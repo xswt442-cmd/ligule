@@ -1,0 +1,137 @@
+name: publish
+
+# A release is a tag: bump package.json + the VERSION constant in src/index.js,
+# then push vX.Y.Z. The tag must sit on a commit main already carries, and its
+# name must equal package.json#version -- both are checked below.
+#
+# Auth: npm Trusted Publishing (OIDC) has no token in this repo, but npm only
+# lets a trusted publisher be bound to a package that already exists. The first
+# release therefore runs with NPM_TOKEN; once the package is on the registry,
+# configure the trusted publisher and drop that secret.
+
+on:
+  push:
+    tags: ['v*']
+
+# Publishing must never be cancelled halfway through: a second tag landing
+# while the first is on npm would race the registry. Queue instead of cancel.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: release checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The ancestry test below compares the tagged commit against `main`,
+          # and a default checkout of a tag has neither the branch nor a history
+          # deep enough to answer the question.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: tag matches package.json version
+        shell: bash
+        run: |
+          pkg=$(node -p "require('./package.json').version")
+          tag=${GITHUB_REF_NAME#v}
+          if [ "$pkg" != "$tag" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match package.json version ${pkg}"
+            exit 1
+          fi
+
+      # A tag is the release's identity, so it has to point at a commit `main`
+      # already carries. Without this, a tag pushed on a side branch publishes
+      # code no branch was ever reviewed on.
+      - name: tag points at a commit on main
+        shell: bash
+        run: |
+          git fetch --no-tags --force origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+            echo "::error::${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is not on main"
+            exit 1
+          fi
+
+      # `node --check` parses one file without importing another, so a syntax
+      # error anywhere under src/ fails the release here.
+      - name: syntax check every module
+        shell: bash
+        run: |
+          set -e
+          for f in src/*.js; do node --check "$f"; done
+
+      - name: test
+        run: npm test
+
+      - name: pack
+        run: npm pack --dry-run
+
+  npm:
+    name: publish to npm
+    needs: checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm provenance / Trusted Publishing (OIDC).
+    env:
+      # Read once so the two publish steps below can be mutually exclusive.
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: skip when version is already published
+        id: published
+        shell: bash
+        run: |
+          pkg=$(node -p "require('./package.json').version")
+          if npm view --json "ligule@${pkg}" version > /dev/null 2>&1; then
+            echo "already=yes" >> "$GITHUB_OUTPUT"
+            echo "::warning::${pkg} is already on npm - nothing to publish"
+          fi
+
+      - name: publish to npm (token)
+        if: steps.published.outputs.already != 'yes' && env.NPM_TOKEN != ''
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public
+
+      - name: publish to npm (trusted publishing)
+        if: steps.published.outputs.already != 'yes' && env.NPM_TOKEN == ''
+        run: npm publish --provenance --access public
+
+  release:
+    name: create GitHub release
+    needs: checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Create the matching GitHub release.
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # Re-running must converge rather than fail over an occupied name.
+      - name: GitHub release (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            echo "::warning::release $GITHUB_REF_NAME already exists - refreshing its notes"
+            gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+          else
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+          fi

@@ -1,0 +1,40 @@
+{
+  "name": "ligule",
+  "version": "0.0.1",
+  "description": "占位版本，开发中。自建 agent harness：内核不提供任何工具，一切能力皆插件。Placeholder, under development. A self-built agent harness: the kernel ships no tools of its own; every capability is a plugin.",
+  "type": "module",
+  "bin": {
+    "ligule": "./src/cli.js"
+  },
+  "exports": {
+    ".": "./src/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "author": "xswt442-cmd",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xswt442-cmd/ligule.git"
+  },
+  "homepage": "https://github.com/xswt442-cmd/ligule#readme",
+  "bugs": {
+    "url": "https://github.com/xswt442-cmd/ligule/issues"
+  },
+  "keywords": [
+    "agent",
+    "harness",
+    "agent-harness",
+    "placeholder"
+  ]
+}
