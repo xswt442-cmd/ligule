@@ -4,7 +4,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { KernelError } from '../kernel/error.js';
 import { resolveWithin } from './paths.js';
-import { boundaryOf, limitsOf } from '../tools/tools.js';
+import { boundaryOf, limitsOf } from './limits.js';
 
 // 命令输出的上限按头尾各留一半：输出的结论常在末尾，只留头部会把失败原因截掉。
 // 头部留满一半，尾部只留最近的上限那么多字节，中间那一段的字节数算进标记里，

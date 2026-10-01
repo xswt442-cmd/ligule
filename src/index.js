@@ -11,10 +11,9 @@ export { isWithin, resolveWithin } from './capability/paths.js';
 export { probeBackend } from './capability/capability.js';
 export { createDecisionChain, DEFAULT_THRESHOLDS } from './kernel/policy.js';
 export { parseCommand } from './capability/command.js';
-export {
-  readOnlyTools, readTool, findTool, searchTool,
-  writeTools, createTool, writeTool, editTool, deleteTool, DEFAULT_LIMITS,
-} from './tools/tools.js';
+export { readOnlyTools, readTool, findTool, searchTool } from './tools/read-only.js';
+export { writeTools, createTool, writeTool, editTool, deleteTool } from './tools/write.js';
+export { DEFAULT_LIMITS } from './capability/limits.js';
 export { createObservationLog, versionOf } from './session/observe.js';
 export { resolveRecycler, windowsRecycleBin, freedesktopTrash } from './capability/recycle.js';
 export { resolveRipgrep, searchWithRipgrep } from './capability/ripgrep.js';
