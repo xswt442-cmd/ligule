@@ -155,7 +155,7 @@ export const searchTool = {
     const { resultCount, scanBytes, scanFiles } = limitsOf(config);
     const boundary = boundaryOf(config);
 
-    // 有外部后端就用它：同一棵树上它比 Node 自己遍历快一个量级，实测数字记在 todo.md 第 6 步。
+    // 有外部后端就用它：八千个文件的树上一秒出头，自己遍历要三倍耗时（数字记在 todo.md 第 6 步）。
     // 探测不到就回落到自己遍历，回落的原因写进日志（I8）。
     const backend = await resolveRipgrep({ path: config.ripgrepPath });
     if (backend.executable !== undefined) {
