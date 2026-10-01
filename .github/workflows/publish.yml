@@ -1,20 +1,21 @@
 name: publish
 
-# A release is a tag: bump package.json + the VERSION constant in src/index.js,
-# then push vX.Y.Z. The tag must sit on a commit main already carries, and its
-# name must equal package.json#version -- both are checked below.
+# 一次发布就是一个标签：把 package.json 与 src/index.js 里的 VERSION 一起改好，再推 vX.Y.Z。
+# 标签必须落在 main 已经带着的那个提交上，标签名必须等于 package.json 的 version，下面两步各查一件。
 #
-# Auth: npm Trusted Publishing (OIDC) has no token in this repo, but npm only
-# lets a trusted publisher be bound to a package that already exists. The first
-# release therefore runs with NPM_TOKEN; once the package is on the registry,
-# configure the trusted publisher and drop that secret.
+# 鉴权：npm 的 Trusted Publishing（OIDC）需要包先存在才能绑定发布者，所以第一次发布用
+# NPM_TOKEN；包上了 registry 之后配好 trusted publisher、删掉那个 secret，往后的发布走 OIDC。
 
 on:
   push:
     tags: ['v*']
 
-# Publishing must never be cancelled halfway through: a second tag landing
-# while the first is on npm would race the registry. Queue instead of cancel.
+env:
+  # 与 ci.yml 和 package.json 的 engines.node 取同一个大版本号，test/runtime-version.test.js 断言这一点。
+  PRIMARY_NODE_VERSION: '24'
+
+# 发布不能跑到一半被取消：第一个标签还在上传 npm 时又来一个标签会和 registry 抢。
+# 所以这里排队，不取消。
 concurrency:
   group: publish
   cancel-in-progress: false
@@ -26,17 +27,16 @@ jobs:
   checks:
     name: release checks
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
         with:
-          # The ancestry test below compares the tagged commit against `main`,
-          # and a default checkout of a tag has neither the branch nor a history
-          # deep enough to answer the question.
+          # 下面要比对标签提交与 main 的祖先关系，按标签默认检出既没有那个分支也没有足够深的历史。
           fetch-depth: 0
 
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
 
       - name: tag matches package.json version
         shell: bash
@@ -48,9 +48,8 @@ jobs:
             exit 1
           fi
 
-      # A tag is the release's identity, so it has to point at a commit `main`
-      # already carries. Without this, a tag pushed on a side branch publishes
-      # code no branch was ever reviewed on.
+      # 标签是这次发布的身份，它必须指向 main 已经带着的提交；否则一个旁支上的标签会发布
+      # 一份没有任何分支被评审过的代码。
       - name: tag points at a commit on main
         shell: bash
         run: |
@@ -60,19 +59,18 @@ jobs:
             exit 1
           fi
 
-      # `node --check` parses one file without importing another, so a syntax
-      # error anywhere under src/ fails the release here.
+      # node --check 只解析单个文件、不 import 别的文件，所以这三处任何一处语法错误都在这里失败。
       - name: syntax check every module
         shell: bash
         run: |
           set -e
-          for f in src/*.js; do node --check "$f"; done
+          for f in src/*.js scripts/*.js test/*.js; do node --check "$f"; done
 
       - name: test
         run: npm test
 
-      - name: pack
-        run: npm pack --dry-run
+      - name: check the packed artifact
+        run: npm run check-pack
 
   npm:
     name: publish to npm
@@ -80,16 +78,16 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write # npm provenance / Trusted Publishing (OIDC).
+      id-token: write # npm provenance / Trusted Publishing（OIDC）。
     env:
-      # Read once so the two publish steps below can be mutually exclusive.
+      # 读一次，让下面两个发布步骤互斥。
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v5
 
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
           registry-url: https://registry.npmjs.org
 
       - name: skip when version is already published
@@ -117,13 +115,13 @@ jobs:
     needs: checks
     runs-on: ubuntu-latest
     permissions:
-      contents: write # Create the matching GitHub release.
+      contents: write # 建对应的 GitHub Release。
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      # Re-running must converge rather than fail over an occupied name.
+      # 重跑要收敛而不是因为名字被占而失败。
       - name: GitHub release (idempotent)
         env:
           GH_TOKEN: ${{ github.token }}

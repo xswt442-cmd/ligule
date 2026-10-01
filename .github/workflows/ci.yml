@@ -4,26 +4,52 @@ on:
   push:
     branches: ['**']
   pull_request:
+  workflow_dispatch:
+
+env:
+  # 运行时下限在这里写一次。package.json 的 engines.node、README 的徽章和两个工作流
+  # 必须取同一个大版本号，test/runtime-version.test.js 断言这一点（D28）。
+  PRIMARY_NODE_VERSION: '24'
+
+# 同一分支上的新推送取消还在跑的那一次；main 上不取消，那一次承担发布前的最后一轮完整验证。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_name != 'main' }}
 
 permissions:
   contents: read
 
 jobs:
   test:
-    name: test
-    runs-on: ubuntu-latest
+    name: test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+
+      # package.json 没有声明依赖，也没有锁文件，所以这里不跑 npm ci、也不配依赖缓存。
+      # 第一条依赖进来时一并补锁文件和缓存。
 
       - name: syntax check every module
         shell: bash
         run: |
           set -e
-          for f in src/*.js; do node --check "$f"; done
+          for f in src/*.js scripts/*.js test/*.js; do node --check "$f"; done
 
       - name: test
         run: npm test
+
+      # 发布物检查：npm pack 一次，解开产物，按 package.json 声明的入口逐个查文件在不在，
+      # 再把解出来的目录当成已经安装好的包 import 一次。npm test 从 src/ 直接导入，看不到这两类问题。
+      - name: check the packed artifact
+        run: npm run check-pack
