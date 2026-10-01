@@ -17,6 +17,7 @@ export {
 } from './tools.js';
 export { createObservationLog, versionOf } from './observe.js';
 export { resolveRecycler, windowsRecycleBin, freedesktopTrash } from './recycle.js';
+export { resolveRipgrep, searchWithRipgrep } from './ripgrep.js';
 export { execTool } from './exec.js';
 export { createPromptAssembly, PROMPT_BOUNDARY } from './prompt.js';
 export { createSessionLog } from './session.js';

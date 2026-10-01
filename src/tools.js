@@ -10,6 +10,7 @@ import { matchesName } from './match.js';
 import { versionOf } from './observe.js';
 import { resolveWithin } from './paths.js';
 import { resolveRecycler } from './recycle.js';
+import { resolveRipgrep, searchWithRipgrep } from './ripgrep.js';
 
 // 起点值由本项目自定，配置层可以逐键覆盖；分页单位与标记措辞没有外部来源。
 export const DEFAULT_LIMITS = Object.freeze({
@@ -126,9 +127,9 @@ export const findTool = {
   },
 };
 
-// ponytail: search 用 Node 自己遍历、逐行做字面匹配，代价是每次搜索线性扫过 scanFiles 个文件、
-// scanBytes 字节。升级路线是换一个外部搜索后端（ripgrep 一类）并给它一条能力探测，
-// 那条依赖属于未定的选型项，先不引入。
+// 检索有两条后端：外部的 ripgrep（随包分发的那一份，或者配置里指明的可执行文件）与 Node 自己遍历。
+// ponytail: 回落那一条是逐行做字面匹配，代价是每次搜索线性扫过 scanFiles 个文件、scanBytes 字节，
+// 而且这两个扫描预算只在回落那条上生效；外部后端可用时只有命中数上限参与。
 export const searchTool = {
   name: 'search',
   description: 'Search file contents for a literal string inside the workspace boundary.',
@@ -140,9 +141,28 @@ export const searchTool = {
     },
     required: ['pattern'],
   },
-  async run(args, { config }) {
+  async run(args, { config, logger }) {
     const { resultCount, scanBytes, scanFiles } = limitsOf(config);
     const boundary = boundaryOf(config);
+
+    // 有外部后端就用它：同一棵树上它比 Node 自己遍历快一个量级，实测数字记在 todo.md 第 6 步。
+    // 探测不到就回落到自己遍历，回落的原因写进日志（I8）。
+    const backend = await resolveRipgrep({ path: config.ripgrepPath });
+    if (backend.executable !== undefined) {
+      const target = args.path === undefined
+        ? '.'
+        : toPosix(relative(boundary, await resolveWithin(boundary, args.path)));
+      const found = await searchWithRipgrep({
+        executable: backend.executable, boundary, target, pattern: args.pattern, limit: resultCount,
+      });
+      return {
+        text: found.hits.join('\n') + (found.truncated
+          ? marker(`truncated: ${resultCount} matches shown and more follow, narrow the pattern`)
+          : ''),
+      };
+    }
+    logger.debug('ripgrep is not available, walking the tree instead', { tool: 'search', code: backend.code, detail: backend.detail });
+
     const hits = [];
     let scannedBytes = 0;
     let scannedFiles = 0;

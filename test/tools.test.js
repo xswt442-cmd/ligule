@@ -22,8 +22,22 @@ async function withWorkspace(run) {
   }
 }
 
-function context(workspace, limits) {
-  return { config: { boundary: workspace, limits } };
+const silentLogger = { debug: () => {}, log: () => {} };
+
+function context(workspace, limits, extra) {
+  return { config: { boundary: workspace, limits, ...extra }, logger: silentLogger };
+}
+
+// 收集回落原因的日志接口：检索有两条后端，用不上外部那一条时要说清为什么。
+function recordingContext(workspace, extra) {
+  const logged = [];
+  return {
+    logged,
+    context: {
+      config: { boundary: workspace, ...extra },
+      logger: { debug: (message, fields) => logged.push({ message, ...fields }), log: () => {} },
+    },
+  };
 }
 
 test('read returns the file content and says nothing about truncation when it fits', async () => {
@@ -93,6 +107,30 @@ test('find and search fail with a stable code when the path does not exist or is
     await assert.rejects(findTool.run({ pattern: '*', path: 'missing' }, context(workspace)), { code: 'path_not_found' });
     await assert.rejects(searchTool.run({ pattern: NEEDLE, path: 'missing' }, context(workspace)), { code: 'path_not_found' });
     await assert.rejects(findTool.run({ pattern: '*', path: 'note.txt' }, context(workspace)), { code: 'find_path_not_directory' });
+  });
+});
+
+test('search walks the tree itself when no external backend is there, and says why', async () => {
+  await withWorkspace(async (workspace) => {
+    const { logged, context: searchContext } = recordingContext(workspace);
+    const result = await searchTool.run({ pattern: NEEDLE }, searchContext);
+    assert.deepEqual(result.text.split('\n'), [
+      `note.txt:2:${NEEDLE}`,
+      'src/app.js:2:second line needle here',
+    ]);
+    assert.equal(logged.length, 1);
+    assert.equal(logged[0].code, 'search_backend_missing');
+  });
+});
+
+test('a configured ripgrep that cannot run is reported and search still returns hits', async () => {
+  await withWorkspace(async (workspace) => {
+    const { logged, context: searchContext } = recordingContext(workspace, { ripgrepPath: join(workspace, 'no-such-rg') });
+    const result = await searchTool.run({ pattern: NEEDLE }, searchContext);
+    assert.match(result.text, /^note\.txt:2:/);
+    assert.equal(logged.length, 1);
+    assert.equal(logged[0].code, 'search_backend_failed');
+    assert.ok(logged[0].detail !== undefined);
   });
 });
 
