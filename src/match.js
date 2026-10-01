@@ -13,11 +13,12 @@ export function matches(input, pattern) {
   return input === pattern || input.startsWith(`${pattern} `);
 }
 
-// 文件名的通配匹配：`*` 与 `?` 不跨路径分隔符，`**` 跨。比较之前路径要写成斜杠形式。
+// 文件名的通配匹配：`*` 与 `?` 不跨路径分隔符，`**` 跨，`**/` 那一段可以是零层目录（`**/*.js` 要能命根下那一个 `.js`）。
+// 比较之前路径要写成斜杠形式。
 export function matchesName(name, pattern) {
   const source = pattern
-    .split(/(\*\*|\*|\?)/g)
-    .map((part) => (part === '**' ? '[\\s\\S]*' : part === '*' ? '[^/]*' : part === '?' ? '[^/]' : escapeLiteral(part)))
+    .split(/(\*\*\/|\*\*|\*|\?)/g)
+    .map((part) => (part === '**/' ? '(?:[^/]*/)*' : part === '**' ? '[\\s\\S]*' : part === '*' ? '[^/]*' : part === '?' ? '[^/]' : escapeLiteral(part)))
     .join('');
   return new RegExp(`^${source}$`).test(name);
 }

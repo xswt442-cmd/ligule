@@ -111,7 +111,7 @@ export const findTool = {
   parameters: {
     type: 'object',
     properties: {
-      pattern: { type: 'string', description: 'Name pattern: * and ? stop at a path separator, ** crosses it.' },
+      pattern: { type: 'string', description: 'Name pattern: * and ? stop at a path separator, ** crosses it, and **/ may match no directory at all.' },
       path: { type: 'string', description: 'Subdirectory to search from, relative to the boundary.' },
     },
     required: ['pattern'],

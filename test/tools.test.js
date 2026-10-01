@@ -89,6 +89,15 @@ test('find stops at the result limit and says more matches follow', async () => 
   });
 });
 
+test('a **/ prefix also matches the search root itself', async () => {
+  await withWorkspace(async (workspace) => {
+    await writeFile(join(workspace, 'top.js'), 'no hit in here');
+    assert.equal((await findTool.run({ pattern: '**/*.js' }, context(workspace))).text, 'src/app.js\ntop.js');
+    assert.equal((await findTool.run({ pattern: '*/app.js' }, context(workspace))).text, 'src/app.js');
+    assert.equal((await findTool.run({ pattern: '*.js' }, context(workspace))).text, 'top.js');
+  });
+});
+
 test('search skips node_modules at any depth and the trash directory, but not hidden ones', async () => {
   await withWorkspace(async (workspace) => {
     const result = await searchTool.run({ pattern: NEEDLE }, context(workspace));
