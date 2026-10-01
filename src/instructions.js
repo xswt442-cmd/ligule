@@ -31,18 +31,18 @@ async function identity(path) {
 }
 
 // 从当前目录上溯到项目根，逐层看有没有 AGENTS.md。不越过项目根（对照 Codex 的那条硬规则）。
+// 停下来的判据用与入口同一个词法包含判断，不用字符串相等：Windows 上两个写法只差大小写时它们指的是
+// 同一个目录，字符串相等对不上，上溯就会一路走到文件系统根，把项目根之外的规则文件读进来（本机实测）。
 async function walkUpTo(boundary, current) {
   const found = [];
-  let directory = resolve(current);
   const root = resolve(boundary);
-  while (true) {
-    if (directory === root || directory === dirname(directory)) {
-      found.unshift(directory);
-      return found;
-    }
+  let directory = resolve(current);
+  while (isWithin(root, directory) && directory !== root) {
     found.unshift(directory);
     directory = dirname(directory);
   }
+  found.unshift(root);
+  return found;
 }
 
 export async function loadInstructions(options = {}) {
@@ -130,9 +130,11 @@ export async function loadInstructions(options = {}) {
     }
     let head = Buffer.from(file.text, 'utf8').subarray(0, budget).toString('utf8');
     while (Buffer.byteLength(head, 'utf8') > budget) head = head.slice(0, -1);
+    // 切在一个多字节字符中间时那半个字符留不住，实际留下的比预算少：标记与用量都按实际的算。
+    const keptBytes = Buffer.byteLength(head, 'utf8');
     kept.unshift({ ...file, text: `${head}${note}` });
-    truncated.unshift({ path: file.path, from: bytes, to: budget });
-    used += separator + heading + budget + Buffer.byteLength(note, 'utf8');
+    truncated.unshift({ path: file.path, from: bytes, to: keptBytes });
+    used += separator + heading + keptBytes + Buffer.byteLength(note, 'utf8');
   }
 
   // 说明行本身也要位置。顺序是：先把说明行压成计数形式，还不够再丢最低优先级的内容——

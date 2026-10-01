@@ -111,6 +111,32 @@ test('a file that only partly fits is truncated with its own marker', async () =
   });
 });
 
+// 切在一个多字节字符中间时那半个字符留不住：标记里的「到多少字节」要按实际留下的算，不是按预算算。
+test('the truncation notice counts the bytes actually kept rather than the budget', async () => {
+  await withTree(async ({ boundary }) => {
+    await writeFile(join(boundary, 'pkg', 'AGENTS.md'), 'é'.repeat(400));
+    const result = await loadInstructions({ boundary, current: join(boundary, 'pkg'), maxBytes: 200 });
+    const notice = /truncated pkg\/AGENTS\.md from (\d+) to (\d+) bytes/.exec(result.text);
+    assert.ok(notice !== null, `no per-file notice in: ${result.text}`);
+    const kept = result.text.slice('## pkg/AGENTS.md\n\n'.length, result.text.indexOf('\n[truncated from'));
+    assert.equal(Number(notice[2]), Buffer.byteLength(kept, 'utf8'), 'the counted figure is what is on the page');
+    assert.ok(Buffer.byteLength(result.text, 'utf8') <= 200);
+  });
+});
+
+// Windows 上只差大小写的两个写法指的是同一个目录。上溯的停止判据用字符串相等时对不上，
+// 于是一路走到文件系统根，把项目根之外的 AGENTS.md 也读进来。这条性质是 Windows 的，所以只在它上面跑。
+test('a boundary spelled in another case still stops the walk at the project root', async (t) => {
+  if (process.platform !== 'win32') return t.skip('case-insensitive paths are a Windows property');
+  await withTree(async ({ root, boundary }) => {
+    await writeFile(join(root, 'AGENTS.md'), 'rules from above the project root');
+    const otherCase = join(root, boundary.slice(root.length + 1).replace(/^b/, 'B'));
+    const result = await loadInstructions({ boundary: otherCase, current: join(otherCase, 'Pkg') });
+    assert.doesNotMatch(result.text, /above the project root/, 'nothing outside the boundary is loaded');
+    assert.deepEqual(order(result.text), ['AGENTS.md', 'Pkg/AGENTS.md'], 'the walk stops at the boundary, two layers');
+  });
+});
+
 test('a starting point outside the project root and a missing root are both refused', async () => {
   await withTree(async ({ root, boundary }) => {
     await assert.rejects(
