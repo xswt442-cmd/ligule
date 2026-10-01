@@ -87,6 +87,8 @@ jobs:
     env:
       # 读一次，让下面两个发布步骤互斥。
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # setup-node 写的 .npmrc 按这个变量取凭据；配了 NPM_TOKEN 时三个包都用它，没配就走 OIDC。
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v5
 
@@ -94,6 +96,10 @@ jobs:
         with:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
           registry-url: https://registry.npmjs.org
+
+      # 平台包的内容不提交进仓库：按 scripts/ripgrep-pin.json 钉死的版本与校验和拉取解包。
+      - name: build the ripgrep platform packages
+        run: npm run build-rg
 
       - name: skip when version is already published
         id: published
@@ -104,6 +110,22 @@ jobs:
             echo "already=yes" >> "$GITHUB_OUTPUT"
             echo "::warning::${pkg} is already on npm - nothing to publish"
           fi
+
+      # 两个平台包先于主包发布：主包的 optionalDependencies 指向它们，晚一步就有人装到 404。
+      # 每个包自己查一次 registry，重跑不会因为已发布而以 E409 失败。
+      - name: publish the ripgrep platform packages
+        if: steps.published.outputs.already != 'yes'
+        shell: bash
+        run: |
+          for dir in packages/rg-*; do
+            name=$(node -p "require('./$dir/package.json').name")
+            version=$(node -p "require('./$dir/package.json').version")
+            if npm view --json "$name@$version" version > /dev/null 2>&1; then
+              echo "::warning::$name@$version is already on npm - skipping"
+              continue
+            fi
+            (cd "$dir" && npm publish --provenance --access public)
+          done
 
       - name: publish to npm (token)
         if: steps.published.outputs.already != 'yes' && env.NPM_TOKEN != ''
