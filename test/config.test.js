@@ -41,6 +41,24 @@ test('the snapshot is read all the way down', () => {
   }, TypeError);
 });
 
+// 项目层那一份文件可以出自别人写的仓库。TOML 里一段 `["__proto__"]` 解析出来是对象自己的一个键，
+// 直接赋下去会把值挂到所有对象的原型上，后面每一次判定都读得到它。
+test('a __proto__ key in a layer is refused instead of polluting every object', () => {
+  const hostile = JSON.parse('{"__proto__": {"polluted": 1}}');
+  assert.throws(() => createConfig({ user: hostile }), (error) => error.code === 'config_key_unsafe');
+  assert.equal({}.polluted, undefined, 'nothing reached Object.prototype');
+});
+
+// TOML 的日期时间折出来是一个类实例而不是一张表：按表递归合下去，它没有自己的键，上层那一份就没了。
+test('a datetime in a higher layer replaces the lower one instead of merging away', () => {
+  const snapshot = createConfig({
+    user: { when: new Date('1979-05-27T07:32:00Z'), keep: new Date('2000-01-01T00:00:00Z') },
+    project: { when: new Date('2026-10-01T00:00:00Z') },
+  });
+  assert.equal(snapshot.when.toISOString(), '2026-10-01T00:00:00.000Z');
+  assert.equal(snapshot.keep.toISOString(), '2000-01-01T00:00:00.000Z', 'a lower layer value still survives on its own');
+});
+
 test('the snapshot does not share references with the layer objects', () => {
   const layer = { sandbox: { network: 'on' }, allow: ['read'] };
   const config = createConfig({ user: layer });

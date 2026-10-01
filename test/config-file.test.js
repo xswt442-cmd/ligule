@@ -19,6 +19,25 @@ async function withLayers(run) {
   }
 }
 
+// 这两条都走真实的文件与折叠那一条路：项目层那一份可能出自别人写的仓库，日期时间是 TOML 里正当的写法。
+test('a project file holding a __proto__ table is refused when the layers fold', async () => {
+  await withLayers(async ({ home, project }) => {
+    await writeFile(join(project, '.ligule', 'config.toml'), '["__proto__"]\npolluted = 1\n');
+    const layers = await loadConfigLayers({ projectRoot: project, userHome: home });
+    assert.throws(() => createConfig(layers), (error) => error.code === 'config_key_unsafe');
+    assert.equal({}.polluted, undefined, 'nothing reached Object.prototype');
+  });
+});
+
+test('a datetime in the higher layer file replaces the lower one', async () => {
+  await withLayers(async ({ home, project }) => {
+    await writeFile(join(home, '.ligule', 'config.toml'), 'when = 1979-05-27T07:32:00Z\n');
+    await writeFile(join(project, '.ligule', 'config.toml'), 'when = 2026-10-01T00:00:00Z\n');
+    const snapshot = createConfig(await loadConfigLayers({ projectRoot: project, userHome: home }));
+    assert.equal(snapshot.when.toISOString(), '2026-10-01T00:00:00.000Z');
+  });
+});
+
 test('the three files fold user < project < local, tables per key and arrays whole', async () => {
   await withLayers(async ({ home, project }) => {
     await writeFile(join(home, '.ligule', 'config.toml'), 'boundary = "/from-user"\n\n[limits]\nreadBytes = 10\nresultCount = 5\nkeep = [1, 2]\n');
