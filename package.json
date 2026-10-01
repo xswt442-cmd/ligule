@@ -17,7 +17,8 @@
   ],
   "scripts": {
     "test": "node --test test/*.test.js",
-    "check-pack": "node scripts/check-pack.js"
+    "check-pack": "node scripts/check-pack.js",
+    "build-rg": "node scripts/build-rg-packages.js"
   },
   "engines": {
     "node": ">=24"
@@ -42,5 +43,9 @@
     "smol-toml": "^1.9.0",
     "tree-sitter": "^0.25.1",
     "tree-sitter-bash": "^0.25.1"
+  },
+  "optionalDependencies": {
+    "ligule-rg-win32-x64": "0.0.1",
+    "ligule-rg-linux-x64": "0.0.1"
   }
 }

@@ -1,0 +1,25 @@
+{
+  "version": "15.2.0",
+  "download": "https://github.com/BurntSushi/ripgrep/releases/download",
+  "licenseFiles": ["LICENSE-MIT", "UNLICENSE", "COPYING"],
+  "targets": {
+    "win32-x64": {
+      "package": "ligule-rg-win32-x64",
+      "directory": "rg-win32-x64",
+      "triple": "x86_64-pc-windows-msvc",
+      "format": "zip",
+      "binary": "rg.exe",
+      "size": 1789611,
+      "sha256": "71b2fef860abe467217a538ff31de02f5258807c0129f771846f87bd029aafc5"
+    },
+    "linux-x64": {
+      "package": "ligule-rg-linux-x64",
+      "directory": "rg-linux-x64",
+      "triple": "x86_64-unknown-linux-musl",
+      "format": "tar.gz",
+      "binary": "rg",
+      "size": 2265718,
+      "sha256": "33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c"
+    }
+  }
+}

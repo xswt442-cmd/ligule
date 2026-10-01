@@ -30,6 +30,18 @@ test('the package description carries both languages', () => {
   assert.match(description, /[A-Za-z]{4,}\s+[A-Za-z]{4,}/, 'the English part of the description is missing');
 });
 
+test('the ripgrep platform packages move with the release and ship what the build script writes', () => {
+  const pkg = JSON.parse(read('../package.json'));
+  const pin = JSON.parse(read('../scripts/ripgrep-pin.json'));
+  for (const target of Object.values(pin.targets)) {
+    const manifest = JSON.parse(read(`../packages/${target.directory}/package.json`));
+    assert.equal(manifest.name, target.package, `packages/${target.directory} is named ${manifest.name}`);
+    assert.equal(manifest.version, pkg.version, `${target.package} does not move with the release version`);
+    assert.equal(pkg.optionalDependencies[target.package], pkg.version, `${target.package} is not pinned to this release`);
+    assert.deepEqual(manifest.files, [target.binary, ...pin.licenseFiles, 'RIPGREP-VERSION'], `${target.package} ships a different file list`);
+  }
+});
+
 test('workflows take the Node version from their own env instead of repeating it', () => {
   for (const file of workflows) {
     assert.doesNotMatch(read(`../.github/workflows/${file}`), /node-version:\s*['"]?\d/, `${file} hardcodes a Node version`);

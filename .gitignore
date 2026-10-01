@@ -19,6 +19,14 @@ coverage/
 *.tar.gz
 .npm/
 
+# 平台包内容由 scripts/build-rg-packages.js 拉取生成：二进制与它自带的许可文本都不进版本控制
+packages/*/rg
+packages/*/rg.exe
+packages/*/LICENSE-MIT
+packages/*/UNLICENSE
+packages/*/COPYING
+packages/*/RIPGREP-VERSION
+
 # Environment & secrets
 .env
 .env.*

@@ -1,0 +1,15 @@
+{
+  "name": "ligule-rg-win32-x64",
+  "version": "0.0.1",
+  "description": "The ripgrep executable ligule uses for content search on win32-x64. Not published on its own: the main package lists it under optionalDependencies.",
+  "license": "(MIT OR Unlicense)",
+  "os": ["win32"],
+  "cpu": ["x64"],
+  "files": ["rg.exe", "LICENSE-MIT", "UNLICENSE", "COPYING", "RIPGREP-VERSION"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xswt442-cmd/ligule.git"
+  },
+  "homepage": "https://github.com/xswt442-cmd/ligule#readme",
+  "keywords": ["agent", "harness", "agent-harness", "ripgrep"]
+}
