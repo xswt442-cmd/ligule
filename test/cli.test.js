@@ -21,9 +21,11 @@ test('tools prints the eight members of the minimal manifest', () => {
 });
 
 test('call runs a tool in the same process and prints what it returned', () => {
-  const found = capture('call', 'find', JSON.stringify({ pattern: '**/*.js' }));
-  assert.ok(found.ok);
-  assert.match(found.stdout, /src\/cli\.js/);
+  // 边界指到 src：默认边界是整个仓库，那一次遍历会走进 testplace/，
+  // 而并行跑的测试正在那里建删临时目录，扫到一半目录就不在了。
+  const found = capture('call', 'find', JSON.stringify({ pattern: '*.js' }), '--config', 'boundary = "src"');
+  assert.ok(found.ok, found.stderr);
+  assert.match(found.stdout, /^cli\.js$/m);
 
   const read = capture('call', 'read', JSON.stringify({ path: 'package.json' }));
   assert.ok(read.ok);
@@ -41,6 +43,17 @@ test('a failure prints its stable code on stderr and exits non-zero', () => {
 
   const noName = capture('call');
   assert.match(noName.stderr, /cli_call_needs_a_tool_name/);
+});
+
+test('--config narrows the boundary from the command line and a valueless flag is refused', () => {
+  const scoped = capture('call', 'find', JSON.stringify({ pattern: '*.js' }), '--config', 'boundary = "test"');
+  assert.ok(scoped.ok, scoped.stderr);
+  assert.match(scoped.stdout, /^cli\.test\.js$/m);
+  assert.doesNotMatch(scoped.stdout, /src/);
+
+  const missing = capture('tools', '--config');
+  assert.equal(missing.ok, false);
+  assert.match(missing.stderr, /cli_config_needs_a_value/);
 });
 
 test('--version prints the package version and the bare invocation lists the commands', () => {
