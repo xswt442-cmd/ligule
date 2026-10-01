@@ -49,6 +49,21 @@ test('a failure prints its stable code on stderr and exits non-zero', () => {
   assert.match(missingFile.stderr, /^path_not_found: there is nothing to read at /);
 });
 
+// 打错的命令不是一次成功：帮助文本走 stdout、退出码 0，调用方是个脚本就分不出来。
+test('an unknown command is a failure, while asking for help is not', () => {
+  const unknown = capture('frobnicate');
+  assert.equal(unknown.ok, false);
+  assert.equal(unknown.status, 1);
+  assert.match(unknown.stderr, /cli_command_unknown/);
+  assert.equal(unknown.stdout, '');
+
+  for (const flag of [undefined, '--help', '-h']) {
+    const asked = flag === undefined ? capture() : capture(flag);
+    assert.ok(asked.ok, asked.stderr);
+    assert.match(asked.stdout, /commands: tools, call /);
+  }
+});
+
 test('--config narrows the boundary from the command line and a valueless flag is refused', () => {
   const scoped = capture('call', 'find', JSON.stringify({ pattern: '*.js' }), '--config', 'boundary = "test"');
   assert.ok(scoped.ok, scoped.stderr);

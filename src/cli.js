@@ -88,8 +88,11 @@ if (missingFlagValue) {
       }
     }
   }
-} else {
+} else if (command === undefined || command === '--help' || command === '-h') {
   console.log(`ligule ${pkg.version} - under development, do not depend on it.`);
   console.log('commands: tools, call <tool> [json-args], --version');
   console.log('options: --config <key.path=value> (repeatable)');
+} else {
+  // 打错的命令不该走帮助文本再退出 0：调用方是个脚本时，0 加一段帮助就是一次成功。
+  printFailure('cli_command_unknown', `"${command}" is not a command; run ligule --help to list them`);
 }
