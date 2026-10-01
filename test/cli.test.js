@@ -16,8 +16,8 @@ function capture(...args) {
   }
 }
 
-test('tools prints the seven members of the minimal manifest', () => {
-  assert.deepEqual(capture('tools').stdout.trim().split('\n'), ['create', 'delete', 'edit', 'exec', 'find', 'read', 'search']);
+test('tools prints the eight members of the minimal manifest', () => {
+  assert.deepEqual(capture('tools').stdout.trim().split('\n'), ['create', 'delete', 'edit', 'exec', 'find', 'read', 'search', 'write']);
 });
 
 test('call runs a tool in the same process and prints what it returned', () => {

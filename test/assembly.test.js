@@ -93,11 +93,11 @@ test('a plugin whose setup throws is unwound the same way', () => {
   assert.deepEqual(disposed, ['files']);
 });
 
-test('the minimal manifest is exactly the seven tools decided in D3 and unloads completely', () => {
+test('the minimal manifest is exactly the eight tools decided in D3 and unloads completely', () => {
   const kernel = createKernel();
   const assembly = loadAssembly(kernel, [minimalPlugin]);
   assert.deepEqual(assembly.list(), ['ligule-minimal']);
-  assert.deepEqual(kernel.list(), ['create', 'delete', 'edit', 'exec', 'find', 'read', 'search']);
+  assert.deepEqual(kernel.list(), ['create', 'delete', 'edit', 'exec', 'find', 'read', 'search', 'write']);
   assert.deepEqual(kernel.manifest().map((entry) => entry.name), kernel.list());
   assembly.dispose();
   assert.deepEqual(assembly.list(), []);

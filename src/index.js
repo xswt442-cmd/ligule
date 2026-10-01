@@ -11,8 +11,9 @@ export { probeBackend } from './capability.js';
 export { createDecisionChain, DEFAULT_THRESHOLDS } from './policy.js';
 export {
   readOnlyTools, readTool, findTool, searchTool,
-  writeTools, createTool, editTool, deleteTool, DEFAULT_LIMITS,
+  writeTools, createTool, writeTool, editTool, deleteTool, DEFAULT_LIMITS,
 } from './tools.js';
+export { createObservationLog, versionOf } from './observe.js';
 export { execTool } from './exec.js';
 export { createPromptAssembly, PROMPT_BOUNDARY } from './prompt.js';
 export { createSessionLog } from './session.js';

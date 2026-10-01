@@ -7,6 +7,7 @@ import { KernelError } from './error.js';
 import { createConfig } from './config.js';
 import { createLogger } from './log.js';
 import { failureOf, refusalOf, resultLimit, resultOf, spillContent } from './result.js';
+import { createObservationLog } from './observe.js';
 import { assertSupportedSchema, validateArgs } from './schema.js';
 
 // options.config 是装载侧折好的配置快照，options.logger 是宿主自己的日志后端（D8、D26），
@@ -19,7 +20,9 @@ export function createKernel(options = {}) {
   const policy = options.policy;
   const session = options.session;
   const logger = createLogger(options.logger);
-  const context = Object.freeze({ config, logger });
+  // 本次运行的文件观察记录，与工具表同寿：读过的文件登记在这里，覆盖之前要对上它（D3）。
+  const observations = createObservationLog();
+  const context = Object.freeze({ config, logger, observations });
 
   const tools = new Map();
   // 宿主交给内核的按工具名拒绝集。每一项由一次 restrict() 追加，可以重叠。

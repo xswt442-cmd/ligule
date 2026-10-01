@@ -20,7 +20,7 @@ test('清单第 1 条：全新构造的内核工具表为空，最小清单装�
   assert.deepEqual(kernel.list(), []);
   assert.deepEqual(kernel.manifest(), []);
   loadAssembly(kernel, [minimalPlugin]);
-  assert.equal(kernel.list().length, 7);
+  assert.equal(kernel.list().length, 8);
 });
 
 test('清单第 2 条：装配清单能读出本次运行装了哪些插件', () => {
@@ -72,7 +72,7 @@ test('清单第 5 条：上级引用越界与链接指向边界之外，两种�
 test('清单第 6 条的工具部分：卸载插件后不留下工具', () => {
   const kernel = createKernel();
   const assembly = loadAssembly(kernel, [minimalPlugin]);
-  assert.equal(kernel.manifest().length, 7);
+  assert.equal(kernel.manifest().length, 8);
   assembly.dispose();
   assert.deepEqual(kernel.manifest(), []);
   assert.deepEqual(kernel.list(), []);
