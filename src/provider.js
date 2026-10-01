@@ -122,6 +122,8 @@ async function* parseSse(body) {
 // 因为端点要求工具结果紧跟在发出调用的那条助手消息之后。
 function toWireMessages(view) {
   const messages = [];
+  // 助手那一轮里每个调用都得有对应的结果，缺一条端点就把整份请求拒掉，而且从外面的报错看不出缺在哪一条。
+  const answered = new Set(view.filter((entry) => entry.role === 'tool').map((entry) => entry.id));
   for (const entry of view) {
     if (entry.role === 'user') {
       messages.push({ role: 'user', content: entry.text });
@@ -131,6 +133,9 @@ function toWireMessages(view) {
       const content = [];
       if (entry.text !== '') content.push({ type: 'text', text: entry.text });
       for (const call of entry.toolCalls ?? []) {
+        if (!answered.has(call.id)) {
+          throw new KernelError('provider_unanswered_call', { detail: `${call.name} (${call.id})` });
+        }
         content.push({ type: 'tool_use', id: call.id, name: call.name, input: call.args });
       }
       if (content.length > 0) messages.push({ role: 'assistant', content });

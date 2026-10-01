@@ -248,6 +248,21 @@ test('the credential is read from the environment at request time and a missing 
   await assert.rejects(() => events, (error) => error.code === 'provider_credential_missing' && error.detail === API_KEY_ENV);
 });
 
+test('a projection with a call nobody answered is refused before the request goes out', async () => {
+  process.env[API_KEY_ENV] = 'test-key';
+  try {
+    const events = collect(createMessagesProvider({ baseUrl: 'http://127.0.0.1:1', model: 'm', apiKeyEnv: API_KEY_ENV }).stream({
+      messages: [{ role: 'assistant', text: '', toolCalls: [{ id: 'call_7', name: 'read', args: {} }] }],
+    }));
+    await assert.rejects(
+      () => events,
+      (error) => error.code === 'provider_unanswered_call' && error.detail === 'read (call_7)',
+    );
+  } finally {
+    delete process.env[API_KEY_ENV];
+  }
+});
+
 test('a service address that is not an HTTP(S) root, and a missing model, are refused at construction', () => {
   assert.throws(() => createMessagesProvider({ model: 'm' }), (error) => error.code === 'provider_base_url_required');
   for (const baseUrl of [
