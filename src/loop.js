@@ -2,6 +2,7 @@
 // 「哪个工具算完成本轮」由宿主按工具名持有（D12 的模型可见白名单里没有它，与 D16 同一分工）。
 // 提供方接口只定形状（D13）：接入走自己写的最小 HTTP 客户端，服务地址从配置读、凭据从环境变量读。
 import { KernelError, KernelRuntimeError } from './error.js';
+import { failureOf } from './result.js';
 
 export const DEFAULT_LOOP_LIMITS = Object.freeze({ iterations: 32, modelCalls: 64 });
 
@@ -17,6 +18,11 @@ function groupCalls(calls, executionOf) {
   return groups;
 }
 
+// 从 groups[groupIndex] 这一组的第 index 条之后算起，交出还没有执行的那些调用。
+function restOf(groups, groupIndex, index = -1) {
+  return groups.slice(groupIndex).flatMap((group, offset) => group.calls.slice(offset === 0 ? index + 1 : 0));
+}
+
 export function createLoop({ kernel, provider, prompt, session, limits = DEFAULT_LOOP_LIMITS, completesRun = [] }) {
   if (typeof provider?.stream !== 'function') throw new KernelError('loop_provider_required');
   const completing = new Set(completesRun);
@@ -29,6 +35,20 @@ export function createLoop({ kernel, provider, prompt, session, limits = DEFAULT
       signal?.addEventListener('abort', forward, { once: true });
       let calls = 0;
       let text = '';
+
+      // 许出去却没执行的调用要留下一条结果：请求体里每个工具调用都要有对应的结果顶着，
+      // 少一条，端点把整份请求拒掉，而这一轮之后每一轮都拼不出合法请求。
+      // 参照实现在同一种情形下也是记一条错误结果，而不是留着没人回答（Cline 的循环里那条 skipReason）。
+      async function answerRemaining(skipped, content) {
+        if (!session) return;
+        for (const call of skipped) {
+          await session.append({
+            kind: 'tool', tool: call.name, callId: call.id, args: call.args,
+            result: failureOf('tool_skipped', { content }),
+          });
+        }
+      }
+
       // 这一轮的用户输入同样进记录：模型看见的每一条都要能从记录重建出来（I5）。
       if (session) await session.append({ kind: 'user', text: input });
 
@@ -55,7 +75,8 @@ export function createLoop({ kernel, provider, prompt, session, limits = DEFAULT
           if (session) await session.append({ kind: 'assistant', text, toolCalls });
           if (toolCalls.length === 0) return { text, iterations: iteration, modelCalls: calls };
 
-          for (const group of groupCalls(toolCalls, (name) => kernel.execution(name))) {
+          const groups = groupCalls(toolCalls, (name) => kernel.execution(name));
+          for (const [groupIndex, group] of groups.entries()) {
             const settled = await Promise.allSettled(
               group.calls.map((call) => kernel.call(call.name, call.args, { signal: controller.signal, callId: call.id })),
             );
@@ -67,10 +88,18 @@ export function createLoop({ kernel, provider, prompt, session, limits = DEFAULT
                 throw reason;
               }
               if (outcome.status === 'fulfilled' && completing.has(group.calls[index].name)) {
-                return { text, completedBy: group.calls[index].name, iterations: iteration, modelCalls: calls };
+                // 这一轮算完成了，同一条助手消息里后面的那些调用就再也不会有机会执行：同样逐条留下不执行的结果。
+                const name = group.calls[index].name;
+                await answerRemaining(restOf(groups, groupIndex, index), `${name} ended this round before this call ran`);
+                return { text, completedBy: name, iterations: iteration, modelCalls: calls };
               }
             }
-            if (controller.signal.aborted) throw new KernelError('loop_cancelled');
+            if (controller.signal.aborted) {
+              // 取消落在两组之间：后面那几组已经在助手那一条里许出去了，但把它们执行一遍是错的——
+              // 用户按的就是停，插件那一个工具未必看信号。留下不执行的结果，理由是给模型看的那一份。
+              await answerRemaining(restOf(groups, groupIndex + 1), 'the run was cancelled before this call ran');
+              throw new KernelError('loop_cancelled');
+            }
           }
         }
         throw new KernelError('loop_iteration_limit');

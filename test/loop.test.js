@@ -123,6 +123,81 @@ test('a cancelled run leaves complete records only', async () => {
   }
 });
 
+// 取消落在两组之间：后面那一组的调用已经在助手那一条里许出去了。不能执行——用户按的就是停；
+// 也不能没人回答——请求体里每个调用都要有一条结果顶着，少一条之后每一轮都拼不出合法请求。
+test('a cancellation between two groups answers the call that never ran', async () => {
+  const root = await mkdtemp(join(process.cwd(), 'testplace', 'loop-'));
+  try {
+    const session = createSessionLog({ directory: root, id: 'between' });
+    const kernel = createKernel({ config: createConfig({ user: { boundary: root } }), session });
+    const controller = new AbortController();
+    const ran = [];
+    kernel.register(tool('stop_now', async () => {
+      ran.push('stop_now');
+      controller.abort();
+      return { text: 'ok' };
+    }));
+    kernel.register(tool('later', async () => {
+      ran.push('later');
+      return { text: 'never' };
+    }));
+    const provider = scriptedProvider([[
+      { type: 'tool-call', id: 'call_1', name: 'stop_now', args: {} },
+      { type: 'tool-call', id: 'call_2', name: 'later', args: {} },
+    ]]);
+    await assert.rejects(
+      () => createLoop({ kernel, provider, session }).run('go', { signal: controller.signal }),
+      (error) => error.code === 'loop_cancelled',
+    );
+    assert.deepEqual(ran, ['stop_now'], 'a call queued behind a cancelled run does not execute');
+    assert.deepEqual(await session.modelView(), [
+      { role: 'user', text: 'go' },
+      {
+        role: 'assistant', text: '', toolCalls: [
+          { id: 'call_1', name: 'stop_now', args: {} },
+          { id: 'call_2', name: 'later', args: {} },
+        ],
+      },
+      { role: 'tool', id: 'call_1', tool: 'stop_now', content: { text: 'ok' }, failed: false, code: undefined },
+      {
+        role: 'tool', id: 'call_2', tool: 'later', content: 'the run was cancelled before this call ran',
+        failed: true, code: 'tool_skipped',
+      },
+    ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// 算完成本轮的那一件工具之后还有别的调用：那些也许出去了，同样只留一条不执行的结果。
+test('the tool that ends the round answers the calls behind it', async () => {
+  const root = await mkdtemp(join(process.cwd(), 'testplace', 'loop-'));
+  try {
+    const session = createSessionLog({ directory: root, id: 'completes' });
+    const kernel = createKernel({ config: createConfig({ user: { boundary: root } }), session });
+    const ran = [];
+    kernel.register(tool('finish', async () => ({ text: 'done' })));
+    kernel.register(tool('behind', async () => {
+      ran.push('behind');
+      return { text: 'never' };
+    }));
+    const provider = scriptedProvider([[
+      { type: 'tool-call', id: 'call_1', name: 'finish', args: {} },
+      { type: 'tool-call', id: 'call_2', name: 'behind', args: {} },
+    ]]);
+    const result = await createLoop({ kernel, provider, session, completesRun: ['finish'] }).run('go');
+    assert.equal(result.completedBy, 'finish');
+    assert.deepEqual(ran, [], 'the round ends without running what came after it');
+    const view = await session.modelView();
+    assert.deepEqual(view.at(-1), {
+      role: 'tool', id: 'call_2', tool: 'behind', content: 'finish ended this round before this call ran',
+      failed: true, code: 'tool_skipped',
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('a tool that throws an unwrapped error does not stop the run', async () => {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'loop-'));
   try {
