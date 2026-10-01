@@ -39,6 +39,21 @@ test('what the model sees is rebuildable from the log, byte for byte', async () 
   });
 });
 
+// 一组标为并发的工具调用会同时把结果写进同一份记录（D29），先后要一个个排出来。
+test('appends that arrive at the same time still take turns on the sequence', async () => {
+  await withDirectory(async (directory) => {
+    const session = createSessionLog({ directory, id: 'run-7' });
+    const letters = ['a', 'b', 'c', 'd', 'e'];
+    const written = await Promise.all(
+      letters.map((letter) => session.append({ kind: 'tool', tool: letter, args: {}, result: { content: letter.repeat(2_000) } })),
+    );
+    assert.deepEqual(written.map((event) => event.seq), [0, 1, 2, 3, 4], 'no two events share a sequence number');
+    assert.deepEqual((await session.read()).map((event) => event.tool), letters, 'the log holds them in the order they queued in');
+    const after = await session.append({ kind: 'tool', tool: 'f', args: {}, result: { content: 'f' } });
+    assert.equal(after.seq, 5, 'the queue keeps working after a burst');
+  });
+});
+
 test('a half line left by a crash is discarded and the file is cut back to the last complete event', async () => {
   await withDirectory(async (directory) => {
     const session = createSessionLog({ directory, id: 'run-2' });
