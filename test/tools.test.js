@@ -210,6 +210,38 @@ test('a configured ripgrep that cannot run is reported and search still returns 
   });
 });
 
+test('a cancelled search and find report their own code on the walk backend', async () => {
+  await withWorkspace(async (workspace) => {
+    const controller = new AbortController();
+    controller.abort();
+    const cancelled = { config: { boundary: workspace }, logger: silentLogger, signal: controller.signal };
+    await assert.rejects(searchTool.run({ pattern: NEEDLE }, cancelled), { code: 'search_cancelled' });
+    await assert.rejects(findTool.run({ pattern: '**' }, cancelled), { code: 'find_cancelled' });
+  });
+});
+
+// 取消落在遍历中途：abort 在第一个 await 之前发生，所以这条不靠时序运气。
+test('a search cancelled while it is walking stops walking', async () => {
+  await withWorkspace(async (workspace) => {
+    const controller = new AbortController();
+    const running = searchTool.run({ pattern: NEEDLE }, { config: { boundary: workspace }, logger: silentLogger, signal: controller.signal });
+    controller.abort();
+    await assert.rejects(running, { code: 'search_cancelled' });
+  });
+});
+
+test('a pre-cancelled call never starts the external backend', async (t) => {
+  if (!existsSync(builtRipgrep)) return t.skip('no ripgrep built locally, run npm run build-rg');
+  await withWorkspace(async (workspace) => {
+    const controller = new AbortController();
+    controller.abort();
+    await assert.rejects(
+      searchTool.run({ pattern: NEEDLE }, { config: { boundary: workspace, ripgrepPath: builtRipgrep }, logger: silentLogger, signal: controller.signal }),
+      { code: 'search_cancelled' },
+    );
+  });
+});
+
 test('the three read-only tools satisfy the registration contract and reach the manifest', async () => {
   const kernel = createKernel();
   for (const tool of readOnlyTools) kernel.register(tool);

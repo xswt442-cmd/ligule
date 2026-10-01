@@ -116,7 +116,9 @@ export const findTool = {
     },
     required: ['pattern'],
   },
-  async run(args, { config }) {
+  async run(args, { config, signal }) {
+    // 取消边界（D20）：先判一次，再在每一份文件之前判一次，两条后端交回的码相同。
+    if (signal?.aborted) throw new KernelError('find_cancelled');
     const { resultCount } = limitsOf(config);
     const boundary = boundaryOf(config);
     const root = args.path === undefined ? boundary : await resolveWithin(boundary, args.path);
@@ -126,6 +128,7 @@ export const findTool = {
     const names = [];
     let scanned = 0;
     for await (const name of walkFiles(root, skippedDirectories(config))) {
+      if (signal?.aborted) throw new KernelError('find_cancelled');
       scanned += 1;
       if (!matchesName(name, args.pattern)) continue;
       if (names.length === resultCount) {
@@ -151,7 +154,9 @@ export const searchTool = {
     },
     required: ['pattern'],
   },
-  async run(args, { config, logger }) {
+  async run(args, { config, logger, signal }) {
+    // 取消边界（D20）：外部后端那一条把同一个信号交给子进程，这一条在每份文件之前判一次。
+    if (signal?.aborted) throw new KernelError('search_cancelled');
     const { resultCount, scanBytes, scanFiles } = limitsOf(config);
     const boundary = boundaryOf(config);
 
@@ -170,6 +175,7 @@ export const searchTool = {
         pattern: args.pattern,
         limit: resultCount,
         excludes: skippedDirectories(config),
+        signal,
       });
       return {
         text: (found.hits.length === 0 ? '(no matches)' : found.hits.join('\n'))
@@ -229,6 +235,7 @@ export const searchTool = {
     }
 
     for await (const target of candidates()) {
+      if (signal?.aborted) throw new KernelError('search_cancelled');
       scannedFiles += 1;
       if (scannedFiles > scanFiles) {
         skipped += 1;
