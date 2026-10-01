@@ -1,0 +1,160 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import {
+  createConfig, createDecisionChain, createKernel, createSessionLog, execTool, readTool,
+} from '../src/index.js';
+
+async function withDirectory(run) {
+  const root = await mkdtemp(join(process.cwd(), 'testplace', 'session-'));
+  try {
+    return await run(root);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+function kernelWith(session, extra = {}) {
+  return createKernel({
+    config: createConfig({ user: { boundary: process.cwd(), limits: { resultBytes: 200 }, ...extra.config } }),
+    session,
+    ...extra.kernel,
+  });
+}
+
+test('what the model sees is rebuildable from the log, byte for byte', async () => {
+  await withDirectory(async (directory) => {
+    const session = createSessionLog({ directory, id: 'run-1' });
+    const written = await session.append({ kind: 'tool', tool: 'read', args: { path: 'note.txt' }, result: { content: 'kept exactly' } });
+    assert.equal(written.seq, 0);
+    assert.equal(await readFile(session.path, 'utf8'), `${JSON.stringify(written)}\n`);
+
+    const reopened = createSessionLog({ directory, id: 'run-1' });
+    assert.deepEqual(await reopened.modelView(), [
+      { role: 'tool', id: undefined, tool: 'read', content: 'kept exactly', failed: undefined, code: undefined },
+    ]);
+    const second = await reopened.append({ kind: 'tool', tool: 'exec', args: {}, result: { content: 'next' } });
+    assert.equal(second.seq, 1, 'a reopened log continues the sequence');
+  });
+});
+
+test('a half line left by a crash is discarded and the file is cut back to the last complete event', async () => {
+  await withDirectory(async (directory) => {
+    const session = createSessionLog({ directory, id: 'run-2' });
+    await session.append({ kind: 'tool', tool: 'read', args: {}, result: { content: 'one' } });
+    await writeFile(session.path, '{"seq":1,"kind":"tool","too', { flag: 'a' });
+
+    const events = await session.read();
+    assert.equal(events.length, 1);
+    assert.equal(await readFile(session.path, 'utf8'), `${JSON.stringify(events[0])}\n`);
+    const next = await session.append({ kind: 'tool', tool: 'read', args: {}, result: { content: 'two' } });
+    assert.equal(next.seq, 1, 'the discarded half line does not burn a sequence number');
+  });
+});
+
+test('a half line ending in an incomplete multi-byte sequence is cut on the byte boundary', async () => {
+  await withDirectory(async (directory) => {
+    const session = createSessionLog({ directory, id: 'run-6' });
+    await session.append({ kind: 'tool', tool: 'read', args: {}, result: { content: '中文内容' } });
+    const kept = await readFile(session.path);
+    // 崩溃时写了一半：那半截以一个三字节字符的第二个字节结尾，解码成字符串会得到一个替换符。
+    await writeFile(session.path, Buffer.concat([Buffer.from('{"seq":1,"c":"', 'utf8'), Buffer.from([0xe5, 0x8d])]), { flag: 'a' });
+
+    const events = await session.read();
+    assert.deepEqual(events, [JSON.parse(kept.toString('utf8'))]);
+    assert.deepEqual((await readFile(session.path)).subarray(0, kept.length), kept);
+    assert.equal((await readFile(session.path)).length, kept.length, '文件长度退回上一个完整事件的末尾');
+  });
+});
+
+test('a log that cannot be written reports a code and leaves nothing behind', async () => {
+  await withDirectory(async (directory) => {
+    // 会话目录的位置上放一个普通文件：装载记录的第一步就会失败，失败点在任何写入之前。
+    const blocked = join(directory, 'blocked');
+    await writeFile(blocked, 'not a directory');
+    const session = createSessionLog({ directory: blocked, id: 'run' });
+    await assert.rejects(
+      () => session.append({ kind: 'tool', tool: 'read', args: {}, result: { content: 'x' } }),
+      (error) => error.code === 'session_write_failed',
+    );
+    assert.equal(await readFile(blocked, 'utf8'), 'not a directory');
+  });
+});
+
+test('an oversized result in a session directory that does not exist yet still spills and records', async () => {
+  const root = await mkdtemp(join(process.cwd(), 'testplace', 'write-'));
+  try {
+    const directory = join(root, 'sessions', 'nested');
+    const session = createSessionLog({ directory, id: 'first' });
+    const kernel = createKernel({ config: createConfig({ user: { boundary: root, limits: { resultBytes: 100 } } }), session });
+    kernel.register({
+      name: 'chatty',
+      description: 'returns more than the result limit',
+      parameters: { type: 'object', properties: {} },
+      run: async () => ({ text: 'z'.repeat(400) }),
+    });
+    await kernel.call('chatty', {});
+    const [event] = await session.read();
+    assert.match(event.result.content, /omitted/);
+    assert.deepEqual(JSON.parse(await readFile(join(directory, event.result.spilled), 'utf8')), { text: 'z'.repeat(400) });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a refusal and a failure each carry their own code into the log', async () => {
+  await withDirectory(async (directory) => {
+    const session = createSessionLog({ directory, id: 'run-3' });
+    const kernel = kernelWith(session, {
+      kernel: { policy: createDecisionChain({ mode: 'auto', rules: [{ tool: 'exec', decision: 'deny', match: 'rm *', reason: 'no deleting' }] }) },
+    });
+    kernel.register(execTool);
+    await assert.rejects(() => kernel.call('exec', { command: 'rm -rf /tmp/nowhere' }), (error) => error.code === 'policy_denied');
+    await assert.rejects(() => kernel.call('exec', { command: '   ' }), (error) => error.code === 'exec_command_required');
+
+    const events = await session.read();
+    assert.deepEqual(events.map((event) => [event.tool, event.result.kind, event.result.code]), [
+      ['exec', 'refusal', 'policy_denied'],
+      ['exec', 'failure', 'exec_command_required'],
+    ]);
+    assert.equal(events[0].result.reason, 'no deleting');
+  });
+});
+
+test('an oversized result keeps a retrievable reference instead of the whole text', async () => {
+  await withDirectory(async (directory) => {
+    const session = createSessionLog({ directory, id: 'run-4' });
+    const kernel = kernelWith(session);
+    kernel.register({
+      name: 'chatty',
+      description: 'returns more than the result limit',
+      parameters: { type: 'object', properties: {} },
+      run: async () => ({ text: 'y'.repeat(500) }),
+    });
+    await kernel.call('chatty', {});
+    const [event] = await session.read();
+    assert.match(event.result.content, /\[omitted: full output is \d+ bytes, kept in result-\d+-[0-9a-f]{8}\.json]/);
+    assert.ok(Buffer.byteLength(event.result.content, 'utf8') <= 200);
+    const spilled = await readFile(join(directory, event.result.spilled), 'utf8');
+    assert.equal(spilled, JSON.stringify({ text: 'y'.repeat(500) }));
+  });
+});
+
+test('a read result reaches the session log with its content intact', async () => {
+  await withDirectory(async (directory) => {
+    const workspace = join(directory, 'workspace');
+    await mkdir(workspace, { recursive: true });
+    await writeFile(join(workspace, 'note.txt'), 'the file content');
+    const session = createSessionLog({ directory, id: 'run-5' });
+    const kernel = createKernel({
+      config: createConfig({ user: { boundary: workspace } }),
+      session,
+    });
+    kernel.register(readTool);
+    assert.deepEqual(await kernel.call('read', { path: 'note.txt' }), { text: 'the file content' });
+    assert.deepEqual(await session.modelView(), [
+      { role: 'tool', id: undefined, tool: 'read', content: { text: 'the file content' }, failed: false, code: undefined },
+    ]);
+  });
+});
