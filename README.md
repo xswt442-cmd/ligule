@@ -5,3 +5,5 @@
 [![license](https://img.shields.io/badge/license-MIT-22c55e.svg)](./LICENSE)
 
 **开发中。**
+
+Anyway , `ligule` 读 /ˈlɪɡjuːl/。
