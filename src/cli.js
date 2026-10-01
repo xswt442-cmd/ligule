@@ -41,8 +41,9 @@ async function installedKernel() {
   return kernel;
 }
 
-function printFailure(code) {
-  console.error(code);
+// 码是给脚本分支的，后面那一句是给站在终端前的人看的（D19 把码与文本分开就是为了两边各取一样）。
+function printFailure(code, detail) {
+  console.error(detail === undefined || detail === '' ? code : `${code}: ${detail}`);
   process.exitCode = 1;
 }
 
@@ -50,7 +51,7 @@ async function kernelOrFail() {
   try {
     return await installedKernel();
   } catch (error) {
-    printFailure(error.code ?? 'cli_kernel_failed');
+    printFailure(error.code ?? 'cli_kernel_failed', error.detail);
     return undefined;
   }
 }
@@ -82,7 +83,7 @@ if (missingFlagValue) {
           const result = await kernel.call(name, args);
           console.log(typeof result?.text === 'string' ? result.text : JSON.stringify(result, null, 2));
         } catch (error) {
-          printFailure(error.code ?? 'cli_call_failed');
+          printFailure(error.code ?? 'cli_call_failed', error.detail);
         }
       }
     }

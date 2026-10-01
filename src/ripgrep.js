@@ -70,7 +70,7 @@ export function searchWithRipgrep({ executable, boundary, target = '.', pattern,
   return new Promise((resolve, reject) => {
     // 已经取消就不起这个进程：起了再杀会留一个短暂的孤儿，而且调用方拿到的该是取消而不是后端故障。
     if (signal?.aborted) {
-      reject(new KernelError('search_cancelled'));
+      reject(new KernelError('search_cancelled', { detail: 'the content search was cancelled before it started' }));
       return;
     }
     // `--no-config` 挡住宿主环境里的 RIPGREP_CONFIG_PATH 与二进制旁边的 rg.conf：
@@ -102,7 +102,7 @@ export function searchWithRipgrep({ executable, boundary, target = '.', pattern,
     };
     const cancel = () => {
       child.kill();
-      settle(() => reject(new KernelError('search_cancelled')));
+      settle(() => reject(new KernelError('search_cancelled', { detail: 'the content search was cancelled before it finished' })));
     };
     signal?.addEventListener('abort', cancel, { once: true });
     // 起进程到挂上监听之间信号也可能已经变了，那种情况补一次取消，不要把这一趟扫完才回话。
@@ -128,7 +128,7 @@ export function searchWithRipgrep({ executable, boundary, target = '.', pattern,
 
     child.stdout.on('data', consume);
     child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.on('error', (error) => settle(() => reject(new KernelError('search_backend_failed', { cause: error }))));
+    child.on('error', (error) => settle(() => reject(new KernelError('search_backend_failed', { cause: error, detail: `the search backend could not run: ${error.code ?? error.message}` }))));
     child.on('close', (code) => {
       // ripgrep 没有命中时以 1 退出，那是结果不是故障；2 才是它自己出错。
       if (code === 0 || code === 1 || truncated) settle(() => resolve({ hits, truncated }));

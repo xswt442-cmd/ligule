@@ -45,7 +45,9 @@ export const execTool = {
     required: ['command'],
   },
   async run(args, { config, signal }) {
-    if (typeof args.command !== 'string' || args.command.trim() === '') throw new KernelError('exec_command_required');
+    if (typeof args.command !== 'string' || args.command.trim() === '') {
+      throw new KernelError('exec_command_required', { detail: 'the command to run is missing' });
+    }
     const { execBytes } = limitsOf(config);
     const boundary = boundaryOf(config);
     const cwd = args.cwd === undefined ? boundary : await resolveWithin(boundary, args.cwd);
@@ -95,7 +97,7 @@ export const execTool = {
       else signal?.addEventListener('abort', abort, { once: true });
     });
     signal?.removeEventListener('abort', abort);
-    if (cancelled) throw new KernelError('exec_cancelled');
+    if (cancelled) throw new KernelError('exec_cancelled', { detail: 'the command was terminated because the run was cancelled' });
     return { text: pageOutput(total, head, tail, execBytes), exitCode };
   },
 };

@@ -31,7 +31,7 @@ function runPowershell(command, env) {
     });
     let stderr = '';
     child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.on('error', (error) => reject(new KernelError('recycle_backend_failed', { cause: error })));
+    child.on('error', (error) => reject(new KernelError('recycle_backend_failed', { cause: error, detail: `powershell could not be started to move the file to the recycle bin: ${error.code ?? error.message}` })));
     child.on('close', (code) => {
       if (code === 0) resolve();
       else reject(new KernelError('recycle_backend_failed', { detail: stderr.trim() || `powershell exited with ${code}` }));
@@ -80,7 +80,7 @@ export const freedesktopTrash = {
         await writeFile(infoPath, info, { flag: 'wx' });
       } catch (error) {
         if (error.code === 'EEXIST') continue;
-        throw new KernelError('recycle_backend_failed', { cause: error });
+        throw new KernelError('recycle_backend_failed', { cause: error, detail: `the trash could not claim a name for ${target}: ${error.code ?? error.message}` });
       }
       try {
         await rename(target, join(files, name));
@@ -92,8 +92,10 @@ export const freedesktopTrash = {
         } catch {}
         // 回收站与目标不在同一个文件系统上时 rename 报 EXDEV：规范要求那种情况用挂载点自己的回收站，
         // 本实现不做那一层，交回给调用方回落到项目内那个目录。
-        if (error.code === 'EXDEV') throw new KernelError('recycle_cross_device', { cause: error });
-        throw new KernelError('recycle_backend_failed', { cause: error });
+        if (error.code === 'EXDEV') {
+          throw new KernelError('recycle_cross_device', { cause: error, detail: `${target} and the trash are on different filesystems` });
+        }
+        throw new KernelError('recycle_backend_failed', { cause: error, detail: `the trash refused ${target}: ${error.code ?? error.message}` });
       }
       return;
     }

@@ -43,6 +43,10 @@ test('a failure prints its stable code on stderr and exits non-zero', () => {
 
   const noName = capture('call');
   assert.match(noName.stderr, /cli_call_needs_a_tool_name/);
+
+  // 站在终端前的人看的是那一句说明，不只是码（D19 把码与文本分开就是这个用意）。
+  const missingFile = capture('call', 'read', JSON.stringify({ path: 'no-such-file-anywhere.txt' }));
+  assert.match(missingFile.stderr, /^path_not_found: there is nothing to read at /);
 });
 
 test('--config narrows the boundary from the command line and a valueless flag is refused', () => {

@@ -32,7 +32,9 @@ function skippedDirectories(config) {
 }
 
 export function boundaryOf(config) {
-  if (typeof config.boundary !== 'string' || config.boundary === '') throw new KernelError('boundary_required');
+  if (typeof config.boundary !== 'string' || config.boundary === '') {
+    throw new KernelError('boundary_required', { detail: 'the host configured no workspace boundary, so file tools have nowhere to work' });
+  }
   return config.boundary;
 }
 
@@ -100,8 +102,8 @@ async function readExisting(path) {
   try {
     return await readFile(path);
   } catch (error) {
-    if (error.code === 'ENOENT') throw new KernelError('path_not_found');
-    throw new KernelError('path_resolve_failed', { cause: error });
+    if (error.code === 'ENOENT') throw new KernelError('path_not_found', { detail: `there is nothing to read at ${path}` });
+    throw new KernelError('path_resolve_failed', { cause: error, detail: `reading ${path} failed: ${error.code ?? error.message}` });
   }
 }
 
@@ -118,17 +120,19 @@ export const findTool = {
   },
   async run(args, { config, signal }) {
     // 取消边界（D20）：先判一次，再在每一份文件之前判一次，两条后端交回的码相同。
-    if (signal?.aborted) throw new KernelError('find_cancelled');
+    if (signal?.aborted) throw new KernelError('find_cancelled', { detail: 'the file listing was cancelled before it finished' });
     const { resultCount } = limitsOf(config);
     const boundary = boundaryOf(config);
     const root = args.path === undefined ? boundary : await resolveWithin(boundary, args.path);
     // 遍历的起点必须是目录：交给 walkFiles 的话，readdir 会对文件抛原始的 ENOTDIR，
     // 那一类错误没有稳定码，判定链与调用方都没法分支。
-    if (await kindOfTarget(root) !== 'directory') throw new KernelError('find_path_not_directory');
+    if (await kindOfTarget(root) !== 'directory') {
+      throw new KernelError('find_path_not_directory', { detail: `find starts from a directory, but ${args.path} is a file` });
+    }
     const names = [];
     let scanned = 0;
     for await (const name of walkFiles(root, skippedDirectories(config))) {
-      if (signal?.aborted) throw new KernelError('find_cancelled');
+      if (signal?.aborted) throw new KernelError('find_cancelled', { detail: 'the file listing was cancelled before it finished' });
       scanned += 1;
       if (!matchesName(name, args.pattern)) continue;
       if (names.length === resultCount) {
@@ -156,7 +160,7 @@ export const searchTool = {
   },
   async run(args, { config, logger, signal }) {
     // 取消边界（D20）：外部后端那一条把同一个信号交给子进程，这一条在每份文件之前判一次。
-    if (signal?.aborted) throw new KernelError('search_cancelled');
+    if (signal?.aborted) throw new KernelError('search_cancelled', { detail: 'the content search was cancelled before it finished' });
     const { resultCount, scanBytes, scanFiles } = limitsOf(config);
     const boundary = boundaryOf(config);
 
@@ -240,7 +244,7 @@ export const searchTool = {
     }
 
     for await (const target of candidates()) {
-      if (signal?.aborted) throw new KernelError('search_cancelled');
+      if (signal?.aborted) throw new KernelError('search_cancelled', { detail: 'the content search was cancelled before it finished' });
       scannedFiles += 1;
       if (scannedFiles > scanFiles) {
         // 剩下没走的那一截没数过，所以标记里说「没读完」而不是报一个数不清的数。
@@ -263,7 +267,7 @@ async function existsOrFails(path) {
     return true;
   } catch (error) {
     if (error.code === 'ENOENT') return false;
-    throw new KernelError('path_resolve_failed', { cause: error });
+    throw new KernelError('path_resolve_failed', { cause: error, detail: `checking ${path} failed: ${error.code ?? error.message}` });
   }
 }
 
@@ -272,8 +276,8 @@ async function kindOfTarget(path) {
   try {
     return (await stat(path)).isDirectory() ? 'directory' : 'file';
   } catch (error) {
-    if (error.code === 'ENOENT') throw new KernelError('path_not_found');
-    throw new KernelError('path_resolve_failed', { cause: error });
+    if (error.code === 'ENOENT') throw new KernelError('path_not_found', { detail: `there is nothing at ${path}` });
+    throw new KernelError('path_resolve_failed', { cause: error, detail: `checking ${path} failed: ${error.code ?? error.message}` });
   }
 }
 
@@ -292,7 +296,9 @@ export const createTool = {
     const boundary = boundaryOf(config);
     const target = await resolveWithin(boundary, args.path, { forWrite: true });
     // 已存在就报错、一个字节都不写：覆盖是 write 的动作，分开才让判定链看得见差别（D3）。
-    if (await existsOrFails(target)) throw new KernelError('create_target_exists');
+    if (await existsOrFails(target)) {
+      throw new KernelError('create_target_exists', { detail: `${args.path} already exists; use write to replace its whole content or edit to change one part of it` });
+    }
     await mkdir(dirname(target), { recursive: true });
     await writeFile(target, args.content, 'utf8');
     observations?.observe(target, versionOf(Buffer.from(args.content, 'utf8')));
@@ -322,12 +328,16 @@ export const writeTool = {
     try {
       before = await readFile(target);
     } catch (error) {
-      if (error.code === 'ENOENT') throw new KernelError('write_target_missing');
-      throw new KernelError('path_resolve_failed', { cause: error });
+      if (error.code === 'ENOENT') throw new KernelError('write_target_missing', { detail: `${args.path} does not exist; create is the tool for a file that is not there yet` });
+      throw new KernelError('path_resolve_failed', { cause: error, detail: `reading ${args.path} failed: ${error.code ?? error.message}` });
     }
     const observed = observations?.versionAt(target);
-    if (observed === undefined) throw new KernelError('write_not_observed');
-    if (observed !== versionOf(before)) throw new KernelError('write_version_stale');
+    if (observed === undefined) {
+      throw new KernelError('write_not_observed', { detail: `${args.path} has not been read in this run; read it in full first, then write` });
+    }
+    if (observed !== versionOf(before)) {
+      throw new KernelError('write_version_stale', { detail: `${args.path} changed since it was read; read it again before replacing its content` });
+    }
     await writeFile(target, args.content, 'utf8');
     observations?.observe(target, versionOf(Buffer.from(args.content, 'utf8')));
     return { text: `wrote ${toPosix(relative(boundary, target))} (${Buffer.byteLength(args.content, 'utf8')} bytes)` };
@@ -348,20 +358,24 @@ export const editTool = {
   },
   async run(args, { config, observations }) {
     const boundary = boundaryOf(config);
-    if (args.anchor.trim() === '') throw new KernelError('edit_anchor_empty');
+    if (args.anchor.trim() === '') {
+      throw new KernelError('edit_anchor_empty', { detail: 'an anchor of only whitespace would match anywhere; give the text to locate' });
+    }
     const target = await resolveWithin(boundary, args.path, { forWrite: true });
     let text;
     try {
       text = await readFile(target, 'utf8');
     } catch (error) {
       // 目标不存在时 create 才是那件成立的动作（D3）。
-      if (error.code === 'ENOENT') throw new KernelError('edit_target_missing');
-      throw new KernelError('path_resolve_failed', { cause: error });
+      if (error.code === 'ENOENT') throw new KernelError('edit_target_missing', { detail: `${args.path} does not exist; create is the tool for a file that is not there yet` });
+      throw new KernelError('path_resolve_failed', { cause: error, detail: `reading ${args.path} failed: ${error.code ?? error.message}` });
     }
     const hits = text.split(args.anchor).length - 1;
-    if (hits === 0) throw new KernelError('edit_anchor_not_found');
+    if (hits === 0) throw new KernelError('edit_anchor_not_found', { detail: `the anchor does not appear in ${args.path}` });
     // 多重匹配时选哪一处由模型决定是不可审计的，所以要求定位串唯一（D3）。
-    if (hits > 1) throw new KernelError('edit_anchor_ambiguous');
+    if (hits > 1) {
+      throw new KernelError('edit_anchor_ambiguous', { detail: `the anchor appears ${hits} times in ${args.path}; widen it until one occurrence is left` });
+    }
     const updated = text.replace(args.anchor, args.replacement);
     await writeFile(target, updated, 'utf8');
     observations?.observe(target, versionOf(Buffer.from(updated, 'utf8')));
@@ -384,14 +398,14 @@ export const deleteTool = {
     const boundary = boundaryOf(config);
     const target = await resolveWithin(boundary, args.path, { forWrite: true });
     const name = toPosix(relative(boundary, target));
-    if (name === '') throw new KernelError('delete_target_is_boundary');
-    if (!(await existsOrFails(target))) throw new KernelError('delete_target_missing');
+    if (name === '') throw new KernelError('delete_target_is_boundary', { detail: 'the workspace boundary itself cannot be moved into the trash; name a file or directory inside it' });
+    if (!(await existsOrFails(target))) throw new KernelError('delete_target_missing', { detail: `there is nothing at ${args.path} to move into the trash` });
 
     // 去处由配置的 trashBackend 定：auto 是「有系统回收站就用它，没有就用项目内那个目录」，
     // system 与 managed 各自钉死一条，钉死的那一条不成立时报错而不是悄悄换另一条。
     const backend = config.trashBackend ?? 'auto';
     if (backend !== 'auto' && backend !== 'system' && backend !== 'managed') {
-      throw new KernelError('delete_trash_backend_unknown', { detail: String(backend) });
+      throw new KernelError('delete_trash_backend_unknown', { detail: `"${backend}" is not a trash backend; the choices are auto, system and managed` });
     }
     if (backend !== 'managed') {
       const { recycler, code } = await resolveRecycler();
@@ -406,7 +420,7 @@ export const deleteTool = {
           logger.log(`the ${recycler.name} refused this deletion, falling back to ${trashDirectory}`, { tool: 'delete', code: error.code });
         }
       } else if (backend === 'system') {
-        throw new KernelError(code);
+        throw new KernelError(code, { detail: `no system recycle bin is available here (${code}), and trashBackend is pinned to system` });
       } else {
         logger.debug(`no system recycle bin on this platform, using ${trashDirectory}`, { tool: 'delete', code });
       }

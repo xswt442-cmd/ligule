@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
-  createConfig, createDecisionChain, createKernel, createSessionLog, KernelError, VERSION,
+  createConfig, createDecisionChain, createKernel, createSessionLog, KernelError, minimalTools, VERSION,
 } from '../src/index.js';
 
 function makeTool(name, overrides = {}) {
@@ -284,6 +284,38 @@ test('calling an unregistered tool rejects with a code', async () => {
 });
 
 // 助手那一轮已经带着这次调用，记录里必须有一条结果跟它的 id 对上，否则下一次请求体里那个调用悬空。
+// 错误码是给宿主分支的，`content` 才是模型看见的那一份：一个空的失败结果等于什么也没告诉它。
+test('every tool failure leaves the model a sentence to act on', async () => {
+  const root = await mkdtemp(join(process.cwd(), 'testplace', 'kernel-'));
+  try {
+    await writeFile(join(root, 'note.txt'), 'seed content\n');
+    const session = createSessionLog({ directory: root, id: 'messages' });
+    const kernel = createKernel({ config: createConfig({ user: { boundary: root } }), session });
+    for (const tool of minimalTools) kernel.register(tool);
+    const failures = [
+      ['read', { path: 'missing.txt' }],
+      ['find', { pattern: '*', path: 'missing.txt' }],
+      ['search', { pattern: 'x', path: 'missing.txt' }],
+      ['create', { path: 'note.txt', content: 'a' }],
+      ['write', { path: 'note.txt', content: 'b' }],
+      ['edit', { path: 'note.txt', anchor: '   ', replacement: 'x' }],
+      ['edit', { path: 'note.txt', anchor: 'absent anchor', replacement: 'x' }],
+      ['delete', { path: '.' }],
+      ['exec', { command: '   ' }],
+    ];
+    for (const [name, args] of failures) {
+      await assert.rejects(() => kernel.call(name, args), `${name} should have refused ${JSON.stringify(args)}`);
+    }
+    const refused = (await session.read()).filter((event) => event.result?.failed);
+    assert.equal(refused.length, failures.length, 'each refusal left exactly one failure event');
+    for (const event of refused) {
+      assert.ok(typeof event.result.content === 'string' && event.result.content !== '', `${event.tool} / ${event.result.code} says nothing to the model`);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('a call naming a tool that is not registered is recorded against its call id', async () => {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'kernel-'));
   try {
