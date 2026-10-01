@@ -144,6 +144,10 @@ test('the freedesktop backend writes the info file the spec asks for and counts 
     assert.equal(header, '[Trash Info]');
     assert.equal(pathLine, `Path=${join(workspace, 'note.txt').split('/').map(encodeURIComponent).join('/')}`);
     assert.match(dateLine, /^DeletionDate=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/);
+    // 规范要的是本地时间：JS 把这一串按本地时间解析，所以下手时间与它相差不该超过一分钟。
+    // 执行机正好在 UTC 时区时这条判不出时区差，形状那一条仍然在。
+    const written = new Date(dateLine.slice('DeletionDate='.length));
+    assert.ok(Math.abs(written.getTime() - Date.now()) < 60_000, `${dateLine} is not the local time of the deletion`);
 
     // 同名再来一次：回收站里那一份不被覆盖，新的那一份按规范往后加计数。
     await writeFile(join(workspace, 'note.txt'), 'second');
@@ -151,6 +155,37 @@ test('the freedesktop backend writes the info file the spec asks for and counts 
     assert.deepEqual((await readdir(files)).sort(), ['note.txt', 'note.txt.1']);
     assert.equal(await readFile(join(files, 'note.txt'), 'utf8'), 'keep me');
     assert.equal(await readFile(join(files, 'note.txt.1'), 'utf8'), 'second');
+  } finally {
+    if (previous === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// 回收站里可以躺着别的程序放的东西：没有信息文件的同名那一份也要让名字往后加计数，
+// 反过来，移不进去时占名的信息文件要撤掉，别在回收站里留一个没有内容的条目。
+test('the freedesktop backend skips a name another program took and leaves nothing after a failed move', async () => {
+  const root = await mkdtemp(join(process.cwd(), 'testplace', 'trash-'));
+  const previous = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = join(root, 'data');
+  const infoDir = join(root, 'data', 'Trash', 'info');
+  const files = join(root, 'data', 'Trash', 'files');
+  try {
+    const workspace = join(root, 'workspace');
+    await mkdir(workspace, { recursive: true });
+    await freedesktopTrash.probe();
+    await writeFile(join(files, 'note.txt'), 'foreign');
+    await writeFile(join(workspace, 'note.txt'), 'mine');
+    await freedesktopTrash.send(join(workspace, 'note.txt'));
+    assert.equal(await readFile(join(files, 'note.txt'), 'utf8'), 'foreign', 'what another program put there stays put');
+    assert.equal(await readFile(join(files, 'note.txt.1'), 'utf8'), 'mine');
+    assert.deepEqual(await readdir(infoDir), ['note.txt.1.trashinfo']);
+
+    await assert.rejects(
+      () => freedesktopTrash.send(join(workspace, 'gone.txt')),
+      (error) => error.code === 'recycle_backend_failed',
+    );
+    assert.deepEqual(await readdir(infoDir), ['note.txt.1.trashinfo'], 'a move that failed leaves no info file behind');
   } finally {
     if (previous === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = previous;

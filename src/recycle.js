@@ -2,7 +2,7 @@
 // 平台代码只待在这一层：Windows 走外壳接口，Linux 走 freedesktop 的 Trash 规范，macOS 没有后端。
 // 探测结果在一次运行里只算一次，它是一条平台事实，运行期间不会变。
 import { spawn } from 'node:child_process';
-import { access, constants, mkdir, rename, writeFile } from 'node:fs/promises';
+import { access, constants, mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import { KernelError } from './error.js';
@@ -23,9 +23,11 @@ const PROBE_COMMAND = 'Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.
 
 function runPowershell(command, env) {
   return new Promise((resolve, reject) => {
+    // stdout 也接成 ignore：这条命令不往标准输出写东西，但一旦写了而没人读，管道满了子进程就永远等在这里。
     const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
       env: { ...process.env, ...env },
       windowsHide: true,
+      stdio: ['ignore', 'ignore', 'pipe'],
     });
     let stderr = '';
     child.stderr.on('data', (chunk) => { stderr += chunk; });
@@ -65,22 +67,46 @@ export const freedesktopTrash = {
   async send(target) {
     const root = trashRoot();
     const files = join(root, 'files');
-    // 同名时往后加计数，不覆盖已经在回收站里的那一份。
     const base = basename(target);
-    let name = base;
-    for (let suffix = 1; await exists(join(files, name)); suffix += 1) name = `${base}.${suffix}`;
-    const info = `[Trash Info]\nPath=${encodeTrashPath(target)}\nDeletionDate=${new Date().toISOString().slice(0, 19)}\n`;
-    await writeFile(join(root, 'info', `${name}.trashinfo`), info, 'utf8');
-    try {
-      await rename(target, join(files, name));
-    } catch (error) {
-      // 回收站与目标不在同一个文件系统上时 rename 报 EXDEV：规范要求那种情况用挂载点自己的回收站，
-      // 本实现不做那一层，交回给调用方回落到项目内那个目录。
-      if (error.code === 'EXDEV') throw new KernelError('recycle_cross_device', { cause: error });
-      throw new KernelError('recycle_backend_failed', { cause: error });
+    const info = `[Trash Info]\nPath=${encodeTrashPath(target)}\nDeletionDate=${deletionDate(new Date())}\n`;
+    // ponytail: 名字是先看一眼有没有、再独占建信息文件来占住的；检查与改名之间仍有一个窗口，
+    // 别的程序正好在那一刻放进同一个文件就会撞上。上限是这条，升级路线是先建一个空的同名硬链接占位再改名。
+    for (let attempt = 0; ; attempt += 1) {
+      const name = attempt === 0 ? base : `${base}.${attempt}`;
+      const infoPath = join(root, 'info', `${name}.trashinfo`);
+      if (await exists(join(files, name))) continue;
+      try {
+        // 独占创建：两次删除同时挑中同一个名字时，只有一个能建出这份信息文件，另一个往后加计数。
+        await writeFile(infoPath, info, { flag: 'wx' });
+      } catch (error) {
+        if (error.code === 'EEXIST') continue;
+        throw new KernelError('recycle_backend_failed', { cause: error });
+      }
+      try {
+        await rename(target, join(files, name));
+      } catch (error) {
+        // 移不进去就把占名的信息文件删掉：留着它就是回收站里一个没有内容的条目。
+        // 这里删不掉也不上报，移动失败才是调用方要看的那一条。
+        try {
+          await rm(infoPath, { force: true });
+        } catch {}
+        // 回收站与目标不在同一个文件系统上时 rename 报 EXDEV：规范要求那种情况用挂载点自己的回收站，
+        // 本实现不做那一层，交回给调用方回落到项目内那个目录。
+        if (error.code === 'EXDEV') throw new KernelError('recycle_cross_device', { cause: error });
+        throw new KernelError('recycle_backend_failed', { cause: error });
+      }
+      return;
     }
   },
 };
+
+// 规范要的是本地时间的 YYYY-MM-DDThh:mm:ss：截一刀 ISO 串得到的是 UTC，
+// 还原界面按本地时间去读就把删除时间报差了几个小时。
+function deletionDate(now) {
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+    + `T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+}
 
 // 规范里的 Path 是百分号编码的绝对路径，分隔符本身不编码。
 function encodeTrashPath(target) {
