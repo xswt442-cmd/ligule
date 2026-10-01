@@ -31,13 +31,15 @@ async function identity(path) {
 }
 
 // 从当前目录上溯到项目根，逐层看有没有 AGENTS.md。不越过项目根（对照 Codex 的那条硬规则）。
-// 停下来的判据用与入口同一个词法包含判断，不用字符串相等：Windows 上两个写法只差大小写时它们指的是
-// 同一个目录，字符串相等对不上，上溯就会一路走到文件系统根，把项目根之外的规则文件读进来（本机实测）。
+// 「到了根」与「还在根之内」都按同一个依据判：包含关系用入口那一条词法判断，是不是根本身用真实路径，
+// 就是下面去重用的同一个 identity。大小写只差一点的两种写法在 Windows 上指同一个目录，
+// 用字符串相等判时对不上，上溯会一路走到文件系统根，把项目根之外的 AGENTS.md 读进来（本机实测：九层）。
 async function walkUpTo(boundary, current) {
   const found = [];
   const root = resolve(boundary);
+  const realRoot = await identity(root);
   let directory = resolve(current);
-  while (isWithin(root, directory) && directory !== root) {
+  while (isWithin(root, directory) && (await identity(directory)) !== realRoot) {
     found.unshift(directory);
     directory = dirname(directory);
   }

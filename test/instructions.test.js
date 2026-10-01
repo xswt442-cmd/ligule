@@ -124,16 +124,20 @@ test('the truncation notice counts the bytes actually kept rather than the budge
   });
 });
 
-// Windows 上只差大小写的两个写法指的是同一个目录。上溯的停止判据用字符串相等时对不上，
-// 于是一路走到文件系统根，把项目根之外的 AGENTS.md 也读进来。这条性质是 Windows 的，所以只在它上面跑。
+// Windows 上只差大小写的两个写法指的是同一个目录。上溯的停止判据原先用字符串相等，相等判不出来时
+// 一路走到文件系统根，把项目根之外的 AGENTS.md 读了进来。这条性质是 Windows 的，所以只在它上面跑：
+// Linux 上大小写不同就是不同目录，入口那条判据本来就该拒。
 test('a boundary spelled in another case still stops the walk at the project root', async (t) => {
   if (process.platform !== 'win32') return t.skip('case-insensitive paths are a Windows property');
   await withTree(async ({ root, boundary }) => {
     await writeFile(join(root, 'AGENTS.md'), 'rules from above the project root');
-    const otherCase = join(root, boundary.slice(root.length + 1).replace(/^b/, 'B'));
-    const result = await loadInstructions({ boundary: otherCase, current: join(otherCase, 'Pkg') });
+    const result = await loadInstructions({
+      boundary: join(root, 'Boundary'),
+      current: join(root, 'boundary', 'pkg'),
+    });
     assert.doesNotMatch(result.text, /above the project root/, 'nothing outside the boundary is loaded');
-    assert.deepEqual(order(result.text), ['AGENTS.md', 'Pkg/AGENTS.md'], 'the walk stops at the boundary, two layers');
+    assert.deepEqual(order(result.text), ['AGENTS.md', 'pkg/AGENTS.md'], 'the walk stops at the boundary, two layers');
+    assert.deepEqual(result.files.map((file) => file.layer), ['project', 'directory'], 'the boundary itself is the project layer');
   });
 });
 
