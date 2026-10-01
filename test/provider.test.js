@@ -30,7 +30,7 @@ async function withEndpoint(respond, run) {
       headers: request.headers,
       body: text === '' ? undefined : JSON.parse(text),
     });
-    await respond(requests.length, response);
+    await respond(requests.length, response, requests[requests.length - 1]);
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
@@ -311,13 +311,19 @@ test('one real round trip: the second request body is what the record rebuilds i
       { type: 'content_block_stop', index: 0 },
       { type: 'message_stop' },
     ];
-    await withEndpoint(async (attempt, response) => {
+    // 答哪一轮看这一份请求里有没有工具结果，不看第几次连接：一次传输层的重试会让同一轮被问两次，
+    // 按次数答的话测试断的是重试的次序，不是它本来要断的那件事。
+    await withEndpoint(async (attempt, response, request) => {
+      const answered = JSON.stringify(request.body?.messages ?? []).includes('tool_result');
       response.writeHead(200, { 'content-type': 'text/event-stream' });
-      response.end(sseBody(attempt === 1 ? toolTurn : textTurn));
+      response.end(sseBody(answered ? textTurn : toolTurn));
     }, async (baseUrl, requests) => {
       const result = await createLoop({ kernel, provider: provider(baseUrl), session }).run('read the note');
       assert.equal(result.text, 'the file says so');
-      assert.deepEqual(requests[1].body.messages, [
+      // 带着工具结果的那一份请求只该有一份：模型被问过两次同一个工具轮才算重试没兜住。
+      const asked = requests.filter((entry) => JSON.stringify(entry.body.messages).includes('tool_result'));
+      assert.equal(asked.length, 1, 'the tool round is sent once');
+      assert.deepEqual(asked[0].body.messages, [
         { role: 'user', content: 'read the note' },
         { role: 'assistant', content: [{ type: 'tool_use', id: 'call_1', name: 'read', input: { path: 'note.txt' } }] },
         { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_1', content: '{"text":"the body"}', is_error: false }] },
@@ -329,7 +335,7 @@ test('one real round trip: the second request body is what the record rebuilds i
         { role: 'tool', id: 'call_1', tool: 'read', content: { text: 'the body' }, failed: false, code: undefined },
         { role: 'assistant', text: 'the file says so', toolCalls: [] },
       ]);
-      assert.deepEqual(requests[1].body.tools, [{
+      assert.deepEqual(asked[0].body.tools, [{
         name: 'read',
         description: readTool.description,
         input_schema: readTool.parameters,
