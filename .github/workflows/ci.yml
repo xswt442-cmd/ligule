@@ -36,9 +36,11 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          cache: npm
 
-      # package.json 没有声明依赖，也没有锁文件，所以这里不跑 npm ci、也不配依赖缓存。
-      # 第一条依赖进来时一并补锁文件和缓存。
+      # 依赖按锁文件装，CI 上不解析新版本。
+      - name: install
+        run: npm ci
 
       - name: syntax check every module
         shell: bash

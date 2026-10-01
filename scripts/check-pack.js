@@ -8,7 +8,7 @@
 // .cmd 文件（spawnSync 报 EINVAL）。npm 在子进程环境里放了 npm_execpath，指向它真正的入口
 // JavaScript 文件，所以这里用 node.exe 加那个文件来跑 npm。tar 与 node.exe 都是真正的可执行文件。
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 
@@ -58,12 +58,21 @@ try {
   const consumer = join(work, 'consumer');
   mkdirSync(join(consumer, 'node_modules'), { recursive: true });
   renameSync(shipped, join(consumer, 'node_modules', 'ligule'));
+  // 消费者要能解析到运行时依赖，否则 import 到依赖那一行就断了。把仓库自己的 node_modules 复制过去，
+  // 不联网、不跑第二次安装。
+  // ponytail: 本仓库目前没有 devDependencies，所以这一份正好等于运行时依赖；将来有了开发期依赖，
+  // 它们会一起被带过去，这项检查就弱一档，那时改成按 dependencies 逐棵复制。
+  const repoModules = join(repo, 'node_modules');
+  if (existsSync(repoModules)) cpSync(repoModules, join(consumer, 'node_modules'), { recursive: true });
   writeFileSync(join(consumer, 'package.json'), `${JSON.stringify({ name: 'ligule-consumer', version: '0.0.0', private: true }, null, 2)}\n`);
   writeFileSync(
     join(consumer, 'probe.mjs'),
     [
-      "import { createKernel, KernelError } from 'ligule';",
+      "import { createKernel, KernelError, flagLayer } from 'ligule';",
       "if (typeof KernelError !== 'function') throw new Error('KernelError is missing from the installed package');",
+      "if (flagLayer(['limits.readBytes = 100']).limits?.readBytes !== 100) {",
+      "  throw new Error('the installed package cannot parse a dotted override, its TOML dependency did not come along');",
+      "}",
       "const kernel = createKernel();",
       "if (kernel.manifest().length !== 0) throw new Error('the installed kernel ships tools');",
       "const dispose = kernel.register({",

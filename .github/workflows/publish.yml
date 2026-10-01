@@ -37,6 +37,11 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          cache: npm
+
+      # 依赖按锁文件装，CI 上不解析新版本。
+      - name: install
+        run: npm ci
 
       - name: tag matches package.json version
         shell: bash
