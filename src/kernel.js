@@ -140,10 +140,15 @@ export function createKernel(options = {}) {
     // options.signal 是这次调用的取消边界，由循环或适配器交进来（D20）。
     // 判定链在这一步上，所以没有任何一条执行路径绕得开它；每一次拒绝、失败与成功都进会话记录。
     async call(name, args, options = {}) {
-      const tool = tools.get(name);
-      if (!tool) throw new KernelError('tool_not_found');
       // options.callId 是模型那一次调用的 id，进记录用来把工具结果挂回助手那一轮（D11、D13）。
       const entry = { kind: 'tool', tool: name, callId: options.callId, args };
+      const tool = tools.get(name);
+      if (!tool) {
+        // 没登记的名字也要留下一条结果：助手那一轮已经带着这次调用，记录里少一条跟它的 id 对上，
+        // 下一次请求体里那个调用就悬空，端点会把整份请求拒掉，而代价只是模型打错了一个名字。
+        // 参照实现同样是交回一条错误结果而不是抛一个没人接收的异常（Cline 的循环）。
+        await fail(entry, new KernelError('tool_not_found', { detail: `no tool named "${name}" is registered for this run` }));
+      }
       if (isDenied(name)) {
         await record(entry, refusalOf('tool_denied', 'the tool is restricted for this run'));
         throw new KernelError('tool_denied');

@@ -255,6 +255,25 @@ test('calling an unregistered tool rejects with a code', async () => {
   );
 });
 
+// 助手那一轮已经带着这次调用，记录里必须有一条结果跟它的 id 对上，否则下一次请求体里那个调用悬空。
+test('a call naming a tool that is not registered is recorded against its call id', async () => {
+  const root = await mkdtemp(join(process.cwd(), 'testplace', 'kernel-'));
+  try {
+    const session = createSessionLog({ directory: root, id: 'missing' });
+    const kernel = createKernel({ session });
+    await assert.rejects(kernel.call('nope', {}, { callId: 'call_9' }), (error) => error.code === 'tool_not_found');
+    const events = await session.read();
+    assert.deepEqual(events.map((event) => [event.kind, event.callId, event.result.kind, event.result.code]), [
+      ['tool', 'call_9', 'failure', 'tool_not_found'],
+    ]);
+    assert.deepEqual(await session.modelView(), [
+      { role: 'tool', id: 'call_9', tool: 'nope', content: 'no tool named "nope" is registered for this run', failed: true, code: 'tool_not_found' },
+    ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('a tool reads the configuration snapshot and the logger from the context it is called with', async () => {
   const seen = [];
   const kernel = createKernel({
