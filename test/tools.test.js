@@ -161,9 +161,9 @@ test('the external backend and our own walk return the same hits in the same ord
   if (!existsSync(builtRipgrep)) return t.skip('no ripgrep built locally, run npm run build-rg');
   await withWorkspace(async (workspace) => {
     await writeFile(join(workspace, 'crlf.txt'), `windows line endings ${NEEDLE}\r\ntail`);
-    const both = async (args) => [
-      (await searchTool.run(args, context(workspace, undefined, { ripgrepPath: builtRipgrep }))).text,
-      (await searchTool.run(args, context(workspace))).text,
+    const both = async (args, limits) => [
+      (await searchTool.run(args, context(workspace, limits, { ripgrepPath: builtRipgrep }))).text,
+      (await searchTool.run(args, context(workspace, limits))).text,
     ];
     const [external, own] = await both({ pattern: NEEDLE });
     assert.equal(external, own);
@@ -173,6 +173,10 @@ test('the external backend and our own walk return the same hits in the same ord
       'note.txt:2:needle here',
       'src/app.js:2:second line needle here',
     ]);
+    // 命中数到上限时两边留下的标记同形，终止的方式却不一样：外部那条杀进程，遍历那条停在这一份文件里。
+    const [cappedExternal, cappedOwn] = await both({ pattern: NEEDLE }, { resultCount: 2 });
+    assert.equal(cappedExternal, cappedOwn);
+    assert.match(cappedExternal, /\[truncated: 2 matches shown and more follow, narrow the pattern]/);
     // 点名到回收站里的一个文件：那种路径外部后端不套排除项，两边都得搜到。
     const [fromTrash, walkedFromTrash] = await both({ pattern: NEEDLE, path: '.ligule-trash/gone.txt' });
     assert.equal(fromTrash, walkedFromTrash);
@@ -239,6 +243,29 @@ test('a pre-cancelled call never starts the external backend', async (t) => {
       searchTool.run({ pattern: NEEDLE }, { config: { boundary: workspace, ripgrepPath: builtRipgrep }, logger: silentLogger, signal: controller.signal }),
       { code: 'search_cancelled' },
     );
+  });
+});
+
+test('an exhausted scan budget stops the walk instead of reading every remaining file', async () => {
+  await withWorkspace(async (workspace) => {
+    const result = await searchTool.run({ pattern: NEEDLE }, context(workspace, { scanBytes: 12 }));
+    assert.equal(result.text, `(no matches)\n[incomplete: 12 bytes scanned, the rest of the tree was not read]`);
+  });
+});
+
+test('the file limit stops the walk and says the rest of the tree was not read', async () => {
+  await withWorkspace(async (workspace) => {
+    assert.match((await searchTool.run({ pattern: NEEDLE }, context(workspace, { scanFiles: 1 }))).text,
+      /\[incomplete: 1 file\(s\) scanned, the rest of the tree was not read]/);
+  });
+});
+
+test('a binary file is counted on its own and does not make the scan incomplete', async () => {
+  await withWorkspace(async (workspace) => {
+    await writeFile(join(workspace, 'data.bin'), Buffer.from(`head ${NEEDLE}\0tail`, 'utf8'));
+    const result = await searchTool.run({ pattern: NEEDLE }, context(workspace));
+    assert.doesNotMatch(result.text, /incomplete/);
+    assert.match(result.text, /\[1 binary file\(s\) skipped]/);
   });
 });
 

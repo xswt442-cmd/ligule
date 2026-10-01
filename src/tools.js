@@ -187,18 +187,23 @@ export const searchTool = {
     const hits = [];
     let scannedBytes = 0;
     let scannedFiles = 0;
-    let skipped = 0;
-    let exhausted = false;
+    let binaries = 0;
+    let stopped = '';
 
-    // 返回 false 表示命中数已经用完、不用再扫后面的文件。
+    // 返回 false 表示这一趟该停了：命中数用完，或者扫描预算见底。
     async function scan(target) {
       const file = toPosix(relative(boundary, target));
       const bytes = await readFile(target);
-      // 含零字节的按二进制对待；超过扫描预算的文件整个跳过。两者都记进最后一行的标记里，
-      // 跳过之后继续扫下一个文件。
-      if (bytes.includes(0) || scannedBytes + bytes.length > scanBytes) {
-        skipped += 1;
+      // 含零字节的按二进制对待，跳过去看下一份：外部后端那种文件也不交命中。
+      if (bytes.includes(0)) {
+        binaries += 1;
         return true;
+      }
+      // 预算按累计扫过的字节算，这一份放不下时后面的每一份都放不下，
+      // 继续读下去只是把文件一份份读进内存再丢掉。
+      if (scannedBytes + bytes.length > scanBytes) {
+        stopped = `incomplete: ${scanBytes} bytes scanned, the rest of the tree was not read`;
+        return false;
       }
       scannedBytes += bytes.length;
       // 行尾的回车属于换行符本身，不属于行的内容：外部后端也不把它交回来，两边都去掉。
@@ -206,7 +211,7 @@ export const searchTool = {
       for (let index = 0; index < lines.length; index += 1) {
         if (!lines[index].includes(args.pattern)) continue;
         if (hits.length === resultCount) {
-          exhausted = true;
+          stopped = `truncated: ${resultCount} matches shown and more follow, narrow the pattern`;
           return false;
         }
         hits.push(`${file}:${index + 1}:${lines[index]}`);
@@ -238,16 +243,17 @@ export const searchTool = {
       if (signal?.aborted) throw new KernelError('search_cancelled');
       scannedFiles += 1;
       if (scannedFiles > scanFiles) {
-        skipped += 1;
+        // 剩下没走的那一截没数过，所以标记里说「没读完」而不是报一个数不清的数。
+        stopped = `incomplete: ${scanFiles} file(s) scanned, the rest of the tree was not read`;
         break;
       }
       if (!(await scan(target))) break;
     }
 
-    const note = exhausted
-      ? marker(`truncated: ${resultCount} matches shown and more follow, narrow the pattern`)
-      : skipped > 0 ? marker(`${skipped} file(s) skipped: binary, beyond the scan budget, or the file limit`) : '';
-    return { text: (hits.length === 0 ? '(no matches)' : hits.join('\n')) + note };
+    // 标记里分开说三件事：命中数用完、扫描预算或文件数见底、跳过了几份二进制。
+    const notes = stopped === '' ? [] : [stopped];
+    if (binaries > 0) notes.push(`${binaries} binary file(s) skipped`);
+    return { text: (hits.length === 0 ? '(no matches)' : hits.join('\n')) + (notes.length === 0 ? '' : marker(notes.join('; '))) };
   },
 };
 
