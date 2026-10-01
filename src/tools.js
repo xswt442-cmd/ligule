@@ -9,6 +9,7 @@ import { KernelError } from './error.js';
 import { matchesName } from './match.js';
 import { versionOf } from './observe.js';
 import { resolveWithin } from './paths.js';
+import { resolveRecycler } from './recycle.js';
 
 // 起点值由本项目自定，配置层可以逐键覆盖；分页单位与标记措辞没有外部来源。
 export const DEFAULT_LIMITS = Object.freeze({
@@ -316,7 +317,7 @@ export const editTool = {
 
 export const deleteTool = {
   name: 'delete',
-  description: 'Move a file or directory inside the workspace boundary into the trash directory. Nothing is deleted in place.',
+  description: 'Move a file or directory inside the workspace boundary into the trash: the system recycle bin where there is one, otherwise a trash directory inside the boundary. Nothing is deleted in place.',
   parameters: {
     type: 'object',
     properties: {
@@ -324,16 +325,40 @@ export const deleteTool = {
     },
     required: ['path'],
   },
-  async run(args, { config, observations }) {
+  async run(args, { config, logger, observations }) {
     const { trashDirectory } = limitsOf(config);
     const boundary = boundaryOf(config);
     const target = await resolveWithin(boundary, args.path, { forWrite: true });
     const name = toPosix(relative(boundary, target));
     if (name === '') throw new KernelError('delete_target_is_boundary');
     if (!(await existsOrFails(target))) throw new KernelError('delete_target_missing');
+
+    // 去处由配置的 trashBackend 定：auto 是「有系统回收站就用它，没有就用项目内那个目录」，
+    // system 与 managed 各自钉死一条，钉死的那一条不成立时报错而不是悄悄换另一条。
+    const backend = config.trashBackend ?? 'auto';
+    if (backend !== 'auto' && backend !== 'system' && backend !== 'managed') {
+      throw new KernelError('delete_trash_backend_unknown', { detail: String(backend) });
+    }
+    if (backend !== 'managed') {
+      const { recycler, code } = await resolveRecycler();
+      if (recycler) {
+        try {
+          await recycler.send(target);
+          observations?.forget(target);
+          return { text: `sent ${name} to the ${recycler.name}` };
+        } catch (error) {
+          // 送不进去（例如回收站与目标不在同一个文件系统上）就回落，并把原因写进日志（I8）。
+          if (backend === 'system') throw error;
+          logger.log(`the ${recycler.name} refused this deletion, falling back to ${trashDirectory}`, { tool: 'delete', code: error.code });
+        }
+      } else if (backend === 'system') {
+        throw new KernelError(code);
+      } else {
+        logger.debug(`no system recycle bin on this platform, using ${trashDirectory}`, { tool: 'delete', code });
+      }
+    }
     await mkdir(join(boundary, trashDirectory), { recursive: true });
     // 回收站里的名字带上时间戳与一段随机后缀，避免同一毫秒内两次删除同名撞车。
-    // 回收站本身是本项目自己管的目录，换成操作系统的回收站是 U19 那一条。
     await rename(target, join(boundary, trashDirectory, `${Date.now()}-${randomUUID().slice(0, 8)}--${name.split('/').join('__')}`));
     observations?.forget(target);
     return { text: `moved ${name} into ${trashDirectory}` };

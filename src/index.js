@@ -16,6 +16,7 @@ export {
   writeTools, createTool, writeTool, editTool, deleteTool, DEFAULT_LIMITS,
 } from './tools.js';
 export { createObservationLog, versionOf } from './observe.js';
+export { resolveRecycler, windowsRecycleBin, freedesktopTrash } from './recycle.js';
 export { execTool } from './exec.js';
 export { createPromptAssembly, PROMPT_BOUNDARY } from './prompt.js';
 export { createSessionLog } from './session.js';

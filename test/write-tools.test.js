@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
-  createConfig, createKernel, createObservationLog, createTool, deleteTool, editTool, readTool, readOnlyTools,
-  writeTool, writeTools,
+  createConfig, createKernel, createObservationLog, createTool, deleteTool, editTool, freedesktopTrash, readTool,
+  readOnlyTools, resolveRecycler, writeTool, writeTools,
 } from '../src/index.js';
 
 async function withWorkspace(run) {
@@ -18,8 +18,11 @@ async function withWorkspace(run) {
   }
 }
 
-function context(workspace, limits) {
-  return { config: { boundary: workspace, limits } };
+// 日志接口与观察记录都由内核注入，这里按内核给的形状自己建一份，直接调工具。
+const silentLogger = { debug: () => {}, log: () => {} };
+
+function context(workspace, limits, extra) {
+  return { config: { boundary: workspace, limits, ...extra }, logger: silentLogger };
 }
 
 test('create writes a new file and creates the missing parent directories', async () => {
@@ -86,7 +89,7 @@ test('edit rejects a missing target, an anchor that is not there, and an anchor 
 test('delete moves the file into the trash directory instead of removing it', async () => {
   await withWorkspace(async (workspace) => {
     await writeFile(join(workspace, 'note.txt'), 'keep me');
-    assert.deepEqual(await deleteTool.run({ path: 'note.txt' }, context(workspace)), {
+    assert.deepEqual(await deleteTool.run({ path: 'note.txt' }, context(workspace, undefined, { trashBackend: 'managed' })), {
       text: 'moved note.txt into .ligule-trash',
     });
     await assert.rejects(() => readFile(join(workspace, 'note.txt'), 'utf8'), (error) => error.code === 'ENOENT');
@@ -95,6 +98,64 @@ test('delete moves the file into the trash directory instead of removing it', as
     assert.match(trashed[0], /^\d{13}-[0-9a-f]{8}--note\.txt$/);
     assert.equal(await readFile(join(workspace, '.ligule-trash', trashed[0]), 'utf8'), 'keep me');
   });
+});
+
+test('delete with the default backend takes the file out of the workspace and says where it went', async () => {
+  await withWorkspace(async (workspace) => {
+    await writeFile(join(workspace, 'note.txt'), 'keep me');
+    // 这一条走的是这台机器上真正生效的那一条后端：在 Windows 上它会送进系统回收站，
+    // 在 Linux 上送进 freedesktop 的 Trash，两者都不在断言里钉死，钉死的是「文件离开了工作区」与「交回的说法」。
+    const result = await deleteTool.run({ path: 'note.txt' }, context(workspace));
+    assert.match(result.text, /^(sent note\.txt to the (system recycle bin|freedesktop trash)|moved note\.txt into \.ligule-trash)$/);
+    await assert.rejects(() => readFile(join(workspace, 'note.txt'), 'utf8'), (error) => error.code === 'ENOENT');
+  });
+});
+
+test('an unknown trash backend is refused with a code', async () => {
+  await withWorkspace(async (workspace) => {
+    await writeFile(join(workspace, 'note.txt'), 'keep me');
+    await assert.rejects(
+      () => deleteTool.run({ path: 'note.txt' }, context(workspace, undefined, { trashBackend: 'shred' })),
+      (error) => error.code === 'delete_trash_backend_unknown',
+    );
+    assert.equal(await readFile(join(workspace, 'note.txt'), 'utf8'), 'keep me');
+  });
+});
+
+test('a platform without a backend resolves to no recycler and a stable code', async () => {
+  assert.deepEqual(await resolveRecycler('darwin'), { recycler: undefined, code: 'recycle_backend_missing' });
+});
+
+test('the freedesktop backend writes the info file the spec asks for and counts name collisions', async () => {
+  const root = await mkdtemp(join(process.cwd(), 'testplace', 'trash-'));
+  const previous = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = join(root, 'data');
+  try {
+    const workspace = join(root, 'workspace');
+    await mkdir(workspace, { recursive: true });
+    await writeFile(join(workspace, 'note.txt'), 'keep me');
+    await freedesktopTrash.probe();
+    await freedesktopTrash.send(join(workspace, 'note.txt'));
+
+    const files = join(root, 'data', 'Trash', 'files');
+    assert.equal(await readFile(join(files, 'note.txt'), 'utf8'), 'keep me');
+    const info = await readFile(join(root, 'data', 'Trash', 'info', 'note.txt.trashinfo'), 'utf8');
+    const [header, pathLine, dateLine] = info.trimEnd().split('\n');
+    assert.equal(header, '[Trash Info]');
+    assert.equal(pathLine, `Path=${join(workspace, 'note.txt').split('/').map(encodeURIComponent).join('/')}`);
+    assert.match(dateLine, /^DeletionDate=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/);
+
+    // 同名再来一次：回收站里那一份不被覆盖，新的那一份按规范往后加计数。
+    await writeFile(join(workspace, 'note.txt'), 'second');
+    await freedesktopTrash.send(join(workspace, 'note.txt'));
+    assert.deepEqual((await readdir(files)).sort(), ['note.txt', 'note.txt.1']);
+    assert.equal(await readFile(join(files, 'note.txt'), 'utf8'), 'keep me');
+    assert.equal(await readFile(join(files, 'note.txt.1'), 'utf8'), 'second');
+  } finally {
+    if (previous === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('delete refuses the boundary itself and a target that is not there', async () => {
@@ -110,10 +171,10 @@ test('delete refuses the boundary itself and a target that is not there', async 
   });
 });
 
-// 观察记录由内核注入，这里按内核给的形状自己建一份，直接调工具。
 function observed(workspace, limits) {
   const observations = createObservationLog();
-  return { config: { boundary: workspace, limits }, observations };
+  // 删除钉在项目内那个目录上：这一组测试要看的是观察记录，不该把文件送进系统回收站。
+  return { config: { boundary: workspace, limits, trashBackend: 'managed' }, logger: silentLogger, observations };
 }
 
 test('write replaces the whole content of a file observed in this run', async () => {
