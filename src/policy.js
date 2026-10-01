@@ -1,8 +1,11 @@
 // 判定链（D15、D17）：顺序固定为「按工具名的策略表 → 内容级检查 → 档位放行 → 询问用户」。
 // 整条链单调：任何一步的拒绝都不会被后一步改成放行，守卫没有「放行」这一种返回值；
 // 被前两步拦下的调用不去询问用户。
-// 命令文本的匹配第一版只按前缀与通配（D15）。自动档不放过以脚本解释器开头的命令（D17 第三条）：
-// 那条命令实际会执行任意代码，规则表写没写过它都一样，所以按命令本身判而不是按规则形态判。
+// 命令文本先按 bash 语法解析成可信的分段，规则表逐段套：任何一段命中拒绝就整条拒绝，
+// 任何一段盖不住就去询问。解析不出分段（有子集之外的构造、解析报错、解析器不可用）按无法完整处理对待。
+// 自动档不放过以脚本解释器开头的分段（D17 第三条）：那一段实际会执行任意代码，
+// 规则表写没写过它都一样，所以按分段本身判而不是按规则形态判；解释器外壳不剥。
+import { parseCommand } from './command.js';
 import { KernelError } from './error.js';
 import { matches } from './match.js';
 
@@ -16,7 +19,9 @@ const INTERPRETERS = [
 ];
 
 function commandOf(input) {
-  return typeof input === 'object' && input !== null && typeof input.command === 'string' ? input.command : undefined;
+  if (typeof input !== 'object' || input === null || typeof input.command !== 'string') return undefined;
+  // 全空白的命令没有内容可判，交给工具自己那条校验去报稳定码，不在这一层当成看不透的命令。
+  return input.command.trim() === '' ? undefined : input.command;
 }
 
 // 命令文本能不能走自动放行：第一个词是脚本解释器时不能；没有命令文本的调用（读文件一类）不受这条影响。
@@ -24,6 +29,13 @@ function canAutoApprove(command) {
   if (command === undefined) return true;
   const first = command.trim().split(/[\s;|&]+/)[0];
   return !INTERPRETERS.includes(first);
+}
+
+// 要去询问时把原因一起交出去：解析器不可用与命令里有哪种看不透的构造，界面上要说得出来（I8）。
+function askReason(parsed) {
+  if (parsed?.kind === 'unavailable') return `the command syntax parser is unavailable: ${parsed.detail}`;
+  if (parsed?.kind === 'unsupported') return `the command is not fully understood: ${parsed.construct}`;
+  return undefined;
 }
 
 // ask 是宿主交进来的询问通道，与适配器无关（内核对外接口）。没有这条通道时，需要询问的调用按拒绝处理。
@@ -73,30 +85,48 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       if (typeof tool !== 'string' || tool === '') throw new KernelError('policy_call_tool_required');
       const command = commandOf(input);
       const effective = forcedToAsk ? 'ask' : current;
+      const candidates = rules.filter((item) => item.tool === tool);
+      // 命令文本先过一次语法解析：能拆成可信的分段就逐段套规则，拆不出来就整条按无法完整处理对待。
+      const parsed = command === undefined ? undefined : parseCommand(command);
+      const segments = parsed?.kind === 'segments' ? parsed.segments : undefined;
+
       // 命中的规则里只要有拒绝就拒绝：链只能收紧，写在拒绝规则前面的放行规则不能把它压掉（I4）。
-      const matching = rules.filter((item) => item.tool === tool && matches(command, item.match));
-      const denied = matching.find((item) => item.decision === 'deny');
+      // 拒绝对整条文本与每一个分段都生效，`git status | rm x` 才拦得住。
+      const denied = candidates.find((item) => item.decision === 'deny'
+        && (matches(command, item.match) || (segments ?? []).some((segment) => matches(segment, item.match))));
       if (denied) {
         return deny('policy_denied', denied.reason ?? `${tool} is denied by policy`);
       }
-      const allowed = matching.find((item) => item.decision === 'allow');
 
       for (const check of guards) {
         const reason = check({ tool, input, command });
         if (typeof reason === 'string') return deny('guard_denied', reason);
       }
 
-      if (effective === 'auto' && canAutoApprove(command)) {
-        record(false);
-        return { decision: 'allow' };
+      const allowed = candidates.filter((item) => item.decision === 'allow');
+      let covered;
+      if (command === undefined) {
+        // 没有命令文本的调用（读文件一类）不受语法这一层影响：自动档直接放行，
+        // 逐次询问这一档仍然要有放行规则盖住它。
+        covered = effective === 'auto' || allowed.some((item) => matches(command, item.match));
+      } else if (effective === 'auto') {
+        // 自动档按语法放行：整棵树可信，而且每一段的第一个词都不是脚本解释器（D17 第三条）。
+        // 解释器外壳不因为能解析里面那个字符串就剥掉，`bash -lc "git status"` 仍然要问。
+        covered = segments !== undefined && segments.every((segment) => canAutoApprove(segment));
+      } else {
+        // 逐次询问这一档：放行规则要盖住每一个分段，解析不出分段就等于盖不住。
+        covered = segments !== undefined
+          && segments.every((segment) => allowed.some((item) => matches(segment, item.match)));
       }
-      if (effective === 'ask' && allowed) {
+      if (covered) {
         record(false);
         return { decision: 'allow' };
       }
 
-      if (typeof ask !== 'function') return deny('ask_unavailable', 'no ask channel is installed');
-      if (await ask({ tool, input, command }) !== true) return deny('ask_declined', 'the user declined');
+      // 走到这里都要问：自动档遇到看不透的命令不自动放行，只降档到逐次询问，并把原因交出去（D17、I8）。
+      const reason = askReason(parsed);
+      if (typeof ask !== 'function') return deny('ask_unavailable', reason ?? 'no ask channel is installed');
+      if (await ask({ tool, input, command, reason }) !== true) return deny('ask_declined', 'the user declined');
       record(false);
       return { decision: 'allow' };
     },

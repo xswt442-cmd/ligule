@@ -31,7 +31,7 @@ test('a denied call never reaches the user', async () => {
 test('an asked call follows the answer, and a missing channel denies', async () => {
   const yes = asked(true);
   assert.deepEqual(await createDecisionChain({ ask: yes.ask }).evaluate({ tool: 'read', input: {} }), { decision: 'allow' });
-  assert.deepEqual(yes.calls, [{ tool: 'read', input: {}, command: undefined }]);
+  assert.deepEqual(yes.calls, [{ tool: 'read', input: {}, command: undefined, reason: undefined }]);
 
   const no = asked(false);
   assert.equal((await createDecisionChain({ ask: no.ask }).evaluate({ tool: 'read', input: {} })).code, 'ask_declined');
@@ -65,6 +65,35 @@ test('a deny rule wins over an allow rule written earlier in the table', async (
   });
   assert.deepEqual(await chain.evaluate({ tool: 'exec', input: { command: 'git status' } }), { decision: 'allow' });
   assert.equal(calls.length, 0);
+});
+
+test('every segment of a pipeline has to be covered before an asked call is allowed', async () => {
+  const { calls, ask } = asked(true);
+  const chain = createDecisionChain({ rules: [{ tool: 'exec', decision: 'allow', match: 'git *' }], ask });
+  assert.deepEqual(await chain.evaluate({ tool: 'exec', input: { command: 'git status' } }), { decision: 'allow' });
+  assert.deepEqual(await chain.evaluate({ tool: 'exec', input: { command: 'git status | grep x' } }), { decision: 'allow' });
+  assert.equal(calls.length, 1, 'only the pipeline needed a decision');
+  assert.equal(calls[0].command, 'git status | grep x');
+  assert.equal(calls[0].reason, undefined);
+});
+
+test('a deny rule catches a segment hidden behind a pipe', async () => {
+  const { calls, ask } = asked(true);
+  const chain = createDecisionChain({ rules: [{ tool: 'exec', decision: 'deny', match: 'rm *' }], ask });
+  assert.equal(
+    (await chain.evaluate({ tool: 'exec', input: { command: 'git status | rm -rf /tmp/x' } })).code,
+    'policy_denied',
+  );
+  assert.equal(calls.length, 0);
+});
+
+test('a command the parser cannot fully understand is asked about, with the reason', async () => {
+  const { calls, ask } = asked(true);
+  const chain = createDecisionChain({ mode: 'auto', ask });
+  assert.deepEqual(await chain.evaluate({ tool: 'exec', input: { command: 'ls -la' } }), { decision: 'allow' });
+  assert.equal((await chain.evaluate({ tool: 'exec', input: { command: 'echo $(whoami)' } })).decision, 'allow');
+  assert.equal(calls.length, 1, 'the automatic mode does not approve what it cannot parse');
+  assert.match(calls[0].reason, /command_substitution/);
 });
 
 test('content checks still deny in the low-risk automatic mode', async () => {

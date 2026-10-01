@@ -10,6 +10,7 @@ export { loadInstructions } from './instructions.js';
 export { isWithin, resolveWithin } from './paths.js';
 export { probeBackend } from './capability.js';
 export { createDecisionChain, DEFAULT_THRESHOLDS } from './policy.js';
+export { parseCommand } from './command.js';
 export {
   readOnlyTools, readTool, findTool, searchTool,
   writeTools, createTool, writeTool, editTool, deleteTool, DEFAULT_LIMITS,

@@ -122,7 +122,7 @@ test('清单第 8 条：能力探测不出结果时报明确错误码，不静�
 });
 
 test('清单第 9 条：内核一侧不引入传输、界面与适配器，同进程直接调用跑通一轮', async () => {
-  const kernelSide = ['kernel.js', 'config.js', 'log.js', 'error.js', 'policy.js', 'schema.js', 'session.js', 'assembly.js', 'prompt.js', 'loop.js', 'match.js', 'paths.js'];
+  const kernelSide = ['kernel.js', 'config.js', 'log.js', 'error.js', 'policy.js', 'command.js', 'schema.js', 'session.js', 'assembly.js', 'prompt.js', 'loop.js', 'match.js', 'paths.js'];
   const forbidden = ['node:http', 'node:https', 'node:net', 'node:tls', 'node:dns', 'node:worker_threads', 'cli.js', 'ui', 'dom'];
   for (const file of kernelSide) {
     const specifiers = [...readFileSync(join(sourceDirectory, file), 'utf8').matchAll(/from '([^']+)'/g)].map((match) => match[1]);
