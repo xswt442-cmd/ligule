@@ -23,6 +23,32 @@ test('output beyond the limit keeps both ends and says how much is missing', asy
   assert.match(result.text, /x{20}$/);
 });
 
+// 不给标准输入：把父进程的那一个继承下去，等着读输入的命令就一直挂着，这一轮再也回不来。
+test('the command gets no readable standard input', async () => {
+  const script = "let n=0;"
+    + "process.stdin.on('data',(d)=>{n+=d.length});"
+    + "process.stdin.on('end',()=>{console.log('eof:' + n);process.exit(0)});"
+    + "setTimeout(()=>{console.log('hang');process.exit(9)},2000)";
+  const result = await run(`${node} -e ${JSON.stringify(script)}`);
+  assert.equal(result.exitCode, 0, 'the command ends on its own once the input is closed');
+  assert.match(result.text, /eof:0/);
+  assert.doesNotMatch(result.text, /hang/);
+});
+
+// 一千万字节的输出：留下的只有头尾那一页，中间那一段既不收集也不在最后整体拼一次。
+test('a large output keeps a bounded page and reports the exact arithmetic', async () => {
+  const result = await run(
+    `${node} -e ${JSON.stringify("for (let i = 0; i < 200; i++) process.stdout.write('y'.repeat(50000));")}`,
+    { execBytes: 60 },
+  );
+  assert.match(result.text, /\[truncated: 10000000 bytes total, 9999940 bytes in the middle omitted]/);
+  assert.match(result.text, /^y{30}/);
+  assert.match(result.text, /y{30}$/);
+  assert.equal(result.text.split('\n')[0], 'y'.repeat(30), 'the head is exactly the first half of the limit');
+  assert.equal(result.text.split('\n').at(-1), 'y'.repeat(30), 'the tail is the rest of the limit');
+  assert.equal(result.text.split('\n').length, 3, 'three lines: head, one notice, tail');
+});
+
 test('an abort terminates the command tree instead of waiting for it', async () => {
   const controller = new AbortController();
   const started = Date.now();
