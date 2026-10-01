@@ -42,6 +42,11 @@ jobs:
       - name: install
         run: npm ci
 
+      # 测试里那两条按真实后端做的比较读的是构建出来的那一份 ripgrep，没有就跳过。
+      # 这里先把它拉下来，两个平台的矩阵就各按自己那一份查一遍参数与输出解析。
+      - name: build the pinned ripgrep packages
+        run: npm run build-rg
+
       - name: syntax check every module
         shell: bash
         run: |
