@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createKernel, findTool, readOnlyTools, readTool, searchTool } from '../src/index.js';
 
@@ -185,6 +185,17 @@ test('the external backend gives the same text twice over', async (t) => {
   await withWorkspace(async (workspace) => {
     const run = async () => (await searchTool.run({ pattern: NEEDLE }, context(workspace, undefined, { ripgrepPath: builtRipgrep }))).text;
     assert.equal(await run(), await run());
+  });
+});
+
+// 检索的子进程要在边界里跑，配置里那个相对路径不能跟着子进程的当前目录走（本机实测：跟着走就是 ENOENT）。
+test('a relative ripgrepPath is read against the process directory, not the boundary', async (t) => {
+  if (!existsSync(builtRipgrep)) return t.skip('no ripgrep built locally, run npm run build-rg');
+  await withWorkspace(async (workspace) => {
+    const { logged, context: searchContext } = recordingContext(workspace, { ripgrepPath: relative(process.cwd(), builtRipgrep) });
+    const result = await searchTool.run({ pattern: NEEDLE }, searchContext);
+    assert.deepEqual(logged, []);
+    assert.match(result.text, /note\.txt:2:/);
   });
 });
 

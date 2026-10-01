@@ -3,6 +3,7 @@
 // 探测不到就把原因交给调用方去记日志，检索回落到 Node 自己遍历（I8 要显式报告，不静默降级）。
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { resolve } from 'node:path';
 import { KernelError } from './error.js';
 
 // 随包分发按平台分成可选依赖包，npm 只装匹配当前平台与架构的那一个。
@@ -44,7 +45,9 @@ export async function resolveRipgrep({ path, platform = process.platform, arch =
   const key = path ?? `${platform}-${arch}`;
   const cached = probed.get(key);
   if (cached !== undefined) return cached;
-  const candidate = path ?? packaged(platform, arch);
+  // 配置里写的是相对路径时，按启动这个进程的那个目录算：检索要在边界内跑，
+  // 子进程的当前目录会被换成边界，相对的可执行文件路径不能跟着它走。
+  const candidate = path === undefined ? packaged(platform, arch) : resolve(process.cwd(), path);
   const result = candidate === undefined ? { code: 'search_backend_missing' } : await probe(candidate);
   probed.set(key, result);
   return result;
