@@ -1,8 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createKernel, findTool, readOnlyTools, readTool, searchTool } from '../src/index.js';
+
+const repo = dirname(dirname(fileURLToPath(import.meta.url)));
+// npm run build-rg 生成的那一份 ripgrep。这个路径在 .gitignore 里，所以按真实后端做的比较
+// 只在本地构建过之后才跑得起来；解析与排序的那些行为没法用假的可执行文件模拟。
+const builtRipgrep = join(repo, 'packages', `rg-${process.platform}-${process.arch}`, process.platform === 'win32' ? 'rg.exe' : 'rg');
 
 const NEEDLE = 'needle here';
 
@@ -10,11 +17,19 @@ async function withWorkspace(run) {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'tools-'));
   const workspace = join(root, 'workspace');
   await mkdir(join(workspace, 'src'), { recursive: true });
-  // node_modules 里放一条同样的命中，用来证明遍历确实跳过了它。
+  // node_modules 放两处：搜索根下一层与嵌套一层，两条后端都必须按任意深度跳过它。
   await mkdir(join(workspace, 'node_modules', 'pkg'), { recursive: true });
+  await mkdir(join(workspace, 'src', 'node_modules', 'pkg'), { recursive: true });
+  // 隐藏目录要搜得到：配置写在 .github/ 这类目录里，跳过整棵子树等于看不见。
+  await mkdir(join(workspace, '.github', 'workflows'), { recursive: true });
+  // 回收站那个目录反过来：删掉的东西不能再以第二次命中出现。
+  await mkdir(join(workspace, '.ligule-trash'), { recursive: true });
   await writeFile(join(workspace, 'note.txt'), `line one\n${NEEDLE}\nline three`);
   await writeFile(join(workspace, 'src', 'app.js'), `const a = 'unused';\nsecond line ${NEEDLE}`);
+  await writeFile(join(workspace, 'src', 'node_modules', 'pkg', 'deep.js'), `${NEEDLE} at depth`);
   await writeFile(join(workspace, 'node_modules', 'pkg', 'index.js'), `${NEEDLE} but skipped`);
+  await writeFile(join(workspace, '.ligule-trash', 'gone.txt'), `${NEEDLE} already deleted`);
+  await writeFile(join(workspace, '.github', 'workflows', 'ci.yml'), `name: ${NEEDLE}`);
   try {
     return await run(workspace);
   } finally {
@@ -69,16 +84,17 @@ test('find returns sorted relative paths and honours the pattern kinds', async (
 test('find stops at the result limit and says more matches follow', async () => {
   await withWorkspace(async (workspace) => {
     const result = await findTool.run({ pattern: '**' }, context(workspace, { resultCount: 1 }));
-    assert.equal(result.text.split('\n')[0], 'note.txt');
+    assert.equal(result.text.split('\n')[0], '.github/workflows/ci.yml');
     assert.match(result.text, /\[truncated: 1 matches shown and more follow, narrow the pattern]/);
   });
 });
 
-test('search reports file, line and text, and does not walk into node_modules', async () => {
+test('search skips node_modules at any depth and the trash directory, but not hidden ones', async () => {
   await withWorkspace(async (workspace) => {
     const result = await searchTool.run({ pattern: NEEDLE }, context(workspace));
     assert.deepEqual(result.text.split('\n'), [
-      `note.txt:2:${NEEDLE}`,
+      '.github/workflows/ci.yml:1:name: needle here',
+      'note.txt:2:needle here',
       'src/app.js:2:second line needle here',
     ]);
   });
@@ -115,7 +131,8 @@ test('search walks the tree itself when no external backend is there, and says w
     const { logged, context: searchContext } = recordingContext(workspace);
     const result = await searchTool.run({ pattern: NEEDLE }, searchContext);
     assert.deepEqual(result.text.split('\n'), [
-      `note.txt:2:${NEEDLE}`,
+      '.github/workflows/ci.yml:1:name: needle here',
+      'note.txt:2:needle here',
       'src/app.js:2:second line needle here',
     ]);
     assert.equal(logged.length, 1);
@@ -123,11 +140,59 @@ test('search walks the tree itself when no external backend is there, and says w
   });
 });
 
+test('search with no hit says so instead of returning empty text', async () => {
+  await withWorkspace(async (workspace) => {
+    assert.equal((await searchTool.run({ pattern: 'absent string' }, context(workspace))).text, '(no matches)');
+  });
+});
+
+test('search of an explicit file inside a skipped directory still reads that file', async () => {
+  await withWorkspace(async (workspace) => {
+    assert.equal(
+      (await searchTool.run({ pattern: NEEDLE, path: '.ligule-trash/gone.txt' }, context(workspace))).text,
+      '.ligule-trash/gone.txt:1:needle here already deleted',
+    );
+  });
+});
+
+// 换后端不换行为（D18）：命中行与顺序都要相同。这里没有二进制文件，所以两边连最后一行的
+// 跳过标记都不该出现——那条标记只属于自己遍历那一条，它知道自己跳过了什么，外部后端不交这个数。
+test('the external backend and our own walk return the same hits in the same order', async (t) => {
+  if (!existsSync(builtRipgrep)) return t.skip('no ripgrep built locally, run npm run build-rg');
+  await withWorkspace(async (workspace) => {
+    await writeFile(join(workspace, 'crlf.txt'), `windows line endings ${NEEDLE}\r\ntail`);
+    const both = async (args) => [
+      (await searchTool.run(args, context(workspace, undefined, { ripgrepPath: builtRipgrep }))).text,
+      (await searchTool.run(args, context(workspace))).text,
+    ];
+    const [external, own] = await both({ pattern: NEEDLE });
+    assert.equal(external, own);
+    assert.deepEqual(external.split('\n'), [
+      '.github/workflows/ci.yml:1:name: needle here',
+      'crlf.txt:1:windows line endings needle here',
+      'note.txt:2:needle here',
+      'src/app.js:2:second line needle here',
+    ]);
+    // 点名到回收站里的一个文件：那种路径外部后端不套排除项，两边都得搜到。
+    const [fromTrash, walkedFromTrash] = await both({ pattern: NEEDLE, path: '.ligule-trash/gone.txt' });
+    assert.equal(fromTrash, walkedFromTrash);
+    assert.match(fromTrash, /gone\.txt:1:/);
+  });
+});
+
+test('the external backend gives the same text twice over', async (t) => {
+  if (!existsSync(builtRipgrep)) return t.skip('no ripgrep built locally, run npm run build-rg');
+  await withWorkspace(async (workspace) => {
+    const run = async () => (await searchTool.run({ pattern: NEEDLE }, context(workspace, undefined, { ripgrepPath: builtRipgrep }))).text;
+    assert.equal(await run(), await run());
+  });
+});
+
 test('a configured ripgrep that cannot run is reported and search still returns hits', async () => {
   await withWorkspace(async (workspace) => {
     const { logged, context: searchContext } = recordingContext(workspace, { ripgrepPath: join(workspace, 'no-such-rg') });
     const result = await searchTool.run({ pattern: NEEDLE }, searchContext);
-    assert.match(result.text, /^note\.txt:2:/);
+    assert.match(result.text, /note\.txt:2:needle here/);
     assert.equal(logged.length, 1);
     assert.equal(logged[0].code, 'search_backend_failed');
     assert.ok(logged[0].detail !== undefined);

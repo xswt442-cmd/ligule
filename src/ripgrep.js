@@ -63,11 +63,19 @@ function normalize(line) {
   return `${path.replace(/^\.\//, '')}:${match[2]}:${match[3]}`;
 }
 
-export function searchWithRipgrep({ executable, boundary, target = '.', pattern, limit, signal }) {
+export function searchWithRipgrep({ executable, boundary, target = '.', pattern, limit, excludes = [], signal }) {
   return new Promise((resolve, reject) => {
+    // `--no-config` 挡住宿主环境里的 RIPGREP_CONFIG_PATH 与二进制旁边的 rg.conf：
+    // 那份配置能塞进 `--pre`，等于让每次检索都执行一个外人指定的程序。
+    // 排除项每个名字写两条：`!**/node_modules` 让遍历根本不进这个目录，
+    // `!**/node_modules/**` 管的是搜索目标本身落在里面时的情况，那一条前一种匹配不到。
+    // 不带 `**/` 的 `!node_modules/**` 只排得掉搜索根下那一层，嵌套的 a/node_modules 还能命中；
+    // 加了才与 Node 遍历「任意深度都跳过」一致（本机 ripgrep 15.2.0 实测）。
+    // 默认多线程，命中顺序两次运行就不一样；`--sort path` 按路径排序，才守住同一输入同一输出。
     const child = spawn(executable, [
-      '--no-ignore', '--no-heading', '--with-filename', '--line-number', '--fixed-strings',
-      '--glob', '!node_modules/**', '--glob', '!.git/**',
+      '--no-config', '--no-ignore', '--hidden', '--no-heading', '--with-filename', '--line-number',
+      '--fixed-strings', '--sort', 'path',
+      ...excludes.flatMap((name) => ['--glob', `!**/${name}`, '--glob', `!**/${name}/**`]),
       '--', pattern, target,
     ], { cwd: boundary, windowsHide: true, signal });
     const hits = [];

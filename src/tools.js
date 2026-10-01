@@ -25,6 +25,12 @@ export const DEFAULT_LIMITS = Object.freeze({
 // 遍历跳过这些目录：它们的内容不是要找的东西，扫过去只会把上限用光。
 const SKIPPED_DIRECTORIES = ['node_modules', '.git'];
 
+// 回收站那个目录也在跳过之列：隐藏目录现在搜得到，删掉的东西不该再以第二次命中出现。
+// 名字可以由配置改，所以两条后端都得从配置取，不能写死。
+function skippedDirectories(config) {
+  return [...SKIPPED_DIRECTORIES, limitsOf(config).trashDirectory];
+}
+
 export function boundaryOf(config) {
   if (typeof config.boundary !== 'string' || config.boundary === '') throw new KernelError('boundary_required');
   return config.boundary;
@@ -42,22 +48,26 @@ function marker(detail) {
   return `\n[${detail}]`;
 }
 
-// 深度优先遍历边界内的文件，交出相对边界、用斜杠书写的路径。目录项按名字排序，
-// 这样同一份文件树两次扫出来的顺序一样，截断时留下的那一截也一样。
-async function* walkFiles(root) {
-  const stack = [root];
-  while (stack.length > 0) {
-    const directory = stack.pop();
-    const entries = (await readdir(directory, { withFileTypes: true })).sort((left, right) => (left.name < right.name ? -1 : 1));
-    for (const entry of entries) {
-      const full = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        if (!SKIPPED_DIRECTORIES.includes(entry.name) && !entry.name.startsWith('.')) stack.push(full);
-      } else if (entry.isFile()) {
-        yield toPosix(relative(root, full));
-      }
+// 深度优先遍历边界内的文件，交出相对边界、用斜杠书写的路径。
+// 排序把目录名后面补一个斜杠再比，于是文件与子目录按路径的字典序交错出现：
+// `src.txt` 排在 `src/app.js` 前面，与外部后端按路径排序那一条一样。
+// 顺序固定下来，同一份文件树两次扫出来的结果与截断时留下的那一截才相同。
+// 跳过的目录由调用方给，遍历只负责按上面的顺序走。
+async function* walkFiles(root, skipped, directory = root) {
+  const entries = await readdir(directory, { withFileTypes: true });
+  entries.sort((left, right) => (orderKey(left) < orderKey(right) ? -1 : 1));
+  for (const entry of entries) {
+    const full = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      if (!skipped.includes(entry.name)) yield* walkFiles(root, skipped, full);
+    } else if (entry.isFile()) {
+      yield toPosix(relative(root, full));
     }
   }
+}
+
+function orderKey(entry) {
+  return entry.isDirectory() ? `${entry.name}/` : entry.name;
 }
 
 export const readTool = {
@@ -115,7 +125,7 @@ export const findTool = {
     if (await kindOfTarget(root) !== 'directory') throw new KernelError('find_path_not_directory');
     const names = [];
     let scanned = 0;
-    for await (const name of walkFiles(root)) {
+    for await (const name of walkFiles(root, skippedDirectories(config))) {
       scanned += 1;
       if (!matchesName(name, args.pattern)) continue;
       if (names.length === resultCount) {
@@ -149,16 +159,21 @@ export const searchTool = {
     // 探测不到就回落到自己遍历，回落的原因写进日志（I8）。
     const backend = await resolveRipgrep({ path: config.ripgrepPath });
     if (backend.executable !== undefined) {
-      const target = args.path === undefined
-        ? '.'
-        : toPosix(relative(boundary, await resolveWithin(boundary, args.path)));
+      // 目标要先判存在：ripgrep 对着不存在的路径以自己的退出码报错，
+      // 那条路走会交出一个说「后端故障」的码，而回落那条给的是 path_not_found。
+      const root = args.path === undefined ? boundary : await resolveWithin(boundary, args.path);
+      if (args.path !== undefined) await kindOfTarget(root);
       const found = await searchWithRipgrep({
-        executable: backend.executable, boundary, target, pattern: args.pattern, limit: resultCount,
+        executable: backend.executable,
+        boundary,
+        target: toPosix(relative(boundary, root)) || '.',
+        pattern: args.pattern,
+        limit: resultCount,
+        excludes: skippedDirectories(config),
       });
       return {
-        text: found.hits.join('\n') + (found.truncated
-          ? marker(`truncated: ${resultCount} matches shown and more follow, narrow the pattern`)
-          : ''),
+        text: (found.hits.length === 0 ? '(no matches)' : found.hits.join('\n'))
+          + (found.truncated ? marker(`truncated: ${resultCount} matches shown and more follow, narrow the pattern`) : ''),
       };
     }
     logger.debug('ripgrep is not available, walking the tree instead', { tool: 'search', code: backend.code, detail: backend.detail });
@@ -180,7 +195,8 @@ export const searchTool = {
         return true;
       }
       scannedBytes += bytes.length;
-      const lines = bytes.toString('utf8').split('\n');
+      // 行尾的回车属于换行符本身，不属于行的内容：外部后端也不把它交回来，两边都去掉。
+      const lines = bytes.toString('utf8').split('\n').map((line) => line.replace(/\r$/, ''));
       for (let index = 0; index < lines.length; index += 1) {
         if (!lines[index].includes(args.pattern)) continue;
         if (hits.length === resultCount) {
@@ -195,16 +211,21 @@ export const searchTool = {
     // 描述里写的「文件或子目录」两种都成立：给定 path 时按它实际是哪种分派，
     // 把目录当文件读会抛原始的 EISDIR，没有稳定码。
     async function* candidates() {
+      const skipped = skippedDirectories(config);
       if (args.path === undefined) {
-        for await (const file of walkFiles(boundary)) yield join(boundary, file);
+        for await (const file of walkFiles(boundary, skipped)) yield join(boundary, file);
         return;
       }
       const root = await resolveWithin(boundary, args.path);
       if (await kindOfTarget(root) === 'file') {
+        // 点名到文件就搜这一个文件：外部后端对显式给出的文件不套排除项，两边要一样。
         yield root;
         return;
       }
-      for await (const file of walkFiles(root)) yield join(root, file);
+      // 点名到目录时，落在跳过的那几棵里面就不搜——外部后端那种情况下也不交命中，
+      // 因为它按相对边界的路径套排除项。要读那些路径里的文件用 `read`。
+      if (toPosix(relative(boundary, root)).split('/').some((part) => skipped.includes(part))) return;
+      for await (const file of walkFiles(root, skipped)) yield join(root, file);
     }
 
     for await (const target of candidates()) {
@@ -219,7 +240,7 @@ export const searchTool = {
     const note = exhausted
       ? marker(`truncated: ${resultCount} matches shown and more follow, narrow the pattern`)
       : skipped > 0 ? marker(`${skipped} file(s) skipped: binary, beyond the scan budget, or the file limit`) : '';
-    return { text: hits.join('\n') + note };
+    return { text: (hits.length === 0 ? '(no matches)' : hits.join('\n')) + note };
   },
 };
 
