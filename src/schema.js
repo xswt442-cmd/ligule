@@ -39,8 +39,21 @@ export function assertSupportedSchema(schema) {
       if (leaf.description !== undefined && typeof leaf.description !== 'string') {
         violations.push(`${name}.description must be a string`);
       }
+      // 上下界只在数值类型上校验得了。D14 定的判据是「内核不校验的构造等于承诺一件做不到的事」，
+      // 所以字符串上的 minimum 要在注册期就指名拒掉，而不是收下之后默默不生效；
+      // 非有限的界值同样生效不了（任何数与 NaN 比都小于 false）。
       for (const bound of ['minimum', 'maximum']) {
-        if (leaf[bound] !== undefined && typeof leaf[bound] !== 'number') violations.push(`${name}.${bound} must be a number`);
+        if (leaf[bound] === undefined) continue;
+        if (typeof leaf[bound] !== 'number' || !Number.isFinite(leaf[bound])) {
+          violations.push(`${name}.${bound} must be a finite number`);
+        } else if (!NUMBER_TYPES.includes(leaf.type)) {
+          violations.push(`${name}.${bound} needs type integer or number`);
+        }
+      }
+      if (NUMBER_TYPES.includes(leaf.type) && leaf.minimum !== undefined && leaf.maximum !== undefined
+        && Number.isFinite(leaf.minimum) && Number.isFinite(leaf.maximum) && leaf.minimum > leaf.maximum) {
+        // 反过来的一对界值会让这个参数无解：那是写错了模式，当场说清楚比每次调用都拒更好。
+        violations.push(`${name} has minimum above maximum`);
       }
     }
   }

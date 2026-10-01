@@ -104,7 +104,35 @@ test('a parameter schema outside the supported subset fails at registration and 
     () => kernel.register(makeTool('read', { parameters: { type: 'object', properties: {}, required: ['path'] } })),
     (error) => error.detail.includes('required names "path" which is not in properties'),
   );
+  // 上下界只在数值类型上校验得了：写在字符串上就是一句内核不会兑现的承诺（D14）。
+  assert.throws(
+    () => kernel.register(makeTool('read', {
+      parameters: { type: 'object', properties: { path: { type: 'string', minimum: 1 } } },
+    })),
+    (error) => error.code === 'tool_parameters_unsupported_construct' && error.detail.includes('path.minimum needs type integer or number'),
+  );
+  assert.throws(
+    () => kernel.register(makeTool('read', {
+      parameters: { type: 'object', properties: { n: { type: 'number', maximum: Number.NaN } } },
+    })),
+    (error) => error.detail.includes('n.maximum must be a finite number'),
+  );
+  assert.throws(
+    () => kernel.register(makeTool('read', {
+      parameters: { type: 'object', properties: { n: { type: 'integer', minimum: 10, maximum: 1 } } },
+    })),
+    (error) => error.detail.includes('n has minimum above maximum'),
+  );
   assert.deepEqual(kernel.list(), []);
+});
+
+test('a numeric bound on a numeric parameter registers and is enforced per call', async () => {
+  const kernel = createKernel();
+  kernel.register(makeTool('read', { parameters: { type: 'object', properties: { n: { type: 'integer', minimum: 1, maximum: 3 } }, required: ['n'] } }));
+  assert.deepEqual(kernel.manifest().map((tool) => tool.name), ['read']);
+  await assert.rejects(() => kernel.call('read', { n: 0 }), (error) => error.code === 'tool_args_invalid');
+  await assert.rejects(() => kernel.call('read', { n: 4 }), (error) => error.code === 'tool_args_invalid');
+  assert.equal(await kernel.call('read', { n: 2 }), 'ok');
 });
 
 test('a call whose arguments do not match the schema fails before the decision chain and is recorded', async () => {
