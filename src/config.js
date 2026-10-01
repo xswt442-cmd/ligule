@@ -11,7 +11,8 @@ function isPlainObject(value) {
 
 // 嵌套对象按键逐个合，数组与标量整份替换：一层写的是「局部覆盖」，
 // 逐项合并数组会把两层的列表接成一条谁都没写过的列表。
-function mergeInto(target, source) {
+// 装载侧合并同一层里的多条命令行覆盖时用的是同一个函数，两处语义不会走岔。
+export function mergeInto(target, source) {
   for (const [key, value] of Object.entries(source)) {
     if (isPlainObject(value) && isPlainObject(target[key])) mergeInto(target[key], value);
     else target[key] = structuredClone(value);

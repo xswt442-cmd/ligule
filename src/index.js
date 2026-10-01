@@ -1,6 +1,7 @@
 export { createKernel } from './kernel.js';
 export { KernelError, KernelRuntimeError } from './error.js';
 export { createConfig, LAYER_ORDER } from './config.js';
+export { loadConfigLayers, flagLayer, configPaths } from './config-file.js';
 export { createLogger } from './log.js';
 export { loadAssembly } from './assembly.js';
 export { minimalTools, minimalPlugin } from './minimal.js';
