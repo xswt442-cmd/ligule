@@ -3,8 +3,8 @@
 // 每一层的内容都是注入给模型的，所以整段受 I6 的字节上限约束，超限时在末尾留下一行看得见的说明。
 import { readFile, realpath } from 'node:fs/promises';
 import { dirname, join, relative, resolve, sep } from 'node:path';
-import { KernelError } from './error.js';
-import { matchesName } from './match.js';
+import { KernelError } from '../kernel/error.js';
+import { matchesName } from '../kernel/match.js';
 import { isWithin } from './paths.js';
 
 const FILE_NAME = 'AGENTS.md';

@@ -2,7 +2,7 @@
 // 服务地址属于普通配置，凭据只从环境变量读；能力上限由提供方声明，配置只能把它调低。
 // 流式接收期间就开始拼装工具调用：增量到的 JSON 片段先积在块上，块一关就解析成一次调用交出去。
 import { setTimeout as sleep } from 'node:timers/promises';
-import { KernelError } from './error.js';
+import { KernelError } from '../kernel/error.js';
 
 // 重试边界照 Codex 的 RetryPolicy 那三条可重试类别：429、5xx、传输。请求构造错误与响应内容不可解析永不重试。
 // 默认值是本项目自定的起点，配置层可以覆盖。

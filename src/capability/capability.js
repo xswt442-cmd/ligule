@@ -1,8 +1,8 @@
 // 后端能力探测：每个后端自带一个探测函数，强制程度由实测得出（I8、D18）。
 // 探测不出结果时返回稳定错误码并把强制程度报成 none：报「没有约束」是可以被调用方处置的，
 // 看起来受控而实际没有约束不是。底层的异常文本进日志，返回体只带错误码（D19）。
-import { KernelError } from './error.js';
-import { createLogger } from './log.js';
+import { KernelError } from '../kernel/error.js';
+import { createLogger } from '../kernel/log.js';
 
 const LEVELS = ['full', 'partial', 'none'];
 

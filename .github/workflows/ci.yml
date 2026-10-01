@@ -51,7 +51,7 @@ jobs:
         shell: bash
         run: |
           set -e
-          for f in src/*.js scripts/*.js test/*.js; do node --check "$f"; done
+          for f in $(find src scripts test -name '*.js'); do node --check "$f"; done
 
       - name: test
         run: npm test

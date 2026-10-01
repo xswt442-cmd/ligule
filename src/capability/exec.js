@@ -2,9 +2,9 @@
 // 在 POSIX 上把孩子放进自己的进程组、终止整组。两条路的实测结论与还没定的那条路线见 todo.md U1。
 // 取消由调用方交进来的 signal 触发（D20 的取消边界）；本工具不做超时，超时没有进契约（D29）。
 import { execFileSync, spawn } from 'node:child_process';
-import { KernelError } from './error.js';
+import { KernelError } from '../kernel/error.js';
 import { resolveWithin } from './paths.js';
-import { boundaryOf, limitsOf } from './tools.js';
+import { boundaryOf, limitsOf } from '../tools/tools.js';
 
 // 命令输出的上限按头尾各留一半：输出的结论常在末尾，只留头部会把失败原因截掉。
 // 头部留满一半，尾部只留最近的上限那么多字节，中间那一段的字节数算进标记里，

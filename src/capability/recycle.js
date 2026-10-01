@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import { access, constants, mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
-import { KernelError } from './error.js';
+import { KernelError } from '../kernel/error.js';
 
 // 交给 powershell 的目标路径走环境变量，不拼进命令文本：路径里带引号或分号也构不成第二条命令。
 const SEND_COMMAND = [

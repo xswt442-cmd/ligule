@@ -2,11 +2,11 @@
 // CLI 适配器：与内核同进程直接调用，不起端口（D23、实现顺序第 13 步）。
 // 它自己不持有任何能力：装载的是那份显式的最小清单，内核一件工具都没有（I1）。
 import { readFileSync } from 'node:fs';
-import { createConfig } from './config.js';
-import { loadConfigLayers } from './config-file.js';
-import { createKernel } from './kernel.js';
-import { loadAssembly } from './assembly.js';
-import { minimalPlugin } from './minimal.js';
+import { createConfig } from './kernel/config.js';
+import { loadConfigLayers } from './kernel/config-file.js';
+import { createKernel } from './kernel/kernel.js';
+import { loadAssembly } from './kernel/assembly.js';
+import { minimalPlugin } from './tools/minimal.js';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 

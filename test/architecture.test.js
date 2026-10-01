@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import {
@@ -122,12 +122,16 @@ test('清单第 8 条：能力探测不出结果时报明确错误码，不静�
 });
 
 test('清单第 9 条：内核一侧不引入传输、界面与适配器，同进程直接调用跑通一轮', async () => {
-  const kernelSide = ['kernel.js', 'config.js', 'log.js', 'error.js', 'policy.js', 'command.js', 'schema.js', 'session.js', 'assembly.js', 'prompt.js', 'loop.js', 'match.js', 'paths.js'];
+  // 按目录扫，不写文件清单：搬进这几个目录的新文件自动就在检查范围内。
+  // kernel 是工具表与判定链本体，session 是会话记录，model 之外两侧都不该碰传输与界面（部件表与 D18 的分工）。
+  const pureDirectories = ['kernel', 'session'];
   const forbidden = ['node:http', 'node:https', 'node:net', 'node:tls', 'node:dns', 'node:worker_threads', 'cli.js', 'ui', 'dom'];
-  for (const file of kernelSide) {
-    const specifiers = [...readFileSync(join(sourceDirectory, file), 'utf8').matchAll(/from '([^']+)'/g)].map((match) => match[1]);
-    for (const specifier of specifiers) {
-      assert.ok(!forbidden.some((entry) => specifier.includes(entry)), `${file} imports ${specifier}`);
+  for (const directory of pureDirectories) {
+    for (const file of readdirSync(join(sourceDirectory, directory))) {
+      const specifiers = [...readFileSync(join(sourceDirectory, directory, file), 'utf8').matchAll(/from '([^']+)'/g)].map((match) => match[1]);
+      for (const specifier of specifiers) {
+        assert.ok(!forbidden.some((entry) => specifier.includes(entry)), `${directory}/${file} imports ${specifier}`);
+      }
     }
   }
   const kernel = createKernel();

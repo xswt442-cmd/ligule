@@ -5,7 +5,7 @@
 // 任何一段盖不住就去询问。解析不出分段（有子集之外的构造、解析报错、解析器不可用）按无法完整处理对待。
 // 自动档不放过以脚本解释器开头的分段（D17 第三条）：那一段实际会执行任意代码，
 // 规则表写没写过它都一样，所以按分段本身判而不是按规则形态判；解释器外壳不剥。
-import { parseCommand } from './command.js';
+import { parseCommand } from '../capability/command.js';
 import { KernelError } from './error.js';
 import { matches } from './match.js';
 

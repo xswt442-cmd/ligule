@@ -5,12 +5,12 @@
 import { mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname, join, relative, sep } from 'node:path';
-import { KernelError } from './error.js';
-import { matchesName } from './match.js';
-import { versionOf } from './observe.js';
-import { resolveWithin } from './paths.js';
-import { resolveRecycler } from './recycle.js';
-import { resolveRipgrep, searchWithRipgrep } from './ripgrep.js';
+import { KernelError } from '../kernel/error.js';
+import { matchesName } from '../kernel/match.js';
+import { versionOf } from '../session/observe.js';
+import { resolveWithin } from '../capability/paths.js';
+import { resolveRecycler } from '../capability/recycle.js';
+import { resolveRipgrep, searchWithRipgrep } from '../capability/ripgrep.js';
 
 // 起点值由本项目自定，配置层可以逐键覆盖；分页单位与标记措辞没有外部来源。
 export const DEFAULT_LIMITS = Object.freeze({

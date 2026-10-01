@@ -4,7 +4,7 @@
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
-import { KernelError } from './error.js';
+import { KernelError } from '../kernel/error.js';
 
 // 随包分发按平台分成可选依赖包，npm 只装匹配当前平台与架构的那一个。
 const PACKAGES = {

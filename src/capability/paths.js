@@ -3,7 +3,7 @@
 // 这里只做判断，不做约束：真正的文件与进程约束由能力提供者的后端负责（D18）。
 import { realpath, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
-import { KernelError } from './error.js';
+import { KernelError } from '../kernel/error.js';
 
 const UP = `..${sep}`;
 

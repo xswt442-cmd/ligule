@@ -3,7 +3,7 @@
 // 读写失败都是内核自身的故障（KernelRuntimeError）：记录已经不可信，循环要停住，不当成工具没做成那一类。
 import { mkdir, open, readFile, truncate } from 'node:fs/promises';
 import { join } from 'node:path';
-import { KernelError, KernelRuntimeError } from './error.js';
+import { KernelError, KernelRuntimeError } from '../kernel/error.js';
 
 export function createSessionLog({ directory, id }) {
   if (typeof directory !== 'string' || directory === '') throw new KernelError('session_directory_required');
