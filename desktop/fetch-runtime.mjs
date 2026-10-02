@@ -1,5 +1,5 @@
 // 桌面壳的自包含运行时（D34）：安装包要能装到没有这份仓库的机器上就跑起来，
-// 所以随包带两样东西——一份钉住版本的 Node，和 ligule 自己的运行时树（src 加它需要的依赖）。
+// 所以随包带两样东西——一份钉住版本的 Node，和 ligule 自己的运行时树（构建出来的 dist 加它需要的依赖）。
 // 与 `scripts/build-rg-packages.js` 同一种做法：版本与校验和写在 pin 文件里，下载后先核对再放进目录。
 // 用法：node desktop/fetch-runtime.mjs [--force]
 import { createHash } from 'node:crypto';
@@ -99,9 +99,13 @@ async function copyTree(from, to) {
 
 async function fetchAppTree() {
   const app = join(vendor, 'app');
+  // 运行时树是构建产物：没有就先构建，不要交出一份装得上、起不来的安装包。
+  if (!existsSync(join(root, 'dist', 'cli.js'))) {
+    throw new Error('dist/cli.js is missing; run npm run build before vendoring the runtime tree');
+  }
   await rm(app, { recursive: true, force: true });
   await mkdir(join(app, 'node_modules'), { recursive: true });
-  await copyTree(join(root, 'src'), join(app, 'src'));
+  await copyTree(join(root, 'dist'), join(app, 'dist'));
   await copyFile(join(root, 'package.json'), join(app, 'package.json'));
   await copyFile(join(root, 'LICENSE'), join(app, 'LICENSE'));
   for (const name of productionPackages()) {
@@ -119,7 +123,7 @@ async function countFiles(directory) {
   return total;
 }
 
-const existing = await stat(join(vendor, 'app', 'src', 'cli.js')).catch(() => null);
+const existing = await stat(join(vendor, 'app', 'dist', 'cli.js')).catch(() => null);
 if (existing !== null && !force && Date.now() - existing.mtimeMs < 4 * 60 * 60 * 1000) {
   console.log('runtime tree already vendored (use --force to redo)');
 } else {
