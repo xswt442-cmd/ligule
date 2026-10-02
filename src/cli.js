@@ -197,7 +197,7 @@ if (missingFlagValue) {
   console.log(`ligule ${pkg.version} - under development, do not depend on it.`);
   console.log('commands: tools, run <text>, call <tool> [json-args], host, --version');
   console.log('options: --config <key.path=value> (repeatable)');
-  console.log('run and host read model.baseURL and model.model from the config layers; the key comes from LIGULE_API_KEY');
+  console.log('run and host read model.api ("messages" or "chat-completions"), model.baseURL and model.model from the config layers; the key comes from LIGULE_API_KEY');
 } else {
   // 打错的命令不该走帮助文本再退出 0：调用方是个脚本时，0 加一段帮助就是一次成功。
   printFailure('cli_command_unknown', `"${command}" is not a command; run ligule --help to list them`);

@@ -27,8 +27,12 @@ export {
 export { createConnection } from './host/connection.js';
 export { createHost, serveHost, providerFromConfig } from './host/host.js';
 export {
-  createMessagesProvider, capabilitiesOf, MESSAGES_CAPABILITIES, DEFAULT_RETRY,
-} from './model/provider.js';
+  createMessagesProvider, capabilitiesOf, MESSAGES_CAPABILITIES,
+} from './model/messages.js';
+export {
+  createChatCompletionsProvider, chatCompletionsCapabilities, CHAT_COMPLETIONS_CAPABILITIES,
+} from './model/chat-completions.js';
+export { DEFAULT_RETRY } from './model/http.js';
 export { resultOf, failureOf, refusalOf, spillContent, resultLimit, DEFAULT_RESULT_BYTES } from './kernel/result.js';
 
 // 与 package.json#version 保持一致，test/kernel.test.js 断言这一点。

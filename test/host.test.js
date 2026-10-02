@@ -10,7 +10,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { createConnection, METHODS, NOTIFICATIONS } from '../src/index.js';
+import { createConnection, createConfig, MESSAGES_CAPABILITIES, METHODS, NOTIFICATIONS, providerFromConfig } from '../src/index.js';
 
 const CLI = fileURLToPath(new URL('../src/cli.js', import.meta.url));
 
@@ -56,6 +56,7 @@ async function withEndpoint(run) {
 function startHost(directory, baseUrl) {
   const child = spawn(process.execPath, [
     CLI, 'host',
+    '--config', 'model.api="messages"',
     '--config', `model.baseURL="${baseUrl}"`,
     '--config', 'model.model="test-model"',
     '--config', 'policy.mode="ask"',
@@ -234,6 +235,7 @@ async function runCli(directory, answer) {
   return withEndpoint(async (baseUrl, requests) => {
     const child = spawn(process.execPath, [
       CLI, 'run', 'read the note',
+      '--config', 'model.api="messages"',
       '--config', `model.baseURL="${baseUrl}"`,
       '--config', 'model.model="test-model"',
       '--config', 'policy.mode="ask"',
@@ -294,6 +296,62 @@ test('ligule run with nobody answering the prompt declines the tool and still fi
     assert.match(outcome.stderr, /2 iterations, 2 model calls/);
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('the model section can lower the declared capability limits but never raise them', () => {
+  // 配置快照由层折出来，所以这里给的是一层里的 model 段，与 `--config model.baseURL=...` 走到同一处。
+  const model = (extra) => createConfig({ user: { model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model', ...extra } } });
+
+  assert.deepEqual(providerFromConfig(model()).capabilities, MESSAGES_CAPABILITIES);
+
+  const lowered = providerFromConfig(model({ capabilities: { maxOutputTokens: 1024, streaming: false } })).capabilities;
+  assert.equal(lowered.maxOutputTokens, 1024, 'a smaller declared number is taken');
+  assert.equal(lowered.streaming, false, 'a declared capability can be switched off');
+  assert.equal(lowered.parallelToolCalls, false, 'switching one off does not turn another on');
+
+  const raised = providerFromConfig(model({ capabilities: { maxOutputTokens: 99999, parallelToolCalls: true } })).capabilities;
+  assert.equal(raised.maxOutputTokens, MESSAGES_CAPABILITIES.maxOutputTokens, 'config cannot raise a limit');
+  assert.equal(raised.parallelToolCalls, false, 'config cannot grant an undeclared capability');
+
+  assert.throws(
+    () => providerFromConfig(model({ capabilities: { vision: true } })),
+    (error) => error.code === 'provider_capability_unknown',
+  );
+});
+
+test('a malformed retry block in the config is refused instead of quietly disabling retries', () => {
+  // 只写一项的块要能补上其余的默认值：非整数的 maxAttempts 让「第几次了」比不出大小，
+  // 于是每次传输失败都悄悄变成不重试，而看不出为什么不重试。
+  assert.doesNotThrow(() => providerFromConfig(createConfig({
+    user: { model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model', retry: { maxAttempts: 5 } } },
+  })));
+
+  for (const bad of [{ maxAttempts: '5' }, { maxAttempts: 0 }, { baseDelayMs: 1.5 }, { retry429: 'yes' }]) {
+    assert.throws(
+      () => providerFromConfig(createConfig({
+        user: { model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model', retry: bad } },
+      })),
+      (error) => error.code === 'host_retry_invalid',
+      `a retry block ${JSON.stringify(bad)} is refused`,
+    );
+  }
+});
+
+test('the wire form is named by the config instead of guessed from the address', () => {
+  const withApi = (api) => createConfig({
+    user: { model: { ...(api === undefined ? {} : { api }), baseURL: 'http://127.0.0.1:1', model: 'test-model' } },
+  });
+
+  assert.equal(providerFromConfig(withApi('messages')).name, 'messages');
+  assert.equal(providerFromConfig(withApi('chat-completions')).name, 'chat-completions');
+  // 没写与写错都要指名：猜错的形状发出去是一份错的请求体，端点回的 400 说不出缺了哪一行。
+  for (const api of [undefined, 'responses']) {
+    assert.throws(
+      () => providerFromConfig(withApi(api)),
+      (error) => error.code === 'provider_api_form_required' && /messages/.test(error.detail) && /chat-completions/.test(error.detail),
+      `model.api "${String(api)}" is refused`,
+    );
   }
 });
 

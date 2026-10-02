@@ -13,18 +13,48 @@ import { createSessionLog } from '../session/session.js';
 import { loadInstructions, DEFAULT_INSTRUCTION_BYTES } from '../capability/instructions.js';
 import { createLoop, DEFAULT_LOOP_LIMITS } from '../kernel/loop.js';
 import { minimalPlugin } from '../tools/minimal.js';
-import { createMessagesProvider } from '../model/provider.js';
+import { createMessagesProvider } from '../model/messages.js';
+import { createChatCompletionsProvider } from '../model/chat-completions.js';
+import { DEFAULT_RETRY } from '../model/http.js';
 import { createConnection } from './connection.js';
 import { APPROVAL_METHOD, isApproved, validateCall } from './protocol.js';
 
+// 重试边界也在配置里；形状在这里就查：非整数的 maxAttempts 让「第几次了」比不出大小，
+// 每次传输失败就悄悄变成不重试，而看不出为什么不重试。
+function retryOf(model) {
+  const retry = { ...DEFAULT_RETRY, ...model.retry };
+  for (const key of ['maxAttempts', 'baseDelayMs']) {
+    if (!Number.isInteger(retry[key]) || retry[key] < 1) {
+      throw new KernelError('host_retry_invalid', { detail: `${key} must be an integer of at least 1` });
+    }
+  }
+  for (const key of ['retry429', 'retry5xx', 'retryTransport']) {
+    if (typeof retry[key] !== 'boolean') throw new KernelError('host_retry_invalid', { detail: `${key} must be a boolean` });
+  }
+  return Object.freeze(retry);
+}
+
 // 服务地址与模型名从配置快照读，凭据只在发请求时从环境变量读（D13）。
+// 线上形状由 `model.api` 指名（D31）：不按地址猜，猜错的请求体只会换来一句说不出原因的 400。
+// 能力项只能把该种形状声明的上限调低，那一条判据由各自的声明把守，这里只负责把配置送到它面前。
+const API_FORMS = Object.freeze({
+  messages: createMessagesProvider,
+  'chat-completions': createChatCompletionsProvider,
+});
+
 export function providerFromConfig(config) {
   const model = config.model;
   if (model === undefined) throw new KernelError('host_model_config_missing', { detail: 'config.model.baseURL and config.model.model' });
-  return createMessagesProvider({
+  const createProvider = API_FORMS[model.api];
+  if (createProvider === undefined) {
+    throw new KernelError('provider_api_form_required', { detail: `model.api must be "messages" or "chat-completions"` });
+  }
+  return createProvider({
     baseUrl: model.baseURL,
     model: model.model,
     ...(model.apiKeyEnv === undefined ? {} : { apiKeyEnv: model.apiKeyEnv }),
+    ...(model.capabilities === undefined ? {} : { capabilities: model.capabilities }),
+    retry: retryOf(model),
   });
 }
 
@@ -49,9 +79,10 @@ function loopLimitsOf(config) {
 }
 
 // 流式接收期间把每一条事件抄一份送出去，交回给循环的那一份原样不动。
+// 抄的是原对象再加一个 stream，而不是重搭一个：提供方声明的能力、模型名与换模型的路径都要留着看得见。
 function observedProvider(provider, onDelta) {
   return {
-    model: provider.model,
+    ...provider,
     async *stream(request, options) {
       for await (const event of provider.stream(request, options)) {
         onDelta(event);
