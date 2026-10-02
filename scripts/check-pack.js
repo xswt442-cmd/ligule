@@ -20,6 +20,11 @@ if (!npmCli) {
   throw new Error('run it as `npm run check-pack` - only npm itself can tell Node which file to launch on Windows');
 }
 
+// 发布物里带的是构建出来的 `dist/`（D47）：没先构建就跑这个检查，报出来的是「tarball 缺文件」，看不出缺的其实是那一步构建。
+if (!existsSync(join(repo, 'dist', 'index.js'))) {
+  throw new Error('dist/index.js is missing; run `npm run build` before checking the packaged artifact');
+}
+
 // exports 可以写成字符串，也可以写成带条件的对象，这里把所有字符串取值收齐。
 function collectTargets(value, found = []) {
   if (typeof value === 'string') found.push(value);
