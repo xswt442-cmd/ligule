@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createConfig, KernelError } from '../src/index.js';
+import { createConfig, KernelError } from '../dist/index.js';
 
 test('a key written in two layers is taken from the higher-precedence one', () => {
   const config = createConfig({

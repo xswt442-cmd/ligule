@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import {
   CHAT_COMPLETIONS_CAPABILITIES, chatCompletionsCapabilities, createChatCompletionsProvider, readTool,
-} from '../src/index.js';
+} from '../dist/index.js';
 
 const API_KEY_ENV = 'LIGULE_TEST_API_KEY';
 

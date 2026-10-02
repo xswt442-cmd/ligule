@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { link, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { isWithin, resolveWithin, KernelError } from '../src/index.js';
+import { isWithin, resolveWithin, KernelError } from '../dist/index.js';
 
 // 夹具建在 testplace/ 下：那个目录既不进版本控制也不进包。
 // 边界取 workspace，outside 是边界之外的那一半，用来构造两类越界。

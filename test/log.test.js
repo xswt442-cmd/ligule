@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createLogger, KernelError } from '../src/index.js';
+import { createLogger, KernelError } from '../dist/index.js';
 
 function recordingSink(withError) {
   const seen = [];

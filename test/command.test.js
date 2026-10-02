@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseCommand } from '../src/index.js';
+import { parseCommand } from '../dist/index.js';
 
 test('a simple command is one segment and the safe operators split it into several', () => {
   assert.deepEqual(parseCommand('git status'), { kind: 'segments', segments: ['git status'] });

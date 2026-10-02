@@ -22,6 +22,9 @@ test('the runtime floor is one value across package metadata, README and workflo
     const declared = firstGroup(read(`../.github/workflows/${file}`), /PRIMARY_NODE_VERSION: '(\d+)'/, file);
     assert.equal(declared, engines, `${file} and engines.node disagree`);
   }
+  // 类型描述的是另一个大版本的运行时时，新写的 TypeScript 模块会用上这一档 Node 没有的接口，本机测试也照样绿。
+  const types = firstGroup(pkg.devDependencies['@types/node'], /^\^?(\d+)\./, 'devDependencies @types/node');
+  assert.equal(types, engines, '@types/node describes a different Node major version than engines.node');
 });
 
 test('the package description carries both languages', () => {

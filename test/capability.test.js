@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { KernelError, probeBackend } from '../src/index.js';
+import { KernelError, probeBackend } from '../dist/index.js';
 
 function recordingLogger() {
   const seen = [];

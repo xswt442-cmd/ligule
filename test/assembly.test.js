@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createKernel, KernelError, loadAssembly, minimalPlugin } from '../src/index.js';
+import { createKernel, KernelError, loadAssembly, minimalPlugin } from '../dist/index.js';
 
 function tool(name) {
   return {

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 let rows = {};
 let missing = '';
 try {
-  rows = await import('../src/tui/app.js');
+  rows = await import('../dist/tui/app.js');
 } catch (error) {
   missing = error.code === 'ERR_MODULE_NOT_FOUND' ? 'the terminal UI dependencies are not installed' : error.message;
 }
@@ -84,7 +84,7 @@ test('the app paints the session line and the input hint onto the terminal', opt
   const { render } = await import('ink');
   const { PassThrough } = await import('node:stream');
   const { setTimeout: delay } = await import('node:timers/promises');
-  const { App } = await import('../src/tui/app.js');
+  const { App } = await import('../dist/tui/app.js');
 
   const stdout = new PassThrough();
   stdout.columns = 80;

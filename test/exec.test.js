@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { createDecisionChain, createKernel, execTool } from '../src/index.js';
-import { decode } from '../src/capability/exec.js';
+import { createDecisionChain, createKernel, execTool } from '../dist/index.js';
+import { decode } from '../dist/capability/exec.js';
 
 const node = `"${process.execPath}"`;
 
