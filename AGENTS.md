@@ -30,7 +30,7 @@ npm test
 npm run check-pack
 ```
 
-`npm run check-pack` packs the tarball, unpacks it, checks every entry `package.json` points at, then imports the unpacked package from an empty consumer directory. `npm test` builds and reads `dist/` in place, so it cannot see a file left out of the `files` list or an `exports` entry the tarball does not carry — that is what this check is for. Invoke the script through npm: on Windows Node refuses to launch `npm.cmd` without a shell, so the script needs `npm_execpath`.
+`npm run check-pack` packs the tarball, unpacks it, checks every entry `package.json` points at, then imports the unpacked package from an empty consumer directory; it refuses before packing when `dist/` is missing, so run `npm run build` (or `npm test`, which builds) first. `npm test` exercises the same `dist/` the package ships, so it cannot see a file left out of the `files` list or an `exports` entry the tarball does not carry — that is what this check is for. Invoke the script through npm: on Windows Node refuses to launch `npm.cmd` without a shell, so the script needs `npm_execpath`.
 
 `npm test` reports `skipped 2` when no ripgrep has been built locally: those two compare the real backend with our own tree walk and cannot be faked. Run `npm run build-rg` first when a change touches either backend.
 
