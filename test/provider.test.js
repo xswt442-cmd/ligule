@@ -381,7 +381,7 @@ test('one real round trip: the second request body is what the record rebuilds i
     }, async (baseUrl, requests) => {
       const result = await createLoop({ kernel, provider: provider(baseUrl), session }).run('read the note');
       assert.equal(result.text, 'the file says so');
-      // 带着工具结果的那一份请求只该有一份：模型被问过两次同一个工具轮才算重试没兜住。
+      // 带着工具结果的那一份请求只该有一份：重试把同一轮发两遍时，这里会数到两份。
       const asked = requests.filter((entry) => JSON.stringify(entry.body.messages).includes('tool_result'));
       assert.equal(asked.length, 1, 'the tool round is sent once');
       assert.deepEqual(asked[0].body.messages, [

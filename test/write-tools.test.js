@@ -104,7 +104,7 @@ test('delete with the default backend takes the file out of the workspace and sa
   await withWorkspace(async (workspace) => {
     await writeFile(join(workspace, 'note.txt'), 'keep me');
     // 这一条走的是这台机器上真正生效的那一条后端：在 Windows 上它会送进系统回收站，
-    // 在 Linux 上送进 freedesktop 的 Trash，两者都不在断言里钉死，钉死的是「文件离开了工作区」与「交回的说法」。
+    // 在 Linux 上送进 freedesktop 的 Trash。断言里不指定走的是哪一条回收路径，指定的是「文件离开了工作区」与「交回的说法」。
     const result = await deleteTool.run({ path: 'note.txt' }, context(workspace));
     assert.match(result.text, /^(sent note\.txt to the (system recycle bin|freedesktop trash)|moved note\.txt into \.ligule-trash)$/);
     await assert.rejects(() => readFile(join(workspace, 'note.txt'), 'utf8'), (error) => error.code === 'ENOENT');
