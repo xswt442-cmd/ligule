@@ -94,6 +94,11 @@ export function createConnection({ input, output, onFault }) {
       write(message);
     },
 
+    // 答复对端发出来的那一次请求：带同一个 id 而没有 method，与通报分开写，读的人不用记形状。
+    reply(id, result) {
+      write({ id, result });
+    },
+
     request(method, params) {
       const id = `${origin}${counter}`;
       counter += 1;
