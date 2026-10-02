@@ -31,6 +31,8 @@ packages/*/RIPGREP-VERSION
 .env
 .env.*
 !.env.example
+# 一次运行的会话记录与本地配置都在这儿（D8、D11），没有该签进去的东西
+.ligule/
 
 # Editors & OS
 .DS_Store

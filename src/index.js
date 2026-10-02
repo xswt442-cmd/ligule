@@ -22,6 +22,11 @@ export { createPromptAssembly, PROMPT_BOUNDARY } from './kernel/prompt.js';
 export { createSessionLog } from './session/session.js';
 export { createLoop, DEFAULT_LOOP_LIMITS } from './kernel/loop.js';
 export {
+  METHODS, APPROVAL_METHOD, NOTIFICATIONS, validateCall, isApproved,
+} from './host/protocol.js';
+export { createConnection } from './host/connection.js';
+export { createHost, serveHost, providerFromConfig } from './host/host.js';
+export {
   createMessagesProvider, capabilitiesOf, MESSAGES_CAPABILITIES, DEFAULT_RETRY,
 } from './model/provider.js';
 export { resultOf, failureOf, refusalOf, spillContent, resultLimit, DEFAULT_RESULT_BYTES } from './kernel/result.js';
