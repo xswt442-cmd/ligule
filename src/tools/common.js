@@ -1,5 +1,5 @@
 // 文件工具的共享部分：路径的书写形式、截断标记、按路径序遍历边界、存在与类型判断。
-// 遍历顺序与两条检索后端的排序规则是同一套（差别记在 ligule-set/todo.md 第 6 步）。
+// 遍历顺序与两条检索后端的排序规则是同一套：都按路径序交回，同一输入两次运行得到同一份结果。
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
 import { KernelError } from '../kernel/error.js';

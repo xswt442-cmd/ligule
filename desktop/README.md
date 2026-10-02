@@ -1,6 +1,6 @@
 # ligule 桌面壳
 
-窗口、后端进程与调用帧的搬运，Rust 侧没有业务逻辑（[../AGENTS.md](../AGENTS.md) 与 `ligule-set/decisions.md` 的 D24、D30）。
+窗口、后端进程与调用帧的搬运，Rust 侧没有业务逻辑（约束见 [../AGENTS.md](../AGENTS.md)）。
 
 ```
 WebView (frontend/)  ←Tauri 事件与命令→  Rust 壳  ←stdin/stdout 一行一条→  node src/cli.js host  ←→  内核
@@ -25,7 +25,7 @@ npm run build    # 出 NSIS 安装包：target/release/bundle/nsis/ligule_<版�
 
 `LIGULE_DESKTOP_CLI` 可以指到别的 `cli.js`，`NODE` 可以指到别的 node 可执行文件——开发时用得上。
 
-安装包目前只带壳与界面：后端仍按「从可执行文件位置向上找 `src/cli.js`，或者 `LIGULE_DESKTOP_CLI` 指过去」那一条规则找，所以装到没有仓库的机器上时，后端要么由 npm 包提供、要么随包另放一份，那一条路线还没定（见 `ligule-set/todo.md` 第 18 步）。
+安装包自带一份 Node 运行时与 ligule 的运行时树（`desktop/vendor/`，由 `desktop/fetch-runtime.mjs` 按 `desktop/node-pin.json` 拉出来），所以装到没有这份仓库、也没有 node 的机器上就能跑。壳找后端的顺序是：`LIGULE_DESKTOP_CLI` → 随包的 `app/src/cli.js` → 从可执行文件位置向上找 `src/cli.js`。
 
 ## 界面
 

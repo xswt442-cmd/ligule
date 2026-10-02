@@ -9,7 +9,7 @@ import { parseCommand } from '../capability/command.js';
 import { KernelError } from './error.js';
 import { matches } from './match.js';
 
-// 阈值与档位由配置层给出；这里的默认值是本项目自定的起点，出处记在 ligule-set/decisions.md D17。
+// 阈值与档位由配置层给出；这里的默认值是本项目自定的起点，理由记在决定条目 D17。
 export const DEFAULT_THRESHOLDS = Object.freeze({ consecutive: 3, total: 20 });
 
 // 自动档里不能直接放行的脚本解释器：一次调用能跑任意代码，内容级检查管不到参数。
