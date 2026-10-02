@@ -47,3 +47,12 @@ test('workflows take the Node version from their own env instead of repeating it
     assert.doesNotMatch(read(`../.github/workflows/${file}`), /node-version:\s*['"]?\d/, `${file} hardcodes a Node version`);
   }
 });
+
+// 桌面壳的安装包与 npm 包同版本发布：三处版本号写在一起，不一致就在这儿失败（D34）。
+test('the desktop shell carries the same version as the package', () => {
+  const pkg = JSON.parse(read('../package.json'));
+  const shell = JSON.parse(read('../desktop/package.json'));
+  const config = JSON.parse(read('../desktop/src-tauri/tauri.conf.json'));
+  assert.equal(shell.version, pkg.version, 'desktop/package.json and package.json disagree');
+  assert.equal(config.version, pkg.version, 'tauri.conf.json and package.json disagree');
+});
