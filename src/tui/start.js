@@ -14,7 +14,12 @@ export async function runTui({ config, provider, policy, logger, stdout = proces
   const client = createConnection(pair.client);
   const { sessionId } = await client.request('session.create', {});
   const instance = render(
-    createElement(App, { client, sessionId, interactive: Boolean(stdin.isTTY && stdout.isTTY) }),
+    createElement(App, {
+      client,
+      sessionId,
+      info: { model: config.model?.model, boundary: config.boundary },
+      interactive: Boolean(stdin.isTTY && stdout.isTTY),
+    }),
     { stdout, stdin, stderr },
   );
   await instance.waitUntilExit();
