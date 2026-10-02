@@ -27,11 +27,20 @@ fn pump(app: AppHandle, receiver: std::sync::mpsc::Receiver<String>, event: &'st
 }
 
 /// 起后端进程。壳一起来就起，界面不需要先问一次「后端在哪」——这里没有地址可给（D30）。
+/// 运行时与后端入口优先用随包带的那一份（D34），没有才退回开发时的目录层级与 PATH 上的 node。
 fn start_host(app: &AppHandle) -> Result<(), String> {
     let exe_path = std::env::current_exe().map_err(|error| format!("cannot locate this executable: {error}"))?;
     let exe_dir = exe_path.parent().ok_or("the executable has no directory")?;
-    let cli = bridge::resolve_cli_script(exe_dir, std::env::var("LIGULE_DESKTOP_CLI").ok().as_deref())?;
-    let node = std::env::var("NODE").unwrap_or_else(|_| "node".to_string());
+    let resources = app.path().resource_dir().ok();
+    let cli = bridge::resolve_cli_script(
+        exe_dir,
+        resources.as_deref(),
+        std::env::var("LIGULE_DESKTOP_CLI").ok().as_deref(),
+    )?;
+    let node = bridge::bundled_node(resources.as_deref())
+        .map(|path| path.display().to_string())
+        .or_else(|| std::env::var("NODE").ok().filter(|value| !value.is_empty()))
+        .unwrap_or_else(|| "node".to_string());
     let (host, frames, logs) = bridge::spawn_host(&node, &[&cli.display().to_string(), "host"])?;
 
     pump(app.clone(), frames, FRAME_EVENT);

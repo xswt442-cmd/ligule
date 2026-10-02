@@ -25,6 +25,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"]
+    "targets": ["nsis"],
+    "resources": {
+      "../vendor/node": "node",
+      "../vendor/app": "app"
+    }
   }
 }

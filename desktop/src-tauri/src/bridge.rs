@@ -6,9 +6,14 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Mutex;
 
-/// 从可执行文件所在目录往上找 `src/cli.js`，找到就交出它的绝对路径。
-/// 找不到的情形要说清楚找过哪几层：开发时目录层级一改就找不到后端，报一句「找不到」查不出来。
-pub fn resolve_cli_script(exe_dir: &Path, override_path: Option<&str>) -> Result<PathBuf, String> {
+/// 找后端入口，按这三步：环境变量指的那一份 → 随包带的那一份（安装包里的 `app/src/cli.js`，D34）
+/// → 从可执行文件所在目录往上找 `src/cli.js`（开发时的目录层级）。
+/// 找不到的情形要说清楚找过哪几处：开发时目录层级一改就找不到后端，报一句「找不到」查不出来。
+pub fn resolve_cli_script(
+    exe_dir: &Path,
+    resource_dir: Option<&Path>,
+    override_path: Option<&str>,
+) -> Result<PathBuf, String> {
     if let Some(path) = override_path.filter(|value| !value.is_empty()) {
         let candidate = PathBuf::from(path);
         if candidate.is_file() {
@@ -17,9 +22,17 @@ pub fn resolve_cli_script(exe_dir: &Path, override_path: Option<&str>) -> Result
         return Err(format!("LIGULE_DESKTOP_CLI points at {}, which is not a file", candidate.display()));
     }
 
+    let mut tried = Vec::new();
+    if let Some(directory) = resource_dir {
+        let candidate = directory.join("app").join("src").join("cli.js");
+        tried.push(candidate.display().to_string());
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+
     const SEARCH_DEPTH: u32 = 6;
     let mut directory = Some(exe_dir.to_path_buf());
-    let mut tried = Vec::new();
     for _ in 0..SEARCH_DEPTH {
         let current = match directory {
             Some(path) => path,
@@ -33,10 +46,26 @@ pub fn resolve_cli_script(exe_dir: &Path, override_path: Option<&str>) -> Result
         directory = current.parent().map(|parent| parent.to_path_buf());
     }
     Err(format!(
-        "no src/cli.js found from {} upwards (checked {})",
-        exe_dir.display(),
+        "no src/cli.js found (checked {})",
         tried.join(", ")
     ))
+}
+
+/// 随包带的 Node 可执行文件（D34：安装包自带一套运行时，不要求那台机器上有 node）。
+/// 没有随包带时交回 None，调用方退回 `NODE` 环境变量或者 PATH 上的 node。
+pub fn bundled_node(resource_dir: Option<&Path>) -> Option<PathBuf> {
+    let candidate = resource_dir?.join("node").join(node_file_name());
+    candidate.is_file().then_some(candidate)
+}
+
+#[cfg(windows)]
+fn node_file_name() -> &'static str {
+    "node.exe"
+}
+
+#[cfg(not(windows))]
+fn node_file_name() -> &'static str {
+    "node"
 }
 
 pub struct Host {
@@ -140,14 +169,14 @@ mod tests {
         fs::create_dir_all(root.join("src")).expect("create src");
         fs::write(root.join("src").join("cli.js"), "#!/usr/bin/env node\n").expect("write the cli stub");
 
-        assert_eq!(resolve_cli_script(&exe_dir, None).expect("found"), root.join("src").join("cli.js"));
+        assert_eq!(resolve_cli_script(&exe_dir, None, None).expect("found"), root.join("src").join("cli.js"));
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn a_missing_cli_names_the_directories_it_tried() {
         let root = temp_dir("absent");
-        let error = resolve_cli_script(&root, None).expect_err("nothing to find");
+        let error = resolve_cli_script(&root, None, None).expect_err("nothing to find");
         assert!(error.contains("src/cli.js"), "{error}");
         let _ = fs::remove_dir_all(&root);
     }
@@ -158,7 +187,7 @@ mod tests {
         fs::create_dir_all(root.join("src")).expect("create src");
         fs::write(root.join("src").join("cli.js"), "").expect("write a decoy");
         let missing = root.join("nowhere.js");
-        let error = resolve_cli_script(&root, Some(missing.to_str().expect("utf-8 path"))).expect_err("refused");
+        let error = resolve_cli_script(&root, None, Some(missing.to_str().expect("utf-8 path"))).expect_err("refused");
         assert!(error.contains("LIGULE_DESKTOP_CLI"), "{error}");
         let _ = fs::remove_dir_all(&root);
     }
@@ -200,5 +229,37 @@ mod tests {
             lines.push(line);
         }
         lines
+    }
+
+    #[test]
+    fn the_bundled_runtime_is_found_before_the_development_tree() {
+        let root = temp_dir("bundle");
+        let exe_dir = root.join("install");
+        let resources = root.join("resources");
+        fs::create_dir_all(&exe_dir).expect("create the executable directory");
+        fs::create_dir_all(resources.join("app").join("src")).expect("create the bundled tree");
+        fs::write(resources.join("app").join("src").join("cli.js"), "// bundled\n").expect("write the bundled entry");
+        // 开发时那份仓库也在往上找得到的位置上：随包带的那一份要先，不然装好的应用会去用错处的代码。
+        fs::create_dir_all(root.join("src")).expect("create the development tree");
+        fs::write(root.join("src").join("cli.js"), "// development\n").expect("write the development entry");
+
+        assert_eq!(
+            resolve_cli_script(&exe_dir, Some(&resources), None).expect("found"),
+            resources.join("app").join("src").join("cli.js")
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_bundled_node_is_used_only_when_it_is_really_there() {
+        let root = temp_dir("node");
+        let node = root.join("node").join(node_file_name());
+        assert_eq!(bundled_node(Some(&root)), None);
+
+        fs::create_dir_all(root.join("node")).expect("create the node directory");
+        fs::write(&node, "not a real node, only a marker\n").expect("write the marker");
+        assert_eq!(bundled_node(Some(&root)), Some(node));
+        assert_eq!(bundled_node(None), None);
+        let _ = fs::remove_dir_all(&root);
     }
 }

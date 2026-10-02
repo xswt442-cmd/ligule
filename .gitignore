@@ -6,6 +6,8 @@ desktop/src-tauri/target/
 desktop/src-tauri/gen/
 desktop/frontend/node_modules/
 desktop/frontend/dist/
+# 随安装包分发的 Node 运行时与运行时树，由 desktop/fetch-runtime.mjs 拉出来
+desktop/vendor/
 
 # Dependencies
 node_modules/
