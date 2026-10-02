@@ -90,7 +90,8 @@ test('the request body carries the shape this form names, and the address is the
     }));
 
     const { url, headers, body } = requests[0];
-    assert.equal(url, '/v1/chat/completions');
+    // 地址按给出的那一份用：这里给的是没有 /v1 的根（DeepSeek 那一类），路径就是 /chat/completions。
+    assert.equal(url, '/chat/completions');
     assert.equal(headers.authorization, 'Bearer test-key');
     assert.equal(body.model, 'test-model');
     assert.equal(body.stream, true);
@@ -111,6 +112,10 @@ test('the request body carries the shape this form names, and the address is the
       type: 'function',
       function: { name: 'read', description: readTool.description, parameters: readTool.parameters },
     }]);
+
+    // 另一种约定也要能用：OpenAI 自己的 base_url 含 /v1，这时不重复补。
+    await collect(provider(`${baseUrl}/v1`).stream({ system: '', messages: [], tools: [] }));
+    assert.equal(requests[1].url, '/v1/chat/completions');
   });
 });
 

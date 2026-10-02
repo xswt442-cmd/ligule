@@ -30,7 +30,7 @@ export function resolveCapabilities(declared, requested = {}) {
 }
 
 // 服务地址必须是 HTTP(S) 的根：不带凭据、查询与片段，否则同一份配置在不同宿主下会打到不同地方。
-// 路径末尾的 /v1 不重复补，两种形状的端点都挂在它下面。
+// 这里只管校验与去掉末尾的斜杠；要不要补 /v1 是形状自己的事，交给各自的适配器。
 export function apiRoot(baseUrl) {
   if (typeof baseUrl !== 'string' || baseUrl === '') throw new KernelError('provider_base_url_required');
   let parsed;
@@ -43,7 +43,7 @@ export function apiRoot(baseUrl) {
     throw new KernelError('provider_base_url_invalid', { detail: 'an HTTP(S) root without credentials, query, or fragment' });
   }
   const base = baseUrl.replace(/\/+$/, '');
-  return parsed.pathname.endsWith('/v1') ? base : `${base}/v1`;
+  return base;
 }
 
 // 凭据在发请求时才读：进程运行期间换过密钥不必重建提供方，配置快照里也始终没有它。

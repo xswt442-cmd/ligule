@@ -16,6 +16,12 @@ export function capabilitiesOf(requested = {}) {
   return resolveCapabilities(MESSAGES_CAPABILITIES, requested);
 }
 
+// 这一种形状的端点挂在 /v1 下面；地址末尾已经有了就不重复补（dsh 的 messages-api 同一条规则）。
+function messagesRoot(baseUrl) {
+  const root = apiRoot(baseUrl);
+  return root.endsWith('/v1') ? root : `${root}/v1`;
+}
+
 // 把重建出来的会话投影折成 Messages 的 messages：连续的几条工具结果并进同一条 user 消息，
 // 因为端点要求工具结果紧跟在发出调用的那条助手消息之后。
 function toWireMessages(view) {
@@ -55,7 +61,7 @@ export function createMessagesProvider({
   capabilities,
   retry = DEFAULT_RETRY,
 } = {}) {
-  const root = apiRoot(baseUrl);
+  const root = messagesRoot(baseUrl);
   if (typeof model !== 'string' || model === '') throw new KernelError('provider_model_required');
   const effective = capabilitiesOf(capabilities);
 

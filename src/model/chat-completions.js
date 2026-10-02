@@ -51,6 +51,9 @@ export function createChatCompletionsProvider({
   capabilities,
   retry = DEFAULT_RETRY,
 } = {}) {
+  // 地址按给出的那一份用：这一种形状的约定是 base_url 已经含 /v1（OpenAI 自己的 base_url 就是
+  // `https://api.openai.com/v1`），而 DeepSeek 那一种把 base_url 写作 `https://api.deepseek.com`、
+  // 路径直接是 /chat/completions（2026-10-02 从其文档「首次调用 API」一节读到）。补一个 /v1 会打断后一种。
   const root = apiRoot(baseUrl);
   if (typeof model !== 'string' || model === '') throw new KernelError('provider_model_required');
   const effective = chatCompletionsCapabilities(capabilities);
