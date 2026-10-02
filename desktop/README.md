@@ -53,6 +53,18 @@ cd desktop/frontend && npm run build && npm run preview
 
 第一条起真壳，数它带起来的后端进程数、截一张窗口图，并在强杀壳之后确认没有孤儿进程留下来；抢不到前台焦点时它不打字，只截窗口。第二条把构建产物服务在 5188 端口，配合 `testplace/check-desktop-frontend.mjs`（挂一个假载体，帧由它生成）看行的次序、审批卡、四个展示档位与菜单面板——壳打不进字的时候，界面那一条就靠它。
 
+## 随包带的运行时
+
+安装包自带一套 Node 与 ligule 的运行时树（D34），装到没有这份仓库的机器上也能跑。两样东西由一条脚本备出来：
+
+```sh
+node desktop/fetch-runtime.mjs
+```
+
+它按 `desktop/node-pin.json` 里钉住的版本与校验和下载 Node，只把 `node.exe` 抽到 `desktop/vendor/node/`；再把 `src/`、`package.json` 与生产依赖（按 `package.json` 的 `dependencies` 递归收，装不上的原生模块跳过——内核那一侧本来就有降级路径）拷到 `desktop/vendor/app/`。`desktop/vendor/` 不进版本控制。
+
+`tauri.conf.json` 的 `bundle.resources` 把这两份分别挂成 `node/` 与 `app/`；壳起后端时按「`LIGULE_DESKTOP_CLI` → 随包的 `app/src/cli.js` → 从可执行文件位置向上找 `src/cli.js`」这一条顺序找，node 程序同理先用随包的那一份，再退 `NODE`，最后退 PATH。
+
 ## 图标
 
 `tauri-build` 在 Windows 上生成资源时必须有 `src-tauri/icons/icon.ico`。图标是脚本画出来的，不手工存二进制：
