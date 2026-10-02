@@ -4,87 +4,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ligule</title>
-    <link rel="stylesheet" href="styles.css" />
-    <link rel="icon" href="icon.png" />
+    <link rel="icon" href="/icon.png" />
   </head>
   <body>
-    <div class="frame" id="frame">
-      <aside class="sidebar" id="sidebar">
-        <div class="brand">
-          <img src="icon.png" alt="" width="22" height="22" />
-          <span>ligule</span>
-        </div>
-
-        <button class="new-run" id="new-session" type="button">新建会话</button>
-
-        <div class="section-label">会话</div>
-        <div class="sessions" id="sessions" data-slot="rail.sessions"></div>
-
-        <div class="sidebar-foot">
-          <button class="entry" id="menu-toggle" type="button" aria-haspopup="true" aria-expanded="false">
-            <span class="entry-glyph">⌗</span>
-            <span>功能</span>
-          </button>
-        </div>
-      </aside>
-
-      <main class="center">
-        <header class="topbar">
-          <div class="title">
-            <strong id="session-title">没有会话</strong>
-            <span class="muted" id="session-note">后端进程由壳起，帧走管道</span>
-          </div>
-          <div class="pills" id="pills" data-slot="header.status"></div>
-          <label class="verbosity">
-            <span>工作步骤展示</span>
-            <select id="verbosity">
-              <option value="brief">简洁</option>
-              <option value="standard" selected>标准</option>
-              <option value="detailed">详细</option>
-              <option value="full">完全展开</option>
-            </select>
-          </label>
-        </header>
-
-        <div class="conversation" id="conversation" data-slot="conversation.rows" aria-live="polite">
-          <p class="empty">还没有轮次。下方输入一句话，或按 Ctrl+Enter 直接开始。</p>
-        </div>
-
-        <section class="approval" id="approval" hidden>
-          <div class="approval-head">
-            <span class="approval-kind">要执行</span>
-            <strong id="approval-tool"></strong>
-            <code id="approval-detail"></code>
-          </div>
-          <p class="approval-reason" id="approval-reason"></p>
-          <div class="approval-actions" data-slot="conversation.approval.detail">
-            <button id="allow" type="button">允许一次</button>
-            <button id="deny" type="button">不允许</button>
-          </div>
-        </section>
-
-        <footer class="composer" data-slot="conversation.composer">
-          <textarea id="input" rows="3" placeholder="要模型做的事（Enter 发送，Shift+Enter 换行）"></textarea>
-          <div class="composer-actions">
-            <span class="muted" id="transport-note"></span>
-            <button id="read-back" type="button">读回记录</button>
-            <button id="cancel-run" type="button">取消本轮</button>
-            <button id="send" type="button" class="primary">发送</button>
-          </div>
-        </footer>
-      </main>
-
-      <aside class="dock" id="dock" data-slot="dock.panels" hidden>
-        <div class="dock-head">
-          <strong id="dock-title"></strong>
-          <button id="dock-close" type="button" aria-label="关闭面板">✕</button>
-        </div>
-        <div class="dock-body" id="dock-body"></div>
-      </aside>
-    </div>
-
-    <div class="menu" id="panel-menu" role="menu" hidden></div>
-
-    <script type="module" src="app.js"></script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

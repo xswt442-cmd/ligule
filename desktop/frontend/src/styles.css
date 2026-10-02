@@ -420,7 +420,7 @@ button.primary {
   gap: 0.6rem;
 }
 
-#transport-note {
+.composer-actions .muted {
   margin-inline-start: auto;
 }
 
@@ -515,7 +515,7 @@ button.primary {
   font-size: 0.74rem;
 }
 
-#dock-title {
+.dock-title {
   display: flex;
   align-items: baseline;
   flex: 1;

@@ -4,10 +4,12 @@
   "version": "0.0.1",
   "identifier": "app.ligule.desktop",
   "build": {
-    "frontendDist": "../frontend"
+    "frontendDist": "../frontend/dist",
+    "devUrl": "http://localhost:5188",
+    "beforeDevCommand": "npm --prefix ../frontend run dev",
+    "beforeBuildCommand": "npm --prefix ../frontend run build"
   },
   "app": {
-    "withGlobalTauri": true,
     "windows": [
       {
         "label": "main",

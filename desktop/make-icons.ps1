@@ -31,8 +31,9 @@ Save-Resized '32x32.png' 32
 Save-Resized '128x128.png' 128
 Save-Resized '128x128@2x.png' 256
 Save-Resized 'icon.png' 512
-# 界面里那一处品牌标记与标签页图标读的是前端目录里的一张 PNG，与打包图标同源，不在两处各画一张。
-$frontend = Join-Path $PSScriptRoot 'frontend'
+# 界面里那一处品牌标记与标签页图标读的是前端 public 目录里的一张 PNG，与打包图标同源，不在两处各画一张。
+$frontend = Join-Path $PSScriptRoot 'frontend/public'
+New-Item -ItemType Directory -Force -Path $frontend | Out-Null
 Copy-Item -Force -Path (Join-Path $icons 'icon.png') -Destination (Join-Path $frontend 'icon.png')
 if (-not (Test-Path (Join-Path $frontend 'icon.png'))) { throw "the frontend icon did not land in $frontend" }
 Write-Output "wrote PNGs to $icons and $frontend/"

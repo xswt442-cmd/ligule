@@ -1,9 +1,11 @@
 # testplace
 testplace
 
-# 桌面壳的构建产物与编译期生成的 schema 目录（Tauri 自己写这两处）
+# 桌面壳的构建产物与编译期生成的 schema 目录（Tauri 自己写这两处），以及前端的依赖与构建输出
 desktop/src-tauri/target/
 desktop/src-tauri/gen/
+desktop/frontend/node_modules/
+desktop/frontend/dist/
 
 # Dependencies
 node_modules/
