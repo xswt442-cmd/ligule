@@ -8,18 +8,24 @@ WebView (frontend/)  ←Tauri 事件与命令→  Rust 壳  ←stdin/stdout 一�
 
 ## 跑起来
 
+`desktop/package.json` 是壳的构建入口（Tauri 命令行认 `src-tauri` 是它的直接子目录），前端的构建由壳的配置去拉起。
+
 ```sh
-cd desktop/frontend && npm install && npm run build
-cd ../src-tauri && cargo run
+cd desktop
+npm install
+npm run dev      # 前端起 Vite（5188），壳连它，改界面即时可见
+npm run build    # 出 NSIS 安装包：target/release/bundle/nsis/ligule_<版本>_x64-setup.exe
 ```
 
-需要 PATH 上有 `node`（Windows 上还需要 WebView2 运行时，Win11 自带）。后端进程由壳起，界面不需要知道任何地址与端口：帧走这两根管道。
+只想看已经构建好的产物时：`cd frontend && npm run build`，再 `cd ../src-tauri && cargo run`。`tauri-build` 在编译时把 `frontend/dist` 嵌进可执行文件，改一行前端不重跑构建就看不见。
 
-改前端要重跑 `npm run build` 再 `cargo run`：`tauri-build` 在编译时把 `frontend/dist` 嵌进可执行文件，改一行界面不重编就看不见。带热更新的开发回路（`tauri dev`，配置里的 `devUrl` 与 `beforeDevCommand` 已经为它写好）要等 Tauri 命令行装上，那一处排在实现顺序第 18 步。
+需要 PATH 上有 `node`（Windows 上还需要 WebView2 运行时，Win11 自带）。后端进程由壳起，界面不需要知道任何地址与端口：帧走这两根管道。
 
 配置与命令行读同一份：`~/.ligule/config.toml` 里的 `[model]` 段（`api`、`baseURL`、`model`），凭据读环境变量 `LIGULE_API_KEY`。壳的工作目录决定工具能读写哪儿（边界取进程当前目录）。
 
 `LIGULE_DESKTOP_CLI` 可以指到别的 `cli.js`，`NODE` 可以指到别的 node 可执行文件——开发时用得上。
+
+安装包目前只带壳与界面：后端仍按「从可执行文件位置向上找 `src/cli.js`，或者 `LIGULE_DESKTOP_CLI` 指过去」那一条规则找，所以装到没有仓库的机器上时，后端要么由 npm 包提供、要么随包另放一份，那一条路线还没定（见 `ligule-set/todo.md` 第 18 步）。
 
 ## 界面
 
