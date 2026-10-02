@@ -241,11 +241,14 @@ async function runCli(directory, answer) {
       '--config', 'policy.mode="ask"',
     ], { cwd: directory, env: { ...process.env, LIGULE_API_KEY: 'test-key' } });
     const written = { stdout: '', stderr: '' };
+    // 只答一次：提示里那段字样在之后的每一个数据块上都还在，不记这一次就会对着已经关掉的管道再写一遍。
+    let answered = false;
     for (const name of ['stdout', 'stderr']) {
       child[name].setEncoding('utf8');
       child[name].on('data', (chunk) => {
         written[name] += chunk;
-        if (written.stderr.includes('[y/N]') && !child.stdin.destroyed) {
+        if (!answered && written.stderr.includes('[y/N]')) {
+          answered = true;
           if (answer !== null) child.stdin.write(`${answer}\n`);
           child.stdin.end();
         }
