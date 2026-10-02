@@ -109,13 +109,17 @@ export function createSessionLog({ directory, id }) {
         } else if (event.kind === 'assistant') {
           view.push({ role: 'assistant', text: event.text, toolCalls: event.toolCalls });
         } else if (event.kind === 'tool') {
+          // 拒绝那一条的 reason 是给人的，content 是给模型的：留空字符串，模型只会以为工具通道坏了，
+          // 于是把同一件事再问七轮（本机 2026-10-02 实测）。失败时把码与理由拼成一句给模型看。
+          const result = event.result;
+          const content = result.content === '' && result.failed ? `${result.code}: ${result.reason ?? 'no output'}` : result.content;
           view.push({
             role: 'tool',
             id: event.callId,
             tool: event.tool,
-            content: event.result.content,
-            failed: event.result.failed,
-            code: event.result.code,
+            content,
+            failed: result.failed,
+            code: result.code,
           });
         }
       }

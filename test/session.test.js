@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
-  createConfig, createDecisionChain, createKernel, createSessionLog, execTool, readTool,
+  createConfig, createDecisionChain, createKernel, createSessionLog, execTool, readTool, refusalOf,
 } from '../src/index.js';
 
 async function withDirectory(run) {
@@ -170,6 +170,19 @@ test('a read result reaches the session log with its content intact', async () =
     assert.deepEqual(await kernel.call('read', { path: 'note.txt' }), { text: 'the file content' });
     assert.deepEqual(await session.modelView(), [
       { role: 'tool', id: undefined, tool: 'read', content: { text: 'the file content' }, failed: false, code: undefined },
+    ]);
+  });
+});
+
+test('a refusal reaches the model as a sentence instead of an empty result', async () => {
+  await withDirectory(async (directory) => {
+    const session = createSessionLog({ directory, id: 'run-9' });
+    const call = { id: 'call_1', name: 'exec', args: { command: 'npm test' } };
+    await session.append({ kind: 'assistant', text: '', toolCalls: [call] });
+    await session.append({ kind: 'tool', tool: 'exec', callId: call.id, args: call.args, result: refusalOf('ask_declined', 'the user declined') });
+    assert.deepEqual(await session.modelView(), [
+      { role: 'assistant', text: '', toolCalls: [call] },
+      { role: 'tool', id: 'call_1', tool: 'exec', content: 'ask_declined: the user declined', failed: true, code: 'ask_declined' },
     ]);
   });
 });
