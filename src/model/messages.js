@@ -104,20 +104,25 @@ export function createMessagesProvider({
         const content = event.content_block ?? {};
         if (content.type === 'text') blocks.set(event.index, { kind: 'text' });
         else if (content.type === 'tool_use') blocks.set(event.index, { kind: 'tool', id: content.id, name: content.name, json: '' });
-        // 推理段：这一类端点会把它当成一种内容块交回来。内部形状里没有推理这一类事件，
-        // 它也不是答案的一部分，所以按名字认出它、跳过它的内容增量；类型认不出来的仍然当场报错误码，
-        // 不把「没见过」混进「见过且不要」。要不要把它交给界面见 todo.md 的 U23。
+        // 推理段是一种内容块（D32）：认出来，把它的内容增量作为 reasoning 事件交出去。
+        // 签名先攒着不外传——把带签名的推理块回传是 Anthropic 原生端点那一类要求，接上之后再补。
         else if (content.type === 'thinking' || content.type === 'redacted_thinking') blocks.set(event.index, { kind: 'reasoning' });
         else throw new KernelError('provider_content_unsupported', { detail: String(content.type) });
       } else if (event.type === 'content_block_delta') {
         const block = blocks.get(event.index);
         if (block === undefined) throw new KernelError('provider_stream_invalid', { detail: 'a delta without an open block' });
-        if (block.kind === 'reasoning') continue;
         const delta = event.delta ?? {};
         if (delta.type === 'text_delta') {
           yield { type: 'text', text: delta.text ?? '' };
         } else if (delta.type === 'input_json_delta') {
           block.json += delta.partial_json ?? '';
+        } else if (delta.type === 'thinking_delta') {
+          yield { type: 'reasoning', text: delta.thinking ?? '' };
+        } else if (delta.type === 'signature_delta') {
+          if (block.kind !== 'reasoning') {
+            throw new KernelError('provider_stream_invalid', { detail: 'a signature delta on a block that is not reasoning' });
+          }
+          block.signature = (block.signature ?? '') + (delta.signature ?? '');
         } else {
           throw new KernelError('provider_stream_invalid', { detail: `unsupported delta ${String(delta.type)}` });
         }

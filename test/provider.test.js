@@ -107,9 +107,8 @@ test('a tool call is assembled while the stream is still arriving', async () => 
   });
 });
 
-// 推理段是这一类端点会交回来的内容块（本机对真实端点跑出来过一次）：认出它、跳过它的内容增量，
-// 一轮不该因为看到了模型的思考就整轮失败。
-test('a reasoning block is skipped while the answer still comes through', async () => {
+// 推理段是一种内容块（D32）：它作为 reasoning 事件交出去，与答案分开，签名攒着不外传。
+test('a reasoning block becomes reasoning events while the answer stays separate', async () => {
   const turn = [
     { type: 'message_start', message: { usage: {} } },
     { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } },
@@ -126,8 +125,28 @@ test('a reasoning block is skipped while the answer still comes through', async 
     response.end(sseBody(turn));
   }, async (baseUrl) => {
     assert.deepEqual(await collect(provider(baseUrl).stream({ system: '', tools: [], messages: [] })), [
+      { type: 'reasoning', text: 'the file is one line' },
       { type: 'text', text: 'reading it' },
     ]);
+  });
+});
+
+// 签名只会跟在推理块上；落在别的内容块上说明这一份流不是我们以为的那个形状。
+test('a signature delta on another kind of block is reported as a broken stream', async () => {
+  const turn = [
+    { type: 'message_start', message: { usage: {} } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'sig' } },
+    { type: 'message_stop' },
+  ];
+  await withEndpoint(async (attempt, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(sseBody(turn));
+  }, async (baseUrl) => {
+    await assert.rejects(
+      collect(provider(baseUrl).stream({ system: '', tools: [], messages: [] })),
+      (error) => error.code === 'provider_stream_invalid' && /signature/.test(error.detail),
+    );
   });
 });
 

@@ -47,6 +47,7 @@ function provider(baseUrl, extra = {}) {
 // 一次调用分三片到达，文本从中间穿过；整段响应再按 7 个字节切开写，切点落在 JSON 里。
 const TOOL_CALL_CHUNKS = [
   { choices: [{ index: 0, delta: { role: 'assistant', content: '' } }] },
+  { choices: [{ index: 0, delta: { reasoning_content: 'the file is one line' } }] },
   { choices: [{ index: 0, delta: { content: 'Let me ' } }] },
   { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'read', arguments: '' } }] } }] },
   { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '{"path": "no' } }] } }] },
@@ -65,8 +66,9 @@ test('tool call fragments arriving by index are assembled into one call', async 
     response.end();
   }, async (baseUrl) => {
     const events = await collect(provider(baseUrl).stream({ system: '', messages: [], tools: [] }));
-    // 文本按到达顺序交出去；调用没有「这一块结束」那一种事件，攒到流收尾再交，顺序按 index。
+    // 文本与推理按到达顺序交出；调用没有「这一块结束」那一种事件，攒到流收尾再交，顺序按 index。
     assert.deepEqual(events, [
+      { type: 'reasoning', text: 'the file is one line' },
       { type: 'text', text: 'Let me ' },
       { type: 'text', text: 'read it.' },
       { type: 'tool-call', id: 'call_1', name: 'read', args: { path: 'note.txt' } },

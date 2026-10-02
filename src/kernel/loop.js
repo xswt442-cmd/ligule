@@ -69,9 +69,13 @@ export function createLoop({ kernel, provider, prompt, session, limits = DEFAULT
           )) events.push(event);
 
           text = events.filter((event) => event.type === 'text').map((event) => event.text).join('');
+          const reasoning = events.filter((event) => event.type === 'reasoning').map((event) => event.text).join('');
           const toolCalls = events
             .filter((event) => event.type === 'tool-call')
             .map((event) => ({ id: event.id, name: event.name, args: event.args ?? {} }));
+          // 推理段进记录，不进投影（D32）：它是这一轮真的发生过的事，界面与重开时要能看见，
+          // 而下一轮的请求体里没有它的位置，进了投影就是每轮重复占一份上下文。
+          if (session && reasoning !== '') await session.append({ kind: 'reasoning', text: reasoning });
           if (session) await session.append({ kind: 'assistant', text, toolCalls });
           if (toolCalls.length === 0) return { text, iterations: iteration, modelCalls: calls };
 

@@ -66,6 +66,10 @@ async function kernelOrFail() {
 function printNotification(message) {
   if (message.notify === 'delta') {
     if (message.event?.type === 'text') process.stdout.write(message.event.text);
+    // 推理段走标准错误：答案那一份要留给管道另一头的脚本，想看的的人在终端里看得见（D32）。
+    if (message.event?.type === 'reasoning') process.stderr.write(message.event.text);
+  } else if (message.notify === 'event' && message.event?.kind === 'reasoning') {
+    process.stderr.write('\n');
   } else if (message.notify === 'event' && message.event?.kind === 'assistant') {
     // 只有流上真的吐过字才收那一行，纯工具调用那一轮的文本是空的，不该留一个空行。
     if (message.event.text !== '') process.stdout.write('\n');

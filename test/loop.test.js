@@ -267,3 +267,25 @@ test('what the model is shown next is rebuilt from the session log', async () =>
     await rm(root, { recursive: true, force: true });
   }
 });
+
+// 推理段进记录、不进投影（D32）：界面与重开时要能看见它，而下一轮的请求体里没有它的位置。
+test('reasoning is recorded and kept out of what the model is asked next', async () => {
+  const root = await mkdtemp(join(process.cwd(), 'testplace', 'loop-'));
+  try {
+    const session = createSessionLog({ directory: root, id: 'run' });
+    const kernel = createKernel({ config: createConfig({ user: { boundary: root } }), session });
+    kernel.register(tool('peek', async () => ({ text: 'one line' })));
+    const provider = scriptedProvider([
+      [{ type: 'reasoning', text: 'the file is short' }, { type: 'tool-call', id: 'c1', name: 'peek', args: {} }],
+      [{ type: 'text', text: 'it says one line' }],
+    ]);
+    await createLoop({ kernel, provider, session }).run('read it');
+
+    const events = await session.read();
+    assert.deepEqual(events.map((event) => event.kind), ['user', 'reasoning', 'assistant', 'tool', 'assistant']);
+    assert.equal(events[1].text, 'the file is short');
+    assert.deepEqual(provider.requests[1].messages.map((entry) => entry.role), ['user', 'assistant', 'tool']);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

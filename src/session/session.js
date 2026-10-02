@@ -100,6 +100,7 @@ export function createSessionLog({ directory, id }) {
 
     // 模型上一轮看见的那一份，从记录算出来（I5）。助手那一轮与工具结果都要投影：
     // 请求体里的工具结果要按调用 id 挂在助手那一轮的调用上，只投影工具结果拼不出合法的请求。
+    // 推理段那一种事件不在这里出现（D32）：它进了记录是为了界面与重开时能看见，不是要回传给模型。
     async modelView() {
       const view = [];
       for (const event of await this.read()) {

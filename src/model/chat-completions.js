@@ -91,6 +91,10 @@ export function createChatCompletionsProvider({
       for (const choice of chunk.choices ?? []) {
         const delta = choice.delta ?? {};
         if (typeof delta.content === 'string' && delta.content !== '') yield { type: 'text', text: delta.content };
+        // 推理段在这一种形状里是增量上的一个平行字段（D32），DeepSeek 那一类用的名字是 reasoning_content。
+        if (typeof delta.reasoning_content === 'string' && delta.reasoning_content !== '') {
+          yield { type: 'reasoning', text: delta.reasoning_content };
+        }
         for (const fragment of delta.tool_calls ?? []) {
           const index = Number.isInteger(fragment.index) ? fragment.index : calls.size;
           const call = calls.get(index) ?? { id: undefined, name: '', json: '' };
