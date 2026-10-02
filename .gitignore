@@ -1,3 +1,14 @@
+# testplace
+testplace
+
+# 桌面壳的构建产物与编译期生成的 schema 目录（Tauri 自己写这两处），以及前端的依赖与构建输出
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+desktop/frontend/node_modules/
+desktop/frontend/dist/
+# 随安装包分发的 Node 运行时与运行时树，由 desktop/fetch-runtime.mjs 拉出来
+desktop/vendor/
+
 # Dependencies
 node_modules/
 
@@ -16,10 +27,20 @@ coverage/
 *.tar.gz
 .npm/
 
+# 平台包内容由 scripts/build-rg-packages.js 拉取生成：二进制与它自带的许可文本都不进版本控制
+packages/*/rg
+packages/*/rg.exe
+packages/*/LICENSE-MIT
+packages/*/UNLICENSE
+packages/*/COPYING
+packages/*/RIPGREP-VERSION
+
 # Environment & secrets
 .env
 .env.*
 !.env.example
+# 一次运行的会话记录与本地配置都在这儿（D8、D11），没有该签进去的东西
+.ligule/
 
 # Editors & OS
 .DS_Store

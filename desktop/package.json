@@ -1,0 +1,13 @@
+{
+  "name": "ligule-desktop",
+  "private": true,
+  "version": "0.0.1",
+  "description": "桌面壳的构建入口：Tauri 命令行认的是这一层（src-tauri 是本目录的直接子目录），前端的构建由壳的配置去拉起。",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.1"
+  }
+}

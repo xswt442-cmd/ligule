@@ -16,10 +16,12 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "check-pack": "node scripts/check-pack.js",
+    "build-rg": "node scripts/build-rg-packages.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "author": "xswt442-cmd",
   "license": "MIT",
@@ -36,5 +38,14 @@
     "harness",
     "agent-harness",
     "placeholder"
-  ]
+  ],
+  "dependencies": {
+    "smol-toml": "^1.9.0",
+    "tree-sitter": "^0.25.1",
+    "tree-sitter-bash": "^0.25.1"
+  },
+  "optionalDependencies": {
+    "ink": "^7.1.1",
+    "react": "^19.3.0"
+  }
 }

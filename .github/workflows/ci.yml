@@ -4,26 +4,123 @@ on:
   push:
     branches: ['**']
   pull_request:
+  workflow_dispatch:
+
+env:
+  # 运行时下限在这里写一次。package.json 的 engines.node、README 的徽章和两个工作流
+  # 必须取同一个大版本号，test/runtime-version.test.js 断言这一点（D28）。
+  PRIMARY_NODE_VERSION: '24'
+
+# 同一分支上的新推送取消还在跑的那一次；main 上不取消，那一次承担发布前的最后一轮完整验证。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_name != 'main' }}
 
 permissions:
   contents: read
 
 jobs:
   test:
-    name: test
-    runs-on: ubuntu-latest
+    name: test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          cache: npm
+
+      # 依赖按锁文件装，CI 上不解析新版本。
+      - name: install
+        run: npm ci
+
+      # 测试里那两条按真实后端做的比较读的是构建出来的那一份 ripgrep，没有就跳过。
+      # 这里先把它拉下来，两个平台的矩阵就各按自己那一份查一遍参数与输出解析。
+      - name: build the pinned ripgrep packages
+        run: npm run build-rg
 
       - name: syntax check every module
         shell: bash
         run: |
           set -e
-          for f in src/*.js; do node --check "$f"; done
+          for f in $(find src scripts test -name '*.js'); do node --check "$f"; done
 
       - name: test
         run: npm test
+
+      # 发布物检查：npm pack 一次，解开产物，按 package.json 声明的入口逐个查文件在不在，
+      # 再把解出来的目录当成已经安装好的包 import 一次。npm test 从 src/ 直接导入，看不到这两类问题。
+      - name: check the packed artifact
+        run: npm run check-pack
+
+  # 桌面壳（D34）：Windows 上出 NSIS 安装包并留一个可下载的产品。构建在前端与 Rust 之间只有编译期那一次
+  # 资源嵌入，本地不构建就等不到改完界面才发现打不出来。不签名，装完之后首次运行会有操作系统的一次警告。
+  desktop:
+    name: desktop shell on windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+            desktop/frontend/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: install
+        run: |
+          npm ci
+          npm --prefix desktop ci
+          npm --prefix desktop/frontend ci
+
+      # 安装包自带一份 Node 运行时与运行时树（D34），先按 pin 拉下来并核对校验和。
+      # 这一步要排在任何 cargo 调用之前：`bundle.resources` 指的那两个目录得在编译期就在，
+      # 不然 tauri-build 直接失败在「resource path `../vendor/app` doesn't exist」（2026-10-02 的 CI 就这么红过一次）。
+      - name: vendor the runtime the installer carries
+        run: node desktop/fetch-runtime.mjs
+
+      # 随包带的那一份要能自己跑起来：用带进去的 node 跑带进去的入口，不借 PATH 上的 node。
+      # 八件工具是数出来的：少一件就是运行时树缺了东西，而不是跑通了个空壳。
+      - name: run the vendored tree on its own
+        shell: bash
+        run: |
+          ./desktop/vendor/node/node.exe ./desktop/vendor/app/src/cli.js --version
+          test "$(./desktop/vendor/node/node.exe ./desktop/vendor/app/src/cli.js tools | wc -l)" -eq 8
+
+      # 壳的 Rust 一侧自己那两件事（从可执行文件位置找后端入口、帧在子进程两根管道之间按行转递）与格式。
+      # 这一段不跑就等于壳的测试只在本地跑过，而安装包照样能打出来。
+      - name: check the shell's Rust side
+        working-directory: desktop/src-tauri
+        run: |
+          cargo fmt --check
+          cargo test
+
+      # 壳的构建入口在 desktop/（Tauri 命令行认 src-tauri 是它的直接子目录），它会先把前端构出 dist/。
+      - name: build the installer
+        run: npm --prefix desktop run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ligule-windows-installer
+          path: desktop/src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
