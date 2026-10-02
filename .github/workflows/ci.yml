@@ -93,15 +93,9 @@ jobs:
           npm --prefix desktop ci
           npm --prefix desktop/frontend ci
 
-      # 壳的 Rust 一侧自己那两件事（从可执行文件位置找后端入口、帧在子进程两根管道之间按行转递）与格式。
-      # 这一段不跑就等于壳的测试只在本地跑过，而安装包照样能打出来。
-      - name: check the shell's Rust side
-        working-directory: desktop/src-tauri
-        run: |
-          cargo fmt --check
-          cargo test
-
       # 安装包自带一份 Node 运行时与运行时树（D34），先按 pin 拉下来并核对校验和。
+      # 这一步要排在任何 cargo 调用之前：`bundle.resources` 指的那两个目录得在编译期就在，
+      # 不然 tauri-build 直接失败在「resource path `../vendor/app` doesn't exist」（2026-10-02 的 CI 就这么红过一次）。
       - name: vendor the runtime the installer carries
         run: node desktop/fetch-runtime.mjs
 
@@ -112,6 +106,14 @@ jobs:
         run: |
           ./desktop/vendor/node/node.exe ./desktop/vendor/app/src/cli.js --version
           test "$(./desktop/vendor/node/node.exe ./desktop/vendor/app/src/cli.js tools | wc -l)" -eq 8
+
+      # 壳的 Rust 一侧自己那两件事（从可执行文件位置找后端入口、帧在子进程两根管道之间按行转递）与格式。
+      # 这一段不跑就等于壳的测试只在本地跑过，而安装包照样能打出来。
+      - name: check the shell's Rust side
+        working-directory: desktop/src-tauri
+        run: |
+          cargo fmt --check
+          cargo test
 
       # 壳的构建入口在 desktop/（Tauri 命令行认 src-tauri 是它的直接子目录），它会先把前端构出 dist/。
       - name: build the installer
