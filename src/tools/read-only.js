@@ -1,4 +1,4 @@
-// 只读三件（architecture.md 第四节的最小配置成员）：`read`、`find`、`search`。
+// 只读三件（最小配置的成员，D3）：`read`、`find`、`search`。
 // 每一条交回的内容受字节与条数上限约束，超限时在文本里留下一行看得见的标记（I6）。
 import { readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
@@ -93,7 +93,7 @@ export const searchTool = {
     const { resultCount, scanBytes, scanFiles } = limitsOf(config);
     const boundary = boundaryOf(config);
 
-    // 有外部后端就用它：八千个文件的树上一秒出头，自己遍历要三倍耗时（数字记在 todo.md 第 6 步）。
+    // 有外部后端就用它：八千个文件的树上一秒出头，自己遍历要三倍耗时（本机实测）。
     // 探测不到就回落到自己遍历，回落的原因写进日志（I8）。
     const backend = await resolveRipgrep({ path: config.ripgrepPath });
     if (backend.executable !== undefined) {

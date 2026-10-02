@@ -74,7 +74,7 @@ const pendingPanels: Panel<PanelProps>[] = [
     id: 'panel.policy',
     title: '审批规则',
     pending: true,
-    view: () => <p className="stub">档位现在是整个运行一份，按工具名一份那一档没定（todo.md 的 U22）。界面在这里放开关就等于替那条未定项做决定，所以先不放。</p>,
+    view: () => <p className="stub">档位现在是整个运行一份，按工具名一份那一档没定（未定项 U22）。界面在这里放开关就等于替那条未定项做决定，所以先不放。</p>,
   },
   {
     id: 'panel.appearance',

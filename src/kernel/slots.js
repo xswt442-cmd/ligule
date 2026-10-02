@@ -37,7 +37,7 @@ export function createSlotRegistry(slots) {
       };
     },
 
-    // 宿主渲染时按槽位取内容；没有内容的槽位返回空数组，而不是 undefined。
+    // 宿主渲染时按槽位取内容；没有内容时返回空数组。
     list(slotName) {
       if (!declared.has(slotName)) throw new KernelError('slot_unknown');
       return (filled.get(slotName) ?? []).map((entry) => entry.payload);

@@ -1,4 +1,4 @@
-// 写操作四件（decisions.md D3）：`create`、`write`、`edit`、`delete`。
+// 写操作四件（D3）：`create`、`write`、`edit`、`delete`。
 // 四条语义约束落在工具内部，每条带一个稳定错误码；`delete` 的去处由能力提供者那一层给（D18）。
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
@@ -131,7 +131,7 @@ export const deleteTool = {
     if (!(await existsOrFails(target))) throw new KernelError('delete_target_missing', { detail: `there is nothing at ${args.path} to move into the trash` });
 
     // 去处由配置的 trashBackend 定：auto 是「有系统回收站就用它，没有就用项目内那个目录」，
-    // system 与 managed 各自钉死一条，钉死的那一条不成立时报错而不是悄悄换另一条。
+    // system 与 managed 各自固定一条路径，那条路径不成立时报错，不悄悄换另一条。
     const backend = config.trashBackend ?? 'auto';
     if (backend !== 'auto' && backend !== 'system' && backend !== 'managed') {
       throw new KernelError('delete_trash_backend_unknown', { detail: `"${backend}" is not a trash backend; the choices are auto, system and managed` });

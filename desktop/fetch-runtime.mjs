@@ -1,6 +1,6 @@
 // 桌面壳的自包含运行时（D34）：安装包要能装到没有这份仓库的机器上就跑起来，
 // 所以随包带两样东西——一份钉住版本的 Node，和 ligule 自己的运行时树（src 加它需要的依赖）。
-// 与 `scripts/build-rg.js` 同一种做法：版本与校验和写在 pin 文件里，下载后先核对再落地。
+// 与 `scripts/build-rg-packages.js` 同一种做法：版本与校验和写在 pin 文件里，下载后先核对再放进目录。
 // 用法：node desktop/fetch-runtime.mjs [--force]
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';

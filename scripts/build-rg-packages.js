@@ -1,4 +1,4 @@
-// 造出两个平台包的内容：按 scripts/ripgrep-pin.json 钉死的版本下载 ripgrep 的发布产物，
+// 造出两个平台包的内容：按 scripts/ripgrep-pin.json 写明的版本下载 ripgrep 的发布产物，
 // 逐个校验大小与 sha256，把可执行文件与它自带的三份许可文本解到 packages/<平台>/ 下。
 // 二进制不进版本控制，也不由 npm 在安装期拉取：发布工作流跑一次这个脚本，再按依赖顺序发三个包。
 // 本地想用外部搜索后端也跑它：npm run build-rg。

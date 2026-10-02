@@ -1,5 +1,5 @@
 // 规则与文件名共用的匹配写法：第一版只有前缀与含 `*` 的通配两种（D15 对命令动作匹配的规定）。
-// 前缀匹配要求整段参数边界对齐，否则规则 `git status` 会顺带放行 `git statusfoo`。
+// 前缀匹配要求匹配到完整的参数边界，否则规则 `git status` 会顺带放行 `git statusfoo`。
 function escapeLiteral(text) {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

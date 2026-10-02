@@ -1,5 +1,5 @@
 // `exec`：命令执行与进程所有权（D18）。整棵子树的终止在 Windows 上走系统自带的 `taskkill /T /F`，
-// 在 POSIX 上把孩子放进自己的进程组、终止整组。两条路的实测结论与还没定的那条路线见 todo.md U1。
+// 在 POSIX 上把孩子放进自己的进程组、终止整组。两条路的实测结论与还没定的那条路线记在项目的未定项 U1。
 // 取消由调用方交进来的 signal 触发（D20 的取消边界）；本工具不做超时，超时没有进契约（D29）。
 import { execFileSync, spawn } from 'node:child_process';
 import { KernelError } from '../kernel/error.js';

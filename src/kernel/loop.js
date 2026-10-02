@@ -38,7 +38,7 @@ export function createLoop({ kernel, provider, prompt, session, limits = DEFAULT
 
       // 许出去却没执行的调用要留下一条结果：请求体里每个工具调用都要有对应的结果顶着，
       // 少一条，端点把整份请求拒掉，而这一轮之后每一轮都拼不出合法请求。
-      // 参照实现在同一种情形下也是记一条错误结果，而不是留着没人回答（Cline 的循环里那条 skipReason）。
+      // 同一种情形下也记一条错误结果：留着没人回答，之后每一轮都拼不出合法的请求体。
       async function answerRemaining(skipped, content) {
         if (!session) return;
         for (const call of skipped) {

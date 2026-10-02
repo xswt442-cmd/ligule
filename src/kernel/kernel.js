@@ -172,7 +172,7 @@ export function createKernel(options = {}) {
       try {
         value = await tool.run(args, { ...context, signal: options.signal });
       } catch (error) {
-        // 工具没把错误包成内核错误码时由内核兜住：统一成一个稳定码，原始错误进 cause，
+        // 工具没把错误包成内核错误码时由内核接住：统一成一个稳定码，原始错误进 cause，
         // 它自己的消息作为给模型看的那一份说明。半成品工具抛出的异常不该停住循环，
         // 所以这一类同样作为一条失败事件进会话记录，模型下一轮看得见（D19、D20）。
         const failure = error instanceof KernelError

@@ -1,5 +1,5 @@
 // 会话记录：一条追加式 JSONL 事件日志是唯一事实源，恢复与重建都从它算出来（D11、I5）。
-// 写失败时把长度退回写之前、崩溃留下的半行截掉，这两条照 dsh 的做法，理由与出处记在 todo.md 第 10 步。
+// 写失败时把长度退回写之前、崩溃留下的半行截掉，这两条做法与 dsh 相同：半行会让下一次重试用同一个序号写两遍。
 // 读写失败都是内核自身的故障（KernelRuntimeError）：记录已经不可信，循环要停住，不当成工具没做成那一类。
 import { mkdir, open, readFile, truncate } from 'node:fs/promises';
 import { join } from 'node:path';
