@@ -97,7 +97,7 @@ jobs:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
           registry-url: https://registry.npmjs.org
 
-      # 平台包的内容不提交进仓库：按 scripts/ripgrep-pin.json 钉死的版本与校验和拉取解包。
+      # 平台包的内容不提交进仓库：按 scripts/ripgrep-pin.json 写明的版本与校验和拉取解包。
       - name: build the ripgrep platform packages
         run: npm run build-rg
 

@@ -100,7 +100,7 @@ jobs:
         run: node desktop/fetch-runtime.mjs
 
       # 随包带的那一份要能自己跑起来：用带进去的 node 跑带进去的入口，不借 PATH 上的 node。
-      # 八件工具是数出来的：少一件就是运行时树缺了东西，而不是跑通了个空壳。
+      # 八件工具是数出来的：少一件就说明运行时树缺了东西。
       - name: run the vendored tree on its own
         shell: bash
         run: |
