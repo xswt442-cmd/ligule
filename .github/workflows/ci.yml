@@ -60,3 +60,45 @@ jobs:
       # 再把解出来的目录当成已经安装好的包 import 一次。npm test 从 src/ 直接导入，看不到这两类问题。
       - name: check the packed artifact
         run: npm run check-pack
+
+  # 桌面壳（D34）：Windows 上出 NSIS 安装包并留一个可下载的产品。构建在前端与 Rust 之间只有编译期那一次
+  # 资源嵌入，本地不构建就等不到改完界面才发现打不出来。不签名，装完之后首次运行会有操作系统的一次警告。
+  desktop:
+    name: desktop shell on windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+            desktop/frontend/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: install
+        run: |
+          npm ci
+          npm --prefix desktop ci
+          npm --prefix desktop/frontend ci
+
+      # 壳的构建入口在 desktop/（Tauri 命令行认 src-tauri 是它的直接子目录），它会先把前端构出 dist/。
+      - name: build the installer
+        run: npm --prefix desktop run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ligule-windows-installer
+          path: desktop/src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
