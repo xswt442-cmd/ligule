@@ -197,11 +197,27 @@ if (missingFlagValue) {
   } catch (error) {
     printFailure(error.code ?? 'cli_host_failed', error.detail);
   }
+} else if (command === 'tui') {
+  // 终端界面是协议的第二个客户端（D33）：与 Host 同进程、走内存载体，界面只读协议帧。
+  // 它需要真终端：管道那头没有 raw mode，按键与重画都无从谈起。
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    printFailure('tui_terminal_required', 'the terminal UI needs an interactive terminal; use ligule run from a script');
+  } else {
+    try {
+      const config = await configSnapshot();
+      const { runTui } = await import('./tui/start.js');
+      await runTui({ config, provider: providerFromConfig(config), policy: config.policy });
+    } catch (error) {
+      const missing = error.code === 'ERR_MODULE_NOT_FOUND' && /Cannot find package '(ink|react)'/.test(String(error.message));
+      printFailure(missing ? 'tui_dependency_missing' : error.code ?? 'cli_tui_failed',
+        missing ? 'the terminal UI is an optional dependency: npm install ink react' : error.detail);
+    }
+  }
 } else if (command === undefined || command === '--help' || command === '-h') {
   console.log(`ligule ${pkg.version} - under development, do not depend on it.`);
-  console.log('commands: tools, run <text>, call <tool> [json-args], host, --version');
+  console.log('commands: tools, run <text>, call <tool> [json-args], tui, host, --version');
   console.log('options: --config <key.path=value> (repeatable)');
-  console.log('run and host read model.api ("messages" or "chat-completions"), model.baseURL and model.model from the config layers; the key comes from LIGULE_API_KEY');
+  console.log('run, tui and host read model.api ("messages" or "chat-completions"), model.baseURL and model.model from the config layers; the key comes from LIGULE_API_KEY');
 } else {
   // 打错的命令不该走帮助文本再退出 0：调用方是个脚本时，0 加一段帮助就是一次成功。
   printFailure('cli_command_unknown', `"${command}" is not a command; run ligule --help to list them`);
