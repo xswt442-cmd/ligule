@@ -47,8 +47,11 @@ async function walkUpTo(boundary, current) {
   return found;
 }
 
+// 四层指令的总预算默认值；装载侧登记提示词片段时读同一个数，两处不各截一次。
+export const DEFAULT_INSTRUCTION_BYTES = 32_000;
+
 export async function loadInstructions(options = {}) {
-  const { boundary, current = boundary, managed, user, maxBytes = 32_000, exclude = [] } = options;
+  const { boundary, current = boundary, managed, user, maxBytes = DEFAULT_INSTRUCTION_BYTES, exclude = [] } = options;
   if (typeof boundary !== 'string' || boundary === '') throw new KernelError('instructions_boundary_required');
   if (!(maxBytes >= 1)) throw new KernelError('instructions_max_bytes_required');
   // 上溯的起点必须在项目根之内，否则会读到边界之外的规则文件。

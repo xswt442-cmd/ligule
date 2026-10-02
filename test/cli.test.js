@@ -60,7 +60,7 @@ test('an unknown command is a failure, while asking for help is not', () => {
   for (const flag of [undefined, '--help', '-h']) {
     const asked = flag === undefined ? capture() : capture(flag);
     assert.ok(asked.ok, asked.stderr);
-    assert.match(asked.stdout, /commands: tools, call /);
+    assert.match(asked.stdout, /commands: tools, run /);
   }
 });
 
@@ -78,5 +78,5 @@ test('--config narrows the boundary from the command line and a valueless flag i
 test('--version prints the package version and the bare invocation lists the commands', () => {
   const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'));
   assert.equal(capture('--version').stdout.trim(), pkg.version);
-  assert.match(capture().stdout, /commands: tools, call/);
+  assert.match(capture().stdout, /commands: tools, run/);
 });
