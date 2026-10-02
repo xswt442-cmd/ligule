@@ -29,3 +29,5 @@ npm run check-pack
 `npm run check-pack` packs the tarball, unpacks it, checks every entry `package.json` points at, then imports the unpacked package from an empty consumer directory. `npm test` cannot catch those failures because it imports `src/` directly. Invoke the script through npm: on Windows Node refuses to launch `npm.cmd` without a shell, so the script needs `npm_execpath`.
 
 `npm test` reports `skipped 2` when no ripgrep has been built locally: those two compare the real backend with our own tree walk and cannot be faked. Run `npm run build-rg` first when a change touches either backend.
+
+`testplace/real-round.mjs` drives one round against the configured endpoint (`~/.ligule/config.toml` plus `LIGULE_API_KEY`) and prints the session record afterwards; it is the entry for the two acceptances a local server cannot cover — a real request whose tool call is assembled from stream fragments, and the CLI printing a real round. That directory is neither committed nor published, and the script holds no credential of its own.
