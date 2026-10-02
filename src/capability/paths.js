@@ -19,7 +19,9 @@ async function resolveReal(absolute) {
   try {
     return await realpath(absolute);
   } catch (error) {
-    if (error.code !== 'ENOENT') {
+    // POSIX 对「穿过一个普通文件」的路径直接报 ENOTDIR，Windows 报 ENOENT：两种都要走进下面那段找祖先的循环，
+    // 由那里给出同一个码（循环里两条都认）。在这里就把 ENOTDIR 当解析失败，同一个调用在两个平台会报不同的码。
+    if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') {
       throw new KernelError('path_resolve_failed', { cause: error, detail: `resolving ${absolute} failed: ${error.code ?? error.message}` });
     }
     const missing = [];
