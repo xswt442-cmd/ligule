@@ -93,6 +93,10 @@ jobs:
           npm --prefix desktop ci
           npm --prefix desktop/frontend ci
 
+      # 安装包自带一份 Node 运行时与运行时树（D34），先按 pin 拉下来并核对校验和。
+      - name: vendor the runtime the installer carries
+        run: node desktop/fetch-runtime.mjs
+
       # 壳的构建入口在 desktop/（Tauri 命令行认 src-tauri 是它的直接子目录），它会先把前端构出 dist/。
       - name: build the installer
         run: npm --prefix desktop run build
