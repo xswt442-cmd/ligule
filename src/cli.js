@@ -205,6 +205,9 @@ if (missingFlagValue) {
   } else {
     try {
       const config = await configSnapshot();
+      // React 与 Ink 在第一次被加载时按 NODE_ENV 选构建，所以这一行要在动态导入之前。
+      // 开发版把界面拖贵了一倍：两千条记录的转录下提交一行是 2.6 毫秒对 1.4 毫秒，进程常驻 155 MiB 对 114 MiB。
+      process.env.NODE_ENV = 'production';
       const { runTui } = await import('./tui/start.js');
       await runTui({ config, provider: providerFromConfig(config), policy: config.policy });
     } catch (error) {
