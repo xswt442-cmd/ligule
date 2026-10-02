@@ -49,7 +49,11 @@ export function createConnection({ input, output, onFault }) {
       Promise.resolve()
         .then(() => handler?.(message))
         .then(
-          (result) => write({ id: message.id, result }),
+          // 分发器交出 undefined 是「这一条我自己答复」：客户端收到审批就是这样，要等人按键之后才回。
+          // 在这里自动答一个 undefined 会把对面那一次等待变成一次拒绝。
+          (result) => {
+            if (result !== undefined) write({ id: message.id, result });
+          },
           // 对面按码分支，看得见的解释在 detail 里；底层原因（一个 fetch 失败）在 cause 里，不带上就只剩一个码。
           (error) => write({
             id: message.id,

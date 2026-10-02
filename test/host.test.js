@@ -400,7 +400,8 @@ test('the same protocol runs over an in-memory carrier inside one process', asyn
       client.onNotification((message) => notified.push(message.notify === 'event' ? message.event.kind : message.notify));
       client.onRequest((message) => {
         asked.push(message.params.tool);
-        client.reply(message.id, { decision: 'allow' });
+        // 答复晚一拍：分发器交出 undefined 是「这一条我自己答复」，载体不该替界面先答一个空的「不允许」。
+        setTimeout(() => client.reply(message.id, { decision: 'allow' }), 30);
       });
 
       const { sessionId } = await client.request('session.create', {});
@@ -409,6 +410,10 @@ test('the same protocol runs over an in-memory carrier inside one process', asyn
       assert.deepEqual(asked, ['read']);
       assert.equal(result.iterations, 2);
       for (const kind of ['user', 'assistant', 'tool']) assert.ok(notified.includes(kind), `${kind} reaches the client`);
+      const { events } = await client.request('session.read', { sessionId });
+      const tool = events.find((event) => event.kind === 'tool');
+      assert.equal(tool.result.failed, false, 'the late approval reached the decision chain');
+      assert.equal(tool.result.content.text, 'the body');
       const status = await client.request('status.get', { sessionId });
       assert.equal(status.running, false);
       assert.ok(status.eventCount >= 4, 'the round is in the record');
