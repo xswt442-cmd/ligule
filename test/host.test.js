@@ -10,7 +10,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { createConnection, createConfig, MESSAGES_CAPABILITIES, METHODS, NOTIFICATIONS, providerFromConfig } from '../src/index.js';
+import { createConnection, createConfig, createMemoryConnectionPair, MESSAGES_CAPABILITIES, METHODS, NOTIFICATIONS, providerFromConfig, serveHost } from '../src/index.js';
 
 const CLI = fileURLToPath(new URL('../src/cli.js', import.meta.url));
 
@@ -376,6 +376,49 @@ test('opening a session with no record on disk is refused, and an unknown method
         .request(name, name === 'run.start' ? { sessionId: 'nobody', input: '' } : { sessionId: 'nobody' })
         .then((result) => result, (error) => error);
       assert.notEqual(outcome?.code, 'protocol_method_unknown', `${name} reaches a handler`);
+    }
+  });
+});
+
+// 同一份协议的第二种载体（D33 的终端界面走的就是这一条）：Host 与客户端在同一个进程里，
+// 两端是两根内存流，帧的写法与子进程那一条一模一样，协议与 connection.js 都没有为它改动。
+test('the same protocol runs over an in-memory carrier inside one process', async () => {
+  await withEndpoint(async (baseUrl) => {
+    const directory = await mkdtemp(join(tmpdir(), 'ligule-memory-'));
+    await writeFile(join(directory, 'note.txt'), 'the body');
+    const previous = process.env.LIGULE_API_KEY;
+    process.env.LIGULE_API_KEY = 'test-key';
+    try {
+      const config = createConfig({
+        user: { boundary: directory, model: { api: 'messages', baseURL: baseUrl, model: 'test-model' }, policy: { mode: 'ask' } },
+      });
+      const pair = createMemoryConnectionPair();
+      const host = serveHost({ ...pair.host, config, provider: providerFromConfig(config), policy: config.policy });
+      const client = createConnection(pair.client);
+      const notified = [];
+      const asked = [];
+      client.onNotification((message) => notified.push(message.notify === 'event' ? message.event.kind : message.notify));
+      client.onRequest((message) => {
+        asked.push(message.params.tool);
+        client.reply(message.id, { decision: 'allow' });
+      });
+
+      const { sessionId } = await client.request('session.create', {});
+      const result = await client.request('run.start', { sessionId, input: '读 note.txt 并告诉我它写了什么' });
+
+      assert.deepEqual(asked, ['read']);
+      assert.equal(result.iterations, 2);
+      for (const kind of ['user', 'assistant', 'tool']) assert.ok(notified.includes(kind), `${kind} reaches the client`);
+      const status = await client.request('status.get', { sessionId });
+      assert.equal(status.running, false);
+      assert.ok(status.eventCount >= 4, 'the round is in the record');
+
+      pair.client.output.end();
+      host.release();
+    } finally {
+      if (previous === undefined) delete process.env.LIGULE_API_KEY;
+      else process.env.LIGULE_API_KEY = previous;
+      await rm(directory, { recursive: true, force: true });
     }
   });
 });
