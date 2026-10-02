@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { createDecisionChain, createKernel, execTool } from '../src/index.js';
+import { decode } from '../src/capability/exec.js';
 
 const node = `"${process.execPath}"`;
 
@@ -77,4 +79,18 @@ test('the decision chain sees the command text before anything is spawned', asyn
     () => kernel.call('exec', { command: 'rm -rf /tmp/nowhere' }),
     (error) => error.code === 'policy_denied',
   );
+});
+
+// Windows 上子进程写的是控制台码页，按 utf8 硬解会得到一串乱字（界面里就是问号）。
+// 这一条只在码页真是 cp936 的控制台上跑：别的码页要的标签不在 WHATWG 的编码表里，测了也不代表那台机器。
+const GBK_ZHONGWEN = Buffer.from([0xd6, 0xd0, 0xce, 0xc4]);
+const consolePage = process.platform === 'win32'
+  ? /(\d+)/.exec(execFileSync('chcp.com', [], { encoding: 'utf8' }))?.[1]
+  : undefined;
+
+test('a child writing the console code page is decoded instead of garbled', {
+  skip: consolePage === '936' ? false : `needs a cp936 console (this one: ${consolePage ?? process.platform})`,
+}, () => {
+  assert.equal(decode(GBK_ZHONGWEN), '中文');
+  assert.equal(decode(Buffer.from('普通的 utf8 输出', 'utf8')), '普通的 utf8 输出');
 });
