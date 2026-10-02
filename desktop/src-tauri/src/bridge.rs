@@ -19,7 +19,10 @@ pub fn resolve_cli_script(
         if candidate.is_file() {
             return Ok(candidate);
         }
-        return Err(format!("LIGULE_DESKTOP_CLI points at {}, which is not a file", candidate.display()));
+        return Err(format!(
+            "LIGULE_DESKTOP_CLI points at {}, which is not a file",
+            candidate.display()
+        ));
     }
 
     let mut tried = Vec::new();
@@ -94,7 +97,10 @@ fn pump<R: std::io::Read + Send + 'static>(reader: R, sink: Sender<String>) {
 
 /// 起后端进程，交回进程本身与两条读到的行流（帧与日志）。
 /// 流不放在 `Host` 里：读流要交给转发线程持有，而进程本身要留在壳的状态里。
-pub fn spawn_host(program: &str, args: &[&str]) -> Result<(Host, Receiver<String>, Receiver<String>), String> {
+pub fn spawn_host(
+    program: &str,
+    args: &[&str],
+) -> Result<(Host, Receiver<String>, Receiver<String>), String> {
     let mut command = Command::new(program);
     command
         .args(args)
@@ -108,9 +114,13 @@ pub fn spawn_host(program: &str, args: &[&str]) -> Result<(Host, Receiver<String
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("failed to start the host ({} {}): {error}", program, args.join(" ")))?;
+    let mut child = command.spawn().map_err(|error| {
+        format!(
+            "failed to start the host ({} {}): {error}",
+            program,
+            args.join(" ")
+        )
+    })?;
     let stdin = child.stdin.take().ok_or("the host has no stdin")?;
     let stdout = child.stdout.take().ok_or("the host has no stdout")?;
     let stderr = child.stderr.take().ok_or("the host has no stderr")?;
@@ -133,9 +143,15 @@ pub fn spawn_host(program: &str, args: &[&str]) -> Result<(Host, Receiver<String
 impl Host {
     /// 交出一帧。行尾的换行由这一层补，上面不需要知道帧是怎么分的。
     pub fn send(&self, frame: &str) -> Result<(), String> {
-        let mut stdin = self.stdin.lock().map_err(|_| "the host's stdin is gone".to_string())?;
-        writeln!(stdin, "{frame}").map_err(|error| format!("failed to write to the host: {error}"))?;
-        stdin.flush().map_err(|error| format!("failed to flush the host's stdin: {error}"))
+        let mut stdin = self
+            .stdin
+            .lock()
+            .map_err(|_| "the host's stdin is gone".to_string())?;
+        writeln!(stdin, "{frame}")
+            .map_err(|error| format!("failed to write to the host: {error}"))?;
+        stdin
+            .flush()
+            .map_err(|error| format!("failed to flush the host's stdin: {error}"))
     }
 
     /// 终止后端进程。Windows 上没有能够送达进程并让它自己退出的终止信号，参照实现同样是直接终止
@@ -155,7 +171,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     fn temp_dir(tag: &str) -> PathBuf {
-        let directory = std::env::temp_dir().join(format!("ligule-desktop-{tag}-{}", std::process::id()));
+        let directory =
+            std::env::temp_dir().join(format!("ligule-desktop-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).expect("create the temporary directory");
         directory
@@ -164,12 +181,20 @@ mod tests {
     #[test]
     fn finds_the_cli_by_walking_up_from_the_executable_directory() {
         let root = temp_dir("walk");
-        let exe_dir = root.join("desktop").join("src-tauri").join("target").join("debug");
+        let exe_dir = root
+            .join("desktop")
+            .join("src-tauri")
+            .join("target")
+            .join("debug");
         fs::create_dir_all(exe_dir.join("nested")).expect("create the executable directory");
         fs::create_dir_all(root.join("src")).expect("create src");
-        fs::write(root.join("src").join("cli.js"), "#!/usr/bin/env node\n").expect("write the cli stub");
+        fs::write(root.join("src").join("cli.js"), "#!/usr/bin/env node\n")
+            .expect("write the cli stub");
 
-        assert_eq!(resolve_cli_script(&exe_dir, None, None).expect("found"), root.join("src").join("cli.js"));
+        assert_eq!(
+            resolve_cli_script(&exe_dir, None, None).expect("found"),
+            root.join("src").join("cli.js")
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -187,7 +212,8 @@ mod tests {
         fs::create_dir_all(root.join("src")).expect("create src");
         fs::write(root.join("src").join("cli.js"), "").expect("write a decoy");
         let missing = root.join("nowhere.js");
-        let error = resolve_cli_script(&root, None, Some(missing.to_str().expect("utf-8 path"))).expect_err("refused");
+        let error = resolve_cli_script(&root, None, Some(missing.to_str().expect("utf-8 path")))
+            .expect_err("refused");
         assert!(error.contains("LIGULE_DESKTOP_CLI"), "{error}");
         let _ = fs::remove_dir_all(&root);
     }
@@ -201,14 +227,22 @@ mod tests {
         let node = std::env::var("NODE").unwrap_or_else(|_| "node".to_string());
         let (host, frames, logs) = spawn_host(&node, &["-e", script]).expect("spawn the child");
 
-        host.send(r#"{"id":"1","method":"ping"}"#).expect("write a frame");
+        host.send(r#"{"id":"1","method":"ping"}"#)
+            .expect("write a frame");
         // 收不到帧的时候，把子进程写过来的话一起报出来：起不来的原因通常就写在里面。
-        let frame = recv(&frames).unwrap_or_else(|| panic!("no frame came back; the child wrote: {:?}", drain(&logs)));
+        let frame = recv(&frames)
+            .unwrap_or_else(|| panic!("no frame came back; the child wrote: {:?}", drain(&logs)));
         assert_eq!(frame, r#"echo {"id":"1","method":"ping"}"#);
-        assert_eq!(recv(&logs).expect("a log line comes back"), r#"log {"id":"1","method":"ping"}"#);
+        assert_eq!(
+            recv(&logs).expect("a log line comes back"),
+            r#"log {"id":"1","method":"ping"}"#
+        );
 
         host.send("second").expect("write a second frame");
-        assert_eq!(recv(&frames).expect("the second frame comes back"), "echo second");
+        assert_eq!(
+            recv(&frames).expect("the second frame comes back"),
+            "echo second"
+        );
         host.stop();
     }
 
@@ -238,10 +272,15 @@ mod tests {
         let resources = root.join("resources");
         fs::create_dir_all(&exe_dir).expect("create the executable directory");
         fs::create_dir_all(resources.join("app").join("src")).expect("create the bundled tree");
-        fs::write(resources.join("app").join("src").join("cli.js"), "// bundled\n").expect("write the bundled entry");
+        fs::write(
+            resources.join("app").join("src").join("cli.js"),
+            "// bundled\n",
+        )
+        .expect("write the bundled entry");
         // 开发时那份仓库也在往上找得到的位置上：随包带的那一份要先，不然装好的应用会去用错处的代码。
         fs::create_dir_all(root.join("src")).expect("create the development tree");
-        fs::write(root.join("src").join("cli.js"), "// development\n").expect("write the development entry");
+        fs::write(root.join("src").join("cli.js"), "// development\n")
+            .expect("write the development entry");
 
         assert_eq!(
             resolve_cli_script(&exe_dir, Some(&resources), None).expect("found"),

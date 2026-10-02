@@ -29,7 +29,8 @@ fn pump(app: AppHandle, receiver: std::sync::mpsc::Receiver<String>, event: &'st
 /// 起后端进程。壳一起来就起，界面不需要先问一次「后端在哪」——这里没有地址可给（D30）。
 /// 运行时与后端入口优先用随包带的那一份（D34），没有才退回开发时的目录层级与 PATH 上的 node。
 fn start_host(app: &AppHandle) -> Result<(), String> {
-    let exe_path = std::env::current_exe().map_err(|error| format!("cannot locate this executable: {error}"))?;
+    let exe_path = std::env::current_exe()
+        .map_err(|error| format!("cannot locate this executable: {error}"))?;
     let exe_dir = exe_path.parent().ok_or("the executable has no directory")?;
     let resources = app.path().resource_dir().ok();
     let cli = bridge::resolve_cli_script(
@@ -53,7 +54,9 @@ fn start_host(app: &AppHandle) -> Result<(), String> {
 impl AppState {
     /// 拿这一份状态里的槽位。锁被毒过之后不接着用：那说明有一次搬运在持锁时 panic 了。
     fn slot(&self) -> Result<std::sync::MutexGuard<'_, Option<Host>>, String> {
-        self.host.lock().map_err(|_| "the host slot is poisoned".to_string())
+        self.host
+            .lock()
+            .map_err(|_| "the host slot is poisoned".to_string())
     }
 }
 
