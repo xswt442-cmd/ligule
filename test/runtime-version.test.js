@@ -37,7 +37,11 @@ test('the ripgrep platform packages move with the release and ship what the buil
     const manifest = JSON.parse(read(`../packages/${target.directory}/package.json`));
     assert.equal(manifest.name, target.package, `packages/${target.directory} is named ${manifest.name}`);
     assert.equal(manifest.version, pkg.version, `${target.package} does not move with the release version`);
-    assert.equal(pkg.optionalDependencies[target.package], pkg.version, `${target.package} is not pinned to this release`);
+    // 声明要等两个包真的发布之后再进 optionalDependencies：`npm ci` 要求锁文件与 package.json 完全同步，
+    // 而没发布的包进不了锁文件（2026-10-02 持续集成第一次跑 npm ci 就卡在这儿）。已经声明了就必须钉住本次发布版本。
+    if (pkg.optionalDependencies?.[target.package] !== undefined) {
+      assert.equal(pkg.optionalDependencies[target.package], pkg.version, `${target.package} is not pinned to this release`);
+    }
     assert.deepEqual(manifest.files, [target.binary, ...pin.licenseFiles, 'RIPGREP-VERSION'], `${target.package} ships a different file list`);
   }
 });
