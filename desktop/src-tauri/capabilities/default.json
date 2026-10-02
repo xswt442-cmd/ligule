@@ -1,0 +1,13 @@
+{
+  "identifier": "main-window",
+  "description": "主窗口需要的权限：核心与事件监听，加上窗口自身的几个操作。自定义命令属于本应用自己，不在这里列。",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:allow-close",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-start-dragging"
+  ]
+}

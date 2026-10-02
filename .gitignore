@@ -1,6 +1,10 @@
 # testplace
 testplace
 
+# 桌面壳的构建产物与编译期生成的 schema 目录（Tauri 自己写这两处）
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+
 # Dependencies
 node_modules/
 
