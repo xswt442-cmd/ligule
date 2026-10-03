@@ -12,8 +12,10 @@ import { createDecisionChain } from '../kernel/policy.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { createSessionLog } from '../session/session.js';
 import { loadInstructions, DEFAULT_INSTRUCTION_BYTES } from '../capability/instructions.js';
+import { SKILL_METADATA_BUDGET_BYTES, discoverSkills, formatSkillCatalog, skillDirectories } from '../kernel/skills.js';
 import { createLoop, DEFAULT_LOOP_LIMITS } from '../kernel/loop.js';
 import { minimalPlugin } from '../tools/minimal.js';
+import { createSkillPlugin } from '../tools/skill.js';
 import { createMessagesProvider } from '../model/messages.js';
 import { createChatCompletionsProvider } from '../model/chat-completions.js';
 import { DEFAULT_RETRY } from '../model/http.js';
@@ -105,7 +107,7 @@ function observedSession(session, onEvent) {
   };
 }
 
-export function createHost({ config, provider, plugins = [minimalPlugin], policy, logger, mode }) {
+export function createHost({ config, provider, plugins = [minimalPlugin], policy, logger, mode, skillRegistry }) {
   if (!Object.isFrozen(config)) throw new KernelError('host_config_must_be_frozen');
   // 边界是工具读写的位置，也是指令文件上溯的止点，两边都读它，缺一处就说缺一处。
   if (typeof config.boundary !== 'string' || config.boundary === '') throw new KernelError('host_boundary_required');
@@ -152,7 +154,16 @@ export function createHost({ config, provider, plugins = [minimalPlugin], policy
       },
     });
     const kernel = createKernel({ config, policy: chain, session, logger });
-    const assembly = loadAssembly(kernel, plugins);
+    // 技能注册表是一条系统事实（D46）：磁盘上有几份技能与模式选了哪几件无关（D45、D57）。
+    // 装载侧可以交进已经查好的一份（测试与以后的重载），没交就在这里扫那四个目录。
+    // 一份都没有时不改工具表也不加片段：多一件没人用的工具会改掉每次请求的前缀字节（D12）。
+    const skills = skillRegistry ?? await discoverSkills(skillDirectories(config.boundary));
+    for (const diagnostic of skills.diagnostics) {
+      // 头部解不开与被同名压掉的那一份都不静默：装载侧留一条日志，提示词里那一段说明也带上计数（D49、D57）。
+      logger?.log?.('skill is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
+    }
+    const loaded = skills.skills.length === 0 ? plugins : [...plugins, createSkillPlugin(skills)];
+    const assembly = loadAssembly(kernel, loaded);
     // 模式选中的那一栏工具在装载之后收紧（D35、D44）：清单里写了本次没登记的名字会在这里失败，
     // 而不是静默少一件。收紧只减不加，被藏起来的那几件仍然留在登记表里（I4）。
     if (mode !== undefined) applyMode(kernel, mode);
@@ -162,6 +173,10 @@ export function createHost({ config, provider, plugins = [minimalPlugin], policy
     const maxBytes = config.instructions?.maxBytes ?? DEFAULT_INSTRUCTION_BYTES;
     const instructions = await loadInstructions({ boundary: config.boundary, ...config.instructions });
     prompt.fragment({ name: 'instructions', anchor: 0, text: instructions.text, maxBytes });
+    // 目录整份内联还是只留一句使用说明由预算判（D55），而注入的前提是 `skill` 真的交给了模型（D35：模式只减不加）。
+    if (skills.skills.length > 0 && kernel.manifest().some((tool) => tool.name === 'skill')) {
+      prompt.fragment({ name: 'skills', anchor: 1, text: formatSkillCatalog(skills), maxBytes: SKILL_METADATA_BUDGET_BYTES });
+    }
     const loop = createLoop({
       kernel,
       provider: observedProvider(provider, (event) => connection.notify({ notify: 'delta', sessionId: id, event })),
