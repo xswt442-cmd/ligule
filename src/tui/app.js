@@ -15,6 +15,7 @@ export const COMMANDS = [
   { name: 'tools', usage: '/tools', text: '列出这次运行装了哪些工具' },
   { name: 'status', usage: '/status', text: '显示模式、档位、拒绝计数与记录条数' },
   { name: 'mode', usage: '/mode [名字]', text: '显示当前模式，或切换到另一个名字' },
+  { name: 'show', usage: '/show [序号]', text: '把记录里那一条的完整内容画出来，不带序号收起' },
   { name: 'new', usage: '/new', text: '开一份新会话，画面上方的历史留在终端里' },
   { name: 'quit', usage: '/quit', text: '退出（Ctrl+C 同样）' },
 ];
@@ -99,6 +100,13 @@ export function buildStatusLine({ head, sessionId, boundary, status, running, se
   return line(parts);
 }
 
+// `/show` 要的是记录里那个稳定的序号，不是画面上的第几行：行会随投影变，序号不会（D40）。
+export function findRecord(events, argument) {
+  const seq = Number(argument);
+  if (!Number.isInteger(seq) || seq < 0) return { code: 'tui_show_needs_a_number' };
+  return { record: events.find((event) => event.seq === seq) ?? null };
+}
+
 function Row({ row, expanded }) {
   if (row.kind === 'question') return h(Text, { color: 'cyan' }, `› ${row.text}`);
   if (row.kind === 'reasoning') {
@@ -137,6 +145,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [history, setHistory] = useState([]);
   const [historyAt, setHistoryAt] = useState(-1);
   const [status, setStatus] = useState(null);
+  // 详情画在动态区里：`Static` 不回画已提交的行，所以「看那一条」只能是把它再画一次（D39、D40）。
+  const [detail, setDetail] = useState(null);
 
   const push = useCallback((...added) => setRows((current) => [...current, ...added]), []);
 
@@ -269,6 +279,30 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       })();
       return;
     }
+    if (name === 'show') {
+      void (async () => {
+        if (argument === '') {
+          setDetail(null);
+          return;
+        }
+        const read = await client.request('session.read', { sessionId }).catch((error) => error);
+        if (read.code !== undefined) {
+          push({ kind: 'error', text: `记录读不回来：${read.code}` });
+          return;
+        }
+        const picked = findRecord(read.events, argument);
+        if (picked.code !== undefined) {
+          push({ kind: 'error', text: '/show 后面要一个记录序号（会话记录里的第几条，不是画面上的第几行）' });
+          return;
+        }
+        if (picked.record === null) {
+          push({ kind: 'error', text: `记录里没有第 ${argument} 条（现有 ${read.events.length} 条，编号从 0 起）` });
+          return;
+        }
+        setDetail({ seq: picked.record.seq, kind: picked.record.kind, rows: projectRecord(picked.record) });
+      })();
+      return;
+    }
     if (name === 'help') {
       push({ kind: 'meta', text: COMMANDS.map((command) => `${command.usage} —— ${command.text}`).join('\n') });
       return;
@@ -356,6 +390,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       h(Text, { wrap: 'truncate-end' }, ask.detail),
       ask.reason === '' ? null : h(Text, { dimColor: true }, ask.reason),
       h(Text, null, '按 y 允许一次，按 n 不允许')),
+    detail === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'cyan', paddingX: 1 },
+      h(Text, { dimColor: true }, `记录 ${detail.seq}（${detail.kind}）的完整内容 · /show 收起`),
+      detail.rows.length === 0
+        ? h(Text, { dimColor: true }, '这一条没有可画的内容')
+        : detail.rows.map((row, index) => h(Row, { key: index, row, expanded: true }))),
     h(Box, null,
       h(Text, { color: running ? 'yellow' : 'cyan' }, running ? `${SPINNER[tick % SPINNER.length]} ` : '› '),
       draft === '' && !running

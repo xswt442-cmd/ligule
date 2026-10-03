@@ -12,7 +12,7 @@ try {
 }
 
 const options = { skip: missing === '' ? false : missing };
-const { foldText, parseInput, editDraft, projectRecord, buildStatusLine } = rows;
+const { foldText, parseInput, editDraft, projectRecord, buildStatusLine, findRecord } = rows;
 
 test('a record becomes the rows the terminal shows, one line each', options, () => {
   assert.deepEqual(projectRecord({ kind: 'user', text: '读一下' }), [{ kind: 'question', text: '读一下' }]);
@@ -138,4 +138,13 @@ test('a mode switch and an expanded template both reach the transcript', options
     projectRecord({ kind: 'user', text: 'Review src/a.ts\n', raw: '/review:security src/a.ts' }),
     [{ kind: 'question', text: '/review:security src/a.ts' }],
   );
+});
+
+test('/show takes the number from the record, not the row on screen', options, () => {
+  const events = [{ seq: 0, kind: 'mode' }, { seq: 1, kind: 'user', text: 'hi' }];
+  assert.deepEqual(findRecord(events, '1'), { record: events[1] });
+  // 序号写错形状与写了一个没有的号是两类问题，说的话得不一样（空序号是另一个动作：收起，不走这里）。
+  assert.equal(findRecord(events, 'third').code, 'tui_show_needs_a_number');
+  assert.equal(findRecord(events, '-1').code, 'tui_show_needs_a_number');
+  assert.equal(findRecord(events, '7').record, null);
 });
