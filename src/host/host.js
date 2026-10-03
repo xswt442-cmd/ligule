@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import { createKernel } from '../kernel/kernel.js';
 import { loadAssembly } from '../kernel/assembly.js';
-import { applyMode } from '../kernel/modes.js';
+import { applyMode, loadMode } from '../kernel/modes.js';
 import { createDecisionChain } from '../kernel/policy.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { createSessionLog } from '../session/session.js';
@@ -108,11 +108,13 @@ function observedSession(session, onEvent) {
   };
 }
 
-export function createHost({ config, provider, plugins = [minimalPlugin], policy, logger, mode, skillRegistry, templateRegistry }) {
+// modeName 与 modePaths 是一对：给了名字就要能给那三层目录，运行中换模式要用同一套查找（D41、D44）。
+export function createHost({ config, provider, plugins = [minimalPlugin], policy, logger, modeName, modePaths, skillRegistry, templateRegistry }) {
   if (!Object.isFrozen(config)) throw new KernelError('host_config_must_be_frozen');
   // 边界是工具读写的位置，也是指令文件上溯的止点，两边都读它，缺一处就说缺一处。
   if (typeof config.boundary !== 'string' || config.boundary === '') throw new KernelError('host_boundary_required');
   if (typeof provider?.stream !== 'function') throw new KernelError('host_provider_required');
+  if (modeName !== undefined && modePaths === undefined) throw new KernelError('host_mode_paths_required');
   const directory = sessionDirectoryOf(config);
   const sessions = new Map();
 
@@ -130,7 +132,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin], policy
     const session = observedSession(createSessionLog({ directory, id }), (event) => {
       connection.notify({ notify: 'event', sessionId: id, event });
     });
-    const state = { id, session, asks: new Set(), running: undefined };
+    const state = { id, session, asks: new Set(), running: undefined, mode: { file: undefined, tools: [], undo: () => {} }, pending: undefined };
     const chain = createDecisionChain({
       ...policy,
       ask: async ({ tool, input, command, reason }) => {
@@ -171,9 +173,24 @@ export function createHost({ config, provider, plugins = [minimalPlugin], policy
       logger?.log?.('prompt template is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
     }
     const assembly = loadAssembly(kernel, loaded);
+    // 应用一份模式：先撤销上一次自己那一项收紧，再按新清单收紧，再把交给模型的那一栏留在记录里。
+    // 记录里这一条是给「两条用户输入之间各自用的是哪一份清单」用的（I2、I5）；
+    // 收紧只减不加，被藏起来的那几件仍然留在登记表里（I4）。
+    state.adopt = async (file) => {
+      state.mode.undo();
+      const applied = applyMode(kernel, file);
+      const tools = kernel.manifest().map((entry) => entry.name);
+      Object.assign(state.mode, { file, tools, undo: applied.undo });
+      // 同一份清单不重复记：重新attach 到一份已有记录上不写东西（客户端接上来读不该改动事实源）。
+      // 名字、来源或那一栏工具变了才记一条，让「这一条输入用的是哪一份」在记录里读得出来（I5）。
+      const last = (await session.read()).filter((event) => event.kind === 'mode').at(-1);
+      if (last === undefined || last.name !== file.name || last.layer !== file.layer || last.tools.join(' ') !== tools.join(' ')) {
+        await session.append({ kind: 'mode', name: file.name, layer: file.layer, path: file.path, tools });
+      }
+    };
     // 模式选中的那一栏工具在装载之后收紧（D35、D44）：清单里写了本次没登记的名字会在这里失败，
-    // 而不是静默少一件。收紧只减不加，被藏起来的那几件仍然留在登记表里（I4）。
-    if (mode !== undefined) applyMode(kernel, mode);
+    // 而不是静默少一件。
+    if (modeName !== undefined) await state.adopt(await loadMode(modeName, modePaths));
     const prompt = createPromptAssembly({ static: config.prompt?.static ?? '' });
     // 项目指令文件那四层是装载侧交给提示词的一段（D10、第 9.5 步留下的那一半）：
     // 装载器自己的预算算在完整文本上，片段登记时按同一个数，两处不会各截一次。
@@ -250,6 +267,13 @@ export function createHost({ config, provider, plugins = [minimalPlugin], policy
           } finally {
             controller.signal.removeEventListener('abort', settleAsks);
             state.running = undefined;
+            // 等本轮结束再生效（D41）：完成与被打断都算结束，轮中不换清单，记录里那条用户输入
+            // 才对得上当时交给模型的那一栏工具。待生效的清单在请求时就装载过，这里不会再失败。
+            if (state.pending !== undefined) {
+              const next = state.pending;
+              state.pending = undefined;
+              await state.adopt(next);
+            }
           }
         }
         case 'run.cancel': {
@@ -259,13 +283,38 @@ export function createHost({ config, provider, plugins = [minimalPlugin], policy
           state.running.abort();
           return { cancelled: true };
         }
+        case 'mode.set': {
+          const state = open(sessionId);
+          // 名字在这里就读成清单：坏清单在请求这一次就说出来，而不是等本轮结束应用时才炸（D44）。
+          const requested = await loadMode(message.params.name, modePaths);
+          const current = state.mode.file;
+          if (current !== undefined && current.name === requested.name && current.layer === requested.layer) {
+            // 又选了一遍当前这一份：那是在撤回上一次待生效的请求，不写任何东西（D41）。
+            state.pending = undefined;
+          } else if (state.running === undefined) {
+            await state.adopt(requested);
+          } else {
+            state.pending = requested;
+          }
+          return {
+            mode: state.mode.file?.name ?? null,
+            layer: state.mode.file?.layer ?? null,
+            pending: state.pending?.name ?? null,
+            tools: state.kernel.manifest().map((entry) => entry.name),
+          };
+        }
         case 'status.get': {
           const state = open(sessionId);
           return {
             sessionId,
             running: state.running !== undefined,
-            tools: state.kernel.list(),
-            mode: state.chain.mode,
+            // 交给模型的那一栏，不是登记表的全部（I2）：被模式藏起来的几件不在这儿。
+            tools: state.kernel.manifest().map((entry) => entry.name),
+            mode: state.mode.file?.name ?? null,
+            modeLayer: state.mode.file?.layer ?? null,
+            pendingMode: state.pending?.name ?? null,
+            // 判定档位与模式名是两样东西，字段也各写各的（D40：状态行上 `mode:` 与 `policy:`）。
+            policy: state.chain.mode,
             denials: state.chain.denials(),
             // 条数而不是内容：内容走 session.read。
             eventCount: (await state.session.read()).length,

@@ -133,8 +133,9 @@ test('a client over stdio drives one round, answers one approval and watches the
     assert.deepEqual(deltas.map((event) => event.type), ['tool-call', 'text'], 'the stream is forwarded as it arrives');
     assert.ok(notifications.every((message) => NOTIFICATIONS.includes(message.notify)), 'nothing arrives outside the names the protocol declares');
     const events = notifications.filter((message) => message.notify === 'event').map((message) => message.event);
-    assert.deepEqual(events.map((event) => event.kind), ['user', 'assistant', 'tool', 'assistant']);
-    assert.equal(events[2].result.content.text, 'the body', 'the tool result the client saw is the file content');
+    // 装载先记一条模式事件：那一份清单是这一轮工具栏目的来源（I2、I5）。
+    assert.deepEqual(events.map((event) => event.kind), ['mode', 'user', 'assistant', 'tool', 'assistant']);
+    assert.equal(events.find((event) => event.kind === 'tool').result.content.text, 'the body', 'the tool result the client saw is the file content');
 
     // 客户端看见的那一条与记录里落盘的那一条同源，序号也在通知里带回来了。
     const recorded = (await readFile(join(directory, '.ligule', 'sessions', `${sessionId}.jsonl`), 'utf8'))
@@ -143,7 +144,8 @@ test('a client over stdio drives one round, answers one approval and watches the
 
     const status = await host.client.request('status.get', { sessionId });
     assert.equal(status.running, false);
-    assert.equal(status.mode, 'ask');
+    assert.equal(status.policy, 'ask');
+    assert.equal(status.mode, 'minimal', '状态里模式名与判定档位是两样东西（D40）');
     assert.ok(status.tools.includes('read'));
     assert.deepEqual(status.denials, { consecutive: 0, total: 0 });
   });
@@ -216,8 +218,9 @@ test('a second Host process opens the same record, so the session lives in the H
       // 晚到的客户端把已经发生过的事读回来：记录是唯一事实源（I5），这一份与第一个进程写下的相同。
       const reopened = await second.client.request('session.read', { sessionId });
       assert.equal(reopened.sessionId, sessionId);
-      assert.deepEqual(reopened.events.map((event) => event.kind), ['user', 'assistant', 'tool', 'assistant']);
-      assert.equal(reopened.events[2].result.content.text, 'the body');
+      // 第二个进程装载同一份清单，不再往记录里补一条：attach 与读不动事实源（I5）。
+      assert.deepEqual(reopened.events.map((event) => event.kind), ['mode', 'user', 'assistant', 'tool', 'assistant']);
+      assert.equal(reopened.events.find((event) => event.kind === 'tool').result.content.text, 'the body');
       const status = await second.client.request('status.get', { sessionId });
       assert.equal(status.running, false);
       assert.equal(status.eventCount, reopened.events.length);

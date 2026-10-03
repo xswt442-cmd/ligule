@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_LIMITS, MESSAGES_CAPABILITIES, DEFAULT_MODE, SKILL_METADATA_BUDGET_BYTES,
   createConnection, createConfig, createKernel, createMemoryConnectionPair, createSessionLog, createSkillPlugin,
-  discoverSkills, formatSkillCatalog, loadAssembly, loadMode, minimalPlugin, modeDirectories, searchSkills,
+  discoverSkills, formatSkillCatalog, loadAssembly, minimalPlugin, modeDirectories, searchSkills,
   serveHost, skillDirectories,
 } from '../dist/index.js';
 
@@ -233,8 +233,8 @@ test('a mode narrows the capability tools and cannot reach the disclosure entry'
     const userHome = join(root, 'home');
     await mkdir(join(userHome, '.ligule', 'modes'), { recursive: true });
     await writeFile(join(userHome, '.ligule', 'modes', 'readonly.toml'), 'tools = ["read"]\nprompt = []\n');
-    const modeOf = async (name) => loadMode(name, modeDirectories(projectRoot, shippedModes, userHome));
-    const capture = async (mode) => {
+    const modePaths = modeDirectories(projectRoot, shippedModes, userHome);
+    const capture = async (modeName) => {
       const config = createConfig({
         user: {
           boundary: projectRoot,
@@ -257,7 +257,7 @@ test('a mode narrows the capability tools and cannot reach the disclosure entry'
       };
       const pair = createMemoryConnectionPair();
       const host = serveHost({
-        input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy, mode, skillRegistry: registry,
+        input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy, modeName, modePaths, skillRegistry: registry,
       });
       const connection = createConnection(pair.client);
       try {
@@ -277,10 +277,10 @@ test('a mode narrows the capability tools and cannot reach the disclosure entry'
     assert.match(everything.system, /- pdf-tools: read a report/);
 
     // 模式只筛直接能力工具：藏掉七件之后 `skill` 仍然留着（D63），目录那一段也跟着留着。
-    const readonly = await capture(await modeOf('readonly'));
+    const readonly = await capture('readonly');
     assert.deepEqual(readonly.tools.map((entry) => entry.name), ['read', 'skill']);
     assert.match(readonly.system, /- pdf-tools: read a report/);
-    const minimal = await capture(await modeOf(DEFAULT_MODE));
+    const minimal = await capture(DEFAULT_MODE);
     assert.ok(minimal.tools.some((entry) => entry.name === 'skill'));
     assert.equal(minimal.tools.length, 9);
   });

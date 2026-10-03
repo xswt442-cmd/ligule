@@ -9,7 +9,7 @@ import { createConfig } from './kernel/config.js';
 import { loadConfigLayers } from './kernel/config-file.js';
 import { createKernel } from './kernel/kernel.js';
 import { loadAssembly } from './kernel/assembly.js';
-import { DEFAULT_MODE, loadMode, modeDirectories } from './kernel/modes.js';
+import { DEFAULT_MODE, modeDirectories } from './kernel/modes.js';
 import { discoverSkills, skillDirectories } from './kernel/skills.js';
 import { minimalPlugin } from './tools/minimal.js';
 import { createHost, providerFromConfig, serveHost } from './host/host.js';
@@ -50,9 +50,9 @@ async function configSnapshot() {
 }
 
 // 模式名按 D44：`--mode` 覆盖一次运行，否则读配置里的 `mode`，两处都没写就是随包的 minimal。
-// 读模式与读配置是分开的两步：模式文件里的名字对不上注册表要等到装载之后才查得出来（applyMode）。
-async function resolveMode(config) {
-  return loadMode(modeFlag ?? config.mode ?? DEFAULT_MODE, modeDirectories(process.cwd(), shippedModes));
+// 交出去的是名字加那三层目录，装载在 Host 那一侧做：运行中换模式要用同一套查找（D41）。
+function resolveMode(config) {
+  return { modeName: modeFlag ?? config.mode ?? DEFAULT_MODE, modePaths: modeDirectories(process.cwd(), shippedModes) };
 }
 
 async function installedKernel() {
@@ -140,8 +140,8 @@ function terminalApprovals() {
   };
 }
 
-async function runOneRound(config, mode, text) {
-  const host = createHost({ config, provider: providerFromConfig(config), policy: config.policy, mode });
+async function runOneRound(config, selection, text) {
+  const host = createHost({ config, provider: providerFromConfig(config), policy: config.policy, ...selection });
   const approvals = terminalApprovals();
   const connection = {
     notify: printNotification,
@@ -222,7 +222,7 @@ if (missingFlagValue) {
   } else {
     try {
       const config = await configSnapshot();
-      await runOneRound(config, await resolveMode(config), text);
+      await runOneRound(config, resolveMode(config), text);
     } catch (error) {
       printFailure(error.code ?? 'cli_run_failed', error.detail);
     }
@@ -231,7 +231,7 @@ if (missingFlagValue) {
   // 桌面壳或者脚本起这一个进程，两端各读写一行 JSON（D30）：本机不开端口，审批与事件都走这条连接。
   try {
     const config = await configSnapshot();
-    serveHost({ config, provider: providerFromConfig(config), policy: config.policy, mode: await resolveMode(config) });
+    serveHost({ config, provider: providerFromConfig(config), policy: config.policy, ...resolveMode(config) });
   } catch (error) {
     printFailure(error.code ?? 'cli_host_failed', error.detail);
   }
@@ -246,9 +246,8 @@ if (missingFlagValue) {
       // React 与 Ink 在第一次被加载时按 NODE_ENV 选构建，所以这一行要在动态导入之前。
       // 开发版把界面拖贵了一倍：两千条记录的转录下提交一行是 2.6 毫秒对 1.4 毫秒，进程常驻 155 MiB 对 114 MiB。
       process.env.NODE_ENV = 'production';
-      const mode = await resolveMode(config);
       const { runTui } = await import('./tui/start.js');
-      await runTui({ config, provider: providerFromConfig(config), policy: config.policy, mode });
+      await runTui({ config, provider: providerFromConfig(config), policy: config.policy, ...resolveMode(config) });
     } catch (error) {
       const missing = error.code === 'ERR_MODULE_NOT_FOUND' && /Cannot find package '(ink|react)'/.test(String(error.message));
       printFailure(missing ? 'tui_dependency_missing' : error.code ?? 'cli_tui_failed',
