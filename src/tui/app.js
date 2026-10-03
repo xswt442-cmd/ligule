@@ -60,7 +60,8 @@ export function foldText(text, expanded, limit = FOLD_LINES, maxChars = 400) {
 
 // 一条记录画成一行或者几行：助手那一条可能带着若干次工具调用，工具调用与结果各占一行。
 export function projectRecord(record) {
-  if (record.kind === 'user') return [{ kind: 'question', text: record.text }];
+  // 人打的那一行原样画出来（D54）：展开后的那一份是给模型的，回看时要对得上当时敲了什么。
+  if (record.kind === 'user') return [{ kind: 'question', text: record.raw ?? record.text }];
   if (record.kind === 'reasoning') return [{ kind: 'reasoning', text: record.text }];
   if (record.kind === 'assistant') {
     const rows = record.text === '' ? [] : [{ kind: 'answer', text: record.text }];

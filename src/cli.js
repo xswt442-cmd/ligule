@@ -92,7 +92,8 @@ function printNotification(message) {
     const { tool, result } = message.event;
     console.log(`· ${tool}: ${result.failed ? result.code : 'ok'}`);
   } else if (message.notify === 'event' && message.event?.kind === 'user') {
-    console.log(`> ${message.event.text}`);
+    // 模板展开过的那一条画原始那一行（D54）：终端里回声要等于人打的字。
+    console.log(`> ${message.event.raw ?? message.event.text}`);
   } else if (message.notify === 'fault') {
     console.error(message.detail === undefined ? message.code : `${message.code}: ${message.detail}`);
   }
