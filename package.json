@@ -12,6 +12,7 @@
   },
   "files": [
     "dist",
+    "modes",
     "README.md",
     "LICENSE"
   ],

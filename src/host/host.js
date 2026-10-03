@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import { createKernel } from '../kernel/kernel.js';
 import { loadAssembly } from '../kernel/assembly.js';
+import { applyMode } from '../kernel/modes.js';
 import { createDecisionChain } from '../kernel/policy.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { createSessionLog } from '../session/session.js';
@@ -104,7 +105,7 @@ function observedSession(session, onEvent) {
   };
 }
 
-export function createHost({ config, provider, plugins = [minimalPlugin], policy, logger }) {
+export function createHost({ config, provider, plugins = [minimalPlugin], policy, logger, mode }) {
   if (!Object.isFrozen(config)) throw new KernelError('host_config_must_be_frozen');
   // 边界是工具读写的位置，也是指令文件上溯的止点，两边都读它，缺一处就说缺一处。
   if (typeof config.boundary !== 'string' || config.boundary === '') throw new KernelError('host_boundary_required');
@@ -152,6 +153,9 @@ export function createHost({ config, provider, plugins = [minimalPlugin], policy
     });
     const kernel = createKernel({ config, policy: chain, session, logger });
     const assembly = loadAssembly(kernel, plugins);
+    // 模式选中的那一栏工具在装载之后收紧（D35、D44）：清单里写了本次没登记的名字会在这里失败，
+    // 而不是静默少一件。收紧只减不加，被藏起来的那几件仍然留在登记表里（I4）。
+    if (mode !== undefined) applyMode(kernel, mode);
     const prompt = createPromptAssembly({ static: config.prompt?.static ?? '' });
     // 项目指令文件那四层是装载侧交给提示词的一段（D10、第 9.5 步留下的那一半）：
     // 装载器自己的预算算在完整文本上，片段登记时按同一个数，两处不会各截一次。

@@ -6,7 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const repo = dirname(dirname(fileURLToPath(import.meta.url)));
-const cli = join(repo, 'src', 'cli.js');
+// 命令行按构建产物验（D47）：src/ 里有 .ts，源码那一份不能直接跑，跑起来的那一份就是发布出去的那一份。
+const cli = join(repo, 'dist', 'cli.js');
 
 function capture(...args) {
   try {

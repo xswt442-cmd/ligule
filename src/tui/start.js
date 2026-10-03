@@ -8,9 +8,9 @@ import { createMemoryConnectionPair } from '../host/memory.js';
 import { serveHost } from '../host/host.js';
 import { App } from './app.js';
 
-export async function runTui({ config, provider, policy, logger, stdout = process.stdout, stdin = process.stdin, stderr = process.stderr }) {
+export async function runTui({ config, provider, policy, logger, mode, stdout = process.stdout, stdin = process.stdin, stderr = process.stderr }) {
   const pair = createMemoryConnectionPair();
-  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy, logger });
+  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy, logger, mode });
   const client = createConnection(pair.client);
   const { sessionId } = await client.request('session.create', {});
   const instance = render(

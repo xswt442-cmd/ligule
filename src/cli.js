@@ -4,33 +4,41 @@
 // `host` 这一条是另一件事：它把同一个内核作为 Host 进程起起来，等一条标准输入输出上的客户端连接（D30）。
 import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
+import { fileURLToPath } from 'node:url';
 import { createConfig } from './kernel/config.js';
 import { loadConfigLayers } from './kernel/config-file.js';
 import { createKernel } from './kernel/kernel.js';
 import { loadAssembly } from './kernel/assembly.js';
+import { DEFAULT_MODE, loadMode, modeDirectories } from './kernel/modes.js';
 import { minimalPlugin } from './tools/minimal.js';
 import { createHost, providerFromConfig, serveHost } from './host/host.js';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+// 随包的模式目录与 `dist/` 同级：从本模块往上一层就是包根，本地检出与解包之后是同一个相对位置。
+const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
 
-// `--config a.b=c` 可以出现多次，从位置参数里挑出来；剩下的按「命令、工具名、一段 JSON」三段读。
+// `--config a.b=c` 可以出现多次；`--mode <名字>` 取一个值。两者都从位置参数里挑出来。
 const flags = [];
 const positional = [];
 const argv = process.argv.slice(2);
 let missingFlagValue = false;
+let missingModeValue = false;
+let modeFlag;
 for (let index = 0; index < argv.length; index += 1) {
   const arg = argv[index];
-  if (arg !== '--config') {
-    positional.push(arg);
+  if (arg === '--config' || arg === '--mode') {
+    const value = argv[index + 1];
+    if (value === undefined) {
+      if (arg === '--config') missingFlagValue = true;
+      else missingModeValue = true;
+      break;
+    }
+    if (arg === '--config') flags.push(value);
+    else modeFlag = value;
+    index += 1;
     continue;
   }
-  const value = argv[index + 1];
-  if (value === undefined) {
-    missingFlagValue = true;
-    break;
-  }
-  flags.push(value);
-  index += 1;
+  positional.push(arg);
 }
 const [command, ...rest] = positional;
 
@@ -38,6 +46,12 @@ async function configSnapshot() {
   const layers = await loadConfigLayers({ projectRoot: process.cwd(), flags });
   // 边界兜底取当前工作目录：命令行在哪里跑，工具就能在哪里读写。任何一层配置都盖得过它。
   return createConfig({ ...layers, user: { boundary: process.cwd(), ...layers.user } });
+}
+
+// 模式名按 D44：`--mode` 覆盖一次运行，否则读配置里的 `mode`，两处都没写就是随包的 minimal。
+// 读模式与读配置是分开的两步：模式文件里的名字对不上注册表要等到装载之后才查得出来（applyMode）。
+async function resolveMode(config) {
+  return loadMode(modeFlag ?? config.mode ?? DEFAULT_MODE, modeDirectories(process.cwd(), shippedModes));
 }
 
 async function installedKernel() {
@@ -124,8 +138,8 @@ function terminalApprovals() {
   };
 }
 
-async function runOneRound(config, text) {
-  const host = createHost({ config, provider: providerFromConfig(config), policy: config.policy });
+async function runOneRound(config, mode, text) {
+  const host = createHost({ config, provider: providerFromConfig(config), policy: config.policy, mode });
   const approvals = terminalApprovals();
   const connection = {
     notify: printNotification,
@@ -148,6 +162,8 @@ async function runOneRound(config, text) {
 
 if (missingFlagValue) {
   printFailure('cli_config_needs_a_value');
+} else if (missingModeValue) {
+  printFailure('cli_mode_needs_a_value', '--mode takes a mode name, e.g. --mode full');
 } else if (command === '--version' || command === '-v') {
   console.log(pkg.version);
 } else if (command === 'tools') {
@@ -184,7 +200,8 @@ if (missingFlagValue) {
     printFailure('cli_run_needs_the_user_text', 'run takes the user message, e.g. ligule run "read the note"');
   } else {
     try {
-      await runOneRound(await configSnapshot(), text);
+      const config = await configSnapshot();
+      await runOneRound(config, await resolveMode(config), text);
     } catch (error) {
       printFailure(error.code ?? 'cli_run_failed', error.detail);
     }
@@ -193,7 +210,7 @@ if (missingFlagValue) {
   // 桌面壳或者脚本起这一个进程，两端各读写一行 JSON（D30）：本机不开端口，审批与事件都走这条连接。
   try {
     const config = await configSnapshot();
-    serveHost({ config, provider: providerFromConfig(config), policy: config.policy });
+    serveHost({ config, provider: providerFromConfig(config), policy: config.policy, mode: await resolveMode(config) });
   } catch (error) {
     printFailure(error.code ?? 'cli_host_failed', error.detail);
   }
@@ -208,8 +225,9 @@ if (missingFlagValue) {
       // React 与 Ink 在第一次被加载时按 NODE_ENV 选构建，所以这一行要在动态导入之前。
       // 开发版把界面拖贵了一倍：两千条记录的转录下提交一行是 2.6 毫秒对 1.4 毫秒，进程常驻 155 MiB 对 114 MiB。
       process.env.NODE_ENV = 'production';
+      const mode = await resolveMode(config);
       const { runTui } = await import('./tui/start.js');
-      await runTui({ config, provider: providerFromConfig(config), policy: config.policy });
+      await runTui({ config, provider: providerFromConfig(config), policy: config.policy, mode });
     } catch (error) {
       const missing = error.code === 'ERR_MODULE_NOT_FOUND' && /Cannot find package '(ink|react)'/.test(String(error.message));
       printFailure(missing ? 'tui_dependency_missing' : error.code ?? 'cli_tui_failed',
@@ -219,8 +237,9 @@ if (missingFlagValue) {
 } else if (command === undefined || command === '--help' || command === '-h') {
   console.log(`ligule ${pkg.version} - under development, do not depend on it.`);
   console.log('commands: tools, run <text>, call <tool> [json-args], tui, host, --version');
-  console.log('options: --config <key.path=value> (repeatable)');
+  console.log('options: --config <key.path=value> (repeatable), --mode <name>');
   console.log('run, tui and host read model.api ("messages" or "chat-completions"), model.baseURL and model.model from the config layers; the key comes from LIGULE_API_KEY');
+  console.log('run, tui and host also pick a mode: --mode <name> overrides the config `mode`, and neither one written means the shipped "minimal" (D44); tools and call do not read one');
 } else {
   // 打错的命令不该走帮助文本再退出 0：调用方是个脚本时，0 加一段帮助就是一次成功。
   printFailure('cli_command_unknown', `"${command}" is not a command; run ligule --help to list them`);

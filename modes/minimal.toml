@@ -1,0 +1,5 @@
+# 随包的最小模式（D43）：三格都要写，这一份就是 D3 定下的那八件，不选模式时装的也是它。
+# tools 交给模型的是这八件；prompt 与 sources 写空数组表示这一格不选（阶段一的行为）。
+tools = ['exec', 'find', 'search', 'read', 'create', 'write', 'edit', 'delete']
+prompt = []
+sources = []

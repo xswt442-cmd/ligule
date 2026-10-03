@@ -4,6 +4,7 @@ export { createConfig, LAYER_ORDER } from './kernel/config.js';
 export { loadConfigLayers, flagLayer, configPaths } from './kernel/config-file.js';
 export { createLogger } from './kernel/log.js';
 export { loadAssembly } from './kernel/assembly.js';
+export { loadMode, applyMode, modeDirectories, MODE_DIRECTORY, DEFAULT_MODE } from './kernel/modes.js';
 export { minimalTools, minimalPlugin } from './tools/minimal.js';
 export { createSlotRegistry } from './kernel/slots.js';
 export { loadInstructions } from './capability/instructions.js';
