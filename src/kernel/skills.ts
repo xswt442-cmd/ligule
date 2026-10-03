@@ -10,6 +10,7 @@ import { join, relative, resolve, sep } from 'node:path';
 import { parse } from 'yaml';
 import { isWithin } from '../capability/paths.js';
 import { CONFIG_DIRECTORY } from './config-file.js';
+import { splitFrontmatter } from './frontmatter.js';
 import { KernelError } from './error.js';
 
 export const SKILL_FILE = 'SKILL.md';
@@ -63,15 +64,7 @@ async function readIfExists(path: string): Promise<string | undefined> {
   }
 }
 
-// 头部与正文按同一处切：`---` 那一块之外就是交给模型的正文。
-function splitSkillDocument(text: string): { head: string | undefined; body: string } {
-  const opening = text.match(/^---[ \t]*\r?\n/);
-  if (opening?.index !== 0) return { head: undefined, body: text };
-  const rest = text.slice(opening[0].length);
-  const closing = rest.match(/^---[ \t]*$/m);
-  if (closing?.index === undefined) return { head: undefined, body: text };
-  return { head: rest.slice(0, closing.index), body: rest.slice(closing.index + closing[0].length).replace(/^[ \t]*\r?\n/, '') };
-}
+// 头部与正文按同一处切（frontmatter.ts）：交给模型的是正文，头部是装载侧读过的结构化字段。
 
 // `metadata` 那一格按规范是自由键值（D49）：认不出的键原样留着，只把本项目要读的那一键取出来。
 function readRequires(metadata: unknown): string[] {
@@ -81,7 +74,7 @@ function readRequires(metadata: unknown): string[] {
 }
 
 function checkedSkill(text: string, file: string): SkillEntry {
-  const { head: source } = splitSkillDocument(text);
+  const { head: source } = splitFrontmatter(text);
   if (source === undefined) throw new KernelError('skill_frontmatter_missing', { detail: `${file} has no YAML frontmatter` });
   let head: unknown;
   try {
@@ -214,7 +207,7 @@ export async function readSkillBody(skill: SkillEntry): Promise<{ body: string; 
   });
   const text = bytes.toString('utf8');
   return {
-    body: splitSkillDocument(text).body,
+    body: splitFrontmatter(text).body,
     bytes: bytes.length,
     digest: createHash('sha256').update(bytes).digest('hex').slice(0, 12),
   };

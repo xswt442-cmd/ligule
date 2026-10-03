@@ -10,6 +10,10 @@ export {
   SKILL_FILE, SKILLS_DIRECTORY, SKILL_METADATA_BUDGET_BYTES,
 } from './kernel/skills.js';
 export { createSkillTool, createSkillPlugin } from './tools/skill.js';
+export {
+  discoverTemplates, templateDirectories, parseInvocation, findTemplate, splitArguments, expandTemplate,
+  PROMPTS_DIRECTORY,
+} from './kernel/templates.js';
 export { minimalTools, minimalPlugin } from './tools/minimal.js';
 export { createSlotRegistry } from './kernel/slots.js';
 export { loadInstructions } from './capability/instructions.js';
