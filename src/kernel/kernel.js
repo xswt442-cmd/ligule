@@ -9,6 +9,7 @@ import { createLogger } from './log.js';
 import { failureOf, refusalOf, resultLimit, resultOf, spillContent } from './result.js';
 import { createObservationLog } from '../session/observe.js';
 import { resolveTarget } from '../capability/network.js';
+import { resolveShell } from '../capability/shell.js';
 import { assertSupportedSchema, validateArgs } from './schema.js';
 
 // options.config 是装载侧折好的配置快照，options.logger 是宿主自己的日志后端（D8、D26），
@@ -106,6 +107,7 @@ export function createKernel(options = {}) {
       // 执行策略声明按工具名留在内核这一侧，循环读它，模型看不见（D29、I3）。
       // 披露入口也留在内核这一侧：固定那几件工具由注册表里有没有内容决定，不进模式的选择范围（D63）。
       // 哪个参数是要取回的目标同样留在内核这一侧：判定链看的是解析之后的地址类别，不是模型写的字符串（D58）。
+      // 哪个参数是一段命令文本也留在这里：那一段要按 Host 选定的那种语法解析后再判（D59）。
       const entry = {
         name: tool.name,
         description: tool.description,
@@ -113,6 +115,7 @@ export function createKernel(options = {}) {
         execution: tool.execution === 'parallel' ? 'parallel' : 'serial',
         disclosure: tool.disclosure === true,
         targetArgument: typeof tool.targetArgument === 'string' ? tool.targetArgument : undefined,
+        commandArgument: typeof tool.commandArgument === 'string' ? tool.commandArgument : undefined,
         run: tool.run,
       };
       tools.set(tool.name, entry);
@@ -175,18 +178,32 @@ export function createKernel(options = {}) {
       const network = tool.targetArgument === undefined || typeof args?.[tool.targetArgument] !== 'string'
         ? undefined
         : await resolveTarget(args[tool.targetArgument]);
+      // 解释器在这里选定一次（D59）：判定链读的就是这一份选择所用的语法，工具随后起的也是这一个可执行文件。
+      // 配置显式写了哪一种而机器上没有时报稳定码并留一条失败记录，不换成另一份——换掉的那一种语法没被读过，
+      // 「跑的是一件 exec」与「这条文本按哪种语法解析出了什么」必须是同一条记录里的两栏。
+      let shell;
+      if (tool.commandArgument !== undefined && typeof args?.[tool.commandArgument] === 'string') {
+        try {
+          shell = resolveShell(config);
+        } catch (error) {
+          await fail(entry, error);
+        }
+        entry.shell = { kind: shell.kind, executable: shell.executable };
+      }
       if (policy) {
-        const verdict = await policy.evaluate({ tool: name, input: args, target: network });
+        const verdict = await policy.evaluate({ tool: name, input: args, target: network, shell });
         if (verdict.decision !== 'allow') {
           // 拒绝理由进日志与记录，抛出去的那一份只带错误码（D19 把文本与码分开）。
           logger.log(`tool ${name} is not allowed`, { tool: name, code: verdict.code, reason: verdict.reason });
           await record(entry, refusalOf(verdict.code, verdict.reason));
           throw new KernelError(verdict.code);
         }
+        // 解析出的分段跟着答复回来：记录里要读得出这条文本被读成了哪几段（D59）。
+        if (entry.shell !== undefined && verdict.segments !== undefined) entry.shell.segments = verdict.segments;
       }
       let value;
       try {
-        value = await tool.run(args, { ...context, signal: options.signal, target: network });
+        value = await tool.run(args, { ...context, signal: options.signal, target: network, shell });
       } catch (error) {
         // 工具没把错误包成内核错误码时由内核接住：统一成一个稳定码，原始错误进 cause，
         // 它自己的消息作为给模型看的那一份说明。半成品工具抛出的异常不该停住循环，

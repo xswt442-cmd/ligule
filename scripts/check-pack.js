@@ -73,8 +73,15 @@ try {
   writeFileSync(
     join(consumer, 'probe.mjs'),
     [
-      "import { createKernel, KernelError, flagLayer } from 'ligule';",
+      "import { createKernel, KernelError, flagLayer, parseCommand } from 'ligule';",
       "if (typeof KernelError !== 'function') throw new Error('KernelError is missing from the installed package');",
+      // 两份 tree-sitter 语法是原生插件：装不上时判定只会一路降级成「问」，界面看不出来，所以在这里当场读一次。
+      "if ((await parseCommand('git status')).kind !== 'segments') {",
+      "  throw new Error('the installed package cannot parse bash text: its grammar did not come along');",
+      "}",
+      "if ((await parseCommand('git status', 'powershell')).kind !== 'segments') {",
+      "  throw new Error('the installed package cannot parse PowerShell text: its grammar did not come along');",
+      "}",
       "if (flagLayer(['limits.readBytes = 100']).limits?.readBytes !== 100) {",
       "  throw new Error('the installed package cannot parse a dotted override, its TOML dependency did not come along');",
       "}",
