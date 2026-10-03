@@ -93,12 +93,12 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       const parsed = command === undefined ? undefined : parseCommand(command);
       const segments = parsed?.kind === 'segments' ? parsed.segments : undefined;
 
-      // 网络目标的类别先收紧（D58）：用不了的 URL 与链路本地那一类根本不进后面的顺序。
+      // 网络目标的类别先收紧（D58）：用不了的 URL 与「根本不该被取回的地址」这一类不进后面的顺序。
       if (target !== undefined && (target.failure !== undefined || target.class === undefined)) {
         return deny('policy_denied', `the network target cannot be classified (${target.failure ?? 'unsupported'})`);
       }
-      if (target?.class === 'link-local') {
-        return deny('policy_denied', 'link-local and metadata endpoints are not fetched from this run');
+      if (target?.class === 'link-local' || target?.class === 'unspecified') {
+        return deny('policy_denied', `${target.class} addresses (link-local, metadata endpoints, multicast and reserved ranges) are not fetched from this run`);
       }
       const loopOrPrivate = target?.class === 'loopback' || target?.class === 'private';
 

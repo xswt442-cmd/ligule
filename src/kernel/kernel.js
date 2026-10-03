@@ -8,7 +8,7 @@ import { createConfig } from './config.js';
 import { createLogger } from './log.js';
 import { failureOf, refusalOf, resultLimit, resultOf, spillContent } from './result.js';
 import { createObservationLog } from '../session/observe.js';
-import { classifyTarget } from '../capability/network.js';
+import { resolveTarget } from '../capability/network.js';
 import { assertSupportedSchema, validateArgs } from './schema.js';
 
 // options.config 是装载侧折好的配置快照，options.logger 是宿主自己的日志后端（D8、D26），
@@ -170,13 +170,13 @@ export function createKernel(options = {}) {
       if (violations.length > 0) {
         await fail(entry, new KernelError('tool_args_invalid', { detail: violations.join('; ') }));
       }
+      // 目标地址在这里解析一次：判定链判断的就是这一次解析出的地址，工具随后连的也是这几个地址（D58）。
+      // 分两次解析的话，链条批准了一个 IP 而连接自己又查一次 DNS，两次可以不是同一个地址。
+      const network = tool.targetArgument === undefined || typeof args?.[tool.targetArgument] !== 'string'
+        ? undefined
+        : await resolveTarget(args[tool.targetArgument]);
       if (policy) {
-        // 取回这一类调用先把名字解析成地址再判定（D58）：判定链要看得见「它其实指向哪儿」，
-        // 一个公网名字解析到 127.0.0.1 与一个写死的 127.0.0.1 是同一件事。
-        const target = tool.targetArgument === undefined || typeof args?.[tool.targetArgument] !== 'string'
-          ? undefined
-          : await classifyTarget(args[tool.targetArgument]);
-        const verdict = await policy.evaluate({ tool: name, input: args, target });
+        const verdict = await policy.evaluate({ tool: name, input: args, target: network });
         if (verdict.decision !== 'allow') {
           // 拒绝理由进日志与记录，抛出去的那一份只带错误码（D19 把文本与码分开）。
           logger.log(`tool ${name} is not allowed`, { tool: name, code: verdict.code, reason: verdict.reason });
@@ -186,7 +186,7 @@ export function createKernel(options = {}) {
       }
       let value;
       try {
-        value = await tool.run(args, { ...context, signal: options.signal });
+        value = await tool.run(args, { ...context, signal: options.signal, target: network });
       } catch (error) {
         // 工具没把错误包成内核错误码时由内核接住：统一成一个稳定码，原始错误进 cause，
         // 它自己的消息作为给模型看的那一份说明。半成品工具抛出的异常不该停住循环，
