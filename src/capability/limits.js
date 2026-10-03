@@ -9,6 +9,10 @@ export const DEFAULT_LIMITS = Object.freeze({
   scanFiles: 5_000,
   execBytes: 32_000,
   trashDirectory: '.ligule-trash',
+  // 技能那三个动作各自的结果上限，数值记在 D55；注入那一层的总量上限（resultBytes）仍然压在这三条之上。
+  skillSearchBytes: 8_000,
+  skillBodyBytes: 24_000,
+  skillFileBytes: 64_000,
 });
 
 // 遍历跳过这些目录：它们的内容不是要找的东西，扫过去只会把上限用光。
