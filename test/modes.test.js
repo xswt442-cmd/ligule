@@ -1,4 +1,4 @@
-// 第 22 步的验收（D35、D43、D44、D49）：模式文件的三层查找、两格的形状、错误码，
+// 第 22 步的验收（D35、D43、D44、D46）：模式文件的三层查找、两格的形状、错误码，
 // 以及装载之后真的收紧了交给模型的那一栏工具。临时目录是真的目录层级，工具是真的最小清单，
 // 提供方只用来把请求体交回来看见 tools 那一栏，没有假实现。
 import test from 'node:test';
@@ -84,7 +84,7 @@ test('both fields are required and nothing else is accepted', async () => {
       ['tools = ["read"]\n', 'mode_field_missing'],
       ['prompt = []\n', 'mode_field_missing'],
       [`${complete('["read"]')}extra = 1\n`, 'mode_field_unknown'],
-      // 模式不管技能与扩展的来源（D49）：写这一格就是写了一格没人读的东西，认不出来就报出去。
+      // 模式不管技能与扩展的来源（D46）：写这一格就是写了一格没人读的东西，认不出来就报出去。
       [`${complete('["read"]')}sources = ["./plugin.ts"]\n`, 'mode_field_unknown'],
       ['tools = "read"\nprompt = []\n', 'mode_field_invalid'],
       [complete('["read", "read"]'), 'mode_field_duplicate'],
@@ -110,7 +110,7 @@ test('the project layer wins whole, and its file still cannot name what the load
   });
 });
 
-// prompt 这一格这一轮只解析校验：写了内容而装载还不接，当场失败而不是悄悄忽略（第 23 步把它接上）。
+// prompt 这一格这一轮只解析校验：写了内容而装载还不接，当场失败而不是悄悄忽略（第 29 步的片段注册表把它接上）。
 test('fields the loader does not act on yet refuse a non-empty value', async () => {
   await withLayout(async ({ directories }) => {
     await writeMode(directories, 'user', 'later', 'tools = ["read"]\nprompt = ["notes"]\n');
