@@ -12,7 +12,7 @@ try {
 }
 
 const options = { skip: missing === '' ? false : missing };
-const { foldText, parseInput, editDraft, projectRecord } = rows;
+const { foldText, parseInput, editDraft, projectRecord, buildStatusLine } = rows;
 
 test('a record becomes the rows the terminal shows, one line each', options, () => {
   assert.deepEqual(projectRecord({ kind: 'user', text: '读一下' }), [{ kind: 'question', text: '读一下' }]);
@@ -97,7 +97,10 @@ test('the app paints the session line and the input hint onto the terminal', opt
   const client = {
     onNotification() {},
     onRequest() {},
-    request: async () => ({ mode: 'ask', tools: ['read'], eventCount: 0, running: false, denials: { consecutive: 0, total: 0 } }),
+    request: async () => ({
+      mode: 'minimal', modeLayer: 'shipped', pendingMode: null, policy: 'ask',
+      tools: ['read'], eventCount: 0, running: false, denials: { consecutive: 0, total: 0 },
+    }),
     reply() {},
   };
   const instance = render(
@@ -108,6 +111,31 @@ test('the app paints the session line and the input hint onto the terminal', opt
   instance.unmount();
 
   assert.match(painted, /test-model · 会话 abcdef01/);
-  assert.match(painted, /档位 ask · 工具 1 件/);
+  assert.match(painted, /mode:minimal  policy:ask  tools:1/);
   assert.match(painted, /\/help 看命令/);
+});
+
+test('the status line names the mode and the decision level separately', options, () => {
+  const status = { mode: 'minimal', pendingMode: null, policy: 'ask', tools: ['read', 'find'], eventCount: 3 };
+  assert.equal(
+    buildStatusLine({ head: '', sessionId: 'abcdef0123456789', status, running: false, seconds: 0, expanded: false }),
+    '会话 abcdef01 · mode:minimal  policy:ask  tools:2 · 记录 3 条',
+  );
+  // 待生效写成 mode:a→b（D41）。
+  assert.match(buildStatusLine({ head: '', sessionId: 'abcdef0123456789', status: { ...status, pendingMode: 'full' } }), /mode:minimal→full/);
+  // 宽度不够先丢工具数：模式与档位才说得出这一轮能做什么（D40）。
+  const narrow = buildStatusLine({ head: '', sessionId: 'abcdef0123456789', status, columns: 30 });
+  assert.doesNotMatch(narrow, /tools:/);
+  assert.match(narrow, /mode:minimal  policy:ask/);
+});
+
+test('a mode switch and an expanded template both reach the transcript', options, () => {
+  assert.deepEqual(
+    projectRecord({ kind: 'mode', name: 'full', layer: 'shipped', tools: ['read', 'skill'] }),
+    [{ kind: 'meta', text: '模式 full（随包）生效：read、skill' }],
+  );
+  assert.deepEqual(
+    projectRecord({ kind: 'user', text: 'Review src/a.ts\n', raw: '/review:security src/a.ts' }),
+    [{ kind: 'question', text: '/review:security src/a.ts' }],
+  );
 });

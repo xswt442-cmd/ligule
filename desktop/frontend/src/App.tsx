@@ -7,7 +7,11 @@ export type Status = {
   sessionId: string;
   running: boolean;
   tools: string[];
-  mode: string;
+  // 模式名与判定档位是两样东西，字段也分开（D40：界面上 `mode` 这个词不该同时指两处）。
+  mode: string | null;
+  modeLayer: string | null;
+  pendingMode: string | null;
+  policy: string;
   denials: { consecutive: number; total: number };
   eventCount: number;
 };
@@ -38,7 +42,7 @@ const menuPanels: Panel<PanelProps>[] = [
     view: ({ status }) => status === null
       ? <p className="stub">还没有会话，读不到状态。</p>
       : <>
-        <h3>档位 {status.mode} · 工具 {status.tools.length} 件 · 记录 {status.eventCount} 条 · {status.running ? '正在跑' : '空闲'}</h3>
+        <h3>模式 {status.mode ?? '没装'} · 档位 {status.policy} · 工具 {status.tools.length} 件 · 记录 {status.eventCount} 条 · {status.running ? '正在跑' : '空闲'}</h3>
         <p className="stub">判定链记的拒绝：连续 {status.denials.consecutive} 次、累计 {status.denials.total} 次。连续次数到阈值时档位自动回到逐次询问（D17）。</p>
         <ul>{status.tools.map((name) => <li key={name}>{name}</li>)}</ul>
       </>,
@@ -104,7 +108,8 @@ const statusPanels: Panel<PanelProps>[] = [
       {running && <span className="pill" data-tone="running">正在跑</span>}
       {waiting > 0 && <span className="pill" data-tone="running">在等人答复</span>}
       {status !== null && <>
-        <span className="pill">档位 {status.mode}</span>
+        <span className="pill">模式 {status.mode ?? '没装'}</span>
+        <span className="pill">档位 {status.policy}</span>
         <span className="pill">工具 {status.tools.length} 件</span>
         <span className="pill">记录 {status.eventCount} 条</span>
         {status.denials.total > 0 && <span className="pill">不允许 {status.denials.consecutive}/{status.denials.total}</span>}
