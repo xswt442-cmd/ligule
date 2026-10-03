@@ -16,6 +16,7 @@ import { SKILL_METADATA_BUDGET_BYTES, discoverSkills, formatSkillCatalog, skillD
 import { discoverTemplates, expandTemplate, findTemplate, parseInvocation, templateDirectories } from '../kernel/templates.js';
 import { createLoop, DEFAULT_LOOP_LIMITS } from '../kernel/loop.js';
 import { minimalPlugin } from '../tools/minimal.js';
+import { networkPlugin } from '../tools/network.js';
 import { createSkillPlugin } from '../tools/skill.js';
 import { createMessagesProvider } from '../model/messages.js';
 import { createChatCompletionsProvider } from '../model/chat-completions.js';
@@ -109,7 +110,7 @@ function observedSession(session, onEvent) {
 }
 
 // modeName 与 modePaths 是一对：给了名字就要能给那三层目录，运行中换模式要用同一套查找（D41、D44）。
-export function createHost({ config, provider, plugins = [minimalPlugin], policy, logger, modeName, modePaths, skillRegistry, templateRegistry }) {
+export function createHost({ config, provider, plugins = [minimalPlugin, networkPlugin], policy, logger, modeName, modePaths, skillRegistry, templateRegistry }) {
   if (!Object.isFrozen(config)) throw new KernelError('host_config_must_be_frozen');
   // 边界是工具读写的位置，也是指令文件上溯的止点，两边都读它，缺一处就说缺一处。
   if (typeof config.boundary !== 'string' || config.boundary === '') throw new KernelError('host_boundary_required');

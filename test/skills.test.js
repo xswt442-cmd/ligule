@@ -270,18 +270,20 @@ test('a mode narrows the capability tools and cannot reach the disclosure entry'
       return requests[0];
     };
 
-    // 没有模式收紧时八件都在，`skill` 与目录那一段都在。
+    // 没有模式收紧时八件加可选的那一件都在，`skill` 与目录那一段都在。
     const everything = await capture(undefined);
     assert.ok(everything.tools.some((entry) => entry.name === 'skill'), 'the disclosure entry is offered');
-    assert.equal(everything.tools.length, 9);
+    assert.equal(everything.tools.length, 10);
     assert.match(everything.system, /- pdf-tools: read a report/);
 
-    // 模式只筛直接能力工具：藏掉七件之后 `skill` 仍然留着（D63），目录那一段也跟着留着。
+    // 模式只筛直接能力工具：藏掉其余几件之后 `skill` 仍然留着（D63），目录那一段也跟着留着。
     const readonly = await capture('readonly');
     assert.deepEqual(readonly.tools.map((entry) => entry.name), ['read', 'skill']);
     assert.match(readonly.system, /- pdf-tools: read a report/);
     const minimal = await capture(DEFAULT_MODE);
     assert.ok(minimal.tools.some((entry) => entry.name === 'skill'));
+    // 可选的第一方工具由模式装上或藏掉：`minimal` 里没写 `fetch` 就看不见它（D48）。
+    assert.ok(!minimal.tools.some((entry) => entry.name === 'fetch'), 'minimal keeps the optional tool out');
     assert.equal(minimal.tools.length, 9);
   });
 });

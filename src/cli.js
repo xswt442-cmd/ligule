@@ -12,6 +12,7 @@ import { loadAssembly } from './kernel/assembly.js';
 import { DEFAULT_MODE, modeDirectories } from './kernel/modes.js';
 import { discoverSkills, skillDirectories } from './kernel/skills.js';
 import { minimalPlugin } from './tools/minimal.js';
+import { networkPlugin } from './tools/network.js';
 import { createHost, providerFromConfig, serveHost } from './host/host.js';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
@@ -57,7 +58,7 @@ function resolveMode(config) {
 
 async function installedKernel() {
   const kernel = createKernel({ config: await configSnapshot() });
-  loadAssembly(kernel, [minimalPlugin]);
+  loadAssembly(kernel, [minimalPlugin, networkPlugin]);
   return kernel;
 }
 

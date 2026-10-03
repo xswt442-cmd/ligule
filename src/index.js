@@ -10,6 +10,8 @@ export {
   SKILL_FILE, SKILLS_DIRECTORY, SKILL_METADATA_BUDGET_BYTES,
 } from './kernel/skills.js';
 export { createSkillTool, createSkillPlugin } from './tools/skill.js';
+export { fetchTool, networkPlugin } from './tools/network.js';
+export { classifyAddress, classifyTarget, fetchTarget, parseTarget } from './capability/network.js';
 export {
   discoverTemplates, templateDirectories, parseInvocation, findTemplate, splitArguments, expandTemplate,
   PROMPTS_DIRECTORY,
