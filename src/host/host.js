@@ -13,6 +13,7 @@ import { createPromptAssembly } from '../kernel/prompt.js';
 import { createSessionLog } from '../session/session.js';
 import { loadInstructions, DEFAULT_INSTRUCTION_BYTES } from '../capability/instructions.js';
 import { SKILL_METADATA_BUDGET_BYTES, discoverSkills, formatSkillCatalog, skillDirectories } from '../kernel/skills.js';
+import { discoverTemplates, expandTemplate, findTemplate, parseInvocation, templateDirectories } from '../kernel/templates.js';
 import { createLoop, DEFAULT_LOOP_LIMITS } from '../kernel/loop.js';
 import { minimalPlugin } from '../tools/minimal.js';
 import { createSkillPlugin } from '../tools/skill.js';
@@ -107,7 +108,7 @@ function observedSession(session, onEvent) {
   };
 }
 
-export function createHost({ config, provider, plugins = [minimalPlugin], policy, logger, mode, skillRegistry }) {
+export function createHost({ config, provider, plugins = [minimalPlugin], policy, logger, mode, skillRegistry, templateRegistry }) {
   if (!Object.isFrozen(config)) throw new KernelError('host_config_must_be_frozen');
   // 边界是工具读写的位置，也是指令文件上溯的止点，两边都读它，缺一处就说缺一处。
   if (typeof config.boundary !== 'string' || config.boundary === '') throw new KernelError('host_boundary_required');
@@ -163,6 +164,12 @@ export function createHost({ config, provider, plugins = [minimalPlugin], policy
       logger?.log?.('skill is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
     }
     const loaded = skills.skills.length === 0 ? plugins : [...plugins, createSkillPlugin(skills)];
+    // 提示模板也是装载侧扫出来的事实（D45）：两处目录，靠近仓库的那一份胜出。展开发生在这一侧，
+    // 三个客户端因此不必各写一份替换规则（D54）。
+    const templates = templateRegistry ?? await discoverTemplates(templateDirectories(config.boundary));
+    for (const diagnostic of templates.diagnostics) {
+      logger?.log?.('prompt template is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
+    }
     const assembly = loadAssembly(kernel, loaded);
     // 模式选中的那一栏工具在装载之后收紧（D35、D44）：清单里写了本次没登记的名字会在这里失败，
     // 而不是静默少一件。收紧只减不加，被藏起来的那几件仍然留在登记表里（I4）。
@@ -186,7 +193,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin], policy
       limits: loopLimitsOf(config),
     });
     // 一份会话一份状态，审批的等待与正在跑的那一轮都记在这里。
-    return Object.assign(state, { chain, kernel, assembly, loop });
+    return Object.assign(state, { chain, kernel, assembly, loop, templates });
   }
 
   return {
@@ -227,9 +234,19 @@ export function createHost({ config, provider, plugins = [minimalPlugin], policy
             for (const settle of state.asks) settle();
           };
           controller.signal.addEventListener('abort', settleAsks, { once: true });
+          // 模板展开排在这一轮开始之前（D54）：交进循环的是展开后的文本，记录里另外留着人打的那一行、
+          // 参数、模板来源与内容摘要。查不到的那一行斜杠在这里就报出去，不带着没展开的原文进模型。
+          const invocation = parseInvocation(input);
+          let text = input;
+          let user;
+          if (invocation !== undefined) {
+            const expanded = await expandTemplate(findTemplate(state.templates, invocation.command), invocation.arguments);
+            text = expanded.text;
+            user = { raw: input, arguments: expanded.arguments, source: expanded.source, digest: expanded.digest };
+          }
           state.running = controller;
           try {
-            return await state.loop.run(input, { signal: controller.signal });
+            return await state.loop.run(text, { signal: controller.signal, user });
           } finally {
             controller.signal.removeEventListener('abort', settleAsks);
             state.running = undefined;

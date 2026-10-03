@@ -29,7 +29,9 @@ export function createLoop({ kernel, provider, prompt, session, limits = DEFAULT
 
   return {
     // signal 由适配器或上层交进来；每一轮自己再派生一个取消令牌，工具、提供方与本循环看到的是同一次取消。
-    async run(input, { signal } = {}) {
+    // options.user 是宿主交进来的那一条用户记录的附加字段（模板展开时是原始调用、参数、来源与摘要，D54）：
+    // 循环只把它们并进记录，模型看见的仍然是 input 那一份文本。
+    async run(input, { signal, user } = {}) {
       const controller = new AbortController();
       const forward = () => controller.abort();
       signal?.addEventListener('abort', forward, { once: true });
@@ -50,7 +52,7 @@ export function createLoop({ kernel, provider, prompt, session, limits = DEFAULT
       }
 
       // 这一轮的用户输入同样进记录：模型看见的每一条都要能从记录重建出来（I5）。
-      if (session) await session.append({ kind: 'user', text: input });
+      if (session) await session.append({ kind: 'user', text: input, ...user });
 
       try {
         for (let iteration = 1; iteration <= limits.iterations; iteration += 1) {
