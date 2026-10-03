@@ -13,6 +13,10 @@ export const DEFAULT_LIMITS = Object.freeze({
   skillSearchBytes: 8_000,
   skillBodyBytes: 24_000,
   skillFileBytes: 64_000,
+  // 取回一件的三条（D58）：响应字节上限、超时与最多跟几跳。
+  fetchBytes: 64_000,
+  fetchTimeoutMs: 15_000,
+  fetchRedirects: 5,
 });
 
 // 遍历跳过这些目录：它们的内容不是要找的东西，扫过去只会把上限用光。

@@ -8,6 +8,7 @@ import { createConfig } from './config.js';
 import { createLogger } from './log.js';
 import { failureOf, refusalOf, resultLimit, resultOf, spillContent } from './result.js';
 import { createObservationLog } from '../session/observe.js';
+import { classifyTarget } from '../capability/network.js';
 import { assertSupportedSchema, validateArgs } from './schema.js';
 
 // options.config 是装载侧折好的配置快照，options.logger 是宿主自己的日志后端（D8、D26），
@@ -104,12 +105,14 @@ export function createKernel(options = {}) {
       // 只留名字、描述、参数模式那三项，插件附带的其他字段进不了模型可见清单（D12）。
       // 执行策略声明按工具名留在内核这一侧，循环读它，模型看不见（D29、I3）。
       // 披露入口也留在内核这一侧：固定那几件工具由注册表里有没有内容决定，不进模式的选择范围（D63）。
+      // 哪个参数是要取回的目标同样留在内核这一侧：判定链看的是解析之后的地址类别，不是模型写的字符串（D58）。
       const entry = {
         name: tool.name,
         description: tool.description,
         parameters,
         execution: tool.execution === 'parallel' ? 'parallel' : 'serial',
         disclosure: tool.disclosure === true,
+        targetArgument: typeof tool.targetArgument === 'string' ? tool.targetArgument : undefined,
         run: tool.run,
       };
       tools.set(tool.name, entry);
@@ -168,7 +171,12 @@ export function createKernel(options = {}) {
         await fail(entry, new KernelError('tool_args_invalid', { detail: violations.join('; ') }));
       }
       if (policy) {
-        const verdict = await policy.evaluate({ tool: name, input: args });
+        // 取回这一类调用先把名字解析成地址再判定（D58）：判定链要看得见「它其实指向哪儿」，
+        // 一个公网名字解析到 127.0.0.1 与一个写死的 127.0.0.1 是同一件事。
+        const target = tool.targetArgument === undefined || typeof args?.[tool.targetArgument] !== 'string'
+          ? undefined
+          : await classifyTarget(args[tool.targetArgument]);
+        const verdict = await policy.evaluate({ tool: name, input: args, target });
         if (verdict.decision !== 'allow') {
           // 拒绝理由进日志与记录，抛出去的那一份只带错误码（D19 把文本与码分开）。
           logger.log(`tool ${name} is not allowed`, { tool: name, code: verdict.code, reason: verdict.reason });

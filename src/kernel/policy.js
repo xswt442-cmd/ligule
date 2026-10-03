@@ -32,9 +32,12 @@ function canAutoApprove(command) {
 }
 
 // 要去询问时把原因一起交出去：解析器不可用与命令里有哪种看不透的构造，界面上要说得出来（I8）。
-function askReason(parsed) {
+function askReason(parsed, target) {
   if (parsed?.kind === 'unavailable') return `the command syntax parser is unavailable: ${parsed.detail}`;
   if (parsed?.kind === 'unsupported') return `the command is not fully understood: ${parsed.construct}`;
+  if (target?.class === 'loopback' || target?.class === 'private') {
+    return `the address ${target.addresses.join(', ')} is ${target.class}, so this fetch needs an explicit yes`;
+  }
   return undefined;
 }
 
@@ -81,7 +84,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       return { consecutive, total };
     },
 
-    async evaluate({ tool, input }) {
+    async evaluate({ tool, input, target }) {
       if (typeof tool !== 'string' || tool === '') throw new KernelError('policy_call_tool_required');
       const command = commandOf(input);
       const effective = forcedToAsk ? 'ask' : current;
@@ -89,6 +92,15 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       // 命令文本先过一次语法解析：能拆成可信的分段就逐段套规则，拆不出来就整条按无法完整处理对待。
       const parsed = command === undefined ? undefined : parseCommand(command);
       const segments = parsed?.kind === 'segments' ? parsed.segments : undefined;
+
+      // 网络目标的类别先收紧（D58）：用不了的 URL 与链路本地那一类根本不进后面的顺序。
+      if (target !== undefined && (target.failure !== undefined || target.class === undefined)) {
+        return deny('policy_denied', `the network target cannot be classified (${target.failure ?? 'unsupported'})`);
+      }
+      if (target?.class === 'link-local') {
+        return deny('policy_denied', 'link-local and metadata endpoints are not fetched from this run');
+      }
+      const loopOrPrivate = target?.class === 'loopback' || target?.class === 'private';
 
       // 命中的规则里只要有拒绝就拒绝：链只能收紧，写在拒绝规则前面的放行规则不能把它压掉（I4）。
       // 拒绝对整条文本与每一个分段都生效，`git status | rm x` 才拦得住。
@@ -105,7 +117,10 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
 
       const allowed = candidates.filter((item) => item.decision === 'allow');
       let covered;
-      if (command === undefined) {
+      if (loopOrPrivate) {
+        // 环回与内网至少问到一次：放行规则写得再宽也算没盖住，因为「哪一个地址」不是字符串看得出来的。
+        covered = false;
+      } else if (command === undefined) {
         // 没有命令文本的调用（读文件一类）不受语法这一层影响：自动档直接放行，
         // 逐次询问这一档仍然要有放行规则盖住它。
         covered = effective === 'auto' || allowed.some((item) => matches(command, item.match));
@@ -124,7 +139,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       }
 
       // 走到这里都要问：自动档遇到看不透的命令不自动放行，只降档到逐次询问，并把原因交出去（D17、I8）。
-      const reason = askReason(parsed);
+      const reason = askReason(parsed, target);
       if (typeof ask !== 'function') return deny('ask_unavailable', reason ?? 'no ask channel is installed');
       if (await ask({ tool, input, command, reason }) !== true) return deny('ask_declined', 'the user declined');
       record(false);
