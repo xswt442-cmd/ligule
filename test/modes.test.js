@@ -1,4 +1,4 @@
-// 第 22 步的验收（D35、D43、D44、D46）：模式文件的三层查找、三格的形状、错误码，
+// 第 22 步的验收（D35、D43、D44、D49）：模式文件的三层查找、两格的形状、错误码，
 // 以及装载之后真的收紧了交给模型的那一栏工具。临时目录是真的目录层级，工具是真的最小清单，
 // 提供方只用来把请求体交回来看见 tools 那一栏，没有假实现。
 import test from 'node:test';
@@ -36,7 +36,7 @@ async function writeMode(directories, layer, name, text) {
   return path;
 }
 
-const complete = (tools) => `tools = ${tools}\nprompt = []\nsources = []\n`;
+const complete = (tools) => `tools = ${tools}\nprompt = []\n`;
 
 test('the same name in two layers resolves to the highest one, whole file and no merging', async () => {
   await withLayout(async ({ directories }) => {
@@ -77,17 +77,18 @@ test('a name that could escape the mode directories is refused before any read',
   });
 });
 
-// 三格每一格都要写：写了名字却没生效的那一格，比少写一格更难查（I2）。
-test('each of the three fields is required and nothing else is accepted', async () => {
+// 两格每一格都要写：写了名字却没生效的那一格，比少写一格更难查（I2）。
+test('both fields are required and nothing else is accepted', async () => {
   await withLayout(async ({ directories }) => {
     const cases = [
-      ['tools = ["read"]\nprompt = []\n', 'mode_field_missing'],
-      ['tools = ["read"]\nsources = []\n', 'mode_field_missing'],
-      ['prompt = []\nsources = []\n', 'mode_field_missing'],
+      ['tools = ["read"]\n', 'mode_field_missing'],
+      ['prompt = []\n', 'mode_field_missing'],
       [`${complete('["read"]')}extra = 1\n`, 'mode_field_unknown'],
-      ['tools = "read"\nprompt = []\nsources = []\n', 'mode_field_invalid'],
+      // 模式不管技能与扩展的来源（D49）：写这一格就是写了一格没人读的东西，认不出来就报出去。
+      [`${complete('["read"]')}sources = ["./plugin.ts"]\n`, 'mode_field_unknown'],
+      ['tools = "read"\nprompt = []\n', 'mode_field_invalid'],
       [complete('["read", "read"]'), 'mode_field_duplicate'],
-      ['tools = { oops = 1 }\nprompt = []\nsources = []\n', 'mode_field_invalid'],
+      ['tools = { oops = 1 }\nprompt = []\n', 'mode_field_invalid'],
       ['not toml at all = =\n', 'mode_file_invalid'],
     ];
     for (const [index, [text, code]] of cases.entries()) {
@@ -98,21 +99,21 @@ test('each of the three fields is required and nothing else is accepted', async 
   });
 });
 
-test('the project layer may not name sources, and an empty list copied from the shipped file is fine', async () => {
+test('the project layer wins whole, and its file still cannot name what the loader has no field for', async () => {
   await withLayout(async ({ directories }) => {
+    await writeMode(directories, 'user', 'mine', complete('["read", "find"]'));
     await writeMode(directories, 'project', 'mine', complete('["read"]'));
-    assert.equal((await loadMode('mine', directories)).layer, 'project');
-    await writeMode(directories, 'project', 'loaded', 'tools = ["read"]\nprompt = []\nsources = ["./plugin.ts"]\n');
-    const error = await loadMode('loaded', directories).catch((failure) => failure);
-    assert.equal(error.code, 'mode_project_field_forbidden');
-    assert.match(error.detail, /D46/);
+    const mode = await loadMode('mine', directories);
+    assert.equal(mode.layer, 'project');
+    // 整份覆盖：全局那份写了两个工具，项目那份写一个，生效的就只有一个，不做按键合并。
+    assert.deepEqual(mode.tools, ['read']);
   });
 });
 
-// prompt 与 sources 这两格这一轮只解析校验：写了内容而装载还不接，当场失败而不是悄悄忽略（D45、D37）。
+// prompt 这一格这一轮只解析校验：写了内容而装载还不接，当场失败而不是悄悄忽略（第 23 步把它接上）。
 test('fields the loader does not act on yet refuse a non-empty value', async () => {
   await withLayout(async ({ directories }) => {
-    await writeMode(directories, 'user', 'later', 'tools = ["read"]\nprompt = ["notes"]\nsources = []\n');
+    await writeMode(directories, 'user', 'later', 'tools = ["read"]\nprompt = ["notes"]\n');
     const error = await loadMode('later', directories).catch((failure) => failure);
     assert.equal(error.code, 'mode_field_unsupported');
     assert.match(error.detail, /prompt/);

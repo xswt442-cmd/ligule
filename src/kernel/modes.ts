@@ -1,10 +1,11 @@
-// 模式是一份命名的装配清单（D35）：三格——`tools` 选本次运行注册表里的哪几件交给模型，
-// `prompt` 选哪几段提示词，`sources` 列扩展与技能的来源。一个模式一份 TOML，文件名就是模式名（D43）。
-// 查找从低到高分三层：随包那一份、`~/.ligule/modes/`、`<项目根>/.ligule/modes/`；同名只取最高那层的整份，
-// 不做跨层合并——把「这一次运行装了什么」写成两处，读的时候就对不上了（D35 放弃「模式引用模式」是同一条理由）。
-// 项目层那份不许写 `sources`（D46）：这一格决定往进程里加载谁的代码，不由别人写的仓库替本机决定。
-// `prompt` 与 `sources` 这两格这一轮只解析与校验：提示词段的按名选择要等片段注册表，
-// 扩展文件的加载要等 D37 那条窄接口。写了非空内容而装载还不接，当场失败，不装作生效了。
+// 模式是一份命名的装配清单（D35、D49）：两格——`tools` 选本次运行注册表里的哪几件交给模型，
+// `prompt` 选哪几段提示词片段。它不描述系统里有哪些技能、装了哪些扩展，也不描述权限：
+// 那几件事各有各的持有者，Mode ≠ Capability Registry ≠ Policy。
+// 一个模式一份 TOML，文件名就是模式名（D43）。查找从低到高分三层：随包那一份、`~/.ligule/modes/`、
+// `<项目根>/.ligule/modes/`；同名只取最高那层的整份，不做跨层合并——把「这一次运行装了什么」写成两处，
+// 读的时候就对不上了（D35 放弃「模式引用模式」是同一条理由）。
+// `prompt` 这一格这一轮只解析与校验：片段按名选择要等提示词片段注册表（第 23 步），
+// 写了内容而装载还不接，当场失败，不装作生效了。
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -15,7 +16,7 @@ import { KernelError } from './error.js';
 export const MODE_DIRECTORY = 'modes';
 // 不选模式时装的是随包的这一份，也就是 D3 那八件，行为与阶段一相同。
 export const DEFAULT_MODE = 'minimal';
-const MODE_FIELDS = ['tools', 'prompt', 'sources'];
+const MODE_FIELDS = ['tools', 'prompt'];
 
 export type ModeLayer = 'shipped' | 'user' | 'project';
 
@@ -25,7 +26,6 @@ export interface ModeFile {
   path: string;
   tools: string[] | '*';
   prompt: string[] | '*';
-  sources: string[];
 }
 
 export interface ModeDirectories {
@@ -125,20 +125,11 @@ export async function loadMode(name: string, directories: ModeDirectories): Prom
   }
   const tools = readNames(fields.tools, 'tools', file.path, true);
   const prompt = readNames(fields.prompt, 'prompt', file.path, true);
-  const sources = readNameList(fields.sources, 'sources', file.path);
   // 空数组是「这一格不选」，写进文件里看得见；非空而装载还不接就是错。
   if (prompt !== '*' && prompt.length > 0) {
     throw new KernelError('mode_field_unsupported', { detail: `prompt is not selected by the loader yet (it lands with the fragment registry): ${file.path}` });
   }
-  if (sources.length > 0) {
-    // 项目层那份出自别人写的仓库：这一格决定往进程里加载谁的代码，不由它替本机决定（D46）。
-    // 空数组允许，因为随包的那份可以原样拷进项目目录改前两格。
-    if (file.layer === 'project') {
-      throw new KernelError('mode_project_field_forbidden', { detail: `sources cannot be set by the project layer (D46): ${file.path}` });
-    }
-    throw new KernelError('mode_field_unsupported', { detail: `sources are loaded by the extension carrier, not yet by the mode loader: ${file.path}` });
-  }
-  return { name, layer: file.layer, path: file.path, tools, prompt, sources };
+  return { name, layer: file.layer, path: file.path, tools, prompt };
 }
 
 // 选中的一栏与注册表对得上才算数：模式写了一件本次运行没登记的工具，那是清单写错，
