@@ -225,12 +225,15 @@ test('one disclosure is an ordinary tool call in the session record', async () =
   });
 });
 
-test('the catalog and the tool reach the provider only while the mode hands skill over', async () => {
+test('a mode narrows the capability tools and cannot reach the disclosure entry', async () => {
   await withSkills(async ({ directories, place, root }) => {
     await place(0, 'pdf-tools', `${header({ name: 'pdf-tools', description: 'read a report' })}body\n`);
     const registry = await discoverSkills(directories);
     const projectRoot = join(root, 'project');
-    const modeOf = async (name) => loadMode(name, modeDirectories(projectRoot, shippedModes, join(root, 'home')));
+    const userHome = join(root, 'home');
+    await mkdir(join(userHome, '.ligule', 'modes'), { recursive: true });
+    await writeFile(join(userHome, '.ligule', 'modes', 'readonly.toml'), 'tools = ["read"]\nprompt = []\n');
+    const modeOf = async (name) => loadMode(name, modeDirectories(projectRoot, shippedModes, userHome));
     const capture = async (mode) => {
       const config = createConfig({
         user: {
@@ -267,13 +270,18 @@ test('the catalog and the tool reach the provider only while the mode hands skil
       return requests[0];
     };
 
-    const open = await capture(undefined);
-    assert.ok(open.tools.some((entry) => entry.name === 'skill'), 'the skill tool is offered');
-    assert.match(open.system, /- pdf-tools: read a report/);
+    // 没有模式收紧时八件都在，`skill` 与目录那一段都在。
+    const everything = await capture(undefined);
+    assert.ok(everything.tools.some((entry) => entry.name === 'skill'), 'the disclosure entry is offered');
+    assert.equal(everything.tools.length, 9);
+    assert.match(everything.system, /- pdf-tools: read a report/);
 
+    // 模式只筛直接能力工具：藏掉七件之后 `skill` 仍然留着（D63），目录那一段也跟着留着。
+    const readonly = await capture(await modeOf('readonly'));
+    assert.deepEqual(readonly.tools.map((entry) => entry.name), ['read', 'skill']);
+    assert.match(readonly.system, /- pdf-tools: read a report/);
     const minimal = await capture(await modeOf(DEFAULT_MODE));
-    assert.ok(!minimal.tools.some((entry) => entry.name === 'skill'), 'minimal keeps the tool out of the table');
-    // 工具被模式藏起来时不注入目录：那段说明指向一件模型够不到的工具（D35）。
-    assert.doesNotMatch(minimal.system, /pdf-tools/);
+    assert.ok(minimal.tools.some((entry) => entry.name === 'skill'));
+    assert.equal(minimal.tools.length, 9);
   });
 });

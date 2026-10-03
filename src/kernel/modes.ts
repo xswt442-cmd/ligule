@@ -1,6 +1,6 @@
-// 模式是一份命名的装配清单（D35、D43、D46）：两格——`tools` 选本次运行注册表里的哪几件交给模型，
+// 模式是一份命名的装配清单（D35、D43、D46）：两格——`tools` 选本次运行注册表里的哪几件直接能力工具交给模型，
 // `prompt` 选哪几段提示词片段。它不描述系统里有哪些技能、装了哪些扩展，也不描述权限：
-// 那几件事各有各的持有者，Mode ≠ Capability Registry ≠ Policy。
+// 那几件事各有各的持有者，Mode ≠ Capability Registry ≠ Policy。固定披露入口（`skill`）也不在这一格里（D63）。
 // 一个模式一份 TOML，文件名就是模式名（D43）。查找从低到高分三层：随包那一份、`~/.ligule/modes/`、
 // `<项目根>/.ligule/modes/`；同名只取最高那层的整份，不做跨层合并——把「这一次运行装了什么」写成两处，
 // 读的时候就对不上了（D35 放弃「模式引用模式」是同一条理由）。
@@ -34,9 +34,11 @@ export interface ModeDirectories {
   project: string;
 }
 
-// 内核在装载之后交给 applyMode 的是这两件事：读出登记了哪些工具，以及把没选中的藏起来（I4 只收紧）。
+// 内核在装载之后交给 applyMode 的是这两件事：读出模式能选的那一栏工具，以及把没选中的藏起来（I4 只收紧）。
+// 固定披露入口不在这份名单里（D63），模式也就藏不掉它。
 export interface ModeTarget {
   list(): string[];
+  selectable(): string[];
   restrict(names: string[]): () => void;
 }
 
@@ -136,14 +138,19 @@ export async function loadMode(name: string, directories: ModeDirectories): Prom
 // 而不是「少一件」——静默少一件会让装配清单读出来的与模型看见的不是一回事（I2）。
 export function applyMode(kernel: ModeTarget, mode: ModeFile): string[] {
   const registered = kernel.list();
+  const selectable = kernel.selectable();
   const selected = mode.tools;
   if (selected === '*') return registered;
   for (const name of selected) {
     if (!registered.includes(name)) {
       throw new KernelError('mode_tool_unregistered', { detail: `${name} (mode ${mode.name}; registered: ${registered.join(', ') || 'none'})` });
     }
+    // 披露入口不是模式能写的一格（D63）：写它的名字是清单写错了，静默收下只会让人以为把那件关掉了。
+    if (!selectable.includes(name)) {
+      throw new KernelError('mode_tool_not_selectable', { detail: `${name} is a fixed disclosure tool (mode ${mode.name})` });
+    }
   }
-  const hidden = registered.filter((name) => !selected.includes(name));
+  const hidden = selectable.filter((name) => !selected.includes(name));
   if (hidden.length > 0) kernel.restrict(hidden);
   return selected;
 }

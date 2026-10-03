@@ -173,8 +173,9 @@ export function createHost({ config, provider, plugins = [minimalPlugin], policy
     const maxBytes = config.instructions?.maxBytes ?? DEFAULT_INSTRUCTION_BYTES;
     const instructions = await loadInstructions({ boundary: config.boundary, ...config.instructions });
     prompt.fragment({ name: 'instructions', anchor: 0, text: instructions.text, maxBytes });
-    // 目录整份内联还是只留一句使用说明由预算判（D55），而注入的前提是 `skill` 真的交给了模型（D35：模式只减不加）。
-    if (skills.skills.length > 0 && kernel.manifest().some((tool) => tool.name === 'skill')) {
+    // 目录整份内联还是只留一句使用说明由预算判（D55）。有技能就有这一段：
+    // 披露入口不在模式的选择范围里，模式藏不掉它（D63）。
+    if (skills.skills.length > 0) {
       prompt.fragment({ name: 'skills', anchor: 1, text: formatSkillCatalog(skills), maxBytes: SKILL_METADATA_BUDGET_BYTES });
     }
     const loop = createLoop({

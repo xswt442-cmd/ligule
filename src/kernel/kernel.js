@@ -58,6 +58,12 @@ export function createKernel(options = {}) {
       return [...tools.keys()].sort();
     },
 
+    // 模式能从哪几件里挑：登记表里去掉固定披露入口（D63）。被模式藏起来不该是一种可能，
+    // 否则默认档位下模型连发现技能的入口都没有，而注册表里明明有东西。
+    selectable() {
+      return [...tools.values()].filter((tool) => !tool.disclosure).map((tool) => tool.name).sort();
+    },
+
     // 循环按这一条决定分组：没有声明、或者登记名不存在，一律按串行处理（D29）。
     execution(name) {
       return tools.get(name)?.execution ?? 'serial';
@@ -97,11 +103,13 @@ export function createKernel(options = {}) {
       assertSupportedSchema(parameters);
       // 只留名字、描述、参数模式那三项，插件附带的其他字段进不了模型可见清单（D12）。
       // 执行策略声明按工具名留在内核这一侧，循环读它，模型看不见（D29、I3）。
+      // 披露入口也留在内核这一侧：固定那几件工具由注册表里有没有内容决定，不进模式的选择范围（D63）。
       const entry = {
         name: tool.name,
         description: tool.description,
         parameters,
         execution: tool.execution === 'parallel' ? 'parallel' : 'serial',
+        disclosure: tool.disclosure === true,
         run: tool.run,
       };
       tools.set(tool.name, entry);

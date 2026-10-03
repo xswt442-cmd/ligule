@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import {
-  applyMode, createConfig, createConnection, createKernel, createMemoryConnectionPair, DEFAULT_MODE,
+  applyMode, createConfig, createConnection, createKernel, createMemoryConnectionPair, createSkillPlugin, DEFAULT_MODE,
   loadAssembly, loadMode, MESSAGES_CAPABILITIES, minimalPlugin, modeDirectories, serveHost,
 } from '../dist/index.js';
 
@@ -125,6 +125,34 @@ function kernelWithMinimal() {
   loadAssembly(kernel, [minimalPlugin]);
   return kernel;
 }
+
+// 固定披露入口（`skill`）不在这份名单里，所以模式既选不到它也藏不掉它（D63）。
+function kernelWithDisclosure() {
+  const kernel = createKernel({ config: createConfig({ user: { boundary: process.cwd() } }) });
+  loadAssembly(kernel, [minimalPlugin, createSkillPlugin({ skills: [], diagnostics: [] })]);
+  return kernel;
+}
+
+test('a mode cannot name the disclosure entry, and hiding the rest still leaves it visible', async () => {
+  await withLayout(async ({ directories }) => {
+    await writeMode(directories, 'user', 'withskill', complete('["read", "skill"]'));
+    let error;
+    try {
+      applyMode(kernelWithDisclosure(), await loadMode('withskill', directories));
+    } catch (failure) {
+      error = failure;
+    }
+    // 写它的名字是清单写错了：静默收下会让人以为那一件被关掉了。
+    assert.equal(error.code, 'mode_tool_not_selectable');
+    assert.match(error.detail, /skill/);
+
+    await writeMode(directories, 'user', 'justread', complete('["read"]'));
+    const narrowed = kernelWithDisclosure();
+    applyMode(narrowed, await loadMode('justread', directories));
+    assert.deepEqual(narrowed.manifest().map((entry) => entry.name), ['read', 'skill']);
+    assert.equal(narrowed.list().length, 9);
+  });
+});
 
 test('applying a mode narrows what the model is offered, and "*" offers everything registered', async () => {
   await withLayout(async ({ directories, projectRoot, userHome }) => {
