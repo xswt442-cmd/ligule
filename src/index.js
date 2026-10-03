@@ -5,6 +5,11 @@ export { loadConfigLayers, flagLayer, configPaths } from './kernel/config-file.j
 export { createLogger } from './kernel/log.js';
 export { loadAssembly } from './kernel/assembly.js';
 export { loadMode, applyMode, modeDirectories, MODE_DIRECTORY, DEFAULT_MODE } from './kernel/modes.js';
+export {
+  discoverSkills, skillDirectories, formatSkillCatalog, searchSkills, readSkillBody, listSkillFiles,
+  SKILL_FILE, SKILLS_DIRECTORY, SKILL_METADATA_BUDGET_BYTES,
+} from './kernel/skills.js';
+export { createSkillTool, createSkillPlugin } from './tools/skill.js';
 export { minimalTools, minimalPlugin } from './tools/minimal.js';
 export { createSlotRegistry } from './kernel/slots.js';
 export { loadInstructions } from './capability/instructions.js';
