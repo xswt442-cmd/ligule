@@ -136,11 +136,13 @@ export async function loadMode(name: string, directories: ModeDirectories): Prom
 
 // 选中的一栏与注册表对得上才算数：模式写了一件本次运行没登记的工具，那是清单写错，
 // 而不是「少一件」——静默少一件会让装配清单读出来的与模型看见的不是一回事（I2）。
-export function applyMode(kernel: ModeTarget, mode: ModeFile): string[] {
+// 交回的 undo 是运行中换模式要用的一样东西：上一次的收紧必须先撤销，新的清单才谈得上生效（D41）。
+// 撤销只撤自己那一项，别的 restrict() 追加的拒绝仍然在（I4）。
+export function applyMode(kernel: ModeTarget, mode: ModeFile): { tools: string[]; undo: () => void } {
   const registered = kernel.list();
   const selectable = kernel.selectable();
   const selected = mode.tools;
-  if (selected === '*') return registered;
+  if (selected === '*') return { tools: registered, undo: () => {} };
   for (const name of selected) {
     if (!registered.includes(name)) {
       throw new KernelError('mode_tool_unregistered', { detail: `${name} (mode ${mode.name}; registered: ${registered.join(', ') || 'none'})` });
@@ -151,6 +153,6 @@ export function applyMode(kernel: ModeTarget, mode: ModeFile): string[] {
     }
   }
   const hidden = selectable.filter((name) => !selected.includes(name));
-  if (hidden.length > 0) kernel.restrict(hidden);
-  return selected;
+  const undo = hidden.length > 0 ? kernel.restrict(hidden) : () => {};
+  return { tools: selected, undo };
 }

@@ -4,6 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { setTimeout } from 'node:timers/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -157,7 +158,7 @@ test('a mode cannot name the disclosure entry, and hiding the rest still leaves 
 test('applying a mode narrows what the model is offered, and "*" offers everything registered', async () => {
   await withLayout(async ({ directories, projectRoot, userHome }) => {
     await writeMode(directories, 'user', 'readonly', complete('["read", "find", "search"]'));
-    const selected = applyMode(kernelWithMinimal(), await loadMode('readonly', directories));
+    const selected = applyMode(kernelWithMinimal(), await loadMode('readonly', directories)).tools;
     assert.deepEqual(selected, ['read', 'find', 'search']);
 
     const kernel = kernelWithMinimal();
@@ -166,7 +167,7 @@ test('applying a mode narrows what the model is offered, and "*" offers everythi
     // 登记表本身没被改动：被藏起来的三件仍然在，只是不再交给模型，也不允许被绕过去调用（I4）。
     assert.equal(kernel.list().length, MINIMAL.length);
     const shipped = modeDirectories(projectRoot, shippedModes, userHome);
-    assert.deepEqual(applyMode(kernelWithMinimal(), await loadMode('full', shipped)), MINIMAL);
+    assert.deepEqual(applyMode(kernelWithMinimal(), await loadMode('full', shipped)).tools, MINIMAL);
   });
 });
 
@@ -196,7 +197,6 @@ test('a session built by the Host asks the provider with only the mode-selected 
   await writeFile(join(root, 'note.txt'), 'hello');
   const directories = modeDirectories(projectRoot, shippedModes, userHome);
   await writeMode(directories, 'user', 'readonly', complete('["read"]'));
-  const mode = await loadMode('readonly', directories);
   const config = createConfig({
     user: {
       boundary: root,
@@ -218,7 +218,7 @@ test('a session built by the Host asks the provider with only the mode-selected 
     },
   };
   const pair = createMemoryConnectionPair();
-  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy, mode });
+  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy, modeName: 'readonly', modePaths: directories });
   const connection = createConnection(pair.client);
   try {
     const { sessionId } = await connection.request('session.create', {});
@@ -230,4 +230,77 @@ test('a session built by the Host asks the provider with only the mode-selected 
     host.release();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+// 第 25 步的验收（D41）：轮中不打断，本轮结束才换清单，生效之前再选一次当前那份就是撤回。
+test('a switch asked for during a round takes effect only once that round ends', async () => {
+  await withLayout(async ({ directories, projectRoot, userHome }) => {
+    await writeMode(directories, 'user', 'readonly', complete('["read"]'));
+    await writeMode(directories, 'user', 'wide', complete('["read", "find"]'));
+    const config = createConfig({
+      user: {
+        boundary: projectRoot,
+        model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model' },
+        policy: { mode: 'ask' },
+      },
+    });
+    let release;
+    const requests = [];
+    const provider = {
+      capabilities: MESSAGES_CAPABILITIES,
+      model: 'test-model',
+      async *stream(request) {
+        requests.push(request);
+        // 只卡第一次模型调用，让测试能站在「本轮还在跑」这一侧提请求；第二次照常走完。
+        if (requests.length === 1) {
+          await new Promise((resolve) => {
+            release = resolve;
+          });
+        }
+        yield { type: 'text', text: 'ok' };
+      },
+    };
+    const pair = createMemoryConnectionPair();
+    const host = serveHost({
+      input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy,
+      modeName: 'readonly', modePaths: directories,
+    });
+    const connection = createConnection(pair.client);
+    const waiting = connection.request('session.create', {});
+    try {
+      const { sessionId } = await waiting;
+      const running = connection.request('run.start', { sessionId, input: 'first' });
+      for (let tried = 0; (await connection.request('status.get', { sessionId })).running !== true; tried += 1) {
+        assert.ok(tried < 100, 'the round never started');
+        await setTimeout(5);
+      }
+
+      const asked = await connection.request('mode.set', { sessionId, name: 'wide' });
+      assert.equal(asked.pending, 'wide');
+      assert.deepEqual(asked.tools, ['read'], '本轮交给模型的那一栏没在半路变');
+
+      // 再选一次当前那一份：这是撤回，不是第二次切换。
+      const withdrawn = await connection.request('mode.set', { sessionId, name: 'readonly' });
+      assert.equal(withdrawn.pending, null);
+      assert.equal(withdrawn.mode, 'readonly');
+
+      await connection.request('mode.set', { sessionId, name: 'wide' });
+      release();
+      assert.equal((await running).text, 'ok');
+
+      const after = await connection.request('status.get', { sessionId });
+      assert.equal(after.mode, 'wide');
+      assert.equal(after.pendingMode, null);
+      assert.deepEqual(after.tools, ['find', 'read']);
+      // 下一轮真的用上新清单（收紧撤掉后 find 又回来了）。
+      await connection.request('run.start', { sessionId, input: 'second' });
+      assert.deepEqual(requests[1].tools.map((entry) => entry.name), ['find', 'read']);
+      const { events } = await connection.request('session.read', { sessionId });
+      assert.deepEqual(events.filter((event) => event.kind === 'mode').map((event) => event.name), ['readonly', 'wide']);
+    } finally {
+      release?.();
+      pair.client.output.end();
+      host.release();
+    }
+  });
 });
