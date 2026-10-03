@@ -10,6 +10,7 @@ import { loadConfigLayers } from './kernel/config-file.js';
 import { createKernel } from './kernel/kernel.js';
 import { loadAssembly } from './kernel/assembly.js';
 import { DEFAULT_MODE, loadMode, modeDirectories } from './kernel/modes.js';
+import { discoverSkills, skillDirectories } from './kernel/skills.js';
 import { minimalPlugin } from './tools/minimal.js';
 import { createHost, providerFromConfig, serveHost } from './host/host.js';
 
@@ -170,6 +171,25 @@ if (missingFlagValue) {
   // 默认运行装的就是那份显式的最小清单（D3）。
   const kernel = await kernelOrFail();
   if (kernel) for (const name of kernel.list()) console.log(name);
+} else if (command === 'skills') {
+  // 只读的诊断入口：装载侧扫一遍那四个目录，把载入的与被丢下的都说出来，不起内核也不读模型配置。
+  // 客户端协议不为这件事扩，日志留完整记录，提示词里只带一个计数（D64）。
+  try {
+    const directories = skillDirectories(process.cwd());
+    const registry = await discoverSkills(directories);
+    for (const skill of registry.skills) console.log(`${skill.name}\t${skill.root}`);
+    if (registry.skills.length === 0) {
+      // 「装了但没生效」最难自查，所以一份都没有时把扫过的位置说出来。
+      console.log('no skills loaded');
+      for (const directory of directories) console.log(`  looked in ${directory}`);
+    }
+    if (registry.diagnostics.length > 0) {
+      console.error(`not loaded: ${registry.diagnostics.length}`);
+      for (const diagnostic of registry.diagnostics) console.error(`${diagnostic.code}\t${diagnostic.detail}`);
+    }
+  } catch (error) {
+    printFailure(error.code ?? 'cli_skills_failed', error.detail);
+  }
 } else if (command === 'call') {
   const [name, argsJson] = rest;
   if (name === undefined) {
@@ -236,10 +256,11 @@ if (missingFlagValue) {
   }
 } else if (command === undefined || command === '--help' || command === '-h') {
   console.log(`ligule ${pkg.version} - under development, do not depend on it.`);
-  console.log('commands: tools, run <text>, call <tool> [json-args], tui, host, --version');
+  console.log('commands: tools, skills, run <text>, call <tool> [json-args], tui, host, --version');
   console.log('options: --config <key.path=value> (repeatable), --mode <name>');
   console.log('run, tui and host read model.api ("messages" or "chat-completions"), model.baseURL and model.model from the config layers; the key comes from LIGULE_API_KEY');
   console.log('run, tui and host also pick a mode: --mode <name> overrides the config `mode`, and neither one written means the shipped "minimal" (D44); tools and call do not read one');
+  console.log('skills lists what this directory would load and why any skill was skipped; it reads the four skill directories and no model config');
 } else {
   // 打错的命令不该走帮助文本再退出 0：调用方是个脚本时，0 加一段帮助就是一次成功。
   printFailure('cli_command_unknown', `"${command}" is not a command; run ligule --help to list them`);
