@@ -1,10 +1,12 @@
 // 会话记录：一条追加式 JSONL 事件日志是唯一事实源，恢复与重建都从它算出来（D11、I5）。
 // 写失败时把长度退回写之前、崩溃留下的半行截掉，这两条做法与 dsh 相同：半行会让下一次重试用同一个序号写两遍。
 // 新建的一份先写首行（会话元信息与格式版本），读的时候版本或事件种类读不懂就拒绝重建（D73）。
+// 上下文压缩不改动这一份：摘要写进同目录下的另一份文件，投影前按那一段事件重算哈希，对不上就整份不读它（D75）。
 // 读写失败都是内核自身的故障（KernelRuntimeError）：记录已经不可信，循环要停住，不当成工具没做成那一类。
 import { mkdir, open, readFile, truncate } from 'node:fs/promises';
 import { join } from 'node:path';
 import { KernelError, KernelRuntimeError } from '../kernel/error.js';
+import { loadCheckpoint } from './checkpoint.js';
 import { createSessionHeader, parseSessionEvents } from './format.js';
 
 /**
@@ -144,9 +146,21 @@ export function createSessionLog({ directory, id, meta }) {
     // 模型上一轮看见的那一份，从记录算出来（I5）。助手那一轮与工具结果都要投影：
     // 请求体里的工具结果要按调用 id 挂在助手那一轮的调用上，只投影工具结果拼不出合法的请求。
     // 推理段那一种事件不在这里出现（D32）：它进了记录是为了界面与重开时能看见，不是要回传给模型。
+    // 同目录下有一份对得上的检查点时，它顶掉的那一段换成摘要那一条，之后的照原样投（D75）：日志一条都没动。
     async modelView() {
+      const events = await this.read();
+      const { checkpoint } = await loadCheckpoint({ directory, id, events });
       const view = [];
-      for (const event of await this.read()) {
+      let summarized = false;
+      for (const event of events) {
+        const covered = checkpoint !== null && event.seq >= checkpoint.fromSeq && event.seq <= checkpoint.toSeq;
+        if (covered) {
+          if (!summarized) {
+            view.push({ role: 'user', text: checkpoint.text });
+            summarized = true;
+          }
+          continue;
+        }
         if (event.kind === 'user') {
           view.push({ role: 'user', text: event.text });
         } else if (event.kind === 'assistant') {

@@ -40,6 +40,7 @@ export { createSessionLog } from './session/session.js';
 export { SESSION_FORMAT_VERSION, parseSessionEvents } from './session/format.js';
 export { findUnresolvedCalls, buildRepairEvents, repairUnresolvedCalls } from './session/repair.js';
 export { chooseResumeMode, listSessions, sessionDirectory } from './session/list.js';
+export { CHECKPOINT_FORMAT_VERSION, CHECKPOINT_INPUT_VERSION, checkpointPath, createCheckpoint, loadCheckpoint, prefixDigest, usableCheckpoint } from './session/checkpoint.js';
 export { createLoop, DEFAULT_LOOP_LIMITS } from './kernel/loop.js';
 export {
   METHODS, APPROVAL_METHOD, NOTIFICATIONS, validateCall, isApproved,
