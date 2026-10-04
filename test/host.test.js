@@ -431,6 +431,8 @@ test('the same protocol runs over an in-memory carrier inside one process', asyn
       const status = await client.request('status.get', { sessionId });
       assert.equal(status.running, false);
       assert.ok(status.eventCount >= 4, 'the round is in the record');
+      // 判定真正用的那一格跟着这次调用进记录（D77）：这一条是问出来的，答复是允许。
+      assert.deepEqual(tool.verdict, { capability: 'read', decision: 'allow', via: 'ask', level: 'ask', answer: 'allow' });
 
       pair.client.output.end();
       host.release();

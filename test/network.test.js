@@ -79,7 +79,7 @@ test('the chain tightens on the class before any rule is consulted', async () =>
 
   // 自动档也不把环回与内网直接放行：那条 URL 指的是本机上的服务，规则表写得再宽也不算盖住。
   const loop = await chain(true).evaluate({ tool: 'fetch', input: {}, target: await resolveTarget('http://127.0.0.1:8080/') });
-  assert.deepEqual(loop, { decision: 'allow' });
+  assert.deepEqual(loop, { decision: 'allow', capability: 'fetch', via: 'ask', level: 'auto', answer: 'allow' });
   assert.equal(asked.length, 1);
   assert.match(asked[0].reason, /loopback/);
   assert.equal((await chain(false).evaluate({ tool: 'fetch', input: {}, target: await resolveTarget('http://10.0.0.5/x') })).code, 'ask_declined');
@@ -93,7 +93,7 @@ test('the chain tightens on the class before any rule is consulted', async () =>
   }
   assert.equal((await chain(true).evaluate({ tool: 'fetch', input: {}, target: await resolveTarget('ftp://host/x') })).code, 'policy_denied');
   // 公网目标在自动档里照原来的顺序走：这一件工具没有命令文本可解析。
-  assert.deepEqual(await chain(true).evaluate({ tool: 'fetch', input: {}, target: await resolveTarget('http://93.184.216.34/') }), { decision: 'allow' });
+  assert.deepEqual(await chain(true).evaluate({ tool: 'fetch', input: {}, target: await resolveTarget('http://93.184.216.34/') }), { decision: 'allow', capability: 'fetch', via: 'auto', level: 'auto' });
 });
 
 test('the socket uses the address the target resolved to while the name stays in the request', async () => {

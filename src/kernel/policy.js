@@ -12,6 +12,9 @@ import { matches } from './match.js';
 // 阈值与档位由配置层给出；这里的默认值是本项目自定的起点，理由记在决定条目 D17。
 export const DEFAULT_THRESHOLDS = Object.freeze({ consecutive: 3, total: 20 });
 
+// 判定结果里进记录的那几格（D77）：内核按这一张表抄出去，链子以后多出来的字段不会悄悄进记录。
+export const VERDICT_FIELDS = Object.freeze(['capability', 'decision', 'via', 'level', 'forced', 'rule', 'answer']);
+
 // 自动档里不能直接放行的脚本解释器：一次调用能跑任意代码，内容级检查管不到参数。
 const INTERPRETERS = [
   'bash', 'sh', 'zsh', 'dash', 'fish', 'pwsh', 'powershell', 'cmd',
@@ -65,11 +68,6 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
     }
   }
 
-  function deny(code, reason) {
-    record(true);
-    return { decision: 'deny', code, reason };
-  }
-
   return {
     // 守卫返回一段拒绝理由或者什么都不返回（I4）：没有 allow 这个返回值，后一个守卫撤销不了前一个的拒绝。
     guard(check) {
@@ -93,21 +91,45 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       const named = capability ?? tool;
       const command = commandOf(input);
       const effective = forcedToAsk ? 'ask' : current;
+      // 判定这一格要说清当时生效的是哪一份档位：配置写的是 `current`，被拒绝阈值压下来是另一回事（D77）。
+      const judged = (decision, via, extra) => ({
+        decision,
+        via,
+        capability: named,
+        level: current,
+        ...(forcedToAsk ? { forced: true } : {}),
+        ...extra,
+      });
       const candidates = rules.filter((item) => item.tool === named);
       // 命令文本先过一次语法解析：能拆成可信的分段就逐段套规则，拆不出来就整条按无法完整处理对待。
       // 读哪一种语法由 Host 的那一份选择决定（D59），判定与执行看的不是同一份东西就没有意义。
       const parsed = command === undefined ? undefined : await parseCommand(command, shell?.kind);
       const segments = parsed?.kind === 'segments' ? parsed.segments : undefined;
+      // 没有命令文本的调用（读文件一类）整次调用就是一段：规则表照旧套，只是套在一个空的分段上。
+      const parts = command === undefined ? [undefined] : segments;
       // 答复里带上解析出的分段：会话记录要读得出这条文本按那一种语法被读成了什么（D59）。
       // 没有命令文本的调用与解析不出分段的调用都不带这个字段，答复形状与加这一条之前一样。
-      const approved = () => (segments === undefined ? { decision: 'allow' } : { decision: 'allow', segments });
+      const answer = (via, rule) => judged('allow', via, {
+        ...(segments === undefined ? {} : { segments }),
+        ...(rule?.match === undefined ? {} : { rule: rule.match }),
+      });
+
+      const refuse = (code, via, reason, rule, reply) => {
+        record(true);
+        return judged('deny', via, {
+          code,
+          reason,
+          ...(rule === undefined ? {} : { rule }),
+          ...(reply === undefined ? {} : { answer: reply }),
+        });
+      };
 
       // 网络目标的类别先收紧（D58）：用不了的 URL 与「根本不该被取回的地址」这一类不进后面的顺序。
       if (target !== undefined && (target.failure !== undefined || target.class === undefined)) {
-        return deny('policy_denied', `the network target cannot be classified (${target.failure ?? 'unsupported'})`);
+        return refuse('policy_denied', 'target', `the network target cannot be classified (${target.failure ?? 'unsupported'})`);
       }
       if (target?.class === 'link-local' || target?.class === 'unspecified') {
-        return deny('policy_denied', `${target.class} addresses (link-local, metadata endpoints, multicast and reserved ranges) are not fetched from this run`);
+        return refuse('policy_denied', 'target', `${target.class} addresses (link-local, metadata endpoints, multicast and reserved ranges) are not fetched from this run`);
       }
       const loopOrPrivate = target?.class === 'loopback' || target?.class === 'private';
 
@@ -116,40 +138,43 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       const denied = candidates.find((item) => item.decision === 'deny'
         && (matches(command, item.match) || (segments ?? []).some((segment) => matches(segment, item.match))));
       if (denied) {
-        return deny('policy_denied', denied.reason ?? `${named} is denied by policy`);
+        return refuse('policy_denied', 'rule', denied.reason ?? `${named} is denied by policy`, denied.match);
       }
 
       for (const check of guards) {
         const reason = check({ tool: named, input, command });
-        if (typeof reason === 'string') return deny('guard_denied', reason);
+        if (typeof reason === 'string') return refuse('guard_denied', 'guard', reason);
       }
 
       const allowed = candidates.filter((item) => item.decision === 'allow');
+      // 盖住这一次的那一条放行规则要留名字：D77 那一格说的是命中了哪一条，而不是只说通过了。
+      const covering = () => (parts === undefined ? undefined : allowed.find((item) => parts.every((segment) => matches(segment, item.match))));
       let covered;
       if (loopOrPrivate) {
         // 环回与内网至少问到一次：放行规则写得再宽也算没盖住，因为「哪一个地址」不是字符串看得出来的。
-        covered = false;
+        covered = undefined;
       } else if (command === undefined) {
         // 没有命令文本的调用（读文件一类）不受语法这一层影响：自动档直接放行，
         // 逐次询问这一档仍然要有放行规则盖住它。
-        covered = effective === 'auto' || allowed.some((item) => matches(command, item.match));
+        covered = effective === 'auto' ? null : covering();
       } else if (effective === 'auto') {
         // 自动档按语法放行：整棵树可信，而且每一段的第一个词都不是脚本解释器（D17 第三条）。
         // 解释器外壳不因为能解析里面那个字符串就剥掉，`bash -lc "git status"` 仍然要问。
-        covered = segments !== undefined && segments.every((segment) => canAutoApprove(segment));
+        covered = segments !== undefined && segments.every((segment) => canAutoApprove(segment)) ? null : undefined;
       } else {
         // 逐次询问这一档：放行规则要盖住每一个分段，解析不出分段就等于盖不住。
-        covered = segments !== undefined
-          && segments.every((segment) => allowed.some((item) => matches(segment, item.match)));
+        covered = segments !== undefined && parts.every((segment) => allowed.some((item) => matches(segment, item.match)))
+          ? covering()
+          : undefined;
       }
-      if (covered) {
+      if (covered !== undefined) {
         record(false);
-        return approved();
+        return covered === null ? answer('auto') : answer('rules', covered);
       }
 
       // 走到这里都要问：自动档遇到看不透的命令不自动放行，只降档到逐次询问，并把原因交出去（D17、I8）。
       const reason = askReason(parsed, target, shell);
-      if (typeof ask !== 'function') return deny('ask_unavailable', reason ?? 'no ask channel is installed');
+      if (typeof ask !== 'function') return refuse('ask_unavailable', 'ask', reason ?? 'no ask channel is installed', undefined, 'unavailable');
       // 答复这一次要点头就得多看一眼：同一条文本在两种语法下能自动放行的面积不一样，答的是哪一种、跑的是哪一个可执行文件，
       // 只有 Host 这一侧知道（D59）。没有命令文本的调用不带这两个字段，答复的形状与加这一条之前一样。
       const question = { tool: named, input, command, reason };
@@ -157,9 +182,9 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         question.shell = shell.kind;
         question.executable = shell.executable;
       }
-      if (await ask(question) !== true) return deny('ask_declined', 'the user declined');
+      if (await ask(question) !== true) return refuse('ask_declined', 'ask', 'the user declined', undefined, 'deny');
       record(false);
-      return approved();
+      return judged('allow', 'ask', { ...(segments === undefined ? {} : { segments }), answer: 'allow' });
     },
   };
 }

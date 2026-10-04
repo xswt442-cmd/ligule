@@ -7,6 +7,7 @@ import { KernelError } from './error.js';
 import { createConfig } from './config.js';
 import { createLogger } from './log.js';
 import { failureOf, refusalOf, resultLimit, resultOf, spillContent } from './result.js';
+import { VERDICT_FIELDS } from './policy.js';
 import { createObservationLog } from '../session/observe.js';
 import { resolveTarget } from '../capability/network.js';
 import { resolveShell, withNativeExitCode } from '../capability/shell.js';
@@ -205,6 +206,12 @@ export function createKernel(options = {}) {
         // 声明了自己能力的那件工具按它给的能力判（D52）：`mcp.call` 这个名字对判定没有意义。
         const capability = tool.capability?.(args);
         const verdict = await policy.evaluate({ tool: name, input: args, target: network, shell, capability });
+        // 判定真正用的那一格结果进记录（D77）：哪一档、走的是哪一条路、命中哪条规则、问过之后答了什么。
+        // 这一格不进模型可见投影（D12：模型只看名字、描述与参数模式），也不进检查点那段哈希的输入。
+        entry.verdict = {};
+        for (const field of VERDICT_FIELDS) {
+          if (verdict[field] !== undefined) entry.verdict[field] = verdict[field];
+        }
         if (verdict.decision !== 'allow') {
           // 拒绝理由进日志与记录，抛出去的那一份只带错误码（D19 把文本与码分开）。
           logger.log(`tool ${name} is not allowed`, { tool: name, code: verdict.code, reason: verdict.reason });

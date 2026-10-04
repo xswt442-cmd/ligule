@@ -42,6 +42,7 @@ export { findUnresolvedCalls, buildRepairEvents, repairUnresolvedCalls } from '.
 export { chooseResumeMode, listSessions, sessionDirectory } from './session/list.js';
 export { CHECKPOINT_FORMAT_VERSION, CHECKPOINT_INPUT_VERSION, checkpointPath, createCheckpoint, loadCheckpoint, prefixDigest, usableCheckpoint } from './session/checkpoint.js';
 export { createCompaction, cutPoint, estimateTokens } from './session/compaction.js';
+export { summarizeVerdicts, formatVerdicts } from './session/verdicts.js';
 export { createLoop, DEFAULT_LOOP_LIMITS } from './kernel/loop.js';
 export {
   METHODS, APPROVAL_METHOD, NOTIFICATIONS, validateCall, isApproved,
