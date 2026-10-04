@@ -13,6 +13,7 @@ import { createDecisionChain } from '../kernel/policy.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { createSessionLog } from '../session/session.js';
 import { sessionDirectory } from '../session/list.js';
+import { createCompaction } from '../session/compaction.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
 import { limitsOf } from '../capability/limits.js';
 import { loadInstructions, DEFAULT_INSTRUCTION_BYTES } from '../capability/instructions.js';
@@ -80,6 +81,23 @@ function loopLimitsOf(config) {
     if (!Number.isInteger(limits[key]) || limits[key] < 1) {
       throw new KernelError('host_loop_limits_invalid', { detail: `${key} must be an integer of at least 1` });
     }
+  }
+  return limits;
+}
+
+// 压缩那三条比例与窗口线（D75、U43）：形状在这里查，写错的那一份不该让每一次请求都算出一个 NaN 的线。
+// 保留量必须严格小于压力线，否则压完还是越线，而看不出来为什么一直在压（dsh 同一条约束）。
+function compactionLimitsOf(config) {
+  const limits = limitsOf(config);
+  for (const key of ['contextTokens', 'compactThresholdRatio', 'compactRetainRatio']) {
+    if (typeof limits[key] !== 'number' || !Number.isFinite(limits[key]) || limits[key] <= 0) {
+      throw new KernelError('host_compaction_limits_invalid', { detail: `${key} must be a positive number` });
+    }
+  }
+  if (limits.compactThresholdRatio > 1 || limits.compactRetainRatio >= limits.compactThresholdRatio) {
+    throw new KernelError('host_compaction_limits_invalid', {
+      detail: `compactRetainRatio (${limits.compactRetainRatio}) must be below compactThresholdRatio (${limits.compactThresholdRatio}), and the threshold must be at most 1`,
+    });
   }
   return limits;
 }
@@ -316,12 +334,23 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       for (const event of repaired) logger?.log?.('unanswered tool call repaired', { sessionId: id, callId: event.callId, tool: event.tool });
     }
     if (modeName !== undefined) await state.adopt(await loadMode(modeName, modePaths));
+    // 压缩挂在这一份会话上（D75）：两条触发都在循环里问它，摘要那一次调用走未装饰的提供方——
+    // 它的流式增量不该转给客户端，而它写完检查点就退出这一轮的事，事件日志一条都不动。
+    const compaction = createCompaction({
+      provider,
+      session,
+      directory,
+      id,
+      limits: compactionLimitsOf(config),
+      logger,
+    });
     const loop = createLoop({
       kernel,
       provider: observedProvider(provider, (event) => connection.notify({ notify: 'delta', sessionId: id, event })),
       prompt,
       session,
       limits: loopLimitsOf(config),
+      compaction,
     });
     // 一份会话一份状态，审批的等待与正在跑的那一轮都记在这里。
     return Object.assign(state, { chain, kernel, assembly, extensions: installedExtensions, mcp, loop, templates });

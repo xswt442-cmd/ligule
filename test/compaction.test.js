@@ -1,0 +1,230 @@
+// 压缩的两条触发、切点与那一次修正（D75、D76，实现顺序第 37 步）。
+// 端点是本地假的那一个：要验的是「什么时候压、压完投影是什么、压几次」，不是某一家端点的报错文案。
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import {
+  KernelError,
+  createCompaction,
+  createLoop,
+  createSessionLog,
+  cutPoint,
+  estimateTokens,
+  loadCheckpoint,
+} from '../dist/index.js';
+
+const SUMMARY = 'SUMMARY OF THE EARLIER TURNS';
+const LONG = 'x'.repeat(2000);
+const limits = { contextTokens: 4_000, compactThresholdRatio: 0.8, compactRetainRatio: 0.16, resultBytes: 16_000 };
+const kernel = { manifest: () => [], execution: () => 'serial', call: async () => ({ ok: true }) };
+const prompt = { render: () => 'the system prefix' };
+
+// 假提供方：按脚本回答。看见那句摘要指令就答摘要，否则按 script 依次交事件或抛错。
+function fakeProvider(script, summaryText = SUMMARY) {
+  const seen = [];
+  let index = 0;
+  let summaries = 0;
+  return {
+    seen,
+    summaries: () => summaries,
+    model: 'fake',
+    capabilities: {},
+    async *stream(request) {
+      seen.push(request);
+      if (String(request.messages?.[0]?.text ?? '').startsWith('Write a summary')) {
+        summaries += 1;
+        yield { type: 'text', text: summaryText };
+        return;
+      }
+      const next = script[Math.min(index, script.length - 1)];
+      index += 1;
+      if (next instanceof Error) throw next;
+      for (const event of next) yield event;
+    },
+  };
+}
+
+async function withSession(run) {
+  const directory = await mkdtemp(join(tmpdir(), 'ligule-compaction-'));
+  const id = 'compacting-session';
+  const session = createSessionLog({ directory, id });
+  try {
+    return await run({ directory, id, session });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+// 攒出足够长的一段历史，让投影的本地估算越得过那条线。
+async function fill(session, rounds) {
+  for (let round = 0; round < rounds; round += 1) {
+    await session.append({ kind: 'user', text: `问题 ${round} ${LONG}` });
+    await session.append({ kind: 'assistant', text: `答 ${round} ${LONG}`, toolCalls: [] });
+  }
+}
+
+test('the cut point lands on a user or assistant event and keeps the tail under the budget', () => {
+  const events = [
+    { seq: 0, kind: 'user', text: LONG },
+    { seq: 1, kind: 'assistant', text: '', toolCalls: [{ id: 'c1', name: 'read', args: {} }] },
+    { seq: 2, kind: 'tool', tool: 'read', callId: 'c1', result: { failed: false, content: LONG } },
+    { seq: 3, kind: 'user', text: LONG },
+    { seq: 4, kind: 'assistant', text: LONG },
+  ];
+  // 预算只放得下最后一条时，切点往后落到 4 号那条 assistant：切在 2 号那条工具结果上会留下没人回答的调用。
+  assert.equal(cutPoint(events, estimateTokens(events[4])), 4);
+  assert.equal(cutPoint(events, 1), 4);
+  // 预算装得下整段时不切。
+  assert.equal(cutPoint(events, 10_000), null);
+});
+
+test('pressure over the line compacts once and the next request carries the summary', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    await fill(session, 4);
+    const logBefore = await readFile(join(directory, `${id}.jsonl`), 'utf8');
+    const lines = logBefore.trim().split('\n').length;
+    const logged = [];
+    const logger = { log: (message, fields) => logged.push({ message, ...fields }) };
+    const provider = fakeProvider([[{ type: 'text', text: 'continued' }]]);
+    const compaction = createCompaction({ provider, session, directory, id, limits, logger });
+
+    const result = await createLoop({ kernel, provider, prompt, session, compaction }).run('再问一句', {});
+    assert.equal(result.text, 'continued');
+
+    const read = await loadCheckpoint({ directory, id, events: await session.read() });
+    assert.equal(read.reason, '', 'the checkpoint the compaction wrote matches the log');
+    assert.equal(read.checkpoint.text, SUMMARY);
+    const last = (await session.read()).at(-1);
+    assert.ok(read.checkpoint.fromSeq >= 0 && read.checkpoint.toSeq < last.seq);
+
+    const sent = provider.seen.at(-1);
+    assert.equal(sent.messages[0].text, SUMMARY, 'the covered range is replaced by the summary');
+    assert.equal(sent.messages.at(-1).text, '再问一句', 'the input of this round is still there');
+
+    const after = await readFile(join(directory, `${id}.jsonl`), 'utf8');
+    assert.equal(after.trim().split('\n').length, lines + 2, 'the round adds its own two events and the checkpoint adds none');
+    const numbers = logged.find((entry) => entry.message === 'session compacted');
+    assert.ok(numbers.tokensBefore > numbers.tokensAfter, 'a summary removes more than it adds');
+  });
+});
+
+const overflow = new KernelError('provider_http_error', { detail: '400 the input is longer than the maximum context length' });
+
+// 超长那一条只在端点报回之后走，而整个运行只允许一次压缩加一次重试（D75）。
+test('an endpoint overflow answer gets one compaction and one retry', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    await fill(session, 2);
+    const provider = fakeProvider([overflow, [{ type: 'text', text: 'after the retry' }]]);
+    const compaction = createCompaction({ provider, session, directory, id, limits });
+    const result = await createLoop({ kernel, provider, prompt, session, compaction }).run('继续', {});
+    assert.equal(result.text, 'after the retry');
+    assert.equal(provider.summaries(), 1, 'exactly one summary call');
+    assert.equal((await loadCheckpoint({ directory, id, events: await session.read() })).reason, '');
+    // 那一次报超长之前没压过：压力那一条量的是本地估算，这一段还没越线。
+    assert.equal(provider.seen.filter((request) => String(request.messages?.[0]?.text ?? '') === SUMMARY).length, 1);
+  });
+});
+
+test('a second overflow answer does not buy a second compaction', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    await fill(session, 2);
+    const provider = fakeProvider([overflow, overflow]);
+    const compaction = createCompaction({ provider, session, directory, id, limits });
+    await assert.rejects(
+      createLoop({ kernel, provider, prompt, session, compaction }).run('继续', {}),
+      (error) => error.code === 'provider_http_error',
+    );
+    assert.equal(provider.summaries(), 1, 'the one allowed compaction is spent');
+  });
+});
+
+// 不是超长的失败不压：那一格错误说的不是窗口不够。
+test('a provider failure that is not about length leaves the record alone', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    await fill(session, 2);
+    const provider = fakeProvider([new KernelError('provider_http_error', { detail: '400 invalid api key' })]);
+    const compaction = createCompaction({ provider, session, directory, id, limits });
+    await assert.rejects(
+      createLoop({ kernel, provider, prompt, session, compaction }).run('继续', {}),
+      (error) => error.code === 'provider_http_error' && error.detail.includes('invalid api key'),
+    );
+    assert.equal(provider.summaries(), 0, 'no summary was asked for');
+    assert.equal((await loadCheckpoint({ directory, id, events: await session.read() })).reason, 'checkpoint_absent');
+  });
+});
+
+// 本地估算修正过才谈得上压力：端点报回的真实用量比本地大时，那条线要跟着提前响（D75）。
+test('the local estimate is corrected by the usage the endpoint reports back', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    await session.append({ kind: 'user', text: '短' });
+    await session.append({ kind: 'assistant', text: '也短' });
+    const provider = fakeProvider([
+      [{ type: 'tool-call', id: 'c1', name: 'noop', args: {} }, { type: 'usage', input: 12_000, output: 20 }],
+      [{ type: 'text', text: '第二轮' }],
+    ]);
+    const compaction = createCompaction({ provider, session, directory, id, limits });
+    const result = await createLoop({ kernel, provider, prompt, session, compaction }).run('第三句', {});
+    assert.equal(result.text, '第二轮');
+    // 按本地的字节数这一份远不到线，是修正系数让压力那一条在第二次请求之前响起来。
+    assert.ok(estimateTokens(await session.read()) < limits.contextTokens * limits.compactThresholdRatio);
+    assert.equal(provider.summaries(), 1, 'the corrected estimate triggers the pressure line');
+    assert.equal((await session.modelView())[0].text, SUMMARY);
+  });
+});
+
+// 检查点里只有摘要与范围，没有任何「模型以前知道过」的那几格；被顶掉的那些事件仍然在日志里（D76、I5）。
+test('the checkpoint carries no disclosure state and the log keeps every event', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    await fill(session, 4);
+    await session.append({ kind: 'mode', name: 'full', layer: 'shipped', tools: ['read'], digest: 'aaaaaaaaaaaa', path: '/x/full.toml' });
+    const provider = fakeProvider([[{ type: 'text', text: 'ok' }]]);
+    const compaction = createCompaction({ provider, session, directory, id, limits });
+    await createLoop({ kernel, provider, prompt, session, compaction }).run('一句', {});
+
+    const raw = JSON.parse(await readFile(join(directory, `${id}.checkpoint.json`), 'utf8'));
+    assert.deepEqual(Object.keys(raw).sort(), ['digest', 'formatVersion', 'fromSeq', 'inputVersion', 'sessionId', 'text', 'toSeq']);
+    const events = await session.read();
+    assert.equal(events.filter((event) => event.kind === 'mode').length, 1, 'a mode event is not anything the summary swallows');
+    assert.ok(events.length > (await loadCheckpoint({ directory, id, events })).checkpoint.toSeq, 'no event left the log');
+  });
+});
+
+// 第二次压缩从上一次保留的边界开始，并把上一次的摘要当作输入（D75）。
+test('the next compaction starts at the kept boundary and feeds the previous summary in', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    const provider = fakeProvider([[{ type: 'text', text: 'one' }], [{ type: 'text', text: 'two' }], [{ type: 'text', text: 'three' }]]);
+    const compaction = createCompaction({ provider, session, directory, id, limits });
+    const loop = createLoop({ kernel, provider, prompt, session, compaction });
+    assert.equal((await loadCheckpoint({ directory, id, events: await session.read() })).reason, 'checkpoint_absent');
+
+    await fill(session, 4);
+    await loop.run('A', {});
+    const first = await loadCheckpoint({ directory, id, events: await session.read() });
+    assert.equal(first.reason, '');
+
+    await fill(session, 4);
+    await loop.run('B', {});
+    const second = await loadCheckpoint({ directory, id, events: await session.read() });
+    assert.equal(second.reason, '');
+    assert.equal(second.checkpoint.fromSeq, first.checkpoint.fromSeq, 'the merged range still starts at the old boundary');
+    assert.ok(second.checkpoint.toSeq > first.checkpoint.toSeq, 'the second compaction covers further into the log');
+    const excerpt = provider.seen.filter((request) => String(request.messages?.[0]?.text ?? '').startsWith('Write a summary')).at(-1);
+    assert.match(String(excerpt.messages[0].text), /Earlier summary:\nSUMMARY/, 'the previous summary is part of the input');
+  });
+});
+
+// 摘要文本也受注入那一层的上限约束（I6）：超了整份溢出到文件，检查点里留可取回的引用。
+test('an oversized summary spills to a file with a retrievable reference', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    await fill(session, 4);
+    const provider = fakeProvider([[{ type: 'text', text: 'ok' }]], 'y'.repeat(40_000));
+    const compaction = createCompaction({ provider, session, directory, id, limits: { ...limits, resultBytes: 2_000 } });
+    await createLoop({ kernel, provider, prompt, session, compaction }).run('一句', {});
+    const text = (await loadCheckpoint({ directory, id, events: await session.read() })).checkpoint.text;
+    const reference = /full output is 40000 bytes, kept in (\S+)\]/.exec(text);
+    assert.ok(reference, `the checkpoint keeps a reference: ${text.slice(-80)}`);
+    assert.ok((await readFile(join(directory, reference[1]), 'utf8')).startsWith('yyyy'));
+  });
+});

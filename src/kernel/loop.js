@@ -23,7 +23,7 @@ function restOf(groups, groupIndex, index = -1) {
   return groups.slice(groupIndex).flatMap((group, offset) => group.calls.slice(offset === 0 ? index + 1 : 0));
 }
 
-export function createLoop({ kernel, provider, prompt, session, limits = DEFAULT_LOOP_LIMITS, completesRun = [] }) {
+export function createLoop({ kernel, provider, prompt, session, limits = DEFAULT_LOOP_LIMITS, completesRun = [], compaction = null }) {
   if (typeof provider?.stream !== 'function') throw new KernelError('loop_provider_required');
   const completing = new Set(completesRun);
 
@@ -60,15 +60,31 @@ export function createLoop({ kernel, provider, prompt, session, limits = DEFAULT
           calls += 1;
 
           const events = [];
+          const system = prompt?.render() ?? '';
+          const tools = kernel.manifest();
+          let messages = session ? await session.modelView() : [{ role: 'user', text: input }];
+          // 压力那一条触发在请求拼好之后、发出去之前：宿主交进来的那一件量一次，越线就先压一次再重拼（D75）。
+          if (compaction !== null) messages = await compaction.prepare({ system, tools, messages });
           // 流式接收期间就开始拼装工具调用（D13）。
-          for await (const event of provider.stream(
-            {
-              system: prompt?.render() ?? '',
-              tools: kernel.manifest(),
-              messages: session ? await session.modelView() : [{ role: 'user', text: input }],
-            },
-            { signal: controller.signal },
-          )) events.push(event);
+          for (let attempt = 0; ; attempt += 1) {
+            try {
+              for await (const event of provider.stream({ system, tools, messages }, { signal: controller.signal })) {
+                events.push(event);
+              }
+              break;
+            } catch (error) {
+              // 超长那一条只在端点报回之后走，而整个运行只允许一次压缩加一次重试（D75）：
+              // 压不成、已经压过一次、或者不是超长，都让原来那个错误说话。
+              const retried = attempt === 0 && compaction !== null
+                ? await compaction.recover(error, { system, tools, messages }, controller.signal)
+                : null;
+              if (retried === null) throw error;
+              events.length = 0;
+              messages = retried;
+            }
+          }
+          // 端点交回的真实用量用来修正本地估算：没有这一句，压力那一条可能永远不响。
+          compaction?.observe({ messages }, events);
 
           text = events.filter((event) => event.type === 'text').map((event) => event.text).join('');
           const reasoning = events.filter((event) => event.type === 'reasoning').map((event) => event.text).join('');

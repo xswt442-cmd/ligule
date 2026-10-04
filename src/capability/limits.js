@@ -19,6 +19,11 @@ export const DEFAULT_LIMITS = Object.freeze({
   fetchRedirects: 5,
   // 扩展登记的一段提示词片段的预算（D69）：与技能元数据那一条同一档，注入那一层的总量上限仍然压在它上面。
   promptFragmentBytes: 8_000,
+  // 压缩的两条比例与那条窗口线（D75、U43）：0.8 与 0.16 是待验证的缺省而不是定论，窗口大小按模型配置覆盖。
+  // 缺省的 200000 是这一族端点里最常见的那一档，接上更小的模型时这一格要跟着改（`model` 之外没有别处可读）。
+  contextTokens: 200_000,
+  compactThresholdRatio: 0.8,
+  compactRetainRatio: 0.16,
 });
 
 // 遍历跳过这些目录：它们的内容不是要找的东西，扫过去只会把上限用光。
