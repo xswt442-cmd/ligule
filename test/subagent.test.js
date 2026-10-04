@@ -86,9 +86,13 @@ test('the derived agent runs on the parent decision chain and cannot delegate ag
   const files = await readdir(session.directory);
   assert.deepEqual(files.sort(), ['parent.jsonl', 'parent.sub-1.jsonl']);
   const side = (await readFile(join(session.directory, 'parent.sub-1.jsonl'), 'utf8')).split('\n').filter(Boolean).map(JSON.parse);
-  assert.equal(side[0].kind, 'user');
-  assert.equal(side[0].text, 'delete the thing');
-  const denied = side.find((event) => event.kind === 'tool' && event.tool === 'exec');
+  // 支线记录也有一份首行（D73）：它说清这一份是谁的哪一次派生，读的人不必猜。
+  assert.equal(side[0].kind, 'session');
+  assert.equal(side[0].sessionId, 'parent.sub-1');
+  const sideEvents = side.filter((event) => event.kind !== 'session');
+  assert.equal(sideEvents[0].kind, 'user');
+  assert.equal(sideEvents[0].text, 'delete the thing');
+  const denied = sideEvents.find((event) => event.kind === 'tool' && event.tool === 'exec');
   assert.equal(denied.result.code, 'policy_denied');
   const parent = (await readFile(join(session.directory, 'parent.jsonl'), 'utf8')).split('\n').filter(Boolean).map(JSON.parse);
   const delegated = parent.find((event) => event.kind === 'tool' && event.tool === 'subagent');

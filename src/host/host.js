@@ -141,7 +141,15 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
   async function build(id, connection) {
     // 扩展收事件的那一条通道（D37）：刚落盘的这一条同时送给客户端与扩展，两边读的是同一份事实（I5）。
     const listeners = [];
-    const session = observedSession(createSessionLog({ directory, id }), (event) => {
+    // 首行那份元信息在第一次落笔时才写，所以模式身份用一条取当前值的函数给：建会话的那一刻常常还没选过模式（D73）。
+    const session = observedSession(createSessionLog({
+      directory,
+      id,
+      meta: () => ({
+        projectRoot: config.boundary,
+        mode: state.mode.file === undefined ? undefined : { name: state.mode.file.name, layer: state.mode.file.layer },
+      }),
+    }), (event) => {
       connection.notify({ notify: 'event', sessionId: id, event });
       for (const listener of listeners) listener(event);
     });
