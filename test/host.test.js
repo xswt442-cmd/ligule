@@ -490,3 +490,63 @@ test('an approval for a command names the shell backend the host chose', async (
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+// 支线那一份记录读回来的前提（第 35 步、D74）：派生体跑完就把装配撤掉了（D71），
+// 它留下的那份文件仍然是同一目录下的会话记录，读它不该要求它在这一刻是打开的，也不为它加一个协议方法。
+test('a record on disk reads back through the same action whether or not it is open', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'ligule-host-record-read-'));
+  const config = createConfig({
+    user: {
+      boundary: directory,
+      model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model' },
+      policy: { mode: 'auto' },
+    },
+  });
+  const provider = {
+    capabilities: MESSAGES_CAPABILITIES,
+    model: 'test-model',
+    async *stream() {
+      yield { type: 'text', text: 'done' };
+    },
+  };
+  const pair = createMemoryConnectionPair();
+  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy });
+  const connection = createConnection(pair.client);
+  const branchId = '00000000-0000-4000-8000-000000000001.sub-1';
+  try {
+    const { sessionId } = await connection.request('session.create', {});
+    await connection.request('run.start', { sessionId, input: '一句话' });
+    host.release();
+    // 这一条连接上现在一份会话都不在，记录本身还在磁盘上：读回来的还是那几条。
+    const { events } = await connection.request('session.read', { sessionId });
+    assert.ok(events.some((event) => event.kind === 'user' && event.text === '一句话'), 'the record reads back without a session');
+    assert.ok(events.every((event) => typeof event.seq === 'number'), 'sequence numbers come from the record');
+
+    await writeFile(join(directory, '.ligule', 'sessions', `${branchId}.jsonl`), [
+      JSON.stringify({ kind: 'session', formatVersion: 1, sessionId: branchId, projectRoot: directory, createdAt: '2026-10-05T00:00:00.000Z' }),
+      JSON.stringify({ seq: 0, kind: 'user', text: 'the delegated task' }),
+    ].join('\n') + '\n');
+    const branch = await connection.request('session.read', { sessionId: branchId });
+    // 首行那份元信息不在事件里（它的序号都没有，D73），交回的是可以拼请求的那几条。
+    assert.deepEqual(branch.events.map((event) => event.kind), ['user'], 'the branch record comes back whole');
+    assert.equal(branch.events[0].seq, 0, 'the branch numbers on from its own first event');
+
+    // 会话 id 是要拼进文件名的那一串，带目录分隔符的写法在这一步就报自己的码（记录目录之外不读）。
+    for (const [id, expected] of [['../outside', 'session_id_invalid'], ['nobody', 'session_not_found']]) {
+      await assert.rejects(
+        connection.request('session.read', { sessionId: id }),
+        (error) => error.code === expected,
+        `reading ${id} reports ${expected}`,
+      );
+      await assert.rejects(
+        connection.request('session.open', { sessionId: id }),
+        (error) => error.code === expected,
+        `opening ${id} reports ${expected}`,
+      );
+    }
+  } finally {
+    pair.client.output.end();
+    host.release();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

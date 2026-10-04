@@ -130,6 +130,16 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     return state;
   }
 
+  // 记录文件名由会话 id 拼出，而那个 id 是从客户端来的串：带目录分隔符时拼出的路径会走到记录目录外面。
+  // 形状在这里查一次，打开与读取两条路共用同一处（D74 之后，读一份记录不再要求它在这一刻是打开的）。
+  function recordPathOf(id) {
+    if (typeof id !== 'string' || id === '' || id === '.' || id === '..'
+      || id.includes('/') || id.includes('\\') || id.includes(':') || id.includes('\0')) {
+      throw new KernelError('session_id_invalid', { detail: String(id).slice(0, 80) });
+    }
+    return join(directory, `${id}.jsonl`);
+  }
+
   // 一个会话一套内核、判定链与循环：判定链里的拒绝计数与档位按会话存活（D15、D17）。
   // ask 是这条会话的审批通道：客户端不在答复里说允许，就按不允许处理（D16 的询问走内核对外接口）。
   // 取消落在审批还没答复的时候要把这个问题收掉：答复不会再来了，而判定链在这里抛出，
@@ -330,8 +340,10 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
         }
         case 'session.open': {
           // 记录不在磁盘上就是没有这份会话，把它当新的一次空记录打开会让人以为恢复成功了。
+          // 形状不对的 id 先报自己那个码，不混进「找不到这份会话」。
+          const path = recordPathOf(sessionId);
           try {
-            await access(join(directory, `${sessionId}.jsonl`));
+            await access(path);
           } catch {
             throw new KernelError('session_not_found', { detail: sessionId });
           }
@@ -343,8 +355,17 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
         }
         case 'session.read': {
           // 交回的是记录本身：客户端晚到了也能把已经发生过的事画出来（I5）。
-          const state = open(sessionId);
-          return { sessionId, events: await state.session.read() };
+          const state = sessions.get(sessionId);
+          if (state !== undefined) return { sessionId, events: await state.session.read() };
+          // 派生支线那一份不在此刻的内核里（那一轮跑完就把装配撤掉了，D71），但它就是同一目录下的另一份会话记录：
+          // 读它用这同一次动作，不为它多开一个协议方法（D74）。这一条路只读，不建内核也不补未知结果。
+          const path = recordPathOf(sessionId);
+          try {
+            await access(path);
+          } catch {
+            throw new KernelError('session_not_found', { detail: sessionId });
+          }
+          return { sessionId, events: await createSessionLog({ directory, id: sessionId }).read() };
         }
         case 'run.start': {
           const state = open(sessionId);
