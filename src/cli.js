@@ -2,9 +2,10 @@
 // CLI 适配器：与内核同进程直接调用，不起端口（D23、实现顺序第 13 步）。
 // 它自己不持有任何能力：装载的是那份显式的最小清单，内核一件工具都没有（I1）。
 // `host` 这一条是另一件事：它把同一个内核作为 Host 进程起起来，等一条标准输入输出上的客户端连接（D30）。
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { createConfig } from './kernel/config.js';
 import { loadConfigLayers } from './kernel/config-file.js';
 import { createKernel } from './kernel/kernel.js';
@@ -14,6 +15,7 @@ import { extensionSources } from './kernel/extensions.js';
 import { discoverSkills, skillDirectories } from './kernel/skills.js';
 import { createSessionLog } from './session/session.js';
 import { chooseResumeMode, listSessions, sessionDirectory } from './session/list.js';
+import { formatVerdicts, summarizeVerdicts } from './session/verdicts.js';
 import { minimalPlugin } from './tools/minimal.js';
 import { networkPlugin } from './tools/network.js';
 import { createHost, providerFromConfig, serveHost } from './host/host.js';
@@ -332,6 +334,27 @@ if (missingFlagValue) {
   } catch (error) {
     printFailure(error.code ?? 'cli_sessions_failed', error.detail);
   }
+} else if (command === 'policy') {
+  // 判定结果的汇总（D77）：读那一份记录算出来，内核里没有第二份计数器；这一条也不建内核、不开会话。
+  const [sessionId] = rest;
+  if (sessionId === undefined) {
+    printFailure('cli_policy_needs_the_session_id', 'policy takes a session id, e.g. ligule policy 5f3c');
+  } else {
+    try {
+      const { config } = await configSnapshot();
+      const directory = sessionDirectory(config);
+      if (!existsSync(join(directory, `${sessionId}.jsonl`))) {
+        printFailure('session_not_found', `no record for ${sessionId} in ${directory}`);
+      } else {
+        const counts = summarizeVerdicts(await createSessionLog({ directory, id: sessionId }).read());
+        if (jsonFlag) console.log(JSON.stringify(counts));
+        else if (counts.length === 0) console.log(`no decision records in ${sessionId} (calls from before this field existed read as none)`);
+        else for (const line of formatVerdicts(counts)) console.log(line);
+      }
+    } catch (error) {
+      printFailure(error.code ?? 'cli_policy_failed', error.detail);
+    }
+  }
 } else if (command === 'host') {
   // 桌面壳或者脚本起这一个进程，两端各读写一行 JSON（D30）：本机不开端口，审批与事件都走这条连接。
   try {
@@ -361,7 +384,7 @@ if (missingFlagValue) {
   }
 } else if (command === undefined || command === '--help' || command === '-h') {
   console.log(`ligule ${pkg.version} - under development, do not depend on it.`);
-  console.log('commands: tools, skills, sessions, run <text>, resume <id> <text>, call <tool> [json-args], tui, host, --version');
+  console.log('commands: tools, skills, sessions, policy <session-id>, run <text>, resume <id> <text>, call <tool> [json-args], tui, host, --version');
   console.log('options: --config <key.path=value> (repeatable), --mode <name>');
   console.log('run, tui and host read model.api ("messages" or "chat-completions"), model.baseURL and model.model from the config layers; the key comes from LIGULE_API_KEY');
   console.log('run, tui and host also pick a mode: --mode <name> overrides the config `mode`, and neither one written means the shipped "minimal" (D44); tools and call do not read one');

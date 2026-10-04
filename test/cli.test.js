@@ -62,7 +62,7 @@ test('an unknown command is a failure, while asking for help is not', () => {
   for (const flag of [undefined, '--help', '-h']) {
     const asked = flag === undefined ? capture() : capture(flag);
     assert.ok(asked.ok, asked.stderr);
-    assert.match(asked.stdout, /commands: tools, skills, sessions, run/);
+    assert.match(asked.stdout, /commands: tools, skills, sessions/);
   }
 });
 
@@ -80,7 +80,7 @@ test('--config narrows the boundary from the command line and a valueless flag i
 test('--version prints the package version and the bare invocation lists the commands', () => {
   const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'));
   assert.equal(capture('--version').stdout.trim(), pkg.version);
-  assert.match(capture().stdout, /commands: tools, skills, sessions, run/);
+  assert.match(capture().stdout, /commands: tools, skills, sessions/);
 });
 
 test('skills lists what this directory would load and says why anything was skipped', () => {
@@ -109,6 +109,37 @@ test('skills lists what this directory would load and says why anything was skip
     // 一份都没有时把扫过的四个位置说出来：「装了但没生效」最难自查。
     assert.match(none.stdout, /looked in .*[\\/]empty[\\/]\.ligule[\\/]/);
     assert.equal(none.stdout.split('\n').filter((line) => line.includes('looked in')).length, 4);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// 判定汇总读的就是那一份记录（D77）：不建内核、不开会话，内核里也没有第二份计数器可读。
+test('policy summarises the decisions one session recorded', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ligule-cli-policy-'));
+  const project = join(root, 'project');
+  const directory = join(project, '.ligule', 'sessions');
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, 's-1.jsonl'), [
+    JSON.stringify({ kind: 'session', formatVersion: 1, sessionId: 's-1', projectRoot: project, createdAt: '2026-10-05T00:00:00.000Z' }),
+    JSON.stringify({ seq: 0, kind: 'tool', tool: 'exec', verdict: { capability: 'exec', decision: 'allow', via: 'auto', level: 'auto' }, result: { failed: false, content: 'ok' } }),
+    JSON.stringify({ seq: 1, kind: 'tool', tool: 'exec', verdict: { capability: 'exec', decision: 'deny', via: 'rule', level: 'auto', rule: 'rm *' }, result: { failed: true, code: 'policy_denied' } }),
+  ].join('\n') + '\n');
+  const env = { ...process.env, HOME: root, USERPROFILE: root };
+  try {
+    const told = spawnSync(process.execPath, [cli, 'policy', 's-1'], { cwd: project, encoding: 'utf8', env });
+    assert.equal(told.status, 0, told.stderr);
+    assert.match(told.stdout, /^exec  自动 1  问过 0  没让做 1  档位 auto×2  命中规则 "rm \*"×1  码 policy_denied×1$/m);
+
+    const machine = spawnSync(process.execPath, [cli, 'policy', 's-1', '--json'], { cwd: project, encoding: 'utf8', env });
+    assert.equal(machine.status, 0, machine.stderr);
+    assert.equal(JSON.parse(machine.stdout)[0].denied, 1);
+
+    for (const [args, expected] of [[['policy', 'nope'], /session_not_found/], [['policy'], /cli_policy_needs_the_session_id/]]) {
+      const refused = spawnSync(process.execPath, [cli, ...args], { cwd: project, encoding: 'utf8', env });
+      assert.equal(refused.status, 1, refused.stdout);
+      assert.match(refused.stderr, expected);
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
