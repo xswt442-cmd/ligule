@@ -270,10 +270,10 @@ test('a mode narrows the capability tools and cannot reach the disclosure entry'
       return requests[0];
     };
 
-    // 没有模式收紧时八件加可选的那一件都在，`skill` 与目录那一段都在。
+    // 没有模式收紧时八件加可选的那一件、派生那一件都在，`skill` 与目录那一段都在。
     const everything = await capture(undefined);
     assert.ok(everything.tools.some((entry) => entry.name === 'skill'), 'the disclosure entry is offered');
-    assert.equal(everything.tools.length, 10);
+    assert.equal(everything.tools.length, 11);
     assert.match(everything.system, /- pdf-tools: read a report/);
 
     // 模式只筛直接能力工具：藏掉其余几件之后 `skill` 仍然留着（D63），目录那一段也跟着留着。

@@ -13,6 +13,7 @@ export {
 export { createSkillTool, createSkillPlugin } from './tools/skill.js';
 export { fetchTool, networkPlugin } from './tools/network.js';
 export { createMcpPlugin, createMcpTools } from './tools/mcp.js';
+export { createSubagentPlugin } from './tools/subagent.js';
 export { createMcpRegistry, mcpServerConfigs, validateToolArguments } from './capability/mcp.js';
 export { classifyAddress, resolveTarget, fetchTarget } from './capability/network.js';
 export {

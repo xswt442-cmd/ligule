@@ -21,6 +21,7 @@ import { minimalPlugin } from '../tools/minimal.js';
 import { networkPlugin } from '../tools/network.js';
 import { createSkillPlugin } from '../tools/skill.js';
 import { createMcpPlugin } from '../tools/mcp.js';
+import { createSubagentPlugin } from '../tools/subagent.js';
 import { createMcpRegistry, mcpServerConfigs } from '../capability/mcp.js';
 import { createMessagesProvider } from '../model/messages.js';
 import { createChatCompletionsProvider } from '../model/chat-completions.js';
@@ -190,9 +191,25 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     for (const diagnostic of templates.diagnostics) {
       logger?.log?.('prompt template is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
     }
-    const assembly = loadAssembly(kernel, [...loaded, createMcpPlugin(mcp)]);
     // 提示词的组装器先建好：扩展登记的那几段要进这一份，模式 `prompt` 那一格挑的也就是这几段（D35、D46）。
     const prompt = createPromptAssembly({ static: config.prompt?.static ?? '' });
+    // 派生执行体那一件工具（D71）：它拿到的插件是这一套减去 `subagent` 自己（一层是「谁在跑」读得出来的下界），
+    // 判定链沿用这一条实例，静态前缀沿用这一份（同一串字节让端点的缓存对派生体也成立，D9）。
+    // 提供方直接用未装饰的那一份：派生体的流式事件不往客户端转，那一段的进度在它自己的记录里（与 pi 的差别记在 D71）。
+    const basePlugins = [...loaded, createMcpPlugin(mcp)];
+    const assembly = loadAssembly(kernel, [...basePlugins, createSubagentPlugin({
+      config,
+      provider,
+      chain,
+      prompt,
+      directory,
+      sessionId: id,
+      logger,
+      plugins: basePlugins,
+      modePaths,
+      modeFile: () => state.mode.file,
+      loopLimits: loopLimitsOf(config),
+    })]);
     // 项目指令文件那四层是装载侧交给提示词的一段（D10、第 9.5 步留下的那一半）：
     // 装载器自己的预算算在完整文本上，片段登记时按同一个数，两处不会各截一次。
     const maxBytes = config.instructions?.maxBytes ?? DEFAULT_INSTRUCTION_BYTES;
