@@ -12,6 +12,7 @@ import { applyMode, loadMode } from '../kernel/modes.js';
 import { createDecisionChain } from '../kernel/policy.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { createSessionLog } from '../session/session.js';
+import { sessionDirectory } from '../session/list.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
 import { limitsOf } from '../capability/limits.js';
 import { loadInstructions, DEFAULT_INSTRUCTION_BYTES } from '../capability/instructions.js';
@@ -69,13 +70,7 @@ export function providerFromConfig(config) {
   });
 }
 
-// 会话记录落在哪儿：配置写了目录就用它，没有就贴着边界放。
-function sessionDirectoryOf(config) {
-  if (typeof config.host?.sessionDirectory === 'string' && config.host.sessionDirectory !== '') {
-    return config.host.sessionDirectory;
-  }
-  return join(config.boundary, '.ligule', 'sessions');
-}
+// 会话记录落在哪儿由 `src/session/list.js` 那一处说:同一件事在两处各写一次,列表与宿主就会读到两个目录(D73)。
 
 // 循环的上限来自配置文件，形状在这里就查：只写其中一项时另一项照默认值补，
 // 缺值传下去会让「迭代上限」变成 undefined，那一轮一次都不跑，报出来的码还说不出为什么。
@@ -126,7 +121,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
   if (modeName !== undefined && modePaths === undefined) throw new KernelError('host_mode_paths_required');
   // MCP 的配置在装载这一刻就校验：一条写法不对的服务器配置不该等到模型第一次调用才炸（D60）。
   const mcpConfigs = mcpServerConfigs(config);
-  const directory = sessionDirectoryOf(config);
+  const directory = sessionDirectory(config);
   const sessions = new Map();
 
   function open(id) {
@@ -298,8 +293,8 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       // 同一份清单不重复记：重新attach 到一份已有记录上不写东西（客户端接上来读不该改动事实源）。
       // 名字、来源或那一栏工具变了才记一条，让「这一条输入用的是哪一份」在记录里读得出来（I5）。
       const last = (await session.read()).filter((event) => event.kind === 'mode').at(-1);
-      if (last === undefined || last.name !== file.name || last.layer !== file.layer || last.tools.join(' ') !== tools.join(' ')) {
-        await session.append({ kind: 'mode', name: file.name, layer: file.layer, path: file.path, tools });
+      if (last === undefined || last.name !== file.name || last.layer !== file.layer || last.tools.join(' ') !== tools.join(' ') || last.digest !== file.digest) {
+        await session.append({ kind: 'mode', name: file.name, layer: file.layer, path: file.path, tools, digest: file.digest });
       }
     };
     // 模式选中的那一栏工具与那几段片段在装载之后才生效（D35、D44）：清单里写了本次没有登记的名字会在这里失败，

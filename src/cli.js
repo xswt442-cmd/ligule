@@ -9,9 +9,11 @@ import { createConfig } from './kernel/config.js';
 import { loadConfigLayers } from './kernel/config-file.js';
 import { createKernel } from './kernel/kernel.js';
 import { loadAssembly } from './kernel/assembly.js';
-import { DEFAULT_MODE, modeDirectories } from './kernel/modes.js';
+import { DEFAULT_MODE, loadMode, modeDirectories } from './kernel/modes.js';
 import { extensionSources } from './kernel/extensions.js';
 import { discoverSkills, skillDirectories } from './kernel/skills.js';
+import { createSessionLog } from './session/session.js';
+import { chooseResumeMode, listSessions, sessionDirectory } from './session/list.js';
 import { minimalPlugin } from './tools/minimal.js';
 import { networkPlugin } from './tools/network.js';
 import { createHost, providerFromConfig, serveHost } from './host/host.js';
@@ -20,15 +22,34 @@ const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url),
 // 随包的模式目录与 `dist/` 同级：从本模块往上一层就是包根，本地检出与解包之后是同一个相对位置。
 const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
 
-// `--config a.b=c` 可以出现多次；`--mode <名字>` 取一个值。两者都从位置参数里挑出来。
+// `--config a.b=c` 可以出现多次；`--mode <名字>` 与 `--project <根>` 各取一个值；`--json` 是个旗子。
+// 它们都从位置参数里挑出来。
 const flags = [];
 const positional = [];
 const argv = process.argv.slice(2);
 let missingFlagValue = false;
 let missingModeValue = false;
+let missingProjectValue = false;
 let modeFlag;
+let projectFlag;
+let jsonFlag = false;
 for (let index = 0; index < argv.length; index += 1) {
   const arg = argv[index];
+  if (arg === '--json') {
+    jsonFlag = true;
+    continue;
+  }
+  if (arg === '--project') {
+    // 列表按项目根过滤；写了这个旗子却没给值与 `--mode` 同一类处理，不静默当成没写。
+    const value = argv[index + 1];
+    if (value === undefined) {
+      missingProjectValue = true;
+      break;
+    }
+    projectFlag = value;
+    index += 1;
+    continue;
+  }
   if (arg === '--config' || arg === '--mode') {
     const value = argv[index + 1];
     if (value === undefined) {
@@ -146,7 +167,7 @@ function terminalApprovals() {
   };
 }
 
-async function runOneRound(config, selection, extensions, text) {
+async function runOneRound(config, selection, extensions, text, sessionId) {
   const host = createHost({ config, provider: providerFromConfig(config), policy: config.policy, extensions, ...selection });
   const approvals = terminalApprovals();
   const connection = {
@@ -161,19 +182,44 @@ async function runOneRound(config, selection, extensions, text) {
     },
   };
   try {
-    const { sessionId } = await host.handle({ method: 'session.create', params: {} }, connection);
-    const result = await host.handle({ method: 'run.start', params: { sessionId, input: text } }, connection);
-    console.error(`session ${sessionId}: ${result.iterations} iterations, ${result.modelCalls} model calls`);
+    // 给了 id 就是接着那一份记录往下走：记录不在就是没有这次会话，不新建一份空记录顶上去（D73）。
+    const opened = sessionId === undefined
+      ? await host.handle({ method: 'session.create', params: {} }, connection)
+      : await host.handle({ method: 'session.open', params: { sessionId } }, connection);
+    const result = await host.handle({ method: 'run.start', params: { sessionId: opened.sessionId, input: text } }, connection);
+    console.error(`session ${opened.sessionId}: ${result.iterations} iterations, ${result.modelCalls} model calls`);
   } finally {
     approvals.close();
     host.release();
   }
 }
 
+// 恢复一次会话时用哪一份模式清单：`--mode` 写了就照它来，否则取记录里最后生效的那一条（D78）。
+// 名字对得上而摘要变了（那份 TOML 被人改过）要报出来并要求显式选一次——静默退回随包的 minimal
+// 等于在人选过的范围之外决定这一次能用什么。
+async function modeForResume(config, sessionId) {
+  const modePaths = modeDirectories(process.cwd(), shippedModes);
+  if (modeFlag !== undefined) return { modeName: modeFlag, modePaths };
+  const record = createSessionLog({ directory: sessionDirectory(config), id: sessionId });
+  const last = (await record.read()).filter((event) => event.kind === 'mode').at(-1);
+  // 名字在那三层里找不到时 `loadMode` 报 `mode_unknown`，并把找过的位置一起说出去（D44 那条判据 reused）。
+  const file = last === undefined ? undefined : await loadMode(String(last.name), modePaths);
+  return {
+    modeName: chooseResumeMode({
+      recorded: last === undefined ? undefined : { name: String(last.name), digest: last.digest },
+      loaded: file,
+      fallback: config.mode ?? DEFAULT_MODE,
+    }),
+    modePaths,
+  };
+}
+
 if (missingFlagValue) {
   printFailure('cli_config_needs_a_value');
 } else if (missingModeValue) {
   printFailure('cli_mode_needs_a_value', '--mode takes a mode name, e.g. --mode full');
+} else if (missingProjectValue) {
+  printFailure('cli_project_needs_a_value', '--project takes a project root to filter the listing by');
 } else if (command === '--version' || command === '-v') {
   console.log(pkg.version);
 } else if (command === 'tools') {
@@ -249,6 +295,43 @@ if (missingFlagValue) {
       printFailure(error.code ?? 'cli_run_failed', error.detail);
     }
   }
+} else if (command === 'resume') {
+  // 接着一次已经跑过的会话往下走（D73、D78）：那一份记录不在就是没有这次会话，模式清单取记录里最后生效的那一条。
+  const [sessionId, ...textParts] = rest;
+  const text = textParts.join(' ').trim();
+  if (sessionId === undefined) {
+    printFailure('cli_resume_needs_the_session_id', 'resume takes a session id and the user message, e.g. ligule resume 5f3c "keep going"');
+  } else if (text === '') {
+    printFailure('cli_run_needs_the_user_text', 'resume takes the user message too, e.g. ligule resume 5f3c "keep going"');
+  } else {
+    try {
+      const { config, extensions } = await configSnapshot();
+      await runOneRound(config, await modeForResume(config, sessionId), extensions, text, sessionId);
+    } catch (error) {
+      printFailure(error.code ?? 'cli_resume_failed', error.detail);
+    }
+  }
+} else if (command === 'sessions') {
+  // 只读地列出跑过的会话（D73）：扫记录目录，不建索引也不开会话；耗时打在这一行上，U38 要的就是这个数。
+  try {
+    const { config } = await configSnapshot();
+    const directory = sessionDirectory(config);
+    const started = Date.now();
+    const listed = await listSessions(directory, { projectRoot: projectFlag });
+    if (jsonFlag) console.log(JSON.stringify(listed));
+    else if (listed.length === 0) {
+      console.log('no sessions');
+      console.log(`  looked in ${directory}`);
+    } else {
+      for (const item of listed) {
+        const open = item.unanswered > 0 ? `  ${item.unanswered} dispatched without a result` : '';
+        console.log(`${item.updatedAt}  ${item.id}  ${item.events} events  mode:${item.mode?.name ?? '-'}${open}`);
+      }
+      console.error(`${listed.length} sessions in ${directory}, scanned in ${Date.now() - started}ms`);
+    }
+  } catch (error) {
+    printFailure(error.code ?? 'cli_sessions_failed', error.detail);
+  }
 } else if (command === 'host') {
   // 桌面壳或者脚本起这一个进程，两端各读写一行 JSON（D30）：本机不开端口，审批与事件都走这条连接。
   try {
@@ -278,7 +361,7 @@ if (missingFlagValue) {
   }
 } else if (command === undefined || command === '--help' || command === '-h') {
   console.log(`ligule ${pkg.version} - under development, do not depend on it.`);
-  console.log('commands: tools, skills, run <text>, call <tool> [json-args], tui, host, --version');
+  console.log('commands: tools, skills, sessions, run <text>, resume <id> <text>, call <tool> [json-args], tui, host, --version');
   console.log('options: --config <key.path=value> (repeatable), --mode <name>');
   console.log('run, tui and host read model.api ("messages" or "chat-completions"), model.baseURL and model.model from the config layers; the key comes from LIGULE_API_KEY');
   console.log('run, tui and host also pick a mode: --mode <name> overrides the config `mode`, and neither one written means the shipped "minimal" (D44); tools and call do not read one');

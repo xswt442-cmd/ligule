@@ -148,6 +148,7 @@ test('a client over stdio drives one round, answers one approval and watches the
     assert.equal(lines[0].sessionId, sessionId);
     const recorded = lines.slice(1);
     assert.deepEqual(recorded.map((event) => event.seq), events.map((event) => event.seq));
+    assert.match(recorded[0].digest, /^[0-9a-f]{12}$/, '模式事件带着那一份清单的摘要，恢复时比的就是它（D78）');
 
     const status = await host.client.request('status.get', { sessionId });
     assert.equal(status.running, false);

@@ -39,6 +39,7 @@ export { createPromptAssembly, PROMPT_BOUNDARY } from './kernel/prompt.js';
 export { createSessionLog } from './session/session.js';
 export { SESSION_FORMAT_VERSION, parseSessionEvents } from './session/format.js';
 export { findUnresolvedCalls, buildRepairEvents, repairUnresolvedCalls } from './session/repair.js';
+export { chooseResumeMode, listSessions, sessionDirectory } from './session/list.js';
 export { createLoop, DEFAULT_LOOP_LIMITS } from './kernel/loop.js';
 export {
   METHODS, APPROVAL_METHOD, NOTIFICATIONS, validateCall, isApproved,
