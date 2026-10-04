@@ -23,6 +23,7 @@ export function createMcpTools(registry: Pick<McpRegistry, 'servers' | 'toolsOf'
   return {
     inspectTool: {
       name: 'mcp.inspect',
+  readOnly: true,
       disclosure: true,
       description: `Look up what an MCP server offers, one level at a time. ${LEVELS}`,
       parameters: {

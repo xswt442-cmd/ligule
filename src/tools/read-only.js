@@ -12,6 +12,7 @@ import { existsOrFails, kindOfTarget, marker, readExisting, toPosix, walkFiles }
 
 export const readTool = {
   name: 'read',
+  readOnly: true,
   description: 'Read a text file inside the workspace boundary, up to a byte limit.',
   parameters: {
     type: 'object',
@@ -38,6 +39,7 @@ export const readTool = {
 
 export const findTool = {
   name: 'find',
+  readOnly: true,
   description: 'Find files by name pattern inside the workspace boundary.',
   parameters: {
     type: 'object',
@@ -78,6 +80,7 @@ export const findTool = {
 // 而且这两个扫描预算只在回落那条上生效；外部后端可用时只有命中数上限参与。
 export const searchTool = {
   name: 'search',
+  readOnly: true,
   description: 'Search file contents for a literal string inside the workspace boundary.',
   parameters: {
     type: 'object',

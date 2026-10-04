@@ -12,6 +12,7 @@ import { applyMode, loadMode } from '../kernel/modes.js';
 import { createDecisionChain } from '../kernel/policy.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { createSessionLog } from '../session/session.js';
+import { repairUnresolvedCalls } from '../session/repair.js';
 import { limitsOf } from '../capability/limits.js';
 import { loadInstructions, DEFAULT_INSTRUCTION_BYTES } from '../capability/instructions.js';
 import { SKILL_METADATA_BUDGET_BYTES, discoverSkills, formatSkillCatalog, skillDirectories } from '../kernel/skills.js';
@@ -138,7 +139,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
   // ask 是这条会话的审批通道：客户端不在答复里说允许，就按不允许处理（D16 的询问走内核对外接口）。
   // 取消落在审批还没答复的时候要把这个问题收掉：答复不会再来了，而判定链在这里抛出，
   // 那一次调用就在记录里没人回答，之后每一轮都拼不出合法请求体（D11）。
-  async function build(id, connection) {
+  async function build(id, connection, recover = false) {
     // 扩展收事件的那一条通道（D37）：刚落盘的这一条同时送给客户端与扩展，两边读的是同一份事实（I5）。
     const listeners = [];
     // 首行那份元信息在第一次落笔时才写，所以模式身份用一条取当前值的函数给：建会话的那一刻常常还没选过模式（D73）。
@@ -303,6 +304,12 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     };
     // 模式选中的那一栏工具与那几段片段在装载之后才生效（D35、D44）：清单里写了本次没有登记的名字会在这里失败，
     // 而不是静默少一件。
+    // 打开一份已有的记录时，先把没人回答的那几次派发补成规范的工具结果（D72）：这一条只在可写的恢复路径上做一次，
+    // 读的那几处（`session.read`、界面、列表）报告缺口而不改盘。新建的那一份里没有待补的东西。
+    if (recover) {
+      const repaired = await repairUnresolvedCalls(session, { readOnly: new Set(kernel.readOnly()) });
+      for (const event of repaired) logger?.log?.('unanswered tool call repaired', { sessionId: id, callId: event.callId, tool: event.tool });
+    }
     if (modeName !== undefined) await state.adopt(await loadMode(modeName, modePaths));
     const loop = createLoop({
       kernel,
@@ -335,7 +342,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           }
           // 同一条连接上开两次同一个 id 会丢掉前一份状态：那一轮还在跑，取消与撤插件都没了对象。
           if (sessions.has(sessionId)) throw new KernelError('session_already_open', { detail: sessionId });
-          const state = await build(sessionId, connection);
+          const state = await build(sessionId, connection, true);
           sessions.set(sessionId, state);
           return { sessionId };
         }

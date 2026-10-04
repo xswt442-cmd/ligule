@@ -60,6 +60,12 @@ export function createKernel(options = {}) {
       return [...tools.keys()].sort();
     },
 
+    // 登记时声明过「重做一次不会在本机之外多留下什么」的那几件名字：恢复措辞按这一格分开说（D79）。
+    // 判定不读它，模型也读不到它（I3、D12）。
+    readOnly() {
+      return [...tools.values()].filter((tool) => tool.readOnly).map((tool) => tool.name).sort();
+    },
+
     // 模式能从哪几件里挑：登记表里去掉固定披露入口（D63）。被模式藏起来不该是一种可能，
     // 否则默认档位下模型连发现技能的入口都没有，而注册表里明明有东西。
     selectable() {
@@ -114,6 +120,9 @@ export function createKernel(options = {}) {
         parameters,
         execution: tool.execution === 'parallel' ? 'parallel' : 'serial',
         disclosure: tool.disclosure === true,
+        // 一件工具可以自己声明「重做一次不会在本机之外多留下什么」：恢复时的那句话按这一格分开说（D79）。
+        // 声明不参与判定，判定读的还是每一次调用自己（I3）。
+        readOnly: tool.readOnly === true,
         targetArgument: typeof tool.targetArgument === 'string' ? tool.targetArgument : undefined,
         commandArgument: typeof tool.commandArgument === 'string' ? tool.commandArgument : undefined,
         // 一件工具可以声明「这一次调用真正用的能力是什么」：MCP 的两件固定工具靠它把 `mcp:<服务器>/<工具>` 交出去（D52）。

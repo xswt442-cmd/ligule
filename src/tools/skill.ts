@@ -40,6 +40,7 @@ async function namedSkill(registry: SkillRegistry, name: unknown): Promise<Skill
 export function createSkillTool(registry: SkillRegistry, visibleTools: () => string[]) {
   return {
     name: 'skill',
+  readOnly: true,
     // 这一件是披露入口，不是模式能挑的直接能力工具：注册表里有技能就看得见（D63）。
     disclosure: true,
     description: 'Load packaged instructions kept on disk. action "search" needs a query, action "activate" needs a name, '

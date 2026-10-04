@@ -25,6 +25,9 @@ export interface SessionEvent {
   [key: string]: unknown;
 }
 
+// 交给 `append` 的那一条还没有序号：号是写出去的时候定的（D73）。
+export type PendingSessionEvent = Omit<SessionEvent, 'seq'>;
+
 export interface SessionRecord {
   events: SessionEvent[];
   formatVersion: number;

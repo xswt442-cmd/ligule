@@ -7,6 +7,7 @@ import type { NetworkTarget } from '../capability/network.js';
 
 export const fetchTool = {
   name: 'fetch',
+  readOnly: true,
   description: 'Fetch one URL as text: GET only, http or https, no cookies and no credentials of this machine.',
   parameters: {
     type: 'object',

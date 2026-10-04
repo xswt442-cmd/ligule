@@ -37,6 +37,8 @@ export { resolveRipgrep, searchWithRipgrep } from './capability/ripgrep.js';
 export { execTool } from './capability/exec.js';
 export { createPromptAssembly, PROMPT_BOUNDARY } from './kernel/prompt.js';
 export { createSessionLog } from './session/session.js';
+export { SESSION_FORMAT_VERSION, parseSessionEvents } from './session/format.js';
+export { findUnresolvedCalls, buildRepairEvents, repairUnresolvedCalls } from './session/repair.js';
 export { createLoop, DEFAULT_LOOP_LIMITS } from './kernel/loop.js';
 export {
   METHODS, APPROVAL_METHOD, NOTIFICATIONS, validateCall, isApproved,
