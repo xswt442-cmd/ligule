@@ -9,7 +9,7 @@ import { createLogger } from './log.js';
 import { failureOf, refusalOf, resultLimit, resultOf, spillContent } from './result.js';
 import { createObservationLog } from '../session/observe.js';
 import { resolveTarget } from '../capability/network.js';
-import { resolveShell } from '../capability/shell.js';
+import { resolveShell, withNativeExitCode } from '../capability/shell.js';
 import { assertSupportedSchema, validateArgs } from './schema.js';
 
 // options.config 是装载侧折好的配置快照，options.logger 是宿主自己的日志后端（D8、D26），
@@ -199,7 +199,13 @@ export function createKernel(options = {}) {
           throw new KernelError(verdict.code);
         }
         // 解析出的分段跟着答复回来：记录里要读得出这条文本被读成了哪几段（D59）。
-        if (entry.shell !== undefined && verdict.segments !== undefined) entry.shell.segments = verdict.segments;
+        if (entry.shell !== undefined) {
+          if (verdict.segments !== undefined) entry.shell.segments = verdict.segments;
+          // 退出码那一段尾巴补不补，看的是判定读出来的那一条：整条文本就是一条简单命令，而且那个名字在这台机器上
+          // 是一个可执行文件。没有判定链时不补——那时没有「这条文本被读成一条原生命令」这个事实，宁可少一个退出码。
+          shell = withNativeExitCode(shell, verdict.segments?.length === 1 ? verdict.segments[0] : undefined);
+          if (shell.tail !== '') entry.shell.tail = shell.tail;
+        }
       }
       let value;
       try {

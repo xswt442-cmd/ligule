@@ -136,14 +136,18 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     const state = { id, session, asks: new Set(), running: undefined, mode: { file: undefined, tools: [], undo: () => {} }, pending: undefined };
     const chain = createDecisionChain({
       ...policy,
-      ask: async ({ tool, input, command, reason }) => {
+      ask: async ({ tool, input, command, reason, shell, executable }) => {
         let settle;
         const cancelled = new Promise((resolve) => {
           settle = () => resolve(false);
         });
         state.asks.add(settle);
         try {
-          const request = connection.request(APPROVAL_METHOD, { sessionId: id, tool, args: input, command, reason });
+          // 后端那两样只在真有一条命令要判时带上：没有命令文本的调用（读文件一类）不该在答复里多出一个空字段，
+          // 否则同一条协议在按行转递的载体上与在进程内的那一种上读到的形状就不一样。
+          const request = connection.request(APPROVAL_METHOD, {
+            sessionId: id, tool, args: input, command, reason, ...(shell === undefined ? {} : { shell, executable }),
+          });
           return await Promise.race([
             request.then(isApproved, (error) => {
               // 客户端把答复写成一次失败：这是它的问题，说出来，同时这一条按不允许处理，记录仍然完整。

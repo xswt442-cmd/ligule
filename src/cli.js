@@ -149,7 +149,9 @@ async function runOneRound(config, selection, text) {
     // 协议里 Host 只发出这一种请求：一次询问，答允许或不允许。
     request: async (method, params) => {
       const described = params.command ?? JSON.stringify(params.args);
-      const answer = await approvals.ask(`allow ${params.tool} ${described}? [y/N] `);
+      // 命令文本后面说清是哪一种语法、哪一个可执行文件（D59）：同一条文本在两种语法下要问不该问是两回事。
+      const backend = params.shell === undefined ? '' : ` (${params.shell}: ${params.executable ?? ''})`;
+      const answer = await approvals.ask(`allow ${params.tool} ${described}${backend}? [y/N] `);
       return { decision: /^y(es)?$/i.test(String(answer).trim()) ? 'allow' : 'deny' };
     },
   };

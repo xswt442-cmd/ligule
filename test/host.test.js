@@ -10,7 +10,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { createConnection, createConfig, createMemoryConnectionPair, MESSAGES_CAPABILITIES, METHODS, NOTIFICATIONS, providerFromConfig, serveHost } from '../dist/index.js';
+import { createConnection, createConfig, createMemoryConnectionPair, MESSAGES_CAPABILITIES, METHODS, NOTIFICATIONS, providerFromConfig, resolveShell, serveHost } from '../dist/index.js';
 
 const CLI = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
 
@@ -128,6 +128,9 @@ test('a client over stdio drives one round, answers one approval and watches the
     assert.equal(approvals[0].tool, 'read');
     assert.deepEqual(approvals[0].args, { path: 'note.txt' });
     assert.equal(approvals[0].sessionId, sessionId);
+    // 没有命令文本的调用不带后端那两样：那一种语法与哪一个可执行文件对读一次文件这件事没有意义。
+    assert.equal(approvals[0].shell, undefined);
+    assert.equal(approvals[0].executable, undefined);
 
     const deltas = notifications.filter((message) => message.notify === 'delta').map((message) => message.event);
     assert.deepEqual(deltas.map((event) => event.type), ['tool-call', 'text'], 'the stream is forwarded as it arrives');
@@ -432,4 +435,53 @@ test('the same protocol runs over an in-memory carrier inside one process', asyn
       await rm(directory, { recursive: true, force: true });
     }
   });
+});
+
+// 审批那一次问的不只是「要不要跑」：同一条文本在两种语法下能自动放行的面积不一样，
+// 答的是那一种、跑起来会是哪一个可执行文件要看得见（D59）。这一条答复的是不允许，不真起进程。
+test('an approval for a command names the shell backend the host chose', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'ligule-host-shell-'));
+  const config = createConfig({
+    user: {
+      boundary: directory,
+      model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model' },
+      policy: { mode: 'ask' },
+    },
+  });
+  let turns = 0;
+  // 提供方交回的是已经归一化的那一种事件（`text`、`tool-call`），不是端点线上的那一份帧。
+  const provider = {
+    capabilities: MESSAGES_CAPABILITIES,
+    model: 'test-model',
+    async *stream() {
+      turns += 1;
+      if (turns === 1) {
+        yield { type: 'tool-call', id: 'call_1', name: 'exec', args: { command: 'git status' } };
+        return;
+      }
+      yield { type: 'text', text: 'done' };
+    },
+  };
+  const pair = createMemoryConnectionPair();
+  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy });
+  const approvals = [];
+  const connection = createConnection(pair.client);
+  connection.onRequest(async (message) => {
+    approvals.push(message.params);
+    return { decision: 'deny' };
+  });
+  try {
+    const { sessionId } = await connection.request('session.create', {});
+    await connection.request('run.start', { sessionId, input: 'run it' });
+    assert.equal(approvals.length, 1);
+    assert.equal(approvals[0].tool, 'exec');
+    assert.equal(approvals[0].command, 'git status');
+    const selection = resolveShell({});
+    assert.equal(approvals[0].shell, selection.kind);
+    assert.equal(approvals[0].executable, selection.executable);
+  } finally {
+    pair.client.output.end();
+    host.release();
+    await rm(directory, { recursive: true, force: true });
+  }
 });

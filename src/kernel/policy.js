@@ -147,7 +147,14 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       // 走到这里都要问：自动档遇到看不透的命令不自动放行，只降档到逐次询问，并把原因交出去（D17、I8）。
       const reason = askReason(parsed, target, shell);
       if (typeof ask !== 'function') return deny('ask_unavailable', reason ?? 'no ask channel is installed');
-      if (await ask({ tool, input, command, reason }) !== true) return deny('ask_declined', 'the user declined');
+      // 答复这一次要点头就得多看一眼：同一条文本在两种语法下能自动放行的面积不一样，答的是哪一种、跑的是哪一个可执行文件，
+      // 只有 Host 这一侧知道（D59）。没有命令文本的调用不带这两个字段，答复的形状与加这一条之前一样。
+      const question = { tool, input, command, reason };
+      if (shell !== undefined) {
+        question.shell = shell.kind;
+        question.executable = shell.executable;
+      }
+      if (await ask(question) !== true) return deny('ask_declined', 'the user declined');
       record(false);
       return approved();
     },

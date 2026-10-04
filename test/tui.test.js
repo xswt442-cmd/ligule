@@ -148,3 +148,49 @@ test('/show takes the number from the record, not the row on screen', options, (
   assert.equal(findRecord(events, '-1').code, 'tui_show_needs_a_number');
   assert.equal(findRecord(events, '7').record, null);
 });
+
+// 审批框上要看得见答的是哪一种语法、跑起来会是哪一个可执行文件（D59）：同一条文本在两种后端下的结论可以相反。
+test('the approval box names the shell backend and its executable', options, async () => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { setTimeout: delay } = await import('node:timers/promises');
+  const { App } = await import('../dist/tui/app.js');
+
+  const stdout = new PassThrough();
+  stdout.columns = 100;
+  stdout.isTTY = false;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = new PassThrough();
+  stdin.isTTY = false;
+
+  let deliver;
+  const client = {
+    onNotification() {},
+    onRequest: (handler) => { deliver = handler; },
+    request: async () => ({ mode: 'minimal', modeLayer: 'shipped', pendingMode: null, policy: 'ask', tools: ['exec'], eventCount: 0, running: false, denials: { consecutive: 0, total: 0 } }),
+    reply: (id, result) => result,
+  };
+  const instance = render(createElement(App, { client, sessionId: 'abcdef01-2345-6789', info: {}, interactive: false }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
+  await delay(200);
+  await deliver({
+    id: 'ask-1',
+    method: 'approval.request',
+    params: {
+      sessionId: 'abcdef01-2345-6789',
+      tool: 'exec',
+      command: 'Get-Process | Stop-Process',
+      shell: 'powershell',
+      executable: 'C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe',
+      reason: 'the powershell command is not fully understood: |',
+    },
+  });
+  await delay(120);
+  instance.unmount();
+
+  assert.match(painted, /要执行 exec/);
+  assert.match(painted, /Get-Process \| Stop-Process/);
+  assert.match(painted, /后端 powershell/);
+  assert.match(painted, /not fully understood/);
+});

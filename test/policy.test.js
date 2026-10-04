@@ -182,7 +182,7 @@ test('the kernel runs every call through the decision chain and reports the code
 });
 
 // 判定读哪一种语法由 Host 的那一份选择决定（D59）：同一行文本在两个后端下可以得出不同结论。
-const POWERSHELL = { kind: 'powershell', executable: 'pwsh.exe', prefix: ['-Command'], suffix: '; exit $LASTEXITCODE' };
+const POWERSHELL = { kind: 'powershell', executable: 'pwsh.exe', prefix: ['-Command'], tail: '' };
 
 test('the PowerShell backend judges only its own narrow subset', async () => {
   const { calls, ask } = asked(true, true);
@@ -200,6 +200,9 @@ test('the PowerShell backend judges only its own narrow subset', async () => {
   assert.equal((await chain.evaluate({ tool: 'exec', input: { command: 'git status | grep x' }, shell: POWERSHELL })).decision, 'allow');
   assert.deepEqual(calls.map((call) => call.command), ['git status | grep x']);
   assert.match(calls[0].reason, /the powershell command is not fully understood: \|/);
+  // 答复那一次要多看一眼的东西：答的是哪一种语法下的这条文本、跑起来会是哪一个可执行文件。
+  assert.equal(calls[0].shell, 'powershell');
+  assert.equal(calls[0].executable, 'pwsh.exe');
 
   // 以脚本解释器开头这一段两边都不放（D17 第三条），换后端不把它放宽。
   assert.equal(

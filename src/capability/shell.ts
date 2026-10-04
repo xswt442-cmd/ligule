@@ -13,8 +13,8 @@ export interface ShellSelection {
   executable: string;
   // 解释器自己的参数，命令文本作为最后一个参数交进去。
   prefix: string[];
-  // 跟在命令文本后面的一段固定文本：PowerShell 用它把退出码交回来。
-  suffix: string;
+  // 跟在命令文本后面的一段固定文本，只在能证明这一条是原生命令时才补（`withNativeExitCode`）。
+  tail: string;
 }
 
 interface ShellProbe {
@@ -33,9 +33,9 @@ const BASH_PREFIX = ['-c'];
 
 // Windows PowerShell 5.1 在 `-Command` 下把失败的原生命令一律交回 1，命令真正的退出码留在 `$LASTEXITCODE` 里
 // （本机 2026-10-03 实测：`node` 里 `process.exit(7)`，交回来的是 1，补上这一段之后交回来的是 7）。
-// 判定链读的是模型写的那一条命令，这一段是宿主补的固定尾巴，不进去——它不含命令内容。
-const POWERSHELL_SUFFIX = '; exit $LASTEXITCODE';
-const BASH_SUFFIX = '';
+// 这一段不能对所有 PowerShell 命令统一补：cmdlet 失败不改 `$LASTEXITCODE`，补上去就把一次失败读成上一条原生命令的退出码，
+// 常常是 0，也就是成功。所以只补在能证明「这一条是原生命令」的那一次调用上（`withNativeExitCode`）。
+const POWERSHELL_TAIL = '; exit $LASTEXITCODE';
 
 function known(directory: string | undefined, ...parts: string[]): string | undefined {
   return directory === undefined || directory === '' ? undefined : join(directory, ...parts);
@@ -50,6 +50,12 @@ function locate(name: string, environment: Record<string, string | undefined>): 
     if (existsSync(candidate)) return candidate;
   }
   return undefined;
+}
+
+// Windows 上按名字调用时可省略的后缀来自 PATHEXT：PATH 上真实存在的是 `git.exe`，`git` 这个文件不存在。
+// 只试 PATHEXT 里那几个，不试 `.ps1`——一个模块脚本不是一条原生命令，补退出码尾巴对它没有意义。
+function windowsExtensions(environment: Record<string, string | undefined>): string[] {
+  return (environment.PATHEXT ?? '.EXE;.CMD;.BAT;.COM').split(';').filter((entry) => entry !== '');
 }
 
 function firstFound(
@@ -98,16 +104,30 @@ export function resolveShell(
     const names = kind === 'bash' ? bashCandidates(platform, environment) : powershellCandidates(platform);
     const { executable, searched } = firstFound(names, environment, locateExecutable);
     if (executable !== undefined) {
-      return {
-        kind,
-        executable,
-        prefix: kind === 'bash' ? BASH_PREFIX : POWERSHELL_PREFIX,
-        suffix: kind === 'bash' ? BASH_SUFFIX : POWERSHELL_SUFFIX,
-      };
+      return { kind, executable, prefix: kind === 'bash' ? BASH_PREFIX : POWERSHELL_PREFIX, tail: '' };
     }
     failures.push(`${kind}: ${searched.join(', ')}`);
   }
   const looked = failures.join('; ');
   if (requested === 'auto') throw new KernelError('exec_shell_unavailable', { detail: `no shell backend was found (looked for ${looked})` });
   throw new KernelError('exec_shell_unavailable', { detail: `exec.shell="${requested}" but nothing matched ${looked}` });
+}
+
+// 判定链把这条文本读成「一条简单命令」之后才来问这一句：命令名在这台机器上是一个可执行文件，才补那段退出码尾巴。
+// 名字落在 PATH 之外（cmdlet、函数、别名）时不补——宁可交回 PowerShell 自己的那一个 1，也不交回上一条原生命令留下的旧值。
+// 只给一条命令补：分号与 `&&` 串起来的那几种，`$LASTEXITCODE` 说的是最后那一条，前几条的失败会被盖掉。
+export function withNativeExitCode(
+  shell: ShellSelection,
+  command: string | undefined,
+  { platform = process.platform, environment = process.env, locateExecutable = locate }: ShellProbe = {},
+): ShellSelection {
+  if (shell.kind !== 'powershell' || shell.tail !== '' || command === undefined) return shell;
+  const name = /^(\S+)(\s|$)/.exec(command)?.[1];
+  if (name === undefined) return shell;
+  const extensions = platform === 'win32' ? windowsExtensions(environment) : [];
+  const candidates = [name, ...extensions.flatMap((extension) => [name + extension.toLowerCase(), name + extension])];
+  for (const candidate of candidates) {
+    if (locateExecutable(candidate, environment) !== undefined) return { ...shell, tail: POWERSHELL_TAIL };
+  }
+  return shell;
 }

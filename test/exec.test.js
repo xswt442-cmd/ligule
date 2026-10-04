@@ -4,25 +4,25 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createDecisionChain, createConfig, createKernel, createSessionLog, execTool, resolveShell } from '../dist/index.js';
+import { createDecisionChain, createConfig, createKernel, createSessionLog, execTool, resolveShell, withNativeExitCode } from '../dist/index.js';
 import { decode } from '../dist/capability/exec.js';
 
 // 后端由 Host 选定再交进来（D59），这里读的就是这一具机器上的那一份选择。
 // 被测的是 exec 自己的那几件事（头尾分页、标准输入、取消、退出码），所以脚本片段落到一个临时文件里再跑：
 // Windows PowerShell 5.1 把传给原生命令的引号参数重排过一次，`<`、`>` 与 `=>` 都会被截掉（本机 2026-10-03 实测），
-// 那段文本能不能原样送到 node 手上是 PowerShell 的事情，不是这一件工具的事情。
-// PowerShell 要跑一个带引号的可执行文件路径必须先加调用运算符 `&`。
+// 那段文本能不能原样送到 node 手上是 PowerShell 的事情，不是这一件工具的事情。斜杠两种 shell 都认，路径统一写成正斜杠。
+// 命令写成 `node "<脚本>"` 这种一条简单原生命令的形状，退出码那一段尾巴才按内核那一条规则补得上。
 const shell = resolveShell({});
 const directory = mkdtempSync(join(tmpdir(), 'ligule-exec-'));
 let counter = 0;
 function nodeCommand(code) {
-  const script = join(directory, `case-${(counter += 1)}.js`);
+  const script = join(directory, `case-${(counter += 1)}.js`).replace(/\\/g, '/');
   writeFileSync(script, code);
-  return `${shell.kind === 'powershell' ? '& ' : ''}"${process.execPath}" "${script}"`;
+  return `node "${script}"`;
 }
 
 function run(command, limits, signal) {
-  return execTool.run({ command }, { config: { boundary: process.cwd(), limits }, signal, shell });
+  return execTool.run({ command }, { config: { boundary: process.cwd(), limits }, signal, shell: withNativeExitCode(shell, command) });
 }
 
 test('exec returns the command output and its exit code', async () => {
@@ -106,7 +106,10 @@ test('the record names the backend a command was judged and run under', async ()
   kernel.register(execTool);
   await kernel.call('exec', { command: 'git status' });
   const [entry] = await session.read();
-  assert.deepEqual(entry.shell, { kind: shell.kind, executable: shell.executable, segments: ['git status'] });
+  // 尾巴补没补由这台机器的 PATH 决定（`git` 是个可执行文件才补），两种都在这一条里接受，但不接受第三种值。
+  const { tail, ...chosen } = entry.shell;
+  assert.deepEqual(chosen, { kind: shell.kind, executable: shell.executable, segments: ['git status'] });
+  assert.ok(tail === undefined || tail === '; exit $LASTEXITCODE', `unexpected tail: ${tail}`);
 });
 
 // Windows 上子进程写的是控制台码页，按 utf8 硬解会得到一串乱字（界面里就是问号）。

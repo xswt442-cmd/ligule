@@ -92,7 +92,7 @@ export const execTool = {
     // Windows 没有进程组，终止用 taskkill /T。windowsHide 不弹控制台窗口。
     // stdin 不给文件描述符：继承了那一个，等着读输入的命令就一直挂着——有些命令按启发式去读标准输入，
     // 具体是哪一家会踩到不必枚举，不给它可读的东西就够了。
-    const child = spawn(shell.executable, [...shell.prefix, `${args.command}${shell.suffix}`], {
+    const child = spawn(shell.executable, [...shell.prefix, `${args.command}${shell.tail}`], {
       cwd,
       detached: process.platform !== 'win32',
       windowsHide: true,

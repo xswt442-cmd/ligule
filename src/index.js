@@ -23,7 +23,7 @@ export { isWithin, resolveWithin } from './capability/paths.js';
 export { probeBackend } from './capability/capability.js';
 export { createDecisionChain, DEFAULT_THRESHOLDS } from './kernel/policy.js';
 export { parseCommand } from './capability/command.js';
-export { resolveShell } from './capability/shell.js';
+export { resolveShell, withNativeExitCode } from './capability/shell.js';
 export { readOnlyTools, readTool, findTool, searchTool } from './tools/read-only.js';
 export { writeTools, createTool, writeTool, editTool, deleteTool } from './tools/write.js';
 export { DEFAULT_LIMITS } from './capability/limits.js';

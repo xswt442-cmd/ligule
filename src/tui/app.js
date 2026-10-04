@@ -183,6 +183,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         tool: message.params.tool,
         detail: message.params.command ?? JSON.stringify(message.params.args ?? {}),
         reason: message.params.reason ?? '',
+        // 用哪一种语法判的、跑的是哪一个可执行文件：答的是这一条命令，看得见的该是这两样（D59）。
+        backend: message.params.shell === undefined ? '' : `${message.params.shell} · ${message.params.executable ?? ''}`,
       });
     };
     client.onNotification(onNotification);
@@ -388,6 +390,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     ask === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'yellow', paddingX: 1 },
       h(Text, { bold: true }, `要执行 ${ask.tool}`),
       h(Text, { wrap: 'truncate-end' }, ask.detail),
+      ask.backend === '' ? null : h(Text, { dimColor: true, wrap: 'truncate-end' }, `后端 ${ask.backend}`),
       ask.reason === '' ? null : h(Text, { dimColor: true }, ask.reason),
       h(Text, null, '按 y 允许一次，按 n 不允许')),
     detail === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'cyan', paddingX: 1 },
