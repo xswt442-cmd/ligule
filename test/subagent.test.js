@@ -1,8 +1,8 @@
 // 第 31 步的验收（D71）：派生体过同一条判定链、登记表里没有 `subagent` 自己、记录另开一份支线。
 // 内核、判定链、会话记录与循环都是真的；提供方按脚本回答，因为它只负责把「下一步做什么」这件事说出来。
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -33,8 +33,17 @@ function scripted(turns) {
   };
 }
 
+// 父记录与派生记录都要真目录（记录是真的会话文件），跑完一起收掉。
+const created = [];
+async function tempDirectory(prefix) {
+  const directory = await mkdtemp(join(tmpdir(), prefix));
+  created.push(directory);
+  return directory;
+}
+after(() => Promise.all(created.map((directory) => rm(directory, { recursive: true, force: true }))));
+
 async function workspace() {
-  const directory = await mkdtemp(join(tmpdir(), 'ligule-subagent-'));
+  const directory = await tempDirectory('ligule-subagent-');
   await writeFile(join(directory, 'note.txt'), 'the body');
   return directory;
 }
@@ -52,7 +61,7 @@ test('the derived agent runs on the parent decision chain and cannot delegate ag
     text('I could not delete it'),                       // 子：收口
     text('the child reported back'),                     // 父：收口
   ]);
-  const session = createSessionLog({ directory: await mkdtemp(join(tmpdir(), 'ligule-subagent-log-')), id: 'parent' });
+  const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'parent' });
   const kernel = createKernel({ config, policy: chain, session });
   createSubagentPlugin({
     config,
@@ -90,7 +99,7 @@ test('a task is required, and a mode is only looked up when this run has mode di
   const boundary = await workspace();
   const config = createConfig({ user: { boundary } });
   const chain = createDecisionChain({ mode: 'auto' });
-  const session = createSessionLog({ directory: await mkdtemp(join(tmpdir(), 'ligule-subagent-log-')), id: 'p2' });
+  const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'p2' });
   const kernel = createKernel({ config, policy: chain, session });
   createSubagentPlugin({
     config,
@@ -121,7 +130,7 @@ test("the derived agent runs under the mode the parent session picked", async ()
     text('read it'),
     text('back to the parent'),
   ]);
-  const session = createSessionLog({ directory: await mkdtemp(join(tmpdir(), 'ligule-subagent-log-')), id: 'p3' });
+  const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'p3' });
   const kernel = createKernel({ config, policy: chain, session });
   createSubagentPlugin({
     config,

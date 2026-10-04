@@ -1,8 +1,8 @@
 // 第 29 步的验收（D37、D46、D68）：扩展从哪几处来、递出去的面有多大、装坏了留什么。
 // 临时目录里的模块是真的 ESM 文件，用真的动态 import 跑；内核、判定链、提示词组装也都是真的。
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,11 +12,15 @@ import {
 
 const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
 
+// 每一条测试都要一份真的临时目录（扩展文件是被真动态 import 的），跑完一起收掉。
+const created = [];
 async function directoryWith(files) {
   const root = await mkdtemp(join(tmpdir(), 'ligule-extensions-'));
+  created.push(root);
   for (const [name, text] of Object.entries(files)) await writeFile(join(root, name), text);
   return root;
 }
+after(() => Promise.all(created.map((root) => rm(root, { recursive: true, force: true }))));
 
 test('sources come from the install directory, the user layer and the command line, not from the repository', async () => {
   const root = await directoryWith({ 'b.js': '', 'a.js': '', 'notes.txt': '' });

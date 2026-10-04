@@ -1,7 +1,7 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createDecisionChain, createConfig, createKernel, createSessionLog, execTool, resolveShell, withNativeExitCode } from '../dist/index.js';
@@ -14,6 +14,8 @@ import { decode } from '../dist/capability/exec.js';
 // 命令写成 `node "<脚本>"` 这种一条简单原生命令的形状，退出码那一段尾巴才按内核那一条规则补得上。
 const shell = resolveShell({});
 const directory = mkdtempSync(join(tmpdir(), 'ligule-exec-'));
+// 这一份跑完就收掉：留在系统临时目录里的话，每跑一次 `npm test` 就多一份，几十次之后没人会再去清。
+after(() => rmSync(directory, { recursive: true, force: true }));
 let counter = 0;
 function nodeCommand(code) {
   const script = join(directory, `case-${(counter += 1)}.js`).replace(/\\/g, '/');
@@ -97,7 +99,7 @@ test('the decision chain sees the command text before anything is spawned', asyn
 
 // 记录里三样都要看得见（D59）：按哪一种语法判的、实际起的是哪一个可执行文件、这条文本被读成了哪几段。
 test('the record names the backend a command was judged and run under', async () => {
-  const session = createSessionLog({ directory: mkdtempSync(join(tmpdir(), 'ligule-exec-record-')), id: 'backend' });
+  const session = createSessionLog({ directory: mkdtempSync(join(directory, 'record-')), id: 'backend' });
   const kernel = createKernel({
     config: createConfig({ user: { boundary: process.cwd() } }),
     policy: createDecisionChain({ mode: 'auto' }),

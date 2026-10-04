@@ -171,6 +171,7 @@ test('a real stdio server answers inspect and call through the registry', async 
   );
   } finally {
     await registry.close();
+    await rm(root, { recursive: true, force: true });
   }
 });
 
@@ -203,6 +204,7 @@ test('a server that moved its definition is caught over the real protocol', asyn
   );
   } finally {
     await registry.close();
+    await rm(root, { recursive: true, force: true });
   }
 });
 
