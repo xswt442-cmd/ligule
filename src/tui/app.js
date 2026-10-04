@@ -1,7 +1,7 @@
 // 终端界面的行、输入与状态（D33 的第二种客户端）。这里不读帧也不写帧：帧由 src/host/connection.js 那一层交进来，
 // 这一层只把会话记录与流式增量画成行，并把按键变成协议里的调用。
-// 纯函数（parseInput、editDraft、foldText、projectRecord）都从这里交出去，检查在 test/tui.test.js，
-// 不靠真终端也能验；画面本身用 testplace/drive-tui.mjs 跑一轮看。
+// 纯函数（parseInput、editDraft、foldText、projectRecord、branchOf、detailTitle）都从这里交出去，检查在 test/tui.test.js，
+// 不靠真终端也能验；画面本身跑 `ligule tui` 看。
 import { createElement as h, Fragment, useCallback, useEffect, useState } from 'react';
 import { Box, Static, Text, useApp, useInput } from 'ink';
 
@@ -16,6 +16,7 @@ export const COMMANDS = [
   { name: 'status', usage: '/status', text: '显示模式、档位、拒绝计数与记录条数' },
   { name: 'mode', usage: '/mode [名字]', text: '显示当前模式，或切换到另一个名字' },
   { name: 'show', usage: '/show [序号]', text: '把记录里那一条的完整内容画出来，不带序号收起' },
+  { name: 'sub', usage: '/sub [序号]', text: '画出那一次派生执行的整份支线记录，不带序号收起' },
   { name: 'new', usage: '/new', text: '开一份新会话，画面上方的历史留在终端里' },
   { name: 'quit', usage: '/quit', text: '退出（Ctrl+C 同样）' },
 ];
@@ -105,6 +106,24 @@ export function findRecord(events, argument) {
   const seq = Number(argument);
   if (!Number.isInteger(seq) || seq < 0) return { code: 'tui_show_needs_a_number' };
   return { record: events.find((event) => event.seq === seq) ?? null };
+}
+
+// `/sub` 用的也是同一套序号，指向父记录里那条派生结果：支线会话 id 写在那一条的结果内容里（D71），
+// 界面不猜文件名，也不为支线多要一次别的动作（D74）。
+export function branchOf(record) {
+  if (record?.kind !== 'tool' || record.tool !== 'subagent') return { code: 'tui_sub_needs_a_branch' };
+  const sessionId = record.result?.content?.sessionId;
+  // 结果内容超过注入上限时整段溢出到文件（I6），那一条记录里就没有 sessionId 这一格。
+  if (typeof sessionId !== 'string' || sessionId === '') {
+    return { code: 'tui_sub_reference_spilled', spilled: record.result?.spilled };
+  }
+  return { sessionId };
+}
+
+// 那一格的标题先说清画的是哪一条线：主干与支线各有一套序号，混着看读出来的是错的因果（D74）。
+export function detailTitle(detail) {
+  if (detail.branch === undefined) return `记录 ${detail.seq}（${detail.kind}）的完整内容 · /show 收起`;
+  return `支线 ${detail.branch}，父记录第 ${detail.seq} 那一次派生 · 这里的序号是支线自己的 · /sub 收起`;
 }
 
 function Row({ row, expanded }) {
@@ -305,6 +324,50 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       })();
       return;
     }
+    if (name === 'sub') {
+      void (async () => {
+        if (argument === '') {
+          setDetail(null);
+          return;
+        }
+        const parent = await client.request('session.read', { sessionId }).catch((error) => error);
+        if (parent.code !== undefined) {
+          push({ kind: 'error', text: `记录读不回来：${parent.code}` });
+          return;
+        }
+        const picked = findRecord(parent.events, argument);
+        if (picked.code !== undefined) {
+          push({ kind: 'error', text: '/sub 后面要一个记录序号（父记录里那条 subagent 结果的序号）' });
+          return;
+        }
+        if (picked.record === null) {
+          push({ kind: 'error', text: `记录里没有第 ${argument} 条（现有 ${parent.events.length} 条，编号从 0 起）` });
+          return;
+        }
+        const branch = branchOf(picked.record);
+        if (branch.code === 'tui_sub_needs_a_branch') {
+          push({ kind: 'error', text: `第 ${argument} 条不是一次派生执行的结果（要的是 subagent 那一条）` });
+          return;
+        }
+        if (branch.code === 'tui_sub_reference_spilled') {
+          push({ kind: 'error', text: `那一次派生的结果内容溢出在 ${branch.spilled ?? '文件里'}，记录里没有支线 id` });
+          return;
+        }
+        // 支线那份走的是同一次读记录的动作：它不在这轮的内核里，但它是同一目录下的另一份会话记录（D74）。
+        const read = await client.request('session.read', { sessionId: branch.sessionId }).catch((error) => error);
+        if (read.code !== undefined) {
+          push({ kind: 'error', text: `支线记录读不回来：${read.code}` });
+          return;
+        }
+        setDetail({
+          seq: picked.record.seq,
+          kind: 'subagent',
+          branch: branch.sessionId,
+          rows: read.events.flatMap((event) => projectRecord(event)),
+        });
+      })();
+      return;
+    }
     if (name === 'help') {
       push({ kind: 'meta', text: COMMANDS.map((command) => `${command.usage} —— ${command.text}`).join('\n') });
       return;
@@ -394,7 +457,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       ask.reason === '' ? null : h(Text, { dimColor: true }, ask.reason),
       h(Text, null, '按 y 允许一次，按 n 不允许')),
     detail === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'cyan', paddingX: 1 },
-      h(Text, { dimColor: true }, `记录 ${detail.seq}（${detail.kind}）的完整内容 · /show 收起`),
+      h(Text, { dimColor: true }, detailTitle(detail)),
       detail.rows.length === 0
         ? h(Text, { dimColor: true }, '这一条没有可画的内容')
         : detail.rows.map((row, index) => h(Row, { key: index, row, expanded: true }))),

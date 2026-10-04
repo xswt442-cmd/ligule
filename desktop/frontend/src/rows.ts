@@ -12,6 +12,8 @@ export type Record_ = {
   toolCalls?: ToolCall[];
   tool?: string;
   callId?: string;
+  // 工具那一条记录留着交进去的参数（`src/kernel/kernel.js` 的 call），派生支线那一格要说得出交的是哪件事。
+  args?: Record<string, unknown>;
   result?: { kind?: string; failed?: boolean; code?: string; reason?: string; content?: unknown };
 };
 

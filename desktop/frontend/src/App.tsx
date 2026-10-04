@@ -19,6 +19,7 @@ export type Status = {
 type Session = { id: string; label: string };
 type Ask = { id: string; tool: string; detail: string; reason: string; backend: string };
 type Verbosity = 'brief' | 'standard' | 'detailed' | 'full';
+type Branch = { seq: number; id: string; task: string };
 
 type PanelProps = {
   client: Client;
@@ -34,7 +35,7 @@ const VERBOSITY_KEY = 'ligule.verbosity';
 const code = (error: unknown): string => (error as { code?: string; message?: string }).code
   ?? (error as { message?: string }).message ?? String(error);
 
-// 已经接上的三项。
+// 已经接上的四项。
 const menuPanels: Panel<PanelProps>[] = [
   {
     id: 'panel.status',
@@ -69,6 +70,11 @@ const menuPanels: Panel<PanelProps>[] = [
       </ul>
       <p className="stub">载体是标准输入输出两根管道，本机没有监听端口（D30）；界面拿不到地址与凭据。</p>
     </>,
+  },
+  {
+    id: 'panel.branch',
+    title: '派生支线',
+    view: ({ client, sessionId }) => <BranchPanel client={client} sessionId={sessionId} />,
   },
 ];
 
@@ -117,6 +123,65 @@ const statusPanels: Panel<PanelProps>[] = [
     </>,
   },
 ];
+
+// 派生支线（D74）：入口作为一个面板挂进类型化槽位，渲染主干不写支线这件事。
+// 支线 id 读自父记录那条 subagent 结果，读它用的还是那一次读记录的动作——协议表里没为支线加方法。
+function branchOf(record: Record_): Branch | null {
+  if (record.kind !== 'tool' || record.tool !== 'subagent') return null;
+  const content = record.result?.content as { sessionId?: unknown } | undefined;
+  if (typeof content?.sessionId !== 'string' || content.sessionId === '') return null;
+  return { seq: record.seq ?? 0, id: content.sessionId, task: String(record.args?.task ?? '') };
+}
+
+function BranchPanel({ client, sessionId }: { client: Client; sessionId: string | null }) {
+  const [branches, setBranches] = useState<Branch[]>([]);
+  const [shown, setShown] = useState<{ id: string; rows: Row[] } | null>(null);
+  const [note, setNote] = useState('');
+
+  useEffect(() => {
+    setBranches([]);
+    setShown(null);
+    setNote('');
+    if (sessionId === null) return;
+    // 每次打开面板重扫一遍父记录：派生体跑完才有那条结果，第一版不做实时流（D74）。
+    void (async () => {
+      try {
+        const { events } = await client.call('session.read', { sessionId }) as { events: Record_[] };
+        setBranches(events.map(branchOf).filter((item): item is Branch => item !== null));
+      } catch (error) {
+        setNote(`父记录读不回来：${code(error)}`);
+      }
+    })();
+  }, [client, sessionId]);
+
+  const open = useCallback(async (id: string) => {
+    setNote('');
+    try {
+      const { events } = await client.call('session.read', { sessionId: id }) as { events: Record_[] };
+      setShown({ id, rows: events.flatMap((record) => projectRecord(record)) });
+    } catch (error) {
+      setNote(`支线读不回来：${code(error)}`);
+    }
+  }, [client]);
+
+  if (branches.length === 0) {
+    return <p className="stub">{note === '' ? '这一份会话还没有派生支线。模型调用 subagent 之后，那条结果里就带着支线的会话 id。' : note}</p>;
+  }
+  return <>
+    <h3>主线里的 {branches.length} 次派生</h3>
+    <ul>{branches.map((branch) => <li key={branch.id}>
+      <button type="button" onClick={() => void open(branch.id)}>第 {branch.seq} 条</button>
+      <span className="muted"> {branch.task === '' ? '（没有留下任务文本）' : branch.task.slice(0, 60)}</span>
+    </li>)}</ul>
+    {shown !== null && <>
+      <h3>支线 {shown.id} · 下面这些序号属于支线自己</h3>
+      <div className="conversation" data-verbosity="standard">
+        {shown.rows.map((row) => <RowView key={row.id} row={row} />)}
+      </div>
+    </>}
+    {note !== '' && <p className="stub">{note}</p>}
+  </>;
+}
 
 function RowView({ row }: { row: Row }) {
   if (row.kind === 'question') {

@@ -12,7 +12,7 @@ try {
 }
 
 const options = { skip: missing === '' ? false : missing };
-const { foldText, parseInput, editDraft, projectRecord, buildStatusLine, findRecord } = rows;
+const { foldText, parseInput, editDraft, projectRecord, buildStatusLine, findRecord, branchOf, detailTitle, COMMANDS } = rows;
 
 test('a record becomes the rows the terminal shows, one line each', options, () => {
   assert.deepEqual(projectRecord({ kind: 'user', text: '读一下' }), [{ kind: 'question', text: '读一下' }]);
@@ -147,6 +147,23 @@ test('/show takes the number from the record, not the row on screen', options, (
   assert.equal(findRecord(events, 'third').code, 'tui_show_needs_a_number');
   assert.equal(findRecord(events, '-1').code, 'tui_show_needs_a_number');
   assert.equal(findRecord(events, '7').record, null);
+});
+
+// 支线入口用的序号就是父记录里那条派生结果的序号，而支线 id 从那条结果的内容里读（D71、D74）。
+test('/sub reads the branch reference out of the delegation result', options, () => {
+  assert.ok(COMMANDS.some((command) => command.name === 'sub'), 'the command is listed in help');
+  const branch = { kind: 'tool', tool: 'subagent', result: { failed: false, content: { sessionId: 'parent.sub-1', text: 'done' } } };
+  assert.deepEqual(branchOf({ seq: 4, ...branch }), { sessionId: 'parent.sub-1' });
+  assert.equal(branchOf({ seq: 4, kind: 'tool', tool: 'read', result: { content: { sessionId: 'x' } } }).code, 'tui_sub_needs_a_branch');
+  assert.equal(branchOf({ seq: 4, kind: 'user', text: 'hi' }).code, 'tui_sub_needs_a_branch');
+  // 结果内容超过注入上限时整段溢出到文件（I6），那一条记录里就没有 sessionId 这一格了。
+  const spilled = { seq: 4, kind: 'tool', tool: 'subagent', result: { failed: false, content: 'a truncated string', spilled: 'result-1.json' } };
+  assert.deepEqual(branchOf(spilled), { code: 'tui_sub_reference_spilled', spilled: 'result-1.json' });
+
+  // 那一格的标题先说清在哪条线上：主干与支线各有一套序号；收起那一句跟着命令名走。
+  assert.equal(detailTitle({ seq: 3, kind: 'assistant' }), '记录 3（assistant）的完整内容 · /show 收起');
+  assert.match(detailTitle({ seq: 4, kind: 'subagent', branch: 'parent.sub-1' }), /^支线 parent\.sub-1，父记录第 4 那一次派生/);
+  assert.match(detailTitle({ seq: 4, kind: 'subagent', branch: 'parent.sub-1' }), /支线自己的 · \/sub 收起$/);
 });
 
 // 审批框上要看得见答的是哪一种语法、跑起来会是哪一个可执行文件（D59）：同一条文本在两种后端下的结论可以相反。
