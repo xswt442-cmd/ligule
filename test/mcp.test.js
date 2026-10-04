@@ -2,12 +2,12 @@
 // 协议层用的是官方 SDK，服务器用的是官方那个文件系统参考服务器；摘要与陈旧那两条读的是我们自己那一段逻辑。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import {
-  createConfig, createDecisionChain, createKernel, createMcpPlugin, createMcpRegistry, createMcpTools, loadAssembly,
+  createConfig, createConnection, createDecisionChain, createKernel, createMcpPlugin, createMcpRegistry, createMcpTools, createMemoryConnectionPair, loadAssembly, MESSAGES_CAPABILITIES, serveHost,
   mcpServerConfigs, validateToolArguments,
 } from '../dist/index.js';
 
@@ -214,4 +214,32 @@ test('a mode can neither select nor hide the two MCP tools', async () => {
   assert.deepEqual(kernel.selectable(), [], '登记了但不在模式能挑的范围里');
   const chain = createDecisionChain({ mode: 'auto' });
   assert.deepEqual(chain.evaluate === undefined, false);
+});
+
+// Host 那一条接线：配置里有一台服务器就在会话里多出那两件固定工具，没配就一件都不加。
+// 注册表是惰性连接的，所以这一条不会起子进程。
+test('the host wires the two tools from the config, and not when there is no server', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-mcp-host-'));
+  const withServer = createConfig({
+    user: {
+      boundary: root,
+      model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'm' },
+      policy: { mode: 'ask' },
+      mcp: { servers: { fs: { command: process.execPath, args: [serverEntry, root] } } },
+    },
+  });
+  const provider = { capabilities: MESSAGES_CAPABILITIES, model: 'm', async *stream() { yield { type: 'text', text: 'ok' }; } };
+  const pair = createMemoryConnectionPair();
+  const host = serveHost({ input: pair.host.input, output: pair.host.output, config: withServer, provider, policy: withServer.policy });
+  const connection = createConnection(pair.client);
+  try {
+    const { sessionId } = await connection.request('session.create', {});
+    const status = await connection.request('status.get', { sessionId });
+    assert.deepEqual(status.tools.filter((name) => name.startsWith('mcp.')), ['mcp.call', 'mcp.inspect']);
+    assert.equal(status.tools.includes('read'), true, 'the rest of the registry is untouched');
+  } finally {
+    pair.client.output.end();
+    host.release();
+    await rm(root, { recursive: true, force: true });
+  }
 });
