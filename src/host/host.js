@@ -7,10 +7,12 @@ import { join } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import { createKernel } from '../kernel/kernel.js';
 import { loadAssembly } from '../kernel/assembly.js';
+import { loadExtensions } from '../kernel/extensions.js';
 import { applyMode, loadMode } from '../kernel/modes.js';
 import { createDecisionChain } from '../kernel/policy.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { createSessionLog } from '../session/session.js';
+import { limitsOf } from '../capability/limits.js';
 import { loadInstructions, DEFAULT_INSTRUCTION_BYTES } from '../capability/instructions.js';
 import { SKILL_METADATA_BUDGET_BYTES, discoverSkills, formatSkillCatalog, skillDirectories } from '../kernel/skills.js';
 import { discoverTemplates, expandTemplate, findTemplate, parseInvocation, templateDirectories } from '../kernel/templates.js';
@@ -110,7 +112,9 @@ function observedSession(session, onEvent) {
 }
 
 // modeName 与 modePaths 是一对：给了名字就要能给那三层目录，运行中换模式要用同一套查找（D41、D44）。
-export function createHost({ config, provider, plugins = [minimalPlugin, networkPlugin], policy, logger, modeName, modePaths, skillRegistry, templateRegistry }) {
+// 扩展来源由装载侧算好交进来（D68：项目层与本地层里写的路径不算）：paths 是要加载的文件，
+// ignored 是那些被这条规则挡掉的路径，它们进日志而不是静默消失。
+export function createHost({ config, provider, plugins = [minimalPlugin, networkPlugin], policy, logger, modeName, modePaths, skillRegistry, templateRegistry, extensions = { paths: [], ignored: [] } }) {
   if (!Object.isFrozen(config)) throw new KernelError('host_config_must_be_frozen');
   // 边界是工具读写的位置，也是指令文件上溯的止点，两边都读它，缺一处就说缺一处。
   if (typeof config.boundary !== 'string' || config.boundary === '') throw new KernelError('host_boundary_required');
@@ -130,10 +134,13 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
   // 取消落在审批还没答复的时候要把这个问题收掉：答复不会再来了，而判定链在这里抛出，
   // 那一次调用就在记录里没人回答，之后每一轮都拼不出合法请求体（D11）。
   async function build(id, connection) {
+    // 扩展收事件的那一条通道（D37）：刚落盘的这一条同时送给客户端与扩展，两边读的是同一份事实（I5）。
+    const listeners = [];
     const session = observedSession(createSessionLog({ directory, id }), (event) => {
       connection.notify({ notify: 'event', sessionId: id, event });
+      for (const listener of listeners) listener(event);
     });
-    const state = { id, session, asks: new Set(), running: undefined, mode: { file: undefined, tools: [], undo: () => {} }, pending: undefined };
+    const state = { id, session, listeners, asks: new Set(), running: undefined, mode: { file: undefined, tools: [], undo: () => {} }, pending: undefined };
     const chain = createDecisionChain({
       ...policy,
       ask: async ({ tool, input, command, reason, shell, executable }) => {
@@ -178,24 +185,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       logger?.log?.('prompt template is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
     }
     const assembly = loadAssembly(kernel, loaded);
-    // 应用一份模式：先撤销上一次自己那一项收紧，再按新清单收紧，再把交给模型的那一栏留在记录里。
-    // 记录里这一条是给「两条用户输入之间各自用的是哪一份清单」用的（I2、I5）；
-    // 收紧只减不加，被藏起来的那几件仍然留在登记表里（I4）。
-    state.adopt = async (file) => {
-      state.mode.undo();
-      const applied = applyMode(kernel, file);
-      const tools = kernel.manifest().map((entry) => entry.name);
-      Object.assign(state.mode, { file, tools, undo: applied.undo });
-      // 同一份清单不重复记：重新attach 到一份已有记录上不写东西（客户端接上来读不该改动事实源）。
-      // 名字、来源或那一栏工具变了才记一条，让「这一条输入用的是哪一份」在记录里读得出来（I5）。
-      const last = (await session.read()).filter((event) => event.kind === 'mode').at(-1);
-      if (last === undefined || last.name !== file.name || last.layer !== file.layer || last.tools.join(' ') !== tools.join(' ')) {
-        await session.append({ kind: 'mode', name: file.name, layer: file.layer, path: file.path, tools });
-      }
-    };
-    // 模式选中的那一栏工具在装载之后收紧（D35、D44）：清单里写了本次没登记的名字会在这里失败，
-    // 而不是静默少一件。
-    if (modeName !== undefined) await state.adopt(await loadMode(modeName, modePaths));
+    // 提示词的组装器先建好：扩展登记的那几段要进这一份，模式 `prompt` 那一格挑的也就是这几段（D35、D46）。
     const prompt = createPromptAssembly({ static: config.prompt?.static ?? '' });
     // 项目指令文件那四层是装载侧交给提示词的一段（D10、第 9.5 步留下的那一半）：
     // 装载器自己的预算算在完整文本上，片段登记时按同一个数，两处不会各截一次。
@@ -207,6 +197,82 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     if (skills.skills.length > 0) {
       prompt.fragment({ name: 'skills', anchor: 1, text: formatSkillCatalog(skills), maxBytes: SKILL_METADATA_BUDGET_BYTES });
     }
+    // 扩展的装载（D37、D68）：来源由装载侧算好交进来，这一处只管按次序 import、递出窄接口、留下反注册动作。
+    // 窄接口只有那四件——注册工具、注册提示词片段、收事件、请求一次能力操作。这就是契约承诺的暴露面；
+    // 它不是限制：进程内的模块技术上能做 Node 能做任何事，所以判定链、路径边界与参数校验对每一次调用照常生效（D37）。
+    const fragments = [];
+    for (const diagnostic of extensions.ignored) {
+      logger?.log?.('extension source is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
+    }
+    const installedExtensions = await loadExtensions(extensions.paths, {
+      config,
+      registerTool: (tool) => kernel.register(tool),
+      registerFragment: (fragment) => {
+        // 两个扩展抢同一个片段名会让「这一格选了谁」读不出来：报出去，让后装的那一件自己改名字。
+        if (fragments.some((entry) => entry.name === fragment.name)) throw new KernelError('extension_fragment_duplicate', { detail: fragment.name });
+        fragments.push(fragment);
+        return () => {
+          const index = fragments.indexOf(fragment);
+          if (index >= 0) fragments.splice(index, 1);
+        };
+      },
+      addEventListener: (handler) => {
+        state.listeners.push(handler);
+        return () => {
+          const index = state.listeners.indexOf(handler);
+          if (index >= 0) state.listeners.splice(index, 1);
+        };
+      },
+      // 请求一次能力操作走的就是内核那一条 call：判定链、会话记录与参数校验一件都少不了（D37、D11）。
+      request: (tool, args) => kernel.call(tool, args),
+    });
+    for (const diagnostic of installedExtensions.diagnostics) {
+      // 一件坏扩展不带走整次运行：它自己的登记全撤掉，别一条诊断，装载继续（D37 的承诺只到暴露面为止）。
+      logger?.log?.('extension is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
+    }
+    // 应用一份模式：先按新清单挑出提示词片段，再撤销上一次那一项收紧，然后装上新的片段。
+    // 挑片段放在撤销之前：那一格写错了名字时不该留下「旧的已撤、新的没上」这一中间状态。
+    // 记录里这一条是给「两条用户输入之间各自用的是哪一份清单」用的（I2、I5）；
+    // 收紧只减不加，被藏起来的那几件仍然留在登记表里（I4）。
+    state.adopt = async (file) => {
+      const selected = file.prompt === '*'
+        ? [...fragments]
+        : file.prompt.map((name) => {
+            const found = fragments.find((entry) => entry.name === name);
+            if (found === undefined) {
+              throw new KernelError('mode_prompt_unavailable', {
+                detail: `${name} (mode ${file.name}; registered: ${fragments.map((entry) => entry.name).join(', ') || 'none'})`,
+              });
+            }
+            return found;
+          });
+      state.mode.undo();
+      const applied = applyMode(kernel, file);
+      const fragmentUndo = selected.map((fragment, index) => prompt.fragment({
+        name: `extension:${fragment.name}`,
+        anchor: 2 + index,
+        text: fragment.text,
+        maxBytes: limitsOf(config).promptFragmentBytes,
+      }));
+      const tools = kernel.manifest().map((entry) => entry.name);
+      Object.assign(state.mode, {
+        file,
+        tools,
+        undo: () => {
+          for (const remove of fragmentUndo.slice().reverse()) remove();
+          applied.undo();
+        },
+      });
+      // 同一份清单不重复记：重新attach 到一份已有记录上不写东西（客户端接上来读不该改动事实源）。
+      // 名字、来源或那一栏工具变了才记一条，让「这一条输入用的是哪一份」在记录里读得出来（I5）。
+      const last = (await session.read()).filter((event) => event.kind === 'mode').at(-1);
+      if (last === undefined || last.name !== file.name || last.layer !== file.layer || last.tools.join(' ') !== tools.join(' ')) {
+        await session.append({ kind: 'mode', name: file.name, layer: file.layer, path: file.path, tools });
+      }
+    };
+    // 模式选中的那一栏工具与那几段片段在装载之后才生效（D35、D44）：清单里写了本次没有登记的名字会在这里失败，
+    // 而不是静默少一件。
+    if (modeName !== undefined) await state.adopt(await loadMode(modeName, modePaths));
     const loop = createLoop({
       kernel,
       provider: observedProvider(provider, (event) => connection.notify({ notify: 'delta', sessionId: id, event })),
@@ -215,7 +281,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       limits: loopLimitsOf(config),
     });
     // 一份会话一份状态，审批的等待与正在跑的那一轮都记在这里。
-    return Object.assign(state, { chain, kernel, assembly, loop, templates });
+    return Object.assign(state, { chain, kernel, assembly, extensions: installedExtensions, loop, templates });
   }
 
   return {
@@ -336,7 +402,11 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       for (const state of sessions.values()) {
         if (state.running !== undefined) state.running.abort();
       }
-      for (const state of sessions.values()) state.assembly.dispose();
+      // 后装的先撤：扩展在插件之后登记，撤的顺序反过来，两边都不留半截。
+      for (const state of sessions.values()) {
+        state.extensions.dispose();
+        state.assembly.dispose();
+      }
       sessions.clear();
     },
   };

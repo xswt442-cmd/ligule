@@ -10,6 +10,7 @@ import { loadConfigLayers } from './kernel/config-file.js';
 import { createKernel } from './kernel/kernel.js';
 import { loadAssembly } from './kernel/assembly.js';
 import { DEFAULT_MODE, modeDirectories } from './kernel/modes.js';
+import { extensionSources } from './kernel/extensions.js';
 import { discoverSkills, skillDirectories } from './kernel/skills.js';
 import { minimalPlugin } from './tools/minimal.js';
 import { networkPlugin } from './tools/network.js';
@@ -47,7 +48,10 @@ const [command, ...rest] = positional;
 async function configSnapshot() {
   const layers = await loadConfigLayers({ projectRoot: process.cwd(), flags });
   // 边界兜底取当前工作目录：命令行在哪里跑，工具就能在哪里读写。任何一层配置都盖得过它。
-  return createConfig({ ...layers, user: { boundary: process.cwd(), ...layers.user } });
+  const user = { boundary: process.cwd(), ...layers.user };
+  // 扩展的来源在同一次装载里算出来（D68）：项目层与本地层里写的路径不算，那一条挡住的判断在这里看得见。
+  const extensions = await extensionSources({ ...layers, user }, { projectRoot: process.cwd() });
+  return { config: createConfig({ ...layers, user }), extensions };
 }
 
 // 模式名按 D44：`--mode` 覆盖一次运行，否则读配置里的 `mode`，两处都没写就是随包的 minimal。
@@ -57,7 +61,8 @@ function resolveMode(config) {
 }
 
 async function installedKernel() {
-  const kernel = createKernel({ config: await configSnapshot() });
+  const { config } = await configSnapshot();
+  const kernel = createKernel({ config });
   loadAssembly(kernel, [minimalPlugin, networkPlugin]);
   return kernel;
 }
@@ -141,8 +146,8 @@ function terminalApprovals() {
   };
 }
 
-async function runOneRound(config, selection, text) {
-  const host = createHost({ config, provider: providerFromConfig(config), policy: config.policy, ...selection });
+async function runOneRound(config, selection, extensions, text) {
+  const host = createHost({ config, provider: providerFromConfig(config), policy: config.policy, extensions, ...selection });
   const approvals = terminalApprovals();
   const connection = {
     notify: printNotification,
@@ -175,6 +180,20 @@ if (missingFlagValue) {
   // 默认运行装的就是那份显式的最小清单（D3）。
   const kernel = await kernelOrFail();
   if (kernel) for (const name of kernel.list()) console.log(name);
+} else if (command === 'extensions') {
+  // 与 `ligule skills` 同一类只读排错入口（D64）：说清这一具机器会加载哪几个文件、哪些路径被 D68 那条规则挡掉，
+  // 不 import 任何一份扩展——一条诊断命令不该执行别人的代码。
+  try {
+    const { extensions } = await configSnapshot();
+    for (const path of extensions.paths) console.log(path);
+    if (extensions.paths.length === 0) {
+      console.log('no extensions loaded');
+      console.log(`  looked in ${extensions.installedDirectory}`);
+    }
+    for (const diagnostic of extensions.ignored) console.error(`${diagnostic.code}\t${diagnostic.path}\t${diagnostic.detail}`);
+  } catch (error) {
+    printFailure(error.code ?? 'cli_extensions_failed', error.detail);
+  }
 } else if (command === 'skills') {
   // 只读的诊断入口：装载侧扫一遍那四个目录，把载入的与被丢下的都说出来，不起内核也不读模型配置。
   // 客户端协议不为这件事扩，日志留完整记录，提示词里只带一个计数（D64）。
@@ -224,8 +243,8 @@ if (missingFlagValue) {
     printFailure('cli_run_needs_the_user_text', 'run takes the user message, e.g. ligule run "read the note"');
   } else {
     try {
-      const config = await configSnapshot();
-      await runOneRound(config, resolveMode(config), text);
+      const { config, extensions } = await configSnapshot();
+      await runOneRound(config, resolveMode(config), extensions, text);
     } catch (error) {
       printFailure(error.code ?? 'cli_run_failed', error.detail);
     }
@@ -233,8 +252,8 @@ if (missingFlagValue) {
 } else if (command === 'host') {
   // 桌面壳或者脚本起这一个进程，两端各读写一行 JSON（D30）：本机不开端口，审批与事件都走这条连接。
   try {
-    const config = await configSnapshot();
-    serveHost({ config, provider: providerFromConfig(config), policy: config.policy, ...resolveMode(config) });
+    const { config, extensions } = await configSnapshot();
+    serveHost({ config, provider: providerFromConfig(config), policy: config.policy, extensions, ...resolveMode(config) });
   } catch (error) {
     printFailure(error.code ?? 'cli_host_failed', error.detail);
   }
@@ -245,12 +264,12 @@ if (missingFlagValue) {
     printFailure('tui_terminal_required', 'the terminal UI needs an interactive terminal; use ligule run from a script');
   } else {
     try {
-      const config = await configSnapshot();
+      const { config, extensions } = await configSnapshot();
       // React 与 Ink 在第一次被加载时按 NODE_ENV 选构建，所以这一行要在动态导入之前。
       // 开发版把界面拖贵了一倍：两千条记录的转录下提交一行是 2.6 毫秒对 1.4 毫秒，进程常驻 155 MiB 对 114 MiB。
       process.env.NODE_ENV = 'production';
       const { runTui } = await import('./tui/start.js');
-      await runTui({ config, provider: providerFromConfig(config), policy: config.policy, ...resolveMode(config) });
+      await runTui({ config, provider: providerFromConfig(config), policy: config.policy, extensions, ...resolveMode(config) });
     } catch (error) {
       const missing = error.code === 'ERR_MODULE_NOT_FOUND' && /Cannot find package '(ink|react)'/.test(String(error.message));
       printFailure(missing ? 'tui_dependency_missing' : error.code ?? 'cli_tui_failed',

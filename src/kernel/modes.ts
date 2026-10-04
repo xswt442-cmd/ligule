@@ -126,11 +126,10 @@ export async function loadMode(name: string, directories: ModeDirectories): Prom
     if (fields[key] === undefined) throw new KernelError('mode_field_missing', { detail: `${key} (required by every mode): ${file.path}` });
   }
   const tools = readNames(fields.tools, 'tools', file.path, true);
+  // `prompt` 这一格挑的是扩展登记进来的提示词片段（D35 留下的那一格，第 29 步之后才有可选的值）：
+  // 装载这一处只解析与校验形状，「哪一个名字在本次登记里没有」要等扩展装完才知道，那一问在 Host 的 adopt 里报
+  // `mode_prompt_unavailable`。
   const prompt = readNames(fields.prompt, 'prompt', file.path, true);
-  // 空数组是「这一格不选」，写进文件里看得见；非空而装载还不接就是错。
-  if (prompt !== '*' && prompt.length > 0) {
-    throw new KernelError('mode_field_unsupported', { detail: `prompt is not selected by the loader yet (it lands with the fragment registry): ${file.path}` });
-  }
   return { name, layer: file.layer, path: file.path, tools, prompt };
 }
 

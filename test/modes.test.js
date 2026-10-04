@@ -111,13 +111,15 @@ test('the project layer wins whole, and its file still cannot name what the load
   });
 });
 
-// prompt 这一格这一轮只解析校验：写了内容而装载还不接，当场失败而不是悄悄忽略（第 29 步的片段注册表把它接上）。
-test('fields the loader does not act on yet refuse a non-empty value', async () => {
+// prompt 这一格挑的是扩展登记进来的片段（D35 留下的那一格，第 29 步接上）：装载这一处只解析名字。
+test('the prompt field keeps the names it was written with, selection happens at load', async () => {
   await withLayout(async ({ directories }) => {
-    await writeMode(directories, 'user', 'later', 'tools = ["read"]\nprompt = ["notes"]\n');
-    const error = await loadMode('later', directories).catch((failure) => failure);
-    assert.equal(error.code, 'mode_field_unsupported');
-    assert.match(error.detail, /prompt/);
+    await writeMode(directories, 'user', 'review', 'tools = ["read"]\nprompt = ["notes"]\n');
+    const mode = await loadMode('review', directories);
+    assert.deepEqual(mode.prompt, ['notes']);
+    // 哪一个名字在本次登记的片段里没有，要等扩展装完才知道，那一问由 Host 报 `mode_prompt_unavailable`。
+    await writeMode(directories, 'user', 'wide', 'tools = ["read"]\nprompt = "*"\n');
+    assert.equal((await loadMode('wide', directories)).prompt, '*');
   });
 });
 
