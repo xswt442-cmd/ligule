@@ -17,8 +17,11 @@ export function createSessionLog({ directory, id, meta }) {
   if (typeof id !== 'string' || id === '') throw new KernelError('session_id_required');
   const path = join(directory, `${id}.jsonl`);
   let nextSeq = 0;
-  // 首行只在新建的那一份里写；接上已有记录时它的版本与序号都从文件里读出来。
-  let tailChecked = false;
+  // 首行只在该写的那一次写：读一遍与写一条都要先知道文件末尾是什么样（D73）。
+  // 这里记住两件事——最后一个序号，以及这份文件是不是还空着（没首行也没事件）。
+  // 只用一次「先读后写」的顺序就把 needsHeader 关掉是错的：宿主打开一份会话时总是先读一遍记录。
+  let probed = false;
+  let needsHeader = false;
 
   async function loadEvents() {
     let bytes;
@@ -44,17 +47,19 @@ export function createSessionLog({ directory, id, meta }) {
     return parseSessionEvents(objects);
   }
 
-  // 第一次动这一份文件之前先看清它的尾部：序号要接在最后一条之后，否则一次恢复后的第一条会与已有的一条同号（D73）。
-  async function checkTail() {
-    if (tailChecked) return;
+  // 第一次动这一份文件之前先看清它的尾部：序号要接在最后一条之后，否则一次恢复后的第一条会与已有的一条同号；
+  // 一份空文件（没有首行也没有事件）才是新建，那种才写首行（D73）。
+  async function probe() {
+    if (probed) return needsHeader;
     const { events, header } = await loadEvents();
     nextSeq = events.length > 0 ? events[events.length - 1].seq + 1 : 0;
-    tailChecked = true;
-    return header === undefined && events.length === 0;
+    needsHeader = header === undefined && events.length === 0;
+    probed = true;
+    return needsHeader;
   }
 
   async function appendOnce(event) {
-    const writeHeader = await checkTail();
+    const writeHeader = await probe();
     const written = { seq: nextSeq, ...event };
     const lines = [];
     if (writeHeader) {
@@ -63,6 +68,8 @@ export function createSessionLog({ directory, id, meta }) {
         ...(typeof meta === 'function' ? meta() ?? {} : meta ?? {}),
         createdAt: new Date().toISOString(),
       })));
+      // 首行占了文件的第一行，但它不占事件的序号：下一条事件仍然从 0 号数起。
+      needsHeader = false;
     }
     lines.push(JSON.stringify(written));
     const line = `${lines.join('\n')}\n`;
@@ -117,10 +124,12 @@ export function createSessionLog({ directory, id, meta }) {
   }
 
   // 读回全部事件。首行那份会话元信息不算事件，它由 header() 单独交出去（D73）。
+  // 读也顺手刷新那两个记号：先读后写是宿主的常态（模式去重要先读一遍），不能让一次读把该写的首行挡掉。
   async function readOnce() {
-    const { events } = await loadEvents();
+    const { events, header } = await loadEvents();
     nextSeq = events.length > 0 ? events[events.length - 1].seq + 1 : 0;
-    tailChecked = true;
+    probed = true;
+    needsHeader = header === undefined && events.length === 0;
     return events;
   }
 

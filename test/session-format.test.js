@@ -50,7 +50,19 @@ test('a record that never picked a mode says so by leaving the field out', async
   });
 });
 
-// 现存记录没有首行：按版本 0 读，读出来还是原来那几条，序号接着最后一条往后走。
+// 宿主打开一份会话时总要先读一遍（模式那条去重要看记录里最后一条），这一次读不该把该写的首行挡掉（D73）。
+test('a record read before its first write still gets its first line', async () => {
+  await withDirectory(async (directory) => {
+    const session = createSessionLog({ directory, id: 'read-first', meta: { projectRoot: '/repo' } });
+    assert.deepEqual(await session.read(), [], '读一份还不存在的记录不是错误');
+    await session.append({ kind: 'user', text: 'go' });
+    const lines = (await readFile(session.path, 'utf8')).trim().split('\n').map(JSON.parse);
+    assert.equal(lines[0].kind, 'session');
+    assert.equal(lines[1].seq, 0, '首行不占事件的序号');
+  });
+});
+
+// 没有首行的现存记录按版本 0 读，读出来还是原来那几条，序号接着最后一条往后走。
 test('a record written before the first line existed still reads and continues', async () => {
   await withDirectory(async (directory) => {
     const path = join(directory, 'legacy.jsonl');

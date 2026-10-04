@@ -141,8 +141,12 @@ test('a client over stdio drives one round, answers one approval and watches the
     assert.equal(events.find((event) => event.kind === 'tool').result.content.text, 'the body', 'the tool result the client saw is the file content');
 
     // 客户端看见的那一条与记录里落盘的那一条同源，序号也在通知里带回来了。
-    const recorded = (await readFile(join(directory, '.ligule', 'sessions', `${sessionId}.jsonl`), 'utf8'))
+    const lines = (await readFile(join(directory, '.ligule', 'sessions', `${sessionId}.jsonl`), 'utf8'))
       .trim().split('\n').map((line) => JSON.parse(line));
+    // 首行是会话元信息，不是一条事件；宿主先读一遍（模式去重）也该把它写出来（D73）。
+    assert.equal(lines[0].kind, 'session');
+    assert.equal(lines[0].sessionId, sessionId);
+    const recorded = lines.slice(1);
     assert.deepEqual(recorded.map((event) => event.seq), events.map((event) => event.seq));
 
     const status = await host.client.request('status.get', { sessionId });
