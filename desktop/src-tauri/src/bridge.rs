@@ -6,8 +6,8 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Mutex;
 
-/// 找后端入口，按这三步：环境变量指的那一份 → 随包带的那一份（安装包里的 `app/src/cli.js`，D34）
-/// → 从可执行文件所在目录往上找 `src/cli.js`（开发时的目录层级）。
+/// 找后端入口，按这三步：环境变量指的那一份 → 随包带的那一份（安装包里的 `app/dist/cli.js`，D34）
+/// → 从可执行文件所在目录往上找 `dist/cli.js`（开发时的目录层级，构建之后才有）。
 /// 找不到的情形要说清楚找过哪几处：开发时目录层级一改就找不到后端，报一句「找不到」查不出来。
 pub fn resolve_cli_script(
     exe_dir: &Path,
@@ -27,7 +27,7 @@ pub fn resolve_cli_script(
 
     let mut tried = Vec::new();
     if let Some(directory) = resource_dir {
-        let candidate = directory.join("app").join("src").join("cli.js");
+        let candidate = directory.join("app").join("dist").join("cli.js");
         tried.push(candidate.display().to_string());
         if candidate.is_file() {
             return Ok(candidate);
@@ -41,7 +41,7 @@ pub fn resolve_cli_script(
             Some(path) => path,
             None => break,
         };
-        let candidate = current.join("src").join("cli.js");
+        let candidate = current.join("dist").join("cli.js");
         tried.push(candidate.display().to_string());
         if candidate.is_file() {
             return Ok(candidate);
@@ -49,7 +49,7 @@ pub fn resolve_cli_script(
         directory = current.parent().map(|parent| parent.to_path_buf());
     }
     Err(format!(
-        "no src/cli.js found (checked {})",
+        "no dist/cli.js found, run npm run build (checked {})",
         tried.join(", ")
     ))
 }
@@ -187,13 +187,13 @@ mod tests {
             .join("target")
             .join("debug");
         fs::create_dir_all(exe_dir.join("nested")).expect("create the executable directory");
-        fs::create_dir_all(root.join("src")).expect("create src");
-        fs::write(root.join("src").join("cli.js"), "#!/usr/bin/env node\n")
+        fs::create_dir_all(root.join("dist")).expect("create dist");
+        fs::write(root.join("dist").join("cli.js"), "#!/usr/bin/env node\n")
             .expect("write the cli stub");
 
         assert_eq!(
             resolve_cli_script(&exe_dir, None, None).expect("found"),
-            root.join("src").join("cli.js")
+            root.join("dist").join("cli.js")
         );
         let _ = fs::remove_dir_all(&root);
     }
@@ -202,15 +202,15 @@ mod tests {
     fn a_missing_cli_names_the_directories_it_tried() {
         let root = temp_dir("absent");
         let error = resolve_cli_script(&root, None, None).expect_err("nothing to find");
-        assert!(error.contains("src/cli.js"), "{error}");
+        assert!(error.contains("dist/cli.js"), "{error}");
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn an_override_pointing_nowhere_is_refused_instead_of_falling_back() {
         let root = temp_dir("override");
-        fs::create_dir_all(root.join("src")).expect("create src");
-        fs::write(root.join("src").join("cli.js"), "").expect("write a decoy");
+        fs::create_dir_all(root.join("dist")).expect("create dist");
+        fs::write(root.join("dist").join("cli.js"), "").expect("write a decoy");
         let missing = root.join("nowhere.js");
         let error = resolve_cli_script(&root, None, Some(missing.to_str().expect("utf-8 path")))
             .expect_err("refused");
@@ -271,20 +271,20 @@ mod tests {
         let exe_dir = root.join("install");
         let resources = root.join("resources");
         fs::create_dir_all(&exe_dir).expect("create the executable directory");
-        fs::create_dir_all(resources.join("app").join("src")).expect("create the bundled tree");
+        fs::create_dir_all(resources.join("app").join("dist")).expect("create the bundled tree");
         fs::write(
-            resources.join("app").join("src").join("cli.js"),
+            resources.join("app").join("dist").join("cli.js"),
             "// bundled\n",
         )
         .expect("write the bundled entry");
         // 开发时那份仓库也在往上找得到的位置上：随包带的那一份要先，不然装好的应用会去用错处的代码。
-        fs::create_dir_all(root.join("src")).expect("create the development tree");
-        fs::write(root.join("src").join("cli.js"), "// development\n")
+        fs::create_dir_all(root.join("dist")).expect("create the development tree");
+        fs::write(root.join("dist").join("cli.js"), "// development\n")
             .expect("write the development entry");
 
         assert_eq!(
             resolve_cli_script(&exe_dir, Some(&resources), None).expect("found"),
-            resources.join("app").join("src").join("cli.js")
+            resources.join("app").join("dist").join("cli.js")
         );
         let _ = fs::remove_dir_all(&root);
     }

@@ -4,6 +4,22 @@ export { createConfig, LAYER_ORDER } from './kernel/config.js';
 export { loadConfigLayers, flagLayer, configPaths } from './kernel/config-file.js';
 export { createLogger } from './kernel/log.js';
 export { loadAssembly } from './kernel/assembly.js';
+export { loadMode, applyMode, modeDirectories, MODE_DIRECTORY, DEFAULT_MODE } from './kernel/modes.js';
+export { extensionSources, loadExtensions } from './kernel/extensions.js';
+export {
+  discoverSkills, skillDirectories, formatSkillCatalog, searchSkills, readSkillBody, listSkillFiles,
+  SKILL_FILE, SKILLS_DIRECTORY, SKILL_METADATA_BUDGET_BYTES,
+} from './kernel/skills.js';
+export { createSkillTool, createSkillPlugin } from './tools/skill.js';
+export { fetchTool, networkPlugin } from './tools/network.js';
+export { createMcpPlugin, createMcpTools } from './tools/mcp.js';
+export { createSubagentPlugin } from './tools/subagent.js';
+export { createMcpRegistry, mcpServerConfigs, validateToolArguments } from './capability/mcp.js';
+export { classifyAddress, resolveTarget, fetchTarget } from './capability/network.js';
+export {
+  discoverTemplates, templateDirectories, parseInvocation, findTemplate, splitArguments, expandTemplate,
+  PROMPTS_DIRECTORY,
+} from './kernel/templates.js';
 export { minimalTools, minimalPlugin } from './tools/minimal.js';
 export { createSlotRegistry } from './kernel/slots.js';
 export { loadInstructions } from './capability/instructions.js';
@@ -11,6 +27,7 @@ export { isWithin, resolveWithin } from './capability/paths.js';
 export { probeBackend } from './capability/capability.js';
 export { createDecisionChain, DEFAULT_THRESHOLDS } from './kernel/policy.js';
 export { parseCommand } from './capability/command.js';
+export { resolveShell, withNativeExitCode } from './capability/shell.js';
 export { readOnlyTools, readTool, findTool, searchTool } from './tools/read-only.js';
 export { writeTools, createTool, writeTool, editTool, deleteTool } from './tools/write.js';
 export { DEFAULT_LIMITS } from './capability/limits.js';

@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   createConfig, createDecisionChain, createKernel, createSessionLog, execTool, readTool, refusalOf,
-} from '../src/index.js';
+} from '../dist/index.js';
 
 async function withDirectory(run) {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'session-'));

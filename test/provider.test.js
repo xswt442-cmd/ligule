@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import {
   capabilitiesOf, createConfig, createKernel, createLoop, createMessagesProvider, createSessionLog,
   DEFAULT_RETRY, MESSAGES_CAPABILITIES, readTool,
-} from '../src/index.js';
+} from '../dist/index.js';
 
 const API_KEY_ENV = 'LIGULE_TEST_API_KEY';
 const FAST_RETRY = { ...DEFAULT_RETRY, baseDelayMs: 1 };

@@ -7,6 +7,8 @@ export type Record_ = {
   seq?: number;
   kind: string;
   text?: string;
+  // 模板展开过的那一条用户记录另留着人打的那一行（D54）：画的是这一份，交给模型的是 text。
+  raw?: string;
   toolCalls?: ToolCall[];
   tool?: string;
   callId?: string;
@@ -37,7 +39,7 @@ export function metaRow(kind: 'meta' | 'error', text: string): Row {
 }
 
 export function projectRecord(record: Record_): Row[] {
-  if (record.kind === 'user') return [{ id: nextId(), kind: 'question', text: record.text ?? '' }];
+  if (record.kind === 'user') return [{ id: nextId(), kind: 'question', text: record.raw ?? record.text ?? '' }];
   if (record.kind === 'reasoning') return [{ id: nextId(), kind: 'reasoning', text: record.text ?? '' }];
   if (record.kind === 'assistant') {
     const rows: Row[] = record.text === '' || record.text === undefined

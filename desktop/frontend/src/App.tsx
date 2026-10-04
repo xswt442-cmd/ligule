@@ -7,13 +7,17 @@ export type Status = {
   sessionId: string;
   running: boolean;
   tools: string[];
-  mode: string;
+  // 模式名与判定档位是两样东西，字段也分开（D40：界面上 `mode` 这个词不该同时指两处）。
+  mode: string | null;
+  modeLayer: string | null;
+  pendingMode: string | null;
+  policy: string;
   denials: { consecutive: number; total: number };
   eventCount: number;
 };
 
 type Session = { id: string; label: string };
-type Ask = { id: string; tool: string; detail: string; reason: string };
+type Ask = { id: string; tool: string; detail: string; reason: string; backend: string };
 type Verbosity = 'brief' | 'standard' | 'detailed' | 'full';
 
 type PanelProps = {
@@ -38,7 +42,7 @@ const menuPanels: Panel<PanelProps>[] = [
     view: ({ status }) => status === null
       ? <p className="stub">还没有会话，读不到状态。</p>
       : <>
-        <h3>档位 {status.mode} · 工具 {status.tools.length} 件 · 记录 {status.eventCount} 条 · {status.running ? '正在跑' : '空闲'}</h3>
+        <h3>模式 {status.mode ?? '没装'} · 档位 {status.policy} · 工具 {status.tools.length} 件 · 记录 {status.eventCount} 条 · {status.running ? '正在跑' : '空闲'}</h3>
         <p className="stub">判定链记的拒绝：连续 {status.denials.consecutive} 次、累计 {status.denials.total} 次。连续次数到阈值时档位自动回到逐次询问（D17）。</p>
         <ul>{status.tools.map((name) => <li key={name}>{name}</li>)}</ul>
       </>,
@@ -104,7 +108,8 @@ const statusPanels: Panel<PanelProps>[] = [
       {running && <span className="pill" data-tone="running">正在跑</span>}
       {waiting > 0 && <span className="pill" data-tone="running">在等人答复</span>}
       {status !== null && <>
-        <span className="pill">档位 {status.mode}</span>
+        <span className="pill">模式 {status.mode ?? '没装'}</span>
+        <span className="pill">档位 {status.policy}</span>
         <span className="pill">工具 {status.tools.length} 件</span>
         <span className="pill">记录 {status.eventCount} 条</span>
         {status.denials.total > 0 && <span className="pill">不允许 {status.denials.consecutive}/{status.denials.total}</span>}
@@ -192,13 +197,15 @@ export function App({ transport }: { transport: Transport }) {
     client.onRequest((message) => {
       // Host 朝界面发出去的请求只有 approval.request 这一种。
       if (message.method !== 'approval.request') return;
-      const params = message.params as { sessionId?: string; tool?: string; command?: string; args?: unknown; reason?: string };
+      const params = message.params as { sessionId?: string; tool?: string; command?: string; args?: unknown; reason?: string; shell?: string; executable?: string };
       if (params?.sessionId !== active.current) return;
       setAsk({
         id: message.id ?? '',
         tool: params.tool ?? '',
         detail: params.command ?? JSON.stringify(params.args ?? {}, null, 2),
         reason: params.reason ?? '',
+        // 同一条文本在两种语法下能自动放行的面积不一样，答的是哪一种、跑的是哪一个可执行文件要看得见（D59）。
+        backend: params.shell === undefined ? '' : `${params.shell} · ${params.executable ?? ''}`,
       });
     });
 
@@ -363,6 +370,7 @@ export function App({ transport }: { transport: Transport }) {
           <span className="approval-kind">要执行</span>
           <strong>{ask.tool}</strong>
           <code>{ask.detail}</code>
+          {ask.backend !== '' && <span className="approval-backend">{ask.backend}</span>}
         </div>
         {ask.reason !== '' && <p className="approval-reason">{ask.reason}</p>}
         <div className="approval-actions">

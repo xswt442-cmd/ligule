@@ -9,6 +9,16 @@ export const DEFAULT_LIMITS = Object.freeze({
   scanFiles: 5_000,
   execBytes: 32_000,
   trashDirectory: '.ligule-trash',
+  // 技能那三个动作各自的结果上限，数值记在 D55；注入那一层的总量上限（resultBytes）仍然压在这三条之上。
+  skillSearchBytes: 8_000,
+  skillBodyBytes: 24_000,
+  skillFileBytes: 64_000,
+  // 取回一件的三条（D58）：响应字节上限、超时与最多跟几跳。
+  fetchBytes: 64_000,
+  fetchTimeoutMs: 15_000,
+  fetchRedirects: 5,
+  // 扩展登记的一段提示词片段的预算（D69）：与技能元数据那一条同一档，注入那一层的总量上限仍然压在它上面。
+  promptFragmentBytes: 8_000,
 });
 
 // 遍历跳过这些目录：它们的内容不是要找的东西，扫过去只会把上限用光。

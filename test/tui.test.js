@@ -6,13 +6,13 @@ import assert from 'node:assert/strict';
 let rows = {};
 let missing = '';
 try {
-  rows = await import('../src/tui/app.js');
+  rows = await import('../dist/tui/app.js');
 } catch (error) {
   missing = error.code === 'ERR_MODULE_NOT_FOUND' ? 'the terminal UI dependencies are not installed' : error.message;
 }
 
 const options = { skip: missing === '' ? false : missing };
-const { foldText, parseInput, editDraft, projectRecord } = rows;
+const { foldText, parseInput, editDraft, projectRecord, buildStatusLine, findRecord } = rows;
 
 test('a record becomes the rows the terminal shows, one line each', options, () => {
   assert.deepEqual(projectRecord({ kind: 'user', text: '读一下' }), [{ kind: 'question', text: '读一下' }]);
@@ -84,7 +84,7 @@ test('the app paints the session line and the input hint onto the terminal', opt
   const { render } = await import('ink');
   const { PassThrough } = await import('node:stream');
   const { setTimeout: delay } = await import('node:timers/promises');
-  const { App } = await import('../src/tui/app.js');
+  const { App } = await import('../dist/tui/app.js');
 
   const stdout = new PassThrough();
   stdout.columns = 80;
@@ -97,7 +97,10 @@ test('the app paints the session line and the input hint onto the terminal', opt
   const client = {
     onNotification() {},
     onRequest() {},
-    request: async () => ({ mode: 'ask', tools: ['read'], eventCount: 0, running: false, denials: { consecutive: 0, total: 0 } }),
+    request: async () => ({
+      mode: 'minimal', modeLayer: 'shipped', pendingMode: null, policy: 'ask',
+      tools: ['read'], eventCount: 0, running: false, denials: { consecutive: 0, total: 0 },
+    }),
     reply() {},
   };
   const instance = render(
@@ -108,6 +111,86 @@ test('the app paints the session line and the input hint onto the terminal', opt
   instance.unmount();
 
   assert.match(painted, /test-model · 会话 abcdef01/);
-  assert.match(painted, /档位 ask · 工具 1 件/);
+  assert.match(painted, /mode:minimal  policy:ask  tools:1/);
   assert.match(painted, /\/help 看命令/);
+});
+
+test('the status line names the mode and the decision level separately', options, () => {
+  const status = { mode: 'minimal', pendingMode: null, policy: 'ask', tools: ['read', 'find'], eventCount: 3 };
+  assert.equal(
+    buildStatusLine({ head: '', sessionId: 'abcdef0123456789', status, running: false, seconds: 0, expanded: false }),
+    '会话 abcdef01 · mode:minimal  policy:ask  tools:2 · 记录 3 条',
+  );
+  // 待生效写成 mode:a→b（D41）。
+  assert.match(buildStatusLine({ head: '', sessionId: 'abcdef0123456789', status: { ...status, pendingMode: 'full' } }), /mode:minimal→full/);
+  // 宽度不够先丢工具数：模式与档位才说得出这一轮能做什么（D40）。
+  const narrow = buildStatusLine({ head: '', sessionId: 'abcdef0123456789', status, columns: 30 });
+  assert.doesNotMatch(narrow, /tools:/);
+  assert.match(narrow, /mode:minimal  policy:ask/);
+});
+
+test('a mode switch and an expanded template both reach the transcript', options, () => {
+  assert.deepEqual(
+    projectRecord({ kind: 'mode', name: 'full', layer: 'shipped', tools: ['read', 'skill'] }),
+    [{ kind: 'meta', text: '模式 full（随包）生效：read、skill' }],
+  );
+  assert.deepEqual(
+    projectRecord({ kind: 'user', text: 'Review src/a.ts\n', raw: '/review:security src/a.ts' }),
+    [{ kind: 'question', text: '/review:security src/a.ts' }],
+  );
+});
+
+test('/show takes the number from the record, not the row on screen', options, () => {
+  const events = [{ seq: 0, kind: 'mode' }, { seq: 1, kind: 'user', text: 'hi' }];
+  assert.deepEqual(findRecord(events, '1'), { record: events[1] });
+  // 序号写错形状与写了一个没有的号是两类问题，说的话得不一样（空序号是另一个动作：收起，不走这里）。
+  assert.equal(findRecord(events, 'third').code, 'tui_show_needs_a_number');
+  assert.equal(findRecord(events, '-1').code, 'tui_show_needs_a_number');
+  assert.equal(findRecord(events, '7').record, null);
+});
+
+// 审批框上要看得见答的是哪一种语法、跑起来会是哪一个可执行文件（D59）：同一条文本在两种后端下的结论可以相反。
+test('the approval box names the shell backend and its executable', options, async () => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { setTimeout: delay } = await import('node:timers/promises');
+  const { App } = await import('../dist/tui/app.js');
+
+  const stdout = new PassThrough();
+  stdout.columns = 100;
+  stdout.isTTY = false;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = new PassThrough();
+  stdin.isTTY = false;
+
+  let deliver;
+  const client = {
+    onNotification() {},
+    onRequest: (handler) => { deliver = handler; },
+    request: async () => ({ mode: 'minimal', modeLayer: 'shipped', pendingMode: null, policy: 'ask', tools: ['exec'], eventCount: 0, running: false, denials: { consecutive: 0, total: 0 } }),
+    reply: (id, result) => result,
+  };
+  const instance = render(createElement(App, { client, sessionId: 'abcdef01-2345-6789', info: {}, interactive: false }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
+  await delay(200);
+  await deliver({
+    id: 'ask-1',
+    method: 'approval.request',
+    params: {
+      sessionId: 'abcdef01-2345-6789',
+      tool: 'exec',
+      command: 'Get-Process | Stop-Process',
+      shell: 'powershell',
+      executable: 'C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe',
+      reason: 'the powershell command is not fully understood: |',
+    },
+  });
+  await delay(120);
+  instance.unmount();
+
+  assert.match(painted, /要执行 exec/);
+  assert.match(painted, /Get-Process \| Stop-Process/);
+  assert.match(painted, /后端 powershell/);
+  assert.match(painted, /not fully understood/);
 });

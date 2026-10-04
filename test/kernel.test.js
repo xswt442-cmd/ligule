@@ -5,7 +5,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   createConfig, createDecisionChain, createKernel, createSessionLog, KernelError, minimalTools, VERSION,
-} from '../src/index.js';
+} from '../dist/index.js';
 
 function makeTool(name, overrides = {}) {
   return {

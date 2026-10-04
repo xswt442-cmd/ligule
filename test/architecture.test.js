@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import {
   createConfig, createDecisionChain, createKernel, createLoop, createSessionLog, findTool,
   loadAssembly, minimalPlugin, probeBackend, readTool,
-} from '../src/index.js';
+} from '../dist/index.js';
 
 const sourceDirectory = fileURLToPath(new URL('../src/', import.meta.url));
 

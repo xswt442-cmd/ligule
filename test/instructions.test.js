@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
-import { loadInstructions } from '../src/index.js';
+import { loadInstructions } from '../dist/index.js';
 
 const rel = (from, to) => relative(from, to).split('\\').join('/');
 

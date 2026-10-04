@@ -1,8 +1,10 @@
-// 命令文本的语法级判断（D15、D17）：用 tree-sitter 的 bash 语法解析一次，
-// 只有整棵树都落在支持的语法子集里，才把每个 command 叶子交出去逐段套规则；
+// 命令文本的语法级判断（D15、D17、D59）：按 Host 选定的那一种解释器挑一份 parser。
+// bash 用 tree-sitter 的 bash 语法解析一次，只有整棵树都落在支持的语法子集里，才把每个 command 叶子交出去逐段套规则；
 // 树里出现子集之外的构造、解析报错、或者解析器根本加载不起来，三种都按「无法完整处理」对待。
+// PowerShell 那一条路走 `powershell.js` 里更窄的子集（D59、D66），两边交回同一种结果形状。
 // 解析器是原生插件，加载失败不能让内核起不来，所以这里是懒加载并把失败记下来（D18 的显式报告）。
 import { createRequire } from 'node:module';
+import { parsePowerShell } from './powershell.js';
 
 // 允许的命名单点，照 Codex 那一份清单：容器、命令与字面量，没有替换、重定向与控制流。
 const SUPPORTED_KINDS = new Set([
@@ -56,15 +58,15 @@ function analyse(tree, text) {
 
 // 三种结果：`segments` 是逐段判的依据；`unsupported` 带一个说明是哪种构造的字段；
 // `unavailable` 说明解析器这一次运行里用不了，按语法自动放行这条能力整个关掉。
-export function parseCommand(text) {
-  if (typeof text !== 'string' || text.trim() === '') return { kind: 'unsupported', construct: 'no command' };
+// 交回的都是 Promise：PowerShell 那一份 grammar 只能用动态 import 拿（D66），bash 那一条也一起走异步，两条路的调用形状相同。
+export function parseCommand(text, kind = 'bash') {
+  if (typeof text !== 'string' || text.trim() === '') return Promise.resolve({ kind: 'unsupported', construct: 'no command' });
+  if (kind === 'powershell') return parsePowerShell(text);
   const state = loadParser();
-  if (state.parser === undefined) return { kind: 'unavailable', detail: state.detail };
-  let tree;
+  if (state.parser === undefined) return Promise.resolve({ kind: 'unavailable', detail: state.detail });
   try {
-    tree = state.parser.parse(text);
+    return Promise.resolve(analyse(state.parser.parse(text), text));
   } catch (error) {
-    return { kind: 'unavailable', detail: typeof error?.message === 'string' ? error.message : String(error) };
+    return Promise.resolve({ kind: 'unavailable', detail: typeof error?.message === 'string' ? error.message : String(error) });
   }
-  return analyse(tree, text);
 }

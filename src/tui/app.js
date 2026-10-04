@@ -7,11 +7,15 @@ import { Box, Static, Text, useApp, useInput } from 'ink';
 
 const SPINNER = ['⠋', '⠙', '', '⠸', '⠼', '⠴', '⠦', '', '⠇', '⠏'];
 const FOLD_LINES = 3;
+// 模式来自哪一层，画给人看的是中文，记录里那三个名字与装载那一侧一致（D43）。
+const MODE_LAYERS = { shipped: '随包', user: '全局', project: '项目' };
 
 export const COMMANDS = [
   { name: 'help', usage: '/help', text: '列出命令与按键' },
   { name: 'tools', usage: '/tools', text: '列出这次运行装了哪些工具' },
-  { name: 'status', usage: '/status', text: '显示档位、拒绝计数与记录条数' },
+  { name: 'status', usage: '/status', text: '显示模式、档位、拒绝计数与记录条数' },
+  { name: 'mode', usage: '/mode [名字]', text: '显示当前模式，或切换到另一个名字' },
+  { name: 'show', usage: '/show [序号]', text: '把记录里那一条的完整内容画出来，不带序号收起' },
   { name: 'new', usage: '/new', text: '开一份新会话，画面上方的历史留在终端里' },
   { name: 'quit', usage: '/quit', text: '退出（Ctrl+C 同样）' },
 ];
@@ -60,7 +64,8 @@ export function foldText(text, expanded, limit = FOLD_LINES, maxChars = 400) {
 
 // 一条记录画成一行或者几行：助手那一条可能带着若干次工具调用，工具调用与结果各占一行。
 export function projectRecord(record) {
-  if (record.kind === 'user') return [{ kind: 'question', text: record.text }];
+  // 人打的那一行原样画出来（D54）：展开后的那一份是给模型的，回看时要对得上当时敲了什么。
+  if (record.kind === 'user') return [{ kind: 'question', text: record.raw ?? record.text }];
   if (record.kind === 'reasoning') return [{ kind: 'reasoning', text: record.text }];
   if (record.kind === 'assistant') {
     const rows = record.text === '' ? [] : [{ kind: 'answer', text: record.text }];
@@ -72,7 +77,34 @@ export function projectRecord(record) {
     const kind = result.failed !== true ? 'result' : result.kind === 'refusal' ? 'refusal' : 'failure';
     return [{ kind, tool: record.tool, text: textOf(result.reason ?? result.content), code: result.code }];
   }
+  if (record.kind === 'mode') {
+    // 模式生效是一件会改变模型能做什么的事，画在转录里，让人看得见是哪一条输入之后换的（I5）。
+    return [{ kind: 'meta', text: `模式 ${record.name}（${MODE_LAYERS[record.layer] ?? record.layer}）生效：${record.tools.join('、')}` }];
+  }
   return [];
+}
+
+// 状态行里模式与判定档位各带一个前缀：`mode` 这一个词在界面上指过两样东西，写清楚比省字重要（D40）。
+// 待生效写成 `mode:minimal→full`。宽度不够时先去掉工具数——它是模式与档位的推论，那两样才说得出这一轮能做什么。
+export function buildStatusLine({ head, sessionId, boundary, status, running, seconds, expanded, columns }) {
+  const base = `${head}会话 ${sessionId.slice(0, 8)}${boundary === undefined ? '' : ` · ${boundary}`}`;
+  if (status === null) return base;
+  const parts = [`mode:${status.pendingMode === null ? status.mode ?? 'none' : `${status.mode}→${status.pendingMode}`}`,
+    `policy:${status.policy}`, `tools:${status.tools.length}`];
+  const tail = `记录 ${status.eventCount} 条`
+    + (running ? ` · ${Math.floor(seconds)} 秒，Esc 打断` : '')
+    + (expanded ? ' · 已展开（Ctrl+O 收起）' : '');
+  const line = (kept) => `${base} · ${kept.join('  ')} · ${tail}`;
+  // 列数读不到时不裁：宁可让终端自己折行，也不要按一个猜的宽度丢东西。
+  if (columns !== undefined && columns > 0 && line(parts).length > columns) parts.pop();
+  return line(parts);
+}
+
+// `/show` 要的是记录里那个稳定的序号，不是画面上的第几行：行会随投影变，序号不会（D40）。
+export function findRecord(events, argument) {
+  const seq = Number(argument);
+  if (!Number.isInteger(seq) || seq < 0) return { code: 'tui_show_needs_a_number' };
+  return { record: events.find((event) => event.seq === seq) ?? null };
 }
 
 function Row({ row, expanded }) {
@@ -98,7 +130,7 @@ function Row({ row, expanded }) {
   return h(Text, { color: 'red' }, `! ${row.text}`);
 }
 
-export function App({ client, sessionId: firstSessionId, info = {}, interactive = true }) {
+export function App({ client, sessionId: firstSessionId, info = {}, interactive = true, stdout }) {
   const app = useApp();
   const [sessionId, setSessionId] = useState(firstSessionId);
   const [rows, setRows] = useState([]);
@@ -113,6 +145,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [history, setHistory] = useState([]);
   const [historyAt, setHistoryAt] = useState(-1);
   const [status, setStatus] = useState(null);
+  // 详情画在动态区里：`Static` 不回画已提交的行，所以「看那一条」只能是把它再画一次（D39、D40）。
+  const [detail, setDetail] = useState(null);
 
   const push = useCallback((...added) => setRows((current) => [...current, ...added]), []);
 
@@ -149,6 +183,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         tool: message.params.tool,
         detail: message.params.command ?? JSON.stringify(message.params.args ?? {}),
         reason: message.params.reason ?? '',
+        // 用哪一种语法判的、跑的是哪一个可执行文件：答的是这一条命令，看得见的该是这两样（D59）。
+        backend: message.params.shell === undefined ? '' : `${message.params.shell} · ${message.params.executable ?? ''}`,
       });
     };
     client.onNotification(onNotification);
@@ -186,7 +222,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     }
   }, [client, push, refreshStatus, sessionId]);
 
-  const runCommand = useCallback((name) => {
+  // 命令一律收到第一个词，后面的整段作为参数交进来（/mode 要用）。
+  const runCommand = useCallback((name, argument = '') => {
     if (name === 'quit') {
       app.exit();
       return;
@@ -218,7 +255,53 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         const current = await client.request('status.get', { sessionId }).catch(() => null);
         setStatus(current);
         push({ kind: 'meta', text: current === null ? '状态读不到'
-          : `档位 ${current.mode} · 拒绝 连续 ${current.denials.consecutive} 次 / 累计 ${current.denials.total} 次 · 记录 ${current.eventCount} 条` });
+          : `模式 ${current.mode ?? '没装'} · 档位 ${current.policy} · 拒绝 连续 ${current.denials.consecutive} 次 / 累计 ${current.denials.total} 次 · 记录 ${current.eventCount} 条` });
+      })();
+      return;
+    }
+    if (name === 'mode') {
+      void (async () => {
+        // 带名字就是一次切换请求，不带名字只是问一句现在用的是哪一份（D41）。
+        if (argument === '') {
+          const current = await client.request('status.get', { sessionId }).catch(() => null);
+          setStatus(current);
+          push({ kind: 'meta', text: current === null || current.mode === null ? '模式读不到'
+            : `当前 ${current.mode}${current.pendingMode === null ? '' : `，下一个 ${current.pendingMode}（待生效）`}` });
+          return;
+        }
+        const switched = await client.request('mode.set', { sessionId, name: argument }).catch((error) => error);
+        if (switched.code !== undefined) {
+          push({ kind: 'error', text: `切不过去：${switched.code}${switched.detail === undefined ? '' : ` · ${switched.detail}`}` });
+          return;
+        }
+        setStatus(await client.request('status.get', { sessionId }).catch(() => null));
+        push({ kind: 'meta', text: switched.pending === null
+          ? `模式切到 ${switched.mode}（${switched.tools.length} 件工具）`
+          : `已请求切到 ${switched.pending}，这一轮结束才生效；再打一次 /mode ${switched.mode} 可以撤回` });
+      })();
+      return;
+    }
+    if (name === 'show') {
+      void (async () => {
+        if (argument === '') {
+          setDetail(null);
+          return;
+        }
+        const read = await client.request('session.read', { sessionId }).catch((error) => error);
+        if (read.code !== undefined) {
+          push({ kind: 'error', text: `记录读不回来：${read.code}` });
+          return;
+        }
+        const picked = findRecord(read.events, argument);
+        if (picked.code !== undefined) {
+          push({ kind: 'error', text: '/show 后面要一个记录序号（会话记录里的第几条，不是画面上的第几行）' });
+          return;
+        }
+        if (picked.record === null) {
+          push({ kind: 'error', text: `记录里没有第 ${argument} 条（现有 ${read.events.length} 条，编号从 0 起）` });
+          return;
+        }
+        setDetail({ seq: picked.record.seq, kind: picked.record.kind, rows: projectRecord(picked.record) });
       })();
       return;
     }
@@ -236,7 +319,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     setHistoryAt(-1);
     if (parsed.kind === 'command') {
       push({ kind: 'meta', text: `/${parsed.name}` });
-      runCommand(parsed.name === '' ? 'help' : parsed.name);
+      runCommand(parsed.name === '' ? 'help' : parsed.name, parsed.argument);
       return;
     }
     setHistory((current) => [parsed.text, ...current].slice(0, 50));
@@ -307,8 +390,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     ask === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'yellow', paddingX: 1 },
       h(Text, { bold: true }, `要执行 ${ask.tool}`),
       h(Text, { wrap: 'truncate-end' }, ask.detail),
+      ask.backend === '' ? null : h(Text, { dimColor: true, wrap: 'truncate-end' }, `后端 ${ask.backend}`),
       ask.reason === '' ? null : h(Text, { dimColor: true }, ask.reason),
       h(Text, null, '按 y 允许一次，按 n 不允许')),
+    detail === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'cyan', paddingX: 1 },
+      h(Text, { dimColor: true }, `记录 ${detail.seq}（${detail.kind}）的完整内容 · /show 收起`),
+      detail.rows.length === 0
+        ? h(Text, { dimColor: true }, '这一条没有可画的内容')
+        : detail.rows.map((row, index) => h(Row, { key: index, row, expanded: true }))),
     h(Box, null,
       h(Text, { color: running ? 'yellow' : 'cyan' }, running ? `${SPINNER[tick % SPINNER.length]} ` : '› '),
       draft === '' && !running
@@ -317,10 +406,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           h(Text, null, draft.slice(0, caret)),
           h(Text, { inverse: true }, draft[caret] ?? ' '),
           h(Text, null, draft.slice(caret + 1)))),
-    h(Text, { dimColor: true }, `${head}会话 ${sessionId.slice(0, 8)}`
-      + (info.boundary === undefined ? '' : ` · ${info.boundary}`)
-      + (status === null ? '' : ` · 档位 ${status.mode} · 工具 ${status.tools.length} 件 · 记录 ${status.eventCount} 条`)
-      + (running ? ` · ${Math.floor(seconds)} 秒，Esc 打断` : '')
-      + (expanded ? ' · 已展开（Ctrl+O 收起）' : '')),
+    h(Text, { dimColor: true }, buildStatusLine({
+      head, sessionId, boundary: info.boundary, status, running, seconds, expanded, columns: stdout?.columns,
+    })),
   );
 }

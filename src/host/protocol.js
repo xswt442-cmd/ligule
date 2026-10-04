@@ -37,6 +37,14 @@ export const METHODS = Object.freeze({
     description: 'Read what the Host currently holds for this session',
     parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
   },
+  'mode.set': {
+    description: 'Switch to another named mode; while a round runs it takes effect once that round ends, and naming the mode already in use withdraws a pending switch',
+    parameters: {
+      type: 'object',
+      properties: { sessionId: SESSION_ID, name: { type: 'string', description: 'the mode to use for the next round' } },
+      required: ['sessionId', 'name'],
+    },
+  },
 });
 
 // Host 向客户端发出去的那一份请求，与客户端答复的形状。

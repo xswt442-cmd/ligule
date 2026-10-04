@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createConfig, flagLayer, loadConfigLayers } from '../src/index.js';
+import { createConfig, flagLayer, loadConfigLayers } from '../dist/index.js';
 
 // 用户主目录与项目根都建在 testplace/ 下的临时目录里：装载侧读哪三份文件由这两个根决定，
 // 测试因此不碰真实的 ~/.ligule，也不依赖进程环境。

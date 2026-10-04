@@ -10,9 +10,9 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { createConnection, createConfig, createMemoryConnectionPair, MESSAGES_CAPABILITIES, METHODS, NOTIFICATIONS, providerFromConfig, serveHost } from '../src/index.js';
+import { createConnection, createConfig, createMemoryConnectionPair, MESSAGES_CAPABILITIES, METHODS, NOTIFICATIONS, providerFromConfig, resolveShell, serveHost } from '../dist/index.js';
 
-const CLI = fileURLToPath(new URL('../src/cli.js', import.meta.url));
+const CLI = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
 
 const TOOL_TURN = [
   { type: 'message_start', message: { usage: {} } },
@@ -128,13 +128,17 @@ test('a client over stdio drives one round, answers one approval and watches the
     assert.equal(approvals[0].tool, 'read');
     assert.deepEqual(approvals[0].args, { path: 'note.txt' });
     assert.equal(approvals[0].sessionId, sessionId);
+    // 没有命令文本的调用不带后端那两样：那一种语法与哪一个可执行文件对读一次文件这件事没有意义。
+    assert.equal(approvals[0].shell, undefined);
+    assert.equal(approvals[0].executable, undefined);
 
     const deltas = notifications.filter((message) => message.notify === 'delta').map((message) => message.event);
     assert.deepEqual(deltas.map((event) => event.type), ['tool-call', 'text'], 'the stream is forwarded as it arrives');
     assert.ok(notifications.every((message) => NOTIFICATIONS.includes(message.notify)), 'nothing arrives outside the names the protocol declares');
     const events = notifications.filter((message) => message.notify === 'event').map((message) => message.event);
-    assert.deepEqual(events.map((event) => event.kind), ['user', 'assistant', 'tool', 'assistant']);
-    assert.equal(events[2].result.content.text, 'the body', 'the tool result the client saw is the file content');
+    // 装载先记一条模式事件：那一份清单是这一轮工具栏目的来源（I2、I5）。
+    assert.deepEqual(events.map((event) => event.kind), ['mode', 'user', 'assistant', 'tool', 'assistant']);
+    assert.equal(events.find((event) => event.kind === 'tool').result.content.text, 'the body', 'the tool result the client saw is the file content');
 
     // 客户端看见的那一条与记录里落盘的那一条同源，序号也在通知里带回来了。
     const recorded = (await readFile(join(directory, '.ligule', 'sessions', `${sessionId}.jsonl`), 'utf8'))
@@ -143,7 +147,8 @@ test('a client over stdio drives one round, answers one approval and watches the
 
     const status = await host.client.request('status.get', { sessionId });
     assert.equal(status.running, false);
-    assert.equal(status.mode, 'ask');
+    assert.equal(status.policy, 'ask');
+    assert.equal(status.mode, 'minimal', '状态里模式名与判定档位是两样东西（D40）');
     assert.ok(status.tools.includes('read'));
     assert.deepEqual(status.denials, { consecutive: 0, total: 0 });
   });
@@ -216,8 +221,9 @@ test('a second Host process opens the same record, so the session lives in the H
       // 晚到的客户端把已经发生过的事读回来：记录是唯一事实源（I5），这一份与第一个进程写下的相同。
       const reopened = await second.client.request('session.read', { sessionId });
       assert.equal(reopened.sessionId, sessionId);
-      assert.deepEqual(reopened.events.map((event) => event.kind), ['user', 'assistant', 'tool', 'assistant']);
-      assert.equal(reopened.events[2].result.content.text, 'the body');
+      // 第二个进程装载同一份清单，不再往记录里补一条：attach 与读不动事实源（I5）。
+      assert.deepEqual(reopened.events.map((event) => event.kind), ['mode', 'user', 'assistant', 'tool', 'assistant']);
+      assert.equal(reopened.events.find((event) => event.kind === 'tool').result.content.text, 'the body');
       const status = await second.client.request('status.get', { sessionId });
       assert.equal(status.running, false);
       assert.equal(status.eventCount, reopened.events.length);
@@ -429,4 +435,53 @@ test('the same protocol runs over an in-memory carrier inside one process', asyn
       await rm(directory, { recursive: true, force: true });
     }
   });
+});
+
+// 审批那一次问的不只是「要不要跑」：同一条文本在两种语法下能自动放行的面积不一样，
+// 答的是那一种、跑起来会是哪一个可执行文件要看得见（D59）。这一条答复的是不允许，不真起进程。
+test('an approval for a command names the shell backend the host chose', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'ligule-host-shell-'));
+  const config = createConfig({
+    user: {
+      boundary: directory,
+      model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model' },
+      policy: { mode: 'ask' },
+    },
+  });
+  let turns = 0;
+  // 提供方交回的是已经归一化的那一种事件（`text`、`tool-call`），不是端点线上的那一份帧。
+  const provider = {
+    capabilities: MESSAGES_CAPABILITIES,
+    model: 'test-model',
+    async *stream() {
+      turns += 1;
+      if (turns === 1) {
+        yield { type: 'tool-call', id: 'call_1', name: 'exec', args: { command: 'git status' } };
+        return;
+      }
+      yield { type: 'text', text: 'done' };
+    },
+  };
+  const pair = createMemoryConnectionPair();
+  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy });
+  const approvals = [];
+  const connection = createConnection(pair.client);
+  connection.onRequest(async (message) => {
+    approvals.push(message.params);
+    return { decision: 'deny' };
+  });
+  try {
+    const { sessionId } = await connection.request('session.create', {});
+    await connection.request('run.start', { sessionId, input: 'run it' });
+    assert.equal(approvals.length, 1);
+    assert.equal(approvals[0].tool, 'exec');
+    assert.equal(approvals[0].command, 'git status');
+    const selection = resolveShell({});
+    assert.equal(approvals[0].shell, selection.kind);
+    assert.equal(approvals[0].executable, selection.executable);
+  } finally {
+    pair.client.output.end();
+    host.release();
+    await rm(directory, { recursive: true, force: true });
+  }
 });

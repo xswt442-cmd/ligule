@@ -389,6 +389,13 @@ button.primary {
   color: var(--fg-muted);
 }
 
+/* 用哪一种语法判的、跑的是哪一个可执行文件（D59）：与命令文本同一行区域，但更弱一档。 */
+.approval-backend {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--fg-muted);
+}
+
 .approval-reason {
   margin: 0;
   color: var(--fg-muted);

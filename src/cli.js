@@ -4,45 +4,66 @@
 // `host` 这一条是另一件事：它把同一个内核作为 Host 进程起起来，等一条标准输入输出上的客户端连接（D30）。
 import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
+import { fileURLToPath } from 'node:url';
 import { createConfig } from './kernel/config.js';
 import { loadConfigLayers } from './kernel/config-file.js';
 import { createKernel } from './kernel/kernel.js';
 import { loadAssembly } from './kernel/assembly.js';
+import { DEFAULT_MODE, modeDirectories } from './kernel/modes.js';
+import { extensionSources } from './kernel/extensions.js';
+import { discoverSkills, skillDirectories } from './kernel/skills.js';
 import { minimalPlugin } from './tools/minimal.js';
+import { networkPlugin } from './tools/network.js';
 import { createHost, providerFromConfig, serveHost } from './host/host.js';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+// 随包的模式目录与 `dist/` 同级：从本模块往上一层就是包根，本地检出与解包之后是同一个相对位置。
+const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
 
-// `--config a.b=c` 可以出现多次，从位置参数里挑出来；剩下的按「命令、工具名、一段 JSON」三段读。
+// `--config a.b=c` 可以出现多次；`--mode <名字>` 取一个值。两者都从位置参数里挑出来。
 const flags = [];
 const positional = [];
 const argv = process.argv.slice(2);
 let missingFlagValue = false;
+let missingModeValue = false;
+let modeFlag;
 for (let index = 0; index < argv.length; index += 1) {
   const arg = argv[index];
-  if (arg !== '--config') {
-    positional.push(arg);
+  if (arg === '--config' || arg === '--mode') {
+    const value = argv[index + 1];
+    if (value === undefined) {
+      if (arg === '--config') missingFlagValue = true;
+      else missingModeValue = true;
+      break;
+    }
+    if (arg === '--config') flags.push(value);
+    else modeFlag = value;
+    index += 1;
     continue;
   }
-  const value = argv[index + 1];
-  if (value === undefined) {
-    missingFlagValue = true;
-    break;
-  }
-  flags.push(value);
-  index += 1;
+  positional.push(arg);
 }
 const [command, ...rest] = positional;
 
 async function configSnapshot() {
   const layers = await loadConfigLayers({ projectRoot: process.cwd(), flags });
   // 边界兜底取当前工作目录：命令行在哪里跑，工具就能在哪里读写。任何一层配置都盖得过它。
-  return createConfig({ ...layers, user: { boundary: process.cwd(), ...layers.user } });
+  const user = { boundary: process.cwd(), ...layers.user };
+  // 扩展的来源在同一次装载里算出来（D68）：项目层与本地层里写的路径不算，那一条挡住的判断在这里看得见。
+  const extensions = await extensionSources({ ...layers, user }, { projectRoot: process.cwd() });
+  return { config: createConfig({ ...layers, user }), extensions };
+}
+
+// 模式名按 D44：`--mode` 覆盖一次运行，否则读配置里的 `mode`，两处都没写就是随包的 minimal。
+// 交出去的是名字加那三层目录，装载在 Host 那一侧做：运行中换模式要用同一套查找（D41）。
+function resolveMode(config) {
+  return { modeName: modeFlag ?? config.mode ?? DEFAULT_MODE, modePaths: modeDirectories(process.cwd(), shippedModes) };
 }
 
 async function installedKernel() {
-  const kernel = createKernel({ config: await configSnapshot() });
-  loadAssembly(kernel, [minimalPlugin]);
+  const { config } = await configSnapshot();
+  const kernel = createKernel({ config });
+  loadAssembly(kernel, [minimalPlugin, networkPlugin]);
   return kernel;
 }
 
@@ -77,7 +98,8 @@ function printNotification(message) {
     const { tool, result } = message.event;
     console.log(`· ${tool}: ${result.failed ? result.code : 'ok'}`);
   } else if (message.notify === 'event' && message.event?.kind === 'user') {
-    console.log(`> ${message.event.text}`);
+    // 模板展开过的那一条画原始那一行（D54）：终端里回声要等于人打的字。
+    console.log(`> ${message.event.raw ?? message.event.text}`);
   } else if (message.notify === 'fault') {
     console.error(message.detail === undefined ? message.code : `${message.code}: ${message.detail}`);
   }
@@ -124,15 +146,17 @@ function terminalApprovals() {
   };
 }
 
-async function runOneRound(config, text) {
-  const host = createHost({ config, provider: providerFromConfig(config), policy: config.policy });
+async function runOneRound(config, selection, extensions, text) {
+  const host = createHost({ config, provider: providerFromConfig(config), policy: config.policy, extensions, ...selection });
   const approvals = terminalApprovals();
   const connection = {
     notify: printNotification,
     // 协议里 Host 只发出这一种请求：一次询问，答允许或不允许。
     request: async (method, params) => {
       const described = params.command ?? JSON.stringify(params.args);
-      const answer = await approvals.ask(`allow ${params.tool} ${described}? [y/N] `);
+      // 命令文本后面说清是哪一种语法、哪一个可执行文件（D59）：同一条文本在两种语法下要问不该问是两回事。
+      const backend = params.shell === undefined ? '' : ` (${params.shell}: ${params.executable ?? ''})`;
+      const answer = await approvals.ask(`allow ${params.tool} ${described}${backend}? [y/N] `);
       return { decision: /^y(es)?$/i.test(String(answer).trim()) ? 'allow' : 'deny' };
     },
   };
@@ -148,12 +172,47 @@ async function runOneRound(config, text) {
 
 if (missingFlagValue) {
   printFailure('cli_config_needs_a_value');
+} else if (missingModeValue) {
+  printFailure('cli_mode_needs_a_value', '--mode takes a mode name, e.g. --mode full');
 } else if (command === '--version' || command === '-v') {
   console.log(pkg.version);
 } else if (command === 'tools') {
   // 默认运行装的就是那份显式的最小清单（D3）。
   const kernel = await kernelOrFail();
   if (kernel) for (const name of kernel.list()) console.log(name);
+} else if (command === 'extensions') {
+  // 与 `ligule skills` 同一类只读排错入口（D64）：说清这一具机器会加载哪几个文件、哪些路径被 D68 那条规则挡掉，
+  // 不 import 任何一份扩展——一条诊断命令不该执行别人的代码。
+  try {
+    const { extensions } = await configSnapshot();
+    for (const path of extensions.paths) console.log(path);
+    if (extensions.paths.length === 0) {
+      console.log('no extensions loaded');
+      console.log(`  looked in ${extensions.installedDirectory}`);
+    }
+    for (const diagnostic of extensions.ignored) console.error(`${diagnostic.code}\t${diagnostic.path}\t${diagnostic.detail}`);
+  } catch (error) {
+    printFailure(error.code ?? 'cli_extensions_failed', error.detail);
+  }
+} else if (command === 'skills') {
+  // 只读的诊断入口：装载侧扫一遍那四个目录，把载入的与被丢下的都说出来，不起内核也不读模型配置。
+  // 客户端协议不为这件事扩，日志留完整记录，提示词里只带一个计数（D64）。
+  try {
+    const directories = skillDirectories(process.cwd());
+    const registry = await discoverSkills(directories);
+    for (const skill of registry.skills) console.log(`${skill.name}\t${skill.root}`);
+    if (registry.skills.length === 0) {
+      // 「装了但没生效」最难自查，所以一份都没有时把扫过的位置说出来。
+      console.log('no skills loaded');
+      for (const directory of directories) console.log(`  looked in ${directory}`);
+    }
+    if (registry.diagnostics.length > 0) {
+      console.error(`not loaded: ${registry.diagnostics.length}`);
+      for (const diagnostic of registry.diagnostics) console.error(`${diagnostic.code}\t${diagnostic.detail}`);
+    }
+  } catch (error) {
+    printFailure(error.code ?? 'cli_skills_failed', error.detail);
+  }
 } else if (command === 'call') {
   const [name, argsJson] = rest;
   if (name === undefined) {
@@ -184,7 +243,8 @@ if (missingFlagValue) {
     printFailure('cli_run_needs_the_user_text', 'run takes the user message, e.g. ligule run "read the note"');
   } else {
     try {
-      await runOneRound(await configSnapshot(), text);
+      const { config, extensions } = await configSnapshot();
+      await runOneRound(config, resolveMode(config), extensions, text);
     } catch (error) {
       printFailure(error.code ?? 'cli_run_failed', error.detail);
     }
@@ -192,8 +252,8 @@ if (missingFlagValue) {
 } else if (command === 'host') {
   // 桌面壳或者脚本起这一个进程，两端各读写一行 JSON（D30）：本机不开端口，审批与事件都走这条连接。
   try {
-    const config = await configSnapshot();
-    serveHost({ config, provider: providerFromConfig(config), policy: config.policy });
+    const { config, extensions } = await configSnapshot();
+    serveHost({ config, provider: providerFromConfig(config), policy: config.policy, extensions, ...resolveMode(config) });
   } catch (error) {
     printFailure(error.code ?? 'cli_host_failed', error.detail);
   }
@@ -204,9 +264,12 @@ if (missingFlagValue) {
     printFailure('tui_terminal_required', 'the terminal UI needs an interactive terminal; use ligule run from a script');
   } else {
     try {
-      const config = await configSnapshot();
+      const { config, extensions } = await configSnapshot();
+      // React 与 Ink 在第一次被加载时按 NODE_ENV 选构建，所以这一行要在动态导入之前。
+      // 开发版把界面拖贵了一倍：两千条记录的转录下提交一行是 2.6 毫秒对 1.4 毫秒，进程常驻 155 MiB 对 114 MiB。
+      process.env.NODE_ENV = 'production';
       const { runTui } = await import('./tui/start.js');
-      await runTui({ config, provider: providerFromConfig(config), policy: config.policy });
+      await runTui({ config, provider: providerFromConfig(config), policy: config.policy, extensions, ...resolveMode(config) });
     } catch (error) {
       const missing = error.code === 'ERR_MODULE_NOT_FOUND' && /Cannot find package '(ink|react)'/.test(String(error.message));
       printFailure(missing ? 'tui_dependency_missing' : error.code ?? 'cli_tui_failed',
@@ -215,9 +278,11 @@ if (missingFlagValue) {
   }
 } else if (command === undefined || command === '--help' || command === '-h') {
   console.log(`ligule ${pkg.version} - under development, do not depend on it.`);
-  console.log('commands: tools, run <text>, call <tool> [json-args], tui, host, --version');
-  console.log('options: --config <key.path=value> (repeatable)');
+  console.log('commands: tools, skills, run <text>, call <tool> [json-args], tui, host, --version');
+  console.log('options: --config <key.path=value> (repeatable), --mode <name>');
   console.log('run, tui and host read model.api ("messages" or "chat-completions"), model.baseURL and model.model from the config layers; the key comes from LIGULE_API_KEY');
+  console.log('run, tui and host also pick a mode: --mode <name> overrides the config `mode`, and neither one written means the shipped "minimal" (D44); tools and call do not read one');
+  console.log('skills lists what this directory would load and why any skill was skipped; it reads the four skill directories and no model config');
 } else {
   // 打错的命令不该走帮助文本再退出 0：调用方是个脚本时，0 加一段帮助就是一次成功。
   printFailure('cli_command_unknown', `"${command}" is not a command; run ligule --help to list them`);

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createKernel, createSlotRegistry, loadAssembly } from '../src/index.js';
+import { createKernel, createSlotRegistry, loadAssembly } from '../dist/index.js';
 
 const panelSlot = { name: 'panel', accepts: (payload) => typeof payload?.title === 'string' };
 

@@ -93,6 +93,10 @@ jobs:
           npm --prefix desktop ci
           npm --prefix desktop/frontend ci
 
+      # 安装包带的是构建产物，所以先构建再复制（D47）。
+      - name: build the runtime tree the installer carries
+        run: npm run build
+
       # 安装包自带一份 Node 运行时与运行时树（D34），先按 pin 拉下来并核对校验和。
       # 这一步要排在任何 cargo 调用之前：`bundle.resources` 指的那两个目录得在编译期就在，
       # 不然 tauri-build 直接失败在「resource path `../vendor/app` doesn't exist」（2026-10-02 的 CI 就这么红过一次）。
@@ -100,12 +104,12 @@ jobs:
         run: node desktop/fetch-runtime.mjs
 
       # 随包带的那一份要能自己跑起来：用带进去的 node 跑带进去的入口，不借 PATH 上的 node。
-      # 八件工具是数出来的：少一件就说明运行时树缺了东西。
+      # 工具是数出来的：D3 那八件加上一件第一方可选工具 `fetch`（D48），少一件就说明运行时树缺了东西。
       - name: run the vendored tree on its own
         shell: bash
         run: |
-          ./desktop/vendor/node/node.exe ./desktop/vendor/app/src/cli.js --version
-          test "$(./desktop/vendor/node/node.exe ./desktop/vendor/app/src/cli.js tools | wc -l)" -eq 8
+          ./desktop/vendor/node/node.exe ./desktop/vendor/app/dist/cli.js --version
+          test "$(./desktop/vendor/node/node.exe ./desktop/vendor/app/dist/cli.js tools | wc -l)" -eq 9
 
       # 壳的 Rust 一侧自己那两件事（从可执行文件位置找后端入口、帧在子进程两根管道之间按行转递）与格式。
       # 这一段不跑就等于壳的测试只在本地跑过，而安装包照样能打出来。

@@ -1,12 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const repo = dirname(dirname(fileURLToPath(import.meta.url)));
-const cli = join(repo, 'src', 'cli.js');
+// 命令行按构建产物验（D47）：src/ 里有 .ts，源码那一份不能直接跑，跑起来的那一份就是发布出去的那一份。
+const cli = join(repo, 'dist', 'cli.js');
 
 function capture(...args) {
   try {
@@ -16,8 +18,8 @@ function capture(...args) {
   }
 }
 
-test('tools prints the eight members of the minimal manifest', () => {
-  assert.deepEqual(capture('tools').stdout.trim().split('\n'), ['create', 'delete', 'edit', 'exec', 'find', 'read', 'search', 'write']);
+test('tools prints the members of the minimal manifest plus the first-party optional tools', () => {
+  assert.deepEqual(capture('tools').stdout.trim().split('\n'), ['create', 'delete', 'edit', 'exec', 'fetch', 'find', 'read', 'search', 'write']);
 });
 
 test('call runs a tool in the same process and prints what it returned', () => {
@@ -60,7 +62,7 @@ test('an unknown command is a failure, while asking for help is not', () => {
   for (const flag of [undefined, '--help', '-h']) {
     const asked = flag === undefined ? capture() : capture(flag);
     assert.ok(asked.ok, asked.stderr);
-    assert.match(asked.stdout, /commands: tools, run /);
+    assert.match(asked.stdout, /commands: tools, skills, run/);
   }
 });
 
@@ -78,5 +80,36 @@ test('--config narrows the boundary from the command line and a valueless flag i
 test('--version prints the package version and the bare invocation lists the commands', () => {
   const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'));
   assert.equal(capture('--version').stdout.trim(), pkg.version);
-  assert.match(capture().stdout, /commands: tools, run/);
+  assert.match(capture().stdout, /commands: tools, skills, run/);
+});
+
+test('skills lists what this directory would load and says why anything was skipped', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ligule-cli-skills-'));
+  const project = join(root, 'project');
+  const home = join(root, 'home');
+  mkdirSync(join(project, '.ligule', 'skills', 'demo'), { recursive: true });
+  writeFileSync(join(project, '.ligule', 'skills', 'demo', 'SKILL.md'), '---\nname: demo\ndescription: one real pack\n---\nbody\n');
+  mkdirSync(join(project, '.ligule', 'skills', 'broken'), { recursive: true });
+  writeFileSync(join(project, '.ligule', 'skills', 'broken', 'SKILL.md'), '---\nname: broken\n---\nbody\n');
+  mkdirSync(home, { recursive: true });
+  // 用户那一层指到临时目录：不碰真实 HOME，两个平台的取值入口都设上。
+  const env = { ...process.env, HOME: home, USERPROFILE: home };
+  try {
+    const listed = spawnSync(process.execPath, [cli, 'skills'], { cwd: project, encoding: 'utf8', env });
+    assert.equal(listed.status, 0, listed.stderr);
+    assert.match(listed.stdout, /^demo\t.*demo$/m);
+    assert.match(listed.stderr, /not loaded: 1/);
+    assert.match(listed.stderr, /skill_description_missing/);
+
+    const empty = join(root, 'empty');
+    mkdirSync(empty, { recursive: true });
+    const none = spawnSync(process.execPath, [cli, 'skills'], { cwd: empty, encoding: 'utf8', env });
+    assert.equal(none.status, 0, none.stderr);
+    assert.match(none.stdout, /no skills loaded/);
+    // 一份都没有时把扫过的四个位置说出来：「装了但没生效」最难自查。
+    assert.match(none.stdout, /looked in .*[\\/]empty[\\/]\.ligule[\\/]/);
+    assert.equal(none.stdout.split('\n').filter((line) => line.includes('looked in')).length, 4);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

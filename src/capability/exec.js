@@ -1,6 +1,6 @@
-// `exec`：命令执行与进程所有权（D18）。整棵子树的终止在 Windows 上走系统自带的 `taskkill /T /F`，
-// 在 POSIX 上把孩子放进自己的进程组、终止整组。两条路的实测结论与还没定的那条路线记在项目的未定项 U1。
-// 取消由调用方交进来的 signal 触发（D20 的取消边界）；本工具不做超时，超时没有进契约（D29）。
+// `exec`：命令执行与进程所有权（D18）。用哪一个解释器由 Host 选定并交进来（D59），这里只负责按那一份选择起进程。
+// 整棵子树的终止在 Windows 上走系统自带的 `taskkill /T /F`，在 POSIX 上把孩子放进自己的进程组、终止整组。
+// 两条路的实测结论与还没定的那条路线记在项目的未定项 U1。取消由调用方交进来的 signal 触发（D20 的取消边界）；本工具不做超时，超时没有进契约（D29）。
 import { execFileSync, spawn } from 'node:child_process';
 import { KernelError } from '../kernel/error.js';
 import { resolveWithin } from './paths.js';
@@ -68,7 +68,9 @@ function killTree(child) {
 
 export const execTool = {
   name: 'exec',
-  description: 'Run a command line through the platform shell with the workspace boundary as its working directory.',
+  description: 'Run a command line with the shell backend the host chose, with the workspace boundary as its working directory.',
+  // 内核按这一条认出「这行文本要走解释器」（D59）：选定后端、按那一种语法解析、把事实记进会话记录都在那一条路上做。
+  commandArgument: 'command',
   parameters: {
     type: 'object',
     properties: {
@@ -77,20 +79,21 @@ export const execTool = {
     },
     required: ['command'],
   },
-  async run(args, { config, signal }) {
+  async run(args, { config, signal, shell }) {
     if (typeof args.command !== 'string' || args.command.trim() === '') {
       throw new KernelError('exec_command_required', { detail: 'the command to run is missing' });
     }
     const { execBytes } = limitsOf(config);
     const boundary = boundaryOf(config);
     const cwd = args.cwd === undefined ? boundary : await resolveWithin(boundary, args.cwd);
+    // shell 是内核交进来的那一份选择（D59）：判定链读的就是这一种语法，起的也就是这一个可执行文件，
+    // 不再把文本交给系统默认的 shell——那样记录里读不出「按哪种语法跑的」，判定读过的语法也可能不是那一种。
     // POSIX 上 detached 让孩子成为新进程组的首，终止时对 -pid 发信号带走整组；
     // Windows 没有进程组，终止用 taskkill /T。windowsHide 不弹控制台窗口。
     // stdin 不给文件描述符：继承了那一个，等着读输入的命令就一直挂着——有些命令按启发式去读标准输入，
     // 具体是哪一家会踩到不必枚举，不给它可读的东西就够了。
-    const child = spawn(args.command, {
+    const child = spawn(shell.executable, [...shell.prefix, `${args.command}${shell.tail}`], {
       cwd,
-      shell: true,
       detached: process.platform !== 'win32',
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],

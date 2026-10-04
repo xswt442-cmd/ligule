@@ -8,6 +8,8 @@ import { createConfig } from './config.js';
 import { createLogger } from './log.js';
 import { failureOf, refusalOf, resultLimit, resultOf, spillContent } from './result.js';
 import { createObservationLog } from '../session/observe.js';
+import { resolveTarget } from '../capability/network.js';
+import { resolveShell, withNativeExitCode } from '../capability/shell.js';
 import { assertSupportedSchema, validateArgs } from './schema.js';
 
 // options.config 是装载侧折好的配置快照，options.logger 是宿主自己的日志后端（D8、D26），
@@ -58,6 +60,12 @@ export function createKernel(options = {}) {
       return [...tools.keys()].sort();
     },
 
+    // 模式能从哪几件里挑：登记表里去掉固定披露入口（D63）。被模式藏起来不该是一种可能，
+    // 否则默认档位下模型连发现技能的入口都没有，而注册表里明明有东西。
+    selectable() {
+      return [...tools.values()].filter((tool) => !tool.disclosure).map((tool) => tool.name).sort();
+    },
+
     // 循环按这一条决定分组：没有声明、或者登记名不存在，一律按串行处理（D29）。
     execution(name) {
       return tools.get(name)?.execution ?? 'serial';
@@ -97,11 +105,19 @@ export function createKernel(options = {}) {
       assertSupportedSchema(parameters);
       // 只留名字、描述、参数模式那三项，插件附带的其他字段进不了模型可见清单（D12）。
       // 执行策略声明按工具名留在内核这一侧，循环读它，模型看不见（D29、I3）。
+      // 披露入口也留在内核这一侧：固定那几件工具由注册表里有没有内容决定，不进模式的选择范围（D63）。
+      // 哪个参数是要取回的目标同样留在内核这一侧：判定链看的是解析之后的地址类别，不是模型写的字符串（D58）。
+      // 哪个参数是一段命令文本也留在这里：那一段要按 Host 选定的那种语法解析后再判（D59）。
       const entry = {
         name: tool.name,
         description: tool.description,
         parameters,
         execution: tool.execution === 'parallel' ? 'parallel' : 'serial',
+        disclosure: tool.disclosure === true,
+        targetArgument: typeof tool.targetArgument === 'string' ? tool.targetArgument : undefined,
+        commandArgument: typeof tool.commandArgument === 'string' ? tool.commandArgument : undefined,
+        // 一件工具可以声明「这一次调用真正用的能力是什么」：MCP 的两件固定工具靠它把 `mcp:<服务器>/<工具>` 交出去（D52）。
+        capability: typeof tool.capability === 'function' ? tool.capability : undefined,
         run: tool.run,
       };
       tools.set(tool.name, entry);
@@ -159,18 +175,45 @@ export function createKernel(options = {}) {
       if (violations.length > 0) {
         await fail(entry, new KernelError('tool_args_invalid', { detail: violations.join('; ') }));
       }
+      // 目标地址在这里解析一次：判定链判断的就是这一次解析出的地址，工具随后连的也是这几个地址（D58）。
+      // 分两次解析的话，链条批准了一个 IP 而连接自己又查一次 DNS，两次可以不是同一个地址。
+      const network = tool.targetArgument === undefined || typeof args?.[tool.targetArgument] !== 'string'
+        ? undefined
+        : await resolveTarget(args[tool.targetArgument]);
+      // 解释器在这里选定一次（D59）：判定链读的就是这一份选择所用的语法，工具随后起的也是这一个可执行文件。
+      // 配置显式写了哪一种而机器上没有时报稳定码并留一条失败记录，不换成另一份——换掉的那一种语法没被读过，
+      // 「跑的是一件 exec」与「这条文本按哪种语法解析出了什么」必须是同一条记录里的两栏。
+      let shell;
+      if (tool.commandArgument !== undefined && typeof args?.[tool.commandArgument] === 'string') {
+        try {
+          shell = resolveShell(config);
+        } catch (error) {
+          await fail(entry, error);
+        }
+        entry.shell = { kind: shell.kind, executable: shell.executable };
+      }
       if (policy) {
-        const verdict = await policy.evaluate({ tool: name, input: args });
+        // 声明了自己能力的那件工具按它给的能力判（D52）：`mcp.call` 这个名字对判定没有意义。
+        const capability = tool.capability?.(args);
+        const verdict = await policy.evaluate({ tool: name, input: args, target: network, shell, capability });
         if (verdict.decision !== 'allow') {
           // 拒绝理由进日志与记录，抛出去的那一份只带错误码（D19 把文本与码分开）。
           logger.log(`tool ${name} is not allowed`, { tool: name, code: verdict.code, reason: verdict.reason });
           await record(entry, refusalOf(verdict.code, verdict.reason));
           throw new KernelError(verdict.code);
         }
+        // 解析出的分段跟着答复回来：记录里要读得出这条文本被读成了哪几段（D59）。
+        if (entry.shell !== undefined) {
+          if (verdict.segments !== undefined) entry.shell.segments = verdict.segments;
+          // 退出码那一段尾巴补不补，看的是判定读出来的那一条：整条文本就是一条简单命令，而且那个名字在这台机器上
+          // 是一个可执行文件。没有判定链时不补——那时没有「这条文本被读成一条原生命令」这个事实，宁可少一个退出码。
+          shell = withNativeExitCode(shell, verdict.segments?.length === 1 ? verdict.segments[0] : undefined);
+          if (shell.tail !== '') entry.shell.tail = shell.tail;
+        }
       }
       let value;
       try {
-        value = await tool.run(args, { ...context, signal: options.signal });
+        value = await tool.run(args, { ...context, signal: options.signal, target: network, shell });
       } catch (error) {
         // 工具没把错误包成内核错误码时由内核接住：统一成一个稳定码，原始错误进 cause，
         // 它自己的消息作为给模型看的那一份说明。半成品工具抛出的异常不该停住循环，

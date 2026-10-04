@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createKernel, findTool, readOnlyTools, readTool, searchTool } from '../src/index.js';
+import { createKernel, findTool, readOnlyTools, readTool, searchTool } from '../dist/index.js';
 
 const repo = dirname(dirname(fileURLToPath(import.meta.url)));
 // npm run build-rg 生成的那一份 ripgrep。这个路径在 .gitignore 里，所以按真实后端做的比较

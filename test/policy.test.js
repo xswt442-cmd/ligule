@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createDecisionChain, createKernel, KernelError } from '../src/index.js';
+import { createDecisionChain, createKernel, KernelError } from '../dist/index.js';
 
 function asked(...answers) {
   const calls = [];
@@ -63,15 +63,15 @@ test('a deny rule wins over an allow rule written earlier in the table', async (
     code: 'policy_denied',
     reason: 'pushing is the host call',
   });
-  assert.deepEqual(await chain.evaluate({ tool: 'exec', input: { command: 'git status' } }), { decision: 'allow' });
+  assert.deepEqual(await chain.evaluate({ tool: 'exec', input: { command: 'git status' } }), { decision: 'allow', segments: ['git status'] });
   assert.equal(calls.length, 0);
 });
 
 test('every segment of a pipeline has to be covered before an asked call is allowed', async () => {
   const { calls, ask } = asked(true);
   const chain = createDecisionChain({ rules: [{ tool: 'exec', decision: 'allow', match: 'git *' }], ask });
-  assert.deepEqual(await chain.evaluate({ tool: 'exec', input: { command: 'git status' } }), { decision: 'allow' });
-  assert.deepEqual(await chain.evaluate({ tool: 'exec', input: { command: 'git status | grep x' } }), { decision: 'allow' });
+  assert.deepEqual(await chain.evaluate({ tool: 'exec', input: { command: 'git status' } }), { decision: 'allow', segments: ['git status'] });
+  assert.deepEqual(await chain.evaluate({ tool: 'exec', input: { command: 'git status | grep x' } }), { decision: 'allow', segments: ['git status', 'grep x'] });
   assert.equal(calls.length, 1, 'only the pipeline needed a decision');
   assert.equal(calls[0].command, 'git status | grep x');
   assert.equal(calls[0].reason, undefined);
@@ -90,7 +90,7 @@ test('a deny rule catches a segment hidden behind a pipe', async () => {
 test('a command the parser cannot fully understand is asked about, with the reason', async () => {
   const { calls, ask } = asked(true);
   const chain = createDecisionChain({ mode: 'auto', ask });
-  assert.deepEqual(await chain.evaluate({ tool: 'exec', input: { command: 'ls -la' } }), { decision: 'allow' });
+  assert.deepEqual(await chain.evaluate({ tool: 'exec', input: { command: 'ls -la' } }), { decision: 'allow', segments: ['ls -la'] });
   assert.equal((await chain.evaluate({ tool: 'exec', input: { command: 'echo $(whoami)' } })).decision, 'allow');
   assert.equal(calls.length, 1, 'the automatic mode does not approve what it cannot parse');
   assert.match(calls[0].reason, /command_substitution/);
@@ -107,7 +107,7 @@ test('content checks still deny in the low-risk automatic mode', async () => {
 test('the automatic mode lets an ordinary call through and still asks for an interpreter', async () => {
   const { calls, ask } = asked(true);
   const chain = createDecisionChain({ mode: 'auto', ask, rules: [{ tool: 'exec', decision: 'allow', match: 'python *' }] });
-  assert.deepEqual(await chain.evaluate({ tool: 'exec', input: { command: 'ls -la' } }), { decision: 'allow' });
+  assert.deepEqual(await chain.evaluate({ tool: 'exec', input: { command: 'ls -la' } }), { decision: 'allow', segments: ['ls -la'] });
   assert.equal((await chain.evaluate({ tool: 'exec', input: { command: 'python run.py' } })).decision, 'allow');
   assert.deepEqual(calls.map((call) => call.command), ['python run.py']);
 });
@@ -115,12 +115,12 @@ test('the automatic mode lets an ordinary call through and still asks for an int
 test('a prefix rule matches whole arguments only, a wildcard rule matches across the rest', async () => {
   const { calls, ask } = asked(true);
   const chain = createDecisionChain({ rules: [{ tool: 'exec', decision: 'allow', match: 'git status' }], ask });
-  assert.deepEqual(await chain.evaluate({ tool: 'exec', input: { command: 'git status' } }), { decision: 'allow' });
-  assert.deepEqual(await chain.evaluate({ tool: 'exec', input: { command: 'git statusfoo' } }), { decision: 'allow' });
+  assert.deepEqual(await chain.evaluate({ tool: 'exec', input: { command: 'git status' } }), { decision: 'allow', segments: ['git status'] });
+  assert.deepEqual(await chain.evaluate({ tool: 'exec', input: { command: 'git statusfoo' } }), { decision: 'allow', segments: ['git statusfoo'] });
   assert.deepEqual(calls.map((call) => call.command), ['git statusfoo']);
 
   const wild = createDecisionChain({ rules: [{ tool: 'exec', decision: 'allow', match: 'git *' }], ask: asked().ask });
-  assert.deepEqual(await wild.evaluate({ tool: 'exec', input: { command: 'git commit -m x' } }), { decision: 'allow' });
+  assert.deepEqual(await wild.evaluate({ tool: 'exec', input: { command: 'git commit -m x' } }), { decision: 'allow', segments: ['git commit -m x'] });
   assert.equal((await wild.evaluate({ tool: 'exec', input: { command: 'github push' } })).code, 'ask_declined');
 });
 
@@ -131,7 +131,7 @@ test('consecutive denials fall back to asking every time', async () => {
   assert.equal((await chain.evaluate({ tool: 'exec', input: { command: 'rm' } })).code, 'guard_denied');
   assert.equal((await chain.evaluate({ tool: 'exec', input: { command: 'rm' } })).code, 'guard_denied');
   assert.equal(chain.mode, 'ask');
-  assert.deepEqual(await chain.evaluate({ tool: 'exec', input: { command: 'ls' } }), { decision: 'allow' });
+  assert.deepEqual(await chain.evaluate({ tool: 'exec', input: { command: 'ls' } }), { decision: 'allow', segments: ['ls'] });
   assert.deepEqual(calls.map((call) => call.command), ['ls']);
 });
 
@@ -179,4 +179,35 @@ test('the kernel runs every call through the decision chain and reports the code
   );
   assert.deepEqual(seen[0], { tool: 'exec', code: 'policy_denied', reason: 'exec is denied by policy' });
   assert.equal(await kernel.call('exec', { command: 'ls' }), 'ran');
+});
+
+// 判定读哪一种语法由 Host 的那一份选择决定（D59）：同一行文本在两个后端下可以得出不同结论。
+const POWERSHELL = { kind: 'powershell', executable: 'pwsh.exe', prefix: ['-Command'], tail: '' };
+
+test('the PowerShell backend judges only its own narrow subset', async () => {
+  const { calls, ask } = asked(true, true);
+  const chain = createDecisionChain({ mode: 'auto', ask });
+  assert.deepEqual(await chain.evaluate({ tool: 'exec', input: { command: 'Get-ChildItem -Force' }, shell: POWERSHELL }), {
+    decision: 'allow',
+    segments: ['Get-ChildItem -Force'],
+  });
+
+  // 管道在 bash 那一档是可以逐段判的连接符，在 PowerShell 这一档不是：管道里过去的是对象，类型只有运行时知道。
+  assert.deepEqual(await chain.evaluate({ tool: 'exec', input: { command: 'git status | grep x' } }), {
+    decision: 'allow',
+    segments: ['git status', 'grep x'],
+  });
+  assert.equal((await chain.evaluate({ tool: 'exec', input: { command: 'git status | grep x' }, shell: POWERSHELL })).decision, 'allow');
+  assert.deepEqual(calls.map((call) => call.command), ['git status | grep x']);
+  assert.match(calls[0].reason, /the powershell command is not fully understood: \|/);
+  // 答复那一次要多看一眼的东西：答的是哪一种语法下的这条文本、跑起来会是哪一个可执行文件。
+  assert.equal(calls[0].shell, 'powershell');
+  assert.equal(calls[0].executable, 'pwsh.exe');
+
+  // 以脚本解释器开头这一段两边都不放（D17 第三条），换后端不把它放宽。
+  assert.equal(
+    (await chain.evaluate({ tool: 'exec', input: { command: 'python -c "print(1)"' }, shell: POWERSHELL })).decision,
+    'allow',
+  );
+  assert.deepEqual(calls.map((call) => call.command), ['git status | grep x', 'python -c "print(1)"']);
 });

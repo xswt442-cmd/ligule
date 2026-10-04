@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createConfig, createKernel, createLoop, createSessionLog, KernelError, KernelRuntimeError } from '../src/index.js';
+import { createConfig, createKernel, createLoop, createSessionLog, KernelError, KernelRuntimeError } from '../dist/index.js';
 
 // 这里交进去的是按 D13 那个形状写的脚本化提供方：本文件测的是循环，不是任何一家端点。
 function scriptedProvider(turns, fallback = [{ type: 'text', text: 'done' }]) {

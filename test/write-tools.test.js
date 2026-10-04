@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import {
   createConfig, createKernel, createObservationLog, createTool, deleteTool, editTool, freedesktopTrash, readTool,
   readOnlyTools, resolveRecycler, writeTool, writeTools,
-} from '../src/index.js';
+} from '../dist/index.js';
 
 async function withWorkspace(run) {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'write-'));

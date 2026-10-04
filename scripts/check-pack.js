@@ -20,6 +20,11 @@ if (!npmCli) {
   throw new Error('run it as `npm run check-pack` - only npm itself can tell Node which file to launch on Windows');
 }
 
+// 发布物里带的是构建出来的 `dist/`（D47）：没先构建就跑这个检查，报出来的是「tarball 缺文件」，看不出缺的其实是那一步构建。
+if (!existsSync(join(repo, 'dist', 'index.js'))) {
+  throw new Error('dist/index.js is missing; run `npm run build` before checking the packaged artifact');
+}
+
 // exports 可以写成字符串，也可以写成带条件的对象，这里把所有字符串取值收齐。
 function collectTargets(value, found = []) {
   if (typeof value === 'string') found.push(value);
@@ -58,21 +63,40 @@ try {
   const consumer = join(work, 'consumer');
   mkdirSync(join(consumer, 'node_modules'), { recursive: true });
   renameSync(shipped, join(consumer, 'node_modules', 'ligule'));
-  // 消费者要能解析到运行时依赖，否则 import 到依赖那一行就断了。把仓库自己的 node_modules 复制过去，
-  // 不联网、不跑第二次安装。
-  // ponytail: 本仓库目前没有 devDependencies，所以这一份正好等于运行时依赖；将来有了开发期依赖，
-  // 它们会一起被带过去，这项检查就弱一档，那时改成按 dependencies 逐棵复制。
+  // 消费者要能解析到运行时依赖，否则 import 到依赖那一行就断了。只复制 `dependencies` 的传递闭包，
+  // 不联网、不跑第二次安装：devDependencies 现在有了（测试用的 MCP 参考服务器），整棵复制过去会让这项检查读不出
+  // 「发布物自己够不够用」——那一条正是它存在的理由。
   const repoModules = join(repo, 'node_modules');
-  if (existsSync(repoModules)) cpSync(repoModules, join(consumer, 'node_modules'), { recursive: true });
+  const needed = new Set(Object.keys(pkg.dependencies ?? {}));
+  for (const name of needed) {
+    const manifest = join(repoModules, name, 'package.json');
+    if (!existsSync(manifest)) continue;
+    for (const dependency of Object.keys(JSON.parse(readFileSync(manifest, 'utf8')).dependencies ?? {})) needed.add(dependency);
+  }
+  for (const name of needed) {
+    const from = join(repoModules, name);
+    if (!existsSync(from)) throw new Error(`${name} is a declared runtime dependency but is not installed; run npm install`);
+    cpSync(from, join(consumer, 'node_modules', name), { recursive: true });
+  }
   writeFileSync(join(consumer, 'package.json'), `${JSON.stringify({ name: 'ligule-consumer', version: '0.0.0', private: true }, null, 2)}\n`);
   writeFileSync(
     join(consumer, 'probe.mjs'),
     [
-      "import { createKernel, KernelError, flagLayer } from 'ligule';",
+      "import { createKernel, createMcpPlugin, createMcpRegistry, flagLayer, KernelError, mcpServerConfigs, parseCommand } from 'ligule';",
       "if (typeof KernelError !== 'function') throw new Error('KernelError is missing from the installed package');",
+      // 两份 tree-sitter 语法是原生插件：装不上时判定只会一路降级成「问」，界面看不出来，所以在这里当场读一次。
+      "if ((await parseCommand('git status')).kind !== 'segments') {",
+      "  throw new Error('the installed package cannot parse bash text: its grammar did not come along');",
+      "}",
+      "if ((await parseCommand('git status', 'powershell')).kind !== 'segments') {",
+      "  throw new Error('the installed package cannot parse PowerShell text: its grammar did not come along');",
+      "}",
       "if (flagLayer(['limits.readBytes = 100']).limits?.readBytes !== 100) {",
       "  throw new Error('the installed package cannot parse a dotted override, its TOML dependency did not come along');",
       "}",
+      // 官方 SDK 是第六条约定依赖：`import 'ligule'` 就会加载它，缺了这里就断，不是等到接服务器才发现。
+      "if (typeof createMcpRegistry !== 'function' || typeof mcpServerConfigs !== 'function') throw new Error('the installed package cannot reach the MCP client layer');",
+      "if (createMcpPlugin(createMcpRegistry(mcpServerConfigs({}))).setup(createKernel()) !== undefined) { /* no servers: nothing registered */ }",
       "const kernel = createKernel();",
       "if (kernel.manifest().length !== 0) throw new Error('the installed kernel ships tools');",
       "const dispose = kernel.register({",

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createPromptAssembly, PROMPT_BOUNDARY } from '../src/index.js';
+import { createPromptAssembly, PROMPT_BOUNDARY } from '../dist/index.js';
 
 test('the whole static section can be replaced and the default text is then absent', () => {
   const assembly = createPromptAssembly({ static: 'the default instructions', replace: 'project instructions' });
