@@ -42,6 +42,7 @@
     "placeholder"
   ],
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.0",
     "smol-toml": "^1.9.0",
     "tree-sitter": "^0.25.1",
     "tree-sitter-bash": "^0.25.1",
@@ -53,6 +54,7 @@
     "react": "^19.3.0"
   },
   "devDependencies": {
+    "@modelcontextprotocol/server-filesystem": "^2026.8.31",
     "@types/node": "^24.19.1",
     "typescript": "^5.9.3"
   }

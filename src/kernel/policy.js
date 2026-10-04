@@ -86,11 +86,14 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       return { consecutive, total };
     },
 
-    async evaluate({ tool, input, target, shell }) {
+    async evaluate({ tool, input, target, shell, capability }) {
       if (typeof tool !== 'string' || tool === '') throw new KernelError('policy_call_tool_required');
+      // 判定看的能力名由工具自己声明（D52）：`mcp.call` 的一次调用真正用的是 `mcp:<服务器>/<工具>`，
+      // 规则表、守卫与问出去的那一句都按这个名字走，登记表里的名字只用于找到这件工具。
+      const named = capability ?? tool;
       const command = commandOf(input);
       const effective = forcedToAsk ? 'ask' : current;
-      const candidates = rules.filter((item) => item.tool === tool);
+      const candidates = rules.filter((item) => item.tool === named);
       // 命令文本先过一次语法解析：能拆成可信的分段就逐段套规则，拆不出来就整条按无法完整处理对待。
       // 读哪一种语法由 Host 的那一份选择决定（D59），判定与执行看的不是同一份东西就没有意义。
       const parsed = command === undefined ? undefined : await parseCommand(command, shell?.kind);
@@ -113,11 +116,11 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       const denied = candidates.find((item) => item.decision === 'deny'
         && (matches(command, item.match) || (segments ?? []).some((segment) => matches(segment, item.match))));
       if (denied) {
-        return deny('policy_denied', denied.reason ?? `${tool} is denied by policy`);
+        return deny('policy_denied', denied.reason ?? `${named} is denied by policy`);
       }
 
       for (const check of guards) {
-        const reason = check({ tool, input, command });
+        const reason = check({ tool: named, input, command });
         if (typeof reason === 'string') return deny('guard_denied', reason);
       }
 
@@ -149,7 +152,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       if (typeof ask !== 'function') return deny('ask_unavailable', reason ?? 'no ask channel is installed');
       // 答复这一次要点头就得多看一眼：同一条文本在两种语法下能自动放行的面积不一样，答的是哪一种、跑的是哪一个可执行文件，
       // 只有 Host 这一侧知道（D59）。没有命令文本的调用不带这两个字段，答复的形状与加这一条之前一样。
-      const question = { tool, input, command, reason };
+      const question = { tool: named, input, command, reason };
       if (shell !== undefined) {
         question.shell = shell.kind;
         question.executable = shell.executable;

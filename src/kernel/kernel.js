@@ -116,6 +116,8 @@ export function createKernel(options = {}) {
         disclosure: tool.disclosure === true,
         targetArgument: typeof tool.targetArgument === 'string' ? tool.targetArgument : undefined,
         commandArgument: typeof tool.commandArgument === 'string' ? tool.commandArgument : undefined,
+        // 一件工具可以声明「这一次调用真正用的能力是什么」：MCP 的两件固定工具靠它把 `mcp:<服务器>/<工具>` 交出去（D52）。
+        capability: typeof tool.capability === 'function' ? tool.capability : undefined,
         run: tool.run,
       };
       tools.set(tool.name, entry);
@@ -191,7 +193,9 @@ export function createKernel(options = {}) {
         entry.shell = { kind: shell.kind, executable: shell.executable };
       }
       if (policy) {
-        const verdict = await policy.evaluate({ tool: name, input: args, target: network, shell });
+        // 声明了自己能力的那件工具按它给的能力判（D52）：`mcp.call` 这个名字对判定没有意义。
+        const capability = tool.capability?.(args);
+        const verdict = await policy.evaluate({ tool: name, input: args, target: network, shell, capability });
         if (verdict.decision !== 'allow') {
           // 拒绝理由进日志与记录，抛出去的那一份只带错误码（D19 把文本与码分开）。
           logger.log(`tool ${name} is not allowed`, { tool: name, code: verdict.code, reason: verdict.reason });

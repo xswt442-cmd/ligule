@@ -20,6 +20,8 @@ import { createLoop, DEFAULT_LOOP_LIMITS } from '../kernel/loop.js';
 import { minimalPlugin } from '../tools/minimal.js';
 import { networkPlugin } from '../tools/network.js';
 import { createSkillPlugin } from '../tools/skill.js';
+import { createMcpPlugin } from '../tools/mcp.js';
+import { createMcpRegistry, mcpServerConfigs } from '../capability/mcp.js';
 import { createMessagesProvider } from '../model/messages.js';
 import { createChatCompletionsProvider } from '../model/chat-completions.js';
 import { DEFAULT_RETRY } from '../model/http.js';
@@ -120,6 +122,8 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
   if (typeof config.boundary !== 'string' || config.boundary === '') throw new KernelError('host_boundary_required');
   if (typeof provider?.stream !== 'function') throw new KernelError('host_provider_required');
   if (modeName !== undefined && modePaths === undefined) throw new KernelError('host_mode_paths_required');
+  // MCP 的配置在装载这一刻就校验：一条写法不对的服务器配置不该等到模型第一次调用才炸（D60）。
+  const mcpConfigs = mcpServerConfigs(config);
   const directory = sessionDirectoryOf(config);
   const sessions = new Map();
 
@@ -178,13 +182,15 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       logger?.log?.('skill is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
     }
     const loaded = skills.skills.length === 0 ? plugins : [...plugins, createSkillPlugin(skills)];
+    // MCP 的两件固定工具按配置里有没有服务器登记（D52、D60）：一件都没配时这一格是空的，模型可见清单不涨。
+    const mcp = createMcpRegistry(mcpConfigs);
     // 提示模板也是装载侧扫出来的事实（D45）：两处目录，靠近仓库的那一份胜出。展开发生在这一侧，
     // 三个客户端因此不必各写一份替换规则（D54）。
     const templates = templateRegistry ?? await discoverTemplates(templateDirectories(config.boundary));
     for (const diagnostic of templates.diagnostics) {
       logger?.log?.('prompt template is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
     }
-    const assembly = loadAssembly(kernel, loaded);
+    const assembly = loadAssembly(kernel, [...loaded, createMcpPlugin(mcp)]);
     // 提示词的组装器先建好：扩展登记的那几段要进这一份，模式 `prompt` 那一格挑的也就是这几段（D35、D46）。
     const prompt = createPromptAssembly({ static: config.prompt?.static ?? '' });
     // 项目指令文件那四层是装载侧交给提示词的一段（D10、第 9.5 步留下的那一半）：
@@ -281,7 +287,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       limits: loopLimitsOf(config),
     });
     // 一份会话一份状态，审批的等待与正在跑的那一轮都记在这里。
-    return Object.assign(state, { chain, kernel, assembly, extensions: installedExtensions, loop, templates });
+    return Object.assign(state, { chain, kernel, assembly, extensions: installedExtensions, mcp, loop, templates });
   }
 
   return {
@@ -404,6 +410,8 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       }
       // 后装的先撤：扩展在插件之后登记，撤的顺序反过来，两边都不留半截。
       for (const state of sessions.values()) {
+        // 关子进程不等它：release() 是同步的，一个不响的服务器不该把退出这条路堵住。
+        state.mcp.close().catch(() => undefined);
         state.extensions.dispose();
         state.assembly.dispose();
       }
