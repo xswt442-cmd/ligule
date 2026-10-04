@@ -406,3 +406,25 @@ test('one real round trip: the second request body is what the record rebuilds i
     await rm(root, { recursive: true, force: true });
   }
 });
+
+// 端点报回的用量作为一条 usage 事件交出去：压缩的那一条压力判据要拿它修正本地估算（D75）。
+// 这一种形状把它拆在两处，输入的在 message_start（含缓存里读回来的那一段），输出的在 message_delta。
+test('the usage the endpoint reports comes back as one event at the end', async () => {
+  const turn = [
+    { type: 'message_start', message: { usage: { input_tokens: 1200, cache_read_input_tokens: 300, output_tokens: 5 } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', usage: { output_tokens: 7 } },
+    { type: 'message_stop' },
+  ];
+  await withEndpoint(async (attempt, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(sseBody(turn));
+  }, async (baseUrl) => {
+    assert.deepEqual(await collect(provider(baseUrl).stream({ system: '', tools: [], messages: [] })), [
+      { type: 'text', text: 'hi' },
+      { type: 'usage', input: 1500, output: 7 },
+    ]);
+  });
+});

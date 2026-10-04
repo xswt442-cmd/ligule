@@ -93,10 +93,18 @@ export function createMessagesProvider({
 
     const blocks = new Map();
     let started = false;
+    // 用量攒在这里，流收尾时才交一条：这一种形状把它拆在两处——`message_start` 给输入的，`message_delta` 给输出的。
+    let inputTokens = 0;
+    let outputTokens = 0;
     for await (const event of parseSse(response.body)) {
       // 端点可以增加自己的事件类型，带内容的那几类之外的都跳过。
       if (event.type === 'message_start') {
         started = true;
+        const usage = event.message?.usage ?? {};
+        // 窗口占的是这几段之和：缓存里读回来的那一段同样是这一轮请求的上下文（压缩的压力线要看它）。
+        inputTokens = Number(usage.input_tokens ?? 0) + Number(usage.cache_read_input_tokens ?? 0)
+          + Number(usage.cache_creation_input_tokens ?? 0);
+        outputTokens = Number(usage.output_tokens ?? 0);
         continue;
       }
       if (!started) throw new KernelError('provider_stream_invalid', { detail: 'an event precedes message_start' });
@@ -132,8 +140,12 @@ export function createMessagesProvider({
         blocks.delete(event.index);
         if (block.kind !== 'tool') continue;
         yield { type: 'tool-call', id: block.id, name: block.name, args: parseArgs(block.json) };
+      } else if (event.type === 'message_delta') {
+        outputTokens = Number(event.usage?.output_tokens ?? outputTokens);
       }
     }
+    // 一条都没报回来时不交这一条：压缩的那一条判据宁可沿用本地估算，也不把一个 0 当成真实用量。
+    if (inputTokens > 0 || outputTokens > 0) yield { type: 'usage', input: inputTokens, output: outputTokens };
   }
 
   const provider = {

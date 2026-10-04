@@ -147,3 +147,21 @@ test('the declared limits of this form can be lowered by config but not raised',
   );
   assert.throws(() => chatCompletionsCapabilities({ vision: true }), (error) => error.code === 'provider_capability_unknown');
 });
+
+// 流式也要把用量要回来（压缩的那一条压力判据看的是端点真实报回的那一份，D75）：
+// 那一族端点不写 stream_options 就不交 usage，而它落在一条没有 choices 的收尾分片上。
+test('a streamed answer asks for usage and hands back the one it got', async () => {
+  await withEndpoint(async (response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(sseBody([
+      { choices: [{ index: 0, delta: { content: 'hi' } }] },
+      { choices: [], usage: { prompt_tokens: 900, completion_tokens: 12 } },
+    ]));
+  }, async (baseUrl, requests) => {
+    assert.deepEqual(await collect(provider(baseUrl).stream({ system: '', tools: [], messages: [{ role: 'user', text: 'x' }] })), [
+      { type: 'text', text: 'hi' },
+      { type: 'usage', input: 900, output: 12 },
+    ]);
+    assert.deepEqual(requests[0].body.stream_options, { include_usage: true });
+  });
+});
