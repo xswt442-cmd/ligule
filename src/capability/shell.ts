@@ -2,7 +2,7 @@
 // `auto` 按平台探测挑一份。选择要进会话记录（种类 + 实际解析出来的可执行文件），因为判定链读的是那一种语法下的解析结果。
 // 探测不动用进程：已知位置直接 stat，其余按 PATH 逐目录 stat（顺序照 pi，`pi/packages/coding-agent/src/utils/shell.ts:76-119`）。
 import { existsSync } from 'node:fs';
-import { delimiter, join } from 'node:path';
+import { delimiter, join, win32 } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 
 export type ShellKind = 'bash' | 'powershell';
@@ -38,7 +38,9 @@ const BASH_PREFIX = ['-c'];
 const POWERSHELL_TAIL = '; exit $LASTEXITCODE';
 
 function known(directory: string | undefined, ...parts: string[]): string | undefined {
-  return directory === undefined || directory === '' ? undefined : join(directory, ...parts);
+  // 这些位置属于目标平台那一台 Windows 机器，与本项目跑在什么平台上无关，所以按 Windows 的规则拼：
+  // 用平台自己的 `join` 在 POSIX 上会拼出 `C:\Program Files/Git/bin/bash.exe` 那种两可的形状，谁都不认。
+  return directory === undefined || directory === '' ? undefined : win32.join(directory, ...parts);
 }
 
 // 名字里带路径分隔符的当成一个位置直接看，其余按 PATH 逐目录找。
