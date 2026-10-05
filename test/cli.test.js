@@ -151,3 +151,26 @@ test('policy summarises the decisions one session recorded', () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// 第 44 步的验收：命令行交出来的那几行与协议 `sessions.list` 交出去的是同一批字段，
+// 两边都读同一个扫描器，界面那一边不必自己再拼一遍（D73）。
+test('the printed session list is the same rows the scanner produces', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ligule-cli-sessions-'));
+  const directory = join(root, '.ligule', 'sessions');
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, 's-1.jsonl'), [
+    JSON.stringify({ kind: 'session', formatVersion: 1, sessionId: 's-1', projectRoot: root, createdAt: '2026-10-05T00:00:00.000Z' }),
+    JSON.stringify({ seq: 0, kind: 'user', text: 'go' }),
+    JSON.stringify({ seq: 1, kind: 'assistant', text: '', toolCalls: [{ id: 'c', name: 'exec', args: { command: 'make' } }] }),
+  ].join('\n') + '\n');
+  try {
+    const { listSessions } = await import('../dist/index.js');
+    const printed = capture('sessions', '--json', '--config', `boundary = ${JSON.stringify(root)}`);
+    assert.equal(printed.ok, true, printed.stderr);
+    assert.deepEqual(JSON.parse(printed.stdout), await listSessions(directory),
+      '逐字段相同，包括那条没结果的派发');
+    assert.equal(JSON.parse(printed.stdout)[0].unanswered, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
