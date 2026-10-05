@@ -53,6 +53,8 @@ async function withEndpoint(run) {
 
 // 起一个 Host 子进程，并在它的标准输入输出两端装好这条协议的客户端。
 // --config 的值是一段 TOML，所以字符串要带引号（D8 那一条装载规则）。
+// HOME 与 USERPROFILE 指到这个临时目录：命令行为读真实主目录下的用户层配置，那一份属于这台机器，
+// 它写了 `model.apiKeyEnv` 就会盖掉这里设的 `LIGULE_API_KEY`，本机配了什么测试就跟着变红。
 function startHost(directory, baseUrl) {
   const child = spawn(process.execPath, [
     CLI, 'host',
@@ -60,7 +62,7 @@ function startHost(directory, baseUrl) {
     '--config', `model.baseURL="${baseUrl}"`,
     '--config', 'model.model="test-model"',
     '--config', 'policy.mode="ask"',
-  ], { cwd: directory, env: { ...process.env, LIGULE_API_KEY: 'test-key' } });
+  ], { cwd: directory, env: { ...process.env, HOME: directory, USERPROFILE: directory, LIGULE_API_KEY: 'test-key' } });
   const stderr = [];
   child.stderr.setEncoding('utf8');
   child.stderr.on('data', (chunk) => stderr.push(chunk));
@@ -250,7 +252,7 @@ async function runCli(directory, answer) {
       '--config', `model.baseURL="${baseUrl}"`,
       '--config', 'model.model="test-model"',
       '--config', 'policy.mode="ask"',
-    ], { cwd: directory, env: { ...process.env, LIGULE_API_KEY: 'test-key' } });
+    ], { cwd: directory, env: { ...process.env, HOME: directory, USERPROFILE: directory, LIGULE_API_KEY: 'test-key' } });
     const written = { stdout: '', stderr: '' };
     // 只答一次：提示里那段字样在之后的每一个数据块上都还在，不记这一次就会对着已经关掉的管道再写一遍。
     let answered = false;

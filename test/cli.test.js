@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -10,9 +10,16 @@ const repo = dirname(dirname(fileURLToPath(import.meta.url)));
 // 命令行按构建产物验（D47）：src/ 里有 .ts，源码那一份不能直接跑，跑起来的那一份就是发布出去的那一份。
 const cli = join(repo, 'dist', 'cli.js');
 
+// 每一次 spawn 出去的命令行都会读真实主目录下的用户层配置，那一份属于这台机器而不是这份仓库：
+// 它写了 `model.apiKeyEnv` 就会盖掉测试自己设的 `LIGULE_API_KEY`，于是本机配了什么，测试就跟着变红。
+// 所以把 HOME 与 USERPROFILE 指到一个空的临时目录，用户层读到的是不存在。
+const isolatedHome = mkdtempSync(join(tmpdir(), 'ligule-cli-home-'));
+const childEnv = { ...process.env, HOME: isolatedHome, USERPROFILE: isolatedHome };
+after(() => rmSync(isolatedHome, { recursive: true, force: true }));
+
 function capture(...args) {
   try {
-    return { ok: true, stdout: execFileSync(process.execPath, [cli, ...args], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }) };
+    return { ok: true, stdout: execFileSync(process.execPath, [cli, ...args], { cwd: repo, encoding: 'utf8', env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] }) };
   } catch (error) {
     return { ok: false, stdout: error.stdout, stderr: error.stderr, status: error.status };
   }
