@@ -5,7 +5,10 @@ import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { chooseResumeMode, createSessionLog, listSessions, loadMode, sessionDirectory } from '../dist/index.js';
+import {
+  chooseResumeMode, createConfig, createConnection, createMemoryConnectionPair, createSessionLog, listSessions,
+  loadMode, MESSAGES_CAPABILITIES, modeDirectories, serveHost, sessionDirectory,
+} from '../dist/index.js';
 
 const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
 
@@ -95,4 +98,74 @@ test('a resume takes the mode the session last ran under, and a changed list is 
       && /pass --mode to choose/.test(error.detail),
     '名字对得上而内容变了要报出来，不静默换成磁盘上那一份',
   );
+});
+
+const provider = {
+  capabilities: MESSAGES_CAPABILITIES,
+  model: 'test-model',
+  async *stream() {
+    yield { type: 'text', text: 'ok' };
+  },
+};
+
+// 第 44 步：列表与恢复这两件事都从宿主那一边出去，界面不必自己去读记录目录，也不必自己算那一份模式清单。
+async function withHost(root, run) {
+  const config = createConfig({
+    user: {
+      boundary: root,
+      model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model' },
+      policy: { mode: 'auto' },
+    },
+  });
+  const pair = createMemoryConnectionPair();
+  // 装配那一份带着 full：打开记录时换成哪一份，是宿主按那一份记录定的，不是这里给的这一个名字。
+  const host = serveHost({
+    input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy,
+    modeName: 'full', modePaths: modeDirectories(root, shippedModes, join(root, 'home')),
+  });
+  const connection = createConnection(pair.client);
+  try {
+    return await run(connection, host);
+  } finally {
+    pair.client.output.end();
+    host.release();
+  }
+}
+
+test('the host hands out the listing and resumes under the mode that record last ran', async () => {
+  await withSessions(async (root, directory) => {
+    const modePaths = modeDirectories(root, shippedModes, join(root, 'home'));
+    const minimal = await loadMode('minimal', modePaths);
+    const ran = createSessionLog({ directory, id: 'ran', meta: { projectRoot: root } });
+    await ran.append({ kind: 'mode', name: 'minimal', layer: 'shipped', path: minimal.path, tools: minimal.tools, digest: minimal.digest });
+    await ran.append({ kind: 'user', text: 'go' });
+    // 那一份 TOML 在跑过之后被人改过一个字：记录里的摘要与磁盘上的对不上。
+    const moved = createSessionLog({ directory, id: 'moved', meta: { projectRoot: root } });
+    await moved.append({ kind: 'mode', name: 'minimal', layer: 'shipped', path: minimal.path, tools: minimal.tools, digest: 'stale111' });
+    await moved.append({ kind: 'user', text: 'go' });
+
+    await withHost(root, async (connection) => {
+      const listed = await connection.request('sessions.list', {});
+      assert.deepEqual(listed.sessions.map((item) => item.id).sort(), ['moved', 'ran'], '两份都在，界面不用自己扫那一份目录');
+      assert.equal(listed.sessions.every((item) => item.mode?.name === 'minimal'), true, '列表里带着各自最后生效的那一份模式清单');
+      assert.equal((await connection.request('sessions.list', { projectRoot: root })).sessions.length, 2, '按项目根过滤留下这个根下的那两份');
+      assert.deepEqual((await connection.request('sessions.list', { projectRoot: 'nowhere' })).sessions, []);
+      assert.equal((await connection.request('sessions.list', { limit: 1 })).sessions.length, 1);
+      await assert.rejects(connection.request('sessions.list', { limit: 0 }), (error) => error.code === 'protocol_args_invalid',
+        '条数写 0 是自己跟自己矛盾，不接');
+
+      // 宿主装配时带着 full，打开那一份记录时用的却是记录里最后生效的 minimal（D78）。
+      await connection.request('session.open', { sessionId: 'ran' });
+      assert.equal((await connection.request('status.get', { sessionId: 'ran' })).mode, 'minimal');
+      // 摘要变了要在这里报出来，让客户端指名一份再来——不静默换成磁盘上现在那一份，也不静默退回缺省。
+      await assert.rejects(connection.request('session.open', { sessionId: 'moved' }),
+        (error) => error.code === 'resume_mode_changed' && /pass --mode to choose/.test(error.detail));
+    });
+
+    // 客户端指名了一份就照那一份，记录里那条不再比对。
+    await withHost(root, async (connection) => {
+      await connection.request('session.open', { sessionId: 'ran', mode: 'full' });
+      assert.equal((await connection.request('status.get', { sessionId: 'ran' })).mode, 'full');
+    });
+  });
 });

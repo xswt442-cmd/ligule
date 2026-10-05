@@ -14,8 +14,28 @@ export const METHODS = Object.freeze({
     parameters: { type: 'object', properties: {}, description: 'creating a session takes no argument' },
   },
   'session.open': {
-    description: 'Resume a session whose record is already on disk',
-    parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
+    description: 'Resume a session whose record is already on disk; without a mode the Host takes the one last in force in that record',
+    parameters: {
+      type: 'object',
+      properties: {
+        sessionId: SESSION_ID,
+        mode: { type: 'string', description: 'the mode to resume with, in place of the one that record carries' },
+      },
+      required: ['sessionId'],
+    },
+  },
+  // 第三条只为界面多出来的方法（前两条是 `mode.set` D65 与 `session.compact` D83）：会话列表扫的是记录目录，
+  // 那是宿主那一侧的事实源，界面自己不去开盘。
+  'sessions.list': {
+    description: 'List sessions already on disk, most recently written first, so a client can pick one to resume',
+    parameters: {
+      type: 'object',
+      properties: {
+        projectRoot: { type: 'string', description: 'only sessions opened against this project root' },
+        limit: { type: 'integer', description: 'stop after this many rows', minimum: 1 },
+      },
+      description: 'listing sessions takes no argument; both filters are optional',
+    },
   },
   'session.read': {
     description: 'Read the events of an open session, oldest first, so a client that arrives late can show what happened',

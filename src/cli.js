@@ -10,11 +10,11 @@ import { createConfig } from './kernel/config.js';
 import { loadConfigLayers } from './kernel/config-file.js';
 import { createKernel } from './kernel/kernel.js';
 import { loadAssembly } from './kernel/assembly.js';
-import { DEFAULT_MODE, loadMode, modeDirectories } from './kernel/modes.js';
+import { DEFAULT_MODE, modeDirectories } from './kernel/modes.js';
 import { extensionSources } from './kernel/extensions.js';
 import { discoverSkills, skillDirectories } from './kernel/skills.js';
 import { createSessionLog } from './session/session.js';
-import { chooseResumeMode, listSessions, sessionDirectory } from './session/list.js';
+import { listSessions, sessionDirectory } from './session/list.js';
 import { formatVerdicts, summarizeVerdicts } from './session/verdicts.js';
 import { minimalPlugin } from './tools/minimal.js';
 import { networkPlugin } from './tools/network.js';
@@ -185,35 +185,17 @@ async function runOneRound(config, selection, extensions, text, sessionId) {
   };
   try {
     // 给了 id 就是接着那一份记录往下走：记录不在就是没有这次会话，不新建一份空记录顶上去（D73）。
+    // 用哪一份模式清单由宿主定（D78、第 44 步）：`--mode` 写了就作为那一个参数递过去，
+    // 没写时宿主取记录里最后生效的那一条并比它的摘要，这一侧不再另算一遍。
     const opened = sessionId === undefined
       ? await host.handle({ method: 'session.create', params: {} }, connection)
-      : await host.handle({ method: 'session.open', params: { sessionId } }, connection);
+      : await host.handle({ method: 'session.open', params: { sessionId, ...(modeFlag === undefined ? {} : { mode: modeFlag }) } }, connection);
     const result = await host.handle({ method: 'run.start', params: { sessionId: opened.sessionId, input: text } }, connection);
     console.error(`session ${opened.sessionId}: ${result.iterations} iterations, ${result.modelCalls} model calls`);
   } finally {
     approvals.close();
     host.release();
   }
-}
-
-// 恢复一次会话时用哪一份模式清单：`--mode` 写了就照它来，否则取记录里最后生效的那一条（D78）。
-// 名字对得上而摘要变了（那份 TOML 被人改过）要报出来并要求显式选一次——静默退回随包的 minimal
-// 等于在人选过的范围之外决定这一次能用什么。
-async function modeForResume(config, sessionId) {
-  const modePaths = modeDirectories(process.cwd(), shippedModes);
-  if (modeFlag !== undefined) return { modeName: modeFlag, modePaths };
-  const record = createSessionLog({ directory: sessionDirectory(config), id: sessionId });
-  const last = (await record.read()).filter((event) => event.kind === 'mode').at(-1);
-  // 名字在那三层里找不到时 `loadMode` 报 `mode_unknown`，并把找过的位置一起说出去（D44 那条判据 reused）。
-  const file = last === undefined ? undefined : await loadMode(String(last.name), modePaths);
-  return {
-    modeName: chooseResumeMode({
-      recorded: last === undefined ? undefined : { name: String(last.name), digest: last.digest },
-      loaded: file,
-      fallback: config.mode ?? DEFAULT_MODE,
-    }),
-    modePaths,
-  };
 }
 
 if (missingFlagValue) {
@@ -308,7 +290,7 @@ if (missingFlagValue) {
   } else {
     try {
       const { config, extensions } = await configSnapshot();
-      await runOneRound(config, await modeForResume(config, sessionId), extensions, text, sessionId);
+      await runOneRound(config, resolveMode(config), extensions, text, sessionId);
     } catch (error) {
       printFailure(error.code ?? 'cli_resume_failed', error.detail);
     }

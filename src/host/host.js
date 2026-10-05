@@ -8,11 +8,11 @@ import { KernelError } from '../kernel/error.js';
 import { createKernel } from '../kernel/kernel.js';
 import { loadAssembly } from '../kernel/assembly.js';
 import { loadExtensions } from '../kernel/extensions.js';
-import { applyMode, loadMode } from '../kernel/modes.js';
+import { applyMode, DEFAULT_MODE, loadMode } from '../kernel/modes.js';
 import { createDecisionChain } from '../kernel/policy.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { createSessionLog } from '../session/session.js';
-import { sessionDirectory } from '../session/list.js';
+import { chooseResumeMode, listSessions, sessionDirectory } from '../session/list.js';
 import { createCompaction } from '../session/compaction.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
 import { limitsOf } from '../capability/limits.js';
@@ -174,7 +174,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
   // ask 是这条会话的审批通道：客户端不在答复里说允许，就按不允许处理（D16 的询问走内核对外接口）。
   // 取消落在审批还没答复的时候要把这个问题收掉：答复不会再来了，而判定链在这里抛出，
   // 那一次调用就在记录里没人回答，之后每一轮都拼不出合法请求体（D11）。
-  async function build(id, connection, recover = false) {
+  async function build(id, connection, recover = false, explicitMode) {
     // 扩展收事件的那一条通道（D37）：刚落盘的这一条同时送给客户端与扩展，两边读的是同一份事实（I5）。
     const listeners = [];
     // 首行那份元信息在第一次落笔时才写，所以模式身份用一条取当前值的函数给：建会话的那一刻常常还没选过模式（D73）。
@@ -345,7 +345,21 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       const repaired = await repairUnresolvedCalls(session, { readOnly: new Set(kernel.readOnly()) });
       for (const event of repaired) logger?.log?.('unanswered tool call repaired', { sessionId: id, callId: event.callId, tool: event.tool });
     }
-    if (modeName !== undefined) await state.adopt(await loadMode(modeName, modePaths));
+    // 用哪一份模式清单：客户端显式选了就用它；打开一份已有记录时取记录里最后生效的那一条并比它的摘要（D78）；
+    // 两者都没有时保持装配时那一份。静默换成磁盘上现在这一份等于在别人没选过的范围里决定这一次能用什么，
+    // 所以摘要变了要报 `resume_mode_changed` 并要求显式选一次，而不是悄悄沿用。
+    let wanted = explicitMode ?? modeName;
+    if (explicitMode === undefined && recover && modePaths !== undefined) {
+      const last = (await session.read()).filter((event) => event.kind === 'mode').at(-1);
+      if (last !== undefined) {
+        wanted = chooseResumeMode({
+          recorded: { name: String(last.name), digest: last.digest },
+          loaded: await loadMode(String(last.name), modePaths),
+          fallback: modeName ?? DEFAULT_MODE,
+        });
+      }
+    }
+    if (wanted !== undefined) await state.adopt(await loadMode(wanted, modePaths));
     // 压缩挂在这一份会话上（D75）：两条触发都在循环里问它，摘要那一次调用走未装饰的提供方——
     // 它的流式增量不该转给客户端，而它写完检查点就退出这一轮的事，事件日志一条都不动。
     // 配置没写 `limits.contextTokens` 时这一件是 null：窗口大小是模型事实，不猜，正常聊天照跑。
@@ -392,9 +406,15 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           }
           // 同一条连接上开两次同一个 id 会丢掉前一份状态：那一轮还在跑，取消与撤插件都没了对象。
           if (sessions.has(sessionId)) throw new KernelError('session_already_open', { detail: sessionId });
-          const state = await build(sessionId, connection, true);
+          const state = await build(sessionId, connection, true, message.params.mode);
           sessions.set(sessionId, state);
           return { sessionId };
+        }
+        case 'sessions.list': {
+          // 与 `ligule sessions` 走的是同一个扫描器（D73）：协议只是把它递到界面那一边，
+          // 记录目录仍然只有宿主这一处开盘。
+          const { projectRoot, limit } = message.params;
+          return { sessions: await listSessions(directory, { projectRoot, limit }) };
         }
         case 'session.read': {
           // 交回的是记录本身：客户端晚到了也能把已经发生过的事画出来（I5）。
