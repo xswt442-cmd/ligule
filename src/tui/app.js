@@ -4,7 +4,7 @@
 // 检查在 test/tui.test.js，不靠真终端也能验；画面本身跑 `ligule tui` 看。
 import { createElement as h, Fragment, useCallback, useEffect, useState } from 'react';
 import { Box, Static, Text, useApp, useInput } from 'ink';
-import { UI_COMMANDS, candidatesOf, findUiCommand, flowGroups, routeInput } from './commands.js';
+import { SESSION_ROWS, UI_COMMANDS, candidatesOf, findUiCommand, flowGroups, resolveSessionId, routeInput, sessionLines } from './commands.js';
 import { markdownLines } from './markdown.js';
 
 const SPINNER = ['⠋', '⠙', '', '⠸', '⠼', '⠴', '⠦', '', '⠇', '⠏'];
@@ -15,7 +15,7 @@ const MODE_LAYERS = { shipped: '随包', user: '全局', project: '项目' };
 const CANDIDATE_ROWS = 6;
 
 // 那几张表与那几个纯函数交给检查里用（test/tui.test.js），界面自己只走这一处出口。
-export { UI_COMMANDS, candidatesOf, displayWidth, findUiCommand, flowGroups, routeInput } from './commands.js';
+export { SESSION_ROWS, UI_COMMANDS, candidatesOf, displayWidth, findUiCommand, flowGroups, resolveSessionId, routeInput, sessionLines } from './commands.js';
 export { markdownLines } from './markdown.js';
 
 // `/help` 画三组：界面命令、宿主交出来的提示模板、按键。前两组在这里只列名字与说明，展开与装载都不归界面。
@@ -350,6 +350,70 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       })();
       return;
     }
+    if (name === 'sessions') {
+      void (async () => {
+        // 列表来自宿主扫的那一份目录（第 34 步那个扫描器）：界面不去开盘，事实源仍然只有那一份（D81 边界一）。
+        const listed = await client.request('sessions.list', { projectRoot: info.boundary, limit: SESSION_ROWS }).catch((error) => error);
+        if (listed.code !== undefined) {
+          push({ kind: 'error', text: `会话列不出来：${listed.code}${listed.detail === undefined ? '' : ` · ${listed.detail}`}` });
+          return;
+        }
+        push({ kind: 'meta', text: sessionLines(listed.sessions, sessionId).join('\n') });
+      })();
+      return;
+    }
+    if (name === 'resume') {
+      if (argument === '') {
+        push({ kind: 'error', text: '/resume 后面要跟一个会话 id（/sessions 里那一串，写开头几段就行）' });
+        return;
+      }
+      // 第二个词是那一份模式清单的名字：摘要变了时 D78 要一次显式的选择，界面上没有 `--mode` 这一格，
+      // 这个位置就是它的等价物——否则那一次拒绝在终端里没有任何走下去的路。
+      const [wanted, chosenMode] = argument.split(/\s+/);
+      void (async () => {
+        const listed = await client.request('sessions.list', { projectRoot: info.boundary }).catch((error) => error);
+        if (listed.code !== undefined) {
+          push({ kind: 'error', text: `会话列不出来：${listed.code}` });
+          return;
+        }
+        const picked = resolveSessionId(wanted, listed.sessions);
+        if (picked.id === undefined) {
+          push({ kind: 'error', text: picked.code === 'tui_session_ambiguous'
+            ? `以 ${wanted} 开头的有好几份，id 多写几段（/sessions 看列表）`
+            : `${wanted} 在这个项目根跑过的会话里对不上任何一份（/sessions 看列表）` });
+          return;
+        }
+        if (picked.id === sessionId) {
+          push({ kind: 'meta', text: '当前就在这一份上，不用接' });
+          return;
+        }
+        // 打开那一份记录时宿主会先补没人回答的派发，再按记录里最后生效的模式清单装配（D72、D78）。
+        const opened = await client.request('session.open', { sessionId: picked.id, ...(chosenMode === undefined ? {} : { mode: chosenMode }) })
+          .catch((error) => error);
+        if (opened.code !== undefined) {
+          push({ kind: 'error', text: `接不上：${opened.code}${opened.detail === undefined ? '' : ` · ${opened.detail}`}`
+            + (opened.code === 'resume_mode_changed' ? `；指名一份再来一次：/resume ${wanted} <模式名>` : '') });
+          return;
+        }
+        const read = await client.request('session.read', { sessionId: picked.id }).catch((error) => error);
+        if (read.code !== undefined) {
+          push({ kind: 'error', text: `接上了但记录读不回来：${read.code}` });
+          return;
+        }
+        setSessionId(picked.id);
+        // 投影从那份记录重建，而不是接着画：换过来的这一份里发生过什么，只有记录说得出（I5）。
+        setRows(read.events.flatMap((event) => projectRecord(event)));
+        setLive({ text: '', reasoning: '' });
+        setDetail(null);
+        const row = listed.sessions.find((item) => item.id === picked.id);
+        push({
+          kind: 'meta',
+          text: `接上会话 ${picked.id.slice(0, 8)}：${read.events.length} 条记录画在下方`
+            + (row === undefined || row.unanswered === 0 ? '' : `；崩溃留下的 ${row.unanswered} 次派发补成了未知结果`),
+        });
+      })();
+      return;
+    }
     if (name === 'tools') {
       void (async () => {
         const current = await client.request('status.get', { sessionId }).catch(() => null);
@@ -480,7 +544,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     push({ kind: 'error', text: `没有这条命令：/${name}（/help 看列表）` });
-  }, [app, client, push, sessionId, status, stdout]);
+  }, [app, client, info, push, sessionId, status, stdout]);
 
   const send = useCallback((text) => {
     const route = routeInput(text, running);
@@ -605,7 +669,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const foldedLive = foldText(live.reasoning, expanded, 1);
 
   return h(Fragment, null,
-    h(Static, { items: rows }, (row, index) => h(Box, { key: index, flexDirection: 'column' }, h(Row, { row, expanded }))),
+    // 一换会话就重画整份：`Static` 只补索引往后新增的行，接上来的那一份记录比当前这一份短时，
+    // 不加这个 key 就一条都画不出来（第 44 步）。会话 id 正是这一串行的归属，拿它当 key 不用另记一个计数。
+    h(Static, { key: sessionId, items: rows }, (row, index) => h(Box, { key: index, flexDirection: 'column' }, h(Row, { row, expanded }))),
     foldedLive.shown === '' ? null : h(Text, { dimColor: true, wrap: 'truncate-end' }, `· 推理 ${foldedLive.shown}${foldedLive.hidden > 0 ? ` …还有 ${foldedLive.hidden} 字` : ''}`),
     live.text === '' ? null : h(Text, { wrap: 'wrap' }, live.text),
     ask === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'yellow', paddingX: 1 },

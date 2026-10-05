@@ -34,6 +34,8 @@ export const UI_COMMANDS: readonly UiCommand[] = Object.freeze([
   { name: 'show', usage: '/show [序号]', text: '把记录里那一条的完整内容画出来，不带序号收起', hint: '[序号]', whenRunning: true },
   { name: 'sub', usage: '/sub [序号]', text: '画出那一次派生执行的整份支线记录，不带序号收起', hint: '[序号]', whenRunning: true },
   { name: 'new', usage: '/new', text: '开一份新会话，画面上方的历史留在终端里', hint: '', whenRunning: false },
+  { name: 'sessions', usage: '/sessions', text: '列出这个项目根下跑过的会话（时间是 UTC）', hint: '', whenRunning: true },
+  { name: 'resume', usage: '/resume <id> [模式名]', text: '接上列出来的那一份会话，id 写开头几段就行；模式名是那一份清单改过之后显式指定用哪一份', hint: '<id> [模式名]', whenRunning: false },
   { name: 'quit', usage: '/quit', text: '退出（Ctrl+C 同样）', hint: '', whenRunning: true },
 ]);
 
@@ -142,4 +144,43 @@ export function flowGroups(groups: readonly HelpGroup[], width: number, gap = 4)
     lines.push(...block.lines);
   }
   return lines;
+}
+
+/** 宿主从记录目录扫出来的那一栏里，界面要画的几格（`sessions.list` 交回的形状，D73）。 */
+export interface SessionRow {
+  readonly id: string;
+  readonly updatedAt: string;
+  readonly events: number;
+  readonly mode: { readonly name: string } | null;
+  readonly unanswered: number;
+}
+
+/** 列表的条数上限：界面上一次画五十行已经把终端滚出一屏，U38 那条「要不要建索引」要的是日常使用的数字。 */
+export const SESSION_ROWS = 20;
+
+// 一栏一行。id 整串写出来，因为 `/resume` 后面要跟的就是这一串；时间是记录文件的写入时间，UTC。
+export function sessionLines(listed: readonly SessionRow[], current = ''): string[] {
+  if (listed.length === 0) return ['这个项目根下还没有跑过的会话'];
+  return listed.map((item) => [
+    item.updatedAt.slice(0, 19).replace('T', ' '),
+    item.id,
+    `${item.events} 条`,
+    `mode:${item.mode?.name ?? '-'}`,
+    item.unanswered > 0 ? `未收尾 ${item.unanswered} 次派发` : '',
+    item.id === current ? '← 正在这一份上' : '',
+  ].filter((cell) => cell !== '').join('  '));
+}
+
+/** 前缀对上的那一份，或者一条说明为什么对不上——猜一份是把人带去他没选过的会话里。 */
+export type SessionPick = { readonly id: string } | { readonly code: 'tui_session_ambiguous' | 'tui_session_not_listed' };
+
+// `ligule sessions` 里那一串 id 太长，敲一半是自然会做的事：在这份列表里唯一对上才算认。
+// 列表按项目根过滤过，所以别的项目根下的会话不会被这一条接走。
+export function resolveSessionId(argument: string, listed: readonly SessionRow[]): SessionPick {
+  const wanted = argument.trim().toLowerCase();
+  const exact = listed.find((item) => item.id.toLowerCase() === wanted);
+  if (exact !== undefined) return { id: exact.id };
+  const prefix = listed.filter((item) => item.id.toLowerCase().startsWith(wanted));
+  if (prefix.length === 1) return { id: prefix[0].id };
+  return { code: prefix.length > 1 ? 'tui_session_ambiguous' : 'tui_session_not_listed' };
 }

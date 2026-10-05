@@ -12,7 +12,7 @@ try {
 }
 
 const options = { skip: missing === '' ? false : missing };
-const { foldText, editDraft, projectRecord, buildStatusLine, contextSegment, findRecord, branchOf, detailTitle, helpLines, routeInput, candidatesOf, displayWidth, flowGroups, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine } = rows;
+const { foldText, editDraft, projectRecord, buildStatusLine, contextSegment, findRecord, branchOf, detailTitle, helpLines, routeInput, candidatesOf, displayWidth, flowGroups, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, resolveSessionId, SESSION_ROWS } = rows;
 
 test('a record becomes the rows the terminal shows, one line each', options, () => {
   assert.deepEqual(projectRecord({ kind: 'user', text: '读一下' }), [{ kind: 'question', text: '读一下' }]);
@@ -491,4 +491,88 @@ test('the status line reports context pressure only when a window is written', o
   assert.match(draw(64), /ctx:~/);
   assert.doesNotMatch(draw(40), /ctx:/);
   assert.ok(UI_COMMANDS.some((command) => command.name === 'compact'), '/compact 在命令表里');
+});
+
+// 第 44 步：`/sessions` 画的那几行与 `/resume` 认的那个 id。列表来自宿主，界面不去开盘（D81 边界一）。
+test('the session listing is one row per record and an id prefix resolves to one of them', options, () => {
+  const listed = [
+    { id: '5f3c1234-aaaa-bbbb-cccc-dddddddddddd', updatedAt: '2026-10-05T09:12:34.567Z', events: 12, mode: { name: 'full' }, unanswered: 0 },
+    { id: '5f3d9999-aaaa-bbbb-cccc-dddddddddddd', updatedAt: '2026-10-04T08:00:00.000Z', events: 3, mode: null, unanswered: 2 },
+  ];
+  assert.deepEqual(sessionLines(listed, '5f3d9999-aaaa-bbbb-cccc-dddddddddddd'), [
+    '2026-10-05 09:12:34  5f3c1234-aaaa-bbbb-cccc-dddddddddddd  12 条  mode:full',
+    '2026-10-04 08:00:00  5f3d9999-aaaa-bbbb-cccc-dddddddddddd  3 条  mode:-  未收尾 2 次派发  ← 正在这一份上',
+  ], '时间只到秒、id 整串写出来、没收尾的那几处都画在这一行上');
+  assert.deepEqual(sessionLines([]), ['这个项目根下还没有跑过的会话']);
+  assert.equal(SESSION_ROWS > 0, true);
+
+  assert.equal(resolveSessionId('5f3c', listed).id, listed[0].id, '前缀唯一对上就用那一份');
+  assert.equal(resolveSessionId('5F3C1234-AAAA-bbbb-cccc-dddddddddddd', listed).id, listed[0].id, '整串照抄也对得上，大小写不分');
+  assert.equal(resolveSessionId('5f3', listed).code, 'tui_session_ambiguous', '对上两份就不猜，让人多写几段');
+  assert.equal(resolveSessionId('nope', listed).code, 'tui_session_not_listed');
+  assert.equal(resolveSessionId('', listed).code, 'tui_session_ambiguous', '空的那一段对上的是一份都对不上，而不是随便挑一份');
+
+  // 换会话把人从正在跑的那一轮带走，那一轮落下来的事件从此没人看；只读的那一条不受影响。
+  assert.equal(routeInput('/resume 5f3c', true).kind, 'blocked');
+  assert.equal(routeInput('/new', true).kind, 'blocked');
+  assert.equal(routeInput('/sessions', true).kind, 'command');
+});
+
+// 接上另一份记录时画面上换的是整份投影：那几行来自记录，不来自界面自己留着的东西（I5）。
+// 这里先在当前会话上画一行，再换过去——少了 `Static` 上那个 key，短时的那一份一条都画不出来。
+test('resuming a session repaints that record as the transcript', options, async () => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { setTimeout: delay } = await import('node:timers/promises');
+  const { App } = await import('../dist/tui/app.js');
+
+  const stdout = new PassThrough();
+  stdout.columns = 140;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+
+  const resumed = '5f3c1234-aaaa-bbbb-cccc-dddddddddddd';
+  const calls = [];
+  let notify = () => {};
+  const client = {
+    onNotification: (handler) => { notify = handler; },
+    onRequest() {},
+    request: async (method, params) => {
+      calls.push({ method, params });
+      if (method === 'sessions.list') return { sessions: [{ id: resumed, updatedAt: '2026-10-05T09:12:34.567Z', events: 2, mode: { name: 'full' }, unanswered: 0 }] };
+      if (method === 'session.open') return { sessionId: params.sessionId };
+      if (method === 'session.read') return { sessionId: params.sessionId, events: [{ kind: 'user', text: '那一份里问过的事' }, { kind: 'assistant', text: '那一份里答过的话' }] };
+      return { sessionId: params.sessionId, running: false, mode: 'full', modeLayer: 'shipped', pendingMode: null, policy: 'ask', tools: ['read'], eventCount: 2, denials: { consecutive: 0, total: 0 }, templates: [] };
+    },
+    reply: () => {},
+  };
+  const instance = render(createElement(App, { client, sessionId: 'current', info: { boundary: 'E:/work' }, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
+  try {
+    await delay(300);
+    notify({ notify: 'event', sessionId: 'current', event: { seq: 0, kind: 'user', text: '当前这一份里问过的事' } });
+    notify({ notify: 'event', sessionId: 'current', event: { seq: 1, kind: 'assistant', text: '当前这一份里答过的话' } });
+    await delay(300);
+
+    stdin.write('/sessions');
+    await delay(100);
+    stdin.write('\r');
+    await delay(300);
+    assert.match(painted, new RegExp(resumed), '列表里看得见那一份的 id');
+    assert.doesNotMatch(painted, /项目根下还没有跑过的会话/);
+
+    stdin.write('/resume 5f3c');
+    await delay(100);
+    stdin.write('\r');
+    await delay(500);
+    const frame = painted.split('\x1B[?2026h').pop() ?? '';
+    assert.equal(calls.find((call) => call.method === 'session.open')?.params.sessionId, resumed, '前缀在宿主列出来的那几份里对上了才打开');
+    assert.match(frame, /那一份里答过的话/, '接上来的那一份记录整份重画在画面上');
+    assert.doesNotMatch(frame, /当前这一份里答过的话/, '换过来之后画面上不再是上一份的投影');
+    assert.match(frame, /会话 5f3c1234/, '状态行说的是现在这一份会话');
+  } finally {
+    instance.unmount();
+  }
 });
