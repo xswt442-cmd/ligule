@@ -5,6 +5,8 @@
 import { createElement as h, Fragment, useCallback, useEffect, useState } from 'react';
 import { Box, Static, Text, useApp, useInput } from 'ink';
 import { SESSION_ROWS, UI_COMMANDS, candidatesOf, findUiCommand, flowGroups, resolveSessionId, routeInput, sessionLines } from './commands.js';
+import { pushHistory, searchHistory } from './history.js';
+import { editInExternalEditor } from './editor.js';
 import { markdownLines } from './markdown.js';
 
 const SPINNER = ['⠋', '⠙', '', '⠸', '⠼', '⠴', '⠦', '', '⠇', '⠏'];
@@ -24,6 +26,8 @@ const KEYS = [
   { key: 'Shift+Enter', action: '换行' },
   { key: 'Tab', action: '补全清单里选中的那一条' },
   { key: '↑ ↓', action: '在清单里选，清单不在时翻输入历史' },
+  { key: 'Ctrl+R', action: '反查发过的那几句' },
+  { key: 'Ctrl+G', action: '把草稿交给 EDITOR 里那一份编辑器' },
   { key: 'Esc', action: '收起清单；跑着的时候打断这一轮' },
   { key: 'Ctrl+O', action: '展开或收起长内容' },
   { key: 'Ctrl+C', action: '退出' },
@@ -227,7 +231,7 @@ export function queuedLine(text, limit = 64) {
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
 
-export function App({ client, sessionId: firstSessionId, info = {}, interactive = true, stdout }) {
+export function App({ client, sessionId: firstSessionId, info = {}, interactive = true, stdout, history = { entries: [], remember: async () => {} } }) {
   const app = useApp();
   const [sessionId, setSessionId] = useState(firstSessionId);
   const [rows, setRows] = useState([]);
@@ -239,8 +243,12 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [expanded, setExpanded] = useState(false);
   const [draft, setDraft] = useState('');
   const [caret, setCaret] = useState(0);
-  const [history, setHistory] = useState([]);
+  // 输入历史跨会话留住（D81 边界二：它存在界面自己那一份文件里，不进会话记录）。
+  // 文件里的先后就是这里的先后，最新的排在第一个，上下键从第一个往下翻就是往旧处翻。
+  const [entries, setEntries] = useState(history.entries);
   const [historyAt, setHistoryAt] = useState(-1);
+  // Ctrl+R 那一次反查：查询串与移到第几条匹配；不在反查中时这一格是 null。
+  const [search, setSearch] = useState(null);
   const [status, setStatus] = useState(null);
   // 详情画在动态区里：`Static` 不回画已提交的行，所以「看那一条」只能是把它再画一次（D39、D40）。
   const [detail, setDetail] = useState(null);
@@ -314,6 +322,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   }, [running]);
 
   const submit = useCallback(async (text) => {
+    // 发出去的那一句才进历史：排进队列的那几条等真正发出去时各自进一次，翻历史看到的都是真说过的话。
+    setEntries((current) => pushHistory(current, text));
+    void history.remember(text);
     setRunning(true);
     try {
       const result = await client.request('run.start', { sessionId, input: text });
@@ -328,7 +339,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       setRunning(false);
       void refreshStatus();
     }
-  }, [client, push, refreshStatus, sessionId]);
+  }, [client, history, push, refreshStatus, sessionId]);
 
   // 命令一律收到第一个词，后面的整段作为参数交进来（/mode 要用）。
   const runCommand = useCallback((name, argument = '') => {
@@ -567,7 +578,6 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       runCommand(route.name, route.argument);
       return;
     }
-    setHistory((current) => [route.text, ...current].slice(0, 50));
     void submit(route.text);
   }, [push, runCommand, running, submit]);
 
@@ -581,8 +591,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
 
   // 候选每次从当前草稿算出来：草稿改一个字清单就跟着变，不需要再维护一份状态（D81）。
   const templates = status?.templates ?? [];
-  const picks = dismissedAt === draft ? [] : candidatesOf(draft, templates);
+  const picks = dismissedAt === draft || search !== null ? [] : candidatesOf(draft, templates);
   const chosen = picks.length === 0 ? 0 : Math.min(pick, picks.length - 1);
+  const searched = search === null ? [] : searchHistory(entries, search.query);
 
   useInput((input, key) => {
     if (key.ctrl && input === 'c') {
@@ -591,6 +602,66 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     }
     if (key.ctrl && input === 'o') {
       setExpanded((current) => !current);
+      return;
+    }
+    // Ctrl+G 把草稿交给外面那一份编辑器：这一段文本走一份临时文件，回来的是它写回的那一份。
+    // 让出终端这件事归 Ink（raw mode 与重画都在它手里），否则编辑器与界面抢同一把输入。
+    if (key.ctrl && input === 'g') {
+      if (info.editor === undefined || info.editor === '') {
+        push({ kind: 'error', text: '没有 EDITOR 这一格，界面不猜哪一个编辑器能用；设好它再来一次 Ctrl+G' });
+        return;
+      }
+      void (async () => {
+        let outcome = { code: 'tui_editor_failed' };
+        await app.suspendTerminal(async () => {
+          outcome = await editInExternalEditor(info.editor, draft);
+        });
+        if (outcome.text === undefined) {
+          push({ kind: 'error', text: `编辑没成：${outcome.code}` });
+          return;
+        }
+        setDraft(outcome.text);
+        setCaret(outcome.text.length);
+      })();
+      return;
+    }
+    if (key.ctrl && input === 'r' && search === null) {
+      // 起一次反查：查询串从空开始，接着打的每个字符都往它后面加。
+      setSearch({ query: '', at: 0 });
+      return;
+    }
+    if (search !== null) {
+      const found = searchHistory(entries, search.query);
+      const cycle = (step) => setSearch(found.length === 0 ? search : { ...search, at: (search.at + step + found.length) % found.length });
+      if (key.escape) {
+        setSearch(null);
+        return;
+      }
+      if (key.return) {
+        const picked = found[search.at];
+        if (picked !== undefined) {
+          setDraft(picked);
+          setCaret(picked.length);
+        }
+        setSearch(null);
+        return;
+      }
+      if (key.upArrow || (key.ctrl && input === 'r')) {
+        cycle(1);
+        return;
+      }
+      if (key.downArrow) {
+        cycle(-1);
+        return;
+      }
+      if (key.backspace || key.delete) {
+        // 查询串空着时再按退格就是退出反查，不是把空格当内容删。
+        setSearch(search.query === '' ? null : { query: search.query.slice(0, -1), at: 0 });
+        return;
+      }
+      if (input !== '' && !key.ctrl && !key.meta) {
+        setSearch({ query: search.query + input, at: 0 });
+      }
       return;
     }
     if (ask !== null) {
@@ -631,12 +702,12 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     if (key.upArrow || key.downArrow) {
-      if (history.length === 0) return;
+      if (entries.length === 0) return;
       // 只在单行草稿上翻历史：草稿里已经有换行时上下键留给光标。
       if (draft.includes('\n')) return;
-      const next = key.upArrow ? Math.min(historyAt + 1, history.length - 1) : Math.max(historyAt - 1, -1);
+      const next = key.upArrow ? Math.min(historyAt + 1, entries.length - 1) : Math.max(historyAt - 1, -1);
       setHistoryAt(next);
-      const recalled = next < 0 ? '' : history[next];
+      const recalled = next < 0 ? '' : entries[next];
       setDraft(recalled);
       setCaret(recalled.length);
       return;
@@ -689,6 +760,13 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     queue.length === 0 ? null : h(Box, { flexDirection: 'column' },
       queue.map((item, index) => h(Text, { key: `${index}:${item}`, dimColor: true }, `排队 ${index + 1} · ${queuedLine(item)}`)),
       h(Text, { dimColor: true }, '  这一轮结束后按先后发出；草稿空着时按退格收回最后一条')),
+    search === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'magenta', paddingX: 1 },
+      h(Text, null, `反查 ${search.query}`),
+      searched.length === 0
+        ? h(Text, { dimColor: true }, entries.length === 0 ? '还没有发过任何一句' : `没有哪一句含「${search.query}」`)
+        : searched.map((entry, index) => h(Box, { key: `${index}:${entry}` },
+            h(Text, { inverse: index === search.at }, ` ${queuedLine(entry, 60)}`))),
+      h(Text, { dimColor: true }, '  接着打字缩小 · Ctrl+R 或 ↑↓ 换一条 · Enter 填进草稿 · Esc 退出')),
     picks.length === 0 ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'gray', paddingX: 1 },
       picks.slice(0, CANDIDATE_ROWS).map((candidate, index) => h(Box, { key: `${candidate.source}:${candidate.name}` },
         h(Text, { inverse: index === chosen }, ` /${candidate.name}${candidate.hint === '' ? '' : ` ${candidate.hint}`}`),

@@ -2,6 +2,11 @@
 // 与那两条比较真实检索后端的检查同一个处理：不能假造一个后端来通过。
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { appendFile, mkdtemp, readdir, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { HISTORY_LIMIT, SEARCH_ROWS, historyPathOf, loadHistory, pushHistory, rememberHistory, searchHistory } from '../dist/tui/history.js';
 
 let rows = {};
 let missing = '';
@@ -12,6 +17,11 @@ try {
 }
 
 const options = { skip: missing === '' ? false : missing };
+// `status.get` 交回的那一份形状：界面按它画状态行与候选，假客户端就照协议那一份答。
+const statusLine = () => ({
+  sessionId: 's', running: false, mode: 'minimal', modeLayer: 'shipped', pendingMode: null, policy: 'ask',
+  tools: ['read'], eventCount: 0, denials: { consecutive: 0, total: 0 }, templates: [], usage: null,
+});
 const { foldText, editDraft, projectRecord, buildStatusLine, contextSegment, findRecord, branchOf, detailTitle, helpLines, routeInput, candidatesOf, displayWidth, flowGroups, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, resolveSessionId, SESSION_ROWS } = rows;
 
 test('a record becomes the rows the terminal shows, one line each', options, () => {
@@ -575,4 +585,175 @@ test('resuming a session repaints that record as the transcript', options, async
   } finally {
     instance.unmount();
   }
+});
+
+// 输入历史跨会话留住（第 45 步）：那一份文件与翻它的两条动作。这一层不依赖 ink，所以不跟着界面那几条一起跳过。
+test('the history keeps the newest sentence first and one place per sentence', () => {
+  assert.deepEqual(pushHistory([], '  把 note.txt 读一遍 '), ['把 note.txt 读一遍'], '首尾空白不算内容');
+  assert.deepEqual(pushHistory(['a', 'b'], 'a'), ['a', 'b'], '同一句再说一次不占两个位置');
+  assert.deepEqual(pushHistory(['a', 'b'], '   '), ['a', 'b'], '空的那一句不进历史');
+  const long = pushHistory(Array.from({ length: HISTORY_LIMIT }, (_, index) => `第 ${index} 条`), '最新的一条');
+  assert.deepEqual([long[0], long.length, long.at(-1)], ['最新的一条', HISTORY_LIMIT, '第 198 条'], '攒到上限就把最旧的那几条挤出去');
+
+  assert.deepEqual(searchHistory(['改 README 的第一段', '改 note.txt', '改 README 的第二段'], 'readme'), ['改 README 的第一段', '改 README 的第二段'],
+    '从新到旧，大小写不分');
+  assert.deepEqual(searchHistory(['a'], ''), [], '空的查询串不猜一份');
+  assert.deepEqual(searchHistory(['ab', 'cd', 'ab'], 'a'), ['ab'], '同一句只报一次');
+  assert.equal(searchHistory(Array.from({ length: 40 }, (_, index) => `第 ${index} 条`), '第').length, SEARCH_ROWS, '一次最多报那么几条');
+  assert.deepEqual(searchHistory(['a', 'b'], 'zzz'), []);
+});
+
+test('the history file reads back what it was given and drops a line that is not one', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-tui-history-'));
+  const path = historyPathOf(root);
+  try {
+    assert.deepEqual(await loadHistory(path), [], '还没有过任何一次输入不是错误');
+    await rememberHistory(path, ['最新的一条', '旧的一条']);
+    assert.deepEqual(await loadHistory(path), ['最新的一条', '旧的一条'], '先后与文件里一致，最新的排在第一个');
+    await appendFile(path, '这一行不是 JSON\n');
+    const merged = pushHistory(await loadHistory(path), '又新的一条');
+    await rememberHistory(path, merged);
+    assert.deepEqual(await loadHistory(path), ['又新的一条', '最新的一条', '旧的一条'], '读不懂的那一行丢掉，其余照旧');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// 上下键翻的是那一份跨会话的历史，Ctrl+R 从里面找；两处都只改草稿，发出去的仍是 `run.start`。
+test('the arrow keys recall the last sentence and Ctrl+R searches the history', options, async () => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { setTimeout: delay } = await import('node:timers/promises');
+  const { App } = await import('../dist/tui/app.js');
+
+  const stdout = new PassThrough();
+  stdout.columns = 120;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+
+  const remembered = [];
+  const sent = [];
+  const status = { sessionId: 's', running: false, mode: 'minimal', modeLayer: 'shipped', pendingMode: null, policy: 'ask', tools: ['read'], eventCount: 0, denials: { consecutive: 0, total: 0 }, templates: [] };
+  const client = {
+    onNotification() {},
+    onRequest() {},
+    request: async (method, params) => {
+      if (method === 'run.start') sent.push(params.input);
+      return method === 'status.get' ? status : {};
+    },
+    reply: () => {},
+  };
+  const instance = render(createElement(App, {
+    client,
+    sessionId: 's',
+    info: {},
+    interactive: true,
+    stdout,
+    history: { entries: ['改 note.txt 的第一行', '上一次会话里说过的话'], remember: async (text) => { remembered.push(text); } },
+  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
+  try {
+    await delay(300);
+    stdin.write('把这条记进历史');
+    await delay(100);
+    stdin.write('\r');
+    await delay(400);
+    assert.deepEqual(sent, ['把这条记进历史']);
+    assert.deepEqual(remembered, ['把这条记进历史'], '发出去的那一句才交给那一份文件');
+
+    // 上下键往上翻：第一条就是刚发出去的那一句，因为它排到了历史最前面。
+    stdin.write('\x1B[A');
+    await delay(300);
+    assert.match(painted.split('\x1B[?2026h').pop() ?? '', /把这条记进历史/, '翻到的那一句回到草稿里');
+
+    stdin.write('\x12');
+    await delay(200);
+    stdin.write('note');
+    await delay(300);
+    const searching = painted.split('\x1B[?2026h').pop() ?? '';
+    assert.match(searching, /反查 note/);
+    assert.match(searching, /改 note\.txt 的第一行/, '含这一段的那一条列在框里');
+
+    stdin.write('\r');
+    await delay(300);
+    const picked = painted.split('\x1B[?2026h').pop() ?? '';
+    assert.match(picked, /› 改 note\.txt 的第一行/, 'Enter 把选中的那一条填进草稿');
+    assert.doesNotMatch(picked, /反查 note/, '选完就退出反查');
+    assert.equal(sent.length, 1, '反查本身不发任何东西');
+  } finally {
+    instance.unmount();
+  }
+});
+
+// Ctrl+G 把草稿交给外面那一份编辑器：真的起一个子进程，改的是那一份临时文件（假编辑器脚本在 testplace/）。
+test('Ctrl+G hands the draft to the editor and reads back what it wrote', options, async () => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { setTimeout: delay } = await import('node:timers/promises');
+  const { App } = await import('../dist/tui/app.js');
+
+  const stdout = new PassThrough();
+  stdout.columns = 120;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+
+  const editor = `node ${fileURLToPath(new URL('../testplace/fake-editor.mjs', import.meta.url))}`;
+  const client = { onNotification() {}, onRequest() {}, request: async () => statusLine(), reply: () => {} };
+  const instance = render(createElement(App, {
+    client, sessionId: 's', info: { editor }, interactive: true, stdout,
+  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
+  try {
+    await delay(300);
+    stdin.write('草稿里的一半');
+    await delay(200);
+    stdin.write('\x07');
+    await delay(1_500);
+    const frame = painted.split('\x1B[?2026h').pop() ?? '';
+    assert.match(frame, /草稿里的一半\n?从编辑器里补上的那一句|从编辑器里补上的那一句/, '编辑器写回的那一份回到草稿里');
+    assert.doesNotMatch(frame, /编辑没成/);
+  } finally {
+    instance.unmount();
+  }
+});
+
+test('Ctrl+G says the editor is not configured instead of guessing one', options, async () => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { setTimeout: delay } = await import('node:timers/promises');
+  const { App } = await import('../dist/tui/app.js');
+
+  const stdout = new PassThrough();
+  stdout.columns = 120;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+
+  const client = { onNotification() {}, onRequest() {}, request: async () => statusLine(), reply: () => {} };
+  const instance = render(createElement(App, { client, sessionId: 's', info: {}, interactive: true, stdout }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
+  try {
+    await delay(300);
+    stdin.write('\x07');
+    await delay(400);
+    assert.match(painted, /没有 EDITOR 这一格/, '缺的是那一个环境变量，不是猜一个能用的程序');
+  } finally {
+    instance.unmount();
+  }
+});
+
+// 外部编辑器那一条的失败路径也要把临时目录收掉：那一份草稿里可能是刚写的一半代码。
+test('a failed editor run leaves no temporary directory behind', async () => {
+  const { editInExternalEditor } = await import('../dist/tui/editor.js');
+  const leftovers = async () => (await readdir(tmpdir())).filter((name) => name.startsWith('ligule-editor-'));
+  const before = await leftovers();
+  assert.deepEqual(await editInExternalEditor('node 这份脚本不存在.mjs', '草稿的一半'), { code: 'tui_editor_failed' });
+  assert.deepEqual(await leftovers(), before, '退出码不是 0 那一条路径上临时目录也删掉了');
+  assert.deepEqual(await editInExternalEditor('   ', '草稿的一半'), { code: 'tui_editor_command_invalid' });
+  assert.deepEqual(await leftovers(), before, '命令名为空时连目录都不建');
 });
