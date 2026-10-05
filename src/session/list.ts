@@ -8,7 +8,7 @@ import type { ModeFile } from '../kernel/modes.js';
 import { findUnresolvedCalls } from './repair.js';
 import type { SessionEvent, SessionHeader } from './format.js';
 
-// 恢复一次会话该用哪一份模式清单：`--mode` 写了就照它；没写就用记录里最后生效的那一条，并比它的摘要（D78）。
+// 恢复一次会话该用哪一份模式清单：客户端指名了那一份就照它；没指名就用记录里最后生效的那一条，并比它的摘要（D78）。
 // 名字对得上而摘要变了要报出来——静默换成磁盘上现在这一份，等于在别人没选过的范围里决定这一次能用什么。
 export function chooseResumeMode({
   explicit,
@@ -26,7 +26,7 @@ export function chooseResumeMode({
   // 加首行之前那些记录里的模式事件没有摘要，那时无从比对，名字对得上就沿用。
   if (recorded.digest !== undefined && recorded.digest !== loaded?.digest) {
     throw new KernelError('resume_mode_changed', {
-      detail: `${recorded.name} was ${recorded.digest} in that session and is ${loaded?.digest ?? 'unreadable'} on disk; pass --mode to choose`,
+      detail: `${recorded.name} was ${recorded.digest} in that session and is ${loaded?.digest ?? 'unreadable'} on disk; name a mode explicitly to resume`,
     });
   }
   return recorded.name;

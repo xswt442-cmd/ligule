@@ -95,7 +95,7 @@ test('a resume takes the mode the session last ran under, and a changed list is 
     () => chooseResumeMode({ recorded: { name: 'full', digest: 'old123' }, loaded: full, fallback: 'minimal' }),
     (error) => error.code === 'resume_mode_changed'
       && new RegExp(`was old123 in that session and is ${full.digest} on disk`).test(error.detail)
-      && /pass --mode to choose/.test(error.detail),
+      && /name a mode explicitly to resume/.test(error.detail),
     '名字对得上而内容变了要报出来，不静默换成磁盘上那一份',
   );
 });
@@ -159,7 +159,7 @@ test('the host hands out the listing and resumes under the mode that record last
       assert.equal((await connection.request('status.get', { sessionId: 'ran' })).mode, 'minimal');
       // 摘要变了要在这里报出来，让客户端指名一份再来——不静默换成磁盘上现在那一份，也不静默退回缺省。
       await assert.rejects(connection.request('session.open', { sessionId: 'moved' }),
-        (error) => error.code === 'resume_mode_changed' && /pass --mode to choose/.test(error.detail));
+        (error) => error.code === 'resume_mode_changed' && /name a mode explicitly to resume/.test(error.detail));
     });
 
     // 客户端指名了一份就照那一份，记录里那条不再比对。
