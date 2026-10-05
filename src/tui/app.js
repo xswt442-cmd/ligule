@@ -1,33 +1,31 @@
 // 终端界面的行、输入与状态（D33 的第二种客户端）。这里不读帧也不写帧：帧由 src/host/connection.js 那一层交进来，
 // 这一层只把会话记录与流式增量画成行，并把按键变成协议里的调用。
-// 纯函数（parseInput、editDraft、foldText、projectRecord、branchOf、detailTitle）都从这里交出去，检查在 test/tui.test.js，
-// 不靠真终端也能验；画面本身跑 `ligule tui` 看。
+// 纯函数（editDraft、foldText、projectRecord、branchOf、detailTitle 与 commands.ts 里那几张表）都从这里交出去，
+// 检查在 test/tui.test.js，不靠真终端也能验；画面本身跑 `ligule tui` 看。
 import { createElement as h, Fragment, useCallback, useEffect, useState } from 'react';
 import { Box, Static, Text, useApp, useInput } from 'ink';
+import { UI_COMMANDS, candidatesOf, findUiCommand, flowGroups, routeInput } from './commands.js';
 
 const SPINNER = ['⠋', '⠙', '', '⠸', '⠼', '⠴', '⠦', '', '⠇', '⠏'];
 const FOLD_LINES = 3;
 // 模式来自哪一层，画给人看的是中文，记录里那三个名字与装载那一侧一致（D43）。
 const MODE_LAYERS = { shipped: '随包', user: '全局', project: '项目' };
+// 清单最多画几行：再长就把屏幕顶到输入框以外，人看不到自己在敲什么。
+const CANDIDATE_ROWS = 6;
 
-export const COMMANDS = [
-  { name: 'help', usage: '/help', text: '列出命令与按键' },
-  { name: 'tools', usage: '/tools', text: '列出这次运行装了哪些工具' },
-  { name: 'status', usage: '/status', text: '显示模式、档位、拒绝计数与记录条数' },
-  { name: 'mode', usage: '/mode [名字]', text: '显示当前模式，或切换到另一个名字' },
-  { name: 'show', usage: '/show [序号]', text: '把记录里那一条的完整内容画出来，不带序号收起' },
-  { name: 'sub', usage: '/sub [序号]', text: '画出那一次派生执行的整份支线记录，不带序号收起' },
-  { name: 'new', usage: '/new', text: '开一份新会话，画面上方的历史留在终端里' },
-  { name: 'quit', usage: '/quit', text: '退出（Ctrl+C 同样）' },
+// 那几张表与那几个纯函数交给检查里用（test/tui.test.js），界面自己只走这一处出口。
+export { UI_COMMANDS, candidatesOf, displayWidth, findUiCommand, flowGroups, routeInput } from './commands.js';
+
+// `/help` 画三组：界面命令、宿主交出来的提示模板、按键。前两组在这里只列名字与说明，展开与装载都不归界面。
+const KEYS = [
+  { key: 'Enter', action: '发送' },
+  { key: 'Shift+Enter', action: '换行' },
+  { key: 'Tab', action: '补全清单里选中的那一条' },
+  { key: '↑ ↓', action: '在清单里选，清单不在时翻输入历史' },
+  { key: 'Esc', action: '收起清单；跑着的时候打断这一轮' },
+  { key: 'Ctrl+O', action: '展开或收起长内容' },
+  { key: 'Ctrl+C', action: '退出' },
 ];
-
-// 一段输入要么是斜杠命令，要么是要交给模型的话。命令只认第一个词，其余算参数。
-export function parseInput(text) {
-  const trimmed = text.trim();
-  if (!trimmed.startsWith('/')) return { kind: 'text', text: trimmed };
-  const [name, ...rest] = trimmed.slice(1).split(/\s+/);
-  return { kind: 'command', name: name.toLowerCase(), argument: rest.join(' ') };
-}
 
 // 草稿的编辑：左右移光标、Home/End 与 Ctrl+A/E 跳两端、Ctrl+W 删前一个词、Ctrl+U 清空、其余可打印字符插在光标处。
 export function editDraft(draft, caret, input, key) {
@@ -126,6 +124,23 @@ export function detailTitle(detail) {
   return `支线 ${detail.branch}，父记录第 ${detail.seq} 那一次派生 · 这里的序号是支线自己的 · /sub 收起`;
 }
 
+// `/help` 那几行：界面命令、宿主交出来的提示模板、按键三组；宽度放不下就整组往下一层（D81）。
+// 提示模板列在这里不是为了在界面里展开它——那一条命令真正跑的是 `run.start`，展开归宿主（D24、D49）。
+export function helpLines(status, width) {
+  const templates = status?.templates ?? [];
+  const groups = [
+    { title: '命令', entries: UI_COMMANDS.map((command) => ({ key: command.usage, action: command.text })) },
+    {
+      title: '提示模板',
+      entries: templates.length === 0
+        ? [{ key: '(没有)', action: '在 .ligule/prompts/ 或 ~/.ligule/prompts/ 下放一份 markdown' }]
+        : templates.map((template) => ({ key: `/${template.command}`, action: template.description ?? '' })),
+    },
+    { title: '按键', entries: KEYS },
+  ];
+  return flowGroups(groups, width);
+}
+
 function Row({ row, expanded }) {
   if (row.kind === 'question') return h(Text, { color: 'cyan' }, `› ${row.text}`);
   if (row.kind === 'reasoning') {
@@ -166,6 +181,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [status, setStatus] = useState(null);
   // 详情画在动态区里：`Static` 不回画已提交的行，所以「看那一条」只能是把它再画一次（D39、D40）。
   const [detail, setDetail] = useState(null);
+  // 斜杠输入时的选中位置：候选每次从草稿现算，这里只记住人移到第几条（D81）。
+  const [pick, setPick] = useState(0);
+  // Esc 收起候选时记下收起的是哪一段草稿：改一个字就该重新露出来，不需要另一个开关。
+  const [dismissedAt, setDismissedAt] = useState(null);
 
   const push = useCallback((...added) => setRows((current) => [...current, ...added]), []);
 
@@ -369,25 +388,36 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     if (name === 'help') {
-      push({ kind: 'meta', text: COMMANDS.map((command) => `${command.usage} —— ${command.text}`).join('\n') });
+      push({ kind: 'meta', text: helpLines(status, stdout?.columns ?? 80).join('\n') });
       return;
     }
     push({ kind: 'error', text: `没有这条命令：/${name}（/help 看列表）` });
-  }, [app, client, push, sessionId]);
+  }, [app, client, push, sessionId, status, stdout]);
 
   const send = useCallback((text) => {
-    const parsed = parseInput(text);
+    const route = routeInput(text, running);
     setDraft('');
     setCaret(0);
     setHistoryAt(-1);
-    if (parsed.kind === 'command') {
-      push({ kind: 'meta', text: `/${parsed.name}` });
-      runCommand(parsed.name === '' ? 'help' : parsed.name, parsed.argument);
+    setPick(0);
+    setDismissedAt(null);
+    if (route.kind === 'blocked') {
+      push({ kind: 'meta', text: `这一轮跑着的时候 ${route.usage} 用不了；Esc 先打断这一轮` });
       return;
     }
-    setHistory((current) => [parsed.text, ...current].slice(0, 50));
-    void submit(parsed.text);
-  }, [push, runCommand, submit]);
+    if (route.kind === 'command') {
+      push({ kind: 'meta', text: findUiCommand(route.name).usage });
+      runCommand(route.name, route.argument);
+      return;
+    }
+    setHistory((current) => [route.text, ...current].slice(0, 50));
+    void submit(route.text);
+  }, [push, runCommand, running, submit]);
+
+  // 候选每次从当前草稿算出来：草稿改一个字清单就跟着变，不需要再维护一份状态（D81）。
+  const templates = status?.templates ?? [];
+  const picks = dismissedAt === draft ? [] : candidatesOf(draft, templates);
+  const chosen = picks.length === 0 ? 0 : Math.min(pick, picks.length - 1);
 
   useInput((input, key) => {
     if (key.ctrl && input === 'c') {
@@ -411,6 +441,25 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         client.reply(asked.id, { decision: 'deny' });
       }
       return;
+    }
+    if (picks.length > 0) {
+      if (key.tab) {
+        const picked = picks[chosen];
+        // 带参数提示的那一条补完留一个空格，光标落在要写参数的地方；不带的补完就能直接发。
+        const completed = `/${picked.name}${picked.hint === '' ? '' : ' '}`;
+        setDraft(completed);
+        setCaret(completed.length);
+        setPick(0);
+        return;
+      }
+      if (key.upArrow || key.downArrow) {
+        setPick(key.upArrow ? (chosen === 0 ? picks.length - 1 : chosen - 1) : (chosen + 1) % picks.length);
+        return;
+      }
+      if (key.escape) {
+        setDismissedAt(draft);
+        return;
+      }
     }
     if (key.escape) {
       if (running) void client.request('run.cancel', { sessionId }).catch((error) => push({ kind: 'error', text: error.code ?? 'run_cancel_failed' }));
@@ -461,10 +510,16 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       detail.rows.length === 0
         ? h(Text, { dimColor: true }, '这一条没有可画的内容')
         : detail.rows.map((row, index) => h(Row, { key: index, row, expanded: true }))),
+    picks.length === 0 ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'gray', paddingX: 1 },
+      picks.slice(0, CANDIDATE_ROWS).map((candidate, index) => h(Box, { key: `${candidate.source}:${candidate.name}` },
+        h(Text, { inverse: index === chosen }, ` /${candidate.name}${candidate.hint === '' ? '' : ` ${candidate.hint}`}`),
+        h(Text, { dimColor: true }, ` ${candidate.text}`))),
+      picks.length > CANDIDATE_ROWS ? h(Text, { dimColor: true }, `  还有 ${picks.length - CANDIDATE_ROWS} 条，接着打字就缩小了`) : null,
+      h(Text, { dimColor: true }, ' Tab 补全 · ↑↓ 选 · Esc 收起')),
     h(Box, null,
       h(Text, { color: running ? 'yellow' : 'cyan' }, running ? `${SPINNER[tick % SPINNER.length]} ` : '› '),
       draft === '' && !running
-        ? h(Text, { dimColor: true }, '要模型做的事（Enter 发送，Shift+Enter 换行，/help 看命令）')
+        ? h(Text, { dimColor: true }, '要模型做的事（Enter 发送，Shift+Enter 换行，打 / 看清单）')
         : h(Fragment, null,
           h(Text, null, draft.slice(0, caret)),
           h(Text, { inverse: true }, draft[caret] ?? ' '),

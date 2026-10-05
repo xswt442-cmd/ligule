@@ -12,7 +12,7 @@ try {
 }
 
 const options = { skip: missing === '' ? false : missing };
-const { foldText, parseInput, editDraft, projectRecord, buildStatusLine, findRecord, branchOf, detailTitle, COMMANDS } = rows;
+const { foldText, editDraft, projectRecord, buildStatusLine, findRecord, branchOf, detailTitle, helpLines, routeInput, candidatesOf, displayWidth, flowGroups, UI_COMMANDS } = rows;
 
 test('a record becomes the rows the terminal shows, one line each', options, () => {
   assert.deepEqual(projectRecord({ kind: 'user', text: '读一下' }), [{ kind: 'question', text: '读一下' }]);
@@ -49,10 +49,17 @@ test('a record kind the terminal does not draw yields no rows instead of guessin
   assert.deepEqual(projectRecord({ kind: 'something-new' }), []);
 });
 
-test('input starting with a slash is a command, anything else is the user message', options, () => {
-  assert.deepEqual(parseInput('  读一下 note.txt  '), { kind: 'text', text: '读一下 note.txt' });
-  assert.deepEqual(parseInput('/tools'), { kind: 'command', name: 'tools', argument: '' });
-  assert.deepEqual(parseInput('/MODE now'), { kind: 'command', name: 'mode', argument: 'now' });
+// 斜杠开头的输入先查界面那张表；表里没有的这一行要原样落到 run.start，宿主才展开得开提示模板（D24、D81）。
+test('a slash line the UI table does not own goes to the host as one message', options, () => {
+  assert.deepEqual(routeInput('  读一下 note.txt  ', false), { kind: 'run', text: '读一下 note.txt' });
+  assert.deepEqual(routeInput('/tools', false), { kind: 'command', name: 'tools', argument: '' });
+  assert.deepEqual(routeInput('/MODE now', false), { kind: 'command', name: 'mode', argument: 'now' });
+  // 这一条就是第 40 步修掉的缺陷：模板命令在界面表里没有，但它不是「没有这条命令」。
+  assert.deepEqual(routeInput('/git:release:prepare 3', false), { kind: 'run', text: '/git:release:prepare 3' });
+  assert.deepEqual(routeInput('/', false), { kind: 'command', name: 'help', argument: '' });
+  // 存在但这一轮跑着的时候不能用，说的话与「界面没有这一条」不一样。
+  assert.deepEqual(routeInput('/new', true), { kind: 'blocked', usage: '/new' });
+  assert.deepEqual(routeInput('/new', false), { kind: 'command', name: 'new', argument: '' });
 });
 
 test('the draft edits around a caret instead of only appending', options, () => {
@@ -112,7 +119,7 @@ test('the app paints the session line and the input hint onto the terminal', opt
 
   assert.match(painted, /test-model · 会话 abcdef01/);
   assert.match(painted, /mode:minimal  policy:ask  tools:1/);
-  assert.match(painted, /\/help 看命令/);
+  assert.match(painted, /打 \/ 看清单/);
 });
 
 test('the status line names the mode and the decision level separately', options, () => {
@@ -151,7 +158,7 @@ test('/show takes the number from the record, not the row on screen', options, (
 
 // 支线入口用的序号就是父记录里那条派生结果的序号，而支线 id 从那条结果的内容里读（D71、D74）。
 test('/sub reads the branch reference out of the delegation result', options, () => {
-  assert.ok(COMMANDS.some((command) => command.name === 'sub'), 'the command is listed in help');
+  assert.ok(UI_COMMANDS.some((command) => command.name === 'sub'), 'the command is listed in help');
   const branch = { kind: 'tool', tool: 'subagent', result: { failed: false, content: { sessionId: 'parent.sub-1', text: 'done' } } };
   assert.deepEqual(branchOf({ seq: 4, ...branch }), { sessionId: 'parent.sub-1' });
   assert.equal(branchOf({ seq: 4, kind: 'tool', tool: 'read', result: { content: { sessionId: 'x' } } }).code, 'tui_sub_needs_a_branch');
@@ -210,4 +217,100 @@ test('the approval box names the shell backend and its executable', options, asy
   assert.match(painted, /Get-Process \| Stop-Process/);
   assert.match(painted, /后端 powershell/);
   assert.match(painted, /not fully understood/);
+});
+
+// 候选清单：界面那张表在前，宿主交出来的模板在后，都按前缀收窄（D81）。
+test('the candidate list narrows on what is typed and appends host templates', options, () => {
+  const templates = [{ command: 'git:release:prepare', description: '准备一次发布', hint: '<序号>' }];
+  assert.deepEqual(candidatesOf('读一下', templates), []);
+  // 光打一个斜杠就给整张表是噪音：等第一个字母。
+  assert.deepEqual(candidatesOf('/', templates), []);
+  // 已经在写参数了就不再压着清单。
+  assert.deepEqual(candidatesOf('/mode ', templates), []);
+  const [only] = candidatesOf('/mo', templates);
+  assert.deepEqual([only.name, only.hint, only.source], ['mode', '[名字]', 'ui']);
+  assert.deepEqual(
+    candidatesOf('/git', templates).map((c) => [c.name, c.source, c.text]),
+    [['git:release:prepare', 'template', '准备一次发布']],
+  );
+  // 前缀越短候选越多，但画出来的行数有上限。
+  assert.ok(candidatesOf('/', [{ command: 'a' }, { command: 'b' }]).length <= 8);
+});
+
+// `/help` 那几行：放得下就并排，放不下整组往下一层，两种都不截字（D81）。
+test('help groups flow side by side when there is room and stack when there is not', options, () => {
+  const groups = [
+    { title: 'A', entries: [{ key: '/aa', action: 'x' }] },
+    { title: 'B', entries: [{ key: '/bb', action: 'yy' }, { key: '/ccc', action: 'z' }] },
+  ];
+  const wide = flowGroups(groups, 120);
+  assert.equal(wide.length, 3, '行数是最高那一组的行数');
+  assert.match(wide[0], /^A\s+B$/);
+  assert.deepEqual(flowGroups(groups, 12), ['A', '/aa  x', '', 'B', '/bb   yy', '/ccc  z']);
+});
+
+// 中英混排那一列按终端里的列数对齐，不按字符数：一个汉字占两列。
+test('padding counts the columns a character takes in the terminal', options, () => {
+  assert.equal(displayWidth('a中'), 3);
+  const rows2 = flowGroups([
+    { title: '命令', entries: [{ key: '/a', action: '读' }] },
+    { title: '按键', entries: [{ key: 'Ctrl+O', action: 'x' }] },
+  ], 40);
+  assert.equal(rows2[0], '命令      按键');
+  assert.equal(rows2[1], '/a  读    Ctrl+O  x');
+});
+
+test('help lists the templates the host reports and says where they come from', options, () => {
+  const painted = helpLines({ templates: [{ command: 'git:release:prepare', description: '准备一次发布', hint: '' }] }, 400).join('\n');
+  assert.match(painted, /\/mode/);
+  assert.match(painted, /git:release:prepare/);
+  assert.match(painted, /Tab\s+补全/);
+  assert.match(helpLines({ templates: [] }, 400).join('\n'), /在 \.ligule\/prompts/);
+  assert.match(helpLines(null, 400).join('\n'), /命令/);
+});
+
+// 这一条是第 40 步那处缺陷的直接验证：在终端里敲模板命令，落出去的是原样那一行，不是「没有这条命令」。
+// 假 stdin 带着 setRawMode，按键走 Ink 自己的解析，不需要真终端。
+test('typing a template command completes it and sends the raw line to the host', options, async () => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { setTimeout: delay } = await import('node:timers/promises');
+  const { App } = await import('../dist/tui/app.js');
+
+  const stdout = new PassThrough();
+  stdout.columns = 120;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+
+  const sent = [];
+  const client = {
+    onNotification() {},
+    onRequest() {},
+    request: async (method, params) => {
+      sent.push({ method, input: params.input });
+      return method === 'status.get'
+        ? { sessionId: 's', running: false, mode: 'minimal', modeLayer: 'shipped', pendingMode: null, policy: 'ask', tools: ['read'], eventCount: 0, denials: { consecutive: 0, total: 0 }, templates: [{ command: 'git:release:prepare', description: '准备一次发布', hint: '<序号>' }] }
+        : {};
+    },
+    reply: () => {},
+  };
+  const instance = render(createElement(App, { client, sessionId: 's', info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
+  await delay(300);
+  stdin.write('/gi');
+  await delay(200);
+  assert.match(painted, /git:release:prepare/, '清单里看得见宿主交出来的那一条');
+  stdin.write('\t');
+  await delay(200);
+  assert.match(painted, /› \/git:release:prepare/, 'Tab 把名字补全了');
+  stdin.write('3');
+  await delay(200);
+  stdin.write('\r');
+  await delay(300);
+  instance.unmount();
+
+  const run = sent.find((call) => call.method === 'run.start');
+  assert.equal(run.input, '/git:release:prepare 3', '交给宿主的是原样那一行，展开归宿主（D24、D81）');
 });

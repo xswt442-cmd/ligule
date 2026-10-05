@@ -488,6 +488,8 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
             denials: state.chain.denials(),
             // 条数而不是内容：内容走 session.read。
             eventCount: (await state.session.read()).length,
+            // 名字、说明与参数提示三样交出去，为的是界面上那一串候选：展开仍然只在这地方做一次（D24、D81）。
+            templates: state.templates.templates.map(({ command, description, hint }) => ({ command, description, hint })),
           };
         }
         default:

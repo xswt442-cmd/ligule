@@ -158,6 +158,8 @@ test('a client over stdio drives one round, answers one approval and watches the
     assert.equal(status.mode, 'minimal', '状态里模式名与判定档位是两样东西（D40）');
     assert.ok(status.tools.includes('read'));
     assert.deepEqual(status.denials, { consecutive: 0, total: 0 });
+    // 提示模板的名字与说明交出去，界面才列得出来；展开仍然只在宿主做那一次（D24、D81）。
+    assert.ok(Array.isArray(status.templates), 'status carries the prompt templates the host loaded');
   });
 });
 
