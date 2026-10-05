@@ -49,7 +49,7 @@ npm run build-rg    downloads the pinned ripgrep into packages/rg-*
 
 `dist/` is what runs: `bin`, `exports` and `files` point there, and the tests import it, so a green run exercised the shipped bytes. `tsc` runs with `allowJs` and `checkJs: false`. New modules are TypeScript under `strict`, with erasable syntax only — no `enum`, no `namespace`, no parameter properties (D47). Older JavaScript files are copied through and convert layer by layer. `src/` is not runnable as it stands: a `.ts` module has no `.js` twin.
 
-`package.json#version` and `src/index.js#VERSION` stay equal; `test/kernel.test.js` asserts it. Both CI workflows install dependencies with `npm ci` and take the Node version from `PRIMARY_NODE_VERSION` rather than repeating a number per step. The Node floor is one value written in four places — `engines.node`, the README badge, `PRIMARY_NODE_VERSION` in each workflow — and `test/runtime-version.test.js` asserts they agree.
+`package.json#version` and `src/index.js#VERSION` stay equal; `test/kernel.test.js` asserts it. The Node floor is one number written in three kinds of place — `engines.node`, the badge in `README.md`, `PRIMARY_NODE_VERSION` in each workflow — and `test/runtime-version.test.js` reads all of them and asserts they agree; the workflows install Node from that variable instead of repeating a number per step.
 
 ## Assembly
 
@@ -138,6 +138,8 @@ Sections the layers can set: `model` (`api`, `baseURL`, `model`, `apiKeyEnv`, `c
 ## Release
 
 Bump `package.json` and `VERSION` together, then tag `vX.Y.Z` on `main`. The tag drives the publish workflow, which runs `npm run build-rg` and publishes the two ripgrep platform packages before the main one. The first publish cannot use npm Trusted Publishing: npm requires the package to exist before a trusted publisher binds to it, so publish `0.0.1` with a token, configure the publisher, then let the workflow take over. The account has 2FA, so a direct `npm publish` asks a one-time password — run it interactively or pass `--otp`; tokens that bypass 2FA are being restricted for direct publishing, so do not reach for one. OIDC publishing is not affected by 2FA.
+
+`npm ci` installs from the lockfile in both workflows.
 
 ## Verify
 
