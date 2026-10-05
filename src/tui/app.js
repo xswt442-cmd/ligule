@@ -7,6 +7,8 @@ import { Box, Static, Text, useApp, useInput } from 'ink';
 import { SESSION_ROWS, UI_COMMANDS, candidatesOf, findUiCommand, flowGroups, resolveSessionId, routeInput, sessionLines } from './commands.js';
 import { pushHistory, searchHistory } from './history.js';
 import { editInExternalEditor } from './editor.js';
+import { copyToClipboard, lastAnswer } from './clipboard.js';
+import { exportMarkdown, titleEscape, titleText, writeExport } from './output.js';
 import { markdownLines } from './markdown.js';
 
 const SPINNER = ['⠋', '⠙', '', '⠸', '⠼', '⠴', '⠦', '', '⠇', '⠏'];
@@ -308,6 +310,13 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     void refreshStatus();
   }, [client, push, refreshStatus, sessionId]);
 
+  // 终端标题画出模型、项目根与这一份会话：切会话时那一串跟着换，任务栏与窗口列表里就能认出是哪一份。
+  // 没有真终端时不写：那串转义序列落在管道里会成为别人读到的字节。
+  useEffect(() => {
+    if (stdout?.isTTY !== true) return;
+    stdout.write(titleEscape(titleText({ model: info.model, boundary: info.boundary, sessionId })));
+  }, [info.boundary, info.model, sessionId, stdout]);
+
   // 跑着的时候走一个计时器：一格转圈、一秒一格，Esc 能打断这件事要看得见。
   useEffect(() => {
     if (!running) {
@@ -358,6 +367,64 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         } catch (error) {
           push({ kind: 'error', text: `会话开不出来：${error.code ?? error.message}` });
         }
+      })();
+      return;
+    }
+    if (name === 'copy') {
+      void (async () => {
+        // 复制的是记录里最后那一条回答：流式期间那半截还没落盘，复制它等于复制一份没成形的文本（I5）。
+        const read = await client.request('session.read', { sessionId }).catch((error) => error);
+        if (read.code !== undefined) {
+          push({ kind: 'error', text: `记录读不回来：${read.code}` });
+          return;
+        }
+        const answer = lastAnswer(read.events);
+        if (answer === '') {
+          push({ kind: 'meta', text: '这一份记录里还没有可复制的回答' });
+          return;
+        }
+        const done = await copyToClipboard(answer);
+        push(done.program === undefined
+          ? { kind: 'error', text: `复制没成：${done.code}` }
+          : { kind: 'meta', text: `最近那一条回答（${answer.length} 字）已放进剪贴板（${done.program}）` });
+      })();
+      return;
+    }
+    if (name === 'export') {
+      if (argument === '') {
+        push({ kind: 'error', text: '/export 后面要跟一个写到哪里的路径，例如 /export 笔记/这次运行.md' });
+        return;
+      }
+      void (async () => {
+        const read = await client.request('session.read', { sessionId }).catch((error) => error);
+        if (read.code !== undefined) {
+          push({ kind: 'error', text: `记录读不回来：${read.code}` });
+          return;
+        }
+        const header = read.events.find((event) => event.kind === 'session');
+        const main = exportMarkdown(read.events, {
+          id: sessionId,
+          projectRoot: header?.projectRoot,
+          createdAt: header?.createdAt ?? null,
+        });
+        // 支线那几份还是同一次读记录的动作（D74）：父记录里那条派生结果带着支线自己的 id。
+        const branches = [];
+        for (const event of read.events) {
+          const branch = branchOf(event);
+          if (branch.sessionId === undefined) continue;
+          const branchRead = await client.request('session.read', { sessionId: branch.sessionId }).catch((error) => error);
+          if (branchRead.code !== undefined) {
+            push({ kind: 'error', text: `支线 ${branch.sessionId} 读不回来：${branchRead.code}，那一份没写出去` });
+            continue;
+          }
+          branches.push({ id: branch.sessionId, text: exportMarkdown(branchRead.events, { id: branch.sessionId, projectRoot: header?.projectRoot }) });
+        }
+        const written = await writeExport(argument, main, branches).catch((error) => error);
+        if (written.code !== undefined) {
+          push({ kind: 'error', text: `写不出去：${written.code ?? written.message}` });
+          return;
+        }
+        push({ kind: 'meta', text: `已写出 ${written.length} 份文件：\n${written.join('\n')}` });
       })();
       return;
     }
