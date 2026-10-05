@@ -39,7 +39,7 @@ ligule tui                                # 终端界面，要 ink 与 react 两
 ligule host                               # 一行一条帧的协议端点，桌面壳起的就是这一个进程
 ```
 
-`/mode`、`/show <序号>`、`/sub <序号>`、`/status`、`/tools`、`/help` 是终端界面里的命令。跑过的会话列在 `ligule sessions`，接上某一份用 `ligule resume <会话 id> "接着做"`，那一次判定怎么走的用 `ligule policy <会话 id>` 读出来。记录在边界下的 `.ligule/sessions/`。
+终端界面里的命令是 `/help`、`/mode [名字]`、`/status`、`/tools`、`/show [序号]`、`/sub [序号]`、`/compact`、`/new`、`/quit`。打 `/` 会列出候选，Tab 补全、上下键选、Esc 收起；提示模板也在这条输入框里用，展开在宿主那一侧做，画出来的是你原本敲的那一行。跑着的那一轮里回车不吞话：那一句排进队列，本轮结束后按先后发出，草稿空着时按退格收回最后一条。状态行上有 `mode:`、`policy:`、`tools:`，写了 `limits.contextTokens` 时多一段 `ctx:~估算/窗口`。跑过的会话列在 `ligule sessions`，接上某一份用 `ligule resume <会话 id> "接着做"`，那一次判定怎么走的用 `ligule policy <会话 id>` 读出来。记录在边界下的 `.ligule/sessions/`。
 
 ## 约定
 
