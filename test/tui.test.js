@@ -12,7 +12,7 @@ try {
 }
 
 const options = { skip: missing === '' ? false : missing };
-const { foldText, editDraft, projectRecord, buildStatusLine, findRecord, branchOf, detailTitle, helpLines, routeInput, candidatesOf, displayWidth, flowGroups, UI_COMMANDS } = rows;
+const { foldText, editDraft, projectRecord, buildStatusLine, findRecord, branchOf, detailTitle, helpLines, routeInput, candidatesOf, displayWidth, flowGroups, UI_COMMANDS, markdownLines, changeSummary, capabilityOf } = rows;
 
 test('a record becomes the rows the terminal shows, one line each', options, () => {
   assert.deepEqual(projectRecord({ kind: 'user', text: '读一下' }), [{ kind: 'question', text: '读一下' }]);
@@ -42,7 +42,8 @@ test('a refusal reads as a refusal, a failure as a failure, and structured conte
   );
   const [row] = projectRecord({ kind: 'tool', tool: 'read', result: { kind: 'result', failed: false, code: undefined, content: { text: 'a body' } } });
   assert.equal(row.kind, 'result');
-  assert.match(row.text, /"text": "a body"/);
+  // 工具交回的是 { text, ...附带 }，界面画的是正文那一格，不是整层信封（第 41 步）。
+  assert.equal(row.text, 'a body', '正文画正文');
 });
 
 test('a record kind the terminal does not draw yields no rows instead of guessing', options, () => {
@@ -313,4 +314,89 @@ test('typing a template command completes it and sends the raw line to the host'
 
   const run = sent.find((call) => call.method === 'run.start');
   assert.equal(run.input, '/git:release:prepare 3', '交给宿主的是原样那一行，展开归宿主（D24、D81）');
+});
+
+// 助手那一段的结构看得见：围栏里的内容一行不动，标题与列表分出来，行内那几种写法只留文字（第 41 步）。
+test('markdown text splits into the shapes a terminal can show', options, () => {
+  assert.deepEqual(markdownLines('## 要做三件事\n- 读 `note.txt`\n- **改** 一处\n1. 跑一次\n'), [
+    { kind: 'heading', text: '要做三件事' },
+    { kind: 'list', text: '读 note.txt' },
+    { kind: 'list', text: '改 一处' },
+    { kind: 'list', text: '跑一次' },
+  ]);
+  // 围栏里的一行 `#` 是代码，不是标题；尾随空格也留着。
+  assert.deepEqual(markdownLines('```sh\n# 注释   \nls -la\n```'), [{ kind: 'code', text: '# 注释   ' }, { kind: 'code', text: 'ls -la' }]);
+  // 链接留下文字与地址；不成对的星号不动它。
+  assert.deepEqual(markdownLines('看 [文档](https://example.com/a) 与 a*b*c'), [{ kind: 'text', text: '看 文档 (https://example.com/a) 与 a*b*c' }]);
+  assert.deepEqual(markdownLines('第一行\n\n第二行'), [{ kind: 'text', text: '第一行' }, { kind: 'text', text: '' }, { kind: 'text', text: '第二行' }]);
+});
+
+// 一次调用画出来的是判定链真正用的那串能力名，不是 `mcp.call` 那件工具的名字（D52、D77）。
+test('an MCP call shows the capability it actually used', options, () => {
+  assert.equal(capabilityOf('mcp.call', { server: 'fs', tool: 'read_file' }), 'mcp:fs/read_file');
+  assert.equal(capabilityOf('mcp.call', { server: 'fs' }), 'mcp.call', '参数不完整时不拼一个半截的名字');
+  assert.equal(capabilityOf('read', { path: 'a' }), 'read');
+  const [call] = projectRecord({ kind: 'assistant', text: '', toolCalls: [{ id: 'c1', name: 'mcp.call', args: { server: 'fs', tool: 'read_file', args: {} } }] });
+  assert.equal(call.tool, 'mcp:fs/read_file');
+  const [done] = projectRecord({ kind: 'tool', tool: 'mcp.call', args: { server: 'fs', tool: 'read_file' }, result: { kind: 'result', failed: false, content: { text: 'a body', effectiveCapability: 'mcp:fs/read_file' } } });
+  assert.deepEqual([done.tool, done.text], ['mcp:fs/read_file', 'a body']);
+});
+
+// 一次 exec 的退出码画在抬头那一行：一段非零码的输出与一段成功输出不该画得一样（D59 量过这个差别）。
+test('an exec result names its exit code and a spilled one names its file', options, () => {
+  const [ok] = projectRecord({ kind: 'tool', tool: 'exec', result: { kind: 'result', failed: false, content: { text: 'done', exitCode: 0 } } });
+  assert.deepEqual([ok.tool, ok.text, ok.exitCode], ['exec', 'done', 0]);
+  const [spilled] = projectRecord({ kind: 'tool', tool: 'read', result: { kind: 'result', failed: false, content: { text: 'a body' }, spilled: 'result-3.json' } });
+  assert.equal(spilled.spilled, 'result-3.json');
+  // 被拒的那一条没有 content 可画，理由就是那一行。
+  const [refused] = projectRecord({ kind: 'tool', tool: 'write', result: { kind: 'refusal', failed: true, code: 'ask_declined', reason: 'the user declined', content: '' } });
+  assert.deepEqual(refused, { kind: 'refusal', tool: 'write', text: 'the user declined', code: 'ask_declined' });
+});
+
+// 审批框那一格要说得出改的是什么，而不是把整份文件内容喷在屏幕上（第 41 步）。
+test('the approval box sums the change instead of dumping the payload', options, () => {
+  assert.equal(changeSummary('write', { path: 'note.txt', content: 'a\nb\nc' }), 'note.txt：3 行新内容');
+  assert.equal(changeSummary('edit', { path: 'note.txt', anchor: 'a\nb', replacement: 'x' }), 'note.txt：换掉 2 行，换上 1 行');
+  assert.equal(changeSummary('delete', { path: 'note.txt' }), '把 note.txt 移进回收站');
+  assert.equal(changeSummary('exec', { command: 'ls' }), '', '命令那一行文本由 detail 那一条说，这里不重复');
+});
+
+// 助手那一段画到屏幕上时结构要看得见：这一条走的是真的渲染路径，不是只看纯函数的返回值。
+test('an answer with markdown shapes paints a heading, a list and a code line', options, async () => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { setTimeout: delay } = await import('node:timers/promises');
+  const { App } = await import('../dist/tui/app.js');
+
+  const stdout = new PassThrough();
+  stdout.columns = 100;
+  stdout.isTTY = false;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = new PassThrough();
+  stdin.isTTY = false;
+
+  let notify;
+  const client = {
+    onNotification: (handler) => { notify = handler; },
+    onRequest() {},
+    request: async () => ({ sessionId: 'abcdef01-2345', running: false, mode: 'minimal', modeLayer: 'shipped', pendingMode: null, policy: 'ask', tools: ['read'], eventCount: 0, denials: { consecutive: 0, total: 0 }, templates: [] }),
+    reply: () => {},
+  };
+  const instance = render(createElement(App, { client, sessionId: 'abcdef01-2345', info: {}, interactive: false }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
+  await delay(200);
+  notify({
+    sessionId: 'abcdef01-2345',
+    notify: 'event',
+    event: { kind: 'assistant', text: '## 两步\n- 先看\n```js\nconst a = 1\n```\n退出码那行是 **0**' },
+  });
+  await delay(150);
+  instance.unmount();
+
+  assert.match(painted, /两步/);
+  assert.match(painted, /· 先看/);
+  assert.match(painted, / {2}const a = 1/, '围栏里那一行带缩进画出来');
+  assert.doesNotMatch(painted, /## 两步/, '井号不留在画面上');
+  assert.doesNotMatch(painted, /\*\*0\*\*/, '加粗的星号也不留在画面上');
 });

@@ -5,6 +5,7 @@
 import { createElement as h, Fragment, useCallback, useEffect, useState } from 'react';
 import { Box, Static, Text, useApp, useInput } from 'ink';
 import { UI_COMMANDS, candidatesOf, findUiCommand, flowGroups, routeInput } from './commands.js';
+import { markdownLines } from './markdown.js';
 
 const SPINNER = ['⠋', '⠙', '', '⠸', '⠼', '⠴', '⠦', '', '⠇', '⠏'];
 const FOLD_LINES = 3;
@@ -15,6 +16,7 @@ const CANDIDATE_ROWS = 6;
 
 // 那几张表与那几个纯函数交给检查里用（test/tui.test.js），界面自己只走这一处出口。
 export { UI_COMMANDS, candidatesOf, displayWidth, findUiCommand, flowGroups, routeInput } from './commands.js';
+export { markdownLines } from './markdown.js';
 
 // `/help` 画三组：界面命令、宿主交出来的提示模板、按键。前两组在这里只列名字与说明，展开与装载都不归界面。
 const KEYS = [
@@ -61,6 +63,23 @@ export function foldText(text, expanded, limit = FOLD_LINES, maxChars = 400) {
   return { shown: cut, hidden: full.length - cut.length };
 }
 
+// 工具交回的那一份形状是 { text, 附带几格 }：界面画正文，附带那几格画在抬头那一行。
+// 正文之外真正要看得见的是两件事——命令跑出来的退出码，与一次 `mcp.call` 真正用的能力名（D52、D59、D77）。
+export function resultParts(result) {
+  const payload = typeof result.content === 'object' && result.content !== null ? result.content : {};
+  return {
+    text: typeof payload.text === 'string' ? payload.text : textOf(result.reason ?? result.content),
+    exitCode: payload.exitCode,
+    capability: payload.effectiveCapability,
+  };
+}
+
+// `mcp.call` 这个名字对人不说明任何事：判定链、审批框与记录里读的都是 `mcp:<服务器>/<工具>`，画出来的也该是那一串。
+export function capabilityOf(name, args) {
+  if (name === 'mcp.call' && typeof args?.server === 'string' && typeof args?.tool === 'string') return `mcp:${args.server}/${args.tool}`;
+  return name;
+}
+
 // 一条记录画成一行或者几行：助手那一条可能带着若干次工具调用，工具调用与结果各占一行。
 export function projectRecord(record) {
   // 人打的那一行原样画出来（D54）：展开后的那一份是给模型的，回看时要对得上当时敲了什么。
@@ -68,13 +87,18 @@ export function projectRecord(record) {
   if (record.kind === 'reasoning') return [{ kind: 'reasoning', text: record.text }];
   if (record.kind === 'assistant') {
     const rows = record.text === '' ? [] : [{ kind: 'answer', text: record.text }];
-    for (const call of record.toolCalls ?? []) rows.push({ kind: 'call', tool: call.name, text: JSON.stringify(call.args ?? {}) });
+    for (const call of record.toolCalls ?? []) rows.push({ kind: 'call', tool: capabilityOf(call.name, call.args), text: JSON.stringify(call.args ?? {}) });
     return rows;
   }
   if (record.kind === 'tool') {
     const result = record.result ?? {};
     const kind = result.failed !== true ? 'result' : result.kind === 'refusal' ? 'refusal' : 'failure';
-    return [{ kind, tool: record.tool, text: textOf(result.reason ?? result.content), code: result.code }];
+    const parts = resultParts(result);
+    const row = { kind, tool: parts.capability ?? capabilityOf(record.tool, record.args), text: parts.text };
+    if (result.code !== undefined) row.code = result.code;
+    if (parts.exitCode !== undefined) row.exitCode = parts.exitCode;
+    if (result.spilled !== undefined) row.spilled = result.spilled;
+    return [row];
   }
   if (record.kind === 'mode') {
     // 模式生效是一件会改变模型能做什么的事，画在转录里，让人看得见是哪一条输入之后换的（I5）。
@@ -141,6 +165,26 @@ export function helpLines(status, width) {
   return flowGroups(groups, width);
 }
 
+// 助手那一段是 markdown，看得见结构才算读得下去：标题加粗、列表带点、围栏里的内容原样且不加折行（第 41 步）。
+// 代码行用 truncate-end 而不是 wrap：把一行代码折到第二行会让人以为那是两行代码。
+function MarkdownRows({ text }) {
+  return h(Fragment, null, markdownLines(text).map((line, index) => {
+    if (line.kind === 'code') return h(Text, { key: index, wrap: 'truncate-end' }, `  ${line.text}`);
+    if (line.kind === 'heading') return h(Text, { key: index, bold: true }, line.text);
+    if (line.kind === 'list') return h(Text, { key: index, wrap: 'wrap' }, `· ${line.text}`);
+    return h(Text, { key: index, wrap: 'wrap' }, line.text);
+  }));
+}
+
+// 审批问的是「要不要做这一件」，那一句改动得先看得见：写入类工具的参数里带着全文或那两段，界面上算个行数就够。
+export function changeSummary(tool, args) {
+  const lines = (value) => String(value ?? '').split('\n').length;
+  if ((tool === 'write' || tool === 'create') && typeof args?.content === 'string') return `${args.path ?? '?'}：${lines(args.content)} 行新内容`;
+  if (tool === 'edit' && typeof args?.anchor === 'string') return `${args.path ?? '?'}：换掉 ${lines(args.anchor)} 行，换上 ${lines(args.replacement ?? '')} 行`;
+  if (tool === 'delete') return `把 ${args.path ?? '?'} 移进回收站`;
+  return '';
+}
+
 function Row({ row, expanded }) {
   if (row.kind === 'question') return h(Text, { color: 'cyan' }, `› ${row.text}`);
   if (row.kind === 'reasoning') {
@@ -149,12 +193,14 @@ function Row({ row, expanded }) {
       h(Text, { dimColor: true, wrap: 'truncate-end' }, `· 推理 ${folded.shown}`),
       folded.hidden > 0 ? h(Text, { dimColor: true }, `  …还有 ${folded.hidden} 字推理，Ctrl+O 展开`) : null);
   }
-  if (row.kind === 'answer') return h(Text, { wrap: 'wrap' }, row.text);
+  if (row.kind === 'answer') return h(MarkdownRows, { text: row.text });
   if (row.kind === 'call') return h(Text, { color: 'yellow' }, `→ ${row.tool} ${foldText(row.text, expanded, 1).shown}`);
   if (row.kind === 'result') {
     const folded = foldText(row.text, expanded);
+    // 抬头那一行说的是这一件做成了什么：命令带退出码，溢出带那个文件名（I6 的那一条引用要看得见）。
+    const note = [row.exitCode === undefined ? '' : `退出码 ${row.exitCode}`, row.spilled === undefined ? '' : `整段在 ${row.spilled}`].filter((part) => part !== '').join(' · ');
     return h(Fragment, null,
-      h(Text, { color: 'green' }, `✓ ${row.tool}`),
+      h(Text, { color: 'green' }, `✓ ${row.tool}${note === '' ? '' : `（${note}）`}`),
       folded.shown === '' ? null : h(Text, { dimColor: true, wrap: 'truncate-end' }, folded.shown),
       folded.hidden > 0 ? h(Text, { dimColor: true }, `  …还有 ${folded.hidden} 字输出，Ctrl+O 展开`) : null);
   }
@@ -216,10 +262,15 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     };
     const onRequest = (message) => {
       if (message.method !== 'approval.request' || message.params.sessionId !== sessionId) return;
+      const args = message.params.args ?? {};
+      // 画出来的那一行说的是什么对象：命令文本、路径、目标地址，或者那一项 MCP 能力名。
+      // 写入类的参数里带着整份文件内容，那一段不进这一行——行数写在下面那一行里，全文走 `/show`。
+      const shown = message.params.command ?? args.path ?? args.url ?? (typeof args.server === 'string' ? `mcp:${args.server}/${args.tool ?? ''}` : '');
       setAsk({
         id: message.id,
         tool: message.params.tool,
-        detail: message.params.command ?? JSON.stringify(message.params.args ?? {}),
+        detail: shown === '' ? JSON.stringify(args) : String(shown),
+        change: changeSummary(message.params.tool, args),
         reason: message.params.reason ?? '',
         // 用哪一种语法判的、跑的是哪一个可执行文件：答的是这一条命令，看得见的该是这两样（D59）。
         backend: message.params.shell === undefined ? '' : `${message.params.shell} · ${message.params.executable ?? ''}`,
@@ -502,6 +553,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     ask === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'yellow', paddingX: 1 },
       h(Text, { bold: true }, `要执行 ${ask.tool}`),
       h(Text, { wrap: 'truncate-end' }, ask.detail),
+      ask.change === '' ? null : h(Text, { dimColor: true }, ask.change),
       ask.backend === '' ? null : h(Text, { dimColor: true, wrap: 'truncate-end' }, `后端 ${ask.backend}`),
       ask.reason === '' ? null : h(Text, { dimColor: true }, ask.reason),
       h(Text, null, '按 y 允许一次，按 n 不允许')),
