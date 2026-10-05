@@ -6,8 +6,11 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
+  DEFAULT_LIMITS,
   KernelError,
+  compactionLimitsOf,
   createCompaction,
+  createConfig,
   createLoop,
   createSessionLog,
   cutPoint,
@@ -227,4 +230,25 @@ test('an oversized summary spills to a file with a retrievable reference', async
     assert.ok(reference, `the checkpoint keeps a reference: ${text.slice(-80)}`);
     assert.ok((await readFile(join(directory, reference[1]), 'utf8')).startsWith('yyyy'));
   });
+});
+
+// 窗口那一格没写就不启用压缩（D75 修订，2026-10-05 定）：0.8 与 0.16 是策略参数可以给缺省，
+// 窗口大小是模型事实——猜大了会让摘要请求自己超窗，所以没配置的人正常聊天照跑而不自动压。
+test('compaction stays off until the model window is configured', () => {
+  assert.equal(compactionLimitsOf(createConfig({ user: { limits: {} } })), undefined);
+  assert.equal(DEFAULT_LIMITS.contextTokens, undefined, 'the window has no shipped default to fall back on');
+  assert.equal(compactionLimitsOf(createConfig({ user: { limits: { contextTokens: 128_000 } } })).compactRetainRatio, 0.16);
+  for (const written of [
+    { contextTokens: 0 },
+    { contextTokens: '128000' },
+    { contextTokens: 128_000, compactThresholdRatio: 0 },
+    { contextTokens: 128_000, compactRetainRatio: 0.9 },
+    { contextTokens: 128_000, compactThresholdRatio: 2 },
+  ]) {
+    assert.throws(
+      () => compactionLimitsOf(createConfig({ user: { limits: written } })),
+      (error) => error.code === 'host_compaction_limits_invalid',
+      `${JSON.stringify(written)} is refused rather than silently disabling the line`,
+    );
+  }
 });

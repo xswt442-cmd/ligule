@@ -495,7 +495,8 @@ test('an approval for a command names the shell backend the host chose', async (
 
 // 支线那一份记录读回来的前提（第 35 步、D74）：派生体跑完就把装配撤掉了（D71），
 // 它留下的那份文件仍然是同一目录下的会话记录，读它不该要求它在这一刻是打开的，也不为它加一个协议方法。
-test('a record on disk reads back through the same action whether or not it is open', async () => {
+// 只放开这一种：别的会话没打开就读不到——发现历史归 sessions，接上别的会话归 session.open。
+test('a branch of an open session reads back through the same action', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'ligule-host-record-read-'));
   const config = createConfig({
     user: {
@@ -514,14 +515,13 @@ test('a record on disk reads back through the same action whether or not it is o
   const pair = createMemoryConnectionPair();
   const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy });
   const connection = createConnection(pair.client);
-  const branchId = '00000000-0000-4000-8000-000000000001.sub-1';
+  let branchId;
   try {
     const { sessionId } = await connection.request('session.create', {});
+    branchId = `${sessionId}.sub-1`;
     await connection.request('run.start', { sessionId, input: '一句话' });
-    host.release();
-    // 这一条连接上现在一份会话都不在，记录本身还在磁盘上：读回来的还是那几条。
     const { events } = await connection.request('session.read', { sessionId });
-    assert.ok(events.some((event) => event.kind === 'user' && event.text === '一句话'), 'the record reads back without a session');
+    assert.ok(events.some((event) => event.kind === 'user' && event.text === '一句话'), 'the open session reads back');
     assert.ok(events.every((event) => typeof event.seq === 'number'), 'sequence numbers come from the record');
 
     await writeFile(join(directory, '.ligule', 'sessions', `${branchId}.jsonl`), [
@@ -530,22 +530,32 @@ test('a record on disk reads back through the same action whether or not it is o
     ].join('\n') + '\n');
     const branch = await connection.request('session.read', { sessionId: branchId });
     // 首行那份元信息不在事件里（它的序号都没有，D73），交回的是可以拼请求的那几条。
-    assert.deepEqual(branch.events.map((event) => event.kind), ['user'], 'the branch record comes back whole');
+    assert.deepEqual(branch.events.map((event) => event.kind), ['user'], 'the branch of an open session reads back whole');
     assert.equal(branch.events[0].seq, 0, 'the branch numbers on from its own first event');
 
-    // 会话 id 是要拼进文件名的那一串，带目录分隔符的写法在这一步就报自己的码（记录目录之外不读）。
-    for (const [id, expected] of [['../outside', 'session_id_invalid'], ['nobody', 'session_not_found']]) {
+    // 读不到的那几种要说清各是哪一种：id 不是合法文件名、主干开着而支线不存在、这一份不是此刻任何主干的支线。
+    for (const [id, expected] of [
+      ['../outside', 'session_id_invalid'],
+      [`${sessionId}.sub-9`, 'session_not_found'],
+      [`${sessionId}.sub-x`, 'session_not_open'],
+      ['nobody', 'session_not_open'],
+    ]) {
       await assert.rejects(
         connection.request('session.read', { sessionId: id }),
         (error) => error.code === expected,
         `reading ${id} reports ${expected}`,
       );
-      await assert.rejects(
-        connection.request('session.open', { sessionId: id }),
-        (error) => error.code === expected,
-        `opening ${id} reports ${expected}`,
-      );
     }
+    await assert.rejects(connection.request('session.open', { sessionId: '../outside' }), (error) => error.code === 'session_id_invalid');
+    await assert.rejects(connection.request('session.open', { sessionId: 'nobody' }), (error) => error.code === 'session_not_found');
+
+    // 关掉这条连接上的会话之后支线也不再读得到：这一次动作不是记录目录的浏览器。
+    host.release();
+    await assert.rejects(
+      connection.request('session.read', { sessionId: branchId }),
+      (error) => error.code === 'session_not_open',
+      'a branch whose trunk is closed is not readable',
+    );
   } finally {
     pair.client.output.end();
     host.release();

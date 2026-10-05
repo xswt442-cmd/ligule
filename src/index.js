@@ -49,7 +49,7 @@ export {
 } from './host/protocol.js';
 export { createConnection } from './host/connection.js';
 export { createMemoryConnectionPair } from './host/memory.js';
-export { createHost, serveHost, providerFromConfig } from './host/host.js';
+export { createHost, serveHost, providerFromConfig, compactionLimitsOf } from './host/host.js';
 export {
   createMessagesProvider, capabilitiesOf, MESSAGES_CAPABILITIES,
 } from './model/messages.js';

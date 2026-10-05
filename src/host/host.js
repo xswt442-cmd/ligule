@@ -85,12 +85,18 @@ function loopLimitsOf(config) {
   return limits;
 }
 
-// 压缩那三条比例与窗口线（D75、U43）：形状在这里查，写错的那一份不该让每一次请求都算出一个 NaN 的线。
-// 保留量必须严格小于压力线，否则压完还是越线，而看不出来为什么一直在压（dsh 同一条约束）。
-function compactionLimitsOf(config) {
+// 压缩的两条线（D75、U43）：窗口那一格必须写出来，两条比例才有意义——窗口是模型事实，不是策略参数。
+// 没写就整条不启用（交回 undefined，宿主不给这一份会话挂压缩），写了但形状不对当场报出去，
+// 因为一条 NaN 的线会让每一次请求都算不出「超没超」，看上去是压缩从不触发。
+// 保留量还必须严格小于压力线，否则压完还是越线，而看不出来为什么一直在压（dsh 同一条约束）。
+export function compactionLimitsOf(config) {
   const limits = limitsOf(config);
-  for (const key of ['contextTokens', 'compactThresholdRatio', 'compactRetainRatio']) {
-    if (typeof limits[key] !== 'number' || !Number.isFinite(limits[key]) || limits[key] <= 0) {
+  if (limits.contextTokens === undefined) return undefined;
+  if (typeof limits.contextTokens !== 'number' || !Number.isFinite(limits.contextTokens) || limits.contextTokens <= 0) {
+    throw new KernelError('host_compaction_limits_invalid', { detail: `contextTokens must be a positive number, got ${JSON.stringify(limits.contextTokens)}` });
+  }
+  for (const key of ['compactThresholdRatio', 'compactRetainRatio']) {
+    if (typeof limits[key] !== 'number' || !(limits[key] > 0)) {
       throw new KernelError('host_compaction_limits_invalid', { detail: `${key} must be a positive number` });
     }
   }
@@ -148,8 +154,14 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     return state;
   }
 
+  // `<主干 id>.sub-<序号>` 是派生支线的名字（D71）：它的主干在这条连接上打开着，这一条才读得到（D74）。
+  function branchOwner(id) {
+    const matched = /^(.+)\.sub-(\d+)$/.exec(id);
+    return matched !== null && sessions.has(matched[1]) ? matched[1] : undefined;
+  }
+
   // 记录文件名由会话 id 拼出，而那个 id 是从客户端来的串：带目录分隔符时拼出的路径会走到记录目录外面。
-  // 形状在这里查一次，打开与读取两条路共用同一处（D74 之后，读一份记录不再要求它在这一刻是打开的）。
+  // 形状在这里查一次，打开与读取两条路共用同一处。
   function recordPathOf(id) {
     if (typeof id !== 'string' || id === '' || id === '.' || id === '..'
       || id.includes('/') || id.includes('\\') || id.includes(':') || id.includes('\0')) {
@@ -336,12 +348,14 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     if (modeName !== undefined) await state.adopt(await loadMode(modeName, modePaths));
     // 压缩挂在这一份会话上（D75）：两条触发都在循环里问它，摘要那一次调用走未装饰的提供方——
     // 它的流式增量不该转给客户端，而它写完检查点就退出这一轮的事，事件日志一条都不动。
-    const compaction = createCompaction({
+    // 配置没写 `limits.contextTokens` 时这一件是 null：窗口大小是模型事实，不猜，正常聊天照跑。
+    const limits = compactionLimitsOf(config);
+    const compaction = limits === undefined ? null : createCompaction({
       provider,
       session,
       directory,
       id,
-      limits: compactionLimitsOf(config),
+      limits,
       logger,
     });
     const loop = createLoop({
@@ -386,9 +400,11 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           // 交回的是记录本身：客户端晚到了也能把已经发生过的事画出来（I5）。
           const state = sessions.get(sessionId);
           if (state !== undefined) return { sessionId, events: await state.session.read() };
-          // 派生支线那一份不在此刻的内核里（那一轮跑完就把装配撤掉了，D71），但它就是同一目录下的另一份会话记录：
-          // 读它用这同一次动作，不为它多开一个协议方法（D74）。这一条路只读，不建内核也不补未知结果。
+          // 派生支线那一份不在这轮的内核里（跑完就把装配撤了，D71），界面读它用的是这同一次动作（D74）。
+          // 除这一种之外不读磁盘：这一次动作的语义是「把我这一份会话的事实拿回来」，不是记录目录的浏览器；
+          // 发现历史会话归 sessions，接上别的会话归 session.open。
           const path = recordPathOf(sessionId);
+          if (branchOwner(sessionId) === undefined) throw new KernelError('session_not_open', { detail: sessionId });
           try {
             await access(path);
           } catch {

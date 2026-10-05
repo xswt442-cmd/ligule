@@ -163,5 +163,9 @@ test('a streamed answer asks for usage and hands back the one it got', async () 
       { type: 'usage', input: 900, output: 12 },
     ]);
     assert.deepEqual(requests[0].body.stream_options, { include_usage: true });
+
+    // 不认这一格的兼容代理把 streamUsage 降成 false：少一条用量，别少一次请求。
+    await collect(provider(baseUrl, { capabilities: { streamUsage: false } }).stream({ system: '', tools: [], messages: [] }));
+    assert.equal(requests[1].body.stream_options, undefined);
   });
 });

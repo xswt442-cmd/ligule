@@ -9,6 +9,9 @@ export const CHAT_COMPLETIONS_CAPABILITIES = Object.freeze({
   streaming: true,
   parallelToolCalls: true,
   maxOutputTokens: 8192,
+  // 流式请求要不要带 `stream_options:{include_usage:true}` 去要那一条用量（D75 的压力线要用真实用量修正本地估算）。
+  // 这一族里绝大多数端点认这一格，不认的那一些把它降成 false：少一条用量，压缩的压力线退回本地估算，聊天照跑。
+  streamUsage: true,
 });
 
 export function chatCompletionsCapabilities(requested = {}) {
@@ -72,8 +75,9 @@ export function createChatCompletionsProvider({
         model,
         messages: toWireMessages(request.messages ?? [], request.system ?? ''),
         stream: effective.streaming,
-        // 流式也要最后那一条用量（压缩的压力线要看端点真实报回的那一份）：不写这一格，很多兼容端点就不交 usage。
-        ...(effective.streaming ? { stream_options: { include_usage: true } } : {}),
+        // 流式也要最后那一条用量（压缩的压力线要看端点真实报回的那一份）：这一格由能力声明决定，
+        // 不认它的代理把 model.capabilities 里的 streamUsage 降成 false，两条线退回本地估算。
+        ...(effective.streaming && effective.streamUsage ? { stream_options: { include_usage: true } } : {}),
         max_tokens: effective.maxOutputTokens,
         parallel_tool_calls: effective.parallelToolCalls,
         ...(request.tools?.length === 0 || request.tools === undefined ? {} : {
