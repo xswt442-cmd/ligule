@@ -210,6 +210,11 @@ function Row({ row, expanded }) {
   return h(Text, { color: 'red' }, `! ${row.text}`);
 }
 
+// 队列里那一条画之前先裁短：一行装不下一整句话，而这一格的作用只是让人看见排了几条。
+export function queuedLine(text, limit = 64) {
+  return text.length > limit ? `${text.slice(0, limit)}…` : text;
+}
+
 export function App({ client, sessionId: firstSessionId, info = {}, interactive = true, stdout }) {
   const app = useApp();
   const [sessionId, setSessionId] = useState(firstSessionId);
@@ -231,6 +236,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [pick, setPick] = useState(0);
   // Esc 收起候选时记下收起的是哪一段草稿：改一个字就该重新露出来，不需要另一个开关。
   const [dismissedAt, setDismissedAt] = useState(null);
+  // 跑着的那一轮里回车排进来的那几条：只在界面一侧，不进记录也不进内核（D81 边界二）。
+  const [queue, setQueue] = useState([]);
 
   const push = useCallback((...added) => setRows((current) => [...current, ...added]), []);
 
@@ -456,6 +463,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       push({ kind: 'meta', text: `这一轮跑着的时候 ${route.usage} 用不了；Esc 先打断这一轮` });
       return;
     }
+    // 跑着的那一轮里，要交给模型的那一句进队列：这一轮结束后按先后发出，回车不再是吞掉一句话。
+    if (route.kind === 'run' && running) {
+      setQueue((current) => [...current, route.text]);
+      return;
+    }
     if (route.kind === 'command') {
       push({ kind: 'meta', text: findUiCommand(route.name).usage });
       runCommand(route.name, route.argument);
@@ -464,6 +476,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     setHistory((current) => [route.text, ...current].slice(0, 50));
     void submit(route.text);
   }, [push, runCommand, running, submit]);
+
+  // 本轮结束后把队列里的第一条发出去：一次只发一条，剩下的接着排；被打断也算这一轮结束（D20）。
+  useEffect(() => {
+    if (running || queue.length === 0) return;
+    const [next, ...rest] = queue;
+    setQueue(rest);
+    void submit(next);
+  }, [queue, running, submit]);
 
   // 候选每次从当前草稿算出来：草稿改一个字清单就跟着变，不需要再维护一份状态（D81）。
   const templates = status?.templates ?? [];
@@ -527,6 +547,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       setCaret(recalled.length);
       return;
     }
+    if ((key.backspace || key.delete) && draft === '' && queue.length > 0) {
+      // 草稿已经空着时按退格，最后排进来的那一条收回草稿里：打错的那一句要能改，不必重新打一遍。
+      setQueue((current) => current.slice(0, -1));
+      const last = queue[queue.length - 1];
+      setDraft(last);
+      setCaret(last.length);
+      return;
+    }
     if (key.return) {
       if (key.shift) {
         const inserted = draft.slice(0, caret) + '\n' + draft.slice(caret);
@@ -562,6 +590,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       detail.rows.length === 0
         ? h(Text, { dimColor: true }, '这一条没有可画的内容')
         : detail.rows.map((row, index) => h(Row, { key: index, row, expanded: true }))),
+    queue.length === 0 ? null : h(Box, { flexDirection: 'column' },
+      queue.map((item, index) => h(Text, { key: `${index}:${item}`, dimColor: true }, `排队 ${index + 1} · ${queuedLine(item)}`)),
+      h(Text, { dimColor: true }, '  这一轮结束后按先后发出；草稿空着时按退格收回最后一条')),
     picks.length === 0 ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'gray', paddingX: 1 },
       picks.slice(0, CANDIDATE_ROWS).map((candidate, index) => h(Box, { key: `${candidate.source}:${candidate.name}` },
         h(Text, { inverse: index === chosen }, ` /${candidate.name}${candidate.hint === '' ? '' : ` ${candidate.hint}`}`),

@@ -12,7 +12,7 @@ try {
 }
 
 const options = { skip: missing === '' ? false : missing };
-const { foldText, editDraft, projectRecord, buildStatusLine, findRecord, branchOf, detailTitle, helpLines, routeInput, candidatesOf, displayWidth, flowGroups, UI_COMMANDS, markdownLines, changeSummary, capabilityOf } = rows;
+const { foldText, editDraft, projectRecord, buildStatusLine, findRecord, branchOf, detailTitle, helpLines, routeInput, candidatesOf, displayWidth, flowGroups, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine } = rows;
 
 test('a record becomes the rows the terminal shows, one line each', options, () => {
   assert.deepEqual(projectRecord({ kind: 'user', text: '读一下' }), [{ kind: 'question', text: '读一下' }]);
@@ -299,21 +299,24 @@ test('typing a template command completes it and sends the raw line to the host'
     reply: () => {},
   };
   const instance = render(createElement(App, { client, sessionId: 's', info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
-  await delay(300);
-  stdin.write('/gi');
-  await delay(200);
-  assert.match(painted, /git:release:prepare/, '清单里看得见宿主交出来的那一条');
-  stdin.write('\t');
-  await delay(200);
-  assert.match(painted, /› \/git:release:prepare/, 'Tab 把名字补全了');
-  stdin.write('3');
-  await delay(200);
-  stdin.write('\r');
-  await delay(300);
-  instance.unmount();
-
-  const run = sent.find((call) => call.method === 'run.start');
-  assert.equal(run.input, '/git:release:prepare 3', '交给宿主的是原样那一行，展开归宿主（D24、D81）');
+  try {
+    await delay(300);
+    stdin.write('/gi');
+    await delay(200);
+    assert.match(painted, /git:release:prepare/, '清单里看得见宿主交出来的那一条');
+    stdin.write('\t');
+    await delay(200);
+    assert.match(painted, /› \/git:release:prepare/, 'Tab 把名字补全了');
+    stdin.write('3');
+    await delay(200);
+    stdin.write('\r');
+    await delay(300);
+    const run = sent.find((call) => call.method === 'run.start');
+    assert.equal(run.input, '/git:release:prepare 3', '交给宿主的是原样那一行，展开归宿主（D24、D81）');
+  } finally {
+    // 断言失败也要收掉这一具渲染：没 unmount 的 Ink 会留着输入与计时器把测试进程拖住。
+    instance.unmount();
+  }
 });
 
 // 助手那一段的结构看得见：围栏里的内容一行不动，标题与列表分出来，行内那几种写法只留文字（第 41 步）。
@@ -399,4 +402,73 @@ test('an answer with markdown shapes paints a heading, a list and a code line', 
   assert.match(painted, / {2}const a = 1/, '围栏里那一行带缩进画出来');
   assert.doesNotMatch(painted, /## 两步/, '井号不留在画面上');
   assert.doesNotMatch(painted, /\*\*0\*\*/, '加粗的星号也不留在画面上');
+});
+
+// 排队的短句只画前 64 字：这一格的作用是说「排了几条」，不是把整句话再印一遍。
+test('a queued line is clipped to one row', options, () => {
+  assert.equal(queuedLine('短的一句'), '短的一句');
+  assert.equal(queuedLine('x'.repeat(70)).length, 65);
+  assert.match(queuedLine('x'.repeat(70)), /…$/);
+});
+
+// 跑着的那一轮里回车不再吞话：排进来的按先后在本轮结束后发出，空草稿上按退格收回最后一条（D81 边界二）。
+test('input typed while a round runs queues up and flushes in order', options, async () => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { setTimeout: delay } = await import('node:timers/promises');
+  const { App } = await import('../dist/tui/app.js');
+
+  const stdout = new PassThrough();
+  stdout.columns = 100;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+
+  const started = [];
+  const resolvers = [];
+  const client = {
+    onNotification() {},
+    onRequest() {},
+    request: async (method, params) => {
+      if (method === 'run.start') {
+        started.push(params.input);
+        return new Promise((resolve) => resolvers.push(() => resolve({ iterations: 1, modelCalls: 1 })));
+      }
+      if (method === 'status.get') {
+        return { sessionId: 'abcdef01-2345', running: false, mode: 'minimal', modeLayer: 'shipped', pendingMode: null, policy: 'ask', tools: ['read'], eventCount: 0, denials: { consecutive: 0, total: 0 }, templates: [] };
+      }
+      return {};
+    },
+    reply: () => {},
+  };
+  const instance = render(createElement(App, { client, sessionId: 'abcdef01-2345', info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
+  // 文本与回车分两次写：一段中文后面紧跟 `\r` 时被同一个 chunk 吃掉，真键盘上是两次按键。
+  const type = async (text) => { stdin.write(text); await delay(80); stdin.write('\r'); await delay(200); };
+  // 只看最后一帧：Ink 把每一帧续写在同一个流里，取尾巴会连上一帧的内容一起读。
+  const lastFrame = () => painted.split('\x1B[?2026h').pop();
+  try {
+    await delay(250);
+    await type('第一条');
+    assert.deepEqual(started, ['第一条'], '第一句直接进这一轮');
+    await type('第二条');
+    await type('第三条');
+    assert.deepEqual(started, ['第一条'], '跑着的时候不再开第二轮');
+    assert.match(lastFrame(), /排队 1 · 第二条/);
+    assert.match(lastFrame(), /排队 2 · 第三条/);
+
+    // 草稿空着时按退格：最后排进来的那一条回到草稿，队列少一条。
+    stdin.write('\x7f');
+    await delay(200);
+    assert.match(lastFrame(), /第三条/, '收回来的那一句在草稿里');
+    assert.equal((lastFrame().match(/排队 \d/g) ?? []).length, 1, '队列里少了一条');
+
+    resolvers.shift()();
+    await delay(300);
+    assert.deepEqual(started, ['第一条', '第二条'], '本轮结束后按先后接上');
+  } finally {
+    // 断言失败也要收掉这一具渲染：没 unmount 的 Ink 会留着输入与计时器把测试进程拖住。
+    instance.unmount();
+  }
 });
