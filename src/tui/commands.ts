@@ -29,6 +29,7 @@ export const UI_COMMANDS: readonly UiCommand[] = Object.freeze([
   { name: 'help', usage: '/help', text: '列出命令与按键', hint: '', whenRunning: true },
   { name: 'mode', usage: '/mode [名字]', text: '显示当前模式，或切换到另一个名字', hint: '[名字]', whenRunning: true },
   { name: 'status', usage: '/status', text: '显示模式、档位、拒绝计数与记录条数', hint: '', whenRunning: true },
+  { name: 'compact', usage: '/compact', text: '现在就把靠前的那一段压成一份摘要（要写出 limits.contextTokens）', hint: '', whenRunning: true },
   { name: 'tools', usage: '/tools', text: '列出这次运行装了哪些工具', hint: '', whenRunning: true },
   { name: 'show', usage: '/show [序号]', text: '把记录里那一条的完整内容画出来，不带序号收起', hint: '[序号]', whenRunning: true },
   { name: 'sub', usage: '/sub [序号]', text: '画出那一次派生执行的整份支线记录，不带序号收起', hint: '[序号]', whenRunning: true },

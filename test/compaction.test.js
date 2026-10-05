@@ -252,3 +252,77 @@ test('compaction stays off until the model window is configured', () => {
     );
   }
 });
+
+// 端点报回的用量落成一条记录事件（D82）：界面与恢复读的是记录，不是上一次进程留在内存里的那个数。
+test('the usage an endpoint reports lands in the record and never in the projection', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    await fill(session, 2);
+    const compaction = createCompaction({ provider: fakeProvider([]), session, directory, id, limits });
+    const messages = await session.modelView();
+    await compaction.observe({ messages }, [{ type: 'usage', input: 1200, output: 80 }]);
+    const usage = (await session.read()).at(-1);
+    assert.equal(usage.kind, 'usage');
+    assert.equal(usage.ignorable, true, '读不懂它的旧程序略过这一条，而不是拒绝打开这份记录');
+    assert.deepEqual([usage.input, usage.output], [1200, 80]);
+    assert.equal(usage.estimated, estimateTokens(messages), '本地那一份估算一起留：系数要能从记录本身算回来');
+    // 投影里没有它的位置：它不是模型说过的话，也不是工具结果。
+    assert.deepEqual((await session.modelView()).map((entry) => entry.role), ['user', 'assistant', 'user', 'assistant']);
+    // 一条都没报回时不再多写一条：0 不是「用量是零」，是「没说」。
+    const before = (await session.read()).length;
+    await compaction.observe({ messages }, [{ type: 'text', text: 'no usage here' }]);
+    assert.equal((await session.read()).length, before);
+  });
+});
+
+// 重开一份会话不该从「从没校准过」重新开始：系数从记录里最后一条用量算回来（D82）。
+test('a fresh compaction over a record that carries usage starts calibrated', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    await fill(session, 2);
+    const local = estimateTokens(await session.modelView());
+    await session.append({ kind: 'usage', ignorable: true, input: local * 3, output: 10, estimated: local });
+    const compaction = createCompaction({ provider: fakeProvider([]), session, directory, id, limits });
+    const context = await compaction.context();
+    assert.equal(context.factor, 3);
+    assert.equal(context.estimated, local * 3);
+    assert.deepEqual([context.window, context.threshold, context.retained], [4000, 3200, 640]);
+    assert.deepEqual([context.reported.input, context.reported.output], [local * 3, 10]);
+  });
+});
+
+// 手动那一条与自动那两条走同一次摘要生成；切不动时说清切不动（D83）。
+test('a manual compaction writes the same checkpoint and says when there is nothing to cut', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    const compaction = createCompaction({ provider: fakeProvider([], 'MANUAL SUMMARY'), session, directory, id, limits });
+    assert.equal(await compaction.compactNow(), null, '一段可切的边界都还没有时不写检查点');
+    await fill(session, 3);
+    const done = await compaction.compactNow();
+    assert.ok(done !== null && done.toSeq >= done.fromSeq && done.tokensAfter < done.tokensBefore);
+    const read = await loadCheckpoint({ directory, id, events: await session.read() });
+    assert.equal(read.reason, '', '手动写出去的那一份与日志对得上');
+    assert.equal(read.checkpoint.text, 'MANUAL SUMMARY');
+    assert.equal((await session.modelView())[0].text, 'MANUAL SUMMARY', '压完的投影第一段就是那份摘要');
+  });
+});
+
+// 摘要比它顶掉的那一段还长时不压（第 43 步补的那一条护栏）：那种检查点只会让模型少读历史、多读一份摘要，
+// 而它顶掉的那一段再也不会被读到——压不动就说清压不动。
+test('a summary that would not shrink the projection is refused', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    for (let round = 0; round < 4; round += 1) {
+      await session.append({ kind: 'user', text: `第 ${round} 问` });
+      await session.append({ kind: 'assistant', text: `第 ${round} 答`, toolCalls: [] });
+    }
+    const logged = [];
+    const compaction = createCompaction({
+      provider: fakeProvider([], 'A '.repeat(400)),
+      session,
+      directory,
+      id,
+      limits: { contextTokens: 1000, compactThresholdRatio: 0.8, compactRetainRatio: 0.05, resultBytes: 16_000 },
+      logger: { log: (message, fields) => logged.push({ message, ...fields }) },
+    });
+    assert.equal(await compaction.compactNow(), null);
+    assert.ok(logged.some((entry) => String(entry.message).includes('would not shrink')), '要说清为什么没压');
+    await assert.rejects(() => readFile(join(directory, `${id}.checkpoint.json`), 'utf8'), '没写出检查点');
+  });
+});

@@ -45,6 +45,11 @@ export const METHODS = Object.freeze({
       required: ['sessionId', 'name'],
     },
   },
+  // 第二次多出一个方法（第一条是 `mode.set`，D65）：摘要要调模型、检查点要写盘，两处都在宿主一侧，界面做不到（D83）。
+  'session.compact': {
+    description: 'Compact the front of this session now: ask for one summary, write the checkpoint, return the new boundary; refuses while a round runs or when no window is configured',
+    parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
+  },
 });
 
 // Host 向客户端发出去的那一份请求，与客户端答复的形状。

@@ -122,3 +122,17 @@ test('a second header line is a refusal, not a second session', async () => {
     });
   });
 });
+
+// 端点报回的用量进记录（D82）：它带着 `ignorable` 那一格，可这一具程序写得出来也读得回来，
+// 所以序号连着——检查点那段范围不会因为它多占一个号就缺号。它也不进投影（D12）。
+test('the usage event this build writes comes back out of a record', async () => {
+  await withDirectory(async (directory) => {
+    const session = createSessionLog({ directory, id: 'usage-kept' });
+    await session.append({ kind: 'user', text: 'one' });
+    await session.append({ kind: 'usage', ignorable: true, input: 400, output: 5, estimated: 120 });
+    const events = await createSessionLog({ directory, id: 'usage-kept' }).read();
+    assert.deepEqual(events.map((event) => event.seq), [0, 1]);
+    assert.equal(events[1].kind, 'usage');
+    assert.deepEqual((await session.modelView()).map((entry) => entry.role), ['user'], '用量那一格不进投影');
+  });
+});

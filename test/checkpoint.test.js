@@ -114,3 +114,20 @@ test('the hash input leaves out transport identity and fields this build does no
     assert.notEqual(prefixDigest(widened), prefixDigest(widened.map((event) => ({ ...event, text: `${event.text}.` }))), 'a real content change still moves the hash');
   });
 });
+
+// `usage` 那一格不进哈希输入，也不该占出一个「缺号」来（D82 与 D75 的交界处）：
+// 它进了记录之后，一份本来对得上的检查点不该因此作废。
+test('a usage event inside the covered range leaves the checkpoint alone', () => {
+  const id = 'usage-in-range';
+  const events = [
+    { seq: 0, kind: 'user', text: 'one' },
+    { seq: 1, kind: 'assistant', text: 'two', toolCalls: [] },
+    { seq: 2, kind: 'usage', input: 400, output: 5, estimated: 120 },
+    { seq: 3, kind: 'user', text: 'three' },
+  ];
+  const checkpoint = createCheckpoint({ id, events: events.slice(0, 3), text: '一份摘要', fromSeq: 0, toSeq: 2 });
+  assert.equal(prefixDigest(events), prefixDigest(events.filter((event) => event.kind !== 'usage')), '用量那一格不参与输入');
+  assert.deepEqual(usableCheckpoint(checkpoint, id, events), { checkpoint, reason: '' }, '序号还是连着的，检查点照用');
+  // 反过来读：谁把它当成「可以略过的那一种」丢掉，那段范围就缺号——这正是它要在 WRITTEN_KINDS 里的理由。
+  assert.equal(usableCheckpoint(checkpoint, id, events.filter((event) => event.kind !== 'usage')).reason, 'checkpoint_range_missing');
+});

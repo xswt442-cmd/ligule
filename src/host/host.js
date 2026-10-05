@@ -367,7 +367,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       compaction,
     });
     // 一份会话一份状态，审批的等待与正在跑的那一轮都记在这里。
-    return Object.assign(state, { chain, kernel, assembly, extensions: installedExtensions, mcp, loop, templates });
+    return Object.assign(state, { chain, kernel, assembly, extensions: installedExtensions, mcp, loop, templates, compaction });
   }
 
   return {
@@ -490,7 +490,22 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
             eventCount: (await state.session.read()).length,
             // 名字、说明与参数提示三样交出去，为的是界面上那一串候选：展开仍然只在这地方做一次（D24、D81）。
             templates: state.templates.templates.map(({ command, description, hint }) => ({ command, description, hint })),
+            // 上下文压力那一格（D82）：窗口、压力线、当前投影的估算，加上记录里最后一次报回的用量。
+            // 没写窗口时整格是 null，画面上那一段就不出现——那不是「还没压到」，是「线还没定」。
+            usage: state.compaction === null ? null : await state.compaction.context(),
           };
+        }
+        case 'session.compact': {
+          const state = open(sessionId);
+          // 压的是下一次请求要用的那一份投影，正在跑的这一轮的上下文已经在路上：这时候压改变不了它（D83）。
+          if (state.running !== undefined) throw new KernelError('compact_turn_running', { detail: sessionId });
+          if (state.compaction === null) {
+            throw new KernelError('compact_window_unset', { detail: 'limits.contextTokens is not written, so there is no window to compact against' });
+          }
+          const done = await state.compaction.compactNow();
+          // 压不动只可能是那一种：留下保留预算之后一段里找不到能切的边界。
+          if (done === null) throw new KernelError('compact_nothing_to_cut', { detail: sessionId });
+          return { sessionId, ...done };
         }
         default:
           // validateCall 已经拦住了不认识的方法，走到这里说明分发表与协议表不是同一份。

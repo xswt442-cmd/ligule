@@ -84,7 +84,8 @@ export function createLoop({ kernel, provider, prompt, session, limits = DEFAULT
             }
           }
           // 端点交回的真实用量用来修正本地估算：没有这一句，压力那一条可能永远不响。
-          compaction?.observe({ messages }, events);
+          // 这一句同时也是把那一格落进记录的地方（D82）：界面与恢复都从记录读它，不读内存。
+          await compaction?.observe({ messages }, events);
 
           text = events.filter((event) => event.type === 'text').map((event) => event.text).join('');
           const reasoning = events.filter((event) => event.type === 'reasoning').map((event) => event.text).join('');

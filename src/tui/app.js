@@ -107,20 +107,32 @@ export function projectRecord(record) {
   return [];
 }
 
+// 状态行上的那一段上下文压力：当前投影的估算、窗口，外加越线没有（D82）。没写窗口时宿主交出 null，这一段整块不出现。
+// 估算是本地量法乘上端点报回的修正系数，前面那个波浪号说的是它不是端点给的确数。
+export function contextSegment(usage) {
+  if (usage === null || usage === undefined) return '';
+  return `ctx:~${usage.estimated}/${usage.window}${usage.estimated > usage.threshold ? ' 越线' : ''}`;
+}
+
 // 状态行里模式与判定档位各带一个前缀：`mode` 这一个词在界面上指过两样东西，写清楚比省字重要（D40）。
-// 待生效写成 `mode:minimal→full`。宽度不够时先去掉工具数——它是模式与档位的推论，那两样才说得出这一轮能做什么。
+// 待生效写成 `mode:minimal→full`。宽度不够时先去掉工具数——它是模式与档位的推论，再挤就丢上下文那一段。
 export function buildStatusLine({ head, sessionId, boundary, status, running, seconds, expanded, columns }) {
   const base = `${head}会话 ${sessionId.slice(0, 8)}${boundary === undefined ? '' : ` · ${boundary}`}`;
   if (status === null) return base;
+  const context = contextSegment(status.usage);
   const parts = [`mode:${status.pendingMode === null ? status.mode ?? 'none' : `${status.mode}→${status.pendingMode}`}`,
-    `policy:${status.policy}`, `tools:${status.tools.length}`];
+    `policy:${status.policy}`];
+  if (context !== '') parts.push(context);
+  parts.push(`tools:${status.tools.length}`);
   const tail = `记录 ${status.eventCount} 条`
     + (running ? ` · ${Math.floor(seconds)} 秒，Esc 打断` : '')
     + (expanded ? ' · 已展开（Ctrl+O 收起）' : '');
   const line = (kept) => `${base} · ${kept.join('  ')} · ${tail}`;
   // 列数读不到时不裁：宁可让终端自己折行，也不要按一个猜的宽度丢东西。
-  if (columns !== undefined && columns > 0 && line(parts).length > columns) parts.pop();
-  return line(parts);
+  let shown = parts;
+  if (columns !== undefined && columns > 0 && line(shown).length > columns) shown = shown.filter((part) => !part.startsWith('tools:'));
+  if (columns !== undefined && columns > 0 && line(shown).length > columns) shown = shown.filter((part) => !part.startsWith('ctx:'));
+  return line(shown);
 }
 
 // `/show` 要的是记录里那个稳定的序号，不是画面上的第几行：行会随投影变，序号不会（D40）。
@@ -350,8 +362,26 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       void (async () => {
         const current = await client.request('status.get', { sessionId }).catch(() => null);
         setStatus(current);
+        const context = contextSegment(current?.usage);
         push({ kind: 'meta', text: current === null ? '状态读不到'
-          : `模式 ${current.mode ?? '没装'} · 档位 ${current.policy} · 拒绝 连续 ${current.denials.consecutive} 次 / 累计 ${current.denials.total} 次 · 记录 ${current.eventCount} 条` });
+          : `模式 ${current.mode ?? '没装'} · 档位 ${current.policy} · 拒绝 连续 ${current.denials.consecutive} 次 / 累计 ${current.denials.total} 次 · 记录 ${current.eventCount} 条`
+            + (context === '' ? '' : ` · ${context}`) });
+      })();
+      return;
+    }
+    if (name === 'compact') {
+      void (async () => {
+        // 压这一件事归宿主：要调模型、要写检查点（D83）。界面只把结果说清楚，包括三种不肯压的情况。
+        const done = await client.request('session.compact', { sessionId }).catch((error) => error);
+        if (done.code !== undefined) {
+          push({ kind: 'error', text: `压不成：${done.code}${done.detail === undefined ? '' : ` · ${done.detail}`}` });
+          return;
+        }
+        setStatus(await client.request('status.get', { sessionId }).catch(() => null));
+        push({
+          kind: 'meta',
+          text: `压掉了第 ${done.fromSeq} 到 ${done.toSeq} 条：投影从约 ${done.tokensBefore} 变成约 ${done.tokensAfter}（本地量法），原文仍在记录里`,
+        });
       })();
       return;
     }

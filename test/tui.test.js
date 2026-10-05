@@ -12,7 +12,7 @@ try {
 }
 
 const options = { skip: missing === '' ? false : missing };
-const { foldText, editDraft, projectRecord, buildStatusLine, findRecord, branchOf, detailTitle, helpLines, routeInput, candidatesOf, displayWidth, flowGroups, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine } = rows;
+const { foldText, editDraft, projectRecord, buildStatusLine, contextSegment, findRecord, branchOf, detailTitle, helpLines, routeInput, candidatesOf, displayWidth, flowGroups, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine } = rows;
 
 test('a record becomes the rows the terminal shows, one line each', options, () => {
   assert.deepEqual(projectRecord({ kind: 'user', text: '读一下' }), [{ kind: 'question', text: '读一下' }]);
@@ -471,4 +471,24 @@ test('input typed while a round runs queues up and flushes in order', options, a
     // 断言失败也要收掉这一具渲染：没 unmount 的 Ink 会留着输入与计时器把测试进程拖住。
     instance.unmount();
   }
+});
+
+// 状态行上那一段上下文压力（D82、第 43 步）：没写窗口时整段不出现，不是写一个 0 上去。
+test('the status line reports context pressure only when a window is written', options, () => {
+  assert.equal(contextSegment(null), '');
+  assert.equal(contextSegment(undefined), '');
+  assert.equal(contextSegment({ window: 200_000, threshold: 160_000, estimated: 42_000 }), 'ctx:~42000/200000');
+  assert.equal(contextSegment({ window: 200_000, threshold: 160_000, estimated: 168_000 }), 'ctx:~168000/200000 越线');
+
+  const status = {
+    mode: 'full', pendingMode: null, policy: 'ask', tools: ['a', 'b'], eventCount: 4,
+    denials: { consecutive: 0, total: 0 }, usage: { window: 200_000, threshold: 160_000, estimated: 42_000 },
+  };
+  const draw = (columns) => buildStatusLine({ head: '', sessionId: 'x', status, running: false, seconds: 0, expanded: false, columns });
+  assert.match(draw(200), /ctx:~42000\/200000/);
+  // 挤的时候先丢工具数，再丢上下文那一段：那两段都从别处读得出来，模式与档位留着。
+  assert.doesNotMatch(draw(64), /tools:/);
+  assert.match(draw(64), /ctx:~/);
+  assert.doesNotMatch(draw(40), /ctx:/);
+  assert.ok(UI_COMMANDS.some((command) => command.name === 'compact'), '/compact 在命令表里');
 });

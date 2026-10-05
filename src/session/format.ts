@@ -36,7 +36,9 @@ export interface SessionRecord {
 
 // 这一具程序会写出去的事件种类。不在这一张表里的种类，只有事件自己标了可跳过才允许略过（D73）：
 // 一条撑起重建的事件被静丢掉，读出来的就是错的历史。
-const WRITTEN_KINDS = ['session', 'user', 'reasoning', 'assistant', 'tool', 'mode'];
+// `usage` 在表里（D82）：它不进投影，但它的序号占着位——把它当成「可略过」丢掉的那几种读法会让检查点那段范围缺号，
+// 一份本来对得上的检查点就白作废了。它同时带着 `ignorable` 那一格，读不懂它的旧程序略过而不是拒绝打开。
+const WRITTEN_KINDS = ['session', 'user', 'reasoning', 'assistant', 'tool', 'mode', 'usage'];
 
 export function createSessionHeader({
   id,

@@ -566,3 +566,90 @@ test('a branch of an open session reads back through the same action', async () 
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+// 手动压缩与状态上那一格（D82、D83，实现顺序第 43 步）：压这件事要调模型、要写检查点，两处都在宿主一侧，
+// 所以它是一条协议方法而不是界面里的一个把戏。
+async function withInProcessHost(run, limits) {
+  const directory = await mkdtemp(join(tmpdir(), 'ligule-host-compact-'));
+  const config = createConfig({
+    user: {
+      boundary: directory,
+      model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model' },
+      policy: { mode: 'auto' },
+      ...(limits === undefined ? {} : { limits }),
+    },
+  });
+  // hold 交进去的那一个 Promise 会挡在提供方回答之前：用来演「这一轮还在跑」。
+  let gate;
+  const provider = {
+    capabilities: MESSAGES_CAPABILITIES,
+    model: 'test-model',
+    async *stream(request) {
+      if (gate !== undefined) await gate;
+      // 摘要那一次要答得短，否则「压完更小」这一条在这份假端点上永远不成立（真端点也一样会有这种事）。
+      if (String(request.messages?.[0]?.text ?? '').startsWith('Write a summary')) {
+        yield { type: 'text', text: 'SUMMARY OF THE EARLIER TURNS' };
+        return;
+      }
+      yield { type: 'text', text: 'a chunk of an answer that is worth summarising '.repeat(30) };
+    },
+  };
+  const pair = createMemoryConnectionPair();
+  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy });
+  const connection = createConnection(pair.client);
+  try {
+    return await run(connection, { hold: (promise) => { gate = promise; }, directory });
+  } finally {
+    pair.client.output.end();
+    host.release();
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+// 窗口那一格没写时不猜（D75 那条门在这里是同一句说法）：压不动，状态上那一段也不出现。
+test('manual compaction refuses when no window is written and the status line says nothing', async () => {
+  await withInProcessHost(async (connection) => {
+    const { sessionId } = await connection.request('session.create', {});
+    await assert.rejects(
+      connection.request('session.compact', { sessionId }),
+      (error) => error.code === 'compact_window_unset',
+      '没有窗口就没有线',
+    );
+    const status = await connection.request('status.get', { sessionId });
+    assert.equal(status.usage, null, '那一格是 null，不是 0');
+  });
+});
+
+test('manual compaction returns a boundary the status line then reports', async () => {
+  await withInProcessHost(async (connection, { hold }) => {
+    const { sessionId } = await connection.request('session.create', {});
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    hold(gate);
+    const started = connection.request('run.start', { sessionId, input: 'go' });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    // 这一轮的上下文已经在路上，这时候压改变不了它（D83）。
+    await assert.rejects(
+      connection.request('session.compact', { sessionId }),
+      (error) => error.code === 'compact_turn_running',
+      '跑着的那一轮不压',
+    );
+    release();
+    await started;
+    hold(Promise.resolve());
+    // 再跑一轮：只有一轮历史时能切的段小得过不了「压完要更小」那条护栏，那是应该的（第 43 步）。
+    await connection.request('run.start', { sessionId, input: 'go again' });
+
+    const done = await connection.request('session.compact', { sessionId });
+    assert.ok(Number.isInteger(done.fromSeq) && Number.isInteger(done.toSeq) && done.toSeq >= done.fromSeq);
+    assert.ok(done.tokensAfter < done.tokensBefore, '压完的投影要比压之前小，不然就不该压');
+    const read = await connection.request('session.read', { sessionId });
+    assert.ok(read.events.some((event) => event.kind === 'assistant' && String(event.text).includes('worth summarising')),
+      '压过一次之后原文一条都没动（D75）');
+    const status = await connection.request('status.get', { sessionId });
+    assert.equal(status.usage.window, 1200);
+    assert.equal(status.usage.threshold, 960);
+    assert.equal(status.usage.reported, null, '这个假端点一条用量都没报，报回那一格是 null 而不是 0');
+    assert.ok(status.usage.estimated > 0);
+  }, { contextTokens: 1200 });
+});
