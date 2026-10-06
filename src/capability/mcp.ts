@@ -134,7 +134,7 @@ export function mcpServerConfigs(config: { mcp?: { servers?: unknown } }, enviro
     const entry = servers[name];
     if (typeof entry?.command !== 'string' || entry.command === '') throw new KernelError('mcp_command_required', { detail: `${name} needs a command` });
     // 一条可以执行的文件，不是一行交给 shell 的文本（D60 与 D59 同一条理由）：带空白的这一串里能藏参数与管道。
-    if (/s/.test(entry.command) && !existsSync(entry.command)) throw new KernelError('mcp_command_invalid', { detail: `${name}.command is a single executable; put its arguments in args` });
+    if (/\s/.test(entry.command) && !existsSync(entry.command)) throw new KernelError('mcp_command_invalid', { detail: `${name}.command is a single executable; put its arguments in args` });
     const args = entry.args === undefined ? [] : entry.args;
     if (!Array.isArray(args) || args.some((item) => typeof item !== 'string')) throw new KernelError('mcp_args_invalid', { detail: `${name}.args must be an array of strings` });
     const env = entry.env === undefined ? {} : entry.env;

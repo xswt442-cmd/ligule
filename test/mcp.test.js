@@ -29,6 +29,10 @@ test('the server config takes a plain command and only ${NAME} credential refere
     (error) => error.code === 'mcp_env_unsupported',
   );
   assert.throws(() => mcpServerConfigs(configsToConfig(undefined, { command: 'node /x.js' })), (error) => error.code === 'mcp_command_invalid');
+  // 判据看的是空白：合法的可执行文件名里常带字母 s，按字母判会把整份配置拒掉。
+  assert.deepEqual(mcpServerConfigs(configsToConfig(undefined, { command: 'mcp-server-stdio' })), [
+    { name: 'fs', command: 'mcp-server-stdio', args: [], env: {}, cwd: undefined },
+  ]);
 });
 
 function configsToConfig(env, tools = { command: 'node' }) {
