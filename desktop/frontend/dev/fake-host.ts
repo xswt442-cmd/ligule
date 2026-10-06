@@ -138,7 +138,7 @@ let status = {
   usage: { window: 200_000, threshold: 160_000, retained: 32_000, estimated: 41_512, factor: 0.48, reported: { seq: 6, input: 8351, output: 126 }, measurement: 'request-v1' },
 };
 
-const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 // 长转录的测量用：一份 N 条的合成记录，五种形状轮着来，每一条都是真记录里会出现的那几种之一。
 export function longEvent(seq: number): Record<string, unknown> {
@@ -212,16 +212,17 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
   let deaf = false;
   // 界面答复那一条审批之后才往下跑：真宿主也是等这一格答复才继续（D16）。
   const asking = new Map<string, (decision: string) => void>();
+  // 取消那一轮：真宿主打断的是那一份装配里的信号，`run.start` 那一条报 `loop_cancelled`（协议里写明）。
+  // 假宿主照同一个形状：按下之后，下一次落步就停在这儿，没答的询问按不允许结掉。
+  const cancelled = new Set<string>();
+  const pendingAsks = new Map<string, string[]>();
 
   const answer = (frame: Frame): void => {
     if (deaf && frame.method !== undefined) return;
     const id = frame.id as string;
     if (typeof id === 'string' && id.startsWith('ask-')) {
-      const settle = asking.get(id);
-      if (settle !== undefined) {
-        asking.delete(id);
-        settle((frame.result as { decision?: string } | undefined)?.decision ?? 'deny');
-      }
+      const owner = [...pendingAsks.entries()].find(([, ids]) => ids.includes(id))?.[0] ?? '';
+      settleAsk(owner, id, (frame.result as { decision?: string } | undefined)?.decision ?? 'deny');
       return;
     }
     const params = (frame.params ?? {}) as Record<string, unknown>;
@@ -328,9 +329,20 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
         status = { ...status, usage: { ...status.usage, estimated: 12_400 } };
         return reply({ sessionId: params.sessionId, fromSeq: 0, toSeq: 6, tokensBefore: 41_512, tokensAfter: 12_400 });
       case 'run.start':
-        return void run(String(params.sessionId), String(params.input)).then(() => reply({ iterations: 4, modelCalls: 3, completedBy: 'assistant' }));
-      case 'run.cancel':
-        return fail('run_not_running', '这一份会话没在跑');
+        return void run(String(params.sessionId), String(params.input))
+          .then(() => reply({ iterations: 4, modelCalls: 3, completedBy: 'assistant' }))
+          .catch(() => {
+            status = { ...status, running: false };
+            return fail('loop_cancelled', '这一轮被打断');
+          });
+      case 'run.cancel': {
+        // 真宿主在那一刻发的是信号：正在跑的模型调用被中止，`run.start` 那一条报 `loop_cancelled`（协议里写明）。
+        const own = String(params.sessionId);
+        if (status.running !== true || status.sessionId !== own) return fail('run_not_running', '这一份会话没在跑');
+        cancelled.add(own);
+        for (const askId of [...(pendingAsks.get(own) ?? [])]) settleAsk(own, askId, 'deny');
+        return reply({ cancelled: true });
+      }
       default:
         return fail('protocol_method_unknown', String(frame.method));
     }
@@ -339,16 +351,22 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
   // 审批那一条反过来的请求：发出去，等界面答复；停在没人答复那一下时 30 秒后按不允许收掉。
   function ask(callId: string, params: Record<string, unknown>): Promise<string> {
     const askId = `ask-${callId}`;
+    const owner = String(params.sessionId);
     return new Promise((resolve) => {
       asking.set(askId, resolve);
+      pendingAsks.set(owner, [...(pendingAsks.get(owner) ?? []), askId]);
       emit({ id: askId, method: 'approval.request', params });
-      setTimeout(() => {
-        if (asking.has(askId)) {
-          asking.delete(askId);
-          resolve('deny');
-        }
-      }, 30_000);
+      setTimeout(() => settleAsk(owner, askId, 'deny'), 30_000);
     });
+  }
+
+  // 一次询问只有一个答复会落下：界面答的、30 秒到点的、取消这一轮的都走这一处，先收走再答，不重复收掉。
+  function settleAsk(owner: string, askId: string, decision: string): void {
+    const resolve = asking.get(askId);
+    if (resolve === undefined) return;
+    asking.delete(askId);
+    pendingAsks.set(owner, (pendingAsks.get(owner) ?? []).filter((id) => id !== askId));
+    resolve(decision);
   }
 
   // 一轮的样子：先推理增量，再两次工具调用与结果，中间夹两次审批（按先后各演一次），最后是带 markdown 的回答。
@@ -356,10 +374,16 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
     const tell = (event: Record<string, unknown>) => emit({ notify: 'event', sessionId, event });
     const part = (type: string, text: string) => emit({ notify: 'delta', sessionId, event: { type, text } });
     const callId = 'call_exec_2';
+    cancelled.delete(sessionId);
+    // 每一步之前看一眼有没有人按下取消：停下的位置就在这一段等待之前，跟真宿主那一轮被信号打断一样。
+    const step = (ms: number): Promise<void> => {
+      if (cancelled.has(sessionId)) throw new Error('loop_cancelled');
+      return wait(ms);
+    };
     status = { ...status, running: true, sessionId };
     tell({ seq: 100, kind: 'user', text: input, raw: input });
     for (const piece of ['先看一眼', '那份记录里的读数，', '再决定要不要连模型。']) {
-      await wait(180);
+      await step(180);
       part('reasoning', piece);
     }
     tell({ seq: 101, kind: 'reasoning', text: '先看一眼那份记录里的读数，再决定要不要连模型。' });
@@ -382,13 +406,13 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
           : { failed: true, kind: 'refusal', code: 'policy_denied', reason: '这一条没被允许（答复是不允许）。' },
       },
     }));
-    await wait(200);
+    await step(200);
     part('text', '这一步要动两个文件：');
     for (const piece of ['先 `read` 那份笔记，', '再跑一条命令数一遍行数。']) {
-      await wait(160);
+      await step(160);
       part('text', piece);
     }
-    await wait(240);
+    await step(240);
     const command = 'powershell -NoProfile -Command "Get-ChildItem | Measure-Object"';
     const decision = await ask(callId, {
       sessionId,
@@ -398,9 +422,9 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
       shell: 'powershell',
       executable: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
     });
-    await wait(240);
+    await step(240);
     tell({ seq: 102, kind: 'assistant', text: '', toolCalls: [{ id: callId, name: 'exec', args: { command } }] });
-    await wait(420);
+    await step(420);
     if (decision === 'allow') {
       tell({ seq: 103, kind: 'tool', tool: 'exec', callId, args: { command },
         verdict: { decision: 'allow', via: 'ask', capability: 'exec', level: 'ask', rule: '命令逐次询问', answer: 'allow' },
@@ -410,7 +434,7 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
         verdict: { decision: 'deny', via: 'ask', capability: 'exec', level: 'ask', rule: '命令逐次询问', answer: 'deny' },
         result: { failed: true, kind: 'refusal', code: 'policy_denied', reason: '这一条没被允许（答复是不允许）。' } });
     }
-    await wait(220);
+    await step(220);
     // 第二次询问：一次整份写入。参数里带着正文，界面上给的是那一句改动摘要与可展开的全文（D94）。
     const writeId = 'call_write_2';
     const path = 'notes/readings-2.md';
@@ -421,9 +445,9 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
       args: { path, content },
       reason: '写入整份文件要人点头：这一件不在自动放行那一档里（D3）。',
     });
-    await wait(200);
+    await step(200);
     tell({ seq: 104, kind: 'assistant', text: '', toolCalls: [{ id: writeId, name: 'write', args: { path, content } }] });
-    await wait(380);
+    await step(380);
     tell({ seq: 105, kind: 'tool', tool: 'write', callId: writeId, args: { path, content },
       verdict: writeDecision === 'allow'
         ? { decision: 'allow', via: 'ask', capability: 'write', level: 'ask', rule: '写入逐次询问', answer: 'allow' }
@@ -431,9 +455,9 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
       result: writeDecision === 'allow'
         ? { content: { text: '写了 6 行' } }
         : { failed: true, kind: 'refusal', code: 'policy_denied', reason: '这一条没被允许（答复是不允许）。' } });
-    await wait(220);
+    await step(220);
     tell({ seq: 106, kind: 'usage', ignorable: true, input: 9211, output: 214, estimated: 19_050, measurement: 'request-v1' });
-    await wait(160);
+    await step(160);
     tell({ seq: 107, kind: 'assistant', text: markdown });
     status = { ...status, running: false, eventCount: 6, usage: { ...status.usage, estimated: status.usage.estimated + 9_425 } };
   }

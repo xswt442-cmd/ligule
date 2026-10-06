@@ -1002,6 +1002,38 @@ button.icon-button:hover:not(:disabled) {
   flex: 1;
 }
 
+/* 排着的那几条：贴在输入坞顶上，人看得见自己敲了什么、现在走不走得出去（方案 5.2）。 */
+.queue {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  background: var(--bg-sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.queue-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--fg-muted);
+}
+
+.queue-item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.queue-text {
+  flex: 1;
+  color: var(--fg);
+  font-size: var(--text-sm);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .mini {
   display: flex;
   align-items: center;

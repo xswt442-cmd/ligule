@@ -249,6 +249,12 @@ export function App({ transport }: { transport: Transport }) {
   // 输入历史留在本机（D90）：-1 说的是当前那份草稿。
   const [history, setHistory] = useState(readHistory);
   const [walk, setWalk] = useState(-1);
+  // 运行中敲进去的那几句排在界面这一侧：每份会话各排各的，取消这一轮之后停下等一次显式的继续（方案 5.2）。
+  const [queues, setQueues] = useState<Record<string, { items: string[]; paused: boolean }>>({});
+  const queue = queues[sessionId ?? ''] ?? { items: [] as string[], paused: false };
+  const patchQueue = useCallback((own: string, next: (current: { items: string[]; paused: boolean }) => { items: string[]; paused: boolean }) => {
+    setQueues((current) => ({ ...current, [own]: next(current[own] ?? { items: [], paused: false }) }));
+  }, []);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const active = useRef<string | null>(null);
   // 跟随最新：画面停在最后一行时新内容进来就滚到底；人往上翻过就不再自动滚，给一个跳回最新的按钮。
@@ -561,7 +567,14 @@ export function App({ transport }: { transport: Transport }) {
   }, [sessionId, openSession]);
 
   const submit = useCallback(async (text: string) => {
-    if (text === '' || sessionId === null || running) return;
+    if (text === '' || sessionId === null) return;
+    // 跑着的那一轮里回车不丢话：那一句排在界面这一侧，本轮结束后按先后发出（方案 5.2、D81 边界二：不进记录）。
+    if (running) {
+      setDraft('');
+      setWalk(-1);
+      patchQueue(sessionId, (current) => ({ ...current, items: [...current.items, text] }));
+      return;
+    }
     setDraft('');
     setWalk(-1);
     const remembered = [text, ...history.filter((item) => item !== text)].slice(0, HISTORY_MAX);
@@ -572,14 +585,43 @@ export function App({ transport }: { transport: Transport }) {
       const result = await client.call('run.start', { sessionId, input: text }) as { iterations: number; modelCalls: number; completedBy?: string };
       setRows((current) => [...current, metaRow('meta', `本轮结束：${result.iterations} 次迭代、${result.modelCalls} 次模型调用${result.completedBy === undefined ? '' : `，由 ${result.completedBy} 收尾`}`)]);
     } catch (error) {
-      setRows((current) => [...current, metaRow('error', `这一轮停住：${code(error)}`)]);
+      const stopped = code(error);
+      // 打断落在还在跑的模型调用上时端点那一头交回 `provider_cancelled`，落在两组调用之间才是 `loop_cancelled`：
+      // 人要读的是同一句——这一轮是他停下来的（方案 5.2）。
+      const cancelled = stopped === 'loop_cancelled' || stopped === 'provider_cancelled';
+      setRows((current) => [...current, metaRow(cancelled ? 'meta' : 'error', cancelled ? '这一轮已被打断' : `这一轮停住：${stopped}`)]);
     } finally {
       setRunning(false);
       // 这一轮收尾了：它名下那些没答的询问由宿主按「不允许」结了，界面上不再留着让人去答。
       dropAsksOf(sessionId);
       void refreshStatus(sessionId);
     }
-  }, [client, dropAsksOf, history, refreshStatus, running, sessionId]);
+  }, [client, dropAsksOf, history, patchQueue, refreshStatus, running, sessionId]);
+
+  // 本轮收尾后把排着的第一条发出去：一次只发一条。暂停着就一条也不发——那几句是人在跑着的时候敲进来的，
+  // 他按下的是取消，剩下怎么走要他再说一次（方案 5.2）。
+  useEffect(() => {
+    if (running || sessionId === null) return;
+    const own = queues[sessionId];
+    if (own === undefined || own.paused || own.items.length === 0) return;
+    const [next, ...rest] = own.items;
+    patchQueue(sessionId, () => ({ items: rest, paused: false }));
+    void submit(next);
+  }, [patchQueue, queues, running, sessionId, submit]);
+
+  // 收回来的那一句回到草稿：草稿上还有字时不动它，界面不把两句拼在一起（方案 5.2「取消项仍能恢复文本」）。
+  const recoverQueueItem = useCallback((index: number, all: boolean) => {
+    if (sessionId === null || draft !== '') return;
+    const own = queues[sessionId] ?? { items: [], paused: false };
+    if (own.items.length === 0) return;
+    const recovered = all ? own.items.join('\n\n') : own.items[index] ?? '';
+    if (recovered === '') return;
+    setDraft(recovered);
+    setWalk(-1);
+    patchQueue(sessionId, all
+      ? () => ({ items: [], paused: false })
+      : (current) => ({ ...current, items: current.items.filter((_, at) => at !== index) }));
+  }, [draft, patchQueue, queues, sessionId]);
 
   const send = useCallback(async () => {
     await submit(draft.trim());
@@ -587,12 +629,14 @@ export function App({ transport }: { transport: Transport }) {
 
   const cancel = useCallback(async () => {
     if (sessionId === null) return;
+    // 按下取消就是「剩下的别自己走」：那几条留在这儿，等一次显式的继续（方案 5.2）。
+    if ((queues[sessionId]?.items.length ?? 0) > 0) patchQueue(sessionId, (current) => ({ ...current, paused: true }));
     try {
       await client.call('run.cancel', { sessionId });
     } catch (error) {
       setRows((current) => [...current, metaRow('meta', `取消没生效：${code(error)}`)]);
     }
-  }, [client, sessionId]);
+  }, [client, patchQueue, queues, sessionId]);
 
   // 切模式走协议里那一条 `mode.set`（D65）：坏清单在那一刻就报稳定码，不静默换成随包的那一份。
   const setMode = useCallback(async (name: string) => {
@@ -845,12 +889,34 @@ export function App({ transport }: { transport: Transport }) {
       </div>}
 
       <footer className="composer">
+        {queue.items.length === 0 ? null : (
+          <div className="queue">
+            <div className="queue-head">
+              <span className="mini">排队 {queue.items.length} 条 · {queue.paused ? '暂停中：这一轮是你停下来的，剩下的不自己发' : '这一轮结束后按先后发出'}</span>
+              <button type="button" className="mini chip" title={queue.paused ? '接着把排着的发出去' : '先停下，排着的几条都不发'}
+                onClick={() => { if (sessionId !== null) patchQueue(sessionId, (current) => ({ ...current, paused: !current.paused })); }}>
+                {queue.paused ? '继续' : '暂停'}
+              </button>
+              <button type="button" className="mini chip" disabled={draft !== ''}
+                title={draft === '' ? '把这几条都收回草稿，中间空一行分开' : '草稿上还有字：先把它发出去或排起来，界面不把两句拼在一起'}
+                onClick={() => recoverQueueItem(0, true)}>全部收回</button>
+            </div>
+            {queue.items.map((item, index) => (
+              <div className="queue-item" key={`${index}:${item}`}>
+                <span className="queue-text">{item}</span>
+                <button type="button" className="mini chip" disabled={draft !== ''}
+                  title={draft === '' ? '收回草稿，队列少一条' : '草稿上还有字：先把它发出去或排起来，界面不把两句拼在一起'}
+                  onClick={() => recoverQueueItem(index, false)}>收回</button>
+              </div>
+            ))}
+          </div>
+        )}
         <textarea
           className="composer-input"
           ref={composerRef}
           rows={3}
           value={draft}
-          placeholder="要模型做的事（Enter 发送，Shift+Enter 换行，空草稿上 ↑↓ 翻历史）"
+          placeholder="要模型做的事（Enter 发送，跑着的时候排到后面，Shift+Enter 换行，空草稿上 ↑↓ 翻历史）"
           onChange={(event) => {
             setDraft(event.target.value);
             setWalk(-1);
@@ -880,7 +946,7 @@ export function App({ transport }: { transport: Transport }) {
           <button className="icon-button" type="button" title="读回这一份记录" aria-label="读回记录" onClick={() => void readBack()}><Icon name="refresh" size={15} /></button>
           <button className="icon-button" type="button" title="复制最后那条回答（Ctrl+Shift+C）" aria-label="复制回答" onClick={copyLastAnswer}><Icon name="copy" size={15} /></button>
           <button className="icon-button" type="button" title="取消这一轮（Esc）" aria-label="取消本轮" disabled={!running} onClick={() => void cancel()}><Icon name="stop" size={15} /></button>
-          <button className="send" type="button" title="发送（Enter）" aria-label="发送" disabled={running || sessionId === null} onClick={() => void send()}><Icon name="send" size={17} /></button>
+          <button className="send" type="button" title={running ? '排到后面（这一轮结束后发出）' : '发送（Enter）'} aria-label="发送" disabled={sessionId === null} onClick={() => void send()}><Icon name="send" size={17} /></button>
         </div>
       </footer>
       <div className="statusbar">
