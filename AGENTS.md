@@ -240,6 +240,7 @@ npm run build-rg    downloads the pinned ripgrep into packages/rg-*
 
 - `desktop/` is the Tauri shell. Rust opens the window, starts the Node host and moves one line per frame each way. `frontend/` is a Vite project (React, TypeScript) built by `npm run build` into `dist/`, and Tauri embeds that directory.
 - Rust names no protocol method, event or error code, and `desktop/src-tauri/Cargo.toml` carries no serialization, HTTP or WebSocket dependency.
+- The shell has four commands: `host_send`, `host_stop`, `host_restart`, `app_quit`. `host_restart` runs the same start path, which hands back the previous child and terminates it, so only one process ever writes frames into the window. Which session to take back is the interface's decision, carried by `session.open` (D30).
 - Interface content registers into a declared slot in `desktop/frontend/src/slots.ts` instead of editing the render path. `src/main.tsx` reads `window.__LIGULE_TRANSPORT__` when a page sets one, which is how the browser check drives it without a shell.
 - `desktop/` stays outside `package.json#files`.
 - The installer carries its own runtime (D34). `node desktop/fetch-runtime.mjs` vendors the pinned `node.exe`, the built `dist/` tree, production dependencies and installed transitive optional dependencies into `desktop/vendor/`. This includes platform native packages when installed and omits unrelated root optional dependencies such as the terminal UI packages. That directory is never committed, and `bundle.resources` mounts them as `node/` and `app/`.

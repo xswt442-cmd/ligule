@@ -31,7 +31,7 @@ npm run build    # 出 NSIS 安装包：target/release/bundle/nsis/ligule_<版�
 
 `frontend/` 是一份 Vite 工程（React 加 TypeScript），构建出的 `dist/` 交给壳嵌入：`src/App.tsx` 是三栏与行的渲染，`src/protocol.ts` 收发帧，`src/rows.ts` 把会话记录投影成行，`src/slots.ts` 是与 `src/kernel/slots.js` 同一形状的槽位注册表，`src/bridge.ts` 是 Tauri 那一头的载体。
 
-往界面加东西走注册表，不改渲染主干：一枚状态标记注册进 `header.status`，一个面板注册进 `rail.menu`。左侧「功能」菜单里有三项标着「待实现」，点开说的是缺的那件事在哪（逐件收紧审批靠规则表，界面上的开关要先有写配置的方法；多窗口等 U8；断线重连等 U51）。「模型与端点」读的是 `config.get` 交回的那几格，改它仍然要动配置文件。
+往界面加东西走注册表，不改渲染主干：一枚状态标记注册进 `header.status`，一个面板注册进 `rail.menu`。左侧「功能」菜单里有两项标着「待实现」，点开说的是缺的那件事在哪（逐件收紧审批靠规则表，界面上的开关要先有写配置的方法；多窗口等 U8）。「模型与端点」读的是 `config.get` 交回的那几格，改它仍然要动配置文件。后端进程退了，断连横幅上那一个「重连」让壳换一具进程再用 `session.open` 接回这一份会话。
 
 `src/main.tsx` 先看 `window.__LIGULE_TRANSPORT__`：页面外部挂上它，帧就从那里来，不挂就走壳的 Tauri 载体。这一处是给检查用的口子。
 
@@ -42,7 +42,7 @@ cd desktop/src-tauri
 cargo test
 ```
 
-测的是这一层真正负责的两件事：从可执行文件位置找到后端入口（找不到要说清找过哪几层），以及帧在子进程两根管道之间的按行转递。
+测的是这一层真正负责的三件事：从可执行文件位置找到后端入口（找不到要说清找过哪几层），帧在子进程两根管道之间的按行转递，以及槽位换新的那一具进程时把旧的那一份交回调用方终止——旧进程终止之后既写不进帧，也不再往窗口里送。
 
 前端构建检查运行 `cd desktop/frontend && npm run build`，包含 TypeScript 检查与 Vite 构建。窗口交互通过 `cd desktop && npm run dev` 启动真实桌面壳，检查后端进程、转录、审批与菜单；关闭壳后检查后端与正在执行的命令退出。
 
