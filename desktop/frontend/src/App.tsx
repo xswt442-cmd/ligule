@@ -242,7 +242,7 @@ export function App({ transport }: { transport: Transport }) {
   const [walk, setWalk] = useState(-1);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const active = useRef<string | null>(null);
-  // 跟随最新：贴在底部时新内容进来就滚到底；人往上翻过就不再自动滚，给一个跳回最新的按钮。
+  // 跟随最新：画面停在最后一行时新内容进来就滚到底；人往上翻过就不再自动滚，给一个跳回最新的按钮。
   const scroller = useRef<HTMLDivElement | null>(null);
   const [pinned, setPinned] = useState(true);
   const [limit, setLimit] = useState(RENDER_WINDOW);

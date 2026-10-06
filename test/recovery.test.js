@@ -28,7 +28,7 @@ test('an assistant turn whose call never got a result is the only thing left ope
   assert.equal(repaired.result.failed, true);
   assert.equal(repaired.result.code, 'tool_outcome_unknown');
   assert.deepEqual(repaired.recovery, { assistantSeq: 3, safeToRedo: true });
-  // 措辞按这一件工具改不改本机之外的东西分开：只读的说「需要就重跑」，可能落地的说「先看现状，别盲目重试」。
+  // 措辞按这一件工具改不改本机之外的东西分开：只读的说「需要就重跑」，可能改了外部状态的说「先看现状，别盲目重试」。
   assert.match(repaired.result.content, /does not change anything on this machine/);
   const [mayHaveLanded] = buildRepairEvents([{ tool: 'exec', callId: 'b', args: {}, assistantSeq: 3 }], { readOnly: READ_ONLY });
   assert.match(mayHaveLanded.result.content, /may or may not have happened/);

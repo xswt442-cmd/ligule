@@ -25,7 +25,7 @@ npm run build    # 出 NSIS 安装包：target/release/bundle/nsis/ligule_<版�
 
 `LIGULE_DESKTOP_CLI` 可以指到别的 `cli.js`，`NODE` 可以指到别的 node 可执行文件——开发时用得上。
 
-安装包自带一份 Node 运行时与 ligule 的运行时树（`desktop/vendor/`，由 `desktop/fetch-runtime.mjs` 按 `desktop/node-pin.json` 拉出来；它复制的是 `npm run build` 出来的 `dist/`，没有就先构建，否则这一步直接报错），所以装到没有这份仓库、也没有 node 的机器上就能跑。壳找后端的顺序是：`LIGULE_DESKTOP_CLI` → 随包的 `app/dist/cli.js` → 从可执行文件位置向上找 `dist/cli.js`。
+安装包里随带一份 Node 运行时与 ligule 的运行时树，所以装到没有这份仓库、也没有 node 的机器上就能跑。怎么备出来、壳按什么顺序找后端入口，写在下面「随包带的运行时」那一节。
 
 ## 界面
 

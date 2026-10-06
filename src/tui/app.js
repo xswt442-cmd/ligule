@@ -692,7 +692,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     setHistoryAt(-1);
     setPick(0);
     setDismissedAt(null);
-    // 跑着的那一轮里，要交给模型的那一句进队列：这一轮结束后按先后发出，回车不再是吞掉一句话。
+    // 跑着的那一轮里，要交给模型的那一句进队列：这一轮结束后按先后发出，回车不会把那一句丢掉。
     if (route.kind === 'run' && running) {
       setQueue((current) => [...current, route.text]);
       return;

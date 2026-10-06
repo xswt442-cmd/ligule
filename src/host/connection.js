@@ -78,7 +78,7 @@ export function createConnection({ input, output, onFault }) {
   });
   input.on('end', () => {
     closed = true;
-    // 对端不再答复，还没有答复的那些请求要有人接住，否则等它的调用永远悬着。
+    // 对端退出后不会再答复：已经发出去、还没答复的那些请求要有明确的收尾，否则等它的调用一直挂着。
     for (const settleWith of responders.values()) settleWith.reject(new KernelError('connection_closed'));
     responders.clear();
   });

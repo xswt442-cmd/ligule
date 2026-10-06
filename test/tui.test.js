@@ -401,7 +401,7 @@ test('a queued line is clipped to one row', options, () => {
   assert.match(queuedLine('x'.repeat(70)), /…$/);
 });
 
-// 跑着的那一轮里回车不再吞话：排进来的按先后在本轮结束后发出，空草稿上按退格收回最后一条（D81 边界二）。
+// 跑着的那一轮里回车不会丢掉那一句：排进来的按先后在本轮结束后发出，空草稿上按退格收回最后一条（D81 边界二）。
 test('input typed while a round runs queues up and flushes in order', options, async () => withTuiHost(async ({ client, sessionId, requests }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');

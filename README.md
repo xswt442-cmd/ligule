@@ -46,8 +46,8 @@ ligule host                               # 一行一条帧的协议端点，桌
 - 上下键翻跨会话留住的那一份输入历史。Ctrl+R 在里面反查。Ctrl+G 把草稿交给 `VISUAL`（若已设置）或 `EDITOR` 指定的编辑器再读回来。Ctrl+O 可打开完整历史浏览：PageUp/PageDown 翻页，Home/End 跳到两端，Shift+↑/↓ 选择行，Ctrl+Y 复制选择，Esc 关闭；审批中的 Ctrl+O 查看或收起实际改动，Esc 取消当前运行。
 - `/copy` 把最近那一条回答放进剪贴板。`/export <路径>` 把这一份记录写成 markdown。每条派生支线另写一份。
 - 状态行上有 `mode:`、`policy:`、`tools:`。写了 `limits.contextTokens` 时多一段 `ctx:~估算/窗口`。终端标题画出模型、项目根与这份会话的编号。
-- 跑过的会话列在 `ligule sessions` 和终端的 `/sessions`。接上某一份用 `ligule resume <会话 id> "接着做"` 或终端的 `/resume <会话 id>`。那一次判定怎么走的用 `ligule policy <会话 id>` 读出来。
-- `/sessions` 可用键盘选择会话。完整历史浏览会从记录及溢出文件读取内容。
+- 跑过的会话列在 `ligule sessions` 和终端的 `/sessions`，后者可用键盘选。接上某一份用 `ligule resume <会话 id> "接着做"` 或终端的 `/resume <会话 id>`。那一次判定怎么走的用 `ligule policy <会话 id>` 读出来。
+- 完整历史浏览会从记录及溢出文件读取内容。
 - 记录在边界下的 `.ligule/sessions/`。
 
 ## 约定

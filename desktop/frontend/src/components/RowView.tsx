@@ -1,5 +1,5 @@
 // 视图行到组件的那一次分派（D88）。这里只按 `kind` 挑组件，不认识会话记录本身。
-// 落一条记录会让整份列表重新渲染一次：记录里的行对象不再变化，跳过它们才让追加便宜得下来。
+// 写入一条记录会让整份列表重新渲染一次：记录里的行对象本身没变，跳过它们才让追加便宜得下来。
 import { memo, type ReactElement } from 'react';
 import type { Row } from '../rows';
 import type { RowProps } from './types';
