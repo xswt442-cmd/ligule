@@ -53,6 +53,13 @@ assert.equal(failure.notes.length, 4);
 assert.deepEqual(failure.notes.slice(0, 3), ['退出码 1', '整段在 result-3-1a2b3c4d.json', '判定问过才放行（ask） 规则「命令逐次询问」']);
 assert.match(failure.notes[3], /^用时 2\.\d 秒$/);
 
+// 记录里带着内核量的那一格时画的是它：重开这份会话也还在，不靠界面活着的那一段（第 66 步）。
+const recorded = projectRecord({
+  kind: 'tool', tool: 'exec', callId: 'c5', args: { command: 'npm test' }, durationMs: 640,
+  result: { failed: false, content: { text: 'ok' } },
+}, { startedAt: Date.now() - 2500 })[0];
+assert.deepEqual(recorded.notes, ['用时 0.6 秒']);
+
 const refusal = projectRecord({
   kind: 'tool',
   tool: 'exec',

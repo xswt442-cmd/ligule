@@ -23,6 +23,8 @@ export type Record_ = {
   toolCalls?: ToolCall[];
   tool?: string;
   callId?: string;
+  // 这一次执行花了多久，由内核记在事件外层（第 66 步）。没执行的调用与恢复补写的那一条没有这一格。
+  durationMs?: number;
   // 工具那一条记录留着交进去的参数（`src/kernel/kernel.js` 的 call），派生支线那一格要说得出交的是哪件事。
   args?: Record<string, unknown>;
   result?: {
@@ -143,10 +145,15 @@ export function metaRow(kind: 'meta' | 'error', text: string): Row {
   return { id: nextId(), kind, text };
 }
 
-// 一次调用发出与交回之间隔了多久。记录里没有逐条时间戳，这一格只在界面活着的那一轮量得到（D94、U50）。
-export function durationNote(startedAt: number, now: number): string {
-  const seconds = (now - startedAt) / 1000;
+// 记录里那一格是内核自己量的实际执行时间，不含审批等待（第 66 步）。
+// 界面这一侧量到的那一段是发出到交回之间，含等人答复，所以只在跑着的那一轮读得到。
+function secondsNote(ms: number): string {
+  const seconds = ms / 1000;
   return `用时 ${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} 秒`;
+}
+
+export function durationNote(startedAt: number, now: number): string {
+  return secondsNote(now - startedAt);
 }
 
 export function projectRecord(record: Record_, options: { startedAt?: number; now?: number } = {}): Row[] {
@@ -174,7 +181,9 @@ export function projectRecord(record: Record_, options: { startedAt?: number; no
     const payload = payloadOf(result);
     const notes = toolNotes(record, result);
     const change = changeOf(record.tool ?? '', record.args ?? {});
-    if (options.startedAt !== undefined) notes.push(durationNote(options.startedAt, options.now ?? Date.now()));
+    // 记录里有的那一格优先：它跟着记录走，重开这份会话也还在。
+    if (typeof record.durationMs === 'number') notes.push(secondsNote(record.durationMs));
+    else if (options.startedAt !== undefined) notes.push(durationNote(options.startedAt, options.now ?? Date.now()));
     return [{
       id: nextId(),
       kind,

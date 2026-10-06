@@ -49,12 +49,12 @@ const eventsOf = (sessionId: string): Record<string, unknown>[] => [
     { id: 'call_read_1', name: 'read', args: { path: 'notes/compaction.md' } },
     { id: 'call_exec_1', name: 'exec', args: { command: 'node -e "console.log(1)"' } },
   ] },
-  // 一次读取：没问人就成了，正文溢出在文件里（D77、D94）。
-  { seq: 3, kind: 'tool', tool: 'read', callId: 'call_read_1', args: { path: 'notes/compaction.md' },
+  // 一次读取：没问人就成了，正文溢出在文件里（D77、D94）。外层那一格是内核量的执行时间（第 66 步）。
+  { seq: 3, kind: 'tool', tool: 'read', callId: 'call_read_1', args: { path: 'notes/compaction.md' }, durationMs: 42,
     verdict: { decision: 'allow', via: 'auto', capability: 'read', level: 'auto' },
     result: { content: { text: '窗口 200000、压力线 16…（整段已截断）' }, spilled: 'result-3-1a2b3c4d.json' } },
-  // 一次命令：问过才放行，跑出来是失败的退出码。
-  { seq: 4, kind: 'tool', tool: 'exec', callId: 'call_exec_1', args: { command: 'node -e "console.log(1)"' },
+  // 一次命令：问过才放行，跑出来是失败的退出码。用时那一格不含等人答复的那一段。
+  { seq: 4, kind: 'tool', tool: 'exec', callId: 'call_exec_1', args: { command: 'node -e "console.log(1)"' }, durationMs: 12_400,
     verdict: { decision: 'allow', via: 'ask', capability: 'exec', level: 'ask', rule: '命令逐次询问', answer: 'allow' },
     result: { failed: true, code: 'exec_exit_1', content: { text: '命令没找到', exitCode: 1 } } },
   { seq: 5, kind: 'assistant', text: '', toolCalls: [

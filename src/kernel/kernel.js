@@ -230,6 +230,12 @@ export function createKernel(options = {}) {
         }
       }
       let value;
+      // 这一次执行花了多久，记在事件外层（实现顺序第 66 步）。计时从判定放行之后开始，所以审批等的那一段不在里面。
+      // 单调时钟：墙上时间被调过一次，也不会把这一格变成负数或者一个很长的数。
+      const startedAt = process.hrtime.bigint();
+      const timed = () => {
+        entry.durationMs = Number((process.hrtime.bigint() - startedAt) / 1_000_000n);
+      };
       try {
         value = await tool.run(args, { ...context, signal: options.signal, target: network, shell });
       } catch (error) {
@@ -239,8 +245,11 @@ export function createKernel(options = {}) {
         const failure = error instanceof KernelError
           ? error
           : new KernelError('tool_failed', { cause: error, detail: typeof error?.message === 'string' ? error.message : undefined });
+        // 失败与取消也真的跑了那一段时间，那一格照记；没执行的调用（拒绝、参数不合法、被跳过）走不到这一行。
+        timed();
         await fail(entry, failure);
       }
+      timed();
       await record(entry, resultOf(value));
       return value;
     },

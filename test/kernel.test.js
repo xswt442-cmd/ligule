@@ -162,6 +162,39 @@ test('a call whose arguments do not match the schema fails before the decision c
   }
 });
 
+// 实际执行那一段时间记在事件外层（实现顺序第 66 步）。计时在判定放行之后开始，所以等人答复那一段不在里面。
+test('a tool record carries how long the tool ran, and approval waiting is not in it', async () => {
+  const root = await mkdtemp(join(process.cwd(), 'testplace', 'kernel-'));
+  try {
+    const wait = async (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const session = createSessionLog({ directory: root, id: 'timed' });
+    const kernel = createKernel({
+      policy: createDecisionChain({ mode: 'ask', ask: async () => { await wait(60); return true; } }),
+      session,
+    });
+    kernel.register(makeTool('read', { run: async () => { await wait(30); return 'ok'; } }));
+    assert.equal(await kernel.call('read', { path: 'note.txt' }), 'ok');
+    const [ran] = await session.read();
+    assert.ok(Number.isInteger(ran.durationMs), `那一格是整数毫秒，读到的是 ${ran.durationMs}`);
+    assert.ok(ran.durationMs >= 20 && ran.durationMs < 60, `只算这一次执行，读到的是 ${ran.durationMs}`);
+    // 那一格不进模型可见投影：投影按种类取固定的那几格（D12）。
+    assert.ok(!(JSON.stringify(await session.modelView())).includes('durationMs'));
+
+    // 没执行的调用没有这一格：规则拒绝的那一条根本没跑起来。
+    const refusedSession = createSessionLog({ directory: root, id: 'refused' });
+    const strict = createKernel({
+      policy: createDecisionChain({ mode: 'ask', rules: [{ tool: 'read', decision: 'deny' }], ask: async () => true }),
+      session: refusedSession,
+    });
+    strict.register(makeTool('read'));
+    await assert.rejects(strict.call('read', { path: 'note.txt' }), (error) => error.code === 'policy_denied');
+    const [refused] = await refusedSession.read();
+    assert.equal(refused.durationMs, undefined, '拒绝的那一条不记执行耗时');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('a numeric bound in the schema is enforced on every call', async () => {
   const kernel = createKernel();
   kernel.register(makeTool('read', {

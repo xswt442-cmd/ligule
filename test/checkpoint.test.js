@@ -109,7 +109,8 @@ test('the hash input leaves out transport identity and fields this build does no
     const checkpoint = createCheckpoint({ id, events: events.slice(0, 3), text: '前几轮的话', fromSeq: 0, toSeq: 2 });
 
     // 给记录加一个这一具程序不认识的外层字段之后，旧检查点仍然有效：输入按固定的那几格拼。
-    const widened = events.map((event) => ({ ...event, thinkingTokens: 12 }));
+    // 执行耗时那一格（第 66 步）也是外层字段，同样不动哈希。
+    const widened = events.map((event) => ({ ...event, thinkingTokens: 12, durationMs: 40 }));
     assert.deepEqual(usableCheckpoint(checkpoint, id, widened), { checkpoint, reason: '' });
     assert.notEqual(prefixDigest(widened), prefixDigest(widened.map((event) => ({ ...event, text: `${event.text}.` }))), 'a real content change still moves the hash');
   });
