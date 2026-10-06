@@ -56,6 +56,20 @@ export const METHODS = Object.freeze({
       required: ['sessionId'],
     },
   },
+  // 第八条只为界面多出来的方法：分支复制的是记录的前缀，父那一份一个字都不动（方案 4.3）。
+  // `at` 那一格说停在哪个轮次；不给就是整份复制，复制到此刻记录落到哪儿为止。
+  'session.branch': {
+    description: 'Copy the prefix of a record into a new session: with `at`, up to that completed turn marker; without it, the whole record as it stands. The parent record is never written to, and a half-written branch is not listed',
+    parameters: {
+      type: 'object',
+      properties: {
+        sessionId: SESSION_ID,
+        at: { type: 'integer', minimum: 0, description: 'the sequence number of a `turn` marker this record proves it completed' },
+        projectRoot: { type: 'string', description: 'the project the parent record belongs to, when it is not the one the Host started on' },
+      },
+      required: ['sessionId'],
+    },
+  },
   // 第三条只为界面多出来的方法（前两条是 `mode.set` D65 与 `session.compact` D83）：会话列表扫的是记录目录，
   // 那是宿主那一侧的事实源，界面自己不去开盘。
   'sessions.list': {

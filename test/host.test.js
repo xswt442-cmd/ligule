@@ -895,3 +895,27 @@ test('a search over the records names the session and the event each hit is in',
     );
   });
 });
+
+// 分支（实现顺序第 80 步，方案 4.3）：复制一段前缀成新会话，父那一份不动。
+test('branching a session copies a prefix and leaves the parent record alone', async () => {
+  await withInProcessHost(async (connection) => {
+    const { sessionId } = await connection.request('session.create', {});
+    await connection.request('run.start', { sessionId, input: '说一句' });
+    const record = await connection.request('session.read', { sessionId });
+    const marker = record.events.find((event) => event.kind === 'turn');
+    assert.ok(marker !== undefined, '一轮正常收尾留下一条可选的轮次标记（第 68 步）');
+
+    const branched = await connection.request('session.branch', { sessionId, at: marker.seq });
+    assert.deepEqual([branched.parentSessionId, branched.at], [sessionId, marker.seq], '交回的是新会话与它停在哪一条');
+    const opened = await connection.request('session.open', { sessionId: branched.sessionId });
+    const copied = await connection.request('session.read', { sessionId: opened.sessionId });
+    assert.deepEqual(copied.events.map((event) => event.seq), record.events.filter((event) => event.seq <= marker.seq).map((event) => event.seq),
+      '分支那份就是那一段前缀，序号接着父那一份');
+    assert.ok((await connection.request('sessions.list', {})).sessions.some((item) => item.id === branched.sessionId),
+      '写完才出现在列表里');
+
+    const after = await connection.request('session.read', { sessionId });
+    assert.deepEqual(after.events, record.events, '父那一份一个字没动');
+    await connection.request('session.close', { sessionId: opened.sessionId });
+  });
+});

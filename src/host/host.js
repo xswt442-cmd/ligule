@@ -14,6 +14,7 @@ import { createPromptAssembly } from '../kernel/prompt.js';
 import { createSessionLog } from '../session/session.js';
 import { chooseResumeMode, listSessions, sessionDirectory } from '../session/list.js';
 import { searchSessions } from '../session/search.js';
+import { branchSession } from '../session/branch.js';
 import { createCompaction } from '../session/compaction.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
 import { foldLabel } from '../session/format.js';
@@ -662,6 +663,14 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
             ...(archived === undefined ? {} : { archived }),
           });
           return await labelOf(state);
+        }
+        case 'session.branch': {
+          // 分支不要求父会话停下来：复制的是记录里已经落下的那几条，父后来追加的不进这一份（方案 4.3）。
+          // 那一份记录里没配上的派发留给分支第一次打开时补（D72）：补用的是分支自己的装配与那份记录锁，不在父侧动盘。
+          const state = sessions.get(sessionId);
+          assertSessionId(sessionId);
+          const env = state?.environment ?? await environmentFor(message.params.projectRoot);
+          return await branchSession(env.directory, sessionId, { at: message.params.at, projectRoot: env.projectRoot });
         }
         case 'sessions.list': {
           // 与 `ligule sessions` 走的是同一个扫描器（D73）：协议只是把它递到界面那一边，

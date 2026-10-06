@@ -6,8 +6,8 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { withTuiHost } from './helpers/tui-host.js';
 import {
-  chooseResumeMode, createConfig, createConnection, createMemoryConnectionPair, createSessionLog, listSessions,
-  loadMode, MESSAGES_CAPABILITIES, modeDirectories, searchSessions, serveHost, sessionDirectory,
+  branchSession, chooseResumeMode, createConfig, createConnection, createMemoryConnectionPair, createSessionLog, findUnresolvedCalls, listSessions,
+  loadMode, MESSAGES_CAPABILITIES, modeDirectories, parseSessionBytes, searchSessions, serveHost, sessionDirectory,
 } from '../dist/index.js';
 
 const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
@@ -159,6 +159,43 @@ test('a search scoped to one record also reads the results it spilled', async ()
       (error) => error.code === 'session_not_found',
       '指名的一份不在记录目录里就说清',
     );
+  });
+});
+
+test('a branch copies a prefix of the record and leaves the parent alone', async () => {
+  await withSessions(async (root, directory) => {
+    const parent = createSessionLog({ directory, id: 'parent', meta: () => ({ projectRoot: root }) });
+    await parent.append({ kind: 'mode', name: 'full', layer: 'shipped', path: 'modes/full.toml', tools: ['read'], digest: 'aaa111' });
+    await parent.append({ kind: 'user', text: '第一轮' });
+    await parent.append({ kind: 'turn', ignorable: true, status: 'completed', userSeq: 1, iterations: 1, modelCalls: 1 });
+    await parent.append({ kind: 'user', text: '第二轮还没结束' });
+    await parent.append({ kind: 'assistant', text: '', toolCalls: [{ id: 'c1', name: 'write', args: { path: 'a' } }] });
+
+    const whole = await branchSession(directory, 'parent', { projectRoot: root });
+    const file = join(directory, `${whole.sessionId}.jsonl`);
+    const copied = parseSessionBytes(await readFile(file));
+    assert.deepEqual(copied.events.map((event) => [event.seq, event.kind]), [[0, 'mode'], [1, 'user'], [2, 'turn'], [3, 'user'], [4, 'assistant']],
+      '整份复制带到此刻记录落到哪儿为止，序号接着父那一份连续');
+    const header = JSON.parse((await readFile(file, 'utf8')).split('\n')[0]);
+    assert.deepEqual([header.kind, header.branchOf, header.branchAt], ['session', 'parent', 4], '首行说得出这是谁的分支、停在哪儿');
+    assert.equal(header.sessionId, whole.sessionId, '新的一份是自己的编号');
+    assert.deepEqual(copied.header.mode, { name: 'full', layer: 'shipped' }, '继承那一份最后生效的模式清单');
+    assert.deepEqual(findUnresolvedCalls(copied.events).map((call) => call.callId), ['c1'],
+      '没配上的那一次派发原样复制过来，补它的是打开这一份的那一条路，不在父侧动盘（D72）');
+
+    const early = await branchSession(directory, 'parent', { at: 2, projectRoot: root });
+    assert.equal(early.events, 3, '选一个完整轮次就复制到那一条标记为止');
+    await assert.rejects(branchSession(directory, 'parent', { at: 3, projectRoot: root }),
+      (error) => error.code === 'session_branch_point_unavailable', '那一条不是轮次标记就不猜一个分支点出来');
+
+    await parent.append({ kind: 'user', text: '父后来又说了一句' });
+    assert.equal(parseSessionBytes(await readFile(file)).events.length, 5, '复制过的那一份不跟着父长');
+
+    // 没有首行的现存记录：第一条事件不是元信息，不能丢。
+    await writeFile(join(directory, 'legacy.jsonl'), `${JSON.stringify({ seq: 0, kind: 'user', text: 'older' })}\n`, 'utf8');
+    const legacy = await branchSession(directory, 'legacy', { projectRoot: root });
+    assert.equal(parseSessionBytes(await readFile(join(directory, `${legacy.sessionId}.jsonl`))).events.length, 1);
+    await assert.rejects(branchSession(directory, 'nobody', { projectRoot: root }), (error) => error.code === 'session_not_found');
   });
 });
 
