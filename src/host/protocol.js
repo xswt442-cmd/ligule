@@ -69,6 +69,20 @@ export const METHODS = Object.freeze({
       description: 'listing sessions takes no argument; both filters are optional',
     },
   },
+  // 第七条只为界面多出来的方法：查的是记录目录里的那些整份记录，与列表同一个扫描器（方案 4.2）。
+  // 交回的是「哪一份会话的第几条」，界面拿着这两个值接上那一份会话、跳到那一行。
+  'sessions.search': {
+    description: 'Find one piece of text in the records on disk and return which session each hit is in, most recently written session first; the query is required and must not be blank',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'the text to look for, matched case-insensitively in what a record stores inline' },
+        projectRoot: { type: 'string', description: 'only search sessions opened against this project root' },
+        limit: { type: 'integer', description: 'stop after this many hits', minimum: 1, maximum: 200 },
+      },
+      required: ['query'],
+    },
+  },
   'session.read': {
     description: 'Read the events of an open session, oldest first, so a client that arrives late can show what happened; `limit` and `before` ask for one history page instead of the whole record',
     parameters: { type: 'object', properties: {

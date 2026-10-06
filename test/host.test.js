@@ -863,3 +863,21 @@ test('naming or archiving a session appends one fact the listing reads back', as
     );
   });
 });
+
+// 跨会话查找（实现顺序第 76 步，方案 4.2）：查的是宿主那一份记录目录，交回的是「哪一份会话的第几条」。
+test('a search over the records names the session and the event each hit is in', async () => {
+  await withInProcessHost(async (connection) => {
+    const { sessionId } = await connection.request('session.create', {});
+    await connection.request('run.start', { sessionId, input: '读数那一段跑一遍' });
+    const hits = (await connection.request('sessions.search', { query: '读数' })).hits;
+    assert.deepEqual([hits[0].sessionId, hits[0].kind, hits[0].seq], [sessionId, 'user', 0], '命中的是记录里那一条用户输入');
+    assert.ok(hits[0].text.includes('读数'), '摘录带着命中那一段');
+    assert.ok(hits.every((hit) => hit.sessionId === sessionId), '这个项目根下只跑过这一份会话');
+    assert.deepEqual((await connection.request('sessions.search', { query: '没有这段文字' })).hits, [], '查不到不是错误');
+    await assert.rejects(
+      connection.request('sessions.search', { query: '   ' }),
+      (error) => error.code === 'search_query_empty',
+      '空白的查询在每份记录里都能对上，那一份结果没有意义，扫之前就说清',
+    );
+  });
+});

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { withTuiHost } from './helpers/tui-host.js';
 import {
   chooseResumeMode, createConfig, createConnection, createMemoryConnectionPair, createSessionLog, listSessions,
-  loadMode, MESSAGES_CAPABILITIES, modeDirectories, serveHost, sessionDirectory,
+  loadMode, MESSAGES_CAPABILITIES, modeDirectories, searchSessions, serveHost, sessionDirectory,
 } from '../dist/index.js';
 
 const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
@@ -101,6 +101,38 @@ test('a label folds into the listing and stays out of what the model is shown', 
     await log.append({ kind: 'label', ignorable: true, archived: true });
     assert.deepEqual((await listSessions(directory)).map((item) => [item.id, item.name, item.archived]), [['named', '读数那一轮', true]], '列表读的是那两条折出来的当前值');
     assert.deepEqual((await log.modelView()).map((row) => row.text), ['go'], '模型那一份里没有这一条事实');
+  });
+});
+
+test('a search says which record a hit is in and which event it is', async () => {
+  await withSessions(async (root, directory) => {
+    const newer = createSessionLog({ directory, id: 'newer', meta: () => ({ projectRoot: root }) });
+    await newer.append({ kind: 'label', ignorable: true, name: 'alpha 那一份' });
+    await newer.append({ kind: 'tool', tool: 'exec', callId: 'c1', args: { command: 'run' }, result: { content: 'done alpha', spilled: 'result-1-abcdef12.json' } });
+    // 一份长会话里一个常见词能中几十条：每份最多交三条。
+    const many = createSessionLog({ directory, id: 'many', meta: () => ({ projectRoot: root }) });
+    for (const line of ['alpha 一', 'alpha 二', 'alpha 三', 'alpha 四', 'alpha 五']) await many.append({ kind: 'user', text: line });
+    const older = createSessionLog({ directory, id: 'older', meta: () => ({ projectRoot: root }) });
+    await older.append({ kind: 'user', text: '第一段\n   alpha   第二段' });
+    // 读不出来的那一份不参与查：列表那一行已经带着稳定码说清它读不懂，这里不报第二次，也不猜它写过什么。
+    await writeFile(join(directory, 'broken.jsonl'), `${JSON.stringify({ seq: 0, kind: 'nonsense' })}\n`);
+    await utimes(join(directory, 'many.jsonl'), new Date('2026-01-02'), new Date('2026-01-02'));
+    await utimes(join(directory, 'older.jsonl'), new Date('2026-01-01'), new Date('2026-01-01'));
+
+    assert.deepEqual((await searchSessions(directory, { query: 'ALPHA' })).map((hit) => [hit.sessionId, hit.seq, hit.kind]), [
+      ['newer', 0, 'label'], ['newer', 1, 'tool'], ['many', 0, 'user'], ['many', 1, 'user'], ['many', 2, 'user'], ['older', 0, 'user'],
+    ], '最近动过的那一份先出现，一份最多三条，读不出来的那一份不交命中');
+
+    const hits = await searchSessions(directory, { query: 'alpha' });
+    assert.equal(hits[0].name, 'alpha 那一份', '命中的那一行带着这一份会话的名字');
+    assert.equal(hits[1].text, 'done alpha');
+    assert.equal(hits[1].spilled, 'result-1-abcdef12.json', '整段溢出在文件里时那一行说得出文件名');
+    assert.equal(hits[5].text, '第一段 alpha 第二段', '正文里的换行与缩进先收拢，摘录不带半截行');
+    assert.deepEqual((await searchSessions(directory, { query: '五' })).map((hit) => [hit.sessionId, hit.seq]), [['many', 4]],
+      '上限管的是一份交几条，不是只读前几条');
+    assert.equal((await searchSessions(directory, { query: 'alpha', limit: 2 })).length, 2);
+    assert.deepEqual(await searchSessions(directory, { query: 'alpha', projectRoot: 'nowhere' }), []);
+    assert.deepEqual(await searchSessions(directory, { query: '没有这段文字' }), []);
   });
 });
 

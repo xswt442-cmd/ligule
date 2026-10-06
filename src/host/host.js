@@ -13,6 +13,7 @@ import { createDecisionChain } from '../kernel/policy.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { createSessionLog } from '../session/session.js';
 import { chooseResumeMode, listSessions, sessionDirectory } from '../session/list.js';
+import { searchSessions } from '../session/search.js';
 import { createCompaction } from '../session/compaction.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
 import { limitsOf } from '../capability/limits.js';
@@ -245,6 +246,14 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     if (environment === defaultEnvironment) return;
     for (const other of sessions.values()) if (other.environment === environment) return;
     environments.delete(environment.projectRoot);
+  }
+
+  // 列清单与查记录扫的是同一格目录，两条路共用这一处判断（方案 3.2）。
+  // 指名的项目还没装载过、装载侧又给不出那条路时，照当前这一份目录扫，过滤条件继续生效——
+  // 扫一遍磁盘上的记录不逼出装载。
+  async function scanDirectory(projectRoot) {
+    const unloaded = projectRoot !== undefined && !environments.has(projectRoot) && loadEnvironment === undefined;
+    return (unloaded ? defaultEnvironment : await environmentFor(projectRoot)).directory;
   }
 
   // 名字与归档标记读回的是记录里那几条 `label` 折出来的当前值：宿主不另存一份，两端看的是同一份事实（I5、方案 4.2）。
@@ -657,11 +666,15 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           // 与 `ligule sessions` 走的是同一个扫描器（D73）：协议只是把它递到界面那一边，
           // 记录目录仍然只有宿主这一处开盘。
           const { projectRoot, limit } = message.params;
-          // 列一份清单不该逼出装载：指名的那一个项目还没装载过、装载侧又给不出那条路时，照当前这一份目录扫。
-          // 过滤条件仍然生效，扫的是哪一格目录由 `listSessions` 那一个参数说（方案 3.2）。
-          const unloaded = projectRoot !== undefined && !environments.has(projectRoot) && loadEnvironment === undefined;
-          const env = unloaded ? defaultEnvironment : await environmentFor(projectRoot);
-          return { sessions: await listSessions(env.directory, { projectRoot, limit }) };
+          return { sessions: await listSessions(await scanDirectory(projectRoot), { projectRoot, limit }) };
+        }
+        case 'sessions.search': {
+          // 第七条只为界面多出来的方法：扫的还是那一处记录目录，与列表同一个开盘处（方案 4.2）。
+          // 空白的查询在所有记录里都能对上，那一份结果没有意义，所以在这里就拒掉，不扫一遍磁盘再说。
+          const { query, projectRoot, limit } = message.params;
+          const needle = query.trim();
+          if (needle === '') throw new KernelError('search_query_empty', { detail: 'a search query has to say what to look for' });
+          return { hits: await searchSessions(await scanDirectory(projectRoot), { query: needle, projectRoot, limit }) };
         }
         case 'session.read': {
           // 交回的是记录本身：客户端晚到了也能把已经发生过的事画出来（I5）。
