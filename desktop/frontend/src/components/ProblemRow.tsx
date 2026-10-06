@@ -6,7 +6,7 @@ export function ProblemRow({ row, verbosity }: RowProps) {
   return <article className={`row ${row.kind}`} data-kind={row.kind} data-failed="true">
     <div className="row-head">
       <code className="row-tool">{row.tool}</code>
-      <span className="state-bad">{row.kind === 'refusal' ? '没让做' : '失败了'}</span>
+      <span className="state-bad">{row.kind === 'refusal' ? '不允许' : '失败了'}</span>
       {row.code !== undefined && <code className="row-code">{row.code}</code>}
       {row.summary !== undefined && row.summary !== '' && <span className="row-target-inline">{row.summary}</span>}
       {row.notes?.map((note) => <span className="row-note" key={note}>{note}</span>)}

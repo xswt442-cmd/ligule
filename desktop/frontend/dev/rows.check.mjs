@@ -63,7 +63,7 @@ const refusal = projectRecord({
 })[0];
 assert.equal(refusal.kind, 'refusal');
 assert.equal(refusal.text, '这一条没被允许。');
-assert.deepEqual(refusal.notes, ['判定没让做（auto→ask）']);
+assert.deepEqual(refusal.notes, ['判定不允许（auto→ask）']);
 
 const repaired = projectRecord({
   kind: 'tool',

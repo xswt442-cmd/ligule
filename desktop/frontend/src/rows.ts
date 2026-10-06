@@ -108,10 +108,10 @@ function argSummary(tool: string, args: Record<string, unknown>): string {
   return line.length > 160 ? `${line.slice(0, 160)}…` : line;
 }
 
-// 判定那一格说人话：没问人就成了、问过才成、没让做，外加命中的规则与档位（D77、D94）。
+// 判定那一格说人话：没问人就成了、问过才成、不允许，外加命中的规则与档位（D77、D94）。
 function verdictNote(verdict: Verdict): string {
   if (typeof verdict.decision !== 'string') return '';
-  const outcome = verdict.decision === 'deny' ? '没让做' : verdict.via === 'ask' ? '问过才放行' : '没问就放行';
+  const outcome = verdict.decision === 'deny' ? '不允许' : verdict.via === 'ask' ? '问过才放行' : '没问就放行';
   const level = verdict.level === undefined ? '' : `（${verdict.level}${verdict.forced === true ? '→ask' : ''}）`;
   const rule = typeof verdict.rule === 'string' && verdict.rule !== '' ? ` 规则「${verdict.rule}」` : '';
   return `判定${outcome}${level}${rule}`;
