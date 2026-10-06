@@ -39,7 +39,7 @@ ligule tui                                # 终端界面，要 ink 与 react 两
 ligule host                               # 一行一条帧的协议端点，桌面壳起的就是这一个进程
 ```
 
-终端界面里的命令是 `/help`、`/mode [名字]`、`/status`、`/tools`、`/show [序号]`、`/sub [序号]`、`/compact`、`/copy`、`/export <路径>`、`/sessions`、`/resume <id> [名字]`、`/new`、`/quit`。
+终端界面里的命令是 `/help`、`/mode [名字]`、`/status`、`/tools`、`/show [序号]`、`/sub [序号]`、`/compact`、`/copy`、`/export <路径>`、`/sessions`、`/find <文字>`、`/resume <id> [名字]`、`/name <文字>`、`/archive`、`/unarchive`、`/new`、`/quit`。
 
 - 打 `/` 列出候选：Tab 补全、上下键选、Esc 收起。提示模板也在这条输入框里用。展开在宿主那一侧做。画出来的是你原本敲的那一行。
 - 跑着的那一轮里回车不会丢掉那一句：它排进队列，本轮结束后按先后发出。草稿空着时按退格收回最后一条。
@@ -47,6 +47,8 @@ ligule host                               # 一行一条帧的协议端点，桌
 - `/copy` 把最近那一条回答放进剪贴板。`/export <路径>` 把这一份记录写成 markdown。每条派生支线另写一份。
 - 状态行上有 `mode:`、`policy:`、`tools:`。写了 `limits.contextTokens` 时多一段 `ctx:~估算/窗口`。终端标题画出模型、项目根与这份会话的编号。
 - 跑过的会话列在 `ligule sessions` 和终端的 `/sessions`，后者可用键盘选。接上某一份用 `ligule resume <会话 id> "接着做"` 或终端的 `/resume <会话 id>`。那一次判定怎么走的用 `ligule policy <会话 id>` 读出来。
+- `/find <文字>` 在这个项目根跑过的会话里找一段文字，一行说出是哪一份会话的第几条：那串编号开头交给 `/resume`，序号交给 `/show`。搜的是记录里留着的那些正文，溢出文件里的整段不在其中。
+- `/name <文字>` 给这一份会话起一个名字，`/archive` 与 `/unarchive` 决定它在列表里排在哪。这两样写成记录里的一条事实，两种界面读的是同一份，模型看不见。
 - 完整历史浏览会从记录及溢出文件读取内容。
 - 记录在边界下的 `.ligule/sessions/`。
 
