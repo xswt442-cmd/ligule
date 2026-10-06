@@ -95,7 +95,7 @@ const menuPanels: Panel<PanelProps>[] = [
   },
 ];
 
-// 还没有实现的四项：菜单里看得见，点开只说明缺的是哪一件，不做半只的开关。
+// 还没有实现的三项：菜单里看得见，点开只说明缺的是哪一件，不做半只的开关。
 const pendingPanels: Panel<PanelProps>[] = [
   {
     id: 'panel.policy',
@@ -126,7 +126,8 @@ const railPanels: Panel<PanelProps>[] = [
   },
 ];
 
-const statusPanels: Panel<PanelProps>[] = [  {
+const statusPanels: Panel<PanelProps>[] = [
+  {
     id: 'status.pills',
     title: '运行状态',
     view: ({ status, running, waiting, seconds }) => <>
@@ -672,15 +673,6 @@ export function App({ transport }: { transport: Transport }) {
           }}
         />
         <div className="composer-bar">
-          <label className="mini">
-            <span>展示</span>
-            <select value={verbosity} onChange={(event) => patch({ verbosity: event.target.value as Verbosity })}>
-              <option value="brief">简洁</option>
-              <option value="standard">标准</option>
-              <option value="detailed">详细</option>
-              <option value="full">完全展开</option>
-            </select>
-          </label>
           <button type="button" className="mini chip" title="切模式在设置那个对话框里" onClick={() => setSettingsOpen(true)}>
             模式 <b>{status?.mode ?? '没装'}</b>
           </button>
