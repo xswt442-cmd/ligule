@@ -698,11 +698,15 @@ test('one host keeps two projects apart, and a host without a loader says so', a
     policy: { mode: 'auto' },
   });
   const pair = createMemoryConnectionPair();
+  let loaded = 0;
   const host = serveHost({
     input: pair.host.input,
     output: pair.host.output,
     ...environmentOf(first),
-    loadEnvironment: async (projectRoot) => environmentOf(projectRoot),
+    loadEnvironment: async (projectRoot) => {
+      loaded += 1;
+      return environmentOf(projectRoot);
+    },
   });
   const client = createConnection(pair.client);
   const bare = createMemoryConnectionPair();
@@ -726,6 +730,12 @@ test('one host keeps two projects apart, and a host without a loader says so', a
     assert.ok((await readFile(join(first, '.ligule', 'sessions', `${inFirst.sessionId}.jsonl`), 'utf8')).includes('第一轮'));
     assert.ok((await readFile(join(second, '.ligule', 'sessions', `${inSecond.sessionId}.jsonl`), 'utf8')).includes('另一轮'));
 
+    // 那一个根上最后一份会话收了，那份项目环境就退出这张表：下一次开这一根的会话重新读配置那几层（方案 3.1、实现顺序第 70 步）。
+    await client.request('session.close', { sessionId: inSecond.sessionId });
+    const loadedBefore = loaded;
+    await client.request('session.open', { sessionId: inSecond.sessionId, projectRoot: second });
+    assert.equal(loaded, loadedBefore + 1, '收了最后一份会话之后，那一份项目环境重新装载一次');
+
     await assert.rejects(
       bareClient.request('session.create', { projectRoot: second }),
       (error) => error.code === 'host_project_root_unsupported',
@@ -738,4 +748,51 @@ test('one host keeps two projects apart, and a host without a loader says so', a
     await bareHost.release();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+// 一份会话收了（实现顺序第 70 步）：交回的是那一次装配与那一份记录锁，记录本身一个字都不动（I1、D85）。
+// 正在跑的那一轮不由这一次动作收尾，所以 close 先问一句，不打断。
+test('closing a session hands back its record lock and leaves the record alone', async () => {
+  await withInProcessHost(async (connection) => {
+    const { sessionId } = await connection.request('session.create', {});
+    await connection.request('run.start', { sessionId, input: '说一句' });
+    const before = await connection.request('session.read', { sessionId });
+
+    assert.deepEqual(await connection.request('session.close', { sessionId }), { sessionId });
+    await assert.rejects(
+      connection.request('session.read', { sessionId }),
+      (error) => error.code === 'session_not_open',
+      '收了之后读不到的是这一份装配，不是那一份记录',
+    );
+
+    // 锁真的交回来了：同一路径上再要一次独占锁，拿不到就报 `session_locked`，接不上这一段就停在这里。
+    const reopened = await connection.request('session.open', { sessionId });
+    assert.deepEqual(reopened, { sessionId });
+    const after = await connection.request('session.read', { sessionId });
+    assert.deepEqual(after.events, before.events, '收过一次之后，记录里的事件一条没多、一条没少');
+  });
+});
+
+// 收尾失败也不留没人能收的会话，而正在跑的那一轮更不让它被偷偷收掉：两条都在 close 这一条路上验。
+test('closing a session while its round runs says so instead of interrupting', async () => {
+  await withInProcessHost(async (connection, { hold }) => {
+    const { sessionId } = await connection.request('session.create', {});
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    hold(gate);
+    const running = connection.request('run.start', { sessionId, input: '慢一点' });
+    await delay(50);
+    await assert.rejects(
+      connection.request('session.close', { sessionId }),
+      (error) => error.code === 'run_already_running',
+      'close 不暗中打断正在跑的那一轮',
+    );
+    release(undefined);
+    await running;
+    await connection.request('session.close', { sessionId });
+    await assert.rejects(
+      connection.request('status.get', { sessionId }),
+      (error) => error.code === 'session_not_open',
+    );
+  });
 });

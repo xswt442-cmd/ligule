@@ -220,6 +220,30 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     return state;
   }
 
+  // 一次装配的收尾：MCP 的子进程、扩展的监听、模板登记表与那一份记录锁，四样都只在这一份会话里存在过（D60、D37、D85）。
+  // 记录本身一个字都不动：它是事实源，收掉的只是宿主里这一份活着的装配（I1）。
+  async function retire(state) {
+    // 那一轮的失败不是收尾的失败：取消、提供方断流这些事实已经写在记录里了，这里只等它跑完（D11）。
+    await state.operation?.catch(() => undefined);
+    try {
+      await state.mcp.close();
+      state.extensions.dispose();
+      state.assembly.dispose();
+    } finally {
+      // 收尾失败也要把这一份从表里摘出去并交回记录锁：留着它，界面再也收不掉，锁也一直占着（D85）。
+      sessions.delete(state.id);
+      await state.session.close();
+    }
+  }
+
+  // 这一个项目根上最后一份会话收了，那份项目环境就退出这张表：下一次开这一根的会话重新读配置那几层（方案 3.1）。
+  // 宿主自己那一份不退，它没有装载侧可回去重算。
+  function evictEnvironment(environment) {
+    if (environment === defaultEnvironment) return;
+    for (const other of sessions.values()) if (other.environment === environment) return;
+    environments.delete(environment.projectRoot);
+  }
+
   async function execute(state, action) {
     if (state.running !== undefined) throw new KernelError('run_already_running', { detail: state.id });
     const controller = new AbortController();
@@ -570,6 +594,14 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           }
           return await buildSession(sessionId, connection, true, message.params.mode, env);
         }
+        case 'session.close': {
+          const state = open(sessionId);
+          // 正在跑的那一轮不由这一次动作收尾：界面要先发 `run.cancel`，这里不暗中打断（D11 那一轮的结果要有人写进记录）。
+          if (state.running !== undefined) throw new KernelError('run_already_running', { detail: sessionId });
+          await retire(state);
+          evictEnvironment(state.environment);
+          return { sessionId };
+        }
         case 'sessions.list': {
           // 与 `ligule sessions` 走的是同一个扫描器（D73）：协议只是把它递到界面那一边，
           // 记录目录仍然只有宿主这一处开盘。
@@ -702,18 +734,8 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
         await Promise.allSettled([...building]);
         const opened = [...sessions.values()];
         for (const state of opened) state.running?.abort();
-        const mcpClosed = await Promise.allSettled(opened.map((state) => state.mcp.close()));
-        for (const result of mcpClosed) if (result.status === 'rejected') failures.push(result.reason);
-        await Promise.allSettled(opened.map((state) => state.operation));
-        const sessionsClosed = await Promise.allSettled(opened.map(async (state) => {
-          try {
-            state.extensions.dispose();
-            state.assembly.dispose();
-          } finally {
-            await state.session.close();
-          }
-        }));
-        for (const result of sessionsClosed) if (result.status === 'rejected') failures.push(result.reason);
+        const retired = await Promise.allSettled(opened.map((state) => retire(state)));
+        for (const result of retired) if (result.status === 'rejected') failures.push(result.reason);
         sessions.clear();
         if (failures.length > 0) throw new AggregateError(failures, 'host_release_failed');
       })();

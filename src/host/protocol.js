@@ -32,6 +32,16 @@ export const METHODS = Object.freeze({
       required: ['sessionId'],
     },
   },
+  // 第五条只为界面多出来的方法：一份会话在宿主那一侧占着记录锁、MCP 子进程与扩展监听，界面换到别的一份时要把这些收掉。
+  // 它不取消正在跑的那一轮，也不动记录——记录是唯一的事实源，收的只是这一次装配（D85、D71）。
+  'session.close': {
+    description: 'Release this session in the Host: its record lock, its MCP servers and its extension listeners; the record on disk stays as it is',
+    parameters: {
+      type: 'object',
+      properties: { sessionId: SESSION_ID },
+      required: ['sessionId'],
+    },
+  },
   // 第三条只为界面多出来的方法（前两条是 `mode.set` D65 与 `session.compact` D83）：会话列表扫的是记录目录，
   // 那是宿主那一侧的事实源，界面自己不去开盘。
   'sessions.list': {
