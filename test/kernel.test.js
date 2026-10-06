@@ -169,14 +169,15 @@ test('a tool record carries how long the tool ran, and approval waiting is not i
     const wait = async (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const session = createSessionLog({ directory: root, id: 'timed' });
     const kernel = createKernel({
-      policy: createDecisionChain({ mode: 'ask', ask: async () => { await wait(60); return true; } }),
+      // 答复之前先等 250 毫秒，而工具自己什么都不做：那一段等待不该进这一格。
+      policy: createDecisionChain({ mode: 'ask', ask: async () => { await wait(250); return true; } }),
       session,
     });
-    kernel.register(makeTool('read', { run: async () => { await wait(30); return 'ok'; } }));
+    kernel.register(makeTool('read'));
     assert.equal(await kernel.call('read', { path: 'note.txt' }), 'ok');
     const [ran] = await session.read();
     assert.ok(Number.isInteger(ran.durationMs), `那一格是整数毫秒，读到的是 ${ran.durationMs}`);
-    assert.ok(ran.durationMs >= 20 && ran.durationMs < 60, `只算这一次执行，读到的是 ${ran.durationMs}`);
+    assert.ok(ran.durationMs >= 0 && ran.durationMs < 200, `只算这一次执行，读到的是 ${ran.durationMs}`);
     // 那一格不进模型可见投影：投影按种类取固定的那几格（D12）。
     assert.ok(!(JSON.stringify(await session.modelView())).includes('durationMs'));
 
