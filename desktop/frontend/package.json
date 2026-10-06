@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "check": "node dev/rows.check.mjs && node dev/protocol.check.mjs",
+    "check": "node dev/rows.check.mjs && node dev/protocol.check.mjs && node dev/hotkeys.check.mjs",
     "preview": "vite preview --port 5188"
   },
   "dependencies": {

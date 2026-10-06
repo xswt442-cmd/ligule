@@ -21,6 +21,8 @@ export type Status = {
   policy: string;
   denials: { consecutive: number; total: number };
   eventCount: number;
+  // 装载着的提示模板：命令面板里那几条入口读的就是这一份（D92、D54）。
+  templates: { command: string; description: string; hint: string | null }[];
   // 窗口那一格没写时宿主交出 null：两条触发都不启用，压力条整块不出现（D75）。
   usage: Usage | null;
 };

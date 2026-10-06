@@ -3,6 +3,8 @@ import { createClient, type Client, type Transport } from './protocol';
 import { RowView } from './components/RowView';
 import { SessionRail } from './components/SessionRail';
 import { UsageMeter } from './components/UsageMeter';
+import { Palette, type Command } from './components/Palette';
+import { hotkeyOf } from './hotkeys';
 import type { Verbosity } from './components/types';
 import { createSlotRegistry, SLOTS, type Panel } from './slots';
 import { metaRow, projectRecord, type Record_, type Row } from './rows';
@@ -32,6 +34,19 @@ type PanelProps = {
 };
 
 const VERBOSITY_KEY = 'ligule.verbosity';
+const COLLAPSE_KEY = 'ligule.rail-collapsed';
+const HISTORY_KEY = 'ligule.input-history';
+const HISTORY_MAX = 50;
+
+// 本机存的那一份是不可信的输入：读坏了就当没有。
+function readHistory(): string[] {
+  try {
+    const raw: unknown = JSON.parse(localStorage.getItem(HISTORY_KEY) ?? '[]');
+    return Array.isArray(raw) ? raw.filter((item): item is string => typeof item === 'string') : [];
+  } catch {
+    return [];
+  }
+}
 const code = (error: unknown): string => (error as { code?: string; message?: string }).code
   ?? (error as { message?: string }).message ?? String(error);
 
@@ -222,6 +237,12 @@ export function App({ transport }: { transport: Transport }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [panel, setPanel] = useState<Panel<PanelProps> | null>(null);
   const [verbosity, setVerbosity] = useState<Verbosity>(() => (localStorage.getItem(VERBOSITY_KEY) as Verbosity) ?? 'standard');
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSE_KEY) === 'true');
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  // 输入历史留在本机（D90）：-1 说的是当前那份草稿。
+  const [history, setHistory] = useState(readHistory);
+  const [walk, setWalk] = useState(-1);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const active = useRef<string | null>(null);
   // 跟随最新：贴在底部时新内容进来就滚到底；人往上翻过就不再自动滚，给一个跳回最新的按钮。
   const scroller = useRef<HTMLDivElement | null>(null);
@@ -290,6 +311,10 @@ export function App({ transport }: { transport: Transport }) {
   useEffect(() => {
     localStorage.setItem(VERBOSITY_KEY, verbosity);
   }, [verbosity]);
+
+  useEffect(() => {
+    localStorage.setItem(COLLAPSE_KEY, String(collapsed));
+  }, [collapsed]);
 
   useEffect(() => {
     client.onNotification((message) => {
@@ -390,10 +415,13 @@ export function App({ transport }: { transport: Transport }) {
     await openSession(sessionId);
   }, [sessionId, openSession]);
 
-  const send = useCallback(async () => {
-    const text = draft.trim();
+  const submit = useCallback(async (text: string) => {
     if (text === '' || sessionId === null || running) return;
     setDraft('');
+    setWalk(-1);
+    const remembered = [text, ...history.filter((item) => item !== text)].slice(0, HISTORY_MAX);
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(remembered));
+    setHistory(remembered);
     setRunning(true);
     try {
       const result = await client.call('run.start', { sessionId, input: text }) as { iterations: number; modelCalls: number; completedBy?: string };
@@ -405,7 +433,11 @@ export function App({ transport }: { transport: Transport }) {
       setAsk(null);
       void refreshStatus(sessionId);
     }
-  }, [client, draft, refreshStatus, running, sessionId]);
+  }, [client, history, refreshStatus, running, sessionId]);
+
+  const send = useCallback(async () => {
+    await submit(draft.trim());
+  }, [draft, submit]);
 
   const cancel = useCallback(async () => {
     if (sessionId === null) return;
@@ -432,6 +464,50 @@ export function App({ transport }: { transport: Transport }) {
     void refreshStatus(sessionId);
   }, [client, modeDraft, refreshStatus, sessionId]);
 
+  // 手动压缩走 `session.compact`（D83）：压的是模型那一份上下文，画面上的行仍然来自整份记录。
+  const compact = useCallback(async () => {
+    if (sessionId === null) return;
+    try {
+      const result = await client.call('session.compact', { sessionId }) as { fromSeq: number; toSeq: number; tokensBefore: number; tokensAfter: number };
+      setRows((current) => [...current, metaRow('meta', `压掉第 ${result.fromSeq} 到 ${result.toSeq} 条：${result.tokensBefore} → ${result.tokensAfter}`)]);
+    } catch (error) {
+      setRows((current) => [...current, metaRow('error', `压缩没成：${code(error)}`)]);
+    }
+    void refreshStatus(sessionId);
+  }, [client, refreshStatus, sessionId]);
+
+  const copyLastAnswer = useCallback(() => {
+    const answer = [...rows].reverse().find((row) => row.kind === 'answer');
+    if (answer === undefined) {
+      setRows((current) => [...current, metaRow('meta', '记录里还没有一条带正文的回答')]);
+      return;
+    }
+    void navigator.clipboard.writeText(answer.text).then(
+      () => setRows((current) => [...current, metaRow('meta', `已复制最后那条回答（${answer.text.length} 字）`)]),
+      (error: unknown) => setRows((current) => [...current, metaRow('error', `复制没成：${code(error)}`)]),
+    );
+  }, [rows]);
+
+  // 命令面板只做入口：那一条落下去的还是界面本来就会做的那一件事（D92）。
+  const commands = useMemo<Command[]>(() => [
+    { id: 'session.new', title: '新建会话', note: 'session.create', run: () => void newSession() },
+    { id: 'session.read', title: '读回这一份记录', note: 'session.read', run: () => void readBack() },
+    { id: 'run.cancel', title: '取消这一轮', note: 'run.cancel', run: () => void cancel() },
+    { id: 'session.compact', title: '手动压缩上下文', note: 'session.compact', run: () => void compact() },
+    { id: 'rail.toggle', title: collapsed ? '展开左侧栏' : '收起左侧栏', note: 'Ctrl+B', run: () => setCollapsed((value) => !value) },
+    { id: 'answer.copy', title: '复制最后那条回答', note: 'Ctrl+Shift+C', run: copyLastAnswer },
+    ...(status?.templates ?? []).map((item) => ({
+      id: `prompt:${item.command}`,
+      title: `填一条 /${item.command}`,
+      note: item.hint === null || item.hint === undefined ? item.description : `${item.description} ${item.hint}`,
+      run: () => {
+        setDraft(`/${item.command} `);
+        setWalk(-1);
+        composerRef.current?.focus();
+      },
+    })),
+  ], [cancel, collapsed, copyLastAnswer, compact, newSession, readBack, status]);
+
   const answer = useCallback((decision: 'allow' | 'deny') => {
     if (ask === null) return;
     const asked = ask;
@@ -443,14 +519,23 @@ export function App({ transport }: { transport: Transport }) {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      const hot = hotkeyOf(event);
+      if (hot !== null) {
+        event.preventDefault();
+        if (hot === 'palette') setPaletteOpen((open) => !open);
+        else if (hot === 'sidebar') setCollapsed((value) => !value);
+        else copyLastAnswer();
+        return;
+      }
       if (event.key !== 'Escape') return;
-      if (menuOpen) setMenuOpen(false);
+      if (paletteOpen) setPaletteOpen(false);
+      else if (menuOpen) setMenuOpen(false);
       else if (panel !== null) setPanel(null);
       else if (running) void cancel();
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [cancel, menuOpen, panel, running]);
+  }, [cancel, copyLastAnswer, menuOpen, panel, paletteOpen, running]);
 
   const panelProps: PanelProps = {
     client,
@@ -465,7 +550,7 @@ export function App({ transport }: { transport: Transport }) {
   };
   const hidden = Math.max(0, rows.length - limit);
 
-  return <div className="frame">
+  return <div className="frame" data-collapsed={collapsed ? 'true' : undefined}>
     <aside className="sidebar">
       <div className="brand"><img src="/icon.png" alt="" width="22" height="22" /><span>ligule</span></div>
       <button className="new-run" type="button" onClick={() => void newSession()}>新建会话</button>
@@ -544,15 +629,27 @@ export function App({ transport }: { transport: Transport }) {
 
       <footer className="composer">
         <textarea
+          ref={composerRef}
           rows={3}
           value={draft}
-          placeholder="要模型做的事（Enter 发送，Shift+Enter 换行）"
-          onChange={(event) => setDraft(event.target.value)}
+          placeholder="要模型做的事（Enter 发送，Shift+Enter 换行，空草稿上 ↑↓ 翻历史）"
+          onChange={(event) => {
+            setDraft(event.target.value);
+            setWalk(-1);
+          }}
           onKeyDown={(event) => {
             if (event.key === 'Enter' && !event.shiftKey) {
               event.preventDefault();
               void send();
+              return;
             }
+            // 只在空草稿或已经在历史里走的时候接这两个键：否则它们该移动光标。
+            if ((event.key !== 'ArrowUp' && event.key !== 'ArrowDown') || (draft !== '' && walk < 0)) return;
+            if (history.length === 0) return;
+            event.preventDefault();
+            const next = event.key === 'ArrowUp' ? Math.min(walk + 1, history.length - 1) : walk - 1;
+            setWalk(next);
+            setDraft(next < 0 ? '' : history[Math.max(next, 0)] ?? '');
           }}
         />
         <div className="composer-actions">
@@ -583,5 +680,6 @@ export function App({ transport }: { transport: Transport }) {
         }}
       >{item.title}{item.pending === true && <span className="menu-tag">待实现</span>}</button>)}
     </div>}
+    {paletteOpen && <Palette commands={commands} onClose={() => setPaletteOpen(false)} />}
   </div>;
 }

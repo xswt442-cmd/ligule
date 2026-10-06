@@ -1,0 +1,58 @@
+import { useMemo, useState } from 'react';
+
+// 命令面板：只做入口，不做语义（D92）。每一条落下去的是界面或协议本来就有的那一个动作。
+export type Command = { id: string; title: string; note: string; run: () => void };
+
+export function Palette({ commands, onClose }: { commands: Command[]; onClose: () => void }) {
+  const [filter, setFilter] = useState('');
+  const [index, setIndex] = useState(0);
+  const matched = useMemo(() => {
+    const text = filter.trim().toLowerCase();
+    if (text === '') return commands;
+    return commands.filter((item) => `${item.title} ${item.note}`.toLowerCase().includes(text));
+  }, [commands, filter]);
+
+  const pick = (item: Command | undefined) => {
+    if (item === undefined) return;
+    onClose();
+    item.run();
+  };
+
+  return <div className="palette" role="dialog" aria-label="命令面板">
+    <input
+      autoFocus
+      value={filter}
+      placeholder="要做的命令（↑↓ 选，Enter 落，Esc 收）"
+      aria-label="命令过滤"
+      onChange={(event) => {
+        setFilter(event.target.value);
+        setIndex(0);
+      }}
+      onKeyDown={(event) => {
+        if (event.key === 'ArrowDown') {
+          event.preventDefault();
+          setIndex((at) => Math.min(at + 1, matched.length - 1));
+        } else if (event.key === 'ArrowUp') {
+          event.preventDefault();
+          setIndex((at) => Math.max(at - 1, 0));
+        } else if (event.key === 'Enter') {
+          event.preventDefault();
+          pick(matched[index]);
+        } else if (event.key === 'Escape') {
+          event.preventDefault();
+          event.stopPropagation();
+          onClose();
+        }
+      }}
+    />
+    <ul role="listbox" aria-label="命令清单">
+      {matched.length === 0 && <li className="palette-empty">没有对得上的命令</li>}
+      {matched.map((item, at) => <li key={item.id} role="option" aria-selected={at === index}>
+        <button type="button" onClick={() => pick(item)} onMouseEnter={() => setIndex(at)}>
+          <span>{item.title}</span>
+          <span className="palette-note">{item.note}</span>
+        </button>
+      </li>)}
+    </ul>
+  </div>;
+}
