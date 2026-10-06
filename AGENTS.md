@@ -207,7 +207,8 @@ npm run build-rg    downloads the pinned ripgrep into packages/rg-*
 ## Host and protocol
 
 - `src/host/` carries the protocol (D30). `protocol.js` names the operations and their argument shapes in the same subset the kernel validates, `connection.js` moves one message per line, and `host.js` owns the sessions.
-- The table holds nine methods: `session.create`, `session.open`, `sessions.list`, `session.read`, `run.start`, `run.cancel`, `status.get`, `mode.set`, `session.compact`. Three of them exist only because an interface asked (`mode.set`, `session.compact`, `sessions.list`).
+- The table holds ten methods: `session.create`, `session.open`, `sessions.list`, `session.read`, `run.start`, `run.cancel`, `status.get`, `config.get`, `mode.set`, `session.compact`. Four exist only because an interface asked (`mode.set`, `session.compact`, `sessions.list`, `config.get`).
+- `config.get` returns the whitelist the host lists (`model.api`, `model.baseURL`, `model.model`, `model.apiKeyEnv`). It takes no argument, so a client cannot ask for another key: the merge accepts any key a config layer writes, and keeping credentials out of files is a convention rather than a block (D13, D60).
 - The Host reaches the loop through what a host may inject anyway: the provider, the ask channel, the session log. A new carrier adds a file beside `connection.js` and changes neither the table nor the kernel.
 - The Host keeps session authority. A client that disconnects loses nothing, and a second process opens the same record.
 - An approval for a command line carries the shell kind and the executable (D67), and a call with no command text carries neither. That keeps the request the same shape on both carriers.
