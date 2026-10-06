@@ -39,7 +39,6 @@ export type Record_ = {
   verdict?: Verdict;
   // 崩溃之后由恢复路径补上的那一条（D72、D85）。
   recovery?: { assistantSeq?: number; safeToRedo?: boolean };
-  name?: string;
 };
 
 export type Row = {
