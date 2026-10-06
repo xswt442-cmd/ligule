@@ -555,3 +555,21 @@ button.primary {
     display: none;
   }
 }
+
+/* 跳回最新：贴在底部时不占位，人往上翻过才出现在转录与输入框之间（D88 那一份外壳形状）。 */
+.jump-latest {
+  align-self: center;
+  margin: 0.4rem 0 0;
+  padding: 0.25rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-raised);
+  color: var(--fg-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.jump-latest:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createClient, type Client, type Transport } from './protocol';
+import { RowView } from './components/RowView';
 import { createSlotRegistry, SLOTS, type Panel } from './slots';
 import { metaRow, projectRecord, type Record_, type Row } from './rows';
 
@@ -183,29 +184,6 @@ function BranchPanel({ client, sessionId }: { client: Client; sessionId: string 
   </>;
 }
 
-function RowView({ row }: { row: Row }) {
-  if (row.kind === 'question') {
-    return <article className="row question"><div className="row-head">你</div><div className="row-body">{row.text}</div></article>;
-  }
-  if (row.kind === 'reasoning') {
-    return <details className="row reasoning"><summary className="row-head">推理段</summary><div className="row-body">{row.text}</div></details>;
-  }
-  if (row.kind === 'answer') {
-    return <article className="row answer"><div className="row-head">助手</div><div className="row-body">{row.text}</div></article>;
-  }
-  if (row.kind === 'call') {
-    return <article className="row call"><div className="row-head">调用 {row.tool}</div><div className="row-body">{row.text}</div></article>;
-  }
-  if (row.kind === 'result' || row.kind === 'refusal' || row.kind === 'failure') {
-    const label = row.kind === 'result' ? `${row.tool} · 完成` : row.kind === 'refusal' ? `${row.tool} · 没让做（${row.code}）` : `${row.tool} · ${row.code}`;
-    return <article className={`row ${row.kind}`} data-failed={row.kind === 'result' ? 'false' : 'true'}>
-      <div className="row-head">{label}</div>
-      <div className="row-body">{row.text}</div>
-    </article>;
-  }
-  return <article className={`row ${row.kind}`}><div className="row-head">{row.kind === 'meta' ? '界面' : '出问题了'}</div><div className="row-body">{row.text}</div></article>;
-}
-
 export function App({ transport }: { transport: Transport }) {
   const client = useMemo(() => createClient(transport), [transport]);
   const registry = useMemo(() => {
@@ -227,6 +205,29 @@ export function App({ transport }: { transport: Transport }) {
   const [panel, setPanel] = useState<Panel<PanelProps> | null>(null);
   const [verbosity, setVerbosity] = useState<Verbosity>(() => (localStorage.getItem(VERBOSITY_KEY) as Verbosity) ?? 'standard');
   const active = useRef<string | null>(null);
+  // 跟随最新：贴在底部时新内容进来就滚到底；人往上翻过就不再自动滚，给一个跳回最新的按钮。
+  const scroller = useRef<HTMLDivElement | null>(null);
+  const [pinned, setPinned] = useState(true);
+
+  const nearBottom = () => {
+    const node = scroller.current;
+    return node === null || node.scrollHeight - node.scrollTop - node.clientHeight < 40;
+  };
+
+  useEffect(() => {
+    const node = scroller.current;
+    if (node !== null && pinned) node.scrollTop = node.scrollHeight;
+  }, [rows, live, pinned]);
+
+  const onScroll = useCallback(() => {
+    setPinned(nearBottom());
+  }, []);
+
+  const jumpToLatest = useCallback(async () => {
+    const node = scroller.current;
+    if (node !== null) node.scrollTo({ top: node.scrollHeight, behavior: 'smooth' });
+    setPinned(true);
+  }, []);
 
   useEffect(() => {
     active.current = sessionId;
@@ -423,12 +424,14 @@ export function App({ transport }: { transport: Transport }) {
         </label>
       </header>
 
-      <div className="conversation" data-verbosity={verbosity} aria-live="polite">
+      <div className="conversation" data-verbosity={verbosity} aria-live="polite" ref={scroller} onScroll={onScroll}>
         {rows.length === 0 && live.text === '' && <p className="empty">还没有轮次。下方输入一句话，Enter 直接开始。</p>}
-        {live.reasoning !== '' && <details className="row reasoning" open={verbosity === 'full'}><summary className="row-head">推理段（流式）</summary><div className="row-body">{live.reasoning}</div></details>}
-        {live.text !== '' && <article className="row answer"><div className="row-head">助手</div><div className="row-body">{live.text}</div></article>}
         {rows.map((row) => <RowView key={row.id} row={row} />)}
+        {/* 流式那半截排在已落盘的那些行之后：它是这一轮的末尾，画到开头去就把因果倒过来了。 */}
+        {live.reasoning !== '' && <details className="row reasoning" data-kind="reasoning" open={verbosity === 'full'}><summary className="row-head">推理段（流式）</summary><div className="row-body">{live.reasoning}</div></details>}
+        {live.text !== '' && <article className="row answer" data-kind="answer"><div className="row-head">助手</div><div className="row-body">{live.text}</div></article>}
       </div>
+      {!pinned && <button className="jump-latest" type="button" onClick={() => void jumpToLatest()}>回到最新</button>}
 
       {ask !== null && <section className="approval">
         <div className="approval-head">
