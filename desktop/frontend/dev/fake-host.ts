@@ -120,6 +120,23 @@ let status = {
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// 长转录的测量用：一份 N 条的合成记录，五种形状轮着来，每一条都是真记录里会出现的那几种之一。
+export function longEvent(seq: number): Record<string, unknown> {
+  const kind = seq % 5;
+  if (kind === 1) return { seq, kind: 'user', text: `第 ${seq} 条输入`, raw: `第 ${seq} 条输入` };
+  if (kind === 2) return { seq, kind: 'reasoning', text: '这一段推理够长，能占掉几行屏幕。'.repeat(3) };
+  if (kind === 3) return { seq, kind: 'assistant', text: '', toolCalls: [{ id: `c${seq}`, name: 'exec', args: { command: `node -e ${seq}` } }] };
+  if (kind === 4) {
+    const command = `node -e ${seq}`;
+    return {
+      seq, kind: 'tool', tool: 'exec', callId: `c${seq}`, args: { command },
+      verdict: { decision: 'allow', via: 'auto', capability: 'exec', level: 'auto' },
+      result: { content: { text: `命令输出第 ${seq} 行，一共二十行。\n`.repeat(20), exitCode: 0 } },
+    };
+  }
+  return { seq, kind: 'assistant', text: `第 ${seq} 段回答，带一个 \`inline\` 与两行列表：\n\n- 一\n- 二` };
+}
+
 // 与宿主那一条同形：`fullResults` 交回时把溢出事件的内容换成整段，记录本身那份是截断的。
 function fillSpills(events: Record<string, unknown>[]): Record<string, unknown>[] {
   return events.map((event) => {
@@ -128,9 +145,10 @@ function fillSpills(events: Record<string, unknown>[]): Record<string, unknown>[
   });
 }
 
-export function createFakeHost(): Transport {
+export function createFakeHost(options: { events?: number } = {}): Transport & { pushEvent: (event: Record<string, unknown>) => void } {
   let emit: (frame: Frame) => void = () => undefined;
   let opened = 0;
+  let seq = 1000;
   // 界面答复那一条审批之后才往下跑：真宿主也是等这一格答复才继续（D16）。
   const asking = new Map<string, (decision: string) => void>();
 
@@ -156,8 +174,13 @@ export function createFakeHost(): Transport {
       case 'session.open':
         return reply({ sessionId: params.sessionId });
       case 'session.read': {
-        const events = String(params.sessionId).includes('.sub-') ? branchEvents : eventsOf(String(params.sessionId));
-        return reply({ sessionId: params.sessionId, events: params.fullResults === true ? fillSpills(events) : events });
+        const id = String(params.sessionId);
+        const loaded = id.includes('.sub-')
+          ? branchEvents
+          : options.events === undefined
+            ? eventsOf(id)
+            : Array.from({ length: options.events }, (_unused, index) => longEvent(index + 1));
+        return reply({ sessionId: id, events: params.fullResults === true ? fillSpills(loaded) : loaded });
       }
       case 'sessions.list':
         return reply({ sessions: params.projectRoot === undefined ? sessions : sessions.filter((item) => item.projectRoot === params.projectRoot) });
@@ -249,6 +272,10 @@ export function createFakeHost(): Transport {
     },
     onLog: (handle) => {
       handle('宿主：这一份是开发用的假宿主，帧不经管道');
+    },
+    // 测量与手工试形状用的那一个入口：往现在开着的那一份会话上补一条刚落盘的事件。
+    pushEvent: (event) => {
+      emit({ notify: 'event', sessionId: status.sessionId, event: { ...event, seq: (seq += 1) } });
     },
   };
 }

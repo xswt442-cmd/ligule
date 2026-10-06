@@ -26,6 +26,10 @@ type Branch = { seq: number; id: string; task: string };
 const LIVE_REASONING: Row = { id: -2, kind: 'reasoning', text: '' };
 const LIVE_ANSWER: Row = { id: -1, kind: 'answer', text: '' };
 
+// 一次挂进行里的最多行数：一份长转录先只画末尾那一段，早前的靠「显示更早」往前要（U48）。
+// 不做虚拟化库：读数说明多少条开始画不动，窗口大小按那份读数调。
+const RENDER_WINDOW = 400;
+
 type PanelProps = {
   client: Client;
   status: Status | null;
@@ -213,6 +217,7 @@ export function App({ transport }: { transport: Transport }) {
   // 跟随最新：贴在底部时新内容进来就滚到底；人往上翻过就不再自动滚，给一个跳回最新的按钮。
   const scroller = useRef<HTMLDivElement | null>(null);
   const [pinned, setPinned] = useState(true);
+  const [limit, setLimit] = useState(RENDER_WINDOW);
   // 那一次派发是什么时候交出去的：只为算用时，键是调用 id（D94）。
   const dispatchAt = useRef(new Map<string, number>());
 
@@ -306,6 +311,7 @@ export function App({ transport }: { transport: Transport }) {
       setSessions((current) => [...current, { id: created.sessionId, label: '（还没有输入）' }]);
       setSessionId(created.sessionId);
       setRows([]);
+      setLimit(RENDER_WINDOW);
       setLive({ text: '', reasoning: '' });
       setAsk(null);
       void refreshStatus(created.sessionId);
@@ -322,6 +328,7 @@ export function App({ transport }: { transport: Transport }) {
   const switchSession = useCallback(async (id: string) => {
     setSessionId(id);
     setRows([]);
+    setLimit(RENDER_WINDOW);
     setLive({ text: '', reasoning: '' });
     setAsk(null);
     dispatchAt.current.clear();
@@ -400,6 +407,7 @@ export function App({ transport }: { transport: Transport }) {
     verbosity,
   };
   const current = sessions.find((item) => item.id === sessionId);
+  const hidden = Math.max(0, rows.length - limit);
 
   return <div className="frame">
     <aside className="sidebar">
@@ -442,7 +450,8 @@ export function App({ transport }: { transport: Transport }) {
 
       <div className="conversation" data-verbosity={verbosity} aria-live="polite" ref={scroller} onScroll={onScroll}>
         {rows.length === 0 && live.text === '' && <p className="empty">还没有轮次。下方输入一句话，Enter 直接开始。</p>}
-        {rows.map((row) => <RowView key={row.id} row={row} verbosity={verbosity} />)}
+        {hidden > 0 && <button type="button" className="earlier" onClick={() => setLimit((n) => n + RENDER_WINDOW)}>显示更早的 {hidden} 行</button>}
+        {rows.slice(hidden).map((row) => <RowView key={row.id} row={row} verbosity={verbosity} />)}
         {/* 流式那半截排在已落盘的那些行之后：它是这一轮的末尾，画到开头去就把因果倒过来了。 */}
         {live.reasoning !== '' && <RowView row={{ ...LIVE_REASONING, text: live.reasoning }} verbosity={verbosity} />}
         {live.text !== '' && <RowView row={{ ...LIVE_ANSWER, text: live.text }} verbosity={verbosity} />}

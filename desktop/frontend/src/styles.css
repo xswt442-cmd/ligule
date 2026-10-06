@@ -395,6 +395,22 @@ button.primary {
   border-style: solid;
 }
 
+/* 长转录窗口上方那一个把手：往前要一段，不是一次全挂上。 */
+.earlier {
+  align-self: center;
+  padding: 0.25rem 0.8rem;
+  font-size: 0.78rem;
+  color: var(--fg-muted);
+  background: var(--bg-sunk);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+
+.earlier:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
 /* ---------- 审批与输入 ---------- */
 
 .approval {

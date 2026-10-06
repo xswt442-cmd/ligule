@@ -1,5 +1,6 @@
 // 视图行到组件的那一次分派（D88）。这里只按 `kind` 挑组件，不认识会话记录本身。
-import type { ReactElement } from 'react';
+// 落一条记录会让整份列表重新渲染一次：记录里的行对象不再变化，跳过它们才让追加便宜得下来。
+import { memo, type ReactElement } from 'react';
 import type { Row } from '../rows';
 import type { RowProps } from './types';
 import { AnswerRow } from './AnswerRow';
@@ -22,7 +23,7 @@ const VIEWS: Record<Row['kind'], (props: RowProps) => ReactElement> = {
   error: NoticeRow,
 };
 
-export function RowView(props: RowProps) {
+export const RowView = memo(function RowView(props: RowProps) {
   const View = VIEWS[props.row.kind];
   return <View {...props} />;
-}
+});
