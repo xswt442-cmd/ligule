@@ -40,6 +40,7 @@ export const UI_COMMANDS: readonly UiCommand[] = Object.freeze([
   { name: 'copy', usage: '/copy', text: '把最近那一条回答放进剪贴板', hint: '', whenRunning: true },
   { name: 'export', usage: '/export <路径>', text: '把这一份记录写成 markdown，派生支线各另写一份', hint: '<路径>', whenRunning: true },
   { name: 'sessions', usage: '/sessions', text: '列出这个项目根下跑过的会话（时间是 UTC）', hint: '', whenRunning: true },
+  { name: 'find', usage: '/find <文字>', text: '在这个项目根跑过的会话里找一段文字：说出是哪一份的第几条', hint: '<文字>', whenRunning: true },
   { name: 'resume', usage: '/resume <id> [模式名]', text: '接上列出来的那一份会话，id 写开头几段就行；模式名是那一份清单改过之后显式指定用哪一份', hint: '<id> [模式名]', whenRunning: false },
   { name: 'name', usage: '/name <文字>', text: '给这一份会话起个名字：列表那一行读它，模型看不见', hint: '<文字>', whenRunning: true },
   { name: 'archive', usage: '/archive', text: '把这一份归档：列表默认不再画它，记录照旧，也接得回来', hint: '', whenRunning: true },
@@ -180,6 +181,32 @@ export function sessionLines(listed: readonly SessionRow[], current = ''): strin
     (item.truncatedBytes ?? 0) > 0 ? `尾行未完成 ${item.truncatedBytes} 字节` : '',
     item.error === undefined ? '' : `无法恢复：${item.error.code} · ${item.error.detail}`,
     item.id === current ? '← 正在这一份上' : '',
+  ].filter((cell) => cell !== '').join('  '));
+}
+
+/** 宿主从记录目录里查出来的那一条命中（`sessions.search` 交回的形状，方案 4.2）。 */
+export interface SearchRow {
+  readonly sessionId: string;
+  readonly seq: number;
+  readonly kind: string;
+  readonly text: string;
+  readonly name?: string;
+  readonly spilled?: string;
+}
+
+// 那一条记录里的事件种类，画给人看的是中文；认不出的一种原样画出来，不猜它是什么。
+const HIT_KINDS: Record<string, string> = { user: '问', assistant: '答', reasoning: '推理', tool: '工具', label: '名字' };
+
+// 一行一条命中：会话编号写开头八段——`/resume` 要的就是这一串，在这份列表里唯一对上就接得回来；
+// 序号交给 `/show`，所以两处都整串写出来，不省略。
+export function findLines(listed: readonly SearchRow[], current = ''): string[] {
+  return listed.map((hit) => [
+    hit.sessionId.slice(0, 8),
+    hit.name === undefined || hit.name === '' ? '' : `「${hit.name}」`,
+    `${HIT_KINDS[hit.kind] ?? hit.kind} 第 ${hit.seq} 条`,
+    hit.text,
+    hit.spilled === undefined ? '' : `整段在 ${hit.spilled}`,
+    hit.sessionId === current ? '← 正在这一份上' : '',
   ].filter((cell) => cell !== '').join('  '));
 }
 

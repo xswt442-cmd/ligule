@@ -4,7 +4,7 @@
 // 检查在 test/tui.test.js，不靠真终端也能验；画面本身跑 `ligule tui` 看。
 import { createElement as h, Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Static, Text, useApp, useInput } from 'ink';
-import { SESSION_ROWS, UI_COMMANDS, candidatesOf, findUiCommand, flowGroups, resolveSessionId, routeInput, sessionLines } from './commands.js';
+import { SESSION_ROWS, UI_COMMANDS, candidatesOf, findLines, findUiCommand, flowGroups, resolveSessionId, routeInput, sessionLines } from './commands.js';
 import { pushHistory, searchHistory } from './history.js';
 import { editInExternalEditor } from './editor.js';
 import { copyToClipboard, lastAnswer } from './clipboard.js';
@@ -22,7 +22,7 @@ const CANDIDATE_ROWS = 6;
 const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 // 那几张表与那几个纯函数交给检查里用（test/tui.test.js），界面自己只走这一处出口。
-export { SESSION_ROWS, UI_COMMANDS, candidatesOf, displayWidth, findUiCommand, flowGroups, resolveSessionId, routeInput, sessionLines } from './commands.js';
+export { SESSION_ROWS, UI_COMMANDS, candidatesOf, displayWidth, findLines, findUiCommand, flowGroups, resolveSessionId, routeInput, sessionLines } from './commands.js';
 export { markdownLines } from './markdown.js';
 
 // `/help` 画三组：界面命令、宿主交出来的提示模板、按键。前两组在这里只列名字与说明，展开与装载都不归界面。
@@ -494,6 +494,25 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           setSearch(null);
           setSessionPicker({ items: listed.sessions, at: 0 });
         }
+      })();
+      return;
+    }
+    if (name === 'find') {
+      const wanted = argument.trim();
+      if (wanted === '') {
+        push({ kind: 'meta', text: '要找哪一段文字：/find <文字>' });
+        return;
+      }
+      void (async () => {
+        // 查的也是宿主扫的那一份记录目录，界面不开盘（D81 边界一）；交回的是「哪一份会话的第几条」（方案 4.2）。
+        const found = await client.request('sessions.search', { query: wanted, projectRoot: info.boundary }).catch((error) => error);
+        if (found.code !== undefined) {
+          push({ kind: 'error', text: `查不了：${found.code}${found.detail === undefined ? '' : ` · ${found.detail}`}` });
+          return;
+        }
+        push({ kind: 'meta', text: found.hits.length === 0
+          ? `这个项目根跑过的会话里没有含「${wanted}」的`
+          : [`「${wanted}」在这些地方出现过：`, ...findLines(found.hits, sessionId)].join('\n') });
       })();
       return;
     }

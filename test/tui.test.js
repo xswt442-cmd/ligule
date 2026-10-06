@@ -26,7 +26,7 @@ try {
 
 const options = { skip: missing === '' ? false : missing };
 const editorFixture = fileURLToPath(new URL('./fixtures/editor.mjs', import.meta.url));
-const { foldText, editDraft, projectRecord, buildStatusLine, contextSegment, findRecord, branchOf, detailTitle, helpLines, routeInput, candidatesOf, displayWidth, flowGroups, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, resolveSessionId, SESSION_ROWS } = rows;
+const { foldText, editDraft, projectRecord, buildStatusLine, contextSegment, findRecord, branchOf, detailTitle, helpLines, routeInput, candidatesOf, displayWidth, flowGroups, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, findLines, resolveSessionId, SESSION_ROWS } = rows;
 const quoted = (value) => `"${value.replaceAll('"', '\\"')}"`;
 const plainOutput = (value) => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
 
@@ -489,6 +489,20 @@ test('the session listing is one row per record and an id prefix resolves to one
   assert.equal(routeInput('/sessions', true).kind, 'command');
 });
 
+// 第 76 步：查回来的是「哪一份会话的第几条」，那一行要同时说清这两个值（方案 4.2）。
+test('a search hit line names the session and the event to open', options, () => {
+  assert.deepEqual(findLines([
+    { sessionId: '5f3c1234-aaaa-bbbb-cccc-dddddddddddd', seq: 7, kind: 'tool', text: 'npm run 读数 跑完了', name: '读数那一份', spilled: 'result-7-abcdef12.json' },
+    { sessionId: '5f3d9999-aaaa-bbbb-cccc-dddddddddddd', seq: 0, kind: 'label', text: '读数那一份', name: '读数那一份' },
+  ], '5f3d9999-aaaa-bbbb-cccc-dddddddddddd'), [
+    '5f3c1234  「读数那一份」  工具 第 7 条  npm run 读数 跑完了  整段在 result-7-abcdef12.json',
+    '5f3d9999  「读数那一份」  名字 第 0 条  读数那一份  ← 正在这一份上',
+  ], '会话编号写开头八段交给 `/resume`，序号整串写出来交给 `/show`');
+  assert.deepEqual(findLines([{ sessionId: 'aaaa1111', seq: 3, kind: 'world', text: 'x' }]), ['aaaa1111  world 第 3 条  x'],
+    '认不出的种类原样画出来，不猜它是什么');
+  assert.equal(routeInput('/find 读数', true).kind, 'command', '查一份读过的记录不改任何东西，跑着的时候也能查');
+});
+
 // 接上另一份记录时画面上换的是整份投影：那几行来自记录，不来自界面自己留着的东西（I5）。
 // 这里先在当前会话上画一行，再换过去——少了 `Static` 上那个 key，短时的那一份一条都画不出来。
 test('resuming a session repaints that record as the transcript', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
@@ -532,6 +546,45 @@ test('resuming a session repaints that record as the transcript', options, async
     assert.match(frame, new RegExp(`会话 ${resumed.slice(0, 8)}`), '状态行说的是现在这一份会话');
     assert.ok(requests.some((request) => request.method === 'session.close' && request.params.sessionId === sessionId),
       '换走的那一份会话在宿主里收了，装配与记录锁交回去');
+  } finally {
+    instance.unmount();
+  }
+}));
+
+// `/find` 的那一次查询交给宿主：界面不开记录目录，画面上那一行说的是哪一份会话的第几条（D81 边界一）。
+test('finding a phrase shows which session each hit is in', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { setTimeout: delay } = await import('node:timers/promises');
+  const { App } = await import('../dist/tui/app.js');
+
+  const stdout = new PassThrough();
+  stdout.columns = 140;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+
+  const other = (await client.request('session.create', {})).sessionId;
+  await client.request('run.start', { sessionId: other, input: '另一份里问过的事' });
+  const instance = render(createElement(App, { client, sessionId, info: { boundary: projectDirectory }, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  try {
+    const before = painted.length;
+    stdin.write('/find 问过');
+    await delay(100);
+    stdin.write('\r');
+    const shown = () => plainOutput(painted.slice(before));
+    await waitFor(() => shown().includes(other.slice(0, 8)), { read: shown });
+    assert.ok(requests.some((request) => request.method === 'sessions.search' && request.params.query === '问过'
+      && request.params.projectRoot === projectDirectory), '查的是这一个项目根跑过的那几份记录');
+    assert.match(shown(), /问 第 \d+ 条  另一份里问过的事/, '那一行说出种类、序号与命中那一段');
+
+    const empty = painted.length;
+    stdin.write('/find 没有这段文字');
+    await delay(100);
+    stdin.write('\r');
+    await waitFor(() => plainOutput(painted.slice(empty)).includes('没有含「没有这段文字」的'), { read: () => plainOutput(painted.slice(empty)) });
   } finally {
     instance.unmount();
   }
