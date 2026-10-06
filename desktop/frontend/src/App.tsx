@@ -255,9 +255,13 @@ export function App({ transport }: { transport: Transport }) {
   const [page, setPage] = useState<{ before: number; hasMore: boolean } | null>(null);
   const [olderLoading, setOlderLoading] = useState(false);
   const [firstIndex, setFirstIndex] = useState(FIRST_INDEX);
-  // 查找命中要落到的那一条：接上那一份会话、读到位，再换一枚 `stamp` 让视口从这一条开始画（方案 6.2）。
-  const [wanted, setWanted] = useState<SearchHit | null>(null);
+  // 画面要落到哪一条：查找的命中，或者上一次读到的那一个位置（方案 4.2、6.2）。
+  const [wanted, setWanted] = useState<{ sessionId: string; seq: number; kind: string } | null>(null);
   const [stamp, setStamp] = useState(0);
+  // 每一份会话读到哪儿了：键是会话编号，值是画面最上面那一行的事件序号。切回来时还在手里这一页之内才落回去。
+  const anchors = useRef(new Map<string, number>());
+  // 这一次读的是哪一份记录的答复：中途又切走时，旧的那一份答复不能落到新的画面上（方案 6.2）。
+  const opening = useRef<string | null>(null);
   // 跳到的那一行亮一小段：一屏里几十行都在，不落个记号认不出停在哪一条。
   const [flash, setFlash] = useState<number | null>(null);
   // 那一次派发是什么时候交出去的：只为算用时，键是调用 id（D94）。
@@ -315,6 +319,8 @@ export function App({ transport }: { transport: Transport }) {
     try {
       const older = await client.call('session.read',
         { sessionId, before: page.before, limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean };
+      // 这一页读回来的时候人已经切走了：过期答复不改新画面的行数，也不动它的游标（方案 6.2）。
+      if (opening.current !== sessionId) return;
       const added = older.events.flatMap((record) => projectRecord(record));
       // 往前插一页要同时把起始编号减去插进去的行数：那一行的序号在插页前后不变，视口就停在它上面（U48）。
       setFirstIndex((current) => current - added.length);
@@ -468,6 +474,7 @@ export function App({ transport }: { transport: Transport }) {
   // 给了 `hit` 就一口气往回读到那一条进来，并把「要落到哪一条」与那些行同一批交出去：
   // 数据先变长、跳转晚一帧的话，贴在末行那一条会先把画面拉回去（U48、方案 6.2）。
   const openSession = useCallback(async (id: string, hit?: SearchHit) => {
+    opening.current = id;
     setSessionId(id);
     setRows([]);
     setPage(null);
@@ -482,18 +489,26 @@ export function App({ transport }: { transport: Transport }) {
       // fullResults 那一格是给界面读的：溢出文件里的整段正文这才到得了画面（记录本身不动）。
       // 只取最近这一页：更早的靠「显示更早」那一格按游标往前要（方案 4.1、实现顺序第 73 步）。
       const newest = await client.call('session.read', { sessionId: id, limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean };
+      if (opening.current !== id) return;
       let events = newest.events;
       let hasMore = newest.hasMore;
       while (hit !== undefined && hit.seq < Number(events[0]?.seq ?? 0) && hasMore) {
         const older = await client.call('session.read',
           { sessionId: id, before: Number(events[0]?.seq), limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean };
+        // 人在这几页读回来的时候切走了：这一份答复过期，不落到新的画面上（方案 6.2）。
+        if (opening.current !== id) return;
         if (older.events.length === 0) { hasMore = false; break; }
         events = [...older.events, ...events];
         hasMore = older.hasMore;
       }
       setRows(events.flatMap((record) => projectRecord(record)));
       setPage({ before: Number(events[0]?.seq ?? 1), hasMore });
-      setWanted(hit ?? null);
+      // 上一次读到的位置还在手里这一页之内就落回去；落不回就停在末尾，不替他改展示档，也不往前多读页。
+      const anchor = anchors.current.get(id);
+      const back = anchor !== undefined && anchor > Number(events[0]?.seq) && anchor < Number(events.at(-1)?.seq)
+        ? { sessionId: id, seq: anchor, kind: 'anchor' }
+        : null;
+      setWanted(hit ?? back);
     } catch (error) {
       setRows((current) => [...current, metaRow('error', `那份会话接不上：${code(error)}`)]);
     } finally {
@@ -686,6 +701,11 @@ export function App({ transport }: { transport: Transport }) {
       setFlash(wanted.seq);
       return;
     }
+    // 上一次读到的那一行不在画出来的这几类里（展示档筛掉了它）：就停在末尾，不替他改档位，也不在转录里写字。
+    if (wanted.kind === 'anchor') {
+      setWanted(null);
+      return;
+    }
     // 记录里有这一行而画面上没有：是当前展示档把那一类行筛掉了，收到全量才看得见它（D90）。
     const held = rows.find((row) => row.seq === wanted.seq);
     if (held !== undefined && !shownIn(verbosity, held)) {
@@ -766,6 +786,11 @@ export function App({ transport }: { transport: Transport }) {
           followOutput={(atBottom) => (atBottom && wanted === null && flash === null ? 'smooth' : false)}
           atBottomThreshold={40}
           atBottomStateChange={(atBottom) => setPinned(atBottom)}
+          rangeChanged={({ startIndex }) => {
+            // 记住这一份会话读到哪儿：画面最上面那一行的事件序号，切回来时按它落回去（方案 6.2）。
+            const row = visible[startIndex - firstIndex];
+            if (row?.seq !== undefined && sessionId !== null) anchors.current.set(sessionId, row.seq);
+          }}
           increaseViewportBy={{ top: 240, bottom: 600 }}
           components={viewport}
         />
