@@ -42,6 +42,20 @@ export const METHODS = Object.freeze({
       required: ['sessionId'],
     },
   },
+  // 第六条只为界面多出来的方法：名字与归档标记由宿主写成记录里的一条事实，两端读的是同一份（方案 4.2）。
+  // 两格都可省略，但至少要给一格：什么都不改的一次调用没有意义，那一格由宿主说。
+  'session.label': {
+    description: 'Name this session, mark it archived, or both; the fact is appended to the record and the model is never shown it',
+    parameters: {
+      type: 'object',
+      properties: {
+        sessionId: SESSION_ID,
+        name: { type: 'string', description: 'the title a person reads in the list; it stays out of what the model is shown' },
+        archived: { type: 'boolean', description: 'archived keeps the record and only changes how the list shows it' },
+      },
+      required: ['sessionId'],
+    },
+  },
   // 第三条只为界面多出来的方法（前两条是 `mode.set` D65 与 `session.compact` D83）：会话列表扫的是记录目录，
   // 那是宿主那一侧的事实源，界面自己不去开盘。
   'sessions.list': {

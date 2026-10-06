@@ -832,3 +832,34 @@ test('a history page names its own end and an older page picks up where it stopp
     );
   });
 });
+
+// 命名与归档（实现顺序第 75 步）：宿主写成记录里的一条事实，列表读的是同一份，界面不留第二份。
+test('naming or archiving a session appends one fact the listing reads back', async () => {
+  await withInProcessHost(async (connection) => {
+    const { sessionId } = await connection.request('session.create', {});
+    await connection.request('run.start', { sessionId, input: '说一句' });
+    assert.deepEqual(
+      await connection.request('session.label', { sessionId, name: ' 读数那一轮 ' }),
+      { sessionId, name: '读数那一轮', archived: false },
+      '两端读的是同一份事实',
+    );
+    assert.deepEqual(
+      await connection.request('session.label', { sessionId, archived: true }),
+      { sessionId, name: '读数那一轮', archived: true },
+      '只说归档时名字沿用，不是清掉',
+    );
+    const listed = (await connection.request('sessions.list', {})).sessions.find((item) => item.id === sessionId);
+    assert.equal(listed.name, '读数那一轮', '列表那一处读的是记录里折出来的当前值');
+    assert.equal(listed.archived, true);
+    await assert.rejects(
+      connection.request('session.label', { sessionId, name: '   ' }),
+      (error) => error.code === 'session_name_invalid',
+      '整条空白不算一个名字',
+    );
+    await assert.rejects(
+      connection.request('session.label', { sessionId }),
+      (error) => error.code === 'session_label_empty',
+      '什么都不改的一次调用要说出为什么不改',
+    );
+  });
+});

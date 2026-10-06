@@ -48,6 +48,10 @@ export interface SessionSummary {
   events: number;
   lastSeq: number;
   mode: { name: string; layer: string; digest: string } | null;
+  // 人给这一份会话起的名字；没起过就是空串，列表那一处拿会话编号当标题（实现顺序第 75 步）。
+  name: string;
+  // 归档只改列表怎么展示：记录还在，接得上，也能取消归档（方案 4.2）。
+  archived: boolean;
   // 有几条派发留在记录里没有结果：恢复这一次会话时它们会被补成未知结果（D72）。
   unanswered: number;
   truncatedBytes: number;
@@ -104,6 +108,14 @@ export async function listSessions(
     }
     if (projectRoot !== undefined && invalid === undefined && header === undefined) continue;
     const lastMode = events.filter((event) => event.kind === 'mode').at(-1);
+    // 名字与归档标记是记录里的那几条 `label`：后写的盖掉前写的，一条只说一件事时另一件沿用（实现顺序第 75 步）。
+    let title = '';
+    let archived = false;
+    for (const event of events) {
+      if (event.kind !== 'label') continue;
+      if (typeof event.name === 'string') title = event.name;
+      if (typeof event.archived === 'boolean') archived = event.archived;
+    }
     summaries.push({
       id,
       formatVersion: header?.formatVersion ?? 0,
@@ -115,6 +127,8 @@ export async function listSessions(
       mode: lastMode === undefined || typeof lastMode.name !== 'string'
         ? null
         : { name: lastMode.name, layer: String(lastMode.layer ?? ''), digest: String(lastMode.digest ?? '') },
+      name: title,
+      archived,
       unanswered: findUnresolvedCalls(events).length,
       truncatedBytes,
       ...(invalid === undefined ? {} : { error: invalid }),

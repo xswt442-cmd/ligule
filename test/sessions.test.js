@@ -64,6 +64,8 @@ test('the listing reads each record once and reports what a resume would need', 
       events: 4,
       lastSeq: 3,
       mode: { name: 'full', layer: 'shipped', digest: 'aaa111' },
+      name: '',
+      archived: false,
       // 那一次 `exec` 派发留在记录里没有结果：列表上就看得见这一份没收尾。
       unanswered: 1,
       truncatedBytes: 0,
@@ -77,6 +79,8 @@ test('the listing reads each record once and reports what a resume would need', 
       events: 1,
       lastSeq: 0,
       mode: null,
+      name: '',
+      archived: false,
       unanswered: 0,
       truncatedBytes: 0,
     });
@@ -84,6 +88,19 @@ test('the listing reads each record once and reports what a resume would need', 
     assert.deepEqual(await listSessions(directory, { projectRoot: 'nowhere' }), []);
     assert.deepEqual((await listSessions(directory, { projectRoot: root })).map((item) => item.id), ['fresh']);
     assert.deepEqual((await listSessions(join(root, 'nothing-here'))), [], '还没有任何记录不是错误');
+  });
+});
+
+// 名字与归档标记是记录里的那几条 `label`：后写的盖掉前写的那一件，一条只说另一件时这一件沿用。
+// 它也不进模型那一份：读回来的历史与发给模型的上下文是两件事（I5、实现顺序第 75 步）。
+test('a label folds into the listing and stays out of what the model is shown', async () => {
+  await withSessions(async (root, directory) => {
+    const log = createSessionLog({ directory, id: 'named', meta: () => ({ projectRoot: root }) });
+    await log.append({ kind: 'user', text: 'go' });
+    await log.append({ kind: 'label', ignorable: true, name: '读数那一轮' });
+    await log.append({ kind: 'label', ignorable: true, archived: true });
+    assert.deepEqual((await listSessions(directory)).map((item) => [item.id, item.name, item.archived]), [['named', '读数那一轮', true]], '列表读的是那两条折出来的当前值');
+    assert.deepEqual((await log.modelView()).map((row) => row.text), ['go'], '模型那一份里没有这一条事实');
   });
 });
 

@@ -32,6 +32,9 @@ import { DEFAULT_RETRY } from '../model/http.js';
 import { createConnection } from './connection.js';
 import { APPROVAL_METHOD, isApproved, validateCall } from './protocol.js';
 
+// 会话名字的上限：列表那一行还要放得下时间与条数，名字过长就该换一份短的（实现顺序第 75 步）。
+export const SESSION_NAME_MAX = 120;
+
 // 重试边界也在配置里；形状在这里就查：非整数的 maxAttempts 让「第几次了」比不出大小，
 // 每次传输失败就悄悄变成不重试，而看不出为什么不重试。
 function retryOf(model) {
@@ -242,6 +245,18 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     if (environment === defaultEnvironment) return;
     for (const other of sessions.values()) if (other.environment === environment) return;
     environments.delete(environment.projectRoot);
+  }
+
+  // 名字与归档标记读回的是记录里那几条 `label` 折出来的当前值：宿主不另存一份，两端看的是同一份事实（I5、方案 4.2）。
+  async function labelOf(state) {
+    let name = '';
+    let archived = false;
+    for (const event of await state.session.read()) {
+      if (event.kind !== 'label') continue;
+      if (typeof event.name === 'string') name = event.name;
+      if (typeof event.archived === 'boolean') archived = event.archived;
+    }
+    return { sessionId: state.id, name, archived };
   }
 
   async function execute(state, action) {
@@ -619,6 +634,24 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           await retire(state);
           evictEnvironment(state.environment);
           return { sessionId };
+        }
+        case 'session.label': {
+          const state = open(sessionId);
+          const { name, archived } = message.params;
+          // 什么都不改的一次调用没有意义，说出来比写一条空事件好。
+          if (name === undefined && archived === undefined) throw new KernelError('session_label_empty', { detail: sessionId });
+          const trimmed = name?.trim() ?? '';
+          // 名字由人写、给列表那一行看：控制字符会把排版弄坏，整条空白不算一个名字（方案 4.2）。
+          if (name !== undefined && (trimmed === '' || trimmed.length > SESSION_NAME_MAX || /[\u0000-\u001f\u007f]/.test(name))) {
+            throw new KernelError('session_name_invalid', { detail: `wanted 1-${SESSION_NAME_MAX} visible characters` });
+          }
+          await state.session.append({
+            kind: 'label',
+            ignorable: true,
+            ...(name === undefined ? {} : { name: trimmed }),
+            ...(archived === undefined ? {} : { archived }),
+          });
+          return await labelOf(state);
         }
         case 'sessions.list': {
           // 与 `ligule sessions` 走的是同一个扫描器（D73）：协议只是把它递到界面那一边，
