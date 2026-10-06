@@ -138,6 +138,30 @@ test('a search says which record a hit is in and which event it is', async () =>
   });
 });
 
+test('a search scoped to one record also reads the results it spilled', async () => {
+  await withSessions(async (root, directory) => {
+    const log = createSessionLog({ directory, id: 'deep', meta: () => ({ projectRoot: root }) });
+    await log.append({ kind: 'label', ignorable: true, name: '溢出那一份' });
+    await log.append({ kind: 'tool', tool: 'read', callId: 'c1', args: { path: 'notes/big.md' },
+      result: { content: '开头 [omitted: full output is 40000 bytes, kept in result-17-abcdef12.json] 结尾', spilled: 'result-17-abcdef12.json' } });
+    // 记录里留着的那一头一尾对不上，中间那一段在溢出的那个文件里。
+    await writeFile(join(directory, 'result-17-abcdef12.json'), `${'前段。'.repeat(20)}那一段藏在中间${'后段。'.repeat(20)}\n`, 'utf8');
+
+    assert.deepEqual(await searchSessions(directory, { query: '藏在中间' }), [], '跨会话那一种读的是记录本身，不翻溢出文件（U38）');
+
+    const scoped = await searchSessions(directory, { query: '藏在中间', sessionId: 'deep' });
+    assert.deepEqual(scoped.map((hit) => [hit.seq, hit.kind, hit.spilled]), [[1, 'tool', 'result-17-abcdef12.json']], '整段里那一处也认得出是哪一次结果');
+    assert.match(scoped[0].text, /藏在中间/);
+    assert.equal(scoped[0].name, '溢出那一份', '一份记录的名字读的是列表那一套折法');
+    assert.deepEqual((await searchSessions(directory, { query: 'big.md', sessionId: 'deep' })).map((hit) => hit.seq), [1], '记录里对得上的那一段先交，一条事件只交一处');
+    await assert.rejects(
+      () => searchSessions(directory, { query: '任何文字', sessionId: 'nobody' }),
+      (error) => error.code === 'session_not_found',
+      '指名的一份不在记录目录里就说清',
+    );
+  });
+});
+
 test('a resume takes the mode the session last ran under, and a changed list is a refusal', async () => {
   const full = { name: 'full', layer: 'shipped', path: 'modes/full.toml', tools: '*', prompt: '*', digest: await digestOf('full') };
 

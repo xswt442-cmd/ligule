@@ -7,6 +7,7 @@ import { KernelError } from '../kernel/error.js';
 import type { ModeFile } from '../kernel/modes.js';
 import { findUnresolvedCalls } from './repair.js';
 import type { SessionEvent, SessionHeader } from './format.js';
+import { foldLabel } from './format.js';
 import { parseSessionBytes } from './record.js';
 
 // 恢复一次会话该用哪一份模式清单：客户端指名了那一份就照它；没指名就用记录里最后生效的那一条，并比它的摘要（D78）。
@@ -108,14 +109,7 @@ export async function listSessions(
     }
     if (projectRoot !== undefined && invalid === undefined && header === undefined) continue;
     const lastMode = events.filter((event) => event.kind === 'mode').at(-1);
-    // 名字与归档标记是记录里的那几条 `label`：后写的盖掉前写的，一条只说一件事时另一件沿用（实现顺序第 75 步）。
-    let title = '';
-    let archived = false;
-    for (const event of events) {
-      if (event.kind !== 'label') continue;
-      if (typeof event.name === 'string') title = event.name;
-      if (typeof event.archived === 'boolean') archived = event.archived;
-    }
+    const label = foldLabel(events);
     summaries.push({
       id,
       formatVersion: header?.formatVersion ?? 0,
@@ -127,8 +121,8 @@ export async function listSessions(
       mode: lastMode === undefined || typeof lastMode.name !== 'string'
         ? null
         : { name: lastMode.name, layer: String(lastMode.layer ?? ''), digest: String(lastMode.digest ?? '') },
-      name: title,
-      archived,
+      name: label.name,
+      archived: label.archived,
       unanswered: findUnresolvedCalls(events).length,
       truncatedBytes,
       ...(invalid === undefined ? {} : { error: invalid }),

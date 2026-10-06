@@ -76,8 +76,10 @@ export const METHODS = Object.freeze({
     parameters: {
       type: 'object',
       properties: {
-        query: { type: 'string', description: 'the text to look for, matched case-insensitively in what a record stores inline' },
+        query: { type: 'string', description: 'the text to look for, matched case-insensitively' },
         projectRoot: { type: 'string', description: 'only search sessions opened against this project root' },
+        // 指名一份就只读那一份记录，并且读得深一层：那一次结果溢出在另一个文件里的整段正文也搜（方案 4.2 的完整工具结果）。
+        sessionId: { ...SESSION_ID, description: 'search this one record only, including the tool results it spilled into other files' },
         limit: { type: 'integer', description: 'stop after this many hits', minimum: 1, maximum: 200 },
       },
       required: ['query'],

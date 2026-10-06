@@ -880,6 +880,14 @@ test('a search over the records names the session and the event each hit is in',
     assert.ok(hits[0].text.includes('读数'), '摘录带着命中那一段');
     assert.ok(hits.every((hit) => hit.sessionId === sessionId), '这个项目根下只跑过这一份会话');
     assert.deepEqual((await connection.request('sessions.search', { query: '没有这段文字' })).hits, [], '查不到不是错误');
+    // 指名一份就只扫那一份记录，溢出在另一个文件里的那一段也读（方案 4.2 的完整工具结果）。
+    const scoped = await connection.request('sessions.search', { query: '读数', sessionId });
+    assert.ok(scoped.hits.length > 0 && scoped.hits.every((hit) => hit.sessionId === sessionId), '指名一份就只交那一份的命中');
+    await assert.rejects(
+      connection.request('sessions.search', { query: '读数', sessionId: '../outside' }),
+      (error) => error.code === 'session_id_invalid',
+      '会话编号要拼成记录文件名，形状先查，不混进「找不到这份会话」',
+    );
     await assert.rejects(
       connection.request('sessions.search', { query: '   ' }),
       (error) => error.code === 'search_query_empty',

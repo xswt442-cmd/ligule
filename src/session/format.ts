@@ -28,6 +28,19 @@ export interface SessionEvent {
 // 交给 `append` 的那一条还没有序号：号是写出去的时候定的（D73）。
 export type PendingSessionEvent = Omit<SessionEvent, 'seq'>;
 
+// 名字与归档标记读回的是记录里那几条 `label` 折出来的当前值：后写的只盖掉它说的那一件，另一件沿用（方案 4.2、实现顺序第 75 步）。
+// 列表、宿主的答复与查找三处都读这一份，所以折法只写在一处。
+export function foldLabel(events: SessionEvent[]): { name: string; archived: boolean } {
+  let name = '';
+  let archived = false;
+  for (const event of events) {
+    if (event.kind !== 'label') continue;
+    if (typeof event.name === 'string') name = event.name;
+    if (typeof event.archived === 'boolean') archived = event.archived;
+  }
+  return { name, archived };
+}
+
 export interface SessionRecord {
   events: SessionEvent[];
   formatVersion: number;

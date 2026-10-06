@@ -16,6 +16,8 @@ import { chooseResumeMode, listSessions, sessionDirectory } from '../session/lis
 import { searchSessions } from '../session/search.js';
 import { createCompaction } from '../session/compaction.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
+import { foldLabel } from '../session/format.js';
+import { SPILL_NAME } from '../kernel/result.js';
 import { limitsOf } from '../capability/limits.js';
 import { loadInstructions, DEFAULT_INSTRUCTION_BYTES } from '../capability/instructions.js';
 import { SKILL_METADATA_BUDGET_BYTES, discoverSkills, formatSkillCatalog, skillDirectories } from '../kernel/skills.js';
@@ -258,14 +260,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
 
   // 名字与归档标记读回的是记录里那几条 `label` 折出来的当前值：宿主不另存一份，两端看的是同一份事实（I5、方案 4.2）。
   async function labelOf(state) {
-    let name = '';
-    let archived = false;
-    for (const event of await state.session.read()) {
-      if (event.kind !== 'label') continue;
-      if (typeof event.name === 'string') name = event.name;
-      if (typeof event.archived === 'boolean') archived = event.archived;
-    }
-    return { sessionId: state.id, name, archived };
+    return { sessionId: state.id, ...foldLabel(await state.session.read()) };
   }
 
   async function execute(state, action) {
@@ -321,7 +316,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     for (const event of events) {
       const result = event.kind === 'tool' ? event.result : undefined;
       if (result?.spilled === undefined) { complete.push(event); continue; }
-      if (typeof result.spilled !== 'string' || !/^result-\d+-[a-f0-9]{8}\.json$/.test(result.spilled)) {
+      if (typeof result.spilled !== 'string' || !SPILL_NAME.test(result.spilled)) {
         throw new KernelError('session_spill_reference_invalid', { detail: `event ${event.seq}` });
       }
       let content;
@@ -677,10 +672,16 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
         case 'sessions.search': {
           // 第七条只为界面多出来的方法：扫的还是那一处记录目录，与列表同一个开盘处（方案 4.2）。
           // 空白的查询在所有记录里都能对上，那一份结果没有意义，所以在这里就拒掉，不扫一遍磁盘再说。
-          const { query, projectRoot, limit } = message.params;
+          const { query, projectRoot, sessionId: scoped, limit } = message.params;
           const needle = query.trim();
           if (needle === '') throw new KernelError('search_query_empty', { detail: 'a search query has to say what to look for' });
-          return { hits: await searchSessions(await scanDirectory(projectRoot), { query: needle, projectRoot, limit }) };
+          // 指名一份就读那一份记录，溢出在另一个文件里的那一段也读：一次会话内的查找不该只看记录留着的那一头一尾。
+          // 那一份会话开着就读它自己那一个项目的目录，与 `session.read` 同一处说法；形状不对先报自己那个码。
+          if (scoped !== undefined) assertSessionId(scoped);
+          const open = scoped === undefined ? undefined : sessions.get(scoped);
+          const root = open !== undefined ? undefined : projectRoot;
+          const directory = open?.environment.directory ?? await scanDirectory(projectRoot);
+          return { hits: await searchSessions(directory, { query: needle, sessionId: scoped, projectRoot: root, limit }) };
         }
         case 'session.read': {
           // 交回的是记录本身：客户端晚到了也能把已经发生过的事画出来（I5）。

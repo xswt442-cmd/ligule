@@ -26,6 +26,9 @@ export function resultLimit(config) {
 
 // 超限的内容改为可取回的引用：完整那一份另存一个文件，交回的文本留头尾与一行说明（I6、D19）。
 // 上限算在包括标记在内的完整结果上，所以先算标记要占的字节，再决定头尾各留多少。
+// 那一个文件名要按这一串查过才敢读回来：名字出自记录，而记录里的东西不能拼出走到目录外面去的路（D85）。
+export const SPILL_NAME = /^result-\d+-[a-f0-9]{8}\.json$/;
+
 export async function spillContent(text, { limit, directory, name }) {
   const bytes = Buffer.from(text, 'utf8');
   if (bytes.length <= limit) return text;

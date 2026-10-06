@@ -37,7 +37,7 @@ export { resolveRipgrep, searchWithRipgrep } from './capability/ripgrep.js';
 export { execTool } from './capability/exec.js';
 export { createPromptAssembly, PROMPT_BOUNDARY } from './kernel/prompt.js';
 export { createSessionLog } from './session/session.js';
-export { SESSION_FORMAT_VERSION, parseSessionEvents } from './session/format.js';
+export { SESSION_FORMAT_VERSION, foldLabel, parseSessionEvents } from './session/format.js';
 export { findUnresolvedCalls, buildRepairEvents, repairUnresolvedCalls } from './session/repair.js';
 export { chooseResumeMode, listSessions, sessionDirectory } from './session/list.js';
 export { searchSessions } from './session/search.js';
