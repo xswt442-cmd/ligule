@@ -15,7 +15,6 @@ const SHAPES = {
     <rect x="9" y="9" width="11" height="11" rx="2" />
     <path d="M15 5H6a2 2 0 0 0-2 2v9" />
   </>,
-  chevron: <path d="M9 6l6 6-6 6" />,
   check: <path d="M5 13l4 4L19 7" />,
   close: <path d="M6 6l12 12M18 6L6 18" />,
   warn: <>

@@ -763,25 +763,6 @@ button:disabled {
 
 /* ---------- 顶部状态、用量条与断连横幅（D82、D86、D93）---------- */
 
-.mode-set {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  color: var(--fg-muted);
-  font-size: 0.78rem;
-  white-space: nowrap;
-}
-
-.mode-set input {
-  width: 9rem;
-  padding: 0.25rem 0.45rem;
-  color: var(--fg);
-  background: var(--bg-sunk);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  font: inherit;
-}
-
 .usage {
   display: inline-flex;
   align-items: center;

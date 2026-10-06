@@ -16,7 +16,7 @@ const SECTIONS = [
 // 模式来自哪一层，终端那一份用的是同一组词；层名不在表里时把原样交出去。
 const LAYERS: Record<string, string> = { shipped: '随包', user: '全局', project: '项目' };
 
-export type SectionId = (typeof SECTIONS)[number]['id'];
+type SectionId = (typeof SECTIONS)[number]['id'];
 
 export type SettingsProps = {
   status: Status | null;
