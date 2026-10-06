@@ -651,6 +651,8 @@ test('manual compaction returns a boundary the status line then reports', async 
     assert.equal(status.usage.window, 1200);
     assert.equal(status.usage.threshold, 960);
     assert.equal(status.usage.reported, null, '这个假端点一条用量都没报，报回那一格是 null 而不是 0');
+    // 量法那一格界面在读（浮层「本地估算」后面那一句），宿主就得交得出。
+    assert.equal(status.usage.measurement, 'request-v1');
     assert.ok(status.usage.estimated > 0);
   }, { contextTokens: 1200 });
 });

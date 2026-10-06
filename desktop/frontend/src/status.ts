@@ -5,9 +5,11 @@ export type Usage = {
   threshold: number;
   retained: number;
   estimated: number;
-  factor: number | null;
-  reported: { seq: number; input: number; output: number } | null;
+  // 修正系数：宿主按端点报回的用量算出来，没有可算的依据时是 1（D86）。
+  factor: number;
+  // 量法的名字。本地估算一直是整份请求那一种，记作 `request-v1`（D86）。
   measurement: string;
+  reported: { seq: number; input: number; output: number | null } | null;
 };
 
 export type Status = {

@@ -196,6 +196,8 @@ export function createCompaction({ provider, session, directory, id, limits, log
       retained: number;
       estimated: number;
       factor: number;
+      // 本地估算用的是哪一种量法（D86）。界面那一格「（request-v1）」读的就是这一格。
+      measurement: string;
       reported: { seq: number; input: number; output: number | null } | null;
     }> {
       await seedFromRecord();
@@ -209,6 +211,7 @@ export function createCompaction({ provider, session, directory, id, limits, log
         retained,
         estimated: Math.round(estimateRequest({ ...requestPrefix(), messages: view }) * factor),
         factor: Math.round(factor * 100) / 100,
+        measurement: 'request-v1',
         reported: usage === null || !Number.isFinite(input)
           ? null
           : { seq: Number(usage.seq), input, output },

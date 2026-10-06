@@ -12,8 +12,11 @@ export function UsageMeter({ usage, seconds, running }: { usage: Usage; seconds:
     ['窗口', usage.window.toLocaleString()],
     ['压力线', `${usage.threshold.toLocaleString()}（过线就该压）`],
     ['压完保留', usage.retained.toLocaleString()],
-    ['修正系数', usage.factor === null ? '还没校准，用的是本地那一份估算' : `×${usage.factor.toFixed(2)}`],
-    ['端点报回', usage.reported === null ? '还没有一次报回' : `第 ${usage.reported.seq} 条：入 ${usage.reported.input.toLocaleString()}、出 ${usage.reported.output.toLocaleString()}`],
+    ['修正系数', usage.reported === null ? `×${usage.factor.toFixed(2)}（端点还没报回过用量，这一格是 1）` : `×${usage.factor.toFixed(2)}`],
+    // 报回的用量里出量那一格可以没有：端点只在流结束时给入量，也是一种真实情况。
+    ['端点报回', usage.reported === null
+      ? '还没有一次报回'
+      : `第 ${usage.reported.seq} 条：入 ${usage.reported.input.toLocaleString()}${usage.reported.output === null ? '' : `、出 ${usage.reported.output.toLocaleString()}`}`],
     ['本轮计时', running ? `${seconds} 秒（界面自己数的）` : '空闲'],
   ];
   return <span className="usage" data-open={open ? 'true' : undefined}>
