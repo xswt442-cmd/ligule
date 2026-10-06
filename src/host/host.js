@@ -165,15 +165,51 @@ export function shownConfigOf(config) {
 // modeName 与 modePaths 是一对：给了名字就要能给那三层目录，运行中换模式要用同一套查找（D41、D44）。
 // 扩展来源由装载侧算好交进来（D68：项目层与本地层里写的路径不算）：paths 是要加载的文件，
 // ignored 是那些被这条规则挡掉的路径，它们进日志而不是静默消失。
-export function createHost({ config, provider, plugins = [minimalPlugin, networkPlugin], policy, logger, modeName, modePaths, skillRegistry, templateRegistry, extensions = { paths: [], ignored: [] } }) {
-  if (!Object.isFrozen(config)) throw new KernelError('host_config_must_be_frozen');
+export function createHost({ config, provider, plugins = [minimalPlugin, networkPlugin], policy, logger, modeName, modePaths, skillRegistry, templateRegistry, extensions = { paths: [], ignored: [] }, loadEnvironment }) {
+  // 一份项目环境：这个项目自己的配置快照、提供方、判定档位、模式目录与记录目录（方案 3.1 与 3.2）。
+  // 校验在装载这一刻做完：一条坏配置不该等到模型第一次调用才炸（D60）。
   // 边界是工具读写的位置，也是指令文件上溯的止点，两边都读它，缺一处就说缺一处。
-  if (typeof config.boundary !== 'string' || config.boundary === '') throw new KernelError('host_boundary_required');
-  if (typeof provider?.stream !== 'function') throw new KernelError('host_provider_required');
-  if (modeName !== undefined && modePaths === undefined) throw new KernelError('host_mode_paths_required');
-  // MCP 的配置在装载这一刻就校验：一条写法不对的服务器配置不该等到模型第一次调用才炸（D60）。
-  const mcpConfigs = mcpServerConfigs(config);
-  const directory = sessionDirectory(config);
+  function prepareEnvironment(own) {
+    if (!Object.isFrozen(own.config)) throw new KernelError('host_config_must_be_frozen');
+    if (typeof own.config?.boundary !== 'string' || own.config?.boundary === '') throw new KernelError('host_boundary_required');
+    if (typeof own.provider?.stream !== 'function') throw new KernelError('host_provider_required');
+    if (own.modeName !== undefined && own.modePaths === undefined) throw new KernelError('host_mode_paths_required');
+    return {
+      projectRoot: own.config.boundary,
+      config: own.config,
+      provider: own.provider,
+      policy: own.policy,
+      modeName: own.modeName,
+      modePaths: own.modePaths,
+      skillRegistry: own.skillRegistry,
+      templateRegistry: own.templateRegistry,
+      extensions: own.extensions ?? { paths: [], ignored: [] },
+      mcpConfigs: mcpServerConfigs(own.config),
+      directory: sessionDirectory(own.config),
+    };
+  }
+
+  const defaultEnvironment = prepareEnvironment({
+    config, provider, policy, modeName, modePaths, skillRegistry, templateRegistry, extensions,
+  });
+  // 按项目根存一张表：同一份项目环境只装载一次，之后开这一项目的会话与列这一项目的记录都读它。
+  const environments = new Map([[defaultEnvironment.projectRoot, defaultEnvironment]]);
+
+  // 取这一份项目环境。没指名就是宿主自己那一份；指名了别的项目而装载侧没给那条路就说清不支持，
+  // 不悄悄用当前这一份项目环境去读另一项目的记录（方案 3.2：不能在另一个项目里悄悄继续）。
+  async function environmentFor(projectRoot) {
+    if (projectRoot === undefined || projectRoot === null || projectRoot === '') return defaultEnvironment;
+    const known = environments.get(projectRoot);
+    if (known !== undefined) return known;
+    if (loadEnvironment === undefined) throw new KernelError('host_project_root_unsupported', { detail: String(projectRoot).slice(0, 200) });
+    const loaded = prepareEnvironment(await loadEnvironment(projectRoot));
+    if (loaded.projectRoot !== projectRoot) {
+      throw new KernelError('host_project_root_mismatch', { detail: `asked for ${projectRoot}, the layers give ${loaded.projectRoot}` });
+    }
+    environments.set(projectRoot, loaded);
+    return loaded;
+  }
+
   const sessions = new Map();
   const building = new Set();
   let closing;
@@ -216,21 +252,25 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     return matched !== null && sessions.has(matched[1]) ? matched[1] : undefined;
   }
 
-  // 记录文件名由会话 id 拼出，而那个 id 是从客户端来的串：带目录分隔符时拼出的路径会走到记录目录外面。
-  // 形状在这里查一次，打开与读取两条路共用同一处。
-  function recordPathOf(id) {
+  // 会话 id 那个串是从客户端来的，要拼成记录文件名：带目录分隔符时拼出的路径会走到记录目录外面。
+  // 形状在这里查一次，打开、读取与支线三条路共用同一处，形状不对都报同一个码，不混进「找不到这份会话」。
+  function assertSessionId(id) {
     if (typeof id !== 'string' || id === '' || id === '.' || id === '..'
       || id.includes('/') || id.includes('\\') || id.includes(':') || id.includes('\0')) {
       throw new KernelError('session_id_invalid', { detail: String(id).slice(0, 80) });
     }
-    return join(directory, `${id}.jsonl`);
   }
 
-  async function readForClient(session, sessionId, fullResults) {
+  function recordPathOf(id, env = defaultEnvironment) {
+    assertSessionId(id);
+    return join(env.directory, `${id}.jsonl`);
+  }
+
+  async function readForClient(session, sessionId, fullResults, env = defaultEnvironment) {
     const events = await session.read();
     const header = await session.header();
     if (!fullResults) return { sessionId, events, header: header ?? null };
-    const base = await realpath(directory);
+    const base = await realpath(env.directory);
     const complete = [];
     for (const event of events) {
       const result = event.kind === 'tool' ? event.result : undefined;
@@ -240,7 +280,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       }
       let content;
       try {
-        const path = await realpath(join(directory, result.spilled));
+        const path = await realpath(join(env.directory, result.spilled));
         const local = relative(base, path);
         if (isAbsolute(local) || local === '..' || local.startsWith('../') || local.startsWith('..\\')) {
           throw new KernelError('session_spill_reference_invalid', { detail: `event ${event.seq}` });
@@ -260,7 +300,9 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
   // ask 是这条会话的审批通道：客户端不在答复里说允许，就按不允许处理（D16 的询问走内核对外接口）。
   // 取消落在审批还没答复的时候要把这个问题收掉：答复不会再来了，而判定链在这里抛出，
   // 那一次调用就在记录里没人回答，之后每一轮都拼不出合法请求体（D11）。
-  async function build(id, connection, recover = false, explicitMode) {
+  async function build(id, connection, recover = false, explicitMode, env = defaultEnvironment) {
+    // 这一份会话读的项目环境就是它所属那一个：下面这些名字从这里取，不再读宿主闭包里的那一份（方案 3.1）。
+    const { config, provider, policy, modePaths, directory, mcpConfigs, extensions, skillRegistry, templateRegistry } = env;
     // 扩展收事件的那一条通道（D37）：刚落盘的这一条同时送给客户端与扩展，两边读的是同一份事实（I5）。
     const listeners = [];
     // 首行那份元信息在第一次落笔时才写，所以模式身份用一条取当前值的函数给：建会话的那一刻常常还没选过模式（D73）。
@@ -275,7 +317,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       connection.notify({ notify: 'event', sessionId: id, event });
       for (const listener of listeners) listener(event);
     });
-    const state = { id, session, listeners, asks: new Set(), running: undefined, mode: { file: undefined, tools: [], undo: () => {} }, pending: undefined };
+    const state = { id, session, listeners, asks: new Set(), running: undefined, mode: { file: undefined, tools: [], undo: () => {} }, pending: undefined, environment: env };
     await session.acquire();
     const cleanup = [];
     try {
@@ -485,8 +527,8 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     }
   }
 
-  function buildSession(id, connection, recover = false, mode) {
-    const pending = build(id, connection, recover, mode).then((state) => {
+  function buildSession(id, connection, recover = false, mode, env = defaultEnvironment) {
+    const pending = build(id, connection, recover, mode, env).then((state) => {
       sessions.set(id, state);
       return { sessionId: id };
     });
@@ -503,12 +545,14 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       switch (message.method) {
         case 'session.create': {
           const id = randomUUID();
-          return await buildSession(id, connection);
+          return await buildSession(id, connection, false, undefined, await environmentFor(message.params.projectRoot));
         }
         case 'session.open': {
+          // 指名了项目就取那一份项目环境：记录在哪个目录、工具在哪个目录读写，都由它说（方案 3.2）。
+          const env = await environmentFor(message.params.projectRoot);
           // 记录不在磁盘上就是没有这份会话，把它当新的一次空记录打开会让人以为恢复成功了。
           // 形状不对的 id 先报自己那个码，不混进「找不到这份会话」。
-          const path = recordPathOf(sessionId);
+          const path = recordPathOf(sessionId, env);
           try {
             await access(path);
           } catch {
@@ -519,34 +563,41 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
             const state = open(sessionId);
             if (state.running !== undefined) throw new KernelError('run_already_running', { detail: sessionId });
             if (message.params.mode !== undefined) {
-              if (modePaths === undefined) throw new KernelError('host_mode_paths_required');
-              await state.adopt(await loadMode(message.params.mode, modePaths));
+              if (state.environment.modePaths === undefined) throw new KernelError('host_mode_paths_required');
+              await state.adopt(await loadMode(message.params.mode, state.environment.modePaths));
             }
             return { sessionId };
           }
-          return await buildSession(sessionId, connection, true, message.params.mode);
+          return await buildSession(sessionId, connection, true, message.params.mode, env);
         }
         case 'sessions.list': {
           // 与 `ligule sessions` 走的是同一个扫描器（D73）：协议只是把它递到界面那一边，
           // 记录目录仍然只有宿主这一处开盘。
           const { projectRoot, limit } = message.params;
-          return { sessions: await listSessions(directory, { projectRoot, limit }) };
+          // 列一份清单不该逼出装载：指名的那一个项目还没装载过、装载侧又给不出那条路时，照当前这一份目录扫。
+          // 过滤条件仍然生效，扫的是哪一格目录由 `listSessions` 那一个参数说（方案 3.2）。
+          const unloaded = projectRoot !== undefined && !environments.has(projectRoot) && loadEnvironment === undefined;
+          const env = unloaded ? defaultEnvironment : await environmentFor(projectRoot);
+          return { sessions: await listSessions(env.directory, { projectRoot, limit }) };
         }
         case 'session.read': {
           // 交回的是记录本身：客户端晚到了也能把已经发生过的事画出来（I5）。
           const state = sessions.get(sessionId);
-          if (state !== undefined) return await readForClient(state.session, sessionId, message.params.fullResults);
+          if (state !== undefined) return await readForClient(state.session, sessionId, message.params.fullResults, state.environment);
           // 派生支线那一份不在这轮的内核里（跑完就把装配撤了，D71），界面读它用的是这同一次动作（D74）。
           // 除这一种之外不读磁盘：这一次动作的语义是「把我这一份会话的事实拿回来」，不是记录目录的浏览器；
           // 发现历史会话归 sessions，接上别的会话归 session.open。
-          const path = recordPathOf(sessionId);
-          if (branchOwner(sessionId) === undefined) throw new KernelError('session_not_open', { detail: sessionId });
+          assertSessionId(sessionId);
+          const owner = branchOwner(sessionId);
+          if (owner === undefined) throw new KernelError('session_not_open', { detail: sessionId });
+          const env = sessions.get(owner)?.environment ?? defaultEnvironment;
+          const path = recordPathOf(sessionId, env);
           try {
             await access(path);
           } catch {
             throw new KernelError('session_not_found', { detail: sessionId });
           }
-          return await readForClient(createSessionLog({ directory, id: sessionId }), sessionId, message.params.fullResults);
+          return await readForClient(createSessionLog({ directory: env.directory, id: sessionId }), sessionId, message.params.fullResults, env);
         }
         case 'run.start': {
           const state = open(sessionId);
@@ -574,7 +625,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
         case 'mode.set': {
           const state = open(sessionId);
           // 名字在这里就读成清单：坏清单在请求这一次就说出来，而不是等本轮结束应用时才炸（D44）。
-          const requested = await loadMode(message.params.name, modePaths);
+          const requested = await loadMode(message.params.name, state.environment.modePaths);
           const current = state.mode.file;
           if (current !== undefined && current.name === requested.name && current.layer === requested.layer) {
             // 又选了一遍当前这一份：那是在撤回上一次待生效的请求，不写任何东西（D41）。

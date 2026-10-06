@@ -213,6 +213,10 @@ npm run build-rg    downloads the pinned ripgrep into packages/rg-*
 - `config.get` answers with four fields the host builds by name: `model.api`, `model.baseURL`, `model.model`, `model.apiKeyEnv`. A value has to be a string to be shown, and the address keeps only its scheme, host, port and path.
 - The boundary is that fixed construction, not argument checking: the parameter subset lets through keys it does not declare. The merge accepts any key a config layer writes, so handing over the whole snapshot would prove nothing about what a frame carries (D8, D13, D60).
 - The Host reaches the loop through what a host may inject anyway: the provider, the ask channel, the session log. A new carrier adds a file beside `connection.js` and changes neither the table nor the kernel.
+- A project environment is one project's config snapshot, provider, policy, mode directories, extension sources, MCP servers and session directory. The Host loads one per project root, keeps it, and a session reads that environment rather than the one the Host started on.
+- `session.create` and `session.open` name that project in an optional `projectRoot`. A Host without a loader answers `host_project_root_unsupported`, and a loader whose layers give a different root answers `host_project_root_mismatch` — neither falls back to reading another project through the current one (D73, 方案 3.2).
+- `sessions.list` scans the directory of the environment it can reach. A root that is not loaded yet, on a Host with no loader, is filtered against the current directory instead: listing does not force a load.
+- `config.get` reads the project the Host was launched on, because that method names no session.
 - The Host keeps session authority. A client that disconnects loses nothing, and a second process opens the same record.
 - An approval for a command line carries the shell kind and the executable (D67), and a call with no command text carries neither. That keeps the request the same shape on both carriers.
 

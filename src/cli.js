@@ -83,6 +83,23 @@ function resolveMode(config) {
   return { modeName: modeFlag ?? config.mode ?? DEFAULT_MODE, modePaths: modeDirectories(process.cwd(), shippedModes) };
 }
 
+// 一具宿主可以接多个项目，这是宿主按项目根再装载一份环境的那条路（方案 3.1、实现顺序第 69 步）。
+// 走的是命令行自己启动时同一批函数：配置那几层、提供方、模式与扩展来源都按那一个项目根重算。
+// `--mode` 是这一次运行的覆盖，不跟着进另一个项目的环境；要换清单由 `session.open` 的 `mode` 那一格指名。
+async function projectEnvironment(projectRoot) {
+  const layers = await loadConfigLayers({ projectRoot, flags });
+  const user = { boundary: projectRoot, ...layers.user };
+  const config = createConfig({ ...layers, user });
+  return {
+    config,
+    provider: providerFromConfig(config),
+    policy: config.policy,
+    modeName: config.mode ?? DEFAULT_MODE,
+    modePaths: modeDirectories(projectRoot, shippedModes),
+    extensions: await extensionSources({ ...layers, user }, { projectRoot }),
+  };
+}
+
 async function installedKernel() {
   const { config } = await configSnapshot();
   const kernel = createKernel({ config });
@@ -341,7 +358,7 @@ if (missingFlagValue) {
   // 桌面壳或者脚本起这一个进程，两端各读写一行 JSON（D30）：本机不开端口，审批与事件都走这条连接。
   try {
     const { config, extensions } = await configSnapshot();
-    serveHost({ config, provider: providerFromConfig(config), policy: config.policy, extensions, ...resolveMode(config) });
+    serveHost({ config, provider: providerFromConfig(config), policy: config.policy, extensions, loadEnvironment: projectEnvironment, ...resolveMode(config) });
   } catch (error) {
     printFailure(error.code ?? 'cli_host_failed', error.detail);
   }

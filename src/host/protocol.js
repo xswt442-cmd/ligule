@@ -11,7 +11,13 @@ const SESSION_ID = { type: 'string', description: 'the session this call refers 
 export const METHODS = Object.freeze({
   'session.create': {
     description: 'Start a session the Host keeps; returns the id every later call needs',
-    parameters: { type: 'object', properties: {}, description: 'creating a session takes no argument' },
+    parameters: {
+      type: 'object',
+      properties: {
+        projectRoot: { type: 'string', description: 'start this session against another project the Host can load' },
+      },
+      description: 'a session starts on the project the Host was launched on; naming another project is optional',
+    },
   },
   'session.open': {
     description: 'Resume a session whose record is already on disk; without a mode the Host takes the one last in force in that record',
@@ -20,6 +26,8 @@ export const METHODS = Object.freeze({
       properties: {
         sessionId: SESSION_ID,
         mode: { type: 'string', description: 'the mode to resume with, in place of the one that record carries' },
+        // 记录属于哪个项目由这一格说：宿主按它取那一份项目环境，工具目录与记录目录都跟着走（方案 3.2）。
+        projectRoot: { type: 'string', description: 'the project this record belongs to, when it is not the one the Host started on' },
       },
       required: ['sessionId'],
     },

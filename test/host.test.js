@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -681,4 +681,61 @@ test('shownConfigOf keeps the displayable part of each field', () => {
   // 解析不出来的地址不猜着交：那一格就没有，界面上说「读不出来或没写」。
   assert.deepEqual(shownConfigOf({ model: { baseURL: 'not a url' } }), { model: { api: undefined, baseURL: undefined, model: undefined, apiKeyEnv: undefined } });
   assert.deepEqual(shownConfigOf({}), { model: { api: undefined, baseURL: undefined, model: undefined, apiKeyEnv: undefined } });
+});
+
+// 一具宿主接两个项目（实现顺序第 69 步，方案 3.1 与 3.2）：会话属于哪一个项目，记录就落在
+// 那一个项目的记录目录里，那一个项目的列表才列得出它。装载不出别的项目环境的宿主直接说不支持。
+test('one host keeps two projects apart, and a host without a loader says so', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-projects-'));
+  const first = join(root, 'first');
+  const second = join(root, 'second');
+  await mkdir(first, { recursive: true });
+  await mkdir(second, { recursive: true });
+  const quiet = { capabilities: MESSAGES_CAPABILITIES, model: 'test-model', async *stream() { yield { type: 'text', text: 'ok' }; } };
+  const environmentOf = (projectRoot) => ({
+    config: createConfig({ user: { boundary: projectRoot, model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model' } } }),
+    provider: quiet,
+    policy: { mode: 'auto' },
+  });
+  const pair = createMemoryConnectionPair();
+  const host = serveHost({
+    input: pair.host.input,
+    output: pair.host.output,
+    ...environmentOf(first),
+    loadEnvironment: async (projectRoot) => environmentOf(projectRoot),
+  });
+  const client = createConnection(pair.client);
+  const bare = createMemoryConnectionPair();
+  const bareHost = serveHost({ input: bare.host.input, output: bare.host.output, ...environmentOf(first) });
+  const bareClient = createConnection(bare.client);
+  try {
+    const inSecond = await client.request('session.create', { projectRoot: second });
+    // 首行那份元信息在第一次落笔时才写，所以先跑一轮，再读那一份记录属于谁（D73）。
+    await client.request('run.start', { sessionId: inSecond.sessionId, input: '另一轮' });
+    const header = JSON.parse((await readFile(join(second, '.ligule', 'sessions', `${inSecond.sessionId}.jsonl`), 'utf8')).split('\n')[0]);
+    assert.equal(header.projectRoot, second, '首行说得出这一份记录属于哪个项目');
+
+    const listedHere = await client.request('sessions.list', {});
+    assert.ok(!listedHere.sessions.some((item) => item.id === inSecond.sessionId), '当前项目的列表不替别的项目说话');
+    const listedThere = await client.request('sessions.list', { projectRoot: second });
+    assert.ok(listedThere.sessions.some((item) => item.id === inSecond.sessionId), '指名那个项目才列得出它');
+
+    // 两个项目各开一份会话，交错跑一轮：各自的记录进各自的目录，互不串。
+    const inFirst = await client.request('session.create', {});
+    await client.request('run.start', { sessionId: inFirst.sessionId, input: '第一轮' });
+    assert.ok((await readFile(join(first, '.ligule', 'sessions', `${inFirst.sessionId}.jsonl`), 'utf8')).includes('第一轮'));
+    assert.ok((await readFile(join(second, '.ligule', 'sessions', `${inSecond.sessionId}.jsonl`), 'utf8')).includes('另一轮'));
+
+    await assert.rejects(
+      bareClient.request('session.create', { projectRoot: second }),
+      (error) => error.code === 'host_project_root_unsupported',
+      '装载侧没给那条路时说出来，不用当前这一份项目环境去读别的项目',
+    );
+  } finally {
+    pair.client.output.end();
+    bare.client.output.end();
+    await host.release();
+    await bareHost.release();
+    await rm(root, { recursive: true, force: true });
+  }
 });
