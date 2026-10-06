@@ -1519,6 +1519,11 @@ button.mini.chip b {
   font-size: var(--text-sm);
 }
 
+/* 卡片是纵向弹性列，把手不跟着拉满整行。 */
+.approval .fold-toggle {
+  align-self: flex-start;
+}
+
 .approval-head {
   gap: var(--space-2);
 }
@@ -1560,4 +1565,63 @@ button.mini.chip b {
 
 .banner span {
   min-width: 0;
+}
+
+/* ---------- 上下文用量的浮层（第 60 步，D96）---------- */
+
+.usage {
+  position: relative;
+}
+
+.usage-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 2px var(--space-2);
+  color: inherit;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.usage-trigger:hover,
+.usage-trigger:focus-visible,
+.usage[data-open="true"] .usage-trigger {
+  background: var(--bg-sunk);
+  border-color: var(--line);
+}
+
+.usage-pop {
+  position: absolute;
+  inset-block-start: calc(100% + var(--space-2));
+  inset-inline-end: 0;
+  z-index: 6;
+  display: grid;
+  gap: var(--space-1);
+  inline-size: 22rem;
+  padding: var(--space-3);
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-pop);
+}
+
+.usage-row {
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+  justify-content: space-between;
+  font-size: var(--text-xs);
+}
+
+.usage-row span {
+  color: var(--fg-muted);
+  flex: none;
+}
+
+.usage-row b {
+  font-weight: 500;
+  text-align: end;
 }

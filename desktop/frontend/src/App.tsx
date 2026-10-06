@@ -130,14 +130,13 @@ const statusPanels: Panel<PanelProps>[] = [
   {
     id: 'status.pills',
     title: '运行状态',
+    // 顶栏只说这一份会话现在在做什么；工具件数、记录条数与拒绝计数在设置那一个对话框里（D98）。
     view: ({ status, running, waiting, seconds }) => <>
       {running && <span className="pill" data-tone="running">正在跑 {seconds} 秒</span>}
       {waiting > 0 && <span className="pill" title="发出去还没回来的调用">未答的调用 {waiting}</span>}
       {status !== null && <>
         <span className="pill">模式 {status.mode ?? '没装'}{status.pendingMode === null || status.pendingMode === undefined ? '' : `→${status.pendingMode}`}</span>
         <span className="pill">档位 {status.policy}</span>
-        <span className="pill">工具 {status.tools.length} 件</span>
-        <span className="pill">记录 {status.eventCount} 条</span>
         {status.denials.total > 0 && <span className="pill">不允许 {status.denials.consecutive}/{status.denials.total}</span>}
       </>}
     </>,
@@ -145,12 +144,12 @@ const statusPanels: Panel<PanelProps>[] = [
   {
     id: 'status.usage',
     title: '上下文用量',
-    view: ({ status }) => {
+    view: ({ status, running, seconds }) => {
       const usage = status?.usage;
       // 窗口那一格没写时两条压缩触发都不启用，这一格也就没有压力线可画（D75）。
       return usage === undefined || usage === null
         ? <span className="pill" title="限额那一格没写，两条压缩触发都不启用">窗口没写</span>
-        : <UsageMeter usage={usage} />;
+        : <UsageMeter usage={usage} running={running} seconds={seconds} />;
     },
   },
 ];
@@ -617,7 +616,7 @@ export function App({ transport }: { transport: Transport }) {
       <header className="topbar">
         <div className="title">
           <strong id="session-title">{sessionId === null ? '没有会话' : `会话 ${sessionId.slice(0, 8)}`}</strong>
-          <span className="muted" id="session-note">{status === null ? '后端进程由壳起，帧走管道' : `模式 ${status.mode ?? '没装'} · 记录 ${status.eventCount} 条`}</span>
+          <span className="muted" id="session-note">{status === null ? '后端进程由壳起，帧走管道' : `记录 ${status.eventCount} 条`}</span>
         </div>
         <div className="pills">{registry.list('header.status').map((item) => <span key={item.id}>{item.view(panelProps)}</span>)}</div>
         <button className="icon-button" type="button" title="命令面板（Ctrl+K）" aria-label="命令面板" onClick={() => setPaletteOpen(true)}><Icon name="search" size={15} /></button>
