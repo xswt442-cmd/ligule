@@ -377,7 +377,9 @@ export function App({ transport }: { transport: Transport }) {
       // Host 朝界面发出去的请求只有 approval.request 这一种。
       if (message.method !== 'approval.request') return;
       const params = message.params as { sessionId?: string; tool?: string; command?: string; args?: Record<string, unknown>; reason?: string; shell?: string; executable?: string };
-      if (params?.sessionId !== active.current) return;
+      // 询问归那一份会话，不归眼前看着的那一份：别的那一份在等，也得让人看得见、答得掉（实现顺序第 71 步）。
+      const asked = params?.sessionId;
+      if (typeof asked !== 'string' || asked === '') return;
       const tool = params.tool ?? '';
       const args = params.args ?? {};
       // 画出来的那一句说的是哪个对象：命令文本、路径、目标地址，或者那一项 MCP 能力名（D67）。
@@ -390,6 +392,7 @@ export function App({ transport }: { transport: Transport }) {
           : Object.keys(args).length === 0 ? '' : JSON.stringify(args, null, 2);
       setAsks((current) => [...current, {
         id: message.id ?? '',
+        sessionId: asked,
         tool,
         detail,
         change: changeOf(tool, args).summary,
@@ -412,6 +415,10 @@ export function App({ transport }: { transport: Transport }) {
     }
   }, [client]);
 
+  // 询问是宿主那一侧在等的一件事，不随看着的是哪一份会话而变化：换走时不清空，否则那一条派发给谁答。
+  // 只有那一轮自己收尾（跑完、被打断）或那具宿主换掉时，才收掉它名下的那些询问。
+  const dropAsksOf = useCallback((id: string) => setAsks((current) => current.filter((ask) => ask.sessionId !== id)), [setAsks]);
+
   const newSession = useCallback(async () => {
     try {
       const created = await client.call('session.create', {}) as { sessionId: string };
@@ -419,7 +426,6 @@ export function App({ transport }: { transport: Transport }) {
       setRows([]);
       setLimit(RENDER_WINDOW);
       setLive({ text: '', reasoning: '' });
-      setAsks([]);
       void refreshStatus(created.sessionId);
     } catch (error) {
       setRows((current) => [...current, metaRow('error', `会话建不起来：${code(error)}`)]);
@@ -437,7 +443,6 @@ export function App({ transport }: { transport: Transport }) {
     setRows([]);
     setLimit(RENDER_WINDOW);
     setLive({ text: '', reasoning: '' });
-    setAsks([]);
     dispatchAt.current.clear();
     setReading(true);
     try {
@@ -489,10 +494,11 @@ export function App({ transport }: { transport: Transport }) {
       setRows((current) => [...current, metaRow('error', `这一轮停住：${code(error)}`)]);
     } finally {
       setRunning(false);
-      setAsks([]);
+      // 这一轮收尾了：它名下那些没答的询问由宿主按「不允许」结了，界面上不再留着让人去答。
+      dropAsksOf(sessionId);
       void refreshStatus(sessionId);
     }
-  }, [client, history, refreshStatus, running, sessionId]);
+  }, [client, dropAsksOf, history, refreshStatus, running, sessionId]);
 
   const send = useCallback(async () => {
     await submit(draft.trim());
@@ -570,10 +576,14 @@ export function App({ transport }: { transport: Transport }) {
     const [head, ...rest] = asks;
     if (head === undefined) return;
     setAsks(rest);
-    // 先把这一条记在界面上再发答复：答复一发出去，Host 那一边就往下跑，工具结果可能比这一行先到。
-    setRows((current) => [...current, metaRow('meta', `${decision === 'allow' ? '已允许' : '已不允许'} ${head.tool}${head.detail === '' ? '' : `：${head.detail.slice(0, 60)}`}`)]);
+    // 答复按那一次请求的编号回去，看着的是哪一份会话不影响它落到哪一轮。
+    // 回声那一行只画在它自己那一份会话的转录里：别的那一份的答复不属于眼前这一段。
+    if (head.sessionId === sessionId) {
+      // 先把这一条记在界面上再发答复：答复一发出去，Host 那一边就往下跑，工具结果可能比这一行先到。
+      setRows((current) => [...current, metaRow('meta', `${decision === 'allow' ? '已允许' : '已不允许'} ${head.tool}${head.detail === '' ? '' : `：${head.detail.slice(0, 60)}`}`)]);
+    }
     client.reply(head.id, { decision });
-  }, [asks, client]);
+  }, [asks, client, sessionId]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -653,6 +663,8 @@ export function App({ transport }: { transport: Transport }) {
         queued={asks.length - 1}
         verbosity={verbosity}
         policy={status?.policy ?? 'ask'}
+        active={sessionId}
+        onOpen={(id: string) => void openSession(id)}
         onAnswer={answer}
       />}
 

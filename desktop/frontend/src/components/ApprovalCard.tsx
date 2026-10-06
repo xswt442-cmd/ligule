@@ -4,6 +4,8 @@ import type { Verbosity } from './types';
 // 审批那一格：答的取值只有 allow 与 deny 两种，界面不动判定档位（D81 边界三）。
 export type Ask = {
   id: string;
+  // 那一次询问属于哪一份会话：宿主等的是一个答复，界面看着别的那一份时也答得了它（实现顺序第 71 步）。
+  sessionId: string;
   tool: string;
   // 那一句要动的对象：命令文本、路径、目标地址或那一项 MCP 能力名。
   detail: string;
@@ -20,19 +22,24 @@ const TIER: Record<string, string> = {
   ask: '要有放行规则盖住每一个分段才不用问，否则每一件事都问到人',
 };
 
-export function ApprovalCard({ ask, queued, verbosity, policy, onAnswer }: {
+export function ApprovalCard({ ask, queued, verbosity, policy, active, onAnswer, onOpen }: {
   ask: Ask;
   queued: number;
   verbosity: Verbosity;
   policy: string;
+  active: string | null;
   onAnswer: (decision: 'allow' | 'deny') => void;
+  onOpen: (sessionId: string) => void;
 }) {
+  // 问过来的那一份不是眼前这一份：答复按那一次请求的编号回去，跟看着的是哪一份无关。
+  const background = ask.sessionId !== active;
   return <section className="approval" aria-label="要人答应的调用">
     <div className="approval-head">
-      <span className="approval-kind">要执行</span>
+      <span className="approval-kind">{background ? '另一份会话要执行' : '要执行'}</span>
       <code className="row-tool">{ask.tool}</code>
       {ask.backend !== '' && <span className="row-note">{ask.backend}</span>}
       {queued > 0 && <span className="row-note">还有 {queued} 条在问</span>}
+      {background && <button type="button" onClick={() => onOpen(ask.sessionId)}>看这一份会话 {ask.sessionId.slice(0, 8)}</button>}
     </div>
     {ask.detail !== '' && <div className="row-target">{ask.detail}</div>}
     {ask.change !== '' && <div className="row-target">{ask.change}</div>}

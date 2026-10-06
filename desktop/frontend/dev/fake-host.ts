@@ -247,6 +247,25 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
       part('reasoning', piece);
     }
     tell({ seq: 101, kind: 'reasoning', text: '先看一眼那份记录里的读数，再决定要不要连模型。' });
+    // 另一份会话在等人答（实现顺序第 71 步）：那一次派发属于左侧栏列出来的第二份记录。
+    // 当前这一份不因为它停下，停下的是它那一份自己的那一轮；答复按那一次请求的编号落回它自己那一份。
+    const otherId = '2b8d55c0-11aa-4c3e-8d77-9f0a1b2c3d4e';
+    void ask('call_other_1', {
+      sessionId: otherId,
+      tool: 'edit',
+      args: { path: 'notes/readings-3.md', anchor: '窗口 120000', replacement: '窗口 200000' },
+      reason: '那是另一份会话里的编辑：它排在当前这一份的询问前面，答的仍然是它那一次派发。',
+    }).then((decision) => emit({
+      notify: 'event',
+      sessionId: otherId,
+      event: {
+        seq: 400, kind: 'tool', tool: 'edit', callId: 'call_other_1', args: { path: 'notes/readings-3.md' },
+        verdict: { decision, via: 'ask', capability: 'edit', level: 'ask', rule: '编辑逐次询问', answer: decision },
+        result: decision === 'allow'
+          ? { content: { text: '改了一行' } }
+          : { failed: true, kind: 'refusal', code: 'policy_denied', reason: '这一条没被允许（答复是不允许）。' },
+      },
+    }));
     await wait(200);
     part('text', '这一步要动两个文件：');
     for (const piece of ['先 `read` 那份笔记，', '再跑一条命令数一遍行数。']) {

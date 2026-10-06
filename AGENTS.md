@@ -222,6 +222,8 @@ npm run build-rg    downloads the pinned ripgrep into packages/rg-*
 - Waiting for that round is not inheriting its failure. A cancelled or broken round already left its facts in the record; the release path drops its rejection instead of reporting a release failure.
 - Closing the last session of a loaded project drops that project environment; the next session of the same root loads the layers again. The project the Host launched on stays.
 - An approval for a command line carries the shell kind and the executable (D67), and a call with no command text carries neither. That keeps the request the same shape on both carriers.
+- An approval belongs to the session that asked, not to the one an interface is showing. A round that waits on an unanswered approval keeps waiting when the person opens another session, so switching shows that ask and answering it reaches its own round by request id (D16).
+- A round that ends — answered through or cancelled — settles only its own session's approvals. Replacing the Host process settles every one of them.
 
 ## Terminal client
 
