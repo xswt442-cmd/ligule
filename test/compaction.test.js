@@ -215,7 +215,10 @@ test('the next compaction starts at the kept boundary and feeds the previous sum
     assert.equal(second.checkpoint.fromSeq, first.checkpoint.fromSeq, 'the merged range still starts at the old boundary');
     assert.ok(second.checkpoint.toSeq > first.checkpoint.toSeq, 'the second compaction covers further into the log');
     const excerpt = provider.seen.filter((request) => String(request.messages?.[0]?.text ?? '').startsWith('Write a summary')).at(-1);
-    assert.match(String(excerpt.messages[0].text), /Earlier summary:\nSUMMARY/, 'the previous summary is part of the input');
+    const instruction = String(excerpt.messages[0].text);
+    assert.match(instruction, /Earlier summary:\nSUMMARY/, 'the previous summary is part of the input');
+    assert.match(instruction, /the language the conversation is written in/, '摘要正文跟着这份转录的语言写');
+    assert.match(instruction, /exactly as it appeared/, '路径、命令与标识符留原文');
   });
 });
 

@@ -49,7 +49,8 @@ function flatten(events: SessionEvent[]): string {
 }
 
 const INSTRUCTION = 'Write a summary of the transcript excerpt below so a later agent can continue the work. '
-  + 'Keep every path, command, identifier, decision, still-open question and tool outcome that matters. Plain prose, no preamble.\n\n';
+  + 'Keep every decision, still-open question, tool outcome, path, command, code fragment and identifier that matters; write each of them exactly as it appeared. '
+  + 'Write the prose in the language the conversation is written in, or the language it asks for. Plain prose, no preamble.\n\n';
 
 // 摘要那一次的输入本身也可能长过窗口：过长的话留后段（近处的事更要紧），前段丢掉的部位留一句话。
 // 上一次的摘要不在这段里截：第二次压缩要把它当输入带进去，截掉了就等于把边界之前的事整段丢了。
