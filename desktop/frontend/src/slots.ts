@@ -13,8 +13,7 @@ export type Panel<P> = {
 
 export type Slot = { name: string; accepts: (payload: unknown) => boolean };
 
-export const isPanel = (payload: unknown): boolean => {
-  const value = payload as { id?: unknown; title?: unknown; view?: unknown };
+export const isPanel = (payload: unknown): boolean => {  const value = payload as { id?: unknown; title?: unknown; view?: unknown };
   return typeof value?.id === 'string' && typeof value?.title === 'string' && typeof value?.view === 'function';
 };
 

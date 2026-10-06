@@ -22,7 +22,7 @@ export function Palette({ commands, onClose }: { commands: Command[]; onClose: (
     <input
       autoFocus
       value={filter}
-      placeholder="要做的命令（↑↓ 选，Enter 落，Esc 收）"
+      placeholder="挑一条命令（↑↓ 选，Enter 执行，Esc 收起）"
       aria-label="命令过滤"
       onChange={(event) => {
         setFilter(event.target.value);
