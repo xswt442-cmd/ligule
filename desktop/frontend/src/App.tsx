@@ -10,7 +10,7 @@ import { Palette, type Command } from './components/Palette';
 import { hotkeyOf } from './hotkeys';
 import type { Verbosity } from './components/types';
 import { createSlotRegistry, SLOTS, type Panel } from './slots';
-import { capabilityOf, changeSummary, metaRow, projectRecord, type Record_, type Row } from './rows';
+import { capabilityOf, changeOf, metaRow, projectRecord, type Record_, type Row } from './rows';
 import type { Status } from './status';
 import { readSettings, writeSettings, type Settings } from './settings';
 
@@ -383,7 +383,7 @@ export function App({ transport }: { transport: Transport }) {
       const tool = params.tool ?? '';
       const args = params.args ?? {};
       // 画出来的那一句说的是哪个对象：命令文本、路径、目标地址，或者那一项 MCP 能力名（D67）。
-      const shown = params.command ?? args.path ?? args.url ?? capabilityOf(tool, args);
+      const detail = String(params.command ?? args.path ?? args.url ?? capabilityOf(tool, args));
       const content = tool === 'edit'
         ? `原内容：\n${String(args.anchor ?? '')}\n\n新内容：\n${String(args.replacement ?? '')}`
         : typeof args.content === 'string'
@@ -393,8 +393,8 @@ export function App({ transport }: { transport: Transport }) {
       setAsks((current) => [...current, {
         id: message.id ?? '',
         tool,
-        detail: shown === undefined || String(shown) === '' ? '' : String(shown),
-        change: changeSummary(tool, args),
+        detail,
+        change: changeOf(tool, args).summary,
         reason: params.reason ?? '',
         // 用哪一种语法判的、跑的是哪一个可执行文件：答的是这一条命令，看得见的该是这两样（D59）。
         backend: params.shell === undefined ? '' : `${params.shell} · ${params.executable ?? ''}`,

@@ -79,22 +79,23 @@ function payloadOf(result: Record_['result']): { text?: string; exitCode?: unkno
     : {};
 }
 
-// 写入类的参数里带着整份内容，那一整份不进摘要行：行数够了（D94）。
-export function changeSummary(tool: string, args: Record<string, unknown>): string {
+// 写入类那一句改动摘要与加减行数说的是同一件事：路径、换掉多少行、换上多少行。
+// 参数里没有路径就不编造一个：摘要行宁可空着，也不画 `?.md` 那种形状。
+export function changeOf(tool: string, args: Record<string, unknown>): { summary: string; diff?: { added: number; removed: number } } {
+  const path = typeof args.path === 'string' ? args.path : '';
   const lines = (value: unknown) => String(value ?? '').split('\n').length;
-  const path = String(args.path ?? '?');
-  if ((tool === 'write' || tool === 'create') && typeof args.content === 'string') return `${path}：${lines(args.content)} 行新内容`;
-  if (tool === 'edit' && typeof args.anchor === 'string') return `${path}：换掉 ${lines(args.anchor)} 行，换上 ${lines(args.replacement ?? '')} 行`;
-  if (tool === 'delete') return `把 ${path} 移进回收站`;
-  return '';
-}
-
-// 加减行数那一格：写入与新建只有「换上」，编辑两样都有。删掉的文件没有行数可说。
-function diffOf(tool: string, args: Record<string, unknown>): Row['diff'] {
-  const lines = (value: unknown) => String(value ?? '').split('\n').length;
-  if (tool === 'edit' && typeof args.anchor === 'string') return { removed: lines(args.anchor), added: lines(args.replacement ?? '') };
-  if ((tool === 'write' || tool === 'create') && typeof args.content === 'string') return { removed: 0, added: lines(args.content) };
-  return undefined;
+  if (path === '') return { summary: '' };
+  if ((tool === 'write' || tool === 'create') && typeof args.content === 'string') {
+    const added = lines(args.content);
+    return { summary: `${path}：${added} 行新内容`, diff: { added, removed: 0 } };
+  }
+  if (tool === 'edit' && typeof args.anchor === 'string') {
+    const added = lines(args.replacement ?? '');
+    const removed = lines(args.anchor);
+    return { summary: `${path}：换掉 ${removed} 行，换上 ${added} 行`, diff: { added, removed } };
+  }
+  if (tool === 'delete') return { summary: `把 ${path} 移进回收站` };
+  return { summary: '' };
 }
 
 // 一次调用对人说清它动的是哪个对象：命令文本、路径、地址、那一项 MCP 能力名，都没有就退回一行参数。
@@ -172,6 +173,7 @@ export function projectRecord(record: Record_, options: { startedAt?: number; no
     const kind = result.failed !== true ? 'result' : result.kind === 'refusal' ? 'refusal' : 'failure';
     const payload = payloadOf(result);
     const notes = toolNotes(record, result);
+    const change = changeOf(record.tool ?? '', record.args ?? {});
     if (options.startedAt !== undefined) notes.push(durationNote(options.startedAt, options.now ?? Date.now()));
     return [{
       id: nextId(),
@@ -181,8 +183,8 @@ export function projectRecord(record: Record_, options: { startedAt?: number; no
         : capabilityOf(record.tool, record.args),
       code: result.code,
       callId: record.callId,
-      summary: changeSummary(record.tool ?? '', record.args ?? {}),
-      diff: diffOf(record.tool ?? '', record.args ?? {}),
+      summary: change.summary,
+      diff: change.diff,
       notes,
       // 失败与未允许那一格带着说不出去的原因，正文读它，不读那层信封（D93）。
       text: typeof payload.text === 'string' ? payload.text : textOf(result.reason ?? result.content),
