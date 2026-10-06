@@ -7,7 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createElement } from 'react';
 import { render } from 'ink';
 import { App } from '../dist/tui/app.js';
-import { withTuiHost } from './helpers/tui-host.js';
+import { waitFor, withTuiHost } from './helpers/tui-host.js';
 
 async function withApp(context, run) {
   const stdout = Object.assign(new PassThrough(), { columns: 80, rows: 24, isTTY: true });
@@ -17,54 +17,48 @@ async function withApp(context, run) {
   const frame = () => (painted.split('\x1b[?2026h').at(-1) ?? '').replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
   const output = () => painted.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
   const instance = render(createElement(App, { client: context.client, sessionId: context.sessionId, stdout, info: { boundary: context.config.boundary } }), { stdout, stdin, patchConsole: false, exitOnCtrlC: false });
-  const waitFor = async (condition) => {
-    for (let count = 0; count < 100; count += 1) {
-      if (condition()) return;
-      await delay(30);
-    }
-    assert.fail(`condition did not arrive: ${frame()}`);
-  };
+  const wait = (condition) => waitFor(condition, { read: frame });
   const type = async (text) => { stdin.write(text); await delay(50); stdin.write('\r'); };
   try {
-    await waitFor(() => frame().includes('policy:ask'));
-    await run({ frame, output, stdin, type, waitFor, stdout });
+    await wait(() => frame().includes('policy:ask'));
+    await run({ frame, output, stdin, type, wait, stdout });
   } finally {
     instance.unmount();
   }
 }
 
 test('complete history opens in a bounded viewport and keyboard navigation reaches both ends', async () => {
-  await withTuiHost(async (context) => withApp(context, async ({ frame, output, stdin, type, waitFor }) => {
+  await withTuiHost(async (context) => withApp(context, async ({ frame, output, stdin, type, wait }) => {
     const text = Array.from({ length: 60 }, (_, index) => `历史行 ${index}`).join('\n');
     await type(text);
-    await waitFor(() => context.notifications.some((notice) => notice.event?.kind === 'assistant'));
+    await wait(() => context.notifications.some((notice) => notice.event?.kind === 'assistant'));
     await delay(80);
     stdin.write('\x0f');
-    await waitFor(() => frame().includes('会话完整历史'));
+    await wait(() => frame().includes('会话完整历史'));
     await delay(100);
     stdin.write('\x1b[H');
-    await waitFor(() => frame().includes('第 1/'));
+    await wait(() => frame().includes('第 1/'));
     assert.ok(frame().split('\n').length <= 24, '动态历史视图受终端高度约束');
     stdin.write('\x1b[6~');
-    await waitFor(() => !frame().includes('第 1/'));
+    await wait(() => !frame().includes('第 1/'));
     stdin.write('\x1b[F');
-    await waitFor(() => frame().includes('历史行 59'));
+    await wait(() => frame().includes('历史行 59'));
     stdin.write('\x1b');
-    await waitFor(() => !frame().includes('会话完整历史'));
+    await wait(() => !frame().includes('会话完整历史'));
   }));
 });
 
 test('an approval exposes its entire change through pages and Escape cancels without writing', async () => {
-  await withTuiHost(async (context) => withApp(context, async ({ frame, output, stdin, type, waitFor }) => {
+  await withTuiHost(async (context) => withApp(context, async ({ frame, output, stdin, type, wait }) => {
     const content = Array.from({ length: 40 }, (_, index) => `待审批内容 ${index}`).join('\n');
     await type(JSON.stringify({ tool: 'create', args: { path: 'approval.md', content } }));
-    await waitFor(() => frame().includes('要执行 create'));
+    await wait(() => frame().includes('要执行 create'));
     stdin.write('\x0f');
-    await waitFor(() => frame().includes('改动第 1/40 行'));
+    await wait(() => frame().includes('改动第 1/40 行'));
     stdin.write('\x1b[F');
-    await waitFor(() => frame().includes('待审批内容 39'));
+    await wait(() => frame().includes('待审批内容 39'));
     stdin.write('\x1b');
-    await waitFor(() => output().includes('这一轮已被打断'));
+    await wait(() => output().includes('这一轮已被打断'));
     await assert.rejects(access(join(context.config.boundary, 'approval.md')), (error) => error.code === 'ENOENT');
     assert.ok(context.requests.some((request) => request.method === 'run.cancel'));
   }));

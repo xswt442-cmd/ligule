@@ -25,8 +25,18 @@ function observeFrames(stream, visit) {
   });
 }
 
-export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {} } = {}) {
-  const testplace = resolve('testplace');
+// 等一个条件成立。固定毫秒的等待在负载高的机器上会先于渲染到期：检查会假红，
+// 靠画面决定下一步的写法还会把那一轮永远等下去。read 只在没等到时交出画面供报告用。
+export async function waitFor(condition, { within = 10_000, every = 30, read = () => '' } = {}) {
+  const deadline = Date.now() + within;
+  for (;;) {
+    if (condition()) return;
+    if (Date.now() >= deadline) throw new Error(`等的条件没有成立\n${read().slice(-1_500)}`);
+    await delay(every);
+  }
+}
+
+export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {} } = {}) {  const testplace = resolve('testplace');
   await mkdir(testplace, { recursive: true });
   const directory = await mkdtemp(join(testplace, 'tui-host-'));
   const absoluteDirectory = resolve(directory);

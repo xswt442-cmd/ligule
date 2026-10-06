@@ -6,7 +6,7 @@ import { appendFile, cp, mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { withTuiHost } from './helpers/tui-host.js';
+import { waitFor, withTuiHost } from './helpers/tui-host.js';
 import { HISTORY_LIMIT, SEARCH_ROWS, historyPathOf, loadHistory, pushHistory, rememberHistory, searchHistory } from '../dist/tui/history.js';
 
 let rows = {};
@@ -109,7 +109,7 @@ test('long content folds to a few lines and counts what is hidden', options, () 
   assert.equal(foldText({ text: 'a body' }, false).shown.includes('[object Object]'), false);
 });
 
-test('the app paints the session line and the input hint onto the terminal', options, async () => withTuiHost(async ({ client, sessionId }) => {
+test('the app paints the session line and the input hint onto the terminal', options, async () => withTuiHost(async ({ client, sessionId, requests }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
   const { PassThrough } = await import('node:stream');
@@ -129,8 +129,11 @@ test('the app paints the session line and the input hint onto the terminal', opt
     createElement(App, { client, sessionId, info: { model: 'test-model' }, interactive: false }),
     { stdout, stdin, exitOnCtrlC: false, patchConsole: false },
   );
-  await delay(200);
+  // 非交互那一具渲染只在收掉时写一次，所以状态要先落定：等界面自己那一次 `status.get` 到宿主，再收。
+  await waitFor(() => requests.some((request) => request.method === 'status.get'), { read: () => painted });
+  await delay(300);
   instance.unmount();
+  await waitFor(() => /mode:minimal  policy:ask/.test(painted), { read: () => painted });
 
   assert.match(painted, new RegExp(`test-model · 会话 ${sessionId.slice(0, 8)}`));
   assert.match(painted, new RegExp(`mode:minimal  policy:ask .*tools:${status.tools.length}`));
@@ -204,12 +207,9 @@ test('the approval box names the shell backend and its executable', options, asy
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
   const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
   try {
-    await delay(200);
     const run = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command: 'node --version | node --version' } }) });
-    await delay(350);
-    assert.match(painted, /要执行 exec/);
-    assert.match(painted, /node --version \| node --version/);
-    assert.match(painted, /后端 (powershell|bash) · /);
+    // 答复要在询问画出来之后给：那一句 'n' 早到一步就落进草稿，这一轮就没人结束了。
+    await waitFor(() => /后端 (powershell|bash) · /.test(painted), { read: () => painted });
     stdin.write('n');
     await run;
   } finally {
@@ -288,18 +288,14 @@ test('typing a template command completes it and expands through the host', opti
 
   const instance = render(createElement(App, { client, sessionId, info: { boundary: projectDirectory }, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
   try {
-    await delay(300);
     stdin.write('/gi');
-    await delay(200);
-    assert.match(plainOutput(painted), /git:release:prepare/, '清单里看得见宿主交出来的那一条');
+    await waitFor(() => /git:release:prepare/.test(plainOutput(painted)), { read: () => plainOutput(painted) });
     stdin.write('\t');
-    await delay(200);
-    assert.match(plainOutput(painted), /› \/git:release:prepare/, 'Tab 把名字补全了');
+    await waitFor(() => /› \/git:release:prepare/.test(plainOutput(painted)), { read: () => plainOutput(painted) });
     stdin.write('3');
     await delay(200);
     stdin.write('\r');
-    await delay(300);
-    assert.ok(providerRequests.some((request) => request.messages.some((message) => message.role === 'user' && message.content === 'Prepare release 3.\n')), '宿主从磁盘模板展开原始调用');
+    await waitFor(() => providerRequests.some((request) => request.messages.some((message) => message.role === 'user' && message.content === 'Prepare release 3.\n')), { read: () => plainOutput(painted) });
   } finally {
     // 断言失败也要收掉这一具渲染：没 unmount 的 Ink 会留着输入与计时器把测试进程拖住。
     instance.unmount();
@@ -378,11 +374,10 @@ test('an answer with markdown shapes paints a heading, a list and highlighted co
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
   const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
   try {
-    await delay(200);
     stdin.write('请原样保留这些内容：\n## 两步\n- 先看\n```js\nconst a = 1\n```\n退出码那行是 **0**');
     await delay(80);
     stdin.write('\r');
-    await delay(200);
+    await waitFor(() => /\x1B\[35mconst\x1B\[39m/.test(painted), { read: () => painted });
   } finally {
     instance.unmount();
   }
@@ -425,23 +420,21 @@ test('input typed while a round runs queues up and flushes in order', options, a
   // 只看最后一帧：Ink 把每一帧续写在同一个流里，取尾巴会连上一帧的内容一起读。
   const lastFrame = () => painted.split('\x1B[?2026h').pop();
   try {
-    await delay(250);
+    await waitFor(() => painted.includes('要模型做的事'), { read: () => painted });
     await type('第一条');
     const started = () => requests.filter((request) => request.method === 'run.start').map((request) => request.params.input);
+    await waitFor(() => started().length === 1, { read: () => painted });
     assert.deepEqual(started(), ['第一条'], '第一句直接进这一轮');
     await type('第二条');
     await type('第三条');
+    await waitFor(() => /排队 2 · 第三条/.test(lastFrame()), { read: () => lastFrame() });
     assert.deepEqual(started(), ['第一条'], '跑着的时候不再开第二轮');
-    assert.match(lastFrame(), /排队 1 · 第二条/);
-    assert.match(lastFrame(), /排队 2 · 第三条/);
 
     // 草稿空着时按退格：最后排进来的那一条回到草稿，队列少一条。
     stdin.write('\x7f');
-    await delay(200);
-    assert.match(lastFrame(), /第三条/, '收回来的那一句在草稿里');
-    assert.equal((lastFrame().match(/排队 \d/g) ?? []).length, 1, '队列里少了一条');
+    await waitFor(() => /第三条/.test(lastFrame()) && (lastFrame().match(/排队 \d/g) ?? []).length === 1, { read: () => lastFrame() });
 
-    await delay(3_800);
+    await waitFor(() => started().length === 2, { within: 20_000, read: () => painted });
     assert.deepEqual(started(), ['第一条', '第二条'], '本轮结束后按先后接上');
   } finally {
     // 断言失败也要收掉这一具渲染：没 unmount 的 Ink 会留着输入与计时器把测试进程拖住。
@@ -515,23 +508,22 @@ test('resuming a session repaints that record as the transcript', options, async
   await client.request('run.start', { sessionId: resumed, input: '那一份里问过的事' });
   const instance = render(createElement(App, { client, sessionId, info: { boundary: projectDirectory }, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
   try {
-    await delay(300);
     await client.request('run.start', { sessionId, input: '当前这一份里问过的事' });
-    await delay(300);
+    await waitFor(() => painted.includes('当前这一份里问过的事'), { read: () => painted });
 
     stdin.write('/sessions');
     await delay(100);
     stdin.write('\r');
-    await delay(300);
-    assert.match(painted, new RegExp(resumed), '列表里看得见那一份的 id');
+    await waitFor(() => painted.includes(resumed), { read: () => painted });
     assert.doesNotMatch(painted, /项目根下还没有跑过的会话/);
 
     const beforeResume = painted.length;
     stdin.write(`/resume ${resumed.slice(0, 8)}`);
     await delay(100);
     stdin.write('\r');
-    await delay(500);
-    const frame = plainOutput(painted.slice(beforeResume));
+    const shown = () => plainOutput(painted.slice(beforeResume));
+    await waitFor(() => shown().includes('Local response: 那一份里问过的事'), { read: shown });
+    const frame = shown();
     assert.equal(requests.find((request) => request.method === 'session.open')?.params.sessionId, resumed, '前缀在宿主列出来的那几份里对上了才打开');
     assert.match(frame, /Local response: 那一份里问过的事/, '接上来的那一份记录整份重画在画面上');
     assert.doesNotMatch(frame, /当前这一份里答过的话/, '换过来之后画面上不再是上一份的投影');
@@ -598,33 +590,27 @@ test('the arrow keys recall the last sentence and Ctrl+R searches the history', 
     stdout,
     history: { entries: ['改 note.txt 的第一行', '上一次会话里说过的话'], remember: async (text) => { remembered.push(text); } },
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
+  const lastFrame = () => plainOutput(painted.split('\x1B[?2026h').pop() ?? '');
   try {
-    await delay(300);
     stdin.write('把这条记进历史');
     await delay(100);
     stdin.write('\r');
-    await delay(400);
+    await waitFor(() => remembered.length === 1, { read: () => painted });
     assert.deepEqual(requests.filter((request) => request.method === 'run.start').map((request) => request.params.input), ['把这条记进历史']);
     assert.deepEqual(remembered, ['把这条记进历史'], '发出去的那一句才交给那一份文件');
 
     // 上下键往上翻：第一条就是刚发出去的那一句，因为它排到了历史最前面。
     stdin.write('\x1B[A');
-    await delay(300);
-    assert.match(plainOutput(painted.split('\x1B[?2026h').pop() ?? ''), /把这条记进历史/, '翻到的那一句回到草稿里');
+    await waitFor(() => lastFrame().includes('把这条记进历史'), { read: lastFrame });
 
     stdin.write('\x12');
     await delay(200);
     stdin.write('note');
-    await delay(300);
-    const searching = painted.split('\x1B[?2026h').pop() ?? '';
-    assert.match(plainOutput(searching), /反查 note/);
-    assert.match(plainOutput(searching), /改 note\.txt 的第一行/, '含这一段的那一条列在框里');
+    await waitFor(() => lastFrame().includes('反查 note') && lastFrame().includes('改 note.txt 的第一行'), { read: lastFrame });
 
     stdin.write('\r');
-    await delay(300);
-    const picked = painted.split('\x1B[?2026h').pop() ?? '';
-    assert.match(plainOutput(picked), /› 改 note\.txt 的第一行/, 'Enter 把选中的那一条填进草稿');
-    assert.doesNotMatch(plainOutput(picked), /反查 note/, '选完就退出反查');
+    await waitFor(() => lastFrame().includes('› 改 note.txt 的第一行'), { read: lastFrame });
+    assert.doesNotMatch(lastFrame(), /反查 note/, '选完就退出反查');
     assert.equal(requests.filter((request) => request.method === 'run.start').length, 1, '反查本身不发任何东西');
   } finally {
     instance.unmount();
@@ -650,13 +636,14 @@ test('Ctrl+G hands the draft to the editor and reads back what it wrote', option
   const instance = render(createElement(App, {
     client, sessionId, info: { editor }, interactive: true, stdout,
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
+  const lastFrame = () => painted.split('\x1B[?2026h').pop() ?? '';
   try {
-    await delay(300);
     stdin.write('草稿里的一半');
     await delay(200);
     stdin.write('\x07');
-    await delay(1_500);
-    const frame = painted.split('\x1B[?2026h').pop() ?? '';
+    // 编辑器是一个真子进程：等它写回的那一份回到草稿最上面那一帧，再判这一帧。
+    await waitFor(() => /草稿里的一半 edited/.test(lastFrame()), { read: lastFrame });
+    const frame = lastFrame();
     assert.match(frame, /草稿里的一半 edited/, '编辑器写回的那一份回到草稿里');
     assert.doesNotMatch(frame, /编辑没成/);
   } finally {
@@ -680,10 +667,8 @@ test('Ctrl+G says the editor is not configured instead of guessing one', options
 
   const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true, stdout }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
   try {
-    await delay(300);
     stdin.write('\x07');
-    await delay(400);
-    assert.match(painted, /没有 EDITOR 这一格/, '缺的是那一个环境变量，不是猜一个能用的程序');
+    await waitFor(() => /没有 EDITOR 这一格/.test(painted), { read: () => painted });
   } finally {
     instance.unmount();
   }
