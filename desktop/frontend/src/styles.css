@@ -14,6 +14,7 @@
   --warn: #e0a34a;
   --bad: #e0655c;
   --radius: 8px;
+  --font-size: 14px;
   --sidebar: 280px;
   --dock: 420px;
   --mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", monospace;
@@ -32,19 +33,64 @@ body {
 body {
   background: var(--bg);
   color: var(--fg);
-  font: 14px/1.6 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+  font: var(--font-size)/1.6 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
   overflow: hidden;
 }
 
 .frame {
-  display: grid;
-  grid-template-columns: var(--sidebar) minmax(400px, 1fr) auto;
+  display: flex;
   height: 100vh;
+}
+
+/* 侧栏可拖 264–420；收起时那两格都不占位；面板可以停到左边（D90）。 */
+.frame[data-collapsed="true"] .sidebar,
+.frame[data-collapsed="true"] .splitter {
+  display: none;
+}
+
+.frame[data-dock="left"] .dock {
+  order: -1;
+  border-inline-start: 0;
+  border-inline-end: 1px solid var(--line);
+}
+
+.splitter {
+  flex: 0 0 5px;
+  cursor: col-resize;
+  background: var(--line);
+  touch-action: none;
+}
+
+.splitter:hover,
+.splitter:active {
+  background: var(--accent);
+}
+
+:root[data-font="small"] {
+  --font-size: 12.5px;
+  font-size: 15px;
+}
+
+:root[data-font="large"] {
+  --font-size: 16px;
+  font-size: 17px;
+}
+
+/* 浅色那一套只改这几枚颜色变量：几何、组件与状态色都不动。 */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4f4f2;
+  --bg-raised: #ffffff;
+  --bg-sunk: #e9e9e6;
+  --fg: #1b1d21;
+  --fg-muted: #61656e;
+  --line: #d6d7d3;
 }
 
 /* ---------- 侧栏 ---------- */
 
 .sidebar {
+  flex: 0 0 var(--sidebar);
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
@@ -218,9 +264,10 @@ body {
 /* ---------- 中栏 ---------- */
 
 .center {
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
-  min-width: 0;
+  min-width: 400px;
   min-height: 0;
 }
 
@@ -567,6 +614,7 @@ button.primary {
 /* ---------- 右侧面板与菜单 ---------- */
 
 .dock {
+  flex: 0 0 var(--dock);
   display: flex;
   flex-direction: column;
   inline-size: var(--dock);
@@ -831,10 +879,6 @@ button.primary {
 
 /* ---------- 命令面板与键盘层（D92）---------- */
 
-.frame[data-collapsed="true"] .sidebar {
-  display: none;
-}
-
 .palette {
   position: fixed;
   inset-block-start: 12vh;
@@ -899,4 +943,25 @@ button.primary {
   padding: 0.5rem;
   color: var(--fg-muted);
   font-size: 0.82rem;
+}
+
+/* ---------- 外观那一格面板里的控件（D90）---------- */
+
+.dock-body label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-block: 0.55rem;
+  color: var(--fg-muted);
+  font-size: 0.82rem;
+}
+
+.dock-body select,
+.dock-body input[type="range"] {
+  padding: 0.25rem 0.4rem;
+  color: var(--fg);
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font: inherit;
 }

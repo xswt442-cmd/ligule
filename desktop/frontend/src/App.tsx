@@ -10,6 +10,7 @@ import type { Verbosity } from './components/types';
 import { createSlotRegistry, SLOTS, type Panel } from './slots';
 import { capabilityOf, changeSummary, metaRow, projectRecord, type Record_, type Row } from './rows';
 import type { Status } from './status';
+import { readSettings, writeSettings, type Settings } from './settings';
 
 type Branch = { seq: number; id: string; task: string };
 
@@ -30,11 +31,10 @@ type PanelProps = {
   waiting: number;
   counts: { sent: number; received: number };
   openSession: (id: string) => void;
-  verbosity: Verbosity;
+  settings: Settings;
+  patch: (part: Partial<Settings>) => void;
 };
 
-const VERBOSITY_KEY = 'ligule.verbosity';
-const COLLAPSE_KEY = 'ligule.rail-collapsed';
 const HISTORY_KEY = 'ligule.input-history';
 const HISTORY_MAX = 50;
 
@@ -89,7 +89,7 @@ const menuPanels: Panel<PanelProps>[] = [
   {
     id: 'panel.branch',
     title: '派生支线',
-    view: ({ client, sessionId, verbosity }) => <BranchPanel client={client} sessionId={sessionId} verbosity={verbosity} />,
+    view: ({ client, sessionId, settings }) => <BranchPanel client={client} sessionId={sessionId} verbosity={settings.verbosity} />,
   },
 ];
 
@@ -103,9 +103,35 @@ const pendingPanels: Panel<PanelProps>[] = [
   },
   {
     id: 'panel.appearance',
-    title: '外观与主题',
-    pending: true,
-    view: () => <p className="stub">只有「工作步骤展示」那一档接上了，它在顶部工具条上。主题、字号与侧栏宽度还没有存起来的地方。</p>,
+    title: '外观与状态',
+    view: ({ patch: write, settings }) => <>
+      <h3>这些都存在这台机器的界面里，不进记录也不进配置文件（D90）</h3>
+      <label>主题
+        <select value={settings.theme} onChange={(event) => write({ theme: event.target.value as Settings['theme'] })}>
+          <option value="system">跟随系统</option>
+          <option value="dark">深色</option>
+          <option value="light">浅色</option>
+        </select>
+      </label>
+      <label>字号
+        <select value={settings.font} onChange={(event) => write({ font: event.target.value as Settings['font'] })}>
+          <option value="small">小</option>
+          <option value="medium">中</option>
+          <option value="large">大</option>
+        </select>
+      </label>
+      <label>侧栏宽度
+        <input type="range" min={264} max={420} step={4} value={settings.sidebar} onChange={(event) => write({ sidebar: Number(event.target.value) })} />
+        <span className="muted">{settings.sidebar} 像素，也可以拖那一根分隔线</span>
+      </label>
+      <label>面板停靠
+        <select value={settings.dock} onChange={(event) => write({ dock: event.target.value as Settings['dock'] })}>
+          <option value="right">右侧</option>
+          <option value="left">左侧</option>
+        </select>
+      </label>
+      <p className="stub">草稿与输入历史也留在本机：刷新之后那一句还在输入框里，空草稿上按 ↑ 能翻回来。</p>
+    </>,
   },
   {
     id: 'panel.model',
@@ -234,12 +260,14 @@ export function App({ transport }: { transport: Transport }) {
   const [asks, setAsks] = useState<Ask[]>([]);
   const [running, setRunning] = useState(false);
   const [status, setStatus] = useState<Status | null>(null);
-  const [draft, setDraft] = useState('');
+  const [draft, setDraft] = useState(() => readSettings().draft);
   const [menuOpen, setMenuOpen] = useState(false);
   const [panel, setPanel] = useState<Panel<PanelProps> | null>(null);
-  const [verbosity, setVerbosity] = useState<Verbosity>(() => (localStorage.getItem(VERBOSITY_KEY) as Verbosity) ?? 'standard');
-  const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSE_KEY) === 'true');
+  const [settings, setSettings] = useState(readSettings);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [reading, setReading] = useState(false);
+  const verbosity = settings.verbosity;
+  const collapsed = settings.collapsed;
   // 输入历史留在本机（D90）：-1 说的是当前那份草稿。
   const [history, setHistory] = useState(readHistory);
   const [walk, setWalk] = useState(-1);
@@ -310,12 +338,43 @@ export function App({ transport }: { transport: Transport }) {
   }, [sessionId]);
 
   useEffect(() => {
-    localStorage.setItem(VERBOSITY_KEY, verbosity);
-  }, [verbosity]);
+    writeSettings({ ...settings, draft });
+  }, [draft, settings]);
 
+  // 主题、字号与侧栏宽度落在根元素上：那一份 CSS 变量在 `:root` 那一格读（D90）。
   useEffect(() => {
-    localStorage.setItem(COLLAPSE_KEY, String(collapsed));
-  }, [collapsed]);
+    const root = document.documentElement;
+    const query = window.matchMedia('(prefers-color-scheme: dark)');
+    const light = settings.theme === 'light' || (settings.theme === 'system' && !query.matches);
+    root.dataset.theme = light ? 'light' : 'dark';
+    root.dataset.font = settings.font;
+    root.style.setProperty('--sidebar', `${settings.sidebar}px`);
+    if (settings.theme !== 'system') return;
+    const follow = (event: MediaQueryListEvent) => {
+      root.dataset.theme = event.matches ? 'dark' : 'light';
+    };
+    query.addEventListener('change', follow);
+    return () => query.removeEventListener('change', follow);
+  }, [settings.font, settings.sidebar, settings.theme]);
+
+  const patch = useCallback((part: Partial<Settings>) => {
+    setSettings((current) => ({ ...current, ...part }));
+  }, []);
+
+  // 拖那一条分隔线改侧栏宽度：范围与设置面板里那根滑杆是同一份（D90）。
+  const startDrag = useCallback((event: { clientX: number }) => {
+    const startX = event.clientX;
+    const startWidth = settings.sidebar;
+    const move = (moveEvent: PointerEvent) => {
+      patch({ sidebar: Math.min(420, Math.max(264, startWidth + moveEvent.clientX - startX)) });
+    };
+    const stop = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', stop);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', stop);
+  }, [patch, settings.sidebar]);
 
   useEffect(() => {
     client.onNotification((message) => {
@@ -412,13 +471,17 @@ export function App({ transport }: { transport: Transport }) {
     setLive({ text: '', reasoning: '' });
     setAsks([]);
     dispatchAt.current.clear();
+    setReading(true);
     try {
-      await client.call('session.open', { sessionId: id });
+      // 两条都带超时：那一边不回话时这一格要落到失败那一张脸，不能一直停在「在读那份记录…」。
+      await client.call('session.open', { sessionId: id }, 15_000);
       // fullResults 那一格是给界面读的：溢出文件里的整段正文这才到得了画面（记录本身不动）。
-      const { events } = await client.call('session.read', { sessionId: id, fullResults: true }) as { events: Record_[] };
+      const { events } = await client.call('session.read', { sessionId: id, fullResults: true }, 15_000) as { events: Record_[] };
       setRows(events.flatMap((record) => projectRecord(record)));
     } catch (error) {
       setRows((current) => [...current, metaRow('error', `那份会话接不上：${code(error)}`)]);
+    } finally {
+      setReading(false);
     }
     void refreshStatus(id);
   }, [client, refreshStatus]);
@@ -507,7 +570,7 @@ export function App({ transport }: { transport: Transport }) {
     { id: 'session.read', title: '读回这一份记录', note: 'session.read', run: () => void readBack() },
     { id: 'run.cancel', title: '取消这一轮', note: 'run.cancel', run: () => void cancel() },
     { id: 'session.compact', title: '手动压缩上下文', note: 'session.compact', run: () => void compact() },
-    { id: 'rail.toggle', title: collapsed ? '展开左侧栏' : '收起左侧栏', note: 'Ctrl+B', run: () => setCollapsed((value) => !value) },
+    { id: 'rail.toggle', title: collapsed ? '展开左侧栏' : '收起左侧栏', note: 'Ctrl+B', run: () => patch({ collapsed: !collapsed }) },
     { id: 'answer.copy', title: '复制最后那条回答', note: 'Ctrl+Shift+C', run: copyLastAnswer },
     ...(status?.templates ?? []).map((item) => ({
       id: `prompt:${item.command}`,
@@ -519,7 +582,7 @@ export function App({ transport }: { transport: Transport }) {
         composerRef.current?.focus();
       },
     })),
-  ], [cancel, collapsed, copyLastAnswer, compact, newSession, readBack, status]);
+  ], [cancel, collapsed, copyLastAnswer, compact, newSession, patch, readBack, status]);
 
   const answer = useCallback((decision: 'allow' | 'deny') => {
     const [head, ...rest] = asks;
@@ -536,7 +599,7 @@ export function App({ transport }: { transport: Transport }) {
       if (hot !== null) {
         event.preventDefault();
         if (hot === 'palette') setPaletteOpen((open) => !open);
-        else if (hot === 'sidebar') setCollapsed((value) => !value);
+        else if (hot === 'sidebar') patch({ collapsed: !collapsed });
         else copyLastAnswer();
         return;
       }
@@ -548,7 +611,7 @@ export function App({ transport }: { transport: Transport }) {
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [cancel, copyLastAnswer, menuOpen, panel, paletteOpen, running]);
+  }, [cancel, collapsed, copyLastAnswer, menuOpen, panel, paletteOpen, patch, running]);
 
   const panelProps: PanelProps = {
     client,
@@ -559,11 +622,12 @@ export function App({ transport }: { transport: Transport }) {
     waiting: client.waiting(),
     counts: client.counts(),
     openSession,
-    verbosity,
+    settings,
+    patch,
   };
   const hidden = Math.max(0, rows.length - limit);
 
-  return <div className="frame" data-collapsed={collapsed ? 'true' : undefined}>
+  return <div className="frame" data-collapsed={collapsed ? 'true' : undefined} data-dock={settings.dock}>
     <aside className="sidebar">
       <div className="brand"><img src="/icon.png" alt="" width="22" height="22" /><span>ligule</span></div>
       <button className="new-run" type="button" onClick={() => void newSession()}>新建会话</button>
@@ -575,6 +639,7 @@ export function App({ transport }: { transport: Transport }) {
         </button>
       </div>
     </aside>
+    <div className="splitter" role="separator" aria-orientation="vertical" aria-label="侧栏宽度" onPointerDown={startDrag} />
 
     <main className="center">
       <header className="topbar">
@@ -585,7 +650,7 @@ export function App({ transport }: { transport: Transport }) {
         <div className="pills">{registry.list('header.status').map((item) => <span key={item.id}>{item.view(panelProps)}</span>)}</div>
         <label className="verbosity">
           <span>工作步骤展示</span>
-          <select value={verbosity} onChange={(event) => setVerbosity(event.target.value as Verbosity)}>
+          <select value={verbosity} onChange={(event) => patch({ verbosity: event.target.value as Verbosity })}>
             <option value="brief">简洁</option>
             <option value="standard">标准</option>
             <option value="detailed">详细</option>
@@ -610,7 +675,8 @@ export function App({ transport }: { transport: Transport }) {
       </header>
 
       <div className="conversation" data-verbosity={verbosity} aria-live="polite" ref={scroller} onScroll={onScroll}>
-        {rows.length === 0 && live.text === '' && <p className="empty">还没有轮次。下方输入一句话，Enter 直接开始。</p>}
+        {reading && <p className="empty">在读那份记录…</p>}
+        {!reading && rows.length === 0 && live.text === '' && <p className="empty">还没有轮次。下方输入一句话，Enter 直接开始。</p>}
         {hidden > 0 && <button type="button" className="earlier" onClick={() => setLimit((n) => n + RENDER_WINDOW)}>显示更早的 {hidden} 行</button>}
         {rows.slice(hidden).map((row) => <RowView key={row.id} row={row} verbosity={verbosity} />)}
         {/* 流式那半截排在已落盘的那些行之后：它是这一轮的末尾，画到开头去就把因果倒过来了。 */}
