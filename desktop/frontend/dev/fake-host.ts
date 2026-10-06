@@ -147,6 +147,39 @@ function fillSpills(events: Record<string, unknown>[]): Record<string, unknown>[
   });
 }
 
+// 命中那一格的算法与宿主同形：一段一段找，摘录取真正对上那一段，不把两段接成一句假话（实现顺序第 76 步）。
+// 指名一份就读得深一层：溢出文件里那一段整段正文也搜（方案 4.2 的完整工具结果，实现顺序第 78 步）。
+function hitsOf(item: (typeof sessions)[number], needle: string, deep: boolean): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  for (const event of eventsOf(item.id)) {
+    const texts = event.kind === 'user' || event.kind === 'assistant' || event.kind === 'reasoning'
+      ? [String(event.text ?? '')]
+      : event.kind === 'tool'
+        ? [JSON.stringify(event.args ?? {}), String((event.result as { content?: { text?: string } })?.content?.text ?? '')]
+        : [];
+    const spilled = (event.result as { spilled?: string } | undefined)?.spilled;
+    if (deep && spilled !== undefined) texts.push(String((spills[spilled] as { text?: string } | undefined)?.text ?? ''));
+    const matched = texts.map((raw) => raw.replace(/\s+/g, ' ')).find((text) => text.toLocaleLowerCase().includes(needle));
+    if (matched === undefined) continue;
+    const at = matched.toLocaleLowerCase().indexOf(needle);
+    const tail = at + needle.length + 44;
+    out.push({
+      sessionId: item.id,
+      name: item.name,
+      seq: event.seq,
+      kind: event.kind,
+      text: `${at > 0 ? '…' : ''}${matched.slice(Math.max(0, at - 16), tail).trim()}${tail < matched.length ? '…' : ''}`,
+      ...(spilled === undefined ? {} : { spilled }),
+    });
+    if (!deep && out.length === 3) break;
+  }
+  // 名字那一格也搜得到：它写在 `label` 那一条上，不画在转录里，落到那一条时要说清（实现顺序第 75、77 步）。
+  if ((deep || out.length < 3) && String(item.name).toLocaleLowerCase().includes(needle)) {
+    out.push({ sessionId: item.id, name: item.name, seq: item.events - 1, kind: 'label', text: String(item.name) });
+  }
+  return out;
+}
+
 export function createFakeHost(options: { events?: number } = {}): Transport & {
   pushEvent: (event: Record<string, unknown>) => void;
   stopReplies: (on: boolean) => void;
@@ -221,38 +254,11 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
         const needle = String(params.query ?? '').trim().toLocaleLowerCase();
         // 空白的查询在每一份记录里都能对上，宿主那一条在扫之前就拒掉（实现顺序第 76 步）。
         if (needle === '') return fail('search_query_empty', 'a search query has to say what to look for');
-        const found: Record<string, unknown>[] = [];
-        for (const item of sessions) {
-          let inThisRecord = 0;
-          for (const event of eventsOf(item.id)) {
-            if (inThisRecord === 3) break;
-            const texts = event.kind === 'user' || event.kind === 'assistant' || event.kind === 'reasoning'
-              ? [String(event.text ?? '')]
-              : event.kind === 'tool'
-                ? [JSON.stringify(event.args ?? {}), String((event.result as { content?: { text?: string } })?.content?.text ?? '')]
-                : [];
-            // 与宿主同一套：一段一段找，摘录取真正对上那一段，不把两段接成一句假话。
-            const hit = texts.map((raw) => raw.replace(/\s+/g, ' ')).find((text) => text.toLocaleLowerCase().includes(needle));
-            if (hit === undefined) continue;
-            const at = hit.toLocaleLowerCase().indexOf(needle);
-            const tail = at + needle.length + 44;
-            inThisRecord += 1;
-            found.push({
-              sessionId: item.id,
-              name: item.name,
-              seq: event.seq,
-              kind: event.kind,
-              text: `${at > 0 ? '…' : ''}${hit.slice(Math.max(0, at - 16), tail).trim()}${tail < hit.length ? '…' : ''}`,
-              ...(((event.result as { spilled?: string } | undefined)?.spilled ?? '') !== '' ? { spilled: (event.result as { spilled?: string }).spilled } : {}),
-            });
-            if (found.length === 50) return reply({ hits: found });
-          }
-          // 名字那一格也搜得到，命中带的是那一条 `label` 的序号——它不画在转录里，跳到那一条要说清（实现顺序第 75、77 步）。
-          if (inThisRecord < 3 && String(item.name).toLocaleLowerCase().includes(needle)) {
-            found.push({ sessionId: item.id, name: item.name, seq: item.events - 1, kind: 'label', text: String(item.name) });
-            if (found.length === 50) return reply({ hits: found });
-          }
-        }
+        const scoped = typeof params.sessionId === 'string' ? params.sessionId : undefined;
+        const found = sessions
+          .filter((item) => (scoped === undefined ? !item.id.includes('.sub-') : item.id === scoped))
+          .flatMap((item) => hitsOf(item, needle, scoped !== undefined))
+          .slice(0, 50);
         return reply({ hits: found });
       }
       case 'status.get':

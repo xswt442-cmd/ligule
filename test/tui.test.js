@@ -578,6 +578,9 @@ test('finding a phrase shows which session each hit is in', options, async () =>
     await waitFor(() => shown().includes(other.slice(0, 8)), { read: shown });
     assert.ok(requests.some((request) => request.method === 'sessions.search' && request.params.query === '问过'
       && request.params.projectRoot === projectDirectory), '查的是这一个项目根跑过的那几份记录');
+    assert.ok(requests.some((request) => request.method === 'sessions.search' && request.params.sessionId === sessionId),
+      '当前这一份另问一次，指名之后连溢出在文件里的那一段一起读');
+    assert.match(shown(), /其他会话：/, '两组分开说：这一份与其他');
     assert.match(shown(), /问 第 \d+ 条  另一份里问过的事/, '那一行说出种类、序号与命中那一段');
 
     const empty = painted.length;

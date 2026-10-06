@@ -55,6 +55,8 @@ export function SessionRail({ client, current, onOpen, onOpenHit }: {
   const [note, setNote] = useState('');
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState('');
+  // 只看这一份：那一段文字只在这一次打开的会话里找，并且读得深一层——溢出文件里的整段正文也进来（方案 4.2）。
+  const [only, setOnly] = useState(false);
   // `hits` 是 null 就是没在查，那一栏画的仍是要找的会话列表。
   const [hits, setHits] = useState<SearchHit[] | null>(null);
   const [searchNote, setSearchNote] = useState('');
@@ -84,12 +86,15 @@ export function SessionRail({ client, current, onOpen, onOpenHit }: {
   const search = useCallback(async (needle: string) => {
     setSearchNote('');
     try {
-      setHits((await client.call('sessions.search', { query: needle }, 15_000) as { hits: SearchHit[] }).hits);
+      // 只看这一份就指名那一份记录：宿主于是连溢出文件里的那一段一起读（实现顺序第 78 步）。
+      const scoped = only && current !== null && current !== '';
+      const found = await client.call('sessions.search', { query: needle, ...(scoped ? { sessionId: current } : {}) }, 15_000) as { hits: SearchHit[] };
+      setHits(found.hits);
     } catch (error) {
       setHits([]);
       setSearchNote(`查不了：${code(error)}`);
     }
-  }, [client]);
+  }, [client, current, only]);
 
   useEffect(() => {
     void load();
@@ -108,25 +113,37 @@ export function SessionRail({ client, current, onOpen, onOpenHit }: {
   }, [query, search]);
 
   return <div className="sessions">
-    <label className="rail-search">
-      <Icon name="search" size={13} />
-      <input
-        type="search"
-        value={query}
-        placeholder="在这些会话的记录里找"
-        aria-label="在这些会话的记录里找一段文字"
-        onChange={(event) => setQuery(event.target.value)}
-        onKeyDown={(event) => {
-          // Enter 不等那 300 毫秒：查不动之后这也是那一个重试的把手。
-          if (event.key !== 'Enter' || query.trim() === '') return;
-          event.preventDefault();
-          void search(query.trim());
-        }}
-      />
-      {query !== '' && <button type="button" className="search-clear" aria-label="清空查找" onClick={() => setQuery('')}><Icon name="close" size={12} /></button>}
-    </label>
+    <div className="rail-find">
+      <label className="rail-search">
+        <Icon name="search" size={13} />
+        <input
+          type="search"
+          value={query}
+          placeholder={only ? '在这份会话的记录里找' : '在这些会话的记录里找'}
+          aria-label={only ? '只在当前这一份会话的记录里找一段文字' : '在项目根跑过的会话记录里找一段文字'}
+          onChange={(event) => setQuery(event.target.value)}
+          onKeyDown={(event) => {
+            // Enter 不等那 300 毫秒：查不动之后这也是那一个重试的把手。
+            if (event.key !== 'Enter' || query.trim() === '') return;
+            event.preventDefault();
+            void search(query.trim());
+          }}
+        />
+        {query !== '' && <button type="button" className="search-clear" aria-label="清空查找" onClick={() => setQuery('')}><Icon name="close" size={12} /></button>}
+      </label>
+      <button
+        type="button"
+        className={`rail-scope${only ? ' on' : ''}`}
+        aria-pressed={only}
+        disabled={current === null}
+        title="只在这一次打开的会话里找：那一次结果溢出在文件里的整段正文也搜进来"
+        onClick={() => setOnly((on) => !on)}
+      >只看这一份</button>
+    </div>
     {hits !== null && searchNote !== '' && <div className="session-note">{searchNote}</div>}
-    {hits !== null && hits.length === 0 && searchNote === '' && <div className="session-note">这些会话的记录里没找到「{query.trim()}」。</div>}
+    {hits !== null && hits.length === 0 && searchNote === '' && (
+      <div className="session-note">{only ? `这一份会话的记录里没找到「${query.trim()}」。` : `这些会话的记录里没找到「${query.trim()}」。`}</div>
+    )}
     {hits?.map((hit) => <button
       key={`${hit.sessionId}:${hit.seq}`}
       type="button"

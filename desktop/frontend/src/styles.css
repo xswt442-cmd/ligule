@@ -1452,16 +1452,51 @@ button.mini.chip b {
 
 /* ---------- 左侧栏的查找（第 77 步，方案 4.2）---------- */
 
-.rail-search {
+.rail-find {
   display: flex;
   align-items: center;
   gap: var(--space-2);
   margin-bottom: var(--space-2);
+}
+
+.rail-search {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-2);
   padding: var(--space-1) var(--space-2);
   color: var(--fg-muted);
   background: var(--bg-sunk);
   border: 1px solid var(--line);
   border-radius: var(--radius);
+}
+
+/* 只看这一份那一枚按下去换了说法：读的那一格从「这些会话」变成「这一份」，深一层读的是溢出文件里那一段。 */
+.rail-scope {
+  flex: none;
+  padding: var(--space-1) var(--space-2);
+  color: var(--fg-muted);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font: inherit;
+  font-size: var(--text-xs);
+}
+
+.rail-scope:hover:not(:disabled) {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
+.rail-scope.on {
+  color: var(--fg);
+  background: var(--bg-raised);
+  border-color: var(--accent);
+}
+
+.rail-scope:disabled {
+  opacity: 0.5;
 }
 
 .rail-search:focus-within {

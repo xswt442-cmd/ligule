@@ -505,14 +505,23 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       }
       void (async () => {
         // 查的也是宿主扫的那一份记录目录，界面不开盘（D81 边界一）；交回的是「哪一份会话的第几条」（方案 4.2）。
-        const found = await client.request('sessions.search', { query: wanted, projectRoot: info.boundary }).catch((error) => error);
-        if (found.code !== undefined) {
-          push({ kind: 'error', text: `查不了：${found.code}${found.detail === undefined ? '' : ` · ${found.detail}`}` });
-          return;
+        // 当前这一份另问一次并指名道姓：那一次结果溢出在文件里的整段正文也进来，跨会话那一种只读到记录留着的那一头一尾。
+        const [listed, deep] = await Promise.all([
+          client.request('sessions.search', { query: wanted, projectRoot: info.boundary }).catch((error) => error),
+          client.request('sessions.search', { query: wanted, sessionId }).catch((error) => error),
+        ]);
+        for (const answer of [listed, deep]) {
+          if (answer.code !== undefined) push({ kind: 'error', text: `查不了：${answer.code}${answer.detail === undefined ? '' : ` · ${answer.detail}`}` });
         }
-        push({ kind: 'meta', text: found.hits.length === 0
+        if (listed.code !== undefined && deep.code !== undefined) return;
+        const here = deep.code === undefined ? deep.hits : [];
+        const others = listed.code === undefined ? listed.hits.filter((hit) => hit.sessionId !== sessionId) : [];
+        push({ kind: 'meta', text: here.length + others.length === 0
           ? `这个项目根跑过的会话里没有含「${wanted}」的`
-          : [`「${wanted}」在这些地方出现过：`, ...findLines(found.hits, sessionId)].join('\n') });
+          : [
+            ...(here.length === 0 ? [] : ['这一份会话（含溢出在文件里的那一段）：', ...findLines(here, '')]),
+            ...(others.length === 0 ? [] : ['其他会话：', ...findLines(others, sessionId)]),
+          ].join('\n') });
       })();
       return;
     }
