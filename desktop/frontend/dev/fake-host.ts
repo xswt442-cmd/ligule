@@ -27,7 +27,7 @@ const markdown = [
   'if (estimated * factor > threshold) await compact();',
   '```',
   '',
-  '细节在 [阶段三那份实现顺序](ligule-set/phase3/todo.md) 里，一轮压完大约从十万降到两万。',
+  '细节在 [阶段三那份实现顺序](ligule-set/phase3/todo.md) 里，外链走另一条路：[example](https://example.com/)。一轮压完大约从十万降到两万。',
 ].join('\n');
 
 const eventsOf = (sessionId: string): Record<string, unknown>[] => [
