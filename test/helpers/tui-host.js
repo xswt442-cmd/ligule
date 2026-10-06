@@ -120,11 +120,15 @@ export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {} 
     return await run({ client, config, directory, sessionDirectory, sessionId, requests, notifications, providerRequests, host, hostOutput: pair.host.output });
   } finally {
     try {
-      if (pair !== undefined) pair.client.output.end();
-      if (host !== undefined) await host.release();
-      if (server.listening) {
-        server.closeAllConnections();
-        await new Promise((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()));
+      try {
+        if (pair !== undefined) pair.client.output.end();
+        if (host !== undefined) await host.release();
+      } finally {
+        // 那台 HTTP 服务一定要关掉：它开着的时候整个测试进程退不出去，收尾失败报出来的就只剩一个挂住。
+        if (server.listening) {
+          server.closeAllConnections();
+          await new Promise((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()));
+        }
       }
     } finally {
       for (const key of envKeys) {
