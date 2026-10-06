@@ -1,7 +1,7 @@
 // 投影那一份取值规则的唯一检查：跑 `node dev/rows.check.mjs`，坏了就非零退出。
 // 它 import 的是同目录树上那份 `src/rows.ts`，Node 直接剥类型跑，不需要构建产物。
 import assert from 'node:assert/strict';
-import { capabilityOf, projectRecord, shownIn } from '../src/rows.ts';
+import { capabilityOf, metaRow, projectRecord, shownIn } from '../src/rows.ts';
 
 const call = projectRecord({
   kind: 'assistant',
@@ -86,6 +86,11 @@ assert.deepEqual(repaired.notes, ['恢复补的 · 外部副作用次数未知']
 // 没有参数的那一次调用不该在正文里留一个空对象；读不认识的种类不产行。
 assert.equal(projectRecord({ kind: 'assistant', text: '', toolCalls: [{ id: 'c6', name: 'skill' }] })[0].text, '');
 assert.deepEqual(projectRecord({ kind: 'usage', input: 1 }), []);
+
+// 每一行带着它来自哪一条事件：查找的命中说的是那一个序号，跳到那一行要靠它（方案 4.2、实现顺序第 77 步）。
+const stamped = projectRecord({ seq: 12, kind: 'assistant', text: '两句', toolCalls: [{ id: 'c9', name: 'read', args: {} }] });
+assert.deepEqual(stamped.map((row) => row.seq), [12, 12], '一条记录出来的每一行都认得自己是哪一条事件');
+assert.equal(metaRow('meta', '界面自己写的一行').seq, undefined, '界面自己写的那几行没有序号可对');
 
 // 展示档那一格筛的是行的种类：虚拟视口要量每一行的高度，藏着不画的那几类不进列表（D90、U48）。
 const answered = projectRecord({ kind: 'assistant', text: '一句' })[0];

@@ -50,6 +50,8 @@ export type Row = {
   id: number;
   kind: 'question' | 'answer' | 'reasoning' | 'call' | 'result' | 'refusal' | 'failure' | 'meta' | 'error';
   text: string;
+  // 这一行来自记录里哪一条事件（D73 那个稳定序号）。界面自己写的那几行没有它。
+  seq?: number;
   // 生效的能力名：`mcp.call` 这一件画的是 `mcp:<服务器>/<工具>`，与判定链读的那一串一致（D52）。
   tool?: string;
   code?: string;
@@ -161,6 +163,12 @@ export function durationNote(startedAt: number, now: number): string {
 }
 
 export function projectRecord(record: Record_, options: { startedAt?: number; now?: number } = {}): Row[] {
+  // 每一行带着它来自记录里哪一条事件：查找的命中说的是那一条事件的序号，跳到那一行要靠它（方案 4.2、实现顺序第 77 步）。
+  const at = record.seq === undefined ? {} : { seq: record.seq };
+  return projected(record, options).map((row) => ({ ...row, ...at }));
+}
+
+function projected(record: Record_, options: { startedAt?: number; now?: number }): Row[] {
   if (record.kind === 'user') return [{ id: nextId(), kind: 'question', text: record.raw ?? record.text ?? '' }];
   if (record.kind === 'reasoning') return [{ id: nextId(), kind: 'reasoning', text: record.text ?? '' }];
   if (record.kind === 'assistant') {
