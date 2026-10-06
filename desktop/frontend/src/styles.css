@@ -1337,3 +1337,164 @@ button.send:hover:not(:disabled) {
   color: var(--accent);
   border: 0;
 }
+
+/* ---------- 设置那一个对话框（第 58 步，D98）---------- */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  background: rgb(0 0 0 / 45%);
+}
+
+.sheet {
+  display: grid;
+  grid-template-columns: 10.5rem minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  inline-size: min(56rem, 92vw);
+  max-block-size: 82vh;
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius) * 1.5);
+  box-shadow: var(--shadow-pop);
+  overflow: hidden;
+}
+
+.sheet-head {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3) var(--space-4);
+  border-block-end: 1px solid var(--line);
+  font-size: var(--text-lg);
+}
+
+.sheet-nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-2);
+  background: var(--bg-sunk);
+  border-inline-end: 1px solid var(--line);
+}
+
+.sheet-nav button {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  color: var(--fg-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  text-align: start;
+  font-size: var(--text-md);
+}
+
+.sheet-nav button:hover {
+  color: var(--fg);
+  background: var(--bg-raised);
+  border: 1px solid transparent;
+}
+
+.sheet-nav button.active {
+  color: var(--fg);
+  background: var(--bg-raised);
+  border-color: var(--line);
+}
+
+.sheet-body {
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-4);
+}
+
+.sheet-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  padding: var(--space-3) 0;
+  border-block-end: 1px solid var(--line);
+}
+
+.sheet-row:last-child {
+  border-block-end: 0;
+}
+
+.sheet-label {
+  flex: 0 0 9rem;
+  color: var(--fg);
+  font-size: var(--text-md);
+}
+
+.sheet-value {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  flex: 1;
+  min-width: 0;
+}
+
+.sheet-hint {
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
+
+.sheet-value select,
+.sheet-value input,
+.sheet-value button {
+  inline-size: fit-content;
+  padding: var(--space-1) var(--space-2);
+  color: var(--fg);
+  background: var(--bg-sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font: inherit;
+  font-size: var(--text-sm);
+}
+
+.sheet-value input[type="range"] {
+  inline-size: 14rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.sheet-value .value {
+  color: var(--fg);
+  font-size: var(--text-md);
+}
+
+.sheet-value .mono {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+}
+
+.inline-field {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.sheet-note {
+  margin: var(--space-4) 0 0;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+button.mini.chip {
+  padding: 2px var(--space-2);
+  color: var(--fg-muted);
+  background: var(--bg-sunk);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: var(--text-xs);
+}
+
+button.mini.chip b {
+  color: var(--fg);
+  font-weight: 600;
+}

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createClient, type Client, type Transport } from './protocol';
 import { ApprovalCard, type Ask } from './components/ApprovalCard';
 import { Icon } from './components/Icon';
+import { SettingsDialog } from './components/Settings';
 import { RowView } from './components/RowView';
 import { SessionRail } from './components/SessionRail';
 import { UsageMeter } from './components/UsageMeter';
@@ -103,42 +104,10 @@ const pendingPanels: Panel<PanelProps>[] = [
     view: () => <p className="stub">档位现在是整个运行一份，按工具名一份那一档没定（未定项 U22）。界面在这里放开关就等于替那条未定项做决定，所以先不放。</p>,
   },
   {
-    id: 'panel.appearance',
-    title: '外观与状态',
-    view: ({ patch: write, settings }) => <>
-      <h3>这些都存在这台机器的界面里，不进记录也不进配置文件（D90）</h3>
-      <label>主题
-        <select value={settings.theme} onChange={(event) => write({ theme: event.target.value as Settings['theme'] })}>
-          <option value="system">跟随系统</option>
-          <option value="dark">深色</option>
-          <option value="light">浅色</option>
-        </select>
-      </label>
-      <label>字号
-        <select value={settings.font} onChange={(event) => write({ font: event.target.value as Settings['font'] })}>
-          <option value="small">小</option>
-          <option value="medium">中</option>
-          <option value="large">大</option>
-        </select>
-      </label>
-      <label>侧栏宽度
-        <input type="range" min={264} max={420} step={4} value={settings.sidebar} onChange={(event) => write({ sidebar: Number(event.target.value) })} />
-        <span className="muted">{settings.sidebar} 像素，也可以拖那一根分隔线</span>
-      </label>
-      <label>面板停靠
-        <select value={settings.dock} onChange={(event) => write({ dock: event.target.value as Settings['dock'] })}>
-          <option value="right">右侧</option>
-          <option value="left">左侧</option>
-        </select>
-      </label>
-      <p className="stub">草稿与输入历史也留在本机：刷新之后那一句还在输入框里，空草稿上按 ↑ 能翻回来。</p>
-    </>,
-  },
-  {
     id: 'panel.model',
     title: '模型与端点',
     pending: true,
-    view: () => <p className="stub">服务地址与模型名读的是配置文件那三层（D8），协议表里六条方法没有一条读写配置。这一项要先加方法，界面改配置才谈得上。</p>,
+    view: () => <p className="stub">服务地址与模型名读的是配置文件那三层（D8），协议表里那九条方法没有一条读写配置。这一项要先加方法，界面改配置才谈得上。设置那一个对话框里也写着这一条。</p>,
   },
   {
     id: 'panel.windows',
@@ -266,6 +235,7 @@ export function App({ transport }: { transport: Transport }) {
   const [panel, setPanel] = useState<Panel<PanelProps> | null>(null);
   const [settings, setSettings] = useState(readSettings);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [reading, setReading] = useState(false);
   const verbosity = settings.verbosity;
   const collapsed = settings.collapsed;
@@ -283,7 +253,6 @@ export function App({ transport }: { transport: Transport }) {
   const [seconds, setSeconds] = useState(0);
   // 这一条连接还在不在：null 是在，其余是那一侧报回来的说法（D93 原样带出）。
   const [link, setLink] = useState<string | null>(null);
-  const [modeDraft, setModeDraft] = useState('');
 
   // 本轮计时：跑着的时候一秒走一格，本轮结束（完成或被打断）就归零。
   useEffect(() => {
@@ -526,20 +495,18 @@ export function App({ transport }: { transport: Transport }) {
   }, [client, sessionId]);
 
   // 切模式走协议里那一条 `mode.set`（D65）：坏清单在那一刻就报稳定码，不静默换成随包的那一份。
-  const setMode = useCallback(async () => {
-    const name = modeDraft.trim();
+  const setMode = useCallback(async (name: string) => {
     if (sessionId === null || name === '') return;
     try {
       const result = await client.call('mode.set', { sessionId, name }) as { mode: string; pending: string | null };
       setRows((current) => [...current, metaRow('meta', result.pending === null
         ? `模式 ${result.mode} 已生效`
         : `模式 ${result.pending} 等本轮结束生效`)]);
-      setModeDraft('');
     } catch (error) {
       setRows((current) => [...current, metaRow('error', `模式换不了：${code(error)}`)]);
     }
     void refreshStatus(sessionId);
-  }, [client, modeDraft, refreshStatus, sessionId]);
+  }, [client, refreshStatus, sessionId]);
 
   // 手动压缩走 `session.compact`（D83）：压的是模型那一份上下文，画面上的行仍然来自整份记录。
   const compact = useCallback(async () => {
@@ -571,6 +538,7 @@ export function App({ transport }: { transport: Transport }) {
     { id: 'session.read', title: '读回这一份记录', note: 'session.read', run: () => void readBack() },
     { id: 'run.cancel', title: '取消这一轮', note: 'run.cancel', run: () => void cancel() },
     { id: 'session.compact', title: '手动压缩上下文', note: 'session.compact', run: () => void compact() },
+    { id: 'settings.open', title: '打开设置', note: '外观、模式、审批规则、连接', run: () => setSettingsOpen(true) },
     { id: 'rail.toggle', title: collapsed ? '展开左侧栏' : '收起左侧栏', note: 'Ctrl+B', run: () => patch({ collapsed: !collapsed }) },
     { id: 'answer.copy', title: '复制最后那条回答', note: 'Ctrl+Shift+C', run: copyLastAnswer },
     ...(status?.templates ?? []).map((item) => ({
@@ -606,13 +574,14 @@ export function App({ transport }: { transport: Transport }) {
       }
       if (event.key !== 'Escape') return;
       if (paletteOpen) setPaletteOpen(false);
+      else if (settingsOpen) setSettingsOpen(false);
       else if (menuOpen) setMenuOpen(false);
       else if (panel !== null) setPanel(null);
       else if (running) void cancel();
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [cancel, collapsed, copyLastAnswer, menuOpen, panel, paletteOpen, patch, running]);
+  }, [cancel, collapsed, copyLastAnswer, menuOpen, panel, paletteOpen, patch, running, settingsOpen]);
 
   const panelProps: PanelProps = {
     client,
@@ -628,8 +597,6 @@ export function App({ transport }: { transport: Transport }) {
   };
   const hidden = Math.max(0, rows.length - limit);
 
-  const settingsPanel = registry.list('rail.menu').find((item) => item.id === 'panel.appearance') ?? null;
-
   return <div className="frame" data-collapsed={collapsed ? 'true' : undefined} data-dock={settings.dock}>
     <aside className="sidebar">
       <div className="brand"><img src="/icon.png" alt="" width="22" height="22" /><span>ligule</span></div>
@@ -637,7 +604,7 @@ export function App({ transport }: { transport: Transport }) {
       <div className="section-label">会话</div>
       {registry.list('rail.sessions').map((item) => <div key={item.id} className="rail-slot">{item.view(panelProps)}</div>)}
       <div className="sidebar-foot">
-        <button className="entry" type="button" onClick={() => setPanel(settingsPanel)}><Icon name="gear" size={15} /><span>设置</span></button>
+        <button className="entry" type="button" aria-haspopup="dialog" aria-expanded={settingsOpen} onClick={() => setSettingsOpen(true)}><Icon name="gear" size={15} /><span>设置</span></button>
         <button className="entry" type="button" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}>
           <Icon name="grid" size={15} /><span>功能</span>
         </button>
@@ -714,21 +681,9 @@ export function App({ transport }: { transport: Transport }) {
               <option value="full">完全展开</option>
             </select>
           </label>
-          <label className="mini mode-set">
-            <span>模式</span>
-            <input
-              value={modeDraft}
-              placeholder={status?.mode ?? '模式名'}
-              aria-label="要换成的模式名"
-              onChange={(event) => setModeDraft(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key !== 'Enter') return;
-                event.preventDefault();
-                void setMode();
-              }}
-            />
-            <button type="button" disabled={modeDraft.trim() === ''} onClick={() => void setMode()}>切换</button>
-          </label>
+          <button type="button" className="mini chip" title="切模式在设置那个对话框里" onClick={() => setSettingsOpen(true)}>
+            模式 <b>{status?.mode ?? '没装'}</b>
+          </button>
           <span className="bar-spacer" />
           <button className="icon-button" type="button" title="读回这一份记录" aria-label="读回记录" onClick={() => void readBack()}><Icon name="refresh" size={15} /></button>
           <button className="icon-button" type="button" title="复制最后那条回答（Ctrl+Shift+C）" aria-label="复制回答" onClick={copyLastAnswer}><Icon name="copy" size={15} /></button>
@@ -763,5 +718,16 @@ export function App({ transport }: { transport: Transport }) {
       >{item.title}{item.pending === true && <span className="menu-tag">待实现</span>}</button>)}
     </div>}
     {paletteOpen && <Palette commands={commands} onClose={() => setPaletteOpen(false)} />}
+    {settingsOpen && <SettingsDialog
+      status={status}
+      settings={settings}
+      patch={patch}
+      link={link}
+      counts={panelProps.counts}
+      waiting={panelProps.waiting}
+      onSetMode={(name) => void setMode(name)}
+      onRetry={() => void beat(4_000)}
+      onClose={() => setSettingsOpen(false)}
+    />}
   </div>;
 }
