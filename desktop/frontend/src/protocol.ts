@@ -25,7 +25,8 @@ export type Transport = {
 
 export type Client = {
   // timeoutMs 只给那一个调用用：一轮模型跑几分钟是正常事，不能拿一个全局上限去砍它。
-  call: (method: string, params: Record<string, unknown>, timeoutMs?: number) => Promise<any>;
+  // 交回来的是帧里那一格 result，这一层不认识它的形状，所以每个调用方自己说明读成什么。
+  call: (method: string, params: Record<string, unknown>, timeoutMs?: number) => Promise<unknown>;
   reply: (id: string, result: unknown) => void;
   receive: (text: string) => { kind: string; message?: Frame };
   onNotification: (handle: (message: Frame) => void) => void;
