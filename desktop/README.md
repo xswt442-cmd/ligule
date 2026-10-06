@@ -44,14 +44,7 @@ cargo test
 
 测的是这一层真正负责的两件事：从可执行文件位置找到后端入口（找不到要说清找过哪几层），以及帧在子进程两根管道之间的按行转递。
 
-窗口与界面另有两条：
-
-```sh
-powershell -NoProfile -ExecutionPolicy Bypass -File testplace/check-desktop-window.ps1
-cd desktop/frontend && npm run build && npm run preview
-```
-
-第一条起真壳，数它带起来的后端进程数、截一张窗口图，并在强杀壳之后确认没有孤儿进程留下来；抢不到前台焦点时它不打字，只截窗口。第二条把构建产物服务在 5188 端口，配合 `testplace/check-desktop-frontend.mjs`（挂一个假载体，帧由它生成）看行的次序、审批卡、四个展示档位与菜单面板——壳打不进字的时候，界面那一条就靠它。
+前端构建检查运行 `cd desktop/frontend && npm run build`，包含 TypeScript 检查与 Vite 构建。窗口交互通过 `cd desktop && npm run dev` 启动真实桌面壳，检查后端进程、转录、审批与菜单；关闭壳后检查后端与正在执行的命令退出。
 
 ## 随包带的运行时
 

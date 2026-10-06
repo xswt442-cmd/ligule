@@ -60,8 +60,7 @@ impl AppState {
     }
 }
 
-/// 终止后端进程并把它从槽位里拿走。Windows 上没有能够送达进程并让它自己退出的终止信号，
-/// 参照实现同样是直接终止（`cline/apps/examples/desktop-app/src-tauri/src/main.rs:342-377`）。
+/// 终止后端进程并把它从槽位里拿走。
 fn stop_host(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     if let Some(host) = state.slot()?.take() {

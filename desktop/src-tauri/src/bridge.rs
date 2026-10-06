@@ -154,8 +154,7 @@ impl Host {
             .map_err(|error| format!("failed to flush the host's stdin: {error}"))
     }
 
-    /// 终止后端进程。Windows 上没有能够送达进程并让它自己退出的终止信号，参照实现同样是直接终止
-    /// （`cline/apps/examples/desktop-app/src-tauri/src/main.rs:342-377`）。
+    /// 终止后端进程并等待退出。
     pub fn stop(&self) {
         if let Ok(mut child) = self.child.lock() {
             let _ = child.kill();

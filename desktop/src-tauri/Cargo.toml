@@ -11,5 +11,4 @@ tauri = { version = "2.11.1", features = [] }
 
 # 这一层不写业务逻辑（D24），也不碰协议内容：它只搬调用帧、窗口和进程。
 # 依赖表里只有 tauri 本身，没有序列化库、没有 HTTP 与 WebSocket 客户端——
-# 帧按整行字符串原样转递，壳不需要读懂里面是什么。这条边界与参照实现一致
-# （`cline/apps/examples/desktop-app/src-tauri/Cargo.toml:10-17`）。
+# 帧按整行字符串原样转递，壳不需要读懂里面是什么。
