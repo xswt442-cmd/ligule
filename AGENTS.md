@@ -209,7 +209,7 @@ npm run build-rg    downloads the pinned ripgrep into packages/rg-*
 ## Host and protocol
 
 - `src/host/` carries the protocol (D30). `protocol.js` names the operations and their argument shapes in the same subset the kernel validates, `connection.js` moves one message per line, and `host.js` owns the sessions.
-- The table holds ten methods: `session.create`, `session.open`, `sessions.list`, `session.read`, `run.start`, `run.cancel`, `status.get`, `config.get`, `mode.set`, `session.compact`. Four exist only because an interface asked (`mode.set`, `session.compact`, `sessions.list`, `config.get`).
+- The table holds eleven methods: `session.create`, `session.open`, `session.close`, `sessions.list`, `session.read`, `run.start`, `run.cancel`, `status.get`, `config.get`, `mode.set`, `session.compact`. Five exist only because an interface asked (`mode.set`, `session.compact`, `sessions.list`, `config.get`, `session.close`).
 - `config.get` answers with four fields the host builds by name: `model.api`, `model.baseURL`, `model.model`, `model.apiKeyEnv`. A value has to be a string to be shown, and the address keeps only its scheme, host, port and path.
 - The boundary is that fixed construction, not argument checking: the parameter subset lets through keys it does not declare. The merge accepts any key a config layer writes, so handing over the whole snapshot would prove nothing about what a frame carries (D8, D13, D60).
 - The Host reaches the loop through what a host may inject anyway: the provider, the ask channel, the session log. A new carrier adds a file beside `connection.js` and changes neither the table nor the kernel.
@@ -218,6 +218,9 @@ npm run build-rg    downloads the pinned ripgrep into packages/rg-*
 - `sessions.list` scans the directory of the environment it can reach. A root that is not loaded yet, on a Host with no loader, is filtered against the current directory instead: listing does not force a load.
 - `config.get` reads the project the Host was launched on, because that method names no session.
 - The Host keeps session authority. A client that disconnects loses nothing, and a second process opens the same record.
+- `session.close` releases one session's assembly — the MCP servers, the extension listeners, the template assembly and the record lock — and writes nothing to the record. A round that runs is not interrupted by it: the client sends `run.cancel` first, and the Host answers `run_already_running`.
+- Waiting for that round is not inheriting its failure. A cancelled or broken round already left its facts in the record; the release path drops its rejection instead of reporting a release failure.
+- Closing the last session of a loaded project drops that project environment; the next session of the same root loads the layers again. The project the Host launched on stays.
 - An approval for a command line carries the shell kind and the executable (D67), and a call with no command text carries neither. That keeps the request the same shape on both carriers.
 
 ## Terminal client
@@ -234,7 +237,8 @@ npm run build-rg    downloads the pinned ripgrep into packages/rg-*
 - A tool result names what it did in its header — the capability a `mcp.call` used, an `exec` exit code, a spilled file — and the body shows `content.text`, not the envelope. The approval box sums the proposed change from the arguments instead of dumping a file.
 - Input typed during a round queues in the UI, flushes in order when the round ends, and returns to the draft on Backspace. History, drafts, the queue, folds and the caret are UI state: none of them reaches the record (D81).
 - The status line names mode and policy separately, adds `ctx:~estimated/window` only when a window is configured, and drops `tools:` then that segment when the terminal is narrow.
-- `/sessions` lists what `sessions.list` returns with keyboard selection, and `/resume <id> [mode]` opens one; an id prefix resolves only when exactly one session of this project root starts with it. `/mode [name]` sends `mode.set`, and a switch asked for while a round runs reads `mode:a→b` (D41, D65).
+- `/sessions` lists what `sessions.list` returns with keyboard selection, and `/resume <id> [mode]` opens one; an id prefix resolves only when exactly one session of this project root starts with it. Switching closes the session it left, so one terminal holds one assembly and one record lock. `/mode [name]` sends `mode.set`, and a switch asked for while a round runs reads `mode:a→b` (D41, D65).
+- The session id and the transcript rows change in the same render. `Static` decides by index which rows it still has to print, so an `await` between those two state updates loses the resumed record off the screen.
 - Input history is the UI's own file (`~/.ligule/tui-history.jsonl`): one sentence per line, newest first, one place per sentence, 200 lines, only sentences actually sent. The arrow keys and Ctrl+R read it.
 - Ctrl+G writes the draft to a temporary file, runs `$VISUAL` or `$EDITOR` through `cross-spawn` and Ink's terminal suspension, then reads the file back.
 - Ctrl+O opens a complete-history browser with paging, Home/End navigation, line selection and copy; it reads full spill files through `session.read` with `fullResults: true`. Approval Ctrl+O displays or hides the actual change, and Esc cancels the current operation.
