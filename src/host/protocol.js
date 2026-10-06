@@ -56,10 +56,13 @@ export const METHODS = Object.freeze({
     },
   },
   'session.read': {
-    description: 'Read the events of an open session, oldest first, so a client that arrives late can show what happened',
+    description: 'Read the events of an open session, oldest first, so a client that arrives late can show what happened; `limit` and `before` ask for one history page instead of the whole record',
     parameters: { type: 'object', properties: {
       sessionId: SESSION_ID,
       fullResults: { type: 'boolean', description: 'read complete spilled tool results for display; the record and model view stay unchanged' },
+      // 事件序号就是那条稳定游标：往回翻页要说出这一页最早的那一条，翻页期间新到的事件只追加在末尾（E03）。
+      limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'take at most this many of the newest events in the requested range' },
+      before: { type: 'integer', minimum: 1, description: 'read events older than this sequence number; it has to name an event in this record' },
     }, required: ['sessionId'] },
   },
   'run.start': {

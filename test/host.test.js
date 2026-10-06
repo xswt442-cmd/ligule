@@ -796,3 +796,39 @@ test('closing a session while its round runs says so instead of interrupting', a
     );
   });
 });
+
+// 历史那一页（实现顺序第 72 步，方案 4.1）：游标用的是记录里那一条事件自己的序号，它稳定也单调。
+// 往回翻只说「比这一页最早那一条更早」，所以翻页期间新到的事件只追加在末尾，旧页既不重复也不漏。
+test('a history page names its own end and an older page picks up where it stopped', async () => {
+  await withInProcessHost(async (connection) => {
+    const { sessionId } = await connection.request('session.create', {});
+    await connection.request('run.start', { sessionId, input: '第一轮' });
+    await connection.request('run.start', { sessionId, input: '第二轮' });
+
+    const newest = await connection.request('session.read', { sessionId, limit: 3 });
+    assert.equal(newest.events.length, 3, '说了三条就交三条');
+    assert.deepEqual(newest.events.map((event) => event.seq), [newest.endSeq - 2, newest.endSeq - 1, newest.endSeq], '序号连着一段，页内从早到晚');
+    assert.equal(newest.hasMore, true, '更早的那些还在后面');
+
+    const older = await connection.request('session.read', { sessionId, limit: 3, before: newest.events[0].seq });
+    assert.equal(older.events.at(-1).seq, newest.events[0].seq - 1, '上一页的最早一条正好接在下一页的最后一条之后');
+    assert.ok(older.events.every((event) => event.seq < newest.events[0].seq), '游标之外的一条也不给');
+
+    // 再跑一轮：新事件只在末尾出现，手里那一页旧记录按同一个游标重读还是那三条。
+    await connection.request('run.start', { sessionId, input: '第三轮' });
+    const again = await connection.request('session.read', { sessionId, limit: 3, before: newest.events[0].seq });
+    assert.deepEqual(again.events.map((event) => event.seq), older.events.map((event) => event.seq), '旧页不重复也不漏');
+    const tail = await connection.request('session.read', { sessionId, limit: 3 });
+    assert.ok(tail.endSeq > newest.endSeq, '快照末端跟着新事件往前走');
+
+    const whole = await connection.request('session.read', { sessionId });
+    assert.equal(whole.hasMore, false, '不带那一格就是整份记录，前面没有更早的');
+    assert.ok(whole.events.length > tail.events.length, '整份读仍然比一页多');
+
+    await assert.rejects(
+      connection.request('session.read', { sessionId, before: 9999 }),
+      (error) => error.code === 'session_cursor_invalid',
+      '认不出这一份记录里那条序号的游标要说失效，不能静默当成第一页',
+    );
+  });
+});

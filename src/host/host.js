@@ -290,10 +290,8 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     return join(env.directory, `${id}.jsonl`);
   }
 
-  async function readForClient(session, sessionId, fullResults, env = defaultEnvironment) {
-    const events = await session.read();
-    const header = await session.header();
-    if (!fullResults) return { sessionId, events, header: header ?? null };
+  // 溢出的那一份完整正文只在被读到的那一页上取：一次读一百条时不该把整份记录的结果文件都翻一遍。
+  async function fillSpills(events, env) {
     const base = await realpath(env.directory);
     const complete = [];
     for (const event of events) {
@@ -317,7 +315,27 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       }
       complete.push({ ...event, result: { ...result, content } });
     }
-    return { sessionId, events: complete, header: header ?? null };
+    return complete;
+  }
+
+  // 一页历史（实现顺序第 72 步，方案 4.1）：游标用的是记录里那一条事件自己的序号，它稳定且单调，
+  // 所以往回翻只说「比这一页最早那一条更早」，翻页期间新事件只追加在末尾，旧页不重复也不漏。
+  // 交回的 `endSeq` 是这一次读到的快照末端，`hasMore` 说这一页之前还有没有更早的。
+  async function readForClient(session, sessionId, { fullResults, limit, before } = {}, env = defaultEnvironment) {
+    const events = await session.read();
+    const header = await session.header();
+    // 游标归属那一格要说清它认不认得：不是这一份记录里的事件序号就是失效的游标，不静默当成第一页（E03）。
+    if (before !== undefined && !events.some((event) => event.seq === before)) {
+      throw new KernelError('session_cursor_invalid', { detail: `${sessionId} has no event ${before}` });
+    }
+    const page = (before === undefined ? events : events.filter((event) => event.seq < before)).slice(-(limit ?? events.length));
+    return {
+      sessionId,
+      events: fullResults ? await fillSpills(page, env) : page,
+      header: header ?? null,
+      endSeq: page.length === 0 ? null : page.at(-1).seq,
+      hasMore: page.length > 0 && page[0].seq > 1,
+    };
   }
 
   // 一个会话一套内核、判定链与循环：判定链里的拒绝计数与档位按会话存活（D15、D17）。
@@ -614,8 +632,10 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
         }
         case 'session.read': {
           // 交回的是记录本身：客户端晚到了也能把已经发生过的事画出来（I5）。
+          // 历史那一页由 `limit` 与 `before` 说（方案 4.1）：支线那份读的是同一套分页，两个入口不分两种形状。
+          const { fullResults, limit, before } = message.params;
           const state = sessions.get(sessionId);
-          if (state !== undefined) return await readForClient(state.session, sessionId, message.params.fullResults, state.environment);
+          if (state !== undefined) return await readForClient(state.session, sessionId, { fullResults, limit, before }, state.environment);
           // 派生支线那一份不在这轮的内核里（跑完就把装配撤了，D71），界面读它用的是这同一次动作（D74）。
           // 除这一种之外不读磁盘：这一次动作的语义是「把我这一份会话的事实拿回来」，不是记录目录的浏览器；
           // 发现历史会话归 sessions，接上别的会话归 session.open。
