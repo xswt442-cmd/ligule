@@ -1,5 +1,8 @@
 // 终端界面的命令表与候选清单（D81）。这里只做「画哪几条、命中哪一条」这类纯计算。
 // 命令的内容一律来自宿主：提示模板由宿主交出、展开也归宿主（D24、D49），界面不留第二份事实源。
+import stringWidth from 'string-width';
+const WIDTH_CACHE_LIMIT = 1024;
+const widthCache = new Map<string, number>();
 
 export interface UiCommand {
   readonly name: string;
@@ -101,18 +104,12 @@ export interface HelpGroup {
 }
 
 // 中日韩那一段与全角标点在一个字符位上占两列：按字符数补齐会歪，按列数补齐才对得齐（界面里全是中英混排）。
-const WIDE_RANGES: readonly [number, number][] = [
-  [0x1100, 0x115f], [0x2e80, 0x303e], [0x3041, 0x33ff], [0x3400, 0x4dbf],
-  [0x4e00, 0x9fff], [0xa000, 0xa4cf], [0xa960, 0xa97f], [0xac00, 0xd7a3],
-  [0xf900, 0xfaff], [0xfe10, 0xfe19], [0xfe30, 0xfe6f], [0xff00, 0xff60], [0xffe0, 0xffe6],
-];
-
 export function displayWidth(text: string): number {
-  let width = 0;
-  for (const character of text) {
-    const code = character.codePointAt(0) ?? 0;
-    width += WIDE_RANGES.some(([from, to]) => code >= from && code <= to) ? 2 : 1;
-  }
+  if (text.length > 32) return stringWidth(text);
+  const known = widthCache.get(text);
+  if (known !== undefined) return known;
+  const width = stringWidth(text);
+  if (widthCache.size < WIDTH_CACHE_LIMIT) widthCache.set(text, width);
   return width;
 }
 
@@ -155,6 +152,8 @@ export interface SessionRow {
   readonly events: number;
   readonly mode: { readonly name: string } | null;
   readonly unanswered: number;
+  readonly truncatedBytes?: number;
+  readonly error?: { readonly code: string; readonly detail: string };
 }
 
 /** 列表的条数上限：界面上一次画五十行已经把终端滚出一屏，U38 那条「要不要建索引」要的是日常使用的数字。 */
@@ -169,6 +168,8 @@ export function sessionLines(listed: readonly SessionRow[], current = ''): strin
     `${item.events} 条`,
     `mode:${item.mode?.name ?? '-'}`,
     item.unanswered > 0 ? `未收尾 ${item.unanswered} 次派发` : '',
+    (item.truncatedBytes ?? 0) > 0 ? `尾行未完成 ${item.truncatedBytes} 字节` : '',
+    item.error === undefined ? '' : `无法恢复：${item.error.code} · ${item.error.detail}`,
     item.id === current ? '← 正在这一份上' : '',
   ].filter((cell) => cell !== '').join('  '));
 }

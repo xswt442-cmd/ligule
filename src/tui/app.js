@@ -2,7 +2,7 @@
 // 这一层只把会话记录与流式增量画成行，并把按键变成协议里的调用。
 // 纯函数（editDraft、foldText、projectRecord、branchOf、detailTitle 与 commands.ts 里那几张表）都从这里交出去，
 // 检查在 test/tui.test.js，不靠真终端也能验；画面本身跑 `ligule tui` 看。
-import { createElement as h, Fragment, useCallback, useEffect, useState } from 'react';
+import { createElement as h, Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Static, Text, useApp, useInput } from 'ink';
 import { SESSION_ROWS, UI_COMMANDS, candidatesOf, findUiCommand, flowGroups, resolveSessionId, routeInput, sessionLines } from './commands.js';
 import { pushHistory, searchHistory } from './history.js';
@@ -10,6 +10,8 @@ import { editInExternalEditor } from './editor.js';
 import { copyToClipboard, lastAnswer } from './clipboard.js';
 import { exportMarkdown, titleEscape, titleText, writeExport } from './output.js';
 import { markdownLines } from './markdown.js';
+import { selectedText, transcriptLines, viewportPosition, wrapLine } from './viewport.js';
+import { displayWidth } from './commands.js';
 
 const SPINNER = ['⠋', '⠙', '', '⠸', '⠼', '⠴', '⠦', '', '⠇', '⠏'];
 const FOLD_LINES = 3;
@@ -17,6 +19,7 @@ const FOLD_LINES = 3;
 const MODE_LAYERS = { shipped: '随包', user: '全局', project: '项目' };
 // 清单最多画几行：再长就把屏幕顶到输入框以外，人看不到自己在敲什么。
 const CANDIDATE_ROWS = 6;
+const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 // 那几张表与那几个纯函数交给检查里用（test/tui.test.js），界面自己只走这一处出口。
 export { SESSION_ROWS, UI_COMMANDS, candidatesOf, displayWidth, findUiCommand, flowGroups, resolveSessionId, routeInput, sessionLines } from './commands.js';
@@ -25,31 +28,36 @@ export { markdownLines } from './markdown.js';
 // `/help` 画三组：界面命令、宿主交出来的提示模板、按键。前两组在这里只列名字与说明，展开与装载都不归界面。
 const KEYS = [
   { key: 'Enter', action: '发送' },
-  { key: 'Shift+Enter', action: '换行' },
+  { key: 'Shift+Enter / Ctrl+N', action: '换行' },
   { key: 'Tab', action: '补全清单里选中的那一条' },
   { key: '↑ ↓', action: '在清单里选，清单不在时翻输入历史' },
   { key: 'Ctrl+R', action: '反查发过的那几句' },
-  { key: 'Ctrl+G', action: '把草稿交给 EDITOR 里那一份编辑器' },
+  { key: 'Ctrl+G', action: '用 VISUAL 或 EDITOR 编辑草稿' },
   { key: 'Esc', action: '收起清单；跑着的时候打断这一轮' },
-  { key: 'Ctrl+O', action: '展开或收起长内容' },
+  { key: 'Ctrl+O', action: '打开或收起完整历史' },
+  { key: 'PageUp/Down', action: '在历史浏览中分页，Home/End 到两端' },
+  { key: 'Shift+↑↓', action: '在历史浏览中选择文字，Ctrl+Y 复制' },
   { key: 'Ctrl+C', action: '退出' },
 ];
 
 // 草稿的编辑：左右移光标、Home/End 与 Ctrl+A/E 跳两端、Ctrl+W 删前一个词、Ctrl+U 清空、其余可打印字符插在光标处。
 export function editDraft(draft, caret, input, key) {
-  if (key.leftArrow) return { draft, caret: Math.max(0, caret - 1) };
-  if (key.rightArrow) return { draft, caret: Math.min(draft.length, caret + 1) };
+  const boundaries = [...GRAPHEMES.segment(draft)].map((part) => part.index);
+  const previous = boundaries.filter((index) => index < caret).at(-1) ?? 0;
+  const next = boundaries.find((index) => index > caret) ?? draft.length;
+  if (key.leftArrow) return { draft, caret: previous };
+  if (key.rightArrow) return { draft, caret: next };
   if (key.home || (key.ctrl && input === 'a')) return { draft, caret: 0 };
   if (key.end || (key.ctrl && input === 'e')) return { draft, caret: draft.length };
   if (key.ctrl && input === 'u') return { draft: '', caret: 0 };
   if (key.ctrl && input === 'w') {
     // 先跳过光标前的空白，再删一个词：连着空白一起删会让「rm -rf  」整段消失。
-    const head = draft.slice(0, caret).replace(/\s+$/, '').replace(/[\w.\-/]+\s*$/, '');
+    const head = draft.slice(0, caret).replace(/\s+$/, '').replace(/[\p{L}\p{N}_.\-/]+$/u, '');
     return { draft: head + draft.slice(caret), caret: head.length };
   }
   if (key.backspace || key.delete) {
     if (caret === 0) return { draft, caret };
-    return { draft: draft.slice(0, caret - 1) + draft.slice(caret), caret: caret - 1 };
+    return { draft: draft.slice(0, previous) + draft.slice(caret), caret: previous };
   }
   if (input === '' || key.ctrl || key.meta) return { draft, caret };
   return { draft: draft.slice(0, caret) + input + draft.slice(caret), caret: caret + input.length };
@@ -123,7 +131,7 @@ export function contextSegment(usage) {
 // 状态行里模式与判定档位各带一个前缀：`mode` 这一个词在界面上指过两样东西，写清楚比省字重要（D40）。
 // 待生效写成 `mode:minimal→full`。宽度不够时先去掉工具数——它是模式与档位的推论，再挤就丢上下文那一段。
 export function buildStatusLine({ head, sessionId, boundary, status, running, seconds, expanded, columns }) {
-  const base = `${head}会话 ${sessionId.slice(0, 8)}${boundary === undefined ? '' : ` · ${boundary}`}`;
+  let base = `${head}会话 ${sessionId.slice(0, 8)}${boundary === undefined ? '' : ` · ${boundary}`}`;
   if (status === null) return base;
   const context = contextSegment(status.usage);
   const parts = [`mode:${status.pendingMode === null ? status.mode ?? 'none' : `${status.mode}→${status.pendingMode}`}`,
@@ -136,8 +144,9 @@ export function buildStatusLine({ head, sessionId, boundary, status, running, se
   const line = (kept) => `${base} · ${kept.join('  ')} · ${tail}`;
   // 列数读不到时不裁：宁可让终端自己折行，也不要按一个猜的宽度丢东西。
   let shown = parts;
-  if (columns !== undefined && columns > 0 && line(shown).length > columns) shown = shown.filter((part) => !part.startsWith('tools:'));
-  if (columns !== undefined && columns > 0 && line(shown).length > columns) shown = shown.filter((part) => !part.startsWith('ctx:'));
+  if (columns !== undefined && columns > 0 && displayWidth(line(shown)) > columns) shown = shown.filter((part) => !part.startsWith('tools:'));
+  if (columns !== undefined && columns > 0 && displayWidth(line(shown)) > columns) shown = shown.filter((part) => !part.startsWith('ctx:'));
+  if (columns !== undefined && columns > 0 && displayWidth(line(shown)) > columns) base = `${head}会话 ${sessionId.slice(0, 8)}`;
   return line(shown);
 }
 
@@ -183,13 +192,17 @@ export function helpLines(status, width) {
   return flowGroups(groups, width);
 }
 
-// 助手那一段是 markdown，看得见结构才算读得下去：标题加粗、列表带点、围栏里的内容原样且不加折行（第 41 步）。
-// 代码行用 truncate-end 而不是 wrap：把一行代码折到第二行会让人以为那是两行代码。
-function MarkdownRows({ text }) {
-  return h(Fragment, null, markdownLines(text).map((line, index) => {
-    if (line.kind === 'code') return h(Text, { key: index, wrap: 'truncate-end' }, `  ${line.text}`);
+// 助手的 Markdown 按终端列数排版，代码按语言上色，内容完整保留。
+function MarkdownRows({ text, columns = 80 }) {
+  const lines = useMemo(() => markdownLines(text, columns), [text, columns]);
+  return h(Fragment, null, lines.map((line, index) => {
+    if (line.kind === 'code') return h(Text, { key: index, wrap: 'wrap' }, '  ', line.spans === undefined ? line.text : line.spans.map((span, part) => {
+      const scope = span.scope?.split('.')[0];
+      const color = { keyword: 'magenta', string: 'green', number: 'yellow', comment: 'gray', title: 'cyan', literal: 'yellow', built_in: 'cyan' }[scope];
+      return h(Text, { key: part, color }, span.text);
+    }));
     if (line.kind === 'heading') return h(Text, { key: index, bold: true }, line.text);
-    if (line.kind === 'list') return h(Text, { key: index, wrap: 'wrap' }, `· ${line.text}`);
+    if (line.kind === 'list') return h(Text, { key: index, wrap: 'wrap' }, line.text);
     return h(Text, { key: index, wrap: 'wrap' }, line.text);
   }));
 }
@@ -203,7 +216,7 @@ export function changeSummary(tool, args) {
   return '';
 }
 
-function Row({ row, expanded }) {
+function Row({ row, expanded, columns }) {
   if (row.kind === 'question') return h(Text, { color: 'cyan' }, `› ${row.text}`);
   if (row.kind === 'reasoning') {
     const folded = foldText(row.text, expanded, 1);
@@ -211,7 +224,7 @@ function Row({ row, expanded }) {
       h(Text, { dimColor: true, wrap: 'truncate-end' }, `· 推理 ${folded.shown}`),
       folded.hidden > 0 ? h(Text, { dimColor: true }, `  …还有 ${folded.hidden} 字推理，Ctrl+O 展开`) : null);
   }
-  if (row.kind === 'answer') return h(MarkdownRows, { text: row.text });
+  if (row.kind === 'answer') return h(MarkdownRows, { text: row.text, columns });
   if (row.kind === 'call') return h(Text, { color: 'yellow' }, `→ ${row.tool} ${foldText(row.text, expanded, 1).shown}`);
   if (row.kind === 'result') {
     const folded = foldText(row.text, expanded);
@@ -236,6 +249,9 @@ export function queuedLine(text, limit = 64) {
 export function App({ client, sessionId: firstSessionId, info = {}, interactive = true, stdout, history = { entries: [], remember: async () => {} } }) {
   const app = useApp();
   const [sessionId, setSessionId] = useState(firstSessionId);
+  const activeSession = useRef(sessionId);
+  activeSession.current = sessionId;
+  const [geometry, setGeometry] = useState({ columns: stdout?.columns ?? 80, rows: stdout?.rows ?? 24 });
   const [rows, setRows] = useState([]);
   const [live, setLive] = useState({ text: '', reasoning: '' });
   const [ask, setAsk] = useState(null);
@@ -249,6 +265,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   // 文件里的先后就是这里的先后，最新的排在第一个，上下键从第一个往下翻就是往旧处翻。
   const [entries, setEntries] = useState(history.entries);
   const [historyAt, setHistoryAt] = useState(-1);
+  const [historyDraft, setHistoryDraft] = useState('');
   // Ctrl+R 那一次反查：查询串与移到第几条匹配；不在反查中时这一格是 null。
   const [search, setSearch] = useState(null);
   const [status, setStatus] = useState(null);
@@ -260,16 +277,28 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [dismissedAt, setDismissedAt] = useState(null);
   // 跑着的那一轮里回车排进来的那几条：只在界面一侧，不进记录也不进内核（D81 边界二）。
   const [queue, setQueue] = useState([]);
+  const [sessionPicker, setSessionPicker] = useState(null);
+  const [approvalExpanded, setApprovalExpanded] = useState(false);
+  const [approvalCursor, setApprovalCursor] = useState(0);
 
   const push = useCallback((...added) => setRows((current) => [...current, ...added]), []);
 
   const refreshStatus = useCallback(async () => {
     try {
-      setStatus(await client.request('status.get', { sessionId }));
-    } catch {
-      // 状态读不到不影响这一轮本身，底部那一行留着上一次的读数。
+      const current = await client.request('status.get', { sessionId });
+      if (activeSession.current === sessionId) setStatus(current);
+    } catch (error) {
+      if (activeSession.current !== sessionId) return;
+      setStatus(null);
+      push({ kind: 'error', text: `状态读不回来：${error.code ?? error.message}` });
     }
-  }, [client, sessionId]);
+  }, [client, push, sessionId]);
+
+  useEffect(() => {
+    const resize = () => setGeometry({ columns: stdout?.columns ?? 80, rows: stdout?.rows ?? 24 });
+    stdout?.on?.('resize', resize);
+    return () => stdout?.off?.('resize', resize);
+  }, [stdout]);
 
   useEffect(() => {
     const onNotification = (message) => {
@@ -284,7 +313,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         // 刚落盘的那一条取代流式期间的那半截：记录是事实源（I5），界面按它重画。
         if (message.event?.kind === 'assistant') setLive((current) => ({ ...current, text: '' }));
         if (message.event?.kind === 'reasoning') setLive((current) => ({ ...current, reasoning: '' }));
-        push(...projectRecord(message.event));
+        push(...projectRecord(message.event).map((row) => ({ ...row, seq: message.event.seq })));
         return;
       }
       if (message.notify === 'fault') push({ kind: 'error', text: `${message.code}：${message.detail ?? ''}` });
@@ -292,6 +321,12 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     const onRequest = (message) => {
       if (message.method !== 'approval.request' || message.params.sessionId !== sessionId) return;
       const args = message.params.args ?? {};
+      setApprovalExpanded(false);
+      setApprovalCursor(0);
+      setDetail(null);
+      setSessionPicker(null);
+      setSearch(null);
+      setExpanded(false);
       // 画出来的那一行说的是什么对象：命令文本、路径、目标地址，或者那一项 MCP 能力名。
       // 写入类的参数里带着整份文件内容，那一段不进这一行——行数写在下面那一行里，全文走 `/show`。
       const shown = message.params.command ?? args.path ?? args.url ?? (typeof args.server === 'string' ? `mcp:${args.server}/${args.tool ?? ''}` : '');
@@ -301,6 +336,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         detail: shown === '' ? JSON.stringify(args) : String(shown),
         change: changeSummary(message.params.tool, args),
         reason: message.params.reason ?? '',
+        content: message.params.tool === 'edit'
+          ? `原内容：\n${args.anchor ?? ''}\n\n新内容：\n${args.replacement ?? ''}`
+          : typeof args.content === 'string' ? args.content : JSON.stringify(args, null, 2),
         // 用哪一种语法判的、跑的是哪一个可执行文件：答的是这一条命令，看得见的该是这两样（D59）。
         backend: message.params.shell === undefined ? '' : `${message.params.shell} · ${message.params.executable ?? ''}`,
       });
@@ -330,10 +368,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     return () => clearInterval(timer);
   }, [running]);
 
-  const submit = useCallback(async (text) => {
+  const remember = useCallback((text) => {
     // 发出去的那一句才进历史：排进队列的那几条等真正发出去时各自进一次，翻历史看到的都是真说过的话。
     setEntries((current) => pushHistory(current, text));
-    void history.remember(text);
+    void history.remember(text).catch((error) => push({ kind: 'error', text: `输入历史保存失败：${error.code ?? error.message}` }));
+  }, [history, push]);
+
+  const submit = useCallback(async (text) => {
+    remember(text);
     setRunning(true);
     try {
       const result = await client.request('run.start', { sessionId, input: text });
@@ -348,7 +390,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       setRunning(false);
       void refreshStatus();
     }
-  }, [client, history, push, refreshStatus, sessionId]);
+  }, [client, push, refreshStatus, remember, sessionId]);
 
   // 命令一律收到第一个词，后面的整段作为参数交进来（/mode 要用）。
   const runCommand = useCallback((name, argument = '') => {
@@ -361,6 +403,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         try {
           const created = await client.request('session.create', {});
           setSessionId(created.sessionId);
+          setDetail(null);
+          setSessionPicker(null);
           setRows([]);
           setLive({ text: '', reasoning: '' });
           push({ kind: 'meta', text: `新会话 ${created.sessionId.slice(0, 8)}` });
@@ -396,12 +440,12 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         return;
       }
       void (async () => {
-        const read = await client.request('session.read', { sessionId }).catch((error) => error);
+        const read = await client.request('session.read', { sessionId, fullResults: true }).catch((error) => error);
         if (read.code !== undefined) {
           push({ kind: 'error', text: `记录读不回来：${read.code}` });
           return;
         }
-        const header = read.events.find((event) => event.kind === 'session');
+        const header = read.header;
         const main = exportMarkdown(read.events, {
           id: sessionId,
           projectRoot: header?.projectRoot,
@@ -412,7 +456,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         for (const event of read.events) {
           const branch = branchOf(event);
           if (branch.sessionId === undefined) continue;
-          const branchRead = await client.request('session.read', { sessionId: branch.sessionId }).catch((error) => error);
+          const branchRead = await client.request('session.read', { sessionId: branch.sessionId, fullResults: true }).catch((error) => error);
           if (branchRead.code !== undefined) {
             push({ kind: 'error', text: `支线 ${branch.sessionId} 读不回来：${branchRead.code}，那一份没写出去` });
             continue;
@@ -431,18 +475,24 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     if (name === 'sessions') {
       void (async () => {
         // 列表来自宿主扫的那一份目录（第 34 步那个扫描器）：界面不去开盘，事实源仍然只有那一份（D81 边界一）。
-        const listed = await client.request('sessions.list', { projectRoot: info.boundary, limit: SESSION_ROWS }).catch((error) => error);
+        const listed = await client.request('sessions.list', { projectRoot: info.boundary }).catch((error) => error);
         if (listed.code !== undefined) {
           push({ kind: 'error', text: `会话列不出来：${listed.code}${listed.detail === undefined ? '' : ` · ${listed.detail}`}` });
           return;
         }
-        push({ kind: 'meta', text: sessionLines(listed.sessions, sessionId).join('\n') });
+        if (listed.sessions.length === 0) push({ kind: 'meta', text: '这个项目根下还没有跑过的会话' });
+        else {
+          setDetail(null);
+          setExpanded(false);
+          setSearch(null);
+          setSessionPicker({ items: listed.sessions, at: 0 });
+        }
       })();
       return;
     }
     if (name === 'resume') {
       if (argument === '') {
-        push({ kind: 'error', text: '/resume 后面要跟一个会话 id（/sessions 里那一串，写开头几段就行）' });
+        runCommand('sessions');
         return;
       }
       // 第二个词是那一份模式清单的名字：摘要变了时 D78 要一次显式的选择，界面上没有 `--mode` 这一格，
@@ -461,7 +511,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
             : `${wanted} 在这个项目根跑过的会话里对不上任何一份（/sessions 看列表）` });
           return;
         }
-        if (picked.id === sessionId) {
+        if (picked.id === sessionId && chosenMode === undefined) {
+          setSessionPicker(null);
           push({ kind: 'meta', text: '当前就在这一份上，不用接' });
           return;
         }
@@ -479,8 +530,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           return;
         }
         setSessionId(picked.id);
+        setSessionPicker(null);
         // 投影从那份记录重建，而不是接着画：换过来的这一份里发生过什么，只有记录说得出（I5）。
-        setRows(read.events.flatMap((event) => projectRecord(event)));
+        setRows(read.events.flatMap((event) => projectRecord(event).map((row) => ({ ...row, seq: event.seq }))));
         setLive({ text: '', reasoning: '' });
         setDetail(null);
         const row = listed.sessions.find((item) => item.id === picked.id);
@@ -513,6 +565,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     }
     if (name === 'compact') {
       void (async () => {
+        setRunning(true);
+        try {
         // 压这一件事归宿主：要调模型、要写检查点（D83）。界面只把结果说清楚，包括三种不肯压的情况。
         const done = await client.request('session.compact', { sessionId }).catch((error) => error);
         if (done.code !== undefined) {
@@ -524,6 +578,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           kind: 'meta',
           text: `压掉了第 ${done.fromSeq} 到 ${done.toSeq} 条：投影从约 ${done.tokensBefore} 变成约 ${done.tokensAfter}（本地量法），原文仍在记录里`,
         });
+        } finally {
+          setRunning(false);
+        }
       })();
       return;
     }
@@ -555,7 +612,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           setDetail(null);
           return;
         }
-        const read = await client.request('session.read', { sessionId }).catch((error) => error);
+        const read = await client.request('session.read', { sessionId, fullResults: true }).catch((error) => error);
         if (read.code !== undefined) {
           push({ kind: 'error', text: `记录读不回来：${read.code}` });
           return;
@@ -579,7 +636,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           setDetail(null);
           return;
         }
-        const parent = await client.request('session.read', { sessionId }).catch((error) => error);
+        const parent = await client.request('session.read', { sessionId, fullResults: true }).catch((error) => error);
         if (parent.code !== undefined) {
           push({ kind: 'error', text: `记录读不回来：${parent.code}` });
           return;
@@ -603,7 +660,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           return;
         }
         // 支线那份走的是同一次读记录的动作：它不在这轮的内核里，但它是同一目录下的另一份会话记录（D74）。
-        const read = await client.request('session.read', { sessionId: branch.sessionId }).catch((error) => error);
+        const read = await client.request('session.read', { sessionId: branch.sessionId, fullResults: true }).catch((error) => error);
         if (read.code !== undefined) {
           push({ kind: 'error', text: `支线记录读不回来：${read.code}` });
           return;
@@ -626,27 +683,28 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
 
   const send = useCallback((text) => {
     const route = routeInput(text, running);
+    if (route.kind === 'blocked') {
+      push({ kind: 'meta', text: `这一轮跑着的时候 ${route.usage} 用不了；Esc 先打断这一轮` });
+      return;
+    }
     setDraft('');
     setCaret(0);
     setHistoryAt(-1);
     setPick(0);
     setDismissedAt(null);
-    if (route.kind === 'blocked') {
-      push({ kind: 'meta', text: `这一轮跑着的时候 ${route.usage} 用不了；Esc 先打断这一轮` });
-      return;
-    }
     // 跑着的那一轮里，要交给模型的那一句进队列：这一轮结束后按先后发出，回车不再是吞掉一句话。
     if (route.kind === 'run' && running) {
       setQueue((current) => [...current, route.text]);
       return;
     }
     if (route.kind === 'command') {
+      remember(text);
       push({ kind: 'meta', text: findUiCommand(route.name).usage });
       runCommand(route.name, route.argument);
       return;
     }
     void submit(route.text);
-  }, [push, runCommand, running, submit]);
+  }, [push, remember, runCommand, running, submit]);
 
   // 本轮结束后把队列里的第一条发出去：一次只发一条，剩下的接着排；被打断也算这一轮结束（D20）。
   useEffect(() => {
@@ -658,9 +716,17 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
 
   // 候选每次从当前草稿算出来：草稿改一个字清单就跟着变，不需要再维护一份状态（D81）。
   const templates = status?.templates ?? [];
-  const picks = dismissedAt === draft || search !== null ? [] : candidatesOf(draft, templates);
+  const picks = dismissedAt === draft || search !== null || detail !== null || sessionPicker !== null || ask !== null ? [] : candidatesOf(draft, templates);
   const chosen = picks.length === 0 ? 0 : Math.min(pick, picks.length - 1);
   const searched = search === null ? [] : searchHistory(entries, search.query);
+  const viewLines = useMemo(() => detail === null ? [] : transcriptLines(detail.rows, Math.max(1, geometry.columns - 6)), [detail?.rows, geometry.columns]);
+  const viewHeight = Math.max(1, geometry.rows - 12 - (ask === null ? 0 : 7));
+  const view = viewportPosition(detail?.cursor ?? 0, viewLines.length, viewHeight, detail?.offset ?? 0);
+  const selection = detail?.anchor === undefined || detail.anchor === null ? [view.cursor, view.cursor] : [Math.min(detail.anchor, view.cursor), Math.max(detail.anchor, view.cursor)];
+  const approvalLines = useMemo(() => ask === null ? [] : wrapLine(ask.content, Math.max(1, geometry.columns - 6)), [ask?.content, geometry.columns]);
+  const approvalHeight = Math.max(1, geometry.rows - 12);
+  const approvalView = viewportPosition(approvalCursor, approvalLines.length, approvalHeight);
+  const caretText = useMemo(() => [...GRAPHEMES.segment(draft.slice(caret))][0]?.segment ?? ' ', [draft, caret]);
 
   useInput((input, key) => {
     if (key.ctrl && input === 'c') {
@@ -668,8 +734,78 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     if (key.ctrl && input === 'o') {
-      setExpanded((current) => !current);
+      if (ask !== null) setApprovalExpanded((current) => !current);
+      else {
+        setSessionPicker(null);
+        setSearch(null);
+        setDetail(detail === null ? { seq: null, kind: 'transcript', rows: [], cursor: Number.MAX_SAFE_INTEGER, anchor: null, loading: true } : null);
+        setExpanded(detail === null);
+        if (detail === null) {
+          void client.request('session.read', { sessionId, fullResults: true }).then((read) => {
+            if (activeSession.current !== sessionId) return;
+            const complete = read.events.flatMap((event) => projectRecord(event).map((row) => ({ ...row, seq: event.seq })));
+            setDetail((current) => current?.kind === 'transcript' ? { ...current, rows: complete, loading: false } : current);
+          }, (error) => push({ kind: 'error', text: `完整记录读不回来：${error.code ?? error.message}` }));
+        }
+      }
       return;
+    }
+    if (ask !== null && key.escape) {
+      void client.request('run.cancel', { sessionId }).catch((error) => push({ kind: 'error', text: error.code ?? 'run_cancel_failed' }));
+      return;
+    }
+    if (ask !== null && approvalExpanded) {
+      const target = key.home ? 0 : key.end ? approvalLines.length - 1
+        : key.pageUp ? approvalView.cursor - approvalHeight : key.pageDown ? approvalView.cursor + approvalHeight
+          : key.upArrow ? approvalView.cursor - 1 : key.downArrow ? approvalView.cursor + 1 : null;
+      if (target !== null) { setApprovalCursor(target); return; }
+    }
+    if (ask !== null) {
+      if (input === 'y' || input === 'Y') {
+        const asked = ask;
+        setAsk(null);
+        push({ kind: 'meta', text: `已允许 ${asked.tool}` });
+        client.reply(asked.id, { decision: 'allow' });
+      } else if (input === 'n' || input === 'N') {
+        const asked = ask;
+        setAsk(null);
+        push({ kind: 'meta', text: `已不允许 ${asked.tool}` });
+        client.reply(asked.id, { decision: 'deny' });
+      }
+      return;
+    }
+    if (detail !== null && ask === null) {
+      if (key.escape) { setDetail(null); setExpanded(false); return; }
+      if (key.ctrl && input === 'y') {
+        void copyToClipboard(selectedText(viewLines, view.cursor, detail.anchor ?? null)).then((done) => {
+          if (done.code !== undefined) push({ kind: 'error', text: `复制失败：${done.code}` });
+        });
+        return;
+      }
+      const target = key.home ? 0 : key.end ? viewLines.length - 1
+        : key.pageUp ? view.cursor - viewHeight : key.pageDown ? view.cursor + viewHeight
+          : key.upArrow ? view.cursor - 1 : key.downArrow ? view.cursor + 1 : null;
+      if (target !== null) {
+        const moved = viewportPosition(target, viewLines.length, viewHeight, view.offset);
+        setDetail({ ...detail, ...moved, anchor: key.shift ? detail.anchor ?? view.cursor : null });
+        return;
+      }
+      return;
+    }
+    if (sessionPicker !== null && ask === null) {
+      if (key.escape) { setSessionPicker(null); return; }
+      if (key.upArrow || key.downArrow || key.pageUp || key.pageDown || key.home || key.end) {
+        const step = key.pageUp ? -viewHeight : key.pageDown ? viewHeight : key.upArrow ? -1 : 1;
+        const at = key.home ? 0 : key.end ? sessionPicker.items.length - 1 : Math.max(0, Math.min(sessionPicker.at + step, sessionPicker.items.length - 1));
+        setSessionPicker({ ...sessionPicker, at });
+        return;
+      }
+      if (key.return && draft === '') {
+        if (running) push({ kind: 'meta', text: '当前轮次结束后才能切换会话' });
+        else runCommand('resume', sessionPicker.items[sessionPicker.at].id);
+        return;
+      }
+      if (input !== '' && !key.ctrl && !key.meta) setSessionPicker(null);
     }
     // Ctrl+G 把草稿交给外面那一份编辑器：这一段文本走一份临时文件，回来的是它写回的那一份。
     // 让出终端这件事归 Ink（raw mode 与重画都在它手里），否则编辑器与界面抢同一把输入。
@@ -684,7 +820,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           outcome = await editInExternalEditor(info.editor, draft);
         });
         if (outcome.text === undefined) {
-          push({ kind: 'error', text: `编辑没成：${outcome.code}` });
+          push({ kind: 'error', text: `编辑没成：${outcome.code}${outcome.detail === undefined ? '' : ` · ${outcome.detail}`}` });
           return;
         }
         setDraft(outcome.text);
@@ -731,20 +867,6 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       }
       return;
     }
-    if (ask !== null) {
-      if (input === 'y' || input === 'Y') {
-        const asked = ask;
-        setAsk(null);
-        push({ kind: 'meta', text: `已允许 ${asked.tool}` });
-        client.reply(asked.id, { decision: 'allow' });
-      } else if (input === 'n' || input === 'N') {
-        const asked = ask;
-        setAsk(null);
-        push({ kind: 'meta', text: `已不允许 ${asked.tool}` });
-        client.reply(asked.id, { decision: 'deny' });
-      }
-      return;
-    }
     if (picks.length > 0) {
       if (key.tab) {
         const picked = picks[chosen];
@@ -769,12 +891,26 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     if (key.upArrow || key.downArrow) {
+      if (draft.includes('\n')) {
+        const start = draft.lastIndexOf('\n', Math.max(0, caret - 1)) + 1;
+        const column = caret - start;
+        if (key.upArrow && start > 0) {
+          const previous = draft.lastIndexOf('\n', start - 2) + 1;
+          setCaret(Math.min(previous + column, start - 1));
+        } else if (key.downArrow) {
+          const next = draft.indexOf('\n', caret);
+          if (next >= 0) {
+            const end = draft.indexOf('\n', next + 1);
+            setCaret(Math.min(next + 1 + column, end < 0 ? draft.length : end));
+          }
+        }
+        return;
+      }
       if (entries.length === 0) return;
-      // 只在单行草稿上翻历史：草稿里已经有换行时上下键留给光标。
-      if (draft.includes('\n')) return;
+      if (historyAt === -1 && key.upArrow) setHistoryDraft(draft);
       const next = key.upArrow ? Math.min(historyAt + 1, entries.length - 1) : Math.max(historyAt - 1, -1);
       setHistoryAt(next);
-      const recalled = next < 0 ? '' : entries[next];
+      const recalled = next < 0 ? historyDraft : entries[next];
       setDraft(recalled);
       setCaret(recalled.length);
       return;
@@ -787,8 +923,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       setCaret(last.length);
       return;
     }
-    if (key.return) {
-      if (key.shift) {
+    if (key.return || (key.ctrl && input === 'n')) {
+      if (key.shift || (key.ctrl && input === 'n')) {
         const inserted = draft.slice(0, caret) + '\n' + draft.slice(caret);
         setDraft(inserted);
         setCaret(caret + 1);
@@ -797,7 +933,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       if (draft.trim() !== '') send(draft);
       return;
     }
-    const edited = editDraft(draft, caret, input, key);
+    const edited = editDraft(draft, caret, input.replace(/\r\n?/g, '\n'), key);
     setDraft(edited.draft);
     setCaret(edited.caret);
   // 没有真终端时不开这一路：Ink 在拿不到 raw mode 的输入上是报错而不是降级（检查里就传 interactive: false）。
@@ -809,21 +945,28 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   return h(Fragment, null,
     // 一换会话就重画整份：`Static` 只补索引往后新增的行，接上来的那一份记录比当前这一份短时，
     // 不加这个 key 就一条都画不出来（第 44 步）。会话 id 正是这一串行的归属，拿它当 key 不用另记一个计数。
-    h(Static, { key: sessionId, items: rows }, (row, index) => h(Box, { key: index, flexDirection: 'column' }, h(Row, { row, expanded }))),
+    h(Static, { key: sessionId, items: rows }, (row, index) => h(Box, { key: index, flexDirection: 'column' }, h(Row, { row, expanded: false, columns: geometry.columns }))),
     foldedLive.shown === '' ? null : h(Text, { dimColor: true, wrap: 'truncate-end' }, `· 推理 ${foldedLive.shown}${foldedLive.hidden > 0 ? ` …还有 ${foldedLive.hidden} 字` : ''}`),
-    live.text === '' ? null : h(Text, { wrap: 'wrap' }, live.text),
+    live.text === '' || detail !== null ? null : h(MarkdownRows, { text: live.text, columns: geometry.columns }),
     ask === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'yellow', paddingX: 1 },
       h(Text, { bold: true }, `要执行 ${ask.tool}`),
       h(Text, { wrap: 'truncate-end' }, ask.detail),
       ask.change === '' ? null : h(Text, { dimColor: true }, ask.change),
       ask.backend === '' ? null : h(Text, { dimColor: true, wrap: 'truncate-end' }, `后端 ${ask.backend}`),
-      ask.reason === '' ? null : h(Text, { dimColor: true }, ask.reason),
-      h(Text, null, '按 y 允许一次，按 n 不允许')),
+      ask.reason === '' ? null : h(Text, { dimColor: true, wrap: 'truncate-end' }, ask.reason),
+      approvalExpanded ? h(Fragment, null,
+        ...approvalLines.slice(approvalView.offset, approvalView.offset + approvalHeight).map((line, index) => h(Text, { key: index, wrap: 'truncate-end' }, line)),
+        h(Text, { dimColor: true }, `改动第 ${approvalView.cursor + 1}/${approvalLines.length} 行 · PageUp/Down 查看 · Home/End 到两端`)) : null,
+      h(Text, { wrap: 'truncate-end' }, '按 y 允许一次，按 n 不允许 · Ctrl+O 查看改动 · Esc 打断')),
     detail === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'cyan', paddingX: 1 },
-      h(Text, { dimColor: true }, detailTitle(detail)),
-      detail.rows.length === 0
-        ? h(Text, { dimColor: true }, '这一条没有可画的内容')
-        : detail.rows.map((row, index) => h(Row, { key: index, row, expanded: true }))),
+      h(Text, { dimColor: true, wrap: 'truncate-end' }, detail.kind === 'transcript' ? '会话完整历史' : detailTitle(detail)),
+      viewLines.length === 0
+        ? h(Text, { dimColor: true }, detail.loading ? '正在读取完整记录…' : '这一条没有可画的内容')
+        : viewLines.slice(view.offset, view.offset + viewHeight).map((line, index) => h(Text, { key: view.offset + index, inverse: view.offset + index >= selection[0] && view.offset + index <= selection[1], wrap: 'truncate-end' }, line)),
+      h(Text, { dimColor: true, wrap: 'truncate-end' }, `第 ${view.cursor + 1}/${viewLines.length} 行 · PageUp/Down 分页 · Home/End 到两端 · Shift+↑↓ 选择 · Ctrl+Y 复制 · Esc 收起`)),
+    sessionPicker === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', paddingX: 1 },
+      h(Text, { wrap: 'truncate-end' }, `历史会话 ${sessionPicker.items.length} 份 · ↑↓ 选择 · Enter 接上 · Esc 收起`),
+      sessionPicker.items.slice(Math.max(0, sessionPicker.at - viewHeight + 1), Math.max(0, sessionPicker.at - viewHeight + 1) + viewHeight).map((item) => h(Text, { key: item.id, inverse: item === sessionPicker.items[sessionPicker.at], wrap: 'truncate-end' }, sessionLines([item], sessionId)[0]))),
     queue.length === 0 ? null : h(Box, { flexDirection: 'column' },
       queue.map((item, index) => h(Text, { key: `${index}:${item}`, dimColor: true }, `排队 ${index + 1} · ${queuedLine(item)}`)),
       h(Text, { dimColor: true }, '  这一轮结束后按先后发出；草稿空着时按退格收回最后一条')),
@@ -835,8 +978,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
             h(Text, { inverse: index === search.at }, ` ${queuedLine(entry, 60)}`))),
       h(Text, { dimColor: true }, '  接着打字缩小 · Ctrl+R 或 ↑↓ 换一条 · Enter 填进草稿 · Esc 退出')),
     picks.length === 0 ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'gray', paddingX: 1 },
-      picks.slice(0, CANDIDATE_ROWS).map((candidate, index) => h(Box, { key: `${candidate.source}:${candidate.name}` },
-        h(Text, { inverse: index === chosen }, ` /${candidate.name}${candidate.hint === '' ? '' : ` ${candidate.hint}`}`),
+      picks.slice(Math.max(0, chosen - CANDIDATE_ROWS + 1), Math.max(0, chosen - CANDIDATE_ROWS + 1) + CANDIDATE_ROWS).map((candidate) => h(Box, { key: `${candidate.source}:${candidate.name}` },
+        h(Text, { inverse: candidate === picks[chosen] }, ` /${candidate.name}${candidate.hint === '' ? '' : ` ${candidate.hint}`}`),
         h(Text, { dimColor: true }, ` ${candidate.text}`))),
       picks.length > CANDIDATE_ROWS ? h(Text, { dimColor: true }, `  还有 ${picks.length - CANDIDATE_ROWS} 条，接着打字就缩小了`) : null,
       h(Text, { dimColor: true }, ' Tab 补全 · ↑↓ 选 · Esc 收起')),
@@ -844,11 +987,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       h(Text, { color: running ? 'yellow' : 'cyan' }, running ? `${SPINNER[tick % SPINNER.length]} ` : '› '),
       draft === '' && !running
         ? h(Text, { dimColor: true }, '要模型做的事（Enter 发送，Shift+Enter 换行，打 / 看清单）')
-        : h(Fragment, null,
-          h(Text, null, draft.slice(0, caret)),
-          h(Text, { inverse: true }, draft[caret] ?? ' '),
-          h(Text, null, draft.slice(caret + 1)))),
-    h(Text, { dimColor: true }, buildStatusLine({
+        : h(Text, { wrap: 'wrap' },
+          draft.slice(0, caret),
+          h(Text, { inverse: true }, caretText),
+          draft.slice(caret + (caret === draft.length ? 0 : caretText.length)))),
+    h(Text, { dimColor: true, wrap: 'truncate-end' }, buildStatusLine({
       head, sessionId, boundary: info.boundary, status, running, seconds, expanded, columns: stdout?.columns,
     })),
   );

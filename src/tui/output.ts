@@ -42,13 +42,15 @@ export function exportMarkdown(events: readonly ExportRecord[], meta: { id: stri
         lines.push(`### 第 ${record.seq} 条的一次调用 · ${call.name}`, '', fence(JSON.stringify(call.args ?? {}, null, 2)), '');
       }
     } else if (record.kind === 'tool') {
-      lines.push(`### 第 ${record.seq} 条 · ${record.tool} 的结果`, record.result?.failed === true ? '（这一次没做成）' : '', '', resultBody(record), '');
+      lines.push(`### 第 ${record.seq} 条 · ${record.tool} 的结果`);
+      if (record.result?.failed === true) lines.push(`（这一次没做成）${record.result.code === undefined ? '' : ` ${record.result.code}`}`);
+      lines.push('', resultBody(record), '');
     } else if (record.kind === 'mode') {
       lines.push(`> 第 ${record.seq} 条：模式 ${record.name}（${record.layer ?? ''}）生效`, '');
     }
     // `session` 首行与 `usage` 那一条是元信息与读数，不作为一段：那份文件给人读历史，不是给人读表格。
   }
-  return `${lines.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd()}\n`;
+  return `${lines.join('\n').trimEnd()}\n`;
 }
 
 /** 导出的那几份文件：主干一份，每一条派生支线另写一份，文件名里带着那条支线自己的 id。 */
@@ -67,7 +69,7 @@ export async function writeExport(path: string, main: string, branches: readonly
 
 // 标题那一串来自模型名与项目根这类位置，去掉能终止转义序列的控制字符与双向格式码：
 // 一串带 ESC 或 BEL 的文本写进标题就等于在替这个终端写它自己的指令。
-const CONTROL = /[\u0000-\u001F\u007F-\u009F\u200E\u202A-\u202E]/g;
+const CONTROL = /[\u0000-\u001F\u007F-\u009F\u200E-\u200F\u202A-\u202E\u2066-\u2069]/g;
 
 export function titleText({ model, boundary, sessionId }: { model?: string; boundary?: string; sessionId: string }): string {
   const parts = [model, boundary, sessionId.slice(0, 8)].filter((part) => typeof part === 'string' && part !== '');

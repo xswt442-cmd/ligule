@@ -2,27 +2,39 @@
 // 与那两条比较真实检索后端的检查同一个处理：不能假造一个后端来通过。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFile, mkdtemp, readdir, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { appendFile, cp, mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { withTuiHost } from './helpers/tui-host.js';
 import { HISTORY_LIMIT, SEARCH_ROWS, historyPathOf, loadHistory, pushHistory, rememberHistory, searchHistory } from '../dist/tui/history.js';
 
 let rows = {};
 let missing = '';
+const previousForceColor = process.env.FORCE_COLOR;
+process.env.FORCE_COLOR = '1';
 try {
   rows = await import('../dist/tui/app.js');
 } catch (error) {
   missing = error.code === 'ERR_MODULE_NOT_FOUND' ? 'the terminal UI dependencies are not installed' : error.message;
+} finally {
+  if (previousForceColor === undefined) delete process.env.FORCE_COLOR;
+  else process.env.FORCE_COLOR = previousForceColor;
 }
 
 const options = { skip: missing === '' ? false : missing };
-// `status.get` 交回的那一份形状：界面按它画状态行与候选，假客户端就照协议那一份答。
-const statusLine = () => ({
-  sessionId: 's', running: false, mode: 'minimal', modeLayer: 'shipped', pendingMode: null, policy: 'ask',
-  tools: ['read'], eventCount: 0, denials: { consecutive: 0, total: 0 }, templates: [], usage: null,
-});
+const editorFixture = fileURLToPath(new URL('./fixtures/editor.mjs', import.meta.url));
 const { foldText, editDraft, projectRecord, buildStatusLine, contextSegment, findRecord, branchOf, detailTitle, helpLines, routeInput, candidatesOf, displayWidth, flowGroups, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, resolveSessionId, SESSION_ROWS } = rows;
+const quoted = (value) => `"${value.replaceAll('"', '\\"')}"`;
+const plainOutput = (value) => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
+
+function assertInTestplace(path) {
+  const root = resolve('testplace');
+  const absolutePath = resolve(path);
+  const relativePath = relative(root, absolutePath);
+  assert.ok(relativePath !== '' && !isAbsolute(relativePath) && relativePath !== '..' && !relativePath.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`));
+  return absolutePath;
+}
 
 test('a record becomes the rows the terminal shows, one line each', options, () => {
   assert.deepEqual(projectRecord({ kind: 'user', text: '读一下' }), [{ kind: 'question', text: '读一下' }]);
@@ -97,7 +109,7 @@ test('long content folds to a few lines and counts what is hidden', options, () 
   assert.equal(foldText({ text: 'a body' }, false).shown.includes('[object Object]'), false);
 });
 
-test('the app paints the session line and the input hint onto the terminal', options, async () => {
+test('the app paints the session line and the input hint onto the terminal', options, async () => withTuiHost(async ({ client, sessionId }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
   const { PassThrough } = await import('node:stream');
@@ -111,27 +123,19 @@ test('the app paints the session line and the input hint onto the terminal', opt
   stdout.on('data', (chunk) => { painted += chunk; });
   const stdin = new PassThrough();
   stdin.isTTY = false;
+  const status = await client.request('status.get', { sessionId });
 
-  const client = {
-    onNotification() {},
-    onRequest() {},
-    request: async () => ({
-      mode: 'minimal', modeLayer: 'shipped', pendingMode: null, policy: 'ask',
-      tools: ['read'], eventCount: 0, running: false, denials: { consecutive: 0, total: 0 },
-    }),
-    reply() {},
-  };
   const instance = render(
-    createElement(App, { client, sessionId: 'abcdef01-2345-6789', info: { model: 'test-model' }, interactive: false }),
+    createElement(App, { client, sessionId, info: { model: 'test-model' }, interactive: false }),
     { stdout, stdin, exitOnCtrlC: false, patchConsole: false },
   );
   await delay(200);
   instance.unmount();
 
-  assert.match(painted, /test-model · 会话 abcdef01/);
-  assert.match(painted, /mode:minimal  policy:ask  tools:1/);
+  assert.match(painted, new RegExp(`test-model · 会话 ${sessionId.slice(0, 8)}`));
+  assert.match(painted, new RegExp(`mode:minimal  policy:ask .*tools:${status.tools.length}`));
   assert.match(painted, /打 \/ 看清单/);
-});
+}));
 
 test('the status line names the mode and the decision level separately', options, () => {
   const status = { mode: 'minimal', pendingMode: null, policy: 'ask', tools: ['read', 'find'], eventCount: 3 };
@@ -185,7 +189,7 @@ test('/sub reads the branch reference out of the delegation result', options, ()
 });
 
 // 审批框上要看得见答的是哪一种语法、跑起来会是哪一个可执行文件（D59）：同一条文本在两种后端下的结论可以相反。
-test('the approval box names the shell backend and its executable', options, async () => {
+test('the approval box names the shell backend and its executable', options, async () => withTuiHost(async ({ client, sessionId }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
   const { PassThrough } = await import('node:stream');
@@ -194,41 +198,28 @@ test('the approval box names the shell backend and its executable', options, asy
 
   const stdout = new PassThrough();
   stdout.columns = 100;
-  stdout.isTTY = false;
+  stdout.isTTY = true;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
-  const stdin = new PassThrough();
-  stdin.isTTY = false;
-
-  let deliver;
-  const client = {
-    onNotification() {},
-    onRequest: (handler) => { deliver = handler; },
-    request: async () => ({ mode: 'minimal', modeLayer: 'shipped', pendingMode: null, policy: 'ask', tools: ['exec'], eventCount: 0, running: false, denials: { consecutive: 0, total: 0 } }),
-    reply: (id, result) => result,
-  };
-  const instance = render(createElement(App, { client, sessionId: 'abcdef01-2345-6789', info: {}, interactive: false }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
-  await delay(200);
-  await deliver({
-    id: 'ask-1',
-    method: 'approval.request',
-    params: {
-      sessionId: 'abcdef01-2345-6789',
-      tool: 'exec',
-      command: 'Get-Process | Stop-Process',
-      shell: 'powershell',
-      executable: 'C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe',
-      reason: 'the powershell command is not fully understood: |',
-    },
-  });
-  await delay(120);
-  instance.unmount();
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
+  try {
+    await delay(200);
+    const run = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command: 'node --version | node --version' } }) });
+    await delay(350);
+    assert.match(painted, /要执行 exec/);
+    assert.match(painted, /node --version \| node --version/);
+    assert.match(painted, /后端 (powershell|bash) · /);
+    stdin.write('n');
+    await run;
+  } finally {
+    instance.unmount();
+  }
 
   assert.match(painted, /要执行 exec/);
-  assert.match(painted, /Get-Process \| Stop-Process/);
-  assert.match(painted, /后端 powershell/);
-  assert.match(painted, /not fully understood/);
-});
+  assert.match(painted, /node --version \| node --version/);
+  assert.match(painted, /后端 (powershell|bash) · /);
+}));
 
 // 候选清单：界面那张表在前，宿主交出来的模板在后，都按前缀收窄（D81）。
 test('the candidate list narrows on what is typed and appends host templates', options, () => {
@@ -280,9 +271,8 @@ test('help lists the templates the host reports and says where they come from', 
   assert.match(helpLines(null, 400).join('\n'), /命令/);
 });
 
-// 这一条是第 40 步那处缺陷的直接验证：在终端里敲模板命令，落出去的是原样那一行，不是「没有这条命令」。
-// 假 stdin 带着 setRawMode，按键走 Ink 自己的解析，不需要真终端。
-test('typing a template command completes it and sends the raw line to the host', options, async () => {
+// 这一条验证终端补全后由真实 Host 展开模板，并把结果送进本地 HTTP 模型端点。
+test('typing a template command completes it and expands through the host', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, providerRequests }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
   const { PassThrough } = await import('node:stream');
@@ -296,51 +286,49 @@ test('typing a template command completes it and sends the raw line to the host'
   stdout.on('data', (chunk) => { painted += chunk; });
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
 
-  const sent = [];
-  const client = {
-    onNotification() {},
-    onRequest() {},
-    request: async (method, params) => {
-      sent.push({ method, input: params.input });
-      return method === 'status.get'
-        ? { sessionId: 's', running: false, mode: 'minimal', modeLayer: 'shipped', pendingMode: null, policy: 'ask', tools: ['read'], eventCount: 0, denials: { consecutive: 0, total: 0 }, templates: [{ command: 'git:release:prepare', description: '准备一次发布', hint: '<序号>' }] }
-        : {};
-    },
-    reply: () => {},
-  };
-  const instance = render(createElement(App, { client, sessionId: 's', info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
+  const instance = render(createElement(App, { client, sessionId, info: { boundary: projectDirectory }, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
   try {
     await delay(300);
     stdin.write('/gi');
     await delay(200);
-    assert.match(painted, /git:release:prepare/, '清单里看得见宿主交出来的那一条');
+    assert.match(plainOutput(painted), /git:release:prepare/, '清单里看得见宿主交出来的那一条');
     stdin.write('\t');
     await delay(200);
-    assert.match(painted, /› \/git:release:prepare/, 'Tab 把名字补全了');
+    assert.match(plainOutput(painted), /› \/git:release:prepare/, 'Tab 把名字补全了');
     stdin.write('3');
     await delay(200);
     stdin.write('\r');
     await delay(300);
-    const run = sent.find((call) => call.method === 'run.start');
-    assert.equal(run.input, '/git:release:prepare 3', '交给宿主的是原样那一行，展开归宿主（D24、D81）');
+    assert.ok(providerRequests.some((request) => request.messages.some((message) => message.role === 'user' && message.content === 'Prepare release 3.\n')), '宿主从磁盘模板展开原始调用');
   } finally {
     // 断言失败也要收掉这一具渲染：没 unmount 的 Ink 会留着输入与计时器把测试进程拖住。
     instance.unmount();
   }
-});
+}, { setup: async ({ projectDirectory }) => {
+  const promptDirectory = join(projectDirectory, '.ligule', 'prompts');
+  await mkdir(promptDirectory, { recursive: true });
+  const templateDirectory = join(promptDirectory, 'git', 'release');
+  await mkdir(templateDirectory, { recursive: true });
+  await cp(fileURLToPath(new URL('./fixtures/git-release-prepare.md', import.meta.url)), join(templateDirectory, 'prepare.md'));
+} }));
 
 // 助手那一段的结构看得见：围栏里的内容一行不动，标题与列表分出来，行内那几种写法只留文字（第 41 步）。
 test('markdown text splits into the shapes a terminal can show', options, () => {
   assert.deepEqual(markdownLines('## 要做三件事\n- 读 `note.txt`\n- **改** 一处\n1. 跑一次\n'), [
     { kind: 'heading', text: '要做三件事' },
-    { kind: 'list', text: '读 note.txt' },
-    { kind: 'list', text: '改 一处' },
-    { kind: 'list', text: '跑一次' },
+    { kind: 'list', text: '· 读 note.txt' },
+    { kind: 'list', text: '· 改 一处' },
+    { kind: 'list', text: '1. 跑一次' },
   ]);
   // 围栏里的一行 `#` 是代码，不是标题；尾随空格也留着。
-  assert.deepEqual(markdownLines('```sh\n# 注释   \nls -la\n```'), [{ kind: 'code', text: '# 注释   ' }, { kind: 'code', text: 'ls -la' }]);
-  // 链接留下文字与地址；不成对的星号不动它。
-  assert.deepEqual(markdownLines('看 [文档](https://example.com/a) 与 a*b*c'), [{ kind: 'text', text: '看 文档 (https://example.com/a) 与 a*b*c' }]);
+  const shellLines = markdownLines('```sh\n# 注释   \nls -la\n```');
+  assert.deepEqual(shellLines.map(({ kind, text }) => ({ kind, text })), [{ kind: 'code', text: '# 注释   ' }, { kind: 'code', text: 'ls -la' }]);
+  assert.ok(shellLines[0].spans.some((span) => span.scope?.startsWith('comment')), '代码注释带高亮范围');
+  const jsLines = markdownLines('```js\nconst a = 1\n```');
+  assert.equal(jsLines[0].text, 'const a = 1', '高亮不改变代码正文');
+  assert.ok(jsLines[0].spans.some((span) => span.scope?.startsWith('keyword')), 'JavaScript 关键字带高亮范围');
+  // 链接留下文字与地址；成对的星号只保留包住的文字。
+  assert.deepEqual(markdownLines('看 [文档](https://example.com/a) 与 a*b*c'), [{ kind: 'text', text: '看 文档 (https://example.com/a) 与 abc' }]);
   assert.deepEqual(markdownLines('第一行\n\n第二行'), [{ kind: 'text', text: '第一行' }, { kind: 'text', text: '' }, { kind: 'text', text: '第二行' }]);
 });
 
@@ -375,7 +363,7 @@ test('the approval box sums the change instead of dumping the payload', options,
 });
 
 // 助手那一段画到屏幕上时结构要看得见：这一条走的是真的渲染路径，不是只看纯函数的返回值。
-test('an answer with markdown shapes paints a heading, a list and a code line', options, async () => {
+test('an answer with markdown shapes paints a heading, a list and highlighted code from the host', options, async () => withTuiHost(async ({ client, sessionId }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
   const { PassThrough } = await import('node:stream');
@@ -384,35 +372,30 @@ test('an answer with markdown shapes paints a heading, a list and a code line', 
 
   const stdout = new PassThrough();
   stdout.columns = 100;
-  stdout.isTTY = false;
+  stdout.isTTY = true;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
-  const stdin = new PassThrough();
-  stdin.isTTY = false;
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
+  try {
+    await delay(200);
+    stdin.write('请原样保留这些内容：\n## 两步\n- 先看\n```js\nconst a = 1\n```\n退出码那行是 **0**');
+    await delay(80);
+    stdin.write('\r');
+    await delay(200);
+  } finally {
+    instance.unmount();
+  }
 
-  let notify;
-  const client = {
-    onNotification: (handler) => { notify = handler; },
-    onRequest() {},
-    request: async () => ({ sessionId: 'abcdef01-2345', running: false, mode: 'minimal', modeLayer: 'shipped', pendingMode: null, policy: 'ask', tools: ['read'], eventCount: 0, denials: { consecutive: 0, total: 0 }, templates: [] }),
-    reply: () => {},
-  };
-  const instance = render(createElement(App, { client, sessionId: 'abcdef01-2345', info: {}, interactive: false }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
-  await delay(200);
-  notify({
-    sessionId: 'abcdef01-2345',
-    notify: 'event',
-    event: { kind: 'assistant', text: '## 两步\n- 先看\n```js\nconst a = 1\n```\n退出码那行是 **0**' },
-  });
-  await delay(150);
-  instance.unmount();
-
-  assert.match(painted, /两步/);
-  assert.match(painted, /· 先看/);
-  assert.match(painted, / {2}const a = 1/, '围栏里那一行带缩进画出来');
-  assert.doesNotMatch(painted, /## 两步/, '井号不留在画面上');
-  assert.doesNotMatch(painted, /\*\*0\*\*/, '加粗的星号也不留在画面上');
-});
+  const plain = painted.replace(/\x1B\[[0-9;]*m/g, '');
+  const response = plain.split('Local response:').at(-1) ?? '';
+  assert.match(response, /两步/);
+  assert.match(response, /· 先看/);
+  assert.match(response, / {2}const a = 1/, '围栏里那一行带缩进画出来');
+  assert.doesNotMatch(response, /## 两步/, '井号不留在助手画面上');
+  assert.doesNotMatch(response, /\*\*0\*\*/, '加粗的星号也不留在助手画面上');
+  assert.match(painted, /\x1B\[35mconst\x1B\[39m/, '代码关键字通过高亮颜色呈现');
+}));
 
 // 排队的短句只画前 64 字：这一格的作用是说「排了几条」，不是把整句话再印一遍。
 test('a queued line is clipped to one row', options, () => {
@@ -422,7 +405,7 @@ test('a queued line is clipped to one row', options, () => {
 });
 
 // 跑着的那一轮里回车不再吞话：排进来的按先后在本轮结束后发出，空草稿上按退格收回最后一条（D81 边界二）。
-test('input typed while a round runs queues up and flushes in order', options, async () => {
+test('input typed while a round runs queues up and flushes in order', options, async () => withTuiHost(async ({ client, sessionId, requests }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
   const { PassThrough } = await import('node:stream');
@@ -436,24 +419,7 @@ test('input typed while a round runs queues up and flushes in order', options, a
   stdout.on('data', (chunk) => { painted += chunk; });
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
 
-  const started = [];
-  const resolvers = [];
-  const client = {
-    onNotification() {},
-    onRequest() {},
-    request: async (method, params) => {
-      if (method === 'run.start') {
-        started.push(params.input);
-        return new Promise((resolve) => resolvers.push(() => resolve({ iterations: 1, modelCalls: 1 })));
-      }
-      if (method === 'status.get') {
-        return { sessionId: 'abcdef01-2345', running: false, mode: 'minimal', modeLayer: 'shipped', pendingMode: null, policy: 'ask', tools: ['read'], eventCount: 0, denials: { consecutive: 0, total: 0 }, templates: [] };
-      }
-      return {};
-    },
-    reply: () => {},
-  };
-  const instance = render(createElement(App, { client, sessionId: 'abcdef01-2345', info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
+  const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
   // 文本与回车分两次写：一段中文后面紧跟 `\r` 时被同一个 chunk 吃掉，真键盘上是两次按键。
   const type = async (text) => { stdin.write(text); await delay(80); stdin.write('\r'); await delay(200); };
   // 只看最后一帧：Ink 把每一帧续写在同一个流里，取尾巴会连上一帧的内容一起读。
@@ -461,10 +427,11 @@ test('input typed while a round runs queues up and flushes in order', options, a
   try {
     await delay(250);
     await type('第一条');
-    assert.deepEqual(started, ['第一条'], '第一句直接进这一轮');
+    const started = () => requests.filter((request) => request.method === 'run.start').map((request) => request.params.input);
+    assert.deepEqual(started(), ['第一条'], '第一句直接进这一轮');
     await type('第二条');
     await type('第三条');
-    assert.deepEqual(started, ['第一条'], '跑着的时候不再开第二轮');
+    assert.deepEqual(started(), ['第一条'], '跑着的时候不再开第二轮');
     assert.match(lastFrame(), /排队 1 · 第二条/);
     assert.match(lastFrame(), /排队 2 · 第三条/);
 
@@ -474,14 +441,13 @@ test('input typed while a round runs queues up and flushes in order', options, a
     assert.match(lastFrame(), /第三条/, '收回来的那一句在草稿里');
     assert.equal((lastFrame().match(/排队 \d/g) ?? []).length, 1, '队列里少了一条');
 
-    resolvers.shift()();
-    await delay(300);
-    assert.deepEqual(started, ['第一条', '第二条'], '本轮结束后按先后接上');
+    await delay(3_800);
+    assert.deepEqual(started(), ['第一条', '第二条'], '本轮结束后按先后接上');
   } finally {
     // 断言失败也要收掉这一具渲染：没 unmount 的 Ink 会留着输入与计时器把测试进程拖住。
     instance.unmount();
   }
-});
+}, { delayMs: 1_800 }));
 
 // 状态行上那一段上下文压力（D82、第 43 步）：没写窗口时整段不出现，不是写一个 0 上去。
 test('the status line reports context pressure only when a window is written', options, () => {
@@ -530,7 +496,7 @@ test('the session listing is one row per record and an id prefix resolves to one
 
 // 接上另一份记录时画面上换的是整份投影：那几行来自记录，不来自界面自己留着的东西（I5）。
 // 这里先在当前会话上画一行，再换过去——少了 `Static` 上那个 key，短时的那一份一条都画不出来。
-test('resuming a session repaints that record as the transcript', options, async () => {
+test('resuming a session repaints that record as the transcript', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
   const { PassThrough } = await import('node:stream');
@@ -544,26 +510,13 @@ test('resuming a session repaints that record as the transcript', options, async
   stdout.on('data', (chunk) => { painted += chunk; });
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
 
-  const resumed = '5f3c1234-aaaa-bbbb-cccc-dddddddddddd';
-  const calls = [];
-  let notify = () => {};
-  const client = {
-    onNotification: (handler) => { notify = handler; },
-    onRequest() {},
-    request: async (method, params) => {
-      calls.push({ method, params });
-      if (method === 'sessions.list') return { sessions: [{ id: resumed, updatedAt: '2026-10-05T09:12:34.567Z', events: 2, mode: { name: 'full' }, unanswered: 0 }] };
-      if (method === 'session.open') return { sessionId: params.sessionId };
-      if (method === 'session.read') return { sessionId: params.sessionId, events: [{ kind: 'user', text: '那一份里问过的事' }, { kind: 'assistant', text: '那一份里答过的话' }] };
-      return { sessionId: params.sessionId, running: false, mode: 'full', modeLayer: 'shipped', pendingMode: null, policy: 'ask', tools: ['read'], eventCount: 2, denials: { consecutive: 0, total: 0 }, templates: [] };
-    },
-    reply: () => {},
-  };
-  const instance = render(createElement(App, { client, sessionId: 'current', info: { boundary: 'E:/work' }, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
+  const resumedSession = await client.request('session.create', {});
+  const resumed = resumedSession.sessionId;
+  await client.request('run.start', { sessionId: resumed, input: '那一份里问过的事' });
+  const instance = render(createElement(App, { client, sessionId, info: { boundary: projectDirectory }, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
   try {
     await delay(300);
-    notify({ notify: 'event', sessionId: 'current', event: { seq: 0, kind: 'user', text: '当前这一份里问过的事' } });
-    notify({ notify: 'event', sessionId: 'current', event: { seq: 1, kind: 'assistant', text: '当前这一份里答过的话' } });
+    await client.request('run.start', { sessionId, input: '当前这一份里问过的事' });
     await delay(300);
 
     stdin.write('/sessions');
@@ -573,19 +526,20 @@ test('resuming a session repaints that record as the transcript', options, async
     assert.match(painted, new RegExp(resumed), '列表里看得见那一份的 id');
     assert.doesNotMatch(painted, /项目根下还没有跑过的会话/);
 
-    stdin.write('/resume 5f3c');
+    const beforeResume = painted.length;
+    stdin.write(`/resume ${resumed.slice(0, 8)}`);
     await delay(100);
     stdin.write('\r');
     await delay(500);
-    const frame = painted.split('\x1B[?2026h').pop() ?? '';
-    assert.equal(calls.find((call) => call.method === 'session.open')?.params.sessionId, resumed, '前缀在宿主列出来的那几份里对上了才打开');
-    assert.match(frame, /那一份里答过的话/, '接上来的那一份记录整份重画在画面上');
+    const frame = plainOutput(painted.slice(beforeResume));
+    assert.equal(requests.find((request) => request.method === 'session.open')?.params.sessionId, resumed, '前缀在宿主列出来的那几份里对上了才打开');
+    assert.match(frame, /Local response: 那一份里问过的事/, '接上来的那一份记录整份重画在画面上');
     assert.doesNotMatch(frame, /当前这一份里答过的话/, '换过来之后画面上不再是上一份的投影');
-    assert.match(frame, /会话 5f3c1234/, '状态行说的是现在这一份会话');
+    assert.match(frame, new RegExp(`会话 ${resumed.slice(0, 8)}`), '状态行说的是现在这一份会话');
   } finally {
     instance.unmount();
   }
-});
+}));
 
 // 输入历史跨会话留住（第 45 步）：那一份文件与翻它的两条动作。这一层不依赖 ink，所以不跟着界面那几条一起跳过。
 test('the history keeps the newest sentence first and one place per sentence', () => {
@@ -603,24 +557,25 @@ test('the history keeps the newest sentence first and one place per sentence', (
   assert.deepEqual(searchHistory(['a', 'b'], 'zzz'), []);
 });
 
-test('the history file reads back what it was given and drops a line that is not one', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'ligule-tui-history-'));
+test('the history file reads valid entries and reports a malformed line', async () => {
+  const testplace = resolve('testplace');
+  await mkdir(testplace, { recursive: true });
+  const root = await mkdtemp(join(testplace, 'tui-history-'));
+  const absoluteRoot = assertInTestplace(root);
   const path = historyPathOf(root);
   try {
     assert.deepEqual(await loadHistory(path), [], '还没有过任何一次输入不是错误');
     await rememberHistory(path, ['最新的一条', '旧的一条']);
     assert.deepEqual(await loadHistory(path), ['最新的一条', '旧的一条'], '先后与文件里一致，最新的排在第一个');
     await appendFile(path, '这一行不是 JSON\n');
-    const merged = pushHistory(await loadHistory(path), '又新的一条');
-    await rememberHistory(path, merged);
-    assert.deepEqual(await loadHistory(path), ['又新的一条', '最新的一条', '旧的一条'], '读不懂的那一行丢掉，其余照旧');
+    await assert.rejects(loadHistory(path), (error) => error.code === 'tui_history_invalid' && error.line === 3);
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await rm(assertInTestplace(absoluteRoot), { recursive: true, force: true });
   }
 });
 
 // 上下键翻的是那一份跨会话的历史，Ctrl+R 从里面找；两处都只改草稿，发出去的仍是 `run.start`。
-test('the arrow keys recall the last sentence and Ctrl+R searches the history', options, async () => {
+test('the arrow keys recall the last sentence and Ctrl+R searches the history', options, async () => withTuiHost(async ({ client, sessionId, requests }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
   const { PassThrough } = await import('node:stream');
@@ -635,20 +590,9 @@ test('the arrow keys recall the last sentence and Ctrl+R searches the history', 
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
 
   const remembered = [];
-  const sent = [];
-  const status = { sessionId: 's', running: false, mode: 'minimal', modeLayer: 'shipped', pendingMode: null, policy: 'ask', tools: ['read'], eventCount: 0, denials: { consecutive: 0, total: 0 }, templates: [] };
-  const client = {
-    onNotification() {},
-    onRequest() {},
-    request: async (method, params) => {
-      if (method === 'run.start') sent.push(params.input);
-      return method === 'status.get' ? status : {};
-    },
-    reply: () => {},
-  };
   const instance = render(createElement(App, {
     client,
-    sessionId: 's',
+    sessionId,
     info: {},
     interactive: true,
     stdout,
@@ -660,35 +604,35 @@ test('the arrow keys recall the last sentence and Ctrl+R searches the history', 
     await delay(100);
     stdin.write('\r');
     await delay(400);
-    assert.deepEqual(sent, ['把这条记进历史']);
+    assert.deepEqual(requests.filter((request) => request.method === 'run.start').map((request) => request.params.input), ['把这条记进历史']);
     assert.deepEqual(remembered, ['把这条记进历史'], '发出去的那一句才交给那一份文件');
 
     // 上下键往上翻：第一条就是刚发出去的那一句，因为它排到了历史最前面。
     stdin.write('\x1B[A');
     await delay(300);
-    assert.match(painted.split('\x1B[?2026h').pop() ?? '', /把这条记进历史/, '翻到的那一句回到草稿里');
+    assert.match(plainOutput(painted.split('\x1B[?2026h').pop() ?? ''), /把这条记进历史/, '翻到的那一句回到草稿里');
 
     stdin.write('\x12');
     await delay(200);
     stdin.write('note');
     await delay(300);
     const searching = painted.split('\x1B[?2026h').pop() ?? '';
-    assert.match(searching, /反查 note/);
-    assert.match(searching, /改 note\.txt 的第一行/, '含这一段的那一条列在框里');
+    assert.match(plainOutput(searching), /反查 note/);
+    assert.match(plainOutput(searching), /改 note\.txt 的第一行/, '含这一段的那一条列在框里');
 
     stdin.write('\r');
     await delay(300);
     const picked = painted.split('\x1B[?2026h').pop() ?? '';
-    assert.match(picked, /› 改 note\.txt 的第一行/, 'Enter 把选中的那一条填进草稿');
-    assert.doesNotMatch(picked, /反查 note/, '选完就退出反查');
-    assert.equal(sent.length, 1, '反查本身不发任何东西');
+    assert.match(plainOutput(picked), /› 改 note\.txt 的第一行/, 'Enter 把选中的那一条填进草稿');
+    assert.doesNotMatch(plainOutput(picked), /反查 note/, '选完就退出反查');
+    assert.equal(requests.filter((request) => request.method === 'run.start').length, 1, '反查本身不发任何东西');
   } finally {
     instance.unmount();
   }
-});
+}));
 
-// Ctrl+G 把草稿交给外面那一份编辑器：真的起一个子进程，改的是那一份临时文件（假编辑器脚本在 testplace/）。
-test('Ctrl+G hands the draft to the editor and reads back what it wrote', options, async () => {
+// Ctrl+G 把草稿交给外部编辑器：真实子进程修改临时草稿后，界面读回该内容。
+test('Ctrl+G hands the draft to the editor and reads back what it wrote', options, async () => withTuiHost(async ({ client, sessionId }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
   const { PassThrough } = await import('node:stream');
@@ -702,10 +646,9 @@ test('Ctrl+G hands the draft to the editor and reads back what it wrote', option
   stdout.on('data', (chunk) => { painted += chunk; });
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
 
-  const editor = `node ${fileURLToPath(new URL('../testplace/fake-editor.mjs', import.meta.url))}`;
-  const client = { onNotification() {}, onRequest() {}, request: async () => statusLine(), reply: () => {} };
+  const editor = `${quoted(process.execPath)} ${quoted(editorFixture)} append-crlf - - -`;
   const instance = render(createElement(App, {
-    client, sessionId: 's', info: { editor }, interactive: true, stdout,
+    client, sessionId, info: { editor }, interactive: true, stdout,
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
   try {
     await delay(300);
@@ -714,14 +657,14 @@ test('Ctrl+G hands the draft to the editor and reads back what it wrote', option
     stdin.write('\x07');
     await delay(1_500);
     const frame = painted.split('\x1B[?2026h').pop() ?? '';
-    assert.match(frame, /草稿里的一半\n?从编辑器里补上的那一句|从编辑器里补上的那一句/, '编辑器写回的那一份回到草稿里');
+    assert.match(frame, /草稿里的一半 edited/, '编辑器写回的那一份回到草稿里');
     assert.doesNotMatch(frame, /编辑没成/);
   } finally {
     instance.unmount();
   }
-});
+}));
 
-test('Ctrl+G says the editor is not configured instead of guessing one', options, async () => {
+test('Ctrl+G says the editor is not configured instead of guessing one', options, async () => withTuiHost(async ({ client, sessionId }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
   const { PassThrough } = await import('node:stream');
@@ -735,8 +678,7 @@ test('Ctrl+G says the editor is not configured instead of guessing one', options
   stdout.on('data', (chunk) => { painted += chunk; });
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
 
-  const client = { onNotification() {}, onRequest() {}, request: async () => statusLine(), reply: () => {} };
-  const instance = render(createElement(App, { client, sessionId: 's', info: {}, interactive: true, stdout }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
+  const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true, stdout }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
   try {
     await delay(300);
     stdin.write('\x07');
@@ -745,15 +687,18 @@ test('Ctrl+G says the editor is not configured instead of guessing one', options
   } finally {
     instance.unmount();
   }
-});
+}));
 
 // 外部编辑器那一条的失败路径也要把临时目录收掉：那一份草稿里可能是刚写的一半代码。
 test('a failed editor run leaves no temporary directory behind', async () => {
   const { editInExternalEditor } = await import('../dist/tui/editor.js');
   const leftovers = async () => (await readdir(tmpdir())).filter((name) => name.startsWith('ligule-editor-'));
   const before = await leftovers();
-  assert.deepEqual(await editInExternalEditor('node 这份脚本不存在.mjs', '草稿的一半'), { code: 'tui_editor_failed' });
+  const failed = await editInExternalEditor(`${quoted(process.execPath)} ${quoted(join(resolve('test'), 'fixtures', 'editor.mjs'))} exit - - 17`, '草稿的一半');
+  assert.equal(failed.code, 'tui_editor_failed');
+  assert.match(failed.detail, /17/);
   assert.deepEqual(await leftovers(), before, '退出码不是 0 那一条路径上临时目录也删掉了');
-  assert.deepEqual(await editInExternalEditor('   ', '草稿的一半'), { code: 'tui_editor_command_invalid' });
+  const empty = await editInExternalEditor('   ', '草稿的一半');
+  assert.deepEqual(empty, { code: 'tui_editor_command_invalid', detail: 'EDITOR must contain a program name' });
   assert.deepEqual(await leftovers(), before, '命令名为空时连目录都不建');
 });

@@ -2,12 +2,12 @@
 // 排版与编码都是纯计算；落盘那一条只写进临时目录；`/export` 那一条走真的 Ink 渲染路径喂按键。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { readFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 import { exportMarkdown, titleEscape, titleText, writeExport } from '../dist/tui/output.js';
 import { clipboardPayload, copyToClipboard, lastAnswer } from '../dist/tui/clipboard.js';
 import { routeInput } from '../dist/tui/commands.js';
+import { withTuiHost } from './helpers/tui-host.js';
 
 let missing = '';
 try {
@@ -42,6 +42,11 @@ test('the exported markdown gives each call and each result its own section', ()
   assert.equal(text.split('\n### ').length - 1, 3, '那一次调用与两次结果各自一段');
 });
 
+test('the exported markdown preserves consecutive blank lines in the original body', () => {
+  const text = exportMarkdown([{ seq: 8, kind: 'assistant', text: '第一段\n\n\n第二段' }], { id: 's-8' });
+  assert.ok(text.includes('第一段\n\n\n第二段'));
+});
+
 test('the terminal title drops the characters that could end its own escape', () => {
   assert.equal(titleText({ model: 'test-model', boundary: '/work', sessionId: '0123456789' }), 'test-model · /work · 01234567');
   assert.equal(titleText({ model: 'm\u001B]0;pwn\u0007', boundary: '/w\nork', sessionId: 'abc' }), 'm]0;pwn · /work · abc');
@@ -64,7 +69,7 @@ test('the clipboard payload is the encoding the local program reads back', async
   assert.equal(routeInput('/export 笔记/这次运行.md', true).kind, 'command');
 });
 
-test('/export writes this record as markdown and one file per branch', options, async () => {
+test('/export writes real host and subagent records as markdown', options, async () => withTuiHost(async ({ client, sessionId, directory, config, requests }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
   const { PassThrough } = await import('node:stream');
@@ -78,32 +83,45 @@ test('/export writes this record as markdown and one file per branch', options, 
   stdout.on('data', (chunk) => { painted += chunk; });
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
 
-  const root = await mkdtemp(join(tmpdir(), 'ligule-export-'));
-  const path = join(root, 'notes', 'run.md');
-  const branchEvents = [{ seq: 0, kind: 'user', text: '支线里问的那一句' }];
-  const parent = [...events, { seq: 6, kind: 'tool', tool: 'subagent', callId: 'c9', result: { content: { sessionId: 's-1.sub-1', text: '支线答完的话' } } }];
-  const client = {
-    onNotification() {},
-    onRequest() {},
-    request: async (method, params) => {
-      if (method === 'session.read') return { sessionId: params.sessionId, events: params.sessionId === 's-1' ? parent : branchEvents };
-      return { sessionId: 's-1', running: false, mode: 'full', modeLayer: 'shipped', pendingMode: null, policy: 'ask', tools: ['read'], eventCount: 0, denials: { consecutive: 0, total: 0 }, templates: [], usage: null };
-    },
-    reply: () => {},
-  };
-  const instance = render(createElement(App, { client, sessionId: 's-1', info: {}, interactive: true, stdout }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
+  const exportDirectory = join(directory, 'export');
+  const projectDirectory = config.boundary;
+  await mkdir(exportDirectory, { recursive: true });
+  const path = join(exportDirectory, 'run.md');
+  const instance = render(createElement(App, { client, sessionId, info: { boundary: projectDirectory }, interactive: true, stdout }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
   try {
     await delay(300);
+    await client.request('mode.set', { sessionId, name: 'full' });
+    let runFinished = false;
+    const run = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'subagent', args: { task: '支线导出验证' } }) })
+      .finally(() => { runFinished = true; });
+    for (let attempt = 0; attempt < 40 && !runFinished && !painted.includes('要执行 subagent'); attempt += 1) await delay(100);
+    if (painted.includes('要执行 subagent')) stdin.write('y');
+    await run;
+    const parentRead = await client.request('session.read', { sessionId, fullResults: true });
+    const branchEvent = parentRead.events.find((event) => event.kind === 'tool' && event.tool === 'subagent');
+    const branchId = branchEvent?.result?.content?.sessionId;
+    assert.equal(typeof branchId, 'string', '支线 id 来自 Host 记录的真实 subagent 结果');
+    const branchRead = await client.request('session.read', { sessionId: branchId, fullResults: true });
+    assert.equal(branchRead.header.projectRoot, projectDirectory);
+    assert.ok(branchRead.events.some((event) => event.kind === 'user' && event.text === '支线导出验证'));
+
     stdin.write(`/export ${path}`);
     await delay(100);
     stdin.write('\r');
     await delay(600);
-    const written = [path, join(root, 'notes', 'run.s-1.sub-1.md')];
+    const branchPath = join(exportDirectory, `run.${branchId}.md`);
     assert.match(painted, /已写出 2 份文件/, '说清写了哪两份');
-    assert.match(await readFile(path, 'utf8'), /第 2 条 · read 的结果/);
-    assert.match(await readFile(written[1], 'utf8'), /支线里问的那一句/, '派生支线另写一份，内容它那一条线自己的');
+    const mainText = await readFile(path, 'utf8');
+    const branchText = await readFile(branchPath, 'utf8');
+    assert.match(mainText, new RegExp(`# ligule 会话 ${sessionId}`));
+    assert.match(mainText, new RegExp(`- 项目根：${projectDirectory.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+    assert.match(mainText, /一次调用 · subagent/);
+    assert.ok(mainText.includes('支线导出验证'));
+    assert.match(branchText, new RegExp(`# ligule 会话 ${branchId}`));
+    assert.match(branchText, new RegExp(`- 项目根：${projectDirectory.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+    assert.ok(branchText.includes('Local response: 支线导出验证'));
+    assert.ok(requests.some((request) => request.method === 'session.read' && request.params.sessionId === branchId && request.params.fullResults === true));
   } finally {
     instance.unmount();
-    await rm(root, { recursive: true, force: true });
   }
-});
+}));
