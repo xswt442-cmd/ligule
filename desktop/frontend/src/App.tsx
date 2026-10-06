@@ -5,6 +5,7 @@ import { Icon } from './components/Icon';
 import { SettingsDialog } from './components/Settings';
 import { RowView } from './components/RowView';
 import { SessionRail } from './components/SessionRail';
+import { ModelPanel } from './components/ModelPanel';
 import { UsageMeter } from './components/UsageMeter';
 import { Palette, type Command } from './components/Palette';
 import { hotkeyOf } from './hotkeys';
@@ -91,21 +92,20 @@ const menuPanels: Panel<PanelProps>[] = [
     title: '派生支线',
     view: ({ client, sessionId, settings }) => <BranchPanel client={client} sessionId={sessionId} verbosity={settings.verbosity} />,
   },
+  {
+    id: 'panel.model',
+    title: '模型与端点',
+    view: ({ client }) => <ModelPanel client={client} />,
+  },
 ];
 
-// 还没有实现的三项：菜单里看得见，点开只说明缺的是哪一件，不做半只的开关。
+// 还没有实现的两项：菜单里看得见，点开只说明缺的是哪一件，不做半只的开关。
 const pendingPanels: Panel<PanelProps>[] = [
   {
     id: 'panel.policy',
     title: '审批规则',
     pending: true,
-    view: () => <p className="stub">档位现在是整个运行一份，按工具名一份那一档没定（未定项 U22）。界面在这里放开关就等于替那条未定项做决定，所以先不放。</p>,
-  },
-  {
-    id: 'panel.model',
-    title: '模型与端点',
-    pending: true,
-    view: () => <p className="stub">服务地址与模型名读的是配置文件那三层（D8），协议表里那九条方法没有一条读写配置。这一项要先加方法，界面改配置才谈得上。设置那一个对话框里也写着这一条。</p>,
+    view: () => <p className="stub">档位是整个运行一份，逐件收紧走配置里的规则表，那条已经定了（U41、U22）。这一格要放开关，得先有写配置的方法：协议里现在只有读配置的那一条（`config.get`）。</p>,
   },
   {
     id: 'panel.windows',

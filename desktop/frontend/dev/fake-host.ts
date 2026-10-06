@@ -205,6 +205,9 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
         status = { ...status, mode: name, modeLayer: 'shipped' };
         return reply({ mode: name, layer: status.modeLayer, pending: null, tools: status.tools });
       }
+      case 'config.get':
+        // 假宿主也按白名单答：这几格是真的配置文件里会写的那种值，密钥本身从来不在里面（D13）。
+        return reply({ model: { api: 'chat-completions', baseURL: 'https://example.test/v1', model: 'fake-review-model', apiKeyEnv: 'LIGULE_FAKE_KEY' } });
       case 'session.compact':
         status = { ...status, usage: { ...status.usage, estimated: 12_400 } };
         return reply({ sessionId: params.sessionId, fromSeq: 0, toSeq: 6, tokensBefore: 41_512, tokensAfter: 12_400 });
