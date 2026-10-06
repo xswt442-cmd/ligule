@@ -245,7 +245,11 @@ export function App({ transport }: { transport: Transport }) {
   // 跟随最新：画面停在最后一行时新内容进来就滚到底；人往上翻过就不再自动滚，给一个跳回最新的按钮。
   const scroller = useRef<HTMLDivElement | null>(null);
   const [pinned, setPinned] = useState(true);
-  const [limit, setLimit] = useState(RENDER_WINDOW);
+  // 历史读到哪一条了：`before` 是这一页最早那一条事件的序号，`hasMore` 说宿主那一边还有没有更早的（方案 4.1）。
+  // 界面手里只有读过的这几页，整份记录留在宿主那一边（实现顺序第 73 步）。
+  const [page, setPage] = useState<{ before: number; hasMore: boolean } | null>(null);
+  const [olderLoading, setOlderLoading] = useState(false);
+  const anchor = useRef<{ height: number; top: number } | null>(null);
   // 那一次派发是什么时候交出去的：只为算用时，键是调用 id（D94）。
   const dispatchAt = useRef(new Map<string, number>());
   const [seconds, setSeconds] = useState(0);
@@ -291,6 +295,15 @@ export function App({ transport }: { transport: Transport }) {
     if (node !== null && pinned) node.scrollTop = node.scrollHeight;
   }, [rows, live, pinned]);
 
+  // 往前插了一页之后把画面按回原来那一条上：那一页多高只有浏览器量得到，按行数估会跳。
+  // 这一段排在上面那一条之后，所以刚插进旧页的那一次以它为准。
+  useEffect(() => {
+    const node = scroller.current;
+    if (node === null || anchor.current === null) return;
+    node.scrollTop = anchor.current.top + (node.scrollHeight - anchor.current.height);
+    anchor.current = null;
+  }, [rows]);
+
   const onScroll = useCallback(() => {
     setPinned(nearBottom());
   }, []);
@@ -300,6 +313,27 @@ export function App({ transport }: { transport: Transport }) {
     if (node !== null) node.scrollTo({ top: node.scrollHeight, behavior: 'smooth' });
     setPinned(true);
   }, []);
+
+  // 「显示更早」要的那一页仍在宿主那一边：游标是这一页最早那一条事件的序号，它稳定也单调，
+  // 所以翻页期间新到的事实在末尾追加，手里这一页不重复也不漏（方案 4.1、实现顺序第 73 步）。
+  const showEarlier = useCallback(async () => {
+    if (sessionId === null || page === null || !page.hasMore || olderLoading) return;
+    const node = scroller.current;
+    anchor.current = node === null ? null : { height: node.scrollHeight, top: node.scrollTop };
+    setOlderLoading(true);
+    try {
+      const older = await client.call('session.read',
+        { sessionId, before: page.before, limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean };
+      const added = older.events.flatMap((record) => projectRecord(record));
+      setRows((current) => [...added, ...current]);
+      setPage({ before: older.events.length === 0 ? page.before : Number(older.events[0]?.seq), hasMore: older.hasMore });
+    } catch (error) {
+      anchor.current = null;
+      setRows((current) => [...current, metaRow('error', `更早的那一页读不来：${code(error)}`)]);
+    } finally {
+      setOlderLoading(false);
+    }
+  }, [client, olderLoading, page, sessionId]);
 
   useEffect(() => {
     active.current = sessionId;
@@ -424,7 +458,7 @@ export function App({ transport }: { transport: Transport }) {
       const created = await client.call('session.create', {}) as { sessionId: string };
       setSessionId(created.sessionId);
       setRows([]);
-      setLimit(RENDER_WINDOW);
+      setPage(null);
       setLive({ text: '', reasoning: '' });
       void refreshStatus(created.sessionId);
     } catch (error) {
@@ -441,7 +475,7 @@ export function App({ transport }: { transport: Transport }) {
   const openSession = useCallback(async (id: string) => {
     setSessionId(id);
     setRows([]);
-    setLimit(RENDER_WINDOW);
+    setPage(null);
     setLive({ text: '', reasoning: '' });
     dispatchAt.current.clear();
     setReading(true);
@@ -449,8 +483,10 @@ export function App({ transport }: { transport: Transport }) {
       // 两条都带超时：那一边不回话时要显示失败那一种状态，不能一直停在「在读那份记录…」。
       await client.call('session.open', { sessionId: id }, 15_000);
       // fullResults 那一格是给界面读的：溢出文件里的整段正文这才到得了画面（记录本身不动）。
-      const { events } = await client.call('session.read', { sessionId: id, fullResults: true }, 15_000) as { events: Record_[] };
-      setRows(events.flatMap((record) => projectRecord(record)));
+      // 只取最近这一页：更早的靠「显示更早」那一格按游标往前要（方案 4.1、实现顺序第 73 步）。
+      const first = await client.call('session.read', { sessionId: id, limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean };
+      setRows(first.events.flatMap((record) => projectRecord(record)));
+      setPage({ before: Number(first.events[0]?.seq ?? 1), hasMore: first.hasMore });
     } catch (error) {
       setRows((current) => [...current, metaRow('error', `那份会话接不上：${code(error)}`)]);
     } finally {
@@ -618,7 +654,6 @@ export function App({ transport }: { transport: Transport }) {
     settings,
     patch,
   };
-  const hidden = Math.max(0, rows.length - limit);
 
   return <div className="frame" data-collapsed={collapsed ? 'true' : undefined} data-dock={settings.dock}>
     <aside className="sidebar">
@@ -649,8 +684,10 @@ export function App({ transport }: { transport: Transport }) {
         <div className="stream">
           {reading && <p className="placeholder"><Icon name="clock" size={14} /> 在读那份记录…</p>}
           {!reading && rows.length === 0 && live.text === '' && <p className="placeholder"><Icon name="spark" size={14} /> 还没有轮次。下方输入一句话，Enter 直接开始。</p>}
-          {hidden > 0 && <button type="button" className="earlier" onClick={() => setLimit((n) => n + RENDER_WINDOW)}>显示更早的 {hidden} 行</button>}
-          {rows.slice(hidden).map((row) => <RowView key={row.id} row={row} verbosity={verbosity} />)}
+          {page?.hasMore === true && <button type="button" className="earlier" disabled={olderLoading} onClick={() => void showEarlier()}>
+            {olderLoading ? '在读更早的一页…' : '显示更早的一页'}
+          </button>}
+          {rows.map((row) => <RowView key={row.id} row={row} verbosity={verbosity} />)}
           {/* 流式那半截排在已落盘的那些行之后：它是这一轮的末尾，画到开头去就把因果倒过来了。 */}
           {live.reasoning !== '' && <RowView row={{ ...LIVE_REASONING, text: live.reasoning }} verbosity={verbosity} />}
           {live.text !== '' && <RowView row={{ ...LIVE_ANSWER, text: live.text }} verbosity={verbosity} />}

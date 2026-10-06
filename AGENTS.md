@@ -203,6 +203,7 @@ npm run build-rg    downloads the pinned ripgrep into packages/rg-*
 ## Reading a record
 
 - `session.read` returns the record of an open session, and for a session that is not open it returns only its own `<open id>.sub-<n>` branch (D74).
+- A history page is asked for with `limit` and `before` (D73, 方案 4.1). `before` is the sequence number of an event in that record — stable and increasing — so walking back never repeats or skips events while new ones append at the end. Every read answers `endSeq`, the end of the snapshot it stopped at, and `hasMore`, whether older events remain. A cursor that names no event in that record is `session_cursor_invalid`, not a quiet first page. Spilled results are read only for the events a page returned.
 - Listing past sessions is `sessions.list` for a client and `ligule sessions` for a person; taking over another session is `session.open`.
 - A session id becomes a file name, so an id with a path separator, a colon, a NUL byte or the shape `..` is refused with `session_id_invalid` before anything touches the directory, and a missing record is `session_not_found`.
 
@@ -253,6 +254,7 @@ npm run build-rg    downloads the pinned ripgrep into packages/rg-*
 - Rust names no protocol method, event or error code, and `desktop/src-tauri/Cargo.toml` carries no serialization, HTTP or WebSocket dependency.
 - The shell has four commands: `host_send`, `host_stop`, `host_restart`, `app_quit`. `host_restart` runs the same start path, which hands back the previous child and terminates it, so only one process ever writes frames into the window. Which session to take back is the interface's decision, carried by `session.open` (D30).
 - Interface content registers into a declared slot in `desktop/frontend/src/slots.ts` instead of editing the render path. `src/main.tsx` reads `window.__LIGULE_TRANSPORT__` when a page sets one, which is how the browser check drives it without a shell.
+- The desktop transcript holds only the pages it read: the first `session.read` asks for the newest page, and 「显示更早」 asks for the page before that cursor. The whole record stays on the Host side. Prepending a page moves the scroll by the height the browser measured, because a row count would jump.
 - `desktop/` stays outside `package.json#files`.
 - The installer carries its own runtime (D34). `node desktop/fetch-runtime.mjs` vendors the pinned `node.exe`, the built `dist/` tree, production dependencies and installed transitive optional dependencies into `desktop/vendor/`. This includes platform native packages when installed and omits unrelated root optional dependencies such as the terminal UI packages. That directory is never committed, and `bundle.resources` mounts them as `node/` and `app/`.
 - The shell looks for the backend in this order: `LIGULE_DESKTOP_CLI`, the bundled `app/dist/cli.js`, then `dist/cli.js` walking up from the executable. It prefers the bundled node over `NODE` and `PATH`.

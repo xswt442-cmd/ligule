@@ -192,7 +192,17 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
           : options.events === undefined
             ? eventsOf(id)
             : Array.from({ length: options.events }, (_unused, index) => longEvent(index + 1));
-        return reply({ sessionId: id, events: params.fullResults === true ? fillSpills(loaded) : loaded });
+        // 分页那一格与宿主同一套说法：游标是这一页最早那一条事件的序号，`hasMore` 说前面还有没有更早的（方案 4.1）。
+        const before = typeof params.before === 'number' ? params.before : undefined;
+        const limit = typeof params.limit === 'number' ? params.limit : undefined;
+        const older = (before === undefined ? loaded : loaded.filter((event) => Number(event.seq) < before));
+        const page = limit === undefined ? older : older.slice(-limit);
+        return reply({
+          sessionId: id,
+          events: params.fullResults === true ? fillSpills(page) : page,
+          endSeq: page.length === 0 ? null : Number(page.at(-1)?.seq),
+          hasMore: page.length > 0 && Number(page[0]?.seq) > 1,
+        });
       }
       case 'sessions.list':
         return reply({ sessions: params.projectRoot === undefined ? sessions : sessions.filter((item) => item.projectRoot === params.projectRoot) });
