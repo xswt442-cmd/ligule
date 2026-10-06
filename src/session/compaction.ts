@@ -2,7 +2,7 @@
 // 两条触发分开走：压力那条在请求拼好之后本地量一次（本地估算要用端点上一次交回的真实用量修正，低估会让它永远不响），
 // 超长那条只在端点报回之后走，并且整个运行只允许一次压缩加一次重试。事件日志一条都不动（D75）。
 import { writeFile } from 'node:fs/promises';
-import { checkpointPath, createCheckpoint, loadCheckpoint } from './checkpoint.js';
+import { checkpointPath, createCheckpoint, loadCheckpoint, PROJECTED_KINDS } from './checkpoint.js';
 import { spillContent } from '../kernel/result.js';
 import { KernelError } from '../kernel/error.js';
 import type { SessionEvent } from './format.js';
@@ -14,17 +14,19 @@ export { estimateRequest, estimateTokens } from './usage.js';
 // 连一条都放不下的时候（预算比最后一条还小）只能留下最后那一条 user 或 assistant：
 // 一个空的投影拼不出请求，而压过头比压不动更可查。
 export function cutPoint(events: SessionEvent[], budgetTokens: number, measure: (event: SessionEvent) => number = estimateTokens): number | null {
+  // 切点看的是模型请求里那一段：推理段、模式、用量与轮次标记都不进投影，也就不吃保留量（D32、D75）。
+  const list = events.filter((event) => PROJECTED_KINDS.includes(String(event.kind)));
   let total = 0;
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    total += measure(events[index]);
+  for (let index = list.length - 1; index >= 0; index -= 1) {
+    total += measure(list[index]);
     if (total <= budgetTokens) continue;
-    for (let cut = index + 1; cut < events.length; cut += 1) {
-      const kind = events[cut].kind;
-      if (kind === 'user' || kind === 'assistant') return Number(events[cut].seq);
+    for (let cut = index + 1; cut < list.length; cut += 1) {
+      const kind = list[cut].kind;
+      if (kind === 'user' || kind === 'assistant') return Number(list[cut].seq);
     }
     for (let cut = index; cut >= 0; cut -= 1) {
-      const kind = events[cut].kind;
-      if (kind === 'user' || kind === 'assistant') return Number(events[cut].seq);
+      const kind = list[cut].kind;
+      if (kind === 'user' || kind === 'assistant') return Number(list[cut].seq);
     }
     return null;
   }
@@ -130,9 +132,13 @@ export function createCompaction({ provider, session, directory, id, limits, log
     const { checkpoint } = await loadCheckpoint({ directory, id, events });
     const fromSeq = checkpoint?.fromSeq ?? 0;
     const tail = events.filter((event) => event.seq >= fromSeq);
+    // 不进投影的那几种事件既不占保留量，也不算「压完还剩多少」：切点那一处已经过滤，
+    // 这里再按同一份名单算剩下的那一段（D32、D75）。
+    const projected = tail.filter((event) => PROJECTED_KINDS.includes(String(event.kind)));
     // 切点用的也是修正过的那一份量法：不然压力线按真实用量响，切点按本地字节切，压完还是越线。
     const cut = cutPoint(tail, retained, (event) => estimateTokens(event) * factor);
     if (cut === null) return null;
+    // 覆盖范围按记录写：检查点校验的是那一段序号连续，与哪几种事件进投影无关。
     const covered = tail.filter((event) => event.seq < cut);
     if (covered.length === 0) return null;
     const tokensBefore = estimateTokens(await session.modelView());
@@ -156,7 +162,7 @@ export function createCompaction({ provider, session, directory, id, limits, log
     });
     // 压完不比压之前小就不要压：一份把 25 token 换成 144 token 的检查点只是多一个要校验的文件，
     // 而它顶着的那一段历史再也不会被模型读到。手动那一条尤其要说清「压不动」。
-    const remaining = tail.filter((event) => event.seq >= cut);
+    const remaining = projected.filter((event) => event.seq >= cut);
     const tokensAfter = estimateTokens(kept) + remaining.reduce((sum, event) => sum + estimateTokens(event), 0);
     if (tokensAfter >= tokensBefore) {
       logger?.log?.('compaction would not shrink the projection, skipping', {

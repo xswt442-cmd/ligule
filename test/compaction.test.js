@@ -108,7 +108,7 @@ test('pressure over the line compacts once and the next request carries the summ
     assert.equal(sent.messages.at(-1).text, '再问一句', 'the input of this round is still there');
 
     const after = await readFile(join(directory, `${id}.jsonl`), 'utf8');
-    assert.equal(after.trim().split('\n').length, lines + 2, 'the round adds its own two events and the checkpoint adds none');
+    assert.equal(after.trim().split('\n').length, lines + 3, '这一轮加用户、助手与轮次完成那三条，检查点一条都不加');
     const numbers = logged.find((entry) => entry.message === 'session compacted');
     assert.ok(numbers.tokensBefore > numbers.tokensAfter, 'a summary removes more than it adds');
   });
@@ -330,4 +330,22 @@ test('a summary that would not shrink the projection is refused', async () => {
     assert.ok(logged.some((entry) => String(entry.message).includes('would not shrink')), '要说清为什么没压');
     await assert.rejects(() => readFile(join(directory, `${id}.checkpoint.json`), 'utf8'), '没写出检查点');
   });
+});
+
+// 不进投影的那几种事件不吃保留量：轮次标记与用量插进去，切点不动（实现顺序第 68 步）。
+test('the cut point ignores events that never reach the model', () => {
+  const long = (count) => 'x'.repeat(count);
+  const mixed = [
+    { seq: 0, kind: 'user', text: long(1200) },
+    { seq: 1, kind: 'turn', ignorable: true, status: 'completed' },
+    { seq: 2, kind: 'assistant', text: long(1200) },
+    { seq: 3, kind: 'usage', ignorable: true, input: 10, output: 5, estimated: 12 },
+    { seq: 4, kind: 'assistant', text: long(1200) },
+    { seq: 5, kind: 'mode', name: 'full' },
+    { seq: 6, kind: 'assistant', text: long(1200) },
+  ];
+  const projected = mixed.filter((event) => ['user', 'assistant', 'tool'].includes(event.kind));
+  const cut = cutPoint(mixed, 700);
+  assert.equal(cut, cutPoint(projected, 700), '同一份历史，插不插那些事件都切在同一处');
+  assert.ok(cut !== null && cut > 0, '这份样例要真切出一刀来，等号才不是两个 null 相等');
 });

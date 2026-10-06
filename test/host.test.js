@@ -140,7 +140,8 @@ test('a client over stdio drives one round, answers one approval and watches the
     assert.ok(notifications.every((message) => NOTIFICATIONS.includes(message.notify)), 'nothing arrives outside the names the protocol declares');
     const events = notifications.filter((message) => message.notify === 'event').map((message) => message.event);
     // 装载先记一条模式事件：那一份清单是这一轮工具栏目的来源（I2、I5）。
-    assert.deepEqual(events.map((event) => event.kind), ['mode', 'user', 'assistant', 'tool', 'assistant']);
+    // 最后那一条是轮次完成标记：它跟在助手那一条之后，不进投影（实现顺序第 68 步）。
+    assert.deepEqual(events.map((event) => event.kind), ['mode', 'user', 'assistant', 'tool', 'assistant', 'turn']);
     assert.equal(events.find((event) => event.kind === 'tool').result.content.text, 'the body', 'the tool result the client saw is the file content');
 
     // 客户端看见的那一条与记录里落盘的那一条同源，序号也在通知里带回来了。
@@ -232,7 +233,7 @@ test('a second Host process opens the same record, so the session lives in the H
       const reopened = await second.client.request('session.read', { sessionId });
       assert.equal(reopened.sessionId, sessionId);
       // 第二个进程装载同一份清单，不再往记录里补一条：attach 与读不动事实源（I5）。
-      assert.deepEqual(reopened.events.map((event) => event.kind), ['mode', 'user', 'assistant', 'tool', 'assistant']);
+      assert.deepEqual(reopened.events.map((event) => event.kind), ['mode', 'user', 'assistant', 'tool', 'assistant', 'turn']);
       assert.equal(reopened.events.find((event) => event.kind === 'tool').result.content.text, 'the body');
       const status = await second.client.request('status.get', { sessionId });
       assert.equal(status.running, false);

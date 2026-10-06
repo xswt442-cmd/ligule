@@ -26,7 +26,8 @@ export interface CheckpointRead {
 }
 
 // 只有参与模型请求重建的那几种事件进输入：推理段不进投影（D32），模式那一条是装配事实而不是对话内容。
-const PROJECTED_KINDS = ['user', 'assistant', 'tool'];
+// 压缩算预算用的是同一份名单：切点与「压完还剩多少」都按模型请求里那一段算。
+export const PROJECTED_KINDS = ['user', 'assistant', 'tool'];
 
 const textOf = (value: unknown): string => (typeof value === 'string' ? value : JSON.stringify(value ?? null));
 

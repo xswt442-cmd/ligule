@@ -53,7 +53,21 @@ export function createLoop({ kernel, provider, prompt, session, limits = DEFAULT
       }
 
       // 这一轮的用户输入同样进记录：模型看见的每一条都要能从记录重建出来（I5）。
-      if (session) await session.append({ kind: 'user', text: input, ...user });
+      // 它的序号就是这一轮的身份证：轮次完成标记与分支选点都指着它（实现顺序第 68 步）。
+      let userSeq;
+      if (session) userSeq = (await session.append({ kind: 'user', text: input, ...user })).seq;
+
+      // 一轮正常完整结束时留下一条事实（D88 之外的界面契约要的是「这一轮真的收尾了」，
+      // 不是「最后一条助手消息出现了」）。取消、失败、上限与恢复补写都走不到这一行。
+      // 这一条不进模型投影，也不进检查点那一段哈希的输入；它带 `ignorable`，旧版本读得懂。
+      async function markTurn(iteration, completedBy) {
+        if (!session || userSeq === undefined) return;
+        await session.append({
+          kind: 'turn', ignorable: true, status: 'completed', userSeq,
+          iterations: iteration, modelCalls: calls,
+          ...(completedBy === undefined ? {} : { completedBy }),
+        });
+      }
 
       try {
         for (let iteration = 1; iteration <= limits.iterations; iteration += 1) {
@@ -101,7 +115,10 @@ export function createLoop({ kernel, provider, prompt, session, limits = DEFAULT
           // 而下一轮的请求体里没有它的位置，进了投影就是每轮重复占一份上下文。
           if (session && reasoning !== '') await session.append({ kind: 'reasoning', text: reasoning });
           if (session) await session.append({ kind: 'assistant', text, toolCalls });
-          if (toolCalls.length === 0) return { text, iterations: iteration, modelCalls: calls };
+          if (toolCalls.length === 0) {
+            await markTurn(iteration);
+            return { text, iterations: iteration, modelCalls: calls };
+          }
 
           const groups = groupCalls(toolCalls, (name) => kernel.execution(name));
           for (const [groupIndex, group] of groups.entries()) {
@@ -119,6 +136,7 @@ export function createLoop({ kernel, provider, prompt, session, limits = DEFAULT
                 // 这一轮算完成了，同一条助手消息里后面的那些调用就再也不会有机会执行：同样逐条留下不执行的结果。
                 const name = group.calls[index].name;
                 await answerRemaining(restOf(groups, groupIndex, index), `${name} ended this round before this call ran`);
+                await markTurn(iteration, name);
                 return { text, completedBy: name, iterations: iteration, modelCalls: calls };
               }
             }
