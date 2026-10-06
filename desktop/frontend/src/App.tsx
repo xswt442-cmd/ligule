@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createClient, type Client, type Transport } from './protocol';
 import { ApprovalCard, type Ask } from './components/ApprovalCard';
+import { Icon } from './components/Icon';
 import { RowView } from './components/RowView';
 import { SessionRail } from './components/SessionRail';
 import { UsageMeter } from './components/UsageMeter';
@@ -627,15 +628,18 @@ export function App({ transport }: { transport: Transport }) {
   };
   const hidden = Math.max(0, rows.length - limit);
 
+  const settingsPanel = registry.list('rail.menu').find((item) => item.id === 'panel.appearance') ?? null;
+
   return <div className="frame" data-collapsed={collapsed ? 'true' : undefined} data-dock={settings.dock}>
     <aside className="sidebar">
       <div className="brand"><img src="/icon.png" alt="" width="22" height="22" /><span>ligule</span></div>
-      <button className="new-run" type="button" onClick={() => void newSession()}>新建会话</button>
+      <button className="new-run" type="button" onClick={() => void newSession()}><Icon name="plus" size={15} /><span>新建会话</span></button>
       <div className="section-label">会话</div>
       {registry.list('rail.sessions').map((item) => <div key={item.id} className="rail-slot">{item.view(panelProps)}</div>)}
       <div className="sidebar-foot">
+        <button className="entry" type="button" onClick={() => setPanel(settingsPanel)}><Icon name="gear" size={15} /><span>设置</span></button>
         <button className="entry" type="button" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}>
-          <span className="entry-glyph">⌗</span><span>功能</span>
+          <Icon name="grid" size={15} /><span>功能</span>
         </button>
       </div>
     </aside>
@@ -648,46 +652,26 @@ export function App({ transport }: { transport: Transport }) {
           <span className="muted" id="session-note">{status === null ? '后端进程由壳起，帧走管道' : `模式 ${status.mode ?? '没装'} · 记录 ${status.eventCount} 条`}</span>
         </div>
         <div className="pills">{registry.list('header.status').map((item) => <span key={item.id}>{item.view(panelProps)}</span>)}</div>
-        <label className="verbosity">
-          <span>工作步骤展示</span>
-          <select value={verbosity} onChange={(event) => patch({ verbosity: event.target.value as Verbosity })}>
-            <option value="brief">简洁</option>
-            <option value="standard">标准</option>
-            <option value="detailed">详细</option>
-            <option value="full">完全展开</option>
-          </select>
-        </label>
-        <label className="mode-set">
-          <span>切模式</span>
-          <input
-            value={modeDraft}
-            placeholder={status?.mode ?? '模式名'}
-            aria-label="要换成的模式名"
-            onChange={(event) => setModeDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key !== 'Enter') return;
-              event.preventDefault();
-              void setMode();
-            }}
-          />
-          <button type="button" disabled={modeDraft.trim() === ''} onClick={() => void setMode()}>切换</button>
-        </label>
+        <button className="icon-button" type="button" title="命令面板（Ctrl+K）" aria-label="命令面板" onClick={() => setPaletteOpen(true)}><Icon name="search" size={15} /></button>
       </header>
 
       <div className="conversation" data-verbosity={verbosity} aria-live="polite" ref={scroller} onScroll={onScroll}>
-        {reading && <p className="empty">在读那份记录…</p>}
-        {!reading && rows.length === 0 && live.text === '' && <p className="empty">还没有轮次。下方输入一句话，Enter 直接开始。</p>}
-        {hidden > 0 && <button type="button" className="earlier" onClick={() => setLimit((n) => n + RENDER_WINDOW)}>显示更早的 {hidden} 行</button>}
-        {rows.slice(hidden).map((row) => <RowView key={row.id} row={row} verbosity={verbosity} />)}
-        {/* 流式那半截排在已落盘的那些行之后：它是这一轮的末尾，画到开头去就把因果倒过来了。 */}
-        {live.reasoning !== '' && <RowView row={{ ...LIVE_REASONING, text: live.reasoning }} verbosity={verbosity} />}
-        {live.text !== '' && <RowView row={{ ...LIVE_ANSWER, text: live.text }} verbosity={verbosity} />}
+        <div className="stream">
+          {reading && <p className="placeholder"><Icon name="clock" size={14} /> 在读那份记录…</p>}
+          {!reading && rows.length === 0 && live.text === '' && <p className="placeholder"><Icon name="spark" size={14} /> 还没有轮次。下方输入一句话，Enter 直接开始。</p>}
+          {hidden > 0 && <button type="button" className="earlier" onClick={() => setLimit((n) => n + RENDER_WINDOW)}>显示更早的 {hidden} 行</button>}
+          {rows.slice(hidden).map((row) => <RowView key={row.id} row={row} verbosity={verbosity} />)}
+          {/* 流式那半截排在已落盘的那些行之后：它是这一轮的末尾，画到开头去就把因果倒过来了。 */}
+          {live.reasoning !== '' && <RowView row={{ ...LIVE_REASONING, text: live.reasoning }} verbosity={verbosity} />}
+          {live.text !== '' && <RowView row={{ ...LIVE_ANSWER, text: live.text }} verbosity={verbosity} />}
+        </div>
       </div>
       {!pinned && <button className="jump-latest" type="button" onClick={() => void jumpToLatest()}>回到最新</button>}
 
       {asks.length > 0 && <ApprovalCard ask={asks[0]} queued={asks.length - 1} verbosity={verbosity} onAnswer={answer} />}
 
       {link !== null && <div className="banner" role="alert">
+        <Icon name="warn" size={15} />
         <strong>这一条连接不在了</strong>
         <code>{link}</code>
         <span>界面只能重问一次；后端进程起不来那一段是壳的事。</span>
@@ -696,6 +680,7 @@ export function App({ transport }: { transport: Transport }) {
 
       <footer className="composer">
         <textarea
+          className="composer-input"
           ref={composerRef}
           rows={3}
           value={draft}
@@ -719,19 +704,49 @@ export function App({ transport }: { transport: Transport }) {
             setDraft(next < 0 ? '' : history[Math.max(next, 0)] ?? '');
           }}
         />
-        <div className="composer-actions">
-          <span className="muted">帧走管道 · 出 {panelProps.counts.sent} 条 / 入 {panelProps.counts.received} 条</span>
-          <button type="button" onClick={() => void readBack()}>读回记录</button>
-          <button type="button" disabled={!running} onClick={() => void cancel()}>取消本轮</button>
-          <button type="button" className="primary" disabled={running || sessionId === null} onClick={() => void send()}>发送</button>
+        <div className="composer-bar">
+          <label className="mini">
+            <span>展示</span>
+            <select value={verbosity} onChange={(event) => patch({ verbosity: event.target.value as Verbosity })}>
+              <option value="brief">简洁</option>
+              <option value="standard">标准</option>
+              <option value="detailed">详细</option>
+              <option value="full">完全展开</option>
+            </select>
+          </label>
+          <label className="mini mode-set">
+            <span>模式</span>
+            <input
+              value={modeDraft}
+              placeholder={status?.mode ?? '模式名'}
+              aria-label="要换成的模式名"
+              onChange={(event) => setModeDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key !== 'Enter') return;
+                event.preventDefault();
+                void setMode();
+              }}
+            />
+            <button type="button" disabled={modeDraft.trim() === ''} onClick={() => void setMode()}>切换</button>
+          </label>
+          <span className="bar-spacer" />
+          <button className="icon-button" type="button" title="读回这一份记录" aria-label="读回记录" onClick={() => void readBack()}><Icon name="refresh" size={15} /></button>
+          <button className="icon-button" type="button" title="复制最后那条回答（Ctrl+Shift+C）" aria-label="复制回答" onClick={copyLastAnswer}><Icon name="copy" size={15} /></button>
+          <button className="icon-button" type="button" title="取消这一轮（Esc）" aria-label="取消本轮" disabled={!running} onClick={() => void cancel()}><Icon name="stop" size={15} /></button>
+          <button className="send" type="button" title="发送（Enter）" aria-label="发送" disabled={running || sessionId === null} onClick={() => void send()}><Icon name="send" size={17} /></button>
         </div>
       </footer>
+      <div className="statusbar">
+        <span>帧走管道 · 出 {panelProps.counts.sent} 条 / 入 {panelProps.counts.received} 条</span>
+        <span>{running ? `正在跑 ${seconds} 秒` : '空闲'}</span>
+        <span>{sessionId === null ? '没有会话' : `会话 ${sessionId}`}</span>
+      </div>
     </main>
 
     {panel !== null && <aside className="dock">
       <div className="dock-head">
         <strong className="dock-title">{panel.title}{panel.pending === true && <span className="menu-tag">待实现</span>}</strong>
-        <button type="button" aria-label="关闭面板" onClick={() => setPanel(null)}>✕</button>
+        <button type="button" className="icon-button" aria-label="关闭面板" onClick={() => setPanel(null)}><Icon name="close" size={15} /></button>
       </div>
       <div className="dock-body">{panel.view(panelProps)}</div>
     </aside>}

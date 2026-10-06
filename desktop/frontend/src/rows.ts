@@ -52,6 +52,8 @@ export type Row = {
   summary?: string;
   // 抬头右侧那几枚读数：退出码、溢出文件、判定、支线、耗时。
   notes?: string[];
+  // 写入类那一张卡片上的加减行数：换掉多少行、换上多少行（D94）。
+  diff?: { added: number; removed: number };
 };
 
 // 工具结果的内容可以是串，也可以是结构化的一段（read 交回的是 {text: ...}）。
@@ -85,6 +87,14 @@ export function changeSummary(tool: string, args: Record<string, unknown>): stri
   if (tool === 'edit' && typeof args.anchor === 'string') return `${path}：换掉 ${lines(args.anchor)} 行，换上 ${lines(args.replacement ?? '')} 行`;
   if (tool === 'delete') return `把 ${path} 移进回收站`;
   return '';
+}
+
+// 加减行数那一格：写入与新建只有「换上」，编辑两样都有。删掉的文件没有行数可说。
+function diffOf(tool: string, args: Record<string, unknown>): Row['diff'] {
+  const lines = (value: unknown) => String(value ?? '').split('\n').length;
+  if (tool === 'edit' && typeof args.anchor === 'string') return { removed: lines(args.anchor), added: lines(args.replacement ?? '') };
+  if ((tool === 'write' || tool === 'create') && typeof args.content === 'string') return { removed: 0, added: lines(args.content) };
+  return undefined;
 }
 
 // 一次调用对人说清它动的是哪个对象：命令文本、路径、地址、那一项 MCP 能力名，都没有就退回一行参数。
@@ -172,6 +182,7 @@ export function projectRecord(record: Record_, options: { startedAt?: number; no
       code: result.code,
       callId: record.callId,
       summary: changeSummary(record.tool ?? '', record.args ?? {}),
+      diff: diffOf(record.tool ?? '', record.args ?? {}),
       notes,
       // 失败与未允许那一格带着说不出去的原因，正文读它，不读那层信封（D93）。
       text: typeof payload.text === 'string' ? payload.text : textOf(result.reason ?? result.content),

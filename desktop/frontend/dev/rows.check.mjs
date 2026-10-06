@@ -24,8 +24,19 @@ const write = projectRecord({
 })[0];
 assert.equal(write.kind, 'result');
 assert.equal(write.summary, 'notes/readings.md：4 行新内容');
+assert.deepEqual(write.diff, { removed: 0, added: 4 });
 assert.deepEqual(write.notes, ['判定没问就放行（auto）']);
 assert.equal(write.text, '写了 3 行');
+
+const edit = projectRecord({
+  kind: 'tool',
+  tool: 'edit',
+  callId: 'c7',
+  args: { path: 'notes/readings.md', anchor: '旧的一行\n第二行', replacement: '新的一句话\n第二行\n第三行' },
+  result: { content: { text: '换好了' } },
+})[0];
+assert.equal(edit.summary, 'notes/readings.md：换掉 2 行，换上 3 行');
+assert.deepEqual(edit.diff, { removed: 2, added: 3 });
 
 const failure = projectRecord({
   kind: 'tool',

@@ -7,9 +7,13 @@ export function ResultRow({ row, verbosity }: RowProps) {
     <div className="row-head">
       <code className="row-tool">{row.tool}</code>
       <span className="state-ok">完成</span>
+      {row.diff !== undefined && <span className="diff">
+        {row.diff.removed > 0 && <span className="diff-minus">−{row.diff.removed}</span>}
+        <span className="diff-plus">+{row.diff.added}</span>
+      </span>}
+      {row.summary !== undefined && row.summary !== '' && <span className="row-target-inline">{row.summary}</span>}
       {row.notes?.map((note) => <span className="row-note" key={note}>{note}</span>)}
     </div>
-    {row.summary !== undefined && row.summary !== '' && <div className="row-target">{row.summary}</div>}
     <Fold text={row.text} verbosity={verbosity} />
   </article>;
 }

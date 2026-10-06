@@ -1,6 +1,7 @@
 // 左侧栏那一份会话列表：读的是 `sessions.list`，按项目根分组（D91）。
 // 记录目录只有宿主那一侧开盘，这里不猜有什么会话，读回来的就是全部。
 import { useCallback, useEffect, useState } from 'react';
+import { Icon } from './Icon';
 import type { Client } from '../protocol';
 
 export type SessionSummary = {
@@ -60,7 +61,7 @@ export function SessionRail({ client, current, onOpen }: { client: Client; curre
   }, [load]);
 
   return <div className="sessions">
-    <button type="button" className="rail-refresh" onClick={() => void load()}>刷新会话列表</button>
+    <button type="button" className="rail-refresh" onClick={() => void load()}><Icon name="refresh" size={13} /> 刷新会话列表</button>
     {loading && <div className="session-item">在读记录目录…</div>}
     {!loading && note !== '' && <div className="session-note">
       {note}
@@ -68,7 +69,11 @@ export function SessionRail({ client, current, onOpen }: { client: Client; curre
     </div>}
     {!loading && note === '' && groups.length === 0 && <div className="session-item">记录目录里还没有会话。跑一轮之后再来刷新。</div>}
     {groups.map(([root, items]) => <section key={root}>
-      <h3 className="group-label" title={root}>{root}</h3>
+      <h3 className="group-label" title={root}>
+        <Icon name="folder" size={13} />
+        <span className="group-root">{root}</span>
+        <span className="group-count">{items.length}</span>
+      </h3>
       {items.map((item) => <button
         key={item.id}
         type="button"
@@ -76,15 +81,18 @@ export function SessionRail({ client, current, onOpen }: { client: Client; curre
         title={item.id}
         onClick={() => onOpen(item.id)}
       >
-        <span className="session-when">{clock(item.updatedAt)}</span>
-        <span className="session-id">{item.id}</span>
-        <span className="session-meta">
-          {item.events} 条 · {item.mode?.name ?? '没有模式'}
-          {item.unanswered > 0 && ` · 没收尾 ${item.unanswered}`}
-          {item.formatVersion === 0 && ' · 没有首行'}
-          {item.truncatedBytes > 0 && ` · 尾部缺 ${item.truncatedBytes} 字节`}
+        <span className="session-line">
+          <span className="session-when">{clock(item.updatedAt)}</span>
+          <span className="session-mode">{item.mode?.name ?? '没有模式'}</span>
+          <span className="session-count">{item.events} 条</span>
         </span>
-        {item.error !== undefined && <code className="row-code">{item.error.code}</code>}
+        <span className="session-id">{item.id}</span>
+        {(item.unanswered > 0 || item.formatVersion === 0 || item.truncatedBytes > 0 || item.error !== undefined) && <span className="session-meta">
+          {item.unanswered > 0 && <span>没收尾 {item.unanswered} 次</span>}
+          {item.formatVersion === 0 && <span>没有首行</span>}
+          {item.truncatedBytes > 0 && <span>尾部缺 {item.truncatedBytes} 字节</span>}
+          {item.error !== undefined && <code className="row-code">{item.error.code}</code>}
+        </span>}
       </button>)}
     </section>)}
   </div>;

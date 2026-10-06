@@ -6,13 +6,13 @@ import type { Verbosity } from './types';
 const LINES = 12;
 const CHARS = 600;
 
-export function Fold({ text, verbosity }: { text: string; verbosity: Verbosity }) {
+export function Fold({ text, verbosity, always = false }: { text: string; verbosity: Verbosity; always?: boolean }) {
   const [forced, setForced] = useState<boolean | null>(null);
   if (text === '') return null;
-  const long = text.length > CHARS || text.split('\n').length > LINES;
+  const long = always || text.length > CHARS || text.split('\n').length > LINES;
   const open = forced ?? verbosity === 'full';
   return <>
-    <div className="row-body" data-folded={long && !open ? 'true' : undefined}>{text}</div>
+    <div className="row-body" data-folded={long && !open ? (always ? 'tight' : 'true') : undefined}>{text}</div>
     {long && <button
       type="button"
       className="fold-toggle"
