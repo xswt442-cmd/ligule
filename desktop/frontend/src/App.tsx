@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createClient, type Client, type Transport } from './protocol';
 import { RowView } from './components/RowView';
+import { SessionRail } from './components/SessionRail';
 import type { Verbosity } from './components/types';
 import { createSlotRegistry, SLOTS, type Panel } from './slots';
 import { metaRow, projectRecord, type Record_, type Row } from './rows';
@@ -18,7 +19,6 @@ export type Status = {
   eventCount: number;
 };
 
-type Session = { id: string; label: string };
 type Ask = { id: string; tool: string; detail: string; reason: string; backend: string };
 type Branch = { seq: number; id: string; task: string };
 
@@ -37,7 +37,7 @@ type PanelProps = {
   running: boolean;
   waiting: number;
   counts: { sent: number; received: number };
-  sessions: number;
+  openSession: (id: string) => void;
   verbosity: Verbosity;
 };
 
@@ -71,12 +71,12 @@ const menuPanels: Panel<PanelProps>[] = [
   {
     id: 'panel.frames',
     title: '这一条连接',
-    view: ({ counts, waiting, sessions }) => <>
+    view: ({ counts, waiting, sessionId }) => <>
       <ul>
         <li>发出的帧：{counts.sent}</li>
         <li>收到的帧：{counts.received}</li>
         <li>还没答复的调用：{waiting}</li>
-        <li>会话：{sessions}</li>
+        <li>当前会话：{sessionId ?? '没有'}</li>
       </ul>
       <p className="stub">载体是标准输入输出两根管道，本机没有监听端口（D30）；界面拿不到地址与凭据。</p>
     </>,
@@ -116,8 +116,16 @@ const pendingPanels: Panel<PanelProps>[] = [
   },
 ];
 
-const statusPanels: Panel<PanelProps>[] = [
+// 左侧栏那一项：读的是 `sessions.list`，挂的是声明好的那个槽位（D91、I7）。
+const railPanels: Panel<PanelProps>[] = [
   {
+    id: 'rail.sessions',
+    title: '会话',
+    view: ({ client, sessionId, openSession }) => <SessionRail client={client} current={sessionId} onOpen={openSession} />,
+  },
+];
+
+const statusPanels: Panel<PanelProps>[] = [  {
     id: 'status.pills',
     title: '运行状态',
     view: ({ status, running, waiting }) => <>
@@ -199,10 +207,10 @@ export function App({ transport }: { transport: Transport }) {
     const created = createSlotRegistry<PanelProps>(SLOTS);
     for (const panel of [...menuPanels, ...pendingPanels]) created.register('rail.menu', panel);
     for (const panel of statusPanels) created.register('header.status', panel);
+    for (const panel of railPanels) created.register('rail.sessions', panel);
     return created;
   }, []);
 
-  const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [rows, setRows] = useState<Row[]>([]);
   const [live, setLive] = useState({ text: '', reasoning: '' });
@@ -308,7 +316,6 @@ export function App({ transport }: { transport: Transport }) {
   const newSession = useCallback(async () => {
     try {
       const created = await client.call('session.create', {}) as { sessionId: string };
-      setSessions((current) => [...current, { id: created.sessionId, label: '（还没有输入）' }]);
       setSessionId(created.sessionId);
       setRows([]);
       setLimit(RENDER_WINDOW);
@@ -324,8 +331,9 @@ export function App({ transport }: { transport: Transport }) {
     void newSession();
   }, [newSession]);
 
-  // 换会话只切界面：那份会话在这个进程里已经是打开的，再发一次 session.open 会被 Host 拒掉。
-  const switchSession = useCallback(async (id: string) => {
+  // 换会话先让 Host 那一份接上：记录不在磁盘上就是没有这份会话，`session.open` 会说清（D78）。
+  // 已经打开的那一份复用状态，不重开，所以这一个动作对当前会话也是安全的。
+  const openSession = useCallback(async (id: string) => {
     setSessionId(id);
     setRows([]);
     setLimit(RENDER_WINDOW);
@@ -333,27 +341,25 @@ export function App({ transport }: { transport: Transport }) {
     setAsk(null);
     dispatchAt.current.clear();
     try {
+      await client.call('session.open', { sessionId: id });
       // fullResults 那一格是给界面读的：溢出文件里的整段正文这才到得了画面（记录本身不动）。
       const { events } = await client.call('session.read', { sessionId: id, fullResults: true }) as { events: Record_[] };
       setRows(events.flatMap((record) => projectRecord(record)));
     } catch (error) {
-      setRows((current) => [...current, metaRow('error', `记录读不回来：${code(error)}`)]);
+      setRows((current) => [...current, metaRow('error', `那份会话接不上：${code(error)}`)]);
     }
     void refreshStatus(id);
   }, [client, refreshStatus]);
 
   const readBack = useCallback(async () => {
     if (sessionId === null) return;
-    await switchSession(sessionId);
-  }, [sessionId, switchSession]);
+    await openSession(sessionId);
+  }, [sessionId, openSession]);
 
   const send = useCallback(async () => {
     const text = draft.trim();
     if (text === '' || sessionId === null || running) return;
     setDraft('');
-    setSessions((current) => current.map((item) => (item.id === sessionId && item.label === '（还没有输入）'
-      ? { ...item, label: text.slice(0, 24) }
-      : item)));
     setRunning(true);
     try {
       const result = await client.call('run.start', { sessionId, input: text }) as { iterations: number; modelCalls: number; completedBy?: string };
@@ -403,10 +409,9 @@ export function App({ transport }: { transport: Transport }) {
     running,
     waiting: client.waiting(),
     counts: client.counts(),
-    sessions: sessions.length,
+    openSession,
     verbosity,
   };
-  const current = sessions.find((item) => item.id === sessionId);
   const hidden = Math.max(0, rows.length - limit);
 
   return <div className="frame">
@@ -414,15 +419,7 @@ export function App({ transport }: { transport: Transport }) {
       <div className="brand"><img src="/icon.png" alt="" width="22" height="22" /><span>ligule</span></div>
       <button className="new-run" type="button" onClick={() => void newSession()}>新建会话</button>
       <div className="section-label">会话</div>
-      <div className="sessions">
-        {sessions.length === 0 && <div className="session-item">这一次运行还没有会话</div>}
-        {sessions.map((item) => <button
-          key={item.id}
-          type="button"
-          className={`session-item${item.id === sessionId ? ' active' : ''}`}
-          onClick={() => void switchSession(item.id)}
-        >{item.label}</button>)}
-      </div>
+      {registry.list('rail.sessions').map((item) => <div key={item.id} className="rail-slot">{item.view(panelProps)}</div>)}
       <div className="sidebar-foot">
         <button className="entry" type="button" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}>
           <span className="entry-glyph">⌗</span><span>功能</span>
@@ -433,8 +430,8 @@ export function App({ transport }: { transport: Transport }) {
     <main className="center">
       <header className="topbar">
         <div className="title">
-          <strong id="session-title">{current === undefined ? '没有会话' : `会话 ${current.id.slice(0, 8)}`}</strong>
-          <span className="muted" id="session-note">{current === undefined ? '后端进程由壳起，帧走管道' : current.label}</span>
+          <strong id="session-title">{sessionId === null ? '没有会话' : `会话 ${sessionId.slice(0, 8)}`}</strong>
+          <span className="muted" id="session-note">{status === null ? '后端进程由壳起，帧走管道' : `模式 ${status.mode ?? '没装'} · 记录 ${status.eventCount} 条`}</span>
         </div>
         <div className="pills">{registry.list('header.status').map((item) => <span key={item.id}>{item.view(panelProps)}</span>)}</div>
         <label className="verbosity">

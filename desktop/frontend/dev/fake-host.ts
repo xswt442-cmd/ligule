@@ -95,10 +95,12 @@ const branchEvents: Record<string, unknown>[] = [
   { seq: 1, kind: 'assistant', text: '对完：`seq`、kind、工具名三格一致；`callId` 不在输入里。' },
 ];
 
+// 左侧栏那一份列表的夹具：三行是正常读出来的，第四行是读不出来的那一种（D93 要看得见码）。
 const sessions = [
-  { id: '7f3c9a21-4b7e-4f0a-9c1d-2a5e8b0c6d9f', formatVersion: 1, projectRoot: 'E:/notes', createdAt: '2026-10-05T09:02:11.000Z', updatedAt: '2026-10-05T11:41:07.000Z', events: 41, lastSeq: 40, mode: { name: 'full', layer: 'shipped', digest: '0f2b1c3d4e5f' }, unanswered: 0 },
-  { id: '2b8d55c0-11aa-4c3e-8d77-9f0a1b2c3d4e', formatVersion: 1, projectRoot: 'E:/notes', createdAt: '2026-10-05T07:20:00.000Z', updatedAt: '2026-10-05T08:55:31.000Z', events: 128, lastSeq: 127, mode: { name: 'minimal', layer: 'shipped', digest: 'aa11bb22cc33' }, unanswered: 2 },
-  { id: 'c4e1f00d-7788-4a5b-9c0d-e1f2a3b4c5d6', formatVersion: 0, projectRoot: '', createdAt: null, updatedAt: '2026-10-04T13:07:44.000Z', events: 3, lastSeq: 2, mode: null, unanswered: 0 },
+  { id: '7f3c9a21-4b7e-4f0a-9c1d-2a5e8b0c6d9f', formatVersion: 1, projectRoot: 'E:/notes', createdAt: '2026-10-05T09:02:11.000Z', updatedAt: '2026-10-05T11:41:07.000Z', events: 41, lastSeq: 40, mode: { name: 'full', layer: 'shipped', digest: '0f2b1c3d4e5f' }, unanswered: 0, truncatedBytes: 0 },
+  { id: '2b8d55c0-11aa-4c3e-8d77-9f0a1b2c3d4e', formatVersion: 1, projectRoot: 'E:/notes', createdAt: '2026-10-05T07:20:00.000Z', updatedAt: '2026-10-05T08:55:31.000Z', events: 128, lastSeq: 127, mode: { name: 'minimal', layer: 'shipped', digest: 'aa11bb22cc33' }, unanswered: 2, truncatedBytes: 0 },
+  { id: 'c4e1f00d-7788-4a5b-9c0d-e1f2a3b4c5d6', formatVersion: 0, projectRoot: '', createdAt: null, updatedAt: '2026-10-04T13:07:44.000Z', events: 3, lastSeq: 2, mode: null, unanswered: 0, truncatedBytes: 0 },
+  { id: '9a7b5c3d-0e1f-4a5b-8c9d-0e1f2a3b4c5d', formatVersion: 0, projectRoot: '', createdAt: null, updatedAt: '2026-10-04T09:12:03.000Z', events: 0, lastSeq: -1, mode: null, unanswered: 0, truncatedBytes: 0, error: { code: 'session_event_unknown', detail: '事件种类没标 ignorable，读不懂就拒绝重建（D73）' } },
 ];
 
 let status = {
@@ -171,8 +173,12 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
         opened += 1;
         status = { ...status, sessionId: `dev-session-${opened}`, eventCount: 0 };
         return reply({ sessionId: status.sessionId });
-      case 'session.open':
+      case 'session.open': {
+        // 接上一份记录时，那份记录最后生效的模式清单就是现在的模式（D78）；状态那一格跟着换。
+        const found = sessions.find((item) => item.id === params.sessionId);
+        if (found !== undefined && found.mode !== null) status = { ...status, mode: found.mode.name, modeLayer: found.mode.layer };
         return reply({ sessionId: params.sessionId });
+      }
       case 'session.read': {
         const id = String(params.sessionId);
         const loaded = id.includes('.sub-')

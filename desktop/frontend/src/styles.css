@@ -123,6 +123,87 @@ body {
   color: var(--fg);
 }
 
+/* ---------- 左侧栏那一份会话列表（D91）---------- */
+
+/* 槽位那一格自己不成布局，内容要能撑满并滚动（I7、D25）。 */
+.rail-slot {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.sessions section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.group-label {
+  margin: 0.55rem 0.35rem 0.1rem;
+  color: var(--fg-muted);
+  font-size: 0.72rem;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-item {
+  display: flex;
+  flex-direction: column;
+  align-items: start;
+  gap: 0.12rem;
+  white-space: normal;
+}
+
+.session-when {
+  color: var(--fg);
+  font-size: 0.8rem;
+}
+
+.session-id,
+.session-meta {
+  font-size: 0.72rem;
+  color: var(--fg-muted);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-id {
+  font-family: var(--mono);
+}
+
+.rail-refresh {
+  align-self: start;
+  margin-bottom: 0.35rem;
+  padding: 0.15rem 0.6rem;
+  font-size: 0.76rem;
+  color: var(--fg-muted);
+  background: var(--bg-sunk);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+
+.rail-refresh:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
+.session-note {
+  padding: 0.4rem 0.5rem;
+  border: 1px dashed color-mix(in srgb, var(--bad) 45%, var(--line));
+  border-radius: var(--radius);
+  color: var(--bad);
+  font-size: 0.78rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  align-items: start;
+}
+
 .sidebar-foot {
   border-block-start: 1px solid var(--line);
   padding-top: 0.6rem;
