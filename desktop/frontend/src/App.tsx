@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createClient, type Client, type Transport } from './protocol';
 import { RowView } from './components/RowView';
+import type { Verbosity } from './components/types';
 import { createSlotRegistry, SLOTS, type Panel } from './slots';
 import { metaRow, projectRecord, type Record_, type Row } from './rows';
 
@@ -19,8 +20,11 @@ export type Status = {
 
 type Session = { id: string; label: string };
 type Ask = { id: string; tool: string; detail: string; reason: string; backend: string };
-type Verbosity = 'brief' | 'standard' | 'detailed' | 'full';
 type Branch = { seq: number; id: string; task: string };
+
+// 流式期间的那半截排在已落盘的那些行之后，id 固定：每次增量都换 id 会让那一行重建，展开状态就丢了。
+const LIVE_REASONING: Row = { id: -2, kind: 'reasoning', text: '' };
+const LIVE_ANSWER: Row = { id: -1, kind: 'answer', text: '' };
 
 type PanelProps = {
   client: Client;
@@ -30,6 +34,7 @@ type PanelProps = {
   waiting: number;
   counts: { sent: number; received: number };
   sessions: number;
+  verbosity: Verbosity;
 };
 
 const VERBOSITY_KEY = 'ligule.verbosity';
@@ -75,7 +80,7 @@ const menuPanels: Panel<PanelProps>[] = [
   {
     id: 'panel.branch',
     title: '派生支线',
-    view: ({ client, sessionId }) => <BranchPanel client={client} sessionId={sessionId} />,
+    view: ({ client, sessionId, verbosity }) => <BranchPanel client={client} sessionId={sessionId} verbosity={verbosity} />,
   },
 ];
 
@@ -134,7 +139,7 @@ function branchOf(record: Record_): Branch | null {
   return { seq: record.seq ?? 0, id: content.sessionId, task: String(record.args?.task ?? '') };
 }
 
-function BranchPanel({ client, sessionId }: { client: Client; sessionId: string | null }) {
+function BranchPanel({ client, sessionId, verbosity }: { client: Client; sessionId: string | null; verbosity: Verbosity }) {
   const [branches, setBranches] = useState<Branch[]>([]);
   const [shown, setShown] = useState<{ id: string; rows: Row[] } | null>(null);
   const [note, setNote] = useState('');
@@ -147,7 +152,7 @@ function BranchPanel({ client, sessionId }: { client: Client; sessionId: string 
     // 每次打开面板重扫一遍父记录：派生体跑完才有那条结果，第一版不做实时流（D74）。
     void (async () => {
       try {
-        const { events } = await client.call('session.read', { sessionId }) as { events: Record_[] };
+        const { events } = await client.call('session.read', { sessionId, fullResults: true }) as { events: Record_[] };
         setBranches(events.map(branchOf).filter((item): item is Branch => item !== null));
       } catch (error) {
         setNote(`父记录读不回来：${code(error)}`);
@@ -158,7 +163,7 @@ function BranchPanel({ client, sessionId }: { client: Client; sessionId: string 
   const open = useCallback(async (id: string) => {
     setNote('');
     try {
-      const { events } = await client.call('session.read', { sessionId: id }) as { events: Record_[] };
+      const { events } = await client.call('session.read', { sessionId: id, fullResults: true }) as { events: Record_[] };
       setShown({ id, rows: events.flatMap((record) => projectRecord(record)) });
     } catch (error) {
       setNote(`支线读不回来：${code(error)}`);
@@ -176,8 +181,8 @@ function BranchPanel({ client, sessionId }: { client: Client; sessionId: string 
     </li>)}</ul>
     {shown !== null && <>
       <h3>支线 {shown.id} · 下面这些序号属于支线自己</h3>
-      <div className="conversation" data-verbosity="standard">
-        {shown.rows.map((row) => <RowView key={row.id} row={row} />)}
+      <div className="conversation" data-verbosity={verbosity}>
+        {shown.rows.map((row) => <RowView key={row.id} row={row} verbosity={verbosity} />)}
       </div>
     </>}
     {note !== '' && <p className="stub">{note}</p>}
@@ -208,6 +213,8 @@ export function App({ transport }: { transport: Transport }) {
   // 跟随最新：贴在底部时新内容进来就滚到底；人往上翻过就不再自动滚，给一个跳回最新的按钮。
   const scroller = useRef<HTMLDivElement | null>(null);
   const [pinned, setPinned] = useState(true);
+  // 那一次派发是什么时候交出去的：只为算用时，键是调用 id（D94）。
+  const dispatchAt = useRef(new Map<string, number>());
 
   const nearBottom = () => {
     const node = scroller.current;
@@ -253,9 +260,15 @@ export function App({ transport }: { transport: Transport }) {
       if (message.notify === 'event') {
         const record = message.event as Record_;
         // 刚落盘的那一条取代流式期间的那半截：记录是事实源（I5）。
-        if (record?.kind === 'assistant') setLive((current) => ({ ...current, text: '' }));
+        if (record?.kind === 'assistant') {
+          setLive((current) => ({ ...current, text: '' }));
+          for (const call of record.toolCalls ?? []) dispatchAt.current.set(call.id, Date.now());
+        }
         if (record?.kind === 'reasoning') setLive((current) => ({ ...current, reasoning: '' }));
-        const added = projectRecord(record);
+        // 记录里不带逐条时间戳，用时这一格只有界面活着的那一轮量得到（D94、U50）。
+        const started = record?.kind === 'tool' && record.callId !== undefined ? dispatchAt.current.get(record.callId) : undefined;
+        if (started !== undefined && record?.callId !== undefined) dispatchAt.current.delete(record.callId);
+        const added = projectRecord(record, started === undefined ? {} : { startedAt: started });
         if (added.length > 0) setRows((current) => [...current, ...added]);
       }
     });
@@ -311,8 +324,10 @@ export function App({ transport }: { transport: Transport }) {
     setRows([]);
     setLive({ text: '', reasoning: '' });
     setAsk(null);
+    dispatchAt.current.clear();
     try {
-      const { events } = await client.call('session.read', { sessionId: id }) as { events: Record_[] };
+      // fullResults 那一格是给界面读的：溢出文件里的整段正文这才到得了画面（记录本身不动）。
+      const { events } = await client.call('session.read', { sessionId: id, fullResults: true }) as { events: Record_[] };
       setRows(events.flatMap((record) => projectRecord(record)));
     } catch (error) {
       setRows((current) => [...current, metaRow('error', `记录读不回来：${code(error)}`)]);
@@ -382,6 +397,7 @@ export function App({ transport }: { transport: Transport }) {
     waiting: client.waiting(),
     counts: client.counts(),
     sessions: sessions.length,
+    verbosity,
   };
   const current = sessions.find((item) => item.id === sessionId);
 
@@ -426,10 +442,10 @@ export function App({ transport }: { transport: Transport }) {
 
       <div className="conversation" data-verbosity={verbosity} aria-live="polite" ref={scroller} onScroll={onScroll}>
         {rows.length === 0 && live.text === '' && <p className="empty">还没有轮次。下方输入一句话，Enter 直接开始。</p>}
-        {rows.map((row) => <RowView key={row.id} row={row} />)}
+        {rows.map((row) => <RowView key={row.id} row={row} verbosity={verbosity} />)}
         {/* 流式那半截排在已落盘的那些行之后：它是这一轮的末尾，画到开头去就把因果倒过来了。 */}
-        {live.reasoning !== '' && <details className="row reasoning" data-kind="reasoning" open={verbosity === 'full'}><summary className="row-head">推理段（流式）</summary><div className="row-body">{live.reasoning}</div></details>}
-        {live.text !== '' && <article className="row answer" data-kind="answer"><div className="row-head">助手</div><div className="row-body">{live.text}</div></article>}
+        {live.reasoning !== '' && <RowView row={{ ...LIVE_REASONING, text: live.reasoning }} verbosity={verbosity} />}
+        {live.text !== '' && <RowView row={{ ...LIVE_ANSWER, text: live.text }} verbosity={verbosity} />}
       </div>
       {!pinned && <button className="jump-latest" type="button" onClick={() => void jumpToLatest()}>回到最新</button>}
 

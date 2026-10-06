@@ -30,6 +30,18 @@ const markdown = [
   '细节在 [阶段三那份实现顺序](ligule-set/phase3/todo.md) 里，外链走另一条路：[example](https://example.com/)。一轮压完大约从十万降到两万。',
 ].join('\n');
 
+// 溢出文件里的那一整段：只有 `fullResults` 这一格交回来，记录里留着的是截断后的那一份。
+const spills: Record<string, unknown> = {
+  'result-3-1a2b3c4d.json': {
+    text: [
+      '窗口 200000、压力线 160000、一次压掉 97122。',
+      '这一段是溢出文件里的整段正文，界面上「看全文」展开的就是它。',
+      '记录里那一份是截断后的，读回记录时才由宿主换成整段。',
+      ...Array.from({ length: 14 }, (_unused, index) => `第 ${index + 1} 次：越线在校准后约 ${158_000 + index * 1_200} 报回，压完剩 ${19_000 + index * 300}。`),
+    ].join('\n'),
+  },
+};
+
 const eventsOf = (sessionId: string): Record<string, unknown>[] => [
   { seq: 0, kind: 'user', text: '把压缩那一步的读数写成一页', raw: '把压缩那一步的读数写成一页' },
   { seq: 1, kind: 'reasoning', text: '需要先看记录里那条 usage 的读数，然后写成一份能贴进文档的段落。' },
@@ -37,12 +49,45 @@ const eventsOf = (sessionId: string): Record<string, unknown>[] => [
     { id: 'call_read_1', name: 'read', args: { path: 'notes/compaction.md' } },
     { id: 'call_exec_1', name: 'exec', args: { command: 'node -e "console.log(1)"' } },
   ] },
-  { seq: 3, kind: 'tool', tool: 'read', callId: 'call_read_1', args: { path: 'notes/compaction.md' }, result: { content: { text: '窗口 200000、压力线 160000、一次压掉 97122。' } } },
-  { seq: 4, kind: 'tool', tool: 'exec', callId: 'call_exec_1', args: { command: 'node -e "console.log(1)"' }, result: { failed: true, code: 'exec_exit_1', content: { text: '命令没找到', exitCode: 1 } } },
-  { seq: 5, kind: 'mode', name: 'full', layer: 'shipped', tools: ['*'], digest: '0f2b1c3d4e5f' },
-  { seq: 6, kind: 'usage', ignorable: true, input: 8351, output: 126, estimated: 17398, measurement: 'request-v1' },
-  { seq: 7, kind: 'assistant', text: markdown },
-  { seq: 8, kind: 'tool', tool: 'subagent', callId: 'call_sub_1', args: { task: '把那段哈希输入逐格核对一遍' }, result: { content: { text: '核对完，三格对不上。', sessionId: `${sessionId}.sub-1` } } },
+  // 一次读取：没问人就成了，正文溢出在文件里（D77、D94）。
+  { seq: 3, kind: 'tool', tool: 'read', callId: 'call_read_1', args: { path: 'notes/compaction.md' },
+    verdict: { decision: 'allow', via: 'auto', capability: 'read', level: 'auto' },
+    result: { content: { text: '窗口 200000、压力线 16…（整段已截断）' }, spilled: 'result-3-1a2b3c4d.json' } },
+  // 一次命令：问过才放行，跑出来是失败的退出码。
+  { seq: 4, kind: 'tool', tool: 'exec', callId: 'call_exec_1', args: { command: 'node -e "console.log(1)"' },
+    verdict: { decision: 'allow', via: 'ask', capability: 'exec', level: 'ask', rule: '命令逐次询问', answer: 'allow' },
+    result: { failed: true, code: 'exec_exit_1', content: { text: '命令没找到', exitCode: 1 } } },
+  { seq: 5, kind: 'assistant', text: '', toolCalls: [
+    { id: 'call_write_1', name: 'write', args: { path: 'notes/readings.md', content: '# 读数\n\n窗口 200000\n压力线 160000\n' } },
+  ] },
+  // 一次写入：参数里带着整份内容，界面上给的是行数与那句改动摘要（D94）。
+  { seq: 6, kind: 'tool', tool: 'write', callId: 'call_write_1', args: { path: 'notes/readings.md', content: '# 读数\n\n窗口 200000\n压力线 160000\n' },
+    verdict: { decision: 'allow', via: 'auto', capability: 'write', level: 'auto' },
+    result: { content: { text: '写了 5 行' } } },
+  { seq: 7, kind: 'assistant', text: '', toolCalls: [
+    { id: 'call_mcp_1', name: 'mcp.call', args: { server: 'demo', tool: 'lookup', input: { key: 'compaction' } } },
+  ] },
+  // 一次 MCP 调用：判定链读的是 `mcp:<服务器>/<工具>`，画出来的也该是那一串（D52）。
+  { seq: 8, kind: 'tool', tool: 'mcp.call', callId: 'call_mcp_1', args: { server: 'demo', tool: 'lookup', input: { key: 'compaction' } },
+    verdict: { decision: 'allow', via: 'ask', capability: 'mcp:demo/lookup', level: 'auto', rule: '第三方工具逐次询问' },
+    result: { content: { text: '找到两条相关段落，都在第三份文档里。', effectiveCapability: 'mcp:demo/lookup' } } },
+  { seq: 9, kind: 'mode', name: 'full', layer: 'shipped', tools: ['create', 'delete', 'edit', 'exec', 'fetch', 'find', 'read', 'search', 'write'], digest: '0f2b1c3d4e5f' },
+  { seq: 10, kind: 'usage', ignorable: true, input: 8351, output: 126, estimated: 17398, measurement: 'request-v1' },
+  { seq: 11, kind: 'assistant', text: markdown },
+  // 派生支线：交回的那一份里带着支线的会话 id，正文之外那一格进抬头（D74）。
+  { seq: 12, kind: 'tool', tool: 'subagent', callId: 'call_sub_1', args: { task: '把那段哈希输入逐格核对一遍' },
+    result: { content: { text: '核对完，三格对不上。', sessionId: `${sessionId}.sub-1` } } },
+  // 崩溃留下的那一次派发由恢复路径补成一条正常结果，码是 tool_outcome_unknown（D72）。
+  { seq: 13, kind: 'tool', tool: 'exec', callId: 'call_exec_9', args: { command: 'git status --short' },
+    recovery: { assistantSeq: 14, safeToRedo: false },
+    result: { failed: true, code: 'tool_outcome_unknown', content: { text: '那一次派发没留下结果，它的外部副作用次数未知。' } } },
+  { seq: 14, kind: 'assistant', text: '', toolCalls: [
+    { id: 'call_fetch_1', name: 'fetch', args: { url: 'http://169.254.169.254/latest/meta-data/' } },
+  ] },
+  // 未允许与失败是两种脸：这一条被判定链直接拒了，码原样显示（D58、D93）。
+  { seq: 15, kind: 'tool', tool: 'fetch', callId: 'call_fetch_1', args: { url: 'http://169.254.169.254/latest/meta-data/' },
+    verdict: { decision: 'deny', capability: 'fetch', level: 'auto', rule: '元数据端点直接拒绝' },
+    result: { failed: true, kind: 'refusal', code: 'fetch_metadata_blocked', reason: '那个地址落在链路本地与元数据端点那一类，直接拒（D58）。' } },
 ];
 
 const branchEvents: Record<string, unknown>[] = [
@@ -75,6 +120,14 @@ let status = {
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// 与宿主那一条同形：`fullResults` 交回时把溢出事件的内容换成整段，记录本身那份是截断的。
+function fillSpills(events: Record<string, unknown>[]): Record<string, unknown>[] {
+  return events.map((event) => {
+    const spilled = (event.result as { spilled?: string } | undefined)?.spilled;
+    return spilled === undefined ? event : { ...event, result: { ...(event.result as object), content: spills[spilled] } };
+  });
+}
+
 export function createFakeHost(): Transport {
   let emit: (frame: Frame) => void = () => undefined;
   let opened = 0;
@@ -102,8 +155,10 @@ export function createFakeHost(): Transport {
         return reply({ sessionId: status.sessionId });
       case 'session.open':
         return reply({ sessionId: params.sessionId });
-      case 'session.read':
-        return reply({ sessionId: params.sessionId, events: String(params.sessionId).includes('.sub-') ? branchEvents : eventsOf(String(params.sessionId)) });
+      case 'session.read': {
+        const events = String(params.sessionId).includes('.sub-') ? branchEvents : eventsOf(String(params.sessionId));
+        return reply({ sessionId: params.sessionId, events: params.fullResults === true ? fillSpills(events) : events });
+      }
       case 'sessions.list':
         return reply({ sessions: params.projectRoot === undefined ? sessions : sessions.filter((item) => item.projectRoot === params.projectRoot) });
       case 'status.get':
@@ -170,9 +225,13 @@ export function createFakeHost(): Transport {
     tell({ seq: 102, kind: 'assistant', text: '', toolCalls: [{ id: callId, name: 'exec', args: { command } }] });
     await wait(420);
     if (decision === 'allow') {
-      tell({ seq: 103, kind: 'tool', tool: 'exec', callId, args: { command }, result: { content: { text: 'Count 12', exitCode: 0 } } });
+      tell({ seq: 103, kind: 'tool', tool: 'exec', callId, args: { command },
+        verdict: { decision: 'allow', via: 'ask', capability: 'exec', level: 'ask', rule: '命令逐次询问', answer: 'allow' },
+        result: { content: { text: 'Count 12', exitCode: 0 } } });
     } else {
-      tell({ seq: 103, kind: 'tool', tool: 'exec', callId, args: { command }, result: { failed: true, kind: 'refusal', code: 'policy_denied', reason: '这一条没被允许（答复是不允许）。' } });
+      tell({ seq: 103, kind: 'tool', tool: 'exec', callId, args: { command },
+        verdict: { decision: 'deny', via: 'ask', capability: 'exec', level: 'ask', rule: '命令逐次询问', answer: 'deny' },
+        result: { failed: true, kind: 'refusal', code: 'policy_denied', reason: '这一条没被允许（答复是不允许）。' } });
     }
     await wait(220);
     tell({ seq: 104, kind: 'usage', ignorable: true, input: 9211, output: 214, estimated: 19_050, measurement: 'request-v1' });

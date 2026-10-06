@@ -269,7 +269,7 @@ button.primary {
 }
 
 .row.answer {
-  white-space: pre-wrap;
+  white-space: normal;
   overflow-wrap: anywhere;
 }
 
@@ -294,26 +294,14 @@ button.primary {
   font-size: 0.86rem;
 }
 
-.row.reasoning summary {
-  cursor: pointer;
-  list-style: none;
-}
-
-.row.reasoning summary::before {
-  content: "▾ ";
-}
-
-.row.reasoning:not([open]) summary::before {
-  content: "▸ ";
-}
-
 .row.call,
 .row.result {
   font-family: var(--mono);
   font-size: 0.82rem;
 }
 
-.row.result[data-failed="true"] {
+.row.refusal,
+.row.failure {
   border-color: color-mix(in srgb, var(--bad) 45%, var(--line));
 }
 
@@ -348,8 +336,63 @@ button.primary {
   display: none;
 }
 
-.conversation[data-verbosity="detailed"] .row.reasoning summary {
-  pointer-events: none;
+/* ---------- 工具卡片（D94）---------- */
+
+.row-tool {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+/* 抬头下面那一行说的是对着哪个对象：命令文本、路径、那一项 MCP 能力名。 */
+.row-target {
+  margin-top: 0.3rem;
+  color: var(--fg-muted);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.row-note {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 0.42rem;
+  font-size: 0.72rem;
+  color: var(--fg-muted);
+  background: var(--bg-sunk);
+}
+
+.row-code {
+  border-radius: var(--radius);
+  padding: 0 0.35rem;
+  font-size: 0.74rem;
+  color: var(--bad);
+  background: color-mix(in srgb, var(--bad) 14%, var(--bg-sunk));
+}
+
+.row.refusal .row-note,
+.row.failure .row-note {
+  border-color: color-mix(in srgb, var(--bad) 40%, var(--line));
+}
+
+/* 长正文默认一屏高，多出来的靠「看全文」；展开是界面一侧的状态。 */
+.row-body[data-folded="true"] {
+  max-height: 9rem;
+  overflow: hidden;
+}
+
+.fold-toggle {
+  margin-top: 0.3rem;
+  padding: 0.1rem 0.5rem;
+  font-size: 0.74rem;
+  color: var(--fg-muted);
+  background: var(--bg-sunk);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+}
+
+.fold-toggle:hover {
+  color: var(--fg);
+  border-style: solid;
 }
 
 /* ---------- 审批与输入 ---------- */

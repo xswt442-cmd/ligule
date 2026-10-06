@@ -1,5 +1,9 @@
+import { Fold } from './Fold';
 import type { RowProps } from './types';
 
-export function ReasoningRow({ row }: RowProps) {
-  return <details className="row reasoning" data-kind="reasoning"><summary className="row-head">推理段</summary><div className="row-body">{row.text}</div></details>;
+export function ReasoningRow({ row, verbosity }: RowProps) {
+  return <article className="row reasoning" data-kind="reasoning">
+    <div className="row-head">推理段</div>
+    <Fold text={row.text} verbosity={verbosity} />
+  </article>;
 }

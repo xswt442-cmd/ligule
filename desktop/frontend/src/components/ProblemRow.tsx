@@ -1,7 +1,16 @@
+import { Fold } from './Fold';
 import type { RowProps } from './types';
 
 // 未允许与失败是同一类形状：这一次没做成，差别在稳定码上（D93 把码原样带出来）。
-export function ProblemRow({ row }: RowProps) {
-  const label = row.kind === 'refusal' ? `${row.tool} · 没让做（${row.code}）` : `${row.tool} · ${row.code}`;
-  return <article className={`row ${row.kind}`} data-kind={row.kind} data-failed="true"><div className="row-head">{label}</div><div className="row-body">{row.text}</div></article>;
+export function ProblemRow({ row, verbosity }: RowProps) {
+  return <article className={`row ${row.kind}`} data-kind={row.kind} data-failed="true">
+    <div className="row-head">
+      <code className="row-tool">{row.tool}</code>
+      <span className="state-bad">{row.kind === 'refusal' ? '没让做' : '失败了'}</span>
+      {row.code !== undefined && <code className="row-code">{row.code}</code>}
+      {row.notes?.map((note) => <span className="row-note" key={note}>{note}</span>)}
+    </div>
+    {row.summary !== undefined && row.summary !== '' && <div className="row-target">{row.summary}</div>}
+    <Fold text={row.text} verbosity={verbosity} />
+  </article>;
 }

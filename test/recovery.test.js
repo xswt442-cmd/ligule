@@ -1,5 +1,4 @@
 // 第 33 步的验收（D72、D79）：崩溃留下的那次派发补成一条规范的工具结果，只读的那一侧不改盘，补一次就够。
-// 真把宿主杀掉的验收在 `testplace/hard-kill.mjs`（平台事实记在阶段三那份实现顺序的第 33 行），这里跑同一套代码路径。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
