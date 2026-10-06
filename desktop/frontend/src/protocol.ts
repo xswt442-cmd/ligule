@@ -34,6 +34,13 @@ export type Client = {
   counts: () => { sent: number; received: number };
 };
 
+// 界面上要说得出的是那一个稳定码（D93）。宿主回的错误带码，客户端自己造的错误（超时、载体断了）只有 message，
+// 再外面一层可能什么都不是；这一处把三种形状收敛成一个码。
+export function code(error: unknown): string {
+  const shaped = error as { code?: string; message?: string };
+  return shaped.code ?? shaped.message ?? String(error);
+}
+
 export function createClient(transport: Transport): Client {
   const pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer?: ReturnType<typeof setTimeout> }>();
   const notifications: Array<(message: Frame) => void> = [];

@@ -2,7 +2,7 @@
 // 记录目录只有宿主那一侧开盘，这里不猜有什么会话，读回来的就是全部。
 import { useCallback, useEffect, useState } from 'react';
 import { Icon } from './Icon';
-import type { Client } from '../protocol';
+import { code, type Client } from '../protocol';
 
 export type SessionSummary = {
   id: string;
@@ -19,9 +19,6 @@ export type SessionSummary = {
   truncatedBytes: number;
   error?: { code: string; detail: string };
 };
-
-const codeOf = (error: unknown): string => (error as { code?: string; message?: string }).code
-  ?? (error as { message?: string }).message ?? String(error);
 
 // 列表上那一格时间只求认得出先后：月日与时分够了。
 function clock(iso: string): string {
@@ -50,7 +47,7 @@ export function SessionRail({ client, current, onOpen }: { client: Client; curre
       }
       setGroups([...byRoot.entries()]);
     } catch (error) {
-      setNote(`会话列表读不回来：${codeOf(error)}`);
+      setNote(`会话列表读不回来：${code(error)}`);
     } finally {
       setLoading(false);
     }
@@ -88,9 +85,9 @@ export function SessionRail({ client, current, onOpen }: { client: Client; curre
         </span>
         <span className="session-id">{item.id}</span>
         {(item.unanswered > 0 || item.formatVersion === 0 || item.truncatedBytes > 0 || item.error !== undefined) && <span className="session-meta">
-          {item.unanswered > 0 && <span>没收尾 {item.unanswered} 次</span>}
+          {item.unanswered > 0 && <span>未收尾 {item.unanswered} 次派发</span>}
           {item.formatVersion === 0 && <span>没有首行</span>}
-          {item.truncatedBytes > 0 && <span>尾部缺 {item.truncatedBytes} 字节</span>}
+          {item.truncatedBytes > 0 && <span>尾行未完成 {item.truncatedBytes} 字节</span>}
           {item.error !== undefined && <code className="row-code">{item.error.code}</code>}
         </span>}
       </button>)}

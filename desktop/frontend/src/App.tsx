@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { createClient, type Client, type Transport } from './protocol';
+import { code, createClient, type Client, type Transport } from './protocol';
 import { ApprovalCard, type Ask } from './components/ApprovalCard';
 import { Icon } from './components/Icon';
 import { SettingsDialog } from './components/Settings';
@@ -49,8 +49,6 @@ function readHistory(): string[] {
     return [];
   }
 }
-const code = (error: unknown): string => (error as { code?: string; message?: string }).code
-  ?? (error as { message?: string }).message ?? String(error);
 
 // 已经接上的四项。
 const menuPanels: Panel<PanelProps>[] = [
@@ -60,8 +58,8 @@ const menuPanels: Panel<PanelProps>[] = [
     view: ({ status }) => status === null
       ? <p className="stub">还没有会话，读不到状态。</p>
       : <>
-        <h3>模式 {status.mode ?? '没装'} · 档位 {status.policy} · 工具 {status.tools.length} 件 · 记录 {status.eventCount} 条 · {status.running ? '正在跑' : '空闲'}</h3>
-        <p className="stub">判定链记的拒绝：连续 {status.denials.consecutive} 次、累计 {status.denials.total} 次。连续次数到阈值时档位自动回到逐次询问（D17）。</p>
+        <h3>模式 {status.mode ?? '没有装'} · 档位 {status.policy} · 工具 {status.tools.length} 件 · 记录 {status.eventCount} 条 · {status.running ? '正在跑' : '空闲'}</h3>
+        <p className="stub">判定链记下的不允许：连续 {status.denials.consecutive} 次、累计 {status.denials.total} 次。连续次数到阈值时档位自己回到逐次询问（D17）。</p>
         <ul>{status.tools.map((name) => <li key={name}>{name}</li>)}</ul>
       </>,
   },
@@ -72,7 +70,7 @@ const menuPanels: Panel<PanelProps>[] = [
       <li>Enter —— 发送</li>
       <li>Shift+Enter —— 换行</li>
       <li>Ctrl+Enter —— 发送</li>
-      <li>Esc —— 输入框里取消这一轮；别处关掉菜单与右侧面板</li>
+      <li>Esc —— 依次关掉命令面板、设置、菜单、右侧面板；都关完时打断正在跑的那一轮</li>
     </ul>,
   },
   {
@@ -616,7 +614,7 @@ export function App({ transport }: { transport: Transport }) {
       <header className="topbar">
         <div className="title">
           <strong id="session-title">{sessionId === null ? '没有会话' : `会话 ${sessionId.slice(0, 8)}`}</strong>
-          <span className="muted" id="session-note">{status === null ? '后端进程由壳起，帧走管道' : `记录 ${status.eventCount} 条`}</span>
+          <span className="muted" id="session-note">{status === null ? '还没有会话：新建一份，或者从左侧栏挑一份' : `记录 ${status.eventCount} 条`}</span>
         </div>
         <div className="pills">{registry.list('header.status').map((item) => <span key={item.id}>{item.view(panelProps)}</span>)}</div>
         <button className="icon-button" type="button" title="命令面板（Ctrl+K）" aria-label="命令面板" onClick={() => setPaletteOpen(true)}><Icon name="search" size={15} /></button>
@@ -647,8 +645,8 @@ export function App({ transport }: { transport: Transport }) {
         <Icon name="warn" size={15} />
         <strong>这一条连接不在了</strong>
         <code>{link}</code>
-        <span>界面只能重问一次；后端进程起不来那一段是壳的事。</span>
-        <button type="button" onClick={() => void beat(4_000)}>重试</button>
+        <span>这一侧只能再问一次；把后端进程重新起来是壳的事，那一条命令还没有（U51）。</span>
+        <button type="button" onClick={() => void beat(4_000)}>重问一次</button>
       </div>}
 
       <footer className="composer">
@@ -689,7 +687,7 @@ export function App({ transport }: { transport: Transport }) {
         </div>
       </footer>
       <div className="statusbar">
-        <span>帧走管道 · 出 {panelProps.counts.sent} 条 / 入 {panelProps.counts.received} 条</span>
+        <span>管道 · 发出 {panelProps.counts.sent} 条 · 收到 {panelProps.counts.received} 条</span>
         <span>{running ? `正在跑 ${seconds} 秒` : '空闲'}</span>
         <span>{sessionId === null ? '没有会话' : `会话 ${sessionId}`}</span>
       </div>

@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react';
-import { Icon, type IconName } from './Icon';
+import { Icon } from './Icon';
 import type { Settings } from '../settings';
 import type { Status } from '../status';
 
@@ -12,6 +12,9 @@ const SECTIONS = [
   { id: 'model', title: '模型与端点', icon: 'folder' },
   { id: 'connection', title: '连接', icon: 'refresh' },
 ] as const;
+
+// 模式来自哪一层，终端那一份用的是同一组词；层名不在表里时把原样交出去。
+const LAYERS: Record<string, string> = { shipped: '随包', user: '全局', project: '项目' };
 
 export type SectionId = (typeof SECTIONS)[number]['id'];
 
@@ -46,7 +49,7 @@ export function SettingsDialog(props: SettingsProps) {
           aria-selected={section === item.id}
           className={section === item.id ? 'active' : ''}
           onClick={() => setSection(item.id)}
-        ><Icon name={item.icon as IconName} size={14} /><span>{item.title}</span></button>)}
+        ><Icon name={item.icon} size={14} /><span>{item.title}</span></button>)}
       </nav>
       <div className="sheet-body" role="tabpanel">
         {section === 'appearance' && <Appearance settings={settings} patch={patch} />}
@@ -61,7 +64,7 @@ export function SettingsDialog(props: SettingsProps) {
 
 function Appearance({ settings, patch }: { settings: Settings; patch: SettingsProps['patch'] }) {
   return <>
-    <Row label="主题" note="跟随系统时看的是这台机器现在要深色还是浅色">
+    <Row label="主题" note="跟随系统时按这台机器现在用的是深色还是浅色">
       <select value={settings.theme} onChange={(event) => patch({ theme: event.target.value as Settings['theme'] })}>
         <option value="system">跟随系统</option>
         <option value="dark">深色</option>
@@ -75,7 +78,7 @@ function Appearance({ settings, patch }: { settings: Settings; patch: SettingsPr
         <option value="large">大</option>
       </select>
     </Row>
-    <Row label="侧栏宽度" note={`${settings.sidebar} 像素，也可以拖那一根分隔线`}>
+    <Row label="侧栏宽度" note={`${settings.sidebar} 像素；左侧那根分隔线也可以直接拖`}>
       <input type="range" min={264} max={420} step={4} value={settings.sidebar} onChange={(event) => patch({ sidebar: Number(event.target.value) })} />
     </Row>
     <Row label="面板停靠">
@@ -84,7 +87,7 @@ function Appearance({ settings, patch }: { settings: Settings; patch: SettingsPr
         <option value="left">左侧</option>
       </select>
     </Row>
-    <Row label="工作步骤展示" note="四档只改可见性，收进来的东西一直是全的（D32）">
+    <Row label="工作步骤展示" note="四档改的是哪些步骤看得见；交给模型的内容一直是全的（D32）">
       <select value={settings.verbosity} onChange={(event) => patch({ verbosity: event.target.value as Settings['verbosity'] })}>
         <option value="brief">简洁</option>
         <option value="standard">标准</option>
@@ -105,13 +108,13 @@ function Mode({ status, draft, onDraft, onSet }: { status: Status | null; draft:
     onDraft('');
   };
   return <>
-    <Row label="现在生效的" note={status === null ? '还没有会话' : `${status.mode ?? '没装'}（${status.modeLayer ?? '未知那层'}）`}>
-      <span className="value">{status === null ? '—' : `${status.tools.length} 件工具交给模型`}</span>
+    <Row label="现在生效的" note={status === null ? '还没有会话' : `${status.mode ?? '没有装'}（${LAYERS[status.modeLayer ?? ''] ?? status.modeLayer ?? '层名读不到'}）`}>
+      <span className="value">{status === null ? '读不到' : `${status.tools.length} 件工具交给模型`}</span>
     </Row>
     {status?.pendingMode !== null && status?.pendingMode !== undefined && <Row label="待生效" note="正在跑的那一轮结束才换（D41）">
       <span className="value">{status.pendingMode}</span>
     </Row>}
-    <Row label="换成" note="随包带的是 minimal 与 full；名字写错那一刻报 mode_unknown">
+    <Row label="换成" note="随包带的是 minimal 与 full；名字写错时那一次调用报 mode_unknown">
       <span className="inline-field">
         <input value={draft} placeholder="模式名" aria-label="要换成的模式名" onChange={(event) => onDraft(event.target.value)} onKeyDown={(event) => {
           if (event.key !== 'Enter') return;
@@ -121,26 +124,26 @@ function Mode({ status, draft, onDraft, onSet }: { status: Status | null; draft:
         <button type="button" disabled={draft.trim() === ''} onClick={send}>切换</button>
       </span>
     </Row>
-    <p className="sheet-note">这一份清单挑的是工具集与提示词片段两格（D35、D43）；判定档位与模型都不在它的范围里（D35）。</p>
+    <p className="sheet-note">模式挑的是工具集与提示词片段；判定档位与用哪一个模型都不在模式里（D35、D43）。</p>
   </>;
 }
 
 function Policy({ status }: { status: Status | null }) {
   return <>
-    <Row label="档位" note={status === null ? '还没有会话' : '连续拒绝到阈值时自动回到逐次询问（D17）'}>
-      <span className="value">{status?.policy ?? '—'}</span>
+    <Row label="档位" note={status === null ? '还没有会话' : '连续不允许到阈值时自动回到逐次询问（D17）'}>
+      <span className="value">{status?.policy ?? '读不到'}</span>
     </Row>
-    <Row label="拒绝计数">
-      <span className="value">{status === null ? '—' : `连续 ${status.denials.consecutive} 次 · 累计 ${status.denials.total} 次`}</span>
+    <Row label="不允许的次数">
+      <span className="value">{status === null ? '读不到' : `连续 ${status.denials.consecutive} 次 · 累计 ${status.denials.total} 次`}</span>
     </Row>
-    <p className="sheet-note">档位现在是整个运行一份。按工具名或按能力分类收紧那一条没定（U41），界面在这里放开关就等于替那条未定项做决定，所以这一栏只读数。</p>
+    <p className="sheet-note">档位管的是整个运行。按工具名或者按能力分类收紧那一条还没定（U41），所以这一栏只给读数，不放开关。</p>
   </>;
 }
 
 function Model() {
   return <p className="sheet-note">
-    服务地址、模型名与限额读的是配置文件那三层（D8）。协议表里那九条方法没有一条读写配置，所以这一栏改不动任何东西：
-    要在这里选模型，先得加那一条方法。现在能看的是上下文那一格的窗口与用量，它在「连接」那一段与顶栏那条压力上。
+    服务地址、模型名与限额读的是配置文件的三层（D8）。协议的九条方法里没有读写配置的那一条，所以这一栏没有可以改的东西。
+    要看窗口与用量，在「连接」这一栏，以及顶栏那一条上下文读数里。
   </p>;
 }
 
@@ -156,14 +159,14 @@ function Connection({ link, counts, waiting, status, onRetry }: {
       <span className="value">标准输入输出两根管道</span>
     </Row>
     <Row label="帧">
-      <span className="value">出 {counts.sent} 条 · 入 {counts.received} 条 · 未答 {waiting} 条</span>
+      <span className="value">发出 {counts.sent} 条 · 收到 {counts.received} 条 · 没回 {waiting} 条</span>
     </Row>
     <Row label="这一份会话">
-      <span className="value mono">{status?.sessionId ?? '没有'}</span>
+      <span className="value mono">{status?.sessionId ?? '没有会话'}</span>
     </Row>
-    <Row label="连接状态" note={link === null ? undefined : '界面只能重问一次；后端进程起不来那一段是壳的事（U51）'}>
+    <Row label="连接状态" note={link === null ? undefined : '这一侧只能再问一次；把后端进程重新起来是壳的事，那一条命令还没有（U51）'}>
       <span className="inline-field">
-        <span className="value">{link === null ? '在' : `不在 · ${link}`}</span>
+        <span className="value">{link === null ? '连着' : `断了 · ${link}`}</span>
         <button type="button" onClick={onRetry}>重问一次</button>
       </span>
     </Row>
