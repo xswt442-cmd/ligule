@@ -441,7 +441,7 @@ export function App({ transport }: { transport: Transport }) {
     dispatchAt.current.clear();
     setReading(true);
     try {
-      // 两条都带超时：那一边不回话时这一格要落到失败那一张脸，不能一直停在「在读那份记录…」。
+      // 两条都带超时：那一边不回话时要显示失败那一种状态，不能一直停在「在读那份记录…」。
       await client.call('session.open', { sessionId: id }, 15_000);
       // fullResults 那一格是给界面读的：溢出文件里的整段正文这才到得了画面（记录本身不动）。
       const { events } = await client.call('session.read', { sessionId: id, fullResults: true }, 15_000) as { events: Record_[] };
