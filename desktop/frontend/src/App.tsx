@@ -5,7 +5,7 @@ import { ApprovalCard, type Ask } from './components/ApprovalCard';
 import { Icon } from './components/Icon';
 import { SettingsDialog } from './components/Settings';
 import { RowView } from './components/RowView';
-import { SessionRail } from './components/SessionRail';
+import { SessionRail, type SearchHit } from './components/SessionRail';
 import { ModelPanel } from './components/ModelPanel';
 import { UsageMeter } from './components/UsageMeter';
 import { Palette, type Command } from './components/Palette';
@@ -37,6 +37,8 @@ type PanelProps = {
   waiting: number;
   counts: { sent: number; received: number };
   openSession: (id: string) => void;
+  // 查找命中说的是一份会话里的第几条：接上那一份，再跳到那一行（方案 4.2）。
+  openHit: (hit: SearchHit) => void;
   settings: Settings;
   patch: (part: Partial<Settings>) => void;
 };
@@ -123,7 +125,7 @@ const railPanels: Panel<PanelProps>[] = [
   {
     id: 'rail.sessions',
     title: '会话',
-    view: ({ client, sessionId, openSession }) => <SessionRail client={client} current={sessionId} onOpen={openSession} />,
+    view: ({ client, sessionId, openSession, openHit }) => <SessionRail client={client} current={sessionId} onOpen={openSession} onOpenHit={openHit} />,
   },
 ];
 
@@ -253,6 +255,11 @@ export function App({ transport }: { transport: Transport }) {
   const [page, setPage] = useState<{ before: number; hasMore: boolean } | null>(null);
   const [olderLoading, setOlderLoading] = useState(false);
   const [firstIndex, setFirstIndex] = useState(FIRST_INDEX);
+  // 查找命中要落到的那一条：接上那一份会话、读到位，再换一枚 `stamp` 让视口从这一条开始画（方案 6.2）。
+  const [wanted, setWanted] = useState<SearchHit | null>(null);
+  const [stamp, setStamp] = useState(0);
+  // 跳到的那一行亮一小段：一屏里几十行都在，不落个记号认不出停在哪一条。
+  const [flash, setFlash] = useState<number | null>(null);
   // 那一次派发是什么时候交出去的：只为算用时，键是调用 id（D94）。
   const dispatchAt = useRef(new Map<string, number>());
   const [seconds, setSeconds] = useState(0);
@@ -458,12 +465,15 @@ export function App({ transport }: { transport: Transport }) {
 
   // 换会话先让 Host 那一份接上：记录不在磁盘上就是没有这份会话，`session.open` 会说清（D78）。
   // 已经打开的那一份复用状态，不重开，所以这一个动作对当前会话也是安全的。
-  const openSession = useCallback(async (id: string) => {
+  // 给了 `hit` 就一口气往回读到那一条进来，并把「要落到哪一条」与那些行同一批交出去：
+  // 数据先变长、跳转晚一帧的话，贴在末行那一条会先把画面拉回去（U48、方案 6.2）。
+  const openSession = useCallback(async (id: string, hit?: SearchHit) => {
     setSessionId(id);
     setRows([]);
     setPage(null);
     setFirstIndex(FIRST_INDEX);
     setLive({ text: '', reasoning: '' });
+    setWanted(null);
     dispatchAt.current.clear();
     setReading(true);
     try {
@@ -471,9 +481,19 @@ export function App({ transport }: { transport: Transport }) {
       await client.call('session.open', { sessionId: id }, 15_000);
       // fullResults 那一格是给界面读的：溢出文件里的整段正文这才到得了画面（记录本身不动）。
       // 只取最近这一页：更早的靠「显示更早」那一格按游标往前要（方案 4.1、实现顺序第 73 步）。
-      const first = await client.call('session.read', { sessionId: id, limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean };
-      setRows(first.events.flatMap((record) => projectRecord(record)));
-      setPage({ before: Number(first.events[0]?.seq ?? 1), hasMore: first.hasMore });
+      const newest = await client.call('session.read', { sessionId: id, limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean };
+      let events = newest.events;
+      let hasMore = newest.hasMore;
+      while (hit !== undefined && hit.seq < Number(events[0]?.seq ?? 0) && hasMore) {
+        const older = await client.call('session.read',
+          { sessionId: id, before: Number(events[0]?.seq), limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean };
+        if (older.events.length === 0) { hasMore = false; break; }
+        events = [...older.events, ...events];
+        hasMore = older.hasMore;
+      }
+      setRows(events.flatMap((record) => projectRecord(record)));
+      setPage({ before: Number(events[0]?.seq ?? 1), hasMore });
+      setWanted(hit ?? null);
     } catch (error) {
       setRows((current) => [...current, metaRow('error', `那份会话接不上：${code(error)}`)]);
     } finally {
@@ -481,6 +501,9 @@ export function App({ transport }: { transport: Transport }) {
     }
     void refreshStatus(id);
   }, [client, refreshStatus]);
+
+  // 查找命中那一条交给接会话那一个动作：读到位与落笔在同一批里，跳转那一处只认这一份会话的第几条（方案 4.2）。
+  const openHit = useCallback((hit: SearchHit) => void openSession(hit.sessionId, hit), [openSession]);
 
   // 重连（实现顺序第 65 步）：旧的那一具宿主不会再答复了，先把发出去的请求按一个稳定码收尾，
   // 把没答的询问作废，再让壳换一具进程，最后用 `session.open` 接回原来那一份会话。
@@ -652,6 +675,42 @@ export function App({ transport }: { transport: Transport }) {
     ...(live.text === '' || !shownIn(verbosity, LIVE_ANSWER) ? [] : [{ ...LIVE_ANSWER, text: live.text }]),
   ];
 
+  // 命中落在手里这几页之外：由 `openSession` 往回读到位再落笔，所以这一处只负责画面（方案 6.2）。
+  // 跳转靠换一枚 `stamp` 让视口重新挂载，并从 `jumpAt` 那一条开始画：数据刚变长时视口自己要先量一遍行高，
+  // 同一帧里发出的 `scrollToIndex` 会被它随后那一次回到末行盖掉（U48）。
+  useEffect(() => {
+    if (wanted === null) return;
+    const at = visible.findIndex((row) => row.seq === wanted.seq);
+    if (at >= 0) {
+      setStamp((current) => current + 1);
+      setFlash(wanted.seq);
+      return;
+    }
+    // 记录里有这一行而画面上没有：是当前展示档把那一类行筛掉了，收到全量才看得见它（D90）。
+    const held = rows.find((row) => row.seq === wanted.seq);
+    if (held !== undefined && !shownIn(verbosity, held)) {
+      patch({ verbosity: 'detailed' });
+      return;
+    }
+    // 读到的那几页里没有这一行：它不画在转录里（比如它是一份会话的名字）。说出来，不让人等一次不会来的跳转。
+    setWanted(null);
+    setRows((current) => [...current, metaRow('meta', `第 ${wanted.seq} 条不在这份转录里：${wanted.kind === 'label' ? '那一条是这一份会话的名字，名字画在标题与列表那一处' : '它不在这一份记录读得到的那几类里'}`)]);
+  }, [patch, rows, verbosity, visible, wanted]);
+
+  // 那一段亮只亮一会儿：它说的是「跳到这一条」，不是「这一条与别的那些不一样」。
+  // `stamp` 也在读数里：连着跳同一行时那一个值不变，不看它就没法重新起那一段计时。
+  useEffect(() => {
+    if (flash === null) return;
+    const timer = setTimeout(() => {
+      setFlash(null);
+      setWanted(null);
+    }, 2500);
+    return () => clearTimeout(timer);
+  }, [flash, stamp]);
+
+  // 要落的那一条在数据里的位置：`stamp` 换掉的那一帧视口重新挂载，就从这一条开始画。
+  const jumpAt = wanted === null ? -1 : visible.findIndex((row) => row.seq === wanted.seq);
+
   const panelProps: PanelProps = {
     client,
     status,
@@ -661,6 +720,7 @@ export function App({ transport }: { transport: Transport }) {
     waiting: client.waiting(),
     counts: client.counts(),
     openSession,
+    openHit,
     settings,
     patch,
   };
@@ -693,13 +753,17 @@ export function App({ transport }: { transport: Transport }) {
       {/* 转录只挂视口里那几十行：读回来的那一页全在数据里，画出来的由视口决定（U48、方案 6.2）。 */}
       <div className="conversation" aria-live="polite">
         <Virtuoso
+          key={`stream-${stamp}`}
           ref={list}
           style={{ height: '100%' }}
           data={visible}
           firstItemIndex={firstIndex}
+          initialTopMostItemIndex={jumpAt < 0 ? undefined : { index: jumpAt, align: 'start' }}
           computeItemKey={(_index, row) => row.id}
-          itemContent={(_index, row) => <RowView row={row} verbosity={verbosity} />}
-          followOutput={(atBottom) => (atBottom ? 'smooth' : false)}
+          itemContent={(_index, row) => <RowView row={row} verbosity={verbosity} flash={row.seq !== undefined && row.seq === flash} />}
+          // 一次查找的跳转期间不跟末行：往前要页与展示档那一次收全都会让数据变长，
+          // 而跟末行那一条会把刚落下的那一行重新推走（方案 6.2）。
+          followOutput={(atBottom) => (atBottom && wanted === null && flash === null ? 'smooth' : false)}
           atBottomThreshold={40}
           atBottomStateChange={(atBottom) => setPinned(atBottom)}
           increaseViewportBy={{ top: 240, bottom: 600 }}

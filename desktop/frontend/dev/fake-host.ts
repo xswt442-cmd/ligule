@@ -216,6 +216,45 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
       }
       case 'sessions.list':
         return reply({ sessions: params.projectRoot === undefined ? sessions : sessions.filter((item) => item.projectRoot === params.projectRoot) });
+      // 查找扫的就是这些假记录里的正文，与宿主那一条交回同一份形状：哪一份会话的第几条（方案 4.2）。
+      case 'sessions.search': {
+        const needle = String(params.query ?? '').trim().toLocaleLowerCase();
+        // 空白的查询在每一份记录里都能对上，宿主那一条在扫之前就拒掉（实现顺序第 76 步）。
+        if (needle === '') return fail('search_query_empty', 'a search query has to say what to look for');
+        const found: Record<string, unknown>[] = [];
+        for (const item of sessions) {
+          let inThisRecord = 0;
+          for (const event of eventsOf(item.id)) {
+            if (inThisRecord === 3) break;
+            const texts = event.kind === 'user' || event.kind === 'assistant' || event.kind === 'reasoning'
+              ? [String(event.text ?? '')]
+              : event.kind === 'tool'
+                ? [JSON.stringify(event.args ?? {}), String((event.result as { content?: { text?: string } })?.content?.text ?? '')]
+                : [];
+            // 与宿主同一套：一段一段找，摘录取真正对上那一段，不把两段接成一句假话。
+            const hit = texts.map((raw) => raw.replace(/\s+/g, ' ')).find((text) => text.toLocaleLowerCase().includes(needle));
+            if (hit === undefined) continue;
+            const at = hit.toLocaleLowerCase().indexOf(needle);
+            const tail = at + needle.length + 44;
+            inThisRecord += 1;
+            found.push({
+              sessionId: item.id,
+              name: item.name,
+              seq: event.seq,
+              kind: event.kind,
+              text: `${at > 0 ? '…' : ''}${hit.slice(Math.max(0, at - 16), tail).trim()}${tail < hit.length ? '…' : ''}`,
+              ...(((event.result as { spilled?: string } | undefined)?.spilled ?? '') !== '' ? { spilled: (event.result as { spilled?: string }).spilled } : {}),
+            });
+            if (found.length === 50) return reply({ hits: found });
+          }
+          // 名字那一格也搜得到，命中带的是那一条 `label` 的序号——它不画在转录里，跳到那一条要说清（实现顺序第 75、77 步）。
+          if (inThisRecord < 3 && String(item.name).toLocaleLowerCase().includes(needle)) {
+            found.push({ sessionId: item.id, name: item.name, seq: item.events - 1, kind: 'label', text: String(item.name) });
+            if (found.length === 50) return reply({ hits: found });
+          }
+        }
+        return reply({ hits: found });
+      }
       case 'status.get':
         return reply({ ...status, sessionId: params.sessionId, eventCount: eventsOf(String(params.sessionId)).length });
       case 'mode.set': {

@@ -1449,3 +1449,107 @@ button.mini.chip b {
   font-weight: 500;
   text-align: end;
 }
+
+/* ---------- 左侧栏的查找（第 77 步，方案 4.2）---------- */
+
+.rail-search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  color: var(--fg-muted);
+  background: var(--bg-sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.rail-search:focus-within {
+  border-color: var(--accent);
+}
+
+.rail-search input {
+  flex: 1;
+  min-inline-size: 0;
+  padding: 0;
+  color: var(--fg);
+  background: transparent;
+  border: 0;
+  font: inherit;
+  font-size: var(--text-sm);
+}
+
+/* 浏览器自带的那一枚清空把手与下面那一枚是同一件事，留一枚。 */
+.rail-search input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.search-clear {
+  display: grid;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+}
+
+.search-clear:hover {
+  color: var(--fg);
+}
+
+.hit-item {
+  display: flex;
+  flex-direction: column;
+  align-items: start;
+  gap: 2px;
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  text-align: start;
+  color: var(--fg-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  font-size: var(--text-sm);
+}
+
+.hit-item:hover {
+  border-color: var(--accent);
+  color: var(--fg);
+}
+
+.hit-where {
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+  font-size: var(--text-xs);
+}
+
+.hit-session {
+  color: var(--fg);
+}
+
+.hit-text {
+  white-space: normal;
+}
+
+.hit-note {
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+}
+
+/* 查找落到的那一行亮一会儿：说的是「跳到这一条」，不是这一行与别的那些不同。 */
+.row-flash {
+  animation: hit-flash 2.5s ease-out 1;
+  border-radius: var(--radius);
+}
+
+@keyframes hit-flash {
+  from { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+  to { background: transparent; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .row-flash {
+    animation: none;
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+}

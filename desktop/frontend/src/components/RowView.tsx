@@ -25,5 +25,7 @@ const VIEWS: Record<Row['kind'], (props: RowProps) => ReactElement> = {
 
 export const RowView = memo(function RowView(props: RowProps) {
   const View = VIEWS[props.row.kind];
-  return <View {...props} />;
+  if (props.flash !== true) return <View {...props} />;
+  // 亮起来的那一行才多包一层：其余每一行的节点数不变。
+  return <div className="row-flash"><View {...props} /></div>;
 });
