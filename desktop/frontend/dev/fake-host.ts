@@ -320,5 +320,9 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
     stopReplies: (on) => {
       deaf = on;
     },
+    // 重连那一条路的开发时演法：这一具「进程」又开始答话。装聋期间发出去的那些帧由界面自己收尾（第 65 步）。
+    restart: async () => {
+      deaf = false;
+    },
   };
 }

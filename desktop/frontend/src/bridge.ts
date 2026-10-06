@@ -22,5 +22,7 @@ export function tauriTransport(): Transport {
     onFault: (handle) => {
       fault = handle;
     },
+    // 换一具后端进程。会话不在壳里：它只负责进程，接回哪一份会话由界面用协议说（D30、第 65 步）。
+    restart: () => invoke('host_restart').then(() => undefined),
   };
 }

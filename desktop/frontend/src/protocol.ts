@@ -21,6 +21,8 @@ export type Transport = {
   onLog: (handle: (text: string) => void) => void;
   // 载体自己报的故障：帧发不出去了。协议帧里没有这一类，所以它从载体那一侧进来。
   onFault?: (handle: (reason: string) => void) => void;
+  // 换一具后端进程。壳里那是 `host_restart` 一条命令；开发时那一份假宿主用它重新答话（第 65 步）。
+  restart?: () => Promise<void>;
 };
 
 export type Client = {
@@ -33,6 +35,8 @@ export type Client = {
   onRequest: (handle: (message: Frame) => void) => void;
   waiting: () => number;
   counts: () => { sent: number; received: number };
+  // 旧的那一具宿主不会再答复了：把这些等待按一个稳定码收尾，交回收尾了几条（第 65 步）。
+  discard: (reason: string) => number;
 };
 
 // 界面上要说得出的是那一个稳定码（D93）。宿主回的错误带码，客户端自己造的错误（超时、载体断了）只有 message，
@@ -120,5 +124,15 @@ export function createClient(transport: Transport): Client {
     },
     waiting: () => pending.size,
     counts: () => ({ ...counts }),
+    discard(reason) {
+      let dropped = 0;
+      for (const [id, waiter] of [...pending]) {
+        if (waiter.timer !== undefined) clearTimeout(waiter.timer);
+        pending.delete(id);
+        waiter.reject(Object.assign(new Error(reason), { code: reason }));
+        dropped += 1;
+      }
+      return dropped;
+    },
   };
 }

@@ -111,7 +111,7 @@ const pendingPanels: Panel<PanelProps>[] = [
     id: 'panel.windows',
     title: '多窗口与重连',
     pending: true,
-    view: () => <p className="stub">一份壳对应一个 Host 进程，会话状态在那个进程里（D30）。多个窗口看同一会话要等共享常驻进程引入（U8）。进程断掉之后记录里那批没有结果的调用，D72 已经定了补法：补成一条 `tool_outcome_unknown` 的工具结果，恢复时不自动重放。这一项还缺的是界面重连上那一具 Host，把断掉期间漏掉的帧接回来（U51）。</p>,
+    view: () => <p className="stub">一份壳对应一个 Host 进程，会话状态在那个进程里（D30）。后端进程退了可以重连：那一个动作换一具进程，再用 `session.open` 接回这一份会话（第 65 步）。多个窗口看同一会话要等共享常驻进程引入（U8）。</p>,
   },
 ];
 
@@ -454,6 +454,21 @@ export function App({ transport }: { transport: Transport }) {
     void refreshStatus(id);
   }, [client, refreshStatus]);
 
+  // 重连（实现顺序第 65 步）：旧的那一具宿主不会再答复了，先把发出去的请求按一个稳定码收尾，
+  // 把没答的询问作废，再让壳换一具进程，最后用 `session.open` 接回原来那一份会话。
+  const reconnect = useCallback(async () => {
+    client.discard('host_restarted');
+    setAsks([]);
+    setRunning(false);
+    try {
+      await transport.restart?.();
+    } catch (error) {
+      setRows((current) => [...current, metaRow('error', `后端进程起不来：${code(error)}`)]);
+      return;
+    }
+    if (sessionId !== null) await openSession(sessionId);
+  }, [client, openSession, sessionId, setAsks, setRunning, transport]);
+
   const readBack = useCallback(async () => {
     if (sessionId === null) return;
     await openSession(sessionId);
@@ -645,8 +660,8 @@ export function App({ transport }: { transport: Transport }) {
         <Icon name="warn" size={15} />
         <strong>这一条连接不在了</strong>
         <code>{link}</code>
-        <span>这一侧只能再问一次；把后端进程重新起来是壳的事，那一条命令还没有（U51）。</span>
-        <button type="button" onClick={() => void beat(4_000)}>重问一次</button>
+        <span>重连会换一具后端进程。没答复的那些请求按 `host_restarted` 收尾，还没答的询问作废，这一份会话接回来。</span>
+        <button type="button" onClick={() => void reconnect()}>重连</button>
       </div>}
 
       <footer className="composer">
@@ -721,7 +736,7 @@ export function App({ transport }: { transport: Transport }) {
       counts={panelProps.counts}
       waiting={panelProps.waiting}
       onSetMode={(name) => void setMode(name)}
-      onRetry={() => void beat(4_000)}
+      onReconnect={() => void reconnect()}
       onClose={() => setSettingsOpen(false)}
     />}
   </div>;

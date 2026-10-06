@@ -26,7 +26,7 @@ export type SettingsProps = {
   counts: { sent: number; received: number };
   waiting: number;
   onSetMode: (name: string) => void;
-  onRetry: () => void;
+  onReconnect: () => void;
   onClose: () => void;
 };
 
@@ -56,7 +56,7 @@ export function SettingsDialog(props: SettingsProps) {
         {section === 'mode' && <Mode status={status} draft={modeDraft} onDraft={setModeDraft} onSet={props.onSetMode} />}
         {section === 'policy' && <Policy status={status} />}
         {section === 'model' && <Model />}
-        {section === 'connection' && <Connection link={props.link} counts={props.counts} waiting={props.waiting} status={status} onRetry={props.onRetry} />}
+        {section === 'connection' && <Connection link={props.link} counts={props.counts} waiting={props.waiting} status={status} onReconnect={props.onReconnect} />}
       </div>
     </div>
   </div>;
@@ -147,12 +147,12 @@ function Model() {
   </p>;
 }
 
-function Connection({ link, counts, waiting, status, onRetry }: {
+function Connection({ link, counts, waiting, status, onReconnect }: {
   link: string | null;
   counts: { sent: number; received: number };
   waiting: number;
   status: Status | null;
-  onRetry: () => void;
+  onReconnect: () => void;
 }) {
   return <>
     <Row label="载体" note="本机不监听端口，界面拿不到地址与凭据（D30）">
@@ -164,10 +164,10 @@ function Connection({ link, counts, waiting, status, onRetry }: {
     <Row label="这一份会话">
       <span className="value mono">{status?.sessionId ?? '没有会话'}</span>
     </Row>
-    <Row label="连接状态" note={link === null ? undefined : '这一侧只能再问一次；把后端进程重新起来是壳的事，那一条命令还没有（U51）'}>
+    <Row label="连接状态" note={link === null ? undefined : '重连换一具后端进程：没答复的请求按 `host_restarted` 收尾，没答的询问作废，这一份会话接回来'}>
       <span className="inline-field">
         <span className="value">{link === null ? '连着' : `断了 · ${link}`}</span>
-        <button type="button" onClick={onRetry}>重问一次</button>
+        <button type="button" onClick={onReconnect}>重连</button>
       </span>
     </Row>
   </>;
