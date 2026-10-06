@@ -2,6 +2,7 @@
 // 「哪个工具算完成本轮」由宿主按工具名持有（D12 的模型可见白名单里没有它，与 D16 同一分工）。
 // 提供方接口只定形状（D13）：接入走自己写的最小 HTTP 客户端，服务地址从配置读、凭据从环境变量读。
 import { KernelError, KernelRuntimeError } from './error.js';
+import { usageEvent } from '../session/usage.js';
 import { failureOf } from './result.js';
 
 export const DEFAULT_LOOP_LIMITS = Object.freeze({ iterations: 32, modelCalls: 64 });
@@ -64,7 +65,7 @@ export function createLoop({ kernel, provider, prompt, session, limits = DEFAULT
           const tools = kernel.manifest();
           let messages = session ? await session.modelView() : [{ role: 'user', text: input }];
           // 压力那一条触发在请求拼好之后、发出去之前：宿主交进来的那一件量一次，越线就先压一次再重拼（D75）。
-          if (compaction !== null) messages = await compaction.prepare({ system, tools, messages });
+          if (compaction !== null) messages = await compaction.prepare({ system, tools, messages }, controller.signal);
           // 流式接收期间就开始拼装工具调用（D13）。
           for (let attempt = 0; ; attempt += 1) {
             try {
@@ -85,7 +86,11 @@ export function createLoop({ kernel, provider, prompt, session, limits = DEFAULT
           }
           // 端点交回的真实用量用来修正本地估算：没有这一句，压力那一条可能永远不响。
           // 这一句同时也是把那一格落进记录的地方（D82）：界面与恢复都从记录读它，不读内存。
-          await compaction?.observe({ messages }, events);
+          if (compaction !== null) await compaction.observe({ system, tools, messages }, events);
+          else if (session !== undefined) {
+            const usage = usageEvent({ system, tools, messages }, events);
+            if (usage !== null) await session.append(usage);
+          }
 
           text = events.filter((event) => event.type === 'text').map((event) => event.text).join('');
           const reasoning = events.filter((event) => event.type === 'reasoning').map((event) => event.text).join('');

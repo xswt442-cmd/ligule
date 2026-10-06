@@ -439,7 +439,7 @@ test('the same protocol runs over an in-memory carrier inside one process', asyn
       assert.deepEqual(tool.verdict, { capability: 'read', decision: 'allow', via: 'ask', level: 'ask', answer: 'allow' });
 
       pair.client.output.end();
-      host.release();
+      await host.release();
     } finally {
       if (previous === undefined) delete process.env.LIGULE_API_KEY;
       else process.env.LIGULE_API_KEY = previous;
@@ -492,7 +492,7 @@ test('an approval for a command names the shell backend the host chose', async (
     assert.equal(approvals[0].executable, selection.executable);
   } finally {
     pair.client.output.end();
-    host.release();
+    await host.release();
     await rm(directory, { recursive: true, force: true });
   }
 });
@@ -554,15 +554,15 @@ test('a branch of an open session reads back through the same action', async () 
     await assert.rejects(connection.request('session.open', { sessionId: 'nobody' }), (error) => error.code === 'session_not_found');
 
     // 关掉这条连接上的会话之后支线也不再读得到：这一次动作不是记录目录的浏览器。
-    host.release();
+    await host.release();
     await assert.rejects(
       connection.request('session.read', { sessionId: branchId }),
-      (error) => error.code === 'session_not_open',
+      (error) => error.code === 'host_closed',
       'a branch whose trunk is closed is not readable',
     );
   } finally {
     pair.client.output.end();
-    host.release();
+    await host.release();
     await rm(directory, { recursive: true, force: true });
   }
 });
@@ -601,7 +601,7 @@ async function withInProcessHost(run, limits) {
     return await run(connection, { hold: (promise) => { gate = promise; }, directory });
   } finally {
     pair.client.output.end();
-    host.release();
+    await host.release();
     await rm(directory, { recursive: true, force: true });
   }
 }

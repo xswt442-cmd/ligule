@@ -241,7 +241,7 @@ test('the host wires the two tools from the config, and not when there is no ser
     assert.equal(status.tools.includes('read'), true, 'the rest of the registry is untouched');
   } finally {
     pair.client.output.end();
-    host.release();
+    await host.release();
     await rm(root, { recursive: true, force: true });
   }
 });

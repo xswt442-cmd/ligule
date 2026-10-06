@@ -2,8 +2,8 @@
 // 加这一层不改动内核任何一行：要往外发的每一件事都有现成的注入口——
 // 提供方与判定链由构造参数交进来，落盘的事件从会话记录那一条路上过一遍。
 import { randomUUID } from 'node:crypto';
-import { access } from 'node:fs/promises';
-import { join } from 'node:path';
+import { access, readFile, realpath } from 'node:fs/promises';
+import { isAbsolute, join, relative } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import { createKernel } from '../kernel/kernel.js';
 import { loadAssembly } from '../kernel/assembly.js';
@@ -147,11 +147,39 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
   const mcpConfigs = mcpServerConfigs(config);
   const directory = sessionDirectory(config);
   const sessions = new Map();
+  const building = new Set();
+  let closing;
 
   function open(id) {
     const state = sessions.get(id);
     if (state === undefined) throw new KernelError('session_not_open', { detail: id });
     return state;
+  }
+
+  async function execute(state, action) {
+    if (state.running !== undefined) throw new KernelError('run_already_running', { detail: state.id });
+    const controller = new AbortController();
+    const settleAsks = () => { for (const settle of state.asks) settle(); };
+    controller.signal.addEventListener('abort', settleAsks, { once: true });
+    state.running = controller;
+    state.operation = (async () => {
+      try {
+        return await action(controller.signal);
+      } finally {
+        controller.signal.removeEventListener('abort', settleAsks);
+        state.running = undefined;
+        if (state.pending !== undefined) {
+          const next = state.pending;
+          state.pending = undefined;
+          await state.adopt(next);
+        }
+      }
+    })();
+    try {
+      return await state.operation;
+    } finally {
+      state.operation = undefined;
+    }
   }
 
   // `<主干 id>.sub-<序号>` 是派生支线的名字（D71）：它的主干在这条连接上打开着，这一条才读得到（D74）。
@@ -168,6 +196,36 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       throw new KernelError('session_id_invalid', { detail: String(id).slice(0, 80) });
     }
     return join(directory, `${id}.jsonl`);
+  }
+
+  async function readForClient(session, sessionId, fullResults) {
+    const events = await session.read();
+    const header = await session.header();
+    if (!fullResults) return { sessionId, events, header: header ?? null };
+    const base = await realpath(directory);
+    const complete = [];
+    for (const event of events) {
+      const result = event.kind === 'tool' ? event.result : undefined;
+      if (result?.spilled === undefined) { complete.push(event); continue; }
+      if (typeof result.spilled !== 'string' || !/^result-\d+-[a-f0-9]{8}\.json$/.test(result.spilled)) {
+        throw new KernelError('session_spill_reference_invalid', { detail: `event ${event.seq}` });
+      }
+      let content;
+      try {
+        const path = await realpath(join(directory, result.spilled));
+        const local = relative(base, path);
+        if (isAbsolute(local) || local === '..' || local.startsWith('../') || local.startsWith('..\\')) {
+          throw new KernelError('session_spill_reference_invalid', { detail: `event ${event.seq}` });
+        }
+        const text = await readFile(path, 'utf8');
+        content = result.spillFormat === 'json' ? JSON.parse(text) : text;
+      } catch (cause) {
+        if (cause.code === 'session_spill_reference_invalid') throw cause;
+        throw new KernelError('session_spill_read_failed', { cause, detail: `${result.spilled}: ${cause.message}` });
+      }
+      complete.push({ ...event, result: { ...result, content } });
+    }
+    return { sessionId, events: complete, header: header ?? null };
   }
 
   // 一个会话一套内核、判定链与循环：判定链里的拒绝计数与档位按会话存活（D15、D17）。
@@ -190,6 +248,9 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       for (const listener of listeners) listener(event);
     });
     const state = { id, session, listeners, asks: new Set(), running: undefined, mode: { file: undefined, tools: [], undo: () => {} }, pending: undefined };
+    await session.acquire();
+    const cleanup = [];
+    try {
     const chain = createDecisionChain({
       ...policy,
       ask: async ({ tool, input, command, reason, shell, executable }) => {
@@ -229,6 +290,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     const loaded = skills.skills.length === 0 ? plugins : [...plugins, createSkillPlugin(skills)];
     // MCP 的两件固定工具按配置里有没有服务器登记（D52、D60）：一件都没配时这一格是空的，模型可见清单不涨。
     const mcp = createMcpRegistry(mcpConfigs);
+    cleanup.push(() => mcp.close());
     // 提示模板也是装载侧扫出来的事实（D45）：两处目录，靠近仓库的那一份胜出。展开发生在这一侧，
     // 三个客户端因此不必各写一份替换规则（D54）。
     const templates = templateRegistry ?? await discoverTemplates(templateDirectories(config.boundary));
@@ -254,6 +316,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       modeFile: () => state.mode.file,
       loopLimits: loopLimitsOf(config),
     })]);
+    cleanup.push(() => assembly.dispose());
     // 项目指令文件那四层是装载侧交给提示词的一段（D10、第 9.5 步留下的那一半）：
     // 装载器自己的预算算在完整文本上，片段登记时按同一个数，两处不会各截一次。
     const maxBytes = config.instructions?.maxBytes ?? DEFAULT_INSTRUCTION_BYTES;
@@ -293,6 +356,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       // 请求一次能力操作走的就是内核那一条 call：判定链、会话记录与参数校验一件都少不了（D37、D11）。
       request: (tool, args) => kernel.call(tool, args),
     });
+    cleanup.push(() => installedExtensions.dispose());
     for (const diagnostic of installedExtensions.diagnostics) {
       // 一件坏扩展不带走整次运行：它自己的登记全撤掉，别一条诊断，装载继续（D37 的承诺只到暴露面为止）。
       logger?.log?.('extension is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
@@ -371,6 +435,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       id,
       limits,
       logger,
+      requestPrefix: () => ({ system: prompt.render(), tools: kernel.manifest() }),
     });
     const loop = createLoop({
       kernel,
@@ -382,18 +447,35 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     });
     // 一份会话一份状态，审批的等待与正在跑的那一轮都记在这里。
     return Object.assign(state, { chain, kernel, assembly, extensions: installedExtensions, mcp, loop, templates, compaction });
+    } catch (error) {
+      try {
+        for (const dispose of cleanup.reverse()) await dispose();
+      } finally {
+        await session.close();
+      }
+      throw error;
+    }
+  }
+
+  function buildSession(id, connection, recover = false, mode) {
+    const pending = build(id, connection, recover, mode).then((state) => {
+      sessions.set(id, state);
+      return { sessionId: id };
+    });
+    building.add(pending);
+    return pending.finally(() => building.delete(pending));
   }
 
   return {
     async handle(message, connection) {
+      if (closing !== undefined) throw new KernelError('host_closed');
       validateCall(message.method, message.params);
       const { sessionId, input } = message.params ?? {};
 
       switch (message.method) {
         case 'session.create': {
           const id = randomUUID();
-          sessions.set(id, await build(id, connection));
-          return { sessionId: id };
+          return await buildSession(id, connection);
         }
         case 'session.open': {
           // 记录不在磁盘上就是没有这份会话，把它当新的一次空记录打开会让人以为恢复成功了。
@@ -404,11 +486,17 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           } catch {
             throw new KernelError('session_not_found', { detail: sessionId });
           }
-          // 同一条连接上开两次同一个 id 会丢掉前一份状态：那一轮还在跑，取消与撤插件都没了对象。
-          if (sessions.has(sessionId)) throw new KernelError('session_already_open', { detail: sessionId });
-          const state = await build(sessionId, connection, true, message.params.mode);
-          sessions.set(sessionId, state);
-          return { sessionId };
+          // 切回已经打开的会话时复用其状态；模式变更仍受当前轮次的边界约束。
+          if (sessions.has(sessionId)) {
+            const state = open(sessionId);
+            if (state.running !== undefined) throw new KernelError('run_already_running', { detail: sessionId });
+            if (message.params.mode !== undefined) {
+              if (modePaths === undefined) throw new KernelError('host_mode_paths_required');
+              await state.adopt(await loadMode(message.params.mode, modePaths));
+            }
+            return { sessionId };
+          }
+          return await buildSession(sessionId, connection, true, message.params.mode);
         }
         case 'sessions.list': {
           // 与 `ligule sessions` 走的是同一个扫描器（D73）：协议只是把它递到界面那一边，
@@ -419,7 +507,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
         case 'session.read': {
           // 交回的是记录本身：客户端晚到了也能把已经发生过的事画出来（I5）。
           const state = sessions.get(sessionId);
-          if (state !== undefined) return { sessionId, events: await state.session.read() };
+          if (state !== undefined) return await readForClient(state.session, sessionId, message.params.fullResults);
           // 派生支线那一份不在这轮的内核里（跑完就把装配撤了，D71），界面读它用的是这同一次动作（D74）。
           // 除这一种之外不读磁盘：这一次动作的语义是「把我这一份会话的事实拿回来」，不是记录目录的浏览器；
           // 发现历史会话归 sessions，接上别的会话归 session.open。
@@ -430,17 +518,11 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           } catch {
             throw new KernelError('session_not_found', { detail: sessionId });
           }
-          return { sessionId, events: await createSessionLog({ directory, id: sessionId }).read() };
+          return await readForClient(createSessionLog({ directory, id: sessionId }), sessionId, message.params.fullResults);
         }
         case 'run.start': {
           const state = open(sessionId);
-          if (state.running !== undefined) throw new KernelError('run_already_running', { detail: sessionId });
-          const controller = new AbortController();
-          // 取消落在还没答复的审批上时把那些等待收掉，否则这一轮停在没人答复的问题上。
-          const settleAsks = () => {
-            for (const settle of state.asks) settle();
-          };
-          controller.signal.addEventListener('abort', settleAsks, { once: true });
+          return await execute(state, async (signal) => {
           // 模板展开排在这一轮开始之前（D54）：交进循环的是展开后的文本，记录里另外留着人打的那一行、
           // 参数、模板来源与内容摘要。查不到的那一行斜杠在这里就报出去，不带着没展开的原文进模型。
           const invocation = parseInvocation(input);
@@ -451,20 +533,8 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
             text = expanded.text;
             user = { raw: input, arguments: expanded.arguments, source: expanded.source, digest: expanded.digest };
           }
-          state.running = controller;
-          try {
-            return await state.loop.run(text, { signal: controller.signal, user });
-          } finally {
-            controller.signal.removeEventListener('abort', settleAsks);
-            state.running = undefined;
-            // 等本轮结束再生效（D41）：完成与被打断都算结束，轮中不换清单，记录里那条用户输入
-            // 才对得上当时交给模型的那一栏工具。待生效的清单在请求时就装载过，这里不会再失败。
-            if (state.pending !== undefined) {
-              const next = state.pending;
-              state.pending = undefined;
-              await state.adopt(next);
-            }
-          }
+          return await state.loop.run(text, { signal, user });
+          });
         }
         case 'run.cancel': {
           const state = open(sessionId);
@@ -522,10 +592,12 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           if (state.compaction === null) {
             throw new KernelError('compact_window_unset', { detail: 'limits.contextTokens is not written, so there is no window to compact against' });
           }
-          const done = await state.compaction.compactNow();
+          return await execute(state, async (signal) => {
+          const done = await state.compaction.compactNow(signal);
           // 压不动只可能是那一种：留下保留预算之后一段里找不到能切的边界。
           if (done === null) throw new KernelError('compact_nothing_to_cut', { detail: sessionId });
           return { sessionId, ...done };
+          });
         }
         default:
           // validateCall 已经拦住了不认识的方法，走到这里说明分发表与协议表不是同一份。
@@ -535,17 +607,32 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
 
     // 一条连接断开时把它还占着的那一轮停下来，然后按装配清单的逆序把插件撤掉（I7）。
     release() {
-      for (const state of sessions.values()) {
+      if (closing !== undefined) return closing;
+      const states = [...sessions.values()];
+      for (const state of states) {
         if (state.running !== undefined) state.running.abort();
       }
-      // 后装的先撤：扩展在插件之后登记，撤的顺序反过来，两边都不留半截。
-      for (const state of sessions.values()) {
-        // 关子进程不等它：release() 是同步的，一个不响的服务器不该把退出这条路堵住。
-        state.mcp.close().catch(() => undefined);
-        state.extensions.dispose();
-        state.assembly.dispose();
-      }
-      sessions.clear();
+      closing = (async () => {
+        const failures = [];
+        await Promise.allSettled([...building]);
+        const opened = [...sessions.values()];
+        for (const state of opened) state.running?.abort();
+        const mcpClosed = await Promise.allSettled(opened.map((state) => state.mcp.close()));
+        for (const result of mcpClosed) if (result.status === 'rejected') failures.push(result.reason);
+        await Promise.allSettled(opened.map((state) => state.operation));
+        const sessionsClosed = await Promise.allSettled(opened.map(async (state) => {
+          try {
+            state.extensions.dispose();
+            state.assembly.dispose();
+          } finally {
+            await state.session.close();
+          }
+        }));
+        for (const result of sessionsClosed) if (result.status === 'rejected') failures.push(result.reason);
+        sessions.clear();
+        if (failures.length > 0) throw new AggregateError(failures, 'host_release_failed');
+      })();
+      return closing;
     },
   };
 }
@@ -560,6 +647,8 @@ export function serveHost({ input = process.stdin, output = process.stdout, conf
     onFault: (error) => connection.notify({ notify: 'fault', code: error.code, detail: error.detail }),
   });
   connection.onRequest((message) => host.handle(message, connection));
-  input.on('end', () => host.release());
+  input.on('end', () => {
+    void host.release().catch((error) => rest.logger?.error?.('host release failed', { code: error.code, detail: error.detail }));
+  });
   return host;
 }

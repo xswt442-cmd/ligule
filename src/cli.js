@@ -194,7 +194,7 @@ async function runOneRound(config, selection, extensions, text, sessionId) {
     console.error(`session ${opened.sessionId}: ${result.iterations} iterations, ${result.modelCalls} model calls`);
   } finally {
     approvals.close();
-    host.release();
+    await host.release();
   }
 }
 
@@ -359,9 +359,9 @@ if (missingFlagValue) {
       const { runTui } = await import('./tui/start.js');
       await runTui({ config, provider: providerFromConfig(config), policy: config.policy, extensions, ...resolveMode(config) });
     } catch (error) {
-      const missing = error.code === 'ERR_MODULE_NOT_FOUND' && /Cannot find package '(ink|react)'/.test(String(error.message));
+      const missing = error.code === 'ERR_MODULE_NOT_FOUND' && /Cannot find package '(ink|react|marked|highlight\.js|string-width)'/.test(String(error.message));
       printFailure(missing ? 'tui_dependency_missing' : error.code ?? 'cli_tui_failed',
-        missing ? 'the terminal UI is an optional dependency: npm install ink react' : error.detail);
+        missing ? 'the terminal UI requires optional dependencies: npm install ink react marked highlight.js string-width' : error.detail);
     }
   }
 } else if (command === undefined || command === '--help' || command === '-h') {

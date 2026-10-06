@@ -154,7 +154,7 @@ async function withSession(modePrompt, run) {
     return await run(connection, requests, host);
   } finally {
     pair.client.output.end();
-    host.release();
+    await host.release();
   }
 }
 

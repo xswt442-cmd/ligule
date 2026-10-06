@@ -39,7 +39,10 @@ export const METHODS = Object.freeze({
   },
   'session.read': {
     description: 'Read the events of an open session, oldest first, so a client that arrives late can show what happened',
-    parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
+    parameters: { type: 'object', properties: {
+      sessionId: SESSION_ID,
+      fullResults: { type: 'boolean', description: 'read complete spilled tool results for display; the record and model view stay unchanged' },
+    }, required: ['sessionId'] },
   },
   'run.start': {
     description: 'Send one user input through the loop; events arrive as notifications while it runs',

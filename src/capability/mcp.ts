@@ -34,8 +34,8 @@ interface ConnectedServer {
   tools: Map<string, ToolDefinition>;
 }
 
-async function refreshTools(opened: ConnectedServer): Promise<Map<string, ToolDefinition>> {
-  const listed = await opened.client.listTools();
+async function refreshTools(opened: ConnectedServer, signal?: AbortSignal): Promise<Map<string, ToolDefinition>> {
+  const listed = await opened.client.listTools(undefined, signal === undefined ? undefined : { signal });
   opened.tools = new Map<string, ToolDefinition>();
   for (const raw of listed.tools as unknown as Record<string, unknown>[]) {
     const definition = definitionOf(raw);
@@ -144,8 +144,23 @@ export function mcpServerConfigs(config: { mcp?: { servers?: unknown } }, enviro
   });
 }
 
+function killServerProcess(pid: number): void {
+  try {
+    if (process.platform === 'win32') spawn('taskkill.exe', ['/T', '/F', '/PID', String(pid)], { stdio: 'ignore' });
+    else process.kill(-pid, 'SIGKILL');
+  } catch {
+    // 已经退出的进程不需要第二次招呼。
+  }
+}
+
+async function closeClient(client: Client): Promise<void> {
+  const pid = (client.transport as unknown as { _process?: { pid?: number } })?._process?.pid;
+  await client.close().catch(() => undefined);
+  if (pid !== undefined) killServerProcess(pid);
+}
+
 // 连上去、读完定义之后留在进程里：一台服务器一条子进程，第一版不重连也不并发起多份。
-export async function connectServer(settings: ReturnType<typeof mcpServerConfigs>[number]): Promise<ConnectedServer> {
+export async function connectServer(settings: ReturnType<typeof mcpServerConfigs>[number], signal?: AbortSignal): Promise<ConnectedServer> {
   const transport = new StdioClientTransport({
     command: settings.command,
     args: settings.args,
@@ -155,20 +170,21 @@ export async function connectServer(settings: ReturnType<typeof mcpServerConfigs
   });
   const client = new Client({ name: 'ligule', version: '0.0.1' });
   try {
-    await client.connect(transport);
+    await client.connect(transport, signal === undefined ? undefined : { signal });
+    const opened = { name: settings.name, client, tools: new Map<string, ToolDefinition>() };
+    await refreshTools(opened, signal);
+    return opened;
   } catch (error) {
+    await closeClient(client);
     throw new KernelError('mcp_connect_failed', { cause: error, detail: `${settings.name}: ${error instanceof Error ? error.message : String(error)}` });
   }
-  const opened = { name: settings.name, client, tools: new Map<string, ToolDefinition>() };
-  await refreshTools(opened);
-  return opened;
 }
 
 export interface McpRegistry {
   servers(): string[];
-  toolsOf(server: string): Promise<ToolDefinition[]>;
-  definition(server: string, tool: string): Promise<ToolDefinition>;
-  call(server: string, tool: string, args: unknown): Promise<unknown>;
+  toolsOf(server: string, signal?: AbortSignal): Promise<ToolDefinition[]>;
+  definition(server: string, tool: string, signal?: AbortSignal): Promise<ToolDefinition>;
+  call(server: string, tool: string, args: unknown, signal?: AbortSignal): Promise<unknown>;
   close(): Promise<void>;
 }
 
@@ -176,52 +192,73 @@ export interface McpRegistry {
 export function createMcpRegistry(configs: ReturnType<typeof mcpServerConfigs>): McpRegistry {
   const connected = new Map<string, ConnectedServer>();
   const pending = new Map<string, Promise<ConnectedServer>>();
+  const lifetime = new AbortController();
+  const closedClients = new WeakSet<Client>();
+  let closing: Promise<void> | undefined;
 
-  async function server(name: string): Promise<ConnectedServer> {
+  function operationSignal(signal?: AbortSignal): AbortSignal {
+    return signal === undefined ? lifetime.signal : AbortSignal.any([lifetime.signal, signal]);
+  }
+
+  async function closeServer(opened: ConnectedServer): Promise<void> {
+    if (closedClients.has(opened.client)) return;
+    closedClients.add(opened.client);
+    await closeClient(opened.client);
+  }
+
+  async function server(name: string, signal?: AbortSignal): Promise<ConnectedServer> {
+    const activeSignal = operationSignal(signal);
+    if (activeSignal.aborted) throw activeSignal.reason;
     const existing = connected.get(name);
     if (existing !== undefined) return existing;
     const settings = configs.find((entry) => entry.name === name);
     if (settings === undefined) throw new KernelError('mcp_server_unknown', { detail: `${name} (configured: ${configs.map((entry) => entry.name).join(', ') || 'none'})` });
-    const started = pending.get(name) ?? connectServer(settings);
+    const started = pending.get(name) ?? connectServer(settings, activeSignal);
     pending.set(name, started);
-    const opened = await started;
-    pending.delete(name);
-    connected.set(name, opened);
-    return opened;
+    try {
+      const opened = await started;
+      if (activeSignal.aborted) {
+        await closeServer(opened);
+        throw activeSignal.reason;
+      }
+      connected.set(name, opened);
+      return opened;
+    } finally {
+      if (pending.get(name) === started) pending.delete(name);
+    }
   }
 
   return {
     servers: () => configs.map((entry) => entry.name),
     // 每一次问定义都重新列一次工具：服务器悄悄改了声明，只有再列一次才看得见（D52 的摘要那条要用到这一点）。
-    toolsOf: async (name) => [...(await refreshTools(await server(name))).values()],
-    definition: async (name, tool) => {
-      const opened = await server(name);
-      await refreshTools(opened);
+    toolsOf: async (name, signal) => [...(await refreshTools(await server(name, signal), operationSignal(signal))).values()],
+    definition: async (name, tool, signal) => {
+      const activeSignal = operationSignal(signal);
+      const opened = await server(name, activeSignal);
+      await refreshTools(opened, activeSignal);
       const found = opened.tools.get(tool);
       if (found === undefined) throw new KernelError('mcp_tool_unknown', { detail: `${name}/${tool}` });
       return found;
     },
-    call: async (name, tool, args) => {
-      const opened = await server(name);
+    call: async (name, tool, args, signal) => {
+      const activeSignal = operationSignal(signal);
+      const opened = await server(name, activeSignal);
       if (!opened.tools.has(tool)) throw new KernelError('mcp_tool_unknown', { detail: `${name}/${tool}` });
-      return opened.client.callTool({ name: tool, arguments: args as Record<string, unknown> });
+      return opened.client.callTool({ name: tool, arguments: args as Record<string, unknown> }, undefined, { signal: activeSignal });
     },
     // 关子进程的顺序照 pi 记下的那一条：先关 stdin 再 SIGTERM，最后才带走整棵子树（D60 的来源）。
-    close: async () => {
-      for (const opened of connected.values()) {
-        // SDK 把子进程放在自己的 `_process` 上（内部字段），close() 之后它不一定已经走掉：
-        // 留着一个不响的 MCP 子进程就是把整条测试与宿主进程拖住，所以按 D18 那一条自己收。
-        const pid = (opened.client.transport as unknown as { _process?: { pid?: number } })?._process?.pid;
-        await opened.client.close().catch(() => undefined);
-        if (pid === undefined) continue;
-        try {
-          if (process.platform === 'win32') spawn('taskkill.exe', ['/T', '/F', '/PID', String(pid)], { stdio: 'ignore' });
-          else process.kill(-pid, 'SIGKILL');
-        } catch {
-          // 已经退出的进程不需要第二次招呼。
-        }
-      }
-      connected.clear();
+    close: () => {
+      if (closing !== undefined) return closing;
+      lifetime.abort(new Error('MCP registry closed'));
+      closing = (async () => {
+        const settled = await Promise.allSettled([...pending.values()]);
+        const opened = new Set(connected.values());
+        for (const result of settled) if (result.status === 'fulfilled') opened.add(result.value);
+        await Promise.all([...opened].map(closeServer));
+        connected.clear();
+        pending.clear();
+      })();
+      return closing;
     },
   };
 }

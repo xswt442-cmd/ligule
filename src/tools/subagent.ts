@@ -102,6 +102,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
             };
           } finally {
             assembly.dispose();
+            await session.close();
           }
         },
       });

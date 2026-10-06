@@ -68,17 +68,19 @@ test('appends that arrive at the same time still take turns on the sequence', as
   });
 });
 
-test('a half line left by a crash is discarded and the file is cut back to the last complete event', async () => {
+test('reading a crash tail preserves the file and the next append repairs it', async () => {
   await withDirectory(async (directory) => {
     const session = createSessionLog({ directory, id: 'run-2' });
     await session.append({ kind: 'tool', tool: 'read', args: {}, result: { content: 'one' } });
     await writeFile(session.path, '{"seq":1,"kind":"tool","too', { flag: 'a' });
 
+    const beforeRead = await readFile(session.path);
     const events = await session.read();
     assert.equal(events.length, 1);
-    assert.equal((await eventBytes(session.path)).toString('utf8'), `${JSON.stringify(events[0])}\n`);
+    assert.deepEqual(await readFile(session.path), beforeRead, '只读入口不修改文件');
     const next = await session.append({ kind: 'tool', tool: 'read', args: {}, result: { content: 'two' } });
     assert.equal(next.seq, 1, 'the discarded half line does not burn a sequence number');
+    assert.deepEqual((await session.read()).map((event) => event.seq), [0, 1]);
   });
 });
 
@@ -94,7 +96,9 @@ test('a half line ending in an incomplete multi-byte sequence is cut on the byte
     const events = await session.read();
     assert.deepEqual(events, [JSON.parse(kept.toString('utf8'))]);
     assert.equal(events[0].seq, 0, '首行不占事件的序号');
-    assert.equal((await readFile(session.path)).length, whole, '文件长度退回上一个完整事件的末尾');
+    assert.ok((await readFile(session.path)).length > whole, '读取保留未完成尾行');
+    await session.append({ kind: 'user', text: '继续读取' });
+    assert.deepEqual((await session.read()).map((event) => event.seq), [0, 1], '写入时按字节边界修复尾行');
   });
 });
 
@@ -106,7 +110,7 @@ test('a log that cannot be written reports a code and leaves nothing behind', as
     const session = createSessionLog({ directory: blocked, id: 'run' });
     await assert.rejects(
       () => session.append({ kind: 'tool', tool: 'read', args: {}, result: { content: 'x' } }),
-      (error) => error.code === 'session_write_failed',
+      (error) => error.code === 'session_lock_failed',
     );
     assert.equal(await readFile(blocked, 'utf8'), 'not a directory');
   });

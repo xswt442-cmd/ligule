@@ -1,6 +1,7 @@
 // 压缩的两条触发、切点与那一次修正（D75、D76，实现顺序第 37 步）。
 // 端点是本地假的那一个：要验的是「什么时候压、压完投影是什么、压几次」，不是某一家端点的报错文案。
 import test from 'node:test';
+import { estimateRequest } from '../dist/session/compaction.js';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -264,7 +265,8 @@ test('the usage an endpoint reports lands in the record and never in the project
     assert.equal(usage.kind, 'usage');
     assert.equal(usage.ignorable, true, '读不懂它的旧程序略过这一条，而不是拒绝打开这份记录');
     assert.deepEqual([usage.input, usage.output], [1200, 80]);
-    assert.equal(usage.estimated, estimateTokens(messages), '本地那一份估算一起留：系数要能从记录本身算回来');
+    assert.equal(usage.estimated, estimateRequest({ messages }), '估算保留完整请求的结构');
+    assert.equal(usage.measurement, 'request-v1');
     // 投影里没有它的位置：它不是模型说过的话，也不是工具结果。
     assert.deepEqual((await session.modelView()).map((entry) => entry.role), ['user', 'assistant', 'user', 'assistant']);
     // 一条都没报回时不再多写一条：0 不是「用量是零」，是「没说」。
@@ -278,8 +280,8 @@ test('the usage an endpoint reports lands in the record and never in the project
 test('a fresh compaction over a record that carries usage starts calibrated', async () => {
   await withSession(async ({ directory, id, session }) => {
     await fill(session, 2);
-    const local = estimateTokens(await session.modelView());
-    await session.append({ kind: 'usage', ignorable: true, input: local * 3, output: 10, estimated: local });
+    const local = estimateRequest({ messages: await session.modelView() });
+    await session.append({ kind: 'usage', ignorable: true, input: local * 3, output: 10, estimated: local, measurement: 'request-v1' });
     const compaction = createCompaction({ provider: fakeProvider([]), session, directory, id, limits });
     const context = await compaction.context();
     assert.equal(context.factor, 3);

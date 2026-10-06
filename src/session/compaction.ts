@@ -4,14 +4,10 @@
 import { writeFile } from 'node:fs/promises';
 import { checkpointPath, createCheckpoint, loadCheckpoint } from './checkpoint.js';
 import { spillContent } from '../kernel/result.js';
+import { KernelError } from '../kernel/error.js';
 import type { SessionEvent } from './format.js';
-
-// 本地估算：按字节的四分之一算 token 数。
-// ponytail: 这是一个不认语言的粗算法（中文与代码的字节/词比例差得远），升级路径是接一个真分词器；
-// 之所以还能用，是因为它只用来比一个线，而那条线由端点交回的真实用量修正过。
-export function estimateTokens(value: unknown): number {
-  return Math.ceil(Buffer.byteLength(JSON.stringify(value ?? ''), 'utf8') / 4);
-}
+import { estimateRequest, estimateTokens, usageEvent } from './usage.js';
+export { estimateRequest, estimateTokens } from './usage.js';
 
 // 切点：从后往前累加，越过保留预算之后那一条之后的第一个 user 或 assistant 就是切点。
 // 切在工具结果上会把上一条助手消息里的那次调用留下没人回答，请求体就不合法了（I5 的投影要能拼出请求）。
@@ -65,7 +61,7 @@ function fitExcerpt(text: string, budgetTokens: number): string {
   return `[earlier turns dropped from this excerpt]\n${bytes.subarray(bytes.length - limit).toString('utf8')}`;
 }
 
-export function createCompaction({ provider, session, directory, id, limits, logger }: {
+export function createCompaction({ provider, session, directory, id, limits, logger, requestPrefix = () => ({ system: '', tools: [] }) }: {
   provider: { stream: (request: unknown, options?: { signal?: AbortSignal }) => AsyncIterable<unknown> };
   session: {
     read: () => Promise<SessionEvent[]>;
@@ -77,11 +73,12 @@ export function createCompaction({ provider, session, directory, id, limits, log
   id: string;
   limits: { contextTokens: number; compactThresholdRatio: number; compactRetainRatio: number; resultBytes: number };
   logger?: { log?: (message: string, fields?: Record<string, unknown>) => void };
+  requestPrefix?: () => { system: string; tools: unknown };
 }) {
   if (!(limits.compactRetainRatio < limits.compactThresholdRatio)) {
     throw new Error('compaction_retain_must_be_below_threshold');
   }
-  // 压力线与被顶掉那一段的预算都算在窗口上（dsh 那两个比例的形状，`reference-read/dsh.md` 第 5 节）。
+  // 压力线与保留预算使用同一个窗口（D75）。
   const threshold = Math.floor(limits.contextTokens * limits.compactThresholdRatio);
   const retained = Math.floor(limits.contextTokens * limits.compactRetainRatio);
   // 本地估算与端点真实用量之间的修正系数：一次都没报回来时是 1（那就是压力那条不响的另一种说法）。
@@ -103,11 +100,11 @@ export function createCompaction({ provider, session, directory, id, limits, log
     if (seeded) return;
     seeded = true;
     const usage = await lastUsage();
-    if (usage === null) return;
+    if (usage === null || usage.measurement !== 'request-v1') return;
     const input = Number(usage.input);
     const estimated = Number(usage.estimated);
     if (Number.isFinite(input) && input > 0 && Number.isFinite(estimated) && estimated > 0) {
-      factor = Math.max(factor, input / estimated);
+      factor = input / estimated;
     }
   }
 
@@ -143,7 +140,8 @@ export function createCompaction({ provider, session, directory, id, limits, log
       text = await summarise(covered, checkpoint?.text, signal);
     } catch (error) {
       logger?.log?.('compaction summary call failed', { sessionId: id, code: (error as { code?: string }).code });
-      return null;
+      if (signal?.aborted) throw new KernelError('loop_cancelled', { cause: error });
+      throw error;
     }
     if (text === '') {
       logger?.log?.('compaction summary came back empty', { sessionId: id });
@@ -208,7 +206,7 @@ export function createCompaction({ provider, session, directory, id, limits, log
         window: limits.contextTokens,
         threshold,
         retained,
-        estimated: Math.round(estimateTokens(view) * factor),
+        estimated: Math.round(estimateRequest({ ...requestPrefix(), messages: view }) * factor),
         factor: Math.round(factor * 100) / 100,
         reported: usage === null || !Number.isFinite(input)
           ? null
@@ -220,10 +218,10 @@ export function createCompaction({ provider, session, directory, id, limits, log
     compactNow: (signal?: AbortSignal) => compact(signal),
 
     // 请求拼好之后量一次压力：越线就先压一次，压完了用新投影。
-    async prepare(request: { system: string; tools: unknown; messages: unknown[] }): Promise<unknown[]> {
+    async prepare(request: { system: string; tools: unknown; messages: unknown[] }, signal?: AbortSignal): Promise<unknown[]> {
       await seedFromRecord();
-      if (estimateTokens(request.messages) * factor <= threshold) return request.messages;
-      const done = await compact();
+      if (estimateRequest(request) * factor <= threshold) return request.messages;
+      const done = await compact(signal);
       if (done === null) return request.messages;
       return await session.modelView();
     },
@@ -235,7 +233,7 @@ export function createCompaction({ provider, session, directory, id, limits, log
       logger?.log?.('context reported overflow, compacting once', {
         sessionId: id,
         detail: (error as { detail?: string }).detail?.slice(0, 200),
-        estimated: Math.round(estimateTokens(request.messages) * factor),
+        estimated: Math.round(estimateRequest(request) * factor),
       });
       const done = await compact(signal);
       if (done === null) {
@@ -246,24 +244,16 @@ export function createCompaction({ provider, session, directory, id, limits, log
     },
 
     // 端点交回真实用量时用它修正本地估算（低估会让压力那条永远不响），并把这一格落进记录（D82）。
-    // 真实那一份算的是整份请求（系统前缀与工具清单都在内），本地这一份只算消息，所以这一个系数把那两段也带进来了。
-    async observe(request: { messages: unknown[] }, events: unknown[]): Promise<void> {
-      const usage = (events as { type?: string; input?: unknown; output?: unknown }[]).find((event) => event?.type === 'usage');
-      const input = Number(usage?.input);
-      if (!Number.isFinite(input) || input <= 0) return;
-      const local = estimateTokens(request.messages);
+    // 端点读数与本地估算都包含系统提示、工具定义与消息，固定前缀不会被当作历史的增长比例。
+    async observe(request: { system?: string; tools?: unknown; messages: unknown[] }, events: unknown[]): Promise<void> {
+      const usage = usageEvent(request, events);
+      if (usage === null) return;
       // 这一次报回的比记录里那一条更近，不必再从历史算。
       seeded = true;
-      if (local > 0) factor = Math.max(factor, input / local);
-      if (typeof session.append !== 'function' || local <= 0) return;
+      factor = usage.input / usage.estimated;
+      if (typeof session.append !== 'function') return;
       // 本地那一份估算一起留：系数要能从记录算回来，而这一格不进检查点的哈希输入（D75 的白名单只认三种）。
-      await session.append({
-        kind: 'usage',
-        ignorable: true,
-        input,
-        output: Number.isFinite(Number(usage?.output)) ? Number(usage?.output) : null,
-        estimated: local,
-      });
+      await session.append(usage);
     },
   };
 }

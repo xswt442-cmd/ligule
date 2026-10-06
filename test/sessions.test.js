@@ -1,10 +1,10 @@
 // 第 34 步的验收（D73、D78）：列表从记录目录扫出来，恢复用记录里最后生效的那份模式清单并比摘要。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { appendFile, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { withTuiHost } from './helpers/tui-host.js';
 import {
   chooseResumeMode, createConfig, createConnection, createMemoryConnectionPair, createSessionLog, listSessions,
   loadMode, MESSAGES_CAPABILITIES, modeDirectories, serveHost, sessionDirectory,
@@ -18,13 +18,17 @@ async function digestOf(name) {
 }
 
 async function withSessions(run) {
-  const root = await mkdtemp(join(tmpdir(), 'ligule-sessions-'));
+  const testplace = resolve('testplace');
+  await mkdir(testplace, { recursive: true });
+  const root = await mkdtemp(join(testplace, 'ligule-sessions-'));
+  const absoluteRoot = resolve(root);
+  assert.equal(absoluteRoot.startsWith(`${testplace}${process.platform === 'win32' ? '\\' : '/'}`), true);
   const directory = join(root, '.ligule', 'sessions');
   await mkdir(directory, { recursive: true });
   try {
     return await run(root, directory);
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await rm(absoluteRoot, { recursive: true, force: true });
   }
 }
 
@@ -62,6 +66,7 @@ test('the listing reads each record once and reports what a resume would need', 
       mode: { name: 'full', layer: 'shipped', digest: 'aaa111' },
       // 那一次 `exec` 派发留在记录里没有结果：列表上就看得见这一份没收尾。
       unanswered: 1,
+      truncatedBytes: 0,
     });
     assert.deepEqual({ ...legacy, updatedAt: 'x' }, {
       id: 'legacy',
@@ -73,6 +78,7 @@ test('the listing reads each record once and reports what a resume would need', 
       lastSeq: 0,
       mode: null,
       unanswered: 0,
+      truncatedBytes: 0,
     });
 
     assert.deepEqual(await listSessions(directory, { projectRoot: 'nowhere' }), []);
@@ -128,7 +134,7 @@ async function withHost(root, run) {
     return await run(connection, host);
   } finally {
     pair.client.output.end();
-    host.release();
+    await host.release();
   }
 }
 
@@ -167,5 +173,40 @@ test('the host hands out the listing and resumes under the mode that record last
       await connection.request('session.open', { sessionId: 'ran', mode: 'full' });
       assert.equal((await connection.request('status.get', { sessionId: 'ran' })).mode, 'full');
     });
+  });
+});
+
+test('the listing reports a crash tail without changing it or blocking another session', async () => {
+  await withTuiHost(async ({ client, sessionId, sessionDirectory }) => {
+    const other = (await client.request('session.create', {})).sessionId;
+    await client.request('run.start', { sessionId, input: 'first session' });
+    await client.request('run.start', { sessionId: other, input: 'other session' });
+    const path = join(sessionDirectory, `${sessionId}.jsonl`);
+    await appendFile(path, '{"kind":"user"');
+    const before = await readFile(path);
+
+    const listed = await client.request('sessions.list', {});
+    assert.deepEqual(new Set(listed.sessions.map((item) => item.id)), new Set([sessionId, other]));
+    assert.equal(listed.sessions.find((item) => item.id === sessionId).truncatedBytes, Buffer.byteLength('{"kind":"user"'));
+    assert.deepEqual(await readFile(path), before);
+  });
+});
+
+test('one Host preserves A, B, then A session state', async () => {
+  await withTuiHost(async ({ client, sessionId: sessionA }) => {
+    await client.request('mode.set', { sessionId: sessionA, name: 'full' });
+    assert.equal((await client.request('status.get', { sessionId: sessionA })).mode, 'full');
+    const sessionB = (await client.request('session.create', {})).sessionId;
+    await client.request('run.start', { sessionId: sessionA, input: 'A first' });
+    const beforeSwitch = await client.request('status.get', { sessionId: sessionA });
+    await client.request('run.start', { sessionId: sessionB, input: 'B only' });
+    await client.request('mode.set', { sessionId: sessionB, name: 'full' });
+    await client.request('session.open', { sessionId: sessionA, mode: 'minimal' });
+    const afterSwitch = await client.request('status.get', { sessionId: sessionA });
+    assert.equal(afterSwitch.eventCount, beforeSwitch.eventCount + 1, '显式选定模式只给这份会话增加一条 mode 事件');
+    assert.equal(afterSwitch.mode, 'minimal');
+    await client.request('run.start', { sessionId: sessionA, input: 'A again' });
+    const { events } = await client.request('session.read', { sessionId: sessionA });
+    assert.deepEqual(events.filter((event) => event.kind === 'user').map((event) => event.text), ['A first', 'A again']);
   });
 });

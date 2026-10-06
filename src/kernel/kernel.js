@@ -41,7 +41,9 @@ export function createKernel(options = {}) {
     const limit = resultLimit(config);
     if (Buffer.byteLength(text, 'utf8') <= limit) return result;
     const name = `result-${Date.now()}-${randomUUID().slice(0, 8)}.json`;
-    return { ...result, content: await spillContent(text, { limit, directory: session.directory, name }), spilled: name };
+    return { ...result, content: await spillContent(text, { limit, directory: session.directory, name }), spilled: name,
+      spillFormat: typeof result.content === 'string' ? 'text' : 'json',
+    };
   }
 
   async function record(entry, result) {
