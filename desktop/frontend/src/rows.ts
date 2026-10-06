@@ -41,6 +41,11 @@ export type Record_ = {
   recovery?: { assistantSeq?: number; safeToRedo?: boolean };
 };
 
+// 展示档那一格决定哪几行进得来：虚拟视口要量每一行的高度，藏着不画的行留在列表里只会量到零（D90、U48）。
+export const shownIn = (verbosity: string, row: Row): boolean =>
+  !(verbosity === 'brief' && (row.kind === 'reasoning' || row.kind === 'call' || row.kind === 'result'))
+  && !(verbosity === 'standard' && row.kind === 'reasoning');
+
 export type Row = {
   id: number;
   kind: 'question' | 'answer' | 'reasoning' | 'call' | 'result' | 'refusal' | 'failure' | 'meta' | 'error';

@@ -1,7 +1,7 @@
 // 投影那一份取值规则的唯一检查：跑 `node dev/rows.check.mjs`，坏了就非零退出。
 // 它 import 的是同目录树上那份 `src/rows.ts`，Node 直接剥类型跑，不需要构建产物。
 import assert from 'node:assert/strict';
-import { capabilityOf, projectRecord } from '../src/rows.ts';
+import { capabilityOf, projectRecord, shownIn } from '../src/rows.ts';
 
 const call = projectRecord({
   kind: 'assistant',
@@ -86,4 +86,12 @@ assert.deepEqual(repaired.notes, ['恢复补的 · 外部副作用次数未知']
 // 没有参数的那一次调用不该在正文里留一个空对象；读不认识的种类不产行。
 assert.equal(projectRecord({ kind: 'assistant', text: '', toolCalls: [{ id: 'c6', name: 'skill' }] })[0].text, '');
 assert.deepEqual(projectRecord({ kind: 'usage', input: 1 }), []);
+
+// 展示档那一格筛的是行的种类：虚拟视口要量每一行的高度，藏着不画的那几类不进列表（D90、U48）。
+const answered = projectRecord({ kind: 'assistant', text: '一句' })[0];
+const reasoned = projectRecord({ kind: 'reasoning', text: '一段' })[0];
+const resulted = projectRecord({ kind: 'tool', tool: 'read', callId: 'c7', args: {}, result: { content: { text: 'x' } } })[0];
+assert.ok(shownIn('detailed', reasoned) && shownIn('detailed', resulted), '全量档什么都画');
+assert.ok(shownIn('standard', resulted) && !shownIn('standard', reasoned), '标准档藏推理段');
+assert.ok(shownIn('brief', answered) && !shownIn('brief', reasoned) && !shownIn('brief', resulted), '简略档只留问答');
 console.log('桌面前端的投影检查通过');

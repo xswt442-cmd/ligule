@@ -21,9 +21,11 @@ window.__LIGULE_TRANSPORT__ = host;
 window.__LIGULE_FAKE__ = host;
 await import('../src/main');
 
-const transcript = (): HTMLElement => document.querySelector('.conversation') as HTMLElement;
+// 虚拟视口自己那一条滚动栏才是滚动的主体，`.conversation` 只是它的外框（U48）。
+const transcript = (): HTMLElement => (document.querySelector('[data-virtuoso-scroller="true"]') ?? document.querySelector('.conversation')) as HTMLElement;
 const idle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
-const mountedRows = () => document.querySelectorAll('.conversation > .row').length;
+const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+const mountedRows = () => document.querySelectorAll('.conversation .row').length;
 
 async function cost(action: () => void): Promise<number> {
   await idle();
@@ -39,7 +41,6 @@ async function cost(action: () => void): Promise<number> {
 
 const average = (values: number[]) => Number((values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(2));
 const worst = (values: number[]) => Math.max(...values);
-const click = (label: string) => [...document.querySelectorAll('button')].find((item) => item.textContent === label);
 
 // 滚一遍：每次改 scrollTop 之后逼一次布局，量的是这一屏换一次位置要多久。
 async function scrollCost(): Promise<Record<string, number>> {
@@ -68,7 +69,10 @@ async function runBench(target: ReturnType<typeof createFakeHost>, count: number
   for (let tries = 0; tries < 100 && (transcript() === null || document.getElementById('session-title')?.textContent === '没有会话'); tries += 1) {
     await idle();
   }
-  const rebuild = await cost(() => click('读回记录')?.click());
+  // 打开那一份长记录走左侧栏那一条真有的动作：「读回记录」在功能菜单里，菜单没打开时那个按钮不在页面上。
+  const rebuild = await cost(() => document.querySelector<HTMLButtonElement>('.sidebar .session-item')?.click());
+  // 那一页挂上才算：读记录带着超时，落位要等渲染与那两条调用回来。
+  for (let tries = 0; tries < 200 && mountedRows() === 0; tries += 1) await wait(25);
   const windowed = {
     挂上的行数: mountedRows(),
     整份重建毫秒: rebuild,

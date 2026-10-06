@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Virtuoso, type ItemProps, type VirtuosoHandle } from 'react-virtuoso';
 import { code, createClient, type Client, type Transport } from './protocol';
 import { ApprovalCard, type Ask } from './components/ApprovalCard';
 import { Icon } from './components/Icon';
@@ -11,7 +12,7 @@ import { Palette, type Command } from './components/Palette';
 import { hotkeyOf } from './hotkeys';
 import type { Verbosity } from './components/types';
 import { createSlotRegistry, SLOTS, type Panel } from './slots';
-import { capabilityOf, changeOf, metaRow, projectRecord, type Record_, type Row } from './rows';
+import { capabilityOf, changeOf, metaRow, projectRecord, shownIn, type Record_, type Row } from './rows';
 import type { Status } from './status';
 import { readSettings, writeSettings, type Settings } from './settings';
 
@@ -21,9 +22,11 @@ type Branch = { seq: number; id: string; task: string };
 const LIVE_REASONING: Row = { id: -2, kind: 'reasoning', text: '' };
 const LIVE_ANSWER: Row = { id: -1, kind: 'answer', text: '' };
 
-// 一次挂进行里的最多行数：一份长转录先只画末尾那一段，早前的靠「显示更早」往前要（U48）。
-// 不做虚拟化库：读数说明多少条开始画不动，窗口大小按那份读数调。
+// 一次往前要一页的事件数：打开一份会话读最近这一页，更早的按游标继续要（方案 4.1）。
 const RENDER_WINDOW = 400;
+// 虚拟视口里第一条的起始编号：往前插一页就把它减去插进去的行数，那一条的序号在插页前后不变，视口就停在它上面（U48）。
+// 这一格要留成正数，所以从一个足够大的数起，而不是直接用记录的序号。
+const FIRST_INDEX = 100_000;
 
 type PanelProps = {
   client: Client;
@@ -203,8 +206,8 @@ function BranchPanel({ client, sessionId, verbosity }: { client: Client; session
     </li>)}</ul>
     {shown !== null && <>
       <h3>支线 {shown.id} · 下面这些序号属于支线自己</h3>
-      <div className="conversation" data-verbosity={verbosity}>
-        {shown.rows.map((row) => <RowView key={row.id} row={row} verbosity={verbosity} />)}
+      <div className="conversation">
+        {shown.rows.filter((row) => shownIn(verbosity, row)).map((row) => <RowView key={row.id} row={row} verbosity={verbosity} />)}
       </div>
     </>}
     {note !== '' && <p className="stub">{note}</p>}
@@ -243,13 +246,13 @@ export function App({ transport }: { transport: Transport }) {
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const active = useRef<string | null>(null);
   // 跟随最新：画面停在最后一行时新内容进来就滚到底；人往上翻过就不再自动滚，给一个跳回最新的按钮。
-  const scroller = useRef<HTMLDivElement | null>(null);
+  const list = useRef<VirtuosoHandle | null>(null);
   const [pinned, setPinned] = useState(true);
   // 历史读到哪一条了：`before` 是这一页最早那一条事件的序号，`hasMore` 说宿主那一边还有没有更早的（方案 4.1）。
   // 界面手里只有读过的这几页，整份记录留在宿主那一边（实现顺序第 73 步）。
   const [page, setPage] = useState<{ before: number; hasMore: boolean } | null>(null);
   const [olderLoading, setOlderLoading] = useState(false);
-  const anchor = useRef<{ height: number; top: number } | null>(null);
+  const [firstIndex, setFirstIndex] = useState(FIRST_INDEX);
   // 那一次派发是什么时候交出去的：只为算用时，键是调用 id（D94）。
   const dispatchAt = useRef(new Map<string, number>());
   const [seconds, setSeconds] = useState(0);
@@ -285,32 +288,15 @@ export function App({ transport }: { transport: Transport }) {
     return () => clearInterval(timer);
   }, [beat, sessionId, transport]);
 
-  const nearBottom = () => {
-    const node = scroller.current;
-    return node === null || node.scrollHeight - node.scrollTop - node.clientHeight < 40;
-  };
-
+  // 接上一份会话时落在最后一行：读回来的那一页本来就是末尾那一段，停在顶上等于没接上（D95）。
+  // 新内容进来只在本来就在最后一行时跟着滚到底，那是 `followOutput` 那一格管的（U48）。
   useEffect(() => {
-    const node = scroller.current;
-    if (node !== null && pinned) node.scrollTop = node.scrollHeight;
-  }, [rows, live, pinned]);
+    if (reading || rows.length === 0) return;
+    list.current?.scrollToIndex({ index: 'LAST' });
+  }, [reading, sessionId]);
 
-  // 往前插了一页之后把画面按回原来那一条上：那一页多高只有浏览器量得到，按行数估会跳。
-  // 这一段排在上面那一条之后，所以刚插进旧页的那一次以它为准。
-  useEffect(() => {
-    const node = scroller.current;
-    if (node === null || anchor.current === null) return;
-    node.scrollTop = anchor.current.top + (node.scrollHeight - anchor.current.height);
-    anchor.current = null;
-  }, [rows]);
-
-  const onScroll = useCallback(() => {
-    setPinned(nearBottom());
-  }, []);
-
-  const jumpToLatest = useCallback(async () => {
-    const node = scroller.current;
-    if (node !== null) node.scrollTo({ top: node.scrollHeight, behavior: 'smooth' });
+  const jumpToLatest = useCallback(() => {
+    list.current?.scrollToIndex({ index: 'LAST', behavior: 'smooth' });
     setPinned(true);
   }, []);
 
@@ -318,17 +304,16 @@ export function App({ transport }: { transport: Transport }) {
   // 所以翻页期间新到的事实在末尾追加，手里这一页不重复也不漏（方案 4.1、实现顺序第 73 步）。
   const showEarlier = useCallback(async () => {
     if (sessionId === null || page === null || !page.hasMore || olderLoading) return;
-    const node = scroller.current;
-    anchor.current = node === null ? null : { height: node.scrollHeight, top: node.scrollTop };
     setOlderLoading(true);
     try {
       const older = await client.call('session.read',
         { sessionId, before: page.before, limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean };
       const added = older.events.flatMap((record) => projectRecord(record));
+      // 往前插一页要同时把起始编号减去插进去的行数：那一行的序号在插页前后不变，视口就停在它上面（U48）。
+      setFirstIndex((current) => current - added.length);
       setRows((current) => [...added, ...current]);
       setPage({ before: older.events.length === 0 ? page.before : Number(older.events[0]?.seq), hasMore: older.hasMore });
     } catch (error) {
-      anchor.current = null;
       setRows((current) => [...current, metaRow('error', `更早的那一页读不来：${code(error)}`)]);
     } finally {
       setOlderLoading(false);
@@ -459,6 +444,7 @@ export function App({ transport }: { transport: Transport }) {
       setSessionId(created.sessionId);
       setRows([]);
       setPage(null);
+      setFirstIndex(FIRST_INDEX);
       setLive({ text: '', reasoning: '' });
       void refreshStatus(created.sessionId);
     } catch (error) {
@@ -476,6 +462,7 @@ export function App({ transport }: { transport: Transport }) {
     setSessionId(id);
     setRows([]);
     setPage(null);
+    setFirstIndex(FIRST_INDEX);
     setLive({ text: '', reasoning: '' });
     dispatchAt.current.clear();
     setReading(true);
@@ -642,6 +629,29 @@ export function App({ transport }: { transport: Transport }) {
     return () => document.removeEventListener('keydown', onKey);
   }, [cancel, collapsed, copyLastAnswer, menuOpen, panel, paletteOpen, patch, running, settingsOpen]);
 
+  // 虚拟视口的三件外壳（U48、方案 6.2）：每一条都要占住转录那一条 74 字的居中列，所以 `Item` 自己包一层。
+  // 身份用 `useMemo` 稳住：每次渲染都换一个新组件会让视口把挂着的行重建一遍。
+  const viewport = useMemo(() => ({
+    // 换外壳要连着 Virtuoso 读尺寸用的那几格 `data-*` 一起递出去，只转 children 与 style 会让它量不到行高（U48）。
+    Item: ({ children, style, ...rest }: ItemProps<Row>) => <div {...rest} style={style} className="stream-row">{children}</div>,
+    Header: () => <div className="stream-band">
+      {page?.hasMore === true && <button type="button" className="earlier" disabled={olderLoading} onClick={() => void showEarlier()}>
+        {olderLoading ? '在读更早的一页…' : '显示更早的一页'}
+      </button>}
+    </div>,
+    EmptyState: () => <div className="stream-band">{reading
+      ? <p className="placeholder"><Icon name="clock" size={14} /> 在读那份记录…</p>
+      : <p className="placeholder"><Icon name="spark" size={14} /> 还没有轮次。下方输入一句话，Enter 直接开始。</p>}</div>,
+  }), [olderLoading, page, reading, showEarlier]);
+  // 展示档没放进来那几类行不进列表：虚拟视口要量每一行的高度，藏着不画的行留在列表里只会量到零（D90、U48）。
+  const shown = useMemo(() => rows.filter((row) => shownIn(verbosity, row)), [rows, verbosity]);
+  // 流式那半截排在已落盘的那些行之后：它是这一轮的末尾，画到开头去就把因果倒过来了。
+  const visible = live.reasoning === '' && live.text === '' ? shown : [
+    ...shown,
+    ...(live.reasoning === '' || !shownIn(verbosity, LIVE_REASONING) ? [] : [{ ...LIVE_REASONING, text: live.reasoning }]),
+    ...(live.text === '' || !shownIn(verbosity, LIVE_ANSWER) ? [] : [{ ...LIVE_ANSWER, text: live.text }]),
+  ];
+
   const panelProps: PanelProps = {
     client,
     status,
@@ -680,20 +690,23 @@ export function App({ transport }: { transport: Transport }) {
         <button className="icon-button" type="button" title="命令面板（Ctrl+K）" aria-label="命令面板" onClick={() => setPaletteOpen(true)}><Icon name="search" size={15} /></button>
       </header>
 
-      <div className="conversation" data-verbosity={verbosity} aria-live="polite" ref={scroller} onScroll={onScroll}>
-        <div className="stream">
-          {reading && <p className="placeholder"><Icon name="clock" size={14} /> 在读那份记录…</p>}
-          {!reading && rows.length === 0 && live.text === '' && <p className="placeholder"><Icon name="spark" size={14} /> 还没有轮次。下方输入一句话，Enter 直接开始。</p>}
-          {page?.hasMore === true && <button type="button" className="earlier" disabled={olderLoading} onClick={() => void showEarlier()}>
-            {olderLoading ? '在读更早的一页…' : '显示更早的一页'}
-          </button>}
-          {rows.map((row) => <RowView key={row.id} row={row} verbosity={verbosity} />)}
-          {/* 流式那半截排在已落盘的那些行之后：它是这一轮的末尾，画到开头去就把因果倒过来了。 */}
-          {live.reasoning !== '' && <RowView row={{ ...LIVE_REASONING, text: live.reasoning }} verbosity={verbosity} />}
-          {live.text !== '' && <RowView row={{ ...LIVE_ANSWER, text: live.text }} verbosity={verbosity} />}
-        </div>
+      {/* 转录只挂视口里那几十行：读回来的那一页全在数据里，画出来的由视口决定（U48、方案 6.2）。 */}
+      <div className="conversation" aria-live="polite">
+        <Virtuoso
+          ref={list}
+          style={{ height: '100%' }}
+          data={visible}
+          firstItemIndex={firstIndex}
+          computeItemKey={(_index, row) => row.id}
+          itemContent={(_index, row) => <RowView row={row} verbosity={verbosity} />}
+          followOutput={(atBottom) => (atBottom ? 'smooth' : false)}
+          atBottomThreshold={40}
+          atBottomStateChange={(atBottom) => setPinned(atBottom)}
+          increaseViewportBy={{ top: 240, bottom: 600 }}
+          components={viewport}
+        />
       </div>
-      {!pinned && <button className="jump-latest" type="button" onClick={() => void jumpToLatest()}>回到最新</button>}
+      {!pinned && <button className="jump-latest" type="button" onClick={jumpToLatest}>回到最新</button>}
 
       {asks.length > 0 && <ApprovalCard
         ask={asks[0]}
