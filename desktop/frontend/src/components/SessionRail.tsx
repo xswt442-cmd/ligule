@@ -37,7 +37,8 @@ export function SessionRail({ client, current, onOpen }: { client: Client; curre
     setLoading(true);
     setNote('');
     try {
-      const { sessions } = await client.call('sessions.list', {}) as { sessions: SessionSummary[] };
+      // 这一条带超时：宿主不回时界面要停在「读不回来」那一句，不能一直停在在读。
+      const { sessions } = await client.call('sessions.list', {}, 15_000) as { sessions: SessionSummary[] };
       const byRoot = new Map<string, SessionSummary[]>();
       for (const item of sessions) {
         const key = item.projectRoot === '' ? '读不出项目根' : item.projectRoot;
