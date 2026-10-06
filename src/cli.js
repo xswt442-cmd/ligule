@@ -326,7 +326,7 @@ if (missingFlagValue) {
     } else {
       for (const item of listed) {
         const open = item.unanswered > 0 ? `  ${item.unanswered} dispatched without a result` : '';
-        console.log(`${item.updatedAt}  ${item.id}  ${item.events} events  mode:${item.mode?.name ?? '-'}${open}`);
+        console.log(`${item.updatedAt}  ${item.id}  ${item.events} events  mode:${item.mode?.name ?? '-'}${item.name === '' ? '' : `  "${item.name}"`}${item.archived ? '  archived' : ''}${open}`);
       }
       console.error(`${listed.length} sessions in ${directory}, scanned in ${Date.now() - started}ms`);
     }

@@ -97,10 +97,10 @@ const branchEvents: Record<string, unknown>[] = [
 
 // 左侧栏那一份列表的夹具：三行是正常读出来的，第四行是读不出来的那一种（D93 要看得见码）。
 const sessions = [
-  { id: '7f3c9a21-4b7e-4f0a-9c1d-2a5e8b0c6d9f', formatVersion: 1, projectRoot: 'E:/notes', createdAt: '2026-10-05T09:02:11.000Z', updatedAt: '2026-10-05T11:41:07.000Z', events: 41, lastSeq: 40, mode: { name: 'full', layer: 'shipped', digest: '0f2b1c3d4e5f' }, unanswered: 0, truncatedBytes: 0 },
-  { id: '2b8d55c0-11aa-4c3e-8d77-9f0a1b2c3d4e', formatVersion: 1, projectRoot: 'E:/notes', createdAt: '2026-10-05T07:20:00.000Z', updatedAt: '2026-10-05T08:55:31.000Z', events: 128, lastSeq: 127, mode: { name: 'minimal', layer: 'shipped', digest: 'aa11bb22cc33' }, unanswered: 2, truncatedBytes: 0 },
-  { id: 'c4e1f00d-7788-4a5b-9c0d-e1f2a3b4c5d6', formatVersion: 0, projectRoot: '', createdAt: null, updatedAt: '2026-10-04T13:07:44.000Z', events: 3, lastSeq: 2, mode: null, unanswered: 0, truncatedBytes: 0 },
-  { id: '9a7b5c3d-0e1f-4a5b-8c9d-0e1f2a3b4c5d', formatVersion: 0, projectRoot: '', createdAt: null, updatedAt: '2026-10-04T09:12:03.000Z', events: 0, lastSeq: -1, mode: null, unanswered: 0, truncatedBytes: 0, error: { code: 'session_event_unknown', detail: '事件种类没标 ignorable，读不懂就拒绝重建（D73）' } },
+  { id: '7f3c9a21-4b7e-4f0a-9c1d-2a5e8b0c6d9f', formatVersion: 1, projectRoot: 'E:/notes', createdAt: '2026-10-05T09:02:11.000Z', updatedAt: '2026-10-05T11:41:07.000Z', events: 41, lastSeq: 40, mode: { name: 'full', layer: 'shipped', digest: '0f2b1c3d4e5f' }, name: '压缩读数那一轮', archived: false, unanswered: 0, truncatedBytes: 0 },
+  { id: '2b8d55c0-11aa-4c3e-8d77-9f0a1b2c3d4e', formatVersion: 1, projectRoot: 'E:/notes', createdAt: '2026-10-05T07:20:00.000Z', updatedAt: '2026-10-05T08:55:31.000Z', events: 128, lastSeq: 127, mode: { name: 'minimal', layer: 'shipped', digest: 'aa11bb22cc33' }, name: '', archived: true, unanswered: 2, truncatedBytes: 0 },
+  { id: 'c4e1f00d-7788-4a5b-9c0d-e1f2a3b4c5d6', formatVersion: 0, projectRoot: '', createdAt: null, updatedAt: '2026-10-04T13:07:44.000Z', events: 3, lastSeq: 2, mode: null, name: '', archived: false, unanswered: 0, truncatedBytes: 0 },
+  { id: '9a7b5c3d-0e1f-4a5b-8c9d-0e1f2a3b4c5d', formatVersion: 0, projectRoot: '', createdAt: null, updatedAt: '2026-10-04T09:12:03.000Z', events: 0, lastSeq: -1, mode: null, name: '', archived: false, unanswered: 0, truncatedBytes: 0, error: { code: 'session_event_unknown', detail: '事件种类没标 ignorable，读不懂就拒绝重建（D73）' } },
 ];
 
 let status = {
@@ -203,6 +203,16 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
           endSeq: page.length === 0 ? null : Number(page.at(-1)?.seq),
           hasMore: page.length > 0 && Number(page[0]?.seq) > 1,
         });
+      }
+      // 名字与归档标记改的是列表读的那一份事实：这里直接改那几行假记录（实现顺序第 75 步）。
+      case 'session.label': {
+        const found = sessions.find((item) => item.id === params.sessionId);
+        if (found === undefined) return fail('session_not_open', String(params.sessionId));
+        const named = typeof params.name === 'string' ? params.name.trim() : '';
+        if (params.name !== undefined && named === '') return fail('session_name_invalid', 'wanted 1-120 visible characters');
+        if (named !== '') found.name = named;
+        if (typeof params.archived === 'boolean') found.archived = params.archived;
+        return reply({ sessionId: found.id, name: found.name, archived: found.archived });
       }
       case 'sessions.list':
         return reply({ sessions: params.projectRoot === undefined ? sessions : sessions.filter((item) => item.projectRoot === params.projectRoot) });

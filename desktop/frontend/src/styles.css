@@ -1086,12 +1086,23 @@ button.send:hover:not(:disabled) {
 
 .session-line,
 .session-id,
+.session-name,
 .session-meta {
   inline-size: 100%;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 人起的那个名字是这一行的标题，编号退到下面；归档的那一份整条压暗，仍在列表里（实现顺序第 75 步）。 */
+.session-name {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.session-item.archived {
+  opacity: 0.6;
 }
 
 .session-line {

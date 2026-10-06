@@ -118,6 +118,13 @@ export function projectRecord(record) {
     // 模式生效是一件会改变模型能做什么的事，画在转录里，让人看得见是哪一条输入之后换的（I5）。
     return [{ kind: 'meta', text: `模式 ${record.name}（${MODE_LAYERS[record.layer] ?? record.layer}）生效：${record.tools.join('、')}` }];
   }
+  if (record.kind === 'label') {
+    // 名字与归档是这份会话自己的事实，改在哪一条输入之后要看得见（I5、实现顺序第 75 步）。
+    const parts = [];
+    if (typeof record.name === 'string') parts.push(`名字改成「${record.name}」`);
+    if (typeof record.archived === 'boolean') parts.push(record.archived ? '这一份归档了' : '这一份不再归档');
+    return parts.length === 0 ? [] : [{ kind: 'meta', text: parts.join('，') }];
+  }
   return [];
 }
 
@@ -566,6 +573,23 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         push({ kind: 'meta', text: current === null ? '状态读不到'
           : `模式 ${current.mode ?? '没装'} · 档位 ${current.policy} · 拒绝 连续 ${current.denials.consecutive} 次 / 累计 ${current.denials.total} 次 · 记录 ${current.eventCount} 条`
             + (context === '' ? '' : ` · ${context}`) });
+      })();
+      return;
+    }
+    if (name === 'name' || name === 'archive' || name === 'unarchive') {
+      // 名字与归档标记由宿主写成记录里的一条事实：界面不留第二份，两端读的是同一份（方案 4.2、实现顺序第 75 步）。
+      const label = name === 'name' ? { name: argument.trim() } : { archived: name === 'archive' };
+      if (name === 'name' && label.name === '') {
+        push({ kind: 'error', text: '名字要写几个字：/name <文字>' });
+        return;
+      }
+      void (async () => {
+        const done = await client.request('session.label', { sessionId, ...label }).catch((error) => error);
+        if (done.code !== undefined) {
+          push({ kind: 'error', text: `改不了：${done.code}${done.detail === undefined ? '' : ` · ${done.detail}`}` });
+          return;
+        }
+        push({ kind: 'meta', text: `这一份会话：${done.name === '' ? '没起过名字' : `名字「${done.name}」`}，${done.archived ? '已归档（列表默认不画它，/unarchive 取消）' : '未归档'}` });
       })();
       return;
     }

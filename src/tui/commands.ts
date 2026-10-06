@@ -41,6 +41,9 @@ export const UI_COMMANDS: readonly UiCommand[] = Object.freeze([
   { name: 'export', usage: '/export <路径>', text: '把这一份记录写成 markdown，派生支线各另写一份', hint: '<路径>', whenRunning: true },
   { name: 'sessions', usage: '/sessions', text: '列出这个项目根下跑过的会话（时间是 UTC）', hint: '', whenRunning: true },
   { name: 'resume', usage: '/resume <id> [模式名]', text: '接上列出来的那一份会话，id 写开头几段就行；模式名是那一份清单改过之后显式指定用哪一份', hint: '<id> [模式名]', whenRunning: false },
+  { name: 'name', usage: '/name <文字>', text: '给这一份会话起个名字：列表那一行读它，模型看不见', hint: '<文字>', whenRunning: true },
+  { name: 'archive', usage: '/archive', text: '把这一份归档：列表默认不再画它，记录照旧，也接得回来', hint: '', whenRunning: true },
+  { name: 'unarchive', usage: '/unarchive', text: '取消归档', hint: '', whenRunning: true },
   { name: 'quit', usage: '/quit', text: '退出（Ctrl+C 同样）', hint: '', whenRunning: true },
 ]);
 
@@ -151,6 +154,10 @@ export interface SessionRow {
   readonly updatedAt: string;
   readonly events: number;
   readonly mode: { readonly name: string } | null;
+  /** 人给这份会话起的名字；没起过是空串（实现顺序第 75 步）。 */
+  readonly name?: string;
+  /** 归档只改列表怎么展示：记录还在，也接得回来（方案 4.2）。 */
+  readonly archived?: boolean;
   readonly unanswered: number;
   readonly truncatedBytes?: number;
   readonly error?: { readonly code: string; readonly detail: string };
@@ -167,6 +174,8 @@ export function sessionLines(listed: readonly SessionRow[], current = ''): strin
     item.id,
     `${item.events} 条`,
     `mode:${item.mode?.name ?? '-'}`,
+    item.name === undefined || item.name === '' ? '' : `「${item.name}」`,
+    item.archived === true ? '已归档' : '',
     item.unanswered > 0 ? `未收尾 ${item.unanswered} 次派发` : '',
     (item.truncatedBytes ?? 0) > 0 ? `尾行未完成 ${item.truncatedBytes} 字节` : '',
     item.error === undefined ? '' : `无法恢复：${item.error.code} · ${item.error.detail}`,

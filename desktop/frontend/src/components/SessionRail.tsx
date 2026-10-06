@@ -14,6 +14,9 @@ export type SessionSummary = {
   events: number;
   lastSeq: number;
   mode: { name: string; layer: string; digest: string } | null;
+  // 人起的名字；没起过是空串。归档只改这一栏怎么画，记录还在，也接得回来（方案 4.2、实现顺序第 75 步）。
+  name?: string;
+  archived?: boolean;
   // 有几条派发留在记录里没有结果：恢复时它们会被补成未知结果（D72）。
   unanswered: number;
   truncatedBytes: number;
@@ -46,7 +49,8 @@ export function SessionRail({ client, current, onOpen }: { client: Client; curre
         if (list === undefined) byRoot.set(key, [item]);
         else list.push(item);
       }
-      setGroups([...byRoot.entries()]);
+      // 归档的那几份沉到本组底下：最近动过的仍在上面，一屏里先看到的是没归档的（方案 4.2）。
+      setGroups([...byRoot.entries()].map(([root, items]) => [root, [...items].sort((left, right) => Number(left.archived === true) - Number(right.archived === true))] as [string, SessionSummary[]]));
     } catch (error) {
       setNote(`会话列表读不回来：${code(error)}`);
     } finally {
@@ -75,7 +79,7 @@ export function SessionRail({ client, current, onOpen }: { client: Client; curre
       {items.map((item) => <button
         key={item.id}
         type="button"
-        className={`session-item${item.id === current ? ' active' : ''}`}
+        className={`session-item${item.id === current ? ' active' : ''}${item.archived === true ? ' archived' : ''}`}
         title={item.id}
         onClick={() => onOpen(item.id)}
       >
@@ -84,11 +88,13 @@ export function SessionRail({ client, current, onOpen }: { client: Client; curre
           <span className="session-mode">{item.mode?.name ?? '没有模式'}</span>
           <span className="session-count">{item.events} 条</span>
         </span>
+        {item.name !== undefined && item.name !== '' && <span className="session-name">{item.name}</span>}
         <span className="session-id">{item.id}</span>
-        {(item.unanswered > 0 || item.formatVersion === 0 || item.truncatedBytes > 0 || item.error !== undefined) && <span className="session-meta">
+        {(item.unanswered > 0 || item.formatVersion === 0 || item.truncatedBytes > 0 || item.archived === true || item.error !== undefined) && <span className="session-meta">
           {item.unanswered > 0 && <span>未收尾 {item.unanswered} 次派发</span>}
           {item.formatVersion === 0 && <span>没有首行</span>}
           {item.truncatedBytes > 0 && <span>尾行未完成 {item.truncatedBytes} 字节</span>}
+          {item.archived === true && <span>已归档</span>}
           {item.error !== undefined && <code className="row-code">{item.error.code}</code>}
         </span>}
       </button>)}
