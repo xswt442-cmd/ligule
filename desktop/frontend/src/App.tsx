@@ -636,7 +636,13 @@ export function App({ transport }: { transport: Transport }) {
       </div>
       {!pinned && <button className="jump-latest" type="button" onClick={() => void jumpToLatest()}>回到最新</button>}
 
-      {asks.length > 0 && <ApprovalCard ask={asks[0]} queued={asks.length - 1} verbosity={verbosity} onAnswer={answer} />}
+      {asks.length > 0 && <ApprovalCard
+        ask={asks[0]}
+        queued={asks.length - 1}
+        verbosity={verbosity}
+        policy={status?.policy ?? 'ask'}
+        onAnswer={answer}
+      />}
 
       {link !== null && <div className="banner" role="alert">
         <Icon name="warn" size={15} />

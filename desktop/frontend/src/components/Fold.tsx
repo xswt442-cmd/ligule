@@ -6,7 +6,12 @@ import type { Verbosity } from './types';
 const LINES = 12;
 const CHARS = 600;
 
-export function Fold({ text, verbosity, always = false }: { text: string; verbosity: Verbosity; always?: boolean }) {
+export function Fold({ text, verbosity, always = false, label = '看全文' }: {
+  text: string;
+  verbosity: Verbosity;
+  always?: boolean;
+  label?: string;
+}) {
   const [forced, setForced] = useState<boolean | null>(null);
   if (text === '') return null;
   const long = always || text.length > CHARS || text.split('\n').length > LINES;
@@ -18,6 +23,6 @@ export function Fold({ text, verbosity, always = false }: { text: string; verbos
       className="fold-toggle"
       aria-expanded={open}
       onClick={() => setForced(!open)}
-    >{open ? '收起' : '看全文'}</button>}
+    >{open ? '收起' : label}</button>}
   </>;
 }

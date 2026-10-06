@@ -1498,3 +1498,66 @@ button.mini.chip b {
   color: var(--fg);
   font-weight: 600;
 }
+
+/* ---------- 审批与断连那两格的第二版（第 59 步，D97）---------- */
+
+/* 审批卡片与输入坞都落到转录那一条居中列上，不再各占一份宽度。横幅占整栏宽，它说的是这一条连接的事。 */
+.approval,
+.composer {
+  inline-size: min(100%, var(--stream));
+  margin-inline: auto;
+}
+
+.approval {
+  gap: var(--space-2);
+  margin-block: 0 var(--space-2);
+  padding: var(--space-3);
+}
+
+/* 卡片自己不定字号：`--stream` 用的是 ch，字号一变这一格的宽度就和转录那一条列错开了。 */
+.approval-reason {
+  font-size: var(--text-sm);
+}
+
+.approval-head {
+  gap: var(--space-2);
+}
+
+.approval-kind {
+  font-size: var(--text-xs);
+  letter-spacing: 0.06em;
+}
+
+.approval-actions {
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.approval-actions button {
+  padding: var(--space-1) var(--space-3);
+  border-radius: 999px;
+  font-size: var(--text-sm);
+}
+
+.approval-actions button[data-tone="allow"] {
+  color: var(--bg-raised);
+  background: var(--ok);
+  border-color: var(--ok);
+}
+
+.approval-actions button[data-tone="deny"] {
+  color: var(--fg);
+  background: var(--bg-sunk);
+  border-color: var(--line);
+}
+
+/* 档位那一格说的是这一档怎么走到问人这一格，读自 `status.get`，界面不据此改判定（D81 边界三）。 */
+.approval-tier {
+  margin-inline-start: auto;
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
+
+.banner span {
+  min-width: 0;
+}
