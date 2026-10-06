@@ -585,6 +585,13 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
             usage: state.compaction === null ? null : await state.compaction.context(),
           };
         }
+        case 'config.get': {
+          // 白名单在这一处列明（实现顺序第 67 步）。配置合并除 `__proto__` 之外接受任何键，项目层那一份可能出自
+          // 别人写的仓库，而凭据只走环境变量是一条约定不是拦阻，所以交出整份快照不能证明帧里没有别的东西。
+          // `apiKeyEnv` 交的是环境变量的名字，值从来不进配置，也就不进这一格。
+          const model = config.model ?? {};
+          return { model: { api: model.api, baseURL: model.baseURL, model: model.model, apiKeyEnv: model.apiKeyEnv } };
+        }
         case 'session.compact': {
           const state = open(sessionId);
           // 压的是下一次请求要用的那一份投影，正在跑的这一轮的上下文已经在路上：这时候压改变不了它（D83）。

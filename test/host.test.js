@@ -653,3 +653,17 @@ test('manual compaction returns a boundary the status line then reports', async 
     assert.ok(status.usage.estimated > 0);
   }, { contextTokens: 1200 });
 });
+
+// 只读的配置展示（实现顺序第 67 步）：宿主只交白名单里那几格，快照里别的东西进不了帧。
+test('config.get shows the endpoint block and nothing else from the snapshot', async () => {
+  await withInProcessHost(async (connection, { directory }) => {
+    const shown = await connection.request('config.get', {});
+    assert.deepEqual(Object.keys(shown), ['model'], '交回来的只有一格 model');
+    assert.deepEqual(Object.keys(shown.model).sort(), ['api', 'baseURL', 'model'], '端点那三样；这份配置没写 apiKeyEnv，那一格就不出现');
+    const frame = JSON.stringify(shown);
+    assert.ok(!frame.includes(directory), '边界那一个目录不进帧：那是这台机器上的位置');
+    assert.ok(!frame.includes('auto'), '判定档位不在这一条里读，它走 status.get（D40）');
+    // 这条路不收参数：多写的那一格不会被读，也换不来白名单之外的一格。
+    assert.deepEqual(Object.keys(await connection.request('config.get', { path: 'policy.mode' })), ['model']);
+  });
+});
