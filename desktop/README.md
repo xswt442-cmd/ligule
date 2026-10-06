@@ -31,7 +31,7 @@ npm run build    # 出 NSIS 安装包：target/release/bundle/nsis/ligule_<版�
 
 `frontend/` 是一份 Vite 工程（React 加 TypeScript），构建出的 `dist/` 交给壳嵌入：`src/App.tsx` 是三栏与行的渲染，`src/protocol.ts` 收发帧，`src/rows.ts` 把会话记录投影成行，`src/slots.ts` 是与 `src/kernel/slots.js` 同一形状的槽位注册表，`src/bridge.ts` 是 Tauri 那一头的载体。
 
-往界面加东西走注册表，不改渲染主干：一枚状态标记注册进 `header.status`，一个面板注册进 `rail.menu`。左侧「功能」菜单里有四项标着「待实现」，点开说的是缺的那件事在哪（U22、U8、U21，以及协议里还没有读写配置的方法）。
+往界面加东西走注册表，不改渲染主干：一枚状态标记注册进 `header.status`，一个面板注册进 `rail.menu`。左侧「功能」菜单里有四项标着「待实现」，点开说的是缺的那件事在哪（U22、U8 与 U51，以及协议里还没有读写配置的方法）。
 
 `src/main.tsx` 先看 `window.__LIGULE_TRANSPORT__`：页面外部挂上它，帧就从那里来，不挂就走壳的 Tauri 载体。这一处是给检查用的口子。
 

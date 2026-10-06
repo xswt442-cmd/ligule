@@ -111,7 +111,7 @@ const pendingPanels: Panel<PanelProps>[] = [
     id: 'panel.windows',
     title: '多窗口与重连',
     pending: true,
-    view: () => <p className="stub">一份壳对应一个 Host 进程，会话状态在那个进程里（D30）。多个窗口看同一会话要等共享常驻进程引入（U8）；进程断掉之后记录里那批没结果的调用怎么补也没定（U21）。</p>,
+    view: () => <p className="stub">一份壳对应一个 Host 进程，会话状态在那个进程里（D30）。多个窗口看同一会话要等共享常驻进程引入（U8）。进程断掉之后记录里那批没有结果的调用，D72 已经定了补法：补成一条 `tool_outcome_unknown` 的工具结果，恢复时不自动重放。这一项还缺的是界面重连上那一具 Host，把断掉期间漏掉的帧接回来（U51）。</p>,
   },
 ];
 
