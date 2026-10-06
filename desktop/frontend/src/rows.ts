@@ -78,7 +78,7 @@ function payloadOf(result: Record_['result']): { text?: string; exitCode?: unkno
 }
 
 // 写入类的参数里带着整份内容，那一整份不进摘要行：行数够了（D94）。
-function changeSummary(tool: string, args: Record<string, unknown>): string {
+export function changeSummary(tool: string, args: Record<string, unknown>): string {
   const lines = (value: unknown) => String(value ?? '').split('\n').length;
   const path = String(args.path ?? '?');
   if ((tool === 'write' || tool === 'create') && typeof args.content === 'string') return `${path}：${lines(args.content)} 行新内容`;

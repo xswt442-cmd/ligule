@@ -217,7 +217,22 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
     }
   };
 
-  // 一轮的样子：先推理增量，再两次工具调用与结果，中间夹一次审批，最后是带 markdown 的回答。
+  // 审批那一条反过来的请求：发出去，等界面答复；停在没人答复那一下时 30 秒后按不允许收掉。
+  function ask(callId: string, params: Record<string, unknown>): Promise<string> {
+    const askId = `ask-${callId}`;
+    return new Promise((resolve) => {
+      asking.set(askId, resolve);
+      emit({ id: askId, method: 'approval.request', params });
+      setTimeout(() => {
+        if (asking.has(askId)) {
+          asking.delete(askId);
+          resolve('deny');
+        }
+      }, 30_000);
+    });
+  }
+
+  // 一轮的样子：先推理增量，再两次工具调用与结果，中间夹两次审批（按先后各演一次），最后是带 markdown 的回答。
   async function run(sessionId: string, input: string): Promise<void> {
     const tell = (event: Record<string, unknown>) => emit({ notify: 'event', sessionId, event });
     const part = (type: string, text: string) => emit({ notify: 'delta', sessionId, event: { type, text } });
@@ -237,28 +252,13 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
     }
     await wait(240);
     const command = 'powershell -NoProfile -Command "Get-ChildItem | Measure-Object"';
-    const askId = `ask-${callId}`;
-    const decision = await new Promise<string>((resolve) => {
-      asking.set(askId, resolve);
-      emit({
-        id: askId,
-        method: 'approval.request',
-        params: {
-          sessionId,
-          tool: 'exec',
-          command,
-          reason: 'PowerShell 那一条不是简单命令（带管道与 cmdlet），自动档不放开（D66）。',
-          shell: 'powershell',
-          executable: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
-        },
-      });
-      // 演示页面停在没人答复时也要能走下去：30 秒后按不允许收掉。
-      setTimeout(() => {
-        if (asking.has(askId)) {
-          asking.delete(askId);
-          resolve('deny');
-        }
-      }, 30_000);
+    const decision = await ask(callId, {
+      sessionId,
+      tool: 'exec',
+      command,
+      reason: 'PowerShell 那一条不是简单命令（带管道与 cmdlet），自动档不放开（D66）。',
+      shell: 'powershell',
+      executable: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
     });
     await wait(240);
     tell({ seq: 102, kind: 'assistant', text: '', toolCalls: [{ id: callId, name: 'exec', args: { command } }] });
@@ -273,9 +273,30 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
         result: { failed: true, kind: 'refusal', code: 'policy_denied', reason: '这一条没被允许（答复是不允许）。' } });
     }
     await wait(220);
-    tell({ seq: 104, kind: 'usage', ignorable: true, input: 9211, output: 214, estimated: 19_050, measurement: 'request-v1' });
+    // 第二次询问：一次整份写入。参数里带着正文，界面上给的是那一句改动摘要与可展开的全文（D94）。
+    const writeId = 'call_write_2';
+    const path = 'notes/readings-2.md';
+    const content = '# 读数\n\n窗口 200000\n压力线 160000\n一次压掉 97122\n';
+    const writeDecision = await ask(writeId, {
+      sessionId,
+      tool: 'write',
+      args: { path, content },
+      reason: '写入整份文件要人点头：这一件不在自动放行那一档里（D3）。',
+    });
+    await wait(200);
+    tell({ seq: 104, kind: 'assistant', text: '', toolCalls: [{ id: writeId, name: 'write', args: { path, content } }] });
+    await wait(380);
+    tell({ seq: 105, kind: 'tool', tool: 'write', callId: writeId, args: { path, content },
+      verdict: writeDecision === 'allow'
+        ? { decision: 'allow', via: 'ask', capability: 'write', level: 'ask', rule: '写入逐次询问', answer: 'allow' }
+        : { decision: 'deny', via: 'ask', capability: 'write', level: 'ask', rule: '写入逐次询问', answer: 'deny' },
+      result: writeDecision === 'allow'
+        ? { content: { text: '写了 6 行' } }
+        : { failed: true, kind: 'refusal', code: 'policy_denied', reason: '这一条没被允许（答复是不允许）。' } });
+    await wait(220);
+    tell({ seq: 106, kind: 'usage', ignorable: true, input: 9211, output: 214, estimated: 19_050, measurement: 'request-v1' });
     await wait(160);
-    tell({ seq: 105, kind: 'assistant', text: markdown });
+    tell({ seq: 107, kind: 'assistant', text: markdown });
     status = { ...status, running: false, eventCount: 6, usage: { ...status.usage, estimated: status.usage.estimated + 9_425 } };
   }
 

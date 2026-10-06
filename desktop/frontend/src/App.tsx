@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createClient, type Client, type Transport } from './protocol';
+import { ApprovalCard, type Ask } from './components/ApprovalCard';
 import { RowView } from './components/RowView';
 import { SessionRail } from './components/SessionRail';
 import { UsageMeter } from './components/UsageMeter';
@@ -7,10 +8,9 @@ import { Palette, type Command } from './components/Palette';
 import { hotkeyOf } from './hotkeys';
 import type { Verbosity } from './components/types';
 import { createSlotRegistry, SLOTS, type Panel } from './slots';
-import { metaRow, projectRecord, type Record_, type Row } from './rows';
+import { capabilityOf, changeSummary, metaRow, projectRecord, type Record_, type Row } from './rows';
 import type { Status } from './status';
 
-type Ask = { id: string; tool: string; detail: string; reason: string; backend: string };
 type Branch = { seq: number; id: string; task: string };
 
 // 流式期间的那半截排在已落盘的那些行之后，id 固定：每次增量都换 id 会让那一行重建，展开状态就丢了。
@@ -230,7 +230,8 @@ export function App({ transport }: { transport: Transport }) {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [rows, setRows] = useState<Row[]>([]);
   const [live, setLive] = useState({ text: '', reasoning: '' });
-  const [ask, setAsk] = useState<Ask | null>(null);
+  // 跑着的时候新到的询问排在后面：一次问一件事，答一件再画下一件。
+  const [asks, setAsks] = useState<Ask[]>([]);
   const [running, setRunning] = useState(false);
   const [status, setStatus] = useState<Status | null>(null);
   const [draft, setDraft] = useState('');
@@ -348,16 +349,28 @@ export function App({ transport }: { transport: Transport }) {
     client.onRequest((message) => {
       // Host 朝界面发出去的请求只有 approval.request 这一种。
       if (message.method !== 'approval.request') return;
-      const params = message.params as { sessionId?: string; tool?: string; command?: string; args?: unknown; reason?: string; shell?: string; executable?: string };
+      const params = message.params as { sessionId?: string; tool?: string; command?: string; args?: Record<string, unknown>; reason?: string; shell?: string; executable?: string };
       if (params?.sessionId !== active.current) return;
-      setAsk({
+      const tool = params.tool ?? '';
+      const args = params.args ?? {};
+      // 画出来的那一句说的是哪个对象：命令文本、路径、目标地址，或者那一项 MCP 能力名（D67）。
+      const shown = params.command ?? args.path ?? args.url ?? capabilityOf(tool, args);
+      const content = tool === 'edit'
+        ? `原内容：\n${String(args.anchor ?? '')}\n\n新内容：\n${String(args.replacement ?? '')}`
+        : typeof args.content === 'string'
+          ? args.content
+          // 命令文本在 `command` 那一格，参数这一格是空的：空的就不给一个展开把手。
+          : Object.keys(args).length === 0 ? '' : JSON.stringify(args, null, 2);
+      setAsks((current) => [...current, {
         id: message.id ?? '',
-        tool: params.tool ?? '',
-        detail: params.command ?? JSON.stringify(params.args ?? {}, null, 2),
+        tool,
+        detail: shown === undefined || String(shown) === '' ? '' : String(shown),
+        change: changeSummary(tool, args),
         reason: params.reason ?? '',
-        // 同一条文本在两种语法下能自动放行的面积不一样，答的是哪一种、跑的是哪一个可执行文件要看得见（D59）。
+        // 用哪一种语法判的、跑的是哪一个可执行文件：答的是这一条命令，看得见的该是这两样（D59）。
         backend: params.shell === undefined ? '' : `${params.shell} · ${params.executable ?? ''}`,
-      });
+        content,
+      }]);
     });
 
     // 后端进程的标准错误输出走到这里：它不是协议帧，是那一侧打印的东西。
@@ -379,7 +392,7 @@ export function App({ transport }: { transport: Transport }) {
       setRows([]);
       setLimit(RENDER_WINDOW);
       setLive({ text: '', reasoning: '' });
-      setAsk(null);
+      setAsks([]);
       void refreshStatus(created.sessionId);
     } catch (error) {
       setRows((current) => [...current, metaRow('error', `会话建不起来：${code(error)}`)]);
@@ -397,7 +410,7 @@ export function App({ transport }: { transport: Transport }) {
     setRows([]);
     setLimit(RENDER_WINDOW);
     setLive({ text: '', reasoning: '' });
-    setAsk(null);
+    setAsks([]);
     dispatchAt.current.clear();
     try {
       await client.call('session.open', { sessionId: id });
@@ -430,7 +443,7 @@ export function App({ transport }: { transport: Transport }) {
       setRows((current) => [...current, metaRow('error', `这一轮停住：${code(error)}`)]);
     } finally {
       setRunning(false);
-      setAsk(null);
+      setAsks([]);
       void refreshStatus(sessionId);
     }
   }, [client, history, refreshStatus, running, sessionId]);
@@ -509,13 +522,13 @@ export function App({ transport }: { transport: Transport }) {
   ], [cancel, collapsed, copyLastAnswer, compact, newSession, readBack, status]);
 
   const answer = useCallback((decision: 'allow' | 'deny') => {
-    if (ask === null) return;
-    const asked = ask;
-    setAsk(null);
+    const [head, ...rest] = asks;
+    if (head === undefined) return;
+    setAsks(rest);
     // 先把这一条记在界面上再发答复：答复一发出去，Host 那一边就往下跑，工具结果可能比这一行先到。
-    setRows((current) => [...current, metaRow('meta', `${decision === 'allow' ? '已允许' : '已不允许'} ${asked.tool}`)]);
-    client.reply(asked.id, { decision });
-  }, [ask, client]);
+    setRows((current) => [...current, metaRow('meta', `${decision === 'allow' ? '已允许' : '已不允许'} ${head.tool}${head.detail === '' ? '' : `：${head.detail.slice(0, 60)}`}`)]);
+    client.reply(head.id, { decision });
+  }, [asks, client]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -606,19 +619,7 @@ export function App({ transport }: { transport: Transport }) {
       </div>
       {!pinned && <button className="jump-latest" type="button" onClick={() => void jumpToLatest()}>回到最新</button>}
 
-      {ask !== null && <section className="approval">
-        <div className="approval-head">
-          <span className="approval-kind">要执行</span>
-          <strong>{ask.tool}</strong>
-          <code>{ask.detail}</code>
-          {ask.backend !== '' && <span className="approval-backend">{ask.backend}</span>}
-        </div>
-        {ask.reason !== '' && <p className="approval-reason">{ask.reason}</p>}
-        <div className="approval-actions">
-          <button type="button" onClick={() => answer('allow')}>允许一次</button>
-          <button type="button" onClick={() => answer('deny')}>不允许</button>
-        </div>
-      </section>}
+      {asks.length > 0 && <ApprovalCard ask={asks[0]} queued={asks.length - 1} verbosity={verbosity} onAnswer={answer} />}
 
       {link !== null && <div className="banner" role="alert">
         <strong>这一条连接不在了</strong>
