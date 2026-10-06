@@ -42,6 +42,7 @@ export const UI_COMMANDS: readonly UiCommand[] = Object.freeze([
   { name: 'sessions', usage: '/sessions', text: '列出这个项目根下跑过的会话（时间是 UTC）', hint: '', whenRunning: true },
   { name: 'find', usage: '/find <文字>', text: '在这个项目根跑过的会话里找一段文字：说出是哪一份的第几条', hint: '<文字>', whenRunning: true },
   { name: 'resume', usage: '/resume <id> [模式名]', text: '接上列出来的那一份会话，id 写开头几段就行；模式名是那一份清单改过之后显式指定用哪一份', hint: '<id> [模式名]', whenRunning: false },
+  { name: 'branch', usage: '/branch [序号]', text: '把这一份记录复制成一份新会话并接上去：不带序号带到此刻的末端，带序号带到那一轮完整结束那一条', hint: '[序号]', whenRunning: false },
   { name: 'name', usage: '/name <文字>', text: '给这一份会话起个名字：列表那一行读它，模型看不见', hint: '<文字>', whenRunning: true },
   { name: 'archive', usage: '/archive', text: '把这一份归档：列表默认不再画它，记录照旧，也接得回来', hint: '', whenRunning: true },
   { name: 'unarchive', usage: '/unarchive', text: '取消归档', hint: '', whenRunning: true },

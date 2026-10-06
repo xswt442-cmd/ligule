@@ -593,6 +593,58 @@ test('finding a phrase shows which session each hit is in', options, async () =>
   }
 }));
 
+// 分支的两个入口落在终端的同一条命令上：不带序号复制到此刻的末端，带序号复制到那一轮完整结束那一条（方案 4.3）。
+test('branching copies the record and switches onto the new session', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { setTimeout: delay } = await import('node:timers/promises');
+  const { App } = await import('../dist/tui/app.js');
+
+  const stdout = new PassThrough();
+  stdout.columns = 140;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+
+  assert.ok(UI_COMMANDS.some((command) => command.name === 'branch'), '/branch 在命令表里');
+  assert.equal(routeInput('/branch', true).kind, 'blocked', '分支会把人从跑着的这一轮带走，那一轮落下来的事件就没人在看');
+  await client.request('run.start', { sessionId, input: '先问过一句' });
+  const instance = render(createElement(App, { client, sessionId, info: { boundary: projectDirectory }, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  try {
+    const before = painted.length;
+    stdin.write('/branch');
+    await delay(100);
+    stdin.write('\r');
+    const shown = () => plainOutput(painted.slice(before));
+    await waitFor(() => shown().includes('复制成一份新的会话'), { read: shown });
+    // 接上去走的是 `/resume` 那一条路，它自己会说一句；等这一句而不是等毫秒，两条都在同一帧序列里落下。
+    await waitFor(() => shown().includes('接上会话'), { read: shown });
+    const branched = requests.filter((request) => request.method === 'session.branch');
+    assert.equal(branched.length, 1);
+    assert.equal(branched[0].params.at, undefined, '不带序号不发 `at`：复制到哪儿由宿主固定那一刻的末端');
+    const opened = requests.filter((request) => request.method === 'session.open').at(-1);
+    assert.notEqual(opened.params.sessionId, sessionId, '接上去的是复制出来的那一份，不是原来那一份');
+    assert.match(shown(), new RegExp(`会话 ${opened.params.sessionId.slice(0, 8)}`), '状态行说的是现在这一份会话');
+
+    const unreadable = painted.length;
+    stdin.write('/branch 第三');
+    await delay(100);
+    stdin.write('\r');
+    await waitFor(() => plainOutput(painted.slice(unreadable)).includes('不是序号'), { read: () => plainOutput(painted.slice(unreadable)) });
+    const unavailable = painted.length;
+    stdin.write('/branch 0');
+    await delay(100);
+    stdin.write('\r');
+    await waitFor(() => plainOutput(painted.slice(unavailable)).includes('session_branch_point_unavailable'),
+      { read: () => plainOutput(painted.slice(unavailable)) });
+    assert.equal(requests.filter((request) => request.method === 'session.branch').length, 2, '读不出序号那一次没发给宿主');
+  } finally {
+    instance.unmount();
+  }
+}));
+
 // 输入历史跨会话留住（第 45 步）：那一份文件与翻它的两条动作。这一层不依赖 ink，所以不跟着界面那几条一起跳过。
 test('the history keeps the newest sentence first and one place per sentence', () => {
   assert.deepEqual(pushHistory([], '  把 note.txt 读一遍 '), ['把 note.txt 读一遍'], '首尾空白不算内容');

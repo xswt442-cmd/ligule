@@ -586,6 +586,28 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       })();
       return;
     }
+    if (name === 'branch') {
+      // 两个入口在这一条命令上合成一个：不带序号是整份复制，带一个序号是带到那一轮完整结束那一条（方案 4.3）。
+      // 序号读不出整数就当场说清：一个猜出来的分支点比没有分支点更坏（4.3「不猜测历史分支点」）。
+      const wanted = argument.trim();
+      const at = wanted === '' ? undefined : Number(wanted);
+      if (at !== undefined && !Number.isInteger(at)) {
+        push({ kind: 'error', text: `那个分支点是记录里的序号：/branch [序号]（${wanted} 不是序号；不带序号就复制整份）` });
+        return;
+      }
+      void (async () => {
+        const branched = await client.request('session.branch', { sessionId, ...(at === undefined ? {} : { at }) }).catch((error) => error);
+        if (branched.code !== undefined) {
+          push({ kind: 'error', text: `分支没成：${branched.code}${branched.detail === undefined ? '' : ` · ${branched.detail}`}` });
+          return;
+        }
+        push({ kind: 'meta', text: `复制成一份新的会话 ${branched.sessionId.slice(0, 8)}：带到第 ${branched.at} 条为止，共 ${branched.events} 条，原来那一份不动` });
+        // 接上去走的是 `/resume` 那一条路：打开、读回、投影、收掉上一份，一次只看一份会话（D85）。
+        // 那一份没配上的派发由这一次打开补成未知结果，补它用的是分支自己的装配（D72、方案 4.3）。
+        runCommand('resume', branched.sessionId);
+      })();
+      return;
+    }
     if (name === 'tools') {
       void (async () => {
         const current = await client.request('status.get', { sessionId }).catch(() => null);
