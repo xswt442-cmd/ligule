@@ -63,7 +63,7 @@ export const METHODS = Object.freeze({
   // 第四条只为界面多出来的方法（前三条是 `mode.set` D65、`session.compact` D83、`sessions.list`）：配置在宿主那一侧，
   // 而这条路只交得出白名单里的几格——没有参数可点路径，所以界面要不到别的格。
   'config.get': {
-    description: 'Read the configuration this interface may show: the endpoint block only; no path argument, and no credential ever comes from configuration (D13, D60)',
+    description: 'Read the configuration this interface may show: the host builds the answer from four listed fields, so no path can be asked for and no credential ever comes from configuration (D13, D60)',
     parameters: { type: 'object', properties: {}, description: 'reading the shown configuration takes no argument' },
   },
   'mode.set': {

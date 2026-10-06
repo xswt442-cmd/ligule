@@ -134,6 +134,34 @@ function observedSession(session, onEvent) {
   };
 }
 
+// 界面能看到的配置由这一处拼出来（实现顺序第 67 步）。每一格要先是字符串，不是字符串就不交。
+// 地址只留协议、主机、端口与路径：用户名、密码、查询参数与片段常常装的就是凭据，不原样交回。
+// 地址解析不出来时也不猜，交回没有这一格，界面上说「读不出来或没写」。
+function shownText(value) {
+  return typeof value === 'string' ? value : undefined;
+}
+
+export function shownConfigOf(config) {
+  const model = config.model ?? {};
+  let endpoint = shownText(model.baseURL);
+  if (endpoint !== undefined) {
+    try {
+      const url = new URL(endpoint);
+      endpoint = `${url.protocol}//${url.host}${url.pathname}`;
+    } catch {
+      endpoint = undefined;
+    }
+  }
+  return {
+    model: {
+      api: shownText(model.api),
+      baseURL: endpoint,
+      model: shownText(model.model),
+      apiKeyEnv: shownText(model.apiKeyEnv),
+    },
+  };
+}
+
 // modeName 与 modePaths 是一对：给了名字就要能给那三层目录，运行中换模式要用同一套查找（D41、D44）。
 // 扩展来源由装载侧算好交进来（D68：项目层与本地层里写的路径不算）：paths 是要加载的文件，
 // ignored 是那些被这条规则挡掉的路径，它们进日志而不是静默消失。
@@ -586,11 +614,10 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           };
         }
         case 'config.get': {
-          // 白名单在这一处列明（实现顺序第 67 步）。配置合并除 `__proto__` 之外接受任何键，项目层那一份可能出自
-          // 别人写的仓库，而凭据只走环境变量是一条约定不是拦阻，所以交出整份快照不能证明帧里没有别的东西。
-          // `apiKeyEnv` 交的是环境变量的名字，值从来不进配置，也就不进这一格。
-          const model = config.model ?? {};
-          return { model: { api: model.api, baseURL: model.baseURL, model: model.model, apiKeyEnv: model.apiKeyEnv } };
+          // 边界在「结果由固定四格拼出来」这一句上，不在参数校验上：子集校验放过模式里没声明的键（D14）。
+          // 白名单的理由：配置合并除 `__proto__` 之外接受任何键，项目层那一份可能出自别人写的仓库（D8）。
+          // 凭据只走环境变量是一条约定，不是拦阻（D13、D60），所以交出整份快照证明不了帧里没有别的东西。
+          return shownConfigOf(config);
         }
         case 'session.compact': {
           const state = open(sessionId);

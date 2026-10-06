@@ -34,15 +34,16 @@ export function ModelPanel({ client }: { client: Client }) {
   ];
 
   return <>
-    <button type="button" className="rail-refresh" onClick={() => void load()}><Icon name="refresh" size={13} /> 重读一次</button>
+    <button type="button" className="rail-refresh" onClick={() => void load()}><Icon name="refresh" size={13} /> 再问一次</button>
     {note !== '' && <p className="session-note">{note}</p>}
     {rows.map(([label, value]) => <div key={label} className="sheet-row">
       <span className="sheet-label">{label}</span>
-      <span className="sheet-value">{value ?? '没写这一格'}</span>
+      <span className="sheet-value">{value ?? '读不出来或没写这一格'}</span>
     </div>)}
     <p className="sheet-note">
-      这几格读的是配置文件那三层（D8），要改就得动文件：协议里只有读配置的这一条，没有写配置的方法。
-      密钥的值从来不进配置，也不进这一格，所以这里看不到它。
+      这几格读的是这一具宿主启动时折好的那一份快照。配置文件那三层与命令行的 `--config` 都在里面（D8）。
+      改完配置要重启宿主才生效，这一个按钮只是再问一次当前这一具宿主；协议里没有写配置的方法。
+      地址只展示协议、主机、端口与路径那一段，密钥的值从来不进配置。
     </p>
   </>;
 }

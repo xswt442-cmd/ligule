@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createConnection, createConfig, createMemoryConnectionPair, MESSAGES_CAPABILITIES, METHODS, NOTIFICATIONS, providerFromConfig, resolveShell, serveHost } from '../dist/index.js';
+import { shownConfigOf } from '../dist/host/host.js';
 
 const CLI = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
 
@@ -664,6 +665,17 @@ test('config.get shows the endpoint block and nothing else from the snapshot', a
     assert.ok(!frame.includes(directory), '边界那一个目录不进帧：那是这台机器上的位置');
     assert.ok(!frame.includes('auto'), '判定档位不在这一条里读，它走 status.get（D40）');
     // 这条路不收参数：多写的那一格不会被读，也换不来白名单之外的一格。
+    // 边界不在参数校验上（子集校验放过模式里没声明的键），在结果由固定四格拼出来那一句上。
     assert.deepEqual(Object.keys(await connection.request('config.get', { path: 'policy.mode' })), ['model']);
   });
+});
+
+// 展示值由宿主拼：每一格要先是字符串，地址只留协议、主机、端口与路径那一段（实现顺序第 67 步）。
+test('shownConfigOf keeps the displayable part of each field', () => {
+  assert.deepEqual(shownConfigOf({ model: { api: 'messages', baseURL: 'https://user:secret@api.example.test:8443/v1?token=abc#frag', model: 42 } }), {
+    model: { api: 'messages', baseURL: 'https://api.example.test:8443/v1', model: undefined, apiKeyEnv: undefined },
+  });
+  // 解析不出来的地址不猜着交：那一格就没有，界面上说「读不出来或没写」。
+  assert.deepEqual(shownConfigOf({ model: { baseURL: 'not a url' } }), { model: { api: undefined, baseURL: undefined, model: undefined, apiKeyEnv: undefined } });
+  assert.deepEqual(shownConfigOf({}), { model: { api: undefined, baseURL: undefined, model: undefined, apiKeyEnv: undefined } });
 });
