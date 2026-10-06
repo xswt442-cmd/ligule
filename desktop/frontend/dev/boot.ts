@@ -9,6 +9,8 @@ import { createFakeHost, longEvent } from './fake-host';
 declare global {
   interface Window {
     __LIGULE_COST__?: (action: () => void) => Promise<number>;
+    // 检查里要能自己把这条连接弄断：那一张断连横幅才有办法演出来。
+    __LIGULE_FAKE__?: { stopReplies: (on: boolean) => void };
   }
 }
 
@@ -16,6 +18,7 @@ const params = new URLSearchParams(location.search);
 const rows = Number(params.get('rows') ?? 0);
 const host = createFakeHost(rows > 0 ? { events: rows } : {});
 window.__LIGULE_TRANSPORT__ = host;
+window.__LIGULE_FAKE__ = host;
 await import('../src/main');
 
 const transcript = (): HTMLElement => document.querySelector('.conversation') as HTMLElement;

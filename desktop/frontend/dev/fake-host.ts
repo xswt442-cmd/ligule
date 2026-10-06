@@ -147,14 +147,20 @@ function fillSpills(events: Record<string, unknown>[]): Record<string, unknown>[
   });
 }
 
-export function createFakeHost(options: { events?: number } = {}): Transport & { pushEvent: (event: Record<string, unknown>) => void } {
+export function createFakeHost(options: { events?: number } = {}): Transport & {
+  pushEvent: (event: Record<string, unknown>) => void;
+  stopReplies: (on: boolean) => void;
+} {
   let emit: (frame: Frame) => void = () => undefined;
   let opened = 0;
   let seq = 1000;
+  // 装聋那一格：把帧收进去但不答，用来演「这一条连接不在了」那一张横幅。
+  let deaf = false;
   // 界面答复那一条审批之后才往下跑：真宿主也是等这一格答复才继续（D16）。
   const asking = new Map<string, (decision: string) => void>();
 
   const answer = (frame: Frame): void => {
+    if (deaf && frame.method !== undefined) return;
     const id = frame.id as string;
     if (typeof id === 'string' && id.startsWith('ask-')) {
       const settle = asking.get(id);
@@ -192,9 +198,13 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
         return reply({ sessions: params.projectRoot === undefined ? sessions : sessions.filter((item) => item.projectRoot === params.projectRoot) });
       case 'status.get':
         return reply({ ...status, sessionId: params.sessionId, eventCount: eventsOf(String(params.sessionId)).length });
-      case 'mode.set':
-        status = { ...status, mode: String(params.name), modeLayer: 'shipped' };
-        return reply({ mode: status.mode, layer: status.modeLayer, pending: null, tools: status.tools });
+      case 'mode.set': {
+        // 坏清单在那一刻就报稳定码（D65）：随包带的只有那两份，界面写别的就换不过去。
+        const name = String(params.name);
+        if (name !== 'minimal' && name !== 'full') return fail('mode_unknown', `没有那一份模式清单：${name}`);
+        status = { ...status, mode: name, modeLayer: 'shipped' };
+        return reply({ mode: name, layer: status.modeLayer, pending: null, tools: status.tools });
+      }
       case 'session.compact':
         status = { ...status, usage: { ...status.usage, estimated: 12_400 } };
         return reply({ sessionId: params.sessionId, fromSeq: 0, toSeq: 6, tokensBefore: 41_512, tokensAfter: 12_400 });
@@ -282,6 +292,9 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
     // 测量与手工试形状用的那一个入口：往现在开着的那一份会话上补一条刚落盘的事件。
     pushEvent: (event) => {
       emit({ notify: 'event', sessionId: status.sessionId, event: { ...event, seq: (seq += 1) } });
+    },
+    stopReplies: (on) => {
+      deaf = on;
     },
   };
 }

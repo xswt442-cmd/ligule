@@ -747,3 +747,91 @@ button.primary {
 .md-table th, .md-table td { border: 1px solid var(--line); padding: 0.3rem 0.5rem; text-align: left; vertical-align: top; }
 .md-table th { background: var(--bg-raised); color: var(--fg-muted); font-weight: 600; }
 .markdown blockquote { margin: 0.5rem 0; padding-left: 0.7rem; border-left: 3px solid var(--line); color: var(--fg-muted); }
+
+/* ---------- 顶部状态、用量条与断连横幅（D82、D86、D93）---------- */
+
+.mode-set {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--fg-muted);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.mode-set input {
+  width: 9rem;
+  padding: 0.25rem 0.45rem;
+  color: var(--fg);
+  background: var(--bg-sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font: inherit;
+}
+
+.usage {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.usage-bar {
+  position: relative;
+  display: inline-block;
+  width: 6.5rem;
+  height: 0.42rem;
+  overflow: hidden;
+  background: var(--bg-sunk);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+
+.usage-fill {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  background: color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+.usage-bar[data-over="true"] .usage-fill {
+  background: color-mix(in srgb, var(--warn) 75%, transparent);
+}
+
+.usage-line {
+  position: absolute;
+  inset-block: -2px;
+  width: 2px;
+  background: var(--fg-muted);
+}
+
+.usage-text {
+  color: var(--fg-muted);
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0 1.2rem 0.4rem;
+  padding: 0.5rem 0.8rem;
+  color: var(--fg);
+  background: color-mix(in srgb, var(--bad) 12%, var(--bg-raised));
+  border: 1px solid color-mix(in srgb, var(--bad) 50%, var(--line));
+  border-radius: var(--radius);
+  font-size: 0.84rem;
+}
+
+.banner code {
+  color: var(--bad);
+}
+
+.banner button {
+  margin-inline-start: auto;
+  padding: 0.2rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-sunk);
+  color: var(--fg);
+}

@@ -19,10 +19,13 @@ export type Transport = {
   send: (frame: string) => void;
   onFrame: (handle: (text: string) => void) => void;
   onLog: (handle: (text: string) => void) => void;
+  // 载体自己报的故障：帧发不出去了。协议帧里没有这一类，所以它从载体那一侧进来。
+  onFault?: (handle: (reason: string) => void) => void;
 };
 
 export type Client = {
-  call: (method: string, params: Record<string, unknown>) => Promise<any>;
+  // timeoutMs 只给那一个调用用：一轮模型跑几分钟是正常事，不能拿一个全局上限去砍它。
+  call: (method: string, params: Record<string, unknown>, timeoutMs?: number) => Promise<any>;
   reply: (id: string, result: unknown) => void;
   receive: (text: string) => { kind: string; message?: Frame };
   onNotification: (handle: (message: Frame) => void) => void;
@@ -32,7 +35,7 @@ export type Client = {
 };
 
 export function createClient(transport: Transport): Client {
-  const pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+  const pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer?: ReturnType<typeof setTimeout> }>();
   const notifications: Array<(message: Frame) => void> = [];
   const requests: Array<(message: Frame) => void> = [];
   let counter = 0;
@@ -46,6 +49,7 @@ export function createClient(transport: Transport): Client {
   function settle(id: string, message: Frame): void {
     const waiter = pending.get(id);
     if (waiter === undefined) return;
+    if (waiter.timer !== undefined) clearTimeout(waiter.timer);
     pending.delete(id);
     if (message.error !== undefined) {
       const error = new Error(message.error.message ?? message.error.code ?? 'failed');
@@ -82,11 +86,17 @@ export function createClient(transport: Transport): Client {
   transport.onFrame((text) => receive(text));
 
   return {
-    call(method, params) {
+    call(method, params, timeoutMs = 0) {
       counter += 1;
       const id = String(counter);
       return new Promise((resolve, reject) => {
-        pending.set(id, { resolve, reject });
+        const waiter: { resolve: (value: unknown) => void; reject: (error: Error) => void; timer?: ReturnType<typeof setTimeout> } = { resolve, reject };
+        if (timeoutMs > 0) {
+          waiter.timer = setTimeout(() => {
+            if (pending.delete(id)) reject(Object.assign(new Error('host_unanswered'), { code: 'host_unanswered' }));
+          }, timeoutMs);
+        }
+        pending.set(id, waiter);
         send({ id, method, params });
       });
     },

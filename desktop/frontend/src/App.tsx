@@ -2,22 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createClient, type Client, type Transport } from './protocol';
 import { RowView } from './components/RowView';
 import { SessionRail } from './components/SessionRail';
+import { UsageMeter } from './components/UsageMeter';
 import type { Verbosity } from './components/types';
 import { createSlotRegistry, SLOTS, type Panel } from './slots';
 import { metaRow, projectRecord, type Record_, type Row } from './rows';
-
-export type Status = {
-  sessionId: string;
-  running: boolean;
-  tools: string[];
-  // 模式名与判定档位是两样东西，字段也分开（D40：界面上 `mode` 这个词不该同时指两处）。
-  mode: string | null;
-  modeLayer: string | null;
-  pendingMode: string | null;
-  policy: string;
-  denials: { consecutive: number; total: number };
-  eventCount: number;
-};
+import type { Status } from './status';
 
 type Ask = { id: string; tool: string; detail: string; reason: string; backend: string };
 type Branch = { seq: number; id: string; task: string };
@@ -35,6 +24,7 @@ type PanelProps = {
   status: Status | null;
   sessionId: string | null;
   running: boolean;
+  seconds: number;
   waiting: number;
   counts: { sent: number; received: number };
   openSession: (id: string) => void;
@@ -128,17 +118,28 @@ const railPanels: Panel<PanelProps>[] = [
 const statusPanels: Panel<PanelProps>[] = [  {
     id: 'status.pills',
     title: '运行状态',
-    view: ({ status, running, waiting }) => <>
-      {running && <span className="pill" data-tone="running">正在跑</span>}
-      {waiting > 0 && <span className="pill" data-tone="running">在等人答复</span>}
+    view: ({ status, running, waiting, seconds }) => <>
+      {running && <span className="pill" data-tone="running">正在跑 {seconds} 秒</span>}
+      {waiting > 0 && <span className="pill" title="发出去还没回来的调用">未答的调用 {waiting}</span>}
       {status !== null && <>
-        <span className="pill">模式 {status.mode ?? '没装'}</span>
+        <span className="pill">模式 {status.mode ?? '没装'}{status.pendingMode === null || status.pendingMode === undefined ? '' : `→${status.pendingMode}`}</span>
         <span className="pill">档位 {status.policy}</span>
         <span className="pill">工具 {status.tools.length} 件</span>
         <span className="pill">记录 {status.eventCount} 条</span>
         {status.denials.total > 0 && <span className="pill">不允许 {status.denials.consecutive}/{status.denials.total}</span>}
       </>}
     </>,
+  },
+  {
+    id: 'status.usage',
+    title: '上下文用量',
+    view: ({ status }) => {
+      const usage = status?.usage;
+      // 窗口那一格没写时两条压缩触发都不启用，这一格也就没有压力线可画（D75）。
+      return usage === undefined || usage === null
+        ? <span className="pill" title="限额那一格没写，两条压缩触发都不启用">窗口没写</span>
+        : <UsageMeter usage={usage} />;
+    },
   },
 ];
 
@@ -228,6 +229,39 @@ export function App({ transport }: { transport: Transport }) {
   const [limit, setLimit] = useState(RENDER_WINDOW);
   // 那一次派发是什么时候交出去的：只为算用时，键是调用 id（D94）。
   const dispatchAt = useRef(new Map<string, number>());
+  const [seconds, setSeconds] = useState(0);
+  // 这一条连接还在不在：null 是在，其余是那一侧报回来的说法（D93 原样带出）。
+  const [link, setLink] = useState<string | null>(null);
+  const [modeDraft, setModeDraft] = useState('');
+
+  // 本轮计时：跑着的时候一秒走一格，本轮结束（完成或被打断）就归零。
+  useEffect(() => {
+    if (!running) {
+      setSeconds(0);
+      return;
+    }
+    const tick = setInterval(() => setSeconds((value) => value + 1), 1000);
+    return () => clearInterval(tick);
+  }, [running]);
+
+  // 每 3 秒问一次状态：那是协议里已有的一条只读调用，答不上来就是这一条连接不在了。
+  // 界面这一侧只能重问一次；后端进程起不来那一段是壳的事，协议表里没有那一条命令。
+  const beat = useCallback(async (timeoutMs = 5_000) => {
+    if (sessionId === null) return;
+    try {
+      await client.call('status.get', { sessionId }, timeoutMs);
+      setLink(null);
+    } catch (error) {
+      setLink(code(error));
+    }
+  }, [client, sessionId]);
+
+  useEffect(() => {
+    transport.onFault?.((reason) => setLink(reason));
+    if (sessionId === null) return;
+    const timer = setInterval(() => void beat(), 3_000);
+    return () => clearInterval(timer);
+  }, [beat, sessionId, transport]);
 
   const nearBottom = () => {
     const node = scroller.current;
@@ -382,6 +416,22 @@ export function App({ transport }: { transport: Transport }) {
     }
   }, [client, sessionId]);
 
+  // 切模式走协议里那一条 `mode.set`（D65）：坏清单在那一刻就报稳定码，不静默换成随包的那一份。
+  const setMode = useCallback(async () => {
+    const name = modeDraft.trim();
+    if (sessionId === null || name === '') return;
+    try {
+      const result = await client.call('mode.set', { sessionId, name }) as { mode: string; pending: string | null };
+      setRows((current) => [...current, metaRow('meta', result.pending === null
+        ? `模式 ${result.mode} 已生效`
+        : `模式 ${result.pending} 等本轮结束生效`)]);
+      setModeDraft('');
+    } catch (error) {
+      setRows((current) => [...current, metaRow('error', `模式换不了：${code(error)}`)]);
+    }
+    void refreshStatus(sessionId);
+  }, [client, modeDraft, refreshStatus, sessionId]);
+
   const answer = useCallback((decision: 'allow' | 'deny') => {
     if (ask === null) return;
     const asked = ask;
@@ -407,6 +457,7 @@ export function App({ transport }: { transport: Transport }) {
     status,
     sessionId,
     running,
+    seconds,
     waiting: client.waiting(),
     counts: client.counts(),
     openSession,
@@ -443,6 +494,21 @@ export function App({ transport }: { transport: Transport }) {
             <option value="full">完全展开</option>
           </select>
         </label>
+        <label className="mode-set">
+          <span>切模式</span>
+          <input
+            value={modeDraft}
+            placeholder={status?.mode ?? '模式名'}
+            aria-label="要换成的模式名"
+            onChange={(event) => setModeDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== 'Enter') return;
+              event.preventDefault();
+              void setMode();
+            }}
+          />
+          <button type="button" disabled={modeDraft.trim() === ''} onClick={() => void setMode()}>切换</button>
+        </label>
       </header>
 
       <div className="conversation" data-verbosity={verbosity} aria-live="polite" ref={scroller} onScroll={onScroll}>
@@ -468,6 +534,13 @@ export function App({ transport }: { transport: Transport }) {
           <button type="button" onClick={() => answer('deny')}>不允许</button>
         </div>
       </section>}
+
+      {link !== null && <div className="banner" role="alert">
+        <strong>这一条连接不在了</strong>
+        <code>{link}</code>
+        <span>界面只能重问一次；后端进程起不来那一段是壳的事。</span>
+        <button type="button" onClick={() => void beat(4_000)}>重试</button>
+      </div>}
 
       <footer className="composer">
         <textarea
