@@ -832,3 +832,55 @@ test('a pasted block lands in the draft without sending it', options, async () =
     instance.unmount();
   }
 }));
+
+// 取消这一轮之后队列是停着的：剩下的那几条不自己发，收回来或接着走都由人再说一次（方案 5.2）。
+test('cancelling a round leaves the queued sentences paused', options, async () => withTuiHost(async ({ client, sessionId, requests }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { setTimeout: delay } = await import('node:timers/promises');
+  const { App } = await import('../dist/tui/app.js');
+
+  const stdout = new PassThrough();
+  stdout.columns = 100;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+
+  const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const type = async (text) => { stdin.write(text); await delay(80); stdin.write('\r'); await delay(200); };
+  const lastFrame = () => painted.split('\x1B[?2026h').pop();
+  const started = () => requests.filter((request) => request.method === 'run.start').map((request) => request.params.input);
+  try {
+    await waitFor(() => painted.includes('要模型做的事'), { read: () => painted });
+    await type('第一条');
+    await waitFor(() => started().length === 1, { read: () => painted });
+    await type('第二条');
+    await type('第三条');
+    await waitFor(() => /排队 2 · 第三条/.test(lastFrame()), { read: lastFrame });
+
+    stdin.write('\x1b');
+    await waitFor(() => /队列停下/.test(painted), { read: () => painted });
+    // 被打断的那一轮收自己的尾：等这一句出来，而不是等一个固定的毫秒数。
+    await waitFor(() => /这一轮已被打断/.test(painted), { read: () => painted });
+    assert.deepEqual(started(), ['第一条'], '暂停中的队列在这一轮结束后不自己发');
+
+    await type('/queue drop 2');
+    await waitFor(() => /第 2 条收回草稿/.test(painted), { read: () => painted });
+    assert.match(lastFrame(), /排队 1 · 第二条/, '剩下那一条还排着');
+    assert.match(lastFrame(), /第三条/, '收回的那一条在草稿上，没丢');
+
+    // 收回来的一句照常再发一次：暂停只管排着的那几条。这一轮自己收尾时也不把暂停中的那条带出去。
+    stdin.write('\r');
+    await waitFor(() => started().includes('第三条'), { read: () => painted });
+    await waitFor(() => /本轮结束/.test(painted), { read: () => painted });
+    assert.deepEqual(started(), ['第一条', '第三条'], '暂停留着：这一轮结束不替人发还排着的那条');
+
+    await type('/queue continue');
+    await waitFor(() => started().length === 3, { within: 20_000, read: () => painted });
+    assert.deepEqual(started(), ['第一条', '第三条', '第二条'], '单独一次继续才把还排着的那条发出去');
+  } finally {
+    instance.unmount();
+  }
+}, { delayMs: 1_800 }));

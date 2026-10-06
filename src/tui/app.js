@@ -284,6 +284,22 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [dismissedAt, setDismissedAt] = useState(null);
   // 跑着的那一轮里回车排进来的那几条：只在界面一侧，不进记录也不进内核（D81 边界二）。
   const [queue, setQueue] = useState([]);
+  // 取消这一轮之后队列停下等人：剩余的那几条不自己发出去（方案 5.2）。
+  const [queuePaused, setQueuePaused] = useState(false);
+  // 排着的那几条与草稿都属于那一份会话：换看别的一份时把这一份收起来，换回来再摊开——
+  // 既不把没发的话送到另一份会话里，也不把它丢掉（方案 5.2「队列按会话隔离」）。
+  const inputState = useRef(new Map());
+  const viewedSession = useRef(sessionId);
+  useEffect(() => {
+    if (viewedSession.current === sessionId) return;
+    inputState.current.set(viewedSession.current, { queue, queuePaused, draft });
+    const saved = inputState.current.get(sessionId);
+    setQueue(saved?.queue ?? []);
+    setQueuePaused(saved?.queuePaused ?? false);
+    setDraft(saved?.draft ?? '');
+    setCaret((saved?.draft ?? '').length);
+    viewedSession.current = sessionId;
+  }, [draft, queue, queuePaused, sessionId]);
   const [sessionPicker, setSessionPicker] = useState(null);
   const [approvalExpanded, setApprovalExpanded] = useState(false);
   const [approvalCursor, setApprovalCursor] = useState(0);
@@ -390,7 +406,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       push({ kind: 'meta', text: `本轮结束：${result.iterations} 次迭代、${result.modelCalls} 次模型调用${extra}` });
     } catch (error) {
       const code = error.code ?? 'run_failed';
-      if (code === 'loop_cancelled') push({ kind: 'meta', text: '这一轮已被打断' });
+      // 打断落在还在跑的模型调用上时端点那一头交回 `provider_cancelled`，落在两组调用之间才是 `loop_cancelled`：
+      // 人要读的是同一句——这一轮是他停下来的（方案 5.2）。
+      if (code === 'loop_cancelled' || code === 'provider_cancelled') push({ kind: 'meta', text: '这一轮已被打断' });
       else push({ kind: 'error', text: `${code}：${error.detail ?? error.message ?? ''}` });
     } finally {
       setAsk(null);
@@ -608,6 +626,57 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       })();
       return;
     }
+    if (name === 'queue') {
+      // 队列是界面一侧那几行字：这一处只答「怎么走下去」与「收回到哪儿」，不动记录（D81 边界二、方案 5.2）。
+      const [action, ordinal] = argument.split(/\s+/);
+      if (action === undefined || action === '' || action === 'list') {
+        push({ kind: 'meta', text: queue.length === 0 ? '队列是空的'
+          : [
+            `排队 ${queue.length} 条（${queuePaused ? '暂停中：接着发用 /queue continue' : '本轮结束后按先后自动发出'}）：`,
+            ...queue.map((item, index) => `${index + 1} · ${queuedLine(item)}`),
+          ].join('\n') });
+        return;
+      }
+      if (action === 'pause' || action === 'continue') {
+        setQueuePaused(action === 'pause');
+        push({ kind: 'meta', text: action === 'pause'
+          ? `队列暂停：还有 ${queue.length} 条没发`
+          : queue.length === 0 ? '队列是空的，解开暂停不发任何东西'
+            : `队列接着走：${running ? '本轮结束后' : '现在'}发第 1 条，共 ${queue.length} 条` });
+        return;
+      }
+      // 丢出去的那一条不扔：它回到草稿，那才是人写东西的那一格（5.2「取消项仍能恢复文本」）。
+      // 走到这一条时那行命令自己已经从草稿清掉了，所以草稿是空的那一格，不会把两句拼在一起。
+      if (action === 'drop') {
+        const wanted = ordinal === undefined ? queue.length : Number(ordinal);
+        const at = wanted - 1;
+        if (!Number.isInteger(wanted) || at < 0 || at >= queue.length) {
+          push({ kind: 'error', text: `那一条不排在队列里：/queue drop <序号>，现在共 ${queue.length} 条` });
+          return;
+        }
+        const recovered = queue[at];
+        setQueue((current) => current.filter((_, index) => index !== at));
+        setDraft(recovered);
+        setCaret(recovered.length);
+        push({ kind: 'meta', text: `第 ${at + 1} 条收回草稿：${queuedLine(recovered)}` });
+        return;
+      }
+      if (action === 'clear') {
+        if (queue.length === 0) {
+          push({ kind: 'meta', text: '队列是空的' });
+          return;
+        }
+        const recovered = queue.join('\n\n');
+        setQueue([]);
+        setQueuePaused(false);
+        setDraft(recovered);
+        setCaret(recovered.length);
+        push({ kind: 'meta', text: `排队的那 ${queue.length} 条都收回草稿，中间空一行分开` });
+        return;
+      }
+      push({ kind: 'error', text: `/queue 不认 ${action}：可写 list、pause、continue、drop <序号>、clear` });
+      return;
+    }
     if (name === 'tools') {
       void (async () => {
         const current = await client.request('status.get', { sessionId }).catch(() => null);
@@ -760,7 +829,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     push({ kind: 'error', text: `没有这条命令：/${name}（/help 看列表）` });
-  }, [app, client, info, push, sessionId, status, stdout]);
+  }, [app, client, info, push, queue, queuePaused, sessionId, status, stdout]);
 
   const send = useCallback((text) => {
     const route = routeInput(text, running);
@@ -788,12 +857,22 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   }, [push, remember, runCommand, running, submit]);
 
   // 本轮结束后把队列里的第一条发出去：一次只发一条，剩下的接着排；被打断也算这一轮结束（D20）。
+  // 人按下取消之后队列是停着的：那时不自动发，剩下的每一句都要等一次显式的继续（方案 5.2）。
   useEffect(() => {
-    if (running || queue.length === 0) return;
+    if (running || queuePaused || queue.length === 0) return;
     const [next, ...rest] = queue;
     setQueue(rest);
     void submit(next);
-  }, [queue, running, submit]);
+  }, [queue, queuePaused, running, submit]);
+
+  // 打断这一轮这一处动作有两个入口（审批框上的 Esc 与平时的 Esc），停下队列这件事只在一份说明里做。
+  const cancelRound = useCallback(() => {
+    if (queue.length > 0) {
+      setQueuePaused(true);
+      push({ kind: 'meta', text: `队列停下：还有 ${queue.length} 条没发，接着发用 /queue continue` });
+    }
+    void client.request('run.cancel', { sessionId }).catch((error) => push({ kind: 'error', text: error.code ?? 'run_cancel_failed' }));
+  }, [client, push, queue.length, sessionId]);
 
   // 候选每次从当前草稿算出来：草稿改一个字清单就跟着变，不需要再维护一份状态（D81）。
   const templates = status?.templates ?? [];
@@ -832,7 +911,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     if (ask !== null && key.escape) {
-      void client.request('run.cancel', { sessionId }).catch((error) => push({ kind: 'error', text: error.code ?? 'run_cancel_failed' }));
+      cancelRound();
       return;
     }
     if (ask !== null && approvalExpanded) {
@@ -968,7 +1047,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       }
     }
     if (key.escape) {
-      if (running) void client.request('run.cancel', { sessionId }).catch((error) => push({ kind: 'error', text: error.code ?? 'run_cancel_failed' }));
+      if (running) cancelRound();
       return;
     }
     if (key.upArrow || key.downArrow) {
@@ -1058,7 +1137,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       sessionPicker.items.slice(Math.max(0, sessionPicker.at - viewHeight + 1), Math.max(0, sessionPicker.at - viewHeight + 1) + viewHeight).map((item) => h(Text, { key: item.id, inverse: item === sessionPicker.items[sessionPicker.at], wrap: 'truncate-end' }, sessionLines([item], sessionId)[0]))),
     queue.length === 0 ? null : h(Box, { flexDirection: 'column' },
       queue.map((item, index) => h(Text, { key: `${index}:${item}`, dimColor: true }, `排队 ${index + 1} · ${queuedLine(item)}`)),
-      h(Text, { dimColor: true }, '  这一轮结束后按先后发出；草稿空着时按退格收回最后一条')),
+      h(Text, { dimColor: true }, queuePaused
+        ? '  队列暂停中（这一轮是被你打断的）：接着发用 /queue continue，收回某一条用 /queue drop <序号>'
+        : '  这一轮结束后按先后发出；草稿空着时按退格收回最后一条')),
     search === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'magenta', paddingX: 1 },
       h(Text, null, `反查 ${search.query}`),
       searched.length === 0
