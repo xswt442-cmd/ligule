@@ -5,4 +5,5 @@ import type { Row } from '../rows';
 export type Verbosity = 'brief' | 'standard' | 'detailed' | 'full';
 
 // `flash` 只给查找落到的那一行：跳过来的一屏里几十行都在，不落个记号认不出停在哪一条（方案 6.2）。
-export type RowProps = { row: Row; verbosity: Verbosity; flash?: boolean };
+// `branch` 只给一轮完整结束那一行：按下的是「从这里分支」，交出去的是那一条事件的序号（方案 4.3）。
+export type RowProps = { row: Row; verbosity: Verbosity; flash?: boolean; branch?: (at: number) => void };

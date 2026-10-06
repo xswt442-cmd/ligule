@@ -37,6 +37,10 @@ export type Record_ = {
   };
   // 判定真正用的那一格（D77）：进记录、不进模型可见投影，界面读得到。
   verdict?: Verdict;
+  // 一轮正常完整结束留下的那一条事实（D68）：它是一处可选的分支点（方案 4.3）。
+  status?: string;
+  iterations?: number;
+  modelCalls?: number;
   // 崩溃之后由恢复路径补上的那一条（D72、D85）。
   recovery?: { assistantSeq?: number; safeToRedo?: boolean };
 };
@@ -48,7 +52,7 @@ export const shownIn = (verbosity: string, row: Row): boolean =>
 
 export type Row = {
   id: number;
-  kind: 'question' | 'answer' | 'reasoning' | 'call' | 'result' | 'refusal' | 'failure' | 'meta' | 'error';
+  kind: 'question' | 'answer' | 'reasoning' | 'call' | 'result' | 'refusal' | 'failure' | 'round' | 'meta' | 'error';
   text: string;
   // 这一行来自记录里哪一条事件（D73 那个稳定序号）。界面自己写的那几行没有它。
   seq?: number;
@@ -171,6 +175,12 @@ export function projectRecord(record: Record_, options: { startedAt?: number; no
 function projected(record: Record_, options: { startedAt?: number; now?: number }): Row[] {
   if (record.kind === 'user') return [{ id: nextId(), kind: 'question', text: record.raw ?? record.text ?? '' }];
   if (record.kind === 'reasoning') return [{ id: nextId(), kind: 'reasoning', text: record.text ?? '' }];
+  // 一轮正常完整结束留下一条事实，那也是一处可选的分支点（D68、方案 4.3）：它画出一行，「从这里分支」挂在那一行上。
+  if (record.kind === 'turn') {
+    return record.status === 'completed'
+      ? [{ id: nextId(), kind: 'round', text: `这一轮完整结束：${record.iterations ?? '?'} 次迭代 · ${record.modelCalls ?? '?'} 次模型调用` }]
+      : [];
+  }
   if (record.kind === 'assistant') {
     const rows: Row[] = record.text === '' || record.text === undefined
       ? []

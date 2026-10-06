@@ -39,6 +39,8 @@ type PanelProps = {
   openSession: (id: string) => void;
   // 查找命中说的是一份会话里的第几条：接上那一份，再跳到那一行（方案 4.2）。
   openHit: (hit: SearchHit) => void;
+  // 宿主多出一份记录时（分支之后）左侧栏重读一次的信号（方案 4.3）。
+  sessionsRevision: number;
   settings: Settings;
   patch: (part: Partial<Settings>) => void;
 };
@@ -125,7 +127,9 @@ const railPanels: Panel<PanelProps>[] = [
   {
     id: 'rail.sessions',
     title: '会话',
-    view: ({ client, sessionId, openSession, openHit }) => <SessionRail client={client} current={sessionId} onOpen={openSession} onOpenHit={openHit} />,
+    view: ({ client, sessionId, openSession, openHit, sessionsRevision }) => (
+      <SessionRail client={client} current={sessionId} onOpen={openSession} onOpenHit={openHit} revision={sessionsRevision} />
+    ),
   },
 ];
 
@@ -258,6 +262,8 @@ export function App({ transport }: { transport: Transport }) {
   // 画面要落到哪一条：查找的命中，或者上一次读到的那一个位置（方案 4.2、6.2）。
   const [wanted, setWanted] = useState<{ sessionId: string; seq: number; kind: string } | null>(null);
   const [stamp, setStamp] = useState(0);
+  // 分支写完一份新记录，左侧栏要重读一次才说得出它存在（方案 4.3）；这一枚编号就是那一次重读的信号。
+  const [sessionsRevision, setSessionsRevision] = useState(0);
   // 每一份会话读到哪儿了：键是会话编号，值是画面最上面那一行的事件序号。切回来时还在手里这一页之内才落回去。
   const anchors = useRef(new Map<string, number>());
   // 这一次读的是哪一份记录的答复：中途又切走时，旧的那一份答复不能落到新的画面上（方案 6.2）。
@@ -520,6 +526,20 @@ export function App({ transport }: { transport: Transport }) {
   // 查找命中那一条交给接会话那一个动作：读到位与落笔在同一批里，跳转那一处只认这一份会话的第几条（方案 4.2）。
   const openHit = useCallback((hit: SearchHit) => void openSession(hit.sessionId, hit), [openSession]);
 
+  // 两个分支入口共用这一处：不给 `at` 是整份复制——复制到的就是这一刻记录落到哪儿为止；
+  // 给一个轮次标记就是复制到那一轮为止。父那一份一个字不动（方案 4.3）。
+  const branchFrom = useCallback(async (at?: number) => {
+    if (sessionId === null) return;
+    try {
+      const branched = await client.call('session.branch', { sessionId, ...(at === undefined ? {} : { at }) }, 15_000) as { sessionId: string; at: number };
+      await openSession(branched.sessionId);
+      setSessionsRevision((current) => current + 1);
+      setRows((current) => [...current, metaRow('meta', `复制成一份新的会话 ${branched.sessionId.slice(0, 8)}：带到第 ${branched.at} 条为止，原来那一份不动。`)]);
+    } catch (error) {
+      setRows((current) => [...current, metaRow('error', `分支没成：${code(error)}`)]);
+    }
+  }, [client, openSession, sessionId]);
+
   // 重连（实现顺序第 65 步）：旧的那一具宿主不会再答复了，先把发出去的请求按一个稳定码收尾，
   // 把没答的询问作废，再让壳换一具进程，最后用 `session.open` 接回原来那一份会话。
   const reconnect = useCallback(async () => {
@@ -616,6 +636,7 @@ export function App({ transport }: { transport: Transport }) {
   const commands = useMemo<Command[]>(() => [
     { id: 'session.new', title: '新建会话', note: 'session.create', run: () => void newSession() },
     { id: 'session.read', title: '读回这一份记录', note: 'session.read', run: () => void readBack() },
+    { id: 'session.branch', title: '分支这一份会话', note: 'session.branch：复制到此刻记录落到哪儿为止', run: () => void branchFrom() },
     { id: 'run.cancel', title: '取消这一轮', note: 'run.cancel', run: () => void cancel() },
     { id: 'session.compact', title: '手动压缩上下文', note: 'session.compact', run: () => void compact() },
     { id: 'settings.open', title: '打开设置', note: '外观、模式、审批规则、连接', run: () => setSettingsOpen(true) },
@@ -631,7 +652,7 @@ export function App({ transport }: { transport: Transport }) {
         composerRef.current?.focus();
       },
     })),
-  ], [cancel, collapsed, copyLastAnswer, compact, newSession, patch, readBack, status]);
+  ], [branchFrom, cancel, collapsed, copyLastAnswer, compact, newSession, patch, readBack, status]);
 
   const answer = useCallback((decision: 'allow' | 'deny') => {
     const [head, ...rest] = asks;
@@ -741,6 +762,7 @@ export function App({ transport }: { transport: Transport }) {
     counts: client.counts(),
     openSession,
     openHit,
+    sessionsRevision,
     settings,
     patch,
   };
@@ -780,7 +802,12 @@ export function App({ transport }: { transport: Transport }) {
           firstItemIndex={firstIndex}
           initialTopMostItemIndex={jumpAt < 0 ? undefined : { index: jumpAt, align: 'start' }}
           computeItemKey={(_index, row) => row.id}
-          itemContent={(_index, row) => <RowView row={row} verbosity={verbosity} flash={row.seq !== undefined && row.seq === flash} />}
+          itemContent={(_index, row) => <RowView
+            row={row}
+            verbosity={verbosity}
+            flash={row.seq !== undefined && row.seq === flash}
+            branch={row.kind === 'round' ? (at) => void branchFrom(at) : undefined}
+          />}
           // 一次查找的跳转期间不跟末行：往前要页与展示档那一次收全都会让数据变长，
           // 而跟末行那一条会把刚落下的那一行重新推走（方案 6.2）。
           followOutput={(atBottom) => (atBottom && wanted === null && flash === null ? 'smooth' : false)}

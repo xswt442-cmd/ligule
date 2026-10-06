@@ -45,11 +45,13 @@ function clock(iso: string): string {
   return `${at.getMonth() + 1}-${pad(at.getDate())} ${pad(at.getHours())}:${pad(at.getMinutes())}`;
 }
 
-export function SessionRail({ client, current, onOpen, onOpenHit }: {
+export function SessionRail({ client, current, onOpen, onOpenHit, revision }: {
   client: Client;
   current: string | null;
   onOpen: (id: string) => void;
   onOpenHit: (hit: SearchHit) => void;
+  // 宿主那边多出一份记录时（分支之后），这一栏要重读一次才说得出新的那一份存在（方案 4.3）。
+  revision: number;
 }) {
   const [groups, setGroups] = useState<[string, SessionSummary[]][]>([]);
   const [note, setNote] = useState('');
@@ -98,7 +100,7 @@ export function SessionRail({ client, current, onOpen, onOpenHit }: {
 
   useEffect(() => {
     void load();
-  }, [load]);
+  }, [load, revision]);
 
   // 查的是磁盘上那几份记录，敲一个字扫一遍太贵：等手停下问一次。
   // E04 那一条随敲随筛，因为它筛的已经是读回手里的那一份列表；这一条要宿主开盘。

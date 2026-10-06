@@ -88,6 +88,8 @@ const eventsOf = (sessionId: string): Record<string, unknown>[] => [
   { seq: 15, kind: 'tool', tool: 'fetch', callId: 'call_fetch_1', args: { url: 'http://169.254.169.254/latest/meta-data/' },
     verdict: { decision: 'deny', capability: 'fetch', level: 'auto', rule: '元数据端点直接拒绝' },
     result: { failed: true, kind: 'refusal', code: 'fetch_metadata_blocked', reason: '那个地址落在链路本地与元数据端点那一类，直接拒（D58）。' } },
+  // 一轮正常完整结束留下一条事实：转录里那一行「从这里分支」的把手挂在它上面（D68、方案 4.3）。
+  { seq: 16, kind: 'turn', ignorable: true, status: 'completed', userSeq: 0, iterations: 4, modelCalls: 4 },
 ];
 
 const branchEvents: Record<string, unknown>[] = [
@@ -96,7 +98,23 @@ const branchEvents: Record<string, unknown>[] = [
 ];
 
 // 左侧栏那一份列表的夹具：三行是正常读出来的，第四行是读不出来的那一种（D93 要看得见码）。
-const sessions = [
+type Listed = {
+  id: string;
+  formatVersion: number;
+  projectRoot: string;
+  createdAt: string | null;
+  updatedAt: string;
+  events: number;
+  lastSeq: number;
+  mode: { name: string; layer: string; digest: string } | null;
+  name: string;
+  archived: boolean;
+  unanswered: number;
+  truncatedBytes: number;
+  error?: { code: string; detail: string };
+};
+
+const sessions: Listed[] = [
   { id: '7f3c9a21-4b7e-4f0a-9c1d-2a5e8b0c6d9f', formatVersion: 1, projectRoot: 'E:/notes', createdAt: '2026-10-05T09:02:11.000Z', updatedAt: '2026-10-05T11:41:07.000Z', events: 41, lastSeq: 40, mode: { name: 'full', layer: 'shipped', digest: '0f2b1c3d4e5f' }, name: '压缩读数那一轮', archived: false, unanswered: 0, truncatedBytes: 0 },
   { id: '2b8d55c0-11aa-4c3e-8d77-9f0a1b2c3d4e', formatVersion: 1, projectRoot: 'E:/notes', createdAt: '2026-10-05T07:20:00.000Z', updatedAt: '2026-10-05T08:55:31.000Z', events: 128, lastSeq: 127, mode: { name: 'minimal', layer: 'shipped', digest: 'aa11bb22cc33' }, name: '', archived: true, unanswered: 2, truncatedBytes: 0 },
   { id: 'c4e1f00d-7788-4a5b-9c0d-e1f2a3b4c5d6', formatVersion: 0, projectRoot: '', createdAt: null, updatedAt: '2026-10-04T13:07:44.000Z', events: 3, lastSeq: 2, mode: null, name: '', archived: false, unanswered: 0, truncatedBytes: 0 },
@@ -138,6 +156,9 @@ export function longEvent(seq: number): Record<string, unknown> {
   }
   return { seq, kind: 'assistant', text: `第 ${seq} 段回答，带一个 \`inline\` 与两行列表：\n\n- 一\n- 二` };
 }
+
+// 分支那一份复制到哪儿为止：读它的时候按这一格收住尾部，界面上看得见那一段前缀（方案 4.3）。
+const caps = new Map<string, number>();
 
 // 与宿主那一条同形：`fullResults` 交回时把溢出事件的内容换成整段，记录本身那份是截断的。
 function fillSpills(events: Record<string, unknown>[]): Record<string, unknown>[] {
@@ -218,6 +239,34 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
         if (found !== undefined && found.mode !== null) status = { ...status, mode: found.mode.name, modeLayer: found.mode.layer };
         return reply({ sessionId: params.sessionId });
       }
+      case 'session.branch': {
+        // 分支复制的是记录的前缀：整份复制带到此刻的末端，给了 `at` 就带到那一条轮次标记（方案 4.3）。
+        const parent = sessions.find((item) => item.id === params.sessionId);
+        if (parent === undefined) return fail('session_not_found', String(params.sessionId));
+        const at = typeof params.at === 'number' ? params.at : parent.lastSeq;
+        if (typeof params.at === 'number' && !eventsOf(parent.id)
+          .some((event) => event.seq === at && event.kind === 'turn' && event.status === 'completed')) {
+          return fail('session_branch_point_unavailable', `no completed turn at event ${at}`);
+        }
+        opened += 1;
+        const id = `branch-of-${opened}`;
+        caps.set(id, at);
+        sessions.push({
+          id,
+          formatVersion: parent.formatVersion,
+          projectRoot: parent.projectRoot,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          events: at + 1,
+          lastSeq: at,
+          mode: parent.mode,
+          name: '',
+          archived: false,
+          unanswered: 0,
+          truncatedBytes: 0,
+        });
+        return reply({ sessionId: id, parentSessionId: parent.id, at, events: at + 1 });
+      }
       case 'session.read': {
         const id = String(params.sessionId);
         const loaded = id.includes('.sub-')
@@ -228,7 +277,9 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
         // 分页那一格与宿主同一套说法：游标是这一页最早那一条事件的序号，`hasMore` 说前面还有没有更早的（方案 4.1）。
         const before = typeof params.before === 'number' ? params.before : undefined;
         const limit = typeof params.limit === 'number' ? params.limit : undefined;
-        const older = (before === undefined ? loaded : loaded.filter((event) => Number(event.seq) < before));
+        const cap = caps.get(id);
+        const older = (before === undefined ? loaded : loaded.filter((event) => Number(event.seq) < before))
+          .filter((event) => cap === undefined || Number(event.seq) <= cap);
         const page = limit === undefined ? older : older.slice(-limit);
         return reply({
           sessionId: id,
