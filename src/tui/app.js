@@ -529,16 +529,22 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           push({ kind: 'error', text: `接上了但记录读不回来：${read.code}` });
           return;
         }
+        // 换走的那一份在宿主里还占着一次装配与那一份记录锁：终端一次只看一份会话，看走的那一份收掉（D85）。
+        // 请求先发、答复后等：换会话 id 与换那一栏记录要在同一帧里落笔，`Static` 的 items 按索引决定补画哪几行，
+        // 中间插一次 await 就把它拆成两帧，少画的那一段正是接过来的那一份记录。收不掉也不是接不上的理由，只在 meta 那一行说一句。
+        const retiring = client.request('session.close', { sessionId }).catch((error) => error);
         setSessionId(picked.id);
         setSessionPicker(null);
         // 投影从那份记录重建，而不是接着画：换过来的这一份里发生过什么，只有记录说得出（I5）。
         setRows(read.events.flatMap((event) => projectRecord(event).map((row) => ({ ...row, seq: event.seq }))));
         setLive({ text: '', reasoning: '' });
         setDetail(null);
+        const retired = await retiring;
         const row = listed.sessions.find((item) => item.id === picked.id);
         push({
           kind: 'meta',
           text: `接上会话 ${picked.id.slice(0, 8)}：${read.events.length} 条记录画在下方`
+            + (retired.code === undefined ? '' : `；上一份没收掉：${retired.code}`)
             + (row === undefined || row.unanswered === 0 ? '' : `；崩溃留下的 ${row.unanswered} 次派发补成了未知结果`),
         });
       })();

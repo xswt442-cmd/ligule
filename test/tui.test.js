@@ -530,6 +530,8 @@ test('resuming a session repaints that record as the transcript', options, async
     assert.match(frame, /Local response: 那一份里问过的事/, '接上来的那一份记录整份重画在画面上');
     assert.doesNotMatch(frame, /当前这一份里答过的话/, '换过来之后画面上不再是上一份的投影');
     assert.match(frame, new RegExp(`会话 ${resumed.slice(0, 8)}`), '状态行说的是现在这一份会话');
+    assert.ok(requests.some((request) => request.method === 'session.close' && request.params.sessionId === sessionId),
+      '换走的那一份会话在宿主里收了，装配与记录锁交回去');
   } finally {
     instance.unmount();
   }
