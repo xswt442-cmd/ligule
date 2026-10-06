@@ -799,3 +799,36 @@ test('a failed editor run leaves no temporary directory behind', async () => {
   assert.deepEqual(empty, { code: 'tui_editor_command_invalid', detail: 'EDITOR must contain a program name' });
   assert.deepEqual(await leftovers(), before, '命令名为空时连目录都不建');
 });
+
+// 整段粘贴走的是另一条通道：那一段文本进草稿，里面的换行不发起一轮（方案 5.1）。
+test('a pasted block lands in the draft without sending it', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { App } = await import('../dist/tui/app.js');
+
+  const stdout = new PassThrough();
+  stdout.columns = 140;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+
+  const instance = render(createElement(App, { client, sessionId, info: { boundary: projectDirectory }, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  try {
+    const esc = String.fromCharCode(27);
+    const line = String.fromCharCode(10);
+    const before = painted.length;
+    // bracketed paste 的那一串：首尾是标记，中间带着换行。没有这一对标记时，那些换行就是一记记 Enter。
+    stdin.write(`${esc}[200~把这段读一遍${line}注意第三行${esc}[201~`);
+    const shown = () => plainOutput(painted.slice(before));
+    await waitFor(() => shown().includes('注意第三行'), { read: shown });
+    assert.equal(requests.filter((request) => request.method === 'run.start').length, 0, '粘进来的那一段不发起一轮');
+    stdin.write('\r');
+    await waitFor(() => requests.some((request) => request.method === 'run.start'), { read: shown });
+    const sent = requests.find((request) => request.method === 'run.start').params.input;
+    assert.equal(sent, `把这段读一遍${line}注意第三行`, '两条都在草稿里：按 Enter 发出去的就是这一整段');
+  } finally {
+    instance.unmount();
+  }
+}));

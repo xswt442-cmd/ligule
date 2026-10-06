@@ -9,7 +9,7 @@ import { SessionRail, type SearchHit } from './components/SessionRail';
 import { ModelPanel } from './components/ModelPanel';
 import { UsageMeter } from './components/UsageMeter';
 import { Palette, type Command } from './components/Palette';
-import { hotkeyOf } from './hotkeys';
+import { hotkeyOf, isComposing } from './hotkeys';
 import type { Verbosity } from './components/types';
 import { createSlotRegistry, SLOTS, type Panel } from './slots';
 import { capabilityOf, changeOf, metaRow, projectRecord, shownIn, type Record_, type Row } from './rows';
@@ -669,6 +669,8 @@ export function App({ transport }: { transport: Transport }) {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      // 输入法正在拼的那一段里，Esc 属于取消候选词，Enter 属于选中候选词：这一路都不能替人收面板或打断这一轮（方案 5.1、5.4）。
+      if (isComposing(event)) return;
       const hot = hotkeyOf(event);
       if (hot !== null) {
         event.preventDefault();
@@ -854,6 +856,8 @@ export function App({ transport }: { transport: Transport }) {
             setWalk(-1);
           }}
           onKeyDown={(event) => {
+            // 组合期间的 Enter 与上下键都是候选词那一路的按键，界面不接：不发这一句，也不翻本机历史（方案 5.1）。
+            if (isComposing(event.nativeEvent)) return;
             if (event.key === 'Enter' && !event.shiftKey) {
               event.preventDefault();
               void send();

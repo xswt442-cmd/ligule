@@ -3,7 +3,7 @@
 // 纯函数（editDraft、foldText、projectRecord、branchOf、detailTitle 与 commands.ts 里那几张表）都从这里交出去，
 // 检查在 test/tui.test.js，不靠真终端也能验；画面本身跑 `ligule tui` 看。
 import { createElement as h, Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Box, Static, Text, useApp, useInput } from 'ink';
+import { Box, Static, Text, useApp, useInput, usePaste } from 'ink';
 import { SESSION_ROWS, UI_COMMANDS, candidatesOf, findLines, findUiCommand, flowGroups, resolveSessionId, routeInput, sessionLines } from './commands.js';
 import { pushHistory, searchHistory } from './history.js';
 import { editInExternalEditor } from './editor.js';
@@ -1018,6 +1018,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     setDraft(edited.draft);
     setCaret(edited.caret);
   // 没有真终端时不开这一路：Ink 在拿不到 raw mode 的输入上是报错而不是降级（检查里就传 interactive: false）。
+  }, { isActive: interactive });
+
+  // 整段粘贴走 Ink 的另一条通道：这一条开着时它替终端打上 bracketed paste，粘进来的那一段是一整串文本，
+  // 不会被拆成一串按键——所以粘贴里的换行不会发一轮，审批框上的 `y` 也不会被粘贴按下去（方案 5.1、5.4）。
+  usePaste((text) => {
+    const inserted = editDraft(draft, caret, text.replace(/\r\n?/g, '\n'), {});
+    setDraft(inserted.draft);
+    setCaret(inserted.caret);
   }, { isActive: interactive });
 
   const head = info.model === undefined ? '' : `${info.model} · `;
