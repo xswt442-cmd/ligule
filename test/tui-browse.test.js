@@ -16,7 +16,7 @@ async function withApp(context, run) {
   stdout.on('data', (chunk) => { painted += chunk; });
   const frame = () => (painted.split('\x1b[?2026h').at(-1) ?? '').replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
   const output = () => painted.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
-  const instance = render(createElement(App, { client: context.client, sessionId: context.sessionId, stdout, info: { boundary: context.config.boundary } }), { stdout, stdin, patchConsole: false, exitOnCtrlC: false });
+  const instance = render(createElement(App, { client: context.client, sessionId: context.sessionId, stdout, info: { boundary: context.config.boundary } }), { stdout, stdin, patchConsole: false, exitOnCtrlC: false, interactive: true });
   const wait = (condition) => waitFor(condition, { read: frame });
   const type = async (text) => { stdin.write(text); await delay(50); stdin.write('\r'); };
   try {

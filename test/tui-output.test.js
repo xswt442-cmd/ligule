@@ -87,7 +87,7 @@ test('/export writes real host and subagent records as markdown', options, async
   const projectDirectory = config.boundary;
   await mkdir(exportDirectory, { recursive: true });
   const path = join(exportDirectory, 'run.md');
-  const instance = render(createElement(App, { client, sessionId, info: { boundary: projectDirectory }, interactive: true, stdout }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
+  const instance = render(createElement(App, { client, sessionId, info: { boundary: projectDirectory }, interactive: true, stdout }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   try {
     await client.request('mode.set', { sessionId, name: 'full' });
     let runFinished = false;

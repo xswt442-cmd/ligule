@@ -1,5 +1,7 @@
 // 终端界面的行、输入与折叠（D33 的第二种客户端）。ink 与 react 是可选依赖，装不上时这一份整份跳过，
 // 与那两条比较真实检索后端的检查同一个处理：不能假造一个后端来通过。
+// 每一具渲染都向 ink 传 `interactive: true`：环境里有 CI 那一个变量时 ink 自己走非交互那一条路，画面不再更新，
+// 而这几条检查要验的正是交互那一档。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { appendFile, cp, mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
@@ -129,7 +131,7 @@ test('the app paints the session line and the input hint onto the terminal', opt
     createElement(App, { client, sessionId, info: { model: 'test-model' }, interactive: false }),
     { stdout, stdin, exitOnCtrlC: false, patchConsole: false },
   );
-  // 非交互那一具渲染只在收掉时写一次，所以状态要先落定：等界面自己那一次 `status.get` 到宿主，再收。
+  // 这一具渲染走的就是非交互那一条路：收掉时才写一次，所以状态要先落定，等宿主收到界面自己发的那一次 `status.get`。
   await waitFor(() => requests.some((request) => request.method === 'status.get'), { read: () => painted });
   await delay(300);
   instance.unmount();
@@ -205,7 +207,7 @@ test('the approval box names the shell backend and its executable', options, asy
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
-  const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
+  const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   try {
     const run = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command: 'node --version | node --version' } }) });
     // 答复要在询问画出来之后给：那一句 'n' 早到一步就落进草稿，这一轮就没人结束了。
@@ -286,7 +288,7 @@ test('typing a template command completes it and expands through the host', opti
   stdout.on('data', (chunk) => { painted += chunk; });
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
 
-  const instance = render(createElement(App, { client, sessionId, info: { boundary: projectDirectory }, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
+  const instance = render(createElement(App, { client, sessionId, info: { boundary: projectDirectory }, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   try {
     stdin.write('/gi');
     await waitFor(() => /git:release:prepare/.test(plainOutput(painted)), { read: () => plainOutput(painted) });
@@ -372,7 +374,7 @@ test('an answer with markdown shapes paints a heading, a list and highlighted co
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
-  const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
+  const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   try {
     stdin.write('请原样保留这些内容：\n## 两步\n- 先看\n```js\nconst a = 1\n```\n退出码那行是 **0**');
     await delay(80);
@@ -414,7 +416,7 @@ test('input typed while a round runs queues up and flushes in order', options, a
   stdout.on('data', (chunk) => { painted += chunk; });
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
 
-  const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
+  const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   // 文本与回车分两次写：一段中文后面紧跟 `\r` 时被同一个 chunk 吃掉，真键盘上是两次按键。
   const type = async (text) => { stdin.write(text); await delay(80); stdin.write('\r'); await delay(200); };
   // 只看最后一帧：Ink 把每一帧续写在同一个流里，取尾巴会连上一帧的内容一起读。
@@ -506,7 +508,7 @@ test('resuming a session repaints that record as the transcript', options, async
   const resumedSession = await client.request('session.create', {});
   const resumed = resumedSession.sessionId;
   await client.request('run.start', { sessionId: resumed, input: '那一份里问过的事' });
-  const instance = render(createElement(App, { client, sessionId, info: { boundary: projectDirectory }, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
+  const instance = render(createElement(App, { client, sessionId, info: { boundary: projectDirectory }, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   try {
     await client.request('run.start', { sessionId, input: '当前这一份里问过的事' });
     await waitFor(() => painted.includes('当前这一份里问过的事'), { read: () => painted });
@@ -589,7 +591,7 @@ test('the arrow keys recall the last sentence and Ctrl+R searches the history', 
     interactive: true,
     stdout,
     history: { entries: ['改 note.txt 的第一行', '上一次会话里说过的话'], remember: async (text) => { remembered.push(text); } },
-  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
+  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   const lastFrame = () => plainOutput(painted.split('\x1B[?2026h').pop() ?? '');
   try {
     stdin.write('把这条记进历史');
@@ -635,7 +637,7 @@ test('Ctrl+G hands the draft to the editor and reads back what it wrote', option
   const editor = `${quoted(process.execPath)} ${quoted(editorFixture)} append-crlf - - -`;
   const instance = render(createElement(App, {
     client, sessionId, info: { editor }, interactive: true, stdout,
-  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
+  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   const lastFrame = () => painted.split('\x1B[?2026h').pop() ?? '';
   try {
     stdin.write('草稿里的一半');
@@ -665,7 +667,7 @@ test('Ctrl+G says the editor is not configured instead of guessing one', options
   stdout.on('data', (chunk) => { painted += chunk; });
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
 
-  const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true, stdout }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false });
+  const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true, stdout }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   try {
     stdin.write('\x07');
     await waitFor(() => /没有 EDITOR 这一格/.test(painted), { read: () => painted });
