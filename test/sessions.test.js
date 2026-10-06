@@ -114,6 +114,8 @@ test('a search says which record a hit is in and which event it is', async () =>
     for (const line of ['alpha 一', 'alpha 二', 'alpha 三', 'alpha 四', 'alpha 五']) await many.append({ kind: 'user', text: line });
     const older = createSessionLog({ directory, id: 'older', meta: () => ({ projectRoot: root }) });
     await older.append({ kind: 'user', text: '第一段\n   alpha   第二段' });
+    // 派生支线那一份不参与查：它接不回来，读它走主干那一侧（D74）。
+    await writeFile(join(directory, 'newer.sub-1.jsonl'), `${JSON.stringify({ seq: 0, kind: 'user', text: 'alpha 写在支线里' })}\n`);
     // 读不出来的那一份不参与查：列表那一行已经带着稳定码说清它读不懂，这里不报第二次，也不猜它写过什么。
     await writeFile(join(directory, 'broken.jsonl'), `${JSON.stringify({ seq: 0, kind: 'nonsense' })}\n`);
     await utimes(join(directory, 'many.jsonl'), new Date('2026-01-02'), new Date('2026-01-02'));

@@ -547,7 +547,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           .catch((error) => error);
         if (opened.code !== undefined) {
           push({ kind: 'error', text: `接不上：${opened.code}${opened.detail === undefined ? '' : ` · ${opened.detail}`}`
-            + (opened.code === 'resume_mode_changed' ? `；指名一份再来一次：/resume ${wanted} <模式名>` : '') });
+            + (opened.code === 'resume_mode_changed' ? `；指名一份再来一次：/resume ${wanted} <模式名>` : '')
+            + (opened.code === 'session_is_branch' ? '；那一次派生做过什么用 /sub <序号> 读' : '') });
           return;
         }
         const read = await client.request('session.read', { sessionId: picked.id }).catch((error) => error);

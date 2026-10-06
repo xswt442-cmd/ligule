@@ -616,6 +616,12 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
         case 'session.open': {
           // 指名了项目就取那一份项目环境：记录在哪个目录、工具在哪个目录读写，都由它说（方案 3.2）。
           const env = await environmentFor(message.params.projectRoot);
+          // 派生支线那一份记录说的是父侧那一次派生做过什么，它不是一份等着接回来的会话：把它当主干接开，
+          // 人就在一份没人负责的对账单上继续写（D71、D74）。读它仍然走 `session.read` 带那一条支线的编号。
+          const branch = /^(.+)\.sub-(\d+)$/.exec(sessionId);
+          if (branch !== null) {
+            throw new KernelError('session_is_branch', { detail: `${sessionId} is a derived branch of ${branch[1]}; open the parent, or read that record with session.read` });
+          }
           // 记录不在磁盘上就是没有这份会话，把它当新的一次空记录打开会让人以为恢复成功了。
           // 形状不对的 id 先报自己那个码，不混进「找不到这份会话」。
           const path = recordPathOf(sessionId, env);

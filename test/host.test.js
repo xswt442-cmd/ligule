@@ -554,6 +554,12 @@ test('a branch of an open session reads back through the same action', async () 
     }
     await assert.rejects(connection.request('session.open', { sessionId: '../outside' }), (error) => error.code === 'session_id_invalid');
     await assert.rejects(connection.request('session.open', { sessionId: 'nobody' }), (error) => error.code === 'session_not_found');
+    // 支线那份记录在磁盘上，但它不是一份等着接回来的会话：接开它等于在没人负责对的那一份上继续写（D71、D74）。
+    await assert.rejects(
+      connection.request('session.open', { sessionId: branchId }),
+      (error) => error.code === 'session_is_branch' && error.detail.includes(branchId.replace(/\.sub-\d+$/, '')),
+      '那一份派生支线的编号说出它是谁的支线',
+    );
 
     // 关掉这条连接上的会话之后支线也不再读得到：这一次动作不是记录目录的浏览器。
     await host.release();

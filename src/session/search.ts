@@ -81,6 +81,9 @@ export async function searchSessions(
   const hits: SearchHit[] = [];
   // 顺序跟着列表：最近动过的那一份先出现。命中按记录里的事件序号从小到大。
   for (const item of listed) {
+    // 派生支线那一份不参与查：它接不回来（`session.open` 报 `session_is_branch`），交一条跳不过去的命中不如不交。
+    // 那一段做过什么由主干那一侧读：`session.read` 带支线的编号，终端里是 `/sub <序号>`（D74）。
+    if (/\.sub-\d+$/.test(item.id)) continue;
     let events: SessionEvent[];
     try {
       // ponytail: 列表那一趟已经读过一遍文件，这里为正文再读一遍；上限是 U38 那条扫描代价，
