@@ -310,11 +310,14 @@ mod tests {
     #[test]
     fn a_second_host_replaces_the_first_one_and_the_first_stops_carrying_frames() {
         // 重连那一条路要成立：槽位换新的那一具之后，旧的那一份既不能再写帧，也不再往窗口里送（第 65 步）。
-        let script = "require('node:readline').createInterface({ input: process.stdin }).on('line', \
+        let script =
+            "require('node:readline').createInterface({ input: process.stdin }).on('line', \
                       (line) => { process.stdout.write('echo ' + line + '\\n'); });";
         let node = std::env::var("NODE").unwrap_or_else(|_| "node".to_string());
-        let (first, first_frames, _) = spawn_host(&node, &["-e", script]).expect("spawn the first child");
-        let (second, second_frames, _) = spawn_host(&node, &["-e", script]).expect("spawn the second child");
+        let (first, first_frames, _) =
+            spawn_host(&node, &["-e", script]).expect("spawn the first child");
+        let (second, second_frames, _) =
+            spawn_host(&node, &["-e", script]).expect("spawn the second child");
 
         let mut slot: Option<Host> = None;
         assert!(
@@ -325,9 +328,17 @@ mod tests {
         assert!(slot.is_some(), "one host is left in the slot");
         old.stop();
 
-        assert!(old.send("nope").is_err(), "a stopped host cannot carry a frame");
-        assert!(first_frames.recv_timeout(Duration::from_millis(300)).is_err());
-        slot.as_ref().expect("the live host").send("ping").expect("write a frame");
+        assert!(
+            old.send("nope").is_err(),
+            "a stopped host cannot carry a frame"
+        );
+        assert!(first_frames
+            .recv_timeout(Duration::from_millis(300))
+            .is_err());
+        slot.as_ref()
+            .expect("the live host")
+            .send("ping")
+            .expect("write a frame");
         assert_eq!(
             recv(&second_frames).expect("the new child answers"),
             "echo ping"

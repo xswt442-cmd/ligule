@@ -108,7 +108,12 @@ fn main() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![host_send, host_stop, host_restart, app_quit])
+        .invoke_handler(tauri::generate_handler![
+            host_send,
+            host_stop,
+            host_restart,
+            app_quit
+        ])
         .build(tauri::generate_context!())
         .expect("error while building the desktop shell")
         .run(|app_handle, event| {
