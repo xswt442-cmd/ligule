@@ -8,6 +8,16 @@ import { Icon } from './Icon';
 type Shown = {
   model?: { api?: string; baseURL?: string; model?: string; apiKeyEnv?: string };
   layers?: { layer: string; version: string; exists: boolean }[];
+  sources?: Record<string, string>;
+};
+
+// 来源那一格说的是装载那一次读到的四层（D8 的次序）：`flag` 与 `project` 都是只读的，改文件盖不过它们。
+const SOURCE_NAMES: Record<string, string> = {
+  flag: '命令行 `--config`（只读）',
+  local: '当前项目的本机覆盖',
+  project: '项目共享那一份（只读）',
+  user: '使用者默认',
+  none: '四层里都没写',
 };
 
 type Draft = { field: string; label: string; value: string; choices?: string[] };
@@ -70,15 +80,17 @@ export function ModelPanel({ client, sessionId }: { client: Client; sessionId: s
     setSaving(true);
     try {
       const answer = await client.call('config.set', { field: draft.field, value: draft.value, layer, version }, 30_000) as
-        { applies?: { sessionId: string; when: string }[]; failure?: { code: string }; created?: boolean };
+        { applies?: { sessionId: string; when: string }[]; failure?: { code: string }; created?: boolean; shadowed?: boolean };
       const now = (answer.applies ?? []).filter((item) => item.when === 'now').length;
       const waiting = (answer.applies ?? []).filter((item) => item.when === 'round').length;
-      // 保存与采用是两件事，这里分两句说（方案 7.2：文件已保存与该会话未生效不能并成一句成功）。
+      // 保存与采用是两件事，这里分两句说（方案 7.2：运行应用失败时分别显示「文件已保存」与「该会话未生效」）。
       const parts = [`文件已写进${nameOf(layer)}${answer.created === true ? '（这一层原先没有那一份文件）' : ''}`];
-      if (answer.failure !== undefined) parts.push(`但提供方重算失败（${answer.failure.code}）：会话还没用上它`);
+      if (answer.shadowed === true) parts.push(`但这一条由命令行那一层写着，改文件盖不过它：这一具宿主不会用上新值`);
+      else if (answer.failure !== undefined) parts.push(`但提供方重算失败（${answer.failure.code}）：会话还没用上它`);
       else if (waiting > 0) parts.push(`${waiting} 份会话等自己那一轮收尾之后才换`);
       if (now > 0) parts.push(`${now} 份空着的会话现在就换`);
-      if ((answer.applies ?? []).length === 0 && answer.failure === undefined) parts.push('这一具宿主里没有会话属于这一格项目环境，所以没有谁要换');
+      // 被只读那一层盖着时不再补「没有会话要换」：那一句的原因已经说过一遍了。
+      if ((answer.applies ?? []).length === 0 && answer.failure === undefined && answer.shadowed !== true) parts.push('这一具宿主里没有会话属于这一格项目环境，所以没有谁要换');
       setNote(parts.join('；'));
       setDraft(null);
       // 重读时把这一句留着：`load` 一开头会收掉上一回的说明，先写就等着被它擦掉（浏览器里量到过）。
@@ -114,6 +126,8 @@ export function ModelPanel({ client, sessionId }: { client: Client; sessionId: s
           <button type="button" disabled={saving} onClick={() => void save()}>保存</button>
           <button type="button" onClick={() => setDraft(null)}>不收这笔</button>
         </> : <span className="mono">{current ?? '读不出来或没写这一格'}</span>}</span>
+        <span className="row-note">来源 {SOURCE_NAMES[shown?.sources?.[item.field] ?? 'none']}
+          {shown?.sources?.[item.field] === 'flag' ? '，改文件盖不过它' : ''}</span>
         {!editing && <button type="button" onClick={() => { setDraft(item); setNote(''); }}>改</button>}
       </div>;
     })}
@@ -121,7 +135,7 @@ export function ModelPanel({ client, sessionId }: { client: Client; sessionId: s
       要把「{draft.label}」从「{valueOf(draft.field) ?? '（没写）'}」改成「{draft.value}」，写进{nameOf(layer)}。
     </p>}
     <p className="sheet-note">
-      这几格读的是这一具宿主启动时折好的那一份快照；一份值来自哪一层现在说不出来，宿主还没交回每格的出处。
+      这几格读的是这一具宿主启动时折好的那一份快照（D8）；每一条后面那一句说的是它由四层里哪一层写着，项目共享与命令行那两层只能读。
       {sessionId === null ? '现在没有接开的会话，所以说不出一份模型在用哪一份'
         : <>这一份会话现在用的是 <code>{inUse.model ?? '读不出来'}</code>
           {inUse.pendingModel === undefined || inUse.pendingModel === null ? '，没有等着换的那一份' : <>，等在它轮次边界上的是 <code>{inUse.pendingModel}</code></>}</>}。

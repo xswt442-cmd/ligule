@@ -127,19 +127,26 @@ const PROJECT_FILES = [
   'notes/readings-2.md', 'notes/readings-3.md', 'notes/读数 第三版.md', 'src/host/host.js', 'src/kernel/loop.js',
 ];
 
-// 假宿主手里那两层配置：值与那一份的版本。版本演成一个递增的串，够把「读回来时带着、写的时候交回去比对」
+// 假宿主手里那四层配置：值与那一份的版本。版本演成一个递增的串，够把「读回来时带着、写的时候交回来比对」
 // 这一条跑出来——版本不等时界面就能看到 `config_version_stale` 那一句长什么样。真宿主那一格是那份文件的内容哈希。
+// 只读的两层（项目共享与命令行 `--config`）也摆一份：来源与「改文件盖不过它」那两句话要有东西可指。
 const WRITABLE = ['model.api', 'model.baseURL', 'model.model', 'model.apiKeyEnv'];
-const layers = {
-  user: {
-    version: '1',
-    values: { api: 'chat-completions', baseURL: 'https://example.test/v1', model: 'fake-review-model', apiKeyEnv: 'LIGULE_FAKE_KEY' } as Record<string, string>,
-  },
-  projectLocal: { version: '', values: {} as Record<string, string> },
+type Cell = { version: string; values: Record<string, string> };
+const layers: Record<string, Cell> = {
+  user: { version: '1', values: { model: 'fake-review-model', apiKeyEnv: 'LIGULE_FAKE_KEY' } },
+  projectLocal: { version: '', values: {} },
+  project: { version: '', values: { baseURL: 'https://project.test/v1' } },
+  flag: { version: '', values: { api: 'chat-completions' } },
 };
-// 本机覆盖那一层压在使用者默认那一层之上：读出来的就是折好之后的那一份（D8 的次序）。
-const shownModel = () => ({ ...layers.user.values, ...layers.projectLocal.values });
-const layerList = () => Object.entries(layers).map(([layer, cell]) => ({ layer, version: cell.version, exists: cell.version !== '' }));
+// 从高优先级往下找那一条落在哪一层（D8 的次序）：界面上那一格「来源」读的就是这个。
+const SOURCES = ['flag', 'projectLocal', 'project', 'user'];
+const sourceOf = (field: string) => {
+  const key = field.split('.')[1];
+  return SOURCES.find((layer) => layers[layer].values[key] !== undefined) ?? 'none';
+};
+const shownValue = (key: string) => layers[SOURCES.find((layer) => layers[layer].values[key] !== undefined) ?? 'user'].values[key];
+const shownModel = () => Object.fromEntries(['api', 'baseURL', 'model', 'apiKeyEnv'].map((key) => [key, shownValue(key)]));
+const layerList = () => ['user', 'projectLocal'].map((layer) => ({ layer, version: layers[layer].version, exists: layers[layer].version !== '' }));
 
 let status = {
   sessionId: '',
@@ -350,28 +357,30 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
       }
       case 'config.get':
         // 假宿主也按白名单答：这几格是真的配置文件里会写的那种值，密钥本身从来不在里面（D13）。
-        return reply({ model: shownModel(), layers: layerList() });
+        return reply({ model: shownModel(), layers: layerList(), sources: Object.fromEntries(WRITABLE.map((field) => [field, sourceOf(field)])) });
       case 'config.set': {
-        // 演的是真宿主那四件事：字段与层的白名单、版本比对、值形状、写完谁什么时候用上（第 90、91 步）。
+        // 演的是真宿主那四件事：字段与层的白名单、版本比对、值形状、写完谁什么时候用上（第 90、91、93 步）。
         const field = String(params.field);
         const layer = String(params.layer);
-        const cell = layers[layer as keyof typeof layers];
-        if (cell === undefined) return fail('config_layer_unknown', `可写的层只有：${Object.keys(layers).join(', ')}`);
+        const cell = layer === 'user' || layer === 'projectLocal' ? layers[layer] : undefined;
+        if (cell === undefined) return fail('config_layer_unknown', `可写的层只有：user, projectLocal`);
         if (!WRITABLE.includes(field)) return fail('config_field_unknown', `可写的字段：${WRITABLE.join(', ')}`);
         if (params.version !== cell.version) return fail('config_version_stale', '那一层在这之后被改过，这一次没有写进去');
         const value = String(params.value);
         if (field === 'model.api' && value !== 'messages' && value !== 'chat-completions') return fail('config_field_value', '线上形状只有那两种');
         if (field === 'model.baseURL' && /\/\/[^/]*@/.test(value)) return fail('config_field_value', '地址里不带凭据');
         const created = cell.version === '';
+        // 来源是只读那一层的话，这一笔改文件盖不过它（D8）：文件还是写了，但谁都不采用。
+        const shadowed = sourceOf(field) === 'flag';
         cell.values[field.split('.')[1]] = value;
         cell.version = String(Number(cell.version) + 1);
-        // 空着的那一份现在就换，跑着的那一份等自己那一轮收尾——与宿主同一条判据。
         const running = status.running === true;
-        if (field === 'model.model') status = running ? { ...status, pendingModel: value } : { ...status, model: value, pendingModel: null };
+        if (field === 'model.model' && !shadowed) status = running ? { ...status, pendingModel: value } : { ...status, model: value, pendingModel: null };
         return reply({
           version: cell.version,
           created,
-          applies: [{ sessionId: status.sessionId || 'dev-session-1', when: running ? 'round' : 'now' }],
+          shadowed,
+          applies: shadowed ? [] : [{ sessionId: status.sessionId || 'dev-session-1', when: running ? 'round' : 'now' }],
           layers: layerList(),
         });
       }
