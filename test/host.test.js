@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -917,5 +917,41 @@ test('branching a session copies a prefix and leaves the parent record alone', a
     const after = await connection.request('session.read', { sessionId });
     assert.deepEqual(after.events, record.events, '父那一份一个字没动');
     await connection.request('session.close', { sessionId: opened.sessionId });
+  });
+});
+
+// `paths.list`（实现顺序第 85 步，方案 5.3）：候选由宿主列出来，界面不开盘。
+// 交回的是边界内的相对路径；`.git` 与 `node_modules` 不进候选，符号链接既不跟也不列，条数有上限。
+test('the host lists project files for an interface without exposing links or noise', async () => {
+  await withInProcessHost(async (connection, { directory }) => {
+    await mkdir(join(directory, 'notes'), { recursive: true });
+    await mkdir(join(directory, '.git'), { recursive: true });
+    await mkdir(join(directory, 'node_modules', 'pkg'), { recursive: true });
+    await writeFile(join(directory, 'notes', 'Readings Old.md'), 'x');
+    await writeFile(join(directory, 'notes', 'readings-3.md'), 'x');
+    await writeFile(join(directory, '.git', 'config'), 'x');
+    await writeFile(join(directory, 'node_modules', 'pkg', 'index.js'), 'x');
+    // Windows 上建符号链接要开发者模式：建不出来就跳过那一段断言，不把它算成通过。
+    let linked = false;
+    try {
+      await symlink(join(directory, 'notes', 'readings-3.md'), join(directory, 'notes', 'inside-link.md'));
+      linked = true;
+    } catch {
+      linked = false;
+    }
+
+    const listed = await connection.request('paths.list', { query: 'readings' });
+    assert.deepEqual(listed.paths, ['notes/Readings Old.md', 'notes/readings-3.md'], '大小写不分，交回的是斜杠书写的相对路径');
+    assert.equal(listed.projectRoot, directory, '交回的是列的哪一个项目');
+    assert.equal(listed.stopped, '', '这一份小目录翻得完，不说「可能没找全」');
+    assert.equal((await connection.request('paths.list', { query: 'config' })).paths.length, 0, '.git 里的东西不进候选');
+    assert.equal((await connection.request('paths.list', { query: 'index.js' })).paths.length, 0, 'node_modules 里的东西不进候选');
+    if (linked) assert.equal((await connection.request('paths.list', { query: 'inside-link' })).paths.length, 0,
+      '符号链接既不跟也不列：指向边界之内也一样不替人决定那一条路通向哪里');
+
+    const capped = await connection.request('paths.list', { query: '', limit: 1 });
+    assert.equal(capped.paths.length, 1, '一次最多交 `limit` 条');
+    await assert.rejects(connection.request('paths.list', { projectRoot: join(directory, 'nope') }),
+      (error) => error.code === 'host_project_root_unsupported', '没装载过的项目根不猜边界');
   });
 });

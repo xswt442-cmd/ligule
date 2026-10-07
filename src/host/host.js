@@ -15,6 +15,7 @@ import { createSessionLog } from '../session/session.js';
 import { chooseResumeMode, listSessions, sessionDirectory } from '../session/list.js';
 import { searchSessions } from '../session/search.js';
 import { branchSession } from '../session/branch.js';
+import { listProjectFiles } from './paths.js';
 import { createCompaction } from '../session/compaction.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
 import { foldLabel } from '../session/format.js';
@@ -691,6 +692,13 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           const root = open !== undefined ? undefined : projectRoot;
           const directory = open?.environment.directory ?? await scanDirectory(projectRoot);
           return { hits: await searchSessions(directory, { query: needle, sessionId: scoped, projectRoot: root, limit }) };
+        }
+        case 'paths.list': {
+          // 第九条只为界面多出来的方法：`@` 要的候选文件由宿主这一侧列出来，界面不开盘（方案 5.3、D81 边界一）。
+          // 要哪一个项目就装载哪一个：这一处不猜边界，装载不了那条路的项目根报 `host_project_root_unsupported`（方案 3.2）。
+          const { projectRoot, query, limit } = message.params;
+          const env = await environmentFor(projectRoot);
+          return await listProjectFiles(env.projectRoot, typeof query === 'string' ? query : '', limit);
         }
         case 'session.read': {
           // 交回的是记录本身：客户端晚到了也能把已经发生过的事画出来（I5）。

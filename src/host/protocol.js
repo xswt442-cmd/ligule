@@ -99,6 +99,19 @@ export const METHODS = Object.freeze({
       required: ['query'],
     },
   },
+  // 第九条只为界面多出来的方法：`@` 要的候选文件由宿主这一侧列，界面不开盘（方案 5.3、D81 边界一）。
+  // 列的是那一个项目根内的普通文件：符号链接不跟也不进候选，读不了的那一层不报错，只说这句可能没找全。
+  'paths.list': {
+    description: 'List file paths inside one project that contain the typed fragment, so an interface can offer @-references without walking the filesystem itself; results are capped and never include links',
+    parameters: {
+      type: 'object',
+      properties: {
+        projectRoot: { type: 'string', description: 'the project to list inside; absent means the one the Host was launched on' },
+        query: { type: 'string', description: 'the fragment typed after @; matched case-insensitively against the path, absent or blank lists the first entries' },
+        limit: { type: 'integer', description: 'stop after this many paths', minimum: 1, maximum: 50 },
+      },
+    },
+  },
   'session.read': {
     description: 'Read the events of an open session, oldest first, so a client that arrives late can show what happened; `limit` and `before` ask for one history page instead of the whole record',
     parameters: { type: 'object', properties: {
