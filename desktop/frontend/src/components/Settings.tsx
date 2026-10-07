@@ -1,6 +1,8 @@
 import { Fragment, useEffect, useState, type ReactNode } from 'react';
 import { Icon } from './Icon';
+import { ModelPanel } from './ModelPanel';
 import { CURRENT, KEYMAP, conflictsIn, formatKeys, setCapturing, specOf, type KeyAction, type KeyView } from '../hotkeys';
+import type { Client } from '../protocol';
 import type { Settings } from '../settings';
 import type { Status } from '../status';
 
@@ -21,6 +23,8 @@ const LAYERS: Record<string, string> = { shipped: '随包', user: '全局', proj
 type SectionId = (typeof SECTIONS)[number]['id'];
 
 export type SettingsProps = {
+  client: Client;
+  sessionId: string | null;
   status: Status | null;
   settings: Settings;
   patch: (part: Partial<Settings>) => void;
@@ -59,7 +63,7 @@ export function SettingsDialog(props: SettingsProps) {
         {section === 'appearance' && <Appearance settings={settings} patch={patch} />}
         {section === 'mode' && <Mode status={status} draft={modeDraft} onDraft={setModeDraft} onSet={props.onSetMode} />}
         {section === 'policy' && <Policy status={status} />}
-        {section === 'model' && <Model />}
+        {section === 'model' && <Model client={props.client} sessionId={props.sessionId} />}
         {section === 'connection' && <Connection link={props.link} counts={props.counts} waiting={props.waiting} status={status} onReconnect={props.onReconnect} />}
         {section === 'keys' && <Keys settings={settings} patch={patch} notice={props.keyNotice} />}
       </div>
@@ -212,11 +216,15 @@ function Policy({ status }: { status: Status | null }) {
   </>;
 }
 
-function Model() {
-  return <p className="sheet-note">
-    服务地址与模型名读的是配置文件那三层（D8）。读的一格是 `config.get`，交回宿主列出的那几格；写的一格是 `config.set`，只能改那四条模型字段，落进使用者默认或当前项目的本机覆盖两层之一（方案 7.2）。能改的那几样在「模型与端点」那一栏里，改完谁什么时候用上它由那一栏的同一处说出来（第 91 步）。
-    限额读的是配置，窗口那一格在「连接」这一栏，以及顶栏那一条上下文读数里。
-  </p>;
+function Model({ client, sessionId }: { client: Client; sessionId: string | null }) {
+  return <>
+    <p className="sheet-note">
+      服务地址与模型名读的是配置文件那三层（D8）。读的一格是 `config.get`，交回宿主列出的那几格；写的一格是 `config.set`，只能改那四条模型字段，落进使用者默认或当前项目的本机覆盖两层之一（方案 7.2）。改完谁什么时候用上它由下面那份读数自己说（第 91 步）。
+      限额读的是配置，「连接」那一栏与顶栏那一条上下文读数里各有一格。
+    </p>
+    {/* 四条可写的行就在这一栏里（第 92 步交的是这一份组件）：设置页里点进来看到的不是一句指路，是那四个「改」。 */}
+    <ModelPanel client={client} sessionId={sessionId} />
+  </>;
 }
 
 function Connection({ link, counts, waiting, status, onReconnect }: {

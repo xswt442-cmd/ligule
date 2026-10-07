@@ -1131,6 +1131,8 @@ export function App({ transport }: { transport: Transport }) {
     </div>}
     {paletteOpen && <Palette commands={commands} onClose={() => setPaletteOpen(false)} />}
     {settingsOpen && <SettingsDialog
+      client={client}
+      sessionId={sessionId}
       status={status}
       settings={settings}
       patch={patch}
