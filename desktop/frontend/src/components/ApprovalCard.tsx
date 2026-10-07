@@ -22,12 +22,14 @@ const TIER: Record<string, string> = {
   ask: '要有放行规则盖住每一个分段才不用问，否则每一件事都问到人',
 };
 
-export function ApprovalCard({ ask, queued, verbosity, policy, active, onAnswer, onOpen }: {
+export function ApprovalCard({ ask, queued, verbosity, policy, active, project, onAnswer, onOpen }: {
   ask: Ask;
   queued: number;
   verbosity: Verbosity;
   policy: string;
   active: string | null;
+  // 那一次调用要动的文件属于哪一项目录：答的是「在这一个项目里做这件事」，项目名要看得见（方案 5.4）。
+  project: string;
   onAnswer: (decision: 'allow' | 'deny') => void;
   onOpen: (sessionId: string) => void;
 }) {
@@ -37,6 +39,7 @@ export function ApprovalCard({ ask, queued, verbosity, policy, active, onAnswer,
     <div className="approval-head">
       <span className="approval-kind">{background ? '另一份会话要执行' : '要执行'}</span>
       <code className="row-tool">{ask.tool}</code>
+      {project !== '' && <span className="row-note">项目 {project}</span>}
       {ask.backend !== '' && <span className="row-note">{ask.backend}</span>}
       {queued > 0 && <span className="row-note">还有 {queued} 条在问</span>}
       {background && <button type="button" onClick={() => onOpen(ask.sessionId)}>看这一份会话 {ask.sessionId.slice(0, 8)}</button>}

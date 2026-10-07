@@ -1,7 +1,7 @@
 // 投影那一份取值规则的唯一检查：跑 `node dev/rows.check.mjs`，坏了就非零退出。
 // 它 import 的是同目录树上那份 `src/rows.ts`，Node 直接剥类型跑，不需要构建产物。
 import assert from 'node:assert/strict';
-import { capabilityOf, metaRow, projectRecord, shownIn } from '../src/rows.ts';
+import { capabilityOf, changeBody, changeOf, metaRow, projectRecord, shownIn } from '../src/rows.ts';
 
 const call = projectRecord({
   kind: 'assistant',
@@ -23,8 +23,17 @@ const write = projectRecord({
   result: { content: { text: '写了 3 行' } },
 })[0];
 assert.equal(write.kind, 'result');
-assert.equal(write.summary, 'notes/readings.md：4 行新内容');
+assert.equal(write.summary, 'notes/readings.md：整份写入 4 行');
 assert.deepEqual(write.diff, { removed: 0, added: 4 });
+// 审批那一格展开的两段内容都来自参数：整份写入没有一份读过的原文可画，编辑才有（方案 5.4）。
+const writeChange = changeOf('write', { path: 'notes/readings.md', content: 'a\nb' });
+assert.match(changeBody(writeChange, { content: 'a\nb' }), /^整份写入/);
+assert.ok(!changeBody(writeChange, { content: 'a\nb' }).includes('要去掉的那一段'), '没读过的原文不编造');
+assert.equal(
+  changeBody(changeOf('edit', { path: 'x.md', anchor: '旧的一行', replacement: '新的一行' }), {}),
+  'x.md：把定位到的那一段换成另一段\n要去掉的那一段:\n- 旧的一行\n要换上的那一段:\n+ 新的一行',
+);
+assert.equal(changeBody(changeOf('delete', { path: 'x.md' }), {}), '把 x.md 移进回收站（不是就地删掉：有回收站的地方进回收站，否则进边界内那一个回收目录）');
 assert.deepEqual(write.notes, ['判定没问就放行（auto）']);
 assert.equal(write.text, '写了 3 行');
 

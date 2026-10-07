@@ -13,7 +13,7 @@ import { KEYMAP, CURRENT, actionOf, formatKeys, isCapturing, isComposing, loadBi
 import { insertMention, mentionToken } from './mentions';
 import type { Verbosity } from './components/types';
 import { createSlotRegistry, SLOTS, type Panel } from './slots';
-import { capabilityOf, changeOf, metaRow, projectRecord, shownIn, type Record_, type Row } from './rows';
+import { capabilityOf, changeBody, changeOf, metaRow, projectRecord, shownIn, type Record_, type Row } from './rows';
 import type { Status } from './status';
 import { readSettings, writeSettings, type Settings } from './settings';
 
@@ -236,6 +236,9 @@ export function App({ transport }: { transport: Transport }) {
   const [live, setLive] = useState({ text: '', reasoning: '' });
   // 跑着的时候新到的询问排在后面：一次问一件事，答一件再画下一件。
   const [asks, setAsks] = useState<Ask[]>([]);
+  // 本轮收尾时要知道还剩几条没答：这一格由渲染之后同步，不在那一条收尾路径的依赖里读 `asks`（那会读到旧的一份）。
+  const asksLeft = useRef(0);
+  useEffect(() => { asksLeft.current = asks.length; }, [asks.length]);
   const [running, setRunning] = useState(false);
   const [status, setStatus] = useState<Status | null>(null);
   const [draft, setDraft] = useState('');
@@ -468,18 +471,15 @@ export function App({ transport }: { transport: Transport }) {
       const args = params.args ?? {};
       // 画出来的那一句说的是哪个对象：命令文本、路径、目标地址，或者那一项 MCP 能力名（D67）。
       const detail = String(params.command ?? args.path ?? args.url ?? capabilityOf(tool, args));
-      const content = tool === 'edit'
-        ? `原内容：\n${String(args.anchor ?? '')}\n\n新内容：\n${String(args.replacement ?? '')}`
-        : typeof args.content === 'string'
-          ? args.content
-          // 命令文本在 `command` 那一格，参数这一格是空的：空的就不给一个展开把手。
-          : Object.keys(args).length === 0 ? '' : JSON.stringify(args, null, 2);
+      // 展开那一段画的是实际动的是哪一件与两段内容；其余的调用把参数交出去，命令那一类参数是空的就不给把手（方案 5.4）。
+      const change = changeOf(tool, args);
+      const content = changeBody(change, args);
       setAsks((current) => [...current, {
         id: message.id ?? '',
         sessionId: asked,
         tool,
         detail,
-        change: changeOf(tool, args).summary,
+        change: change.summary,
         reason: params.reason ?? '',
         // 用哪一种语法判的、跑的是哪一个可执行文件：答的是这一条命令，看得见的该是这两样（D59）。
         backend: params.shell === undefined ? '' : `${params.shell} · ${params.executable ?? ''}`,
@@ -637,7 +637,10 @@ export function App({ transport }: { transport: Transport }) {
       setRows((current) => [...current, metaRow(cancelled ? 'meta' : 'error', cancelled ? '这一轮已被打断' : `这一轮停住：${stopped}`)]);
     } finally {
       setRunning(false);
-      // 这一轮收尾了：它名下那些没答的询问由宿主按「不允许」结了，界面上不再留着让人去答。
+      // 这一轮收尾了：它名下那些没答的询问由宿主按「不允许」结了，界面上不再留着让人去答——留着的原因要说一句（方案 5.4）。
+      if (asksLeft.current > 0) {
+        setRows((current) => [...current, metaRow('meta', `这一轮收尾时还有 ${asksLeft.current} 条没答的询问：它们按不允许结掉，不再摆在能答的那一栏里`)]);
+      }
       dropAsksOf(sessionId);
       void refreshStatus(sessionId);
     }
@@ -796,6 +799,8 @@ export function App({ transport }: { transport: Transport }) {
       setRows((current) => [...current, metaRow('meta', `${decision === 'allow' ? '已允许' : '已不允许'} ${head.tool}${head.detail === '' ? '' : `：${head.detail.slice(0, 60)}`}`)]);
     }
     client.reply(head.id, { decision });
+    // 答完把焦点从那一枚按钮上移开：焦点还停在按钮上时，下一次 Enter 会再按一次同一枚按钮——那是误批准的一条路（方案 5.4）。
+    (document.activeElement as HTMLElement | null)?.blur();
   }, [asks, client, sessionId]);
 
   useEffect(() => {
@@ -963,6 +968,8 @@ export function App({ transport }: { transport: Transport }) {
 
       {asks.length > 0 && <ApprovalCard
         ask={asks[0]}
+        // 问的是眼前这一份时项目名读记录头部那一格；另一份会话的项目名要左侧栏那一份列表，界面还没把它递过来。
+        project={asks[0].sessionId === sessionId ? projectRoot : ''}
         queued={asks.length - 1}
         verbosity={verbosity}
         policy={status?.policy ?? 'ask'}

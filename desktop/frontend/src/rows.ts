@@ -93,21 +93,51 @@ function payloadOf(result: Record_['result']): { text?: string; exitCode?: unkno
 
 // 写入类那一句改动摘要与加减行数说的是同一件事：路径、换掉多少行、换上多少行。
 // 参数里没有路径就不编造一个：摘要行宁可空着，也不画 `?.md` 那种形状。
-export function changeOf(tool: string, args: Record<string, unknown>): { summary: string; diff?: { added: number; removed: number } } {
+// `action`、`before`、`after` 是给审批那一格看的差异（方案 5.4）：说清实际动的是哪一件、去掉哪一段、换上哪一段。
+// 没读过的正文一概不画：删除只说移进回收站；整份写入不猜目标是新建还是覆盖，那一件由内核那条规则管。
+export type Change = { summary: string; diff?: { added: number; removed: number }; action: string; before: string; after: string };
+
+export function changeOf(tool: string, args: Record<string, unknown>): Change {
   const path = typeof args.path === 'string' ? args.path : '';
   const lines = (value: unknown) => String(value ?? '').split('\n').length;
-  if (path === '') return { summary: '' };
+  const none: Change = { summary: '', action: '', before: '', after: '' };
+  if (path === '') return none;
   if ((tool === 'write' || tool === 'create') && typeof args.content === 'string') {
     const added = lines(args.content);
-    return { summary: `${path}：${added} 行新内容`, diff: { added, removed: 0 } };
+    return {
+      summary: `${path}：整份写入 ${added} 行`,
+      diff: { added, removed: 0 },
+      action: '整份写入这一份内容（目标已经存在时这是覆盖：内核要求覆盖之前先把那一份读全）',
+      before: '',
+      after: args.content,
+    };
   }
   if (tool === 'edit' && typeof args.anchor === 'string') {
-    const added = lines(args.replacement ?? '');
-    const removed = lines(args.anchor);
-    return { summary: `${path}：换掉 ${removed} 行，换上 ${added} 行`, diff: { added, removed } };
+    const replacement = typeof args.replacement === 'string' ? args.replacement : '';
+    return {
+      summary: `${path}：换掉 ${lines(args.anchor)} 行，换上 ${lines(replacement)} 行`,
+      diff: { added: lines(replacement), removed: lines(args.anchor) },
+      action: `${path}：把定位到的那一段换成另一段`,
+      before: args.anchor,
+      after: replacement,
+    };
   }
-  if (tool === 'delete') return { summary: `把 ${path} 移进回收站` };
-  return { summary: '' };
+  if (tool === 'delete') {
+    return { summary: `把 ${path} 移进回收站`, action: `把 ${path} 移进回收站（不是就地删掉：有回收站的地方进回收站，否则进边界内那一个回收目录）`, before: '', after: '' };
+  }
+  return none;
+}
+
+// 审批那一格展开的正文：写入类那三件画成「去掉哪一段、换上哪一段」，段首带减号与加号（方案 5.4）。
+// 与终端那一侧同一条规则、两份写法；其余的调用还是把参数交出去，不编内容。
+export function changeBody(change: Change, args: Record<string, unknown>): string {
+  if (change.action === '') return typeof args.content === 'string' ? args.content : JSON.stringify(args, null, 2);
+  const mark = (text: string, sign: string): string[] =>
+    text === '' ? [`${sign}（那一段是空的）`] : text.split('\n').map((line) => `${sign} ${line}`);
+  return [change.action,
+    ...(change.before === '' ? [] : ['要去掉的那一段:', ...mark(change.before, '-')]),
+    ...(change.after === '' ? [] : ['要换上的那一段:', ...mark(change.after, '+')]),
+  ].join('\n');
 }
 
 // 一次调用对人说清它动的是哪个对象：命令文本、路径、地址、那一项 MCP 能力名，都没有就退回一行参数。
