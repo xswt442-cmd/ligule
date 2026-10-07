@@ -75,7 +75,7 @@ async function configSnapshot() {
   const user = { boundary: process.cwd(), ...layers.user };
   // 扩展的来源在同一次装载里算出来（D68）：项目层与本地层里写的路径不算，那一条挡住的判断在这里看得见。
   const extensions = await extensionSources({ ...layers, user }, { projectRoot: process.cwd() });
-  return { config: createConfig({ ...layers, user }), extensions };
+  return { config: createConfig({ ...layers, user }), extensions, layers };
 }
 
 // 模式名按 D44：`--mode` 覆盖一次运行，否则读配置里的 `mode`，两处都没写就是随包的 minimal。
@@ -358,8 +358,9 @@ if (missingFlagValue) {
 } else if (command === 'host') {
   // 桌面壳或者脚本起这一个进程，两端各读写一行 JSON（D30）：本机不开端口，审批与事件都走这条连接。
   try {
-    const { config, extensions } = await configSnapshot();
+    const { config, extensions, layers } = await configSnapshot();
     // 可写的那两层由启动这一侧算出路径：宿主只认「哪一层、哪一个白名单字段、读回的那一份版本」，说不出文件在哪（方案 7.2）。
+    // 装载那一次读到的四层对象一起交进去：来源那一格要说得出一条值现在由哪一层写着，`--config` 那一层是只读的（方案 7.1）。
     // 这一格跟着 `ligule host` 起：设置那一栏在桌面壳里，终端与 `ligule run` 都没有要写配置的入口。
     serveHost({
       config,
@@ -367,7 +368,7 @@ if (missingFlagValue) {
       policy: config.policy,
       extensions,
       loadEnvironment: projectEnvironment,
-      configStore: createConfigStore({ projectRoot: config.boundary }),
+      configStore: createConfigStore({ projectRoot: config.boundary, layers }),
       ...resolveMode(config),
     });
   } catch (error) {

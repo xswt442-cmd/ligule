@@ -853,6 +853,8 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           return {
             ...shownConfigOf(config),
             layers: configStore === undefined ? [] : await configStore.list(),
+            // 每一条现在由哪一层写着：`flag` 是命令行 `--config` 那一层，只读（方案 7.1 的来源那一格）。
+            sources: configStore === undefined ? {} : configStore.sources(),
           };
         }
         case 'config.set': {
@@ -860,10 +862,11 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           // 界面说不出文件路径，也说不出白名单之外的键（方案 7.2）。
           if (configStore === undefined) throw new KernelError('config_write_unsupported');
           const { field, value, layer, version } = message.params;
-          const { key, ...saved } = await configStore.write({ layer, field, value, version });
+          const { key, shadowed, ...saved } = await configStore.write({ layer, field, value, version });
           // 白名单里这四条都是提供方要读的那几格，所以写完就问一句：哪一份会话现在就换，哪一份等自己那一轮的边界。
-          const { applies, failure } = adoptGeneration(key, value);
-          return { ...saved, applies, ...(failure === undefined ? {} : { failure }), layers: await configStore.list() };
+          // 那一条值本来就是命令行 `--config` 写着的话，改文件盖不过它（D8 的次序、方案 7.1）：这一笔说成 shadowed，正在用的提供方不动。
+          const adoption = shadowed === true ? { applies: [] } : adoptGeneration(key, value);
+          return { ...saved, shadowed, ...adoption, layers: await configStore.list() };
         }
         case 'session.compact': {
           const state = open(sessionId);

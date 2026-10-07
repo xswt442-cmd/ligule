@@ -671,9 +671,10 @@ test('manual compaction returns a boundary the status line then reports', async 
 test('config.get shows the endpoint block and nothing else from the snapshot', async () => {
   await withInProcessHost(async (connection, { directory }) => {
     const shown = await connection.request('config.get', {});
-    assert.deepEqual(Object.keys(shown), ['model', 'layers'], '交出来的是那格端点与可写的那几层');
+    assert.deepEqual(Object.keys(shown).sort(), ['layers', 'model', 'sources'], '交出来的是那格端点、可写的那几层与每条的来源');
     assert.deepEqual(Object.keys(shown.model).sort(), ['api', 'baseURL', 'model'], '端点那三样；这份配置没写 apiKeyEnv，那一格就不出现');
     assert.deepEqual(shown.layers, [], '启动这一侧没给写入口时那一格是空的：这一具宿主不知道该往哪里写');
+    assert.deepEqual(shown.sources, {}, '没有那一格时来源也说不出来，不猜一条');
     await assert.rejects(
       () => connection.request('config.set', { field: 'model.model', value: 'x', layer: 'user', version: '' }),
       (error) => error.code === 'config_write_unsupported',
@@ -683,7 +684,7 @@ test('config.get shows the endpoint block and nothing else from the snapshot', a
     assert.ok(!frame.includes('auto'), '判定档位不在这一条里读，它走 status.get（D40）');
     // 这条路不收参数：多写的那一格不会被读，也换不来白名单之外的一格。
     // 边界不在参数校验上（子集校验放过模式里没声明的键），在结果由固定四格拼出来那一句上。
-    assert.deepEqual(Object.keys(await connection.request('config.get', { path: 'policy.mode' })), ['model', 'layers']);
+    assert.deepEqual(Object.keys(await connection.request('config.get', { path: 'policy.mode' })).sort(), ['layers', 'model', 'sources']);
   });
 });
 
@@ -696,7 +697,7 @@ test('config.set writes one whitelisted field and reports a concurrent edit inst
   await mkdir(dirname(userFile), { recursive: true });
   const original = '# 我的默认\n[model]\nmodel = "旧的"\napi = "messages" # 线上形状\n';
   await writeFile(userFile, original, 'utf8');
-  const store = createConfigStore({ projectRoot: root, userHome: home });
+  const store = createConfigStore({ projectRoot: root, userHome: home, layers: { user: { model: { api: 'messages', model: '旧的' } } } });
   try {
     await withInProcessHost(async (connection) => {
       const first = await connection.request('config.get', {});
@@ -705,6 +706,7 @@ test('config.set writes one whitelisted field and reports a concurrent edit inst
       assert.equal(user.exists, true);
       assert.equal(local.version, '', '那一份项目本机覆盖还没写过：版本是空串');
       assert.ok(!JSON.stringify(first.layers).includes(home), '帧里没有文件路径：那格只说层名与版本');
+      assert.deepEqual(first.sources, { 'model.api': 'user', 'model.model': 'user', 'model.baseURL': 'none', 'model.apiKeyEnv': 'none' }, '来源说的是装载那一次读到的四层，没写的那一格是 none');
 
       const written = await connection.request('config.set', { field: 'model.model', value: '新的', layer: 'user', version: user.version });
       assert.equal(written.created, false);
@@ -727,6 +729,8 @@ test('config.set writes one whitelisted field and reports a concurrent edit inst
       const fresh = await connection.request('config.set', { field: 'model.api', value: 'chat-completions', layer: 'projectLocal', version: '' });
       assert.equal(fresh.created, true);
       assert.ok((await readFile(join(root, '.ligule', 'config.local.toml'), 'utf8')).includes('api = "chat-completions"'));
+      assert.equal(fresh.shadowed, false, '命令行那一层没写这一条：这一笔改得动');
+      assert.equal((await connection.request('config.get', {})).sources['model.api'], 'local', '写完那一条之后，来源跟着变成本机覆盖那一层');
 
       // 白名单之外、层名不对、值的形状不对：三条都当场说出来，且都问不出一个路径。
       await assert.rejects(
@@ -743,6 +747,37 @@ test('config.set writes one whitelisted field and reports a concurrent edit inst
         (error) => error.code === 'config_field_value',
       );
       assert.equal(await readFile(userFile, 'utf8'), outside, '被拒的那几次都没碰那份文件');
+    }, undefined, { configStore: store });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// 命令行那一层写着的一条，改文件盖不过它（D8 的次序、方案 7.1 的「不能声称改低层文件即可生效」）：
+// 这一笔说成 shadowed，正在用的提供方与任何会话都不动。
+test('a field the command line wrote is reported as shadowed instead of adopted', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-shadowed-'));
+  const home = join(root, 'home');
+  const userFile = join(home, '.ligule', 'config.toml');
+  await mkdir(dirname(userFile), { recursive: true });
+  const original = '[model]\nmodel = "文件里写的那一份"\n';
+  await writeFile(userFile, original, 'utf8');
+  const store = createConfigStore({
+    projectRoot: root,
+    userHome: home,
+    layers: { user: { model: { model: '文件里写的那一份' } }, flag: { model: { model: '命令行写的那一份' } } },
+  });
+  try {
+    await withInProcessHost(async (connection) => {
+      const { sessionId } = await connection.request('session.create', {});
+      const shown = await connection.request('config.get', {});
+      assert.equal(shown.sources['model.model'], 'flag', '最高那一层写着的那一条读得出来');
+      const answer = await connection.request('config.set', { field: 'model.model', value: '改文件的那一份', layer: 'user', version: shown.layers[0].version });
+      assert.equal(answer.shadowed, true);
+      assert.deepEqual(answer.applies, [], '没有一份会话采用它');
+      assert.ok(answer.version, '文件那一笔还是写成了：说的是盖不过，不是没写');
+      assert.equal((await connection.request('status.get', { sessionId })).model, 'test-model', '正在用的那一份提供方不动');
+      assert.ok((await readFile(userFile, 'utf8')).includes('model = "改文件的那一份"'), '文件里是那一句新值');
     }, undefined, { configStore: store });
   } finally {
     await rm(root, { recursive: true, force: true });
