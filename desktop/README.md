@@ -46,7 +46,7 @@ cargo test
 
 前端构建检查运行 `cd desktop/frontend && npm run build`，包含 TypeScript 检查与 Vite 构建。窗口交互通过 `cd desktop && npm run dev` 启动真实桌面壳，检查后端进程、转录、审批与菜单；关闭壳后检查后端与正在执行的命令退出。
 
-不启动壳也有两条可跑的：`cd desktop/frontend && npm run check` 跑投影、协议与按键三份断言；`npm run dev` 起开发服务后打开 `dev/dev.html`，那一份界面跑的是仓库里的假宿主（`desktop/frontend/dev/`），流式、审批、稳定码、用量、会话列表、查找、分支与支线都有确定形状，地址后面接 `?rows=2000&bench=1` 量一轮长转录的读数。
+不启动壳也有两条可跑的：`cd desktop/frontend && npm run check` 跑投影、协议与按键三份断言；`npm run dev` 起开发服务后打开 `dev/dev.html`，那一份界面跑的是仓库里的假宿主（`desktop/frontend/dev/`），流式、审批、稳定码、用量、会话列表、查找、分支、支线与 `@` 的文件候选都有确定形状，地址后面接 `?rows=2000&bench=1` 量一轮长转录的读数。
 
 ## 随包带的运行时
 
