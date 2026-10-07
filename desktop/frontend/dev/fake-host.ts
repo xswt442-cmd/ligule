@@ -121,6 +121,12 @@ const sessions: Listed[] = [
   { id: '9a7b5c3d-0e1f-4a5b-8c9d-0e1f2a3b4c5d', formatVersion: 0, projectRoot: '', createdAt: null, updatedAt: '2026-10-04T09:12:03.000Z', events: 0, lastSeq: -1, mode: null, name: '', archived: false, unanswered: 0, truncatedBytes: 0, error: { code: 'session_event_unknown', detail: '事件种类没标 ignorable，读不懂就拒绝重建（D73）' } },
 ];
 
+// `paths.list` 演的那一份项目里的文件：斜杠书写、相对项目根，与宿主交回的是同一形状（方案 5.3）。
+const PROJECT_FILES = [
+  'AGENTS.md', 'README.md', 'modes/full.toml', 'modes/minimal.toml',
+  'notes/readings-2.md', 'notes/readings-3.md', 'src/host/host.js', 'src/kernel/loop.js',
+];
+
 let status = {
   sessionId: '',
   running: false,
@@ -338,6 +344,15 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
             status = { ...status, running: false };
             return fail('loop_cancelled', '这一轮被打断');
           });
+      case 'paths.list': {
+        // `@` 要的候选：真宿主列的是那一次装配的项目根，这里给一份固定清单演同一形状与同一格说法（方案 5.3）。
+        const needle = String(params.query ?? '').trim().toLowerCase();
+        const cap = typeof params.limit === 'number' ? params.limit : 20;
+        const paths = PROJECT_FILES
+          .filter((path) => needle === '' || path.toLowerCase().includes(needle))
+          .slice(0, cap);
+        return reply({ projectRoot: '/fixture/project', paths, visited: PROJECT_FILES.length, stopped: '' });
+      }
       case 'run.cancel': {
         // 真宿主在那一刻发的是信号：正在跑的模型调用被中止，`run.start` 那一条报 `loop_cancelled`（协议里写明）。
         const own = String(params.sessionId);
