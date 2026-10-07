@@ -26,7 +26,7 @@ try {
 
 const options = { skip: missing === '' ? false : missing };
 const editorFixture = fileURLToPath(new URL('./fixtures/editor.mjs', import.meta.url));
-const { foldText, editDraft, projectRecord, buildStatusLine, contextSegment, findRecord, branchOf, detailTitle, helpLines, routeInput, candidatesOf, displayWidth, flowGroups, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, findLines, mentionToken, insertMention, resolveSessionId, SESSION_ROWS } = rows;
+const { foldText, editDraft, projectRecord, buildStatusLine, contextSegment, findRecord, branchOf, detailTitle, helpLines, routeInput, candidatesOf, displayWidth, flowGroups, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, findLines, mentionToken, insertMention, resolveSessionId, SESSION_ROWS, KEYMAP, CURRENT, conflictsIn, formatKeys, hit, keyHint, specOf } = rows;
 const quoted = (value) => `"${value.replaceAll('"', '\\"')}"`;
 const plainOutput = (value) => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
 
@@ -1019,3 +1019,25 @@ test('an @ fragment asks the host for project files and Enter picks one', option
     instance.unmount();
   }
 }));
+
+test('the key table is the one place both the dispatch and the names on screen read', () => {
+  assert.equal(specOf('', { return: true }), 'enter');
+  assert.equal(specOf('', { return: true, shift: true }), 'shift+enter');
+  assert.equal(specOf('r', { ctrl: true }), 'ctrl+r');
+  assert.equal(specOf('Y', {}), 'y', '大写的 Y 与 y 是同一记键');
+  assert.equal(specOf('', { upArrow: true, shift: true }), 'shift+arrowup');
+  assert.equal(specOf('Control', {}), null, '光按住修饰键不是一记绑定');
+  assert.equal(hit('send', '', { return: true }), true);
+  assert.equal(hit('pick-path', '', { return: true }), true, 'Enter 在两个范围各有各的落：这一处只问那一个动作');
+  assert.equal(hit('send', '', { return: true, shift: true }), false, '带 Shift 的那一记不是发送');
+  assert.equal(formatKeys('pageup'), 'PageUp');
+  assert.equal(keyHint('list-up', 'list-down'), '↑/↓', '提示里那一串键名也从同一份表拼出来');
+  // 默认那一份表里同一个范围不撞：撞了就说明界面写着的那一记键与按下落的事对不上。
+  for (const view of [...new Set(Object.values(KEYMAP).map((binding) => binding.view))]) {
+    assert.deepEqual(conflictsIn(view, CURRENT), [], `${view} 里那几记键不撞`);
+  }
+  for (const [action, binding] of Object.entries(KEYMAP)) {
+    assert.ok(binding.label !== '' && binding.view !== '', `${action} 要说得出做什么与落在哪一个范围`);
+    assert.equal(CURRENT[action], binding.spec, `${action} 的默认键读得回来`);
+  }
+});

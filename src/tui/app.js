@@ -11,6 +11,7 @@ import { copyToClipboard, lastAnswer } from './clipboard.js';
 import { exportMarkdown, titleEscape, titleText, writeExport } from './output.js';
 import { markdownLines } from './markdown.js';
 import { selectedText, transcriptLines, viewportPosition, wrapLine } from './viewport.js';
+import { CURRENT, KEYMAP, formatKeys, hit, keyHint } from './keymap.js';
 import { displayWidth } from './commands.js';
 
 const SPINNER = ['⠋', '⠙', '', '⠸', '⠼', '⠴', '⠦', '', '⠇', '⠏'];
@@ -27,22 +28,14 @@ const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 // 那几张表与那几个纯函数交给检查里用（test/tui.test.js），界面自己只走这一处出口。
 export { SESSION_ROWS, UI_COMMANDS, candidatesOf, displayWidth, findLines, findUiCommand, flowGroups, insertMention, mentionToken, resolveSessionId, routeInput, sessionLines } from './commands.js';
+export { KEYMAP, CURRENT, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, specOf } from './keymap.js';
 export { markdownLines } from './markdown.js';
 
-// `/help` 画三组：界面命令、宿主交出来的提示模板、按键。前两组在这里只列名字与说明，展开与装载都不归界面。
-const KEYS = [
-  { key: 'Enter', action: '发送' },
-  { key: 'Shift+Enter / Ctrl+N', action: '换行' },
-  { key: 'Tab', action: '补全清单里选中的那一条' },
-  { key: '↑ ↓', action: '在清单里选，清单不在时翻输入历史' },
-  { key: 'Ctrl+R', action: '反查发过的那几句' },
-  { key: 'Ctrl+G', action: '用 VISUAL 或 EDITOR 编辑草稿' },
-  { key: 'Esc', action: '收起清单；跑着的时候打断这一轮' },
-  { key: 'Ctrl+O', action: '打开或收起完整历史' },
-  { key: 'PageUp/Down', action: '在历史浏览中分页，Home/End 到两端' },
-  { key: 'Shift+↑↓', action: '在历史浏览中选择文字，Ctrl+Y 复制' },
-  { key: 'Ctrl+C', action: '退出' },
-];
+// `/help` 里那一组按键读的是 `keymap.ts` 那一份表：画面说出的键、动作与按键落的事从同一处取（方案 6.1）。
+// 别名那几条不单列（`-alt`、`-shift` 结尾的那一些与另一记键落的是同一件事），一份清单不说两遍。
+const KEYS = Object.entries(KEYMAP)
+  .filter(([action]) => !/-alt$|-shift$/.test(action))
+  .map(([action, binding]) => ({ key: formatKeys(CURRENT[action]), action: `${binding.label}（${binding.view}）` }));
 
 // 草稿的编辑：左右移光标、Home/End 与 Ctrl+A/E 跳两端、Ctrl+W 删前一个词、Ctrl+U 清空、其余可打印字符插在光标处。
 export function editDraft(draft, caret, input, key) {
@@ -150,8 +143,8 @@ export function buildStatusLine({ head, sessionId, boundary, status, running, se
   if (context !== '') parts.push(context);
   parts.push(`tools:${status.tools.length}`);
   const tail = `记录 ${status.eventCount} 条`
-    + (running ? ` · ${Math.floor(seconds)} 秒，Esc 打断` : '')
-    + (expanded ? ' · 已展开（Ctrl+O 收起）' : '');
+    + (running ? ` · ${Math.floor(seconds)} 秒，${keyHint('interrupt')} 打断` : '')
+    + (expanded ? ` · 已展开（${keyHint('expand-or-history')} 收起）` : '');
   const line = (kept) => `${base} · ${kept.join('  ')} · ${tail}`;
   // 列数读不到时不裁：宁可让终端自己折行，也不要按一个猜的宽度丢东西。
   let shown = parts;
@@ -233,7 +226,7 @@ function Row({ row, expanded, columns }) {
     const folded = foldText(row.text, expanded, 1);
     return h(Fragment, null,
       h(Text, { dimColor: true, wrap: 'truncate-end' }, `· 推理 ${folded.shown}`),
-      folded.hidden > 0 ? h(Text, { dimColor: true }, `  …还有 ${folded.hidden} 字推理，Ctrl+O 展开`) : null);
+      folded.hidden > 0 ? h(Text, { dimColor: true }, `  …还有 ${folded.hidden} 字推理，${keyHint('expand-or-history')} 展开`) : null);
   }
   if (row.kind === 'answer') return h(MarkdownRows, { text: row.text, columns });
   if (row.kind === 'call') return h(Text, { color: 'yellow' }, `→ ${row.tool} ${foldText(row.text, expanded, 1).shown}`);
@@ -244,7 +237,7 @@ function Row({ row, expanded, columns }) {
     return h(Fragment, null,
       h(Text, { color: 'green' }, `✓ ${row.tool}${note === '' ? '' : `（${note}）`}`),
       folded.shown === '' ? null : h(Text, { dimColor: true, wrap: 'truncate-end' }, folded.shown),
-      folded.hidden > 0 ? h(Text, { dimColor: true }, `  …还有 ${folded.hidden} 字输出，Ctrl+O 展开`) : null);
+      folded.hidden > 0 ? h(Text, { dimColor: true }, `  …还有 ${folded.hidden} 字输出，${keyHint('expand-or-history')} 展开`) : null);
   }
   if (row.kind === 'refusal') return h(Text, { color: 'magenta' }, `✗ ${row.tool} 没让做（${row.code}）`);
   if (row.kind === 'failure') return h(Text, { color: 'red' }, `✗ ${row.tool} ${row.code ?? ''} ${row.text}`);
@@ -908,7 +901,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const send = useCallback((text) => {
     const route = routeInput(text, running);
     if (route.kind === 'blocked') {
-      push({ kind: 'meta', text: `这一轮跑着的时候 ${route.usage} 用不了；Esc 先打断这一轮` });
+      push({ kind: 'meta', text: `这一轮跑着的时候 ${route.usage} 用不了；${keyHint('interrupt')} 先打断这一轮` });
       return;
     }
     setDraft('');
@@ -963,11 +956,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const caretText = useMemo(() => [...GRAPHEMES.segment(draft.slice(caret))][0]?.segment ?? ' ', [draft, caret]);
 
   useInput((input, key) => {
-    if (key.ctrl && input === 'c') {
+    if (hit('quit', input, key)) {
       app.exit();
       return;
     }
-    if (key.ctrl && input === 'o') {
+    if (hit('expand-or-history', input, key)) {
       if (ask !== null) setApprovalExpanded((current) => !current);
       else {
         setSessionPicker(null);
@@ -984,23 +977,23 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       }
       return;
     }
-    if (ask !== null && key.escape) {
+    if (ask !== null && hit('approval-cancel', input, key)) {
       cancelRound();
       return;
     }
     if (ask !== null && approvalExpanded) {
-      const target = key.home ? 0 : key.end ? approvalLines.length - 1
-        : key.pageUp ? approvalView.cursor - approvalHeight : key.pageDown ? approvalView.cursor + approvalHeight
-          : key.upArrow ? approvalView.cursor - 1 : key.downArrow ? approvalView.cursor + 1 : null;
+      const target = hit('approval-top', input, key) ? 0 : hit('approval-bottom', input, key) ? approvalLines.length - 1
+        : hit('approval-page-up', input, key) ? approvalView.cursor - approvalHeight : hit('approval-page-down', input, key) ? approvalView.cursor + approvalHeight
+          : hit('approval-up', input, key) ? approvalView.cursor - 1 : hit('approval-down', input, key) ? approvalView.cursor + 1 : null;
       if (target !== null) { setApprovalCursor(target); return; }
     }
     if (ask !== null) {
-      if (input === 'y' || input === 'Y') {
+      if (hit('approve', input, key)) {
         const asked = ask;
         setAsk(null);
         push({ kind: 'meta', text: `已允许 ${asked.tool}` });
         client.reply(asked.id, { decision: 'allow' });
-      } else if (input === 'n' || input === 'N') {
+      } else if (hit('deny', input, key)) {
         const asked = ask;
         setAsk(null);
         push({ kind: 'meta', text: `已不允许 ${asked.tool}` });
@@ -1009,32 +1002,35 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     if (detail !== null && ask === null) {
-      if (key.escape) { setDetail(null); setExpanded(false); return; }
-      if (key.ctrl && input === 'y') {
+      if (hit('view-close', input, key)) { setDetail(null); setExpanded(false); return; }
+      if (hit('copy-selection', input, key)) {
         void copyToClipboard(selectedText(viewLines, view.cursor, detail.anchor ?? null)).then((done) => {
           if (done.code !== undefined) push({ kind: 'error', text: `复制失败：${done.code}` });
         });
         return;
       }
-      const target = key.home ? 0 : key.end ? viewLines.length - 1
-        : key.pageUp ? view.cursor - viewHeight : key.pageDown ? view.cursor + viewHeight
-          : key.upArrow ? view.cursor - 1 : key.downArrow ? view.cursor + 1 : null;
+      // 带着 Shift 的那两记先落进「扩选」那两条，移动本身跟着走：选中的起点就是那一次按下落下的位置。
+      const marked = hit('mark-up', input, key) || hit('mark-down', input, key);
+      const up = hit('view-up', input, key) || hit('mark-up', input, key);
+      const down = hit('view-down', input, key) || hit('mark-down', input, key);
+      const target = hit('view-top', input, key) ? 0 : hit('view-bottom', input, key) ? viewLines.length - 1
+        : hit('view-page-up', input, key) ? view.cursor - viewHeight : hit('view-page-down', input, key) ? view.cursor + viewHeight
+          : up ? view.cursor - 1 : down ? view.cursor + 1 : null;
       if (target !== null) {
         const moved = viewportPosition(target, viewLines.length, viewHeight, view.offset);
-        setDetail({ ...detail, ...moved, anchor: key.shift ? detail.anchor ?? view.cursor : null });
+        setDetail({ ...detail, ...moved, anchor: marked ? detail.anchor ?? view.cursor : null });
         return;
       }
       return;
     }
     if (sessionPicker !== null && ask === null) {
-      if (key.escape) { setSessionPicker(null); return; }
-      if (key.upArrow || key.downArrow || key.pageUp || key.pageDown || key.home || key.end) {
-        const step = key.pageUp ? -viewHeight : key.pageDown ? viewHeight : key.upArrow ? -1 : 1;
-        const at = key.home ? 0 : key.end ? sessionPicker.items.length - 1 : Math.max(0, Math.min(sessionPicker.at + step, sessionPicker.items.length - 1));
-        setSessionPicker({ ...sessionPicker, at });
-        return;
-      }
-      if (key.return && draft === '') {
+      if (hit('list-close', input, key)) { setSessionPicker(null); return; }
+      const step = hit('list-page-up', input, key) ? -viewHeight : hit('list-page-down', input, key) ? viewHeight
+        : hit('list-up', input, key) ? -1 : hit('list-down', input, key) ? 1 : null;
+      const at = hit('list-first', input, key) ? 0 : hit('list-last', input, key) ? sessionPicker.items.length - 1
+        : step === null ? null : Math.max(0, Math.min(sessionPicker.at + step, sessionPicker.items.length - 1));
+      if (at !== null) { setSessionPicker({ ...sessionPicker, at }); return; }
+      if (hit('list-open', input, key) && draft === '') {
         if (running) push({ kind: 'meta', text: '当前轮次结束后才能切换会话' });
         else runCommand('resume', sessionPicker.items[sessionPicker.at].id);
         return;
@@ -1043,7 +1039,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     }
     // Ctrl+G 把草稿交给外面那一份编辑器：这一段文本走一份临时文件，回来的是它写回的那一份。
     // 让出终端这件事归 Ink（raw mode 与重画都在它手里），否则编辑器与界面抢同一把输入。
-    if (key.ctrl && input === 'g') {
+    if (hit('editor', input, key)) {
       if (info.editor === undefined || info.editor === '') {
         push({ kind: 'error', text: '没有 EDITOR 这一格，界面不猜哪一个编辑器能用；设好它再来一次 Ctrl+G' });
         return;
@@ -1062,7 +1058,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       })();
       return;
     }
-    if (key.ctrl && input === 'r' && search === null) {
+    if (hit('search-open', input, key) && search === null) {
       // 起一次反查：查询串从空开始，接着打的每个字符都往它后面加。
       setSearch({ query: '', at: 0 });
       return;
@@ -1070,11 +1066,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     if (search !== null) {
       const found = searchHistory(entries, search.query);
       const cycle = (step) => setSearch(found.length === 0 ? search : { ...search, at: (search.at + step + found.length) % found.length });
-      if (key.escape) {
+      if (hit('search-close', input, key)) {
         setSearch(null);
         return;
       }
-      if (key.return) {
+      if (hit('search-pick', input, key)) {
         const picked = found[search.at];
         if (picked !== undefined) {
           setDraft(picked);
@@ -1083,15 +1079,15 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         setSearch(null);
         return;
       }
-      if (key.upArrow || (key.ctrl && input === 'r')) {
+      if (hit('search-up', input, key) || hit('search-cycle', input, key)) {
         cycle(1);
         return;
       }
-      if (key.downArrow) {
+      if (hit('search-down', input, key)) {
         cycle(-1);
         return;
       }
-      if (key.backspace || key.delete) {
+      if (hit('search-back', input, key) || hit('search-back-alt', input, key)) {
         // 查询串空着时再按退格就是退出反查，不是把空格当内容删。
         setSearch(search.query === '' ? null : { query: search.query.slice(0, -1), at: 0 });
         return;
@@ -1104,14 +1100,15 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     // 路径候选开着时这几记按键归清单：Enter 是选中那一条，不是发送（方案 5.3「选中候选不能触发发送」）。
     // 一条候选都没有时 Enter 照旧发这一句——那时清单上说的是「没有对得上的文件」，不该把发送挡住。
     if (mention !== null && ask === null && detail === null && sessionPicker === null && search === null) {
-      if (key.escape) {
+      if (hit('path-close', input, key)) {
         setHiddenMention(mention.text);
         setMention(null);
         return;
       }
+      const picking = hit('pick-path', input, key) || hit('pick-path-alt', input, key);
       // 那一次查询还没回来时 Enter 什么都不做：既不是选一条旧的候选，也不是把这一句发出去（方案 5.3）。
-      if (mention.stopped === 'pending' && (key.tab || key.return)) return;
-      if (mention.paths.length > 0 && (key.tab || key.return)) {
+      if (mention.stopped === 'pending' && picking) return;
+      if (mention.paths.length > 0 && picking) {
         const picked = mention.paths[Math.min(mention.chosen, mention.paths.length - 1)];
         const merged = insertMention(draft, caret, mention.start, picked);
         setDraft(merged.draft);
@@ -1120,14 +1117,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         setMention(null);
         return;
       }
-      if (mention.paths.length > 0 && (key.upArrow || key.downArrow)) {
-        const step = key.upArrow ? -1 : 1;
+      if (mention.paths.length > 0 && (hit('path-up', input, key) || hit('path-down', input, key))) {
+        const step = hit('path-up', input, key) ? -1 : 1;
         setMention({ ...mention, chosen: (mention.chosen + step + mention.paths.length) % mention.paths.length });
         return;
       }
     }
     if (picks.length > 0) {
-      if (key.tab) {
+      if (hit('complete', input, key)) {
         const picked = picks[chosen];
         // 带参数提示的那一条补完留一个空格，光标落在要写参数的地方；不带的补完就能直接发。
         const completed = `/${picked.name}${picked.hint === '' ? '' : ' '}`;
@@ -1136,27 +1133,29 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         setPick(0);
         return;
       }
-      if (key.upArrow || key.downArrow) {
-        setPick(key.upArrow ? (chosen === 0 ? picks.length - 1 : chosen - 1) : (chosen + 1) % picks.length);
+      if (hit('complete-up', input, key) || hit('complete-down', input, key)) {
+        setPick(hit('complete-up', input, key) ? (chosen === 0 ? picks.length - 1 : chosen - 1) : (chosen + 1) % picks.length);
         return;
       }
-      if (key.escape) {
+      if (hit('complete-close', input, key)) {
         setDismissedAt(draft);
         return;
       }
     }
-    if (key.escape) {
+    if (hit('interrupt', input, key)) {
       if (running) cancelRound();
       return;
     }
-    if (key.upArrow || key.downArrow) {
+    const up = hit('history-up', input, key) || hit('history-up-shift', input, key);
+    const down = hit('history-down', input, key) || hit('history-down-shift', input, key);
+    if (up || down) {
       if (draft.includes('\n')) {
         const start = draft.lastIndexOf('\n', Math.max(0, caret - 1)) + 1;
         const column = caret - start;
-        if (key.upArrow && start > 0) {
+        if (up && start > 0) {
           const previous = draft.lastIndexOf('\n', start - 2) + 1;
           setCaret(Math.min(previous + column, start - 1));
-        } else if (key.downArrow) {
+        } else if (down) {
           const next = draft.indexOf('\n', caret);
           if (next >= 0) {
             const end = draft.indexOf('\n', next + 1);
@@ -1166,15 +1165,15 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         return;
       }
       if (entries.length === 0) return;
-      if (historyAt === -1 && key.upArrow) setHistoryDraft(draft);
-      const next = key.upArrow ? Math.min(historyAt + 1, entries.length - 1) : Math.max(historyAt - 1, -1);
+      if (historyAt === -1 && up) setHistoryDraft(draft);
+      const next = up ? Math.min(historyAt + 1, entries.length - 1) : Math.max(historyAt - 1, -1);
       setHistoryAt(next);
       const recalled = next < 0 ? historyDraft : entries[next];
       setDraft(recalled);
       setCaret(recalled.length);
       return;
     }
-    if ((key.backspace || key.delete) && draft === '' && queue.length > 0) {
+    if ((hit('queue-recall', input, key) || hit('queue-recall-alt', input, key)) && draft === '' && queue.length > 0) {
       // 草稿已经空着时按退格，最后排进来的那一条收回草稿里：打错的那一句要能改，不必重新打一遍。
       setQueue((current) => current.slice(0, -1));
       const last = queue[queue.length - 1];
@@ -1182,8 +1181,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       setCaret(last.length);
       return;
     }
-    if (key.return || (key.ctrl && input === 'n')) {
-      if (key.shift || (key.ctrl && input === 'n')) {
+    if (hit('send', input, key) || hit('newline-alt', input, key)) {
+      if (hit('newline', input, key) || hit('newline-alt', input, key)) {
         const inserted = draft.slice(0, caret) + '\n' + draft.slice(caret);
         setDraft(inserted);
         setCaret(caret + 1);
@@ -1223,16 +1222,16 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       ask.reason === '' ? null : h(Text, { dimColor: true, wrap: 'truncate-end' }, ask.reason),
       approvalExpanded ? h(Fragment, null,
         ...approvalLines.slice(approvalView.offset, approvalView.offset + approvalHeight).map((line, index) => h(Text, { key: index, wrap: 'truncate-end' }, line)),
-        h(Text, { dimColor: true }, `改动第 ${approvalView.cursor + 1}/${approvalLines.length} 行 · PageUp/Down 查看 · Home/End 到两端`)) : null,
-      h(Text, { wrap: 'truncate-end' }, '按 y 允许一次，按 n 不允许 · Ctrl+O 查看改动 · Esc 打断')),
+        h(Text, { dimColor: true }, `改动第 ${approvalView.cursor + 1}/${approvalLines.length} 行 · ${keyHint('approval-page-up', 'approval-page-down')} 查看 · ${keyHint('approval-top', 'approval-bottom')} 到两端`)) : null,
+      h(Text, { wrap: 'truncate-end' }, `按 ${keyHint('approve')} 允许一次，按 ${keyHint('deny')} 不允许 · ${keyHint('expand-or-history')} 查看改动 · ${keyHint('approval-cancel')} 打断`)),
     detail === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'cyan', paddingX: 1 },
       h(Text, { dimColor: true, wrap: 'truncate-end' }, detail.kind === 'transcript' ? '会话完整历史' : detailTitle(detail)),
       viewLines.length === 0
         ? h(Text, { dimColor: true }, detail.loading ? '正在读取完整记录…' : '这一条没有可画的内容')
         : viewLines.slice(view.offset, view.offset + viewHeight).map((line, index) => h(Text, { key: view.offset + index, inverse: view.offset + index >= selection[0] && view.offset + index <= selection[1], wrap: 'truncate-end' }, line)),
-      h(Text, { dimColor: true, wrap: 'truncate-end' }, `第 ${view.cursor + 1}/${viewLines.length} 行 · PageUp/Down 分页 · Home/End 到两端 · Shift+↑↓ 选择 · Ctrl+Y 复制 · Esc 收起`)),
+      h(Text, { dimColor: true, wrap: 'truncate-end' }, `第 ${view.cursor + 1}/${viewLines.length} 行 · ${keyHint('view-page-up', 'view-page-down')} 分页 · ${keyHint('view-top', 'view-bottom')} 到两端 · ${keyHint('mark-up', 'mark-down')} 选择 · ${keyHint('copy-selection')} 复制 · ${keyHint('view-close')} 收起`)),
     sessionPicker === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', paddingX: 1 },
-      h(Text, { wrap: 'truncate-end' }, `历史会话 ${sessionPicker.items.length} 份 · ↑↓ 选择 · Enter 接上 · Esc 收起`),
+      h(Text, { wrap: 'truncate-end' }, `历史会话 ${sessionPicker.items.length} 份 · ${keyHint('list-up', 'list-down')} 选择 · ${keyHint('list-open')} 接上 · ${keyHint('list-close')} 收起`),
       sessionPicker.items.slice(Math.max(0, sessionPicker.at - viewHeight + 1), Math.max(0, sessionPicker.at - viewHeight + 1) + viewHeight).map((item) => h(Text, { key: item.id, inverse: item === sessionPicker.items[sessionPicker.at], wrap: 'truncate-end' }, sessionLines([item], sessionId)[0]))),
     queue.length === 0 ? null : h(Box, { flexDirection: 'column' },
       queue.map((item, index) => h(Text, { key: `${index}:${item}`, dimColor: true }, `排队 ${index + 1} · ${queuedLine(item)}`)),
@@ -1245,13 +1244,13 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         ? h(Text, { dimColor: true }, entries.length === 0 ? '还没有发过任何一句' : `没有哪一句含「${search.query}」`)
         : searched.map((entry, index) => h(Box, { key: `${index}:${entry}` },
             h(Text, { inverse: index === search.at }, ` ${queuedLine(entry, 60)}`))),
-      h(Text, { dimColor: true }, '  接着打字缩小 · Ctrl+R 或 ↑↓ 换一条 · Enter 填进草稿 · Esc 退出')),
+      h(Text, { dimColor: true }, `  接着打字缩小 · ${keyHint('search-cycle', 'search-up', 'search-down')} 换一条 · ${keyHint('search-pick')} 填进草稿 · ${keyHint('search-close')} 退出`)),
     picks.length === 0 ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'gray', paddingX: 1 },
       picks.slice(Math.max(0, chosen - CANDIDATE_ROWS + 1), Math.max(0, chosen - CANDIDATE_ROWS + 1) + CANDIDATE_ROWS).map((candidate) => h(Box, { key: `${candidate.source}:${candidate.name}` },
         h(Text, { inverse: candidate === picks[chosen] }, ` /${candidate.name}${candidate.hint === '' ? '' : ` ${candidate.hint}`}`),
         h(Text, { dimColor: true }, ` ${candidate.text}`))),
       picks.length > CANDIDATE_ROWS ? h(Text, { dimColor: true }, `  还有 ${picks.length - CANDIDATE_ROWS} 条，接着打字就缩小了`) : null,
-      h(Text, { dimColor: true }, ' Tab 补全 · ↑↓ 选 · Esc 收起')),
+      h(Text, { dimColor: true }, ` ${keyHint('complete')} 补全 · ${keyHint('complete-up', 'complete-down')} 选 · ${keyHint('complete-close')} 收起`)),
     mention === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'gray', paddingX: 1 },
       h(Text, { dimColor: true, wrap: 'truncate-end' }, ` 项目 ${info.boundary}`),
       mention.paths.length === 0
@@ -1267,11 +1266,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         ? h(Text, { dimColor: true }, '  只翻了前面那些文件，更深的没看到：把字写得更具体一些') : null,
       mention.paths.length > 0 && mention.stopped === 'unreadable'
         ? h(Text, { dimColor: true }, '  有一层目录读不了，这份清单不一定全') : null,
-      mention.paths.length === 0 ? null : h(Text, { dimColor: true }, ' Tab 或 Enter 选中 · ↑↓ 换一条 · Esc 收起')),
+      mention.paths.length === 0 ? null : h(Text, { dimColor: true }, ` ${keyHint('pick-path', 'pick-path-alt')} 选中 · ${keyHint('path-up', 'path-down')} 换一条 · ${keyHint('path-close')} 收起`)),
     h(Box, null,
       h(Text, { color: running ? 'yellow' : 'cyan' }, running ? `${SPINNER[tick % SPINNER.length]} ` : '› '),
       draft === '' && !running
-        ? h(Text, { dimColor: true }, '要模型做的事（Enter 发送，Shift+Enter 换行，打 / 看清单，打 @ 引用项目里的文件）')
+        ? h(Text, { dimColor: true }, `要模型做的事（${keyHint('send')} 发送，${keyHint('newline')} 换行，打 / 看清单，打 @ 引用项目里的文件）`)
         : h(Text, { wrap: 'wrap' },
           draft.slice(0, caret),
           h(Text, { inverse: true }, caretText),
