@@ -800,7 +800,9 @@ export function App({ transport }: { transport: Transport }) {
     }
     client.reply(head.id, { decision });
     // 答完把焦点从那一枚按钮上移开：焦点还停在按钮上时，下一次 Enter 会再按一次同一枚按钮——那是误批准的一条路（方案 5.4）。
+    // 移开之后交给输入坞：只用键盘的人答完接着说话，焦点丢给页面就要从页头重新 Tab 过去（第 94 步量到 42 次）。
     (document.activeElement as HTMLElement | null)?.blur();
+    composerRef.current?.focus();
   }, [asks, client, sessionId]);
 
   useEffect(() => {
