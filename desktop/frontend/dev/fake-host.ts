@@ -127,6 +127,20 @@ const PROJECT_FILES = [
   'notes/readings-2.md', 'notes/readings-3.md', 'notes/读数 第三版.md', 'src/host/host.js', 'src/kernel/loop.js',
 ];
 
+// 假宿主手里那两层配置：值与那一份的版本。版本演成一个递增的串，够把「读回来时带着、写的时候交回去比对」
+// 这一条跑出来——版本不等时界面就能看到 `config_version_stale` 那一句长什么样。真宿主那一格是那份文件的内容哈希。
+const WRITABLE = ['model.api', 'model.baseURL', 'model.model', 'model.apiKeyEnv'];
+const layers = {
+  user: {
+    version: '1',
+    values: { api: 'chat-completions', baseURL: 'https://example.test/v1', model: 'fake-review-model', apiKeyEnv: 'LIGULE_FAKE_KEY' } as Record<string, string>,
+  },
+  projectLocal: { version: '', values: {} as Record<string, string> },
+};
+// 本机覆盖那一层压在使用者默认那一层之上：读出来的就是折好之后的那一份（D8 的次序）。
+const shownModel = () => ({ ...layers.user.values, ...layers.projectLocal.values });
+const layerList = () => Object.entries(layers).map(([layer, cell]) => ({ layer, version: cell.version, exists: cell.version !== '' }));
+
 let status = {
   sessionId: '',
   running: false,
@@ -136,6 +150,9 @@ let status = {
   pendingMode: null,
   policy: 'auto',
   denials: { consecutive: 0, total: 3 },
+  // 这一份会话现在用的是哪一份模型，与等在它轮次边界上的那一份（第 91 步交回的两格）。
+  model: 'fake-review-model',
+  pendingModel: null as string | null,
   eventCount: 0,
   templates: [
     { command: 'git:release:prepare', description: '准备一次发布', hint: '<序号>' },
@@ -333,7 +350,31 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
       }
       case 'config.get':
         // 假宿主也按白名单答：这几格是真的配置文件里会写的那种值，密钥本身从来不在里面（D13）。
-        return reply({ model: { api: 'chat-completions', baseURL: 'https://example.test/v1', model: 'fake-review-model', apiKeyEnv: 'LIGULE_FAKE_KEY' } });
+        return reply({ model: shownModel(), layers: layerList() });
+      case 'config.set': {
+        // 演的是真宿主那四件事：字段与层的白名单、版本比对、值形状、写完谁什么时候用上（第 90、91 步）。
+        const field = String(params.field);
+        const layer = String(params.layer);
+        const cell = layers[layer as keyof typeof layers];
+        if (cell === undefined) return fail('config_layer_unknown', `可写的层只有：${Object.keys(layers).join(', ')}`);
+        if (!WRITABLE.includes(field)) return fail('config_field_unknown', `可写的字段：${WRITABLE.join(', ')}`);
+        if (params.version !== cell.version) return fail('config_version_stale', '那一层在这之后被改过，这一次没有写进去');
+        const value = String(params.value);
+        if (field === 'model.api' && value !== 'messages' && value !== 'chat-completions') return fail('config_field_value', '线上形状只有那两种');
+        if (field === 'model.baseURL' && /\/\/[^/]*@/.test(value)) return fail('config_field_value', '地址里不带凭据');
+        const created = cell.version === '';
+        cell.values[field.split('.')[1]] = value;
+        cell.version = String(Number(cell.version) + 1);
+        // 空着的那一份现在就换，跑着的那一份等自己那一轮收尾——与宿主同一条判据。
+        const running = status.running === true;
+        if (field === 'model.model') status = running ? { ...status, pendingModel: value } : { ...status, model: value, pendingModel: null };
+        return reply({
+          version: cell.version,
+          created,
+          applies: [{ sessionId: status.sessionId || 'dev-session-1', when: running ? 'round' : 'now' }],
+          layers: layerList(),
+        });
+      }
       case 'session.compact':
         status = { ...status, usage: { ...status.usage, estimated: 12_400 } };
         return reply({ sessionId: params.sessionId, fromSeq: 0, toSeq: 6, tokensBefore: 41_512, tokensAfter: 12_400 });

@@ -103,7 +103,7 @@ const menuPanels: Panel<PanelProps>[] = [
   {
     id: 'panel.model',
     title: '模型与端点',
-    view: ({ client }) => <ModelPanel client={client} />,
+    view: ({ client, sessionId }) => <ModelPanel client={client} sessionId={sessionId} />,
   },
 ];
 
@@ -113,7 +113,7 @@ const pendingPanels: Panel<PanelProps>[] = [
     id: 'panel.policy',
     title: '审批规则',
     pending: true,
-    view: () => <p className="stub">档位是整个运行一份，逐件收紧走配置里的规则表，那条已经定了（U41、U22）。这一格要放开关，得先有写配置的方法：协议里现在只有读配置的那一条（`config.get`）。</p>,
+    view: () => <p className="stub">档位是整个运行一份，逐件收紧走配置里的规则表，那条已经定了（U41、U22）。这一格还缺的是规则表那一批字段：那是一份表，写入侧现在认的形状只有一条一行的那种值。</p>,
   },
   {
     id: 'panel.windows',
