@@ -54,7 +54,8 @@ test('an approval exposes its entire change through pages and Escape cancels wit
     await type(JSON.stringify({ tool: 'create', args: { path: 'approval.md', content } }));
     await wait(() => frame().includes('要执行 create'));
     stdin.write('\x0f');
-    await wait(() => frame().includes('改动第 1/40 行'));
+    await wait(() => frame().includes('要换上的那一段:'));
+    await wait(() => /改动第 1\/\d+ 行/.test(frame()));
     stdin.write('\x1b[F');
     await wait(() => frame().includes('待审批内容 39'));
     stdin.write('\x1b');

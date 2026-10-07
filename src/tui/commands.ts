@@ -55,6 +55,40 @@ export function findUiCommand(name: string): UiCommand | undefined {
   return UI_COMMANDS.find((command) => command.name === name);
 }
 
+// 写入类那一句改动说的是同一件事的两头：动的是哪一个对象、要去掉哪一段、要换上哪一段（方案 5.4）。
+// 没读过的内容一律不编：删除那一条只说把哪一个对象移进回收站，正文一概不画；
+// 整份写入时目标在不在由内核那条规则管（覆盖之前要先读全），界面不替它断言那是新建还是覆盖。
+export type Change = { readonly summary: string; readonly action: string; readonly before: string; readonly after: string };
+
+export function describeChange(tool: string, args: Record<string, unknown>): Change {
+  const path = typeof args.path === 'string' ? args.path : '';
+  const count = (value: unknown) => String(value ?? '').split('\n').length;
+  const empty: Change = { summary: '', action: '', before: '', after: '' };
+  // 参数里没有路径就不编造一个对象：摘要行宁可空着，展开那一段照样把正文交出去（与桌面前端同一条规则）。
+  if (path === '') return empty;
+  if ((tool === 'write' || tool === 'create') && typeof args.content === 'string') {
+    return {
+      summary: `${path}：整份写入 ${count(args.content)} 行`,
+      action: '整份写入这一份内容（目标已经存在时这是覆盖：内核要求覆盖之前先把那一份读全）',
+      before: '',
+      after: args.content,
+    };
+  }
+  if (tool === 'edit' && typeof args.anchor === 'string') {
+    const replacement = typeof args.replacement === 'string' ? args.replacement : '';
+    return {
+      summary: `${path}：换掉 ${count(args.anchor)} 行，换上 ${count(replacement)} 行`,
+      action: `${path}：把定位到的那一段换成另一段`,
+      before: args.anchor,
+      after: replacement,
+    };
+  }
+  if (tool === 'delete') {
+    return { summary: `把 ${path} 移进回收站`, action: `把 ${path} 移进回收站（不是就地删掉：有回收站的地方进回收站，否则进边界内那一个回收目录）`, before: '', after: '' };
+  }
+  return empty;
+}
+
 export type InputRoute =
   | { readonly kind: 'command'; readonly name: string; readonly argument: string }
   | { readonly kind: 'run'; readonly text: string }

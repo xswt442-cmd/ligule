@@ -4,7 +4,7 @@
 // 检查在 test/tui.test.js，不靠真终端也能验；画面本身跑 `ligule tui` 看。
 import { createElement as h, Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Static, Text, useApp, useInput, usePaste } from 'ink';
-import { SESSION_ROWS, UI_COMMANDS, candidatesOf, findLines, findUiCommand, flowGroups, insertMention, mentionToken, resolveSessionId, routeInput, sessionLines } from './commands.js';
+import { SESSION_ROWS, UI_COMMANDS, candidatesOf, describeChange, findLines, findUiCommand, flowGroups, insertMention, mentionToken, resolveSessionId, routeInput, sessionLines } from './commands.js';
 import { pushHistory, searchHistory } from './history.js';
 import { editInExternalEditor } from './editor.js';
 import { copyToClipboard, lastAnswer } from './clipboard.js';
@@ -27,7 +27,7 @@ const NO_TOKEN = { start: -1, text: '' };
 const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 // 那几张表与那几个纯函数交给检查里用（test/tui.test.js），界面自己只走这一处出口。
-export { SESSION_ROWS, UI_COMMANDS, candidatesOf, displayWidth, findLines, findUiCommand, flowGroups, insertMention, mentionToken, resolveSessionId, routeInput, sessionLines } from './commands.js';
+export { SESSION_ROWS, UI_COMMANDS, candidatesOf, describeChange, displayWidth, findLines, findUiCommand, flowGroups, insertMention, mentionToken, resolveSessionId, routeInput, sessionLines } from './commands.js';
 export { KEYMAP, CURRENT, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec, specOf } from './keymap.js';
 export { markdownLines } from './markdown.js';
 
@@ -214,11 +214,19 @@ function MarkdownRows({ text, columns = 80 }) {
 
 // 审批问的是「要不要做这一件」，那一句改动得先看得见：写入类工具的参数里带着全文或那两段，界面上算个行数就够。
 export function changeSummary(tool, args) {
-  const lines = (value) => String(value ?? '').split('\n').length;
-  if ((tool === 'write' || tool === 'create') && typeof args?.content === 'string') return `${args.path ?? '?'}：${lines(args.content)} 行新内容`;
-  if (tool === 'edit' && typeof args?.anchor === 'string') return `${args.path ?? '?'}：换掉 ${lines(args.anchor)} 行，换上 ${lines(args.replacement ?? '')} 行`;
-  if (tool === 'delete') return `把 ${args.path ?? '?'} 移进回收站`;
-  return '';
+  return describeChange(tool, args).summary;
+}
+
+// 审批框展开的那一段：写入类那三件说清实际动的是哪一件、要去掉哪一段、要换上哪一段（方案 5.4）。
+// 两段内容都带行首的减号与加号，读的人不必自己对照；没读过的正文不画，删除那一条只说移进回收站。
+function approvalBody(tool, args) {
+  const change = describeChange(tool, args);
+  if (change.action === '') return typeof args.content === 'string' ? args.content : JSON.stringify(args, null, 2);
+  const marked = (text, sign) => (text === '' ? [`${sign}（那一段是空的）`] : text.split('\n').map((line) => `${sign} ${line}`));
+  return [change.action,
+    ...(change.before === '' ? [] : ['要去掉的那一段:', ...marked(change.before, '-')]),
+    ...(change.after === '' ? [] : ['要换上的那一段:', ...marked(change.after, '+')]),
+  ].join('\n');
 }
 
 function Row({ row, expanded, columns }) {
@@ -290,7 +298,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [hiddenMention, setHiddenMention] = useState('');
   const mentionWanted = useRef(NO_TOKEN);
   const mentionAsked = useRef(NO_TOKEN);
-  const push = useCallback((...added) => setRows((current) => [...current, ...added]), []);
+  // 退出之后流已经关了：那时候再落一行会让 Ink 往关掉的输出上写，报出来的是 `write after end`，
+  // 而不是那一句真正想说的话。这一格只用来让迟到的答复与状态刷新不再往画面上写。
+  const alive = useRef(true);
+  useEffect(() => () => { alive.current = false; }, []);
+  const push = useCallback((...added) => {
+    if (!alive.current) return;
+    setRows((current) => [...current, ...added]);
+  }, []);
   // 个人键位那一份覆盖读自本机的另一份文件，写也写回那里：不进记录、不进模型上下文、不进项目的业务配置（方案 6.1、D81 边界二）。
   const [keyOverrides, setKeyOverrides] = useState({});
   useEffect(() => {
@@ -389,6 +404,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [approvalCursor, setApprovalCursor] = useState(0);
 
   const refreshStatus = useCallback(async () => {
+    // 界面已经收掉了：这一处不去敲那条已经关掉的连接，免得一次迟到的收尾变成一条没人接的错误。
+    if (!alive.current) return;
     try {
       const current = await client.request('status.get', { sessionId });
       if (activeSession.current === sessionId) setStatus(current);
@@ -441,9 +458,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         detail: shown === '' ? JSON.stringify(args) : String(shown),
         change: changeSummary(message.params.tool, args),
         reason: message.params.reason ?? '',
-        content: message.params.tool === 'edit'
-          ? `原内容：\n${args.anchor ?? ''}\n\n新内容：\n${args.replacement ?? ''}`
-          : typeof args.content === 'string' ? args.content : JSON.stringify(args, null, 2),
+        content: approvalBody(message.params.tool, args),
         // 用哪一种语法判的、跑的是哪一个可执行文件：答的是这一条命令，看得见的该是这两样（D59）。
         backend: message.params.shell === undefined ? '' : `${message.params.shell} · ${message.params.executable ?? ''}`,
       });
