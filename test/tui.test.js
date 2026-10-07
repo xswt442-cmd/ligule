@@ -26,7 +26,7 @@ try {
 
 const options = { skip: missing === '' ? false : missing };
 const editorFixture = fileURLToPath(new URL('./fixtures/editor.mjs', import.meta.url));
-const { foldText, editDraft, projectRecord, buildStatusLine, contextSegment, findRecord, branchOf, detailTitle, helpLines, routeInput, candidatesOf, displayWidth, flowGroups, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, findLines, resolveSessionId, SESSION_ROWS } = rows;
+const { foldText, editDraft, projectRecord, buildStatusLine, contextSegment, findRecord, branchOf, detailTitle, helpLines, routeInput, candidatesOf, displayWidth, flowGroups, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, findLines, mentionToken, insertMention, resolveSessionId, SESSION_ROWS } = rows;
 const quoted = (value) => `"${value.replaceAll('"', '\\"')}"`;
 const plainOutput = (value) => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
 
@@ -946,6 +946,65 @@ test('a reopened session takes back its own draft and a paused queue', options, 
     await waitFor(() => written.length > 0, { read: () => JSON.stringify(written) });
     assert.deepEqual(written.at(-1), { projectRoot: projectDirectory, sessionId, draft: '上次没写完的那一句', queued: ['上次排着的那一句'] },
       '写回去的是那一份会话自己的两格');
+  } finally {
+    instance.unmount();
+  }
+}));
+
+// `@` 那一段的识别与插入：句首或空白之后的 `@` 才算，选中之后落笔处在那一段之后。
+test('an @ fragment is recognised at a word boundary and inserts a path', () => {
+  assert.deepEqual(mentionToken('看一下 @notes/rea', 14), { start: 4, text: 'notes/rea' });
+  assert.deepEqual(mentionToken('@a', 2), { start: 0, text: 'a' }, '句首的 @ 也算');
+  assert.equal(mentionToken('邮箱是me@li', 9), null, '紧贴在字后面的 @ 不是路径引用');
+  assert.equal(mentionToken('@notes/rea 后面还有字', 8), null, '笔落在一段中间时不替换：那会截断人已写好的那一段');
+  assert.deepEqual(insertMention('看一下 @rea', 8, 4, 'notes/readings-3.md'),
+    { draft: '看一下 @notes/readings-3.md ', caret: 25 }, '换掉那一段并留一个空格，后面的字不动');
+});
+
+// 候选由宿主列出来：界面不开目录；清单开着时 Enter 是选中，不是发送（方案 5.3）。
+test('an @ fragment asks the host for project files and Enter picks one', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { App } = await import('../dist/tui/app.js');
+
+  await mkdir(join(projectDirectory, 'notes'), { recursive: true });
+  await appendFile(join(projectDirectory, 'notes', 'readings-3.md'), '一段读数');
+
+  const stdout = new PassThrough();
+  stdout.columns = 120;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+
+  const instance = render(createElement(App, {
+    client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const lastFrame = () => painted.split('\x1B[?2026h').pop();
+  const started = () => requests.filter((request) => request.method === 'run.start').length;
+  try {
+    await waitFor(() => painted.includes('要模型做的事'), { read: () => painted });
+    stdin.write('先看 @readings');
+    await waitFor(() => lastFrame().includes('notes/readings-3.md'), { read: lastFrame });
+    const asked = requests.filter((request) => request.method === 'paths.list');
+    assert.equal(asked.length, 1, '这一段问一次，不是每个字问一次');
+    assert.deepEqual(asked[0].params, { projectRoot: projectDirectory, query: 'readings', limit: 8 }, '问的是那一个项目根里含这一段文字的文件');
+    assert.equal(started(), 0, '清单开着不发送');
+
+    stdin.write('\r');
+    await waitFor(() => lastFrame().includes('@notes/readings-3.md'), { read: lastFrame });
+    assert.equal(started(), 0, 'Enter 选中的是那一条候选，不是把这一句发出去');
+    assert.doesNotMatch(lastFrame(), /Tab 或 Enter 选中/, '选中之后清单收起');
+
+    stdin.write(' 还有 @notes');
+    await waitFor(() => lastFrame().includes('Esc 收起'), { read: lastFrame });
+    const askedAgain = requests.filter((request) => request.method === 'paths.list');
+    assert.equal(askedAgain.length, 2, '改了这个词就重新问一次');
+    assert.equal(askedAgain.at(-1).params.query, 'notes', '问的是新那一段文字');
+
+    stdin.write('\x1b');
+    await waitFor(() => !lastFrame().includes('Esc 收起'), { read: lastFrame });
   } finally {
     instance.unmount();
   }

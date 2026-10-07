@@ -4,7 +4,7 @@
 // 检查在 test/tui.test.js，不靠真终端也能验；画面本身跑 `ligule tui` 看。
 import { createElement as h, Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Static, Text, useApp, useInput, usePaste } from 'ink';
-import { SESSION_ROWS, UI_COMMANDS, candidatesOf, findLines, findUiCommand, flowGroups, resolveSessionId, routeInput, sessionLines } from './commands.js';
+import { SESSION_ROWS, UI_COMMANDS, candidatesOf, findLines, findUiCommand, flowGroups, insertMention, mentionToken, resolveSessionId, routeInput, sessionLines } from './commands.js';
 import { pushHistory, searchHistory } from './history.js';
 import { editInExternalEditor } from './editor.js';
 import { copyToClipboard, lastAnswer } from './clipboard.js';
@@ -19,10 +19,12 @@ const FOLD_LINES = 3;
 const MODE_LAYERS = { shipped: '随包', user: '全局', project: '项目' };
 // 清单最多画几行：再长就把屏幕顶到输入框以外，人看不到自己在敲什么。
 const CANDIDATE_ROWS = 6;
+// 路径候选一次问宿主 8 条：这一处画的是文件名，多几行也读不完，而宿主的 `limit` 比它更宽。
+const MENTION_ROWS = 8;
 const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 // 那几张表与那几个纯函数交给检查里用（test/tui.test.js），界面自己只走这一处出口。
-export { SESSION_ROWS, UI_COMMANDS, candidatesOf, displayWidth, findLines, findUiCommand, flowGroups, resolveSessionId, routeInput, sessionLines } from './commands.js';
+export { SESSION_ROWS, UI_COMMANDS, candidatesOf, displayWidth, findLines, findUiCommand, flowGroups, insertMention, mentionToken, resolveSessionId, routeInput, sessionLines } from './commands.js';
 export { markdownLines } from './markdown.js';
 
 // `/help` 画三组：界面命令、宿主交出来的提示模板、按键。前两组在这里只列名字与说明，展开与装载都不归界面。
@@ -286,6 +288,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [queue, setQueue] = useState([]);
   // 取消这一轮之后队列停下等人：剩余的那几条不自己发出去（方案 5.2）。
   const [queuePaused, setQueuePaused] = useState(false);
+  // 落笔处那一段 `@` 路径引用的候选：清单由宿主列出来，界面不开盘（方案 5.3、D81 边界一）。
+  const [mention, setMention] = useState(null);
+  // Esc 收起的是当下这一个词：接着改字会重新问，原样不动时不再弹出来挡住输入。
+  const [hiddenMention, setHiddenMention] = useState('');
+  const mentionWanted = useRef({ start: -1, text: '' });
   const push = useCallback((...added) => setRows((current) => [...current, ...added]), []);
   // 排着的那几条与草稿都属于那一份会话：换看别的一份时把这一份收起来，换回来再摊开——
   // 既不把没发的话送到另一份会话里，也不把它丢掉（方案 5.2「队列按会话隔离」）。
@@ -338,6 +345,29 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     }, 400);
     return () => clearTimeout(timer);
   }, [draft, info.boundary, inputs, push, queue, sessionId]);
+
+  // 落笔处那一段 `@` 交给宿主去列：等手停下 160 毫秒再问一次，答回来时那一段已经变了就丢掉（方案 5.3）。
+  // 传输那一层没有中途取消的办法，所以「慢请求可取消」在这儿做到的是「不落到画面上」。
+  useEffect(() => {
+    const token = mentionToken(draft, caret);
+    if (token === null) { setMention(null); return; }
+    mentionWanted.current = token;
+    if (hiddenMention === token.text) return;
+    if (mention !== null && mention.start === token.start && mention.text === token.text) return;
+    const asked = token;
+    const timer = setTimeout(() => {
+      void (async () => {
+        const listed = await client.request('paths.list', { projectRoot: info.boundary, query: asked.text, limit: MENTION_ROWS })
+          .catch((error) => ({ code: error.code ?? 'paths_list_failed' }));
+        const now = mentionWanted.current;
+        if (now.start !== asked.start || now.text !== asked.text) return;
+        setMention(listed.code === undefined
+          ? { ...asked, paths: listed.paths, stopped: listed.stopped, chosen: 0 }
+          : { ...asked, paths: [], stopped: 'error', failed: listed.code, chosen: 0 });
+      })();
+    }, 160);
+    return () => clearTimeout(timer);
+  }, [caret, client, draft, hiddenMention, info.boundary, mention]);
   const [sessionPicker, setSessionPicker] = useState(null);
   const [approvalExpanded, setApprovalExpanded] = useState(false);
   const [approvalCursor, setApprovalCursor] = useState(0);
@@ -1063,6 +1093,29 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       }
       return;
     }
+    // 路径候选开着时这几记按键归清单：Enter 是选中那一条，不是发送（方案 5.3「选中候选不能触发发送」）。
+    // 一条候选都没有时 Enter 照旧发这一句——那时清单上说的是「没有对得上的文件」，不该把发送挡住。
+    if (mention !== null && ask === null && detail === null && sessionPicker === null && search === null) {
+      if (key.escape) {
+        setHiddenMention(mention.text);
+        setMention(null);
+        return;
+      }
+      if (mention.paths.length > 0 && (key.tab || key.return)) {
+        const picked = mention.paths[Math.min(mention.chosen, mention.paths.length - 1)];
+        const merged = insertMention(draft, caret, mention.start, picked);
+        setDraft(merged.draft);
+        setCaret(merged.caret);
+        setHiddenMention('');
+        setMention(null);
+        return;
+      }
+      if (mention.paths.length > 0 && (key.upArrow || key.downArrow)) {
+        const step = key.upArrow ? -1 : 1;
+        setMention({ ...mention, chosen: (mention.chosen + step + mention.paths.length) % mention.paths.length });
+        return;
+      }
+    }
     if (picks.length > 0) {
       if (key.tab) {
         const picked = picks[chosen];
@@ -1189,10 +1242,21 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         h(Text, { dimColor: true }, ` ${candidate.text}`))),
       picks.length > CANDIDATE_ROWS ? h(Text, { dimColor: true }, `  还有 ${picks.length - CANDIDATE_ROWS} 条，接着打字就缩小了`) : null,
       h(Text, { dimColor: true }, ' Tab 补全 · ↑↓ 选 · Esc 收起')),
+    mention === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'gray', paddingX: 1 },
+      mention.paths.length === 0
+        ? h(Text, { dimColor: true }, mention.stopped === 'error'
+          ? `这个项目列不出文件：${mention.failed}`
+          : `这个项目里没有文件名含「${mention.text}」的文件`)
+        : mention.paths.map((path, index) => h(Text, { key: path, inverse: index === mention.chosen, wrap: 'truncate-end' }, ` ${path}`)),
+      mention.paths.length > 0 && mention.stopped === 'budget'
+        ? h(Text, { dimColor: true }, '  只翻了前面那些文件，更深的没看到：把字写得更具体一些') : null,
+      mention.paths.length > 0 && mention.stopped === 'unreadable'
+        ? h(Text, { dimColor: true }, '  有一层目录读不了，这份清单不一定全') : null,
+      mention.paths.length === 0 ? null : h(Text, { dimColor: true }, ' Tab 或 Enter 选中 · ↑↓ 换一条 · Esc 收起')),
     h(Box, null,
       h(Text, { color: running ? 'yellow' : 'cyan' }, running ? `${SPINNER[tick % SPINNER.length]} ` : '› '),
       draft === '' && !running
-        ? h(Text, { dimColor: true }, '要模型做的事（Enter 发送，Shift+Enter 换行，打 / 看清单）')
+        ? h(Text, { dimColor: true }, '要模型做的事（Enter 发送，Shift+Enter 换行，打 / 看清单，打 @ 引用项目里的文件）')
         : h(Text, { wrap: 'wrap' },
           draft.slice(0, caret),
           h(Text, { inverse: true }, caretText),

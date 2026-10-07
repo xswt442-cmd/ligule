@@ -212,8 +212,26 @@ export function findLines(listed: readonly SearchRow[], current = ''): string[] 
   ].filter((cell) => cell !== '').join('  '));
 }
 
-/** 前缀对上的那一份，或者一条说明为什么对不上——猜一份是把人带去他没选过的会话里。 */
-export type SessionPick = { readonly id: string } | { readonly code: 'tui_session_ambiguous' | 'tui_session_not_listed' };
+// 界面上 `@` 的那一段：正被写的一个路径引用。`@` 要在句首或空白之后才算，邮箱与 `a@b` 那一种不弹候选。
+const MENTION = /(?:^|(\s))@([^\s]*)$/;
+
+/** 落笔处往回找那一个还没写完的路径引用；没有就是 null。`start` 是 `@` 的位置。
+ * 笔落在一段中间（后面还跟着字）时不算：那时替换会把人已写好的那一段截断。 */
+export function mentionToken(draft: string, caret: number): { readonly start: number; readonly text: string } | null {
+  const after = draft.slice(caret);
+  if (after !== '' && !/^\s/.test(after)) return null;
+  const matched = MENTION.exec(draft.slice(0, caret));
+  if (matched === null) return null;
+  return { start: caret - matched[2].length - 1, text: matched[2] };
+}
+
+/** 选中一条候选后的草稿与落笔处：那一段 `@…` 换成 `@路径␣`，后面已写的字保留。 */
+export function insertMention(draft: string, caret: number, start: number, path: string): { readonly draft: string; readonly caret: number } {
+  const inserted = `@${path} `;
+  return { draft: draft.slice(0, start) + inserted + draft.slice(caret), caret: start + inserted.length };
+}
+
+/** 前缀对上的那一份，或者一条说明为什么对不上——猜一份是把人带去他没选过的会话里。 */export type SessionPick = { readonly id: string } | { readonly code: 'tui_session_ambiguous' | 'tui_session_not_listed' };
 
 // `ligule sessions` 里那一串 id 太长，敲一半是自然会做的事：在这份列表里唯一对上才算认。
 // 列表按项目根过滤过，所以别的项目根下的会话不会被这一条接走。
