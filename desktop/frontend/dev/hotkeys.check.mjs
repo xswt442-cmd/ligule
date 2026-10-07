@@ -1,6 +1,6 @@
 // 键盘层那一份表的检查：跑 `node dev/hotkeys.check.mjs`。
 import assert from 'node:assert/strict';
-import { KEYMAP, actionOf, conflictsIn, defaultSpecs, formatKeys, isComposing, specOf } from '../src/hotkeys.ts';
+import { CURRENT, KEYMAP, actionOf, conflictsIn, defaultSpecs, formatKeys, isCapturing, isComposing, loadBindings, parseSpec, setCapturing, specOf } from '../src/hotkeys.ts';
 import { insertMention, mentionToken } from '../src/mentions.ts';
 
 // 认键与说键读的是同一份表（方案 6.1）：这一记按键落的是哪一个动作，与按钮上写的那一串字，一处改了另一处跟着改。
@@ -29,6 +29,24 @@ for (const [action, binding] of Object.entries(KEYMAP)) {
   assert.ok(binding.label !== '' && binding.view !== '', `${action} 要说得出做什么与落在哪一个范围`);
   assert.equal(actionOf({ key: binding.spec.split('+').at(-1), ...(binding.spec.includes('ctrl') ? { ctrlKey: true } : {}), ...(binding.spec.includes('shift') ? { shiftKey: true } : {}) }, binding.view), action, `${action} 的默认键认得回来`);
 }
+// 个人覆盖那一条路：读得开的落下、读不开的一条条报出来，认键与说键跟着一起换（方案 6.1）。
+assert.equal(parseSpec('Ctrl+Shift+K'), 'ctrl+shift+k');
+assert.equal(parseSpec('esc'), 'escape');
+assert.equal(parseSpec('hyper+k'), null, '表里没有的那一个修饰键不猜');
+assert.equal(parseSpec('ctrl+'), null, '缺一记键名不算一记键');
+const loaded = loadBindings({ palette: 'ctrl+alt+p', 表里没有: 'ctrl+y' });
+assert.equal(loaded.applied, 1);
+assert.deepEqual(loaded.refused, ['表里没有（表里没有这一个动作）'], '名字对不上就说出来，不悄悄丢掉');
+assert.equal(actionOf({ key: 'p', ctrlKey: true, altKey: true }, '窗口'), 'palette', '改过之后那一记键落的是开面板');
+assert.equal(actionOf({ key: 'k', ctrlKey: true }, '窗口'), null, '原先那一记键不再落开面板');
+assert.equal(formatKeys(CURRENT.palette), 'Ctrl+Alt+P', '按钮与提示上那串字跟着换');
+const restored = loadBindings({});
+assert.equal(restored.applied, 0, '整份退回默认之后那一张表是空的');
+assert.equal(actionOf({ key: 'k', ctrlKey: true }, '窗口'), 'palette', '退回默认之后 Enter 那一条路照旧');
+assert.equal(isCapturing(), false);
+setCapturing(true);
+assert.equal(isCapturing(), true, '录一记新键的那一段里，窗口这一层要知道自己该不接键');
+setCapturing(false);
 // 输入法组合期间的那一格：`isComposing` 是标准写法，229 是各浏览器在组合中一贯交回的 keyCode。
 assert.equal(isComposing({ isComposing: true, key: 'Enter' }), true);
 assert.equal(isComposing({ keyCode: 229, key: 'Process' }), true);

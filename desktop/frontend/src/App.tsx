@@ -9,7 +9,7 @@ import { SessionRail, type SearchHit } from './components/SessionRail';
 import { ModelPanel } from './components/ModelPanel';
 import { UsageMeter } from './components/UsageMeter';
 import { Palette, type Command } from './components/Palette';
-import { KEYMAP, actionOf, defaultSpecs, formatKeys, isComposing, specOf } from './hotkeys';
+import { KEYMAP, CURRENT, actionOf, formatKeys, isCapturing, isComposing, loadBindings, specOf } from './hotkeys';
 import { insertMention, mentionToken } from './mentions';
 import type { Verbosity } from './components/types';
 import { createSlotRegistry, SLOTS, type Panel } from './slots';
@@ -50,9 +50,6 @@ const HISTORY_KEY = 'ligule.input-history';
 const HISTORY_MAX = 50;
 // 「没在问哪一段」的形状：真实的落笔处起点不可能是 -1，所以它跟任何一段都对不上。
 const NO_TOKEN = { start: -1, text: '' };
-// 当前那一份键位：按键落的是哪一个动作、按钮上写的是哪一串字，都读这一份（方案 6.1）。
-// 个人覆盖读的是界面偏好里的那一格，落在设置那一层；这里先按默认那一份装配。
-const KEY_BINDINGS = defaultSpecs();
 
 // 本机存的那一份是不可信的输入：读坏了就当没有。
 function readHistory(): string[] {
@@ -82,7 +79,7 @@ const menuPanels: Panel<PanelProps>[] = [
     title: '快捷键',
     // 这一份清单读的是当前那一份键位表：键、动作与它落在哪一个范围，界面上说的和按键落的同一处取（方案 6.1）。
     view: () => <ul>{(Object.keys(KEYMAP) as (keyof typeof KEYMAP)[]).map((action) => (
-      <li key={action}>{formatKeys(KEY_BINDINGS[action])} —— {KEYMAP[action].label}（{KEYMAP[action].view}）</li>
+      <li key={action}>{formatKeys(CURRENT[action])} —— {KEYMAP[action].label}（{KEYMAP[action].view}）</li>
     ))}</ul>,
   },
   {
@@ -407,6 +404,14 @@ export function App({ transport }: { transport: Transport }) {
   const patch = useCallback((part: Partial<Settings>) => {
     setSettings((current) => ({ ...current, ...part }));
   }, []);
+
+  // 键位从界面偏好那一格读回来：整份先退回默认，再落有效的那一些；读不懂的一条条说出来（方案 6.1）。
+  const [keyNotice, setKeyNotice] = useState('');
+  useEffect(() => {
+    const outcome = loadBindings(settings.keys);
+    setKeyNotice(outcome.refused.length === 0 ? ''
+      : `有 ${outcome.refused.length} 条键位落不下来，那几条按默认那一份走：${outcome.refused.join('、')}`);
+  }, [settings.keys]);
 
   // 拖那一条分隔线改侧栏宽度：范围与设置面板里那根滑杆是同一份（D90）。
   const startDrag = useCallback((event: { clientX: number }) => {
@@ -766,8 +771,8 @@ export function App({ transport }: { transport: Transport }) {
     { id: 'run.cancel', title: '取消这一轮', note: 'run.cancel', run: () => void cancel() },
     { id: 'session.compact', title: '手动压缩上下文', note: 'session.compact', run: () => void compact() },
     { id: 'settings.open', title: '打开设置', note: '外观、模式、审批规则、连接', run: () => setSettingsOpen(true) },
-    { id: 'rail.toggle', title: collapsed ? '展开左侧栏' : '收起左侧栏', note: formatKeys(KEY_BINDINGS['sidebar']), run: () => patch({ collapsed: !collapsed }) },
-    { id: 'answer.copy', title: '复制最后那条回答', note: formatKeys(KEY_BINDINGS['copy-answer']), run: copyLastAnswer },
+    { id: 'rail.toggle', title: collapsed ? '展开左侧栏' : '收起左侧栏', note: formatKeys(CURRENT['sidebar']), run: () => patch({ collapsed: !collapsed }) },
+    { id: 'answer.copy', title: '复制最后那条回答', note: formatKeys(CURRENT['copy-answer']), run: copyLastAnswer },
     ...(status?.templates ?? []).map((item) => ({
       id: `prompt:${item.command}`,
       title: `填一条 /${item.command}`,
@@ -797,8 +802,10 @@ export function App({ transport }: { transport: Transport }) {
     const onKey = (event: KeyboardEvent) => {
       // 输入法正在拼的那一段里，Esc 属于取消候选词，Enter 属于选中候选词：这一路都不能替人收面板或打断这一轮（方案 5.1、5.4）。
       if (isComposing(event)) return;
+      // 设置那一栏正在录一记新键：这一记按键属于「换成什么」，窗口这一层不接（方案 6.1）。
+      if (isCapturing()) return;
       // 按键落的是哪一个动作读这一份表，界面上说出来的一串字也从同一处取（方案 6.1）。
-      const action = actionOf(event, '窗口', KEY_BINDINGS);
+      const action = actionOf(event, '窗口');
       if (action !== null && action !== 'interrupt') {
         event.preventDefault();
         if (action === 'palette') setPaletteOpen((open) => !open);
@@ -807,7 +814,7 @@ export function App({ transport }: { transport: Transport }) {
         return;
       }
       // 收层那一条顺序排在打断这一轮之前：面板、设置、菜单、右侧抽屉，都收完了才轮到取消。
-      if (specOf(event) !== KEY_BINDINGS['interrupt']) return;
+      if (specOf(event) !== CURRENT['interrupt']) return;
       if (paletteOpen) setPaletteOpen(false);
       else if (settingsOpen) setSettingsOpen(false);
       else if (menuOpen) setMenuOpen(false);
@@ -830,7 +837,7 @@ export function App({ transport }: { transport: Transport }) {
     </div>,
     EmptyState: () => <div className="stream-band">{reading
       ? <p className="placeholder"><Icon name="clock" size={14} /> 在读那份记录…</p>
-      : <p className="placeholder"><Icon name="spark" size={14} /> 还没有轮次。下方输入一句话，{formatKeys(KEY_BINDINGS['send'])} 直接开始。</p>}</div>,
+      : <p className="placeholder"><Icon name="spark" size={14} /> 还没有轮次。下方输入一句话，{formatKeys(CURRENT['send'])} 直接开始。</p>}</div>,
   }), [olderLoading, page, reading, showEarlier]);
   // 展示档没放进来那几类行不进列表：虚拟视口要量每一行的高度，藏着不画的行留在列表里只会量到零（D90、U48）。
   const shown = useMemo(() => rows.filter((row) => shownIn(verbosity, row)), [rows, verbosity]);
@@ -919,7 +926,7 @@ export function App({ transport }: { transport: Transport }) {
           <span className="muted" id="session-note">{status === null ? '还没有会话：新建一份，或者从左侧栏挑一份' : `记录 ${status.eventCount} 条`}</span>
         </div>
         <div className="pills">{registry.list('header.status').map((item) => <span key={item.id}>{item.view(panelProps)}</span>)}</div>
-        <button className="icon-button" type="button" title={`命令面板（${formatKeys(KEY_BINDINGS['palette'])}）`} aria-label="命令面板" onClick={() => setPaletteOpen(true)}><Icon name="search" size={15} /></button>
+        <button className="icon-button" type="button" title={`命令面板（${formatKeys(CURRENT['palette'])}）`} aria-label="命令面板" onClick={() => setPaletteOpen(true)}><Icon name="search" size={15} /></button>
       </header>
 
       {/* 转录只挂视口里那几十行：读回来的那一页全在数据里，画出来的由视口决定（U48、方案 6.2）。 */}
@@ -1016,7 +1023,7 @@ export function App({ transport }: { transport: Transport }) {
               && <span className="mini">只翻了前面那些文件，更深的没看到：把字写得更具体一些</span>}
             {mention.paths.length > 0 && mention.stopped === 'unreadable'
               && <span className="mini">有一层目录读不了，这份清单不一定全</span>}
-            {mention.paths.length > 0 && <span className="mini">{`${formatKeys(KEY_BINDINGS['pick-candidate'])} 或 ${formatKeys(KEY_BINDINGS['complete-candidate'])} 选中 · ${formatKeys(KEY_BINDINGS['candidate-older'])}${formatKeys(KEY_BINDINGS['candidate-newer'])} 换一条 · ${formatKeys(KEY_BINDINGS['hide-candidate'])} 收起`}</span>}
+            {mention.paths.length > 0 && <span className="mini">{`${formatKeys(CURRENT['pick-candidate'])} 或 ${formatKeys(CURRENT['complete-candidate'])} 选中 · ${formatKeys(CURRENT['candidate-older'])}${formatKeys(CURRENT['candidate-newer'])} 换一条 · ${formatKeys(CURRENT['hide-candidate'])} 收起`}</span>}
           </div>
         )}
         <textarea
@@ -1024,7 +1031,7 @@ export function App({ transport }: { transport: Transport }) {
           ref={composerRef}
           rows={3}
           value={draft}
-          placeholder={`要模型做的事（${formatKeys(KEY_BINDINGS['send'])} 发送，跑着的时候排到后面，${formatKeys(KEY_BINDINGS['newline'])} 换行，空草稿上 ${formatKeys(KEY_BINDINGS['history-older'])}${formatKeys(KEY_BINDINGS['history-newer'])} 翻历史，打 @ 引用项目里的文件）`}
+          placeholder={`要模型做的事（${formatKeys(CURRENT['send'])} 发送，跑着的时候排到后面，${formatKeys(CURRENT['newline'])} 换行，空草稿上 ${formatKeys(CURRENT['history-older'])}${formatKeys(CURRENT['history-newer'])} 翻历史，打 @ 引用项目里的文件）`}
           onChange={(event) => {
             setDraft(event.target.value);
             setCaret(event.target.selectionStart ?? event.target.value.length);
@@ -1037,7 +1044,7 @@ export function App({ transport }: { transport: Transport }) {
             if (isComposing(event.nativeEvent)) return;
             // 清单开着时这几记按键归清单那一层：Enter 与 Tab 是选中那一条，不是发送（方案 5.3「选中候选不能触发发送」）。
             if (mention !== null) {
-              const candidate = actionOf(event, '候选清单', KEY_BINDINGS);
+              const candidate = actionOf(event, '候选清单');
               if (candidate === 'hide-candidate') {
                 setHiddenMention(mention.text);
                 setMention(null);
@@ -1060,7 +1067,7 @@ export function App({ transport }: { transport: Transport }) {
                 return;
               }
             }
-            const typed = actionOf(event, '输入坞', KEY_BINDINGS);
+            const typed = actionOf(event, '输入坞');
             if (typed === 'send' || typed === 'send-alt') {
               event.preventDefault();
               void send();
@@ -1082,9 +1089,9 @@ export function App({ transport }: { transport: Transport }) {
           </button>
           <span className="bar-spacer" />
           <button className="icon-button" type="button" title="读回这一份记录" aria-label="读回记录" onClick={() => void readBack()}><Icon name="refresh" size={15} /></button>
-          <button className="icon-button" type="button" title={`复制最后那条回答（${formatKeys(KEY_BINDINGS['copy-answer'])}）`} aria-label="复制回答" onClick={copyLastAnswer}><Icon name="copy" size={15} /></button>
-          <button className="icon-button" type="button" title={`取消这一轮（${formatKeys(KEY_BINDINGS['interrupt'])}）`} aria-label="取消本轮" disabled={!running} onClick={() => void cancel()}><Icon name="stop" size={15} /></button>
-          <button className="send" type="button" title={running ? `排到后面（${formatKeys(KEY_BINDINGS['send'])}，这一轮结束后发出）` : `发送（${formatKeys(KEY_BINDINGS['send'])}）`} aria-label="发送" disabled={sessionId === null} onClick={() => void send()}><Icon name="send" size={17} /></button>
+          <button className="icon-button" type="button" title={`复制最后那条回答（${formatKeys(CURRENT['copy-answer'])}）`} aria-label="复制回答" onClick={copyLastAnswer}><Icon name="copy" size={15} /></button>
+          <button className="icon-button" type="button" title={`取消这一轮（${formatKeys(CURRENT['interrupt'])}）`} aria-label="取消本轮" disabled={!running} onClick={() => void cancel()}><Icon name="stop" size={15} /></button>
+          <button className="send" type="button" title={running ? `排到后面（${formatKeys(CURRENT['send'])}，这一轮结束后发出）` : `发送（${formatKeys(CURRENT['send'])}）`} aria-label="发送" disabled={sessionId === null} onClick={() => void send()}><Icon name="send" size={17} /></button>
         </div>
       </footer>
       <div className="statusbar">
@@ -1118,6 +1125,7 @@ export function App({ transport }: { transport: Transport }) {
       status={status}
       settings={settings}
       patch={patch}
+      keyNotice={keyNotice}
       link={link}
       counts={panelProps.counts}
       waiting={panelProps.waiting}

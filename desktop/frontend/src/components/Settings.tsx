@@ -1,5 +1,6 @@
-import { useState, type ReactNode } from 'react';
+import { Fragment, useEffect, useState, type ReactNode } from 'react';
 import { Icon } from './Icon';
+import { CURRENT, KEYMAP, conflictsIn, formatKeys, setCapturing, specOf, type KeyAction, type KeyView } from '../hotkeys';
 import type { Settings } from '../settings';
 import type { Status } from '../status';
 
@@ -11,6 +12,7 @@ const SECTIONS = [
   { id: 'policy', title: '审批规则', icon: 'check' },
   { id: 'model', title: '模型与端点', icon: 'folder' },
   { id: 'connection', title: '连接', icon: 'refresh' },
+  { id: 'keys', title: '键位', icon: 'copy' },
 ] as const;
 
 // 模式来自哪一层，终端那一份用的是同一组词；层名不在表里时把原样交出去。
@@ -22,6 +24,8 @@ export type SettingsProps = {
   status: Status | null;
   settings: Settings;
   patch: (part: Partial<Settings>) => void;
+  // 键位那一栏要说的两件都在外面读回来：本机那一格里落不下来的那几条，与现在这一份表。
+  keyNotice: string;
   link: string | null;
   counts: { sent: number; received: number };
   waiting: number;
@@ -57,6 +61,7 @@ export function SettingsDialog(props: SettingsProps) {
         {section === 'policy' && <Policy status={status} />}
         {section === 'model' && <Model />}
         {section === 'connection' && <Connection link={props.link} counts={props.counts} waiting={props.waiting} status={status} onReconnect={props.onReconnect} />}
+        {section === 'keys' && <Keys settings={settings} patch={patch} notice={props.keyNotice} />}
       </div>
     </div>
   </div>;
@@ -97,6 +102,73 @@ function Appearance({ settings, patch }: { settings: Settings; patch: SettingsPr
     </Row>
     <Row label="左侧栏">
       <button type="button" onClick={() => patch({ collapsed: !settings.collapsed })}>{settings.collapsed ? '展开' : '收起'}</button>
+    </Row>
+  </>;
+}
+
+// 键位那一栏：一条动作一行，写着它现在那一串键、落在哪一个范围。改一记键要先录一次按键——
+// 录的状态下窗口那一层不接全局键，Esc 属于取消这次录制（方案 6.1）。
+function Keys({ settings, patch, notice }: { settings: Settings; patch: SettingsProps['patch']; notice: string }) {
+  const [listening, setListening] = useState<KeyAction | null>(null);
+  const [refused, setRefused] = useState('');
+  useEffect(() => {
+    if (listening === null) return;
+    setCapturing(true);
+    const stop = () => {
+      setCapturing(false);
+      setListening(null);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      event.preventDefault();
+      if (event.key === 'Escape') {
+        stop();
+        return;
+      }
+      const spec = specOf(event);
+      if (spec === null) return;
+      const binding = KEYMAP[listening];
+      // 同一个范围里那一记键已经落在别的事上就拒：存下去的表必须是这一份界面按得动的。
+      const clash = conflictsIn(binding.view, { ...CURRENT, [listening]: spec });
+      if (clash.length > 0) {
+        setRefused(`${formatKeys(spec)} 在${binding.view}里已经落在 ${clash[0][0]} 与 ${clash[0][1]} 上：同一范围里不能两记键落同一件事`);
+        stop();
+        return;
+      }
+      setRefused('');
+      patch({ keys: { ...settings.keys, [listening]: spec } });
+      stop();
+    };
+    document.addEventListener('keydown', onKey, true);
+    return () => {
+      document.removeEventListener('keydown', onKey, true);
+      setCapturing(false);
+    };
+  }, [listening, patch, settings.keys]);
+
+  const restore = (action: string) => {
+    const next = { ...settings.keys };
+    delete next[action];
+    patch({ keys: next });
+  };
+  const views = [...new Set(Object.values(KEYMAP).map((binding) => binding.view))] as KeyView[];
+  return <>
+    {notice === '' ? null : <p className="stub">{notice}</p>}
+    {refused === '' ? null : <p className="stub">{refused}</p>}
+    <p className="stub">「改键」之后按下的那一记按键就是新的键；同一范围里两记键不能落同一件事。「退回」只退那一条。</p>
+    {views.map((view) => <Fragment key={view}>
+      <h4>{view}</h4>
+      {(Object.entries(KEYMAP) as [KeyAction, (typeof KEYMAP)[KeyAction]][])
+        .filter(([, binding]) => binding.view === view)
+        .map(([action, binding]) => <Row key={action} label={binding.label} note={settings.keys[action] === undefined ? '默认' : `你改成了 ${settings.keys[action]}`}>
+          <code>{formatKeys(CURRENT[action])}</code>
+          <button type="button" onClick={() => { setRefused(''); setListening(listening === action ? null : action); }}>
+            {listening === action ? '在等那一记键…（Esc 取消）' : '改键'}
+          </button>
+          {settings.keys[action] === undefined ? null : <button type="button" onClick={() => restore(action)}>退回</button>}
+        </Row>)}
+    </Fragment>)}
+    <Row label="全部退回默认" note="清掉本机那一格里的覆盖">
+      <button type="button" onClick={() => { setRefused(''); patch({ keys: {} }); }}>退回</button>
     </Row>
   </>;
 }

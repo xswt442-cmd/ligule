@@ -57,7 +57,7 @@ export function formatKeys(spec: string): string {
 }
 
 /** 这一记按键落的是哪一个动作。`view` 只收那一个范围里的绑定，所以候选清单开着时 Enter 认成选中而不是发送。 */
-export function actionOf(event: KeyEvent, view: KeyView, bindings: Record<KeyAction, string> = defaultSpecs()): KeyAction | null {
+export function actionOf(event: KeyEvent, view: KeyView, bindings: Record<KeyAction, string> = CURRENT): KeyAction | null {
   const typed = specOf(event);
   if (typed === null) return null;
   for (const [action, binding] of Object.entries(KEYMAP) as [KeyAction, Binding][]) {
@@ -82,6 +82,38 @@ export function defaultSpecs(): Record<KeyAction, string> {
   return Object.fromEntries(Object.entries(KEYMAP).map(([action, binding]) => [action, binding.spec])) as Record<KeyAction, string>;
 }
 
+// 当前那一份：个人覆盖换的是这一格的内容，按键落点与画面说法读的都是它。
+export const CURRENT = defaultSpecs();
+
+/** 一串人写的键名（`Ctrl+Shift+K`）读成规范写法；认不出来交回 null，不猜。 */
+export function parseSpec(text: string): string | null {
+  const parts = text.trim().toLowerCase().split('+').map((part) => part.trim());
+  if (parts.some((part) => part === '')) return null;
+  const mods = parts.slice(0, -1);
+  if (mods.some((mod) => !MODIFIERS.includes(mod as typeof MODIFIERS[number]))) return null;
+  const aliases: Record<string, string> = { esc: 'escape', return: 'enter', up: 'arrowup', down: 'arrowdown', left: 'arrowleft', right: 'arrowright', pgup: 'pageup', pgdn: 'pagedown', del: 'delete', space: ' ' };
+  const key = aliases[parts[parts.length - 1]!] ?? parts[parts.length - 1]!;
+  if (BARE_MODIFIERS.includes(key) || (KEY_NAMES[key] === undefined && key.length !== 1)) return null;
+  return [...mods, key].join('+');
+}
+
+/** 换上那一份覆盖：先整份退回默认再落有效的那一些，表里没有的名字与读不懂的键名一条条报出来。 */
+export function loadBindings(overrides: Record<string, string>): { readonly applied: number; readonly refused: string[] } {
+  const defaults = defaultSpecs();
+  for (const [action, spec] of Object.entries(defaults)) CURRENT[action as KeyAction] = spec;
+  const refused: string[] = [];
+  let applied = 0;
+  for (const [action, value] of Object.entries(overrides)) {
+    const key = action as KeyAction;
+    if (!Object.prototype.hasOwnProperty.call(KEYMAP, action)) { refused.push(`${action}（表里没有这一个动作）`); continue; }
+    const spec = typeof value === 'string' ? parseSpec(value) : null;
+    if (spec === null) { refused.push(`${action}=${String(value)}`); continue; }
+    CURRENT[key] = spec;
+    applied += 1;
+  }
+  return { applied, refused };
+}
+
 /** 同一个范围里两记键撞在一起时交回那两动作的名字；不同范围共用一记键不算撞。 */
 export function conflictsIn(view: KeyView, bindings: Record<KeyAction, string>): [KeyAction, KeyAction][] {
   const seen = new Map<string, KeyAction>();
@@ -100,4 +132,13 @@ export function conflictsIn(view: KeyView, bindings: Record<KeyAction, string>):
 // `isComposing` 是标准的那一格，229 是各浏览器在组合期间一贯交回的 keyCode。
 export function isComposing(event: { isComposing?: boolean; keyCode?: number }): boolean {
   return event.isComposing === true || event.keyCode === 229;
+}
+
+// 正在录一记新键时，窗口那一层不接任何全局键：那一记按键属于「要换成什么」，不属于动作。
+let capturing = false;
+export function setCapturing(on: boolean): void {
+  capturing = on;
+}
+export function isCapturing(): boolean {
+  return capturing;
 }

@@ -12,6 +12,8 @@ export type Settings = {
   // 草稿与排着的几句都按「哪一项目录下的哪一份会话」放：两份会话不共用一格草稿，退出再打开还在（方案 5.1）。
   drafts: Record<string, Record<string, string>>;
   queued: Record<string, Record<string, string[]>>;
+  // 个人键位：动作名 → 那一串键的写法。它属于本机的界面偏好，不进记录、不进模型上下文、也不进项目的业务配置（方案 6.1）。
+  keys: Record<string, string>;
 };
 
 const KEY = 'ligule.ui';
@@ -29,12 +31,20 @@ export const defaultSettings: Settings = {
   collapsed: false,
   drafts: {},
   queued: {},
+  keys: {},
 };
 
 const oneOf = <T extends string>(value: unknown, allowed: T[], fallback: T): T =>
   allowed.includes(value as T) ? value as T : fallback;
 const clamped = (value: unknown, low: number, high: number, fallback: number): number =>
   typeof value === 'number' && value >= low && value <= high ? Math.round(value) : fallback;
+// 键位那一张表只认「名字 → 一串键的写法」这一种形状；那串写法读不读得开归键位那一层判，这里不重复一份判断。
+const stringMap = (value: unknown): Record<string, string> => {
+  if (typeof value !== 'object' || value === null) return {};
+  const out: Record<string, string> = {};
+  for (const [name, text] of Object.entries(value)) if (typeof text === 'string') out[name] = text;
+  return out;
+};
 
 // 那两张表只认写得出来的形状：一格草稿是串，一排是串数组，别的一律丢掉，不猜它想表达什么。
 const draftTable = (value: unknown): Record<string, Record<string, string>> => {
@@ -83,6 +93,7 @@ export function readSettings(): Settings {
     collapsed: value.collapsed === true,
     drafts: draftTable(value.drafts),
     queued: queueTable(value.queued),
+    keys: stringMap(value.keys),
   };
 }
 
