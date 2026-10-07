@@ -117,17 +117,34 @@ export function compactionLimitsOf(config) {
 }
 
 // 流式接收期间把每一条事件抄一份送出去，交回给循环的那一份原样不动。
-// 抄的是原对象再加一个 stream，而不是重搭一个：提供方声明的能力、模型名与换模型的路径都要留着看得见。
+// 抄的是转手而不是重搭一份：提供方声明的能力、模型名与换模型的路径都要留着看得见，
+// 而这一份会话的提供方会在整轮的边界上换一次（方案 7.3），抄成一份快照就会把后面那几轮钉死在旧的端点上。
 function observedProvider(provider, onDelta) {
-  return {
-    ...provider,
-    async *stream(request, options) {
-      for await (const event of provider.stream(request, options)) {
-        onDelta(event);
-        yield event;
-      }
+  return new Proxy(provider, {
+    get(target, key) {
+      if (key !== 'stream') return Reflect.get(target, key);
+      return async function* (request, options) {
+        for await (const event of target.stream(request, options)) {
+          onDelta(event);
+          yield event;
+        }
+      };
     },
-  };
+  });
+}
+
+// 「这一轮用哪一份提供方」落在会话自己那一格上：三处消费者（主循环、压缩、派生执行体）都只调用 `stream`，
+// 所以这里交出的是一句转手——被调用时才去读当前那一份。换提供方因此只发生在整轮的边界上，
+// 一轮之内不会出现只换了主循环而别处仍打旧端点的那种事（方案 7.3 第二行）。
+function currentProvider(read) {
+  return new Proxy({}, {
+    get: (_target, key) => {
+      const provider = read();
+      const value = Reflect.get(provider, key);
+      return typeof value === 'function' ? value.bind(provider) : value;
+    },
+    has: (_target, key) => key in read(),
+  });
 }
 
 // 落盘的每一条都抄一份送出去：记录里的事与客户端看见的事同源，客户端看见的就是已经写下来的。
@@ -173,7 +190,7 @@ export function shownConfigOf(config) {
 // modeName 与 modePaths 是一对：给了名字就要能给那三层目录，运行中换模式要用同一套查找（D41、D44）。
 // 扩展来源由装载侧算好交进来（D68：项目层与本地层里写的路径不算）：paths 是要加载的文件，
 // ignored 是那些被这条规则挡掉的路径，它们进日志而不是静默消失。
-export function createHost({ config, provider, plugins = [minimalPlugin, networkPlugin], policy, logger, modeName, modePaths, skillRegistry, templateRegistry, extensions = { paths: [], ignored: [] }, loadEnvironment, configStore }) {
+export function createHost({ config, provider, plugins = [minimalPlugin, networkPlugin], policy, logger, modeName, modePaths, skillRegistry, templateRegistry, extensions = { paths: [], ignored: [] }, loadEnvironment, configStore, deriveProvider = providerFromConfig }) {
   // 一份项目环境：这个项目自己的配置快照、提供方、判定档位、模式目录与记录目录（方案 3.1 与 3.2）。
   // 校验在装载这一刻做完：一条坏配置不该等到模型第一次调用才炸（D60）。
   // 边界是工具读写的位置，也是指令文件上溯的止点，两边都读它，缺一处就说缺一处。
@@ -226,6 +243,36 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     const state = sessions.get(id);
     if (state === undefined) throw new KernelError('session_not_open', { detail: id });
     return state;
+  }
+
+  // 刚写进配置的那一个字段落在哪一份提供方上，由这一处算：值已经过写入侧的形状校验，这里只按那一条路径
+  // 重算一份提供方，交给属于启动这一格项目环境的每一份会话——空着的立刻采用，跑着的等自己那一轮的边界（方案 7.3 第二行）。
+  // 重算失败是「文件已保存但该会话未生效」那一类：把话说出来，不把两步并成一步成功。
+  function adoptGeneration(key, value) {
+    const next = { ...defaultEnvironment.config, model: { ...defaultEnvironment.config.model, [key]: value } };
+    let provider;
+    try {
+      provider = deriveProvider(next);
+    } catch (error) {
+      return { applies: [], failure: { code: error.code ?? 'provider_rebuild_failed', detail: String(error.detail ?? error.message) } };
+    }
+    const applies = [];
+    for (const [id, state] of sessions) {
+      if (state.environment !== defaultEnvironment) continue;
+      if (state.running === undefined) {
+        state.generation = { provider };
+        state.pendingGeneration = undefined;
+        applies.push({ sessionId: id, when: 'now' });
+      } else {
+        state.pendingGeneration = { provider };
+        applies.push({ sessionId: id, when: 'round' });
+      }
+    }
+    // 这一格项目环境的提供方跟着走：新开的会话读的是它，于是继承的是最近一次写进去的那一份，
+    // 而不是装配那一次的那一份（方案 7.2「已有显式会话选择保持其选择，保存后重算受这层影响的继承者」）。
+    // 装载那一次的配置快照不动：它是事实；`config.get` 说的还是启动时读到的值，会话现在打的那一份从 `status.get` 读。
+    defaultEnvironment.provider = provider;
+    return { applies };
   }
 
   // 一次装配的收尾：MCP 的子进程、扩展的监听、模板登记表与那一份记录锁，四样都只在这一份会话里存在过（D60、D37、D85）。
@@ -281,6 +328,12 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           const next = state.pending;
           state.pending = undefined;
           await state.adopt(next);
+        }
+        // 生成参数在整轮收尾之后、下一条输入受理之前采用（方案 7.3 第二行）：这一轮里跑完的循环、压缩与派生体
+        // 用的都是开始时那一份，跑到一半换端点会让一轮里发出过两种请求体，记录也就对不上一次完整的回答。
+        if (state.pendingGeneration !== undefined) {
+          state.generation = state.pendingGeneration;
+          state.pendingGeneration = undefined;
         }
       }
     })();
@@ -380,7 +433,9 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       connection.notify({ notify: 'event', sessionId: id, event });
       for (const listener of listeners) listener(event);
     });
-    const state = { id, session, listeners, asks: new Set(), running: undefined, mode: { file: undefined, tools: [], undo: () => {} }, pending: undefined, environment: env };
+    const state = { id, session, listeners, asks: new Set(), running: undefined, mode: { file: undefined, tools: [], undo: () => {} }, pending: undefined, environment: env, generation: { provider } };
+    // 三处消费者读的都是这一句转手，它到调用时才去取 `state.generation` 里那一份（方案 7.3）。
+    const live = currentProvider(() => state.generation.provider);
     await session.acquire();
     const cleanup = [];
     try {
@@ -438,7 +493,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     const basePlugins = [...loaded, createMcpPlugin(mcp)];
     const assembly = loadAssembly(kernel, [...basePlugins, createSubagentPlugin({
       config,
-      provider,
+      provider: live,
       chain,
       prompt,
       directory,
@@ -562,7 +617,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     // 配置没写 `limits.contextTokens` 时这一件是 null：窗口大小是模型事实，不猜，正常聊天照跑。
     const limits = compactionLimitsOf(config);
     const compaction = limits === undefined ? null : createCompaction({
-      provider,
+      provider: live,
       session,
       directory,
       id,
@@ -572,7 +627,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     });
     const loop = createLoop({
       kernel,
-      provider: observedProvider(provider, (event) => connection.notify({ notify: 'delta', sessionId: id, event })),
+      provider: observedProvider(live, (event) => connection.notify({ notify: 'delta', sessionId: id, event })),
       prompt,
       session,
       limits: loopLimitsOf(config),
@@ -774,6 +829,10 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
             mode: state.mode.file?.name ?? null,
             modeLayer: state.mode.file?.layer ?? null,
             pendingMode: state.pending?.name ?? null,
+            // 这一份会话现在打的是哪一份模型，以及等在它轮次边界上的那一份（方案 7.1 的三种读数、7.3 第二行）。
+            // 读的是会话自己那一格而不是项目环境那一份：写完未采用与已采用在这两格里是分得开的。
+            model: state.generation.provider.model ?? null,
+            pendingModel: state.pendingGeneration?.provider.model ?? null,
             // 判定档位与模式名是两样东西，字段也各写各的（D40：状态行上 `mode:` 与 `policy:`）。
             policy: state.chain.mode,
             denials: state.chain.denials(),
@@ -801,8 +860,10 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           // 界面说不出文件路径，也说不出白名单之外的键（方案 7.2）。
           if (configStore === undefined) throw new KernelError('config_write_unsupported');
           const { field, value, layer, version } = message.params;
-          const written = await configStore.write({ layer, field, value, version });
-          return { ...written, layers: await configStore.list() };
+          const { key, ...saved } = await configStore.write({ layer, field, value, version });
+          // 白名单里这四条都是提供方要读的那几格，所以写完就问一句：哪一份会话现在就换，哪一份等自己那一轮的边界。
+          const { applies, failure } = adoptGeneration(key, value);
+          return { ...saved, applies, ...(failure === undefined ? {} : { failure }), layers: await configStore.list() };
         }
         case 'session.compact': {
           const state = open(sessionId);

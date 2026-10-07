@@ -3,7 +3,7 @@
 // 那个文件跟着仓库走，改它等于替别人改（7.2 表里那一格写的是本机覆盖）。命令行与管理端那两层是只读的。
 import { configPaths } from './config-file.js';
 import { KernelError } from './error.js';
-import { readConfigVersion, writeConfigField } from './config-edit.js';
+import { editableField, readConfigVersion, writeConfigField } from './config-edit.js';
 
 const LAYERS = ['user', 'projectLocal'];
 
@@ -23,7 +23,12 @@ export function createConfigStore({ projectRoot, userHome }: { projectRoot: stri
       }));
     },
     write({ layer, field, value, version }: { layer: string; field: string; value: string; version: string }) {
-      return writeConfigField(pathOf(layer), field, value, version);
+      const definition = editableField(field);
+      return writeConfigField(pathOf(layer), field, value, version).then((written) => ({
+        ...written,
+        // 那一个字段落在提供方配置的哪一格上：宿主按这一格重算提供方，不必知道白名单的全表（方案 7.3）。
+        key: definition.path[1],
+      }));
     },
   };
 }

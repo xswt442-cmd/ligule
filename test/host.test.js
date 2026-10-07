@@ -759,7 +759,80 @@ test('shownConfigOf keeps the displayable part of each field', () => {
   assert.deepEqual(shownConfigOf({}), { model: { api: undefined, baseURL: undefined, model: undefined, apiKeyEnv: undefined } });
 });
 
-// 一具宿主接两个项目（实现顺序第 69 步，方案 3.1 与 3.2）：会话属于哪一个项目，记录就落在
+// 写进去的生成选择什么时候被采用（实现顺序第 91 步，方案 7.3 第二行）：空着的会话立刻换，
+// 跑着的那一轮用开始时那一份，新的那一份在整轮收尾之后、下一条输入受理之前采用。
+test('a saved generation choice lands now on an idle session and at the round edge on a running one', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-generation-'));
+  const home = join(root, 'home');
+  const userFile = join(home, '.ligule', 'config.toml');
+  await mkdir(dirname(userFile), { recursive: true });
+  await writeFile(userFile, '[model]\napi = "messages"\nbaseURL = "http://127.0.0.1:1"\nmodel = "装配时那一份"\n', 'utf8');
+  const store = createConfigStore({ projectRoot: root, userHome: home });
+  const served = [];
+  let gate;
+  const deriveProvider = (config) => ({
+    model: config.model.model,
+    capabilities: MESSAGES_CAPABILITIES,
+    async *stream() {
+      if (gate !== undefined) await gate;
+      served.push(config.model.model);
+      yield { type: 'text', text: '一份回答' };
+    },
+  });
+  try {
+    await withInProcessHost(async (connection) => {
+      const { sessionId } = await connection.request('session.create', {});
+      const version = (await connection.request('config.get', {})).layers[0].version;
+
+      // 空着的那一份：写完就走新读回来的那一条提供方。
+      const idle = await connection.request('config.set', { field: 'model.model', value: '第一份', layer: 'user', version });
+      assert.deepEqual(idle.applies, [{ sessionId, when: 'now' }]);
+      const now = await connection.request('status.get', { sessionId });
+      assert.equal(now.model, '第一份', '状态里读得出这一份会话现在打的是哪一份模型');
+      assert.equal(now.pendingModel, null, '没有等着换的那一份时那一格是空的');
+      await connection.request('run.start', { sessionId, input: '甲' });
+      assert.deepEqual(served, ['第一份'], '下一轮走的是刚写进去的那一份，不是装配时那一份');
+
+      // 跑着的那一轮里保存：本轮的每一次调用都还是开始时那一份，换的那一次落在轮的边界上。
+      let release;
+      gate = new Promise((resolve) => { release = resolve; });
+      const running = connection.request('run.start', { sessionId, input: '乙' });
+      await delay(60);
+      const again = await connection.request('config.set', {
+        field: 'model.model', value: '第二份', layer: 'user', version: (await connection.request('config.get', {})).layers[0].version,
+      });
+      assert.deepEqual(again.applies, [{ sessionId, when: 'round' }]);
+      const waiting = await connection.request('status.get', { sessionId });
+      assert.equal(waiting.model, '第一份', '那一轮还在走开始时那一份');
+      assert.equal(waiting.pendingModel, '第二份', '等在它轮次边界上的那一份读得出来');
+      release();
+      gate = undefined;
+      await running;
+      assert.deepEqual(served, ['第一份', '第一份'], '那一轮里两次调用用的都是开始时那一份');
+      await connection.request('run.start', { sessionId, input: '丙' });
+      assert.deepEqual(served.at(-1), '第二份', '边界之后才换');
+
+      // 晚开的会话继承最近写进去的那一份，不是装配那一次的那一份。
+      const other = await connection.request('session.create', {});
+      assert.equal((await connection.request('status.get', { sessionId: other.sessionId })).model, '第二份');
+
+      // 文件已经写对、提供方重算失败：那两件事分开说，界面才写得出「已保存 / 未生效」。
+      const broken = await connection.request('config.set', {
+        field: 'model.model', value: 'deriveProvider 认不下的那一份', layer: 'user', version: (await connection.request('config.get', {})).layers[0].version,
+      });
+      assert.ok(broken.version, '文件那一次是写成了');
+      assert.deepEqual(broken.applies, [], '但没有任何一份会话采用了它');
+      assert.equal(broken.failure.code, 'provider_rebuild_failed', '失败那一侧说的是重算提供方这件事，不是保存失败');
+      await connection.request('run.start', { sessionId, input: '丁' });
+      assert.deepEqual(served.at(-1), '第二份', '重算失败不改已经在走的那一份');
+    }, undefined, { configStore: store, deriveProvider: (config) => {
+      if (config.model.model === 'deriveProvider 认不下的那一份') throw new Error('that shape is not known');
+      return deriveProvider(config);
+    } });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 // 那一个项目的记录目录里，那一个项目的列表才列得出它。装载不出别的项目环境的宿主直接说不支持。
 test('one host keeps two projects apart, and a host without a loader says so', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ligule-projects-'));
