@@ -39,7 +39,7 @@ ligule tui                                # 终端界面，要 ink 与 react 两
 ligule host                               # 一行一条帧的协议端点，桌面壳起的就是这一个进程
 ```
 
-终端界面里的命令是 `/help`、`/mode [名字]`、`/status`、`/tools`、`/show [序号]`、`/sub [序号]`、`/compact`、`/copy`、`/export <路径>`、`/sessions`、`/find <文字>`、`/resume <id> [名字]`、`/queue [动作]`、`/branch [序号]`、`/name <文字>`、`/archive`、`/unarchive`、`/new`、`/quit`。
+终端界面里的命令是 `/help`、`/mode [名字]`、`/status`、`/tools`、`/show [序号]`、`/sub [序号]`、`/compact`、`/copy`、`/export <路径>`、`/sessions`、`/find <文字>`、`/resume <id> [名字]`、`/queue [动作]`、`/bind [<动作> <键的写法>|reset <动作>|default]`、`/branch [序号]`、`/name <文字>`、`/archive`、`/unarchive`、`/new`、`/quit`。
 
 - 打 `/` 列出候选：Tab 补全、上下键选、Esc 收起。提示模板也在这条输入框里用。展开在宿主那一侧做。画出来的是你原本敲的那一行。
 - 打 `@` 引用这个项目里的文件：候选由宿主列出来，界面自己不开盘，清单第一行说这批出自哪一个项目。Enter 或 Tab 把选中那一条换成 `@路径` 放进草稿而不发送；那一次问还没答回来时这两记键什么都不做，一条候选都没有时 Enter 照旧发这一句；Esc 收起当下这一个词。这一段文字只是草稿里的字：不发起一次工具调用，也不写进记录。宿主翻到 4000 个文件的上限时那一栏说「更深的没翻到」，不说「没有」。
@@ -49,6 +49,7 @@ ligule host                               # 一行一条帧的协议端点，桌
 - 上下键翻跨会话留住的那一份输入历史。Ctrl+R 在里面反查。Ctrl+G 把草稿交给 `VISUAL`（若已设置）或 `EDITOR` 指定的编辑器再读回来。Ctrl+O 可打开完整历史浏览：PageUp/PageDown 翻页，Home/End 跳到两端，Shift+↑/↓ 选择行，Ctrl+Y 复制选择，Esc 关闭；审批中的 Ctrl+O 查看或收起实际改动，Esc 取消当前运行。
 - 整段粘贴作为一个整体进草稿：里面的换行不发起一轮，那一段里若有 `y` 也不替人答复审批。要发还是由人按那一次 Enter。
 - `/help` 里那一组按键与界面上每一处说出的键名读的是同一份表（`src/tui/keymap.ts`：动作、默认那串键、落在哪一个范围、一句怎么说）。说得出「Ctrl+Enter 发送」，那一条分支就一定接得住这一记按键。
+- `/bind` 列出现在这一份键位；`/bind <动作> <键的写法>` 改一记，`/bind reset <动作>` 退那一条，`/bind default` 整份退回。同一范围里两记键要落同一件事会当场拒掉。改的那一份存在 `~/.ligule/tui-keys.json`，下次打开还是它；桌面那一侧在设置的「键位」那一栏里改。
 - `/copy` 把最近那一条回答放进剪贴板。`/export <路径>` 把这一份记录写成 markdown。每条派生支线另写一份。
 - 状态行上有 `mode:`、`policy:`、`tools:`。写了 `limits.contextTokens` 时多一段 `ctx:~估算/窗口`。终端标题画出模型、项目根与这份会话的编号。
 - 跑过的会话列在 `ligule sessions` 和终端的 `/sessions`，后者可用键盘选。接上某一份用 `ligule resume <会话 id> "接着做"` 或终端的 `/resume <会话 id>`。那一次判定怎么走的用 `ligule policy <会话 id>` 读出来。
