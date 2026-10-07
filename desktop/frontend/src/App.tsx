@@ -54,6 +54,8 @@ const HISTORY_KEY = 'ligule.input-history';
 const HISTORY_MAX = 50;
 // 「没在问哪一段」的形状：真实的落笔处起点不可能是 -1，所以它跟任何一段都对不上。
 const NO_TOKEN = { start: -1, text: '' };
+// 交给视口的那几个对象要稳住身份：每渲染一个新对象会被当成新值，短记录上那几次重排会连成死循环（第 105 步）。
+const VIEWPORT_INCREASE = { top: 240, bottom: 600 };
 
 // 本机存的那一份是不可信的输入：读坏了就当没有。
 function readHistory(): string[] {
@@ -862,11 +864,13 @@ export function App({ transport }: { transport: Transport }) {
   // 展示档没放进来那几类行不进列表：虚拟视口要量每一行的高度，藏着不画的行留在列表里只会量到零（D90、U48）。
   const shown = useMemo(() => rows.filter((row) => shownIn(verbosity, row)), [rows, verbosity]);
   // 流式那半截排在已落盘的那些行之后：它是这一轮的末尾，画到开头去就把因果倒过来了。
-  const visible = live.reasoning === '' && live.text === '' ? shown : [
+  // 这一份数组交给视口当数据：身份必须稳住（只在真有变化时才换），否则每渲染一个新数组会让视口
+  // 一直当它变了，短记录上那一串重排会连成死循环（第 105 步在真端点上撞到过两次）。
+  const visible = useMemo(() => (live.reasoning === '' && live.text === '' ? shown : [
     ...shown,
     ...(live.reasoning === '' || !shownIn(verbosity, LIVE_REASONING) ? [] : [{ ...LIVE_REASONING, text: live.reasoning }]),
     ...(live.text === '' || !shownIn(verbosity, LIVE_ANSWER) ? [] : [{ ...LIVE_ANSWER, text: live.text }]),
-  ];
+  ]), [shown, live.reasoning, live.text, verbosity]);
 
   // 记住这一份会话读到哪儿：画面最上面那一行的事件序号，切回来时按它落回去（方案 6.2）。
   // 身份要稳住：每次渲染都换一个新函数会让视口重新订阅一次，短记录上那几次重排会连成一串（第 105 步）。
@@ -915,6 +919,7 @@ export function App({ transport }: { transport: Transport }) {
 
   // 要落的那一条在数据里的位置：`stamp` 换掉的那一帧视口重新挂载，就从这一条开始画。
   const jumpAt = wanted === null ? -1 : visible.findIndex((row) => row.seq === wanted.seq);
+  const initialIndex = useMemo(() => (jumpAt < 0 ? undefined : { index: jumpAt, align: 'start' as const }), [jumpAt]);
 
   const panelProps: PanelProps = {
     client,
@@ -967,7 +972,7 @@ export function App({ transport }: { transport: Transport }) {
           style={{ height: '100%' }}
           data={visible}
           firstItemIndex={firstIndex}
-          initialTopMostItemIndex={jumpAt < 0 ? undefined : { index: jumpAt, align: 'start' }}
+          initialTopMostItemIndex={initialIndex}
           computeItemKey={(_index, row) => row.id}
           itemContent={(_index, row) => <RowView
             row={row}
@@ -983,7 +988,7 @@ export function App({ transport }: { transport: Transport }) {
           // 一次 setState 会让视口重排，重排又报一次——记录短得装不满一屏时这一条会转成死循环（第 105 步在真端点上撞到）。
           atBottomStateChange={(atBottom) => setPinned((current) => (current === atBottom ? current : atBottom))}
           rangeChanged={onRangeChanged}
-          increaseViewportBy={{ top: 240, bottom: 600 }}
+          increaseViewportBy={VIEWPORT_INCREASE}
           components={viewport}
         />
       </div>
