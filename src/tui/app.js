@@ -253,7 +253,7 @@ export function queuedLine(text, limit = 64) {
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
 
-export function App({ client, sessionId: firstSessionId, info = {}, interactive = true, stdout, history = { entries: [], remember: async () => {} } }) {
+export function App({ client, sessionId: firstSessionId, info = {}, interactive = true, stdout, history = { entries: [], remember: async () => {} }, inputs }) {
   const app = useApp();
   const [sessionId, setSessionId] = useState(firstSessionId);
   const activeSession = useRef(sessionId);
@@ -286,6 +286,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [queue, setQueue] = useState([]);
   // 取消这一轮之后队列停下等人：剩余的那几条不自己发出去（方案 5.2）。
   const [queuePaused, setQueuePaused] = useState(false);
+  const push = useCallback((...added) => setRows((current) => [...current, ...added]), []);
   // 排着的那几条与草稿都属于那一份会话：换看别的一份时把这一份收起来，换回来再摊开——
   // 既不把没发的话送到另一份会话里，也不把它丢掉（方案 5.2「队列按会话隔离」）。
   const inputState = useRef(new Map());
@@ -300,11 +301,46 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     setCaret((saved?.draft ?? '').length);
     viewedSession.current = sessionId;
   }, [draft, queue, queuePaused, sessionId]);
+
+  // 退出之前没发出去的那一句与排着的几句留在本机这一份文件里：接上哪一份会话就读哪一份（方案 5.1）。
+  // 只在本次没摊开过的那一份上读一次；读回来时人已切走的丢掉，不盖到另一份的草稿上。
+  const inputNow = useRef({ draft: '', queue: [] });
+  inputNow.current = { draft, queue };
+  useEffect(() => {
+    if (inputs === undefined) return;
+    const own = sessionId;
+    const root = info.boundary ?? '';
+    if (inputState.current.has(own)) return;
+    void (async () => {
+      const saved = await inputs.read(root, own);
+      if (viewedSession.current !== own) return;
+      inputState.current.set(own, { queue: saved.queued, queuePaused: saved.queued.length > 0, draft: saved.draft });
+      // 那一句读回来的路上人已经自己敲了字：以他敲的为准，不拿一份旧的盖过去。
+      if (saved.draft !== '' && inputNow.current.draft === '') {
+        setDraft(saved.draft);
+        setCaret(saved.draft.length);
+      }
+      // 排着的几句恢复成暂停：那几句当时还没发出去，重启之后自己发是替人做了他没要的决定（方案 5.2）。
+      if (saved.queued.length > 0 && inputNow.current.queue.length === 0) {
+        setQueue(saved.queued);
+        setQueuePaused(true);
+      }
+    })().catch(() => inputState.current.delete(own));
+  }, [info.boundary, inputs, sessionId]);
+
+  // 手停下来 400 毫秒才写这一份：敲字那一段不碰磁盘，而退出与崩溃前那一句已经落下了。
+  useEffect(() => {
+    if (inputs === undefined) return;
+    const own = sessionId;
+    const root = info.boundary ?? '';
+    const timer = setTimeout(() => {
+      void inputs.write(root, own, draft, queue).catch(() => push({ kind: 'error', text: '这一句在本机存不住：退出再打开时它不会回来' }));
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [draft, info.boundary, inputs, push, queue, sessionId]);
   const [sessionPicker, setSessionPicker] = useState(null);
   const [approvalExpanded, setApprovalExpanded] = useState(false);
   const [approvalCursor, setApprovalCursor] = useState(0);
-
-  const push = useCallback((...added) => setRows((current) => [...current, ...added]), []);
 
   const refreshStatus = useCallback(async () => {
     try {

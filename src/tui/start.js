@@ -8,8 +8,9 @@ import { createMemoryConnectionPair } from '../host/memory.js';
 import { serveHost } from '../host/host.js';
 import { App } from './app.js';
 import { flushHistory, historyPathOf, loadHistory, pushHistory, rememberHistory } from './history.js';
+import { flushInput, inputPathOf, readInput, rememberInput } from './input-store.js';
 
-export async function runTui({ config, provider, policy, logger, modeName, modePaths, extensions, stdout = process.stdout, stdin = process.stdin, stderr = process.stderr, editor = process.env.VISUAL || process.env.EDITOR, historyFile = historyPathOf() }) {
+export async function runTui({ config, provider, policy, logger, modeName, modePaths, extensions, stdout = process.stdout, stdin = process.stdin, stderr = process.stderr, editor = process.env.VISUAL || process.env.EDITOR, historyFile = historyPathOf(), inputFile = inputPathOf() }) {
   const pair = createMemoryConnectionPair();
   const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy, logger, modeName, modePaths, extensions });
   const client = createConnection(pair.client);
@@ -32,6 +33,11 @@ export async function runTui({ config, provider, policy, logger, modeName, modeP
         // 编辑器那一个命令名由启动这一侧读环境变量，界面自己不碰进程。
         info: { model: config.model?.model, boundary: config.boundary, editor },
         history,
+        // 草稿与排着的那几句归本机这一份文件：读写都由启动这一侧接出去，界面不认识路径（与历史同一层做法）。
+        inputs: {
+          read: (projectRoot, sessionId) => readInput(inputFile, projectRoot, sessionId),
+          write: (projectRoot, own, draft, queued) => rememberInput(inputFile, { projectRoot, sessionId: own, draft, queued }),
+        },
         interactive: Boolean(stdin.isTTY && stdout.isTTY),
         // 状态行按宽度取舍要看终端列数（D40），界面自己不读进程。
         stdout,
@@ -41,7 +47,7 @@ export async function runTui({ config, provider, policy, logger, modeName, modeP
     await instance.waitUntilExit();
   } finally {
     try {
-      await flushHistory(historyFile);
+      await Promise.all([flushHistory(historyFile), flushInput(inputFile)]);
     } finally {
       // 界面退出之后关掉客户端这一侧：Host 读到末尾就把还在跑的轮次取消、按装配清单的逆序撤插件（D30）。
       pair.client.output.end();

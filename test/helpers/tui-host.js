@@ -117,7 +117,7 @@ export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {} 
     });
     const client = createConnection(pair.client);
     const { sessionId } = await client.request('session.create', {});
-    return await run({ client, config, directory, sessionDirectory, sessionId, requests, notifications, providerRequests, host, hostOutput: pair.host.output });
+    return await run({ client, config, directory, projectDirectory, sessionDirectory, sessionId, requests, notifications, providerRequests, host, hostOutput: pair.host.output });
   } finally {
     try {
       try {

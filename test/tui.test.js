@@ -884,3 +884,69 @@ test('cancelling a round leaves the queued sentences paused', options, async () 
     instance.unmount();
   }
 }, { delayMs: 1_800 }));
+
+// 草稿与排着的几句跨退出留住：一行一份会话，同一份再写换掉旧的那一行，两句都没了就不留这一行。
+test('the input file keeps one line per session and drops emptied ones', async () => {
+  const { mkdir, mkdtemp, readFile, rm } = await import('node:fs/promises');
+  const { join, resolve } = await import('node:path');
+  const { parseInputs, readInput, rememberInput } = await import('../dist/tui/input-store.js');
+
+  await mkdir(resolve('testplace'), { recursive: true });
+  const directory = await mkdtemp(join(resolve('testplace'), 'input-store-'));
+  const path = join(directory, 'tui-input.jsonl');
+  try {
+    await rememberInput(path, { projectRoot: 'E:/a', sessionId: 'one', draft: '第一份的半句', queued: ['排着的那句'] });
+    await rememberInput(path, { projectRoot: 'E:/b', sessionId: 'one', draft: '另一个项目里的同号', queued: [] });
+    await rememberInput(path, { projectRoot: 'E:/a', sessionId: 'two', draft: '', queued: ['第二份排着的'] });
+    assert.deepEqual(await readInput(path, 'E:/a', 'one'), { projectRoot: 'E:/a', sessionId: 'one', draft: '第一份的半句', queued: ['排着的那句'] },
+      '同一个编号在不同项目根下是两份会话');
+    assert.deepEqual(await readInput(path, 'E:/a', 'never'), { projectRoot: 'E:/a', sessionId: 'never', draft: '', queued: [] }, '没留过就是空的');
+    assert.deepEqual(parseInputs('不是 JSON\n{"sessionId":"ok","draft":"坏行旁边那句还在"}\n').map((item) => item.sessionId), ['ok'],
+      '读不懂的一行跳过，不带走整份，也不让会话开不了');
+    await rememberInput(path, { projectRoot: 'E:/a', sessionId: 'one', draft: '', queued: [] });
+    assert.deepEqual(await readInput(path, 'E:/a', 'one'), { projectRoot: 'E:/a', sessionId: 'one', draft: '', queued: [] },
+      '两句都收回来了就不留这一行');
+    assert.deepEqual(await readInput(path, 'E:/b', 'one'), { projectRoot: 'E:/b', sessionId: 'one', draft: '另一个项目里的同号', queued: [] },
+      '另一项目根下的同号不受影响');
+    assert.deepEqual(parseInputs(await readFile(path, 'utf8')).map((item) => item.projectRoot).sort(), ['E:/a', 'E:/b']);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+// 界面读回来的是那一份会话自己的那一句：排着的几句恢复成暂停，不替人发（方案 5.1、5.2）。
+test('a reopened session takes back its own draft and a paused queue', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { App } = await import('../dist/tui/app.js');
+
+  const stdout = new PassThrough();
+  stdout.columns = 140;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const saved = new Map([[sessionId, { draft: '上次没写完的那一句', queued: ['上次排着的那一句'] }]]);
+  const written = [];
+  const inputs = {
+    read: async (projectRoot, own) => saved.get(own) ?? { projectRoot, sessionId: own, draft: '', queued: [] },
+    write: async (projectRoot, own, draft, queued) => { written.push({ projectRoot, sessionId: own, draft, queued }); },
+  };
+
+  const instance = render(createElement(App, {
+    client, sessionId, info: { boundary: projectDirectory }, interactive: true, inputs, stdout,
+  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  try {
+    await waitFor(() => plainOutput(painted).includes('上次没写完的那一句'), { read: () => plainOutput(painted) });
+    const frame = plainOutput(painted);
+    assert.match(frame, /上次排着的那一句/, '排着的那一句跟着回来');
+    assert.match(frame, /队列暂停中/, '恢复时是暂停的：那几句当时还没发出去');
+    assert.equal(requests.filter((request) => request.method === 'run.start').length, 0, '恢复不自己发');
+    await waitFor(() => written.length > 0, { read: () => JSON.stringify(written) });
+    assert.deepEqual(written.at(-1), { projectRoot: projectDirectory, sessionId, draft: '上次没写完的那一句', queued: ['上次排着的那一句'] },
+      '写回去的是那一份会话自己的两格');
+  } finally {
+    instance.unmount();
+  }
+}));
