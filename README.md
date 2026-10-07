@@ -39,10 +39,11 @@ ligule tui                                # 终端界面，要 ink 与 react 两
 ligule host                               # 一行一条帧的协议端点，桌面壳起的就是这一个进程
 ```
 
-终端界面里的命令是 `/help`、`/mode [名字]`、`/status`、`/tools`、`/show [序号]`、`/sub [序号]`、`/compact`、`/copy`、`/export <路径>`、`/sessions`、`/find <文字>`、`/resume <id> [名字]`、`/branch [序号]`、`/name <文字>`、`/archive`、`/unarchive`、`/new`、`/quit`。
+终端界面里的命令是 `/help`、`/mode [名字]`、`/status`、`/tools`、`/show [序号]`、`/sub [序号]`、`/compact`、`/copy`、`/export <路径>`、`/sessions`、`/find <文字>`、`/resume <id> [名字]`、`/queue [动作]`、`/branch [序号]`、`/name <文字>`、`/archive`、`/unarchive`、`/new`、`/quit`。
 
 - 打 `/` 列出候选：Tab 补全、上下键选、Esc 收起。提示模板也在这条输入框里用。展开在宿主那一侧做。画出来的是你原本敲的那一行。
 - 跑着的那一轮里回车不会丢掉那一句：它排进队列，本轮结束后按先后发出。草稿空着时按退格收回最后一条。
+- 你按下 Esc 打断这一轮时，排着的几条一起停下：`/queue` 说出现在走不走，`/queue continue` 才接着发，`/queue drop <序号>` 与 `/queue clear` 把那些句子收回草稿而不是丢掉。
 - 上下键翻跨会话留住的那一份输入历史。Ctrl+R 在里面反查。Ctrl+G 把草稿交给 `VISUAL`（若已设置）或 `EDITOR` 指定的编辑器再读回来。Ctrl+O 可打开完整历史浏览：PageUp/PageDown 翻页，Home/End 跳到两端，Shift+↑/↓ 选择行，Ctrl+Y 复制选择，Esc 关闭；审批中的 Ctrl+O 查看或收起实际改动，Esc 取消当前运行。
 - 整段粘贴作为一个整体进草稿：里面的换行不发起一轮，那一段里若有 `y` 也不替人答复审批。要发还是由人按那一次 Enter。
 - `/copy` 把最近那一条回答放进剪贴板。`/export <路径>` 把这一份记录写成 markdown。每条派生支线另写一份。
