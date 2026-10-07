@@ -7,7 +7,7 @@ import type { Transport } from '../src/protocol';
 type Frame = { id?: string; method?: string; params?: Record<string, unknown>; notify?: string; [key: string]: unknown };
 
 const markdown = [
-  '上下文压缩这一步做了三件事，按先后是：',
+  '上下文压缩这一步做了三件事，**顺序不能换**，按先后是：',
   '',
   '## 做了什么',
   '',
