@@ -26,8 +26,10 @@ function observeFrames(stream, visit) {
 }
 
 // 等一个条件成立。固定毫秒的等待在负载高的机器上会先于渲染到期：检查会假红，
-// 靠画面决定下一步的写法还会把那一轮永远等下去。read 只在没等到时交出画面供报告用。
-export async function waitFor(condition, { within = 10_000, every = 30, read = () => '' } = {}) {
+// 靠画面决定下一步的写法还会把那一轮永远等下去。几份终端界面的检查并行跑时，一条本机回环上的模型往返
+// 能在 10 秒内落不下来（单独跑那一份时 1.6 秒就过），所以这一格留到 60 秒：成立就立刻返回，绿的运行不变慢。
+// read 只在没等到时交出画面供报告用。
+export async function waitFor(condition, { within = 60_000, every = 30, read = () => '' } = {}) {
   const deadline = Date.now() + within;
   for (;;) {
     if (condition()) return;
