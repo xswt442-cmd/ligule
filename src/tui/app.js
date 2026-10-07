@@ -208,16 +208,24 @@ export function helpLines(status, width) {
 }
 
 // 助手的 Markdown 按终端列数排版，代码按语言上色，内容完整保留。
+// 强调那几种记号（加粗、斜体、删除线、行内代码）在这一层画出来：范围名到 Ink 那几格的对应只有这一处（第 96 步）。
+const MARK_STYLES = {
+  'md-strong': { bold: true },
+  'md-em': { italic: true },
+  'md-del': { strikethrough: true },
+  'md-codespan': { color: 'cyan' },
+};
 function MarkdownRows({ text, columns = 80 }) {
   const lines = useMemo(() => markdownLines(text, columns), [text, columns]);
+  const marked = (line) => line.spans.map((span, part) => h(Text, { key: part, ...(MARK_STYLES[span.scope] ?? {}) }, span.text));
   return h(Fragment, null, lines.map((line, index) => {
     if (line.kind === 'code') return h(Text, { key: index, wrap: 'wrap' }, '  ', line.spans === undefined ? line.text : line.spans.map((span, part) => {
       const scope = span.scope?.split('.')[0];
       const color = { keyword: 'magenta', string: 'green', number: 'yellow', comment: 'gray', title: 'cyan', literal: 'yellow', built_in: 'cyan' }[scope];
       return h(Text, { key: part, color }, span.text);
     }));
-    if (line.kind === 'heading') return h(Text, { key: index, bold: true }, line.text);
-    if (line.kind === 'list') return h(Text, { key: index, wrap: 'wrap' }, line.text);
+    if (line.kind === 'heading') return h(Text, { key: index, bold: true, wrap: 'wrap' }, line.spans === undefined ? line.text : marked(line));
+    if (line.spans !== undefined) return h(Text, { key: index, wrap: 'wrap' }, marked(line));
     return h(Text, { key: index, wrap: 'wrap' }, line.text);
   }));
 }

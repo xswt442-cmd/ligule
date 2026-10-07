@@ -310,12 +310,12 @@ test('typing a template command completes it and expands through the host', opti
   await cp(fileURLToPath(new URL('./fixtures/git-release-prepare.md', import.meta.url)), join(templateDirectory, 'prepare.md'));
 } }));
 
-// 助手那一段的结构看得见：围栏里的内容一行不动，标题与列表分出来，行内那几种写法只留文字（第 41 步）。
+// 助手那一段的结构看得见：围栏里的内容一行不动，标题与列表分出来，强调与行内代码带上各自的范围名（第 41、96 步）。
 test('markdown text splits into the shapes a terminal can show', options, () => {
   assert.deepEqual(markdownLines('## 要做三件事\n- 读 `note.txt`\n- **改** 一处\n1. 跑一次\n'), [
     { kind: 'heading', text: '要做三件事' },
-    { kind: 'list', text: '· 读 note.txt' },
-    { kind: 'list', text: '· 改 一处' },
+    { kind: 'list', text: '· 读 note.txt', spans: [{ text: '· 读 ' }, { text: 'note.txt', scope: 'md-codespan' }] },
+    { kind: 'list', text: '· 改 一处', spans: [{ text: '· ' }, { text: '改', scope: 'md-strong' }, { text: ' 一处' }] },
     { kind: 'list', text: '1. 跑一次' },
   ]);
   // 围栏里的一行 `#` 是代码，不是标题；尾随空格也留着。
@@ -325,8 +325,10 @@ test('markdown text splits into the shapes a terminal can show', options, () => 
   const jsLines = markdownLines('```js\nconst a = 1\n```');
   assert.equal(jsLines[0].text, 'const a = 1', '高亮不改变代码正文');
   assert.ok(jsLines[0].spans.some((span) => span.scope?.startsWith('keyword')), 'JavaScript 关键字带高亮范围');
-  // 链接留下文字与地址；成对的星号只保留包住的文字。
-  assert.deepEqual(markdownLines('看 [文档](https://example.com/a) 与 a*b*c'), [{ kind: 'text', text: '看 文档 (https://example.com/a) 与 abc' }]);
+  // 链接留下文字与地址；成对的星号只留包住的文字，但那一句的范围名留着（第 96 步：斜体要画得出来）。
+  assert.deepEqual(markdownLines('看 [文档](https://example.com/a) 与 a*b*c'), [
+    { kind: 'text', text: '看 文档 (https://example.com/a) 与 abc', spans: [{ text: '看 文档 (https://example.com/a) 与 a' }, { text: 'b', scope: 'md-em' }, { text: 'c' }] },
+  ]);
   assert.deepEqual(markdownLines('第一行\n\n第二行'), [{ kind: 'text', text: '第一行' }, { kind: 'text', text: '' }, { kind: 'text', text: '第二行' }]);
 });
 
