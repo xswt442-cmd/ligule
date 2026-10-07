@@ -27,7 +27,7 @@ export type KeyView = '全局' | '输入' | '补全清单' | '路径候选' | '�
 
 export type TerminalAction =
   | 'quit' | 'expand-or-history' | 'editor' | 'search-open' | 'interrupt'
-  | 'send' | 'newline' | 'newline-alt' | 'history-up' | 'history-down' | 'history-up-shift' | 'history-down-shift' | 'queue-recall' | 'queue-recall-alt'
+  | 'send' | 'newline' | 'newline-alt' | 'history-up' | 'history-down' | 'history-up-shift' | 'history-down-shift' | 'queue-recall' | 'queue-recall-alt' | 'undo-draft' | 'redo-draft'
   | 'complete' | 'complete-up' | 'complete-down' | 'complete-close'
   | 'pick-path' | 'pick-path-alt' | 'path-up' | 'path-down' | 'path-close'
   | 'search-pick' | 'search-up' | 'search-down' | 'search-cycle' | 'search-back' | 'search-back-alt' | 'search-close'
@@ -56,6 +56,10 @@ export const KEYMAP: Readonly<Record<TerminalAction, Binding>> = {
   'history-down-shift': { spec: 'shift+arrowdown', view: '输入', label: '往下（带 Shift 的那一记，与 ↓ 同一件事）' },
   'queue-recall': { spec: 'backspace', view: '输入', label: '草稿空着时收回排着的最后一条' },
   'queue-recall-alt': { spec: 'delete', view: '输入', label: '草稿空着时收回排着的最后一条（与退格同一件事）' },
+  // pi 把撤销放在 ctrl+-（`pi/packages/tui/src/keybindings.ts:142`），因为 Ctrl+Z 在 POSIX 终端上是「暂停这个作业」那一记。
+  // 这里走人先试的那一记：Ink 开的是 raw mode，那一个字节交回界面而不是发到作业控制上去。
+  'undo-draft': { spec: 'ctrl+z', view: '输入', label: '退回草稿的上一次改动' },
+  'redo-draft': { spec: 'ctrl+y', view: '输入', label: '把刚退回的那一段再拿回来' },
 
   'complete': { spec: 'tab', view: '补全清单', label: '补全那一条命令' },
   'complete-up': { spec: 'arrowup', view: '补全清单', label: '选上一条命令' },

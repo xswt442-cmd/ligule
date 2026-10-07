@@ -26,7 +26,7 @@ try {
 
 const options = { skip: missing === '' ? false : missing };
 const editorFixture = fileURLToPath(new URL('./fixtures/editor.mjs', import.meta.url));
-const { foldText, editDraft, projectRecord, buildStatusLine, contextSegment, findRecord, branchOf, detailTitle, helpLines, routeInput, candidatesOf, describeChange, displayWidth, flowGroups, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, findLines, mentionToken, insertMention, resolveSessionId, SESSION_ROWS } = rows;
+const { foldText, editDraft, projectRecord, buildStatusLine, contextSegment, findRecord, branchOf, detailTitle, helpLines, routeInput, candidatesOf, describeChange, displayWidth, flowGroups, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, findLines, mentionToken, insertMention, resolveSessionId, SESSION_ROWS, isTypingRun } = rows;
 const quoted = (value) => `"${value.replaceAll('"', '\\"')}"`;
 const plainOutput = (value) => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
 
@@ -1025,6 +1025,72 @@ test('an @ fragment asks the host for project files and Enter picks one', option
     await delay(120);
     assert.equal(started(), 0, '查询在路上时 Enter 既不选中也不发送');
     assert.match(lastFrame(), /@x/, '那一句还在草稿上');
+  } finally {
+    instance.unmount();
+  }
+}));
+
+// 撤销的单位怎么划：连着在末尾打的字算一段，空格、插到中间、粘贴进来的那一段各算一段（方案 6.1）。
+test('one undo unit is a typing run, not one keystroke', options, () => {
+  assert.equal(isTypingRun({ draft: 'ab', caret: 2 }, { draft: 'abc', caret: 3 }), true);
+  assert.equal(isTypingRun({ draft: 'ab', caret: 2 }, { draft: 'ab ', caret: 3 }), false, '打下的那个空格自己成一段');
+  assert.equal(isTypingRun({ draft: 'ab', caret: 2 }, { draft: 'acb', caret: 2 }), false, '盖掉中间一个字符的不是往后打');
+  assert.equal(isTypingRun({ draft: 'ab', caret: 1 }, { draft: 'abc', caret: 2 }), false, '光标不在末尾时不并段');
+  assert.equal(isTypingRun({ draft: '甲', caret: 1 }, { draft: '甲乙丙', caret: 3 }), false, '一次粘进来三个字的是一段而不是三键');
+  assert.equal(isTypingRun({ draft: '👍', caret: 2 }, { draft: '👍👍', caret: 4 }), true, '一个字素算一个单位，成对的那一种不算两个');
+});
+
+// Ctrl+Z 退一段、Ctrl+Y 再拿回来：这一处走的是真按键喂进渲染那一条路，撤销不发任何东西出去。
+test('Ctrl+Z walks the draft back a unit at a time and Ctrl+Y takes it back', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { setTimeout: delay } = await import('node:timers/promises');
+  const { App } = await import('../dist/tui/app.js');
+
+  const stdout = new PassThrough();
+  stdout.columns = 120;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const instance = render(createElement(App, {
+    client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const lastFrame = () => painted.split('\x1B[?2026h').pop();
+  const started = () => requests.filter((request) => request.method === 'run.start').length;
+  // 光标处那一段有反色标记，画面里那串字中间夹着样式码：认草稿内容时先把它们去掉。
+  const shown = () => plainOutput(lastFrame());
+  try {
+    await waitFor(() => shown().includes('要模型做的事'), { read: shown });
+
+    // 连着打的五个字是一段：一次 Ctrl+Z 整段没了，再按 Ctrl+Y 又整段回来。
+    stdin.write('第一段草稿');
+    await waitFor(() => shown().includes('第一段草稿'), { read: shown });
+    stdin.write('\x1a');
+    await waitFor(() => !shown().includes('第一段草稿'), { read: shown });
+    stdin.write('\x19');
+    await waitFor(() => shown().includes('第一段草稿'), { read: shown });
+
+    // 退回来之后接着打的字是另一段：一次退回整段，原来那一段留着。
+    stdin.write('ab');
+    await delay(60);
+    stdin.write('\x1a');
+    await waitFor(() => !shown().includes('ab'), { read: shown });
+    assert.ok(shown().includes('第一段草稿'), '退掉后打的那两个字符时，原来那一段还在');
+
+    // 光标挪开之后再打的字又是一段：退一次只去掉那一个字符。
+    stdin.write('甲');
+    await delay(60);
+    stdin.write('\x1b[D');
+    await delay(60);
+    stdin.write('乙');
+    await delay(60);
+    assert.ok(shown().includes('第一段草稿乙甲'), '光标挪到中间再打的字落在那一个字前面');
+    stdin.write('\x1a');
+    await waitFor(() => !shown().includes('乙'), { read: shown });
+    assert.ok(shown().includes('第一段草稿甲'), '退的是刚才那一段，不是整份草稿');
+    assert.equal(started(), 0, '撤销不发任何东西出去，也不起一轮');
   } finally {
     instance.unmount();
   }

@@ -61,6 +61,16 @@ export function editDraft(draft, caret, input, key) {
   return { draft: draft.slice(0, caret) + input + draft.slice(caret), caret: caret + input.length };
 }
 
+// 撤销的「一个单位」怎么划：连着在末尾打出来的字算一个单位，退格、删词、粘贴、换行各算一个（方案 6.1）。
+// 划线段的判据只有这一个：前一份是后一份的开头、多出来的正好是一个字素、那一头落在末尾、且不是空白。
+// 空白单独成一段，打错「两个字之间的那个空格」时能退回打空格之前，而不是整句一起没。
+export function isTypingRun(before, after) {
+  if (before.caret !== before.draft.length || after.caret !== after.draft.length) return false;
+  if (!after.draft.startsWith(before.draft)) return false;
+  const parts = [...GRAPHEMES.segment(after.draft.slice(before.draft.length))];
+  return parts.length === 1 && !/\s/u.test(parts[0].segment);
+}
+
 // 工具结果的内容可以是串，也可以是结构化的一段（read 交回的是 {text: ...}）；界面这一处只画文本。
 const textOf = (value) => (typeof value === 'string' ? value : JSON.stringify(value ?? '', null, 2));
 
@@ -274,6 +284,32 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [expanded, setExpanded] = useState(false);
   const [draft, setDraft] = useState('');
   const [caret, setCaret] = useState(0);
+  // 草稿的撤销栈（方案 6.1）：人在这一格里改出来的每一段，改之前那一份先留下来，Ctrl+Z 退回它、Ctrl+Y 再拿回来。
+  // 只留在这一次打开的内存里：跨退出留住的是第 84 步那两格，退出之后退回刚才打的字没有意义。
+  // stack 与 future 各 100 份（ponytail: 上限写在这一处，一句草稿远够用；要更长就换成按字节预算的环形缓冲）。
+  const undo = useRef({ stack: [], future: [], kind: null, before: { draft: '', caret: 0 } });
+  useEffect(() => {
+    const cell = undo.current;
+    const current = { draft, caret };
+    const previous = cell.before;
+    cell.before = current;
+    if (current.draft === previous.draft) { cell.kind = null; return; }
+    const run = isTypingRun(previous, current);
+    // 连着打的字并上一个单位：退一次是一段，不是一个字符。
+    if (run && cell.kind === 'insert') return;
+    cell.stack = [...cell.stack.slice(-99), previous];
+    cell.kind = run ? 'insert' : 'text';
+  }, [draft, caret]);
+  // 草稿整份换掉的那几处走这一条：那不是一次可退回的改动，清空栈也别让 Ctrl+Z 把另一份会话的草稿翻回来。
+  const resetDraft = useCallback((text) => {
+    const cell = undo.current;
+    cell.stack = [];
+    cell.future = [];
+    cell.kind = null;
+    cell.before = { draft: text, caret: text.length };
+    setDraft(text);
+    setCaret(text.length);
+  }, []);
   // 输入历史跨会话留住（D81 边界二：它存在界面自己那一份文件里，不进会话记录）。
   // 文件里的先后就是这里的先后，最新的排在第一个，上下键从第一个往下翻就是往旧处翻。
   const [entries, setEntries] = useState(history.entries);
@@ -330,8 +366,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     const saved = inputState.current.get(sessionId);
     setQueue(saved?.queue ?? []);
     setQueuePaused(saved?.queuePaused ?? false);
-    setDraft(saved?.draft ?? '');
-    setCaret((saved?.draft ?? '').length);
+    resetDraft(saved?.draft ?? '');
     viewedSession.current = sessionId;
   }, [draft, queue, queuePaused, sessionId]);
 
@@ -349,10 +384,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       if (viewedSession.current !== own) return;
       inputState.current.set(own, { queue: saved.queued, queuePaused: saved.queued.length > 0, draft: saved.draft });
       // 那一句读回来的路上人已经自己敲了字：以他敲的为准，不拿一份旧的盖过去。
-      if (saved.draft !== '' && inputNow.current.draft === '') {
-        setDraft(saved.draft);
-        setCaret(saved.draft.length);
-      }
+      if (saved.draft !== '' && inputNow.current.draft === '') resetDraft(saved.draft);
       // 排着的几句恢复成暂停：那几句当时还没发出去，重启之后自己发是替人做了他没要的决定（方案 5.2）。
       if (saved.queued.length > 0 && inputNow.current.queue.length === 0) {
         setQueue(saved.queued);
@@ -996,8 +1028,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       push({ kind: 'meta', text: `这一轮跑着的时候 ${route.usage} 用不了；${keyHint('interrupt')} 先打断这一轮` });
       return;
     }
-    setDraft('');
-    setCaret(0);
+    resetDraft('');
     setHistoryAt(-1);
     setPick(0);
     setDismissedAt(null);
@@ -1263,6 +1294,26 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       const recalled = next < 0 ? historyDraft : entries[next];
       setDraft(recalled);
       setCaret(recalled.length);
+      return;
+    }
+    if (hit('undo-draft', input, key) || hit('redo-draft', input, key)) {
+      // 退回去与再退回来：两侧各留一份栈，Ctrl+Z 退过头还能用 Ctrl+Y 拿回来——多退一步不是真的把那句草稿丢掉。
+      const cell = undo.current;
+      const back = hit('undo-draft', input, key);
+      const target = (back ? cell.stack : cell.future).at(-1);
+      if (target === undefined) return;
+      const current = { draft: cell.before.draft, caret: cell.before.caret };
+      if (back) {
+        cell.stack = cell.stack.slice(0, -1);
+        cell.future = [...cell.future.slice(-99), current];
+      } else {
+        cell.future = cell.future.slice(0, -1);
+        cell.stack = [...cell.stack.slice(-99), current];
+      }
+      cell.kind = null;
+      cell.before = target;
+      setDraft(target.draft);
+      setCaret(target.caret);
       return;
     }
     if ((hit('queue-recall', input, key) || hit('queue-recall-alt', input, key)) && draft === '' && queue.length > 0) {
