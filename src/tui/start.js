@@ -9,8 +9,9 @@ import { serveHost } from '../host/host.js';
 import { App } from './app.js';
 import { flushHistory, historyPathOf, loadHistory, pushHistory, rememberHistory } from './history.js';
 import { flushInput, inputPathOf, readInput, rememberInput } from './input-store.js';
+import { flushKeys, keyPathOf, readKeys, writeKeys } from './key-store.js';
 
-export async function runTui({ config, provider, policy, logger, modeName, modePaths, extensions, stdout = process.stdout, stdin = process.stdin, stderr = process.stderr, editor = process.env.VISUAL || process.env.EDITOR, historyFile = historyPathOf(), inputFile = inputPathOf() }) {
+export async function runTui({ config, provider, policy, logger, modeName, modePaths, extensions, stdout = process.stdout, stdin = process.stdin, stderr = process.stderr, editor = process.env.VISUAL || process.env.EDITOR, historyFile = historyPathOf(), inputFile = inputPathOf(), keyFile = keyPathOf() }) {
   const pair = createMemoryConnectionPair();
   const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy, logger, modeName, modePaths, extensions });
   const client = createConnection(pair.client);
@@ -39,6 +40,8 @@ export async function runTui({ config, provider, policy, logger, modeName, modeP
           write: (projectRoot, own, draft, queued) => rememberInput(inputFile, { projectRoot, sessionId: own, draft, queued }),
         },
         interactive: Boolean(stdin.isTTY && stdout.isTTY),
+        // 个人键位存在本机另一份文件里：读与写同样由启动这一侧接出去，界面不认识路径（方案 6.1）。
+        keys: { read: () => readKeys(keyFile), write: (overrides) => writeKeys(keyFile, overrides) },
         // 状态行按宽度取舍要看终端列数（D40），界面自己不读进程。
         stdout,
       }),
@@ -47,7 +50,7 @@ export async function runTui({ config, provider, policy, logger, modeName, modeP
     await instance.waitUntilExit();
   } finally {
     try {
-      await Promise.all([flushHistory(historyFile), flushInput(inputFile)]);
+      await Promise.all([flushHistory(historyFile), flushInput(inputFile), flushKeys()]);
     } finally {
       // 界面退出之后关掉客户端这一侧：Host 读到末尾就把还在跑的轮次取消、按装配清单的逆序撤插件（D30）。
       pair.client.output.end();

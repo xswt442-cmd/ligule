@@ -38,6 +38,7 @@ export const UI_COMMANDS: readonly UiCommand[] = Object.freeze([
   { name: 'sub', usage: '/sub [序号]', text: '画出那一次派生执行的整份支线记录，不带序号收起', hint: '[序号]', whenRunning: true },
   { name: 'new', usage: '/new', text: '开一份新会话，画面上方的历史留在终端里', hint: '', whenRunning: false },
   { name: 'queue', usage: '/queue [pause|continue|drop <序号>|clear]', text: '说清排队的那几条现在怎么走，并把它们收回来或丢出去', hint: '[动作]', whenRunning: true },
+  { name: 'bind', usage: '/bind [<动作> <键的写法>|reset <动作>|default]', text: '列出现在的键位；改一记键、取消那一条的覆盖、全部回到默认', hint: '[动作 键|reset <动作>|default]', whenRunning: true },
   { name: 'copy', usage: '/copy', text: '把最近那一条回答放进剪贴板', hint: '', whenRunning: true },
   { name: 'export', usage: '/export <路径>', text: '把这一份记录写成 markdown，派生支线各另写一份', hint: '<路径>', whenRunning: true },
   { name: 'sessions', usage: '/sessions', text: '列出这个项目根下跑过的会话（时间是 UTC）', hint: '', whenRunning: true },

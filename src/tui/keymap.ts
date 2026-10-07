@@ -144,8 +144,41 @@ export function defaultSpecs(): Record<TerminalAction, string> {
   return Object.fromEntries(Object.entries(KEYMAP).map(([action, binding]) => [action, binding.spec])) as Record<TerminalAction, string>;
 }
 
-// 当前那一份：个人覆盖接进来之后换的是这一格的来源，读它的那两处（按键落点与画面说法）跟着一起换。
+// 当前那一份：个人覆盖换的是这一格的内容，读它的两处（按键落点与画面说法）跟着一起换。
+// 换的时机只有一处（`applyOverrides`），所以它是一份要改就整份改的表，不是散在各调用点的开关。
 export const CURRENT = defaultSpecs();
+
+/** 一串人写的键名（`Ctrl+Shift+K`、`enter`）读成规范写法；认不出来交回 null，不猜。 */
+export function parseSpec(text: string): string | null {
+  const parts = text.trim().toLowerCase().split('+').map((part) => part.trim());
+  if (parts.some((part) => part === '')) return null;
+  const key = parts[parts.length - 1]!;
+  const mods = parts.slice(0, -1);
+  if (mods.some((mod) => !MODIFIERS.includes(mod))) return null;
+  const aliases: Record<string, string> = { esc: 'escape', return: 'enter', arrowup: 'uparrow', up: 'arrowup', down: 'arrowdown', left: 'arrowleft', right: 'arrowright', pgup: 'pageup', pgdn: 'pagedown', del: 'delete', space: ' ' };
+  const named = aliases[key] ?? key;
+  if (BARE_MODIFIERS.includes(named) || !(KEY_NAMES[named] !== undefined || named.length === 1)) return null;
+  return [...mods, named].join('+');
+}
+
+/** 换上个人那一份覆盖：读不懂的键名与表里没有的动作名都交回去，有效的那一些照样落下来。 */
+export function applyOverrides(overrides: Record<string, string>): { readonly applied: string[]; readonly refused: string[] } {
+  const applied: string[] = [];
+  const refused: string[] = [];
+  for (const [action, text] of Object.entries(overrides)) {
+    if (!Object.prototype.hasOwnProperty.call(CURRENT, action)) { refused.push(`${action}（表里没有这一个动作）`); continue; }
+    const spec = parseSpec(text);
+    if (spec === null) { refused.push(`${action}: ${text}`); continue; }
+    CURRENT[action as TerminalAction] = spec;
+    applied.push(action);
+  }
+  return { applied, refused };
+}
+
+/** 某一范围里现在的键位撞在一起的那几条。 */
+export function conflictsNow(view: KeyView): [TerminalAction, TerminalAction][] {
+  return conflictsIn(view, CURRENT);
+}
 
 /** 这一记按键落的是不是那一个动作。调用那一处已经站在哪个范围里，这里只比键。 */
 export function hit(action: TerminalAction, input: string, key: InkKey, bindings: Record<TerminalAction, string> = CURRENT): boolean {

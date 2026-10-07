@@ -11,7 +11,7 @@ import { copyToClipboard, lastAnswer } from './clipboard.js';
 import { exportMarkdown, titleEscape, titleText, writeExport } from './output.js';
 import { markdownLines } from './markdown.js';
 import { selectedText, transcriptLines, viewportPosition, wrapLine } from './viewport.js';
-import { CURRENT, KEYMAP, formatKeys, hit, keyHint } from './keymap.js';
+import { CURRENT, KEYMAP, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec } from './keymap.js';
 import { displayWidth } from './commands.js';
 
 const SPINNER = ['⠋', '⠙', '', '⠸', '⠼', '⠴', '⠦', '', '⠇', '⠏'];
@@ -28,12 +28,13 @@ const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 // 那几张表与那几个纯函数交给检查里用（test/tui.test.js），界面自己只走这一处出口。
 export { SESSION_ROWS, UI_COMMANDS, candidatesOf, displayWidth, findLines, findUiCommand, flowGroups, insertMention, mentionToken, resolveSessionId, routeInput, sessionLines } from './commands.js';
-export { KEYMAP, CURRENT, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, specOf } from './keymap.js';
+export { KEYMAP, CURRENT, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec, specOf } from './keymap.js';
 export { markdownLines } from './markdown.js';
 
 // `/help` 里那一组按键读的是 `keymap.ts` 那一份表：画面说出的键、动作与按键落的事从同一处取（方案 6.1）。
 // 别名那几条不单列（`-alt`、`-shift` 结尾的那一些与另一记键落的是同一件事），一份清单不说两遍。
-const KEYS = Object.entries(KEYMAP)
+// 这一处是现算而不是模块加载时算一次：个人覆盖落进来之后，清单要说的是换过的键。
+const keyRows = () => Object.entries(KEYMAP)
   .filter(([action]) => !/-alt$|-shift$/.test(action))
   .map(([action, binding]) => ({ key: formatKeys(CURRENT[action]), action: `${binding.label}（${binding.view}）` }));
 
@@ -191,7 +192,7 @@ export function helpLines(status, width) {
         ? [{ key: '(没有)', action: '在 .ligule/prompts/ 或 ~/.ligule/prompts/ 下放一份 markdown' }]
         : templates.map((template) => ({ key: `/${template.command}`, action: template.description ?? '' })),
     },
-    { title: '按键', entries: KEYS },
+    { title: '按键', entries: keyRows() },
   ];
   return flowGroups(groups, width);
 }
@@ -250,7 +251,7 @@ export function queuedLine(text, limit = 64) {
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
 
-export function App({ client, sessionId: firstSessionId, info = {}, interactive = true, stdout, history = { entries: [], remember: async () => {} }, inputs }) {
+export function App({ client, sessionId: firstSessionId, info = {}, interactive = true, stdout, history = { entries: [], remember: async () => {} }, inputs, keys }) {
   const app = useApp();
   const [sessionId, setSessionId] = useState(firstSessionId);
   const activeSession = useRef(sessionId);
@@ -290,6 +291,20 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const mentionWanted = useRef(NO_TOKEN);
   const mentionAsked = useRef(NO_TOKEN);
   const push = useCallback((...added) => setRows((current) => [...current, ...added]), []);
+  // 个人键位那一份覆盖读自本机的另一份文件，写也写回那里：不进记录、不进模型上下文、不进项目的业务配置（方案 6.1、D81 边界二）。
+  const [keyOverrides, setKeyOverrides] = useState({});
+  useEffect(() => {
+    if (keys === undefined) return;
+    void (async () => {
+      const loaded = await keys.read().catch((error) => ({ overrides: {}, refused: [`那一格读不出来：${error.code ?? error.message}`] }));
+      const outcome = applyOverrides(loaded.overrides);
+      setKeyOverrides(Object.fromEntries(outcome.applied.map((action) => [action, CURRENT[action]])));
+      const refused = [...loaded.refused, ...outcome.refused];
+      // 落不下来的那几条一条条说出来：剩下的那些照样按默认那一份走，但「你以为改掉了其实没有」这件事要说得见。
+      if (refused.length > 0) push({ kind: 'meta', text: `键位里有 ${refused.length} 条落不下来，那几条按默认那一份走：${refused.join('、')}` });
+      else if (outcome.applied.length > 0) push({ kind: 'meta', text: `接上你上次存的键位：改过 ${outcome.applied.length} 条，看一眼用 /bind` });
+    })();
+  }, [keys, push]);
   // 排着的那几条与草稿都属于那一份会话：换看别的一份时把这一份收起来，换回来再摊开——
   // 既不把没发的话送到另一份会话里，也不把它丢掉（方案 5.2「队列按会话隔离」）。
   const inputState = useRef(new Map());
@@ -693,6 +708,68 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       })();
       return;
     }
+    if (name === 'bind') {
+      // 改的是那一个动作的键，动作名不动：画面上说的那串字与按键落的事都从同一份表读，改完两处一起变（方案 6.1）。
+      const parts = argument.trim().split(/\s+/).filter((part) => part !== '');
+      const save = (next) => {
+        if (keys === undefined) {
+          push({ kind: 'meta', text: '这一份界面没接上键位的存储：改的键只在这次运行里有效' });
+          return;
+        }
+        void keys.write(next).catch(() => push({ kind: 'error', text: '键位存不住：退出再打开时它会回到原来那一份' }));
+      };
+      if (parts.length === 0) {
+        push({ kind: 'meta', text: [
+          `现在这一份键位（你改过 ${Object.keys(keyOverrides).length} 条）。改一记键：/bind <动作> <键的写法>；退回默认：/bind reset <动作> 或 /bind default。`,
+          ...Object.entries(KEYMAP).map(([action, binding]) => `${action} = ${formatKeys(CURRENT[action])}（${binding.view}）`),
+        ].join('\n') });
+        return;
+      }
+      if (parts[0] === 'default') {
+        for (const [action, spec] of Object.entries(defaultSpecs())) CURRENT[action] = spec;
+        setKeyOverrides({});
+        save({});
+        push({ kind: 'meta', text: '键位整份回到默认那一份' });
+        return;
+      }
+      if (parts[0] === 'reset') {
+        const action = parts[1];
+        if (action === undefined || KEYMAP[action] === undefined) {
+          push({ kind: 'error', text: `表里没有那一个动作：${action ?? '（没写）'}。先看一眼 /bind 列出来的那一些名字` });
+          return;
+        }
+        CURRENT[action] = KEYMAP[action].spec;
+        const next = { ...keyOverrides };
+        delete next[action];
+        setKeyOverrides(next);
+        save(next);
+        push({ kind: 'meta', text: `${action} 回到 ${formatKeys(KEYMAP[action].spec)}` });
+        return;
+      }
+      const [action, text] = parts;
+      const binding = KEYMAP[action];
+      if (binding === undefined) {
+        push({ kind: 'error', text: `表里没有那一个动作：${action}。先看一眼 /bind 列出来的那一些名字` });
+        return;
+      }
+      const spec = parseSpec(text ?? '');
+      if (spec === null) {
+        push({ kind: 'error', text: `那一串键读不懂：${text ?? '（没写）'}。写法是 修饰键+键名，例如 Ctrl+Shift+K、enter、pageup` });
+        return;
+      }
+      // 先按这一条试一遍：同一个范围里两记键要落同一件事就拒，存下去的表必须是自己按得动的。
+      const clash = conflictsIn(binding.view, { ...CURRENT, [action]: spec });
+      if (clash.length > 0) {
+        push({ kind: 'error', text: `${formatKeys(spec)} 在${binding.view}里已经落在 ${clash[0][0]} 与 ${clash[0][1]} 上：同一范围里不能两记键落同一件事，先把那一条改开` });
+        return;
+      }
+      CURRENT[action] = spec;
+      const next = { ...keyOverrides, [action]: spec };
+      setKeyOverrides(next);
+      save(next);
+      push({ kind: 'meta', text: `${action} 现在是 ${formatKeys(spec)}（${binding.view}）：${binding.label}` });
+      return;
+    }
     if (name === 'queue') {
       // 队列是界面一侧那几行字：这一处只答「怎么走下去」与「收回到哪儿」，不动记录（D81 边界二、方案 5.2）。
       const [action, ordinal] = argument.split(/\s+/);
@@ -896,7 +973,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     push({ kind: 'error', text: `没有这条命令：/${name}（/help 看列表）` });
-  }, [app, client, info, push, queue, queuePaused, sessionId, status, stdout]);
+  }, [app, client, info, keyOverrides, keys, push, queue, queuePaused, sessionId, status, stdout]);
 
   const send = useCallback((text) => {
     const route = routeInput(text, running);
