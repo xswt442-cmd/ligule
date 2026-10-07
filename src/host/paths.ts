@@ -14,16 +14,18 @@ const SKIPPED = ['.git', 'node_modules', 'dist', '.ligule/sessions'];
 export type PathListing = { projectRoot: string; paths: string[]; visited: number; stopped: '' | 'budget' | 'unreadable' };
 
 /**
- * 在项目根内找文件名含这一段文字的那些条。
+ * 在项目根内找整条相对路径里含这一段文字的那些条。
  * 文字为空就是列出最靠前的几条，不是拒掉——按下 `@` 时人正是要看有什么。
+ * `budget` 是这一处那一个上限，只为检查留的口：真用法都是默认的 4000。
  */
-export async function listProjectFiles(boundary: string, query: string, limit = PATH_LIMIT): Promise<PathListing> {
+export async function listProjectFiles(boundary: string, query: string, limit = PATH_LIMIT, budget = VISIT_BUDGET): Promise<PathListing> {
   const wanted = query.trim().toLowerCase();
   const found: string[] = [];
   let visited = 0;
   let stopped: PathListing['stopped'] = '';
+  let finished = false;
   const walker = walkFiles(boundary, SKIPPED)[Symbol.asyncIterator]();
-  while (visited < VISIT_BUDGET && found.length < limit) {
+  while (visited < budget && found.length < limit) {
     let next: IteratorResult<string>;
     try {
       next = await walker.next();
@@ -33,10 +35,11 @@ export async function listProjectFiles(boundary: string, query: string, limit = 
       stopped = 'unreadable';
       break;
     }
-    if (next.done === true) break;
+    if (next.done === true) { finished = true; break; }
     visited += 1;
     if (wanted === '' || next.value.toLowerCase().includes(wanted)) found.push(next.value);
   }
-  if (stopped === '' && visited >= VISIT_BUDGET && found.length >= limit) stopped = 'budget';
+  // 翻到上限就停手时，「没有对得上的」这一句不能说得像查过每一层：一条没找到也要说可能没找全。
+  if (stopped === '' && !finished && visited >= budget) stopped = 'budget';
   return { projectRoot: boundary, paths: found, visited, stopped };
 }

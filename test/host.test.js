@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createConnection, createConfig, createMemoryConnectionPair, MESSAGES_CAPABILITIES, METHODS, NOTIFICATIONS, providerFromConfig, resolveShell, serveHost } from '../dist/index.js';
 import { shownConfigOf } from '../dist/host/host.js';
+import { listProjectFiles } from '../dist/host/paths.js';
 
 const CLI = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
 
@@ -929,6 +930,7 @@ test('the host lists project files for an interface without exposing links or no
     await mkdir(join(directory, 'node_modules', 'pkg'), { recursive: true });
     await writeFile(join(directory, 'notes', 'Readings Old.md'), 'x');
     await writeFile(join(directory, 'notes', 'readings-3.md'), 'x');
+    await writeFile(join(directory, 'notes', '读数 第三版.md'), 'x');
     await writeFile(join(directory, '.git', 'config'), 'x');
     await writeFile(join(directory, 'node_modules', 'pkg', 'index.js'), 'x');
     // Windows 上建符号链接要开发者模式：建不出来就跳过那一段断言，不把它算成通过。
@@ -949,9 +951,26 @@ test('the host lists project files for an interface without exposing links or no
     if (linked) assert.equal((await connection.request('paths.list', { query: 'inside-link' })).paths.length, 0,
       '符号链接既不跟也不列：指向边界之内也一样不替人决定那一条路通向哪里');
 
+    assert.deepEqual((await connection.request('paths.list', { query: '读数' })).paths, ['notes/读数 第三版.md'],
+      '中文与带空格的文件名照原样交回：路径里那一个空格不改写成别的形状');
     const capped = await connection.request('paths.list', { query: '', limit: 1 });
     assert.equal(capped.paths.length, 1, '一次最多交 `limit` 条');
     await assert.rejects(connection.request('paths.list', { projectRoot: join(directory, 'nope') }),
       (error) => error.code === 'host_project_root_unsupported', '没装载过的项目根不猜边界');
   });
+});
+
+test('a file listing that ran out of its budget says so instead of finding nothing', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'ligule-paths-budget-'));
+  try {
+    for (const name of ['a.md', 'b.md', 'c.md', 'd.md']) await writeFile(join(directory, name), 'x');
+    const partial = await listProjectFiles(directory, 'zzz', 20, 2);
+    assert.equal(partial.visited, 2, '翻到那一个上限就停手');
+    assert.equal(partial.stopped, 'budget', '一条没找到也要说这份清单不一定全：人据此改字重问，而不是以为项目里没有');
+    const complete = await listProjectFiles(directory, 'zzz', 20, 99);
+    assert.deepEqual(complete.paths, [], '整棵翻完时才说没有对得上的');
+    assert.equal(complete.stopped, '', '整棵翻完时不说「可能没找全」');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
