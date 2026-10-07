@@ -6,6 +6,7 @@ import { Icon } from './components/Icon';
 import { SettingsDialog } from './components/Settings';
 import { RowView } from './components/RowView';
 import { SessionRail, type SearchHit } from './components/SessionRail';
+import { SessionMenu } from './components/SessionMenu';
 import { ModelPanel } from './components/ModelPanel';
 import { UsageMeter } from './components/UsageMeter';
 import { Palette, type Command } from './components/Palette';
@@ -44,6 +45,9 @@ type PanelProps = {
   sessionsRevision: number;
   settings: Settings;
   patch: (part: Partial<Settings>) => void;
+  // 会话级的那几格（模式、档位）挂在会话这一侧的浮层里，入口是顶栏那两枚小牌子（第 105 步）。
+  sessionMenuOpen: boolean;
+  toggleSessionMenu: () => void;
 };
 
 const HISTORY_KEY = 'ligule.input-history';
@@ -139,12 +143,12 @@ const statusPanels: Panel<PanelProps>[] = [
     id: 'status.pills',
     title: '运行状态',
     // 顶栏只说这一份会话现在在做什么；工具件数、记录条数与拒绝计数在设置那一个对话框里（D98）。
-    view: ({ status, running, waiting, seconds }) => <>
+    view: ({ status, running, waiting, seconds, sessionMenuOpen, toggleSessionMenu }) => <>
       {running && <span className="pill" data-tone="running">正在跑 {seconds} 秒</span>}
       {waiting > 0 && <span className="pill" title="发出去还没回来的调用">未答的调用 {waiting}</span>}
       {status !== null && <>
-        <span className="pill">模式 {status.mode ?? '没装'}{status.pendingMode === null || status.pendingMode === undefined ? '' : `→${status.pendingMode}`}</span>
-        <span className="pill">档位 {status.policy}</span>
+        <button className="pill" type="button" aria-haspopup="dialog" aria-expanded={sessionMenuOpen} onClick={toggleSessionMenu}>模式 {status.mode ?? '没装'}{status.pendingMode === null || status.pendingMode === undefined ? '' : `→${status.pendingMode}`}</button>
+        <button className="pill" type="button" aria-haspopup="dialog" aria-expanded={sessionMenuOpen} onClick={toggleSessionMenu}>档位 {status.policy}</button>
         {status.denials.total > 0 && <span className="pill">不允许 {status.denials.consecutive}/{status.denials.total}</span>}
       </>}
     </>,
@@ -260,6 +264,8 @@ export function App({ transport }: { transport: Transport }) {
   const [settings, setSettings] = useState(readSettings);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // 会话这一侧那一格浮层（模式与档位）：入口是顶栏那两枚小牌子（第 105 步）。
+  const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const [reading, setReading] = useState(false);
   const verbosity = settings.verbosity;
   const collapsed = settings.collapsed;
@@ -417,18 +423,24 @@ export function App({ transport }: { transport: Transport }) {
   }, [settings.keys]);
 
   // 拖那一条分隔线改侧栏宽度：范围与设置面板里那根滑杆是同一份（D90）。
-  const startDrag = useCallback((event: { clientX: number }) => {
+  // 指针要抓住：拖到别处（转录的滚动条、另一侧的面板）时 move 也还得送到这一处来。
+  const startDrag = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     const startX = event.clientX;
     const startWidth = settings.sidebar;
+    const target = event.currentTarget;
+    try { target.setPointerCapture(event.pointerId); } catch { /* 抓不住照样用窗口那两条兜底 */ }
     const move = (moveEvent: PointerEvent) => {
       patch({ sidebar: Math.min(420, Math.max(264, startWidth + moveEvent.clientX - startX)) });
     };
     const stop = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', stop);
+      window.removeEventListener('pointercancel', stop);
+      try { target.releasePointerCapture(event.pointerId); } catch { /* 已经松开 */ }
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', stop);
+    window.addEventListener('pointercancel', stop);
   }, [patch, settings.sidebar]);
 
   useEffect(() => {
@@ -823,6 +835,7 @@ export function App({ transport }: { transport: Transport }) {
       // 收层那一条顺序排在打断这一轮之前：面板、设置、菜单、右侧抽屉，都收完了才轮到取消。
       if (specOf(event) !== CURRENT['interrupt']) return;
       if (paletteOpen) setPaletteOpen(false);
+      else if (sessionMenuOpen) setSessionMenuOpen(false);
       else if (settingsOpen) setSettingsOpen(false);
       else if (menuOpen) setMenuOpen(false);
       else if (panel !== null) setPanel(null);
@@ -830,7 +843,7 @@ export function App({ transport }: { transport: Transport }) {
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [cancel, collapsed, copyLastAnswer, menuOpen, panel, paletteOpen, patch, running, settingsOpen]);
+  }, [cancel, collapsed, copyLastAnswer, menuOpen, panel, paletteOpen, patch, running, sessionMenuOpen, settingsOpen]);
 
   // 虚拟视口的三件外壳（U48、方案 6.2）：每一条都要占住转录那一条 74 字的居中列，所以 `Item` 自己包一层。
   // 身份用 `useMemo` 稳住：每次渲染都换一个新组件会让视口把挂着的行重建一遍。
@@ -854,6 +867,13 @@ export function App({ transport }: { transport: Transport }) {
     ...(live.reasoning === '' || !shownIn(verbosity, LIVE_REASONING) ? [] : [{ ...LIVE_REASONING, text: live.reasoning }]),
     ...(live.text === '' || !shownIn(verbosity, LIVE_ANSWER) ? [] : [{ ...LIVE_ANSWER, text: live.text }]),
   ];
+
+  // 记住这一份会话读到哪儿：画面最上面那一行的事件序号，切回来时按它落回去（方案 6.2）。
+  // 身份要稳住：每次渲染都换一个新函数会让视口重新订阅一次，短记录上那几次重排会连成一串（第 105 步）。
+  const onRangeChanged = useCallback(({ startIndex }: { startIndex: number }) => {
+    const row = visible[startIndex - firstIndex];
+    if (row?.seq !== undefined && sessionId !== null) anchors.current.set(sessionId, row.seq);
+  }, [visible, firstIndex, sessionId]);
 
   // 命中落在手里这几页之外：由 `openSession` 往回读到位再落笔，所以这一处只负责画面（方案 6.2）。
   // 跳转靠换一枚 `stamp` 让视口重新挂载，并从 `jumpAt` 那一条开始画：数据刚变长时视口自己要先量一遍行高，
@@ -909,6 +929,8 @@ export function App({ transport }: { transport: Transport }) {
     sessionsRevision,
     settings,
     patch,
+    sessionMenuOpen,
+    toggleSessionMenu: () => setSessionMenuOpen((open) => !open),
   };
 
   return <div className="frame" data-collapsed={collapsed ? 'true' : undefined} data-dock={settings.dock}>
@@ -934,6 +956,7 @@ export function App({ transport }: { transport: Transport }) {
         </div>
         <div className="pills">{registry.list('header.status').map((item) => <span key={item.id}>{item.view(panelProps)}</span>)}</div>
         <button className="icon-button" type="button" title={`命令面板（${formatKeys(CURRENT['palette'])}）`} aria-label="命令面板" onClick={() => setPaletteOpen(true)}><Icon name="search" size={15} /></button>
+        {sessionMenuOpen && <SessionMenu status={status} onSetMode={(name) => void setMode(name)} onClose={() => setSessionMenuOpen(false)} />}
       </header>
 
       {/* 转录只挂视口里那几十行：读回来的那一页全在数据里，画出来的由视口决定（U48、方案 6.2）。 */}
@@ -956,12 +979,10 @@ export function App({ transport }: { transport: Transport }) {
           // 而跟末行那一条会把刚落下的那一行重新推走（方案 6.2）。
           followOutput={(atBottom) => (atBottom && wanted === null && flash === null ? 'smooth' : false)}
           atBottomThreshold={40}
-          atBottomStateChange={(atBottom) => setPinned(atBottom)}
-          rangeChanged={({ startIndex }) => {
-            // 记住这一份会话读到哪儿：画面最上面那一行的事件序号，切回来时按它落回去（方案 6.2）。
-            const row = visible[startIndex - firstIndex];
-            if (row?.seq !== undefined && sessionId !== null) anchors.current.set(sessionId, row.seq);
-          }}
+          // 只在真的翻过去时才改这一格：视口在「到底」附近来回报同一件事实时，
+          // 一次 setState 会让视口重排，重排又报一次——记录短得装不满一屏时这一条会转成死循环（第 105 步在真端点上撞到）。
+          atBottomStateChange={(atBottom) => setPinned((current) => (current === atBottom ? current : atBottom))}
+          rangeChanged={onRangeChanged}
           increaseViewportBy={{ top: 240, bottom: 600 }}
           components={viewport}
         />
@@ -1140,7 +1161,6 @@ export function App({ transport }: { transport: Transport }) {
       link={link}
       counts={panelProps.counts}
       waiting={panelProps.waiting}
-      onSetMode={(name) => void setMode(name)}
       onReconnect={() => void reconnect()}
       onClose={() => setSettingsOpen(false)}
     />}

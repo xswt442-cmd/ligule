@@ -69,14 +69,23 @@ body {
 }
 
 .splitter {
-  flex: 0 0 5px;
+  flex: 0 0 9px;
+  /* 看得见的那一条细线由 ::before 画，命中区比它宽：五像素那一条在鼠标底下太窄，抓不稳（第 105 步）。 */
+  position: relative;
   cursor: col-resize;
-  background: var(--line);
+  background: transparent;
   touch-action: none;
 }
 
-.splitter:hover,
-.splitter:active {
+.splitter::before {
+  content: '';
+  position: absolute;
+  inset: 0 4px;
+  background: var(--line);
+}
+
+.splitter:hover::before,
+.splitter:active::before {
   background: var(--accent);
 }
 
@@ -1648,4 +1657,66 @@ button.mini.chip b {
 .row-branch:hover {
   color: var(--fg);
   border-color: var(--accent);
+}
+
+/* 会话这一侧那一格浮层（第 105 步）：模式与档位跟着会话走，挂在顶栏那两枚小牌子下面。 */
+.topbar {
+  position: relative;
+}
+
+button.pill {
+  font: inherit;
+  color: inherit;
+  background: var(--bg-raised);
+  cursor: pointer;
+}
+
+button.pill:hover {
+  border-color: var(--accent);
+}
+
+.session-menu {
+  position: absolute;
+  inset-block-start: 100%;
+  inset-inline-end: var(--space-4);
+  z-index: 6;
+  inline-size: min(420px, 92vw);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-raised);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 35%);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.sm-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.sm-row {
+  display: grid;
+  grid-template-columns: 5.5rem minmax(0, 1fr);
+  gap: var(--space-2);
+  align-items: center;
+  font-size: 13px;
+}
+
+.sm-label {
+  color: var(--fg-muted);
+}
+
+.sm-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.sm-note {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 1.5;
 }

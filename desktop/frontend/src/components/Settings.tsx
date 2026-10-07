@@ -8,17 +8,13 @@ import type { Status } from '../status';
 
 // 设置与配置的二级展开：入口一枚，展开才分栏（D98）。
 // 每一栏里的取值都读自界面这一侧的状态或 `status.get`；协议里没有的那一条，这一栏说清缺的是哪一件。
+// 会话级的两栏（模式、审批规则）不在这里：它们跟着会话走，入口在会话那一边的顶栏上（第 105 步）。
 const SECTIONS = [
   { id: 'appearance', title: '外观', icon: 'spark' },
-  { id: 'mode', title: '模式', icon: 'grid' },
-  { id: 'policy', title: '审批规则', icon: 'check' },
   { id: 'model', title: '模型与端点', icon: 'folder' },
   { id: 'connection', title: '连接', icon: 'refresh' },
   { id: 'keys', title: '键位', icon: 'copy' },
 ] as const;
-
-// 模式来自哪一层，终端那一份用的是同一组词；层名不在表里时把原样交出去。
-const LAYERS: Record<string, string> = { shipped: '随包', user: '全局', project: '项目' };
 
 type SectionId = (typeof SECTIONS)[number]['id'];
 
@@ -33,14 +29,12 @@ export type SettingsProps = {
   link: string | null;
   counts: { sent: number; received: number };
   waiting: number;
-  onSetMode: (name: string) => void;
   onReconnect: () => void;
   onClose: () => void;
 };
 
 export function SettingsDialog(props: SettingsProps) {
   const [section, setSection] = useState<SectionId>('appearance');
-  const [modeDraft, setModeDraft] = useState('');
   const { status, settings, patch } = props;
 
   return <div className="overlay" onClick={props.onClose}>
@@ -61,8 +55,6 @@ export function SettingsDialog(props: SettingsProps) {
       </nav>
       <div className="sheet-body" role="tabpanel">
         {section === 'appearance' && <Appearance settings={settings} patch={patch} />}
-        {section === 'mode' && <Mode status={status} draft={modeDraft} onDraft={setModeDraft} onSet={props.onSetMode} />}
-        {section === 'policy' && <Policy status={status} />}
         {section === 'model' && <Model client={props.client} sessionId={props.sessionId} />}
         {section === 'connection' && <Connection link={props.link} counts={props.counts} waiting={props.waiting} status={status} onReconnect={props.onReconnect} />}
         {section === 'keys' && <Keys settings={settings} patch={patch} notice={props.keyNotice} />}
@@ -177,44 +169,7 @@ function Keys({ settings, patch, notice }: { settings: Settings; patch: Settings
   </>;
 }
 
-function Mode({ status, draft, onDraft, onSet }: { status: Status | null; draft: string; onDraft: (value: string) => void; onSet: (name: string) => void }) {
-  const send = () => {
-    if (draft.trim() === '') return;
-    onSet(draft.trim());
-    onDraft('');
-  };
-  return <>
-    <Row label="现在生效的" note={status === null ? '还没有会话' : `${status.mode ?? '没有装'}（${LAYERS[status.modeLayer ?? ''] ?? status.modeLayer ?? '层名读不到'}）`}>
-      <span className="value">{status === null ? '读不到' : `${status.tools.length} 件工具交给模型`}</span>
-    </Row>
-    {status?.pendingMode !== null && status?.pendingMode !== undefined && <Row label="待生效" note="正在跑的那一轮结束才换（D41）">
-      <span className="value">{status.pendingMode}</span>
-    </Row>}
-    <Row label="换成" note="随包带的是 minimal 与 full；名字写错时那一次调用报 mode_unknown">
-      <span className="inline-field">
-        <input value={draft} placeholder="模式名" aria-label="要换成的模式名" onChange={(event) => onDraft(event.target.value)} onKeyDown={(event) => {
-          if (event.key !== 'Enter') return;
-          event.preventDefault();
-          send();
-        }} />
-        <button type="button" disabled={draft.trim() === ''} onClick={send}>切换</button>
-      </span>
-    </Row>
-    <p className="sheet-note">模式挑的是工具集与提示词片段；判定档位与用哪一个模型都不在模式里（D35、D43）。</p>
-  </>;
-}
 
-function Policy({ status }: { status: Status | null }) {
-  return <>
-    <Row label="档位" note={status === null ? '还没有会话' : '连续不允许到阈值时自动回到逐次询问（D17）'}>
-      <span className="value">{status?.policy ?? '读不到'}</span>
-    </Row>
-    <Row label="不允许的次数">
-      <span className="value">{status === null ? '读不到' : `连续 ${status.denials.consecutive} 次 · 累计 ${status.denials.total} 次`}</span>
-    </Row>
-    <p className="sheet-note">档位管的是整个运行。按工具名或者按能力分类收紧那一条还没定（U41），所以这一栏只给读数，不放开关。</p>
-  </>;
-}
 
 function Model({ client, sessionId }: { client: Client; sessionId: string | null }) {
   return <>
