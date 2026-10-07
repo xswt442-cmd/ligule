@@ -94,10 +94,21 @@ export async function open(url, init, retry) {
 
 // SSE 的一帧以空行结束，一帧里的 data 行可以连着几行；其余字段与注释行不带内容。
 // 终止符 `[DONE]` 是 Chat Completions 那一种形状的收尾，它不是一段 JSON，所以在这里跳过。
+// 流正在往外吐内容时取消，Node 交回的是只带一个数字码的 AbortError：两种形状都从这一处过，
+// 所以取消要在这里就换成 `provider_cancelled`，否则界面收到的是一条认不出来的失败。
+async function* cancelMapped(source) {
+  try {
+    for await (const chunk of source) yield chunk;
+  } catch (error) {
+    if (error?.name === 'AbortError') throw new KernelError('provider_cancelled', { cause: error });
+    throw error;
+  }
+}
+
 export async function* parseSse(body) {
   const decoder = new TextDecoder();
   let buffer = '';
-  for await (const chunk of body) {
+  for await (const chunk of cancelMapped(body)) {
     buffer += decoder.decode(chunk, { stream: true }).replace(/\r/g, '');
     let end;
     while ((end = buffer.indexOf('\n\n')) >= 0) {

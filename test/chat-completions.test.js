@@ -169,3 +169,19 @@ test('a streamed answer asks for usage and hands back the one it got', async () 
     assert.equal(requests[1].body.stream_options, undefined);
   });
 });
+
+test('a cancel that lands while the stream is still open reports provider_cancelled', async () => {
+  // 第 94 步在真端点上撞到的那条：流已经在吐内容时打断，Node 交回的是只带数字码的 AbortError，
+  // 界面那一侧认的是稳定码，所以这一处要在模型层就换掉（src/model/http.js 的 cancelMapped）。
+  await withEndpoint(async (response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: '第一段' } }] })}\n\n`);
+    await new Promise(() => {});
+  }, async (baseUrl) => {
+    const controller = new AbortController();
+    const stream = provider(baseUrl).stream({ system: '', tools: [], messages: [{ role: 'user', content: 'x' }] }, { signal: controller.signal });
+    assert.deepEqual((await stream.next()).value, { type: 'text', text: '第一段' });
+    controller.abort();
+    await assert.rejects(() => stream.next(), (error) => error.code === 'provider_cancelled');
+  });
+});

@@ -131,7 +131,7 @@ export const METHODS = Object.freeze({
     },
   },
   'run.cancel': {
-    description: 'Stop the round this session is running; the call answering run.start then reports loop_cancelled',
+    description: 'Stop the round this session is running; the call answering run.start reports loop_cancelled between model calls and provider_cancelled while one is in flight',
     parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
   },
   'status.get': {
