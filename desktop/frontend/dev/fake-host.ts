@@ -282,9 +282,12 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
         const older = (before === undefined ? loaded : loaded.filter((event) => Number(event.seq) < before))
           .filter((event) => cap === undefined || Number(event.seq) <= cap);
         const page = limit === undefined ? older : older.slice(-limit);
+        const listed = sessions.find((item) => item.id === id);
         return reply({
           sessionId: id,
           events: params.fullResults === true ? fillSpills(page) : page,
+          // 记录头部交给界面当「这一份属于哪项目录」的那一格：草稿与队列按它存放（方案 5.1）。读不出首行的现存记录交回 null，与宿主一致。
+          header: listed === undefined ? null : { kind: 'session', sessionId: id, projectRoot: listed.projectRoot, formatVersion: 1 },
           endSeq: page.length === 0 ? null : Number(page.at(-1)?.seq),
           hasMore: page.length > 0 && Number(page[0]?.seq) > 1,
         });

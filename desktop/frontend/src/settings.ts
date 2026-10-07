@@ -9,11 +9,16 @@ export type Settings = {
   dock: 'right' | 'left';
   verbosity: Verbosity;
   collapsed: boolean;
-  draft: string;
+  // 草稿与排着的几句都按「哪一项目录下的哪一份会话」放：两份会话不共用一格草稿，退出再打开还在（方案 5.1）。
+  drafts: Record<string, Record<string, string>>;
+  queued: Record<string, Record<string, string[]>>;
 };
 
 const KEY = 'ligule.ui';
 const VERBOSITY: Verbosity[] = ['brief', 'standard', 'detailed', 'full'];
+// 一格草稿留 4000 字，一份会话最多排 20 句：这台机器上的存储不是给整段文件当缓存用的。
+const DRAFT_LIMIT = 4000;
+const QUEUE_LIMIT = 20;
 
 export const defaultSettings: Settings = {
   theme: 'system',
@@ -22,13 +27,44 @@ export const defaultSettings: Settings = {
   dock: 'right',
   verbosity: 'standard',
   collapsed: false,
-  draft: '',
+  drafts: {},
+  queued: {},
 };
 
 const oneOf = <T extends string>(value: unknown, allowed: T[], fallback: T): T =>
   allowed.includes(value as T) ? value as T : fallback;
 const clamped = (value: unknown, low: number, high: number, fallback: number): number =>
   typeof value === 'number' && value >= low && value <= high ? Math.round(value) : fallback;
+
+// 那两张表只认写得出来的形状：一格草稿是串，一排是串数组，别的一律丢掉，不猜它想表达什么。
+const draftTable = (value: unknown): Record<string, Record<string, string>> => {
+  if (typeof value !== 'object' || value === null) return {};
+  const out: Record<string, Record<string, string>> = {};
+  for (const [project, sessions] of Object.entries(value)) {
+    if (typeof sessions !== 'object' || sessions === null) continue;
+    const kept: Record<string, string> = {};
+    for (const [session, text] of Object.entries(sessions)) {
+      if (typeof text === 'string' && text !== '') kept[session] = text.slice(0, DRAFT_LIMIT);
+    }
+    if (Object.keys(kept).length > 0) out[project] = kept;
+  }
+  return out;
+};
+const queueTable = (value: unknown): Record<string, Record<string, string[]>> => {
+  if (typeof value !== 'object' || value === null) return {};
+  const out: Record<string, Record<string, string[]>> = {};
+  for (const [project, sessions] of Object.entries(value)) {
+    if (typeof sessions !== 'object' || sessions === null) continue;
+    const kept: Record<string, string[]> = {};
+    for (const [session, items] of Object.entries(sessions)) {
+      if (!Array.isArray(items)) continue;
+      const sentences = items.filter((each): each is string => typeof each === 'string' && each !== '').slice(0, QUEUE_LIMIT);
+      if (sentences.length > 0) kept[session] = sentences;
+    }
+    if (Object.keys(kept).length > 0) out[project] = kept;
+  }
+  return out;
+};
 
 export function readSettings(): Settings {
   let raw: unknown;
@@ -45,10 +81,17 @@ export function readSettings(): Settings {
     dock: oneOf(value.dock, ['right', 'left'], 'right'),
     verbosity: oneOf(value.verbosity, VERBOSITY, 'standard'),
     collapsed: value.collapsed === true,
-    draft: typeof value.draft === 'string' ? value.draft.slice(0, 4000) : '',
+    drafts: draftTable(value.drafts),
+    queued: queueTable(value.queued),
   };
 }
 
-export function writeSettings(settings: Settings): void {
-  localStorage.setItem(KEY, JSON.stringify(settings));
+// 写不进去要说得出来：那一句还留在屏幕上，但不能让人以为它已经存住了。
+export function writeSettings(settings: Settings): boolean {
+  try {
+    localStorage.setItem(KEY, JSON.stringify(settings));
+    return true;
+  } catch {
+    return false;
+  }
 }

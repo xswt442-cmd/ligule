@@ -237,7 +237,13 @@ export function App({ transport }: { transport: Transport }) {
   const [asks, setAsks] = useState<Ask[]>([]);
   const [running, setRunning] = useState(false);
   const [status, setStatus] = useState<Status | null>(null);
-  const [draft, setDraft] = useState(() => readSettings().draft);
+  const [draft, setDraft] = useState('');
+  // 草稿与队列存本机时用的那一个项目身份，读自那份记录的头部；写不进去说过一次就不再重复。
+  const [projectRoot, setProjectRoot] = useState('');
+  // 屏幕上这一格草稿属于哪一份会话：接一份会话要等两次调用回来才摊开它自己的那一格，
+  // 中间那一段里 `sessionId` 已经换了而草稿还是上一份的——那时保存会把上一句写进新的那一份名下。
+  const [inputOwner, setInputOwner] = useState<string | null>(null);
+  const saveWarned = useRef(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [panel, setPanel] = useState<Panel<PanelProps> | null>(null);
   const [settings, setSettings] = useState(readSettings);
@@ -349,9 +355,27 @@ export function App({ transport }: { transport: Transport }) {
     active.current = sessionId;
   }, [sessionId]);
 
+  // 草稿与排着的几句按「哪一项目录下的哪一份会话」存本机：切换、打开设置、看历史与断连都不丢这一句，
+  // 退出再打开时接得回来（方案 5.1）。写不进去要说一句，别让人以为它已经存住了。
   useEffect(() => {
-    writeSettings({ ...settings, draft });
-  }, [draft, settings]);
+    if (sessionId === null || inputOwner !== sessionId) return;
+    const stored = readSettings();
+    // 空的那一格不留：草稿清空、队列发完，那一行整个从存储里去掉，不留着旧内容。
+    const put = <T extends { length: number }>(table: Record<string, Record<string, T>>, value: T): Record<string, Record<string, T>> => {
+      const row = { ...(table[projectRoot] ?? {}) };
+      if (value.length === 0) delete row[sessionId];
+      else row[sessionId] = value;
+      const next = { ...table };
+      if (Object.keys(row).length === 0) delete next[projectRoot];
+      else next[projectRoot] = row;
+      return next;
+    };
+    const items = queues[sessionId]?.items ?? [];
+    if (writeSettings({ ...settings, drafts: put(stored.drafts, draft), queued: put(stored.queued, items) })) return;
+    if (saveWarned.current) return;
+    saveWarned.current = true;
+    setRows((current) => [...current, metaRow('error', '这一句在屏幕上留着，但本机那一份存储写不进去：退出再打开时它不会回来')]);
+  }, [draft, inputOwner, projectRoot, queues, sessionId, settings]);
 
   // 主题、字号与侧栏宽度落在根元素上：那一份 CSS 变量在 `:root` 那一格读（D90）。
   useEffect(() => {
@@ -463,24 +487,6 @@ export function App({ transport }: { transport: Transport }) {
   // 只有那一轮自己收尾（跑完、被打断）或那具宿主换掉时，才收掉它名下的那些询问。
   const dropAsksOf = useCallback((id: string) => setAsks((current) => current.filter((ask) => ask.sessionId !== id)), [setAsks]);
 
-  const newSession = useCallback(async () => {
-    try {
-      const created = await client.call('session.create', {}) as { sessionId: string };
-      setSessionId(created.sessionId);
-      setRows([]);
-      setPage(null);
-      setFirstIndex(FIRST_INDEX);
-      setLive({ text: '', reasoning: '' });
-      void refreshStatus(created.sessionId);
-    } catch (error) {
-      setRows((current) => [...current, metaRow('error', `会话建不起来：${code(error)}`)]);
-    }
-  }, [client, refreshStatus]);
-
-  useEffect(() => {
-    void newSession();
-  }, [newSession]);
-
   // 换会话先让 Host 那一份接上：记录不在磁盘上就是没有这份会话，`session.open` 会说清（D78）。
   // 已经打开的那一份复用状态，不重开，所以这一个动作对当前会话也是安全的。
   // 给了 `hit` 就一口气往回读到那一条进来，并把「要落到哪一条」与那些行同一批交出去：
@@ -493,6 +499,7 @@ export function App({ transport }: { transport: Transport }) {
     setFirstIndex(FIRST_INDEX);
     setLive({ text: '', reasoning: '' });
     setWanted(null);
+    setInputOwner(null);
     dispatchAt.current.clear();
     setReading(true);
     try {
@@ -500,8 +507,16 @@ export function App({ transport }: { transport: Transport }) {
       await client.call('session.open', { sessionId: id }, 15_000);
       // fullResults 那一格是给界面读的：溢出文件里的整段正文这才到得了画面（记录本身不动）。
       // 只取最近这一页：更早的靠「显示更早」那一格按游标往前要（方案 4.1、实现顺序第 73 步）。
-      const newest = await client.call('session.read', { sessionId: id, limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean };
+      const newest = await client.call('session.read', { sessionId: id, limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean; header: { projectRoot?: string } | null };
       if (opening.current !== id) return;
+      // 接上这一份时把它自己那两格摊回来：草稿是当时没发出去的那一句，排着的几条恢复成暂停（方案 5.1、5.2）。
+      const root = newest.header?.projectRoot ?? '';
+      setProjectRoot(root);
+      const stored = readSettings();
+      setDraft(stored.drafts[root]?.[id] ?? '');
+      const restored = stored.queued[root]?.[id] ?? [];
+      patchQueue(id, () => ({ items: restored, paused: restored.length > 0 }));
+      setInputOwner(id);
       let events = newest.events;
       let hasMore = newest.hasMore;
       while (hit !== undefined && hit.seq < Number(events[0]?.seq ?? 0) && hasMore) {
@@ -528,6 +543,20 @@ export function App({ transport }: { transport: Transport }) {
     }
     void refreshStatus(id);
   }, [client, refreshStatus]);
+
+  const newSession = useCallback(async () => {
+    try {
+      const created = await client.call('session.create', {}) as { sessionId: string };
+      // 新建那一份也走接会话那一条路：只有那一次读把记录头部的项目根带回来，草稿与队列才知道该存到哪一格。
+      void openSession(created.sessionId);
+    } catch (error) {
+      setRows((current) => [...current, metaRow('error', `会话建不起来：${code(error)}`)]);
+    }
+  }, [client, openSession]);
+
+  useEffect(() => {
+    void newSession();
+  }, [newSession]);
 
   // 查找命中那一条交给接会话那一个动作：读到位与落笔在同一批里，跳转那一处只认这一份会话的第几条（方案 4.2）。
   const openHit = useCallback((hit: SearchHit) => void openSession(hit.sessionId, hit), [openSession]);
