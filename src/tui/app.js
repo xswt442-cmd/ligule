@@ -21,6 +21,8 @@ const MODE_LAYERS = { shipped: '随包', user: '全局', project: '项目' };
 const CANDIDATE_ROWS = 6;
 // 路径候选一次问宿主 8 条：这一处画的是文件名，多几行也读不完，而宿主的 `limit` 比它更宽。
 const MENTION_ROWS = 8;
+// 「没在问哪一段」的形状：真实的落笔处起点不可能是 -1，所以它跟任何一段都对不上。
+const NO_TOKEN = { start: -1, text: '' };
 const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 // 那几张表与那几个纯函数交给检查里用（test/tui.test.js），界面自己只走这一处出口。
@@ -292,7 +294,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [mention, setMention] = useState(null);
   // Esc 收起的是当下这一个词：接着改字会重新问，原样不动时不再弹出来挡住输入。
   const [hiddenMention, setHiddenMention] = useState('');
-  const mentionWanted = useRef({ start: -1, text: '' });
+  const mentionWanted = useRef(NO_TOKEN);
+  const mentionAsked = useRef(NO_TOKEN);
   const push = useCallback((...added) => setRows((current) => [...current, ...added]), []);
   // 排着的那几条与草稿都属于那一份会话：换看别的一份时把这一份收起来，换回来再摊开——
   // 既不把没发的话送到另一份会话里，也不把它丢掉（方案 5.2「队列按会话隔离」）。
@@ -350,24 +353,29 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   // 传输那一层没有中途取消的办法，所以「慢请求可取消」在这儿做到的是「不落到画面上」。
   useEffect(() => {
     const token = mentionToken(draft, caret);
-    if (token === null) { setMention(null); return; }
+    if (token === null) { setMention(null); mentionAsked.current = NO_TOKEN; return; }
     mentionWanted.current = token;
-    if (hiddenMention === token.text) return;
-    if (mention !== null && mention.start === token.start && mention.text === token.text) return;
-    const asked = token;
+    if (hiddenMention === token.text) { mentionAsked.current = NO_TOKEN; return; }
+    // 「上一次问的是哪一段」放在 ref 而不是 state：写进 state 会让本条 effect 重跑，
+    // 那一次重跑先把已经排好的那一下问撤销掉，接着又因为这一段没变而不再重问，画面就停在等那一下上。
+    const asked = mentionAsked.current;
+    if (asked.start === token.start && asked.text === token.text) return;
+    // 换了一个词就把手里那几条旧的候选放下：清单留着，Enter 就会把人没选过的那一条插进去。
+    mentionAsked.current = token;
+    setMention({ ...token, paths: [], chosen: 0, stopped: 'pending' });
     const timer = setTimeout(() => {
       void (async () => {
-        const listed = await client.request('paths.list', { projectRoot: info.boundary, query: asked.text, limit: MENTION_ROWS })
+        const listed = await client.request('paths.list', { projectRoot: info.boundary, query: token.text, limit: MENTION_ROWS })
           .catch((error) => ({ code: error.code ?? 'paths_list_failed' }));
         const now = mentionWanted.current;
-        if (now.start !== asked.start || now.text !== asked.text) return;
+        if (now.start !== token.start || now.text !== token.text) return;
         setMention(listed.code === undefined
-          ? { ...asked, paths: listed.paths, stopped: listed.stopped, chosen: 0 }
-          : { ...asked, paths: [], stopped: 'error', failed: listed.code, chosen: 0 });
+          ? { ...token, paths: listed.paths, stopped: listed.stopped, chosen: 0 }
+          : { ...token, paths: [], stopped: 'error', failed: listed.code, chosen: 0 });
       })();
     }, 160);
     return () => clearTimeout(timer);
-  }, [caret, client, draft, hiddenMention, info.boundary, mention]);
+  }, [caret, client, draft, hiddenMention, info.boundary]);
   const [sessionPicker, setSessionPicker] = useState(null);
   const [approvalExpanded, setApprovalExpanded] = useState(false);
   const [approvalCursor, setApprovalCursor] = useState(0);
@@ -1101,6 +1109,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         setMention(null);
         return;
       }
+      // 那一次查询还没回来时 Enter 什么都不做：既不是选一条旧的候选，也不是把这一句发出去（方案 5.3）。
+      if (mention.stopped === 'pending' && (key.tab || key.return)) return;
       if (mention.paths.length > 0 && (key.tab || key.return)) {
         const picked = mention.paths[Math.min(mention.chosen, mention.paths.length - 1)];
         const merged = insertMention(draft, caret, mention.start, picked);
@@ -1243,10 +1253,15 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       picks.length > CANDIDATE_ROWS ? h(Text, { dimColor: true }, `  还有 ${picks.length - CANDIDATE_ROWS} 条，接着打字就缩小了`) : null,
       h(Text, { dimColor: true }, ' Tab 补全 · ↑↓ 选 · Esc 收起')),
     mention === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'gray', paddingX: 1 },
+      h(Text, { dimColor: true, wrap: 'truncate-end' }, ` 项目 ${info.boundary}`),
       mention.paths.length === 0
         ? h(Text, { dimColor: true }, mention.stopped === 'error'
           ? `这个项目列不出文件：${mention.failed}`
-          : `这个项目里没有文件名含「${mention.text}」的文件`)
+          : mention.stopped === 'pending'
+            ? '在列这个项目的文件…'
+            : mention.stopped === 'budget'
+              ? `前面那些文件里没有含「${mention.text}」的，更深的没翻到：把字写得更具体一些`
+              : `这个项目里没有文件名含「${mention.text}」的文件`)
         : mention.paths.map((path, index) => h(Text, { key: path, inverse: index === mention.chosen, wrap: 'truncate-end' }, ` ${path}`)),
       mention.paths.length > 0 && mention.stopped === 'budget'
         ? h(Text, { dimColor: true }, '  只翻了前面那些文件，更深的没看到：把字写得更具体一些') : null,

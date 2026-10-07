@@ -48,6 +48,8 @@ type PanelProps = {
 
 const HISTORY_KEY = 'ligule.input-history';
 const HISTORY_MAX = 50;
+// 「没在问哪一段」的形状：真实的落笔处起点不可能是 -1，所以它跟任何一段都对不上。
+const NO_TOKEN = { start: -1, text: '' };
 
 // 本机存的那一份是不可信的输入：读坏了就当没有。
 function readHistory(): string[] {
@@ -241,10 +243,11 @@ export function App({ transport }: { transport: Transport }) {
   const [draft, setDraft] = useState('');
   const [caret, setCaret] = useState(0);
   // 落笔处那一段 `@` 路径引用的候选：清单由宿主列出来，界面不开盘（方案 5.3、D81 边界一）。
-  const [mention, setMention] = useState<null | { start: number; text: string; paths: string[]; chosen: number; stopped: string; failed?: string }>(null);
+  const [mention, setMention] = useState<null | { start: number; text: string; paths: string[]; chosen: number; stopped: string; root: string; failed?: string }>(null);
   // Esc 收起的是当下这一个词：接着改字会重新问，原样不动时不再弹出来挡住输入。
   const [hiddenMention, setHiddenMention] = useState('');
-  const mentionWanted = useRef({ start: -1, text: '' });
+  const mentionWanted = useRef(NO_TOKEN);
+  const mentionAsked = useRef(NO_TOKEN);
   // 草稿与队列存本机时用的那一个项目身份，读自那份记录的头部；写不进去说过一次就不再重复。
   const [projectRoot, setProjectRoot] = useState('');
   // 屏幕上这一格草稿属于哪一份会话：接一份会话要等两次调用回来才摊开它自己的那一格，
@@ -678,22 +681,31 @@ export function App({ transport }: { transport: Transport }) {
   // 所以 5.3 那一条「慢请求可取消」在这儿做到的是不落到画面上。
   useEffect(() => {
     const token = mentionToken(draft, caret);
-    if (token === null) { setMention(null); return; }
+    if (token === null) { setMention(null); mentionAsked.current = NO_TOKEN; return; }
     mentionWanted.current = token;
-    if (hiddenMention === token.text) return;
-    if (mention !== null && mention.start === token.start && mention.text === token.text) return;
+    if (hiddenMention === token.text) { mentionAsked.current = NO_TOKEN; return; }
+    // 「上一次问的是哪一段」放在 ref 而不是 state：写进 state 会让本条 effect 重跑，
+    // 那一次重跑先把已经排好的那一下问撤销掉，接着又因为这一段没变而不再重问，画面就停在等那一下上。
+    const asked = mentionAsked.current;
+    if (asked.start === token.start && asked.text === token.text) return;
+    // 换了一个词就把手里那几条旧的候选放下：清单留着，Enter 就会把人没选过的那一条插进去。
+    mentionAsked.current = token;
+    setMention({ ...token, paths: [], chosen: 0, stopped: 'pending', root: projectRoot });
     const timer = setTimeout(() => {
       void (async () => {
         const listed = await client.call('paths.list', { projectRoot, query: token.text, limit: 8 }, 8_000)
-          .then((answer) => ({ ...(answer as { paths: string[]; stopped: string }), failed: undefined as string | undefined }))
-          .catch((error) => ({ paths: [], stopped: 'error', failed: code(error) }));
+          .then((answer) => {
+            const got = answer as { projectRoot: string; paths: string[]; stopped: string };
+            return { paths: got.paths, stopped: got.stopped, root: got.projectRoot, failed: undefined as string | undefined };
+          })
+          .catch((error) => ({ paths: [] as string[], stopped: 'error', root: projectRoot, failed: code(error) }));
         const now = mentionWanted.current;
         if (now.start !== token.start || now.text !== token.text) return;
-        setMention({ ...token, paths: listed.paths, chosen: 0, stopped: listed.stopped, failed: listed.failed });
+        setMention({ ...token, paths: listed.paths, chosen: 0, stopped: listed.stopped, root: listed.root, failed: listed.failed });
       })();
     }, 160);
     return () => clearTimeout(timer);
-  }, [caret, client, draft, hiddenMention, mention, projectRoot]);
+  }, [caret, client, draft, hiddenMention, projectRoot]);
 
   // 选中一条候选：那一段 `@…` 换成 `@路径␣`，笔落到那一段之后，后面已写的字不动（方案 5.3）。
   const pickMention = useCallback((path: string) => {
@@ -982,10 +994,15 @@ export function App({ transport }: { transport: Transport }) {
         )}
         {mention === null ? null : (
           <div className="queue" role="listbox" aria-label="项目里的文件">
+            {mention.root === '' ? null : <span className="mini">项目 {mention.root}</span>}
             {mention.paths.length === 0 ? (
               <span className="mini">{mention.stopped === 'error'
                 ? `这个项目列不出文件：${mention.failed}`
-                : `这个项目里没有文件名含「${mention.text}」的文件`}</span>
+                : mention.stopped === 'pending'
+                  ? '在列这个项目的文件…'
+                  : mention.stopped === 'budget'
+                    ? `前面那些文件里没有含「${mention.text}」的，更深的没翻到：把字写得更具体一些`
+                    : `这个项目里没有文件名含「${mention.text}」的文件`}</span>
             ) : mention.paths.map((path, index) => (
               <div className="queue-item" key={path} role="option" aria-selected={index === mention.chosen}>
                 <span className="queue-text">{path}</span>
@@ -1017,23 +1034,28 @@ export function App({ transport }: { transport: Transport }) {
             if (isComposing(event.nativeEvent)) return;
             // 路径候选开着时这几记按键归清单：Enter 是选中那一条，不是发送（方案 5.3「选中候选不能触发发送」）。
             // 一条候选都没有时 Enter 照旧发这一句——那时那一栏说的是「没有对得上的文件」，不该把发送挡住。
-            if (mention !== null && mention.paths.length > 0) {
+            if (mention !== null) {
               if (event.key === 'Escape') {
                 setHiddenMention(mention.text);
                 setMention(null);
                 return;
               }
-              if (event.key === 'Tab' || event.key === 'Enter') {
+              // 那一次查询还没回来时 Enter 与 Tab 什么都不做：既不选一条旧的候选，也不把这一句发出去。
+              if (mention.stopped === 'pending' && (event.key === 'Enter' || event.key === 'Tab')) {
+                event.preventDefault();
+                return;
+              }
+              if (mention.paths.length > 0 && (event.key === 'Tab' || event.key === 'Enter')) {
                 event.preventDefault();
                 pickMention(mention.paths[Math.min(mention.chosen, mention.paths.length - 1)]);
                 return;
               }
-              if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+              if (mention.paths.length > 0 && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
                 event.preventDefault();
                 const step = event.key === 'ArrowUp' ? -1 : 1;
                 setMention({ ...mention, chosen: (mention.chosen + step + mention.paths.length) % mention.paths.length });
+                return;
               }
-              return;
             }
             if (event.key === 'Enter' && !event.shiftKey) {
               event.preventDefault();

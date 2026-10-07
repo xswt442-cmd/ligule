@@ -124,7 +124,7 @@ const sessions: Listed[] = [
 // `paths.list` 演的那一份项目里的文件：斜杠书写、相对项目根，与宿主交回的是同一形状（方案 5.3）。
 const PROJECT_FILES = [
   'AGENTS.md', 'README.md', 'modes/full.toml', 'modes/minimal.toml',
-  'notes/readings-2.md', 'notes/readings-3.md', 'src/host/host.js', 'src/kernel/loop.js',
+  'notes/readings-2.md', 'notes/readings-3.md', 'notes/读数 第三版.md', 'src/host/host.js', 'src/kernel/loop.js',
 ];
 
 let status = {
@@ -351,7 +351,8 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
         const paths = PROJECT_FILES
           .filter((path) => needle === '' || path.toLowerCase().includes(needle))
           .slice(0, cap);
-        return reply({ projectRoot: '/fixture/project', paths, visited: PROJECT_FILES.length, stopped: '' });
+        // 交回的根是这一次问的那一个：没写项目根时真宿主答的是它自己启动那一份，这里同一形状给固定清单里那一个根。
+        return reply({ projectRoot: String(params.projectRoot || 'E:/notes'), paths, visited: PROJECT_FILES.length, stopped: '' });
       }
       case 'run.cancel': {
         // 真宿主在那一刻发的是信号：正在跑的模型调用被中止，`run.start` 那一条报 `loop_cancelled`（协议里写明）。

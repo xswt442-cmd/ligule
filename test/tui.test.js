@@ -966,6 +966,7 @@ test('an @ fragment asks the host for project files and Enter picks one', option
   const { createElement } = await import('react');
   const { render } = await import('ink');
   const { PassThrough } = await import('node:stream');
+  const { setTimeout: delay } = await import('node:timers/promises');
   const { App } = await import('../dist/tui/app.js');
 
   await mkdir(join(projectDirectory, 'notes'), { recursive: true });
@@ -987,6 +988,7 @@ test('an @ fragment asks the host for project files and Enter picks one', option
     await waitFor(() => painted.includes('要模型做的事'), { read: () => painted });
     stdin.write('先看 @readings');
     await waitFor(() => lastFrame().includes('notes/readings-3.md'), { read: lastFrame });
+    assert.ok(lastFrame().includes(`项目 ${projectDirectory}`), '清单说清这些候选出自哪一个项目');
     const asked = requests.filter((request) => request.method === 'paths.list');
     assert.equal(asked.length, 1, '这一段问一次，不是每个字问一次');
     assert.deepEqual(asked[0].params, { projectRoot: projectDirectory, query: 'readings', limit: 8 }, '问的是那一个项目根里含这一段文字的文件');
@@ -1005,6 +1007,14 @@ test('an @ fragment asks the host for project files and Enter picks one', option
 
     stdin.write('\x1b');
     await waitFor(() => !lastFrame().includes('Esc 收起'), { read: lastFrame });
+
+    // 那一次查询还没回来时 Enter 什么都不做：不选一条没选过的候选，也不把这一句发出去。
+    stdin.write(' @x');
+    await delay(60);
+    stdin.write('\r');
+    await delay(120);
+    assert.equal(started(), 0, '查询在路上时 Enter 既不选中也不发送');
+    assert.match(lastFrame(), /@x/, '那一句还在草稿上');
   } finally {
     instance.unmount();
   }
