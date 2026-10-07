@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { createConfig } from './kernel/config.js';
 import { loadConfigLayers } from './kernel/config-file.js';
+import { createConfigStore } from './kernel/config-store.js';
 import { createKernel } from './kernel/kernel.js';
 import { loadAssembly } from './kernel/assembly.js';
 import { DEFAULT_MODE, modeDirectories } from './kernel/modes.js';
@@ -358,7 +359,17 @@ if (missingFlagValue) {
   // 桌面壳或者脚本起这一个进程，两端各读写一行 JSON（D30）：本机不开端口，审批与事件都走这条连接。
   try {
     const { config, extensions } = await configSnapshot();
-    serveHost({ config, provider: providerFromConfig(config), policy: config.policy, extensions, loadEnvironment: projectEnvironment, ...resolveMode(config) });
+    // 可写的那两层由启动这一侧算出路径：宿主只认「哪一层、哪一个白名单字段、读回的那一份版本」，说不出文件在哪（方案 7.2）。
+    // 这一格跟着 `ligule host` 起：设置那一栏在桌面壳里，终端与 `ligule run` 都没有要写配置的入口。
+    serveHost({
+      config,
+      provider: providerFromConfig(config),
+      policy: config.policy,
+      extensions,
+      loadEnvironment: projectEnvironment,
+      configStore: createConfigStore({ projectRoot: config.boundary }),
+      ...resolveMode(config),
+    });
   } catch (error) {
     printFailure(error.code ?? 'cli_host_failed', error.detail);
   }

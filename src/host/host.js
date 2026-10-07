@@ -173,7 +173,7 @@ export function shownConfigOf(config) {
 // modeName 与 modePaths 是一对：给了名字就要能给那三层目录，运行中换模式要用同一套查找（D41、D44）。
 // 扩展来源由装载侧算好交进来（D68：项目层与本地层里写的路径不算）：paths 是要加载的文件，
 // ignored 是那些被这条规则挡掉的路径，它们进日志而不是静默消失。
-export function createHost({ config, provider, plugins = [minimalPlugin, networkPlugin], policy, logger, modeName, modePaths, skillRegistry, templateRegistry, extensions = { paths: [], ignored: [] }, loadEnvironment }) {
+export function createHost({ config, provider, plugins = [minimalPlugin, networkPlugin], policy, logger, modeName, modePaths, skillRegistry, templateRegistry, extensions = { paths: [], ignored: [] }, loadEnvironment, configStore }) {
   // 一份项目环境：这个项目自己的配置快照、提供方、判定档位、模式目录与记录目录（方案 3.1 与 3.2）。
   // 校验在装载这一刻做完：一条坏配置不该等到模型第一次调用才炸（D60）。
   // 边界是工具读写的位置，也是指令文件上溯的止点，两边都读它，缺一处就说缺一处。
@@ -790,7 +790,19 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           // 边界在「结果由固定四格拼出来」这一句上，不在参数校验上：子集校验放过模式里没声明的键（D14）。
           // 白名单的理由：配置合并除 `__proto__` 之外接受任何键，项目层那一份可能出自别人写的仓库（D8）。
           // 凭据只走环境变量是一条约定，不是拦阻（D13、D60），所以交出整份快照证明不了帧里没有别的东西。
-          return shownConfigOf(config);
+          // 多交出的那一格是各层文件的版本：写的时候要把读到的那一份带回来，光有值比不出「别人也改过」。
+          return {
+            ...shownConfigOf(config),
+            layers: configStore === undefined ? [] : await configStore.list(),
+          };
+        }
+        case 'config.set': {
+          // 字段表、值的形状与「哪一层落在哪一个文件」都由那一格配置里的写入侧持有：这一处只转发，
+          // 界面说不出文件路径，也说不出白名单之外的键（方案 7.2）。
+          if (configStore === undefined) throw new KernelError('config_write_unsupported');
+          const { field, value, layer, version } = message.params;
+          const written = await configStore.write({ layer, field, value, version });
+          return { ...written, layers: await configStore.list() };
         }
         case 'session.compact': {
           const state = open(sessionId);

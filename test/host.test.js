@@ -7,11 +7,13 @@ import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createConnection, createConfig, createMemoryConnectionPair, MESSAGES_CAPABILITIES, METHODS, NOTIFICATIONS, providerFromConfig, resolveShell, serveHost } from '../dist/index.js';
 import { shownConfigOf } from '../dist/host/host.js';
+import { createConfigStore } from '../dist/kernel/config-store.js';
+import { configVersion } from '../dist/kernel/config-edit.js';
 import { listProjectFiles } from '../dist/host/paths.js';
 
 const CLI = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
@@ -578,7 +580,7 @@ test('a branch of an open session reads back through the same action', async () 
 
 // 手动压缩与状态上那一格（D82、D83，实现顺序第 43 步）：压这件事要调模型、要写检查点，两处都在宿主一侧，
 // 所以它是一条协议方法而不是界面里的一个把戏。
-async function withInProcessHost(run, limits) {
+async function withInProcessHost(run, limits, extra = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'ligule-host-compact-'));
   const config = createConfig({
     user: {
@@ -604,7 +606,7 @@ async function withInProcessHost(run, limits) {
     },
   };
   const pair = createMemoryConnectionPair();
-  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy });
+  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy, ...extra });
   const connection = createConnection(pair.client);
   try {
     return await run(connection, { hold: (promise) => { gate = promise; }, directory });
@@ -669,15 +671,82 @@ test('manual compaction returns a boundary the status line then reports', async 
 test('config.get shows the endpoint block and nothing else from the snapshot', async () => {
   await withInProcessHost(async (connection, { directory }) => {
     const shown = await connection.request('config.get', {});
-    assert.deepEqual(Object.keys(shown), ['model'], '交回来的只有一格 model');
+    assert.deepEqual(Object.keys(shown), ['model', 'layers'], '交出来的是那格端点与可写的那几层');
     assert.deepEqual(Object.keys(shown.model).sort(), ['api', 'baseURL', 'model'], '端点那三样；这份配置没写 apiKeyEnv，那一格就不出现');
+    assert.deepEqual(shown.layers, [], '启动这一侧没给写入口时那一格是空的：这一具宿主不知道该往哪里写');
+    await assert.rejects(
+      () => connection.request('config.set', { field: 'model.model', value: 'x', layer: 'user', version: '' }),
+      (error) => error.code === 'config_write_unsupported',
+    );
     const frame = JSON.stringify(shown);
     assert.ok(!frame.includes(directory), '边界那一个目录不进帧：那是这台机器上的位置');
     assert.ok(!frame.includes('auto'), '判定档位不在这一条里读，它走 status.get（D40）');
     // 这条路不收参数：多写的那一格不会被读，也换不来白名单之外的一格。
     // 边界不在参数校验上（子集校验放过模式里没声明的键），在结果由固定四格拼出来那一句上。
-    assert.deepEqual(Object.keys(await connection.request('config.get', { path: 'policy.mode' })), ['model']);
+    assert.deepEqual(Object.keys(await connection.request('config.get', { path: 'policy.mode' })), ['model', 'layers']);
   });
+});
+
+// 写配置那一条路（实现顺序第 90 步，方案 7.2）：字段与层由宿主持有，别的一格都说不出口；
+// 那份文件被别人改过时报冲突而不是盖掉他的改动。
+test('config.set writes one whitelisted field and reports a concurrent edit instead of overwriting it', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-config-set-'));
+  const home = join(root, 'home');
+  const userFile = join(home, '.ligule', 'config.toml');
+  await mkdir(dirname(userFile), { recursive: true });
+  const original = '# 我的默认\n[model]\nmodel = "旧的"\napi = "messages" # 线上形状\n';
+  await writeFile(userFile, original, 'utf8');
+  const store = createConfigStore({ projectRoot: root, userHome: home });
+  try {
+    await withInProcessHost(async (connection) => {
+      const first = await connection.request('config.get', {});
+      assert.deepEqual(first.layers.map((layer) => layer.layer), ['user', 'projectLocal']);
+      const [user, local] = first.layers;
+      assert.equal(user.exists, true);
+      assert.equal(local.version, '', '那一份项目本机覆盖还没写过：版本是空串');
+      assert.ok(!JSON.stringify(first.layers).includes(home), '帧里没有文件路径：那格只说层名与版本');
+
+      const written = await connection.request('config.set', { field: 'model.model', value: '新的', layer: 'user', version: user.version });
+      assert.equal(written.created, false);
+      const text = await readFile(userFile, 'utf8');
+      assert.ok(text.includes('model = "新的"'), text);
+      assert.ok(text.includes('# 我的默认'), '整行的注释留着');
+      assert.ok(text.includes('api = "messages" # 线上形状'), '没编辑那一条一个字节都没动');
+      assert.equal(written.version, configVersion(text), '交回的新版本就是刚落盘的那一份');
+
+      // 另一份进程或人自己开的编辑器在这之后改过：这一次写不进去，他的那份留着。
+      const outside = text.replace('新的', '别人写的');
+      await writeFile(userFile, outside, 'utf8');
+      await assert.rejects(
+        () => connection.request('config.set', { field: 'model.model', value: '我要写的', layer: 'user', version: written.version }),
+        (error) => error.code === 'config_version_stale',
+      );
+      assert.equal(await readFile(userFile, 'utf8'), outside, '冲突那一次一个字都没写');
+
+      // 那一份不在的层可以写第一次：版本交回空串，写完才在。
+      const fresh = await connection.request('config.set', { field: 'model.api', value: 'chat-completions', layer: 'projectLocal', version: '' });
+      assert.equal(fresh.created, true);
+      assert.ok((await readFile(join(root, '.ligule', 'config.local.toml'), 'utf8')).includes('api = "chat-completions"'));
+
+      // 白名单之外、层名不对、值的形状不对：三条都当场说出来，且都问不出一个路径。
+      await assert.rejects(
+        () => connection.request('config.set', { field: 'policy.mode', value: 'auto', layer: 'user', version: written.version }),
+        (error) => error.code === 'config_field_unknown',
+      );
+      await assert.rejects(
+        () => connection.request('config.set', { field: 'model.model', value: 'x', layer: 'project', version: '' }),
+        (error) => error.code === 'config_layer_unknown',
+        '项目共享那一份不在可写的两层里',
+      );
+      await assert.rejects(
+        () => connection.request('config.set', { field: 'model.baseURL', value: 'https://a:b@c.example.test/v1', layer: 'user', version: written.version }),
+        (error) => error.code === 'config_field_value',
+      );
+      assert.equal(await readFile(userFile, 'utf8'), outside, '被拒的那几次都没碰那份文件');
+    }, undefined, { configStore: store });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 // 展示值由宿主拼：每一格要先是字符串，地址只留协议、主机、端口与路径那一段（实现顺序第 67 步）。

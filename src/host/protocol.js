@@ -141,8 +141,23 @@ export const METHODS = Object.freeze({
   // 第四条只为界面多出来的方法（前三条是 `mode.set` D65、`session.compact` D83、`sessions.list`）：配置在宿主那一侧，
   // 而这条路只交得出白名单里的几格——没有参数可点路径，所以界面要不到别的格。
   'config.get': {
-    description: 'Read the configuration this interface may show: the host builds the answer from four listed fields, so no path can be asked for and no credential ever comes from configuration (D13, D60)',
+    description: 'Read the configuration this interface may show: the host builds the answer from four listed fields plus the version of each writable settings file, so no path can be asked for and no credential ever comes from configuration (D13, D60)',
     parameters: { type: 'object', properties: {}, description: 'reading the shown configuration takes no argument' },
+  },
+  // 第十条只为界面多出来的方法：配置由宿主持有，界面说得出改哪一个白名单字段、写进哪一层，以及它读回的那一份版本；
+  // 文件路径、白名单之外的键与项目共享那一份配置都说不出口（方案 7.2）。
+  'config.set': {
+    description: 'Write one whitelisted configuration field into one settings layer; the host owns the field list, the value shape and the target file, and refuses the write when that file changed since it was read',
+    parameters: {
+      type: 'object',
+      properties: {
+        field: { type: 'string', description: 'one field name from the list the host names back when this is not one of them' },
+        value: { type: 'string', description: 'the new value; the host checks it against the shape that field declares' },
+        layer: { type: 'string', description: 'which settings file to write; the writable ones are named back when this is not one of them' },
+        version: { type: 'string', description: 'the version read from that file, so a concurrent edit is reported instead of overwritten; blank when that file did not exist' },
+      },
+      required: ['field', 'value', 'layer', 'version'],
+    },
   },
   'mode.set': {
     description: 'Switch to another named mode; while a round runs it takes effect once that round ends, and naming the mode already in use withdraws a pending switch',
