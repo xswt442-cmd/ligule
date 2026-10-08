@@ -33,7 +33,11 @@ async function withEndpoint(respond, run) {
     await respond(requests.length, response, requests[requests.length - 1]);
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const port = server.address()?.port;
+  // 一次整套跑里见过这里拿到的端口不能用，报回来的却是端点那一句 `provider_transport_failed`（fetch 的「bad port」）：
+  // 端口不对就在这儿说清，别让它混进端点那一类的失败里。
+  if (typeof port !== 'number' || port === 0) throw new Error(`test_endpoint_port_unusable:${String(port)}`);
+  const baseUrl = `http://127.0.0.1:${port}`;
   process.env[API_KEY_ENV] = 'test-key';
   try {
     return await run(baseUrl, requests);
