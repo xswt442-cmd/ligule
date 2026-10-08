@@ -69,12 +69,12 @@ for (let index = 0; index < argv.length; index += 1) {
 }
 const [command, ...rest] = positional;
 
-async function configSnapshot() {
-  const layers = await loadConfigLayers({ projectRoot: process.cwd(), flags });
-  // 边界兜底取当前工作目录：命令行在哪里跑，工具就能在哪里读写。任何一层配置都盖得过它。
-  const user = { boundary: process.cwd(), ...layers.user };
+async function configSnapshot(projectRoot = process.cwd()) {
+  const layers = await loadConfigLayers({ projectRoot, flags });
+  // 边界兜底取这一次指的那一根：命令行在哪里跑（或 `--project` 指了哪一根），工具就在哪里读写。任何一层配置都盖得过它。
+  const user = { boundary: projectRoot, ...layers.user };
   // 扩展的来源在同一次装载里算出来（D68）：项目层与本地层里写的路径不算，那一条挡住的判断在这里看得见。
-  const extensions = await extensionSources({ ...layers, user }, { projectRoot: process.cwd() });
+  const extensions = await extensionSources({ ...layers, user }, { projectRoot });
   return { config: createConfig({ ...layers, user }), extensions, layers };
 }
 
@@ -316,7 +316,9 @@ if (missingFlagValue) {
 } else if (command === 'sessions') {
   // 只读地列出跑过的会话（D73）：扫记录目录，不建索引也不开会话；耗时打在这一行上，U38 要的就是这个数。
   try {
-    const { config } = await configSnapshot();
+    // `--project <根>` 指了哪一根就读哪一根的那一层：记录目录本身是按项目层配出来的，
+    // 只在当前目录下筛项目根等于没读那个项目（`RUNLOCAL.md` 那一条说的不是这个意思）。
+    const { config } = await configSnapshot(projectFlag);
     const directory = sessionDirectory(config);
     const started = Date.now();
     const listed = await listSessions(directory, { projectRoot: projectFlag });
@@ -397,7 +399,7 @@ if (missingFlagValue) {
   console.log(`ligule ${pkg.version} - under development, do not depend on it.`);
   console.log('commands: tools, skills, sessions, policy <session-id>, run <text>, resume <id> <text>, call <tool> [json-args], tui, host, --version');
   console.log('options: --config <key.path=value> (repeatable), --mode <name>');
-  console.log('run, tui and host read model.api ("messages" or "chat-completions"), model.baseURL and model.model from the config layers; the key comes from LIGULE_API_KEY');
+  console.log('run, tui and host read model.api ("messages" or "chat-completions"), model.baseURL and model.model from the config layers; the key comes from the environment variable named by model.apiKeyEnv, or LIGULE_API_KEY when that one is not written');
   console.log('run, tui and host also pick a mode: --mode <name> overrides the config `mode`, and neither one written means the shipped "minimal" (D44); tools and call do not read one');
   console.log('skills lists what this directory would load and why any skill was skipped; it reads the four skill directories and no model config');
 } else {

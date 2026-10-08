@@ -59,13 +59,14 @@ async function withEndpoint(run) {
 // --config 的值是一段 TOML，所以字符串要带引号（D8 那一条装载规则）。
 // HOME 与 USERPROFILE 指到这个临时目录：命令行为读真实主目录下的用户层配置，那一份属于这台机器，
 // 它写了 `model.apiKeyEnv` 就会盖掉这里设的 `LIGULE_API_KEY`，本机配了什么测试就跟着变红。
-function startHost(directory, baseUrl) {
+function startHost(directory, baseUrl, extra = []) {
   const child = spawn(process.execPath, [
     CLI, 'host',
     '--config', 'model.api="messages"',
     '--config', `model.baseURL="${baseUrl}"`,
     '--config', 'model.model="test-model"',
     '--config', 'policy.mode="ask"',
+    ...extra,
   ], { cwd: directory, env: { ...process.env, HOME: directory, USERPROFILE: directory, LIGULE_API_KEY: 'test-key' } });
   const stderr = [];
   child.stderr.setEncoding('utf8');
@@ -78,23 +79,32 @@ function startHost(directory, baseUrl) {
 }
 
 // 一轮跑完之后再关本地服务与子进程：模型那两次请求都要打在还开着的服务上。
-async function withHost(run) {
+async function withHost(run, extra = []) {
   const directory = await mkdtemp(join(tmpdir(), 'ligule-host-'));
   await writeFile(join(directory, 'note.txt'), 'the body');
   try {
     return await withEndpoint(async (baseUrl) => {
-      const host = startHost(directory, baseUrl);
+      const host = startHost(directory, baseUrl, extra);
       const notifications = [];
       const approvals = [];
       host.client.onNotification((message) => notifications.push(message));
       try {
-        return await run(host, { notifications, approvals, directory, baseUrl, startAnother: () => startHost(directory, baseUrl) });
+        return await run(host, { notifications, approvals, directory, baseUrl, startAnother: () => startHost(directory, baseUrl, extra) });
       } finally {
         await stop(host);
       }
     });
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    // Windows 上刚退出的子进程那一份工作目录句柄不一定立刻放掉：删不动时重试一小段，别把 EBUSY 报成测试失败。
+    for (let tries = 0; tries < 40; tries += 1) {
+      try {
+        await rm(directory, { recursive: true, force: true });
+        break;
+      } catch (error) {
+        if (error.code !== 'EBUSY') throw error;
+        await delay(50);
+      }
+    }
   }
 }
 
@@ -134,6 +144,8 @@ test('a client over stdio drives one round, answers one approval and watches the
     assert.equal(approvals[0].tool, 'read');
     assert.deepEqual(approvals[0].args, { path: 'note.txt' });
     assert.equal(approvals[0].sessionId, sessionId);
+    // 那一次询问带着属于它自己的那一项目录：客户端看着别的那一份时，答的是那一个项目里的这一步。
+    assert.equal(approvals[0].projectRoot, directory);
     // 没有命令文本的调用不带后端那两样：那一种语法与哪一个可执行文件对读一次文件这件事没有意义。
     assert.equal(approvals[0].shell, undefined);
     assert.equal(approvals[0].executable, undefined);
@@ -144,7 +156,7 @@ test('a client over stdio drives one round, answers one approval and watches the
     const events = notifications.filter((message) => message.notify === 'event').map((message) => message.event);
     // 装载先记一条模式事件：那一份清单是这一轮工具栏目的来源（I2、I5）。
     // 最后那一条是轮次完成标记：它跟在助手那一条之后，不进投影（实现顺序第 68 步）。
-    assert.deepEqual(events.map((event) => event.kind), ['mode', 'user', 'assistant', 'tool', 'assistant', 'turn']);
+    assert.deepEqual(events.map((event) => event.kind), ['mode', 'user', 'turnContext', 'assistant', 'tool', 'assistant', 'turn']);
     assert.equal(events.find((event) => event.kind === 'tool').result.content.text, 'the body', 'the tool result the client saw is the file content');
 
     // 客户端看见的那一条与记录里落盘的那一条同源，序号也在通知里带回来了。
@@ -236,7 +248,7 @@ test('a second Host process opens the same record, so the session lives in the H
       const reopened = await second.client.request('session.read', { sessionId });
       assert.equal(reopened.sessionId, sessionId);
       // 第二个进程装载同一份清单，不再往记录里补一条：attach 与读不动事实源（I5）。
-      assert.deepEqual(reopened.events.map((event) => event.kind), ['mode', 'user', 'assistant', 'tool', 'assistant', 'turn']);
+      assert.deepEqual(reopened.events.map((event) => event.kind), ['mode', 'user', 'turnContext', 'assistant', 'tool', 'assistant', 'turn']);
       assert.equal(reopened.events.find((event) => event.kind === 'tool').result.content.text, 'the body');
       const status = await second.client.request('status.get', { sessionId });
       assert.equal(status.running, false);
@@ -303,7 +315,16 @@ test('ligule run prints the round, asks the terminal once, and the project instr
     // 项目指令那一层进了请求体的系统段（D10 装载侧的接线）。
     assert.match(outcome.requests[0].system, /print nothing but the answer/);
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    // Windows 上刚退出的子进程那一份工作目录句柄不一定立刻放掉：删不动时重试一小段，别把 EBUSY 报成测试失败。
+    for (let tries = 0; tries < 40; tries += 1) {
+      try {
+        await rm(directory, { recursive: true, force: true });
+        break;
+      } catch (error) {
+        if (error.code !== 'EBUSY') throw error;
+        await delay(50);
+      }
+    }
   }
 });
 
@@ -318,7 +339,16 @@ test('ligule run with nobody answering the prompt declines the tool and still fi
     assert.match(outcome.stdout, /the file says so/);
     assert.match(outcome.stderr, /2 iterations, 2 model calls/);
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    // Windows 上刚退出的子进程那一份工作目录句柄不一定立刻放掉：删不动时重试一小段，别把 EBUSY 报成测试失败。
+    for (let tries = 0; tries < 40; tries += 1) {
+      try {
+        await rm(directory, { recursive: true, force: true });
+        break;
+      } catch (error) {
+        if (error.code !== 'EBUSY') throw error;
+        await delay(50);
+      }
+    }
   }
 });
 
@@ -706,7 +736,7 @@ test('config.set writes one whitelisted field and reports a concurrent edit inst
       assert.equal(user.exists, true);
       assert.equal(local.version, '', '那一份项目本机覆盖还没写过：版本是空串');
       assert.ok(!JSON.stringify(first.layers).includes(home), '帧里没有文件路径：那格只说层名与版本');
-      assert.deepEqual(first.sources, { 'model.api': 'user', 'model.model': 'user', 'model.baseURL': 'none', 'model.apiKeyEnv': 'none' }, '来源说的是装载那一次读到的四层，没写的那一格是 none');
+      assert.deepEqual(first.sources, { 'model.api': 'user', 'model.model': 'user', 'model.baseURL': 'none', 'model.apiKeyEnv': 'none', 'policy.mode': 'none', 'policy.rules': 'none' }, '来源说的是装载那一次读到的四层，没写的那一格是 none');
 
       const written = await connection.request('config.set', { field: 'model.model', value: '新的', layer: 'user', version: user.version });
       assert.equal(written.created, false);
@@ -732,9 +762,40 @@ test('config.set writes one whitelisted field and reports a concurrent edit inst
       assert.equal(fresh.shadowed, false, '命令行那一层没写这一条：这一笔改得动');
       assert.equal((await connection.request('config.get', {})).sources['model.api'], 'local', '写完那一条之后，来源跟着变成本机覆盖那一层');
 
-      // 白名单之外、层名不对、值的形状不对：三条都当场说出来，且都问不出一个路径。
+      // 档位与规则表现在在白名单里（D100、D101）：档位是一条标量，规则表按整块动作写。
+      const current = (await connection.request('config.get', {})).layers.find((layer) => layer.layer === 'user').version;
+      const tier = await connection.request('config.set', { field: 'policy.mode', value: 'auto', layer: 'user', version: current });
+      assert.equal(tier.created, true, '那一份文件里原来没有 [policy]，补一张表');
+      const added = await connection.request('config.set', {
+        field: 'policy.rules',
+        op: 'add',
+        layer: 'user',
+        version: tier.version,
+        ruleTool: 'read',
+        ruleDecision: 'allow',
+      });
+      assert.deepEqual(added.rules, [{ tool: 'read', decision: 'allow' }], '交回的是写完那一张表');
+      const shown = await connection.request('config.get', {});
+      assert.deepEqual(shown.rules, [{ tool: 'read', decision: 'allow' }]);
+      assert.equal(shown.rulesSource, 'user', '生效那一份出自使用者默认这一层');
+      assert.equal(shown.sources['policy.mode'], 'user');
       await assert.rejects(
-        () => connection.request('config.set', { field: 'policy.mode', value: 'auto', layer: 'user', version: written.version }),
+        () => connection.request('config.set', {
+          field: 'policy.rules',
+          op: 'add',
+          layer: 'user',
+          version: added.version,
+          ruleTool: 'read',
+          ruleDecision: 'maybe',
+        }),
+        (error) => error.code === 'config_rule_invalid',
+        '非法的档位不落盘',
+      );
+
+      // 白名单之外、层名不对、值的形状不对：三条都当场说出来，且都问不出一个路径。
+      const kept = await readFile(userFile, 'utf8');
+      await assert.rejects(
+        () => connection.request('config.set', { field: 'policy.secret', value: 'auto', layer: 'user', version: current }),
         (error) => error.code === 'config_field_unknown',
       );
       await assert.rejects(
@@ -746,7 +807,7 @@ test('config.set writes one whitelisted field and reports a concurrent edit inst
         () => connection.request('config.set', { field: 'model.baseURL', value: 'https://a:b@c.example.test/v1', layer: 'user', version: written.version }),
         (error) => error.code === 'config_field_value',
       );
-      assert.equal(await readFile(userFile, 'utf8'), outside, '被拒的那几次都没碰那份文件');
+      assert.equal(await readFile(userFile, 'utf8'), kept, '被拒的那几次都没碰那份文件');
     }, undefined, { configStore: store });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -1148,6 +1209,111 @@ test('a file listing that ran out of its budget says so instead of finding nothi
     assert.deepEqual(complete.paths, [], '整棵翻完时才说没有对得上的');
     assert.equal(complete.stopped, '', '整棵翻完时不说「可能没找全」');
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    // Windows 上刚退出的子进程那一份工作目录句柄不一定立刻放掉：删不动时重试一小段，别把 EBUSY 报成测试失败。
+    for (let tries = 0; tries < 40; tries += 1) {
+      try {
+        await rm(directory, { recursive: true, force: true });
+        break;
+      } catch (error) {
+        if (error.code !== 'EBUSY') throw error;
+        await delay(50);
+      }
+    }
   }
+});
+
+// 审批档位是两件：配置那一份默认与这一份会话的覆盖（D101）。
+test('a session overrides the approval tier without touching the settings file', async () => {
+  await withInProcessHost(async (connection) => {
+    const { sessionId } = await connection.request('session.create', {});
+    const before = await connection.request('status.get', { sessionId });
+    assert.equal(before.policySource, 'config', '刚开起来的会话用的是配置那一份');
+    const switched = await connection.request('policy.set', { sessionId, mode: 'auto' });
+    assert.equal(switched.policy, 'auto');
+    assert.equal(switched.policySource, 'session');
+    assert.equal(switched.policyDefault, before.policy, '交回的是配置里那一份默认，界面上才有「退回」可说');
+    const after = await connection.request('status.get', { sessionId });
+    assert.equal(after.policy, 'auto');
+    assert.equal(after.policySource, 'session');
+    const back = await connection.request('policy.set', { sessionId, mode: 'default' });
+    assert.equal(back.policySource, 'config');
+    assert.equal(back.policy, before.policy);
+    // 覆盖只落在被指名的那一份会话上：同一具宿主里的另一份读的仍是配置那一份（D101）。
+    const other = await connection.request('session.create', {});
+    await connection.request('policy.set', { sessionId, mode: 'auto' });
+    const aside = await connection.request('status.get', { sessionId: other.sessionId });
+    assert.equal(aside.policySource, 'config', '另一份会话没有被带着改');
+    assert.equal(aside.policy, before.policy);
+    assert.equal((await connection.request('status.get', { sessionId })).policySource, 'session');
+    await assert.rejects(
+      () => connection.request('policy.set', { sessionId, mode: 'sometimes' }),
+      (error) => error.code === 'policy_mode_unknown',
+    );
+  });
+});
+
+// 规则表整份替换（D8 的合并语义），所以 `index` 指的是写着生效那一份的那一层：往另一层加一条会写出一张只有这一条的表（D100）。
+test('a rule table written by another layer refuses a write aimed at a lower one', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-rules-layer-'));
+  const home = join(root, 'home');
+  await mkdir(home, { recursive: true });
+  const store = createConfigStore({
+    projectRoot: root,
+    userHome: home,
+    layers: { project: { policy: { mode: 'ask', rules: [{ tool: 'read', decision: 'allow' }] } } },
+  });
+  try {
+    await withInProcessHost(async (connection) => {
+      const shown = await connection.request('config.get', {});
+      assert.deepEqual(shown.rules, [{ tool: 'read', decision: 'allow' }]);
+      assert.equal(shown.rulesSource, 'project', '生效那一份是项目共享那一层写着的');
+      const [user] = shown.layers.filter((layer) => layer.layer === 'user');
+      await assert.rejects(
+        () => connection.request('config.set', {
+          field: 'policy.rules', op: 'add', layer: 'user', version: user.version, ruleTool: 'exec', ruleDecision: 'deny',
+        }),
+        (error) => error.code === 'config_rules_elsewhere' && error.detail.includes('project'),
+      );
+      assert.equal(await readFile(join(home, '.ligule', 'config.toml'), 'utf8').catch(() => ''), '', '被拒的那一次没有写出那一份文件');
+    }, undefined, { configStore: store });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// 方案 8.2 第五景里那条合起来读的一件事：换一具宿主接回同一份会话，那一次工具调用的整段正文（写在溢出文件里）
+// 与它自己的实际耗时都要照原样读回来，新一轮也不改写上一轮那两条。
+// 上一版在一趟里交替起落两具子进程宿主，重复跑到第三遍时工作进程静默断在十条之后；这一版改成按会话交锁：
+// 关掉那一份会话就把写锁交了（第 70 步那一条），不必在一趟里停掉还活着的宿主，收尾也只由助手做一次。
+test('a restarted Host reads back the spilled body and the stored duration of the earlier round', async () => {
+  await withHost(async (host, { directory, startAnother }) => {
+    host.client.onRequest(() => ({ decision: 'allow' }));
+    await writeFile(join(directory, 'note.txt'), '这一段正文要长到越过那一格上限。'.repeat(40));
+    const { sessionId } = await host.client.request('session.create', {});
+    await host.client.request('run.start', { sessionId, input: 'read the note' });
+
+    const first = (await host.client.request('session.read', { sessionId, fullResults: true })).events;
+    const tool = first.find((event) => event.kind === 'tool');
+    assert.ok(tool !== undefined, `这一轮没留下工具结果那一条事实：${first.map((event) => event.kind).join(',')}`);
+    assert.equal(typeof tool.result?.spilled, 'string', `那一次结果没走溢出文件：${String(tool.result?.content).slice(0, 80)}`);
+    const stored = tool.durationMs ?? tool.result?.durationMs;
+    const body = JSON.stringify(tool.result?.content ?? '');
+    assert.equal(typeof stored, 'number', `那次工具调用没带上实际耗时：${body.slice(0, 200)}`);
+
+    await host.client.request('session.close', { sessionId });
+    const again = startAnother();
+    try {
+      again.client.onRequest(() => ({ decision: 'allow' }));
+      await again.client.request('session.open', { sessionId });
+      const reread = (await again.client.request('session.read', { sessionId, fullResults: true })).events.find((event) => event.kind === 'tool');
+      assert.ok(JSON.stringify(reread.result?.content ?? '').includes('这一段正文要长到越过那一格上限'), `重开之后整段正文没读回来：${JSON.stringify(reread.result?.content).slice(0, 120)}`);
+      assert.equal(reread.durationMs ?? reread.result?.durationMs, stored, '重开之后那次工具调用的实际耗时变了');
+      await again.client.request('run.start', { sessionId, input: 'read the note again' });
+      const after = (await again.client.request('session.read', { sessionId, fullResults: true })).events.find((event) => event.kind === 'tool');
+      assert.equal(after.result?.spilled, tool.result.spilled, '新一轮改写了上一轮那条结果的溢出文件引用');
+      assert.equal(after.durationMs ?? after.result?.durationMs, stored, '新一轮改写了上一轮那次调用的实际耗时');
+    } finally {
+      await stop(again);
+    }
+  }, ['--config', 'limits.resultBytes=48']);
 });

@@ -2,7 +2,7 @@
 // 一份记录能读出来的事都在这一处：它是哪一版格式、属于哪个项目、什么时候动过、几条事件、
 // 最后生效的是哪一份模式清单，以及有没有还没收尾的派发（那是第 33 步那一条判据，列表里就该看得见）。
 import { readdir, readFile, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import type { ModeFile } from '../kernel/modes.js';
 import { findUnresolvedCalls } from './repair.js';
@@ -92,7 +92,8 @@ export async function listSessions(
       // 正文与首行的错误由完整记录校验交回，不用猜测损坏记录的项目归属。
     }
     // 按项目根过滤时，读不出项目根的那些（没有首行的现存记录）不算在这个项目里：过滤的意义是「只显示这一处的会话」。
-    if (projectRoot !== undefined && typeof header?.projectRoot === 'string' && header.projectRoot !== projectRoot) continue;
+    // 比的是同一个目录，不是同一串字符：记录头部写的是当时解析出来的那一种写法，命令行上敲的可能是另一种分隔符。
+    if (projectRoot !== undefined && typeof header?.projectRoot === 'string' && resolve(header.projectRoot) !== resolve(projectRoot)) continue;
     let events: SessionEvent[] = [];
     let truncatedBytes = 0;
     let invalid: SessionSummary['error'];
