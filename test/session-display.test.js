@@ -6,7 +6,8 @@ import { withTuiHost } from './helpers/tui-host.js';
 
 test('complete results are read through the Host without changing the record or model projection', async () => {
   await withTuiHost(async ({ client, config, sessionId, sessionDirectory }) => {
-    const original = await readFile(new URL('../AGENTS.md', import.meta.url), 'utf8');
+    // 正文自己造，不拿仓库里那份文档当样本：文档会一直长，长过读取那一格的上限时交回的是截断那一份，这条断言就跟文档的字节数绑在了一起。
+    const original = Array.from({ length: 600 }, (_, index) => `${index} 这一段正文要长到越过那一格上限`).join('\n');
     await writeFile(join(config.boundary, 'notes.md'), original);
     client.onRequest((message) => message.method === 'approval.request' ? { decision: 'allow' } : undefined);
     await client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'read', args: { path: 'notes.md' } }) });
