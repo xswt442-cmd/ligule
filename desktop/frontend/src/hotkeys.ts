@@ -1,6 +1,6 @@
 // 桌面的键位层：一记按键落的是哪一个动作，与界面说出来的一串字，读的是同一份表。
 // 动作名是稳定标识；个人覆盖换掉的是那一个动作的键，动作名不动（方案 6.1 已定的那一条）。
-// 两头同源才说不出一键两义：提示写着 Ctrl+K 而实际落的是别的键，这种情况在这一层里进不来。
+// 按键表与画面上的说明读同一份东西：提示写着 Ctrl+K 而实际落下的是另一记键，这种不一致在这一层里进不来。
 
 export type KeyAction = 'palette' | 'sidebar' | 'copy-answer' | 'interrupt'
   | 'send' | 'send-alt' | 'newline' | 'history-older' | 'history-newer'
@@ -28,7 +28,7 @@ const KEY_NAMES: Readonly<Record<string, string>> = {
 
 export const KEYMAP: Readonly<Record<KeyAction, Binding>> = {
   'palette': { spec: 'ctrl+k', view: '窗口', label: '开命令面板' },
-  'sidebar': { spec: 'ctrl+b', view: '窗口', label: '收左侧栏' },
+  'sidebar': { spec: 'ctrl+b', view: '窗口', label: '收起或展开左侧栏' },
   'copy-answer': { spec: 'ctrl+shift+c', view: '窗口', label: '复制最后那条回答' },
   'interrupt': { spec: 'escape', view: '窗口', label: '收起开着的那一层；都收完才打断这一轮' },
   'send': { spec: 'enter', view: '输入坞', label: '发送这一句；跑着的时候排到后面' },

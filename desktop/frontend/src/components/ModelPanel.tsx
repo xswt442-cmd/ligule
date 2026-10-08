@@ -23,7 +23,7 @@ const SOURCE_NAMES: Record<string, string> = {
 type Draft = { field: string; label: string; value: string; choices?: string[] };
 
 const FIELDS: Draft[] = [
-  { field: 'model.api', label: '线上形状', value: '', choices: ['messages', 'chat-completions'] },
+  { field: 'model.api', label: '接口类型', value: '', choices: ['messages', 'chat-completions'] },
   { field: 'model.baseURL', label: '服务地址', value: '' },
   { field: 'model.model', label: '模型名', value: '' },
   { field: 'model.apiKeyEnv', label: '密钥的环境变量名', value: '' },
@@ -83,22 +83,24 @@ export function ModelPanel({ client, sessionId }: { client: Client; sessionId: s
         { applies?: { sessionId: string; when: string }[]; failure?: { code: string }; created?: boolean; shadowed?: boolean };
       const now = (answer.applies ?? []).filter((item) => item.when === 'now').length;
       const waiting = (answer.applies ?? []).filter((item) => item.when === 'round').length;
-      // 保存与采用是两件事，这里分两句说（方案 7.2：运行应用失败时分别显示「文件已保存」与「该会话未生效」）。
-      const parts = [`文件已写进${nameOf(layer)}${answer.created === true ? '（这一层原先没有那一份文件）' : ''}`];
-      if (answer.shadowed === true) parts.push(`但这一条由命令行那一层写着，改文件盖不过它：这一具宿主不会用上新值`);
-      else if (answer.failure !== undefined) parts.push(`但提供方重算失败（${answer.failure.code}）：会话还没用上它`);
-      else if (waiting > 0) parts.push(`${waiting} 份会话等自己那一轮收尾之后才换`);
-      if (now > 0) parts.push(`${now} 份空着的会话现在就换`);
-      // 被只读那一层盖着时不再补「没有会话要换」：那一句的原因已经说过一遍了。
-      if ((answer.applies ?? []).length === 0 && answer.failure === undefined && answer.shadowed !== true) parts.push('这一具宿主里没有会话属于这一格项目环境，所以没有谁要换');
-      setNote(parts.join('；'));
+      // 保存结果一句、什么时候生效一句，两句从不合在一起（方案 7.2：文件已保存与该会话未生效分别显示）。
+      const saved = `文件已写进${nameOf(layer)}${answer.created === true ? '（这一层原先没有那一份文件）' : ''}。`;
+      // 被只读那一层盖着、或提供方重算失败时，说的是「谁还不会用上新值」这一件事实，不再补「没有会话要换」。
+      let effect: string;
+      if (answer.shadowed === true) effect = '这一条由命令行那一层写着，改文件盖不过它：这一具宿主不会用上新值。';
+      else if (answer.failure !== undefined) effect = `提供方重算配置没成（${answer.failure.code}）：会话还没用上它。`;
+      else if (waiting > 0 && now > 0) effect = `${now} 份空着的会话现在就换，${waiting} 份跑着的会话等自己那一轮收尾之后才换。`;
+      else if (waiting > 0) effect = `${waiting} 份会话等自己那一轮收尾之后才换。`;
+      else if (now > 0) effect = `${now} 份空着的会话现在就换上它。`;
+      else effect = '这一具宿主里没有会话属于这个项目，所以现在没有会话会换上它。';
+      setNote(`${saved}${effect}`);
       setDraft(null);
       // 重读时把这一句留着：`load` 一开头会收掉上一回的说明，先写就等着被它擦掉（浏览器里量到过）。
       await load(true);
     } catch (error) {
       const kind = code(error);
       setNote(kind === 'config_version_stale'
-        ? '那一层文件在这之后被别的过程或你在编辑器里改过：这一次没有写进去，他的那份留着。按「再问一次」读回最新版本再试。'
+        ? '那一层文件在这之后被别的过程或你在编辑器里改过。这一次没有写进去，他的那份留着。按「再问一次」读回最新版本再试。'
         : `没写进去：${kind}`);
     } finally {
       setSaving(false);
@@ -136,11 +138,11 @@ export function ModelPanel({ client, sessionId }: { client: Client; sessionId: s
     </p>}
     <p className="sheet-note">
       这几格读的是这一具宿主启动时折好的那一份快照（D8）；每一条后面那一句说的是它由四层里哪一层写着，项目共享与命令行那两层只能读。
-      {sessionId === null ? '现在没有接开的会话，所以说不出一份模型在用哪一份'
+      {sessionId === null ? '现在没有打开的会话，说不出模型用的是哪一份'
         : <>这一份会话现在用的是 <code>{inUse.model ?? '读不出来'}</code>
           {inUse.pendingModel === undefined || inUse.pendingModel === null ? '，没有等着换的那一份' : <>，等在它轮次边界上的是 <code>{inUse.pendingModel}</code></>}</>}。
       地址只展示协议、主机、端口与路径那一段，密钥的值从来不进配置。
-      审批规则表那一批字段不在这一条路上：那是一份表，写入侧现在认的形状只有一条一行的那种值。
+      审批规则表不在这四条里：它在设置里另一栏「审批规则」那里改。
     </p>
   </>;
 }

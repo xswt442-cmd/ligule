@@ -41,6 +41,11 @@ export type Record_ = {
   status?: string;
   iterations?: number;
   modelCalls?: number;
+  // 一轮开始时交回的那一份完整参数快照（`session.read` 里的一条 `turnContext`）。内核没落这一条时这几格都不出现。
+  model?: string;
+  policy?: string;
+  policySource?: string;
+  mode?: string;
   // 崩溃之后由恢复路径补上的那一条（D72、D85）。
   recovery?: { assistantSeq?: number; safeToRedo?: boolean };
 };
@@ -52,7 +57,7 @@ export const shownIn = (verbosity: string, row: Row): boolean =>
 
 export type Row = {
   id: number;
-  kind: 'question' | 'answer' | 'reasoning' | 'call' | 'result' | 'refusal' | 'failure' | 'round' | 'meta' | 'error';
+  kind: 'question' | 'answer' | 'reasoning' | 'call' | 'result' | 'refusal' | 'failure' | 'round' | 'context' | 'meta' | 'error';
   text: string;
   // 这一行来自记录里哪一条事件（D73 那个稳定序号）。界面自己写的那几行没有它。
   seq?: number;
@@ -204,6 +209,16 @@ export function projectRecord(record: Record_, options: { startedAt?: number; no
 
 function projected(record: Record_, options: { startedAt?: number; now?: number }): Row[] {
   if (record.kind === 'user') return [{ id: nextId(), kind: 'question', text: record.raw ?? record.text ?? '' }];
+  // 一轮开始时的参数快照画成那一轮里的一行小字：内核还没落这一条时这一路不产行（读回来的记录里就没有它）。
+  if (record.kind === 'turnContext') {
+    const facts = [
+      record.model === undefined ? '' : `模型 ${record.model}`,
+      record.mode === undefined || record.mode === '' ? '' : `模式 ${record.mode}`,
+      record.policy === undefined ? '' : `审批档位 ${record.policy}${record.policySource === 'session' ? '（这一份会话改的）' : record.policySource === 'config' ? '（配置默认）' : ''}`,
+    ].filter((part) => part !== '');
+    if (facts.length === 0) return [];
+    return [{ id: nextId(), kind: 'context', text: `这一轮用的是 ${facts.join(' · ')}` }];
+  }
   if (record.kind === 'reasoning') return [{ id: nextId(), kind: 'reasoning', text: record.text ?? '' }];
   // 一轮正常完整结束留下一条事实，那也是一处可选的分支点（D68、方案 4.3）：它画出一行，「从这里分支」挂在那一行上。
   if (record.kind === 'turn') {

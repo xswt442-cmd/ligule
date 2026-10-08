@@ -21,6 +21,8 @@ export type Status = {
   modeLayer: string | null;
   pendingMode: string | null;
   policy: string;
+  // 现在生效的档位来自哪一层：配置默认还是会话临时改的（`status.get`、`policy.set` 都交回这一格）。
+  policySource: 'config' | 'session';
   denials: { consecutive: number; total: number };
   eventCount: number;
   // 装载着的提示模板：命令面板里那几条入口读的就是这一份（D92、D54）。

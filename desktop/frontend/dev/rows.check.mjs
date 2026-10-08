@@ -108,4 +108,12 @@ const resulted = projectRecord({ kind: 'tool', tool: 'read', callId: 'c7', args:
 assert.ok(shownIn('detailed', reasoned) && shownIn('detailed', resulted), '全量档什么都画');
 assert.ok(shownIn('standard', resulted) && !shownIn('standard', reasoned), '标准档藏推理段');
 assert.ok(shownIn('brief', answered) && !shownIn('brief', reasoned) && !shownIn('brief', resulted), '简略档只留问答');
+
+// 一轮开始时的完整参数快照画成一行小字：档位来自哪一处都写在行里；内核没落这一条时（记录里没这一种事件）就不产行。
+const ctx = projectRecord({ seq: 3, kind: 'turnContext', model: 'gpt-x', mode: 'full', policy: 'auto', policySource: 'session' })[0];
+assert.equal(ctx.kind, 'context');
+assert.equal(ctx.text, '这一轮用的是 模型 gpt-x · 模式 full · 审批档位 auto（这一份会话改的）');
+assert.equal(projectRecord({ seq: 4, kind: 'turnContext', policy: 'ask', policySource: 'config' })[0].text, '这一轮用的是 审批档位 ask（配置默认）', '只带档位与来源时其余段不硬编');
+assert.equal(projectRecord({ seq: 5, kind: 'turnContext' })[0], undefined, '几个读数都没有时这一行整个不画');
+// 会话浮层里那几格读自 status.get：档位与它的来源是两格，界面上才说得出「现在生效的是配置默认还是会话临时改的」。
 console.log('桌面前端的投影检查通过');

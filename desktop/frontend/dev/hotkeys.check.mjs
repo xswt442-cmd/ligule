@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { CURRENT, KEYMAP, actionOf, conflictsIn, defaultSpecs, formatKeys, isCapturing, isComposing, loadBindings, parseSpec, setCapturing, specOf } from '../src/hotkeys.ts';
 import { insertMention, mentionToken } from '../src/mentions.ts';
+import { mergeQueueIntoDraft } from '../src/settings.ts';
 
 // 认键与说键读的是同一份表（方案 6.1）：这一记按键落的是哪一个动作，与按钮上写的那一串字，一处改了另一处跟着改。
 assert.equal(actionOf({ key: 'k', ctrlKey: true }, '窗口'), 'palette');
@@ -58,4 +59,8 @@ assert.deepEqual(mentionToken('@a', 2), { start: 0, text: 'a' });
 assert.equal(mentionToken('邮箱是me@li', 8), null, '紧贴在字后面的 @ 不是路径引用');
 assert.equal(mentionToken('@notes/rea 后面还有字', 8), null, '笔落在一段中间时不替换');
 assert.deepEqual(insertMention('先看 @rea', 7, 3, 'notes/readings-3.md'), { draft: '先看 @notes/readings-3.md ', caret: 24 });
+// 重连之后排着的几句收回草稿：按先后拼在草稿后面，草稿原来那句留在最前；空草稿就从第一条起拼（交付五）。
+assert.equal(mergeQueueIntoDraft('先前的一句', ['第二句', '第三句']), '先前的一句\n\n第二句\n\n第三句');
+assert.equal(mergeQueueIntoDraft('', ['第一条', '第二条']), '第一条\n\n第二条', '空草稿时不留一个前导空行');
+assert.equal(mergeQueueIntoDraft('', []), '', '没有排着的句时草稿不动');
 console.log('桌面前端的按键检查通过');

@@ -43,6 +43,8 @@ const spills: Record<string, unknown> = {
 };
 
 const eventsOf = (sessionId: string): Record<string, unknown>[] => [
+  // 一轮开始时交回的完整参数快照：内核把这一条落在记录里，界面上那一行小字读它（交付四）。
+  { seq: -1, kind: 'turnContext', model: 'fake-review-model', policy: 'auto', policySource: 'config', mode: 'full' },
   { seq: 0, kind: 'user', text: '把压缩那一步的读数写成一页', raw: '把压缩那一步的读数写成一页' },
   { seq: 1, kind: 'reasoning', text: '需要先看记录里那条 usage 的读数，然后写成一份能贴进文档的段落。' },
   { seq: 2, kind: 'assistant', text: '', toolCalls: [
@@ -148,6 +150,20 @@ const shownValue = (key: string) => layers[SOURCES.find((layer) => layers[layer]
 const shownModel = () => Object.fromEntries(['api', 'baseURL', 'model', 'apiKeyEnv'].map((key) => [key, shownValue(key)]));
 const layerList = () => ['user', 'projectLocal'].map((layer) => ({ layer, version: layers[layer].version, exists: layers[layer].version !== '' }));
 
+// 规则表与配置默认档：`config.get` 交回这一份表与写它的那一层，`config.set` 的 policy.rules / policy.mode 改的就是这里。
+// 一条规则的形状与契约一致：`{ tool, match?, decision: 'allow' | 'deny', reason? }`。
+type Rule = { tool: string; match?: string; decision: 'allow' | 'deny'; reason?: string };
+let policyRules: Rule[] = [
+  { tool: 'read', decision: 'allow', reason: '随包规则：读取直接放行' },
+  { tool: 'exec', match: 'git status', decision: 'allow' },
+  { tool: 'fetch', decision: 'deny', reason: '元数据端点直接拒绝' },
+];
+// 规则表今天由哪一层写着：这一份假宿主记在 user 层，界面上「规则来自哪一层」读的就是它。
+const RULES_SOURCE = 'user';
+// 配置默认档与会话临时档：会话临时为 null 时退回配置默认。
+let configPolicy: 'ask' | 'auto' = 'auto';
+let sessionPolicy: 'ask' | 'auto' | null = null;
+
 let status = {
   sessionId: '',
   running: false,
@@ -156,6 +172,8 @@ let status = {
   modeLayer: 'shipped',
   pendingMode: null,
   policy: 'auto',
+  // 现在生效的档位来自哪一层：会话临时改过就是 session，否则跟着配置默认 config。
+  policySource: 'config' as 'config' | 'session',
   denials: { consecutive: 0, total: 3 },
   // 这一份会话现在用的是哪一份模型，与等在它轮次边界上的那一份（第 91 步交回的两格）。
   model: 'fake-review-model',
@@ -347,7 +365,21 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
         return reply({ hits: found });
       }
       case 'status.get':
-        return reply({ ...status, sessionId: params.sessionId, eventCount: eventsOf(String(params.sessionId)).length });
+        return reply({
+          ...status,
+          sessionId: params.sessionId,
+          eventCount: eventsOf(String(params.sessionId)).length,
+          // 生效的档位与会话临时覆盖同一处算：会话改过读会话那一份，否则读配置默认那一份。
+          policy: sessionPolicy ?? configPolicy,
+          policySource: sessionPolicy === null ? 'config' : 'session',
+        });
+      // 会话这一侧的档位：`null` 是退回配置默认，界面上「退回」那一个动作交的就是这一格。
+      case 'policy.set': {
+        const mode = params.mode === null ? null : String(params.mode);
+        if (mode !== null && mode !== 'ask' && mode !== 'auto') return fail('policy_mode_unknown', `档位只有 ask 与 auto 两种，或 null 退回配置默认`);
+        sessionPolicy = mode;
+        return reply({ policy: sessionPolicy ?? configPolicy, policySource: sessionPolicy === null ? 'config' : 'session' });
+      }
       case 'mode.set': {
         // 坏清单在那一刻就报稳定码（D65）：随包带的只有那两份，界面写别的就换不过去。
         const name = String(params.name);
@@ -357,15 +389,63 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
       }
       case 'config.get':
         // 假宿主也按白名单答：这几格是真的配置文件里会写的那种值，密钥本身从来不在里面（D13）。
-        return reply({ model: shownModel(), layers: layerList(), sources: Object.fromEntries(WRITABLE.map((field) => [field, sourceOf(field)])) });
+        // 规则表读的是折好的那一份合并结果，`rulesSource` 说它今天由哪一层写着（实现顺序第 4 项交付）。
+        return reply({
+          model: shownModel(),
+          layers: layerList(),
+          sources: Object.fromEntries(WRITABLE.map((field) => [field, sourceOf(field)])),
+          rules: policyRules,
+          rulesSource: RULES_SOURCE,
+          policy: configPolicy,
+        });
       case 'config.set': {
         // 演的是真宿主那四件事：字段与层的白名单、版本比对、值形状、写完谁什么时候用上（第 90、91、93 步）。
         const field = String(params.field);
         const layer = String(params.layer);
         const cell = layer === 'user' || layer === 'projectLocal' ? layers[layer] : undefined;
         if (cell === undefined) return fail('config_layer_unknown', `可写的层只有：user, projectLocal`);
-        if (!WRITABLE.includes(field)) return fail('config_field_unknown', `可写的字段：${WRITABLE.join(', ')}`);
         if (params.version !== cell.version) return fail('config_version_stale', '那一层在这之后被改过，这一次没有写进去');
+        // 规则表与配置默认档这两批字段：一份是表（一条一行的形状，带 op/index/rule），一档只有 ask 与 auto。
+        if (field === 'policy.mode') {
+          const mode = String(params.value);
+          if (mode !== 'ask' && mode !== 'auto') return fail('config_field_value', '配置默认档只有 ask 与 auto 两种');
+          configPolicy = mode;
+          cell.version = String(Number(cell.version) + 1);
+          return reply({ version: cell.version, created: false, applies: [], rules: policyRules, layers: layerList() });
+        }
+        if (field === 'policy.rules') {
+          const op = String(params.op);
+          if (op === 'remove') {
+            const index = Number(params.index);
+            if (!Number.isInteger(index) || policyRules[index] === undefined) return fail('config_field_value', `规则表里没有第 ${params.index} 条`);
+            policyRules = policyRules.filter((_, at) => at !== index);
+          } else if (op === 'add' || op === 'update') {
+            // 与真宿主同一份形状：那四格各是一个字符串，表由宿主拼出来，非法的形状当场拒（D100）。
+            const tool = typeof params.ruleTool === 'string' ? params.ruleTool : '';
+            const decision = params.ruleDecision;
+            if (tool === '' || (decision !== 'allow' && decision !== 'deny')) {
+              return fail('config_field_value', '规则要有工具名与 allow 或 deny 这一个判定');
+            }
+            const rule = {
+              tool,
+              decision,
+              ...(typeof params.ruleMatch === 'string' && params.ruleMatch !== '' ? { match: params.ruleMatch } : {}),
+              ...(typeof params.ruleReason === 'string' && params.ruleReason !== '' ? { reason: params.ruleReason } : {}),
+            } as Rule;
+            if (op === 'update') {
+              const index = Number(params.index);
+              if (!Number.isInteger(index) || policyRules[index] === undefined) return fail('config_field_value', `规则表里没有第 ${params.index} 条`);
+              policyRules = policyRules.map((item, at) => (at === index ? rule : item));
+            } else {
+              policyRules = [...policyRules, rule];
+            }
+          } else {
+            return fail('config_field_value', '规则表的写入只有 add、update 与 remove 三种');
+          }
+          cell.version = String(Number(cell.version) + 1);
+          return reply({ version: cell.version, created: false, applies: [], rules: policyRules, layers: layerList() });
+        }
+        if (!WRITABLE.includes(field)) return fail('config_field_unknown', `可写的字段：${WRITABLE.join(', ')}, policy.mode, policy.rules`);
         const value = String(params.value);
         if (field === 'model.api' && value !== 'messages' && value !== 'chat-completions') return fail('config_field_value', '线上形状只有那两种');
         if (field === 'model.baseURL' && /\/\/[^/]*@/.test(value)) return fail('config_field_value', '地址里不带凭据');
@@ -450,6 +530,8 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
       return wait(ms);
     };
     status = { ...status, running: true, sessionId };
+    // 一轮开始时交回这一轮的完整参数快照：界面上那一行小字读它，内核没落这一条时这行不出现（交付四）。
+    tell({ seq: 99, kind: 'turnContext', model: status.model, policy: sessionPolicy ?? configPolicy, policySource: sessionPolicy === null ? 'config' : 'session', mode: status.mode });
     tell({ seq: 100, kind: 'user', text: input, raw: input });
     for (const piece of ['先看一眼', '那份记录里的读数，', '再决定要不要连模型。']) {
       await step(180);
@@ -485,6 +567,7 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
     const command = 'powershell -NoProfile -Command "Get-ChildItem | Measure-Object"';
     const decision = await ask(callId, {
       sessionId,
+      projectRoot: 'E:/notes',
       tool: 'exec',
       command,
       reason: 'PowerShell 那一条不是简单命令（带管道与 cmdlet），自动档不放开（D66）。',
@@ -510,6 +593,7 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
     const content = '# 读数\n\n窗口 200000\n压力线 160000\n一次压掉 97122\n';
     const writeDecision = await ask(writeId, {
       sessionId,
+      projectRoot: 'E:/notes',
       tool: 'write',
       args: { path, content },
       reason: '写入整份文件要人点头：这一件不在自动放行那一档里（D3）。',

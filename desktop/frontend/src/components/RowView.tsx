@@ -11,6 +11,7 @@ import { QuestionRow } from './QuestionRow';
 import { ReasoningRow } from './ReasoningRow';
 import { ResultRow } from './ResultRow';
 import { RoundRow } from './RoundRow';
+import { ContextRow } from './ContextRow';
 
 const VIEWS: Record<Row['kind'], (props: RowProps) => ReactElement> = {
   question: QuestionRow,
@@ -21,6 +22,7 @@ const VIEWS: Record<Row['kind'], (props: RowProps) => ReactElement> = {
   refusal: ProblemRow,
   failure: ProblemRow,
   round: RoundRow,
+  context: ContextRow,
   meta: NoticeRow,
   error: NoticeRow,
 };
