@@ -39,7 +39,7 @@ ligule tui                                # 终端界面，要 ink 与 react 两
 ligule host                               # 一行一条帧的协议端点，桌面壳起的就是这一个进程
 ```
 
-终端界面里的命令是 `/help`、`/mode [名字]`、`/status`、`/tools`、`/show [序号]`、`/sub [序号]`、`/compact`、`/copy`、`/export <路径>`、`/sessions`、`/find <文字>`、`/resume <id> [名字]`、`/queue [动作]`、`/bind [<动作> <键的写法>|reset <动作>|default]`、`/branch [序号]`、`/name <文字>`、`/archive`、`/unarchive`、`/new`、`/quit`。
+终端界面里的命令是 `/help`、`/mode [名字]`、`/policy [ask|auto|reset]`、`/status`、`/tools`、`/show [序号]`、`/sub [序号]`、`/compact`、`/copy`、`/export <路径>`、`/sessions`、`/find <文字>`、`/resume <id> [名字]`、`/queue [动作]`、`/bind [<动作> <键的写法>|reset <动作>|default]`、`/branch [序号]`、`/name <文字>`、`/archive`、`/unarchive`、`/new`、`/quit`。
 
 - 打 `/` 列出候选：Tab 补全、上下键选、Esc 收起。提示模板也在这条输入框里用。展开在宿主那一侧做。画出来的是你原本敲的那一行。
 - 打 `@` 引用这个项目里的文件：候选由宿主列出来，界面自己不开盘，清单第一行说这批出自哪一个项目。Enter 或 Tab 把选中那一条换成 `@路径` 放进草稿而不发送；那一次问还没答回来时这两记键什么都不做，一条候选都没有时 Enter 照旧发这一句；Esc 收起当下这一个词。这一段文字只是草稿里的字：不发起一次工具调用，也不写进记录。宿主翻到 4000 个文件的上限时那一栏说「更深的没翻到」，不说「没有」。
