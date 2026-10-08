@@ -33,7 +33,11 @@ async function withEndpoint(respond, run) {
     await respond(requests.length, response, requests[requests.length - 1]);
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const port = server.address()?.port;
+  // 一次整套跑里见过这里拿到的端口不能用，报回来的却是端点那一句 `provider_transport_failed`（fetch 的「bad port」）：
+  // 端口不对就在这儿说清，别让它混进端点那一类的失败里。
+  if (typeof port !== 'number' || port === 0) throw new Error(`test_endpoint_port_unusable:${String(port)}`);
+  const baseUrl = `http://127.0.0.1:${port}`;
   process.env[API_KEY_ENV] = 'test-key';
   try {
     return await run(baseUrl, requests);
@@ -405,4 +409,26 @@ test('one real round trip: the second request body is what the record rebuilds i
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+// 端点报回的用量作为一条 usage 事件交出去：压缩的那一条压力判据要拿它修正本地估算（D75）。
+// 这一种形状把它拆在两处，输入的在 message_start（含缓存里读回来的那一段），输出的在 message_delta。
+test('the usage the endpoint reports comes back as one event at the end', async () => {
+  const turn = [
+    { type: 'message_start', message: { usage: { input_tokens: 1200, cache_read_input_tokens: 300, output_tokens: 5 } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', usage: { output_tokens: 7 } },
+    { type: 'message_stop' },
+  ];
+  await withEndpoint(async (attempt, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(sseBody(turn));
+  }, async (baseUrl) => {
+    assert.deepEqual(await collect(provider(baseUrl).stream({ system: '', tools: [], messages: [] })), [
+      { type: 'text', text: 'hi' },
+      { type: 'usage', input: 1500, output: 7 },
+    ]);
+  });
 });

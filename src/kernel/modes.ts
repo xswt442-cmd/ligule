@@ -6,6 +6,7 @@
 // 读的时候就对不上了（D35 放弃「模式引用模式」是同一条理由）。
 // `prompt` 这一格这一轮只解析与校验：片段按名选择要等提示词片段注册表（第 29 步的扩展载体），
 // 写了内容而装载还不接，当场失败，不装作生效了。
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -26,6 +27,9 @@ export interface ModeFile {
   path: string;
   tools: string[] | '*';
   prompt: string[] | '*';
+  // 这份清单内容的摘要：恢复一次会话时靠它判断「同名的那一份还是不是当时那一份」（D78）。
+  // 算的是文件正文的字节，注释与空白也算——写的人改了一个字就该让人看见。
+  digest: string;
 }
 
 export interface ModeDirectories {
@@ -130,7 +134,9 @@ export async function loadMode(name: string, directories: ModeDirectories): Prom
   // 装载这一处只解析与校验形状，「哪一个名字在本次登记里没有」要等扩展装完才知道，那一问在 Host 的 adopt 里报
   // `mode_prompt_unavailable`。
   const prompt = readNames(fields.prompt, 'prompt', file.path, true);
-  return { name, layer: file.layer, path: file.path, tools, prompt };
+  // 摘要算的是这两格的规范化写法（顺序固定在这里），与做法同 D70 的那条定义摘要：同名而内容变了要读得出来（D78）。
+  const digest = createHash('sha256').update(JSON.stringify({ tools, prompt })).digest('hex').slice(0, 12);
+  return { name, layer: file.layer, path: file.path, tools, prompt, digest };
 }
 
 // 选中的一栏与注册表对得上才算数：模式写了一件本次运行没登记的工具，那是清单写错，

@@ -1,7 +1,6 @@
 // 提示模板注册表（D45、D54）：两处目录——`<项目根>/.ligule/prompts/` 与 `~/.ligule/prompts/`，项目层优先。
 // 命令名从相对路径推出来（`git/release/prepare.md` 就是 `/git:release:prepare`），头部不再写 `name`，
 // 免得路径与字段成为两份真相。目录要递归：嵌套本身就是人组织这些文件的方式。
-// 参照实现只读根下一层（`pi/packages/coding-agent/docs/prompt-templates.md:55`），这一条与它不同。
 // 展开只发生在 Host（D54）：命令行、终端界面与桌面前端因此看到的是同一份展开结果与同一条记录。
 import { createHash } from 'node:crypto';
 import { readFile, readdir } from 'node:fs/promises';
@@ -172,7 +171,7 @@ export function findTemplate(registry: TemplateRegistry, command: string): Templ
   return found;
 }
 
-// 参数按 shell 那一套引号切（参照实现同一条：`pi/packages/coding-agent/docs/prompt-templates.md:49`）。
+// 参数按 shell 那一套引号切。
 // 引号不成对就报出去：静默把半截引号当成内容，展开出来的是用户没说的那句话。
 export function splitArguments(text: string): string[] {
   const tokens: string[] = [];

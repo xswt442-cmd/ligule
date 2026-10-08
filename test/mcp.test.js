@@ -29,6 +29,10 @@ test('the server config takes a plain command and only ${NAME} credential refere
     (error) => error.code === 'mcp_env_unsupported',
   );
   assert.throws(() => mcpServerConfigs(configsToConfig(undefined, { command: 'node /x.js' })), (error) => error.code === 'mcp_command_invalid');
+  // 判据看的是空白：合法的可执行文件名里常带字母 s，按字母判会把整份配置拒掉。
+  assert.deepEqual(mcpServerConfigs(configsToConfig(undefined, { command: 'mcp-server-stdio' })), [
+    { name: 'fs', command: 'mcp-server-stdio', args: [], env: {}, cwd: undefined },
+  ]);
 });
 
 function configsToConfig(env, tools = { command: 'node' }) {
@@ -171,6 +175,7 @@ test('a real stdio server answers inspect and call through the registry', async 
   );
   } finally {
     await registry.close();
+    await rm(root, { recursive: true, force: true });
   }
 });
 
@@ -203,6 +208,7 @@ test('a server that moved its definition is caught over the real protocol', asyn
   );
   } finally {
     await registry.close();
+    await rm(root, { recursive: true, force: true });
   }
 });
 
@@ -239,7 +245,7 @@ test('the host wires the two tools from the config, and not when there is no ser
     assert.equal(status.tools.includes('read'), true, 'the rest of the registry is untouched');
   } finally {
     pair.client.output.end();
-    host.release();
+    await host.release();
     await rm(root, { recursive: true, force: true });
   }
 });

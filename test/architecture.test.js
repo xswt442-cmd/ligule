@@ -44,6 +44,9 @@ test('清单第 4 条：后一个守卫无法放宽前一个守卫的拒绝', as
     decision: 'deny',
     code: 'guard_denied',
     reason: 'denied by the first guard',
+    capability: 'exec',
+    via: 'guard',
+    level: 'auto',
   });
 });
 

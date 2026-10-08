@@ -1,5 +1,4 @@
 // 传输边界的一种实现（D30）：一条消息一行 JSON，读两端各一条流。
-// 参照实现在标准输入输出上就是这么读的（`codex/codex-rs/app-server-transport/src/transport/stdio.rs:73` 按行取 stdin）。
 // 这一层不认识协议里的方法名，只认识三种消息：带 method 的请求、带同一 id 而没有 method 的答复、带 notify 的通报。
 // 两个方向各自数 id，所以同一时刻客户端的请求与 Host 的审批请求不会撞到同一个号。
 import { randomUUID } from 'node:crypto';
@@ -79,7 +78,7 @@ export function createConnection({ input, output, onFault }) {
   });
   input.on('end', () => {
     closed = true;
-    // 对端不再答复，还没有答复的那些请求要有人接住，否则等它的调用永远悬着。
+    // 对端退出后不会再答复：已经发出去、还没答复的那些请求要有明确的收尾，否则等它的调用一直挂着。
     for (const settleWith of responders.values()) settleWith.reject(new KernelError('connection_closed'));
     responders.clear();
   });

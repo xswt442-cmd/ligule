@@ -9,6 +9,9 @@ export const CHAT_COMPLETIONS_CAPABILITIES = Object.freeze({
   streaming: true,
   parallelToolCalls: true,
   maxOutputTokens: 8192,
+  // 流式请求要不要带 `stream_options:{include_usage:true}` 去要那一条用量（D75 的压力线要用真实用量修正本地估算）。
+  // 这一族里绝大多数端点认这一格，不认的那一些把它降成 false：少一条用量，压缩的压力线退回本地估算，聊天照跑。
+  streamUsage: true,
 });
 
 export function chatCompletionsCapabilities(requested = {}) {
@@ -72,6 +75,9 @@ export function createChatCompletionsProvider({
         model,
         messages: toWireMessages(request.messages ?? [], request.system ?? ''),
         stream: effective.streaming,
+        // 流式也要最后那一条用量（压缩的压力线要看端点真实报回的那一份）：这一格由能力声明决定，
+        // 不认它的代理把 model.capabilities 里的 streamUsage 降成 false，两条线退回本地估算。
+        ...(effective.streaming && effective.streamUsage ? { stream_options: { include_usage: true } } : {}),
         max_tokens: effective.maxOutputTokens,
         parallel_tool_calls: effective.parallelToolCalls,
         ...(request.tools?.length === 0 || request.tools === undefined ? {} : {
@@ -87,7 +93,9 @@ export function createChatCompletionsProvider({
     // 一次工具调用的参数按 index 分片到达，中间没有「这一块结束了」那一种事件，
     // 所以全部攒到流收尾再交出去；循环本来也是在流结束后才用这些调用（D20）。
     const calls = new Map();
+    let usage;
     for await (const chunk of parseSse(response.body)) {
+      if (chunk.usage !== undefined) usage = chunk.usage;
       for (const choice of chunk.choices ?? []) {
         const delta = choice.delta ?? {};
         if (typeof delta.content === 'string' && delta.content !== '') yield { type: 'text', text: delta.content };
@@ -110,6 +118,10 @@ export function createChatCompletionsProvider({
         throw new KernelError('provider_stream_invalid', { detail: 'a tool call without an id or a name' });
       }
       yield { type: 'tool-call', id: call.id, name: call.name, args: parseArgs(call.json) };
+    }
+    // 用量在那一条没有 choices 的收尾分片上；没有报回来时不交这一条，压缩的那一条判据宁可只用本地估算。
+    if (usage !== undefined) {
+      yield { type: 'usage', input: Number(usage.prompt_tokens ?? 0), output: Number(usage.completion_tokens ?? 0) };
     }
   }
 

@@ -26,6 +26,9 @@ export function resultLimit(config) {
 
 // 超限的内容改为可取回的引用：完整那一份另存一个文件，交回的文本留头尾与一行说明（I6、D19）。
 // 上限算在包括标记在内的完整结果上，所以先算标记要占的字节，再决定头尾各留多少。
+// 那一个文件名要按这一串查过才敢读回来：名字出自记录，而记录里的东西不能拼出走到目录外面去的路（D85）。
+export const SPILL_NAME = /^result-\d+-[a-f0-9]{8}\.json$/;
+
 export async function spillContent(text, { limit, directory, name }) {
   const bytes = Buffer.from(text, 'utf8');
   if (bytes.length <= limit) return text;
@@ -40,6 +43,7 @@ export async function spillContent(text, { limit, directory, name }) {
     // 完整那一份存不下去就没有可取回的引用，交回截断文本等于把内容丢了，按内核自身的故障停住。
     throw new KernelRuntimeError('session_spill_failed', { cause: error });
   }
-  // 按字节切可能把多字节字符切成一半，切出来的那半个字符以替换符出现，内容本身没有丢。
-  return `${bytes.subarray(0, half).toString('utf8')}${note}${bytes.subarray(bytes.length - half).toString('utf8')}`;
+  // 按字节切可能把多字节字符切成一半，Node 用一个替换符顶上那残缺的几字节，而它占三字节，两头各多出一点来。
+  // 上限算在完整结果上，所以把那两头不成字符的残余去掉，留在记录里的那一段才真的不超过 limit。
+  return `${bytes.subarray(0, half).toString('utf8').replace(/\uFFFD+$/, '')}${note}${bytes.subarray(bytes.length - half).toString('utf8').replace(/^\uFFFD+/, '')}`;
 }

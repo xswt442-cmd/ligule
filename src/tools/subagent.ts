@@ -59,7 +59,13 @@ export function createSubagentPlugin(deps: SubagentDeps) {
           }
           counter += 1;
           const id = `${deps.sessionId}.sub-${counter}`;
-          const session = createSessionLog({ directory: deps.directory, id });
+          // 首行在第一次落笔时才写，所以模式身份先留一个格子，等到那一份清单选定再填（D73）。
+          let modeIdentity: { name: string; layer: string } | undefined;
+          const session = createSessionLog({
+            directory: deps.directory,
+            id,
+            meta: () => ({ projectRoot: deps.config.boundary, mode: modeIdentity }),
+          });
           const child = createKernel({
             config: deps.config,
             // 判定链是父会话那一条实例：拒绝计数与降到逐次询问这件事跟着共用，换一份链就等于给派生体另起一档（D71）。
@@ -74,7 +80,10 @@ export function createSubagentPlugin(deps: SubagentDeps) {
             const file = args.mode === undefined
               ? deps.modeFile?.()
               : await loadMode(args.mode, deps.modePaths as NonNullable<Parameters<typeof loadMode>[1]>);
-            if (file !== undefined) applyMode(child, file);
+            if (file !== undefined) {
+              modeIdentity = { name: file.name, layer: file.layer };
+              applyMode(child, file);
+            }
             const loop = createLoop({
               kernel: child,
               provider: deps.provider,
@@ -93,6 +102,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
             };
           } finally {
             assembly.dispose();
+            await session.close();
           }
         },
       });

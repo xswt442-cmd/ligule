@@ -15,6 +15,18 @@ async function withDirectory(run) {
   }
 }
 
+// 首行是会话元信息，不是一条事件；这几份测试要读的是事件那几行（D73）。
+async function eventLines(path) {
+  const bytes = await readFile(path, 'utf8');
+  return bytes.split('\n').filter((line) => line !== '').map(JSON.parse).filter((event) => event.kind !== 'session');
+}
+
+async function eventBytes(path) {
+  const bytes = await readFile(path);
+  const cut = bytes.indexOf(0x0a);
+  return bytes.subarray(cut + 1);
+}
+
 function kernelWith(session, extra = {}) {
   return createKernel({
     config: createConfig({ user: { boundary: process.cwd(), limits: { resultBytes: 200 }, ...extra.config } }),
@@ -28,7 +40,9 @@ test('what the model sees is rebuildable from the log, byte for byte', async () 
     const session = createSessionLog({ directory, id: 'run-1' });
     const written = await session.append({ kind: 'tool', tool: 'read', args: { path: 'note.txt' }, result: { content: 'kept exactly' } });
     assert.equal(written.seq, 0);
-    assert.equal(await readFile(session.path, 'utf8'), `${JSON.stringify(written)}\n`);
+    // 首行说清这一份是哪一版格式（D73），事件那几行仍然按写出去的字节原样躺在文件里。
+    assert.deepEqual(await eventLines(session.path), [written]);
+    assert.equal((await eventBytes(session.path)).toString('utf8'), `${JSON.stringify(written)}\n`);
 
     const reopened = createSessionLog({ directory, id: 'run-1' });
     assert.deepEqual(await reopened.modelView(), [
@@ -54,17 +68,19 @@ test('appends that arrive at the same time still take turns on the sequence', as
   });
 });
 
-test('a half line left by a crash is discarded and the file is cut back to the last complete event', async () => {
+test('reading a crash tail preserves the file and the next append repairs it', async () => {
   await withDirectory(async (directory) => {
     const session = createSessionLog({ directory, id: 'run-2' });
     await session.append({ kind: 'tool', tool: 'read', args: {}, result: { content: 'one' } });
     await writeFile(session.path, '{"seq":1,"kind":"tool","too', { flag: 'a' });
 
+    const beforeRead = await readFile(session.path);
     const events = await session.read();
     assert.equal(events.length, 1);
-    assert.equal(await readFile(session.path, 'utf8'), `${JSON.stringify(events[0])}\n`);
+    assert.deepEqual(await readFile(session.path), beforeRead, '只读入口不修改文件');
     const next = await session.append({ kind: 'tool', tool: 'read', args: {}, result: { content: 'two' } });
     assert.equal(next.seq, 1, 'the discarded half line does not burn a sequence number');
+    assert.deepEqual((await session.read()).map((event) => event.seq), [0, 1]);
   });
 });
 
@@ -72,14 +88,17 @@ test('a half line ending in an incomplete multi-byte sequence is cut on the byte
   await withDirectory(async (directory) => {
     const session = createSessionLog({ directory, id: 'run-6' });
     await session.append({ kind: 'tool', tool: 'read', args: {}, result: { content: '中文内容' } });
-    const kept = await readFile(session.path);
+    const kept = await eventBytes(session.path);
+    const whole = (await readFile(session.path)).length;
     // 崩溃时写了一半：那半截以一个三字节字符的第二个字节结尾，解码成字符串会得到一个替换符。
     await writeFile(session.path, Buffer.concat([Buffer.from('{"seq":1,"c":"', 'utf8'), Buffer.from([0xe5, 0x8d])]), { flag: 'a' });
 
     const events = await session.read();
     assert.deepEqual(events, [JSON.parse(kept.toString('utf8'))]);
-    assert.deepEqual((await readFile(session.path)).subarray(0, kept.length), kept);
-    assert.equal((await readFile(session.path)).length, kept.length, '文件长度退回上一个完整事件的末尾');
+    assert.equal(events[0].seq, 0, '首行不占事件的序号');
+    assert.ok((await readFile(session.path)).length > whole, '读取保留未完成尾行');
+    await session.append({ kind: 'user', text: '继续读取' });
+    assert.deepEqual((await session.read()).map((event) => event.seq), [0, 1], '写入时按字节边界修复尾行');
   });
 });
 
@@ -91,7 +110,7 @@ test('a log that cannot be written reports a code and leaves nothing behind', as
     const session = createSessionLog({ directory: blocked, id: 'run' });
     await assert.rejects(
       () => session.append({ kind: 'tool', tool: 'read', args: {}, result: { content: 'x' } }),
-      (error) => error.code === 'session_write_failed',
+      (error) => error.code === 'session_lock_failed',
     );
     assert.equal(await readFile(blocked, 'utf8'), 'not a directory');
   });

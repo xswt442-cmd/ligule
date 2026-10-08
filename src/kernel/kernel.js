@@ -7,6 +7,7 @@ import { KernelError } from './error.js';
 import { createConfig } from './config.js';
 import { createLogger } from './log.js';
 import { failureOf, refusalOf, resultLimit, resultOf, spillContent } from './result.js';
+import { VERDICT_FIELDS } from './policy.js';
 import { createObservationLog } from '../session/observe.js';
 import { resolveTarget } from '../capability/network.js';
 import { resolveShell, withNativeExitCode } from '../capability/shell.js';
@@ -40,7 +41,9 @@ export function createKernel(options = {}) {
     const limit = resultLimit(config);
     if (Buffer.byteLength(text, 'utf8') <= limit) return result;
     const name = `result-${Date.now()}-${randomUUID().slice(0, 8)}.json`;
-    return { ...result, content: await spillContent(text, { limit, directory: session.directory, name }), spilled: name };
+    return { ...result, content: await spillContent(text, { limit, directory: session.directory, name }), spilled: name,
+      spillFormat: typeof result.content === 'string' ? 'text' : 'json',
+    };
   }
 
   async function record(entry, result) {
@@ -58,6 +61,12 @@ export function createKernel(options = {}) {
     // 本次运行登记了哪些工具，从这一处读出（I2）。
     list() {
       return [...tools.keys()].sort();
+    },
+
+    // 登记时声明过「重做一次不会在本机之外多留下什么」的那几件名字：恢复措辞按这一格分开说（D79）。
+    // 判定不读它，模型也读不到它（I3、D12）。
+    readOnly() {
+      return [...tools.values()].filter((tool) => tool.readOnly).map((tool) => tool.name).sort();
     },
 
     // 模式能从哪几件里挑：登记表里去掉固定披露入口（D63）。被模式藏起来不该是一种可能，
@@ -114,6 +123,9 @@ export function createKernel(options = {}) {
         parameters,
         execution: tool.execution === 'parallel' ? 'parallel' : 'serial',
         disclosure: tool.disclosure === true,
+        // 一件工具可以自己声明「重做一次不会在本机之外多留下什么」：恢复时的那句话按这一格分开说（D79）。
+        // 声明不参与判定，判定读的还是每一次调用自己（I3）。
+        readOnly: tool.readOnly === true,
         targetArgument: typeof tool.targetArgument === 'string' ? tool.targetArgument : undefined,
         commandArgument: typeof tool.commandArgument === 'string' ? tool.commandArgument : undefined,
         // 一件工具可以声明「这一次调用真正用的能力是什么」：MCP 的两件固定工具靠它把 `mcp:<服务器>/<工具>` 交出去（D52）。
@@ -196,6 +208,12 @@ export function createKernel(options = {}) {
         // 声明了自己能力的那件工具按它给的能力判（D52）：`mcp.call` 这个名字对判定没有意义。
         const capability = tool.capability?.(args);
         const verdict = await policy.evaluate({ tool: name, input: args, target: network, shell, capability });
+        // 判定真正用的那一格结果进记录（D77）：哪一档、走的是哪一条路、命中哪条规则、问过之后答了什么。
+        // 这一格不进模型可见投影（D12：模型只看名字、描述与参数模式），也不进检查点那段哈希的输入。
+        entry.verdict = {};
+        for (const field of VERDICT_FIELDS) {
+          if (verdict[field] !== undefined) entry.verdict[field] = verdict[field];
+        }
         if (verdict.decision !== 'allow') {
           // 拒绝理由进日志与记录，抛出去的那一份只带错误码（D19 把文本与码分开）。
           logger.log(`tool ${name} is not allowed`, { tool: name, code: verdict.code, reason: verdict.reason });
@@ -212,6 +230,12 @@ export function createKernel(options = {}) {
         }
       }
       let value;
+      // 这一次执行花了多久，记在事件外层（实现顺序第 66 步）。计时从判定放行之后开始，所以审批等的那一段不在里面。
+      // 单调时钟：墙上时间被调过一次，也不会把这一格变成负数或者一个很长的数。
+      const startedAt = process.hrtime.bigint();
+      const timed = () => {
+        entry.durationMs = Number((process.hrtime.bigint() - startedAt) / 1_000_000n);
+      };
       try {
         value = await tool.run(args, { ...context, signal: options.signal, target: network, shell });
       } catch (error) {
@@ -221,8 +245,11 @@ export function createKernel(options = {}) {
         const failure = error instanceof KernelError
           ? error
           : new KernelError('tool_failed', { cause: error, detail: typeof error?.message === 'string' ? error.message : undefined });
+        // 失败与取消也真的跑了那一段时间，那一格照记；没执行的调用（拒绝、参数不合法、被跳过）走不到这一行。
+        timed();
         await fail(entry, failure);
       }
+      timed();
       await record(entry, resultOf(value));
       return value;
     },

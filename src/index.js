@@ -36,14 +36,24 @@ export { resolveRecycler, windowsRecycleBin, freedesktopTrash } from './capabili
 export { resolveRipgrep, searchWithRipgrep } from './capability/ripgrep.js';
 export { execTool } from './capability/exec.js';
 export { createPromptAssembly, PROMPT_BOUNDARY } from './kernel/prompt.js';
+export { BASE_SYSTEM_PROMPT } from './kernel/base-prompt.js';
 export { createSessionLog } from './session/session.js';
+export { SESSION_FORMAT_VERSION, foldLabel, parseSessionEvents } from './session/format.js';
+export { parseSessionBytes, readSessionRecord } from './session/record.js';
+export { findUnresolvedCalls, buildRepairEvents, repairUnresolvedCalls } from './session/repair.js';
+export { chooseResumeMode, listSessions, sessionDirectory } from './session/list.js';
+export { searchSessions } from './session/search.js';
+export { branchSession } from './session/branch.js';
+export { CHECKPOINT_FORMAT_VERSION, CHECKPOINT_INPUT_VERSION, checkpointPath, createCheckpoint, loadCheckpoint, prefixDigest, usableCheckpoint } from './session/checkpoint.js';
+export { createCompaction, cutPoint, estimateTokens } from './session/compaction.js';
+export { summarizeVerdicts, formatVerdicts } from './session/verdicts.js';
 export { createLoop, DEFAULT_LOOP_LIMITS } from './kernel/loop.js';
 export {
   METHODS, APPROVAL_METHOD, NOTIFICATIONS, validateCall, isApproved,
 } from './host/protocol.js';
 export { createConnection } from './host/connection.js';
 export { createMemoryConnectionPair } from './host/memory.js';
-export { createHost, serveHost, providerFromConfig } from './host/host.js';
+export { createHost, serveHost, providerFromConfig, compactionLimitsOf } from './host/host.js';
 export {
   createMessagesProvider, capabilitiesOf, MESSAGES_CAPABILITIES,
 } from './model/messages.js';

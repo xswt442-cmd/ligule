@@ -23,6 +23,7 @@ export function createMcpTools(registry: Pick<McpRegistry, 'servers' | 'toolsOf'
   return {
     inspectTool: {
       name: 'mcp.inspect',
+      readOnly: true,
       disclosure: true,
       description: `Look up what an MCP server offers, one level at a time. ${LEVELS}`,
       parameters: {
@@ -33,9 +34,9 @@ export function createMcpTools(registry: Pick<McpRegistry, 'servers' | 'toolsOf'
         },
         required: [],
       },
-      async run(args: { server?: string; tool?: string }) {
+      async run(args: { server?: string; tool?: string }, { signal }: { signal?: AbortSignal } = {}) {
         if (args.server === undefined) return { text: registry.servers().join('\n') || 'no MCP servers are configured' };
-        const tools = await registry.toolsOf(args.server);
+        const tools = await registry.toolsOf(args.server, signal);
         if (args.tool === undefined) {
           return {
             text: (tools as ToolDefinition[]).map((tool) => `${tool.name}\t${tool.digest}\t${tool.description.split('\n')[0]}`).join('\n'),
@@ -43,7 +44,7 @@ export function createMcpTools(registry: Pick<McpRegistry, 'servers' | 'toolsOf'
             tools: (tools as ToolDefinition[]).map((tool) => ({ name: tool.name, digest: tool.digest })),
           };
         }
-        const found = await registry.definition(args.server, args.tool);
+        const found = await registry.definition(args.server, args.tool, signal);
         // 披露状态记在这里：模型看见的那一份定义与它的摘要，之后 `call` 要对着它问。
         disclosed.seen.add(key(args.server, args.tool, found.digest));
         return {
@@ -71,8 +72,8 @@ export function createMcpTools(registry: Pick<McpRegistry, 'servers' | 'toolsOf'
       // 这一次调用真正用的能力是 `mcp:<服务器>/<工具>`，不是 `mcp.call` 这个名字（D52）：
       // 读一个文件与删一份数据不该退化成同一种操作，判定链要看见那两者的差别。
       capability: (args: { server?: string; tool?: string }) => `mcp:${args.server}/${args.tool}`,
-      async run(args: { server: string; tool: string; arguments: string; schemaDigest: string }) {
-        const found = await registry.definition(args.server, args.tool);
+      async run(args: { server: string; tool: string; arguments: string; schemaDigest: string }, { signal }: { signal?: AbortSignal } = {}) {
+        const found = await registry.definition(args.server, args.tool, signal);
         // 看过的那一版与服务器现在的这一版是两件事：先问有没有看过，再问看的是不是旧的一版（D52）。
         if (!disclosed.seen.has(key(args.server, args.tool, args.schemaDigest))) {
           throw new KernelError('mcp_not_disclosed', {
@@ -92,7 +93,7 @@ export function createMcpTools(registry: Pick<McpRegistry, 'servers' | 'toolsOf'
         }
         const problems = validateToolArguments(parsed, found.inputSchema);
         if (problems.length > 0) throw new KernelError('mcp_arguments_invalid', { detail: problems.join('; ') });
-        const result = await registry.call(args.server, args.tool, parsed) as { content?: { type: string; text?: string }[]; isError?: boolean };
+        const result = await registry.call(args.server, args.tool, parsed, signal) as { content?: { type: string; text?: string }[]; isError?: boolean };
         const text = (result.content ?? []).filter((item) => item.type === 'text').map((item) => item.text ?? '').join('\n');
         return { text, server: args.server, tool: args.tool, effectiveCapability: `mcp:${args.server}/${args.tool}`, failed: result.isError === true };
       },

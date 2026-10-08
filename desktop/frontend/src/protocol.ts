@@ -19,20 +19,35 @@ export type Transport = {
   send: (frame: string) => void;
   onFrame: (handle: (text: string) => void) => void;
   onLog: (handle: (text: string) => void) => void;
+  // 载体自己报的故障：帧发不出去了。协议帧里没有这一类，所以它从载体那一侧进来。
+  onFault?: (handle: (reason: string) => void) => void;
+  // 换一具后端进程。壳里那是 `host_restart` 一条命令；开发时那一份假宿主用它重新答话（第 65 步）。
+  restart?: () => Promise<void>;
 };
 
 export type Client = {
-  call: (method: string, params: Record<string, unknown>) => Promise<any>;
+  // timeoutMs 只给那一个调用用：一轮模型跑几分钟是正常事，不能拿一个全局上限去砍它。
+  // 交回来的是帧里那一格 result，这一层不认识它的形状，所以每个调用方自己说明读成什么。
+  call: (method: string, params: Record<string, unknown>, timeoutMs?: number) => Promise<unknown>;
   reply: (id: string, result: unknown) => void;
   receive: (text: string) => { kind: string; message?: Frame };
   onNotification: (handle: (message: Frame) => void) => void;
   onRequest: (handle: (message: Frame) => void) => void;
   waiting: () => number;
   counts: () => { sent: number; received: number };
+  // 旧的那一具宿主不会再答复了：把这些等待按一个稳定码收尾，交回收尾了几条（第 65 步）。
+  discard: (reason: string) => number;
 };
 
+// 界面上要说得出的是那一个稳定码（D93）。宿主回的错误带码，客户端自己造的错误（超时、载体断了）只有 message，
+// 再外面一层可能什么都不是；这一处把三种形状收敛成一个码。
+export function code(error: unknown): string {
+  const shaped = error as { code?: string; message?: string };
+  return shaped.code ?? shaped.message ?? String(error);
+}
+
 export function createClient(transport: Transport): Client {
-  const pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+  const pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer?: ReturnType<typeof setTimeout> }>();
   const notifications: Array<(message: Frame) => void> = [];
   const requests: Array<(message: Frame) => void> = [];
   let counter = 0;
@@ -46,6 +61,7 @@ export function createClient(transport: Transport): Client {
   function settle(id: string, message: Frame): void {
     const waiter = pending.get(id);
     if (waiter === undefined) return;
+    if (waiter.timer !== undefined) clearTimeout(waiter.timer);
     pending.delete(id);
     if (message.error !== undefined) {
       const error = new Error(message.error.message ?? message.error.code ?? 'failed');
@@ -82,11 +98,17 @@ export function createClient(transport: Transport): Client {
   transport.onFrame((text) => receive(text));
 
   return {
-    call(method, params) {
+    call(method, params, timeoutMs = 0) {
       counter += 1;
       const id = String(counter);
       return new Promise((resolve, reject) => {
-        pending.set(id, { resolve, reject });
+        const waiter: { resolve: (value: unknown) => void; reject: (error: Error) => void; timer?: ReturnType<typeof setTimeout> } = { resolve, reject };
+        if (timeoutMs > 0) {
+          waiter.timer = setTimeout(() => {
+            if (pending.delete(id)) reject(Object.assign(new Error('host_unanswered'), { code: 'host_unanswered' }));
+          }, timeoutMs);
+        }
+        pending.set(id, waiter);
         send({ id, method, params });
       });
     },
@@ -102,5 +124,15 @@ export function createClient(transport: Transport): Client {
     },
     waiting: () => pending.size,
     counts: () => ({ ...counts }),
+    discard(reason) {
+      let dropped = 0;
+      for (const [id, waiter] of [...pending]) {
+        if (waiter.timer !== undefined) clearTimeout(waiter.timer);
+        pending.delete(id);
+        waiter.reject(Object.assign(new Error(reason), { code: reason }));
+        dropped += 1;
+      }
+      return dropped;
+    },
   };
 }

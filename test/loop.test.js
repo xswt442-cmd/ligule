@@ -282,9 +282,59 @@ test('reasoning is recorded and kept out of what the model is asked next', async
     await createLoop({ kernel, provider, session }).run('read it');
 
     const events = await session.read();
-    assert.deepEqual(events.map((event) => event.kind), ['user', 'reasoning', 'assistant', 'tool', 'assistant']);
+    assert.deepEqual(events.map((event) => event.kind), ['user', 'reasoning', 'assistant', 'tool', 'assistant', 'turn']);
     assert.equal(events[1].text, 'the file is short');
     assert.deepEqual(provider.requests[1].messages.map((entry) => entry.role), ['user', 'assistant', 'tool']);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// 轮次完成标记（实现顺序第 68 步）：一轮正常完整结束才留下一条，取消、失败与达到上限都不留。
+// 它是「从这里分支」那个入口的依据，不进模型投影，也不进检查点那一段哈希的输入。
+test('a completed round leaves a turn marker and a round that stops early does not', async () => {
+  const root = await mkdtemp(join(process.cwd(), 'testplace', 'loop-'));
+  try {
+    const session = createSessionLog({ directory: root, id: 'turns' });
+    const kernel = createKernel({ config: createConfig({ user: { boundary: root } }), session });
+    kernel.register(tool('peek', async () => ({ text: 'one line' })));
+    const provider = scriptedProvider([
+      [{ type: 'tool-call', id: 'c1', name: 'peek', args: {} }],
+      [{ type: 'text', text: 'done' }],
+    ]);
+    const done = await createLoop({ kernel, provider, session }).run('first');
+
+    const events = await session.read();
+    const marker = events.at(-1);
+    assert.equal(marker.kind, 'turn');
+    assert.equal(marker.status, 'completed');
+    assert.equal(marker.ignorable, true, '旧版本读不懂时可以跳过它，但它仍然占一个序号');
+    assert.equal(marker.userSeq, events.find((event) => event.kind === 'user').seq, '身份证就是这一轮的那条用户输入');
+    assert.equal(marker.iterations, done.iterations);
+    assert.equal(marker.modelCalls, done.modelCalls);
+    assert.equal(marker.completedBy, undefined);
+    // 投影里没有它的位置：这一轮交回去的那四段与加这条标记之前一样多。
+    assert.deepEqual((await session.modelView()).map((entry) => entry.role), ['user', 'assistant', 'tool', 'assistant']);
+
+    // 由一件算完成本轮的工具收尾的那一种，标记里说出是哪一件。
+    const byTool = scriptedProvider([[{ type: 'tool-call', id: 'c2', name: 'peek', args: {} }]]);
+    await createLoop({ kernel, provider: byTool, session, completesRun: ['peek'] }).run('second');
+    assert.equal((await session.read()).at(-1).completedBy, 'peek');
+
+    // 模型调用预算耗尽的那一轮没完整结束，不产生分支点。
+    const stuck = createSessionLog({ directory: root, id: 'stuck' });
+    const stuckKernel = createKernel({ config: createConfig({ user: { boundary: root } }), session: stuck });
+    stuckKernel.register(tool('peek', async () => ({ text: 'one line' })));
+    await assert.rejects(
+      createLoop({
+        kernel: stuckKernel,
+        provider: scriptedProvider([[{ type: 'tool-call', id: 'c9', name: 'peek', args: {} }]]),
+        session: stuck,
+        limits: { iterations: 32, modelCalls: 1 },
+      }).run('go'),
+      (error) => error.code === 'loop_model_budget_exhausted',
+    );
+    assert.ok(!(await stuck.read()).some((event) => event.kind === 'turn'), '预算耗尽的那一轮不留下完成标记');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

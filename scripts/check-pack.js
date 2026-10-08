@@ -71,7 +71,12 @@ try {
   for (const name of needed) {
     const manifest = join(repoModules, name, 'package.json');
     if (!existsSync(manifest)) continue;
-    for (const dependency of Object.keys(JSON.parse(readFileSync(manifest, 'utf8')).dependencies ?? {})) needed.add(dependency);
+    const dependencyManifest = JSON.parse(readFileSync(manifest, 'utf8'));
+    for (const dependency of Object.keys(dependencyManifest.dependencies ?? {})) needed.add(dependency);
+    // 原生绑定以按平台安装的可选包交付，这些包仍属于运行时闭包。
+    for (const dependency of Object.keys(dependencyManifest.optionalDependencies ?? {})) {
+      if (existsSync(join(repoModules, dependency))) needed.add(dependency);
+    }
   }
   for (const name of needed) {
     const from = join(repoModules, name);
@@ -82,7 +87,7 @@ try {
   writeFileSync(
     join(consumer, 'probe.mjs'),
     [
-      "import { createKernel, createMcpPlugin, createMcpRegistry, flagLayer, KernelError, mcpServerConfigs, parseCommand } from 'ligule';",
+      "import { createKernel, createMcpPlugin, createMcpRegistry, execTool, flagLayer, KernelError, mcpServerConfigs, parseCommand, resolveShell, withNativeExitCode } from 'ligule';",
       "if (typeof KernelError !== 'function') throw new Error('KernelError is missing from the installed package');",
       // 两份 tree-sitter 语法是原生插件：装不上时判定只会一路降级成「问」，界面看不出来，所以在这里当场读一次。
       "if ((await parseCommand('git status')).kind !== 'segments') {",
@@ -111,6 +116,9 @@ try {
       "}",
       "dispose();",
       "if (kernel.manifest().length !== 0) throw new Error('dispose did not remove the tool');",
+      "const shell = withNativeExitCode(resolveShell({}), 'node --version');",
+      "const command = await execTool.run({ command: 'node --version' }, { config: { boundary: process.cwd() }, shell });",
+      "if (command.exitCode !== 0 || !command.text.includes(process.version)) throw new Error('the installed package cannot execute a real command');",
       "console.log('installed package works');",
     ].join('\n'),
   );

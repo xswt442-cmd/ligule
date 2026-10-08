@@ -20,8 +20,7 @@ const ALLOWED_NAMED = new Set([
 const ALLOWED_TOKENS = new Set(['"', "'", ';', '&&']);
 
 // PowerShell 把这批 Unicode 字符当作语法别名（弯引号就是引号、长破折号就是 `-`），而树把它们留在字面量中间。
-// 整个拼写家族一起挡掉，不去猜某一位到底是不是结构（同一件事 codex 也这样做，
-// `codex/codex-rs/shell-command/src/command_safety/powershell_tree_sitter.rs:18-26`）。
+// 整个拼写家族一起挡掉，不去猜某一位到底是不是结构。
 const UNICODE_ALIASES = /[‘’“”–—―]/;
 
 // 字面参数的形状：可打印 ASCII，且不含 `$` 与反引号——那两位在 PowerShell 里是变量替换与转义的起点。

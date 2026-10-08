@@ -43,6 +43,9 @@
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.0",
+    "cross-spawn": "7.0.6",
+    "koffi": "3.1.1",
+    "proper-lockfile": "4.1.2",
     "smol-toml": "^1.9.0",
     "tree-sitter": "^0.25.1",
     "tree-sitter-bash": "^0.25.1",
@@ -50,12 +53,17 @@
     "yaml": "^2.9.1"
   },
   "optionalDependencies": {
+    "highlight.js": "11.12.0",
     "ink": "^7.1.1",
-    "react": "^19.3.0"
+    "marked": "18.0.14",
+    "react": "^19.3.0",
+    "string-width": "8.3.0"
   },
   "devDependencies": {
     "@modelcontextprotocol/server-filesystem": "^2026.8.31",
+    "@types/cross-spawn": "^6.0.6",
     "@types/node": "^24.19.1",
+    "@types/proper-lockfile": "^4.1.4",
     "typescript": "^5.9.3"
   }
 }

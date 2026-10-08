@@ -19,6 +19,11 @@ export const DEFAULT_LIMITS = Object.freeze({
   fetchRedirects: 5,
   // 扩展登记的一段提示词片段的预算（D69）：与技能元数据那一条同一档，注入那一层的总量上限仍然压在它上面。
   promptFragmentBytes: 8_000,
+  // 压缩的两条比例（D75）：这是策略参数，给缺省，从 0.8 与 0.16 起步（U43）。
+  // 窗口大小不给缺省：那是模型事实，猜小了白压、猜大了连摘要请求自己都会超窗，
+  // 所以 `limits.contextTokens` 没写时两条触发都不启用，正常聊天照跑（D75 修订，2026-10-05 定）。
+  compactThresholdRatio: 0.8,
+  compactRetainRatio: 0.16,
 });
 
 // 遍历跳过这些目录：它们的内容不是要找的东西，扫过去只会把上限用光。

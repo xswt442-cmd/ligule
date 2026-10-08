@@ -147,3 +147,41 @@ test('the declared limits of this form can be lowered by config but not raised',
   );
   assert.throws(() => chatCompletionsCapabilities({ vision: true }), (error) => error.code === 'provider_capability_unknown');
 });
+
+// 流式也要把用量要回来（压缩的那一条压力判据看的是端点真实报回的那一份，D75）：
+// 那一族端点不写 stream_options 就不交 usage，而它落在一条没有 choices 的收尾分片上。
+test('a streamed answer asks for usage and hands back the one it got', async () => {
+  await withEndpoint(async (response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(sseBody([
+      { choices: [{ index: 0, delta: { content: 'hi' } }] },
+      { choices: [], usage: { prompt_tokens: 900, completion_tokens: 12 } },
+    ]));
+  }, async (baseUrl, requests) => {
+    assert.deepEqual(await collect(provider(baseUrl).stream({ system: '', tools: [], messages: [{ role: 'user', text: 'x' }] })), [
+      { type: 'text', text: 'hi' },
+      { type: 'usage', input: 900, output: 12 },
+    ]);
+    assert.deepEqual(requests[0].body.stream_options, { include_usage: true });
+
+    // 不认这一格的兼容代理把 streamUsage 降成 false：少一条用量，别少一次请求。
+    await collect(provider(baseUrl, { capabilities: { streamUsage: false } }).stream({ system: '', tools: [], messages: [] }));
+    assert.equal(requests[1].body.stream_options, undefined);
+  });
+});
+
+test('a cancel that lands while the stream is still open reports provider_cancelled', async () => {
+  // 第 94 步在真端点上撞到的那条：流已经在吐内容时打断，Node 交回的是只带数字码的 AbortError，
+  // 界面那一侧认的是稳定码，所以这一处要在模型层就换掉（src/model/http.js 的 cancelMapped）。
+  await withEndpoint(async (response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: '第一段' } }] })}\n\n`);
+    await new Promise(() => {});
+  }, async (baseUrl) => {
+    const controller = new AbortController();
+    const stream = provider(baseUrl).stream({ system: '', tools: [], messages: [{ role: 'user', content: 'x' }] }, { signal: controller.signal });
+    assert.deepEqual((await stream.next()).value, { type: 'text', text: '第一段' });
+    controller.abort();
+    await assert.rejects(() => stream.next(), (error) => error.code === 'provider_cancelled');
+  });
+});

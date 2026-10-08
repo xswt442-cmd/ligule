@@ -154,14 +154,19 @@ impl Host {
             .map_err(|error| format!("failed to flush the host's stdin: {error}"))
     }
 
-    /// 终止后端进程。Windows 上没有能够送达进程并让它自己退出的终止信号，参照实现同样是直接终止
-    /// （`cline/apps/examples/desktop-app/src-tauri/src/main.rs:342-377`）。
+    /// 终止后端进程并等待退出。
     pub fn stop(&self) {
         if let Ok(mut child) = self.child.lock() {
             let _ = child.kill();
             let _ = child.wait();
         }
     }
+}
+
+/// 槽位里换上新的一具后端进程，交回被换掉的那一份。调用方要终止它。
+/// 同一时刻只留一具进程：重连时不换就会有两具各自往同一个窗口写帧（实现顺序第 65 步）。
+pub fn install_host(slot: &mut Option<Host>, next: Host) -> Option<Host> {
+    slot.replace(next)
 }
 
 #[cfg(test)]
@@ -300,5 +305,44 @@ mod tests {
         assert_eq!(bundled_node(Some(&root)), Some(node));
         assert_eq!(bundled_node(None), None);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_second_host_replaces_the_first_one_and_the_first_stops_carrying_frames() {
+        // 重连那一条路要成立：槽位换新的那一具之后，旧的那一份既不能再写帧，也不再往窗口里送（第 65 步）。
+        let script =
+            "require('node:readline').createInterface({ input: process.stdin }).on('line', \
+                      (line) => { process.stdout.write('echo ' + line + '\\n'); });";
+        let node = std::env::var("NODE").unwrap_or_else(|_| "node".to_string());
+        let (first, first_frames, _) =
+            spawn_host(&node, &["-e", script]).expect("spawn the first child");
+        let (second, second_frames, _) =
+            spawn_host(&node, &["-e", script]).expect("spawn the second child");
+
+        let mut slot: Option<Host> = None;
+        assert!(
+            install_host(&mut slot, first).is_none(),
+            "an empty slot has nothing to replace"
+        );
+        let old = install_host(&mut slot, second).expect("the previous host comes back");
+        assert!(slot.is_some(), "one host is left in the slot");
+        old.stop();
+
+        assert!(
+            old.send("nope").is_err(),
+            "a stopped host cannot carry a frame"
+        );
+        assert!(first_frames
+            .recv_timeout(Duration::from_millis(300))
+            .is_err());
+        slot.as_ref()
+            .expect("the live host")
+            .send("ping")
+            .expect("write a frame");
+        assert_eq!(
+            recv(&second_frames).expect("the new child answers"),
+            "echo ping"
+        );
+        slot.take().expect("the live host").stop();
     }
 }

@@ -4,10 +4,9 @@
 // 用法：node desktop/fetch-runtime.mjs [--force]
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
-import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(fileURLToPath(new URL('.', import.meta.url)), '..');
@@ -30,22 +29,26 @@ async function fetchNode() {
     const printed = execFileSync(nodeExe, ['--version'], { encoding: 'utf8' }).trim();
     if (printed === pin.version) return console.log(`node ${printed} already vendored`);
   }
-  const download = await sha256Checked(join(await mkdtemp(join(tmpdir(), 'ligule-node-')), archive));
-  const outDir = join(vendor, 'node');
-  await rm(outDir, { recursive: true, force: true });
-  await mkdir(outDir, { recursive: true });
-  // 解包用系统自带的那一份 bsdtar（认 zip、能只抽一个成员）。要按全路径调用：
-  // Git Bash 的 PATH 上前面的 tar 是 GNU tar，它既读不了 zip 也把「C:\…」的冒号当成远程主机
-  // （本机 2026-10-02 实测两条）。bsdtar 没有 --force-local 这个选项，也不需要。
-  const inner = `${archive.replace('.zip', '')}/`;
-  if (process.platform === 'win32') {
-    const bsdtar = join(process.env.SystemRoot ?? 'C:\\WINDOWS', 'System32', 'tar.exe');
-    execFileSync(bsdtar, ['-xf', download, '--strip-components=1', '-C', outDir, `${inner}node.exe`]);
-  } else {
-    execFileSync('tar', ['-xf', download, '--strip-components=1', '-C', outDir, `${inner}node.exe`]);
+  const scratchRoot = join(root, 'testplace');
+  await mkdir(scratchRoot, { recursive: true });
+  const temporary = await mkdtemp(join(scratchRoot, 'node-runtime-'));
+  try {
+    const download = await sha256Checked(join(temporary, archive));
+    const outDir = join(vendor, 'node');
+    await rm(outDir, { recursive: true, force: true });
+    await mkdir(outDir, { recursive: true });
+    // Windows 自带的 bsdtar 支持 zip 与带盘符的路径。
+    const inner = `${archive.replace('.zip', '')}/`;
+    if (process.platform === 'win32') {
+      const bsdtar = join(process.env.SystemRoot ?? 'C:\\WINDOWS', 'System32', 'tar.exe');
+      execFileSync(bsdtar, ['-xf', download, '--strip-components=1', '-C', outDir, `${inner}node.exe`]);
+    } else {
+      execFileSync('tar', ['-xf', download, '--strip-components=1', '-C', outDir, `${inner}node.exe`]);
+    }
+    console.log(`vendored ${pin.version} -> ${nodeExe}`);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
   }
-  await rm(join(download, '..'), { recursive: true, force: true });
-  console.log(`vendored ${pin.version} -> ${nodeExe}`);
 }
 
 async function sha256Checked(target) {
@@ -71,13 +74,14 @@ function productionPackages() {
     if (found.has(name)) return;
     const directory = join(modules, name);
     if (!existsSync(directory)) {
-      // 原生模块装不上时（CI 的 allowScripts、跨平台）跳过它：内核那一侧本来就有降级路径。
-      console.log(`skipped ${name}: not installed`);
-      return;
+      throw new Error(`${name} is a required runtime dependency but is not installed`);
     }
     found.add(name);
     const pkg = JSON.parse(readFileSyncSync(join(directory, 'package.json')));
     for (const dependency of Object.keys(pkg.dependencies ?? {})) collect(dependency);
+    for (const dependency of Object.keys(pkg.optionalDependencies ?? {})) {
+      if (existsSync(join(modules, dependency))) collect(dependency);
+    }
   }
   return [...found].sort();
 }
@@ -106,6 +110,7 @@ async function fetchAppTree() {
   await rm(app, { recursive: true, force: true });
   await mkdir(join(app, 'node_modules'), { recursive: true });
   await copyTree(join(root, 'dist'), join(app, 'dist'));
+  await copyTree(join(root, 'modes'), join(app, 'modes'));
   await copyFile(join(root, 'package.json'), join(app, 'package.json'));
   await copyFile(join(root, 'LICENSE'), join(app, 'LICENSE'));
   for (const name of productionPackages()) {
@@ -123,11 +128,6 @@ async function countFiles(directory) {
   return total;
 }
 
-const existing = await stat(join(vendor, 'app', 'dist', 'cli.js')).catch(() => null);
-if (existing !== null && !force && Date.now() - existing.mtimeMs < 4 * 60 * 60 * 1000) {
-  console.log('runtime tree already vendored (use --force to redo)');
-} else {
-  await fetchNode();
-  await fetchAppTree();
-}
+await fetchNode();
+await fetchAppTree();
 console.log(`node: ${basename(nodeExe)}`);

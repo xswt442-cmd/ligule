@@ -1,6 +1,6 @@
 // `exec` 用哪一个解释器由 Host 定（D59）：模型侧仍然只有一件 `exec`，配置 `exec.shell` 取 `auto`、`bash`、`powershell`，
 // `auto` 按平台探测挑一份。选择要进会话记录（种类 + 实际解析出来的可执行文件），因为判定链读的是那一种语法下的解析结果。
-// 探测不动用进程：已知位置直接 stat，其余按 PATH 逐目录 stat（顺序照 pi，`pi/packages/coding-agent/src/utils/shell.ts:76-119`）。
+// 探测不动用进程：已知位置直接 stat，其余按 PATH 逐目录 stat。
 import { existsSync } from 'node:fs';
 import { delimiter, join, win32 } from 'node:path';
 import { KernelError } from '../kernel/error.js';

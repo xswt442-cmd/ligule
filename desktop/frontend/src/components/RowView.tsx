@@ -1,0 +1,35 @@
+// 视图行到组件的那一次分派（D88）。这里只按 `kind` 挑组件，不认识会话记录本身。
+// 写入一条记录会让整份列表重新渲染一次：记录里的行对象本身没变，跳过它们才让追加便宜得下来。
+import { memo, type ReactElement } from 'react';
+import type { Row } from '../rows';
+import type { RowProps } from './types';
+import { AnswerRow } from './AnswerRow';
+import { CallRow } from './CallRow';
+import { NoticeRow } from './NoticeRow';
+import { ProblemRow } from './ProblemRow';
+import { QuestionRow } from './QuestionRow';
+import { ReasoningRow } from './ReasoningRow';
+import { ResultRow } from './ResultRow';
+import { RoundRow } from './RoundRow';
+import { ContextRow } from './ContextRow';
+
+const VIEWS: Record<Row['kind'], (props: RowProps) => ReactElement> = {
+  question: QuestionRow,
+  answer: AnswerRow,
+  reasoning: ReasoningRow,
+  call: CallRow,
+  result: ResultRow,
+  refusal: ProblemRow,
+  failure: ProblemRow,
+  round: RoundRow,
+  context: ContextRow,
+  meta: NoticeRow,
+  error: NoticeRow,
+};
+
+export const RowView = memo(function RowView(props: RowProps) {
+  const View = VIEWS[props.row.kind];
+  if (props.flash !== true) return <View {...props} />;
+  // 亮起来的那一行才多包一层：其余每一行的节点数不变。
+  return <div className="row-flash"><View {...props} /></div>;
+});
