@@ -152,11 +152,27 @@ export const METHODS = Object.freeze({
       type: 'object',
       properties: {
         field: { type: 'string', description: 'one field name from the list the host names back when this is not one of them' },
-        value: { type: 'string', description: 'the new value; the host checks it against the shape that field declares' },
+        value: { type: 'string', description: 'the new value of a one-line field; the host checks it against the shape that field declares' },
         layer: { type: 'string', description: 'which settings file to write; the writable ones are named back when this is not one of them' },
         version: { type: 'string', description: 'the version read from that file, so a concurrent edit is reported instead of overwritten; blank when that file did not exist' },
+        op: { type: 'string', description: 'for the tool rule table: add a rule, change that one rule, or remove it' },
+        index: { type: 'number', description: 'which rule in the table that layer writes, counted from 0; ignored when adding' },
+        ruleTool: { type: 'string', description: 'for add and change: the capability name the rule matches' },
+        ruleDecision: { type: 'string', description: "for add and change: 'allow' or 'deny'" },
+        ruleMatch: { type: 'string', description: 'for add and change: the command prefix pattern; absent means the whole capability' },
+        ruleReason: { type: 'string', description: 'for add and change: the sentence shown when this rule decides' },
       },
-      required: ['field', 'value', 'layer', 'version'],
+      required: ['field', 'layer', 'version'],
+    },
+  },
+  // 第十一条只为界面多出来的方法：审批档位有两件来源，配置文件那一份是默认，这一份会话可以覆盖它（D101）。
+  // 覆盖只在运行期，不写文件也不动别的会话；交回档位说成 `default` 就是退回配置那一份。
+  'policy.set': {
+    description: 'Override the approval tier for this session only, or go back to the tier the settings file writes; the new tier applies to the tool decisions that follow',
+    parameters: {
+      type: 'object',
+      properties: { sessionId: SESSION_ID, mode: { type: 'string', description: "'ask', 'auto', or 'default' to drop this session's override" } },
+      required: ['sessionId', 'mode'],
     },
   },
   'mode.set': {

@@ -52,7 +52,7 @@ export interface SessionRecord {
 // `usage` 在表里（D82）：它不进投影，但它的序号占着位——把它当成「可略过」丢掉的那几种读法会让检查点那段范围缺号，
 // 一份本来对得上的检查点就白作废了。它同时带着 `ignorable` 那一格，读不懂它的旧程序略过而不是拒绝打开。
 // `label` 同一条道理（实现顺序第 75 步）：会话的名字与归档标记是记在记录里的事实，列表那一处读它，模型看不见它。
-const WRITTEN_KINDS = ['session', 'user', 'reasoning', 'assistant', 'tool', 'mode', 'usage', 'turn', 'label'];
+const WRITTEN_KINDS = ['session', 'user', 'reasoning', 'assistant', 'tool', 'mode', 'usage', 'turn', 'label', 'turnContext'];
 
 export function createSessionHeader({
   id,

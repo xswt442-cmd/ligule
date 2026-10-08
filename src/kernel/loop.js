@@ -24,7 +24,7 @@ function restOf(groups, groupIndex, index = -1) {
   return groups.slice(groupIndex).flatMap((group, offset) => group.calls.slice(offset === 0 ? index + 1 : 0));
 }
 
-export function createLoop({ kernel, provider, prompt, session, limits = DEFAULT_LOOP_LIMITS, completesRun = [], compaction = null }) {
+export function createLoop({ kernel, provider, prompt, session, limits = DEFAULT_LOOP_LIMITS, completesRun = [], compaction = null, turnContext = null }) {
   if (typeof provider?.stream !== 'function') throw new KernelError('loop_provider_required');
   const completing = new Set(completesRun);
 
@@ -56,6 +56,9 @@ export function createLoop({ kernel, provider, prompt, session, limits = DEFAULT
       // 它的序号就是这一轮的身份证：轮次完成标记与分支选点都指着它（实现顺序第 68 步）。
       let userSeq;
       if (session) userSeq = (await session.append({ kind: 'user', text: input, ...user })).seq;
+      // 开轮时生效的那一份参数冻进记录（D104）：轮中改了模型或档位，事后也读得出这一轮当时用的是哪一份。
+      // 它不进模型投影也不进检查点哈希（`PROJECTED_KINDS` 是白名单），界面按事件序号读它。
+      if (session && turnContext !== null) await session.append({ kind: 'turnContext', ignorable: true, userSeq, ...turnContext() });
 
       // 一轮正常完整结束时留下一条事实（D88 之外的界面契约要的是「这一轮真的收尾了」，
       // 不是「最后一条助手消息出现了」）。取消、失败、上限与恢复补写都走不到这一行。

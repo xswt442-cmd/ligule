@@ -35,13 +35,13 @@ function canAutoApprove(command) {
 }
 
 // 要去询问时把原因一起交出去：解析器不可用、命令里有哪种看不透的构造、以及按哪一种语法读的，
-// 界面上要说得出来（I8）。
+// 界面上要说得出来（I8）。那一句是界面直接念出来的话，本项目界面说中文；要机器认的东西在稳定码那一格（D93）。
 function askReason(parsed, target, shell) {
   const kind = shell?.kind ?? 'bash';
-  if (parsed?.kind === 'unavailable') return `the ${kind} command syntax parser is unavailable: ${parsed.detail}`;
-  if (parsed?.kind === 'unsupported') return `the ${kind} command is not fully understood: ${parsed.construct}`;
+  if (parsed?.kind === 'unavailable') return `${kind} 的命令语法解析器用不了：${parsed.detail}`;
+  if (parsed?.kind === 'unsupported') return `${kind} 的这一条命令没能完整读下来：${parsed.construct}`;
   if (target?.class === 'loopback' || target?.class === 'private') {
-    return `the address ${target.addresses.join(', ')} is ${target.class}, so this fetch needs an explicit yes`;
+    return `地址 ${target.addresses.join(', ')} 属于 ${target.class}，这一次取回要你明确点头`;
   }
   return undefined;
 }
@@ -52,6 +52,10 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
   if (!(thresholds.consecutive >= 1) || !(thresholds.total >= 1)) throw new KernelError('policy_thresholds_required');
 
   let current = mode;
+  // 配置那一份是默认，会话可以覆盖它（D101）：`configured` 留着，是为了能说出「退回配置默认」退到哪儿。
+  let configured = mode;
+  let source = 'config';
+  let currentRules = rules;
   let forcedToAsk = false;
   let consecutive = 0;
   let total = 0;
@@ -80,6 +84,44 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       return forcedToAsk ? 'ask' : current;
     },
 
+    // 现在生效的这一档出自哪一件：配置那一份默认，还是这一份会话覆盖的（D101）。被拒绝阈值压下来另有一格 `forced`。
+    get modeSource() {
+      return source;
+    },
+
+    configuredMode() {
+      return configured;
+    },
+
+    // 交回配置那一份默认：会话覆盖只在运行期存在，这一具宿主退出之后没有。
+    resetMode() {
+      current = configured;
+      source = 'config';
+    },
+
+    setMode(next) {
+      if (next !== 'ask' && next !== 'auto') throw new KernelError('policy_mode_unknown');
+      current = next;
+      source = 'session';
+    },
+
+    // 配置文件里那一条默认改了：没有自己覆盖过档位的会话跟着走，覆盖过的那一份不动（D101）。
+    setConfiguredMode(next) {
+      if (next !== 'ask' && next !== 'auto') throw new KernelError('policy_mode_unknown');
+      configured = next;
+      if (source === 'config') current = next;
+    },
+
+    // 规则表可以从界面写入（方案 7.3：接受之后立即作用于后续判定）。守卫、拒绝计数与强制询问状态都不动。
+    setRules(next) {
+      if (!Array.isArray(next)) throw new KernelError('policy_rules_invalid');
+      currentRules = next;
+    },
+
+    get rules() {
+      return currentRules;
+    },
+
     denials() {
       return { consecutive, total };
     },
@@ -100,7 +142,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         ...(forcedToAsk ? { forced: true } : {}),
         ...extra,
       });
-      const candidates = rules.filter((item) => item.tool === named);
+      const candidates = currentRules.filter((item) => item.tool === named);
       // 命令文本先过一次语法解析：能拆成可信的分段就逐段套规则，拆不出来就整条按无法完整处理对待。
       // 读哪一种语法由 Host 的那一份选择决定（D59），判定与执行看的不是同一份东西就没有意义。
       const parsed = command === undefined ? undefined : await parseCommand(command, shell?.kind);
@@ -126,10 +168,10 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
 
       // 网络目标的类别先收紧（D58）：用不了的 URL 与「根本不该被取回的地址」这一类不进后面的顺序。
       if (target !== undefined && (target.failure !== undefined || target.class === undefined)) {
-        return refuse('policy_denied', 'target', `the network target cannot be classified (${target.failure ?? 'unsupported'})`);
+        return refuse('policy_denied', 'target', `分不出这一个网络目标的类别（${target.failure ?? 'unsupported'}）`);
       }
       if (target?.class === 'link-local' || target?.class === 'unspecified') {
-        return refuse('policy_denied', 'target', `${target.class} addresses (link-local, metadata endpoints, multicast and reserved ranges) are not fetched from this run`);
+        return refuse('policy_denied', 'target', `${target.class} 这一类地址（链路本地、元数据端点、组播与保留段）不在这一趟运行里取回`);
       }
       const loopOrPrivate = target?.class === 'loopback' || target?.class === 'private';
 
@@ -138,7 +180,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       const denied = candidates.find((item) => item.decision === 'deny'
         && (matches(command, item.match) || (segments ?? []).some((segment) => matches(segment, item.match))));
       if (denied) {
-        return refuse('policy_denied', 'rule', denied.reason ?? `${named} is denied by policy`, denied.match);
+        return refuse('policy_denied', 'rule', denied.reason ?? `${named} 被规则表拒绝`, denied.match);
       }
 
       for (const check of guards) {
@@ -174,7 +216,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
 
       // 走到这里都要问：自动档遇到看不透的命令不自动放行，只降档到逐次询问，并把原因交出去（D17、I8）。
       const reason = askReason(parsed, target, shell);
-      if (typeof ask !== 'function') return refuse('ask_unavailable', 'ask', reason ?? 'no ask channel is installed', undefined, 'unavailable');
+      if (typeof ask !== 'function') return refuse('ask_unavailable', 'ask', reason ?? '这一条连接上没有问人的通道', undefined, 'unavailable');
       // 答复这一次要点头就得多看一眼：同一条文本在两种语法下能自动放行的面积不一样，答的是哪一种、跑的是哪一个可执行文件，
       // 只有 Host 这一侧知道（D59）。没有命令文本的调用不带这两个字段，答复的形状与加这一条之前一样。
       const question = { tool: named, input, command, reason };

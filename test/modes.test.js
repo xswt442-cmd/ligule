@@ -272,7 +272,8 @@ test('a switch asked for during a round takes effect only once that round ends',
     try {
       const { sessionId } = await waiting;
       const running = connection.request('run.start', { sessionId, input: 'first' });
-      for (let tried = 0; (await connection.request('status.get', { sessionId })).running !== true; tried += 1) {
+      // 等的是条件而不是「running 那一格刚落」：本轮真正卡在第一次模型请求上，那一次没到就没有 `release` 可按。
+      for (let tried = 0; (await connection.request('status.get', { sessionId })).running !== true || requests.length === 0; tried += 1) {
         assert.ok(tried < 100, 'the round never started');
         await setTimeout(5);
       }

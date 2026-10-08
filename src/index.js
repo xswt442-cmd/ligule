@@ -36,6 +36,7 @@ export { resolveRecycler, windowsRecycleBin, freedesktopTrash } from './capabili
 export { resolveRipgrep, searchWithRipgrep } from './capability/ripgrep.js';
 export { execTool } from './capability/exec.js';
 export { createPromptAssembly, PROMPT_BOUNDARY } from './kernel/prompt.js';
+export { BASE_SYSTEM_PROMPT } from './kernel/base-prompt.js';
 export { createSessionLog } from './session/session.js';
 export { SESSION_FORMAT_VERSION, foldLabel, parseSessionEvents } from './session/format.js';
 export { parseSessionBytes, readSessionRecord } from './session/record.js';

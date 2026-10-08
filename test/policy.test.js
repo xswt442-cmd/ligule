@@ -184,7 +184,7 @@ test('the kernel runs every call through the decision chain and reports the code
     () => kernel.call('exec', { command: 'rm -rf /tmp/x' }),
     (error) => error.code === 'policy_denied',
   );
-  assert.deepEqual(seen[0], { tool: 'exec', code: 'policy_denied', reason: 'exec is denied by policy' });
+  assert.deepEqual(seen[0], { tool: 'exec', code: 'policy_denied', reason: 'exec 被规则表拒绝' });
   assert.equal(await kernel.call('exec', { command: 'ls' }), 'ran');
 });
 
@@ -206,7 +206,7 @@ test('the PowerShell backend judges only its own narrow subset', async () => {
   });
   assert.equal((await chain.evaluate({ tool: 'exec', input: { command: 'git status | grep x' }, shell: POWERSHELL })).decision, 'allow');
   assert.deepEqual(calls.map((call) => call.command), ['git status | grep x']);
-  assert.match(calls[0].reason, /the powershell command is not fully understood: \|/);
+  assert.match(calls[0].reason, /powershell 的这一条命令没能完整读下来: |/);
   // 答复那一次要多看一眼的东西：答的是哪一种语法下的这条文本、跑起来会是哪一个可执行文件。
   assert.equal(calls[0].shell, 'powershell');
   assert.equal(calls[0].executable, 'pwsh.exe');
@@ -217,4 +217,25 @@ test('the PowerShell backend judges only its own narrow subset', async () => {
     'allow',
   );
   assert.deepEqual(calls.map((call) => call.command), ['git status | grep x', 'python -c "print(1)"']);
+});
+
+// 档位的两件来源与规则表可以整张换掉（D100、D101）。
+test('the tier has two sources and the rule table can be replaced in place', async () => {
+  const chain = createDecisionChain({ mode: 'ask', rules: [], ask: async () => true });
+  assert.equal(chain.mode, 'ask');
+  assert.equal(chain.modeSource, 'config');
+  chain.setMode('auto');
+  assert.equal(chain.mode, 'auto', '会话覆盖的那一份现在生效');
+  assert.equal(chain.modeSource, 'session');
+  chain.setConfiguredMode('ask');
+  assert.equal(chain.mode, 'auto', '配置默认改了，会话自己覆盖过的那一份不动');
+  assert.equal(chain.configuredMode(), 'ask');
+  chain.resetMode();
+  assert.equal(chain.mode, 'ask', '退回的就是配置那一份');
+  assert.equal(chain.modeSource, 'config');
+  assert.throws(() => chain.setMode('sometimes'), (error) => error.code === 'policy_mode_unknown');
+  chain.setRules([{ tool: 'exec', decision: 'deny', match: 'rm' }]);
+  const denied = await chain.evaluate({ tool: 'exec', input: { command: 'rm something' } });
+  assert.equal(denied.decision, 'deny');
+  assert.equal(denied.via, 'rule', '新表里那一条现在就在判');
 });
