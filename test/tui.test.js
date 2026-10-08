@@ -1169,7 +1169,7 @@ test('/policy overrides the tier for this session alone and says so on the statu
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   // 终端里那一格会换行：比对之前把控制序列与换行去掉，长句被拆开也算同一句话。
   const strip = (text) => text.replace(/\x1B\[[0-9;?]*[A-Za-z]/g, '').replace(/[\r\n]+/g, '');
-  const lastFrame = () => strip(painted.split('\x1B[?2026h').pop());
+  const lastFrame = () => completeFrame(painted);
   const spoken = (text) => strip(painted).includes(text);
   const type = async (line) => {
     stdin.write(line);
