@@ -144,25 +144,35 @@ export function contextSegment(usage) {
 }
 
 // 状态行里模式与判定档位各带一个前缀：`mode` 这一个词在界面上指过两样东西，写清楚比省字重要（D40）。
-// 待生效写成 `mode:minimal→full`。宽度不够时先去掉工具数——它是模式与档位的推论，再挤就丢上下文那一段。
+// 待生效写成 `mode:minimal→full`。宽度不够时按「这一段能不能从别处再读到」退让：先把那一段最长的路径缩成最后一级目录名（认得出是哪一项目），
+// 再去工具数与上下文那两段，然后丢模型名、丢整段路径，最后才动记录条数——跑着那一轮的打断提示不能被挤掉，
+// 排在后面的那一段要为核心那几句留出固定的位置。
 export function buildStatusLine({ head, sessionId, boundary, status, running, seconds, expanded, columns }) {
-  let base = `${head}会话 ${sessionId.slice(0, 8)}${boundary === undefined ? '' : ` · ${boundary}`}`;
+  const id = `会话 ${sessionId.slice(0, 8)}`;
+  const root = boundary === undefined ? '' : boundary;
+  let base = `${head}${id}${root === '' ? '' : ` · ${root}`}`;
   if (status === null) return base;
   const context = contextSegment(status.usage);
   const parts = [`mode:${status.pendingMode === null ? status.mode ?? 'none' : `${status.mode}→${status.pendingMode}`}`,
-    `policy:${status.policy}`];
+    `policy:${status.policy}${status.policySource === 'session' ? '(会话)' : ''}`];
   if (context !== '') parts.push(context);
   parts.push(`tools:${status.tools.length}`);
-  const tail = `记录 ${status.eventCount} 条`
-    + (running ? ` · ${Math.floor(seconds)} 秒，${keyHint('interrupt')} 打断` : '')
+  // 打断与展开那两句跟在条数之后：挤的时候条数先走，这两句留着。
+  const hints = (running ? ` · ${Math.floor(seconds)} 秒，${keyHint('interrupt')} 打断` : '')
     + (expanded ? ` · 已展开（${keyHint('expand-or-history')} 收起）` : '');
-  const line = (kept) => `${base} · ${kept.join('  ')} · ${tail}`;
-  // 列数读不到时不裁：宁可让终端自己折行，也不要按一个猜的宽度丢东西。
+  let tail = `记录 ${status.eventCount} 条${hints}`;
   let shown = parts;
-  if (columns !== undefined && columns > 0 && displayWidth(line(shown)) > columns) shown = shown.filter((part) => !part.startsWith('tools:'));
-  if (columns !== undefined && columns > 0 && displayWidth(line(shown)) > columns) shown = shown.filter((part) => !part.startsWith('ctx:'));
-  if (columns !== undefined && columns > 0 && displayWidth(line(shown)) > columns) base = `${head}会话 ${sessionId.slice(0, 8)}`;
-  return line(shown);
+  // 列数读不到时不裁：宁可让终端自己折行，也不要按一个猜的宽度丢东西。
+  const line = () => `${base} · ${shown.join('  ')}${tail === '' ? '' : ` · ${tail}`}`;
+  const over = () => columns !== undefined && columns > 0 && displayWidth(line()) > columns;
+  const leaf = root === '' ? '' : root.split(/[\\/]/).filter(Boolean).pop() ?? '';
+  if (over()) base = `${head}${id}${leaf === '' ? '' : ` · ${leaf}`}`;
+  if (over()) shown = shown.filter((part) => !part.startsWith('tools:'));
+  if (over()) shown = shown.filter((part) => !part.startsWith('ctx:'));
+  if (over()) base = `${id}${leaf === '' ? '' : ` · ${leaf}`}`;
+  if (over()) base = id;
+  if (over()) tail = hints === '' ? '' : hints.slice(3);
+  return line();
 }
 
 // `/show` 要的是记录里那个稳定的序号，不是画面上的第几行：行会随投影变，序号不会（D40）。
@@ -952,6 +962,33 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         push({ kind: 'meta', text: switched.pending === null
           ? `模式切到 ${switched.mode}（${switched.tools.length} 件工具）`
           : `已请求切到 ${switched.pending}，这一轮结束才生效；再打一次 /mode ${switched.mode} 可以撤回` });
+      })();
+      return;
+    }
+    if (name === 'policy') {
+      void (async () => {
+        // 档位有两件来源：配置文件那一份默认与这一份会话的覆盖（D101）。不带参数只是问现在按哪一档、出自哪一件。
+        if (argument === '') {
+          const current = await client.request('status.get', { sessionId }).catch(() => null);
+          setStatus(current);
+          push({ kind: 'meta', text: current === null ? '档位读不到'
+            : `当前 ${current.policy}（${current.policySource === 'session' ? '这一份会话改的' : '配置默认'}），配置里写的是 ${current.policyDefault ?? '读不到'}` });
+          return;
+        }
+        const asked = argument === 'reset' ? 'default' : argument;
+        if (asked !== 'default' && asked !== 'ask' && asked !== 'auto') {
+          push({ kind: 'error', text: `/policy 只认 ask、auto 与 reset，打的是 ${argument}` });
+          return;
+        }
+        const changed = await client.request('policy.set', { sessionId, mode: asked }).catch((error) => error);
+        if (changed.code !== undefined) {
+          push({ kind: 'error', text: `改不过去：${changed.code}${changed.detail === undefined ? '' : ` · ${changed.detail}`}` });
+          return;
+        }
+        setStatus(await client.request('status.get', { sessionId }).catch(() => null));
+        push({ kind: 'meta', text: changed.policySource === 'session'
+          ? `这一份会话从现在起按 ${changed.policy} 走，配置文件里那一份还是 ${changed.policyDefault}`
+          : `退回配置默认：${changed.policy}` });
       })();
       return;
     }

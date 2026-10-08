@@ -10,6 +10,7 @@ import { App } from './app.js';
 import { flushHistory, historyPathOf, loadHistory, pushHistory, rememberHistory } from './history.js';
 import { flushInput, inputPathOf, readInput, rememberInput } from './input-store.js';
 import { flushKeys, keyPathOf, readKeys, writeKeys } from './key-store.js';
+import { titleEscape } from './output.js';
 
 export async function runTui({ config, provider, policy, logger, modeName, modePaths, extensions, stdout = process.stdout, stdin = process.stdin, stderr = process.stderr, editor = process.env.VISUAL || process.env.EDITOR, historyFile = historyPathOf(), inputFile = inputPathOf(), keyFile = keyPathOf() }) {
   const pair = createMemoryConnectionPair();
@@ -49,6 +50,11 @@ export async function runTui({ config, provider, policy, logger, modeName, modeP
     );
     await instance.waitUntilExit();
   } finally {
+    // 退出之前把终端标题交回去：进程已经不在了，那一格还写着 `ligule · 模型 … · 会话 …` 会让那个标签页说一件不成立的事。
+    // 写不进就不写（管道对面先关掉时这里会抛），别让这一格把后面的收尾与放锁挡住。
+    try {
+      stdout.write(titleEscape(''));
+    } catch { /* 标准输出已经不接了 */ }
     try {
       await Promise.all([flushHistory(historyFile), flushInput(inputFile), flushKeys()]);
     } finally {

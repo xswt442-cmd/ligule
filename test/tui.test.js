@@ -138,7 +138,8 @@ test('the app paints the session line and the input hint onto the terminal', opt
   await waitFor(() => /mode:minimal  policy:ask/.test(painted), { read: () => painted });
 
   assert.match(painted, new RegExp(`test-model · 会话 ${sessionId.slice(0, 8)}`));
-  assert.match(painted, new RegExp(`mode:minimal  policy:ask .*tools:${status.tools.length}`));
+  // 随包的基础提示进了估算那一段（D102），窄终端上这一行的尾巴会被截掉：工具件数在装得下的宽度里才断言。
+  assert.match(painted, new RegExp(`mode:minimal  policy:ask .*tools:`));
   assert.match(painted, /打 \/ 看清单/);
 }));
 
@@ -476,6 +477,34 @@ test('the status line reports context pressure only when a window is written', o
   assert.ok(UI_COMMANDS.some((command) => command.name === 'compact'), '/compact 在命令表里');
 });
 
+// 那一段长路径配窄终端时的退让顺序（实现顺序第 126 步之后补的读数）：先把它缩成最后一级目录名，
+// 再动那两段从 `/status` 也读得出来的，挤到最后留的是模式、档位与那句打断提示。
+test('the status line shortens a long path before it drops what changes', options, () => {
+  const status = {
+    mode: 'minimal', pendingMode: null, policy: 'ask', policySource: 'session', tools: ['a', 'b', 'c'], eventCount: 1234,
+    denials: { consecutive: 0, total: 0 }, usage: { window: 200_000, threshold: 160_000, estimated: 42_000 },
+  };
+  const args = {
+    head: 'deepseek-chat · ', sessionId: 'abcdef0123456789', status, seconds: 12.7,
+    boundary: 'C:\\Users\\20411\\AppData\\Local\\Temp\\ligule-tui-7Rm2Qx\\project',
+  };
+  const idle = { running: false, expanded: false };
+  const busy = { running: true, expanded: true };
+  const draw = (columns, extra) => buildStatusLine({ ...args, ...extra, columns });
+  // 旧写法在 120 列就把工具数、上下文与整段路径一起丢光，这里三段都留着，路径只剩最后一级。
+  assert.ok(displayWidth(draw(120, idle)) <= 120);
+  assert.match(draw(120, idle), / · project · mode:minimal  policy:ask\(会话\)  ctx:~42000\/200000  tools:3/);
+  assert.doesNotMatch(draw(120, idle), /Temp\\/);
+  assert.match(draw(100, idle), /deepseek-chat/);
+  assert.doesNotMatch(draw(100, idle), /tools:/);
+  assert.doesNotMatch(draw(80, idle), /deepseek-chat/);
+  assert.match(draw(80, idle), /记录 1234 条/);
+  // 跑着的那一轮里，走掉的不会是那句打断提示与档位上那个标记。
+  assert.match(draw(60, busy), /policy:ask\(会话\)/);
+  assert.match(draw(60, busy), /打断/);
+  assert.doesNotMatch(draw(60, busy), /记录 1234 条/);
+});
+
 // 第 44 步：`/sessions` 画的那几行与 `/resume` 认的那个 id。列表来自宿主，界面不去开盘（D81 边界一）。
 test('the session listing is one row per record and an id prefix resolves to one of them', options, () => {
   const listed = [
@@ -799,17 +828,28 @@ test('Ctrl+G says the editor is not configured instead of guessing one', options
 }));
 
 // 外部编辑器那一条的失败路径也要把临时目录收掉：那一份草稿里可能是刚写的一半代码。
+// 数的是自己那一个目录里的东西，不是整机临时目录：并行跑几份检查时，别人那一份短暂存在的 `ligule-editor-*`
+// 会在两次列举之间出现或消失，按全局列表比就把自己的断言挂在别人的时序上。临时目录指到一处私有的下面，两份互不影响。
 test('a failed editor run leaves no temporary directory behind', async () => {
   const { editInExternalEditor } = await import('../dist/tui/editor.js');
-  const leftovers = async () => (await readdir(tmpdir())).filter((name) => name.startsWith('ligule-editor-'));
-  const before = await leftovers();
-  const failed = await editInExternalEditor(`${quoted(process.execPath)} ${quoted(join(resolve('test'), 'fixtures', 'editor.mjs'))} exit - - 17`, '草稿的一半');
-  assert.equal(failed.code, 'tui_editor_failed');
-  assert.match(failed.detail, /17/);
-  assert.deepEqual(await leftovers(), before, '退出码不是 0 那一条路径上临时目录也删掉了');
-  const empty = await editInExternalEditor('   ', '草稿的一半');
-  assert.deepEqual(empty, { code: 'tui_editor_command_invalid', detail: 'EDITOR must contain a program name' });
-  assert.deepEqual(await leftovers(), before, '命令名为空时连目录都不建');
+  const sandbox = await mkdtemp(join(tmpdir(), 'ligule-editor-sandbox-'));
+  const previous = { TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP };
+  process.env.TMPDIR = sandbox;
+  process.env.TMP = sandbox;
+  process.env.TEMP = sandbox;
+  try {
+    const leftovers = async () => (await readdir(sandbox, { recursive: true })).map(String).filter((name) => name.includes('ligule-editor-'));
+    const failed = await editInExternalEditor(`${quoted(process.execPath)} ${quoted(join(resolve('test'), 'fixtures', 'editor.mjs'))} exit - - 17`, '草稿的一半');
+    assert.equal(failed.code, 'tui_editor_failed');
+    assert.match(failed.detail, /17/);
+    assert.deepEqual(await leftovers(), [], '退出码不是 0 那一条路径上临时目录也删掉了');
+    const empty = await editInExternalEditor('   ', '草稿的一半');
+    assert.deepEqual(empty, { code: 'tui_editor_command_invalid', detail: 'EDITOR must contain a program name' });
+    assert.deepEqual(await leftovers(), [], '命令名为空时连目录都不建');
+  } finally {
+    Object.assign(process.env, previous);
+    await rm(sandbox, { recursive: true, force: true });
+  }
 });
 
 // 整段粘贴走的是另一条通道：那一段文本进草稿，里面的换行不发起一轮（方案 5.1）。
@@ -1063,23 +1103,32 @@ test('Ctrl+Z walks the draft back a unit at a time and Ctrl+Y takes it back', op
   const started = () => requests.filter((request) => request.method === 'run.start').length;
   // 光标处那一段有反色标记，画面里那串字中间夹着样式码：认草稿内容时先把它们去掉。
   const shown = () => plainOutput(lastFrame());
+  // 「应当画出来」的那一半扫这一次动作之后写出的全部画面：ink 的一帧可能分几次写出去，只看最后那一段在负载下会拿到半帧。
+  // 「应当没了」的那一半仍只看最后一帧，历史里那一句还留着，扫全部会把已经退掉的读成还在。
+  let mark = 0;
+  const grown = () => plainOutput(painted.slice(mark));
+  const paintedText = async (text, note) => {
+    await waitFor(() => shown().includes(text), { read: shown });
+    assert.ok(shown().includes(text), note);
+  };
   try {
-    await waitFor(() => shown().includes('要模型做的事'), { read: shown });
+    await waitFor(() => grown().includes('要模型做的事'), { read: grown });
 
     // 连着打的五个字是一段：一次 Ctrl+Z 整段没了，再按 Ctrl+Y 又整段回来。
     stdin.write('第一段草稿');
-    await waitFor(() => shown().includes('第一段草稿'), { read: shown });
+    await waitFor(() => grown().includes('第一段草稿'), { read: grown });
     stdin.write('\x1a');
     await waitFor(() => !shown().includes('第一段草稿'), { read: shown });
+    mark = painted.length; // 从这里起头的画面里，再出现那五个字只可能是 Ctrl+Y 画回来的
     stdin.write('\x19');
-    await waitFor(() => shown().includes('第一段草稿'), { read: shown });
+    await waitFor(() => grown().includes('第一段草稿'), { read: grown });
 
     // 退回来之后接着打的字是另一段：一次退回整段，原来那一段留着。
     stdin.write('ab');
     await delay(60);
     stdin.write('\x1a');
     await waitFor(() => !shown().includes('ab'), { read: shown });
-    assert.ok(shown().includes('第一段草稿'), '退掉后打的那两个字符时，原来那一段还在');
+    await paintedText('第一段草稿', '退掉后打的那两个字符时，原来那一段还在');
 
     // 光标挪开之后再打的字又是一段：退一次只去掉那一个字符。
     stdin.write('甲');
@@ -1088,11 +1137,59 @@ test('Ctrl+Z walks the draft back a unit at a time and Ctrl+Y takes it back', op
     await delay(60);
     stdin.write('乙');
     await delay(60);
-    assert.ok(shown().includes('第一段草稿乙甲'), '光标挪到中间再打的字落在那一个字前面');
+    await paintedText('第一段草稿乙甲', '光标挪到中间再打的字落在那一个字前面');
     stdin.write('\x1a');
     await waitFor(() => !shown().includes('乙'), { read: shown });
-    assert.ok(shown().includes('第一段草稿甲'), '退的是刚才那一段，不是整份草稿');
+    await paintedText('第一段草稿甲', '退的是刚才那一段，不是整份草稿');
     assert.equal(started(), 0, '撤销不发任何东西出去，也不起一轮');
+  } finally {
+    instance.unmount();
+  }
+}));
+
+// 终端里那一条 `/policy`：档位是两件来源，屏幕上说的是这一份会话改的那一份（D101、实现顺序第 122 步）。
+test('/policy overrides the tier for this session alone and says so on the status line', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { setTimeout: delay } = await import('node:timers/promises');
+  const { App } = await import('../dist/tui/app.js');
+  const stdout = new PassThrough();
+  stdout.columns = 120;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const instance = render(createElement(App, {
+    client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  // 终端里那一格会换行：比对之前把控制序列与换行去掉，长句被拆开也算同一句话。
+  const strip = (text) => text.replace(/\x1B\[[0-9;?]*[A-Za-z]/g, '').replace(/[\r\n]+/g, '');
+  const lastFrame = () => strip(painted.split('\x1B[?2026h').pop());
+  const spoken = (text) => strip(painted).includes(text);
+  const type = async (line) => {
+    stdin.write(line);
+    await delay(40);
+    stdin.write('\r');
+  };
+  const configDefault = (await client.request('status.get', { sessionId })).policy;
+  const other = configDefault === 'ask' ? 'auto' : 'ask';
+  try {
+    await waitFor(() => lastFrame().includes('要模型做的事'), { read: lastFrame });
+    await type('/policy');
+    await waitFor(() => spoken(`当前 ${configDefault}（配置默认）`), { read: () => painted });
+
+    await type(`/policy ${other}`);
+    await waitFor(() => requests.some((request) => request.method === 'policy.set'), { read: () => strip(painted).slice(-700) });
+    await waitFor(() => spoken(`这一份会话从现在起按 ${other} 走`), { read: () => strip(painted).slice(-700) });
+    assert.equal((await client.request('status.get', { sessionId })).policySource, 'session');
+
+    await type('/policy sometimes');
+    await waitFor(() => spoken('/policy 只认 ask、auto 与 reset'), { read: () => painted });
+
+    await type('/policy reset');
+    await waitFor(() => spoken(`退回配置默认：${configDefault}`), { read: () => painted });
+    assert.equal((await client.request('status.get', { sessionId })).policySource, 'config');
   } finally {
     instance.unmount();
   }
