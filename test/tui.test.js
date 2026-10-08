@@ -9,6 +9,7 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { waitFor, withTuiHost } from './helpers/tui-host.js';
+import { completeFrame } from './helpers/frames.js';
 import { HISTORY_LIMIT, SEARCH_ROWS, historyPathOf, loadHistory, pushHistory, rememberHistory, searchHistory } from '../dist/tui/history.js';
 
 let rows = {};
@@ -433,7 +434,7 @@ test('input typed while a round runs queues up and flushes in order', options, a
   // 文本与回车分两次写：一段中文后面紧跟 `\r` 时被同一个 chunk 吃掉，真键盘上是两次按键。
   const type = async (text) => { stdin.write(text); await delay(80); stdin.write('\r'); await delay(200); };
   // 只看最后一帧：Ink 把每一帧续写在同一个流里，取尾巴会连上一帧的内容一起读。
-  const lastFrame = () => painted.split('\x1B[?2026h').pop();
+  const lastFrame = () => completeFrame(painted);
   try {
     await waitFor(() => painted.includes('要模型做的事'), { read: () => painted });
     await type('第一条');
@@ -743,7 +744,7 @@ test('the arrow keys recall the last sentence and Ctrl+R searches the history', 
     stdout,
     history: { entries: ['改 note.txt 的第一行', '上一次会话里说过的话'], remember: async (text) => { remembered.push(text); } },
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
-  const lastFrame = () => plainOutput(painted.split('\x1B[?2026h').pop() ?? '');
+  const lastFrame = () => completeFrame(painted);
   try {
     stdin.write('把这条记进历史');
     await delay(100);
@@ -789,7 +790,7 @@ test('Ctrl+G hands the draft to the editor and reads back what it wrote', option
   const instance = render(createElement(App, {
     client, sessionId, info: { editor }, interactive: true, stdout,
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
-  const lastFrame = () => painted.split('\x1B[?2026h').pop() ?? '';
+  const lastFrame = () => completeFrame(painted);
   try {
     stdin.write('草稿里的一半');
     await delay(200);
@@ -902,7 +903,7 @@ test('cancelling a round leaves the queued sentences paused', options, async () 
 
   const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   const type = async (text) => { stdin.write(text); await delay(80); stdin.write('\r'); await delay(200); };
-  const lastFrame = () => painted.split('\x1B[?2026h').pop();
+  const lastFrame = () => completeFrame(painted);
   const started = () => requests.filter((request) => request.method === 'run.start').map((request) => request.params.input);
   try {
     await waitFor(() => painted.includes('要模型做的事'), { read: () => painted });
@@ -1034,7 +1035,7 @@ test('an @ fragment asks the host for project files and Enter picks one', option
   const instance = render(createElement(App, {
     client, sessionId, info: { boundary: projectDirectory }, interactive: true,
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
-  const lastFrame = () => painted.split('\x1B[?2026h').pop();
+  const lastFrame = () => completeFrame(painted);
   const started = () => requests.filter((request) => request.method === 'run.start').length;
   try {
     await waitFor(() => painted.includes('要模型做的事'), { read: () => painted });
@@ -1083,6 +1084,13 @@ test('one undo unit is a typing run, not one keystroke', options, () => {
 });
 
 // Ctrl+Z 退一段、Ctrl+Y 再拿回来：这一处走的是真按键喂进渲染那一条路，撤销不发任何东西出去。
+test('the frame reader waits for the closing marker before reading', () => {
+  // 那一帧写完的标志是同步输出的结束符：没等到它的画面不当成已经画出来的那一份，否则负载下会把半帧读成一个状态。
+  assert.equal(completeFrame('\x1B[?2026h› 第一段草稿\x1B[?2026l\x1B[?2026h› 第一段').includes('草稿'), true, '写完的那一帧读得到');
+  assert.equal(completeFrame('\x1B[?2026h› 只有开头').includes('只有开头'), false, '还没写完的那一帧不算画面');
+  assert.equal(completeFrame('\x1B[?2026h› 旧的一帧\x1B[?2026l\x1B[?2026h› 新的一帧\x1B[?2026l'), '› 新的一帧', '读的是最后写完的那一帧');
+});
+
 test('Ctrl+Z walks the draft back a unit at a time and Ctrl+Y takes it back', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
@@ -1099,29 +1107,25 @@ test('Ctrl+Z walks the draft back a unit at a time and Ctrl+Y takes it back', op
   const instance = render(createElement(App, {
     client, sessionId, info: { boundary: projectDirectory }, interactive: true,
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
-  const lastFrame = () => painted.split('\x1B[?2026h').pop();
+  const lastFrame = () => completeFrame(painted);
   const started = () => requests.filter((request) => request.method === 'run.start').length;
   // 光标处那一段有反色标记，画面里那串字中间夹着样式码：认草稿内容时先把它们去掉。
   const shown = () => plainOutput(lastFrame());
-  // 「应当画出来」的那一半扫这一次动作之后写出的全部画面：ink 的一帧可能分几次写出去，只看最后那一段在负载下会拿到半帧。
-  // 「应当没了」的那一半仍只看最后一帧，历史里那一句还留着，扫全部会把已经退掉的读成还在。
-  let mark = 0;
-  const grown = () => plainOutput(painted.slice(mark));
+  // 认草稿那一行读的是写完的那一帧：负载下一帧可能分几次写出去，半帧会被读成「这句没了」。
   const paintedText = async (text, note) => {
     await waitFor(() => shown().includes(text), { read: shown });
     assert.ok(shown().includes(text), note);
   };
   try {
-    await waitFor(() => grown().includes('要模型做的事'), { read: grown });
+    await waitFor(() => shown().includes('要模型做的事'), { read: shown });
 
     // 连着打的五个字是一段：一次 Ctrl+Z 整段没了，再按 Ctrl+Y 又整段回来。
     stdin.write('第一段草稿');
-    await waitFor(() => grown().includes('第一段草稿'), { read: grown });
+    await waitFor(() => shown().includes('第一段草稿'), { read: shown });
     stdin.write('\x1a');
     await waitFor(() => !shown().includes('第一段草稿'), { read: shown });
-    mark = painted.length; // 从这里起头的画面里，再出现那五个字只可能是 Ctrl+Y 画回来的
     stdin.write('\x19');
-    await waitFor(() => grown().includes('第一段草稿'), { read: grown });
+    await waitFor(() => shown().includes('第一段草稿'), { read: shown });
 
     // 退回来之后接着打的字是另一段：一次退回整段，原来那一段留着。
     stdin.write('ab');

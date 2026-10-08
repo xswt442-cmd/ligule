@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createElement } from 'react';
 import { render } from 'ink';
+import { completeFrame } from './helpers/frames.js';
 import { App } from '../dist/tui/app.js';
 import { waitFor, withTuiHost } from './helpers/tui-host.js';
 
@@ -14,7 +15,7 @@ async function withApp(context, run) {
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref() {}, unref() {} });
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
-  const frame = () => (painted.split('\x1b[?2026h').at(-1) ?? '').replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
+  const frame = () => completeFrame(painted);
   const output = () => painted.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
   const instance = render(createElement(App, { client: context.client, sessionId: context.sessionId, stdout, info: { boundary: context.config.boundary } }), { stdout, stdin, patchConsole: false, exitOnCtrlC: false, interactive: true });
   const wait = (condition) => waitFor(condition, { read: frame });

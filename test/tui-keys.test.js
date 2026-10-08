@@ -1,6 +1,7 @@
 // 个人键位那一份表的检查（方案 6.1、第 87 步）。这几条会换模块级的那一份当前键位，所以单独一份文件：
 // 同一个文件里的顶层检查是并发调度的，把 `send` 改走会波及同文件里别的喂按键的检查——那类检查跑的是默认那一份表。
 import test from 'node:test';
+import { completeFrame } from './helpers/frames.js';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -97,7 +98,7 @@ test('/bind changes what a key does and what the screen says about it', options,
     client, sessionId, info: { boundary: projectDirectory }, interactive: true,
     keys: { read: async () => ({ overrides: {}, refused: [] }), write: async (next) => { written.push(next); } },
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
-  const lastFrame = () => painted.split('\x1B[?2026h').pop();
+  const lastFrame = () => completeFrame(painted);
   // 说出来的那几句是提交过的行：`Static` 只打一次，读它要看整段流，不能只看最后一帧。
   const spoken = (text) => painted.includes(text);
   try {
