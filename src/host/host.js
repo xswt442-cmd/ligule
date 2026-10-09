@@ -9,7 +9,7 @@ import { createKernel } from '../kernel/kernel.js';
 import { loadAssembly } from '../kernel/assembly.js';
 import { loadExtensions } from '../kernel/extensions.js';
 import { applyMode, DEFAULT_MODE, loadMode } from '../kernel/modes.js';
-import { registerWorkspace, workspaceIdentity } from '../kernel/workspace.js';
+import { readRegistry, registerWorkspace, setDefaultWorkspace, workspaceIdentity } from '../kernel/workspace.js';
 import { createDecisionChain } from '../kernel/policy.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
@@ -843,9 +843,14 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       switch (message.method) {
         case 'session.create': {
           const id = randomUUID();
+          const origin = message.params.workspaceOrigin;
+          // 来源由客户端说：桌面可能指名一份目录而那一份正是它的默认工作区，指没指名推不出这一层意思（方案 5.5.3）。
+          if (origin !== undefined && origin !== 'explicit' && origin !== 'default') {
+            throw new KernelError('workspace_origin_unknown', { detail: `${origin}; the call takes 'explicit' or 'default', or nothing at all` });
+          }
           const env = await environmentFor(message.params.projectRoot);
           const created = await buildSession(id, connection, false, undefined, env,
-            message.params.projectRoot === undefined ? 'default' : 'explicit');
+            origin ?? (message.params.projectRoot === undefined ? 'default' : 'explicit'));
           await noteWorkspace(env);
           return created;
         }
@@ -1066,6 +1071,17 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
             // 没写窗口时整格是 null，画面上那一段就不出现——那不是「还没压到」，是「线还没定」。
             usage: state.compaction === null ? null : await state.compaction.context(),
           };
+        }
+        case 'workspaces.list':
+          // 那份登记才是持久清单，侧栏只是它的一个读者（方案 5.5.1）：界面收起、窗口关掉都不减一条。
+          // 交回整份对象，`default` 那一格跟着走——界面要点出「默认」那一枚标签，得有身份值可比。
+          return await readRegistry();
+        case 'workspace.default.set': {
+          // 空的是退掉默认，不需要那一条路真的存在；指了名的先分一次类，不存在、不是目录、读不动各给一个稳定码（方案 2A）。
+          const directory = String(message.params.directory).trim();
+          if (directory === '') return await setDefaultWorkspace(null);
+          await classifyProjectRoot(resolve(directory));
+          return await setDefaultWorkspace(directory, { name: message.params.name });
         }
         case 'config.get': {
           // 边界在「结果由固定那几格拼出来」这一句上，不在参数校验上：子集校验放过模式里没声明的键（D14）。

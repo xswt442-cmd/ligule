@@ -15,6 +15,9 @@ export const METHODS = Object.freeze({
       type: 'object',
       properties: {
         projectRoot: { type: 'string', description: 'start this session against another project the Host can load' },
+        // 一份会话落在哪一具工作区由客户端说：桌面可能指名一份目录，而那一份正是它的默认工作区，
+        // 「有没有指名」推不出这一层意思（方案 5.5.3）。不写这一格时宿主按指没指名定：指了是 explicit，没指是 default。
+        workspaceOrigin: { type: 'string', description: "how this session landed on that workspace: 'explicit' when the client chose it, 'default' when it is the one the client falls back to" },
       },
       description: 'a session starts on the project the Host was launched on; naming another project is optional',
     },
@@ -147,6 +150,23 @@ export const METHODS = Object.freeze({
   'status.get': {
     description: 'Read what the Host currently holds for this session',
     parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
+  },
+  // 工作区那份持久登记的读与写（方案 5.5.1、5.5.2、5.5.3）：清单与默认选择都在应用数据根里，
+  // 界面上那一栏只是读者，收起或列不出来都不改这份文件。写那一头只有默认选择一件，登记本身由建会话那两处做。
+  'workspaces.list': {
+    description: 'Read the durable workspace roster and its default selection from the application data root; the interface list is a reader of it, so a workspace a person stopped watching is still here',
+    parameters: { type: 'object', properties: {} },
+  },
+  'workspace.default.set': {
+    description: 'Name the workspace new sessions fall back to; the directory is registered first so the default always points at a row that exists, and an empty directory clears the default',
+    parameters: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: 'the workspace to make default; blank means no workspace is the default' },
+        name: { type: 'string', description: 'the label to show for it; absent keeps the last segment of the directory' },
+      },
+      required: ['directory'],
+    },
   },
   // 第四条只为界面多出来的方法（前三条是 `mode.set` D65、`session.compact` D83、`sessions.list`）：配置在宿主那一侧，
   // 而这条路只交得出白名单里的几格——没有参数可点路径，所以界面要不到别的格。
