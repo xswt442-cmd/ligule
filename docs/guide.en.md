@@ -248,7 +248,7 @@ Three different effective times: the level and the rule table act on the followi
 
 `/branch` without a number copies up to wherever the log has fallen; with a number it copies up to the entry where that round finished normally, and `/show <n>` reads that entry. The original log is not changed by one character. A dispatch the previous session never received is not replayed: the first time you open the new session it is filled in as "outcome unknown". A branch does not create another workspace — a branch in the same project writes the same files.
 
-Export reads the full log, fills in the content spilled into files, and does layout and writing on the host side; every derived branch writes its own file in the same directory. The dialog returning a path does not mean the file was written: that panel states the paths the host returned, and when a branch cannot be read back it names the code for that one.
+Export reads the full log, fills in the content spilled into files, and does layout and writing on the host side; every derived branch writes its own file in the same directory. The dialog returning a path does not mean the file was written: that panel states the paths the host returned, and when a branch cannot be read back, or the file name it computes already holds something (that one is left alone), it names that branch's code or path.
 
 Interrupting a running round takes the whole child-process tree of the command with it. When the host is killed hard or crashes it cannot: that call's result is recorded as `tool_outcome_unknown` on recovery, and both the UI and the model see the same sentence — "unknown whether it happened".
 
