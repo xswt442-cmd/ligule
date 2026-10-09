@@ -14,7 +14,8 @@ import { titleEscape } from './output.js';
 
 export async function runTui({ config, provider, policy, logger, modeName, modePaths, extensions, stdout = process.stdout, stdin = process.stdin, stderr = process.stderr, editor = process.env.VISUAL || process.env.EDITOR, historyFile = historyPathOf(), inputFile = inputPathOf(), keyFile = keyPathOf() }) {
   const pair = createMemoryConnectionPair();
-  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy, logger, modeName, modePaths, extensions });
+  // 终端界面答得了提问：这一路进来的时候 stdin 与 stdout 都已经是真终端（`ligule tui` 在没有终端时就停了）。
+  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy, logger, modeName, modePaths, extensions, interactive: true });
   const client = createConnection(pair.client);
   try {
     const { sessionId } = await client.request('session.create', {});

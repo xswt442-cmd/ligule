@@ -15,6 +15,9 @@ export const DEFAULT_THRESHOLDS = Object.freeze({ consecutive: 3, total: 20 });
 // 判定结果里进记录的那几格（D77）：内核按这一张表抄出去，链子以后多出来的字段不会悄悄进记录。
 export const VERDICT_FIELDS = Object.freeze(['capability', 'decision', 'via', 'level', 'forced', 'rule', 'answer']);
 
+// 不进档位判定那一格的两个名字（D107）：向人提问不是一件需要批准的操作，它自己带一次请求与一次答复。
+const UNASKED = new Set(['ask_user_question']);
+
 // 自动档里不能直接放行的脚本解释器：一次调用能跑任意代码，内容级检查管不到参数。
 const INTERPRETERS = [
   'bash', 'sh', 'zsh', 'dash', 'fish', 'pwsh', 'powershell', 'cmd',
@@ -131,6 +134,13 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       // 判定看的能力名由工具自己声明（D52）：`mcp.call` 的一次调用真正用的是 `mcp:<服务器>/<工具>`，
       // 规则表、守卫与问出去的那一句都按这个名字走，登记表里的名字只用于找到这件工具。
       const named = capability ?? tool;
+      // 提问那一件不进这条链（D107）：审批问的是「能不能做这一件操作」，它问的是「这一件事该怎么办」。
+      // 让档位决定「能不能向人问一句」会把两条链叠成一次审批提示；这个名字不写成规则表里的一格，
+      // 因为它是这条链自己的一步，不是用户可以调的放行。
+      if (capability === undefined && UNASKED.has(named)) {
+        return { decision: 'allow', via: 'unasked', capability: named, level: current, ...(forcedToAsk ? { forced: true } : {}) };
+      }
+
       const command = commandOf(input);
       const effective = forcedToAsk ? 'ask' : current;
       // 判定这一格要说清当时生效的是哪一份档位：配置写的是 `current`，被拒绝阈值压下来是另一回事（D77）。

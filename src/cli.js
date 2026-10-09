@@ -194,7 +194,7 @@ async function runOneRound(config, selection, extensions, text, sessionId) {
   const approvals = terminalApprovals();
   const connection = {
     notify: printNotification,
-    // 协议里 Host 只发出这一种请求：一次询问，答允许或不允许。
+    // 这一路答得了的请求只有审批那一种：一次询问，答允许或不允许。模型的提问不在这一路装载，纯命令行的下一次调用没人替它答（D107）。
     request: async (method, params) => {
       const described = params.command ?? JSON.stringify(params.args);
       // 命令文本后面说清是哪一种语法、哪一个可执行文件（D59）：同一条文本在两种语法下要问不该问是两回事。
@@ -372,6 +372,8 @@ if (missingFlagValue) {
       policy: config.policy,
       extensions,
       loadEnvironment: projectEnvironment,
+      // 桌面壳那一侧答得了模型的提问，也答得了审批：这一进程只由壳或脚本起，客户端在界面的另一头（D107）。
+      interactive: true,
       // 装载那一次读到的四层交进宿主，可写那两层的存储由宿主按项目环境各建一份：设置那一栏说的是
       // 「哪一个项目的哪一层文件」，读与写都落在它自己身上（方案 3.2、审阅 F3）。
       // 路径与文件名在这里算，宿主说不出也换不到（方案 7.2）：它只认层名、白名单字段与读回的那一份版本。

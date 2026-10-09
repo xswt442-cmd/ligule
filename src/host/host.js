@@ -32,12 +32,13 @@ import { networkPlugin } from '../tools/network.js';
 import { createSkillPlugin } from '../tools/skill.js';
 import { createMcpPlugin } from '../tools/mcp.js';
 import { createSubagentPlugin } from '../tools/subagent.js';
+import { createAskUserPlugin } from '../tools/ask-user.js';
 import { createMcpRegistry, mcpServerConfigs } from '../capability/mcp.js';
 import { createMessagesProvider } from '../model/messages.js';
 import { createChatCompletionsProvider } from '../model/chat-completions.js';
 import { DEFAULT_RETRY } from '../model/http.js';
 import { createConnection } from './connection.js';
-import { APPROVAL_METHOD, isApproved, validateCall } from './protocol.js';
+import { APPROVAL_METHOD, QUESTION_METHOD, isApproved, validateCall } from './protocol.js';
 
 // 会话名字的上限：列表那一行还要放得下时间与条数，名字过长就该换一份短的（实现顺序第 75 步）。
 export const SESSION_NAME_MAX = 120;
@@ -192,7 +193,7 @@ export function shownConfigOf(config) {
 // modeName 与 modePaths 是一对：给了名字就要能给那三层目录，运行中换模式要用同一套查找（D41、D44）。
 // 扩展来源由装载侧算好交进来（D68：项目层与本地层里写的路径不算）：paths 是要加载的文件，
 // ignored 是那些被这条规则挡掉的路径，它们进日志而不是静默消失。
-export function createHost({ config, provider, plugins = [minimalPlugin, networkPlugin], policy, logger, modeName, modePaths, skillRegistry, templateRegistry, extensions = { paths: [], ignored: [] }, loadEnvironment, configStore, configLayers, configStoreFor, deriveProvider = providerFromConfig }) {
+export function createHost({ config, provider, plugins = [minimalPlugin, networkPlugin], policy, logger, modeName, modePaths, skillRegistry, templateRegistry, extensions = { paths: [], ignored: [] }, loadEnvironment, configStore, configLayers, configStoreFor, deriveProvider = providerFromConfig, interactive = false }) {
   // 一份项目环境：这个项目自己的配置快照、提供方、判定档位、模式目录、记录目录与那两格可写的配置文件（方案 3.1 与 3.2）。
   // 校验在装载这一刻做完：一条坏配置不该等到模型第一次调用才炸（D60）。
   // 边界是工具读写的位置，也是指令文件上溯的止点，两边都读它，缺一处就说缺一处。
@@ -607,7 +608,37 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     // 判定链沿用这一条实例，静态前缀沿用这一份（同一串字节让端点的缓存对派生体也成立，D9）。
     // 提供方直接用未装饰的那一份：派生体的流式事件不往客户端转，那一段的进度在它自己的记录里（与 pi 的差别记在 D71）。
     const basePlugins = [...loaded, createMcpPlugin(mcp)];
-    const assembly = loadAssembly(kernel, [...basePlugins, createSubagentPlugin({
+    // 提问那一件只挂在父会话上（D107、方案 4.4）：派生支线没有能答复的人，那一条链走不到客户端的界面上。
+    // 它不进上面那条判定链：审批问的是能不能做这一件操作，提问问的是这一件事该怎么办，两件事各问各的。
+    // 客户端不声明支持交互时装都不装——命令行那一路问出去没人能答，模型看见一件用不了的工具比看不见更糟。
+    const asked = interactive === false ? [] : [createAskUserPlugin({
+      ask: async (questions) => {
+        let settle;
+        const cancelled = new Promise((resolve) => {
+          settle = () => resolve('cancelled');
+        });
+        state.asks.add(settle);
+        try {
+          const outcome = await Promise.race([
+            // 不设等待上限：等人回答不是失败。取消由这一发的 signal 那侧收，请求身份就是那一帧的 id。
+            connection.request(QUESTION_METHOD, { sessionId: id, projectRoot: config.boundary, questions }),
+            cancelled,
+          ]);
+          if (outcome === 'cancelled') {
+            throw new KernelError('ask_user_cancelled', { detail: `${id}: the round was cancelled while the question waited for an answer` });
+          }
+          return outcome;
+        } catch (error) {
+          if (error instanceof KernelError) throw error;
+          // 客户端把答复写成一次失败，或者那条通道本身断了：这里没有可以替人答的值，说清是哪一种。
+          logger?.log?.('ask user request failed', { sessionId: id, code: error.code, reason: error.detail ?? String(error.message ?? error) });
+          throw new KernelError('ask_user_host_gone', { detail: `${id}: ${String(error.message ?? error)}` });
+        } finally {
+          state.asks.delete(settle);
+        }
+      },
+    })];
+    const assembly = loadAssembly(kernel, [...basePlugins, ...asked, createSubagentPlugin({
       config,
       provider: live,
       chain,

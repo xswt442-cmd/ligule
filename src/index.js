@@ -49,7 +49,7 @@ export { createCompaction, cutPoint, estimateTokens } from './session/compaction
 export { summarizeVerdicts, formatVerdicts } from './session/verdicts.js';
 export { createLoop, DEFAULT_LOOP_LIMITS } from './kernel/loop.js';
 export {
-  METHODS, APPROVAL_METHOD, NOTIFICATIONS, validateCall, isApproved,
+  METHODS, APPROVAL_METHOD, QUESTION_METHOD, NOTIFICATIONS, validateCall, isApproved,
 } from './host/protocol.js';
 export { createConnection } from './host/connection.js';
 export { createMemoryConnectionPair } from './host/memory.js';
