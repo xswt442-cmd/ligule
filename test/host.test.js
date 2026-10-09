@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -15,6 +15,7 @@ import { shownConfigOf } from '../dist/host/host.js';
 import { createConfigStore } from '../dist/kernel/config-store.js';
 import { configVersion } from '../dist/kernel/config-edit.js';
 import { listProjectFiles } from '../dist/host/paths.js';
+import { listenFetchable } from './helpers/port.js';
 
 const CLI = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
 
@@ -46,9 +47,9 @@ async function withEndpoint(run) {
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.end(events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''));
   });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = await listenFetchable(server);
   try {
-    return await run(`http://127.0.0.1:${server.address().port}`, requests);
+    return await run(`http://127.0.0.1:${port}`, requests);
   } finally {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
@@ -711,7 +712,7 @@ test('config.get shows the endpoint block and nothing else from the snapshot', a
     );
     const frame = JSON.stringify(shown);
     assert.ok(!frame.includes(directory), '边界那一个目录不进帧：那是这台机器上的位置');
-    assert.ok(!frame.includes('auto'), '判定档位不在这一条里读，它走 status.get（D40）');
+    assert.ok(!frame.includes('auto'), '这一具宿主没有配置文件的读写口，档位读不出来那一格就不出现：正在生效的那一份走 status.get（D40）');
     // 这条路不收参数：多写的那一格不会被读，也换不来白名单之外的一格。
     // 边界不在参数校验上（子集校验放过模式里没声明的键），在结果由固定四格拼出来那一句上。
     assert.deepEqual(Object.keys(await connection.request('config.get', { path: 'policy.mode' })).sort(), ['layers', 'model', 'sources']);
@@ -808,6 +809,43 @@ test('config.set writes one whitelisted field and reports a concurrent edit inst
         (error) => error.code === 'config_field_value',
       );
       assert.equal(await readFile(userFile, 'utf8'), kept, '被拒的那几次都没碰那份文件');
+    }, undefined, { configStore: store });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// 方案 3A：设置那一栏的值、来源与那一份版本出自同一遍读取，读的是可写那两层文件此刻的内容。
+// 打开这一栏是一次纯读：正在跑的会话用的那一份提供方、档位与规则都不动。
+test('the settings panel reads value, source and version in one pass and changes nothing in effect', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-one-read-'));
+  const home = join(root, 'home');
+  const userFile = join(home, '.ligule', 'config.toml');
+  await mkdir(dirname(userFile), { recursive: true });
+  await writeFile(userFile, '[model]\nmodel = "文件里那一份"\n', 'utf8');
+  const store = createConfigStore({ projectRoot: root, userHome: home, layers: { user: { model: { model: '装载时那一份' } } } });
+  try {
+    await withInProcessHost(async (connection) => {
+      const { sessionId } = await connection.request('session.create', {});
+      const before = await connection.request('status.get', { sessionId });
+      const shown = await connection.request('config.get', {});
+      assert.equal(shown.model.model, '文件里那一份', '屏幕上那一份是文件此刻的内容，不是装载那一次的快照');
+      assert.equal(shown.sources['model.model'], 'user');
+      assert.equal(shown.layers[0].version, configVersion(await readFile(userFile, 'utf8')), '那一份版本与那一个值出自同一遍读取');
+      assert.equal(shown.policyMode, undefined, '四层里没写档位时那一格是空的，界面不替配置文件猜一档');
+      assert.equal(shown.sources['policy.mode'], 'none');
+      const after = await connection.request('status.get', { sessionId });
+      assert.equal(after.model, before.model, '读一遍设置不改这一份会话正在用的那一份模型');
+      assert.equal(after.policy, before.policy, '也不改正在生效的那一档');
+
+      // 别的过程或人自己开的编辑器在这之后改了那一份文件：下一次读，值、来源与版本一起跟着换成新的那一份。
+      await writeFile(userFile, '[model]\nmodel = "别人写的"\n[policy]\nmode = "auto"\n', 'utf8');
+      const again = await connection.request('config.get', {});
+      assert.equal(again.model.model, '别人写的');
+      assert.equal(again.policyMode, 'auto', '文件里写着的默认档现在读得出来');
+      assert.equal(again.sources['policy.mode'], 'user');
+      assert.equal(again.layers[0].version, configVersion(await readFile(userFile, 'utf8')));
+      assert.equal((await connection.request('status.get', { sessionId })).policy, before.policy, '正在生效的那一份还是装载时的：外部改文件不走过这一具宿主的写入那一路');
     }, undefined, { configStore: store });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -930,6 +968,7 @@ test('a saved generation choice lands now on an idle session and at the round ed
   }
 });
 // 那一个项目的记录目录里，那一个项目的列表才列得出它。装载不出别的项目环境的宿主直接说不支持。
+// 项目根自己不存在、是文件、读不动各给一个稳定码；有效项目没有记录目录时交回空列表（方案 2A）。
 test('one host keeps two projects apart, and a host without a loader says so', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ligule-projects-'));
   const first = join(root, 'first');
@@ -969,6 +1008,9 @@ test('one host keeps two projects apart, and a host without a loader says so', a
     const listedThere = await client.request('sessions.list', { projectRoot: second });
     assert.ok(listedThere.sessions.some((item) => item.id === inSecond.sessionId), '指名那个项目才列得出它');
 
+    // 接开已经在这具宿主里的那一份不用再指名项目：它读自己那一份项目环境（桌面对刚在别项目录里建好的那一份只带编号去接那一条路）。
+    assert.deepEqual(await client.request('session.open', { sessionId: inSecond.sessionId }), { sessionId: inSecond.sessionId });
+
     // 两个项目各开一份会话，交错跑一轮：各自的记录进各自的目录，互不串。
     const inFirst = await client.request('session.create', {});
     await client.request('run.start', { sessionId: inFirst.sessionId, input: '第一轮' });
@@ -986,6 +1028,37 @@ test('one host keeps two projects apart, and a host without a loader says so', a
       (error) => error.code === 'host_project_root_unsupported',
       '装载侧没给那条路时说出来，不用当前这一份项目环境去读别的项目',
     );
+
+    // 项目根自己那三种情形各给一个稳定码（方案 2A）：不存在、是文件、以及有效但还没有记录目录。
+    await assert.rejects(
+      client.request('sessions.list', { projectRoot: join(root, 'never-created') }),
+      (error) => error.code === 'host_project_root_missing',
+      '这一条路不存在说出来，不把它当成一份没有会话的项目',
+    );
+    // 开会话也走同一处分类：拒绝发生在装载之前，记录那一路的建目录（`src/session/session.js`）就不会把拼错的那一条路建出来。
+    await assert.rejects(
+      client.request('session.create', { projectRoot: join(root, 'never-created') }),
+      (error) => error.code === 'host_project_root_missing',
+      '拼错的项目根开不成会话',
+    );
+    assert.equal(await stat(join(root, 'never-created')).then(() => 'created', (error) => error.code), 'ENOENT',
+      '被拒绝的那一次没有留下任何目录');
+    await writeFile(join(root, 'a-file.txt'), 'x');
+    await assert.rejects(
+      client.request('sessions.list', { projectRoot: join(root, 'a-file.txt') }),
+      (error) => error.code === 'host_project_root_not_directory',
+      '那一条路是文件：说的不是「不存在」',
+    );
+    // 那一条路下面还有一段时，两边走的写法不同：Windows 上 `stat` 报 ENOENT，POSIX 上报 ENOTDIR（2026-10-08 在本机探针复测）。
+    // 两种都算「这一条路不是一个能打开的目录」，具体是哪一个由那台机器说。
+    const nested = await client.request('sessions.list', { projectRoot: join(root, 'a-file.txt', 'nested') })
+      .then(() => 'resolved', (error) => error.code);
+    assert.ok(nested === 'host_project_root_missing' || nested === 'host_project_root_not_directory',
+      `路上有一段是文件时要说出来，实际是 ${nested}`);
+    const empty = join(root, 'third');
+    await mkdir(empty, { recursive: true });
+    assert.deepEqual((await client.request('sessions.list', { projectRoot: empty })).sessions, [],
+      '有效项目还没跑过任何一轮时交回空列表：记录目录不存在不是错误（参照 E09）');
   } finally {
     pair.client.output.end();
     bare.client.output.end();
@@ -1204,7 +1277,7 @@ test('a file listing that ran out of its budget says so instead of finding nothi
     for (const name of ['a.md', 'b.md', 'c.md', 'd.md']) await writeFile(join(directory, name), 'x');
     const partial = await listProjectFiles(directory, 'zzz', 20, 2);
     assert.equal(partial.visited, 2, '翻到那一个上限就停手');
-    assert.equal(partial.stopped, 'budget', '一条没找到也要说这份清单不一定全：人据此改字重问，而不是以为项目里没有');
+    assert.equal(partial.stopped, 'budget', '一条没找到也要说这份清单不一定全：人据此改字重问，不会把没翻完当成项目里没有');
     const complete = await listProjectFiles(directory, 'zzz', 20, 99);
     assert.deepEqual(complete.paths, [], '整棵翻完时才说没有对得上的');
     assert.equal(complete.stopped, '', '整棵翻完时不说「可能没找全」');

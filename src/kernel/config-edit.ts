@@ -3,7 +3,8 @@
 // 而这三样正是要保住的东西。这一条在原文里定位那一个值的跨度，只换它，行尾的注释留在原地；
 // 换完整份读回来核对目标键等于要写的值，对不上就不落盘。
 // 认的形状是「[表] 头之下的一条 `键 = 值`」、「顶层那一条 `表.键 = 值`」，以及数组表 `[[policy.rules]]` 的整块增删改。
-// 多行字符串、内联表与嵌套表仍不认，撞上就报 `config_edit_shape_unsupported` 且一个字都不写。
+// 键名与表名两侧的空白、带引号的写法都按 TOML 允许的形状认下来；多行字符串的那几行正文不当成键行或表头。
+// 要换的那一个值是数组、内联表或多行字符串时，报 `config_edit_shape_unsupported` 并说出是哪一种形状，一个字都不写。
 import { createHash } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
@@ -81,7 +82,10 @@ export function encodeValue(field: EditableField, value: unknown): { literal: st
   return { literal: JSON.stringify(text), value: text };
 }
 
-type Line = { body: string; eol: string };
+// hidden：这一行还是一段多行字符串的正文。pending：这一行读完时那一段还没有闭下来，下一行仍在正文里。
+type Line = { body: string; eol: string; hidden: boolean; pending: boolean };
+
+const makeLine = (body: string, eol: string): Line => ({ body, eol, hidden: false, pending: false });
 
 // 按行切开且把每一行的换行形状记下来：混着 CRLF 与 LF 的那一份文件接回去还是原来那一份。
 function splitLines(text: string): Line[] {
@@ -90,25 +94,125 @@ function splitLines(text: string): Line[] {
   for (;;) {
     const next = text.indexOf('\n', start);
     if (next === -1) {
-      lines.push({ body: text.endsWith('\r') ? text.slice(start, -1) : text.slice(start), eol: '' });
-      return lines;
+      lines.push(makeLine(text.endsWith('\r') ? text.slice(start, -1) : text.slice(start), ''));
+      return markRegions(lines);
     }
     const crlf = text[next - 1] === '\r';
-    lines.push({ body: text.slice(start, crlf ? next - 1 : next), eol: crlf ? '\r\n' : '\n' });
+    lines.push(makeLine(text.slice(start, crlf ? next - 1 : next), crlf ? '\r\n' : '\n'));
     start = next + 1;
   }
 }
 
-const joined = (lines: Line[]): string => lines.map((line) => line.body + line.eol).join('');
-
-function headerOf(body: string): string | null {
-  // 数组表（`[[x]]`）也算一段的边界：交回一个空串，它永远不等于一个表名，但会切断上面那一段。
-  if (/^[ \t]*\[\[/.test(body)) return '';
-  const match = /^[ \t]*\[([^\s[\]]+)\][ \t]*(#.*)?$/.exec(body);
-  return match === null ? null : match[1];
+// 标出一段多行字符串（`"""` 或 `'''`）正文占的那些行：那几行里看着像键行、表头与注释的东西都还只是正文。
+// 一行之内已经闭上的普通串整段跳过，所以里面的三引号形状不会被当成一段的开头。
+// 不认的只有「值以引号收尾」那一种写法（`about = """"x""""`）：四连引数在这里只算一段的结束加一次重新开始。
+// 认错了的走向是拒写而不是写错——版本比对、读回核对与落盘在同一次持锁里兜着（见 writeConfigField）。上限：换成完整的字符串词法。
+function markRegions(lines: Line[]): Line[] {
+  let open: string | null = null;
+  for (const line of lines) {
+    const body = line.body;
+    line.hidden = open !== null;
+    let at = 0;
+    while (at < body.length) {
+      if (open !== null) {
+        if (open === '"""' && body[at] === '\\') {
+          at += 2;
+          continue;
+        }
+        if (body.startsWith(open, at)) {
+          at += 3;
+          open = null;
+          continue;
+        }
+        at += 1;
+        continue;
+      }
+      const char = body[at];
+      if (char === '#') break;
+      if (body.startsWith('"""', at) || body.startsWith("'''", at)) {
+        open = body.slice(at, at + 3);
+        at += 3;
+        continue;
+      }
+      at = char === '"' || char === "'" ? closeQuote(body, at) : at + 1;
+    }
+    line.pending = open !== null;
+  }
+  return lines;
 }
 
-// 等号右边那一段：交回到注释或行尾之前那一个跨度。数组、内联表、没在本行闭上的引号都认不下来。
+// 本行里那一根引号的另一头：基本串按反斜杠转义，字面串里反斜杠不算。整行都找不到就走到行尾（那一份文件读不回 TOML）。
+function closeQuote(body: string, from: number): number {
+  const quote = body[from];
+  for (let at = from + 1; at < body.length; at += 1) {
+    if (quote === '"' && body[at] === '\\') at += 1;
+    else if (body[at] === quote) return at + 1;
+  }
+  return body.length;
+}
+
+const joined = (lines: Line[]): string => lines.map((line) => line.body + line.eol).join('');
+
+// 一段键名：裸键（TOML 的裸键不含点号）、基本串键、字面串键。基本串里带反斜杠的那种认不下来，
+// 那一行不当成键行，要写的值补成一条重复键，读回核对处拒掉。
+const KEY_SEGMENT = String.raw`[A-Za-z0-9_-]+|"[^"\\]*"|'[^']*'`;
+const SEGMENT_START = new RegExp(`^(${KEY_SEGMENT})`);
+const PATH_START = new RegExp(`^[ \\t]*((?:${KEY_SEGMENT})(?:[ \\t]*\\.[ \\t]*(?:${KEY_SEGMENT}))*)[ \\t]*`);
+const SEPARATOR = /^[ \t]*\.[ \t]*/;
+
+const unquote = (text: string): string => (text[0] === '"' || text[0] === "'" ? text.slice(1, -1) : text);
+
+// 点号把几段连成一条路径；引号里的点号属于那一段键名，不是分隔。
+function splitKeyParts(text: string): string[] | null {
+  const parts: string[] = [];
+  let at = 0;
+  for (;;) {
+    const match = SEGMENT_START.exec(text.slice(at));
+    if (match === null) return null;
+    parts.push(unquote(match[1]));
+    at += match[1].length;
+    const rest = text.slice(at);
+    if (rest === '') return parts;
+    const separator = SEPARATOR.exec(rest);
+    if (separator === null) return null;
+    at += separator[0].length;
+  }
+}
+
+/** 一行表头：`[[数组表]]` 交回空串（它永远不等于一个表名，但会切断上面那一段），`[表]` 交回那张表的名字。 */
+function headerOf(line: Line): string | null {
+  if (line.hidden) return null;
+  if (/^[ \t]*\[\[/.test(line.body)) return '';
+  const match = /^[ \t]*\[([^[\]]*)\][ \t]*(#.*)?$/.exec(line.body);
+  if (match === null) return null;
+  const parts = splitKeyParts(match[1].trim());
+  return parts === null ? null : parts.join('.');
+}
+
+/** 一段数组表头那张数组表的名字：`[[policy.rules]]` 交回 `policy.rules`，别的形状交回 null。 */
+function arrayHeaderOf(line: Line): string | null {
+  if (line.hidden) return null;
+  const match = /^[ \t]*\[\[([^\]]*)\]\][ \t]*(#.*)?$/.exec(line.body);
+  if (match === null) return null;
+  const parts = splitKeyParts(match[1].trim());
+  return parts === null ? null : parts.join('.');
+}
+
+const isComment = (line: Line): boolean => !line.hidden && line.body.trimStart().startsWith('#');
+
+/** 一行键值：交回那条键的路径与等号的位置。表头、注释、多行字符串的那几行正文与没有等号的行都交回 null。 */
+function keyOf(line: Line): { parts: string[]; equal: number } | null {
+  if (line.hidden || isComment(line)) return null;
+  const match = PATH_START.exec(line.body);
+  if (match === null || line.body[match[0].length] !== '=') return null;
+  const parts = splitKeyParts(match[1]);
+  return parts === null ? null : { parts, equal: match[0].length };
+}
+
+const samePath = (parts: readonly string[], wanted: readonly string[]): boolean =>
+  parts.length === wanted.length && wanted.every((part, index) => parts[index] === part);
+
+// 等号右边那一段：跨度到注释或行尾为止，两者本身都不含在内。数组、内联表、没在本行闭上的引号都认不下来。
 function valueSpan(body: string, from: number): number | null {
   let index = from;
   while (body[index] === ' ' || body[index] === '\t') index += 1;
@@ -138,14 +242,21 @@ function replaceValue(body: string, equal: number, literal: string): string | nu
   return `${body.slice(0, equal + 1)} ${literal}${body.slice(end)}`;
 }
 
-// 任意一条键行：补一行时要知道这一张表里最后那一条键落在哪儿。
-const KEY_ANY = /^[ \t]*[^ \t=#]+[ \t]*=/;
-
-function keyLine(body: string, key: string): { equal: number } | null {
-  if (body.trimStart().startsWith('#')) return null;
-  const match = /^[ \t]*([^ \t=#]+)[ \t]*=/.exec(body);
-  if (match === null || match[1] !== key) return null;
-  return { equal: body.indexOf('=', match[0].length - 1) };
+// 换不了的那一个值说出它是什么形状：这一条路只换得上本行闭得下来的那一个值。
+function refuseShape(body: string, equal: number, path: readonly string[]): never {
+  let at = equal + 1;
+  while (body[at] === ' ' || body[at] === '\t') at += 1;
+  const shape =
+    body.startsWith('"""', at) || body.startsWith("'''", at)
+      ? 'a multi-line string'
+      : body[at] === '['
+        ? 'an array'
+        : body[at] === '{'
+          ? 'an inline table'
+          : 'a value that does not close on this line';
+  throw new KernelError('config_edit_shape_unsupported', {
+    detail: `${path.join('.')} holds ${shape}; only a value that closes on its own line can be changed`,
+  });
 }
 
 /** 在原文里换掉那一个值：注释、其余键、键的顺序与每一行的换行形状都留着。键不存在时在那一张表里补一行。 */
@@ -153,40 +264,42 @@ export function editTomlValue(text: string, path: readonly [string, string], lit
   const [table, key] = path;
   const lines = splitLines(text);
   const eol = lines.find((line) => line.eol !== '')?.eol ?? '\n';
-  const first = lines.findIndex((line) => headerOf(line.body) !== null);
+  const first = lines.findIndex((line) => headerOf(line) !== null);
   // 顶层那一段（第一张表的头之前）写的 `表.键 = 值` 与表里那一条是同一件事。
   const scope = first === -1 ? lines.length : first;
   for (let index = 0; index < scope; index += 1) {
-    const found = keyLine(lines[index].body, `${table}.${key}`);
-    if (found === null) continue;
+    const found = keyOf(lines[index]);
+    if (found === null || !samePath(found.parts, [table, key])) continue;
     const replaced = replaceValue(lines[index].body, found.equal, literal);
-    if (replaced === null) throw new KernelError('config_edit_shape_unsupported', { detail: 'that value is not one line' });
+    if (replaced === null) refuseShape(lines[index].body, found.equal, [table, key]);
     lines[index].body = replaced;
     return { text: joined(lines), created: false };
   }
   if (first === -1) {
     return appendTable(lines, eol, table, key, literal);
   }
-  const block = lines.findIndex((line, index) => index >= first && headerOf(line.body) === table);
+  const block = lines.findIndex((line, index) => index >= first && headerOf(line) === table);
   if (block === -1) {
     return appendTable(lines, eol, table, key, literal);
   }
-  const until = lines.findIndex((line, index) => index > block && headerOf(line.body) !== null);
+  const until = lines.findIndex((line, index) => index > block && headerOf(line) !== null);
   const end = until === -1 ? lines.length : until;
   let last = block;
   for (let index = block + 1; index < end; index += 1) {
-    const found = keyLine(lines[index].body, key);
-    if (found === null) {
-      if (KEY_ANY.test(lines[index].body)) last = index;
+    const found = keyOf(lines[index]);
+    if (found === null) continue;
+    if (!samePath(found.parts, [key])) {
+      // 那一行把一段多行字符串打开了就还没写完：补的行落在它后面会掉进正文里，所以锚点只认已经写完的那一行。
+      if (!lines[index].pending) last = index;
       continue;
     }
     const replaced = replaceValue(lines[index].body, found.equal, literal);
-    if (replaced === null) throw new KernelError('config_edit_shape_unsupported', { detail: 'that value is not one line' });
+    if (replaced === null) refuseShape(lines[index].body, found.equal, [table, key]);
     lines[index].body = replaced;
     return { text: joined(lines), created: false };
   }
   // 补在这一张表已有那些键的后面：表头紧跟着一行注释时，那一行注释不该被插到中间去。
-  lines.splice(last + 1, 0, { body: `${key} = ${literal}`, eol });
+  lines.splice(last + 1, 0, makeLine(`${key} = ${literal}`, eol));
   return { text: joined(lines), created: true };
 }
 
@@ -195,25 +308,24 @@ function appendTable(lines: Line[], eol: string, table: string, key: string, lit
   // 先 `[[a.b]]` 再声明 `[a]` 不是合法形状，而且读的人也会以为这一行属于下面那一段。
   const anchor = arrayAnchorOf(lines, table);
   if (anchor !== -1) {
-    lines.splice(anchor, 0, { body: `[${table}]`, eol }, { body: `${key} = ${literal}`, eol }, { body: '', eol });
+    lines.splice(anchor, 0, makeLine(`[${table}]`, eol), makeLine(`${key} = ${literal}`, eol), makeLine('', eol));
     return { text: joined(lines), created: true };
   }
   const last = lines.at(-1)!;
   const base = last.body === '' && last.eol === '' ? lines.slice(0, -1) : lines;
-  const added = base.length === 0 ? [] : [{ body: '', eol }];
+  const added = base.length === 0 ? [] : [makeLine('', eol)];
   return {
-    text: joined([...base, ...added, { body: `[${table}]`, eol }, { body: `${key} = ${literal}`, eol }]),
+    text: joined([...base, ...added, makeLine(`[${table}]`, eol), makeLine(`${key} = ${literal}`, eol)]),
     created: true,
   };
 }
 
 // 那一张表的第一段数组表从哪里开始：贴着它头上那几行注释一起算作那一段的，不插到注释中间去。
 function arrayAnchorOf(lines: Line[], table: string): number {
-  const header = new RegExp(`^[ \\t]*\\[\\[\\s*${table}\\.[^\\]]*\\]\\]`);
-  const index = lines.findIndex((line) => header.test(line.body));
+  const index = lines.findIndex((line) => arrayHeaderOf(line)?.startsWith(`${table}.`) === true);
   if (index === -1) return -1;
   let from = index;
-  while (from > 0 && lines[from - 1].body.trimStart().startsWith('#')) from -= 1;
+  while (from > 0 && isComment(lines[from - 1])) from -= 1;
   return from;
 }
 
@@ -222,21 +334,18 @@ export function configVersion(text: string): string {
   return createHash('sha256').update(text).digest('hex');
 }
 
-export async function readConfigVersion(file: string): Promise<string> {
+/** 一份设置文件读一遍：版本与解析出来的那张表出自同一次读（方案 3A）。文件不在时版本是空串、表是空的。 */
+export async function readConfigLayer(file: string): Promise<{ version: string; table: Record<string, unknown> }> {
+  let text: string;
   try {
-    return configVersion((await readFile(resolve(file))).toString('utf8'));
+    text = (await readFile(resolve(file))).toString('utf8');
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return '';
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: '', table: {} };
     throw new KernelRuntimeError('config_file_read_failed', { cause: error, detail: file });
   }
-}
-
-/** 一份文件里写着的那张规则表：界面上的第几条指的是这一份，不是折完那一份。 */
-export async function readConfigRules(file: string): Promise<PolicyRule[]> {
   try {
-    return rulesOfLayer(parse((await readFile(resolve(file))).toString('utf8')) as Record<string, unknown>);
+    return { version: configVersion(text), table: parse(text) as Record<string, unknown> };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw new KernelRuntimeError('config_file_read_failed', { cause: error, detail: file });
   }
 }
@@ -380,21 +489,16 @@ export function checkedRule(input: unknown): PolicyRule {
   };
 }
 
-const isRulesHeader = (body: string): boolean => /^[ \t]*\[\[\s*policy\.rules\s*\]\][ \t]*(#.*)?$/.test(body);
-
-function ruleName(body: string): string | null {
-  const match = /^[ \t]*([^ \t=#]+)[ \t]*=/.exec(body);
-  return match?.[1] ?? null;
-}
+const isRulesHeader = (line: Line): boolean => arrayHeaderOf(line) === 'policy.rules';
 
 // 一条数组表项占的行范围：从它的头到下一个任何表头之前，文件末尾也算一个边界。
 function ruleBlocks(lines: Line[]): { start: number; end: number }[] {
   const blocks: { start: number; end: number }[] = [];
   for (let index = 0; index < lines.length; index += 1) {
-    if (!isRulesHeader(lines[index].body)) continue;
+    if (!isRulesHeader(lines[index])) continue;
     let end = lines.length;
     for (let next = index + 1; next < lines.length; next += 1) {
-      if (headerOf(lines[next].body) !== null) {
+      if (headerOf(lines[next]) !== null) {
         end = next;
         break;
       }
@@ -406,10 +510,10 @@ function ruleBlocks(lines: Line[]): { start: number; end: number }[] {
 }
 
 function ruleLines(rule: PolicyRule, eol: string): Line[] {
-  const added: Line[] = [{ body: '[[policy.rules]]', eol }];
+  const added: Line[] = [makeLine('[[policy.rules]]', eol)];
   for (const key of RULE_FIELDS) {
     const value = rule[key];
-    if (value !== undefined) added.push({ body: `${key} = ${JSON.stringify(value)}`, eol });
+    if (value !== undefined) added.push(makeLine(`${key} = ${JSON.stringify(value)}`, eol));
   }
   return added;
 }
@@ -417,14 +521,21 @@ function ruleLines(rule: PolicyRule, eol: string): Line[] {
 // 注释说的是它下面那一段：追加要落在贴着下一个表头的注释之前，删除要把贴着自己头上的注释一起带走。
 function unattachedEnd(lines: Line[], block: { start: number; end: number }): number {
   let end = block.end;
-  while (end > block.start + 1 && lines[end - 1].body.trimStart().startsWith('#')) end -= 1;
+  while (end > block.start + 1 && isComment(lines[end - 1])) end -= 1;
   return end;
 }
 
 function attachedComment(lines: Line[], start: number): number {
   let from = start;
-  while (from > 0 && lines[from - 1].body.trimStart().startsWith('#')) from -= 1;
+  while (from > 0 && isComment(lines[from - 1])) from -= 1;
   return from;
+}
+
+// 一条语句占的那几行：本行打开一段多行字符串且没在本行闭下来时，那几行正文与闭上的那一行都跟着它一起算。
+function spanEndOf(lines: Line[], from: number, limit: number): number {
+  if (!lines[from].pending) return from + 1;
+  const closing = lines.findIndex((line, index) => index > from && index < limit && line.hidden && !line.pending);
+  return closing === -1 ? limit : closing + 1;
 }
 
 /** 在原文里对规则表做一次动作：新增一项、换掉那一项里的键、删掉那一项。表之外的字节一个不动。 */
@@ -438,7 +549,7 @@ export function editRuleTable(text: string, op: RuleOp, index: number, rule?: Po
     if (last === undefined) {
       if (text.trim() === '') return { text: joined(added), created: true };
       lines.at(-1)!.eol = eol;
-      lines.push({ body: '', eol }, ...added);
+      lines.push(makeLine('', eol), ...added);
       return { text: joined(lines), created: true };
     }
     lines.at(-1)!.eol = eol;
@@ -459,27 +570,30 @@ export function editRuleTable(text: string, op: RuleOp, index: number, rule?: Po
   const kept: Line[] = [];
   for (let cursor = block.start + 1; cursor < block.end; cursor += 1) {
     const line = lines[cursor];
-    const name = ruleName(line.body);
-    if (name === null || !(RULE_FIELDS as readonly string[]).includes(name)) {
-      kept.push(line);
+    const until = spanEndOf(lines, cursor, block.end);
+    const found = keyOf(line);
+    if (found === null || found.parts.length !== 1 || !(RULE_FIELDS as readonly string[]).includes(found.parts[0])) {
+      kept.push(...lines.slice(cursor, until));
+      cursor = until - 1;
       continue;
     }
+    const name = found.parts[0];
     seen.add(name);
     const value = (wanted as Record<string, string | undefined>)[name];
-    // 新规则里没有了的那一格（`match` 与 `reason` 都可以空着）删掉这一行，留着会读成旧值。
-    if (value === undefined) continue;
-    const found = keyLine(line.body, name);
-    if (found === null) {
-      kept.push(line);
+    // 新规则里没有了的那一格（`match` 与 `reason` 都可以空着）整条语句删掉，只删头一行会把正文丢在原地。
+    if (value === undefined) {
+      cursor = until - 1;
       continue;
     }
     const replaced = replaceValue(line.body, found.equal, JSON.stringify(value));
-    if (replaced === null) throw new KernelError('config_edit_shape_unsupported', { detail: `${name} is not one line` });
-    kept.push({ body: replaced, eol: line.eol });
+    if (replaced === null) refuseShape(line.body, found.equal, [name]);
+    kept.push(makeLine(replaced, line.eol));
+    cursor = until - 1;
   }
   const toAdd = RULE_FIELDS.filter((key) => wanted[key] !== undefined && !seen.has(key))
-    .map((key) => ({ body: `${key} = ${JSON.stringify(wanted[key])}`, eol }));
-  const after = kept.map((line) => KEY_ANY.test(line.body)).lastIndexOf(true);
+    .map((key) => makeLine(`${key} = ${JSON.stringify(wanted[key])}`, eol));
+  // 落在这一项已有那些键的后面：一段还没写完的多行字符串那一行不算锚点，补进去会掉进它的正文里。
+  const after = kept.map((line) => keyOf(line) !== null && !line.pending).lastIndexOf(true);
   kept.splice(after === -1 ? kept.length : after + 1, 0, ...toAdd);
   lines.splice(block.start + 1, block.end - block.start - 1, ...kept);
   return { text: joined(lines), created: false };

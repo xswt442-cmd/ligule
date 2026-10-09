@@ -5,6 +5,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { parse } from 'smol-toml';
+import lockfile from 'proper-lockfile';
 import {
   EDITABLE,
   checkedRule,
@@ -58,15 +59,47 @@ test('mixed line endings and a CRLF file keep the shape each line already had', 
   const crlf = apply('[model]\r\nmodel = "old"\r\n', 'model.model', 'new');
   assert.equal(crlf, '[model]\r\nmodel = "new"\r\n');
   assert.equal(parse(crlf).model.model, 'new');
+  // 同一份文件里 CRLF 与 LF 混着：改的那一行保住它自己那个换行，别的行一个字不变。
+  const mixed = apply('[model]\r\nmodel = "old"\napi = "messages"\r\n', 'model.model', 'new');
+  assert.equal(mixed, '[model]\r\nmodel = "new"\napi = "messages"\r\n');
+  assert.equal(parse(mixed).model.api, 'messages', '没编辑的那一行连它的换行都没动');
 });
 
-test('a value this route cannot read is refused without touching a byte', () => {
+test('a value this route cannot read is refused, and the shape is named', () => {
   const array = '[model]\nmodel = "a"\nrules = [\n  "one",\n]\n';
-  assert.throws(() => editTomlValue(array, ['model', 'rules'], '"x"'), (error) => error.code === 'config_edit_shape_unsupported');
+  assert.throws(() => editTomlValue(array, ['model', 'rules'], '"x"'), (error) => error.code === 'config_edit_shape_unsupported' && /an array/.test(error.detail));
   const multiline = '[model]\nabout = """\n两行\n"""\n';
-  assert.throws(() => editTomlValue(multiline, ['model', 'about'], '"x"'), (error) => error.code === 'config_edit_shape_unsupported');
+  assert.throws(() => editTomlValue(multiline, ['model', 'about'], '"x"'), (error) => error.code === 'config_edit_shape_unsupported' && /a multi-line string/.test(error.detail));
   const inline = '[model]\nextra = { api = "messages" }\n';
-  assert.throws(() => editTomlValue(inline, ['model', 'extra'], '"x"'), (error) => error.code === 'config_edit_shape_unsupported');
+  assert.throws(() => editTomlValue(inline, ['model', 'extra'], '"x"'), (error) => error.code === 'config_edit_shape_unsupported' && /an inline table/.test(error.detail));
+});
+
+// 多行字符串的那几行正文只是正文：里面长得像键行与表头的东西都不算结构，改的要落在表里那一条上。
+test('a multi-line string body is not read as a key line or a table header', () => {
+  const body = editTomlValue('[model]\nabout = """\nmodel = "正文里的这一行"\n"""\nmodel = "表里的那一条"\n', ['model', 'model'], '"新值"');
+  assert.equal(body.text, '[model]\nabout = """\nmodel = "正文里的这一行"\n"""\nmodel = "新值"\n');
+  assert.equal(parse(body.text).model.about, 'model = "正文里的这一行"\n', '那一段正文一个字没动');
+
+  const header = editTomlValue('[model]\nabout = """\n[limits]\nstill inside\n"""\nmodel = "old"\n', ['model', 'model'], '"new"');
+  assert.equal(parse(header.text).model.model, 'new');
+  assert.equal(parse(header.text).model.about, '[limits]\nstill inside\n', '那一段里的表头形状没有切断这一段');
+  assert.ok(header.text.includes('[limits]'), '那一句还留在正文里');
+
+  // 那一张表里根本没有这一条时，补的行落在写完的那一条键之后，不掉进还没闭下来的正文里。
+  const added = editTomlValue('[model]\nabout = """\n两行\n"""\n', ['model', 'model'], '"补的"');
+  assert.equal(added.text, '[model]\nmodel = "补的"\nabout = """\n两行\n"""\n');
+  assert.equal(parse(added.text).model.model, '补的');
+});
+
+// 键名与表名两侧的空白、带引号的写法都是合法 TOML：那一条就是要改的那一条，原写法保住。
+test('a quoted key and a spaced or quoted table header are the same key', () => {
+  assert.equal(editTomlValue('[model]\n"model" = "old"\n', ['model', 'model'], '"new"').text, '[model]\n"model" = "new"\n');
+  assert.equal(editTomlValue('[model]\n\'model\' = "old"\n', ['model', 'model'], '"new"').text, '[model]\n\'model\' = "new"\n');
+  assert.equal(parse(editTomlValue('["model"]\nmodel = "old"\n', ['model', 'model'], '"new"').text).model.model, 'new');
+  assert.equal(parse(editTomlValue('[ model ]\nmodel = "old"\n', ['model', 'model'], '"new"').text).model.model, 'new');
+  assert.equal(editTomlValue('[ model ]\nmodel = "old"\n', ['model', 'model'], '"new"').created, false, '那一张表已经在了，不是补一张新的');
+  // 顶层那一条点号键两侧的空格也一样认下来。
+  assert.equal(parse(editTomlValue('model . model = "old"\n', ['model', 'model'], '"new"').text).model.model, 'new');
 });
 
 test('a key with the same name in another table is not the one being changed', () => {
@@ -187,6 +220,27 @@ test('removing a rule takes the comment attached to it and leaves the one attach
   assert.ok(edited.text.includes('[limits]'), edited.text);
 });
 
+// 一条语句的多行正文跟着那一行键一起算：只删头一行会把正文丢在原地，那一份文件就读不回 TOML 了。
+test('a rule statement whose value is a multi-line string is dropped whole', () => {
+  const text = '[[policy.rules]]\ntool = "read"\nreason = """\ndecision = "deny"\n"""\n';
+  const edited = editRuleTable(text, 'update', 0, { tool: 'read', decision: 'allow' });
+  assert.equal(edited.text, '[[policy.rules]]\ntool = "read"\ndecision = "allow"\n');
+  assert.deepEqual(readRules(edited.text), [{ tool: 'read', decision: 'allow' }]);
+  // 反过来要把那一条正文换成一行值：这一条路只换得上本行闭得下来的值，报出形状且不落笔。
+  assert.throws(() => editRuleTable(text, 'update', 0, { tool: 'read', decision: 'allow', reason: '一句' }),
+    (error) => error.code === 'config_edit_shape_unsupported' && /a multi-line string/.test(error.detail));
+  // 宿主持有之外的键那一行也带着一段正文：整条留着，补的键落在它前面。
+  const owned = editRuleTable('[[policy.rules]]\ntool = "read"\ndecision = "allow"\nowner = """\n两句\n"""\n', 'update', 0, { tool: 'read', decision: 'allow', match: 'git *' });
+  assert.equal(owned.text, '[[policy.rules]]\ntool = "read"\ndecision = "allow"\nmatch = "git *"\nowner = """\n两句\n"""\n');
+  assert.equal(parse(owned.text).policy.rules[0].owner, '两句\n');
+});
+
+test('a key the host does not own inside a rule is left where it is', () => {
+  const edited = editRuleTable('[[policy.rules]]\ntool = "read"\ndecision = "allow"\nowner = "另一个人写的"\n', 'update', 0, { tool: 'read', decision: 'deny' });
+  assert.ok(edited.text.includes('owner = "另一个人写的"'), edited.text);
+  assert.deepEqual({ ...parse(edited.text).policy.rules[0] }, { tool: 'read', decision: 'deny', owner: '另一个人写的' });
+});
+
 // 那张表只以数组表存在时补的标量落在那几段之前：先 `[[a.b]]` 再声明 `[a]` 不是合法形状（第 121、122 步在真窗口里查出来的）。
 test('a scalar added while the table exists only as an array of tables lands above those blocks', () => {
   const edited = editTomlValue('[[policy.rules]]\ntool = "read"\ndecision = "allow"\n', ['policy', 'mode'], '"ask"');
@@ -244,6 +298,48 @@ test('the rule table writes through the same lock, version check and read-back',
     });
     assert.equal(removed.rules.length, 2);
     assert.deepEqual(removed.rules[0], { tool: 'exec', match: 'git status*', decision: 'allow', reason: '只读的那一条' });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+// 写法不同但都是合法 TOML 的那两份文件走同一条落盘路：引号键保住自己的引号，混着的换行保住每一行那一个。
+test('a quoted key lands in place through the write route', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'ligule-quoted-'));
+  const file = join(directory, 'config.toml');
+  const original = '[ model ]\n"model" = "gpt-4o" # 那一家的名字\napi = "messages"\r\napiKeyEnv = \'LIGULE_KEY\'\r\n';
+  try {
+    await writeFile(file, original, 'utf8');
+    const first = await writeConfigField(file, { field: 'model.model', value: '新模型名', version: configVersion(original) });
+    assert.equal(first.created, false, '那一张表已经在了');
+    assert.equal(first.version, configVersion(await readFile(file, 'utf8')));
+    const onDisk = await readFile(file, 'utf8');
+    assert.equal(onDisk, '[ model ]\n"model" = "新模型名" # 那一家的名字\napi = "messages"\r\napiKeyEnv = \'LIGULE_KEY\'\r\n');
+    assert.equal(parse(onDisk).model.api, 'messages', '没编辑的那几行连换行都没动');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+// 两份写入同时到达时后到那一份不排队也不覆盖：说出锁在那里，那一份文件一个字不动。
+test('a file another writer holds is refused while that lock is active', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'ligule-lock-'));
+  const file = join(directory, 'config.toml');
+  try {
+    await writeFile(file, SAMPLE, 'utf8');
+    const held = await lockfile.lock(file, { realpath: false, lockfilePath: `${file}.lock`, stale: 10_000, update: 2_000, retries: 0 });
+    try {
+      await assert.rejects(
+        () => writeConfigField(file, { field: 'model.model', value: '第二个写入者', version: configVersion(SAMPLE) }),
+        (error) => error.code === 'config_locked',
+      );
+      assert.equal(parse(await readFile(file, 'utf8')).model.model, 'gpt-4o', '锁在那里的那一次一个字都没写');
+    } finally {
+      await held();
+    }
+    const after = await writeConfigField(file, { field: 'model.model', value: '锁放了才写', version: configVersion(SAMPLE) });
+    assert.equal(after.created, false);
+    assert.equal(parse(await readFile(file, 'utf8')).model.model, '锁放了才写');
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

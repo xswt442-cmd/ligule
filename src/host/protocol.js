@@ -122,6 +122,16 @@ export const METHODS = Object.freeze({
       before: { type: 'integer', minimum: 1, description: 'read events older than this sequence number; it has to name an event in this record' },
     }, required: ['sessionId'] },
   },
+  // 第十二条只为界面多出来的方法：一份记录写成 markdown 并落到人选定的那个位置（方案 6A）。
+  // 读完整记录、补溢出正文、排版、写文件四件都在宿主这一侧，两个界共用这一条；界面只管由人选定目的地。
+  // 那一条路径出自人自己按下的保存对话框，不是模型工具的一次写出，所以不套项目边界；交回路径不等于写成。
+  'session.export': {
+    description: 'Write this session record, and each derived branch record, as Markdown files at the destination the human chose; returns the paths written and any branch it could not read',
+    parameters: { type: 'object', properties: {
+      sessionId: SESSION_ID,
+      path: { type: 'string', description: 'the file to write the main record to; branch records get a sibling file named after their own session id' },
+    }, required: ['sessionId', 'path'] },
+  },
   'run.start': {
     description: 'Send one user input through the loop; events arrive as notifications while it runs',
     parameters: {
@@ -141,7 +151,7 @@ export const METHODS = Object.freeze({
   // 第四条只为界面多出来的方法（前三条是 `mode.set` D65、`session.compact` D83、`sessions.list`）：配置在宿主那一侧，
   // 而这条路只交得出白名单里的几格——没有参数可点路径，所以界面要不到别的格。
   'config.get': {
-    description: 'Read the configuration this interface may show: the host builds the answer from four listed fields plus the version of each writable settings file, so no path can be asked for and no credential ever comes from configuration (D13, D60)',
+    description: 'Read the configuration this interface may show: the host builds the answer from the whitelisted fields it owns, and those values, the layer writing each one and the version of every writable settings file come from one read, so no path can be asked for and no credential ever comes from configuration (D13, D60)',
     parameters: { type: 'object', properties: {}, description: 'reading the shown configuration takes no argument' },
   },
   // 第十条只为界面多出来的方法：配置由宿主持有，界面说得出改哪一个白名单字段、写进哪一层，以及它读回的那一份版本；

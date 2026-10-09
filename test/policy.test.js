@@ -82,6 +82,17 @@ test('every segment of a pipeline has to be covered before an asked call is allo
   assert.equal(calls.length, 1, 'only the pipeline needed a decision');
   assert.equal(calls[0].command, 'git status | grep x');
   assert.equal(calls[0].reason, undefined);
+
+  // 几条放行规则各盖住一段不算盖住整条：判定要说得出命中了哪一条（D77），说不出来就问。
+  const second = asked(true);
+  const across = createDecisionChain({
+    rules: [{ tool: 'exec', decision: 'allow', match: 'git status' }, { tool: 'exec', decision: 'allow', match: 'grep x' }],
+    ask: second.ask,
+  });
+  const wide = await across.evaluate({ tool: 'exec', input: { command: 'git status | grep x' } });
+  assert.equal(wide.via, 'ask');
+  assert.equal(wide.decision, 'allow', '人点头之后才放行：这一条链上没有一条规则盖住两段');
+  assert.equal(second.calls.length, 1);
 });
 
 test('a deny rule catches a segment hidden behind a pipe', async () => {
@@ -129,6 +140,18 @@ test('a prefix rule matches whole arguments only, a wildcard rule matches across
   const wild = createDecisionChain({ rules: [{ tool: 'exec', decision: 'allow', match: 'git *' }], ask: asked().ask });
   assert.deepEqual(await judged(wild, { tool: 'exec', input: { command: 'git commit -m x' } }), { decision: 'allow', segments: ['git commit -m x'] });
   assert.equal((await wild.evaluate({ tool: 'exec', input: { command: 'github push' } })).code, 'ask_declined');
+});
+
+test('a rule with a pattern cannot cover a call that carries no command text', async () => {
+  // 匹配的是命令文本，参数里的路径不参与：读文件那一类调用没有命令文本，
+  // 填了字的规则对它是「比不了」而不是「比不过」，只有留空的那一条盖得住。
+  const { calls, ask } = asked(true);
+  const chain = createDecisionChain({ rules: [{ tool: 'read', decision: 'allow', match: 'src/' }], ask });
+  assert.equal((await chain.evaluate({ tool: 'read', input: { path: 'src/a.js' } })).answer, 'allow');
+  assert.deepEqual(calls.map((call) => call.input), [{ path: 'src/a.js' }], '问过人才放行：这一条规则没有盖住它');
+
+  const blank = createDecisionChain({ rules: [{ tool: 'read', decision: 'allow' }], ask: asked().ask });
+  assert.deepEqual(await judged(blank, { tool: 'read', input: { path: 'src/a.js' } }), { decision: 'allow' }, '留空的那一条盖住每一次调用');
 });
 
 test('consecutive denials fall back to asking every time', async () => {

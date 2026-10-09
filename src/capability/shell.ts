@@ -91,7 +91,7 @@ function powershellCandidates(platform: NodeJS.Platform): string[] {
 }
 
 // 交回这一具 Host 该用哪一个解释器。`auto` 在 Windows 上先看 PowerShell 再看 Git Bash，在别的平台上用 bash；
-// 显式写了哪一种就只要那一种——拿不到时报稳定码而不是悄悄换成另一份，因为换掉的那一种正是判定链读过的语法。
+// 显式写了哪一种就只要那一种——拿不到时报稳定码，不会另起一份解释器，因为换掉的那一种正是判定链读过的语法。
 export function resolveShell(
   config: { exec?: { shell?: unknown } },
   { platform = process.platform, environment = process.env, locateExecutable = locate }: ShellProbe = {},

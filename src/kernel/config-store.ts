@@ -6,8 +6,8 @@ import { configPaths } from './config-file.js';
 import {
   EDITABLE,
   editableField,
-  readConfigRules,
-  readConfigVersion,
+  readConfigLayer,
+  rulesOfLayer,
   writeConfigField,
   type PolicyRule,
   type WriteRequest,
@@ -19,7 +19,7 @@ const LAYERS = ['user', 'projectLocal'];
 const PRECEDENCE = ['flag', 'local', 'project', 'user'] as const;
 type Source = typeof PRECEDENCE[number] | 'none';
 
-/** 装载那一次读到的四层对象；写成功之后这一份跟着改，来源才不会停在启动那一刻。 */
+/** 装载那一次读到的四层对象。`read()` 每跑一次就把可写的那两层换成文件此刻的内容（方案 3A）。 */
 export type LoadedLayers = Partial<Record<(typeof PRECEDENCE)[number], Record<string, unknown>>>;
 
 const inLayer = (layer: Record<string, unknown> | undefined, path: readonly string[]): boolean => {
@@ -30,6 +30,10 @@ const inLayer = (layer: Record<string, unknown> | undefined, path: readonly stri
   }
   return true;
 };
+
+/** 那一条路径在那一层里写着的值；没写时是 undefined。 */
+const valueIn = (layer: Record<string, unknown> | undefined, path: readonly string[]): unknown =>
+  path.reduce<unknown>((node, part) => (node as Record<string, unknown>)[part], layer);
 
 // 规则表里的一条在画面上排第几，说的是那一张数组表的顺序：界面上「第 3 条」与文件里第三个 `[[policy.rules]]` 是同一件事。
 const RULES_FIELD = 'policy.rules';
@@ -43,9 +47,12 @@ export function createConfigStore({ projectRoot, userHome, layers = {} }: { proj
   };
   // 界面上那一个层名与装载侧那一份键的对应：`projectLocal` 写的就是 `local` 那一层。
   const keyOfLayer = (layer: string) => (layer === 'user' ? 'user' : 'local');
-  const sourceOf = (field: string): Source => {
-    const path = editableField(field).path;
-    return PRECEDENCE.find((layer) => inLayer(layers[layer], path)) ?? 'none';
+  const holderOf = (field: string) => PRECEDENCE.find((layer) => inLayer(layers[layer], editableField(field).path));
+  const sourceOf = (field: string): Source => holderOf(field) ?? 'none';
+  // 一条字段现在折出来的是哪一份值：从高到低那几层里第一个写着它的地方取。
+  const valueOf = (field: string): unknown => {
+    const layer = holderOf(field);
+    return layer === undefined ? undefined : valueIn(layers[layer], editableField(field).path);
   };
   // 折完那一张规则表：数组整份替换（D8 的合并语义），所以生效的那一份出自最高的那一层。
   const effectiveRules = (): PolicyRule[] => {
@@ -55,25 +62,42 @@ export function createConfigStore({ projectRoot, userHome, layers = {} }: { proj
     }
     return [];
   };
+  // 白名单里那几条标量字段（规则表是另一类，交回的是整张表）。
+  const scalarFields = Object.keys(EDITABLE).filter((field) => editableField(field).kind !== 'rules');
+  // 那几条标量折出来的一份值，按配置文件自己的形状分层：`{ model: { api, baseURL, model, apiKeyEnv }, policy: { mode } }`。
+  const foldValues = (): Record<string, Record<string, unknown>> => {
+    const values: Record<string, Record<string, unknown>> = {};
+    for (const field of scalarFields) {
+      const [table, key] = editableField(field).path;
+      (values[table] ??= {})[key] = valueOf(field);
+    }
+    return values;
+  };
   return {
-    // 每一层现在那一份文件的版本：界面读回来带着它，写的时候交回来核对。文件不在时版本是空串。
-    // 规则表那一格只有写着它的那一层才交回，别的层没有这一张表就是没有，不交回一份空数组让人以为被盖住了。
-    async list() {
-      return Promise.all(
+    // 设置那一栏要读的东西一次读齐（方案 3A）：可写的那两层各读一遍文件，界面上的值、每一条由哪一层写着、
+    // 生效的那张规则表与它的来源、以及写的时候要带回去的那一份版本，全部出自这一遍。
+    // 只读的那两层（项目共享与命令行）留在装载那一次读到的那一份上：这一栏改不了它们，
+    // 正在跑的这一份环境用的也是那一次读到的，说成文件此刻的内容反而对不上。
+    // 这一处只读不写：判定链、提供方与记录都不从这儿取东西，打开设置那一栏改不了正在执行的权限。
+    async read() {
+      const readLayers = await Promise.all(
         LAYERS.map(async (layer) => {
-          const version = await readConfigVersion(pathOf(layer));
-          const written = inLayer(layers[keyOfLayer(layer)], ['policy', 'rules']);
-          return { layer, version, exists: version !== '', ...(written ? { rules: await readConfigRules(pathOf(layer)) } : {}) };
+          const { version, table } = await readConfigLayer(pathOf(layer));
+          layers[keyOfLayer(layer)] = table;
+          // 规则表那一格只有写着它的那一层才交回：别的层没有这一张表就是没有，不交回一份空数组让人以为被盖住了。
+          const written = inLayer(table, ['policy', 'rules']);
+          return { layer, version, exists: version !== '', ...(written ? { rules: rulesOfLayer(table) } : {}) };
         }),
       );
-    },
-    // 白名单里每一条现在由哪一层写着（方案 7.1 的来源那一格）。`flag` 是命令行 `--config` 写的那一层，只读。
-    sources() {
-      return Object.fromEntries(Object.keys(EDITABLE).map((field) => [field, sourceOf(field)]));
-    },
-    // 现在生效的那一张规则表与它出自哪一层（方案 7.1 的三种读数）：界面上列规则、改规则都读这一份。
-    rules() {
-      return { rules: effectiveRules(), rulesSource: sourceOf(RULES_FIELD) };
+      return {
+        layers: readLayers,
+        // 白名单里每一条现在由哪一层写着（方案 7.1 的来源那一格）。`flag` 是命令行 `--config` 写的那一层，只读。
+        sources: Object.fromEntries(Object.keys(EDITABLE).map((field) => [field, sourceOf(field)])),
+        values: foldValues(),
+        // 现在生效的那一张规则表与它出自哪一层（方案 7.1 的三种读数）：界面上列规则、改规则都读这一份。
+        rules: effectiveRules(),
+        rulesSource: sourceOf(RULES_FIELD),
+      };
     },
     write(request: WriteRequest & { layer: string }) {
       const definition = editableField(request.field);
@@ -87,25 +111,13 @@ export function createConfigStore({ projectRoot, userHome, layers = {} }: { proj
           throw new KernelError('config_rules_elsewhere', { detail: `the rule table in effect is written by the ${source} layer, not ${request.layer}` });
         }
       }
-      return writeConfigField(file, request).then(async (written) => {
-        const holder = layers[keyOfLayer(request.layer)] ?? {};
-        const table = (holder[definition.path[0]] ?? {}) as Record<string, unknown>;
-        if (definition.kind === 'rules') {
-          // 读回来那一份才是事实：这一格存的是整张表，写哪一种动作之后表里有什么，按文件里现在的那些项记。
-          table[definition.path[1]] = written.rules ?? await readConfigRules(file);
-        } else {
-          table[definition.path[1]] = request.value;
-        }
-        holder[definition.path[0]] = table;
-        layers[keyOfLayer(request.layer)] = holder;
-        return {
-          ...written,
-          // 那一个字段落在提供方配置的哪一格上：宿主按这一格重算提供方，不必知道白名单的全表（方案 7.3）。
-          key: definition.path[1],
-          // 值本来就是只读那一层写的话，这一笔改了也盖不过它——宿主因此不动正在跑的提供方，界面另说一句。
-          shadowed: sourceOf(request.field) === 'flag',
-        };
-      });
+      return writeConfigField(file, request).then((written) => ({
+        ...written,
+        // 那一个字段落在提供方配置的哪一格上：宿主按这一格重算提供方，不必知道白名单的全表（方案 7.3）。
+        key: definition.path[1],
+        // 值本来就是只读那一层写的话，这一笔改了也盖不过它——宿主因此不动正在跑的提供方，界面另说一句。
+        shadowed: sourceOf(request.field) === 'flag',
+      }));
     },
   };
 }

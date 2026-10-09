@@ -159,7 +159,7 @@ function padTo(text: string, columns: number): string {
   return `${text}${' '.repeat(Math.max(0, columns - displayWidth(text)))}`;
 }
 
-// 放得下就并排，放不下整组往下一层，列与列之间按最宽那一行对齐。
+// 放得下就并排，放不下整组往下一层，每一列的宽度取它那一段里最宽的一行。
 export function flowGroups(groups: readonly HelpGroup[], width: number, gap = 4): string[] {
   const blocks = groups.map((group) => {
     const keyWidth = group.entries.reduce((widest, entry) => Math.max(widest, displayWidth(entry.key)), 0);

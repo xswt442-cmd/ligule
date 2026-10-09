@@ -2,7 +2,7 @@
 // 加这一层不改动内核任何一行：要往外发的每一件事都有现成的注入口——
 // 提供方与判定链由构造参数交进来，落盘的事件从会话记录那一条路上过一遍。
 import { randomUUID } from 'node:crypto';
-import { access, readFile, realpath } from 'node:fs/promises';
+import { access, readFile, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import { createKernel } from '../kernel/kernel.js';
@@ -17,6 +17,7 @@ import { chooseResumeMode, listSessions, sessionDirectory } from '../session/lis
 import { searchSessions } from '../session/search.js';
 import { branchSession } from '../session/branch.js';
 import { listProjectFiles } from './paths.js';
+import { branchSessionId, exportMarkdown, writeExport } from './export.js';
 import { createCompaction } from '../session/compaction.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
 import { foldLabel } from '../session/format.js';
@@ -119,7 +120,7 @@ export function compactionLimitsOf(config) {
 
 // 流式接收期间把每一条事件抄一份送出去，交回给循环的那一份原样不动。
 // 抄的是转手而不是重搭一份：提供方声明的能力、模型名与换模型的路径都要留着看得见，
-// 而这一份会话的提供方会在整轮的边界上换一次（方案 7.3），抄成一份快照就会把后面那几轮钉死在旧的端点上。
+// 而这一份会话的提供方会在整轮的边界上换一次（方案 7.3），抄成一份快照就会把后面那几轮固定在旧的端点上。
 function observedProvider(provider, onDelta) {
   return new Proxy(provider, {
     get(target, key) {
@@ -221,6 +222,21 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
   // 按项目根存一张表：同一份项目环境只装载一次，之后开这一项目的会话与列这一项目的记录都读它。
   const environments = new Map([[defaultEnvironment.projectRoot, defaultEnvironment]]);
 
+  // 项目根自己先分一次类：不存在、不是目录、读不动是三件事，各给一个稳定码（方案 2A）。
+  // 记录目录不存在不在这一处管：一份正常的新项目还没有会话，那一条由 `listSessions` 交回空列表。
+  async function classifyProjectRoot(asked) {
+    try {
+      if (!(await stat(asked)).isDirectory()) throw new KernelError('host_project_root_not_directory', { detail: asked });
+    } catch (error) {
+      if (error instanceof KernelError) throw error;
+      const reason = error.code;
+      if (reason === 'ENOENT') throw new KernelError('host_project_root_missing', { detail: asked });
+      // 路上有一段是文件：那一段不是目录，与「这一条路不存在」说的不是同一件事。
+      if (reason === 'ENOTDIR') throw new KernelError('host_project_root_not_directory', { detail: asked });
+      throw new KernelError('host_project_root_unreadable', { detail: `${asked}: ${reason ?? String(error)}` });
+    }
+  }
+
   // 取这一份项目环境。没指名就是宿主自己那一份；指名了别的项目而装载侧没给那条路就说清不支持，
   // 不悄悄用当前这一份项目环境去读另一项目的记录（方案 3.2：不能在另一个项目里悄悄继续）。
   async function environmentFor(projectRoot) {
@@ -231,6 +247,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     const known = [...environments.values()].find((each) => resolve(each.projectRoot) === asked);
     if (known !== undefined) return known;
     if (loadEnvironment === undefined) throw new KernelError('host_project_root_unsupported', { detail: String(projectRoot).slice(0, 200) });
+    await classifyProjectRoot(asked);
     const loaded = prepareEnvironment(await loadEnvironment(projectRoot));
     // 同一台机器上同一目录可以有多种写法（大小写、斜杠方向、尾部分隔符）：比的是 resolve 之后的那一个位置，
     // 写法不同不算身份不符。与 `src/session/list.ts` 筛记录头部用的是同一条规矩。
@@ -290,7 +307,8 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     }
     // 这一格项目环境的提供方跟着走：新开的会话读的是它，于是继承的是最近一次写进去的那一份，
     // 而不是装配那一次的那一份（方案 7.2「已有显式会话选择保持其选择，保存后重算受这层影响的继承者」）。
-    // 装载那一次的配置快照不动：它是事实；`config.get` 说的还是启动时读到的值，会话现在打的那一份从 `status.get` 读。
+    // 装载那一次的配置快照不动：正在跑的这一份环境用的就是它。`config.get` 读的是可写那两层文件的此刻内容（方案 3A），
+    // 会话现在打的那一份从 `status.get` 读；两份读数各自说一件事，界面把它们分开摆。
     defaultEnvironment.provider = provider;
     return { applies };
   }
@@ -430,6 +448,25 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       endSeq: page.length === 0 ? null : page.at(-1).seq,
       hasMore: page.length > 0 && page[0].seq > 1,
     };
+  }
+
+  // 一次读记录：开着的那一份读它自己的内核，派生支线那一份读它在磁盘上的记录，两个入口不分两种形状。
+  // 这一处不读别的磁盘目录：这一次动作的语义是「把我这一份会话的事实拿回来」，不是记录目录的浏览器；
+  // 发现历史会话归 sessions，接上别的会话归 session.open。分页与溢出正文的参数原样交给 `readForClient`。
+  async function readRecord(id, params) {
+    const state = sessions.get(id);
+    if (state !== undefined) return await readForClient(state.session, id, params, state.environment);
+    // 派生支线那一份不在这轮的内核里（跑完就把装配撤了，D71），界面读它用的是这同一次动作（D74）。
+    assertSessionId(id);
+    const owner = branchOwner(id);
+    if (owner === undefined) throw new KernelError('session_not_open', { detail: id });
+    const env = sessions.get(owner)?.environment ?? defaultEnvironment;
+    try {
+      await access(recordPathOf(id, env));
+    } catch {
+      throw new KernelError('session_not_found', { detail: id });
+    }
+    return await readForClient(createSessionLog({ directory: env.directory, id }), id, params, env);
   }
 
   // 一个会话一套内核、判定链与循环：判定链里的拒绝计数与档位按会话存活（D15、D17）。
@@ -622,7 +659,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     }
     // 用哪一份模式清单：客户端显式选了就用它；打开一份已有记录时取记录里最后生效的那一条并比它的摘要（D78）；
     // 两者都没有时保持装配时那一份。静默换成磁盘上现在这一份等于在别人没选过的范围里决定这一次能用什么，
-    // 所以摘要变了要报 `resume_mode_changed` 并要求显式选一次，而不是悄悄沿用。
+    // 所以摘要变了要报 `resume_mode_changed`，由人显式选一次之后才继续。
     let wanted = explicitMode ?? modeName;
     if (explicitMode === undefined && recover && modePaths !== undefined) {
       const last = (await session.read()).filter((event) => event.kind === 'mode').at(-1);
@@ -702,6 +739,17 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           return await buildSession(id, connection, false, undefined, await environmentFor(message.params.projectRoot));
         }
         case 'session.open': {
+          // 已经在这具宿主里开着的会话读它自己那一份项目环境，与 `session.read` 同一个形状：
+          // 不带 `projectRoot` 的接回（重读手里那一份、刚在别项目录里建好的那一份）按默认那一份去找记录，会报出假的 `session_not_found`。
+          if (sessions.has(sessionId)) {
+            const state = open(sessionId);
+            if (state.running !== undefined) throw new KernelError('run_already_running', { detail: sessionId });
+            if (message.params.mode !== undefined) {
+              if (state.environment.modePaths === undefined) throw new KernelError('host_mode_paths_required');
+              await state.adopt(await loadMode(message.params.mode, state.environment.modePaths));
+            }
+            return { sessionId };
+          }
           // 指名了项目就取那一份项目环境：记录在哪个目录、工具在哪个目录读写，都由它说（方案 3.2）。
           const env = await environmentFor(message.params.projectRoot);
           // 派生支线那一份记录说的是父侧那一次派生做过什么，它不是一份等着接回来的会话：把它当主干接开，
@@ -718,16 +766,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           } catch {
             throw new KernelError('session_not_found', { detail: sessionId });
           }
-          // 切回已经打开的会话时复用其状态；模式变更仍受当前轮次的边界约束。
-          if (sessions.has(sessionId)) {
-            const state = open(sessionId);
-            if (state.running !== undefined) throw new KernelError('run_already_running', { detail: sessionId });
-            if (message.params.mode !== undefined) {
-              if (state.environment.modePaths === undefined) throw new KernelError('host_mode_paths_required');
-              await state.adopt(await loadMode(message.params.mode, state.environment.modePaths));
-            }
-            return { sessionId };
-          }
+          // 接开还没装过的那一份：模式变更仍受当前轮次的边界约束。
           return await buildSession(sessionId, connection, true, message.params.mode, env);
         }
         case 'session.close': {
@@ -794,23 +833,38 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
         case 'session.read': {
           // 交回的是记录本身：客户端晚到了也能把已经发生过的事画出来（I5）。
           // 历史那一页由 `limit` 与 `before` 说（方案 4.1）：支线那份读的是同一套分页，两个入口不分两种形状。
-          const { fullResults, limit, before } = message.params;
-          const state = sessions.get(sessionId);
-          if (state !== undefined) return await readForClient(state.session, sessionId, { fullResults, limit, before }, state.environment);
-          // 派生支线那一份不在这轮的内核里（跑完就把装配撤了，D71），界面读它用的是这同一次动作（D74）。
-          // 除这一种之外不读磁盘：这一次动作的语义是「把我这一份会话的事实拿回来」，不是记录目录的浏览器；
-          // 发现历史会话归 sessions，接上别的会话归 session.open。
-          assertSessionId(sessionId);
-          const owner = branchOwner(sessionId);
-          if (owner === undefined) throw new KernelError('session_not_open', { detail: sessionId });
-          const env = sessions.get(owner)?.environment ?? defaultEnvironment;
-          const path = recordPathOf(sessionId, env);
-          try {
-            await access(path);
-          } catch {
-            throw new KernelError('session_not_found', { detail: sessionId });
+          return await readRecord(sessionId, message.params);
+        }
+        case 'session.export': {
+          // 导出交给 Node 这一侧：读完整记录、补溢出正文、排版、落盘四件都在这里（方案 6A），界面只管选目的地。
+          // 那一条路径是人在原生保存对话框里自己选的，不是模型工具的一次写出，因此不套项目边界；返回路径不等于写成。
+          const record = await readRecord(sessionId, { fullResults: true });
+          const header = record.header ?? {};
+          const main = exportMarkdown(record.events, {
+            id: sessionId,
+            projectRoot: header.projectRoot,
+            createdAt: header.createdAt ?? null,
+            // 还在跑的那一轮此刻没有末端：那份文件说到记录落到哪一条为止，后面写进来的不在里面（方案 6A）。
+            unfinished: sessions.get(sessionId)?.running !== undefined,
+          });
+          // 支线那几份还是同一次读记录的动作（D74）：父记录里那条派生结果带着支线自己的 id。
+          const branches = [];
+          const skipped = [];
+          for (const event of record.events) {
+            const branchId = branchSessionId(event);
+            if (branchId === undefined) continue;
+            const branch = await readRecord(branchId, { fullResults: true }).catch((error) => error);
+            if (branch.code !== undefined) {
+              skipped.push({ id: branchId, code: branch.code });
+              continue;
+            }
+            branches.push({ id: branchId, text: exportMarkdown(branch.events, { id: branchId, projectRoot: header.projectRoot }) });
           }
-          return await readForClient(createSessionLog({ directory: env.directory, id: sessionId }), sessionId, message.params.fullResults, env);
+          try {
+            return { written: await writeExport(message.params.path, main, branches), skipped };
+          } catch (cause) {
+            throw new KernelError('host_export_write_failed', { cause, detail: `${message.params.path}: ${cause.message}` });
+          }
         }
         case 'run.start': {
           const state = open(sessionId);
@@ -892,17 +946,21 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           };
         }
         case 'config.get': {
-          // 边界在「结果由固定四格拼出来」这一句上，不在参数校验上：子集校验放过模式里没声明的键（D14）。
+          // 边界在「结果由固定那几格拼出来」这一句上，不在参数校验上：子集校验放过模式里没声明的键（D14）。
           // 白名单的理由：配置合并除 `__proto__` 之外接受任何键，项目层那一份可能出自别人写的仓库（D8）。
           // 凭据只走环境变量是一条约定，不是拦阻（D13、D60），所以交出整份快照证明不了帧里没有别的东西。
-          // 多交出的那一格是各层文件的版本：写的时候要把读到的那一份带回来，光有值比不出「别人也改过」。
+          // 值、来源与各层文件的版本出自同一遍读取（方案 3A）：界面上那三样说的是同一时刻的那一份文件。
+          // 版本是写的时候要比对的那一份：光有值比不出「别人也改过」。
+          if (configStore === undefined) return { ...shownConfigOf(config), layers: [], sources: {} };
+          const { layers, sources, values, rules, rulesSource } = await configStore.read();
           return {
-            ...shownConfigOf(config),
-            layers: configStore === undefined ? [] : await configStore.list(),
-            // 每一条现在由哪一层写着：`flag` 是命令行 `--config` 那一层，只读（方案 7.1 的来源那一格）。
-            sources: configStore === undefined ? {} : configStore.sources(),
-            // 现在生效的那一张工具规则表与它出自哪一层（D100）：界面上列规则、改第几条读的都是这一份。
-            ...(configStore === undefined ? {} : configStore.rules()),
+            ...shownConfigOf(values),
+            // 配置里写着的默认档：这一格说的是文件里现在那一份，正在生效的那一份从 `status.get` 读（D40、D101）。
+            policyMode: values.policy.mode,
+            layers,
+            sources,
+            rules,
+            rulesSource,
           };
         }
         case 'config.set': {
@@ -919,7 +977,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           // 那一条值本来就是命令行 `--config` 写着的话，改文件盖不过它（D8 的次序、方案 7.1）：这一笔说成 shadowed，正在用的提供方不动。
           const adoption =
             shadowed === true ? { applies: [] } : key === 'rules' || key === 'mode' ? adoptPolicy(key, rules ?? value) : adoptGeneration(key, value);
-          return { ...saved, shadowed, ...adoption, ...(rules === undefined ? {} : { rules }), layers: await configStore.list() };
+          return { ...saved, shadowed, ...adoption, ...(rules === undefined ? {} : { rules }), layers: (await configStore.read()).layers };
         }
         case 'session.compact': {
           const state = open(sessionId);

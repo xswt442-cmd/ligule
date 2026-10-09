@@ -40,7 +40,7 @@ export function assertSupportedSchema(schema) {
         violations.push(`${name}.description must be a string`);
       }
       // 上下界只在数值类型上校验得了。D14 定的判据是「内核不校验的构造等于承诺一件做不到的事」，
-      // 所以字符串上的 minimum 要在注册期就指名拒掉，而不是收下之后默默不生效；
+      // 所以字符串上的 minimum 要在注册期就指名拒掉：收下之后它一点作用也没有，用的人看不出来；
       // 非有限的界值同样生效不了（任何数与 NaN 比都小于 false）。
       for (const bound of ['minimum', 'maximum']) {
         if (leaf[bound] === undefined) continue;

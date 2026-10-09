@@ -25,7 +25,7 @@ export function chooseResumeMode({
 }): string {
   if (explicit !== undefined) return explicit;
   if (recorded === undefined) return fallback;
-  // 加首行之前那些记录里的模式事件没有摘要，那时无从比对，名字对得上就沿用。
+  // 没有首行的记录（版本 0）里那条模式事件不带摘要，这一种只能比名字，名字对得上就沿用。
   if (recorded.digest !== undefined && recorded.digest !== loaded?.digest) {
     throw new KernelError('resume_mode_changed', {
       detail: `${recorded.name} was ${recorded.digest} in that session and is ${loaded?.digest ?? 'unreadable'} on disk; name a mode explicitly to resume`,

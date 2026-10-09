@@ -1,10 +1,10 @@
-// 第 46 步的验收：导出的那一份 markdown、终端标题那一串、剪贴板那一段字节。
-// 排版与编码都是纯计算；落盘那一条只写进临时目录；`/export` 那一条走真的 Ink 渲染路径喂按键。
+// 第 46 步的验收：终端标题那一串、剪贴板那一段字节，以及 `/export` 那一条按键走到写出那两份文件。
+// 编码是纯计算；`/export` 那一条走真的 Ink 渲染路径喂按键，排版的检查在 test/host-export.test.js。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, mkdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { exportMarkdown, titleEscape, titleText, writeExport } from '../dist/tui/output.js';
+import { titleEscape, titleText } from '../dist/tui/output.js';
 import { clipboardPayload, copyToClipboard, lastAnswer } from '../dist/tui/clipboard.js';
 import { routeInput } from '../dist/tui/commands.js';
 import { waitFor, withTuiHost } from './helpers/tui-host.js';
@@ -17,35 +17,6 @@ try {
 }
 
 const options = { skip: missing === '' ? false : missing };
-
-const events = [
-  { kind: 'session', formatVersion: 1, sessionId: 's-1', projectRoot: '/work', createdAt: '2026-10-05T00:00:00.000Z' },
-  { seq: 0, kind: 'user', text: '看一眼 note.txt', raw: '/看看 note' },
-  { seq: 1, kind: 'assistant', text: '第一段回答', toolCalls: [{ id: 'c1', name: 'read', args: { path: 'note.txt' } }] },
-  { seq: 2, kind: 'tool', tool: 'read', callId: 'c1', result: { content: '第一行原文' } },
-  { seq: 3, kind: 'tool', tool: 'exec', callId: 'c2', result: { content: '没了', failed: true, code: 'exec_exit_1' } },
-  { seq: 4, kind: 'mode', name: 'full', layer: 'shipped', tools: ['*'] },
-  { seq: 5, kind: 'usage', input: 8351, output: 39, estimated: 13 },
-];
-
-test('the exported markdown gives each call and each result its own section', () => {
-  const text = exportMarkdown(events, { id: 's-1', projectRoot: '/work', createdAt: '2026-10-05T00:00:00.000Z' });
-  assert.match(text, /^# ligule 会话 s-1$/m);
-  assert.match(text, /- 项目根：\/work/);
-  assert.match(text, /第 0 条 · 你说\n\n\/看看 note/, '写出去的是人原本打的那一行（D54）');
-  assert.match(text, /第 1 条的一次调用 · read/);
-  assert.match(text, /第 2 条 · read 的结果\n\n第一行原文/);
-  assert.match(text, /（这一次没做成）/, '没做成的那一次在段子里说得出来');
-  assert.match(text, /第 4 条：模式 full（shipped）生效/);
-  assert.doesNotMatch(text, /8351/, '用量那一条不是对话的一段，不写出去');
-  assert.equal(text.split('\n## ').length - 1, 2, '问的那一条与答的那一条各成一段');
-  assert.equal(text.split('\n### ').length - 1, 3, '那一次调用与两次结果各自一段');
-});
-
-test('the exported markdown preserves consecutive blank lines in the original body', () => {
-  const text = exportMarkdown([{ seq: 8, kind: 'assistant', text: '第一段\n\n\n第二段' }], { id: 's-8' });
-  assert.ok(text.includes('第一段\n\n\n第二段'));
-});
 
 test('the terminal title drops the characters that could end its own escape', () => {
   assert.equal(titleText({ model: 'test-model', boundary: '/work', sessionId: '0123456789' }), 'test-model · /work · 01234567');
@@ -85,7 +56,6 @@ test('/export writes real host and subagent records as markdown', options, async
 
   const exportDirectory = join(directory, 'export');
   const projectDirectory = config.boundary;
-  await mkdir(exportDirectory, { recursive: true });
   const path = join(exportDirectory, 'run.md');
   const instance = render(createElement(App, { client, sessionId, info: { boundary: projectDirectory }, interactive: true, stdout }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   try {
@@ -101,9 +71,6 @@ test('/export writes real host and subagent records as markdown', options, async
     const branchEvent = parentRead.events.find((event) => event.kind === 'tool' && event.tool === 'subagent');
     const branchId = branchEvent?.result?.content?.sessionId;
     assert.equal(typeof branchId, 'string', '支线 id 来自 Host 记录的真实 subagent 结果');
-    const branchRead = await client.request('session.read', { sessionId: branchId, fullResults: true });
-    assert.equal(branchRead.header.projectRoot, projectDirectory);
-    assert.ok(branchRead.events.some((event) => event.kind === 'user' && event.text === '支线导出验证'));
 
     stdin.write(`/export ${path}`);
     await delay(100);
@@ -120,7 +87,8 @@ test('/export writes real host and subagent records as markdown', options, async
     assert.match(branchText, new RegExp(`# ligule 会话 ${branchId}`));
     assert.match(branchText, new RegExp(`- 项目根：${projectDirectory.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
     assert.ok(branchText.includes('Local response: 支线导出验证'));
-    assert.ok(requests.some((request) => request.method === 'session.read' && request.params.sessionId === branchId && request.params.fullResults === true));
+    assert.ok(requests.some((request) => request.method === 'session.export' && request.params.sessionId === sessionId && request.params.path === path),
+      '界面只交出那一条目的地，读记录与写出都在宿主那一侧');
   } finally {
     instance.unmount();
   }

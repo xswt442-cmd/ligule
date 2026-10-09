@@ -2,13 +2,14 @@
 // 这一层只把会话记录与流式增量画成行，并把按键变成协议里的调用。
 // 纯函数（editDraft、foldText、projectRecord、branchOf、detailTitle 与 commands.ts 里那几张表）都从这里交出去，
 // 检查在 test/tui.test.js，不靠真终端也能验；画面本身跑 `ligule tui` 看。
+import { resolve } from 'node:path';
 import { createElement as h, Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Static, Text, useApp, useInput, usePaste } from 'ink';
 import { SESSION_ROWS, UI_COMMANDS, candidatesOf, describeChange, findLines, findUiCommand, flowGroups, insertMention, mentionToken, resolveSessionId, routeInput, sessionLines } from './commands.js';
 import { pushHistory, searchHistory } from './history.js';
 import { editInExternalEditor } from './editor.js';
 import { copyToClipboard, lastAnswer } from './clipboard.js';
-import { exportMarkdown, titleEscape, titleText, writeExport } from './output.js';
+import { titleEscape, titleText } from './output.js';
 import { markdownLines } from './markdown.js';
 import { selectedText, transcriptLines, viewportPosition, wrapLine } from './viewport.js';
 import { CURRENT, KEYMAP, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec } from './keymap.js';
@@ -302,7 +303,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [expanded, setExpanded] = useState(false);
   const [draft, setDraft] = useState('');
   const [caret, setCaret] = useState(0);
-  // 草稿的撤销栈（方案 6.1）：人在这一格里改出来的每一段，改之前那一份先留下来，Ctrl+Z 退回它、Ctrl+Y 再拿回来。
+  // 草稿的撤销栈（方案 6.1）：人在这一格里改出来的每一段，落笔时先把当时那一格的草稿与光标留下来，Ctrl+Z 退回它、Ctrl+Y 再拿回来。
   // 只留在这一次打开的内存里：跨退出留住的是第 84 步那两格，退出之后退回刚才打的字没有意义。
   // stack 与 future 各 100 份（ponytail: 上限写在这一处，一句草稿远够用；要更长就换成按字节预算的环形缓冲）。
   const undo = useRef({ stack: [], future: [], kind: null, before: { draft: '', caret: 0 } });
@@ -612,35 +613,17 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         return;
       }
       void (async () => {
-        const read = await client.request('session.read', { sessionId, fullResults: true }).catch((error) => error);
-        if (read.code !== undefined) {
-          push({ kind: 'error', text: `记录读不回来：${read.code}` });
+        // 排版与落盘都在宿主那一侧（方案 6A），这里只把人打的那一条路径按当前目录定成目的地：
+        // 宿主可能在别的进程里，相对路径要按敲下这一行的位置算。
+        const done = await client.request('session.export', { sessionId, path: resolve(argument) }).catch((error) => error);
+        if (done.code !== undefined) {
+          push({ kind: 'error', text: `导出没成：${done.code}${done.detail === undefined ? '' : ` · ${done.detail}`}` });
           return;
         }
-        const header = read.header;
-        const main = exportMarkdown(read.events, {
-          id: sessionId,
-          projectRoot: header?.projectRoot,
-          createdAt: header?.createdAt ?? null,
-        });
-        // 支线那几份还是同一次读记录的动作（D74）：父记录里那条派生结果带着支线自己的 id。
-        const branches = [];
-        for (const event of read.events) {
-          const branch = branchOf(event);
-          if (branch.sessionId === undefined) continue;
-          const branchRead = await client.request('session.read', { sessionId: branch.sessionId, fullResults: true }).catch((error) => error);
-          if (branchRead.code !== undefined) {
-            push({ kind: 'error', text: `支线 ${branch.sessionId} 读不回来：${branchRead.code}，那一份没写出去` });
-            continue;
-          }
-          branches.push({ id: branch.sessionId, text: exportMarkdown(branchRead.events, { id: branch.sessionId, projectRoot: header?.projectRoot }) });
+        for (const branch of done.skipped) {
+          push({ kind: 'error', text: `支线 ${branch.id} 读不回来：${branch.code}，那一份没写出去` });
         }
-        const written = await writeExport(argument, main, branches).catch((error) => error);
-        if (written.code !== undefined) {
-          push({ kind: 'error', text: `写不出去：${written.code ?? written.message}` });
-          return;
-        }
-        push({ kind: 'meta', text: `已写出 ${written.length} 份文件：\n${written.join('\n')}` });
+        push({ kind: 'meta', text: `已写出 ${done.written.length} 份文件：\n${done.written.join('\n')}` });
       })();
       return;
     }

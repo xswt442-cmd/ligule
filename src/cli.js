@@ -71,7 +71,7 @@ const [command, ...rest] = positional;
 
 async function configSnapshot(projectRoot = process.cwd()) {
   const layers = await loadConfigLayers({ projectRoot, flags });
-  // 边界兜底取这一次指的那一根：命令行在哪里跑（或 `--project` 指了哪一根），工具就在哪里读写。任何一层配置都盖得过它。
+  // 边界的默认值就是这一次指的那一根：命令行在哪里跑（或 `--project` 指了哪一根），工具就在哪里读写。任何一层配置写的 boundary 都盖得过它。
   const user = { boundary: projectRoot, ...layers.user };
   // 扩展的来源在同一次装载里算出来（D68）：项目层与本地层里写的路径不算，那一条挡住的判断在这里看得见。
   const extensions = await extensionSources({ ...layers, user }, { projectRoot });
@@ -147,7 +147,7 @@ function printNotification(message) {
 }
 
 // 审批问在终端上。行从进程一开头就收着：`echo y | ligule run` 那一种把答复写在问题之前，
-// 那时无人在等，行也不能丢（本机实测：等有人问再建 readline，先前那一行已经被读走了，问出去就一直没有答复）。
+// 那时无人在等，行也不能丢——readline 建得早，才拿得到已经到达的那一行，问出去才有答复可读。
 function terminalApprovals() {
   const reader = createInterface({ input: process.stdin, output: process.stderr });
   const queued = [];
@@ -317,7 +317,7 @@ if (missingFlagValue) {
   // 只读地列出跑过的会话（D73）：扫记录目录，不建索引也不开会话；耗时打在这一行上，U38 要的就是这个数。
   try {
     // `--project <根>` 指了哪一根就读哪一根的那一层：记录目录本身是按项目层配出来的，
-    // 只在当前目录下筛项目根等于没读那个项目（`RUNLOCAL.md` 那一条说的不是这个意思）。
+    // 只在当前目录下筛项目根等于没读那个项目。
     const { config } = await configSnapshot(projectFlag);
     const directory = sessionDirectory(config);
     const started = Date.now();
@@ -397,7 +397,7 @@ if (missingFlagValue) {
   }
 } else if (command === undefined || command === '--help' || command === '-h') {
   console.log(`ligule ${pkg.version} - under development, do not depend on it.`);
-  console.log('commands: tools, skills, sessions, policy <session-id>, run <text>, resume <id> <text>, call <tool> [json-args], tui, host, --version');
+  console.log('commands: tools, skills, extensions, sessions, policy <session-id>, run <text>, resume <id> <text>, call <tool> [json-args], tui, host, --version');
   console.log('options: --config <key.path=value> (repeatable), --mode <name>');
   console.log('run, tui and host read model.api ("messages" or "chat-completions"), model.baseURL and model.model from the config layers; the key comes from the environment variable named by model.apiKeyEnv, or LIGULE_API_KEY when that one is not written');
   console.log('run, tui and host also pick a mode: --mode <name> overrides the config `mode`, and neither one written means the shipped "minimal" (D44); tools and call do not read one');
