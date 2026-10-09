@@ -34,6 +34,7 @@ npm ci              dependencies from the lockfile
 npm run build       tsc → dist/
 npm test            builds, then runs the suites against dist/
 npm run check-pack  packs, unpacks, imports the package from an empty consumer
+npm run verify-install  installs that tarball into an empty directory with npm and checks the installed CLI, grammars and search backend
 npm run build-rg    downloads the pinned ripgrep into packages/rg-*
 ```
 
@@ -109,6 +110,7 @@ npm run build-rg    downloads the pinned ripgrep into packages/rg-*
 ## Verify
 
 - `npm run check-pack` packs, unpacks, checks every entry `package.json` points at, then imports the package from an empty consumer directory. It copies the transitive closure of `dependencies` and installed optional dependencies from that closure, including native platform packages, while leaving unrelated root optional dependencies out, and it refuses when a declared runtime dependency is missing. Copying all of `node_modules` would hide a tarball short at runtime.
+- `npm run verify-install [tarball]` is the gate that copy cannot be: an empty directory, `npm install` of the packed tarball, dependencies resolved and downloaded from the declarations, then the installed CLI's `--version`, its tool count, the non-interactive TUI refusal, both command grammars and the search backend read from the installed package. Passing a tarball path reuses those bytes instead of packing again, which is how the release pipeline verifies what it publishes. The consumer's `package.json` carries an `allowScripts` field so npm on a hardened machine may run the install scripts of the four native bindings; a stock npm ignores that field and installs the same way.
 - It refuses before packing when `dist/` is missing. Build first.
 - `npm test` exercises the same `dist/`, so it cannot see a file missing from `files` or an `exports` entry the tarball lacks. Invoke the script through npm: on Windows Node refuses to launch `npm.cmd` without a shell, and the script needs `npm_execpath` for that reason.
 - The first devDependency, `@modelcontextprotocol/server-filesystem`, is the test MCP server and stays out of the consumer.

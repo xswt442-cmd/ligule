@@ -61,6 +61,11 @@ jobs:
       - name: check the packed artifact
         run: npm run check-pack
 
+      # 全新安装那一份：tarball 装进一个空目录，依赖按声明解析并下载，再查版本、工具数、TUI 那一条拒绝、
+      # 两种命令语法与搜索后端。check-pack 从开发树复制依赖，证明不了「声明装得出来」。
+      - name: install the packed artifact into an empty directory
+        run: npm run verify-install
+
   # 桌面壳（D34）：Windows 上出 NSIS 安装包并留一个可下载的产品。构建在前端与 Rust 之间只有编译期那一次
   # 资源嵌入，本地不构建就等不到改完界面才发现打不出来。不签名，装完之后首次运行会有操作系统的一次警告。
   desktop:

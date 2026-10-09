@@ -77,9 +77,53 @@ jobs:
       - name: check the packed artifact
         run: npm run check-pack
 
+      # 打一次包就是这次发布的身份：tarball 与它的 SHA-256 交给下游两个作业，谁都不再重新打一次。
+      - name: pack the tarball the release publishes
+        shell: bash
+        run: |
+          set -e
+          mkdir -p dist-tarball
+          npm pack --pack-destination dist-tarball
+          tarball=$(ls dist-tarball/*.tgz | head -1)
+          sha256sum "$tarball" | tee dist-tarball/SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball
+          path: dist-tarball/
+          if-no-files-found: error
+
+  # 装一次真的：空目录里安装上面那一份字节，依赖按声明解析，再查版本、工具数、TUI 那一条拒绝、
+  # 两种命令语法与搜索后端。check-pack 从开发树复制依赖，证明不了「声明装得出来」。
+  verify:
+    name: verify the packed tarball by installing it
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          cache: npm
+
+      - name: install
+        run: npm ci
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-tarball
+          path: dist-tarball
+
+      - name: install the tarball into an empty consumer and check it
+        run: npm run verify-install -- "$PWD/dist-tarball/ligule-$(node -p "require('./package.json').version").tgz"
+
   npm:
     name: publish to npm
-    needs: checks
+    needs: [checks, verify]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -127,19 +171,30 @@ jobs:
             (cd "$dir" && npm publish --provenance --access public)
           done
 
+      # 发的是验过的那一份字节：作业自己不打第二份包，从 artifact 里取下来直接发。
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-tarball
+          path: dist-tarball
+
+      - name: take the tarball identity from the artifact
+        id: tarball
+        shell: bash
+        run: echo "path=$(ls dist-tarball/*.tgz | head -1)" >> "$GITHUB_OUTPUT"
+
       - name: publish to npm (token)
         if: steps.published.outputs.already != 'yes' && env.NPM_TOKEN != ''
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --provenance --access public
+        run: npm publish --provenance --access public "${{ steps.tarball.outputs.path }}"
 
       - name: publish to npm (trusted publishing)
         if: steps.published.outputs.already != 'yes' && env.NPM_TOKEN == ''
-        run: npm publish --provenance --access public
+        run: npm publish --provenance --access public "${{ steps.tarball.outputs.path }}"
 
   release:
     name: create GitHub release
-    needs: checks
+    needs: [checks, verify]
     runs-on: ubuntu-latest
     permissions:
       contents: write # 建对应的 GitHub Release。
@@ -148,15 +203,16 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 重跑要收敛而不是因为名字被占而失败。
-      - name: GitHub release (idempotent)
+      # 四个桌面目标还没进这条流水线（R3 那一组），所以 Release 只以 draft 建出来：
+      # 缺附件的那一份不能算完整交付，公开与否由人在验收之后点。
+      - name: GitHub release (idempotent, kept draft)
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
             echo "::warning::release $GITHUB_REF_NAME already exists - refreshing its notes"
-            gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+            gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --draft=true --generate-notes
           else
-            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --draft=true --generate-notes
           fi
