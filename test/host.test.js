@@ -983,13 +983,12 @@ test('the settings panel reads and writes the project it names, and a shared def
   await mkdir(join(b, '.ligule'), { recursive: true });
   await mkdir(home, { recursive: true });
   await writeFile(join(b, '.ligule', 'config.local.toml'), '[model]\nmodel = "B 那一份"\n', 'utf8');
-  const quiet = { capabilities: MESSAGES_CAPABILITIES, model: 'test-model', async *stream() { yield { type: 'text', text: 'ok' }; } };
-  const environmentOf = (projectRoot) => ({
-    config: createConfig({ user: { boundary: projectRoot, model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model' } } }),
-    provider: quiet,
-    policy: { mode: 'auto' },
-    layers: {},
-  });
+  const environmentOf = (projectRoot) => {
+    const config = createConfig({ user: { boundary: projectRoot, model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model' } } });
+    // 提供方按命令行与宿主那一条路从这份配置建出来（`providerFromConfig`），不再是本检查自己造的格子：
+    // 线上形状、能力上限与地址校验都在这一步真走过。这一趟不发请求，那一格地址不会被碰到。
+    return { config, provider: providerFromConfig(config), policy: config.policy, layers: {} };
+  };
   const pair = createMemoryConnectionPair();
   const host = serveHost({
     input: pair.host.input,
