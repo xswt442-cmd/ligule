@@ -133,31 +133,35 @@ async function acquireRegistryLock(path: string): Promise<() => Promise<void>> {
   }
 }
 
+/** 一条身份的记录：第一次见就添一条，之后只动 `lastSeen` 与显示名。 */
+function upsertEntry(registry: WorkspaceRegistry, canonical: { identity: string; directory: string }, name: string | undefined, now: string): void {
+  const known = registry.workspaces.find((one) => one.identity === canonical.identity);
+  if (known === undefined) {
+    registry.workspaces.push({
+      identity: canonical.identity,
+      directory: canonical.directory,
+      name: name === undefined || name.trim() === '' ? basename(canonical.directory) : name.trim(),
+      firstSeen: now,
+      lastSeen: now,
+    });
+    return;
+  }
+  known.lastSeen = now;
+  known.directory = canonical.directory;
+  if (name !== undefined && name.trim() !== '') known.name = name.trim();
+}
+
 /**
- * 记下这一次用到的工作区：一个身份只有一条，`firstSeen` 留着，`lastSeen` 与显示名跟着这一次走。
- * 写出去之前先取那把锁，替身文件名带随机段且 exclusively 创建，改名之后那一份临时名不再留下。
+ * 改这份文件的那一个入口：锁在里面取，替身文件名带随机段并独占创建，改名之后不留半个文件；同进程里连着改排成一条队。
+ * 改的是读回来的那一份对象，所以两具宿主同时登记时各自那一条都在。
  */
-export function registerWorkspace(directory: string, { path = registryPathOf(), name = undefined as string | undefined, now = new Date().toISOString() } = {}): Promise<WorkspaceRegistry> {
-  const canonical = canonicalOf(directory);
+function mutateRegistry(path: string, mutate: (registry: WorkspaceRegistry) => void): Promise<WorkspaceRegistry> {
   const next = writing.then(async () => {
     await mkdir(dirname(path), { recursive: true });
     const release = await acquireRegistryLock(path);
     try {
       const registry = await readRegistry(path);
-      const known = registry.workspaces.find((one) => one.identity === canonical.identity);
-      if (known === undefined) {
-        registry.workspaces.push({
-          identity: canonical.identity,
-          directory: canonical.directory,
-          name: name === undefined || name.trim() === '' ? basename(canonical.directory) : name.trim(),
-          firstSeen: now,
-          lastSeen: now,
-        });
-      } else {
-        known.lastSeen = now;
-        known.directory = canonical.directory;
-        if (name !== undefined && name.trim() !== '') known.name = name.trim();
-      }
+      mutate(registry);
       const temporary = `${path}.${randomUUID()}.tmp`;
       try {
         await writeFile(temporary, `${JSON.stringify(registry, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
@@ -172,4 +176,29 @@ export function registerWorkspace(directory: string, { path = registryPathOf(), 
   });
   writing = next.then(() => undefined, () => undefined);
   return next;
+}
+
+/** 记下这一次用到的工作区：一个身份只有一条，`firstSeen` 留着，`lastSeen` 与显示名跟着这一次走。 */
+export function registerWorkspace(directory: string, { path = registryPathOf(), name = undefined as string | undefined, now = new Date().toISOString() } = {}): Promise<WorkspaceRegistry> {
+  const canonical = canonicalOf(directory);
+  return mutateRegistry(path, (registry) => {
+    upsertEntry(registry, canonical, name, now);
+  });
+}
+
+/**
+ * 把默认选择定在那一具工作区上：先记下它再指过去，默认那一格因此永远指得着一条登记。
+ * 交回 null 是退掉默认：没有哪一具工作区算默认，界面新建一份时得自己指名那一具。
+ */
+export function setDefaultWorkspace(directory: string | null, { path = registryPathOf(), name = undefined as string | undefined, now = new Date().toISOString() } = {}): Promise<WorkspaceRegistry> {
+  if (directory === null) {
+    return mutateRegistry(path, (registry) => {
+      registry.default = null;
+    });
+  }
+  const canonical = canonicalOf(directory);
+  return mutateRegistry(path, (registry) => {
+    upsertEntry(registry, canonical, name, now);
+    registry.default = canonical.identity;
+  });
 }
