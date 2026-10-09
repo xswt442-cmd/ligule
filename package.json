@@ -13,7 +13,9 @@
   "files": [
     "dist",
     "modes",
+    "docs",
     "README.md",
+    "AGENTS.md",
     "LICENSE"
   ],
   "scripts": {
