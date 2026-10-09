@@ -12,8 +12,24 @@ import { loadInstructions } from '../dist/index.js';
 const repoRoot = fileURLToPath(new URL('../', import.meta.url));
 const zhPath = join(repoRoot, 'docs', 'guide.zh-CN.md');
 const enPath = join(repoRoot, 'docs', 'guide.en.md');
-// 工程指南三份：根那一份放全局规则，两份局部的放在各自代码旁边。
-const guides = ['AGENTS.md', join('desktop', 'AGENTS.md'), join('src', 'tui', 'AGENTS.md')];
+// 工程指南六份：根那一份放全局规则，五份局部的放在各自代码旁边（`src/` 与 `desktop/` 的四个目录、终端界面）。
+const guides = [
+  'AGENTS.md',
+  join('desktop', 'AGENTS.md'),
+  join('src', 'kernel', 'AGENTS.md'),
+  join('src', 'tools', 'AGENTS.md'),
+  join('src', 'session', 'AGENTS.md'),
+  join('src', 'host', 'AGENTS.md'),
+  join('src', 'tui', 'AGENTS.md'),
+];
+const localGuides = [
+  join(repoRoot, 'desktop'),
+  join(repoRoot, 'src', 'kernel'),
+  join(repoRoot, 'src', 'tools'),
+  join(repoRoot, 'src', 'session'),
+  join(repoRoot, 'src', 'host'),
+  join(repoRoot, 'src', 'tui'),
+];
 const guidePath = (guide) => join(repoRoot, guide);
 
 /** 标题换成 GitHub 那一种锚点：小写、去掉除字母数字与连字符以外的字符、空格换成连字符。 */
@@ -83,9 +99,10 @@ test('docs 目录只有这两种语言的入口，且都有正文', () => {
   }
 });
 
-// 工程指南分三份放之后要守的两条：每份都能整份读进默认上限，局部那两份真的能被装载到。
+// 工程指南分几份放之后要守的两条：每份都能整份读进默认读入上限，且每一处都以默认预算完整装载。
 // 装载那一条按这一份仓库自己的目录跑，不建临时夹具：夹具验的是机制，这里验的是这份布局。
-test('每份工程指南都在默认读入上限之内，且局部那两份跟着根那一份装载', async () => {
+// 预算那一格用的是默认值，并当场看有没有截断标记——「必要规则在默认总预算内完整装载」说的就是这一件事（审阅 C09）。
+test('每份工程指南都在默认读入上限之内，且每一处都以默认预算完整装载', async () => {
   for (const guide of guides) {
     const bytes = Buffer.byteLength(readFileSync(guidePath(guide), 'utf8'), 'utf8');
     assert.ok(bytes < DEFAULT_LIMITS.readBytes, `${guide} 有 ${bytes} 字节，超过默认读入的 ${DEFAULT_LIMITS.readBytes} 字节`);
@@ -94,8 +111,12 @@ test('每份工程指南都在默认读入上限之内，且局部那两份跟�
   for (const guide of guides.slice(1)) {
     assert.ok(rootGuide.includes(guide.split(sep).join('/')), `AGENTS.md 没有指向 ${guide}`);
   }
-  for (const directory of [join(repoRoot, 'desktop'), join(repoRoot, 'src', 'tui')]) {
-    const loaded = await loadInstructions({ boundary: repoRoot, current: directory, maxBytes: 200_000 });
+  const atRoot = await loadInstructions({ boundary: repoRoot, current: repoRoot });
+  assert.deepEqual(atRoot.files.map((file) => file.layer), ['project'], '只从项目根装载时只有根那一份');
+  assert.ok(!atRoot.text.includes('[Instruction budget'), '默认预算下根那一份被截断了');
+  for (const directory of localGuides) {
+    const loaded = await loadInstructions({ boundary: repoRoot, current: directory });
     assert.deepEqual(loaded.files.map((file) => file.layer), ['project', 'directory'], `${directory} 那一份没有连根那一份一起装上`);
+    assert.ok(!loaded.text.includes('[Instruction budget'), `${directory} 处按默认预算装载时被截断了`);
   }
 });
