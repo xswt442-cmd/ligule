@@ -98,6 +98,21 @@ fn app_quit(app: AppHandle) {
     app.exit(0);
 }
 
+/// 首次使用时那一份默认工作区：系统文档目录下的 `ligule/default-workspace`，不在那儿就建出来。
+/// 文档目录由平台自己交回，这里不拼用户主目录。取不到或建不成都把原因交回界面，让那个人自己选一处可用目录——
+/// 安装目录、系统目录与用户主目录都不是静默的退路（方案 5.5.3）。
+#[tauri::command]
+fn default_workspace(app: AppHandle) -> Result<String, String> {
+    let documents = app
+        .path()
+        .document_dir()
+        .map_err(|error| format!("the system documents directory is not reachable: {error}"))?;
+    let directory = documents.join("ligule").join("default-workspace");
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("{} cannot be created: {error}", directory.display()))?;
+    Ok(directory.to_string_lossy().into_owned())
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(AppState::default())
@@ -114,7 +129,8 @@ fn main() {
             host_send,
             host_stop,
             host_restart,
-            app_quit
+            app_quit,
+            default_workspace
         ])
         .build(tauri::generate_context!())
         .expect("error while building the desktop shell")
