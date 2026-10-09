@@ -38,15 +38,40 @@ test('a denied call never reaches the user', async () => {
 test('an asked call follows the answer, and a missing channel denies', async () => {
   const yes = asked(true);
   assert.deepEqual(await judged(createDecisionChain({ ask: yes.ask }), { tool: 'read', input: {} }), { decision: 'allow' });
-  assert.deepEqual(yes.calls, [{ tool: 'read', input: {}, command: undefined, reason: undefined }]);
+  assert.deepEqual(yes.calls, [{ tool: 'read', input: {}, command: undefined, reason: undefined, policy: 'ask', policySource: 'config', policyForced: false }]);
 
   const no = asked(false);
   assert.equal((await createDecisionChain({ ask: no.ask }).evaluate({ tool: 'read', input: {} })).code, 'ask_declined');
   assert.equal((await createDecisionChain({}).evaluate({ tool: 'read', input: {} })).code, 'ask_unavailable');
 });
 
-test('a later guard cannot undo an earlier denial', async () => {
-  const chain = createDecisionChain({ ask: async () => true });
+// 那一次询问带着自己那一份档位与来源（审阅 C08）：界面看着别的那一份会话时，解释这一条的不能是另一份的档位，
+// 也不能把「被连着拒绝压下来」说成「配置文件里写着逐次询问」。
+test('the question names the tier and the source of the chain that asked', async () => {
+  const plain = asked(true);
+  await judged(createDecisionChain({ ask: plain.ask }), { tool: 'read', input: {} });
+  assert.deepEqual(plain.calls.map((call) => [call.policy, call.policySource, call.policyForced]), [['ask', 'config', false]],
+    '默认那一档问过来的：档位与来源都说得出');
+
+  const session = asked(true);
+  const overridden = createDecisionChain({ mode: 'auto', ask: session.ask });
+  overridden.setMode('ask');
+  await judged(overridden, { tool: 'read', input: {} });
+  assert.deepEqual(session.calls.map((call) => [call.policy, call.policySource, call.policyForced]), [['ask', 'session', false]],
+    '这一条问过来时它走的是这一份会话自己改过的那一档');
+
+  const forced = asked(true);
+  const falling = createDecisionChain({ mode: 'auto', thresholds: { consecutive: 2, total: 99 }, ask: forced.ask });
+  falling.guard(({ command }) => (command === 'rm' ? 'no' : undefined));
+  await falling.evaluate({ tool: 'exec', input: { command: 'rm' } });
+  await falling.evaluate({ tool: 'exec', input: { command: 'rm' } });
+  assert.equal(falling.mode, 'ask', '连着拒掉两次之后这一档被压到逐次询问');
+  await judged(falling, { tool: 'exec', input: { command: 'ls' } });
+  assert.deepEqual(forced.calls.map((call) => [call.policy, call.policySource, call.policyForced]), [['ask', 'config', true]],
+    '压下来那一次说的是这一档被压下来了，来源仍是配置那一份默认');
+});
+
+test('a later guard cannot undo an earlier denial', async () => {  const chain = createDecisionChain({ ask: async () => true });
   chain.guard(() => 'first guard says no');
   chain.guard(() => undefined);
   assert.deepEqual(await judged(chain, { tool: 'exec', input: { command: 'ls' } }), {
