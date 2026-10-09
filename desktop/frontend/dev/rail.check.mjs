@@ -1,6 +1,6 @@
 // 左侧栏那一份分组规则的唯一检查：跑 `node dev/rail.check.mjs`，坏了就非零退出（方案 5.5.4）。
 import assert from 'node:assert/strict';
-import { groupByWorkspace } from '../src/rail.ts';
+import { createCallOf, groupByWorkspace } from '../src/rail.ts';
 
 const base = {
   formatVersion: 1,
@@ -36,5 +36,25 @@ assert.equal(keyed.loose.length, 0);
 
 // 空清单不造假的一组。
 assert.deepEqual(groupByWorkspace([]), { groups: [], loose: [] });
+
+// 那份持久登记是组名与「默认」那一枚标签的来源（方案 5.5.1）：登记里改过的显示名顶上，默认那一格指着的带标签。
+const alpha = { identity: 'e:\\work\\alpha', directory: 'E:\\work\\alpha', name: '改过的名字', firstSeen: '2026-10-01T00:00:00.000Z', lastSeen: '2026-10-09T00:00:00.000Z' };
+const explicit = session('a', { projectRoot: 'E:\\work\\alpha', workspace: 'e:\\work\\alpha', workspaceOrigin: 'explicit' });
+const named = groupByWorkspace([explicit], [], { default: 'e:\\work\\alpha', workspaces: [alpha] });
+assert.equal(named.groups[0].label, '改过的名字', '组名读登记里那一行的显示名，不再取目录那一段');
+assert.equal(named.groups[0].isDefault, true, '默认那一格指着谁，谁就带那一枚标签');
+assert.equal(groupByWorkspace([explicit], [], { default: null, workspaces: [alpha] }).groups[0].isDefault, false, '没有默认那一格时哪一组都不带标签');
+
+// 登记记着的位置与记录里的路径写法不同：组上那份目录取登记里最后记下的一处（方案 5.5.1）。
+const moved = groupByWorkspace([session('b', { projectRoot: 'E:\\work\\beta', workspace: 'e:\\work\\beta', workspaceOrigin: 'explicit' })], [],
+  { default: null, workspaces: [{ identity: 'e:\\work\\beta', directory: 'E:/work/beta', name: 'beta', firstSeen: '', lastSeen: '' }] });
+assert.equal(moved.groups[0].root, 'E:/work/beta', '在那一具工作区里新建时递出去的是登记里记着的那一处');
+assert.equal(moved.groups[0].label, 'beta', '显示名也在登记那一行里');
+
+// 新建会话要递出去的那一格：人选的算 explicit，界面退出来的那一份算 default，三格都没有就不指名（方案 5.5.3）。
+assert.deepEqual(createCallOf('E:/work/alpha', 'E:/work/beta', 'E:/work/gamma'), { projectRoot: 'E:/work/alpha', workspaceOrigin: 'explicit' }, '人选的那一具优先');
+assert.deepEqual(createCallOf(undefined, 'E:/work/beta', 'E:/work/gamma'), { projectRoot: 'E:/work/beta', workspaceOrigin: 'default' }, '眼前这一份会话所在的项目是界面退出来的');
+assert.deepEqual(createCallOf(undefined, undefined, 'E:/work/gamma'), { projectRoot: 'E:/work/gamma', workspaceOrigin: 'default' }, '登记里的默认那一具也是退出来的，不是人选的');
+assert.deepEqual(createCallOf(undefined, undefined, undefined), {}, '三格都没有时不指名，由宿主用它自己那一份项目环境');
 
 console.log('左侧栏的分组检查通过');

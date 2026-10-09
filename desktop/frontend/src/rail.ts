@@ -8,10 +8,17 @@ function leafOf(path: string): string {
   return parts.length === 0 ? path : parts[parts.length - 1];
 }
 
+export type WorkspaceRow = { identity: string; directory: string; name: string };
+
+/** 那份持久登记的形状（方案 5.5.1）：`workspaces.list` 交回的就是这一份，默认那一格指的是 `identity`。 */
+export type WorkspaceRoster = { default: string | null; workspaces: WorkspaceRow[] };
+
 export type RailGroup = {
   identity: string;
   root: string;
   label: string;
+  // 登记里那一格默认选择指的就是这一组（方案 5.5.1）：由 `workspaces.list` 交回，界面不自己记。
+  isDefault: boolean;
   sessions: SessionSummary[];
 };
 
@@ -25,15 +32,19 @@ function withinGroup(items: SessionSummary[]): SessionSummary[] {
 /**
  * 分组：`workspaceOrigin === 'explicit'` 的按 `workspace` 身份成组；其余进 `loose`。
  * `watched` 是这一扇窗口另外指着的那几项目录——还没有会话的那几份也要有自己那一组，人才能在它里面新建。
+ * `registry` 是那份持久登记：组名与目录优先取登记里的那一行，人改过显示名就不用目录那一段（方案 5.5.1）。
  */
-export function groupByWorkspace(sessions: SessionSummary[], watched: string[] = []): RailLayout {
+export function groupByWorkspace(sessions: SessionSummary[], watched: string[] = [], registry: WorkspaceRoster = { default: null, workspaces: [] }): RailLayout {
   const groups = new Map<string, RailGroup>();
   const loose: SessionSummary[] = [];
+  const rowOf = (identity: string, root: string) => registry.workspaces.find((one) => one.identity === identity || one.directory === root);
   const add = (identity: string, root: string, item?: SessionSummary) => {
     const known = groups.get(identity);
-    if (known === undefined) groups.set(identity, { identity, root, label: leafOf(root), sessions: item === undefined ? [] : [item] });
-    else if (item !== undefined) known.sessions.push(item);
-    return known;
+    if (known === undefined) {
+      const row = rowOf(identity, root);
+      const where = row?.directory ?? root;
+      groups.set(identity, { identity, root: where, label: row?.name ?? leafOf(where), isDefault: registry.default === identity, sessions: item === undefined ? [] : [item] });
+    } else if (item !== undefined) known.sessions.push(item);
   };
   for (const item of sessions) {
     if (item.workspaceOrigin !== 'explicit') {
@@ -55,4 +66,14 @@ export function groupByWorkspace(sessions: SessionSummary[], watched: string[] =
       .sort((left, right) => newest(right).localeCompare(newest(left))),
     loose: withinGroup(loose),
   };
+}
+
+/**
+ * 新建一份会话要递出去的那一格（方案 5.5.3）：人选的那一具算 `explicit`，界面自己退出来的那一份算 `default`，
+ * 三格都没有就不指名，由宿主用它自己那一份项目环境。
+ */
+export function createCallOf(named: string | undefined, current: string | undefined, fallback: string | undefined): { projectRoot?: string; workspaceOrigin?: 'explicit' | 'default' } {
+  const asked = named ?? current ?? fallback;
+  if (asked === undefined) return {};
+  return { projectRoot: asked, workspaceOrigin: named === undefined ? 'default' : 'explicit' };
 }
