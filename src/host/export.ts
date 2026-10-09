@@ -1,6 +1,6 @@
 // 导出的一整件（方案 6A）：一份记录写成 markdown 并落盘。读记录与补溢出正文由宿主那一次读取交出，
 // 这一层只管排版与写文件；界面那一侧只负责由人选定目的地。
-import { access, mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 /** 一次导出的逐份结果：写成了哪几份、哪一份因为已经存在没去盖、哪一份写失败与它的码。 */
@@ -88,17 +88,14 @@ export async function writeExport(path: string, main: string, branches: readonly
   for (const branch of branches) {
     const branchPath = `${stem}.${branch.id}.md`;
     try {
-      await access(branchPath);
-      skipped.push({ id: branch.id, path: branchPath, code: 'export_target_exists' });
-      continue;
-    } catch {
-      // 那一份目标不在磁盘上：这正是可以写的位置。
-    }
-    try {
-      await writeFile(branchPath, branch.text);
+      // 独占创建：先 `access` 再覆盖式写会把两份导出之间的时间差当成「这里没人写过」。
+      await writeFile(branchPath, branch.text, { flag: 'wx' });
       written.push(branchPath);
     } catch (cause) {
-      failed.push({ path: branchPath, code: String((cause as { code?: string }).code ?? 'write_failed') });
+      const code = String((cause as { code?: string }).code ?? 'write_failed');
+      // 目标已经在那儿：那一份文件的正文不是这一次导出的，谁也不该去盖它（审阅 F6）。
+      if (code === 'EEXIST') skipped.push({ id: branch.id, path: branchPath, code: 'export_target_exists' });
+      else failed.push({ path: branchPath, code });
     }
   }
   return { written, skipped, failed };

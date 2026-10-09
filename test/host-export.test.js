@@ -110,6 +110,29 @@ test('a branch file already sitting at that name is left alone and named', async
   }
 });
 
+// 两次导出同时奔同一个支线目标（审阅 R1 的第二行）：先 `access` 再覆盖式写会把这段时间差说成「两边都写成了」，
+// 磁盘上实际留下的只有后落笔那一份的正文。独占创建让其中一次拿到已存在这一条，交回的逐份结果与磁盘一致。
+test('two exports racing for one branch target leave one file and one truthful answer', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'ligule-export-race-'));
+  try {
+    const path = join(directory, '同一处.md');
+    const branchPath = join(directory, '同一处.b-1.md');
+    const [first, second] = await Promise.all([
+      writeExport(path, 'A 的主干', [{ id: 'b-1', text: 'A 的支线' }]),
+      writeExport(path, 'B 的主干', [{ id: 'b-1', text: 'B 的支线' }]),
+    ]);
+    const written = [first, second].filter((done) => done.written.includes(branchPath));
+    const skipped = [first, second].filter((done) => done.skipped.some((item) => item.code === 'export_target_exists'));
+    assert.equal(written.length, 1, '一次导出写成那一份支线文件');
+    assert.equal(skipped.length, 1, '另一次说清它没去盖');
+    assert.deepEqual(written[0].failed, []);
+    assert.deepEqual(skipped[0].failed, []);
+    assert.equal(await readFile(branchPath, 'utf8'), written[0] === first ? 'A 的支线' : 'B 的支线', '交回写成那一份的，磁盘上就是那一份的正文');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 // 一份写失败不把它已经落盘的同伴抹掉：交回的是逐份结果（审阅 F6 的第二句）。
 // 这里让主文件那一个位置是一个目录（写它必然失败），支线那一份是新的：一份失败与一份写成要各说各的。
 test('one target that cannot be written is named while the others stay reported', async () => {
