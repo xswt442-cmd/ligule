@@ -940,6 +940,39 @@ test('two saves of generation fields compose instead of reverting the first', as
   }
 });
 
+// 保存过模型字段之后新开的一份会话：状态、这一份会话在打的提供方与轮次记录读的是同一份生成选择。
+// 装载那一次的配置快照在这一笔写入之后仍是旧的那一份，新会话从它起就会让 `status.get` 说新的、
+// 记录里的 `turnContext` 说旧的，两份读数各讲各的（方案 7.2 与 D104 在同一格上相遇）。
+// 提供方是按那一份折出来的配置重建的，所以这一趟打到本机端点上的请求体自己就是第三条证据。
+test('a session created after a model save inherits the generation the environment is on', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-inherit-generation-'));
+  const home = join(root, 'home');
+  const userFile = join(home, '.ligule', 'config.toml');
+  await mkdir(dirname(userFile), { recursive: true });
+  await writeFile(userFile, '[model]\nmodel = "装载那一份"\n', 'utf8');
+  const store = createConfigStore({ projectRoot: root, userHome: home, layers: { user: { model: { model: '装载那一份' } } } });
+  try {
+    await withEndpoint(async (baseUrl, requests) => {
+      await withInProcessHost(async (connection) => {
+        const first = await connection.request('config.get', {});
+        await connection.request('config.set', { field: 'model.model', value: '保存那一份', layer: 'user', version: first.layers[0].version });
+        const second = await connection.request('config.get', {});
+        await connection.request('config.set', { field: 'model.baseURL', value: baseUrl, layer: 'user', version: second.layers[0].version });
+        const { sessionId } = await connection.request('session.create', {});
+        assert.equal((await connection.request('status.get', { sessionId })).model, '保存那一份', '新开的一份继承的是这一份环境此刻的那一份');
+        await connection.request('run.start', { sessionId, input: 'say it' });
+        const record = await connection.request('session.read', { sessionId, limit: 50 });
+        const context = record.events.find((event) => event.kind === 'turnContext');
+        assert.notEqual(context, undefined, '开轮那一份参数快照要落进记录');
+        assert.equal(context.model, '保存那一份', '记录里那一份与状态里那一份同源');
+        assert.equal(requests.at(-1).model, '保存那一份', '真正打到端点上的那一份请求带的也是它');
+      }, undefined, { configStore: store });
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 // 一具宿主开了 A、B 两份项目的会话之后，设置那一栏读写的是「现在说的那一个项目」自己那两层文件（方案 3.2、审阅 F3）。
 // 往本机覆盖那一层写的一笔只属于那一个项目；往使用者默认那一层写的一笔，两份项目各按自己折出来的那一份采用。
 test('the settings panel reads and writes the project it names, and a shared default lands on each project its own way', async () => {

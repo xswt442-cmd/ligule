@@ -542,7 +542,10 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       connection.notify({ notify: 'event', sessionId: id, event });
       for (const listener of listeners) listener(event);
     });
-    const state = { id, session, listeners, asks: new Set(), running: undefined, mode: { file: undefined, tools: [], undo: () => {} }, pending: undefined, environment: env, generation: { provider, model: config.model } };
+    // 新开的一份会话继承的是这一份项目环境此刻的那一份完整生成选择（方案 7.2、D101 的「新会话按当前配置」）：
+    // `config.model` 是装载那一次的快照，保存过模型字段之后它仍是旧的那一份，直接从它起会让状态与轮次记录分家。
+    // 没写过任何东西时 `env.generation` 还不存在，那时用的就是装载那一次的快照与它算出来的提供方。
+    const state = { id, session, listeners, asks: new Set(), running: undefined, mode: { file: undefined, tools: [], undo: () => {} }, pending: undefined, environment: env, generation: env.generation ?? { provider, model: config.model } };
     // 三处消费者读的都是这一句转手，它到调用时才去取 `state.generation` 里那一份（方案 7.3）。
     const live = currentProvider(() => state.generation.provider);
     await session.acquire();
