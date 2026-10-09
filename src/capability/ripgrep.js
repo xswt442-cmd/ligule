@@ -10,6 +10,8 @@ import { KernelError } from '../kernel/error.js';
 const PACKAGES = {
   'win32-x64': { name: 'ligule-rg-win32-x64', file: 'rg.exe' },
   'linux-x64': { name: 'ligule-rg-linux-x64', file: 'rg' },
+  'darwin-arm64': { name: 'ligule-rg-darwin-arm64', file: 'rg' },
+  'darwin-x64': { name: 'ligule-rg-darwin-x64', file: 'rg' },
 };
 
 function packaged(platform, arch) {

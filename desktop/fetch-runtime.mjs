@@ -64,11 +64,21 @@ async function sha256Checked(target) {
 }
 
 // 生产依赖的目录名：从 package.json 的 dependencies 出发，按锁文件里已经装好的那份递归收。
+// 可选依赖里只有这份清单进树；koffi 在 Windows 上供 Job Object 那条绑定用，在别的系统上装不上也不进树。
+const RUNTIME_OPTIONAL = ['koffi'];
+
 function productionPackages() {
   const manifest = JSON.parse(readFileSyncSync(join(root, 'package.json')));
   const wanted = new Set(Object.keys(manifest.dependencies ?? {}));
   const modules = join(root, 'node_modules');
   const found = new Set();
+  for (const name of RUNTIME_OPTIONAL) {
+    if (!existsSync(join(modules, name))) {
+      if (process.platform === 'win32') throw new Error(`${name} is missing but win32 needs it at runtime`);
+      continue;
+    }
+    wanted.add(name);
+  }
   for (const name of wanted) collect(name);
   function collect(name) {
     if (found.has(name)) return;

@@ -20,6 +20,24 @@
       "binary": "rg",
       "size": 2265718,
       "sha256": "33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c"
+    },
+    "darwin-arm64": {
+      "package": "ligule-rg-darwin-arm64",
+      "directory": "rg-darwin-arm64",
+      "triple": "aarch64-apple-darwin",
+      "format": "tar.gz",
+      "binary": "rg",
+      "size": 1764284,
+      "sha256": "3750b2e93f37e0c692657da574d7019a101c0084da05a790c83fd335bad973e4"
+    },
+    "darwin-x64": {
+      "package": "ligule-rg-darwin-x64",
+      "directory": "rg-darwin-x64",
+      "triple": "x86_64-apple-darwin",
+      "format": "tar.gz",
+      "binary": "rg",
+      "size": 1878284,
+      "sha256": "af7825fcc69a2afc7a7aea55fc9af90e26421d8f20fe59df32e233c0b8a231c1"
     }
   }
 }
