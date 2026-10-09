@@ -883,6 +883,118 @@ test('a field the command line wrote is reported as shadowed instead of adopted'
   }
 });
 
+// 同一层次序的另一头（审阅 F1）：项目共享那一份写着档位时，把使用者默认存成别的档位不该改变任何会话在判的那一档。
+// 盖没盖住由折完整四层说，不由「是不是命令行写的」说；交回的 `shadowedBy` 指名是哪一层盖着它。
+test('a tier saved into a lower layer that the project layer overrides adopts nothing', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-tier-override-'));
+  const home = join(root, 'home');
+  const userFile = join(home, '.ligule', 'config.toml');
+  await mkdir(dirname(userFile), { recursive: true });
+  await writeFile(userFile, '[model]\nmodel = "文件里那一份"\n', 'utf8');
+  const store = createConfigStore({ projectRoot: root, userHome: home, layers: { user: { model: { model: '文件里那一份' } }, project: { policy: { mode: 'ask' } } } });
+  try {
+    await withInProcessHost(async (connection) => {
+      const { sessionId } = await connection.request('session.create', {});
+      const shown = await connection.request('config.get', {});
+      assert.equal(shown.sources['policy.mode'], 'project', '生效那一份由项目共享那一层写着');
+      assert.equal(shown.policyMode, 'ask', '屏幕上那一份默认档是折完四层之后的');
+      const answer = await connection.request('config.set', { field: 'policy.mode', value: 'auto', layer: 'user', version: shown.layers[0].version });
+      assert.equal(answer.shadowed, true);
+      assert.equal(answer.shadowedBy, 'project', '说的是哪一层盖住了这一笔');
+      assert.deepEqual(answer.applies, [], '前后折出来是同一份，没有一份会话要采用它');
+      assert.equal((await connection.request('status.get', { sessionId })).policy, 'ask', '正在判的那一档没被低一层的写入放宽');
+      assert.ok((await readFile(userFile, 'utf8')).includes('mode = "auto"'), '文件那一笔还是写成了：说的是当前运行没变，不是没写');
+    }, undefined, { configStore: store, policy: { mode: 'ask' } });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// 连着改两条生成字段（审阅 F2）：后一次重建提供方用的是这一格项目环境此刻的那一份完整选择，
+// 不是装载那一次的快照，所以改服务地址不会把刚改过的模型名退回装载时那一份。
+test('two saves of generation fields compose instead of reverting the first', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-two-edits-'));
+  const home = join(root, 'home');
+  const userFile = join(home, '.ligule', 'config.toml');
+  await mkdir(dirname(userFile), { recursive: true });
+  await writeFile(userFile, '[model]\nmodel = "旧的"\n', 'utf8');
+  const store = createConfigStore({ projectRoot: root, userHome: home, layers: { user: { model: { model: '旧的' } } } });
+  try {
+    await withInProcessHost(async (connection) => {
+      const { sessionId } = await connection.request('session.create', {});
+      const first = await connection.request('config.set', { field: 'model.model', value: '改过的模型', layer: 'user', version: (await connection.request('config.get', {})).layers[0].version });
+      assert.deepEqual(first.applies.map((item) => item.when), ['now'], '空着的会话立刻采用');
+      assert.equal((await connection.request('status.get', { sessionId })).model, '改过的模型');
+      const shown = await connection.request('config.get', {});
+      const second = await connection.request('config.set', { field: 'model.baseURL', value: 'https://edited.test/v1', layer: 'user', version: shown.layers[0].version });
+      assert.deepEqual(second.applies.map((item) => item.when), ['now']);
+      const status = await connection.request('status.get', { sessionId });
+      assert.equal(status.model, '改过的模型', '改地址那一笔没把模型名退回装载时那一份');
+      assert.equal(status.pendingModel, null, '空着的会话没有等在边界的另一份');
+      const text = await readFile(userFile, 'utf8');
+      assert.ok(text.includes('model = "改过的模型"') && text.includes('baseURL = "https://edited.test/v1"'), '两份都落在那一份文件里');
+      assert.equal((await connection.request('config.get', {})).model.baseURL, 'https://edited.test/v1', '屏幕上说的与运行里打的是同一份');
+    }, undefined, { configStore: store });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// 一具宿主开了 A、B 两份项目的会话之后，设置那一栏读写的是「现在说的那一个项目」自己那两层文件（方案 3.2、审阅 F3）。
+// 往本机覆盖那一层写的一笔只属于那一个项目；往使用者默认那一层写的一笔，两份项目各按自己折出来的那一份采用。
+test('the settings panel reads and writes the project it names, and a shared default lands on each project its own way', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-project-settings-'));
+  const a = join(root, 'a');
+  const b = join(root, 'b');
+  const home = join(root, 'home');
+  await mkdir(join(b, '.ligule'), { recursive: true });
+  await mkdir(home, { recursive: true });
+  await writeFile(join(b, '.ligule', 'config.local.toml'), '[model]\nmodel = "B 那一份"\n', 'utf8');
+  const quiet = { capabilities: MESSAGES_CAPABILITIES, model: 'test-model', async *stream() { yield { type: 'text', text: 'ok' }; } };
+  const environmentOf = (projectRoot) => ({
+    config: createConfig({ user: { boundary: projectRoot, model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model' } } }),
+    provider: quiet,
+    policy: { mode: 'auto' },
+    layers: {},
+  });
+  const pair = createMemoryConnectionPair();
+  const host = serveHost({
+    input: pair.host.input,
+    output: pair.host.output,
+    ...environmentOf(a),
+    loadEnvironment: async (projectRoot) => environmentOf(projectRoot),
+    configLayers: {},
+    configStoreFor: (projectRoot, layers) => createConfigStore({ projectRoot, userHome: home, layers }),
+  });
+  const client = createConnection(pair.client);
+  try {
+    const inA = await client.request('session.create', {});
+    const inB = await client.request('session.create', { projectRoot: b });
+
+    const shownB = await client.request('config.get', { projectRoot: b });
+    assert.equal(shownB.model.model, 'B 那一份', '指名 B 就读 B 的本机覆盖那一层');
+    assert.equal(shownB.sources['model.model'], 'local');
+    const shownA = await client.request('config.get', {});
+    assert.equal(shownA.model.model, undefined, 'A 那一格没写：读自己那两层，不拿 B 的那一份来说');
+
+    const written = await client.request('config.set', { field: 'model.model', value: 'B 改过的', layer: 'projectLocal', version: shownB.layers[1].version, projectRoot: b });
+    assert.deepEqual(written.applies.map((item) => item.sessionId), [inB.sessionId], '只有 B 的会话采用它');
+    assert.ok((await readFile(join(b, '.ligule', 'config.local.toml'), 'utf8')).includes('B 改过的'));
+    await assert.rejects(() => stat(join(a, '.ligule', 'config.local.toml')), 'A 的那一份文件没被这次写出来');
+    assert.equal((await client.request('status.get', { sessionId: inA.sessionId })).model, 'test-model', 'A 的会话打的东西没被这一次带动');
+
+    // 使用者默认那一层是所有项目共用的：A 折得到它，B 自己被本机覆盖那一层盖着，所以只有 A 采用（D8 的层序）。
+    const saved = await client.request('config.set', { field: 'model.model', value: '共用默认', layer: 'user', version: shownB.layers[0].version });
+    assert.deepEqual(saved.applies.map((item) => item.sessionId), [inA.sessionId], 'B 那一格由本机覆盖写着，低一层的默认盖不过它');
+    assert.equal((await client.request('status.get', { sessionId: inA.sessionId })).model, '共用默认');
+    assert.equal((await client.request('status.get', { sessionId: inB.sessionId })).model, 'B 改过的');
+  } finally {
+    pair.client.output.end();
+    await host.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 // 展示值由宿主拼：每一格要先是字符串，地址只留协议、主机、端口与路径那一段（实现顺序第 67 步）。
 test('shownConfigOf keeps the displayable part of each field', () => {
   assert.deepEqual(shownConfigOf({ model: { api: 'messages', baseURL: 'https://user:secret@api.example.test:8443/v1?token=abc#frag', model: 42 } }), {
@@ -1088,6 +1200,25 @@ test('closing a session hands back its record lock and leaves the record alone',
     assert.deepEqual(reopened, { sessionId });
     const after = await connection.request('session.read', { sessionId });
     assert.deepEqual(after.events, before.events, '收过一次之后，记录里的事件一条没多、一条没少');
+  });
+});
+
+// 跑着的那一轮不该挡住「看一眼这一份会话」（审阅 F4）：桌面切换会话先要接住这一份，接不上就连那一屏的记录也读不到。
+// 这一条只看不改：不重装配、不收线，也不把这一轮打断。
+test('opening a session that is already open and running is a read, not an interruption', async () => {
+  await withInProcessHost(async (connection, { hold }) => {
+    const { sessionId } = await connection.request('session.create', {});
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    hold(gate);
+    const running = connection.request('run.start', { sessionId, input: '慢一点' });
+    await delay(50);
+    assert.deepEqual(await connection.request('session.open', { sessionId }), { sessionId }, '接回来这一份是成立的：它没被打断，也没换装配');
+    const read = await connection.request('session.read', { sessionId });
+    assert.ok(read.events.some((event) => event.kind === 'user'), '正在跑的那一句已经在记录里，画面读得到');
+    assert.equal((await connection.request('status.get', { sessionId })).running, true, '这一轮还在跑');
+    release(undefined);
+    assert.ok((await running).iterations >= 1, '这一轮自己走完了');
   });
 });
 

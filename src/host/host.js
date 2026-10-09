@@ -192,10 +192,13 @@ export function shownConfigOf(config) {
 // modeName 与 modePaths 是一对：给了名字就要能给那三层目录，运行中换模式要用同一套查找（D41、D44）。
 // 扩展来源由装载侧算好交进来（D68：项目层与本地层里写的路径不算）：paths 是要加载的文件，
 // ignored 是那些被这条规则挡掉的路径，它们进日志而不是静默消失。
-export function createHost({ config, provider, plugins = [minimalPlugin, networkPlugin], policy, logger, modeName, modePaths, skillRegistry, templateRegistry, extensions = { paths: [], ignored: [] }, loadEnvironment, configStore, deriveProvider = providerFromConfig }) {
-  // 一份项目环境：这个项目自己的配置快照、提供方、判定档位、模式目录与记录目录（方案 3.1 与 3.2）。
+export function createHost({ config, provider, plugins = [minimalPlugin, networkPlugin], policy, logger, modeName, modePaths, skillRegistry, templateRegistry, extensions = { paths: [], ignored: [] }, loadEnvironment, configStore, configLayers, configStoreFor, deriveProvider = providerFromConfig }) {
+  // 一份项目环境：这个项目自己的配置快照、提供方、判定档位、模式目录、记录目录与那两格可写的配置文件（方案 3.1 与 3.2）。
   // 校验在装载这一刻做完：一条坏配置不该等到模型第一次调用才炸（D60）。
   // 边界是工具读写的位置，也是指令文件上溯的止点，两边都读它，缺一处就说缺一处。
+  // 那两格可写的配置文件跟着环境走：设置那一栏说的是「哪一个项目的哪一层文件」，读与写都落在它自己身上（方案 3.2、审阅 F3）。
+  // 使用者默认那一层是所有项目共用的那一份文件，项目共享与本机覆盖各是这一个项目自己的（D8 的层序）。
+  // 存储由装载侧建（`configStoreFor`）：路径、文件名与用户目录的位置都在那一侧算，宿主只认层名、字段与读回的那一份版本（方案 7.2）。
   function prepareEnvironment(own) {
     if (!Object.isFrozen(own.config)) throw new KernelError('host_config_must_be_frozen');
     if (typeof own.config?.boundary !== 'string' || own.config?.boundary === '') throw new KernelError('host_boundary_required');
@@ -203,6 +206,8 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     if (own.modeName !== undefined && own.modePaths === undefined) throw new KernelError('host_mode_paths_required');
     return {
       projectRoot: own.config.boundary,
+      layers: own.layers ?? {},
+      store: own.store ?? configStoreFor?.(own.config.boundary, own.layers ?? {}),
       config: own.config,
       provider: own.provider,
       policy: own.policy,
@@ -218,6 +223,10 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
 
   const defaultEnvironment = prepareEnvironment({
     config, provider, policy, modeName, modePaths, skillRegistry, templateRegistry, extensions,
+    // 装载那一次读到的四层交进来，存储就在宿主这一侧按那一份建：来源那一格要说得出一条值现在由哪一层写着（方案 7.1）。
+    // `configStore` 是启动那一份环境已有的存储，装载侧自己建好时用这一条（`ligule host` 走的是 `configLayers`）。
+    layers: configLayers,
+    store: configStore,
   });
   // 按项目根存一张表：同一份项目环境只装载一次，之后开这一项目的会话与列这一项目的记录都读它。
   const environments = new Map([[defaultEnvironment.projectRoot, defaultEnvironment]]);
@@ -268,49 +277,92 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     return state;
   }
 
-  // 刚写进配置的那一个字段落在哪一份提供方上，由这一处算：值已经过写入侧的形状校验，这里只按那一条路径
-  // 重算一份提供方，交给属于启动这一格项目环境的每一份会话——空着的立刻采用，跑着的等自己那一轮的边界（方案 7.3 第二行）。
-  // 重算失败是「文件已保存但该会话未生效」那一类：把话说出来，不把两步并成一步成功。
-  // 档位与规则表的生效边界是「下一次判定」（方案 7.3 第一行）：已经派发出去的调用不受这一笔影响。
-  // 配置里的默认改了，会话自己覆盖过档位的那一份不动（D101）；规则表只有配置那一层，改完就换。
-  function adoptPolicy(key, value) {
-    const applies = [];
-    for (const [id, state] of sessions) {
-      if (state.environment !== defaultEnvironment) continue;
-      if (key === 'rules') state.chain.setRules(value);
-      else state.chain.setConfiguredMode(value);
-      applies.push({ sessionId: id, when: 'now' });
-    }
-    defaultEnvironment.policy = key === 'rules' ? { ...defaultEnvironment.policy, rules: value } : { ...defaultEnvironment.policy, mode: value };
-    return { applies };
-  }
-
-  function adoptGeneration(key, value) {
-    const next = { ...defaultEnvironment.config, model: { ...defaultEnvironment.config.model, [key]: value } };
+  // 刚写进配置的那一个字段落在哪一份提供方上，由这一处算。写入侧交回的是落盘之后按层序重折出来的那一份值，
+  // 不是刚写进去的那一个（方案 7.1、D8）：更上面那一层（项目共享、本机覆盖、命令行）还写着它时，
+  // 这一笔改了文件却没改变任何会话在打的东西，那种写入要说成「当前运行没变」，不能报成采用了。
+  // 基座用的是这一份项目环境此刻的那一份完整生成选择，不是装载那一次的快照：连着改两条字段，后一次盖不掉前一次。
+  // 装载那一次的配置快照不动：正在跑的这一份环境用的就是它。`config.get` 读的是可写那两层文件的此刻内容（方案 3A），
+  // 会话现在打的那一份从 `status.get` 读；两份读数各自说一件事，界面把它们分开摆。
+  function adoptGeneration(env, key, effective) {
+    const base = env.generation ?? { provider: env.provider, model: env.config.model };
+    const model = { ...base.model, [key]: effective };
     let provider;
     try {
-      provider = deriveProvider(next);
+      provider = deriveProvider({ ...env.config, model });
     } catch (error) {
       return { applies: [], failure: { code: error.code ?? 'provider_rebuild_failed', detail: String(error.detail ?? error.message) } };
     }
+    // 折出来的那几格一格没变，就没有任何东西要采用：一条没改变的写入报成「采用了」，
+    // 界面会说出没发生过的事（方案 7.3 的 `applies` 说的是真实生效边界）。
+    const changed = new Set([...Object.keys(base.model ?? {}), ...Object.keys(model)]);
+    if ([...changed].every((field) => base.model?.[field] === model[field])) return { applies: [] };
+    env.generation = { provider, model };
+    // 这一格项目环境的提供方跟着走：新开的会话读的是它，于是继承的是最近一次真正生效的那一份（方案 7.2）。
+    env.provider = provider;
     const applies = [];
     for (const [id, state] of sessions) {
-      if (state.environment !== defaultEnvironment) continue;
+      if (state.environment !== env) continue;
       if (state.running === undefined) {
-        state.generation = { provider, model: next.model };
+        state.generation = { provider, model };
         state.pendingGeneration = undefined;
         applies.push({ sessionId: id, when: 'now' });
       } else {
-        state.pendingGeneration = { provider, model: next.model };
+        state.pendingGeneration = { provider, model };
         applies.push({ sessionId: id, when: 'round' });
       }
     }
-    // 这一格项目环境的提供方跟着走：新开的会话读的是它，于是继承的是最近一次写进去的那一份，
-    // 而不是装配那一次的那一份（方案 7.2「已有显式会话选择保持其选择，保存后重算受这层影响的继承者」）。
-    // 装载那一次的配置快照不动：正在跑的这一份环境用的就是它。`config.get` 读的是可写那两层文件的此刻内容（方案 3A），
-    // 会话现在打的那一份从 `status.get` 读；两份读数各自说一件事，界面把它们分开摆。
-    defaultEnvironment.provider = provider;
     return { applies };
+  }
+
+  // 档位与规则表的生效边界是「下一次判定」（方案 7.3 第一行）：已经派发出去的那一次调用不受这一笔影响。
+  // 配置里的默认改了才动会话，会话自己覆盖过档位的那一份不动（D101）；规则表整份替换，只有配置那一层写着它（D8）。
+  function adoptPolicy(env, key, effective) {
+    if (key === 'rules') {
+      if (JSON.stringify(env.policy?.rules ?? []) === JSON.stringify(effective ?? [])) return { applies: [] };
+      const applies = [];
+      for (const [id, state] of sessions) {
+        if (state.environment !== env) continue;
+        state.chain.setRules(effective);
+        applies.push({ sessionId: id, when: 'now' });
+      }
+      env.policy = { ...env.policy, rules: effective };
+      return { applies };
+    }
+    if (env.policy?.mode === effective) return { applies: [] };
+    const applies = [];
+    for (const [id, state] of sessions) {
+      if (state.environment !== env) continue;
+      state.chain.setConfiguredMode(effective);
+      applies.push({ sessionId: id, when: 'now' });
+    }
+    env.policy = { ...env.policy, mode: effective };
+    return { applies };
+  }
+
+  // 这一格项目环境按层序折出来的那一份有效值：写完之后每一份都各折一次，因为大家共用使用者默认、
+  // 各自有项目共享与本机覆盖那两层（D8、方案 3.2）。折不出来的环境（装载侧没给四层）不参与这一遍。
+  async function effectiveOf(env, table, key) {
+    if (env.store === undefined) return undefined;
+    const fresh = await env.store.read();
+    return key === 'rules' ? fresh.rules : fresh.values?.[table]?.[key];
+  }
+
+  // 一次写入影响哪一些项目环境由层名说：使用者默认那一层是所有已装载项目共用的那一份文件，
+  // 本机覆盖只属于它自己那一个项目（方案 3.2、审阅 F3）。每一份环境用的是它自己折出来的那一份，
+  // 被本项目那两层盖着的会话不会因为别人往低一层写就换掉在打的东西（方案 7.1、D8）。
+  async function adoptWritten(env, layer, table, key, effective, changed) {
+    const applies = [];
+    let failure;
+    for (const target of layer === 'user' ? [...environments.values()] : [env]) {
+      // 写入那一份环境：折前折后是同一份值时什么都不采用，那一格环境早就在打这一份（审阅 F1 的那一句「未改变当前运行」）。
+      if (target === env && changed === false) continue;
+      const own = target === env ? effective : await effectiveOf(target, table, key);
+      if (own === undefined) continue;
+      const answer = table === 'policy' ? adoptPolicy(target, key, own) : adoptGeneration(target, key, own);
+      applies.push(...answer.applies);
+      if (answer.failure !== undefined) failure = answer.failure;
+    }
+    return { applies, ...(failure === undefined ? {} : { failure }) };
   }
 
   // 一次装配的收尾：MCP 的子进程、扩展的监听、模板登记表与那一份记录锁，四样都只在这一份会话里存在过（D60、D37、D85）。
@@ -498,7 +550,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     try {
     const chain = createDecisionChain({
       ...policy,
-      ask: async ({ tool, input, command, reason, shell, executable }) => {
+      ask: async ({ tool, input, command, reason, shell, executable, policy, policySource, policyForced }) => {
         let settle;
         const cancelled = new Promise((resolve) => {
           settle = () => resolve(false);
@@ -508,8 +560,9 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           // 后端那两样只在真有一条命令要判时带上：没有命令文本的调用（读文件一类）不该在答复里多出一个空字段，
           // 否则同一条协议在按行转递的载体上与在进程内的那一种上读到的形状就不一样。
           // 那一份会话属于哪一项目录跟着请求一起交出去：客户端看着别的那一份时也要答得出这一条，答的是那一个项目里的这件事。
+          // 档位与它的来源也一起交出去，读的是这一次判定自己那一条链：界面看着别的那一份会话时，解释这一条的不能是另一份的档位（审阅 C08）。
           const request = connection.request(APPROVAL_METHOD, {
-            sessionId: id, projectRoot: config.boundary, tool, args: input, command, reason,
+            sessionId: id, projectRoot: config.boundary, tool, args: input, command, reason, policy, policySource, policyForced,
             ...(shell === undefined ? {} : { shell, executable }),
           });
           return await Promise.race([
@@ -742,11 +795,15 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           // 已经在这具宿主里开着的会话读它自己那一份项目环境，与 `session.read` 同一个形状：
           // 不带 `projectRoot` 的接回（重读手里那一份、刚在别项目录里建好的那一份）按默认那一份去找记录，会报出假的 `session_not_found`。
           if (sessions.has(sessionId)) {
+            // 已经在这具宿主里开着的会话，接回来是一次纯读：正在跑的那一轮不因这一次重装配、也不因这一次收线（审阅 F4）。
+            // `run_already_running` 说的是「别在跑着的时候收掉这一份会话」那一条路（`session.close`），看着它不是那件事。
+            // 指了模式就按 D41 那条边界走：空着的立刻采用，跑着的等自己那一轮收尾，这一处不越过去。
             const state = open(sessionId);
-            if (state.running !== undefined) throw new KernelError('run_already_running', { detail: sessionId });
             if (message.params.mode !== undefined) {
               if (state.environment.modePaths === undefined) throw new KernelError('host_mode_paths_required');
-              await state.adopt(await loadMode(message.params.mode, state.environment.modePaths));
+              const requested = await loadMode(message.params.mode, state.environment.modePaths);
+              if (state.running === undefined) await state.adopt(requested);
+              else state.pending = requested;
             }
             return { sessionId };
           }
@@ -861,8 +918,13 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
             branches.push({ id: branchId, text: exportMarkdown(branch.events, { id: branchId, projectRoot: header.projectRoot }) });
           }
           try {
-            return { written: await writeExport(message.params.path, main, branches), skipped };
+            // 逐份结果从这一处交回：写成了哪几份、哪一份位置已经有人占着、哪一份写失败（审阅 F6）。
+            // 那一份没写成说的是那一份，主文件落在哪里一起交回，不并成一句整体失败。
+            const done = await writeExport(message.params.path, main, branches);
+            return { written: done.written, skipped: [...skipped, ...done.skipped], failed: done.failed };
           } catch (cause) {
+            if (cause instanceof KernelError) throw cause;
+            // 那一个位置连目录都建不出来（路径落在一个文件下面、没有写权限）：这一句说的是整批没开始写。
             throw new KernelError('host_export_write_failed', { cause, detail: `${message.params.path}: ${cause.message}` });
           }
         }
@@ -951,8 +1013,11 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           // 凭据只走环境变量是一条约定，不是拦阻（D13、D60），所以交出整份快照证明不了帧里没有别的东西。
           // 值、来源与各层文件的版本出自同一遍读取（方案 3A）：界面上那三样说的是同一时刻的那一份文件。
           // 版本是写的时候要比对的那一份：光有值比不出「别人也改过」。
-          if (configStore === undefined) return { ...shownConfigOf(config), layers: [], sources: {} };
-          const { layers, sources, values, rules, rulesSource } = await configStore.read();
+          // 指名了项目就读那一份项目的两层文件：设置那一栏说的是「哪一个项目的哪一层」（方案 3.2、审阅 F3）。
+          // 帧里不出现那一个根：界面上选的是哪一份项目由它自己带着，宿主把位置说进帧里是另一条规矩不允许的（D13）。
+          const env = await environmentFor(message.params.projectRoot);
+          if (env.store === undefined) return { ...shownConfigOf(env.config), layers: [], sources: {} };
+          const { layers, sources, values, rules, rulesSource } = await env.store.read();
           return {
             ...shownConfigOf(values),
             // 配置里写着的默认档：这一格说的是文件里现在那一份，正在生效的那一份从 `status.get` 读（D40、D101）。
@@ -966,18 +1031,29 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
         case 'config.set': {
           // 字段表、值的形状与「哪一层落在哪一个文件」都由那一格配置里的写入侧持有：这一处只转发，
           // 界面说不出文件路径，也说不出白名单之外的键（方案 7.2）。
-          if (configStore === undefined) throw new KernelError('config_write_unsupported');
+          if (defaultEnvironment.store === undefined) throw new KernelError('config_write_unsupported');
           const { field, value, layer, version, op, index, ruleTool, ruleDecision, ruleMatch, ruleReason } = message.params;
           // 规则的四格在协议表里各是一个字符串：校验器认形状，宿主这一侧 `checkedRule` 认内容（D100）。
           const given = { tool: ruleTool, decision: ruleDecision, match: ruleMatch, reason: ruleReason };
           const rule = Object.values(given).every((item) => item === undefined) ? undefined : given;
-          const { key, shadowed, rules, ...saved } = await configStore.write({ layer, field, value, version, op, index, rule });
-          // 白名单里那四条模型字段都是提供方要读的那几格，所以写完就问一句：哪一份会话现在就换，哪一份等自己那一轮的边界。
+          const env = await environmentFor(message.params.projectRoot);
+          if (env.store === undefined) throw new KernelError('config_write_unsupported');
+          const { key, table, shadowed, shadowedBy, changed, effective, layers, ...saved } = await env.store.write({ layer, field, value, version, op, index, rule });
+          // 白名单里那几条模型字段都是提供方要读的那几格，所以写完就问一句：哪一份会话现在就换，哪一份等自己那一轮的边界。
+          // 采用的依据是落盘之后按层序重折出来的那一份有效值，不是刚写进去的那一个（方案 7.1、D8）：
+          // 更上面那一层还写着它时，前后折出来是同一份，会话一份都不动、`applies` 交回空，界面由 `shadowed` 与 `shadowedBy` 说出是哪一层盖着它。
+          // 那一条值本来就是命令行 `--config` 写着的话，也在这一条里：`shadowedBy` 说的是 `flag`。
           // 档位与规则表是另一类：接受之后立即作用于后续判定（方案 7.3 第一行），不等轮次边界。
-          // 那一条值本来就是命令行 `--config` 写着的话，改文件盖不过它（D8 的次序、方案 7.1）：这一笔说成 shadowed，正在用的提供方不动。
-          const adoption =
-            shadowed === true ? { applies: [] } : key === 'rules' || key === 'mode' ? adoptPolicy(key, rules ?? value) : adoptGeneration(key, value);
-          return { ...saved, shadowed, ...adoption, ...(rules === undefined ? {} : { rules }), layers: (await configStore.read()).layers };
+          const adoption = await adoptWritten(env, layer, table, key, effective, changed);
+          return {
+            ...saved,
+            shadowed,
+            ...(shadowedBy === undefined ? {} : { shadowedBy }),
+            changed,
+            ...adoption,
+            ...(key === 'rules' ? { rules: effective } : {}),
+            layers,
+          };
         }
         case 'session.compact': {
           const state = open(sessionId);

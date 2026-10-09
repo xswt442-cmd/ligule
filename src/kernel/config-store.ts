@@ -73,32 +73,33 @@ export function createConfigStore({ projectRoot, userHome, layers = {} }: { proj
     }
     return values;
   };
+  // 设置那一栏要读的东西一次读齐（方案 3A）：可写的那两层各读一遍文件，界面上的值、每一条由哪一层写着、
+  // 生效的那张规则表与它的来源、以及写的时候要带回去的那一份版本，全部出自这一遍。
+  // 只读的那两层（项目共享与命令行）留在装载那一次读到的那一份上：这一栏改不了它们，
+  // 正在跑的这一份环境用的也是那一次读到的，说成文件此刻的内容反而对不上。
+  // 这一处只读不写：判定链、提供方与记录都不从这儿取东西，打开设置那一栏改不了正在执行的权限。
+  const readNow = async () => {
+    const readLayers = await Promise.all(
+      LAYERS.map(async (layer) => {
+        const { version, table } = await readConfigLayer(pathOf(layer));
+        layers[keyOfLayer(layer)] = table;
+        // 规则表那一格只有写着它的那一层才交回：别的层没有这一张表就是没有，不交回一份空数组让人以为被盖住了。
+        const written = inLayer(table, ['policy', 'rules']);
+        return { layer, version, exists: version !== '', ...(written ? { rules: rulesOfLayer(table) } : {}) };
+      }),
+    );
+    return {
+      layers: readLayers,
+      // 白名单里每一条现在由哪一层写着（方案 7.1 的来源那一格）。`flag` 是命令行 `--config` 写的那一层，只读。
+      sources: Object.fromEntries(Object.keys(EDITABLE).map((field) => [field, sourceOf(field)])),
+      values: foldValues(),
+      // 现在生效的那一张规则表与它出自哪一层（方案 7.1 的三种读数）：界面上列规则、改规则都读这一份。
+      rules: effectiveRules(),
+      rulesSource: sourceOf(RULES_FIELD),
+    };
+  };
   return {
-    // 设置那一栏要读的东西一次读齐（方案 3A）：可写的那两层各读一遍文件，界面上的值、每一条由哪一层写着、
-    // 生效的那张规则表与它的来源、以及写的时候要带回去的那一份版本，全部出自这一遍。
-    // 只读的那两层（项目共享与命令行）留在装载那一次读到的那一份上：这一栏改不了它们，
-    // 正在跑的这一份环境用的也是那一次读到的，说成文件此刻的内容反而对不上。
-    // 这一处只读不写：判定链、提供方与记录都不从这儿取东西，打开设置那一栏改不了正在执行的权限。
-    async read() {
-      const readLayers = await Promise.all(
-        LAYERS.map(async (layer) => {
-          const { version, table } = await readConfigLayer(pathOf(layer));
-          layers[keyOfLayer(layer)] = table;
-          // 规则表那一格只有写着它的那一层才交回：别的层没有这一张表就是没有，不交回一份空数组让人以为被盖住了。
-          const written = inLayer(table, ['policy', 'rules']);
-          return { layer, version, exists: version !== '', ...(written ? { rules: rulesOfLayer(table) } : {}) };
-        }),
-      );
-      return {
-        layers: readLayers,
-        // 白名单里每一条现在由哪一层写着（方案 7.1 的来源那一格）。`flag` 是命令行 `--config` 写的那一层，只读。
-        sources: Object.fromEntries(Object.keys(EDITABLE).map((field) => [field, sourceOf(field)])),
-        values: foldValues(),
-        // 现在生效的那一张规则表与它出自哪一层（方案 7.1 的三种读数）：界面上列规则、改规则都读这一份。
-        rules: effectiveRules(),
-        rulesSource: sourceOf(RULES_FIELD),
-      };
-    },
+    read: readNow,
     write(request: WriteRequest & { layer: string }) {
       const definition = editableField(request.field);
       const file = pathOf(request.layer);
@@ -111,13 +112,28 @@ export function createConfigStore({ projectRoot, userHome, layers = {} }: { proj
           throw new KernelError('config_rules_elsewhere', { detail: `the rule table in effect is written by the ${source} layer, not ${request.layer}` });
         }
       }
-      return writeConfigField(file, request).then((written) => ({
-        ...written,
-        // 那一个字段落在提供方配置的哪一格上：宿主按这一格重算提供方，不必知道白名单的全表（方案 7.3）。
-        key: definition.path[1],
-        // 值本来就是只读那一层写的话，这一笔改了也盖不过它——宿主因此不动正在跑的提供方，界面另说一句。
-        shadowed: sourceOf(request.field) === 'flag',
-      }));
+      // 落笔之前先记下这一条现在折出来的是哪一份：宿主要说的是「这一笔有没有改变当前生效的那一份」，
+      // 不是「这一笔写进去的是什么值」——更上面那一层本来就写着它时，前后是同一份，运行里什么都不会变。
+      const before = definition.kind === 'rules' ? JSON.stringify(effectiveRules()) : JSON.stringify(valueOf(request.field));
+      return writeConfigField(file, request).then(async (written) => {
+        // 落盘之后按层序重折一次，交回的是「这一条现在生效的是哪一份值、由哪一层写着」，不是刚写进去的那一个值（D8、方案 7.1）。
+        // 读的是这一遍，版本也是这一遍的：宿主随后要说「保存了但当前运行没变」，两句必须出自同一时刻的文件。
+        const fresh = await readNow();
+        const source = definition.kind === 'rules' ? fresh.rulesSource : fresh.sources[request.field];
+        const holder = keyOfLayer(request.layer);
+        const effective = definition.kind === 'rules' ? fresh.rules : fresh.values[definition.path[0]]?.[definition.path[1]];
+        return {
+          ...written,
+          // 那一个字段落在提供方配置的哪一格上：宿主按这一格重算提供方，不必知道白名单的全表（方案 7.3）。
+          key: definition.path[1],
+          table: definition.path[0],
+          shadowed: source !== holder,
+          shadowedBy: source !== holder ? source : undefined,
+          changed: JSON.stringify(effective) !== before,
+          effective,
+          layers: fresh.layers,
+        };
+      });
     },
   };
 }

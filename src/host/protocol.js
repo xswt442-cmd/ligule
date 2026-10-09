@@ -152,12 +152,17 @@ export const METHODS = Object.freeze({
   // 而这条路只交得出白名单里的几格——没有参数可点路径，所以界面要不到别的格。
   'config.get': {
     description: 'Read the configuration this interface may show: the host builds the answer from the whitelisted fields it owns, and those values, the layer writing each one and the version of every writable settings file come from one read, so no path can be asked for and no credential ever comes from configuration (D13, D60)',
-    parameters: { type: 'object', properties: {}, description: 'reading the shown configuration takes no argument' },
+    parameters: {
+      type: 'object',
+      properties: {
+        projectRoot: { type: 'string', description: 'the project whose settings layers to read; absent means the one the Host was launched on' },
+      },
+    },
   },
   // 第十条只为界面多出来的方法：配置由宿主持有，界面说得出改哪一个白名单字段、写进哪一层，以及它读回的那一份版本；
   // 文件路径、白名单之外的键与项目共享那一份配置都说不出口（方案 7.2）。
   'config.set': {
-    description: 'Write one whitelisted configuration field into one settings layer; the host owns the field list, the value shape and the target file, and refuses the write when that file changed since it was read',
+    description: 'Write one whitelisted configuration field into one settings layer of one project; the host owns the field list, the value shape and the target file, refuses the write when that file changed since it was read, and adopts only the sessions whose effective value changed after the layers are folded again',
     parameters: {
       type: 'object',
       properties: {
@@ -165,6 +170,7 @@ export const METHODS = Object.freeze({
         value: { type: 'string', description: 'the new value of a one-line field; the host checks it against the shape that field declares' },
         layer: { type: 'string', description: 'which settings file to write; the writable ones are named back when this is not one of them' },
         version: { type: 'string', description: 'the version read from that file, so a concurrent edit is reported instead of overwritten; blank when that file did not exist' },
+        projectRoot: { type: 'string', description: 'the project whose settings layer to write; absent means the one the Host was launched on' },
         op: { type: 'string', description: 'for the tool rule table: add a rule, change that one rule, or remove it' },
         index: { type: 'number', description: 'which rule in the table that layer writes, counted from 0; ignored when adding' },
         ruleTool: { type: 'string', description: 'for add and change: the capability name the rule matches' },

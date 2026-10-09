@@ -1,7 +1,14 @@
 // 导出的一整件（方案 6A）：一份记录写成 markdown 并落盘。读记录与补溢出正文由宿主那一次读取交出，
 // 这一层只管排版与写文件；界面那一侧只负责由人选定目的地。
-import { mkdir, writeFile } from 'node:fs/promises';
+import { access, mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
+
+/** 一次导出的逐份结果：写成了哪几份、哪一份因为已经存在没去盖、哪一份写失败与它的码。 */
+export interface Exported {
+  readonly written: readonly string[];
+  readonly skipped: readonly { id: string; path?: string; code: string }[];
+  readonly failed: readonly { path: string; code: string }[];
+}
 
 export interface ExportRecord {
   readonly kind: string;
@@ -62,16 +69,37 @@ export function exportMarkdown(events: readonly ExportRecord[], meta: { id: stri
   return `${lines.join('\n').trimEnd()}\n`;
 }
 
-/** 导出的那几份文件：主干一份，每一条派生支线另写一份，文件名里带着那条支线自己的 id。 */
-export async function writeExport(path: string, main: string, branches: readonly { id: string; text: string }[]): Promise<string[]> {
+/** 导出的那几份文件：主干一份，每一条派生支线另写一份，文件名里带着那条支线自己的 id。
+ *  主干那一个位置是人在原生保存对话框里选定并确认过的（终端那一路是他自己打的那一条路径），所以它写下去；
+ *  同前缀的支线文件没有人看过那一份已经存在没有，就不盖（审阅 F6）：交回 `export_target_exists` 与那一条路径。
+ *  每份文件各报各的结果：那一份没写成，说的是这一份，主文件已经落在哪里也一起交回。 */
+export async function writeExport(path: string, main: string, branches: readonly { id: string; text: string }[]): Promise<Exported> {
   await mkdir(dirname(path), { recursive: true });
-  const written = [path];
-  await writeFile(path, main);
+  const written: string[] = [];
+  const skipped: { id: string; path?: string; code: string }[] = [];
+  const failed: { path: string; code: string }[] = [];
+  try {
+    await writeFile(path, main);
+    written.push(path);
+  } catch (cause) {
+    failed.push({ path, code: String((cause as { code?: string }).code ?? 'write_failed') });
+  }
   const stem = path.replace(/\.(md|markdown|txt)$/i, '');
   for (const branch of branches) {
     const branchPath = `${stem}.${branch.id}.md`;
-    await writeFile(branchPath, branch.text);
-    written.push(branchPath);
+    try {
+      await access(branchPath);
+      skipped.push({ id: branch.id, path: branchPath, code: 'export_target_exists' });
+      continue;
+    } catch {
+      // 那一份目标不在磁盘上：这正是可以写的位置。
+    }
+    try {
+      await writeFile(branchPath, branch.text);
+      written.push(branchPath);
+    } catch (cause) {
+      failed.push({ path: branchPath, code: String((cause as { code?: string }).code ?? 'write_failed') });
+    }
   }
-  return written;
+  return { written, skipped, failed };
 }

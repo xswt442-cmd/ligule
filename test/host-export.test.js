@@ -2,9 +2,10 @@
 // 排版是纯计算；那一次写出走真的协议与真的临时目录，落点由调用方给。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { branchSessionId, exportMarkdown } from '../dist/host/export.js';
+import { tmpdir } from 'node:os';
+import { branchSessionId, exportMarkdown, writeExport } from '../dist/host/export.js';
 import { waitFor, withTuiHost } from './helpers/tui-host.js';
 
 const events = [
@@ -89,3 +90,40 @@ test('session.export needs both a session and a destination', async () => withTu
     (error) => error.code === 'protocol_args_invalid',
     '目的地说不出就落到调用之前，不去猜一个位置');
 }));
+
+// 支线那几份文件的名字是宿主按前缀算出来的，原生对话框只就主干那一个位置问过要不要覆盖（审阅 F6）。
+// 已经有人占着的那一个位置不盖，报出来；主文件与其余目标各报各的结果。
+test('a branch file already sitting at that name is left alone and named', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'ligule-export-target-'));
+  try {
+    const path = join(directory, '这一轮.md');
+    const branchPath = join(directory, '这一轮.b-1.md');
+    await writeFile(branchPath, '已经有的一份');
+    const done = await writeExport(path, '主干那一份', [{ id: 'b-1', text: '新的那一份' }, { id: 'b-2', text: '另一份' }]);
+    assert.deepEqual(done.written, [path, join(directory, '这一轮.b-2.md')], '没人占着的那几份照写');
+    assert.deepEqual(done.skipped, [{ id: 'b-1', path: branchPath, code: 'export_target_exists' }]);
+    assert.deepEqual(done.failed, []);
+    assert.equal(await readFile(branchPath, 'utf8'), '已经有的一份', '未经确认的目标不被盖掉');
+    assert.equal(await readFile(path, 'utf8'), '主干那一份', '人选定的那一个位置还是写下去了');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+// 一份写失败不把它已经落盘的同伴抹掉：交回的是逐份结果（审阅 F6 的第二句）。
+// 这里让主文件那一个位置是一个目录（写它必然失败），支线那一份是新的：一份失败与一份写成要各说各的。
+test('one target that cannot be written is named while the others stay reported', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'ligule-export-partial-'));
+  try {
+    const path = join(directory, '这一轮.md');
+    await mkdir(path);
+    const done = await writeExport(path, '主干那一份', [{ id: 'b-1', text: '新的那一份' }]);
+    assert.deepEqual(done.written, [join(directory, '这一轮.b-1.md')], '写得成的那一份照写、照报');
+    assert.deepEqual(done.skipped, [], '那一条支线的目标本来不在那里，不算「已经有人占着」');
+    assert.equal(done.failed.length, 1, '主文件那一份没写成，说的是它自己');
+    assert.equal(done.failed[0].path, path);
+    assert.ok(done.failed[0].code !== '');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

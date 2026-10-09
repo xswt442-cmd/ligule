@@ -620,8 +620,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           push({ kind: 'error', text: `导出没成：${done.code}${done.detail === undefined ? '' : ` · ${done.detail}`}` });
           return;
         }
-        for (const branch of done.skipped) {
-          push({ kind: 'error', text: `支线 ${branch.id} 读不回来：${branch.code}，那一份没写出去` });
+        // 没写出去的那几份分两种：那一条支线的记录读不回来，与那一个位置已经有同名文件而这一份没人确认过要不要盖（审阅 F6）。
+        for (const item of done.skipped) {
+          push({ kind: 'error', text: item.code === 'export_target_exists'
+            ? `那一个位置已经有 ${item.path ?? `支线 ${item.id}`} 那一份，这里没有盖它`
+            : `支线 ${item.id} 读不回来：${item.code}，那一份没写出去` });
+        }
+        for (const item of done.failed) {
+          push({ kind: 'error', text: `那一份没写成：${item.path}（${item.code}）` });
         }
         push({ kind: 'meta', text: `已写出 ${done.written.length} 份文件：\n${done.written.join('\n')}` });
       })();
