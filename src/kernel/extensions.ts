@@ -11,6 +11,7 @@ import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { KernelError } from './error.js';
+import { dataRoot } from './config-file.js';
 
 interface ExtensionConfig {
   registerTool?: (tool: unknown) => () => void;
@@ -85,7 +86,7 @@ export async function extensionSources(layers: SourceLayers = {}, { projectRoot,
       ignored.push({ code: 'extension_entries_invalid', path: layer, detail: `extensions must be an array of paths, got ${entries.invalid}` });
     }
   }
-  const installed = await installedIn(join(userHome, '.ligule', 'extensions'), readDirectory);
+  const installed = await installedIn(join(dataRoot(userHome), 'extensions'), readDirectory);
   // 同一个文件被安装目录与配置各写一次时只加载一次：路径先归一，再看谁先出现。
   const seen = new Set<string>();
   const paths: string[] = [];
@@ -95,7 +96,7 @@ export async function extensionSources(layers: SourceLayers = {}, { projectRoot,
     seen.add(key);
     paths.push(key);
   }
-  return { paths, ignored, installedDirectory: join(userHome, '.ligule', 'extensions') };
+  return { paths, ignored, installedDirectory: join(dataRoot(userHome), 'extensions') };
 }
 
 interface LoadOptions {

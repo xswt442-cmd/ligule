@@ -4,6 +4,7 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { dataRoot } from '../kernel/config-file.js';
 
 /** 内存里与文件里各留多少条：再长的历史没人往上翻那么多次。 */
 export const HISTORY_LIMIT = 200;
@@ -14,7 +15,7 @@ export const SEARCH_ROWS = 8;
 const pendingSaves = new Map<string, Promise<void>>();
 
 export function historyPathOf(userHome = homedir()): string {
-  return join(userHome, '.ligule', 'tui-history.jsonl');
+  return join(dataRoot(userHome), 'tui-history.jsonl');
 }
 
 /** 发出去的那一句进历史的最前面，原来在历史里的那一条让位过来，尾上超预算的那几条丢掉。 */
