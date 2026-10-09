@@ -2,14 +2,19 @@
 // 身份是「哪一个目录」，不是「哪一串字符」：Windows 上同一个目录可以有大小写、分隔符、盘符、尾部斜杠与链接多种写法，
 // 登记、缓存与筛选都按归一之后的那一个值比，别名不会各占一条。
 // 清单存在应用数据根里，界面上那一栏只是它的一个读者：侧栏收起或列不出来都不该让一个工作区从登记里消失。
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
+import lockfile from 'proper-lockfile';
 import { dataRoot } from './config-file.js';
-import { KernelError } from './error.js';
+import { KernelError, KernelRuntimeError } from './error.js';
 
 export const REGISTRY_VERSION = 1;
+
+// 登记那一把锁的租期：一次读—改—写在毫秒级完成，超出这些秒数就是写下它的人半路没了。
+export const REGISTRY_LOCK_STALE_MS = 5_000;
 
 export type WorkspaceEntry = {
   identity: string;
@@ -109,41 +114,62 @@ export async function readRegistry(path = registryPathOf()): Promise<WorkspaceRe
   return parseRegistry(text);
 }
 
+// 登记是一次读—改—写：两具宿主同时记下自己的工作区时，后一份不能把前一份抹掉。
+// 跨进程那一半用 `proper-lockfile`（与写会话记录那把锁同一套设施），进程内那一半再排一条队。
 let writing: Promise<unknown> = Promise.resolve();
+
+/** 那把锁：拿到就交回一个释放动作；等不到就说清是哪一份文件被占着。 */
+async function acquireRegistryLock(path: string): Promise<() => Promise<void>> {
+  try {
+    return await lockfile.lock(path, {
+      realpath: false,
+      lockfilePath: `${path}.lock`,
+      stale: REGISTRY_LOCK_STALE_MS,
+      retries: { retries: 10, minTimeout: 20, maxTimeout: 200 },
+      onCompromised: () => {},
+    });
+  } catch (cause) {
+    throw new KernelRuntimeError('workspace_registry_locked', { cause, detail: path });
+  }
+}
 
 /**
  * 记下这一次用到的工作区：一个身份只有一条，`firstSeen` 留着，`lastSeen` 与显示名跟着这一次走。
- * 同进程里连着登记两次排成一条队，改名时不留半份文件。
+ * 写出去之前先取那把锁，替身文件名带随机段且 exclusively 创建，改名之后那一份临时名不再留下。
  */
 export function registerWorkspace(directory: string, { path = registryPathOf(), name = undefined as string | undefined, now = new Date().toISOString() } = {}): Promise<WorkspaceRegistry> {
   const canonical = canonicalOf(directory);
   const next = writing.then(async () => {
-    const registry = await readRegistry(path);
-    const known = registry.workspaces.find((one) => one.identity === canonical.identity);
-    if (known === undefined) {
-      registry.workspaces.push({
-        identity: canonical.identity,
-        directory: canonical.directory,
-        name: name === undefined || name.trim() === '' ? basename(canonical.directory) : name.trim(),
-        firstSeen: now,
-        lastSeen: now,
-      });
-    } else {
-      known.lastSeen = now;
-      known.directory = canonical.directory;
-      if (name !== undefined && name.trim() !== '') known.name = name.trim();
-    }
     await mkdir(dirname(path), { recursive: true });
-    const temporary = `${path}.${process.pid}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(registry, null, 2)}\n`, 'utf8');
-    await rename(temporary, path);
-    return registry;
+    const release = await acquireRegistryLock(path);
+    try {
+      const registry = await readRegistry(path);
+      const known = registry.workspaces.find((one) => one.identity === canonical.identity);
+      if (known === undefined) {
+        registry.workspaces.push({
+          identity: canonical.identity,
+          directory: canonical.directory,
+          name: name === undefined || name.trim() === '' ? basename(canonical.directory) : name.trim(),
+          firstSeen: now,
+          lastSeen: now,
+        });
+      } else {
+        known.lastSeen = now;
+        known.directory = canonical.directory;
+        if (name !== undefined && name.trim() !== '') known.name = name.trim();
+      }
+      const temporary = `${path}.${randomUUID()}.tmp`;
+      try {
+        await writeFile(temporary, `${JSON.stringify(registry, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
+        await rename(temporary, path);
+      } finally {
+        await rm(temporary, { force: true });
+      }
+      return registry;
+    } finally {
+      await release();
+    }
   });
-  writing = next.catch(() => undefined);
+  writing = next.then(() => undefined, () => undefined);
   return next;
-}
-
-/** 等那一条登记队列走完：检查里要用它确认落盘。 */
-export function flushRegistry(): Promise<unknown> {
-  return writing;
 }

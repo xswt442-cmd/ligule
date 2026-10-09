@@ -1,9 +1,14 @@
 // 工作区的身份与那份持久登记（D110、方案 5.5.1 与 5.5.2）：别名归成一个身份、一条身份只有一条记录、读不懂就当场拒。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
+import { execFile as callbackExecFile } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink } from 'node:fs/promises';
 import { basename, join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
+
+const execFile = promisify(callbackExecFile);
 import { MESSAGES_CAPABILITIES, createConfig, createConnection, createMemoryConnectionPair, serveHost } from '../dist/index.js';
 import { listSessions } from '../dist/session/list.js';
 import { parseRegistry, readRegistry, registerWorkspace, workspaceIdentity } from '../dist/kernel/workspace.js';
@@ -72,6 +77,30 @@ test('那份登记读不懂就当场拒，不当成空的', () => {
   assert.throws(() => parseRegistry(JSON.stringify({ version: 1, default: null, workspaces: [{ identity: 'a' }] })), (error) => error.code === 'workspace_registry_invalid', '一条记录少了字段就是少了');
   const readable = parseRegistry(JSON.stringify({ version: 1, default: 'a', workspaces: [{ identity: 'a', directory: 'A', name: 'a', firstSeen: 'x', lastSeen: 'y' }] }));
   assert.equal(readable.default, 'a');
+});
+
+// 两具宿主同时各记一条：那一把锁保证两条都在，替身名也不留在盘上。
+test('两具进程同时登记时两条都留下，替身与锁都不留', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-reg-race-'));
+  const path = join(root, 'workspaces.json');
+  const fixture = fileURLToPath(new URL('./fixtures/register-workspace.mjs', import.meta.url));
+  try {
+    await Promise.all(['alpha', 'beta', 'alpha', 'beta'].map(async (one) => {
+      const directory = join(root, one);
+      await mkdir(directory, { recursive: true });
+      try {
+        await execFile(process.execPath, [fixture, path, directory], { encoding: 'utf8' });
+      } catch (error) {
+        assert.fail(`那一具进程没登记上：${error.stdout ?? error.message}`);
+      }
+    }));
+    const registry = await readRegistry(path);
+    assert.deepEqual(registry.workspaces.map((one) => basename(one.directory)).sort(), ['alpha', 'beta'], '两具进程各一条，谁也没盖掉谁');
+    const left = (await readdir(root)).filter((one) => one !== 'alpha' && one !== 'beta');
+    assert.deepEqual(left, ['workspaces.json'], `替身或锁留在了那一份目录里：${left.join(', ')}`);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 // 宿主那一条路：真的建了一份会话，那一具工作区就进了登记，位置在应用数据根里，记录首行也带上身份与来源。
