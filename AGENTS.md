@@ -88,18 +88,19 @@ npm run build-rg    downloads the pinned ripgrep into packages/rg-*
 
 ## Dependencies and search
 
-- Runtime and optional dependencies are listed in `package.json`. `cross-spawn` launches external editors, `proper-lockfile` protects session writes across processes (D85), and `koffi` calls the Windows Job Object API (D87).
+- Runtime and optional dependencies are listed in `package.json`. `cross-spawn` launches external editors, `proper-lockfile` protects session writes across processes (D85), and `koffi` calls the Windows Job Object API (D87). `koffi` sits under `optionalDependencies` because it serves that one platform and its install step needs either the network or a compiler: an install on Linux or macOS succeeds whether that step works.
 - Optional `marked` and `highlight.js` provide terminal Markdown rendering and code highlighting (D84), and `string-width` supports terminal display width.
 - `tree-sitter`, `tree-sitter-bash` and `tree-sitter-pwsh` are native addons. All three ship prebuilds for six platform and architecture combinations, which is why no compiler runs, and npm blocking their install script does not matter.
 - The bash grammar loads lazily through `createRequire`. The PowerShell one is an ESM graph with a top-level await, so `require` refuses it and only a dynamic `import` works; its `main` names a directory without an extension, and it loads from `bindings/node/index.js`.
 - A parser that cannot load leaves the chain asking every time and says so in the reason. `scripts/check-pack.js` parses one command line with each grammar through the installed package, because a missing addon would otherwise look like a machine that asks a lot.
 - `packages/rg-*` hold no committed binaries. `npm run build-rg` downloads the ripgrep version pinned in `scripts/ripgrep-pin.json`, checks size and sha256, and writes the executable plus licence texts there.
-- An unpublished name cannot enter the lockfile, and `npm ci` refuses a `package.json` the lockfile does not cover, which is why the two entries stay out of `optionalDependencies` until publish. Until then search walks the tree and the two comparison tests skip.
+- An unpublished name cannot enter the lockfile, and `npm ci` refuses a `package.json` the lockfile does not cover, which is why the four entries stay out of `optionalDependencies` until publish. Until then search walks the tree on a platform whose package is missing and the two comparison tests skip.
 - `ci.yml` runs `npm run build-rg` before `npm test`, so both platforms compare the real backend with our own walk. Nothing resolves `rg` from `PATH`: a bare `ripgrepPath` resolves as a relative path and fails.
 
 ## Release
 
-- Bump `package.json` and `VERSION` together, then tag `vX.Y.Z` on `main`. The tag drives the publish workflow, which runs `npm run build-rg` and publishes the two ripgrep platform packages before the main one.
+- [RELEASE.md](RELEASE.md) is the distribution list: one row per desktop target with its artifact, digest, system floor, build host and where the installed product gets checked, plus the npm package set.
+- Bump `package.json` and `VERSION` together, then tag `vX.Y.Z` on `main`. The tag drives the publish workflow, which runs `npm run build-rg` and publishes the four ripgrep platform packages before the main one.
 - The first publish cannot use npm Trusted Publishing, because npm requires the package to exist before a trusted publisher binds to it. Publish `0.0.1` with a token, configure the publisher, then let the workflow take over.
 - The account has 2FA, so a direct `npm publish` asks a one-time password; run it interactively or pass `--otp`. Tokens that bypass 2FA are being restricted for direct publishing, so do not reach for one. OIDC publishing is not affected by 2FA.
 - `npm ci` installs from the lockfile in both workflows.
