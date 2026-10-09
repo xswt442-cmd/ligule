@@ -68,7 +68,7 @@ The command line, the terminal UI and the desktop shell read the same configurat
 
 Nested tables merge key by key; arrays and scalars replace wholesale.
 
-The directory holding the user layer is the application data root: `~/.ligule` by default, and an absolute path in the environment variable `LIGULE_HOME` moves the whole thing elsewhere. A relative value is refused on the spot (`data_root_invalid`). The auto-loaded modes, skills, prompt templates and extensions, plus the terminal UI's key overrides, input history and drafts, all live under that directory. Session records and the project layers follow the project root, `~/.agents/skills/` follows the home directory, and neither moves with the data root.
+The directory holding the user layer is the application data root: `~/.ligule` by default, and an absolute path in the environment variable `LIGULE_HOME` moves the whole thing elsewhere. A relative value is refused on the spot (`data_root_invalid`). The auto-loaded modes, skills, prompt templates and extensions, plus the terminal UI's key overrides, input history and drafts, all live under that directory. Session records and the project layers follow the project root, `~/.agents/skills/` follows the home directory, and neither moves with the data root. The default workspace the desktop creates on first use has no configuration file of its own, so the model line belongs in the user layer: written only into a project's layers, it is not readable there.
 
 The key is never written into any layer — every key in a configuration file is readable by the tools — it comes from an environment variable only. The default name is `LIGULE_API_KEY`, renamed by `model.apiKeyEnv`.
 
