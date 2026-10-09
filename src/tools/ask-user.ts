@@ -69,7 +69,7 @@ export function checkedQuestions(input: unknown): AskQuestion[] {
   });
 }
 
-/** 客户端交回的答复按题目编号对齐：编号对不上的丢掉，一道题都没答就报告这条请求没拿到回答。 */
+/** 客户端交回的答复按题目编号对上：编号对不上的丢掉，一道题都没答就报告这条请求没拿到回答。 */
 export function checkedAnswers(questions: readonly AskQuestion[], reply: unknown): AskAnswer[] {
   const items = (reply as { answers?: unknown } | null)?.answers;
   if (!Array.isArray(items)) throw new KernelError('ask_user_answer_invalid', { detail: 'the reply holds no answers array' });

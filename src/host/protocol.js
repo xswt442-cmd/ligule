@@ -209,8 +209,8 @@ export const METHODS = Object.freeze({
 // Host 向客户端发出去的那一份请求，与客户端答复的形状。
 export const APPROVAL_METHOD = 'approval.request';
 
-// 模型向人提问那一条请求（D107）：与审批各走一发请求与答复，问的不是「能不能做这一件」而是「这一件该怎么办」。
-// 答复带 `answers`，每题一项，按题目自己的编号对齐；形状由那件工具核对，这条协议只说请求叫什么。
+// 模型向人提问那一条请求（D107）：审批那一格问这一件能不能做，这一格问这一件该怎么办，两条各自一发请求与一次答复。
+// 答复带 `answers`，每题一项，按题目自己的编号对上；题目的字段由那件工具核对，这条协议只定请求的名字。
 export const QUESTION_METHOD = 'question.request';
 
 // Host 交回的通知名。delta 来自流式接收期间，event 是会话记录里刚落盘的那一条（I5：记录是唯一事实源），
