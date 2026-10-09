@@ -20,8 +20,8 @@ export type Ask = {
 
 // 档位那一格说的是现在这一档怎么走到「问人」这一格的。只有 auto 与 ask 两种（D17）。
 const TIER: Record<string, string> = {
-  auto: '规则表、守卫与命令语法都过关的那一件直接放行，看不透的那一件才问到你',
-  ask: '除非有放行规则盖住每一个分段，每一件事都先问到你',
+  auto: '放行规则在这一档不参与，看的是守卫与命令语法：看不透的那一件才问到你',
+  ask: '要有同一条放行规则盖住整条命令的每一个分段，其余都先问到你',
 };
 
 export function ApprovalCard({ ask, queued, verbosity, policy, active, onAnswer, onOpen }: {
@@ -36,18 +36,20 @@ export function ApprovalCard({ ask, queued, verbosity, policy, active, onAnswer,
   // 问过来的那一份不是眼前这一份：答复按那一次请求的编号回去，跟看着的是哪一份无关。
   const background = ask.sessionId !== active;
   return <section className="approval" aria-label="等一个人答应的调用">
-    <div className="approval-head">
-      <span className="approval-kind">{background ? '另一份会话要执行这一步' : '要执行这一步'}</span>
-      <code className="row-tool">{ask.tool}</code>
-      {ask.project !== '' && <span className="row-note">项目 {ask.project}</span>}
-      {ask.backend !== '' && <span className="row-note">用的是 {ask.backend}</span>}
-      {queued > 0 && <span className="row-note">后面还有 {queued} 条在等</span>}
-      {background && <button type="button" onClick={() => onOpen(ask.sessionId)}>看这一份会话 {ask.sessionId.slice(0, 8)}</button>}
+    <div className="approval-body">
+      <div className="approval-head">
+        <span className="approval-kind">{background ? '另一份会话要执行这一步' : '要执行这一步'}</span>
+        <code className="row-tool">{ask.tool}</code>
+        {ask.project !== '' && <span className="row-note">项目 {ask.project}</span>}
+        {ask.backend !== '' && <span className="row-note">用的是 {ask.backend}</span>}
+        {queued > 0 && <span className="row-note">后面还有 {queued} 条在等</span>}
+        {background && <button type="button" onClick={() => onOpen(ask.sessionId)}>看这一份会话 {ask.sessionId.slice(0, 8)}</button>}
+      </div>
+      {ask.detail !== '' && <div className="row-target">{ask.detail}</div>}
+      {ask.change !== '' && <div className="row-target">{ask.change}</div>}
+      {ask.reason !== '' && <p className="approval-reason">{ask.reason}</p>}
+      <Fold text={ask.content} verbosity={verbosity} always label="看要改的内容" />
     </div>
-    {ask.detail !== '' && <div className="row-target">{ask.detail}</div>}
-    {ask.change !== '' && <div className="row-target">{ask.change}</div>}
-    {ask.reason !== '' && <p className="approval-reason">{ask.reason}</p>}
-    <Fold text={ask.content} verbosity={verbosity} always label="看要改的内容" />
     <div className="approval-actions">
       <button type="button" data-tone="allow" onClick={() => onAnswer('allow')}>允许这一次</button>
       <button type="button" data-tone="deny" onClick={() => onAnswer('deny')}>不允许</button>

@@ -27,7 +27,7 @@ const markdown = [
   'if (estimated * factor > threshold) await compact();',
   '```',
   '',
-  '细节在 [阶段三那份实现顺序](ligule-set/phase3/todo.md) 里，外链走另一条路：[example](https://example.com/)。一轮压完大约从十万降到两万。',
+  '细节在 [压缩那一段](src/session/compaction.ts) 里，外链走另一条路：[example](https://example.com/)。一轮压完大约从十万降到两万。',
 ].join('\n');
 
 // 溢出文件里的那一整段：只有 `fullResults` 这一格交回来，记录里留着的是截断后的那一份。
@@ -133,9 +133,11 @@ const PROJECT_FILES = [
 // 这一条跑出来——版本不等时界面就能看到 `config_version_stale` 那一句长什么样。真宿主那一格是那份文件的内容哈希。
 // 只读的两层（项目共享与命令行 `--config`）也摆一份：来源与「改文件盖不过它」那两句话要有东西可指。
 const WRITABLE = ['model.api', 'model.baseURL', 'model.model', 'model.apiKeyEnv'];
+// 「来源」那一句要指得出六条白名单字段里的任何一条：真宿主的 `sources` 覆盖整份白名单（方案 7.1）。
+const SOURCE_FIELDS = [...WRITABLE, 'policy.mode', 'policy.rules'];
 type Cell = { version: string; values: Record<string, string> };
 const layers: Record<string, Cell> = {
-  user: { version: '1', values: { model: 'fake-review-model', apiKeyEnv: 'LIGULE_FAKE_KEY' } },
+  user: { version: '1', values: { model: 'fake-review-model', apiKeyEnv: 'LIGULE_FAKE_KEY', mode: 'auto' } },
   projectLocal: { version: '', values: {} },
   project: { version: '', values: { baseURL: 'https://project.test/v1' } },
   flag: { version: '', values: { api: 'chat-completions' } },
@@ -149,6 +151,8 @@ const sourceOf = (field: string) => {
 const shownValue = (key: string) => layers[SOURCES.find((layer) => layers[layer].values[key] !== undefined) ?? 'user'].values[key];
 const shownModel = () => Object.fromEntries(['api', 'baseURL', 'model', 'apiKeyEnv'].map((key) => [key, shownValue(key)]));
 const layerList = () => ['user', 'projectLocal'].map((layer) => ({ layer, version: layers[layer].version, exists: layers[layer].version !== '' }));
+// 规则表在这一份假宿主里存在另一格上，来源那一句跟着那一格走。
+const sourceAt = (field: string) => (field === 'policy.rules' ? RULES_SOURCE : sourceOf(field));
 
 // 规则表与配置默认档：`config.get` 交回这一份表与写它的那一层，`config.set` 的 policy.rules / policy.mode 改的就是这里。
 // 一条规则的形状与契约一致：`{ tool, match?, decision: 'allow' | 'deny', reason? }`。
@@ -389,14 +393,15 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
       }
       case 'config.get':
         // 假宿主也按白名单答：这几格是真的配置文件里会写的那种值，密钥本身从来不在里面（D13）。
+        // 值、来源、规则表与那一份版本出自这一次回答（方案 3A）；`policyMode` 是文件里此刻写着的那一档。
         // 规则表读的是折好的那一份合并结果，`rulesSource` 说它今天由哪一层写着（实现顺序第 4 项交付）。
         return reply({
           model: shownModel(),
+          policyMode: shownValue('mode'),
           layers: layerList(),
-          sources: Object.fromEntries(WRITABLE.map((field) => [field, sourceOf(field)])),
+          sources: Object.fromEntries(SOURCE_FIELDS.map((field) => [field, sourceAt(field)])),
           rules: policyRules,
           rulesSource: RULES_SOURCE,
-          policy: configPolicy,
         });
       case 'config.set': {
         // 演的是真宿主那四件事：字段与层的白名单、版本比对、值形状、写完谁什么时候用上（第 90、91、93 步）。
@@ -410,6 +415,8 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
           const mode = String(params.value);
           if (mode !== 'ask' && mode !== 'auto') return fail('config_field_value', '配置默认档只有 ask 与 auto 两种');
           configPolicy = mode;
+          // 写进层里那一份值：下一次 `config.get` 的档位与来源都从这一格读出来（方案 3A）。
+          cell.values.mode = mode;
           cell.version = String(Number(cell.version) + 1);
           return reply({ version: cell.version, created: false, applies: [], rules: policyRules, layers: layerList() });
         }

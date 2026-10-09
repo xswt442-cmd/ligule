@@ -1,7 +1,8 @@
-import { Fragment, useEffect, useState, type ReactNode } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { Icon } from './Icon';
 import { ModelPanel } from './ModelPanel';
 import { PolicyRules } from './PolicyRules';
+import { Group, Modal, Row } from './ui';
 import { CURRENT, KEYMAP, conflictsIn, formatKeys, setCapturing, specOf, type KeyAction, type KeyView } from '../hotkeys';
 import { PALETTES, type Palette, type Settings } from '../settings';
 import type { Client } from '../protocol';
@@ -38,31 +39,29 @@ export function SettingsDialog(props: SettingsProps) {
   const [section, setSection] = useState<SectionId>('appearance');
   const { settings, patch } = props;
 
-  return <div className="overlay" onClick={props.onClose}>
-    <div className="sheet" role="dialog" aria-modal="true" aria-label="设置" onClick={(event) => event.stopPropagation()}>
-      <header className="sheet-head">
-        <strong>设置</strong>
-        <button type="button" className="icon-button" aria-label="关闭设置" onClick={props.onClose}><Icon name="close" size={15} /></button>
-      </header>
-      <nav className="sheet-nav">
-        {SECTIONS.map((item) => <button
-          key={item.id}
-          type="button"
-          role="tab"
-          aria-selected={section === item.id}
-          className={section === item.id ? 'active' : ''}
-          onClick={() => setSection(item.id)}
-        ><Icon name={item.icon} size={14} /><span>{item.title}</span></button>)}
-      </nav>
-      <div className="sheet-body" role="tabpanel">
-        {section === 'appearance' && <Appearance settings={settings} patch={patch} />}
-        {section === 'model' && <Model client={props.client} sessionId={props.sessionId} />}
-        {section === 'rules' && <PolicyRules client={props.client} />}
-        {section === 'connection' && <Connection link={props.link} counts={props.counts} waiting={props.waiting} status={props.status} onReconnect={props.onReconnect} />}
-        {section === 'keys' && <Keys settings={settings} patch={patch} notice={props.keyNotice} />}
-      </div>
+  return <Modal title="设置" className="sheet" onClose={props.onClose}>
+    <header className="sheet-head">
+      <strong>设置</strong>
+      <button type="button" className="icon-button" aria-label="关闭设置" onClick={props.onClose}><Icon name="close" size={15} /></button>
+    </header>
+    <nav className="sheet-nav">
+      {SECTIONS.map((item) => <button
+        key={item.id}
+        type="button"
+        role="tab"
+        aria-selected={section === item.id}
+        className={section === item.id ? 'active' : ''}
+        onClick={() => setSection(item.id)}
+      ><Icon name={item.icon} size={14} /><span>{item.title}</span></button>)}
+    </nav>
+    <div className="sheet-body" role="tabpanel">
+      {section === 'appearance' && <Appearance settings={settings} patch={patch} />}
+      {section === 'model' && <Model client={props.client} sessionId={props.sessionId} />}
+      {section === 'rules' && <PolicyRules client={props.client} />}
+      {section === 'connection' && <Connection link={props.link} counts={props.counts} waiting={props.waiting} status={props.status} onReconnect={props.onReconnect} />}
+      {section === 'keys' && <Keys settings={settings} patch={patch} notice={props.keyNotice} />}
     </div>
-  </div>;
+  </Modal>;
 }
 
 // 配色方案的名字与一句说明：界面上那一枚色板按这一份表排，颜色从 `data-palette` 那一个块自己读，不写在这里。
@@ -118,7 +117,7 @@ function Appearance({ settings, patch }: { settings: Settings; patch: SettingsPr
       </Row>
     </Group>
     <Group title="工作步骤展示">
-      <Row label="展示详细程度" note="这一格改的是哪些步骤画在屏幕上。交给模型的内容一直是全的（D32）。">
+      <Row label="展示详细程度" note="这一格改的是哪些步骤画在屏幕上。交给模型的内容一直是全的。">
         <select value={settings.verbosity} onChange={(event) => patch({ verbosity: event.target.value as Settings['verbosity'] })}>
           <option value="brief">简洁</option>
           <option value="standard">标准</option>
@@ -177,7 +176,7 @@ function Keys({ settings, patch, notice }: { settings: Settings; patch: Settings
   const views = [...new Set(Object.values(KEYMAP).map((binding) => binding.view))] as KeyView[];
   return <>
     {notice === '' ? null : <p className="stub">{notice}</p>}
-    {refused === '' ? null : <p className="session-note">{refused}</p>}
+    {refused === '' ? null : <p className="session-note" data-tone="bad">{refused}</p>}
     {views.map((view) => <Fragment key={view}>
       <Group title={view}>
         {(Object.entries(KEYMAP) as [KeyAction, (typeof KEYMAP)[KeyAction]][])
@@ -202,7 +201,7 @@ function Keys({ settings, patch, notice }: { settings: Settings; patch: Settings
 function Model({ client, sessionId }: { client: Client; sessionId: string | null }) {
   return <>
     <p className="sheet-note">
-      服务地址与模型名读的是配置文件那四层里的哪一层，由 `config.get` 交回；改的时候走 `config.set`，落进使用者默认或当前项目的本机覆盖两层之一。密钥的值从来不进配置。
+      服务地址与模型名读的是配置文件那四层里的哪一层，由 <code>config.get</code> 交回；改的时候走 <code>config.set</code>，落进使用者默认或当前项目的本机覆盖两层之一。密钥的值从来不进配置。
     </p>
     {/* 四条可写的行就在这一栏里（第 92 步）：设置页里点进来看到的就是那四个「改」。 */}
     <ModelPanel client={client} sessionId={sessionId} />
@@ -218,7 +217,7 @@ function Connection({ link, counts, waiting, status, onReconnect }: {
 }) {
   return <>
     <Group title="这一条连接">
-      <Row label="载体" note="本机不监听端口，界面拿不到地址与凭据（D30）">
+      <Row label="载体" note="本机不监听端口，界面拿不到地址与凭据">
         <span className="value">标准输入输出两根管道</span>
       </Row>
       <Row label="帧数">
@@ -235,22 +234,4 @@ function Connection({ link, counts, waiting, status, onReconnect }: {
       </Row>
     </Group>
   </>;
-}
-
-// 一个分区：一句标题 + 一条分隔 + 里面的行。屏幕上先看到分区名，再逐行看取值（交付二）。
-function Group({ title, children }: { title: string; children: ReactNode }) {
-  return <section className="region-group">
-    <h3>{title}</h3>
-    {children}
-  </section>;
-}
-
-function Row({ label, note, children }: { label: string; note?: string; children: ReactNode }) {
-  return <div className="sheet-row">
-    <span className="sheet-label">{label}</span>
-    <span className="sheet-value">
-      {children}
-      {note !== undefined && note !== '' && <span className="sheet-hint">{note}</span>}
-    </span>
-  </div>;
 }

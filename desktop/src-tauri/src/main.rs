@@ -101,6 +101,8 @@ fn app_quit(app: AppHandle) {
 fn main() {
     tauri::Builder::default()
         .manage(AppState::default())
+        // 原生保存对话框那一个插件（方案 6A）：界面自己开那扇窗，壳不读记录也不写文件。
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let handle = app.handle().clone();
             if let Err(error) = start_host(&handle) {

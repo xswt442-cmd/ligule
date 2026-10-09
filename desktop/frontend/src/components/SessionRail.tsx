@@ -189,7 +189,7 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
         onClick={() => setOnly((on) => !on)}
       >只看这一份</button>
     </div>
-    {hits !== null && searchNote !== '' && <div className="session-note">{searchNote}</div>}
+    {hits !== null && searchNote !== '' && <div className="session-note" data-tone="bad">{searchNote}</div>}
     {hits !== null && hits.length === 0 && searchNote === '' && (
       <div className="session-note">{only ? `这一份会话的记录里没找到「${query.trim()}」。` : `这些会话的记录里没找到「${query.trim()}」。`}</div>
     )}
@@ -215,7 +215,7 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
       {/* 另外看着哪几项目录（方案 3.2）：这一格只是界面这边的清单，记录、锁与工具目录都按那一份项目环境自己算。 */}
       <div className="rail-projects">
         {projects.map((root) => <p className="mini" key={root}>
-          <span className="row-note">{root}</span>
+          <span className="row-note" title={root}>{root}</span>
           <button type="button" onClick={() => onProjects(projects.filter((each) => each !== root))} title="不再在这一栏里列它的项目：记录与会话都不动">不再看这一份</button>
         </p>)}
         <input
@@ -236,7 +236,7 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
         <button type="button" onClick={addProject}>加一个项目</button>
       </div>
       {loading && <div className="session-item">在读记录目录…</div>}
-      {!loading && note !== '' && <div className="session-note">
+      {!loading && note !== '' && <div className="session-note" data-tone="bad">
         {note}
         <button type="button" onClick={() => void load()}>重试</button>
       </div>}

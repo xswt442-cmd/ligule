@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { Modal } from './ui';
 
 // 命令面板：只做入口，不做语义（D92）。每一条落下去的是界面或协议本来就有的那一个动作。
 export type Command = { id: string; title: string; note: string; run: () => void };
@@ -18,7 +19,8 @@ export function Palette({ commands, onClose }: { commands: Command[]; onClose: (
     item.run();
   };
 
-  return <div className="palette" role="dialog" aria-label="命令面板">
+  // 焦点限制、焦点返回与 Esc 收起在 `Modal` 那一层（方案 4.2），这一处只接挑选命令的三记按键。
+  return <Modal title="命令面板" className="palette" onClose={onClose}>
     <input
       autoFocus
       value={filter}
@@ -38,10 +40,6 @@ export function Palette({ commands, onClose }: { commands: Command[]; onClose: (
         } else if (event.key === 'Enter') {
           event.preventDefault();
           pick(matched[index]);
-        } else if (event.key === 'Escape') {
-          event.preventDefault();
-          event.stopPropagation();
-          onClose();
         }
       }}
     />
@@ -54,5 +52,5 @@ export function Palette({ commands, onClose }: { commands: Command[]; onClose: (
         </button>
       </li>)}
     </ul>
-  </div>;
+  </Modal>;
 }

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { DropdownMenu, Popover } from 'radix-ui';
 import { Virtuoso, type ItemProps, type VirtuosoHandle } from 'react-virtuoso';
 import { code, createClient, type Client, type Transport } from './protocol';
 import { ApprovalCard, type Ask } from './components/ApprovalCard';
@@ -8,8 +9,11 @@ import { RowView } from './components/RowView';
 import { SessionRail, type SearchHit } from './components/SessionRail';
 import { SessionMenu } from './components/SessionMenu';
 import { ModelPanel } from './components/ModelPanel';
+import { ExportPanel } from './components/ExportPanel';
+import { HelpPanel } from './components/HelpPanel';
 import { UsageMeter } from './components/UsageMeter';
 import { Palette, type Command } from './components/Palette';
+import { keepEscape } from './components/ui';
 import { KEYMAP, CURRENT, actionOf, formatKeys, isCapturing, isComposing, loadBindings, specOf } from './hotkeys';
 import { insertMention, mentionToken } from './mentions';
 import type { Verbosity } from './components/types';
@@ -27,7 +31,7 @@ const LIVE_ANSWER: Row = { id: -1, kind: 'answer', text: '' };
 // 一次往前要一页的事件数：打开一份会话读最近这一页，更早的按游标继续要（方案 4.1）。
 const RENDER_WINDOW = 400;
 // 虚拟视口里第一条的起始编号：往前插一页就把它减去插进去的行数，那一条的序号在插页前后不变，视口就停在它上面（U48）。
-// 这一格要留成正数，所以从一个足够大的数起，而不是直接用记录的序号。
+// 这一格要留成正数，所以从一个足够大的数起：往前每插一页就从它里面减掉插进去的行数，起得太小会减成负数。
 const FIRST_INDEX = 100_000;
 
 type PanelProps = {
@@ -55,9 +59,6 @@ type PanelProps = {
   sessionsRevision: number;
   settings: Settings;
   patch: (part: Partial<Settings>) => void;
-  // 会话级的那几格（模式、档位）挂在会话这一侧的浮层里，入口是顶栏那两枚小牌子（第 105 步）。
-  sessionMenuOpen: boolean;
-  toggleSessionMenu: () => void;
 };
 
 const HISTORY_KEY = 'ligule.input-history';
@@ -130,6 +131,17 @@ const menuPanels: Panel<PanelProps>[] = [
     title: '模型与端点',
     view: ({ client, sessionId }) => <ModelPanel client={client} sessionId={sessionId} />,
   },
+  {
+    id: 'panel.export',
+    title: '导出全文',
+    view: ({ client, sessionId }) => <ExportPanel client={client} sessionId={sessionId} />,
+  },
+  {
+    id: 'panel.help',
+    title: '使用手册',
+    // 读的是随包的两份手册正文，不读磁盘、不等站点：这一栏与当前会话无关，所以不用任何 props。
+    view: () => <HelpPanel />,
+  },
 ];
 
 // 还没有实现的那一项：菜单里看得见，点开说的是缺的那一件在哪。多窗看同一会话要等共享常驻进程引入。
@@ -138,13 +150,7 @@ const pendingPanels: Panel<PanelProps>[] = [
     id: 'panel.windows',
     title: '多窗口与重连',
     pending: true,
-    view: () => <p className="stub">一份壳对应一个 Host 进程，会话状态在那个进程里。后端进程退了可以重连：重连会换一具进程，再用 `session.open` 接回这一份会话。多个窗口看同一份会话还没有做。</p>,
-  },
-  {
-    id: 'panel.export',
-    title: '导出全文',
-    pending: true,
-    view: () => <p className="stub">把整份转录导出成文件还没有做。终端那一条 `/export` 写的是 markdown 文件；桌面这一侧要落文件就得开一个保存对话框，那是新增依赖，等使用者点头。这一格现在能做的两件：复制最后那条回答（`Ctrl+Shift+C`），以及把这一份会话整份复制或复制到某一轮为止（「从这里分支」）。</p>,
+    view: () => <p className="stub">一份壳对应一个 Host 进程，会话状态在那个进程里。后端进程退了可以重连：重连会换一具进程，再用 <code>session.open</code> 接回这一份会话。多个窗口看同一份会话还没有做。</p>,
   },
 ];
 
@@ -164,13 +170,13 @@ const statusPanels: Panel<PanelProps>[] = [
     id: 'status.pills',
     title: '运行状态',
     // 顶栏只说这一份会话现在在做什么；工具件数、记录条数与拒绝计数在设置那一个对话框里（D98）。
-    view: ({ status, running, othersRunning, waiting, seconds, sessionMenuOpen, toggleSessionMenu }) => <>
+    view: ({ status, running, othersRunning, waiting, seconds }) => <>
       {running && <span className="pill" data-tone="running">正在跑 {seconds} 秒</span>}
       {othersRunning > 0 && <span className="pill" title="别的那些会话各有自己的轮次在跑：切过去看它自己那一份">另一份在跑 {othersRunning} 份</span>}
       {waiting > 0 && <span className="pill" title="发出去还没回来的调用">还没答复的调用 {waiting}</span>}
       {status !== null && <>
-        <button className="pill" type="button" title="打开这一份会话的设置" aria-haspopup="dialog" aria-expanded={sessionMenuOpen} onClick={toggleSessionMenu}>模式 {status.mode ?? '没装'}{status.pendingMode === null || status.pendingMode === undefined ? '' : ` → ${status.pendingMode}`}</button>
-        <button className="pill" type="button" title="打开这一份会话的设置" aria-haspopup="dialog" aria-expanded={sessionMenuOpen} onClick={toggleSessionMenu}>审批 {status.policy}</button>
+        <Popover.Trigger asChild><button className="pill" type="button" title="打开这一份会话的设置">模式 {status.mode ?? '没装'}{status.pendingMode === null || status.pendingMode === undefined ? '' : ` → ${status.pendingMode}`}</button></Popover.Trigger>
+        <Popover.Trigger asChild><button className="pill" type="button" title="打开这一份会话的设置">审批 {status.policy}</button></Popover.Trigger>
         {status.denials.total > 0 && <span className="pill">不允许 连续 {status.denials.consecutive} 次 · 累计 {status.denials.total} 次</span>}
       </>}
     </>,
@@ -318,6 +324,7 @@ export function App({ transport }: { transport: Transport }) {
     setQueues((current) => ({ ...current, [own]: next(current[own] ?? { items: [], paused: false }) }));
   }, []);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  // 眼前看着的那一份会话：在接会话的那一处与 `opening` 同步写下，别的那一份的答复与状态不摊到这一份的格子上。
   const active = useRef<string | null>(null);
   // 跟随最新：画面停在最后一行时新内容进来就滚到底；人往上翻过就不再自动滚，给一个跳回最新的按钮。
   const list = useRef<VirtuosoHandle | null>(null);
@@ -393,7 +400,8 @@ export function App({ transport }: { transport: Transport }) {
       if (opening.current !== sessionId) return;
       const added = older.events.flatMap((record) => projectRecord(record));
       // 往前插一页要同时把起始编号减去插进去的行数：那一行的序号在插页前后不变，视口就停在它上面（U48）。
-      setFirstIndex((current) => current - added.length);
+      // 减去的是真的进列表那几行：展示档筛掉的行不在 `visible` 里，按整页的行数减会让视口锚到别的那一行。
+      setFirstIndex((current) => current - added.filter((row) => shownIn(verbosity, row)).length);
       setRows((current) => [...added, ...current]);
       setPage({ before: older.events.length === 0 ? page.before : Number(older.events[0]?.seq), hasMore: older.hasMore });
     } catch (error) {
@@ -401,11 +409,7 @@ export function App({ transport }: { transport: Transport }) {
     } finally {
       setOlderLoading(false);
     }
-  }, [client, olderLoading, page, sessionId]);
-
-  useEffect(() => {
-    active.current = sessionId;
-  }, [sessionId]);
+  }, [client, olderLoading, page, sessionId, verbosity]);
 
   // 草稿与排着的几句按「哪一项目录下的哪一份会话」存本机：切换、打开设置、看历史与断连都不丢这一句，
   // 退出再打开时接得回来（方案 5.1）。写不进去要说一句，别让人以为它已经存住了。
@@ -455,7 +459,7 @@ export function App({ transport }: { transport: Transport }) {
     const startX = event.clientX;
     const startWidth = settings.sidebar;
     const target = event.currentTarget;
-    try { target.setPointerCapture(event.pointerId); } catch { /* 抓不住照样用窗口那两条兜底 */ }
+    try { target.setPointerCapture(event.pointerId); } catch { /* 抓不住时窗口上那三条监听照样把移动与松开送到这一处 */ }
     const move = (moveEvent: PointerEvent) => {
       patch({ sidebar: Math.min(420, Math.max(264, startWidth + moveEvent.clientX - startX)) });
     };
@@ -554,6 +558,9 @@ export function App({ transport }: { transport: Transport }) {
   // 正常换会话与点开一份会话仍把排着的几条恢复成暂停（方案 5.1、5.2），那一条不变。
   const openSession = useCallback(async (id: string, hit?: SearchHit, reclaimQueue = false, askedRoot?: string) => {
     opening.current = id;
+    // 看着的是哪一份与「正在接的是哪一份」同一处定下来：状态那一次读紧跟在几次读后面，
+    // 落在渲染提交之后的那一格会把这一次读判成过期，标题上的条数就停在上一份那一份。
+    active.current = id;
     setSessionId(id);
     // 切回来看这一份时，它那个「刚跑完一轮」的记号就消掉（方案 3.1 的未读结果只用来指「还没看着」）。
     setUnread((current) => current.filter((item) => item !== id));
@@ -621,7 +628,8 @@ export function App({ transport }: { transport: Transport }) {
       const asked = root === undefined || root === '' ? (projectRoot === '' ? undefined : projectRoot) : root;
       const created = await client.call('session.create', asked === undefined ? {} : { projectRoot: asked }) as { sessionId: string };
       // 新建那一份也走接会话那一条路：只有那一次读把记录头部的项目根带回来，草稿与队列才知道该存到哪一格。
-      void openSession(created.sessionId);
+      // 指名了哪一项目录就带着它去接：不带的话宿主按默认那一份项目环境找记录，另一项目录里刚建好的那一份就报 `session_not_found`（方案 3.2）。
+      void openSession(created.sessionId, undefined, false, asked);
       // 这一扇窗口自己刚造出来的那一份要马上在左侧栏里看得见，不该让人再去按一次「刷新」（方案 4.2 的会话列表）。
       setSessionsRevision((current) => current + 1);
     } catch (error) {
@@ -630,8 +638,11 @@ export function App({ transport }: { transport: Transport }) {
   }, [client, openSession, projectRoot]);
 
   useEffect(() => {
+    // 只在手里还没有会话时自动开第一份：`newSession` 的身份跟着 `projectRoot` 变，少了这一道判断，
+    // 接上另一项目录里的会话会把这一格改掉，这个 effect 就跟着又建一份并跳过去（方案 3.2）。
+    if (sessionId !== null) return;
     void newSession();
-  }, [newSession]);
+  }, [sessionId, newSession]);
 
   // 查找命中那一条交给接会话那一个动作：读到位与落笔在同一批里，跳转那一处只认这一份会话的第几条（方案 4.2）。
   const openHit = useCallback((hit: SearchHit, root?: string) => void openSession(hit.sessionId, hit, false, root), [openSession]);
@@ -933,20 +944,21 @@ export function App({ transport }: { transport: Transport }) {
         else copyLastAnswer();
         return;
       }
-      // 收层那一条顺序排在打断这一轮之前：面板、设置、菜单、右侧抽屉，都收完了才轮到取消。
+      // 收层那一条顺序排在打断这一轮之前：面板、右侧抽屉，都收完了才轮到取消。
       if (specOf(event) !== CURRENT['interrupt']) return;
-      if (paletteOpen) setPaletteOpen(false);
-      else if (sessionMenuOpen) setSessionMenuOpen(false);
-      else if (settingsOpen) setSettingsOpen(false);
-      else if (menuOpen) setMenuOpen(false);
-      else if (panel !== null) setPanel(null);
+      // 那一层浮层（命令面板、这一份会话、设置、功能菜单）的 Esc 归 radix 收：它收层时把这一记键标成已处理。
+      // 状态那一格在这里靠不住——这一记按键是离散事件，radix 收到 React 里先改完状态并重画，键才冒到 document，
+      // 这一条读到的已经是收层之后的那一份。按「这记键有没有人接过」判，才只收一层。
+      if (event.defaultPrevented) return;
+      if (panel !== null) setPanel(null);
       else if (running) void cancel();
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [cancel, collapsed, copyLastAnswer, menuOpen, panel, paletteOpen, patch, running, sessionMenuOpen, settingsOpen]);
+  }, [cancel, collapsed, copyLastAnswer, panel, patch, running]);
 
-  // 虚拟视口的三件外壳（U48、方案 6.2）：每一条都要占住转录那一条 74 字的居中列，所以 `Item` 自己包一层。
+  // 虚拟视口的两件外壳（U48、方案 6.2）：每一条都要占住转录那一条 74 字的居中列，所以 `Item` 自己包一层。
+  // 空记录那一句不由视口画：这一版的视口没有空状态那个槽位，那一处写在渲染里的视口外面。
   // 身份用 `useMemo` 稳住：每次渲染都换一个新组件会让视口把挂着的行重建一遍。
   const viewport = useMemo(() => ({
     // 换外壳要连着 Virtuoso 读尺寸用的那几格 `data-*` 一起递出去，只转 children 与 style 会让它量不到行高（U48）。
@@ -956,10 +968,7 @@ export function App({ transport }: { transport: Transport }) {
         {olderLoading ? '在读更早的一页…' : '显示更早的一页'}
       </button>}
     </div>,
-    EmptyState: () => <div className="stream-band">{reading
-      ? <p className="placeholder"><Icon name="clock" size={14} /> 在读这一份会话的记录…</p>
-      : <p className="placeholder"><Icon name="spark" size={14} /> 这一份会话还没有一轮。在下方写一句要模型做的事，按 {formatKeys(CURRENT['send'])} 就开始。</p>}</div>,
-  }), [olderLoading, page, reading, showEarlier]);
+  }), [olderLoading, page, showEarlier]);
   // 展示档没放进来那几类行不进列表：虚拟视口要量每一行的高度，藏着不画的行留在列表里只会量到零（D90、U48）。
   const shown = useMemo(() => rows.filter((row) => shownIn(verbosity, row)), [rows, verbosity]);
   // 流式那半截排在已落盘的那些行之后：它是这一轮的末尾，画到开头去就把因果倒过来了。
@@ -1039,8 +1048,6 @@ export function App({ transport }: { transport: Transport }) {
     sessionsRevision,
     settings,
     patch,
-    sessionMenuOpen,
-    toggleSessionMenu: () => setSessionMenuOpen((open) => !open),
   };
 
   return <div className="frame" data-collapsed={collapsed ? 'true' : undefined} data-dock={settings.dock}>
@@ -1051,9 +1058,19 @@ export function App({ transport }: { transport: Transport }) {
       {registry.list('rail.sessions').map((item) => <div key={item.id} className="rail-slot">{item.view(panelProps)}</div>)}
       <div className="sidebar-foot">
         <button className="entry" type="button" aria-haspopup="dialog" aria-expanded={settingsOpen} onClick={() => setSettingsOpen(true)}><Icon name="gear" size={15} /><span>设置</span></button>
-        <button className="entry" type="button" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}>
-          <Icon name="grid" size={15} /><span>功能</span>
-        </button>
+        {/* 这一枚菜单交给 radix：打开、收起、方向键走到哪一条、焦点交回都由它管，这里只说有哪些功能项（方案 4.2）。 */}
+        <DropdownMenu.Root open={menuOpen} onOpenChange={setMenuOpen}>
+          <DropdownMenu.Trigger asChild>
+            <button className="entry" type="button"><Icon name="grid" size={15} /><span>功能</span></button>
+          </DropdownMenu.Trigger>
+          <DropdownMenu.Portal>
+            <DropdownMenu.Content className="menu" side="top" align="start" sideOffset={4} onEscapeKeyDown={keepEscape}>
+              {registry.list('rail.menu').map((item) => <DropdownMenu.Item key={item.id} onSelect={() => setPanel(item)}>
+                {item.title}{item.pending === true && <span className="menu-tag">待实现</span>}
+              </DropdownMenu.Item>)}
+            </DropdownMenu.Content>
+          </DropdownMenu.Portal>
+        </DropdownMenu.Root>
       </div>
     </aside>
     <div className="splitter" role="separator" aria-orientation="vertical" aria-label="侧栏宽度" onPointerDown={startDrag} />
@@ -1064,14 +1081,23 @@ export function App({ transport }: { transport: Transport }) {
           <strong id="session-title">{sessionId === null ? '没有会话' : `会话 ${sessionId.slice(0, 8)}`}</strong>
           <span className="muted" id="session-note">{status === null ? '还没有会话：新建一份，或者从左侧栏挑一份' : `记录 ${status.eventCount} 条`}</span>
         </div>
-        <div className="pills">{registry.list('header.status').map((item) => <span key={item.id}>{item.view(panelProps)}</span>)}</div>
+        {/* 这一份会话那几格：那两枚胶囊是浮层的入口，那一横排是它的锚；点开、点外面收起、焦点交回都归 radix（方案 4.2）。 */}
+        <Popover.Root open={sessionMenuOpen} onOpenChange={setSessionMenuOpen}>
+          <Popover.Anchor className="pills">
+            {registry.list('header.status').map((item) => <span key={item.id}>{item.view(panelProps)}</span>)}
+          </Popover.Anchor>
+          <SessionMenu status={status} onSetMode={(name) => void setMode(name)} onSetPolicy={(mode) => void setPolicy(mode)} />
+        </Popover.Root>
         <button className="icon-button" type="button" title={`命令面板（${formatKeys(CURRENT['palette'])}）`} aria-label="命令面板" onClick={() => setPaletteOpen(true)}><Icon name="search" size={15} /></button>
-        {sessionMenuOpen && <SessionMenu status={status} onSetMode={(name) => void setMode(name)} onSetPolicy={(mode) => void setPolicy(mode)} onClose={() => setSessionMenuOpen(false)} />}
       </header>
 
-      {/* 转录只挂视口里那几十行：读回来的那一页全在数据里，画出来的由视口决定（U48、方案 6.2）。 */}
+      {/* 转录只挂视口里那几十行：读回来的那一页全在数据里，画出来的由视口决定（U48、方案 6.2）。
+          记录里一行都没有时不挂视口：这一版的视口没有空状态那个槽位，那一句写在视口外面，否则人面对的是一片空白。
+          展示档筛掉全部那一种不算空记录，视口照旧挂着，「显示更早」那一格才留在画面上（D90）。 */}
       <div className="conversation" aria-live="polite">
-        <Virtuoso
+        {rows.length === 0 ? <div className="stream-band">{reading
+          ? <p className="placeholder"><Icon name="clock" size={14} /> 在读这一份会话的记录…</p>
+          : <p className="placeholder"><Icon name="spark" size={14} /> 这一份会话还没有一轮。在下方写一句要模型做的事，按 {formatKeys(CURRENT['send'])} 就开始。</p>}</div> : <Virtuoso
           key={`stream-${stamp}`}
           ref={list}
           style={{ height: '100%' }}
@@ -1095,9 +1121,11 @@ export function App({ transport }: { transport: Transport }) {
           rangeChanged={onRangeChanged}
           increaseViewportBy={VIEWPORT_INCREASE}
           components={viewport}
-        />
+        />}
+        {/* 离开末行时浮出来的那一枚：挂在转录这一格外面要占一段高度，出现与收掉时转录跟着换高，
+            所以画在转录里面、绝对定位。 */}
+        {!pinned && <button className="jump-latest" type="button" onClick={jumpToLatest}>回到最新</button>}
       </div>
-      {!pinned && <button className="jump-latest" type="button" onClick={jumpToLatest}>回到最新</button>}
 
       {asks.length > 0 && <ApprovalCard
         ask={asks[0]}
@@ -1113,7 +1141,7 @@ export function App({ transport }: { transport: Transport }) {
         <Icon name="warn" size={15} />
         <strong>这一条连接不在了</strong>
         <code>{link}</code>
-        <span>重连会换一具后端进程。没答复的那些请求按 `host_restarted` 收尾，还没答的询问作废，这一份会话接回来。</span>
+        <span>重连会换一具后端进程。没答复的那些请求按 <code>host_restarted</code> 收尾，还没答的询问作废，这一份会话接回来。</span>
         <button type="button" onClick={() => void reconnect()}>重连</button>
       </div>}
 
@@ -1256,18 +1284,8 @@ export function App({ transport }: { transport: Transport }) {
       <div className="dock-body">{panel.view(panelProps)}</div>
     </aside>}
 
-    {menuOpen && <div className="menu" role="menu">
-      {registry.list('rail.menu').map((item) => <button
-        key={item.id}
-        type="button"
-        role="menuitem"
-        onClick={() => {
-          setPanel(item);
-          setMenuOpen(false);
-        }}
-      >{item.title}{item.pending === true && <span className="menu-tag">待实现</span>}</button>)}
-    </div>}
-    {paletteOpen && <Palette commands={commands} onClose={() => setPaletteOpen(false)} />}
+    {/* 面板收起后把焦点交回输入坞：面板自己那一个过滤框带着 `autoFocus`，它收掉之后没人可交，落在页面上就得从页头重新 Tab 过去。 */}
+    {paletteOpen && <Palette commands={commands} onClose={() => { setPaletteOpen(false); composerRef.current?.focus(); }} />}
     {settingsOpen && <SettingsDialog
       client={client}
       sessionId={sessionId}

@@ -8,7 +8,8 @@ tauri-build = { version = "2.0.0", features = [] }
 
 [dependencies]
 tauri = { version = "2.11.1", features = [] }
+tauri-plugin-dialog = "2.8.1"
 
 # 这一层不写业务逻辑（D24），也不碰协议内容：它只搬调用帧、窗口和进程。
-# 依赖表里只有 tauri 本身，没有序列化库、没有 HTTP 与 WebSocket 客户端——
+# 依赖表里只有 tauri 与那一个原生保存对话框插件，没有序列化库、没有 HTTP 与 WebSocket 客户端——
 # 帧按整行字符串原样转递，壳不需要读懂里面是什么。
