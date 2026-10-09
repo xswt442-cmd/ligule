@@ -41,7 +41,7 @@ export async function waitFor(condition, { within = 150_000, every = 30, read = 
   }
 }
 
-export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {} } = {}) {  const testplace = resolve('testplace');
+export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {}, interactive = false } = {}) {  const testplace = resolve('testplace');
   await mkdir(testplace, { recursive: true });
   const directory = await mkdtemp(join(testplace, 'tui-host-'));
   const absoluteDirectory = resolve(directory);
@@ -138,6 +138,8 @@ export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {} 
       if (typeof message.notify === 'string') notifications.push(message);
     });
     host = serveHost({ ...pair.host, config, provider, policy: config.policy, loadEnvironment,
+      // 客户端声明它答得了模型的提问（D107）：这一格与终端壳、桌面壳走的是同一条入口。
+      interactive,
       modeName: 'minimal', modePaths: modeDirectories(projectDirectory, modesDirectory, homeDirectory),
     });
     const client = createConnection(pair.client);

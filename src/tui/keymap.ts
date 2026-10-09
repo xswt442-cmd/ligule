@@ -23,7 +23,7 @@ export type InkKey = {
   end?: boolean;
 };
 
-export type KeyView = '全局' | '输入' | '补全清单' | '路径候选' | '反查' | '会话列表' | '完整历史' | '审批';
+export type KeyView = '全局' | '输入' | '补全清单' | '路径候选' | '反查' | '会话列表' | '完整历史' | '审批' | '提问';
 
 export type TerminalAction =
   | 'quit' | 'expand-or-history' | 'editor' | 'search-open' | 'interrupt'
@@ -35,7 +35,8 @@ export type TerminalAction =
   | 'view-up' | 'view-down' | 'view-page-up' | 'view-page-down' | 'view-top' | 'view-bottom'
   | 'mark-up' | 'mark-down' | 'copy-selection' | 'view-close'
   | 'approval-cancel' | 'approve' | 'deny'
-  | 'approval-up' | 'approval-down' | 'approval-page-up' | 'approval-page-down' | 'approval-top' | 'approval-bottom';
+  | 'approval-up' | 'approval-down' | 'approval-page-up' | 'approval-page-down' | 'approval-top' | 'approval-bottom'
+  | 'question-back';
 
 export type Binding = { readonly spec: string; readonly view: KeyView; readonly label: string };
 
@@ -109,6 +110,9 @@ export const KEYMAP: Readonly<Record<TerminalAction, Binding>> = {
   'approval-page-down': { spec: 'pagedown', view: '审批', label: '在那一段改动里往下翻一屏' },
   'approval-top': { spec: 'home', view: '审批', label: '跳到那一段改动的开头' },
   'approval-bottom': { spec: 'end', view: '审批', label: '跳到那一段改动的末尾' },
+
+  // 答题那几格里回车就是交出这一题，草稿里的光标还得靠左走：所以退回上一题那一记只在草稿空着时落。
+  'question-back': { spec: 'arrowleft', view: '提问', label: '草稿空着时回到上一题，把刚才写的答话放回草稿里改' },
 };
 
 // Ink 对修饰键交回的是那一键自己的名字（`Control`、`Meta`）：光按住修饰键不是一记能用光自己的绑定。

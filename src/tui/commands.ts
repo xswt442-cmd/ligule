@@ -1,6 +1,7 @@
 // 终端界面的命令表与候选清单（D81）。这里只做「画哪几条、命中哪一条」这类纯计算。
 // 命令的内容一律来自宿主：提示模板由宿主交出、展开也归宿主（D24、D49），界面不留第二份事实源。
 import stringWidth from 'string-width';
+import type { AskAnswer, AskQuestion } from '../tools/ask-user.js';
 const WIDTH_CACHE_LIMIT = 1024;
 const widthCache = new Map<string, number>();
 
@@ -278,4 +279,21 @@ export function resolveSessionId(argument: string, listed: readonly SessionRow[]
   const prefix = listed.filter((item) => item.id.toLowerCase().startsWith(wanted));
   if (prefix.length === 1) return { id: prefix[0].id };
   return { code: prefix.length > 1 ? 'tui_session_ambiguous' : 'tui_session_not_listed' };
+}
+
+/**
+ * 模型那一道题在终端里怎么答（D107）：写的是一到四这一个范围内的纯编号就选中那几条选项，其余文本原样作为自由回答记下，空着就是这一题不答。
+ * 不做「答话里出现了某一条选项的名字」那种匹配：猜人要说什么，不如把编号写清楚——与审批那一格同一立场（D81）。
+ * 单选那一格收到两个编号时按自由回答记，不把人选过的那一条悄悄丢掉一半。
+ */
+export function answerOf(question: AskQuestion, text: string): AskAnswer | null {
+  const trimmed = text.trim();
+  if (trimmed === '') return null;
+  const tokens = trimmed.split(/[,，、\s]+/).filter((one) => one !== '');
+  const within = question.options.length > 0
+    && tokens.every((one) => /^\d+$/.test(one))
+    && tokens.every((one) => Number(one) >= 1 && Number(one) <= question.options.length)
+    && (question.multiSelect || tokens.length === 1);
+  if (!within) return { id: question.id, selected: [], custom: trimmed };
+  return { id: question.id, selected: [...new Set(tokens.map((one) => question.options[Number(one) - 1].label))] };
 }

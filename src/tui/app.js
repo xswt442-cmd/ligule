@@ -5,7 +5,7 @@
 import { resolve } from 'node:path';
 import { createElement as h, Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Static, Text, useApp, useInput, usePaste } from 'ink';
-import { SESSION_ROWS, UI_COMMANDS, candidatesOf, describeChange, findLines, findUiCommand, flowGroups, insertMention, mentionToken, resolveSessionId, routeInput, sessionLines } from './commands.js';
+import { SESSION_ROWS, UI_COMMANDS, answerOf, candidatesOf, describeChange, findLines, findUiCommand, flowGroups, insertMention, mentionToken, resolveSessionId, routeInput, sessionLines } from './commands.js';
 import { pushHistory, searchHistory } from './history.js';
 import { editInExternalEditor } from './editor.js';
 import { copyToClipboard, lastAnswer } from './clipboard.js';
@@ -28,7 +28,7 @@ const NO_TOKEN = { start: -1, text: '' };
 const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 // 那几张表与那几个纯函数交给检查里用（test/tui.test.js），界面自己只走这一处出口。
-export { SESSION_ROWS, UI_COMMANDS, candidatesOf, describeChange, displayWidth, findLines, findUiCommand, flowGroups, insertMention, mentionToken, resolveSessionId, routeInput, sessionLines } from './commands.js';
+export { SESSION_ROWS, UI_COMMANDS, answerOf, candidatesOf, describeChange, displayWidth, findLines, findUiCommand, flowGroups, insertMention, mentionToken, resolveSessionId, routeInput, sessionLines } from './commands.js';
 export { KEYMAP, CURRENT, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec, specOf } from './keymap.js';
 export { markdownLines } from './markdown.js';
 
@@ -288,6 +288,17 @@ export function queuedLine(text, limit = 64) {
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
 
+// 一道题在画面上怎么写：选中的那几条与自由回答各占一段，两样都没有就说这一格是空的（D107）。
+// `undefined` 是还没走到那一题，`null` 是走到过、回车交的是空的一句——两者交回宿主之后都记成「没有回答」，画面上要说清是哪一种。
+const answeredLine = (answer) => answer === undefined ? '还没答'
+  : answer === null ? '空着交出的'
+  : [answer.selected.join('、'), answer.custom].filter((one) => one !== '' && one !== undefined).join('；') || '没选中也没写';
+
+// 那一格下面说的是「怎么答」：有选项时要把编号那条写出来，人不然只会照着题面写一句自由回答（D107）。
+const optionHint = (question) => question.options.length === 0
+  ? '在下面的输入里写一句回答'
+  : question.multiSelect ? '在下面的输入里写一句回答，或写几条编号选出那几项' : '在下面的输入里写一句回答，或写那一条的编号';
+
 export function App({ client, sessionId: firstSessionId, info = {}, interactive = true, stdout, history = { entries: [], remember: async () => {} }, inputs, keys }) {
   const app = useApp();
   const [sessionId, setSessionId] = useState(firstSessionId);
@@ -297,6 +308,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [rows, setRows] = useState([]);
   const [live, setLive] = useState({ text: '', reasoning: '' });
   const [ask, setAsk] = useState(null);
+  // 模型的提问（D107）：一次请求一到四道题，答一道前进一道，答完最后一道才把答复交回去。
+  const [query, setQuery] = useState(null);
   const [running, setRunning] = useState(false);
   const [tick, setTick] = useState(0);
   const [seconds, setSeconds] = useState(0);
@@ -492,6 +505,17 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       if (message.notify === 'fault') push({ kind: 'error', text: `${message.code}：${message.detail ?? ''}` });
     };
     const onRequest = (message) => {
+      if (message.method === 'question.request') {
+        // 终端界面一次盯一份会话：别的那一份问过来的题在这一格里答不了（审批那一条同一处门）。
+        const asked = message.params;
+        if (asked.sessionId !== sessionId || !Array.isArray(asked.questions) || asked.questions.length === 0) return;
+        setDetail(null);
+        setSessionPicker(null);
+        setSearch(null);
+        setExpanded(false);
+        setQuery({ id: message.id, questions: asked.questions, at: 0, picked: {} });
+        return;
+      }
       if (message.method !== 'approval.request' || message.params.sessionId !== sessionId) return;
       const args = message.params.args ?? {};
       setApprovalExpanded(false);
@@ -560,6 +584,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       else push({ kind: 'error', text: `${code}：${error.detail ?? error.message ?? ''}` });
     } finally {
       setAsk(null);
+      // 这一轮结束了，还没答完的那几道题也不再有人等：宿主那一侧把取消记成一条结果，画面上这一格跟着收掉（D107）。
+      setQuery(null);
       setRunning(false);
       void refreshStatus();
     }
@@ -1056,7 +1082,29 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     push({ kind: 'error', text: `没有这条命令：/${name}（/help 看列表）` });
   }, [app, client, info, keyOverrides, keys, push, queue, queuePaused, sessionId, status, stdout]);
 
+  // 答一道题：回车把这一题的答话记下并走到下一题，最后一题答完才把整份答复交回去（D107）。
+  // 空着回车也往前走：那一题在宿主那里记成「没有回答」，模型读到的就是没答，不是界面替它编的一个答案。
+  const answerQuery = useCallback((text) => {
+    const head = query;
+    const question = head.questions[head.at];
+    const picked = { ...head.picked, [question.id]: { raw: text, answer: answerOf(question, text) } };
+    resetDraft('');
+    if (head.at + 1 < head.questions.length) {
+      setQuery({ ...head, at: head.at + 1, picked });
+      return;
+    }
+    const answers = head.questions.map((one) => picked[one.id]?.answer).filter((one) => one !== undefined && one !== null);
+    setQuery(null);
+    push({ kind: 'meta', text: `已交出 ${answers.length}/${head.questions.length} 道题的回答${answers.length === head.questions.length ? '' : '，其余按「没有回答」记下'}` });
+    client.reply(head.id, { answers });
+  }, [client, push, query, resetDraft]);
+
   const send = useCallback((text) => {
+    // 答题这一格开着时回车交的是这一题的答话，不是新的一轮；斜杠开头的仍按命令走，人还能用 /status 与 /queue（D107）。
+    if (query !== null && !text.trim().startsWith('/')) {
+      answerQuery(text);
+      return;
+    }
     const route = routeInput(text, running);
     if (route.kind === 'blocked') {
       push({ kind: 'meta', text: `这一轮跑着的时候 ${route.usage} 用不了；${keyHint('interrupt')} 先打断这一轮` });
@@ -1078,7 +1126,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     void submit(route.text);
-  }, [push, remember, runCommand, running, submit]);
+  }, [answerQuery, push, query, remember, runCommand, running, submit]);
 
   // 本轮结束后把队列里的第一条发出去：一次只发一条，剩下的接着排；被打断也算这一轮结束（D20）。
   // 人按下取消之后队列是停着的：那时不自动发，剩下的每一句都要等一次显式的继续（方案 5.2）。
@@ -1100,7 +1148,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
 
   // 候选每次从当前草稿算出来：草稿改一个字清单就跟着变，不需要再维护一份状态（D81）。
   const templates = status?.templates ?? [];
-  const picks = dismissedAt === draft || search !== null || detail !== null || sessionPicker !== null || ask !== null ? [] : candidatesOf(draft, templates);
+  const picks = dismissedAt === draft || search !== null || detail !== null || sessionPicker !== null || ask !== null || query !== null ? [] : candidatesOf(draft, templates);
   const chosen = picks.length === 0 ? 0 : Math.min(pick, picks.length - 1);
   const searched = search === null ? [] : searchHistory(entries, search.query);
   const viewLines = useMemo(() => detail === null ? [] : transcriptLines(detail.rows, Math.max(1, geometry.columns - 6)), [detail?.rows, geometry.columns]);
@@ -1110,6 +1158,15 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const approvalLines = useMemo(() => ask === null ? [] : wrapLine(ask.content, Math.max(1, geometry.columns - 6)), [ask?.content, geometry.columns]);
   const approvalHeight = Math.max(1, geometry.rows - 12);
   const approvalView = viewportPosition(approvalCursor, approvalLines.length, approvalHeight);
+  // 答题那一格要画的几样：题面、已经走过的几道各自记成了什么、这是不是最后一道（D107）。
+  const asking = query === null ? null : {
+    count: query.questions.length,
+    current: query.questions[query.at],
+    title: query.questions[query.at].header === undefined ? query.questions[query.at].question
+      : `${query.questions[query.at].header} · ${query.questions[query.at].question}`,
+    done: query.questions.slice(0, query.at).map((one, index) => `第 ${index + 1} 道已记下：${answeredLine(query.picked[one.id]?.answer)}`),
+    last: query.at + 1 === query.questions.length,
+  };
   const caretText = useMemo(() => [...GRAPHEMES.segment(draft.slice(caret))][0]?.segment ?? ' ', [draft, caret]);
 
   useInput((input, key) => {
@@ -1156,6 +1213,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         push({ kind: 'meta', text: `已不允许 ${asked.tool}` });
         client.reply(asked.id, { decision: 'deny' });
       }
+      return;
+    }
+    // 答题那一格：← 在草稿空着时退回上一题，把那一题刚才写的原文放回草稿里改；改完再回车，交出去的是改过的那一份。
+    // 草稿非空时这一记仍归光标移动——答题要写得了一句话，退回上一题是偶尔做的事（D107）。
+    if (query !== null && draft === '' && hit('question-back', input, key)) {
+      const back = Math.max(0, query.at - 1);
+      resetDraft(query.picked[query.questions[back].id]?.raw ?? '');
+      setQuery({ ...query, at: back });
       return;
     }
     if (detail !== null && ask === null) {
@@ -1256,7 +1321,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     }
     // 路径候选开着时这几记按键归清单：Enter 是选中那一条，不是发送（方案 5.3「选中候选不能触发发送」）。
     // 一条候选都没有时 Enter 照旧发这一句——那时清单上说的是「没有对得上的文件」，不该把发送挡住。
-    if (mention !== null && ask === null && detail === null && sessionPicker === null && search === null) {
+    if (mention !== null && ask === null && query === null && detail === null && sessionPicker === null && search === null) {
       if (hit('path-close', input, key)) {
         setHiddenMention(mention.text);
         setMention(null);
@@ -1365,7 +1430,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         setCaret(caret + 1);
         return;
       }
-      if (draft.trim() !== '') send(draft);
+      // 空着回车本来什么都不发；答题那一格开着时它说的是「这一道不答」，要往前走下一道（D107）。
+      if (draft.trim() !== '' || query !== null) send(draft);
       return;
     }
     const edited = editDraft(draft, caret, input.replace(/\r\n?/g, '\n'), key);
@@ -1401,6 +1467,13 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         ...approvalLines.slice(approvalView.offset, approvalView.offset + approvalHeight).map((line, index) => h(Text, { key: index, wrap: 'truncate-end' }, line)),
         h(Text, { dimColor: true }, `改动第 ${approvalView.cursor + 1}/${approvalLines.length} 行 · ${keyHint('approval-page-up', 'approval-page-down')} 查看 · ${keyHint('approval-top', 'approval-bottom')} 到两端`)) : null,
       h(Text, { wrap: 'truncate-end' }, `按 ${keyHint('approve')} 允许一次，按 ${keyHint('deny')} 不允许 · ${keyHint('expand-or-history')} 查看改动 · ${keyHint('approval-cancel')} 打断`)),
+    asking === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'blue', paddingX: 1 },
+      h(Text, { bold: true }, `模型在问 ${asking.count} 道题，现在答第 ${query.at + 1} 道`),
+      h(Text, { wrap: 'truncate-end' }, asking.title),
+      ...asking.current.options.map((option, position) => h(Text, { key: `option:${position}`, dimColor: true, wrap: 'truncate-end' }, `  ${position + 1}. ${option.label}${option.description === undefined ? '' : ` —— ${option.description}`}`)),
+      ...asking.done.map((line, index) => h(Text, { key: `done:${index}`, dimColor: true, wrap: 'truncate-end' }, `  ${line}`)),
+      h(Text, { wrap: 'truncate-end' }, `${optionHint(asking.current)}，回车${asking.last ? '交出整份答复' : '记下这一道并走到下一道'}`),
+      h(Text, { dimColor: true, wrap: 'truncate-end' }, `  ${asking.done.length > 0 ? `${keyHint('question-back')} 改上一道 · ` : ''}${keyHint('interrupt')} 取消这一轮 · 这一格没有回答时限`)),
     detail === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'cyan', paddingX: 1 },
       h(Text, { dimColor: true, wrap: 'truncate-end' }, detail.kind === 'transcript' ? '会话完整历史' : detailTitle(detail)),
       viewLines.length === 0

@@ -3,6 +3,7 @@ import { DropdownMenu, Popover } from 'radix-ui';
 import { Virtuoso, type ItemProps, type VirtuosoHandle } from 'react-virtuoso';
 import { code, createClient, type Client, type Transport } from './protocol';
 import { ApprovalCard, type Ask } from './components/ApprovalCard';
+import { QuestionCard, type QuestionAsk } from './components/QuestionCard';
 import { Icon } from './components/Icon';
 import { SettingsDialog } from './components/Settings';
 import { RowView } from './components/RowView';
@@ -275,6 +276,8 @@ export function App({ transport }: { transport: Transport }) {
   // 本轮收尾时要知道那一份会话还剩几条没答：这一格由渲染之后同步，不在那一条收尾路径的依赖里读 `asks`（那会读到旧的一份）。
   const asksLeft = useRef<Ask[]>([]);
   useEffect(() => { asksLeft.current = asks; }, [asks]);
+  // 模型的提问与审批各一张卡、各一条链：审批答「能不能做这一件」，提问答「这一件事该怎么办」（D107）。
+  const [queries, setQueries] = useState<QuestionAsk[]>([]);
   // 跑着的那几轮各属于哪一份会话（方案 3.1「后台会话继续运行」与 5.2「队列按会话隔离」）：
   // 一具 Host 给每份会话自己的信号与判定链（`state.running` 按会话存），界面这一侧也跟着按会话记，
   // 「本轮结束」与那几句画面只说得上它自己那一份会话；切走看着另一份时不替那一份发话、也不替那一份画收尾。
@@ -521,7 +524,18 @@ export function App({ transport }: { transport: Transport }) {
     });
 
     client.onRequest((message) => {
-      // Host 朝界面发出去的请求只有 approval.request 这一种。
+      // 提问那一发（D107）：一次请求一到四道题，答复按题目自己的编号回去，与审批各走一条链。
+      if (message.method === 'question.request') {
+        const asked = message.params as { sessionId?: string; projectRoot?: string; questions?: QuestionAsk['questions'] };
+        const owner = asked.sessionId;
+        const items = asked.questions;
+        if (typeof owner !== 'string' || owner === '' || !Array.isArray(items)) return;
+        const id = message.id ?? '';
+        // 同一个编号不排两张卡：一张卡答一次。
+        setQueries((current) => current.some((one) => one.id === id) ? current : [...current, { id, sessionId: owner, project: asked.projectRoot ?? '', questions: items }]);
+        return;
+      }
+      // Host 朝界面发出去的请求到此只有两种：审批与提问。
       if (message.method !== 'approval.request') return;
       const params = message.params as { sessionId?: string; projectRoot?: string; tool?: string; command?: string; args?: Record<string, unknown>; reason?: string; shell?: string; executable?: string; policy?: string; policySource?: string; policyForced?: boolean };
       // 询问归那一份会话，不归眼前看着的那一份：别的那一份在等，也得让人看得见、答得掉（实现顺序第 71 步）。
@@ -694,6 +708,13 @@ export function App({ transport }: { transport: Transport }) {
     reconnecting.current = true;
     client.discard('host_restarted');
     setAsks([]);
+    // 换了一具宿主，旧的那一发请求身份就作废了：题面与已经打下的字留成一条可读的记录，不自动发给新的宿主（方案 4.4）。
+    if (queries.length > 0) {
+      setRows((current) => [...current, metaRow('meta', queries
+        .map((one) => one.questions.map((question, index) => `第 ${index + 1} 题：${question.question}`).join('；'))
+        .join('\n') + '\n宿主换了一具，这一次问的已作废，上面的回答不会再交出去')]);
+      setQueries([]);
+    }
     setRunningIds([]);
     try {
       try {
@@ -721,7 +742,7 @@ export function App({ transport }: { transport: Transport }) {
       // 这一格必须在每一条路上都清掉：留着会让之后每一次重连都点在「还在重连」上，队列也永远不点火。
       reconnecting.current = false;
     }
-  }, [client, openSession, projectRoot, sessionId, setAsks, setRunningIds, transport]);
+  }, [client, openSession, projectRoot, queries, sessionId, setAsks, setRunningIds, transport]);
 
   const readBack = useCallback(async () => {
     if (sessionId === null) return;
@@ -963,6 +984,20 @@ export function App({ transport }: { transport: Transport }) {
     composerRef.current?.focus();
   }, [asks, client, sessionId]);
 
+  // 提问只交一次答复：交出去就把这张卡收掉，之后再按没有对象可答（一次请求一次答复，D107）。
+  const answerQuestion = useCallback((answers: { id: string; selected: string[]; custom?: string }[]) => {
+    const [head, ...rest] = queries;
+    if (head === undefined) return;
+    setQueries(rest);
+    if (head.sessionId === sessionId) {
+      setRows((current) => [...current, metaRow('meta', `已答 ${head.questions.length} 道题里的 ${answers.length} 道，其余按「没有回答」记下`)]);
+    }
+    client.reply(head.id, { answers });
+    // 与审批那两枚一样：答完把焦点从按钮上移开，免得下一次 Enter 又按一次同一枚。
+    (document.activeElement as HTMLElement | null)?.blur();
+    composerRef.current?.focus();
+  }, [client, queries, sessionId]);
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       // 输入法正在拼的那一段里，Esc 属于取消候选词，Enter 属于选中候选词：这一路都不能替人收面板或打断这一轮（方案 5.1、5.4）。
@@ -1161,6 +1196,16 @@ export function App({ transport }: { transport: Transport }) {
             所以画在转录里面、绝对定位。 */}
         {!pinned && <button className="jump-latest" type="button" onClick={jumpToLatest}>回到最新</button>}
       </div>
+
+      {queries.length > 0 && <QuestionCard
+        key={queries[0].id}
+        ask={queries[0]}
+        queued={queries.length - 1}
+        active={sessionId}
+        onOpen={(id: string) => void openSession(id)}
+        onSubmit={answerQuestion}
+        onCancel={() => void cancel()}
+      />}
 
       {asks.length > 0 && <ApprovalCard
         ask={asks[0]}

@@ -725,6 +725,104 @@ button:disabled {
   gap: var(--space-2);
 }
 
+/* ---------- 模型提问那一格（D107）：与审批卡同一套刻度，只把「等人回答」这件事说清楚 ---------- */
+
+.question {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 0;
+  inline-size: min(100%, var(--stream));
+  margin-inline: auto;
+  margin-block: 0 var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-raised));
+}
+
+.question-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 0;
+  max-height: min(24rem, 32vh);
+  overflow: auto;
+}
+
+@media (max-height: 700px) {
+  .question-body {
+    max-height: min(16rem, 24vh);
+  }
+}
+
+.question-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.question-kind {
+  color: var(--accent-strong);
+  font-size: var(--text-xs);
+  letter-spacing: 0.06em;
+}
+
+/* 一道题一格：题目、选项与那一行自己写的字属于同一次回答。 */
+.question-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.question-item legend {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  padding-inline: var(--space-1);
+  font-size: var(--text-md);
+}
+
+.question-option {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  /* 命中的那一横条整段可点：只有圆点可点时窄窗里要点很多次才中。 */
+  min-block-size: var(--hit);
+  padding-inline: var(--space-1);
+}
+
+.question-option-note,
+.question-note {
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+.question-tag {
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding-inline: var(--space-1);
+}
+
+.question-free {
+  inline-size: 100%;
+}
+
+.question-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
 .composer {
   display: flex;
   flex-direction: column;
