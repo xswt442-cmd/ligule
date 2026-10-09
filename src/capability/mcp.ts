@@ -12,6 +12,7 @@ import { createHash } from 'node:crypto';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { KernelError } from '../kernel/error.js';
+import { VERSION } from '../version.js';
 
 export interface McpServerConfig {
   command?: unknown;
@@ -168,7 +169,7 @@ export async function connectServer(settings: ReturnType<typeof mcpServerConfigs
     env: { ...process.env, ...settings.env } as Record<string, string>,
     stderr: 'pipe',
   });
-  const client = new Client({ name: 'ligule', version: '0.0.1' });
+  const client = new Client({ name: 'ligule', version: VERSION });
   try {
     await client.connect(transport, signal === undefined ? undefined : { signal });
     const opened = { name: settings.name, client, tools: new Map<string, ToolDefinition>() };

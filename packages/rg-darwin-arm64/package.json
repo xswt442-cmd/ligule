@@ -1,6 +1,6 @@
 {
   "name": "ligule-rg-darwin-arm64",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "The ripgrep executable ligule uses for content search on darwin-arm64. Not published on its own: the main package lists it under optionalDependencies.",
   "license": "(MIT OR Unlicense)",
   "os": ["darwin"],
