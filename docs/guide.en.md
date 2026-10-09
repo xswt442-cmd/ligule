@@ -173,10 +173,13 @@ The terminal UI's input history survives sessions in `~/.ligule/tui-history.json
 
 The policy level applies to the whole run, not per tool name. Two levels can be written: `ask` asks every time, `auto` opens read, write and execution together; anything else reports `policy_mode_unknown`. Each call's judgement has three outcomes: allowed, refused, asked.
 
+`ask_user_question` asks what the person wants rather than whether an action may run, so it keeps its own request and answer: it takes no part in the level decision, has no deadline, and ends only when the answers are submitted or the round is cancelled. Both the terminal and the desktop shell can answer it; the plain command-line entry does not carry it, because nobody is there to answer the next call.
+
 | To do | Terminal UI | Desktop shell |
 |---|---|---|
 | answer this request | `y` allows, `n` refuses; Esc cancels the round | the allow and refuse buttons; Esc cancels the round |
 | see the actual change | expanded inside the request box; Ctrl+O opens or collapses it | same shape, and the header names which project the action belongs to |
+| answer a question from the model | write a sentence in the draft, or the number of an option; Enter records that item and the last one sends the whole set | pick an option or write free text, then use the submit button |
 | change the level for this session | `/policy ask`, `/policy auto`, `/policy reset` | the badge in the top bar; reset returns to the configured default |
 | see how this run judged | `ligule policy <session-id>` | the "tools and levels" panel states the current level, which layer it comes from, and the consecutive and total refusal counts |
 | save a default level and rule table | `[policy]` in a configuration file | the settings "approval rules" section |
@@ -276,6 +279,7 @@ Terminal UI (`/bind` lists the current table):
 | Enter, ↑ ↓, PageUp/PageDown, Home/End, Esc | take the session selected in the list | session list |
 | ↑ ↓, PageUp/PageDown, Home/End, Shift+↑/↓, Ctrl+Y, Esc | browse and select the full history | full history |
 | y, n, Esc, ↑ ↓, PageUp/PageDown, Home/End | answer the approval and read that change | approval |
+| Enter, ←, Esc | answer the model's questions one item at a time; ← returns to the earlier item while the draft is empty | question |
 
 `/bind <action> <key-spec>` changes one binding, `/bind reset <action>` drops that override, `/bind default` returns the whole table. Two keys landing on one action in the same scope are refused on the spot. Overrides are stored in `~/.ligule/tui-keys.json` and survive the next start.
 
@@ -299,7 +303,7 @@ The palette holds: new session, re-read this session's log, branch a new session
 | You see | Meaning | What to do |
 |---|---|---|
 | `session_locked` | another backend process holds this session | close the other one, or wait for it to release; after a hard kill of the lock owner the lock expires within ten seconds |
-| the disconnect banner and its "reconnect" button | the backend process exited | press "reconnect": it starts a new process and takes the session back with `session.open`. Unanswered requests end as `host_restarted`, unanswered approvals are voided |
+| the disconnect banner and its "reconnect" button | the backend process exited | press "reconnect": it starts a new process and takes the session back with `session.open`. Unanswered requests end as `host_restarted`, unanswered approvals and questions are voided |
 | `tool_outcome_unknown` | left by a call whose host was hard-killed or crashed | treat it as "unknown whether it happened"; confirm the actual state before redoing it |
 | `config_field_unknown` | the key the UI submitted is not on the host whitelist | use one of the four model fields the panel offers |
 | `cli_command_unknown` | the command name is misspelled | run `ligule --help` |

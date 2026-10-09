@@ -74,6 +74,7 @@ npm run build-rg    downloads the pinned ripgrep into packages/rg-*
 - `src/tui/AGENTS.md` holds the rules of the terminal client (D33) and `desktop/AGENTS.md` the rules of the desktop surface (D34); this section holds only what the two share.
 - A round the person interrupted reads 这一轮已被打断 whichever code the kernel answered with: an abort landing on a live model call reports `provider_cancelled`, between two call groups `loop_cancelled`.
 - Both surfaces describe an approval from the same three fields read off the arguments — the action, the block to remove, the block to put in — and mark the last two with `-` and `+` (`describeChange` in `src/tui/commands.ts`, `changeOf` and `changeBody` in `desktop/frontend/src/rows.ts`).
+- Both surfaces answer `question.request` from one shape (D107): the item's options may be picked or answered in free text, an item nobody answers is reported as unanswered rather than guessed, and there is no deadline — only an answer or a cancelled round settles the wait.
 - A draft, a queued sentence, a fold and a key binding are interface state on either surface and reach no record (D81).
 
 ## Configuration

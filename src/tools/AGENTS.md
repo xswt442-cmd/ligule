@@ -30,3 +30,9 @@ Rules for `src/tools/`: the three read-only tools, the four write tools, the fir
 - The parent receives the child's text, its session id and the record path. One child at a time; the concurrency field is untouched (D29).
 - The tool registers only when a session is built, so `ligule tools` counts nine. A branch is read with the existing action (D74).
 
+`ask_user_question` is a first-party tool that waits for a person (D107).
+
+- Its one parameter is a JSON array text: the parameter subset the kernel accepts (D14) holds scalars only, and `mcp.call`'s `arguments` takes the same route (D52). Validation lives here — at most four questions, at most four options each, every length capped, and the question ids are numbered `q1`..`qN` by this module so the model cannot state a duplicate or a missing one.
+- It registers with `disclosure: true`, so no tool mode hides it. That list is the model's disclosure of what it may do; a mode written wrong should not swallow a question the person is waiting to read.
+- Answers align by question id. An answer set matching none of the questions fails `ask_user_answer_invalid`; a round cancelled while waiting fails `ask_user_cancelled`. The text handed back pairs each question with what the person actually said, and an item left unanswered reads 没有回答 instead of an invented answer.
+
