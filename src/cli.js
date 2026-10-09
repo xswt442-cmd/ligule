@@ -95,6 +95,8 @@ async function projectEnvironment(projectRoot) {
     config,
     provider: providerFromConfig(config),
     policy: config.policy,
+    // 四层原样交回：宿主给这一份项目环境建它自己的可写层存储，设置那一栏读写都按这一个项目算（方案 3.2）。
+    layers,
     modeName: config.mode ?? DEFAULT_MODE,
     modePaths: modeDirectories(projectRoot, shippedModes),
     extensions: await extensionSources({ ...layers, user }, { projectRoot }),
@@ -370,7 +372,11 @@ if (missingFlagValue) {
       policy: config.policy,
       extensions,
       loadEnvironment: projectEnvironment,
-      configStore: createConfigStore({ projectRoot: config.boundary, layers }),
+      // 装载那一次读到的四层交进宿主，可写那两层的存储由宿主按项目环境各建一份：设置那一栏说的是
+      // 「哪一个项目的哪一层文件」，读与写都落在它自己身上（方案 3.2、审阅 F3）。
+      // 路径与文件名在这里算，宿主说不出也换不到（方案 7.2）：它只认层名、白名单字段与读回的那一份版本。
+      configLayers: layers,
+      configStoreFor: (projectRoot, ownLayers) => createConfigStore({ projectRoot, layers: ownLayers }),
       ...resolveMode(config),
     });
   } catch (error) {
