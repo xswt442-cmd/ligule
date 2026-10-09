@@ -41,6 +41,8 @@ Rules for `src/session/`: the record, its format, repair, listing, checkpoint an
 
 - `ligule sessions` reads the record directory and lists past runs. It builds no kernel, loads no extension and opens no session (D73).
 - The first line gives the project and the start time, the last `mode` event gives the list the run used, and a dispatched call with no result is counted, so a half-finished session shows itself in the listing.
+- The first line also carries `workspace` and `workspaceOrigin` (`explicit` when a client named the root, `default` when it used the one it was on) (D110, 方案 5.5.3). A surface groups by those two facts and never by "does this path equal the current default" (方案 5.5.4). A record that predates them, or one a reopen wrote a header for, says neither: the listing answers an empty string, which is "not stated", not "the default one".
+- A derived branch copies both facts off the parent's first line: a branch shows up where its source shows up, whatever the current default says (方案 5.5.4).
 - `--json` is for scripts and `--project <root>` filters by that first line. A record whose project cannot be read belongs to no project. The filter compares `workspaceIdentity()` of both sides when the two spellings differ, so a directory written another way is still the same project (D110).
 - The scan reads whole files, so its cost grows linearly with the number of records and no index exists yet (U38).
 - The same rows reach a client over `sessions.list`, where `projectRoot` and `limit` are both optional. No surface reads that directory itself.
