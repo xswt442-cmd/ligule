@@ -2,6 +2,12 @@
 
 Rules for `src/kernel/`: the tool table, decision chain, loop, prompt assembly, slot registry, assembly list, mode loader, result shapes, config, log and error codes. The repository-wide rules in [../../AGENTS.md](../../AGENTS.md) apply here too; this file states what only this directory has to keep.
 
+## Data root
+
+- `dataRoot()` in `config-file.js` is the one place that builds the per-user directory (D110). Nothing under `src/kernel/` joins `.ligule` onto the home directory by hand, and the tests take a home parameter the same way the loaders do.
+- An absolute `LIGULE_HOME` wins. A blank one reads as unset, and a relative one fails with `data_root_invalid` — the root never moves with the working directory.
+- The user config layer, `modes/`, `skills/`, `prompts/` and `extensions/` are read under it. `~/.agents/skills/` and everything under the project boundary keep their own anchors.
+
 ## Modes
 
 - A mode is a named assembly list (D35, D43): one TOML per mode, found in `modes/`, then `~/.ligule/modes/<name>.toml`, then `<project root>/.ligule/modes/<name>.toml`.

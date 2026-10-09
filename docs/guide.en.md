@@ -68,6 +68,8 @@ The command line, the terminal UI and the desktop shell read the same configurat
 
 Nested tables merge key by key; arrays and scalars replace wholesale.
 
+The directory holding the user layer is the application data root: `~/.ligule` by default, and an absolute path in the environment variable `LIGULE_HOME` moves the whole thing elsewhere. A relative value is refused on the spot (`data_root_invalid`). The auto-loaded modes, skills, prompt templates and extensions, plus the terminal UI's key overrides, input history and drafts, all live under that directory. Session records and the project layers follow the project root, `~/.agents/skills/` follows the home directory, and neither moves with the data root.
+
 The key is never written into any layer — every key in a configuration file is readable by the tools — it comes from an environment variable only. The default name is `LIGULE_API_KEY`, renamed by `model.apiKeyEnv`.
 
 The smallest configuration that runs; replace every angle-bracket value:
@@ -306,6 +308,7 @@ The palette holds: new session, re-read this session's log, branch a new session
 | the disconnect banner and its "reconnect" button | the backend process exited | press "reconnect": it starts a new process and takes the session back with `session.open`. Unanswered requests end as `host_restarted`, unanswered approvals and questions are voided |
 | `tool_outcome_unknown` | left by a call whose host was hard-killed or crashed | treat it as "unknown whether it happened"; confirm the actual state before redoing it |
 | `config_field_unknown` | the key the UI submitted is not on the host whitelist | use one of the four model fields the panel offers |
+| `data_root_invalid` | `LIGULE_HOME` names a relative path | write an absolute path; without this variable the data root is `~/.ligule` |
 | `cli_command_unknown` | the command name is misspelled | run `ligule --help` |
 | `tui_terminal_required` | the terminal UI started on a non-interactive terminal | use `ligule run` |
 | `tui_dependency_missing` | the terminal UI's optional dependencies are not installed | `npm install ink react marked highlight.js string-width` |

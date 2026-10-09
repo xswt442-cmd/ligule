@@ -81,6 +81,8 @@ npm run build-rg    downloads the pinned ripgrep into packages/rg-*
 ## Configuration
 
 - Configuration arrives in layers: `~/.ligule/config.toml`, `<project root>/.ligule/config.toml`, `<project root>/.ligule/config.local.toml`, then `--config key.path=value`. The layers fold into one frozen snapshot (D8).
+- `dataRoot()` in `src/kernel/config-file.js` builds the per-user directory and nothing else joins it (D110): an absolute `LIGULE_HOME` wins, an empty one reads as unset, a relative one raises `data_root_invalid`, and the default is `<home>/.ligule`. The user config layer and the mode, skill, prompt-template and extension directories, plus the terminal client's key bindings, input history and drafts, hang off it.
+- The project layers, the session records and `~/.agents/skills/` keep their own anchors: the first two the boundary, the last one the home directory.
 - Only plain tables merge recursively; arrays and scalars replace whole. A TOML datetime is a class instance, and a higher layer replaces it for that reason.
 - The project layer can come from someone else's repository, which is why a `__proto__` key in any layer is refused (`config_key_unsafe`).
 - Credentials never come from files. Every key in a config layer is readable by tools, so a key comes from the environment instead (`LIGULE_API_KEY`, renamed by `model.apiKeyEnv`).

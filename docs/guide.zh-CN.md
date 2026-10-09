@@ -68,6 +68,8 @@ npm run build     # NSIS 安装包，产物在 target/release/bundle/nsis/
 
 嵌套的表逐键合并，数组与标量整份替换。
 
+用户层所在的那一份目录就是应用数据根：默认 `~/.ligule`，环境变量 `LIGULE_HOME` 写一个绝对路径能让它整体挪到别处，写相对路径当场拒掉（`data_root_invalid`）。模式、技能、提示词模板与扩展的自动装载目录，终端界面的键位改动、输入历史与草稿都在这一份目录下面。会话记录与项目层文件按项目根走，`~/.agents/skills/` 按主目录走，这两处不跟着数据根挪。
+
 密钥不写进任何一层文件——配置文件里的每个键工具都读得到——只走环境变量。默认读 `LIGULE_API_KEY`，用 `model.apiKeyEnv` 改名字。
 
 最小的一份能跑的配置，尖括号里的值都要换成你自己的：
@@ -306,6 +308,7 @@ reason = "只读的 diff"
 | 断连横幅与「重连」 | 后端进程退了 | 按「重连」：会换一具进程，再用 `session.open` 接回这一份会话。没答复的那些请求按 `host_restarted` 收尾，还没答的询问与提问作废 |
 | `tool_outcome_unknown` | 宿主被硬杀或崩掉时那一次调用留下的 | 当作「不知道做没做成」，先确认实际状态再重做 |
 | `config_field_unknown` | 界面提交的格子不在宿主白名单里 | 换那一格的名字；界面上能改的只有四条模型字段 |
+| `data_root_invalid` | `LIGULE_HOME` 写的是相对路径 | 写绝对路径；没写这一格时数据根是 `~/.ligule` |
 | `cli_command_unknown` | 命令名打错 | 跑 `ligule --help` 列一遍 |
 | `tui_terminal_required` | 在非交互终端里起了终端界面 | 改用 `ligule run` |
 | `tui_dependency_missing` | 终端界面的可选依赖没装上 | `npm install ink react marked highlight.js string-width` |
