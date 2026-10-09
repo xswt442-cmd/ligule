@@ -410,6 +410,7 @@ if (missingFlagValue) {
   console.log('run, tui and host read model.api ("messages" or "chat-completions"), model.baseURL and model.model from the config layers; the key comes from the environment variable named by model.apiKeyEnv, or LIGULE_API_KEY when that one is not written');
   console.log('run, tui and host also pick a mode: --mode <name> overrides the config `mode`, and neither one written means the shipped "minimal" (D44); tools and call do not read one');
   console.log('skills lists what this directory would load and why any skill was skipped; it reads the four skill directories and no model config');
+  console.log('the personal layer sits in the data root: ~/.ligule, or the absolute directory named by LIGULE_HOME; a relative value is refused with data_root_invalid (D110)');
 } else {
   // 打错的命令不该走帮助文本再退出 0：调用方是个脚本时，0 加一段帮助就是一次成功。
   printFailure('cli_command_unknown', `"${command}" is not a command; run ligule --help to list them`);
