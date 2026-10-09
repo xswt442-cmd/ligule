@@ -8,7 +8,7 @@ import {
   capabilitiesOf, createConfig, createKernel, createLoop, createMessagesProvider, createSessionLog,
   DEFAULT_RETRY, MESSAGES_CAPABILITIES, readTool,
 } from '../dist/index.js';
-import { listenFetchable } from './helpers/port.js';
+import { fetchablePort, listenFetchable } from './helpers/port.js';
 
 const API_KEY_ENV = 'LIGULE_TEST_API_KEY';
 const FAST_RETRY = { ...DEFAULT_RETRY, baseDelayMs: 1 };
@@ -429,28 +429,27 @@ test('the usage the endpoint reports comes back as one event at the end', async 
   });
 });
 
-// 端口助手自己那一条：系统连着给出两个 fetch 拒用的端口时，助手要重听并把用得出去的那一个交回来。
-// 那两张端口号是这一版 Node 上扫出来的（6000 与 6665 都在拒的那一批里）。
-test('the endpoint helper waits for a port that fetch will use', async () => {
-  const given = [6000, 6665, 45123];
-  const listens = [];
-  let closes = 0;
-  const server = {
-    once(name, handler) {
-      if (name === 'close') setImmediate(handler);
-      return this;
-    },
-    listen(_port, _host, onListening) {
-      const port = given[listens.length];
-      listens.push(port);
-      onListening();
-    },
-    address: () => (listens.length === 0 ? null : { port: listens[listens.length - 1] }),
-    close() {
-      closes += 1;
-    },
-  };
-  assert.equal(await listenFetchable(server), 45123, '拒用的端口不能交出去');
-  assert.deepEqual(listens, [6000, 6665, 45123], '每重听一次就问系统要一个新的');
-  assert.equal(closes, 2, '重听之前先收了上一次那一个');
+// 端口助手自己那一条：真起一张服务表，交回来的那一个端口要真的能被 fetch 用到（审阅 C11：
+// 原先那一格自己造了假的 listen/close/once/address，证明不了 Node 的服务生命周期，换成真服务与真纯函数两格）。
+test('the endpoint helper hands back a port that fetch really reaches', async () => {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/plain' });
+    response.end('ok');
+  });
+  try {
+    const port = await listenFetchable(server);
+    const answer = await fetch(`http://127.0.0.1:${port}/`);
+    assert.equal(answer.status, 200);
+    assert.equal(await answer.text(), 'ok');
+  } finally {
+    await new Promise((resolve) => { server.close(resolve); });
+  }
+});
+
+// 那一张拒用表是这一版 Node 的事实（整片扫出来的），这一格测的是真函数本身而不是照它重写的另一份：
+// 拒用的几个与放行的几个各验一次，另外 1024 以下这一份一个也不放（那一截只有 80 与 443 可用，这里不需要）。
+test('the refused-port table answers for the real predicate', () => {
+  for (const port of [1719, 5060, 6000, 6665, 10080]) assert.equal(fetchablePort(port), false, `${port} 是 fetch 拒用的那一个`);
+  assert.equal(fetchablePort(45123), true);
+  assert.equal(fetchablePort(1023), false, '1024 以下这一份一个也不放');
 });
