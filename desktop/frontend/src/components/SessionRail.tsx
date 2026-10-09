@@ -108,12 +108,28 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
   const load = useCallback(async () => {
     setLoading(true);
     setNote('');
-    // 每项目录各读一次：这一具宿主自己的那一份不用指名，另外看着的那几份按目录指名。
-    const asked = ['', ...projects.filter((root) => root !== '')];
+    const failures: string[] = [];
+    // 那份登记先读：默认那一具工作区可能不是宿主自己的进程目录，会话落在它里面时这一栏也要能列出来（方案 5.5.3）。
+    // 读不回来要说得出，但别让人看不见会话，所以组名退成目录那一段。
+    const read = await client.call('workspaces.list', {}, 15_000)
+      .then((answer) => answer as WorkspaceRoster)
+      .catch((error) => {
+        failures.push(failureLine('那份工作区登记', error));
+        return { default: null, workspaces: [] } as WorkspaceRoster;
+      });
+    // 每项目录各读一次：这一具宿主自己的那一份不用指名，另外看着的那几份与登记里默认那一份按目录指名。
+    const asked = new Map<string, string>();
+    const remember = (root: string) => {
+      const key = root.replace(/[/\\]+$/, '').toLowerCase();
+      if (!asked.has(key)) asked.set(key, root);
+    };
+    remember('');
+    for (const root of projects) remember(root);
+    const chosen = read.workspaces.find((one) => one.identity === read.default);
+    if (chosen !== undefined) remember(chosen.directory);
     const all: SessionSummary[] = [];
     const found = new Map<string, string>();
-    const failures: string[] = [];
-    for (const root of asked) {
+    for (const root of asked.values()) {
       let sessions: SessionSummary[];
       try {
         // 这一条带超时：宿主不回时界面要停在「读不回来」那一句，不能一直停在在读。
@@ -129,13 +145,6 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
       }
     }
     setRootsById(found);
-    // 那份登记读不动时组名照旧用目录那一段画：读不回来要说得出，但别让人看不见会话。
-    const read = await client.call('workspaces.list', {}, 15_000)
-      .then((answer) => answer as WorkspaceRoster)
-      .catch((error) => {
-        failures.push(failureLine('那份工作区登记', error));
-        return { default: null, workspaces: [] } as WorkspaceRoster;
-      });
     setLayout(groupByWorkspace(all, projects, read));
     setNote(failures.join('；'));
     setLoading(false);
