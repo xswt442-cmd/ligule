@@ -13,6 +13,7 @@ import { createKernel } from './kernel/kernel.js';
 import { loadAssembly } from './kernel/assembly.js';
 import { DEFAULT_MODE, modeDirectories } from './kernel/modes.js';
 import { extensionSources } from './kernel/extensions.js';
+import { readRegistry, registryPathOf } from './kernel/workspace.js';
 import { discoverSkills, skillDirectories } from './kernel/skills.js';
 import { createSessionLog } from './session/session.js';
 import { listSessions, sessionDirectory } from './session/list.js';
@@ -338,6 +339,25 @@ if (missingFlagValue) {
   } catch (error) {
     printFailure(error.code ?? 'cli_sessions_failed', error.detail);
   }
+} else if (command === 'workspaces') {
+  // 读那份持久的登记（D110、方案 5.5.1）：宿主在真的建会话与真的接会话那两处写下每一条，这一条只读它，不建内核。
+  // 界面上那一栏列不出来的工作区仍然在这份清单里：登记不是「最近八个路径」那一类列表。
+  try {
+    const path = registryPathOf();
+    const registry = await readRegistry(path);
+    if (jsonFlag) console.log(JSON.stringify(registry));
+    else if (registry.workspaces.length === 0) {
+      console.log('no workspaces registered');
+      console.log(`  looked in ${path}`);
+    } else {
+      for (const one of registry.workspaces) {
+        console.log(`${one.lastSeen}  ${one.name}  ${one.directory}${one.identity === registry.default ? '  default' : ''}`);
+      }
+      console.error(`${registry.workspaces.length} workspaces in ${path}`);
+    }
+  } catch (error) {
+    printFailure(error.code ?? 'cli_workspaces_failed', error.detail);
+  }
 } else if (command === 'policy') {
   // 判定结果的汇总（D77）：读那一份记录算出来，内核里没有第二份计数器；这一条也不建内核、不开会话。
   const [sessionId] = rest;
@@ -405,7 +425,7 @@ if (missingFlagValue) {
   }
 } else if (command === undefined || command === '--help' || command === '-h') {
   console.log(`ligule ${pkg.version} - under development, do not depend on it.`);
-  console.log('commands: tools, skills, extensions, sessions, policy <session-id>, run <text>, resume <id> <text>, call <tool> [json-args], tui, host, --version');
+  console.log('commands: tools, skills, extensions, sessions, workspaces, policy <session-id>, run <text>, resume <id> <text>, call <tool> [json-args], tui, host, --version');
   console.log('options: --config <key.path=value> (repeatable), --mode <name>');
   console.log('run, tui and host read model.api ("messages" or "chat-completions"), model.baseURL and model.model from the config layers; the key comes from the environment variable named by model.apiKeyEnv, or LIGULE_API_KEY when that one is not written');
   console.log('run, tui and host also pick a mode: --mode <name> overrides the config `mode`, and neither one written means the shipped "minimal" (D44); tools and call do not read one');

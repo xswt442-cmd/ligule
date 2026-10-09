@@ -9,6 +9,7 @@ import { createKernel } from '../kernel/kernel.js';
 import { loadAssembly } from '../kernel/assembly.js';
 import { loadExtensions } from '../kernel/extensions.js';
 import { applyMode, DEFAULT_MODE, loadMode } from '../kernel/modes.js';
+import { registerWorkspace, workspaceIdentity } from '../kernel/workspace.js';
 import { createDecisionChain } from '../kernel/policy.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
@@ -252,20 +253,35 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
   async function environmentFor(projectRoot) {
     if (projectRoot === undefined || projectRoot === null || projectRoot === '') return defaultEnvironment;
     const asked = resolve(projectRoot);
-    // 缓存按装载出来的那一份根存（关会话时删的也是那一个名字），认的时候按 resolve 之后的位置比：
-    // 同一目录的两种写法共用一份环境，不会各存一份、关的时候漏一把。
-    const known = [...environments.values()].find((each) => resolve(each.projectRoot) === asked);
+    const askedIdentity = workspaceIdentity(projectRoot);
+    // 缓存按装载出来的那一份根存（关会话时删的也是那一个名字），认的时候先比 resolve 之后的位置，再比归一后的身份：
+    // 同一目录的两种写法共用一份环境，不会各存一份、关的时候漏一把（D110）。
+    const known = [...environments.values()].find((each) => resolve(each.projectRoot) === asked || workspaceIdentity(each.projectRoot) === askedIdentity);
     if (known !== undefined) return known;
     if (loadEnvironment === undefined) throw new KernelError('host_project_root_unsupported', { detail: String(projectRoot).slice(0, 200) });
     await classifyProjectRoot(asked);
     const loaded = prepareEnvironment(await loadEnvironment(projectRoot));
-    // 同一台机器上同一目录可以有多种写法（大小写、斜杠方向、尾部分隔符）：比的是 resolve 之后的那一个位置，
-    // 写法不同不算身份不符。与 `src/session/list.ts` 筛记录头部用的是同一条规矩。
-    if (resolve(loaded.projectRoot) !== asked) {
+    // 同一台机器上同一目录可以有多种写法（大小写、斜杠方向、尾部分隔符、链接）：写法不同不算身份不符。
+    // 与 `src/session/list.ts` 筛记录头部用的是同一条规矩。
+    if (resolve(loaded.projectRoot) !== asked && workspaceIdentity(loaded.projectRoot) !== askedIdentity) {
       throw new KernelError('host_project_root_mismatch', { detail: `asked for ${projectRoot}, the layers give ${loaded.projectRoot}` });
     }
     environments.set(loaded.projectRoot, loaded);
     return loaded;
+  }
+
+  // 真的在一具工作区里建了会话或接了会话，就把它登记一次：那份清单是持久的，侧栏列出来的只是它的一个读者（D110、方案 5.5.1）。
+  // 记不上去要说出来：会话照开，缺口在日志里看得见，人的清单上不会静默少一个工作区。
+  async function noteWorkspace(environment) {
+    try {
+      await registerWorkspace(environment.projectRoot);
+    } catch (error) {
+      logger?.log?.('workspace is not registered', {
+        code: error.code ?? 'workspace_registry_failed',
+        path: environment.projectRoot,
+        reason: error.detail ?? String(error.message ?? error),
+      });
+    }
   }
 
   const sessions = new Map();
@@ -823,7 +839,10 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       switch (message.method) {
         case 'session.create': {
           const id = randomUUID();
-          return await buildSession(id, connection, false, undefined, await environmentFor(message.params.projectRoot));
+          const env = await environmentFor(message.params.projectRoot);
+          const created = await buildSession(id, connection, false, undefined, env);
+          await noteWorkspace(env);
+          return created;
         }
         case 'session.open': {
           // 已经在这具宿主里开着的会话读它自己那一份项目环境，与 `session.read` 同一个形状：
@@ -858,7 +877,9 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
             throw new KernelError('session_not_found', { detail: sessionId });
           }
           // 接开还没装过的那一份：模式变更仍受当前轮次的边界约束。
-          return await buildSession(sessionId, connection, true, message.params.mode, env);
+          const opened = await buildSession(sessionId, connection, true, message.params.mode, env);
+          await noteWorkspace(env);
+          return opened;
         }
         case 'session.close': {
           const state = open(sessionId);

@@ -5,6 +5,7 @@ import { readdir, readFile, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import type { ModeFile } from '../kernel/modes.js';
+import { workspaceIdentity } from '../kernel/workspace.js';
 import { findUnresolvedCalls } from './repair.js';
 import type { SessionEvent, SessionHeader } from './format.js';
 import { foldLabel } from './format.js';
@@ -77,6 +78,10 @@ export async function listSessions(
     throw error;
   }
   const summaries: SessionSummary[] = [];
+  // 筛的是同一个目录，不是同一串字符：记录头部写的是当时那一种写法，命令行上敲的可能是另一种大小写、分隔符或链接。
+  // 字面相同就先认，不同的那一些才付一次归一（`realpath` 那一类同步调用）的钱。
+  const asked = projectRoot === undefined ? undefined : resolve(projectRoot);
+  const askedIdentity = asked === undefined ? undefined : workspaceIdentity(asked);
   for (const name of names) {
     if (!name.endsWith('.jsonl')) continue;
     const id = name.slice(0, -'.jsonl'.length);
@@ -92,8 +97,8 @@ export async function listSessions(
       // 正文与首行的错误由完整记录校验交回，不用猜测损坏记录的项目归属。
     }
     // 按项目根过滤时，读不出项目根的那些（没有首行的现存记录）不算在这个项目里：过滤的意义是「只显示这一处的会话」。
-    // 比的是同一个目录，不是同一串字符：记录头部写的是当时解析出来的那一种写法，命令行上敲的可能是另一种分隔符。
-    if (projectRoot !== undefined && typeof header?.projectRoot === 'string' && resolve(header.projectRoot) !== resolve(projectRoot)) continue;
+    if (asked !== undefined && typeof header?.projectRoot === 'string'
+      && resolve(header.projectRoot) !== asked && workspaceIdentity(header.projectRoot) !== askedIdentity) continue;
     let events: SessionEvent[] = [];
     let truncatedBytes = 0;
     let invalid: SessionSummary['error'];
