@@ -8,6 +8,20 @@ import { code, type Client } from '../protocol';
 // 一条命中来自记录里哪一类事件：抬头那一格写的是它（与终端那一栏用同一组词）。
 const HIT_KINDS: Record<string, string> = { user: '问', assistant: '答', reasoning: '推理', tool: '工具', label: '名字' };
 
+// 项目那一格读不回来时要说的是「出了什么事、下一步做什么」，不是把稳定码拼进句子里（审阅 C14）：
+// 认得的几个说成人话，认不得的留一句短话带上码，诊断那份完整读数在设置里「连接」那一栏。
+const PROJECT_FAILURES: Record<string, string> = {
+  host_project_root_missing: '那个目录不在了：核对这条路径，或从左侧栏把它去掉',
+  host_project_root_not_directory: '这条路径指向的不是目录：该写的是一个文件夹',
+  host_project_root_unreadable: '那个目录读不动：检查它的权限',
+  host_project_root_mismatch: '这条路径与它配置层给出的项目根对不上',
+  host_project_root_unsupported: '这一具宿主没有装载别的项目那一层',
+};
+const failureLine = (label: string, error: unknown): string => {
+  const kind = code(error);
+  return `${label}：${PROJECT_FAILURES[kind] ?? `读不回来（${kind}）`}`;
+};
+
 export type SearchHit = {
   sessionId: string;
   name?: string;
@@ -98,7 +112,7 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
         sessions = (await client.call('sessions.list', root === '' ? {} : { projectRoot: root }, 15_000) as { sessions: SessionSummary[] }).sessions;
       } catch (error) {
         // 某一项目录读不回来要说得出是哪一份，别的几份仍照各自真实的结果画（方案 3.3 那一句）。
-        failures.push(`${root === '' ? '这一具宿主的项目' : root}：${code(error)}`);
+        failures.push(failureLine(root === '' ? '这一具宿主的项目' : root, error));
         continue;
       }
       for (const item of sessions) {
@@ -138,7 +152,7 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
           merged.push(hit);
         }
       } catch (error) {
-        failures.push(`${root === '' ? '这一具宿主的项目' : root}：${code(error)}`);
+        failures.push(failureLine(root === '' ? '这一具宿主的项目' : root, error));
       }
     }
     setHits(merged);

@@ -28,7 +28,7 @@ const matchText = (pattern: string) => `${matchKind(pattern)} ${pattern}`;
 // 空白的一条待写规则：新增从这一份起，编辑读回那一条填进来。
 const blankRule = (): Rule => ({ tool: '', match: '', decision: 'allow', reason: '' });
 
-export function PolicyRules({ client }: { client: Client }) {
+export function PolicyRules({ client, projectRoot }: { client: Client; projectRoot: string }) {
   const [shown, setShown] = useState<Shown | null>(null);
   // 说明那一句带着自己的语气：读不回来与没写进去才报警，写完与预览不报（方案 4.3 那一句）。
   const [note, setNote] = useState<{ text: string; bad: boolean } | null>(null);
@@ -37,9 +37,12 @@ export function PolicyRules({ client }: { client: Client }) {
   // `editing` 是 null 就是没在写规则；给了 index 是改那一条，给 -1 是新增一条。
   const [editing, setEditing] = useState<{ index: number; rule: Rule } | null>(null);
 
+  // 这一栏读写的是哪一份项目的文件：左侧选了别的项目，这里的读与写就跟着换成那一个项目的两层（方案 3.2、审阅 F3）。
+  const target = projectRoot === '' ? {} : { projectRoot };
+
   const load = useCallback(async (keep = false): Promise<Shown | null> => {
     try {
-      const answer = await client.call('config.get', {}, 15_000) as Shown;
+      const answer = await client.call('config.get', target, 15_000) as Shown;
       setShown(answer);
       // 读得回来就把上一次读不回来的那句说明清掉：那一句话带着「再问一次」的按钮，留着就成了一句假话。
       if (!keep) setNote(null);
@@ -48,7 +51,7 @@ export function PolicyRules({ client }: { client: Client }) {
       setNote({ text: `规则表读不回来：${code(error)}`, bad: true });
       return null;
     }
-  }, [client]);
+  }, [client, projectRoot]);
 
   useEffect(() => {
     void load();
@@ -77,7 +80,7 @@ export function PolicyRules({ client }: { client: Client }) {
   const setMode = async (mode: 'ask' | 'auto') => {
     setSaving(true);
     try {
-      await client.call('config.set', { field: 'policy.mode', value: mode, layer, version: versionOf() }, 30_000);
+      await client.call('config.set', { field: 'policy.mode', value: mode, layer, version: versionOf(), ...target }, 30_000);
       await afterSave(`配置默认档已写成 ${mode}，落进${layerName(layer)}。`);
     } catch (error) {
       setNote({ text: conflictOr(error), bad: true });
@@ -102,8 +105,8 @@ export function PolicyRules({ client }: { client: Client }) {
       ...(rule.reason === undefined ? {} : { ruleReason: rule.reason }),
     };
     const params = editing.index < 0
-      ? { field: 'policy.rules', layer, version: versionOf(), op: 'add', ...flat }
-      : { field: 'policy.rules', layer, version: versionOf(), op: 'update', index: editing.index, ...flat };
+      ? { field: 'policy.rules', layer, version: versionOf(), op: 'add', ...target, ...flat }
+      : { field: 'policy.rules', layer, version: versionOf(), op: 'update', index: editing.index, ...target, ...flat };
     setSaving(true);
     try {
       await client.call('config.set', params, 30_000);
@@ -119,7 +122,7 @@ export function PolicyRules({ client }: { client: Client }) {
   const removeRule = async (index: number) => {
     setSaving(true);
     try {
-      await client.call('config.set', { field: 'policy.rules', layer, version: versionOf(), op: 'remove', index }, 30_000);
+      await client.call('config.set', { field: 'policy.rules', layer, version: versionOf(), op: 'remove', index, ...target }, 30_000);
       await afterSave(`去掉了第 ${index + 1} 条规则，落进${layerName(layer)}。`);
     } catch (error) {
       setNote({ text: conflictOr(error), bad: true });
@@ -134,7 +137,7 @@ export function PolicyRules({ client }: { client: Client }) {
     <button type="button" className="rail-refresh" onClick={() => void load()}><Icon name="refresh" size={13} /> 再问一次</button>
     {note !== null && <p className="session-note" data-tone={note.bad ? 'bad' : undefined}>{note.text}</p>}
     {shown === null ? <p className="stub">规则表还没读回来。</p> : <>
-      <p className="sheet-note">这一份表是四层折完的结果，{rulesFrom()}。这一栏说的是这一具宿主启动时那一个项目的文件：<code>config.get</code> 不点名会话，左侧选了别的项目也不会换到那一个项目的文件上去。</p>
+      <p className="sheet-note">这一份表是四层折完的结果，{rulesFrom()}。这一栏读与写的是这一份会话所属那一个项目的两层文件；左侧选了别的项目，这里跟着换成那一个项目的文件。没有打开的会话时说的是这一具宿主启动时那一个项目。</p>
       <Row label="写进哪一层">
         <select value={layer} onChange={(event) => setLayer(event.target.value)}>
           {WRITABLE_LAYERS.map(([id, name]) => <option key={id} value={id}>{name}</option>)}

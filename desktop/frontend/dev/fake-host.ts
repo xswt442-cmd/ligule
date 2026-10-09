@@ -508,10 +508,12 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
   function ask(callId: string, params: Record<string, unknown>): Promise<string> {
     const askId = `ask-${callId}`;
     const owner = String(params.sessionId);
+    // 档位与它的来源跟着这一次询问一起出去，说的是问那一次的会话自己那一份（真实宿主同一条形状，审阅 C08）。
+    const tier = { policy: sessionPolicy ?? configPolicy, policySource: sessionPolicy === null ? 'config' : 'session', policyForced: false };
     return new Promise((resolve) => {
       asking.set(askId, resolve);
       pendingAsks.set(owner, [...(pendingAsks.get(owner) ?? []), askId]);
-      emit({ id: askId, method: 'approval.request', params });
+      emit({ id: askId, method: 'approval.request', params: { ...tier, ...params } });
       setTimeout(() => settleAsk(owner, askId, 'deny'), 30_000);
     });
   }

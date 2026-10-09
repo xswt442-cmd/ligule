@@ -19,7 +19,7 @@ const SOURCE_NAMES: Record<string, string> = {
   none: '四层里都没写',
 };
 
-const sourceName = (source: string | undefined): string => SOURCE_NAMES[source ?? 'none'] ?? SOURCE_NAMES.none;
+export const sourceName = (source: string | undefined): string => SOURCE_NAMES[source ?? 'none'] ?? SOURCE_NAMES.none;
 
 /** 「来源」那一句的完整形状：命令行那一层写着的那一条要额外说出改文件盖不过它（方案 7.1）。 */
 export const sourceLine = (source: string | undefined): string =>

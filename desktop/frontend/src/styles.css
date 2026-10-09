@@ -497,9 +497,9 @@ button:disabled {
 .conversation {
   position: relative;
   flex: 1;
-  /* 转录那一格只吃剩下的空间，审批卡与横幅再高也留 3rem 那一格地板：800×600 里带审批卡时它被压成 0 高，
-     整段对话一行都看不见。 */
-  min-height: 3rem;
+  /* 转录那一格只吃剩下的空间，审批卡与横幅再高也留 6rem 那一格地板：800×600 里带审批卡时它被压到只剩一行高，
+     整段对话看不见（审阅第三节第 1 条：有界滚动那两格之后它要留下来一行以上）。 */
+  min-height: 6rem;
   overflow: hidden;
 }
 
@@ -684,6 +684,13 @@ button:disabled {
      下面那两枚答复的按钮不在这一格里，不必滚到卡片末尾才按得到。 */
   max-height: min(24rem, 32vh);
   overflow: auto;
+}
+
+/* 矮窗口里再多让一段给转录：那一格的地板不跟着窗口缩，这一格的正文自己滚（审阅第三节第 1 条）。 */
+@media (max-height: 700px) {
+  .approval-body {
+    max-height: min(16rem, 24vh);
+  }
 }
 
 .approval-head {
@@ -1179,6 +1186,9 @@ button.icon-button:hover:not(:disabled) {
   background: var(--bg-sunk);
   border: 1px solid var(--line);
   border-radius: var(--radius);
+  /* 排着的句子多起来时这一格自己滚，不去挤转录那一格：条带整份撑高过一次，矮窗里转录被压到只剩一行（审阅第三节第 1 条）。 */
+  max-height: min(9rem, 26vh);
+  overflow: auto;
 }
 
 .queue-head {

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { code, type Client } from '../protocol';
-import { layerName, sourceLine, WRITABLE_LAYERS } from '../config-layers';
+import { layerName, sourceLine, sourceName, WRITABLE_LAYERS } from '../config-layers';
 import { Icon } from './Icon';
 
 // 「模型与端点」那一格读的是 `config.get`（实现顺序第 67 步），改的是 `config.set`（第 90、91 步）：
@@ -21,7 +21,7 @@ const FIELDS: Draft[] = [
   { field: 'model.apiKeyEnv', label: '密钥的环境变量名', value: '' },
 ];
 
-export function ModelPanel({ client, sessionId }: { client: Client; sessionId: string | null }) {
+export function ModelPanel({ client, sessionId, projectRoot }: { client: Client; sessionId: string | null; projectRoot: string }) {
   const [shown, setShown] = useState<Shown | null>(null);
   // 说明那一句带着自己的语气：读不回来与没写进去才报警，写成了与预览不报（方案 4.3 那一句）。
   const [note, setNote] = useState<{ text: string; bad: boolean } | null>(null);
@@ -34,7 +34,8 @@ export function ModelPanel({ client, sessionId }: { client: Client; sessionId: s
   const load = useCallback(async (keep = false) => {
     if (!keep) setNote(null);
     try {
-      setShown(await client.call('config.get', {}, 15_000) as Shown);
+      // 指名这一栏属于哪一份项目：读的是那一个项目自己的两层可写文件，不是宿主启动时那一份（方案 3.2、审阅 F3）。
+      setShown(await client.call('config.get', projectRoot === '' ? {} : { projectRoot }, 15_000) as Shown);
     } catch (error) {
       setNote({ text: `配置读不回来：${code(error)}`, bad: true });
     }
@@ -48,7 +49,7 @@ export function ModelPanel({ client, sessionId }: { client: Client; sessionId: s
       // 状态读不回来只说明不了「现在生效的是哪一份」，不该带走这一栏别的内容：配置那几格是另一条回答。
       setInUse({});
     }
-  }, [client, sessionId]);
+  }, [client, sessionId, projectRoot]);
 
   useEffect(() => {
     void load();
@@ -63,15 +64,20 @@ export function ModelPanel({ client, sessionId }: { client: Client; sessionId: s
     const version = shown?.layers?.find((item) => item.layer === layer)?.version ?? '';
     setSaving(true);
     try {
-      const answer = await client.call('config.set', { field: draft.field, value: draft.value, layer, version }, 30_000) as
-        { applies?: { sessionId: string; when: string }[]; failure?: { code: string }; created?: boolean; shadowed?: boolean };
+      const answer = await client.call('config.set', {
+        field: draft.field, value: draft.value, layer, version,
+        ...(projectRoot === '' ? {} : { projectRoot }),
+      }, 30_000) as
+        { applies?: { sessionId: string; when: string }[]; failure?: { code: string }; created?: boolean; shadowed?: boolean; shadowedBy?: string; changed?: boolean };
       const now = (answer.applies ?? []).filter((item) => item.when === 'now').length;
       const waiting = (answer.applies ?? []).filter((item) => item.when === 'round').length;
       // 保存结果一句、什么时候生效一句，两句从不合在一起（方案 7.2：文件已保存与该会话未生效分别显示）。
       const saved = `文件已写进${layerName(layer)}${answer.created === true ? '（这一层原先没有那一份文件）' : ''}。`;
-      // 被只读那一层盖着、或提供方重算失败时，说的是「谁还不会用上新值」这一件事实，不再补「没有会话要换」。
+      // 盖住这一笔的那一层由宿主指名（方案 7.1、D8 的次序）：命令行、项目共享与本机覆盖都可能是上面那一层，
+      // 界面不再只说「命令行」那一种。提供方重算失败说的是「谁还不会用上新值」这一件事实。
       let effect: string;
-      if (answer.shadowed === true) effect = '这一条由命令行那一层写着，改文件盖不过它：这一具宿主不会用上新值。';
+      if (answer.shadowed === true) effect = `这一条现在由${sourceName(answer.shadowedBy)}写着，往低一层改盖不过它：这一具宿主的当前运行没有会话会换上它。`;
+      else if (answer.changed === false) effect = '写进去的值与现在生效的那一份相同，没有会话要换。';
       else if (answer.failure !== undefined) effect = `提供方重算配置没成（${answer.failure.code}）：会话还没用上它。`;
       else if (waiting > 0 && now > 0) effect = `${now} 份空着的会话现在就换，${waiting} 份跑着的会话等自己那一轮收尾之后才换。`;
       else if (waiting > 0) effect = `${waiting} 份会话等自己那一轮收尾之后才换。`;
@@ -121,8 +127,9 @@ export function ModelPanel({ client, sessionId }: { client: Client; sessionId: s
     </p>}
     <p className="sheet-note">
       这几格读的是可写那两层文件此刻的内容：值、每一条的来源与那一份版本出自同一次读取。
-      项目共享与命令行那两层是只读的，界面上说的是这一具宿主装载时读到的那一份。
-      这一栏说的是这一具宿主启动时那一个项目的两份文件：<code>config.get</code> 不点名会话，左侧选了别的项目也不会换到那一个项目的文件上去。
+      项目共享与命令行那两层是只读的，界面上说的是那一份项目环境装载时读到的那一份。
+      这一栏读与写的是这一份会话所属那一个项目的两层文件；左侧选了别的项目，这里就跟着换成那一个项目的文件（方案 3.2）。
+      没有会话时说的是这一具宿主启动时那一个项目。
       {sessionId === null ? '现在没有打开的会话，说不出模型用的是哪一份'
         : <>这一份会话现在用的是 <code>{inUse.model ?? '读不出来'}</code>
           {inUse.pendingModel === undefined || inUse.pendingModel === null ? '，没有等着换的那一份' : <>，等在它轮次边界上的是 <code>{inUse.pendingModel}</code></>}</>}。

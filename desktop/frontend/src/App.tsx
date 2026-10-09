@@ -47,6 +47,8 @@ type PanelProps = {
   // 这一扇窗口另外看着哪几项目录（方案 3.2）：那份清单存在界面偏好里，加与去都写回它。
   projects: string[];
   onProjects: (roots: string[]) => void;
+  // 这一份窗口现在看着的那一份会话属于哪一个项目：配置那两栏读与写都跟着它（方案 3.2、审阅 F3）。
+  projectRoot: string;
   // 在那一份项目里新建一份会话：不给目录就落在这一具宿主自己的项目（方案 3.2）。
   createIn: (root?: string) => void;
   seconds: number;
@@ -129,7 +131,7 @@ const menuPanels: Panel<PanelProps>[] = [
   {
     id: 'panel.model',
     title: '模型与端点',
-    view: ({ client, sessionId }) => <ModelPanel client={client} sessionId={sessionId} />,
+    view: ({ client, sessionId, projectRoot }) => <ModelPanel client={client} sessionId={sessionId} projectRoot={projectRoot} />,
   },
   {
     id: 'panel.export',
@@ -266,6 +268,8 @@ export function App({ transport }: { transport: Transport }) {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [rows, setRows] = useState<Row[]>([]);
   const [live, setLive] = useState({ text: '', reasoning: '' });
+  // 流式那半截按会话各存一份：后台那一轮的片段留着，切回来先补上它，不等那一条落进记录（方案 3.1、审阅 F4）。
+  const liveBySession = useRef(new Map<string, { text: string; reasoning: string }>());
   // 跑着的时候新到的询问排在后面：一次问一件事，答一件再画下一件。
   const [asks, setAsks] = useState<Ask[]>([]);
   // 本轮收尾时要知道那一份会话还剩几条没答：这一格由渲染之后同步，不在那一条收尾路径的依赖里读 `asks`（那会读到旧的一份）。
@@ -480,21 +484,32 @@ export function App({ transport }: { transport: Transport }) {
         setRows((current) => [...current, metaRow('error', `连接上的问题：${message.code} ${message.detail ?? ''}`)]);
         return;
       }
-      if (message.sessionId !== active.current) return;
+      // 每一轮流式进来的那半截按会话各存一份：看着别的那一份时它也在长，切回来要先看见已经收到的那一段，
+      // 不等那一条落进记录（方案 3.1 的后台会话继续运行、审阅 F4）。
+      const owner = message.sessionId ?? '';
+      const held = liveBySession.current.get(owner) ?? { text: '', reasoning: '' };
+      const inView = owner === active.current;
       if (message.notify === 'delta') {
         const event = message.event as { type?: string; text?: string } | undefined;
-        if (event?.type === 'text') setLive((current) => ({ ...current, text: current.text + (event.text ?? '') }));
-        else if (event?.type === 'reasoning') setLive((current) => ({ ...current, reasoning: current.reasoning + (event.text ?? '') }));
+        if (event?.type === 'text') held.text += event.text ?? '';
+        else if (event?.type === 'reasoning') held.reasoning += event.text ?? '';
+        else return;
+        liveBySession.current.set(owner, held);
+        if (inView) setLive({ ...held });
         return;
       }
       if (message.notify === 'event') {
         const record = message.event as Record_;
-        // 刚落盘的那一条取代流式期间的那半截：记录是事实源（I5）。
+        // 刚落盘的那一条取代流式期间的那半截：记录是事实源（I5）。后台那一份收掉的是它自己那半截。
+        if (record?.kind === 'assistant') held.text = '';
+        if (record?.kind === 'reasoning') held.reasoning = '';
+        if (held.text === '' && held.reasoning === '') liveBySession.current.delete(owner);
+        else liveBySession.current.set(owner, held);
+        if (inView) setLive({ ...held });
+        if (!inView) return;
         if (record?.kind === 'assistant') {
-          setLive((current) => ({ ...current, text: '' }));
           for (const call of record.toolCalls ?? []) dispatchAt.current.set(call.id, Date.now());
         }
-        if (record?.kind === 'reasoning') setLive((current) => ({ ...current, reasoning: '' }));
         // 记录里不带逐条时间戳，用时这一格只有界面活着的那一轮量得到（D94、U50）。
         const started = record?.kind === 'tool' && record.callId !== undefined ? dispatchAt.current.get(record.callId) : undefined;
         if (started !== undefined && record?.callId !== undefined) dispatchAt.current.delete(record.callId);
@@ -506,7 +521,7 @@ export function App({ transport }: { transport: Transport }) {
     client.onRequest((message) => {
       // Host 朝界面发出去的请求只有 approval.request 这一种。
       if (message.method !== 'approval.request') return;
-      const params = message.params as { sessionId?: string; projectRoot?: string; tool?: string; command?: string; args?: Record<string, unknown>; reason?: string; shell?: string; executable?: string };
+      const params = message.params as { sessionId?: string; projectRoot?: string; tool?: string; command?: string; args?: Record<string, unknown>; reason?: string; shell?: string; executable?: string; policy?: string; policySource?: string; policyForced?: boolean };
       // 询问归那一份会话，不归眼前看着的那一份：别的那一份在等，也得让人看得见、答得掉（实现顺序第 71 步）。
       const asked = params?.sessionId;
       if (typeof asked !== 'string' || asked === '') return;
@@ -527,6 +542,10 @@ export function App({ transport }: { transport: Transport }) {
         reason: params.reason ?? '',
         // 用哪一种语法判的、跑的是哪一个可执行文件：答的是这一条命令，看得见的该是这两样（D59）。
         backend: params.shell === undefined ? '' : `${params.shell} · ${params.executable ?? ''}`,
+        // 档位、它的来源与是不是被连着拒绝压下来的：这三样跟着那一次询问一起回来，说的都是问那一份会话（审阅 C08）。
+        policy: params.policy ?? '',
+        policySource: params.policySource ?? '',
+        policyForced: params.policyForced === true,
         content,
       }]);
     });
@@ -567,7 +586,8 @@ export function App({ transport }: { transport: Transport }) {
     setRows([]);
     setPage(null);
     setFirstIndex(FIRST_INDEX);
-    setLive({ text: '', reasoning: '' });
+    // 切回来时先把它自己那半截流式回答摆上：这一轮还在跑的话，记录里要到那一条落盘才有全文，中间这几秒不能是空的（审阅 F4）。
+    setLive({ ...(liveBySession.current.get(id) ?? { text: '', reasoning: '' }) });
     setWanted(null);
     setInputOwner(null);
     dispatchAt.current.clear();
@@ -742,6 +762,8 @@ export function App({ transport }: { transport: Transport }) {
         setRows((current) => [...current, metaRow('meta', `这一轮收尾时还有 ${left} 条没答的询问：它们按不允许结掉，不再摆在能答的那一栏里`)]);
       }
       dropAsksOf(own);
+      // 这一轮收尾了：它名下那半截流式片段不再有内容要补（最后那一条由记录说话），这一格不留着（审阅 F4）。
+      liveBySession.current.delete(own);
       // 只有它自己那一份会话的这一轮结束才让它发下一条；别的会话的轮次收尾不替它发（方案 5.2）。
       allowSend.current.add(own);
       // 收尾时人不在这一份的画面上：给那一份会话挂一个「刚跑完一轮」的记号，切过去就消（方案 3.1 的未读结果）。
@@ -756,6 +778,8 @@ export function App({ transport }: { transport: Transport }) {
   // 「该发的那一份」对不上眼前这一份时什么都不发：后台那一轮的完成不能启动另一份会话的输入（方案 5.2 那句），
   // 那几句排在后面的要人切回去、或按下「继续发」才走。
   useEffect(() => {
+    // 与 `send` 同一条门槛：身份与草稿归属没对齐之前，队首那一句也不发出去（审阅 F5）。
+    if (reading || inputOwner !== sessionId) return;
     if (running || link !== null || reconnecting.current || sessionId === null) return;
     if (!allowSend.current.has(sessionId)) return;
     const own = queues[sessionId];
@@ -764,7 +788,7 @@ export function App({ transport }: { transport: Transport }) {
     allowSend.current.delete(sessionId);
     patchQueue(sessionId, () => ({ items: rest, paused: false }));
     void submit(next, sessionId);
-  }, [patchQueue, queues, running, sessionId, submit]);
+  }, [inputOwner, patchQueue, queues, reading, running, sessionId, submit]);
 
   // 收回来的那一句回到草稿：草稿上还有字时不动它，界面不把两句拼在一起（方案 5.2「取消项仍能恢复文本」）。
   const recoverQueueItem = useCallback((index: number, all: boolean) => {
@@ -780,9 +804,13 @@ export function App({ transport }: { transport: Transport }) {
       : (current) => ({ ...current, items: current.items.filter((_, at) => at !== index) }));
   }, [draft, patchQueue, queues, sessionId]);
 
+  // 接一份会话的那一段里不发出去任何东西：`sessionId` 已经换了而草稿与归属还是上一份的，
+  // 这时候按回车或按发送那一枚会把上一句按新的那一份身份落进记录（审阅 F5）。
+  // 这一段里输入坞同时是只读的（下面 `readOnly` 那一格），人新打的字不会被随后恢复草稿那一步盖掉。
   const send = useCallback(async () => {
+    if (reading || inputOwner !== sessionId) return;
     await submit(draft.trim());
-  }, [draft, submit]);
+  }, [draft, inputOwner, reading, sessionId, submit]);
 
   const cancel = useCallback(async () => {
     if (sessionId === null) return;
@@ -1044,6 +1072,7 @@ export function App({ transport }: { transport: Transport }) {
     openHit,
     projects: settings.projects,
     onProjects: (roots: string[]) => patch({ projects: roots }),
+    projectRoot,
     createIn: (root?: string) => void newSession(root),
     sessionsRevision,
     settings,
@@ -1131,7 +1160,6 @@ export function App({ transport }: { transport: Transport }) {
         ask={asks[0]}
         queued={asks.length - 1}
         verbosity={verbosity}
-        policy={status?.policy ?? 'ask'}
         active={sessionId}
         onOpen={(id: string) => void openSession(id)}
         onAnswer={answer}
@@ -1206,6 +1234,8 @@ export function App({ transport }: { transport: Transport }) {
           ref={composerRef}
           rows={3}
           value={draft}
+          // 接一份会话的那一段里不接新字：这一段屏幕上还是上一份的草稿，敲进去的会落在错的归属上（方案 5.1、审阅 F5）。
+          readOnly={reading}
           placeholder={`要模型做的事。按 ${formatKeys(CURRENT['send'])} 发送；正在跑的时候这一句排到后面；${formatKeys(CURRENT['newline'])} 换行；空草稿上按 ${formatKeys(CURRENT['history-older'])}${formatKeys(CURRENT['history-newer'])} 翻本机输入历史；打 @ 引一份项目里的文件。`}
           onChange={(event) => {
             setDraft(event.target.value);
@@ -1266,13 +1296,14 @@ export function App({ transport }: { transport: Transport }) {
           <button className="icon-button" type="button" title="读回这一份记录" aria-label="读回记录" onClick={() => void readBack()}><Icon name="refresh" size={15} /></button>
           <button className="icon-button" type="button" title={`复制最后那条回答（${formatKeys(CURRENT['copy-answer'])}）`} aria-label="复制回答" onClick={copyLastAnswer}><Icon name="copy" size={15} /></button>
           <button className="icon-button" type="button" title={`取消这一轮（${formatKeys(CURRENT['interrupt'])}）`} aria-label="取消本轮" disabled={!running} onClick={() => void cancel()}><Icon name="stop" size={15} /></button>
-          <button className="send" type="button" title={running ? `排到后面（${formatKeys(CURRENT['send'])}，这一轮结束后发出）` : `发送（${formatKeys(CURRENT['send'])}）`} aria-label="发送" disabled={sessionId === null} onClick={() => void send()}><Icon name="send" size={17} /></button>
+          <button className="send" type="button" title={running ? `排到后面（${formatKeys(CURRENT['send'])}，这一轮结束后发出）` : `发送（${formatKeys(CURRENT['send'])}）`} aria-label="发送" disabled={sessionId === null || reading} onClick={() => void send()}><Icon name="send" size={17} /></button>
         </div>
       </footer>
       <div className="statusbar">
         <span>管道 · 发出 {panelProps.counts.sent} 条 · 收到 {panelProps.counts.received} 条</span>
         <span>{running ? `正在跑 ${seconds} 秒` : othersRunning > 0 ? `这一份空闲：另一份在跑 ${othersRunning} 份` : '空闲'}</span>
-        <span>{sessionId === null ? '没有会话' : `会话 ${sessionId}`}</span>
+        {/* 页脚只说得出「哪一份会话」，完整的编号留在设置里「连接」那一栏（那里是诊断读数该在的地方，审阅 C14）。 */}
+        <span title={sessionId ?? undefined}>{sessionId === null ? '没有会话' : `会话 ${sessionId.slice(0, 8)}`}</span>
       </div>
     </main>
 
@@ -1289,6 +1320,7 @@ export function App({ transport }: { transport: Transport }) {
     {settingsOpen && <SettingsDialog
       client={client}
       sessionId={sessionId}
+      projectRoot={projectRoot}
       status={status}
       settings={settings}
       patch={patch}

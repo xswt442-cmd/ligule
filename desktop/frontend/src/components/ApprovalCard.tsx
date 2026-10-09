@@ -15,6 +15,10 @@ export type Ask = {
   // 判定链给的那一句为什么问，原样显示，不替它改写。
   reason: string;
   backend: string;
+  // 那一次判定自己走的档位、它的来源，以及是不是被连着拒绝压到逐次询问的：这三样问那一份会话自己知道（审阅 C08）。
+  policy: string;
+  policySource: string;
+  policyForced: boolean;
   content: string;
 };
 
@@ -24,11 +28,17 @@ const TIER: Record<string, string> = {
   ask: '要有同一条放行规则盖住整条命令的每一个分段，其余都先问到你',
 };
 
-export function ApprovalCard({ ask, queued, verbosity, policy, active, onAnswer, onOpen }: {
+// 档位出自哪一件：配置那一份默认、这一份会话自己改过，还是连着拒掉几次被压下来的（D101、D93）。
+const tierSource = (ask: Ask): string => ask.policyForced
+  ? '这一份会话连着拒掉几次，这一档被压到逐次询问'
+  : ask.policySource === 'session' ? '这一份会话自己改过档位'
+    : ask.policySource === 'config' ? '配置文件里那一份默认档'
+      : '档位来源读不出来';
+
+export function ApprovalCard({ ask, queued, verbosity, active, onAnswer, onOpen }: {
   ask: Ask;
   queued: number;
   verbosity: Verbosity;
-  policy: string;
   active: string | null;
   onAnswer: (decision: 'allow' | 'deny') => void;
   onOpen: (sessionId: string) => void;
@@ -53,7 +63,7 @@ export function ApprovalCard({ ask, queued, verbosity, policy, active, onAnswer,
     <div className="approval-actions">
       <button type="button" data-tone="allow" onClick={() => onAnswer('allow')}>允许这一次</button>
       <button type="button" data-tone="deny" onClick={() => onAnswer('deny')}>不允许</button>
-      <span className="approval-tier">现在的审批档位是 {policy}：{TIER[policy] ?? '读不到那一档'}</span>
+      <span className="approval-tier">这一条问过来时那一份会话走的是 {ask.policy === '' ? '读不出来的那一档' : ask.policy} 档（{tierSource(ask)}）：{TIER[ask.policy] ?? '这一档怎么走到问人这一格读不出来'}</span>
     </div>
   </section>;
 }

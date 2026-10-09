@@ -23,6 +23,8 @@ type SectionId = (typeof SECTIONS)[number]['id'];
 export type SettingsProps = {
   client: Client;
   sessionId: string | null;
+  // 配置那两栏读与写的是哪一份项目：跟着眼前这一份会话走（方案 3.2、审阅 F3）。
+  projectRoot: string;
   status: Status | null;
   settings: Settings;
   patch: (part: Partial<Settings>) => void;
@@ -56,8 +58,8 @@ export function SettingsDialog(props: SettingsProps) {
     </nav>
     <div className="sheet-body" role="tabpanel">
       {section === 'appearance' && <Appearance settings={settings} patch={patch} />}
-      {section === 'model' && <Model client={props.client} sessionId={props.sessionId} />}
-      {section === 'rules' && <PolicyRules client={props.client} />}
+      {section === 'model' && <Model client={props.client} sessionId={props.sessionId} projectRoot={props.projectRoot} />}
+      {section === 'rules' && <PolicyRules client={props.client} projectRoot={props.projectRoot} />}
       {section === 'connection' && <Connection link={props.link} counts={props.counts} waiting={props.waiting} status={props.status} onReconnect={props.onReconnect} />}
       {section === 'keys' && <Keys settings={settings} patch={patch} notice={props.keyNotice} />}
     </div>
@@ -198,13 +200,13 @@ function Keys({ settings, patch, notice }: { settings: Settings; patch: Settings
 
 // 模型与端点这一栏读 `config.get`、写 `config.set`，只能改那四条模型字段，落进使用者默认或当前项目的本机覆盖两层之一（方案 7.2）。
 // 改完谁什么时候用上它，由这一栏下面那份读数自己说（第 91 步）。审批规则不在这里：它在「审批规则」那一栏。
-function Model({ client, sessionId }: { client: Client; sessionId: string | null }) {
+function Model({ client, sessionId, projectRoot }: { client: Client; sessionId: string | null; projectRoot: string }) {
   return <>
     <p className="sheet-note">
       服务地址与模型名读的是配置文件那四层里的哪一层，由 <code>config.get</code> 交回；改的时候走 <code>config.set</code>，落进使用者默认或当前项目的本机覆盖两层之一。密钥的值从来不进配置。
     </p>
     {/* 四条可写的行就在这一栏里（第 92 步）：设置页里点进来看到的就是那四个「改」。 */}
-    <ModelPanel client={client} sessionId={sessionId} />
+    <ModelPanel client={client} sessionId={sessionId} projectRoot={projectRoot} />
   </>;
 }
 
