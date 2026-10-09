@@ -1,10 +1,11 @@
 // 工作区的身份与那份持久登记（D110、方案 5.5.1 与 5.5.2）：别名归成一个身份、一条身份只有一条记录、读不懂就当场拒。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
 import { basename, join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { MESSAGES_CAPABILITIES, createConfig, createConnection, createMemoryConnectionPair, serveHost } from '../dist/index.js';
+import { listSessions } from '../dist/session/list.js';
 import { parseRegistry, readRegistry, registerWorkspace, workspaceIdentity } from '../dist/kernel/workspace.js';
 
 /** 临时根里真建一个目录：身份读的是磁盘上那一份，夹具就得是真的。 */
@@ -73,8 +74,8 @@ test('那份登记读不懂就当场拒，不当成空的', () => {
   assert.equal(readable.default, 'a');
 });
 
-// 宿主那一条路：真的建了一份会话，那一具工作区就进了登记，位置在应用数据根里。
-test('建会话的那一侧把这一具工作区登记进应用数据根', async () => {
+// 宿主那一条路：真的建了一份会话，那一具工作区就进了登记，位置在应用数据根里，记录首行也带上身份与来源。
+test('建会话的那一侧把这一具工作区登记进应用数据根，并把身份与来源写进首行', async () => {
   const home = await mkdtemp(join(tmpdir(), 'ligule-ws-home-'));
   const project = await mkdtemp(join(tmpdir(), 'ligule-ws-proj-'));
   const previous = process.env.LIGULE_HOME;
@@ -86,11 +87,19 @@ test('建会话的那一侧把这一具工作区登记进应用数据根', async
     const provider = { capabilities: MESSAGES_CAPABILITIES, model: 'test-model', async *stream() { yield { type: 'text', text: 'ok' }; } };
     host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy });
     const connection = createConnection(pair.client);
-    await connection.request('session.create', {});
+    const { sessionId } = await connection.request('session.create', {});
+    await connection.request('run.start', { sessionId, input: '第一轮' });
     const registry = await readRegistry();
     assert.equal(registry.workspaces.length, 1);
     assert.equal(registry.workspaces[0].identity, workspaceIdentity(project));
     assert.equal(registry.workspaces[0].name, basename(project), '登记里的显示名是那一段目录名');
+    const lines = await readFile(join(project, '.ligule', 'sessions', `${sessionId}.jsonl`), 'utf8');
+    const header = JSON.parse(lines.split('\n')[0]);
+    assert.equal(header.workspace, workspaceIdentity(project), '首行记下这一份会话落在哪一具工作区');
+    assert.equal(header.workspaceOrigin, 'default', '客户端没指名项目根，来源就是它当前那一具');
+    const [listed] = await listSessions(join(project, '.ligule', 'sessions'), { projectRoot: project });
+    assert.equal(listed.workspace, header.workspace, '列表把这两格一起交出去，界面分组读它而不是读路径相等');
+    assert.equal(listed.workspaceOrigin, 'default');
   } finally {
     pair.client.output.end();
     if (host !== undefined) await host.release();

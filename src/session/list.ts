@@ -45,6 +45,9 @@ export interface SessionSummary {
   // 没有首行的现存记录读作版本 0（D73）。
   formatVersion: number;
   projectRoot: string;
+  // 记录首行没说这两格时（更早的版本）交回空串：空串说的是「没说」，不是「说的是默认」。
+  workspace: string;
+  workspaceOrigin: string;
   createdAt: string | null;
   updatedAt: string;
   events: number;
@@ -120,6 +123,9 @@ export async function listSessions(
       id,
       formatVersion: header?.formatVersion ?? 0,
       projectRoot: header?.projectRoot ?? '',
+      // 工作区的身份与来源一起交给列表：界面分哪一组读这两格，不读「等不等于现在的默认目录」（方案 5.5.4）。
+      workspace: header?.workspace ?? '',
+      workspaceOrigin: header?.workspaceOrigin ?? '',
       createdAt: header?.createdAt ?? null,
       updatedAt: (await stat(path)).mtime.toISOString(),
       events: events.length,

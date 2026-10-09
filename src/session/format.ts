@@ -15,6 +15,11 @@ export interface SessionHeader {
   formatVersion: number;
   sessionId: string;
   projectRoot: string;
+  // 工作区的身份与这一份会话是怎么落到那一具工作区的（D110、方案 5.5.3）：`explicit` 是客户端指名的，
+  // `default` 是它当前那一具。界面按这两格决定这份会话归哪一组，不按「路径等不等于现在的默认目录」猜（方案 5.5.4）。
+  // 更早的记录没有这两格：读的人把它们当成没说过的，不拿现在的默认目录去补写。
+  workspace?: string;
+  workspaceOrigin?: 'explicit' | 'default';
   createdAt: string;
   mode?: SessionModeIdentity;
 }
@@ -57,11 +62,15 @@ const WRITTEN_KINDS = ['session', 'user', 'reasoning', 'assistant', 'tool', 'mod
 export function createSessionHeader({
   id,
   projectRoot,
+  workspace,
+  workspaceOrigin,
   createdAt,
   mode,
 }: {
   id: string;
   projectRoot?: string;
+  workspace?: string;
+  workspaceOrigin?: 'explicit' | 'default';
   createdAt: string;
   mode?: SessionModeIdentity;
 }): SessionHeader {
@@ -73,6 +82,8 @@ export function createSessionHeader({
     projectRoot: projectRoot ?? '',
     createdAt,
   };
+  if (workspace !== undefined && workspace !== '') header.workspace = workspace;
+  if (workspaceOrigin !== undefined) header.workspaceOrigin = workspaceOrigin;
   if (mode !== undefined) header.mode = mode;
   return header;
 }

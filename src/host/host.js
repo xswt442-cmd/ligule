@@ -542,7 +542,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
   // ask 是这条会话的审批通道：客户端不在答复里说允许，就按不允许处理（D16 的询问走内核对外接口）。
   // 取消落在审批还没答复的时候要把这个问题收掉：答复不会再来了，而判定链在这里抛出，
   // 那一次调用就在记录里没人回答，之后每一轮都拼不出合法请求体（D11）。
-  async function build(id, connection, recover = false, explicitMode, env = defaultEnvironment) {
+  async function build(id, connection, recover = false, explicitMode, env = defaultEnvironment, workspaceOrigin) {
     // 这一份会话读的项目环境就是它所属那一个：下面这些名字从这里取，不再读宿主闭包里的那一份（方案 3.1）。
     const { config, provider, policy, modePaths, directory, mcpConfigs, extensions, skillRegistry, templateRegistry } = env;
     // 扩展收事件的那一条通道（D37）：刚落盘的这一条同时送给客户端与扩展，两边读的是同一份事实（I5）。
@@ -553,6 +553,10 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       id,
       meta: () => ({
         projectRoot: config.boundary,
+        // 首行记下这一份会话落在哪一具工作区、是怎么落到那儿的（D110、方案 5.5.3）：
+        // 界面分组读的是这两格，不是「路径等不等于现在的默认目录」。接回一份现存会话时没有这一格可写——那份记录的首行早写好了。
+        workspace: workspaceIdentity(config.boundary),
+        ...(workspaceOrigin === undefined ? {} : { workspaceOrigin }),
         mode: state.mode.file === undefined ? undefined : { name: state.mode.file.name, layer: state.mode.file.layer },
       }),
     }), (event) => {
@@ -821,8 +825,8 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     }
   }
 
-  function buildSession(id, connection, recover = false, mode, env = defaultEnvironment) {
-    const pending = build(id, connection, recover, mode, env).then((state) => {
+  function buildSession(id, connection, recover = false, mode, env = defaultEnvironment, workspaceOrigin) {
+    const pending = build(id, connection, recover, mode, env, workspaceOrigin).then((state) => {
       sessions.set(id, state);
       return { sessionId: id };
     });
@@ -840,7 +844,8 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
         case 'session.create': {
           const id = randomUUID();
           const env = await environmentFor(message.params.projectRoot);
-          const created = await buildSession(id, connection, false, undefined, env);
+          const created = await buildSession(id, connection, false, undefined, env,
+            message.params.projectRoot === undefined ? 'default' : 'explicit');
           await noteWorkspace(env);
           return created;
         }

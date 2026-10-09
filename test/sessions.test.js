@@ -9,6 +9,7 @@ import {
   branchSession, chooseResumeMode, createConfig, createConnection, createMemoryConnectionPair, createSessionLog, findUnresolvedCalls, listSessions,
   loadMode, MESSAGES_CAPABILITIES, modeDirectories, parseSessionBytes, searchSessions, serveHost, sessionDirectory,
 } from '../dist/index.js';
+import { workspaceIdentity } from '../dist/kernel/workspace.js';
 
 const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
 
@@ -39,7 +40,7 @@ test('the session directory follows the boundary unless the config names one', a
 
 test('the listing reads each record once and reports what a resume would need', async () => {
   await withSessions(async (root, directory) => {
-    const fresh = createSessionLog({ directory, id: 'fresh', meta: () => ({ projectRoot: root, mode: { name: 'full', layer: 'shipped' } }) });
+    const fresh = createSessionLog({ directory, id: 'fresh', meta: () => ({ projectRoot: root, workspace: workspaceIdentity(root), workspaceOrigin: 'default', mode: { name: 'full', layer: 'shipped' } }) });
     await fresh.append({ kind: 'mode', name: 'full', layer: 'shipped', path: 'modes/full.toml', tools: ['read'], digest: 'aaa111' });
     await fresh.append({ kind: 'user', text: 'go' });
     await fresh.append({ kind: 'assistant', text: '', toolCalls: [{ id: 'c1', name: 'exec', args: { command: 'make' } }] });
@@ -59,6 +60,8 @@ test('the listing reads each record once and reports what a resume would need', 
       id: 'fresh',
       formatVersion: 1,
       projectRoot: root,
+      workspace: workspaceIdentity(root),
+      workspaceOrigin: 'default',
       createdAt: firstItem.createdAt,
       updatedAt: firstItem.updatedAt,
       events: 4,
@@ -74,6 +77,9 @@ test('the listing reads each record once and reports what a resume would need', 
       id: 'legacy',
       formatVersion: 0,
       projectRoot: '',
+      // 没有首行的记录说不出这两件事：交回空串说的是「没说」，不是「说的是默认」。
+      workspace: '',
+      workspaceOrigin: '',
       createdAt: null,
       updatedAt: 'x',
       events: 1,
