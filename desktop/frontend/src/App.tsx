@@ -347,6 +347,8 @@ export function App({ transport }: { transport: Transport }) {
   const anchors = useRef(new Map<string, number>());
   // 这一次读的是哪一份记录的答复：中途又切走时，旧的那一份答复不能落到新的画面上（方案 6.2）。
   const opening = useRef<string | null>(null);
+  // 接会话这一动作每发起一次换一个号：只看会话编号分不出 A→B→A 里那两次接 A，旧那次的收尾会把新那次的保护解掉。
+  const openRequest = useRef(0);
   // 跳到的那一行亮一小段：一屏里几十行都在，不落个记号认不出停在哪一条。
   const [flash, setFlash] = useState<number | null>(null);
   // 那一次派发是什么时候交出去的：只为算用时，键是调用 id（D94）。
@@ -577,6 +579,7 @@ export function App({ transport }: { transport: Transport }) {
   // 正常换会话与点开一份会话仍把排着的几条恢复成暂停（方案 5.1、5.2），那一条不变。
   const openSession = useCallback(async (id: string, hit?: SearchHit, reclaimQueue = false, askedRoot?: string) => {
     opening.current = id;
+    const request = ++openRequest.current;
     // 看着的是哪一份与「正在接的是哪一份」同一处定下来：状态那一次读紧跟在几次读后面，
     // 落在渲染提交之后的那一格会把这一次读判成过期，标题上的条数就停在上一份那一份。
     active.current = id;
@@ -599,7 +602,7 @@ export function App({ transport }: { transport: Transport }) {
       // fullResults 那一格是给界面读的：溢出文件里的整段正文这才到得了画面（记录本身不动）。
       // 只取最近这一页：更早的靠「显示更早」那一格按游标往前要（方案 4.1、实现顺序第 73 步）。
       const newest = await client.call('session.read', { sessionId: id, limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean; header: { projectRoot?: string } | null };
-      if (opening.current !== id) return;
+      if (openRequest.current !== request) return;
       // 接上这一份时把它自己那两格摊回来：草稿是当时没发出去的那一句，排着的几条恢复成暂停（方案 5.1、5.2）。
       const root = newest.header?.projectRoot ?? '';
       setProjectRoot(root);
@@ -621,7 +624,7 @@ export function App({ transport }: { transport: Transport }) {
         const older = await client.call('session.read',
           { sessionId: id, before: Number(events[0]?.seq), limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean };
         // 人在这几页读回来的时候切走了：这一份答复过期，不落到新的画面上（方案 6.2）。
-        if (opening.current !== id) return;
+        if (openRequest.current !== request) return;
         if (older.events.length === 0) { hasMore = false; break; }
         events = [...older.events, ...events];
         hasMore = older.hasMore;
@@ -635,10 +638,13 @@ export function App({ transport }: { transport: Transport }) {
         : null;
       setWanted(hit ?? back);
     } catch (error) {
-      setRows((current) => [...current, metaRow('error', `那份会话接不上：${code(error)}`)]);
+      // 过期那一次的失败不说在新那一次的画面上：那一份会话可能已经接上了，报的是别处的旧账。
+      if (openRequest.current === request) setRows((current) => [...current, metaRow('error', `那份会话接不上：${code(error)}`)]);
     } finally {
-      setReading(false);
+      // 只有还是这一次在接的时候才收输入保护：旧那一次的收尾把新那一次的锁解开，人就会在答复还没回来时发出去。
+      if (openRequest.current === request) setReading(false);
     }
+    if (openRequest.current !== request) return;
     void refreshStatus(id);
   }, [client, refreshStatus]);
 
