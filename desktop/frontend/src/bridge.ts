@@ -24,5 +24,7 @@ export function tauriTransport(): Transport {
     },
     // 换一具后端进程。会话不在壳里：它只负责进程，接回哪一份会话由界面用协议说（D30、第 65 步）。
     restart: () => invoke('host_restart').then(() => undefined),
+    // 首次使用时那一份默认工作区在壳那一侧：交回系统文档目录下那一具，不在那儿就建出来（方案 5.5.3）。
+    defaultWorkspace: () => invoke<string>('default_workspace'),
   };
 }

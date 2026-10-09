@@ -23,6 +23,9 @@ export type Transport = {
   onFault?: (handle: (reason: string) => void) => void;
   // 换一具后端进程。壳里那是 `host_restart` 一条命令；开发时那一份假宿主用它重新答话（第 65 步）。
   restart?: () => Promise<void>;
+  // 首次使用时那一份默认工作区：壳把系统文档目录下那一具交回来，不在那儿就建出来（方案 5.5.3）。
+  // 载体交不出这一格时界面不猜：没有可用的工作区就请人自己选一具，不去用宿主继承的那个进程目录。
+  defaultWorkspace?: () => Promise<string>;
 };
 
 export type Client = {

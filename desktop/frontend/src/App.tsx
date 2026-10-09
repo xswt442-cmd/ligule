@@ -92,6 +92,20 @@ async function defaultWorkspaceOf(client: Client): Promise<string | undefined> {
   return roster === null ? undefined : roster.workspaces.find((one) => one.identity === roster.default)?.directory;
 }
 
+/**
+ * 首次使用那一次：向壳要系统文档目录下那一具默认工作区，并把这份选择写进那份登记，让它下次启动还在、左侧栏也看得见（方案 5.5.3）。
+ * 取不到、建不成或登记没写成，都交回那一句原因——静默改用别的目录是这一格明令不许的。
+ */
+async function registerShellWorkspace(getDirectory: () => Promise<string>, client: Client): Promise<{ directory?: string; failed?: string }> {
+  try {
+    const directory = await getDirectory();
+    await client.call('workspace.default.set', { directory }, 15_000);
+    return { directory };
+  } catch (error) {
+    return { failed: String((error as { message?: unknown })?.message ?? error) };
+  }
+}
+
 const menuPanels: Panel<PanelProps>[] = [
   {
     id: 'panel.status',
@@ -675,11 +689,26 @@ export function App({ transport }: { transport: Transport }) {
   const newSession = useCallback(async (root?: string) => {
     try {
       // 指名了哪一具工作区就在哪一个项目里建；没指名时先看眼前这一份会话在哪一项目录，再退到那份登记里的默认那一具，
-      // 两格都没有才由宿主用它自己那一份项目环境。来源那一格按这三档说清是谁选的（方案 3.2、5.5.3）。
+      // 登记里没有就问壳要系统文档目录下那一具并登记成默认。来源那一格按这几档说清是谁选的（方案 3.2、5.5.3）。
       const named = root === undefined || root === '' ? undefined : root;
       const current = projectRoot === '' ? undefined : projectRoot;
-      const fallback = named === undefined && current === undefined ? await defaultWorkspaceOf(client) : undefined;
-      const params = createCallOf(named, current, fallback);
+      let landing: string | undefined;
+      let refused: string | undefined;
+      if (named === undefined && current === undefined) {
+        landing = await defaultWorkspaceOf(client);
+        if (landing === undefined && transport.defaultWorkspace !== undefined) {
+          const fromShell = await registerShellWorkspace(transport.defaultWorkspace, client);
+          landing = fromShell.directory;
+          refused = fromShell.failed;
+        }
+      }
+      // 壳在的那一侧不拿宿主继承的那个进程目录当工作区：几格都空着说的是「先选一具工作区」，不是悄悄开一份。
+      // 载体交不出这一格时（浏览器里开发）没有壳可问，仍由宿主用它自己那一份项目环境。
+      if (named === undefined && current === undefined && landing === undefined && transport.defaultWorkspace !== undefined) {
+        setRows((rows) => [...rows, metaRow('meta', `还没有可用的工作区${refused === undefined ? '' : `：${refused}`}。在左侧栏「另一个项目的目录」那一格写一处，或在想用的那一组上按「新建」。`)]);
+        return;
+      }
+      const params = createCallOf(named, current, landing);
       const asked = params.projectRoot;
       const created = await client.call('session.create', params) as { sessionId: string };
       // 新建那一份也走接会话那一条路：只有那一次读把记录头部的项目根带回来，草稿与队列才知道该存到哪一格。
@@ -690,7 +719,7 @@ export function App({ transport }: { transport: Transport }) {
     } catch (error) {
       setRows((current) => [...current, metaRow('error', `会话建不起来：${code(error)}`)]);
     }
-  }, [client, openSession, projectRoot]);
+  }, [client, openSession, projectRoot, transport]);
 
   useEffect(() => {
     // 只在手里还没有会话时自动开第一份：`newSession` 的身份跟着 `projectRoot` 变，少了这一道判断，
