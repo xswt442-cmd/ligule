@@ -1,10 +1,11 @@
 // 桌面壳的自包含运行时（D34）：安装包要能装到没有这份仓库的机器上就跑起来，
 // 所以随包带两样东西——一份钉住版本的 Node，和 ligule 自己的运行时树（构建出来的 dist 加它需要的依赖）。
 // 与 `scripts/build-rg-packages.js` 同一种做法：版本与校验和写在 pin 文件里，下载后先核对再放进目录。
+// 目标按 `<platform>-<arch>` 选，四个目标各自的档名与摘要钉在同一份文件里；一份运行树只带它自己那一个平台的原生绑定。
 // 用法：node desktop/fetch-runtime.mjs [--force]
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,7 +15,13 @@ const vendor = join(root, 'desktop', 'vendor');
 const force = process.argv.includes('--force');
 
 const pin = JSON.parse(await readFile(join(root, 'desktop', 'node-pin.json'), 'utf8'));
-const archive = `node-${pin.version}-win-x64.zip`;
+// 目标默认就是本机这一个：运行树里的原生绑定（tree-sitter 与 koffi 的 `.node`）只能来自真正跑着它们的那个平台。
+const target = `${process.platform}-${process.arch}`;
+const archived = pin.targets[target];
+if (archived === undefined) {
+  throw new Error(`desktop/node-pin.json has no "${target}" target; it lists ${Object.keys(pin.targets).join(', ')}`);
+}
+const archive = archived.file;
 
 async function sha256(path) {
   const hash = createHash('sha256');
@@ -22,12 +29,15 @@ async function sha256(path) {
   return hash.digest('hex');
 }
 
-// Node 的可执行文件：已经存在且版本对得上就跳过下载。
-const nodeExe = join(vendor, 'node', process.platform === 'win32' ? 'node.exe' : 'bin/node');
+// Node 的可执行文件：位置、目标与版本三样都对上才跳过下载。只按「文件在不在」判断，
+// 一台机器上换平台准备时会把上一个平台的Node 当成已经备好的那一份。
+const nodeExe = join(vendor, 'node', target.startsWith('win32') ? 'node.exe' : 'node');
+const stamp = join(vendor, 'node', '.vendored');
 async function fetchNode() {
-  if (!force && existsSync(nodeExe)) {
+  const wanted = `${target}:${pin.version}`;
+  if (!force && existsSync(nodeExe) && existsSync(stamp) && (await readFile(stamp, 'utf8')).trim() === wanted) {
     const printed = execFileSync(nodeExe, ['--version'], { encoding: 'utf8' }).trim();
-    if (printed === pin.version) return console.log(`node ${printed} already vendored`);
+    if (printed === pin.version) return console.log(`node ${printed} already vendored for ${target}`);
   }
   const scratchRoot = join(root, 'testplace');
   await mkdir(scratchRoot, { recursive: true });
@@ -37,30 +47,35 @@ async function fetchNode() {
     const outDir = join(vendor, 'node');
     await rm(outDir, { recursive: true, force: true });
     await mkdir(outDir, { recursive: true });
-    // Windows 自带的 bsdtar 支持 zip 与带盘符的路径。
-    const inner = `${archive.replace('.zip', '')}/`;
-    if (process.platform === 'win32') {
+    const inner = `${archive.replace(/\.(zip|tar\.gz|tar\.xz)$/, '')}/`;
+    if (target.startsWith('win32')) {
+      // Windows 自带的 bsdtar 支持 zip 与带盘符的路径。
       const bsdtar = join(process.env.SystemRoot ?? 'C:\\WINDOWS', 'System32', 'tar.exe');
-      execFileSync(bsdtar, ['-xf', download, '--strip-components=1', '-C', outDir, `${inner}node.exe`]);
+      execFileSync(bsdtar, ['-xf', download, '--strip-components=1', '-C', outDir, `${inner}node.exe`, `${inner}LICENSE`]);
     } else {
-      execFileSync('tar', ['-xf', download, '--strip-components=1', '-C', outDir, `${inner}node.exe`]);
+      // 归档里可执行文件在 `bin/` 下面，而壳找的是随包目录里的 `node/<可执行文件名>`：取掉两层前缀落下来，
+      // 再把可执行位补上——解包工具的属主规则不是我们要依赖的东西。许可跟着 Node 本体一起进包。
+      execFileSync('tar', ['-xf', download, '--strip-components=2', '-C', outDir, `${inner}bin/node`]);
+      execFileSync('tar', ['-xf', download, '--strip-components=1', '-C', outDir, `${inner}LICENSE`]);
+      await chmod(nodeExe, 0o755);
     }
-    console.log(`vendored ${pin.version} -> ${nodeExe}`);
+    await writeFile(stamp, `${wanted}\n`, 'utf8');
+    console.log(`vendored ${pin.version} for ${target} -> ${nodeExe}`);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
 }
 
-async function sha256Checked(target) {
+async function sha256Checked(target2) {
   const url = `https://nodejs.org/dist/${pin.version}/${archive}`;
   console.log(`downloading ${url}`);
   const response = await fetch(url);
   if (!response.ok) throw new Error(`the Node download failed with ${response.status}`);
   const bytes = Buffer.from(await response.arrayBuffer());
   const actual = createHash('sha256').update(bytes).digest('hex');
-  if (actual !== pin.sha256) throw new Error(`${archive} checksum mismatch: got ${actual}`);
-  await writeFile(target, bytes);
-  return target;
+  if (actual !== archived.sha256) throw new Error(`${archive} checksum mismatch: got ${actual}`);
+  await writeFile(target2, bytes);
+  return target2;
 }
 
 // 生产依赖的目录名：从 package.json 的 dependencies 出发，按锁文件里已经装好的那份递归收。

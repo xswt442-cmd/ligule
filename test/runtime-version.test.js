@@ -63,3 +63,19 @@ test('the desktop shell carries the same version as the package', () => {
   assert.equal(shell.version, pkg.version, 'desktop/package.json and package.json disagree');
   assert.equal(config.version, pkg.version, 'tauri.conf.json and package.json disagree');
 });
+
+// 随包 Node 的那四行钉在 `desktop/node-pin.json`，发行清单里也是同样四行：两处说的是同一批字节，抄错一个字符就装不出或装错。
+test('the four vendored Node targets match the release checklist', () => {
+  const pin = JSON.parse(read('../desktop/node-pin.json'));
+  const checklist = read('../RELEASE.md');
+  const suffixes = { 'win32-x64': 'zip', 'linux-x64': 'tar.xz', 'darwin-arm64': 'tar.gz', 'darwin-x64': 'tar.gz' };
+  assert.deepEqual(Object.keys(pin.targets).sort(), ['darwin-arm64', 'darwin-x64', 'linux-x64', 'win32-x64']);
+  for (const [target, archived] of Object.entries(pin.targets)) {
+    const expected = `node-${pin.version}-${target.replace('win32', 'win')}.${suffixes[target]}`;
+    assert.equal(archived.file, expected, `${target} pins ${archived.file}, upstream calls it ${expected}`);
+    assert.match(archived.sha256, /^[0-9a-f]{64}$/, `${target} sha256 is not a lowercase hex digest`);
+    // 发行清单那一行是给人读的那一份，两处写了同一个文件与同一个摘要才算同一批字节。
+    assert.ok(checklist.includes(archived.file), `RELEASE.md does not name ${archived.file}`);
+    assert.ok(checklist.includes(archived.sha256), `RELEASE.md does not carry the ${target} sha256`);
+  }
+});
