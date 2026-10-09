@@ -10,6 +10,7 @@ import { serveHost } from '../../dist/host/host.js';
 import { createChatCompletionsProvider } from '../../dist/model/chat-completions.js';
 import { modeDirectories } from '../../dist/kernel/modes.js';
 import { fileURLToPath } from 'node:url';
+import { listenFetchable } from './port.js';
 
 function observeFrames(stream, visit) {
   let buffer = '';
@@ -92,11 +93,7 @@ export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {} 
   let host;
   let pair;
   try {
-    await new Promise((resolveListen, reject) => {
-      server.once('error', reject);
-      server.listen(0, '127.0.0.1', resolveListen);
-    });
-    const baseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+    const baseUrl = `http://127.0.0.1:${await listenFetchable(server)}/v1`;
     const config = createConfig({ user: {
       boundary: projectDirectory,
       host: { sessionDirectory },

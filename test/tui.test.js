@@ -255,7 +255,7 @@ test('help groups flow side by side when there is room and stack when there is n
   assert.deepEqual(flowGroups(groups, 12), ['A', '/aa  x', '', 'B', '/bb   yy', '/ccc  z']);
 });
 
-// 中英混排那一列按终端里的列数对齐，不按字符数：一个汉字占两列。
+// 补足空格按终端里实际占的列数算：一个汉字占两列，算字符数只算一个。
 test('padding counts the columns a character takes in the terminal', options, () => {
   assert.equal(displayWidth('a中'), 3);
   const rows2 = flowGroups([
@@ -356,7 +356,7 @@ test('an exec result names its exit code and a spilled one names its file', opti
   assert.deepEqual(refused, { kind: 'refusal', tool: 'write', text: 'the user declined', code: 'ask_declined' });
 });
 
-// 审批框那一格要说得出改的是什么，而不是把整份文件内容喷在屏幕上（第 41 步）。
+// 审批框那一格要说得出改的是什么，整份文件内容不写在屏幕上（第 41 步）。
 test('the approval box sums the change instead of dumping the payload', options, () => {
   assert.equal(changeSummary('write', { path: 'note.txt', content: 'a\nb\nc' }), 'note.txt：整份写入 3 行');
   assert.equal(changeSummary('edit', { path: 'note.txt', anchor: 'a\nb', replacement: 'x' }), 'note.txt：换掉 2 行，换上 1 行');

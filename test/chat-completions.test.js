@@ -7,6 +7,7 @@ import { createServer } from 'node:http';
 import {
   CHAT_COMPLETIONS_CAPABILITIES, chatCompletionsCapabilities, createChatCompletionsProvider, readTool,
 } from '../dist/index.js';
+import { listenFetchable } from './helpers/port.js';
 
 const API_KEY_ENV = 'LIGULE_TEST_API_KEY';
 
@@ -23,10 +24,10 @@ async function withEndpoint(respond, run) {
     requests.push({ url: request.url, headers: request.headers, body: text === '' ? undefined : JSON.parse(text) });
     await respond(response);
   });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = await listenFetchable(server);
   process.env[API_KEY_ENV] = 'test-key';
   try {
-    return await run(`http://127.0.0.1:${server.address().port}`, requests);
+    return await run(`http://127.0.0.1:${port}`, requests);
   } finally {
     delete process.env[API_KEY_ENV];
     server.closeAllConnections();

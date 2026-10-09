@@ -58,8 +58,8 @@ test('the derived agent runs on the parent decision chain and cannot delegate ag
   const provider = scripted([
     call('subagent', { task: 'delete the thing' }),      // 父：派一块活
     call('exec', { command: 'rm -rf /tmp/nowhere' }),    // 子：想删东西，被同一条链挡下
-    text('I could not delete it'),                       // 子：收口
-    text('the child reported back'),                     // 父：收口
+    text('I could not delete it'),                       // 子：说完这一轮，交回一段文本
+    text('the child reported back'),                     // 父：说完这一轮，交回一段文本
   ]);
   const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'parent' });
   const kernel = createKernel({ config, policy: chain, session });

@@ -8,6 +8,7 @@ import {
   capabilitiesOf, createConfig, createKernel, createLoop, createMessagesProvider, createSessionLog,
   DEFAULT_RETRY, MESSAGES_CAPABILITIES, readTool,
 } from '../dist/index.js';
+import { listenFetchable } from './helpers/port.js';
 
 const API_KEY_ENV = 'LIGULE_TEST_API_KEY';
 const FAST_RETRY = { ...DEFAULT_RETRY, baseDelayMs: 1 };
@@ -32,12 +33,7 @@ async function withEndpoint(respond, run) {
     });
     await respond(requests.length, response, requests[requests.length - 1]);
   });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const port = server.address()?.port;
-  // 一次整套跑里见过这里拿到的端口不能用，报回来的却是端点那一句 `provider_transport_failed`（fetch 的「bad port」）：
-  // 端口不对就在这儿说清，别让它混进端点那一类的失败里。
-  if (typeof port !== 'number' || port === 0) throw new Error(`test_endpoint_port_unusable:${String(port)}`);
-  const baseUrl = `http://127.0.0.1:${port}`;
+  const baseUrl = `http://127.0.0.1:${await listenFetchable(server)}`;
   process.env[API_KEY_ENV] = 'test-key';
   try {
     return await run(baseUrl, requests);
@@ -431,4 +427,30 @@ test('the usage the endpoint reports comes back as one event at the end', async 
       { type: 'usage', input: 1500, output: 7 },
     ]);
   });
+});
+
+// 端口助手自己那一条：系统连着给出两个 fetch 拒用的端口时，助手要重听并把用得出去的那一个交回来。
+// 那两张端口号是这一版 Node 上扫出来的（6000 与 6665 都在拒的那一批里）。
+test('the endpoint helper waits for a port that fetch will use', async () => {
+  const given = [6000, 6665, 45123];
+  const listens = [];
+  let closes = 0;
+  const server = {
+    once(name, handler) {
+      if (name === 'close') setImmediate(handler);
+      return this;
+    },
+    listen(_port, _host, onListening) {
+      const port = given[listens.length];
+      listens.push(port);
+      onListening();
+    },
+    address: () => (listens.length === 0 ? null : { port: listens[listens.length - 1] }),
+    close() {
+      closes += 1;
+    },
+  };
+  assert.equal(await listenFetchable(server), 45123, '拒用的端口不能交出去');
+  assert.deepEqual(listens, [6000, 6665, 45123], '每重听一次就问系统要一个新的');
+  assert.equal(closes, 2, '重听之前先收了上一次那一个');
 });
