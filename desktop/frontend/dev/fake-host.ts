@@ -170,6 +170,14 @@ const RULES_SOURCE = 'user';
 let configPolicy: 'ask' | 'auto' = 'auto';
 let sessionPolicy: 'ask' | 'auto' | null = null;
 
+// 那份工作区登记的假形状（方案 5.5.1）：`workspaces.list` 交回这一份，`workspace.default.set` 改的就是它。
+// 一条记录只有一个身份、一个目录、一个显示名，默认那一格指的是其中一个身份；这一具假宿主不写盘，改了只在当场有效。
+const workspaces = [
+  { identity: 'e:/notes', directory: 'E:/notes', name: '笔记与读书', firstSeen: '2026-10-05T09:02:11.000Z', lastSeen: '2026-10-05T11:41:07.000Z' },
+];
+let defaultWorkspace: string | null = null;
+const rosterOf = () => ({ version: 1, default: defaultWorkspace, workspaces });
+
 let status = {
   sessionId: '',
   running: false,
@@ -392,6 +400,29 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
         if (name !== 'minimal' && name !== 'full') return fail('mode_unknown', `没有那一份模式清单：${name}`);
         status = { ...status, mode: name, modeLayer: 'shipped' };
         return reply({ mode: name, layer: status.modeLayer, pending: null, tools: status.tools });
+      }
+      case 'workspaces.list':
+        return reply(rosterOf());
+      case 'workspace.default.set': {
+        // 与宿主同一条规矩：指为默认之前先把那一条登记写下，空的那一格只退掉默认，登记一条都不少。
+        const directory = String(params.directory ?? '').trim();
+        if (directory === '') {
+          defaultWorkspace = null;
+          return reply(rosterOf());
+        }
+        const identity = directory.toLowerCase();
+        const known = workspaces.find((one) => one.identity === identity);
+        if (known === undefined) {
+          workspaces.push({
+            identity,
+            directory,
+            name: String(params.name ?? '').trim() || directory.split(/[\\/]+/).filter((one) => one !== '').at(-1) || directory,
+            firstSeen: new Date().toISOString(),
+            lastSeen: new Date().toISOString(),
+          });
+        } else known.directory = directory;
+        defaultWorkspace = identity;
+        return reply(rosterOf());
       }
       case 'config.get':
         // 假宿主也按白名单答：这几格是真的配置文件里会写的那种值，密钥本身从来不在里面（D13）。

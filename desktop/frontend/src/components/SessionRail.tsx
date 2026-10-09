@@ -1,9 +1,10 @@
 // 左侧栏那一份会话列表：读的是 `sessions.list`，按项目根分组（D91）。
 // 记录目录只有宿主那一侧开盘，这里不猜有什么会话，读回来的就是全部。
 // 查找走 `sessions.search`：那一段文字在记录里的哪一处由宿主说清，界面只管把自己这一份递到那一条上（方案 4.2）。
+// 组名与「默认」那一枚标签读的是 `workspaces.list` 那份持久登记：这一栏只是它的一个读者，收起或列不出来都不改那份文件（方案 5.5.1）。
 import { useCallback, useEffect, useState } from 'react';
 import { Icon } from './Icon';
-import { groupByWorkspace, type RailLayout } from '../rail';
+import { groupByWorkspace, type RailLayout, type WorkspaceRoster } from '../rail';
 import { code, type Client } from '../protocol';
 
 // 一条命中来自记录里哪一类事件：抬头那一格写的是它（与终端那一栏用同一组词）。
@@ -17,6 +18,9 @@ const PROJECT_FAILURES: Record<string, string> = {
   host_project_root_unreadable: '那个目录读不动：检查它的权限',
   host_project_root_mismatch: '这条路径与它配置层给出的项目根对不上',
   host_project_root_unsupported: '这一具宿主没有装载别的项目那一层',
+  workspace_registry_invalid: '那份工作区登记读不懂：它不是这一版认得的表格',
+  workspace_registry_version: '那份工作区登记是更新的版本写下的，这一版读不动它',
+  workspace_registry_locked: '那份工作区登记正被另一处写着：稍等片刻再刷新',
 };
 const failureLine = (label: string, error: unknown): string => {
   const kind = code(error);
@@ -125,10 +129,29 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
       }
     }
     setRootsById(found);
-    setLayout(groupByWorkspace(all, projects));
+    // 那份登记读不动时组名照旧用目录那一段画：读不回来要说得出，但别让人看不见会话。
+    const read = await client.call('workspaces.list', {}, 15_000)
+      .then((answer) => answer as WorkspaceRoster)
+      .catch((error) => {
+        failures.push(failureLine('那份工作区登记', error));
+        return { default: null, workspaces: [] } as WorkspaceRoster;
+      });
+    setLayout(groupByWorkspace(all, projects, read));
     setNote(failures.join('；'));
     setLoading(false);
   }, [client, projects]);
+
+  // 换默认工作区只有这一处落笔：写完重读那份登记，画面上那一枚开关说的就是宿主存下来之后的样子（方案 5.5.1、5.5.3）。
+  const markDefault = useCallback(async (root: string, clearing: boolean) => {
+    setNote('');
+    try {
+      await client.call('workspace.default.set', { directory: clearing ? '' : root }, 15_000);
+    } catch (error) {
+      setNote(failureLine(clearing ? '退掉默认' : '设为默认', error));
+      return;
+    }
+    void load();
+  }, [client, load]);
 
   const search = useCallback(async (needle: string) => {
     setSearchNote('');
@@ -295,11 +318,19 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
             <span className="group-root">{group.label}</span>
           </button>
           <span className="group-count">{group.sessions.length}</span>
-          <button type="button" className="group-new" onClick={() => onCreate(group.root)}>在这一份工作区里新建</button>
+          {/* 那一枚开关就是那份登记里的默认那一格：按下设为默认，再按下退掉（方案 5.5.1、5.5.3）。样式接查找那一行的开关，不另加刻度。 */}
+          <button
+            type="button"
+            className={`rail-scope${group.isDefault ? ' on' : ''}`}
+            aria-pressed={group.isDefault}
+            title={group.isDefault ? `新建会话没指名工作区时落在 ${group.root}：按这一枚退掉默认` : `把 ${group.root} 定为新建会话时落的那一具工作区`}
+            onClick={() => void markDefault(group.root, group.isDefault)}
+          >{group.isDefault ? '默认' : '设为默认'}</button>
+          <button type="button" className="group-new" title={`在这一份工作区（${group.root}）里新建一份会话`} onClick={() => onCreate(group.root)}>新建</button>
         </h3>
         {folded[group.identity] === true && <div className="session-note">这一组收着，里面有 {group.sessions.length} 份会话。</div>}
         {folded[group.identity] !== true && <>
-          {group.sessions.length === 0 && <div className="session-note">这一份工作区里还没有会话：按上面那枚「在这一份工作区里新建」开一份。</div>}
+          {group.sessions.length === 0 && <div className="session-note">这一份工作区里还没有会话：按上面那枚「新建」开一份。</div>}
           {group.sessions.map(sessionRow)}
         </>}
       </section>)}
