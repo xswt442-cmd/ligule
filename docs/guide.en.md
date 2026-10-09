@@ -95,6 +95,7 @@ Mode manifests, skills, prompt templates and extensions each have their own dire
 | skills | `.ligule/skills/` and `.agents/skills/` in project and user directories, in that order | `ligule skills` |
 | prompt templates | `<project-root>/.ligule/prompts/` and `~/.ligule/prompts/`, searched recursively | typing `/name` in the terminal UI expands it |
 | extensions | `~/.ligule/extensions/*.js` load automatically; paths in the user layer and on the command line also load; paths in the project or local layer report `extension_source_ignored` and do not load | `ligule extensions` |
+| workspace registry | `workspaces.json` under the data root: one row written when a session is created or reopened, and the client's list is only a reader of it | `ligule workspaces` |
 
 ## Commands
 
@@ -105,6 +106,7 @@ ligule tui                        the terminal UI
 ligule host                       a line-per-frame protocol endpoint; this is what the desktop shell starts
 ligule sessions [--json] [--project <root>]   list sessions, no kernel built
 ligule policy <session-id> [--json]           how the judgements went: three counters and the rules hit
+ligule workspaces [--json]                    list the registered workspaces, no kernel built
 ligule tools                      list the tools this run would install
 ligule skills                     list the skills this directory loads and why any was skipped
 ligule extensions               list the extension files that would load and the paths refused
@@ -309,6 +311,8 @@ The palette holds: new session, re-read this session's log, branch a new session
 | `tool_outcome_unknown` | left by a call whose host was hard-killed or crashed | treat it as "unknown whether it happened"; confirm the actual state before redoing it |
 | `config_field_unknown` | the key the UI submitted is not on the host whitelist | use one of the four model fields the panel offers |
 | `data_root_invalid` | `LIGULE_HOME` names a relative path | write an absolute path; without this variable the data root is `~/.ligule` |
+| `workspace_registry_invalid` | the workspace registry cannot be parsed, or its default selection names an identity that is not registered | fix the field the error names, or delete the file and let session creation register the workspaces again |
+| `workspace_registry_version` | the registry was written by a later version | run that version's executable, or delete the file and register again |
 | `cli_command_unknown` | the command name is misspelled | run `ligule --help` |
 | `tui_terminal_required` | the terminal UI started on a non-interactive terminal | use `ligule run` |
 | `tui_dependency_missing` | the terminal UI's optional dependencies are not installed | `npm install ink react marked highlight.js string-width` |
@@ -316,7 +320,7 @@ The palette holds: new session, re-read this session's log, branch a new session
 | `ligule resume` says the mode file changed | the manifest that session used is not the one read now | name one explicitly with `--mode <name>` or `/resume <id> <mode-name>` |
 | the first line's format version does not match | that log was written by a later build | go back to that build's executable, or start a new session |
 
-Three read-only checks build no kernel and ask no model: `ligule tools`, `ligule skills`, `ligule extensions`. How one run judged is read with `ligule policy <session-id>`.
+Four read-only checks build no kernel and ask no model: `ligule tools`, `ligule skills`, `ligule extensions`, `ligule workspaces`. How one run judged is read with `ligule policy <session-id>`.
 
 When the desktop shell cannot find the backend entry point, `LIGULE_DESKTOP_CLI` points at the entry and `NODE` at a node executable; the priority order of the bundled copies is in [../desktop/README.md](../desktop/README.md).
 

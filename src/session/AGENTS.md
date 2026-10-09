@@ -41,7 +41,7 @@ Rules for `src/session/`: the record, its format, repair, listing, checkpoint an
 
 - `ligule sessions` reads the record directory and lists past runs. It builds no kernel, loads no extension and opens no session (D73).
 - The first line gives the project and the start time, the last `mode` event gives the list the run used, and a dispatched call with no result is counted, so a half-finished session shows itself in the listing.
-- `--json` is for scripts and `--project <root>` filters by that first line. A record whose project cannot be read belongs to no project.
+- `--json` is for scripts and `--project <root>` filters by that first line. A record whose project cannot be read belongs to no project. The filter compares `workspaceIdentity()` of both sides when the two spellings differ, so a directory written another way is still the same project (D110).
 - The scan reads whole files, so its cost grows linearly with the number of records and no index exists yet (U38).
 - The same rows reach a client over `sessions.list`, where `projectRoot` and `limit` are both optional. No surface reads that directory itself.
 - `sessions.search` takes one non-blank query and answers which record each hit is in plus that event's `seq`, so a surface opens the record and jumps to that line. A blank query matches every record, so it is refused as `search_query_empty` before anything is scanned (方案 4.2).

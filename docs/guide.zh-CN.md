@@ -95,6 +95,7 @@ contextTokens = 200000            # 不写这一格就不做上下文压缩
 | 技能 | 项目与用户各自的 `.ligule/skills/` 与 `.agents/skills/`，按这个先后 | `ligule skills` |
 | 提示词模板 | `<项目根>/.ligule/prompts/` 与 `~/.ligule/prompts/`，递归找 | 终端里打 `/名字` 时展开 |
 | 扩展 | `~/.ligule/extensions/*.js` 自动装；用户层与命令行写的路径也装；项目层与本地层写的报 `extension_source_ignored` 不装 | `ligule extensions` |
+| 工作区登记 | 数据根下的 `workspaces.json`：建会话与接会话各写一条，界面那一栏只是它的一个读者 | `ligule workspaces` |
 
 ## 命令一览
 
@@ -105,6 +106,7 @@ ligule tui                        终端界面
 ligule host                       一行一条帧的协议端点，桌面壳起的就是这一个进程
 ligule sessions [--json] [--project <根>]   列出跑过的会话，不建内核
 ligule policy <会话 id> [--json]  这一次会话里判定怎么走的：三档计数与命中的规则
+ligule workspaces [--json]        列出登记过的工作区，不建内核
 ligule tools                      列出这一次会装上哪些工具
 ligule skills                     列出这个目录会加载哪些技能，以及被跳过的原因
 ligule extensions                 列出会装载哪几个扩展文件，以及被挡掉的路径
@@ -309,6 +311,8 @@ reason = "只读的 diff"
 | `tool_outcome_unknown` | 宿主被硬杀或崩掉时那一次调用留下的 | 当作「不知道做没做成」，先确认实际状态再重做 |
 | `config_field_unknown` | 界面提交的格子不在宿主白名单里 | 换那一格的名字；界面上能改的只有四条模型字段 |
 | `data_root_invalid` | `LIGULE_HOME` 写的是相对路径 | 写绝对路径；没写这一格时数据根是 `~/.ligule` |
+| `workspace_registry_invalid` | 那份工作区登记读不懂，或默认选择指向一个没登记的身份 | 按报出来的那一格改那份文件；也可以删掉它，之后由建会话那一条路重新登记 |
+| `workspace_registry_version` | 那份登记由更晚的版本写过 | 换回那一版的可执行文件，或删掉那份文件重新登记 |
 | `cli_command_unknown` | 命令名打错 | 跑 `ligule --help` 列一遍 |
 | `tui_terminal_required` | 在非交互终端里起了终端界面 | 改用 `ligule run` |
 | `tui_dependency_missing` | 终端界面的可选依赖没装上 | `npm install ink react marked highlight.js string-width` |
@@ -316,7 +320,7 @@ reason = "只读的 diff"
 | `ligule resume` 报模式文件被改过 | 那份会话当时生效的装配清单与现在读到的不是同一份 | 用 `--mode <名字>` 或 `/resume <id> <模式名>` 显式指定用哪一份 |
 | 记录第一行的格式版本对不上 | 那份记录由更晚的版本写过 | 换回那一版的可执行文件，或开一份新会话 |
 
-三条只读的检查不建内核，也不问模型：`ligule tools`、`ligule skills`、`ligule extensions`。一次判定怎么走的用 `ligule policy <会话 id>`。
+四条只读的检查不建内核，也不问模型：`ligule tools`、`ligule skills`、`ligule extensions`、`ligule workspaces`。一次判定怎么走的用 `ligule policy <会话 id>`。
 
 桌面壳找不到后端入口时，`LIGULE_DESKTOP_CLI` 指后端入口、`NODE` 指 node 可执行文件；安装包自带的两份优先级在 [../desktop/README.md](../desktop/README.md) 里。
 

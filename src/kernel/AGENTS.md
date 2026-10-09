@@ -8,6 +8,14 @@ Rules for `src/kernel/`: the tool table, decision chain, loop, prompt assembly, 
 - An absolute `LIGULE_HOME` wins. A blank one reads as unset, and a relative one fails with `data_root_invalid` — the root never moves with the working directory.
 - The user config layer, `modes/`, `skills/`, `prompts/` and `extensions/` are read under it. `~/.agents/skills/` and everything under the project boundary keep their own anchors.
 
+## Workspaces
+
+- A workspace is one real directory (D110). Its identity is that directory, not a spelling of it: `workspaceIdentity()` resolves, follows what the platform resolves the path to, folds Windows drive letters and case, and drops trailing separators. Same-directory aliases give one identity, so nothing registers or caches them twice.
+- The registry is `<data root>/workspaces.json` (`registryPathOf`): a version, the default selection, and one entry per identity carrying the directory, the display name, the time it was first seen and the time it was last seen. Registering a known identity moves those two times and the name, and never adds a second row.
+- Recency drops nothing. A client's list is a reader of this file; closing a panel removes no workspace (D110, 方案 5.5.1).
+- A file that cannot be parsed is `workspace_registry_invalid`, and a version this build cannot read is `workspace_registry_version`. Neither reads as an empty registry: an empty answer would lose the list.
+- `workspace_directory_required` refuses an empty argument. A directory that is not there still gets an absolute identity — whether a working directory exists is decided where it is loaded, not here.
+
 ## Modes
 
 - A mode is a named assembly list (D35, D43): one TOML per mode, found in `modes/`, then `~/.ligule/modes/<name>.toml`, then `<project root>/.ligule/modes/<name>.toml`.

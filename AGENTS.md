@@ -51,6 +51,7 @@ npm run build-rg    downloads the pinned ripgrep into packages/rg-*
 - Every failure carries a stable code (`KernelError#code`). `KernelError` is a tool that did not finish, and the loop continues with that result. `KernelRuntimeError` is the kernel itself failing, and the loop stops.
 - An error without a code becomes `tool_failed`, and the original goes into `cause`. The code serves the host, `detail` serves the model, and the CLI prints both.
 - Every dispatched call gets an answer in the record, including one the loop chose not to run (`tool_skipped`). A missing answer invalidates every later request body.
+- A workspace is one real directory, and its identity is that directory after `workspaceIdentity()` folds spelling (D110). The project layers, the record's project line, the Host's environment cache and the registry in the data root all compare that value; the permission boundary stays a separate fact, so moving it moves neither the workspace nor the records.
 
 ## Build and files
 
