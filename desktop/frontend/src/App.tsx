@@ -778,7 +778,7 @@ export function App({ transport }: { transport: Transport }) {
   // 「该发的那一份」对不上眼前这一份时什么都不发：后台那一轮的完成不能启动另一份会话的输入（方案 5.2 那句），
   // 那几句排在后面的要人切回去、或按下「继续发」才走。
   useEffect(() => {
-    // 与 `send` 同一条门槛：身份与草稿归属没对齐之前，队首那一句也不发出去（审阅 F5）。
+    // 与 `send` 同一条门槛：身份与草稿归属还没跟上这一份之前，排着的第一条也不发出去（审阅 F5）。
     if (reading || inputOwner !== sessionId) return;
     if (running || link !== null || reconnecting.current || sessionId === null) return;
     if (!allowSend.current.has(sessionId)) return;

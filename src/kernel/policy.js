@@ -220,7 +220,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       // 答复这一次要点头就得多看一眼：同一条文本在两种语法下能自动放行的面积不一样，答的是哪一种、跑的是哪一个可执行文件，
       // 只有 Host 这一侧知道（D59）。没有命令文本的调用不带这两个字段，答复的形状与加这一条之前一样。
       // 档位与它的来源跟着这一次询问一起交出去：界面看着别的那一份会话时，解释这一条的不能是另一份会话的档位（审阅 C08）。
-      // `policyForced` 说的是这一档被连着拒绝压下来了：那一句来源要说成压下来这一件，而不是「配置文件里写着 ask」。
+      // `policyForced` 说的是这一档被连着拒绝压下来了：界面上那句来源按这一件说（审阅 C08、D93）。
       const question = { tool: named, input, command, reason, policy: effective, policySource: source, policyForced: forcedToAsk };
       if (shell !== undefined) {
         question.shell = shell.kind;
