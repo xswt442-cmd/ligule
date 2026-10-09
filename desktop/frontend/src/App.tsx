@@ -8,6 +8,7 @@ import { Icon } from './components/Icon';
 import { SettingsDialog } from './components/Settings';
 import { RowView } from './components/RowView';
 import { SessionRail, type SearchHit } from './components/SessionRail';
+import { createCallOf, type WorkspaceRoster } from './rail';
 import { SessionMenu } from './components/SessionMenu';
 import { ModelPanel } from './components/ModelPanel';
 import { ExportPanel } from './components/ExportPanel';
@@ -82,6 +83,15 @@ function readHistory(): string[] {
 }
 
 // 已经接上的几项。右侧那一片面板说的是这一份会话现在的情况，与会话浮层里能改的那几格不重复摆控制。
+/**
+ * 那份持久登记里默认那一具的目录（方案 5.5.1、5.5.3）：没设过默认、读不回来都算「没有」。
+ * 桌面不拿宿主继承的进程目录当自己的工作区，所以第一份会话落在这一格上，而不是落在 cwd。
+ */
+async function defaultWorkspaceOf(client: Client): Promise<string | undefined> {
+  const roster = await client.call('workspaces.list', {}, 15_000).catch(() => null) as WorkspaceRoster | null;
+  return roster === null ? undefined : roster.workspaces.find((one) => one.identity === roster.default)?.directory;
+}
+
 const menuPanels: Panel<PanelProps>[] = [
   {
     id: 'panel.status',
@@ -664,9 +674,14 @@ export function App({ transport }: { transport: Transport }) {
 
   const newSession = useCallback(async (root?: string) => {
     try {
-      // 指名了哪一项目录就在哪一个项目里建；没指名就落在眼前这一份会话所属的那一项目录（方案 3.2）。
-      const asked = root === undefined || root === '' ? (projectRoot === '' ? undefined : projectRoot) : root;
-      const created = await client.call('session.create', asked === undefined ? {} : { projectRoot: asked }) as { sessionId: string };
+      // 指名了哪一具工作区就在哪一个项目里建；没指名时先看眼前这一份会话在哪一项目录，再退到那份登记里的默认那一具，
+      // 两格都没有才由宿主用它自己那一份项目环境。来源那一格按这三档说清是谁选的（方案 3.2、5.5.3）。
+      const named = root === undefined || root === '' ? undefined : root;
+      const current = projectRoot === '' ? undefined : projectRoot;
+      const fallback = named === undefined && current === undefined ? await defaultWorkspaceOf(client) : undefined;
+      const params = createCallOf(named, current, fallback);
+      const asked = params.projectRoot;
+      const created = await client.call('session.create', params) as { sessionId: string };
       // 新建那一份也走接会话那一条路：只有那一次读把记录头部的项目根带回来，草稿与队列才知道该存到哪一格。
       // 指名了哪一项目录就带着它去接：不带的话宿主按默认那一份项目环境找记录，另一项目录里刚建好的那一份就报 `session_not_found`（方案 3.2）。
       void openSession(created.sessionId, undefined, false, asked);
