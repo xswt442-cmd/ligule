@@ -104,6 +104,8 @@ type Listed = {
   id: string;
   formatVersion: number;
   projectRoot: string;
+  workspace?: string;
+  workspaceOrigin?: string;
   createdAt: string | null;
   updatedAt: string;
   events: number;
@@ -117,8 +119,8 @@ type Listed = {
 };
 
 const sessions: Listed[] = [
-  { id: '7f3c9a21-4b7e-4f0a-9c1d-2a5e8b0c6d9f', formatVersion: 1, projectRoot: 'E:/notes', createdAt: '2026-10-05T09:02:11.000Z', updatedAt: '2026-10-05T11:41:07.000Z', events: 41, lastSeq: 40, mode: { name: 'full', layer: 'shipped', digest: '0f2b1c3d4e5f' }, name: '压缩读数那一轮', archived: false, unanswered: 0, truncatedBytes: 0 },
-  { id: '2b8d55c0-11aa-4c3e-8d77-9f0a1b2c3d4e', formatVersion: 1, projectRoot: 'E:/notes', createdAt: '2026-10-05T07:20:00.000Z', updatedAt: '2026-10-05T08:55:31.000Z', events: 128, lastSeq: 127, mode: { name: 'minimal', layer: 'shipped', digest: 'aa11bb22cc33' }, name: '', archived: true, unanswered: 2, truncatedBytes: 0 },
+  { id: '7f3c9a21-4b7e-4f0a-9c1d-2a5e8b0c6d9f', formatVersion: 1, projectRoot: 'E:/notes', workspace: 'e:/notes', workspaceOrigin: 'explicit', createdAt: '2026-10-05T09:02:11.000Z', updatedAt: '2026-10-05T11:41:07.000Z', events: 41, lastSeq: 40, mode: { name: 'full', layer: 'shipped', digest: '0f2b1c3d4e5f' }, name: '压缩读数那一轮', archived: false, unanswered: 0, truncatedBytes: 0 },
+  { id: '2b8d55c0-11aa-4c3e-8d77-9f0a1b2c3d4e', formatVersion: 1, projectRoot: 'E:/notes', workspace: 'e:/notes', workspaceOrigin: 'explicit', createdAt: '2026-10-05T07:20:00.000Z', updatedAt: '2026-10-05T08:55:31.000Z', events: 128, lastSeq: 127, mode: { name: 'minimal', layer: 'shipped', digest: 'aa11bb22cc33' }, name: '', archived: true, unanswered: 2, truncatedBytes: 0 },
   { id: 'c4e1f00d-7788-4a5b-9c0d-e1f2a3b4c5d6', formatVersion: 0, projectRoot: '', createdAt: null, updatedAt: '2026-10-04T13:07:44.000Z', events: 3, lastSeq: 2, mode: null, name: '', archived: false, unanswered: 0, truncatedBytes: 0 },
   { id: '9a7b5c3d-0e1f-4a5b-8c9d-0e1f2a3b4c5d', formatVersion: 0, projectRoot: '', createdAt: null, updatedAt: '2026-10-04T09:12:03.000Z', events: 0, lastSeq: -1, mode: null, name: '', archived: false, unanswered: 0, truncatedBytes: 0, error: { code: 'session_event_unknown', detail: '事件种类没标 ignorable，读不懂就拒绝重建（D73）' } },
 ];
