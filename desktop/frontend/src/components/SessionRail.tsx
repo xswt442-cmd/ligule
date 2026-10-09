@@ -3,6 +3,7 @@
 // 查找走 `sessions.search`：那一段文字在记录里的哪一处由宿主说清，界面只管把自己这一份递到那一条上（方案 4.2）。
 import { useCallback, useEffect, useState } from 'react';
 import { Icon } from './Icon';
+import { groupByWorkspace, type RailLayout } from '../rail';
 import { code, type Client } from '../protocol';
 
 // 一条命中来自记录里哪一类事件：抬头那一格写的是它（与终端那一栏用同一组词）。
@@ -37,6 +38,9 @@ export type SessionSummary = {
   // 没有首行的现存记录读作版本 0（D73）。
   formatVersion: number;
   projectRoot: string;
+  // 归组用的那两格（方案 5.5.3、5.5.4）：空串说的是首行没写这两格，与「默认那一具」是两件事。
+  workspace?: string;
+  workspaceOrigin?: string;
   createdAt: string | null;
   updatedAt: string;
   events: number;
@@ -75,7 +79,9 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
   // 在那一份项目里新建一份会话（方案 3.2）：不给目录就落在这一具宿主自己的项目。
   onCreate: (root?: string) => void;
 }) {
-  const [groups, setGroups] = useState<[string, SessionSummary[]][]>([]);
+  const [layout, setLayout] = useState<RailLayout>({ groups: [], loose: [] });
+  // 收起的那几组按工作区身份记着：重读列表、换默认目录都不改这一格（方案 5.5.4）。
+  const [folded, setFolded] = useState<Record<string, boolean>>({});
   const [note, setNote] = useState('');
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState('');
@@ -100,9 +106,7 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
     setNote('');
     // 每项目录各读一次：这一具宿主自己的那一份不用指名，另外看着的那几份按目录指名。
     const asked = ['', ...projects.filter((root) => root !== '')];
-    const byRoot = new Map<string, SessionSummary[]>();
-    // 另外加进来的那几项目录先各占一段：还没有会话的项目也要有那一格，人才能在它里面新建一份会话（方案 3.2）。
-    for (const root of asked) if (root !== '') byRoot.set(root, []);
+    const all: SessionSummary[] = [];
     const found = new Map<string, string>();
     const failures: string[] = [];
     for (const root of asked) {
@@ -117,15 +121,11 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
       }
       for (const item of sessions) {
         found.set(item.id, root);
-        const key = item.projectRoot === '' ? (root === '' ? '读不出项目根' : root) : item.projectRoot;
-        const list = byRoot.get(key);
-        if (list === undefined) byRoot.set(key, [item]);
-        else list.push(item);
+        all.push(item);
       }
     }
-    // 归档的那几份沉到本组底下：最近动过的仍在上面，一屏里先看到的是没归档的（方案 4.2）。
     setRootsById(found);
-    setGroups([...byRoot.entries()].map(([root, items]) => [root, [...items].sort((left, right) => Number(left.archived === true) - Number(right.archived === true))] as [string, SessionSummary[]]));
+    setLayout(groupByWorkspace(all, projects));
     setNote(failures.join('；'));
     setLoading(false);
   }, [client, projects]);
@@ -174,6 +174,32 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
     const timer = setTimeout(() => void search(needle), 300);
     return () => clearTimeout(timer);
   }, [query, search]);
+
+  // 一条会话行：分组上面与下面那一段直接排列的那些画的是同一件东西。
+  const sessionRow = (item: SessionSummary) => <button
+    key={item.id}
+    type="button"
+    className={`session-item${item.id === current ? ' active' : ''}${item.archived === true ? ' archived' : ''}`}
+    title={item.id}
+    onClick={() => onOpen(item.id, item.projectRoot !== '' ? item.projectRoot : (rootsById.get(item.id) === '' ? undefined : rootsById.get(item.id)))}
+  >
+    <span className="session-line">
+      <span className="session-when">{clock(item.updatedAt)}</span>
+      <span className="session-mode">{item.mode?.name ?? '没有模式'}</span>
+      <span className="session-count">{item.events} 条</span>
+    </span>
+    {item.name !== undefined && item.name !== '' && <span className="session-name">{item.name}</span>}
+    <span className="session-id">{item.id}</span>
+    {(running.includes(item.id) || unread.includes(item.id) || item.unanswered > 0 || item.formatVersion === 0 || item.truncatedBytes > 0 || item.archived === true || item.error !== undefined) && <span className="session-meta">
+      {running.includes(item.id) && <span>这一份在跑</span>}
+      {unread.includes(item.id) && <span>刚跑完一轮没看着</span>}
+      {item.unanswered > 0 && <span>未收尾 {item.unanswered} 次派发</span>}
+      {item.formatVersion === 0 && <span>没有首行</span>}
+      {item.truncatedBytes > 0 && <span>尾行未完成 {item.truncatedBytes} 字节</span>}
+      {item.archived === true && <span>已归档</span>}
+      {item.error !== undefined && <code className="row-code">{item.error.code}</code>}
+    </span>}
+  </button>;
 
   return <div className="sessions">
     <div className="rail-find">
@@ -254,41 +280,34 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
         {note}
         <button type="button" onClick={() => void load()}>重试</button>
       </div>}
-      {!loading && note === '' && groups.length === 0 && <div className="session-item">记录目录里还没有会话。跑一轮之后再来刷新。</div>}
-      {groups.map(([root, items]) => <section key={root}>
-        <h3 className="group-label" title={root}>
-          <Icon name="folder" size={13} />
-          <span className="group-root">{root}</span>
-          <span className="group-count">{items.length}</span>
-          {/* 这一份项目是这一扇窗口另外加进来的：新建时要点它自己那一份目录，不能跟着眼前看着的那一份走（方案 3.2）。 */}
-          {projects.includes(root) && <button type="button" className="group-new" onClick={() => onCreate(root)}>在这一份项目里新建</button>}
+      {!loading && note === '' && layout.groups.length === 0 && layout.loose.length === 0 && <div className="session-item">记录目录里还没有会话。跑一轮之后再来刷新。</div>}
+      {/* 上面这些是创建时指名了工作区的会话，按那份身份成组；组名是那一段目录名，完整路径挂在标题与提示上（方案 5.5.4）。 */}
+      {layout.groups.map((group) => <section className="rail-group" key={group.identity}>
+        <h3 className="group-label">
+          <button
+            type="button"
+            className="group-fold"
+            aria-expanded={folded[group.identity] !== true}
+            title={`${group.root}（${folded[group.identity] === true ? '收起着，按这一行展开' : '展开着，按这一行收起'}）`}
+            onClick={() => setFolded((now) => ({ ...now, [group.identity]: !now[group.identity] }))}
+          >
+            <Icon name={folded[group.identity] === true ? 'unfold' : 'fold'} size={13} />
+            <span className="group-root">{group.label}</span>
+          </button>
+          <span className="group-count">{group.sessions.length}</span>
+          <button type="button" className="group-new" onClick={() => onCreate(group.root)}>在这一份工作区里新建</button>
         </h3>
-        {items.length === 0 && <div className="session-note">这一项目录里还没有会话：按上面那枚「在这一份项目里新建」开一份。</div>}
-        {items.map((item) => <button
-          key={item.id}
-          type="button"
-          className={`session-item${item.id === current ? ' active' : ''}${item.archived === true ? ' archived' : ''}`}
-          title={item.id}
-          onClick={() => onOpen(item.id, item.projectRoot !== '' ? item.projectRoot : (rootsById.get(item.id) === '' ? undefined : rootsById.get(item.id)))}
-        >
-          <span className="session-line">
-            <span className="session-when">{clock(item.updatedAt)}</span>
-            <span className="session-mode">{item.mode?.name ?? '没有模式'}</span>
-            <span className="session-count">{item.events} 条</span>
-          </span>
-          {item.name !== undefined && item.name !== '' && <span className="session-name">{item.name}</span>}
-          <span className="session-id">{item.id}</span>
-          {(running.includes(item.id) || unread.includes(item.id) || item.unanswered > 0 || item.formatVersion === 0 || item.truncatedBytes > 0 || item.archived === true || item.error !== undefined) && <span className="session-meta">
-            {running.includes(item.id) && <span>这一份在跑</span>}
-            {unread.includes(item.id) && <span>刚跑完一轮没看着</span>}
-            {item.unanswered > 0 && <span>未收尾 {item.unanswered} 次派发</span>}
-            {item.formatVersion === 0 && <span>没有首行</span>}
-            {item.truncatedBytes > 0 && <span>尾行未完成 {item.truncatedBytes} 字节</span>}
-            {item.archived === true && <span>已归档</span>}
-            {item.error !== undefined && <code className="row-code">{item.error.code}</code>}
-          </span>}
-        </button>)}
+        {folded[group.identity] === true && <div className="session-note">这一组收着，里面有 {group.sessions.length} 份会话。</div>}
+        {folded[group.identity] !== true && <>
+          {group.sessions.length === 0 && <div className="session-note">这一份工作区里还没有会话：按上面那枚「在这一份工作区里新建」开一份。</div>}
+          {group.sessions.map(sessionRow)}
+        </>}
       </section>)}
+      {/* 下面这一段是直接排列的：建会话时没指名工作区的那些，包括更早的记录。位置由记录自己说，不按「路径等不等于现在的默认目录」推（方案 5.5.4）。 */}
+      {layout.loose.length > 0 && <section className="rail-loose">
+        <h3 className="group-label"><Icon name="folder" size={13} /><span className="group-root">没指名工作区的会话</span><span className="group-count">{layout.loose.length}</span></h3>
+        {layout.loose.map(sessionRow)}
+      </section>}
     </>}
   </div>;
 }

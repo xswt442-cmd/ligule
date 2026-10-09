@@ -1392,6 +1392,24 @@ button.send:hover:not(:disabled) {
   white-space: nowrap;
 }
 
+/* 那一组的标题行自己就是把手：整行按下去收起或展开，折了没有由 aria-expanded 说出去（方案 5.5.4）。 */
+.group-fold {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: var(--space-1) 0;
+  min-block-size: var(--hit);
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
 .session-line,
 .session-id,
 .session-name,

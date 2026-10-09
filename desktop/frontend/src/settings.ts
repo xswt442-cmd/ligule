@@ -56,9 +56,11 @@ const stringMap = (value: unknown): Record<string, string> => {
   return out;
 };
 
-// 另外看着哪几项目录：只留写得出来的那几条并去重，最多八条——满了退掉最早加进来的那几份，留下的总是最近用的（方案 3.2）。
+// 另外看着哪几项目录：只留写得出来的那几条并去重（方案 3.2）。这一份清单不再按「最近八条」截断：
+// 它只是这一扇窗口想看着的那几份，登记在应用数据根里的那一份才是持久的（D110、方案 5.5.1），
+// 退掉一条只改这一栏画什么，记录、归属与历史都不动。
 const rootList = (value: unknown): string[] =>
-  Array.isArray(value) ? [...new Set(value.filter((each): each is string => typeof each === 'string' && each !== ''))].slice(-8) : [];
+  Array.isArray(value) ? [...new Set(value.filter((each): each is string => typeof each === 'string' && each !== ''))] : [];
 
 // 那两张表只认写得出来的形状：一格草稿是串，一排是串数组，别的一律丢掉，不猜它想表达什么。
 const draftTable = (value: unknown): Record<string, Record<string, string>> => {
