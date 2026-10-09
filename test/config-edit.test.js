@@ -344,3 +344,17 @@ test('a file another writer holds is refused while that lock is active', async (
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+// 等号与值之间那一段空白是原文件自己的形状：合同只换那一个值，所以 Tab 与多个空格都要原样留着。
+test('a scalar write leaves the whitespace between the equal sign and the value alone', () => {
+  const text = '[model]\nmodel\t = \t"gpt-4o"\napi = "messages"\n';
+  assert.equal(editTomlValue(text, ['model', 'model'], '"glm-4"').text, '[model]\nmodel\t = \t"glm-4"\napi = "messages"\n');
+});
+
+// 注释说的是它下面那一段：删掉一条规则不能把贴着下一条规则表头的那几行注释一起带走。
+test('removing a rule keeps the comments sitting on the next rule', () => {
+  const text = '[[policy.rules]]\ntool = "read"\ndecision = "allow"\n\n# 只读的 diff\n[[policy.rules]]\ntool = "exec"\nmatch = "git diff*"\ndecision = "allow"\n';
+  const edited = editRuleTable(text, 'remove', 0);
+  assert.equal(edited.text, '# 只读的 diff\n[[policy.rules]]\ntool = "exec"\nmatch = "git diff*"\ndecision = "allow"\n');
+  assert.equal(parse(edited.text).policy.rules.length, 1, '留下的那一条一个字没动');
+});

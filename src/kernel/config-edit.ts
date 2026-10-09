@@ -239,7 +239,8 @@ function replaceValue(body: string, equal: number, literal: string): string | nu
   while (body[after] === ' ' || body[after] === '\t') after += 1;
   const end = valueSpan(body, after);
   if (end === null) return null;
-  return `${body.slice(0, equal + 1)} ${literal}${body.slice(end)}`;
+  // 等号后那些空白是原文件自己的形状：合同只换那一个值，所以这一段原样留着（方案 7.2）。
+  return `${body.slice(0, after)}${literal}${body.slice(end)}`;
 }
 
 // 换不了的那一个值说出它是什么形状：这一条路只换得上本行闭得下来的那一个值。
@@ -562,7 +563,8 @@ export function editRuleTable(text: string, op: RuleOp, index: number, rule?: Po
   }
   if (op === 'remove') {
     const from = attachedComment(lines, block.start);
-    lines.splice(from, block.end - from);
+    // 收的范围到 `unattachedEnd` 为止：贴着下一个表头的那几行注释说的是下一条规则，不在这条规则的块里。
+    lines.splice(from, unattachedEnd(lines, block) - from);
     return { text: joined(lines), created: false };
   }
   const wanted = rule as PolicyRule;
