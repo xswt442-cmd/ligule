@@ -1,6 +1,9 @@
-// 界面一侧的设置：都存本机 WebView（D90）。草稿、字号、主题、侧栏宽度与收起、面板停靠都不进记录也不进配置文件。
-// 那一份 JSON 是这台机器上留下的旧内容，读坏了就用默认，不猜它想表达什么。
+// 界面一侧的设置：权威的那一份在应用数据根里（方案 5.5.2），经宿主 `prefs.read` / `prefs.write` 读写；
+// 草稿、字号、主题、侧栏宽度与收起、面板停靠都不进记录也不进配置文件。
+// WebView 里那一份 `ligule.ui` 只当第一屏的快速缓存：可恢复的草稿与队列不靠它，它丢了从数据根那一份读回来。
+// 那一份 JSON 是这台机器上留下的内容，读坏了就用默认，不猜它想表达什么。
 import type { Verbosity } from './components/types';
+import type { Client } from './protocol';
 
 // 六套具名配色：墨青（默认，深色）、羊皮纸（暖米色）、蓝天（冷白蓝）、石墨（中性深色）、森林（深绿）、黄昏（暖深琥珀）。
 // 取值在 `styles.css` 的 `data-palette` 变量块里；这里只认名字。
@@ -92,13 +95,8 @@ const queueTable = (value: unknown): Record<string, Record<string, string[]>> =>
   return out;
 };
 
-export function readSettings(): Settings {
-  let raw: unknown;
-  try {
-    raw = JSON.parse(localStorage.getItem(KEY) ?? '{}');
-  } catch {
-    return defaultSettings;
-  }
+// 从已解析的那一份值收出一份认得的设置：数据根里读回来的与缓存里读回来的都过这一处。
+export function settingsFrom(raw: unknown): Settings {
   const value = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<Settings>;
   return {
     palette: oneOf(value.palette, [...PALETTES], 'ink'),
@@ -114,14 +112,38 @@ export function readSettings(): Settings {
   };
 }
 
-// 写不进去要说得出来：那一句还留在屏幕上，但不能让人以为它已经存住了。
-export function writeSettings(settings: Settings): boolean {
+export function readSettings(): Settings {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(localStorage.getItem(KEY) ?? '{}');
+  } catch {
+    return defaultSettings;
+  }
+  return settingsFrom(raw);
+}
+
+/** 缓存里存着的那一份原文：启动时数据根里还没有偏好文档时，把这一份一次性交上去（迁移的来处）。 */
+export function cachedSettingsJson(): string {
+  try {
+    return localStorage.getItem(KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+// 缓存写不进去只影响第一屏快几毫秒，不影响可恢复性，所以不上报（上报的是数据根那一份写不进去）。
+export function cacheSettings(settings: Settings): void {
   try {
     localStorage.setItem(KEY, JSON.stringify(settings));
-    return true;
   } catch {
-    return false;
+    // 缓存是尽力而为的那一份。
   }
+}
+
+/** 写那一份正式的：数据根里的文档由宿主原子落盘；写不动时抛错，由调用方决定怎么说出口。 */
+export async function saveSettings(client: Client, settings: Settings): Promise<void> {
+  cacheSettings(settings);
+  await client.call('prefs.write', { json: JSON.stringify(settings) }, 15_000);
 }
 
 // 重连之后这一份会话排着的几句交回草稿：按先后拼在草稿后面，原来那一句留在最前，界面不自动发其中任何一句。

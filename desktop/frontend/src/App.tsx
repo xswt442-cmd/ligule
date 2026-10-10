@@ -26,7 +26,7 @@ import type { Verbosity } from './components/types';
 import { createSlotRegistry, SLOTS, type Panel } from './slots';
 import { capabilityOf, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn, type Record_, type Row } from './rows';
 import type { Status } from './status';
-import { mergeQueueIntoDraft, readSettings, writeSettings, type Settings } from './settings';
+import { cacheSettings, cachedSettingsJson, mergeQueueIntoDraft, readSettings, saveSettings, settingsFrom, type Settings } from './settings';
 
 type Branch = { seq: number; id: string; task: string };
 
@@ -424,6 +424,43 @@ export function App({ transport }: { transport: Transport }) {
     );
   }, [client]);
 
+  // 桌面那一份偏好以应用数据根里的文档为准（方案 5.5.2）：打开窗口时从宿主读回来；数据根里还没有这一份
+  // 而 WebView 缓存里留着旧内容时，把那旧内容一次性交上去（此后的权威副本在数据根）。
+  // 读回来之前先不落笔：让第一屏的默认值盖掉数据根里那一份真内容，是会丢草稿的那一种错。
+  const [settingsReady, setSettingsReady] = useState(false);
+  useEffect(() => {
+    let live = true;
+    client.call('prefs.read', {}, 15_000).then(
+      (read) => {
+        if (!live) return;
+        const raw = (read as { settings?: unknown }).settings;
+        if (typeof raw === 'object' && raw !== null && Object.keys(raw).length > 0) {
+          const adopted = settingsFrom(raw);
+          cacheSettings(adopted);
+          setSettings(adopted);
+          return;
+        }
+        const legacy = cachedSettingsJson();
+        if (legacy === '') return;
+        try {
+          const parsed: unknown = JSON.parse(legacy);
+          if (typeof parsed === 'object' && parsed !== null && Object.keys(parsed).length > 0) {
+            void client.call('prefs.write', { json: legacy }, 15_000).catch(() => undefined);
+          }
+        } catch {
+          // 缓存里那一份读不出来就不往上交，按默认走。
+        }
+      },
+      () => undefined,
+      // 读失败了也放行：按缓存那一份继续用，下一次改动仍会往数据根写（那时也写不动会说出来）。
+    ).finally(() => {
+      if (live) setSettingsReady(true);
+    });
+    return () => {
+      live = false;
+    };
+  }, [client]);
+
   // 本轮计时：有轮在跑就一秒走一格，画面按眼前那一份会话自己那一轮的起点算秒数。
   useEffect(() => {
     if (runningIds.length === 0) return;
@@ -489,10 +526,10 @@ export function App({ transport }: { transport: Transport }) {
     }
   }, [client, olderLoading, page, sessionId, verbosity]);
 
-  // 草稿与排着的几句按「哪一项目录下的哪一份会话」存本机：切换、打开设置、看历史与断连都不丢这一句，
-  // 退出再打开时接得回来（方案 5.1）。写不进去要说一句，别让人以为它已经存住了。
+  // 草稿与排着的几句按「哪一项目录下的哪一份会话」存：数据根里那一份文档是正式副本，WebView 里只当第一屏缓存（方案 5.5.2）。
+  // 切换、打开设置、看历史与断连都不丢这一句，退出再打开时接得回来（方案 5.1）。写不进去要说一句，别让人以为它已经存住了。
   useEffect(() => {
-    if (sessionId === null || inputOwner !== sessionId) return;
+    if (!settingsReady || sessionId === null || inputOwner !== sessionId) return;
     const stored = readSettings();
     // 空的那一格不留：草稿清空、队列发完，那一行整个从存储里去掉，不留着旧内容。
     const put = <T extends { length: number }>(table: Record<string, Record<string, T>>, value: T): Record<string, Record<string, T>> => {
@@ -505,11 +542,12 @@ export function App({ transport }: { transport: Transport }) {
       return next;
     };
     const items = queues[sessionId]?.items ?? [];
-    if (writeSettings({ ...settings, drafts: put(stored.drafts, draft), queued: put(stored.queued, items) })) return;
-    if (saveWarned.current) return;
-    saveWarned.current = true;
-    setRows((current) => [...current, metaRow('error', '这一句在屏幕上留着，但本机那一份存储写不进去：退出再打开时它不会回来')]);
-  }, [draft, inputOwner, projectRoot, queues, sessionId, settings]);
+    void saveSettings(client, { ...settings, drafts: put(stored.drafts, draft), queued: put(stored.queued, items) }).catch(() => {
+      if (saveWarned.current) return;
+      saveWarned.current = true;
+      setRows((current) => [...current, metaRow('error', '这一句在屏幕上留着，但本机那一份存储写不进去：退出再打开时它不会回来')]);
+    });
+  }, [client, draft, inputOwner, projectRoot, queues, sessionId, settings, settingsReady]);
 
   // 配色、字号与侧栏宽度落在根元素上：那几组 CSS 变量在 `data-palette` 与 `:root` 那一格读（D90）。
   useEffect(() => {
