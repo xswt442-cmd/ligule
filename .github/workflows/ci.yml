@@ -165,6 +165,8 @@ jobs:
         run: |
           ${{ matrix.node }} ./desktop/vendor/app/dist/cli.js --version
           test "$(${{ matrix.node }} ./desktop/vendor/app/dist/cli.js tools | wc -l)" -eq 9
+          # 运行树只留本平台的原生块，留下的要真的能加载：裁错了要在这里死，不在用户机器上（第 187 步）。
+          ${{ matrix.node }} -e '(async () => { require("./desktop/vendor/app/node_modules/tree-sitter"); require("./desktop/vendor/app/node_modules/tree-sitter-bash"); await import("./desktop/vendor/app/node_modules/tree-sitter-pwsh/bindings/node/index.js"); console.log("native modules loaded"); })()'
 
       # 壳的 Rust 一侧自己那两件事（从可执行文件位置找后端入口、帧在子进程两根管道之间按行转递）与格式。
       # 这一段不跑就等于壳的测试只在本地跑过，而安装包照样能打出来。
