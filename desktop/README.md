@@ -56,7 +56,7 @@ cargo test
 node desktop/fetch-runtime.mjs
 ```
 
-它按 `desktop/node-pin.json` 里钉住的版本与校验和下载 Node，只把 `node.exe` 抽到 `desktop/vendor/node/`；再把 `src/`、`package.json` 与生产依赖（按 `package.json` 的 `dependencies` 递归收，装不上的原生模块跳过——内核那一侧本来就有降级路径）拷到 `desktop/vendor/app/`。`desktop/vendor/` 不进版本控制。
+它按 `desktop/node-pin.json` 里钉住的版本与校验和下载 Node，把可执行文件（Windows 的 `node.exe`，其余平台的 `node`）与 Node 自己的许可取到 `desktop/vendor/node/`；再把构建出来的 `dist/`、`modes/`、`package.json`、`LICENSE` 与生产依赖（按 `package.json` 的 `dependencies` 递归收，装不上的原生模块跳过——内核那一侧本来就有降级路径）拷到 `desktop/vendor/app/`，其中原生依赖只留本目标那一个平台的块。`desktop/vendor/` 不进版本控制。
 
 `tauri.conf.json` 的 `bundle.resources` 把这两份分别挂成 `node/` 与 `app/`；壳起后端时按「`LIGULE_DESKTOP_CLI` → 随包的 `app/dist/cli.js` → 从可执行文件位置向上找 `dist/cli.js`」这一条顺序找，node 程序同理先用随包的那一份，再退 `NODE`，最后退 PATH。
 
