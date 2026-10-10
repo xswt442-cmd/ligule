@@ -148,6 +148,8 @@ The desktop shell's left rail ("sessions") groups the sessions that named a work
 
 The desktop has no rename or archive entry: those two happen in the terminal UI, and the desktop reads the same log.
 
+A window's close button hides that window, not the application: the host process, a running round, an unanswered card and the queued sentences all stay. The tray icon's two menu items bring the window back or ask to leave; in this release those two labels are written in Chinese (「打开 ligule」 and 「退出 ligule」). Before quitting, the window lists which sessions this quit would interrupt: the default action returns to the app, the other interrupts those rounds and exits. Drafts and queued sentences stay on this machine and are there when you open it again. Where the tray cannot be built, that close button quits instead, so nothing ends up hidden out of reach.
+
 One session is held by one backend process at a time. Opening it a second time reports `session_locked`.
 
 ## Input and queue
