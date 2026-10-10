@@ -14,6 +14,7 @@ import { createConnection, createConfig, createMemoryConnectionPair, MESSAGES_CA
 import { shownConfigOf } from '../dist/host/host.js';
 import { createConfigStore } from '../dist/kernel/config-store.js';
 import { configVersion } from '../dist/kernel/config-edit.js';
+import { historyPathOf, rememberHistory } from '../dist/kernel/input-history.js';
 import { listProjectFiles } from '../dist/host/paths.js';
 import { listenFetchable } from './helpers/port.js';
 
@@ -1552,4 +1553,36 @@ test('a restarted Host reads back the spilled body and the stored duration of th
       await stop(again);
     }
   }, ['--config', 'limits.resultBytes=48']);
+});
+
+// 两端共用的那一份输入历史走宿主这一条路（方案 5.5.6）：界面发得出自己说过的那一句、读得回整份清单，
+// 但说不出那一份文件在哪一处。另一端的写法也读得到，因为读写的都是同一份文件。
+test('the host keeps the input history both surfaces share: newest first, one copy per sentence', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-input-history-'));
+  const previous = process.env.LIGULE_HOME;
+  process.env.LIGULE_HOME = join(root, 'data');
+  const config = createConfig({ user: { boundary: root, model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model' } } });
+  const quiet = { capabilities: MESSAGES_CAPABILITIES, model: 'test-model', async *stream() { yield { type: 'text', text: 'ok' }; } };
+  const pair = createMemoryConnectionPair();
+  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider: quiet, policy: { mode: 'auto' } });
+  const client = createConnection(pair.client);
+  try {
+    assert.deepEqual((await client.request('history.read', {})).entries, [], '还没有过任何一次输入不是错误');
+    assert.deepEqual((await client.request('history.append', { text: '第一句' })).entries, ['第一句']);
+    assert.deepEqual((await client.request('history.append', { text: '  第二句  ' })).entries, ['第二句', '第一句'], '最新的排在最前，两头空的字去掉');
+    assert.deepEqual((await client.request('history.append', { text: '第一句' })).entries, ['第一句', '第二句'], '同一句让位过来，不占两格');
+    await client.request('history.append', { text: '   ' });
+    assert.deepEqual((await client.request('history.read', {})).entries, ['第一句', '第二句'], '什么都没有的那一句不改这份历史');
+
+    await rememberHistory(historyPathOf(), ['另一端写下的一句']);
+    assert.deepEqual((await client.request('history.read', {})).entries, ['另一端写下的一句', '第一句', '第二句'], '两端读的是同一份文件');
+    assert.ok((await readFile(join(root, 'data', 'tui-history.jsonl'), 'utf8')).split('\n')[0].includes('另一端写下的一句'));
+    await assert.rejects(client.request('history.append', {}), (error) => error.code === 'protocol_args_invalid', '没有句子就没有要记的东西');
+  } finally {
+    pair.client.output.end();
+    await host.release();
+    if (previous === undefined) delete process.env.LIGULE_HOME;
+    else process.env.LIGULE_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+  }
 });

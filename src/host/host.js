@@ -10,6 +10,7 @@ import { loadAssembly } from '../kernel/assembly.js';
 import { loadExtensions } from '../kernel/extensions.js';
 import { applyMode, DEFAULT_MODE, loadMode } from '../kernel/modes.js';
 import { readRegistry, registerWorkspace, setDefaultWorkspace, workspaceIdentity } from '../kernel/workspace.js';
+import { historyPathOf, loadHistory, pushHistory, rememberHistory } from '../kernel/input-history.js';
 import { createDecisionChain } from '../kernel/policy.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
@@ -1082,6 +1083,15 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           if (directory === '') return await setDefaultWorkspace(null);
           await classifyProjectRoot(resolve(directory));
           return await setDefaultWorkspace(directory, { name: message.params.name });
+        }
+        case 'history.read':
+          // 那一份文件的位置由宿主定（与那份登记同一处）：界面说不出要到哪一份文件，也拿不到数据根里别的文件。
+          return { entries: await loadHistory() };
+        case 'history.append': {
+          // 发出去的那一句进最前面，同句的旧那一份让位过来，尾上超预算的那几条丢掉；交回写完之后那一份清单。
+          const merged = pushHistory(await loadHistory(), String(message.params.text));
+          await rememberHistory(historyPathOf(), merged);
+          return { entries: merged };
         }
         case 'config.get': {
           // 边界在「结果由固定那几格拼出来」这一句上，不在参数校验上：子集校验放过模式里没声明的键（D14）。

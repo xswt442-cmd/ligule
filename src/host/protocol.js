@@ -168,6 +168,23 @@ export const METHODS = Object.freeze({
       required: ['directory'],
     },
   },
+  // 两端共用的那一份输入历史（方案 5.5.6）：句子在应用数据根的那一份文件里跨会话留住，界面拿不到路径，
+  // 也读不到数据根里别的文件。它不是任何一份会话记录的一部分，也不给模型看。
+  'history.read': {
+    description: 'Read the input history this machine keeps across sessions: sentences that were actually sent, newest first, up to the cap the host applies',
+    parameters: { type: 'object', properties: {} },
+  },
+  // 只有发出去的句子进这一份历史；同句重复让位到最前，超预算的尾项丢掉。交回整份清单，界面因此不用再读一次。
+  'history.append': {
+    description: 'Remember one sentence that was sent: it moves to the front of the shared history, an older copy of the same sentence comes with it, and the whole list stays capped; the full list after the write comes back',
+    parameters: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: 'the sentence that was sent; blank changes nothing' },
+      },
+      required: ['text'],
+    },
+  },
   // 第四条只为界面多出来的方法（前三条是 `mode.set` D65、`session.compact` D83、`sessions.list`）：配置在宿主那一侧，
   // 而这条路只交得出白名单里的几格——没有参数可点路径，所以界面要不到别的格。
   'config.get': {
