@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile as callbackExecFile } from 'node:child_process';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -107,6 +107,12 @@ if (process.env.LIGULE_CREDENTIAL_NATIVE_REQUIRED === '1') {
         await storeCredential(reference, firstValue);
         storedA = true;
         assertSecret(await resolveCredential(reference), firstValue, 'the first stored value should resolve');
+        const child = await execFile(process.execPath, ['test/fixtures/credential-read.mjs'], {
+          cwd: repositoryRoot,
+          env: { ...process.env, LIGULE_CREDENTIAL_TEST_REFERENCE: reference, LIGULE_CREDENTIAL_TEST_DIGEST: createHash('sha256').update(firstValue).digest('hex') },
+          timeout: 20_000,
+        });
+        assert.equal(child.stdout.trim(), 'credential persisted');
         assert.deepEqual(await credentialStatus(reference), { reference, source: 'keyring', configured: true });
 
         process.env.LIGULE_HOME = homeB;

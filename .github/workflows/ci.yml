@@ -20,6 +20,44 @@ permissions:
   contents: read
 
 jobs:
+  credentials:
+    name: native credentials on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-22.04, macos-15, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          cache: npm
+      - name: install and build
+        run: |
+          npm ci
+          npm run build
+      - name: prepare persistent Secret Service
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dbus-x11 gnome-keyring
+      - name: native credential operations on Linux
+        if: runner.os == 'Linux'
+        run: |
+          dbus-run-session -- bash -e -c '
+            printf "%s" "ligule-ci-test-password" | gnome-keyring-daemon --unlock --components=secrets
+            LIGULE_CREDENTIAL_NATIVE_REQUIRED=1 node --test --import ./test/hooks/isolated-data-root.mjs test/credentials.test.js test/credential-unavailable.test.js
+          '
+      - name: native credential operations on Windows and macOS
+        if: runner.os != 'Linux'
+        env:
+          LIGULE_CREDENTIAL_NATIVE_REQUIRED: '1'
+        run: node --test --import ./test/hooks/isolated-data-root.mjs test/credentials.test.js test/credential-unavailable.test.js
+
   test:
     name: test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
