@@ -40,6 +40,8 @@ lockfile and `package.json` to agree, and npm drops an unpublished optional depe
 (exit code 0, nothing installed, no message). The version check in `test/runtime-version.test.js` keeps the manifests
 of these packages and the desktop shell on one version, so the declaration and the release go in together.
 
+The installer carries a runtime tree, so the order is build, vendor, then bundle: `npm run build`, `node desktop/fetch-runtime.mjs`, then the desktop build. Bundling copies whatever `desktop/vendor/app` holds, so skipping the vendor step yields an installer that starts and answers with an older host — a method the interface asks is simply not there.
+
 `koffi` is an optional dependency: it only serves the Windows job object, its tarball carries no prebuilt binary and
 its install step either downloads one or compiles it. A normal `npm install` on Windows still gets it, and an install on
 Linux or macOS succeeds whether that step works or fails. The desktop runtime tree takes it from the build host only when
