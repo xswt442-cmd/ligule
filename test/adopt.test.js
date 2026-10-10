@@ -2,7 +2,7 @@
 // 合同 `ligule-set/phase3/r55-data-root-contract.md`）。这些是与临时目录打交道的纯函数级检查，不起进程。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { adoptForSessionDirectory, adoptLegacySessions, sessionDirectory } from '../dist/index.js';
@@ -35,6 +35,10 @@ test('legacy session files are copied once into the data root and the originals 
     assert.deepEqual(first.copied.sort(), ['aaa.checkpoint.json', 'aaa.jsonl', 'result-3-abcdef01.json']);
     assert.deepEqual(first.unknown, ['notes.txt'], '不认识的条目列出来、不复制');
     assert.equal(await readFile(join(legacy, 'aaa.jsonl'), 'utf8'), '{"kind":"user"}\n', '原件保留');
+    // 补齐的那一份保住记录自己的时间：`updatedAt` 读的是文件时间，列表按它排序（POSIX 的 copyFile 会改成此刻）。
+    // `utimes` 走 Date（只到整毫秒），源时间带毫秒以下的小数位时两边差在这一格以内；列表显示到毫秒，已经一致。
+    const [source, copied] = await Promise.all([stat(join(legacy, 'aaa.jsonl')), stat(join(target, 'aaa.jsonl'))]);
+    assert.ok(Math.abs(copied.mtimeMs - source.mtimeMs) <= 1, `补齐不改那一份自己的时间：${copied.mtimeMs} 对 ${source.mtimeMs}`);
 
     const second = await adoptLegacySessions(legacy, target);
     assert.deepEqual(second.copied, [], '再跑只做比对');
