@@ -33,7 +33,7 @@ const tierSource = (ask: Ask): string => ask.policyForced
   ? '这一份会话连着拒掉几次，这一档被压到逐次询问'
   : ask.policySource === 'session' ? '这一份会话自己改过档位'
     : ask.policySource === 'config' ? '配置文件里那一份默认档'
-      : '档位来源读不出来';
+      : '那一次问过来时没带着来源';
 
 export function ApprovalCard({ ask, queued, verbosity, active, onAnswer, onOpen }: {
   ask: Ask;
@@ -63,7 +63,7 @@ export function ApprovalCard({ ask, queued, verbosity, active, onAnswer, onOpen 
     <div className="approval-actions">
       <button type="button" data-tone="allow" onClick={() => onAnswer('allow')}>允许这一次</button>
       <button type="button" data-tone="deny" onClick={() => onAnswer('deny')}>不允许</button>
-      <span className="approval-tier">这一条问过来时那一份会话走的是 {ask.policy === '' ? '读不出来的那一档' : ask.policy} 档（{tierSource(ask)}）：{TIER[ask.policy] ?? '这一档怎么走到问人这一格读不出来'}</span>
+      <span className="approval-tier">这一条问过来时那一份会话走的是 {ask.policy === '' ? '那一次没带着档位' : ask.policy} 档（{tierSource(ask)}）：{TIER[ask.policy] ?? '这一档怎么走到问人这一格读不出来'}</span>
     </div>
   </section>;
 }

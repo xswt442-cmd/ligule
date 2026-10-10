@@ -117,7 +117,7 @@ export function ModelPanel({ client, sessionId, projectRoot }: { client: Client;
           </select>
           <button type="button" disabled={saving} onClick={() => void save()}>保存</button>
           <button type="button" onClick={() => setDraft(null)}>不收这笔</button>
-        </> : <span className="mono">{current ?? '读不出来或没写这一格'}</span>}</span>
+        </> : <span className="mono">{current ?? (shown === null ? '这一栏还没读到' : '可写那两层里没写这一格')}</span>}</span>
         <span className="row-note">来源 {sourceLine(shown?.sources?.[item.field])}</span>
         {!editing && <button type="button" onClick={() => { setDraft(item); setNote(null); }}>改</button>}
       </div>;
