@@ -21,6 +21,16 @@ with WebKitGTK 4.1 installed), so the Node numbers decide.
 AppImage is built on Ubuntu 22.04 rather than a moving default image: the glibc of the build host becomes the floor of
 the produced file, and Ubuntu 22.04 is the oldest release this list supports.
 
+`ci.yml` builds all four rows: one `desktop` job runs the matrix on `windows-latest`, `ubuntu-22.04`, `macos-15` and
+`macos-15-intel`, and each runner bundles on its own architecture. Every one of them checks the bundled runtime it is
+about to ship (its `--version`, its tool count), formats and tests the Rust half, then uploads the produced installers
+as check attachments. Those attachments are not a release: the last column of the table above is a person installing
+the file on that system, which no runner does.
+
+Each platform's installer type comes from its own `desktop/src-tauri/tauri.<platform>.conf.json`, merged into
+`tauri.conf.json` by the bundler, because `bundle.targets` takes either one list or `all` — a single list of all four
+names would ask a Windows runner for a Linux package, and `all` would add an MSI this table does not carry.
+
 The four bundles ship ad-hoc signed and are not notarized. Apple Silicon requires every Mach-O binary in the bundle,
 the bundled Node included, to carry at least an ad-hoc signature for the same architecture, so signing is a build step
 per architecture, not a Windows-style "no certificate means nothing to do".

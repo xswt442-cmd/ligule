@@ -203,7 +203,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 四个桌面目标还没进这条流水线（R3 那一组），所以 Release 只以 draft 建出来：
+      # 四行桌面产物由 `ci.yml` 的那一矩阵构出来并上传成检查附件，这条流水线不把任何附件挂到 Release 上，所以只以 draft 建出来：
       # 缺附件的那一份不能算完整交付，公开与否由人在验收之后点。
       - name: GitHub release (idempotent, kept draft)
         env:
