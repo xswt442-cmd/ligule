@@ -158,19 +158,44 @@ impl Host {
     /// 让后端进程自己收尾：交回那根输入管道就是「这边不再发帧了」，宿主读到头就走它自己的释放
     /// （取消在跑的轮次、把每份会话的记录锁松开）。等到上限它还没退才硬杀——那时它已经不听了。
     /// 直接杀会把记录锁留在磁盘上等那十秒租约过期，下一次打开那份会话就先读到 `session_locked`。
-    pub fn stop(&self) {
+    /// 收尾交出的是这一具子进程怎么结束的：等没等满那扇时间窗不是可观察的事实，
+    /// 一具慢机器上自己退的也可能走过半扇窗，所以检查读的是结局，不是钟点。
+    pub fn stop(&self) -> Stopped {
         if let Ok(mut guard) = self.stdin.lock() {
             drop(guard.take());
         }
         if let Ok(mut child) = self.child.lock() {
             for _ in 0..SELF_CLOSE_TRIES {
-                if matches!(child.try_wait(), Ok(Some(_))) {
-                    return;
+                if let Ok(Some(status)) = child.try_wait() {
+                    return Stopped::of(&status);
                 }
                 std::thread::sleep(std::time::Duration::from_millis(SELF_CLOSE_PAUSE_MS));
             }
             let _ = child.kill();
-            let _ = child.wait();
+            return match child.wait() {
+                Ok(status) => Stopped::of(&status),
+                Err(_) => Stopped::Gone,
+            };
+        }
+        Stopped::Gone
+    }
+}
+
+/// `stop` 的那三种结局。`Exited` 与 `Killed` 读的是退出状态：自己按 `exit(0)` 收工的交出成功码，
+/// 被这头杀掉的交出信号或非零码；锁用不了时什么都读不到，那是 `Gone`。
+#[derive(Debug, PartialEq, Eq)]
+pub enum Stopped {
+    Exited,
+    Killed,
+    Gone,
+}
+
+impl Stopped {
+    fn of(status: &std::process::ExitStatus) -> Self {
+        if status.success() {
+            Stopped::Exited
+        } else {
+            Stopped::Killed
         }
     }
 }
@@ -241,33 +266,33 @@ mod tests {
     }
 
     /// 收尾那一条要验的是「不用杀它」：关掉输入管道就是这头不再发帧，那具进程读到头自己退。
-    /// 计时就是这里的读数——硬杀要等满那一扇时间窗，自己退的几十毫秒就回来了。
+    /// 判据是自己退还是被杀，不是钟点。
     #[test]
     fn a_child_that_exits_on_closed_stdin_is_not_waited_out() {
-        let script = "process.stdin.resume(); process.stdin.on('end', () => process.exit(0));";
+        // 先等它自己报一句 ready：没有这一格，慢机器上会在它那具进程还没装上 'end' 处理之前就把管道断了。
+        let script = "process.stdout.write('ready\\n'); process.stdin.resume(); process.stdin.on('end', () => process.exit(0));";
         let node = std::env::var("NODE").unwrap_or_else(|_| "node".to_string());
-        let (host, _frames, _logs) = spawn_host(&node, &["-e", script]).expect("spawn the child");
-        let started = std::time::Instant::now();
-        host.stop();
-        let took = started.elapsed();
-        assert!(
-            took < std::time::Duration::from_secs(2),
-            "the child should have closed by itself; stop took {took:?}"
+        let (host, frames, _logs) = spawn_host(&node, &["-e", script]).expect("spawn the child");
+        assert_eq!(recv(&frames).as_deref(), Some("ready"), "the child should say it is listening");
+        assert_eq!(
+            host.stop(),
+            Stopped::Exited,
+            "关掉输入管道就该自己收工，不必走到杀那一步"
         );
     }
 
     /// 另一头的形状：那具进程不理闭掉的输入管道，壳就在窗口之后杀掉它——退出这件事不能悬着。
     #[test]
     fn a_child_that_ignores_the_closed_stdin_is_killed_after_the_window() {
-        let script = "setInterval(() => {}, 1000);";
+        // 读的是结局：等满那扇时间窗之后被杀的，交回的是信号或非零码，与钟点无关。
+        let script = "process.stdout.write('ready\\n'); setInterval(() => {}, 1000);";
         let node = std::env::var("NODE").unwrap_or_else(|_| "node".to_string());
-        let (host, _frames, _logs) = spawn_host(&node, &["-e", script]).expect("spawn the child");
-        let started = std::time::Instant::now();
-        host.stop();
-        let took = started.elapsed();
-        assert!(
-            took >= std::time::Duration::from_millis(2_500),
-            "the window should be spent before the kill; stop took {took:?}"
+        let (host, frames, _logs) = spawn_host(&node, &["-e", script]).expect("spawn the child");
+        assert_eq!(recv(&frames).as_deref(), Some("ready"), "the child should say it is up");
+        assert_eq!(
+            host.stop(),
+            Stopped::Killed,
+            "装聋的那一具要走过那扇时间窗再被杀，不能算自己退的"
         );
     }
 
