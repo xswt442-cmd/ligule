@@ -5,17 +5,19 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join, posix, sep } from 'node:path';
+import { dirname, join, posix, resolve, sep } from 'node:path';
 import { DEFAULT_LIMITS } from '../dist/capability/limits.js';
 import { loadInstructions } from '../dist/index.js';
 
 const repoRoot = fileURLToPath(new URL('../', import.meta.url));
 const zhPath = join(repoRoot, 'docs', 'guide.zh-CN.md');
 const enPath = join(repoRoot, 'docs', 'guide.en.md');
-// 工程指南六份：根那一份放全局规则，五份局部的放在各自代码旁边（`src/` 与 `desktop/` 的四个目录、终端界面）。
+// 工程指南九份：根那一份放全局规则，八份局部的放在各自代码旁边（`src/` 的五个目录、终端界面，桌面的三层）。
 const guides = [
   'AGENTS.md',
   join('desktop', 'AGENTS.md'),
+  join('desktop', 'src-tauri', 'AGENTS.md'),
+  join('desktop', 'frontend', 'AGENTS.md'),
   join('src', 'kernel', 'AGENTS.md'),
   join('src', 'tools', 'AGENTS.md'),
   join('src', 'session', 'AGENTS.md'),
@@ -24,6 +26,8 @@ const guides = [
 ];
 const localGuides = [
   join(repoRoot, 'desktop'),
+  join(repoRoot, 'desktop', 'src-tauri'),
+  join(repoRoot, 'desktop', 'frontend'),
   join(repoRoot, 'src', 'kernel'),
   join(repoRoot, 'src', 'tools'),
   join(repoRoot, 'src', 'session'),
@@ -109,14 +113,19 @@ test('每份工程指南都在默认读入上限之内，且每一处都以默�
   }
   const rootGuide = readFileSync(guidePath(guides[0]), 'utf8');
   for (const guide of guides.slice(1)) {
-    assert.ok(rootGuide.includes(guide.split(sep).join('/')), `AGENTS.md 没有指向 ${guide}`);
+    // 根那一份按目录指过去（每一处局部的都叫 `AGENTS.md`，写全名会把预算吃在同一个词上）。
+    assert.ok(rootGuide.includes(posix.dirname(guide.split(sep).join('/')) + '/'), `AGENTS.md 没有指向 ${guide} 所在的那个目录`);
   }
   const atRoot = await loadInstructions({ boundary: repoRoot, current: repoRoot });
   assert.deepEqual(atRoot.files.map((file) => file.layer), ['project'], '只从项目根装载时只有根那一份');
   assert.ok(!atRoot.text.includes('[Instruction budget'), '默认预算下根那一份被截断了');
   for (const directory of localGuides) {
     const loaded = await loadInstructions({ boundary: repoRoot, current: directory });
-    assert.deepEqual(loaded.files.map((file) => file.layer), ['project', 'directory'], `${directory} 那一份没有连根那一份一起装上`);
+    // 目录套目录时上溯会走到不止一份局部指南（`desktop/frontend/` 之外还有 `desktop/` 那一份），
+    // 所以这里只要求第一层是项目根那一份、其余都是目录级，并且这一处自己的那一份在最后。
+    assert.equal(loaded.files[0].layer, 'project', `${directory} 处没有先装载根那一份`);
+    assert.ok(loaded.files.slice(1).every((file) => file.layer === 'directory'), `${directory} 处的目录级层标错了`);
+    assert.equal(resolve(loaded.files[loaded.files.length - 1].path), resolve(directory, 'AGENTS.md'), `${directory} 那一份没有连根那一份一起装载`);
     assert.ok(!loaded.text.includes('[Instruction budget'), `${directory} 处按默认预算装载时被截断了`);
   }
 });

@@ -64,16 +64,16 @@ npm run build-rg    downloads the pinned ripgrep into packages/rg-*
 
 ## Subdirectory guides
 
-- `src/kernel/AGENTS.md`: modes, skills, prompt templates, extensions, parameter schemas, MCP and model providers.
-- `src/tools/AGENTS.md`: the tools, what they share, and the first-party optional ones.
-- `src/session/AGENTS.md`: the record, its format, repair, listing, checkpoint and compaction.
-- `src/host/AGENTS.md`: the protocol, the session owner, reading a record and the export serializer.
-- `src/tui/AGENTS.md` and `desktop/AGENTS.md`: the terminal and desktop rules (D33, D34); `## Clients` holds what those two share.
+- `src/kernel/`: modes, skills, prompt templates, extensions, parameter schemas, MCP and model providers.
+- `src/tools/`: the tools, what they share, and the first-party optional ones.
+- `src/session/`: the record, its format, repair, listing, checkpoint and compaction.
+- `src/host/`: the protocol, the session owner, reading a record and the export serializer.
+- `src/tui/`: the terminal client (D33). `desktop/`, its Rust shell `desktop/src-tauri/` and that shell's interface `desktop/frontend/` (D34). `## Clients` holds what the two surfaces share.
 - One of these enters a run only when the working directory is inside the directory it governs: the loader walks from the project root down to the working directory (`src/capability/instructions.js`). The rules above hold from any directory.
 
 ## Clients
 
-- `src/tui/AGENTS.md` holds the rules of the terminal client (D33) and `desktop/AGENTS.md` the rules of the desktop surface (D34); this section holds only what the two share.
+- `src/tui/AGENTS.md` holds the rules of the terminal client (D33) and `desktop/AGENTS.md` those of the desktop surface (D34); this section holds only what the two share.
 - A round the person interrupted reads 这一轮已被打断 whichever code the kernel answered with: an abort landing on a live model call reports `provider_cancelled`, between two call groups `loop_cancelled`, on a question waiting for a person `ask_user_cancelled`.
 - Both surfaces describe an approval from the same three fields read off the arguments — the action, the block to remove, the block to put in — and mark the last two with `-` and `+` (`describeChange` in `src/tui/commands.ts`, `changeOf` and `changeBody` in `desktop/frontend/src/rows.ts`).
 - Both surfaces answer `question.request` from one shape (D107): the item's options may be picked or answered in free text, an item nobody answers is reported as unanswered rather than guessed, and there is no deadline — only an answer or a cancelled round settles the wait.
@@ -112,13 +112,13 @@ npm run build-rg    downloads the pinned ripgrep into packages/rg-*
 
 ## Verify
 
-- `npm run check-pack` packs, unpacks, checks every entry `package.json` points at, then imports the package from an empty consumer directory. It copies the transitive closure of `dependencies` and installed optional dependencies from that closure, including native platform packages, while leaving unrelated root optional dependencies out, and it refuses when a declared runtime dependency is missing. Copying all of `node_modules` would hide a tarball short at runtime.
-- `npm run verify-install [tarball]` is the gate that copy cannot be: an empty directory, `npm install` of the packed tarball, dependencies resolved and downloaded from the declarations, then the installed CLI's `--version`, its tool count, the non-interactive TUI refusal, both command grammars and the search backend read from the installed package. Passing a tarball path reuses those bytes instead of packing again, which is how the release pipeline verifies what it publishes. The consumer's `package.json` carries an `allowScripts` field so npm on a hardened machine may run the install scripts of the four native bindings; a stock npm ignores that field and installs the same way.
+- `npm run check-pack` packs, unpacks, checks every entry `package.json` points at, then imports the package from an empty consumer directory. It copies the transitive closure of `dependencies` and installed optional dependencies, including native platform packages, leaves unrelated root optional dependencies out, and refuses when a declared runtime dependency is missing. Copying all of `node_modules` would hide a tarball short at runtime.
+- `npm run verify-install [tarball]` is the gate that copy cannot be: an empty directory, `npm install` of the packed tarball, dependencies resolved from the declarations, then the installed CLI's `--version`, its tool count, the non-interactive TUI refusal, both command grammars and the search backend read from the installed package. Passing a tarball path reuses those bytes instead of packing again, which is how the release pipeline verifies what it publishes. The consumer's `package.json` carries an `allowScripts` field so npm on a hardened machine may run the four native bindings' install scripts; a stock npm ignores it.
 - It refuses before packing when `dist/` is missing. Build first.
 - `npm test` exercises the same `dist/`, so it cannot see a file missing from `files` or an `exports` entry the tarball lacks. Invoke the script through npm: on Windows Node refuses to launch `npm.cmd` without a shell, and the script needs `npm_execpath` for that reason.
 - The first devDependency, `@modelcontextprotocol/server-filesystem`, is the test MCP server and stays out of the consumer.
 - `npm test` reports `skipped 2` when no ripgrep has been built locally; those two compare the real backend with our own tree walk and cannot be faked.
 - Real endpoint checks read credentials from the process environment and inspect the persisted record. Credentials are never written into repository files.
-- The shell's checks sit outside `npm test`. `cd desktop/src-tauri && cargo test` covers finding the backend entry and moving frames through the child's pipes; window verification uses the actual shell and host, and frontend build checks run TypeScript and Vite.
+- The shell's checks sit outside `npm test`. `cd desktop/src-tauri && cargo test` covers finding the backend entry, moving frames through the child's pipes and the close-and-exit decisions; window verification uses the actual shell and host, and frontend build checks run TypeScript and Vite.
 - The terminal interaction checks use the actual Host, provider adapter, local HTTP endpoint and Ink keyboard handling. Fixtures are repository files under `test/fixtures`, pure projections are checked separately, and `ligule tui` runs the same component in a terminal.
-- The desktop frontend is checked by `npm --prefix desktop/frontend run check`: three Node assertions over the projection, the frame client and the key layer, plus `tsc --noEmit` and a Vite build. It runs against the fake host in `desktop/frontend/dev/`, which speaks the frame shapes of `src/host/protocol.js` and waits for a real interface reply before an approval proceeds.
+- The desktop frontend is checked by `npm --prefix desktop/frontend run check`: six Node assertions over the projections and the frame, key, quit and edit-gate logic, plus `tsc --noEmit` and a Vite build. It runs against the fake host in `desktop/frontend/dev/`, which speaks the frame shapes of `src/host/protocol.js` and waits for a real interface reply before an approval proceeds.
