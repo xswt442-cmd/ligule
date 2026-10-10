@@ -273,7 +273,11 @@ mod tests {
         let script = "process.stdout.write('ready\\n'); process.stdin.resume(); process.stdin.on('end', () => process.exit(0));";
         let node = std::env::var("NODE").unwrap_or_else(|_| "node".to_string());
         let (host, frames, _logs) = spawn_host(&node, &["-e", script]).expect("spawn the child");
-        assert_eq!(recv(&frames).as_deref(), Some("ready"), "the child should say it is listening");
+        assert_eq!(
+            recv(&frames).as_deref(),
+            Some("ready"),
+            "the child should say it is listening"
+        );
         assert_eq!(
             host.stop(),
             Stopped::Exited,
@@ -288,7 +292,11 @@ mod tests {
         let script = "process.stdout.write('ready\\n'); setInterval(() => {}, 1000);";
         let node = std::env::var("NODE").unwrap_or_else(|_| "node".to_string());
         let (host, frames, _logs) = spawn_host(&node, &["-e", script]).expect("spawn the child");
-        assert_eq!(recv(&frames).as_deref(), Some("ready"), "the child should say it is up");
+        assert_eq!(
+            recv(&frames).as_deref(),
+            Some("ready"),
+            "the child should say it is up"
+        );
         assert_eq!(
             host.stop(),
             Stopped::Killed,
