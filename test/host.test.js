@@ -147,8 +147,9 @@ test('a client over stdio drives one round, answers one approval and watches the
     assert.deepEqual(approvals[0].args, { path: 'note.txt' });
     assert.equal(approvals[0].sessionId, sessionId);
     // 那一次询问带着属于它自己的那一项目录：客户端看着别的那一份时，答的是那一个项目里的这一步。
-    // macOS 上 `/var` 是 `/private/var` 的一条链接：宿主交回的是它走通之后的那一份，两边都先取真实路径再比。
-    assert.equal(approvals[0].projectRoot, await realpath(directory));
+    // 两边写法可以不同而指同一处目录：macOS 上 `/var` 是 `/private/var` 的一条链接，Windows 的 runner 把临时目录给成 8.3 的短名（`RUNNER~1`）。
+    // 这一格要的是「同一处目录」，所以比较之前两边都取真实路径；宿主那一份交回的仍是它自己认的那一处，没有被这一趟改写。
+    assert.equal(await realpath(approvals[0].projectRoot), await realpath(directory));
     // 没有命令文本的调用不带后端那两样：那一种语法与哪一个可执行文件对读一次文件这件事没有意义。
     assert.equal(approvals[0].shell, undefined);
     assert.equal(approvals[0].executable, undefined);
