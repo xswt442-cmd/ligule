@@ -178,6 +178,10 @@ const workspaces = [
 let defaultWorkspace: string | null = null;
 const rosterOf = () => ({ version: 1, default: defaultWorkspace, workspaces });
 
+// 那一份共用的输入历史的假形状（方案 5.5.6）：`history.read` 交回这一份，`history.append` 改的就是它；这一具假宿主不写盘。
+let history: string[] = ['上一轮留下的一句', '再往前的一句'];
+const HISTORY_LIMIT = 200;
+
 let status = {
   sessionId: '',
   running: false,
@@ -400,6 +404,14 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
         if (name !== 'minimal' && name !== 'full') return fail('mode_unknown', `没有那一份模式清单：${name}`);
         status = { ...status, mode: name, modeLayer: 'shipped' };
         return reply({ mode: name, layer: status.modeLayer, pending: null, tools: status.tools });
+      }
+      case 'history.read':
+        return reply({ entries: history });
+      case 'history.append': {
+        // 与宿主同一条规矩：那一句挪到最前，同句的旧那一份让位过来，尾上超预算的丢掉；条数上限在宿主那一侧定（方案 5.5.6）。
+        const sentence = String(params.text ?? '').trim();
+        if (sentence !== '') history = [sentence, ...history.filter((one) => one !== sentence)].slice(0, HISTORY_LIMIT);
+        return reply({ entries: history });
       }
       case 'workspaces.list':
         return reply(rosterOf());

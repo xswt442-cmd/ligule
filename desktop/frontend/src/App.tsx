@@ -65,22 +65,10 @@ type PanelProps = {
   patch: (part: Partial<Settings>) => void;
 };
 
-const HISTORY_KEY = 'ligule.input-history';
-const HISTORY_MAX = 50;
 // 「没在问哪一段」的形状：真实的落笔处起点不可能是 -1，所以它跟任何一段都对不上。
 const NO_TOKEN = { start: -1, text: '' };
 // 交给视口的那几个对象要稳住身份：每渲染一个新对象会被当成新值，短记录上那几次重排会连成死循环（第 105 步）。
 const VIEWPORT_INCREASE = { top: 240, bottom: 600 };
-
-// 本机存的那一份是不可信的输入：读坏了就当没有。
-function readHistory(): string[] {
-  try {
-    const raw: unknown = JSON.parse(localStorage.getItem(HISTORY_KEY) ?? '[]');
-    return Array.isArray(raw) ? raw.filter((item): item is string => typeof item === 'string') : [];
-  } catch {
-    return [];
-  }
-}
 
 // 已经接上的几项。右侧那一片面板说的是这一份会话现在的情况，与会话浮层里能改的那几格不重复摆控制。
 /**
@@ -345,8 +333,8 @@ export function App({ transport }: { transport: Transport }) {
   const [reading, setReading] = useState(false);
   const verbosity = settings.verbosity;
   const collapsed = settings.collapsed;
-  // 输入历史留在本机（D90）：-1 说的是当前那份草稿。
-  const [history, setHistory] = useState(readHistory);
+  // 输入历史在宿主那一侧的那一份共用文件里，终端界面读写的是同一个（D90、方案 5.5.6）：界面手里只是它的一个读法，-1 说的是当前那份草稿。
+  const [history, setHistory] = useState<string[]>([]);
   const [walk, setWalk] = useState(-1);
   // 运行中敲进去的那几句排在界面这一侧：每份会话各排各的，取消这一轮之后停下等一次显式的继续（方案 5.2）。
   const [queues, setQueues] = useState<Record<string, { items: string[]; paused: boolean }>>({});
@@ -382,6 +370,15 @@ export function App({ transport }: { transport: Transport }) {
   const dispatchAt = useRef(new Map<string, number>());
   // 这一条连接还在不在：null 是在，其余是那一侧报回来的说法（D93 原样带出）。
   const [link, setLink] = useState<string | null>(null);
+
+  // 这一扇窗口打开时读那一份共用的历史一次，换一具宿主时再读一次。读不回来就当没有这一份：
+  // 写那一路由宿主先读文件再合并，读失败不会把另一端写下的句子挤掉。
+  useEffect(() => {
+    client.call('history.read', {}, 15_000).then(
+      (read) => setHistory((read as { entries: string[] }).entries),
+      () => setHistory([]),
+    );
+  }, [client]);
 
   // 本轮计时：有轮在跑就一秒走一格，画面按眼前那一份会话自己那一轮的起点算秒数。
   useEffect(() => {
@@ -806,9 +803,12 @@ export function App({ transport }: { transport: Transport }) {
       return;
     }
     if (inView()) { setDraft(''); setWalk(-1); }
-    const remembered = [text, ...history.filter((item) => item !== text)].slice(0, HISTORY_MAX);
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(remembered));
-    setHistory(remembered);
+    // 发出去的那一句进那一份共用的历史：宿主读文件、把这一句挪到最前、写回来，界面采用它交回的那一份清单。
+    // 写不进去时按眼前这一份继续走（这一句在这一扇窗口里还翻得回来），发送本身不等这一格（方案 5.5.6）。
+    void client.call('history.append', { text }, 15_000).then(
+      (written) => setHistory((written as { entries: string[] }).entries),
+      () => setHistory((current) => [text, ...current.filter((item) => item !== text)]),
+    );
     roundStart.current.set(own, Date.now());
     setTick(Date.now());
     setRunningIds((current) => [...current, own]);
@@ -841,7 +841,7 @@ export function App({ transport }: { transport: Transport }) {
       if (!inView()) setUnread((current) => [...new Set([...current, own])]);
       void refreshStatus(own);
     }
-  }, [client, dropAsksOf, history, patchQueue, refreshStatus, runningIds, sessionId]);
+  }, [client, dropAsksOf, patchQueue, refreshStatus, runningIds, sessionId]);
 
   // 本轮收尾后把排着的第一条发出去：一次只发一条。暂停着就一条也不发——那几句是人在跑着的时候敲进来的，
   // 他按下的是取消，剩下怎么走要他再说一次（方案 5.2）。断着连接与重连那一段也不算「本轮收尾」：
