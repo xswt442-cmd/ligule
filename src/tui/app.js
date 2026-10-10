@@ -593,9 +593,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       push({ kind: 'meta', text: `本轮结束：${result.iterations} 次迭代、${result.modelCalls} 次模型调用${extra}` });
     } catch (error) {
       const code = error.code ?? 'run_failed';
-      // 打断落在还在跑的模型调用上时端点那一头交回 `provider_cancelled`，落在两组调用之间才是 `loop_cancelled`：
-      // 人要读的是同一句——这一轮是他停下来的（方案 5.2）。
-      if (code === 'loop_cancelled' || code === 'provider_cancelled') push({ kind: 'meta', text: '这一轮已被打断' });
+      // 打断落在还在跑的模型调用上时端点那一头交回 `provider_cancelled`，落在两组调用之间才是 `loop_cancelled`，
+      // 落在等一个人回答的那一次提问上才是 `ask_user_cancelled`：人要读的是同一句——这一轮是他停下来的（方案 5.2、D107）。
+      if (code === 'loop_cancelled' || code === 'provider_cancelled' || code === 'ask_user_cancelled') push({ kind: 'meta', text: '这一轮已被打断' });
       else push({ kind: 'error', text: `${code}：${error.detail ?? error.message ?? ''}` });
     } finally {
       setAsk(null);
