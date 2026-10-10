@@ -201,6 +201,15 @@ export function durationNote(startedAt: number, now: number): string {
   return secondsNote(now - startedAt);
 }
 
+// 一张提问卡收掉时留下的那一句（审阅 F2）：题面与已经打下的字都读得到。
+// 一次请求只有一次答复（D107），卡片收掉之后那些字不会再交出去，所以要留在转录里。
+export function questionEcho(ask: { questions: { id: string; question: string }[] }, drafts: Record<string, { picked: string[]; extra: string }> = {}): string {
+  return ask.questions.map((question, index) => {
+    const typed = [...(drafts[question.id]?.picked ?? []), (drafts[question.id]?.extra ?? '').trim()].filter((one) => one !== '');
+    return `第 ${index + 1} 题「${question.question}」：${typed.length === 0 ? '没有打下答案' : typed.join('、')}`;
+  }).join('；');
+}
+
 export function projectRecord(record: Record_, options: { startedAt?: number; now?: number } = {}): Row[] {
   // 每一行带着它来自记录里哪一条事件：查找的命中说的是那一条事件的序号，跳到那一行要靠它（方案 4.2、实现顺序第 77 步）。
   const at = record.seq === undefined ? {} : { seq: record.seq };

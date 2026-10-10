@@ -1,14 +1,16 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 // 模型提问那一格（D107、方案 4.4）：一到四道题各答一次，一次显式提交。
 // 它与审批卡分开画：审批答的是「能不能做这一件」，这一格答的是「这一件事该怎么办」。
 export type QuestionOption = { label: string; description?: string };
 export type Question = { id: string; question: string; header?: string; options: QuestionOption[]; multiSelect: boolean };
 export type QuestionAsk = { id: string; sessionId: string; project: string; questions: Question[] };
+/** 一张卡上打下的那些字：卡片收掉时由外面留成一条可读的记录，所以一路送出去一份（审阅 F2）。 */
+export type QuestionDrafts = Record<string, { picked: string[]; extra: string }>;
 
 const answered = (draft: { picked: string[]; extra: string }) => draft.picked.length > 0 || draft.extra.trim() !== '';
 
-export function QuestionCard({ ask, queued, active, onSubmit, onCancel, onOpen }: {
+export function QuestionCard({ ask, queued, active, onSubmit, onCancel, onOpen, onDraft }: {
   ask: QuestionAsk;
   queued: number;
   active: string | null;
@@ -16,10 +18,12 @@ export function QuestionCard({ ask, queued, active, onSubmit, onCancel, onOpen }
   onSubmit: (answers: { id: string; selected: string[]; custom?: string }[]) => void;
   onCancel: () => void;
   onOpen: (sessionId: string) => void;
+  onDraft: (id: string, drafts: QuestionDrafts) => void;
 }) {
-  const [drafts, setDrafts] = useState<Record<string, { picked: string[]; extra: string }>>(
+  const [drafts, setDrafts] = useState<QuestionDrafts>(
     () => Object.fromEntries(ask.questions.map((question) => [question.id, { picked: [], extra: '' }])),
   );
+  useEffect(() => { onDraft(ask.id, drafts); }, [ask.id, drafts, onDraft]);
   const background = ask.sessionId !== active;
   const anyAnswered = ask.questions.some((question) => answered(drafts[question.id] ?? { picked: [], extra: '' }));
   const pick = (id: string, label: string, multiple: boolean) => setDrafts((current) => {

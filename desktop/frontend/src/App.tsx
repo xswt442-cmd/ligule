@@ -3,7 +3,7 @@ import { DropdownMenu, Popover } from 'radix-ui';
 import { Virtuoso, type ItemProps, type VirtuosoHandle } from 'react-virtuoso';
 import { code, createClient, type Client, type Transport } from './protocol';
 import { ApprovalCard, type Ask } from './components/ApprovalCard';
-import { QuestionCard, type QuestionAsk } from './components/QuestionCard';
+import { QuestionCard, type QuestionAsk, type QuestionDrafts } from './components/QuestionCard';
 import { Icon } from './components/Icon';
 import { SettingsDialog } from './components/Settings';
 import { RowView } from './components/RowView';
@@ -20,7 +20,7 @@ import { KEYMAP, CURRENT, actionOf, formatKeys, isCapturing, isComposing, loadBi
 import { insertMention, mentionToken } from './mentions';
 import type { Verbosity } from './components/types';
 import { createSlotRegistry, SLOTS, type Panel } from './slots';
-import { capabilityOf, changeBody, changeOf, metaRow, projectRecord, shownIn, type Record_, type Row } from './rows';
+import { capabilityOf, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn, type Record_, type Row } from './rows';
 import type { Status } from './status';
 import { mergeQueueIntoDraft, readSettings, writeSettings, type Settings } from './settings';
 
@@ -290,6 +290,14 @@ export function App({ transport }: { transport: Transport }) {
   useEffect(() => { asksLeft.current = asks; }, [asks]);
   // 模型的提问与审批各一张卡、各一条链：审批答「能不能做这一件」，提问答「这一件事该怎么办」（D107）。
   const [queries, setQueries] = useState<QuestionAsk[]>([]);
+  // 与审批那一条收尾同一格做法：收尾的路径要说出那一份会话还剩几道题没交，也要拿到已经打下的字（审阅 F2）。
+  const queriesLeft = useRef<QuestionAsk[]>([]);
+  useEffect(() => { queriesLeft.current = queries; }, [queries]);
+  // 一张卡上打下的字一路送到这一格：卡片收掉之后题面与那些字留成转录里的一条记录，而那张卡不再能提交（方案 R1）。
+  const questionDrafts = useRef(new Map<string, QuestionDrafts>());
+  // 收尾时那一份会话不在眼前：那一句留在它自己名下，等下一次接它时一起落下。
+  const pendingEchoes = useRef(new Map<string, string[]>());
+  const keepQuestionDraft = useCallback((id: string, drafts: QuestionDrafts) => { questionDrafts.current.set(id, drafts); }, []);
   // 跑着的那几轮各属于哪一份会话（方案 3.1「后台会话继续运行」与 5.2「队列按会话隔离」）：
   // 一具 Host 给每份会话自己的信号与判定链（`state.running` 按会话存），界面这一侧也跟着按会话记，
   // 「本轮结束」与那几句画面只说得上它自己那一份会话；切走看着另一份时不替那一份发话、也不替那一份画收尾。
@@ -606,6 +614,21 @@ export function App({ transport }: { transport: Transport }) {
   // 只有那一轮自己收尾（跑完、被打断）或那具宿主换掉时，才收掉它名下的那些询问。
   const dropAsksOf = useCallback((id: string) => setAsks((current) => current.filter((ask) => ask.sessionId !== id)), [setAsks]);
 
+  // 提问也按它自己那一份会话收尾（审阅 F2）：那一轮跑完、被打断、或换了宿主之后，这次问的已经没有人在等答复，
+  // 卡片继续摆在能答的那一栏会做两件错事——挡住排在后面的另一份会话，还让人以为旧答案交得出去。
+  // 收掉之前把题面与已经打下的字留成一条记录：那是人打过的字，不是可以无声丢掉的东西（方案 R1）。
+  const dropQueriesOf = useCallback((id: string, reason: string) => {
+    const left = queriesLeft.current.filter((one) => one.sessionId === id);
+    if (left.length === 0) return;
+    const lines = left
+      .map((one) => `${questionEcho(one, questionDrafts.current.get(one.id))}（${reason}，这一次问的不再交出去）`);
+    // 收尾那几句只画在那一份自己的画面上：人这时候切走了，那句话先押在这一份名下，切回来跟着那一次读落下（方案 3.1 同一条规矩）。
+    if (active.current === id) setRows((current) => [...current, metaRow('meta', lines.join('\n'))]);
+    else pendingEchoes.current.set(id, [...(pendingEchoes.current.get(id) ?? []), ...lines]);
+    for (const one of left) questionDrafts.current.delete(one.id);
+    setQueries((current) => current.filter((one) => one.sessionId !== id));
+  }, [setQueries]);
+
   // 换会话先让 Host 那一份接上：记录不在磁盘上就是没有这份会话，`session.open` 会说清（D78）。
   // 已经打开的那一份复用状态，不重开，所以这一个动作对当前会话也是安全的。
   // 给了 `hit` 就一口气往回读到那一条进来，并把「要落到哪一条」与那些行同一批交出去：
@@ -664,7 +687,10 @@ export function App({ transport }: { transport: Transport }) {
         events = [...older.events, ...events];
         hasMore = older.hasMore;
       }
-      setRows(events.flatMap((record) => projectRecord(record)));
+      // 那一份会话不在画面时收掉的提问留下的那一句，跟着这一次读一起落下：那一轮的事只说得上它自己那一份画面。
+      const kept = pendingEchoes.current.get(id) ?? [];
+      pendingEchoes.current.delete(id);
+      setRows([...events.flatMap((record) => projectRecord(record)), ...kept.map((text) => metaRow('meta', text))]);
       setPage({ before: Number(events[0]?.seq ?? 1), hasMore });
       // 上一次读到的位置还在手里这一页之内就落回去；落不回就停在末尾，不替他改展示档，也不往前多读页。
       const anchor = anchors.current.get(id);
@@ -749,13 +775,8 @@ export function App({ transport }: { transport: Transport }) {
     reconnecting.current = true;
     client.discard('host_restarted');
     setAsks([]);
-    // 换了一具宿主，旧的那一发请求身份就作废了：题面与已经打下的字留成一条可读的记录，不自动发给新的宿主（方案 4.4）。
-    if (queries.length > 0) {
-      setRows((current) => [...current, metaRow('meta', queries
-        .map((one) => one.questions.map((question, index) => `第 ${index + 1} 题：${question.question}`).join('；'))
-        .join('\n') + '\n宿主换了一具，这一次问的已作废，上面的回答不会再交出去')]);
-      setQueries([]);
-    }
+    // 换了一具宿主，旧的那一发请求身份就作废了：题面与已经打下的字各自留成一条可读的记录，不自动发给新的宿主（方案 4.4、审阅 F2）。
+    for (const owner of new Set(queriesLeft.current.map((one) => one.sessionId))) dropQueriesOf(owner, '宿主换了一具');
     setRunningIds([]);
     try {
       try {
@@ -783,7 +804,7 @@ export function App({ transport }: { transport: Transport }) {
       // 这一格必须在每一条路上都清掉：留着会让之后每一次重连都点在「还在重连」上，队列也永远不点火。
       reconnecting.current = false;
     }
-  }, [client, openSession, projectRoot, queries, sessionId, setAsks, setRunningIds, transport]);
+  }, [client, dropQueriesOf, openSession, projectRoot, sessionId, setAsks, setRunningIds, transport]);
 
   const readBack = useCallback(async () => {
     if (sessionId === null) return;
@@ -791,8 +812,9 @@ export function App({ transport }: { transport: Transport }) {
   }, [sessionId, openSession]);
 
   // 发一句给哪一份会话由 `own` 说定，不读屏幕上的那一份：跑着的这一轮从开始到收尾都只说得上它自己那一份。
-  // 收尾那几句（本轮结束、被打断、放回草稿、状态）只画在这一轮自己的画面上：人这时候切走了，
-  // 眼前那一份不替另一份记一句「这一轮结束」，那一句也在回到这一份时由记录补回来。
+  // 收尾那几句（本轮结束、被打断、放回草稿、状态）只画在这一轮自己的画面上：人这时候切走了，眼前那一份不替另一份记一句。
+  // 回到那一份时读回来的是记录里有的那几行：跑完的那一轮有 `turn` 事件，画成「这一轮完整结束」；被打断的那一轮没有，
+  // 它留下的是这一轮自己的事件（含那一次被取消的提问），界面不替记录补一句它没写过的话（I5）。
   const submit = useCallback(async (text: string, own = sessionId) => {
     if (text === '' || own === null) return;
     const inView = () => active.current === own;
@@ -817,9 +839,9 @@ export function App({ transport }: { transport: Transport }) {
       if (inView()) setRows((current) => [...current, metaRow('meta', `这一轮结束：跑了 ${result.iterations} 次迭代、${result.modelCalls} 次模型调用${result.completedBy === undefined ? '' : `，最后由 ${result.completedBy} 收尾`}`)]);
     } catch (error) {
       const stopped = code(error);
-      // 打断落在还在跑的模型调用上时端点那一头交回 `provider_cancelled`，落在两组调用之间才是 `loop_cancelled`：
-      // 人要读的是同一句——这一轮是他停下来的（方案 5.2）。
-      const cancelled = stopped === 'loop_cancelled' || stopped === 'provider_cancelled';
+      // 打断落在还在跑的模型调用上时端点那一头交回 `provider_cancelled`，落在两组调用之间才是 `loop_cancelled`，
+      // 落在等一个人回答的那一次提问上才是 `ask_user_cancelled`：人要读的是同一句——这一轮是他停下来的（方案 5.2、D107）。
+      const cancelled = stopped === 'loop_cancelled' || stopped === 'provider_cancelled' || stopped === 'ask_user_cancelled';
       // 没被宿主受理的那一句不丢：连接上的那几种失败说明这一句在记录里根本没有落过，把它放回草稿等一次显式的发送
       // （方案 5.1「未受理失败恢复文本」）。受理过之后才失败的那一种不在此列——那句话已经在记录里了。
       if (inView() && (stopped === 'host_unanswered' || stopped === 'host_closed' || stopped === 'host_restarted')) setDraft((current) => mergeQueueIntoDraft(current, [text]));
@@ -833,6 +855,9 @@ export function App({ transport }: { transport: Transport }) {
         setRows((current) => [...current, metaRow('meta', `这一轮收尾时还有 ${left} 条没答的询问：它们按不允许结掉，不再摆在能答的那一栏里`)]);
       }
       dropAsksOf(own);
+      // 那一份会话的提问跟着同一轮收尾（审阅 F2）：旧的宿主不再等答复，那张卡继续摆在能答的那一栏
+      // 会挡住排在后面的另一份会话，也让人以为旧答案还交得出去。
+      dropQueriesOf(own, '这一轮已经收尾');
       // 这一轮收尾了：它名下那半截流式片段不再有内容要补（最后那一条由记录说话），这一格不留着（审阅 F4）。
       liveBySession.current.delete(own);
       // 只有它自己那一份会话的这一轮结束才让它发下一条；别的会话的轮次收尾不替它发（方案 5.2）。
@@ -841,7 +866,7 @@ export function App({ transport }: { transport: Transport }) {
       if (!inView()) setUnread((current) => [...new Set([...current, own])]);
       void refreshStatus(own);
     }
-  }, [client, dropAsksOf, patchQueue, refreshStatus, runningIds, sessionId]);
+  }, [client, dropAsksOf, dropQueriesOf, patchQueue, refreshStatus, runningIds, sessionId]);
 
   // 本轮收尾后把排着的第一条发出去：一次只发一条。暂停着就一条也不发——那几句是人在跑着的时候敲进来的，
   // 他按下的是取消，剩下怎么走要他再说一次（方案 5.2）。断着连接与重连那一段也不算「本轮收尾」：
@@ -883,15 +908,17 @@ export function App({ transport }: { transport: Transport }) {
     await submit(draft.trim());
   }, [draft, inputOwner, reading, sessionId, submit]);
 
-  const cancel = useCallback(async () => {
-    if (sessionId === null) return;
-    // 停下的是眼前这一份会话自己那一轮：另一份会话在跑不由这一枚按钮管（顶栏那枚牌子说出有几份在跑）。
-    // 按下取消就是「剩下的别自己走」：那几条留在这儿，等一次显式的继续（方案 5.2）。
-    if ((queues[sessionId]?.items.length ?? 0) > 0) patchQueue(sessionId, (current) => ({ ...current, paused: true }));
+  // 取消哪一份会话的那一轮由 `own` 说定：默认是眼前这一份，另一份会话的提问卡取消的是它自己那一份（审阅 F1）。
+  const cancel = useCallback(async (own = sessionId) => {
+    if (own === null) return;
+    // 停下的是那一份会话自己那一轮：另一份会话在跑不由这一枚按钮管（顶栏那枚牌子说出有几份在跑）。
+    // 按下取消就是「剩下的别自己走」：那几条留在那一份会话名下，等一次显式的继续（方案 5.2）。
+    if ((queues[own]?.items.length ?? 0) > 0) patchQueue(own, (current) => ({ ...current, paused: true }));
     try {
-      await client.call('run.cancel', { sessionId });
+      await client.call('run.cancel', { sessionId: own });
     } catch (error) {
-      setRows((current) => [...current, metaRow('meta', `取消没生效：${code(error)}`)]);
+      // 这一句说的是那一份会话的取消，画在它的画面里：人这时候切走了，这一句等切回来由记录补。
+      if (active.current === own) setRows((current) => [...current, metaRow('meta', `取消没生效：${code(error)}`)]);
     }
   }, [client, patchQueue, queues, sessionId]);
 
@@ -1033,6 +1060,7 @@ export function App({ transport }: { transport: Transport }) {
     const [head, ...rest] = queries;
     if (head === undefined) return;
     setQueries(rest);
+    questionDrafts.current.delete(head.id);
     if (head.sessionId === sessionId) {
       setRows((current) => [...current, metaRow('meta', `已答 ${head.questions.length} 道题里的 ${answers.length} 道，其余按「没有回答」记下`)]);
     }
@@ -1248,7 +1276,9 @@ export function App({ transport }: { transport: Transport }) {
         active={sessionId}
         onOpen={(id: string) => void openSession(id)}
         onSubmit={answerQuestion}
-        onCancel={() => void cancel()}
+        // 取消的是这一张卡自己那一份会话的那一轮：页面切到另一份正在跑的会话时，这一枚按钮不能替那一份停下来（审阅 F1）。
+        onCancel={() => void cancel(queries[0].sessionId)}
+        onDraft={keepQuestionDraft}
       />}
 
       {asks.length > 0 && <ApprovalCard

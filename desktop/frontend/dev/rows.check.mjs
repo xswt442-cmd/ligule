@@ -1,7 +1,7 @@
 // 投影那一份取值规则的唯一检查：跑 `node dev/rows.check.mjs`，坏了就非零退出。
 // 它 import 的是同目录树上那份 `src/rows.ts`，Node 直接剥类型跑，不需要构建产物。
 import assert from 'node:assert/strict';
-import { capabilityOf, changeBody, changeOf, metaRow, projectRecord, shownIn } from '../src/rows.ts';
+import { capabilityOf, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn } from '../src/rows.ts';
 
 const call = projectRecord({
   kind: 'assistant',
@@ -116,4 +116,11 @@ assert.equal(ctx.text, '这一轮用的是 模型 gpt-x · 模式 full · 审批
 assert.equal(projectRecord({ seq: 4, kind: 'turnContext', policy: 'ask', policySource: 'config' })[0].text, '这一轮用的是 审批档位 ask（配置默认）', '只带档位与来源时其余段不硬编');
 assert.equal(projectRecord({ seq: 5, kind: 'turnContext' })[0], undefined, '几个读数都没有时这一行整个不画');
 // 会话浮层里那几格读自 status.get：档位与它的来源是两格，界面上才说得出「现在生效的是配置默认还是会话临时改的」。
+// 一张提问卡收掉时留下的那一句：题面与已经打下的字都要读得到，没打的那一道说清没打（审阅 F2、方案 R1）。
+const echoAsk = { questions: [{ id: 'q1', question: '用哪一种格式' }, { id: 'q2', question: '要不要带表头' }] };
+assert.equal(
+  questionEcho(echoAsk, { q1: { picked: ['CSV'], extra: ' 压缩一份 ' }, q2: { picked: [], extra: '' } }),
+  '第 1 题「用哪一种格式」：CSV、压缩一份；第 2 题「要不要带表头」：没有打下答案',
+);
+assert.equal(questionEcho({ questions: [{ id: 'q1', question: '一个问题' }] }), '第 1 题「一个问题」：没有打下答案', '一格草稿都没有时不谎称答过');
 console.log('桌面前端的投影检查通过');
