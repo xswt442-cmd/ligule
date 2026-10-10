@@ -3,6 +3,7 @@
 // 最后生效的是哪一份模式清单，以及有没有还没收尾的派发（那是第 33 步那一条判据，列表里就该看得见）。
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { dataRoot } from '../kernel/config-file.js';
 import { KernelError } from '../kernel/error.js';
 import type { ModeFile } from '../kernel/modes.js';
 import { workspaceIdentity } from '../kernel/workspace.js';
@@ -37,6 +38,8 @@ export function chooseResumeMode({
 
 export interface SessionDirectoryConfig {
   boundary: string;
+  // 数据根要的主目录：装载侧按同一个值读配置（默认 homedir），会话区与配置 user 层才落在同一处（D110）。
+  userHome?: string;
   host?: { sessionDirectory?: unknown };
 }
 
@@ -66,7 +69,8 @@ export interface SessionSummary {
 export function sessionDirectory(config: SessionDirectoryConfig): string {
   const configured = config.host?.sessionDirectory;
   if (typeof configured === 'string' && configured !== '') return configured;
-  return join(config.boundary, '.ligule', 'sessions');
+  // 缺省是数据根下的会话区（D110、方案 5.5.2）：记录与配置 user 层同根，权限边界不再决定记录位置。
+  return join(dataRoot(config.userHome), 'sessions');
 }
 
 export async function listSessions(

@@ -16,6 +16,7 @@ import { createPromptAssembly } from '../kernel/prompt.js';
 import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
 import { createSessionLog } from '../session/session.js';
 import { chooseResumeMode, listSessions, sessionDirectory } from '../session/list.js';
+import { adoptForSessionDirectory } from '../session/adopt.js';
 import { searchSessions } from '../session/search.js';
 import { branchSession } from '../session/branch.js';
 import { listProjectFiles } from './paths.js';
@@ -432,9 +433,24 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
   // 列清单与查记录扫的是同一格目录，两条路共用这一处判断（方案 3.2）。
   // 指名的项目还没装载过、装载侧又给不出那条路时，照当前这一份目录扫，过滤条件继续生效——
   // 扫一遍磁盘上的记录不逼出装载。
+  // 这一份项目此刻的记录目录：第一次读之前先把旧位置（工作区目录下 `.ligule/sessions`）的记录一次性补齐到
+  // 数据根会话区（D110 的整理，合同见 `ligule-set/phase3/r55-data-root-contract.md`）：缺什么补什么、原件保留、
+  // 一份环境只跑一次；失败与会话本身无关，只往标准错误记一行，不挡住这一格。
   async function scanDirectory(projectRoot) {
     const unloaded = projectRoot !== undefined && !environments.has(projectRoot) && loadEnvironment === undefined;
-    return (unloaded ? defaultEnvironment : await environmentFor(projectRoot)).directory;
+    const environment = unloaded ? defaultEnvironment : await environmentFor(projectRoot);
+    if (environment.legacyAdopted !== true) {
+      environment.legacyAdopted = true;
+      try {
+        const report = await adoptForSessionDirectory(environment.config, environment.directory);
+        if (report !== null && (report.copied.length > 0 || report.conflicts.length > 0 || report.unknown.length > 0)) {
+          console.error(`legacy sessions from ${environment.config.boundary}: copied ${report.copied.length}, conflicts ${report.conflicts.length}${report.conflicts.length === 0 ? '' : ` (${report.conflicts.join(', ')})`}, unknown ${report.unknown.length}`);
+        }
+      } catch (error) {
+        console.error(`legacy session adoption failed for ${environment.config.boundary}: ${String(error?.message ?? error)}`);
+      }
+    }
+    return environment.directory;
   }
 
   // 名字与归档标记读回的是记录里那几条 `label` 折出来的当前值：宿主不另存一份，两端看的是同一份事实（I5、方案 4.2）。
@@ -951,8 +967,10 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
         case 'sessions.list': {
           // 与 `ligule sessions` 走的是同一个扫描器（D73）：协议只是把它递到界面那一边，
           // 记录目录仍然只有宿主这一处开盘。
+          // 不指名项目时说当前这一具：记录区是数据根里共用的一处，分得出项目的是首行那一格（D110、方案 5.5.4）。
           const { projectRoot, limit } = message.params;
-          return { sessions: await listSessions(await scanDirectory(projectRoot), { projectRoot, limit }) };
+          const scope = projectRoot ?? defaultEnvironment.projectRoot;
+          return { sessions: await listSessions(await scanDirectory(scope), { projectRoot: scope, limit }) };
         }
         case 'sessions.search': {
           // 第七条只为界面多出来的方法：扫的还是那一处记录目录，与列表同一个开盘处（方案 4.2）。
@@ -964,7 +982,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           // 那一份会话开着就读它自己那一个项目的目录，与 `session.read` 同一处说法；形状不对先报自己那个码。
           if (scoped !== undefined) assertSessionId(scoped);
           const open = scoped === undefined ? undefined : sessions.get(scoped);
-          const root = open !== undefined ? undefined : projectRoot;
+          const root = open !== undefined ? undefined : projectRoot ?? defaultEnvironment.projectRoot;
           const directory = open?.environment.directory ?? await scanDirectory(projectRoot);
           return { hits: await searchSessions(directory, { query: needle, sessionId: scoped, projectRoot: root, limit }) };
         }

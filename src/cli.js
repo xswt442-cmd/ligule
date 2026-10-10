@@ -17,6 +17,7 @@ import { readRegistry, registryPathOf } from './kernel/workspace.js';
 import { discoverSkills, skillDirectories } from './kernel/skills.js';
 import { createSessionLog } from './session/session.js';
 import { listSessions, sessionDirectory } from './session/list.js';
+import { adoptForSessionDirectory } from './session/adopt.js';
 import { formatVerdicts, summarizeVerdicts } from './session/verdicts.js';
 import { minimalPlugin } from './tools/minimal.js';
 import { networkPlugin } from './tools/network.js';
@@ -323,6 +324,12 @@ if (missingFlagValue) {
     // 只在当前目录下筛项目根等于没读那个项目。
     const { config } = await configSnapshot(projectFlag);
     const directory = sessionDirectory(config);
+    // 缺省目录下没有这一份项目的新记录时，先按 D110 的整理把旧位置补齐一份（原件保留、可重跑）：
+    // 这一条是只读命令，补齐失败按没有旧记录处理，不把列会话带停。
+    const adopted = await adoptForSessionDirectory(config, directory).catch(() => null);
+    if (adopted !== null && (adopted.copied.length > 0 || adopted.conflicts.length > 0)) {
+      console.error(`legacy sessions adopted: copied ${adopted.copied.length}, conflicts ${adopted.conflicts.length}${adopted.conflicts.length === 0 ? '' : ` (${adopted.conflicts.join(', ')})`}`);
+    }
     const started = Date.now();
     const listed = await listSessions(directory, { projectRoot: projectFlag });
     if (jsonFlag) console.log(JSON.stringify(listed));
@@ -367,6 +374,7 @@ if (missingFlagValue) {
     try {
       const { config } = await configSnapshot();
       const directory = sessionDirectory(config);
+      await adoptForSessionDirectory(config, directory).catch(() => null);
       if (!existsSync(join(directory, `${sessionId}.jsonl`))) {
         printFailure('session_not_found', `no record for ${sessionId} in ${directory}`);
       } else {

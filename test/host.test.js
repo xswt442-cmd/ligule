@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createConnection, createConfig, createMemoryConnectionPair, MESSAGES_CAPABILITIES, METHODS, NOTIFICATIONS, providerFromConfig, hostProviderFromConfig, resolveShell, serveHost } from '../dist/index.js';
 import { shownConfigOf } from '../dist/host/host.js';
@@ -164,6 +164,7 @@ test('a client over stdio drives one round, answers one approval and watches the
     assert.equal(events.find((event) => event.kind === 'tool').result.content.text, 'the body', 'the tool result the client saw is the file content');
 
     // 客户端看见的那一条与记录里落盘的那一条同源，序号也在通知里带回来了。
+    // 这一族宿主是子进程，HOME 指到这一份临时目录：记录落在它自己的数据根会话区（D110）。
     const lines = (await readFile(join(directory, '.ligule', 'sessions', `${sessionId}.jsonl`), 'utf8'))
       .trim().split('\n').map((line) => JSON.parse(line));
     // 首行是会话元信息，不是一条事件；宿主先读一遍（模式去重）也该把它写出来（D73）。
@@ -567,7 +568,7 @@ test('a branch of an open session reads back through the same action', async () 
     assert.ok(events.some((event) => event.kind === 'user' && event.text === '一句话'), 'the open session reads back');
     assert.ok(events.every((event) => typeof event.seq === 'number'), 'sequence numbers come from the record');
 
-    await writeFile(join(directory, '.ligule', 'sessions', `${branchId}.jsonl`), [
+    await writeFile(join(homedir(), '.ligule', 'sessions', `${branchId}.jsonl`), [
       JSON.stringify({ kind: 'session', formatVersion: 1, sessionId: branchId, projectRoot: directory, createdAt: '2026-10-05T00:00:00.000Z' }),
       JSON.stringify({ seq: 0, kind: 'user', text: 'the delegated task' }),
     ].join('\n') + '\n');
@@ -1182,7 +1183,7 @@ test('one host keeps two projects apart, and a host without a loader says so', a
     const inSecond = await client.request('session.create', { projectRoot: second });
     // 首行那份元信息在第一次落笔时才写，所以先跑一轮，再读那一份记录属于谁（D73）。
     await client.request('run.start', { sessionId: inSecond.sessionId, input: '另一轮' });
-    const header = JSON.parse((await readFile(join(second, '.ligule', 'sessions', `${inSecond.sessionId}.jsonl`), 'utf8')).split('\n')[0]);
+    const header = JSON.parse((await readFile(join(homedir(), '.ligule', 'sessions', `${inSecond.sessionId}.jsonl`), 'utf8')).split('\n')[0]);
     assert.equal(header.projectRoot, second, '首行说得出这一份记录属于哪个项目');
 
     const listedHere = await client.request('sessions.list', {});
@@ -1193,11 +1194,11 @@ test('one host keeps two projects apart, and a host without a loader says so', a
     // 接开已经在这具宿主里的那一份不用再指名项目：它读自己那一份项目环境（桌面对刚在别项目录里建好的那一份只带编号去接那一条路）。
     assert.deepEqual(await client.request('session.open', { sessionId: inSecond.sessionId }), { sessionId: inSecond.sessionId });
 
-    // 两个项目各开一份会话，交错跑一轮：各自的记录进各自的目录，互不串。
+    // 两个项目各开一份会话，交错跑一轮：记录都落数据根会话区，按首行说的项目分得开、互不串。
     const inFirst = await client.request('session.create', {});
     await client.request('run.start', { sessionId: inFirst.sessionId, input: '第一轮' });
-    assert.ok((await readFile(join(first, '.ligule', 'sessions', `${inFirst.sessionId}.jsonl`), 'utf8')).includes('第一轮'));
-    assert.ok((await readFile(join(second, '.ligule', 'sessions', `${inSecond.sessionId}.jsonl`), 'utf8')).includes('另一轮'));
+    assert.ok((await readFile(join(homedir(), '.ligule', 'sessions', `${inFirst.sessionId}.jsonl`), 'utf8')).includes('第一轮'));
+    assert.ok((await readFile(join(homedir(), '.ligule', 'sessions', `${inSecond.sessionId}.jsonl`), 'utf8')).includes('另一轮'));
 
     // 那一个根上最后一份会话收了，那份项目环境就退出这张表：下一次开这一根的会话重新读配置那几层（方案 3.1、实现顺序第 70 步）。
     await client.request('session.close', { sessionId: inSecond.sessionId });

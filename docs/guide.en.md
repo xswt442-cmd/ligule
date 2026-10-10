@@ -15,7 +15,7 @@ cd <your-project-root>
 ligule run "shorten the first paragraph of README"
 ```
 
-The model stops and asks you before it changes a file: `y` allows that call, `n` refuses it. When the round ends, the session log is under `<project-root>/.ligule/sessions/`.
+The model stops and asks you before it changes a file: `y` allows that call, `n` refuses it. When the round ends, the session log is under `sessions/` in the data root (D110).
 
 For daily use start the terminal UI or the desktop shell; both keep the conversation going:
 
@@ -120,7 +120,7 @@ Options: `--config key.path=value` (repeatable), `--mode <name>`, `--project <ro
 
 Where the tools may read and write is decided by the boundary. By default it is the root you pointed at this run: wherever the command line executes (or wherever `--project` points), that is where tools read and write. A `boundary` written by any configuration layer overrides it.
 
-Session logs live in `.ligule/sessions/` under the boundary:
+Session logs live in `sessions/` under the data root (D110; the first read of a project copies its old `.ligule/sessions/` logs here once, keeping the originals):
 
 ```
 <session-id>.jsonl              one event per line, the first line is this log's metadata

@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import {
   buildRepairEvents, createConnection, createConfig, createMemoryConnectionPair, createSessionLog,
   findUnresolvedCalls, repairUnresolvedCalls, serveHost,
@@ -37,7 +37,8 @@ test('an assistant turn whose call never got a result is the only thing left ope
 
 test('reopening a record repairs it once, and reading it changes nothing', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ligule-recovery-'));
-  const directory = join(root, '.ligule', 'sessions');
+  // 记录落数据根会话区（D110）：检查自己造的家目录里那一处，宿主读的也是它。
+  const directory = join(homedir(), '.ligule', 'sessions');
   try {
     const log = createSessionLog({ directory, id: 'crashed', meta: { projectRoot: root } });
     await log.append({ kind: 'user', text: 'build it' });

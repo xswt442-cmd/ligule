@@ -33,10 +33,7 @@ async function withSessions(run) {
   }
 }
 
-test('the session directory follows the boundary unless the config names one', async () => {
-  assert.equal(sessionDirectory({ boundary: '/work' }), join('/work', '.ligule', 'sessions'));
-  assert.equal(sessionDirectory({ boundary: '/work', host: { sessionDirectory: '/elsewhere' } }), '/elsewhere');
-});
+// 缺省解析改成数据根会话区（D110）之后，「跟着边界还是跟着配置」这一条在 `test/adopt.test.js` 里按新合同验。
 
 test('the listing reads each record once and reports what a resume would need', async () => {
   await withSessions(async (root, directory) => {

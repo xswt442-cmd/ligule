@@ -42,6 +42,7 @@ export { SESSION_FORMAT_VERSION, foldLabel, parseSessionEvents } from './session
 export { parseSessionBytes, readSessionRecord } from './session/record.js';
 export { findUnresolvedCalls, buildRepairEvents, repairUnresolvedCalls } from './session/repair.js';
 export { chooseResumeMode, listSessions, sessionDirectory } from './session/list.js';
+export { adoptForSessionDirectory, adoptLegacySessions } from './session/adopt.js';
 export { searchSessions } from './session/search.js';
 export { branchSession } from './session/branch.js';
 export { CHECKPOINT_FORMAT_VERSION, CHECKPOINT_INPUT_VERSION, checkpointPath, createCheckpoint, loadCheckpoint, prefixDigest, usableCheckpoint } from './session/checkpoint.js';

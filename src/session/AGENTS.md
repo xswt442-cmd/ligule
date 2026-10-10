@@ -40,6 +40,7 @@ Rules for `src/session/`: the record, its format, repair, listing, checkpoint an
 ## Listing and resuming
 
 - `ligule sessions` reads the record directory and lists past runs. It builds no kernel, loads no extension and opens no session (D73).
+- The record directory is `sessions/` under the data root (`sessionDirectory` in `list.ts`, D110). `host.sessionDirectory` still overrides it. Before a project's records are first read, the Host (and the CLI) copies that project's legacy `<boundary>/.ligule/sessions/` files into it once — whole files, digest-checked, originals kept, idempotent (`adopt.ts`); a same-id file with different bytes stops and is reported instead of being overwritten.
 - The first line gives the project and the start time, the last `mode` event gives the list the run used, and a dispatched call with no result is counted, so a half-finished session shows itself in the listing.
 - The first line also carries `workspace` and `workspaceOrigin` (`explicit` when a client named the root, `default` when it used the one it was on) (D110, 方案 5.5.3). A surface groups by those two facts and never by "does this path equal the current default" (方案 5.5.4). A record that predates them, or one a reopen wrote a header for, says neither: the listing answers an empty string, which is "not stated", not "the default one".
 - A derived branch copies both facts off the parent's first line: a branch shows up where its source shows up, whatever the current default says (方案 5.5.4).

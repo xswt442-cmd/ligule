@@ -133,8 +133,9 @@ async function withHost(run) {
     return await run({
       connection: createConnection(pair.client),
       project,
-      // 首行是那份会话落在哪一具工作区的原始说法：不经过列表那一层，直接读文件。
-      headerOf: async (sessionId) => JSON.parse((await readFile(join(project, '.ligule', 'sessions', `${sessionId}.jsonl`), 'utf8')).split('\n')[0]),
+      home,
+      // 首行是那份会话落在哪一具工作区的原始说法：不经过列表那一层，直接读文件（记录在数据根会话区，D110）。
+      headerOf: async (sessionId) => JSON.parse((await readFile(join(home, 'sessions', `${sessionId}.jsonl`), 'utf8')).split('\n')[0]),
     });
   } finally {
     pair.client.output.end();
@@ -148,7 +149,7 @@ async function withHost(run) {
 
 // 宿主那一条路：真的建了一份会话，那一具工作区就进了登记，位置在应用数据根里，记录首行也带上身份与来源。
 test('建会话的那一侧把这一具工作区登记进应用数据根，并把身份与来源写进首行', async () => {
-  await withHost(async ({ connection, project, headerOf }) => {
+  await withHost(async ({ connection, project, home, headerOf }) => {
     const { sessionId } = await connection.request('session.create', {});
     await connection.request('run.start', { sessionId, input: '第一轮' });
     const registry = await readRegistry();
@@ -158,7 +159,7 @@ test('建会话的那一侧把这一具工作区登记进应用数据根，并�
     const header = await headerOf(sessionId);
     assert.equal(header.workspace, workspaceIdentity(project), '首行记下这一份会话落在哪一具工作区');
     assert.equal(header.workspaceOrigin, 'default', '客户端没指名项目根，来源就是它当前那一具');
-    const [listed] = await listSessions(join(project, '.ligule', 'sessions'), { projectRoot: project });
+    const [listed] = await listSessions(join(home, 'sessions'), { projectRoot: project });
     assert.equal(listed.workspace, header.workspace, '列表把这两格一起交出去，界面分组读它而不是读路径相等');
     assert.equal(listed.workspaceOrigin, 'default');
   });
