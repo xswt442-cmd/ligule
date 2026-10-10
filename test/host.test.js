@@ -640,9 +640,14 @@ async function withInProcessHost(run, limits, extra = {}) {
   const pair = createMemoryConnectionPair();
   const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy, ...extra });
   const connection = createConnection(pair.client);
+  // 界面上填过端点那两格之后，派出来的那一份提供方读的是环境变量里的凭据：这一份检查自己设一个，别跟着开发机上有没有配过东西变红。
+  const previousKey = process.env.LIGULE_API_KEY;
+  process.env.LIGULE_API_KEY = 'test-key';
   try {
     return await run(connection, { hold: (promise) => { gate = promise; }, directory });
   } finally {
+    if (previousKey === undefined) delete process.env.LIGULE_API_KEY;
+    else process.env.LIGULE_API_KEY = previousKey;
     pair.client.output.end();
     await host.release();
     await rm(directory, { recursive: true, force: true });
