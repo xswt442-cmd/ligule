@@ -32,7 +32,8 @@ export function ModelPanel({ client, sessionId, projectRoot, onEdit }: {
   // 说明那一句带着自己的语气：读不回来与没写进去才报警，写成了与预览不报（方案 4.3 那一句）。
   const [note, setNote] = useState<{ text: string; bad: boolean } | null>(null);
   // 这一份会话现在打的是哪一份模型、等在它边界上的又是哪一份（方案 7.1 三种读数里的两格）。
-  const [inUse, setInUse] = useState<{ model?: string | null; pendingModel?: string | null }>({});
+  // null 是「这一次还没读回来」：帧里分不出「宿主还没有生效的模型」与「这一问没答上来」，所以由这一侧记。
+  const [inUse, setInUse] = useState<{ model?: string | null; pendingModel?: string | null } | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [layer, setLayer] = useState('user');
   const [saving, setSaving] = useState(false);
@@ -56,14 +57,14 @@ export function ModelPanel({ client, sessionId, projectRoot, onEdit }: {
       setNote({ text: `配置读不回来：${code(error)}`, bad: true });
     }
     if (sessionId === null) {
-      setInUse({});
+      setInUse(null);
       return;
     }
     try {
       setInUse(await client.call('status.get', { sessionId }, 15_000) as { model?: string | null; pendingModel?: string | null });
     } catch {
       // 状态读不回来只说明不了「现在生效的是哪一份」，不该带走这一栏别的内容：配置那几格是另一条回答。
-      setInUse({});
+      setInUse(null);
     }
   }, [client, sessionId, projectRoot]);
 
@@ -147,8 +148,10 @@ export function ModelPanel({ client, sessionId, projectRoot, onEdit }: {
       这一栏读与写的是这一份会话所属那一个项目的两层文件；左侧选了别的项目，这里就跟着换成那一个项目的文件（方案 3.2）。
       没有会话时说的是这一具宿主启动时那一个项目。
       {sessionId === null ? '现在没有打开的会话，说不出模型用的是哪一份'
-        : <>这一份会话现在用的是 <code>{inUse.model ?? '读不出来'}</code>
-          {inUse.pendingModel === undefined || inUse.pendingModel === null ? '，没有等着换的那一份' : <>，等在它轮次边界上的是 <code>{inUse.pendingModel}</code></>}</>}。
+        : inUse === null ? '这一份会话现在生效的模型还没读回来'
+          : inUse.model === undefined || inUse.model === null ? '这一具宿主还没有生效的模型，填上模型名并保存之后，这里会说出它'
+            : <>这一份会话现在用的是 <code>{inUse.model}</code>
+              {inUse.pendingModel === undefined || inUse.pendingModel === null ? '，没有等着换的那一份' : <>，等在它轮次边界上的是 <code>{inUse.pendingModel}</code></>}</>}。
       地址只展示协议、主机、端口与路径那一段，密钥的值从来不进配置。
       审批规则表不在这四条里：它在设置里另一栏「审批规则」那里改。
     </p>
