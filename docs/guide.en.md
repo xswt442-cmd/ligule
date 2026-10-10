@@ -221,7 +221,7 @@ When consecutive refusals reach the threshold, the level returns to asking by it
 
 ## Model and config keys
 
-The `model` block is the endpoint: `api` (`chat-completions` or `messages`), `baseURL`, `model`, `apiKeyEnv`. The desktop's "model and endpoint" panel edits those four keys: choose the user default or the local override to write, preview, then save; the same place states when it takes effect and which layer writes that line. A key written on the command line is not overridden by editing the file.
+The `model` block is the endpoint: `api` (`chat-completions` or `messages`), `baseURL`, `model`, `apiKeyEnv`. The desktop's "model and endpoint" panel edits those four keys: choose the user default or the local override to write, preview, then save; the same place states when it takes effect and which layer writes that line. A key written on the command line is not overridden by editing the file. While a settings panel still holds an edit that was never written — or a save whose answer has not come back — closing the dialog, pressing Escape, clicking outside it or switching section asks first and defaults to staying; leaving takes an explicit discard.
 
 The other keys:
 
