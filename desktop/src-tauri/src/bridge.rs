@@ -72,7 +72,7 @@ fn node_file_name() -> &'static str {
 }
 
 pub struct Host {
-    stdin: Mutex<ChildStdin>,
+    stdin: Mutex<Option<ChildStdin>>,
     child: Mutex<Child>,
 }
 
@@ -132,7 +132,7 @@ pub fn spawn_host(
 
     Ok((
         Host {
-            stdin: Mutex::new(stdin),
+            stdin: Mutex::new(Some(stdin)),
             child: Mutex::new(child),
         },
         frames,
@@ -143,10 +143,11 @@ pub fn spawn_host(
 impl Host {
     /// 交出一帧。行尾的换行由这一层补，上面不需要知道帧是怎么分的。
     pub fn send(&self, frame: &str) -> Result<(), String> {
-        let mut stdin = self
+        let mut guard = self
             .stdin
             .lock()
             .map_err(|_| "the host's stdin is gone".to_string())?;
+        let stdin = guard.as_mut().ok_or("the host's stdin is already closed")?;
         writeln!(stdin, "{frame}")
             .map_err(|error| format!("failed to write to the host: {error}"))?;
         stdin
@@ -154,14 +155,30 @@ impl Host {
             .map_err(|error| format!("failed to flush the host's stdin: {error}"))
     }
 
-    /// 终止后端进程并等待退出。
+    /// 让后端进程自己收尾：交回那根输入管道就是「这边不再发帧了」，宿主读到头就走它自己的释放
+    /// （取消在跑的轮次、把每份会话的记录锁松开）。等到上限它还没退才硬杀——那时它已经不听了。
+    /// 直接杀会把记录锁留在磁盘上等那十秒租约过期，下一次打开那份会话就先读到 `session_locked`。
     pub fn stop(&self) {
+        if let Ok(mut guard) = self.stdin.lock() {
+            drop(guard.take());
+        }
         if let Ok(mut child) = self.child.lock() {
+            for _ in 0..SELF_CLOSE_TRIES {
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(SELF_CLOSE_PAUSE_MS));
+            }
             let _ = child.kill();
             let _ = child.wait();
         }
     }
 }
+
+/// 那一具进程自己收的时间窗：三秒在本机量过是够的（空闲宿主读到 EOF 到退出是几十毫秒），
+/// 上限之外仍然由壳杀，退出这件事不能悬着。
+const SELF_CLOSE_TRIES: u32 = 60;
+const SELF_CLOSE_PAUSE_MS: u64 = 50;
 
 /// 槽位里换上新的一具后端进程，交回被换掉的那一份。调用方要终止它。
 /// 同一时刻只留一具进程：重连时不换就会有两具各自往同一个窗口写帧（实现顺序第 65 步）。
@@ -221,6 +238,37 @@ mod tests {
             .expect_err("refused");
         assert!(error.contains("LIGULE_DESKTOP_CLI"), "{error}");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 收尾那一条要验的是「不用杀它」：关掉输入管道就是这头不再发帧，那具进程读到头自己退。
+    /// 计时就是这里的读数——硬杀要等满那一扇时间窗，自己退的几十毫秒就回来了。
+    #[test]
+    fn a_child_that_exits_on_closed_stdin_is_not_waited_out() {
+        let script = "process.stdin.resume(); process.stdin.on('end', () => process.exit(0));";
+        let node = std::env::var("NODE").unwrap_or_else(|_| "node".to_string());
+        let (host, _frames, _logs) = spawn_host(&node, &["-e", script]).expect("spawn the child");
+        let started = std::time::Instant::now();
+        host.stop();
+        let took = started.elapsed();
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "the child should have closed by itself; stop took {took:?}"
+        );
+    }
+
+    /// 另一头的形状：那具进程不理闭掉的输入管道，壳就在窗口之后杀掉它——退出这件事不能悬着。
+    #[test]
+    fn a_child_that_ignores_the_closed_stdin_is_killed_after_the_window() {
+        let script = "setInterval(() => {}, 1000);";
+        let node = std::env::var("NODE").unwrap_or_else(|_| "node".to_string());
+        let (host, _frames, _logs) = spawn_host(&node, &["-e", script]).expect("spawn the child");
+        let started = std::time::Instant::now();
+        host.stop();
+        let took = started.elapsed();
+        assert!(
+            took >= std::time::Duration::from_millis(2_500),
+            "the window should be spent before the kill; stop took {took:?}"
+        );
     }
 
     #[test]
