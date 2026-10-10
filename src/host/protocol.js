@@ -185,6 +185,23 @@ export const METHODS = Object.freeze({
       required: ['text'],
     },
   },
+  // 桌面那一份草稿与界面偏好（方案 5.5.2）：草稿、暂停队列、语言、通知与外观都放应用数据根里的一个文档，
+  // 可恢复的输入不靠 WebView 缓存。界面拿不到那一份文件的路径，也读不到数据根里别的文件。
+  'prefs.read': {
+    description: 'Read the desktop preferences this machine keeps in the application data root: drafts, paused queues and interface choices; the document is per machine, not per session',
+    parameters: { type: 'object', properties: {} },
+  },
+  // 整份替换：写的是界面此刻手里那一份文档，宿主核对它是能解析的对象，用临时文件加改名原子落盘，交回写下的那一份。
+  'prefs.write': {
+    description: 'Replace the desktop preferences document with the given JSON; the host checks it parses to an object, writes it atomically so a crash never leaves half a document, and the written document comes back',
+    parameters: {
+      type: 'object',
+      properties: {
+        json: { type: 'string', description: 'the whole preferences document as JSON; it must parse to an object' },
+      },
+      required: ['json'],
+    },
+  },
   // 第四条只为界面多出来的方法（前三条是 `mode.set` D65、`session.compact` D83、`sessions.list`）：配置在宿主那一侧，
   // 而这条路只交得出白名单里的几格——没有参数可点路径，所以界面要不到别的格。
   'config.get': {

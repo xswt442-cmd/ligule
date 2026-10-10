@@ -15,6 +15,7 @@ import { shownConfigOf } from '../dist/host/host.js';
 import { createConfigStore } from '../dist/kernel/config-store.js';
 import { configVersion } from '../dist/kernel/config-edit.js';
 import { historyPathOf, rememberHistory } from '../dist/kernel/input-history.js';
+import { prefsPathOf, savePrefs } from '../dist/kernel/desktop-prefs.js';
 import { listProjectFiles } from '../dist/host/paths.js';
 import { listenFetchable } from './helpers/port.js';
 
@@ -1616,6 +1617,40 @@ test('the host keeps the input history both surfaces share: newest first, one co
     assert.deepEqual((await client.request('history.read', {})).entries, ['另一端写下的一句', '第一句', '第二句'], '两端读的是同一份文件');
     assert.ok((await readFile(join(root, 'data', 'tui-history.jsonl'), 'utf8')).split('\n')[0].includes('另一端写下的一句'));
     await assert.rejects(client.request('history.append', {}), (error) => error.code === 'protocol_args_invalid', '没有句子就没有要记的东西');
+  } finally {
+    pair.client.output.end();
+    await host.release();
+    if (previous === undefined) delete process.env.LIGULE_HOME;
+    else process.env.LIGULE_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// 桌面草稿与界面偏好那一份文档走宿主这一条路（方案 5.5.2）：界面整份写上去、整份读回来，
+// 那一份文件在哪一处由宿主定；文件被另一端改写之后，读回来的是文件里那一份。坏的那一份交不上来。
+test('the host keeps one desktop preferences document the interface writes whole and reads back', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-desktop-prefs-'));
+  const previous = process.env.LIGULE_HOME;
+  process.env.LIGULE_HOME = join(root, 'data');
+  const config = createConfig({ user: { boundary: root, model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model' } } });
+  const quiet = { capabilities: MESSAGES_CAPABILITIES, model: 'test-model', async *stream() { yield { type: 'text', text: 'ok' }; } };
+  const pair = createMemoryConnectionPair();
+  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider: quiet, policy: { mode: 'auto' } });
+  const client = createConnection(pair.client);
+  try {
+    assert.deepEqual((await client.request('prefs.read', {})).settings, {}, '还没有过任何一次保存不是错误');
+    const document = { palette: 'forest', drafts: { '/p': { s1: '没发出去的一句' } }, queued: { '/p': { s1: ['排着的两句'] } } };
+    assert.deepEqual((await client.request('prefs.write', { json: JSON.stringify(document) })).settings, document, '写下的那一份交回来');
+    assert.deepEqual((await client.request('prefs.read', {})).settings, document, '再读回来是同一份');
+    assert.deepEqual(JSON.parse(await readFile(join(root, 'data', 'desktop.json'), 'utf8')), document, '文件里就是这一份整份文档');
+
+    await savePrefs(prefsPathOf(), { palette: 'graphite' });
+    assert.deepEqual((await client.request('prefs.read', {})).settings, { palette: 'graphite' }, '文件被另一端改写后，读出的是文件里那一份');
+
+    await assert.rejects(client.request('prefs.write', { json: '{ not json' }), (error) => error.code === 'desktop_prefs_invalid', '读不出来的那一份不上桥');
+    await assert.rejects(client.request('prefs.write', { json: '[1]' }), (error) => error.code === 'desktop_prefs_invalid', '不是对象的那一份也拒');
+    await assert.rejects(client.request('prefs.write', {}), (error) => error.code === 'protocol_args_invalid', '没有文档就没有要写的东西');
+    assert.deepEqual((await client.request('prefs.read', {})).settings, { palette: 'graphite' }, '被拒的那几次一个字都没写进文件');
   } finally {
     pair.client.output.end();
     await host.release();
