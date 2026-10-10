@@ -69,7 +69,7 @@ export function createChatCompletionsProvider({
       headers: {
         'content-type': 'application/json',
         'accept': 'text/event-stream',
-        'authorization': `Bearer ${readCredential(apiKeyEnv)}`,
+        'authorization': `Bearer ${await readCredential(apiKeyEnv)}`,
       },
       body: JSON.stringify({
         model,

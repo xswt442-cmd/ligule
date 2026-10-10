@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { setImmediate } from 'node:timers';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -303,10 +304,22 @@ test('a stream that ends inside a frame is reported instead of dropped', async (
   });
 });
 
-test('the credential is read from the environment at request time and a missing one is refused', async () => {
-  delete process.env[API_KEY_ENV];
-  const events = collect(createMessagesProvider({ baseUrl: 'http://127.0.0.1:1', model: 'm', apiKeyEnv: API_KEY_ENV }).stream({}));
-  await assert.rejects(() => events, (error) => error.code === 'provider_credential_missing' && error.detail === API_KEY_ENV);
+test('an empty environment reference reports missing when its native store is available', async () => {
+  const reference = `LIGULE_TEST_${randomUUID().replaceAll('-', '_').toUpperCase()}`;
+  const previous = process.env[reference];
+  delete process.env[reference];
+  try {
+    const events = collect(createMessagesProvider({ baseUrl: 'http://127.0.0.1:1', model: 'm', apiKeyEnv: reference }).stream({}));
+    await assert.rejects(() => events, (error) => {
+      if (error.code === 'provider_credential_missing') return error.detail === reference;
+      return process.platform === 'linux'
+        && process.env.LIGULE_CREDENTIAL_NATIVE_REQUIRED !== '1'
+        && error.code === 'credential_store_unavailable';
+    });
+  } finally {
+    if (previous === undefined) delete process.env[reference];
+    else process.env[reference] = previous;
+  }
 });
 
 test('a projection with a call nobody answered is refused before the request goes out', async () => {

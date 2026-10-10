@@ -2,6 +2,7 @@
 // 两种线上形状（Messages 兼容与 Chat Completions 兼容）共用这一份；差别只在各自的适配器里。
 import { setTimeout as sleep } from 'node:timers/promises';
 import { KernelError } from '../kernel/error.js';
+import { resolveCredential } from '../kernel/credentials.js';
 
 // 重试边界照 Codex 的 RetryPolicy 那三条可重试类别：429、5xx、传输。请求构造错误与响应内容不可解析永不重试。
 // 默认值是本项目自定的起点，配置层可以覆盖。
@@ -47,9 +48,9 @@ export function apiRoot(baseUrl) {
 }
 
 // 凭据在发请求时才读：进程运行期间换过密钥不必重建提供方，配置快照里也始终没有它。
-export function readCredential(apiKeyEnv) {
-  const apiKey = process.env[apiKeyEnv];
-  if (typeof apiKey !== 'string' || apiKey === '') {
+export async function readCredential(apiKeyEnv) {
+  const apiKey = await resolveCredential(apiKeyEnv);
+  if (apiKey === undefined) {
     throw new KernelError('provider_credential_missing', { detail: apiKeyEnv });
   }
   return apiKey;
