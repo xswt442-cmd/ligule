@@ -427,10 +427,12 @@ export function App({ transport }: { transport: Transport }) {
   // 桌面那一份偏好以应用数据根里的文档为准（方案 5.5.2）：打开窗口时从宿主读回来；数据根里还没有这一份
   // 而 WebView 缓存里留着旧内容时，把那旧内容一次性交上去（此后的权威副本在数据根）。
   // 读回来之前先不落笔：让第一屏的默认值盖掉数据根里那一份真内容，是会丢草稿的那一种错。
+  // 接会话那一路也要等它落定：缓存里那一份在读取回来之前是旧的，拿它恢复草稿会把文档里那一句盖成空。
+  const prefsSettled = useRef<Promise<void>>(Promise.resolve());
   const [settingsReady, setSettingsReady] = useState(false);
   useEffect(() => {
     let live = true;
-    client.call('prefs.read', {}, 15_000).then(
+    const settled = client.call('prefs.read', {}, 15_000).then(
       (read) => {
         if (!live) return;
         const raw = (read as { settings?: unknown }).settings;
@@ -456,6 +458,7 @@ export function App({ transport }: { transport: Transport }) {
     ).finally(() => {
       if (live) setSettingsReady(true);
     });
+    prefsSettled.current = settled;
     return () => {
       live = false;
     };
@@ -742,6 +745,8 @@ export function App({ transport }: { transport: Transport }) {
       // 接上这一份时把它自己那两格摊回来：草稿是当时没发出去的那一句，排着的几条恢复成暂停（方案 5.1、5.2）。
       const root = newest.header?.projectRoot ?? '';
       setProjectRoot(root);
+      // 缓存里那一份要等偏好从数据根读回来之后才是新的：恢复草稿与队列读的是那之后的缓存。
+      await prefsSettled.current;
       const stored = readSettings();
       const storedDraft = stored.drafts[root]?.[id] ?? '';
       const restored = stored.queued[root]?.[id] ?? [];
