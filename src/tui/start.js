@@ -20,14 +20,11 @@ export async function runTui({ config, provider, policy, logger, modeName, modeP
   try {
     const { sessionId } = await client.request('session.create', {});
     // 输入历史读一次就交进界面：往后的读与翻都看界面自己那一份，写这一份文件也只由界面发起。
-    const entries = await loadHistory(historyFile);
-    let known = entries;
     const history = {
-      entries,
-      remember: async (text) => {
-        known = pushHistory(known, text);
-        await rememberHistory(historyFile, known);
-      },
+      entries: await loadHistory(historyFile),
+      // 只把这一句交出去，基准由写的那一遍在锁内读：留着进程里那份旧快照整份写回，会把另一端刚落下的一句挤到后面。
+      // 交回写成之后的那一份清单，界面采用它——屏幕上的历史与文件里的那一份才是同一份。
+      remember: (text) => rememberHistory(historyFile, [text]),
     };
     const instance = render(
       createElement(App, {

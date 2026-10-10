@@ -737,13 +737,15 @@ test('the arrow keys recall the last sentence and Ctrl+R searches the history', 
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
 
   const remembered = [];
+  const fileEntries = ['改 note.txt 的第一行', '上一次会话里说过的话'];
   const instance = render(createElement(App, {
     client,
     sessionId,
     info: {},
     interactive: true,
     stdout,
-    history: { entries: ['改 note.txt 的第一行', '上一次会话里说过的话'], remember: async (text) => { remembered.push(text); } },
+    // 交回写完的清单是那一格的合同（方案 5.5.6）：这一份替身按同一条形状走，界面采用它交回的那一份。
+    history: { entries: fileEntries, remember: async (text) => { remembered.push(text); return pushHistory(fileEntries, text); } },
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   const lastFrame = () => completeFrame(painted);
   try {

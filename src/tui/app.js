@@ -300,7 +300,17 @@ const optionHint = (question) => question.options.length === 0
   ? '在下面的输入里写一句回答'
   : question.multiSelect ? '在下面的输入里写一句回答，或写几条编号选出那几项' : '在下面的输入里写一句回答，或写那一条的编号';
 
-export function App({ client, sessionId: firstSessionId, info = {}, interactive = true, stdout, history = { entries: [], remember: async () => {} }, inputs, keys }) {
+// 没有把那一份共用文件接进来时（调用方不给了历史）的历史：句子仍留在这一个进程里，退出就不在了。
+// 模块级一份：`remember` 交回写完的清单是这一格的合同，每次渲染新建一个对象会让界面的依赖一路变。
+const processHistory = {
+  entries: [],
+  remember: async (text) => {
+    processHistory.entries = pushHistory(processHistory.entries, text);
+    return processHistory.entries;
+  },
+};
+
+export function App({ client, sessionId: firstSessionId, info = {}, interactive = true, stdout, history = processHistory, inputs, keys }) {
   const app = useApp();
   const [sessionId, setSessionId] = useState(firstSessionId);
   const activeSession = useRef(sessionId);
@@ -566,8 +576,12 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
 
   const remember = useCallback((text) => {
     // 发出去的那一句才进历史：排进队列的那几条等真正发出去时各自进一次，翻历史看到的都是真说过的话。
+    // 先按眼前这一份排一下，箭头键不必等那一次写；写完再把画面换成锁内那一份清单——另一端那句也跟着进来（方案 5.5.6）。
     setEntries((current) => pushHistory(current, text));
-    void history.remember(text).catch((error) => push({ kind: 'error', text: `输入历史保存失败：${error.code ?? error.message}` }));
+    void history.remember(text).then(
+      (written) => setEntries(written),
+      (error) => push({ kind: 'error', text: `输入历史保存失败：${error.code ?? error.message}` }),
+    );
   }, [history, push]);
 
   const submit = useCallback(async (text) => {

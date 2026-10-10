@@ -8,7 +8,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import lockfile from 'proper-lockfile';
-import { loadHistory, rememberHistory } from '../dist/kernel/input-history.js';
+import { HISTORY_LIMIT, loadHistory, rememberHistory } from '../dist/kernel/input-history.js';
 
 const testplace = resolve('testplace');
 const writer = fileURLToPath(new URL('./fixtures/history-writer.mjs', import.meta.url));
@@ -81,6 +81,36 @@ test('history saves from separate processes keep every sentence', async () => {
     assert.deepEqual(reports, sentences.map(() => ({ written: true })), '四具都该写成功，而不是报那一份文件被人占着');
     const entries = await loadHistory(path);
     for (const sentence of sentences) assert.ok(entries.includes(sentence), `那一份文件里少了那一句：${sentence}`);
+  });
+});
+
+// 界面手里那份快照会过期：另一端在这之后写过，基准就得是文件里此刻那一份，不是界面读到过的那一份。
+test('a save merges into what the file holds now, not into the caller older snapshot', async () => {
+  await mkdir(testplace, { recursive: true });
+  await withHistoryDirectory(async (directory) => {
+    const path = join(directory, 'history.jsonl');
+    await rememberHistory(path, ['old']);
+    // 桌面先写下它那一句，终端后写自己这一句：终端那句排最前，桌面那句仍排在更早那一句之前，不被终端的旧读法挤到后面。
+    await rememberHistory(path, ['desktop']);
+    const written = await rememberHistory(path, ['terminal']);
+    assert.deepEqual(written, ['terminal', 'desktop', 'old'], '本次新增排最前，其余按文件里此刻的顺序');
+    assert.deepEqual(await loadHistory(path), written, '交回的清单就是文件里那一份');
+  });
+});
+
+// 满额时更明显：一份旧快照整体写回去会把文件里那 200 条新输入整份挤掉。
+test('a full file loses its oldest sentences, not another surface newest ones', async () => {
+  await mkdir(testplace, { recursive: true });
+  await withHistoryDirectory(async (directory) => {
+    const path = join(directory, 'history.jsonl');
+    const onDisk = Array.from({ length: HISTORY_LIMIT }, (_, index) => `磁盘里的第 ${index + 1} 条`);
+    await writeFile(path, onDisk.map((entry) => JSON.stringify(entry)).join('\n') + '\n');
+    // 这一边只交出自己刚发出去的那一句：它先前读到过的那些本来就在文件里。
+    const written = await rememberHistory(path, ['这一边新发的一句']);
+    assert.equal(written.length, HISTORY_LIMIT);
+    assert.deepEqual(written.slice(0, 2), ['这一边新发的一句', onDisk[0]]);
+    assert.equal(written.includes(onDisk.at(-1)), false, '满额时从最旧那一条开始丢');
+    assert.equal(written.filter((entry) => entry.startsWith('磁盘里的')).length, HISTORY_LIMIT - 1, '磁盘里更新的那 199 条一条不少');
   });
 });
 

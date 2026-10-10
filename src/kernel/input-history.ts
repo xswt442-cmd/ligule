@@ -58,18 +58,24 @@ export async function loadHistory(path = historyPathOf()): Promise<string[]> {
 const pendingSaves = new Map<string, Promise<void>>();
 
 /** 整份重写而不是追加：同一句只留最新那一份，文件也不跟着使用时长一直涨。
+ * 基准是锁内读到的那一份文件，`fresh` 只说明这一边新发出去的那几句（最新在先）：
+ * 界面自己那份旧快照整体写回去会把另一端刚落下的一句挤到后面，满额时还会把它挤掉。
+ * 交回写完的那一份清单——界面采用它，屏幕上的历史与文件里的那一份才是同一份。
  * ponytail: 每次发送重写一遍 200 行以内的小文件，换的是「崩在半路也不丢历史」——先写临时文件再改名。 */
-export async function rememberHistory(path: string, entries: readonly string[]): Promise<void> {
+export async function rememberHistory(path: string, fresh: readonly string[]): Promise<string[]> {
   const queued = pendingSaves.get(path) ?? Promise.resolve();
+  let written: string[] = [];
   const current = queued.catch(() => {}).then(async () => {
     await mkdir(dirname(path), { recursive: true });
     const release = await acquireHistoryLock(path);
     try {
       const existing = await loadHistory(path);
-      const merged = [...new Set([...entries, ...existing])].slice(0, HISTORY_LIMIT);
+      // `fresh` 按最新在先给，与文件里那一份同一个顺序：本次新增排到磁盘那一份前面，同句的旧那一份让位过来。
+      const added = [...new Set(fresh.map((entry) => entry.trim()).filter((entry) => entry !== ''))];
+      written = [...new Set([...added, ...existing])].slice(0, HISTORY_LIMIT);
       const temporary = `${path}.${randomUUID()}.tmp`;
       try {
-        await writeFile(temporary, merged.map((entry) => JSON.stringify(entry)).join('\n') + '\n', { encoding: 'utf8', flag: 'wx' });
+        await writeFile(temporary, written.map((entry) => JSON.stringify(entry)).join('\n') + '\n', { encoding: 'utf8', flag: 'wx' });
         await rename(temporary, path);
       } finally {
         await rm(temporary, { force: true });
@@ -84,6 +90,7 @@ export async function rememberHistory(path: string, entries: readonly string[]):
   } finally {
     if (pendingSaves.get(path) === current) pendingSaves.delete(path);
   }
+  return written;
 }
 
 /** 那把锁：拿到就交回一个释放动作；等不到就说清是哪一份文件被占着。 */
