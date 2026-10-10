@@ -11,7 +11,7 @@ import { loadExtensions } from '../kernel/extensions.js';
 import { applyMode, DEFAULT_MODE, loadMode } from '../kernel/modes.js';
 import { readRegistry, registerWorkspace, setDefaultWorkspace, workspaceIdentity } from '../kernel/workspace.js';
 import { historyPathOf, loadHistory, rememberHistory } from '../kernel/input-history.js';
-import { loadPrefs, parsePrefsJson, prefsPathOf, savePrefs } from '../kernel/desktop-prefs.js';
+import { parsePrefsJson, prefsPathOf, readPrefs, savePrefs } from '../kernel/desktop-prefs.js';
 import { createDecisionChain } from '../kernel/policy.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
@@ -1135,11 +1135,10 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
         }
         case 'prefs.read':
           // 桌面草稿与界面偏好那一份文档的位置也由宿主定（与输入历史同一处，方案 5.5.2）。
-          return { settings: await loadPrefs() };
+          return await readPrefs();
         case 'prefs.write': {
           const value = parsePrefsJson(String(message.params.json));
-          await savePrefs(prefsPathOf(), value);
-          return { settings: value };
+          return await savePrefs(prefsPathOf(), value, { version: message.params.version });
         }
         case 'config.get': {
           // 边界在「结果由固定那几格拼出来」这一句上，不在参数校验上：子集校验放过模式里没声明的键（D14）。

@@ -1,7 +1,5 @@
-// 界面一侧的设置：权威的那一份在应用数据根里（方案 5.5.2），经宿主 `prefs.read` / `prefs.write` 读写；
-// 草稿、字号、主题、侧栏宽度与收起、面板停靠都不进记录也不进配置文件。
-// WebView 里那一份 `ligule.ui` 只当第一屏的快速缓存：可恢复的草稿与队列不靠它，它丢了从数据根那一份读回来。
-// 那一份 JSON 是这台机器上留下的内容，读坏了就用默认，不猜它想表达什么。
+// Host 把界面设置存在数据根；`ligule.ui` 缓存首屏，只在数据根版本为空时迁移。
+// 读取失败时不写磁盘；草稿和队列保留完整内容，由 Host 检查文档大小。
 import type { Verbosity } from './components/types';
 import type { Client } from './protocol';
 
@@ -30,9 +28,6 @@ export type Settings = {
 
 const KEY = 'ligule.ui';
 const VERBOSITY: Verbosity[] = ['brief', 'standard', 'detailed', 'full'];
-// 一格草稿留 4000 字，一份会话最多排 20 句：这台机器上的存储不是给整段文件当缓存用的。
-const DRAFT_LIMIT = 4000;
-const QUEUE_LIMIT = 20;
 
 export const defaultSettings: Settings = {
   palette: 'ink',
@@ -73,7 +68,7 @@ const draftTable = (value: unknown): Record<string, Record<string, string>> => {
     if (typeof sessions !== 'object' || sessions === null) continue;
     const kept: Record<string, string> = {};
     for (const [session, text] of Object.entries(sessions)) {
-      if (typeof text === 'string' && text !== '') kept[session] = text.slice(0, DRAFT_LIMIT);
+      if (typeof text === 'string' && text !== '') kept[session] = text;
     }
     if (Object.keys(kept).length > 0) out[project] = kept;
   }
@@ -87,7 +82,7 @@ const queueTable = (value: unknown): Record<string, Record<string, string[]>> =>
     const kept: Record<string, string[]> = {};
     for (const [session, items] of Object.entries(sessions)) {
       if (!Array.isArray(items)) continue;
-      const sentences = items.filter((each): each is string => typeof each === 'string' && each !== '').slice(0, QUEUE_LIMIT);
+      const sentences = items.filter((each): each is string => typeof each === 'string' && each !== '');
       if (sentences.length > 0) kept[session] = sentences;
     }
     if (Object.keys(kept).length > 0) out[project] = kept;
@@ -122,7 +117,7 @@ export function readSettings(): Settings {
   return settingsFrom(raw);
 }
 
-/** 缓存里存着的那一份原文：启动时数据根里还没有偏好文档时，把这一份一次性交上去（迁移的来处）。 */
+/** 读取本地缓存原文；只有 Host 报告空版本时才考虑迁移。 */
 export function cachedSettingsJson(): string {
   try {
     return localStorage.getItem(KEY) ?? '';
@@ -140,10 +135,119 @@ export function cacheSettings(settings: Settings): void {
   }
 }
 
-/** 写那一份正式的：数据根里的文档由宿主原子落盘；写不动时抛错，由调用方决定怎么说出口。 */
+type ClientSettingsState = {
+  version: string;
+  writable: boolean;
+  tail: Promise<void>;
+  loading?: Promise<Settings>;
+};
+
+const clientSettings = new WeakMap<Client, ClientSettingsState>();
+
+function errorWithCode(error: unknown, fallback: string): Error {
+  if (error instanceof Error) {
+    const code = (error as Error & { code?: unknown }).code;
+    if (typeof code === 'string' && code !== '') return error;
+    return Object.assign(error, { code: fallback });
+  }
+  return Object.assign(new Error(String(error)), { code: fallback });
+}
+
+function objectValue(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function cachedLegacySettings(): Settings | undefined {
+  const json = cachedSettingsJson();
+  if (json === '') return undefined;
+  try {
+    const raw: unknown = JSON.parse(json);
+    if (objectValue(raw) === undefined) return undefined;
+    return settingsFrom(raw);
+  } catch {
+    return undefined;
+  }
+}
+
+function writeSettings(client: Client, state: ClientSettingsState, settings: Settings, version?: string): Promise<void> {
+  const pending = state.tail.then(async () => {
+    if (!state.writable) throw Object.assign(new Error('prefs_reload_required'), { code: 'prefs_reload_required' });
+    const result = await client.call('prefs.write', {
+      json: JSON.stringify(settings),
+      version: version ?? state.version,
+    }, 15_000);
+    const updated = objectValue(result);
+    if (typeof updated?.version !== 'string') {
+      throw Object.assign(new Error('prefs_write_version_invalid'), { code: 'prefs_write_version_invalid' });
+    }
+    state.version = updated.version;
+  });
+  state.tail = pending.then(
+    () => undefined,
+    () => { state.writable = false; },
+  );
+  return pending.catch((error: unknown) => {
+    state.writable = false;
+    throw errorWithCode(error, 'prefs_write_failed');
+  });
+}
+
+/** 从 Host 读取设置版本；只有成功读取后，该 Client 才能保存。 */
+export function loadSettings(client: Client): Promise<Settings> {
+  let state = clientSettings.get(client);
+  if (state === undefined) {
+    state = { version: '', writable: false, tail: Promise.resolve() };
+    clientSettings.set(client, state);
+  }
+  if (state.loading !== undefined) return state.loading;
+  state.writable = false;
+
+  const loading = (async () => {
+    await state.tail;
+    try {
+      const result = objectValue(await client.call('prefs.read', {}, 15_000));
+      if (result === undefined || typeof result.version !== 'string') {
+        throw Object.assign(new Error('prefs_read_version_invalid'), { code: 'prefs_read_version_invalid' });
+      }
+      state.version = result.version;
+      state.writable = true;
+      const settings = settingsFrom(result.settings);
+      if (state.version !== '') {
+        cacheSettings(settings);
+        return settings;
+      }
+
+      const legacy = cachedLegacySettings();
+      if (legacy !== undefined) {
+        await writeSettings(client, state, legacy, '');
+        cacheSettings(legacy);
+        return legacy;
+      }
+      cacheSettings(settings);
+      return settings;
+    } catch (error) {
+      state.writable = false;
+      throw errorWithCode(error, 'prefs_read_failed');
+    }
+  })();
+  state.loading = loading;
+  void loading.then(
+    () => { if (state.loading === loading) state.loading = undefined; },
+    () => { if (state.loading === loading) state.loading = undefined; },
+  );
+  return loading;
+}
+
+/** 缓存保留首屏状态；正式写入必须使用最近一次成功读取的版本。 */
 export async function saveSettings(client: Client, settings: Settings): Promise<void> {
   cacheSettings(settings);
-  await client.call('prefs.write', { json: JSON.stringify(settings) }, 15_000);
+  const state = clientSettings.get(client);
+  if (state === undefined || !state.writable) {
+    throw Object.assign(new Error('prefs_reload_required'), { code: 'prefs_reload_required' });
+  }
+  await writeSettings(client, state, settings);
 }
 
 // 重连之后这一份会话排着的几句交回草稿：按先后拼在草稿后面，原来那一句留在最前，界面不自动发其中任何一句。

@@ -26,7 +26,7 @@ import type { Verbosity } from './components/types';
 import { createSlotRegistry, SLOTS, type Panel } from './slots';
 import { capabilityOf, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn, type Record_, type Row } from './rows';
 import type { Status } from './status';
-import { cacheSettings, cachedSettingsJson, mergeQueueIntoDraft, readSettings, saveSettings, settingsFrom, type Settings } from './settings';
+import { loadSettings, mergeQueueIntoDraft, readSettings, saveSettings, type Settings } from './settings';
 
 type Branch = { seq: number; id: string; task: string };
 
@@ -430,39 +430,31 @@ export function App({ transport }: { transport: Transport }) {
   // 接会话那一路也要等它落定：缓存里那一份在读取回来之前是旧的，拿它恢复草稿会把文档里那一句盖成空。
   const prefsSettled = useRef<Promise<void>>(Promise.resolve());
   const [settingsReady, setSettingsReady] = useState(false);
+  const [prefsFailure, setPrefsFailure] = useState<string | null>(null);
+  const [prefsRevision, setPrefsRevision] = useState(0);
   useEffect(() => {
     let live = true;
-    const settled = client.call('prefs.read', {}, 15_000).then(
-      (read) => {
+    setSettingsReady(false);
+    setPrefsFailure(null);
+    const settled = loadSettings(client).then(
+      (adopted) => {
         if (!live) return;
-        const raw = (read as { settings?: unknown }).settings;
-        if (typeof raw === 'object' && raw !== null && Object.keys(raw).length > 0) {
-          const adopted = settingsFrom(raw);
-          cacheSettings(adopted);
-          setSettings(adopted);
-          return;
-        }
-        const legacy = cachedSettingsJson();
-        if (legacy === '') return;
-        try {
-          const parsed: unknown = JSON.parse(legacy);
-          if (typeof parsed === 'object' && parsed !== null && Object.keys(parsed).length > 0) {
-            void client.call('prefs.write', { json: legacy }, 15_000).catch(() => undefined);
-          }
-        } catch {
-          // 缓存里那一份读不出来就不往上交，按默认走。
-        }
+        setSettings(adopted);
+        saveWarned.current = false;
+        setSettingsReady(true);
       },
-      () => undefined,
-      // 读失败了也放行：按缓存那一份继续用，下一次改动仍会往数据根写（那时也写不动会说出来）。
-    ).finally(() => {
-      if (live) setSettingsReady(true);
-    });
+      (error) => {
+        if (live) setPrefsFailure(code(error));
+        throw error;
+      },
+    );
+    // 失败在横幅中呈现；接会话的流程等待同一结果并停止恢复，不能据缓存覆盖文件。
+    void settled.catch(() => undefined);
     prefsSettled.current = settled;
     return () => {
       live = false;
     };
-  }, [client]);
+  }, [client, prefsRevision]);
 
   // 本轮计时：有轮在跑就一秒走一格，画面按眼前那一份会话自己那一轮的起点算秒数。
   useEffect(() => {
@@ -545,10 +537,12 @@ export function App({ transport }: { transport: Transport }) {
       return next;
     };
     const items = queues[sessionId]?.items ?? [];
-    void saveSettings(client, { ...settings, drafts: put(stored.drafts, draft), queued: put(stored.queued, items) }).catch(() => {
+    void saveSettings(client, { ...settings, drafts: put(stored.drafts, draft), queued: put(stored.queued, items) }).catch((error) => {
+      setSettingsReady(false);
+      setPrefsFailure(code(error));
       if (saveWarned.current) return;
       saveWarned.current = true;
-      setRows((current) => [...current, metaRow('error', '这一句在屏幕上留着，但本机那一份存储写不进去：退出再打开时它不会回来')]);
+      setRows((current) => [...current, metaRow('error', '草稿尚未保存。请重试保存，或先复制内容。')]);
     });
   }, [client, draft, inputOwner, projectRoot, queues, sessionId, settings, settingsReady]);
 
@@ -1326,6 +1320,10 @@ export function App({ transport }: { transport: Transport }) {
     <div className="splitter" role="separator" aria-orientation="vertical" aria-label="侧栏宽度" onPointerDown={startDrag} />
 
     <main className="center">
+      {prefsFailure !== null && <div className="banner" role="alert">
+        <span>本机偏好暂不可用，已暂停自动保存。<code>{prefsFailure}</code></span>
+        <button type="button" onClick={() => setPrefsRevision((value) => value + 1)}>重试</button>
+      </div>}
       <header className="topbar">
         <div className="title">
           <strong id="session-title">{sessionId === null ? '没有会话' : `会话 ${sessionId.slice(0, 8)}`}</strong>
@@ -1468,7 +1466,7 @@ export function App({ transport }: { transport: Transport }) {
           rows={3}
           value={draft}
           // 接一份会话的那一段里不接新字：这一段屏幕上还是上一份的草稿，敲进去的会落在错的归属上（方案 5.1、审阅 F5）。
-          readOnly={reading}
+          readOnly={sessionId === null || reading || inputOwner !== sessionId || !settingsReady}
           placeholder={`要模型做的事。按 ${formatKeys(CURRENT['send'])} 发送；正在跑的时候这一句排到后面；${formatKeys(CURRENT['newline'])} 换行；空草稿上按 ${formatKeys(CURRENT['history-older'])}${formatKeys(CURRENT['history-newer'])} 翻本机输入历史；打 @ 引一份项目里的文件。`}
           onChange={(event) => {
             setDraft(event.target.value);

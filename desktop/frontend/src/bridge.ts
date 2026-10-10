@@ -6,15 +6,17 @@ import type { Transport } from './protocol';
 // 界面拿不到地址、端口与凭据，本机也不监听端口。
 export function tauriTransport(): Transport {
   let fault: ((reason: string) => void) | undefined;
+  let listening: Promise<unknown> = Promise.resolve();
   return {
     send: (frame) => {
       // 壳那一侧回不了话（后端进程不在了、管道断了）就报到故障那一条路上：帧发不出去是界面要知道的事。
-      invoke('host_send', { frame }).catch((reason: unknown) => {
+      listening.then(() => invoke('host_send', { frame })).catch((reason: unknown) => {
         fault?.(String((reason as { message?: unknown })?.message ?? reason));
       });
     },
     onFrame: (handle) => {
-      void listen<string>('host-frame', (event) => handle(event.payload));
+      // 注册完成后才发送首个请求，避免响应早于事件监听到达。
+      listening = listen<string>('host-frame', (event) => handle(event.payload));
     },
     onLog: (handle) => {
       void listen<string>('host-log', (event) => handle(event.payload));

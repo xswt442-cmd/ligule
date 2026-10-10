@@ -1633,22 +1633,27 @@ test('the host keeps one desktop preferences document the interface writes whole
   const previous = process.env.LIGULE_HOME;
   process.env.LIGULE_HOME = join(root, 'data');
   const config = createConfig({ user: { boundary: root, model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model' } } });
-  const quiet = { capabilities: MESSAGES_CAPABILITIES, model: 'test-model', async *stream() { yield { type: 'text', text: 'ok' }; } };
   const pair = createMemoryConnectionPair();
-  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider: quiet, policy: { mode: 'auto' } });
+  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider: providerFromConfig(config), policy: { mode: 'auto' } });
   const client = createConnection(pair.client);
   try {
-    assert.deepEqual((await client.request('prefs.read', {})).settings, {}, '还没有过任何一次保存不是错误');
+    const empty = await client.request('prefs.read', {});
+    assert.deepEqual(empty, { settings: {}, version: '' }, '缺失文件有明确的空版本');
     const document = { palette: 'forest', drafts: { '/p': { s1: '没发出去的一句' } }, queued: { '/p': { s1: ['排着的两句'] } } };
-    assert.deepEqual((await client.request('prefs.write', { json: JSON.stringify(document) })).settings, document, '写下的那一份交回来');
+    const saved = await client.request('prefs.write', { json: JSON.stringify(document), version: empty.version });
+    assert.deepEqual(saved.settings, document, '写下的那一份交回来');
+    assert.notEqual(saved.version, empty.version);
     assert.deepEqual((await client.request('prefs.read', {})).settings, document, '再读回来是同一份');
     assert.deepEqual(JSON.parse(await readFile(join(root, 'data', 'desktop.json'), 'utf8')), document, '文件里就是这一份整份文档');
 
     await savePrefs(prefsPathOf(), { palette: 'graphite' });
-    assert.deepEqual((await client.request('prefs.read', {})).settings, { palette: 'graphite' }, '文件被另一端改写后，读出的是文件里那一份');
+    await assert.rejects(client.request('prefs.write', { json: JSON.stringify(document), version: saved.version }), (error) => error.code === 'desktop_prefs_version_stale');
+    const latest = await client.request('prefs.read', {});
+    assert.deepEqual(latest.settings, { palette: 'graphite' }, '文件被另一端改写后，读出的是文件里那一份');
 
-    await assert.rejects(client.request('prefs.write', { json: '{ not json' }), (error) => error.code === 'desktop_prefs_invalid', '读不出来的那一份不上桥');
-    await assert.rejects(client.request('prefs.write', { json: '[1]' }), (error) => error.code === 'desktop_prefs_invalid', '不是对象的那一份也拒');
+    await assert.rejects(client.request('prefs.write', { json: '{ not json', version: latest.version }), (error) => error.code === 'desktop_prefs_invalid', '读不出来的那一份不上桥');
+    await assert.rejects(client.request('prefs.write', { json: '[1]', version: latest.version }), (error) => error.code === 'desktop_prefs_invalid', '不是对象的那一份也拒');
+    await assert.rejects(client.request('prefs.write', { json: '{}' }), (error) => error.code === 'protocol_args_invalid', '未读取版本的客户端不能覆盖文件');
     await assert.rejects(client.request('prefs.write', {}), (error) => error.code === 'protocol_args_invalid', '没有文档就没有要写的东西');
     assert.deepEqual((await client.request('prefs.read', {})).settings, { palette: 'graphite' }, '被拒的那几次一个字都没写进文件');
   } finally {

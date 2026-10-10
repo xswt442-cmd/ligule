@@ -7,6 +7,7 @@ Rules for `src/kernel/`: the tool table, decision chain, loop, prompt assembly, 
 - `dataRoot()` in `config-file.js` is the one place that builds the per-user directory (D110). Nothing under `src/kernel/` joins `.ligule` onto the home directory by hand, and the tests take a home parameter the same way the loaders do.
 - An absolute `LIGULE_HOME` wins. A blank one reads as unset, and a relative one fails with `data_root_invalid` — the root never moves with the working directory.
 - The user config layer, `modes/`, `skills/`, `prompts/` and `extensions/` are read under it. `~/.agents/skills/` and everything under the project boundary keep their own anchors.
+- 桌面偏好保存在 `<data root>/desktop.json`。`readPrefs` 返回完整文档及其 SHA-256 版本；文件不存在时返回空文档与空版本。`savePrefs` 在跨进程锁内比较传入版本，拒绝格式错误或超限的文档，再原子替换文件并保留原权限；新文件权限为 `0600`。
 
 ## Workspaces
 

@@ -198,8 +198,9 @@ export const METHODS = Object.freeze({
       type: 'object',
       properties: {
         json: { type: 'string', description: 'the whole preferences document as JSON; it must parse to an object' },
+        version: { type: 'string', description: 'the byte version returned by prefs.read; blank only when the file did not exist' },
       },
-      required: ['json'],
+      required: ['json', 'version'],
     },
   },
   // 第四条只为界面多出来的方法（前三条是 `mode.set` D65、`session.compact` D83、`sessions.list`）：配置在宿主那一侧，
