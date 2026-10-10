@@ -116,13 +116,27 @@ function readFileSyncSync(path) {
   return readFileSync(path, 'utf8');
 }
 
-async function copyTree(from, to) {
+// 一份运行树只带本目标那一个平台的原生块（见文件头那句）：`prebuilds/<平台>-<架构>` 与 koffi 的
+// libc 目录里只留与目标相符的那一份，gyp 的中间物目录 `obj.target` 也不进树。
+// AppImage 的 linuxdeploy 对 AppDir 里每个 ELF 跑 patchelf 并解析依赖，撞上 musl 那份 koffi 绑定
+// （找不到 libc.musl-x86_64.so.1）整包失败；中间物里的 `.o` 连 patchelf 都过不去。
+const NATIVE_DIR = /^(linux|musl|darwin|win32|freebsd|android)[-_](x64|arm64|ia32|armhf|armv7l)$/;
+const nativeDir = target.replace('-', '_');
+function keepNative(name) {
+  if (name === 'obj.target') return false;
+  const normalized = name.replaceAll('-', '_');
+  return NATIVE_DIR.test(normalized) ? normalized === nativeDir : true;
+}
+
+async function copyTree(from, to, keep = () => true) {
   await mkdir(to, { recursive: true });
   for (const entry of await readdir(from, { withFileTypes: true })) {
     const source = join(from, entry.name);
     const target = join(to, entry.name);
-    if (entry.isDirectory()) await copyTree(source, target);
-    else await copyFile(source, target);
+    if (entry.isDirectory()) {
+      if (!keep(entry.name)) continue;
+      await copyTree(source, target, keep);
+    } else await copyFile(source, target);
   }
 }
 
@@ -139,10 +153,26 @@ async function fetchAppTree() {
   await copyFile(join(root, 'package.json'), join(app, 'package.json'));
   await copyFile(join(root, 'LICENSE'), join(app, 'LICENSE'));
   for (const name of productionPackages()) {
-    await copyTree(join(root, 'node_modules', name), join(app, 'node_modules', name));
+    await copyTree(join(root, 'node_modules', name), join(app, 'node_modules', name), keepNative);
+  }
+  const foreign = await listForeignNative(app);
+  if (foreign.length > 0) {
+    throw new Error(`the runtime tree still carries native dirs for another target: ${foreign.slice(0, 5).join(', ')}`);
   }
   const files = await countFiles(app);
-  console.log(`vendored the runtime tree -> ${app} (${files} files)`);
+  console.log(`vendored the runtime tree -> ${app} (${files} files, native for ${nativeDir})`);
+}
+
+// 复制过后的复核：谓词换掉或漏传时这里当场死，不把多出来的原生块交给 linuxdeploy 才发现。
+async function listForeignNative(directory) {
+  const found = [];
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const path = join(directory, entry.name);
+    if (!keepNative(entry.name)) found.push(path);
+    else found.push(...(await listForeignNative(path)));
+  }
+  return found;
 }
 
 async function countFiles(directory) {
