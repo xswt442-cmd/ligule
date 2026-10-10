@@ -44,7 +44,7 @@ cargo test
 
 测的是这一层真正负责的三件事：从可执行文件位置找到后端入口（找不到要说清找过哪几层），帧在子进程两根管道之间的按行转递，以及槽位换新的那一具进程时把旧的那一份交回调用方终止——旧进程终止之后既写不进帧，也不再往窗口里送。
 
-前端构建检查运行 `cd desktop/frontend && npm run build`，包含 TypeScript 检查与 Vite 构建。窗口交互通过 `cd desktop && npm run dev` 启动真实桌面壳，检查后端进程、转录、审批与菜单；关闭壳后检查后端与正在执行的命令退出。
+前端构建检查运行 `cd desktop/frontend && npm run build`，包含 TypeScript 检查与 Vite 构建。窗口交互通过 `cd desktop && npm run dev` 启动真实桌面壳，检查后端进程、转录、审批与菜单；那一记叉收起的是窗口，后端进程与它攥着的记录锁都还在，检查后端与正在执行的命令一起退出要走托盘菜单里「退出 ligule」那一条。
 
 不启动壳也有两条可跑的：`cd desktop/frontend && npm run check` 跑投影、协议与按键三份断言；`npm run dev` 起开发服务后打开 `dev/dev.html`，那一份界面跑的是仓库里的假宿主（`desktop/frontend/dev/`），流式、审批、稳定码、用量、会话列表、查找、分支、支线与 `@` 的文件候选都有确定形状，地址后面接 `?rows=2000&bench=1` 量一轮长转录的读数。
 

@@ -332,7 +332,7 @@ When the desktop shell cannot find the backend entry point, `LIGULE_DESKTOP_CLI`
 
 | Not there yet | How to work around it |
 |---|---|
-| several windows on one session | one shell equals one backend process; close the other window, then take the session back in the new one |
+| several windows on one session | one shell equals one backend process; quit that shell through its tray menu (「退出 ligule」), then take the session back in the new window. The close button only hides a window — its backend process, and the record lock it holds, stay |
 | rename and archive in the desktop | use `/name`, `/archive`, `/unarchive` in the terminal UI; the desktop reads the same log |
 | handing an image to the model | `read` returns text; no such tool exists, so even a multimodal endpoint only gets words |
 | `ligule init` and one self-check command | copy the minimal configuration from the [configuration](#configuration) section; check what loaded with `ligule tools`, `skills` and `extensions` |
