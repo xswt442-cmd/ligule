@@ -21,7 +21,7 @@ const TRAY_QUIT: &str = "tray-quit";
 #[derive(Default)]
 struct AppState {
     host: Mutex<Option<Host>>,
-    /// 托盘有没有立起来。立不起来时点叉收起会把人关在一个找不回的位置，那一种机器上按直接退出走（方案 6.4）。
+    /// 托盘那一枚立起来没有。立不起来只是没有可回的位置：点叉时不收进找不回的地方，而是先问界面再走（方案 6.4、审阅 G1）。
     restorable: AtomicBool,
     /// 人已经点了「中断任务并退出」。这一条之后拦退出与藏窗口都不再做。
     quitting: AtomicBool,
@@ -35,6 +35,34 @@ impl AppState {
     fn confirmed_quit(&self) -> bool {
         self.quitting.load(Ordering::Relaxed)
     }
+}
+
+/// 点叉那一步要做的事。托盘只回答「收起之后还能不能找回来」，它不回答「这一走要不要先问一遍」：
+/// 那是两件独立的事（审阅 G1、D109 与方案 6.4）。
+#[derive(Debug, PartialEq, Eq)]
+enum OnClose {
+    /// 有托盘可回：窗口藏起来，轮次、待答的卡与排着的句子都原样留着。
+    Hide,
+    /// 没有托盘可回：窗口留着不动，把这一走交给界面问一遍。
+    Ask,
+    /// 人已经点过「中断任务并退出」：不再拦。
+    Proceed,
+}
+
+fn close_action(tray_up: bool, confirmed: bool) -> OnClose {
+    if confirmed {
+        return OnClose::Proceed;
+    }
+    if tray_up {
+        OnClose::Hide
+    } else {
+        OnClose::Ask
+    }
+}
+
+/// 退出请求要不要先问界面：只看人确认过没有。托盘立不立得起来都不免掉这一问。
+fn exit_asks(confirmed: bool) -> bool {
+    !confirmed
 }
 
 /// 把主窗口交回眼前：托盘「打开」、macOS 点图标，与退出前那张确认都要窗口在屏幕上才谈得成。
@@ -154,8 +182,8 @@ fn default_workspace(app: AppHandle) -> Result<String, String> {
     Ok(directory.to_string_lossy().into_owned())
 }
 
-/// 托盘那一枚与它两条菜单。立不起来时把原因说出去，界面上那一条叉就退回原来的做法：
-/// 收进一个找不回的位置比直接退出更糟（方案 6.4）。
+/// 托盘那一枚与它两条菜单。立不起来时把原因说出去，界面上那一条叉改走「先问一遍再收」：
+/// 收进一个找不回的位置比问一句更糟（方案 6.4、审阅 G1）。
 fn build_tray(app: &AppHandle) -> Result<(), String> {
     let open = MenuItem::with_id(app, TRAY_OPEN, "打开 ligule", true, None::<&str>)
         .map_err(|error| format!("the tray menu could not be built: {error}"))?;
@@ -209,13 +237,20 @@ fn main() {
             Ok(())
         })
         // 点叉收起这一扇窗：WebView、后端进程、跑着的轮次、待答的卡与排着的几句都原样留着（方案 6.4）。
-        // 收起不弹中断确认——那一句确认只在人真的要走的时候问。
+        // 收起不弹中断确认——那一句确认只在人真的要走的时候问。没有托盘时这一走是真的要走，先问界面。
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.app_handle().state::<AppState>();
-                if state.tray_up() && !state.confirmed_quit() {
-                    api.prevent_close();
-                    let _ = window.hide();
+                match close_action(state.tray_up(), state.confirmed_quit()) {
+                    OnClose::Proceed => {}
+                    OnClose::Hide => {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
+                    OnClose::Ask => {
+                        api.prevent_close();
+                        request_quit(window.app_handle());
+                    }
                 }
             }
         })
@@ -229,11 +264,11 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building the desktop shell")
         .run(|app_handle, event| match event {
-            // 退出入口走同一条检查：托盘「退出」、macOS 的 Cmd+Q、关掉最后一扇窗口都先到这里，
+            // 退出入口走同一条检查：托盘「退出」、macOS 的 Cmd+Q、关掉最后一扇窗口、没有托盘时点叉都先到这里，
             // 由界面说出受影响的会话并等人确认；人点过「中断任务并退出」之后 `app_quit` 才真的收（方案 6.4）。
+            // 这一问与托盘在不在无关（审阅 G1）。
             tauri::RunEvent::ExitRequested { api, .. } => {
-                let state = app_handle.state::<AppState>();
-                if state.tray_up() && !state.confirmed_quit() {
+                if exit_asks(app_handle.state::<AppState>().confirmed_quit()) {
                     api.prevent_exit();
                     request_quit(app_handle);
                 }
@@ -246,4 +281,28 @@ fn main() {
             }
             _ => {}
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{close_action, exit_asks, OnClose};
+
+    #[test]
+    fn a_tray_lets_the_close_button_hide_the_window() {
+        assert_eq!(close_action(true, false), OnClose::Hide);
+    }
+
+    #[test]
+    fn closing_without_a_tray_asks_the_interface_instead_of_quietly_exiting() {
+        // 没有托盘只是少了一个可回的位置，不免掉那一句确认（审阅 G1）。
+        assert_eq!(close_action(false, false), OnClose::Ask);
+        assert!(exit_asks(false));
+    }
+
+    #[test]
+    fn a_confirmed_quit_passes_both_ways_out() {
+        assert_eq!(close_action(true, true), OnClose::Proceed);
+        assert_eq!(close_action(false, true), OnClose::Proceed);
+        assert!(!exit_asks(true));
+    }
 }
