@@ -313,6 +313,8 @@ The palette holds: new session, re-read this session's log, branch a new session
 | `data_root_invalid` | `LIGULE_HOME` names a relative path | write an absolute path; without this variable the data root is `~/.ligule` |
 | `workspace_registry_invalid` | the workspace registry cannot be parsed, or its default selection names an identity that is not registered | fix the field the error names, or delete the file and let session creation register the workspaces again |
 | `workspace_registry_version` | the registry was written by a later version | run that version's executable, or delete the file and register again |
+| `input_history_invalid` | one line of the shared input history does not read as a sentence | fix or delete the line it names, or delete the file; the next send writes it again |
+| `input_history_locked` | something else is writing that history right now | send again a moment later; only two surfaces sending at once hit it |
 | `cli_command_unknown` | the command name is misspelled | run `ligule --help` |
 | `tui_terminal_required` | the terminal UI started on a non-interactive terminal | use `ligule run` |
 | `tui_dependency_missing` | the terminal UI's optional dependencies are not installed | `npm install ink react marked highlight.js string-width` |

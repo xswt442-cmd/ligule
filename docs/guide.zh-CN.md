@@ -313,6 +313,8 @@ reason = "只读的 diff"
 | `data_root_invalid` | `LIGULE_HOME` 写的是相对路径 | 写绝对路径；没写这一格时数据根是 `~/.ligule` |
 | `workspace_registry_invalid` | 那份工作区登记读不懂，或默认选择指向一个没登记的身份 | 按报出来的那一格改那份文件；也可以删掉它，之后由建会话那一条路重新登记 |
 | `workspace_registry_version` | 那份登记由更晚的版本写过 | 换回那一版的可执行文件，或删掉那份文件重新登记 |
+| `input_history_invalid` | 两端共用的那份输入历史里有一行读不成一句 | 按报出来的行号改掉或删掉那一行；整份删掉也行，下一次发送重新写出来 |
+| `input_history_locked` | 另一处正在写那份输入历史 | 过一会儿再发那一句；两端同时发送才碰上得了 |
 | `cli_command_unknown` | 命令名打错 | 跑 `ligule --help` 列一遍 |
 | `tui_terminal_required` | 在非交互终端里起了终端界面 | 改用 `ligule run` |
 | `tui_dependency_missing` | 终端界面的可选依赖没装上 | `npm install ink react marked highlight.js string-width` |
