@@ -10,7 +10,7 @@ import { mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { createConnection, createConfig, createMemoryConnectionPair, MESSAGES_CAPABILITIES, METHODS, NOTIFICATIONS, providerFromConfig, resolveShell, serveHost } from '../dist/index.js';
+import { createConnection, createConfig, createMemoryConnectionPair, MESSAGES_CAPABILITIES, METHODS, NOTIFICATIONS, providerFromConfig, hostProviderFromConfig, resolveShell, serveHost } from '../dist/index.js';
 import { shownConfigOf } from '../dist/host/host.js';
 import { createConfigStore } from '../dist/kernel/config-store.js';
 import { configVersion } from '../dist/kernel/config-edit.js';
@@ -1592,4 +1592,18 @@ test('the host keeps the input history both surfaces share: newest first, one co
     else process.env.LIGULE_HOME = previous;
     await rm(root, { recursive: true, force: true });
   }
+});
+
+// 数据根里没有 `[model]` 那一格时，宿主这一路要起得来：桌面壳设置里那一栏正是用来写上那几格的（U59）。
+// 命令行与终端那两路不当场报错就没人说这句话，所以那两路仍旧走 `providerFromConfig`。
+test('the host keeps a shape to serve from when no model is configured yet', async () => {
+  const pending = hostProviderFromConfig({});
+  assert.equal(pending.pending, true, '缺的那几格由这一枚占位的顶着');
+  assert.equal(typeof pending.stream, 'function', '宿主认的就是 `provider.stream` 是一个函数，这一枚要过得去');
+  await assert.rejects(async () => {
+    for await (const chunk of pending.stream({ messages: [] })) void chunk;
+  }, (error) => error.code === 'host_model_config_missing', '真要发一轮时说的是缺哪几格');
+  assert.throws(() => pending.withModel('deepseek-chat'), (error) => error.code === 'host_model_config_missing', '换模型也换不出一份不存在的配置');
+  assert.equal(hostProviderFromConfig({ model: { api: 'other' } }).pending, true, '线上形状写错的那一种也留着让界面改得动');
+  assert.throws(() => providerFromConfig({}), (error) => error.code === 'host_model_config_missing', '命令行那一路照旧当场说');
 });

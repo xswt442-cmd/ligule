@@ -20,7 +20,7 @@ import { listSessions, sessionDirectory } from './session/list.js';
 import { formatVerdicts, summarizeVerdicts } from './session/verdicts.js';
 import { minimalPlugin } from './tools/minimal.js';
 import { networkPlugin } from './tools/network.js';
-import { createHost, providerFromConfig, serveHost } from './host/host.js';
+import { createHost, providerFromConfig, hostProviderFromConfig, serveHost } from './host/host.js';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 // 随包的模式目录与 `dist/` 同级：从本模块往上一层就是包根，本地检出与解包之后是同一个相对位置。
@@ -388,7 +388,8 @@ if (missingFlagValue) {
     // 这一格跟着 `ligule host` 起：设置那一栏在桌面壳里，终端与 `ligule run` 都没有要写配置的入口。
     serveHost({
       config,
-      provider: providerFromConfig(config),
+      // 还没配上模型时宿主照样起来收请求：那一栏要写得进去才谈得上配上（U59）。发起一轮时才说缺哪几格。
+      provider: hostProviderFromConfig(config),
       policy: config.policy,
       extensions,
       loadEnvironment: projectEnvironment,

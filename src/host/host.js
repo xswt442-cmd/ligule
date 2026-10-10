@@ -84,8 +84,26 @@ export function providerFromConfig(config) {
   });
 }
 
-// 会话记录落在哪儿由 `src/session/list.js` 那一处说:同一件事在两处各写一次,列表与宿主就会读到两个目录(D73)。
+/** 缺那几格时宿主先立起来的这一枚：形状与真提供方一样，进程收得住请求，设置的「模型与端点」那一栏才写得进去（U59）。
+ *  真要发一轮时把缺的字段原样说出去；写完那几格由 `adoptGeneration` 换上真那一份，这一枚就退场。 */
+function pendingProvider(error) {
+  const refuse = () => {
+    throw error;
+  };
+  return { model: null, pending: true, withModel: refuse, stream: async function* () { refuse(); } };
+}
 
+/** 宿主这一路用的提供方：不像命令行那样当场把进程带走。命令行与终端那两路仍旧当场报错——那是人坐在终端前，越早说越好。 */
+export function hostProviderFromConfig(config) {
+  try {
+    return providerFromConfig(config);
+  } catch (error) {
+    if (error?.code !== 'host_model_config_missing' && error?.code !== 'provider_api_form_required') throw error;
+    return pendingProvider(error);
+  }
+}
+
+// 会话记录落在哪儿由 `src/session/list.js` 那一处说:同一件事在两处各写一次,列表与宿主就会读到两个目录(D73)。
 // 循环的上限来自配置文件，形状在这里就查：只写其中一项时另一项照默认值补，
 // 缺值传下去会让「迭代上限」变成 undefined，那一轮一次都不跑，报出来的码还说不出为什么。
 function loopLimitsOf(config) {
