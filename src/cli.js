@@ -95,7 +95,7 @@ async function projectEnvironment(projectRoot) {
   const config = createConfig({ ...layers, user });
   return {
     config,
-    provider: providerFromConfig(config),
+    provider: hostProviderFromConfig(config),
     policy: config.policy,
     // 四层原样交回：宿主给这一份项目环境建它自己的可写层存储，设置那一栏读写都按这一个项目算（方案 3.2）。
     layers,
