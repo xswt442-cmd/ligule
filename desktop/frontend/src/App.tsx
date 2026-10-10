@@ -40,6 +40,23 @@ const RENDER_WINDOW = 400;
 // 这一格要留成正数，所以从一个足够大的数起：往前每插一页就从它里面减掉插进去的行数，起得太小会减成负数。
 const FIRST_INDEX = 100_000;
 
+// 补页之后的视口回补：virtuoso 按当时记下的高度把补进来的那一页接上去，真实行高一量准，
+// 视口会落在锚点下方一屏多的地方（P5 第 35、37 趟各差约 1500 像素）。`scrollTop` 与 `scrollHeight`
+// 同一把尺：等尺寸稳下来之后把「离内容上沿的距离」拨回原值，等于视口没动；补页期间底部也来了新行时不拨。
+async function settleAfterPrepend(before: { top: number; height: number; shown: number }, addedShown: number, shownNow: () => number) {
+  const element = document.querySelector<HTMLElement>('[data-virtuoso-scroller="true"]');
+  if (element === null) return;
+  let last = -1;
+  for (let frame = 0; frame < 60; frame += 1) {
+    await new Promise((done) => requestAnimationFrame(() => done(null)));
+    if (element.scrollHeight === last) break;
+    last = element.scrollHeight;
+  }
+  if (shownNow() !== before.shown + addedShown) return;
+  const wanted = before.top + (element.scrollHeight - before.height);
+  if (Math.abs(element.scrollTop - wanted) > 2) element.scrollTop = wanted;
+}
+
 type PanelProps = {
   client: Client;
   status: Status | null;
@@ -289,6 +306,8 @@ export function App({ transport }: { transport: Transport }) {
   const [live, setLive] = useState({ text: '', reasoning: '' });
   // 流式那半截按会话各存一份：后台那一轮的片段留着，切回来先补上它，不等那一条落进记录（方案 3.1、审阅 F4）。
   const liveBySession = useRef(new Map<string, { text: string; reasoning: string }>());
+  // 展示档之后的可见行数：补页回补靠它分「只有补页」与「补页期间底部也来了新行」两种情形。
+  const shownCount = useRef(0);
   // 跑着的时候新到的询问排在后面：一次问一件事，答一件再画下一件。
   const [asks, setAsks] = useState<Ask[]>([]);
   // 本轮收尾时要知道那一份会话还剩几条没答：这一格由渲染之后同步，不在那一条收尾路径的依赖里读 `asks`（那会读到旧的一份）。
@@ -454,11 +473,15 @@ export function App({ transport }: { transport: Transport }) {
       // 这一页读回来的时候人已经切走了：过期答复不改新画面的行数，也不动它的游标（方案 6.2）。
       if (opening.current !== sessionId) return;
       const added = older.events.flatMap((record) => projectRecord(record));
+      const addedShown = added.filter((row) => shownIn(verbosity, row)).length;
+      const scroller = document.querySelector<HTMLElement>('[data-virtuoso-scroller="true"]');
+      const before = scroller === null ? null : { top: scroller.scrollTop, height: scroller.scrollHeight, shown: shownCount.current };
       // 往前插一页要同时把起始编号减去插进去的行数：那一行的序号在插页前后不变，视口就停在它上面（U48）。
       // 减去的是真的进列表那几行：展示档筛掉的行不在 `visible` 里，按整页的行数减会让视口锚到别的那一行。
-      setFirstIndex((current) => current - added.filter((row) => shownIn(verbosity, row)).length);
+      setFirstIndex((current) => current - addedShown);
       setRows((current) => [...added, ...current]);
       setPage({ before: older.events.length === 0 ? page.before : Number(older.events[0]?.seq), hasMore: older.hasMore });
+      if (before !== null) void settleAfterPrepend(before, addedShown, () => shownCount.current);
     } catch (error) {
       setRows((current) => [...current, metaRow('error', `更早的那一页读不来：${code(error)}`)]);
     } finally {
@@ -1160,6 +1183,7 @@ export function App({ transport }: { transport: Transport }) {
     ...(live.reasoning === '' || !shownIn(verbosity, LIVE_REASONING) ? [] : [{ ...LIVE_REASONING, text: live.reasoning }]),
     ...(live.text === '' || !shownIn(verbosity, LIVE_ANSWER) ? [] : [{ ...LIVE_ANSWER, text: live.text }]),
   ]), [shown, live.reasoning, live.text, verbosity]);
+  useEffect(() => { shownCount.current = visible.length; }, [visible]);
 
   // 记住这一份会话读到哪儿：画面最上面那一行的事件序号，切回来时按它落回去（方案 6.2）。
   // 身份要稳住：每次渲染都换一个新函数会让视口重新订阅一次，短记录上那几次重排会连成一串（第 105 步）。
