@@ -1,6 +1,6 @@
 // 左侧栏那一份分组规则的唯一检查：跑 `node dev/rail.check.mjs`，坏了就非零退出（方案 5.5.4）。
 import assert from 'node:assert/strict';
-import { createCallOf, groupByWorkspace } from '../src/rail.ts';
+import { createCallOf, groupByWorkspace, visibleRoots } from '../src/rail.ts';
 
 const base = {
   formatVersion: 1,
@@ -56,5 +56,18 @@ assert.deepEqual(createCallOf('E:/work/alpha', 'E:/work/beta', 'E:/work/gamma'),
 assert.deepEqual(createCallOf(undefined, 'E:/work/beta', 'E:/work/gamma'), { projectRoot: 'E:/work/beta', workspaceOrigin: 'default' }, '眼前这一份会话所在的项目是界面退出来的');
 assert.deepEqual(createCallOf(undefined, undefined, 'E:/work/gamma'), { projectRoot: 'E:/work/gamma', workspaceOrigin: 'default' }, '登记里的默认那一具也是退出来的，不是人选的');
 assert.deepEqual(createCallOf(undefined, undefined, undefined), {}, '三格都没有时不指名，由宿主用它自己那一份项目环境');
+
+// 那份持久登记决定侧栏看得见哪几项目录（审阅 F3）：终端界面登记的非默认工作区，这一扇窗口没指着它也要扫一遍。
+const roster = {
+  default: 'e:\\work\\beta',
+  workspaces: [alpha, { identity: 'e:\\work\\beta', directory: 'E:\\work\\beta', name: 'beta', firstSeen: '', lastSeen: '' }],
+};
+assert.deepEqual(visibleRoots(roster, ['E:\\work\\gamma']), ['', 'E:\\work\\gamma', 'E:\\work\\alpha', 'E:\\work\\beta'], '第一项是不指名的宿主自己那一份，其余是窗口那几份加登记里那几份');
+assert.deepEqual(visibleRoots(roster, ['E:\\work\\alpha', 'E:\\work\\alpha\\', '']), ['', 'E:\\work\\alpha', 'E:\\work\\beta'], '同一路径的两种写法与尾部分隔符只占一格，空的那一格不进清单');
+assert.deepEqual(
+  groupByWorkspace([session('f', { projectRoot: 'E:\\work\\beta', workspace: 'e:\\work\\beta', workspaceOrigin: 'explicit' })], visibleRoots(roster, []), roster).groups.map((one) => one.identity),
+  ['e:\\work\\beta', 'e:\\work\\alpha'],
+  '登记里每一具工作区都有自己的组，窗口没指着它也一样：还没有会话的那一组排后面，人能在那里面新建',
+);
 
 console.log('左侧栏的分组检查通过');

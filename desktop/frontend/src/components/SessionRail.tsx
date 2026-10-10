@@ -4,7 +4,7 @@
 // 组名与「默认」那一枚标签读的是 `workspaces.list` 那份持久登记：这一栏只是它的一个读者，收起或列不出来都不改那份文件（方案 5.5.1）。
 import { useCallback, useEffect, useState } from 'react';
 import { Icon } from './Icon';
-import { groupByWorkspace, type RailLayout, type WorkspaceRoster } from '../rail';
+import { groupByWorkspace, type RailLayout, type WorkspaceRoster, visibleRoots } from '../rail';
 import { code, type Client } from '../protocol';
 
 // 一条命中来自记录里哪一类事件：抬头那一格写的是它（与终端那一栏用同一组词）。
@@ -105,6 +105,8 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
 
   // 那一份记录是从哪一次指名读回来的：接它的时候按同一份项目环境递给宿主（方案 3.2）。
   const [rootsById, setRootsById] = useState(new Map<string, string>());
+  // 上一次读列出来过的那几项目录：整片搜索按同一份清单搜，不各推各的（审阅 F3）。
+  const [visible, setVisible] = useState<string[]>(['']);
   const load = useCallback(async () => {
     setLoading(true);
     setNote('');
@@ -117,35 +119,33 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
         failures.push(failureLine('那份工作区登记', error));
         return { default: null, workspaces: [] } as WorkspaceRoster;
       });
-    // 每项目录各读一次：这一具宿主自己的那一份不用指名，另外看着的那几份与登记里默认那一份按目录指名。
-    const asked = new Map<string, string>();
-    const remember = (root: string) => {
-      const key = root.replace(/[/\\]+$/, '').toLowerCase();
-      if (!asked.has(key)) asked.set(key, root);
-    };
-    remember('');
-    for (const root of projects) remember(root);
-    const chosen = read.workspaces.find((one) => one.identity === read.default);
-    if (chosen !== undefined) remember(chosen.directory);
-    const all: SessionSummary[] = [];
-    const found = new Map<string, string>();
-    for (const root of asked.values()) {
-      let sessions: SessionSummary[];
+    // 每项目录各读一次：这一具宿主自己的那一份不用指名，窗口另外指着的那几份与那份登记里的每一份按目录指名（审阅 F3）。
+    const asked = visibleRoots(read, projects);
+    // 列出来与搜出去用的是同一份目录清单：两边各推各的会漏——默认工作区的会话列得出，全局搜索却搜不到它的正文。
+    setVisible(asked);
+    const pages = await Promise.all(asked.map(async (root) => {
       try {
         // 这一条带超时：宿主不回时界面要停在「读不回来」那一句，不能一直停在在读。
-        sessions = (await client.call('sessions.list', root === '' ? {} : { projectRoot: root }, 15_000) as { sessions: SessionSummary[] }).sessions;
+        return { root, sessions: (await client.call('sessions.list', root === '' ? {} : { projectRoot: root }, 15_000) as { sessions: SessionSummary[] }).sessions, failed: '' };
       } catch (error) {
         // 某一项目录读不回来要说得出是哪一份，别的几份仍照各自真实的结果画（方案 3.3 那一句）。
-        failures.push(failureLine(root === '' ? '这一具宿主的项目' : root, error));
-        continue;
+        return { root, sessions: [] as SessionSummary[], failed: failureLine(root === '' ? '这一具宿主的项目' : root, error) };
       }
-      for (const item of sessions) {
-        found.set(item.id, root);
+    }));
+    const all: SessionSummary[] = [];
+    const found = new Map<string, string>();
+    for (const page of pages) {
+      if (page.failed !== '') failures.push(page.failed);
+      for (const item of page.sessions) {
+        // 同一份记录可能被两项目录读到（宿主自己那一份与登记里同一处工作区）：一份会话只列一次。
+        if (found.has(item.id)) continue;
+        found.set(item.id, page.root);
         all.push(item);
       }
     }
     setRootsById(found);
-    setLayout(groupByWorkspace(all, projects, read));
+    // 分组的目录清单与扫的那一份相同：登记里那一具还没有会话的工作区也有自己那一组，人能在它里面新建（方案 5.5.1）。
+    setLayout(groupByWorkspace(all, asked, read));
     setNote(failures.join('；'));
     setLoading(false);
   }, [client, projects]);
@@ -165,8 +165,8 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
   const search = useCallback(async (needle: string) => {
     setSearchNote('');
     const scoped = only && current !== null && current !== '';
-    // 只看这一份时那一份会话已经在宿主里开着，它自己的项目环境跟着会话走；整片查找要按每一项目录各问一次。
-    const asked = scoped ? [''] : ['', ...projects.filter((root) => root !== '')];
+    // 只看这一份时那一份会话已经在宿主里开着，它自己的项目环境跟着会话走；整片查找按列出来过的那几项目录各问一次。
+    const asked = scoped ? [''] : visible;
     const merged: SearchHit[] = [];
     const seen = new Set<string>();
     const failures: string[] = [];
@@ -189,7 +189,7 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
     }
     setHits(merged);
     setSearchNote(failures.join('；'));
-  }, [client, current, only, projects]);
+  }, [client, current, only, visible]);
 
   useEffect(() => {
     void load();
@@ -197,15 +197,17 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
 
   // 查的是磁盘上那几份记录，敲一个字扫一遍太贵：等手停下问一次。
   // E04 那一条随敲随筛，因为它筛的已经是读回手里的那一份列表；这一条要宿主开盘。
+  // 还在读列表时先不问：那一份目录清单要等那一次读回来才成形，早问一步搜的是不全的几项目录（审阅 F3）。
   useEffect(() => {
     const needle = query.trim();
     if (needle === '') {
       setHits(null);
       return;
     }
+    if (loading) return;
     const timer = setTimeout(() => void search(needle), 300);
     return () => clearTimeout(timer);
-  }, [query, search]);
+  }, [query, search, loading]);
 
   // 一条会话行：分组上面与下面那一段直接排列的那些画的是同一件东西。
   const sessionRow = (item: SessionSummary) => <button

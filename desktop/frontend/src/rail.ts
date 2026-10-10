@@ -57,7 +57,10 @@ export function groupByWorkspace(sessions: SessionSummary[], watched: string[] =
   }
   for (const root of watched) {
     if (root === '') continue;
-    const identity = sessions.find((item) => item.projectRoot === root)?.workspace ?? root;
+    // 那一具工作区在登记里有一行时，身份取那一行：记录首行里写的是内核折过的身份，两边同一把键才不会被拆成两组。
+    const identity = registry.workspaces.find((one) => one.directory === root)?.identity
+      ?? sessions.find((item) => item.projectRoot === root)?.workspace
+      ?? root;
     add(identity, root);
   }
   const newest = (group: RailGroup): string => group.sessions.map((item) => item.updatedAt).sort().at(-1) ?? '';
@@ -66,6 +69,23 @@ export function groupByWorkspace(sessions: SessionSummary[], watched: string[] =
       .sort((left, right) => newest(right).localeCompare(newest(left))),
     loose: withinGroup(loose),
   };
+}
+
+/**
+ * 侧栏看得见的那几项目录（审阅 F3）：那份持久登记是主要来源，窗口另外指着的那几份跟着一起扫。
+ * 只按窗口那一份清单走的话，终端界面登记的非默认工作区里的记录列不出来——登记存在不等于找得回来。
+ * 第一项固定是 `''`：那一个不指名，读的是这一具宿主自己的项目环境。
+ */
+export function visibleRoots(registry: WorkspaceRoster, watched: string[]): string[] {
+  const out = [''];
+  const seen = new Set<string>();
+  for (const root of [...watched, ...registry.workspaces.map((one) => one.directory)]) {
+    const key = root.replace(/[/\\]+$/, '').toLowerCase();
+    if (key === '' || seen.has(key)) continue;
+    seen.add(key);
+    out.push(root);
+  }
+  return out;
 }
 
 /**
