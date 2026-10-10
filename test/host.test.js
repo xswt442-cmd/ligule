@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
-import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -147,7 +147,8 @@ test('a client over stdio drives one round, answers one approval and watches the
     assert.deepEqual(approvals[0].args, { path: 'note.txt' });
     assert.equal(approvals[0].sessionId, sessionId);
     // 那一次询问带着属于它自己的那一项目录：客户端看着别的那一份时，答的是那一个项目里的这一步。
-    assert.equal(approvals[0].projectRoot, directory);
+    // macOS 上 `/var` 是 `/private/var` 的一条链接：宿主交回的是它走通之后的那一份，两边都先取真实路径再比。
+    assert.equal(approvals[0].projectRoot, await realpath(directory));
     // 没有命令文本的调用不带后端那两样：那一种语法与哪一个可执行文件对读一次文件这件事没有意义。
     assert.equal(approvals[0].shell, undefined);
     assert.equal(approvals[0].executable, undefined);
