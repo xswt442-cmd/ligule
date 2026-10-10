@@ -1,8 +1,10 @@
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { Icon } from './Icon';
+import { HoldSheet } from './HoldSheet';
 import { ModelPanel } from './ModelPanel';
 import { PolicyRules } from './PolicyRules';
 import { Group, Modal, Row } from './ui';
+import { holdReasons, report, type EditGate } from '../edit-gate';
 import { CURRENT, KEYMAP, conflictsIn, formatKeys, setCapturing, specOf, type KeyAction, type KeyView } from '../hotkeys';
 import { PALETTES, type Palette, type Settings } from '../settings';
 import type { Client } from '../protocol';
@@ -39,31 +41,55 @@ export type SettingsProps = {
 
 export function SettingsDialog(props: SettingsProps) {
   const [section, setSection] = useState<SectionId>('appearance');
+  // 哪一栏手里还攥着没写进配置的东西，由那一栏自己报上来；离开这一层的四条出口都读这一份表（审阅 G2）。
+  const [gate, setGate] = useState<EditGate>({});
+  const [holding, setHolding] = useState<{ reasons: string[]; go: () => void } | null>(null);
   const { settings, patch } = props;
 
-  return <Modal title="设置" className="sheet" onClose={props.onClose}>
-    <header className="sheet-head">
-      <strong>设置</strong>
-      <button type="button" className="icon-button" aria-label="关闭设置" onClick={props.onClose}><Icon name="close" size={15} /></button>
-    </header>
-    <nav className="sheet-nav">
-      {SECTIONS.map((item) => <button
-        key={item.id}
-        type="button"
-        role="tab"
-        aria-selected={section === item.id}
-        className={section === item.id ? 'active' : ''}
-        onClick={() => setSection(item.id)}
-      ><Icon name={item.icon} size={14} /><span>{item.title}</span></button>)}
-    </nav>
-    <div className="sheet-body" role="tabpanel">
-      {section === 'appearance' && <Appearance settings={settings} patch={patch} />}
-      {section === 'model' && <Model client={props.client} sessionId={props.sessionId} projectRoot={props.projectRoot} />}
-      {section === 'rules' && <PolicyRules client={props.client} projectRoot={props.projectRoot} />}
-      {section === 'connection' && <Connection link={props.link} counts={props.counts} waiting={props.waiting} status={props.status} onReconnect={props.onReconnect} />}
-      {section === 'keys' && <Keys settings={settings} patch={patch} notice={props.keyNotice} />}
-    </div>
-  </Modal>;
+  // 两个报话口的身份保持稳定：栏里的 effect 才不会为自己刚报的那一句反复重画。
+  const reports = useMemo(() => ({
+    model: (reason: string) => setGate((now) => report(now, 'model', reason)),
+    rules: (reason: string) => setGate((now) => report(now, 'rules', reason)),
+  }), []);
+
+  // 关闭按钮、Escape、点弹层外面、切页四条出口走同一条判断：没攥着就直接走，攥着先把那几句摆出来问一句。
+  const leave = (go: () => void) => {
+    const reasons = holdReasons(gate);
+    if (reasons.length === 0) go();
+    else setHolding({ reasons, go });
+  };
+
+  return <>
+    <Modal title="设置" className="sheet" onClose={() => leave(props.onClose)}>
+      <header className="sheet-head">
+        <strong>设置</strong>
+        <button type="button" className="icon-button" aria-label="关闭设置" onClick={() => leave(props.onClose)}><Icon name="close" size={15} /></button>
+      </header>
+      <nav className="sheet-nav">
+        {SECTIONS.map((item) => <button
+          key={item.id}
+          type="button"
+          role="tab"
+          aria-selected={section === item.id}
+          className={section === item.id ? 'active' : ''}
+          onClick={() => leave(() => setSection(item.id))}
+        ><Icon name={item.icon} size={14} /><span>{item.title}</span></button>)}
+      </nav>
+      <div className="sheet-body" role="tabpanel">
+        {section === 'appearance' && <Appearance settings={settings} patch={patch} />}
+        {section === 'model' && <Model client={props.client} sessionId={props.sessionId} projectRoot={props.projectRoot} onEdit={reports.model} />}
+        {section === 'rules' && <PolicyRules client={props.client} projectRoot={props.projectRoot} onEdit={reports.rules} />}
+        {section === 'connection' && <Connection link={props.link} counts={props.counts} waiting={props.waiting} status={props.status} onReconnect={props.onReconnect} />}
+        {section === 'keys' && <Keys settings={settings} patch={patch} notice={props.keyNotice} />}
+      </div>
+    </Modal>
+    {holding === null ? null : <HoldSheet
+      lead="现在离开会丢掉这些："
+      reasons={holding.reasons}
+      onStay={() => setHolding(null)}
+      onLeave={() => { const go = holding.go; setHolding(null); go(); }}
+    />}
+  </>;
 }
 
 // 配色方案的名字与一句说明：界面上那一枚色板按这一份表排，颜色从 `data-palette` 那一个块自己读，不写在这里。
@@ -200,13 +226,18 @@ function Keys({ settings, patch, notice }: { settings: Settings; patch: Settings
 
 // 模型与端点这一栏读 `config.get`、写 `config.set`，只能改那四条模型字段，落进使用者默认或当前项目的本机覆盖两层之一（方案 7.2）。
 // 改完谁什么时候用上它，由这一栏下面那份读数自己说（第 91 步）。审批规则不在这里：它在「审批规则」那一栏。
-function Model({ client, sessionId, projectRoot }: { client: Client; sessionId: string | null; projectRoot: string }) {
+function Model({ client, sessionId, projectRoot, onEdit }: {
+  client: Client;
+  sessionId: string | null;
+  projectRoot: string;
+  onEdit?: (reason: string) => void;
+}) {
   return <>
     <p className="sheet-note">
       服务地址与模型名读的是配置文件那四层里的哪一层，由 <code>config.get</code> 交回；改的时候走 <code>config.set</code>，落进使用者默认或当前项目的本机覆盖两层之一。密钥的值从来不进配置。
     </p>
     {/* 四条可写的行就在这一栏里（第 92 步）：设置页里点进来看到的就是那四个「改」。 */}
-    <ModelPanel client={client} sessionId={sessionId} projectRoot={projectRoot} />
+    <ModelPanel client={client} sessionId={sessionId} projectRoot={projectRoot} onEdit={onEdit} />
   </>;
 }
 

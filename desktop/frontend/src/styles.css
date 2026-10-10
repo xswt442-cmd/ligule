@@ -1599,7 +1599,8 @@ button.send:hover:not(:disabled) {
   border-color: var(--ok);
 }
 
-.confirm-actions button[data-tone="quit"] {
+.confirm-actions button[data-tone="quit"],
+.confirm-actions button[data-tone="discard"] {
   color: var(--fg);
   background: var(--bg-sunk);
   border-color: var(--line);

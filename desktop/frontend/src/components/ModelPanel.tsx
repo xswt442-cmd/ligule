@@ -21,7 +21,13 @@ const FIELDS: Draft[] = [
   { field: 'model.apiKeyEnv', label: '密钥的环境变量名', value: '' },
 ];
 
-export function ModelPanel({ client, sessionId, projectRoot }: { client: Client; sessionId: string | null; projectRoot: string }) {
+export function ModelPanel({ client, sessionId, projectRoot, onEdit }: {
+  client: Client;
+  sessionId: string | null;
+  projectRoot: string;
+  /** 这一栏手里攥着没写进配置的东西时报给父层，空串是收回（审阅 G2）。 */
+  onEdit?: (reason: string) => void;
+}) {
   const [shown, setShown] = useState<Shown | null>(null);
   // 说明那一句带着自己的语气：读不回来与没写进去才报警，写成了与预览不报（方案 4.3 那一句）。
   const [note, setNote] = useState<{ text: string; bad: boolean } | null>(null);
@@ -30,6 +36,16 @@ export function ModelPanel({ client, sessionId, projectRoot }: { client: Client;
   const [draft, setDraft] = useState<Draft | null>(null);
   const [layer, setLayer] = useState('user');
   const [saving, setSaving] = useState(false);
+  // 正在写配置时也算攥着：那一次的答复还没读回来，离开就看不见它写成没有。
+  const held = saving
+    ? '「模型与端点」正在写配置文件，这一笔的答复还没读回来'
+    : draft === null ? '' : `「模型与端点」里的「${draft.label}」还没保存`;
+
+  useEffect(() => {
+    if (onEdit === undefined) return;
+    onEdit(held);
+    return () => onEdit('');
+  }, [onEdit, held]);
 
   const load = useCallback(async (keep = false) => {
     if (!keep) setNote(null);

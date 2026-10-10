@@ -28,7 +28,12 @@ const matchText = (pattern: string) => `${matchKind(pattern)} ${pattern}`;
 // 空白的一条待写规则：新增从这一份起，编辑读回那一条填进来。
 const blankRule = (): Rule => ({ tool: '', match: '', decision: 'allow', reason: '' });
 
-export function PolicyRules({ client, projectRoot }: { client: Client; projectRoot: string }) {
+export function PolicyRules({ client, projectRoot, onEdit }: {
+  client: Client;
+  projectRoot: string;
+  /** 这一栏手里攥着没写进配置的东西时报给父层，空串是收回（审阅 G2）。 */
+  onEdit?: (reason: string) => void;
+}) {
   const [shown, setShown] = useState<Shown | null>(null);
   // 说明那一句带着自己的语气：读不回来与没写进去才报警，写完与预览不报（方案 4.3 那一句）。
   const [note, setNote] = useState<{ text: string; bad: boolean } | null>(null);
@@ -36,6 +41,18 @@ export function PolicyRules({ client, projectRoot }: { client: Client; projectRo
   const [saving, setSaving] = useState(false);
   // `editing` 是 null 就是没在写规则；给了 index 是改那一条，给 -1 是新增一条。
   const [editing, setEditing] = useState<{ index: number; rule: Rule } | null>(null);
+  // 正在写配置时也算攥着：那一次的答复还没读回来，离开就看不见它写成没有。
+  const held = saving
+    ? '「审批规则」正在写配置文件，这一笔的答复还没读回来'
+    : editing === null
+      ? ''
+      : editing.index < 0 ? '「审批规则」里有一条新规则还没保存' : `「审批规则」里第 ${editing.index + 1} 条的改动还没保存`;
+
+  useEffect(() => {
+    if (onEdit === undefined) return;
+    onEdit(held);
+    return () => onEdit('');
+  }, [onEdit, held]);
 
   // 这一栏读写的是哪一份项目的文件：左侧选了别的项目，这里的读与写就跟着换成那一个项目的两层（方案 3.2、审阅 F3）。
   const target = projectRoot === '' ? {} : { projectRoot };

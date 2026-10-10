@@ -6,7 +6,9 @@ import { ApprovalCard, type Ask } from './components/ApprovalCard';
 import { QuestionCard, type QuestionAsk, type QuestionDrafts } from './components/QuestionCard';
 import { Icon } from './components/Icon';
 import { SettingsDialog } from './components/Settings';
+import { HoldSheet } from './components/HoldSheet';
 import { QuitSheet } from './components/QuitSheet';
+import { holdReasons, report as reportEdit, type EditGate } from './edit-gate';
 import { blockedSessions, type QuitInput, type QuitRow } from './quit';
 import { RowView } from './components/RowView';
 import { SessionRail, type SearchHit } from './components/SessionRail';
@@ -55,6 +57,8 @@ type PanelProps = {
   projectRoot: string;
   // 在那一份项目里新建一份会话：不给目录就落在这一具宿主自己的项目（方案 3.2）。
   createIn: (root?: string) => void;
+  // 这一栏手里攥着没写进配置的东西时报给这一层，关掉或换掉它之前先问一句（审阅 G2）。
+  onEdit?: (reason: string) => void;
   seconds: number;
   waiting: number;
   counts: { sent: number; received: number };
@@ -146,7 +150,7 @@ const menuPanels: Panel<PanelProps>[] = [
   {
     id: 'panel.model',
     title: '模型与端点',
-    view: ({ client, sessionId, projectRoot }) => <ModelPanel client={client} sessionId={sessionId} projectRoot={projectRoot} />,
+    view: ({ client, sessionId, projectRoot, onEdit }) => <ModelPanel client={client} sessionId={sessionId} projectRoot={projectRoot} onEdit={onEdit} />,
   },
   {
     id: 'panel.export',
@@ -335,6 +339,15 @@ export function App({ transport }: { transport: Transport }) {
   const reconnecting = useRef(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [panel, setPanel] = useState<Panel<PanelProps> | null>(null);
+  // 右侧那一栏攥着没写完的编辑（或正写着一笔没读回答复）时，关闭与换栏都先问那一句（审阅 G2）。
+  const [dockGate, setDockGate] = useState<EditGate>({});
+  const [dockHold, setDockHold] = useState<{ reasons: string[]; go: () => void } | null>(null);
+  const reportDock = useCallback((reason: string) => setDockGate((now) => reportEdit(now, 'dock', reason)), []);
+  const leaveDock = useCallback((go: () => void) => {
+    const reasons = holdReasons(dockGate);
+    if (reasons.length === 0) go();
+    else setDockHold({ reasons, go });
+  }, [dockGate]);
   const [settings, setSettings] = useState(readSettings);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1118,12 +1131,12 @@ export function App({ transport }: { transport: Transport }) {
       // 状态那一格在这里靠不住——这一记按键是离散事件，radix 收到 React 里先改完状态并重画，键才冒到 document，
       // 这一条读到的已经是收层之后的那一份。按「这记键有没有人接过」判，才只收一层。
       if (event.defaultPrevented) return;
-      if (panel !== null) setPanel(null);
+      if (panel !== null) leaveDock(() => setPanel(null));
       else if (running) void cancel();
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [cancel, collapsed, copyLastAnswer, panel, patch, running]);
+  }, [cancel, collapsed, copyLastAnswer, leaveDock, panel, patch, running]);
 
   // 虚拟视口的两件外壳（U48、方案 6.2）：每一条都要占住转录那一条 74 字的居中列，所以 `Item` 自己包一层。
   // 空记录那一句不由视口画：这一版的视口没有空状态那个槽位，那一处写在渲染里的视口外面。
@@ -1214,6 +1227,7 @@ export function App({ transport }: { transport: Transport }) {
     onProjects: (roots: string[]) => patch({ projects: roots }),
     projectRoot,
     createIn: (root?: string) => void newSession(root),
+    onEdit: reportDock,
     sessionsRevision,
     settings,
     patch,
@@ -1234,7 +1248,7 @@ export function App({ transport }: { transport: Transport }) {
           </DropdownMenu.Trigger>
           <DropdownMenu.Portal>
             <DropdownMenu.Content className="menu" side="top" align="start" sideOffset={4} onEscapeKeyDown={keepEscape}>
-              {registry.list('rail.menu').map((item) => <DropdownMenu.Item key={item.id} onSelect={() => setPanel(item)}>
+              {registry.list('rail.menu').map((item) => <DropdownMenu.Item key={item.id} onSelect={() => leaveDock(() => setPanel(item))}>
                 {item.title}{item.pending === true && <span className="menu-tag">待实现</span>}
               </DropdownMenu.Item>)}
             </DropdownMenu.Content>
@@ -1462,7 +1476,7 @@ export function App({ transport }: { transport: Transport }) {
     {panel !== null && <aside className="dock">
       <div className="dock-head">
         <strong className="dock-title">{panel.title}{panel.pending === true && <span className="menu-tag">待实现</span>}</strong>
-        <button type="button" className="icon-button" aria-label="关闭面板" onClick={() => setPanel(null)}><Icon name="close" size={15} /></button>
+        <button type="button" className="icon-button" aria-label="关闭面板" onClick={() => leaveDock(() => setPanel(null))}><Icon name="close" size={15} /></button>
       </div>
       <div className="dock-body">{panel.view(panelProps)}</div>
     </aside>}
@@ -1484,5 +1498,11 @@ export function App({ transport }: { transport: Transport }) {
       onClose={() => setSettingsOpen(false)}
     />}
     {quitRows.length > 0 && <QuitSheet rows={quitRows} onBack={() => setQuitRows([])} onQuit={() => void quitApp()} />}
+    {dockHold !== null && <HoldSheet
+      lead="现在离开这一栏会丢掉这些："
+      reasons={dockHold.reasons}
+      onStay={() => setDockHold(null)}
+      onLeave={() => { const go = dockHold.go; setDockHold(null); go(); }}
+    />}
   </div>;
 }
