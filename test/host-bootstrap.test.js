@@ -28,7 +28,7 @@ test('a real unconfigured host opens another workspace while settings remain ava
   await writeFile(join(data, 'config.toml'), '[policy]\nmode = "ask"\n', 'utf8');
   const child = spawn(process.execPath, [cli, 'host'], {
     cwd: first,
-    env: { ...process.env, LIGULE_HOME: data },
+    env: { ...process.env, LIGULE_HOME: data, LIGULE_BOOTSTRAP_KEY: 'bootstrap-environment-key' },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   const exited = new Promise((resolve, reject) => {
@@ -45,6 +45,11 @@ test('a real unconfigured host opens another workspace while settings remain ava
     assert.equal(status.model, null);
     const shown = await deadline(client.request('config.get', { projectRoot: second }), 'read model settings');
     assert.deepEqual(shown.model, {});
+    assert.deepEqual(await client.request('credentials.status', { reference: 'LIGULE_BOOTSTRAP_KEY' }), { reference: 'LIGULE_BOOTSTRAP_KEY', source: 'environment', configured: true });
+    await assert.rejects(client.request('credentials.set', { reference: 'LIGULE_BOOTSTRAP_KEY', value: 'replacement' }), (error) => error.code === 'credential_environment_override');
+    await assert.rejects(client.request('credentials.delete', { reference: 'LIGULE_BOOTSTRAP_KEY' }), (error) => error.code === 'credential_environment_override');
+    const record = await client.request('session.read', { sessionId: opened.sessionId });
+    assert.equal(JSON.stringify({ shown, record }).includes('bootstrap-environment-key'), false);
     const saved = await deadline(client.request('prefs.write', { json: '{"palette":"forest"}', version: '' }), 'save preferences');
     assert.deepEqual(saved.settings, { palette: 'forest' });
     assert.notEqual(saved.version, '');

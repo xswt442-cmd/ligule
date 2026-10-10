@@ -187,6 +187,18 @@ export const METHODS = Object.freeze({
   },
   // 桌面那一份草稿与界面偏好（方案 5.5.2）：草稿、暂停队列、语言、通知与外观都放应用数据根里的一个文档，
   // 可恢复的输入不靠 WebView 缓存。界面拿不到那一份文件的路径，也读不到数据根里别的文件。
+  'credentials.status': {
+    description: 'Report whether a credential is configured and its source; never return the credential value',
+    parameters: { type: 'object', properties: { reference: { type: 'string' } }, required: ['reference'] },
+  },
+  'credentials.set': {
+    description: 'Store a secret in the system credential store; an active environment override prevents changes',
+    parameters: { type: 'object', properties: { reference: { type: 'string' }, value: { type: 'string' } }, required: ['reference', 'value'] },
+  },
+  'credentials.delete': {
+    description: 'Delete a stored secret; never modify an environment variable',
+    parameters: { type: 'object', properties: { reference: { type: 'string' } }, required: ['reference'] },
+  },
   'prefs.read': {
     description: 'Read the desktop preferences this machine keeps in the application data root: drafts, paused queues and interface choices; the document is per machine, not per session',
     parameters: { type: 'object', properties: {} },

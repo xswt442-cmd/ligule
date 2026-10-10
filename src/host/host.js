@@ -12,6 +12,7 @@ import { applyMode, DEFAULT_MODE, loadMode } from '../kernel/modes.js';
 import { readRegistry, registerWorkspace, setDefaultWorkspace, workspaceIdentity } from '../kernel/workspace.js';
 import { historyPathOf, loadHistory, rememberHistory } from '../kernel/input-history.js';
 import { parsePrefsJson, prefsPathOf, readPrefs, savePrefs } from '../kernel/desktop-prefs.js';
+import { credentialStatus, deleteCredential, storeCredential } from '../kernel/credentials.js';
 import { createDecisionChain } from '../kernel/policy.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
@@ -1134,6 +1135,13 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           // 也就是锁内那一次读—改—写的结果：取锁之前自己拼的那一份不算上另一端刚落下的一句。
           return { entries: await rememberHistory(historyPathOf(), [String(message.params.text)]) };
         }
+        case 'credentials.status':
+          return await credentialStatus(message.params.reference);
+        case 'credentials.set':
+          await storeCredential(message.params.reference, message.params.value);
+          return await credentialStatus(message.params.reference);
+        case 'credentials.delete':
+          return { deleted: await deleteCredential(message.params.reference) };
         case 'prefs.read':
           // 桌面草稿与界面偏好那一份文档的位置也由宿主定（与输入历史同一处，方案 5.5.2）。
           return await readPrefs();
