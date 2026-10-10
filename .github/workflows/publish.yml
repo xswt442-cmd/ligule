@@ -1,6 +1,7 @@
 name: publish
 
-# 一次发布就是一个标签：把 package.json 与 src/index.js 里的 VERSION 一起改好，再推 vX.Y.Z。
+# 一次发布就是一个标签：把 `src/version.js` 的 VERSION 与十份带着版本号的清单一起改好，再推 vX.Y.Z——
+# 哪十份由 `test/kernel.test.js` 那条检查说，它对不上时先在测试那一趟红。
 # 标签必须落在 main 已经带着的那个提交上，标签名必须等于 package.json 的 version，下面两步各查一件。
 #
 # 鉴权：npm 的 Trusted Publishing（OIDC）需要包先存在才能绑定发布者，所以第一次发布用
