@@ -1,13 +1,16 @@
+// 两端共用的那一份输入历史（方案 5.5.6）：终端界面与宿主各开各的进程，写的是同一个文件。
+// 那一次读—改—写要跨进程排队，所以除了并发排队，还量一把被人占着的锁。
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
-import { loadHistory, rememberHistory } from '../dist/tui/history.js';
+import lockfile from 'proper-lockfile';
+import { loadHistory, rememberHistory } from '../dist/kernel/input-history.js';
 
 const testplace = resolve('testplace');
 
 async function withHistoryDirectory(run) {
-  const directory = await mkdtemp(join(testplace, 'tui-history-'));
+  const directory = await mkdtemp(join(testplace, 'input-history-'));
   const absoluteDirectory = resolve(directory);
   assert.equal(absoluteDirectory.startsWith(`${testplace}${process.platform === 'win32' ? '\\' : '/'}`), true);
   try {
@@ -37,9 +40,9 @@ test('history reads reject malformed and non-string lines with a stable code', a
   await withHistoryDirectory(async (directory) => {
     const path = join(directory, 'history.jsonl');
     await writeFile(path, '"valid"\nnot-json\n');
-    await assert.rejects(loadHistory(path), (error) => error.code === 'tui_history_invalid' && error.line === 2);
+    await assert.rejects(loadHistory(path), (error) => error.code === 'input_history_invalid' && error.detail.includes('line 2'));
     await writeFile(path, '42\n');
-    await assert.rejects(loadHistory(path), (error) => error.code === 'tui_history_invalid' && error.line === 1);
+    await assert.rejects(loadHistory(path), (error) => error.code === 'input_history_invalid' && error.detail.includes('line 1'));
   });
 });
 
@@ -52,5 +55,21 @@ test('failed history replacement removes its temporary file', async () => {
     await assert.rejects(rememberHistory(path, ['sentence']));
     assert.deepEqual((await readdir(directory)).sort(), ['occupied']);
     assert.equal(await readFile(join(path, 'keep'), 'utf8'), 'content');
+  });
+});
+
+// 另一具进程占着那份文件时不静默改写：等不到锁就说清是哪一份文件被占着（与那份登记同一条码法）。
+test('a history save that cannot take the file reports which file is held', async () => {
+  await mkdir(testplace, { recursive: true });
+  await withHistoryDirectory(async (directory) => {
+    const path = join(directory, 'history.jsonl');
+    await writeFile(path, '"更早的一句"\n');
+    const held = await lockfile.lock(path, { realpath: false, lockfilePath: `${path}.lock`, stale: 10_000, update: 2_000, retries: 0 });
+    try {
+      await assert.rejects(rememberHistory(path, ['后写的一句']), (error) => error.code === 'input_history_locked' && error.detail === path);
+    } finally {
+      await held();
+    }
+    assert.deepEqual(await loadHistory(path), ['更早的一句']);
   });
 });

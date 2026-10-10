@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { configPaths, dataRoot } from '../dist/kernel/config-file.js';
 import { modeDirectories } from '../dist/kernel/modes.js';
-import { historyPathOf } from '../dist/tui/history.js';
+import { historyPathOf } from '../dist/kernel/input-history.js';
 import { skillDirectories } from '../dist/kernel/skills.js';
 
 test('the data root is ~/.ligule unless LIGULE_HOME names another directory', () => {

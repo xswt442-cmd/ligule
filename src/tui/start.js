@@ -7,7 +7,7 @@ import { createConnection } from '../host/connection.js';
 import { createMemoryConnectionPair } from '../host/memory.js';
 import { serveHost } from '../host/host.js';
 import { App } from './app.js';
-import { flushHistory, historyPathOf, loadHistory, pushHistory, rememberHistory } from './history.js';
+import { flushHistory, historyPathOf, loadHistory, pushHistory, rememberHistory } from '../kernel/input-history.js';
 import { flushInput, inputPathOf, readInput, rememberInput } from './input-store.js';
 import { flushKeys, keyPathOf, readKeys, writeKeys } from './key-store.js';
 import { titleEscape } from './output.js';

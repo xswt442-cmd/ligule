@@ -10,7 +10,8 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { waitFor, withTuiHost } from './helpers/tui-host.js';
 import { completeFrame } from './helpers/frames.js';
-import { HISTORY_LIMIT, SEARCH_ROWS, historyPathOf, loadHistory, pushHistory, rememberHistory, searchHistory } from '../dist/tui/history.js';
+import { HISTORY_LIMIT, historyPathOf, loadHistory, pushHistory, rememberHistory } from '../dist/kernel/input-history.js';
+import { SEARCH_ROWS, searchHistory } from '../dist/tui/history.js';
 
 let rows = {};
 let missing = '';
@@ -714,7 +715,7 @@ test('the history file reads valid entries and reports a malformed line', async 
     await rememberHistory(path, ['最新的一条', '旧的一条']);
     assert.deepEqual(await loadHistory(path), ['最新的一条', '旧的一条'], '先后与文件里一致，最新的排在第一个');
     await appendFile(path, '这一行不是 JSON\n');
-    await assert.rejects(loadHistory(path), (error) => error.code === 'tui_history_invalid' && error.line === 3);
+    await assert.rejects(loadHistory(path), (error) => error.code === 'input_history_invalid' && error.detail.includes('line 3'));
   } finally {
     await rm(assertInTestplace(absoluteRoot), { recursive: true, force: true });
   }
