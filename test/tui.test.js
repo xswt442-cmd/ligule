@@ -1131,11 +1131,13 @@ test('Ctrl+Z walks the draft back a unit at a time and Ctrl+Y takes it back', op
     await waitFor(() => shown().includes('第一段草稿'), { read: shown });
 
     // 退回来之后接着打的字是另一段：一次退回整段，原来那一段留着。
-    stdin.write('ab');
+    // 认「这一段没了」读的字面要够独特：先前这里打的是 `ab`，而状态行里有会话 id 那串十六进制，
+    // 某一趟 id 正以 `ab` 开头（`会话 abce2fa8`），这一条就永远等不成——2026-10-10 的 windows-latest 红在这里。
+    stdin.write('第二段');
     await delay(60);
     stdin.write('\x1a');
-    await waitFor(() => !shown().includes('ab'), { read: shown });
-    await paintedText('第一段草稿', '退掉后打的那两个字符时，原来那一段还在');
+    await waitFor(() => !shown().includes('第二段'), { read: shown });
+    await paintedText('第一段草稿', '退掉后打的那一段时，原来那一段还在');
 
     // 光标挪开之后再打的字又是一段：退一次只去掉那一个字符。
     stdin.write('甲');
