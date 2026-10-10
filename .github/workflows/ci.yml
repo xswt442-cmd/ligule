@@ -119,11 +119,14 @@ jobs:
           workspaces: desktop/src-tauri
 
       # Tauri 在 Linux 上要的成套系统库：WebKitGTK 4.1、AppIndicator、librsvg、`file` 这几样（官方列表里的那一串）。
+      # AppImage 那一份还要 FUSE 2：`appimagetool` 不带 `--appimage-extract-and-run` 时自己去挂那枚镜像，
+      # 而 ubuntu-24.04 的镜像里没有 `libfuse2` 这个包名（它改名成 `libfuse2t64`）。两个名字各试一次，两种镜像都走得通。
       - name: install the shell's system libraries
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev libxdo-dev build-essential curl wget file
+          sudo apt-get install -y libfuse2t64 || sudo apt-get install -y libfuse2
 
       - name: install
         run: |
@@ -174,6 +177,12 @@ jobs:
       # 壳的构建入口在 desktop/（Tauri 命令行认 src-tauri 是它的直接子目录），它会先把前端构出 dist/。
       - name: build the installer
         run: npm --prefix desktop run build
+
+      # 出包一失败就把 linuxdeploy 自己的话逼出来：`failed to run linuxdeploy` 那一句不带它的 stderr，
+      # 红两趟都说不出成因。重跑一次只构 AppImage 并要详细输出，读的是同一份已构好的宿主。
+      - name: show why the bundling failed
+        if: failure() && runner.os == 'Linux'
+        run: npm --prefix desktop run build -- --bundles appimage --verbose
 
       - name: show what was bundled
         shell: bash
