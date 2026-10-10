@@ -18,6 +18,12 @@ Rules for `src/kernel/`: the tool table, decision chain, loop, prompt assembly, 
 - A file that cannot be parsed is `workspace_registry_invalid`, and a version this build cannot read is `workspace_registry_version`. Neither reads as an empty registry: an empty answer would lose the list.
 - `workspace_directory_required` refuses an empty argument. A directory that is not there still gets an absolute identity — whether a working directory exists is decided where it is loaded, not here.
 
+## Input history
+
+- `<data root>/tui-history.jsonl` (`src/kernel/input-history.ts`: `historyPathOf`, `pushHistory`, `loadHistory`, `rememberHistory`, `flushHistory`) is the one history both interfaces write (方案 5.5.6): one JSON-encoded sentence per line, newest first, at most 200 lines, only sentences that were actually sent. It is not part of any session record and never reaches a model request. The name says `tui` while both interfaces share that one file: a machine that already has a history must keep reading it. Over the client protocol these are `history.read` (the whole list) and `history.append` (one sentence that was sent, answered with the list after the write).
+- A save rewrites the whole file through a randomly named `wx` stand-in removed in a `finally`, inside a `proper-lockfile` lease (5-second stale, `input_history_locked` naming the file when it cannot be had), and merges with what the file holds at that moment: the terminal client and a desktop Host are separate processes, and neither may push the other's newest sentence off the end.
+- `input_history_invalid` names the line that cannot be read; a file that is not there is an empty history, not an error. The terminal's own filter over these lines (`SEARCH_ROWS`, `searchHistory`) stays in `src/tui/history.ts`, since it is a screen concern.
+
 ## Modes
 
 - A mode is a named assembly list (D35, D43): one TOML per mode, found in `modes/`, then `~/.ligule/modes/<name>.toml`, then `<project root>/.ligule/modes/<name>.toml`.

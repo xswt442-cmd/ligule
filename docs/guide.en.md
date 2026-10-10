@@ -68,7 +68,7 @@ The command line, the terminal UI and the desktop shell read the same configurat
 
 Nested tables merge key by key; arrays and scalars replace wholesale.
 
-The directory holding the user layer is the application data root: `~/.ligule` by default, and an absolute path in the environment variable `LIGULE_HOME` moves the whole thing elsewhere. A relative value is refused on the spot (`data_root_invalid`). The auto-loaded modes, skills, prompt templates and extensions, plus the terminal UI's key overrides, input history and drafts, all live under that directory. Session records and the project layers follow the project root, `~/.agents/skills/` follows the home directory, and neither moves with the data root. The default workspace the desktop creates on first use has no configuration file of its own, so the model line belongs in the user layer: written only into a project's layers, it is not readable there.
+The directory holding the user layer is the application data root: `~/.ligule` by default, and an absolute path in the environment variable `LIGULE_HOME` moves the whole thing elsewhere. A relative value is refused on the spot (`data_root_invalid`). The auto-loaded modes, skills, prompt templates and extensions, plus the terminal UI's key overrides and drafts, and the input history both UIs share, all live under that directory. Session records and the project layers follow the project root, `~/.agents/skills/` follows the home directory, and neither moves with the data root. The default workspace the desktop creates on first use has no configuration file of its own, so the model line belongs in the user layer: written only into a project's layers, it is not readable there.
 
 The key is never written into any layer — every key in a configuration file is readable by the tools — it comes from an environment variable only. The default name is `LIGULE_API_KEY`, renamed by `model.apiKeyEnv`.
 
@@ -171,7 +171,7 @@ Pressing Enter while a round is running does not lose that line: it joins the qu
 - The unsent line and the queued ones are stored in `~/.ligule/tui-input.jsonl`, separated per project and per session, and return when you open the same session again; queued lines come back paused. This file is not the source of truth: a line it cannot read is skipped and the session still opens.
 - After a reconnect the queued text is not sent automatically: it goes back to the draft, and a person presses Enter once more.
 
-The terminal UI's input history survives sessions in `~/.ligule/tui-history.jsonl` and does not enter the session log.
+The input history both UIs share survives sessions in `~/.ligule/tui-history.jsonl`: every sentence sent from the terminal or the desktop joins that one list, newest first, at most 200 lines, and it stays out of the session log. Drafts and queued lines stay each UI's own, kept per session.
 
 ## Approvals and rules
 
