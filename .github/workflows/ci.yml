@@ -131,6 +131,19 @@ jobs:
           npm --prefix desktop ci
           npm --prefix desktop/frontend ci
 
+      # R4 表里「核心与包」那一行写的是四个目标，不是只有 test 作业那两家 runner。
+      # 所以每一家都先把钉住的那四份搜索包构出来（不构就有四条比较会跳过），再跑核心检查与实际 tarball 安装。
+      - name: build the pinned ripgrep packages
+        run: npm run build-rg
+
+      - name: core checks on this target
+        run: npm test
+
+      - name: pack and install the artifact on this target
+        run: |
+          npm run check-pack
+          npm run verify-install
+
       # 安装包带的是构建产物，所以先构建再复制（D47）。
       - name: build the runtime tree the installer carries
         run: npm run build
