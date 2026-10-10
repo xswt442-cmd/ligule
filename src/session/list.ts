@@ -99,9 +99,12 @@ export async function listSessions(
     } catch {
       // 正文与首行的错误由完整记录校验交回，不用猜测损坏记录的项目归属。
     }
-    // 按项目根过滤时，读不出项目根的那些（没有首行的现存记录）不算在这个项目里：过滤的意义是「只显示这一处的会话」。
+    // 按项目根过滤时，首行写着另一项目录的那一条不算在这一处：过滤的意义是「只显示这一处的会话」。读不出首行的下一处处理。
     if (asked !== undefined && typeof header?.projectRoot === 'string'
       && resolve(header.projectRoot) !== asked && workspaceIdentity(header.projectRoot) !== askedIdentity) continue;
+    // 没有头的那一份记录归它物理所在的那一项目录（第 32 步之前留下的记录读不出头）：
+    // 指名了一项目录又读得出这条记录时把它列进来，人才从列表里找回旧会话；不虚构它的来源与创建时间（U60 选定）。
+    const ownRoot = header?.projectRoot ?? asked ?? '';
     let events: SessionEvent[] = [];
     let truncatedBytes = 0;
     let invalid: SessionSummary['error'];
@@ -116,13 +119,12 @@ export async function listSessions(
       const failure = error as { code?: string; detail?: string; message?: string };
       invalid = { code: failure.code ?? 'session_read_failed', detail: failure.detail ?? failure.message ?? path };
     }
-    if (projectRoot !== undefined && invalid === undefined && header === undefined) continue;
     const lastMode = events.filter((event) => event.kind === 'mode').at(-1);
     const label = foldLabel(events);
     summaries.push({
       id,
       formatVersion: header?.formatVersion ?? 0,
-      projectRoot: header?.projectRoot ?? '',
+      projectRoot: ownRoot,
       // 工作区的身份与来源一起交给列表：界面分哪一组读这两格，不读「等不等于现在的默认目录」（方案 5.5.4）。
       workspace: header?.workspace ?? '',
       workspaceOrigin: header?.workspaceOrigin ?? '',

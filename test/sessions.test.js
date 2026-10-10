@@ -91,8 +91,10 @@ test('the listing reads each record once and reports what a resume would need', 
       truncatedBytes: 0,
     });
 
-    assert.deepEqual(await listSessions(directory, { projectRoot: 'nowhere' }), []);
-    assert.deepEqual((await listSessions(directory, { projectRoot: root })).map((item) => item.id), ['fresh']);
+    // 没有首行的那一份归它物理所在的这一项目录：按这一项目录筛时它要列得出来，人才找得回旧会话（U60 选定）。
+    const filtered = await listSessions(directory, { projectRoot: root });
+    assert.deepEqual(filtered.map((item) => item.id), ['fresh', 'legacy']);
+    assert.equal(filtered[1].projectRoot, root, '归属那一格写的是扫的那一项目录，不虚构首行里的那一份');
     assert.deepEqual((await listSessions(join(root, 'nothing-here'))), [], '还没有任何记录不是错误');
   });
 });
