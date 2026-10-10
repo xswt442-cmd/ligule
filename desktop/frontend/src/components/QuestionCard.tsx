@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
+import { useText } from '../locale';
 
-// 模型提问那一格（D107、方案 4.4）：一到四道题各答一次，一次显式提交。
-// 它与审批卡分开画：审批答的是「能不能做这一件」，这一格答的是「这一件事该怎么办」。
 export type QuestionOption = { label: string; description?: string };
 export type Question = { id: string; question: string; header?: string; options: QuestionOption[]; multiSelect: boolean };
 export type QuestionAsk = { id: string; sessionId: string; project: string; questions: Question[] };
@@ -14,12 +13,12 @@ export function QuestionCard({ ask, queued, active, onSubmit, onCancel, onOpen, 
   ask: QuestionAsk;
   queued: number;
   active: string | null;
-  // 交出去的是那一次请求自己的编号对得上的答复；没答的那一道由宿主原样写成「没有回答」。
   onSubmit: (answers: { id: string; selected: string[]; custom?: string }[]) => void;
   onCancel: () => void;
   onOpen: (sessionId: string) => void;
   onDraft: (id: string, drafts: QuestionDrafts) => void;
 }) {
+  const t = useText();
   const [drafts, setDrafts] = useState<QuestionDrafts>(
     () => Object.fromEntries(ask.questions.map((question) => [question.id, { picked: [], extra: '' }])),
   );
@@ -43,13 +42,13 @@ export function QuestionCard({ ask, queued, active, onSubmit, onCancel, onOpen, 
       })
       .filter((answer) => answered({ picked: answer.selected, extra: answer.custom ?? '' })));
   };
-  return <section className="question" aria-label="等一个人回答的问题">
+  return <section className="question" aria-label={t('等待回答', 'Waiting for answers')}>
     <div className="question-body">
       <div className="question-head">
-        <span className="question-kind">{background ? '另一份会话在等人回答' : '模型在等你回答'}</span>
-        {ask.project !== '' && <span className="row-note">项目 {ask.project}</span>}
-        {queued > 0 && <span className="row-note">后面还有 {queued} 条在等</span>}
-        {background && <button type="button" onClick={() => onOpen(ask.sessionId)}>看这一份会话 {ask.sessionId.slice(0, 8)}</button>}
+        <span className="question-kind">{background ? t('另一会话正在等待', 'Another session is waiting') : t('请回答', 'Your answer is needed')}</span>
+        {ask.project !== '' && <span className="row-note">{t('项目', 'Project')} {ask.project}</span>}
+        {queued > 0 && <span className="row-note">{t(`还有 ${queued} 条提问`, `${queued} more question(s)`)}</span>}
+        {background && <button type="button" onClick={() => onOpen(ask.sessionId)}>{t('打开会话', 'Open session')} {ask.sessionId.slice(0, 8)}</button>}
       </div>
       {ask.questions.map((question, index) => {
         const draft = drafts[question.id] ?? { picked: [], extra: '' };
@@ -57,7 +56,7 @@ export function QuestionCard({ ask, queued, active, onSubmit, onCancel, onOpen, 
           <legend>
             {index + 1}. {question.question}
             {question.header === undefined ? '' : <span className="question-tag">{question.header}</span>}
-            {question.multiSelect && <span className="question-tag">可多选</span>}
+            {question.multiSelect && <span className="question-tag">{t('可多选', 'Select multiple')}</span>}
           </legend>
           {question.options.map((option) => <label className="question-option" key={option.label}>
             <input
@@ -72,25 +71,23 @@ export function QuestionCard({ ask, queued, active, onSubmit, onCancel, onOpen, 
           <input
             className="question-free"
             type="text"
-            placeholder="或者自己写一句"
+            placeholder={t('或输入其他答案', 'Or enter another answer')}
             value={draft.extra}
-            aria-label={`第 ${index + 1} 题的补充回答`}
+            aria-label={t(`第 ${index + 1} 题的补充回答`, `Additional answer for question ${index + 1}`)}
             onChange={(event) => write(question.id, event.target.value)}
             onKeyDown={(event) => {
-              // 输入法拼的那一段里 Enter 属于选词，不在这里提交（方案 5.1、5.4）。
               if (event.nativeEvent.isComposing || event.key !== 'Enter') return;
               event.preventDefault();
               submit();
             }}
           />
-          {!answered(draft) && <span className="row-note">这道没答，交出去时写成「没有回答」</span>}
         </fieldset>;
       })}
     </div>
     <div className="question-actions">
-      <button type="button" data-tone="allow" disabled={!anyAnswered} onClick={submit}>交出答案</button>
-      <button type="button" data-tone="deny" onClick={onCancel}>取消这一轮</button>
-      <span className="question-note">没有回答时限，这一轮一直等到你答或者取消。</span>
+      <button type="button" data-tone="allow" disabled={!anyAnswered} onClick={submit}>{t('提交答案', 'Submit answers')}</button>
+      <button type="button" data-tone="deny" onClick={onCancel}>{t('取消本轮', 'Cancel turn')}</button>
+      <span className="question-note">{t('留空题目会标记为未回答；本轮会持续等待，直到提交或取消。', 'Blank questions are recorded as unanswered; the turn waits until you submit or cancel.')}</span>
     </div>
   </section>;
 }

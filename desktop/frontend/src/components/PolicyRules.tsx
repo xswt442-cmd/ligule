@@ -1,13 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
 import { code, type Client } from '../protocol';
-import { layerName, sourceLine, WRITABLE_LAYERS } from '../config-layers';
+import { WRITABLE_LAYERS } from '../config-layers';
 import { Icon } from './Icon';
 import { Row } from './ui';
+import { useText } from '../locale';
 
-// 审批规则这一栏走的是「模型与端点」那四条已经在用的写路径：选层、先预览、带着读回来的那一个版本发，
-// 把保存结果与什么时候生效分两句说出来；版本对不上时报冲突那一句，不报成功（方案 7.2）。
-// 档位、规则表、来源与那一份版本出自 `config.get` 的一次读取，写完再读一遍，界面不拿写入的回答自己拼（方案 3A）。
-// 字段名与形状跟契约一致：`policy.mode`（值为 'ask' 或 'auto'）与 `policy.rules`（op 为 add / update / remove）。
 type Rule = { tool: string; match?: string; decision: 'allow' | 'deny'; reason?: string };
 type Shown = {
   rules?: Rule[];
@@ -17,15 +14,29 @@ type Shown = {
   sources?: Record<string, string>;
   layers?: { layer: string; version: string; exists: boolean }[];
 };
+type Notice = { text: string; bad: boolean; code?: string };
 
-const DECISION_NAMES: Record<Rule['decision'], string> = { allow: '放行', deny: '不允许' };
+const layerText = (layer: string, t: (chinese: string, english: string) => string): string => {
+  if (layer === 'user') return t('使用者默认（~/.ligule/config.toml）', 'User defaults (~/.ligule/config.toml)');
+  if (layer === 'projectLocal') return t('当前项目的本机覆盖（.ligule/config.local.toml）', 'This project’s local override (.ligule/config.local.toml)');
+  return layer;
+};
 
-// 一条规则怎么写才算命中，界面要说成判定里的那一种读法（`src/kernel/match.js`）：
-// 带 `*` 的是把整段命令比完，不带的是命令的开头且要对到一个参数的边界为止。
-const matchKind = (pattern: string) => (pattern.includes('*') ? '整段命令对得上' : '命令开头是');
-const matchText = (pattern: string) => `${matchKind(pattern)} ${pattern}`;
+const sourceText = (source: string | undefined, t: (chinese: string, english: string) => string): string => {
+  if (source === 'flag') return t('命令行 --config（只读）', 'Command line --config (read-only)');
+  if (source === 'local') return t('当前项目的本机覆盖', 'This project’s local override');
+  if (source === 'project') return t('项目共享配置（只读）', 'Shared project configuration (read-only)');
+  if (source === 'user') return t('使用者默认', 'User defaults');
+  return t('四层配置均未设置', 'Not set in any configuration layer');
+};
 
-// 空白的一条待写规则：新增从这一份起，编辑读回那一条填进来。
+const matchKind = (pattern: string, t: (chinese: string, english: string) => string) => pattern.includes('*')
+  ? t('整段命令匹配', 'matches the whole command')
+  : t('命令开头匹配', 'matches the start of the command');
+const matchText = (pattern: string, t: (chinese: string, english: string) => string) => `${matchKind(pattern, t)} ${pattern}`;
+const decisionText = (decision: Rule['decision'], t: (chinese: string, english: string) => string) =>
+  decision === 'allow' ? t('放行', 'Allow') : t('不允许', 'Deny');
+
 const blankRule = (): Rule => ({ tool: '', match: '', decision: 'allow', reason: '' });
 
 export function PolicyRules({ client, projectRoot, onEdit }: {
@@ -34,19 +45,19 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
   /** 这一栏手里攥着没写进配置的东西时报给父层，空串是收回（审阅 G2）。 */
   onEdit?: (reason: string) => void;
 }) {
+  const t = useText();
   const [shown, setShown] = useState<Shown | null>(null);
-  // 说明那一句带着自己的语气：读不回来与没写进去才报警，写完与预览不报（方案 4.3 那一句）。
-  const [note, setNote] = useState<{ text: string; bad: boolean } | null>(null);
+  const [note, setNote] = useState<Notice | null>(null);
   const [layer, setLayer] = useState('user');
   const [saving, setSaving] = useState(false);
-  // `editing` 是 null 就是没在写规则；给了 index 是改那一条，给 -1 是新增一条。
   const [editing, setEditing] = useState<{ index: number; rule: Rule } | null>(null);
-  // 正在写配置时也算攥着：那一次的答复还没读回来，离开就看不见它写成没有。
   const held = saving
-    ? '「审批规则」正在写配置文件，这一笔的答复还没读回来'
+    ? t('“审批规则”正在保存；尚未收到结果。', 'Approval rules are saving; the result has not arrived yet.')
     : editing === null
       ? ''
-      : editing.index < 0 ? '「审批规则」里有一条新规则还没保存' : `「审批规则」里第 ${editing.index + 1} 条的改动还没保存`;
+      : editing.index < 0
+        ? t('有一条新审批规则尚未保存。', 'A new approval rule is not saved yet.')
+        : t(`第 ${editing.index + 1} 条审批规则的改动尚未保存。`, `Changes to approval rule ${editing.index + 1} are not saved yet.`);
 
   useEffect(() => {
     if (onEdit === undefined) return;
@@ -54,18 +65,16 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
     return () => onEdit('');
   }, [onEdit, held]);
 
-  // 这一栏读写的是哪一份项目的文件：左侧选了别的项目，这里的读与写就跟着换成那一个项目的两层（方案 3.2、审阅 F3）。
   const target = projectRoot === '' ? {} : { projectRoot };
 
   const load = useCallback(async (keep = false): Promise<Shown | null> => {
     try {
       const answer = await client.call('config.get', target, 15_000) as Shown;
       setShown(answer);
-      // 读得回来就把上一次读不回来的那句说明清掉：那一句话带着「再问一次」的按钮，留着就成了一句假话。
       if (!keep) setNote(null);
       return answer;
     } catch (error) {
-      setNote({ text: `规则表读不回来：${code(error)}`, bad: true });
+      setNote({ text: t('规则表读取失败。', 'Could not load approval rules.'), code: code(error), bad: true });
       return null;
     }
   }, [client, projectRoot]);
@@ -76,31 +85,29 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
 
   const versionOf = () => shown?.layers?.find((item) => item.layer === layer)?.version ?? '';
 
-  // 生效那一张表出自哪一层，由同一次读取交回；那一格读不出来时说出来，不写成「四层里都没写」。
   const rulesFrom = () => shown?.rulesSource === undefined
-    ? '哪一层写着这一张表读不出来'
+    ? t('规则表来源无法读取。', 'Could not read the source of these rules.')
     : shown.rulesSource === 'none'
-      ? '四层里都没写这一张表'
-      : `现在写着这一张表的是${sourceLine(shown.rulesSource)}`;
+      ? t('四层配置均未设置规则表。', 'No configuration layer defines a rules table.')
+      : t(`当前来源：${sourceText(shown.rulesSource, t)}。`, `Current source: ${sourceText(shown.rulesSource, t)}.`);
 
-  // 写完重读一遍（与「模型与端点」那一栏同一条路）：界面上的规则表、档位、来源与那一份版本说的是同一时刻的那一份文件。
-  // 不拿写入那一次的回答自己拼：自己拼出来那一份只有这一栏知道，下一次写要带的版本也就不一定是刚落盘的那一份。
+  const describe = (count: number) => t(
+    `规则表现有 ${count} 条。新规则和默认档从下一次判定起生效；已经派发的调用不变，正运行的会话档位也不变。`,
+    `The rules table has ${count} entries. Rule and default-tier changes apply from the next decision. Dispatched calls and a running session’s tier are unchanged.`,
+  );
+
   const afterSave = async (saved: string) => {
     const fresh = await load(true);
-    if (fresh !== null) setNote({ text: `${saved}${describe(fresh.rules?.length ?? 0)}`, bad: false });
+    if (fresh !== null) setNote({ text: `${saved} ${describe(fresh.rules?.length ?? 0)}`, bad: false });
   };
-
-  // 保存结果一句、什么时候生效一句：这两句从不合在一起（方案 7.2）。
-  // 生效的边界是下一次判定（方案 7.3 第一行），不是下一次装配宿主：已经派发出去的那一次调用不受这一笔影响。
-  const describe = (count: number) => `这一份表现在一共 ${count} 条。规则表与默认档从下一次判定起用上这一份，已经派发出去的那一次调用不变；跑着的会话自己改过档位的那一份不动。`;
 
   const setMode = async (mode: 'ask' | 'auto') => {
     setSaving(true);
     try {
       await client.call('config.set', { field: 'policy.mode', value: mode, layer, version: versionOf(), ...target }, 30_000);
-      await afterSave(`配置默认档已写成 ${mode}，落进${layerName(layer)}。`);
+      await afterSave(t(`已将配置默认档设为 ${mode}，写入${layerText(layer, t)}。`, `Set the default tier to ${mode} in ${layerText(layer, t)}.`));
     } catch (error) {
-      setNote({ text: conflictOr(error), bad: true });
+      setNote(saveFailure(error, t));
     } finally {
       setSaving(false);
     }
@@ -114,7 +121,6 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
       decision: editing.rule.decision,
       ...(editing.rule.reason === undefined || editing.rule.reason === '' ? {} : { reason: editing.rule.reason }),
     };
-    // 协议表里那四格各是一个字符串，规则的形状由宿主那一边校验（D100）。
     const flat = {
       ruleTool: rule.tool,
       ruleDecision: rule.decision,
@@ -127,10 +133,13 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
     setSaving(true);
     try {
       await client.call('config.set', params, 30_000);
-      await afterSave(`${editing.index < 0 ? '加了一条规则' : `改了第 ${editing.index + 1} 条规则`}，落进${layerName(layer)}。`);
+      const saved = editing.index < 0
+        ? t(`已新增规则并写入${layerText(layer, t)}。`, `Added a rule to ${layerText(layer, t)}.`)
+        : t(`已修改第 ${editing.index + 1} 条规则并写入${layerText(layer, t)}。`, `Updated rule ${editing.index + 1} in ${layerText(layer, t)}.`);
+      await afterSave(saved);
       setEditing(null);
     } catch (error) {
-      setNote({ text: conflictOr(error), bad: true });
+      setNote(saveFailure(error, t));
     } finally {
       setSaving(false);
     }
@@ -140,9 +149,9 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
     setSaving(true);
     try {
       await client.call('config.set', { field: 'policy.rules', layer, version: versionOf(), op: 'remove', index, ...target }, 30_000);
-      await afterSave(`去掉了第 ${index + 1} 条规则，落进${layerName(layer)}。`);
+      await afterSave(t(`已从${layerText(layer, t)}移除第 ${index + 1} 条规则。`, `Removed rule ${index + 1} from ${layerText(layer, t)}.`));
     } catch (error) {
-      setNote({ text: conflictOr(error), bad: true });
+      setNote(saveFailure(error, t));
     } finally {
       setSaving(false);
     }
@@ -151,78 +160,84 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
   const rules = shown?.rules ?? [];
 
   return <>
-    <button type="button" className="rail-refresh" onClick={() => void load()}><Icon name="refresh" size={13} /> 再问一次</button>
-    {note !== null && <p className="session-note" data-tone={note.bad ? 'bad' : undefined}>{note.text}</p>}
-    {shown === null ? <p className="stub">规则表还没读回来。</p> : <>
-      <p className="sheet-note">这一份表是四层折完的结果，{rulesFrom()}。这一栏读与写的是这一份会话所属那一个项目的两层文件；左侧选了别的项目，这里跟着换成那一个项目的文件。没有打开的会话时说的是这一具宿主启动时那一个项目。</p>
-      <Row label="写进哪一层">
-        <select value={layer} onChange={(event) => setLayer(event.target.value)}>
-          {WRITABLE_LAYERS.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+    <button type="button" className="rail-refresh" disabled={saving} onClick={() => void load()}><Icon name="refresh" size={13} />{t('重新读取', 'Reload')}</button>
+    {note !== null && <div className="session-note" data-tone={note.bad ? 'bad' : undefined}>
+      <span>{note.text}</span>
+      {note.code !== undefined && <details><summary>{t('错误代码', 'Error code')}</summary><code>{note.code}</code></details>}
+    </div>}
+    {shown === null ? <p className="stub">{t('正在读取规则表…', 'Loading approval rules…')}</p> : <>
+      <p className="sheet-note">{t('显示合并后的规则表。规则与默认档按当前会话所属项目读取；选择另一项目后随之切换。没有打开的会话时使用 Host 启动项目。', 'This is the merged rules table. Rules and the default tier use the project of the current session and follow the selected project. With no session open, the Host’s startup project is used.')} {rulesFrom()}</p>
+      <Row label={t('写入位置', 'Save to')}>
+        <select value={layer} disabled={saving} onChange={(event) => setLayer(event.target.value)}>
+          {WRITABLE_LAYERS.map(([id]) => <option key={id} value={id}>{layerText(id, t)}</option>)}
         </select>
       </Row>
-      {/* 档位读的是这一次读取交回的那一份值：四层里没写就摆在「没写」那一格，界面不替配置文件猜一档（方案 3A）。 */}
-      <Row label="配置默认档" note={`整个运行默认按哪一档走。会话临时改的档位不动这一格。现在写着这一条的是${sourceLine(shown.sources?.['policy.mode'])}。`}>
+      <Row label={t('默认审批方式', 'Default approval mode')} note={t(`会话可单独更改自己的档位。当前配置来源：${sourceText(shown.sources?.['policy.mode'], t)}。`, `A session can override this mode for itself. Current source: ${sourceText(shown.sources?.['policy.mode'], t)}.`)}>
         <select
           value={shown.policyMode ?? ''}
           disabled={saving}
           onChange={(event) => { if (event.target.value !== '') void setMode(event.target.value as 'ask' | 'auto'); }}
         >
-          <option value="">（四层里都没写这一条）</option>
-          <option value="ask">ask（没有放行规则盖住的调用要问到人）</option>
-          <option value="auto">auto（看守卫与命令语法，放行规则在这一档不参与）</option>
+          <option value="">{t('未设置', 'Not set')}</option>
+          <option value="ask">ask — {t('未被放行规则覆盖的调用需要批准', 'Calls not covered by an allow rule require approval')}</option>
+          <option value="auto">auto — {t('由守卫与命令语法判定，放行规则不参与', 'Guards and command parsing decide; allow rules do not apply')}</option>
         </select>
       </Row>
 
-      <h3 className="group-label">规则表（{rules.length} 条）</h3>
-      {/* 这一张表在判定链里排在守卫之前、问人之前（`src/kernel/policy.js`）：一条命令分成几段时怎么算，写规则的人要在界面上看得见。 */}
-      <p className="sheet-note">一条命令被拆成几段时，逐次询问这一档要同一条放行规则盖住每一段才不问人，几条规则各盖住一段不算盖住。不允许的规则对整条文本与每一段都生效，写在它前面的放行规则压不掉它。</p>
-      {rules.length === 0 && <p className="stub">{shown.rules === undefined ? '这一具宿主没有配置文件的读写口，规则表读不出来。' : '配置里现在没有一条规则。下面那一枚「加一条规则」加上第一条。'}</p>}
+      <h3 className="group-label">{t(`规则（${rules.length} 条）`, `Rules (${rules.length})`)}</h3>
+      <p className="sheet-note">{t('在逐次询问模式下，复合命令的每一段都要被同一条放行规则覆盖，才会跳过询问。禁止规则作用于整条命令及各段，放行规则不能覆盖它。', 'In ask mode, one allow rule must cover every part of a compound command to skip approval. A deny rule applies to the full command and each part; an allow rule cannot override it.')}</p>
+      {rules.length === 0 && <p className="stub">{shown.rules === undefined
+        ? t('此 Host 不提供配置读写，无法读取规则表。', 'This Host does not provide configuration access, so the rules table is unavailable.')
+        : t('当前没有审批规则。添加一条规则即可开始。', 'There are no approval rules. Add a rule to get started.')}</p>}
       {rules.map((rule, index) => <div className="rule-row" key={`${index}:${rule.tool}`}>
-        <span className="rule-kind" data-decision={rule.decision}>{DECISION_NAMES[rule.decision]}</span>
+        <span className="rule-kind" data-decision={rule.decision}>{decisionText(rule.decision, t)}</span>
         <code className="rule-tool">{rule.tool}</code>
-        <span className="rule-detail">{rule.match === undefined || rule.match === '' ? '每一次调用' : matchText(rule.match)}</span>
+        <span className="rule-detail">{rule.match === undefined || rule.match === '' ? t('每次调用', 'Every call') : matchText(rule.match, t)}</span>
         {rule.reason !== undefined && rule.reason !== '' && <span className="rule-detail">{rule.reason}</span>}
         <span className="bar-spacer" />
-        <button type="button" className="mini chip" disabled={saving} onClick={() => setEditing({ index, rule: { ...blankRule(), ...rule, match: rule.match ?? '', reason: rule.reason ?? '' } })}>改</button>
-        <button type="button" className="mini chip" disabled={saving} onClick={() => void removeRule(index)}>去掉</button>
+        <button type="button" className="mini chip" disabled={saving} onClick={() => setEditing({ index, rule: { ...blankRule(), ...rule, match: rule.match ?? '', reason: rule.reason ?? '' } })}>{t('编辑', 'Edit')}</button>
+        <button type="button" className="mini chip" disabled={saving} onClick={() => void removeRule(index)}>{t('移除', 'Remove')}</button>
       </div>)}
 
-      {editing === null ? <button type="button" onClick={() => { setNote(null); setEditing({ index: -1, rule: blankRule() }); }}>加一条规则</button>
+      {editing === null ? <button type="button" disabled={saving} onClick={() => { setNote(null); setEditing({ index: -1, rule: blankRule() }); }}>{t('添加规则', 'Add rule')}</button>
         : <div className="region-group">
-          <h3>{editing.index < 0 ? '新加的那一条' : `改第 ${editing.index + 1} 条`}</h3>
-          <Row label="工具的能力名" note="普通工具用它自己的名字。MCP 的调用按 mcp:<服务器>/<工具> 判，登记表里的 mcp.call 不是这一格要写的那一个。">
-            <input value={editing.rule.tool} placeholder="read、exec、write" onChange={(event) => setEditing({ ...editing, rule: { ...editing.rule, tool: event.target.value } })} />
+          <h3>{editing.index < 0 ? t('新规则', 'New rule') : t(`编辑规则 ${editing.index + 1}`, `Edit rule ${editing.index + 1}`)}</h3>
+          <Row label={t('工具能力名', 'Tool capability')} note={t('普通工具填写工具名。MCP 工具使用 mcp:<server>/<tool>，不使用 mcp.call。', 'Use the tool name for built-in tools. For MCP tools, use mcp:<server>/<tool>, not mcp.call.')}>
+            <input value={editing.rule.tool} placeholder={t('例如 read、exec、write', 'e.g. read, exec, write')} onChange={(event) => setEditing({ ...editing, rule: { ...editing.rule, tool: event.target.value } })} />
           </Row>
-          <Row label="匹配的命令" note="只比命令文本，不比文件路径。这一串要从命令的开头对上，并且对到一个参数的边界为止；串里的 * 是往后的任意内容，整段比完。留空是这一件工具的每一次调用都算命中：读文件那一类调用没有命令文本，只有留空的规则盖得住。">
+          <Row label={t('命令匹配', 'Command match')} note={t('只匹配命令文本。模式从命令开头匹配，并在参数边界结束；* 匹配其后的任意文本。留空表示匹配该工具的所有调用，包括没有命令文本的文件操作。', 'Matches command text only. The pattern starts at the command beginning and ends at an argument boundary; * matches any text after it. Leave blank to match every call for this tool, including file operations without command text.')}>
             <input value={editing.rule.match} onChange={(event) => setEditing({ ...editing, rule: { ...editing.rule, match: event.target.value } })} />
           </Row>
-          <Row label="判定">
+          <Row label={t('判定', 'Decision')}>
             <select value={editing.rule.decision} onChange={(event) => setEditing({ ...editing, rule: { ...editing.rule, decision: event.target.value as Rule['decision'] } })}>
-              <option value="allow">放行</option>
-              <option value="deny">不允许</option>
+              <option value="allow">{t('放行', 'Allow')}</option>
+              <option value="deny">{t('不允许', 'Deny')}</option>
             </select>
           </Row>
-          <Row label="为什么这么定">
+          <Row label={t('理由', 'Reason')}>
             <input value={editing.rule.reason} onChange={(event) => setEditing({ ...editing, rule: { ...editing.rule, reason: event.target.value } })} />
           </Row>
-          {/* 先预览真正会写进去的那一行：这一行就是发出去的那一条规则，界面不藏别的东西。 */}
           <p className="session-note">
-            要写进{layerName(layer)}的那一条是：判定 {DECISION_NAMES[editing.rule.decision]} <code>{editing.rule.tool === '' ? '（还没填工具名）' : editing.rule.tool}</code>
-            {editing.rule.match ? <>，{matchKind(editing.rule.match)} <code>{editing.rule.match}</code></> : '，每一次调用都算命中'}
-            {editing.rule.reason === '' ? '' : <>，理由 {editing.rule.reason}</>}。
+            {t('预览：写入', 'Preview: write to')} {layerText(layer, t)} — {decisionText(editing.rule.decision, t)} <code>{editing.rule.tool === '' ? t('请填写工具名', 'Enter a tool name') : editing.rule.tool}</code>
+            {editing.rule.match ? <>; {matchKind(editing.rule.match, t)} <code>{editing.rule.match}</code></> : `; ${t('匹配每次调用', 'matches every call')}`}
+            {editing.rule.reason === '' ? '' : <>; {t('理由', 'Reason')}: {editing.rule.reason}</>}.
           </p>
           <div className="inline-field">
-            <button type="button" disabled={saving || editing.rule.tool === ''} onClick={() => void saveRule()}>保存</button>
-            <button type="button" onClick={() => setEditing(null)}>不收这笔</button>
+            <button type="button" disabled={saving || editing.rule.tool === ''} onClick={() => void saveRule()}>{t('保存', 'Save')}</button>
+            <button type="button" disabled={saving} onClick={() => setEditing(null)}>{t('取消', 'Cancel')}</button>
           </div>
         </div>}
     </>}
   </>;
 }
 
-// 版本对不上时报的是冲突那一句（与「模型与端点」那一栏同一条说法），不能看着像成功。
-function conflictOr(error: unknown): string {
-  return code(error) === 'config_version_stale'
-    ? '那一层文件在这之后被别的过程或你在编辑器里改过。这一次没有写进去，他的那份留着。按「再问一次」读回最新版本再试。'
-    : `没写进去：${code(error)}`;
+function saveFailure(error: unknown, t: (chinese: string, english: string) => string): Notice {
+  const stableCode = code(error);
+  return {
+    text: stableCode === 'config_version_stale'
+      ? t('配置文件已被其他写入修改，本次没有保存。重新读取后再试。', 'The configuration changed elsewhere, so this change was not saved. Reload and try again.')
+      : t('规则未保存。', 'The rule was not saved.'),
+    code: stableCode,
+    bad: true,
+  };
 }

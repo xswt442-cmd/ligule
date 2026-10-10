@@ -1,6 +1,4 @@
-/* 桌面壳的视觉系统。三栏的取值照 dsh 的那一份几何常量搬：
-   侧栏默认 280、可拖 264–420、收起成 56 的图标条；中栏最小 400；右侧面板最小 300、默认占四成半。
-   颜色全部走变量：六套具名配色在下面的 `data-palette` 块里各换一份颜色变量，几何、刻度与组件都不重来一遍（D97）。 */
+/* 六套配色共用布局、控件和排版变量。 */
 
 :root {
   /* 默认那一套是「墨青」（深色）。几何与刻度放在这一处，颜色变量在下面的配色块里给。 */
@@ -21,7 +19,7 @@
   --text-xl: 1.125rem;     /* 18：标题 */
   /* 常用控件的命中区下限（方案 4.1）：约 32 像素起。图标按钮与行内的小片同一条线。 */
   --hit: 32px;
-  --stream: 74ch;
+  --stream: 850px;
   --shadow-pop: 0 18px 40px rgb(0 0 0 / 35%);
   --sidebar: 280px;
   --dock: 420px;
@@ -54,12 +52,12 @@
 :root[data-palette="parchment"],
 [data-palette="parchment"] {
   color-scheme: light;
-  --bg: #f4ecd8;
-  --bg-raised: #fbf6e9;
-  --bg-sunk: #e9dec2;
+  --bg: #faf7ef;
+  --bg-raised: #fffcf6;
+  --bg-sunk: #f1ebde;
   --fg: #2b271d;
-  --fg-muted: #5f563f;
-  --line: #c9b78f;
+  --fg-muted: #756c5f;
+  --line: #e3dccd;
   --accent: #9a3412;
   --accent-strong: #9a3412;
   --on-accent: #ffffff;
@@ -160,6 +158,7 @@ body {
 .frame {
   display: flex;
   height: 100vh;
+  overflow: hidden;
 }
 
 /* 侧栏可拖 264–420；收起时那两格都不占位；面板可以停到左边（D90）。 */
@@ -175,7 +174,7 @@ body {
 }
 
 .splitter {
-  flex: 0 0 9px;
+  flex: 0 0 5px;
   /* 看得见的那一条细线由 ::before 画，命中区比它宽：五像素那一条在鼠标底下太窄，抓不稳（第 105 步）。 */
   position: relative;
   cursor: col-resize;
@@ -186,8 +185,8 @@ body {
 .splitter::before {
   content: '';
   position: absolute;
-  inset: 0 4px;
-  background: var(--line);
+  inset: 0 2px;
+  background: transparent;
 }
 
 .splitter:hover::before,
@@ -214,9 +213,9 @@ body {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
-  padding: 0.75rem 0.6rem;
+  padding: 1rem 0.75rem 0.6rem;
   background: var(--bg-sunk);
-  border-inline-end: 1px solid var(--line);
+  border-inline-end: 0;
   min-height: 0;
 }
 
@@ -226,8 +225,10 @@ body {
   gap: 0.5rem;
   font-weight: 650;
   letter-spacing: 0.01em;
-  padding: 0.15rem 0.35rem 0.5rem;
+  padding: 0.15rem 0.5rem 0.75rem;
 }
+
+.brand > .icon-button { margin-inline-start: auto; }
 
 .new-run,
 .entry {
@@ -236,9 +237,9 @@ body {
   gap: 0.5rem;
   width: 100%;
   padding: 0.5rem 0.6rem;
-  border: 1px solid var(--line);
+  border: 1px solid transparent;
   border-radius: var(--radius);
-  background: var(--bg-raised);
+  background: transparent;
   color: inherit;
   font: inherit;
   text-align: start;
@@ -246,7 +247,9 @@ body {
 }
 
 .new-run {
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  font-weight: 550;
+  margin-bottom: 0.25rem;
 }
 
 .section-label {
@@ -277,11 +280,11 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   display: flex;
-  flex-direction: column;
-  align-items: start;
-  white-space: normal;
-  gap: 2px;
-  padding: var(--space-2) var(--space-3);
+  flex-direction: row;
+  align-items: center;
+  white-space: nowrap;
+  gap: 8px;
+  padding: 0.4rem 0.65rem 0.4rem 1.7rem;
 }
 
 .session-item:hover {
@@ -289,7 +292,7 @@ body {
 }
 
 .session-item.active {
-  background: var(--bg-raised);
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
   color: var(--fg);
 }
 
@@ -368,7 +371,7 @@ body {
 }
 
 .sidebar-foot {
-  border-block-start: 1px solid var(--line);
+  border-block-start: 0;
   padding-top: 0.6rem;
 }
 
@@ -378,7 +381,7 @@ body {
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
-  min-width: 400px;
+  min-width: 0;
   min-height: 0;
 }
 
@@ -390,18 +393,18 @@ body {
      中栏那一列溢出页面 33 到 100 像素，发送钮掉到 605（P5 三个宽度的读数）。 */
   flex-wrap: nowrap;
   gap: var(--space-3);
-  min-block-size: 52px;
+  min-block-size: 68px;
   flex-shrink: 0;
-  padding: var(--space-2) var(--space-4);
-  border-block-end: 1px solid var(--line);
-  background: color-mix(in srgb, var(--bg) 80%, var(--bg-raised));
+  padding: var(--space-3) var(--space-5);
+  border-block-end: 0;
+  background: var(--bg);
 }
 
 .title {
   display: flex;
   flex-direction: column;
   align-items: baseline;
-  gap: var(--space-2);
+  gap: 1px;
   flex: 1 1 14rem;
   min-width: 0;
 }
@@ -827,13 +830,14 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
-  inline-size: min(100%, var(--stream));
+  inline-size: min(calc(100% - 48px), var(--stream));
   margin-inline: auto;
-  margin-block: 0 var(--space-2);
-  padding: var(--space-1) var(--space-2) 0;
+  margin-block: var(--space-3) 0;
+  padding: var(--space-2) var(--space-3) var(--space-1);
   background: var(--bg-raised);
   border: 1px solid var(--line);
-  border-radius: calc(var(--radius) * 1.6);
+  border-radius: 20px;
+  box-shadow: 0 3px 18px rgb(0 0 0 / 4%);
 }
 
 /* ---------- 右侧面板与菜单 ---------- */
@@ -899,7 +903,7 @@ button:disabled {
   border-radius: var(--radius);
   background: var(--bg-raised);
   box-shadow: var(--shadow-pop);
-  z-index: 20;
+  z-index: 40;
 }
 
 .menu [role="menuitem"] {
@@ -1218,9 +1222,9 @@ button.icon-button:hover:not(:disabled) {
 
 /* 虚拟视口管滚动，74 字那一栏落到每一条上：一条一个外壳，行与行之间的间隔由外壳的上下内边距给（U48）。 */
 .stream-row {
-  inline-size: min(100%, var(--stream));
+  inline-size: min(calc(100% - 48px), var(--stream));
   margin-inline: auto;
-  padding: calc(var(--space-3) / 2) var(--space-4);
+  padding: var(--space-2) 0;
 }
 
 /* 视口上下那两条带：更早那一格排在最上，空着的那一句排在中间。 */
@@ -1250,13 +1254,14 @@ button.icon-button:hover:not(:disabled) {
 
 .composer .composer-input {
   inline-size: 100%;
-  min-block-size: 58px;
+  min-block-size: 76px;
+  max-block-size: 28vh;
   padding: var(--space-2);
   color: var(--fg);
   background: transparent;
   border: 0;
   font: inherit;
-  resize: vertical;
+  resize: none;
 }
 
 .composer .composer-input:focus {
@@ -1268,7 +1273,8 @@ button.icon-button:hover:not(:disabled) {
   align-items: center;
   gap: var(--space-2);
   padding: var(--space-1) var(--space-1) var(--space-2);
-  border-block-start: 1px solid var(--line);
+  min-width: 0;
+  flex-wrap: wrap;
 }
 
 .bar-spacer {
@@ -1375,7 +1381,7 @@ button.send:hover:not(:disabled) {
   display: flex;
   align-items: center;
   gap: var(--space-1);
-  margin: var(--space-3) var(--space-1) var(--space-1);
+  margin: var(--space-2) var(--space-1) 2px;
   color: var(--fg-muted);
   font-size: var(--text-xs);
   font-weight: 500;
@@ -1424,7 +1430,8 @@ button.send:hover:not(:disabled) {
 /* 人起的那个名字是这一行的标题，编号退到下面；归档的那一份整条压暗，仍在列表里（实现顺序第 75 步）。 */
 .session-name {
   color: var(--fg);
-  font-weight: 600;
+  font-weight: 400;
+  flex: 1;
 }
 
 .session-item.archived {
@@ -1612,10 +1619,11 @@ button.send:hover:not(:disabled) {
   margin: auto;
   z-index: 31;
   display: grid;
-  grid-template-columns: 10.5rem minmax(0, 1fr);
+  grid-template-columns: 12.5rem minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr);
-  inline-size: min(56rem, 92vw);
-  max-block-size: 82vh;
+  inline-size: min(960px, 94vw);
+  block-size: min(760px, 88vh);
+  max-block-size: 88vh;
   background: var(--bg-raised);
   border: 1px solid var(--line);
   border-radius: calc(var(--radius) * 1.5);
@@ -1628,7 +1636,7 @@ button.send:hover:not(:disabled) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: var(--space-3) var(--space-4);
+  padding: 18px 24px;
   border-block-end: 1px solid var(--line);
   font-size: var(--text-lg);
 }
@@ -1637,7 +1645,7 @@ button.send:hover:not(:disabled) {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
-  padding: var(--space-3) var(--space-2);
+  padding: 20px 12px;
   background: var(--bg-sunk);
   border-inline-end: 1px solid var(--line);
 }
@@ -1664,20 +1672,20 @@ button.send:hover:not(:disabled) {
 .sheet-nav button.active {
   color: var(--fg);
   background: var(--bg-raised);
-  border-color: var(--line);
+  border-color: transparent;
 }
 
 .sheet-body {
   min-height: 0;
   overflow-y: auto;
-  padding: var(--space-4);
+  padding: 24px 32px 40px;
 }
 
 .sheet-row {
   display: flex;
   align-items: flex-start;
-  gap: var(--space-4);
-  padding: var(--space-3) 0;
+  gap: var(--space-5);
+  padding: 18px 0;
   border-block-end: 1px solid var(--line);
 }
 
@@ -2237,5 +2245,72 @@ button.pill:hover {
   clip-path: inset(50%);
   white-space: nowrap;
   border: 0;
+}
+
+.welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: min(48vh, 420px);
+  gap: 12px;
+  text-align: center;
+}
+
+.welcome h1 { margin: 4px 0 0; font-size: 1.7rem; font-weight: 550; letter-spacing: -0.03em; }
+.welcome p { margin: 0; color: var(--fg-muted); font-size: var(--text-md); }
+.composer-hint { display: flex; justify-content: space-between; gap: 16px; width: min(calc(100% - 64px), var(--stream)); margin: 10px auto 14px; font-size: 0.69rem; color: var(--fg-muted); }
+.composer-choice { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 45%; padding: 2px 6px; background: transparent; border-color: transparent; font-size: var(--text-sm); }
+.composer-choice span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-policy { font-size: var(--text-xs); color: var(--fg-muted); }
+.running-label { display: flex; align-items: center; gap: 6px; font-size: var(--text-xs); color: var(--fg-muted); white-space: nowrap; }
+.status-dot, .unread-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
+.status-dot { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 12%, transparent); }
+.session-trailing { display: inline-flex; align-items: center; gap: 6px; flex: none; color: var(--fg-muted); }
+.session-date { font-size: 0.68rem; color: var(--fg-muted); }
+.rail-heading { display: flex; align-items: center; gap: 4px; margin: 10px 8px 2px; font-size: var(--text-xs); font-weight: 550; color: var(--fg-muted); }
+.rail-heading button.icon-button { width: 25px; height: 28px; min-height: 28px; }
+.rail-empty { padding: 4px 10px; margin: 8px 0; color: var(--fg-muted); font-size: var(--text-xs); }
+.rail-warning { margin: 4px 8px; color: var(--fg-muted); font-size: var(--text-xs); }
+.rail-warning summary { cursor: pointer; color: var(--warn); }
+.rail-warning[open] { max-height: 200px; overflow: auto; }
+.workspace-failure { display: grid; gap: 6px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.workspace-failure span, .workspace-failure code { min-width: 0; overflow-wrap: anywhere; }
+.workspace-pop { z-index: 41; display: grid; gap: 14px; width: min(360px, 90vw); padding: 20px; background: var(--bg-raised); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow-pop); }
+.workspace-pop label { display: grid; gap: 7px; font-size: var(--text-sm); }
+.workspace-pop input { width: 100%; }
+.workspace-pop p { margin: 0; color: var(--fg-muted); font-size: var(--text-xs); }
+.rail-archive { margin: 16px 8px; border: 0; background: transparent; color: var(--fg-muted); font-size: var(--text-xs); text-align: start; }
+.rail-group .group-menu, .rail-group .group-new { opacity: 0; }
+.rail-group:hover .group-menu, .rail-group:hover .group-new, .rail-group:focus-within .group-menu, .rail-group:focus-within .group-new { opacity: 1; }
+.group-label .icon-button { width: 26px; }
+.menu-separator { height: 1px; margin: 5px 4px; background: var(--line); }
+.action-error { font-size: var(--text-xs); color: var(--bad); }
+.settings-intro h2 { margin: 0 0 8px; font-size: 1.3rem; font-weight: 600; }
+.settings-intro p { margin: 0 0 24px; color: var(--fg-muted); font-size: var(--text-sm); }
+
+@media (max-width: 760px) {
+  .frame[data-mobile-sidebar="true"] .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 25; width: min(320px, 85vw); box-shadow: 12px 0 60px rgb(0 0 0 / 25%); }
+  .splitter { display: none; }
+  .topbar { padding: 12px 16px; gap: 8px; }
+  .composer, .stream-row { inline-size: calc(100% - 24px); }
+  .composer-policy { display: none; }
+  .composer-hint { width: calc(100% - 40px); }
+  .sheet { grid-template-columns: 9rem minmax(0, 1fr); }
+  .sheet-body { padding: 20px; }
+  .sheet-row { flex-wrap: wrap; gap: 10px; }
+  .sheet-label { flex-basis: 100%; }
+  .sheet-nav { padding: 12px 6px; }
+  .sheet-nav button { padding: 8px; }
+  .dock { inline-size: min(420px, 100vw); min-inline-size: 0; }
+  .usage-bar { display: none; }
+}
+
+@media (max-width: 480px) {
+  .sheet { grid-template-columns: 1fr; grid-template-rows: auto auto minmax(0, 1fr); }
+  .sheet-nav { flex-direction: row; overflow-x: auto; border-inline-end: 0; border-bottom: 1px solid var(--line); }
+  .sheet-nav button { flex: none; font-size: var(--text-sm); }
+  .sheet-nav button .icon { display: none; }
+  .composer-choice { max-width: 53%; }
 }
 

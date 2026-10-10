@@ -14,19 +14,21 @@ import { RowView } from './components/RowView';
 import { SessionRail, type SearchHit } from './components/SessionRail';
 import { createCallOf, type WorkspaceRoster } from './rail';
 import { SessionMenu } from './components/SessionMenu';
-import { ModelPanel } from './components/ModelPanel';
+import { SessionActions } from './components/SessionActions';
+import { DiagnosticsPanel } from './components/DiagnosticsPanel';
 import { ExportPanel } from './components/ExportPanel';
 import { HelpPanel } from './components/HelpPanel';
 import { UsageMeter } from './components/UsageMeter';
 import { Palette, type Command } from './components/Palette';
 import { keepEscape } from './components/ui';
-import { KEYMAP, CURRENT, actionOf, formatKeys, isCapturing, isComposing, loadBindings, specOf } from './hotkeys';
+import { CURRENT, actionOf, formatKeys, isCapturing, isComposing, loadBindings, specOf } from './hotkeys';
 import { insertMention, mentionToken } from './mentions';
 import type { Verbosity } from './components/types';
 import { createSlotRegistry, SLOTS, type Panel } from './slots';
 import { capabilityOf, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn, type Record_, type Row } from './rows';
 import type { Status } from './status';
 import { loadSettings, mergeQueueIntoDraft, readSettings, saveSettings, type Settings } from './settings';
+import { LocaleProvider, localeOf, useText } from './locale';
 
 type Branch = { seq: number; id: string; task: string };
 
@@ -79,6 +81,8 @@ type PanelProps = {
   seconds: number;
   waiting: number;
   counts: { sent: number; received: number };
+  link: string | null;
+  onReconnect: () => void;
   openSession: (id: string, projectRoot?: string) => void;
   // 查找命中说的是一份会话里的第几条：接上那一份，再跳到那一行（方案 4.2）。
   openHit: (hit: SearchHit, projectRoot?: string) => void;
@@ -119,55 +123,14 @@ async function registerShellWorkspace(getDirectory: () => Promise<string>, clien
 
 const menuPanels: Panel<PanelProps>[] = [
   {
-    id: 'panel.status',
-    title: '工具与档位',
-    view: ({ status }) => status === null
-      ? <p className="stub">还没有会话，读不到状态。</p>
-      : <>
-        <div className="region-group">
-          <h3>这一份会话</h3>
-          <p className="stub">
-            模式 {status.mode ?? '没有装'}。审批档位 {status.policy}，来自{status.policySource === 'session' ? '这一份会话改的' : '配置默认'}。
-            现在{status.running ? '正在跑' : '空闲'}。记录里一共 {status.eventCount} 条。
-            判定链记下的不允许：连续 {status.denials.consecutive} 次、累计 {status.denials.total} 次。连续次数到阈值时档位自己回到逐次询问。
-          </p>
-        </div>
-        <div className="region-group">
-          <h3>装着的工具（{status.tools.length} 件）</h3>
-          <ul>{status.tools.map((name) => <li key={name}>{name}</li>)}</ul>
-        </div>
-      </>,
-  },
-  {
-    id: 'panel.shortcuts',
-    title: '快捷键',
-    // 这一份清单读的是当前那一份键位表：键、动作与它落在哪一个范围，界面上说的和按键落的同一处取（方案 6.1）。
-    view: () => <ul>{(Object.keys(KEYMAP) as (keyof typeof KEYMAP)[]).map((action) => (
-      <li key={action}>{formatKeys(CURRENT[action])} —— {KEYMAP[action].label}（{KEYMAP[action].view}）</li>
-    ))}</ul>,
-  },
-  {
-    id: 'panel.frames',
-    title: '这一条连接',
-    view: ({ counts, waiting, sessionId }) => <>
-      <ul>
-        <li>发出的帧：{counts.sent}</li>
-        <li>收到的帧：{counts.received}</li>
-        <li>还没答复的调用：{waiting}</li>
-        <li>当前会话：{sessionId ?? '没有'}</li>
-      </ul>
-      <p className="stub">载体是标准输入输出两根管道，本机没有监听端口。界面拿不到地址与凭据。</p>
-    </>,
+    id: 'panel.diagnostics',
+    title: '诊断',
+    view: ({ status, counts, waiting, link, onReconnect }) => <DiagnosticsPanel status={status} counts={counts} waiting={waiting} link={link} onReconnect={onReconnect} />,
   },
   {
     id: 'panel.branch',
     title: '派生支线',
     view: ({ client, sessionId, settings }) => <BranchPanel client={client} sessionId={sessionId} verbosity={settings.verbosity} />,
-  },
-  {
-    id: 'panel.model',
-    title: '模型与端点',
-    view: ({ client, sessionId, projectRoot, onEdit }) => <ModelPanel client={client} sessionId={sessionId} projectRoot={projectRoot} onEdit={onEdit} />,
   },
   {
     id: 'panel.export',
@@ -182,53 +145,14 @@ const menuPanels: Panel<PanelProps>[] = [
   },
 ];
 
-// 还没有实现的那一项：菜单里看得见，点开说的是缺的那一件在哪。多窗看同一会话要等共享常驻进程引入。
-const pendingPanels: Panel<PanelProps>[] = [
-  {
-    id: 'panel.windows',
-    title: '多窗口与重连',
-    pending: true,
-    view: () => <p className="stub">一份壳对应一个 Host 进程，会话状态在那个进程里。后端进程退了可以重连：重连会换一具进程，再用 <code>session.open</code> 接回这一份会话。多个窗口看同一份会话还没有做。</p>,
-  },
-];
-
 // 左侧栏那一项：读的是 `sessions.list`，挂的是声明好的那个槽位（D91、I7）。
 const railPanels: Panel<PanelProps>[] = [
   {
     id: 'rail.sessions',
     title: '会话',
-    view: ({ client, sessionId, openSession, openHit, sessionsRevision, runningIds, unread, projects, onProjects, createIn }) => (
-      <SessionRail client={client} current={sessionId} onOpen={openSession} onOpenHit={openHit} revision={sessionsRevision} running={runningIds} unread={unread} projects={projects} onProjects={onProjects} onCreate={createIn} />
+    view: ({ client, sessionId, openSession, openHit, sessionsRevision, runningIds, unread, projects, onProjects, createIn, settings, patch }) => (
+      <SessionRail client={client} current={sessionId} onOpen={openSession} onOpenHit={openHit} revision={sessionsRevision} running={runningIds} unread={unread} projects={projects} hidden={settings.hiddenProjects} onHidden={(hiddenProjects) => patch({ hiddenProjects })} onProjects={onProjects} onCreate={createIn} />
     ),
-  },
-];
-
-const statusPanels: Panel<PanelProps>[] = [
-  {
-    id: 'status.pills',
-    title: '运行状态',
-    // 顶栏只说这一份会话现在在做什么；工具件数、记录条数与拒绝计数在设置那一个对话框里（D98）。
-    view: ({ status, running, othersRunning, waiting, seconds }) => <>
-      {running && <span className="pill" data-tone="running">正在跑 {seconds} 秒</span>}
-      {othersRunning > 0 && <span className="pill" title="别的那些会话各有自己的轮次在跑：切过去看它自己那一份">另一份在跑 {othersRunning} 份</span>}
-      {waiting > 0 && <span className="pill" title="发出去还没回来的调用">还没答复的调用 {waiting}</span>}
-      {status !== null && <>
-        <Popover.Trigger asChild><button className="pill" type="button" title="打开这一份会话的设置">模式 {status.mode ?? '没装'}{status.pendingMode === null || status.pendingMode === undefined ? '' : ` → ${status.pendingMode}`}</button></Popover.Trigger>
-        <Popover.Trigger asChild><button className="pill" type="button" title="打开这一份会话的设置">审批 {status.policy}</button></Popover.Trigger>
-        {status.denials.total > 0 && <span className="pill">不允许 连续 {status.denials.consecutive} 次 · 累计 {status.denials.total} 次</span>}
-      </>}
-    </>,
-  },
-  {
-    id: 'status.usage',
-    title: '上下文用量',
-    view: ({ status, running, seconds }) => {
-      const usage = status?.usage;
-      // 窗口那一格没写时两条压缩触发都不启用，这一格也就没有压力线可画（D75）。
-      return usage === undefined || usage === null
-        ? <span className="pill" title="限额那一格没写，两条压缩触发都不启用">窗口没写</span>
-        : <UsageMeter usage={usage} running={running} seconds={seconds} />;
-    },
   },
 ];
 
@@ -242,6 +166,7 @@ function branchOf(record: Record_): Branch | null {
 }
 
 function BranchPanel({ client, sessionId, verbosity }: { client: Client; sessionId: string | null; verbosity: Verbosity }) {
+  const t = useText();
   const [branches, setBranches] = useState<Branch[]>([]);
   const [shown, setShown] = useState<{ id: string; rows: Row[] } | null>(null);
   const [note, setNote] = useState('');
@@ -273,7 +198,7 @@ function BranchPanel({ client, sessionId, verbosity }: { client: Client; session
   }, [client]);
 
   if (branches.length === 0) {
-    return <p className="stub">{note === '' ? '这一份会话还没有派生支线。模型调用 subagent 之后，那条结果里就带着支线的会话 id。' : note}</p>;
+    return <p className="stub">{note === '' ? t('当前会话没有子任务。', 'This conversation has no subtasks.') : note}</p>;
   }
   return <>
     <h3>主线里的 {branches.length} 次派生</h3>
@@ -295,13 +220,17 @@ export function App({ transport }: { transport: Transport }) {
   const client = useMemo(() => createClient(transport), [transport]);
   const registry = useMemo(() => {
     const created = createSlotRegistry<PanelProps>(SLOTS);
-    for (const panel of [...menuPanels, ...pendingPanels]) created.register('rail.menu', panel);
-    for (const panel of statusPanels) created.register('header.status', panel);
+    for (const panel of menuPanels) created.register('rail.menu', panel);
     for (const panel of railPanels) created.register('rail.sessions', panel);
     return created;
   }, []);
 
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessionLabel, setSessionLabel] = useState({ name: '', archived: false });
+  const [starting, setStarting] = useState(false);
+  const creating = useRef(false);
+  const newParameters = useRef<ReturnType<typeof createCallOf>>({});
+  const booted = useRef(false);
   const [rows, setRows] = useState<Row[]>([]);
   const [live, setLive] = useState({ text: '', reasoning: '' });
   // 流式那半截按会话各存一份：后台那一轮的片段留着，切回来先补上它，不等那一条落进记录（方案 3.1、审阅 F4）。
@@ -368,15 +297,26 @@ export function App({ transport }: { transport: Transport }) {
     else setDockHold({ reasons, go });
   }, [dockGate]);
   const [settings, setSettings] = useState(readSettings);
+  const language = localeOf(settings.language);
+  const t = useCallback((chinese: string, english: string) => language === 'zh' ? chinese : english, [language]);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<'general' | 'model' | 'keys'>('general');
   // 退出请求带来的那一张确认：清单是空的就不画，那种情况直接交回退出。
   const [quitRows, setQuitRows] = useState<QuitRow[]>([]);
   // 会话这一侧那一格浮层（模式与档位）：入口是顶栏那两枚小牌子（第 105 步）。
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const [reading, setReading] = useState(false);
   const verbosity = settings.verbosity;
-  const collapsed = settings.collapsed;
+  const [narrow, setNarrow] = useState(() => window.matchMedia('(max-width: 760px)').matches);
+  const [mobileSidebar, setMobileSidebar] = useState(false);
+  const collapsed = settings.collapsed || (narrow && !mobileSidebar);
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 760px)');
+    const change = () => { setNarrow(media.matches); setMobileSidebar(false); };
+    media.addEventListener('change', change);
+    return () => media.removeEventListener('change', change);
+  }, []);
   // 输入历史在宿主那一侧的那一份共用文件里，终端界面读写的是同一个（D90、方案 5.5.6）：界面手里只是它的一个读法，-1 说的是当前那份草稿。
   const [history, setHistory] = useState<string[]>([]);
   const [walk, setWalk] = useState(-1);
@@ -524,19 +464,20 @@ export function App({ transport }: { transport: Transport }) {
   // 草稿与排着的几句按「哪一项目录下的哪一份会话」存：数据根里那一份文档是正式副本，WebView 里只当第一屏缓存（方案 5.5.2）。
   // 切换、打开设置、看历史与断连都不丢这一句，退出再打开时接得回来（方案 5.1）。写不进去要说一句，别让人以为它已经存住了。
   useEffect(() => {
-    if (!settingsReady || sessionId === null || inputOwner !== sessionId) return;
+    if (!settingsReady || inputOwner !== sessionId) return;
     const stored = readSettings();
+    const draftId = sessionId ?? '$new';
     // 空的那一格不留：草稿清空、队列发完，那一行整个从存储里去掉，不留着旧内容。
     const put = <T extends { length: number }>(table: Record<string, Record<string, T>>, value: T): Record<string, Record<string, T>> => {
       const row = { ...(table[projectRoot] ?? {}) };
-      if (value.length === 0) delete row[sessionId];
-      else row[sessionId] = value;
+      if (value.length === 0) delete row[draftId];
+      else row[draftId] = value;
       const next = { ...table };
       if (Object.keys(row).length === 0) delete next[projectRoot];
       else next[projectRoot] = row;
       return next;
     };
-    const items = queues[sessionId]?.items ?? [];
+    const items = sessionId === null ? [] : queues[sessionId]?.items ?? [];
     void saveSettings(client, { ...settings, drafts: put(stored.drafts, draft), queued: put(stored.queued, items) }).catch((error) => {
       setSettingsReady(false);
       setPrefsFailure(code(error));
@@ -555,6 +496,7 @@ export function App({ transport }: { transport: Transport }) {
   }, [settings.font, settings.palette, settings.sidebar]);
 
   const patch = useCallback((part: Partial<Settings>) => {
+    if (part.collapsed !== undefined) setMobileSidebar(!part.collapsed);
     setSettings((current) => ({ ...current, ...part }));
   }, []);
 
@@ -563,8 +505,8 @@ export function App({ transport }: { transport: Transport }) {
   useEffect(() => {
     const outcome = loadBindings(settings.keys);
     setKeyNotice(outcome.refused.length === 0 ? ''
-      : `有 ${outcome.refused.length} 条键位落不下来，那几条按默认那一份走：${outcome.refused.join('、')}`);
-  }, [settings.keys]);
+      : t(`${outcome.refused.length} 条快捷键无效，已使用默认键：${outcome.refused.join('、')}`, `${outcome.refused.length} invalid shortcuts use their defaults: ${outcome.refused.join(', ')}`));
+  }, [settings.keys, t]);
 
   // 拖那一条分隔线改侧栏宽度：范围与设置面板里那根滑杆是同一份（D90）。
   // 指针要抓住：拖到别处（转录的滚动条、另一侧的面板）时 move 也还得送到这一处来。
@@ -719,6 +661,7 @@ export function App({ transport }: { transport: Transport }) {
     setSessionId(id);
     // 切回来看这一份时，它那个「刚跑完一轮」的记号就消掉（方案 3.1 的未读结果只用来指「还没看着」）。
     setUnread((current) => current.filter((item) => item !== id));
+    setMobileSidebar(false);
     setRows([]);
     setPage(null);
     setFirstIndex(FIRST_INDEX);
@@ -734,13 +677,15 @@ export function App({ transport }: { transport: Transport }) {
       await client.call('session.open', askedRoot === undefined || askedRoot === '' ? { sessionId: id } : { sessionId: id, projectRoot: askedRoot }, 15_000);
       // fullResults 那一格是给界面读的：溢出文件里的整段正文这才到得了画面（记录本身不动）。
       // 只取最近这一页：更早的靠「显示更早」那一格按游标往前要（方案 4.1、实现顺序第 73 步）。
-      const newest = await client.call('session.read', { sessionId: id, limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean; header: { projectRoot?: string } | null };
+      const newest = await client.call('session.read', { sessionId: id, limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean; header: { projectRoot?: string } | null; label: { name: string; archived: boolean } };
       if (openRequest.current !== request) return;
       // 接上这一份时把它自己那两格摊回来：草稿是当时没发出去的那一句，排着的几条恢复成暂停（方案 5.1、5.2）。
       const root = newest.header?.projectRoot ?? '';
+      setSessionLabel(newest.label);
       setProjectRoot(root);
       // 缓存里那一份要等偏好从数据根读回来之后才是新的：恢复草稿与队列读的是那之后的缓存。
       await prefsSettled.current;
+      if (openRequest.current !== request) return;
       const stored = readSettings();
       const storedDraft = stored.drafts[root]?.[id] ?? '';
       const restored = stored.queued[root]?.[id] ?? [];
@@ -753,6 +698,7 @@ export function App({ transport }: { transport: Transport }) {
         patchQueue(id, () => ({ items: restored, paused: restored.length > 0 }));
       }
       setInputOwner(id);
+      setSettings((current) => ({ ...current, lastSession: { id, projectRoot: root } }));
       let events = newest.events;
       let hasMore = newest.hasMore;
       while (hit !== undefined && hit.seq < Number(events[0]?.seq ?? 0) && hasMore) {
@@ -778,20 +724,24 @@ export function App({ transport }: { transport: Transport }) {
     } catch (error) {
       // 过期那一次的失败不说在新那一次的画面上：那一份会话可能已经接上了，报的是别处的旧账。
       if (openRequest.current === request) setRows((current) => [...current, metaRow('error', `那份会话接不上：${code(error)}`)]);
+      return false;
     } finally {
       // 只有还是这一次在接的时候才收输入保护：旧那一次的收尾把新那一次的锁解开，人就会在答复还没回来时发出去。
       if (openRequest.current === request) setReading(false);
     }
     if (openRequest.current !== request) return;
     void refreshStatus(id);
+    return true;
   }, [client, refreshStatus]);
 
   const newSession = useCallback(async (root?: string) => {
+    const request = ++openRequest.current;
+    setReading(true);
     try {
       // 指名了哪一具工作区就在哪一个项目里建；没指名时先看眼前这一份会话在哪一项目录，再退到那份登记里的默认那一具，
       // 登记里没有就问壳要系统文档目录下那一具并登记成默认。来源那一格按这几档说清是谁选的（方案 3.2、5.5.3）。
       const named = root === undefined || root === '' ? undefined : root;
-      const current = projectRoot === '' ? undefined : projectRoot;
+      const current = undefined;
       let landing: string | undefined;
       let refused: string | undefined;
       if (named === undefined && current === undefined) {
@@ -802,31 +752,42 @@ export function App({ transport }: { transport: Transport }) {
           refused = fromShell.failed;
         }
       }
-      // 壳在的那一侧不拿宿主继承的那个进程目录当工作区：几格都空着说的是「先选一具工作区」，不是悄悄开一份。
-      // 载体交不出这一格时（浏览器里开发）没有壳可问，仍由宿主用它自己那一份项目环境。
       if (named === undefined && current === undefined && landing === undefined && transport.defaultWorkspace !== undefined) {
-        setRows((rows) => [...rows, metaRow('meta', `还没有可用的工作区${refused === undefined ? '' : `：${refused}`}。在左侧栏「另一个项目的目录」那一格写一处，或在想用的那一组上按「新建」。`)]);
-        return;
+        throw Object.assign(new Error(refused ?? 'workspace_unavailable'), { code: 'workspace_unavailable' });
       }
       const params = createCallOf(named, current, landing);
-      const asked = params.projectRoot;
-      const created = await client.call('session.create', params) as { sessionId: string };
-      // 新建那一份也走接会话那一条路：只有那一次读把记录头部的项目根带回来，草稿与队列才知道该存到哪一格。
-      // 指名了哪一项目录就带着它去接：不带的话宿主按默认那一份项目环境找记录，另一项目录里刚建好的那一份就报 `session_not_found`（方案 3.2）。
-      void openSession(created.sessionId, undefined, false, asked);
-      // 这一扇窗口自己刚造出来的那一份要马上在左侧栏里看得见，不该让人再去按一次「刷新」（方案 4.2 的会话列表）。
-      setSessionsRevision((current) => current + 1);
+      await prefsSettled.current;
+      if (openRequest.current !== request) return;
+      newParameters.current = params;
+      opening.current = null;
+      active.current = null;
+      setSessionId(null);
+      setSessionLabel({ name: '', archived: false });
+      setInputOwner(null);
+      setProjectRoot(params.projectRoot ?? '');
+      setRows([]);
+      setStatus(null);
+      setLive({ text: '', reasoning: '' });
+      setPage(null);
+      setWanted(null);
+      setDraft(readSettings().drafts[params.projectRoot ?? '']?.$new ?? '');
+      setWalk(-1);
+      setSettings((current) => ({ ...current, lastSession: null }));
+      composerRef.current?.focus();
     } catch (error) {
-      setRows((current) => [...current, metaRow('error', `会话建不起来：${code(error)}`)]);
+      setRows((current) => [...current, metaRow('error', `无法准备新会话：${code(error)}`)]);
+    } finally {
+      if (openRequest.current === request) setReading(false);
     }
-  }, [client, openSession, projectRoot, transport]);
+  }, [client, transport]);
 
   useEffect(() => {
-    // 只在手里还没有会话时自动开第一份：`newSession` 的身份跟着 `projectRoot` 变，少了这一道判断，
-    // 接上另一项目录里的会话会把这一格改掉，这个 effect 就跟着又建一份并跳过去（方案 3.2）。
-    if (sessionId !== null) return;
-    void newSession();
-  }, [sessionId, newSession]);
+    if (!settingsReady || booted.current) return;
+    booted.current = true;
+    const last = settings.lastSession;
+    if (last !== null) void openSession(last.id, undefined, false, last.projectRoot);
+    else void newSession();
+  }, [settingsReady, settings.lastSession, newSession, openSession]);
 
   // 查找命中那一条交给接会话那一个动作：读到位与落笔在同一批里，跳转那一处只认这一份会话的第几条（方案 4.2）。
   const openHit = useCallback((hit: SearchHit, root?: string) => void openSession(hit.sessionId, hit, false, root), [openSession]);
@@ -981,9 +942,40 @@ export function App({ transport }: { transport: Transport }) {
   // 这时候按回车或按发送那一枚会把上一句按新的那一份身份落进记录（审阅 F5）。
   // 这一段里输入坞同时是只读的（下面 `readOnly` 那一格），人新打的字不会被随后恢复草稿那一步盖掉。
   const send = useCallback(async () => {
-    if (reading || inputOwner !== sessionId) return;
-    await submit(draft.trim());
-  }, [draft, inputOwner, reading, sessionId, submit]);
+    const text = draft.trim();
+    if (reading || creating.current || !settingsReady || inputOwner !== sessionId || text === '') return;
+    if (sessionId !== null) {
+      await submit(text);
+      return;
+    }
+    setStarting(true);
+    creating.current = true;
+    const request = openRequest.current;
+    try {
+      const created = await client.call('session.create', newParameters.current, 15_000) as { sessionId: string };
+      if (openRequest.current !== request) return;
+      await client.call('session.label', { sessionId: created.sessionId, name: text.split('\n')[0].replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 120) || t('新会话', 'New conversation') }, 15_000);
+      const opened = await openSession(created.sessionId, undefined, false, newParameters.current.projectRoot);
+      if (active.current !== created.sessionId) return;
+      if (opened !== true) throw Object.assign(new Error('session_open_failed'), { code: 'session_open_failed' });
+      const cached = readSettings();
+      const drafts = { ...cached.drafts };
+      const atRoot = { ...(drafts[projectRoot] ?? {}) };
+      delete atRoot.$new;
+      drafts[projectRoot] = atRoot;
+      const next = { ...cached, drafts, lastSession: { id: created.sessionId, projectRoot } };
+      await saveSettings(client, next);
+      setSettings(next);
+      setSessionsRevision((current) => current + 1);
+      void submit(text, created.sessionId);
+    } catch (error) {
+      setDraft(text);
+      setRows((current) => [...current, metaRow('error', `无法开始会话：${code(error)}`)]);
+    } finally {
+      creating.current = false;
+      setStarting(false);
+    }
+  }, [client, draft, inputOwner, openSession, projectRoot, reading, sessionId, settingsReady, submit, t]);
 
   // 取消哪一份会话的那一轮由 `own` 说定：默认是眼前这一份，另一份会话的提问卡取消的是它自己那一份（审阅 F1）。
   const cancel = useCallback(async (own = sessionId) => {
@@ -1118,17 +1110,17 @@ export function App({ transport }: { transport: Transport }) {
 
   // 命令面板只做入口：那一条落下去的还是界面本来就会做的那一件事（D92）。
   const commands = useMemo<Command[]>(() => [
-    { id: 'session.new', title: '新建一份会话', note: 'session.create', run: () => void newSession() },
-    { id: 'session.read', title: '读回这一份会话的记录', note: 'session.read', run: () => void readBack() },
-    { id: 'session.branch', title: '把这一份会话分支一份新的', note: 'session.branch：复制到此刻记录落到哪儿为止', run: () => void branchFrom() },
-    { id: 'run.cancel', title: '取消这一轮', note: 'run.cancel', run: () => void cancel() },
-    { id: 'session.compact', title: '手动压缩上下文', note: 'session.compact', run: () => void compact() },
-    { id: 'settings.open', title: '打开设置', note: '外观、模型与端点、审批规则、连接、键位', run: () => setSettingsOpen(true) },
-    { id: 'rail.toggle', title: collapsed ? '展开左侧栏' : '收起左侧栏', note: formatKeys(CURRENT['sidebar']), run: () => patch({ collapsed: !collapsed }) },
-    { id: 'answer.copy', title: '复制最后那条回答', note: formatKeys(CURRENT['copy-answer']), run: copyLastAnswer },
+    { id: 'session.new', title: t('新建会话', 'New conversation'), run: () => void newSession() },
+    { id: 'session.read', title: t('刷新记录', 'Refresh conversation'), run: () => void readBack() },
+    { id: 'session.branch', title: t('分支会话', 'Branch conversation'), run: () => void branchFrom() },
+    { id: 'run.cancel', title: t('停止本轮', 'Stop this turn'), run: () => void cancel() },
+    { id: 'session.compact', title: t('压缩上下文', 'Compact context'), run: () => void compact() },
+    { id: 'settings.open', title: t('打开设置', 'Open settings'), run: () => { setSettingsSection('general'); setSettingsOpen(true); } },
+    { id: 'rail.toggle', title: collapsed ? t('展开侧栏', 'Show sidebar') : t('收起侧栏', 'Hide sidebar'), note: formatKeys(CURRENT['sidebar']), run: () => patch({ collapsed: !collapsed }) },
+    { id: 'answer.copy', title: t('复制最新回答', 'Copy latest answer'), note: formatKeys(CURRENT['copy-answer']), run: copyLastAnswer },
     ...(status?.templates ?? []).map((item) => ({
       id: `prompt:${item.command}`,
-      title: `填一条 /${item.command}`,
+      title: t(`使用 /${item.command}`, `Use /${item.command}`),
       note: item.hint === null || item.hint === undefined ? item.description : `${item.description} ${item.hint}`,
       run: () => {
         setDraft(`/${item.command} `);
@@ -1136,12 +1128,12 @@ export function App({ transport }: { transport: Transport }) {
         composerRef.current?.focus();
       },
     })),
-  ], [branchFrom, cancel, collapsed, copyLastAnswer, compact, newSession, patch, readBack, status]);
+  ], [branchFrom, cancel, collapsed, copyLastAnswer, compact, newSession, patch, readBack, status, t]);
 
   const answer = useCallback((decision: 'allow' | 'deny') => {
-    const [head, ...rest] = asks;
+    const head = asks.find((ask) => ask.sessionId === sessionId);
     if (head === undefined) return;
-    setAsks(rest);
+    setAsks((current) => current.filter((ask) => ask.id !== head.id));
     // 答复按那一次请求的编号回去，看着的是哪一份会话不影响它落到哪一轮。
     // 回声那一行只画在它自己那一份会话的转录里：别的那一份的答复不属于眼前这一段。
     if (head.sessionId === sessionId) {
@@ -1157,9 +1149,9 @@ export function App({ transport }: { transport: Transport }) {
 
   // 提问只交一次答复：交出去就把这张卡收掉，之后再按没有对象可答（一次请求一次答复，D107）。
   const answerQuestion = useCallback((answers: { id: string; selected: string[]; custom?: string }[]) => {
-    const [head, ...rest] = queries;
+    const head = queries.find((query) => query.sessionId === sessionId);
     if (head === undefined) return;
-    setQueries(rest);
+    setQueries((current) => current.filter((query) => query.id !== head.id));
     questionDrafts.current.delete(head.id);
     if (head.sessionId === sessionId) {
       setRows((current) => [...current, metaRow('meta', `已答 ${head.questions.length} 道题里的 ${answers.length} 道，其余按「没有回答」记下`)]);
@@ -1282,6 +1274,8 @@ export function App({ transport }: { transport: Transport }) {
     seconds,
     waiting: client.waiting(),
     counts: client.counts(),
+    link,
+    onReconnect: () => void reconnect(),
     openSession: (id: string, root?: string) => void openSession(id, undefined, false, root),
     openHit,
     projects: settings.projects,
@@ -1294,24 +1288,26 @@ export function App({ transport }: { transport: Transport }) {
     patch,
   };
 
-  return <div className="frame" data-collapsed={collapsed ? 'true' : undefined} data-dock={settings.dock}>
+  const currentQueries = queries.filter((query) => query.sessionId === sessionId);
+  const currentAsks = asks.filter((ask) => ask.sessionId === sessionId);
+  return <LocaleProvider language={settings.language}><div className="frame" data-collapsed={collapsed ? 'true' : undefined} data-mobile-sidebar={narrow && mobileSidebar ? 'true' : undefined} data-dock={settings.dock}>
     <aside className="sidebar">
-      <div className="brand"><img src="/icon.png" alt="" width="22" height="22" /><span>ligule</span></div>
-      <button className="new-run" type="button" onClick={() => void newSession()}><Icon name="plus" size={15} /><span>新建会话</span></button>
-      <div className="section-label">会话</div>
+      <div className="brand"><img src="/icon.png" alt="" width="23" height="23" /><span>ligule</span><button type="button" className="icon-button" aria-label={t('收起侧栏', 'Hide sidebar')} onClick={() => patch({ collapsed: true })}><Icon name="sidebar" /></button></div>
+      <button className="new-run" type="button" onClick={() => void newSession()}><Icon name="plus" size={17} /><span>{t('新建会话', 'New conversation')}</span></button>
       {registry.list('rail.sessions').map((item) => <div key={item.id} className="rail-slot">{item.view(panelProps)}</div>)}
       <div className="sidebar-foot">
-        <button className="entry" type="button" aria-haspopup="dialog" aria-expanded={settingsOpen} onClick={() => setSettingsOpen(true)}><Icon name="gear" size={15} /><span>设置</span></button>
+        <button className="entry" type="button" aria-haspopup="dialog" aria-expanded={settingsOpen} onClick={() => { setSettingsSection('general'); setSettingsOpen(true); }}><Icon name="gear" size={17} /><span>{t('设置', 'Settings')}</span></button>
         {/* 这一枚菜单交给 radix：打开、收起、方向键走到哪一条、焦点交回都由它管，这里只说有哪些功能项（方案 4.2）。 */}
         <DropdownMenu.Root open={menuOpen} onOpenChange={setMenuOpen}>
           <DropdownMenu.Trigger asChild>
-            <button className="entry" type="button"><Icon name="grid" size={15} /><span>功能</span></button>
+            <button className="entry" type="button"><Icon name="help" size={17} /><span>{t('帮助', 'Help')}</span></button>
           </DropdownMenu.Trigger>
           <DropdownMenu.Portal>
             <DropdownMenu.Content className="menu" side="top" align="start" sideOffset={4} onEscapeKeyDown={keepEscape}>
-              {registry.list('rail.menu').map((item) => <DropdownMenu.Item key={item.id} onSelect={() => leaveDock(() => setPanel(item))}>
-                {item.title}{item.pending === true && <span className="menu-tag">待实现</span>}
+              {registry.list('rail.menu').filter((item) => ['panel.help', 'panel.diagnostics'].includes(item.id)).map((item) => <DropdownMenu.Item key={item.id} onSelect={() => leaveDock(() => setPanel(item))}>
+                {item.id === 'panel.help' ? t('使用手册', 'User guide') : t('诊断', 'Diagnostics')}
               </DropdownMenu.Item>)}
+              <DropdownMenu.Item onSelect={() => { setSettingsSection('keys'); setSettingsOpen(true); }}>{t('快捷键', 'Keyboard shortcuts')}</DropdownMenu.Item>
             </DropdownMenu.Content>
           </DropdownMenu.Portal>
         </DropdownMenu.Root>
@@ -1321,22 +1317,23 @@ export function App({ transport }: { transport: Transport }) {
 
     <main className="center">
       {prefsFailure !== null && <div className="banner" role="alert">
-        <span>本机偏好暂不可用，已暂停自动保存。<code>{prefsFailure}</code></span>
-        <button type="button" onClick={() => setPrefsRevision((value) => value + 1)}>重试</button>
+        <span>{t('草稿尚未保存。请重试，或先复制输入内容。', 'Draft not saved. Retry, or copy your input before leaving.')}</span>
+        <button type="button" onClick={() => setPrefsRevision((value) => value + 1)}>{t('重试', 'Retry')}</button>
+        <details><summary>{t('详情', 'Details')}</summary><code>{prefsFailure}</code></details>
       </div>}
       <header className="topbar">
+        {collapsed && <button type="button" className="icon-button" aria-label={t('展开侧栏', 'Show sidebar')} onClick={() => patch({ collapsed: false })}><Icon name="sidebar" /></button>}
         <div className="title">
-          <strong id="session-title">{sessionId === null ? '没有会话' : `会话 ${sessionId.slice(0, 8)}`}</strong>
-          <span className="muted" id="session-note">{status === null ? '还没有会话：新建一份，或者从左侧栏挑一份' : `记录 ${status.eventCount} 条`}</span>
+          <strong id="session-title">{sessionId === null ? t('新会话', 'New conversation') : sessionLabel.name || t('未命名会话', 'Untitled conversation')}</strong>
+          <span className="muted" id="session-note" title={projectRoot}>{projectRoot.split(/[\\/]/).filter(Boolean).at(-1) ?? t('默认工作区', 'Default workspace')}</span>
         </div>
-        {/* 这一份会话那几格：那两枚胶囊是浮层的入口，那一横排是它的锚；点开、点外面收起、焦点交回都归 radix（方案 4.2）。 */}
-        <Popover.Root open={sessionMenuOpen} onOpenChange={setSessionMenuOpen}>
-          <Popover.Anchor className="pills">
-            {registry.list('header.status').map((item) => <span key={item.id}>{item.view(panelProps)}</span>)}
-          </Popover.Anchor>
-          <SessionMenu status={status} onSetMode={(name) => void setMode(name)} onSetPolicy={(mode) => void setPolicy(mode)} />
-        </Popover.Root>
-        <button className="icon-button" type="button" title={`命令面板（${formatKeys(CURRENT['palette'])}）`} aria-label="命令面板" onClick={() => setPaletteOpen(true)}><Icon name="search" size={15} /></button>
+        {running && <span className="running-label"><span className="status-dot" />{t('运行中', 'Running')} {seconds}s</span>}
+        {status?.usage && <UsageMeter usage={status.usage} running={running} seconds={seconds} />}
+        <button className="icon-button" type="button" title={`${t('命令面板', 'Command palette')} (${formatKeys(CURRENT['palette'])})`} aria-label={t('命令面板', 'Command palette')} onClick={() => setPaletteOpen(true)}><Icon name="search" size={17} /></button>
+        {sessionId !== null && <SessionActions key={sessionId} client={client} sessionId={sessionId} name={sessionLabel.name} archived={sessionLabel.archived}
+          onLabel={(label) => { setSessionLabel(label); setSessionsRevision((value) => value + 1); }}
+          onBranch={() => void branchFrom()} onExport={() => setPanel(menuPanels.find((item) => item.id === 'panel.export') ?? null)}
+          onTasks={() => setPanel(menuPanels.find((item) => item.id === 'panel.branch') ?? null)} onRefresh={() => void readBack()} onCompact={() => void compact()} />}
       </header>
 
       {/* 转录只挂视口里那几十行：读回来的那一页全在数据里，画出来的由视口决定（U48、方案 6.2）。
@@ -1344,8 +1341,8 @@ export function App({ transport }: { transport: Transport }) {
           展示档筛掉全部那一种不算空记录，视口照旧挂着，「显示更早」那一格才留在画面上（D90）。 */}
       <div className="conversation" aria-live="polite">
         {rows.length === 0 ? <div className="stream-band">{reading
-          ? <p className="placeholder"><Icon name="clock" size={14} /> 在读这一份会话的记录…</p>
-          : <p className="placeholder"><Icon name="spark" size={14} /> 这一份会话还没有一轮。在下方写一句要模型做的事，按 {formatKeys(CURRENT['send'])} 就开始。</p>}</div> : <Virtuoso
+          ? <p className="placeholder">{t('正在打开会话…', 'Opening conversation…')}</p>
+          : <div className="welcome"><img src="/icon.png" alt="" width="42" height="42" /><h1>{t('从一个想法开始', 'Start with an idea')}</h1><p>{t('提问、编写代码，或一起完成项目。', 'Ask a question, write code, or work on a project together.')}</p></div>}</div> : <Virtuoso
           key={`stream-${stamp}`}
           ref={list}
           style={{ height: '100%' }}
@@ -1375,21 +1372,21 @@ export function App({ transport }: { transport: Transport }) {
         {!pinned && <button className="jump-latest" type="button" onClick={jumpToLatest}>回到最新</button>}
       </div>
 
-      {queries.length > 0 && <QuestionCard
-        key={queries[0].id}
-        ask={queries[0]}
-        queued={queries.length - 1}
+      {currentQueries.length > 0 && <QuestionCard
+        key={currentQueries[0].id}
+        ask={currentQueries[0]}
+        queued={currentQueries.length - 1}
         active={sessionId}
         onOpen={(id: string) => void openSession(id)}
         onSubmit={answerQuestion}
         // 取消的是这一张卡自己那一份会话的那一轮：页面切到另一份正在跑的会话时，这一枚按钮不能替那一份停下来（审阅 F1）。
-        onCancel={() => void cancel(queries[0].sessionId)}
+        onCancel={() => void cancel(currentQueries[0].sessionId)}
         onDraft={keepQuestionDraft}
       />}
 
-      {asks.length > 0 && <ApprovalCard
-        ask={asks[0]}
-        queued={asks.length - 1}
+      {currentAsks.length > 0 && <ApprovalCard
+        ask={currentAsks[0]}
+        queued={currentAsks.length - 1}
         verbosity={verbosity}
         active={sessionId}
         onOpen={(id: string) => void openSession(id)}
@@ -1398,10 +1395,9 @@ export function App({ transport }: { transport: Transport }) {
 
       {link !== null && <div className="banner" role="alert">
         <Icon name="warn" size={15} />
-        <strong>这一条连接不在了</strong>
-        <code>{link}</code>
-        <span>重连会换一具后端进程。没答复的那些请求按 <code>host_restarted</code> 收尾，还没答的询问作废，这一份会话接回来。</span>
-        <button type="button" onClick={() => void reconnect()}>重连</button>
+        <span>{t('与后台的连接已中断。重连后可恢复会话，队列保持暂停。', 'Connection lost. Reconnect to restore the conversation; queued messages stay paused.')}</span>
+        <button type="button" onClick={() => void reconnect()}>{t('重新连接', 'Reconnect')}</button>
+        <details><summary>{t('详情', 'Details')}</summary><code>{link}</code></details>
       </div>}
 
       <footer className="composer">
@@ -1466,8 +1462,8 @@ export function App({ transport }: { transport: Transport }) {
           rows={3}
           value={draft}
           // 接一份会话的那一段里不接新字：这一段屏幕上还是上一份的草稿，敲进去的会落在错的归属上（方案 5.1、审阅 F5）。
-          readOnly={sessionId === null || reading || inputOwner !== sessionId || !settingsReady}
-          placeholder={`要模型做的事。按 ${formatKeys(CURRENT['send'])} 发送；正在跑的时候这一句排到后面；${formatKeys(CURRENT['newline'])} 换行；空草稿上按 ${formatKeys(CURRENT['history-older'])}${formatKeys(CURRENT['history-newer'])} 翻本机输入历史；打 @ 引一份项目里的文件。`}
+          readOnly={reading || starting || inputOwner !== sessionId || !settingsReady}
+          placeholder={t('描述任务，使用 @ 引用文件', 'Describe a task, use @ to reference a file')}
           onChange={(event) => {
             setDraft(event.target.value);
             setCaret(event.target.selectionStart ?? event.target.value.length);
@@ -1520,22 +1516,18 @@ export function App({ transport }: { transport: Transport }) {
           }}
         />
         <div className="composer-bar">
-          <button type="button" className="mini chip" title="打开这一份会话的设置：模式、审批档位、拒绝计数" onClick={() => setSessionMenuOpen((open) => !open)}>
-            模式 <b>{status?.mode ?? '没装'}</b>
-          </button>
+          <button type="button" className="composer-choice" title={t('模型服务设置', 'Model service settings')} onClick={() => { setSettingsSection('model'); setSettingsOpen(true); }}><Icon name="spark" size={14} /><span>{status?.model ?? t('选择模型', 'Choose model')}</span><Icon name="fold" size={12} /></button>
+          <Popover.Root open={sessionMenuOpen} onOpenChange={setSessionMenuOpen}>
+            <Popover.Trigger asChild><button type="button" className="composer-choice" disabled={sessionId === null} title={t('工具与审批', 'Tools and approvals')}><span>{status?.mode ?? t('工具模式', 'Tool mode')}</span><Icon name="fold" size={12} /></button></Popover.Trigger>
+            <SessionMenu status={status} onSetMode={(name) => void setMode(name)} onSetPolicy={(mode) => void setPolicy(mode)} />
+          </Popover.Root>
+          {status !== null && <span className="composer-policy">{status.policy === 'ask' ? t('按需审批', 'Ask for approval') : t('自动审批', 'Auto approval')}</span>}
           <span className="bar-spacer" />
-          <button className="icon-button" type="button" title="读回这一份记录" aria-label="读回记录" onClick={() => void readBack()}><Icon name="refresh" size={15} /></button>
-          <button className="icon-button" type="button" title={`复制最后那条回答（${formatKeys(CURRENT['copy-answer'])}）`} aria-label="复制回答" onClick={copyLastAnswer}><Icon name="copy" size={15} /></button>
-          <button className="icon-button" type="button" title={`取消这一轮（${formatKeys(CURRENT['interrupt'])}）`} aria-label="取消本轮" disabled={!running} onClick={() => void cancel()}><Icon name="stop" size={15} /></button>
-          <button className="send" type="button" title={running ? `排到后面（${formatKeys(CURRENT['send'])}，这一轮结束后发出）` : `发送（${formatKeys(CURRENT['send'])}）`} aria-label="发送" disabled={sessionId === null || reading} onClick={() => void send()}><Icon name="send" size={17} /></button>
+          {running && <button className="icon-button stop-button" type="button" title={t('停止本轮', 'Stop this turn')} aria-label={t('停止本轮', 'Stop this turn')} onClick={() => void cancel()}><Icon name="stop" size={15} /></button>}
+          <button className="send" type="button" title={running ? t('加入队列', 'Add to queue') : t('发送', 'Send')} aria-label={t('发送', 'Send')} disabled={reading || starting || !settingsReady || draft.trim() === ''} onClick={() => void send()}><Icon name="send" size={19} /></button>
         </div>
       </footer>
-      <div className="statusbar">
-        <span>管道 · 发出 {panelProps.counts.sent} 条 · 收到 {panelProps.counts.received} 条</span>
-        <span>{running ? `正在跑 ${seconds} 秒` : othersRunning > 0 ? `这一份空闲：另一份在跑 ${othersRunning} 份` : '空闲'}</span>
-        {/* 页脚只说得出「哪一份会话」，完整的编号留在设置里「连接」那一栏（那里是诊断读数该在的地方，审阅 C14）。 */}
-        <span title={sessionId ?? undefined}>{sessionId === null ? '没有会话' : `会话 ${sessionId.slice(0, 8)}`}</span>
-      </div>
+      <div className="composer-hint"><span>{formatKeys(CURRENT.send)} {t('发送', 'to send')} · {formatKeys(CURRENT.newline)} {t('换行', 'for a new line')}</span>{othersRunning > 0 && <span>{othersRunning} {t('个后台任务', 'background tasks')}</span>}</div>
     </main>
 
     {panel !== null && <aside className="dock">
@@ -1549,6 +1541,7 @@ export function App({ transport }: { transport: Transport }) {
     {/* 面板收起后把焦点交回输入坞：面板自己那一个过滤框带着 `autoFocus`，它收掉之后没人可交，落在页面上就得从页头重新 Tab 过去。 */}
     {paletteOpen && <Palette commands={commands} onClose={() => { setPaletteOpen(false); composerRef.current?.focus(); }} />}
     {settingsOpen && <SettingsDialog
+      initialSection={settingsSection}
       client={client}
       sessionId={sessionId}
       projectRoot={projectRoot}
@@ -1564,10 +1557,10 @@ export function App({ transport }: { transport: Transport }) {
     />}
     {quitRows.length > 0 && <QuitSheet rows={quitRows} onBack={() => setQuitRows([])} onQuit={() => void quitApp()} />}
     {dockHold !== null && <HoldSheet
-      lead="现在离开这一栏会丢掉这些："
+      lead={t('放弃未保存的修改？', 'Discard unsaved changes?')}
       reasons={dockHold.reasons}
       onStay={() => setDockHold(null)}
       onLeave={() => { const go = dockHold.go; setDockHold(null); go(); }}
     />}
-  </div>;
+  </div></LocaleProvider>;
 }

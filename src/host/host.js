@@ -554,6 +554,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       sessionId,
       events: fullResults ? await fillSpills(page, env) : page,
       header: header ?? null,
+      label: foldLabel(events),
       endSeq: page.length === 0 ? null : page.at(-1).seq,
       hasMore: page.length > 0 && page[0].seq > 1,
     };

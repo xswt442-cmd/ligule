@@ -20,6 +20,8 @@ export type Status = {
   mode: string | null;
   modeLayer: string | null;
   pendingMode: string | null;
+  model: string | null;
+  pendingModel: string | null;
   policy: string;
   // 现在生效的档位来自哪一层：配置默认还是会话临时改的（`status.get`、`policy.set` 都交回这一格）。
   policySource: 'config' | 'session';

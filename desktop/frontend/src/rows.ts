@@ -17,6 +17,8 @@ export type Verdict = {
 export type Record_ = {
   seq?: number;
   kind: string;
+  name?: string;
+  archived?: boolean;
   // 模板展开过的那一条用户记录另留着人打的那一行（D54）：画的是这一份，交给模型的是 text。
   text?: string;
   raw?: string;

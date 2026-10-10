@@ -1372,6 +1372,8 @@ test('naming or archiving a session appends one fact the listing reads back', as
     const listed = (await connection.request('sessions.list', {})).sessions.find((item) => item.id === sessionId);
     assert.equal(listed.name, '读数那一轮', '列表那一处读的是记录里折出来的当前值');
     assert.equal(listed.archived, true);
+    const page = await connection.request('session.read', { sessionId, before: 2, limit: 1 });
+    assert.deepEqual(page.label, { name: '读数那一轮', archived: true }, '会话标题由完整记录折出，不受当前历史页影响');
     await assert.rejects(
       connection.request('session.label', { sessionId, name: '   ' }),
       (error) => error.code === 'session_name_invalid',

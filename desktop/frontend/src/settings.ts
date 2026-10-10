@@ -2,6 +2,7 @@
 // 读取失败时不写磁盘；草稿和队列保留完整内容，由 Host 检查文档大小。
 import type { Verbosity } from './components/types';
 import type { Client } from './protocol';
+import type { Language } from './locale';
 
 // 六套具名配色：墨青（默认，深色）、羊皮纸（暖米色）、蓝天（冷白蓝）、石墨（中性深色）、森林（深绿）、黄昏（暖深琥珀）。
 // 取值在 `styles.css` 的 `data-palette` 变量块里；这里只认名字。
@@ -9,6 +10,8 @@ export const PALETTES = ['ink', 'parchment', 'sky', 'graphite', 'forest', 'dusk'
 export type Palette = (typeof PALETTES)[number];
 
 export type Settings = {
+  language: Language;
+  lastSession: { id: string; projectRoot: string } | null;
   // 配色方案：六套具名方案选一枚，落在根元素的 `data-palette` 上。存本机界面偏好，不进记录、不进配置（D90）。
   palette: Palette;
   font: 'small' | 'medium' | 'large';
@@ -24,12 +27,15 @@ export type Settings = {
   // 这一扇窗口另外看着哪几项目录（方案 3.2 的第二、第三个项目）：只是界面这边的清单，
   // 落笔与生效都在宿主那一边按每一份会话自己的项目环境算。
   projects: string[];
+  hiddenProjects: string[];
 };
 
 const KEY = 'ligule.ui';
 const VERBOSITY: Verbosity[] = ['brief', 'standard', 'detailed', 'full'];
 
 export const defaultSettings: Settings = {
+  language: 'auto',
+  lastSession: null,
   palette: 'ink',
   font: 'medium',
   sidebar: 280,
@@ -40,6 +46,7 @@ export const defaultSettings: Settings = {
   queued: {},
   keys: {},
   projects: [],
+  hiddenProjects: [],
 };
 
 const oneOf = <T extends string>(value: unknown, allowed: T[], fallback: T): T =>
@@ -94,6 +101,9 @@ const queueTable = (value: unknown): Record<string, Record<string, string[]>> =>
 export function settingsFrom(raw: unknown): Settings {
   const value = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<Settings>;
   return {
+    language: oneOf(value.language, ['auto', 'zh', 'en'], 'auto'),
+    lastSession: typeof value.lastSession?.id === 'string' && typeof value.lastSession?.projectRoot === 'string'
+      ? { id: value.lastSession.id, projectRoot: value.lastSession.projectRoot } : null,
     palette: oneOf(value.palette, [...PALETTES], 'ink'),
     font: oneOf(value.font, ['small', 'medium', 'large'], 'medium'),
     sidebar: clamped(value.sidebar, 264, 420, defaultSettings.sidebar),
@@ -104,6 +114,7 @@ export function settingsFrom(raw: unknown): Settings {
     queued: queueTable(value.queued),
     keys: stringMap(value.keys),
     projects: rootList(value.projects),
+    hiddenProjects: rootList(value.hiddenProjects),
   };
 }
 
