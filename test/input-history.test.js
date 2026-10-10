@@ -1,13 +1,17 @@
 // 两端共用的那一份输入历史（方案 5.5.6）：终端界面与宿主各开各的进程，写的是同一个文件。
 // 那一次读—改—写要跨进程排队，所以除了并发排队，还量一把被人占着的锁。
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import lockfile from 'proper-lockfile';
 import { loadHistory, rememberHistory } from '../dist/kernel/input-history.js';
 
 const testplace = resolve('testplace');
+const writer = fileURLToPath(new URL('./fixtures/history-writer.mjs', import.meta.url));
 
 async function withHistoryDirectory(run) {
   const directory = await mkdtemp(join(testplace, 'input-history-'));
@@ -55,6 +59,28 @@ test('failed history replacement removes its temporary file', async () => {
     await assert.rejects(rememberHistory(path, ['sentence']));
     assert.deepEqual((await readdir(directory)).sort(), ['occupied']);
     assert.equal(await readFile(join(path, 'keep'), 'utf8'), 'content');
+  });
+});
+
+// 两端各开各的进程，写的是同一份文件：那一把锁要在真起进程的那一趟里才证明得了。
+test('history saves from separate processes keep every sentence', async () => {
+  await mkdir(testplace, { recursive: true });
+  await withHistoryDirectory(async (directory) => {
+    const path = join(directory, 'history.jsonl');
+    const sentences = [1, 2, 3, 4].map((one) => `第 ${one} 具进程写的那一句`);
+    const reports = await Promise.all(sentences.map(async (sentence) => {
+      const child = spawn(process.execPath, [writer, path, sentence], { stdio: ['ignore', 'pipe', 'pipe'] });
+      let line = '';
+      for await (const chunk of child.stdout) {
+        line += String(chunk);
+        if (line.includes('\n')) break;
+      }
+      await once(child, 'exit');
+      return JSON.parse(line);
+    }));
+    assert.deepEqual(reports, sentences.map(() => ({ written: true })), '四具都该写成功，而不是报那一份文件被人占着');
+    const entries = await loadHistory(path);
+    for (const sentence of sentences) assert.ok(entries.includes(sentence), `那一份文件里少了那一句：${sentence}`);
   });
 });
 
