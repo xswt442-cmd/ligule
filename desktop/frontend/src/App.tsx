@@ -6,6 +6,8 @@ import { ApprovalCard, type Ask } from './components/ApprovalCard';
 import { QuestionCard, type QuestionAsk, type QuestionDrafts } from './components/QuestionCard';
 import { Icon } from './components/Icon';
 import { SettingsDialog } from './components/Settings';
+import { QuitSheet } from './components/QuitSheet';
+import { blockedSessions, type QuitInput, type QuitRow } from './quit';
 import { RowView } from './components/RowView';
 import { SessionRail, type SearchHit } from './components/SessionRail';
 import { createCallOf, type WorkspaceRoster } from './rail';
@@ -336,6 +338,8 @@ export function App({ transport }: { transport: Transport }) {
   const [settings, setSettings] = useState(readSettings);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // 退出请求带来的那一张确认：清单是空的就不画，那种情况直接交回退出。
+  const [quitRows, setQuitRows] = useState<QuitRow[]>([]);
   // 会话这一侧那一格浮层（模式与档位）：入口是顶栏那两枚小牌子（第 105 步）。
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const [reading, setReading] = useState(false);
@@ -922,6 +926,29 @@ export function App({ transport }: { transport: Transport }) {
     }
   }, [client, patchQueue, queues, sessionId]);
 
+  // 退出请求来了要读的是「当下」这一份状态：订阅只挂一次，所以跟着状态换的是 ref 里那一份快照（与 `asksLeft` 同一种写法）。
+  const quitInput = useRef<QuitInput>({ running: [], approvals: [], questions: [], queued: {} });
+  useEffect(() => {
+    quitInput.current = { running: runningIds, approvals: asks.map((ask) => ask.sessionId), questions: queries.map((query) => query.sessionId), queued: queues };
+  }, [asks, queues, queries, runningIds]);
+
+  // 壳说「人要走」（托盘「退出」、macOS 的 Cmd+Q 与关掉最后一扇窗口在壳那里并成一条，方案 6.4）：
+  // 一份会话都不会被打断时直接交回退出，界面不插一张没内容的卡片；有的话先说清楚受影响的哪几份再问一次。
+  useEffect(() => {
+    transport.onQuit?.(() => {
+      const blocked = blockedSessions(quitInput.current);
+      if (blocked.length === 0) void transport.quit?.();
+      else setQuitRows(blocked);
+    });
+  }, [transport]);
+
+  // 「中断任务并退出」：跑着的那几轮各按自己那一份取消，草稿与排着的句子已经留在本机那一份里（D103）。
+  const quitApp = useCallback(async () => {
+    setQuitRows([]);
+    for (const own of quitInput.current.running) await cancel(own);
+    await transport.quit?.();
+  }, [cancel, transport]);
+
   // 等手停下 160 毫秒问一次；答回来时那一段已经改了就把那一次丢掉。传输那一层没有中途取消，
   // 所以 5.3 那一条「慢请求可取消」在这儿做到的是不落到画面上。
   useEffect(() => {
@@ -1456,5 +1483,6 @@ export function App({ transport }: { transport: Transport }) {
       onReconnect={() => void reconnect()}
       onClose={() => setSettingsOpen(false)}
     />}
+    {quitRows.length > 0 && <QuitSheet rows={quitRows} onBack={() => setQuitRows([])} onQuit={() => void quitApp()} />}
   </div>;
 }

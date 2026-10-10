@@ -1537,6 +1537,74 @@ button.send:hover:not(:disabled) {
   background: rgb(0 0 0 / 45%);
 }
 
+/* 退出前那一张确认：单列、比设置那张小；两条动作并排落在下面，左边那枚是默认（返回应用）。 */
+.confirm {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  z-index: 31;
+  display: grid;
+  align-content: start;
+  gap: var(--space-2);
+  inline-size: min(30rem, 92vw);
+  max-block-size: 82vh;
+  padding: var(--space-3) 1.1rem;
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius) * 1.5);
+  box-shadow: var(--shadow-pop);
+  overflow: auto;
+}
+
+.confirm-lead {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.confirm-list {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: grid;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+}
+
+.confirm-list span {
+  margin-left: var(--space-2);
+  color: var(--fg-muted);
+}
+
+.confirm-note {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+.confirm-actions {
+  display: flex;
+  gap: var(--space-2);
+  justify-content: flex-end;
+}
+
+.confirm-actions button {
+  padding: var(--space-1) var(--space-3);
+  border-radius: 999px;
+  font-size: var(--text-sm);
+}
+
+.confirm-actions button[data-tone="stay"] {
+  color: var(--bg-raised);
+  background: var(--ok);
+  border-color: var(--ok);
+}
+
+.confirm-actions button[data-tone="quit"] {
+  color: var(--fg);
+  background: var(--bg-sunk);
+  border-color: var(--line);
+}
+
 .sheet {
   position: fixed;
   inset: 0;

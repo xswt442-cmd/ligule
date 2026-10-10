@@ -26,6 +26,10 @@ export type Transport = {
   // 首次使用时那一份默认工作区：壳把系统文档目录下那一具交回来，不在那儿就建出来（方案 5.5.3）。
   // 载体交不出这一格时界面不猜：没有可用的工作区就请人自己选一具，不去用宿主继承的那个进程目录。
   defaultWorkspace?: () => Promise<string>;
+  // 退出请求从壳那一侧进来：托盘「退出」、macOS 的 Cmd+Q 与关掉最后一扇窗口在壳那里汇成同一条（方案 6.4）。
+  // 界面说出受影响的会话、等人点头，再由 `quit` 真的收。载体没有这两格时界面不猜，也不自己不退出。
+  onQuit?: (handle: () => void) => void;
+  quit?: () => Promise<void>;
 };
 
 export type Client = {

@@ -270,6 +270,9 @@ function hitsOf(item: (typeof sessions)[number], needle: string, deep: boolean):
 export function createFakeHost(options: { events?: number } = {}): Transport & {
   pushEvent: (event: Record<string, unknown>) => void;
   stopReplies: (on: boolean) => void;
+  // 开发时那一条退出请求的入口：真壳由托盘「退出」或 macOS 的 Cmd+Q 触发，这里让检查自己按一次（方案 6.4）。
+  requestQuit: () => void;
+  quitCount: () => number;
 } {
   let emit: (frame: Frame) => void = () => undefined;
   let opened = 0;
@@ -282,6 +285,10 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
   // 假宿主照同一个形状：按下之后，下一次落步就停在这儿，没答的询问按不允许结掉。
   const cancelled = new Set<string>();
   const pendingAsks = new Map<string, string[]>();
+  // 退出那一条路在开发时的演法：界面把 `onQuit` 挂上来，检查按一次 `requestQuit()` 就走真壳那同一条；
+  // 界面确认退出时 `quit` 被叫几次，这里数得出。
+  let quitRequest: (() => void) | undefined;
+  let quitCalls = 0;
 
   const answer = (frame: Frame): void => {
     if (deaf && frame.method !== undefined) return;
@@ -690,5 +697,14 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
     restart: async () => {
       deaf = false;
     },
+    onQuit: (handle) => {
+      quitRequest = handle;
+    },
+    // 假宿主不真收进程：记下界面确认了几次，检查按这一次数判（方案 6.4 那张确认的读数）。
+    quit: async () => {
+      quitCalls += 1;
+    },
+    requestQuit: () => quitRequest?.(),
+    quitCount: () => quitCalls,
   };
 }

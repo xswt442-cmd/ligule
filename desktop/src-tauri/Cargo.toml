@@ -7,7 +7,8 @@ edition = "2021"
 tauri-build = { version = "2.0.0", features = [] }
 
 [dependencies]
-tauri = { version = "2.11.1", features = [] }
+# `tray-icon` 是 tauri 自己那一枚开关：点叉收起之后要有一个能把窗口找回来的位置（方案 6.4）。
+tauri = { version = "2.11.1", features = ["tray-icon"] }
 tauri-plugin-dialog = "2.8.1"
 
 # 这一层不写业务逻辑（D24），也不碰协议内容：它只搬调用帧、窗口和进程。
