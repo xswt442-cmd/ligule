@@ -1,4 +1,4 @@
-// 旧记录的一次性整理（D110、方案 5.5.2；合同见 `ligule-set/phase3/r55-data-root-contract.md`）：
+// 旧记录整理（D110）：
 // 把工作区目录下 `.ligule/sessions` 里的记录完整复制进数据根会话区，原件保留、逐文件比对、可重跑。
 // 复制过的再跑只做比对；目标已有同名而字节不同时不自行择一，把那一份交回（真实身份无法确认的那一类）。
 import { copyFile, mkdir, readdir, readFile, stat, utimes } from 'node:fs/promises';

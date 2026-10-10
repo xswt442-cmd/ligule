@@ -1,124 +1,62 @@
 # Agent guide
 
-`ligule` is an agent harness under development. The 0.0.x line is a placeholder: the repository, the package name and the licence are claimed; the behaviour is not settled.
+本文规定仓库内代码与文档必须遵守的约束。目录结构和局部规则分别写在对应的 `AGENTS.md`；设计记录与未定问题以当前工作区文档为准。
 
-Design records, decisions (D) and open questions (U) live outside this repository and are not linked from here. This file states the rules a change inside this repository has to keep.
+## 结构
 
-## Layout
+- `src/kernel/` 保存工具注册、判定链、循环、提示词组装、槽位注册、模式加载、配置、日志与错误类型。
+- `src/capability/` 保存路径边界、平台能力探测、命令解析与执行、搜索、回收站、网络目标、指令加载和限制。
+- `src/tools/` 保存工具实现；`src/session/` 保存记录、恢复、列表、检查点与压缩；`src/model/` 保存模型协议与 HTTP 层；`src/host/` 保存客户端协议、会话所有者与传输。
+- `src/tui/` 是终端客户端。`desktop/` 是 Tauri 壳与 Vite 前端，不进入 `package.json#files`。
+- `modes/` 保存随包模式；`scripts/` 保存构建和打包脚本；`test/` 检查构建产物 `dist/`。
+- 依赖指向 `kernel/`，不得反向引用适配器。平台代码放入 `capability/`。架构测试扫描约定目录，新增目录仍须符合这条依赖方向。
 
-```
-src/kernel/      tool table, decision chain, loop, prompt assembly, slot registry,
-                 assembly list, mode loader, result shapes, config, log, error codes
-src/capability/  path boundaries, probing, command parsing and execution, search and
-                 trash backends, network target classes, instruction loading, limits
-src/tools/       the three read-only tools, the four write tools, the first-party
-                 optional tools, what they share, the minimal list
-src/session/     the record, its format, repair, listing, checkpoint, compaction
-src/model/       the two wire shapes and their HTTP layer
-src/host/        the client protocol, the line carrier, the session owner
-src/tui/         the terminal client
-modes/           the shipped assembly lists: minimal, full
-desktop/         the Tauri shell and its Vite frontend (outside package.json#files)
-scripts/         build and packaging helpers
-test/            checks against dist/
-```
-
-- Dependencies point toward `kernel/`, never away from it.
-- `test/architecture.test.js` scans those directories instead of a hand-written list, so a new file is covered without anyone adding it.
-- Platform-specific code belongs in `capability/` (D18).
-
-## Commands
+## 命令
 
 ```sh
-npm ci              dependencies from the lockfile
-npm run build       tsc → dist/
-npm test            builds, then runs the suites against dist/
-npm run check-pack  packs, unpacks, imports the package from an empty consumer
-npm run verify-install  installs that tarball into an empty directory with npm and checks the installed CLI, grammars and search backend
-npm run build-rg    downloads the pinned ripgrep into packages/rg-*
+npm ci
+npm run build
+npm test
+npm run check-pack
+npm run verify-install [tarball]
+npm run build-rg
 ```
 
-## Invariants
+`npm test` 先构建，再针对 `dist/` 运行测试。`check-pack` 检查空消费者中的打包内容；`verify-install` 在空目录安装 tarball 并检查已安装的 CLI、语法解析器和搜索后端。`build-rg` 获取版本固定且校验过的 ripgrep。
 
-- The kernel ships no tools (I1). An adapter adds one by registering it.
-- The assembly list the model sees is the one the run loaded (I2).
-- The decision chain is monotone: no later step relaxes an earlier refusal, and no declaration grants a pass (I3, I4).
-- The session record is the only source of truth (I5). Derived files — listings, checkpoints — are rebuilt from it or discarded.
-- Injected content is capped by bytes; over the cap the full text goes to a file and the record keeps a reference (I6).
-- All interface content mounts through the slot registry; the host never names a plugin (I7, D25).
-- Model-visible fields are name, description and parameter schema only (D12).
-- Cancellation is one token shared by the tool, the provider and the loop (D20).
-- Every failure carries a stable code (`KernelError#code`). `KernelError` is a tool that did not finish, and the loop continues with that result. `KernelRuntimeError` is the kernel itself failing, and the loop stops.
-- An error without a code becomes `tool_failed`, and the original goes into `cause`. The code serves the host, `detail` serves the model, and the CLI prints both.
-- Every dispatched call gets an answer in the record, including one the loop chose not to run (`tool_skipped`). A missing answer invalidates every later request body.
-- A workspace is one real directory, and its identity is that directory after `workspaceIdentity()` folds spelling (D110). The project layers, the record's project line, the Host's environment cache and the registry in the data root all compare that value; the permission boundary stays a separate fact, so moving it moves neither the workspace nor the records.
+## 运行约束
 
-## Build and files
+- Node 是唯一业务运行时。内核不自带工具（I1）；适配器通过注册工具扩展能力。桌面 Rust 壳只搬运命令和原样传递帧，不实现业务逻辑。
+- 每次运行向模型提供实际加载的模式清单（I2）。判定链只收紧决定，不接受后续步骤放宽先前拒绝，也不因声明而跳过判定（I3、I4）。
+- 会话 JSONL 记录是事实来源（I5）。列表和检查点是派生数据；检查点校验失败时从记录重建。会话写入由跨进程锁保护；溢出的注入内容写入文件，记录保留引用（I6）。
+- 判定过的每个调用都在记录中有对应结果，包括没有执行的调用；缺少结果会使后续请求体无法继续使用。
+- 所有界面内容经槽位注册表挂载；Host 不按插件名称分支（I7）。模型可见的工具字段只有名称、说明和参数结构。
+- 工具、模型提供方与循环共用取消信号。工具错误以稳定代码写入结果，循环可继续；内核运行错误终止循环。每个已派发调用都要有记录结果，包括跳过的调用。
+- 工作区身份由真实目录规范化后得到，用于项目缓存和登记比较。Host 目前仍从 `config.boundary` 取得项目根；修改这一处时必须同时核对项目配置、工具目录和历史记录归属，避免权限配置使历史归属改变。
 
-- `dist/` is what runs: `bin`, `exports` and `files` point there, and the tests import it, so a green run exercised the shipped bytes.
-- `tsc` runs with `allowJs` and `checkJs: false`. New modules are TypeScript under `strict`, with erasable syntax only — no `enum`, no `namespace`, no parameter properties (D47). Older JavaScript files are copied through and convert layer by layer.
-- `src/` is not runnable as it stands: a `.ts` module has no `.js` twin.
-- `package.json#version`, `src/version.js#VERSION` and the release manifests stay equal; `test/kernel.test.js` asserts it.
-- The Node floor is one number written in three kinds of place: `engines.node`, the badge in `README.md`, `PRIMARY_NODE_VERSION` in each workflow. `test/runtime-version.test.js` reads all of them and asserts they agree.
+## 构建与配置
 
+- `dist/` 是运行和测试的代码。入口、导出和打包清单都指向它；`src/` 里的 TypeScript 没有可直接运行的 JavaScript 对应文件。
+- `tsc` 允许 JavaScript 并关闭旧文件检查；新模块使用严格 TypeScript 和可擦除语法，不用 `enum`、`namespace` 或参数属性。
+- `package.json#version`、`src/version.js#VERSION` 和发布清单保持一致。Node 最低版本在 `engines.node`、README 徽章和工作流变量中一致，测试会核对。
+- 配置依次合并用户配置、项目共享配置、项目本地配置和命令行覆盖，再冻结为一份快照。只有普通表递归合并；数组与标量整体替换。凭据来自环境变量，不写入配置文件。
+- `dataRoot()` 是用户数据根的唯一入口，默认位置为 `<home>/.ligule`。绝对 `LIGULE_HOME` 覆盖默认位置，空值按未设置处理，相对路径报 `data_root_invalid`。用户配置、模式、技能、提示模板、扩展、工作区登记、桌面偏好和默认会话记录放在数据根下。项目配置与 `~/.agents/skills/` 保持各自锚点；显式 `host.sessionDirectory` 可覆盖默认会话目录。旧项目会话只在首次读取时迁移到新默认目录。
+- 桌面偏好文档由 Host 放在数据根，WebView 的 `ligule.ui` 作首屏缓存；数据根文档为空时，已有缓存可能提交一次。偏好完整恢复流程尚未验证，不把缓存视作持久化事实来源。
+- 项目配置来自其他仓库，合并时拒绝 `__proto__` 键。工具只读内核传入的配置快照，并通过注入的日志接口输出；仓库代码不直接写输出流。
+- 跨进程共享的会话与工作区登记写入必须持锁完成；配置原文编辑要比较文件版本并原子替换，避免覆盖并发修改。
 
-## Subdirectory guides
+## 依赖、发布与验证
 
-- `src/kernel/`: modes, skills, prompt templates, extensions, parameter schemas, MCP and model providers.
-- `src/tools/`: the tools, what they share, and the first-party optional ones.
-- `src/session/`: the record, its format, repair, listing, checkpoint and compaction.
-- `src/host/`: the protocol, the session owner, reading a record and the export serializer.
-- `src/tui/`: the terminal client (D33). `desktop/`, its Rust shell `desktop/src-tauri/` and that shell's interface `desktop/frontend/` (D34). `## Clients` holds what the two surfaces share.
-- One of these enters a run only when the working directory is inside the directory it governs: the loader walks from the project root down to the working directory (`src/capability/instructions.js`). The rules above hold from any directory.
+- 运行依赖及可选依赖列在 `package.json`。仅部分平台需要的原生依赖保持可选，使其他平台安装不依赖它们。ripgrep 二进制由固定版本构建，不提交到仓库。
+- `tree-sitter` 语法解析器无法加载时，判定会要求确认并说明原因。打包检查通过已安装包解析真实命令行，避免缺少解析器时误判。
+- `packages/rg-*` 不提交二进制；构建脚本按固定版本、大小和 SHA-256 校验后写入。
+- `RELEASE.md` 是发行目标、产物与验证位置的清单。版本与清单更新后由发布工作流构建并校验各平台产物；具体发布步骤以清单和工作流为准。
+- 真实端点检查从进程环境读取凭据，并检查持久化记录。凭据不得写进仓库文件或检查输出。纯投影可用固定输入核对；端点、窗口、Host 与进程行为要用实际运行部件验证。
+- 未获明确要求时不执行 Git 写操作。提交前检查暂存内容；凭据、用户会话记录、构建产物和临时文件不得进入提交。`desktop/vendor/` 是本机生成目录，不提交。
+- 桌面 Rust 检查运行 `cargo test --manifest-path desktop/src-tauri/Cargo.toml`；前端检查运行 `npm --prefix desktop/frontend run check`。真实窗口检查需要启动桌面壳和 Host。
 
-## Clients
+## 局部指南
 
-- `src/tui/AGENTS.md` holds the rules of the terminal client (D33) and `desktop/AGENTS.md` those of the desktop surface (D34); this section holds only what the two share.
-- A round the person interrupted reads 这一轮已被打断 whichever code the kernel answered with: an abort landing on a live model call reports `provider_cancelled`, between two call groups `loop_cancelled`, on a question waiting for a person `ask_user_cancelled`.
-- Both surfaces describe an approval from the same three fields read off the arguments — the action, the block to remove, the block to put in — and mark the last two with `-` and `+` (`describeChange` in `src/tui/commands.ts`, `changeOf` and `changeBody` in `desktop/frontend/src/rows.ts`).
-- Both surfaces answer `question.request` from one shape (D107): the item's options may be picked or answered in free text, an item nobody answers is reported as unanswered rather than guessed, and there is no deadline — only an answer or a cancelled round settles the wait.
-- A draft, a queued sentence, a fold and a key binding are interface state on either surface and reach no record (D81).
-
-## Configuration
-
-- Configuration arrives in layers: `~/.ligule/config.toml`, `<project root>/.ligule/config.toml`, `<project root>/.ligule/config.local.toml`, then `--config key.path=value`. The layers fold into one frozen snapshot (D8).
-- `dataRoot()` in `src/kernel/config-file.js` builds the per-user directory and nothing else joins it (D110): an absolute `LIGULE_HOME` wins, an empty one reads as unset, a relative one raises `data_root_invalid`, and the default is `<home>/.ligule`. The user config layer and the mode, skill, prompt-template and extension directories, plus the terminal client's key bindings, drafts and the shared input history, hang off it.
-- The project layers, the session records and `~/.agents/skills/` keep their own anchors: the first two the boundary, the last one the home directory.
-- Only plain tables merge recursively; arrays and scalars replace whole. A TOML datetime is a class instance, and a higher layer replaces it for that reason.
-- The project layer can come from someone else's repository, which is why a `__proto__` key in any layer is refused (`config_key_unsafe`).
-- Credentials never come from files. Every key in a config layer is readable by tools, so a key comes from the environment instead (`LIGULE_API_KEY`, renamed by `model.apiKeyEnv`).
-- Tools read the snapshot the kernel passes them and log through the injected interface (`debug` and `log` required, `error` optional). Nothing under `src/` writes to an output sink directly, and a host that injects no logger gets no output.
-- Sections the layers can set: `model` (`api`, `baseURL`, `model`, `apiKeyEnv`, `capabilities`, `retry`), `mode`, `policy` (`mode`, `rules`, `thresholds`), `loop` (`iterations`, `modelCalls`), `limits` (`readBytes`, `resultBytes`, `resultCount`, `scanBytes`, `scanFiles`, `execBytes`, `trashDirectory`, `skillSearchBytes`, `skillBodyBytes`, `skillFileBytes`, `fetchBytes`, `fetchTimeoutMs`, `fetchRedirects`, `promptFragmentBytes`, `contextTokens`, `compactThresholdRatio`, `compactRetainRatio`), `exec.shell`, `prompt` (`static`; when no layer writes it the shipped base prompt in `src/kernel/base-prompt.ts` supplies the static segment — D102), `instructions`, `mcp.servers`, `extensions`, `host.sessionDirectory`.
-- `contextTokens` has no default and gates compaction (D75).
-
-## Dependencies and search
-
-- Runtime and optional dependencies are listed in `package.json`. `cross-spawn` launches external editors, `proper-lockfile` protects session writes across processes (D85), and `koffi` calls the Windows Job Object API (D87). `koffi` sits under `optionalDependencies` because it serves that one platform and its install step needs either the network or a compiler: an install on Linux or macOS succeeds whether that step works.
-- Optional `marked` and `highlight.js` provide terminal Markdown rendering and code highlighting (D84), and `string-width` supports terminal display width.
-- `tree-sitter`, `tree-sitter-bash` and `tree-sitter-pwsh` are native addons. All three ship prebuilds for six platform and architecture combinations, which is why no compiler runs, and npm blocking their install script does not matter.
-- The bash grammar loads lazily through `createRequire`. The PowerShell one is an ESM graph with a top-level await, so `require` refuses it and only a dynamic `import` works; its `main` names a directory without an extension, and it loads from `bindings/node/index.js`.
-- A parser that cannot load leaves the chain asking every time and says so in the reason. `scripts/check-pack.js` parses one command line with each grammar through the installed package, because a missing addon would otherwise look like a machine that asks a lot.
-- `packages/rg-*` hold no committed binaries. `npm run build-rg` downloads the ripgrep version pinned in `scripts/ripgrep-pin.json`, checks size and sha256, and writes the executable plus licence texts there.
-- An unpublished name cannot enter the lockfile, and `npm ci` refuses a `package.json` the lockfile does not cover, which is why the four entries stay out of `optionalDependencies` until publish. Until then search walks the tree on a platform whose package is missing and the two comparison tests skip.
-- `ci.yml` runs `npm run build-rg` before `npm test`, so both platforms compare the real backend with our own walk. Nothing resolves `rg` from `PATH`: a bare `ripgrepPath` resolves as a relative path and fails.
-
-## Release
-
-- [RELEASE.md](RELEASE.md) is the distribution list: one row per desktop target with its artifact, digest, system floor, build host and where the installed product gets checked, plus the npm package set.
-- Bump `src/version.js` and every release manifest together, then tag `vX.Y.Z` on `main`. The tag drives the publish workflow, which runs `npm run build-rg` and publishes the four ripgrep platform packages before the main one.
-- npm Trusted Publishing needs the package to exist first. `ligule@0.0.1` is on the registry; the four `ligule-rg-*` packages are not, so each one's first publish runs with a token.
-- The account has 2FA, so a direct `npm publish` asks a one-time password; run it interactively or pass `--otp`. Tokens that bypass 2FA are being restricted for direct publishing, so do not reach for one. OIDC publishing is not affected by 2FA.
-- `npm ci` installs from the lockfile in both workflows.
-
-## Verify
-
-- `npm run check-pack` packs, unpacks, checks every entry `package.json` points at, then imports the package from an empty consumer directory. It copies the transitive closure of `dependencies` and installed optional dependencies, including native platform packages, leaves unrelated root optional dependencies out, and refuses when a declared runtime dependency is missing. Copying all of `node_modules` would hide a tarball short at runtime.
-- `npm run verify-install [tarball]` is the gate that copy cannot be: an empty directory, `npm install` of the packed tarball, dependencies resolved from the declarations, then the installed CLI's `--version`, its tool count, the non-interactive TUI refusal, both command grammars and the search backend read from the installed package. Passing a tarball path reuses those bytes instead of packing again, which is how the release pipeline verifies what it publishes. The consumer's `package.json` carries an `allowScripts` field so npm on a hardened machine may run the four native bindings' install scripts; a stock npm ignores it.
-- It refuses before packing when `dist/` is missing. Build first.
-- `npm test` exercises the same `dist/`, so it cannot see a file missing from `files` or an `exports` entry the tarball lacks. Invoke the script through npm: on Windows Node refuses to launch `npm.cmd` without a shell, and the script needs `npm_execpath` for that reason.
-- The first devDependency, `@modelcontextprotocol/server-filesystem`, is the test MCP server and stays out of the consumer.
-- `npm test` reports `skipped 2` when no ripgrep has been built locally; those two compare the real backend with our own tree walk and cannot be faked.
-- Real endpoint checks read credentials from the process environment and inspect the persisted record. Credentials are never written into repository files.
-- The shell's checks sit outside `npm test`. `cd desktop/src-tauri && cargo test` covers finding the backend entry, moving frames through the child's pipes and the close-and-exit decisions; window verification uses the actual shell and host, and frontend build checks run TypeScript and Vite.
-- The terminal interaction checks use the actual Host, provider adapter, local HTTP endpoint and Ink keyboard handling. Fixtures are repository files under `test/fixtures`, pure projections are checked separately, and `ligule tui` runs the same component in a terminal.
-- The desktop frontend is checked by `npm --prefix desktop/frontend run check`: six Node assertions over the projections and the frame, key, quit and edit-gate logic, plus `tsc --noEmit` and a Vite build. It runs against the fake host in `desktop/frontend/dev/`, which speaks the frame shapes of `src/host/protocol.js` and waits for a real interface reply before an approval proceeds.
+- `src/kernel/AGENTS.md`、`src/tools/AGENTS.md`、`src/session/AGENTS.md`、`src/host/AGENTS.md` 与 `src/tui/AGENTS.md` 只写对应目录的约束。
+- `desktop/AGENTS.md` 说明桌面目录边界；`desktop/src-tauri/AGENTS.md` 与 `desktop/frontend/AGENTS.md` 分别说明壳和前端的接口约束。
+- 工作目录处于某份 `AGENTS.md` 管辖的目录时，该指南生效；指令加载从项目根沿路径向下查找。

@@ -1,6 +1,17 @@
 # Desktop
 
-Rules for `desktop/` as a directory: the Tauri shell and its Vite frontend (D34). The repository-wide rules in [../AGENTS.md](../AGENTS.md) apply here too. The shell's own rules are in [src-tauri/AGENTS.md](src-tauri/AGENTS.md) and the window's interface in [frontend/AGENTS.md](frontend/AGENTS.md).
+`desktop/` 包含 Tauri Rust 壳与 Vite 前端，仓库根指南适用于两者。前端规则见 [frontend/AGENTS.md](frontend/AGENTS.md)，壳规则见 [src-tauri/AGENTS.md](src-tauri/AGENTS.md)。桌面目录不进入 npm 包。
 
-- `desktop/` is the Tauri shell. Rust opens the window, starts the Node host and moves one line per frame each way. `frontend/` is a Vite project (React, TypeScript) built by `npm run build` into `dist/`, and Tauri embeds that directory.
-- `desktop/` stays outside `package.json#files`.
+Rust 壳启动 Node Host、管理窗口和进程，并在两端之间搬运调用帧。业务状态和会话记录由 Node Host 管理；接口不得在壳中复制业务逻辑。
+
+常用命令：
+
+```sh
+cd desktop
+npm run dev
+npm run build
+cd src-tauri
+cargo test
+```
+
+`npm run build` 使用前端构建结果生成平台安装包。平台目标由对应的 `tauri.*.conf.json` 指定；不能让单个平台任务误用其他平台的打包目标。安装包使用当前构建目标的 Node 与原生依赖，不得跨平台复用 `desktop/vendor/`。

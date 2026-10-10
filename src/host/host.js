@@ -435,7 +435,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
   // 指名的项目还没装载过、装载侧又给不出那条路时，照当前这一份目录扫，过滤条件继续生效——
   // 扫一遍磁盘上的记录不逼出装载。
   // 这一份项目此刻的记录目录：第一次读之前先把旧位置（工作区目录下 `.ligule/sessions`）的记录一次性补齐到
-  // 数据根会话区（D110 的整理，合同见 `ligule-set/phase3/r55-data-root-contract.md`）：缺什么补什么、原件保留、
+  // 数据根会话区（D110）：补齐旧目录中的记录与附属文件，保留原件，
   // 一份环境只跑一次；失败与会话本身无关，只往标准错误记一行，不挡住这一格。
   async function scanDirectory(projectRoot) {
     const unloaded = projectRoot !== undefined && !environments.has(projectRoot) && loadEnvironment === undefined;
