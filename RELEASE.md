@@ -74,8 +74,9 @@ and Windows ones come from the pin written earlier.
 
 ## Not settled yet
 
-- npm publishing identity: the repository has no Actions secrets, so the first publish of `ligule@0.0.2` and of the four
-  search packages runs on the account owner's machine, and the workflow's token path gets configured with them.
+- npm publishing identity: the repository has no Actions secrets. `ligule@0.0.1` is already on the registry, so `ligule@0.0.2` is a
+  follow-up publish; the four search packages have never been published, so each one's first publish runs on the account owner's
+  machine, and the workflow's token path gets configured with them.
 - Release attachments and the public state of `v0.0.2` are set by the release run itself, after the four desktop
   targets and the npm packages have been verified.
 - The library behind targeted edits in the configuration text (U56) is not chosen, so this list says nothing about it.

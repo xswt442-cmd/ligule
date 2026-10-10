@@ -106,7 +106,7 @@ npm run build-rg    downloads the pinned ripgrep into packages/rg-*
 
 - [RELEASE.md](RELEASE.md) is the distribution list: one row per desktop target with its artifact, digest, system floor, build host and where the installed product gets checked, plus the npm package set.
 - Bump `package.json` and `VERSION` together, then tag `vX.Y.Z` on `main`. The tag drives the publish workflow, which runs `npm run build-rg` and publishes the four ripgrep platform packages before the main one.
-- The first publish cannot use npm Trusted Publishing, because npm requires the package to exist before a trusted publisher binds to it. Publish `0.0.1` with a token, configure the publisher, then let the workflow take over.
+- npm Trusted Publishing needs the package to exist first. `ligule@0.0.1` is on the registry; the four `ligule-rg-*` packages are not, so each one's first publish runs with a token.
 - The account has 2FA, so a direct `npm publish` asks a one-time password; run it interactively or pass `--otp`. Tokens that bypass 2FA are being restricted for direct publishing, so do not reach for one. OIDC publishing is not affected by 2FA.
 - `npm ci` installs from the lockfile in both workflows.
 
