@@ -729,6 +729,36 @@ test('config.get shows the endpoint block and nothing else from the snapshot', a
 
 // 写配置那一条路（实现顺序第 90 步，方案 7.2）：字段与层由宿主持有，别的一格都说不出口；
 // 那份文件被别人改过时报冲突而不是盖掉他的改动。
+test('consecutive first-time writes accumulate into one provider instead of restarting from the load snapshot', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-config-first-'));
+  const home = join(root, 'home');
+  const userFile = join(home, '.ligule', 'config.toml');
+  await mkdir(dirname(userFile), { recursive: true });
+  // 起手这一份一个 [model] 都没有：首启的人从设置里一格一格填（U59 首启检查）。
+  const store = createConfigStore({ projectRoot: root, userHome: home, layers: { user: {} } });
+  try {
+    await withInProcessHost(async (connection) => {
+      let version = '';
+      const first = await connection.request('config.set', { field: 'model.api', value: 'chat-completions', layer: 'user', version });
+      assert.equal(first.failure?.code, 'provider_base_url_required', '第一格填下去时还差服务地址');
+      version = first.version;
+      const second = await connection.request('config.set', { field: 'model.baseURL', value: 'http://127.0.0.1:1/v1', layer: 'user', version });
+      assert.notEqual(second.failure?.code, 'provider_base_url_required', '第二格接在第一格上，不是退回装载那一次的快照');
+      version = second.version;
+      const third = await connection.request('config.set', { field: 'model.model', value: 'stub-model', layer: 'user', version });
+      assert.equal(third.failure, undefined, '三格攒齐之后提供方换得上');
+      const text = await readFile(userFile, 'utf8');
+      assert.ok(text.includes('api = "chat-completions"') && text.includes('baseURL = "http://127.0.0.1:1/v1"') && text.includes('model = "stub-model"'), text);
+    }, undefined, {
+      configStore: store,
+      // 首启那一格：装载时一个 [model] 都没有，宿主先立占位（U59 的那一处修复），设置里再一格一格填。
+      config: createConfig({ user: { boundary: root, policy: { mode: 'ask' } } }),
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('config.set writes one whitelisted field and reports a concurrent edit instead of overwriting it', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ligule-config-set-'));
   const home = join(root, 'home');

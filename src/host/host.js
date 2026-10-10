@@ -320,14 +320,18 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
   // 装载那一次的配置快照不动：正在跑的这一份环境用的就是它。`config.get` 读的是可写那两层文件的此刻内容（方案 3A），
   // 会话现在打的那一份从 `status.get` 读；两份读数各自说一件事，界面把它们分开摆。
   function adoptGeneration(env, key, effective) {
-    const base = env.generation ?? { provider: env.provider, model: env.config.model };
+    // 折不出来时也要把这半份记下：连着填的下一格接在它上面。退回装载那一次的快照就永远攒不齐——
+    // 首启没有 `[model]` 时四格就是这么各填各的，提供方换不上、第一轮发不出去（U59 首启检查量到）。
+    const base = env.generation ?? { provider: env.provider, model: env.pendingModel ?? env.config.model };
     const model = { ...base.model, [key]: effective };
     let provider;
     try {
       provider = deriveProvider({ ...env.config, model });
     } catch (error) {
+      env.pendingModel = model;
       return { applies: [], failure: { code: error.code ?? 'provider_rebuild_failed', detail: String(error.detail ?? error.message) } };
     }
+    env.pendingModel = undefined;
     // 折出来的那几格一格没变，就没有任何东西要采用：一条没改变的写入报成「采用了」，
     // 界面会说出没发生过的事（方案 7.3 的 `applies` 说的是真实生效边界）。
     const changed = new Set([...Object.keys(base.model ?? {}), ...Object.keys(model)]);
