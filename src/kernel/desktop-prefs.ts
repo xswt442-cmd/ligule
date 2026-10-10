@@ -1,15 +1,16 @@
-// 桌面那一份草稿与界面偏好文档（方案 5.5.2）：草稿、暂停队列、语言、通知与外观这类偏好按桌面留在应用数据根里，
-// WebView 缓存里那一份只当第一屏的快速读法，可恢复的输入不靠它。整份替换：先写临时文件再改名，
-// 崩在半路也不会留下一份写了一半的文档；这一处不读旧内容，所以不需要输入历史那把跨进程锁。
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+// 桌面偏好文档按完整 JSON 保存；版本核对与替换都在同一把跨进程锁内完成。
+import { createHash, randomUUID } from 'node:crypto';
+import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
+import lockfile from 'proper-lockfile';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
 import { dataRoot } from './config-file.js';
-import { KernelError } from './error.js';
+import { KernelError, KernelRuntimeError } from './error.js';
 
-/** 一份偏好文档的字节上限：草稿按 4000 字一份、队列 20 句一份算，正常使用远到不了这里。 */
+/** 一份偏好文档的字节上限。 */
 export const DESKTOP_PREFS_LIMIT_BYTES = 1024 * 1024;
+
+const PREFS_LOCK_STALE_MS = 10_000;
 
 export function prefsPathOf(home = homedir()): string {
   return join(dataRoot(home), 'desktop.json');
@@ -19,60 +20,140 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** 读那一份文档：还没有过任何一次保存不是错误；读坏了就用默认（与界面那一侧同一句话），不猜它想表达什么。 */
-export async function loadPrefs(path = prefsPathOf()): Promise<Record<string, unknown>> {
-  let bytes: string;
-  try {
-    bytes = await readFile(path, 'utf8');
-  } catch (error) {
-    if ((error as { code?: string }).code === 'ENOENT') return {};
-    throw error;
-  }
-  try {
-    const parsed: unknown = JSON.parse(bytes);
-    return isPlainObject(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
+function invalidPrefs(cause?: unknown): KernelError {
+  return new KernelError('desktop_prefs_invalid', { cause, detail: 'the preferences document must be a JSON object' });
 }
 
-/** 界面交来的那一份必须是能解析的对象：坏东西不进文件（信任边界在这一次调用上）。 */
-export function parsePrefsJson(json: string): Record<string, unknown> {
-  const size = Buffer.byteLength(json, 'utf8');
-  if (size > DESKTOP_PREFS_LIMIT_BYTES) {
-    throw new KernelError('desktop_prefs_too_large', { detail: `${size} bytes is over the ${DESKTOP_PREFS_LIMIT_BYTES}-byte cap` });
+function parsePrefsBytes(bytes: Buffer): Record<string, unknown> {
+  if (bytes.byteLength > DESKTOP_PREFS_LIMIT_BYTES) {
+    throw new KernelError('desktop_prefs_too_large', {
+      detail: `${bytes.byteLength} bytes is over the ${DESKTOP_PREFS_LIMIT_BYTES}-byte cap`,
+    });
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(json);
+    parsed = JSON.parse(bytes.toString('utf8'));
   } catch (cause) {
-    throw new KernelError('desktop_prefs_invalid', { cause, detail: 'the preferences document is not JSON' });
+    throw invalidPrefs(cause);
   }
-  if (!isPlainObject(parsed)) {
-    throw new KernelError('desktop_prefs_invalid', { detail: 'the preferences document is not a JSON object' });
-  }
+  if (!isPlainObject(parsed)) throw invalidPrefs();
   return parsed;
 }
 
-// 进程内按文件排一条队：两次保存差不多同时到，后发起的那一份才是最后该留在文件里的那一份。
-const pendingSaves = new Map<string, Promise<void>>();
+async function readPrefsFile(path: string): Promise<{ settings: Record<string, unknown>; version: string; mode?: number }> {
+  let bytes: Buffer;
+  try {
+    bytes = await readFile(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { settings: {}, version: '' };
+    throw error;
+  }
+  const settings = parsePrefsBytes(bytes);
+  const fileStat = await stat(path);
+  return {
+    settings,
+    version: createHash('sha256').update(bytes).digest('hex'),
+    mode: fileStat.mode & 0o777,
+  };
+}
 
-export async function savePrefs(path: string, value: Record<string, unknown>): Promise<void> {
-  const queued = pendingSaves.get(path) ?? Promise.resolve();
-  const current = queued.catch(() => {}).then(async () => {
+/** 读偏好文档：文件不存在时返回空对象；坏文档与超限文档明确报错。 */
+export async function loadPrefs(path = prefsPathOf()): Promise<Record<string, unknown>> {
+  return (await readPrefsFile(resolve(path))).settings;
+}
+
+/** 读取偏好与其字节版本；缺失文件的版本为空串。 */
+export async function readPrefs(path = prefsPathOf()): Promise<{ settings: Record<string, unknown>; version: string }> {
+  const { settings, version } = await readPrefsFile(resolve(path));
+  return { settings, version };
+}
+
+/** 界面交来的那一份必须是能解析的对象：坏东西不进文件。 */
+export function parsePrefsJson(json: string): Record<string, unknown> {
+  return parsePrefsBytes(Buffer.from(json, 'utf8'));
+}
+
+type PrefsLock = { assertOwned(): void; release(): Promise<void> };
+
+async function acquirePrefsLock(path: string): Promise<PrefsLock> {
+  let compromised: Error | undefined;
+  let unlock: (() => Promise<void>) | undefined;
+  try {
     await mkdir(dirname(path), { recursive: true });
-    const temporary = `${path}.${randomUUID()}.tmp`;
+    unlock = await lockfile.lock(path, {
+      realpath: false,
+      lockfilePath: `${path}.lock`,
+      stale: PREFS_LOCK_STALE_MS,
+      update: 2_000,
+      retries: { retries: 6, minTimeout: 10, maxTimeout: 80 },
+      onCompromised: (error) => { compromised = error; },
+    });
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === 'ELOCKED') {
+      throw new KernelError('desktop_prefs_locked', { cause, detail: `${path} has an active writer` });
+    }
+    throw new KernelRuntimeError('desktop_prefs_lock_failed', { cause, detail: path });
+  }
+  return {
+    assertOwned() {
+      if (compromised !== undefined) {
+        throw new KernelRuntimeError('desktop_prefs_lock_lost', { cause: compromised, detail: path });
+      }
+    },
+    async release() {
+      if (compromised !== undefined) {
+        throw new KernelRuntimeError('desktop_prefs_lock_lost', { cause: compromised, detail: path });
+      }
+      try {
+        await unlock!();
+      } catch (cause) {
+        throw new KernelRuntimeError('desktop_prefs_unlock_failed', { cause, detail: path });
+      }
+    },
+  };
+}
+
+// 进程内排队避免本进程同时写同一份文档；文件锁再保护其他 Host 进程。
+const pendingSaves = new Map<string, Promise<{ settings: Record<string, unknown>; version: string }>>();
+
+export async function savePrefs(
+  path: string,
+  value: Record<string, unknown>,
+  options: { version?: string } = {},
+): Promise<{ settings: Record<string, unknown>; version: string }> {
+  const target = resolve(path);
+  const queued = pendingSaves.get(target) ?? Promise.resolve({ settings: {}, version: '' });
+  const current = queued.catch(() => ({ settings: {}, version: '' })).then(async () => {
+    const lock = await acquirePrefsLock(target);
+    let temporary: string | undefined;
     try {
-      await writeFile(temporary, `${JSON.stringify(value)}\n`, { encoding: 'utf8', flag: 'wx' });
-      await rename(temporary, path);
+      const before = await readPrefsFile(target);
+      if (options.version !== undefined && options.version !== before.version) {
+        throw new KernelError('desktop_prefs_version_stale', { detail: `${target} changed since it was read; nothing was written` });
+      }
+      const json = `${JSON.stringify(value)}\n`;
+      const settings = parsePrefsJson(json);
+      const bytes = Buffer.from(json, 'utf8');
+      lock.assertOwned();
+      temporary = `${target}.${randomUUID()}.tmp`;
+      await writeFile(temporary, bytes, { flag: 'wx', mode: 0o600 });
+      await chmod(temporary, before.mode ?? 0o600);
+      lock.assertOwned();
+      await rename(temporary, target);
+      temporary = undefined;
+      return { settings, version: createHash('sha256').update(bytes).digest('hex') };
     } finally {
-      await rm(temporary, { force: true });
+      try {
+        if (temporary !== undefined) await rm(temporary, { force: true });
+      } finally {
+        await lock.release();
+      }
     }
   });
-  pendingSaves.set(path, current);
+  pendingSaves.set(target, current);
   try {
-    await current;
+    return await current;
   } finally {
-    if (pendingSaves.get(path) === current) pendingSaves.delete(path);
+    if (pendingSaves.get(target) === current) pendingSaves.delete(target);
   }
 }
