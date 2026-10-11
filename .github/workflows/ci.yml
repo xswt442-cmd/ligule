@@ -53,12 +53,13 @@ jobs:
             LIGULE_CREDENTIAL_NATIVE_REQUIRED=1 node --test test/credentials.test.js test/credential-unavailable.test.js
           '
       - name: prepare an isolated macOS keychain
+        id: keychain
         if: runner.os == 'macOS'
         run: |
           mkdir -p testplace/tmp
-          security create-keychain -p ligule-ci-test-password testplace/tmp/credentials.keychain-db
-          security set-keychain-settings -lut 21600 testplace/tmp/credentials.keychain-db
-          security unlock-keychain -p ligule-ci-test-password testplace/tmp/credentials.keychain-db
+          security create-keychain -p ligule-ci-test-password "$PWD/testplace/tmp/credentials.keychain-db"
+          security set-keychain-settings -lut 21600 "$PWD/testplace/tmp/credentials.keychain-db"
+          security unlock-keychain -p ligule-ci-test-password "$PWD/testplace/tmp/credentials.keychain-db"
           security list-keychains -d user -s "$PWD/testplace/tmp/credentials.keychain-db"
           security default-keychain -d user -s "$PWD/testplace/tmp/credentials.keychain-db"
       - name: native credential operations on Windows and macOS
@@ -67,8 +68,8 @@ jobs:
           LIGULE_CREDENTIAL_NATIVE_REQUIRED: '1'
         run: node --test test/credentials.test.js test/credential-unavailable.test.js
       - name: remove the test keychain
-        if: always() && runner.os == 'macOS'
-        run: security delete-keychain testplace/tmp/credentials.keychain-db
+        if: always() && runner.os == 'macOS' && steps.keychain.outcome == 'success'
+        run: security delete-keychain "$PWD/testplace/tmp/credentials.keychain-db"
 
   test:
     name: test on ${{ matrix.os }}
