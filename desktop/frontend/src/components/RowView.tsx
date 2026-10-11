@@ -12,6 +12,7 @@ import { ReasoningRow } from './ReasoningRow';
 import { ResultRow } from './ResultRow';
 import { RoundRow } from './RoundRow';
 import { ContextRow } from './ContextRow';
+import { useLocale } from '../locale';
 
 const VIEWS: Record<Row['kind'], (props: RowProps) => ReactElement> = {
   question: QuestionRow,
@@ -28,6 +29,8 @@ const VIEWS: Record<Row['kind'], (props: RowProps) => ReactElement> = {
 };
 
 export const RowView = memo(function RowView(props: RowProps) {
+  const locale = useLocale();
+  if (locale === 'en' && props.row.english !== undefined) props = { ...props, row: { ...props.row, ...props.row.english } };
   const View = VIEWS[props.row.kind];
   if (props.flash !== true) return <View {...props} />;
   // 亮起来的那一行才多包一层：其余每一行的节点数不变。

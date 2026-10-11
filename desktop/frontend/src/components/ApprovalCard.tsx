@@ -15,6 +15,7 @@ export type Ask = {
   policySource: string;
   policyForced: boolean;
   content: string;
+  english?: { change: string; content: string };
 };
 
 const TIER: Record<string, [string, string]> = {
@@ -50,9 +51,9 @@ export function ApprovalCard({ ask, queued, verbosity, active, onAnswer, onOpen 
         {background && <button type="button" onClick={() => onOpen(ask.sessionId)}>{t('打开会话', 'Open session')} {ask.sessionId.slice(0, 8)}</button>}
       </div>
       {ask.detail !== '' && <div className="row-target">{ask.detail}</div>}
-      {ask.change !== '' && <div className="row-target">{ask.change}</div>}
+      {ask.change !== '' && <div className="row-target">{t(ask.change, ask.english?.change ?? ask.change)}</div>}
       {ask.reason !== '' && <p className="approval-reason">{ask.reason}</p>}
-      <Fold text={ask.content} verbosity={verbosity} always label={t('查看完整内容', 'View full content')} />
+      <Fold text={t(ask.content, ask.english?.content ?? ask.content)} verbosity={verbosity} always label={t('查看完整内容', 'View full content')} />
     </div>
     <div className="approval-actions">
       <button type="button" data-tone="allow" onClick={() => onAnswer('allow')}>{t('允许一次', 'Allow once')}</button>

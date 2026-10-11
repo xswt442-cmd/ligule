@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useText } from '../locale';
 import type { Verbosity } from './types';
 
 // 长正文默认只给一屏高度，多出来的靠「看全文」那一格（D94）。
@@ -12,6 +13,7 @@ export function Fold({ text, verbosity, always = false, label = '看全文' }: {
   always?: boolean;
   label?: string;
 }) {
+  const t = useText();
   const [forced, setForced] = useState<boolean | null>(null);
   if (text === '') return null;
   const long = always || text.length > CHARS || text.split('\n').length > LINES;
@@ -23,6 +25,6 @@ export function Fold({ text, verbosity, always = false, label = '看全文' }: {
       className="fold-toggle"
       aria-expanded={open}
       onClick={() => setForced(!open)}
-    >{open ? '收起' : label}</button>}
+    >{open ? t('收起', 'Show less') : label === '看全文' ? t('看全文', 'Show more') : label}</button>}
   </>;
 }

@@ -597,6 +597,7 @@ export function App({ transport }: { transport: Transport }) {
       // 展开那一段画的是实际动的是哪一件与两段内容；其余的调用把参数交出去，命令那一类参数是空的就不给把手（方案 5.4）。
       const change = changeOf(tool, args);
       const content = changeBody(change, args);
+      const englishChange = changeOf(tool, args, 'en');
       setAsks((current) => [...current, {
         id: message.id ?? '',
         sessionId: asked,
@@ -612,6 +613,7 @@ export function App({ transport }: { transport: Transport }) {
         policySource: params.policySource ?? '',
         policyForced: params.policyForced === true,
         content,
+        english: { change: englishChange.summary, content: changeBody(englishChange, args, 'en') },
       }]);
     });
 
