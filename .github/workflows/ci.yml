@@ -196,7 +196,7 @@ jobs:
       - name: pack and install the artifact on this target
         run: |
           npm run check-pack
-          npm run verify-install
+          npm run verify-install -- --local-search
 
       # 安装包带的是构建产物，所以先构建再复制（D47）。
       - name: build the runtime tree the installer carries

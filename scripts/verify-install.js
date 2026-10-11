@@ -1,18 +1,26 @@
 // 全新安装验证：打一份 tarball，在一个空目录里让 npm 真的装一次，再按发布验收那几件事读一遍。
 // `check-pack` 那一格把开发树的依赖复制给消费者，它证明的是「文件带齐了」；这一格证明的是「声明装得出来」。
-// 依赖从 tarball 里的 package.json 解析、下载并安装，一个字节都不从本仓库的 `node_modules` 复制，所以要网络。
+// 默认从 registry 安装搜索包；`--local-search` 先打当前平台包并安装，再验证主包 tarball。
+// 其余依赖从 tarball 里的 package.json 解析、下载并安装，不从本仓库的 `node_modules` 复制。
 //
-// 跑法：npm run verify-install
+// 跑法：npm run verify-install [-- --local-search]
 // 带一个 tarball 路径时用它，不再自己打：发布流水线要在同一批字节上先验后发，那一份身份就是 artifact 里的那一个文件。
 import { spawnSync, execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 
 const repo = fileURLToPath(new URL('..', import.meta.url));
 const packDir = join(repo, 'testplace', 'pack');
 const consumer = join(packDir, 'install', 'consumer');
-const given = process.argv[2];
+const args = process.argv.slice(2);
+const localSearchFlags = args.filter((arg) => arg === '--local-search').length;
+const tarballArgs = args.filter((arg) => arg !== '--local-search');
+if (localSearchFlags > 1 || tarballArgs.length > 1 || tarballArgs.some((arg) => arg.startsWith('--'))) {
+  throw new Error('usage: npm run verify-install -- [tarball] [--local-search]');
+}
+const localSearch = localSearchFlags === 1;
+const given = tarballArgs[0];
 const npmCli = process.env.npm_execpath;
 if (!npmCli) throw new Error('run it as `npm run verify-install` - only npm itself can tell Node which file to launch on Windows');
 if (!existsSync(join(repo, 'dist', 'index.js'))) {
@@ -20,18 +28,51 @@ if (!existsSync(join(repo, 'dist', 'index.js'))) {
 }
 
 const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'));
+const pin = JSON.parse(readFileSync(join(repo, 'scripts', 'ripgrep-pin.json'), 'utf8'));
+const targets = Object.values(pin.targets);
+for (const target of targets) {
+  if (pkg.optionalDependencies?.[target.package] !== pkg.version) {
+    throw new Error(`${target.package} must be an optionalDependency pinned to ${pkg.version}`);
+  }
+}
+const currentTarget = pin.targets[`${process.platform}-${process.arch}`];
+if (currentTarget === undefined) {
+  throw new Error(`no search package is defined for ${process.platform}-${process.arch}`);
+}
 const tarball = given === undefined ? join(packDir, `${pkg.name}-${pkg.version}.tgz`) : resolve(given);
 rmSync(join(packDir, 'install'), { recursive: true, force: true });
 mkdirSync(consumer, { recursive: true });
+let localTarball;
+let localBinaryPath;
+if (localSearch) {
+  const packageDirectory = join(repo, 'packages', currentTarget.directory);
+  const packageManifest = JSON.parse(readFileSync(join(packageDirectory, 'package.json'), 'utf8'));
+  localBinaryPath = join(packageDirectory, currentTarget.binary);
+  if (packageManifest.name !== currentTarget.package || packageManifest.version !== pkg.version) {
+    throw new Error(`${currentTarget.directory} must publish ${currentTarget.package}@${pkg.version}`);
+  }
+  if (!existsSync(localBinaryPath)) {
+    throw new Error(`${localBinaryPath} is missing; build this platform package with npm run build-rg before local verification`);
+  }
+  const localPackDirectory = join(packDir, 'install', 'local-search');
+  mkdirSync(localPackDirectory, { recursive: true });
+  execFileSync(process.execPath, [npmCli, 'pack', '--pack-destination', localPackDirectory], {
+    cwd: packageDirectory,
+    stdio: 'inherit',
+  });
+  localTarball = join(localPackDirectory, `${packageManifest.name}-${packageManifest.version}.tgz`);
+  if (!existsSync(localTarball)) throw new Error(`npm pack did not produce ${localTarball}`);
+}
 // 消费者自己的清单：空目录里只写这一份，装进去的依赖全部来自 tarball 的声明。
 // 那四件带原生绑定的依赖要在安装时跑自己的脚本；把「允许哪些依赖跑脚本」写成包内的一格，是收得紧的 npm 唯一收的形式
 // （命令行与用户级配置里的白名单在项目范围内的安装里都不算）。普通 npm 不读这一格，装出来完全一样。
-writeFileSync(join(consumer, 'package.json'), `${JSON.stringify({
+const consumerManifest = {
   name: 'ligule-consumer',
   version: '0.0.0',
   private: true,
   allowScripts: { koffi: true, 'tree-sitter': true, 'tree-sitter-bash': true, 'tree-sitter-pwsh': true },
-}, null, 2)}\n`, 'utf8');
+};
+writeFileSync(join(consumer, 'package.json'), `${JSON.stringify(consumerManifest, null, 2)}\n`, 'utf8');
 if (given === undefined) {
   execFileSync(process.execPath, [npmCli, 'pack', '--pack-destination', 'testplace/pack'], { cwd: repo, stdio: 'inherit' });
 }
@@ -42,6 +83,18 @@ if (!existsSync(tarball)) throw new Error(`npm pack did not produce ${tarball}`)
 const installEnvironment = Object.fromEntries(Object.entries(process.env)
   .filter(([name]) => name.toLowerCase() !== 'npm_config_allow_scripts'));
 try {
+  if (localSearch) {
+    execFileSync(process.execPath, [npmCli, 'install', localTarball, '--no-save', '--package-lock=false', '--no-audit', '--no-fund'], {
+      cwd: consumer,
+      env: installEnvironment,
+      encoding: 'utf8',
+      timeout: 900_000,
+    });
+    consumerManifest.overrides = {
+      [currentTarget.package]: `file:${relative(consumer, localTarball).split(sep).join('/')}`,
+    };
+    writeFileSync(join(consumer, 'package.json'), `${JSON.stringify(consumerManifest, null, 2)}\n`, 'utf8');
+  }
   execFileSync(process.execPath, [npmCli, 'install', tarball, '--no-audit', '--no-fund'], {
     cwd: consumer,
     env: installEnvironment,
@@ -91,7 +144,7 @@ readings.push('tui: refuses with tui_terminal_required on a non-interactive term
 
 // 两种命令语法与搜索后端都从装好的那一份里跑：原生语法插件或搜索二进制没带上来时，这一段就断。
 writeFileSync(join(consumer, 'probe.mjs'), `
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { parseCommand, resolveRipgrep, searchWithRipgrep } from 'ligule';
 
 const bash = await parseCommand('git status');
@@ -104,14 +157,17 @@ console.log(\`grammar: bash \${bash.segments.length} segments, pwsh \${pwsh.segm
 const backend = await resolveRipgrep({});
 const found = typeof backend?.executable === 'string' && existsSync(backend.executable);
 if (!found) {
-  console.log(\`search backend: none here (\${JSON.stringify(backend)})\`);
-} else {
-  mkdirSync('fixture', { recursive: true });
-  writeFileSync('fixture/needle.txt', 'LIGULE-INSTALL-NEEDLE\\n');
-  const hits = await searchWithRipgrep({ executable: backend.executable, boundary: process.cwd(), target: 'fixture', pattern: 'LIGULE-INSTALL-NEEDLE', limit: 5 });
-  console.log(\`search backend: \${backend.executable}; hits \${JSON.stringify(hits).slice(0, 200)}\`);
-  if (JSON.stringify(hits).includes('LIGULE-INSTALL-NEEDLE') === false) throw new Error('the packaged search backend ran but did not find the needle');
+  throw new Error(\`search backend is missing for the supported target: \${JSON.stringify(backend)}\`);
 }
+${localSearch ? `if (!readFileSync(backend.executable).equals(readFileSync(${JSON.stringify(localBinaryPath)}))) {
+  throw new Error('installed search backend does not match the local platform tarball');
+}
+console.log(\`search backend: local tarball ${currentTarget.package}@${pkg.version}; \${backend.executable}\`);` : `console.log(\`search backend: registry package ${currentTarget.package}@${pkg.version}; \${backend.executable}\`);`}
+mkdirSync('fixture', { recursive: true });
+writeFileSync('fixture/needle.txt', 'LIGULE-INSTALL-NEEDLE\\n');
+const hits = await searchWithRipgrep({ executable: backend.executable, boundary: process.cwd(), target: 'fixture', pattern: 'LIGULE-INSTALL-NEEDLE', limit: 5 });
+console.log(\`search results: \${JSON.stringify(hits).slice(0, 200)}\`);
+if (JSON.stringify(hits).includes('LIGULE-INSTALL-NEEDLE') === false) throw new Error('the packaged search backend ran but did not find the needle');
 `, 'utf8');
 
 const probe = spawnSync(process.execPath, ['probe.mjs'], { cwd: consumer, env, encoding: 'utf8' });

@@ -4,13 +4,15 @@
 // 本地想用外部搜索后端也跑它：npm run build-rg。
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, copyFileSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repo = dirname(dirname(fileURLToPath(import.meta.url)));
 const pin = JSON.parse(readFileSync(join(repo, 'scripts', 'ripgrep-pin.json'), 'utf8'));
-const work = join(repo, 'testplace', 'rg-build');
+const scratch = join(repo, 'testplace', 'tmp');
+mkdirSync(scratch, { recursive: true });
+const work = mkdtempSync(join(scratch, 'rg-build-'));
 
 function run(command, args, label) {
   const result = spawnSync(command, args, { encoding: 'utf8', windowsHide: true });
@@ -52,28 +54,29 @@ function verify(target, bytes) {
   if (problems.length > 0) throw new Error(`${target.package}: ${problems.join('; ')}`);
 }
 
-rmSync(work, { recursive: true, force: true });
-for (const [triple, target] of Object.entries(pin.targets)) {
-  const asset = `ripgrep-${pin.version}-${target.triple}.${target.format}`;
-  const archive = join(work, asset);
-  mkdirSync(work, { recursive: true });
-  download(`${pin.download}/${pin.version}/${asset}`, archive);
-  const bytes = readFileSync(archive);
-  verify(target, bytes);
+try {
+  for (const [triple, target] of Object.entries(pin.targets)) {
+    const asset = `ripgrep-${pin.version}-${target.triple}.${target.format}`;
+    const archive = join(work, asset);
+    download(`${pin.download}/${pin.version}/${asset}`, archive);
+    const bytes = readFileSync(archive);
+    verify(target, bytes);
 
-  const staging = join(work, `${target.package}-extract`);
-  extract(archive, target.format, staging);
-  const source = join(staging, `ripgrep-${pin.version}-${target.triple}`);
-  const destination = join(repo, 'packages', target.directory);
-  mkdirSync(destination, { recursive: true });
-  for (const file of [target.binary, ...pin.licenseFiles]) {
-    const from = join(source, file);
-    if (!statSync(from, { throwIfNoEntry: false })?.isFile()) throw new Error(`${asset} does not contain ${file}`);
-    copyFileSync(from, join(destination, file));
+    const staging = join(work, `${target.package}-extract`);
+    extract(archive, target.format, staging);
+    const source = join(staging, `ripgrep-${pin.version}-${target.triple}`);
+    const destination = join(repo, 'packages', target.directory);
+    mkdirSync(destination, { recursive: true });
+    for (const file of [target.binary, ...pin.licenseFiles]) {
+      const from = join(source, file);
+      if (!statSync(from, { throwIfNoEntry: false })?.isFile()) throw new Error(`${asset} does not contain ${file}`);
+      copyFileSync(from, join(destination, file));
+    }
+    // 从 zip 里解出来的文件不带可执行位，POSIX 上要自己补上。
+    if (process.platform !== 'win32') chmodSync(join(destination, target.binary), 0o755);
+    writeFileSync(join(destination, 'RIPGREP-VERSION'), `${target.package} ships ripgrep ${pin.version} for ${target.triple} (pinned in scripts/ripgrep-pin.json)\n`, 'utf8');
+    console.log(`${triple}: ripgrep ${pin.version} -> packages/${target.directory}/${target.binary} (${bytes.length} bytes, sha256 ok)`);
   }
-  // 从 zip 里解出来的文件不带可执行位，POSIX 上要自己补上。
-  if (process.platform !== 'win32') chmodSync(join(destination, target.binary), 0o755);
-  writeFileSync(join(destination, 'RIPGREP-VERSION'), `${target.package} ships ripgrep ${pin.version} for ${target.triple} (pinned in scripts/ripgrep-pin.json)\n`, 'utf8');
-  console.log(`${triple}: ripgrep ${pin.version} -> packages/${target.directory}/${target.binary} (${bytes.length} bytes, sha256 ok)`);
+} finally {
+  rmSync(work, { recursive: true, force: true });
 }
-rmSync(work, { recursive: true, force: true });

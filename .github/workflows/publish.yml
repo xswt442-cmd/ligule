@@ -44,6 +44,9 @@ jobs:
       - name: install
         run: npm ci
 
+      - name: build the pinned search packages
+        run: npm run build-rg
+
       - name: tag matches package.json version
         shell: bash
         run: |
@@ -87,6 +90,11 @@ jobs:
           npm pack --pack-destination dist-tarball
           tarball=$(ls dist-tarball/*.tgz | head -1)
           sha256sum "$tarball" | tee dist-tarball/SHA256SUMS
+          mkdir -p dist-tarball/platforms
+          for dir in packages/rg-*; do
+            npm pack "./$dir" --pack-destination dist-tarball/platforms
+          done
+          sha256sum dist-tarball/platforms/*.tgz >> dist-tarball/SHA256SUMS
 
       - uses: actions/upload-artifact@v4
         with:
@@ -94,11 +102,48 @@ jobs:
           path: dist-tarball/
           if-no-files-found: error
 
+  platforms:
+    name: publish search packages
+    needs: checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-tarball
+          path: dist-tarball
+      - name: verify checksums
+        run: sha256sum --check dist-tarball/SHA256SUMS
+      - name: publish each exact platform artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+          for file in dist-tarball/platforms/*.tgz; do
+            name=$(basename "$file" "-$version.tgz")
+            state=$(npm run --silent registry-version -- "$name@$version" "$file")
+            if [ "$state" = missing ]; then
+              npm publish --provenance --access public "$file"
+            fi
+            npm run --silent registry-version -- "$name@$version" "$file"
+          done
+
   # 装一次真的：空目录里安装上面那一份字节，依赖按声明解析，再查版本、工具数、TUI 那一条拒绝、
   # 两种命令语法与搜索后端。check-pack 从开发树复制依赖，证明不了「声明装得出来」。
   verify:
     name: verify the packed tarball by installing it
-    needs: checks
+    needs: [checks, platforms]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -124,7 +169,7 @@ jobs:
 
   npm:
     name: publish to npm
-    needs: [checks, verify]
+    needs: [checks, platforms, verify]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -142,36 +187,6 @@ jobs:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
           registry-url: https://registry.npmjs.org
 
-      # 平台包的内容不提交进仓库：按 scripts/ripgrep-pin.json 写明的版本与校验和拉取解包。
-      - name: build the ripgrep platform packages
-        run: npm run build-rg
-
-      - name: skip when version is already published
-        id: published
-        shell: bash
-        run: |
-          pkg=$(node -p "require('./package.json').version")
-          if npm view --json "ligule@${pkg}" version > /dev/null 2>&1; then
-            echo "already=yes" >> "$GITHUB_OUTPUT"
-            echo "::warning::${pkg} is already on npm - nothing to publish"
-          fi
-
-      # 两个平台包先于主包发布：主包的 optionalDependencies 指向它们，晚一步就有人装到 404。
-      # 每个包自己查一次 registry，重跑不会因为已发布而以 E409 失败。
-      - name: publish the ripgrep platform packages
-        if: steps.published.outputs.already != 'yes'
-        shell: bash
-        run: |
-          for dir in packages/rg-*; do
-            name=$(node -p "require('./$dir/package.json').name")
-            version=$(node -p "require('./$dir/package.json').version")
-            if npm view --json "$name@$version" version > /dev/null 2>&1; then
-              echo "::warning::$name@$version is already on npm - skipping"
-              continue
-            fi
-            (cd "$dir" && npm publish --provenance --access public)
-          done
-
       # 发的是验过的那一份字节：作业自己不打第二份包，从 artifact 里取下来直接发。
       - uses: actions/download-artifact@v4
         with:
@@ -181,21 +196,26 @@ jobs:
       - name: take the tarball identity from the artifact
         id: tarball
         shell: bash
-        run: echo "path=$(ls dist-tarball/*.tgz | head -1)" >> "$GITHUB_OUTPUT"
+        run: |
+          sha256sum --check dist-tarball/SHA256SUMS
+          file="dist-tarball/ligule-$(node -p "require('./package.json').version").tgz"
+          echo "path=$file" >> "$GITHUB_OUTPUT"
+          state=$(npm run --silent registry-version -- "ligule@$(node -p "require('./package.json').version")" "$file")
+          echo "state=$state" >> "$GITHUB_OUTPUT"
 
       - name: publish to npm (token)
-        if: steps.published.outputs.already != 'yes' && env.NPM_TOKEN != ''
+        if: steps.tarball.outputs.state == 'missing' && env.NPM_TOKEN != ''
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --provenance --access public "${{ steps.tarball.outputs.path }}"
 
       - name: publish to npm (trusted publishing)
-        if: steps.published.outputs.already != 'yes' && env.NPM_TOKEN == ''
+        if: steps.tarball.outputs.state == 'missing' && env.NPM_TOKEN == ''
         run: npm publish --provenance --access public "${{ steps.tarball.outputs.path }}"
 
   release:
     name: create GitHub release
-    needs: [checks, verify]
+    needs: [checks, verify, npm]
     runs-on: ubuntu-latest
     permissions:
       contents: write # 建对应的 GitHub Release。

@@ -1,7 +1,7 @@
 {
   "name": "ligule",
   "version": "0.0.2",
-  "description": "占位版本，开发中。自建 agent harness：内核不提供任何工具，一切能力皆插件。Placeholder, under development. A self-built agent harness: the kernel ships no tools of its own; every capability is a plugin.",
+  "description": "共享会话与工具内核的命令行、终端和桌面 AI 助手。An AI agent harness with shared sessions and tools across CLI, terminal, and desktop interfaces.",
   "type": "module",
   "bin": {
     "ligule": "./dist/cli.js"
@@ -23,6 +23,7 @@
     "test": "npm run build && node --test --import ./test/hooks/isolated-data-root.mjs test/*.test.js",
     "check-pack": "node scripts/check-pack.js",
     "verify-install": "node scripts/verify-install.js",
+    "registry-version": "node scripts/registry-version.js",
     "build-rg": "node scripts/build-rg-packages.js"
   },
   "engines": {
@@ -42,7 +43,7 @@
     "agent",
     "harness",
     "agent-harness",
-    "placeholder"
+    "tui"
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.0",
@@ -60,6 +61,10 @@
     "highlight.js": "11.12.0",
     "ink": "^7.1.1",
     "koffi": "3.1.1",
+    "ligule-rg-darwin-arm64": "0.0.2",
+    "ligule-rg-darwin-x64": "0.0.2",
+    "ligule-rg-linux-x64": "0.0.2",
+    "ligule-rg-win32-x64": "0.0.2",
     "marked": "18.0.14",
     "react": "^19.3.0",
     "string-width": "8.3.0"
