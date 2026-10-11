@@ -4,6 +4,7 @@ import { languageOf, textOf } from '../dist/kernel/locale.js';
 
 test('locale selection accepts built-in values and follows the system locale for auto', () => {
   assert.equal(languageOf('zh', 'en-US'), 'zh');
+  assert.equal(languageOf('zh-CN', 'en-US'), 'zh');
   assert.equal(languageOf('en', 'zh-CN'), 'en');
   assert.equal(languageOf('auto', 'zh-HK'), 'zh');
   assert.equal(languageOf(undefined, 'en-GB'), 'en');

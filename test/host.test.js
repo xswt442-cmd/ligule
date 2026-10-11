@@ -273,6 +273,7 @@ async function runCli(directory, answer) {
   return withEndpoint(async (baseUrl, requests) => {
     const child = spawn(process.execPath, [
       CLI, 'run', 'read the note',
+      '--lang', 'en',
       '--config', 'model.api="messages"',
       '--config', `model.baseURL="${baseUrl}"`,
       '--config', 'model.model="test-model"',
@@ -316,8 +317,8 @@ test('ligule run prints the round, asks the terminal once, and the project instr
     assert.match(outcome.stdout, /^> read the note$/m);
     assert.match(outcome.stdout, /^· read: ok$/m);
     assert.match(outcome.stdout, /the file says so/);
-    assert.match(outcome.stderr, /allow read \{"path":"note\.txt"\}\?/);
-    assert.match(outcome.stderr, /^session [0-9a-f-]{36}: 2 iterations, 2 model calls$/m);
+    assert.match(outcome.stderr, /Allow read \{"path":"note\.txt"\}\?/);
+    assert.match(outcome.stderr, /^Session [0-9a-f-]{36}: 2 iterations, 2 model calls$/m);
     // 项目指令那一层进了请求体的系统段（D10 装载侧的接线）。
     assert.match(outcome.requests[0].system, /print nothing but the answer/);
   } finally {

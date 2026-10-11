@@ -69,7 +69,7 @@ test('an unknown command is a failure, while asking for help is not', () => {
   for (const flag of [undefined, '--help', '-h']) {
     const asked = flag === undefined ? capture() : capture(flag);
     assert.ok(asked.ok, asked.stderr);
-    assert.match(asked.stdout, /(?:commands: |命令：)tools, skills, extensions, sessions/);
+  assert.match(asked.stdout, /(?:Commands: tools, skills, extensions, sessions|命令：tools、skills、extensions、sessions)/);
   }
 });
 
@@ -87,13 +87,13 @@ test('--config narrows the boundary from the command line and a valueless flag i
 test('--version prints the package version and the bare invocation lists the commands', () => {
   const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'));
   assert.equal(capture('--version').stdout.trim(), pkg.version);
-  assert.match(capture().stdout, /(?:commands: |命令：)tools, skills, extensions, sessions/);
+  assert.match(capture().stdout, /(?:Commands: tools, skills, extensions, sessions|命令：tools、skills、extensions、sessions)/);
 });
 
 test('--lang selects help text without requiring a model configuration', () => {
   const english = capture('--help', '--lang', 'en');
   assert.equal(english.ok, true, english.stderr);
-  assert.match(english.stdout, /commands: tools/);
+  assert.match(english.stdout, /Commands: tools/);
   assert.match(english.stdout, /--lang <zh\|en\|auto>/);
 
   const chinese = capture('--help', '--lang', 'zh');
@@ -101,9 +101,39 @@ test('--lang selects help text without requiring a model configuration', () => {
   assert.match(chinese.stdout, /命令：tools/);
   assert.match(chinese.stdout, /选项：/);
 
+  const simplifiedChineseAlias = capture('--help', '--lang', 'zh-CN');
+  assert.equal(simplifiedChineseAlias.ok, true, simplifiedChineseAlias.stderr);
+  assert.match(simplifiedChineseAlias.stdout, /命令：/);
+
   const invalid = capture('--help', '--lang', 'fr');
   assert.equal(invalid.ok, false);
   assert.match(invalid.stderr, /language_invalid/);
+  assert.match(invalid.stderr, /--lang (?:accepts only zh, en, or auto|只接受 zh、en 或 auto)/);
+
+  const missing = capture('--lang');
+  assert.equal(missing.ok, false);
+  assert.match(missing.stderr, /language_invalid: --lang (?:needs zh, en, or auto|需要 zh、en 或 auto)/);
+});
+
+test('ui.language selects CLI text and --lang overrides it', () => {
+  const configured = capture('--help', '--config', 'ui.language = "zh-CN"');
+  assert.equal(configured.ok, true, configured.stderr);
+  assert.match(configured.stdout, /命令：/);
+
+  const overridden = capture('--help', '--config', 'ui.language = "zh-CN"', '--lang', 'en');
+  assert.equal(overridden.ok, true, overridden.stderr);
+  assert.match(overridden.stdout, /Commands: tools/);
+  assert.doesNotMatch(overridden.stdout, /命令：/);
+});
+
+test('CLI argument errors use the selected language and retain stable codes', () => {
+  const chinese = capture('run', '--lang', 'zh');
+  assert.equal(chinese.ok, false);
+  assert.match(chinese.stderr, /cli_run_needs_the_user_text: run 需要用户消息/);
+
+  const english = capture('run', '--lang', 'en');
+  assert.equal(english.ok, false);
+  assert.match(english.stderr, /cli_run_needs_the_user_text: run needs a user message/);
 });
 
 test('skills lists what this directory would load and says why anything was skipped', () => {
@@ -118,20 +148,20 @@ test('skills lists what this directory would load and says why anything was skip
   // 用户那一层指到临时目录：不碰真实 HOME，两个平台的取值入口都设上。
   const env = { ...process.env, HOME: home, USERPROFILE: home };
   try {
-    const listed = spawnSync(process.execPath, [cli, 'skills'], { cwd: project, encoding: 'utf8', env });
+    const listed = spawnSync(process.execPath, [cli, 'skills', '--lang', 'en'], { cwd: project, encoding: 'utf8', env });
     assert.equal(listed.status, 0, listed.stderr);
     assert.match(listed.stdout, /^demo\t.*demo$/m);
-    assert.match(listed.stderr, /not loaded: 1/);
+    assert.match(listed.stderr, /Not loaded: 1/);
     assert.match(listed.stderr, /skill_description_missing/);
 
     const empty = join(root, 'empty');
     mkdirSync(empty, { recursive: true });
-    const none = spawnSync(process.execPath, [cli, 'skills'], { cwd: empty, encoding: 'utf8', env });
+    const none = spawnSync(process.execPath, [cli, 'skills', '--lang', 'en'], { cwd: empty, encoding: 'utf8', env });
     assert.equal(none.status, 0, none.stderr);
-    assert.match(none.stdout, /no skills loaded/);
+    assert.match(none.stdout, /No skills loaded/);
     // 一份都没有时把扫过的四个位置说出来：「装了但没生效」最难自查。
-    assert.match(none.stdout, /looked in .*[\\/]empty[\\/]\.ligule[\\/]/);
-    assert.equal(none.stdout.split('\n').filter((line) => line.includes('looked in')).length, 4);
+    assert.match(none.stdout, /Looked in .*[\\/]empty[\\/]\.ligule[\\/]/);
+    assert.equal(none.stdout.split('\n').filter((line) => line.includes('Looked in')).length, 4);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -150,11 +180,15 @@ test('policy summarises the decisions one session recorded', () => {
   ].join('\n') + '\n');
   const env = { ...process.env, HOME: root, USERPROFILE: root };
   try {
-    const told = spawnSync(process.execPath, [cli, 'policy', 's-1'], { cwd: project, encoding: 'utf8', env });
+    const told = spawnSync(process.execPath, [cli, 'policy', 's-1', '--lang', 'zh'], { cwd: project, encoding: 'utf8', env });
     assert.equal(told.status, 0, told.stderr);
-    assert.match(told.stdout, /^exec  自动 1  问过 0  没让做 1  档位 auto×2  命中规则 "rm \*"×1  码 policy_denied×1$/m);
+    assert.match(told.stdout, /^exec  自动 1  问过 0  拒绝 1  档位 auto×2  命中规则 "rm \*"×1  错误码 policy_denied×1$/m);
 
-    const machine = spawnSync(process.execPath, [cli, 'policy', 's-1', '--json'], { cwd: project, encoding: 'utf8', env });
+    const english = spawnSync(process.execPath, [cli, 'policy', 's-1', '--lang', 'en'], { cwd: project, encoding: 'utf8', env });
+    assert.equal(english.status, 0, english.stderr);
+    assert.match(english.stdout, /^exec  Automatic 1  Asked 0  Denied 1  Levels auto×2  Matched rules "rm \*"×1  Error codes policy_denied×1$/m);
+
+    const machine = spawnSync(process.execPath, [cli, 'policy', 's-1', '--json', '--lang', 'en'], { cwd: project, encoding: 'utf8', env });
     assert.equal(machine.status, 0, machine.stderr);
     assert.equal(JSON.parse(machine.stdout)[0].denied, 1);
 
