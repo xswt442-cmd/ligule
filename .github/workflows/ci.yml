@@ -50,13 +50,25 @@ jobs:
         run: |
           dbus-run-session -- bash -e -c '
             printf "%s" "ligule-ci-test-password" | gnome-keyring-daemon --unlock --components=secrets
-            LIGULE_CREDENTIAL_NATIVE_REQUIRED=1 node --test --import ./test/hooks/isolated-data-root.mjs test/credentials.test.js test/credential-unavailable.test.js
+            LIGULE_CREDENTIAL_NATIVE_REQUIRED=1 node --test test/credentials.test.js test/credential-unavailable.test.js
           '
+      - name: prepare an isolated macOS keychain
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p testplace/tmp
+          security create-keychain -p ligule-ci-test-password testplace/tmp/credentials.keychain-db
+          security set-keychain-settings -lut 21600 testplace/tmp/credentials.keychain-db
+          security unlock-keychain -p ligule-ci-test-password testplace/tmp/credentials.keychain-db
+          security list-keychains -d user -s "$PWD/testplace/tmp/credentials.keychain-db"
+          security default-keychain -d user -s "$PWD/testplace/tmp/credentials.keychain-db"
       - name: native credential operations on Windows and macOS
         if: runner.os != 'Linux'
         env:
           LIGULE_CREDENTIAL_NATIVE_REQUIRED: '1'
-        run: node --test --import ./test/hooks/isolated-data-root.mjs test/credentials.test.js test/credential-unavailable.test.js
+        run: node --test test/credentials.test.js test/credential-unavailable.test.js
+      - name: remove the test keychain
+        if: always() && runner.os == 'macOS'
+        run: security delete-keychain testplace/tmp/credentials.keychain-db
 
   test:
     name: test on ${{ matrix.os }}
@@ -204,7 +216,7 @@ jobs:
           ${{ matrix.node }} ./desktop/vendor/app/dist/cli.js --version
           test "$(${{ matrix.node }} ./desktop/vendor/app/dist/cli.js tools | wc -l)" -eq 9
           # 运行树只留本平台的原生块，留下的要真的能加载：裁错了要在这里死，不在用户机器上（第 187 步）。
-          ${{ matrix.node }} -e '(async () => { require("./desktop/vendor/app/node_modules/tree-sitter"); require("./desktop/vendor/app/node_modules/tree-sitter-bash"); await import("./desktop/vendor/app/node_modules/tree-sitter-pwsh/bindings/node/index.js"); console.log("native modules loaded"); })()'
+          ${{ matrix.node }} -e '(async () => { require("./desktop/vendor/app/node_modules/tree-sitter"); require("./desktop/vendor/app/node_modules/tree-sitter-bash"); await import("./desktop/vendor/app/node_modules/tree-sitter-pwsh/bindings/node/index.js"); const keyring = require("./desktop/vendor/app/node_modules/@napi-rs/keyring"); if (typeof keyring.AsyncEntry !== "function") throw new Error("keyring binding missing"); console.log("native modules loaded"); })()'
 
       # 壳的 Rust 一侧自己那两件事（从可执行文件位置找后端入口、帧在子进程两根管道之间按行转递）与格式。
       # 这一段不跑就等于壳的测试只在本地跑过，而安装包照样能打出来。

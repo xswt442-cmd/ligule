@@ -312,8 +312,7 @@ test('an empty environment reference reports missing when its native store is av
     const events = collect(createMessagesProvider({ baseUrl: 'http://127.0.0.1:1', model: 'm', apiKeyEnv: reference }).stream({}));
     await assert.rejects(() => events, (error) => {
       if (error.code === 'provider_credential_missing') return error.detail === reference;
-      return process.platform === 'linux'
-        && process.env.LIGULE_CREDENTIAL_NATIVE_REQUIRED !== '1'
+      return process.env.LIGULE_CREDENTIAL_NATIVE_REQUIRED !== '1'
         && error.code === 'credential_store_unavailable';
     });
   } finally {
