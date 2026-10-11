@@ -506,7 +506,6 @@ test('the 37 R2 span scenarios run against the built editor', () => {
       results.push(result);
     }
   }
-  console.log(JSON.stringify({ r2SpanResults: results }));
   assert.equal(results.length, 37);
   for (const item of results) {
     if (item.name.startsWith('rules-inline-array-')) assert.equal(item.error, 'config_edit_shape_unsupported', item.name);
