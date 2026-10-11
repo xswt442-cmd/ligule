@@ -227,6 +227,15 @@ jobs:
       - name: build the installer
         run: npm --prefix desktop run build
 
+      - name: verify the macOS signature and disk image
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          codesign --verify --deep --strict desktop/src-tauri/target/release/bundle/macos/ligule.app
+          for image in desktop/src-tauri/target/release/bundle/dmg/*.dmg; do
+            hdiutil verify "$image"
+          done
+
       # 出包一失败就把 linuxdeploy 自己的话逼出来：`failed to run linuxdeploy` 那一句不带它的 stderr，
       # 红两趟都说不出成因。重跑一次只构 AppImage 并要详细输出，读的是同一份已构好的宿主。
       - name: show why the bundling failed
