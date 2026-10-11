@@ -2,6 +2,7 @@
 // 命令的内容一律来自宿主：提示模板由宿主交出、展开也归宿主（D24、D49），界面不留第二份事实源。
 import stringWidth from 'string-width';
 import type { AskAnswer, AskQuestion } from '../tools/ask-user.js';
+import { textOf, type Locale } from '../kernel/locale.js';
 const WIDTH_CACHE_LIMIT = 1024;
 const widthCache = new Map<string, number>();
 
@@ -29,29 +30,62 @@ export interface Candidate {
 }
 
 // 表的先后就是清单里的先后：常用的排在前，不按字母排（参照 codex 那条「枚举顺序即呈现顺序」）。
-export const UI_COMMANDS: readonly UiCommand[] = Object.freeze([
+export const UI_COMMANDS = Object.freeze([
   { name: 'help', usage: '/help', text: '列出命令与按键', hint: '', whenRunning: true },
-  { name: 'mode', usage: '/mode [名字]', text: '显示当前模式，或切换到另一个名字', hint: '[名字]', whenRunning: true },
-  { name: 'policy', usage: '/policy [ask|auto|reset]', text: '显示这一份会话按哪一档走，或临时改这一档', hint: '[ask|auto|reset]', whenRunning: true },
-  { name: 'status', usage: '/status', text: '显示模式、档位、拒绝计数与记录条数', hint: '', whenRunning: true },
-  { name: 'compact', usage: '/compact', text: '现在就把靠前的那一段压成一份摘要（要写出 limits.contextTokens）', hint: '', whenRunning: true },
-  { name: 'tools', usage: '/tools', text: '列出这次运行装了哪些工具', hint: '', whenRunning: true },
-  { name: 'show', usage: '/show [序号]', text: '把记录里那一条的完整内容画出来，不带序号收起', hint: '[序号]', whenRunning: true },
-  { name: 'sub', usage: '/sub [序号]', text: '画出那一次派生执行的整份支线记录，不带序号收起', hint: '[序号]', whenRunning: true },
-  { name: 'new', usage: '/new', text: '开一份新会话，画面上方的历史留在终端里', hint: '', whenRunning: false },
-  { name: 'queue', usage: '/queue [pause|continue|drop <序号>|clear]', text: '说清排队的那几条现在怎么走，并把它们收回来或丢出去', hint: '[动作]', whenRunning: true },
-  { name: 'bind', usage: '/bind [<动作> <键的写法>|reset <动作>|default]', text: '列出现在的键位；改一记键、取消那一条的覆盖、全部回到默认', hint: '[动作 键|reset <动作>|default]', whenRunning: true },
-  { name: 'copy', usage: '/copy', text: '把最近那一条回答放进剪贴板', hint: '', whenRunning: true },
-  { name: 'export', usage: '/export <路径>', text: '把这一份记录写成 markdown，派生支线各另写一份', hint: '<路径>', whenRunning: true },
-  { name: 'sessions', usage: '/sessions', text: '列出这个项目根下跑过的会话（时间是 UTC）', hint: '', whenRunning: true },
-  { name: 'find', usage: '/find <文字>', text: '在这个项目根跑过的会话里找一段文字：说出是哪一份的第几条', hint: '<文字>', whenRunning: true },
-  { name: 'resume', usage: '/resume <id> [模式名]', text: '接上列出来的那一份会话，id 写开头几段就行；模式名是那一份清单改过之后显式指定用哪一份', hint: '<id> [模式名]', whenRunning: false },
-  { name: 'branch', usage: '/branch [序号]', text: '把这一份记录复制成一份新会话并接上去：不带序号带到此刻的末端，带序号带到那一轮完整结束那一条', hint: '[序号]', whenRunning: false },
-  { name: 'name', usage: '/name <文字>', text: '给这一份会话起个名字：列表那一行读它，模型看不见', hint: '<文字>', whenRunning: true },
-  { name: 'archive', usage: '/archive', text: '把这一份归档：列表默认不再画它，记录照旧，也接得回来', hint: '', whenRunning: true },
+  { name: 'mode', usage: '/mode [名字]', text: '查看或切换工具模式', hint: '[名字]', whenRunning: true },
+  { name: 'model', usage: '/model [服务 模型]', text: '列出模型服务，或切换当前会话的模型', hint: '[服务 模型]', whenRunning: true },
+  { name: 'policy', usage: '/policy [ask|auto|reset]', text: '查看或修改审批方式', hint: '[ask|auto|reset]', whenRunning: true },
+  { name: 'status', usage: '/status', text: '查看会话状态', hint: '', whenRunning: true },
+  { name: 'compact', usage: '/compact', text: '压缩上下文（需要 limits.contextTokens）', hint: '', whenRunning: true },
+  { name: 'tools', usage: '/tools', text: '列出可用工具', hint: '', whenRunning: true },
+  { name: 'show', usage: '/show [序号]', text: '查看完整记录；不带序号收起', hint: '[序号]', whenRunning: true },
+  { name: 'sub', usage: '/sub [序号]', text: '查看子任务记录；不带序号收起', hint: '[序号]', whenRunning: true },
+  { name: 'new', usage: '/new', text: '创建新会话', hint: '', whenRunning: false },
+  { name: 'queue', usage: '/queue [pause|continue|drop <序号>|clear]', text: '暂停、继续或收回待发送消息', hint: '[动作]', whenRunning: true },
+  { name: 'bind', usage: '/bind [<动作> <键的写法>|reset <动作>|default]', text: '查看或修改快捷键', hint: '[动作 键|reset <动作>|default]', whenRunning: true },
+  { name: 'copy', usage: '/copy', text: '复制最近的回答', hint: '', whenRunning: true },
+  { name: 'export', usage: '/export <路径>', text: '将会话与子任务导出为 Markdown', hint: '<路径>', whenRunning: true },
+  { name: 'sessions', usage: '/sessions', text: '浏览工作区会话（UTC 时间）', hint: '', whenRunning: true },
+  { name: 'find', usage: '/find <文字>', text: '搜索工作区会话', hint: '<文字>', whenRunning: true },
+  { name: 'resume', usage: '/resume <id> [模式名]', text: '通过唯一编号前缀恢复会话', hint: '<id> [模式名]', whenRunning: false },
+  { name: 'branch', usage: '/branch [序号]', text: '复制会话，或从完整轮次创建分支', hint: '[序号]', whenRunning: false },
+  { name: 'name', usage: '/name <文字>', text: '重命名会话', hint: '<文字>', whenRunning: true },
+  { name: 'archive', usage: '/archive', text: '归档会话', hint: '', whenRunning: true },
   { name: 'unarchive', usage: '/unarchive', text: '取消归档', hint: '', whenRunning: true },
   { name: 'quit', usage: '/quit', text: '退出（Ctrl+C 同样）', hint: '', whenRunning: true },
-]);
+] as const satisfies readonly UiCommand[]);
+
+type CommandName = typeof UI_COMMANDS[number]['name'];
+const ENGLISH_COMMANDS: Record<CommandName, readonly [string, string, string]> = {
+  help: ['/help', 'List commands and shortcuts', ''],
+  mode: ['/mode [name]', 'Show or change the tool mode', '[name]'],
+  model: ['/model [service model]', 'List services or change this session’s model', '[service model]'],
+  policy: ['/policy [ask|auto|reset]', 'Show or change the approval mode', '[ask|auto|reset]'],
+  status: ['/status', 'Show session status', ''],
+  compact: ['/compact', 'Compact context (requires limits.contextTokens)', ''],
+  tools: ['/tools', 'List available tools', ''],
+  show: ['/show [seq]', 'View an event; omit seq to close', '[seq]'],
+  sub: ['/sub [seq]', 'View a subtask; omit seq to close', '[seq]'],
+  new: ['/new', 'Start a new session', ''],
+  queue: ['/queue [pause|continue|drop <n>|clear]', 'Pause, resume, or recover queued messages', '[action]'],
+  bind: ['/bind [<action> <key>|reset <action>|default]', 'View or change keyboard shortcuts', '[action key|reset <action>|default]'],
+  copy: ['/copy', 'Copy the latest answer', ''],
+  export: ['/export <path>', 'Export conversation and subtasks as Markdown', '<path>'],
+  sessions: ['/sessions', 'Browse this workspace’s sessions (UTC)', ''],
+  find: ['/find <text>', 'Search this workspace’s conversations', '<text>'],
+  resume: ['/resume <id> [mode]', 'Resume a session by its unique ID prefix', '<id> [mode]'],
+  branch: ['/branch [seq]', 'Copy the session, or branch at a completed turn', '[seq]'],
+  name: ['/name <text>', 'Rename this session', '<text>'],
+  archive: ['/archive', 'Archive this session', ''],
+  unarchive: ['/unarchive', 'Restore this session from the archive', ''],
+  quit: ['/quit', 'Exit (also Ctrl+C)', ''],
+};
+
+export function localizedCommand(command: UiCommand, locale: Locale): UiCommand {
+  if (locale === 'zh') return command;
+  const [usage, text, hint] = ENGLISH_COMMANDS[command.name as CommandName];
+  return { ...command, usage, text, hint };
+}
 
 export function findUiCommand(name: string): UiCommand | undefined {
   return UI_COMMANDS.find((command) => command.name === name);
@@ -62,7 +96,8 @@ export function findUiCommand(name: string): UiCommand | undefined {
 // 整份写入时目标在不在由内核那条规则管（覆盖之前要先读全），界面不替它断言那是新建还是覆盖。
 export type Change = { readonly summary: string; readonly action: string; readonly before: string; readonly after: string };
 
-export function describeChange(tool: string, args: Record<string, unknown>): Change {
+export function describeChange(tool: string, args: Record<string, unknown>, locale: Locale = 'zh'): Change {
+  const t = (zh: string, en: string) => textOf(locale, zh, en);
   const path = typeof args.path === 'string' ? args.path : '';
   const count = (value: unknown) => String(value ?? '').split('\n').length;
   const empty: Change = { summary: '', action: '', before: '', after: '' };
@@ -70,8 +105,8 @@ export function describeChange(tool: string, args: Record<string, unknown>): Cha
   if (path === '') return empty;
   if ((tool === 'write' || tool === 'create') && typeof args.content === 'string') {
     return {
-      summary: `${path}：整份写入 ${count(args.content)} 行`,
-      action: '整份写入这一份内容（目标已经存在时这是覆盖：内核要求覆盖之前先把那一份读全）',
+      summary: t(`${path}：写入 ${count(args.content)} 行`, `${path}: write ${count(args.content)} lines`),
+      action: t('写入完整文件；覆盖已有文件前必须完整读取', 'Write the entire file; overwriting requires reading the existing file first'),
       before: '',
       after: args.content,
     };
@@ -79,14 +114,14 @@ export function describeChange(tool: string, args: Record<string, unknown>): Cha
   if (tool === 'edit' && typeof args.anchor === 'string') {
     const replacement = typeof args.replacement === 'string' ? args.replacement : '';
     return {
-      summary: `${path}：换掉 ${count(args.anchor)} 行，换上 ${count(replacement)} 行`,
-      action: `${path}：把定位到的那一段换成另一段`,
+      summary: t(`${path}：替换 ${count(args.anchor)} 行，写入 ${count(replacement)} 行`, `${path}: replace ${count(args.anchor)} lines with ${count(replacement)} lines`),
+      action: t(`${path}：替换匹配内容`, `${path}: replace matched text`),
       before: args.anchor,
       after: replacement,
     };
   }
   if (tool === 'delete') {
-    return { summary: `把 ${path} 移进回收站`, action: `把 ${path} 移进回收站（不是就地删掉：有回收站的地方进回收站，否则进边界内那一个回收目录）`, before: '', after: '' };
+    return { summary: t(`将 ${path} 移入回收站`, `Move ${path} to trash`), action: t(`将 ${path} 移入系统回收站或权限边界内的回收目录`, `Move ${path} to system trash or the recovery directory within the permission boundary`), before: '', after: '' };
   }
   return empty;
 }
@@ -119,12 +154,13 @@ export function candidatesOf(
   draft: string,
   templates: readonly TemplateCommand[] = [],
   limit = CANDIDATE_LIMIT,
+  locale: Locale = 'zh',
 ): Candidate[] {
   if (!draft.startsWith('/')) return [];
   const typed = draft.slice(1);
   if (typed === '' || /\s/.test(typed)) return [];
   const prefix = typed.toLowerCase();
-  const fromUi = UI_COMMANDS.filter((command) => command.name.startsWith(prefix)).map((command) => ({
+  const fromUi = UI_COMMANDS.filter((command) => command.name.startsWith(prefix)).map(command => localizedCommand(command, locale)).map((command) => ({
     name: command.name,
     text: command.text,
     hint: command.hint,
@@ -207,19 +243,20 @@ export interface SessionRow {
 export const SESSION_ROWS = 20;
 
 // 一栏一行。id 整串写出来，因为 `/resume` 后面要跟的就是这一串；时间是记录文件的写入时间，UTC。
-export function sessionLines(listed: readonly SessionRow[], current = ''): string[] {
-  if (listed.length === 0) return ['这个项目根下还没有跑过的会话'];
+export function sessionLines(listed: readonly SessionRow[], current = '', locale: Locale = 'zh'): string[] {
+  const t = (zh: string, en: string) => textOf(locale, zh, en);
+  if (listed.length === 0) return [t('此工作区暂无会话', 'No sessions in this workspace')];
   return listed.map((item) => [
     item.updatedAt.slice(0, 19).replace('T', ' '),
     item.id,
-    `${item.events} 条`,
+    t(`${item.events} 条`, `${item.events} events`),
     `mode:${item.mode?.name ?? '-'}`,
     item.name === undefined || item.name === '' ? '' : `「${item.name}」`,
-    item.archived === true ? '已归档' : '',
-    item.unanswered > 0 ? `未收尾 ${item.unanswered} 次派发` : '',
-    (item.truncatedBytes ?? 0) > 0 ? `尾行未完成 ${item.truncatedBytes} 字节` : '',
-    item.error === undefined ? '' : `无法恢复：${item.error.code} · ${item.error.detail}`,
-    item.id === current ? '← 正在这一份上' : '',
+    item.archived === true ? t('已归档', 'archived') : '',
+    item.unanswered > 0 ? t(`未收尾 ${item.unanswered} 次派发`, `${item.unanswered} unresolved calls`) : '',
+    (item.truncatedBytes ?? 0) > 0 ? t(`尾行未完成 ${item.truncatedBytes} 字节`, `${item.truncatedBytes} incomplete bytes`) : '',
+    item.error === undefined ? '' : t(`无法恢复：${item.error.code} · ${item.error.detail}`, `Cannot resume: ${item.error.code} · ${item.error.detail}`),
+    item.id === current ? t('← 当前会话', '← current session') : '',
   ].filter((cell) => cell !== '').join('  '));
 }
 
@@ -238,14 +275,15 @@ const HIT_KINDS: Record<string, string> = { user: '问', assistant: '答', reaso
 
 // 一行一条命中：会话编号写开头八段——`/resume` 要的就是这一串，在这份列表里唯一对上就接得回来；
 // 序号交给 `/show`，所以两处都整串写出来，不省略。
-export function findLines(listed: readonly SearchRow[], current = ''): string[] {
+export function findLines(listed: readonly SearchRow[], current = '', locale: Locale = 'zh'): string[] {
+  const t = (zh: string, en: string) => textOf(locale, zh, en);
   return listed.map((hit) => [
     hit.sessionId.slice(0, 8),
     hit.name === undefined || hit.name === '' ? '' : `「${hit.name}」`,
-    `${HIT_KINDS[hit.kind] ?? hit.kind} 第 ${hit.seq} 条`,
+    t(`${HIT_KINDS[hit.kind] ?? hit.kind} 第 ${hit.seq} 条`, `${hit.kind} #${hit.seq}`),
     hit.text,
-    hit.spilled === undefined ? '' : `整段在 ${hit.spilled}`,
-    hit.sessionId === current ? '← 正在这一份上' : '',
+    hit.spilled === undefined ? '' : t(`整段在 ${hit.spilled}`, `Full result: ${hit.spilled}`),
+    hit.sessionId === current ? t('← 当前会话', '← current session') : '',
   ].filter((cell) => cell !== '').join('  '));
 }
 

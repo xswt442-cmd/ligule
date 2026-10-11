@@ -1200,7 +1200,12 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           // 指名了项目就读那一份项目的两层文件：设置那一栏说的是「哪一个项目的哪一层」（方案 3.2、审阅 F3）。
           // 帧里不出现那一个根：界面上选的是哪一份项目由它自己带着，宿主把位置说进帧里是另一条规矩不允许的（D13）。
           const env = await environmentFor(message.params.projectRoot);
-          if (env.store === undefined) return { ...shownConfigOf(env.config), layers: [], sources: {} };
+          if (env.store === undefined) return {
+            ...shownConfigOf(env.config),
+            services: modelServices(env.config.model?.services),
+            selection: env.config.model?.selection === undefined ? null : modelSelection(env.config.model.selection),
+            layers: [], sources: {},
+          };
           const { layers, sources, values, rules, rulesSource } = await env.store.read();
           return {
             ...shownConfigOf(values),

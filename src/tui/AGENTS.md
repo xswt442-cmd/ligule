@@ -1,29 +1,36 @@
-# Terminal client
+# 终端客户端
 
-Rules for `src/tui/`, the second client (D33). The repository-wide rules in [../../AGENTS.md](../../AGENTS.md) apply here too; this file states what only this directory has to keep.
+本目录使用 React 与 Ink，通过内存载体连接同进程中的 Host。仓库根 [AGENTS.md](../../AGENTS.md) 同时适用。
 
-- It starts a Host in its own process and joins the two with the in-memory carrier (`src/host/memory.js`). It imports `host/`, React and Ink — never a kernel private interface.
-- `ink` and `react` are optional dependencies: `ligule tui` reports `tui_dependency_missing` without them, and every other command works.
-- Ink throws when stdin cannot do raw mode, so `App` takes an `interactive` flag and the command refuses a non-terminal with `tui_terminal_required`.
-- Committed rows live in `Static`, which prints only rows past its own index, so `/show <seq>` and `/sub <seq>` redraw into the dynamic area keyed by the record's sequence number rather than a screen line (D40, D65). `Static` is keyed by the session id, so switching records replaces the whole row list.
-- `src/tui/commands.ts` is the UI command table: name, description, argument hint, and whether the command works while a round runs (D81). A slash line not in that table goes to `run.start` unchanged, which is how a prompt template reaches the terminal; expansion lives in the Host (D49), so the UI must not claim the prefix.
-- Typing `/` lists candidates: UI table first, Host-reported templates after. Tab completes, arrows select, Esc hides for that draft, and `/help` pads by display width (one Chinese character takes two).
-- `src/tui/keymap.ts` is the terminal's binding table: action id, default key spec, the view that action belongs to, and one sentence. Dispatch asks `hit(action, input, key)`; every key name printed on screen — `/help`, both popups, the approval and history footers, the placeholder, the status line — is built from that table by `formatKeys` and `keyHint`. A hint therefore cannot claim a key dispatch does not honour. Two actions sharing a key inside one view is a conflict (`conflictsIn`) and the defaults assert none; one key landing in two views is the design, since Enter sends in the draft and picks in the candidate list (方案 6.1). A personal override lives in `~/.ligule/tui-keys.json`, read and written through the startup side so the interface names no path, and `/bind` is its only entry: it lists the current table, rebinds one action, resets one or all, and refuses a key that would land two actions in the same view instead of saving a table it cannot press.
-- Typing `@` asks `paths.list` 160 ms after the typing stops and shows what the Host answered: relative paths, the project root from that answer, and one line when the walk was capped or a directory unreadable. Enter or Tab inserts the picked path and moves the caret instead of sending; while that answer is pending both keys do nothing, and with no candidate at all Enter sends the sentence. Esc hides that one word until it changes. A fragment typed there is text in the draft: it starts no tool call and writes nothing to the record (D81, 方案 5.3).
-- `src/tui/markdown.ts` parses Markdown with `marked` and highlights fenced code with `highlight.js` (D84).
-- A tool result names what it did in its header — the capability a `mcp.call` used, an `exec` exit code, a spilled file — and the body shows `content.text`, not the envelope. The approval box instead names the action and shows the two blocks it replaces: `describeChange` reads the arguments and returns the action, the block to remove and the block to put in, and the box marks those lines with `-` and `+`. A whole-file write gets no removed block — nothing was read, and the action sentence says a write onto an existing file is an overwrite the kernel requires reading first; a delete gets the action sentence only; arguments without a path get no invented object, and the box falls back to the arguments, which is what every other tool shows there. Paging (Ctrl+O) reads the marked blocks on past their first screen (方案 5.4).
-- History, drafts, the queue, folds and the caret are UI state: none of them reaches the record (D81).
-- A question from the model (`ask_user_question`, D107) opens a panel the draft answers: one item per Enter, the last Enter sends the whole set, and a blank Enter records that item as unanswered. Typed digits select options (`1`, or `1,3` when the item takes several); any other text is a free answer — the panel never maps a sentence onto an option it did not name. Before the set is sent, ← with an empty draft returns to the earlier item with what was typed there back in the draft. `src/tui/keymap.ts` holds one view for it (提问, with `question-back`). Escape is the round interrupt, which settles the wait as `ask_user_cancelled`, and nothing in this panel times out.
-- Input typed during a round queues in the UI, flushes in order when the round ends, and returns to the draft on Backspace. Cancelling the round pauses that queue: nothing left sends until `/queue continue`, and `/queue drop <序号>` / `/queue clear` hand the text back to the draft instead of throwing it away — with a non-empty draft they refuse rather than merge two sentences (D81, 方案 5.2). A queue belongs to the session it was typed in, so switching puts it away and takes back the one that session has.
-- A whole paste arrives on Ink's own paste channel, which switches the terminal to bracketed paste while it is open. The block goes into the draft as text, so newlines inside it start no round and a `y` inside it answers no approval (方案 5.1, 5.4).
-- The draft steps back a unit at a time: Ctrl+Z restores the previous draft and caret, Ctrl+Y takes that unit back. A unit is one run of characters typed at the end — `isTypingRun` decides it from the two states alone — so one press drops a phrase rather than a glyph, while a typed space, a mid-draft insertion, a pasted block, a backspace and a word delete each stand on their own. Two stacks of 100 snapshots, holding nothing but draft and caret, living in this process: what survives an exit is the draft and the queue, not the undo history (方案 6.1, D81 边界二). Replacing the whole draft — switching session, reading back what was kept, sending — clears both stacks, so Ctrl+Z cannot drag another session's draft into view. The desktop names no key for this: its composer is a `<textarea>`, and the browser's own undo and redo already cover it.
-- The status line names mode and policy separately, and adds `ctx:~estimated/window` only when a window is configured. A narrow terminal yields in one order — the project path shortens to its last segment, then `tools:`, then the context segment, then the model name, then the whole path, then the record count — so mode, the policy tier with its `(会话)` mark, and the interrupt hint always survive.
-- `/sessions` lists what `sessions.list` returns with keyboard selection, and `/resume <id> [mode]` opens one; an id prefix resolves only when exactly one session of this project root starts with it. `/find <文字>` prints one line per hit, each naming the id prefix `/resume` takes and the `seq` `/show` takes; it asks twice — once across the project's records and once naming the record it is in, so that one group reaches whole spilled results while the other reads only what the records keep. Switching closes the session it left, so one terminal holds one assembly and one record lock. `/name <文字>`, `/archive` and `/unarchive` write the session's own facts through `session.label` and read the answer back from the Host. `/mode [name]` sends `mode.set`, and a switch asked for while a round runs reads `mode:a→b` (D41, D65). `/policy [ask|auto|reset]` sends `policy.set`: the tier a session overrides lives only in that session's chain, the settings file keeps the default, and the status line marks an override with `(会话)`.
-- `/branch [序号]` copies the record and takes over what it wrote, on the same path `/resume` uses: naming no sequence sends no `at`, and a sequence the terminal cannot read as an integer is refused there instead of becoming a request (方案 4.3). It is unavailable while a round runs, because switching carries the person away from that round's events.
-- The session id and the transcript rows change in the same render. `Static` decides by index which rows it still has to print, so an `await` between those two state updates loses the resumed record off the screen.
-- Input history is the file both clients share (`src/kernel/input-history.ts`, read once at startup; after a send the list the save wrote replaces what this process holds): one sentence per line, newest first, one place per sentence, 200 lines, only sentences actually sent. The arrow keys and Ctrl+R read it, and `src/tui/history.ts` holds only that filter — what a query matches, up to `SEARCH_ROWS` of them, newest first.
-- A draft that was never sent and the sentences still queued live in `~/.ligule/tui-input.jsonl`, one line per session keyed by project root and session id (D81, 方案 5.1). The write is throttled 400 ms after the last keystroke and the exit waits for whatever is in flight; a line the reader cannot parse is skipped, because this file is a convenience, not a source of fact. Queued sentences come back paused (方案 5.2). Both operations are handed in from the startup side, so the interface never names a path.
-- Ctrl+G writes the draft to a temporary file, runs `$VISUAL` or `$EDITOR` through `cross-spawn` and Ink's terminal suspension, then reads the file back.
-- Ctrl+O opens a complete-history browser with paging, Home/End navigation, line selection and copy; it reads full spill files through `session.read` with `fullResults: true`. Approval Ctrl+O displays or hides the actual change, and Esc cancels the current operation.
-- `/copy` hands the last assistant sentence to the machine's clipboard program: on Windows that is `clip`, and it takes UTF-16LE without a BOM. `/export <path>` resolves that path against the directory the terminal was started in — the Host may live in another process — and hands one destination to `session.export`, which does the reading, layout and writing (方案 6A). The answer's file list is what landed, and a branch whose record could not be read, or whose computed target already holds a file (that one is left alone), is named there with its code or path.
-- The terminal title carries model, project root and session id, with C0, DEL, C1 and bidi controls stripped first. The startup side writes an empty title on the way out, in the same cleanup that flushes history, drafts and key overrides, so a tab whose process has gone stops claiming to be this program; a stdout that already refuses the write does not hold up releasing the host.
+## 职责与入口
+
+- `start.js` 启动 Host 和 Ink，接入输入历史、草稿、队列、快捷键、编辑器与终端标题；退出等待文件写入并释放 Host。
+- `app.js` 维护前台会话和交互视图。会话、模型、工具、审批、提问和导出通过 Host 协议操作，界面不能直接执行工具或读取会话文件。
+- 一个终端只有一个前台会话；新建、恢复和分支切换时释放上一会话的记录锁。多个终端可并行，不能同时写同一会话。
+- Ink 与 React 为可选依赖，缺失报告 `tui_dependency_missing`；非交互终端报告 `tui_terminal_required`，其他命令仍可使用。
+
+## 转录与输入
+
+- 已提交内容使用 `Static`，以会话编号作为 key。切换编号与替换记录行必须在同一次渲染完成，避免按索引漏画。主屏保留终端回滚；Ctrl+O 打开完整历史浏览器，分页、选行、复制由 `viewport.ts` 管理。
+- 会话记录是事实来源。流式片段在对应记录到达时替换；轮次终态只显示一次。取消或失败后清理未提交的流式内容。
+- Markdown 使用 `marked`，代码使用 `highlight.js`，显示宽度使用 `string-width`。模型正文、工具输出和路径原样展示，系统标签按 `locale` 选择中英文。
+- `commands.ts` 保存界面命令及补全元数据。未知斜杠命令原样交给 `run.start`，由 Host 处理提示模板。`/model` 读取公开服务清单并通过 `model.select` 修改会话选择，运行中轮后采用。
+- `keymap.ts` 是动作、按键和帮助提示的共同来源。个人覆盖必须经过格式与同视图冲突校验；界面提示使用实际生效绑定。
+- 整段粘贴通过 Ink 的 paste 通道进入草稿，换行不能发送消息，粘贴的 `y` 不能批准工具。Ctrl+Z/Ctrl+Y 管理本次草稿的撤销与重做；替换整个草稿时清理撤销状态。
+- `@` 只列项目文件并插入路径引用，不调用工具或写会话记录。请求延迟 160 毫秒；迟到结果不能覆盖新片段。候选未返回时 Enter/Tab 不发送。
+
+## 等待、队列与保存
+
+- 审批只显示当前会话的操作和实际修改内容，不编造未读过的原文件；允许一次、拒绝和取消分别处理。完整修改可分页查看。
+- 提问按题目逐项输入，数字只对应明确的选项，其他文字为自由回答；空回车表示未回答，最后提交整组答案。没有回答超时；取消终结当前等待。
+- 运行中的新消息按会话排队。取消暂停队列，`/queue continue` 才继续；收回或清空队列将文本移回草稿，不丢弃输入。
+- 输入历史由两端共享；草稿和队列由本端独立保存，恢复的队列保持暂停。存储位置由启动侧的数据根设施确定，界面不写死用户目录。
+- Ctrl+G 使用 `$VISUAL`，其次 `$EDITOR`，并通过 Ink 让出终端；`/copy` 使用平台剪贴板设施。本版完整验收范围为本机 Windows。
+- `/export` 将用户指定的绝对目标交给 Host；相对路径按启动目录解析。逐份显示写入、跳过或失败结果，不能把部分成功说成全部失败。
+- 终端标题使用实际模型、工作区与会话编号，并过滤控制字符。退出清空标题，不能因输出失败阻碍 Host 释放。
+
+## 验证
+
+运行 `npm run build`，再运行 `node --test --import ./test/hooks/isolated-data-root.mjs test/tui.test.js test/tui-browse.test.js test/tui-keys.test.js test/tui-output.test.js`。依赖渲染的检查等待完成帧与实际状态；修改界面文案时同步检查判据，不能靠延长等待掩盖错误。
+
+真实终端另验模型请求、取消与暂停队列、历史浏览、输入法、粘贴、编辑器和剪贴板。合成输入通过不能代替真人键盘、屏幕阅读器或其他平台的验收。

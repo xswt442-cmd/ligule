@@ -712,7 +712,9 @@ test('manual compaction returns a boundary the status line then reports', async 
 test('config.get shows the endpoint block and nothing else from the snapshot', async () => {
   await withInProcessHost(async (connection, { directory }) => {
     const shown = await connection.request('config.get', {});
-    assert.deepEqual(Object.keys(shown).sort(), ['layers', 'model', 'sources'], '交出来的是那格端点、可写的那几层与每条的来源');
+    assert.deepEqual(Object.keys(shown).sort(), ['layers', 'model', 'selection', 'services', 'sources'], '只交回公开模型字段、服务选择与来源');
+    assert.deepEqual(shown.services, []);
+    assert.equal(shown.selection, null);
     assert.deepEqual(Object.keys(shown.model).sort(), ['api', 'baseURL', 'model'], '端点那三样；这份配置没写 apiKeyEnv，那一格就不出现');
     assert.deepEqual(shown.layers, [], '启动这一侧没给写入口时那一格是空的：这一具宿主不知道该往哪里写');
     assert.deepEqual(shown.sources, {}, '没有那一格时来源也说不出来，不猜一条');
@@ -725,7 +727,7 @@ test('config.get shows the endpoint block and nothing else from the snapshot', a
     assert.ok(!frame.includes('auto'), '这一具宿主没有配置文件的读写口，档位读不出来那一格就不出现：正在生效的那一份走 status.get（D40）');
     // 这条路不收参数：多写的那一格不会被读，也换不来白名单之外的一格。
     // 边界不在参数校验上（子集校验放过模式里没声明的键），在结果由固定四格拼出来那一句上。
-    assert.deepEqual(Object.keys(await connection.request('config.get', { path: 'policy.mode' })).sort(), ['layers', 'model', 'sources']);
+    assert.deepEqual(Object.keys(await connection.request('config.get', { path: 'policy.mode' })).sort(), ['layers', 'model', 'selection', 'services', 'sources']);
   });
 });
 

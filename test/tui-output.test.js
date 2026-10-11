@@ -64,7 +64,7 @@ test('/export writes real host and subagent records as markdown', options, async
     const run = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'subagent', args: { task: '支线导出验证' } }) })
       .finally(() => { runFinished = true; });
     // 询问画出来才答：答早了那一句 'y' 落进草稿，这一轮就没人结束，检查会一直等到作业超时。
-    await waitFor(() => runFinished || painted.includes('要执行 subagent'), { within: 20_000, read: () => painted });
+    await waitFor(() => runFinished || painted.includes('允许执行 subagent？'), { within: 20_000, read: () => painted });
     if (!runFinished) stdin.write('y');
     await run;
     const parentRead = await client.request('session.read', { sessionId, fullResults: true });
@@ -75,9 +75,9 @@ test('/export writes real host and subagent records as markdown', options, async
     stdin.write(`/export ${path}`);
     await delay(100);
     stdin.write('\r');
-    await waitFor(() => /已写出 2 份文件/.test(painted), { read: () => painted });
+    await waitFor(() => /已导出 2 个文件/.test(painted), { read: () => painted });
     const branchPath = join(exportDirectory, `run.${branchId}.md`);
-    assert.match(painted, /已写出 2 份文件/, '说清写了哪两份');
+    assert.match(painted, /已导出 2 个文件/, '说清写了哪两个文件');
     const mainText = await readFile(path, 'utf8');
     const branchText = await readFile(branchPath, 'utf8');
     assert.match(mainText, new RegExp(`# ligule 会话 ${sessionId}`));
