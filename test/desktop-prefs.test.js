@@ -39,6 +39,66 @@ async function assertNoWriteArtifacts(directory) {
   assert.equal(entries.some((name) => name.endsWith('.lock')), false, '保存结束后不留锁目录');
 }
 
+function startWindowsFileHolder({ path, root, holdMilliseconds, replaceFrom, replaceTo, rewriteDelayMilliseconds }) {
+  const fixture = join(process.cwd(), 'test', 'fixtures', 'prefs-holder.ps1');
+  const readyPath = join(root, 'holder-ready');
+  const changedPath = join(root, 'holder-changed');
+  const args = [
+    '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', fixture,
+    '-Path', path, '-ReadyPath', readyPath, '-HoldMilliseconds', String(holdMilliseconds),
+  ];
+  if (replaceFrom !== undefined) {
+    args.push('-ChangedPath', changedPath, '-ReplaceFrom', replaceFrom, '-ReplaceTo', replaceTo);
+    args.push('-RewriteDelayMilliseconds', String(rewriteDelayMilliseconds));
+  }
+
+  const child = spawn('powershell.exe', args, { cwd: process.cwd(), stdio: ['ignore', 'ignore', 'pipe'] });
+  const holder = { child, exit: null, stderr: '' };
+  const exited = new Promise((resolve) => {
+    child.once('error', (error) => {
+      holder.exit = { error };
+      resolve(holder.exit);
+    });
+    child.once('exit', (code, signal) => {
+      holder.exit = { code, signal };
+      resolve(holder.exit);
+    });
+  });
+  child.stderr.setEncoding('utf8').on('data', (chunk) => { holder.stderr += chunk; });
+  holder.exited = exited;
+  holder.readyPath = readyPath;
+  holder.changedPath = changedPath;
+  return holder;
+}
+
+async function waitForHolderMarker(holder, markerPath) {
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    try {
+      if ((await readFile(markerPath, 'utf8')) === 'ready') return true;
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    if (holder.exit !== null) throw new Error(`Windows 文件占用进程提前退出：${holder.stderr}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Windows 文件占用进程没有创建标记：${holder.stderr}`);
+}
+
+async function waitForHolderChange(holder) {
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    try {
+      if ((await readFile(holder.changedPath, 'utf8')) === 'changed') return true;
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    if (holder.exit !== null) throw new Error(`Windows 文件占用进程提前退出：${holder.stderr}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Windows 文件占用进程没有改写文档：${holder.stderr}`);
+}
+
 test('desktop preferences: reads distinguish a missing file from a valid empty object', async () => {
   const root = await makeDirectory();
   const path = join(root, 'nested', 'desktop.json');
@@ -133,6 +193,99 @@ test('desktop preferences: byte limits and existing permissions are enforced', a
     if (process.platform !== 'win32') assert.equal((await stat(path)).mode & 0o777, 0o640, '替换后保留原权限位');
     await assertNoWriteArtifacts(root);
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+const windowsTest = process.platform === 'win32'
+  ? (name, run) => test(name, run)
+  : (name, run) => test.skip(name, { skip: 'Windows 文件共享语义专属' }, run);
+
+windowsTest('desktop preferences: a brief Windows file handle allows the save to finish', async () => {
+  const root = await makeDirectory();
+  const path = join(root, 'desktop.json');
+  const initial = await savePrefs(path, { owner: 'initial' });
+  const holder = startWindowsFileHolder({ path, root, holdMilliseconds: 500 });
+  try {
+    await waitForHolderMarker(holder, holder.readyPath);
+    assert.equal(holder.exit, null, '文件占用进程在保存开始时仍持有文件');
+    const saved = await savePrefs(path, { owner: 'saved after short hold' }, { version: initial.version });
+    assert.equal(saved.settings.owner, 'saved after short hold');
+    assert.notEqual(saved.version, initial.version);
+    const exit = await holder.exited;
+    assert.deepEqual(exit, { code: 0, signal: null }, holder.stderr);
+    assert.deepEqual(await readPrefs(path), saved);
+    await assertNoWriteArtifacts(root);
+  } finally {
+    if (holder.exit === null) await holder.exited;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+windowsTest('desktop preferences: a sustained Windows file handle preserves the original and permits retry', async () => {
+  const root = await makeDirectory();
+  const path = join(root, 'desktop.json');
+  const initialValue = { owner: 'initial' };
+  const initial = await savePrefs(path, initialValue);
+  const initialBytes = await readFile(path);
+  const holder = startWindowsFileHolder({ path, root, holdMilliseconds: 2_500 });
+  try {
+    await waitForHolderMarker(holder, holder.readyPath);
+    let saveError;
+    try {
+      await savePrefs(path, { owner: 'replacement' }, { version: initial.version });
+    } catch (error) {
+      saveError = error;
+    }
+    assert.equal(saveError?.code, 'desktop_prefs_replace_failed');
+    assert.ok(['EACCES', 'EBUSY', 'EPERM'].includes(saveError?.cause?.code), JSON.stringify(saveError?.cause));
+    assert.equal(saveError?.cause?.syscall, 'rename');
+    assert.equal(holder.exit, null, '失败返回时文件占用进程仍持有文件');
+    assert.deepEqual(await readFile(path), initialBytes, '替换失败时原字节保持不变');
+    assert.deepEqual(await readPrefs(path), initial);
+    await assertNoWriteArtifacts(root);
+
+    const exit = await holder.exited;
+    assert.deepEqual(exit, { code: 0, signal: null }, holder.stderr);
+    const current = await readPrefs(path);
+    const retry = await savePrefs(path, { owner: 'saved after releasing holder' }, { version: current.version });
+    assert.equal(retry.settings.owner, 'saved after releasing holder');
+    assert.deepEqual(await readPrefs(path), retry);
+    await assertNoWriteArtifacts(root);
+  } finally {
+    if (holder.exit === null) await holder.exited;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+windowsTest('desktop preferences: an external Windows write during a held save makes the base version stale', async () => {
+  const root = await makeDirectory();
+  const path = join(root, 'desktop.json');
+  const initialValue = { owner: 'alpha', sentinel: 'keep' };
+  const externalValue = { owner: 'bravo', sentinel: 'keep' };
+  const initial = await savePrefs(path, initialValue);
+  const holder = startWindowsFileHolder({
+    path,
+    root,
+    holdMilliseconds: 500,
+    replaceFrom: 'alpha',
+    replaceTo: 'bravo',
+    rewriteDelayMilliseconds: 100,
+  });
+  try {
+    await waitForHolderMarker(holder, holder.readyPath);
+    const pendingSave = savePrefs(path, { owner: 'must not replace external write', sentinel: 'keep' }, { version: initial.version });
+    await waitForHolderChange(holder);
+    assert.equal(holder.exit, null, '外部写入发生时文件占用进程仍持有文件');
+    await assert.rejects(pendingSave, (error) => error.code === 'desktop_prefs_version_stale');
+    const externalBytes = Buffer.from(`${JSON.stringify(externalValue)}\n`);
+    assert.deepEqual(await readFile(path), externalBytes, '过期写入保留外部文档字节');
+    assert.deepEqual(await readPrefs(path), { settings: externalValue, version: createHash('sha256').update(externalBytes).digest('hex') });
+    const exit = await holder.exited;
+    assert.deepEqual(exit, { code: 0, signal: null }, holder.stderr);
+    await assertNoWriteArtifacts(root);
+  } finally {
+    if (holder.exit === null) await holder.exited;
     await rm(root, { recursive: true, force: true });
   }
 });

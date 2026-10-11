@@ -4,6 +4,7 @@ import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/pro
 import { dirname, join, resolve } from 'node:path';
 import lockfile from 'proper-lockfile';
 import { homedir } from 'node:os';
+import { setTimeout as delay } from 'node:timers/promises';
 import { dataRoot } from './config-file.js';
 import { KernelError, KernelRuntimeError } from './error.js';
 
@@ -138,8 +139,23 @@ export async function savePrefs(
       temporary = `${target}.${randomUUID()}.tmp`;
       await writeFile(temporary, bytes, { flag: 'wx', mode: 0o600 });
       await chmod(temporary, before.mode ?? 0o600);
-      lock.assertOwned();
-      await rename(temporary, target);
+      // Windows 的短暂文件占用会阻止替换；等待期间继续持锁并核对文件版本。
+      for (let attempt = 0; ; attempt += 1) {
+        lock.assertOwned();
+        if ((await readPrefsFile(target)).version !== before.version) {
+          throw new KernelError('desktop_prefs_version_stale', { detail: `${target} changed before replacement; nothing was written` });
+        }
+        try {
+          await rename(temporary, target);
+          break;
+        } catch (cause) {
+          const code = (cause as NodeJS.ErrnoException)?.code;
+          if (process.platform !== 'win32' || !['EACCES', 'EBUSY', 'EPERM'].includes(code ?? '') || attempt >= 8) {
+            throw new KernelRuntimeError('desktop_prefs_replace_failed', { cause, detail: cause instanceof Error ? cause.message : String(cause) });
+          }
+        }
+        await delay(Math.min(20 * (2 ** attempt), 200));
+      }
       temporary = undefined;
       return { settings, version: createHash('sha256').update(bytes).digest('hex') };
     } finally {
