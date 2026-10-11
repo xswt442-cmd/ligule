@@ -32,13 +32,19 @@ writeFileSync(join(consumer, 'package.json'), `${JSON.stringify({
   private: true,
   allowScripts: { koffi: true, 'tree-sitter': true, 'tree-sitter-bash': true, 'tree-sitter-pwsh': true },
 }, null, 2)}\n`, 'utf8');
-execFileSync(process.execPath, [npmCli, 'pack', '--pack-destination', 'testplace/pack'], { cwd: repo, stdio: 'inherit' });
+if (given === undefined) {
+  execFileSync(process.execPath, [npmCli, 'pack', '--pack-destination', 'testplace/pack'], { cwd: repo, stdio: 'inherit' });
+}
 if (!existsSync(tarball)) throw new Error(`npm pack did not produce ${tarball}`);
 
 // 一次真实安装：解析、下载与安装脚本都按声明走，装不出来就是声明本身有问题。
+// npm run 会把用户配置传成环境变量；项目安装的脚本策略必须读消费者清单与 .npmrc。
+const installEnvironment = Object.fromEntries(Object.entries(process.env)
+  .filter(([name]) => name.toLowerCase() !== 'npm_config_allow_scripts'));
 try {
   execFileSync(process.execPath, [npmCli, 'install', tarball, '--no-audit', '--no-fund'], {
     cwd: consumer,
+    env: installEnvironment,
     encoding: 'utf8',
     timeout: 900_000,
   });
