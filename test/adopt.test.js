@@ -1,5 +1,5 @@
-// 数据根会话区：缺省解析落在数据根，旧位置的一次性复制校验可重跑、原件保留（D110、方案 5.5.2；
-// 合同 `ligule-set/phase3/r55-data-root-contract.md`）。测试使用临时目录与独立 Node 进程核对锁和发布行为。
+// 默认会话目录位于数据根，旧位置的一次性复制校验可重跑、原件保留（D110）。
+// 测试使用临时目录与独立 Node 进程核对锁和发布行为。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
@@ -399,21 +399,23 @@ test('a real Windows read denial is returned as a stable adoption error', { skip
   const root = await mkdtemp(join(tmpdir(), 'ligule-adopt-denied-'));
   const legacy = join(root, 'project', '.ligule', 'sessions');
   const source = join(legacy, 'denied.jsonl');
+  const systemDirectory = join(process.env.SystemRoot, 'System32');
+  const aclTool = join(systemDirectory, 'icacls.exe');
   let userSid;
   let denied = false;
   try {
     await mkdir(legacy, { recursive: true });
     await writeFile(source, '{"seq":0,"kind":"user","text":"private"}\n');
-    const identity = execFileSync('whoami', ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8' });
+    const identity = execFileSync(join(systemDirectory, 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8' });
     userSid = identity.match(/S-\d-\d+(?:-\d+)+/)?.[0];
     assert.ok(userSid, '当前 Windows 用户应有可用 SID');
-    execFileSync('icacls', [source, '/deny', `*${userSid}:(R)`], { stdio: 'pipe' });
+    execFileSync(aclTool, [source, '/deny', `*${userSid}:(R)`], { stdio: 'pipe' });
     denied = true;
 
     await assert.rejects(adoptLegacySessions(legacy, join(root, 'target')),
       (error) => error.code === 'session_adoption_read_failed', '拒绝读取不能伪装成缺失记录');
   } finally {
-    if (denied && userSid !== undefined) execFileSync('icacls', [source, '/remove:d', `*${userSid}`], { stdio: 'pipe' });
+    if (denied && userSid !== undefined) execFileSync(aclTool, [source, '/remove:d', `*${userSid}`], { stdio: 'pipe' });
     await rm(root, { recursive: true, force: true });
   }
 });
