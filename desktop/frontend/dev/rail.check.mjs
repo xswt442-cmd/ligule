@@ -64,6 +64,7 @@ const roster = {
 };
 assert.deepEqual(visibleRoots(roster, ['E:\\work\\gamma']), ['', 'E:\\work\\gamma', 'E:\\work\\alpha', 'E:\\work\\beta'], '第一项是不指名的宿主自己那一份，其余是窗口那几份加登记里那几份');
 assert.deepEqual(visibleRoots(roster, ['E:\\work\\alpha', 'E:\\work\\alpha\\', '']), ['', 'E:\\work\\alpha', 'E:\\work\\beta'], '同一路径的两种写法与尾部分隔符只占一格，空的那一格不进清单');
+assert.deepEqual(visibleRoots({ default: null, workspaces: [] }, ['/work/Alpha', '/work/alpha', '/']), ['', '/work/Alpha', '/work/alpha', '/'], '大小写不同的 POSIX 目录和根目录分别保留');
 assert.deepEqual(
   groupByWorkspace([session('f', { projectRoot: 'E:\\work\\beta', workspace: 'e:\\work\\beta', workspaceOrigin: 'explicit' })], visibleRoots(roster, []), roster).groups.map((one) => one.identity),
   ['e:\\work\\beta', 'e:\\work\\alpha'],

@@ -80,7 +80,7 @@ export function visibleRoots(registry: WorkspaceRoster, watched: string[]): stri
   const out = [''];
   const seen = new Set<string>();
   for (const root of [...watched, ...registry.workspaces.map((one) => one.directory)]) {
-    const key = root.replace(/[/\\]+$/, '').toLowerCase();
+    const key = root.replace(/[/\\]+$/, '') || root;
     if (key === '' || seen.has(key)) continue;
     seen.add(key);
     out.push(root);
