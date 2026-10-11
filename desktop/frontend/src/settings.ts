@@ -3,6 +3,7 @@
 import type { Verbosity } from './components/types';
 import type { Client } from './protocol';
 import type { Language } from './locale';
+import type { ModelSelection } from './model-catalog';
 
 // 六套具名配色：墨青（默认，深色）、羊皮纸（暖米色）、蓝天（冷白蓝）、石墨（中性深色）、森林（深绿）、黄昏（暖深琥珀）。
 // 取值在 `styles.css` 的 `data-palette` 变量块里；这里只认名字。
@@ -12,6 +13,7 @@ export type Palette = (typeof PALETTES)[number];
 export type Settings = {
   language: Language;
   lastSession: { id: string; projectRoot: string } | null;
+  newSelections: Record<string, ModelSelection>;
   // 配色方案：六套具名方案选一枚，落在根元素的 `data-palette` 上。存本机界面偏好，不进记录、不进配置（D90）。
   palette: Palette;
   font: 'small' | 'medium' | 'large';
@@ -36,6 +38,7 @@ const VERBOSITY: Verbosity[] = ['brief', 'standard', 'detailed', 'full'];
 export const defaultSettings: Settings = {
   language: 'auto',
   lastSession: null,
+  newSelections: {},
   palette: 'ink',
   font: 'medium',
   sidebar: 280,
@@ -104,6 +107,9 @@ export function settingsFrom(raw: unknown): Settings {
     language: oneOf(value.language, ['auto', 'zh', 'en'], 'auto'),
     lastSession: typeof value.lastSession?.id === 'string' && typeof value.lastSession?.projectRoot === 'string'
       ? { id: value.lastSession.id, projectRoot: value.lastSession.projectRoot } : null,
+    newSelections: Object.fromEntries(Object.entries(value.newSelections ?? {})
+      .filter(([, item]) => typeof item?.provider === 'string' && typeof item?.model === 'string')
+      .map(([root, item]) => [root, { provider: item.provider, model: item.model }])),
     palette: oneOf(value.palette, [...PALETTES], 'ink'),
     font: oneOf(value.font, ['small', 'medium', 'large'], 'medium'),
     sidebar: clamped(value.sidebar, 264, 420, defaultSettings.sidebar),

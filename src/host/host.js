@@ -13,6 +13,7 @@ import { readRegistry, registerWorkspace, setDefaultWorkspace, workspaceIdentity
 import { historyPathOf, loadHistory, rememberHistory } from '../kernel/input-history.js';
 import { parsePrefsJson, prefsPathOf, readPrefs, savePrefs } from '../kernel/desktop-prefs.js';
 import { credentialStatus, deleteCredential, storeCredential } from '../kernel/credentials.js';
+import { modelServices, modelSelection, resolveModel } from '../kernel/model-services.js';
 import { createDecisionChain } from '../kernel/policy.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
@@ -72,8 +73,8 @@ const API_FORMS = Object.freeze({
 });
 
 export function providerFromConfig(config) {
-  const model = config.model;
-  if (model === undefined) throw new KernelError('host_model_config_missing', { detail: 'config.model.baseURL and config.model.model' });
+  if (config.model === undefined) throw new KernelError('host_model_config_missing', { detail: 'config.model.baseURL and config.model.model' });
+  const model = resolveModel(config.model);
   const createProvider = API_FORMS[model.api];
   if (createProvider === undefined) {
     throw new KernelError('provider_api_form_required', { detail: `model.api must be "messages" or "chat-completions"` });
@@ -101,7 +102,7 @@ export function hostProviderFromConfig(config) {
   try {
     return providerFromConfig(config);
   } catch (error) {
-    if (error?.code !== 'host_model_config_missing' && error?.code !== 'provider_api_form_required') throw error;
+    if (!['host_model_config_missing', 'provider_api_form_required', 'provider_base_url_required', 'provider_model_required', 'model_service_not_found', 'model_not_available'].includes(error?.code)) throw error;
     return pendingProvider(error);
   }
 }
@@ -343,8 +344,24 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     // 这一格项目环境的提供方跟着走：新开的会话读的是它，于是继承的是最近一次真正生效的那一份（方案 7.2）。
     env.provider = provider;
     const applies = [];
+    let sessionFailure;
     for (const [id, state] of sessions) {
       if (state.environment !== env) continue;
+      const ownGeneration = state.pendingGeneration ?? state.generation;
+      if (ownGeneration.explicit === true) {
+        if (key !== 'services' || ownGeneration.model.selection?.provider === 'legacy') continue;
+        const ownModel = { ...ownGeneration.model, services: effective };
+        let ownProvider;
+        try { ownProvider = deriveProvider({ ...env.config, model: ownModel }); }
+        catch (error) { sessionFailure = { code: error.code ?? 'provider_rebuild_failed' }; continue; }
+        const previous = resolveModel(ownGeneration.model);
+        const next = resolveModel(ownModel);
+        if (['api', 'baseURL', 'apiKeyEnv', 'model'].every((field) => previous[field] === next[field])) continue;
+        const generation = { provider: ownProvider, model: ownModel, explicit: true };
+        if (state.running === undefined) { state.generation = generation; state.pendingGeneration = undefined; applies.push({ sessionId: id, when: 'now' }); }
+        else { state.pendingGeneration = generation; applies.push({ sessionId: id, when: 'round' }); }
+        continue;
+      }
       if (state.running === undefined) {
         state.generation = { provider, model };
         state.pendingGeneration = undefined;
@@ -354,7 +371,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
         applies.push({ sessionId: id, when: 'round' });
       }
     }
-    return { applies };
+    return { applies, ...(sessionFailure === undefined ? {} : { failure: sessionFailure }) };
   }
 
   // 档位与规则表的生效边界是「下一次判定」（方案 7.3 第一行）：已经派发出去的那一次调用不受这一笔影响。
@@ -614,6 +631,14 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     await session.acquire();
     const cleanup = [];
     try {
+    if (recover) {
+      const previous = (await session.read()).filter((event) => event.kind === 'modelSelection').at(-1);
+      if (previous !== undefined) {
+        const selection = modelSelection({ provider: previous.provider, model: previous.model });
+        const model = { ...(env.generation?.model ?? config.model), selection };
+        state.generation = { provider: hostProviderFromConfig({ ...config, model }), model, explicit: true };
+      }
+    }
     const chain = createDecisionChain({
       ...policy,
       ask: async ({ tool, input, command, reason, shell, executable, policy, policySource, policyForced }) => {
@@ -844,9 +869,11 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       // 开轮时那一份生效参数的快照（D104）：读的是这一份会话现在的那几格，不是装载那一次的配置。
       // `apiKeyEnv` 交回的是变量名，不是变量的值（D13）。
       turnContext: () => {
-        const model = state.generation.model ?? {};
+        const model = resolveModel(state.generation.model ?? {});
         return {
-          model: model.model ?? null,
+          model: state.generation.provider.model ?? null,
+          ...(typeof model.baseURL === 'string' ? { baseURL: model.baseURL } : {}),
+          serviceId: model.serviceId,
           api: model.api ?? null,
           ...(model.apiKeyEnv === undefined ? {} : { apiKeyEnv: model.apiKeyEnv }),
           policy: chain.mode,
@@ -1100,6 +1127,9 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
             // 这一份会话现在打的是哪一份模型，以及等在它轮次边界上的那一份（方案 7.1 的三种读数、7.3 第二行）。
             // 读的是会话自己那一格而不是项目环境那一份：写完未采用与已采用在这两格里是分得开的。
             model: state.generation.provider.model ?? null,
+            selectedModel: state.generation.model?.selection?.model ?? state.generation.provider.model ?? null,
+            serviceId: state.generation.model?.selection?.provider ?? resolveModel(state.generation.model ?? {}).serviceId ?? 'legacy',
+            pendingServiceId: state.pendingGeneration?.model?.selection?.provider ?? null,
             pendingModel: state.pendingGeneration?.provider.model ?? null,
             // 判定档位与模式名是两样东西，字段也各写各的（D40：状态行上 `mode:` 与 `policy:`）。
             // 档位这一格现在有两件来源：配置那一份默认与会话自己的覆盖（D101），界面要说得出眼下生效的出自哪一件。
@@ -1135,6 +1165,18 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           // 也就是锁内那一次读—改—写的结果：取锁之前自己拼的那一份不算上另一端刚落下的一句。
           return { entries: await rememberHistory(historyPathOf(), [String(message.params.text)]) };
         }
+        case 'model.select': {
+          const state = open(sessionId);
+          const fresh = state.environment.store === undefined ? { model: state.environment.config.model ?? {} } : (await state.environment.store.read()).values;
+          const selection = modelSelection({ provider: message.params.provider, model: message.params.model });
+          const model = { ...(state.environment.config.model ?? {}), ...fresh.model, selection };
+          const provider = deriveProvider({ ...state.environment.config, model });
+          const generation = { model, provider, explicit: true };
+          await state.session.append({ kind: 'modelSelection', ignorable: true, provider: selection.provider, model: selection.model });
+          if (state.running === undefined) state.generation = generation;
+          else state.pendingGeneration = generation;
+          return { model: provider.model, serviceId: selection.provider, when: state.running === undefined ? 'now' : 'round' };
+        }
         case 'credentials.status':
           return await credentialStatus(message.params.reference);
         case 'credentials.set':
@@ -1162,6 +1204,8 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           const { layers, sources, values, rules, rulesSource } = await env.store.read();
           return {
             ...shownConfigOf(values),
+            services: modelServices(values.model?.services),
+            selection: values.model?.selection === undefined ? null : modelSelection(values.model.selection),
             // 配置里写着的默认档：这一格说的是文件里现在那一份，正在生效的那一份从 `status.get` 读（D40、D101）。
             policyMode: values.policy.mode,
             layers,
@@ -1180,6 +1224,14 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           const rule = Object.values(given).every((item) => item === undefined) ? undefined : given;
           const env = await environmentFor(message.params.projectRoot);
           if (env.store === undefined) throw new KernelError('config_write_unsupported');
+          if (field === 'model.selection') {
+            const fresh = await env.store.read();
+            deriveProvider({ ...env.config, model: { ...env.config.model, ...fresh.values.model, selection: modelSelection(value) } });
+          }
+          if (field === 'model.services') {
+            const fresh = await env.store.read();
+            if (fresh.values.model?.selection !== undefined) resolveModel({ ...fresh.values.model, services: modelServices(value) });
+          }
           const { key, table, shadowed, shadowedBy, changed, effective, layers, ...saved } = await env.store.write({ layer, field, value, version, op, index, rule });
           // 白名单里那几条模型字段都是提供方要读的那几格，所以写完就问一句：哪一份会话现在就换，哪一份等自己那一轮的边界。
           // 采用的依据是落盘之后按层序重折出来的那一份有效值，不是刚写进去的那一个（方案 7.1、D8）：

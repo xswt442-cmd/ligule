@@ -191,6 +191,14 @@ export const METHODS = Object.freeze({
     description: 'Report whether a credential is configured and its source; never return the credential value',
     parameters: { type: 'object', properties: { reference: { type: 'string' } }, required: ['reference'] },
   },
+  'model.select': {
+    description: 'Select a listed provider and model for one session, immediately when idle or at the next turn boundary',
+    parameters: {
+      type: 'object',
+      properties: { sessionId: SESSION_ID, provider: { type: 'string' }, model: { type: 'string' } },
+      required: ['sessionId', 'provider', 'model'],
+    },
+  },
   'credentials.set': {
     description: 'Store a secret in the system credential store; an active environment override prevents changes',
     parameters: { type: 'object', properties: { reference: { type: 'string' }, value: { type: 'string' } }, required: ['reference', 'value'] },
@@ -234,7 +242,7 @@ export const METHODS = Object.freeze({
       type: 'object',
       properties: {
         field: { type: 'string', description: 'one field name from the list the host names back when this is not one of them' },
-        value: { type: 'string', description: 'the new value of a one-line field; the host checks it against the shape that field declares' },
+        value: { description: 'the new value; the host checks scalar, service list, and model selection shapes by field name' },
         layer: { type: 'string', description: 'which settings file to write; the writable ones are named back when this is not one of them' },
         version: { type: 'string', description: 'the version read from that file, so a concurrent edit is reported instead of overwritten; blank when that file did not exist' },
         projectRoot: { type: 'string', description: 'the project whose settings layer to write; absent means the one the Host was launched on' },

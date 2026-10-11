@@ -86,6 +86,10 @@ Rules for `src/kernel/`: the tool table, decision chain, loop, prompt assembly, 
 
 ## Model providers
 
+- `model-services.ts` 验证 `model.services` 服务清单及 `model.selection` 默认选择；单服务的四个字段继续可读。服务含稳定编号、显示名、接口类型、地址、凭据引用及模型列表，拒绝未知字段和重复编号。
+- `config-edit.ts` 使用原版 `toml-eslint-parser` 取得 TOML 1.1 节点与跨度，`smol-toml` 验证完整语义。受管服务值内部有注释或使用不支持的节点形状时拒绝替换并保留原文。
+- `credentials.ts` 延迟加载 `@napi-rs/keyring`。非空环境变量优先；系统账户按应用数据根与凭据引用隔离。Linux 显式选择持久化 Secret Service，不静默回退。密钥不进入配置、会话、导出或日志。
+
 - Two wire shapes reach the endpoint (D13, D31), and `model.api` names which one. Only that adapter builds the body.
 - Each shape declares a capability ceiling: `streaming`, `parallelToolCalls`, `maxOutputTokens`, plus `streamUsage` for Chat Completions. A config may lower it but never raise it, and an undeclared name raises `provider_capability_unknown`.
 - `streamUsage` decides whether a streaming request asks for the usage line. That family reports tokens only when the body carries `stream_options:{include_usage:true}`, so a proxy that rejects it turns the flag off and the compaction pressure line falls back to the local count.

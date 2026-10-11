@@ -1,15 +1,16 @@
 // 第 33 步的验收（D72、D79）：崩溃留下的那次派发补成一条规范的工具结果，只读的那一侧不改盘，补一次就够。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import {
   buildRepairEvents, createConnection, createConfig, createMemoryConnectionPair, createSessionLog,
-  findUnresolvedCalls, repairUnresolvedCalls, serveHost,
+  findUnresolvedCalls, providerFromConfig, repairUnresolvedCalls, serveHost,
 } from '../dist/index.js';
 import { prefixDigest } from '../dist/session/checkpoint.js';
 import { branchSession } from '../dist/session/branch.js';
+await mkdir(join(process.cwd(), 'testplace', 'tmp'), { recursive: true });
 
 const READ_ONLY = new Set(['read']);
 const dispatched = (seq, id, name, args) => ({ seq, kind: 'assistant', text: '', toolCalls: [{ id, name, args }] });
@@ -39,8 +40,9 @@ test('an assistant turn whose call never got a result is the only thing left ope
 
 test('reopening a record repairs it once, and reading it changes nothing', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ligule-recovery-'));
-  // 记录落数据根会话区（D110）：检查自己造的家目录里那一处，宿主读的也是它。
-  const directory = join(homedir(), '.ligule', 'sessions');
+  const previousHome = process.env.LIGULE_HOME;
+  process.env.LIGULE_HOME = join(root, 'data');
+  const directory = join(process.env.LIGULE_HOME, 'sessions');
   try {
     const log = createSessionLog({ directory, id: 'crashed', meta: { projectRoot: root } });
     const user = await log.append({ kind: 'user', text: 'build it' });
@@ -56,7 +58,7 @@ test('reopening a record repairs it once, and reading it changes nothing', async
       user: { boundary: root, model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'm' }, policy: { mode: 'ask' } },
     });
     const pair = createMemoryConnectionPair();
-    const host = serveHost({ ...pair.host, config, provider: { name: 'none', model: 'm', async *stream() { throw new Error('no round runs here'); } }, policy: config.policy });
+    const host = serveHost({ ...pair.host, config, provider: providerFromConfig(config), policy: config.policy });
     const client = createConnection(pair.client);
     const { events } = await client.request('session.open', { sessionId: 'crashed' }).then(() => client.request('session.read', { sessionId: 'crashed' }));
     await host.close?.();
@@ -73,6 +75,8 @@ test('reopening a record repairs it once, and reading it changes nothing', async
     assert.equal((await readFile(join(directory, 'crashed.jsonl'), 'utf8')).trim().split('\n').length, 6,
       '首行、原有三条事件、工具结果与中断终态');
   } finally {
+    if (previousHome === undefined) delete process.env.LIGULE_HOME;
+    else process.env.LIGULE_HOME = previousHome;
     await rm(root, { recursive: true, force: true });
   }
 });

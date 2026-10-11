@@ -2289,6 +2289,38 @@ button.pill:hover {
 .settings-intro h2 { margin: 0 0 8px; font-size: 1.3rem; font-weight: 600; }
 .settings-intro p { margin: 0 0 24px; color: var(--fg-muted); font-size: var(--text-sm); }
 
+.service-row { display: flex; align-items: center; gap: 12px; padding: 18px 0; border-bottom: 1px solid var(--line); }
+.service-row > div { display: grid; flex: 1; gap: 4px; min-width: 0; }
+.service-row strong { font-size: var(--text-md); font-weight: 550; }
+.service-row div > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-muted); font-size: var(--text-xs); }
+.service-row button { font-size: var(--text-xs); }
+.service-default { margin-inline-start: 10px; padding: 3px 6px; font-size: var(--text-xs); border-radius: 5px; background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
+.add-service { display: inline-flex; gap: 7px; align-items: center; margin-top: 20px; }
+.model-empty { color: var(--fg-muted); margin: 32px 0; font-size: var(--text-md); }
+.service-fields { display: grid; gap: 18px; border: 0; margin: 0; padding: 0; }
+.service-fields label, .service-advanced label { display: grid; gap: 8px; color: var(--fg); font-size: var(--text-sm); }
+.service-fields input, .service-fields textarea, .service-fields select { width: 100%; min-width: 0; background: var(--bg); padding: 10px 12px; }
+.service-fields textarea { resize: vertical; font-family: var(--mono); }
+.service-fields summary { color: var(--fg-muted); cursor: pointer; font-size: var(--text-sm); }
+.service-advanced { display: grid; gap: 16px; padding-top: 18px; }
+.field-help { margin: -8px 0 0; color: var(--fg-muted); font-size: var(--text-xs); }
+.form-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 4px; }
+button.primary-button { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.text-button { justify-self: start; background: transparent; border: 0; padding-inline: 0; color: var(--fg-muted); font-size: var(--text-xs); }
+.inline-notice { display: grid; gap: 8px; margin: 0 0 18px; padding: 12px; border-radius: 8px; background: var(--bg-sunk); font-size: var(--text-sm); }
+.inline-notice p { margin: 0; }
+.inline-notice[role="alert"] { border-inline-start: 2px solid var(--warn); }
+.inline-notice code { font-size: var(--text-xs); overflow-wrap: anywhere; }
+.model-picker { min-width: 260px; max-height: min(440px, 65vh); max-width: 90vw; overflow: auto; }
+.model-group-name { padding: 10px 10px 4px; font-size: var(--text-xs); color: var(--fg-muted); }
+.model-option { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.model-option span { white-space: normal; overflow-wrap: anywhere; }
+.model-picker-error { padding: 10px; font-size: var(--text-xs); color: var(--bad); display: grid; gap: 4px; }
+.service-default-select { display: grid; gap: 9px; margin-bottom: 16px; font-size: var(--text-sm); }
+.service-default-select select { width: 100%; }
+
+@media (max-width: 760px) { .service-row { flex-wrap: wrap; } .service-row > div { min-width: 60%; } }
+
 @media (max-width: 760px) {
   .frame[data-mobile-sidebar="true"] .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 25; width: min(320px, 85vw); box-shadow: 12px 0 60px rgb(0 0 0 / 25%); }
   .splitter { display: none; }

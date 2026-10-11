@@ -6,7 +6,9 @@ import { dirname, resolve } from 'node:path';
 import { parse } from 'smol-toml';
 import { getStaticTOMLValue, parseTOML, traverseNodes, VisitorKeys, type AST } from 'toml-eslint-parser';
 import lockfile from 'proper-lockfile';
+import { isDeepStrictEqual } from 'node:util';
 import { KernelError, KernelRuntimeError } from './error.js';
+import { modelSelection, modelServices, selectionLiteral, servicesLiteral } from './model-services.js';
 
 /** 一条工具规则：判定链里 `[[policy.rules]]` 的那一项。 */
 export type PolicyRule = { tool: string; match?: string; decision: 'allow' | 'deny'; reason?: string };
@@ -24,7 +26,7 @@ export type WriteRequest = {
 /** 一个可写字段：落在哪一条路径、值按什么形状收。 */
 export type EditableField = {
   readonly path: readonly [string, string];
-  readonly kind: 'string' | 'enum' | 'url' | 'envName' | 'rules';
+  readonly kind: 'string' | 'enum' | 'url' | 'envName' | 'rules' | 'services' | 'selection';
   readonly oneOf?: readonly string[];
 };
 
@@ -34,6 +36,8 @@ export const EDITABLE: Readonly<Record<string, EditableField>> = {
   'model.model': { path: ['model', 'model'], kind: 'string' },
   'model.baseURL': { path: ['model', 'baseURL'], kind: 'url' },
   'model.apiKeyEnv': { path: ['model', 'apiKeyEnv'], kind: 'envName' },
+  'model.services': { path: ['model', 'services'], kind: 'services' },
+  'model.selection': { path: ['model', 'selection'], kind: 'selection' },
   'policy.mode': { path: ['policy', 'mode'], kind: 'enum', oneOf: ['ask', 'auto'] },
   'policy.rules': { path: ['policy', 'rules'], kind: 'rules' },
 };
@@ -46,7 +50,15 @@ export function editableField(field: unknown): EditableField {
 }
 
 /** 值先按字段的形状收下来，再交回一份 TOML 写法与一份读回来核对要用的值。 */
-export function encodeValue(field: EditableField, value: unknown): { literal: string; value: string } {
+export function encodeValue(field: EditableField, value: unknown): { literal: string; value: unknown } {
+  if (field.kind === 'services') {
+    const services = modelServices(value);
+    return { literal: servicesLiteral(services), value: services };
+  }
+  if (field.kind === 'selection') {
+    const selection = modelSelection(value);
+    return { literal: selectionLiteral(selection), value: selection };
+  }
   if (field.kind === 'enum') {
     if (typeof value !== 'string' || !field.oneOf!.includes(value)) {
       throw new KernelError('config_field_value', { detail: `takes one of: ${field.oneOf!.join(', ')}` });
@@ -212,10 +224,19 @@ function appendTomlTable(text: string, table: string, key: string, literal: stri
 }
 
 /** 在原文里换掉那一个值：注释、其余键、键的顺序与每一行的换行形状都留着。键不存在时在那一张表里补一行。 */
-export function editTomlValue(text: string, path: readonly [string, string], literal: string): { text: string; created: boolean } {
+export function editTomlValue(text: string, path: readonly [string, string], literal: string, structured = false): { text: string; created: boolean } {
   const parsed = parseDocument(text);
   const existing = parsed.pairs.find((pair) => sameTomlPath(pair.path, path));
-  if (existing !== undefined) return { text: applyTextEdits(text, [changeTomlValue(existing, literal)]), created: false };
+  if (existing !== undefined) {
+    if (structured) {
+      // 受管数组或表内有注释时拒绝整值替换，保持原文；可用原文编辑器调整。
+      if (parsed.root.comments.some((comment) => comment.range[0] > existing.node.value.range[0] && comment.range[1] < existing.node.value.range[1])) {
+        throw new KernelError('config_edit_shape_unsupported', { detail: 'the managed value contains comments; edit this value in the config file' });
+      }
+      return { text: applyTextEdits(text, [{ start: existing.node.value.range[0], end: existing.node.value.range[1], text: literal }]), created: false };
+    }
+    return { text: applyTextEdits(text, [changeTomlValue(existing, literal)]), created: false };
+  }
 
   const [tableName, key] = path;
   const table = standardTable(parsed.tables, [tableName]);
@@ -337,7 +358,7 @@ export async function writeConfigField(
     const before = definition.kind === 'rules' ? rulesOfLayer(read(current, 'config_file_invalid')) : [];
     const edited = scalar === undefined
       ? editRuleTable(current, op as RuleOp, index, rule)
-      : editTomlValue(current, definition.path, scalar.literal);
+      : editTomlValue(current, definition.path, scalar.literal, definition.kind === 'services' || definition.kind === 'selection');
     const parsed = read(edited.text, 'config_edit_verify_failed');
     if (scalar === undefined) {
       // 核对的是整张表：别的项被这一趟动过，也要在这里说出来。
@@ -348,7 +369,7 @@ export async function writeConfigField(
       }
     } else {
       const landed = definition.path.reduce<unknown>((node, part) => (node as Record<string, unknown>)?.[part], parsed);
-      if (landed !== scalar.value) {
+      if (!isDeepStrictEqual(structuredClone(landed), structuredClone(scalar.value))) {
         throw new KernelError('config_edit_verify_failed', { detail: `${definition.path.join('.')} reads back as ${JSON.stringify(landed)}` });
       }
     }

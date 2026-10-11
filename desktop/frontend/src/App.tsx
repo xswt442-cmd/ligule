@@ -16,6 +16,7 @@ import { createCallOf, type WorkspaceRoster } from './rail';
 import { SessionMenu } from './components/SessionMenu';
 import { SessionActions } from './components/SessionActions';
 import { DiagnosticsPanel } from './components/DiagnosticsPanel';
+import { ModelPicker } from './components/ModelPicker';
 import { ExportPanel } from './components/ExportPanel';
 import { HelpPanel } from './components/HelpPanel';
 import { UsageMeter } from './components/UsageMeter';
@@ -954,6 +955,8 @@ export function App({ transport }: { transport: Transport }) {
     try {
       const created = await client.call('session.create', newParameters.current, 15_000) as { sessionId: string };
       if (openRequest.current !== request) return;
+      const selection = settings.newSelections[projectRoot];
+      if (selection !== undefined) await client.call('model.select', { sessionId: created.sessionId, ...selection }, 15_000);
       await client.call('session.label', { sessionId: created.sessionId, name: text.split('\n')[0].replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 120) || t('新会话', 'New conversation') }, 15_000);
       const opened = await openSession(created.sessionId, undefined, false, newParameters.current.projectRoot);
       if (active.current !== created.sessionId) return;
@@ -975,7 +978,7 @@ export function App({ transport }: { transport: Transport }) {
       creating.current = false;
       setStarting(false);
     }
-  }, [client, draft, inputOwner, openSession, projectRoot, reading, sessionId, settingsReady, submit, t]);
+  }, [client, draft, inputOwner, openSession, projectRoot, reading, sessionId, settings.newSelections, settingsReady, submit, t]);
 
   // 取消哪一份会话的那一轮由 `own` 说定：默认是眼前这一份，另一份会话的提问卡取消的是它自己那一份（审阅 F1）。
   const cancel = useCallback(async (own = sessionId) => {
@@ -1516,7 +1519,14 @@ export function App({ transport }: { transport: Transport }) {
           }}
         />
         <div className="composer-bar">
-          <button type="button" className="composer-choice" title={t('模型服务设置', 'Model service settings')} onClick={() => { setSettingsSection('model'); setSettingsOpen(true); }}><Icon name="spark" size={14} /><span>{status?.model ?? t('选择模型', 'Choose model')}</span><Icon name="fold" size={12} /></button>
+          <ModelPicker key={projectRoot} client={client} projectRoot={projectRoot}
+            disabled={starting || reading || !settingsReady} pending={status?.pendingModel !== undefined && status.pendingModel !== null}
+            selection={status?.selectedModel ? { provider: status.pendingServiceId ?? status.serviceId, model: status.pendingModel ?? status.selectedModel } : settings.newSelections[projectRoot] ?? null}
+            onSelect={async (selection) => {
+              if (sessionId === null) { patch({ newSelections: { ...settings.newSelections, [projectRoot]: selection } }); return; }
+              await client.call('model.select', { sessionId, ...selection }, 15_000);
+              await refreshStatus(sessionId);
+            }} onManage={() => { setSettingsSection('model'); setSettingsOpen(true); }} />
           <Popover.Root open={sessionMenuOpen} onOpenChange={setSessionMenuOpen}>
             <Popover.Trigger asChild><button type="button" className="composer-choice" disabled={sessionId === null} title={t('工具与审批', 'Tools and approvals')}><span>{status?.mode ?? t('工具模式', 'Tool mode')}</span><Icon name="fold" size={12} /></button></Popover.Trigger>
             <SessionMenu status={status} onSetMode={(name) => void setMode(name)} onSetPolicy={(mode) => void setPolicy(mode)} />
@@ -1553,7 +1563,7 @@ export function App({ transport }: { transport: Transport }) {
       counts={panelProps.counts}
       waiting={panelProps.waiting}
       onReconnect={() => void reconnect()}
-      onClose={() => setSettingsOpen(false)}
+      onClose={() => { setSettingsOpen(false); if (sessionId !== null) void refreshStatus(sessionId); }}
     />}
     {quitRows.length > 0 && <QuitSheet rows={quitRows} onBack={() => setQuitRows([])} onQuit={() => void quitApp()} />}
     {dockHold !== null && <HoldSheet

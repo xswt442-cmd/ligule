@@ -45,7 +45,7 @@ async function withFixture(run) {
 }
 
 test('credential references and values reject invalid input without exposing values', async () => {
-  const invalidReferences = ['', '1INVALID', 'WITH-DASH', 'WITH\0NUL'];
+  const invalidReferences = ['', '1INVALID', 'WITH-DASH', 'WITH\0NUL', 'A'.repeat(129)];
   for (const reference of invalidReferences) {
     await assert.rejects(resolveCredential(reference), error => error.code === 'credential_reference_invalid');
     await assert.rejects(credentialStatus(reference), error => error.code === 'credential_reference_invalid');
@@ -62,7 +62,6 @@ test('credential references and values reject invalid input without exposing val
     }
   });
 });
-
 test('a non-empty environment value takes precedence and rejects keyring mutation', async () => {
   await withFixture(async ({ reference }) => {
     const environmentValue = `environment-${randomUUID()}`;

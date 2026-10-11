@@ -336,11 +336,5 @@ function Model({ client, sessionId, projectRoot, onEdit }: {
   projectRoot: string;
   onEdit?: (reason: string) => void;
 }) {
-  const t = useText();
-  return <>
-    <p className="sheet-note">
-      {t('服务地址和模型名由配置读取。编辑保存到使用者默认层或当前项目的本机覆盖层。密钥值不会写入配置。', 'The service address and model name come from configuration. Changes are saved to user defaults or this project’s local override. Secret values are never written to configuration.')}
-    </p>
-    <ModelPanel client={client} sessionId={sessionId} projectRoot={projectRoot} onEdit={onEdit} />
-  </>;
+  return <ModelPanel client={client} sessionId={sessionId} projectRoot={projectRoot} onEdit={onEdit} />;
 }
