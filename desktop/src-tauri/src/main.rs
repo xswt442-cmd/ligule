@@ -1,11 +1,13 @@
-// 桌面壳（D24、D30、实现顺序第 15 步）。这里只有三类事：开窗、起后端进程、把调用帧在 WebView 与
-// 后端进程的两根管道之间搬进搬出。协议内容不在这里解释——帧按整行字符串转递，壳不认识里面的方法名。
+// 桌面壳（D24、D30、实现顺序第 15 步）管理窗口、Host 进程、系统通知和托盘交互，并在 WebView 与 Host
+// 之间逐行传递调用帧。协议内容不在这里解释——壳不认识 Host 帧中的方法名。
 mod bridge;
+mod notification;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
-use tauri::tray::TrayIconBuilder;
+use tauri::tray::{TrayIcon, TrayIconBuilder};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 
 use bridge::Host;
@@ -21,10 +23,17 @@ const TRAY_QUIT: &str = "tray-quit";
 #[derive(Default)]
 struct AppState {
     host: Mutex<Option<Host>>,
+    tray: Mutex<Option<TrayIcon>>,
+    tray_menu: Mutex<Option<TrayMenuItems>>,
     /// 托盘那一枚立起来没有。立不起来只是没有可回的位置：点叉时不收进找不回的地方，而是先问界面再走（方案 6.4、审阅 G1）。
     restorable: AtomicBool,
     /// 人已经点了「中断任务并退出」。这一条之后拦退出与藏窗口都不再做。
     quitting: AtomicBool,
+}
+
+struct TrayMenuItems {
+    open: MenuItem<tauri::Wry>,
+    quit: MenuItem<tauri::Wry>,
 }
 
 impl AppState {
@@ -195,7 +204,7 @@ fn build_tray(app: &AppHandle) -> Result<(), String> {
         .default_window_icon()
         .ok_or("the shell carries no icon to put in the tray")?
         .clone();
-    TrayIconBuilder::with_id(TRAY_ID)
+    let tray = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
         .show_menu_on_left_click(false)
         .tooltip("ligule")
@@ -211,8 +220,123 @@ fn build_tray(app: &AppHandle) -> Result<(), String> {
             }
         })
         .build(app)
-        .map(|_| ())
-        .map_err(|error| format!("the tray could not be built: {error}"))
+        .map_err(|error| format!("the tray could not be built: {error}"))?;
+    let state = app.state::<AppState>();
+    let mut tray_slot = state
+        .tray
+        .lock()
+        .map_err(|_| "the tray slot is poisoned".to_string())?;
+    *tray_slot = Some(tray);
+    *state
+        .tray_menu
+        .lock()
+        .map_err(|_| "the tray menu slot is poisoned".to_string())? =
+        Some(TrayMenuItems { open, quit });
+    Ok(())
+}
+
+const MAX_TRAY_LABEL_BYTES: usize = 128;
+
+fn validate_tray_label(label: &str) -> Result<(), String> {
+    if label.is_empty() || label.len() > MAX_TRAY_LABEL_BYTES {
+        return Err(format!(
+            "tray status text must contain 1 to {MAX_TRAY_LABEL_BYTES} bytes"
+        ));
+    }
+    if label.chars().any(char::is_control) {
+        return Err("tray status text must not contain control characters".to_string());
+    }
+    Ok(())
+}
+
+fn tray_menu_labels(language: Option<&str>) -> Result<(&'static str, &'static str), String> {
+    match language {
+        None | Some("zh") => Ok(("打开 ligule", "退出 ligule")),
+        Some("en") => Ok(("Open ligule", "Quit ligule")),
+        Some(value) => Err(format!("unsupported tray language: {value}")),
+    }
+}
+
+fn attention_icon(icon: &Image<'_>) -> Image<'static> {
+    let width = icon.width();
+    let height = icon.height();
+    let radius = (width.min(height) / 10).max(2) as i32;
+    let center_x = width as i32 - radius - 1;
+    let center_y = radius + 1;
+    let mut rgba = icon.rgba().to_vec();
+
+    for y in (center_y - radius - 1)..=(center_y + radius + 1) {
+        for x in (center_x - radius - 1)..=(center_x + radius + 1) {
+            let distance = (x - center_x).pow(2) + (y - center_y).pow(2);
+            if distance > (radius + 1).pow(2)
+                || x < 0
+                || y < 0
+                || x >= width as i32
+                || y >= height as i32
+            {
+                continue;
+            }
+            let index = ((y as u32 * width + x as u32) * 4) as usize;
+            let color = if distance > radius.pow(2) {
+                [24, 24, 24, 255]
+            } else {
+                [255, 176, 0, 255]
+            };
+            rgba[index..index + 4].copy_from_slice(&color);
+        }
+    }
+
+    Image::new_owned(rgba, width, height)
+}
+
+#[tauri::command]
+fn set_tray_status(
+    app: AppHandle,
+    label: String,
+    attention: bool,
+    language: Option<String>,
+) -> Result<(), String> {
+    validate_tray_label(&label)?;
+    let (open_label, quit_label) = tray_menu_labels(language.as_deref())?;
+    let state = app.state::<AppState>();
+    let tray_slot = state
+        .tray
+        .lock()
+        .map_err(|_| "the tray slot is poisoned".to_string())?;
+    let tray = tray_slot
+        .as_ref()
+        .ok_or_else(|| "the system tray is not available".to_string())?;
+    let icon = app
+        .default_window_icon()
+        .ok_or_else(|| "the shell has no application icon for the tray".to_string())?;
+
+    tray.set_tooltip(Some(&label))
+        .map_err(|error| format!("the tray status text could not be updated: {error}"))?;
+    tray.set_icon(Some(if attention {
+        attention_icon(icon)
+    } else {
+        icon.clone()
+    }))
+    .map_err(|error| format!("the tray icon could not be updated: {error}"))?;
+    let tray_menu = state
+        .tray_menu
+        .lock()
+        .map_err(|_| "the tray menu slot is poisoned".to_string())?;
+    let items = tray_menu
+        .as_ref()
+        .ok_or_else(|| "the system tray menu is not available".to_string())?;
+    items
+        .open
+        .set_text(open_label)
+        .map_err(|error| format!("the tray menu could not be updated: {error}"))?;
+    items
+        .quit
+        .set_text(quit_label)
+        .map_err(|error| format!("the tray menu could not be updated: {error}"))?;
+    #[cfg(target_os = "macos")]
+    tray.set_title(if attention { Some("●") } else { None })
+        .map_err(|error| format!("the tray status marker could not be updated: {error}"))?;
+    Ok(())
 }
 
 fn main() {
@@ -220,6 +344,7 @@ fn main() {
         .manage(AppState::default())
         // 原生保存对话框那一个插件（方案 6A）：界面自己开那扇窗，壳不读记录也不写文件。
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let handle = app.handle().clone();
             if let Err(error) = start_host(&handle) {
@@ -259,7 +384,9 @@ fn main() {
             host_stop,
             host_restart,
             app_quit,
-            default_workspace
+            default_workspace,
+            notification::show_notification,
+            set_tray_status
         ])
         .build(tauri::generate_context!())
         .expect("error while building the desktop shell")
@@ -285,7 +412,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{close_action, exit_asks, OnClose};
+    use super::{close_action, exit_asks, tray_menu_labels, validate_tray_label, OnClose};
 
     #[test]
     fn a_tray_lets_the_close_button_hide_the_window() {
@@ -304,5 +431,30 @@ mod tests {
         assert_eq!(close_action(true, true), OnClose::Proceed);
         assert_eq!(close_action(false, true), OnClose::Proceed);
         assert!(!exit_asks(true));
+    }
+
+    #[test]
+    fn tray_status_text_rejects_control_characters_and_excess_length() {
+        assert!(validate_tray_label("Working").is_ok());
+        assert!(validate_tray_label("Working\nnow").is_err());
+        assert!(validate_tray_label(&"x".repeat(super::MAX_TRAY_LABEL_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn tray_menu_language_defaults_to_chinese_and_accepts_english() {
+        assert_eq!(tray_menu_labels(None), Ok(("打开 ligule", "退出 ligule")));
+        assert_eq!(
+            tray_menu_labels(Some("zh")),
+            Ok(("打开 ligule", "退出 ligule"))
+        );
+        assert_eq!(
+            tray_menu_labels(Some("en")),
+            Ok(("Open ligule", "Quit ligule"))
+        );
+    }
+
+    #[test]
+    fn tray_menu_language_rejects_unknown_values() {
+        assert!(tray_menu_labels(Some("fr")).is_err());
     }
 }
