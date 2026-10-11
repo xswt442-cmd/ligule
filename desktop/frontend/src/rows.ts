@@ -41,6 +41,7 @@ export type Record_ = {
   verdict?: Verdict;
   // 一轮正常完整结束留下的那一条事实（D68）：它是一处可选的分支点（方案 4.3）。
   status?: string;
+  code?: string;
   iterations?: number;
   modelCalls?: number;
   // 一轮开始时交回的那一份完整参数快照（`session.read` 里的一条 `turnContext`）。内核没落这一条时这几格都不出现。
@@ -61,6 +62,7 @@ export type Row = {
   id: number;
   kind: 'question' | 'answer' | 'reasoning' | 'call' | 'result' | 'refusal' | 'failure' | 'round' | 'context' | 'meta' | 'error';
   text: string;
+  status?: string;
   // 这一行来自记录里哪一条事件（D73 那个稳定序号）。界面自己写的那几行没有它。
   seq?: number;
   // 生效的能力名：`mcp.call` 这一件画的是 `mcp:<服务器>/<工具>`，与判定链读的那一串一致（D52）。
@@ -233,9 +235,9 @@ function projected(record: Record_, options: { startedAt?: number; now?: number 
   if (record.kind === 'reasoning') return [{ id: nextId(), kind: 'reasoning', text: record.text ?? '' }];
   // 一轮正常完整结束留下一条事实，那也是一处可选的分支点（D68、方案 4.3）：它画出一行，「从这里分支」挂在那一行上。
   if (record.kind === 'turn') {
-    return record.status === 'completed'
-      ? [{ id: nextId(), kind: 'round', text: `这一轮完整结束：${record.iterations ?? '?'} 次迭代 · ${record.modelCalls ?? '?'} 次模型调用` }]
-      : [];
+    const states: Record<string, string> = { completed: '本轮已完成', cancelled: '本轮已取消', failed: '本轮失败', interrupted: '本轮意外中断' };
+    const status = record.status ?? '';
+    return states[status] === undefined ? [] : [{ id: nextId(), kind: 'round', status, code: record.code, text: states[status] }];
   }
   if (record.kind === 'assistant') {
     const rows: Row[] = record.text === '' || record.text === undefined

@@ -13,6 +13,12 @@ assert.equal(call.summary, '{"input":{"key":"x"}}');
 assert.match(call.text, /"server": "demo"/);
 
 assert.equal(capabilityOf('exec', { command: 'git status' }), 'exec');
+for (const status of ['completed', 'cancelled', 'failed', 'interrupted']) {
+  const row = projectRecord({ seq: 42, kind: 'turn', status, code: status === 'failed' ? 'provider_http_error' : undefined })[0];
+  assert.equal(row.kind, 'round');
+  assert.equal(row.status, status);
+  assert.equal(row.seq, 42);
+}
 
 const write = projectRecord({
   kind: 'tool',

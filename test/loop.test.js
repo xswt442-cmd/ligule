@@ -91,7 +91,7 @@ test('a tool the host marked as completing the run stops it without another mode
   assert.equal(provider.requests.length, 1);
 });
 
-test('a cancelled run leaves complete records only', async () => {
+test('a cancelled run persists its terminal and answers every dispatched call', async () => {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'loop-'));
   try {
     const session = createSessionLog({ directory: root, id: 'run' });
@@ -114,9 +114,15 @@ test('a cancelled run leaves complete records only', async () => {
       () => createLoop({ kernel, provider, session }).run('go', { signal: controller.signal }),
       (error) => error.code === 'loop_cancelled',
     );
+    const turns = (await session.read()).filter((event) => event.kind === 'turn');
+    assert.equal(turns.length, 1, '取消只写一条终态');
+    assert.equal(turns[0].status, 'cancelled');
+    assert.equal(turns[0].code, 'loop_cancelled');
+    assert.equal(turns[0].userSeq, (await session.read()).find((event) => event.kind === 'user').seq);
     const events = await session.read();
-    assert.deepEqual(events.map((event) => event.kind), ['user', 'assistant', 'tool']);
+    assert.deepEqual(events.map((event) => event.kind), ['user', 'assistant', 'tool', 'turn']);
     assert.deepEqual(events[2].result, { kind: 'failure', failed: true, code: 'exec_cancelled', content: '' });
+    assert.equal(events[3].status, 'cancelled');
     assert.equal(provider.requests.length, 1, 'the cancelled run does not ask the model again');
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -230,20 +236,30 @@ test('a tool that throws an unwrapped error does not stop the run', async () => 
 });
 
 test('a failure inside the kernel stops the run instead of asking the model again', async () => {
-  const provider = scriptedProvider([
-    [{ type: 'tool-call', name: 'broken' }],
-    [{ type: 'text', text: 'not reached' }],
-  ]);
-  // 这里用一个工具交出内核自身的故障，代替「记录写不下去」那一种：两者的类别相同，
-  // 循环要停住，因为它已经不能保证模型看见的东西与记录一致。
-  const kernel = kernelWith([tool('broken', async () => {
-    throw new KernelRuntimeError('session_write_failed');
-  })]);
-  await assert.rejects(
-    () => createLoop({ kernel, provider }).run('go'),
-    (error) => error instanceof KernelRuntimeError && error.code === 'session_write_failed',
-  );
-  assert.equal(provider.requests.length, 1);
+  const root = await mkdtemp(join(process.cwd(), 'testplace', 'loop-'));
+  try {
+    const session = createSessionLog({ directory: root, id: 'failed' });
+    const provider = scriptedProvider([
+      [{ type: 'tool-call', name: 'broken' }],
+      [{ type: 'text', text: 'not reached' }],
+    ]);
+    // 内核自身的真实异常会停住循环，记录仍保留对应用户输入的失败终态。
+    const kernel = createKernel({ config: createConfig({ user: { boundary: root } }), session });
+    kernel.register(tool('broken', async () => {
+      throw new KernelRuntimeError('session_write_failed');
+    }));
+    await assert.rejects(
+      () => createLoop({ kernel, provider, session }).run('go'),
+      (error) => error instanceof KernelRuntimeError && error.code === 'session_write_failed',
+    );
+    assert.equal(provider.requests.length, 1);
+    const turns = (await session.read()).filter((event) => event.kind === 'turn');
+    assert.equal(turns.length, 1, '失败只写一条终态');
+    assert.equal(turns[0].status, 'failed');
+    assert.equal(turns[0].code, 'session_write_failed');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('what the model is shown next is rebuilt from the session log', async () => {
@@ -290,9 +306,8 @@ test('reasoning is recorded and kept out of what the model is asked next', async
   }
 });
 
-// 轮次完成标记（实现顺序第 68 步）：一轮正常完整结束才留下一条，取消、失败与达到上限都不留。
-// 它是「从这里分支」那个入口的依据，不进模型投影，也不进检查点那一段哈希的输入。
-test('a completed round leaves a turn marker and a round that stops early does not', async () => {
+// 轮次终态（D113）：每条用户输入对应一条完成、取消或失败记录，不进模型投影与检查点哈希。
+test('completed and budget-exhausted rounds each leave one terminal event', async () => {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'loop-'));
   try {
     const session = createSessionLog({ directory: root, id: 'turns' });
@@ -321,7 +336,7 @@ test('a completed round leaves a turn marker and a round that stops early does n
     await createLoop({ kernel, provider: byTool, session, completesRun: ['peek'] }).run('second');
     assert.equal((await session.read()).at(-1).completedBy, 'peek');
 
-    // 模型调用预算耗尽的那一轮没完整结束，不产生分支点。
+    // 模型调用预算耗尽是一条失败终态，不可作为分支点。
     const stuck = createSessionLog({ directory: root, id: 'stuck' });
     const stuckKernel = createKernel({ config: createConfig({ user: { boundary: root } }), session: stuck });
     stuckKernel.register(tool('peek', async () => ({ text: 'one line' })));
@@ -334,7 +349,11 @@ test('a completed round leaves a turn marker and a round that stops early does n
       }).run('go'),
       (error) => error.code === 'loop_model_budget_exhausted',
     );
-    assert.ok(!(await stuck.read()).some((event) => event.kind === 'turn'), '预算耗尽的那一轮不留下完成标记');
+    const failed = (await stuck.read()).filter((event) => event.kind === 'turn');
+    assert.equal(failed.length, 1);
+    assert.equal(failed[0].status, 'failed');
+    assert.equal(failed[0].code, 'loop_model_budget_exhausted');
+    assert.equal(failed[0].userSeq, (await stuck.read()).find((event) => event.kind === 'user').seq);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

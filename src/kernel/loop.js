@@ -7,6 +7,14 @@ import { failureOf } from './result.js';
 
 export const DEFAULT_LOOP_LIMITS = Object.freeze({ iterations: 32, modelCalls: 64 });
 
+const TURN_CANCEL_CODES = new Set(['provider_cancelled', 'loop_cancelled', 'ask_user_cancelled']);
+
+function failureCode(error) {
+  if (typeof error?.code === 'string' && error.code !== '') return error.code;
+  if (error?.name === 'AbortError') return 'provider_cancelled';
+  return 'loop_failed';
+}
+
 // 相邻的并发调用合成一组同时开始，串行调用自成一组、构成前后边界（D29）。
 function groupCalls(calls, executionOf) {
   const groups = [];
@@ -34,10 +42,14 @@ export function createLoop({ kernel, provider, prompt, session, limits = DEFAULT
     // 循环只把它们并进记录，模型看见的仍然是 input 那一份文本。
     async run(input, { signal, user } = {}) {
       const controller = new AbortController();
-      const forward = () => controller.abort();
-      signal?.addEventListener('abort', forward, { once: true });
+      const forward = () => controller.abort(signal?.reason);
+      if (signal?.aborted) forward();
+      else signal?.addEventListener('abort', forward, { once: true });
       let calls = 0;
+      let iterations = 0;
       let text = '';
+      let userSeq;
+      let terminalAttempted = false;
 
       // 许出去却没执行的调用要留下一条结果：请求体里每个工具调用都要有对应的结果顶着，
       // 少一条，端点把整份请求拒掉，而这一轮之后每一轮都拼不出合法请求。
@@ -54,27 +66,22 @@ export function createLoop({ kernel, provider, prompt, session, limits = DEFAULT
 
       // 这一轮的用户输入同样进记录：模型看见的每一条都要能从记录重建出来（I5）。
       // 它的序号就是这一轮的身份证：轮次完成标记与分支选点都指着它（实现顺序第 68 步）。
-      let userSeq;
-      if (session) userSeq = (await session.append({ kind: 'user', text: input, ...user })).seq;
-      // 开轮时生效的那一份参数冻进记录（D104）：轮中改了模型或档位，事后也读得出这一轮当时用的是哪一份。
-      // 它不进模型投影也不进检查点哈希（`PROJECTED_KINDS` 是白名单），界面按事件序号读它。
-      if (session && turnContext !== null) await session.append({ kind: 'turnContext', ignorable: true, userSeq, ...turnContext() });
-
-      // 一轮正常完整结束时留下一条事实（D88 之外的界面契约要的是「这一轮真的收尾了」，
-      // 不是「最后一条助手消息出现了」）。取消、失败、上限与恢复补写都走不到这一行。
-      // 这一条不进模型投影，也不进检查点那一段哈希的输入；它带 `ignorable`，旧版本读得懂。
-      async function markTurn(iteration, completedBy) {
-        if (!session || userSeq === undefined) return;
+      // 每轮恰好写一条终态。该事件标为可忽略，不进入模型投影或检查点哈希。
+      async function markTurn(status, fields = {}) {
+        if (!session || userSeq === undefined || terminalAttempted) return;
+        terminalAttempted = true;
         await session.append({
-          kind: 'turn', ignorable: true, status: 'completed', userSeq,
-          iterations: iteration, modelCalls: calls,
-          ...(completedBy === undefined ? {} : { completedBy }),
+          kind: 'turn', ignorable: true, status, userSeq, iterations, modelCalls: calls, ...fields,
         });
       }
 
       try {
+        if (session) userSeq = (await session.append({ kind: 'user', text: input, ...user })).seq;
+        // 快照写入失败也收为这一条用户输入的失败终态；Host 在接受输入前失败时没有 userSeq，不会造事件。
+        if (session && turnContext !== null) await session.append({ kind: 'turnContext', ignorable: true, userSeq, ...turnContext() });
         for (let iteration = 1; iteration <= limits.iterations; iteration += 1) {
           if (calls >= limits.modelCalls) throw new KernelError('loop_model_budget_exhausted');
+          iterations = iteration;
           calls += 1;
 
           const events = [];
@@ -119,7 +126,7 @@ export function createLoop({ kernel, provider, prompt, session, limits = DEFAULT
           if (session && reasoning !== '') await session.append({ kind: 'reasoning', text: reasoning });
           if (session) await session.append({ kind: 'assistant', text, toolCalls });
           if (toolCalls.length === 0) {
-            await markTurn(iteration);
+            await markTurn('completed');
             return { text, iterations: iteration, modelCalls: calls };
           }
 
@@ -139,7 +146,7 @@ export function createLoop({ kernel, provider, prompt, session, limits = DEFAULT
                 // 这一轮算完成了，同一条助手消息里后面的那些调用就再也不会有机会执行：同样逐条留下不执行的结果。
                 const name = group.calls[index].name;
                 await answerRemaining(restOf(groups, groupIndex, index), `${name} ended this round before this call ran`);
-                await markTurn(iteration, name);
+                await markTurn('completed', { completedBy: name });
                 return { text, completedBy: name, iterations: iteration, modelCalls: calls };
               }
             }
@@ -152,6 +159,10 @@ export function createLoop({ kernel, provider, prompt, session, limits = DEFAULT
           }
         }
         throw new KernelError('loop_iteration_limit');
+      } catch (error) {
+        const code = failureCode(error);
+        await markTurn(TURN_CANCEL_CODES.has(code) ? 'cancelled' : 'failed', { code });
+        throw error;
       } finally {
         signal?.removeEventListener('abort', forward);
       }

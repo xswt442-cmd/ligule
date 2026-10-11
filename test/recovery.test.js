@@ -8,6 +8,8 @@ import {
   buildRepairEvents, createConnection, createConfig, createMemoryConnectionPair, createSessionLog,
   findUnresolvedCalls, repairUnresolvedCalls, serveHost,
 } from '../dist/index.js';
+import { prefixDigest } from '../dist/session/checkpoint.js';
+import { branchSession } from '../dist/session/branch.js';
 
 const READ_ONLY = new Set(['read']);
 const dispatched = (seq, id, name, args) => ({ seq, kind: 'assistant', text: '', toolCalls: [{ id, name, args }] });
@@ -41,12 +43,13 @@ test('reopening a record repairs it once, and reading it changes nothing', async
   const directory = join(homedir(), '.ligule', 'sessions');
   try {
     const log = createSessionLog({ directory, id: 'crashed', meta: { projectRoot: root } });
-    await log.append({ kind: 'user', text: 'build it' });
-    await log.append(dispatched(1, 'call_x', 'exec', { command: 'make' }));
+    const user = await log.append({ kind: 'user', text: 'build it' });
+    await log.append({ kind: 'turnContext', ignorable: true, userSeq: user.seq, model: 'm' });
+    await log.append(dispatched(2, 'call_x', 'exec', { command: 'make' }));
 
     // 只读的那一侧（协议里的 session.read 走的就是这一条）报告缺口而不写盘（D72）。
     const before = await readFile(join(directory, 'crashed.jsonl'), 'utf8');
-    assert.equal((await createSessionLog({ directory, id: 'crashed' }).read()).length, 2);
+    assert.equal((await createSessionLog({ directory, id: 'crashed' }).read()).length, 3);
     assert.equal(await readFile(join(directory, 'crashed.jsonl'), 'utf8'), before, '读一遍没有改动这份记录');
 
     const config = createConfig({
@@ -62,9 +65,13 @@ test('reopening a record repairs it once, and reading it changes nothing', async
     assert.ok(repaired, '可写的恢复路径把那次派发补成了一条结果');
     assert.equal(repaired.callId, 'call_x');
     assert.equal(repaired.recovery.safeToRedo, false, 'exec 没声明只读，所以那句话是「先看现状」');
-    assert.deepEqual(events.map((event) => event.seq), [0, 1, 2], '补出来的那一条接在最后一条之后');
-    assert.equal((await readFile(join(directory, 'crashed.jsonl'), 'utf8')).trim().split('\n').length, 4,
-      '首行加三条事件');
+    assert.deepEqual(events.map((event) => event.seq), [0, 1, 2, 3, 4], '工具结果与轮次终态依次接在记录末尾');
+    const turns = events.filter((event) => event.kind === 'turn');
+    assert.deepEqual(turns.map(({ status, code, userSeq }) => ({ status, code, userSeq })), [
+      { status: 'interrupted', code: 'host_restarted', userSeq: user.seq },
+    ]);
+    assert.equal((await readFile(join(directory, 'crashed.jsonl'), 'utf8')).trim().split('\n').length, 6,
+      '首行、原有三条事件、工具结果与中断终态');
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -74,13 +81,55 @@ test('a second repair pass adds nothing because the calls are answered now', asy
   const root = await mkdtemp(join(tmpdir(), 'ligule-repair-'));
   try {
     const session = createSessionLog({ directory: root, id: 'twice' });
-    await session.append({ kind: 'user', text: 'go' });
-    await session.append(dispatched(1, 'x', 'exec', { command: 'make' }));
+    const user = await session.append({ kind: 'user', text: 'go' });
+    await session.append({ kind: 'turnContext', ignorable: true, userSeq: user.seq, model: 'm' });
+    await session.append(dispatched(2, 'x', 'exec', { command: 'make' }));
     assert.equal((await repairUnresolvedCalls(session, { readOnly: new Set() })).length, 1);
     assert.equal((await repairUnresolvedCalls(createSessionLog({ directory: root, id: 'twice' }), { readOnly: new Set() })).length, 0,
       '再扫一次：那些调用已经有结果了，一条都不补');
     const lines = (await readFile(join(root, 'twice.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
-    assert.deepEqual(lines.map((line) => line.kind), ['session', 'user', 'assistant', 'tool']);
+    assert.deepEqual(lines.map((line) => line.kind), ['session', 'user', 'turnContext', 'assistant', 'tool', 'turn']);
+    assert.equal(lines.at(-1).status, 'interrupted');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('turn recovery uses input evidence, keeps legacy completed turns, and does not invent input', async () => {
+  const root = await mkdtemp(join(process.cwd(), 'testplace', 'tmp', 'ligule-turn-recovery-'));
+  try {
+    const pending = createSessionLog({ directory: root, id: 'pending' });
+    const user = await pending.append({ kind: 'user', text: 'not yet answered' });
+    const digest = prefixDigest(await pending.read());
+    const appended = await repairUnresolvedCalls(pending, { readOnly: READ_ONLY });
+    assert.deepEqual(appended, []);
+    const interrupted = (await pending.read()).filter((event) => event.kind === 'turn');
+    assert.equal(interrupted.length, 1);
+    assert.equal(prefixDigest(await pending.read()), digest, '终态不改变检查点哈希输入');
+    await assert.rejects(branchSession(root, 'pending', { at: interrupted[0].seq }), error => error.code === 'session_branch_point_unavailable');
+    assert.deepEqual(
+      { status: interrupted[0].status, code: interrupted[0].code, userSeq: interrupted[0].userSeq },
+      { status: 'interrupted', code: 'host_restarted', userSeq: user.seq },
+    );
+    await assert.doesNotReject(() => repairUnresolvedCalls(pending, { readOnly: READ_ONLY }));
+    assert.equal((await pending.read()).filter((event) => event.kind === 'turn').length, 1, '重复恢复不重复写终态');
+
+    const legacy = createSessionLog({ directory: root, id: 'legacy' });
+    const legacyUser = await legacy.append({ kind: 'user', text: 'already answered' });
+    await legacy.append({ kind: 'turnContext', ignorable: true, userSeq: legacyUser.seq, model: 'm' });
+    await legacy.append({ kind: 'turn', ignorable: true, status: 'completed', userSeq: legacyUser.seq });
+    await repairUnresolvedCalls(legacy, { readOnly: READ_ONLY });
+    assert.equal((await legacy.read()).filter((event) => event.kind === 'turn').length, 1, '旧 completed 事件无需新 code 字段');
+
+    const preMarker = createSessionLog({ directory: root, id: 'pre-marker' });
+    await preMarker.append({ kind: 'user', text: 'old completed input' });
+    await preMarker.append({ kind: 'assistant', text: 'old completed answer', toolCalls: [] });
+    await repairUnresolvedCalls(preMarker, { readOnly: READ_ONLY });
+    assert.equal((await preMarker.read()).some((event) => event.kind === 'turn'), false, '旧记录中已有助手答复的输入不猜成中断');
+
+    const empty = createSessionLog({ directory: root, id: 'not-started' });
+    await repairUnresolvedCalls(empty, { readOnly: READ_ONLY });
+    assert.equal((await empty.read()).some((event) => event.kind === 'turn'), false, '没有用户输入时不补中断轮次');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

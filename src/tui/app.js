@@ -15,6 +15,7 @@ import { markdownLines } from './markdown.js';
 import { selectedText, transcriptLines, viewportPosition, wrapLine } from './viewport.js';
 import { CURRENT, KEYMAP, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec } from './keymap.js';
 import { displayWidth } from './commands.js';
+import { textOf as chooseText } from '../kernel/locale.js';
 
 const SPINNER = ['⠋', '⠙', '', '⠸', '⠼', '⠴', '⠦', '', '⠇', '⠏'];
 const FOLD_LINES = 3;
@@ -105,7 +106,11 @@ export function capabilityOf(name, args) {
 }
 
 // 一条记录画成一行或者几行：助手那一条可能带着若干次工具调用，工具调用与结果各占一行。
-export function projectRecord(record) {
+export function projectRecord(record, locale = 'zh') {
+  if (record.kind === 'turn') {
+    const names = { completed: ['本轮已完成', 'Turn completed'], cancelled: ['本轮已取消', 'Turn cancelled'], failed: ['本轮失败', 'Turn failed'], interrupted: ['本轮意外中断', 'Turn interrupted'] };
+    return names[record.status] === undefined ? [] : [{ kind: 'meta', text: `${chooseText(locale, ...names[record.status])}${record.code === undefined ? '' : ` (${record.code})`}` }];
+  }
   // 人打的那一行原样画出来（D54）：展开后的那一份是给模型的，回看时要对得上当时敲了什么。
   if (record.kind === 'user') return [{ kind: 'question', text: record.raw ?? record.text }];
   if (record.kind === 'reasoning') return [{ kind: 'reasoning', text: record.text }];
@@ -149,8 +154,8 @@ export function contextSegment(usage) {
 // 待生效写成 `mode:minimal→full`。宽度不够时按「这一段能不能从别处再读到」退让：先把那一段最长的路径缩成最后一级目录名（认得出是哪一项目），
 // 再去工具数与上下文那两段，然后丢模型名、丢整段路径，最后才动记录条数——跑着那一轮的打断提示不能被挤掉，
 // 排在后面的那一段要为核心那几句留出固定的位置。
-export function buildStatusLine({ head, sessionId, boundary, status, running, seconds, expanded, columns }) {
-  const id = `会话 ${sessionId.slice(0, 8)}`;
+export function buildStatusLine({ head, sessionId, boundary, status, running, seconds, expanded, columns, locale = 'zh' }) {
+  const id = `${chooseText(locale, '会话', 'session')} ${sessionId.slice(0, 8)}`;
   const root = boundary === undefined ? '' : boundary;
   let base = `${head}${id}${root === '' ? '' : ` · ${root}`}`;
   if (status === null) return base;
@@ -162,7 +167,7 @@ export function buildStatusLine({ head, sessionId, boundary, status, running, se
   // 打断与展开那两句跟在条数之后：挤的时候条数先走，这两句留着。
   const hints = (running ? ` · ${Math.floor(seconds)} 秒，${keyHint('interrupt')} 打断` : '')
     + (expanded ? ` · 已展开（${keyHint('expand-or-history')} 收起）` : '');
-  let tail = `记录 ${status.eventCount} 条${hints}`;
+  let tail = `${chooseText(locale, `记录 ${status.eventCount} 条`, `${status.eventCount} events`)}${hints}`;
   let shown = parts;
   // 列数读不到时不裁：宁可让终端自己折行，也不要按一个猜的宽度丢东西。
   const line = () => `${base} · ${shown.join('  ')}${tail === '' ? '' : ` · ${tail}`}`;
@@ -204,17 +209,17 @@ export function detailTitle(detail) {
 
 // `/help` 那几行：界面命令、宿主交出来的提示模板、按键三组；宽度放不下就整组往下一层（D81）。
 // 提示模板列在这里不是为了在界面里展开它——那一条命令真正跑的是 `run.start`，展开归宿主（D24、D49）。
-export function helpLines(status, width) {
+export function helpLines(status, width, locale = 'zh') {
   const templates = status?.templates ?? [];
   const groups = [
-    { title: '命令', entries: UI_COMMANDS.map((command) => ({ key: command.usage, action: command.text })) },
+    { title: chooseText(locale, '命令', 'Commands'), entries: UI_COMMANDS.map((command) => ({ key: command.usage, action: locale === 'zh' ? command.text : command.name })) },
     {
-      title: '提示模板',
+      title: chooseText(locale, '提示模板', 'Prompt templates'),
       entries: templates.length === 0
-        ? [{ key: '(没有)', action: '在 .ligule/prompts/ 或 ~/.ligule/prompts/ 下放一份 markdown' }]
+        ? [{ key: '(none)', action: chooseText(locale, '在 .ligule/prompts/ 或 ~/.ligule/prompts/ 下放一份 markdown', 'Add a markdown file under .ligule/prompts/ or ~/.ligule/prompts/') }]
         : templates.map((template) => ({ key: `/${template.command}`, action: template.description ?? '' })),
     },
-    { title: '按键', entries: keyRows() },
+    { title: chooseText(locale, '按键', 'Keys'), entries: keyRows() },
   ];
   return flowGroups(groups, width);
 }
@@ -310,7 +315,7 @@ const processHistory = {
   },
 };
 
-export function App({ client, sessionId: firstSessionId, info = {}, interactive = true, stdout, history = processHistory, inputs, keys }) {
+export function App({ client, sessionId: firstSessionId, info = {}, interactive = true, stdout, history = processHistory, inputs, keys, locale = 'zh' }) {
   const app = useApp();
   const [sessionId, setSessionId] = useState(firstSessionId);
   const activeSession = useRef(sessionId);
@@ -510,7 +515,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         // 刚落盘的那一条取代流式期间的那半截：记录是事实源（I5），界面按它重画。
         if (message.event?.kind === 'assistant') setLive((current) => ({ ...current, text: '' }));
         if (message.event?.kind === 'reasoning') setLive((current) => ({ ...current, reasoning: '' }));
-        push(...projectRecord(message.event).map((row) => ({ ...row, seq: message.event.seq })));
+        push(...projectRecord(message.event, locale).map((row) => ({ ...row, seq: message.event.seq })));
         return;
       }
       if (message.notify === 'fault') push({ kind: 'error', text: `${message.code}：${message.detail ?? ''}` });
@@ -767,7 +772,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         setSessionId(picked.id);
         setSessionPicker(null);
         // 投影从那份记录重建，而不是接着画：换过来的这一份里发生过什么，只有记录说得出（I5）。
-        setRows(read.events.flatMap((event) => projectRecord(event).map((row) => ({ ...row, seq: event.seq }))));
+        setRows(read.events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq }))));
         setLive({ text: '', reasoning: '' });
         setDetail(null);
         const retired = await retiring;
@@ -1042,7 +1047,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           push({ kind: 'error', text: `记录里没有第 ${argument} 条（现有 ${read.events.length} 条，编号从 0 起）` });
           return;
         }
-        setDetail({ seq: picked.record.seq, kind: picked.record.kind, rows: projectRecord(picked.record) });
+        setDetail({ seq: picked.record.seq, kind: picked.record.kind, rows: projectRecord(picked.record, locale) });
       })();
       return;
     }
@@ -1085,13 +1090,13 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           seq: picked.record.seq,
           kind: 'subagent',
           branch: branch.sessionId,
-          rows: read.events.flatMap((event) => projectRecord(event)),
+          rows: read.events.flatMap((event) => projectRecord(event, locale)),
         });
       })();
       return;
     }
     if (name === 'help') {
-      push({ kind: 'meta', text: helpLines(status, stdout?.columns ?? 80).join('\n') });
+      push({ kind: 'meta', text: helpLines(status, stdout?.columns ?? 80, locale).join('\n') });
       return;
     }
     push({ kind: 'error', text: `没有这条命令：/${name}（/help 看列表）` });
@@ -1199,7 +1204,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         if (detail === null) {
           void client.request('session.read', { sessionId, fullResults: true }).then((read) => {
             if (activeSession.current !== sessionId) return;
-            const complete = read.events.flatMap((event) => projectRecord(event).map((row) => ({ ...row, seq: event.seq })));
+            const complete = read.events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq })));
             setDetail((current) => current?.kind === 'transcript' ? { ...current, rows: complete, loading: false } : current);
           }, (error) => push({ kind: 'error', text: `完整记录读不回来：${error.code ?? error.message}` }));
         }
@@ -1541,7 +1546,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           h(Text, { inverse: true }, caretText),
           draft.slice(caret + (caret === draft.length ? 0 : caretText.length)))),
     h(Text, { dimColor: true, wrap: 'truncate-end' }, buildStatusLine({
-      head, sessionId, boundary: info.boundary, status, running, seconds, expanded, columns: stdout?.columns,
+      head, sessionId, boundary: info.boundary, status, running, seconds, expanded, columns: stdout?.columns, locale,
     })),
   );
 }

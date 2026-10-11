@@ -235,6 +235,7 @@ export function App({ transport }: { transport: Transport }) {
   const [live, setLive] = useState({ text: '', reasoning: '' });
   // 流式那半截按会话各存一份：后台那一轮的片段留着，切回来先补上它，不等那一条落进记录（方案 3.1、审阅 F4）。
   const liveBySession = useRef(new Map<string, { text: string; reasoning: string }>());
+  const terminalBySession = useRef(new Map<string, number>());
   // 展示档之后的可见行数：补页回补靠它分「只有补页」与「补页期间底部也来了新行」两种情形。
   const shownCount = useRef(0);
   // 跑着的时候新到的询问排在后面：一次问一件事，答一件再画下一件。
@@ -551,6 +552,7 @@ export function App({ transport }: { transport: Transport }) {
       }
       if (message.notify === 'event') {
         const record = message.event as Record_;
+        if (record?.kind === 'turn') terminalBySession.current.set(owner, record.seq ?? -1);
         // 刚落盘的那一条取代流式期间的那半截：记录是事实源（I5）。后台那一份收掉的是它自己那半截。
         if (record?.kind === 'assistant') held.text = '';
         if (record?.kind === 'reasoning') held.reasoning = '';
@@ -849,10 +851,7 @@ export function App({ transport }: { transport: Transport }) {
     await openSession(sessionId);
   }, [sessionId, openSession]);
 
-  // 发一句给哪一份会话由 `own` 说定，不读屏幕上的那一份：跑着的这一轮从开始到收尾都只说得上它自己那一份。
-  // 收尾那几句（本轮结束、被打断、放回草稿、状态）只画在这一轮自己的画面上：人这时候切走了，眼前那一份不替另一份记一句。
-  // 回到那一份时读回来的是记录里有的那几行：跑完的那一轮有 `turn` 事件，画成「这一轮完整结束」；被打断的那一轮没有，
-  // 它留下的是这一轮自己的事件（含那一次被取消的提问），界面不替记录补一句它没写过的话（I5）。
+  // 输入与轮次终态按所属会话处理；后台结果不改变当前会话的队列。
   const submit = useCallback(async (text: string, own = sessionId) => {
     if (text === '' || own === null) return;
     const inView = () => active.current === own;
@@ -872,9 +871,9 @@ export function App({ transport }: { transport: Transport }) {
     roundStart.current.set(own, Date.now());
     setTick(Date.now());
     setRunningIds((current) => [...current, own]);
+    const previousTerminal = terminalBySession.current.get(own);
     try {
-      const result = await client.call('run.start', { sessionId: own, input: text }) as { iterations: number; modelCalls: number; completedBy?: string };
-      if (inView()) setRows((current) => [...current, metaRow('meta', `这一轮结束：跑了 ${result.iterations} 次迭代、${result.modelCalls} 次模型调用${result.completedBy === undefined ? '' : `，最后由 ${result.completedBy} 收尾`}`)]);
+      await client.call('run.start', { sessionId: own, input: text });
     } catch (error) {
       const stopped = code(error);
       // 打断落在还在跑的模型调用上时端点那一头交回 `provider_cancelled`，落在两组调用之间才是 `loop_cancelled`，
@@ -883,7 +882,8 @@ export function App({ transport }: { transport: Transport }) {
       // 没被宿主受理的那一句不丢：连接上的那几种失败说明这一句在记录里根本没有落过，把它放回草稿等一次显式的发送
       // （方案 5.1「未受理失败恢复文本」）。受理过之后才失败的那一种不在此列——那句话已经在记录里了。
       if (inView() && (stopped === 'host_unanswered' || stopped === 'host_closed' || stopped === 'host_restarted')) setDraft((current) => mergeQueueIntoDraft(current, [text]));
-      if (inView()) setRows((current) => [...current, metaRow(cancelled ? 'meta' : 'error', cancelled ? '这一轮已被打断' : `这一轮停住：${stopped}`)]);
+      if (inView() && terminalBySession.current.get(own) === previousTerminal) setRows((current) => [...current, metaRow(cancelled ? 'meta' : 'error', cancelled ? t('本轮已取消', 'Turn cancelled') : t(`无法开始本轮：${stopped}`, `Could not start the turn: ${stopped}`))]);
+      if (cancelled) patchQueue(own, (current) => ({ ...current, paused: true }));
     } finally {
       setRunningIds((current) => current.filter((id) => id !== own));
       roundStart.current.delete(own);
@@ -904,7 +904,7 @@ export function App({ transport }: { transport: Transport }) {
       if (!inView()) setUnread((current) => [...new Set([...current, own])]);
       void refreshStatus(own);
     }
-  }, [client, dropAsksOf, dropQueriesOf, patchQueue, refreshStatus, runningIds, sessionId]);
+  }, [client, dropAsksOf, dropQueriesOf, patchQueue, refreshStatus, runningIds, sessionId, t]);
 
   // 本轮收尾后把排着的第一条发出去：一次只发一条。暂停着就一条也不发——那几句是人在跑着的时候敲进来的，
   // 他按下的是取消，剩下怎么走要他再说一次（方案 5.2）。断着连接与重连那一段也不算「本轮收尾」：
