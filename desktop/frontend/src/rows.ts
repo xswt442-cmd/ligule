@@ -155,6 +155,14 @@ export function changeBody(change: Change, args: Record<string, unknown>, locale
 
 // 一次调用对人说清它动的是哪个对象：命令文本、路径、地址、那一项 MCP 能力名，都没有就退回一行参数。
 function argSummary(tool: string, args: Record<string, unknown>): string {
+  if (tool === 'ask_user_question' && Array.isArray(args.questions)) {
+    return args.questions.flatMap((question: unknown) => {
+      if (typeof question !== 'object' || question === null) return [];
+      const fields = question as Record<string, unknown>;
+      const title = fields.header ?? fields.question;
+      return typeof title === 'string' && title.trim() !== '' ? [title.trim()] : [];
+    }).join(' · ').slice(0, 160);
+  }
   const single = args.command ?? args.path ?? args.url ?? args.pattern ?? args.query ?? args.task;
   if (typeof single === 'string' && single !== '') return single;
   // `mcp.call` 的能力名已经在抬头上，摘要只给那一份输入（D52）。

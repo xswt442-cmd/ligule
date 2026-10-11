@@ -12,6 +12,17 @@ assert.equal(call.tool, 'mcp:demo/lookup');
 assert.equal(call.summary, '{"input":{"key":"x"}}');
 assert.match(call.text, /"server": "demo"/);
 
+const questionCall = projectRecord({
+  kind: 'assistant',
+  toolCalls: [{ id: 'q1', name: 'ask_user_question', args: { questions: [
+    { header: '验收方式', question: '逐项检查还是整体检查？', options: [{ label: '逐项检查' }] },
+    { question: '命名形式' },
+  ] } }],
+})[0];
+assert.equal(questionCall.summary, '验收方式 · 命名形式');
+assert.match(questionCall.text, /逐项检查还是整体检查/);
+assert.match(questionCall.text, /"options"/);
+
 assert.equal(capabilityOf('exec', { command: 'git status' }), 'exec');
 for (const status of ['completed', 'cancelled', 'failed', 'interrupted']) {
   const row = projectRecord({ seq: 42, kind: 'turn', status, code: status === 'failed' ? 'provider_http_error' : undefined })[0];
