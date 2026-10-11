@@ -7,6 +7,7 @@ import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { createConfig } from './kernel/config.js';
+import { languageOf, textOf } from './kernel/locale.js';
 import { loadConfigLayers } from './kernel/config-file.js';
 import { createConfigStore } from './kernel/config-store.js';
 import { createKernel } from './kernel/kernel.js';
@@ -37,11 +38,22 @@ let missingModeValue = false;
 let missingProjectValue = false;
 let modeFlag;
 let projectFlag;
+let langFlag;
 let jsonFlag = false;
 for (let index = 0; index < argv.length; index += 1) {
   const arg = argv[index];
   if (arg === '--json') {
     jsonFlag = true;
+    continue;
+  }
+  if (arg === '--lang') {
+    const value = argv[index + 1];
+    if (value === undefined) {
+      missingFlagValue = true;
+      break;
+    }
+    langFlag = value;
+    index += 1;
     continue;
   }
   if (arg === '--project') {
@@ -70,6 +82,14 @@ for (let index = 0; index < argv.length; index += 1) {
   positional.push(arg);
 }
 const [command, ...rest] = positional;
+let invalidLanguage = false;
+try { if (langFlag !== undefined) languageOf(langFlag); } catch { invalidLanguage = true; }
+
+let locale;
+function setLocale(config) {
+  locale = languageOf(langFlag ?? config?.ui?.language);
+  return locale;
+}
 
 async function configSnapshot(projectRoot = process.cwd()) {
   const layers = await loadConfigLayers({ projectRoot, flags });
@@ -77,7 +97,9 @@ async function configSnapshot(projectRoot = process.cwd()) {
   const user = { boundary: projectRoot, ...layers.user };
   // 扩展的来源在同一次装载里算出来（D68）：项目层与本地层里写的路径不算，那一条挡住的判断在这里看得见。
   const extensions = await extensionSources({ ...layers, user }, { projectRoot });
-  return { config: createConfig({ ...layers, user }), extensions, layers };
+  const config = createConfig({ ...layers, user });
+  setLocale(config);
+  return { config, extensions, layers };
 }
 
 // 模式名按 D44：`--mode` 覆盖一次运行，否则读配置里的 `mode`，两处都没写就是随包的 minimal。
@@ -122,7 +144,7 @@ async function kernelOrFail() {
   try {
     return await installedKernel();
   } catch (error) {
-    printFailure(error.code ?? 'cli_kernel_failed', error.detail);
+  printFailure(error.code ?? 'cli_kernel_failed', error.detail);
     return undefined;
   }
 }
@@ -220,7 +242,9 @@ async function runOneRound(config, selection, extensions, text, sessionId) {
   }
 }
 
-if (missingFlagValue) {
+if (invalidLanguage) {
+  printFailure('language_invalid', '--lang accepts zh, en, or auto');
+} else if (missingFlagValue) {
   printFailure('cli_config_needs_a_value');
 } else if (missingModeValue) {
   printFailure('cli_mode_needs_a_value', '--mode takes a mode name, e.g. --mode full');
@@ -425,7 +449,7 @@ if (missingFlagValue) {
       // 开发版把界面拖贵了一倍：两千条记录的转录下提交一行是 2.6 毫秒对 1.4 毫秒，进程常驻 155 MiB 对 114 MiB。
       process.env.NODE_ENV = 'production';
       const { runTui } = await import('./tui/start.js');
-      await runTui({ config, provider: providerFromConfig(config), policy: config.policy, extensions, ...resolveMode(config) });
+      await runTui({ config, provider: providerFromConfig(config), policy: config.policy, extensions, locale, ...resolveMode(config) });
     } catch (error) {
       const missing = error.code === 'ERR_MODULE_NOT_FOUND' && /Cannot find package '(ink|react|marked|highlight\.js|string-width)'/.test(String(error.message));
       printFailure(missing ? 'tui_dependency_missing' : error.code ?? 'cli_tui_failed',
@@ -433,13 +457,17 @@ if (missingFlagValue) {
     }
   }
 } else if (command === undefined || command === '--help' || command === '-h') {
-  console.log(`ligule ${pkg.version} - under development, do not depend on it.`);
-  console.log('commands: tools, skills, extensions, sessions, workspaces, policy <session-id>, run <text>, resume <id> <text>, call <tool> [json-args], tui, host, --version');
-  console.log('options: --config <key.path=value> (repeatable), --mode <name>');
-  console.log('run, tui and host read model.api ("messages" or "chat-completions"), model.baseURL and model.model from the config layers; the key comes from the environment variable named by model.apiKeyEnv, or LIGULE_API_KEY when that one is not written');
-  console.log('run, tui and host also pick a mode: --mode <name> overrides the config `mode`, and neither one written means the shipped "minimal" (D44); tools and call do not read one');
-  console.log('skills lists what this directory would load and why any skill was skipped; it reads the four skill directories and no model config');
-  console.log('the personal layer sits in the data root: ~/.ligule, or the absolute directory named by LIGULE_HOME; a relative value is refused with data_root_invalid (D110)');
+  if (locale === undefined) {
+    try { setLocale((await configSnapshot()).config); } catch { setLocale(undefined); }
+  }
+  const t = (zh, en) => textOf(locale ?? languageOf('auto'), zh, en);
+  console.log(t(`ligule ${pkg.version} - 开发中，请勿依赖。`, `ligule ${pkg.version} - under development, do not depend on it.`));
+  console.log(t('命令：tools, skills, extensions, sessions, workspaces, policy <session-id>, run <text>, resume <id> <text>, call <tool> [json-args], tui, host, --version', 'commands: tools, skills, extensions, sessions, workspaces, policy <session-id>, run <text>, resume <id> <text>, call <tool> [json-args], tui, host, --version'));
+  console.log(t('选项：--config <key.path=value>（可重复），--mode <name>，--lang <zh|en|auto>', 'options: --config <key.path=value> (repeatable), --mode <name>, --lang <zh|en|auto>'));
+  console.log(t('run、tui 与 host 从配置层读取 model.api（"messages" 或 "chat-completions"）、model.baseURL 和 model.model；密钥来自 model.apiKeyEnv 指定的环境变量，未指定时使用 LIGULE_API_KEY', 'run, tui and host read model.api ("messages" or "chat-completions"), model.baseURL and model.model from the config layers; the key comes from the environment variable named by model.apiKeyEnv, or LIGULE_API_KEY when that one is not written'));
+  console.log(t('run、tui 与 host 也会选择模式：--mode <name> 覆盖配置中的 mode；两处都未填写时使用随包提供的 "minimal"（D44）。tools 和 call 不读取模式', 'run, tui and host also pick a mode: --mode <name> overrides the config `mode`, and neither one written means the shipped "minimal" (D44); tools and call do not read one'));
+  console.log(t('skills 列出当前目录会加载的内容及跳过原因；它读取四个技能目录，不读取模型配置', 'skills lists what this directory would load and why any skill was skipped; it reads the four skill directories and no model config'));
+  console.log(t('个人配置层位于数据根：~/.ligule，或 LIGULE_HOME 指定的绝对目录；相对路径会以 data_root_invalid 拒绝（D110）', 'the personal layer sits in the data root: ~/.ligule, or the absolute directory named by LIGULE_HOME; a relative value is refused with data_root_invalid (D110)'));
 } else {
   // 打错的命令不该走帮助文本再退出 0：调用方是个脚本时，0 加一段帮助就是一次成功。
   printFailure('cli_command_unknown', `"${command}" is not a command; run ligule --help to list them`);

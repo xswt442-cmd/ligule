@@ -12,7 +12,7 @@ import { flushInput, inputPathOf, readInput, rememberInput } from './input-store
 import { flushKeys, keyPathOf, readKeys, writeKeys } from './key-store.js';
 import { titleEscape } from './output.js';
 
-export async function runTui({ config, provider, policy, logger, modeName, modePaths, extensions, stdout = process.stdout, stdin = process.stdin, stderr = process.stderr, editor = process.env.VISUAL || process.env.EDITOR, historyFile = historyPathOf(), inputFile = inputPathOf(), keyFile = keyPathOf() }) {
+export async function runTui({ config, provider, policy, logger, modeName, modePaths, extensions, locale = 'zh', stdout = process.stdout, stdin = process.stdin, stderr = process.stderr, editor = process.env.VISUAL || process.env.EDITOR, historyFile = historyPathOf(), inputFile = inputPathOf(), keyFile = keyPathOf() }) {
   const pair = createMemoryConnectionPair();
   // 终端界面答得了提问：这一路进来的时候 stdin 与 stdout 都已经是真终端（`ligule tui` 在没有终端时就停了）。
   const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy, logger, modeName, modePaths, extensions, interactive: true });
@@ -30,6 +30,7 @@ export async function runTui({ config, provider, policy, logger, modeName, modeP
       createElement(App, {
         client,
         sessionId,
+        locale,
         // 编辑器那一个命令名由启动这一侧读环境变量，界面自己不碰进程。
         info: { model: config.model?.model, boundary: config.boundary, editor },
         history,

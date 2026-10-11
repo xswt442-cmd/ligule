@@ -69,7 +69,7 @@ test('an unknown command is a failure, while asking for help is not', () => {
   for (const flag of [undefined, '--help', '-h']) {
     const asked = flag === undefined ? capture() : capture(flag);
     assert.ok(asked.ok, asked.stderr);
-    assert.match(asked.stdout, /commands: tools, skills, extensions, sessions/);
+    assert.match(asked.stdout, /(?:commands: |命令：)tools, skills, extensions, sessions/);
   }
 });
 
@@ -87,7 +87,23 @@ test('--config narrows the boundary from the command line and a valueless flag i
 test('--version prints the package version and the bare invocation lists the commands', () => {
   const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'));
   assert.equal(capture('--version').stdout.trim(), pkg.version);
-  assert.match(capture().stdout, /commands: tools, skills, extensions, sessions/);
+  assert.match(capture().stdout, /(?:commands: |命令：)tools, skills, extensions, sessions/);
+});
+
+test('--lang selects help text without requiring a model configuration', () => {
+  const english = capture('--help', '--lang', 'en');
+  assert.equal(english.ok, true, english.stderr);
+  assert.match(english.stdout, /commands: tools/);
+  assert.match(english.stdout, /--lang <zh\|en\|auto>/);
+
+  const chinese = capture('--help', '--lang', 'zh');
+  assert.equal(chinese.ok, true, chinese.stderr);
+  assert.match(chinese.stdout, /命令：tools/);
+  assert.match(chinese.stdout, /选项：/);
+
+  const invalid = capture('--help', '--lang', 'fr');
+  assert.equal(invalid.ok, false);
+  assert.match(invalid.stderr, /language_invalid/);
 });
 
 test('skills lists what this directory would load and says why anything was skipped', () => {
