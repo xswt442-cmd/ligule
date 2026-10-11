@@ -108,6 +108,7 @@ assert.deepEqual(projectRecord({ kind: 'usage', input: 1 }), []);
 const stamped = projectRecord({ seq: 12, kind: 'assistant', text: '两句', toolCalls: [{ id: 'c9', name: 'read', args: {} }] });
 assert.deepEqual(stamped.map((row) => row.seq), [12, 12], '一条记录出来的每一行都认得自己是哪一条事件');
 assert.equal(metaRow('meta', '界面自己写的一行').seq, undefined, '界面自己写的那几行没有序号可对');
+assert.equal(metaRow('meta', '界面自己写的一行', 'A system notice').english.text, 'A system notice', '系统行保留可切换的英文文本');
 
 // 展示档那一格筛的是行的种类：虚拟视口要量每一行的高度，藏着不画的那几类不进列表（D90、U48）。
 const answered = projectRecord({ kind: 'assistant', text: '一句' })[0];
@@ -132,7 +133,8 @@ assert.equal(projectRecord({ seq: 5, kind: 'turnContext' })[0], undefined, '几�
 const echoAsk = { questions: [{ id: 'q1', question: '用哪一种格式' }, { id: 'q2', question: '要不要带表头' }] };
 assert.equal(
   questionEcho(echoAsk, { q1: { picked: ['CSV'], extra: ' 压缩一份 ' }, q2: { picked: [], extra: '' } }),
-  '第 1 题「用哪一种格式」：CSV、压缩一份；第 2 题「要不要带表头」：没有打下答案',
+  '第 1 题「用哪一种格式」：CSV、压缩一份；第 2 题「要不要带表头」：没有作答',
 );
-assert.equal(questionEcho({ questions: [{ id: 'q1', question: '一个问题' }] }), '第 1 题「一个问题」：没有打下答案', '一格草稿都没有时不谎称答过');
+assert.equal(questionEcho({ questions: [{ id: 'q1', question: '一个问题' }] }), '第 1 题「一个问题」：没有作答', '一格草稿都没有时不谎称答过');
+assert.equal(questionEcho({ questions: [{ id: 'q1', question: 'Which format?' }] }, {}, 'en'), 'Question 1: “Which format?” — No answer entered', '英语提示翻译标签并保留题面原文');
 console.log('桌面前端的投影检查通过');

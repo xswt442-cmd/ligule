@@ -1,6 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
 import type { Transport } from './protocol';
+import type { Locale } from './locale';
 
 // 桌面壳的载体（D30）：一行一条帧，经 Tauri 的命令与事件在 WebView 与后端进程的两根管道之间搬进搬出。
 // 界面拿不到地址、端口与凭据，本机也不监听端口。
@@ -8,6 +10,13 @@ export function tauriTransport(): Transport {
   let fault: ((reason: string) => void) | undefined;
   let listening: Promise<unknown> = Promise.resolve();
   return {
+    notifications: {
+      permission: isPermissionGranted,
+      requestPermission,
+      show: ({ title, body, target, openLabel }) => invoke('show_notification', { title, body, target, openLabel }),
+      onOpen: (handle) => listen<string>('shell-notification-open', event => handle(event.payload)),
+      updateTray: (label: string, attention: boolean, language: Locale) => invoke('set_tray_status', { label, attention, language }),
+    },
     send: (frame) => {
       // 壳那一侧回不了话（后端进程不在了、管道断了）就报到故障那一条路上：帧发不出去是界面要知道的事。
       listening.then(() => invoke('host_send', { frame })).catch((reason: unknown) => {

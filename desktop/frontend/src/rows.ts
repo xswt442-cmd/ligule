@@ -196,8 +196,8 @@ function argsText(args: Record<string, unknown> | undefined): string {
 let sequence = 0;
 const nextId = (): number => (sequence += 1);
 
-export function metaRow(kind: 'meta' | 'error', text: string): Row {
-  return { id: nextId(), kind, text };
+export function metaRow(kind: 'meta' | 'error', text: string, english?: string): Row {
+  return { id: nextId(), kind, text, ...(english === undefined ? {} : { english: { text: english } }) };
 }
 
 // 记录里那一格是内核自己量的实际执行时间，不含审批等待（第 66 步）。
@@ -214,11 +214,15 @@ export function durationNote(startedAt: number, now: number): string {
 
 // 一张提问卡收掉时留下的那一句（审阅 F2）：题面与已经打下的字都读得到。
 // 一次请求只有一次答复（D107），卡片收掉之后那些字不会再交出去，所以要留在转录里。
-export function questionEcho(ask: { questions: { id: string; question: string }[] }, drafts: Record<string, { picked: string[]; extra: string }> = {}): string {
+export function questionEcho(ask: { questions: { id: string; question: string }[] }, drafts: Record<string, { picked: string[]; extra: string }> = {}, locale: 'zh' | 'en' = 'zh'): string {
   return ask.questions.map((question, index) => {
     const typed = [...(drafts[question.id]?.picked ?? []), (drafts[question.id]?.extra ?? '').trim()].filter((one) => one !== '');
-    return `第 ${index + 1} 题「${question.question}」：${typed.length === 0 ? '没有打下答案' : typed.join('、')}`;
-  }).join('；');
+    const prefix = locale === 'zh' ? `第 ${index + 1} 题「${question.question}」：` : `Question ${index + 1}: “${question.question}” — `;
+    const answer = typed.length === 0
+      ? (locale === 'zh' ? '没有作答' : 'No answer entered')
+      : typed.join(locale === 'zh' ? '、' : ', ');
+    return `${prefix}${answer}`;
+  }).join(locale === 'zh' ? '；' : '; ');
 }
 
 export function projectRecord(record: Record_, options: { startedAt?: number; now?: number } = {}): Row[] {

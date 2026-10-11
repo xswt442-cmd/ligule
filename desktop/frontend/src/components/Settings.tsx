@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useState } from 'react';
 import { Icon, type IconName } from './Icon';
 import { HoldSheet } from './HoldSheet';
 import { ModelPanel } from './ModelPanel';
+import { NotificationPanel } from './NotificationPanel';
 import { PolicyRules } from './PolicyRules';
 import { Group, Modal, Row } from './ui';
 import { holdReasons, report, type EditGate } from '../edit-gate';
@@ -11,8 +12,9 @@ import { code, type Client } from '../protocol';
 import type { WorkspaceRoster } from '../rail';
 import type { Status } from '../status';
 import { useText } from '../locale';
+import type { NotificationBridge } from '../notifications';
 
-const SECTIONS = ['general', 'appearance', 'model', 'rules', 'keys'] as const;
+const SECTIONS = ['general', 'appearance', 'model', 'rules', 'notifications', 'keys'] as const;
 
 type SectionId = (typeof SECTIONS)[number];
 
@@ -24,6 +26,9 @@ export type SettingsProps = {
   projectRoot: string;
   status: Status | null;
   settings: Settings;
+  notifications?: NotificationBridge;
+  notificationProblem: string | null;
+  notificationPending: boolean;
   patch: (part: Partial<Settings>) => void;
   // 键位那一栏要说的两件都在外面读回来：本机那一格里落不下来的那几条，与现在这一份表。
   keyNotice: string;
@@ -31,6 +36,7 @@ export type SettingsProps = {
   counts: { sent: number; received: number };
   waiting: number;
   onReconnect: () => void;
+  onEdit: (reasons: string[]) => void;
   onClose: () => void;
 };
 
@@ -40,6 +46,10 @@ export function SettingsDialog(props: SettingsProps) {
   const [gate, setGate] = useState<EditGate>({});
   const [holding, setHolding] = useState<{ reasons: string[]; go: () => void } | null>(null);
   const { settings, patch } = props;
+  useEffect(() => {
+    props.onEdit(holdReasons(gate));
+    return () => props.onEdit([]);
+  }, [gate, props.onEdit]);
 
   const reports = useMemo(() => ({
     model: (reason: string) => setGate((now) => report(now, 'model', reason)),
@@ -69,10 +79,12 @@ export function SettingsDialog(props: SettingsProps) {
         ><Icon name={sectionIcon(id)} size={14} /><span>{sectionTitle(id, t)}</span></button>)}
       </nav>
       <div className="sheet-body" role="tabpanel">
+        {props.notificationPending && <p className="session-note">{t('关闭设置后将打开通知对应的会话。', 'Close settings to open the conversation from your notification.')}</p>}
         {section === 'general' && <General client={props.client} language={settings.language} patch={patch} />}
         {section === 'appearance' && <Appearance settings={settings} patch={patch} />}
         {section === 'model' && <Model client={props.client} sessionId={props.sessionId} projectRoot={props.projectRoot} onEdit={reports.model} />}
         {section === 'rules' && <PolicyRules client={props.client} projectRoot={props.projectRoot} onEdit={reports.rules} />}
+        {section === 'notifications' && <NotificationPanel preferences={settings.notifications} bridge={props.notifications} problem={props.notificationProblem} onChange={notifications => patch({ notifications })} />}
         {section === 'keys' && <Keys settings={settings} patch={patch} notice={props.keyNotice} />}
       </div>
     </Modal>
@@ -90,6 +102,7 @@ function sectionTitle(id: SectionId, t: (chinese: string, english: string) => st
     appearance: ['外观', 'Appearance'],
     model: ['模型服务', 'Model services'],
     rules: ['审批规则', 'Approval rules'],
+    notifications: ['通知', 'Notifications'],
     keys: ['快捷键', 'Keyboard shortcuts'],
   };
   const [chinese, english] = titles[id];
@@ -97,7 +110,7 @@ function sectionTitle(id: SectionId, t: (chinese: string, english: string) => st
 }
 
 function sectionIcon(id: SectionId): IconName {
-  const icons: Record<SectionId, IconName> = { general: 'gear', appearance: 'spark', model: 'folder', rules: 'check', keys: 'copy' };
+  const icons: Record<SectionId, IconName> = { general: 'gear', appearance: 'spark', model: 'folder', rules: 'check', notifications: 'bell', keys: 'copy' };
   return icons[id];
 }
 
@@ -328,8 +341,7 @@ function Keys({ settings, patch, notice }: { settings: Settings; patch: Settings
   </>;
 }
 
-// 模型与端点这一栏读 `config.get`、写 `config.set`，只能改那四条模型字段，落进使用者默认或当前项目的本机覆盖两层之一（方案 7.2）。
-// 改完谁什么时候用上它，由这一栏下面那份读数自己说（第 91 步）。审批规则不在这里：它在「审批规则」那一栏。
+// 模型服务经 Host 保存到用户默认或项目本地配置，会话的模型选择由输入区管理。
 function Model({ client, sessionId, projectRoot, onEdit }: {
   client: Client;
   sessionId: string | null;

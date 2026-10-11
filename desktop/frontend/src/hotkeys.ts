@@ -23,7 +23,7 @@ const BARE_MODIFIERS = ['control', 'shift', 'alt', 'meta'];
 const KEY_NAMES: Readonly<Record<string, string>> = {
   enter: 'Enter', escape: 'Esc', tab: 'Tab', backspace: 'Backspace', delete: 'Delete',
   arrowup: '↑', arrowdown: '↓', arrowleft: '←', arrowright: '→',
-  pageup: 'PageUp', pagedown: 'PageDown', home: 'Home', end: 'End', ' ': '空格',
+  pageup: 'PageUp', pagedown: 'PageDown', home: 'Home', end: 'End', ' ': 'Space',
 };
 
 export const KEYMAP: Readonly<Record<KeyAction, Binding>> = {
