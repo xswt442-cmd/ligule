@@ -44,6 +44,11 @@ const RENDER_WINDOW = 400;
 // 这一格要留成正数，所以从一个足够大的数起：往前每插一页就从它里面减掉插进去的行数，起得太小会减成负数。
 const FIRST_INDEX = 100_000;
 
+// 行组件保持固定身份，翻页和语言切换不重建已展开的内容。
+function StreamItem({ children, style, ...rest }: ItemProps<Row>) {
+  return <div {...rest} style={style} className="stream-row">{children}</div>;
+}
+
 // 补页之后的视口回补：virtuoso 按当时记下的高度把补进来的那一页接上去，真实行高一量准，
 // 视口会落在锚点下方一屏多的地方（P5 第 35、37 趟各差约 1500 像素）。`scrollTop` 与 `scrollHeight`
 // 同一把尺：等尺寸稳下来之后把「离内容上沿的距离」拨回原值，等于视口没动；补页期间底部也来了新行时不拨。
@@ -421,11 +426,13 @@ export function App({ transport }: { transport: Transport }) {
   const [settingsReady, setSettingsReady] = useState(false);
   const unsavedInputs = useRef(new Map<string, { root: string; id: string; draft?: string; items?: string[] }>());
   const [prefsFailure, setPrefsFailure] = useState<string | null>(null);
+  const [prefsDetails, setPrefsDetails] = useState('');
   const [prefsRevision, setPrefsRevision] = useState(0);
   useEffect(() => {
     let live = true;
     setSettingsReady(false);
     setPrefsFailure(null);
+    setPrefsDetails('');
     const settled = loadSettings(client).then(
       (adopted) => {
         if (!live) return;
@@ -434,7 +441,10 @@ export function App({ transport }: { transport: Transport }) {
         setSettingsReady(true);
       },
       (error) => {
-        if (live) setPrefsFailure(code(error));
+        if (live) {
+          setPrefsFailure(code(error));
+          setPrefsDetails(error instanceof Error ? error.message : String(error));
+        }
         throw error;
       },
     );
@@ -562,6 +572,7 @@ export function App({ transport }: { transport: Transport }) {
     void persistInputs().catch((error) => {
       setSettingsReady(false);
       setPrefsFailure(code(error));
+      setPrefsDetails(error instanceof Error ? error.message : String(error));
       if (saveWarned.current) return;
       saveWarned.current = true;
       setRows((current) => [...current, metaRow('error', '草稿未能保存。请重试，或先复制内容。', 'Could not save the draft. Try again or copy its contents first.')]);
@@ -898,6 +909,7 @@ export function App({ transport }: { transport: Transport }) {
       newParameters.current = params;
       opening.current = null;
       active.current = null;
+      setMobileSidebar(false);
       setSessionId(null);
       setSessionLabel({ name: '', archived: false });
       setInputOwner(null);
@@ -1150,6 +1162,7 @@ export function App({ transport }: { transport: Transport }) {
       await transport.quit?.();
     } catch (error) {
       setPrefsFailure(code(error));
+      setPrefsDetails(error instanceof Error ? error.message : String(error));
       quitting.current = false;
       setClosing(false);
     }
@@ -1353,7 +1366,7 @@ export function App({ transport }: { transport: Transport }) {
   // 身份用 `useMemo` 稳住：每次渲染都换一个新组件会让视口把挂着的行重建一遍。
   const viewport = useMemo(() => ({
     // 换外壳要连着 Virtuoso 读尺寸用的那几格 `data-*` 一起递出去，只转 children 与 style 会让它量不到行高（U48）。
-    Item: ({ children, style, ...rest }: ItemProps<Row>) => <div {...rest} style={style} className="stream-row">{children}</div>,
+    Item: StreamItem,
     Header: () => <div className="stream-band">
       {page?.hasMore === true && <button type="button" className="earlier" disabled={olderLoading} onClick={() => void showEarlier()}>
         {olderLoading ? t('正在加载…', 'Loading…') : t('加载更早记录', 'Load earlier records')}
@@ -1480,9 +1493,9 @@ export function App({ transport }: { transport: Transport }) {
 
     <main className="center">
       {prefsFailure !== null && <div className="banner" role="alert">
-        <span>{t('草稿尚未保存。请重试，或先复制输入内容。', 'Draft not saved. Retry, or copy your input before leaving.')}</span>
+        <span>{t('无法保存更改。请重试，离开前请复制草稿。', 'Could not save changes. Retry, or copy your draft before leaving.')}</span>
         <button type="button" onClick={() => setPrefsRevision((value) => value + 1)}>{t('重试', 'Retry')}</button>
-        <details><summary>{t('详情', 'Details')}</summary><code>{prefsFailure}</code></details>
+        <details><summary>{t('详情', 'Details')}</summary><code>{prefsFailure}</code>{prefsDetails !== prefsFailure && <p>{prefsDetails}</p>}</details>
       </div>}
       <header className="topbar">
         {collapsed && <button type="button" className="icon-button" aria-label={t('展开侧栏', 'Show sidebar')} onClick={() => patch({ collapsed: false })}><Icon name="sidebar" /></button>}

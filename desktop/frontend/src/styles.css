@@ -465,6 +465,12 @@ body {
 
 /* 按钮、输入、选择器与文本框共用一份尺寸（方案 4.1）：命中区约 32 像素起、字走控件那一档。
    要嵌在别一格里面的（查找那一格里的输入、色板、代码块角落那枚复制）自己把边与底色改掉。 */
+input[type="range"],
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--accent);
+}
+
 button,
 input:not([type="range"]),
 select,
@@ -1078,6 +1084,17 @@ button:disabled {
 
 .banner code {
   color: var(--bad);
+}
+
+.banner details {
+  min-inline-size: 0;
+  max-inline-size: 50%;
+  overflow-wrap: anywhere;
+}
+
+.banner details[open] {
+  max-block-size: 20vh;
+  overflow: auto;
 }
 
 .banner button {
