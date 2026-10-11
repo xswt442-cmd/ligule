@@ -115,7 +115,7 @@ jobs:
       # 全新安装那一份：tarball 装进一个空目录，依赖按声明解析并下载，再查版本、工具数、TUI 那一条拒绝、
       # 两种命令语法与搜索后端。check-pack 从开发树复制依赖，证明不了「声明装得出来」。
       - name: install the packed artifact into an empty directory
-        run: npm run verify-install
+        run: npm run verify-install -- --local-search
 
   # 桌面壳（D34、D106）：四行目标各在一具本机平台上构出来，产物只上传成检查用的附件，不发 Release。
   # 每一行的安装包类型来自 `desktop/src-tauri/tauri.<平台>.conf.json`，不在主配置里塞一张跨平台的清单：
@@ -145,7 +145,7 @@ jobs:
             node: ./desktop/vendor/node/node
             artifact: desktop/src-tauri/target/release/bundle/dmg/*.dmg
           - id: macos-x64
-            # Node 的 x64 macOS 档案在 Experimental 一档，RELEASE.md 那一句跟着走。
+            # 两种 macOS 架构分别使用本机运行时构建和检查。
             os: macos-15-intel
             node: ./desktop/vendor/node/node
             artifact: desktop/src-tauri/target/release/bundle/dmg/*.dmg
@@ -231,9 +231,16 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          codesign --verify --deep --strict desktop/src-tauri/target/release/bundle/macos/ligule.app
           for image in desktop/src-tauri/target/release/bundle/dmg/*.dmg; do
             hdiutil verify "$image"
+            mount_point=$(mktemp -d "$RUNNER_TEMP/ligule-dmg.XXXXXX")
+            hdiutil attach "$image" -readonly -nobrowse -mountpoint "$mount_point"
+            trap 'hdiutil detach "$mount_point"' EXIT
+            codesign --verify --deep --strict "$mount_point/ligule.app"
+            codesign --display --verbose=4 "$mount_point/ligule.app" 2>&1 | grep 'Signature=adhoc'
+            hdiutil detach "$mount_point"
+            trap - EXIT
+            rmdir "$mount_point"
           done
 
       # 出包一失败就把 linuxdeploy 自己的话逼出来：`failed to run linuxdeploy` 那一句不带它的 stderr，
