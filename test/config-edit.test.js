@@ -1,9 +1,10 @@
 // 配置写入侧那份纯逻辑与那一次落盘的检查（方案 7.2）：保住注释、顺序与换行形状，撞了版本就报。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { isDeepStrictEqual } from 'node:util';
 import { parse } from 'smol-toml';
 import lockfile from 'proper-lockfile';
 import {
@@ -42,7 +43,9 @@ test('a config value changes in place and everything else stays where it was', (
 });
 
 test('a missing key is added inside its own table, a missing table at the end', () => {
-  const added = apply('[model]\napi = "messages"\n\n[policy]\ntier = "ask"\n', 'model.model', '甲');
+  const missing = editTomlValue('[model]\napi = "messages"\n\n[policy]\ntier = "ask"\n', ['model', 'model'], '"甲"');
+  const added = missing.text;
+  assert.equal(missing.created, true, '补入字段时标记创建');
   assert.equal(added, '[model]\napi = "messages"\nmodel = "甲"\n\n[policy]\ntier = "ask"\n');
   const whole = apply('[limits]\ncontextTokens = 1\n', 'model.model', '乙');
   assert.equal(whole, '[limits]\ncontextTokens = 1\n\n[model]\nmodel = "乙"\n');
@@ -53,6 +56,13 @@ test('a root-level dotted key is the same thing as the one inside that table', (
   const edited = apply('model.model = "old" # 顶层写法\n\n[limits]\ncontextTokens = 1\n', 'model.model', 'new');
   assert.ok(edited.includes('model.model = "new" # 顶层写法'), edited);
   assert.equal(parse(edited).model.model, 'new');
+});
+
+test('a missing sibling of a root-level dotted key stays in the root table', () => {
+  const text = 'model.api = "messages"\n\n[limits]\ncontextTokens = 1\n';
+  const edited = editTomlValue(text, ['model', 'model'], '"new"');
+  assert.equal(edited.text, 'model.api = "messages"\nmodel.model = "new"\n\n[limits]\ncontextTokens = 1\n');
+  assert.equal(parse(edited.text).model.model, 'new');
 });
 
 test('mixed line endings and a CRLF file keep the shape each line already had', () => {
@@ -100,6 +110,13 @@ test('a quoted key and a spaced or quoted table header are the same key', () => 
   assert.equal(editTomlValue('[ model ]\nmodel = "old"\n', ['model', 'model'], '"new"').created, false, '那一张表已经在了，不是补一张新的');
   // 顶层那一条点号键两侧的空格也一样认下来。
   assert.equal(parse(editTomlValue('model . model = "old"\n', ['model', 'model'], '"new"').text).model.model, 'new');
+});
+
+test('escaped table and key names resolve to the configured path', () => {
+  const text = '["mo\\u0064el"]\n"mo\\u0064el" = "old" # 保留这一行\n';
+  const edited = editTomlValue(text, ['model', 'model'], '"new"');
+  assert.equal(edited.text, '["mo\\u0064el"]\n"mo\\u0064el" = "new" # 保留这一行\n');
+  assert.equal(parse(edited.text).model.model, 'new');
 });
 
 test('a key with the same name in another table is not the one being changed', () => {
@@ -196,6 +213,13 @@ test('adding a rule lands at the end of that table, before the comment belonging
   assert.equal(parse(edited.text).limits.contextTokens, 200000);
 });
 
+test('adding the first rule to a populated document keeps a section break', () => {
+  const edited = editRuleTable('[policy]\nmode = "ask"\n', 'add', 0, { tool: 'read', decision: 'allow' });
+  assert.equal(edited.created, true);
+  assert.equal(edited.text, '[policy]\nmode = "ask"\n\n[[policy.rules]]\ntool = "read"\ndecision = "allow"\n');
+  assert.deepEqual(readRules(edited.text), [{ tool: 'read', decision: 'allow' }]);
+});
+
 test('changing one key of a rule keeps the other lines and drops the key the new rule does not carry', () => {
   const edited = editRuleTable(RULES, 'update', 1, { tool: 'exec', decision: 'deny', reason: '写之前先问' });
   const rules = readRules(edited.text);
@@ -249,6 +273,19 @@ test('a scalar added while the table exists only as an array of tables lands abo
   assert.equal(parse(edited.text).policy.rules.length, 1);
   const commented = editTomlValue('# 让模型自己读\n[[policy.rules]]\ntool = "read"\ndecision = "allow"\n', ['policy', 'mode'], '"auto"');
   assert.ok(commented.text.startsWith('[policy]\nmode = "auto"\n\n# 让模型自己读\n[[policy.rules]]'), '那句注释仍说的是下面那一段：' + commented.text);
+});
+
+test('a missing parent table is inserted before a commented descendant with its local line ending', () => {
+  const text = '# 子表说明\r\n[model.service]\r\nname = "one"\r\n';
+  const edited = editTomlValue(text, ['model', 'model'], '"new"');
+  assert.equal(edited.text, '[model]\r\nmodel = "new"\r\n\r\n# 子表说明\r\n[model.service]\r\nname = "one"\r\n');
+  assert.equal(parse(edited.text).model.model, 'new');
+  assert.equal(parse(edited.text).model.service.name, 'one');
+});
+
+test('a missing key uses the line ending of its own table row', () => {
+  const text = '[model]\r\napi = "messages"\n';
+  assert.equal(editTomlValue(text, ['model', 'model'], '"new"').text, '[model]\r\napi = "messages"\nmodel = "new"\n');
 });
 
 test('a rule index this file does not have is said plainly, and an empty file gets the table', () => {
@@ -357,4 +394,145 @@ test('removing a rule keeps the comments sitting on the next rule', () => {
   const edited = editRuleTable(text, 'remove', 0);
   assert.equal(edited.text, '# 只读的 diff\n[[policy.rules]]\ntool = "exec"\nmatch = "git diff*"\ndecision = "allow"\n');
   assert.equal(parse(edited.text).policy.rules.length, 1, '留下的那一条一个字没动');
+});
+
+test('removing a rule removes its nested tables and preserves the next rule comments', () => {
+  const text = '# 第一项\n[[policy.rules]]\ntool = "first"\ndecision = "deny"\n[policy.rules.meta]\nnote = "discard"\n\n# 第二项\n[[policy.rules]]\ntool = "second"\ndecision = "allow"\n[policy.rules.meta]\nnote = "keep"\n';
+  const edited = editRuleTable(text, 'remove', 0);
+  assert.equal(edited.text, '# 第二项\n[[policy.rules]]\ntool = "second"\ndecision = "allow"\n[policy.rules.meta]\nnote = "keep"\n');
+  const parsed = parse(edited.text).policy.rules[0];
+  assert.deepEqual({ ...parsed, meta: { ...parsed.meta } }, { tool: 'second', decision: 'allow', meta: { note: 'keep' } });
+});
+
+test('updating a rule inserts fields before its nested table and preserves that table', () => {
+  const text = '[[policy.rules]]\ntool = "read"\ndecision = "allow"\n[policy.rules.meta]\nnote = "keep"\n';
+  const edited = editRuleTable(text, 'update', 0, { tool: 'read', decision: 'deny', match: 'src/**' });
+  assert.equal(edited.text, '[[policy.rules]]\ntool = "read"\ndecision = "deny"\nmatch = "src/**"\n[policy.rules.meta]\nnote = "keep"\n');
+  assert.equal(parse(edited.text).policy.rules[0].meta.note, 'keep');
+});
+
+test('removing or appending around an interleaved unrelated table keeps its bytes and table ownership', () => {
+  const text = '# 目标规则\n[[policy.rules]]\ntool = "read"\ndecision = "allow"\n\n# 独立表\n[unrelated]\nvalue = 1\n\n# 规则子表\n[policy.rules.meta]\nnote = "属于规则"\n\n# 后续表\n[after]\nvalue = 2\n';
+  const removed = editRuleTable(text, 'remove', 0).text;
+  const removedValue = parse(removed);
+  assert.deepEqual({ unrelated: { ...removedValue.unrelated }, after: { ...removedValue.after } }, { unrelated: { value: 1 }, after: { value: 2 } });
+  assert.ok(!removed.includes('# 目标规则'));
+  assert.ok(!removed.includes('# 规则子表'));
+  assert.ok(removed.includes('# 独立表\n[unrelated]\nvalue = 1\n'));
+  assert.ok(removed.includes('# 后续表\n[after]\nvalue = 2\n'));
+
+  const added = editRuleTable(text, 'add', 1, { tool: 'find', decision: 'allow' }).text;
+  const addedValue = parse(added);
+  assert.deepEqual(addedValue.policy.rules.map((rule) => ({
+    ...rule,
+    ...(rule.meta === undefined ? {} : { meta: { ...rule.meta } }),
+  })), [
+    { tool: 'read', decision: 'allow', meta: { note: '属于规则' } },
+    { tool: 'find', decision: 'allow' },
+  ]);
+  assert.deepEqual({ ...addedValue.unrelated }, { value: 1 });
+  assert.deepEqual({ ...addedValue.after }, { value: 2 });
+  assert.ok(added.includes('# 独立表\n[unrelated]\nvalue = 1\n'));
+  assert.ok(added.includes('# 规则子表\n[policy.rules.meta]\nnote = "属于规则"\n'));
+  assert.ok(added.includes('# 后续表\n[after]\nvalue = 2\n'));
+});
+
+test('the 37 R2 span scenarios run against the built editor', () => {
+  const fields = ['tool', 'match', 'decision', 'reason'];
+  const nextRule = { tool: 'find', decision: 'allow' };
+  const updateRule = { tool: 'read', decision: 'deny' };
+  const cases = [];
+  const addScalar = (name, text, literal = '"old-model"', promised = true) => {
+    cases.push({ name, text, kind: 'scalar', exact: text.replace(literal, '"new-model"'), promised });
+  };
+
+  addScalar('scalar-basic', '[model]\nmodel = "old-model" # 模型\n[future]\nvalue = 42\n');
+  addScalar('scalar-spacing', '[model]\n  model\t=\t\t"old-model"  # 模型\n[future]\nvalue = 42\n');
+  addScalar('scalar-mixed-eol', '[model]\r\nmodel = "old-model"\napi = "messages"\r\n');
+  addScalar('scalar-spaced-header', '[ "model" ]\nmodel = "old-model"\n');
+  addScalar('scalar-escaped-table', '["mo\\u0064el"]\nmodel = "old-model"\n', '"old-model"', false);
+  addScalar('scalar-escaped-key', '[model]\n"mo\\u0064el" = "old-model"\n', '"old-model"', false);
+  addScalar('scalar-root-dotted', 'model.model = "old-model" # 说明\n[future]\nvalue = 42\n');
+  addScalar('scalar-quoted-dotted', '"model" . "model" = "old-model"\n[future]\nvalue = 42\n');
+  addScalar('scalar-unicode-prefix', 'title = "🌿中文"\n[model]\nmodel = "old-model"\n[future]\nvalue = "另一个值"\n');
+  addScalar('scalar-no-final-newline', '[model]\nmodel = "old-model"');
+  addScalar('scalar-string-body', '[model]\nabout = """\n[future]\nmodel = "正文"\n"""\nmodel = "old-model"\n');
+  addScalar('scalar-four-quote-ending', '[model]\nabout = """正文末尾一个引号""""\nmodel = "old-model"\n');
+  addScalar('scalar-rich-unknown', '[model]\nmodel = "old-model"\n[future]\nnumber = 0xDEAD_BEEF\nfloating = 1_000.50\nnegativeZero = -0.0\ninfinite = inf\nnotANumber = nan\nwhen = 2026-10-10T10:11:12.123456789+08:00\nlocal = 2026-10-10\nvalues = [{ dotted = { key = "值" } }, { dotted = { key = "其他" } }]\n');
+
+  const canonical = '# 文件说明\n[policy]\nmode = "ask"\n\n# REMOVE-ME\n[[policy.rules]]\ntool = "read"\ndecision = "allow"\n\n# KEEP-ME\n[[policy.rules]]\ntool = "exec"\ndecision = "allow"\n\n# INDEPENDENT\n\n[future]\nvalue = 42\n';
+  const ruleDocuments = [
+    ['rules-basic', canonical, true],
+    ['rules-crlf', canonical.replaceAll('\n', '\r\n'), true],
+    ['rules-escaped-table', canonical.replaceAll('[[policy.rules]]', '[["po\\u006cicy".rules]]'), false],
+    ['rules-nested-unknown', canonical.replace('decision = "allow"\n\n# KEEP-ME', 'decision = "allow"\n[policy.rules.extra]\nvalue = 7\n\n# KEEP-ME'), true],
+    ['rules-multiline-reason', canonical.replace('tool = "read"', 'tool = "read"\nreason = """\n[[policy.rules]]\ndecision = "deny"\n"""'), true],
+    ['rules-quoted-dot-unknown', '["policy.rules"]\nvalue = "不要编辑"\n\n' + canonical, true],
+    ['rules-inline-array', '[policy]\nmode = "ask"\nrules = [{ tool = "read", decision = "allow" }, { tool = "exec", decision = "allow" }]\n[future]\nvalue = 42\n', false],
+    ['rules-unknown-rule-field', canonical.replace('tool = "read"', 'tool = "read"\ncustom = { nested = [1, 2, 3] }'), true],
+  ];
+  for (const [name, text, promised] of ruleDocuments) {
+    for (const action of ['add', 'update', 'remove']) cases.push({ name: `${name}-${action}`, text, kind: 'rule', action, promised });
+  }
+
+  const expectedValues = (item) => {
+    const value = parse(item.text);
+    if (item.kind === 'scalar') value.model.model = 'new-model';
+    else if (item.action === 'add') value.policy.rules.push(nextRule);
+    else if (item.action === 'remove') value.policy.rules.splice(0, 1);
+    else {
+      for (const field of fields) {
+        if (updateRule[field] === undefined) delete value.policy.rules[0][field];
+        else value.policy.rules[0][field] = updateRule[field];
+      }
+    }
+    return value;
+  };
+  const results = [];
+  for (const item of cases) {
+    try {
+      const output = item.kind === 'scalar'
+        ? editTomlValue(item.text, ['model', 'model'], '"new-model"').text
+        : editRuleTable(item.text, item.action, 0, item.action === 'add' ? nextRule : updateRule).text;
+      // TOML 解析表使用空原型；新增项是普通对象，两者的原型不属于配置语义。
+      const semanticPass = isDeepStrictEqual(structuredClone(parse(output)), structuredClone(expectedValues(item)));
+      const commentsPass = ['# KEEP-ME', '# INDEPENDENT'].every(value => !item.text.includes(value) || output.includes(value))
+        && (!item.text.includes('# REMOVE-ME') || output.includes('# REMOVE-ME') === (item.action !== 'remove'));
+      const exactBytes = item.exact === undefined ? undefined : output === item.exact;
+      const result = { name: item.name, promised: item.promised, semanticPass, commentsPass, ...(exactBytes === undefined ? {} : { exactBytes }) };
+      results.push(result);
+    } catch (error) {
+      const result = { name: item.name, promised: item.promised, error: error.code ?? error.name };
+      results.push(result);
+    }
+  }
+  console.log(JSON.stringify({ r2SpanResults: results }));
+  assert.equal(results.length, 37);
+  for (const item of results) {
+    if (item.name.startsWith('rules-inline-array-')) assert.equal(item.error, 'config_edit_shape_unsupported', item.name);
+    else assert.equal(item.error === undefined && item.semanticPass && item.commentsPass && item.exactBytes !== false, true, item.name);
+  }
+});
+
+test('atomic config writes preserve permissions and do not touch another temporary file', async () => {
+  const scratch = join(process.cwd(), 'testplace', 'tmp');
+  await mkdir(scratch, { recursive: true });
+  const directory = await mkdtemp(join(scratch, 'config-permissions-'));
+  const file = join(directory, 'config.toml');
+  try {
+    await writeFile(`${file}.tmp`, 'another writer owns these bytes', 'utf8');
+    const first = await writeConfigField(file, { field: 'model.model', value: 'first', version: '' });
+    assert.equal(await readFile(`${file}.tmp`, 'utf8'), 'another writer owns these bytes');
+    if (process.platform !== 'win32') {
+      assert.equal((await stat(file)).mode & 0o777, 0o600);
+      await chmod(file, 0o640);
+    }
+    await writeConfigField(file, { field: 'model.model', value: 'second', version: first.version });
+    if (process.platform !== 'win32') assert.equal((await stat(file)).mode & 0o777, 0o640);
+    await assert.rejects(writeConfigField(file, { field: 'model.model', value: 'stale', version: first.version }), error => error.code === 'config_version_stale');
+    assert.equal(parse(await readFile(file, 'utf8')).model.model, 'second');
+    assert.deepEqual((await readdir(directory)).sort(), ['config.toml', 'config.toml.tmp']);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
