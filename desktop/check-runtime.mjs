@@ -4,13 +4,14 @@ import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { releaseManifest } from '../scripts/pack-release.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const vendor = join(root, 'desktop', 'vendor');
 const target = `${process.platform}-${process.arch}`;
 const nodePin = JSON.parse(await readFile(join(root, 'desktop', 'node-pin.json'), 'utf8'));
 const ripgrepPin = JSON.parse(await readFile(join(root, 'scripts', 'ripgrep-pin.json'), 'utf8'));
-const packageJson = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
+const packageJson = releaseManifest();
 const nodePath = join(vendor, 'node', process.platform === 'win32' ? 'node.exe' : 'node');
 const app = join(vendor, 'app');
 const appModules = join(app, 'node_modules');
@@ -26,6 +27,11 @@ if (nodePin.version !== process.version) {
 if (targetInfo === undefined) throw new Error(`no search package is pinned for ${target}`);
 if (packageJson.optionalDependencies?.[targetInfo.package] !== packageJson.version) {
   throw new Error(`${targetInfo.package} is not pinned to ligule@${packageJson.version}`);
+}
+const vendoredPackage = JSON.parse(await readFile(join(app, 'package.json'), 'utf8'));
+if (vendoredPackage.name !== packageJson.name || vendoredPackage.version !== packageJson.version
+  || JSON.stringify(vendoredPackage.optionalDependencies) !== JSON.stringify(packageJson.optionalDependencies)) {
+  throw new Error('the vendored app package manifest does not match the generated release manifest');
 }
 
 const cli = join(app, 'dist', 'cli.js');

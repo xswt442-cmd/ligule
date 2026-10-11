@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { releaseManifest } from '../scripts/pack-release.js';
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
 
@@ -35,12 +36,18 @@ test('the package description carries both languages', () => {
 
 test('the ripgrep platform packages move with the release and ship what the build script writes', () => {
   const pkg = JSON.parse(read('../package.json'));
+  const release = releaseManifest();
   const pin = JSON.parse(read('../scripts/ripgrep-pin.json'));
+  assert.deepEqual(
+    Object.keys(release.optionalDependencies).filter((name) => name.startsWith('ligule-rg-')).sort(),
+    Object.values(pin.targets).map((target) => target.package).sort(),
+  );
   for (const target of Object.values(pin.targets)) {
     const manifest = JSON.parse(read(`../packages/${target.directory}/package.json`));
     assert.equal(manifest.name, target.package, `packages/${target.directory} is named ${manifest.name}`);
     assert.equal(manifest.version, pkg.version, `${target.package} does not move with the release version`);
-    assert.equal(pkg.optionalDependencies?.[target.package], pkg.version, `${target.package} is not pinned to this release`);
+    assert.equal(pkg.optionalDependencies?.[target.package], undefined, `${target.package} must only appear in the release manifest`);
+    assert.equal(release.optionalDependencies[target.package], pkg.version, `${target.package} is not pinned to this release`);
     assert.deepEqual(manifest.files, [target.binary, ...pin.licenseFiles, 'RIPGREP-VERSION'], `${target.package} ships a different file list`);
   }
 });

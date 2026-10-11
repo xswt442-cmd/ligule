@@ -9,6 +9,7 @@ import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } fro
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { releaseManifest } from '../scripts/pack-release.js';
 
 const root = resolve(fileURLToPath(new URL('.', import.meta.url)), '..');
 const vendor = join(root, 'desktop', 'vendor');
@@ -150,12 +151,12 @@ async function fetchAppTree() {
   await mkdir(join(app, 'node_modules'), { recursive: true });
   await copyTree(join(root, 'dist'), join(app, 'dist'));
   await copyTree(join(root, 'modes'), join(app, 'modes'));
-  await copyFile(join(root, 'package.json'), join(app, 'package.json'));
+  const packageJson = releaseManifest();
+  await writeFile(join(app, 'package.json'), `${JSON.stringify(packageJson, null, 2)}\n`, 'utf8');
   await copyFile(join(root, 'LICENSE'), join(app, 'LICENSE'));
   for (const name of productionPackages()) {
     await copyTree(join(root, 'node_modules', name), join(app, 'node_modules', name), keepNative);
   }
-  const packageJson = JSON.parse(readFileSyncSync(join(root, 'package.json')));
   const ripgrepPin = JSON.parse(readFileSyncSync(join(root, 'scripts', 'ripgrep-pin.json')));
   const searchTarget = ripgrepPin.targets[target];
   if (searchTarget === undefined) throw new Error(`no search package is pinned for ${target}`);

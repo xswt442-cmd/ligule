@@ -22,6 +22,7 @@
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test --import ./test/hooks/isolated-data-root.mjs test/*.test.js",
     "check-pack": "node scripts/check-pack.js",
+    "pack-release": "node scripts/pack-release.js",
     "verify-install": "node scripts/verify-install.js",
     "registry-version": "node scripts/registry-version.js",
     "build-rg": "node scripts/build-rg-packages.js"
@@ -61,10 +62,6 @@
     "highlight.js": "11.12.0",
     "ink": "^7.1.1",
     "koffi": "3.1.1",
-    "ligule-rg-darwin-arm64": "0.0.2",
-    "ligule-rg-darwin-x64": "0.0.2",
-    "ligule-rg-linux-x64": "0.0.2",
-    "ligule-rg-win32-x64": "0.0.2",
     "marked": "18.0.14",
     "react": "^19.3.0",
     "string-width": "8.3.0"

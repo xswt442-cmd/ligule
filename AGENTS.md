@@ -18,11 +18,12 @@ npm ci
 npm run build
 npm test
 npm run check-pack
+npm run pack-release [destination]
 npm run verify-install [tarball]
 npm run build-rg
 ```
 
-`npm test` 先构建，再针对 `dist/` 运行测试。`check-pack` 检查空消费者中的打包内容；`verify-install` 在空目录安装 tarball 并检查已安装的 CLI、语法解析器和搜索后端。`build-rg` 获取版本固定且校验过的 ripgrep。
+`npm test` 先构建，再针对 `dist/` 运行测试。`pack-release` 使用 npm 的文件清单在独立目录生成发行包，其清单加入四个精确版本的搜索依赖；开发清单保持可在平台包首发前执行 `npm ci`。`check-pack` 检查该发行包的内容；`verify-install` 在空目录安装 tarball 并检查 CLI、语法解析器和搜索。发布验证从 registry 安装搜索依赖，CI 的 `--local-search` 使用本轮构建的平台 tarball。`build-rg` 获取版本固定且校验过的 ripgrep。
 
 ## 运行约束
 

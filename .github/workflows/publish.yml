@@ -87,8 +87,10 @@ jobs:
         run: |
           set -e
           mkdir -p dist-tarball
-          npm pack --pack-destination dist-tarball
-          tarball=$(ls dist-tarball/*.tgz | head -1)
+          npm run pack-release -- dist-tarball
+          version=$(node -p "require('./package.json').version")
+          tarball="dist-tarball/ligule-${version}.tgz"
+          test -f "$tarball"
           sha256sum "$tarball" | tee dist-tarball/SHA256SUMS
           mkdir -p dist-tarball/platforms
           for dir in packages/rg-*; do

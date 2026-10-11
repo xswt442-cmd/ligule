@@ -9,6 +9,7 @@ import { spawnSync, execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, relative, resolve, sep } from 'node:path';
+import { releaseManifest } from './pack-release.js';
 
 const repo = fileURLToPath(new URL('..', import.meta.url));
 const packDir = join(repo, 'testplace', 'pack');
@@ -27,7 +28,7 @@ if (!existsSync(join(repo, 'dist', 'index.js'))) {
   throw new Error('dist/index.js is missing; run `npm run build` before verifying a fresh install');
 }
 
-const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'));
+const pkg = releaseManifest();
 const pin = JSON.parse(readFileSync(join(repo, 'scripts', 'ripgrep-pin.json'), 'utf8'));
 const targets = Object.values(pin.targets);
 for (const target of targets) {
@@ -74,7 +75,7 @@ const consumerManifest = {
 };
 writeFileSync(join(consumer, 'package.json'), `${JSON.stringify(consumerManifest, null, 2)}\n`, 'utf8');
 if (given === undefined) {
-  execFileSync(process.execPath, [npmCli, 'pack', '--pack-destination', 'testplace/pack'], { cwd: repo, stdio: 'inherit' });
+  execFileSync(process.execPath, [join(repo, 'scripts', 'pack-release.js'), 'testplace/pack'], { cwd: repo, stdio: 'inherit' });
 }
 if (!existsSync(tarball)) throw new Error(`npm pack did not produce ${tarball}`);
 
@@ -114,6 +115,9 @@ try {
 
 const installed = JSON.parse(readFileSync(join(consumer, 'node_modules', pkg.name, 'package.json'), 'utf8'));
 if (installed.version !== pkg.version) throw new Error(`the consumer got ${installed.version}, package.json says ${pkg.version}`);
+if (JSON.stringify(installed.optionalDependencies) !== JSON.stringify(pkg.optionalDependencies)) {
+  throw new Error('the consumer did not receive the release manifest optional dependencies');
+}
 if (existsSync(join(consumer, 'node_modules', 'typescript'))) throw new Error('devDependencies came along into the consumer');
 
 // 走用户实际用的那一条路：`.bin` 里的包装脚本，Windows 上是那一个 .cmd。
