@@ -155,6 +155,24 @@ async function fetchAppTree() {
   for (const name of productionPackages()) {
     await copyTree(join(root, 'node_modules', name), join(app, 'node_modules', name), keepNative);
   }
+  const packageJson = JSON.parse(readFileSyncSync(join(root, 'package.json')));
+  const ripgrepPin = JSON.parse(readFileSyncSync(join(root, 'scripts', 'ripgrep-pin.json')));
+  const searchTarget = ripgrepPin.targets[target];
+  if (searchTarget === undefined) throw new Error(`no search package is pinned for ${target}`);
+  const searchSource = join(root, 'packages', searchTarget.directory);
+  const searchManifest = JSON.parse(readFileSyncSync(join(searchSource, 'package.json')));
+  if (searchManifest.name !== searchTarget.package || searchManifest.version !== packageJson.version
+    || packageJson.optionalDependencies?.[searchTarget.package] !== packageJson.version) {
+    throw new Error(`${searchTarget.package} must match the pinned target and ligule@${packageJson.version}`);
+  }
+  for (const file of [searchTarget.binary, ...ripgrepPin.licenseFiles, 'RIPGREP-VERSION']) {
+    if (!existsSync(join(searchSource, file))) throw new Error(`${join(searchSource, file)} is missing`);
+  }
+  const searchStamp = `${searchTarget.package} ships ripgrep ${ripgrepPin.version} for ${searchTarget.triple} (pinned in scripts/ripgrep-pin.json)`;
+  if (readFileSyncSync(join(searchSource, 'RIPGREP-VERSION')).trim() !== searchStamp) {
+    throw new Error(`${searchTarget.package} does not contain ripgrep ${ripgrepPin.version}`);
+  }
+  await copyTree(searchSource, join(app, 'node_modules', searchTarget.package));
   const foreign = await listForeignNative(app);
   if (foreign.length > 0) {
     throw new Error(`the runtime tree still carries native dirs for another target: ${foreign.slice(0, 5).join(', ')}`);
