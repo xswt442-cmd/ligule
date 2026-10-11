@@ -6,7 +6,7 @@
 
 | 目标 | Rust target | 随包 Node 归档 | SHA-256 | 安装包 | 系统要求 | 构建机 | 安装验证 |
 |---|---|---|---|---|---|---|---|
-| Windows x64 | `x86_64-pc-windows-msvc` | `node-v24.21.0-win-x64.zip` | `158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541` | NSIS `.exe` | Windows 10；需要 WebView2 运行时 | GitHub Actions `windows-latest` | 待在 Windows x64 实机安装和启动验证 |
+| Windows x64 | `x86_64-pc-windows-msvc` | `node-v24.21.0-win-x64.zip` | `158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541` | NSIS `.exe` | Windows 10；需要 WebView2 运行时 | GitHub Actions `windows-latest` | 已实测安装、真实模型请求、退出和卸载；发行附件按最终构建复验 |
 | Linux x64 | `x86_64-unknown-linux-gnu` | `node-v24.21.0-linux-x64.tar.xz` | `fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6` | `.AppImage` 与 `.deb` | 声明支持 Ubuntu 22.04 与 Debian 12 | GitHub Actions `ubuntu-22.04` | 待在两种系统安装并启动验证 |
 | macOS Apple Silicon | `aarch64-apple-darwin` | `node-v24.21.0-darwin-arm64.tar.gz` | `bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057` | `.dmg` | macOS 13.5 或更新版本 | GitHub Actions `macos-15` | 待在 Apple Silicon 实机安装并启动验证 |
 | macOS Intel | `x86_64-apple-darwin` | `node-v24.21.0-darwin-x64.tar.gz` | `1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e8097` | `.dmg` | macOS 13.5 或更新版本 | GitHub Actions `macos-15-intel` | 待在 Intel 实机安装并启动验证 |

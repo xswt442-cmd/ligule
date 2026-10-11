@@ -179,7 +179,7 @@ jobs:
     env:
       # 读一次，让下面两个发布步骤互斥。
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-      # setup-node 写的 .npmrc 按这个变量取凭据；配了 NPM_TOKEN 时三个包都用它，没配就走 OIDC。
+      # setup-node 写的 .npmrc 按这个变量取凭据；配了 NPM_TOKEN 时全部包都用它，没配就走 OIDC。
       NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v5
