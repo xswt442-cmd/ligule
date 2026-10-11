@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { DropdownMenu, Popover } from 'radix-ui';
-import { Virtuoso, type ItemProps, type VirtuosoHandle } from 'react-virtuoso';
+import { Virtuoso, type Components, type ContextProp, type FlatIndexLocationWithAlign, type ItemProps, type VirtuosoHandle } from 'react-virtuoso';
 import { code, createClient, type Client, type Transport } from './protocol';
 import { ApprovalCard, type Ask } from './components/ApprovalCard';
 import { QuestionCard, type QuestionAsk, type QuestionDrafts } from './components/QuestionCard';
@@ -44,26 +44,36 @@ const RENDER_WINDOW = 400;
 // 这一格要留成正数，所以从一个足够大的数起：往前每插一页就从它里面减掉插进去的行数，起得太小会减成负数。
 const FIRST_INDEX = 100_000;
 
-// 行组件保持固定身份，翻页和语言切换不重建已展开的内容。
-function StreamItem({ children, style, ...rest }: ItemProps<Row>) {
+type StreamContext = { hasMore: boolean; loading: boolean; showEarlier: () => Promise<void> };
+
+// 行组件保持固定身份；界面上下文不作为 DOM 属性传递。
+function StreamItem({ children, style, item: _item, context: _context, ...rest }: ItemProps<Row> & ContextProp<StreamContext>) {
   return <div {...rest} style={style} className="stream-row">{children}</div>;
 }
 
-// 补页之后的视口回补：virtuoso 按当时记下的高度把补进来的那一页接上去，真实行高一量准，
-// 视口会落在锚点下方一屏多的地方（P5 第 35、37 趟各差约 1500 像素）。`scrollTop` 与 `scrollHeight`
-// 同一把尺：等尺寸稳下来之后把「离内容上沿的距离」拨回原值，等于视口没动；补页期间底部也来了新行时不拨。
-async function settleAfterPrepend(before: { top: number; height: number; shown: number }, addedShown: number, shownNow: () => number) {
-  const element = document.querySelector<HTMLElement>('[data-virtuoso-scroller="true"]');
-  if (element === null) return;
-  let last = -1;
-  for (let frame = 0; frame < 60; frame += 1) {
-    await new Promise((done) => requestAnimationFrame(() => done(null)));
-    if (element.scrollHeight === last) break;
-    last = element.scrollHeight;
+function StreamHeader({ context }: ContextProp<StreamContext>) {
+  const t = useText();
+  return <div className="stream-band">
+    {context?.hasMore === true && <button type="button" className="earlier" disabled={context.loading} onClick={() => void context.showEarlier()}>
+      {context.loading ? t('正在加载…', 'Loading…') : t('加载更早记录', 'Load earlier records')}
+    </button>}
+  </div>;
+}
+
+const STREAM_COMPONENTS: Components<Row, StreamContext> = { Item: StreamItem, Header: StreamHeader };
+
+// 按实际可见项记住阅读位置；全局项号转换为当前数据下标。
+function streamAnchor(rows: Row[], firstIndex: number): { id: number; offset: number } | null {
+  const scroller = document.querySelector<HTMLElement>('[data-virtuoso-scroller="true"]');
+  if (scroller === null) return null;
+  const bounds = scroller.getBoundingClientRect();
+  for (const item of scroller.querySelectorAll<HTMLElement>('[data-item-index]')) {
+    const rect = item.getBoundingClientRect();
+    if (rect.bottom <= bounds.top || rect.top >= bounds.bottom) continue;
+    const row = rows[Number(item.dataset.itemIndex) - firstIndex];
+    if (row !== undefined) return { id: row.id, offset: rect.top - bounds.top };
   }
-  if (shownNow() !== before.shown + addedShown) return;
-  const wanted = before.top + (element.scrollHeight - before.height);
-  if (Math.abs(element.scrollTop - wanted) > 2) element.scrollTop = wanted;
+  return null;
 }
 
 type PanelProps = {
@@ -102,7 +112,7 @@ type PanelProps = {
 
 // 「没在问哪一段」的形状：真实的落笔处起点不可能是 -1，所以它跟任何一段都对不上。
 const NO_TOKEN = { start: -1, text: '' };
-// 交给视口的那几个对象要稳住身份：每渲染一个新对象会被当成新值，短记录上那几次重排会连成死循环（第 105 步）。
+// 视口参数保持对象身份，避免短记录反复测量和重排。
 const VIEWPORT_INCREASE = { top: 240, bottom: 600 };
 
 // 已经接上的几项。右侧那一片面板说的是这一份会话现在的情况，与会话浮层里能改的那几格不重复摆控制。
@@ -250,8 +260,6 @@ export function App({ transport }: { transport: Transport }) {
   // 流式那半截按会话各存一份：后台那一轮的片段留着，切回来先补上它，不等那一条落进记录（方案 3.1、审阅 F4）。
   const liveBySession = useRef(new Map<string, { text: string; reasoning: string }>());
   const terminalBySession = useRef(new Map<string, number>());
-  // 展示档之后的可见行数：补页回补靠它分「只有补页」与「补页期间底部也来了新行」两种情形。
-  const shownCount = useRef(0);
   // 跑着的时候新到的询问排在后面：一次问一件事，答一件再画下一件。
   const [asks, setAsks] = useState<Ask[]>([]);
   // 本轮收尾时要知道那一份会话还剩几条没答：这一格由渲染之后同步，不在那一条收尾路径的依赖里读 `asks`（那会读到旧的一份）。
@@ -385,14 +393,19 @@ export function App({ transport }: { transport: Transport }) {
   // 跟随最新：画面停在最后一行时新内容进来就滚到底；人往上翻过就不再自动滚，给一个跳回最新的按钮。
   const list = useRef<VirtuosoHandle | null>(null);
   const [pinned, setPinned] = useState(true);
+  // 只有读者实际滚动才改变跟随意图，尺寸测量和原生定位不视为阅读操作。
+  const readerScrolling = useRef(false);
   // 历史读到哪一条了：`before` 是这一页最早那一条事件的序号，`hasMore` 说宿主那一边还有没有更早的（方案 4.1）。
   // 界面手里只有读过的这几页，整份记录留在宿主那一边（实现顺序第 73 步）。
   const [page, setPage] = useState<{ before: number; hasMore: boolean } | null>(null);
   const [olderLoading, setOlderLoading] = useState(false);
   const [firstIndex, setFirstIndex] = useState(FIRST_INDEX);
+  const prependAnchor = useRef<{ id: number; offset: number; request: number } | null>(null);
+  const renderedStream = useRef({ rows: [] as Row[], firstIndex: FIRST_INDEX, verbosity });
   // 画面要落到哪一条：查找的命中，或者上一次读到的那一个位置（方案 4.2、6.2）。
   const [wanted, setWanted] = useState<{ sessionId: string; seq: number; kind: string } | null>(null);
   const [stamp, setStamp] = useState(0);
+  const [initialIndex, setInitialIndex] = useState<FlatIndexLocationWithAlign>({ index: 'LAST', align: 'end' });
   // 分支写完一份新记录，左侧栏要重读一次才说得出它存在（方案 4.3）；这一枚编号就是那一次重读的信号。
   const [sessionsRevision, setSessionsRevision] = useState(0);
   // 每一份会话读到哪儿了：键是会话编号，值是画面最上面那一行的事件序号。切回来时还在手里这一页之内才落回去。
@@ -489,15 +502,9 @@ export function App({ transport }: { transport: Transport }) {
     return () => clearInterval(timer);
   }, [beat, notify, sessionId, transport]);
 
-  // 接上一份会话时落在最后一行：读回来的那一页本来就是末尾那一段，停在顶上等于没接上（D95）。
-  // 新内容进来只在本来就在最后一行时跟着滚到底，那是 `followOutput` 那一格管的（U48）。
-  useEffect(() => {
-    if (reading || rows.length === 0) return;
-    list.current?.scrollToIndex({ index: 'LAST' });
-  }, [reading, sessionId]);
-
   const jumpToLatest = useCallback(() => {
-    list.current?.scrollToIndex({ index: 'LAST', behavior: 'smooth' });
+    readerScrolling.current = false;
+    list.current?.scrollToIndex({ index: 'LAST', align: 'end', behavior: 'smooth' });
     setPinned(true);
   }, []);
 
@@ -505,28 +512,33 @@ export function App({ transport }: { transport: Transport }) {
   // 所以翻页期间新到的事实在末尾追加，手里这一页不重复也不漏（方案 4.1、实现顺序第 73 步）。
   const showEarlier = useCallback(async () => {
     if (sessionId === null || page === null || !page.hasMore || olderLoading) return;
+    const request = openRequest.current;
+    let restoring = false;
+    readerScrolling.current = false;
+    setPinned(false);
     setOlderLoading(true);
     try {
       const older = await client.call('session.read',
         { sessionId, before: page.before, limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean };
       // 这一页读回来的时候人已经切走了：过期答复不改新画面的行数，也不动它的游标（方案 6.2）。
-      if (opening.current !== sessionId) return;
+      if (opening.current !== sessionId || openRequest.current !== request) return;
       const added = older.events.flatMap((record) => projectRecord(record));
-      const addedShown = added.filter((row) => shownIn(verbosity, row)).length;
-      const scroller = document.querySelector<HTMLElement>('[data-virtuoso-scroller="true"]');
-      const before = scroller === null ? null : { top: scroller.scrollTop, height: scroller.scrollHeight, shown: shownCount.current };
+      const rendered = renderedStream.current;
+      const addedShown = added.filter((row) => shownIn(rendered.verbosity, row)).length;
+      const anchor = addedShown === 0 ? null : streamAnchor(rendered.rows, rendered.firstIndex);
+      prependAnchor.current = anchor === null ? null : { ...anchor, request };
+      restoring = anchor !== null;
       // 往前插一页要同时把起始编号减去插进去的行数：那一行的序号在插页前后不变，视口就停在它上面（U48）。
       // 减去的是真的进列表那几行：展示档筛掉的行不在 `visible` 里，按整页的行数减会让视口锚到别的那一行。
       setFirstIndex((current) => current - addedShown);
       setRows((current) => [...added, ...current]);
       setPage({ before: older.events.length === 0 ? page.before : Number(older.events[0]?.seq), hasMore: older.hasMore });
-      if (before !== null) void settleAfterPrepend(before, addedShown, () => shownCount.current);
     } catch (error) {
-      setRows((current) => [...current, metaRow('error', `无法读取更早的记录：${code(error)}`, `Could not load earlier records: ${code(error)}`)]);
+      if (openRequest.current === request) setRows((current) => [...current, metaRow('error', `无法读取更早的记录：${code(error)}`, `Could not load earlier records: ${code(error)}`)]);
     } finally {
-      setOlderLoading(false);
+      if (!restoring && openRequest.current === request) setOlderLoading(false);
     }
-  }, [client, olderLoading, page, sessionId, verbosity]);
+  }, [client, olderLoading, page, sessionId]);
 
   // 草稿与排着的几句按「哪一项目录下的哪一份会话」存：数据根里那一份文档是正式副本，WebView 里只当第一屏缓存（方案 5.5.2）。
   // 切换、打开设置、看历史与断连都不丢这一句，退出再打开时接得回来（方案 5.1）。写不进去要说一句，别让人以为它已经存住了。
@@ -763,6 +775,7 @@ export function App({ transport }: { transport: Transport }) {
   // `reclaimQueue` 只有重连那一条路给：宿主换了一具之后，那几句排着的不再留成暂停的队列，而是按先后收回草稿等一次显式的发送。
   // 正常换会话与点开一份会话仍把排着的几条恢复成暂停（方案 5.1、5.2），那一条不变。
   const openSession = useCallback(async (id: string, hit?: SearchHit, reclaimQueue = false, askedRoot?: string) => {
+    const savedAnchor = anchors.current.get(id);
     opening.current = id;
     const request = ++openRequest.current;
     // 看着的是哪一份与「正在接的是哪一份」同一处定下来：状态那一次读紧跟在几次读后面，
@@ -774,7 +787,12 @@ export function App({ transport }: { transport: Transport }) {
     setMobileSidebar(false);
     setRows([]);
     setPage(null);
+    setOlderLoading(false);
+    prependAnchor.current = null;
     setFirstIndex(FIRST_INDEX);
+    setInitialIndex({ index: 'LAST', align: 'end' });
+    readerScrolling.current = false;
+    setPinned(true);
     // 切回来时先把它自己那半截流式回答摆上：这一轮还在跑的话，记录里要到那一条落盘才有全文，中间这几秒不能是空的（审阅 F4）。
     setLive({ ...(liveBySession.current.get(id) ?? { text: '', reasoning: '' }) });
     setWanted(null);
@@ -828,9 +846,8 @@ export function App({ transport }: { transport: Transport }) {
       setRows([...events.flatMap((record) => projectRecord(record)), ...kept.map((line) => metaRow('meta', line.zh, line.en))]);
       setPage({ before: Number(events[0]?.seq ?? 1), hasMore });
       // 上一次读到的位置还在手里这一页之内就落回去；落不回就停在末尾，不替他改展示档，也不往前多读页。
-      const anchor = anchors.current.get(id);
-      const back = anchor !== undefined && anchor > Number(events[0]?.seq) && anchor < Number(events.at(-1)?.seq)
-        ? { sessionId: id, seq: anchor, kind: 'anchor' }
+      const back = savedAnchor !== undefined && savedAnchor > Number(events[0]?.seq) && savedAnchor < Number(events.at(-1)?.seq)
+        ? { sessionId: id, seq: savedAnchor, kind: 'anchor' }
         : null;
       setWanted(hit ?? back);
     } catch (error) {
@@ -884,6 +901,11 @@ export function App({ transport }: { transport: Transport }) {
 
   const newSession = useCallback(async (root?: string) => {
     const request = ++openRequest.current;
+    prependAnchor.current = null;
+    setOlderLoading(false);
+    setInitialIndex({ index: 'LAST', align: 'end' });
+    readerScrolling.current = false;
+    setPinned(true);
     setReading(true);
     try {
       // 指名了哪一具工作区就在哪一个项目里建；没指名时先看眼前这一份会话在哪一项目录，再退到那份登记里的默认那一具，
@@ -1361,46 +1383,67 @@ export function App({ transport }: { transport: Transport }) {
     return () => document.removeEventListener('keydown', onKey);
   }, [cancel, collapsed, copyLastAnswer, leaveDock, panel, patch, running]);
 
-  // 虚拟视口的两件外壳（U48、方案 6.2）：每一条都要占住转录那一条 74 字的居中列，所以 `Item` 自己包一层。
-  // 空记录那一句不由视口画：这一版的视口没有空状态那个槽位，那一处写在渲染里的视口外面。
-  // 身份用 `useMemo` 稳住：每次渲染都换一个新组件会让视口把挂着的行重建一遍。
-  const viewport = useMemo(() => ({
-    // 换外壳要连着 Virtuoso 读尺寸用的那几格 `data-*` 一起递出去，只转 children 与 style 会让它量不到行高（U48）。
-    Item: StreamItem,
-    Header: () => <div className="stream-band">
-      {page?.hasMore === true && <button type="button" className="earlier" disabled={olderLoading} onClick={() => void showEarlier()}>
-        {olderLoading ? t('正在加载…', 'Loading…') : t('加载更早记录', 'Load earlier records')}
-      </button>}
-    </div>,
-  }), [olderLoading, page, showEarlier, t]);
+  const streamContext = useMemo(() => ({ hasMore: page?.hasMore === true, loading: olderLoading, showEarlier }), [olderLoading, page?.hasMore, showEarlier]);
   // 展示档没放进来那几类行不进列表：虚拟视口要量每一行的高度，藏着不画的行留在列表里只会量到零（D90、U48）。
   const shown = useMemo(() => rows.filter((row) => shownIn(verbosity, row)), [rows, verbosity]);
   // 流式那半截排在已落盘的那些行之后：它是这一轮的末尾，画到开头去就把因果倒过来了。
   // 这一份数组交给视口当数据：身份必须稳住（只在真有变化时才换），否则每渲染一个新数组会让视口
-  // 一直当它变了，短记录上那一串重排会连成死循环（第 105 步在真端点上撞到过两次）。
+  // 反复认为数据变化，导致短记录持续重排。
   const visible = useMemo(() => (live.reasoning === '' && live.text === '' ? shown : [
     ...shown,
     ...(live.reasoning === '' || !shownIn(verbosity, LIVE_REASONING) ? [] : [{ ...LIVE_REASONING, text: live.reasoning }]),
     ...(live.text === '' || !shownIn(verbosity, LIVE_ANSWER) ? [] : [{ ...LIVE_ANSWER, text: live.text }]),
   ]), [shown, live.reasoning, live.text, verbosity]);
-  useEffect(() => { shownCount.current = visible.length; }, [visible]);
+
+  useLayoutEffect(() => {
+    renderedStream.current = { rows: visible, firstIndex, verbosity };
+  }, [firstIndex, verbosity, visible]);
+
+  useLayoutEffect(() => {
+    const anchor = prependAnchor.current;
+    if (anchor === null || anchor.request !== openRequest.current) return;
+    const index = visible.findIndex((row) => row.id === anchor.id);
+    if (index < 0) {
+      prependAnchor.current = null;
+      setOlderLoading(false);
+      return;
+    }
+    // 数据提交和前插尺寸补偿后定位；完成测量前保持补页状态，关闭自动跟随。
+    const frame = requestAnimationFrame(() => {
+      if (prependAnchor.current !== anchor || anchor.request !== openRequest.current) return;
+      list.current?.scrollIntoView({
+        index,
+        calculateViewLocation: () => ({ index, align: 'start', offset: -anchor.offset }),
+        done: () => {
+          if (prependAnchor.current !== anchor || anchor.request !== openRequest.current) return;
+          prependAnchor.current = null;
+          setPinned(false);
+          setOlderLoading(false);
+        },
+      });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [visible]);
 
   // 记住这一份会话读到哪儿：画面最上面那一行的事件序号，切回来时按它落回去（方案 6.2）。
-  // 身份要稳住：每次渲染都换一个新函数会让视口重新订阅一次，短记录上那几次重排会连成一串（第 105 步）。
+  // 回调保持身份，避免无关渲染引发视口重新订阅。
   const onRangeChanged = useCallback(({ startIndex }: { startIndex: number }) => {
+    if (reading) return;
     const row = visible[startIndex - firstIndex];
     if (row?.seq !== undefined && sessionId !== null) anchors.current.set(sessionId, row.seq);
-  }, [visible, firstIndex, sessionId]);
+  }, [visible, firstIndex, reading, sessionId]);
 
-  // 命中落在手里这几页之外：由 `openSession` 往回读到位再落笔，所以这一处只负责画面（方案 6.2）。
-  // 跳转靠换一枚 `stamp` 让视口重新挂载，并从 `jumpAt` 那一条开始画：数据刚变长时视口自己要先量一遍行高，
-  // 同一帧里发出的 `scrollToIndex` 会被它随后那一次回到末行盖掉（U48）。
-  useEffect(() => {
+  // 定位请求只消费一次；高亮期间的补页和内容更新继续使用同一视口。
+  useLayoutEffect(() => {
     if (wanted === null) return;
     const at = visible.findIndex((row) => row.seq === wanted.seq);
     if (at >= 0) {
+      readerScrolling.current = false;
+      setPinned(false);
+      setInitialIndex({ index: at, align: 'start' });
       setStamp((current) => current + 1);
       setFlash(wanted.seq);
+      setWanted(null);
       return;
     }
     // 上一次读到的那一行不在画出来的这几类里（展示档筛掉了它）：就停在末尾，不替他改档位，也不在转录里写字。
@@ -1429,14 +1472,9 @@ export function App({ transport }: { transport: Transport }) {
     if (flash === null) return;
     const timer = setTimeout(() => {
       setFlash(null);
-      setWanted(null);
     }, 2500);
     return () => clearTimeout(timer);
   }, [flash, stamp]);
-
-  // 要落的那一条在数据里的位置：`stamp` 换掉的那一帧视口重新挂载，就从这一条开始画。
-  const jumpAt = wanted === null ? -1 : visible.findIndex((row) => row.seq === wanted.seq);
-  const initialIndex = useMemo(() => (jumpAt < 0 ? undefined : { index: jumpAt, align: 'start' as const }), [jumpAt]);
 
   const panelProps: PanelProps = {
     client,
@@ -1532,16 +1570,26 @@ export function App({ transport }: { transport: Transport }) {
             flash={row.seq !== undefined && row.seq === flash}
             branch={row.kind === 'round' ? (at) => void branchFrom(at) : undefined}
           />}
-          // 一次查找的跳转期间不跟末行：往前要页与展示档那一次收全都会让数据变长，
-          // 而跟末行那一条会把刚落下的那一行重新推走（方案 6.2）。
-          followOutput={(atBottom) => (atBottom && wanted === null && flash === null ? 'smooth' : false)}
+          // 上翻、补页和定位期间关闭自动跟随，保留当前阅读位置。
+          followOutput={!olderLoading && pinned && wanted === null && flash === null ? 'auto' : false}
           atBottomThreshold={40}
-          // 只在真的翻过去时才改这一格：视口在「到底」附近来回报同一件事实时，
-          // 一次 setState 会让视口重排，重排又报一次——记录短得装不满一屏时这一条会转成死循环（第 105 步在真端点上撞到）。
-          atBottomStateChange={(atBottom) => setPinned((current) => (current === atBottom ? current : atBottom))}
+          onWheelCapture={(event) => { if (event.deltaY !== 0) readerScrolling.current = true; }}
+          onPointerDownCapture={() => { readerScrolling.current = true; }}
+          onTouchStartCapture={() => { readerScrolling.current = true; }}
+          onKeyDownCapture={(event) => {
+            if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) readerScrolling.current = true;
+          }}
+          onScroll={(event) => {
+            if (!readerScrolling.current) return;
+            const scroller = event.currentTarget;
+            const atBottom = scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= 40;
+            setPinned((current) => current === atBottom ? current : atBottom);
+          }}
+          onScrollEnd={() => { readerScrolling.current = false; }}
           rangeChanged={onRangeChanged}
           increaseViewportBy={VIEWPORT_INCREASE}
-          components={viewport}
+          context={streamContext}
+          components={STREAM_COMPONENTS}
         />}
         {/* 离开末行时浮出来的那一枚：挂在转录这一格外面要占一段高度，出现与收掉时转录跟着换高，
             所以画在转录里面、绝对定位。 */}
