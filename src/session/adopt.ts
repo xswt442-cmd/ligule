@@ -1,10 +1,14 @@
-// 旧记录整理（D110）：
-// 把工作区目录下 `.ligule/sessions` 里的记录完整复制进数据根会话区，原件保留、逐文件比对、可重跑。
-// 复制过的再跑只做比对；目标已有同名而字节不同时不自行择一，把那一份交回（真实身份无法确认的那一类）。
-import { copyFile, mkdir, readdir, readFile, stat, utimes } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
-import { join } from 'node:path';
+// 旧记录整理（D110）：完整保留有效记录与附属文件，原件不动，重复运行只比对。
+import { constants, createReadStream } from 'node:fs';
+import { copyFile, link, lstat, mkdir, open, readdir, readFile, rm, stat, utimes } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { basename, dirname, join, resolve } from 'node:path';
 import { SPILL_NAME } from '../kernel/result.js';
+import { KernelRuntimeError } from '../kernel/error.js';
+import { workspaceIdentity } from '../kernel/workspace.js';
+import { acquireSessionLock } from './lock.js';
+import { parseSessionBytes, type ReadSessionRecord } from './record.js';
+import type { SessionLock } from './lock.js';
 
 const RECORD = /\.jsonl$/;
 const CHECKPOINT = /\.checkpoint\.json$/;
@@ -14,64 +18,315 @@ export interface AdoptionReport {
   already: string[];
   conflicts: string[];
   unknown: string[];
+  busy: string[];
 }
 
-const wanted = (name: string): boolean => RECORD.test(name) || CHECKPOINT.test(name) || SPILL_NAME.test(name);
+type PublishResult = 'copied' | 'already' | 'conflict' | 'missing' | 'busy';
 
-const digestOf = async (path: string): Promise<string | null> => {
+const isMissing = (error: unknown): boolean => (error as NodeJS.ErrnoException)?.code === 'ENOENT';
+
+function failure(code: 'session_adoption_read_failed' | 'session_adoption_write_failed', path: string, cause: unknown): KernelRuntimeError {
+  return new KernelRuntimeError(code, { cause, detail: path });
+}
+
+async function digestOf(path: string): Promise<string | null> {
+  const hash = createHash('sha256');
   try {
-    return createHash('sha256').update(await readFile(path)).digest('hex');
-  } catch {
-    return null;
+    for await (const chunk of createReadStream(path)) hash.update(chunk);
+  } catch (cause) {
+    if (isMissing(cause)) return null;
+    throw failure('session_adoption_read_failed', path, cause);
   }
-};
+  return hash.digest('hex');
+}
+
+async function readExisting(path: string, expectedDigest: string): Promise<PublishResult | undefined> {
+  const existing = await digestOf(path);
+  if (existing === null) return undefined;
+  return existing === expectedDigest ? 'already' : 'conflict';
+}
+
+async function publishBytes(
+  bytes: Buffer,
+  target: string,
+  sourcePath: string,
+  sourceBytes: Buffer,
+  sourceLock: SessionLock,
+  targetLock: SessionLock,
+): Promise<PublishResult> {
+  const expectedDigest = createHash('sha256').update(bytes).digest('hex');
+  const existing = await readExisting(target, expectedDigest);
+  if (existing !== undefined) return existing;
+
+  const temporary = join(dirname(target), `.${basename(target)}.${randomUUID()}.tmp`);
+  let result: PublishResult = 'copied';
+  try {
+    const info = await stat(sourcePath).catch((cause) => {
+      if (isMissing(cause)) return undefined;
+      throw failure('session_adoption_read_failed', sourcePath, cause);
+    });
+    if (info === undefined) return 'missing';
+    const handle = await open(temporary, 'wx', info.mode & 0o777).catch((cause) => {
+      throw failure('session_adoption_write_failed', temporary, cause);
+    });
+    try {
+      await handle.writeFile(bytes);
+      await handle.sync();
+    } catch (cause) {
+      throw failure('session_adoption_write_failed', temporary, cause);
+    } finally {
+      await handle.close();
+    }
+    await utimes(temporary, info.atime, info.mtime).catch((cause) => {
+      throw failure('session_adoption_write_failed', temporary, cause);
+    });
+
+    const current = await readFile(sourcePath).catch((cause) => {
+      if (isMissing(cause)) return undefined;
+      throw failure('session_adoption_read_failed', sourcePath, cause);
+    });
+    if (current === undefined) return 'missing';
+    if (!current.equals(sourceBytes)) return 'busy';
+
+    const stagedDigest = await digestOf(temporary);
+    if (stagedDigest !== expectedDigest) throw failure('session_adoption_write_failed', temporary, new Error('staged file digest changed'));
+    sourceLock.assertOwned();
+    targetLock.assertOwned();
+    try {
+      await link(temporary, target);
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') throw failure('session_adoption_write_failed', target, cause);
+      result = await readExisting(target, expectedDigest) ?? 'busy';
+    }
+    return result;
+  } finally {
+    await rm(temporary, { force: true }).catch((cause) => {
+      throw failure('session_adoption_write_failed', temporary, cause);
+    });
+  }
+}
+
+async function publishFile(
+  source: string,
+  target: string,
+  sourceLock: SessionLock,
+  targetLock: SessionLock,
+): Promise<PublishResult> {
+  const sourceDigest = await digestOf(source);
+  if (sourceDigest === null) return 'missing';
+  const existing = await readExisting(target, sourceDigest);
+  if (existing !== undefined) return existing;
+
+  const temporary = join(dirname(target), `.${basename(target)}.${randomUUID()}.tmp`);
+  try {
+    const info = await lstat(source).catch((cause) => {
+      if (isMissing(cause)) return undefined;
+      throw failure('session_adoption_read_failed', source, cause);
+    });
+    if (info === undefined || !info.isFile()) return 'missing';
+    await copyFile(source, temporary, constants.COPYFILE_EXCL).catch((cause) => {
+      throw failure('session_adoption_write_failed', temporary, cause);
+    });
+    await utimes(temporary, info.atime, info.mtime).catch((cause) => {
+      throw failure('session_adoption_write_failed', temporary, cause);
+    });
+    if (await digestOf(source) !== sourceDigest || await digestOf(temporary) !== sourceDigest) return 'busy';
+    sourceLock.assertOwned();
+    targetLock.assertOwned();
+    try {
+      await link(temporary, target);
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') throw failure('session_adoption_write_failed', target, cause);
+      return await readExisting(target, sourceDigest) ?? 'busy';
+    }
+    return 'copied';
+  } finally {
+    await rm(temporary, { force: true }).catch((cause) => {
+      throw failure('session_adoption_write_failed', temporary, cause);
+    });
+  }
+}
+
+function projectRootOfLegacyDirectory(directory: string): string | undefined {
+  const resolved = resolve(directory);
+  const metadataDirectory = basename(dirname(resolved));
+  if (basename(resolved) !== 'sessions' || metadataDirectory !== '.ligule') return undefined;
+  return dirname(dirname(resolved));
+}
+
+function referencedSpills(events: ReturnType<typeof parseSessionBytes>['events']): Set<string> {
+  const names = new Set<string>();
+  for (const event of events) {
+    const spilled = (event.result as { spilled?: unknown } | undefined)?.spilled;
+    if (typeof spilled === 'string' && SPILL_NAME.test(spilled)) names.add(spilled);
+  }
+  return names;
+}
+
+function recordBytes(name: string, source: Buffer, record: ReadSessionRecord, legacyProjectRoot: string | undefined): Buffer | undefined {
+  if (record.header !== undefined) return source;
+  if (legacyProjectRoot === undefined) return undefined;
+  const id = name.slice(0, -'.jsonl'.length);
+  const header = {
+    kind: 'session',
+    formatVersion: 0,
+    sessionId: id,
+    projectRoot: legacyProjectRoot,
+    workspace: workspaceIdentity(legacyProjectRoot),
+  };
+  return Buffer.concat([Buffer.from(`${JSON.stringify(header)}\n`, 'utf8'), source]);
+}
+
+async function copyRecord(
+  name: string,
+  legacy: string,
+  target: string,
+  names: Set<string>,
+  legacyProjectRoot: string | undefined,
+  report: AdoptionReport,
+): Promise<void> {
+  const sourcePath = join(legacy, name);
+  const targetPath = join(target, name);
+  const samePath = resolve(sourcePath) === resolve(targetPath);
+  let sourceLock: SessionLock | undefined;
+  let targetLock: SessionLock | undefined;
+  try {
+    if (!samePath) {
+      try {
+        sourceLock = await acquireSessionLock(sourcePath);
+      } catch (cause) {
+        if ((cause as { code?: string }).code === 'session_locked') {
+          report.busy.push(name);
+          return;
+        }
+        throw failure('session_adoption_read_failed', sourcePath, cause);
+      }
+      try {
+        targetLock = await acquireSessionLock(targetPath);
+      } catch (cause) {
+        if ((cause as { code?: string }).code === 'session_locked') {
+          report.busy.push(name);
+          return;
+        }
+        throw failure('session_adoption_write_failed', targetPath, cause);
+      }
+    }
+
+    if (samePath) {
+      report.already.push(name);
+      return;
+    }
+    if (sourceLock === undefined || targetLock === undefined) {
+      throw failure('session_adoption_write_failed', targetPath, new Error('session locks are required before publishing'));
+    }
+    const info = await lstat(sourcePath).catch((cause) => {
+      if (isMissing(cause)) return undefined;
+      throw failure('session_adoption_read_failed', sourcePath, cause);
+    });
+    if (info === undefined) return;
+    if (!info.isFile()) {
+      report.unknown.push(name);
+      return;
+    }
+    const source = await readFile(sourcePath).catch((cause) => {
+      if (isMissing(cause)) return undefined;
+      throw failure('session_adoption_read_failed', sourcePath, cause);
+    });
+    if (source === undefined) return;
+    let parsed: ReadSessionRecord;
+    try {
+      parsed = parseSessionBytes(source);
+    } catch {
+      report.unknown.push(name);
+      return;
+    }
+    const record = recordBytes(name, source, parsed, legacyProjectRoot);
+    if (record === undefined) {
+      report.unknown.push(name);
+      return;
+    }
+    const expectedDigest = createHash('sha256').update(record).digest('hex');
+    const existing = await readExisting(targetPath, expectedDigest);
+    if (existing === 'conflict') {
+      report.conflicts.push(name);
+      return;
+    }
+
+    const checkpointName = `${name.slice(0, -'.jsonl'.length)}.checkpoint.json`;
+    const current = await readFile(sourcePath).catch((cause) => {
+      if (isMissing(cause)) return undefined;
+      throw failure('session_adoption_read_failed', sourcePath, cause);
+    });
+    if (current === undefined) return;
+    if (!current.equals(source)) {
+      report.busy.push(name);
+      return;
+    }
+    const sidecars = [
+      ...(names.has(checkpointName) ? [checkpointName] : []),
+      ...referencedSpills(parsed.events),
+    ];
+    let sidecarConflict = false;
+    for (const sidecar of new Set(sidecars)) {
+      const sidecarResult = await publishFile(join(legacy, sidecar), join(target, sidecar), sourceLock, targetLock);
+      if (sidecarResult === 'conflict') {
+        report.conflicts.push(sidecar);
+        sidecarConflict = true;
+      } else if (sidecarResult === 'copied') report.copied.push(sidecar);
+      else if (sidecarResult === 'already') report.already.push(sidecar);
+      else if (sidecarResult === 'busy' || sidecarResult === 'missing') {
+        report.busy.push(name);
+        return;
+      }
+    }
+    if (sidecarConflict) {
+      report.conflicts.push(name);
+      return;
+    }
+
+    const result = await publishBytes(record, targetPath, sourcePath, source, sourceLock, targetLock);
+    if (result === 'copied') report.copied.push(name);
+    else if (result === 'already') report.already.push(name);
+    else if (result === 'conflict') report.conflicts.push(name);
+    else if (result === 'busy' || result === 'missing') report.busy.push(name);
+  } finally {
+    await targetLock?.release();
+    await sourceLock?.release();
+  }
+}
 
 export async function adoptLegacySessions(legacy: string, target: string): Promise<AdoptionReport> {
-  const report: AdoptionReport = { copied: [], already: [], conflicts: [], unknown: [] };
-  let names: string[];
+  const report: AdoptionReport = { copied: [], already: [], conflicts: [], unknown: [], busy: [] };
+  let entries: string[];
   try {
-    names = await readdir(legacy);
-  } catch {
-    // 没有旧目录就没有要整理的：全新的机器与跑在临时根里的检查走这一条。
-    return report;
+    entries = await readdir(legacy);
+  } catch (cause) {
+    if (isMissing(cause)) return report;
+    throw failure('session_adoption_read_failed', legacy, cause);
   }
-  await mkdir(target, { recursive: true });
-  for (const name of names) {
-    if (!wanted(name)) {
-      // 锁目录是用过就撤的现场，不算记录；别的条目列进 unknown 交回，不复制。
-      if (!name.endsWith('.lock')) report.unknown.push(name);
-      continue;
-    }
-    const from = join(legacy, name);
-    const to = join(target, name);
-    const source = await digestOf(from);
-    if (source === null) {
-      report.unknown.push(name);
-      continue;
-    }
-    const existing = await digestOf(to);
-    if (existing !== null) {
-      if (existing === source) report.already.push(name);
-      else report.conflicts.push(name);
-      continue;
-    }
-    const times = await stat(from);
-    await copyFile(from, to);
-    // 补齐的那一份要保住记录自己的时间：`updatedAt` 读的是文件时间，列表按它排序；
-    // POSIX 上的 copyFile 会把时间戳改成此刻，Windows 的 CopyFileW 不会——不补这一下两边读出来不一样。
-    await utimes(to, times.atime, times.mtime).catch(() => undefined);
-    if ((await digestOf(to)) !== source) report.conflicts.push(name);
-    else report.copied.push(name);
+  await mkdir(target, { recursive: true }).catch((cause) => {
+    throw failure('session_adoption_write_failed', target, cause);
+  });
+  const names = new Set(entries);
+  const legacyProjectRoot = projectRootOfLegacyDirectory(legacy);
+  const records = entries.filter((name) => RECORD.test(name)).sort();
+  for (const name of records) await copyRecord(name, legacy, target, names, legacyProjectRoot, report);
+  for (const name of entries) {
+    if (name.endsWith('.lock') || RECORD.test(name)) continue;
+    if (!CHECKPOINT.test(name) && !SPILL_NAME.test(name)) report.unknown.push(name);
+    else if (!report.copied.includes(name) && !report.already.includes(name) && !report.conflicts.includes(name)) report.unknown.push(name);
   }
   return report;
 }
 
-/** 缺省解析出来的记录目录才做整理：`host.sessionDirectory` 覆盖的机器自己指着位置，旧位置不算它的记录。 */
+/** 缺省解析出来的记录目录才做整理；项目根优先来自 Host 的实际工作区身份。 */
 export async function adoptForSessionDirectory(
-  config: { boundary: string; host?: { sessionDirectory?: unknown } },
+  config: { boundary: string; workspaceRoot?: string; host?: { sessionDirectory?: unknown } },
   directory: string,
+  projectRoot?: string,
 ): Promise<AdoptionReport | null> {
   const configured = config.host?.sessionDirectory;
   if (typeof configured === 'string' && configured !== '') return null;
-  return adoptLegacySessions(join(config.boundary, '.ligule', 'sessions'), directory);
+  const legacyProjectRoot = config.workspaceRoot ?? projectRoot ?? config.boundary;
+  return adoptLegacySessions(join(legacyProjectRoot, '.ligule', 'sessions'), directory);
 }

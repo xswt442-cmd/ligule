@@ -1,6 +1,7 @@
 // 边界与上限：工具能看见多少、能到哪里，都由配置快照说了算，工具自己不读别处（D8）。
 // 起点值由本项目自定，配置层可以逐键覆盖；分页单位与标记措辞没有外部来源。
 import { KernelError } from '../kernel/error.js';
+import { resolve } from 'node:path';
 // 起点值由本项目自定，配置层可以逐键覆盖；分页单位与标记措辞没有外部来源。
 export const DEFAULT_LIMITS = Object.freeze({
   readBytes: 64_000,
@@ -36,10 +37,17 @@ export function skippedDirectories(config) {
 }
 
 export function boundaryOf(config) {
-  if (typeof config.boundary !== 'string' || config.boundary === '') {
+  const boundary = typeof config.workspaceRoot === 'string' && config.workspaceRoot !== ''
+    ? resolve(config.workspaceRoot, config.boundary ?? '.')
+    : config.boundary;
+  if (typeof boundary !== 'string' || boundary === '') {
     throw new KernelError('boundary_required', { detail: 'the host configured no workspace boundary, so file tools have nowhere to work' });
   }
-  return config.boundary;
+  return boundary;
+}
+
+export function workingDirectoryOf(config) {
+  return config.workspaceRoot ?? boundaryOf(config);
 }
 
 export function limitsOf(config) {

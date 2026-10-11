@@ -32,7 +32,7 @@ export async function runTui({ config, provider, policy, logger, modeName, modeP
         sessionId,
         locale,
         // 编辑器那一个命令名由启动这一侧读环境变量，界面自己不碰进程。
-        info: { model: config.model?.model, boundary: config.boundary, editor },
+        info: { model: config.model?.model, boundary: config.workspaceRoot ?? config.boundary, editor },
         history,
         // 草稿与排着的那几句归本机这一份文件：读写都由启动这一侧接出去，界面不认识路径（与历史同一层做法）。
         inputs: {

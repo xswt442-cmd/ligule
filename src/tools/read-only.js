@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import { matchesName } from '../kernel/match.js';
-import { boundaryOf, limitsOf, skippedDirectories } from '../capability/limits.js';
+import { boundaryOf, limitsOf, skippedDirectories, workingDirectoryOf } from '../capability/limits.js';
 import { resolveWithin } from '../capability/paths.js';
 import { resolveRipgrep, searchWithRipgrep } from '../capability/ripgrep.js';
 import { versionOf } from '../session/observe.js';
@@ -13,18 +13,19 @@ import { existsOrFails, kindOfTarget, marker, readExisting, toPosix, walkFiles }
 export const readTool = {
   name: 'read',
   readOnly: true,
-  description: 'Read a text file inside the workspace boundary, up to a byte limit.',
+  description: 'Read a text file relative to the working directory, within the workspace boundary, up to a byte limit.',
   parameters: {
     type: 'object',
     properties: {
-      path: { type: 'string', description: 'File path relative to the workspace boundary.' },
+      path: { type: 'string', description: 'File path relative to the working directory, within the workspace boundary.' },
       offsetBytes: { type: 'integer', minimum: 0, description: 'Byte offset to continue from after a truncation.' },
     },
     required: ['path'],
   },
   async run(args, { config, observations }) {
     const { readBytes } = limitsOf(config);
-    const target = await resolveWithin(boundaryOf(config), args.path);
+    const boundary = boundaryOf(config);
+    const target = await resolveWithin(boundary, args.path, { cwd: workingDirectoryOf(config) });
     const bytes = await readExisting(target);
     const offset = args.offsetBytes ?? 0;
     const slice = bytes.subarray(offset, offset + readBytes);
@@ -40,12 +41,12 @@ export const readTool = {
 export const findTool = {
   name: 'find',
   readOnly: true,
-  description: 'Find files by name pattern inside the workspace boundary.',
+  description: 'Find files by name pattern from the working directory, within the workspace boundary.',
   parameters: {
     type: 'object',
     properties: {
       pattern: { type: 'string', description: 'Name pattern: * and ? stop at a path separator, ** crosses it, and **/ may match no directory at all.' },
-      path: { type: 'string', description: 'Subdirectory to search from, relative to the boundary.' },
+      path: { type: 'string', description: 'Subdirectory to search from, relative to the working directory.' },
     },
     required: ['pattern'],
   },
@@ -54,7 +55,8 @@ export const findTool = {
     if (signal?.aborted) throw new KernelError('find_cancelled', { detail: 'the file listing was cancelled before it finished' });
     const { resultCount } = limitsOf(config);
     const boundary = boundaryOf(config);
-    const root = args.path === undefined ? boundary : await resolveWithin(boundary, args.path);
+    const cwd = workingDirectoryOf(config);
+    const root = await resolveWithin(boundary, args.path ?? '.', { cwd });
     // 遍历的起点必须是目录：交给 walkFiles 的话，readdir 会对文件抛原始的 ENOTDIR，
     // 那一类错误没有稳定码，判定链与调用方都没法分支。
     if (await kindOfTarget(root) !== 'directory') {
@@ -81,12 +83,12 @@ export const findTool = {
 export const searchTool = {
   name: 'search',
   readOnly: true,
-  description: 'Search file contents for a literal string inside the workspace boundary.',
+  description: 'Search file contents from the working directory, within the workspace boundary.',
   parameters: {
     type: 'object',
     properties: {
       pattern: { type: 'string', description: 'Literal text to look for, matched case sensitively per line.' },
-      path: { type: 'string', description: 'File or subdirectory to search, relative to the boundary.' },
+      path: { type: 'string', description: 'File or subdirectory to search, relative to the working directory.' },
     },
     required: ['pattern'],
   },
@@ -95,6 +97,7 @@ export const searchTool = {
     if (signal?.aborted) throw new KernelError('search_cancelled', { detail: 'the content search was cancelled before it finished' });
     const { resultCount, scanBytes, scanFiles } = limitsOf(config);
     const boundary = boundaryOf(config);
+    const cwd = workingDirectoryOf(config);
 
     // 有外部后端就用它：八千个文件的树上一秒出头，自己遍历要三倍耗时（本机实测）。
     // 探测不到就回落到自己遍历，回落的原因写进日志（I8）。
@@ -102,12 +105,12 @@ export const searchTool = {
     if (backend.executable !== undefined) {
       // 目标要先判存在：ripgrep 对着不存在的路径以自己的退出码报错，
       // 那条路走会交出一个说「后端故障」的码，而回落那条给的是 path_not_found。
-      const root = args.path === undefined ? boundary : await resolveWithin(boundary, args.path);
+      const root = await resolveWithin(boundary, args.path ?? '.', { cwd });
       if (args.path !== undefined) await kindOfTarget(root);
       const found = await searchWithRipgrep({
         executable: backend.executable,
-        boundary,
-        target: toPosix(relative(boundary, root)) || '.',
+        boundary: cwd,
+        target: toPosix(relative(cwd, root)) || '.',
         pattern: args.pattern,
         limit: resultCount,
         excludes: skippedDirectories(config),
@@ -128,7 +131,7 @@ export const searchTool = {
 
     // 返回 false 表示这一趟该停了：命中数用完，或者扫描预算见底。
     async function scan(target) {
-      const file = toPosix(relative(boundary, target));
+      const file = toPosix(relative(cwd, target));
       const bytes = await readFile(target);
       // 含零字节的按二进制对待，跳过去看下一份：外部后端那种文件也不交命中。
       if (bytes.includes(0)) {
@@ -160,10 +163,11 @@ export const searchTool = {
     async function* candidates() {
       const skipped = skippedDirectories(config);
       if (args.path === undefined) {
-        for await (const file of walkFiles(boundary, skipped)) yield join(boundary, file);
+        const root = await resolveWithin(boundary, '.', { cwd });
+        for await (const file of walkFiles(root, skipped)) yield join(root, file);
         return;
       }
-      const root = await resolveWithin(boundary, args.path);
+      const root = await resolveWithin(boundary, args.path, { cwd });
       if (await kindOfTarget(root) === 'file') {
         // 点名到文件就搜这一个文件：外部后端对显式给出的文件不套排除项，两边要一样。
         yield root;

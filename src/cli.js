@@ -5,7 +5,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { createConfig } from './kernel/config.js';
 import { languageOf, textOf } from './kernel/locale.js';
 import { loadConfigLayers } from './kernel/config-file.js';
@@ -100,7 +100,8 @@ async function configSnapshot(projectRoot = process.cwd()) {
   const user = { boundary: projectRoot, ...layers.user };
   // 扩展的来源在同一次装载里算出来（D68）：项目层与本地层里写的路径不算，那一条挡住的判断在这里看得见。
   const extensions = await extensionSources({ ...layers, user }, { projectRoot });
-  const config = createConfig({ ...layers, user });
+  const snapshot = createConfig({ ...layers, user });
+  const config = Object.freeze({ ...snapshot, workspaceRoot: resolve(projectRoot) });
   setLocale(config);
   return { config, extensions, layers };
 }
@@ -119,7 +120,7 @@ async function projectEnvironment(projectRoot) {
   const user = { boundary: projectRoot, ...layers.user };
   const config = createConfig({ ...layers, user });
   return {
-    config,
+    config: Object.freeze({ ...config, workspaceRoot: resolve(projectRoot) }),
     provider: hostProviderFromConfig(config),
     policy: config.policy,
     // 四层原样交回：宿主给这一份项目环境建它自己的可写层存储，设置那一栏读写都按这一个项目算（方案 3.2）。
@@ -366,8 +367,8 @@ if (invalidLanguage) {
     const { config } = await configSnapshot(projectFlag);
     const directory = sessionDirectory(config);
     // 缺省目录下没有这一份项目的新记录时，先按 D110 的整理把旧位置补齐一份（原件保留、可重跑）：
-    // 这一条是只读命令，补齐失败按没有旧记录处理，不把列会话带停。
-    const adopted = await adoptForSessionDirectory(config, directory).catch(() => null);
+    // 整理失败明确报告，不能把读取失败说成没有旧记录。
+    const adopted = await adoptForSessionDirectory(config, directory);
     if (adopted !== null && (adopted.copied.length > 0 || adopted.conflicts.length > 0)) {
       console.error(t(`已整理旧会话：复制 ${adopted.copied.length} 项，冲突 ${adopted.conflicts.length}${adopted.conflicts.length === 0 ? '' : `（${adopted.conflicts.join(', ')}）`}`, `Legacy sessions adopted: copied ${adopted.copied.length}, conflicts ${adopted.conflicts.length}${adopted.conflicts.length === 0 ? '' : ` (${adopted.conflicts.join(', ')})`}`));
     }
@@ -415,7 +416,7 @@ if (invalidLanguage) {
     try {
       const { config } = await configSnapshot();
       const directory = sessionDirectory(config);
-      await adoptForSessionDirectory(config, directory).catch(() => null);
+      await adoptForSessionDirectory(config, directory);
       if (!existsSync(join(directory, `${sessionId}.jsonl`))) {
         printFailure('session_not_found', t(`找不到会话 ${sessionId} 的记录：${directory}`, `no record for session ${sessionId} in ${directory}`));
       } else {

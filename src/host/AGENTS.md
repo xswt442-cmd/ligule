@@ -10,7 +10,7 @@
 
 ## 会话与项目
 
-- 项目环境包含配置、提供方、规则、模式目录、扩展、MCP 和会话目录，按规范化工作区身份缓存。另一项目必须通过装载器取得自己的环境；不能借当前项目继续执行。
+- 项目环境包含配置、提供方、规则、模式目录、扩展、MCP 和会话目录，按规范化工作区身份缓存。Host 以 `config.workspaceRoot` 作为项目根，缺少时才回退到 `config.boundary`；解析后的 `config.boundary` 是文件工具使用的运行边界，两者可以不同。另一项目必须通过装载器取得自己的环境；不能借当前项目继续执行。
 - `session.create`、`session.open` 可携带 `projectRoot`。不存在、非目录、不可读分别报告 `host_project_root_missing`、`host_project_root_not_directory`、`host_project_root_unreadable`。无装载器时报告 `host_project_root_unsupported`。
 - 会话首行记录工作区身份及 `workspaceOrigin`。客户端明确选择写 `explicit`，使用默认写 `default`；恢复不改首行。创建和恢复登记工作区，失败须报告，读取不登记。
 - 会话编号进入文件名之前必须校验，拒绝路径分隔符、冒号、NUL 和 `..`；缺少记录报告 `session_not_found`。

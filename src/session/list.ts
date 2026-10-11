@@ -2,7 +2,7 @@
 // 一份记录能读出来的事都在这一处：它是哪一版格式、属于哪个项目、什么时候动过、几条事件、
 // 最后生效的是哪一份模式清单，以及有没有还没收尾的派发（那是第 33 步那一条判据，列表里就该看得见）。
 import { readdir, readFile, stat } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { dataRoot } from '../kernel/config-file.js';
 import { KernelError } from '../kernel/error.js';
 import type { ModeFile } from '../kernel/modes.js';
@@ -73,6 +73,13 @@ export function sessionDirectory(config: SessionDirectoryConfig): string {
   return join(dataRoot(config.userHome), 'sessions');
 }
 
+function projectRootOfLegacyDirectory(directory: string): string | undefined {
+  const resolved = resolve(directory);
+  if (resolved === resolve(join(dataRoot(), 'sessions'))) return undefined;
+  if (basename(resolved) !== 'sessions' || basename(dirname(resolved)) !== '.ligule') return undefined;
+  return dirname(dirname(resolved));
+}
+
 export async function listSessions(
   directory: string,
   { projectRoot = undefined as string | undefined, limit = undefined as number | undefined } = {},
@@ -89,6 +96,8 @@ export async function listSessions(
   // 字面相同就先认，不同的那一些才付一次归一（`realpath` 那一类同步调用）的钱。
   const asked = projectRoot === undefined ? undefined : resolve(projectRoot);
   const askedIdentity = asked === undefined ? undefined : workspaceIdentity(asked);
+  const physicalProjectRoot = projectRootOfLegacyDirectory(directory);
+  const physicalIdentity = physicalProjectRoot === undefined ? undefined : workspaceIdentity(physicalProjectRoot);
   for (const name of names) {
     if (!name.endsWith('.jsonl')) continue;
     const id = name.slice(0, -'.jsonl'.length);
@@ -104,11 +113,13 @@ export async function listSessions(
       // 正文与首行的错误由完整记录校验交回，不用猜测损坏记录的项目归属。
     }
     // 按项目根过滤时，首行写着另一项目录的那一条不算在这一处：过滤的意义是「只显示这一处的会话」。读不出首行的下一处处理。
-    if (asked !== undefined && typeof header?.projectRoot === 'string'
-      && resolve(header.projectRoot) !== asked && workspaceIdentity(header.projectRoot) !== askedIdentity) continue;
-    // 没有头的那一份记录归它物理所在的那一项目录（第 32 步之前留下的记录读不出头）：
-    // 指名了一项目录又读得出这条记录时把它列进来，人才从列表里找回旧会话；不虚构它的来源与创建时间（U60 选定）。
-    const ownRoot = header?.projectRoot ?? asked ?? '';
+    const headerRoot = typeof header?.projectRoot === 'string' && header.projectRoot !== '' ? header.projectRoot : undefined;
+    if (asked !== undefined && headerRoot !== undefined
+      && resolve(headerRoot) !== asked && workspaceIdentity(headerRoot) !== askedIdentity) continue;
+    if (asked !== undefined && headerRoot === undefined
+      && (physicalProjectRoot === undefined || physicalIdentity !== askedIdentity)) continue;
+    // 没有头的记录只按实际物理目录归属；共享数据根中的未知来源只出现在未筛选列表。
+    const ownRoot = headerRoot ?? physicalProjectRoot ?? '';
     let events: SessionEvent[] = [];
     let truncatedBytes = 0;
     let invalid: SessionSummary['error'];

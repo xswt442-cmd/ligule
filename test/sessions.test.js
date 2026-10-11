@@ -73,7 +73,7 @@ test('the listing reads each record once and reports what a resume would need', 
     assert.deepEqual({ ...legacy, updatedAt: 'x' }, {
       id: 'legacy',
       formatVersion: 0,
-      projectRoot: '',
+      projectRoot: root,
       // 没有首行的记录说不出这两件事：交回空串说的是「没说」，不是「说的是默认」。
       workspace: '',
       workspaceOrigin: '',
@@ -93,6 +93,27 @@ test('the listing reads each record once and reports what a resume would need', 
     assert.deepEqual(filtered.map((item) => item.id), ['fresh', 'legacy']);
     assert.equal(filtered[1].projectRoot, root, '归属那一格写的是扫的那一项目录，不虚构首行里的那一份');
     assert.deepEqual((await listSessions(join(root, 'nothing-here'))), [], '还没有任何记录不是错误');
+  });
+});
+
+test('headerless records inherit only a physical legacy project, never a requested project', async () => {
+  await withSessions(async (root) => {
+    const project = join(root, 'old-project');
+    const legacyDirectory = join(project, '.ligule', 'sessions');
+    const sharedDirectory = join(root, 'shared', 'sessions');
+    await mkdir(legacyDirectory, { recursive: true });
+    await mkdir(sharedDirectory, { recursive: true });
+    await writeFile(join(legacyDirectory, 'physical.jsonl'), '{"seq":0,"kind":"user","text":"old"}\n');
+    await writeFile(join(sharedDirectory, 'unknown.jsonl'), '{"seq":0,"kind":"user","text":"unknown"}\n');
+
+    const physical = await listSessions(legacyDirectory, { projectRoot: project });
+    assert.equal(physical.length, 1);
+    assert.equal(physical[0].projectRoot, project, '只有物理旧项目目录能说明旧记录来源');
+    assert.deepEqual(await listSessions(sharedDirectory, { projectRoot: project }), [], '请求筛选条件不能替无头记录补造归属');
+    const global = await listSessions(sharedDirectory);
+    assert.equal(global.length, 1, '共享目录里的未知来源记录仍在全局列表可见');
+    assert.equal(global[0].projectRoot, '');
+    assert.equal(global[0].createdAt, null);
   });
 });
 

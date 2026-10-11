@@ -109,3 +109,48 @@ test('a real unconfigured host opens another workspace while settings remain ava
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('workspace history and local configuration keep their identity when the permission boundary differs', async () => {
+  const scratch = join(repository, 'testplace', 'tmp');
+  await mkdir(scratch, { recursive: true });
+  const root = await mkdtemp(join(scratch, 'workspace-boundary-'));
+  const first = join(root, 'first');
+  const second = join(root, 'second');
+  const data = join(root, 'data');
+  await Promise.all([first, second].map(path => mkdir(join(path, '.ligule'), { recursive: true })));
+  await mkdir(data);
+  await writeFile(join(data, 'config.toml'), `boundary = ${JSON.stringify(root)}\n`, 'utf8');
+  for (const [path, name] of [[first, 'first-model'], [second, 'second-model']]) {
+    await writeFile(join(path, '.ligule', 'config.local.toml'), `[model]\napi = "chat-completions"\nbaseURL = "http://127.0.0.1:1"\nmodel = "${name}"\n`, 'utf8');
+  }
+  const start = (flags = []) => {
+    const child = spawn(process.execPath, [cli, 'host', ...flags], { cwd: first, env: { ...process.env, LIGULE_HOME: data }, stdio: ['pipe', 'pipe', 'pipe'] });
+    const exited = new Promise((done, reject) => { child.once('error', reject); child.once('close', done); });
+    child.stderr.resume();
+    const client = createConnection({ input: child.stdout, output: child.stdin });
+    return { client, stop: async () => { child.stdin.end(); try { await deadline(exited, 'release workspace host'); } finally { if (child.exitCode === null) child.kill(); } } };
+  };
+  let host = start();
+  try {
+    const a = await deadline(host.client.request('session.create', {}), 'create first workspace session');
+    const b = await host.client.request('session.create', { projectRoot: second });
+    assert.equal((await host.client.request('session.read', { sessionId: a.sessionId })).header.projectRoot, first);
+    assert.equal((await host.client.request('session.read', { sessionId: b.sessionId })).header.projectRoot, second);
+    assert.deepEqual((await host.client.request('sessions.list', { projectRoot: first })).sessions.map(item => item.id), [a.sessionId]);
+    assert.deepEqual((await host.client.request('sessions.list', { projectRoot: second })).sessions.map(item => item.id), [b.sessionId]);
+    const settings = await host.client.request('config.get', {});
+    await host.client.request('config.set', { field: 'model.model', value: 'saved-for-first', layer: 'projectLocal', version: settings.layers.find(layer => layer.layer === 'projectLocal').version });
+    assert.match(await readFile(join(first, '.ligule', 'config.local.toml'), 'utf8'), /saved-for-first/);
+    assert.doesNotMatch(await readFile(join(second, '.ligule', 'config.local.toml'), 'utf8'), /saved-for-first/);
+    await host.stop();
+    host = start(['--config', `boundary = ${JSON.stringify(second)}`]);
+    const listed = await deadline(host.client.request('sessions.list', {}), 'list after a permission change');
+    assert.deepEqual(listed.sessions.map(item => item.id), [a.sessionId]);
+    await host.client.request('session.open', { sessionId: a.sessionId });
+    assert.equal((await host.client.request('status.get', { sessionId: a.sessionId })).model, 'saved-for-first');
+    assert.equal((await host.client.request('session.read', { sessionId: a.sessionId })).header.projectRoot, first);
+  } finally {
+    await host.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});

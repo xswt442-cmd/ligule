@@ -20,7 +20,7 @@ export interface SessionHeader {
   // 更早的记录没有这两格：读的人把它们当成没说过的，不拿现在的默认目录去补写。
   workspace?: string;
   workspaceOrigin?: 'explicit' | 'default';
-  createdAt: string;
+  createdAt?: string | null;
   mode?: SessionModeIdentity;
 }
 

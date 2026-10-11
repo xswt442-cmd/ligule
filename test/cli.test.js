@@ -32,7 +32,7 @@ test('tools prints the members of the minimal manifest plus the first-party opti
 test('call runs a tool in the same process and prints what it returned', () => {
   // 边界指到 src：默认边界是整个仓库，那一次遍历会走进 testplace/，
   // 而并行跑的测试正在那里建删临时目录，扫到一半目录就不在了。
-  const found = capture('call', 'find', JSON.stringify({ pattern: '*.js' }), '--config', 'boundary = "src"');
+  const found = capture('call', 'find', JSON.stringify({ pattern: '*.js', path: 'src' }), '--config', 'boundary = "src"');
   assert.ok(found.ok, found.stderr);
   assert.match(found.stdout, /^cli\.js$/m);
 
@@ -74,7 +74,7 @@ test('an unknown command is a failure, while asking for help is not', () => {
 });
 
 test('--config narrows the boundary from the command line and a valueless flag is refused', () => {
-  const scoped = capture('call', 'find', JSON.stringify({ pattern: '*.js' }), '--config', 'boundary = "test"');
+  const scoped = capture('call', 'find', JSON.stringify({ pattern: '*.js', path: 'test' }), '--config', 'boundary = "test"');
   assert.ok(scoped.ok, scoped.stderr);
   assert.match(scoped.stdout, /^cli\.test\.js$/m);
   assert.doesNotMatch(scoped.stdout, /src/);
@@ -215,7 +215,7 @@ test('the printed session list is the same rows the scanner produces', async () 
   ].join('\n') + '\n');
   try {
     const { listSessions } = await import('../dist/index.js');
-    const printed = capture('sessions', '--json', '--config', `boundary = ${JSON.stringify(root)}`);
+    const printed = capture('sessions', '--json', '--project', root);
     assert.equal(printed.ok, true, printed.stderr);
     assert.deepEqual(JSON.parse(printed.stdout), await listSessions(directory),
       '逐字段相同，包括那条没结果的派发');

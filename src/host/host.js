@@ -229,11 +229,13 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     if (typeof own.config?.boundary !== 'string' || own.config?.boundary === '') throw new KernelError('host_boundary_required');
     if (typeof own.provider?.stream !== 'function') throw new KernelError('host_provider_required');
     if (own.modeName !== undefined && own.modePaths === undefined) throw new KernelError('host_mode_paths_required');
+    const root = resolve(own.config.workspaceRoot ?? own.config.boundary);
+    const runtimeConfig = Object.freeze({ ...own.config, workspaceRoot: root, boundary: resolve(root, own.config.boundary) });
     return {
-      projectRoot: own.config.boundary,
+      projectRoot: root,
       layers: own.layers ?? {},
-      store: own.store ?? configStoreFor?.(own.config.boundary, own.layers ?? {}),
-      config: own.config,
+      store: own.store ?? configStoreFor?.(root, own.layers ?? {}),
+      config: runtimeConfig,
       provider: own.provider,
       policy: own.policy,
       modeName: own.modeName,
@@ -454,19 +456,28 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
   // 扫一遍磁盘上的记录不逼出装载。
   // 这一份项目此刻的记录目录：第一次读之前先把旧位置（工作区目录下 `.ligule/sessions`）的记录一次性补齐到
   // 数据根会话区（D110）：补齐旧目录中的记录与附属文件，保留原件，
-  // 一份环境只跑一次；失败与会话本身无关，只往标准错误记一行，不挡住这一格。
+  // 同一环境共享进行中的整理；忙写者保留重试机会，读取或写入失败由调用者处理。
   async function scanDirectory(projectRoot) {
     const unloaded = projectRoot !== undefined && !environments.has(projectRoot) && loadEnvironment === undefined;
     const environment = unloaded ? defaultEnvironment : await environmentFor(projectRoot);
     if (environment.legacyAdopted !== true) {
-      environment.legacyAdopted = true;
-      try {
-        const report = await adoptForSessionDirectory(environment.config, environment.directory);
-        if (report !== null && (report.copied.length > 0 || report.conflicts.length > 0 || report.unknown.length > 0)) {
-          console.error(`legacy sessions from ${environment.config.boundary}: copied ${report.copied.length}, conflicts ${report.conflicts.length}${report.conflicts.length === 0 ? '' : ` (${report.conflicts.join(', ')})`}, unknown ${report.unknown.length}`);
+      environment.adopting ??= (async () => {
+        const report = await adoptForSessionDirectory(environment.config, environment.directory, environment.projectRoot);
+        if (report !== null && (report.copied.length > 0 || report.conflicts.length > 0 || report.unknown.length > 0 || report.busy.length > 0)) {
+          logger?.log?.('legacy session adoption', {
+            projectRoot: environment.projectRoot,
+            copied: report.copied,
+            conflicts: report.conflicts,
+            unknown: report.unknown,
+            busy: report.busy,
+          });
         }
-      } catch (error) {
-        console.error(`legacy session adoption failed for ${environment.config.boundary}: ${String(error?.message ?? error)}`);
+        environment.legacyAdopted = report === null || report.busy.length === 0;
+      })();
+      try {
+        await environment.adopting;
+      } finally {
+        environment.adopting = undefined;
       }
     }
     return environment.directory;
@@ -611,10 +622,10 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
       directory,
       id,
       meta: () => ({
-        projectRoot: config.boundary,
+        projectRoot: env.projectRoot,
         // 首行记下这一份会话落在哪一具工作区、是怎么落到那儿的（D110、方案 5.5.3）：
         // 界面分组读的是这两格，不是「路径等不等于现在的默认目录」。接回一份现存会话时没有这一格可写——那份记录的首行早写好了。
-        workspace: workspaceIdentity(config.boundary),
+        workspace: workspaceIdentity(env.projectRoot),
         ...(workspaceOrigin === undefined ? {} : { workspaceOrigin }),
         mode: state.mode.file === undefined ? undefined : { name: state.mode.file.name, layer: state.mode.file.layer },
       }),
@@ -653,7 +664,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
           // 那一份会话属于哪一项目录跟着请求一起交出去：客户端看着别的那一份时也要答得出这一条，答的是那一个项目里的这件事。
           // 档位与它的来源也一起交出去，读的是这一次判定自己那一条链：界面看着别的那一份会话时，解释这一条的不能是另一份的档位（审阅 C08）。
           const request = connection.request(APPROVAL_METHOD, {
-            sessionId: id, projectRoot: config.boundary, tool, args: input, command, reason, policy, policySource, policyForced,
+            sessionId: id, projectRoot: env.projectRoot, tool, args: input, command, reason, policy, policySource, policyForced,
             ...(shell === undefined ? {} : { shell, executable }),
           });
           return await Promise.race([
@@ -673,7 +684,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     // 技能注册表是一条系统事实（D46）：磁盘上有几份技能与模式选了哪几件无关（D45、D57）。
     // 装载侧可以交进已经查好的一份（测试与以后的重载），没交就在这里扫那四个目录。
     // 一份都没有时不改工具表也不加片段：多一件没人用的工具会改掉每次请求的前缀字节（D12）。
-    const skills = skillRegistry ?? await discoverSkills(skillDirectories(config.boundary));
+    const skills = skillRegistry ?? await discoverSkills(skillDirectories(env.projectRoot));
     for (const diagnostic of skills.diagnostics) {
       // 头部解不开与被同名压掉的那一份都不静默：装载侧留一条日志，提示词里那一段说明也带上计数（D49、D57）。
       logger?.log?.('skill is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
@@ -684,7 +695,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     cleanup.push(() => mcp.close());
     // 提示模板也是装载侧扫出来的事实（D45）：两处目录，靠近仓库的那一份胜出。展开发生在这一侧，
     // 三个客户端因此不必各写一份替换规则（D54）。
-    const templates = templateRegistry ?? await discoverTemplates(templateDirectories(config.boundary));
+    const templates = templateRegistry ?? await discoverTemplates(templateDirectories(env.projectRoot));
     for (const diagnostic of templates.diagnostics) {
       logger?.log?.('prompt template is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
     }
@@ -708,7 +719,7 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
         try {
           const outcome = await Promise.race([
             // 不设等待上限：等人回答不是失败。取消由这一发的 signal 那侧收，请求身份就是那一帧的 id。
-            connection.request(QUESTION_METHOD, { sessionId: id, projectRoot: config.boundary, questions }),
+            connection.request(QUESTION_METHOD, { sessionId: id, projectRoot: env.projectRoot, questions }),
             cancelled,
           ]);
           if (outcome === 'cancelled') {
@@ -742,7 +753,11 @@ export function createHost({ config, provider, plugins = [minimalPlugin, network
     // 项目指令文件那四层是装载侧交给提示词的一段（D10、第 9.5 步留下的那一半）：
     // 装载器自己的预算算在完整文本上，片段登记时按同一个数，两处不会各截一次。
     const maxBytes = config.instructions?.maxBytes ?? DEFAULT_INSTRUCTION_BYTES;
-    const instructions = await loadInstructions({ boundary: config.boundary, ...config.instructions });
+    const instructions = await loadInstructions({
+      ...config.instructions,
+      boundary: env.projectRoot,
+      current: resolve(env.projectRoot, config.instructions?.current ?? '.'),
+    });
     prompt.fragment({ name: 'instructions', anchor: 0, text: instructions.text, maxBytes });
     // 目录整份内联还是只留一句使用说明由预算判（D55）。有技能就有这一段：
     // 披露入口不在模式的选择范围里，模式藏不掉它（D63）。
