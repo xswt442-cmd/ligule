@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
+import { writeFileSync } from 'node:fs';
 import { chmod, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DESKTOP_PREFS_LIMIT_BYTES, loadPrefs, parsePrefsJson, prefsPathOf, readPrefs, savePrefs } from '../dist/kernel/desktop-prefs.js';
@@ -39,18 +40,13 @@ async function assertNoWriteArtifacts(directory) {
   assert.equal(entries.some((name) => name.endsWith('.lock')), false, '保存结束后不留锁目录');
 }
 
-function startWindowsFileHolder({ path, root, holdMilliseconds, replaceFrom, replaceTo, rewriteDelayMilliseconds }) {
+function startWindowsFileHolder({ path, root, holdMilliseconds }) {
   const fixture = join(process.cwd(), 'test', 'fixtures', 'prefs-holder.ps1');
   const readyPath = join(root, 'holder-ready');
-  const changedPath = join(root, 'holder-changed');
   const args = [
     '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', fixture,
     '-Path', path, '-ReadyPath', readyPath, '-HoldMilliseconds', String(holdMilliseconds),
   ];
-  if (replaceFrom !== undefined) {
-    args.push('-ChangedPath', changedPath, '-ReplaceFrom', replaceFrom, '-ReplaceTo', replaceTo);
-    args.push('-RewriteDelayMilliseconds', String(rewriteDelayMilliseconds));
-  }
 
   const child = spawn('powershell.exe', args, { cwd: process.cwd(), stdio: ['ignore', 'ignore', 'pipe'] });
   const holder = { child, exit: null, stderr: '' };
@@ -67,7 +63,6 @@ function startWindowsFileHolder({ path, root, holdMilliseconds, replaceFrom, rep
   child.stderr.setEncoding('utf8').on('data', (chunk) => { holder.stderr += chunk; });
   holder.exited = exited;
   holder.readyPath = readyPath;
-  holder.changedPath = changedPath;
   return holder;
 }
 
@@ -85,18 +80,15 @@ async function waitForHolderMarker(holder, markerPath) {
   throw new Error(`Windows 文件占用进程没有创建标记：${holder.stderr}`);
 }
 
-async function waitForHolderChange(holder) {
+async function waitForPendingSave(root, holder, outcome) {
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
-    try {
-      if ((await readFile(holder.changedPath, 'utf8')) === 'changed') return true;
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-    }
+    if ((await readdir(root)).some((name) => name.endsWith('.tmp'))) return;
+    assert.equal(outcome.value, undefined, '外部改写前保存仍在等待替换');
     if (holder.exit !== null) throw new Error(`Windows 文件占用进程提前退出：${holder.stderr}`);
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  throw new Error(`Windows 文件占用进程没有改写文档：${holder.stderr}`);
+  throw new Error(`保存没有创建临时文件：${holder.stderr}`);
 }
 
 test('desktop preferences: reads distinguish a missing file from a valid empty object', async () => {
@@ -267,18 +259,22 @@ windowsTest('desktop preferences: an external Windows write during a held save m
   const holder = startWindowsFileHolder({
     path,
     root,
-    holdMilliseconds: 500,
-    replaceFrom: 'alpha',
-    replaceTo: 'bravo',
-    rewriteDelayMilliseconds: 100,
+    holdMilliseconds: 2_500,
   });
   try {
     await waitForHolderMarker(holder, holder.readyPath);
-    const pendingSave = savePrefs(path, { owner: 'must not replace external write', sentinel: 'keep' }, { version: initial.version });
-    await waitForHolderChange(holder);
+    const outcome = {};
+    const pendingSave = savePrefs(path, { owner: 'must not replace external write', sentinel: 'keep' }, { version: initial.version }).then(
+      (saved) => { outcome.value = { saved }; },
+      (error) => { outcome.value = { error }; },
+    );
+    await waitForPendingSave(root, holder, outcome);
     assert.equal(holder.exit, null, '外部写入发生时文件占用进程仍持有文件');
-    await assert.rejects(pendingSave, (error) => error.code === 'desktop_prefs_version_stale');
     const externalBytes = Buffer.from(`${JSON.stringify(externalValue)}\n`);
+    // 同步改写已打开文件，保持长度；保存进程的下次版本检查会读到完整的外部内容。
+    writeFileSync(path, externalBytes, { flag: 'r+' });
+    await pendingSave;
+    assert.equal(outcome.value?.error?.code, 'desktop_prefs_version_stale');
     assert.deepEqual(await readFile(path), externalBytes, '过期写入保留外部文档字节');
     assert.deepEqual(await readPrefs(path), { settings: externalValue, version: createHash('sha256').update(externalBytes).digest('hex') });
     const exit = await holder.exited;
