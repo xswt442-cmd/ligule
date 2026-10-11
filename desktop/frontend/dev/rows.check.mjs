@@ -23,6 +23,25 @@ assert.equal(questionCall.summary, '验收方式 · 命名形式');
 assert.match(questionCall.text, /逐项检查还是整体检查/);
 assert.match(questionCall.text, /"options"/);
 
+const encodedQuestions = JSON.stringify([
+  { header: '验收方式', question: '逐项检查还是整体检查？', options: [{ label: '逐项检查' }] },
+  { question: '命名形式' },
+]);
+const encodedQuestionCall = projectRecord({
+  kind: 'assistant',
+  toolCalls: [{ id: 'q2', name: 'ask_user_question', args: { questions: encodedQuestions } }],
+})[0];
+assert.equal(encodedQuestionCall.summary, '验收方式 · 命名形式');
+assert.deepEqual(JSON.parse(encodedQuestionCall.text), { questions: encodedQuestions });
+for (const questions of ['[invalid', 'null', '{}']) {
+  const invalidCall = projectRecord({
+    kind: 'assistant',
+    toolCalls: [{ id: 'invalid-question', name: 'ask_user_question', args: { questions } }],
+  })[0];
+  assert.equal(invalidCall.summary, '');
+  assert.deepEqual(JSON.parse(invalidCall.text), { questions });
+}
+
 assert.equal(capabilityOf('exec', { command: 'git status' }), 'exec');
 for (const status of ['completed', 'cancelled', 'failed', 'interrupted']) {
   const row = projectRecord({ seq: 42, kind: 'turn', status, code: status === 'failed' ? 'provider_http_error' : undefined })[0];

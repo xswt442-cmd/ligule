@@ -155,8 +155,18 @@ export function changeBody(change: Change, args: Record<string, unknown>, locale
 
 // 一次调用对人说清它动的是哪个对象：命令文本、路径、地址、那一项 MCP 能力名，都没有就退回一行参数。
 function argSummary(tool: string, args: Record<string, unknown>): string {
-  if (tool === 'ask_user_question' && Array.isArray(args.questions)) {
-    return args.questions.flatMap((question: unknown) => {
+  if (tool === 'ask_user_question') {
+    let questions: unknown = args.questions;
+    if (typeof questions === 'string') {
+      try {
+        questions = JSON.parse(questions);
+      } catch {
+        // 无效参数的原文保留在展开详情中。
+        return '';
+      }
+    }
+    if (!Array.isArray(questions)) return '';
+    return questions.flatMap((question: unknown) => {
       if (typeof question !== 'object' || question === null) return [];
       const fields = question as Record<string, unknown>;
       const title = fields.header ?? fields.question;
