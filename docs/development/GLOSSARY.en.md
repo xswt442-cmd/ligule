@@ -1,6 +1,6 @@
 # Glossary
 
-[简体中文](glossary.zh-CN.md) · [English](glossary.en.md)
+[简体中文](GLOSSARY.zh-cn.md) · [English](GLOSSARY.en.md)
 
 These terms describe current ligule behavior. Protocol method names and configuration keys keep their code spelling.
 
@@ -23,4 +23,4 @@ These terms describe current ligule behavior. Protocol method names and configur
 
 ## Related guides
 
-The [architecture guide](architecture.en.md) explains how these components interact. [Contributing and checks](contributing.en.md) describes the development workflow and validation commands.
+The [architecture guide](ARCHITECTURE.en.md) explains how these components interact. [Contributing and checks](CONTRIBUTING.en.md) describes the development workflow and validation commands.

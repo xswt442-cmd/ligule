@@ -1,6 +1,6 @@
 # 术语表
 
-[简体中文](glossary.zh-CN.md) · [English](glossary.en.md)
+[简体中文](GLOSSARY.zh-cn.md) · [English](GLOSSARY.en.md)
 
 本文统一说明 ligule 当前行为中使用的术语。协议方法名、配置键和错误码保留代码中的拼写。
 
@@ -23,4 +23,4 @@
 
 ## 相关文档
 
-[架构说明](architecture.zh-CN.md)解释这些组件如何交互；[贡献与验证](contributing.zh-CN.md)说明开发流程与检查命令。
+[架构说明](ARCHITECTURE.zh-cn.md)解释这些组件如何交互；[贡献与验证](CONTRIBUTING.zh-cn.md)说明开发流程与检查命令。

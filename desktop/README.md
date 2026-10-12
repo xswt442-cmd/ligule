@@ -2,11 +2,11 @@
 
 [简体中文](README.md) · [English](README.en.md)
 
-桌面应用由 `frontend/` 中的 React 与 TypeScript 前端、`src-tauri/` 中的 Rust 与 Tauri 壳，以及 Node Host 组成。前端通过 Tauri 调用 Host 协议；Rust 壳管理窗口并转发按行分隔的消息帧。业务逻辑和会话状态由 Node 管理。完整调用路径见[架构说明](../docs/development/architecture.zh-CN.md)。
+桌面应用由 `frontend/` 中的 React 与 TypeScript 前端、`src-tauri/` 中的 Rust 与 Tauri 壳，以及 Node Host 组成。前端通过 Tauri 调用 Host 协议；Rust 壳管理窗口并转发按行分隔的消息帧。业务逻辑和会话状态由 Node 管理。完整调用路径见[架构说明](../docs/development/ARCHITECTURE.zh-cn.md)。
 
 ## 环境要求
 
-需要 Node.js 24 或更新版本和稳定版 Rust 工具链。Windows 构建需要 WebView2；Linux 构建需要 [CI 工作流](../.github/workflows/ci.yml)列出的 Tauri 系统库。macOS 使用对应架构的原生 runner。支持的安装目标及验收状态见[发行清单](../docs/RELEASE.md)。
+需要 Node.js 24 或更新版本和稳定版 Rust 工具链。Windows 构建需要 WebView2；Linux 构建需要 [CI 工作流](../.github/workflows/ci.yml)列出的 Tauri 系统库。macOS 使用对应架构的原生 runner。支持的安装目标及验收状态见[发行清单](../docs/development/RELEASE.zh-cn.md)。
 
 从仓库根目录安装各个依赖树：
 
@@ -55,7 +55,7 @@ npm --prefix desktop run build
 
 `fetch-runtime.mjs` 会下载 [`node-pin.json`](node-pin.json) 指定的 Node 归档、验证校验和，并将构建产物和生产依赖复制到 `desktop/vendor/`。运行时目录与平台相关，不要在不同操作系统或架构之间复用。Tauri 会将其打入安装包。目标平台的安装包格式由 `tauri.*.conf.json` 指定。
 
-输出位置和安装包格式见[发行清单](../docs/RELEASE.md)。如需在打包前检查随包运行时，可使用当前平台 `desktop/vendor/node/` 下的 Node 执行 `desktop/check-runtime.mjs`。
+输出位置和安装包格式见[发行清单](../docs/development/RELEASE.zh-cn.md)。如需在打包前检查随包运行时，可使用当前平台 `desktop/vendor/node/` 下的 Node 执行 `desktop/check-runtime.mjs`。
 
 ## 应用图标
 

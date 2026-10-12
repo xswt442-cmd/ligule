@@ -1,6 +1,6 @@
 # Release checklist
 
-[简体中文](RELEASE.md) · [English](RELEASE.en.md)
+[简体中文](RELEASE.zh-cn.md) · [English](RELEASE.en.md)
 
 This document tracks desktop installer and npm package targets, artifacts, system requirements, and installation verification. The repository version is `0.0.2`; this checklist does not mean that the version has been publicly released.
 

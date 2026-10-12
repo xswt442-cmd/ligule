@@ -17,11 +17,11 @@ const enPath = join(repoRoot, 'docs', 'guide.en.md');
 const bilingualPairs = [
   [join(repoRoot, 'README.md'), join(repoRoot, 'README.en.md')],
   [join(repoRoot, 'desktop', 'README.md'), join(repoRoot, 'desktop', 'README.en.md')],
-  [join(repoRoot, 'docs', 'RELEASE.md'), join(repoRoot, 'docs', 'RELEASE.en.md')],
+  [join(repoRoot, 'docs', 'development', 'RELEASE.zh-cn.md'), join(repoRoot, 'docs', 'development', 'RELEASE.en.md')],
   [zhPath, enPath],
-  [join(repoRoot, 'docs', 'development', 'architecture.zh-CN.md'), join(repoRoot, 'docs', 'development', 'architecture.en.md')],
-  [join(repoRoot, 'docs', 'development', 'glossary.zh-CN.md'), join(repoRoot, 'docs', 'development', 'glossary.en.md')],
-  [join(repoRoot, 'docs', 'development', 'contributing.zh-CN.md'), join(repoRoot, 'docs', 'development', 'contributing.en.md')],
+  [join(repoRoot, 'docs', 'development', 'ARCHITECTURE.zh-cn.md'), join(repoRoot, 'docs', 'development', 'ARCHITECTURE.en.md')],
+  [join(repoRoot, 'docs', 'development', 'GLOSSARY.zh-cn.md'), join(repoRoot, 'docs', 'development', 'GLOSSARY.en.md')],
+  [join(repoRoot, 'docs', 'development', 'CONTRIBUTING.zh-cn.md'), join(repoRoot, 'docs', 'development', 'CONTRIBUTING.en.md')],
 ];
 const maintainedDocs = [
   ...bilingualPairs.flatMap((pair) => pair),
@@ -138,23 +138,41 @@ test('README 有使用手册、架构和贡献说明入口', () => {
   assert.match(englishReadme, /src="docs\/app-icon\.png"/);
   assert.match(readme, /docs\/guide\.zh-CN\.md/);
   assert.match(readme, /docs\/guide\.en\.md/);
-  assert.match(readme, /docs\/development\/architecture\.zh-CN\.md/);
-  assert.match(readme, /docs\/development\/glossary\.zh-CN\.md/);
-  assert.match(readme, /docs\/development\/contributing\.zh-CN\.md/);
-  assert.match(englishReadme, /docs\/development\/architecture\.en\.md/);
-  assert.match(englishReadme, /docs\/development\/glossary\.en\.md/);
-  assert.match(englishReadme, /docs\/development\/contributing\.en\.md/);
+  assert.match(readme, /docs\/development\/ARCHITECTURE\.zh-cn\.md/);
+  assert.match(readme, /docs\/development\/GLOSSARY\.zh-cn\.md/);
+  assert.match(readme, /docs\/development\/CONTRIBUTING\.zh-cn\.md/);
+  assert.match(readme, /docs\/development\/RELEASE\.zh-cn\.md/);
+  assert.match(englishReadme, /docs\/development\/ARCHITECTURE\.en\.md/);
+  assert.match(englishReadme, /docs\/development\/GLOSSARY\.en\.md/);
+  assert.match(englishReadme, /docs\/development\/CONTRIBUTING\.en\.md/);
+  assert.match(englishReadme, /docs\/development\/RELEASE\.en\.md/);
   assert.ok(manifest.files.includes('README.en.md'), 'the English README must be included in the npm package');
 });
 
-test('docs 根目录只放双语手册与发行清单，且都有正文', () => {
+test('docs 根目录只放双语使用手册，且都有正文', () => {
   const files = readdirSync(join(repoRoot, 'docs'))
     .filter((name) => name.endsWith('.md'))
     .sort();
-  assert.deepEqual(files, ['RELEASE.en.md', 'RELEASE.md', 'guide.en.md', 'guide.zh-CN.md']);
+  assert.deepEqual(files, ['guide.en.md', 'guide.zh-CN.md']);
   for (const name of files) {
     assert.ok(readFileSync(join(repoRoot, 'docs', name), 'utf8').startsWith('# '), `${name} 的第一行不是一级标题`);
   }
+});
+
+test('development 文档文件名使用大写主体与小写语言标记', () => {
+  const files = readdirSync(join(repoRoot, 'docs', 'development'))
+    .filter((name) => name.endsWith('.md'))
+    .sort();
+  assert.deepEqual(files, [
+    'ARCHITECTURE.en.md',
+    'ARCHITECTURE.zh-cn.md',
+    'CONTRIBUTING.en.md',
+    'CONTRIBUTING.zh-cn.md',
+    'GLOSSARY.en.md',
+    'GLOSSARY.zh-cn.md',
+    'RELEASE.en.md',
+    'RELEASE.zh-cn.md',
+  ]);
 });
 
 // 工程指南分几份放之后要守的两条：每份都能整份读进默认读入上限，且每一处都以默认预算完整装载。

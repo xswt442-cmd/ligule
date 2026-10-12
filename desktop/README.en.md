@@ -2,11 +2,11 @@
 
 [简体中文](README.md) · [English](README.en.md)
 
-The desktop app has a React and TypeScript frontend in [`frontend/`](frontend/), a Rust and Tauri shell in [`src-tauri/`](src-tauri/), and a Node Host process. The frontend owns presentation and sends Host protocol calls through Tauri. The shell manages windows and forwards newline-delimited frames; business logic and session state stay in Node. See the [architecture guide](../docs/development/architecture.en.md) for the complete request path.
+The desktop app has a React and TypeScript frontend in [`frontend/`](frontend/), a Rust and Tauri shell in [`src-tauri/`](src-tauri/), and a Node Host process. The frontend owns presentation and sends Host protocol calls through Tauri. The shell manages windows and forwards newline-delimited frames; business logic and session state stay in Node. See the [architecture guide](../docs/development/ARCHITECTURE.en.md) for the complete request path.
 
 ## Prerequisites
 
-Use Node.js 24 or newer and the stable Rust toolchain. Windows builds require WebView2. Linux builds require the Tauri system libraries listed in the [CI workflow](../.github/workflows/ci.yml). macOS builds use the target runner's native architecture. Supported installer targets and verification status are listed in the [release checklist](../docs/RELEASE.en.md).
+Use Node.js 24 or newer and the stable Rust toolchain. Windows builds require WebView2. Linux builds require the Tauri system libraries listed in the [CI workflow](../.github/workflows/ci.yml). macOS builds use the target runner's native architecture. Supported installer targets and verification status are listed in the [release checklist](../docs/development/RELEASE.en.md).
 
 Install each package tree from the repository root:
 
@@ -56,7 +56,7 @@ npm --prefix desktop run build
 
 `fetch-runtime.mjs` downloads the Node archive named in [`node-pin.json`](node-pin.json), verifies its checksum, and copies the built app plus production dependencies into `desktop/vendor/`. The runtime tree is platform-specific and is generated locally. Tauri embeds it when building the installer. The target-specific bundle format comes from `tauri.*.conf.json`; do not reuse `desktop/vendor/` across operating systems or architectures.
 
-The output locations and installer formats are recorded in the [release checklist](../docs/RELEASE.en.md). To inspect the bundled runtime before building, run `desktop/check-runtime.mjs` with the Node executable under `desktop/vendor/node/` for the current platform.
+The output locations and installer formats are recorded in the [release checklist](../docs/development/RELEASE.en.md). To inspect the bundled runtime before building, run `desktop/check-runtime.mjs` with the Node executable under `desktop/vendor/node/` for the current platform.
 
 ## Application icons
 

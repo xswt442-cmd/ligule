@@ -1,6 +1,6 @@
 # 架构说明
 
-[简体中文](architecture.zh-CN.md) · [English](architecture.en.md)
+[简体中文](ARCHITECTURE.zh-cn.md) · [English](ARCHITECTURE.en.md)
 
 本文根据当前源码说明 ligule 的运行结构、一次 Agent Loop 和会话数据路径。命令行、终端界面和桌面界面使用同一套 Node.js 业务内核，各自通过适配器连接 Host。
 
@@ -128,4 +128,4 @@ CLI 命令直接调用 Host。TUI 在内存连接上使用相同协议。桌面�
 
 ## 相关文档
 
-[术语表](glossary.zh-CN.md)定义项目用语；[贡献与验证](contributing.zh-CN.md)列出开发命令和检查范围；[使用手册](../guide.zh-CN.md)说明 CLI、TUI 和 Desktop 的用户操作。
+[术语表](GLOSSARY.zh-cn.md)定义项目用语；[贡献与验证](CONTRIBUTING.zh-cn.md)列出开发命令和检查范围；[使用手册](../guide.zh-CN.md)说明 CLI、TUI 和 Desktop 的用户操作。

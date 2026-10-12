@@ -1,6 +1,6 @@
 # Session
 
-The repository [Agent guide](../../AGENTS.md) applies here. This directory owns the JSONL record format, recovery, listing, branching, checkpoints, and compaction. The [architecture guide](../../docs/development/architecture.en.md) describes how these pieces fit together.
+The repository [Agent guide](../../AGENTS.md) applies here. This directory owns the JSONL record format, recovery, listing, branching, checkpoints, and compaction. The [architecture guide](../../docs/development/ARCHITECTURE.en.md) describes how these pieces fit together.
 
 ## Record and recovery
 

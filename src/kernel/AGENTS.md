@@ -1,6 +1,6 @@
 # Kernel
 
-The repository [Agent guide](../../AGENTS.md) applies here. This file keeps kernel-specific ownership and safety rules; see the [architecture guide](../../docs/development/architecture.en.md) for the request flow.
+The repository [Agent guide](../../AGENTS.md) applies here. This file keeps kernel-specific ownership and safety rules; see the [architecture guide](../../docs/development/ARCHITECTURE.en.md) for the request flow.
 
 ## Shared state
 

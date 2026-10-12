@@ -1,6 +1,6 @@
 # 发行清单
 
-[简体中文](RELEASE.md) · [English](RELEASE.en.md)
+[简体中文](RELEASE.zh-cn.md) · [English](RELEASE.en.md)
 
 本文列出桌面安装包和 npm 包的目标、产物、系统要求及安装验证状态。版本为 `0.0.2`；本清单不表示该版本已公开发行。
 

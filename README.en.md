@@ -18,7 +18,7 @@ ligule is an AI assistant for working in projects, with one shared Agent kernel 
 | TUI | Ongoing conversations and session management in a terminal | `ligule tui` |
 | Desktop | Workspace sidebar, visual settings, and session actions | Install the desktop package for your platform |
 
-The CLI and TUI require Node.js 24 or newer. The TUI requires an interactive terminal; use `ligule run` in scripts and pipelines. Desktop targets, system requirements, and verification status are listed in the [release checklist](docs/RELEASE.en.md). A repository version or CI artifact does not mean a release is public.
+The CLI and TUI require Node.js 24 or newer. The TUI requires an interactive terminal; use `ligule run` in scripts and pipelines. Desktop targets, system requirements, and verification status are listed in the [release checklist](docs/development/RELEASE.en.md). A repository version or CI artifact does not mean a release is public.
 
 ## Quick start
 
@@ -40,7 +40,7 @@ ligule tui
 
 ### Desktop app
 
-Check the [release checklist](docs/RELEASE.en.md) to confirm that an installer is public for your platform, then download it from [GitHub Releases](https://github.com/xswt442-cmd/ligule/releases). On first launch, the desktop app creates a default workspace. You can change the default directory for new sessions in Settings.
+Check the [release checklist](docs/development/RELEASE.en.md) to confirm that an installer is public for your platform, then download it from [GitHub Releases](https://github.com/xswt442-cmd/ligule/releases). On first launch, the desktop app creates a default workspace. You can change the default directory for new sessions in Settings.
 
 ## Configuration and data
 
@@ -59,9 +59,9 @@ Set the environment variable named by `apiKeyEnv`. Desktop settings also support
 ## Documentation
 
 - [简体中文使用手册](docs/guide.zh-CN.md) · [English user guide](docs/guide.en.md)
-- [架构说明（中文）](docs/development/architecture.zh-CN.md) · [Architecture (English)](docs/development/architecture.en.md)
-- [术语表（中文）](docs/development/glossary.zh-CN.md) · [Glossary (English)](docs/development/glossary.en.md)
-- [贡献与验证（中文）](docs/development/contributing.zh-CN.md) · [Contributing and checks (English)](docs/development/contributing.en.md)
-- [维护者发行清单（中文）](docs/RELEASE.md) · [Release checklist (English)](docs/RELEASE.en.md)
+- [架构说明（中文）](docs/development/ARCHITECTURE.zh-cn.md) · [Architecture (English)](docs/development/ARCHITECTURE.en.md)
+- [术语表（中文）](docs/development/GLOSSARY.zh-cn.md) · [Glossary (English)](docs/development/GLOSSARY.en.md)
+- [贡献与验证（中文）](docs/development/CONTRIBUTING.zh-cn.md) · [Contributing and checks (English)](docs/development/CONTRIBUTING.en.md)
+- [维护者发行清单（中文）](docs/development/RELEASE.zh-cn.md) · [Release checklist (English)](docs/development/RELEASE.en.md)
 
-New users can start with the [English user guide](docs/guide.en.md). Desktop installation checks and public release status are tracked separately in the [release checklist](docs/RELEASE.en.md).
+New users can start with the [English user guide](docs/guide.en.md). Desktop installation checks and public release status are tracked separately in the [release checklist](docs/development/RELEASE.en.md).

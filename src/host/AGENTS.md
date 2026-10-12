@@ -1,6 +1,6 @@
 # Host
 
-The repository [Agent guide](../../AGENTS.md) applies here. The Host owns client protocol dispatch, project environments, open sessions, and Markdown export. See the [architecture guide](../../docs/development/architecture.en.md) for the shared runtime flow.
+The repository [Agent guide](../../AGENTS.md) applies here. The Host owns client protocol dispatch, project environments, open sessions, and Markdown export. See the [architecture guide](../../docs/development/ARCHITECTURE.en.md) for the shared runtime flow.
 
 ## Project and session ownership
 

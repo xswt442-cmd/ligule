@@ -1,6 +1,6 @@
 # Architecture
 
-[简体中文](architecture.zh-CN.md) · [English](architecture.en.md)
+[简体中文](ARCHITECTURE.zh-cn.md) · [English](ARCHITECTURE.en.md)
 
 ligule uses one Node.js business runtime for the command line, terminal UI, and desktop app. The [kernel](../../src/kernel/kernel.js) executes registered tools and applies the decision chain. The [Host](../../src/host/host.js) assembles that kernel with a project environment, model provider, session log, and client protocol. User interfaces call the Host through adapters.
 
@@ -132,4 +132,4 @@ The CLI's single-turn commands call the Host directly. The TUI uses the same pro
 
 ## Related guides
 
-The [glossary](glossary.en.md) defines shared terms. [Contributing and checks](contributing.en.md) lists development commands and validation scope. The [user guide](../guide.en.md) explains CLI, TUI, and desktop workflows.
+The [glossary](GLOSSARY.en.md) defines shared terms. [Contributing and checks](CONTRIBUTING.en.md) lists development commands and validation scope. The [user guide](../guide.en.md) explains CLI, TUI, and desktop workflows.

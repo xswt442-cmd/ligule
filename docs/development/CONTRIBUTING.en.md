@@ -1,8 +1,8 @@
 # Contributing
 
-[简体中文](contributing.zh-CN.md) · [English](contributing.en.md)
+[简体中文](CONTRIBUTING.zh-cn.md) · [English](CONTRIBUTING.en.md)
 
-The repository contains the Node.js runtime, TUI, and Tauri desktop app. Read the root [Agent guide](../../AGENTS.md) and the local `AGENTS.md` for the directory you are changing before editing it. The [architecture guide](architecture.en.md) describes ownership and data flow; the [glossary](glossary.en.md) defines shared terms.
+The repository contains the Node.js runtime, TUI, and Tauri desktop app. Read the root [Agent guide](../../AGENTS.md) and the local `AGENTS.md` for the directory you are changing before editing it. The [architecture guide](ARCHITECTURE.en.md) describes ownership and data flow; the [glossary](GLOSSARY.en.md) defines shared terms.
 
 ## Set up and validate
 
@@ -30,8 +30,8 @@ Rust shell checks run with `cargo fmt --check` and `cargo test` from `desktop/sr
 
 Document behavior from the implementation and its tests. Keep user-facing claims consistent in the Chinese and English guides, and distinguish automated coverage from platform or human verification. Do not put credentials, personal session records, or generated `desktop/vendor/` files in commits. Update a lockfile with its package manifest when a dependency changes.
 
-The CI workflow checks the core package on Windows and Linux, exercises native credential storage on all four desktop targets, and builds the desktop installers on Windows x64, Linux x64, macOS arm64, and macOS x64. CI build artifacts are validation outputs; they are not public releases. The release workflow and current release state are documented in the [release checklist](../RELEASE.en.md).
+The CI workflow checks the core package on Windows and Linux, exercises native credential storage on all four desktop targets, and builds the desktop installers on Windows x64, Linux x64, macOS arm64, and macOS x64. CI build artifacts are validation outputs; they are not public releases. The release workflow and current release state are documented in the [release checklist](RELEASE.en.md).
 
 ## Related guides
 
-The [architecture guide](architecture.en.md) describes the dependency direction between the kernel and adapters. The [user guide](../guide.en.md) explains CLI, TUI, and desktop workflows.
+The [architecture guide](ARCHITECTURE.en.md) describes the dependency direction between the kernel and adapters. The [user guide](../guide.en.md) explains CLI, TUI, and desktop workflows.
