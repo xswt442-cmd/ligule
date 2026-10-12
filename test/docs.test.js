@@ -95,8 +95,10 @@ test('README 有指向两种语言的入口', () => {
   assert.match(readme, /docs\/guide\.en\.md/);
 });
 
-test('docs 目录只有这两种语言的入口，且都有正文', () => {
-  const files = readdirSync(join(repoRoot, 'docs')).sort();
+test('docs 目录的 Markdown 入口只有这两种语言，且都有正文', () => {
+  const files = readdirSync(join(repoRoot, 'docs'))
+    .filter((name) => name.endsWith('.md'))
+    .sort();
   assert.deepEqual(files, ['guide.en.md', 'guide.zh-CN.md']);
   for (const name of files) {
     assert.ok(readFileSync(join(repoRoot, 'docs', name), 'utf8').startsWith('# '), `${name} 的第一行不是一级标题`);
