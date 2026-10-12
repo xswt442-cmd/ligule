@@ -4,7 +4,7 @@
 [![Node.js](https://img.shields.io/static/v1?label=node&message=%3E%3D24&color=339933&logo=node.js&logoColor=white)](https://nodejs.org)
 [![license](https://img.shields.io/badge/license-MIT-22c55e.svg)](./LICENSE)
 
-ligule 是一个共享 Agent 内核的命令行、终端和桌面助手。三种界面共用工具执行、审批、模型请求与会话记录。当前仓库版本为 `0.0.2`；仓库版本与 CI 构建结果不代表已经发布，发行状态见[发行清单](RELEASE.md)。
+ligule 是一个共享 Agent 内核的命令行、终端和桌面助手。三种界面共用工具执行、审批、模型请求与会话记录。当前仓库版本为 `0.0.2`；仓库版本与 CI 构建结果不代表已经发布，发行状态见[发行清单](docs/RELEASE.md)。
 
 ## 安装和启动
 
@@ -20,7 +20,7 @@ npm install -g ligule
 ligule run "检查项目结构并提出建议"
 ```
 
-运行 `ligule tui` 打开终端界面。TUI 需要交互式终端；脚本和管道使用 `ligule run`。桌面安装包的目标平台、系统要求和验收状态见[发行清单](RELEASE.md)。
+运行 `ligule tui` 打开终端界面。TUI 需要交互式终端；脚本和管道使用 `ligule run`。桌面安装包的目标平台、系统要求和验收状态见[发行清单](docs/RELEASE.md)。
 
 ## 配置
 

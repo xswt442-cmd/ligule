@@ -4,7 +4,7 @@ The desktop app has a React and TypeScript frontend in [`frontend/`](frontend/),
 
 ## Prerequisites
 
-Use Node.js 24 or newer and the stable Rust toolchain. Windows builds require WebView2. Linux builds require the Tauri system libraries listed in the [CI workflow](../.github/workflows/ci.yml). macOS builds use the target runner's native architecture. Supported installer targets and verification status are listed in [RELEASE.md](../RELEASE.md).
+Use Node.js 24 or newer and the stable Rust toolchain. Windows builds require WebView2. Linux builds require the Tauri system libraries listed in the [CI workflow](../.github/workflows/ci.yml). macOS builds use the target runner's native architecture. Supported installer targets and verification status are listed in [RELEASE.md](../docs/RELEASE.md).
 
 Install each package tree from the repository root:
 
@@ -54,7 +54,7 @@ npm --prefix desktop run build
 
 `fetch-runtime.mjs` downloads the Node archive named in [`node-pin.json`](node-pin.json), verifies its checksum, and copies the built app plus production dependencies into `desktop/vendor/`. The runtime tree is platform-specific and is generated locally. Tauri embeds it when building the installer. The target-specific bundle format comes from `tauri.*.conf.json`; do not reuse `desktop/vendor/` across operating systems or architectures.
 
-The output locations and installer formats are recorded in [RELEASE.md](../RELEASE.md). To inspect the bundled runtime before building, run `desktop/check-runtime.mjs` with the Node executable under `desktop/vendor/node/` for the current platform.
+The output locations and installer formats are recorded in [RELEASE.md](../docs/RELEASE.md). To inspect the bundled runtime before building, run `desktop/check-runtime.mjs` with the Node executable under `desktop/vendor/node/` for the current platform.
 
 ## Application icons
 

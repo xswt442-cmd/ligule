@@ -16,7 +16,7 @@ const zhPath = join(repoRoot, 'docs', 'guide.zh-CN.md');
 const enPath = join(repoRoot, 'docs', 'guide.en.md');
 const maintainedDocs = [
   join(repoRoot, 'README.md'),
-  join(repoRoot, 'RELEASE.md'),
+  join(repoRoot, 'docs', 'RELEASE.md'),
   join(repoRoot, 'desktop', 'README.md'),
   zhPath,
   enPath,
@@ -132,11 +132,11 @@ test('README 有使用手册、架构和贡献说明入口', () => {
   assert.match(readme, /docs\/development\/contributing\.md/);
 });
 
-test('docs 目录的 Markdown 入口只有这两种语言，且都有正文', () => {
+test('docs 根目录只放双语手册与发行清单，且都有正文', () => {
   const files = readdirSync(join(repoRoot, 'docs'))
     .filter((name) => name.endsWith('.md'))
     .sort();
-  assert.deepEqual(files, ['guide.en.md', 'guide.zh-CN.md']);
+  assert.deepEqual(files, ['RELEASE.md', 'guide.en.md', 'guide.zh-CN.md']);
   for (const name of files) {
     assert.ok(readFileSync(join(repoRoot, 'docs', name), 'utf8').startsWith('# '), `${name} 的第一行不是一级标题`);
   }
