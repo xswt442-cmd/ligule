@@ -2,6 +2,7 @@
 import { createRequire } from 'node:module';
 import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { releaseManifest } from '../scripts/pack-release.js';
@@ -79,7 +80,7 @@ if (relativeBackend === '..' || relativeBackend.startsWith(`..${sep}`) || isAbso
   throw new Error(`the search backend is outside ${expectedPackage}: ${backendPath}`);
 }
 
-const temporary = await mkdtemp(join(app, '.runtime-check-'));
+const temporary = await mkdtemp(join(tmpdir(), 'ligule-runtime-check-'));
 try {
   await writeFile(join(temporary, 'needle.txt'), 'LIGULE-DESKTOP-RUNTIME-CHECK\n', 'utf8');
   const result = await library.searchWithRipgrep({
