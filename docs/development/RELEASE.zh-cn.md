@@ -2,16 +2,29 @@
 
 [简体中文](RELEASE.zh-cn.md) · [English](RELEASE.en.md)
 
-本文列出桌面安装包和 npm 包的目标、产物、系统要求及安装验证状态。版本为 `0.0.2`；本清单不表示该版本已公开发行。
+本文列出桌面安装包和 npm 包的目标、产物、系统要求及安装验证状态。
+
+> **发行状态：尚未公开。** 仓库版本为 `0.0.2`。Windows x64 已实测安装与运行；Linux 和两个 macOS 目标仍待实机验收。
 
 ## 桌面安装包
 
-| 目标 | Rust target | 随包 Node 归档 | SHA-256 | 安装包 | 系统要求 | 构建机 | 安装验证 |
-|---|---|---|---|---|---|---|---|
-| Windows x64 | `x86_64-pc-windows-msvc` | `node-v24.21.0-win-x64.zip` | `158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541` | NSIS `.exe` | Windows 10；需要 WebView2 运行时 | GitHub Actions `windows-latest` | 已实测安装、真实模型请求、退出和卸载；发行附件按最终构建复验 |
-| Linux x64 | `x86_64-unknown-linux-gnu` | `node-v24.21.0-linux-x64.tar.xz` | `fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6` | `.AppImage` 与 `.deb` | 声明支持 Ubuntu 22.04 与 Debian 12 | GitHub Actions `ubuntu-22.04` | 待在两种系统安装并启动验证 |
-| macOS Apple Silicon | `aarch64-apple-darwin` | `node-v24.21.0-darwin-arm64.tar.gz` | `bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057` | `.dmg` | macOS 13.5 或更新版本 | GitHub Actions `macos-15` | 待在 Apple Silicon 实机安装并启动验证 |
-| macOS Intel | `x86_64-apple-darwin` | `node-v24.21.0-darwin-x64.tar.gz` | `1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e8097` | `.dmg` | macOS 13.5 或更新版本 | GitHub Actions `macos-15-intel` | 待在 Intel 实机安装并启动验证 |
+| 目标 | 安装包 | 系统要求 | 安装验证 |
+|---|---|---|---|
+| Windows x64 | NSIS `.exe` | Windows 10；需要 WebView2 运行时 | 已实测安装、真实模型请求、退出和卸载；发行附件按最终构建复验 |
+| Linux x64 | `.AppImage` 与 `.deb` | 声明支持 Ubuntu 22.04 与 Debian 12 | 待在两种系统安装并启动验证 |
+| macOS Apple Silicon | `.dmg` | macOS 13.5 或更新版本 | 待在 Apple Silicon 实机安装并启动验证 |
+| macOS Intel | `.dmg` | macOS 13.5 或更新版本 | 待在 Intel 实机安装并启动验证 |
+
+### 随包 Node.js 运行时
+
+| 目标 | Rust target | Node 归档 | SHA-256 |
+|---|---|---|---|
+| Windows x64 | `x86_64-pc-windows-msvc` | `node-v24.21.0-win-x64.zip` | `158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541` |
+| Linux x64 | `x86_64-unknown-linux-gnu` | `node-v24.21.0-linux-x64.tar.xz` | `fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6` |
+| macOS Apple Silicon | `aarch64-apple-darwin` | `node-v24.21.0-darwin-arm64.tar.gz` | `bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057` |
+| macOS Intel | `x86_64-apple-darwin` | `node-v24.21.0-darwin-x64.tar.gz` | `1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e8097` |
+
+构建机分别为 GitHub Actions `windows-latest`、`ubuntu-22.04`、`macos-15` 和 `macos-15-intel`。
 
 Node.js v24.21.0 的平台表列出 Linux x64 的最低基线为 Linux 4.18 与 glibc 2.28，并列出 macOS 13.5 下的 arm64 和 x64 两种目标。发行目标仍声明 Linux 为 Ubuntu 22.04 与 Debian 12；构建机版本只说明产物构建环境，不能替代这两种系统上的安装与启动验证。[Node.js v24.21.0 平台要求](https://github.com/nodejs/node/blob/v24.21.0/BUILDING.md#platform-list)
 
@@ -46,6 +59,10 @@ AppImage 在 `ubuntu-22.04` 上构建。各平台的安装包类型由 `desktop/
 
 ## 发布顺序
 
-`publish.yml` 为主包和四个平台包各打一次 tarball，并将 SHA-256 一并保存为构建产物。流水线先校验并发布四个搜索包，再从 registry 安装搜索包来验证同一份主包 tarball，随后发布该主包 tarball，最后创建 GitHub draft Release。已存在的同名版本会按 tarball 内容与 registry 版本比较；内容不一致时发布失败。
+1. **准备主分支提交。** 更新 `src/version.js` 和测试要求的版本清单，运行 `npm test` 与发行检查；将目标提交合入 `main`。等该提交对应的 [CI 运行](../../.github/workflows/ci.yml)完成，确认四个平台安装包均已构建。
+2. **推送版本标签。** 在 `main` 上为目标提交创建与 `package.json` 版本一致的 `vX.Y.Z` 标签并推送，例如运行 `git tag -a vX.Y.Z -m "vX.Y.Z"` 和 `git push origin vX.Y.Z`。发布工作流[只由 `v*` 标签触发](../../.github/workflows/publish.yml)，并会检查标签版本与 `package.json` 一致、标签提交属于 `main`。
+3. **检查 npm 发布和草稿。** 发布工作流验证并发布四个搜索包，再验证并发布主包，最后创建或更新 GitHub draft Release。工作流会验证已经存在的同名版本是否与待发布 tarball 内容一致。
+4. **上传桌面安装包。** 从目标提交对应的成功 CI 运行下载以下四个 GitHub Actions 构建产物，并将安装文件手动上传到草稿 Release：`ligule-desktop-windows-x64`、`ligule-desktop-linux-x64`、`ligule-desktop-macos-arm64` 和 `ligule-desktop-macos-x64`。`publish.yml` 只创建草稿，不会把 CI 构建产物上传到 Release。核对安装文件的平台与名称，并用 `Get-FileHash -Algorithm SHA256` 或 `sha256sum` 计算安装包校验值，加入发行说明。
+5. **公开 Release。** 完成四个平台的实机验证、确认草稿中的安装文件和校验值后，再公开 Release。
 
-GitHub Actions 使用 npm Trusted Publishing；初次建立包与发布者信任关系时可通过 `NPM_TOKEN` 完成发布。桌面安装包由 `ci.yml` 构建并作为检查附件提供，Release 会保持草稿。使用者完成四个平台的实机验证、确认附件后，再公开 Release。npm 版本与桌面安装包的实际发行状态以 registry 和 GitHub 上的发布结果为准。
+GitHub Actions 使用 npm Trusted Publishing；初次建立包与发布者信任关系时可通过 `NPM_TOKEN` 完成发布。npm 版本与桌面安装包的实际发行状态以 registry 和 GitHub 上的发布结果为准。

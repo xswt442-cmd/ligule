@@ -2,16 +2,29 @@
 
 [简体中文](RELEASE.zh-cn.md) · [English](RELEASE.en.md)
 
-This document tracks desktop installer and npm package targets, artifacts, system requirements, and installation verification. The repository version is `0.0.2`; this checklist does not mean that the version has been publicly released.
+This document tracks desktop installer and npm package targets, artifacts, system requirements, and installation verification.
+
+> **Release status: not public.** The repository version is `0.0.2`. Windows x64 installation and launch have been tested; Linux and both macOS targets still need hardware validation.
 
 ## Desktop installers
 
-| Target | Rust target | Bundled Node archive | SHA-256 | Installer | System requirement | Build runner | Installation verification |
-|---|---|---|---|---|---|---|---|
-| Windows x64 | `x86_64-pc-windows-msvc` | `node-v24.21.0-win-x64.zip` | `158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541` | NSIS `.exe` | Windows 10; WebView2 runtime required | GitHub Actions `windows-latest` | Installation, a real model request, exit, and uninstall tested; verify release attachments against the final build |
-| Linux x64 | `x86_64-unknown-linux-gnu` | `node-v24.21.0-linux-x64.tar.xz` | `fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6` | `.AppImage` and `.deb` | Ubuntu 22.04 and Debian 12 are declared targets | GitHub Actions `ubuntu-22.04` | Awaiting installation and launch checks on both systems |
-| macOS Apple Silicon | `aarch64-apple-darwin` | `node-v24.21.0-darwin-arm64.tar.gz` | `bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057` | `.dmg` | macOS 13.5 or newer | GitHub Actions `macos-15` | Awaiting installation and launch check on Apple Silicon hardware |
-| macOS Intel | `x86_64-apple-darwin` | `node-v24.21.0-darwin-x64.tar.gz` | `1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e8097` | `.dmg` | macOS 13.5 or newer | GitHub Actions `macos-15-intel` | Awaiting installation and launch check on Intel hardware |
+| Target | Installer | System requirement | Installation verification |
+|---|---|---|---|
+| Windows x64 | NSIS `.exe` | Windows 10; WebView2 runtime required | Installation, a real model request, exit, and uninstall tested; verify release attachments against the final build |
+| Linux x64 | `.AppImage` and `.deb` | Ubuntu 22.04 and Debian 12 are declared targets | Awaiting installation and launch checks on both systems |
+| macOS Apple Silicon | `.dmg` | macOS 13.5 or newer | Awaiting installation and launch check on Apple Silicon hardware |
+| macOS Intel | `.dmg` | macOS 13.5 or newer | Awaiting installation and launch check on Intel hardware |
+
+### Bundled Node.js runtimes
+
+| Target | Rust target | Node archive | SHA-256 |
+|---|---|---|---|
+| Windows x64 | `x86_64-pc-windows-msvc` | `node-v24.21.0-win-x64.zip` | `158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541` |
+| Linux x64 | `x86_64-unknown-linux-gnu` | `node-v24.21.0-linux-x64.tar.xz` | `fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6` |
+| macOS Apple Silicon | `aarch64-apple-darwin` | `node-v24.21.0-darwin-arm64.tar.gz` | `bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057` |
+| macOS Intel | `x86_64-apple-darwin` | `node-v24.21.0-darwin-x64.tar.gz` | `1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e8097` |
+
+GitHub Actions builds them on `windows-latest`, `ubuntu-22.04`, `macos-15`, and `macos-15-intel` runners, respectively.
 
 The four desktop targets are built by the Windows, Linux, Apple Silicon, and Intel runners in `ci.yml`. Automated builds and tests do not replace installation, first-launch, and platform-specific checks on the target systems. Each installer still needs validation, including tray menu and notification behavior.
 
@@ -46,6 +59,10 @@ Each archive contains `LICENSE-MIT`, `UNLICENSE`, and `COPYING`. `npm run build-
 
 ## Release sequence
 
-`publish.yml` creates one tarball each for the main package and four platform packages, and stores their SHA-256 values as build artifacts. The workflow verifies and publishes the four search packages first, installs them from the registry to test the same main package tarball, publishes that tarball, and creates a GitHub draft Release last. If a version already exists, the workflow compares its tarball with the registry version and fails when their contents differ.
+1. **Prepare the main-branch commit.** Update `src/version.js` and the version manifests required by tests, then run `npm test` and the release checks. Merge the target commit into `main`. Wait for the [CI run](../../.github/workflows/ci.yml) for that commit to finish, and confirm that all four platform installers were built.
+2. **Push the version tag.** On `main`, create and push a `vX.Y.Z` tag matching the `package.json` version, for example `git tag -a vX.Y.Z -m "vX.Y.Z"` followed by `git push origin vX.Y.Z`. The publish workflow is [triggered only by `v*` tags](../../.github/workflows/publish.yml); it checks that the tag matches `package.json` and points to a commit on `main`.
+3. **Check npm publication and the draft.** The publish workflow verifies and publishes the four search packages, verifies and publishes the main package, then creates or updates a GitHub draft Release. It checks that any existing version matches the tarball contents being published.
+4. **Upload the desktop installers.** Download the following four GitHub Actions artifacts from the successful CI run for the target commit, then manually upload the installer files to the draft Release: `ligule-desktop-windows-x64`, `ligule-desktop-linux-x64`, `ligule-desktop-macos-arm64`, and `ligule-desktop-macos-x64`. `publish.yml` creates the draft but does not upload CI artifacts to the Release. Check each platform and filename, compute installer checksums with `Get-FileHash -Algorithm SHA256` or `sha256sum`, and include them in the release notes.
+5. **Publish the Release.** Publish it after all four platforms have been tested on hardware and the installers and checksums have been verified in the draft.
 
-GitHub Actions uses npm Trusted Publishing. `NPM_TOKEN` can be used when establishing the packages and publishing trust for the first time. `ci.yml` builds desktop installers as check artifacts; the GitHub Release remains a draft. After all four platform packages have been tested on hardware and the attachments checked, a maintainer can publish the Release. The registry and GitHub release state determine whether an npm version or desktop package is public.
+GitHub Actions uses npm Trusted Publishing. `NPM_TOKEN` can be used when establishing the packages and publishing trust for the first time. The registry and GitHub release state determine whether an npm version or desktop package is public.
