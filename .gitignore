@@ -45,6 +45,8 @@ coverage/
 !.env.example
 
 # Editors & OS
+.vs/
+.vscode/
 .DS_Store
 Thumbs.db
 desktop.ini
