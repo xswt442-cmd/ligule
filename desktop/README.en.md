@@ -16,7 +16,7 @@ npm --prefix desktop ci
 npm --prefix desktop/frontend ci
 ```
 
-## Develop and check
+## Start the development app
 
 Start the Vite frontend and Tauri shell together:
 
@@ -26,6 +26,8 @@ npm --prefix desktop run dev
 
 The shell starts the Node Host. The frontend uses the Tauri transport in a desktop window; its `dev/` page can also run against a local fake Host for focused interface checks.
 
+## Check the frontend
+
 Run the frontend assertions and production build with:
 
 ```sh
@@ -33,7 +35,9 @@ npm --prefix desktop/frontend run check
 npm --prefix desktop/frontend run build
 ```
 
-Check the Rust shell from its directory:
+## Check the Rust shell
+
+From the repository root, run:
 
 ```sh
 cd desktop/src-tauri
@@ -45,15 +49,28 @@ The frontend build runs TypeScript checking before Vite. The Rust tests cover pr
 
 ## Build an installer
 
-The app bundles a pinned Node runtime and a production runtime tree. Build the core package and platform search packages, then prepare the runtime tree on the target platform:
+Complete these steps in order:
 
-```sh
-npm run build
-npm run build-rg
-node desktop/fetch-runtime.mjs
-npm --prefix desktop run build
-```
+1. Build the core package and platform search packages:
 
+   ```sh
+   npm run build
+   npm run build-rg
+   ```
+
+2. Prepare the Node runtime tree on the target platform:
+
+   ```sh
+   node desktop/fetch-runtime.mjs
+   ```
+
+3. Build the desktop installer:
+
+   ```sh
+   npm --prefix desktop run build
+   ```
+
+The app bundles a pinned Node runtime and a production runtime tree.
 `fetch-runtime.mjs` downloads the Node archive named in [`node-pin.json`](node-pin.json), verifies its checksum, and copies the built app plus production dependencies into `desktop/vendor/`. The runtime tree is platform-specific and is generated locally. Tauri embeds it when building the installer. The target-specific bundle format comes from `tauri.*.conf.json`; do not reuse `desktop/vendor/` across operating systems or architectures.
 
 The output locations and installer formats are recorded in the [release checklist](../docs/development/RELEASE.en.md). To inspect the bundled runtime before building, run `desktop/check-runtime.mjs` with the Node executable under `desktop/vendor/node/` for the current platform.

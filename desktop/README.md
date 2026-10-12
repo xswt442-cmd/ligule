@@ -16,7 +16,7 @@ npm --prefix desktop ci
 npm --prefix desktop/frontend ci
 ```
 
-## 开发与检查
+## 启动开发环境
 
 同时启动 Vite 前端和 Tauri 壳：
 
@@ -26,6 +26,8 @@ npm --prefix desktop run dev
 
 壳会启动 Node Host。桌面窗口中的前端使用 Tauri 传输；`dev/` 页面也可以连接本地假 Host，单独检查界面。
 
+## 检查前端
+
 运行前端断言和生产构建：
 
 ```sh
@@ -33,9 +35,12 @@ npm --prefix desktop/frontend run check
 npm --prefix desktop/frontend run build
 ```
 
-在 `desktop/src-tauri/` 中检查 Rust 壳：
+## 检查 Rust 壳
+
+从仓库根目录运行：
 
 ```sh
+cd desktop/src-tauri
 cargo fmt --check
 cargo test
 ```
@@ -44,14 +49,26 @@ cargo test
 
 ## 构建安装包
 
-先构建核心包与平台搜索包，再在目标平台准备运行时目录：
+按顺序完成以下步骤：
 
-```sh
-npm run build
-npm run build-rg
-node desktop/fetch-runtime.mjs
-npm --prefix desktop run build
-```
+1. 构建核心包与平台搜索包：
+
+   ```sh
+   npm run build
+   npm run build-rg
+   ```
+
+2. 在目标平台准备 Node 运行时目录：
+
+   ```sh
+   node desktop/fetch-runtime.mjs
+   ```
+
+3. 构建桌面安装包：
+
+   ```sh
+   npm --prefix desktop run build
+   ```
 
 `fetch-runtime.mjs` 会下载 [`node-pin.json`](node-pin.json) 指定的 Node 归档、验证校验和，并将构建产物和生产依赖复制到 `desktop/vendor/`。运行时目录与平台相关，不要在不同操作系统或架构之间复用。Tauri 会将其打入安装包。目标平台的安装包格式由 `tauri.*.conf.json` 指定。
 
