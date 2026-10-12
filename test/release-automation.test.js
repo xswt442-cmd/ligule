@@ -160,6 +160,8 @@ test('release workflows separate version PRs, tag creation, npm publication, and
   assert.equal(publishWorkflow.on.push, undefined, 'a tag push must not publish npm packages');
   assert.equal(publishWorkflow.jobs.approval.environment, 'npm-publish');
   assert.equal(publishWorkflow.jobs.platforms, undefined, 'platform binaries are supplied by @vscode/ripgrep');
+  assert.ok(publishWorkflow.jobs.verify.steps.some((step) => step.run === 'npm run build'),
+    'the tarball verifier needs the tagged host entry points in its clean checkout');
   assert.ok(publishWorkflow.jobs.npm.needs.includes('approval'), 'the main package must wait for approval');
   const publishJob = publishWorkflow.jobs.npm;
   assert.equal(publishJob.permissions['id-token'], 'write', 'the publish job must authenticate with npm through OIDC');

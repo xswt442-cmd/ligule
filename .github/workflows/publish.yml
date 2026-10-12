@@ -167,6 +167,9 @@ jobs:
       - name: install locked dependencies
         run: npm ci
 
+      - name: build the host entry points for verification
+        run: npm run build
+
       - uses: actions/download-artifact@v4
         with:
           name: npm-tarball
