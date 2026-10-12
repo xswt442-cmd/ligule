@@ -1,0 +1,67 @@
+# ligule
+
+[![npm](https://img.shields.io/npm/v/ligule?label=npm&color=4d6bfe)](https://www.npmjs.com/package/ligule)
+[![Node.js](https://img.shields.io/static/v1?label=node&message=%3E%3D24&color=339933&logo=node.js&logoColor=white)](https://nodejs.org)
+[![license](https://img.shields.io/badge/license-MIT-22c55e.svg)](./LICENSE)
+
+[简体中文](README.md) · [English](README.en.md)
+
+<p align="center"><img src="docs/app-icon.png" alt="ligule app icon" width="112"></p>
+
+ligule is an AI assistant for working in projects, with one shared Agent kernel behind three interfaces. Use the CLI for scripts and one-off tasks, the terminal UI for keyboard-driven work, or the desktop app for workspace navigation and visual settings. All three share tool execution, approvals, model requests, and session records.
+
+## Choose an interface
+
+| Interface | Best for | Start with |
+|---|---|---|
+| CLI | Scripts, pipelines, and one-off tasks | `ligule run "Review the project structure and suggest improvements"` |
+| TUI | Ongoing conversations and session management in a terminal | `ligule tui` |
+| Desktop | Workspace sidebar, visual settings, and session actions | Install the desktop package for your platform |
+
+The CLI and TUI require Node.js 24 or newer. The TUI requires an interactive terminal; use `ligule run` in scripts and pipelines. Desktop targets, system requirements, and verification status are listed in the [release checklist](docs/RELEASE.en.md). A repository version or CI artifact does not mean a release is public.
+
+## Quick start
+
+### Command line
+
+```sh
+npm install -g ligule
+cd /path/to/your-project
+ligule run "Review the project structure and suggest improvements"
+```
+
+### Terminal UI
+
+```sh
+npm install -g ligule
+cd /path/to/your-project
+ligule tui
+```
+
+### Desktop app
+
+Check the [release checklist](docs/RELEASE.en.md) to confirm that an installer is public for your platform, then download it from [GitHub Releases](https://github.com/xswt442-cmd/ligule/releases). On first launch, the desktop app creates a default workspace. You can change the default directory for new sessions in Settings.
+
+## Configuration and data
+
+The CLI and TUI read model service settings from `~/.ligule/config.toml` by default. Minimal example:
+
+```toml
+[model]
+api = "chat-completions"
+baseURL = "https://api.example.com/v1"
+model = "model-name"
+apiKeyEnv = "MODEL_API_KEY"
+```
+
+Set the environment variable named by `apiKeyEnv`. Desktop settings also support multiple services and models, and can store keys in the system credential store. Set `LIGULE_HOME` to an absolute path to move the user data root. The workspace directory identifies the project; `boundary` separately limits which paths file tools can access.
+
+## Documentation
+
+- [简体中文使用手册](docs/guide.zh-CN.md) · [English user guide](docs/guide.en.md)
+- [架构说明（中文）](docs/development/architecture.zh-CN.md) · [Architecture (English)](docs/development/architecture.en.md)
+- [术语表（中文）](docs/development/glossary.zh-CN.md) · [Glossary (English)](docs/development/glossary.en.md)
+- [贡献与验证（中文）](docs/development/contributing.zh-CN.md) · [Contributing and checks (English)](docs/development/contributing.en.md)
+- [维护者发行清单（中文）](docs/RELEASE.md) · [Release checklist (English)](docs/RELEASE.en.md)
+
+New users can start with the [English user guide](docs/guide.en.md). Desktop installation checks and public release status are tracked separately in the [release checklist](docs/RELEASE.en.md).

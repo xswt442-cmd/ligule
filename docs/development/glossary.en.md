@@ -1,5 +1,7 @@
 # Glossary
 
+[简体中文](glossary.zh-CN.md) · [English](glossary.en.md)
+
 These terms describe current ligule behavior. Protocol method names and configuration keys keep their code spelling.
 
 | Term | Meaning in ligule |
@@ -18,3 +20,7 @@ These terms describe current ligule behavior. Protocol method names and configur
 | **Session record** | The append-only JSONL event log for a conversation. It is the source of truth for messages, tool outcomes, turn state, and recoverable session facts. |
 | **Checkpoint** | A separate, validated summary of a covered record range. It can shorten the model projection; it never replaces the JSONL source record. |
 | **Spill file** | A sidecar file that holds a tool result or summary exceeding the configured inline limit. The record retains a reference to that file. |
+
+## Related guides
+
+The [architecture guide](architecture.en.md) explains how these components interact. [Contributing and checks](contributing.en.md) describes the development workflow and validation commands.

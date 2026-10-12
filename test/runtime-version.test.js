@@ -71,6 +71,7 @@ test('the desktop shell carries the same version as the package', () => {
 test('the four vendored Node targets match the release checklist', () => {
   const pin = JSON.parse(read('../desktop/node-pin.json'));
   const checklist = read('../docs/RELEASE.md');
+  const englishChecklist = read('../docs/RELEASE.en.md');
   const suffixes = { 'win32-x64': 'zip', 'linux-x64': 'tar.xz', 'darwin-arm64': 'tar.gz', 'darwin-x64': 'tar.gz' };
   assert.deepEqual(Object.keys(pin.targets).sort(), ['darwin-arm64', 'darwin-x64', 'linux-x64', 'win32-x64']);
   for (const [target, archived] of Object.entries(pin.targets)) {
@@ -80,5 +81,7 @@ test('the four vendored Node targets match the release checklist', () => {
     // 发行清单那一行是给人读的那一份，两处写了同一个文件与同一个摘要才算同一批字节。
     assert.ok(checklist.includes(archived.file), `docs/RELEASE.md does not name ${archived.file}`);
     assert.ok(checklist.includes(archived.sha256), `docs/RELEASE.md does not carry the ${target} sha256`);
+    assert.ok(englishChecklist.includes(archived.file), `docs/RELEASE.en.md does not name ${archived.file}`);
+    assert.ok(englishChecklist.includes(archived.sha256), `docs/RELEASE.en.md does not carry the ${target} sha256`);
   }
 });

@@ -1,5 +1,7 @@
 # ligule 使用手册
 
+[简体中文](guide.zh-CN.md) · [English](guide.en.md)
+
 ligule 提供命令行、终端界面和桌面界面。三种入口使用同一套配置和会话记录。
 
 ## 安装和启动

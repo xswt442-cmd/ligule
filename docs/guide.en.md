@@ -1,5 +1,7 @@
 # ligule user guide
 
+[简体中文](guide.zh-CN.md) · [English](guide.en.md)
+
 ligule provides a command line, a terminal UI, and a desktop UI. All three use the same configuration and session records.
 
 ## Install and launch

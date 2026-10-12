@@ -4,27 +4,47 @@
 [![Node.js](https://img.shields.io/static/v1?label=node&message=%3E%3D24&color=339933&logo=node.js&logoColor=white)](https://nodejs.org)
 [![license](https://img.shields.io/badge/license-MIT-22c55e.svg)](./LICENSE)
 
-ligule 是一个共享 Agent 内核的命令行、终端和桌面助手。三种界面共用工具执行、审批、模型请求与会话记录。当前仓库版本为 `0.0.2`；仓库版本与 CI 构建结果不代表已经发布，发行状态见[发行清单](docs/RELEASE.md)。
+[简体中文](README.md) · [English](README.en.md)
 
-## 安装和启动
+<p align="center"><img src="docs/app-icon.png" alt="ligule 应用图标" width="112"></p>
 
-命令行与终端界面需要 Node.js 24 或更新版本。安装 npm 上已发布的版本：
+ligule 是一个为项目工作、共享同一套 Agent 内核的 AI 助手。命令行适合脚本和单次任务，终端界面适合键盘操作，桌面界面提供会话列表与图形设置。三种入口共用工具执行、审批、模型请求和会话记录。
+
+## 选择入口
+
+| 入口 | 适合场景 | 启动方式 |
+|---|---|---|
+| CLI | 脚本、管道和单次任务 | `ligule run "检查项目结构并提出建议"` |
+| TUI | 在终端持续对话与管理会话 | `ligule tui` |
+| Desktop | 使用工作区侧栏、图形设置和会话操作 | 安装对应平台的桌面包后启动 |
+
+CLI 与 TUI 需要 Node.js 24 或更新版本。TUI 需要交互式终端；脚本和管道使用 `ligule run`。桌面包的平台、系统要求和验证状态见[发行清单](docs/RELEASE.md)。仓库版本或 CI 产物不代表已公开发行。
+
+## 快速开始
+
+### 命令行
 
 ```sh
 npm install -g ligule
-```
-
-在项目目录中运行一轮：
-
-```sh
+cd /path/to/your-project
 ligule run "检查项目结构并提出建议"
 ```
 
-运行 `ligule tui` 打开终端界面。TUI 需要交互式终端；脚本和管道使用 `ligule run`。桌面安装包的目标平台、系统要求和验收状态见[发行清单](docs/RELEASE.md)。
+### 终端界面
 
-## 配置
+```sh
+npm install -g ligule
+cd /path/to/your-project
+ligule tui
+```
 
-CLI 与 TUI 默认从 `<用户数据根>/config.toml` 读取模型设置；用户数据根默认是 `~/.ligule`。下面的单服务格式继续可用：
+### 桌面界面
+
+先从[发行清单](docs/RELEASE.md)确认平台安装包已公开，再到 [GitHub Releases](https://github.com/xswt442-cmd/ligule/releases)下载。桌面版首次启动会准备默认工作区；也可以在设置中更改新会话使用的默认目录。
+
+## 配置与数据
+
+CLI 与 TUI 默认从 `~/.ligule/config.toml` 读取模型服务设置。最小配置示例：
 
 ```toml
 [model]
@@ -34,17 +54,14 @@ model = "model-name"
 apiKeyEnv = "MODEL_API_KEY"
 ```
 
-将密钥放入 `apiKeyEnv` 指定的环境变量。桌面设置还支持保存多个服务与模型，并可把密钥写入系统凭据库。设置、配置层与生效时机见[中文使用手册](docs/guide.zh-CN.md)和[English user guide](docs/guide.en.md)。
+把密钥放入 `apiKeyEnv` 指定的环境变量。桌面设置还支持多个服务与模型，并可将密钥保存到系统凭据库。设置 `LIGULE_HOME` 可将用户数据根改为另一绝对路径。工作区目录决定项目归属，`boundary` 单独限制文件工具可以访问的范围。
 
-设置 `LIGULE_HOME` 可以将用户数据根改到另一处；值必须是绝对路径。工具文件访问范围由工作区目录与 `boundary` 配置共同决定。
+## 文档
 
-## 开发文档
+- [简体中文使用手册](docs/guide.zh-CN.md) · [English user guide](docs/guide.en.md)
+- [架构说明（中文）](docs/development/architecture.zh-CN.md) · [Architecture (English)](docs/development/architecture.en.md)
+- [术语表（中文）](docs/development/glossary.zh-CN.md) · [Glossary (English)](docs/development/glossary.en.md)
+- [贡献与验证（中文）](docs/development/contributing.zh-CN.md) · [Contributing and checks (English)](docs/development/contributing.en.md)
+- [维护者发行清单（中文）](docs/RELEASE.md) · [Release checklist (English)](docs/RELEASE.en.md)
 
-- [架构说明](docs/development/architecture.md)：内核、Host、适配器、工具判定、Agent Loop 与会话恢复。
-- [术语表](docs/development/glossary.md)：统一内核、能力、工具、模式、审批方式、工作区和记录格式的用语。
-- [贡献与验证](docs/development/contributing.md)：开发命令、验证范围和指南入口。
-- [桌面开发说明](desktop/README.md)：前端、Tauri 壳与随包运行时的构建方式。
-
-## 使用手册
-
-[简体中文](docs/guide.zh-CN.md) · [English](docs/guide.en.md)
+首次使用可从[中文使用手册](docs/guide.zh-CN.md)开始。桌面安装验证与实际发行状态会在[发行清单](docs/RELEASE.md)中区分记录。

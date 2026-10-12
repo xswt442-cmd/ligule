@@ -14,15 +14,17 @@ import { modelServices, resolveModel } from '../dist/kernel/model-services.js';
 const repoRoot = fileURLToPath(new URL('../', import.meta.url));
 const zhPath = join(repoRoot, 'docs', 'guide.zh-CN.md');
 const enPath = join(repoRoot, 'docs', 'guide.en.md');
+const bilingualPairs = [
+  [join(repoRoot, 'README.md'), join(repoRoot, 'README.en.md')],
+  [join(repoRoot, 'desktop', 'README.md'), join(repoRoot, 'desktop', 'README.en.md')],
+  [join(repoRoot, 'docs', 'RELEASE.md'), join(repoRoot, 'docs', 'RELEASE.en.md')],
+  [zhPath, enPath],
+  [join(repoRoot, 'docs', 'development', 'architecture.zh-CN.md'), join(repoRoot, 'docs', 'development', 'architecture.en.md')],
+  [join(repoRoot, 'docs', 'development', 'glossary.zh-CN.md'), join(repoRoot, 'docs', 'development', 'glossary.en.md')],
+  [join(repoRoot, 'docs', 'development', 'contributing.zh-CN.md'), join(repoRoot, 'docs', 'development', 'contributing.en.md')],
+];
 const maintainedDocs = [
-  join(repoRoot, 'README.md'),
-  join(repoRoot, 'docs', 'RELEASE.md'),
-  join(repoRoot, 'desktop', 'README.md'),
-  zhPath,
-  enPath,
-  join(repoRoot, 'docs', 'development', 'architecture.md'),
-  join(repoRoot, 'docs', 'development', 'glossary.md'),
-  join(repoRoot, 'docs', 'development', 'contributing.md'),
+  ...bilingualPairs.flatMap((pair) => pair),
 ];
 // 工程指南九份：根那一份放全局规则，八份局部的放在各自代码旁边（`src/` 的五个目录、终端界面，桌面的三层）。
 const guides = [
@@ -94,17 +96,21 @@ test('所有受维护文档的相对链接与锚点都落在仓库内', () => {
   }
 });
 
-test('两份手册的章节数与目录一一对应', () => {
+test('所有中英文配对文档的章节数对应', () => {
   const headings = (text) => text.split('\n').filter((line) => /^##\s/.test(line)).length;
-  assert.equal(headings(readFileSync(zhPath, 'utf8')), headings(readFileSync(enPath, 'utf8')));
+  for (const [zh, en] of bilingualPairs) {
+    assert.equal(headings(readFileSync(zh, 'utf8')), headings(readFileSync(en, 'utf8')), `${zh} 与 ${en} 的章节数不同`);
+  }
 });
 
-test('两种语言覆盖同一批命令、稳定码与配置键', () => {
-  const zh = codeTokens(readFileSync(zhPath, 'utf8'));
-  const en = codeTokens(readFileSync(enPath, 'utf8'));
-  const onlyZh = [...zh].filter((token) => !en.has(token));
-  const onlyEn = [...en].filter((token) => !zh.has(token));
-  assert.deepEqual({ onlyZh, onlyEn }, { onlyZh: [], onlyEn: [] });
+test('所有中英文配对文档包含相同的代码标识符', () => {
+  for (const [zh, en] of bilingualPairs) {
+    const zhTokens = codeTokens(readFileSync(zh, 'utf8'));
+    const enTokens = codeTokens(readFileSync(en, 'utf8'));
+    const onlyZh = [...zhTokens].filter((token) => !enTokens.has(token));
+    const onlyEn = [...enTokens].filter((token) => !zhTokens.has(token));
+    assert.deepEqual({ onlyZh, onlyEn }, { onlyZh: [], onlyEn: [] }, `${zh} 与 ${en} 的标识符不同`);
+  }
 });
 
 test('双语手册的多服务 TOML 示例相同且符合实际配置格式', () => {
@@ -124,19 +130,28 @@ test('双语手册的多服务 TOML 示例相同且符合实际配置格式', ()
 });
 
 test('README 有使用手册、架构和贡献说明入口', () => {
+  const manifest = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
   const readme = readFileSync(join(repoRoot, 'README.md'), 'utf8');
+  const englishReadme = readFileSync(join(repoRoot, 'README.en.md'), 'utf8');
+  assert.ok(existsSync(join(repoRoot, 'docs', 'app-icon.png')), 'the README icon must exist');
+  assert.match(readme, /src="docs\/app-icon\.png"/);
+  assert.match(englishReadme, /src="docs\/app-icon\.png"/);
   assert.match(readme, /docs\/guide\.zh-CN\.md/);
   assert.match(readme, /docs\/guide\.en\.md/);
-  assert.match(readme, /docs\/development\/architecture\.md/);
-  assert.match(readme, /docs\/development\/glossary\.md/);
-  assert.match(readme, /docs\/development\/contributing\.md/);
+  assert.match(readme, /docs\/development\/architecture\.zh-CN\.md/);
+  assert.match(readme, /docs\/development\/glossary\.zh-CN\.md/);
+  assert.match(readme, /docs\/development\/contributing\.zh-CN\.md/);
+  assert.match(englishReadme, /docs\/development\/architecture\.en\.md/);
+  assert.match(englishReadme, /docs\/development\/glossary\.en\.md/);
+  assert.match(englishReadme, /docs\/development\/contributing\.en\.md/);
+  assert.ok(manifest.files.includes('README.en.md'), 'the English README must be included in the npm package');
 });
 
 test('docs 根目录只放双语手册与发行清单，且都有正文', () => {
   const files = readdirSync(join(repoRoot, 'docs'))
     .filter((name) => name.endsWith('.md'))
     .sort();
-  assert.deepEqual(files, ['RELEASE.md', 'guide.en.md', 'guide.zh-CN.md']);
+  assert.deepEqual(files, ['RELEASE.en.md', 'RELEASE.md', 'guide.en.md', 'guide.zh-CN.md']);
   for (const name of files) {
     assert.ok(readFileSync(join(repoRoot, 'docs', name), 'utf8').startsWith('# '), `${name} 的第一行不是一级标题`);
   }

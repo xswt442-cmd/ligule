@@ -1,5 +1,7 @@
 # Architecture
 
+[简体中文](architecture.zh-CN.md) · [English](architecture.en.md)
+
 ligule uses one Node.js business runtime for the command line, terminal UI, and desktop app. The [kernel](../../src/kernel/kernel.js) executes registered tools and applies the decision chain. The [Host](../../src/host/host.js) assembles that kernel with a project environment, model provider, session log, and client protocol. User interfaces call the Host through adapters.
 
 ## Runtime map
@@ -44,6 +46,50 @@ The [Agent Loop](../../src/kernel/loop.js) performs one user turn and any model/
 
 The [model adapters](../../src/model/) implement the supported HTTP message formats. The Host selects a provider from the effective model service and reads credentials only when making a request.
 
+## One Agent Loop turn
+
+```mermaid
+sequenceDiagram
+  actor User
+  participant Adapter as CLI / TUI / desktop adapter
+  participant Host as Node Host
+  participant Loop as Agent Loop
+  participant Session as Session record
+  participant Provider as Model service
+  participant Kernel as Kernel and policy chain
+  participant Tool as Tool and platform capability
+  User->>Adapter: Submit a message
+  Adapter->>Host: run.start
+  Host->>Session: Append user event and turn settings
+  Host->>Loop: Run with session, provider, and kernel
+  Loop->>Session: Read model view
+  Loop->>Provider: Send prompt, tool manifest, and messages
+  Provider-->>Loop: Stream text, reasoning, and tool calls
+  Loop->>Session: Append assistant content and tool calls
+  alt The model requests a tool
+    Loop->>Kernel: Validate and request a verdict
+    Kernel->>Kernel: Check restrictions, rules, and approval
+    opt User approval is required
+      Kernel->>Host: Wait for approval in this session
+      Host-->>Adapter: approval.request
+      Adapter-->>User: Show approval card
+      User-->>Adapter: Allow or refuse
+      Adapter->>Host: approval.respond
+      Host-->>Kernel: Return the verdict
+    end
+    Kernel->>Tool: Run an allowed tool
+    Tool-->>Kernel: Return result
+    Kernel->>Session: Record verdict and tool result
+    Loop->>Provider: Continue with the tool result
+  else The model completes the turn
+    Loop->>Session: Append completed, cancelled, or failed status
+  end
+  Host-->>Adapter: Status, events, and final result
+  Adapter-->>User: Show session updates
+```
+
+The loop appends the user input and effective turn settings, builds the model view, streams a response, and records each assistant event. Tool calls pass through kernel validation and policy before execution. The loop records their results and continues while the model requests more work. It appends one terminal status when the turn completes, is cancelled, or fails.
+
 ## Session records and recovery
 
 The append-only [session JSONL record](../../src/session/session.js) is the source of truth for a conversation. Its first line identifies the record and project; later lines hold user and assistant messages, tool calls and results, turn state, model selection, and other events. Session locks prevent two processes from writing the same record at once.
@@ -54,8 +100,36 @@ Checkpoints are derived files. Before using one, ligule verifies its format, cov
 
 When a session is reopened, recovery repairs dispatched tool calls that have no recorded result with an explicit unknown outcome. It does not replay them. This preserves a valid model projection without repeating an operation whose external effect may already have happened.
 
+## Session data flow
+
+```mermaid
+flowchart TD
+  Config[User and project configuration] --> Environment[Project environment snapshot]
+  Environment --> Provider[Model service and credential lookup]
+  Environment --> Policy[Approval rules and tool mode]
+  Client[CLI / TUI / desktop UI] --> Protocol[Host protocol]
+  Protocol --> Host[Node Host]
+  Host --> Log[Append-only session JSONL]
+  Host --> Loop[Agent Loop]
+  Log --> Projection[Model message projection]
+  Projection --> Loop
+  Loop --> Provider
+  Loop --> Kernel[Kernel policy and tool execution]
+  Kernel --> Log
+  Log --> Checkpoint[Validated checkpoint]
+  Log --> Spill[Tool-result sidecar]
+  Log --> Export[Export and history browsing]
+  Spill --> Export
+```
+
+Configuration layers are combined into a snapshot while the Host creates a project environment. The session JSONL is the source for messages and tool outcomes. Checkpoints and spill files contain derived data that can be validated or retrieved. History browsing and export read the record and available sidecars; a UI cache is not the source of session facts. The user data root and project workspace separately own user-level data and project attribution.
+
 ## Host protocol and clients
 
 The Host protocol defines methods, request parameters, approval requests, question requests, and notifications in one [protocol table](../../src/host/protocol.js). [`connection.js`](../../src/host/connection.js) carries newline-delimited JSON messages. The Host validates method parameters before dispatch and owns all session state; clients use protocol methods to create or open sessions, start and cancel turns, read records, answer requests, and change supported settings.
 
 The CLI's single-turn commands call the Host directly. The TUI uses the same protocol over an in-memory connection. The desktop UI uses a TypeScript client over Tauri commands and events; the Rust shell forwards frames without interpreting Host methods or session data. These transports differ, while the Host methods and kernel behavior remain shared.
+
+## Related guides
+
+The [glossary](glossary.en.md) defines shared terms. [Contributing and checks](contributing.en.md) lists development commands and validation scope. The [user guide](../guide.en.md) explains CLI, TUI, and desktop workflows.

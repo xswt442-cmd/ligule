@@ -1,12 +1,14 @@
-# Desktop development
+# 桌面端开发说明
 
-The desktop app has a React and TypeScript frontend in [`frontend/`](frontend/), a Rust and Tauri shell in [`src-tauri/`](src-tauri/), and a Node Host process. The frontend owns presentation and sends Host protocol calls through Tauri. The shell manages windows and forwards newline-delimited frames; business logic and session state stay in Node. See the [architecture guide](../docs/development/architecture.md) for the complete request path.
+[简体中文](README.md) · [English](README.en.md)
 
-## Prerequisites
+桌面应用由 `frontend/` 中的 React 与 TypeScript 前端、`src-tauri/` 中的 Rust 与 Tauri 壳，以及 Node Host 组成。前端通过 Tauri 调用 Host 协议；Rust 壳管理窗口并转发按行分隔的消息帧。业务逻辑和会话状态由 Node 管理。完整调用路径见[架构说明](../docs/development/architecture.zh-CN.md)。
 
-Use Node.js 24 or newer and the stable Rust toolchain. Windows builds require WebView2. Linux builds require the Tauri system libraries listed in the [CI workflow](../.github/workflows/ci.yml). macOS builds use the target runner's native architecture. Supported installer targets and verification status are listed in [RELEASE.md](../docs/RELEASE.md).
+## 环境要求
 
-Install each package tree from the repository root:
+需要 Node.js 24 或更新版本和稳定版 Rust 工具链。Windows 构建需要 WebView2；Linux 构建需要 [CI 工作流](../.github/workflows/ci.yml)列出的 Tauri 系统库。macOS 使用对应架构的原生 runner。支持的安装目标及验收状态见[发行清单](../docs/RELEASE.md)。
+
+从仓库根目录安装各个依赖树：
 
 ```sh
 npm ci
@@ -14,36 +16,35 @@ npm --prefix desktop ci
 npm --prefix desktop/frontend ci
 ```
 
-## Develop and check
+## 开发与检查
 
-Start the Vite frontend and Tauri shell together:
+同时启动 Vite 前端和 Tauri 壳：
 
 ```sh
 npm --prefix desktop run dev
 ```
 
-The shell starts the Node Host. The frontend uses the Tauri transport in a desktop window; its `dev/` page can also run against a local fake Host for focused interface checks.
+壳会启动 Node Host。桌面窗口中的前端使用 Tauri 传输；`dev/` 页面也可以连接本地假 Host，单独检查界面。
 
-Run the frontend assertions and production build with:
+运行前端断言和生产构建：
 
 ```sh
 npm --prefix desktop/frontend run check
 npm --prefix desktop/frontend run build
 ```
 
-Check the Rust shell from its directory:
+在 `desktop/src-tauri/` 中检查 Rust 壳：
 
 ```sh
-cd desktop/src-tauri
 cargo fmt --check
 cargo test
 ```
 
-The frontend build runs TypeScript checking before Vite. The Rust tests cover process entry resolution, line-based frame forwarding, host replacement, tray and notification input rules. CI builds each installer target on its matching platform runner; those artifacts are validation outputs until a release is published.
+前端构建会先运行 TypeScript 检查，再由 Vite 打包。Rust 测试覆盖进程入口解析、按行转发消息帧、Host 替换、托盘和通知输入规则。CI 在各自的平台 runner 上构建安装包；这些构建产物用于验证，只有正式发布后才是公开安装包。
 
-## Build an installer
+## 构建安装包
 
-The app bundles a pinned Node runtime and a production runtime tree. Build the core package and platform search packages, then prepare the runtime tree on the target platform:
+先构建核心包与平台搜索包，再在目标平台准备运行时目录：
 
 ```sh
 npm run build
@@ -52,17 +53,17 @@ node desktop/fetch-runtime.mjs
 npm --prefix desktop run build
 ```
 
-`fetch-runtime.mjs` downloads the Node archive named in [`node-pin.json`](node-pin.json), verifies its checksum, and copies the built app plus production dependencies into `desktop/vendor/`. The runtime tree is platform-specific and is generated locally. Tauri embeds it when building the installer. The target-specific bundle format comes from `tauri.*.conf.json`; do not reuse `desktop/vendor/` across operating systems or architectures.
+`fetch-runtime.mjs` 会下载 [`node-pin.json`](node-pin.json) 指定的 Node 归档、验证校验和，并将构建产物和生产依赖复制到 `desktop/vendor/`。运行时目录与平台相关，不要在不同操作系统或架构之间复用。Tauri 会将其打入安装包。目标平台的安装包格式由 `tauri.*.conf.json` 指定。
 
-The output locations and installer formats are recorded in [RELEASE.md](../docs/RELEASE.md). To inspect the bundled runtime before building, run `desktop/check-runtime.mjs` with the Node executable under `desktop/vendor/node/` for the current platform.
+输出位置和安装包格式见[发行清单](../docs/RELEASE.md)。如需在打包前检查随包运行时，可使用当前平台 `desktop/vendor/node/` 下的 Node 执行 `desktop/check-runtime.mjs`。
 
-## Application icons
+## 应用图标
 
-[`assets/app-icon.png`](assets/app-icon.png) is the source image. On Windows, regenerate the frontend and Tauri icon assets with:
+[`assets/app-icon.png`](assets/app-icon.png) 是源图。在 Windows 上，运行以下命令重新生成前端与 Tauri 图标：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File desktop/make-icons.ps1
 node desktop/make-ico.mjs
 ```
 
-The scripts write generated files under `desktop/frontend/public/` and `desktop/src-tauri/icons/`. Review the resulting assets before committing them.
+脚本将生成文件写入 `desktop/frontend/public/` 和 `desktop/src-tauri/icons/`。提交前检查生成结果。
