@@ -1,17 +1,31 @@
-// 仓库 markdown 的检查：链接与锚点在自己能读到的范围内可达，两份手册节数相等并覆盖同一批标识符，
-// README 有语言入口，`docs/` 只有那两份，每份工程指南都能整份读进默认的读入上限并跟着根那一份装载。
+// 仓库文档的检查：受维护的 Markdown 链接可达，两份手册章节与标识符一致，
+// README 有使用与开发文档入口，`docs/` 根目录只放双语手册，九份指南都在默认预算内并按目录装载。
 // 这一处不建内核：读的是仓库里的 markdown。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, posix, resolve, sep } from 'node:path';
+import { parse } from 'smol-toml';
 import { DEFAULT_LIMITS } from '../dist/capability/limits.js';
 import { loadInstructions } from '../dist/index.js';
+import { modelServices, resolveModel } from '../dist/kernel/model-services.js';
 
 const repoRoot = fileURLToPath(new URL('../', import.meta.url));
 const zhPath = join(repoRoot, 'docs', 'guide.zh-CN.md');
 const enPath = join(repoRoot, 'docs', 'guide.en.md');
+const bilingualPairs = [
+  [join(repoRoot, 'README.md'), join(repoRoot, 'README.en.md')],
+  [join(repoRoot, 'desktop', 'README.md'), join(repoRoot, 'desktop', 'README.en.md')],
+  [join(repoRoot, 'docs', 'development', 'RELEASE.zh-cn.md'), join(repoRoot, 'docs', 'development', 'RELEASE.en.md')],
+  [zhPath, enPath],
+  [join(repoRoot, 'docs', 'development', 'ARCHITECTURE.zh-cn.md'), join(repoRoot, 'docs', 'development', 'ARCHITECTURE.en.md')],
+  [join(repoRoot, 'docs', 'development', 'GLOSSARY.zh-cn.md'), join(repoRoot, 'docs', 'development', 'GLOSSARY.en.md')],
+  [join(repoRoot, 'docs', 'development', 'CONTRIBUTING.zh-cn.md'), join(repoRoot, 'docs', 'development', 'CONTRIBUTING.en.md')],
+];
+const maintainedDocs = [
+  ...bilingualPairs.flatMap((pair) => pair),
+];
 // 工程指南九份：根那一份放全局规则，八份局部的放在各自代码旁边（`src/` 的五个目录、终端界面，桌面的三层）。
 const guides = [
   'AGENTS.md',
@@ -58,8 +72,14 @@ function codeTokens(text) {
     .filter((token) => /^[a-z][a-z0-9_.-]{2,}$/.test(token) && /[._]/.test(token)));
 }
 
-test('手册的相对链接与锚点都落在仓库内', () => {
-  for (const file of [zhPath, enPath, join(repoRoot, 'README.md'), ...guides.map(guidePath)]) {
+function tomlExample(text) {
+  const match = text.match(/```toml\n([\s\S]*?)\n```/);
+  assert.ok(match, 'guide must contain a TOML example');
+  return parse(match[1]);
+}
+
+test('所有受维护文档的相对链接与锚点都落在仓库内', () => {
+  for (const file of [...maintainedDocs, ...guides.map(guidePath)]) {
     const base = dirname(file);
     for (const target of links(readFileSync(file, 'utf8'))) {
       if (/^https?:/.test(target)) continue;
@@ -76,26 +96,60 @@ test('手册的相对链接与锚点都落在仓库内', () => {
   }
 });
 
-test('两份手册的章节数与目录一一对应', () => {
+test('所有中英文配对文档的章节数对应', () => {
   const headings = (text) => text.split('\n').filter((line) => /^##\s/.test(line)).length;
-  assert.equal(headings(readFileSync(zhPath, 'utf8')), headings(readFileSync(enPath, 'utf8')));
+  for (const [zh, en] of bilingualPairs) {
+    assert.equal(headings(readFileSync(zh, 'utf8')), headings(readFileSync(en, 'utf8')), `${zh} 与 ${en} 的章节数不同`);
+  }
 });
 
-test('两种语言覆盖同一批命令、稳定码与配置键', () => {
-  const zh = codeTokens(readFileSync(zhPath, 'utf8'));
-  const en = codeTokens(readFileSync(enPath, 'utf8'));
-  const onlyZh = [...zh].filter((token) => !en.has(token));
-  const onlyEn = [...en].filter((token) => !zh.has(token));
-  assert.deepEqual({ onlyZh, onlyEn }, { onlyZh: [], onlyEn: [] });
+test('所有中英文配对文档包含相同的代码标识符', () => {
+  for (const [zh, en] of bilingualPairs) {
+    const zhTokens = codeTokens(readFileSync(zh, 'utf8'));
+    const enTokens = codeTokens(readFileSync(en, 'utf8'));
+    const onlyZh = [...zhTokens].filter((token) => !enTokens.has(token));
+    const onlyEn = [...enTokens].filter((token) => !zhTokens.has(token));
+    assert.deepEqual({ onlyZh, onlyEn }, { onlyZh: [], onlyEn: [] }, `${zh} 与 ${en} 的标识符不同`);
+  }
 });
 
-test('README 有指向两种语言的入口', () => {
+test('双语手册的多服务 TOML 示例相同且符合实际配置格式', () => {
+  const zh = tomlExample(readFileSync(zhPath, 'utf8'));
+  const en = tomlExample(readFileSync(enPath, 'utf8'));
+  assert.deepEqual(zh, en);
+  assert.equal(modelServices(zh.model.services).length, 1);
+  assert.deepEqual(resolveModel(zh.model), {
+    api: 'chat-completions',
+    baseURL: 'https://api.deepseek.com/v1',
+    model: 'deepseek-chat',
+    apiKeyEnv: 'DEEPSEEK_API_KEY',
+    services: zh.model.services,
+    selection: zh.model.selection,
+    serviceId: 'deepseek',
+  });
+});
+
+test('README 有使用手册、架构和贡献说明入口', () => {
+  const manifest = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
   const readme = readFileSync(join(repoRoot, 'README.md'), 'utf8');
+  const englishReadme = readFileSync(join(repoRoot, 'README.en.md'), 'utf8');
+  assert.ok(existsSync(join(repoRoot, 'docs', 'app-icon.png')), 'the README icon must exist');
+  assert.match(readme, /src="docs\/app-icon\.png"/);
+  assert.match(englishReadme, /src="docs\/app-icon\.png"/);
   assert.match(readme, /docs\/guide\.zh-CN\.md/);
   assert.match(readme, /docs\/guide\.en\.md/);
+  assert.match(readme, /docs\/development\/ARCHITECTURE\.zh-cn\.md/);
+  assert.match(readme, /docs\/development\/GLOSSARY\.zh-cn\.md/);
+  assert.match(readme, /docs\/development\/CONTRIBUTING\.zh-cn\.md/);
+  assert.match(readme, /docs\/development\/RELEASE\.zh-cn\.md/);
+  assert.match(englishReadme, /docs\/development\/ARCHITECTURE\.en\.md/);
+  assert.match(englishReadme, /docs\/development\/GLOSSARY\.en\.md/);
+  assert.match(englishReadme, /docs\/development\/CONTRIBUTING\.en\.md/);
+  assert.match(englishReadme, /docs\/development\/RELEASE\.en\.md/);
+  assert.ok(manifest.files.includes('README.en.md'), 'the English README must be included in the npm package');
 });
 
-test('docs 目录的 Markdown 入口只有这两种语言，且都有正文', () => {
+test('docs 根目录只放双语使用手册，且都有正文', () => {
   const files = readdirSync(join(repoRoot, 'docs'))
     .filter((name) => name.endsWith('.md'))
     .sort();
@@ -103,6 +157,22 @@ test('docs 目录的 Markdown 入口只有这两种语言，且都有正文', ()
   for (const name of files) {
     assert.ok(readFileSync(join(repoRoot, 'docs', name), 'utf8').startsWith('# '), `${name} 的第一行不是一级标题`);
   }
+});
+
+test('development 文档文件名使用大写主体与小写语言标记', () => {
+  const files = readdirSync(join(repoRoot, 'docs', 'development'))
+    .filter((name) => name.endsWith('.md'))
+    .sort();
+  assert.deepEqual(files, [
+    'ARCHITECTURE.en.md',
+    'ARCHITECTURE.zh-cn.md',
+    'CONTRIBUTING.en.md',
+    'CONTRIBUTING.zh-cn.md',
+    'GLOSSARY.en.md',
+    'GLOSSARY.zh-cn.md',
+    'RELEASE.en.md',
+    'RELEASE.zh-cn.md',
+  ]);
 });
 
 // 工程指南分几份放之后要守的两条：每份都能整份读进默认读入上限，且每一处都以默认预算完整装载。

@@ -1,63 +1,36 @@
 # Agent guide
 
-本文规定仓库内代码与文档必须遵守的约束。目录结构和局部规则分别写在对应的 `AGENTS.md`；设计记录与未定问题以当前工作区文档为准。
+These rules apply throughout the repository. Read the nearest local `AGENTS.md` before changing code under `src/kernel/`, `src/tools/`, `src/session/`, `src/host/`, `src/tui/`, or `desktop/`. The [architecture guide](docs/development/ARCHITECTURE.en.md) explains runtime ownership and data flow; [contributing](docs/development/CONTRIBUTING.en.md) lists development checks.
 
-## 结构
+## Ownership and dependencies
 
-- `src/kernel/` 保存工具注册、判定链、循环、提示词组装、槽位注册、模式加载、配置、日志与错误类型。
-- `src/capability/` 保存路径边界、平台能力探测、命令解析与执行、搜索、回收站、网络目标、指令加载和限制。
-- `src/tools/` 保存工具实现；`src/session/` 保存记录、恢复、列表、检查点与压缩；`src/model/` 保存模型协议与 HTTP 层；`src/host/` 保存客户端协议、会话所有者与传输。
-- `src/tui/` 是终端客户端。`desktop/` 是 Tauri 壳与 Vite 前端，不进入 `package.json#files`。
-- `modes/` 保存随包模式；`scripts/` 保存构建和打包脚本；`test/` 检查构建产物 `dist/`。
-- 依赖指向 `kernel/`，不得反向引用适配器。平台代码放入 `capability/`。架构测试扫描约定目录，新增目录仍须符合这条依赖方向。
+- Node.js owns all business logic. CLI and TUI use the Node Host in process; the desktop Rust shell manages the process and windows and forwards protocol frames without interpreting them.
+- The Host assembles the kernel from plugins and owns project environments, model providers, policy, and open sessions. The kernel has no built-in tools; registered tools call through kernel validation and policy.
+- `src/kernel/` must not depend on client adapters. Put environment-sensitive operations under `src/capability/`; user-facing tool contracts belong under `src/tools/`. Keep protocol transport under `src/host/`.
+- A workspace's `workspaceRoot` identifies its project environment and session ownership. `boundary` limits filesystem tools. They may differ and must remain separate.
 
-## 命令
+## Runtime invariants
 
-```sh
-npm ci
-npm run build
-npm test
-npm run check-pack
-npm run pack-release [destination]
-npm run verify-install [tarball]
-npm run build-rg
-```
+- Resolve a declared network target or command backend once, then pass that same result to policy and execution. Do not approve one target and execute another.
+- Session JSONL is the source of truth. A writable session requires its cross-process lock; checkpoints and other summaries are derived and must be validated before use. Never replay an unresolved tool call during recovery.
+- Configuration is layered and frozen into a snapshot before tools run. Expose configuration through explicit allowlists. Credentials are references: resolve a non-empty environment variable first, then the operating system credential store; Linux uses persistent Secret Service and reports failure when it is unavailable.
+- `dataRoot()` is the single implementation of the user data directory. Respect absolute `LIGULE_HOME`; reject relative values. Do not construct the `.ligule` path independently elsewhere.
+- A tool result, refusal, or failure must leave a result for each dispatched call in the session. Keep approval, question, cancellation, and event routing scoped to the originating session and request.
+- Project configuration is untrusted input. Keep the merge protection against `__proto__`; tools receive the frozen configuration snapshot and injected logger, and must not write directly to process output.
+- If command syntax cannot be parsed or its required backend is unavailable, fail closed with the existing error or approval path. Never approve a command from an incomplete parse.
+- The Rust shell is transport and process lifecycle only. Do not add business rules, session ownership, or Host protocol interpretation there.
 
-`npm test` 先构建，再针对 `dist/` 运行测试。`pack-release` 使用 npm 的文件清单在独立目录生成发行包，其清单加入四个精确版本的搜索依赖；开发清单保持可在平台包首发前执行 `npm ci`。`check-pack` 检查该发行包的内容；`verify-install` 在空目录安装 tarball 并检查 CLI、语法解析器和搜索。发布验证从 registry 安装搜索依赖，CI 的 `--local-search` 使用本轮构建的平台 tarball。`build-rg` 获取版本固定且校验过的 ripgrep。
+## Build, tests, and release
 
-## 运行约束
+Use Node.js 24 or newer. `npm test` builds `dist/` before running tests; `npm run check-pack` checks the npm artifact. Desktop frontend and Rust checks are listed in [desktop/README.en.md](desktop/README.en.md). [docs/development/RELEASE.en.md](docs/development/RELEASE.en.md) is the source for installer targets, artifacts, and release status. CI artifacts do not mean a version has been published.
 
-- Node 是唯一业务运行时。内核不自带工具（I1）；适配器通过注册工具扩展能力。桌面 Rust 壳只搬运命令和原样传递帧，不实现业务逻辑。
-- 每次运行向模型提供实际加载的模式清单（I2）。判定链只收紧决定，不接受后续步骤放宽先前拒绝，也不因声明而跳过判定（I3、I4）。
-- 会话 JSONL 记录是事实来源（I5）。列表和检查点是派生数据；检查点校验失败时从记录重建。会话写入由跨进程锁保护；溢出的注入内容写入文件，记录保留引用（I6）。
-- 判定过的每个调用都在记录中有对应结果，包括没有执行的调用；缺少结果会使后续请求体无法继续使用。
-- 可插拔界面内容经槽位注册表挂载，固定导航与布局由客户端组件管理；Host 不按插件名称分支（I7）。模型可见的工具字段只有名称、说明和参数结构。
-- 工具、模型提供方与循环共用取消信号。工具错误以稳定代码写入结果，循环可继续；内核运行错误终止循环。每个已派发调用都要有记录结果，包括跳过的调用。
-- 工作区身份由真实目录规范化后得到，用于项目缓存和登记比较。Host 以 `config.workspaceRoot` 作为项目根；缺少该字段时才使用 `config.boundary`。Host 另外解析 `config.boundary` 作为工具访问边界，因此它可以与项目根不同。会话归属和项目配置使用项目根。
+Keep `package.json`, lockfiles, `src/version.js`, Node engine declarations, and workflow versions consistent. New TypeScript modules use strict types and erasable syntax; do not add `enum`, `namespace`, or parameter properties. Generated `desktop/vendor/`, platform binaries, personal session data, credentials, and temporary test output do not belong in commits. Do not make release or publishing claims without checking the registry and GitHub Release state.
 
-## 构建与配置
+Branch changes, commits, pushes, resets, and file restoration require an explicit request. Preserve existing user changes and inspect the target before a requested Git operation.
 
-- `dist/` 是运行和测试的代码。入口、导出和打包清单都指向它；`src/` 里的 TypeScript 没有可直接运行的 JavaScript 对应文件。
-- `tsc` 允许 JavaScript 并关闭旧文件检查；新模块使用严格 TypeScript 和可擦除语法，不用 `enum`、`namespace` 或参数属性。
-- `package.json#version`、`src/version.js#VERSION` 和发布清单保持一致。Node 最低版本在 `engines.node`、README 徽章和工作流变量中一致，测试会核对。
-- 配置依次合并用户配置、项目共享配置、项目本地配置和命令行覆盖，再冻结为一份快照。只有普通表递归合并；数组与标量整体替换。凭据在请求时读取：非空环境变量优先，其次是系统凭据库。Linux 指定持久化 Secret Service；不可用时明确失败。配置只存凭据引用。
-- `dataRoot()` 是用户数据根的唯一入口，默认位置为 `<home>/.ligule`。绝对 `LIGULE_HOME` 覆盖默认位置，空值按未设置处理，相对路径报 `data_root_invalid`。用户配置、模式、技能、提示模板、扩展、工作区登记、桌面偏好和默认会话记录放在数据根下。项目配置与 `~/.agents/skills/` 保持各自锚点；显式 `host.sessionDirectory` 可覆盖默认会话目录。旧项目会话只在首次读取时迁移到新默认目录。
-- 桌面偏好文档由 Host 放在数据根，WebView 的 `ligule.ui` 作首屏缓存；只有数据根文档不存在时才迁移缓存。读取失败停止保存；写入携带读取版本并在跨进程锁内比较，冲突或格式错误不得覆盖文件。草稿与队列不截断。
-- 项目配置来自其他仓库，合并时拒绝 `__proto__` 键。工具只读内核传入的配置快照，并通过注入的日志接口输出；仓库代码不直接写输出流。
-- 跨进程共享的会话与工作区登记写入必须持锁完成；配置原文编辑要比较文件版本并原子替换，避免覆盖并发修改。
+Document current behavior and link to its maintained source. Keep the Chinese and English user guides aligned for commands, configuration keys, and stable error codes. Do not duplicate an implementation detail when a nearby source file or test is the maintained authority.
 
-## 依赖、发布与验证
+## Local guides
 
-- 运行依赖及可选依赖列在 `package.json`。仅部分平台需要的原生依赖保持可选，使其他平台安装不依赖它们。ripgrep 二进制由固定版本构建，不提交到仓库。
-- `tree-sitter` 语法解析器无法加载时，判定会要求确认并说明原因。打包检查通过已安装包解析真实命令行，避免缺少解析器时误判。
-- `packages/rg-*` 不提交二进制；构建脚本按固定版本、大小和 SHA-256 校验后写入。
-- `RELEASE.md` 是发行目标、产物与验证位置的清单。版本与清单更新后由发布工作流构建并校验各平台产物；具体发布步骤以清单和工作流为准。
-- 真实端点检查从进程环境读取凭据，并检查持久化记录。凭据不得写进仓库文件或检查输出。纯投影可用固定输入核对；端点、窗口、Host 与进程行为要用实际运行部件验证。
-- 未获明确要求时不执行 Git 写操作。提交前检查暂存内容；凭据、用户会话记录、构建产物和临时文件不得进入提交。`desktop/vendor/` 是本机生成目录，不提交。
-- 桌面 Rust 检查运行 `cargo test --manifest-path desktop/src-tauri/Cargo.toml`；前端检查运行 `npm --prefix desktop/frontend run check`。真实窗口检查需要启动桌面壳和 Host。
-
-## 局部指南
-
-- `src/kernel/AGENTS.md`、`src/tools/AGENTS.md`、`src/session/AGENTS.md`、`src/host/AGENTS.md` 与 `src/tui/AGENTS.md` 只写对应目录的约束。
-- `desktop/AGENTS.md` 说明桌面目录边界；`desktop/src-tauri/AGENTS.md` 与 `desktop/frontend/AGENTS.md` 分别说明壳和前端的接口约束。
-- 工作目录处于某份 `AGENTS.md` 管辖的目录时，该指南生效；指令加载从项目根沿路径向下查找。
+- [desktop/AGENTS.md](desktop/AGENTS.md) applies to the shell and frontend; its child guides cover [`frontend/`](desktop/frontend/AGENTS.md) and [`src-tauri/`](desktop/src-tauri/AGENTS.md).
+- [src/kernel/AGENTS.md](src/kernel/AGENTS.md), [src/tools/AGENTS.md](src/tools/AGENTS.md), [src/session/AGENTS.md](src/session/AGENTS.md), [src/host/AGENTS.md](src/host/AGENTS.md), and [src/tui/AGENTS.md](src/tui/AGENTS.md) cover their respective directories.

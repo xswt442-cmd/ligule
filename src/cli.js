@@ -455,7 +455,7 @@ if (invalidLanguage) {
   } catch (error) {
     printFailure(error.code ?? 'cli_host_failed', error.detail);
   }
-} else if (command === 'tui') {
+} else if (command === 'tui' || command === undefined) {
   // 终端界面是协议的第二个客户端（D33）：与 Host 同进程、走内存载体，界面只读协议帧。
   // 它需要真终端：管道那头没有 raw mode，按键与重画都无从谈起。
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
@@ -474,12 +474,13 @@ if (invalidLanguage) {
         missing ? t('tui 需要可选依赖：npm install ink react marked highlight.js string-width', 'the terminal UI requires optional dependencies: npm install ink react marked highlight.js string-width') : error.detail);
     }
   }
-} else if (command === undefined || command === '--help' || command === '-h') {
+} else if (command === '--help' || command === '-h') {
   if (locale === undefined) {
     try { setLocale((await configSnapshot()).config); } catch { setLocale(undefined); }
   }
   console.log(t(`ligule ${pkg.version} - 开发版本，请勿用于正式环境。`, `ligule ${pkg.version} - development build; do not use in production.`));
   console.log(t('命令：tools、skills、extensions、sessions、workspaces、policy <session-id>、run <text>、resume <id> <text>、call <tool> [json-args]、tui、host、--version', 'Commands: tools, skills, extensions, sessions, workspaces, policy <session-id>, run <text>, resume <id> <text>, call <tool> [json-args], tui, host, --version'));
+  console.log(t('直接运行 ligule 打开终端界面；tui 子命令仍可使用。', 'Run ligule without a command to open the terminal UI; the tui subcommand remains available.'));
   console.log(t('选项：--config <key.path=value>（可重复）、--mode <name>、--lang <zh|en|auto>', 'Options: --config <key.path=value> (repeatable), --mode <name>, --lang <zh|en|auto>'));
   console.log(t('run、tui 和 host 从配置读取 model.api、model.baseURL 与 model.model；密钥由 model.apiKeyEnv 指定，未设置时读取 LIGULE_API_KEY。', 'run, tui and host read model.api, model.baseURL and model.model from config; the key uses model.apiKeyEnv, or LIGULE_API_KEY when unset.'));
   console.log(t('run、tui 和 host 默认使用 minimal 模式；--mode 可覆盖 mode 配置。tools 和 call 不读取模式。', 'run, tui and host use the minimal mode by default; --mode overrides the mode config. tools and call do not read a mode.'));

@@ -1,0 +1,27 @@
+# Glossary
+
+[简体中文](GLOSSARY.zh-cn.md) · [English](GLOSSARY.en.md)
+
+These terms describe current ligule behavior. Protocol method names and configuration keys keep their code spelling.
+
+| Term | 中文 | Meaning in ligule |
+|---|---|---|
+| **Kernel** | 内核 | The runtime that registers tools, validates calls, applies policy, runs allowed tools, and records their results. It starts with an empty tool registry. |
+| **Host** | 宿主 | The Node.js owner of a project environment and its open sessions. It assembles the kernel, model provider, policy, session records, extensions, and client protocol. |
+| **Adapter** | 适配器 | An interface-specific entry point that presents Host behavior to a user. The CLI, TUI, and desktop frontend use different transports. |
+| **Plugin** | 插件 | A module installed by the Host that registers tools or prompt fragments and returns cleanup actions. |
+| **Tool** | 工具 | A registered, model-callable operation with a name, description, parameter schema, and implementation. A tool call always passes through kernel validation and policy. |
+| **Capability** | 能力 | Host-side code that performs an operation requiring access to the operating system or environment, such as path resolution, process execution, or network access. A capability is not necessarily a model-callable tool. A policy verdict's `capability` field labels the operation evaluated. |
+| **Tool mode** | 工具模式 | A named selection of registered tools and prompt fragments. A mode controls the model's available tool manifest; it does not grant approval. |
+| **Approval policy** | 审批策略 | The decision rules applied to a tool call after argument and target checks. A policy can allow, refuse, or ask the user. The session may override the configured approval mode. |
+| **Approval mode** | 审批方式 | The selected approval tier, such as ask for each call or automatic decisions. It is one setting used by the approval policy decision chain. |
+| **Workspace** | 工作区 | A registered real directory used as a project's identity and default location for new sessions. Multiple workspaces can be active in one desktop window. |
+| **Project root** | 项目根目录 | The directory whose configuration, resources, and sessions belong to a Host project environment. It may differ from the tool access boundary. |
+| **Boundary** | 访问边界 | The filesystem scope enforced by file tools. It controls which paths a tool may access; it does not determine session ownership. |
+| **Session record** | 会话记录 | The append-only JSONL event log for a conversation. It is the source of truth for messages, tool outcomes, turn state, and recoverable session facts. |
+| **Checkpoint** | 检查点 | A separate, validated summary of a covered record range. It can shorten the model projection; it never replaces the JSONL source record. |
+| **Spill file** | 旁路文件 | A sidecar file that holds a tool result or summary exceeding the configured inline limit. The record retains a reference to that file. |
+
+## Related documents
+
+The [architecture guide](ARCHITECTURE.en.md) explains how these components interact. [Contributing and checks](CONTRIBUTING.en.md) describes the development workflow and validation commands.
