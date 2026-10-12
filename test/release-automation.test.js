@@ -136,9 +136,14 @@ test('release workflows separate version PRs, tag creation, npm publication, and
   for (const platform of ['windows_x64', 'linux_x64', 'macos_arm64', 'macos_x64']) {
     assert.equal(tagInputs[platform].default, false, `${platform} must require an explicit validation confirmation`);
   }
-  assert.match(tagWorkflow.jobs.prepare.steps.map((step) => step.run ?? '').join('\n'), /gh pr create --base main/);
-  assert.match(tagWorkflow.jobs['create-tag'].steps.map((step) => step.run ?? '').join('\n'), /gh workflow run ci\.yml --ref main/);
-  assert.match(tagWorkflow.jobs['create-tag'].steps.map((step) => step.run ?? '').join('\n'), /git push origin "v\$\{VERSION\}"/);
+  const prepareCommands = tagWorkflow.jobs.prepare.steps.map((step) => step.run ?? '').join('\n');
+  const tagCommands = tagWorkflow.jobs['create-tag'].steps.map((step) => step.run ?? '').join('\n');
+  assert.match(prepareCommands, /gh pr create --base main/);
+  assert.doesNotMatch(prepareCommands, /npm test|npm run check-pack/);
+  assert.match(tagCommands, /gh run list --workflow ci\.yml --branch main --event push --commit/);
+  assert.doesNotMatch(tagCommands, /gh workflow run ci\.yml/);
+  assert.match(tagCommands, /main_head.*COMMIT/s);
+  assert.match(tagCommands, /git push origin "v\$\{VERSION\}"/);
   assert.ok(publishWorkflow.on.workflow_dispatch, 'npm publishing must be manually dispatched');
   assert.equal(publishWorkflow.on.push, undefined, 'a tag push must not publish npm packages');
   assert.equal(publishWorkflow.jobs.approval.environment, 'npm-publish');
@@ -150,5 +155,7 @@ test('release workflows separate version PRs, tag creation, npm publication, and
   assert.ok(releaseWorkflow.on.workflow_dispatch, 'draft recovery must be manually available');
   const releaseCommands = releaseWorkflow.jobs.draft.steps.map((step) => step.run ?? '').join('\n');
   assert.match(releaseCommands, /--notes-file/);
+  assert.match(releaseCommands, /preserving its title, body, and assets/);
+  assert.doesNotMatch(releaseCommands, /gh release edit/);
   assert.doesNotMatch(releaseCommands, /--generate-notes/);
 });

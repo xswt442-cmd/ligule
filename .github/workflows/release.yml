@@ -26,7 +26,7 @@ concurrency:
 
 jobs:
   draft:
-    name: create or update the draft Release
+    name: create the draft Release when it is missing
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -67,7 +67,7 @@ jobs:
           done < <(node -e "const pin=require('./scripts/ripgrep-pin.json'); for(const target of Object.values(pin.targets)) console.log(target.package); console.log('ligule')")
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: create or update the draft Release
+      - name: create a draft without replacing an existing one
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
@@ -79,7 +79,8 @@ jobs:
               echo "::error::refusing to modify the already published Release ${TAG}"
               exit 1
             fi
-            gh release edit "$TAG" --title "$TAG" --draft --notes-file "$RUNNER_TEMP/release-notes.md"
+            echo "::notice::draft Release ${TAG} already exists; preserving its title, body, and assets"
+            echo "Preserved existing draft Release ${TAG}; title, body, and assets were not changed." >> "$GITHUB_STEP_SUMMARY"
           else
             gh release create "$TAG" --verify-tag --title "$TAG" --draft --notes-file "$RUNNER_TEMP/release-notes.md"
           fi

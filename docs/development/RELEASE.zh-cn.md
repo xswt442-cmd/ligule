@@ -59,11 +59,11 @@ AppImage 在 `ubuntu-22.04` 上构建。各平台的安装包类型由 `desktop/
 
 ## 发布顺序
 
-1. **准备版本 PR。** 在 GitHub Actions 手动运行 [`tag.yml`](../../.github/workflows/tag.yml)，选择 `prepare` 并输入稳定版本号（`X.Y.Z`）或 `patch`、`minor`、`major`。工作流从 `main` 更新所有版本清单，将双语 `[Unreleased]` 内容归入版本段，运行 `npm test`、`npm run check-pack` 和完整四平台 CI；全部通过后才创建指向 `main` 的版本 PR。检查该 PR 的版本差异，并从其 CI 运行下载四平台安装包进行实机验收。
+1. **准备版本 PR。** 在 GitHub Actions 手动运行 [`tag.yml`](../../.github/workflows/tag.yml)，选择 `prepare` 并输入稳定版本号（`X.Y.Z`）或 `patch`、`minor`、`major`。工作流从 `main` 更新所有版本清单，将双语 `[Unreleased]` 内容归入版本段，然后运行完整四平台 CI；这趟 CI 已包含单元测试、打包检查和四个平台安装包构建。全部通过后才创建指向 `main` 的版本 PR。检查版本差异，并从该 CI 运行下载四平台安装包进行实机验收。
 2. **合并并验收。** 版本 PR 经审阅后合入 `main`。对合并后的提交再次完成 Windows x64、Linux x64、macOS Apple Silicon 与 macOS Intel 的安装和启动验证。仅 CI 产物成功不等于实机验收。
-3. **创建标签。** 在 `main` 上手动运行 [`tag.yml`](../../.github/workflows/tag.yml)，选择 `tag`、输入已合并版本号，并确认四个平台验收选项。工作流确认标签不存在、版本和 Changelog 匹配、提交属于 `main`，再对该提交重跑完整 CI；通过后自动创建并推送注释标签。无需在本机执行 `git tag`。
+3. **创建标签。** 在 `main` 上手动运行 [`tag.yml`](../../.github/workflows/tag.yml)，选择 `tag`、输入已合并版本号，并确认四个平台验收选项。工作流检查该 SHA 的完整 `main` push CI 已通过，并在推标签前再次确认远端 `main` HEAD 仍是同一 SHA；任一检查不符都会停止。通过后自动创建并推送注释标签，无需在本机执行 `git tag`。
 4. **发布 npm。** 手动运行 [`publish.yml`](../../.github/workflows/publish.yml)，输入刚创建的 `vX.Y.Z`。工作流只检出并验证这个标签对应的主分支提交，测试后进入 `npm-publish` Environment；可在该 Environment 配置人工审核者，审核通过后才开始发布四个搜索包和主包。未配置保护规则时不会增加等待步骤。初次发布需要将 `NPM_TOKEN` 配为仓库 Secret；npm 发布通过后会调用 [`release.yml`](../../.github/workflows/release.yml)。
-5. **补齐草稿附件。** `release.yml` 从该版本的双语 Changelog 生成 Release 正文，并在所有对应 npm 包可读取时创建或更新 draft Release；已公开的 Release 不允许被这条工作流改写。四个桌面安装包仍需从对应 `main` CI 运行下载，人工核对平台、文件名并上传到草稿。用 `Get-FileHash -Algorithm SHA256` 或 `sha256sum` 计算校验值并补入 Release 正文。也可在 npm 包已发布后手动运行 `release.yml` 修复或重建草稿。
+5. **补齐草稿附件。** `release.yml` 从该版本的双语 Changelog 生成 Release 正文，并在所有对应 npm 包可读取且草稿不存在时创建 draft Release。已有草稿的标题、正文和附件都保持不动；已公开的 Release 不允许被这条工作流改写。四个桌面安装包仍需从对应 `main` CI 运行下载，人工核对平台、文件名并上传到草稿。用 `Get-FileHash -Algorithm SHA256` 或 `sha256sum` 计算校验值并补入 Release 正文。缺少草稿时可手动运行 `release.yml` 创建。
 6. **公开 Release。** 完成四个平台的实机验证、确认草稿附件与校验值后，再在 GitHub 上公开 Release。
 
-`CHANGELOG.md` 是更新记录的单一来源。版本 PR 把 `[Unreleased]` 内容提升为带日期的版本段；`release.yml` 直接摘取该版本的中英文内容并添加下载说明，不自动生成另一份变更摘要。GitHub Release 的平台附件与校验值在上传后维护。标签不会触发 npm 发布，`publish.yml` 必须由维护者手动运行。完成 npm Trusted Publishing 配置后，可删除仓库 Secret `NPM_TOKEN`。发布状态以 npm registry 和 GitHub Release 页面为准。
+`CHANGELOG.md` 是更新记录的单一来源。版本 PR 把 `[Unreleased]` 内容提升为带日期的版本段；新建 draft 时，`release.yml` 直接摘取该版本的中英文内容并添加下载说明，不自动生成另一份变更摘要。已有草稿不会被覆盖，因此手工加入的校验值和附件说明会保留。标签不会触发 npm 发布，`publish.yml` 必须由维护者手动运行。完成 npm Trusted Publishing 配置后，可删除仓库 Secret `NPM_TOKEN`。发布状态以 npm registry 和 GitHub Release 页面为准。

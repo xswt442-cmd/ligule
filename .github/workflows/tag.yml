@@ -91,11 +91,6 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
 
-      - name: verify release files
-        run: |
-          npm test
-          npm run check-pack
-
       - name: push the version branch
         id: push
         env:
@@ -162,12 +157,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
-      actions: write
+      actions: read
       contents: write
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: main
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: require all platform validations and main
@@ -209,40 +204,50 @@ jobs:
             exit 1
           fi
           commit=$(git rev-parse HEAD)
-          git fetch --no-tags --force origin +refs/heads/main:refs/remotes/origin/main
-          git merge-base --is-ancestor "$commit" refs/remotes/origin/main
-          echo "commit=$commit" >> "$GITHUB_OUTPUT"
-
-      # Run CI against the exact main commit immediately before tagging. This run also contains the
-      # four desktop artifacts that are manually attached to the eventual draft Release.
-      - name: run the final platform CI
-        env:
-          GH_TOKEN: ${{ github.token }}
-          COMMIT: ${{ steps.release.outputs.commit }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          dispatched_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          gh workflow run ci.yml --ref main
-          run_id=""
-          for attempt in $(seq 1 60); do
-            run_id=$(gh run list --workflow ci.yml --branch main --event workflow_dispatch --limit 20 --json databaseId,headSha,createdAt \
-              | jq -r --arg commit "$COMMIT" --arg since "$dispatched_at" '[.[] | select(.headSha == $commit and (.createdAt | fromdateiso8601) >= ($since | fromdateiso8601))][0].databaseId // empty')
-            if [ -n "$run_id" ]; then break; fi
-            sleep 5
-          done
-          if [ -z "$run_id" ]; then
-            echo "::error::could not find the CI run for $COMMIT"
+          if [ "$commit" != "$GITHUB_SHA" ]; then
+            echo "::error::checked out $commit instead of the requested main commit $GITHUB_SHA"
             exit 1
           fi
+          git fetch --no-tags --force origin +refs/heads/main:refs/remotes/origin/main
+          main_head=$(git rev-parse refs/remotes/origin/main)
+          if [ "$commit" != "$main_head" ]; then
+            echo "::error::main moved before tagging: requested $commit, current main is $main_head"
+            exit 1
+          fi
+          run_json=$(gh run list --workflow ci.yml --branch main --event push --commit "$commit" --limit 100 \
+            --json databaseId,headSha,status,conclusion,createdAt \
+            | jq -c --arg commit "$commit" '[.[] | select(.headSha == $commit)] | sort_by(.createdAt) | reverse | .[0] // empty')
+          if [ -z "$run_json" ]; then
+            echo "::error::no main push CI run exists for $commit"
+            exit 1
+          fi
+          run_id=$(jq -r .databaseId <<< "$run_json")
           gh run watch "$run_id" --exit-status
-          echo "CI run: $(gh run view "$run_id" --json url --jq .url)" >> "$GITHUB_STEP_SUMMARY"
+          run_result=$(gh run view "$run_id" --json headSha,conclusion)
+          if [ "$(jq -r .headSha <<< "$run_result")" != "$commit" ] || [ "$(jq -r .conclusion <<< "$run_result")" != success ]; then
+            echo "::error::the full CI run for $commit did not succeed"
+            exit 1
+          fi
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "ci_url=$(gh run view "$run_id" --json url --jq .url)" >> "$GITHUB_OUTPUT"
 
       - name: create and push the annotated tag
         env:
           VERSION: ${{ inputs.version }}
+          COMMIT: ${{ steps.release.outputs.commit }}
+          CI_URL: ${{ steps.release.outputs.ci_url }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
+          set -euo pipefail
+          git fetch --no-tags --force origin +refs/heads/main:refs/remotes/origin/main
+          main_head=$(git rev-parse refs/remotes/origin/main)
+          if [ "$main_head" != "$COMMIT" ]; then
+            echo "::error::main moved after CI validation: checked $COMMIT, current main is $main_head"
+            exit 1
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "v${VERSION}" -m "v${VERSION}"
           git push origin "v${VERSION}"
+          echo "Created v${VERSION} from ${COMMIT}. CI: ${CI_URL}" >> "$GITHUB_STEP_SUMMARY"
