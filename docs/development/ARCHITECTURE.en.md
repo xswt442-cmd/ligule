@@ -25,7 +25,7 @@ flowchart LR
   Provider --> Endpoint[HTTP model endpoint]
 ```
 
-`ligule run` and `ligule tui` create a Host in the Node process that owns the interface. The TUI sends protocol messages over an in-memory connection. The desktop frontend sends frames through Tauri; the Rust shell forwards each line to a child Node process and returns lines to the frontend. The shell owns process and window lifecycle, while the Node Host owns sessions, project state, policy, and model requests. See the [CLI](../../src/cli.js), [TUI adapter](../../src/tui/start.js), [frame transport](../../src/host/connection.js), and [desktop bridge](../../desktop/src-tauri/src/bridge.rs).
+`ligule run` and the default `ligule` invocation (or the compatible `ligule tui` command) create a Host in the Node process that owns the interface. The TUI sends protocol messages over an in-memory connection. The desktop frontend sends frames through Tauri; the Rust shell forwards each line to a child Node process and returns lines to the frontend. The shell owns process and window lifecycle, while the Node Host owns sessions, project state, policy, and model requests. See the [CLI](../../src/cli.js), [TUI adapter](../../src/tui/start.js), [frame transport](../../src/host/connection.js), and [desktop bridge](../../desktop/src-tauri/src/bridge.rs).
 
 ## Kernel, plugins, tools, and capabilities
 

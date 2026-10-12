@@ -14,7 +14,7 @@ npm install -g ligule
 
 v0.0.2 尚未发布；仓库中的版本不代表 npm 或桌面安装包已经发布。桌面版请使用对应平台已经发布的安装包。Windows 桌面版需要 WebView2 运行时。
 
-在项目目录中运行 `ligule run "查看项目结构并提出建议"`，可以执行一轮对话。日常使用可以运行 `ligule tui` 打开终端界面，或启动已安装的 ligule 桌面版。终端界面需要交互式终端；脚本和管道使用 `ligule run`。
+在项目目录中运行 `ligule run "查看项目结构并提出建议"`，可以执行一轮对话。日常使用可以直接运行 `ligule` 打开终端界面，或启动已安装的 ligule 桌面版。`ligule tui` 仍可作为终端界面的兼容命令。终端界面需要交互式终端；脚本和管道使用 `ligule run`。
 
 使用 `ligule --help` 查看命令。`ligule sessions` 列出当前项目的会话，`ligule workspaces` 列出已登记的工作区，`ligule tools`、`ligule skills` 和 `ligule extensions` 查看已加载的能力。
 
@@ -72,7 +72,7 @@ selection = { provider = "deepseek", model = "deepseek-chat" }
 
 桌面版显示断连横幅时，按「重新连接」重启后端并恢复当前会话。没有得到答复的审批和问题会作废；待发送队列会回到草稿。终端界面退出后使用 `/resume <编号或唯一前缀>` 恢复会话。
 
-`tool_outcome_unknown` 表示进程意外退出时，某个工具调用是否完成无法确定。先检查文件或外部状态，再决定是否重做。`session_locked` 表示另一进程仍持有会话；关闭该进程后再恢复。终端界面退出后，先运行 `ligule tui`，再输入 `/resume <编号或唯一前缀>`；也可以从命令行运行 `ligule resume <编号> "<要发送的消息>"`。`host_model_config_missing` 表示模型服务配置不完整；检查 `~/.ligule/config.toml` 中的模型字段，或在桌面版「模型服务」中填写配置。`provider_credential_missing` 表示密钥环境变量或系统凭据库中没有对应密钥。`credential_store_unavailable` 表示系统凭据库不可用；Linux 请检查 Secret Service。
+`tool_outcome_unknown` 表示进程意外退出时，某个工具调用是否完成无法确定。先检查文件或外部状态，再决定是否重做。`session_locked` 表示另一进程仍持有会话；关闭该进程后再恢复。终端界面退出后，先运行 `ligule`，再输入 `/resume <编号或唯一前缀>`；也可以从命令行运行 `ligule resume <编号> "<要发送的消息>"`。`host_model_config_missing` 表示模型服务配置不完整；检查 `~/.ligule/config.toml` 中的模型字段，或在桌面版「模型服务」中填写配置。`provider_credential_missing` 表示密钥环境变量或系统凭据库中没有对应密钥。`credential_store_unavailable` 表示系统凭据库不可用；Linux 请检查 Secret Service。
 
 ## 语言、外观和快捷键
 
@@ -88,7 +88,7 @@ selection = { provider = "deepseek", model = "deepseek-chat" }
 
 ## 常见问题
 
-- `tui_terminal_required`：请在交互式终端运行 `ligule tui`；脚本中使用 `ligule run`。
+- `tui_terminal_required`：请在交互式终端运行 `ligule`；脚本中使用 `ligule run`。
 - `tui_dependency_missing`：终端界面依赖未安装完整；检查 npm 安装是否包含可选依赖。
 - `data_root_invalid`：`LIGULE_HOME` 必须是绝对路径；未设置时使用 `~/.ligule`。
 - `provider_model_required` 或 `provider_base_url_required`：检查服务地址、接口类型和模型名称。

@@ -25,7 +25,7 @@ flowchart LR
   Provider --> Endpoint[模型服务]
 ```
 
-`ligule run` 与 `ligule tui` 在界面所属的 Node.js 进程中创建 Host。TUI 通过内存连接发送协议消息。桌面前端经 Tauri 发送消息帧；Rust 壳把每一行转发给 Node 子进程，再把响应行交回前端。Rust 管窗口和进程生命周期；Node Host 管项目环境、会话、审批与模型请求。入口分别见[命令行](../../src/cli.js)、[TUI 启动器](../../src/tui/start.js)、[消息连接](../../src/host/connection.js)和[桌面桥接](../../desktop/src-tauri/src/bridge.rs)。
+`ligule run` 与直接运行 `ligule`（或使用兼容命令 `ligule tui`）会在界面所属的 Node.js 进程中创建 Host。TUI 通过内存连接发送协议消息。桌面前端经 Tauri 发送消息帧；Rust 壳把每一行转发给 Node 子进程，再把响应行交回前端。Rust 管窗口和进程生命周期；Node Host 管项目环境、会话、审批与模型请求。入口分别见[命令行](../../src/cli.js)、[TUI 启动器](../../src/tui/start.js)、[消息连接](../../src/host/connection.js)和[桌面桥接](../../desktop/src-tauri/src/bridge.rs)。
 
 ## Kernel、插件、工具与能力
 

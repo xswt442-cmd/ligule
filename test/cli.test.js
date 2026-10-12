@@ -59,17 +59,26 @@ test('a failure prints its stable code on stderr and exits non-zero', () => {
 });
 
 // 打错的命令不是一次成功：帮助文本走 stdout、退出码 0，调用方是个脚本就分不出来。
-test('an unknown command is a failure, while asking for help is not', () => {
+test('an unknown command fails, while explicit help remains available', () => {
   const unknown = capture('frobnicate');
   assert.equal(unknown.ok, false);
   assert.equal(unknown.status, 1);
   assert.match(unknown.stderr, /cli_command_unknown/);
   assert.equal(unknown.stdout, '');
 
-  for (const flag of [undefined, '--help', '-h']) {
-    const asked = flag === undefined ? capture() : capture(flag);
+  for (const flag of ['--help', '-h']) {
+    const asked = capture(flag);
     assert.ok(asked.ok, asked.stderr);
-  assert.match(asked.stdout, /(?:Commands: tools, skills, extensions, sessions|命令：tools、skills、extensions、sessions)/);
+    assert.match(asked.stdout, /(?:Commands: tools, skills, extensions, sessions|命令：tools、skills、extensions、sessions)/);
+  }
+});
+
+test('a bare invocation and the explicit tui alias both require an interactive terminal', () => {
+  for (const args of [[], ['tui']]) {
+    const result = capture(...args);
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /tui_terminal_required/);
   }
 });
 
@@ -84,21 +93,23 @@ test('--config narrows the boundary from the command line and a valueless flag i
   assert.match(missing.stderr, /cli_config_needs_a_value/);
 });
 
-test('--version prints the package version and the bare invocation lists the commands', () => {
+test('--version prints the package version and --help lists the commands', () => {
   const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'));
   assert.equal(capture('--version').stdout.trim(), pkg.version);
-  assert.match(capture().stdout, /(?:Commands: tools, skills, extensions, sessions|命令：tools、skills、extensions、sessions)/);
+  assert.match(capture('--help').stdout, /(?:Commands: tools, skills, extensions, sessions|命令：tools、skills、extensions、sessions)/);
 });
 
 test('--lang selects help text without requiring a model configuration', () => {
   const english = capture('--help', '--lang', 'en');
   assert.equal(english.ok, true, english.stderr);
   assert.match(english.stdout, /Commands: tools/);
+  assert.match(english.stdout, /Run ligule without a command to open the terminal UI/);
   assert.match(english.stdout, /--lang <zh\|en\|auto>/);
 
   const chinese = capture('--help', '--lang', 'zh');
   assert.equal(chinese.ok, true, chinese.stderr);
   assert.match(chinese.stdout, /命令：tools/);
+  assert.match(chinese.stdout, /直接运行 ligule 打开终端界面/);
   assert.match(chinese.stdout, /选项：/);
 
   const simplifiedChineseAlias = capture('--help', '--lang', 'zh-CN');

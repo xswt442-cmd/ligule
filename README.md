@@ -8,17 +8,17 @@
 
 <p align="center"><img src="docs/app-icon.png" alt="ligule 应用图标" width="112"></p>
 
-ligule 是一个为项目工作、共享同一套 Agent 内核的 AI 助手。命令行适合脚本和单次任务，终端界面适合键盘操作，桌面界面提供会话列表与图形设置。三种入口共用工具执行、审批、模型请求和会话记录。
+ligule 是一个为项目工作、共享同一套 Agent 内核的 AI 助手，提供三种入口。三种入口共用工具执行、审批、模型请求和会话记录。
 
 ## 选择入口
 
 | 入口 | 适合场景 | 启动方式 |
 |---|---|---|
 | CLI | 脚本、管道和单次任务 | `ligule run "检查项目结构并提出建议"` |
-| TUI | 在终端持续对话与管理会话 | `ligule tui` |
+| TUI | 在终端持续对话与管理会话 | `ligule` |
 | Desktop | 使用工作区侧栏、图形设置和会话操作 | 安装对应平台的桌面包后启动 |
 
-CLI 与 TUI 需要 Node.js 24 或更新版本。TUI 需要交互式终端；脚本和管道使用 `ligule run`。桌面包的平台、系统要求和验证状态见[发行清单](docs/development/RELEASE.zh-cn.md)。仓库版本或 CI 产物不代表已公开发行。
+CLI 与 TUI 需要 Node.js 24 或更新版本。TUI 需要交互式终端；脚本和管道使用 `ligule run`。桌面包的平台、系统要求和验证状态见[发行清单](docs/development/RELEASE.zh-cn.md)。
 
 ## 快速开始
 
@@ -35,16 +35,16 @@ ligule run "检查项目结构并提出建议"
 ```sh
 npm install -g ligule
 cd /path/to/your-project
-ligule tui
+ligule
 ```
 
 ### 桌面界面
 
-先从[发行清单](docs/development/RELEASE.zh-cn.md)确认平台安装包已公开，再到 [GitHub Releases](https://github.com/xswt442-cmd/ligule/releases)下载。桌面版首次启动会准备默认工作区；也可以在设置中更改新会话使用的默认目录。
+在 [GitHub Releases](https://github.com/xswt442-cmd/ligule/releases)下载。桌面版首次启动会准备默认工作区；也可以在设置中更改新会话使用的默认目录。
 
 ## 配置与数据
 
-CLI 与 TUI 默认从 `~/.ligule/config.toml` 读取模型服务设置。最小配置示例：
+默认从 `~/.ligule/config.toml` 读取模型服务设置。最小配置示例：
 
 ```toml
 [model]
@@ -64,4 +64,6 @@ apiKeyEnv = "MODEL_API_KEY"
 - [贡献与验证（中文）](docs/development/CONTRIBUTING.zh-cn.md) · [Contributing and checks (English)](docs/development/CONTRIBUTING.en.md)
 - [维护者发行清单（中文）](docs/development/RELEASE.zh-cn.md) · [Release checklist (English)](docs/development/RELEASE.en.md)
 
-首次使用可从[中文使用手册](docs/guide.zh-CN.md)开始。桌面安装验证与实际发行状态会在[发行清单](docs/development/RELEASE.zh-cn.md)中区分记录。
+## LICENSE
+
+[MIT](./LICENSE)

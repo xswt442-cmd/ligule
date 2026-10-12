@@ -14,7 +14,7 @@ npm install -g ligule
 
 Version 0.0.2 has not been released; the version in the repository does not mean that its npm package or desktop installers are available. Use a desktop installer published for your platform. The Windows desktop app requires the WebView2 runtime.
 
-From a project directory, run `ligule run "Review the project structure and suggest improvements"` to make one request. For daily use, run `ligule tui` to open the terminal UI or launch the installed ligule desktop app. The terminal UI requires an interactive terminal; use `ligule run` in scripts and pipelines.
+From a project directory, run `ligule run "Review the project structure and suggest improvements"` to make one request. For daily use, run `ligule` to open the terminal UI or launch the installed ligule desktop app. `ligule tui` remains available as a compatibility command. The terminal UI requires an interactive terminal; use `ligule run` in scripts and pipelines.
 
 Run `ligule --help` to list commands. `ligule sessions` lists sessions for the current project, `ligule workspaces` lists registered workspaces, and `ligule tools`, `ligule skills`, and `ligule extensions` show loaded capabilities.
 
@@ -72,7 +72,7 @@ Cancel a running turn by pressing Esc in the terminal UI or the Stop button in t
 
 When the desktop app shows a connection banner, select “Reconnect” to restart the backend and reopen the current session. Unanswered approvals and questions are voided; queued messages return to the draft. After leaving the terminal UI, use `/resume <id> [mode]` to continue a session.
 
-`tool_outcome_unknown` means a tool call may or may not have completed when its process exited unexpectedly. Check the file or external state before deciding whether to repeat the action. `session_locked` means another process still holds the session; close that process before resuming. After leaving the terminal UI, first run `ligule tui`, then enter `/resume <id or unique prefix>`. You can also run `ligule resume <id> "<message to send>"` from the command line. `host_model_config_missing` means the model service configuration is incomplete; check the model fields in `~/.ligule/config.toml` or fill them in under desktop “Model services”. `provider_credential_missing` means the environment variable or system credential store does not contain the key. `credential_store_unavailable` means the system credential store could not be used; on Linux, check Secret Service.
+`tool_outcome_unknown` means a tool call may or may not have completed when its process exited unexpectedly. Check the file or external state before deciding whether to repeat the action. `session_locked` means another process still holds the session; close that process before resuming. After leaving the terminal UI, first run `ligule`, then enter `/resume <id or unique prefix>`. You can also run `ligule resume <id> "<message to send>"` from the command line. `host_model_config_missing` means the model service configuration is incomplete; check the model fields in `~/.ligule/config.toml` or fill them in under desktop “Model services”. `provider_credential_missing` means the environment variable or system credential store does not contain the key. `credential_store_unavailable` means the system credential store could not be used; on Linux, check Secret Service.
 
 ## Language, appearance, and shortcuts
 
@@ -88,7 +88,7 @@ When the tray is available, closing the window hides it while background session
 
 ## Common errors
 
-- `tui_terminal_required`: Run `ligule tui` in an interactive terminal; use `ligule run` in a script.
+- `tui_terminal_required`: Run `ligule` in an interactive terminal; use `ligule run` in a script.
 - `tui_dependency_missing`: Some optional terminal UI dependencies are missing. Check that npm installed optional dependencies.
 - `data_root_invalid`: `LIGULE_HOME` must be an absolute path. Without it, ligule uses `~/.ligule`.
 - `provider_model_required` or `provider_base_url_required`: Check the service URL, API type, and model name.

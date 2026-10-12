@@ -1,7 +1,7 @@
 // 终端界面的行、输入与状态（D33 的第二种客户端）。这里不读帧也不写帧：帧由 src/host/connection.js 那一层交进来，
 // 这一层只把会话记录与流式增量画成行，并把按键变成协议里的调用。
 // 纯函数（editDraft、foldText、projectRecord、branchOf、detailTitle 与 commands.ts 里那几张表）都从这里交出去，
-// 检查在 test/tui.test.js，不靠真终端也能验；画面本身跑 `ligule tui` 看。
+// 检查在 test/tui.test.js，不靠真终端也能验；画面本身跑 `ligule` 看。
 import { resolve } from 'node:path';
 import { createElement as h, Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Static, Text, useApp, useInput, usePaste } from 'ink';

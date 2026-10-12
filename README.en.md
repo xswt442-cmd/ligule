@@ -8,17 +8,17 @@
 
 <p align="center"><img src="docs/app-icon.png" alt="ligule app icon" width="112"></p>
 
-ligule is an AI assistant for working in projects, with one shared Agent kernel behind three interfaces. Use the CLI for scripts and one-off tasks, the terminal UI for keyboard-driven work, or the desktop app for workspace navigation and visual settings. All three share tool execution, approvals, model requests, and session records.
+ligule is an AI assistant for project work that shares one Agent kernel across three interfaces. All three share tool execution, approvals, model requests, and session records.
 
 ## Choose an interface
 
 | Interface | Best for | Start with |
 |---|---|---|
 | CLI | Scripts, pipelines, and one-off tasks | `ligule run "Review the project structure and suggest improvements"` |
-| TUI | Ongoing conversations and session management in a terminal | `ligule tui` |
+| TUI | Ongoing conversations and session management in a terminal | `ligule` |
 | Desktop | Workspace sidebar, visual settings, and session actions | Install the desktop package for your platform |
 
-The CLI and TUI require Node.js 24 or newer. The TUI requires an interactive terminal; use `ligule run` in scripts and pipelines. Desktop targets, system requirements, and verification status are listed in the [release checklist](docs/development/RELEASE.en.md). A repository version or CI artifact does not mean a release is public.
+The CLI and TUI require Node.js 24 or newer. The TUI requires an interactive terminal; use `ligule run` in scripts and pipelines. Desktop targets, system requirements, and verification status are listed in the [release checklist](docs/development/RELEASE.en.md).
 
 ## Quick start
 
@@ -35,16 +35,16 @@ ligule run "Review the project structure and suggest improvements"
 ```sh
 npm install -g ligule
 cd /path/to/your-project
-ligule tui
+ligule
 ```
 
 ### Desktop app
 
-Check the [release checklist](docs/development/RELEASE.en.md) to confirm that an installer is public for your platform, then download it from [GitHub Releases](https://github.com/xswt442-cmd/ligule/releases). On first launch, the desktop app creates a default workspace. You can change the default directory for new sessions in Settings.
+Download the desktop installer from [GitHub Releases](https://github.com/xswt442-cmd/ligule/releases). On first launch, the desktop app prepares a default workspace. You can change the default directory for new sessions in Settings.
 
 ## Configuration and data
 
-The CLI and TUI read model service settings from `~/.ligule/config.toml` by default. Minimal example:
+Model service settings are read from `~/.ligule/config.toml` by default. Minimal example:
 
 ```toml
 [model]
@@ -64,4 +64,6 @@ Set the environment variable named by `apiKeyEnv`. Desktop settings also support
 - [贡献与验证（中文）](docs/development/CONTRIBUTING.zh-cn.md) · [Contributing and checks (English)](docs/development/CONTRIBUTING.en.md)
 - [维护者发行清单（中文）](docs/development/RELEASE.zh-cn.md) · [Release checklist (English)](docs/development/RELEASE.en.md)
 
-New users can start with the [English user guide](docs/guide.en.md). Desktop installation checks and public release status are tracked separately in the [release checklist](docs/development/RELEASE.en.md).
+## License
+
+[MIT](./LICENSE)
