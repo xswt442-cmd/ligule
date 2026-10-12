@@ -1585,7 +1585,7 @@ export function App({ transport }: { transport: Transport }) {
             const atBottom = scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= 40;
             setPinned((current) => current === atBottom ? current : atBottom);
           }}
-          onScrollEnd={() => { readerScrolling.current = false; }}
+          isScrolling={(scrolling) => { if (!scrolling) readerScrolling.current = false; }}
           rangeChanged={onRangeChanged}
           increaseViewportBy={VIEWPORT_INCREASE}
           context={streamContext}
