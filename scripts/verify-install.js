@@ -18,7 +18,7 @@ if (args.length > 1 || args.some((arg) => arg.startsWith('--'))) throw new Error
 const given = args[0];
 const npmCli = process.env.npm_execpath;
 if (!npmCli) throw new Error('run it as `npm run verify-install` - only npm itself can tell Node which file to launch on Windows');
-if (!existsSync(join(repo, 'dist', 'index.js'))) {
+if (given === undefined && !existsSync(join(repo, 'dist', 'index.js'))) {
   throw new Error('dist/index.js is missing; run `npm run build` before verifying a fresh install');
 }
 
