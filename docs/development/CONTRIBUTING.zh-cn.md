@@ -14,7 +14,7 @@ npm test
 npm run check-pack
 ```
 
-`npm test` 会构建 `dist/` 并运行自动化测试。`check-pack` 检查 npm 包产物。发行工作流还会将打包产物安装到干净的消费者环境中，并使用对应平台的搜索包进行验证。
+`npm test` 会构建 `dist/` 并运行自动化测试。`check-pack` 检查 npm 包产物。发行工作流还会将打包产物安装到干净的消费者环境中，并使用 `@vscode/ripgrep` 提供的当前平台二进制进行验证。
 
 桌面前端需要安装其依赖，再运行检查和构建：
 

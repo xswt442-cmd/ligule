@@ -42,7 +42,7 @@ jobs:
         with:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
 
-      - name: validate the tag and published npm packages
+      - name: validate the tag and published npm package
         id: release
         env:
           TAG: ${{ inputs.tag }}
@@ -62,9 +62,7 @@ jobs:
           test "$tagged_version" = "$version"
           git checkout --detach "$commit"
           node scripts/release-notes.js "$TAG" > "$RUNNER_TEMP/release-notes.md"
-          while IFS= read -r package; do
-            npm view "${package}@${version}" version --json | grep -F "${version}" >/dev/null
-          done < <(node -e "const pin=require('./scripts/ripgrep-pin.json'); for(const target of Object.values(pin.targets)) console.log(target.package); console.log('ligule')")
+          npm view "ligule@${version}" version --json | grep -F "${version}" >/dev/null
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: create a draft without replacing an existing one

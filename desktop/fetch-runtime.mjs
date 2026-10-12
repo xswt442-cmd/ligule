@@ -1,7 +1,6 @@
 // 桌面壳的自包含运行时（D34）：安装包要能装到没有这份仓库的机器上就跑起来，
 // 所以随包带两样东西——一份钉住版本的 Node，和 ligule 自己的运行时树（构建出来的 dist 加它需要的依赖）。
-// 与 `scripts/build-rg-packages.js` 同一种做法：版本与校验和写在 pin 文件里，下载后先核对再放进目录。
-// 目标按 `<platform>-<arch>` 选，四个目标各自的档名与摘要钉在同一份文件里；一份运行树只带它自己那一个平台的原生绑定。
+// 依赖树按当前构建目标安装，只把当前平台的可选原生依赖复制进运行时目录。
 // 用法：node desktop/fetch-runtime.mjs [--force]
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -157,23 +156,6 @@ async function fetchAppTree() {
   for (const name of productionPackages()) {
     await copyTree(join(root, 'node_modules', name), join(app, 'node_modules', name), keepNative);
   }
-  const ripgrepPin = JSON.parse(readFileSyncSync(join(root, 'scripts', 'ripgrep-pin.json')));
-  const searchTarget = ripgrepPin.targets[target];
-  if (searchTarget === undefined) throw new Error(`no search package is pinned for ${target}`);
-  const searchSource = join(root, 'packages', searchTarget.directory);
-  const searchManifest = JSON.parse(readFileSyncSync(join(searchSource, 'package.json')));
-  if (searchManifest.name !== searchTarget.package || searchManifest.version !== packageJson.version
-    || packageJson.optionalDependencies?.[searchTarget.package] !== packageJson.version) {
-    throw new Error(`${searchTarget.package} must match the pinned target and ligule@${packageJson.version}`);
-  }
-  for (const file of [searchTarget.binary, ...ripgrepPin.licenseFiles, 'RIPGREP-VERSION']) {
-    if (!existsSync(join(searchSource, file))) throw new Error(`${join(searchSource, file)} is missing`);
-  }
-  const searchStamp = `${searchTarget.package} ships ripgrep ${ripgrepPin.version} for ${searchTarget.triple} (pinned in scripts/ripgrep-pin.json)`;
-  if (readFileSyncSync(join(searchSource, 'RIPGREP-VERSION')).trim() !== searchStamp) {
-    throw new Error(`${searchTarget.package} does not contain ripgrep ${ripgrepPin.version}`);
-  }
-  await copyTree(searchSource, join(app, 'node_modules', searchTarget.package));
   const foreign = await listForeignNative(app);
   if (foreign.length > 0) {
     throw new Error(`the runtime tree still carries native dirs for another target: ${foreign.slice(0, 5).join(', ')}`);

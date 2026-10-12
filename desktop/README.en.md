@@ -51,11 +51,10 @@ The frontend build runs TypeScript checking before Vite. The Rust tests cover pr
 
 Complete these steps in order:
 
-1. Build the core package and platform search packages:
+1. Build the core package:
 
    ```sh
    npm run build
-   npm run build-rg
    ```
 
 2. Prepare the Node runtime tree on the target platform:

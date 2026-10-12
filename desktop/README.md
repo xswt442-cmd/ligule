@@ -51,11 +51,10 @@ cargo test
 
 按顺序完成以下步骤：
 
-1. 构建核心包与平台搜索包：
+1. 构建核心包：
 
    ```sh
    npm run build
-   npm run build-rg
    ```
 
 2. 在目标平台准备 Node 运行时目录：

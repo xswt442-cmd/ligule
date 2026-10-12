@@ -82,9 +82,6 @@ jobs:
       - name: install locked dependencies
         run: npm ci
 
-      - name: build pinned search packages
-        run: npm run build-rg
-
       - name: syntax check every module
         shell: bash
         run: |
@@ -106,10 +103,7 @@ jobs:
           version='${{ needs.preflight.outputs.version }}'
           tarball="dist-tarball/ligule-${version}.tgz"
           test -f "$tarball"
-          sha256sum "$tarball" | tee dist-tarball/SHA256SUMS
-          mkdir -p dist-tarball/platforms
-          for directory in packages/rg-*; do npm pack "./$directory" --pack-destination dist-tarball/platforms; done
-          sha256sum dist-tarball/platforms/*.tgz >> dist-tarball/SHA256SUMS
+          sha256sum "$tarball" > dist-tarball/SHA256SUMS
 
       - uses: actions/upload-artifact@v4
         with:
@@ -118,7 +112,7 @@ jobs:
           if-no-files-found: error
 
   registry-check:
-    name: check every registry version before publishing
+    name: check the main package version before publishing
     needs: [preflight, checks]
     runs-on: ubuntu-latest
     steps:
@@ -136,17 +130,13 @@ jobs:
           name: npm-tarball
           path: dist-tarball
 
-      - name: compare all five package tarballs with the registry
+      - name: compare the package tarball with the registry
         shell: bash
         run: |
           set -euo pipefail
           sha256sum --check dist-tarball/SHA256SUMS
           version='${{ needs.preflight.outputs.version }}'
           npm run --silent registry-version -- "ligule@${version}" "dist-tarball/ligule-${version}.tgz"
-          for file in dist-tarball/platforms/*.tgz; do
-            name=$(basename "$file" "-${version}.tgz")
-            npm run --silent registry-version -- "${name}@${version}" "$file"
-          done
 
   approval:
     name: release approval
@@ -158,50 +148,9 @@ jobs:
     steps:
       - run: echo "npm publication is approved to proceed"
 
-  platforms:
-    name: publish search packages
-    needs: [preflight, checks, registry-check, approval]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ needs.preflight.outputs.commit }}
-          persist-credentials: false
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: ${{ env.PRIMARY_NODE_VERSION }}
-          registry-url: https://registry.npmjs.org
-
-      - name: install npm CLI with trusted publishing support
-        run: npm install --global npm@11.5.1
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: npm-tarball
-          path: dist-tarball
-
-      - name: verify checksums
-        run: sha256sum --check dist-tarball/SHA256SUMS
-
-      - name: publish each exact platform artifact
-        shell: bash
-        run: |
-          set -euo pipefail
-          version='${{ needs.preflight.outputs.version }}'
-          for file in dist-tarball/platforms/*.tgz; do
-            name=$(basename "$file" "-${version}.tgz")
-            state=$(npm run --silent registry-version -- "${name}@${version}" "$file")
-            if [ "$state" = missing ]; then npm publish --provenance --access public "$file"; fi
-            npm run --silent registry-version -- "${name}@${version}" "$file"
-          done
-
   verify:
     name: verify the packed tarball by installing it
-    needs: [preflight, checks, registry-check, approval, platforms]
+    needs: [preflight, checks, registry-check, approval]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -228,7 +177,7 @@ jobs:
 
   npm:
     name: publish to npm
-    needs: [preflight, checks, registry-check, approval, platforms, verify]
+    needs: [preflight, checks, registry-check, approval, verify]
     runs-on: ubuntu-latest
     permissions:
       contents: read

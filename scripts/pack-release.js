@@ -9,33 +9,14 @@ const npmCli = process.env.npm_execpath;
 
 export function releaseManifest() {
   const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
-  const pin = JSON.parse(readFileSync(join(root, 'scripts', 'ripgrep-pin.json'), 'utf8'));
-  const targets = Object.entries(pin.targets);
-  if (targets.length !== 4) throw new Error(`expected four pinned search packages, found ${targets.length}`);
-  const optionalDependencies = { ...(manifest.optionalDependencies ?? {}) };
-  const declaredSearchPackages = Object.keys(optionalDependencies).filter((name) => name.startsWith('ligule-rg-'));
+  if (typeof manifest.dependencies?.['@vscode/ripgrep'] !== 'string') {
+    throw new Error('package.json must declare @vscode/ripgrep as a runtime dependency');
+  }
+  const declaredSearchPackages = Object.keys(manifest.optionalDependencies ?? {}).filter((name) => name.startsWith('ligule-rg-'));
   if (declaredSearchPackages.length > 0) {
-    throw new Error(`source package.json must not declare unpublished search packages: ${declaredSearchPackages.join(', ')}`);
+    throw new Error(`package.json must not declare local search platform packages: ${declaredSearchPackages.join(', ')}`);
   }
-  const names = new Set();
-  for (const [targetName, target] of targets) {
-    if (names.has(target.package)) throw new Error(`duplicate search package ${target.package}`);
-    names.add(target.package);
-    const [platform, architecture] = targetName.split('-');
-    const platformManifest = JSON.parse(readFileSync(join(root, 'packages', target.directory, 'package.json'), 'utf8'));
-    if (platformManifest.name !== target.package || !target.package.startsWith(`${manifest.name}-rg-`)) {
-      throw new Error(`${target.directory} must be named ${target.package}`);
-    }
-    if (platformManifest.version !== manifest.version) {
-      throw new Error(`${target.package} must use ligule version ${manifest.version}`);
-    }
-    if (platformManifest.os?.length !== 1 || platformManifest.os[0] !== platform
-      || platformManifest.cpu?.length !== 1 || platformManifest.cpu[0] !== architecture) {
-      throw new Error(`${target.package} platform restrictions do not match ${targetName}`);
-    }
-    optionalDependencies[target.package] = manifest.version;
-  }
-  return { ...manifest, optionalDependencies };
+  return manifest;
 }
 
 function packInfo(output, label) {

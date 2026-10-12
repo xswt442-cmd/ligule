@@ -2,11 +2,13 @@
 // 不碰这台机器真正的那一份（D110）。挂在 `npm test` 的 `--import` 上，因此每个测试文件的子进程起来时先经过这里。
 // 这里动的是主目录那两格，`LIGULE_HOME` 反过来清掉：那些按参数注入主目录的检查照各自那一份走，
 // 要验数据根覆盖的那两条自己写这个变量，不共用这一份。
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const home = mkdtempSync(join(tmpdir(), 'ligule-test-home-'));
+// CI 检出时没有忽略目录，测试进程先创建仓库内的暂存目录。
+mkdirSync(join(process.cwd(), 'testplace'), { recursive: true });
 delete process.env.LIGULE_HOME;
 // 两个都写：Node 在 Windows 上读 `USERPROFILE`，在 POSIX 上读 `HOME`。
 process.env.HOME = home;

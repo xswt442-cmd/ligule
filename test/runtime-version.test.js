@@ -35,22 +35,17 @@ test('the package description carries both languages', () => {
   assert.match(description, /[A-Za-z]{4,}\s+[A-Za-z]{4,}/, 'the English part of the description is missing');
 });
 
-test('the ripgrep platform packages move with the release and ship what the build script writes', () => {
+test('the ripgrep runtime uses the upstream platform-selecting dependency', () => {
   const pkg = JSON.parse(read('../package.json'));
   const release = releaseManifest();
-  const pin = JSON.parse(read('../scripts/ripgrep-pin.json'));
+  const provider = JSON.parse(read('../node_modules/@vscode/ripgrep/package.json'));
+  assert.equal(pkg.dependencies['@vscode/ripgrep'], '1.18.0');
+  assert.equal(release.dependencies['@vscode/ripgrep'], '1.18.0');
   assert.deepEqual(
-    Object.keys(release.optionalDependencies).filter((name) => name.startsWith('ligule-rg-')).sort(),
-    Object.values(pin.targets).map((target) => target.package).sort(),
+    ['win32-x64', 'linux-x64', 'darwin-arm64', 'darwin-x64'].map((target) => provider.optionalDependencies[`@vscode/ripgrep-${target}`]),
+    ['1.18.0', '1.18.0', '1.18.0', '1.18.0'],
   );
-  for (const target of Object.values(pin.targets)) {
-    const manifest = JSON.parse(read(`../packages/${target.directory}/package.json`));
-    assert.equal(manifest.name, target.package, `packages/${target.directory} is named ${manifest.name}`);
-    assert.equal(manifest.version, pkg.version, `${target.package} does not move with the release version`);
-    assert.equal(pkg.optionalDependencies?.[target.package], undefined, `${target.package} must only appear in the release manifest`);
-    assert.equal(release.optionalDependencies[target.package], pkg.version, `${target.package} is not pinned to this release`);
-    assert.deepEqual(manifest.files, [target.binary, ...pin.licenseFiles, 'RIPGREP-VERSION'], `${target.package} ships a different file list`);
-  }
+  assert.equal(Object.keys(release.optionalDependencies).some((name) => name.startsWith('ligule-rg-')), false);
 });
 
 test('workflows take the Node version from their own env instead of repeating it', () => {

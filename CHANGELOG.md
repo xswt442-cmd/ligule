@@ -8,12 +8,6 @@ This file records important user-visible changes for each release. Chinese and E
 
 ### 简体中文
 
-### English
-
-## [0.0.2] - 2026-10-12
-
-### 简体中文
-
 #### 新增
 
 - 新增共享 Agent 内核的命令行、终端界面和桌面界面，并提供工具、插件、技能与扩展入口。

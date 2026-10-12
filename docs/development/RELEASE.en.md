@@ -26,7 +26,7 @@ This document tracks desktop installer and npm package targets, artifacts, syste
 
 GitHub Actions builds them on `windows-latest`, `ubuntu-22.04`, `macos-15`, and `macos-15-intel` runners, respectively.
 
-The four desktop targets are built by the Windows, Linux, Apple Silicon, and Intel runners in `ci.yml`. Automated builds and tests do not replace installation, first-launch, and platform-specific checks on the target systems. Each installer still needs validation, including tray menu and notification behavior.
+The four desktop targets are built by the Windows, Linux, Apple Silicon, and Intel runners in `ci.yml`. Each runner installs or extracts its generated artifact and runs the search-backend check with the bundled Node executable. This confirms that the target's optional binary is inside the installer and can run. It does not replace first-launch and platform-specific checks on real systems; tray menus and notifications still need target-by-target validation before release.
 
 Node.js v24.21.0 lists Linux x64 with a minimum Linux 4.18 and glibc 2.28 baseline. Its platform list includes arm64 and x64 targets on macOS 13.5. Ligule declares Ubuntu 22.04 and Debian 12 as Linux targets; a build runner version describes the build environment and does not replace installation checks on those systems. See the [Node.js v24.21.0 platform requirements](https://github.com/nodejs/node/blob/v24.21.0/BUILDING.md#platform-list).
 
@@ -36,34 +36,19 @@ AppImage is built on `ubuntu-22.04`. Installer formats are set in `desktop/src-t
 
 | Package | Contents | Version |
 |---|---|---|
-| `ligule` | Kernel, CLI, TUI, and Chinese and English user guides | `0.0.2` |
-| `ligule-rg-win32-x64` | `rg.exe` and three licenses | `0.0.2` |
-| `ligule-rg-linux-x64` | `rg` and three licenses | `0.0.2` |
-| `ligule-rg-darwin-arm64` | `rg` and three licenses | `0.0.2` |
-| `ligule-rg-darwin-x64` | `rg` and three licenses | `0.0.2` |
+| `ligule` | Kernel, CLI, TUI, Chinese and English guides; uses `@vscode/ripgrep@1.18.0` for content search | `0.0.2` |
 
-`npm run pack-release -- <artifact-directory>` creates a release package in an isolated staging directory using npm's file list, then adds four exact search package versions to the artifact's `optionalDependencies`. The development manifest does not depend on platform packages that have not been published, so `npm ci` remains usable.
+The `@vscode/ripgrep` JavaScript wrapper selects ripgrep through platform-specific optional dependencies. npm installs only the matching binary on Windows x64, Linux x64, macOS arm64, or macOS x64. Ligule publishes only its main package and does not maintain separate ripgrep packages.
 
-Run `npm run verify-install -- <main-package-tarball>` in normal mode to install from the registry in a clean consumer and test the platform search package. Run `npm run verify-install -- --local-search` to pack and install the locally built platform package before testing the main package tarball. Verification fails if the search backend is missing or a real search fails. Publish only the tarball produced by the release packaging entry point.
-
-## Search package archives
-
-| Target in `scripts/ripgrep-pin.json` | Archive | Bytes | SHA-256 |
-|---|---|---:|---|
-| `win32-x64` | `ripgrep-15.2.0-x86_64-pc-windows-msvc.zip` | 1789611 | `71b2fef860abe467217a538ff31de02f5258807c0129f771846f87bd029aafc5` |
-| `linux-x64` | `ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz` | 2265718 | `33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c` |
-| `darwin-arm64` | `ripgrep-15.2.0-aarch64-apple-darwin.tar.gz` | 1764284 | `3750b2e93f37e0c692657da574d7019a101c0084da05a790c83fd335bad973e4` |
-| `darwin-x64` | `ripgrep-15.2.0-x86_64-apple-darwin.tar.gz` | 1878284 | `af7825fcc69a2afc7a7aea55fc9af90e26421d8f20fe59df32e233c0b8a231c1` |
-
-Each archive contains `LICENSE-MIT`, `UNLICENSE`, and `COPYING`. `npm run build-rg` verifies the pinned version and SHA-256, then places the binary and licenses in the corresponding platform package.
+`npm run pack-release -- <artifact-directory>` creates the main package tarball in an isolated staging directory using npm's file list. Run `npm run verify-install -- <tarball>` to install it into a clean consumer, start the host ripgrep binary, and perform a real search. Verification fails if the backend is missing or the search fails.
 
 ## Release sequence
 
 1. **Prepare the version PR.** Manually run [`tag.yml`](../../.github/workflows/tag.yml), choose `prepare`, and enter a stable version (`X.Y.Z`) or `patch`, `minor`, or `major`. The workflow updates every version manifest from `main`, promotes the bilingual `[Unreleased]` section, and runs the full four-platform CI matrix. This run already includes unit tests, package checks, and all four installer builds. It opens a PR to `main` only after the matrix passes. Review the version diff and download the installers from that CI run for hardware validation.
 2. **Merge and validate.** Merge the reviewed version PR into `main`. Complete installation and launch validation on Windows x64, Linux x64, macOS Apple Silicon, and macOS Intel for the merged commit. A successful CI artifact build alone is not hardware validation.
 3. **Create the tag.** Manually run [`tag.yml`](../../.github/workflows/tag.yml) on `main`, choose `tag`, enter the merged version, and confirm all four platform validations. The workflow checks that the full `main` push CI for that SHA passed and rechecks that remote `main` still points to the same SHA immediately before pushing the tag. Any mismatch stops the job. It then creates and pushes an annotated tag; you do not need to run `git tag` locally.
-4. **Publish npm.** Manually run [`publish.yml`](../../.github/workflows/publish.yml) with the new `vX.Y.Z` tag. It validates and checks out that tag's main-branch commit, tests it, then enters the `npm-publish` Environment. Configure required reviewers there to gate publication of all four search packages and the main package; without protection rules, the Environment adds no wait. The first publication needs `NPM_TOKEN` configured as a repository secret. After npm succeeds, the workflow calls [`release.yml`](../../.github/workflows/release.yml).
-5. **Complete the draft attachments.** `release.yml` uses the matching bilingual Changelog section as the Release body and creates a draft only when it does not already exist and all matching npm packages are readable. Existing drafts keep their title, body, and assets; published Releases cannot be changed by this workflow. Download the four desktop installers from the matching `main` CI run, verify their platforms and filenames, then upload them to the draft manually. Compute SHA-256 values with `Get-FileHash -Algorithm SHA256` or `sha256sum` and add them to the Release body. You can manually run `release.yml` to create a missing draft.
+4. **Publish npm.** Manually run [`publish.yml`](../../.github/workflows/publish.yml) with the new `vX.Y.Z` tag. It validates and checks out that tag's main-branch commit, tests it, then enters the `npm-publish` Environment. Configure required reviewers there to gate publication of the main package. The job uses Trusted Publishing after approval. After npm succeeds, the workflow calls [`release.yml`](../../.github/workflows/release.yml).
+5. **Complete the draft attachments.** `release.yml` uses the matching bilingual Changelog section as the Release body and creates a draft only when it does not already exist and the main npm package is readable. Existing drafts keep their title, body, and assets; published Releases cannot be changed by this workflow. Download the four desktop installers from the matching `main` CI run, verify their platforms and filenames, then upload them to the draft manually. Compute SHA-256 values with `Get-FileHash -Algorithm SHA256` or `sha256sum` and add them to the Release body. You can manually run `release.yml` to create a missing draft.
 6. **Publish the Release.** Publish it on GitHub after all four hardware validations and the draft attachments and checksums are confirmed.
 
-`CHANGELOG.md` is the single source for update history. The version PR promotes `[Unreleased]` into a dated version section; when creating a new draft, `release.yml` copies that version's Chinese and English content and appends download guidance instead of generating a separate summary. Existing drafts are preserved so manually added checksums and notes remain intact. Tags do not publish npm packages; `publish.yml` must be started manually. Remove the repository secret `NPM_TOKEN` after npm Trusted Publishing is configured. Check npm registry and GitHub Release state to determine what is public.
+`CHANGELOG.md` is the single source for update history. The version PR promotes `[Unreleased]` into a dated version section; when creating a new draft, `release.yml` copies that version's Chinese and English content and appends download guidance instead of generating a separate summary. Existing drafts are preserved so manually added checksums and notes remain intact. Tags do not publish npm packages; `publish.yml` must be started manually. Check npm registry and GitHub Release state to determine what is public.
