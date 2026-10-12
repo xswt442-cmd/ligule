@@ -164,6 +164,11 @@ test('release workflows separate version PRs, tag creation, npm publication, and
     'the tarball verifier needs the tagged host entry points in its clean checkout');
   assert.ok(publishWorkflow.jobs.npm.needs.includes('approval'), 'the main package must wait for approval');
   const publishJob = publishWorkflow.jobs.npm;
+  const tarballIdentity = publishJob.steps.find((step) => step.name === 'verify tarball identity');
+  assert.match(tarballIdentity.run, /echo "path=\.\/\$file"/,
+    'npm must receive the tarball as a relative file path, not a GitHub shorthand');
+  assert.match(publishJob.steps.find((step) => step.name === 'publish with trusted publishing').run,
+    /npm publish .*\$\{\{ steps\.tarball\.outputs\.path \}\}/);
   assert.equal(publishJob.permissions['id-token'], 'write', 'the publish job must authenticate with npm through OIDC');
   assert.equal(publishJob.env, undefined, 'the publish job must not receive a long-lived npm token');
   const setupNode = publishJob.steps.find((step) => step.uses?.startsWith('actions/setup-node@'));
