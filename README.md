@@ -1,37 +1,50 @@
 # ligule
 
 [![npm](https://img.shields.io/npm/v/ligule?label=npm&color=4d6bfe)](https://www.npmjs.com/package/ligule)
-[![node](https://img.shields.io/static/v1?label=node&message=%3E%3D24&color=339933&logo=node.js&logoColor=white)](https://nodejs.org)
+[![Node.js](https://img.shields.io/static/v1?label=node&message=%3E%3D24&color=339933&logo=node.js&logoColor=white)](https://nodejs.org)
 [![license](https://img.shields.io/badge/license-MIT-22c55e.svg)](./LICENSE)
 
-ligule 提供命令行、终端界面和桌面界面。三种入口共用配置与会话记录。中文使用手册见[简体中文指南](docs/guide.zh-CN.md)，英文使用手册见[English guide](docs/guide.en.md)。
+ligule 是一个共享 Agent 内核的命令行、终端和桌面助手。三种界面共用工具执行、审批、模型请求与会话记录。当前仓库版本为 `0.0.2`；仓库版本与 CI 构建结果不代表已经发布，发行状态见[发行清单](RELEASE.md)。
 
-## 安装
+## 安装和启动
 
-命令行和终端界面需要 Node.js 24 或更新版本。安装 npm 当前公开版本：
+命令行与终端界面需要 Node.js 24 或更新版本。安装 npm 上已发布的版本：
 
 ```sh
 npm install -g ligule
 ```
 
-在项目目录中运行 `ligule run "查看项目并提出建议"` 开始对话，运行 `ligule tui` 打开终端界面。终端界面需要交互式终端。
+在项目目录中运行一轮：
 
-桌面版提供 Windows x64、Linux x64、macOS Apple Silicon 和 macOS Intel 安装包。Windows 需要 WebView2 运行时。发行清单列出各平台要求和待完成的安装检查：[RELEASE.md](RELEASE.md)。
+```sh
+ligule run "检查项目结构并提出建议"
+```
+
+运行 `ligule tui` 打开终端界面。TUI 需要交互式终端；脚本和管道使用 `ligule run`。桌面安装包的目标平台、系统要求和验收状态见[发行清单](RELEASE.md)。
 
 ## 配置
 
-命令行和终端界面可在 `~/.ligule/config.toml` 配置模型服务：
+CLI 与 TUI 默认从 `<用户数据根>/config.toml` 读取模型设置；用户数据根默认是 `~/.ligule`。下面的单服务格式继续可用：
 
 ```toml
 [model]
 api = "chat-completions"
 baseURL = "https://api.example.com/v1"
 model = "model-name"
-apiKeyEnv = "LIGULE_API_KEY"
+apiKeyEnv = "MODEL_API_KEY"
 ```
 
-将密钥放入 `apiKeyEnv` 指定的环境变量。桌面版也可以在设置中的「模型服务」填写服务，并使用系统凭据库保存密钥。`LIGULE_HOME` 可设为绝对路径以更换用户数据根。
+将密钥放入 `apiKeyEnv` 指定的环境变量。桌面设置还支持保存多个服务与模型，并可把密钥写入系统凭据库。设置、配置层与生效时机见[中文使用手册](docs/guide.zh-CN.md)和[English user guide](docs/guide.en.md)。
 
-命令行和终端界面以启动目录作为工作区；桌面版可在侧栏选择工作区。工具访问范围由 `boundary` 配置限制。会话记录和应用设置保存在用户数据根。
+设置 `LIGULE_HOME` 可以将用户数据根改到另一处；值必须是绝对路径。工具文件访问范围由工作区目录与 `boundary` 配置共同决定。
 
-运行 `ligule --help` 查看命令。完整安装、配置与操作说明请参阅[简体中文指南](docs/guide.zh-CN.md)或[English guide](docs/guide.en.md)。
+## 开发文档
+
+- [架构说明](docs/development/architecture.md)：内核、Host、适配器、工具判定、Agent Loop 与会话恢复。
+- [术语表](docs/development/glossary.md)：统一内核、能力、工具、模式、审批方式、工作区和记录格式的用语。
+- [贡献与验证](docs/development/contributing.md)：开发命令、验证范围和指南入口。
+- [桌面开发说明](desktop/README.md)：前端、Tauri 壳与随包运行时的构建方式。
+
+## 使用手册
+
+[简体中文](docs/guide.zh-CN.md) · [English](docs/guide.en.md)

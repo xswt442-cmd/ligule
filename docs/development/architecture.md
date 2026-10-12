@@ -1,0 +1,61 @@
+# Architecture
+
+ligule uses one Node.js business runtime for the command line, terminal UI, and desktop app. The [kernel](../../src/kernel/kernel.js) executes registered tools and applies the decision chain. The [Host](../../src/host/host.js) assembles that kernel with a project environment, model provider, session log, and client protocol. User interfaces call the Host through adapters.
+
+## Runtime map
+
+```mermaid
+flowchart LR
+  CLI[CLI] -->|in process| Host[Node Host]
+  TUI[React and Ink] -->|in memory protocol| Host
+  Web[React desktop UI] <-->|Tauri events and commands| Shell[Rust shell]
+  Shell <-->|newline-delimited frames| Child[Node Host process]
+  Child --> HostLogic[Host and kernel]
+  Host --> Project[Project environment]
+  Host --> Loop[Agent Loop]
+  Host --> Session[Session JSONL]
+  Loop --> Provider[Model provider]
+  Loop --> Kernel[Kernel]
+  Kernel --> Policy[Decision chain]
+  Kernel --> Registry[Tool registry]
+  Registry --> Tool[Registered tools]
+  Tool --> Capability[Platform and I/O capabilities]
+  Provider --> Endpoint[HTTP model endpoint]
+```
+
+`ligule run` and `ligule tui` create a Host in the Node process that owns the interface. The TUI sends protocol messages over an in-memory connection. The desktop frontend sends frames through Tauri; the Rust shell forwards each line to a child Node process and returns lines to the frontend. The shell owns process and window lifecycle, while the Node Host owns sessions, project state, policy, and model requests. See the [CLI](../../src/cli.js), [TUI adapter](../../src/tui/start.js), [frame transport](../../src/host/connection.js), and [desktop bridge](../../desktop/src-tauri/src/bridge.rs).
+
+## Kernel, plugins, tools, and capabilities
+
+The kernel starts with an empty tool registry. The Host installs plugins through the [assembly loader](../../src/kernel/assembly.js); a plugin registers tools and returns cleanup actions. The selected [tool mode](../../src/kernel/modes.ts) restricts which registered tools enter the model manifest and selects named prompt fragments. It does not implement tools or provide an approval decision.
+
+A tool is the model-callable contract: a name, description, JSON parameter schema, and execution function. Its implementation may call code under [`src/capability/`](../../src/capability/), which performs environment-sensitive work such as path checks, shell selection, process management, network resolution, or clipboard access. A capability implementation is not automatically a model-callable tool. When policy records a `capability` label, that value names the operation used for that decision.
+
+Every model tool call passes through [`kernel.call`](../../src/kernel/kernel.js). The kernel checks registration and arguments, resolves declared command or network targets, then asks the decision chain to evaluate the call. The chain applies restrictions, guards, configured rules, automatic approval checks, and user approval in its defined order ([policy implementation](../../src/kernel/policy.js)). Only an allowed call reaches the tool implementation. The kernel records the verdict and a result for completed, rejected, or failed calls; the model manifest contains only the tool name, description, and parameter schema.
+
+The [Agent Loop](../../src/kernel/loop.js) performs one user turn and any model/tool iterations it requires:
+
+1. Append the user event and the effective turn settings to the session.
+2. Render the system prompt, build the registered tool manifest, and project the session into model messages.
+3. If configured, compact the request before sending it or once after a provider reports an oversized request.
+4. Stream a model response and append its reasoning, text, and tool calls to the session.
+5. Run each tool call through the kernel, append its result, then continue the loop when the model requested more work.
+6. Append one terminal turn event for completion, cancellation, or failure.
+
+The [model adapters](../../src/model/) implement the supported HTTP message formats. The Host selects a provider from the effective model service and reads credentials only when making a request.
+
+## Session records and recovery
+
+The append-only [session JSONL record](../../src/session/session.js) is the source of truth for a conversation. Its first line identifies the record and project; later lines hold user and assistant messages, tool calls and results, turn state, model selection, and other events. Session locks prevent two processes from writing the same record at once.
+
+The model view is a projection of the record, not a second transcript. Reasoning, labels, turn metadata, and usage remain available for display or recovery but are excluded from model messages where the projection rules require it. A branch copies a record or a prefix ending at a completed turn; it leaves the parent unchanged.
+
+Checkpoints are derived files. Before using one, ligule verifies its format, covered sequence range, and digest against the session events. If validation fails or the checkpoint is absent, it rebuilds the model view from the JSONL record ([checkpoint validation](../../src/session/checkpoint.ts)). Compaction writes a checkpoint and never rewrites the record ([compaction](../../src/session/compaction.ts)). Oversized tool output is stored in a sidecar file; the record retains the reference needed to read or export the complete result.
+
+When a session is reopened, recovery repairs dispatched tool calls that have no recorded result with an explicit unknown outcome. It does not replay them. This preserves a valid model projection without repeating an operation whose external effect may already have happened.
+
+## Host protocol and clients
+
+The Host protocol defines methods, request parameters, approval requests, question requests, and notifications in one [protocol table](../../src/host/protocol.js). [`connection.js`](../../src/host/connection.js) carries newline-delimited JSON messages. The Host validates method parameters before dispatch and owns all session state; clients use protocol methods to create or open sessions, start and cancel turns, read records, answer requests, and change supported settings.
+
+The CLI's single-turn commands call the Host directly. The TUI uses the same protocol over an in-memory connection. The desktop UI uses a TypeScript client over Tauri commands and events; the Rust shell forwards frames without interpreting Host methods or session data. These transports differ, while the Host methods and kernel behavior remain shared.
