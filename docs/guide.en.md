@@ -4,7 +4,32 @@
 
 ligule provides a command line, a terminal UI, and a desktop UI. All three use the same configuration and session records.
 
-## Install and launch
+## Get started
+
+- [Start your first conversation](#start-your-first-conversation)
+- [Install and launch](#install-and-launch)
+- [Workspaces and data](#workspaces-and-data)
+- [Configure a model service](#configure-a-model-service)
+
+## Daily use
+
+- [Sessions and input](#sessions-and-input)
+- [Approvals and settings](#approvals-and-settings)
+- [Branches and export](#branches-and-export)
+
+## Recovery and reference
+
+- [Recovery and cancellation](#recovery-and-cancellation)
+- [Language, appearance, and shortcuts](#language-appearance-and-shortcuts)
+- [Common errors](#common-errors)
+
+### Start your first conversation
+
+1. Choose the CLI and TUI, or the desktop app. Install the CLI and TUI with `npm install -g ligule`; start the desktop app from a published installer.
+2. Configure a model service: use “Settings → Model services” in the desktop app, or follow [Configure a model service](#configure-a-model-service) for the CLI and TUI.
+3. From a project directory, run `ligule run "Review the project structure and suggest improvements"` for one turn or run `ligule` to open the TUI. In the desktop app, select a workspace, start a conversation, and send a message.
+
+### Install and launch
 
 The command line package requires Node.js 24 or newer. Install the version currently published on npm:
 
@@ -18,7 +43,7 @@ From a project directory, run `ligule run "Review the project structure and sugg
 
 Run `ligule --help` to list commands. `ligule sessions` lists sessions for the current project, `ligule workspaces` lists registered workspaces, and `ligule tools`, `ligule skills`, and `ligule extensions` show loaded capabilities.
 
-## Workspaces and data
+### Workspaces and data
 
 The command line and terminal UI use the current directory as the default workspace. On first launch, the desktop app creates and registers `ligule/default-workspace` under the system Documents directory. New sessions then use the selected default workspace. Add other workspaces from the desktop sidebar to view their sessions.
 
@@ -26,7 +51,7 @@ Each session belongs to one workspace. The terminal UI prepares a new session wh
 
 The default data root is `~/.ligule`. Set `LIGULE_HOME` to an absolute path to move it; a relative path returns `data_root_invalid`. User configuration is in `~/.ligule/config.toml`, shared project configuration is in `.ligule/config.toml`, and local project configuration is in `.ligule/config.local.toml`. The data root also holds session records, the workspace registry, terminal input history, desktop preferences, and credential references. Desktop preferences, drafts, and queued messages are stored in `desktop.json` under the data root. WebView's `ligule.ui` value is a first-screen cache. Drafts and queues are separate between the terminal UI and desktop app.
 
-## Configure a model service
+### Configure a model service
 
 In the desktop app, open “Model services” under “Settings” to add multiple services and models, then choose a default. The terminal UI and command line read the same configuration. To configure multiple services manually, add this block to a configuration file:
 
@@ -42,7 +67,7 @@ Set each service's `api` to `chat-completions` or `messages`; `models` lists its
 
 The default service and model apply to new sessions. Use the model menu beside the composer to select a model for the current desktop session. In the terminal UI, use `/model` to list services and `/model <service> <model>` to switch. A session selection does not change the global default. If you switch models while a session is running, the change applies after the current turn.
 
-## Sessions and input
+### Sessions and input
 
 In the terminal UI, use `/sessions` to browse sessions in the current workspace and `/resume <id> [mode]` to resume one; you can use a unique ID prefix. In the desktop app, switch sessions from the sidebar. The conversation menu provides rename, archive, restore, branch, export, view subtasks, refresh, and compact context actions.
 
@@ -50,7 +75,7 @@ Type `@` in the composer to find files in the current workspace. Selecting a fil
 
 The desktop app saves drafts and queues separately for each workspace and session, and restores them when reopened. The terminal UI saves its draft and queue for each workspace and session. Both interfaces share the history of sent messages.
 
-## Approvals and settings
+### Approvals and settings
 
 The default approval mode asks before each tool call. In the terminal UI, press `y` to allow a requested call or `n` to refuse it. In the desktop app, use the Allow or Refuse buttons on the approval card. Expand the card to inspect the requested action or change.
 
@@ -58,7 +83,7 @@ In the terminal UI, use `/policy ask` to ask each time, `/policy auto` to select
 
 Desktop Settings has General, Appearance, Model services, Approval rules, Notifications, and Keyboard shortcuts sections. When saving model settings, choose the user or project-local configuration layer. Running sessions apply model configuration changes after the current turn. Higher-priority configuration still takes precedence. If you leave a settings page with unsaved changes, the app asks whether to discard them.
 
-## Branches and export
+### Branches and export
 
 In the terminal UI, use `/branch` to branch from the current record or `/branch <seq>` to branch from a completed turn. In the desktop app, choose “Branch conversation” from the conversation menu to copy the current record, or use the branch action on a completed turn in the transcript. A branch creates a new session and leaves the original unchanged.
 
@@ -66,7 +91,7 @@ Use `/export <path>` in the terminal UI to export the current session and its su
 
 In the terminal UI, press Ctrl+O to browse the full history, use `/show <seq>` to view one complete record, and `/sub <seq>` to view a subtask record. In the desktop app, expand records in the transcript or open the subtask list from the conversation menu.
 
-## Recovery and cancellation
+### Recovery and cancellation
 
 Cancel a running turn by pressing Esc in the terminal UI or the Stop button in the desktop app. The interface marks turns as completed, cancelled, failed, or interrupted.
 
@@ -74,7 +99,7 @@ When the desktop app shows a connection banner, select “Reconnect” to restar
 
 `tool_outcome_unknown` means a tool call may or may not have completed when its process exited unexpectedly. Check the file or external state before deciding whether to repeat the action. `session_locked` means another process still holds the session; close that process before resuming. After leaving the terminal UI, first run `ligule`, then enter `/resume <id or unique prefix>`. You can also run `ligule resume <id> "<message to send>"` from the command line. `host_model_config_missing` means the model service configuration is incomplete; check the model fields in `~/.ligule/config.toml` or fill them in under desktop “Model services”. `provider_credential_missing` means the environment variable or system credential store does not contain the key. `credential_store_unavailable` means the system credential store could not be used; on Linux, check Secret Service.
 
-## Language, appearance, and shortcuts
+### Language, appearance, and shortcuts
 
 In desktop Settings under General, choose Follow system, 简体中文, or English. Appearance offers six palettes: Ink, Parchment, Sky, Graphite, Forest, and Dusk. You can also adjust the font size, sidebar width, and panel position. Set the CLI and terminal UI language with `--lang zh`, `--lang zh-CN`, `--lang en`, or `--lang auto`; `zh-CN` and `zh` both select Simplified Chinese.
 
@@ -86,7 +111,7 @@ The desktop app provides five kinds of system notifications: a question needs an
 
 When the tray is available, closing the window hides it while background sessions continue. The tray menu follows the interface language: “打开 ligule” / “Open ligule” restores the window, and “退出 ligule” / “Quit ligule” lists affected sessions and asks whether to interrupt work before quitting. If the tray is unavailable, closing the window asks for confirmation before quitting.
 
-## Common errors
+### Common errors
 
 - `tui_terminal_required`: Run `ligule` in an interactive terminal; use `ligule run` in a script.
 - `tui_dependency_missing`: Some optional terminal UI dependencies are missing. Check that npm installed optional dependencies.

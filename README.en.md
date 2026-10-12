@@ -10,6 +10,12 @@
 
 ligule is an AI assistant for project work that shares one Agent kernel across three interfaces. All three share tool execution, approvals, model requests, and session records.
 
+## What you can do
+
+- **Keep project work in context:** sessions belong to workspaces, with branching from completed turns and Markdown export.
+- **Control tool actions:** apply approval rules or review calls one at a time; checkpoints compact context, and session records support recovery.
+- **Choose an interface:** use the CLI for scripts; the TUI and desktop app share the same Agent kernel.
+
 ## Choose an interface
 
 | Interface | Best for | Start with |
@@ -22,10 +28,17 @@ The CLI and TUI require Node.js 24 or newer. The TUI requires an interactive ter
 
 ## Quick start
 
-### Command line
+Before your first request, configure a model service as described under “Configuration and data” below.
+
+Install the CLI and TUI:
 
 ```sh
 npm install -g ligule
+```
+
+### Command line
+
+```sh
 cd /path/to/your-project
 ligule run "Review the project structure and suggest improvements"
 ```
@@ -33,7 +46,6 @@ ligule run "Review the project structure and suggest improvements"
 ### Terminal UI
 
 ```sh
-npm install -g ligule
 cd /path/to/your-project
 ligule
 ```
