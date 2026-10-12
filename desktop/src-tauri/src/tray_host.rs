@@ -116,7 +116,25 @@ pub fn watch(app: &AppHandle) {
 
             let property_app = app.clone();
             let weak = proxy.downgrade();
-            proxy.connect_local("g-properties-changed", false, move |_| {
+            proxy.connect_local("g-properties-changed", false, move |values| {
+                let changed = values[1]
+                    .get::<glib::Variant>()
+                    .ok()
+                    .and_then(|value| value.get::<glib::VariantDict>());
+                let invalidated = values[2].get::<glib::StrV>();
+                let relevant = match (changed, invalidated) {
+                    (Some(changed), Ok(invalidated)) => {
+                        changed.contains(HOST_PROPERTY)
+                            || invalidated.iter().any(|name| name == HOST_PROPERTY)
+                    }
+                    _ => {
+                        failed(&property_app, "the host property change is malformed");
+                        return None;
+                    }
+                };
+                if !relevant {
+                    return None;
+                }
                 if let Some(proxy) = weak.upgrade() {
                     cached(&property_app, &proxy);
                 }
