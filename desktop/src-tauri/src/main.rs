@@ -409,7 +409,8 @@ fn main() {
                                     format!("the window could not be hidden: {error}"),
                                 );
                             }
-                            if !state.tray_up() && state.tray_hidden.load(Ordering::Acquire) {
+                            if !state.tray_up() {
+                                state.tray_hidden.store(true, Ordering::Release);
                                 restore_window(window.app_handle());
                             }
                         }
