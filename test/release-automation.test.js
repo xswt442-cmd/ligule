@@ -139,16 +139,19 @@ test('release workflows separate version PRs, tag creation, npm publication, and
   const tagInputs = tagWorkflow.on.workflow_dispatch.inputs;
 
   assert.deepEqual(tagInputs.action.options, ['prepare', 'tag']);
-  for (const platform of ['windows_x64', 'linux_x64', 'macos_arm64', 'macos_x64']) {
-    assert.equal(tagInputs[platform].default, false, `${platform} must require an explicit validation confirmation`);
-  }
+  assert.deepEqual(Object.keys(tagInputs).sort(), ['action', 'version']);
   const prepareCommands = tagWorkflow.jobs.prepare.steps.map((step) => step.run ?? '').join('\n');
   const tagCommands = tagWorkflow.jobs['create-tag'].steps.map((step) => step.run ?? '').join('\n');
   assert.match(prepareCommands, /gh pr create --base main/);
   assert.match(prepareCommands, /Updates the main package, desktop manifests, and bilingual release checklist/);
+  assert.match(prepareCommands, /installs or extracts each desktop artifact and runs the bundled search-backend check/);
+  assert.match(prepareCommands, /Verify first launch, tray, and notifications on each desktop platform before publishing/);
   assert.doesNotMatch(prepareCommands, /platform package versions/);
   assert.match(prepareCommands, /git add[^\n]*docs\/development\/RELEASE\.zh-cn\.md[^\n]*docs\/development\/RELEASE\.en\.md/);
   assert.doesNotMatch(prepareCommands, /npm test|npm run check-pack/);
+  const tagGate = tagWorkflow.jobs['create-tag'].steps.find((step) => step.name === 'require the default branch');
+  assert.match(tagGate.run, /test "\$GITHUB_REF" = refs\/heads\/main/);
+  assert.doesNotMatch(tagCommands, /WINDOWS_X64|LINUX_X64|MACOS_ARM64|MACOS_X64|all four platform validations/);
   assert.match(tagCommands, /gh run list --workflow ci\.yml --branch main --event push --commit/);
   assert.doesNotMatch(tagCommands, /gh workflow run ci\.yml/);
   assert.match(tagCommands, /main_head.*COMMIT/s);
