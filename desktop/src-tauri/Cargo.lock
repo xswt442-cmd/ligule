@@ -1938,6 +1938,7 @@ dependencies = [
 name = "ligule-desktop"
 version = "0.0.2"
 dependencies = [
+ "gio",
  "notify-rust",
  "tauri",
  "tauri-build",

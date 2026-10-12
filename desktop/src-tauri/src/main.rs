@@ -2,6 +2,8 @@
 // 之间逐行传递调用帧。协议内容不在这里解释——壳不认识 Host 帧中的方法名。
 mod bridge;
 mod notification;
+#[cfg(target_os = "linux")]
+mod tray_host;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -25,8 +27,14 @@ struct AppState {
     host: Mutex<Option<Host>>,
     tray: Mutex<Option<TrayIcon>>,
     tray_menu: Mutex<Option<TrayMenuItems>>,
-    /// 托盘那一枚立起来没有。立不起来只是没有可回的位置：点叉时不收进找不回的地方，而是先问界面再走（方案 6.4、审阅 G1）。
+    /// 托盘是否可用于恢复窗口。Linux 还要求展示宿主已经注册。
     restorable: AtomicBool,
+    #[cfg(target_os = "linux")]
+    tray_hidden: AtomicBool,
+    #[cfg(target_os = "linux")]
+    tray_host_revision: std::sync::atomic::AtomicU64,
+    #[cfg(target_os = "linux")]
+    tray_host_proxy: Mutex<Option<gio::DBusProxy>>,
     /// 人已经点了「中断任务并退出」。这一条之后拦退出与藏窗口都不再做。
     quitting: AtomicBool,
 }
@@ -38,7 +46,7 @@ struct TrayMenuItems {
 
 impl AppState {
     fn tray_up(&self) -> bool {
-        self.restorable.load(Ordering::Relaxed)
+        self.restorable.load(Ordering::Acquire)
     }
 
     fn confirmed_quit(&self) -> bool {
@@ -78,7 +86,21 @@ fn exit_asks(confirmed: bool) -> bool {
 fn restore_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
+        #[cfg(not(target_os = "linux"))]
         let _ = window.show();
+        #[cfg(target_os = "linux")]
+        match window.show() {
+            Ok(()) => app
+                .state::<AppState>()
+                .tray_hidden
+                .store(false, Ordering::Release),
+            Err(error) => {
+                let _ = app.emit(
+                    LOG_EVENT,
+                    format!("the window could not be restored: {error}"),
+                );
+            }
+        }
         let _ = window.set_focus();
     }
 }
@@ -351,10 +373,15 @@ fn main() {
                 let _ = handle.emit(LOG_EVENT, format!("the host could not start: {error}"));
             }
             match build_tray(&handle) {
-                Ok(()) => handle
-                    .state::<AppState>()
-                    .restorable
-                    .store(true, Ordering::Relaxed),
+                Ok(()) => {
+                    #[cfg(target_os = "linux")]
+                    tray_host::watch(&handle);
+                    #[cfg(not(target_os = "linux"))]
+                    handle
+                        .state::<AppState>()
+                        .restorable
+                        .store(true, Ordering::Relaxed);
+                }
                 Err(error) => {
                     let _ = handle.emit(LOG_EVENT, format!("the tray is not available: {error}"));
                 }
@@ -370,7 +397,22 @@ fn main() {
                     OnClose::Proceed => {}
                     OnClose::Hide => {
                         api.prevent_close();
+                        #[cfg(not(target_os = "linux"))]
                         let _ = window.hide();
+                        #[cfg(target_os = "linux")]
+                        {
+                            state.tray_hidden.store(true, Ordering::Release);
+                            if let Err(error) = window.hide() {
+                                state.tray_hidden.store(false, Ordering::Release);
+                                let _ = window.emit(
+                                    LOG_EVENT,
+                                    format!("the window could not be hidden: {error}"),
+                                );
+                            }
+                            if !state.tray_up() && state.tray_hidden.load(Ordering::Acquire) {
+                                restore_window(window.app_handle());
+                            }
+                        }
                     }
                     OnClose::Ask => {
                         api.prevent_close();
@@ -404,6 +446,10 @@ fn main() {
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => restore_window(app_handle),
             tauri::RunEvent::Exit => {
+                #[cfg(target_os = "linux")]
+                if let Ok(mut slot) = app_handle.state::<AppState>().tray_host_proxy.lock() {
+                    slot.take();
+                }
                 let _ = stop_host(app_handle);
             }
             _ => {}

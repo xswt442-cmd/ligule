@@ -5,6 +5,7 @@
 - 壳只管理窗口与 Node Host 子进程，并逐行原样传递调用帧。Rust 不实现业务逻辑，不命名 Host 协议方法、事件或错误码；依赖中不加入序列化、HTTP 或 WebSocket 客户端。
 - Tauri 命令包括 `host_send`、`host_stop`、`host_restart`、`app_quit`、`default_workspace`、`show_notification` 与 `set_tray_status`。壳不持有会话选择；界面通过 `session.open` 决定恢复哪份会话。重启替换进程槽位并停止旧 Host；帧转发线程的生命周期与对应子进程一致。
 - 关闭窗口和退出应用走界面确认。支持托盘时，关闭可隐藏窗口；没有托盘时保留窗口并请求确认。真正退出前关闭 Host 标准输入并终止子进程，使会话锁能释放。
+- Linux 通过现有 GTK 依赖 `gio` 监听 Session D-Bus 的托盘宿主注册状态。仅创建图标对象不足以允许隐藏窗口；宿主消失或检测失败时，恢复因托盘而隐藏的窗口。检测不启动辅助进程，不干预 Host 任务。
 - 后端入口依次读取 `LIGULE_DESKTOP_CLI`、随包的 `app/dist/cli.js` 和从可执行文件位置向上查找的 `dist/cli.js`。Node 运行时优先使用随包版本，再读取 `NODE`，最后使用 `PATH`。
 - `desktop/fetch-runtime.mjs` 按 `desktop/node-pin.json` 的版本与 SHA-256 准备运行时和应用依赖到 `desktop/vendor/`。该目录不提交；每个平台只携带本平台的原生依赖，并由同平台的构建任务打包。
 - 平台安装目标分别由 `tauri.windows.conf.json`、`tauri.linux.conf.json` 和 `tauri.macos.conf.json` 指定。Linux AppImage 需要方形 PNG 图标。发布清单与工作流负责对应平台的构建和产物检查。
