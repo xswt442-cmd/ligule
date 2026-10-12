@@ -63,13 +63,15 @@ async function realBoundaryOf(boundary) {
 }
 
 // options.forWrite 为真时，一个有多余链接计数的现有文件也被拒绝：写穿它等于写到边界之外那个同名文件上。
-export async function resolveWithin(boundary, path, { forWrite = false } = {}) {
+export async function resolveWithin(boundary, path, { forWrite = false, cwd = boundary } = {}) {
   if (typeof boundary !== 'string' || boundary === '') throw new KernelError('boundary_required', { detail: 'no workspace boundary is configured, so no path can be resolved' });
   if (typeof path !== 'string' || path.trim() === '') throw new KernelError('path_required', { detail: 'a non-empty path is required' });
-  const absolute = resolve(boundary, path);
+  if (typeof cwd !== 'string' || cwd === '') throw new KernelError('path_cwd_required', { detail: 'a working directory is required to resolve a relative path' });
+  const absoluteCwd = resolve(cwd);
+  const realBoundary = await realBoundaryOf(boundary);
+  const absolute = resolve(absoluteCwd, path);
   if (!isWithin(boundary, absolute)) throw new KernelError('path_escapes_boundary', { detail: `${path} resolves to ${absolute}, outside the workspace boundary ${boundary}` });
 
-  const realBoundary = await realBoundaryOf(boundary);
   const real = await resolveReal(absolute);
   if (!isWithin(realBoundary, real)) {
     throw new KernelError('path_escapes_through_link', { detail: `${path} leads to ${real} through a link, outside the workspace boundary ${realBoundary}` });

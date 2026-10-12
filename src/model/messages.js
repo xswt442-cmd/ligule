@@ -73,7 +73,7 @@ export function createMessagesProvider({
       headers: {
         'content-type': 'application/json',
         'accept': 'text/event-stream',
-        'x-api-key': readCredential(apiKeyEnv),
+        'x-api-key': await readCredential(apiKeyEnv),
         'anthropic-version': ANTHROPIC_VERSION,
       },
       body: JSON.stringify({

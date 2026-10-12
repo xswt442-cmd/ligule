@@ -411,7 +411,18 @@ test('a configuration object that is not a folded snapshot is rejected', () => {
   );
 });
 
-test('VERSION matches package.json', () => {
+test('every manifest that carries the release version agrees', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   assert.equal(VERSION, pkg.version);
+  // 桌面那四份与搜索那四份包各自独立发行：装上之后读的是同一次发布，版本号写歪一处就说得出两套版本。
+  const jsons = ['../desktop/package.json', '../desktop/frontend/package.json', '../desktop/src-tauri/tauri.conf.json'];
+  for (const path of jsons) {
+    assert.equal(JSON.parse(readFileSync(new URL(path, import.meta.url), 'utf8')).version, pkg.version, path);
+  }
+  const cargo = readFileSync(new URL('../desktop/src-tauri/Cargo.toml', import.meta.url), 'utf8');
+  assert.equal(/^version = "([^"]+)"/m.exec(cargo)[1], pkg.version, 'Cargo.toml');
+  const platforms = ['../packages/rg-win32-x64/package.json', '../packages/rg-linux-x64/package.json', '../packages/rg-darwin-x64/package.json', '../packages/rg-darwin-arm64/package.json'];
+  for (const path of platforms) {
+    assert.equal(JSON.parse(readFileSync(new URL(path, import.meta.url), 'utf8')).version, pkg.version, path);
+  }
 });

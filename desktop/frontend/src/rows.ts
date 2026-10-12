@@ -17,6 +17,8 @@ export type Verdict = {
 export type Record_ = {
   seq?: number;
   kind: string;
+  name?: string;
+  archived?: boolean;
   // 模板展开过的那一条用户记录另留着人打的那一行（D54）：画的是这一份，交给模型的是 text。
   text?: string;
   raw?: string;
@@ -39,10 +41,11 @@ export type Record_ = {
   verdict?: Verdict;
   // 一轮正常完整结束留下的那一条事实（D68）：它是一处可选的分支点（方案 4.3）。
   status?: string;
+  code?: string;
   iterations?: number;
   modelCalls?: number;
   // 一轮开始时交回的那一份完整参数快照（`session.read` 里的一条 `turnContext`）。内核没落这一条时这几格都不出现。
-  model?: string;
+  model?: string | null;
   policy?: string;
   policySource?: string;
   mode?: string;
@@ -52,13 +55,14 @@ export type Record_ = {
 
 // 展示档那一格决定哪几行进得来：虚拟视口要量每一行的高度，藏着不画的行留在列表里只会量到零（D90、U48）。
 export const shownIn = (verbosity: string, row: Row): boolean =>
-  !(verbosity === 'brief' && (row.kind === 'reasoning' || row.kind === 'call' || row.kind === 'result'))
-  && !(verbosity === 'standard' && row.kind === 'reasoning');
+  !(verbosity === 'brief' && (row.kind === 'reasoning' || row.kind === 'call' || row.kind === 'result' || row.kind === 'context'))
+  && !(verbosity === 'standard' && (row.kind === 'reasoning' || row.kind === 'context'));
 
 export type Row = {
   id: number;
   kind: 'question' | 'answer' | 'reasoning' | 'call' | 'result' | 'refusal' | 'failure' | 'round' | 'context' | 'meta' | 'error';
   text: string;
+  status?: string;
   // 这一行来自记录里哪一条事件（D73 那个稳定序号）。界面自己写的那几行没有它。
   seq?: number;
   // 生效的能力名：`mcp.call` 这一件画的是 `mcp:<服务器>/<工具>`，与判定链读的那一串一致（D52）。
@@ -69,6 +73,8 @@ export type Row = {
   summary?: string;
   // 抬头右侧那几枚读数：退出码、溢出文件、判定、支线、耗时。
   notes?: string[];
+  // 系统摘要与读数同时保留两种文字；切换语言不改模型正文和工具输出。
+  english?: { text?: string; summary?: string; notes?: string[] };
   // 写入类那一张卡片上的加减行数：换掉多少行、换上多少行（D94）。
   diff?: { added: number; removed: number };
 };
@@ -102,7 +108,8 @@ function payloadOf(result: Record_['result']): { text?: string; exitCode?: unkno
 // 没读过的正文一概不画：删除只说移进回收站；整份写入不猜目标是新建还是覆盖，那一件由内核那条规则管。
 export type Change = { summary: string; diff?: { added: number; removed: number }; action: string; before: string; after: string };
 
-export function changeOf(tool: string, args: Record<string, unknown>): Change {
+export function changeOf(tool: string, args: Record<string, unknown>, locale: 'zh' | 'en' = 'zh'): Change {
+  const t = (zh: string, en: string) => locale === 'zh' ? zh : en;
   const path = typeof args.path === 'string' ? args.path : '';
   const lines = (value: unknown) => String(value ?? '').split('\n').length;
   const none: Change = { summary: '', action: '', before: '', after: '' };
@@ -110,9 +117,9 @@ export function changeOf(tool: string, args: Record<string, unknown>): Change {
   if ((tool === 'write' || tool === 'create') && typeof args.content === 'string') {
     const added = lines(args.content);
     return {
-      summary: `${path}：整份写入 ${added} 行`,
+      summary: t(`${path}：写入 ${added} 行`, `${path}: write ${added} lines`),
       diff: { added, removed: 0 },
-      action: '整份写入这一份内容（目标已经存在时这是覆盖：内核要求覆盖之前先把那一份读全）',
+      action: t('写入完整文件；覆盖已有文件前必须完整读取', 'Write the entire file; overwriting requires reading the existing file first'),
       before: '',
       after: args.content,
     };
@@ -120,33 +127,52 @@ export function changeOf(tool: string, args: Record<string, unknown>): Change {
   if (tool === 'edit' && typeof args.anchor === 'string') {
     const replacement = typeof args.replacement === 'string' ? args.replacement : '';
     return {
-      summary: `${path}：换掉 ${lines(args.anchor)} 行，换上 ${lines(replacement)} 行`,
+      summary: t(`${path}：替换 ${lines(args.anchor)} 行，写入 ${lines(replacement)} 行`, `${path}: replace ${lines(args.anchor)} lines with ${lines(replacement)} lines`),
       diff: { added: lines(replacement), removed: lines(args.anchor) },
-      action: `${path}：把定位到的那一段换成另一段`,
+      action: t(`${path}：替换匹配内容`, `${path}: replace matched text`),
       before: args.anchor,
       after: replacement,
     };
   }
   if (tool === 'delete') {
-    return { summary: `把 ${path} 移进回收站`, action: `把 ${path} 移进回收站（不是就地删掉：有回收站的地方进回收站，否则进边界内那一个回收目录）`, before: '', after: '' };
+    return { summary: t(`将 ${path} 移入回收站`, `Move ${path} to trash`), action: t(`将 ${path} 移入系统回收站或权限边界内的回收目录`, `Move ${path} to system trash or the recovery directory within the permission boundary`), before: '', after: '' };
   }
   return none;
 }
 
 // 审批那一格展开的正文：写入类那三件画成「去掉哪一段、换上哪一段」，段首带减号与加号（方案 5.4）。
 // 与终端那一侧同一条规则、两份写法；其余的调用还是把参数交出去，不编内容。
-export function changeBody(change: Change, args: Record<string, unknown>): string {
+export function changeBody(change: Change, args: Record<string, unknown>, locale: 'zh' | 'en' = 'zh'): string {
+  const t = (zh: string, en: string) => locale === 'zh' ? zh : en;
   if (change.action === '') return typeof args.content === 'string' ? args.content : JSON.stringify(args, null, 2);
   const mark = (text: string, sign: string): string[] =>
-    text === '' ? [`${sign}（那一段是空的）`] : text.split('\n').map((line) => `${sign} ${line}`);
+    text === '' ? [`${sign}${t('（空）', '(empty)')}`] : text.split('\n').map((line) => `${sign} ${line}`);
   return [change.action,
-    ...(change.before === '' ? [] : ['要去掉的那一段:', ...mark(change.before, '-')]),
-    ...(change.after === '' ? [] : ['要换上的那一段:', ...mark(change.after, '+')]),
+    ...(change.before === '' ? [] : [t('原内容:', 'Before:'), ...mark(change.before, '-')]),
+    ...(change.after === '' ? [] : [t('新内容:', 'After:'), ...mark(change.after, '+')]),
   ].join('\n');
 }
 
 // 一次调用对人说清它动的是哪个对象：命令文本、路径、地址、那一项 MCP 能力名，都没有就退回一行参数。
 function argSummary(tool: string, args: Record<string, unknown>): string {
+  if (tool === 'ask_user_question') {
+    let questions: unknown = args.questions;
+    if (typeof questions === 'string') {
+      try {
+        questions = JSON.parse(questions);
+      } catch {
+        // 无效参数的原文保留在展开详情中。
+        return '';
+      }
+    }
+    if (!Array.isArray(questions)) return '';
+    return questions.flatMap((question: unknown) => {
+      if (typeof question !== 'object' || question === null) return [];
+      const fields = question as Record<string, unknown>;
+      const title = fields.header ?? fields.question;
+      return typeof title === 'string' && title.trim() !== '' ? [title.trim()] : [];
+    }).join(' · ').slice(0, 160);
+  }
   const single = args.command ?? args.path ?? args.url ?? args.pattern ?? args.query ?? args.task;
   if (typeof single === 'string' && single !== '') return single;
   // `mcp.call` 的能力名已经在抬头上，摘要只给那一份输入（D52）。
@@ -156,24 +182,26 @@ function argSummary(tool: string, args: Record<string, unknown>): string {
 }
 
 // 判定那一格说人话：没问人就成了、问过才成、不允许，外加命中的规则与档位（D77、D94）。
-function verdictNote(verdict: Verdict): string {
+function verdictNote(verdict: Verdict, locale: 'zh' | 'en'): string {
+  const t = (zh: string, en: string) => locale === 'zh' ? zh : en;
   if (typeof verdict.decision !== 'string') return '';
-  const outcome = verdict.decision === 'deny' ? '不允许' : verdict.via === 'ask' ? '问过才放行' : '没问就放行';
-  const level = verdict.level === undefined ? '' : `（${verdict.level}${verdict.forced === true ? '→ask' : ''}）`;
-  const rule = typeof verdict.rule === 'string' && verdict.rule !== '' ? ` 规则「${verdict.rule}」` : '';
-  return `判定${outcome}${level}${rule}`;
+  const outcome = verdict.decision === 'deny' ? t('已拒绝', 'Denied') : verdict.via === 'ask' ? t('审批通过', 'Approved') : t('自动允许', 'Allowed automatically');
+  const level = verdict.level === undefined ? '' : ` (${verdict.level}${verdict.forced === true ? '→ask' : ''})`;
+  const rule = typeof verdict.rule === 'string' && verdict.rule !== '' ? t(` · 规则：${verdict.rule}`, ` · Rule: ${verdict.rule}`) : '';
+  return `${outcome}${level}${rule}`;
 }
 
-function toolNotes(record: Record_, result: NonNullable<Record_['result']>): string[] {
+function toolNotes(record: Record_, result: NonNullable<Record_['result']>, locale: 'zh' | 'en'): string[] {
+  const t = (zh: string, en: string) => locale === 'zh' ? zh : en;
   const payload = payloadOf(result);
   const notes: string[] = [];
-  if (payload.exitCode !== undefined) notes.push(`退出码 ${String(payload.exitCode)}`);
-  if (result.spilled !== undefined) notes.push(`整段在 ${result.spilled}`);
-  const verdict = verdictNote(record.verdict ?? {});
+  if (payload.exitCode !== undefined) notes.push(t(`退出码 ${String(payload.exitCode)}`, `Exit code ${String(payload.exitCode)}`));
+  if (result.spilled !== undefined) notes.push(t(`完整结果：${result.spilled}`, `Full result: ${result.spilled}`));
+  const verdict = verdictNote(record.verdict ?? {}, locale);
   if (verdict !== '') notes.push(verdict);
-  if (typeof payload.sessionId === 'string') notes.push(`支线 ${payload.sessionId}`);
+  if (typeof payload.sessionId === 'string') notes.push(t(`子任务 ${payload.sessionId}`, `Subtask ${payload.sessionId}`));
   if (record.recovery !== undefined) {
-    notes.push(record.recovery.safeToRedo === true ? '恢复补的 · 可重试' : '恢复补的 · 外部副作用次数未知');
+    notes.push(record.recovery.safeToRedo === true ? t('中断恢复 · 可重试', 'Recovered after interruption · retry available') : t('中断恢复 · 外部操作结果未知', 'Recovered after interruption · external outcome unknown'));
   }
   return notes;
 }
@@ -186,19 +214,33 @@ function argsText(args: Record<string, unknown> | undefined): string {
 let sequence = 0;
 const nextId = (): number => (sequence += 1);
 
-export function metaRow(kind: 'meta' | 'error', text: string): Row {
-  return { id: nextId(), kind, text };
+export function metaRow(kind: 'meta' | 'error', text: string, english?: string): Row {
+  return { id: nextId(), kind, text, ...(english === undefined ? {} : { english: { text: english } }) };
 }
 
 // 记录里那一格是内核自己量的实际执行时间，不含审批等待（第 66 步）。
 // 界面这一侧量到的那一段是发出到交回之间，含等人答复，所以只在跑着的那一轮读得到。
-function secondsNote(ms: number): string {
+function secondsNote(ms: number, locale: 'zh' | 'en' = 'zh'): string {
   const seconds = ms / 1000;
-  return `用时 ${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} 秒`;
+  const shown = seconds < 10 ? seconds.toFixed(1) : Math.round(seconds);
+  return locale === 'zh' ? `用时 ${shown} 秒` : `${shown}s`;
 }
 
 export function durationNote(startedAt: number, now: number): string {
   return secondsNote(now - startedAt);
+}
+
+// 一张提问卡收掉时留下的那一句（审阅 F2）：题面与已经打下的字都读得到。
+// 一次请求只有一次答复（D107），卡片收掉之后那些字不会再交出去，所以要留在转录里。
+export function questionEcho(ask: { questions: { id: string; question: string }[] }, drafts: Record<string, { picked: string[]; extra: string }> = {}, locale: 'zh' | 'en' = 'zh'): string {
+  return ask.questions.map((question, index) => {
+    const typed = [...(drafts[question.id]?.picked ?? []), (drafts[question.id]?.extra ?? '').trim()].filter((one) => one !== '');
+    const prefix = locale === 'zh' ? `第 ${index + 1} 题「${question.question}」：` : `Question ${index + 1}: “${question.question}” — `;
+    const answer = typed.length === 0
+      ? (locale === 'zh' ? '没有作答' : 'No answer entered')
+      : typed.join(locale === 'zh' ? '、' : ', ');
+    return `${prefix}${answer}`;
+  }).join(locale === 'zh' ? '；' : '; ');
 }
 
 export function projectRecord(record: Record_, options: { startedAt?: number; now?: number } = {}): Row[] {
@@ -211,20 +253,17 @@ function projected(record: Record_, options: { startedAt?: number; now?: number 
   if (record.kind === 'user') return [{ id: nextId(), kind: 'question', text: record.raw ?? record.text ?? '' }];
   // 一轮开始时的参数快照画成那一轮里的一行小字：内核还没落这一条时这一路不产行（读回来的记录里就没有它）。
   if (record.kind === 'turnContext') {
-    const facts = [
-      record.model === undefined ? '' : `模型 ${record.model}`,
-      record.mode === undefined || record.mode === '' ? '' : `模式 ${record.mode}`,
-      record.policy === undefined ? '' : `审批档位 ${record.policy}${record.policySource === 'session' ? '（这一份会话改的）' : record.policySource === 'config' ? '（配置默认）' : ''}`,
-    ].filter((part) => part !== '');
+    const facts = [record.model, record.mode, record.policy].filter((part): part is string => typeof part === 'string' && part !== '');
     if (facts.length === 0) return [];
-    return [{ id: nextId(), kind: 'context', text: `这一轮用的是 ${facts.join(' · ')}` }];
+    const values = facts.join(' · ');
+    return [{ id: nextId(), kind: 'context', text: `本轮参数：${values}`, english: { text: `Turn settings: ${values}` } }];
   }
   if (record.kind === 'reasoning') return [{ id: nextId(), kind: 'reasoning', text: record.text ?? '' }];
   // 一轮正常完整结束留下一条事实，那也是一处可选的分支点（D68、方案 4.3）：它画出一行，「从这里分支」挂在那一行上。
   if (record.kind === 'turn') {
-    return record.status === 'completed'
-      ? [{ id: nextId(), kind: 'round', text: `这一轮完整结束：${record.iterations ?? '?'} 次迭代 · ${record.modelCalls ?? '?'} 次模型调用` }]
-      : [];
+    const states: Record<string, string> = { completed: '本轮已完成', cancelled: '本轮已取消', failed: '本轮失败', interrupted: '本轮意外中断' };
+    const status = record.status ?? '';
+    return states[status] === undefined ? [] : [{ id: nextId(), kind: 'round', status, code: record.code, text: states[status] }];
   }
   if (record.kind === 'assistant') {
     const rows: Row[] = record.text === '' || record.text === undefined
@@ -246,11 +285,16 @@ function projected(record: Record_, options: { startedAt?: number; now?: number 
     const result = record.result ?? {};
     const kind = result.failed !== true ? 'result' : result.kind === 'refusal' ? 'refusal' : 'failure';
     const payload = payloadOf(result);
-    const notes = toolNotes(record, result);
+    const notes = toolNotes(record, result, 'zh');
+    const englishNotes = toolNotes(record, result, 'en');
     const change = changeOf(record.tool ?? '', record.args ?? {});
     // 记录里有的那一格优先：它跟着记录走，重开这份会话也还在。
-    if (typeof record.durationMs === 'number') notes.push(secondsNote(record.durationMs));
-    else if (options.startedAt !== undefined) notes.push(durationNote(options.startedAt, options.now ?? Date.now()));
+    const duration = typeof record.durationMs === 'number' ? record.durationMs
+      : options.startedAt === undefined ? undefined : (options.now ?? Date.now()) - options.startedAt;
+    if (duration !== undefined) {
+      notes.push(secondsNote(duration));
+      englishNotes.push(secondsNote(duration, 'en'));
+    }
     return [{
       id: nextId(),
       kind,
@@ -262,6 +306,7 @@ function projected(record: Record_, options: { startedAt?: number; now?: number 
       summary: change.summary,
       diff: change.diff,
       notes,
+      english: { notes: englishNotes, summary: changeOf(record.tool ?? '', record.args ?? {}, 'en').summary },
       // 失败与未允许那一格带着说不出去的原因，正文读它，不读那层信封（D93）。
       text: typeof payload.text === 'string' ? payload.text : textOf(result.reason ?? result.content),
     }];

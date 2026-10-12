@@ -4,6 +4,7 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { dataRoot } from '../kernel/config-file.js';
 
 export type SavedInput = { projectRoot: string; sessionId: string; draft: string; queued: string[] };
 
@@ -13,7 +14,7 @@ const DRAFT_LIMIT = 8000;
 const QUEUE_LIMIT = 20;
 
 export function inputPathOf(userHome = homedir()): string {
-  return join(userHome, '.ligule', 'tui-input.jsonl');
+  return join(dataRoot(userHome), 'tui-input.jsonl');
 }
 
 // 读不懂的那一行跳过：这一份是界面上的方便之物，不是事实源，坏一行不该让整份会话都开不了。

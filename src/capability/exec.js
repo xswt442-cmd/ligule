@@ -4,7 +4,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { KernelError } from '../kernel/error.js';
 import { resolveWithin } from './paths.js';
-import { boundaryOf, limitsOf } from './limits.js';
+import { boundaryOf, limitsOf, workingDirectoryOf } from './limits.js';
 import { spawnWindowsCommand } from './windows-command.js';
 
 // Windows 上子进程写的是控制台的 OEM 码页（zh-CN 是 cp936），按 utf8 解出来是一串乱字，
@@ -61,14 +61,14 @@ function killTree(child) {
 
 export const execTool = {
   name: 'exec',
-  description: 'Run a command line with the shell backend the host chose, with the workspace boundary as its working directory.',
+  description: 'Run a command line with the shell backend the host chose. The default working directory is the workspace root; an explicit cwd is relative to that root and must resolve inside the workspace boundary.',
   // 内核按这一条认出「这行文本要走解释器」（D59）：选定后端、按那一种语法解析、把事实记进会话记录都在那一条路上做。
   commandArgument: 'command',
   parameters: {
     type: 'object',
     properties: {
       command: { type: 'string', description: 'The command line to run.' },
-      cwd: { type: 'string', description: 'Working directory relative to the workspace boundary.' },
+      cwd: { type: 'string', description: 'Optional working directory relative to the workspace root, within the workspace boundary.' },
     },
     required: ['command'],
   },
@@ -78,7 +78,10 @@ export const execTool = {
     }
     const { execBytes } = limitsOf(config);
     const boundary = boundaryOf(config);
-    const cwd = args.cwd === undefined ? boundary : await resolveWithin(boundary, args.cwd);
+    const workspaceRoot = workingDirectoryOf(config);
+    const cwd = args.cwd === undefined
+      ? await resolveWithin(boundary, '.', { cwd: workspaceRoot })
+      : await resolveWithin(boundary, args.cwd, { cwd: workspaceRoot });
     // shell 是内核交进来的那一份选择（D59）：判定链读的就是这一种语法，起的也就是这一个可执行文件，
     // 不再把文本交给系统默认的 shell——那样记录里读不出「按哪种语法跑的」，判定读过的语法也可能不是那一种。
     // POSIX 上 detached 让孩子成为新进程组的首，终止时对 -pid 发信号带走整组；

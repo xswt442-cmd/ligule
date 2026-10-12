@@ -11,7 +11,7 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'smol-toml';
-import { CONFIG_DIRECTORY } from './config-file.js';
+import { CONFIG_DIRECTORY, dataRoot } from './config-file.js';
 import { KernelError } from './error.js';
 
 export const MODE_DIRECTORY = 'modes';
@@ -50,7 +50,7 @@ export function modeDirectories(projectRoot: string, shippedDirectory: string, u
   if (typeof projectRoot !== 'string' || projectRoot === '') throw new KernelError('mode_project_root_required');
   return {
     shipped: shippedDirectory,
-    user: join(userHome, CONFIG_DIRECTORY, MODE_DIRECTORY),
+    user: join(dataRoot(userHome), MODE_DIRECTORY),
     project: join(projectRoot, CONFIG_DIRECTORY, MODE_DIRECTORY),
   };
 }

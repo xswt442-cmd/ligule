@@ -9,7 +9,7 @@ import { homedir } from 'node:os';
 import { join, relative, resolve, sep } from 'node:path';
 import { parse } from 'yaml';
 import { isWithin } from '../capability/paths.js';
-import { CONFIG_DIRECTORY } from './config-file.js';
+import { CONFIG_DIRECTORY, dataRoot } from './config-file.js';
 import { splitFrontmatter } from './frontmatter.js';
 import { KernelError } from './error.js';
 
@@ -50,7 +50,7 @@ export function skillDirectories(projectRoot: string, userHome = homedir()): str
   return [
     join(projectRoot, CONFIG_DIRECTORY, SKILLS_DIRECTORY),
     join(projectRoot, '.agents', SKILLS_DIRECTORY),
-    join(userHome, CONFIG_DIRECTORY, SKILLS_DIRECTORY),
+    join(dataRoot(userHome), SKILLS_DIRECTORY),
     join(userHome, '.agents', SKILLS_DIRECTORY),
   ];
 }

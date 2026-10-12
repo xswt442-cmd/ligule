@@ -7,7 +7,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, relative, sep } from 'node:path';
 import { parse } from 'yaml';
-import { CONFIG_DIRECTORY } from './config-file.js';
+import { CONFIG_DIRECTORY, dataRoot } from './config-file.js';
 import { splitFrontmatter } from './frontmatter.js';
 import { KernelError } from './error.js';
 
@@ -55,7 +55,7 @@ export function templateDirectories(projectRoot: string, userHome = homedir()): 
   if (typeof projectRoot !== 'string' || projectRoot === '') throw new KernelError('template_project_root_required');
   return [
     { layer: 'project', directory: join(projectRoot, CONFIG_DIRECTORY, PROMPTS_DIRECTORY) },
-    { layer: 'user', directory: join(userHome, CONFIG_DIRECTORY, PROMPTS_DIRECTORY) },
+    { layer: 'user', directory: join(dataRoot(userHome), PROMPTS_DIRECTORY) },
   ];
 }
 

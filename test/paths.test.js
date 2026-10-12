@@ -48,6 +48,20 @@ test('a parent traversal out of the boundary is rejected', async () => {
   });
 });
 
+test('relative paths use an unrestricted anchor while targets stay within the boundary', async () => {
+  await withFixture(async ({ workspace, outside }) => {
+    const child = join(workspace, 'child');
+    await mkdir(child);
+    await writeFile(join(child, 'note.txt'), 'child');
+    assert.equal(await resolveWithin(workspace, 'note.txt', { cwd: child }), await realpath(join(child, 'note.txt')));
+    assert.equal(await resolveWithin(workspace, join(workspace, 'note.txt'), { cwd: outside }), await realpath(join(workspace, 'note.txt')));
+    await assert.rejects(
+      () => resolveWithin(workspace, '../../outside/secret.txt', { cwd: child }),
+      (error) => error.code === 'path_escapes_boundary',
+    );
+  });
+});
+
 test('a linked directory pointing outside the boundary is rejected for reads and for writes', async () => {
   await withFixture(async ({ workspace, outside }) => {
     await symlink(outside, join(workspace, 'escape'), linkType);

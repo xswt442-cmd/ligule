@@ -1,15 +1,17 @@
 import { useMemo, useState } from 'react';
+import { Modal } from './ui';
+import { useText } from '../locale';
 
-// 命令面板：只做入口，不做语义（D92）。每一条落下去的是界面或协议本来就有的那一个动作。
-export type Command = { id: string; title: string; note: string; run: () => void };
+export type Command = { id: string; title: string; note?: string; run: () => void };
 
 export function Palette({ commands, onClose }: { commands: Command[]; onClose: () => void }) {
+  const t = useText();
   const [filter, setFilter] = useState('');
   const [index, setIndex] = useState(0);
   const matched = useMemo(() => {
     const text = filter.trim().toLowerCase();
     if (text === '') return commands;
-    return commands.filter((item) => `${item.title} ${item.note}`.toLowerCase().includes(text));
+    return commands.filter((item) => `${item.title} ${item.note ?? ''}`.toLowerCase().includes(text));
   }, [commands, filter]);
 
   const pick = (item: Command | undefined) => {
@@ -18,17 +20,18 @@ export function Palette({ commands, onClose }: { commands: Command[]; onClose: (
     item.run();
   };
 
-  return <div className="palette" role="dialog" aria-label="命令面板">
+  return <Modal title={t('命令面板', 'Command palette')} className="palette" onClose={onClose}>
     <input
       autoFocus
       value={filter}
-      placeholder="挑一条命令（↑↓ 选，Enter 执行，Esc 收起）"
-      aria-label="命令过滤"
+      placeholder={t('搜索命令（↑↓ 选择，Enter 执行）', 'Search commands (↑↓ to select, Enter to run)')}
+      aria-label={t('搜索命令', 'Search commands')}
       onChange={(event) => {
         setFilter(event.target.value);
         setIndex(0);
       }}
       onKeyDown={(event) => {
+        if (event.nativeEvent.isComposing || event.keyCode === 229) return;
         if (event.key === 'ArrowDown') {
           event.preventDefault();
           setIndex((at) => Math.min(at + 1, matched.length - 1));
@@ -38,21 +41,17 @@ export function Palette({ commands, onClose }: { commands: Command[]; onClose: (
         } else if (event.key === 'Enter') {
           event.preventDefault();
           pick(matched[index]);
-        } else if (event.key === 'Escape') {
-          event.preventDefault();
-          event.stopPropagation();
-          onClose();
         }
       }}
     />
-    <ul role="listbox" aria-label="命令清单">
-      {matched.length === 0 && <li className="palette-empty">没有对得上的命令</li>}
+    <ul role="listbox" aria-label={t('命令列表', 'Command list')}>
+      {matched.length === 0 && <li className="palette-empty">{t('没有匹配的命令', 'No matching commands')}</li>}
       {matched.map((item, at) => <li key={item.id} role="option" aria-selected={at === index}>
         <button type="button" onClick={() => pick(item)} onMouseEnter={() => setIndex(at)}>
           <span>{item.title}</span>
-          <span className="palette-note">{item.note}</span>
+          {item.note && <span className="palette-note">{item.note}</span>}
         </button>
       </li>)}
     </ul>
-  </div>;
+  </Modal>;
 }

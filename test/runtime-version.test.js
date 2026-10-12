@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { releaseManifest } from '../scripts/pack-release.js';
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
 
@@ -35,16 +36,18 @@ test('the package description carries both languages', () => {
 
 test('the ripgrep platform packages move with the release and ship what the build script writes', () => {
   const pkg = JSON.parse(read('../package.json'));
+  const release = releaseManifest();
   const pin = JSON.parse(read('../scripts/ripgrep-pin.json'));
+  assert.deepEqual(
+    Object.keys(release.optionalDependencies).filter((name) => name.startsWith('ligule-rg-')).sort(),
+    Object.values(pin.targets).map((target) => target.package).sort(),
+  );
   for (const target of Object.values(pin.targets)) {
     const manifest = JSON.parse(read(`../packages/${target.directory}/package.json`));
     assert.equal(manifest.name, target.package, `packages/${target.directory} is named ${manifest.name}`);
     assert.equal(manifest.version, pkg.version, `${target.package} does not move with the release version`);
-    // 声明要等两个包真的发布之后再进 optionalDependencies：`npm ci` 要求锁文件与 package.json 完全同步，
-    // 而没发布的包进不了锁文件（2026-10-02 持续集成第一次跑 npm ci 就卡在这儿）。已经声明了就必须钉住本次发布版本。
-    if (pkg.optionalDependencies?.[target.package] !== undefined) {
-      assert.equal(pkg.optionalDependencies[target.package], pkg.version, `${target.package} is not pinned to this release`);
-    }
+    assert.equal(pkg.optionalDependencies?.[target.package], undefined, `${target.package} must only appear in the release manifest`);
+    assert.equal(release.optionalDependencies[target.package], pkg.version, `${target.package} is not pinned to this release`);
     assert.deepEqual(manifest.files, [target.binary, ...pin.licenseFiles, 'RIPGREP-VERSION'], `${target.package} ships a different file list`);
   }
 });
@@ -62,4 +65,20 @@ test('the desktop shell carries the same version as the package', () => {
   const config = JSON.parse(read('../desktop/src-tauri/tauri.conf.json'));
   assert.equal(shell.version, pkg.version, 'desktop/package.json and package.json disagree');
   assert.equal(config.version, pkg.version, 'tauri.conf.json and package.json disagree');
+});
+
+// 随包 Node 的那四行钉在 `desktop/node-pin.json`，发行清单里也是同样四行：两处说的是同一批字节，抄错一个字符就装不出或装错。
+test('the four vendored Node targets match the release checklist', () => {
+  const pin = JSON.parse(read('../desktop/node-pin.json'));
+  const checklist = read('../RELEASE.md');
+  const suffixes = { 'win32-x64': 'zip', 'linux-x64': 'tar.xz', 'darwin-arm64': 'tar.gz', 'darwin-x64': 'tar.gz' };
+  assert.deepEqual(Object.keys(pin.targets).sort(), ['darwin-arm64', 'darwin-x64', 'linux-x64', 'win32-x64']);
+  for (const [target, archived] of Object.entries(pin.targets)) {
+    const expected = `node-${pin.version}-${target.replace('win32', 'win')}.${suffixes[target]}`;
+    assert.equal(archived.file, expected, `${target} pins ${archived.file}, upstream calls it ${expected}`);
+    assert.match(archived.sha256, /^[0-9a-f]{64}$/, `${target} sha256 is not a lowercase hex digest`);
+    // 发行清单那一行是给人读的那一份，两处写了同一个文件与同一个摘要才算同一批字节。
+    assert.ok(checklist.includes(archived.file), `RELEASE.md does not name ${archived.file}`);
+    assert.ok(checklist.includes(archived.sha256), `RELEASE.md does not carry the ${target} sha256`);
+  }
 });

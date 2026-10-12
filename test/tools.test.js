@@ -2,14 +2,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { dirname, join, relative } from 'node:path';
+import { delimiter, dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createKernel, findTool, readOnlyTools, readTool, searchTool } from '../dist/index.js';
+import { createKernel, createObservationLog, createTool, deleteTool, editTool, execTool, findTool, readOnlyTools, readTool, resolveShell, searchTool, withNativeExitCode, writeTool } from '../dist/index.js';
 
 const repo = dirname(dirname(fileURLToPath(import.meta.url)));
 // npm run build-rg 生成的那一份 ripgrep。这个路径在 .gitignore 里，所以按真实后端做的比较
 // 只在本地构建过之后才跑得起来；解析与排序的那些行为没法用假的可执行文件模拟。
-const builtRipgrep = join(repo, 'packages', `rg-${process.platform}-${process.arch}`, process.platform === 'win32' ? 'rg.exe' : 'rg');
+const packagedRipgrep = join(repo, 'packages', `rg-${process.platform}-${process.arch}`, process.platform === 'win32' ? 'rg.exe' : 'rg');
+const pathRipgrep = (process.env.PATH ?? '').split(delimiter)
+  .map((directory) => join(directory, process.platform === 'win32' ? 'rg.exe' : 'rg'))
+  .find(existsSync);
+const builtRipgrep = existsSync(packagedRipgrep) ? packagedRipgrep : pathRipgrep ?? packagedRipgrep;
 
 const NEEDLE = 'needle here';
 
@@ -60,6 +64,90 @@ test('read returns the file content and says nothing about truncation when it fi
     assert.deepEqual(await readTool.run({ path: 'note.txt' }, context(workspace)), {
       text: `line one\n${NEEDLE}\nline three`,
     });
+  });
+});
+
+test('read and default searches start at the working directory within the permission boundary', async () => {
+  await withWorkspace(async (workspace) => {
+    const child = join(workspace, 'src');
+    const childConfig = { boundary: workspace, workspaceRoot: child };
+    assert.equal((await readTool.run({ path: 'app.js' }, context(workspace, undefined, { workspaceRoot: child }))).text,
+      `const a = 'unused';\nsecond line ${NEEDLE}`);
+    assert.equal((await findTool.run({ pattern: '*.js' }, context(workspace, undefined, { workspaceRoot: child }))).text, 'app.js');
+    assert.equal((await searchTool.run({ pattern: NEEDLE }, context(workspace, undefined, { workspaceRoot: child }))).text,
+      `app.js:2:second line ${NEEDLE}`);
+    await assert.rejects(readTool.run({ path: '../../outside.txt' }, { config: childConfig }), { code: 'path_escapes_boundary' });
+  });
+});
+
+test('a parent working directory can address an explicit child boundary', async () => {
+  await withWorkspace(async (workspace) => {
+    const boundary = join(workspace, 'src');
+    const toolContext = {
+      ...context(workspace, undefined, { workspaceRoot: workspace, trashBackend: 'managed' }),
+      config: { boundary, workspaceRoot: workspace, ripgrepPath: builtRipgrep },
+      observations: createObservationLog(),
+    };
+    const absoluteFile = join(boundary, 'app.js');
+    assert.match((await readTool.run({ path: 'src/app.js' }, toolContext)).text, /second line/);
+    assert.match((await readTool.run({ path: absoluteFile }, toolContext)).text, /second line/);
+    await assert.rejects(findTool.run({ pattern: '*' }, toolContext), { code: 'path_escapes_boundary' });
+    assert.equal((await findTool.run({ pattern: '*.js', path: 'src' }, toolContext)).text, 'app.js');
+    await assert.rejects(searchTool.run({ pattern: NEEDLE }, toolContext), { code: 'path_escapes_boundary' });
+    const result = await searchTool.run({ pattern: NEEDLE, path: 'src' }, toolContext);
+    assert.equal(result.text, `src/app.js:2:second line ${NEEDLE}`);
+    assert.match((await readTool.run({ path: result.text.split(':')[0] }, toolContext)).text, /second line/);
+    assert.equal((await searchTool.run({ pattern: NEEDLE, path: absoluteFile }, toolContext)).text, `src/app.js:2:second line ${NEEDLE}`);
+
+    await createTool.run({ path: 'src/new.txt', content: 'first' }, toolContext);
+    await writeTool.run({ path: 'src/new.txt', content: 'whole' }, toolContext);
+    await editTool.run({ path: 'src/new.txt', anchor: 'whole', replacement: 'second' }, toolContext);
+    assert.equal((await readTool.run({ path: 'src/new.txt' }, toolContext)).text, 'second');
+    await deleteTool.run({ path: 'src/new.txt' }, toolContext);
+  });
+});
+
+test('search validates absolute paths against the permission boundary', async () => {
+  await withWorkspace(async (workspace) => {
+    const inside = join(workspace, 'src', 'app.js');
+    assert.match((await searchTool.run({ pattern: NEEDLE, path: inside }, context(workspace))).text, /src\/app\.js:2:/);
+    const outside = join(dirname(workspace), 'outside.txt');
+    await writeFile(outside, NEEDLE);
+    await assert.rejects(searchTool.run({ pattern: NEEDLE, path: outside }, context(workspace)), { code: 'path_escapes_boundary' });
+  });
+});
+
+test('create, edit, and delete resolve relative paths from the working directory', async () => {
+  await withWorkspace(async (workspace) => {
+    const child = join(workspace, 'src');
+    const toolContext = {
+      ...context(workspace, undefined, { workspaceRoot: child, trashBackend: 'managed' }),
+      observations: createObservationLog(),
+    };
+    await createTool.run({ path: 'new.txt', content: 'first' }, toolContext);
+    await writeTool.run({ path: 'new.txt', content: 'whole' }, toolContext);
+    await editTool.run({ path: 'new.txt', anchor: 'whole', replacement: 'second' }, toolContext);
+    assert.equal((await readTool.run({ path: 'new.txt' }, toolContext)).text, 'second');
+    await deleteTool.run({ path: 'new.txt' }, toolContext);
+    await assert.rejects(readTool.run({ path: 'new.txt' }, toolContext), { code: 'path_not_found' });
+  });
+});
+
+test('exec uses the workspace root by default and validates an explicit child working directory', async () => {
+  await withWorkspace(async (workspace) => {
+    const child = join(workspace, 'src');
+    const script = join(workspace, 'cwd.js');
+    await writeFile(script, 'console.log(process.cwd())');
+    const shell = resolveShell({});
+    const command = `node "${script.replace(/\\/g, '/')}"`;
+    const run = (config, cwd) => execTool.run(
+      { command, ...(cwd === undefined ? {} : { cwd }) },
+      { config, shell: withNativeExitCode(shell, command) },
+    );
+    assert.equal((await run({ boundary: workspace, workspaceRoot: workspace })).text.trim(), workspace);
+    assert.equal((await run({ boundary: workspace, workspaceRoot: workspace }, 'src')).text.trim(), child);
+    await assert.rejects(run({ boundary: child, workspaceRoot: workspace }), { code: 'path_escapes_boundary' });
+    assert.equal((await run({ boundary: child, workspaceRoot: workspace }, 'src')).text.trim(), child);
   });
 });
 

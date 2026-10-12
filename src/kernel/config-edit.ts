@@ -1,15 +1,14 @@
-// 配置文件的写入侧（方案 7.2）：只换白名单里那几个标量字段的那一个值，其余字节一个不动。
-// 为什么不用格式编辑库：本仓库装的 `smol-toml` 交回的是值而不是文档，整份重写会把注释、键的顺序与换行丢掉，
-// 而这三样正是要保住的东西。这一条在原文里定位那一个值的跨度，只换它，行尾的注释留在原地；
-// 换完整份读回来核对目标键等于要写的值，对不上就不落盘。
-// 认的形状是「[表] 头之下的一条 `键 = 值`」、「顶层那一条 `表.键 = 值`」，以及数组表 `[[policy.rules]]` 的整块增删改。
-// 多行字符串、内联表与嵌套表仍不认，撞上就报 `config_edit_shape_unsupported` 且一个字都不写。
-import { createHash } from 'node:crypto';
-import { chmod, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
+// 解析器提供 TOML 节点与跨度，编辑器只替换允许修改的值和规则表。
+// 写入前校验版本及完整语义；非目标注释、键序与字节保持原样。
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { parse } from 'smol-toml';
+import { getStaticTOMLValue, parseTOML, traverseNodes, VisitorKeys, type AST } from 'toml-eslint-parser';
 import lockfile from 'proper-lockfile';
+import { isDeepStrictEqual } from 'node:util';
 import { KernelError, KernelRuntimeError } from './error.js';
+import { modelSelection, modelServices, selectionLiteral, servicesLiteral } from './model-services.js';
 
 /** 一条工具规则：判定链里 `[[policy.rules]]` 的那一项。 */
 export type PolicyRule = { tool: string; match?: string; decision: 'allow' | 'deny'; reason?: string };
@@ -27,7 +26,7 @@ export type WriteRequest = {
 /** 一个可写字段：落在哪一条路径、值按什么形状收。 */
 export type EditableField = {
   readonly path: readonly [string, string];
-  readonly kind: 'string' | 'enum' | 'url' | 'envName' | 'rules';
+  readonly kind: 'string' | 'enum' | 'url' | 'envName' | 'rules' | 'services' | 'selection';
   readonly oneOf?: readonly string[];
 };
 
@@ -37,6 +36,8 @@ export const EDITABLE: Readonly<Record<string, EditableField>> = {
   'model.model': { path: ['model', 'model'], kind: 'string' },
   'model.baseURL': { path: ['model', 'baseURL'], kind: 'url' },
   'model.apiKeyEnv': { path: ['model', 'apiKeyEnv'], kind: 'envName' },
+  'model.services': { path: ['model', 'services'], kind: 'services' },
+  'model.selection': { path: ['model', 'selection'], kind: 'selection' },
   'policy.mode': { path: ['policy', 'mode'], kind: 'enum', oneOf: ['ask', 'auto'] },
   'policy.rules': { path: ['policy', 'rules'], kind: 'rules' },
 };
@@ -49,7 +50,15 @@ export function editableField(field: unknown): EditableField {
 }
 
 /** 值先按字段的形状收下来，再交回一份 TOML 写法与一份读回来核对要用的值。 */
-export function encodeValue(field: EditableField, value: unknown): { literal: string; value: string } {
+export function encodeValue(field: EditableField, value: unknown): { literal: string; value: unknown } {
+  if (field.kind === 'services') {
+    const services = modelServices(value);
+    return { literal: servicesLiteral(services), value: services };
+  }
+  if (field.kind === 'selection') {
+    const selection = modelSelection(value);
+    return { literal: selectionLiteral(selection), value: selection };
+  }
   if (field.kind === 'enum') {
     if (typeof value !== 'string' || !field.oneOf!.includes(value)) {
       throw new KernelError('config_field_value', { detail: `takes one of: ${field.oneOf!.join(', ')}` });
@@ -81,140 +90,200 @@ export function encodeValue(field: EditableField, value: unknown): { literal: st
   return { literal: JSON.stringify(text), value: text };
 }
 
-type Line = { body: string; eol: string };
+// TOML 结构与键路径来自 AST；只在原文中替换 AST 给出的跨度。
+type ParsedPair = { node: AST.TOMLKeyValue; path: (string | number)[] };
+type ParsedDocument = { root: AST.TOMLProgram; tables: AST.TOMLTable[]; pairs: ParsedPair[] };
+type TextEdit = { start: number; end: number; text: string };
 
-// 按行切开且把每一行的换行形状记下来：混着 CRLF 与 LF 的那一份文件接回去还是原来那一份。
-function splitLines(text: string): Line[] {
-  const lines: Line[] = [];
-  let start = 0;
+function parseDocument(text: string): ParsedDocument {
+  let root: AST.TOMLProgram;
+  try {
+    root = parseTOML(text, { tomlVersion: '1.1.0' });
+  } catch (cause) {
+    throw new KernelError('config_file_invalid', { cause, detail: 'the TOML document cannot be read' });
+  }
+  const tables: AST.TOMLTable[] = [];
+  const pairs: ParsedPair[] = [];
+  traverseNodes(root, {
+    visitorKeys: VisitorKeys,
+    enterNode(node) {
+      if (node.type === 'TOMLTable') tables.push(node);
+      if (node.type !== 'TOMLKeyValue') return;
+      const parent = node.parent;
+      if (parent.type !== 'TOMLTable' && parent.type !== 'TOMLTopLevelTable') return;
+      pairs.push({
+        node,
+        path: [...(parent.type === 'TOMLTable' ? parent.resolvedKey : []), ...getStaticTOMLValue(node.key)],
+      });
+    },
+    leaveNode() {},
+  });
+  tables.sort((left, right) => left.range[0] - right.range[0]);
+  pairs.sort((left, right) => left.node.range[0] - right.node.range[0]);
+  return { root, tables, pairs };
+}
+
+const sameTomlPath = (left: readonly (string | number)[], right: readonly (string | number)[]): boolean =>
+  left.length === right.length && left.every((part, index) => part === right[index]);
+
+const startsWithTomlPath = (path: readonly (string | number)[], prefix: readonly (string | number)[]): boolean =>
+  path.length >= prefix.length && prefix.every((part, index) => part === path[index]);
+
+function lineStart(text: string, offset: number): number {
+  return text.lastIndexOf('\n', Math.max(0, offset - 1)) + 1;
+}
+
+function lineEnd(text: string, offset: number): number {
+  const next = text.indexOf('\n', Math.max(0, offset));
+  return next === -1 ? text.length : next + 1;
+}
+
+function lineEndingAt(text: string, offset: number): string {
+  const start = lineStart(text, Math.min(offset, text.length));
+  const next = text.indexOf('\n', start);
+  if (next !== -1) return text[next - 1] === '\r' ? '\r\n' : '\n';
+  const previous = text.lastIndexOf('\n', Math.max(0, start - 1));
+  return previous > 0 && text[previous - 1] === '\r' ? '\r\n' : '\n';
+}
+
+function standaloneComment(text: string, comment: AST.Comment): boolean {
+  return comment.loc.start.line === comment.loc.end.line
+    && text.slice(lineStart(text, comment.range[0]), comment.range[0]).trim() === '';
+}
+
+function leadingCommentStart(text: string, root: AST.TOMLProgram, table: AST.TOMLTable): number {
+  let line = table.loc.start.line - 1;
+  let start = lineStart(text, table.range[0]);
+  while (line > 0) {
+    const comment = root.comments.find((item) => item.loc.start.line === line && item.loc.end.line === line && standaloneComment(text, item));
+    if (comment === undefined) break;
+    start = lineStart(text, comment.range[0]);
+    line -= 1;
+  }
+  return start;
+}
+
+function trailingCommentStart(text: string, root: AST.TOMLProgram): number | undefined {
+  const comment = [...root.comments].reverse().find((item) =>
+    standaloneComment(text, item) && text.slice(item.range[1]).trim() === '',
+  );
+  if (comment === undefined) return undefined;
+  let line = comment.loc.start.line;
+  let start = lineStart(text, comment.range[0]);
   for (;;) {
-    const next = text.indexOf('\n', start);
-    if (next === -1) {
-      lines.push({ body: text.endsWith('\r') ? text.slice(start, -1) : text.slice(start), eol: '' });
-      return lines;
-    }
-    const crlf = text[next - 1] === '\r';
-    lines.push({ body: text.slice(start, crlf ? next - 1 : next), eol: crlf ? '\r\n' : '\n' });
-    start = next + 1;
+    const previous = root.comments.find((item) =>
+      item.loc.start.line === line - 1 && item.loc.end.line === line - 1 && standaloneComment(text, item),
+    );
+    if (previous === undefined) return start;
+    line -= 1;
+    start = lineStart(text, previous.range[0]);
   }
 }
 
-const joined = (lines: Line[]): string => lines.map((line) => line.body + line.eol).join('');
-
-function headerOf(body: string): string | null {
-  // 数组表（`[[x]]`）也算一段的边界：交回一个空串，它永远不等于一个表名，但会切断上面那一段。
-  if (/^[ \t]*\[\[/.test(body)) return '';
-  const match = /^[ \t]*\[([^\s[\]]+)\][ \t]*(#.*)?$/.exec(body);
-  return match === null ? null : match[1];
-}
-
-// 等号右边那一段：交回到注释或行尾之前那一个跨度。数组、内联表、没在本行闭上的引号都认不下来。
-function valueSpan(body: string, from: number): number | null {
-  let index = from;
-  while (body[index] === ' ' || body[index] === '\t') index += 1;
-  let quote = '';
-  for (; index < body.length; index += 1) {
-    const char = body[index];
-    if (quote !== '') {
-      if (quote === '"' && char === '\\') index += 1;
-      else if (char === quote) quote = '';
-      continue;
+function applyTextEdits(text: string, edits: TextEdit[]): string {
+  const ordered = [...edits].sort((left, right) => right.start - left.start || right.end - left.end);
+  let boundary = text.length + 1;
+  let result = text;
+  for (const edit of ordered) {
+    if (edit.start < 0 || edit.end < edit.start || edit.end > text.length || edit.end > boundary) {
+      throw new KernelError('config_edit_verify_failed', { detail: 'TOML edit ranges overlap or exceed the document' });
     }
-    if (char === '"' || char === "'") quote = char;
-    else if (char === '#' || char === '[' || char === '{') break;
+    result = `${result.slice(0, edit.start)}${edit.text}${result.slice(edit.end)}`;
+    boundary = edit.start;
   }
-  if (quote !== '') return null;
-  if (body[index] === '[' || body[index] === '{') return null;
-  let end = index;
-  while (body[end - 1] === ' ' || body[end - 1] === '\t') end -= 1;
-  return end > from ? end : null;
+  return result;
 }
 
-function replaceValue(body: string, equal: number, literal: string): string | null {
-  let after = equal + 1;
-  while (body[after] === ' ' || body[after] === '\t') after += 1;
-  const end = valueSpan(body, after);
-  if (end === null) return null;
-  return `${body.slice(0, equal + 1)} ${literal}${body.slice(end)}`;
+function valueShape(value: AST.TOMLContentNode): string | undefined {
+  if (value.type === 'TOMLArray') return 'an array';
+  if (value.type === 'TOMLInlineTable') return 'an inline table';
+  if (value.type === 'TOMLValue' && value.kind === 'string' && value.multiline) return 'a multi-line string';
+  return undefined;
 }
 
-// 任意一条键行：补一行时要知道这一张表里最后那一条键落在哪儿。
-const KEY_ANY = /^[ \t]*[^ \t=#]+[ \t]*=/;
+function changeTomlValue(pair: ParsedPair, literal: string): TextEdit {
+  const shape = valueShape(pair.node.value);
+  if (shape !== undefined) {
+    throw new KernelError('config_edit_shape_unsupported', {
+      detail: `${pair.path.join('.')} holds ${shape}; only a single scalar value can be changed`,
+    });
+  }
+  return { start: pair.node.value.range[0], end: pair.node.value.range[1], text: literal };
+}
 
-function keyLine(body: string, key: string): { equal: number } | null {
-  if (body.trimStart().startsWith('#')) return null;
-  const match = /^[ \t]*([^ \t=#]+)[ \t]*=/.exec(body);
-  if (match === null || match[1] !== key) return null;
-  return { equal: body.indexOf('=', match[0].length - 1) };
+function standardTable(tables: AST.TOMLTable[], path: readonly (string | number)[]): AST.TOMLTable | undefined {
+  return tables.find((table) => table.kind === 'standard' && sameTomlPath(table.resolvedKey, path));
+}
+
+function appendTomlTable(text: string, table: string, key: string, literal: string): string {
+  const eol = lineEndingAt(text, text.length);
+  const prefix = text === ''
+    ? ''
+    : text.endsWith(`${eol}${eol}`) ? '' : text.endsWith(eol) ? eol : `${eol}${eol}`;
+  return `${text}${prefix}[${table}]${eol}${key} = ${literal}${eol}`;
 }
 
 /** 在原文里换掉那一个值：注释、其余键、键的顺序与每一行的换行形状都留着。键不存在时在那一张表里补一行。 */
-export function editTomlValue(text: string, path: readonly [string, string], literal: string): { text: string; created: boolean } {
-  const [table, key] = path;
-  const lines = splitLines(text);
-  const eol = lines.find((line) => line.eol !== '')?.eol ?? '\n';
-  const first = lines.findIndex((line) => headerOf(line.body) !== null);
-  // 顶层那一段（第一张表的头之前）写的 `表.键 = 值` 与表里那一条是同一件事。
-  const scope = first === -1 ? lines.length : first;
-  for (let index = 0; index < scope; index += 1) {
-    const found = keyLine(lines[index].body, `${table}.${key}`);
-    if (found === null) continue;
-    const replaced = replaceValue(lines[index].body, found.equal, literal);
-    if (replaced === null) throw new KernelError('config_edit_shape_unsupported', { detail: 'that value is not one line' });
-    lines[index].body = replaced;
-    return { text: joined(lines), created: false };
-  }
-  if (first === -1) {
-    return appendTable(lines, eol, table, key, literal);
-  }
-  const block = lines.findIndex((line, index) => index >= first && headerOf(line.body) === table);
-  if (block === -1) {
-    return appendTable(lines, eol, table, key, literal);
-  }
-  const until = lines.findIndex((line, index) => index > block && headerOf(line.body) !== null);
-  const end = until === -1 ? lines.length : until;
-  let last = block;
-  for (let index = block + 1; index < end; index += 1) {
-    const found = keyLine(lines[index].body, key);
-    if (found === null) {
-      if (KEY_ANY.test(lines[index].body)) last = index;
-      continue;
+export function editTomlValue(text: string, path: readonly [string, string], literal: string, structured = false): { text: string; created: boolean } {
+  const parsed = parseDocument(text);
+  const existing = parsed.pairs.find((pair) => sameTomlPath(pair.path, path));
+  if (existing !== undefined) {
+    if (structured) {
+      // 受管数组或表内有注释时拒绝整值替换，保持原文；可用原文编辑器调整。
+      if (parsed.root.comments.some((comment) => comment.range[0] > existing.node.value.range[0] && comment.range[1] < existing.node.value.range[1])) {
+        throw new KernelError('config_edit_shape_unsupported', { detail: 'the managed value contains comments; edit this value in the config file' });
+      }
+      return { text: applyTextEdits(text, [{ start: existing.node.value.range[0], end: existing.node.value.range[1], text: literal }]), created: false };
     }
-    const replaced = replaceValue(lines[index].body, found.equal, literal);
-    if (replaced === null) throw new KernelError('config_edit_shape_unsupported', { detail: 'that value is not one line' });
-    lines[index].body = replaced;
-    return { text: joined(lines), created: false };
+    return { text: applyTextEdits(text, [changeTomlValue(existing, literal)]), created: false };
   }
-  // 补在这一张表已有那些键的后面：表头紧跟着一行注释时，那一行注释不该被插到中间去。
-  lines.splice(last + 1, 0, { body: `${key} = ${literal}`, eol });
-  return { text: joined(lines), created: true };
-}
 
-function appendTable(lines: Line[], eol: string, table: string, key: string, literal: string): { text: string; created: boolean } {
-  // 那张表只以数组表（`[[policy.rules]]`）的形式存在时，补的标量要落在那几段之前：
-  // 先 `[[a.b]]` 再声明 `[a]` 不是合法形状，而且读的人也会以为这一行属于下面那一段。
-  const anchor = arrayAnchorOf(lines, table);
-  if (anchor !== -1) {
-    lines.splice(anchor, 0, { body: `[${table}]`, eol }, { body: `${key} = ${literal}`, eol }, { body: '', eol });
-    return { text: joined(lines), created: true };
+  const [tableName, key] = path;
+  const table = standardTable(parsed.tables, [tableName]);
+  if (table !== undefined) {
+    const directPairs = parsed.pairs.filter((pair) =>
+      pair.node.parent === table && pair.path.length === 2 && pair.path[0] === tableName,
+    );
+    const last = directPairs.filter((pair) => valueShape(pair.node.value) !== 'a multi-line string').at(-1);
+    const anchor = last?.node.range[1] ?? table.key.range[0];
+    const at = lineEnd(text, anchor);
+    const eol = lineEndingAt(text, anchor);
+    const prefix = at === text.length && !text.endsWith('\n') ? eol : '';
+    return {
+      text: applyTextEdits(text, [{ start: at, end: at, text: `${prefix}${key} = ${literal}${eol}` }]),
+      created: true,
+    };
   }
-  const last = lines.at(-1)!;
-  const base = last.body === '' && last.eol === '' ? lines.slice(0, -1) : lines;
-  const added = base.length === 0 ? [] : [{ body: '', eol }];
-  return {
-    text: joined([...base, ...added, { body: `[${table}]`, eol }, { body: `${key} = ${literal}`, eol }]),
-    created: true,
-  };
-}
 
-// 那一张表的第一段数组表从哪里开始：贴着它头上那几行注释一起算作那一段的，不插到注释中间去。
-function arrayAnchorOf(lines: Line[], table: string): number {
-  const header = new RegExp(`^[ \\t]*\\[\\[\\s*${table}\\.[^\\]]*\\]\\]`);
-  const index = lines.findIndex((line) => header.test(line.body));
-  if (index === -1) return -1;
-  let from = index;
-  while (from > 0 && lines[from - 1].body.trimStart().startsWith('#')) from -= 1;
-  return from;
+  const rootPairs = parsed.pairs.filter((pair) =>
+    pair.node.parent.type === 'TOMLTopLevelTable'
+      && pair.path.length > 1
+      && pair.path[0] === tableName,
+  );
+  const rootPair = rootPairs.at(-1);
+  if (rootPair !== undefined) {
+    const anchor = rootPair.node.range[1];
+    const at = lineEnd(text, anchor);
+    const eol = lineEndingAt(text, anchor);
+    const prefix = at === text.length && !text.endsWith('\n') ? eol : '';
+    return {
+      text: applyTextEdits(text, [{ start: at, end: at, text: `${prefix}${tableName}.${key} = ${literal}${eol}` }]),
+      created: true,
+    };
+  }
+
+  const descendant = parsed.tables.find((candidate) =>
+    startsWithTomlPath(candidate.resolvedKey, [tableName]) && candidate.resolvedKey.length > 1,
+  );
+  if (descendant !== undefined) {
+    const at = leadingCommentStart(text, parsed.root, descendant);
+    const eol = lineEndingAt(text, descendant.range[0]);
+    return {
+      text: applyTextEdits(text, [{ start: at, end: at, text: `[${tableName}]${eol}${key} = ${literal}${eol}${eol}` }]),
+      created: true,
+    };
+  }
+  return { text: appendTomlTable(text, tableName, key, literal), created: true };
 }
 
 /** 一份文件内容的版本：界面上读回来带着它，写的时候原样交回来核对。 */
@@ -222,21 +291,18 @@ export function configVersion(text: string): string {
   return createHash('sha256').update(text).digest('hex');
 }
 
-export async function readConfigVersion(file: string): Promise<string> {
+/** 一份设置文件读一遍：版本与解析出来的那张表出自同一次读（方案 3A）。文件不在时版本是空串、表是空的。 */
+export async function readConfigLayer(file: string): Promise<{ version: string; table: Record<string, unknown> }> {
+  let text: string;
   try {
-    return configVersion((await readFile(resolve(file))).toString('utf8'));
+    text = (await readFile(resolve(file))).toString('utf8');
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return '';
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: '', table: {} };
     throw new KernelRuntimeError('config_file_read_failed', { cause: error, detail: file });
   }
-}
-
-/** 一份文件里写着的那张规则表：界面上的第几条指的是这一份，不是折完那一份。 */
-export async function readConfigRules(file: string): Promise<PolicyRule[]> {
   try {
-    return rulesOfLayer(parse((await readFile(resolve(file))).toString('utf8')) as Record<string, unknown>);
+    return { version: configVersion(text), table: parse(text) as Record<string, unknown> };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw new KernelRuntimeError('config_file_read_failed', { cause: error, detail: file });
   }
 }
@@ -261,6 +327,8 @@ export async function writeConfigField(
     if ((cause as NodeJS.ErrnoException).code === 'ELOCKED') throw new KernelError('config_locked', { detail: `${target} has an active writer` });
     throw new KernelRuntimeError('config_lock_failed', { cause, detail: target });
   }
+  const temporary = `${target}.${randomUUID()}.tmp`;
+  let temporaryCreated = false;
   try {
     let current = '';
     let exists = true;
@@ -290,7 +358,7 @@ export async function writeConfigField(
     const before = definition.kind === 'rules' ? rulesOfLayer(read(current, 'config_file_invalid')) : [];
     const edited = scalar === undefined
       ? editRuleTable(current, op as RuleOp, index, rule)
-      : editTomlValue(current, definition.path, scalar.literal);
+      : editTomlValue(current, definition.path, scalar.literal, definition.kind === 'services' || definition.kind === 'selection');
     const parsed = read(edited.text, 'config_edit_verify_failed');
     if (scalar === undefined) {
       // 核对的是整张表：别的项被这一趟动过，也要在这里说出来。
@@ -301,15 +369,20 @@ export async function writeConfigField(
       }
     } else {
       const landed = definition.path.reduce<unknown>((node, part) => (node as Record<string, unknown>)?.[part], parsed);
-      if (landed !== scalar.value) {
+      if (!isDeepStrictEqual(structuredClone(landed), structuredClone(scalar.value))) {
         throw new KernelError('config_edit_verify_failed', { detail: `${definition.path.join('.')} reads back as ${JSON.stringify(landed)}` });
       }
     }
-    const temporary = `${target}.tmp`;
-    await writeFile(temporary, edited.text, 'utf8');
+    const handle = await open(temporary, 'wx', mode ?? 0o600);
+    temporaryCreated = true;
+    try {
+      await handle.writeFile(edited.text, 'utf8');
+      await handle.chmod(mode ?? 0o600);
+    } finally {
+      await handle.close();
+    }
     await rename(temporary, target);
-    // 新写的那一份按只有本人可读写；已经有那一份保住它自己的模式。Windows 上这一层由目录的继承规则管，chmod 只动到只读位。
-    await chmod(target, mode ?? 0o600);
+    temporaryCreated = false;
     return {
       version: configVersion(edited.text),
       created: edited.created,
@@ -317,9 +390,13 @@ export async function writeConfigField(
     };
   } finally {
     try {
-      await release();
-    } catch (cause) {
-      throw new KernelRuntimeError('config_unlock_failed', { cause, detail: target });
+      if (temporaryCreated) await rm(temporary, { force: true });
+    } finally {
+      try {
+        await release();
+      } catch (cause) {
+        throw new KernelRuntimeError('config_unlock_failed', { cause, detail: target });
+      }
     }
   }
 }
@@ -380,109 +457,115 @@ export function checkedRule(input: unknown): PolicyRule {
   };
 }
 
-const isRulesHeader = (body: string): boolean => /^[ \t]*\[\[\s*policy\.rules\s*\]\][ \t]*(#.*)?$/.test(body);
+/** 在原文里对规则表做一次动作：新增一项、换掉那一项里的键、删掉那一项。表之外的字节一个不动。 */
+const RULES_PATH = ['policy', 'rules'] as const;
 
-function ruleName(body: string): string | null {
-  const match = /^[ \t]*([^ \t=#]+)[ \t]*=/.exec(body);
-  return match?.[1] ?? null;
+function ruleTables(document: ParsedDocument): AST.TOMLTable[] {
+  return document.tables.filter((table) =>
+    table.kind === 'array'
+      && table.resolvedKey.length === 3
+      && sameTomlPath(table.resolvedKey.slice(0, 2), RULES_PATH)
+      && typeof table.resolvedKey[2] === 'number',
+  );
 }
 
-// 一条数组表项占的行范围：从它的头到下一个任何表头之前，文件末尾也算一个边界。
-function ruleBlocks(lines: Line[]): { start: number; end: number }[] {
-  const blocks: { start: number; end: number }[] = [];
-  for (let index = 0; index < lines.length; index += 1) {
-    if (!isRulesHeader(lines[index].body)) continue;
-    let end = lines.length;
-    for (let next = index + 1; next < lines.length; next += 1) {
-      if (headerOf(lines[next].body) !== null) {
-        end = next;
-        break;
-      }
-    }
-    blocks.push({ start: index, end });
-    index = end - 1;
-  }
-  return blocks;
+function ruleDescendants(document: ParsedDocument, rule: AST.TOMLTable): AST.TOMLTable[] {
+  return document.tables.filter((table) => startsWithTomlPath(table.resolvedKey, rule.resolvedKey));
 }
 
-function ruleLines(rule: PolicyRule, eol: string): Line[] {
-  const added: Line[] = [{ body: '[[policy.rules]]', eol }];
+function ruleTableEdit(text: string, document: ParsedDocument, table: AST.TOMLTable): TextEdit {
+  const next = document.tables.find((candidate) => candidate.range[0] >= table.range[1]);
+  const end = next === undefined
+    ? trailingCommentStart(text, document.root) ?? text.length
+    : leadingCommentStart(text, document.root, next);
+  return { start: leadingCommentStart(text, document.root, table), end, text: '' };
+}
+
+function ruleBlockText(rule: PolicyRule, eol: string): string {
+  const rows = [`[[policy.rules]]`];
   for (const key of RULE_FIELDS) {
     const value = rule[key];
-    if (value !== undefined) added.push({ body: `${key} = ${JSON.stringify(value)}`, eol });
+    if (value !== undefined) rows.push(`${key} = ${JSON.stringify(value)}`);
   }
-  return added;
+  return `${rows.join(eol)}${eol}`;
 }
 
-// 注释说的是它下面那一段：追加要落在贴着下一个表头的注释之前，删除要把贴着自己头上的注释一起带走。
-function unattachedEnd(lines: Line[], block: { start: number; end: number }): number {
-  let end = block.end;
-  while (end > block.start + 1 && lines[end - 1].body.trimStart().startsWith('#')) end -= 1;
-  return end;
-}
-
-function attachedComment(lines: Line[], start: number): number {
-  let from = start;
-  while (from > 0 && lines[from - 1].body.trimStart().startsWith('#')) from -= 1;
-  return from;
-}
-
-/** 在原文里对规则表做一次动作：新增一项、换掉那一项里的键、删掉那一项。表之外的字节一个不动。 */
 export function editRuleTable(text: string, op: RuleOp, index: number, rule?: PolicyRule): { text: string; created: boolean } {
-  const lines = splitLines(text);
-  const eol = lines.find((line) => line.eol !== '')?.eol ?? '\n';
-  const blocks = ruleBlocks(lines);
-  if (op === 'add') {
-    const last = blocks.at(-1);
-    const added = ruleLines(rule as PolicyRule, eol);
-    if (last === undefined) {
-      if (text.trim() === '') return { text: joined(added), created: true };
-      lines.at(-1)!.eol = eol;
-      lines.push({ body: '', eol }, ...added);
-      return { text: joined(lines), created: true };
-    }
-    lines.at(-1)!.eol = eol;
-    lines.splice(unattachedEnd(lines, last), 0, ...added);
-    return { text: joined(lines), created: false };
+  const document = parseDocument(text);
+  if (document.pairs.some((pair) => sameTomlPath(pair.path, RULES_PATH))) {
+    throw new KernelError('config_edit_shape_unsupported', { detail: 'policy.rules must use array-of-table headers for rule editing' });
   }
-  const block = blocks[index];
-  if (block === undefined) {
-    throw new KernelError('config_rule_index', { detail: `that file has ${blocks.length} rules, so rule ${index} is not one of them` });
+  const rules = ruleTables(document);
+  if (op === 'add') {
+    const last = rules.at(-1);
+    if (last === undefined) {
+      const eol = lineEndingAt(text, text.length);
+      const prefix = text === ''
+        ? ''
+        : text.endsWith(`${eol}${eol}`) ? '' : text.endsWith(eol) ? eol : `${eol}${eol}`;
+      return { text: `${text}${prefix}${ruleBlockText(rule as PolicyRule, eol)}`, created: true };
+    }
+    const descendants = ruleDescendants(document, last);
+    const tail = descendants.at(-1) ?? last;
+    const next = document.tables.find((table) =>
+      table.range[0] >= tail.range[1] && !startsWithTomlPath(table.resolvedKey, last.resolvedKey),
+    );
+    const at = next === undefined
+      ? trailingCommentStart(text, document.root) ?? text.length
+      : leadingCommentStart(text, document.root, next);
+    const eol = lineEndingAt(text, Math.max(0, at - 1));
+    const prefix = at === text.length && !text.slice(0, at).endsWith('\n') ? eol : '';
+    return {
+      text: applyTextEdits(text, [{ start: at, end: at, text: `${prefix}${ruleBlockText(rule as PolicyRule, eol)}` }]),
+      created: false,
+    };
+  }
+
+  const target = rules[index];
+  if (target === undefined) {
+    throw new KernelError('config_rule_index', { detail: `that file has ${rules.length} rules, so rule ${index} is not one of them` });
   }
   if (op === 'remove') {
-    const from = attachedComment(lines, block.start);
-    lines.splice(from, block.end - from);
-    return { text: joined(lines), created: false };
+    const edits = ruleDescendants(document, target).map((table) => ruleTableEdit(text, document, table));
+    return { text: applyTextEdits(text, edits), created: false };
   }
+
   const wanted = rule as PolicyRule;
+  const fields = document.pairs.filter((pair) =>
+    startsWithTomlPath(pair.path, target.resolvedKey) && pair.path.length === target.resolvedKey.length + 1,
+  );
   const seen = new Set<string>();
-  const kept: Line[] = [];
-  for (let cursor = block.start + 1; cursor < block.end; cursor += 1) {
-    const line = lines[cursor];
-    const name = ruleName(line.body);
-    if (name === null || !(RULE_FIELDS as readonly string[]).includes(name)) {
-      kept.push(line);
-      continue;
-    }
+  const edits: TextEdit[] = [];
+  for (const pair of fields) {
+    const name = String(pair.path.at(-1));
+    if (!(RULE_FIELDS as readonly string[]).includes(name)) continue;
     seen.add(name);
-    const value = (wanted as Record<string, string | undefined>)[name];
-    // 新规则里没有了的那一格（`match` 与 `reason` 都可以空着）删掉这一行，留着会读成旧值。
-    if (value === undefined) continue;
-    const found = keyLine(line.body, name);
-    if (found === null) {
-      kept.push(line);
-      continue;
+    const value = wanted[name as keyof PolicyRule];
+    if (value === undefined) {
+      edits.push({
+        start: lineStart(text, pair.node.range[0]),
+        end: lineEnd(text, pair.node.range[1] - 1),
+        text: '',
+      });
+    } else {
+      edits.push(changeTomlValue(pair, JSON.stringify(value)));
     }
-    const replaced = replaceValue(line.body, found.equal, JSON.stringify(value));
-    if (replaced === null) throw new KernelError('config_edit_shape_unsupported', { detail: `${name} is not one line` });
-    kept.push({ body: replaced, eol: line.eol });
   }
-  const toAdd = RULE_FIELDS.filter((key) => wanted[key] !== undefined && !seen.has(key))
-    .map((key) => ({ body: `${key} = ${JSON.stringify(wanted[key])}`, eol }));
-  const after = kept.map((line) => KEY_ANY.test(line.body)).lastIndexOf(true);
-  kept.splice(after === -1 ? kept.length : after + 1, 0, ...toAdd);
-  lines.splice(block.start + 1, block.end - block.start - 1, ...kept);
-  return { text: joined(lines), created: false };
+  const toAdd = RULE_FIELDS.filter((key) => wanted[key] !== undefined && !seen.has(key));
+  if (toAdd.length > 0) {
+    const retained = fields.filter((pair) => {
+      const name = String(pair.path.at(-1));
+      return valueShape(pair.node.value) !== 'a multi-line string'
+        && (!(RULE_FIELDS as readonly string[]).includes(name) || wanted[name as keyof PolicyRule] !== undefined);
+    });
+    const last = retained.at(-1);
+    const anchor = last?.node.range[1] ?? target.key.range[0];
+    const at = lineEnd(text, anchor);
+    const eol = lineEndingAt(text, anchor);
+    const prefix = at === text.length && !text.endsWith('\n') ? eol : '';
+    edits.push({ start: at, end: at, text: `${prefix}${toAdd.map((key) => `${key} = ${JSON.stringify(wanted[key])}${eol}`).join('')}` });
+  }
+  return { text: applyTextEdits(text, edits), created: false };
 }
 
 /** 交回一张表里读出来的那些项：认不下的形状报出来，不静默少一项。 */

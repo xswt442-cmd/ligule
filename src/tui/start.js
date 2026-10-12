@@ -7,33 +7,32 @@ import { createConnection } from '../host/connection.js';
 import { createMemoryConnectionPair } from '../host/memory.js';
 import { serveHost } from '../host/host.js';
 import { App } from './app.js';
-import { flushHistory, historyPathOf, loadHistory, pushHistory, rememberHistory } from './history.js';
+import { flushHistory, historyPathOf, loadHistory, pushHistory, rememberHistory } from '../kernel/input-history.js';
 import { flushInput, inputPathOf, readInput, rememberInput } from './input-store.js';
 import { flushKeys, keyPathOf, readKeys, writeKeys } from './key-store.js';
 import { titleEscape } from './output.js';
 
-export async function runTui({ config, provider, policy, logger, modeName, modePaths, extensions, stdout = process.stdout, stdin = process.stdin, stderr = process.stderr, editor = process.env.VISUAL || process.env.EDITOR, historyFile = historyPathOf(), inputFile = inputPathOf(), keyFile = keyPathOf() }) {
+export async function runTui({ config, provider, policy, logger, modeName, modePaths, extensions, locale = 'zh', stdout = process.stdout, stdin = process.stdin, stderr = process.stderr, editor = process.env.VISUAL || process.env.EDITOR, historyFile = historyPathOf(), inputFile = inputPathOf(), keyFile = keyPathOf() }) {
   const pair = createMemoryConnectionPair();
-  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy, logger, modeName, modePaths, extensions });
+  // 终端界面答得了提问：这一路进来的时候 stdin 与 stdout 都已经是真终端（`ligule tui` 在没有终端时就停了）。
+  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy, logger, modeName, modePaths, extensions, interactive: true });
   const client = createConnection(pair.client);
   try {
     const { sessionId } = await client.request('session.create', {});
     // 输入历史读一次就交进界面：往后的读与翻都看界面自己那一份，写这一份文件也只由界面发起。
-    const entries = await loadHistory(historyFile);
-    let known = entries;
     const history = {
-      entries,
-      remember: async (text) => {
-        known = pushHistory(known, text);
-        await rememberHistory(historyFile, known);
-      },
+      entries: await loadHistory(historyFile),
+      // 只把这一句交出去，基准由写的那一遍在锁内读：留着进程里那份旧快照整份写回，会把另一端刚落下的一句挤到后面。
+      // 交回写成之后的那一份清单，界面采用它——屏幕上的历史与文件里的那一份才是同一份。
+      remember: (text) => rememberHistory(historyFile, [text]),
     };
     const instance = render(
       createElement(App, {
         client,
         sessionId,
+        locale,
         // 编辑器那一个命令名由启动这一侧读环境变量，界面自己不碰进程。
-        info: { model: config.model?.model, boundary: config.boundary, editor },
+        info: { model: config.model?.model, boundary: config.workspaceRoot ?? config.boundary, editor },
         history,
         // 草稿与排着的那几句归本机这一份文件：读写都由启动这一侧接出去，界面不认识路径（与历史同一层做法）。
         inputs: {

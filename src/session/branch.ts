@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { KernelError } from '../kernel/error.js';
+import { workspaceIdentity } from '../kernel/workspace.js';
 import { createSessionHeader, type SessionModeIdentity } from './format.js';
 import { parseSessionBytes } from './record.js';
 
@@ -73,6 +74,10 @@ export async function branchSession(
   const header = createSessionHeader({
     id,
     projectRoot,
+    // 支线抄的是来源那一份首行：它落在哪一具工作区、当初怎么落到那儿的（方案 5.5.4「分支继承来源会话的实际工作区与显示归属」）。
+    // 父侧那一格没有说过这两件事，就还是不写，不拿现在的目录或默认值替它猜一个来源。
+    workspace: record.header?.workspace ?? (projectRoot === undefined || projectRoot === '' ? undefined : workspaceIdentity(projectRoot)),
+    workspaceOrigin: record.header?.workspaceOrigin,
     createdAt: new Date().toISOString(),
     mode: modeInForce(kept, record.header?.mode),
   });

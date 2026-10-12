@@ -44,6 +44,36 @@ export function findUnresolvedCalls(events: SessionEvent[]): UnresolvedCall[] {
   return unresolved;
 }
 
+// turnContext、未答复的助手调用和尾部没有助手答复的 user 都能证明一轮已经开始。
+// 没有这些证据的旧记录保持原样，避免把旧版已完成轮次补成中断。
+function findUnfinishedTurns(events: SessionEvent[]): number[] {
+  const users = events.filter((event) => event.kind === 'user' && Number.isInteger(event.seq));
+  const userSeqs = new Set(users.map((event) => Number(event.seq)));
+  const started = new Set<number>();
+  const terminal = new Set<number>();
+  let latestUserSeq: number | undefined;
+  for (const event of events) {
+    if (event.kind === 'user' && Number.isInteger(event.seq)) {
+      latestUserSeq = Number(event.seq);
+    } else if (event.kind === 'turnContext' && Number.isInteger(event.userSeq) && userSeqs.has(Number(event.userSeq))) {
+      started.add(Number(event.userSeq));
+    } else if (event.kind === 'turn') {
+      if (Number.isInteger(event.userSeq)) terminal.add(Number(event.userSeq));
+      else if (latestUserSeq !== undefined) terminal.add(latestUserSeq);
+    }
+  }
+  const lastUser = users.at(-1);
+  if (lastUser !== undefined
+    && !events.some((event) => event.kind === 'assistant' && Number(event.seq) > Number(lastUser.seq))) {
+    started.add(Number(lastUser.seq));
+  }
+  for (const call of findUnresolvedCalls(events)) {
+    const user = users.filter((event) => Number(event.seq) < call.assistantSeq).at(-1);
+    if (user !== undefined) started.add(Number(user.seq));
+  }
+  return [...started].filter((userSeq) => !terminal.has(userSeq));
+}
+
 export function buildRepairEvents(
   unresolved: UnresolvedCall[],
   { readOnly }: { readOnly: Set<string> },
@@ -78,8 +108,12 @@ export async function repairUnresolvedCalls(
   session: RepairSession,
   { readOnly }: { readOnly: Set<string> },
 ): Promise<SessionEvent[]> {
-  const unresolved = findUnresolvedCalls(await session.read());
+  const events = await session.read();
+  const unresolved = findUnresolvedCalls(events);
   const appended: SessionEvent[] = [];
   for (const event of buildRepairEvents(unresolved, { readOnly })) appended.push(await session.append(event));
+  for (const userSeq of findUnfinishedTurns(events)) {
+    await session.append({ kind: 'turn', ignorable: true, status: 'interrupted', userSeq, code: 'host_restarted' });
+  }
   return appended;
 }

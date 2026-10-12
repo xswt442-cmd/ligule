@@ -102,11 +102,11 @@ test('/bind changes what a key does and what the screen says about it', options,
   // 说出来的那几句是提交过的行：`Static` 只打一次，读它要看整段流，不能只看最后一帧。
   const spoken = (text) => painted.includes(text);
   try {
-    await waitFor(() => lastFrame().includes('要模型做的事'), { read: lastFrame });
+    await waitFor(() => lastFrame().includes('描述任务'), { read: lastFrame });
     stdin.write('/bind newline ctrl+x');
     await delay(40);
     stdin.write('\r');
-    await waitFor(() => spoken('newline 现在是 Ctrl+X（输入）'), { read: () => painted });
+    await waitFor(() => spoken('newline = Ctrl+X'), { read: () => painted });
     assert.match(lastFrame(), /Ctrl\+X 换行/, '输入行那句说明跟着换：说的那串字与按键落的事是同一处来的');
     assert.deepEqual(written.at(-1), { newline: 'ctrl+x' }, '那一条覆盖写进本机那一格');
 
@@ -114,21 +114,21 @@ test('/bind changes what a key does and what the screen says about it', options,
     stdin.write('/bind send ctrl+x');
     await delay(40);
     stdin.write('\r');
-    await waitFor(() => spoken('已经落在'), { read: () => painted });
-    assert.match(painted, /send 与 newline/, '说的是那两条动作');
+    await waitFor(() => spoken('冲突'), { read: () => painted });
+    assert.match(painted, /send \/ newline/, '说明发生冲突的两项动作');
     assert.equal(written.length, 1, '撞着的那一次没写进本机那一格');
 
     stdin.write('/bind reset newline');
     await delay(40);
     stdin.write('\r');
-    await waitFor(() => spoken('newline 回到 Shift+Enter'), { read: () => painted });
+    await waitFor(() => spoken('newline 已恢复为 Shift+Enter'), { read: () => painted });
     assert.deepEqual(written.at(-1), {}, '取消那一条覆盖之后，本机那一格是空的');
 
     // 那一记键空出来了：把它派给发送，按下它就走发送，Enter 反倒不再发。
     stdin.write('/bind send ctrl+x');
     await delay(40);
     stdin.write('\r');
-    await waitFor(() => spoken('send 现在是 Ctrl+X（输入）'), { read: () => painted });
+    await waitFor(() => spoken('send = Ctrl+X'), { read: () => painted });
     stdin.write('甲');
     await delay(40);
     stdin.write('\x18');

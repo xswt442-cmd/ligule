@@ -18,7 +18,17 @@ async function withDirectory(run) {
     const absoluteDirectory = resolve(directory);
     const relativeDirectory = relative(testplace, absoluteDirectory);
     assert.ok(relativeDirectory !== '' && !isAbsolute(relativeDirectory) && relativeDirectory !== '..' && !relativeDirectory.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`));
-    await rm(absoluteDirectory, { recursive: true, force: true });
+    // 刚退出的那一具子进程在 Windows 上不一定立刻放掉那一份可执行文件的句柄：删不动时重试一小段（与宿主那份检查同一种处理）。
+    const deadline = Date.now() + 5_000;
+    for (;;) {
+      try {
+        await rm(absoluteDirectory, { recursive: true, force: true });
+        break;
+      } catch (error) {
+        if (Date.now() >= deadline) throw error;
+        await new Promise((done) => setTimeout(done, 100));
+      }
+    }
   }
 }
 

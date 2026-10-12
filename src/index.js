@@ -42,6 +42,7 @@ export { SESSION_FORMAT_VERSION, foldLabel, parseSessionEvents } from './session
 export { parseSessionBytes, readSessionRecord } from './session/record.js';
 export { findUnresolvedCalls, buildRepairEvents, repairUnresolvedCalls } from './session/repair.js';
 export { chooseResumeMode, listSessions, sessionDirectory } from './session/list.js';
+export { adoptForSessionDirectory, adoptLegacySessions } from './session/adopt.js';
 export { searchSessions } from './session/search.js';
 export { branchSession } from './session/branch.js';
 export { CHECKPOINT_FORMAT_VERSION, CHECKPOINT_INPUT_VERSION, checkpointPath, createCheckpoint, loadCheckpoint, prefixDigest, usableCheckpoint } from './session/checkpoint.js';
@@ -49,11 +50,11 @@ export { createCompaction, cutPoint, estimateTokens } from './session/compaction
 export { summarizeVerdicts, formatVerdicts } from './session/verdicts.js';
 export { createLoop, DEFAULT_LOOP_LIMITS } from './kernel/loop.js';
 export {
-  METHODS, APPROVAL_METHOD, NOTIFICATIONS, validateCall, isApproved,
+  METHODS, APPROVAL_METHOD, QUESTION_METHOD, NOTIFICATIONS, validateCall, isApproved,
 } from './host/protocol.js';
 export { createConnection } from './host/connection.js';
 export { createMemoryConnectionPair } from './host/memory.js';
-export { createHost, serveHost, providerFromConfig, compactionLimitsOf } from './host/host.js';
+export { createHost, serveHost, providerFromConfig, hostProviderFromConfig, compactionLimitsOf } from './host/host.js';
 export {
   createMessagesProvider, capabilitiesOf, MESSAGES_CAPABILITIES,
 } from './model/messages.js';
@@ -63,5 +64,4 @@ export {
 export { DEFAULT_RETRY } from './model/http.js';
 export { resultOf, failureOf, refusalOf, spillContent, resultLimit, DEFAULT_RESULT_BYTES } from './kernel/result.js';
 
-// 与 package.json#version 保持一致，test/kernel.test.js 断言这一点。
-export const VERSION = '0.0.1';
+export { VERSION } from './version.js';

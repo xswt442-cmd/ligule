@@ -38,15 +38,40 @@ test('a denied call never reaches the user', async () => {
 test('an asked call follows the answer, and a missing channel denies', async () => {
   const yes = asked(true);
   assert.deepEqual(await judged(createDecisionChain({ ask: yes.ask }), { tool: 'read', input: {} }), { decision: 'allow' });
-  assert.deepEqual(yes.calls, [{ tool: 'read', input: {}, command: undefined, reason: undefined }]);
+  assert.deepEqual(yes.calls, [{ tool: 'read', input: {}, command: undefined, reason: undefined, policy: 'ask', policySource: 'config', policyForced: false }]);
 
   const no = asked(false);
   assert.equal((await createDecisionChain({ ask: no.ask }).evaluate({ tool: 'read', input: {} })).code, 'ask_declined');
   assert.equal((await createDecisionChain({}).evaluate({ tool: 'read', input: {} })).code, 'ask_unavailable');
 });
 
-test('a later guard cannot undo an earlier denial', async () => {
-  const chain = createDecisionChain({ ask: async () => true });
+// 那一次询问带着自己那一份档位与来源（审阅 C08）：界面看着别的那一份会话时，解释这一条的不能是另一份的档位，
+// 也不能把「被连着拒绝压下来」说成「配置文件里写着逐次询问」。
+test('the question names the tier and the source of the chain that asked', async () => {
+  const plain = asked(true);
+  await judged(createDecisionChain({ ask: plain.ask }), { tool: 'read', input: {} });
+  assert.deepEqual(plain.calls.map((call) => [call.policy, call.policySource, call.policyForced]), [['ask', 'config', false]],
+    '默认那一档问过来的：档位与来源都说得出');
+
+  const session = asked(true);
+  const overridden = createDecisionChain({ mode: 'auto', ask: session.ask });
+  overridden.setMode('ask');
+  await judged(overridden, { tool: 'read', input: {} });
+  assert.deepEqual(session.calls.map((call) => [call.policy, call.policySource, call.policyForced]), [['ask', 'session', false]],
+    '这一条问过来时它走的是这一份会话自己改过的那一档');
+
+  const forced = asked(true);
+  const falling = createDecisionChain({ mode: 'auto', thresholds: { consecutive: 2, total: 99 }, ask: forced.ask });
+  falling.guard(({ command }) => (command === 'rm' ? 'no' : undefined));
+  await falling.evaluate({ tool: 'exec', input: { command: 'rm' } });
+  await falling.evaluate({ tool: 'exec', input: { command: 'rm' } });
+  assert.equal(falling.mode, 'ask', '连着拒掉两次之后这一档被压到逐次询问');
+  await judged(falling, { tool: 'exec', input: { command: 'ls' } });
+  assert.deepEqual(forced.calls.map((call) => [call.policy, call.policySource, call.policyForced]), [['ask', 'config', true]],
+    '压下来那一次说的是这一档被压下来了，来源仍是配置那一份默认');
+});
+
+test('a later guard cannot undo an earlier denial', async () => {  const chain = createDecisionChain({ ask: async () => true });
   chain.guard(() => 'first guard says no');
   chain.guard(() => undefined);
   assert.deepEqual(await judged(chain, { tool: 'exec', input: { command: 'ls' } }), {
@@ -82,6 +107,17 @@ test('every segment of a pipeline has to be covered before an asked call is allo
   assert.equal(calls.length, 1, 'only the pipeline needed a decision');
   assert.equal(calls[0].command, 'git status | grep x');
   assert.equal(calls[0].reason, undefined);
+
+  // 几条放行规则各盖住一段不算盖住整条：判定要说得出命中了哪一条（D77），说不出来就问。
+  const second = asked(true);
+  const across = createDecisionChain({
+    rules: [{ tool: 'exec', decision: 'allow', match: 'git status' }, { tool: 'exec', decision: 'allow', match: 'grep x' }],
+    ask: second.ask,
+  });
+  const wide = await across.evaluate({ tool: 'exec', input: { command: 'git status | grep x' } });
+  assert.equal(wide.via, 'ask');
+  assert.equal(wide.decision, 'allow', '人点头之后才放行：这一条链上没有一条规则盖住两段');
+  assert.equal(second.calls.length, 1);
 });
 
 test('a deny rule catches a segment hidden behind a pipe', async () => {
@@ -129,6 +165,18 @@ test('a prefix rule matches whole arguments only, a wildcard rule matches across
   const wild = createDecisionChain({ rules: [{ tool: 'exec', decision: 'allow', match: 'git *' }], ask: asked().ask });
   assert.deepEqual(await judged(wild, { tool: 'exec', input: { command: 'git commit -m x' } }), { decision: 'allow', segments: ['git commit -m x'] });
   assert.equal((await wild.evaluate({ tool: 'exec', input: { command: 'github push' } })).code, 'ask_declined');
+});
+
+test('a rule with a pattern cannot cover a call that carries no command text', async () => {
+  // 匹配的是命令文本，参数里的路径不参与：读文件那一类调用没有命令文本，
+  // 填了字的规则对它是「比不了」而不是「比不过」，只有留空的那一条盖得住。
+  const { calls, ask } = asked(true);
+  const chain = createDecisionChain({ rules: [{ tool: 'read', decision: 'allow', match: 'src/' }], ask });
+  assert.equal((await chain.evaluate({ tool: 'read', input: { path: 'src/a.js' } })).answer, 'allow');
+  assert.deepEqual(calls.map((call) => call.input), [{ path: 'src/a.js' }], '问过人才放行：这一条规则没有盖住它');
+
+  const blank = createDecisionChain({ rules: [{ tool: 'read', decision: 'allow' }], ask: asked().ask });
+  assert.deepEqual(await judged(blank, { tool: 'read', input: { path: 'src/a.js' } }), { decision: 'allow' }, '留空的那一条盖住每一次调用');
 });
 
 test('consecutive denials fall back to asking every time', async () => {

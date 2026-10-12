@@ -11,6 +11,7 @@ import { execFileSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
+import { releaseManifest } from './pack-release.js';
 
 const repo = fileURLToPath(new URL('..', import.meta.url));
 const packDir = join(repo, 'testplace', 'pack');
@@ -36,10 +37,10 @@ rmSync(work, { recursive: true, force: true });
 mkdirSync(work, { recursive: true });
 
 try {
-  const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'));
+  const pkg = releaseManifest();
   const tarball = `${pkg.name}-${pkg.version}.tgz`;
   mkdirSync(packDir, { recursive: true });
-  execFileSync(process.execPath, [npmCli, 'pack', '--pack-destination', 'testplace/pack'], { cwd: repo, stdio: 'inherit' });
+  execFileSync(process.execPath, [join(repo, 'scripts', 'pack-release.js'), 'testplace/pack'], { cwd: repo, stdio: 'inherit' });
   if (!existsSync(join(packDir, tarball))) {
     throw new Error(`npm pack did not produce testplace/pack/${tarball}`);
   }
@@ -49,6 +50,9 @@ try {
 
   const shipped = join(work, 'package');
   const manifest = JSON.parse(readFileSync(join(shipped, 'package.json'), 'utf8'));
+  if (JSON.stringify(manifest.optionalDependencies) !== JSON.stringify(pkg.optionalDependencies)) {
+    throw new Error(`${tarball} does not carry the release manifest's optional dependencies`);
+  }
   const declared = [
     ...collectTargets(manifest.exports),
     ...collectTargets(manifest.bin),

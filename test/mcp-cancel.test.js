@@ -38,6 +38,7 @@ async function waitForFile(path) {
 }
 
 async function waitForProcessExit(pid) {
+  assert.ok(Number.isSafeInteger(pid) && pid > 0, 'the fixture must publish a positive process id');
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
     try {
@@ -98,7 +99,6 @@ test('cancellation stops MCP initialization and tools/list requests', async () =
       const controller = new AbortController();
       const pending = initializing.registry.toolsOf('slow', controller.signal);
       await waitForFile(initializing.pidPath);
-      await delay(50);
       const cancelled = rejectedQuickly(pending);
       controller.abort();
       assert.ok(await cancelled instanceof Error);

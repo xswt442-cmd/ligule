@@ -5,9 +5,10 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { parseSpec } from './keymap.js';
+import { dataRoot } from '../kernel/config-file.js';
 
-export function keyPathOf(): string {
-  return join(homedir(), '.ligule', 'tui-keys.json');
+export function keyPathOf(home = homedir()): string {
+  return join(dataRoot(home), 'tui-keys.json');
 }
 
 /** 读那一份覆盖：读不懂的一格都不落下，交回的是有效的那一些与拒掉的的名字。 */

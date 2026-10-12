@@ -1,6 +1,7 @@
 // 客户端协议这一层的界面侧读法（D30、D33）。方法与参数模式的定义在后端（`src/host/protocol.js`），
 // 这里不复制那张表，只按帧的形状收发：请求带 id 与 method，答复带同一个 id，通报带 notify。
 // 传输由外面交进来（桌面壳走 Tauri 的命令与事件），这一层不认识载体。
+import type { NotificationBridge } from './notifications';
 
 export type Frame = {
   id?: string;
@@ -16,6 +17,7 @@ export type Frame = {
 };
 
 export type Transport = {
+  notifications?: NotificationBridge;
   send: (frame: string) => void;
   onFrame: (handle: (text: string) => void) => void;
   onLog: (handle: (text: string) => void) => void;
@@ -23,6 +25,13 @@ export type Transport = {
   onFault?: (handle: (reason: string) => void) => void;
   // 换一具后端进程。壳里那是 `host_restart` 一条命令；开发时那一份假宿主用它重新答话（第 65 步）。
   restart?: () => Promise<void>;
+  // 首次使用时那一份默认工作区：壳把系统文档目录下那一具交回来，不在那儿就建出来（方案 5.5.3）。
+  // 载体交不出这一格时界面不猜：没有可用的工作区就请人自己选一具，不去用宿主继承的那个进程目录。
+  defaultWorkspace?: () => Promise<string>;
+  // 退出请求从壳那一侧进来：托盘「退出」、macOS 的 Cmd+Q 与关掉最后一扇窗口在壳那里汇成同一条（方案 6.4）。
+  // 界面说出受影响的会话、等人点头，再由 `quit` 真的收。载体没有这两格时界面不猜，也不自己不退出。
+  onQuit?: (handle: () => void) => void;
+  quit?: () => Promise<void>;
 };
 
 export type Client = {

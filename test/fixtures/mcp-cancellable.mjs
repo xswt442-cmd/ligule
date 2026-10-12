@@ -1,4 +1,4 @@
-import { writeFile } from 'node:fs/promises';
+import { rename, writeFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -33,6 +33,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   return { content: [{ type: 'text', text: `waited ${request.params.arguments.milliseconds} ms` }] };
 });
 
-await writeFile(pidPath, String(process.pid));
+// 标记文件出现时必须已包含完整 PID，取消握手才能安全确认子进程退出。
+const pendingPidPath = `${pidPath}.${process.pid}.tmp`;
+await writeFile(pendingPidPath, String(process.pid));
+await rename(pendingPidPath, pidPath);
 if (Number(initializeDelay) > 0) await delay(Number(initializeDelay));
 await server.connect(new StdioServerTransport());

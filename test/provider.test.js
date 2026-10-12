@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { setImmediate } from 'node:timers';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -8,6 +9,7 @@ import {
   capabilitiesOf, createConfig, createKernel, createLoop, createMessagesProvider, createSessionLog,
   DEFAULT_RETRY, MESSAGES_CAPABILITIES, readTool,
 } from '../dist/index.js';
+import { fetchablePort, listenFetchable } from './helpers/port.js';
 
 const API_KEY_ENV = 'LIGULE_TEST_API_KEY';
 const FAST_RETRY = { ...DEFAULT_RETRY, baseDelayMs: 1 };
@@ -32,12 +34,7 @@ async function withEndpoint(respond, run) {
     });
     await respond(requests.length, response, requests[requests.length - 1]);
   });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const port = server.address()?.port;
-  // 一次整套跑里见过这里拿到的端口不能用，报回来的却是端点那一句 `provider_transport_failed`（fetch 的「bad port」）：
-  // 端口不对就在这儿说清，别让它混进端点那一类的失败里。
-  if (typeof port !== 'number' || port === 0) throw new Error(`test_endpoint_port_unusable:${String(port)}`);
-  const baseUrl = `http://127.0.0.1:${port}`;
+  const baseUrl = `http://127.0.0.1:${await listenFetchable(server)}`;
   process.env[API_KEY_ENV] = 'test-key';
   try {
     return await run(baseUrl, requests);
@@ -307,10 +304,21 @@ test('a stream that ends inside a frame is reported instead of dropped', async (
   });
 });
 
-test('the credential is read from the environment at request time and a missing one is refused', async () => {
-  delete process.env[API_KEY_ENV];
-  const events = collect(createMessagesProvider({ baseUrl: 'http://127.0.0.1:1', model: 'm', apiKeyEnv: API_KEY_ENV }).stream({}));
-  await assert.rejects(() => events, (error) => error.code === 'provider_credential_missing' && error.detail === API_KEY_ENV);
+test('an empty environment reference reports missing when its native store is available', async () => {
+  const reference = `LIGULE_TEST_${randomUUID().replaceAll('-', '_').toUpperCase()}`;
+  const previous = process.env[reference];
+  delete process.env[reference];
+  try {
+    const events = collect(createMessagesProvider({ baseUrl: 'http://127.0.0.1:1', model: 'm', apiKeyEnv: reference }).stream({}));
+    await assert.rejects(() => events, (error) => {
+      if (error.code === 'provider_credential_missing') return error.detail === reference;
+      return process.env.LIGULE_CREDENTIAL_NATIVE_REQUIRED !== '1'
+        && error.code === 'credential_store_unavailable';
+    });
+  } finally {
+    if (previous === undefined) delete process.env[reference];
+    else process.env[reference] = previous;
+  }
 });
 
 test('a projection with a call nobody answered is refused before the request goes out', async () => {
@@ -431,4 +439,29 @@ test('the usage the endpoint reports comes back as one event at the end', async 
       { type: 'usage', input: 1500, output: 7 },
     ]);
   });
+});
+
+// 端口助手自己那一条：真起一张服务表，交回来的那一个端口要真的能被 fetch 用到（审阅 C11：
+// 原先那一格自己造了假的 listen/close/once/address，证明不了 Node 的服务生命周期，换成真服务与真纯函数两格）。
+test('the endpoint helper hands back a port that fetch really reaches', async () => {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/plain' });
+    response.end('ok');
+  });
+  try {
+    const port = await listenFetchable(server);
+    const answer = await fetch(`http://127.0.0.1:${port}/`);
+    assert.equal(answer.status, 200);
+    assert.equal(await answer.text(), 'ok');
+  } finally {
+    await new Promise((resolve) => { server.close(resolve); });
+  }
+});
+
+// 那一张拒用表是这一版 Node 的事实（整片扫出来的），这一格测的是真函数本身而不是照它重写的另一份：
+// 拒用的几个与放行的几个各验一次，另外 1024 以下这一份一个也不放（那一截只有 80 与 443 可用，这里不需要）。
+test('the refused-port table answers for the real predicate', () => {
+  for (const port of [1719, 5060, 6000, 6665, 10080]) assert.equal(fetchablePort(port), false, `${port} 是 fetch 拒用的那一个`);
+  assert.equal(fetchablePort(45123), true);
+  assert.equal(fetchablePort(1023), false, '1024 以下这一份一个也不放');
 });

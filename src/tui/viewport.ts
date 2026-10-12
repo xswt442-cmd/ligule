@@ -1,6 +1,7 @@
 // 历史浏览的光标与选择只存在于界面；窗口按终端列数换行后再分页。
 import { markdownLines } from './markdown.js';
 import { displayWidth } from './commands.js';
+import { textOf, type Locale } from '../kernel/locale.js';
 
 export interface TranscriptRow {
   readonly kind: string;
@@ -29,15 +30,16 @@ export function wrapLine(text: string, columns: number): string[] {
   return lines;
 }
 
-export function transcriptLines(rows: readonly TranscriptRow[], columns: number): string[] {
+export function transcriptLines(rows: readonly TranscriptRow[], columns: number, locale: Locale = 'zh'): string[] {
+  const t = (zh: string, en: string) => textOf(locale, zh, en);
   return rows.flatMap((row) => {
-    const identity = row.seq === undefined ? '' : `第 ${row.seq} 条 · `;
-    const label = row.tool ?? ({ question: '你说', answer: '模型', reasoning: '推理', meta: '状态' }[row.kind] ?? row.kind);
+    const identity = row.seq === undefined ? '' : t(`第 ${row.seq} 条 · `, `#${row.seq} · `);
+    const label = row.tool ?? ({ question: t('你', 'You'), answer: t('助手', 'Assistant'), reasoning: t('推理', 'Reasoning'), meta: t('状态', 'Status') }[row.kind] ?? row.kind);
     const heading = `${identity}${label}${row.code === undefined ? '' : ` · ${row.code}`}`;
     const content = row.kind === 'answer'
       ? markdownLines(row.text, columns).map((line) => line.text).join('\n')
       : row.text;
-    return [...wrapLine(heading, columns), ...wrapLine(content, columns), ...(row.spilled === undefined ? [] : wrapLine(`完整结果文件：${row.spilled}`, columns)), ''];
+    return [...wrapLine(heading, columns), ...wrapLine(content, columns), ...(row.spilled === undefined ? [] : wrapLine(t(`完整结果文件：${row.spilled}`, `Full result file: ${row.spilled}`), columns)), ''];
   });
 }
 

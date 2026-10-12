@@ -4,7 +4,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname, join, relative } from 'node:path';
 import { KernelError } from '../kernel/error.js';
-import { boundaryOf, limitsOf } from '../capability/limits.js';
+import { boundaryOf, limitsOf, workingDirectoryOf } from '../capability/limits.js';
 import { resolveWithin } from '../capability/paths.js';
 import { resolveRecycler } from '../capability/recycle.js';
 import { versionOf } from '../session/observe.js';
@@ -12,18 +12,18 @@ import { existsOrFails, kindOfTarget, toPosix } from './common.js';
 
 export const createTool = {
   name: 'create',
-  description: 'Create a new text file inside the workspace boundary. Fails when the file already exists.',
+  description: 'Create a new text file relative to the working directory, within the workspace boundary. Fails when the file already exists.',
   parameters: {
     type: 'object',
     properties: {
-      path: { type: 'string', description: 'File path relative to the workspace boundary.' },
+      path: { type: 'string', description: 'File path relative to the working directory, within the workspace boundary.' },
       content: { type: 'string', description: 'The whole file content.' },
     },
     required: ['path', 'content'],
   },
   async run(args, { config, observations }) {
     const boundary = boundaryOf(config);
-    const target = await resolveWithin(boundary, args.path, { forWrite: true });
+    const target = await resolveWithin(boundary, args.path, { forWrite: true, cwd: workingDirectoryOf(config) });
     // 已存在就报错、一个字节都不写：覆盖是 write 的动作，分开才让判定链看得见差别（D3）。
     if (await existsOrFails(target)) {
       throw new KernelError('create_target_exists', { detail: `${args.path} already exists; use write to replace its whole content or edit to change one part of it` });
@@ -37,11 +37,11 @@ export const createTool = {
 
 export const writeTool = {
   name: 'write',
-  description: 'Replace the whole content of an existing text file inside the workspace boundary. The file must have been read in this run and must not have changed since. Use create for a file that does not exist yet.',
+  description: 'Replace the whole content of an existing text file relative to the working directory, within the workspace boundary. The file must have been read in this run and must not have changed since. Use create for a file that does not exist yet.',
   parameters: {
     type: 'object',
     properties: {
-      path: { type: 'string', description: 'File path relative to the workspace boundary.' },
+      path: { type: 'string', description: 'File path relative to the working directory, within the workspace boundary.' },
       content: { type: 'string', description: 'The whole new file content.' },
     },
     required: ['path', 'content'],
@@ -52,7 +52,7 @@ export const writeTool = {
   // 不是并发控制。升级路线是把「按版本替换」下沉到能力提供者的后端原子地做。
   async run(args, { config, observations }) {
     const boundary = boundaryOf(config);
-    const target = await resolveWithin(boundary, args.path, { forWrite: true });
+    const target = await resolveWithin(boundary, args.path, { forWrite: true, cwd: workingDirectoryOf(config) });
     let before;
     try {
       before = await readFile(target);
@@ -75,11 +75,11 @@ export const writeTool = {
 
 export const editTool = {
   name: 'edit',
-  description: 'Replace one unique occurrence of an anchor in an existing file inside the workspace boundary.',
+  description: 'Replace one unique occurrence of an anchor in an existing file relative to the working directory, within the workspace boundary.',
   parameters: {
     type: 'object',
     properties: {
-      path: { type: 'string', description: 'File path relative to the workspace boundary.' },
+      path: { type: 'string', description: 'File path relative to the working directory, within the workspace boundary.' },
       anchor: { type: 'string', description: 'Text to locate; it must appear exactly once in the file.' },
       replacement: { type: 'string', description: 'Text to put in place of the anchor.' },
     },
@@ -90,7 +90,7 @@ export const editTool = {
     if (args.anchor.trim() === '') {
       throw new KernelError('edit_anchor_empty', { detail: 'an anchor of only whitespace would match anywhere; give the text to locate' });
     }
-    const target = await resolveWithin(boundary, args.path, { forWrite: true });
+    const target = await resolveWithin(boundary, args.path, { forWrite: true, cwd: workingDirectoryOf(config) });
     let text;
     try {
       text = await readFile(target, 'utf8');
@@ -114,18 +114,18 @@ export const editTool = {
 
 export const deleteTool = {
   name: 'delete',
-  description: 'Move a file or directory inside the workspace boundary into the trash: the system recycle bin where there is one, otherwise a trash directory inside the boundary. Nothing is deleted in place.',
+  description: 'Move a file or directory relative to the working directory, within the workspace boundary, into the trash: the system recycle bin where there is one, otherwise a trash directory inside the boundary. Nothing is deleted in place.',
   parameters: {
     type: 'object',
     properties: {
-      path: { type: 'string', description: 'Path relative to the workspace boundary.' },
+      path: { type: 'string', description: 'Path relative to the working directory, within the workspace boundary.' },
     },
     required: ['path'],
   },
   async run(args, { config, logger, observations }) {
     const { trashDirectory } = limitsOf(config);
     const boundary = boundaryOf(config);
-    const target = await resolveWithin(boundary, args.path, { forWrite: true });
+    const target = await resolveWithin(boundary, args.path, { forWrite: true, cwd: workingDirectoryOf(config) });
     const name = toPosix(relative(boundary, target));
     if (name === '') throw new KernelError('delete_target_is_boundary', { detail: 'the workspace boundary itself cannot be moved into the trash; name a file or directory inside it' });
     if (!(await existsOrFails(target))) throw new KernelError('delete_target_missing', { detail: `there is nothing at ${args.path} to move into the trash` });

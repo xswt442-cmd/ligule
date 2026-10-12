@@ -27,7 +27,7 @@ const markdown = [
   'if (estimated * factor > threshold) await compact();',
   '```',
   '',
-  '细节在 [阶段三那份实现顺序](ligule-set/phase3/todo.md) 里，外链走另一条路：[example](https://example.com/)。一轮压完大约从十万降到两万。',
+  '细节在 [压缩那一段](src/session/compaction.ts) 里，外链走另一条路：[example](https://example.com/)。一轮压完大约从十万降到两万。',
 ].join('\n');
 
 // 溢出文件里的那一整段：只有 `fullResults` 这一格交回来，记录里留着的是截断后的那一份。
@@ -104,6 +104,8 @@ type Listed = {
   id: string;
   formatVersion: number;
   projectRoot: string;
+  workspace?: string;
+  workspaceOrigin?: string;
   createdAt: string | null;
   updatedAt: string;
   events: number;
@@ -117,8 +119,8 @@ type Listed = {
 };
 
 const sessions: Listed[] = [
-  { id: '7f3c9a21-4b7e-4f0a-9c1d-2a5e8b0c6d9f', formatVersion: 1, projectRoot: 'E:/notes', createdAt: '2026-10-05T09:02:11.000Z', updatedAt: '2026-10-05T11:41:07.000Z', events: 41, lastSeq: 40, mode: { name: 'full', layer: 'shipped', digest: '0f2b1c3d4e5f' }, name: '压缩读数那一轮', archived: false, unanswered: 0, truncatedBytes: 0 },
-  { id: '2b8d55c0-11aa-4c3e-8d77-9f0a1b2c3d4e', formatVersion: 1, projectRoot: 'E:/notes', createdAt: '2026-10-05T07:20:00.000Z', updatedAt: '2026-10-05T08:55:31.000Z', events: 128, lastSeq: 127, mode: { name: 'minimal', layer: 'shipped', digest: 'aa11bb22cc33' }, name: '', archived: true, unanswered: 2, truncatedBytes: 0 },
+  { id: '7f3c9a21-4b7e-4f0a-9c1d-2a5e8b0c6d9f', formatVersion: 1, projectRoot: 'E:/notes', workspace: 'e:/notes', workspaceOrigin: 'explicit', createdAt: '2026-10-05T09:02:11.000Z', updatedAt: '2026-10-05T11:41:07.000Z', events: 41, lastSeq: 40, mode: { name: 'full', layer: 'shipped', digest: '0f2b1c3d4e5f' }, name: '压缩读数那一轮', archived: false, unanswered: 0, truncatedBytes: 0 },
+  { id: '2b8d55c0-11aa-4c3e-8d77-9f0a1b2c3d4e', formatVersion: 1, projectRoot: 'E:/notes', workspace: 'e:/notes', workspaceOrigin: 'explicit', createdAt: '2026-10-05T07:20:00.000Z', updatedAt: '2026-10-05T08:55:31.000Z', events: 128, lastSeq: 127, mode: { name: 'minimal', layer: 'shipped', digest: 'aa11bb22cc33' }, name: '', archived: true, unanswered: 2, truncatedBytes: 0 },
   { id: 'c4e1f00d-7788-4a5b-9c0d-e1f2a3b4c5d6', formatVersion: 0, projectRoot: '', createdAt: null, updatedAt: '2026-10-04T13:07:44.000Z', events: 3, lastSeq: 2, mode: null, name: '', archived: false, unanswered: 0, truncatedBytes: 0 },
   { id: '9a7b5c3d-0e1f-4a5b-8c9d-0e1f2a3b4c5d', formatVersion: 0, projectRoot: '', createdAt: null, updatedAt: '2026-10-04T09:12:03.000Z', events: 0, lastSeq: -1, mode: null, name: '', archived: false, unanswered: 0, truncatedBytes: 0, error: { code: 'session_event_unknown', detail: '事件种类没标 ignorable，读不懂就拒绝重建（D73）' } },
 ];
@@ -133,9 +135,11 @@ const PROJECT_FILES = [
 // 这一条跑出来——版本不等时界面就能看到 `config_version_stale` 那一句长什么样。真宿主那一格是那份文件的内容哈希。
 // 只读的两层（项目共享与命令行 `--config`）也摆一份：来源与「改文件盖不过它」那两句话要有东西可指。
 const WRITABLE = ['model.api', 'model.baseURL', 'model.model', 'model.apiKeyEnv'];
+// 「来源」那一句要指得出六条白名单字段里的任何一条：真宿主的 `sources` 覆盖整份白名单（方案 7.1）。
+const SOURCE_FIELDS = [...WRITABLE, 'policy.mode', 'policy.rules'];
 type Cell = { version: string; values: Record<string, string> };
 const layers: Record<string, Cell> = {
-  user: { version: '1', values: { model: 'fake-review-model', apiKeyEnv: 'LIGULE_FAKE_KEY' } },
+  user: { version: '1', values: { model: 'fake-review-model', apiKeyEnv: 'LIGULE_FAKE_KEY', mode: 'auto' } },
   projectLocal: { version: '', values: {} },
   project: { version: '', values: { baseURL: 'https://project.test/v1' } },
   flag: { version: '', values: { api: 'chat-completions' } },
@@ -149,6 +153,8 @@ const sourceOf = (field: string) => {
 const shownValue = (key: string) => layers[SOURCES.find((layer) => layers[layer].values[key] !== undefined) ?? 'user'].values[key];
 const shownModel = () => Object.fromEntries(['api', 'baseURL', 'model', 'apiKeyEnv'].map((key) => [key, shownValue(key)]));
 const layerList = () => ['user', 'projectLocal'].map((layer) => ({ layer, version: layers[layer].version, exists: layers[layer].version !== '' }));
+// 规则表在这一份假宿主里存在另一格上，来源那一句跟着那一格走。
+const sourceAt = (field: string) => (field === 'policy.rules' ? RULES_SOURCE : sourceOf(field));
 
 // 规则表与配置默认档：`config.get` 交回这一份表与写它的那一层，`config.set` 的 policy.rules / policy.mode 改的就是这里。
 // 一条规则的形状与契约一致：`{ tool, match?, decision: 'allow' | 'deny', reason? }`。
@@ -163,6 +169,18 @@ const RULES_SOURCE = 'user';
 // 配置默认档与会话临时档：会话临时为 null 时退回配置默认。
 let configPolicy: 'ask' | 'auto' = 'auto';
 let sessionPolicy: 'ask' | 'auto' | null = null;
+
+// 那份工作区登记的假形状（方案 5.5.1）：`workspaces.list` 交回这一份，`workspace.default.set` 改的就是它。
+// 一条记录只有一个身份、一个目录、一个显示名，默认那一格指的是其中一个身份；这一具假宿主不写盘，改了只在当场有效。
+const workspaces = [
+  { identity: 'e:/notes', directory: 'E:/notes', name: '笔记与读书', firstSeen: '2026-10-05T09:02:11.000Z', lastSeen: '2026-10-05T11:41:07.000Z' },
+];
+let defaultWorkspace: string | null = null;
+const rosterOf = () => ({ version: 1, default: defaultWorkspace, workspaces });
+
+// 那一份共用的输入历史的假形状（方案 5.5.6）：`history.read` 交回这一份，`history.append` 改的就是它；这一具假宿主不写盘。
+let history: string[] = ['上一轮留下的一句', '再往前的一句'];
+const HISTORY_LIMIT = 200;
 
 let status = {
   sessionId: '',
@@ -252,6 +270,9 @@ function hitsOf(item: (typeof sessions)[number], needle: string, deep: boolean):
 export function createFakeHost(options: { events?: number } = {}): Transport & {
   pushEvent: (event: Record<string, unknown>) => void;
   stopReplies: (on: boolean) => void;
+  // 开发时那一条退出请求的入口：真壳由托盘「退出」或 macOS 的 Cmd+Q 触发，这里让检查自己按一次（方案 6.4）。
+  requestQuit: () => void;
+  quitCount: () => number;
 } {
   let emit: (frame: Frame) => void = () => undefined;
   let opened = 0;
@@ -264,6 +285,10 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
   // 假宿主照同一个形状：按下之后，下一次落步就停在这儿，没答的询问按不允许结掉。
   const cancelled = new Set<string>();
   const pendingAsks = new Map<string, string[]>();
+  // 退出那一条路在开发时的演法：界面把 `onQuit` 挂上来，检查按一次 `requestQuit()` 就走真壳那同一条；
+  // 界面确认退出时 `quit` 被叫几次，这里数得出。
+  let quitRequest: (() => void) | undefined;
+  let quitCalls = 0;
 
   const answer = (frame: Frame): void => {
     if (deaf && frame.method !== undefined) return;
@@ -387,16 +412,48 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
         status = { ...status, mode: name, modeLayer: 'shipped' };
         return reply({ mode: name, layer: status.modeLayer, pending: null, tools: status.tools });
       }
+      case 'history.read':
+        return reply({ entries: history });
+      case 'history.append': {
+        // 与宿主同一条规矩：那一句挪到最前，同句的旧那一份让位过来，尾上超预算的丢掉；条数上限在宿主那一侧定（方案 5.5.6）。
+        const sentence = String(params.text ?? '').trim();
+        if (sentence !== '') history = [sentence, ...history.filter((one) => one !== sentence)].slice(0, HISTORY_LIMIT);
+        return reply({ entries: history });
+      }
+      case 'workspaces.list':
+        return reply(rosterOf());
+      case 'workspace.default.set': {
+        // 与宿主同一条规矩：指为默认之前先把那一条登记写下，空的那一格只退掉默认，登记一条都不少。
+        const directory = String(params.directory ?? '').trim();
+        if (directory === '') {
+          defaultWorkspace = null;
+          return reply(rosterOf());
+        }
+        const identity = directory.toLowerCase();
+        const known = workspaces.find((one) => one.identity === identity);
+        if (known === undefined) {
+          workspaces.push({
+            identity,
+            directory,
+            name: String(params.name ?? '').trim() || directory.split(/[\\/]+/).filter((one) => one !== '').at(-1) || directory,
+            firstSeen: new Date().toISOString(),
+            lastSeen: new Date().toISOString(),
+          });
+        } else known.directory = directory;
+        defaultWorkspace = identity;
+        return reply(rosterOf());
+      }
       case 'config.get':
         // 假宿主也按白名单答：这几格是真的配置文件里会写的那种值，密钥本身从来不在里面（D13）。
+        // 值、来源、规则表与那一份版本出自这一次回答（方案 3A）；`policyMode` 是文件里此刻写着的那一档。
         // 规则表读的是折好的那一份合并结果，`rulesSource` 说它今天由哪一层写着（实现顺序第 4 项交付）。
         return reply({
           model: shownModel(),
+          policyMode: shownValue('mode'),
           layers: layerList(),
-          sources: Object.fromEntries(WRITABLE.map((field) => [field, sourceOf(field)])),
+          sources: Object.fromEntries(SOURCE_FIELDS.map((field) => [field, sourceAt(field)])),
           rules: policyRules,
           rulesSource: RULES_SOURCE,
-          policy: configPolicy,
         });
       case 'config.set': {
         // 演的是真宿主那四件事：字段与层的白名单、版本比对、值形状、写完谁什么时候用上（第 90、91、93 步）。
@@ -410,6 +467,8 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
           const mode = String(params.value);
           if (mode !== 'ask' && mode !== 'auto') return fail('config_field_value', '配置默认档只有 ask 与 auto 两种');
           configPolicy = mode;
+          // 写进层里那一份值：下一次 `config.get` 的档位与来源都从这一格读出来（方案 3A）。
+          cell.values.mode = mode;
           cell.version = String(Number(cell.version) + 1);
           return reply({ version: cell.version, created: false, applies: [], rules: policyRules, layers: layerList() });
         }
@@ -501,10 +560,12 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
   function ask(callId: string, params: Record<string, unknown>): Promise<string> {
     const askId = `ask-${callId}`;
     const owner = String(params.sessionId);
+    // 档位与它的来源跟着这一次询问一起出去，说的是问那一次的会话自己那一份（真实宿主同一条形状，审阅 C08）。
+    const tier = { policy: sessionPolicy ?? configPolicy, policySource: sessionPolicy === null ? 'config' : 'session', policyForced: false };
     return new Promise((resolve) => {
       asking.set(askId, resolve);
       pendingAsks.set(owner, [...(pendingAsks.get(owner) ?? []), askId]);
-      emit({ id: askId, method: 'approval.request', params });
+      emit({ id: askId, method: 'approval.request', params: { ...tier, ...params } });
       setTimeout(() => settleAsk(owner, askId, 'deny'), 30_000);
     });
   }
@@ -636,5 +697,14 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
     restart: async () => {
       deaf = false;
     },
+    onQuit: (handle) => {
+      quitRequest = handle;
+    },
+    // 假宿主不真收进程：记下界面确认了几次，检查按这一次数判（方案 6.4 那张确认的读数）。
+    quit: async () => {
+      quitCalls += 1;
+    },
+    requestQuit: () => quitRequest?.(),
+    quitCount: () => quitCalls,
   };
 }

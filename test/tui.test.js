@@ -10,7 +10,8 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { waitFor, withTuiHost } from './helpers/tui-host.js';
 import { completeFrame } from './helpers/frames.js';
-import { HISTORY_LIMIT, SEARCH_ROWS, historyPathOf, loadHistory, pushHistory, rememberHistory, searchHistory } from '../dist/tui/history.js';
+import { HISTORY_LIMIT, historyPathOf, loadHistory, pushHistory, rememberHistory } from '../dist/kernel/input-history.js';
+import { SEARCH_ROWS, searchHistory } from '../dist/tui/history.js';
 
 let rows = {};
 let missing = '';
@@ -138,10 +139,10 @@ test('the app paints the session line and the input hint onto the terminal', opt
   instance.unmount();
   await waitFor(() => /mode:minimal  policy:ask/.test(painted), { read: () => painted });
 
-  assert.match(painted, new RegExp(`test-model · 会话 ${sessionId.slice(0, 8)}`));
+  assert.match(painted, new RegExp(`${status.model} · 会话 ${sessionId.slice(0, 8)}`));
   // 随包的基础提示进了估算那一段（D102），窄终端上这一行的尾巴会被截掉：工具件数在装得下的宽度里才断言。
-  assert.match(painted, new RegExp(`mode:minimal  policy:ask .*tools:`));
-  assert.match(painted, /打 \/ 看清单/);
+  assert.match(painted, /mode:minimal  policy:ask/);
+  assert.match(painted, /\/ 命令/);
 }));
 
 test('the status line names the mode and the decision level separately', options, () => {
@@ -158,10 +159,24 @@ test('the status line names the mode and the decision level separately', options
   assert.match(narrow, /mode:minimal  policy:ask/);
 });
 
+test('English terminal labels preserve model content, paths and commands', options, () => {
+  const help = helpLines({ templates: [] }, 120, 'en').join('\n');
+  assert.match(help, /\/model \[service model\]/);
+  assert.match(help, /Keyboard|Keys/);
+  assert.doesNotMatch(help, /[\u3400-\u9fff]/u);
+  assert.equal(candidatesOf('/mo', [], 8, 'en').find(command => command.name === 'model').hint, '[service model]');
+  assert.deepEqual(projectRecord({ kind: 'user', text: '中文问题' }, 'en'), [{ kind: 'question', text: '中文问题' }]);
+  assert.equal(projectRecord({ kind: 'turn', status: 'cancelled' }, 'en')[0].text, 'Turn cancelled');
+  const changed = describeChange('edit', { path: '中文目录/note.txt', anchor: '原文', replacement: '新文' }, 'en');
+  assert.match(changed.summary, /^中文目录\/note.txt: replace/);
+  assert.equal(changed.before, '原文');
+  assert.equal(changed.after, '新文');
+});
+
 test('a mode switch and an expanded template both reach the transcript', options, () => {
   assert.deepEqual(
     projectRecord({ kind: 'mode', name: 'full', layer: 'shipped', tools: ['read', 'skill'] }),
-    [{ kind: 'meta', text: '模式 full（随包）生效：read、skill' }],
+    [{ kind: 'meta', text: '工具模式：full（随包）' }],
   );
   assert.deepEqual(
     projectRecord({ kind: 'user', text: 'Review src/a.ts\n', raw: '/review:security src/a.ts' }),
@@ -213,16 +228,16 @@ test('the approval box names the shell backend and its executable', options, asy
   try {
     const run = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command: 'node --version | node --version' } }) });
     // 答复要在询问画出来之后给：那一句 'n' 早到一步就落进草稿，这一轮就没人结束了。
-    await waitFor(() => /后端 (powershell|bash) · /.test(painted), { read: () => painted });
+    await waitFor(() => /执行环境 (powershell|bash) · /.test(painted), { read: () => painted });
     stdin.write('n');
     await run;
   } finally {
     instance.unmount();
   }
 
-  assert.match(painted, /要执行 exec/);
+  assert.match(painted, /允许执行 exec？/);
   assert.match(painted, /node --version \| node --version/);
-  assert.match(painted, /后端 (powershell|bash) · /);
+  assert.match(painted, /执行环境 (powershell|bash) · /);
 }));
 
 // 候选清单：界面那张表在前，宿主交出来的模板在后，都按前缀收窄（D81）。
@@ -255,7 +270,7 @@ test('help groups flow side by side when there is room and stack when there is n
   assert.deepEqual(flowGroups(groups, 12), ['A', '/aa  x', '', 'B', '/bb   yy', '/ccc  z']);
 });
 
-// 中英混排那一列按终端里的列数对齐，不按字符数：一个汉字占两列。
+// 补足空格按终端里实际占的列数算：一个汉字占两列，算字符数只算一个。
 test('padding counts the columns a character takes in the terminal', options, () => {
   assert.equal(displayWidth('a中'), 3);
   const rows2 = flowGroups([
@@ -356,11 +371,11 @@ test('an exec result names its exit code and a spilled one names its file', opti
   assert.deepEqual(refused, { kind: 'refusal', tool: 'write', text: 'the user declined', code: 'ask_declined' });
 });
 
-// 审批框那一格要说得出改的是什么，而不是把整份文件内容喷在屏幕上（第 41 步）。
+// 审批框那一格要说得出改的是什么，整份文件内容不写在屏幕上（第 41 步）。
 test('the approval box sums the change instead of dumping the payload', options, () => {
-  assert.equal(changeSummary('write', { path: 'note.txt', content: 'a\nb\nc' }), 'note.txt：整份写入 3 行');
-  assert.equal(changeSummary('edit', { path: 'note.txt', anchor: 'a\nb', replacement: 'x' }), 'note.txt：换掉 2 行，换上 1 行');
-  assert.equal(changeSummary('delete', { path: 'note.txt' }), '把 note.txt 移进回收站');
+  assert.equal(changeSummary('write', { path: 'note.txt', content: 'a\nb\nc' }), 'note.txt：写入 3 行');
+  assert.equal(changeSummary('edit', { path: 'note.txt', anchor: 'a\nb', replacement: 'x' }), 'note.txt：替换 2 行，写入 1 行');
+  assert.equal(changeSummary('delete', { path: 'note.txt' }), '将 note.txt 移入回收站');
   assert.equal(changeSummary('exec', { command: 'ls' }), '', '命令那一行文本由 detail 那一条说，这里不重复');
   assert.equal(changeSummary('write', { content: 'a\nb' }), '', '参数里没有路径就不编造一个对象');
   // 审批那一格展开的两段内容来自参数本身：没读过的正文不画，删除那一件没有正文（方案 5.4）。
@@ -436,7 +451,7 @@ test('input typed while a round runs queues up and flushes in order', options, a
   // 只看最后一帧：Ink 把每一帧续写在同一个流里，取尾巴会连上一帧的内容一起读。
   const lastFrame = () => completeFrame(painted);
   try {
-    await waitFor(() => painted.includes('要模型做的事'), { read: () => painted });
+    await waitFor(() => painted.includes('描述任务'), { read: () => painted });
     await type('第一条');
     const started = () => requests.filter((request) => request.method === 'run.start').map((request) => request.params.input);
     await waitFor(() => started().length === 1, { read: () => painted });
@@ -463,7 +478,7 @@ test('the status line reports context pressure only when a window is written', o
   assert.equal(contextSegment(null), '');
   assert.equal(contextSegment(undefined), '');
   assert.equal(contextSegment({ window: 200_000, threshold: 160_000, estimated: 42_000 }), 'ctx:~42000/200000');
-  assert.equal(contextSegment({ window: 200_000, threshold: 160_000, estimated: 168_000 }), 'ctx:~168000/200000 越线');
+  assert.equal(contextSegment({ window: 200_000, threshold: 160_000, estimated: 168_000 }), 'ctx:~168000/200000 超限');
 
   const status = {
     mode: 'full', pendingMode: null, policy: 'ask', tools: ['a', 'b'], eventCount: 4,
@@ -514,9 +529,9 @@ test('the session listing is one row per record and an id prefix resolves to one
   ];
   assert.deepEqual(sessionLines(listed, '5f3d9999-aaaa-bbbb-cccc-dddddddddddd'), [
     '2026-10-05 09:12:34  5f3c1234-aaaa-bbbb-cccc-dddddddddddd  12 条  mode:full',
-    '2026-10-04 08:00:00  5f3d9999-aaaa-bbbb-cccc-dddddddddddd  3 条  mode:-  未收尾 2 次派发  ← 正在这一份上',
+    '2026-10-04 08:00:00  5f3d9999-aaaa-bbbb-cccc-dddddddddddd  3 条  mode:-  未收尾 2 次派发  ← 当前会话',
   ], '时间只到秒、id 整串写出来、没收尾的那几处都画在这一行上');
-  assert.deepEqual(sessionLines([]), ['这个项目根下还没有跑过的会话']);
+  assert.deepEqual(sessionLines([]), ['此工作区暂无会话']);
   assert.equal(SESSION_ROWS > 0, true);
 
   assert.equal(resolveSessionId('5f3c', listed).id, listed[0].id, '前缀唯一对上就用那一份');
@@ -538,7 +553,7 @@ test('a search hit line names the session and the event to open', options, () =>
     { sessionId: '5f3d9999-aaaa-bbbb-cccc-dddddddddddd', seq: 0, kind: 'label', text: '读数那一份', name: '读数那一份' },
   ], '5f3d9999-aaaa-bbbb-cccc-dddddddddddd'), [
     '5f3c1234  「读数那一份」  工具 第 7 条  npm run 读数 跑完了  整段在 result-7-abcdef12.json',
-    '5f3d9999  「读数那一份」  名字 第 0 条  读数那一份  ← 正在这一份上',
+    '5f3d9999  「读数那一份」  名字 第 0 条  读数那一份  ← 当前会话',
   ], '会话编号写开头八段交给 `/resume`，序号整串写出来交给 `/show`');
   assert.deepEqual(findLines([{ sessionId: 'aaaa1111', seq: 3, kind: 'world', text: 'x' }]), ['aaaa1111  world 第 3 条  x'],
     '认不出的种类原样画出来，不猜它是什么');
@@ -629,7 +644,7 @@ test('finding a phrase shows which session each hit is in', options, async () =>
     stdin.write('/find 没有这段文字');
     await delay(100);
     stdin.write('\r');
-    await waitFor(() => plainOutput(painted.slice(empty)).includes('没有含「没有这段文字」的'), { read: () => plainOutput(painted.slice(empty)) });
+    await waitFor(() => plainOutput(painted.slice(empty)).includes('没有找到“没有这段文字”'), { read: () => plainOutput(painted.slice(empty)) });
   } finally {
     instance.unmount();
   }
@@ -660,9 +675,9 @@ test('branching copies the record and switches onto the new session', options, a
     await delay(100);
     stdin.write('\r');
     const shown = () => plainOutput(painted.slice(before));
-    await waitFor(() => shown().includes('复制成一份新的会话'), { read: shown });
+    await waitFor(() => shown().includes('已创建分支会话'), { read: shown });
     // 接上去走的是 `/resume` 那一条路，它自己会说一句；等这一句而不是等毫秒，两条都在同一帧序列里落下。
-    await waitFor(() => shown().includes('接上会话'), { read: shown });
+    await waitFor(() => shown().includes('已恢复会话'), { read: shown });
     const branched = requests.filter((request) => request.method === 'session.branch');
     assert.equal(branched.length, 1);
     assert.equal(branched[0].params.at, undefined, '不带序号不发 `at`：复制到哪儿由宿主固定那一刻的末端');
@@ -674,7 +689,7 @@ test('branching copies the record and switches onto the new session', options, a
     stdin.write('/branch 第三');
     await delay(100);
     stdin.write('\r');
-    await waitFor(() => plainOutput(painted.slice(unreadable)).includes('不是序号'), { read: () => plainOutput(painted.slice(unreadable)) });
+    await waitFor(() => plainOutput(painted.slice(unreadable)).includes('分支点须为完整轮次的记录序号'), { read: () => plainOutput(painted.slice(unreadable)) });
     const unavailable = painted.length;
     stdin.write('/branch 0');
     await delay(100);
@@ -714,7 +729,7 @@ test('the history file reads valid entries and reports a malformed line', async 
     await rememberHistory(path, ['最新的一条', '旧的一条']);
     assert.deepEqual(await loadHistory(path), ['最新的一条', '旧的一条'], '先后与文件里一致，最新的排在第一个');
     await appendFile(path, '这一行不是 JSON\n');
-    await assert.rejects(loadHistory(path), (error) => error.code === 'tui_history_invalid' && error.line === 3);
+    await assert.rejects(loadHistory(path), (error) => error.code === 'input_history_invalid' && error.detail.includes('line 3'));
   } finally {
     await rm(assertInTestplace(absoluteRoot), { recursive: true, force: true });
   }
@@ -736,13 +751,15 @@ test('the arrow keys recall the last sentence and Ctrl+R searches the history', 
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
 
   const remembered = [];
+  const fileEntries = ['改 note.txt 的第一行', '上一次会话里说过的话'];
   const instance = render(createElement(App, {
     client,
     sessionId,
     info: {},
     interactive: true,
     stdout,
-    history: { entries: ['改 note.txt 的第一行', '上一次会话里说过的话'], remember: async (text) => { remembered.push(text); } },
+    // 交回写完的清单是那一格的合同（方案 5.5.6）：这一份替身按同一条形状走，界面采用它交回的那一份。
+    history: { entries: fileEntries, remember: async (text) => { remembered.push(text); return pushHistory(fileEntries, text); } },
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   const lastFrame = () => completeFrame(painted);
   try {
@@ -760,7 +777,7 @@ test('the arrow keys recall the last sentence and Ctrl+R searches the history', 
     stdin.write('\x12');
     await delay(200);
     stdin.write('note');
-    await waitFor(() => lastFrame().includes('反查 note') && lastFrame().includes('改 note.txt 的第一行'), { read: lastFrame });
+    await waitFor(() => lastFrame().includes('历史搜索 note') && lastFrame().includes('改 note.txt 的第一行'), { read: lastFrame });
 
     stdin.write('\r');
     await waitFor(() => lastFrame().includes('› 改 note.txt 的第一行'), { read: lastFrame });
@@ -822,7 +839,7 @@ test('Ctrl+G says the editor is not configured instead of guessing one', options
   const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true, stdout }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   try {
     stdin.write('\x07');
-    await waitFor(() => /没有 EDITOR 这一格/.test(painted), { read: () => painted });
+    await waitFor(() => /请先设置 VISUAL 或 EDITOR/.test(painted), { read: () => painted });
   } finally {
     instance.unmount();
   }
@@ -906,7 +923,7 @@ test('cancelling a round leaves the queued sentences paused', options, async () 
   const lastFrame = () => completeFrame(painted);
   const started = () => requests.filter((request) => request.method === 'run.start').map((request) => request.params.input);
   try {
-    await waitFor(() => painted.includes('要模型做的事'), { read: () => painted });
+    await waitFor(() => painted.includes('描述任务'), { read: () => painted });
     await type('第一条');
     await waitFor(() => started().length === 1, { read: () => painted });
     await type('第二条');
@@ -914,20 +931,20 @@ test('cancelling a round leaves the queued sentences paused', options, async () 
     await waitFor(() => /排队 2 · 第三条/.test(lastFrame()), { read: lastFrame });
 
     stdin.write('\x1b');
-    await waitFor(() => /队列停下/.test(painted), { read: () => painted });
+    await waitFor(() => /队列已暂停/.test(painted), { read: () => painted });
     // 被打断的那一轮收自己的尾：等这一句出来，而不是等一个固定的毫秒数。
-    await waitFor(() => /这一轮已被打断/.test(painted), { read: () => painted });
+    await waitFor(() => /本轮已取消/.test(painted), { read: () => painted });
     assert.deepEqual(started(), ['第一条'], '暂停中的队列在这一轮结束后不自己发');
 
     await type('/queue drop 2');
-    await waitFor(() => /第 2 条收回草稿/.test(painted), { read: () => painted });
+    await waitFor(() => /消息 2 已移回草稿/.test(painted), { read: () => painted });
     assert.match(lastFrame(), /排队 1 · 第二条/, '剩下那一条还排着');
     assert.match(lastFrame(), /第三条/, '收回的那一条在草稿上，没丢');
 
     // 收回来的一句照常再发一次：暂停只管排着的那几条。这一轮自己收尾时也不把暂停中的那条带出去。
     stdin.write('\r');
     await waitFor(() => started().includes('第三条'), { read: () => painted });
-    await waitFor(() => /本轮结束/.test(painted), { read: () => painted });
+    await waitFor(() => /本轮已完成/.test(painted), { read: () => painted });
     assert.deepEqual(started(), ['第一条', '第三条'], '暂停留着：这一轮结束不替人发还排着的那条');
 
     await type('/queue continue');
@@ -994,7 +1011,7 @@ test('a reopened session takes back its own draft and a paused queue', options, 
     await waitFor(() => plainOutput(painted).includes('上次没写完的那一句'), { read: () => plainOutput(painted) });
     const frame = plainOutput(painted);
     assert.match(frame, /上次排着的那一句/, '排着的那一句跟着回来');
-    assert.match(frame, /队列暂停中/, '恢复时是暂停的：那几句当时还没发出去');
+    assert.match(frame, /队列已暂停/, '恢复时是暂停的：那几句当时还没发出去');
     assert.equal(requests.filter((request) => request.method === 'run.start').length, 0, '恢复不自己发');
     await waitFor(() => written.length > 0, { read: () => JSON.stringify(written) });
     assert.deepEqual(written.at(-1), { projectRoot: projectDirectory, sessionId, draft: '上次没写完的那一句', queued: ['上次排着的那一句'] },
@@ -1038,10 +1055,10 @@ test('an @ fragment asks the host for project files and Enter picks one', option
   const lastFrame = () => completeFrame(painted);
   const started = () => requests.filter((request) => request.method === 'run.start').length;
   try {
-    await waitFor(() => painted.includes('要模型做的事'), { read: () => painted });
+    await waitFor(() => painted.includes('描述任务'), { read: () => painted });
     stdin.write('先看 @readings');
     await waitFor(() => lastFrame().includes('notes/readings-3.md'), { read: lastFrame });
-    assert.ok(lastFrame().includes(`项目 ${projectDirectory}`), '清单说清这些候选出自哪一个项目');
+    assert.ok(lastFrame().includes(`工作区 ${projectDirectory}`), '清单说清这些候选出自哪一个工作区');
     const asked = requests.filter((request) => request.method === 'paths.list');
     assert.equal(asked.length, 1, '这一段问一次，不是每个字问一次');
     assert.deepEqual(asked[0].params, { projectRoot: projectDirectory, query: 'readings', limit: 8 }, '问的是那一个项目根里含这一段文字的文件');
@@ -1117,7 +1134,7 @@ test('Ctrl+Z walks the draft back a unit at a time and Ctrl+Y takes it back', op
     assert.ok(shown().includes(text), note);
   };
   try {
-    await waitFor(() => shown().includes('要模型做的事'), { read: shown });
+    await waitFor(() => shown().includes('描述任务'), { read: shown });
 
     // 连着打的五个字是一段：一次 Ctrl+Z 整段没了，再按 Ctrl+Y 又整段回来。
     stdin.write('第一段草稿');
@@ -1128,11 +1145,13 @@ test('Ctrl+Z walks the draft back a unit at a time and Ctrl+Y takes it back', op
     await waitFor(() => shown().includes('第一段草稿'), { read: shown });
 
     // 退回来之后接着打的字是另一段：一次退回整段，原来那一段留着。
-    stdin.write('ab');
+    // 认「这一段没了」读的字面要够独特：状态行里带着会话 id 那串十六进制，两个 ASCII 字母随时可能撞上它，
+    // 撞上了这一条就永远等不成，而撤销与重做本身是对的。
+    stdin.write('第二段');
     await delay(60);
     stdin.write('\x1a');
-    await waitFor(() => !shown().includes('ab'), { read: shown });
-    await paintedText('第一段草稿', '退掉后打的那两个字符时，原来那一段还在');
+    await waitFor(() => !shown().includes('第二段'), { read: shown });
+    await paintedText('第一段草稿', '退掉后打的那一段时，原来那一段还在');
 
     // 光标挪开之后再打的字又是一段：退一次只去掉那一个字符。
     stdin.write('甲');
@@ -1179,20 +1198,20 @@ test('/policy overrides the tier for this session alone and says so on the statu
   const configDefault = (await client.request('status.get', { sessionId })).policy;
   const other = configDefault === 'ask' ? 'auto' : 'ask';
   try {
-    await waitFor(() => lastFrame().includes('要模型做的事'), { read: lastFrame });
+    await waitFor(() => lastFrame().includes('描述任务'), { read: lastFrame });
     await type('/policy');
-    await waitFor(() => spoken(`当前 ${configDefault}（配置默认）`), { read: () => painted });
+    await waitFor(() => spoken(`审批方式：${configDefault}（配置默认）`), { read: () => painted });
 
     await type(`/policy ${other}`);
     await waitFor(() => requests.some((request) => request.method === 'policy.set'), { read: () => strip(painted).slice(-700) });
-    await waitFor(() => spoken(`这一份会话从现在起按 ${other} 走`), { read: () => strip(painted).slice(-700) });
+    await waitFor(() => spoken(`当前会话审批方式：${other}`), { read: () => strip(painted).slice(-700) });
     assert.equal((await client.request('status.get', { sessionId })).policySource, 'session');
 
     await type('/policy sometimes');
-    await waitFor(() => spoken('/policy 只认 ask、auto 与 reset'), { read: () => painted });
+    await waitFor(() => spoken('用法：/policy ask|auto|reset'), { read: () => painted });
 
     await type('/policy reset');
-    await waitFor(() => spoken(`退回配置默认：${configDefault}`), { read: () => painted });
+    await waitFor(() => spoken(`已恢复默认审批方式：${configDefault}`), { read: () => painted });
     assert.equal((await client.request('status.get', { sessionId })).policySource, 'config');
   } finally {
     instance.unmount();

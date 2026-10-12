@@ -10,6 +10,7 @@ import { serveHost } from '../../dist/host/host.js';
 import { createChatCompletionsProvider } from '../../dist/model/chat-completions.js';
 import { modeDirectories } from '../../dist/kernel/modes.js';
 import { fileURLToPath } from 'node:url';
+import { listenFetchable } from './port.js';
 
 function observeFrames(stream, visit) {
   let buffer = '';
@@ -40,7 +41,7 @@ export async function waitFor(condition, { within = 150_000, every = 30, read = 
   }
 }
 
-export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {} } = {}) {  const testplace = resolve('testplace');
+export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {}, interactive = false } = {}) {  const testplace = resolve('testplace');
   await mkdir(testplace, { recursive: true });
   const directory = await mkdtemp(join(testplace, 'tui-host-'));
   const absoluteDirectory = resolve(directory);
@@ -92,11 +93,7 @@ export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {} 
   let host;
   let pair;
   try {
-    await new Promise((resolveListen, reject) => {
-      server.once('error', reject);
-      server.listen(0, '127.0.0.1', resolveListen);
-    });
-    const baseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+    const baseUrl = `http://127.0.0.1:${await listenFetchable(server)}/v1`;
     const config = createConfig({ user: {
       boundary: projectDirectory,
       host: { sessionDirectory },
@@ -141,6 +138,8 @@ export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {} 
       if (typeof message.notify === 'string') notifications.push(message);
     });
     host = serveHost({ ...pair.host, config, provider, policy: config.policy, loadEnvironment,
+      // 客户端声明它答得了模型的提问（D107）：这一格与终端壳、桌面壳走的是同一条入口。
+      interactive,
       modeName: 'minimal', modePaths: modeDirectories(projectDirectory, modesDirectory, homeDirectory),
     });
     const client = createConnection(pair.client);

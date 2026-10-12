@@ -15,6 +15,9 @@ export const METHODS = Object.freeze({
       type: 'object',
       properties: {
         projectRoot: { type: 'string', description: 'start this session against another project the Host can load' },
+        // 一份会话落在哪一具工作区由客户端说：桌面可能指名一份目录，而那一份正是它的默认工作区，
+        // 「有没有指名」推不出这一层意思（方案 5.5.3）。不写这一格时宿主按指没指名定：指了是 explicit，没指是 default。
+        workspaceOrigin: { type: 'string', description: "how this session landed on that workspace: 'explicit' when the client chose it, 'default' when it is the one the client falls back to" },
       },
       description: 'a session starts on the project the Host was launched on; naming another project is optional',
     },
@@ -122,6 +125,16 @@ export const METHODS = Object.freeze({
       before: { type: 'integer', minimum: 1, description: 'read events older than this sequence number; it has to name an event in this record' },
     }, required: ['sessionId'] },
   },
+  // 第十二条只为界面多出来的方法：一份记录写成 markdown 并落到人选定的那个位置（方案 6A）。
+  // 读完整记录、补溢出正文、排版、写文件四件都在宿主这一侧，两个界共用这一条；界面只管由人选定目的地。
+  // 那一条路径出自人自己按下的保存对话框，不是模型工具的一次写出，所以不套项目边界；交回路径不等于写成。
+  'session.export': {
+    description: 'Write this session record, and each derived branch record, as Markdown files at the destination the human chose; returns the paths written and any branch it could not read',
+    parameters: { type: 'object', properties: {
+      sessionId: SESSION_ID,
+      path: { type: 'string', description: 'the file to write the main record to; branch records get a sibling file named after their own session id' },
+    }, required: ['sessionId', 'path'] },
+  },
   'run.start': {
     description: 'Send one user input through the loop; events arrive as notifications while it runs',
     parameters: {
@@ -138,23 +151,101 @@ export const METHODS = Object.freeze({
     description: 'Read what the Host currently holds for this session',
     parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
   },
+  // 工作区那份持久登记的读与写（方案 5.5.1、5.5.2、5.5.3）：清单与默认选择都在应用数据根里，
+  // 界面上那一栏只是读者，收起或列不出来都不改这份文件。写那一头只有默认选择一件，登记本身由建会话那两处做。
+  'workspaces.list': {
+    description: 'Read the durable workspace roster and its default selection from the application data root; the interface list is a reader of it, so a workspace a person stopped watching is still here',
+    parameters: { type: 'object', properties: {} },
+  },
+  'workspace.default.set': {
+    description: 'Name the workspace new sessions fall back to; the directory is registered first so the default always points at a row that exists, and an empty directory clears the default',
+    parameters: {
+      type: 'object',
+      properties: {
+        directory: { type: 'string', description: 'the workspace to make default; blank means no workspace is the default' },
+        name: { type: 'string', description: 'the label to show for it; absent keeps the last segment of the directory' },
+      },
+      required: ['directory'],
+    },
+  },
+  // 两端共用的那一份输入历史（方案 5.5.6）：句子在应用数据根的那一份文件里跨会话留住，界面拿不到路径，
+  // 也读不到数据根里别的文件。它不是任何一份会话记录的一部分，也不给模型看。
+  'history.read': {
+    description: 'Read the input history this machine keeps across sessions: sentences that were actually sent, newest first, up to the cap the host applies',
+    parameters: { type: 'object', properties: {} },
+  },
+  // 只有发出去的句子进这一份历史；同句重复让位到最前，超预算的尾项丢掉。交回整份清单，界面因此不用再读一次。
+  'history.append': {
+    description: 'Remember one sentence that was sent: it moves to the front of the shared history, an older copy of the same sentence comes with it, and the whole list stays capped; the full list after the write comes back',
+    parameters: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: 'the sentence that was sent; blank changes nothing' },
+      },
+      required: ['text'],
+    },
+  },
+  // 桌面那一份草稿与界面偏好（方案 5.5.2）：草稿、暂停队列、语言、通知与外观都放应用数据根里的一个文档，
+  // 可恢复的输入不靠 WebView 缓存。界面拿不到那一份文件的路径，也读不到数据根里别的文件。
+  'credentials.status': {
+    description: 'Report whether a credential is configured and its source; never return the credential value',
+    parameters: { type: 'object', properties: { reference: { type: 'string' } }, required: ['reference'] },
+  },
+  'model.select': {
+    description: 'Select a listed provider and model for one session, immediately when idle or at the next turn boundary',
+    parameters: {
+      type: 'object',
+      properties: { sessionId: SESSION_ID, provider: { type: 'string' }, model: { type: 'string' } },
+      required: ['sessionId', 'provider', 'model'],
+    },
+  },
+  'credentials.set': {
+    description: 'Store a secret in the system credential store; an active environment override prevents changes',
+    parameters: { type: 'object', properties: { reference: { type: 'string' }, value: { type: 'string' } }, required: ['reference', 'value'] },
+  },
+  'credentials.delete': {
+    description: 'Delete a stored secret; never modify an environment variable',
+    parameters: { type: 'object', properties: { reference: { type: 'string' } }, required: ['reference'] },
+  },
+  'prefs.read': {
+    description: 'Read the desktop preferences this machine keeps in the application data root: drafts, paused queues and interface choices; the document is per machine, not per session',
+    parameters: { type: 'object', properties: {} },
+  },
+  // 整份替换：写的是界面此刻手里那一份文档，宿主核对它是能解析的对象，用临时文件加改名原子落盘，交回写下的那一份。
+  'prefs.write': {
+    description: 'Replace the desktop preferences document with the given JSON; the host checks it parses to an object, writes it atomically so a crash never leaves half a document, and the written document comes back',
+    parameters: {
+      type: 'object',
+      properties: {
+        json: { type: 'string', description: 'the whole preferences document as JSON; it must parse to an object' },
+        version: { type: 'string', description: 'the byte version returned by prefs.read; blank only when the file did not exist' },
+      },
+      required: ['json', 'version'],
+    },
+  },
   // 第四条只为界面多出来的方法（前三条是 `mode.set` D65、`session.compact` D83、`sessions.list`）：配置在宿主那一侧，
   // 而这条路只交得出白名单里的几格——没有参数可点路径，所以界面要不到别的格。
   'config.get': {
-    description: 'Read the configuration this interface may show: the host builds the answer from four listed fields plus the version of each writable settings file, so no path can be asked for and no credential ever comes from configuration (D13, D60)',
-    parameters: { type: 'object', properties: {}, description: 'reading the shown configuration takes no argument' },
+    description: 'Read the configuration this interface may show: the host builds the answer from the whitelisted fields it owns, and those values, the layer writing each one and the version of every writable settings file come from one read, so no path can be asked for and no credential ever comes from configuration (D13, D60)',
+    parameters: {
+      type: 'object',
+      properties: {
+        projectRoot: { type: 'string', description: 'the project whose settings layers to read; absent means the one the Host was launched on' },
+      },
+    },
   },
   // 第十条只为界面多出来的方法：配置由宿主持有，界面说得出改哪一个白名单字段、写进哪一层，以及它读回的那一份版本；
   // 文件路径、白名单之外的键与项目共享那一份配置都说不出口（方案 7.2）。
   'config.set': {
-    description: 'Write one whitelisted configuration field into one settings layer; the host owns the field list, the value shape and the target file, and refuses the write when that file changed since it was read',
+    description: 'Write one whitelisted configuration field into one settings layer of one project; the host owns the field list, the value shape and the target file, refuses the write when that file changed since it was read, and adopts only the sessions whose effective value changed after the layers are folded again',
     parameters: {
       type: 'object',
       properties: {
         field: { type: 'string', description: 'one field name from the list the host names back when this is not one of them' },
-        value: { type: 'string', description: 'the new value of a one-line field; the host checks it against the shape that field declares' },
+        value: { description: 'the new value; the host checks scalar, service list, and model selection shapes by field name' },
         layer: { type: 'string', description: 'which settings file to write; the writable ones are named back when this is not one of them' },
         version: { type: 'string', description: 'the version read from that file, so a concurrent edit is reported instead of overwritten; blank when that file did not exist' },
+        projectRoot: { type: 'string', description: 'the project whose settings layer to write; absent means the one the Host was launched on' },
         op: { type: 'string', description: 'for the tool rule table: add a rule, change that one rule, or remove it' },
         index: { type: 'number', description: 'which rule in the table that layer writes, counted from 0; ignored when adding' },
         ruleTool: { type: 'string', description: 'for add and change: the capability name the rule matches' },
@@ -192,6 +283,10 @@ export const METHODS = Object.freeze({
 
 // Host 向客户端发出去的那一份请求，与客户端答复的形状。
 export const APPROVAL_METHOD = 'approval.request';
+
+// 模型向人提问那一条请求（D107）：审批那一格问这一件能不能做，这一格问这一件该怎么办，两条各自一发请求与一次答复。
+// 答复带 `answers`，每题一项，按题目自己的编号对上；题目的字段由那件工具核对，这条协议只定请求的名字。
+export const QUESTION_METHOD = 'question.request';
 
 // Host 交回的通知名。delta 来自流式接收期间，event 是会话记录里刚落盘的那一条（I5：记录是唯一事实源），
 // fault 是这条连接本身的问题——一行读不出来时没有对应的请求可以答复，只能说给对端听。

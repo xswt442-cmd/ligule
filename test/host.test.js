@@ -6,15 +6,18 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { createConnection, createConfig, createMemoryConnectionPair, MESSAGES_CAPABILITIES, METHODS, NOTIFICATIONS, providerFromConfig, resolveShell, serveHost } from '../dist/index.js';
+import { createConnection, createConfig, createMemoryConnectionPair, MESSAGES_CAPABILITIES, METHODS, NOTIFICATIONS, providerFromConfig, hostProviderFromConfig, resolveShell, serveHost } from '../dist/index.js';
 import { shownConfigOf } from '../dist/host/host.js';
 import { createConfigStore } from '../dist/kernel/config-store.js';
 import { configVersion } from '../dist/kernel/config-edit.js';
+import { historyPathOf, rememberHistory } from '../dist/kernel/input-history.js';
+import { prefsPathOf, savePrefs } from '../dist/kernel/desktop-prefs.js';
 import { listProjectFiles } from '../dist/host/paths.js';
+import { listenFetchable } from './helpers/port.js';
 
 const CLI = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
 
@@ -46,9 +49,9 @@ async function withEndpoint(run) {
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.end(events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''));
   });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = await listenFetchable(server);
   try {
-    return await run(`http://127.0.0.1:${server.address().port}`, requests);
+    return await run(`http://127.0.0.1:${port}`, requests);
   } finally {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
@@ -145,7 +148,9 @@ test('a client over stdio drives one round, answers one approval and watches the
     assert.deepEqual(approvals[0].args, { path: 'note.txt' });
     assert.equal(approvals[0].sessionId, sessionId);
     // 那一次询问带着属于它自己的那一项目录：客户端看着别的那一份时，答的是那一个项目里的这一步。
-    assert.equal(approvals[0].projectRoot, directory);
+    // 两边写法可以不同而指同一处目录：macOS 上 `/var` 是 `/private/var` 的一条链接，Windows 的 runner 把临时目录给成 8.3 的短名（`RUNNER~1`）。
+    // 这一格要的是「同一处目录」，所以比较之前两边都取真实路径；宿主那一份交回的仍是它自己认的那一处，没有被这一趟改写。
+    assert.equal(await realpath(approvals[0].projectRoot), await realpath(directory));
     // 没有命令文本的调用不带后端那两样：那一种语法与哪一个可执行文件对读一次文件这件事没有意义。
     assert.equal(approvals[0].shell, undefined);
     assert.equal(approvals[0].executable, undefined);
@@ -160,6 +165,7 @@ test('a client over stdio drives one round, answers one approval and watches the
     assert.equal(events.find((event) => event.kind === 'tool').result.content.text, 'the body', 'the tool result the client saw is the file content');
 
     // 客户端看见的那一条与记录里落盘的那一条同源，序号也在通知里带回来了。
+    // 这一族宿主是子进程，HOME 指到这一份临时目录：记录落在它自己的数据根会话区（D110）。
     const lines = (await readFile(join(directory, '.ligule', 'sessions', `${sessionId}.jsonl`), 'utf8'))
       .trim().split('\n').map((line) => JSON.parse(line));
     // 首行是会话元信息，不是一条事件；宿主先读一遍（模式去重）也该把它写出来（D73）。
@@ -267,6 +273,7 @@ async function runCli(directory, answer) {
   return withEndpoint(async (baseUrl, requests) => {
     const child = spawn(process.execPath, [
       CLI, 'run', 'read the note',
+      '--lang', 'en',
       '--config', 'model.api="messages"',
       '--config', `model.baseURL="${baseUrl}"`,
       '--config', 'model.model="test-model"',
@@ -310,8 +317,8 @@ test('ligule run prints the round, asks the terminal once, and the project instr
     assert.match(outcome.stdout, /^> read the note$/m);
     assert.match(outcome.stdout, /^· read: ok$/m);
     assert.match(outcome.stdout, /the file says so/);
-    assert.match(outcome.stderr, /allow read \{"path":"note\.txt"\}\?/);
-    assert.match(outcome.stderr, /^session [0-9a-f-]{36}: 2 iterations, 2 model calls$/m);
+    assert.match(outcome.stderr, /Allow read \{"path":"note\.txt"\}\?/);
+    assert.match(outcome.stderr, /^Session [0-9a-f-]{36}: 2 iterations, 2 model calls$/m);
     // 项目指令那一层进了请求体的系统段（D10 装载侧的接线）。
     assert.match(outcome.requests[0].system, /print nothing but the answer/);
   } finally {
@@ -563,7 +570,7 @@ test('a branch of an open session reads back through the same action', async () 
     assert.ok(events.some((event) => event.kind === 'user' && event.text === '一句话'), 'the open session reads back');
     assert.ok(events.every((event) => typeof event.seq === 'number'), 'sequence numbers come from the record');
 
-    await writeFile(join(directory, '.ligule', 'sessions', `${branchId}.jsonl`), [
+    await writeFile(join(homedir(), '.ligule', 'sessions', `${branchId}.jsonl`), [
       JSON.stringify({ kind: 'session', formatVersion: 1, sessionId: branchId, projectRoot: directory, createdAt: '2026-10-05T00:00:00.000Z' }),
       JSON.stringify({ seq: 0, kind: 'user', text: 'the delegated task' }),
     ].join('\n') + '\n');
@@ -638,9 +645,14 @@ async function withInProcessHost(run, limits, extra = {}) {
   const pair = createMemoryConnectionPair();
   const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy, ...extra });
   const connection = createConnection(pair.client);
+  // 界面上填过端点那两格之后，派出来的那一份提供方读的是环境变量里的凭据：这一份检查自己设一个，别跟着开发机上有没有配过东西变红。
+  const previousKey = process.env.LIGULE_API_KEY;
+  process.env.LIGULE_API_KEY = 'test-key';
   try {
     return await run(connection, { hold: (promise) => { gate = promise; }, directory });
   } finally {
+    if (previousKey === undefined) delete process.env.LIGULE_API_KEY;
+    else process.env.LIGULE_API_KEY = previousKey;
     pair.client.output.end();
     await host.release();
     await rm(directory, { recursive: true, force: true });
@@ -701,7 +713,9 @@ test('manual compaction returns a boundary the status line then reports', async 
 test('config.get shows the endpoint block and nothing else from the snapshot', async () => {
   await withInProcessHost(async (connection, { directory }) => {
     const shown = await connection.request('config.get', {});
-    assert.deepEqual(Object.keys(shown).sort(), ['layers', 'model', 'sources'], '交出来的是那格端点、可写的那几层与每条的来源');
+    assert.deepEqual(Object.keys(shown).sort(), ['layers', 'model', 'selection', 'services', 'sources'], '只交回公开模型字段、服务选择与来源');
+    assert.deepEqual(shown.services, []);
+    assert.equal(shown.selection, null);
     assert.deepEqual(Object.keys(shown.model).sort(), ['api', 'baseURL', 'model'], '端点那三样；这份配置没写 apiKeyEnv，那一格就不出现');
     assert.deepEqual(shown.layers, [], '启动这一侧没给写入口时那一格是空的：这一具宿主不知道该往哪里写');
     assert.deepEqual(shown.sources, {}, '没有那一格时来源也说不出来，不猜一条');
@@ -711,15 +725,45 @@ test('config.get shows the endpoint block and nothing else from the snapshot', a
     );
     const frame = JSON.stringify(shown);
     assert.ok(!frame.includes(directory), '边界那一个目录不进帧：那是这台机器上的位置');
-    assert.ok(!frame.includes('auto'), '判定档位不在这一条里读，它走 status.get（D40）');
+    assert.ok(!frame.includes('auto'), '这一具宿主没有配置文件的读写口，档位读不出来那一格就不出现：正在生效的那一份走 status.get（D40）');
     // 这条路不收参数：多写的那一格不会被读，也换不来白名单之外的一格。
     // 边界不在参数校验上（子集校验放过模式里没声明的键），在结果由固定四格拼出来那一句上。
-    assert.deepEqual(Object.keys(await connection.request('config.get', { path: 'policy.mode' })).sort(), ['layers', 'model', 'sources']);
+    assert.deepEqual(Object.keys(await connection.request('config.get', { path: 'policy.mode' })).sort(), ['layers', 'model', 'selection', 'services', 'sources']);
   });
 });
 
 // 写配置那一条路（实现顺序第 90 步，方案 7.2）：字段与层由宿主持有，别的一格都说不出口；
 // 那份文件被别人改过时报冲突而不是盖掉他的改动。
+test('consecutive first-time writes accumulate into one provider instead of restarting from the load snapshot', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-config-first-'));
+  const home = join(root, 'home');
+  const userFile = join(home, '.ligule', 'config.toml');
+  await mkdir(dirname(userFile), { recursive: true });
+  // 起手这一份一个 [model] 都没有：首启的人从设置里一格一格填（U59 首启检查）。
+  const store = createConfigStore({ projectRoot: root, userHome: home, layers: { user: {} } });
+  try {
+    await withInProcessHost(async (connection) => {
+      let version = '';
+      const first = await connection.request('config.set', { field: 'model.api', value: 'chat-completions', layer: 'user', version });
+      assert.equal(first.failure?.code, 'provider_base_url_required', '第一格填下去时还差服务地址');
+      version = first.version;
+      const second = await connection.request('config.set', { field: 'model.baseURL', value: 'http://127.0.0.1:1/v1', layer: 'user', version });
+      assert.notEqual(second.failure?.code, 'provider_base_url_required', '第二格接在第一格上，不是退回装载那一次的快照');
+      version = second.version;
+      const third = await connection.request('config.set', { field: 'model.model', value: 'stub-model', layer: 'user', version });
+      assert.equal(third.failure, undefined, '三格攒齐之后提供方换得上');
+      const text = await readFile(userFile, 'utf8');
+      assert.ok(text.includes('api = "chat-completions"') && text.includes('baseURL = "http://127.0.0.1:1/v1"') && text.includes('model = "stub-model"'), text);
+    }, undefined, {
+      configStore: store,
+      // 首启那一格：装载时一个 [model] 都没有，宿主先立占位（U59 的那一处修复），设置里再一格一格填。
+      config: createConfig({ user: { boundary: root, policy: { mode: 'ask' } } }),
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('config.set writes one whitelisted field and reports a concurrent edit instead of overwriting it', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ligule-config-set-'));
   const home = join(root, 'home');
@@ -736,7 +780,7 @@ test('config.set writes one whitelisted field and reports a concurrent edit inst
       assert.equal(user.exists, true);
       assert.equal(local.version, '', '那一份项目本机覆盖还没写过：版本是空串');
       assert.ok(!JSON.stringify(first.layers).includes(home), '帧里没有文件路径：那格只说层名与版本');
-      assert.deepEqual(first.sources, { 'model.api': 'user', 'model.model': 'user', 'model.baseURL': 'none', 'model.apiKeyEnv': 'none', 'policy.mode': 'none', 'policy.rules': 'none' }, '来源说的是装载那一次读到的四层，没写的那一格是 none');
+      assert.deepEqual(first.sources, { 'model.api': 'user', 'model.model': 'user', 'model.baseURL': 'none', 'model.apiKeyEnv': 'none', 'model.services': 'none', 'model.selection': 'none', 'policy.mode': 'none', 'policy.rules': 'none' }, '来源包含当前全部可写字段，未写的字段为 none');
 
       const written = await connection.request('config.set', { field: 'model.model', value: '新的', layer: 'user', version: user.version });
       assert.equal(written.created, false);
@@ -814,6 +858,43 @@ test('config.set writes one whitelisted field and reports a concurrent edit inst
   }
 });
 
+// 方案 3A：设置那一栏的值、来源与那一份版本出自同一遍读取，读的是可写那两层文件此刻的内容。
+// 打开这一栏是一次纯读：正在跑的会话用的那一份提供方、档位与规则都不动。
+test('the settings panel reads value, source and version in one pass and changes nothing in effect', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-one-read-'));
+  const home = join(root, 'home');
+  const userFile = join(home, '.ligule', 'config.toml');
+  await mkdir(dirname(userFile), { recursive: true });
+  await writeFile(userFile, '[model]\nmodel = "文件里那一份"\n', 'utf8');
+  const store = createConfigStore({ projectRoot: root, userHome: home, layers: { user: { model: { model: '装载时那一份' } } } });
+  try {
+    await withInProcessHost(async (connection) => {
+      const { sessionId } = await connection.request('session.create', {});
+      const before = await connection.request('status.get', { sessionId });
+      const shown = await connection.request('config.get', {});
+      assert.equal(shown.model.model, '文件里那一份', '屏幕上那一份是文件此刻的内容，不是装载那一次的快照');
+      assert.equal(shown.sources['model.model'], 'user');
+      assert.equal(shown.layers[0].version, configVersion(await readFile(userFile, 'utf8')), '那一份版本与那一个值出自同一遍读取');
+      assert.equal(shown.policyMode, undefined, '四层里没写档位时那一格是空的，界面不替配置文件猜一档');
+      assert.equal(shown.sources['policy.mode'], 'none');
+      const after = await connection.request('status.get', { sessionId });
+      assert.equal(after.model, before.model, '读一遍设置不改这一份会话正在用的那一份模型');
+      assert.equal(after.policy, before.policy, '也不改正在生效的那一档');
+
+      // 别的过程或人自己开的编辑器在这之后改了那一份文件：下一次读，值、来源与版本一起跟着换成新的那一份。
+      await writeFile(userFile, '[model]\nmodel = "别人写的"\n[policy]\nmode = "auto"\n', 'utf8');
+      const again = await connection.request('config.get', {});
+      assert.equal(again.model.model, '别人写的');
+      assert.equal(again.policyMode, 'auto', '文件里写着的默认档现在读得出来');
+      assert.equal(again.sources['policy.mode'], 'user');
+      assert.equal(again.layers[0].version, configVersion(await readFile(userFile, 'utf8')));
+      assert.equal((await connection.request('status.get', { sessionId })).policy, before.policy, '正在生效的那一份还是装载时的：外部改文件不走过这一具宿主的写入那一路');
+    }, undefined, { configStore: store });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 // 命令行那一层写着的一条，改文件盖不过它（D8 的次序、方案 7.1 的「不能声称改低层文件即可生效」）：
 // 这一笔说成 shadowed，正在用的提供方与任何会话都不动。
 test('a field the command line wrote is reported as shadowed instead of adopted', async () => {
@@ -841,6 +922,150 @@ test('a field the command line wrote is reported as shadowed instead of adopted'
       assert.ok((await readFile(userFile, 'utf8')).includes('model = "改文件的那一份"'), '文件里是那一句新值');
     }, undefined, { configStore: store });
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// 同一层次序的另一头（审阅 F1）：项目共享那一份写着档位时，把使用者默认存成别的档位不该改变任何会话在判的那一档。
+// 盖没盖住由折完整四层说，不由「是不是命令行写的」说；交回的 `shadowedBy` 指名是哪一层盖着它。
+test('a tier saved into a lower layer that the project layer overrides adopts nothing', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-tier-override-'));
+  const home = join(root, 'home');
+  const userFile = join(home, '.ligule', 'config.toml');
+  await mkdir(dirname(userFile), { recursive: true });
+  await writeFile(userFile, '[model]\nmodel = "文件里那一份"\n', 'utf8');
+  const store = createConfigStore({ projectRoot: root, userHome: home, layers: { user: { model: { model: '文件里那一份' } }, project: { policy: { mode: 'ask' } } } });
+  try {
+    await withInProcessHost(async (connection) => {
+      const { sessionId } = await connection.request('session.create', {});
+      const shown = await connection.request('config.get', {});
+      assert.equal(shown.sources['policy.mode'], 'project', '生效那一份由项目共享那一层写着');
+      assert.equal(shown.policyMode, 'ask', '屏幕上那一份默认档是折完四层之后的');
+      const answer = await connection.request('config.set', { field: 'policy.mode', value: 'auto', layer: 'user', version: shown.layers[0].version });
+      assert.equal(answer.shadowed, true);
+      assert.equal(answer.shadowedBy, 'project', '说的是哪一层盖住了这一笔');
+      assert.deepEqual(answer.applies, [], '前后折出来是同一份，没有一份会话要采用它');
+      assert.equal((await connection.request('status.get', { sessionId })).policy, 'ask', '正在判的那一档没被低一层的写入放宽');
+      assert.ok((await readFile(userFile, 'utf8')).includes('mode = "auto"'), '文件那一笔还是写成了：说的是当前运行没变，不是没写');
+    }, undefined, { configStore: store, policy: { mode: 'ask' } });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// 连着改两条生成字段（审阅 F2）：后一次重建提供方用的是这一格项目环境此刻的那一份完整选择，
+// 不是装载那一次的快照，所以改服务地址不会把刚改过的模型名退回装载时那一份。
+test('two saves of generation fields compose instead of reverting the first', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-two-edits-'));
+  const home = join(root, 'home');
+  const userFile = join(home, '.ligule', 'config.toml');
+  await mkdir(dirname(userFile), { recursive: true });
+  await writeFile(userFile, '[model]\nmodel = "旧的"\n', 'utf8');
+  const store = createConfigStore({ projectRoot: root, userHome: home, layers: { user: { model: { model: '旧的' } } } });
+  try {
+    await withInProcessHost(async (connection) => {
+      const { sessionId } = await connection.request('session.create', {});
+      const first = await connection.request('config.set', { field: 'model.model', value: '改过的模型', layer: 'user', version: (await connection.request('config.get', {})).layers[0].version });
+      assert.deepEqual(first.applies.map((item) => item.when), ['now'], '空着的会话立刻采用');
+      assert.equal((await connection.request('status.get', { sessionId })).model, '改过的模型');
+      const shown = await connection.request('config.get', {});
+      const second = await connection.request('config.set', { field: 'model.baseURL', value: 'https://edited.test/v1', layer: 'user', version: shown.layers[0].version });
+      assert.deepEqual(second.applies.map((item) => item.when), ['now']);
+      const status = await connection.request('status.get', { sessionId });
+      assert.equal(status.model, '改过的模型', '改地址那一笔没把模型名退回装载时那一份');
+      assert.equal(status.pendingModel, null, '空着的会话没有等在边界的另一份');
+      const text = await readFile(userFile, 'utf8');
+      assert.ok(text.includes('model = "改过的模型"') && text.includes('baseURL = "https://edited.test/v1"'), '两份都落在那一份文件里');
+      assert.equal((await connection.request('config.get', {})).model.baseURL, 'https://edited.test/v1', '屏幕上说的与运行里打的是同一份');
+    }, undefined, { configStore: store });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// 保存过模型字段之后新开的一份会话：状态、这一份会话在打的提供方与轮次记录读的是同一份生成选择。
+// 装载那一次的配置快照在这一笔写入之后仍是旧的那一份，新会话从它起就会让 `status.get` 说新的、
+// 记录里的 `turnContext` 说旧的，两份读数各讲各的（方案 7.2 与 D104 在同一格上相遇）。
+// 提供方是按那一份折出来的配置重建的，所以这一趟打到本机端点上的请求体自己就是第三条证据。
+test('a session created after a model save inherits the generation the environment is on', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-inherit-generation-'));
+  const home = join(root, 'home');
+  const userFile = join(home, '.ligule', 'config.toml');
+  await mkdir(dirname(userFile), { recursive: true });
+  await writeFile(userFile, '[model]\nmodel = "装载那一份"\n', 'utf8');
+  const store = createConfigStore({ projectRoot: root, userHome: home, layers: { user: { model: { model: '装载那一份' } } } });
+  try {
+    await withEndpoint(async (baseUrl, requests) => {
+      await withInProcessHost(async (connection) => {
+        const first = await connection.request('config.get', {});
+        await connection.request('config.set', { field: 'model.model', value: '保存那一份', layer: 'user', version: first.layers[0].version });
+        const second = await connection.request('config.get', {});
+        await connection.request('config.set', { field: 'model.baseURL', value: baseUrl, layer: 'user', version: second.layers[0].version });
+        const { sessionId } = await connection.request('session.create', {});
+        assert.equal((await connection.request('status.get', { sessionId })).model, '保存那一份', '新开的一份继承的是这一份环境此刻的那一份');
+        await connection.request('run.start', { sessionId, input: 'say it' });
+        const record = await connection.request('session.read', { sessionId, limit: 50 });
+        const context = record.events.find((event) => event.kind === 'turnContext');
+        assert.notEqual(context, undefined, '开轮那一份参数快照要落进记录');
+        assert.equal(context.model, '保存那一份', '记录里那一份与状态里那一份同源');
+        assert.equal(requests.at(-1).model, '保存那一份', '真正打到端点上的那一份请求带的也是它');
+      }, undefined, { configStore: store });
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// 一具宿主开了 A、B 两份项目的会话之后，设置那一栏读写的是「现在说的那一个项目」自己那两层文件（方案 3.2、审阅 F3）。
+// 往本机覆盖那一层写的一笔只属于那一个项目；往使用者默认那一层写的一笔，两份项目各按自己折出来的那一份采用。
+test('the settings panel reads and writes the project it names, and a shared default lands on each project its own way', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-project-settings-'));
+  const a = join(root, 'a');
+  const b = join(root, 'b');
+  const home = join(root, 'home');
+  await mkdir(join(b, '.ligule'), { recursive: true });
+  await mkdir(home, { recursive: true });
+  await writeFile(join(b, '.ligule', 'config.local.toml'), '[model]\nmodel = "B 那一份"\n', 'utf8');
+  const environmentOf = (projectRoot) => {
+    const config = createConfig({ user: { boundary: projectRoot, model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model' } } });
+    // 提供方按命令行与宿主那一条路从这份配置建出来（`providerFromConfig`），不再是本检查自己造的格子：
+    // 线上形状、能力上限与地址校验都在这一步真走过。这一趟不发请求，那一格地址不会被碰到。
+    return { config, provider: providerFromConfig(config), policy: config.policy, layers: {} };
+  };
+  const pair = createMemoryConnectionPair();
+  const host = serveHost({
+    input: pair.host.input,
+    output: pair.host.output,
+    ...environmentOf(a),
+    loadEnvironment: async (projectRoot) => environmentOf(projectRoot),
+    configLayers: {},
+    configStoreFor: (projectRoot, layers) => createConfigStore({ projectRoot, userHome: home, layers }),
+  });
+  const client = createConnection(pair.client);
+  try {
+    const inA = await client.request('session.create', {});
+    const inB = await client.request('session.create', { projectRoot: b });
+
+    const shownB = await client.request('config.get', { projectRoot: b });
+    assert.equal(shownB.model.model, 'B 那一份', '指名 B 就读 B 的本机覆盖那一层');
+    assert.equal(shownB.sources['model.model'], 'local');
+    const shownA = await client.request('config.get', {});
+    assert.equal(shownA.model.model, undefined, 'A 那一格没写：读自己那两层，不拿 B 的那一份来说');
+
+    const written = await client.request('config.set', { field: 'model.model', value: 'B 改过的', layer: 'projectLocal', version: shownB.layers[1].version, projectRoot: b });
+    assert.deepEqual(written.applies.map((item) => item.sessionId), [inB.sessionId], '只有 B 的会话采用它');
+    assert.ok((await readFile(join(b, '.ligule', 'config.local.toml'), 'utf8')).includes('B 改过的'));
+    await assert.rejects(() => stat(join(a, '.ligule', 'config.local.toml')), 'A 的那一份文件没被这次写出来');
+    assert.equal((await client.request('status.get', { sessionId: inA.sessionId })).model, 'test-model', 'A 的会话打的东西没被这一次带动');
+
+    // 使用者默认那一层是所有项目共用的：A 折得到它，B 自己被本机覆盖那一层盖着，所以只有 A 采用（D8 的层序）。
+    const saved = await client.request('config.set', { field: 'model.model', value: '共用默认', layer: 'user', version: shownB.layers[0].version });
+    assert.deepEqual(saved.applies.map((item) => item.sessionId), [inA.sessionId], 'B 那一格由本机覆盖写着，低一层的默认盖不过它');
+    assert.equal((await client.request('status.get', { sessionId: inA.sessionId })).model, '共用默认');
+    assert.equal((await client.request('status.get', { sessionId: inB.sessionId })).model, 'B 改过的');
+  } finally {
+    pair.client.output.end();
+    await host.release();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -930,6 +1155,7 @@ test('a saved generation choice lands now on an idle session and at the round ed
   }
 });
 // 那一个项目的记录目录里，那一个项目的列表才列得出它。装载不出别的项目环境的宿主直接说不支持。
+// 项目根自己不存在、是文件、读不动各给一个稳定码；有效项目没有记录目录时交回空列表（方案 2A）。
 test('one host keeps two projects apart, and a host without a loader says so', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ligule-projects-'));
   const first = join(root, 'first');
@@ -961,7 +1187,7 @@ test('one host keeps two projects apart, and a host without a loader says so', a
     const inSecond = await client.request('session.create', { projectRoot: second });
     // 首行那份元信息在第一次落笔时才写，所以先跑一轮，再读那一份记录属于谁（D73）。
     await client.request('run.start', { sessionId: inSecond.sessionId, input: '另一轮' });
-    const header = JSON.parse((await readFile(join(second, '.ligule', 'sessions', `${inSecond.sessionId}.jsonl`), 'utf8')).split('\n')[0]);
+    const header = JSON.parse((await readFile(join(homedir(), '.ligule', 'sessions', `${inSecond.sessionId}.jsonl`), 'utf8')).split('\n')[0]);
     assert.equal(header.projectRoot, second, '首行说得出这一份记录属于哪个项目');
 
     const listedHere = await client.request('sessions.list', {});
@@ -969,11 +1195,14 @@ test('one host keeps two projects apart, and a host without a loader says so', a
     const listedThere = await client.request('sessions.list', { projectRoot: second });
     assert.ok(listedThere.sessions.some((item) => item.id === inSecond.sessionId), '指名那个项目才列得出它');
 
-    // 两个项目各开一份会话，交错跑一轮：各自的记录进各自的目录，互不串。
+    // 接开已经在这具宿主里的那一份不用再指名项目：它读自己那一份项目环境（桌面对刚在别项目录里建好的那一份只带编号去接那一条路）。
+    assert.deepEqual(await client.request('session.open', { sessionId: inSecond.sessionId }), { sessionId: inSecond.sessionId });
+
+    // 两个项目各开一份会话，交错跑一轮：记录都落数据根会话区，按首行说的项目分得开、互不串。
     const inFirst = await client.request('session.create', {});
     await client.request('run.start', { sessionId: inFirst.sessionId, input: '第一轮' });
-    assert.ok((await readFile(join(first, '.ligule', 'sessions', `${inFirst.sessionId}.jsonl`), 'utf8')).includes('第一轮'));
-    assert.ok((await readFile(join(second, '.ligule', 'sessions', `${inSecond.sessionId}.jsonl`), 'utf8')).includes('另一轮'));
+    assert.ok((await readFile(join(homedir(), '.ligule', 'sessions', `${inFirst.sessionId}.jsonl`), 'utf8')).includes('第一轮'));
+    assert.ok((await readFile(join(homedir(), '.ligule', 'sessions', `${inSecond.sessionId}.jsonl`), 'utf8')).includes('另一轮'));
 
     // 那一个根上最后一份会话收了，那份项目环境就退出这张表：下一次开这一根的会话重新读配置那几层（方案 3.1、实现顺序第 70 步）。
     await client.request('session.close', { sessionId: inSecond.sessionId });
@@ -986,6 +1215,37 @@ test('one host keeps two projects apart, and a host without a loader says so', a
       (error) => error.code === 'host_project_root_unsupported',
       '装载侧没给那条路时说出来，不用当前这一份项目环境去读别的项目',
     );
+
+    // 项目根自己那三种情形各给一个稳定码（方案 2A）：不存在、是文件、以及有效但还没有记录目录。
+    await assert.rejects(
+      client.request('sessions.list', { projectRoot: join(root, 'never-created') }),
+      (error) => error.code === 'host_project_root_missing',
+      '这一条路不存在说出来，不把它当成一份没有会话的项目',
+    );
+    // 开会话也走同一处分类：拒绝发生在装载之前，记录那一路的建目录（`src/session/session.js`）就不会把拼错的那一条路建出来。
+    await assert.rejects(
+      client.request('session.create', { projectRoot: join(root, 'never-created') }),
+      (error) => error.code === 'host_project_root_missing',
+      '拼错的项目根开不成会话',
+    );
+    assert.equal(await stat(join(root, 'never-created')).then(() => 'created', (error) => error.code), 'ENOENT',
+      '被拒绝的那一次没有留下任何目录');
+    await writeFile(join(root, 'a-file.txt'), 'x');
+    await assert.rejects(
+      client.request('sessions.list', { projectRoot: join(root, 'a-file.txt') }),
+      (error) => error.code === 'host_project_root_not_directory',
+      '那一条路是文件：说的不是「不存在」',
+    );
+    // 那一条路下面还有一段时，两边走的写法不同：Windows 上 `stat` 报 ENOENT，POSIX 上报 ENOTDIR（2026-10-08 在本机探针复测）。
+    // 两种都算「这一条路不是一个能打开的目录」，具体是哪一个由那台机器说。
+    const nested = await client.request('sessions.list', { projectRoot: join(root, 'a-file.txt', 'nested') })
+      .then(() => 'resolved', (error) => error.code);
+    assert.ok(nested === 'host_project_root_missing' || nested === 'host_project_root_not_directory',
+      `路上有一段是文件时要说出来，实际是 ${nested}`);
+    const empty = join(root, 'third');
+    await mkdir(empty, { recursive: true });
+    assert.deepEqual((await client.request('sessions.list', { projectRoot: empty })).sessions, [],
+      '有效项目还没跑过任何一轮时交回空列表：记录目录不存在不是错误（参照 E09）');
   } finally {
     pair.client.output.end();
     bare.client.output.end();
@@ -1015,6 +1275,25 @@ test('closing a session hands back its record lock and leaves the record alone',
     assert.deepEqual(reopened, { sessionId });
     const after = await connection.request('session.read', { sessionId });
     assert.deepEqual(after.events, before.events, '收过一次之后，记录里的事件一条没多、一条没少');
+  });
+});
+
+// 跑着的那一轮不该挡住「看一眼这一份会话」（审阅 F4）：桌面切换会话先要接住这一份，接不上就连那一屏的记录也读不到。
+// 这一条只看不改：不重装配、不收线，也不把这一轮打断。
+test('opening a session that is already open and running is a read, not an interruption', async () => {
+  await withInProcessHost(async (connection, { hold }) => {
+    const { sessionId } = await connection.request('session.create', {});
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    hold(gate);
+    const running = connection.request('run.start', { sessionId, input: '慢一点' });
+    await delay(50);
+    assert.deepEqual(await connection.request('session.open', { sessionId }), { sessionId }, '接回来这一份是成立的：它没被打断，也没换装配');
+    const read = await connection.request('session.read', { sessionId });
+    assert.ok(read.events.some((event) => event.kind === 'user'), '正在跑的那一句已经在记录里，画面读得到');
+    assert.equal((await connection.request('status.get', { sessionId })).running, true, '这一轮还在跑');
+    release(undefined);
+    assert.ok((await running).iterations >= 1, '这一轮自己走完了');
   });
 });
 
@@ -1096,6 +1375,8 @@ test('naming or archiving a session appends one fact the listing reads back', as
     const listed = (await connection.request('sessions.list', {})).sessions.find((item) => item.id === sessionId);
     assert.equal(listed.name, '读数那一轮', '列表那一处读的是记录里折出来的当前值');
     assert.equal(listed.archived, true);
+    const page = await connection.request('session.read', { sessionId, before: 2, limit: 1 });
+    assert.deepEqual(page.label, { name: '读数那一轮', archived: true }, '会话标题由完整记录折出，不受当前历史页影响');
     await assert.rejects(
       connection.request('session.label', { sessionId, name: '   ' }),
       (error) => error.code === 'session_name_invalid',
@@ -1204,7 +1485,7 @@ test('a file listing that ran out of its budget says so instead of finding nothi
     for (const name of ['a.md', 'b.md', 'c.md', 'd.md']) await writeFile(join(directory, name), 'x');
     const partial = await listProjectFiles(directory, 'zzz', 20, 2);
     assert.equal(partial.visited, 2, '翻到那一个上限就停手');
-    assert.equal(partial.stopped, 'budget', '一条没找到也要说这份清单不一定全：人据此改字重问，而不是以为项目里没有');
+    assert.equal(partial.stopped, 'budget', '一条没找到也要说这份清单不一定全：人据此改字重问，不会把没翻完当成项目里没有');
     const complete = await listProjectFiles(directory, 'zzz', 20, 99);
     assert.deepEqual(complete.paths, [], '整棵翻完时才说没有对得上的');
     assert.equal(complete.stopped, '', '整棵翻完时不说「可能没找全」');
@@ -1316,4 +1597,89 @@ test('a restarted Host reads back the spilled body and the stored duration of th
       await stop(again);
     }
   }, ['--config', 'limits.resultBytes=48']);
+});
+
+// 两端共用的那一份输入历史走宿主这一条路（方案 5.5.6）：界面发得出自己说过的那一句、读得回整份清单，
+// 但说不出那一份文件在哪一处。另一端的写法也读得到，因为读写的都是同一份文件。
+test('the host keeps the input history both surfaces share: newest first, one copy per sentence', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-input-history-'));
+  const previous = process.env.LIGULE_HOME;
+  process.env.LIGULE_HOME = join(root, 'data');
+  const config = createConfig({ user: { boundary: root, model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model' } } });
+  const quiet = { capabilities: MESSAGES_CAPABILITIES, model: 'test-model', async *stream() { yield { type: 'text', text: 'ok' }; } };
+  const pair = createMemoryConnectionPair();
+  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider: quiet, policy: { mode: 'auto' } });
+  const client = createConnection(pair.client);
+  try {
+    assert.deepEqual((await client.request('history.read', {})).entries, [], '还没有过任何一次输入不是错误');
+    assert.deepEqual((await client.request('history.append', { text: '第一句' })).entries, ['第一句']);
+    assert.deepEqual((await client.request('history.append', { text: '  第二句  ' })).entries, ['第二句', '第一句'], '最新的排在最前，两头空的字去掉');
+    assert.deepEqual((await client.request('history.append', { text: '第一句' })).entries, ['第一句', '第二句'], '同一句让位过来，不占两格');
+    await client.request('history.append', { text: '   ' });
+    assert.deepEqual((await client.request('history.read', {})).entries, ['第一句', '第二句'], '什么都没有的那一句不改这份历史');
+
+    await rememberHistory(historyPathOf(), ['另一端写下的一句']);
+    assert.deepEqual((await client.request('history.read', {})).entries, ['另一端写下的一句', '第一句', '第二句'], '两端读的是同一份文件');
+    assert.ok((await readFile(join(root, 'data', 'tui-history.jsonl'), 'utf8')).split('\n')[0].includes('另一端写下的一句'));
+    await assert.rejects(client.request('history.append', {}), (error) => error.code === 'protocol_args_invalid', '没有句子就没有要记的东西');
+  } finally {
+    pair.client.output.end();
+    await host.release();
+    if (previous === undefined) delete process.env.LIGULE_HOME;
+    else process.env.LIGULE_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// 桌面草稿与界面偏好那一份文档走宿主这一条路（方案 5.5.2）：界面整份写上去、整份读回来，
+// 那一份文件在哪一处由宿主定；文件被另一端改写之后，读回来的是文件里那一份。坏的那一份交不上来。
+test('the host keeps one desktop preferences document the interface writes whole and reads back', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-desktop-prefs-'));
+  const previous = process.env.LIGULE_HOME;
+  process.env.LIGULE_HOME = join(root, 'data');
+  const config = createConfig({ user: { boundary: root, model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model' } } });
+  const pair = createMemoryConnectionPair();
+  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider: providerFromConfig(config), policy: { mode: 'auto' } });
+  const client = createConnection(pair.client);
+  try {
+    const empty = await client.request('prefs.read', {});
+    assert.deepEqual(empty, { settings: {}, version: '' }, '缺失文件有明确的空版本');
+    const document = { palette: 'forest', drafts: { '/p': { s1: '没发出去的一句' } }, queued: { '/p': { s1: ['排着的两句'] } } };
+    const saved = await client.request('prefs.write', { json: JSON.stringify(document), version: empty.version });
+    assert.deepEqual(saved.settings, document, '写下的那一份交回来');
+    assert.notEqual(saved.version, empty.version);
+    assert.deepEqual((await client.request('prefs.read', {})).settings, document, '再读回来是同一份');
+    assert.deepEqual(JSON.parse(await readFile(join(root, 'data', 'desktop.json'), 'utf8')), document, '文件里就是这一份整份文档');
+
+    await savePrefs(prefsPathOf(), { palette: 'graphite' });
+    await assert.rejects(client.request('prefs.write', { json: JSON.stringify(document), version: saved.version }), (error) => error.code === 'desktop_prefs_version_stale');
+    const latest = await client.request('prefs.read', {});
+    assert.deepEqual(latest.settings, { palette: 'graphite' }, '文件被另一端改写后，读出的是文件里那一份');
+
+    await assert.rejects(client.request('prefs.write', { json: '{ not json', version: latest.version }), (error) => error.code === 'desktop_prefs_invalid', '读不出来的那一份不上桥');
+    await assert.rejects(client.request('prefs.write', { json: '[1]', version: latest.version }), (error) => error.code === 'desktop_prefs_invalid', '不是对象的那一份也拒');
+    await assert.rejects(client.request('prefs.write', { json: '{}' }), (error) => error.code === 'protocol_args_invalid', '未读取版本的客户端不能覆盖文件');
+    await assert.rejects(client.request('prefs.write', {}), (error) => error.code === 'protocol_args_invalid', '没有文档就没有要写的东西');
+    assert.deepEqual((await client.request('prefs.read', {})).settings, { palette: 'graphite' }, '被拒的那几次一个字都没写进文件');
+  } finally {
+    pair.client.output.end();
+    await host.release();
+    if (previous === undefined) delete process.env.LIGULE_HOME;
+    else process.env.LIGULE_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// 数据根里没有 `[model]` 那一格时，宿主这一路要起得来：桌面壳设置里那一栏正是用来写上那几格的（U59）。
+// 命令行与终端那两路不当场报错就没人说这句话，所以那两路仍旧走 `providerFromConfig`。
+test('the host keeps a shape to serve from when no model is configured yet', async () => {
+  const pending = hostProviderFromConfig({});
+  assert.equal(pending.pending, true, '缺的那几格由这一枚占位的顶着');
+  assert.equal(typeof pending.stream, 'function', '宿主认的就是 `provider.stream` 是一个函数，这一枚要过得去');
+  await assert.rejects(async () => {
+    for await (const chunk of pending.stream({ messages: [] })) void chunk;
+  }, (error) => error.code === 'host_model_config_missing', '真要发一轮时说的是缺哪几格');
+  assert.throws(() => pending.withModel('deepseek-chat'), (error) => error.code === 'host_model_config_missing', '换模型也换不出一份不存在的配置');
+  assert.equal(hostProviderFromConfig({ model: { api: 'other' } }).pending, true, '线上形状写错的那一种也留着让界面改得动');
+  assert.throws(() => providerFromConfig({}), (error) => error.code === 'host_model_config_missing', '命令行那一路照旧当场说');
 });

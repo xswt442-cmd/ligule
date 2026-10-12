@@ -23,7 +23,7 @@ export type InkKey = {
   end?: boolean;
 };
 
-export type KeyView = '全局' | '输入' | '补全清单' | '路径候选' | '反查' | '会话列表' | '完整历史' | '审批';
+export type KeyView = '全局' | '输入' | '补全清单' | '路径候选' | '反查' | '会话列表' | '完整历史' | '审批' | '提问';
 
 export type TerminalAction =
   | 'quit' | 'expand-or-history' | 'editor' | 'search-open' | 'interrupt'
@@ -35,9 +35,38 @@ export type TerminalAction =
   | 'view-up' | 'view-down' | 'view-page-up' | 'view-page-down' | 'view-top' | 'view-bottom'
   | 'mark-up' | 'mark-down' | 'copy-selection' | 'view-close'
   | 'approval-cancel' | 'approve' | 'deny'
-  | 'approval-up' | 'approval-down' | 'approval-page-up' | 'approval-page-down' | 'approval-top' | 'approval-bottom';
+  | 'approval-up' | 'approval-down' | 'approval-page-up' | 'approval-page-down' | 'approval-top' | 'approval-bottom'
+  | 'question-back';
 
 export type Binding = { readonly spec: string; readonly view: KeyView; readonly label: string };
+
+export const ENGLISH_VIEWS: Record<KeyView, string> = {
+  全局: 'Global', 输入: 'Composer', 补全清单: 'Commands', 路径候选: 'Files',
+  反查: 'Input history', 会话列表: 'Sessions', 完整历史: 'Transcript', 审批: 'Approvals', 提问: 'Questions',
+};
+
+export const ENGLISH_LABELS: Record<TerminalAction, string> = {
+  quit: 'Exit', 'expand-or-history': 'Browse transcript or expand approval details',
+  editor: 'Edit draft in VISUAL or EDITOR', 'search-open': 'Search input history', interrupt: 'Stop this turn and pause the queue',
+  send: 'Send, or queue while running', newline: 'New line', 'newline-alt': 'New line',
+  'history-up': 'Move up, or recall earlier input on a single line', 'history-down': 'Move down, or recall newer input',
+  'history-up-shift': 'Move up', 'history-down-shift': 'Move down',
+  'queue-recall': 'Recover the last queued message when the draft is empty', 'queue-recall-alt': 'Recover the last queued message',
+  'undo-draft': 'Undo draft edit', 'redo-draft': 'Redo draft edit',
+  complete: 'Complete command', 'complete-up': 'Previous command', 'complete-down': 'Next command', 'complete-close': 'Close suggestions',
+  'pick-path': 'Insert the selected file without sending', 'pick-path-alt': 'Insert selected file',
+  'path-up': 'Previous file', 'path-down': 'Next file', 'path-close': 'Close file suggestions',
+  'search-pick': 'Restore the selected input to the draft', 'search-up': 'Previous match', 'search-down': 'Next match',
+  'search-cycle': 'Next match', 'search-back': 'Delete a query character, or close when empty', 'search-back-alt': 'Delete a query character', 'search-close': 'Close search and keep the draft',
+  'list-open': 'Resume selected session', 'list-up': 'Previous session', 'list-down': 'Next session',
+  'list-page-up': 'Previous page', 'list-page-down': 'Next page', 'list-first': 'First session', 'list-last': 'Last session', 'list-close': 'Close session list',
+  'view-up': 'Move up a line', 'view-down': 'Move down a line', 'view-page-up': 'Previous page', 'view-page-down': 'Next page',
+  'view-top': 'Go to start', 'view-bottom': 'Go to end', 'mark-up': 'Extend selection up', 'mark-down': 'Extend selection down',
+  'copy-selection': 'Copy selection', 'view-close': 'Close transcript and keep the draft',
+  'approval-cancel': 'Cancel this turn', approve: 'Allow this call', deny: 'Deny this call',
+  'approval-up': 'Scroll up a line', 'approval-down': 'Scroll down a line', 'approval-page-up': 'Previous page', 'approval-page-down': 'Next page',
+  'approval-top': 'Go to start', 'approval-bottom': 'Go to end', 'question-back': 'Edit the previous answer when the draft is empty',
+};
 
 export const KEYMAP: Readonly<Record<TerminalAction, Binding>> = {
   'quit': { spec: 'ctrl+c', view: '全局', label: '退出界面' },
@@ -56,8 +85,7 @@ export const KEYMAP: Readonly<Record<TerminalAction, Binding>> = {
   'history-down-shift': { spec: 'shift+arrowdown', view: '输入', label: '往下（带 Shift 的那一记，与 ↓ 同一件事）' },
   'queue-recall': { spec: 'backspace', view: '输入', label: '草稿空着时收回排着的最后一条' },
   'queue-recall-alt': { spec: 'delete', view: '输入', label: '草稿空着时收回排着的最后一条（与退格同一件事）' },
-  // pi 把撤销放在 ctrl+-（`pi/packages/tui/src/keybindings.ts:142`），因为 Ctrl+Z 在 POSIX 终端上是「暂停这个作业」那一记。
-  // 这里走人先试的那一记：Ink 开的是 raw mode，那一个字节交回界面而不是发到作业控制上去。
+  // Ink 使用 raw mode，Ctrl+Z 的字节交给界面，不触发 POSIX 作业控制。
   'undo-draft': { spec: 'ctrl+z', view: '输入', label: '退回草稿的上一次改动' },
   'redo-draft': { spec: 'ctrl+y', view: '输入', label: '把刚退回的那一段再拿回来' },
 
@@ -109,6 +137,9 @@ export const KEYMAP: Readonly<Record<TerminalAction, Binding>> = {
   'approval-page-down': { spec: 'pagedown', view: '审批', label: '在那一段改动里往下翻一屏' },
   'approval-top': { spec: 'home', view: '审批', label: '跳到那一段改动的开头' },
   'approval-bottom': { spec: 'end', view: '审批', label: '跳到那一段改动的末尾' },
+
+  // 答题那几格里回车就是交出这一题，草稿里的光标还得靠左走：所以退回上一题那一记只在草稿空着时落。
+  'question-back': { spec: 'arrowleft', view: '提问', label: '草稿空着时回到上一题，把刚才写的答话放回草稿里改' },
 };
 
 // Ink 对修饰键交回的是那一键自己的名字（`Control`、`Meta`）：光按住修饰键不是一记能用光自己的绑定。
