@@ -1,38 +1,28 @@
 # Tools
 
-Rules for `src/tools/`: the three read-only tools, the four write tools, the first-party optional tools and what they share. The repository-wide rules in [../../AGENTS.md](../../AGENTS.md) apply here too; this file states what only this directory has to keep.
+The repository [Agent guide](../../AGENTS.md) applies here. This directory contains model-callable tool contracts and their implementations. Platform and filesystem primitives live under [`src/capability/`](../capability/); every tool call still enters through the kernel.
 
-## Optional first-party tools
+## Filesystem tools
 
-`fetch` is a first-party optional tool: the registry holds it, `minimal` hides it, `full` offers it (D48).
+- Resolve every path against the Host-provided working directory and enforce the configured tool boundary. Do not replace path validation with a string-prefix check or follow a link outside the boundary.
+- `write` requires a complete prior read and rejects a stale observed version. `edit` requires a non-empty anchor that occurs exactly once. Preserve these checks when changing write behavior.
+- `delete` moves its target to the configured system or managed trash. Never replace it with in-place deletion or silently switch a pinned trash backend.
+- File and result limits come from the configuration snapshot. Truncated tool results must say how to continue; incomplete search results must be identified as incomplete.
 
-- It issues GET over http(s), times out at 15 seconds and reads at most 64 KB. It sends no cookie, no custom header and no credential this machine already holds.
-- The target is judged by the address it resolves to, and that address is classified from its bytes. `::ffff:127.0.0.1` and `::ffff:7f00:1` are one loopback, and `::`, `0.0.0.0` and multicast land in a reserved class.
-- Link-local, metadata endpoints and reserved addresses are refused. Loopback and private ranges must be asked at least once. Public ones follow the normal order (D58).
-- Resolution happens once and the socket binds to the approved address. The hostname stays in the `Host` header, the TLS SNI and certificate verification.
-- Every redirect is rebuilt, re-resolved, re-classified and re-judged. Only a same-origin hop continues, and a changed host or port raises `fetch_redirect_denied`.
+## Network and process tools
 
-`exec` runs under the backend the host chose (D59).
+- Resolve a network target once, classify the resolved address, and pass the same target to policy and the HTTP request. Reject link-local, metadata, and reserved targets; private or loopback targets require approval. Re-resolve and re-judge each redirect, and permit only same-origin redirects.
+- `exec` uses the exact shell backend selected by configuration. Do not substitute a different command grammar when the selected executable is unavailable. Automatic approval is limited to command forms the parser proves safe; parse errors and unsupported syntax require approval.
+- Cancellation must terminate the process tree: POSIX uses a process group and Windows uses a Job Object guardian. Do not rely on terminating only the shell parent.
 
-- `exec.shell` takes `auto`, `bash` or `powershell`. `auto` on Windows tries `pwsh`, then the built-in `powershell`, then Git Bash. On POSIX it tries `/bin/bash`, then `bash` on `PATH`, then `sh`.
-- Probing starts no process: known locations are stat-ed and bare names are searched directory by directory. A named backend this machine lacks raises `exec_shell_unavailable` and lists what was searched; the other grammar is never substituted.
-- The kernel resolves the backend once per call and hands the same object to the chain and the tool. The record carries `{kind, executable, segments}`.
-- PowerShell auto-approval covers a literal command with literal arguments only (D66). `|`, sub-expressions, script blocks, splatting, the invocation operator, redirects, comments, reserved declaration forms, non-ASCII or `$`/backtick-bearing arguments and any parse error all fall back to asking.
-- Two Windows PowerShell 5.1 facts shape this: `-Command` returns 1 for any failing native command while the real code stays in `$LASTEXITCODE`, and a failing cmdlet leaves `$LASTEXITCODE` alone. Appending `; exit $LASTEXITCODE` unconditionally therefore reads a cmdlet failure as the previous native command's code.
-- The kernel appends that tail only when the chain read the whole line as one simple command whose name is an executable on `PATH` or a known location. `withNativeExitCode` decides, and the record carries the tail. A path with no chain gets none: the missing code is preferred over the masked failure.
-- Quoted arguments passed to a native command lose `<` and `>`, so the exec tests run a temporary script file rather than `node -e`.
+## Optional tools and interaction
 
-`subagent` is a first-party plugin tool, not a kernel concept (D61, D71).
+- `fetch`, MCP, skills, subagents, and `ask_user_question` are registered through plugins and may be narrowed by a mode according to their disclosure rules. Adding a tool requires a schema in the kernel's supported subset and a stable result/error shape.
+- An MCP server's tool list and read-only/destructive hints are untrusted. Validate arguments against the current declaration and send calls through the decision chain using the effective server/tool identity.
+- A subagent runs a separate loop and record with the parent's policy; it must not gain a looser approval mode or start a recursive subagent chain.
+- `ask_user_question` is a user interaction, not tool approval. It is available only to interactive clients, returns only the user's actual answers, and must be cancelled with its originating turn.
 
-- The derived agent runs a second loop in this process with its own kernel and its own record. The decision chain is the parent's instance, so a child can never sit at a looser level than the run that spawned it.
-- Only one level exists. The child's assembly is the parent's plugin list, which has no `subagent` in it. Its record is `<parent id>.sub-<n>.jsonl` beside the parent's.
-- Model-visible parameters are `task` and an optional `mode`. A name no layer holds fails with `mode_unknown`, and a run with no mode directories fails with `subagent_mode_paths_required`.
-- The parent receives the child's text, its session id and the record path. One child at a time; the concurrency field is untouched (D29).
-- The tool registers only when a session is built, so `ligule tools` counts nine. A branch is read with the existing action (D74).
+## Verification
 
-`ask_user_question` is a first-party tool that waits for a person (D107).
-
-- Its one parameter is a JSON array text: the parameter subset the kernel accepts (D14) holds scalars only, and `mcp.call`'s `arguments` takes the same route (D52). Validation lives here — at most four questions, at most four options each, every length capped, and the question ids are numbered `q1`..`qN` by this module so the model cannot state a duplicate or a missing one.
-- It registers with `disclosure: true`, so no tool mode hides it. That list is the model's disclosure of what it may do; a mode written wrong should not swallow a question the person is waiting to read.
-- Answers align by question id. An answer set matching none of the questions fails `ask_user_answer_invalid`; a round cancelled while waiting fails `ask_user_cancelled`. The text handed back pairs each question with what the person actually said, and an item left unanswered reads 没有回答 instead of an invented answer.
+Run `npm test` and use the existing tests for path escape, observed writes, network classification, command parsing, process cancellation, MCP, and question handling. Security-sensitive changes must exercise the real validation and execution path.
 

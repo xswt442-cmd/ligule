@@ -26,17 +26,17 @@ v0.0.2 尚未发布；仓库中的版本不代表 npm 或桌面安装包已经�
 
 ## 配置模型服务
 
-桌面版打开「设置」中的「模型服务」即可新增服务、填写接口类型、服务地址和模型名称，再选择默认模型。终端界面和命令行读取同一份配置；需要手动设置时，在配置文件中填写：
+桌面版打开「设置」中的「模型服务」即可新增多套服务与模型，并选择默认项。终端界面和命令行读取同一份配置。手动配置多套服务时，在配置文件中填写：
 
 ```toml
 [model]
-api = "chat-completions"
-baseURL = "https://api.example.com/v1"
-model = "model-name"
-apiKeyEnv = "LIGULE_API_KEY"
+services = [
+  { id = "deepseek", name = "DeepSeek", api = "chat-completions", baseURL = "https://api.deepseek.com/v1", apiKeyEnv = "DEEPSEEK_API_KEY", models = ["deepseek-chat"] },
+]
+selection = { provider = "deepseek", model = "deepseek-chat" }
 ```
 
-`api` 可设为 `chat-completions` 或 `messages`。把密钥放入 `apiKeyEnv` 指定的环境变量；未设置 `apiKeyEnv` 时使用 `LIGULE_API_KEY`。桌面模型服务页面也可以把密钥保存到操作系统 Keyring。非空环境变量优先；Linux 使用 Secret Service，服务不可用时会明确报错。
+每项服务的 `api` 可设为 `chat-completions` 或 `messages`，`models` 列出该服务可选的模型。把密钥放入 `apiKeyEnv` 指定的环境变量；桌面版也可以把密钥保存到操作系统凭据库。非空环境变量优先；Linux 使用 Secret Service，服务不可用时会明确报错。旧的单服务 `model.api`、`model.baseURL` 和 `model.model` 配置仍受支持；这类配置未填写 `apiKeyEnv` 时使用 `LIGULE_API_KEY`。
 
 服务和模型的默认选择影响新会话。会话输入区的模型菜单可以为当前会话单独选择模型；终端界面使用 `/model` 查看服务，使用 `/model <服务> <模型>` 切换。切换会话模型不会改写全局默认；会话运行时选择会在本轮结束后生效。
 
@@ -54,7 +54,7 @@ apiKeyEnv = "LIGULE_API_KEY"
 
 终端界面使用 `/policy ask` 改为逐次询问，使用 `/policy auto` 选择自动判定，使用 `/policy reset` 恢复配置默认值。自动档仍受拒绝规则、守卫、命令语法识别和目标地址检查约束；无法确认安全的命令会转为逐次询问。桌面版输入区旁的工具与审批菜单提供相同设置。当前会话的修改只影响当前会话；设置中的「审批规则」可以保存用户默认或项目本地规则。审批方式和规则在保存后立即用于后续判定。
 
-桌面版「设置」分为常规、外观、模型服务、审批规则和快捷键。模型配置选择用户默认或项目本地层后保存；运行中的会话会在本轮结束后采用模型配置变更。高优先级配置仍覆盖较低层的设置。离开含有未保存内容的设置页面时，界面会先询问是否丢弃修改。
+桌面版「设置」分为常规、外观、模型服务、审批规则、通知和快捷键。模型配置选择用户默认或项目本地层后保存；运行中的会话会在本轮结束后采用模型配置变更。高优先级配置仍覆盖较低层的设置。离开含有未保存内容的设置页面时，界面会先询问是否丢弃修改。
 
 ## 分支和导出
 

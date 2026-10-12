@@ -26,17 +26,17 @@ The default data root is `~/.ligule`. Set `LIGULE_HOME` to an absolute path to m
 
 ## Configure a model service
 
-In the desktop app, open “Model services” under “Settings” to add a service, enter its API type, base URL, and model names, then choose a default model. The terminal UI and command line read the same configuration. To configure them manually, add this block to a configuration file:
+In the desktop app, open “Model services” under “Settings” to add multiple services and models, then choose a default. The terminal UI and command line read the same configuration. To configure multiple services manually, add this block to a configuration file:
 
 ```toml
 [model]
-api = "chat-completions"
-baseURL = "https://api.example.com/v1"
-model = "model-name"
-apiKeyEnv = "LIGULE_API_KEY"
+services = [
+  { id = "deepseek", name = "DeepSeek", api = "chat-completions", baseURL = "https://api.deepseek.com/v1", apiKeyEnv = "DEEPSEEK_API_KEY", models = ["deepseek-chat"] },
+]
+selection = { provider = "deepseek", model = "deepseek-chat" }
 ```
 
-Set `api` to `chat-completions` or `messages`. Put the API key in the environment variable named by `apiKeyEnv`; when that field is absent, ligule uses `LIGULE_API_KEY`. The desktop model services page can also save a key in the operating system Keyring. A non-empty environment variable takes priority. Linux uses Secret Service and reports an error when it is unavailable.
+Set each service's `api` to `chat-completions` or `messages`; `models` lists its available models. Put the API key in the environment variable named by `apiKeyEnv`. The desktop model services page can also save a key in the operating system credential store. A non-empty environment variable takes priority. Linux uses Secret Service and reports an error when it is unavailable. The legacy single-service fields `model.api`, `model.baseURL`, and `model.model` remain supported; if that configuration omits `apiKeyEnv`, ligule reads `LIGULE_API_KEY`.
 
 The default service and model apply to new sessions. Use the model menu beside the composer to select a model for the current desktop session. In the terminal UI, use `/model` to list services and `/model <service> <model>` to switch. A session selection does not change the global default. If you switch models while a session is running, the change applies after the current turn.
 
@@ -54,7 +54,7 @@ The default approval mode asks before each tool call. In the terminal UI, press 
 
 In the terminal UI, use `/policy ask` to ask each time, `/policy auto` to select automatic decisions, or `/policy reset` to restore the configured default. Automatic decisions still follow deny rules, guards, command syntax checks, and target-address checks. Commands that cannot be verified safely fall back to asking. The tool and approval menu beside the desktop composer provides the same controls. A session override affects only that session. “Approval rules” in Settings saves the default or a project-local rule table. Saved approval modes and rules affect the next decision immediately.
 
-Desktop Settings has General, Appearance, Model services, Approval rules, and Keyboard shortcuts sections. When saving model settings, choose the user or project-local configuration layer. Running sessions apply model configuration changes after the current turn. Higher-priority configuration still takes precedence. If you leave a settings page with unsaved changes, the app asks whether to discard them.
+Desktop Settings has General, Appearance, Model services, Approval rules, Notifications, and Keyboard shortcuts sections. When saving model settings, choose the user or project-local configuration layer. Running sessions apply model configuration changes after the current turn. Higher-priority configuration still takes precedence. If you leave a settings page with unsaved changes, the app asks whether to discard them.
 
 ## Branches and export
 
@@ -82,7 +82,7 @@ Common desktop shortcuts: Ctrl+K opens the command palette; Ctrl+B hides or show
 
 The desktop app provides five kinds of system notifications: a question needs an answer, an action needs approval, a turn completes, a turn fails, or the connection is interrupted. In Settings under Notifications, enable or disable all notifications and each kind separately. Clicking a notification opens its conversation. App permission and system notification settings affect delivery. Notifications show the conversation name and status without prompts, tool commands, or keys. Real notification behavior has not yet been verified on every target platform.
 
-When the tray is available, closing the window hides it while background sessions continue. The tray menu labels are currently displayed in Chinese: “打开 ligule” restores the window, and “退出 ligule” lists affected sessions and asks whether to interrupt work before quitting. If the tray is unavailable, closing the window asks for confirmation before quitting.
+When the tray is available, closing the window hides it while background sessions continue. The tray menu follows the interface language: “打开 ligule” / “Open ligule” restores the window, and “退出 ligule” / “Quit ligule” lists affected sessions and asks whether to interrupt work before quitting. If the tray is unavailable, closing the window asks for confirmation before quitting.
 
 ## Common errors
 
