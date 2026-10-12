@@ -149,6 +149,18 @@ test('release workflows separate version PRs, tag creation, npm publication, and
   assert.equal(publishWorkflow.jobs.approval.environment, 'npm-publish');
   assert.ok(publishWorkflow.jobs.platforms.needs.includes('approval'), 'platform packages must wait for approval');
   assert.ok(publishWorkflow.jobs.npm.needs.includes('approval'), 'the main package must wait for approval');
+  for (const jobName of ['platforms', 'npm']) {
+    const job = publishWorkflow.jobs[jobName];
+    assert.equal(job.permissions['id-token'], 'write', `${jobName} must authenticate with npm through OIDC`);
+    assert.equal(job.env, undefined, `${jobName} must not receive a long-lived npm token`);
+    const setupNode = job.steps.find((step) => step.uses?.startsWith('actions/setup-node@'));
+    assert.equal(setupNode.with['node-version'], '${{ env.PRIMARY_NODE_VERSION }}');
+    assert.equal(setupNode.with['registry-url'], 'https://registry.npmjs.org');
+    assert.ok(job.steps.some((step) => step.run?.includes('npm install --global npm@11.5.1')),
+      `${jobName} must install the minimum npm version required for trusted publishing`);
+    assert.doesNotMatch(JSON.stringify(job), /NPM_TOKEN|NODE_AUTH_TOKEN/,
+      `${jobName} must not use npm token authentication`);
+  }
   assert.ok(publishWorkflow.jobs['release-notes'].needs.includes('npm'));
   assert.equal(publishWorkflow.jobs['release-notes'].uses, './.github/workflows/release.yml');
   assert.ok(releaseWorkflow.on.workflow_call, 'publish.yml must be able to call the release workflow');
