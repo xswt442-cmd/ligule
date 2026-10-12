@@ -1,17 +1,29 @@
-// 仓库 markdown 的检查：链接与锚点在自己能读到的范围内可达，两份手册节数相等并覆盖同一批标识符，
-// README 有语言入口，`docs/` 只有那两份，每份工程指南都能整份读进默认的读入上限并跟着根那一份装载。
+// 仓库文档的检查：受维护的 Markdown 链接可达，两份手册章节与标识符一致，
+// README 有使用与开发文档入口，`docs/` 根目录只放双语手册，九份指南都在默认预算内并按目录装载。
 // 这一处不建内核：读的是仓库里的 markdown。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, posix, resolve, sep } from 'node:path';
+import { parse } from 'smol-toml';
 import { DEFAULT_LIMITS } from '../dist/capability/limits.js';
 import { loadInstructions } from '../dist/index.js';
+import { modelServices, resolveModel } from '../dist/kernel/model-services.js';
 
 const repoRoot = fileURLToPath(new URL('../', import.meta.url));
 const zhPath = join(repoRoot, 'docs', 'guide.zh-CN.md');
 const enPath = join(repoRoot, 'docs', 'guide.en.md');
+const maintainedDocs = [
+  join(repoRoot, 'README.md'),
+  join(repoRoot, 'RELEASE.md'),
+  join(repoRoot, 'desktop', 'README.md'),
+  zhPath,
+  enPath,
+  join(repoRoot, 'docs', 'development', 'architecture.md'),
+  join(repoRoot, 'docs', 'development', 'glossary.md'),
+  join(repoRoot, 'docs', 'development', 'contributing.md'),
+];
 // 工程指南九份：根那一份放全局规则，八份局部的放在各自代码旁边（`src/` 的五个目录、终端界面，桌面的三层）。
 const guides = [
   'AGENTS.md',
@@ -58,8 +70,14 @@ function codeTokens(text) {
     .filter((token) => /^[a-z][a-z0-9_.-]{2,}$/.test(token) && /[._]/.test(token)));
 }
 
-test('手册的相对链接与锚点都落在仓库内', () => {
-  for (const file of [zhPath, enPath, join(repoRoot, 'README.md'), ...guides.map(guidePath)]) {
+function tomlExample(text) {
+  const match = text.match(/```toml\n([\s\S]*?)\n```/);
+  assert.ok(match, 'guide must contain a TOML example');
+  return parse(match[1]);
+}
+
+test('所有受维护文档的相对链接与锚点都落在仓库内', () => {
+  for (const file of [...maintainedDocs, ...guides.map(guidePath)]) {
     const base = dirname(file);
     for (const target of links(readFileSync(file, 'utf8'))) {
       if (/^https?:/.test(target)) continue;
@@ -89,10 +107,29 @@ test('两种语言覆盖同一批命令、稳定码与配置键', () => {
   assert.deepEqual({ onlyZh, onlyEn }, { onlyZh: [], onlyEn: [] });
 });
 
-test('README 有指向两种语言的入口', () => {
+test('双语手册的多服务 TOML 示例相同且符合实际配置格式', () => {
+  const zh = tomlExample(readFileSync(zhPath, 'utf8'));
+  const en = tomlExample(readFileSync(enPath, 'utf8'));
+  assert.deepEqual(zh, en);
+  assert.equal(modelServices(zh.model.services).length, 1);
+  assert.deepEqual(resolveModel(zh.model), {
+    api: 'chat-completions',
+    baseURL: 'https://api.deepseek.com/v1',
+    model: 'deepseek-chat',
+    apiKeyEnv: 'DEEPSEEK_API_KEY',
+    services: zh.model.services,
+    selection: zh.model.selection,
+    serviceId: 'deepseek',
+  });
+});
+
+test('README 有使用手册、架构和贡献说明入口', () => {
   const readme = readFileSync(join(repoRoot, 'README.md'), 'utf8');
   assert.match(readme, /docs\/guide\.zh-CN\.md/);
   assert.match(readme, /docs\/guide\.en\.md/);
+  assert.match(readme, /docs\/development\/architecture\.md/);
+  assert.match(readme, /docs\/development\/glossary\.md/);
+  assert.match(readme, /docs\/development\/contributing\.md/);
 });
 
 test('docs 目录的 Markdown 入口只有这两种语言，且都有正文', () => {
