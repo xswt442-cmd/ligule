@@ -255,6 +255,18 @@ jobs:
             test -x "$node"
             LIGULE_RUNTIME_APP_DIR="$app" LIGULE_RUNTIME_NODE_PATH="$node" "$node" desktop/check-runtime.mjs
           }
+          verify_linux_search_binary() {
+            local root="$1"
+            local manifest app binary
+            manifest=$(find "$root" -type f -path '*/app/package.json' -print -quit)
+            test -n "$manifest"
+            app="${manifest%/package.json}"
+            binary="$app/node_modules/@vscode/ripgrep-linux-x64/bin/rg"
+            stat -c '%a %n' "$binary"
+            file "$binary"
+            ldd "$binary" || true
+            "$binary" --version
+          }
           index=0
           for package in desktop/src-tauri/target/release/bundle/deb/*.deb; do
             destination="$scratch/deb-$index"
@@ -269,6 +281,7 @@ jobs:
             destination="$scratch/appimage-$index"
             mkdir -p "$destination"
             (cd "$destination" && "$archive" --appimage-extract >/dev/null)
+            verify_linux_search_binary "$destination/squashfs-root"
             verify_runtime "$destination/squashfs-root"
             index=$((index + 1))
           done
