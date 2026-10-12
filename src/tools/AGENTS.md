@@ -11,7 +11,7 @@ The repository [Agent guide](../../AGENTS.md) applies here. This directory conta
 
 ## Network and process tools
 
-- Resolve a network target once, classify the resolved address, and pass the same target to policy and the HTTP request. Reject link-local, metadata, and reserved targets; private or loopback targets require approval. Re-resolve and re-judge each redirect, and permit only same-origin redirects.
+- Reject link-local, metadata, and reserved network targets; private or loopback targets require approval. Re-resolve and re-judge each redirect, and permit only same-origin redirects.
 - `exec` uses the exact shell backend selected by configuration. Do not substitute a different command grammar when the selected executable is unavailable. Automatic approval is limited to command forms the parser proves safe; parse errors and unsupported syntax require approval.
 - Cancellation must terminate the process tree: POSIX uses a process group and Windows uses a Job Object guardian. Do not rely on terminating only the shell parent.
 

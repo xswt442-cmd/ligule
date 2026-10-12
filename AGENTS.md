@@ -1,6 +1,6 @@
 # Agent guide
 
-These rules apply throughout the repository. Read the nearest local `AGENTS.md` before changing code under `src/kernel/`, `src/tools/`, `src/session/`, `src/host/`, `src/tui/`, or `desktop/`. The [architecture guide](docs/development/architecture.md) explains runtime ownership and data flow; [contributing](docs/development/contributing.md) lists development checks.
+These rules apply throughout the repository. Read the nearest local `AGENTS.md` before changing code under `src/kernel/`, `src/tools/`, `src/session/`, `src/host/`, `src/tui/`, or `desktop/`. The [architecture guide](docs/development/architecture.en.md) explains runtime ownership and data flow; [contributing](docs/development/contributing.en.md) lists development checks.
 
 ## Ownership and dependencies
 
@@ -22,7 +22,7 @@ These rules apply throughout the repository. Read the nearest local `AGENTS.md` 
 
 ## Build, tests, and release
 
-Use Node.js 24 or newer. `npm test` builds `dist/` before running tests; `npm run check-pack` checks the npm artifact. Desktop frontend and Rust checks are listed in [desktop/README.md](desktop/README.md). [docs/RELEASE.md](docs/RELEASE.md) is the source for installer targets, artifacts, and release status. CI artifacts do not mean a version has been published.
+Use Node.js 24 or newer. `npm test` builds `dist/` before running tests; `npm run check-pack` checks the npm artifact. Desktop frontend and Rust checks are listed in [desktop/README.en.md](desktop/README.en.md). [docs/RELEASE.md](docs/RELEASE.md) is the source for installer targets, artifacts, and release status. CI artifacts do not mean a version has been published.
 
 Keep `package.json`, lockfiles, `src/version.js`, Node engine declarations, and workflow versions consistent. New TypeScript modules use strict types and erasable syntax; do not add `enum`, `namespace`, or parameter properties. Generated `desktop/vendor/`, platform binaries, personal session data, credentials, and temporary test output do not belong in commits. Do not make release or publishing claims without checking the registry and GitHub Release state.
 
