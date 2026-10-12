@@ -10,6 +10,7 @@ import { parse } from 'smol-toml';
 import { DEFAULT_LIMITS } from '../dist/capability/limits.js';
 import { loadInstructions } from '../dist/index.js';
 import { modelServices, resolveModel } from '../dist/kernel/model-services.js';
+import { releaseNotesForTag } from '../scripts/release-notes.js';
 
 const repoRoot = fileURLToPath(new URL('../', import.meta.url));
 const zhPath = join(repoRoot, 'docs', 'guide.zh-CN.md');
@@ -25,6 +26,7 @@ const bilingualPairs = [
 ];
 const maintainedDocs = [
   ...bilingualPairs.flatMap((pair) => pair),
+  join(repoRoot, 'CHANGELOG.md'),
 ];
 // 工程指南九份：根那一份放全局规则，八份局部的放在各自代码旁边（`src/` 的五个目录、终端界面，桌面的三层）。
 const guides = [
@@ -146,7 +148,20 @@ test('README 有使用手册、架构和贡献说明入口', () => {
   assert.match(englishReadme, /docs\/development\/GLOSSARY\.en\.md/);
   assert.match(englishReadme, /docs\/development\/CONTRIBUTING\.en\.md/);
   assert.match(englishReadme, /docs\/development\/RELEASE\.en\.md/);
+  assert.match(readme, /CHANGELOG\.md/);
+  assert.match(englishReadme, /CHANGELOG\.md/);
   assert.ok(manifest.files.includes('README.en.md'), 'the English README must be included in the npm package');
+  assert.ok(manifest.files.includes('CHANGELOG.md'), 'the version history must be included in the npm package');
+});
+
+test('the bilingual changelog section generates the matching release note body', () => {
+  const changelog = readFileSync(join(repoRoot, 'CHANGELOG.md'), 'utf8');
+  const notes = releaseNotesForTag(changelog, 'v0.0.1');
+  assert.match(changelog, /^## \[Unreleased\]/m);
+  assert.match(notes, /初始公开版本/);
+  assert.match(notes, /Initial public release/);
+  assert.match(notes, /SHA-256/);
+  assert.doesNotMatch(notes, /运行 `ligule`/);
 });
 
 test('docs 根目录只放双语使用手册，且都有正文', () => {

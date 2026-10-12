@@ -70,6 +70,7 @@ apiKeyEnv = "MODEL_API_KEY"
 
 ## 文档
 
+- [更新记录](CHANGELOG.md)
 - [简体中文使用手册](docs/guide.zh-CN.md) · [English user guide](docs/guide.en.md)
 - [架构说明（中文）](docs/development/ARCHITECTURE.zh-cn.md) · [Architecture (English)](docs/development/ARCHITECTURE.en.md)
 - [术语表（中文）](docs/development/GLOSSARY.zh-cn.md) · [Glossary (English)](docs/development/GLOSSARY.en.md)
