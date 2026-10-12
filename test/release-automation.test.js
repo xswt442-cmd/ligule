@@ -178,6 +178,8 @@ test('release workflows separate version PRs, tag creation, npm publication, and
 
   const ciText = JSON.stringify(ciWorkflow);
   assert.doesNotMatch(ciText, /build-rg|local-search/, 'CI must use the upstream dependency for clean installs');
+  assert.deepEqual(ciWorkflow.on.push.branches, ['main', 'dev'], 'feature branch checks should run from the pull request event only');
+  assert.ok(Object.hasOwn(ciWorkflow.on, 'pull_request'), 'pull requests must keep the full cross-platform CI matrix');
   const desktopJob = ciWorkflow.jobs.desktop;
   assert.deepEqual(desktopJob.strategy.matrix.include.map(({ id }) => id), [
     'windows-x64', 'linux-x64', 'macos-arm64', 'macos-x64',
