@@ -2,23 +2,14 @@
 // 探测就是跑一次 `--version`：只查文件在不在说明不了它能不能执行。
 // 探测不到就把原因交给调用方去记日志，检索回落到 Node 自己遍历（I8 要显式报告，不静默降级）。
 import { spawn } from 'node:child_process';
-import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 
-// 随包分发按平台分成可选依赖包，npm 只装匹配当前平台与架构的那一个。
-const PACKAGES = {
-  'win32-x64': { name: 'ligule-rg-win32-x64', file: 'rg.exe' },
-  'linux-x64': { name: 'ligule-rg-linux-x64', file: 'rg' },
-  'darwin-arm64': { name: 'ligule-rg-darwin-arm64', file: 'rg' },
-  'darwin-x64': { name: 'ligule-rg-darwin-x64', file: 'rg' },
-};
-
-function packaged(platform, arch) {
-  const entry = PACKAGES[`${platform}-${arch}`];
-  if (entry === undefined) return undefined;
+// 上游 wrapper 按当前 Node 平台解析对应的可选二进制。
+async function packaged(target) {
+  if (target !== `${process.platform}-${process.arch}`) return undefined;
   try {
-    return createRequire(import.meta.url).resolve(`${entry.name}/${entry.file}`);
+    return (await import('@vscode/ripgrep')).rgPath;
   } catch {
     return undefined;
   }
@@ -44,12 +35,13 @@ function probe(executable) {
 const probed = new Map();
 
 export async function resolveRipgrep({ path, platform = process.platform, arch = process.arch } = {}) {
-  const key = path ?? `${platform}-${arch}`;
+  const target = `${platform}-${arch}`;
+  const key = path === undefined ? target : resolve(process.cwd(), path);
   const cached = probed.get(key);
   if (cached !== undefined) return cached;
   // 配置里写的是相对路径时，按启动这个进程的那个目录算：检索要在边界内跑，
   // 子进程的当前目录会被换成边界，相对的可执行文件路径不能跟着它走。
-  const candidate = path === undefined ? packaged(platform, arch) : resolve(process.cwd(), path);
+  const candidate = path === undefined ? await packaged(target) : key;
   const result = candidate === undefined ? { code: 'search_backend_missing' } : await probe(candidate);
   probed.set(key, result);
   return result;

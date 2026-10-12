@@ -10,12 +10,11 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const vendor = join(root, 'desktop', 'vendor');
 const target = `${process.platform}-${process.arch}`;
 const nodePin = JSON.parse(await readFile(join(root, 'desktop', 'node-pin.json'), 'utf8'));
-const ripgrepPin = JSON.parse(await readFile(join(root, 'scripts', 'ripgrep-pin.json'), 'utf8'));
 const packageJson = releaseManifest();
-const nodePath = join(vendor, 'node', process.platform === 'win32' ? 'node.exe' : 'node');
-const app = join(vendor, 'app');
+const nodePath = resolve(process.env.LIGULE_RUNTIME_NODE_PATH ?? join(vendor, 'node', process.platform === 'win32' ? 'node.exe' : 'node'));
+const app = resolve(process.env.LIGULE_RUNTIME_APP_DIR ?? join(vendor, 'app'));
 const appModules = join(app, 'node_modules');
-const targetInfo = ripgrepPin.targets[target];
+const providerPackage = `@vscode/ripgrep-${target}`;
 delete process.env.NODE_PATH;
 delete process.env.NODE_OPTIONS;
 delete process.env.NAPI_RS_NATIVE_LIBRARY_PATH;
@@ -24,12 +23,9 @@ process.env.PATH = '';
 if (nodePin.version !== process.version) {
   throw new Error(`the checker must run with Node ${nodePin.version}; received ${process.version}`);
 }
-if (targetInfo === undefined) throw new Error(`no search package is pinned for ${target}`);
-if (packageJson.optionalDependencies?.[targetInfo.package] !== packageJson.version) {
-  throw new Error(`${targetInfo.package} is not pinned to ligule@${packageJson.version}`);
-}
 const vendoredPackage = JSON.parse(await readFile(join(app, 'package.json'), 'utf8'));
 if (vendoredPackage.name !== packageJson.name || vendoredPackage.version !== packageJson.version
+  || JSON.stringify(vendoredPackage.dependencies) !== JSON.stringify(packageJson.dependencies)
   || JSON.stringify(vendoredPackage.optionalDependencies) !== JSON.stringify(packageJson.optionalDependencies)) {
   throw new Error('the vendored app package manifest does not match the generated release manifest');
 }
@@ -50,7 +46,7 @@ const insideAppModules = async (name) => {
     throw new Error(`${name} resolved outside the vendored runtime tree: ${modulePath}`);
   }
 };
-for (const name of ['tree-sitter', 'tree-sitter-bash', 'tree-sitter-pwsh', '@napi-rs/keyring']) {
+for (const name of ['tree-sitter', 'tree-sitter-bash', 'tree-sitter-pwsh', '@napi-rs/keyring', '@vscode/ripgrep']) {
   await insideAppModules(name);
 }
 const bash = await library.parseCommand('git status', 'bash');
@@ -75,7 +71,9 @@ if (typeof backend?.executable !== 'string' || !isAbsolute(backend.executable)) 
   throw new Error(`the vendored search backend is unavailable: ${JSON.stringify(backend)}`);
 }
 const backendPath = await realpath(backend.executable);
-const expectedPackage = await realpath(join(appModules, targetInfo.package));
+const provider = await import(pathToFileURL(requireFromApp.resolve('@vscode/ripgrep')).href);
+if (await realpath(provider.rgPath) !== backendPath) throw new Error('@vscode/ripgrep and the Ligule host resolved different search binaries');
+const expectedPackage = await realpath(join(appModules, providerPackage));
 const relativeBackend = relative(expectedPackage, backendPath);
 if (relativeBackend === '..' || relativeBackend.startsWith(`..${sep}`) || isAbsolute(relativeBackend)) {
   throw new Error(`the search backend is outside ${expectedPackage}: ${backendPath}`);
@@ -98,4 +96,4 @@ try {
   await rm(temporary, { recursive: true, force: true });
 }
 
-console.log(`runtime check passed: Node ${process.version}; ligule ${version}; tools; bash and PowerShell grammars; keyring; ${targetInfo.package} search`);
+console.log(`runtime check passed: Node ${process.version}; ligule ${version}; tools; bash and PowerShell grammars; keyring; ${providerPackage} search`);

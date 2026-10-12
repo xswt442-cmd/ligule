@@ -14,7 +14,7 @@ npm test
 npm run check-pack
 ```
 
-`npm test` builds `dist/` and runs the automated test suite. `check-pack` inspects the npm artifact. The release workflow also installs the packed artifact into a clean consumer and tests it with the platform search package.
+`npm test` builds `dist/` and runs the automated test suite. `check-pack` inspects the npm artifact. The release workflow also installs the packed artifact into a clean consumer and tests the host binary provided by `@vscode/ripgrep`.
 
 For the desktop frontend, install its dependencies and run its checks and build:
 

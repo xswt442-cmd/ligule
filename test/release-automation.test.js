@@ -47,7 +47,7 @@ async function writeJson(path, value) {
 async function fixture() {
   const directory = await mkdtemp(join(process.cwd(), 'testplace', 'tmp', 'release-automation-'));
   const version = '0.0.1';
-  const packageManifest = { name: 'ligule', version, optionalDependencies: {} };
+  const packageManifest = { name: 'ligule', version, dependencies: { '@vscode/ripgrep': '1.18.0' }, optionalDependencies: {} };
   await writeJson(join(directory, 'package.json'), packageManifest);
   await writeJson(join(directory, 'package-lock.json'), lockfile('ligule', version));
   await writeJson(join(directory, 'desktop', 'package.json'), { name: 'ligule-desktop', version });
@@ -55,13 +55,15 @@ async function fixture() {
   await writeJson(join(directory, 'desktop', 'frontend', 'package.json'), { name: 'ligule-desktop-frontend', version });
   await writeJson(join(directory, 'desktop', 'frontend', 'package-lock.json'), lockfile('ligule-desktop-frontend', version));
   await writeJson(join(directory, 'desktop', 'src-tauri', 'tauri.conf.json'), { version });
-  await writeJson(join(directory, 'packages', 'rg-win', 'package.json'), { name: 'ligule-rg-win32-x64', version });
-  await writeJson(join(directory, 'scripts', 'ripgrep-pin.json'), { targets: { 'win32-x64': { directory: 'rg-win' } } });
   await mkdir(join(directory, 'src'), { recursive: true });
   await writeFile(join(directory, 'src', 'version.js'), `// Keep this comment.\nexport const VERSION = '${version}';\n`, 'utf8');
   await mkdir(join(directory, 'desktop', 'src-tauri'), { recursive: true });
   await writeFile(join(directory, 'desktop', 'src-tauri', 'Cargo.toml'), `[package]\nname = "ligule-desktop"\nversion = "${version}"\nedition = "2021"\n\n[dependencies]\n# Keep dependency notes.\n`, 'utf8');
   await writeFile(join(directory, 'desktop', 'src-tauri', 'Cargo.lock'), `version = 4\n\n[[package]]\nname = "ligule-desktop"\nversion = "${version}"\n\n[[package]]\nname = "other"\nversion = "1.0.0"\n`, 'utf8');
+  await mkdir(join(directory, 'docs', 'development'), { recursive: true });
+  for (const path of ['RELEASE.zh-cn.md', 'RELEASE.en.md']) {
+    await writeFile(join(directory, 'docs', 'development', path), `| \`ligule\` | package | \`${version}\` |\n`, 'utf8');
+  }
   await writeFile(join(directory, 'CHANGELOG.md'), CHANGELOG, 'utf8');
   return directory;
 }
@@ -92,6 +94,9 @@ test('release preparation updates package, lock, Tauri, Cargo, and runtime versi
     const cargoLock = parse(await readFile(join(directory, 'desktop/src-tauri/Cargo.lock'), 'utf8'));
     assert.equal(cargoLock.package[0].version, '0.0.2');
     assert.equal(cargoLock.package[1].version, '1.0.0');
+    for (const path of ['RELEASE.zh-cn.md', 'RELEASE.en.md']) {
+      assert.match(await readFile(join(directory, 'docs/development', path), 'utf8'), /\| `ligule` \| package \| `0\.0\.2` \|/);
+    }
     assert.match(await readFile(join(directory, 'src/version.js'), 'utf8'), /Keep this comment/);
     assert.match(await readFile(join(directory, 'src/version.js'), 'utf8'), /VERSION = '0\.0\.2'/);
     const changelog = await readFile(join(directory, 'CHANGELOG.md'), 'utf8');
@@ -130,6 +135,7 @@ test('release workflows separate version PRs, tag creation, npm publication, and
   const tagWorkflow = workflow('tag');
   const publishWorkflow = workflow('publish');
   const releaseWorkflow = workflow('release');
+  const ciWorkflow = workflow('ci');
   const tagInputs = tagWorkflow.on.workflow_dispatch.inputs;
 
   assert.deepEqual(tagInputs.action.options, ['prepare', 'tag']);
@@ -139,6 +145,7 @@ test('release workflows separate version PRs, tag creation, npm publication, and
   const prepareCommands = tagWorkflow.jobs.prepare.steps.map((step) => step.run ?? '').join('\n');
   const tagCommands = tagWorkflow.jobs['create-tag'].steps.map((step) => step.run ?? '').join('\n');
   assert.match(prepareCommands, /gh pr create --base main/);
+  assert.match(prepareCommands, /git add[^\n]*docs\/development\/RELEASE\.zh-cn\.md[^\n]*docs\/development\/RELEASE\.en\.md/);
   assert.doesNotMatch(prepareCommands, /npm test|npm run check-pack/);
   assert.match(tagCommands, /gh run list --workflow ci\.yml --branch main --event push --commit/);
   assert.doesNotMatch(tagCommands, /gh workflow run ci\.yml/);
@@ -147,20 +154,18 @@ test('release workflows separate version PRs, tag creation, npm publication, and
   assert.ok(publishWorkflow.on.workflow_dispatch, 'npm publishing must be manually dispatched');
   assert.equal(publishWorkflow.on.push, undefined, 'a tag push must not publish npm packages');
   assert.equal(publishWorkflow.jobs.approval.environment, 'npm-publish');
-  assert.ok(publishWorkflow.jobs.platforms.needs.includes('approval'), 'platform packages must wait for approval');
+  assert.equal(publishWorkflow.jobs.platforms, undefined, 'platform binaries are supplied by @vscode/ripgrep');
   assert.ok(publishWorkflow.jobs.npm.needs.includes('approval'), 'the main package must wait for approval');
-  for (const jobName of ['platforms', 'npm']) {
-    const job = publishWorkflow.jobs[jobName];
-    assert.equal(job.permissions['id-token'], 'write', `${jobName} must authenticate with npm through OIDC`);
-    assert.equal(job.env, undefined, `${jobName} must not receive a long-lived npm token`);
-    const setupNode = job.steps.find((step) => step.uses?.startsWith('actions/setup-node@'));
-    assert.equal(setupNode.with['node-version'], '${{ env.PRIMARY_NODE_VERSION }}');
-    assert.equal(setupNode.with['registry-url'], 'https://registry.npmjs.org');
-    assert.ok(job.steps.some((step) => step.run?.includes('npm install --global npm@11.5.1')),
-      `${jobName} must install the minimum npm version required for trusted publishing`);
-    assert.doesNotMatch(JSON.stringify(job), /NPM_TOKEN|NODE_AUTH_TOKEN/,
-      `${jobName} must not use npm token authentication`);
-  }
+  const publishJob = publishWorkflow.jobs.npm;
+  assert.equal(publishJob.permissions['id-token'], 'write', 'the publish job must authenticate with npm through OIDC');
+  assert.equal(publishJob.env, undefined, 'the publish job must not receive a long-lived npm token');
+  const setupNode = publishJob.steps.find((step) => step.uses?.startsWith('actions/setup-node@'));
+  assert.equal(setupNode.with['node-version'], '${{ env.PRIMARY_NODE_VERSION }}');
+  assert.equal(setupNode.with['registry-url'], 'https://registry.npmjs.org');
+  assert.ok(publishJob.steps.some((step) => step.run?.includes('npm install --global npm@11.5.1')),
+    'the publish job must install the minimum npm version required for trusted publishing');
+  assert.doesNotMatch(JSON.stringify(publishJob), /NPM_TOKEN|NODE_AUTH_TOKEN/,
+    'the publish job must not use npm token authentication');
   assert.ok(publishWorkflow.jobs['release-notes'].needs.includes('npm'));
   assert.equal(publishWorkflow.jobs['release-notes'].uses, './.github/workflows/release.yml');
   assert.ok(releaseWorkflow.on.workflow_call, 'publish.yml must be able to call the release workflow');
@@ -170,4 +175,28 @@ test('release workflows separate version PRs, tag creation, npm publication, and
   assert.match(releaseCommands, /preserving its title, body, and assets/);
   assert.doesNotMatch(releaseCommands, /gh release edit/);
   assert.doesNotMatch(releaseCommands, /--generate-notes/);
+
+  const ciText = JSON.stringify(ciWorkflow);
+  assert.doesNotMatch(ciText, /build-rg|local-search/, 'CI must use the upstream dependency for clean installs');
+  const desktopJob = ciWorkflow.jobs.desktop;
+  assert.deepEqual(desktopJob.strategy.matrix.include.map(({ id }) => id), [
+    'windows-x64', 'linux-x64', 'macos-arm64', 'macos-x64',
+  ]);
+  const desktopSteps = desktopJob.steps;
+  const runtimeCheckIndex = desktopSteps.findIndex((step) => step.name === 'run the vendored tree on its own');
+  const installerBuildIndex = desktopSteps.findIndex((step) => step.name === 'build the installer');
+  assert.ok(runtimeCheckIndex >= 0 && runtimeCheckIndex < installerBuildIndex,
+    'each native desktop target must execute the bundled runtime check before building its installer');
+  assert.match(desktopSteps[runtimeCheckIndex].run, /desktop\/check-runtime\.mjs/);
+  const windowsBundleCheck = desktopSteps.find((step) => step.name === 'install the Windows bundle and check its runtime');
+  const linuxBundleCheck = desktopSteps.find((step) => step.name === 'extract Linux bundles and check their runtimes');
+  const macBundleCheck = desktopSteps.find((step) => step.name === 'verify the macOS signature and disk image');
+  assert.ok(windowsBundleCheck && linuxBundleCheck && macBundleCheck,
+    'every desktop OS must inspect its actual installer after bundling');
+  for (const step of [windowsBundleCheck, linuxBundleCheck, macBundleCheck]) {
+    assert.match(step.run, /desktop\/check-runtime\.mjs/);
+  }
+  assert.ok(desktopSteps.indexOf(windowsBundleCheck) > installerBuildIndex);
+  assert.ok(desktopSteps.indexOf(linuxBundleCheck) > installerBuildIndex);
+  assert.ok(desktopSteps.indexOf(macBundleCheck) > installerBuildIndex);
 });

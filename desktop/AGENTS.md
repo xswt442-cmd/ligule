@@ -14,6 +14,6 @@ cd src-tauri
 cargo test
 ```
 
-`npm run build` 使用前端构建结果生成平台安装包。平台目标由对应的 `tauri.*.conf.json` 指定；不能让单个平台任务误用其他平台的打包目标。安装包使用当前构建目标的 Node、原生依赖和 `ligule-rg-*` 搜索包，不得跨平台复用 `desktop/vendor/`。
+`npm run build` 使用前端构建结果生成平台安装包。平台目标由对应的 `tauri.*.conf.json` 指定；不能让单个平台任务误用其他平台的打包目标。安装包使用当前构建目标的 Node、原生依赖和 `@vscode/ripgrep` 对应平台的可选包，不得跨平台复用 `desktop/vendor/`。
 
-`node desktop/fetch-runtime.mjs` 准备随包运行时树。用 `desktop/vendor/node/node`（Windows 为 `desktop/vendor/node/node.exe`）运行 `desktop/check-runtime.mjs`，检查随包 Node、CLI、命令语法、Keyring 原生模块和当前平台搜索包。
+`node desktop/fetch-runtime.mjs` 准备随包运行时树。用 `desktop/vendor/node/node`（Windows 为 `desktop/vendor/node/node.exe`）运行 `desktop/check-runtime.mjs`，检查随包 Node、CLI、命令语法、Keyring 原生模块和当前平台搜索后端。

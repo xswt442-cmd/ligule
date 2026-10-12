@@ -1,19 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { delimiter, dirname, join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dirname, join, relative } from 'node:path';
+import { rgPath } from '@vscode/ripgrep';
 import { createKernel, createObservationLog, createTool, deleteTool, editTool, execTool, findTool, readOnlyTools, readTool, resolveShell, searchTool, withNativeExitCode, writeTool } from '../dist/index.js';
 
-const repo = dirname(dirname(fileURLToPath(import.meta.url)));
-// npm run build-rg 生成的那一份 ripgrep。这个路径在 .gitignore 里，所以按真实后端做的比较
-// 只在本地构建过之后才跑得起来；解析与排序的那些行为没法用假的可执行文件模拟。
-const packagedRipgrep = join(repo, 'packages', `rg-${process.platform}-${process.arch}`, process.platform === 'win32' ? 'rg.exe' : 'rg');
-const pathRipgrep = (process.env.PATH ?? '').split(delimiter)
-  .map((directory) => join(directory, process.platform === 'win32' ? 'rg.exe' : 'rg'))
-  .find(existsSync);
-const builtRipgrep = existsSync(packagedRipgrep) ? packagedRipgrep : pathRipgrep ?? packagedRipgrep;
+const builtRipgrep = rgPath;
 
 const NEEDLE = 'needle here';
 
@@ -225,7 +217,7 @@ test('find and search fail with a stable code when the path does not exist or is
 
 test('search walks the tree itself when no external backend is there, and says why', async () => {
   await withWorkspace(async (workspace) => {
-    const { logged, context: searchContext } = recordingContext(workspace);
+    const { logged, context: searchContext } = recordingContext(workspace, { ripgrepPath: join(workspace, 'missing-rg') });
     const result = await searchTool.run({ pattern: NEEDLE }, searchContext);
     assert.deepEqual(result.text.split('\n'), [
       '.github/workflows/ci.yml:1:name: needle here',
@@ -233,7 +225,7 @@ test('search walks the tree itself when no external backend is there, and says w
       'src/app.js:2:second line needle here',
     ]);
     assert.equal(logged.length, 1);
-    assert.equal(logged[0].code, 'search_backend_missing');
+    assert.equal(logged[0].code, 'search_backend_failed');
   });
 });
 
@@ -254,8 +246,7 @@ test('search of an explicit file inside a skipped directory still reads that fil
 
 // 换后端不换行为（D18）：命中行与顺序都要相同。这里没有二进制文件，所以两边连最后一行的
 // 跳过标记都不该出现——那条标记只属于自己遍历那一条，它知道自己跳过了什么，外部后端不交这个数。
-test('the external backend and our own walk return the same hits in the same order', async (t) => {
-  if (!existsSync(builtRipgrep)) return t.skip('no ripgrep built locally, run npm run build-rg');
+test('the external backend and our own walk return the same hits in the same order', async () => {
   await withWorkspace(async (workspace) => {
     await writeFile(join(workspace, 'crlf.txt'), `windows line endings ${NEEDLE}\r\ntail`);
     const both = async (args, limits) => [
@@ -281,8 +272,7 @@ test('the external backend and our own walk return the same hits in the same ord
   });
 });
 
-test('the external backend gives the same text twice over', async (t) => {
-  if (!existsSync(builtRipgrep)) return t.skip('no ripgrep built locally, run npm run build-rg');
+test('the external backend gives the same text twice over', async () => {
   await withWorkspace(async (workspace) => {
     const run = async () => (await searchTool.run({ pattern: NEEDLE }, context(workspace, undefined, { ripgrepPath: builtRipgrep }))).text;
     assert.equal(await run(), await run());
@@ -290,8 +280,7 @@ test('the external backend gives the same text twice over', async (t) => {
 });
 
 // 检索的子进程要在边界里跑，配置里那个相对路径不能跟着子进程的当前目录走（本机实测：跟着走就是 ENOENT）。
-test('a relative ripgrepPath is read against the process directory, not the boundary', async (t) => {
-  if (!existsSync(builtRipgrep)) return t.skip('no ripgrep built locally, run npm run build-rg');
+test('a relative ripgrepPath is read against the process directory, not the boundary', async () => {
   await withWorkspace(async (workspace) => {
     const { logged, context: searchContext } = recordingContext(workspace, { ripgrepPath: relative(process.cwd(), builtRipgrep) });
     const result = await searchTool.run({ pattern: NEEDLE }, searchContext);
@@ -315,7 +304,7 @@ test('a cancelled search and find report their own code on the walk backend', as
   await withWorkspace(async (workspace) => {
     const controller = new AbortController();
     controller.abort();
-    const cancelled = { config: { boundary: workspace }, logger: silentLogger, signal: controller.signal };
+    const cancelled = { config: { boundary: workspace, ripgrepPath: join(workspace, 'missing-rg') }, logger: silentLogger, signal: controller.signal };
     await assert.rejects(searchTool.run({ pattern: NEEDLE }, cancelled), { code: 'search_cancelled' });
     await assert.rejects(findTool.run({ pattern: '**' }, cancelled), { code: 'find_cancelled' });
   });
@@ -325,14 +314,17 @@ test('a cancelled search and find report their own code on the walk backend', as
 test('a search cancelled while it is walking stops walking', async () => {
   await withWorkspace(async (workspace) => {
     const controller = new AbortController();
-    const running = searchTool.run({ pattern: NEEDLE }, { config: { boundary: workspace }, logger: silentLogger, signal: controller.signal });
+    const running = searchTool.run({ pattern: NEEDLE }, {
+      config: { boundary: workspace, ripgrepPath: join(workspace, 'missing-rg') },
+      logger: silentLogger,
+      signal: controller.signal,
+    });
     controller.abort();
     await assert.rejects(running, { code: 'search_cancelled' });
   });
 });
 
-test('a pre-cancelled call never starts the external backend', async (t) => {
-  if (!existsSync(builtRipgrep)) return t.skip('no ripgrep built locally, run npm run build-rg');
+test('a pre-cancelled call never starts the external backend', async () => {
   await withWorkspace(async (workspace) => {
     const controller = new AbortController();
     controller.abort();
@@ -345,14 +337,14 @@ test('a pre-cancelled call never starts the external backend', async (t) => {
 
 test('an exhausted scan budget stops the walk instead of reading every remaining file', async () => {
   await withWorkspace(async (workspace) => {
-    const result = await searchTool.run({ pattern: NEEDLE }, context(workspace, { scanBytes: 12 }));
+    const result = await searchTool.run({ pattern: NEEDLE }, context(workspace, { scanBytes: 12 }, { ripgrepPath: join(workspace, 'missing-rg') }));
     assert.equal(result.text, `(no matches)\n[incomplete: 12 bytes scanned, the rest of the tree was not read]`);
   });
 });
 
 test('the file limit stops the walk and says the rest of the tree was not read', async () => {
   await withWorkspace(async (workspace) => {
-    assert.match((await searchTool.run({ pattern: NEEDLE }, context(workspace, { scanFiles: 1 }))).text,
+    assert.match((await searchTool.run({ pattern: NEEDLE }, context(workspace, { scanFiles: 1 }, { ripgrepPath: join(workspace, 'missing-rg') }))).text,
       /\[incomplete: 1 file\(s\) scanned, the rest of the tree was not read]/);
   });
 });
@@ -360,7 +352,7 @@ test('the file limit stops the walk and says the rest of the tree was not read',
 test('a binary file is counted on its own and does not make the scan incomplete', async () => {
   await withWorkspace(async (workspace) => {
     await writeFile(join(workspace, 'data.bin'), Buffer.from(`head ${NEEDLE}\0tail`, 'utf8'));
-    const result = await searchTool.run({ pattern: NEEDLE }, context(workspace));
+    const result = await searchTool.run({ pattern: NEEDLE }, context(workspace, undefined, { ripgrepPath: join(workspace, 'missing-rg') }));
     assert.doesNotMatch(result.text, /incomplete/);
     assert.match(result.text, /\[1 binary file\(s\) skipped]/);
   });

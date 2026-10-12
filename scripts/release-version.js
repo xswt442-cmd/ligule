@@ -104,6 +104,13 @@ function updateSourceVersion(path, expectedVersion, nextVersion) {
   return `${source.slice(0, match.index)}export const VERSION = '${nextVersion}';${source.slice(match.index + match[0].length)}`;
 }
 
+function updateReleaseDocVersion(path, expectedVersion, nextVersion) {
+  const source = readFileSync(path, 'utf8');
+  const pattern = new RegExp(`^(\\| \x60ligule\x60 \\|[^\\r\\n]*\\| )\x60${expectedVersion}\x60( \\|)$`, 'm');
+  if (!pattern.test(source)) throw new Error(`${path} must list ligule@${expectedVersion} in its package table`);
+  return source.replace(pattern, `$1\x60${nextVersion}\x60$2`);
+}
+
 function updateCargoLock(source, expectedVersion, nextVersion, path) {
   const ast = parseForESLint(source).ast;
   const top = ast.body.find((node) => node.type === 'TOMLTopLevelTable');
@@ -162,11 +169,13 @@ export function versionFileUpdates(repositoryRoot, requestedVersion) {
   addJson('desktop/frontend/package-lock.json', { lock: true });
   addJson('desktop/src-tauri/tauri.conf.json', { config: true });
 
-  const pin = JSON.parse(readFileSync(join(repositoryRoot, 'scripts', 'ripgrep-pin.json'), 'utf8'));
-  for (const target of Object.values(pin.targets)) addJson(`packages/${target.directory}/package.json`);
-
   const sourcePath = join(repositoryRoot, 'src', 'version.js');
   updates.set(sourcePath, updateSourceVersion(sourcePath, currentVersion, version));
+
+  for (const path of ['docs/development/RELEASE.zh-cn.md', 'docs/development/RELEASE.en.md']) {
+    const absolutePath = join(repositoryRoot, path);
+    updates.set(absolutePath, updateReleaseDocVersion(absolutePath, currentVersion, version));
+  }
 
   const cargoPath = join(repositoryRoot, 'desktop', 'src-tauri', 'Cargo.toml');
   updates.set(cargoPath, updateTomlFile(cargoPath, { key: ['package'], kind: 'standard' }, 'version', currentVersion, version));
