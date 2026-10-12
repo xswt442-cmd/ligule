@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: Prepare a version PR or create a tag after platform validation
+        description: Prepare a version PR or create a tag after the main CI succeeds
         type: choice
         required: true
         options: [prepare, tag]
@@ -12,26 +12,6 @@ on:
         description: Stable version (X.Y.Z), or patch/minor/major for prepare
         type: string
         required: true
-      windows_x64:
-        description: Windows x64 installation and launch validation is complete
-        type: boolean
-        required: false
-        default: false
-      linux_x64:
-        description: Linux x64 installation and launch validation is complete
-        type: boolean
-        required: false
-        default: false
-      macos_arm64:
-        description: macOS Apple Silicon installation and launch validation is complete
-        type: boolean
-        required: false
-        default: false
-      macos_x64:
-        description: macOS Intel installation and launch validation is complete
-        type: boolean
-        required: false
-        default: false
 
 env:
   PRIMARY_NODE_VERSION: '24'
@@ -143,12 +123,12 @@ jobs:
           cat > "$RUNNER_TEMP/release-pr.md" <<EOF
           ## Version preparation
 
-          - Updates all runtime, desktop, and platform package versions to \`v${VERSION}\`.
+          - Updates the main package, desktop manifests, and bilingual release checklist to \`v${VERSION}\`.
           - Promotes the bilingual \`[Unreleased]\` entry in \`CHANGELOG.md\` to this version.
           - Full four-platform CI passed for this exact commit: ${CI_URL}
-          - Desktop artifacts are available from that CI run for platform acceptance.
+          - The CI run installs or extracts each desktop artifact and runs the bundled search-backend check on all four targets.
 
-          Merge only after reviewing the generated version diff. Create the tag later with the \`tag\` action after all four platform validations are complete.
+          Merge after reviewing the generated version diff and CI results. Verify first launch, tray, and notifications on each desktop platform before publishing the GitHub Release.
           EOF
           gh pr create --base main --head "$BRANCH" --title "chore(release): v${VERSION}" --body-file "$RUNNER_TEMP/release-pr.md"
 
@@ -165,20 +145,8 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
 
-      - name: require all platform validations and main
-        env:
-          WINDOWS_X64: ${{ inputs.windows_x64 }}
-          LINUX_X64: ${{ inputs.linux_x64 }}
-          MACOS_ARM64: ${{ inputs.macos_arm64 }}
-          MACOS_X64: ${{ inputs.macos_x64 }}
-        run: |
-          test "$GITHUB_REF" = refs/heads/main
-          for result in "$WINDOWS_X64" "$LINUX_X64" "$MACOS_ARM64" "$MACOS_X64"; do
-            if [ "$result" != true ]; then
-              echo "::error::all four platform validations must be confirmed before tagging"
-              exit 1
-            fi
-          done
+      - name: require the default branch
+        run: test "$GITHUB_REF" = refs/heads/main
 
       - uses: actions/setup-node@v5
         with:
