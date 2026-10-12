@@ -1,25 +1,36 @@
 {
   "name": "ligule",
-  "version": "0.0.1",
-  "description": "占位版本，开发中。自建 agent harness：内核不提供任何工具，一切能力皆插件。Placeholder, under development. A self-built agent harness: the kernel ships no tools of its own; every capability is a plugin.",
+  "version": "0.0.2",
+  "description": "共享会话与工具内核的命令行、终端和桌面 AI 助手。An AI agent harness with shared sessions and tools across CLI, terminal, and desktop interfaces.",
   "type": "module",
   "bin": {
-    "ligule": "./src/cli.js"
+    "ligule": "./dist/cli.js"
   },
   "exports": {
-    ".": "./src/index.js",
+    ".": "./dist/index.js",
     "./package.json": "./package.json"
   },
   "files": [
-    "src",
+    "dist",
+    "modes",
+    "docs",
     "README.md",
+    "README.en.md",
+    "CHANGELOG.md",
+    "AGENTS.md",
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test --import ./test/hooks/isolated-data-root.mjs test/*.test.js",
+    "check-pack": "node scripts/check-pack.js",
+    "pack-release": "node scripts/pack-release.js",
+    "verify-install": "node scripts/verify-install.js",
+    "registry-version": "node scripts/registry-version.js",
+    "build-rg": "node scripts/build-rg-packages.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "author": "xswt442-cmd",
   "license": "MIT",
@@ -35,6 +46,33 @@
     "agent",
     "harness",
     "agent-harness",
-    "placeholder"
-  ]
+    "tui"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.0",
+    "@napi-rs/keyring": "2.1.1",
+    "cross-spawn": "7.0.6",
+    "proper-lockfile": "4.1.2",
+    "smol-toml": "^1.9.0",
+    "toml-eslint-parser": "1.0.3",
+    "tree-sitter": "^0.25.1",
+    "tree-sitter-bash": "^0.25.1",
+    "tree-sitter-pwsh": "0.38.1",
+    "yaml": "^2.9.1"
+  },
+  "optionalDependencies": {
+    "highlight.js": "11.12.0",
+    "ink": "^7.1.1",
+    "koffi": "3.1.1",
+    "marked": "18.0.14",
+    "react": "^19.3.0",
+    "string-width": "8.3.0"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/server-filesystem": "^2026.8.31",
+    "@types/cross-spawn": "^6.0.6",
+    "@types/node": "^24.19.1",
+    "@types/proper-lockfile": "^4.1.4",
+    "typescript": "^5.9.3"
+  }
 }

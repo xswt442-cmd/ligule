@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    // 旧的 JS 文件跟着一起出到 dist/，但不做类型检查；新写的模块按 strict 那一套走（D47）。
+    "allowJs": true,
+    "checkJs": false,
+    "outDir": "dist",
+    "rootDir": "src",
+    "target": "es2023",
+    "lib": ["es2023"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "strict": true,
+    // 只用可剥离的语法：enum、namespace 与参数属性这类需要生成的写法不接受，和运行时能直接读源码这条路保持一致。
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "noEmitOnError": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["src"]
+}

@@ -1,0 +1,507 @@
+// 桌面壳（D24、D30、实现顺序第 15 步）管理窗口、Host 进程、系统通知和托盘交互，并在 WebView 与 Host
+// 之间逐行传递调用帧。协议内容不在这里解释——壳不认识 Host 帧中的方法名。
+mod bridge;
+mod notification;
+#[cfg(target_os = "linux")]
+mod tray_host;
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use tauri::image::Image;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{TrayIcon, TrayIconBuilder};
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+
+use bridge::Host;
+
+const FRAME_EVENT: &str = "host-frame";
+const LOG_EVENT: &str = "host-log";
+/// 退出请求说给界面听的那一条事件：哪几份会话受影响只有界面知道，壳不认识协议内容（D24、方案 6.4）。
+const QUIT_EVENT: &str = "shell-quit";
+const TRAY_ID: &str = "ligule-main";
+const TRAY_OPEN: &str = "tray-open";
+const TRAY_QUIT: &str = "tray-quit";
+
+#[derive(Default)]
+struct AppState {
+    host: Mutex<Option<Host>>,
+    tray: Mutex<Option<TrayIcon>>,
+    tray_menu: Mutex<Option<TrayMenuItems>>,
+    /// 托盘是否可用于恢复窗口。Linux 还要求展示宿主已经注册。
+    restorable: AtomicBool,
+    #[cfg(target_os = "linux")]
+    tray_hidden: AtomicBool,
+    #[cfg(target_os = "linux")]
+    tray_host_revision: std::sync::atomic::AtomicU64,
+    #[cfg(target_os = "linux")]
+    tray_host_proxy: Mutex<Option<gio::DBusProxy>>,
+    /// 人已经点了「中断任务并退出」。这一条之后拦退出与藏窗口都不再做。
+    quitting: AtomicBool,
+}
+
+struct TrayMenuItems {
+    open: MenuItem<tauri::Wry>,
+    quit: MenuItem<tauri::Wry>,
+}
+
+impl AppState {
+    fn tray_up(&self) -> bool {
+        self.restorable.load(Ordering::Acquire)
+    }
+
+    fn confirmed_quit(&self) -> bool {
+        self.quitting.load(Ordering::Relaxed)
+    }
+}
+
+/// 点叉那一步要做的事。托盘只回答「收起之后还能不能找回来」，它不回答「这一走要不要先问一遍」：
+/// 那是两件独立的事（审阅 G1、D109 与方案 6.4）。
+#[derive(Debug, PartialEq, Eq)]
+enum OnClose {
+    /// 有托盘可回：窗口藏起来，轮次、待答的卡与排着的句子都原样留着。
+    Hide,
+    /// 没有托盘可回：窗口留着不动，把这一走交给界面问一遍。
+    Ask,
+    /// 人已经点过「中断任务并退出」：不再拦。
+    Proceed,
+}
+
+fn close_action(tray_up: bool, confirmed: bool) -> OnClose {
+    if confirmed {
+        return OnClose::Proceed;
+    }
+    if tray_up {
+        OnClose::Hide
+    } else {
+        OnClose::Ask
+    }
+}
+
+/// 退出请求要不要先问界面：只看人确认过没有。托盘立不立得起来都不免掉这一问。
+fn exit_asks(confirmed: bool) -> bool {
+    !confirmed
+}
+
+/// 把主窗口交回眼前：托盘「打开」、macOS 点图标，与退出前那张确认都要窗口在屏幕上才谈得成。
+fn restore_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        #[cfg(not(target_os = "linux"))]
+        let _ = window.show();
+        #[cfg(target_os = "linux")]
+        match window.show() {
+            Ok(()) => app
+                .state::<AppState>()
+                .tray_hidden
+                .store(false, Ordering::Release),
+            Err(error) => {
+                let _ = app.emit(
+                    LOG_EVENT,
+                    format!("the window could not be restored: {error}"),
+                );
+            }
+        }
+        let _ = window.set_focus();
+    }
+}
+
+/// 退出这一步从壳交到界面：壳只把窗口摆回眼前并把请求说出去，等界面确认后由 `app_quit` 真的收。
+fn request_quit(app: &AppHandle) {
+    restore_window(app);
+    let _ = app.emit(QUIT_EVENT, ());
+}
+
+/// 后端交回的一行行转成 WebView 侧的事件。转发线程独立于调用，界面收帧不等壳。
+fn pump(app: AppHandle, receiver: std::sync::mpsc::Receiver<String>, event: &'static str) {
+    std::thread::spawn(move || {
+        while let Ok(line) = receiver.recv() {
+            if app.emit(event, line).is_err() {
+                return;
+            }
+        }
+    });
+}
+
+/// 起后端进程。壳一起来就起，界面不需要先问一次「后端在哪」——这里没有地址可给（D30）。
+/// 运行时与后端入口优先用随包带的那一份（D34），没有才退回开发时的目录层级与 PATH 上的 node。
+/// 槽位里已经有一具时，这一条换掉它并终止旧的：重连走的也是这一条，同一时刻只留一具进程（实现顺序第 65 步）。
+fn start_host(app: &AppHandle) -> Result<(), String> {
+    let exe_path = std::env::current_exe()
+        .map_err(|error| format!("cannot locate this executable: {error}"))?;
+    let exe_dir = exe_path.parent().ok_or("the executable has no directory")?;
+    let resources = app.path().resource_dir().ok();
+    let cli = bridge::resolve_cli_script(
+        exe_dir,
+        resources.as_deref(),
+        std::env::var("LIGULE_DESKTOP_CLI").ok().as_deref(),
+    )?;
+    let node = bridge::bundled_node(resources.as_deref())
+        .map(|path| path.display().to_string())
+        .or_else(|| std::env::var("NODE").ok().filter(|value| !value.is_empty()))
+        .unwrap_or_else(|| "node".to_string());
+    let (host, frames, logs) = bridge::spawn_host(&node, &[&cli.display().to_string(), "host"])?;
+
+    pump(app.clone(), frames, FRAME_EVENT);
+    pump(app.clone(), logs, LOG_EVENT);
+    let state = app.state::<AppState>();
+    let mut slot = state.slot()?;
+    if let Some(old) = bridge::install_host(&mut slot, host) {
+        old.stop();
+    }
+    Ok(())
+}
+
+impl AppState {
+    /// 拿这一份状态里的槽位。锁被毒过之后不接着用：那说明有一次搬运在持锁时 panic 了。
+    fn slot(&self) -> Result<std::sync::MutexGuard<'_, Option<Host>>, String> {
+        self.host
+            .lock()
+            .map_err(|_| "the host slot is poisoned".to_string())
+    }
+}
+
+/// 终止后端进程并把它从槽位里拿走。
+fn stop_host(app: &AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    if let Some(host) = state.slot()?.take() {
+        host.stop();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn host_send(state: State<'_, AppState>, frame: String) -> Result<(), String> {
+    let guard = state.slot()?;
+    match guard.as_ref() {
+        Some(host) => host.send(&frame),
+        None => Err("the host is not running".to_string()),
+    }
+}
+
+#[tauri::command]
+fn host_stop(app: AppHandle) -> Result<(), String> {
+    stop_host(&app)
+}
+
+/// 界面上那一个重连动作：换一具后端进程。会话由界面用 `session.open` 接回去，壳不认识会话（D30）。
+#[tauri::command]
+fn host_restart(app: AppHandle) -> Result<(), String> {
+    start_host(&app)
+}
+
+/// 界面对过「中断任务并退出」之后才走这一条：先记下人已确认，再请求退出，`ExitRequested` 那一处就不再拦。
+#[tauri::command]
+fn app_quit(app: AppHandle) {
+    app.state::<AppState>()
+        .quitting
+        .store(true, Ordering::Relaxed);
+    app.exit(0);
+}
+
+/// 首次使用时那一份默认工作区：系统文档目录下的 `ligule/default-workspace`，不在那儿就建出来。
+/// 文档目录由平台自己交回，这里不拼用户主目录。取不到或建不成都把原因交回界面，让那个人自己选一处可用目录——
+/// 安装目录、系统目录与用户主目录都不是静默的退路（方案 5.5.3）。
+#[tauri::command]
+fn default_workspace(app: AppHandle) -> Result<String, String> {
+    let documents = app
+        .path()
+        .document_dir()
+        .map_err(|error| format!("the system documents directory is not reachable: {error}"))?;
+    let directory = documents.join("ligule").join("default-workspace");
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("{} cannot be created: {error}", directory.display()))?;
+    Ok(directory.to_string_lossy().into_owned())
+}
+
+/// 托盘那一枚与它两条菜单。立不起来时把原因说出去，界面上那一条叉改走「先问一遍再收」：
+/// 收进一个找不回的位置比问一句更糟（方案 6.4、审阅 G1）。
+fn build_tray(app: &AppHandle) -> Result<(), String> {
+    let open = MenuItem::with_id(app, TRAY_OPEN, "打开 ligule", true, None::<&str>)
+        .map_err(|error| format!("the tray menu could not be built: {error}"))?;
+    let quit = MenuItem::with_id(app, TRAY_QUIT, "退出 ligule", true, None::<&str>)
+        .map_err(|error| format!("the tray menu could not be built: {error}"))?;
+    let menu = Menu::with_items(app, &[&open, &quit])
+        .map_err(|error| format!("the tray menu could not be built: {error}"))?;
+    let icon = app
+        .default_window_icon()
+        .ok_or("the shell carries no icon to put in the tray")?
+        .clone();
+    let tray = TrayIconBuilder::with_id(TRAY_ID)
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .tooltip("ligule")
+        .icon(icon)
+        .on_menu_event(|handle, event| match event.id.as_ref() {
+            TRAY_OPEN => restore_window(handle),
+            TRAY_QUIT => request_quit(handle),
+            other => {
+                let _ = handle.emit(
+                    LOG_EVENT,
+                    format!("the tray menu item is not known to this shell: {other}"),
+                );
+            }
+        })
+        .build(app)
+        .map_err(|error| format!("the tray could not be built: {error}"))?;
+    let state = app.state::<AppState>();
+    let mut tray_slot = state
+        .tray
+        .lock()
+        .map_err(|_| "the tray slot is poisoned".to_string())?;
+    *tray_slot = Some(tray);
+    *state
+        .tray_menu
+        .lock()
+        .map_err(|_| "the tray menu slot is poisoned".to_string())? =
+        Some(TrayMenuItems { open, quit });
+    Ok(())
+}
+
+const MAX_TRAY_LABEL_BYTES: usize = 128;
+
+fn validate_tray_label(label: &str) -> Result<(), String> {
+    if label.is_empty() || label.len() > MAX_TRAY_LABEL_BYTES {
+        return Err(format!(
+            "tray status text must contain 1 to {MAX_TRAY_LABEL_BYTES} bytes"
+        ));
+    }
+    if label.chars().any(char::is_control) {
+        return Err("tray status text must not contain control characters".to_string());
+    }
+    Ok(())
+}
+
+fn tray_menu_labels(language: Option<&str>) -> Result<(&'static str, &'static str), String> {
+    match language {
+        None | Some("zh") => Ok(("打开 ligule", "退出 ligule")),
+        Some("en") => Ok(("Open ligule", "Quit ligule")),
+        Some(value) => Err(format!("unsupported tray language: {value}")),
+    }
+}
+
+fn attention_icon(icon: &Image<'_>) -> Image<'static> {
+    let width = icon.width();
+    let height = icon.height();
+    let radius = (width.min(height) / 10).max(2) as i32;
+    let center_x = width as i32 - radius - 1;
+    let center_y = radius + 1;
+    let mut rgba = icon.rgba().to_vec();
+
+    for y in (center_y - radius - 1)..=(center_y + radius + 1) {
+        for x in (center_x - radius - 1)..=(center_x + radius + 1) {
+            let distance = (x - center_x).pow(2) + (y - center_y).pow(2);
+            if distance > (radius + 1).pow(2)
+                || x < 0
+                || y < 0
+                || x >= width as i32
+                || y >= height as i32
+            {
+                continue;
+            }
+            let index = ((y as u32 * width + x as u32) * 4) as usize;
+            let color = if distance > radius.pow(2) {
+                [24, 24, 24, 255]
+            } else {
+                [255, 176, 0, 255]
+            };
+            rgba[index..index + 4].copy_from_slice(&color);
+        }
+    }
+
+    Image::new_owned(rgba, width, height)
+}
+
+#[tauri::command]
+fn set_tray_status(
+    app: AppHandle,
+    label: String,
+    attention: bool,
+    language: Option<String>,
+) -> Result<(), String> {
+    validate_tray_label(&label)?;
+    let (open_label, quit_label) = tray_menu_labels(language.as_deref())?;
+    let state = app.state::<AppState>();
+    let tray_slot = state
+        .tray
+        .lock()
+        .map_err(|_| "the tray slot is poisoned".to_string())?;
+    let tray = tray_slot
+        .as_ref()
+        .ok_or_else(|| "the system tray is not available".to_string())?;
+    let icon = app
+        .default_window_icon()
+        .ok_or_else(|| "the shell has no application icon for the tray".to_string())?;
+
+    tray.set_tooltip(Some(&label))
+        .map_err(|error| format!("the tray status text could not be updated: {error}"))?;
+    tray.set_icon(Some(if attention {
+        attention_icon(icon)
+    } else {
+        icon.clone()
+    }))
+    .map_err(|error| format!("the tray icon could not be updated: {error}"))?;
+    let tray_menu = state
+        .tray_menu
+        .lock()
+        .map_err(|_| "the tray menu slot is poisoned".to_string())?;
+    let items = tray_menu
+        .as_ref()
+        .ok_or_else(|| "the system tray menu is not available".to_string())?;
+    items
+        .open
+        .set_text(open_label)
+        .map_err(|error| format!("the tray menu could not be updated: {error}"))?;
+    items
+        .quit
+        .set_text(quit_label)
+        .map_err(|error| format!("the tray menu could not be updated: {error}"))?;
+    #[cfg(target_os = "macos")]
+    tray.set_title(if attention { Some("●") } else { None })
+        .map_err(|error| format!("the tray status marker could not be updated: {error}"))?;
+    Ok(())
+}
+
+fn main() {
+    tauri::Builder::default()
+        .manage(AppState::default())
+        // 原生保存对话框那一个插件（方案 6A）：界面自己开那扇窗，壳不读记录也不写文件。
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        .setup(|app| {
+            let handle = app.handle().clone();
+            if let Err(error) = start_host(&handle) {
+                let _ = handle.emit(LOG_EVENT, format!("the host could not start: {error}"));
+            }
+            match build_tray(&handle) {
+                Ok(()) => {
+                    #[cfg(target_os = "linux")]
+                    tray_host::watch(&handle);
+                    #[cfg(not(target_os = "linux"))]
+                    handle
+                        .state::<AppState>()
+                        .restorable
+                        .store(true, Ordering::Relaxed);
+                }
+                Err(error) => {
+                    let _ = handle.emit(LOG_EVENT, format!("the tray is not available: {error}"));
+                }
+            }
+            Ok(())
+        })
+        // 点叉收起这一扇窗：WebView、后端进程、跑着的轮次、待答的卡与排着的几句都原样留着（方案 6.4）。
+        // 收起不弹中断确认——那一句确认只在人真的要走的时候问。没有托盘时这一走是真的要走，先问界面。
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                let state = window.app_handle().state::<AppState>();
+                match close_action(state.tray_up(), state.confirmed_quit()) {
+                    OnClose::Proceed => {}
+                    OnClose::Hide => {
+                        api.prevent_close();
+                        #[cfg(not(target_os = "linux"))]
+                        let _ = window.hide();
+                        #[cfg(target_os = "linux")]
+                        {
+                            state.tray_hidden.store(true, Ordering::Release);
+                            if let Err(error) = window.hide() {
+                                state.tray_hidden.store(false, Ordering::Release);
+                                let _ = window.emit(
+                                    LOG_EVENT,
+                                    format!("the window could not be hidden: {error}"),
+                                );
+                            }
+                            if !state.tray_up() {
+                                state.tray_hidden.store(true, Ordering::Release);
+                                restore_window(window.app_handle());
+                            }
+                        }
+                    }
+                    OnClose::Ask => {
+                        api.prevent_close();
+                        request_quit(window.app_handle());
+                    }
+                }
+            }
+        })
+        .invoke_handler(tauri::generate_handler![
+            host_send,
+            host_stop,
+            host_restart,
+            app_quit,
+            default_workspace,
+            notification::show_notification,
+            set_tray_status
+        ])
+        .build(tauri::generate_context!())
+        .expect("error while building the desktop shell")
+        .run(|app_handle, event| match event {
+            // 退出入口走同一条检查：托盘「退出」、macOS 的 Cmd+Q、关掉最后一扇窗口、没有托盘时点叉都先到这里，
+            // 由界面说出受影响的会话并等人确认；人点过「中断任务并退出」之后 `app_quit` 才真的收（方案 6.4）。
+            // 这一问与托盘在不在无关（审阅 G1）。
+            tauri::RunEvent::ExitRequested { api, .. } => {
+                if exit_asks(app_handle.state::<AppState>().confirmed_quit()) {
+                    api.prevent_exit();
+                    request_quit(app_handle);
+                }
+            }
+            // macOS 上窗口收起之后点程序图标：把窗口交回眼前，不再起第二具 Host。这一条只有 macOS 有那个事件。
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => restore_window(app_handle),
+            tauri::RunEvent::Exit => {
+                #[cfg(target_os = "linux")]
+                if let Ok(mut slot) = app_handle.state::<AppState>().tray_host_proxy.lock() {
+                    slot.take();
+                }
+                let _ = stop_host(app_handle);
+            }
+            _ => {}
+        });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{close_action, exit_asks, tray_menu_labels, validate_tray_label, OnClose};
+
+    #[test]
+    fn a_tray_lets_the_close_button_hide_the_window() {
+        assert_eq!(close_action(true, false), OnClose::Hide);
+    }
+
+    #[test]
+    fn closing_without_a_tray_asks_the_interface_instead_of_quietly_exiting() {
+        // 没有托盘只是少了一个可回的位置，不免掉那一句确认（审阅 G1）。
+        assert_eq!(close_action(false, false), OnClose::Ask);
+        assert!(exit_asks(false));
+    }
+
+    #[test]
+    fn a_confirmed_quit_passes_both_ways_out() {
+        assert_eq!(close_action(true, true), OnClose::Proceed);
+        assert_eq!(close_action(false, true), OnClose::Proceed);
+        assert!(!exit_asks(true));
+    }
+
+    #[test]
+    fn tray_status_text_rejects_control_characters_and_excess_length() {
+        assert!(validate_tray_label("Working").is_ok());
+        assert!(validate_tray_label("Working\nnow").is_err());
+        assert!(validate_tray_label(&"x".repeat(super::MAX_TRAY_LABEL_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn tray_menu_language_defaults_to_chinese_and_accepts_english() {
+        assert_eq!(tray_menu_labels(None), Ok(("打开 ligule", "退出 ligule")));
+        assert_eq!(
+            tray_menu_labels(Some("zh")),
+            Ok(("打开 ligule", "退出 ligule"))
+        );
+        assert_eq!(
+            tray_menu_labels(Some("en")),
+            Ok(("Open ligule", "Quit ligule"))
+        );
+    }
+
+    #[test]
+    fn tray_menu_language_rejects_unknown_values() {
+        assert!(tray_menu_labels(Some("fr")).is_err());
+    }
+}
