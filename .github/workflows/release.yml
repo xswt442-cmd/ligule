@@ -83,4 +83,3 @@ jobs:
           else
             gh release create "$TAG" --verify-tag --title "$TAG" --draft --notes-file "$RUNNER_TEMP/release-notes.md"
           fi
-
