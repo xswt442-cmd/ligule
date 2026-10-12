@@ -1,0 +1,86 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published npm tag whose bilingual changelog becomes a draft Release
+        type: string
+        required: true
+  workflow_call:
+    inputs:
+      tag:
+        description: Published npm tag whose bilingual changelog becomes a draft Release
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  PRIMARY_NODE_VERSION: '24'
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  draft:
+    name: create or update the draft Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+
+      - name: validate the tag and published npm packages
+        id: release
+        env:
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! [[ "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::tag must use vX.Y.Z form"
+            exit 1
+          fi
+          git fetch --no-tags --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          git fetch --no-tags --force origin +refs/heads/main:refs/remotes/origin/main
+          commit=$(git rev-parse "${TAG}^{commit}")
+          git merge-base --is-ancestor "$commit" refs/remotes/origin/main
+          version=${TAG#v}
+          tagged_version=$(git show "${TAG}:package.json" | node -e "let input='';process.stdin.on('data',chunk=>input+=chunk).on('end',()=>process.stdout.write(JSON.parse(input).version))")
+          test "$tagged_version" = "$version"
+          git checkout --detach "$commit"
+          node scripts/release-notes.js "$TAG" > "$RUNNER_TEMP/release-notes.md"
+          while IFS= read -r package; do
+            npm view "${package}@${version}" version --json | grep -F "${version}" >/dev/null
+          done < <(node -e "const pin=require('./scripts/ripgrep-pin.json'); for(const target of Object.values(pin.targets)) console.log(target.package); console.log('ligule')")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: create or update the draft Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --json isDraft --jq .isDraft > "$RUNNER_TEMP/release-state" 2>/dev/null; then
+            if [ "$(cat "$RUNNER_TEMP/release-state")" != true ]; then
+              echo "::error::refusing to modify the already published Release ${TAG}"
+              exit 1
+            fi
+            gh release edit "$TAG" --title "$TAG" --draft --notes-file "$RUNNER_TEMP/release-notes.md"
+          else
+            gh release create "$TAG" --verify-tag --title "$TAG" --draft --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi
+

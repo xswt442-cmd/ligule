@@ -1,0 +1,249 @@
+name: tag
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Prepare a version PR or create a tag after platform validation
+        type: choice
+        required: true
+        options: [prepare, tag]
+      version:
+        description: Stable version (X.Y.Z), or patch/minor/major for prepare
+        type: string
+        required: true
+      windows_x64:
+        description: Windows x64 installation and launch validation is complete
+        type: boolean
+        required: false
+        default: false
+      linux_x64:
+        description: Linux x64 installation and launch validation is complete
+        type: boolean
+        required: false
+        default: false
+      macos_arm64:
+        description: macOS Apple Silicon installation and launch validation is complete
+        type: boolean
+        required: false
+        default: false
+      macos_x64:
+        description: macOS Intel installation and launch validation is complete
+        type: boolean
+        required: false
+        default: false
+
+env:
+  PRIMARY_NODE_VERSION: '24'
+
+concurrency:
+  group: tag-${{ inputs.action }}-${{ inputs.version }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    if: inputs.action == 'prepare'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: require the default branch
+        run: test "$GITHUB_REF" = refs/heads/main
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          cache: npm
+
+      - name: install locked dependencies
+        run: npm ci
+
+      - name: resolve version and prepare release files
+        id: version
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version=$(node scripts/release-version.js resolve "$REQUESTED_VERSION")
+          if git ls-remote --exit-code --tags origin "refs/tags/v${version}" >/dev/null 2>&1; then
+            echo "::error::tag v${version} already exists"
+            exit 1
+          fi
+          branch="release/v${version}"
+          if git ls-remote --exit-code --heads origin "refs/heads/${branch}" >/dev/null 2>&1; then
+            echo "::error::branch ${branch} already exists; inspect it before retrying"
+            exit 1
+          fi
+          git switch -c "$branch"
+          node scripts/release-version.js prepare "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: verify release files
+        run: |
+          npm test
+          npm run check-pack
+
+      - name: push the version branch
+        id: push
+        env:
+          BRANCH: ${{ steps.version.outputs.branch }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json desktop packages src/version.js CHANGELOG.md
+          git commit -m "chore(release): v${{ steps.version.outputs.version }}"
+          git push origin "$BRANCH"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      # Pushes made with GITHUB_TOKEN do not start push workflows. Dispatch the normal matrix explicitly
+      # so the PR has all four installer artifacts and a complete CI result for this exact commit.
+      - name: run the full platform CI
+        id: ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.version.outputs.branch }}
+          COMMIT: ${{ steps.push.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          dispatched_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          gh workflow run ci.yml --ref "$BRANCH"
+          run_id=""
+          for attempt in $(seq 1 60); do
+            run_id=$(gh run list --workflow ci.yml --branch "$BRANCH" --event workflow_dispatch --limit 20 --json databaseId,headSha,createdAt \
+              | jq -r --arg commit "$COMMIT" --arg since "$dispatched_at" '[.[] | select(.headSha == $commit and (.createdAt | fromdateiso8601) >= ($since | fromdateiso8601))][0].databaseId // empty')
+            if [ -n "$run_id" ]; then break; fi
+            sleep 5
+          done
+          if [ -z "$run_id" ]; then
+            echo "::error::could not find the CI run for $COMMIT"
+            exit 1
+          fi
+          gh run watch "$run_id" --exit-status
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "url=$(gh run view "$run_id" --json url --jq .url)" >> "$GITHUB_OUTPUT"
+
+      - name: open the version pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.version.outputs.branch }}
+          VERSION: ${{ steps.version.outputs.version }}
+          CI_URL: ${{ steps.ci.outputs.url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/release-pr.md" <<EOF
+          ## Version preparation
+
+          - Updates all runtime, desktop, and platform package versions to \`v${VERSION}\`.
+          - Promotes the bilingual \`[Unreleased]\` entry in \`CHANGELOG.md\` to this version.
+          - Full four-platform CI passed for this exact commit: ${CI_URL}
+          - Desktop artifacts are available from that CI run for platform acceptance.
+
+          Merge only after reviewing the generated version diff. Create the tag later with the \`tag\` action after all four platform validations are complete.
+          EOF
+          gh pr create --base main --head "$BRANCH" --title "chore(release): v${VERSION}" --body-file "$RUNNER_TEMP/release-pr.md"
+
+  create-tag:
+    if: inputs.action == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      actions: write
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: require all platform validations and main
+        env:
+          WINDOWS_X64: ${{ inputs.windows_x64 }}
+          LINUX_X64: ${{ inputs.linux_x64 }}
+          MACOS_ARM64: ${{ inputs.macos_arm64 }}
+          MACOS_X64: ${{ inputs.macos_x64 }}
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          for result in "$WINDOWS_X64" "$LINUX_X64" "$MACOS_ARM64" "$MACOS_X64"; do
+            if [ "$result" != true ]; then
+              echo "::error::all four platform validations must be confirmed before tagging"
+              exit 1
+            fi
+          done
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          cache: npm
+
+      - name: validate version and changelog
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::version must use stable X.Y.Z form"
+            exit 1
+          fi
+          test "$(node -p "require('./package.json').version")" = "$VERSION"
+          node scripts/release-notes.js "v${VERSION}" >/dev/null
+          if git ls-remote --exit-code --tags origin "refs/tags/v${VERSION}" >/dev/null 2>&1; then
+            echo "::error::tag v${VERSION} already exists"
+            exit 1
+          fi
+          commit=$(git rev-parse HEAD)
+          git fetch --no-tags --force origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$commit" refs/remotes/origin/main
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      # Run CI against the exact main commit immediately before tagging. This run also contains the
+      # four desktop artifacts that are manually attached to the eventual draft Release.
+      - name: run the final platform CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ steps.release.outputs.commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          dispatched_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          gh workflow run ci.yml --ref main
+          run_id=""
+          for attempt in $(seq 1 60); do
+            run_id=$(gh run list --workflow ci.yml --branch main --event workflow_dispatch --limit 20 --json databaseId,headSha,createdAt \
+              | jq -r --arg commit "$COMMIT" --arg since "$dispatched_at" '[.[] | select(.headSha == $commit and (.createdAt | fromdateiso8601) >= ($since | fromdateiso8601))][0].databaseId // empty')
+            if [ -n "$run_id" ]; then break; fi
+            sleep 5
+          done
+          if [ -z "$run_id" ]; then
+            echo "::error::could not find the CI run for $COMMIT"
+            exit 1
+          fi
+          gh run watch "$run_id" --exit-status
+          echo "CI run: $(gh run view "$run_id" --json url --jq .url)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: create and push the annotated tag
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${VERSION}" -m "v${VERSION}"
+          git push origin "v${VERSION}"
+

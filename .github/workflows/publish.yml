@@ -1,22 +1,16 @@
 name: publish
 
-# 一次发布就是一个标签：把 `src/version.js` 的 VERSION 与十份带着版本号的清单一起改好，再推 vX.Y.Z——
-# 哪十份由 `test/kernel.test.js` 那条检查说，它对不上时先在测试那一趟红。
-# 标签必须落在 main 已经带着的那个提交上，标签名必须等于 package.json 的 version，下面两步各查一件。
-#
-# 鉴权：npm 的 Trusted Publishing（OIDC）需要包先存在才能绑定发布者，所以第一次发布用
-# NPM_TOKEN；包上了 registry 之后配好 trusted publisher、删掉那个 secret，往后的发布走 OIDC。
-
 on:
-  push:
-    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing, reviewed release tag on main (for example v0.0.2)
+        type: string
+        required: true
 
 env:
-  # 与 ci.yml 和 package.json 的 engines.node 取同一个大版本号，test/runtime-version.test.js 断言这一点。
   PRIMARY_NODE_VERSION: '24'
 
-# 发布不能跑到一半被取消：第一个标签还在上传 npm 时又来一个标签会和 registry 抢。
-# 所以这里排队，不取消。
 concurrency:
   group: publish
   cancel-in-progress: false
@@ -25,55 +19,77 @@ permissions:
   contents: read
 
 jobs:
-  checks:
-    name: release checks
+  preflight:
+    name: validate the requested tag
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.identity.outputs.tag }}
+      version: ${{ steps.identity.outputs.version }}
+      commit: ${{ steps.identity.outputs.commit }}
     steps:
       - uses: actions/checkout@v5
         with:
-          # 下面要比对标签提交与 main 的祖先关系，按标签默认检出既没有那个分支也没有足够深的历史。
+          ref: main
           fetch-depth: 0
+          persist-credentials: false
+
+      - name: validate tag identity and main ancestry
+        id: identity
+        env:
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          if ! [[ "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::tag must use vX.Y.Z form"
+            exit 1
+          fi
+          git fetch --no-tags --force origin +refs/heads/main:refs/remotes/origin/main
+          git fetch --no-tags --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          commit=$(git rev-parse "${TAG}^{commit}")
+          if ! git merge-base --is-ancestor "$commit" refs/remotes/origin/main; then
+            echo "::error::${TAG} does not point to a commit on main"
+            exit 1
+          fi
+          version=${TAG#v}
+          package_version=$(git show "${TAG}:package.json" | node -e "let input='';process.stdin.on('data',chunk=>input+=chunk).on('end',()=>process.stdout.write(JSON.parse(input).version))")
+          if [ "$package_version" != "$version" ]; then
+            echo "::error::${TAG} does not match package.json version ${package_version}"
+            exit 1
+          fi
+          git show "${TAG}:CHANGELOG.md" | grep -F "## [${version}]" >/dev/null
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+  checks:
+    name: release checks
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.preflight.outputs.commit }}
+          persist-credentials: false
 
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
           cache: npm
 
-      # 依赖按锁文件装，CI 上不解析新版本。
-      - name: install
+      - name: install locked dependencies
         run: npm ci
 
-      - name: build the pinned search packages
+      - name: build pinned search packages
         run: npm run build-rg
 
-      - name: tag matches package.json version
-        shell: bash
-        run: |
-          pkg=$(node -p "require('./package.json').version")
-          tag=${GITHUB_REF_NAME#v}
-          if [ "$pkg" != "$tag" ]; then
-            echo "::error::tag ${GITHUB_REF_NAME} does not match package.json version ${pkg}"
-            exit 1
-          fi
-
-      # 标签是这次发布的身份，它必须指向 main 已经带着的提交；否则一个旁支上的标签会发布
-      # 一份没有任何分支被评审过的代码。
-      - name: tag points at a commit on main
-        shell: bash
-        run: |
-          git fetch --no-tags --force origin +refs/heads/main:refs/remotes/origin/main
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
-            echo "::error::${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is not on main"
-            exit 1
-          fi
-
-      # node --check 只解析单个文件、不 import 别的文件，所以这三处任何一处语法错误都在这里失败。
       - name: syntax check every module
         shell: bash
         run: |
-          set -e
-          for f in src/*.js scripts/*.js test/*.js; do node --check "$f"; done
+          set -euo pipefail
+          for file in src/*.js scripts/*.js test/*.js; do node --check "$file"; done
 
       - name: test
         run: npm test
@@ -81,21 +97,18 @@ jobs:
       - name: check the packed artifact
         run: npm run check-pack
 
-      # 打一次包就是这次发布的身份：tarball 与它的 SHA-256 交给下游两个作业，谁都不再重新打一次。
-      - name: pack the tarball the release publishes
+      - name: pack the exact npm artifacts
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           mkdir -p dist-tarball
           npm run pack-release -- dist-tarball
-          version=$(node -p "require('./package.json').version")
+          version='${{ needs.preflight.outputs.version }}'
           tarball="dist-tarball/ligule-${version}.tgz"
           test -f "$tarball"
           sha256sum "$tarball" | tee dist-tarball/SHA256SUMS
           mkdir -p dist-tarball/platforms
-          for dir in packages/rg-*; do
-            npm pack "./$dir" --pack-destination dist-tarball/platforms
-          done
+          for directory in packages/rg-*; do npm pack "./$directory" --pack-destination dist-tarball/platforms; done
           sha256sum dist-tarball/platforms/*.tgz >> dist-tarball/SHA256SUMS
 
       - uses: actions/upload-artifact@v4
@@ -104,9 +117,50 @@ jobs:
           path: dist-tarball/
           if-no-files-found: error
 
+  registry-check:
+    name: check every registry version before publishing
+    needs: [preflight, checks]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.preflight.outputs.commit }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-tarball
+          path: dist-tarball
+
+      - name: compare all five package tarballs with the registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum --check dist-tarball/SHA256SUMS
+          version='${{ needs.preflight.outputs.version }}'
+          npm run --silent registry-version -- "ligule@${version}" "dist-tarball/ligule-${version}.tgz"
+          for file in dist-tarball/platforms/*.tgz; do
+            name=$(basename "$file" "-${version}.tgz")
+            npm run --silent registry-version -- "${name}@${version}" "$file"
+          done
+
+  approval:
+    name: release approval
+    needs: [preflight, registry-check]
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      contents: read
+    steps:
+      - run: echo "npm publication is approved to proceed"
+
   platforms:
     name: publish search packages
-    needs: checks
+    needs: [preflight, checks, registry-check, approval]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -116,41 +170,43 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: ${{ needs.preflight.outputs.commit }}
           persist-credentials: false
+
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
           registry-url: https://registry.npmjs.org
+
       - uses: actions/download-artifact@v4
         with:
           name: npm-tarball
           path: dist-tarball
+
       - name: verify checksums
         run: sha256sum --check dist-tarball/SHA256SUMS
+
       - name: publish each exact platform artifact
         shell: bash
         run: |
           set -euo pipefail
-          version=$(node -p "require('./package.json').version")
+          version='${{ needs.preflight.outputs.version }}'
           for file in dist-tarball/platforms/*.tgz; do
-            name=$(basename "$file" "-$version.tgz")
-            state=$(npm run --silent registry-version -- "$name@$version" "$file")
-            if [ "$state" = missing ]; then
-              npm publish --provenance --access public "$file"
-            fi
-            npm run --silent registry-version -- "$name@$version" "$file"
+            name=$(basename "$file" "-${version}.tgz")
+            state=$(npm run --silent registry-version -- "${name}@${version}" "$file")
+            if [ "$state" = missing ]; then npm publish --provenance --access public "$file"; fi
+            npm run --silent registry-version -- "${name}@${version}" "$file"
           done
 
-  # 装一次真的：空目录里安装上面那一份字节，依赖按声明解析，再查版本、工具数、TUI 那一条拒绝、
-  # 两种命令语法与搜索后端。check-pack 从开发树复制依赖，证明不了「声明装得出来」。
   verify:
     name: verify the packed tarball by installing it
-    needs: [checks, platforms]
+    needs: [preflight, checks, registry-check, approval, platforms]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: ${{ needs.preflight.outputs.commit }}
           persist-credentials: false
 
       - uses: actions/setup-node@v5
@@ -158,7 +214,7 @@ jobs:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
           cache: npm
 
-      - name: install
+      - name: install locked dependencies
         run: npm ci
 
       - uses: actions/download-artifact@v4
@@ -166,76 +222,61 @@ jobs:
           name: npm-tarball
           path: dist-tarball
 
-      - name: install the tarball into an empty consumer and check it
-        run: npm run verify-install -- "$PWD/dist-tarball/ligule-$(node -p "require('./package.json').version").tgz"
+      - name: install the tarball into an empty consumer
+        run: npm run verify-install -- "$PWD/dist-tarball/ligule-${{ needs.preflight.outputs.version }}.tgz"
 
   npm:
     name: publish to npm
-    needs: [checks, platforms, verify]
+    needs: [preflight, checks, registry-check, approval, platforms, verify]
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write # npm provenance / Trusted Publishing（OIDC）。
+      id-token: write
     env:
-      # 读一次，让下面两个发布步骤互斥。
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-      # setup-node 写的 .npmrc 按这个变量取凭据；配了 NPM_TOKEN 时全部包都用它，没配就走 OIDC。
       NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.preflight.outputs.commit }}
+          persist-credentials: false
 
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
           registry-url: https://registry.npmjs.org
 
-      # 发的是验过的那一份字节：作业自己不打第二份包，从 artifact 里取下来直接发。
       - uses: actions/download-artifact@v4
         with:
           name: npm-tarball
           path: dist-tarball
 
-      - name: take the tarball identity from the artifact
+      - name: verify tarball identity
         id: tarball
         shell: bash
         run: |
+          set -euo pipefail
           sha256sum --check dist-tarball/SHA256SUMS
-          file="dist-tarball/ligule-$(node -p "require('./package.json').version").tgz"
+          file="dist-tarball/ligule-${{ needs.preflight.outputs.version }}.tgz"
           echo "path=$file" >> "$GITHUB_OUTPUT"
-          state=$(npm run --silent registry-version -- "ligule@$(node -p "require('./package.json').version")" "$file")
+          state=$(npm run --silent registry-version -- "ligule@${{ needs.preflight.outputs.version }}" "$file")
           echo "state=$state" >> "$GITHUB_OUTPUT"
 
-      - name: publish to npm (token)
+      - name: publish with token
         if: steps.tarball.outputs.state == 'missing' && env.NPM_TOKEN != ''
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --provenance --access public "${{ steps.tarball.outputs.path }}"
 
-      - name: publish to npm (trusted publishing)
+      - name: publish with trusted publishing
         if: steps.tarball.outputs.state == 'missing' && env.NPM_TOKEN == ''
         run: npm publish --provenance --access public "${{ steps.tarball.outputs.path }}"
 
-  release:
-    name: create GitHub release
-    needs: [checks, verify, npm]
-    runs-on: ubuntu-latest
+  release-notes:
+    name: create or refresh the draft Release
+    needs: [preflight, npm]
     permissions:
-      contents: write # 建对应的 GitHub Release。
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      # 四行桌面产物由 `ci.yml` 的那一矩阵构出来并上传成检查附件，这条流水线不把任何附件挂到 Release 上，所以只以 draft 建出来：
-      # 缺附件的那一份不能算完整交付，公开与否由人在验收之后点。
-      - name: GitHub release (idempotent, kept draft)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
-            echo "::warning::release $GITHUB_REF_NAME already exists - refreshing its notes"
-            gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --draft=true --generate-notes
-          else
-            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --draft=true --generate-notes
-          fi
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.preflight.outputs.tag }}
