@@ -36,7 +36,7 @@ AppImage is built on `ubuntu-22.04`. Installer formats are set in `desktop/src-t
 
 | Package | Contents | Version |
 |---|---|---|
-| `ligule` | Kernel, CLI, TUI, Chinese and English guides; uses `@vscode/ripgrep@1.18.0` for content search | `0.0.2` |
+| `ligule` | Kernel, CLI, TUI, Chinese and English guides; uses `@vscode/ripgrep@1.18.0` for content search | `0.0.3` |
 
 The `@vscode/ripgrep` JavaScript wrapper selects ripgrep through platform-specific optional dependencies. npm installs only the matching binary on Windows x64, Linux x64, macOS arm64, or macOS x64. Ligule publishes only its main package and does not maintain separate ripgrep packages.
 

@@ -36,7 +36,7 @@ AppImage 在 `ubuntu-22.04` 上构建。各平台的安装包类型由 `desktop/
 
 | 包 | 内容 | 版本 |
 |---|---|---|
-| `ligule` | 内核、CLI、终端界面和中英文手册；依赖 `@vscode/ripgrep@1.18.0` 提供内容检索 | `0.0.2` |
+| `ligule` | 内核、CLI、终端界面和中英文手册；依赖 `@vscode/ripgrep@1.18.0` 提供内容检索 | `0.0.3` |
 
 `@vscode/ripgrep` 的 JavaScript wrapper 通过平台可选依赖选择 ripgrep；npm 在 Windows x64、Linux x64、macOS arm64 和 macOS x64 上只安装对应平台的二进制包。Ligule 只发布主包，不维护独立的 ripgrep 平台包。
 
