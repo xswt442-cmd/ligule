@@ -143,7 +143,7 @@ jobs:
           cat > "$RUNNER_TEMP/release-pr.md" <<EOF
           ## Version preparation
 
-          - Updates all runtime, desktop, and platform package versions to \`v${VERSION}\`.
+          - Updates the main package, desktop manifests, and bilingual release checklist to \`v${VERSION}\`.
           - Promotes the bilingual \`[Unreleased]\` entry in \`CHANGELOG.md\` to this version.
           - Full four-platform CI passed for this exact commit: ${CI_URL}
           - Desktop artifacts are available from that CI run for platform acceptance.

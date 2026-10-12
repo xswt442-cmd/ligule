@@ -145,6 +145,8 @@ test('release workflows separate version PRs, tag creation, npm publication, and
   const prepareCommands = tagWorkflow.jobs.prepare.steps.map((step) => step.run ?? '').join('\n');
   const tagCommands = tagWorkflow.jobs['create-tag'].steps.map((step) => step.run ?? '').join('\n');
   assert.match(prepareCommands, /gh pr create --base main/);
+  assert.match(prepareCommands, /Updates the main package, desktop manifests, and bilingual release checklist/);
+  assert.doesNotMatch(prepareCommands, /platform package versions/);
   assert.match(prepareCommands, /git add[^\n]*docs\/development\/RELEASE\.zh-cn\.md[^\n]*docs\/development\/RELEASE\.en\.md/);
   assert.doesNotMatch(prepareCommands, /npm test|npm run check-pack/);
   assert.match(tagCommands, /gh run list --workflow ci\.yml --branch main --event push --commit/);
