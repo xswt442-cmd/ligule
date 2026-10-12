@@ -4,16 +4,16 @@
 
 This document tracks desktop installer and npm package targets, artifacts, system requirements, and installation verification.
 
-> **Release status: not public.** The repository version is `0.0.2`. Windows x64 installation and launch have been tested; Linux and both macOS targets still need hardware validation.
+> **Release status: public.** `v0.0.3` is available on [GitHub Releases](https://github.com/xswt442-cmd/ligule/releases/tag/v0.0.3) and [npm](https://www.npmjs.com/package/ligule). CI checked the bundled Node and ripgrep runtime in all four platform packages; first launch, tray, and notification behavior on Linux and both macOS targets still need hardware validation.
 
 ## Desktop installers
 
 | Target | Installer | System requirement | Installation verification |
 |---|---|---|---|
-| Windows x64 | NSIS `.exe` | Windows 10; WebView2 runtime required | Installation, a real model request, exit, and uninstall tested; verify release attachments against the final build |
-| Linux x64 | `.AppImage` and `.deb` | Ubuntu 22.04 and Debian 12 are declared targets | Awaiting installation and launch checks on both systems |
-| macOS Apple Silicon | `.dmg` | macOS 13.5 or newer | Awaiting installation and launch check on Apple Silicon hardware |
-| macOS Intel | `.dmg` | macOS 13.5 or newer | Awaiting installation and launch check on Intel hardware |
+| Windows x64 | NSIS `.exe` | Windows 10; WebView2 runtime required | Installation, a real model request, exit, and uninstall tested; v0.0.3 installer installed in CI and passed its bundled runtime check |
+| Linux x64 | `.AppImage` and `.deb` | Ubuntu 22.04 and Debian 12 are declared targets | CI checked runtimes in both packages; installation and first launch on the actual systems remain unverified |
+| macOS Apple Silicon | `.dmg` | macOS 13.5 or newer | CI checked the DMG and bundled runtime; first launch on Apple Silicon hardware remains unverified |
+| macOS Intel | `.dmg` | macOS 13.5 or newer | CI checked the DMG and bundled runtime; first launch on Intel hardware remains unverified |
 
 ### Bundled Node.js runtimes
 

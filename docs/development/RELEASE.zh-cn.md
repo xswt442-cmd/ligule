@@ -4,16 +4,16 @@
 
 本文列出桌面安装包和 npm 包的目标、产物、系统要求及安装验证状态。
 
-> **发行状态：尚未公开。** 仓库版本为 `0.0.2`。Windows x64 已实测安装与运行；Linux 和两个 macOS 目标仍待实机验收。
+> **发行状态：已公开。** `v0.0.3` 已发布到 [GitHub Releases](https://github.com/xswt442-cmd/ligule/releases/tag/v0.0.3) 与 [npm](https://www.npmjs.com/package/ligule)。四个平台的 CI 均已检查安装包内的 Node 与 ripgrep；Linux 与两个 macOS 目标的真实系统首次启动、托盘和通知行为仍待实机验收。
 
 ## 桌面安装包
 
 | 目标 | 安装包 | 系统要求 | 安装验证 |
 |---|---|---|---|
-| Windows x64 | NSIS `.exe` | Windows 10；需要 WebView2 运行时 | 已实测安装、真实模型请求、退出和卸载；发行附件按最终构建复验 |
-| Linux x64 | `.AppImage` 与 `.deb` | 声明支持 Ubuntu 22.04 与 Debian 12 | 待在两种系统安装并启动验证 |
-| macOS Apple Silicon | `.dmg` | macOS 13.5 或更新版本 | 待在 Apple Silicon 实机安装并启动验证 |
-| macOS Intel | `.dmg` | macOS 13.5 或更新版本 | 待在 Intel 实机安装并启动验证 |
+| Windows x64 | NSIS `.exe` | Windows 10；需要 WebView2 运行时 | 已实测安装、真实模型请求、退出和卸载；v0.0.3 安装包已在 CI 安装并通过随包运行时检查 |
+| Linux x64 | `.AppImage` 与 `.deb` | 声明支持 Ubuntu 22.04 与 Debian 12 | CI 已检查两种包中的运行时；真实系统安装与首次启动仍待验证 |
+| macOS Apple Silicon | `.dmg` | macOS 13.5 或更新版本 | CI 已检查 DMG 与随包运行时；Apple Silicon 实机首次启动仍待验证 |
+| macOS Intel | `.dmg` | macOS 13.5 或更新版本 | CI 已检查 DMG 与随包运行时；Intel 实机首次启动仍待验证 |
 
 ### 随包 Node.js 运行时
 
