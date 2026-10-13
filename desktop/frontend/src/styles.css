@@ -582,6 +582,9 @@ button:disabled {
   color: var(--bad);
 }
 
+.turn-explanation { margin: 6px 0; color: var(--fg-muted); font-size: var(--text-sm); line-height: 1.5; }
+.turn-recovery { margin: 2px 0 6px; font-size: var(--text-sm); }
+
 /* 工作步骤展示的四个档位在读进来的那些行上筛（`shownIn`）：虚拟视口要量每一行的高度，藏着不画的行只会量到零（D32、D90、U48）。 */
 
 /* ---------- 工具卡片（D94）---------- */

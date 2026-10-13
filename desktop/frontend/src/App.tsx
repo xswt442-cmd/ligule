@@ -340,6 +340,7 @@ export function App({ transport }: { transport: Transport }) {
   const dockEdits = useRef<string[]>([]);
   dockEdits.current = holdReasons(dockGate);
   const [settingsSection, setSettingsSection] = useState<'general' | 'model' | 'keys' | 'notifications'>('general');
+  const openModelSettings = useCallback(() => { setSettingsSection('model'); setSettingsOpen(true); }, []);
   const [notificationProblem, setNotificationProblem] = useState<string | null>(null);
   const [diagnosticLogs, setDiagnosticLogs] = useState<string[]>([]);
   const [notificationDestination, setNotificationDestination] = useState<NotificationTarget | null>(null);
@@ -1569,6 +1570,7 @@ export function App({ transport }: { transport: Transport }) {
             verbosity={verbosity}
             flash={row.seq !== undefined && row.seq === flash}
             branch={row.kind === 'round' ? (at) => void branchFrom(at) : undefined}
+            onModels={row.kind === 'round' ? openModelSettings : undefined}
           />}
           // 上翻、补页和定位期间关闭自动跟随，保留当前阅读位置。
           followOutput={!olderLoading && pinned && wanted === null && flash === null ? 'auto' : false}
@@ -1757,7 +1759,7 @@ export function App({ transport }: { transport: Transport }) {
               if (sessionId === null) { patch({ newSelections: { ...settings.newSelections, [projectRoot]: selection } }); return; }
               await client.call('model.select', { sessionId, ...selection }, 15_000);
               await refreshStatus(sessionId);
-            }} onManage={() => { setSettingsSection('model'); setSettingsOpen(true); }} />
+            }} onManage={openModelSettings} />
           <Popover.Root open={sessionMenuOpen} onOpenChange={setSessionMenuOpen}>
             <Popover.Trigger asChild><button type="button" className="composer-choice" disabled={sessionId === null} title={t('工具与审批', 'Tools and approvals')}><span>{status?.mode ?? t('工具模式', 'Tool mode')}</span><Icon name="fold" size={12} /></button></Popover.Trigger>
             <SessionMenu status={status} onSetMode={(name) => void setMode(name)} onSetPolicy={(mode) => void setPolicy(mode)} />
