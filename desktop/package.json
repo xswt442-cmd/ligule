@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.0.3",
   "description": "Ligule Electron desktop application",
+  "homepage": "https://github.com/xswt442-cmd/ligule#readme",
   "main": "electron/dist/main.js",
   "scripts": {
     "dev": "node ./dev.mjs",
