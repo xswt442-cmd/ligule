@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing, reviewed release tag on main (for example v0.0.2)
+        description: Existing reviewed CLI tag on main (for example cli-v0.0.4)
         type: string
         required: true
 
@@ -22,6 +22,9 @@ jobs:
   preflight:
     name: validate the requested tag
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
     outputs:
       tag: ${{ steps.identity.outputs.tag }}
       version: ${{ steps.identity.outputs.version }}
@@ -36,13 +39,14 @@ jobs:
       - name: validate tag identity and main ancestry
         id: identity
         env:
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
           test "$GITHUB_REF" = refs/heads/main
-          if ! [[ "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "::error::tag must use vX.Y.Z form"
+          if ! [[ "$TAG" =~ ^cli-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::npm publication accepts only cli-vX.Y.Z tags"
             exit 1
           fi
           git fetch --no-tags --force origin +refs/heads/main:refs/remotes/origin/main
@@ -52,7 +56,16 @@ jobs:
             echo "::error::${TAG} does not point to a commit on main"
             exit 1
           fi
-          version=${TAG#v}
+          run_json=$(gh run list --workflow ci.yml --branch main --event push --commit "$commit" --limit 100 --json databaseId,headSha,status,conclusion,createdAt \
+            | jq -c --arg commit "$commit" '[.[] | select(.headSha == $commit)] | sort_by(.createdAt) | reverse | .[0] // empty')
+          if [ -z "$run_json" ]; then echo "::error::no main CI run exists for $commit"; exit 1; fi
+          run_id=$(jq -r .databaseId <<< "$run_json")
+          gh run watch "$run_id" --exit-status
+          ci_result=$(gh run view "$run_id" --json headSha,conclusion)
+          if [ "$(jq -r .headSha <<< "$ci_result")" != "$commit" ] || [ "$(jq -r .conclusion <<< "$ci_result")" != success ]; then
+            echo "::error::main CI did not pass for the exact CLI tag SHA"; exit 1
+          fi
+          version=${TAG#cli-v}
           package_version=$(git show "${TAG}:package.json" | node -e "let input='';process.stdin.on('data',chunk=>input+=chunk).on('end',()=>process.stdout.write(JSON.parse(input).version))")
           if [ "$package_version" != "$version" ]; then
             echo "::error::${TAG} does not match package.json version ${package_version}"
@@ -62,6 +75,19 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - name: require configured npm-publish reviewers
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          environment=$(gh api "repos/${GITHUB_REPOSITORY}/environments/npm-publish")
+          if ! jq -e '[.protection_rules[]? | select(.type == "required_reviewers" and (.reviewers | length > 0))] | length > 0' <<< "$environment" >/dev/null; then
+            echo "::error::npm-publish must have at least one required reviewer configured before npm publication"
+            exit 1
+          fi
+          echo "npm-publish required reviewers are configured." >> "$GITHUB_STEP_SUMMARY"
 
   checks:
     name: release checks
@@ -74,16 +100,22 @@ jobs:
           ref: ${{ needs.preflight.outputs.commit }}
           persist-credentials: false
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.9.1
+          run_install: false
+
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
-          cache: npm
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
 
-      - name: install locked dependencies
-        run: npm ci
+      - name: install frozen workspace dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: test
-        run: npm test
+        run: pnpm --filter ligule run test
 
       - name: syntax check compiled modules and checks
         shell: bash
@@ -93,14 +125,14 @@ jobs:
           for file in scripts/*.js test/*.js; do node --check "$file"; done
 
       - name: check the packed artifact
-        run: npm run check-pack
+        run: pnpm --filter ligule run check-pack
 
       - name: pack the exact npm artifacts
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist-tarball
-          npm run pack-release -- dist-tarball
+          pnpm --filter ligule run pack-release -- dist-tarball
           version='${{ needs.preflight.outputs.version }}'
           tarball="dist-tarball/ligule-${version}.tgz"
           test -f "$tarball"
@@ -116,15 +148,25 @@ jobs:
     name: check the main package version before publishing
     needs: [preflight, checks]
     runs-on: ubuntu-latest
+    outputs:
+      state: ${{ steps.registry.outputs.state }}
     steps:
       - uses: actions/checkout@v5
         with:
           ref: ${{ needs.preflight.outputs.commit }}
           persist-credentials: false
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.9.1
+          run_install: false
+
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
+
+      - name: install frozen workspace dependencies for registry helper
+        run: pnpm install --frozen-lockfile
 
       - uses: actions/download-artifact@v4
         with:
@@ -132,12 +174,14 @@ jobs:
           path: dist-tarball
 
       - name: compare the package tarball with the registry
+        id: registry
         shell: bash
         run: |
           set -euo pipefail
           sha256sum --check dist-tarball/SHA256SUMS
           version='${{ needs.preflight.outputs.version }}'
-          npm run --silent registry-version -- "ligule@${version}" "dist-tarball/ligule-${version}.tgz"
+          state=$(pnpm --filter ligule run --silent registry-version -- "ligule@${version}" "dist-tarball/ligule-${version}.tgz")
+          echo "state=$state" >> "$GITHUB_OUTPUT"
 
   approval:
     name: release approval
@@ -160,16 +204,22 @@ jobs:
           ref: ${{ needs.preflight.outputs.commit }}
           persist-credentials: false
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.9.1
+          run_install: false
+
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
-          cache: npm
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
 
-      - name: install locked dependencies
-        run: npm ci
+      - name: install frozen workspace dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: build the host entry points for verification
-        run: npm run build
+        run: pnpm --filter ligule run build
 
       - uses: actions/download-artifact@v4
         with:
@@ -177,7 +227,7 @@ jobs:
           path: dist-tarball
 
       - name: install the tarball into an empty consumer
-        run: npm run verify-install -- "$PWD/dist-tarball/ligule-${{ needs.preflight.outputs.version }}.tgz"
+        run: pnpm --filter ligule run verify-install -- "$PWD/dist-tarball/ligule-${{ needs.preflight.outputs.version }}.tgz"
 
   npm:
     name: publish to npm
@@ -213,18 +263,8 @@ jobs:
           sha256sum --check dist-tarball/SHA256SUMS
           file="dist-tarball/ligule-${{ needs.preflight.outputs.version }}.tgz"
           echo "path=./$file" >> "$GITHUB_OUTPUT"
-          state=$(npm run --silent registry-version -- "ligule@${{ needs.preflight.outputs.version }}" "$file")
-          echo "state=$state" >> "$GITHUB_OUTPUT"
+          echo "state=${{ needs.registry-check.outputs.state }}" >> "$GITHUB_OUTPUT"
 
       - name: publish with trusted publishing
-        if: steps.tarball.outputs.state == 'missing'
+        if: needs.registry-check.outputs.state == 'missing'
         run: npm publish --provenance --access public "${{ steps.tarball.outputs.path }}"
-
-  release-notes:
-    name: create or refresh the draft Release
-    needs: [preflight, npm]
-    permissions:
-      contents: write
-    uses: ./.github/workflows/release.yml
-    with:
-      tag: ${{ needs.preflight.outputs.tag }}

@@ -152,13 +152,13 @@ test('README 有使用手册、架构和贡献说明入口', () => {
   assert.ok(manifest.files.includes('CHANGELOG.md'), 'the version history must be included in the npm package');
 });
 
-test('the bilingual changelog section generates the matching release note body', () => {
+test('the CLI bilingual changelog section generates CLI release notes without Desktop assets', () => {
   const changelog = readFileSync(join(repoRoot, 'CHANGELOG.md'), 'utf8');
-  const notes = releaseNotesForTag(changelog, 'v0.0.1');
+  const notes = releaseNotesForTag(repoRoot, 'cli-v0.0.1');
   assert.match(changelog, /^## \[Unreleased\]/m);
   assert.match(notes, /初始公开版本/);
   assert.match(notes, /Initial public release/);
-  assert.match(notes, /SHA-256/);
+  assert.doesNotMatch(notes, /SHA-256|Downloads/);
   assert.doesNotMatch(notes, /运行 `ligule`/);
 });
 

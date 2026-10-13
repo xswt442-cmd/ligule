@@ -1,8 +1,8 @@
 # 更新记录 / Changelog
 
-本文件记录每个版本中面向使用者的重要变化。中英文内容位于同一版本条目；GitHub Release 正文从对应条目生成。
+本文件只记录 CLI/npm 产品中面向使用者的重要变化。桌面安装包和应用变化单独记录在 `desktop/CHANGELOG.md`。
 
-This file records important user-visible changes for each release. Chinese and English notes share one version entry; the GitHub Release body is generated from that entry.
+This file records user-visible changes for the CLI/npm product only. Desktop installer and application changes are recorded separately in `desktop/CHANGELOG.md`.
 
 ## [Unreleased]
 
