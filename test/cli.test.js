@@ -32,9 +32,9 @@ test('tools prints the members of the minimal manifest plus the first-party opti
 test('call runs a tool in the same process and prints what it returned', () => {
   // 边界指到 src：默认边界是整个仓库，那一次遍历会走进 testplace/，
   // 而并行跑的测试正在那里建删临时目录，扫到一半目录就不在了。
-  const found = capture('call', 'find', JSON.stringify({ pattern: '*.js', path: 'src' }), '--config', 'boundary = "src"');
+  const found = capture('call', 'find', JSON.stringify({ pattern: '*.ts', path: 'src' }), '--config', 'boundary = "src"');
   assert.ok(found.ok, found.stderr);
-  assert.match(found.stdout, /^cli\.js$/m);
+  assert.match(found.stdout, /^cli\.ts$/m);
 
   const read = capture('call', 'read', JSON.stringify({ path: 'package.json' }));
   assert.ok(read.ok);

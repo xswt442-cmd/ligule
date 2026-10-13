@@ -1,5 +1,5 @@
 // 会话记录 → 界面行的投影。记录是事实源（I5），这里只画已经落盘的那一份与流式期间的那半截；
-// 后端的记录形状在 `src/session/session.js`，界面这一侧不认识别的。
+// 后端的记录形状在 `src/session/session.ts`，界面这一侧不认识别的。
 // 卡片上每一格的取值规则写在 D94：抬头说的是这一件做成了什么，正文只给内容，不给信封。
 
 export type ToolCall = { id: string; name: string; args?: Record<string, unknown> };
@@ -27,7 +27,7 @@ export type Record_ = {
   callId?: string;
   // 这一次执行花了多久，由内核记在事件外层（第 66 步）。没执行的调用与恢复补写的那一条没有这一格。
   durationMs?: number;
-  // 工具那一条记录留着交进去的参数（`src/kernel/kernel.js` 的 call），派生支线那一格要说得出交的是哪件事。
+  // 工具那一条记录留着交进去的参数（`src/kernel/kernel.ts` 的 call），派生支线那一格要说得出交的是哪件事。
   args?: Record<string, unknown>;
   result?: {
     kind?: string;

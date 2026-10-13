@@ -73,6 +73,7 @@
     "@types/cross-spawn": "^6.0.6",
     "@types/node": "^24.19.1",
     "@types/proper-lockfile": "^4.1.4",
+    "@types/react": "^19.3.0",
     "typescript": "^5.9.3"
   }
 }

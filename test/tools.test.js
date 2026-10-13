@@ -289,6 +289,15 @@ test('a relative ripgrepPath is read against the process directory, not the boun
   });
 });
 
+test('a ripgrepPath that is not text is refused before probing a backend', async () => {
+  await withWorkspace(async (workspace) => {
+    await assert.rejects(
+      searchTool.run({ pattern: NEEDLE }, context(workspace, undefined, { ripgrepPath: 17 })),
+      (error) => error.code === 'search_backend_failed' && error.detail === 'ripgrepPath must be a string',
+    );
+  });
+});
+
 test('a configured ripgrep that cannot run is reported and search still returns hits', async () => {
   await withWorkspace(async (workspace) => {
     const { logged, context: searchContext } = recordingContext(workspace, { ripgrepPath: join(workspace, 'no-such-rg') });

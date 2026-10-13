@@ -183,6 +183,10 @@ export function defaultSpecs(): Record<TerminalAction, string> {
 // 换的时机只有一处（`applyOverrides`），所以它是一份要改就整份改的表，不是散在各调用点的开关。
 export const CURRENT = defaultSpecs();
 
+function isTerminalAction(value: string): value is TerminalAction {
+  return Object.hasOwn(KEYMAP, value);
+}
+
 /** 一串人写的键名（`Ctrl+Shift+K`、`enter`）读成规范写法；认不出来交回 null，不猜。 */
 export function parseSpec(text: string): string | null {
   const parts = text.trim().toLowerCase().split('+').map((part) => part.trim());
@@ -197,14 +201,14 @@ export function parseSpec(text: string): string | null {
 }
 
 /** 换上个人那一份覆盖：读不懂的键名与表里没有的动作名都交回去，有效的那一些照样落下来。 */
-export function applyOverrides(overrides: Record<string, string>): { readonly applied: string[]; readonly refused: string[] } {
-  const applied: string[] = [];
+export function applyOverrides(overrides: Record<string, string>): { readonly applied: TerminalAction[]; readonly refused: string[] } {
+  const applied: TerminalAction[] = [];
   const refused: string[] = [];
   for (const [action, text] of Object.entries(overrides)) {
-    if (!Object.prototype.hasOwnProperty.call(CURRENT, action)) { refused.push(`${action}（表里没有这一个动作）`); continue; }
+    if (!isTerminalAction(action)) { refused.push(`${action}（表里没有这一个动作）`); continue; }
     const spec = parseSpec(text);
     if (spec === null) { refused.push(`${action}: ${text}`); continue; }
-    CURRENT[action as TerminalAction] = spec;
+    CURRENT[action] = spec;
     applied.push(action);
   }
   return { applied, refused };

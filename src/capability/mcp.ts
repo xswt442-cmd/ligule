@@ -21,6 +21,14 @@ export interface McpServerConfig {
   cwd?: unknown;
 }
 
+export interface NormalizedMcpServerConfig {
+  readonly name: string;
+  readonly command: string;
+  readonly args: string[];
+  readonly env: Record<string, string>;
+  readonly cwd: string | undefined;
+}
+
 export interface ToolDefinition {
   name: string;
   description: string;
@@ -129,7 +137,7 @@ export function validateToolArguments(args: unknown, schema: Record<string, unkn
 }
 
 // 一份 MCP 配置折成要连的服务器列表：名字来自配置里的键，顺序按名字排，这样同一份文件两次装载得到同一张表。
-export function mcpServerConfigs(config: { mcp?: { servers?: unknown } }, environment: NodeJS.ProcessEnv = process.env) {
+export function mcpServerConfigs(config: { mcp?: { servers?: unknown } }, environment: NodeJS.ProcessEnv = process.env): NormalizedMcpServerConfig[] {
   const servers = (config.mcp?.servers ?? {}) as Record<string, McpServerConfig>;
   return Object.keys(servers).sort().map((name) => {
     const entry = servers[name];
@@ -161,7 +169,7 @@ async function closeClient(client: Client): Promise<void> {
 }
 
 // 连上去、读完定义之后留在进程里：一台服务器一条子进程，第一版不重连也不并发起多份。
-export async function connectServer(settings: ReturnType<typeof mcpServerConfigs>[number], signal?: AbortSignal): Promise<ConnectedServer> {
+export async function connectServer(settings: NormalizedMcpServerConfig, signal?: AbortSignal): Promise<ConnectedServer> {
   const transport = new StdioClientTransport({
     command: settings.command,
     args: settings.args,
@@ -190,7 +198,7 @@ export interface McpRegistry {
 }
 
 // 注册表按名字惰性连接：没被用到的服务器不起子进程，一条 `ligule tools` 也不该带走十个进程。
-export function createMcpRegistry(configs: ReturnType<typeof mcpServerConfigs>): McpRegistry {
+export function createMcpRegistry(configs: NormalizedMcpServerConfig[]): McpRegistry {
   const connected = new Map<string, ConnectedServer>();
   const pending = new Map<string, Promise<ConnectedServer>>();
   const lifetime = new AbortController();

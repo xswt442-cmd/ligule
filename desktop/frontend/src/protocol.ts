@@ -1,4 +1,4 @@
-// 客户端协议这一层的界面侧读法（D30、D33）。方法与参数模式的定义在后端（`src/host/protocol.js`），
+// 客户端协议这一层的界面侧读法（D30、D33）。方法与参数模式的定义在后端（`src/host/protocol.ts`），
 // 这里不复制那张表，只按帧的形状收发：请求带 id 与 method，答复带同一个 id，通报带 notify。
 // 传输由外面交进来（桌面壳走 Tauri 的命令与事件），这一层不认识载体。
 import type { NotificationBridge } from './notifications';

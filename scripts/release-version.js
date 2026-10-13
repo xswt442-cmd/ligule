@@ -169,7 +169,7 @@ export function versionFileUpdates(repositoryRoot, requestedVersion) {
   addJson('desktop/frontend/package-lock.json', { lock: true });
   addJson('desktop/src-tauri/tauri.conf.json', { config: true });
 
-  const sourcePath = join(repositoryRoot, 'src', 'version.js');
+  const sourcePath = join(repositoryRoot, 'src', 'version.ts');
   updates.set(sourcePath, updateSourceVersion(sourcePath, currentVersion, version));
 
   for (const path of ['docs/development/RELEASE.zh-cn.md', 'docs/development/RELEASE.en.md']) {
