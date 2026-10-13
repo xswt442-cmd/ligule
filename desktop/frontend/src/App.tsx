@@ -17,6 +17,7 @@ import { SessionMenu } from './components/SessionMenu';
 import { SessionActions } from './components/SessionActions';
 import { DiagnosticsPanel } from './components/DiagnosticsPanel';
 import { ModelPicker } from './components/ModelPicker';
+import { WorkspacePicker } from './components/WorkspacePicker';
 import { ExportPanel } from './components/ExportPanel';
 import { HelpPanel } from './components/HelpPanel';
 import { UsageMeter } from './components/UsageMeter';
@@ -928,7 +929,7 @@ export function App({ transport }: { transport: Transport }) {
       }
       const params = createCallOf(named, current, landing);
       await prefsSettled.current;
-      if (openRequest.current !== request) return;
+      if (openRequest.current !== request) return false;
       newParameters.current = params;
       opening.current = null;
       active.current = null;
@@ -947,8 +948,10 @@ export function App({ transport }: { transport: Transport }) {
       setWalk(-1);
       setSettings((current) => ({ ...current, lastSession: null }));
       composerRef.current?.focus();
+      return true;
     } catch (error) {
       setRows((current) => [...current, metaRow('error', `无法新建会话：${code(error)}`, `Could not create a conversation: ${code(error)}`)]);
+      return false;
     } finally {
       if (openRequest.current === request) setReading(false);
     }
@@ -1634,6 +1637,14 @@ export function App({ transport }: { transport: Transport }) {
       </div>}
 
       <footer className="composer">
+        {sessionId === null && <WorkspacePicker client={client} directory={projectRoot} revision={sessionsRevision}
+          disabled={closing || reading || starting || !settingsReady}
+          onSelect={async (root) => {
+            const text = draft;
+            if (!await newSession(root)) throw new Error('workspace_selection_cancelled');
+            setDraft(text);
+            patch({ projects: [...new Set([...settings.projects, root])], hiddenProjects: settings.hiddenProjects.filter(item => item !== root) });
+          }} />}
         {queue.items.length === 0 ? null : (
           <div className="queue">
             <div className="queue-head">

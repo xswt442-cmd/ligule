@@ -2301,6 +2301,21 @@ button.pill:hover {
 .composer-choice { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 45%; padding: 2px 6px; background: transparent; border-color: transparent; font-size: var(--text-sm); }
 .composer-choice span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-policy { font-size: var(--text-xs); color: var(--fg-muted); }
+.new-workspace { padding: 0 4px; }
+.workspace-choice { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 2px 6px; background: transparent; border-color: transparent; font-size: var(--text-sm); }
+.workspace-choice > span { overflow: hidden; text-overflow: ellipsis; }
+.workspace-picker { z-index: 41; display: grid; gap: 10px; width: min(380px, 90vw); max-height: 65vh; overflow: auto; padding: 14px; background: var(--bg-raised); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow-pop); font-size: var(--text-sm); }
+.workspace-picker > p { margin: 0; color: var(--fg-muted); }
+.workspace-options { display: grid; gap: 2px; min-width: 0; max-height: 30vh; overflow: auto; }
+.workspace-options > button { display: flex; align-items: center; gap: 8px; padding: 6px; text-align: start; background: transparent; border-color: transparent; }
+.workspace-options > button[aria-selected="true"] { background: var(--bg-sunk); }
+.workspace-options > button > span { display: grid; flex: 1; min-width: 0; }
+.workspace-options strong { font-weight: 500; }
+.workspace-options small { color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; }
+.workspace-picker form { display: grid; gap: 6px; border-top: 1px solid var(--line); padding-top: 10px; }
+.workspace-picker input { min-width: 0; width: 100%; }
+.workspace-picker-error { display: grid; gap: 6px; color: var(--bad); }
+.workspace-picker-error code { overflow-wrap: anywhere; }
 .running-label { display: flex; align-items: center; gap: 6px; font-size: var(--text-xs); color: var(--fg-muted); white-space: nowrap; }
 .status-dot, .unread-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
 .status-dot { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 12%, transparent); }
