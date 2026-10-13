@@ -17,12 +17,12 @@ This document tracks desktop installer and npm package targets, artifacts, syste
 
 ### Bundled Node.js runtimes
 
-| Target | Rust target | Node archive | SHA-256 |
+| Target | Node target | Node archive | SHA-256 |
 |---|---|---|---|
-| Windows x64 | `x86_64-pc-windows-msvc` | `node-v24.21.0-win-x64.zip` | `158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541` |
-| Linux x64 | `x86_64-unknown-linux-gnu` | `node-v24.21.0-linux-x64.tar.xz` | `fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6` |
-| macOS Apple Silicon | `aarch64-apple-darwin` | `node-v24.21.0-darwin-arm64.tar.gz` | `bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057` |
-| macOS Intel | `x86_64-apple-darwin` | `node-v24.21.0-darwin-x64.tar.gz` | `1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e8097` |
+| Windows x64 | `win32-x64` | `node-v24.21.0-win-x64.zip` | `158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541` |
+| Linux x64 | `linux-x64` | `node-v24.21.0-linux-x64.tar.xz` | `fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6` |
+| macOS Apple Silicon | `darwin-arm64` | `node-v24.21.0-darwin-arm64.tar.gz` | `bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057` |
+| macOS Intel | `darwin-x64` | `node-v24.21.0-darwin-x64.tar.gz` | `1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e8097` |
 
 GitHub Actions builds them on `windows-latest`, `ubuntu-22.04`, `macos-15`, and `macos-15-intel` runners, respectively.
 
@@ -30,7 +30,7 @@ The four desktop targets are built by the Windows, Linux, Apple Silicon, and Int
 
 Node.js v24.21.0 lists Linux x64 with a minimum Linux 4.18 and glibc 2.28 baseline. Its platform list includes arm64 and x64 targets on macOS 13.5. Ligule declares Ubuntu 22.04 and Debian 12 as Linux targets; a build runner version describes the build environment and does not replace installation checks on those systems. See the [Node.js v24.21.0 platform requirements](https://github.com/nodejs/node/blob/v24.21.0/BUILDING.md#platform-list).
 
-AppImage is built on `ubuntu-22.04`. Installer formats are set in `desktop/src-tauri/tauri.<platform>.conf.json`. macOS packages use an ad-hoc signature for the matching architecture and are not notarized.
+AppImage is built on `ubuntu-22.04`. Windows NSIS, Linux AppImage/deb, and macOS DMG targets are configured in `desktop/electron-builder.cjs`. macOS packages use an ad-hoc signature for the matching architecture and are not notarized.
 
 ## npm packages
 

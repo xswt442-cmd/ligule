@@ -4,7 +4,7 @@ These rules apply throughout the repository. Read the nearest local `AGENTS.md` 
 
 ## Ownership and dependencies
 
-- Node.js owns all business logic. CLI and TUI use the Node Host in process; the desktop Rust shell manages the process and windows and forwards protocol frames without interpreting them.
+- Node.js owns all business logic. CLI and TUI use the Node Host in process; Electron Main manages windows and the Host process while forwarding protocol frames without interpreting them.
 - The Host assembles the kernel from plugins and owns project environments, model providers, policy, and open sessions. The kernel has no built-in tools; registered tools call through kernel validation and policy.
 - `src/kernel/` must not depend on client adapters. Put environment-sensitive operations under `src/capability/`; user-facing tool contracts belong under `src/tools/`. Keep protocol transport under `src/host/`.
 - A workspace's `workspaceRoot` identifies its project environment and session ownership. `boundary` limits filesystem tools. They may differ and must remain separate.
@@ -18,11 +18,11 @@ These rules apply throughout the repository. Read the nearest local `AGENTS.md` 
 - A tool result, refusal, or failure must leave a result for each dispatched call in the session. Keep approval, question, cancellation, and event routing scoped to the originating session and request.
 - Project configuration is untrusted input. Keep the merge protection against `__proto__`; tools receive the frozen configuration snapshot and injected logger, and must not write directly to process output.
 - If command syntax cannot be parsed or its required backend is unavailable, fail closed with the existing error or approval path. Never approve a command from an incomplete parse.
-- The Rust shell is transport and process lifecycle only. Do not add business rules, session ownership, or Host protocol interpretation there.
+- Electron Main and Preload own desktop transport, native interactions, and process lifecycle. Keep session ownership, policy, and Host protocol semantics in Node.
 
 ## Build, tests, and release
 
-Use Node.js 24 or newer. `npm test` builds `dist/` before running tests; `npm run check-pack` checks the npm artifact. Desktop frontend and Rust checks are listed in [desktop/README.en.md](desktop/README.en.md). [docs/development/RELEASE.en.md](docs/development/RELEASE.en.md) is the source for installer targets, artifacts, and release status. CI artifacts do not mean a version has been published.
+Use Node.js 24 or newer. `npm test` builds `dist/` before running tests; `npm run check-pack` checks the npm artifact. Desktop build and acceptance commands are listed in [desktop/README.en.md](desktop/README.en.md). [docs/development/RELEASE.en.md](docs/development/RELEASE.en.md) is the source for installer targets, artifacts, and release status. CI artifacts do not mean a version has been published.
 
 Keep `package.json`, lockfiles, `src/version.ts`, Node engine declarations, and workflow versions consistent. Runtime source in `src/` is strict TypeScript and uses erasable syntax; do not add `enum`, `namespace`, or parameter properties. Generated `desktop/vendor/`, platform binaries, personal session data, credentials, and temporary test output do not belong in commits. Do not make release or publishing claims without checking the registry and GitHub Release state.
 
@@ -32,5 +32,5 @@ Document current behavior and link to its maintained source. Keep the Chinese an
 
 ## Local guides
 
-- [desktop/AGENTS.md](desktop/AGENTS.md) applies to the shell and frontend; its child guides cover [`frontend/`](desktop/frontend/AGENTS.md) and [`src-tauri/`](desktop/src-tauri/AGENTS.md).
+- [desktop/AGENTS.md](desktop/AGENTS.md) applies to the Electron shell and frontend; its child guide covers [`frontend/`](desktop/frontend/AGENTS.md).
 - [src/kernel/AGENTS.md](src/kernel/AGENTS.md), [src/tools/AGENTS.md](src/tools/AGENTS.md), [src/session/AGENTS.md](src/session/AGENTS.md), [src/host/AGENTS.md](src/host/AGENTS.md), and [src/tui/AGENTS.md](src/tui/AGENTS.md) cover their respective directories.

@@ -17,12 +17,12 @@
 
 ### 随包 Node.js 运行时
 
-| 目标 | Rust target | Node 归档 | SHA-256 |
+| 目标 | Node target | Node 归档 | SHA-256 |
 |---|---|---|---|
-| Windows x64 | `x86_64-pc-windows-msvc` | `node-v24.21.0-win-x64.zip` | `158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541` |
-| Linux x64 | `x86_64-unknown-linux-gnu` | `node-v24.21.0-linux-x64.tar.xz` | `fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6` |
-| macOS Apple Silicon | `aarch64-apple-darwin` | `node-v24.21.0-darwin-arm64.tar.gz` | `bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057` |
-| macOS Intel | `x86_64-apple-darwin` | `node-v24.21.0-darwin-x64.tar.gz` | `1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e8097` |
+| Windows x64 | `win32-x64` | `node-v24.21.0-win-x64.zip` | `158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541` |
+| Linux x64 | `linux-x64` | `node-v24.21.0-linux-x64.tar.xz` | `fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6` |
+| macOS Apple Silicon | `darwin-arm64` | `node-v24.21.0-darwin-arm64.tar.gz` | `bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057` |
+| macOS Intel | `darwin-x64` | `node-v24.21.0-darwin-x64.tar.gz` | `1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e8097` |
 
 构建机分别为 GitHub Actions `windows-latest`、`ubuntu-22.04`、`macos-15` 和 `macos-15-intel`。
 
@@ -30,7 +30,7 @@ Node.js v24.21.0 的平台表列出 Linux x64 的最低基线为 Linux 4.18 与 
 
 四个桌面目标分别由 `ci.yml` 的 Windows、Linux、Apple Silicon 和 Intel 构建机打包。每台构建机都会从生成的安装包安装或解包运行树，并用包内 Node 执行搜索后端自检；这能确认对应平台的可选二进制进入安装包且可运行。它不替代实机首次启动与平台特有功能验证；发行前仍需逐目标验证桌面托盘菜单和通知行为。
 
-AppImage 在 `ubuntu-22.04` 上构建。各平台的安装包类型由 `desktop/src-tauri/tauri.<platform>.conf.json` 指定。macOS 安装包使用相同架构的 ad-hoc 签名，不进行公证。
+AppImage 在 `ubuntu-22.04` 上构建。Windows NSIS、Linux AppImage/deb 与 macOS DMG 目标由 `desktop/electron-builder.cjs` 指定。macOS 安装包使用相同架构的 ad-hoc 签名，不进行公证。
 
 ## npm 包
 

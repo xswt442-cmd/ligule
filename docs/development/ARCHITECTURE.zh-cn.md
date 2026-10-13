@@ -28,8 +28,8 @@
 flowchart LR
   CLI[命令行] -->|进程内调用| Host[Node Host]
   TUI[React 与 Ink] -->|内存协议| Host
-  Web[React 桌面界面] <-->|Tauri 命令与事件| Shell[Rust 壳]
-  Shell <-->|按行分隔的消息帧| Child[Node Host 子进程]
+  Web[React 桌面界面] <-->|沙盒 Preload 与 IPC| Main[Electron Main]
+  Main <-->|按行分隔的消息帧| Child[Node Host 子进程]
   Child --> HostLogic[Host 与内核]
   Host --> Project[项目环境]
   Host --> Loop[Agent Loop]
@@ -43,7 +43,7 @@ flowchart LR
   Provider --> Endpoint[模型服务]
 ```
 
-`ligule run` 与直接运行 `ligule`（或使用兼容命令 `ligule tui`）会在界面所属的 Node.js 进程中创建 Host。TUI 通过内存连接发送协议消息。桌面前端经 Tauri 发送消息帧；Rust 壳把每一行转发给 Node 子进程，再把响应行交回前端。Rust 管窗口和进程生命周期；Node Host 管项目环境、会话、审批与模型请求。入口分别见[命令行](../../src/cli.ts)、[TUI 启动器](../../src/tui/start.ts)、[消息连接](../../src/host/connection.ts)和[桌面桥接](../../desktop/src-tauri/src/bridge.rs)。
+`ligule run` 与直接运行 `ligule`（或使用兼容命令 `ligule tui`）会在界面所属的 Node.js 进程中创建 Host。TUI 通过内存连接发送协议消息。桌面前端只通过固定的沙盒 Preload API 与 Electron Main 通信；Main 将协议帧转发给独立 Node Host，并管理窗口、原生交互和进程生命周期。Node Host 管项目环境、会话、审批与模型请求。入口分别见[命令行](../../src/cli.ts)、[TUI 启动器](../../src/tui/start.ts)、[消息连接](../../src/host/connection.ts)、[Electron IPC](../../desktop/electron/ipc.ts)和[Preload API](../../desktop/electron/preload.ts)。
 
 ### Kernel、插件、工具与能力
 
@@ -142,7 +142,7 @@ flowchart TD
 
 Host 协议在[协议表](../../src/host/protocol.ts)中定义方法、参数、审批请求、问题请求和通知。[`connection.ts`](../../src/host/connection.ts) 使用按行分隔的 JSON 消息。Host 在分派前校验方法参数，并持有会话状态；客户端通过协议创建或打开会话、启动或取消轮次、读取记录、回应待办和修改支持的设置。
 
-CLI 命令直接调用 Host。TUI 在内存连接上使用相同协议。桌面前端通过 TypeScript 客户端发送 Tauri 命令和事件；Rust 壳只转发消息帧，不解释 Host 方法或会话数据。传输方式不同，Host 方法和 Kernel 行为保持共用。
+CLI 命令直接调用 Host。TUI 在内存连接上使用相同协议。桌面前端通过固定的 Preload API 使用 IPC 连接 Electron Main，Main 只转发消息帧，不解释 Host 方法或会话数据。传输方式不同，Host 方法和 Kernel 行为保持共用。
 
 ### 相关文档
 

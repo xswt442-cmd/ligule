@@ -28,8 +28,8 @@ This guide is for contributors reading or changing the repository. It explains c
 flowchart LR
   CLI[CLI] -->|in process| Host[Node Host]
   TUI[React and Ink] -->|in memory protocol| Host
-  Web[React desktop UI] <-->|Tauri events and commands| Shell[Rust shell]
-  Shell <-->|newline-delimited frames| Child[Node Host process]
+  Web[React desktop UI] <-->|sandboxed Preload and IPC| Main[Electron Main]
+  Main <-->|newline-delimited frames| Child[Node Host process]
   Child --> HostLogic[Host and kernel]
   Host --> Project[Project environment]
   Host --> Loop[Agent Loop]
@@ -43,7 +43,7 @@ flowchart LR
   Provider --> Endpoint[HTTP model endpoint]
 ```
 
-`ligule run` and the default `ligule` invocation (or the compatible `ligule tui` command) create a Host in the Node process that owns the interface. The TUI sends protocol messages over an in-memory connection. The desktop frontend sends frames through Tauri; the Rust shell forwards each line to a child Node process and returns lines to the frontend. The shell owns process and window lifecycle, while the Node Host owns sessions, project state, policy, and model requests. See the [CLI](../../src/cli.ts), [TUI adapter](../../src/tui/start.ts), [frame transport](../../src/host/connection.ts), and [desktop bridge](../../desktop/src-tauri/src/bridge.rs).
+`ligule run` and the default `ligule` invocation (or the compatible `ligule tui` command) create a Host in the Node process that owns the interface. The TUI sends protocol messages over an in-memory connection. The desktop frontend communicates with Electron Main through a fixed sandboxed Preload API; Main forwards protocol frames to the independent Node Host and manages windows, native interactions, and process lifecycle. The Host owns sessions, project state, policy, and model requests. See the [CLI](../../src/cli.ts), [TUI adapter](../../src/tui/start.ts), [frame transport](../../src/host/connection.ts), [Electron IPC](../../desktop/electron/ipc.ts), and [Preload API](../../desktop/electron/preload.ts).
 
 ### Kernel, plugins, tools, and capabilities
 
@@ -146,7 +146,7 @@ Configuration layers are combined into a snapshot while the Host creates a proje
 
 The Host protocol defines methods, request parameters, approval requests, question requests, and notifications in one [protocol table](../../src/host/protocol.ts). [`connection.ts`](../../src/host/connection.ts) carries newline-delimited JSON messages. The Host validates method parameters before dispatch and owns all session state; clients use protocol methods to create or open sessions, start and cancel turns, read records, answer requests, and change supported settings.
 
-The CLI's single-turn commands call the Host directly. The TUI uses the same protocol over an in-memory connection. The desktop UI uses a TypeScript client over Tauri commands and events; the Rust shell forwards frames without interpreting Host methods or session data. These transports differ, while the Host methods and kernel behavior remain shared.
+The CLI's single-turn commands call the Host directly. The TUI uses the same protocol over an in-memory connection. The desktop UI uses a TypeScript client through the fixed Preload API and Electron IPC; Main forwards frames without interpreting Host methods or session data. These transports differ, while the Host methods and kernel behavior remain shared.
 
 ### Related guides
 

@@ -2,7 +2,7 @@
 
 [简体中文](CONTRIBUTING.zh-cn.md) · [English](CONTRIBUTING.en.md)
 
-The repository contains the Node.js runtime, TUI, and Tauri desktop app. Read the root [Agent guide](../../AGENTS.md) and the local `AGENTS.md` for the directory you are changing before editing it. The [architecture guide](ARCHITECTURE.en.md) describes ownership and data flow; the [glossary](GLOSSARY.en.md) defines shared terms.
+The repository contains the Node.js runtime, TUI, and Electron desktop app. Read the root [Agent guide](../../AGENTS.md) and the local `AGENTS.md` for the directory you are changing before editing it. The [architecture guide](ARCHITECTURE.en.md) describes ownership and data flow; the [glossary](GLOSSARY.en.md) defines shared terms.
 
 ## Set up and validate
 
@@ -24,7 +24,17 @@ npm --prefix desktop/frontend run check
 npm --prefix desktop/frontend run build
 ```
 
-Rust shell checks run with `cargo fmt --check` and `cargo test` from `desktop/src-tauri/`. To launch the complete desktop app during development, install `desktop/` dependencies and run `npm --prefix desktop run dev`; the shell starts the Node Host and embeds the frontend build for production packages.
+Desktop checks also need the Main and frontend dependencies, then the Host, security, and frontend checks:
+
+```sh
+npm --prefix desktop ci
+npm --prefix desktop/frontend ci
+node --experimental-strip-types --test desktop/electron/test/host.test.ts desktop/electron/test/security.test.ts
+npm --prefix desktop/frontend run check
+npm --prefix desktop/frontend run build
+```
+
+To launch the complete desktop app, run `npm --prefix desktop run dev` from the repository root. Electron Main starts the Node Host, and installers use the built frontend.
 
 ## Keep changes verifiable
 

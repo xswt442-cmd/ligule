@@ -2,7 +2,7 @@
 
 [简体中文](CONTRIBUTING.zh-cn.md) · [English](CONTRIBUTING.en.md)
 
-仓库包含 Node.js 运行时、TUI 和 Tauri 桌面应用。开始修改前，请阅读仓库根目录的 [Agent 指南](../../AGENTS.md)及目标目录中的 `AGENTS.md`。[架构说明](ARCHITECTURE.zh-cn.md)介绍组件归属和数据流；[术语表](GLOSSARY.zh-cn.md)统一项目用语。
+仓库包含 Node.js 运行时、TUI 和 Electron 桌面应用。开始修改前，请阅读仓库根目录的 [Agent 指南](../../AGENTS.md)及目标目录中的 `AGENTS.md`。[架构说明](ARCHITECTURE.zh-cn.md)介绍组件归属和数据流；[术语表](GLOSSARY.zh-cn.md)统一项目用语。
 
 ## 安装与验证
 
@@ -24,7 +24,17 @@ npm --prefix desktop/frontend run check
 npm --prefix desktop/frontend run build
 ```
 
-在 `desktop/src-tauri/` 中运行 `cargo fmt --check` 和 `cargo test` 检查 Rust 壳。要启动完整桌面应用，在 `desktop/` 安装依赖后运行 `npm --prefix desktop run dev`；壳会启动 Node Host，正式安装包使用构建后的前端。
+桌面检查还需安装 Main 与前端依赖，并运行 Host、安全和前端检查：
+
+```sh
+npm --prefix desktop ci
+npm --prefix desktop/frontend ci
+node --experimental-strip-types --test desktop/electron/test/host.test.ts desktop/electron/test/security.test.ts
+npm --prefix desktop/frontend run check
+npm --prefix desktop/frontend run build
+```
+
+要启动完整桌面应用，在仓库根目录运行 `npm --prefix desktop run dev`；Electron Main 会启动 Node Host，安装包使用构建后的前端。
 
 ## 让改动可核验
 
