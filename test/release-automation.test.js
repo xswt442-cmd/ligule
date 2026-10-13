@@ -152,16 +152,50 @@ test('desktop artifact manifests bind installer hashes to version, target, sourc
     })) {
       const targetDirectory = join(output, target);
       await mkdir(targetDirectory);
-      for (const name of names) await writeFile(join(targetDirectory, name), `${target}:${name}`);
-      createDesktopReleaseManifest({ directory: targetDirectory, version: '2.4.2', target, commit, runId });
+      const sourceDirectory = join(targetDirectory, 'source');
+      await mkdir(sourceDirectory);
+      for (const name of names) await writeFile(join(sourceDirectory, name), `${target}:${name}`);
+      createDesktopReleaseManifest({ directory: sourceDirectory, outputDirectory: targetDirectory, version: '2.4.2', target, commit, runId });
     }
     const result = verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit, runId });
     assert.deepEqual(result.targets, ['linux-x64', 'macos-arm64', 'macos-x64', 'windows-x64']);
     assert.equal(result.assets.length, 5);
+    const stableManifestPath = join(output, 'desktop-release-manifest.json');
+    const stableManifest = await readFile(stableManifestPath);
+    assert.doesNotMatch(stableManifest.toString(), /workflowRunId/);
+
+    const incompleteLinux = join(output, 'incomplete-linux');
+    await mkdir(incompleteLinux);
+    await writeFile(join(incompleteLinux, 'ligule_2.4.2_amd64.deb'), 'first Debian package');
+    await writeFile(join(incompleteLinux, 'ligule_2.4.2_arm64.deb'), 'second Debian package');
+    assert.throws(() => createDesktopReleaseManifest({ directory: incompleteLinux, version: '2.4.2', target: 'linux-x64', commit, runId }), /exactly one \.AppImage installer; found 0/);
+
+    for (const target of result.targets) {
+      createDesktopReleaseManifest({
+        directory: join(output, target, 'source'),
+        outputDirectory: join(output, target),
+        version: '2.4.2',
+        target,
+        commit,
+        runId: '67890',
+      });
+    }
+    verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit, runId: '67890' });
+    assert.deepEqual(await readFile(stableManifestPath), stableManifest,
+      'rebuilding identical installers in a different workflow run must keep the public manifest byte-for-byte stable');
+
+    const linuxManifestPath = join(output, 'linux-x64', 'desktop-release-manifest-linux-x64.json');
+    const linuxManifestBytes = await readFile(linuxManifestPath);
+    const malformedLinux = JSON.parse(linuxManifestBytes);
+    malformedLinux.assets[0].name = malformedLinux.assets[1].name;
+    await writeFile(linuxManifestPath, `${JSON.stringify(malformedLinux, null, 2)}\n`);
+    assert.throws(() => verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit, runId: '67890' }), /exactly one \.AppImage installer/);
+    await writeFile(linuxManifestPath, linuxManifestBytes);
+
     const manifest = JSON.parse(await readFile(join(output, 'macos-x64', 'desktop-release-manifest-macos-x64.json'), 'utf8'));
     await writeFile(join(output, 'macos-x64', manifest.assets[0].name), 'altered installer');
-    assert.throws(() => verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit, runId }), /checksum mismatch/);
-    assert.throws(() => verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit: 'b'.repeat(40), runId }), /does not match/);
+    assert.throws(() => verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit, runId: '67890' }), /checksum mismatch/);
+    assert.throws(() => verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit: 'b'.repeat(40), runId: '67890' }), /does not match/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -225,6 +259,8 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
   assert.match(draft, /gh release create "\$TAG" --verify-tag[^\n]*--draft/);
   assert.match(draft, /refusing to modify published Release/);
   assert.match(draft, /gh release upload "\$TAG"/);
+  assert.match(draft, /comm -13/);
+  assert.match(draft, /draft Release contains assets outside the verified set/);
   assert.doesNotMatch(draft, /--clobber|gh release edit/);
 
   const desktopSteps = ci.jobs.desktop.steps;

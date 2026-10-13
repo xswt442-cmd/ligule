@@ -37,7 +37,7 @@ npm 包 `ligule` 包含内核、CLI、TUI、手册和运行时依赖。全局安
 1. **准备产品版本。** 在 `main` 上手动运行 [`tag.yml`](../../.github/workflows/tag.yml)，选择 `prepare`，再选择 `cli` 或 `desktop`，输入 `patch`、`minor`、`major` 或 `X.Y.Z`。工作流只更新所选产品的版本和更新记录，推送审查分支，并对该精确提交运行完整 CI 后创建 PR。审查并合并 PR。
 2. **创建产品标签。** 在 `main` 上再次运行 `tag.yml`，选择 `tag`，并使用相同产品和已合并版本。工作流拒绝已有标签，要求 `main` 指向所选提交，并确认该 SHA 的完整 `main` push CI 成功，然后创建注释标签 `cli-vX.Y.Z` 或 `desktop-vX.Y.Z`。
 3. **发布 CLI 到 npm。** 手动运行 [`publish.yml`](../../.github/workflows/publish.yml)，输入 `cli-vX.Y.Z`。工作流验证主分支祖先关系和该精确标签 SHA 的 CI 成功状态，对该提交运行测试、打包、npm registry 精确 tarball 检查，并在空 npm 消费者中安装 tarball。工作流还会通过 GitHub API 检查现有 `npm-publish` Environment 至少配置一名必需审核者；未配置时会 fail closed。检查通过后，发布仍需经过该 Environment，并使用 npm Trusted Publishing/OIDC。Desktop 标签不能触发或满足此流程。
-4. **生成 Desktop 草稿。** 在 `main` 上手动运行 [`release.yml`](../../.github/workflows/release.yml)，输入 `desktop-vX.Y.Z`。工作流重新确认标签属于 `main` 且该 SHA 的 main CI 成功，再从完全相同的提交构建 Windows x64、Linux x64、macOS arm64 与 macOS x64 安装包。每个安装包文件名和清单都绑定产品版本、目标架构、源码提交、工作流运行和 SHA-256。工作流创建或补齐 GitHub 草稿 Release。已有草稿的标题与说明会保留；内容哈希相同的附件会跳过，字节冲突会失败，已公开 Release 不会被修改。
+4. **生成 Desktop 草稿。** 在 `main` 上手动运行 [`release.yml`](../../.github/workflows/release.yml)，输入 `desktop-vX.Y.Z`。工作流重新确认标签属于 `main` 且该 SHA 的 main CI 成功，再从完全相同的提交构建 Windows x64、Linux x64、macOS arm64 与 macOS x64 安装包。安装包文件名绑定版本、目标和源码 SHA；每次运行的构建清单会将产物字节绑定到该工作流运行。公开清单和校验文件只记录稳定的版本、源码、目标、文件名与 SHA-256 身份，因此相同产物可以重试补齐草稿。发现意外附件或字节冲突时会停止并要求人工检查；已有草稿说明会保留，已公开 Release 不会被修改。
 5. **审阅并公开 Desktop 草稿。** 核对安装包校验值，并在目标系统检查首次启动、托盘、通知和系统特定行为。所有检查通过后，在 GitHub 手动公开草稿；工作流本身不会公开 Release。
 
 CLI 与 Desktop 更新记录各自独立。准备某一产品版本时，不会修改另一产品的清单、更新记录、运行时版本或前端私有版本。单纯调整版本不需要更新依赖锁文件。

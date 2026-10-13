@@ -271,6 +271,14 @@ jobs:
           expected_names=$(jq -r '.assets[].name' dist-release/desktop-release-manifest.json)
           expected_names=$(printf '%s\n%s\n' "$expected_names" SHA256SUMS desktop-release-manifest.json)
           existing_names=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+          printf '%s\n' "$expected_names" | sed '/^$/d' | LC_ALL=C sort -u > "$RUNNER_TEMP/expected-release-assets"
+          printf '%s\n' "$existing_names" | sed '/^$/d' | LC_ALL=C sort -u > "$RUNNER_TEMP/existing-release-asset-names"
+          comm -13 "$RUNNER_TEMP/expected-release-assets" "$RUNNER_TEMP/existing-release-asset-names" > "$RUNNER_TEMP/unexpected-release-assets"
+          if [ -s "$RUNNER_TEMP/unexpected-release-assets" ]; then
+            echo "::error::draft Release contains assets outside the verified set; inspect them manually before retrying"
+            cat "$RUNNER_TEMP/unexpected-release-assets" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
           mkdir -p "$RUNNER_TEMP/existing-release-assets"
           while IFS= read -r name; do
             [ -n "$name" ] || continue

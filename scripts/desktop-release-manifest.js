@@ -27,8 +27,11 @@ export function createDesktopReleaseManifest({ directory, outputDirectory = dire
   if (!/^[0-9a-f]{40}$/.test(commit)) throw new Error(`invalid source commit: ${commit}`);
   if (!/^\d+$/.test(String(runId))) throw new Error(`invalid workflow run ID: ${runId}`);
   const files = readdirSync(directory).filter((name) => config.extensions.some((extension) => name.endsWith(extension)));
-  if (files.length !== config.extensions.length) {
-    throw new Error(`${target} must produce ${config.extensions.join(' and ')}; found ${files.join(', ') || 'no installers'}`);
+  for (const extension of config.extensions) {
+    const matches = files.filter((name) => name.endsWith(extension));
+    if (matches.length !== 1) {
+      throw new Error(`${target} must produce exactly one ${extension} installer; found ${matches.length}`);
+    }
   }
   const assets = files.sort().map((name) => {
     if (!name.includes(version)) throw new Error(`${name} does not identify desktop version ${version}`);
@@ -76,8 +79,10 @@ export function verifyDesktopReleaseManifests({ directory, version, commit, runI
       || manifest.workflowRunId !== String(runId) || !Array.isArray(manifest.assets)) {
       throw new Error(`manifest for ${manifest.target} does not match the verified tag workflow source`);
     }
-    if (manifest.assets.length !== config.extensions.length) {
-      throw new Error(`manifest for ${manifest.target} does not contain every expected installer type`);
+    if (manifest.assets.length !== config.extensions.length) throw new Error(`manifest for ${manifest.target} has an unexpected installer count`);
+    for (const extension of config.extensions) {
+      const matches = manifest.assets.filter((asset) => asset.name.endsWith(extension));
+      if (matches.length !== 1) throw new Error(`manifest for ${manifest.target} must contain exactly one ${extension} installer`);
     }
     for (const asset of manifest.assets) {
       if (!config.extensions.some((extension) => asset.name.endsWith(extension))) {
@@ -101,7 +106,6 @@ export function verifyDesktopReleaseManifests({ directory, version, commit, runI
     tag: `desktop-v${version}`,
     version,
     sourceCommit: commit,
-    workflowRunId: String(runId),
     targets: manifests.map(({ value }) => ({ target: value.target, architecture: value.architecture })),
     assets: consolidatedAssets.sort((left, right) => left.name.localeCompare(right.name)),
   }, null, 2)}\n`);
