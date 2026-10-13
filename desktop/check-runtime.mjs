@@ -1,19 +1,20 @@
 // 用随包的 Node 检查桌面运行树中的命令行、原生模块与搜索后端。
 import { createRequire } from 'node:module';
-import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { releaseManifest } from '../scripts/pack-release.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const vendor = join(root, 'desktop', 'vendor');
+const desktopRoot = join(root, 'desktop');
+const options = parseOptions(process.argv.slice(2));
+const runtimeRoot = options.resources ?? options.vendor ?? join(desktopRoot, 'vendor');
 const target = `${process.platform}-${process.arch}`;
 const nodePin = JSON.parse(await readFile(join(root, 'desktop', 'node-pin.json'), 'utf8'));
 const packageJson = releaseManifest();
-const nodePath = resolve(process.env.LIGULE_RUNTIME_NODE_PATH ?? join(vendor, 'node', process.platform === 'win32' ? 'node.exe' : 'node'));
-const app = resolve(process.env.LIGULE_RUNTIME_APP_DIR ?? join(vendor, 'app'));
+const nodePath = join(runtimeRoot, 'node', process.platform === 'win32' ? 'node.exe' : 'node');
+const app = join(runtimeRoot, 'app');
 const appModules = join(app, 'node_modules');
 const providerPackage = `@vscode/ripgrep-${target}`;
 delete process.env.NODE_PATH;
@@ -23,6 +24,10 @@ process.env.PATH = '';
 
 if (nodePin.version !== process.version) {
   throw new Error(`the checker must run with Node ${nodePin.version}; received ${process.version}`);
+}
+const [checkerNode, runtimeNode] = await Promise.all([realpath(process.execPath), realpath(nodePath)]);
+if (checkerNode !== runtimeNode) {
+  throw new Error(`run this checker with the selected standalone Node runtime: ${nodePath}`);
 }
 const vendoredPackage = JSON.parse(await readFile(join(app, 'package.json'), 'utf8'));
 if (vendoredPackage.name !== packageJson.name || vendoredPackage.version !== packageJson.version
@@ -80,7 +85,10 @@ if (relativeBackend === '..' || relativeBackend.startsWith(`..${sep}`) || isAbso
   throw new Error(`the search backend is outside ${expectedPackage}: ${backendPath}`);
 }
 
-const temporary = await mkdtemp(join(tmpdir(), 'ligule-runtime-check-'));
+const testplaceTmp = join(desktopRoot, 'testplace', 'tmp');
+await mkdir(testplaceTmp, { recursive: true });
+const temporary = await mkdtemp(join(testplaceTmp, 'runtime-check-'));
+assertInsideTestplace(temporary, testplaceTmp);
 try {
   await writeFile(join(temporary, 'needle.txt'), 'LIGULE-DESKTOP-RUNTIME-CHECK\n', 'utf8');
   const result = await library.searchWithRipgrep({
@@ -94,7 +102,38 @@ try {
     throw new Error(`the vendored search backend did not find its temporary file: ${JSON.stringify(result)}`);
   }
 } finally {
+  assertInsideTestplace(temporary, testplaceTmp);
   await rm(temporary, { recursive: true, force: true });
 }
 
-console.log(`runtime check passed: Node ${process.version}; ligule ${version}; tools; bash and PowerShell grammars; keyring; ${providerPackage} search`);
+console.log(`runtime check passed: Node ${process.version}; ligule ${version}; tools; bash and PowerShell grammars; keyring; ${providerPackage} search; ${options.resources === undefined ? 'vendor' : 'resources'}=${runtimeRoot}`);
+
+function parseOptions(args) {
+  const parsed = { resources: undefined, vendor: undefined };
+  for (let index = 0; index < args.length; index += 1) {
+    const option = args[index];
+    if (option !== '--resources' && option !== '--vendor') {
+      throw new Error(`unknown runtime checker argument: ${option}`);
+    }
+    const value = args[index + 1];
+    if (value === undefined || value.startsWith('--')) {
+      throw new Error(`${option} requires a directory path`);
+    }
+    if (parsed[option.slice(2)] !== undefined) {
+      throw new Error(`${option} may be provided only once`);
+    }
+    parsed[option.slice(2)] = resolve(value);
+    index += 1;
+  }
+  if (parsed.resources !== undefined && parsed.vendor !== undefined) {
+    throw new Error('use either --resources or --vendor, not both');
+  }
+  return parsed;
+}
+
+function assertInsideTestplace(path, directory) {
+  const relativePath = relative(resolve(directory), resolve(path));
+  if (relativePath === '' || relativePath === '..' || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
+    throw new Error(`temporary runtime check path must be inside desktop/testplace/tmp: ${path}`);
+  }
+}
