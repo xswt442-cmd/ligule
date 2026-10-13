@@ -30,7 +30,7 @@ The application bundles Node.js v24.21.0 for the four targets. The archive SHA-2
 
 The `ligule` npm package contains the kernel, CLI, TUI, guides, and runtime dependencies. Use npm for consumer operations such as global installation and clean-consumer verification. Release automation installs the repository's frozen pnpm workspace (`pnpm@12.9.1`) to run repository scripts and tests; it does not use npm to install the monorepo.
 
-`pnpm --filter ligule run pack-release -- <artifact-directory>` creates the npm tarball. `pnpm --filter ligule run verify-install -- <tarball>` installs that exact tarball with npm into an isolated consumer and exercises its CLI and exports.
+`pnpm --filter ligule run pack-release <artifact-directory>` creates the npm tarball. `pnpm --filter ligule run verify-install <tarball>` installs that exact tarball with npm into an isolated consumer and exercises its CLI and exports.
 
 ## Independent release procedure
 

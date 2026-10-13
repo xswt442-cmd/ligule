@@ -197,11 +197,15 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
   assert.match(JSON.stringify(publish.jobs.preflight), /cli-v/);
   assert.ok(JSON.stringify(publish).includes('pnpm install --frozen-lockfile'));
   assert.ok(JSON.stringify(publish.jobs.npm).includes('npm publish --provenance --access public'));
+  assert.ok(publish.jobs.checks.steps.some((step) => step.run?.includes('pnpm --filter ligule run pack-release dist-tarball')));
+  assert.ok(publish.jobs.verify.steps.some((step) => step.run?.startsWith('pnpm --filter ligule run verify-install ')));
   assert.doesNotMatch(JSON.stringify(publish.jobs.npm), /pnpm|registry-version/,
     'the OIDC publication job consumes the already checked registry result and does not depend on an uninstalled helper');
   assert.equal(publish.jobs.npm.needs.includes('registry-check'), true);
   const registrySteps = publish.jobs['registry-check'].steps;
-  assert.match(JSON.stringify(registrySteps), /pnpm --filter ligule run --silent registry-version/);
+  const registryCommand = registrySteps.find((step) => step.name === 'compare the package tarball with the registry').run;
+  assert.match(registryCommand, /pnpm --filter ligule run --silent registry-version "ligule@/);
+  assert.doesNotMatch(registryCommand, /registry-version --/);
   assert.ok(registrySteps.some((step) => step.run === 'pnpm install --frozen-lockfile'));
   assert.ok(registrySteps.findIndex((step) => step.uses === 'pnpm/action-setup@v4')
     < registrySteps.findIndex((step) => step.uses === 'actions/setup-node@v5'),

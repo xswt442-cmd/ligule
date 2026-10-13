@@ -30,7 +30,7 @@ Electron 平台列表注明支持 Windows 10 及更新版本、macOS Ventura 及
 
 npm 包 `ligule` 包含内核、CLI、TUI、手册和运行时依赖。全局安装与干净消费者验证等消费者操作使用 npm。发行自动化使用锁定的 pnpm 工作区（`pnpm@12.9.1`）运行仓库脚本和测试；仓库依赖不使用 npm 安装。
 
-`pnpm --filter ligule run pack-release -- <产物目录>` 生成 npm tarball。`pnpm --filter ligule run verify-install -- <tarball>` 会将该 tarball 原样交给 npm 安装到隔离消费者，并检查 CLI 与包导出。
+`pnpm --filter ligule run pack-release <产物目录>` 生成 npm tarball。`pnpm --filter ligule run verify-install <tarball>` 会将该 tarball 原样交给 npm 安装到隔离消费者，并检查 CLI 与包导出。
 
 ## 独立发行流程
 

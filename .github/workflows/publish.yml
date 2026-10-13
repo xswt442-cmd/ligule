@@ -132,7 +132,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist-tarball
-          pnpm --filter ligule run pack-release -- dist-tarball
+          pnpm --filter ligule run pack-release dist-tarball
           version='${{ needs.preflight.outputs.version }}'
           tarball="dist-tarball/ligule-${version}.tgz"
           test -f "$tarball"
@@ -180,7 +180,7 @@ jobs:
           set -euo pipefail
           sha256sum --check dist-tarball/SHA256SUMS
           version='${{ needs.preflight.outputs.version }}'
-          state=$(pnpm --filter ligule run --silent registry-version -- "ligule@${version}" "dist-tarball/ligule-${version}.tgz")
+          state=$(pnpm --filter ligule run --silent registry-version "ligule@${version}" "dist-tarball/ligule-${version}.tgz")
           echo "state=$state" >> "$GITHUB_OUTPUT"
 
   approval:
@@ -227,7 +227,7 @@ jobs:
           path: dist-tarball
 
       - name: install the tarball into an empty consumer
-        run: pnpm --filter ligule run verify-install -- "$PWD/dist-tarball/ligule-${{ needs.preflight.outputs.version }}.tgz"
+        run: pnpm --filter ligule run verify-install "$PWD/dist-tarball/ligule-${{ needs.preflight.outputs.version }}.tgz"
 
   npm:
     name: publish to npm

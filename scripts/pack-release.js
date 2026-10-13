@@ -77,6 +77,6 @@ export async function packRelease(destination) {
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const destination = process.argv[2] ?? 'testplace/pack';
-  if (process.argv.length > 3) throw new Error('usage: npm run pack-release -- [destination]');
+  if (process.argv.length > 3) throw new Error('usage: pnpm --filter ligule run pack-release [destination]');
   await packRelease(destination);
 }

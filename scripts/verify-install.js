@@ -1,6 +1,6 @@
 // 全新安装验证：打一份 tarball，在空消费者中用 npm 安装，并通过已安装的 CLI 和包导出运行完整探针。
 //
-// 跑法：pnpm --filter ligule run verify-install [-- tarball]
+// 跑法：pnpm --filter ligule run verify-install [tarball]
 // 带一个 tarball 路径时用它，不再自己打：发布流水线要在同一批字节上先验后发，那一份身份就是 artifact 里的那一个文件。
 import { spawnSync, execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -13,7 +13,7 @@ const repo = fileURLToPath(new URL('..', import.meta.url));
 const packDir = join(repo, 'testplace', 'pack');
 const consumer = join(packDir, 'install', 'consumer');
 const args = process.argv.slice(2);
-if (args.length > 1 || args.some((arg) => arg.startsWith('--'))) throw new Error('usage: pnpm --filter ligule run verify-install -- [tarball]');
+if (args.length > 1 || args.some((arg) => arg.startsWith('--'))) throw new Error('usage: pnpm --filter ligule run verify-install [tarball]');
 const given = args[0];
 if (given === undefined && !existsSync(join(repo, 'dist', 'index.js'))) {
   throw new Error('dist/index.js is missing; run `pnpm --filter ligule run build` before verifying a fresh install');
