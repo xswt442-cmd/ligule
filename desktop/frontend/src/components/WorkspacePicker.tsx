@@ -34,7 +34,7 @@ export function WorkspacePicker({ client, directory, disabled, revision, onSelec
     setChoosing(true);
     setFailure('');
     try {
-      // 只读验证目录；正式会话仍在首次发送时创建，权限由 Host 决定。
+      // 由 Host 验证目录；正式新会话仍在首次发送时创建，权限由 Host 决定。
       await client.call('sessions.list', { projectRoot: root }, 15_000);
       await onSelect(root);
       setPath('');
