@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { parse } from 'smol-toml';
 import { parse as parseYaml } from 'yaml';
 import { changelogSection, releaseNotesForTag } from '../scripts/release-notes.js';
 import { prepareRelease, resolveVersion } from '../scripts/release-version.js';
@@ -45,7 +44,9 @@ async function writeJson(path, value) {
 }
 
 async function fixture() {
-  const directory = await mkdtemp(join(process.cwd(), 'testplace', 'tmp', 'release-automation-'));
+  const parent = join(process.cwd(), 'testplace', 'tmp');
+  await mkdir(parent, { recursive: true });
+  const directory = await mkdtemp(join(parent, 'release-automation-'));
   const version = '0.0.1';
   const packageManifest = { name: 'ligule', version, dependencies: { '@vscode/ripgrep': '1.18.0' }, optionalDependencies: {} };
   await writeJson(join(directory, 'package.json'), packageManifest);
@@ -54,12 +55,8 @@ async function fixture() {
   await writeJson(join(directory, 'desktop', 'package-lock.json'), lockfile('ligule-desktop', version));
   await writeJson(join(directory, 'desktop', 'frontend', 'package.json'), { name: 'ligule-desktop-frontend', version });
   await writeJson(join(directory, 'desktop', 'frontend', 'package-lock.json'), lockfile('ligule-desktop-frontend', version));
-  await writeJson(join(directory, 'desktop', 'src-tauri', 'tauri.conf.json'), { version });
   await mkdir(join(directory, 'src'), { recursive: true });
   await writeFile(join(directory, 'src', 'version.ts'), `// Keep this comment.\nexport const VERSION = '${version}';\n`, 'utf8');
-  await mkdir(join(directory, 'desktop', 'src-tauri'), { recursive: true });
-  await writeFile(join(directory, 'desktop', 'src-tauri', 'Cargo.toml'), `[package]\nname = "ligule-desktop"\nversion = "${version}"\nedition = "2021"\n\n[dependencies]\n# Keep dependency notes.\n`, 'utf8');
-  await writeFile(join(directory, 'desktop', 'src-tauri', 'Cargo.lock'), `version = 4\n\n[[package]]\nname = "ligule-desktop"\nversion = "${version}"\n\n[[package]]\nname = "other"\nversion = "1.0.0"\n`, 'utf8');
   await mkdir(join(directory, 'docs', 'development'), { recursive: true });
   for (const path of ['RELEASE.zh-cn.md', 'RELEASE.en.md']) {
     await writeFile(join(directory, 'docs', 'development', path), `| \`ligule\` | package | \`${version}\` |\n`, 'utf8');
@@ -77,23 +74,22 @@ test('version requests resolve supported bump types and reject invalid or older 
   assert.throws(() => resolveVersion('0.0.2', 'v0.0.3'), /stable X\.Y\.Z/);
 });
 
-test('release preparation updates package, lock, Tauri, Cargo, and runtime versions while preserving unrelated data', async () => {
+test('release preparation updates npm packages and runtime version while preserving unrelated data', async () => {
   const directory = await fixture();
   try {
     const result = prepareRelease(directory, 'patch');
     assert.equal(result.version, '0.0.2');
-    assert.ok(result.files.some((path) => path.endsWith('Cargo.lock')));
+    const paths = result.files.map((path) => path.replaceAll('\\', '/'));
+    assert.ok(paths.includes('desktop/package-lock.json'));
+    assert.ok(paths.includes('desktop/frontend/package-lock.json'));
     const rootLock = JSON.parse(await readFile(join(directory, 'package-lock.json'), 'utf8'));
     assert.equal(rootLock.version, '0.0.2');
     assert.equal(rootLock.packages[''].version, '0.0.2');
-    const shellConfig = JSON.parse(await readFile(join(directory, 'desktop/src-tauri/tauri.conf.json'), 'utf8'));
-    assert.equal(shellConfig.version, '0.0.2');
-    const cargoToml = parse(await readFile(join(directory, 'desktop/src-tauri/Cargo.toml'), 'utf8'));
-    assert.equal(cargoToml.package.version, '0.0.2');
-    assert.match(await readFile(join(directory, 'desktop/src-tauri/Cargo.toml'), 'utf8'), /# Keep dependency notes\./);
-    const cargoLock = parse(await readFile(join(directory, 'desktop/src-tauri/Cargo.lock'), 'utf8'));
-    assert.equal(cargoLock.package[0].version, '0.0.2');
-    assert.equal(cargoLock.package[1].version, '1.0.0');
+    for (const path of ['desktop/package.json', 'desktop/frontend/package.json', 'desktop/package-lock.json', 'desktop/frontend/package-lock.json']) {
+      const manifest = JSON.parse(await readFile(join(directory, path), 'utf8'));
+      assert.equal(manifest.version, '0.0.2', path);
+      if (manifest.packages !== undefined) assert.equal(manifest.packages[''].version, '0.0.2', path);
+    }
     for (const path of ['RELEASE.zh-cn.md', 'RELEASE.en.md']) {
       assert.match(await readFile(join(directory, 'docs/development', path), 'utf8'), /\| `ligule` \| package \| `0\.0\.2` \|/);
     }
@@ -195,29 +191,36 @@ test('release workflows separate version PRs, tag creation, npm publication, and
 
   const ciText = JSON.stringify(ciWorkflow);
   assert.doesNotMatch(ciText, /build-rg|local-search/, 'CI must use the upstream dependency for clean installs');
+  assert.doesNotMatch(ciText, /src-tauri|cargo|rust-toolchain|rust-cache/i, 'desktop CI must use the Electron build pipeline');
   assert.deepEqual(ciWorkflow.on.push.branches, ['main', 'dev'], 'feature branch checks should run from the pull request event only');
   assert.ok(Object.hasOwn(ciWorkflow.on, 'pull_request'), 'pull requests must keep the full cross-platform CI matrix');
   const desktopPackage = JSON.parse(readFileSync(new URL('../desktop/package.json', import.meta.url), 'utf8'));
-  assert.equal(desktopPackage.scripts.build, 'node ./build.mjs', 'desktop builds must run the AppImage repair wrapper');
+  assert.equal(desktopPackage.scripts.build, 'node ./build.mjs', 'desktop builds must use the repository packaging entry');
+  assert.ok(ciWorkflow.jobs['cli-package'].steps.some((step) => step.run === 'npm run check-pack'));
+  assert.ok(ciWorkflow.jobs['cli-package'].steps.some((step) => step.run === 'npm run verify-install'));
   const desktopJob = ciWorkflow.jobs.desktop;
   assert.deepEqual(desktopJob.strategy.matrix.include.map(({ id }) => id), [
     'windows-x64', 'linux-x64', 'macos-arm64', 'macos-x64',
   ]);
   const desktopSteps = desktopJob.steps;
-  const runtimeCheckIndex = desktopSteps.findIndex((step) => step.name === 'run the vendored tree on its own');
-  const installerBuildIndex = desktopSteps.findIndex((step) => step.name === 'build the installer');
+  const runtimeCheckIndex = desktopSteps.findIndex((step) => step.name === 'run the packaged runtime tree checks');
+  const installerBuildIndex = desktopSteps.findIndex((step) => step.name === 'build the Electron installer');
   assert.ok(runtimeCheckIndex >= 0 && runtimeCheckIndex < installerBuildIndex,
-    'each native desktop target must execute the bundled runtime check before building its installer');
+    'each native desktop target must execute its bundled runtime check before building an installer');
   assert.match(desktopSteps[runtimeCheckIndex].run, /desktop\/check-runtime\.mjs/);
-  const windowsBundleCheck = desktopSteps.find((step) => step.name === 'install the Windows bundle and check its runtime');
-  const linuxBundleCheck = desktopSteps.find((step) => step.name === 'extract Linux bundles and check their runtimes');
-  const macBundleCheck = desktopSteps.find((step) => step.name === 'verify the macOS signature and disk image');
+  assert.ok(desktopSteps.some((step) => step.name === 'test Electron Host and security contracts'));
+  assert.ok(desktopSteps.some((step) => step.name === 'check and build the frontend'));
+  assert.ok(desktopSteps.some((step) => step.name === 'test Windows Host process-tree cleanup'));
+  const windowsBundleCheck = desktopSteps.find((step) => step.name === 'install and test the Windows NSIS bundle');
+  const linuxBundleCheck = desktopSteps.find((step) => step.name === 'extract Linux installers and test bundled runtimes');
+  const macBundleCheck = desktopSteps.find((step) => step.name === 'verify macOS DMG and bundled runtime');
   assert.ok(windowsBundleCheck && linuxBundleCheck && macBundleCheck,
     'every desktop OS must inspect its actual installer after bundling');
-  for (const step of [windowsBundleCheck, linuxBundleCheck, macBundleCheck]) {
-    assert.match(step.run, /desktop\/check-runtime\.mjs/);
-  }
+  assert.match(windowsBundleCheck.run, /run-installer-smoke\.ps1/);
+  assert.match(linuxBundleCheck.run, /desktop\/check-runtime\.mjs/);
+  assert.match(macBundleCheck.run, /desktop\/check-runtime\.mjs/);
   assert.ok(desktopSteps.indexOf(windowsBundleCheck) > installerBuildIndex);
   assert.ok(desktopSteps.indexOf(linuxBundleCheck) > installerBuildIndex);
   assert.ok(desktopSteps.indexOf(macBundleCheck) > installerBuildIndex);
+  assert.match(ciText, /ligule-desktop-v\$\{\{ steps\.desktop-version\.outputs\.value \}\}-\$\{\{ matrix\.id \}\}-\$\{\{ github\.sha \}\}/);
 });

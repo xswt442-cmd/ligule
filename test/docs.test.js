@@ -1,5 +1,5 @@
 // 仓库文档的检查：受维护的 Markdown 链接可达，两份手册章节与标识符一致，
-// README 有使用与开发文档入口，`docs/` 根目录只放双语手册，九份指南都在默认预算内并按目录装载。
+// README 有使用与开发文档入口，八份指南都在默认预算内并按目录装载。
 // 这一处不建内核：读的是仓库里的 markdown。
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -28,11 +28,10 @@ const maintainedDocs = [
   ...bilingualPairs.flatMap((pair) => pair),
   join(repoRoot, 'CHANGELOG.md'),
 ];
-// 工程指南九份：根那一份放全局规则，八份局部的放在各自代码旁边（`src/` 的五个目录、终端界面，桌面的三层）。
+// 工程指南八份：根那一份放全局规则，七份局部的放在各自代码旁边（`src/` 的五个目录、桌面两层）。
 const guides = [
   'AGENTS.md',
   join('desktop', 'AGENTS.md'),
-  join('desktop', 'src-tauri', 'AGENTS.md'),
   join('desktop', 'frontend', 'AGENTS.md'),
   join('src', 'kernel', 'AGENTS.md'),
   join('src', 'tools', 'AGENTS.md'),
@@ -42,7 +41,6 @@ const guides = [
 ];
 const localGuides = [
   join(repoRoot, 'desktop'),
-  join(repoRoot, 'desktop', 'src-tauri'),
   join(repoRoot, 'desktop', 'frontend'),
   join(repoRoot, 'src', 'kernel'),
   join(repoRoot, 'src', 'tools'),

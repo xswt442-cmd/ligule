@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { parse } from 'smol-toml';
 import { releaseManifest } from '../scripts/pack-release.js';
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
@@ -54,18 +53,19 @@ test('workflows take the Node version from their own env instead of repeating it
   }
 });
 
-// 桌面安装包与 npm 包同版本发布；清单与锁文件版本必须一致（D34）。
-test('the desktop shell carries the same version as the package', () => {
-  const pkg = JSON.parse(read('../package.json'));
-  const shell = JSON.parse(read('../desktop/package.json'));
-  const config = JSON.parse(read('../desktop/src-tauri/tauri.conf.json'));
-  const cargo = parse(read('../desktop/src-tauri/Cargo.toml'));
-  const cargoLock = parse(read('../desktop/src-tauri/Cargo.lock'));
-  const cargoPackage = cargoLock.package.find((entry) => entry.name === 'ligule-desktop');
-  assert.equal(shell.version, pkg.version, 'desktop/package.json and package.json disagree');
-  assert.equal(config.version, pkg.version, 'tauri.conf.json and package.json disagree');
-  assert.equal(cargo.package.version, pkg.version, 'desktop/src-tauri/Cargo.toml and package.json disagree');
-  assert.equal(cargoPackage?.version, pkg.version, 'desktop/src-tauri/Cargo.lock and package.json disagree');
+test('each npm package manifest agrees with its lockfile', () => {
+  for (const [manifestPath, lockPath] of [
+    ['../package.json', '../package-lock.json'],
+    ['../desktop/package.json', '../desktop/package-lock.json'],
+    ['../desktop/frontend/package.json', '../desktop/frontend/package-lock.json'],
+  ]) {
+    const manifest = JSON.parse(read(manifestPath));
+    const lock = JSON.parse(read(lockPath));
+    assert.equal(lock.name, manifest.name, `${lockPath} package name disagrees with ${manifestPath}`);
+    assert.equal(lock.version, manifest.version, `${lockPath} version disagrees with ${manifestPath}`);
+    assert.equal(lock.packages[''].name, manifest.name, `${lockPath} root package name disagrees with ${manifestPath}`);
+    assert.equal(lock.packages[''].version, manifest.version, `${lockPath} root package version disagrees with ${manifestPath}`);
+  }
 });
 
 // 随包 Node 的那四行钉在 `desktop/node-pin.json`，发行清单里也是同样四行：两处说的是同一批字节，抄错一个字符就装不出或装错。
