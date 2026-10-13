@@ -2300,7 +2300,9 @@ button.pill:hover {
 .composer-hint { display: flex; justify-content: space-between; gap: 16px; width: min(calc(100% - 64px), var(--stream)); margin: 10px auto 14px; font-size: 0.69rem; color: var(--fg-muted); }
 .composer-choice { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 45%; padding: 2px 6px; background: transparent; border-color: transparent; font-size: var(--text-sm); }
 .composer-choice span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.composer-policy { font-size: var(--text-xs); color: var(--fg-muted); }
+.policy-picker { max-width: min(290px, 90vw); }
+.policy-picker [role="menuitem"] { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.policy-picker-note { margin: 6px 10px; color: var(--fg-muted); font-size: var(--text-xs); white-space: normal; }
 .new-workspace { padding: 0 4px; }
 .workspace-choice { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 2px 6px; background: transparent; border-color: transparent; font-size: var(--text-sm); }
 .workspace-choice > span { overflow: hidden; text-overflow: ellipsis; }
@@ -2389,7 +2391,6 @@ button.notification-switch:disabled { opacity: .45; cursor: default; }
   .splitter { display: none; }
   .topbar { padding: 12px 16px; gap: 8px; }
   .composer, .stream-row { inline-size: calc(100% - 24px); }
-  .composer-policy { display: none; }
   .composer-hint { width: calc(100% - 40px); }
   .sheet { grid-template-columns: 9rem minmax(0, 1fr); }
   .sheet-body { padding: 20px; }

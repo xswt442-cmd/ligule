@@ -18,6 +18,7 @@ import { SessionActions } from './components/SessionActions';
 import { DiagnosticsPanel } from './components/DiagnosticsPanel';
 import { ModelPicker } from './components/ModelPicker';
 import { WorkspacePicker } from './components/WorkspacePicker';
+import { PolicyPicker } from './components/PolicyPicker';
 import { ExportPanel } from './components/ExportPanel';
 import { HelpPanel } from './components/HelpPanel';
 import { UsageMeter } from './components/UsageMeter';
@@ -1269,16 +1270,17 @@ export function App({ transport }: { transport: Transport }) {
   const setPolicy = useCallback(async (mode: 'ask' | 'auto' | null) => {
     if (sessionId === null) return;
     try {
-      const result = await client.call('policy.set', { sessionId, mode }) as { policy: string; policySource: string };
-      setRows((current) => [...current, metaRow('meta', mode === null
+      const result = await client.call('policy.set', { sessionId, mode: mode ?? 'default' }, 15_000) as { policy: string; policySource: string };
+      if (active.current === sessionId) setRows((current) => [...current, metaRow('meta', mode === null
         ? `已恢复配置默认审批方式：${result.policy}。`
         : `本会话审批方式已改为 ${result.policy}。`, mode === null
         ? `Restored the configured approval mode: ${result.policy}.`
         : `Approval mode for this conversation changed to ${result.policy}.`)]);
     } catch (error) {
-      setRows((current) => [...current, metaRow('error', `更改审批方式失败：${code(error)}`, `Could not change approval mode: ${code(error)}`)]);
+      if (active.current === sessionId) setRows((current) => [...current, metaRow('error', `更改审批方式失败：${code(error)}`, `Could not change approval mode: ${code(error)}`)]);
+      throw error;
     }
-    void refreshStatus(sessionId);
+    await refreshStatus(sessionId);
   }, [client, refreshStatus, sessionId]);
 
   // 手动压缩走 `session.compact`（D83）：压的是模型那一份上下文，画面上的行仍然来自整份记录。
@@ -1772,10 +1774,10 @@ export function App({ transport }: { transport: Transport }) {
               await refreshStatus(sessionId);
             }} onManage={openModelSettings} />
           <Popover.Root open={sessionMenuOpen} onOpenChange={setSessionMenuOpen}>
-            <Popover.Trigger asChild><button type="button" className="composer-choice" disabled={sessionId === null} title={t('工具与审批', 'Tools and approvals')}><span>{status?.mode ?? t('工具模式', 'Tool mode')}</span><Icon name="fold" size={12} /></button></Popover.Trigger>
-            <SessionMenu status={status} onSetMode={(name) => void setMode(name)} onSetPolicy={(mode) => void setPolicy(mode)} />
+            <Popover.Trigger asChild><button type="button" className="composer-choice" disabled={sessionId === null} title={t('工具模式', 'Tool mode')}><span>{status?.mode ?? t('工具模式', 'Tool mode')}</span><Icon name="fold" size={12} /></button></Popover.Trigger>
+            <SessionMenu status={status} onSetMode={(name) => void setMode(name)} />
           </Popover.Root>
-          {status !== null && <span className="composer-policy">{status.policy === 'ask' ? t('按需审批', 'Ask for approval') : t('自动审批', 'Auto approval')}</span>}
+          <PolicyPicker key={sessionId ?? '$new'} status={status} disabled={closing || reading || starting} onSelect={setPolicy} />
           <span className="bar-spacer" />
           {running && <button className="icon-button stop-button" type="button" title={t('停止本轮', 'Stop this turn')} aria-label={t('停止本轮', 'Stop this turn')} onClick={() => void cancel()}><Icon name="stop" size={15} /></button>}
           <button className="send" type="button" title={running ? t('加入队列', 'Add to queue') : t('发送', 'Send')} aria-label={t('发送', 'Send')} disabled={closing || reading || starting || !settingsReady || draft.trim() === ''} onClick={() => void send()}><Icon name="send" size={19} /></button>
