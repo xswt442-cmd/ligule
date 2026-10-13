@@ -621,12 +621,16 @@ if (invalidLanguage) {
     printFailure('tui_terminal_required', t('tui 需要交互式终端；在脚本中请使用 ligule run', 'tui needs an interactive terminal; use ligule run from a script'));
   } else {
     try {
-      const { config, extensions } = await configSnapshot();
       // React 与 Ink 在第一次被加载时按 NODE_ENV 选构建，所以这一行要在动态导入之前。
       // 开发版把界面拖贵了一倍：两千条记录的转录下提交一行是 2.6 毫秒对 1.4 毫秒，进程常驻 155 MiB 对 114 MiB。
       process.env.NODE_ENV = 'production';
-      const { runTui } = await import('./tui/start.js');
-      await runTui({ config, provider: hostProviderFromConfig(config), policy: config.policy, extensions, locale, ...resolveMode(config) });
+      const { confirmWorkspaceTrust } = await import('./tui/trust.js');
+      // 项目信任先于项目配置和资源装载；拒绝时不创建 Host 或会话。
+      if (await confirmWorkspaceTrust(process.cwd(), { locale: locale ?? languageOf('auto') })) {
+        const { config, extensions } = await configSnapshot();
+        const { runTui } = await import('./tui/start.js');
+        await runTui({ config, provider: hostProviderFromConfig(config), policy: config.policy, extensions, locale, ...resolveMode(config) });
+      }
     } catch (error) {
       const fields = errorFields(error);
       const missing = fields.code === 'ERR_MODULE_NOT_FOUND' && /Cannot find package '(ink|react|marked|highlight\.js|string-width)'/.test(fields.message ?? String(error));

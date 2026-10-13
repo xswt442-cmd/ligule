@@ -5,13 +5,15 @@
 import { resolve } from 'node:path';
 import { createElement as h, Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Static, Text, useApp, useInput, usePaste } from 'ink';
-import { SESSION_ROWS, UI_COMMANDS, answerOf, candidatesOf, describeChange, findLines, findUiCommand, flowGroups, insertMention, localizedCommand, mentionToken, resolveSessionId, routeInput, sessionLines } from './commands.js';
+import { SESSION_ROWS, answerOf, candidatesOf, describeChange, findLines, findUiCommand, insertMention, localizedCommand, mentionToken, resolveSessionId, routeInput, sessionLines } from './commands.js';
 import { pushHistory } from '../kernel/input-history.js';
 import { searchHistory } from './history.js';
 import { editInExternalEditor } from './editor.js';
 import { copyToClipboard, lastAnswer } from './clipboard.js';
 import { titleEscape, titleText } from './output.js';
 import { runtimeFailureText } from './errors.js';
+import { VERSION } from '../version.js';
+import { ChoicePanel, HelpPanel, type PanelChoice } from './panels.js';
 import { markdownLines } from './markdown.js';
 import { selectedText, transcriptLines, viewportPosition, wrapLine } from './viewport.js';
 import { CURRENT, ENGLISH_LABELS, ENGLISH_VIEWS, KEYMAP, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec } from './keymap.js';
@@ -126,6 +128,11 @@ interface SearchState {
   readonly at: number;
 }
 
+type PickerKind = 'model' | 'mode' | 'policy';
+interface RuntimeChoice extends PanelChoice {
+  readonly selection?: ModelSelection;
+}
+
 interface MentionState {
   readonly paths: readonly string[];
   readonly chosen: number;
@@ -172,6 +179,8 @@ interface AppProps {
     write(overrides: Record<string, string>): Promise<void>;
   };
   readonly locale?: Locale;
+  readonly trust?: { revoke(): Promise<void> };
+  readonly modes?: { read(): Promise<readonly { readonly name: string; readonly layer: string }[]> };
 }
 
 interface UndoState {
@@ -249,20 +258,9 @@ interface QuestionState {
 }
 
 // 那几张表与那几个纯函数交给检查里用（test/tui.test.js），界面自己只走这一处出口。
-export { SESSION_ROWS, UI_COMMANDS, answerOf, candidatesOf, describeChange, displayWidth, findLines, findUiCommand, flowGroups, insertMention, mentionToken, resolveSessionId, routeInput, sessionLines } from './commands.js';
+export { SESSION_ROWS, UI_COMMANDS, answerOf, candidatesOf, describeChange, displayWidth, findLines, findUiCommand, insertMention, mentionToken, resolveSessionId, routeInput, sessionLines } from './commands.js';
 export { KEYMAP, CURRENT, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec, specOf } from './keymap.js';
 export { markdownLines } from './markdown.js';
-
-// `/help` 里那一组按键读的是 `keymap.ts` 那一份表：画面说出的键、动作与按键落的事从同一处取（方案 6.1）。
-// 别名那几条不单列（`-alt`、`-shift` 结尾的那一些与另一记键落的是同一件事），一份清单不说两遍。
-// 这一处是现算而不是模块加载时算一次：个人覆盖落进来之后，清单要说的是换过的键。
-const keyRows = (locale: Locale = 'zh') => Object.entries(KEYMAP)
-  .filter(([action]) => !/-alt$|-shift$/.test(action))
-  .flatMap(([name, binding]) => {
-    if (!isTerminalAction(name)) return [];
-    const action = name;
-    return { key: formatKeys(CURRENT[action]), action: locale === 'en' ? `${ENGLISH_LABELS[action]} (${ENGLISH_VIEWS[binding.view]})` : `${binding.label}（${binding.view}）` };
-  });
 
 // 草稿的编辑：左右移光标、Home/End 与 Ctrl+A/E 跳两端、Ctrl+W 删前一个词、Ctrl+U 清空、其余可打印字符插在光标处。
 export function editDraft(draft: string, caret: number, input: string, key: InkKey): DraftState {
@@ -394,12 +392,9 @@ export function contextSegment(usage: ContextUsage | null | undefined, locale: L
   return `ctx:~${usage.estimated}/${usage.window}${usage.estimated > usage.threshold ? chooseText(locale, ' 超限', ' over limit') : ''}`;
 }
 
-// 状态行里模式与判定档位各带一个前缀：`mode` 这一个词在界面上指过两样东西，写清楚比省字重要（D40）。
-// 待生效写成 `mode:minimal→full`。宽度不够时按「这一段能不能从别处再读到」退让：先把那一段最长的路径缩成最后一级目录名（认得出是哪一项目），
-// 再去工具数与上下文那两段，然后丢模型名、丢整段路径，最后才动记录条数——跑着那一轮的打断提示不能被挤掉，
-// 排在后面的那一段要为核心那几句留出固定的位置。
+// 元数据行保留会话、目录、上下文和运行状态；模型与控制入口在输入框下单独显示。
+// 宽度不足时先缩短目录，再隐藏上下文和记录数，保留取消提示。
 interface StatusLineOptions {
-  readonly head: string;
   readonly sessionId: string;
   readonly boundary?: string;
   readonly status: TuiStatus | null;
@@ -410,30 +405,26 @@ interface StatusLineOptions {
   readonly locale?: Locale;
 }
 
-export function buildStatusLine({ head, sessionId, boundary, status, running, seconds, expanded, columns, locale = 'zh' }: StatusLineOptions): string {
+export function buildStatusLine({ sessionId, boundary, status, running, seconds, expanded, columns, locale = 'zh' }: StatusLineOptions): string {
   const t = (zh: string, en: string) => chooseText(locale, zh, en);
   const id = `${chooseText(locale, '会话', 'session')} ${sessionId.slice(0, 8)}`;
   const root = boundary === undefined ? '' : boundary;
-  let base = `${head}${id}${root === '' ? '' : ` · ${root}`}`;
+  let base = `${id}${root === '' ? '' : ` · ${root}`}`;
   if (status === null) return base;
   const context = contextSegment(status.usage, locale);
-  const parts = [`mode:${status.pendingMode === null ? status.mode ?? 'none' : `${status.mode}→${status.pendingMode}`}`,
-    `policy:${status.policy}${status.policySource === 'session' ? t('(会话)', '(session)') : ''}`];
+  const parts: string[] = [];
   if (context !== '') parts.push(context);
-  parts.push(`tools:${status.tools.length}`);
   // 打断与展开那两句跟在条数之后：挤的时候条数先走，这两句留着。
   const hints = (running ? t(` · ${Math.floor(seconds)} 秒，${keyHint('interrupt')} 打断`, ` · ${Math.floor(seconds)}s, ${keyHint('interrupt')} to stop`) : '')
     + (expanded ? t(` · 已展开（${keyHint('expand-or-history')} 收起）`, ` · expanded (${keyHint('expand-or-history')} to close)`) : '');
   let tail = `${chooseText(locale, `记录 ${status.eventCount} 条`, `${status.eventCount} events`)}${hints}`;
   let shown = parts;
   // 列数读不到时不裁：宁可让终端自己折行，也不要按一个猜的宽度丢东西。
-  const line = () => `${base} · ${shown.join('  ')}${tail === '' ? '' : ` · ${tail}`}`;
+  const line = () => [base, ...shown, tail].filter(part => part !== '').join(' · ');
   const over = () => columns !== undefined && columns > 0 && displayWidth(line()) > columns;
   const leaf = root === '' ? '' : root.split(/[\\/]/).filter(Boolean).pop() ?? '';
-  if (over()) base = `${head}${id}${leaf === '' ? '' : ` · ${leaf}`}`;
-  if (over()) shown = shown.filter((part) => !part.startsWith('tools:'));
-  if (over()) shown = shown.filter((part) => !part.startsWith('ctx:'));
   if (over()) base = `${id}${leaf === '' ? '' : ` · ${leaf}`}`;
+  if (over()) shown = shown.filter((part) => !part.startsWith('ctx:'));
   if (over()) base = id;
   if (over()) tail = hints === '' ? '' : hints.slice(3);
   return line();
@@ -470,23 +461,6 @@ interface DetailTitleOptions {
 export function detailTitle(detail: DetailTitleOptions, locale: Locale = 'zh'): string {
   if (detail.branch === undefined) return chooseText(locale, `记录 ${detail.seq}（${detail.kind}）的完整内容 · /show 收起`, `Event ${detail.seq} (${detail.kind}) · /show to close`);
   return chooseText(locale, `支线 ${detail.branch}，父记录第 ${detail.seq} 那一次派生 · 这里的序号是支线自己的 · /sub 收起`, `Subtask ${detail.branch}, from event ${detail.seq} · sequence numbers belong to this subtask · /sub to close`);
-}
-
-// `/help` 那几行：界面命令、宿主交出来的提示模板、按键三组；宽度放不下就整组往下一层（D81）。
-// 提示模板列在这里不是为了在界面里展开它——那一条命令真正跑的是 `run.start`，展开归宿主（D24、D49）。
-export function helpLines(status: TuiStatus | null, width: number, locale: Locale = 'zh'): string[] {
-  const templates = status?.templates ?? [];
-  const groups = [
-    { title: chooseText(locale, '命令', 'Commands'), entries: UI_COMMANDS.map(command => localizedCommand(command, locale)).map(command => ({ key: command.usage, action: command.text })) },
-    {
-      title: chooseText(locale, '提示模板', 'Prompt templates'),
-      entries: templates.length === 0
-        ? [{ key: '(none)', action: chooseText(locale, '在 .ligule/prompts/ 或 ~/.ligule/prompts/ 下放一份 markdown', 'Add a markdown file under .ligule/prompts/ or ~/.ligule/prompts/') }]
-        : templates.map((template) => ({ key: `/${template.command}`, action: template.description ?? '' })),
-    },
-    { title: chooseText(locale, '按键', 'Keys'), entries: keyRows(locale) },
-  ];
-  return flowGroups(groups, width);
 }
 
 // 助手的 Markdown 按终端列数排版，代码按语言上色，内容完整保留。
@@ -583,7 +557,7 @@ const processHistory: TuiInputHistory = {
   },
 };
 
-export function App({ client, sessionId: firstSessionId, info = {}, interactive = true, stdout, history = processHistory, inputs, keys, locale = 'zh' }: AppProps) {
+export function App({ client, sessionId: firstSessionId, info = {}, interactive = true, stdout, history = processHistory, inputs, keys, trust, modes, locale = 'zh' }: AppProps) {
   const t = useCallback((zh: string, en: string) => chooseText(locale, zh, en), [locale]);
   const app = useApp();
   const [sessionId, setSessionId] = useState(firstSessionId);
@@ -600,6 +574,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [tick, setTick] = useState(0);
   const [seconds, setSeconds] = useState(0);
   const [expanded, setExpanded] = useState(false);
+  const [panel, setPanel] = useState<PickerKind | 'help' | null>(null);
+  const [choices, setChoices] = useState<RuntimeChoice[]>([]);
+  const [choicesLoading, setChoicesLoading] = useState(false);
+  const pickerRequest = useRef(0);
   const [draft, setDraft] = useState('');
   const [caret, setCaret] = useState(0);
   // 草稿的撤销栈（方案 6.1）：人在这一格里改出来的每一段，落笔时先把当时那一格的草稿与光标留下来，Ctrl+Z 退回它、Ctrl+Y 再拿回来。
@@ -803,6 +781,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         // 终端界面一次盯一份会话：别的那一份问过来的题在这一格里答不了（审批那一条同一处门）。
         const asked = params;
         if (asked.sessionId !== sessionId || !Array.isArray(asked.questions) || asked.questions.length === 0 || !asked.questions.every(isAskQuestion)) return;
+        pickerRequest.current += 1;
+        setPanel(null);
         setDetail(null);
         setSessionPicker(null);
         setSearch(null);
@@ -811,6 +791,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         return;
       }
       if (message.method !== 'approval.request' || params.sessionId !== sessionId || typeof params.tool !== 'string') return;
+      pickerRequest.current += 1;
+      setPanel(null);
       const args = isRecord(params.args) ? params.args : {};
       setApprovalExpanded(false);
       setApprovalCursor(0);
@@ -894,9 +876,81 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   }, [client, push, refreshStatus, remember, sessionId, t]);
 
   // 命令一律收到第一个词，后面的整段作为参数交进来（/mode 要用）。
+  const closePanel = useCallback(() => {
+    pickerRequest.current += 1;
+    setPanel(null);
+  }, []);
+
+  const exitTui = useCallback((savedDraft = inputNow.current.draft) => {
+    if (inputs === undefined) { app.exit(); return; }
+    void inputs.write(info.boundary ?? '', sessionId, savedDraft, inputNow.current.queue).then(
+      () => app.exit(),
+      () => push({ kind: 'error', text: t('无法保存草稿和队列，请复制后重试退出', 'Could not save draft and queue; copy your input and retry exiting') }),
+    );
+  }, [app, inputs, info.boundary, sessionId, push, t]);
+
+  const openPicker = useCallback((kind: PickerKind) => {
+    const token = ++pickerRequest.current;
+    const own = sessionId;
+    setDetail(null);
+    setSessionPicker(null);
+    setSearch(null);
+    setMention(null);
+    setPanel(kind);
+    setChoices([]);
+    setChoicesLoading(true);
+    void (async () => {
+      let available: RuntimeChoice[];
+      if (kind === 'model') {
+        const config = await client.request('config.get', { projectRoot: info.boundary });
+        available = config.services.flatMap(service => service.models.map(model => ({
+          id: `${service.id}:${model}`, label: `${service.name} / ${model}`, selection: { provider: service.id, model },
+        })));
+        if (typeof config.model?.model === 'string') available.unshift({
+          id: `legacy:${config.model.model}`, label: `${t('默认服务', 'Default service')} / ${config.model.model}`, selection: { provider: 'legacy', model: config.model.model },
+        });
+      } else if (kind === 'mode') {
+        if (modes === undefined) throw new Error('mode_list_unavailable');
+        available = (await modes.read()).map(mode => ({ id: mode.name, label: mode.name,
+          description: t(`来源：${MODE_LAYERS[mode.layer] ?? mode.layer}。只改变模型可用工具和提示，不授予权限。`, `Source: ${mode.layer}. Selects tools and prompts without granting permissions.`),
+        }));
+      } else {
+        available = [
+          { id: 'ask', label: t('逐次审批', 'Ask for each tool'), description: t('工具执行前询问；已有拒绝规则和访问边界继续生效。', 'Ask before tools execute; denial rules and access boundaries still apply.') },
+          { id: 'auto', label: t('自动判定', 'Automatic decisions'), description: t('由现有规则判定；仍可能请求审批，访问边界不变。', 'Use the existing rules; approvals may still be requested and access boundaries stay unchanged.') },
+          { id: 'reset', label: t('使用配置默认', 'Use configured default'), description: t('撤销当前会话的审批方式覆盖。', 'Clear this session’s approval-mode override.') },
+        ];
+      }
+      if (activeSession.current !== own || pickerRequest.current !== token) return;
+      if (kind === 'model' && available.length === 0) {
+        setPanel(null);
+        push({ kind: 'meta', text: t('尚未配置模型服务', 'No model services configured') });
+        return;
+      }
+      setChoices(available);
+      setChoicesLoading(false);
+    })().catch((error: unknown) => {
+      if (activeSession.current !== own || pickerRequest.current !== token) return;
+      setPanel(null);
+      push({ kind: 'error', text: t(`无法读取选项：${errorCode(error) ?? errorMessage(error) ?? 'picker_failed'}`, `Could not load choices: ${errorCode(error) ?? errorMessage(error) ?? 'picker_failed'}`) });
+    });
+  }, [client, info.boundary, modes, push, sessionId, t]);
+
   const runCommand = useCallback((name: string, argument = '') => {
+    if (name === 'trust') {
+      if (argument === '') {
+        push({ kind: 'meta', text: t(`工作区：${info.boundary ?? ''}\n使用 /trust revoke 撤销信任并退出；工具审批仍按当前设置执行。`, `Workspace: ${info.boundary ?? ''}\nUse /trust revoke to revoke trust and exit. Tool approvals still use the current policy.`) });
+      } else if (argument !== 'revoke') {
+        push({ kind: 'error', text: t('用法：/trust [revoke]', 'Usage: /trust [revoke]') });
+      } else if (trust === undefined) {
+        push({ kind: 'error', text: t('此客户端未接入工作区信任存储', 'Workspace trust storage is unavailable in this client') });
+      } else {
+        void trust.revoke().then(() => exitTui(''), (error: unknown) => push({ kind: 'error', text: t(`无法撤销信任：${errorCode(error) ?? 'tui_trust_failed'}`, `Could not revoke trust: ${errorCode(error) ?? 'tui_trust_failed'}`) }));
+      }
+      return;
+    }
     if (name === 'quit') {
-      app.exit();
+      exitTui('');
       return;
     }
     if (name === 'new') {
@@ -1295,18 +1349,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     if (name === 'model') {
+      if (argument.trim() === '') { openPicker('model'); return; }
       void (async () => {
         try {
-          if (argument.trim() === '') {
-            const config = await client.request('config.get', { projectRoot: info.boundary });
-            const lines = (config.services ?? []).flatMap(service => [
-              service.name,
-              ...service.models.map(model => `  /model ${service.id} ${model}`),
-            ]);
-            if (typeof config.model?.model === 'string') lines.push(`  /model legacy ${config.model.model}`);
-            push({ kind: 'meta', text: lines.length === 0 ? t('尚未配置模型服务', 'No model services configured') : lines.join('\n') });
-            return;
-          }
           const [provider, model, ...extra] = argument.trim().split(/\s+/);
           if (model === undefined || extra.length > 0) {
             push({ kind: 'error', text: t('用法：/model <服务> <模型>', 'Usage: /model <service> <model>') });
@@ -1324,15 +1369,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     if (name === 'mode') {
+      if (argument === '') { openPicker('mode'); return; }
       void (async () => {
-        // 带名字就是一次切换请求，不带名字只是问一句现在用的是哪一份（D41）。
-        if (argument === '') {
-          const current = await client.request('status.get', { sessionId }).catch(() => null);
-          setStatus(current);
-          push({ kind: 'meta', text: current === null || current.mode === null ? t('无法读取工具模式', 'Could not read tool mode')
-            : t(`工具模式：${current.mode}${current.pendingMode === null ? '' : ` → ${current.pendingMode}（下轮生效）`}`, `Tool mode: ${current.mode}${current.pendingMode === null ? '' : ` → ${current.pendingMode} (next turn)`}`) });
-          return;
-        }
         const switched = await client.request('mode.set', { sessionId, name: argument }).catch((error: unknown) => requestFailure(error, 'mode_switch_failed'));
         if ('code' in switched) {
           push({ kind: 'error', text: t(`无法切换工具模式：${switched.code}`, `Could not change tool mode: ${switched.code}`) });
@@ -1346,15 +1384,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     if (name === 'policy') {
+      if (argument === '') { openPicker('policy'); return; }
       void (async () => {
-        // 档位有两件来源：配置文件那一份默认与这一份会话的覆盖（D101）。不带参数只是问现在按哪一档、出自哪一件。
-        if (argument === '') {
-          const current = await client.request('status.get', { sessionId }).catch(() => null);
-          setStatus(current);
-          push({ kind: 'meta', text: current === null ? t('无法读取审批方式', 'Could not read approval mode')
-            : t(`审批方式：${current.policy}（${current.policySource === 'session' ? '当前会话' : '配置默认'}）`, `Approval mode: ${current.policy} (${current.policySource === 'session' ? 'this session' : 'configured default'})`) });
-          return;
-        }
         const asked = argument === 'reset' ? 'default' : argument;
         if (asked !== 'default' && asked !== 'ask' && asked !== 'auto') {
           push({ kind: 'error', text: t('用法：/policy ask|auto|reset', 'Usage: /policy ask|auto|reset') });
@@ -1441,11 +1472,31 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     if (name === 'help') {
-      push({ kind: 'meta', text: helpLines(status, stdout?.columns ?? 80, locale).join('\n') });
+      setDetail(null);
+      setSessionPicker(null);
+      setSearch(null);
+      setMention(null);
+      setPanel('help');
       return;
     }
     push({ kind: 'error', text: t(`未知命令：/${name}（/help 查看）`, `Unknown command: /${name} (/help to browse)`) });
-  }, [app, client, info, keyOverrides, keys, locale, push, queue, queuePaused, refreshStatus, sessionId, status, stdout, t]);
+  }, [app, client, info, keyOverrides, keys, locale, push, queue, queuePaused, refreshStatus, sessionId, status, stdout, t, trust, openPicker, exitTui]);
+
+  const chooseOption = useCallback((id: string) => {
+    const choice = choices.find(item => item.id === id);
+    if (choice === undefined || panel === null || panel === 'help') return;
+    closePanel();
+    if (choice.selection === undefined) {
+      runCommand(panel, choice.id);
+      return;
+    }
+    const own = sessionId;
+    void client.request('model.select', { sessionId, ...choice.selection }).then(async changed => {
+      if (activeSession.current !== own) return;
+      await refreshStatus();
+      push({ kind: 'meta', text: changed.when === 'round' ? t(`下轮使用 ${changed.model}`, `${changed.model} will apply next turn`) : t(`已切换至 ${changed.model}`, `Switched to ${changed.model}`) });
+    }, (error: unknown) => push({ kind: 'error', text: t(`无法选择模型：${errorCode(error) ?? 'model_select_failed'}`, `Could not select model: ${errorCode(error) ?? 'model_select_failed'}`) }));
+  }, [choices, panel, closePanel, runCommand, client, sessionId, refreshStatus, push, t]);
 
   // 答一道题：回车把这一题的答话记下并走到下一题，最后一题答完才把整份答复交回去（D107）。
   // 空着回车也往前走：那一题在宿主那里记成「没有回答」，模型读到的就是没答，不是界面替它编的一个答案。
@@ -1523,7 +1574,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
 
   // 候选每次从当前草稿算出来：草稿改一个字清单就跟着变，不需要再维护一份状态（D81）。
   const templates = status?.templates ?? [];
-  const picks = dismissedAt === draft || search !== null || detail !== null || sessionPicker !== null || ask !== null || query !== null ? [] : candidatesOf(draft, templates, undefined, locale);
+  const picks = panel !== null || dismissedAt === draft || search !== null || detail !== null || sessionPicker !== null || ask !== null || query !== null ? [] : candidatesOf(draft, templates, undefined, locale);
   const chosen = picks.length === 0 ? 0 : Math.min(pick, picks.length - 1);
   const searched = search === null ? [] : searchHistory(entries, search.query);
   const viewLines = useMemo(() => detail === null ? [] : transcriptLines(detail.rows, Math.max(1, geometry.columns - 6), locale), [detail?.rows, geometry.columns, locale]);
@@ -1546,8 +1597,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
 
   useInput((input, key) => {
     if (hit('quit', input, key)) {
-      app.exit();
+      exitTui();
       return;
+    }
+    if (panel !== null) return;
+    if (ask === null && query === null) {
+      if (hit('model-picker', input, key)) { openPicker('model'); return; }
+      if (hit('mode-picker', input, key)) { openPicker('mode'); return; }
+      if (hit('policy-picker', input, key)) { openPicker('policy'); return; }
     }
     if (hit('expand-or-history', input, key)) {
       if (ask !== null) setApprovalExpanded((current) => !current);
@@ -1819,19 +1876,25 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   // 整段粘贴走 Ink 的另一条通道：这一条开着时它替终端打上 bracketed paste，粘进来的那一段是一整串文本，
   // 不会被拆成一串按键——所以粘贴里的换行不会发一轮，审批框上的 `y` 也不会被粘贴按下去（方案 5.1、5.4）。
   usePaste((text) => {
+    if (panel !== null) return;
     const inserted = editDraft(draft, caret, text.replace(/\r\n?/g, '\n'), {});
     setDraft(inserted.draft);
     setCaret(inserted.caret);
   }, { isActive: interactive });
 
   const shownModel = status?.model ?? info.model;
-  const head = shownModel === undefined || shownModel === null ? '' : `${shownModel}${status?.pendingModel ? `→${status.pendingModel}` : ''} · `;
   const foldedLive = foldText(live.reasoning, expanded, 1);
 
   return h(Fragment, null,
     // 一换会话就重画整份：`Static` 只补索引往后新增的行，接上来的那一份记录比当前这一份短时，
     // 不加这个 key 就一条都画不出来（第 44 步）。会话 id 正是这一串行的归属，拿它当 key 不用另记一个计数。
-    h(Static<TranscriptItem>, { key: sessionId, items: rows, children: (row, index) => h(Box, { key: index, flexDirection: 'column' }, h(Row, { row, expanded: false, columns: geometry.columns, locale })) }),
+    h(Static<TranscriptItem>, { key: sessionId, items: sessionId === firstSessionId ? [{ kind: 'welcome', text: '' }, ...rows] : rows, children: (row, index) => row.kind === 'welcome'
+      ? h(Box, { key: index, flexDirection: 'column', alignItems: 'center', marginY: 1 },
+          h(Text, { bold: true, color: 'green' }, `❧  ligule  v${VERSION}`),
+          h(Text, null, t('欢迎使用 Ligule', 'Welcome to Ligule')),
+          h(Text, { wrap: 'truncate-middle' }, titleText({ boundary: info.boundary, sessionId: '' })),
+          h(Text, { dimColor: true }, t('输入 /help 查看命令与快捷键', 'Type /help for commands and shortcuts')))
+      : h(Box, { key: index, flexDirection: 'column' }, h(Row, { row, expanded: false, columns: geometry.columns, locale })) }),
     foldedLive.shown === '' ? null : h(Text, { dimColor: true, wrap: 'truncate-end' }, t(`· 推理 ${foldedLive.shown}${foldedLive.hidden > 0 ? ` …还有 ${foldedLive.hidden} 字` : ''}`, `· Reasoning ${foldedLive.shown}${foldedLive.hidden > 0 ? ` …${foldedLive.hidden} more characters` : ''}`)),
     live.text === '' || detail !== null ? null : h(MarkdownRows, { text: live.text, columns: geometry.columns }),
     ask === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'yellow', paddingX: 1 },
@@ -1894,16 +1957,26 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       mention.paths.length > 0 && mention.stopped === 'unreadable'
         ? h(Text, { dimColor: true }, t('  有目录无法读取，列表不完整', '  Some directories are unreadable; list is incomplete')) : null,
       mention.paths.length === 0 ? null : h(Text, { dimColor: true }, t(` ${keyHint('pick-path', 'pick-path-alt')} 选中 · ${keyHint('path-up', 'path-down')} 选择 · ${keyHint('path-close')} 收起`, ` ${keyHint('pick-path', 'pick-path-alt')} insert · ${keyHint('path-up', 'path-down')} select · ${keyHint('path-close')} close`))),
-    h(Box, null,
+    h(HelpPanel, { active: panel === 'help', interactive, templates, locale, columns: geometry.columns - 4, height: Math.max(1, geometry.rows - 13), onClose: closePanel }),
+    h(ChoicePanel, {
+      active: panel !== null && panel !== 'help', interactive,
+      title: panel === 'model' ? t('选择模型', 'Select model') : panel === 'mode' ? t('选择工具模式', 'Select tool mode') : t('选择审批方式', 'Select approval mode'),
+      options: choices,
+      selected: panel === 'model' ? `${status?.serviceId}:${status?.selectedModel ?? status?.model}` : panel === 'mode' ? status?.mode ?? undefined : status?.policy,
+      locale, columns: geometry.columns - 4, height: Math.max(1, Math.min(7, geometry.rows - 16)), loading: choicesLoading, onClose: closePanel, onSelect: (choice: PanelChoice) => chooseOption(choice.id),
+    }),
+    h(Box, { flexDirection: 'column', borderStyle: 'single', borderTop: true, borderBottom: true, borderLeft: false, borderRight: false, borderColor: running ? 'yellow' : 'cyan', paddingX: 1 }, h(Box, null,
       h(Text, { color: running ? 'yellow' : 'cyan' }, running ? `${SPINNER[tick % SPINNER.length]} ` : '› '),
       draft === '' && !running
         ? h(Text, { dimColor: true }, t(`描述任务 · ${keyHint('send')} 发送 · ${keyHint('newline')} 换行 · / 命令 · @ 文件`, `Describe a task · ${keyHint('send')} send · ${keyHint('newline')} new line · / commands · @ files`))
         : h(Text, { wrap: 'wrap' },
           draft.slice(0, caret),
           h(Text, { inverse: true }, caretText),
-          draft.slice(caret + (caret === draft.length ? 0 : caretText.length)))),
+          draft.slice(caret + (caret === draft.length ? 0 : caretText.length))))),
+    h(Text, { wrap: 'wrap' },
+      t(`模型 ${shownModel ?? '未配置'}${status?.pendingModel ? `→${status.pendingModel}` : ''} ${keyHint('model-picker')}  ·  工具模式 ${status?.mode ?? '—'}${status?.pendingMode ? `→${status.pendingMode}` : ''} ${keyHint('mode-picker')}  ·  审批 ${status?.policy === 'auto' ? '自动判定' : '逐次审批'} ${keyHint('policy-picker')}`, `Model ${shownModel ?? 'not configured'}${status?.pendingModel ? `→${status.pendingModel}` : ''} ${keyHint('model-picker')}  ·  Tools ${status?.mode ?? '—'}${status?.pendingMode ? `→${status.pendingMode}` : ''} ${keyHint('mode-picker')}  ·  Approval ${status?.policy === 'auto' ? 'auto' : 'ask'} ${keyHint('policy-picker')}`)),
     h(Text, { dimColor: true, wrap: 'truncate-end' }, buildStatusLine({
-      head, sessionId, boundary: info.boundary, status, running, seconds, expanded, columns: stdout?.columns, locale,
+      sessionId, boundary: info.boundary, status, running, seconds, expanded, columns: stdout?.columns, locale,
     })),
   );
 }

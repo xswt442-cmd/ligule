@@ -10,6 +10,7 @@ import { hostProviderFromConfig } from '../dist/host/host.js';
 import { listSessions } from '../dist/session/list.js';
 import { createSessionLog } from '../dist/session/session.js';
 import { runTui } from '../dist/tui/start.js';
+import { readInput } from '../dist/tui/input-store.js';
 import { completeFrame } from './helpers/frames.js';
 import { waitFor, withTuiHost } from './helpers/tui-host.js';
 
@@ -98,6 +99,8 @@ test('runTui starts without a model, records the failed turn, stays usable, and 
     await typeAndSubmit(terminal, '/help');
     await waitFor(() => visible(terminal, '/resume <id> [mode]'), { within: 10_000, read: terminal.allOutput });
     assert.equal(finished, false, 'help remains available after the failed turn');
+    terminal.stdin.write('\u001b');
+    await waitFor(() => terminal.frame().includes('Describe a task') && !terminal.frame().includes('Prompt templates'), { within: 10_000, read: terminal.allOutput });
 
     await typeAndSubmit(terminal, '/quit');
     await waitFor(() => finished, { within: 10_000, read: terminal.allOutput });
@@ -106,6 +109,7 @@ test('runTui starts without a model, records the failed turn, stays usable, and 
     const nextOwner = createSessionLog({ directory: sessionDirectory, id: sessions[0].id });
     await nextOwner.acquire();
     await nextOwner.close();
+    assert.deepEqual(await readInput(join(directory, 'inputs.jsonl'), projectDirectory, sessions[0].id), { projectRoot: projectDirectory, sessionId: sessions[0].id, draft: '', queued: [] });
   } finally {
     if (!finished) {
       terminal.stdin.write('\u0003');
@@ -116,6 +120,41 @@ test('runTui starts without a model, records the failed turn, stays usable, and 
     terminal.stdout.end();
     terminal.stderr.end();
     await rm(absoluteDirectory, { recursive: true, force: true });
+  }
+});
+
+test('Ctrl+C saves a fresh unsent draft before the debounce interval', { timeout: 20_000 }, async () => {
+  const scratch = resolve('testplace/tmp');
+  await mkdir(scratch, { recursive: true });
+  const directory = await mkdtemp(join(scratch, 'tui-exit-'));
+  const projectDirectory = join(directory, 'project');
+  const sessionDirectory = join(directory, 'sessions');
+  await mkdir(projectDirectory);
+  const config = createConfig({ user: { boundary: projectDirectory, workspaceRoot: projectDirectory, host: { sessionDirectory } } });
+  const terminal = await createTerminal();
+  let finished = false;
+  const running = runTui({
+    config, provider: hostProviderFromConfig(config),
+    modeName: DEFAULT_MODE, modePaths: modeDirectories(projectDirectory, fileURLToPath(new URL('../modes/', import.meta.url))),
+    locale: 'en', stdout: terminal.stdout, stdin: terminal.stdin, stderr: terminal.stderr,
+    historyFile: join(directory, 'history.jsonl'), inputFile: join(directory, 'inputs.jsonl'), keyFile: join(directory, 'keys.json'),
+  }).finally(() => { finished = true; });
+  try {
+    await waitFor(() => visible(terminal, 'Describe a task'), { within: 10_000, read: terminal.allOutput });
+    terminal.stdin.write('unsent fresh draft');
+    await waitFor(() => visible(terminal, '› unsent fresh draft'), { within: 10_000, read: terminal.allOutput });
+    terminal.stdin.write('\u0003');
+    await running;
+    const sessions = await listSessions(sessionDirectory, { projectRoot: projectDirectory });
+    assert.equal(sessions.length, 1);
+    assert.deepEqual(await readInput(join(directory, 'inputs.jsonl'), projectDirectory, sessions[0].id), { projectRoot: projectDirectory, sessionId: sessions[0].id, draft: 'unsent fresh draft', queued: [] });
+  } finally {
+    if (!finished) terminal.stdin.write('\u0003');
+    await running;
+    terminal.stdin.end();
+    terminal.stdout.end();
+    terminal.stderr.end();
+    await rm(directory, { recursive: true, force: true });
   }
 });
 

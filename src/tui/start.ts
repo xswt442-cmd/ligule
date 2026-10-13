@@ -13,6 +13,8 @@ import { flushHistory, historyPathOf, loadHistory, pushHistory, rememberHistory 
 import { flushInput, inputPathOf, readInput, rememberInput } from './input-store.js';
 import { flushKeys, keyPathOf, readKeys, writeKeys } from './key-store.js';
 import { titleEscape } from './output.js';
+import { setTrusted } from './trust-store.js';
+import { modeOptions } from './mode-options.js';
 
 type ServeOptions = Parameters<typeof serveHost>[0];
 
@@ -68,10 +70,12 @@ export async function runTui({ config, provider, policy, logger, modeName, modeP
         interactive: Boolean(stdin.isTTY && stdout.isTTY),
         // 个人键位存在本机另一份文件里：读与写同样由启动这一侧接出去，界面不认识路径（方案 6.1）。
         keys: { read: () => readKeys(keyFile), write: (overrides: Parameters<typeof writeKeys>[1]) => writeKeys(keyFile, overrides) },
+        trust: { revoke: () => setTrusted(String(config.workspaceRoot ?? config.boundary), false) },
+        modes: modePaths === undefined ? undefined : { read: () => modeOptions(modePaths) },
         // 状态行按宽度取舍要看终端列数（D40），界面自己不读进程。
         stdout,
       }),
-      { stdout, stdin, stderr },
+      { stdout, stdin, stderr, exitOnCtrlC: false },
     );
     await instance.waitUntilExit();
   } finally {
