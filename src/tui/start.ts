@@ -75,7 +75,8 @@ export async function runTui({ config, provider, policy, logger, modeName, modeP
         // 状态行按宽度取舍要看终端列数（D40），界面自己不读进程。
         stdout,
       }),
-      { stdout, stdin, stderr, exitOnCtrlC: false },
+      // CI 默认让 Ink 关闭交互渲染；真正的终端和测试模拟 TTY 都必须显式开启。
+      { stdout, stdin, stderr, exitOnCtrlC: false, interactive: Boolean(stdin.isTTY && stdout.isTTY) },
     );
     await instance.waitUntilExit();
   } finally {
