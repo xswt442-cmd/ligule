@@ -1025,10 +1025,10 @@ export function createHost({
       // 头部解不开与被同名压掉的那一份都不静默：装载侧留一条日志，提示词里那一段说明也带上计数（D49、D57）。
       logger?.log?.('skill is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
     }
-    const loaded = skills.skills.length === 0 ? plugins : [...plugins, createSkillPlugin(skills)];
     // MCP 的两件固定工具按配置里有没有服务器登记（D52、D60）：一件都没配时这一格是空的，模型可见清单不涨。
     const mcp = createMcpRegistry(mcpConfigs);
     cleanup.push(() => mcp.close());
+    const loaded = skills.skills.length === 0 ? plugins : [...plugins, createSkillPlugin(skills, () => mcp.servers())];
     // 提示模板也是装载侧扫出来的事实（D45）：两处目录，靠近仓库的那一份胜出。展开发生在这一侧，
     // 三个客户端因此不必各写一份替换规则（D54）。
     const templates = templateRegistry ?? await discoverTemplates(templateDirectories(env.projectRoot));

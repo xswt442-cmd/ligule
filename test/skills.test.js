@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_LIMITS, MESSAGES_CAPABILITIES, DEFAULT_MODE, SKILL_METADATA_BUDGET_BYTES,
   createConnection, createConfig, createKernel, createMemoryConnectionPair, createSessionLog, createSkillPlugin,
-  discoverSkills, formatSkillCatalog, loadAssembly, minimalPlugin, modeDirectories, searchSkills,
+  discoverSkills, formatSkillCatalog, loadAssembly, minimalPlugin, modeDirectories, mcpServerConfigs, searchSkills,
   serveHost, skillDirectories,
 } from '../dist/index.js';
 
@@ -49,7 +49,7 @@ function kernelWithSkills(registry, options = {}) {
     config: createConfig({ user: { boundary: process.cwd(), limits: options.limits } }),
     session: options.session,
   });
-  loadAssembly(kernel, [minimalPlugin, createSkillPlugin(registry)]);
+  loadAssembly(kernel, [minimalPlugin, createSkillPlugin(registry, options.mcpServers)]);
   return kernel;
 }
 
@@ -153,6 +153,25 @@ test('a declared capability that is not there stops activation and changes nothi
     // 声明不产生工具也不改档位：登记表与之前一字不差（D51、I4）。
     assert.deepEqual(kernel.list(), before);
     assert.match((await kernel.call('skill', { action: 'activate', name: 'needs-read' })).text, /body/);
+  });
+});
+
+test('a skill can require a configured MCP server without connecting it or granting its tools', async () => {
+  await withSkills(async ({ directories, place }) => {
+    await place(0, 'needs-filesystem-mcp', `${header({ name: 'needs-filesystem-mcp', requires: 'read mcp:fs' })}Use the configured filesystem server when needed.\n`);
+    const registry = await discoverSkills(directories);
+    const mcpConfigs = mcpServerConfigs({ mcp: { servers: { fs: { command: process.execPath } } } });
+    const unavailable = kernelWithSkills(registry);
+    const unavailableError = await unavailable.call('skill', { action: 'activate', name: 'needs-filesystem-mcp' }).catch((error) => error);
+    assert.equal(unavailableError.code, 'skill_missing_capability');
+    assert.match(unavailableError.detail, /mcp:fs/);
+
+    const available = kernelWithSkills(registry, { mcpServers: () => mcpConfigs.map((server) => server.name) });
+    const before = available.list();
+    const activated = await available.call('skill', { action: 'activate', name: 'needs-filesystem-mcp' });
+    assert.match(activated.text, /Use the configured filesystem server when needed/);
+    assert.deepEqual(available.list(), before, 'a requirement check never registers the server or tool');
+    assert.deepEqual(mcpConfigs.map((server) => server.name), ['fs']);
   });
 });
 
