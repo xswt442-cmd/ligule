@@ -7,7 +7,19 @@ async function boot(): Promise<void> {
   if (cli === undefined || !process.connected) throw new Error('desktop_host_entry_invalid');
   const absoluteCli = resolve(cli);
   process.once('disconnect', () => {
-    const orphanTimer = setTimeout(() => process.exit(1), 12_000);
+    const orphanTimer = setTimeout(() => {
+      if (process.platform === 'win32') {
+        process.exit(1);
+        return;
+      }
+      // POSIX 上 HostController 会 detached 启动本进程，PID 也是共享给工具后代的进程组 ID。
+      try {
+        process.kill(-process.pid, 'SIGKILL');
+      } catch (error) {
+        if (error === null || typeof error !== 'object' || !('code' in error) || error.code !== 'ESRCH') throw error;
+        process.exit(1);
+      }
+    }, 12_000);
     orphanTimer.unref();
   });
   if (process.platform === 'win32') {

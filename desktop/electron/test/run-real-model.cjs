@@ -247,7 +247,7 @@ async function recordReport(exitCode) {
     platform: process.platform,
     release: require('node:os').release(),
     electron: process.versions.electron,
-    hostNode: require('node:child_process').execFileSync(join(desktopRoot, 'vendor', 'node', 'node.exe'), ['--version'], { encoding: 'utf8', windowsHide: true }).trim(),
+    hostNode: require('node:child_process').execFileSync(join(desktopRoot, 'vendor', 'node', process.platform === 'win32' ? 'node.exe' : 'node'), ['--version'], { encoding: 'utf8', windowsHide: process.platform === 'win32' }).trim(),
     applicationPage: security.APP_PAGE,
     provider: providerLabel,
     workspace: workspaceRoot,
