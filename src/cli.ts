@@ -24,6 +24,7 @@ import { minimalPlugin } from './tools/minimal.js';
 import { networkPlugin } from './tools/network.js';
 import { createHost, providerFromConfig, hostProviderFromConfig, serveHost } from './host/host.js';
 import { KernelError } from './kernel/error.js';
+import { runtimeFailureText } from './tui/errors.js';
 import type { ConfigSnapshot } from './kernel/config.js';
 import { isPolicyRule, type PolicyMode, type PolicyThresholds } from './kernel/policy.js';
 import type { PolicyRule } from './kernel/config-edit.js';
@@ -274,7 +275,8 @@ async function installedKernel() {
 
 // 码是给脚本分支的，后面那一句是给站在终端前的人看的（D19 把码与文本分开就是为了两边各取一样）。
 function printFailure(code: string, detail?: string): void {
-  console.error(detail === undefined || detail === '' ? code : `${code}: ${detail}`);
+  const guidance = runtimeFailureText(code, locale ?? languageOf('auto'));
+  console.error(guidance === undefined ? (detail === undefined || detail === '' ? code : `${code}: ${detail}`) : `${code}: ${guidance}`);
   process.exitCode = 1;
 }
 
@@ -624,7 +626,7 @@ if (invalidLanguage) {
       // 开发版把界面拖贵了一倍：两千条记录的转录下提交一行是 2.6 毫秒对 1.4 毫秒，进程常驻 155 MiB 对 114 MiB。
       process.env.NODE_ENV = 'production';
       const { runTui } = await import('./tui/start.js');
-      await runTui({ config, provider: providerFromConfig(config), policy: config.policy, extensions, locale, ...resolveMode(config) });
+      await runTui({ config, provider: hostProviderFromConfig(config), policy: config.policy, extensions, locale, ...resolveMode(config) });
     } catch (error) {
       const fields = errorFields(error);
       const missing = fields.code === 'ERR_MODULE_NOT_FOUND' && /Cannot find package '(ink|react|marked|highlight\.js|string-width)'/.test(fields.message ?? String(error));

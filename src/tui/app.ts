@@ -11,6 +11,7 @@ import { searchHistory } from './history.js';
 import { editInExternalEditor } from './editor.js';
 import { copyToClipboard, lastAnswer } from './clipboard.js';
 import { titleEscape, titleText } from './output.js';
+import { runtimeFailureText } from './errors.js';
 import { markdownLines } from './markdown.js';
 import { selectedText, transcriptLines, viewportPosition, wrapLine } from './viewport.js';
 import { CURRENT, ENGLISH_LABELS, ENGLISH_VIEWS, KEYMAP, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec } from './keymap.js';
@@ -31,6 +32,7 @@ import type { BranchResult } from '../session/branch.js';
 import type { SearchHit } from '../session/search.js';
 import type { ModelSelection, ModelService } from '../kernel/model-services.js';
 import type { LoopResult } from '../kernel/loop.js';
+import type { CredentialStatus } from '../kernel/credentials.js';
 
 const SPINNER = ['⠋', '⠙', '', '⠸', '⠼', '⠴', '⠦', '', '⠇', '⠏'];
 const FOLD_LINES = 3;
@@ -200,7 +202,7 @@ interface SessionPage {
 interface TuiConfigResult extends Record<string, unknown> {
   readonly services: ModelService[];
   readonly selection: ModelSelection | null;
-  readonly model?: { readonly model?: string };
+  readonly model?: { readonly model?: string; readonly apiKeyEnv?: string };
 }
 
 interface TuiRequestResults {
@@ -219,6 +221,7 @@ interface TuiRequestResults {
   readonly 'status.get': TuiStatus;
   readonly 'model.select': { readonly model: string | null; readonly serviceId: string; readonly when: 'now' | 'round' };
   readonly 'config.get': TuiConfigResult;
+  readonly 'credentials.status': CredentialStatus;
   readonly 'mode.set': { readonly mode: string | null; readonly layer: string | null; readonly pending: string | null; readonly tools: string[] };
   readonly 'policy.set': { readonly policy: string; readonly policySource: string; readonly policyDefault: string };
   readonly 'session.compact': { readonly sessionId: string; readonly [key: string]: unknown };
@@ -340,7 +343,8 @@ export function projectRecord(record: TuiRecord, locale: Locale = 'zh'): Transcr
   if (record.kind === 'turn') {
     const names: Readonly<Record<string, readonly [string, string]>> = { completed: ['本轮已完成', 'Turn completed'], cancelled: ['本轮已取消', 'Turn cancelled'], failed: ['本轮失败', 'Turn failed'], interrupted: ['本轮意外中断', 'Turn interrupted'] };
     const label = typeof record.status === 'string' ? names[record.status] : undefined;
-    return label === undefined ? [] : [{ kind: 'meta', text: `${chooseText(locale, label[0], label[1])}${typeof record.code === 'string' ? ` (${record.code})` : ''}` }];
+    const guidance = typeof record.code === 'string' ? runtimeFailureText(record.code, locale) : undefined;
+    return label === undefined ? [] : [{ kind: record.status === 'failed' ? 'error' : 'meta', text: `${chooseText(locale, label[0], label[1])}${typeof record.code === 'string' ? ` (${record.code})` : ''}${guidance === undefined ? '' : `\n${guidance}`}` }];
   }
   // 人打的那一行原样画出来（D54）：展开后的那一份是给模型的，回看时要对得上当时敲了什么。
   if (record.kind === 'user') return [{ kind: 'question', text: typeof record.raw === 'string' ? record.raw : typeof record.text === 'string' ? record.text : '' }];
@@ -877,7 +881,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       // 落在等一个人回答的那一次提问上才是 `ask_user_cancelled`：人要读的是同一句——这一轮是他停下来的（方案 5.2、D107）。
       if (!terminalReceived.current) {
         if (code === 'loop_cancelled' || code === 'provider_cancelled' || code === 'ask_user_cancelled') push({ kind: 'meta', text: t('本轮已取消', 'Turn cancelled') });
-        else push({ kind: 'error', text: t(`运行失败：${code}`, `Run failed: ${code}`) });
+        else push({ kind: 'error', text: `${t(`运行失败：${code}`, `Run failed: ${code}`)}${runtimeFailureText(code, locale) === undefined ? '' : `\n${runtimeFailureText(code, locale)}`}` });
       }
     } finally {
       setAsk(null);
@@ -1263,6 +1267,29 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         });
         } finally {
           setRunning(false);
+        }
+      })();
+      return;
+    }
+    if (name === 'credentials') {
+      void (async () => {
+        try {
+          const [current, config] = await Promise.all([
+            client.request('status.get', { sessionId }),
+            client.request('config.get', { projectRoot: info.boundary }),
+          ]);
+          const service = config.services.find(item => item.id === current.serviceId);
+          const reference = service?.apiKeyEnv ?? config.model?.apiKeyEnv ?? 'LIGULE_API_KEY';
+          const credential = await client.request('credentials.status', { reference });
+          const source = credential.source === 'environment' ? t('环境变量', 'environment') : credential.source === 'keyring' ? t('系统凭据', 'OS credential store') : t('未设置', 'not set');
+          push({ kind: credential.configured ? 'meta' : 'error', text: [
+            `${t('模型', 'Model')}: ${current.selectedModel ?? current.model ?? t('未选择', 'not selected')}`,
+            `${t('凭据引用', 'Credential reference')}: ${reference} · ${source}`,
+            ...(credential.configured ? [] : [runtimeFailureText('provider_credential_missing', locale) ?? 'provider_credential_missing']),
+          ].join('\n') });
+        } catch (error) {
+          const code = errorCode(error) ?? 'credential_status_failed';
+          push({ kind: 'error', text: `${code}\n${runtimeFailureText(code, locale) ?? t('无法检查凭据状态', 'Could not check credential status')}` });
         }
       })();
       return;
