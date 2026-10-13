@@ -14,6 +14,15 @@ import type { PolicyRule } from './config-edit.js';
 
 export type PolicyMode = 'ask' | 'auto';
 export type PolicyModeSource = 'config' | 'session';
+
+export function isPolicyRule(value: unknown): value is PolicyRule {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  return 'tool' in value && typeof value.tool === 'string'
+    && 'decision' in value && (value.decision === 'allow' || value.decision === 'deny')
+    && (!('match' in value) || value.match === undefined || typeof value.match === 'string')
+    && (!('reason' in value) || value.reason === undefined || typeof value.reason === 'string');
+}
+
 export interface PolicyThresholds {
   readonly consecutive: number;
   readonly total: number;

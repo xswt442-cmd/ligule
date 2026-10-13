@@ -25,7 +25,7 @@ import { networkPlugin } from './tools/network.js';
 import { createHost, providerFromConfig, hostProviderFromConfig, serveHost } from './host/host.js';
 import { KernelError } from './kernel/error.js';
 import type { ConfigSnapshot } from './kernel/config.js';
-import type { PolicyMode, PolicyThresholds } from './kernel/policy.js';
+import { isPolicyRule, type PolicyMode, type PolicyThresholds } from './kernel/policy.js';
 import type { PolicyRule } from './kernel/config-edit.js';
 import type { Connection } from './host/connection.js';
 import type { ModeDirectories } from './kernel/modes.js';
@@ -83,14 +83,6 @@ function responseString(value: Record<string, unknown>, field: string): string {
 function responseCount(value: Record<string, unknown>, field: string): number {
   if (typeof value[field] !== 'number' || !Number.isFinite(value[field])) throw new KernelError('host_response_invalid', { detail: `${field} must be a number` });
   return value[field];
-}
-
-function isPolicyRule(value: unknown): value is PolicyRule {
-  return isRecord(value)
-    && typeof value.tool === 'string'
-    && (value.decision === 'allow' || value.decision === 'deny')
-    && (value.match === undefined || typeof value.match === 'string')
-    && (value.reason === undefined || typeof value.reason === 'string');
 }
 
 function policyOf(value: unknown): CliPolicy | undefined {

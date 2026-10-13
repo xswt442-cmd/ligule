@@ -15,7 +15,7 @@ import { historyPathOf, loadHistory, rememberHistory } from '../kernel/input-his
 import { parsePrefsJson, prefsPathOf, readPrefs, savePrefs } from '../kernel/desktop-prefs.js';
 import { credentialStatus, deleteCredential, storeCredential } from '../kernel/credentials.js';
 import { modelServices, modelSelection, resolveModel, type ModelSelection } from '../kernel/model-services.js';
-import { createDecisionChain, type DecisionChain, type PolicyMode, type PolicyThresholds } from '../kernel/policy.js';
+import { createDecisionChain, isPolicyRule, type DecisionChain, type PolicyMode, type PolicyThresholds } from '../kernel/policy.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
 import { createSessionLog, type SessionLog } from '../session/session.js';
@@ -232,14 +232,6 @@ function modelSelectionOf(model: Record<string, unknown>): ModelSelection | unde
   return isRecord(model.selection) && typeof model.selection.provider === 'string' && typeof model.selection.model === 'string'
     ? { provider: model.selection.provider, model: model.selection.model }
     : undefined;
-}
-
-function isPolicyRule(value: unknown): value is PolicyRule {
-  return isRecord(value)
-    && typeof value.tool === 'string'
-    && (value.decision === 'allow' || value.decision === 'deny')
-    && (value.match === undefined || typeof value.match === 'string')
-    && (value.reason === undefined || typeof value.reason === 'string');
 }
 
 // 会话名字的上限：列表那一行还要放得下时间与条数，名字过长就该换一份短的（实现顺序第 75 步）。
