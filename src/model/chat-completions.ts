@@ -170,7 +170,8 @@ export function createChatCompletionsProvider({
     let usage: JsonRecord | undefined;
     for await (const rawChunk of parseSse(response.body)) {
       const chunk = asRecord(rawChunk, 'a stream chunk is not an object');
-      if (chunk.usage !== undefined) usage = asRecord(chunk.usage, 'a stream usage value is not an object');
+      // 普通分片的 usage 可以为 null；只有实际用量对象进入累计结果。
+      if (chunk.usage !== undefined && chunk.usage !== null) usage = asRecord(chunk.usage, 'a stream usage value is not an object');
       const choices = Array.isArray(chunk.choices) ? chunk.choices : [];
       for (const rawChoice of choices) {
         const choice = asRecord(rawChoice, 'a stream choice is not an object');
