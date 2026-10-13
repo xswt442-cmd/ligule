@@ -7,6 +7,7 @@ import { spillContent } from '../kernel/result.js';
 import { KernelError } from '../kernel/error.js';
 import type { SessionEvent } from './format.js';
 import { estimateRequest, estimateTokens, usageEvent } from './usage.js';
+import type { LoopCompactionRequest, ModelProvider, ModelRequest, ModelTool, ProviderEvent } from '../kernel/loop.js';
 export { estimateRequest, estimateTokens } from './usage.js';
 
 // 切点：从后往前累加，越过保留预算之后那一条之后的第一个 user 或 assistant 就是切点。
@@ -65,7 +66,7 @@ function fitExcerpt(text: string, budgetTokens: number): string {
 }
 
 export function createCompaction({ provider, session, directory, id, limits, logger, requestPrefix = () => ({ system: '', tools: [] }) }: {
-  provider: { stream: (request: unknown, options?: { signal?: AbortSignal }) => AsyncIterable<unknown> };
+  provider: ModelProvider;
   session: {
     read: () => Promise<SessionEvent[]>;
     modelView: () => Promise<unknown[]>;
@@ -76,7 +77,7 @@ export function createCompaction({ provider, session, directory, id, limits, log
   id: string;
   limits: { contextTokens: number; compactThresholdRatio: number; compactRetainRatio: number; resultBytes: number };
   logger?: { log?: (message: string, fields?: Record<string, unknown>) => void };
-  requestPrefix?: () => { system: string; tools: unknown };
+  requestPrefix?: () => { system: string; tools: readonly ModelTool[] };
 }) {
   if (!(limits.compactRetainRatio < limits.compactThresholdRatio)) {
     throw new Error('compaction_retain_must_be_below_threshold');
@@ -115,12 +116,16 @@ export function createCompaction({ provider, session, directory, id, limits, log
     // 那一次的请求自己也要放进窗口：预算按修正后的量法算，否则系数大的那一份会把摘要请求本身顶超长。
     const excerpt = `${previous === undefined ? '' : `Earlier summary:\n${previous}\n\n`}${fitExcerpt(flatten(events), Math.max(1, Math.floor((threshold - 1024) / factor)))}`;
     const parts: string[] = [];
+    const request: ModelRequest = {
+      system: '',
+      tools: [],
+      messages: [{ role: 'user', text: `${INSTRUCTION}${excerpt}` }],
+    };
     for await (const event of provider.stream(
-      { system: '', tools: [], messages: [{ role: 'user', text: `${INSTRUCTION}${excerpt}` }] },
+      request,
       { signal },
     )) {
-      const piece = event as { type?: string; text?: string };
-      if (piece?.type === 'text') parts.push(piece.text ?? '');
+      if (event.type === 'text') parts.push(event.text);
     }
     return parts.join('').trim();
   }
@@ -228,7 +233,7 @@ export function createCompaction({ provider, session, directory, id, limits, log
     compactNow: (signal?: AbortSignal) => compact(signal),
 
     // 请求拼好之后量一次压力：越线就先压一次，压完了用新投影。
-    async prepare(request: { system: string; tools: unknown; messages: unknown[] }, signal?: AbortSignal): Promise<unknown[]> {
+    async prepare(request: LoopCompactionRequest, signal?: AbortSignal): Promise<unknown[]> {
       await seedFromRecord();
       if (estimateRequest(request) * factor <= threshold) return request.messages;
       const done = await compact(signal);
@@ -237,7 +242,7 @@ export function createCompaction({ provider, session, directory, id, limits, log
     },
 
     // 超长那条：整个运行只试一次；不是超长、压过一次的、或压不成的都交回 null，让原来那个错误说话。
-    async recover(error: unknown, request: { system: string; tools: unknown; messages: unknown[] }, signal?: AbortSignal): Promise<unknown[] | null> {
+    async recover(error: unknown, request: LoopCompactionRequest, signal?: AbortSignal): Promise<unknown[] | null> {
       if (overflowTried || !isOverflow(error)) return null;
       overflowTried = true;
       logger?.log?.('context reported overflow, compacting once', {
@@ -255,7 +260,7 @@ export function createCompaction({ provider, session, directory, id, limits, log
 
     // 端点交回真实用量时用它修正本地估算（低估会让压力那条永远不响），并把这一格落进记录（D82）。
     // 端点读数与本地估算都包含系统提示、工具定义与消息，固定前缀不会被当作历史的增长比例。
-    async observe(request: { system?: string; tools?: unknown; messages: unknown[] }, events: unknown[]): Promise<void> {
+    async observe(request: LoopCompactionRequest, events: ProviderEvent[]): Promise<void> {
       const usage = usageEvent(request, events);
       if (usage === null) return;
       // 这一次报回的比记录里那一条更近，不必再从历史算。

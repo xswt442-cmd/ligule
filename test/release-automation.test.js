@@ -56,7 +56,7 @@ async function fixture() {
   await writeJson(join(directory, 'desktop', 'frontend', 'package-lock.json'), lockfile('ligule-desktop-frontend', version));
   await writeJson(join(directory, 'desktop', 'src-tauri', 'tauri.conf.json'), { version });
   await mkdir(join(directory, 'src'), { recursive: true });
-  await writeFile(join(directory, 'src', 'version.js'), `// Keep this comment.\nexport const VERSION = '${version}';\n`, 'utf8');
+  await writeFile(join(directory, 'src', 'version.ts'), `// Keep this comment.\nexport const VERSION = '${version}';\n`, 'utf8');
   await mkdir(join(directory, 'desktop', 'src-tauri'), { recursive: true });
   await writeFile(join(directory, 'desktop', 'src-tauri', 'Cargo.toml'), `[package]\nname = "ligule-desktop"\nversion = "${version}"\nedition = "2021"\n\n[dependencies]\n# Keep dependency notes.\n`, 'utf8');
   await writeFile(join(directory, 'desktop', 'src-tauri', 'Cargo.lock'), `version = 4\n\n[[package]]\nname = "ligule-desktop"\nversion = "${version}"\n\n[[package]]\nname = "other"\nversion = "1.0.0"\n`, 'utf8');
@@ -97,8 +97,8 @@ test('release preparation updates package, lock, Tauri, Cargo, and runtime versi
     for (const path of ['RELEASE.zh-cn.md', 'RELEASE.en.md']) {
       assert.match(await readFile(join(directory, 'docs/development', path), 'utf8'), /\| `ligule` \| package \| `0\.0\.2` \|/);
     }
-    assert.match(await readFile(join(directory, 'src/version.js'), 'utf8'), /Keep this comment/);
-    assert.match(await readFile(join(directory, 'src/version.js'), 'utf8'), /VERSION = '0\.0\.2'/);
+    assert.match(await readFile(join(directory, 'src/version.ts'), 'utf8'), /Keep this comment/);
+    assert.match(await readFile(join(directory, 'src/version.ts'), 'utf8'), /VERSION = '0\.0\.2'/);
     const changelog = await readFile(join(directory, 'CHANGELOG.md'), 'utf8');
     assert.match(changelog, /^## \[Unreleased\]\n\n### 简体中文[\s\S]*?## \[0\.0\.2\]/m);
     assert.match(changelog, /^## \[0\.0\.2\] - \d{4}-\d{2}-\d{2}$/m);
@@ -162,6 +162,11 @@ test('release workflows separate version PRs, tag creation, npm publication, and
   assert.equal(publishWorkflow.jobs.platforms, undefined, 'platform binaries are supplied by @vscode/ripgrep');
   assert.ok(publishWorkflow.jobs.verify.steps.some((step) => step.run === 'npm run build'),
     'the tarball verifier needs the tagged host entry points in its clean checkout');
+  const syntaxCheck = publishWorkflow.jobs.checks.steps.find((step) => step.name === 'syntax check compiled modules and checks');
+  assert.match(syntaxCheck.run, /find dist -type f -name '\*\.js'/,
+    'release checks must syntax-check the emitted JavaScript after the TypeScript build');
+  assert.doesNotMatch(syntaxCheck.run, /src\/\*\.js/,
+    'release checks must not require TypeScript source to have JavaScript filenames');
   assert.ok(publishWorkflow.jobs.npm.needs.includes('approval'), 'the main package must wait for approval');
   const publishJob = publishWorkflow.jobs.npm;
   const tarballIdentity = publishJob.steps.find((step) => step.name === 'verify tarball identity');

@@ -100,7 +100,6 @@ export async function extensionSources(layers: SourceLayers = {}, { projectRoot,
 }
 
 interface LoadOptions {
-  config: { limits?: Record<string, unknown> };
   registerTool: (tool: unknown) => () => void;
   registerFragment: (fragment: { name: string; text: string; source: string }) => () => void;
   addEventListener: (handler: (event: unknown) => void) => () => void;

@@ -1,0 +1,325 @@
+// 判定链（D15、D17、D59）：顺序固定为「按工具名的策略表 → 内容级检查 → 档位放行 → 询问用户」。
+// 整条链单调：任何一步的拒绝都不会被后一步改成放行，守卫没有「放行」这一种返回值；
+// 被前两步拦下的调用不去询问用户。
+// 命令文本先按 Host 选定的那一种解释器的语法解析成可信的分段，规则表逐段套：任何一段命中拒绝就整条拒绝，
+// 任何一段盖不住就去询问。解析不出分段（有子集之外的构造、解析报错、解析器不可用）按无法完整处理对待。
+// 自动档不放过以脚本解释器开头的分段（D17 第三条）：那一段实际会执行任意代码，
+// 规则表写没写过它都一样，所以按分段本身判而不是按规则形态判；解释器外壳不剥。
+import { parseCommand } from '../capability/command.js';
+import { KernelError } from './error.js';
+import { matches } from './match.js';
+import type { NetworkTarget } from '../capability/network.js';
+import type { ShellSelection } from '../capability/shell.js';
+import type { PolicyRule } from './config-edit.js';
+
+export type PolicyMode = 'ask' | 'auto';
+export type PolicyModeSource = 'config' | 'session';
+
+export function isPolicyRule(value: unknown): value is PolicyRule {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  return 'tool' in value && typeof value.tool === 'string'
+    && 'decision' in value && (value.decision === 'allow' || value.decision === 'deny')
+    && (!('match' in value) || value.match === undefined || typeof value.match === 'string')
+    && (!('reason' in value) || value.reason === undefined || typeof value.reason === 'string');
+}
+
+export interface PolicyThresholds {
+  readonly consecutive: number;
+  readonly total: number;
+}
+
+export interface PolicyQuestion {
+  readonly tool: string;
+  readonly input: unknown;
+  readonly command: string | undefined;
+  readonly reason: string | undefined;
+  readonly policy: PolicyMode;
+  readonly policySource: PolicyModeSource;
+  readonly policyForced: boolean;
+  readonly shell?: string;
+  readonly executable?: string;
+}
+
+export type PolicyAsk = (question: PolicyQuestion) => boolean | Promise<boolean>;
+export type PolicyGuard = (call: { readonly tool: string; readonly input: unknown; readonly command: string | undefined }) => string | undefined;
+
+export interface DecisionChainOptions {
+  readonly mode?: PolicyMode;
+  readonly rules?: PolicyRule[];
+  readonly thresholds?: PolicyThresholds;
+  readonly ask?: PolicyAsk;
+}
+
+export interface PolicyVerdict {
+  decision: 'allow' | 'deny';
+  via: string;
+  capability: string;
+  level: PolicyMode;
+  forced?: true;
+  code?: string;
+  reason?: string;
+  rule?: string;
+  answer?: string;
+  segments?: string[];
+}
+
+export interface DecisionChain {
+  readonly mode: PolicyMode;
+  readonly modeSource: PolicyModeSource;
+  configuredMode(): PolicyMode;
+  resetMode(): void;
+  setMode(mode: PolicyMode): void;
+  setConfiguredMode(mode: PolicyMode): void;
+  setRules(rules: PolicyRule[]): void;
+  readonly rules: PolicyRule[];
+  denials(): { consecutive: number; total: number };
+  guard(check: PolicyGuard): () => boolean;
+  evaluate(input: PolicyCall): Promise<PolicyVerdict>;
+}
+
+export interface PolicyCall {
+  readonly tool: string;
+  readonly input: unknown;
+  readonly target?: NetworkTarget;
+  readonly shell?: ShellSelection;
+  readonly capability?: string;
+}
+
+// 阈值与档位由配置层给出；这里的默认值是本项目自定的起点，理由记在决定条目 D17。
+export const DEFAULT_THRESHOLDS: PolicyThresholds = Object.freeze({ consecutive: 3, total: 20 });
+
+// 判定结果里进记录的那几格（D77）：内核按这一张表抄出去，链子以后多出来的字段不会悄悄进记录。
+export const VERDICT_FIELDS = Object.freeze(['capability', 'decision', 'via', 'level', 'forced', 'rule', 'answer'] as const);
+
+// 不进档位判定那一格的两个名字（D107）：向人提问不是一件需要批准的操作，它自己带一次请求与一次答复。
+const UNASKED = new Set(['ask_user_question']);
+
+// 自动档里不能直接放行的脚本解释器：一次调用能跑任意代码，内容级检查管不到参数。
+const INTERPRETERS: readonly string[] = [
+  'bash', 'sh', 'zsh', 'dash', 'fish', 'pwsh', 'powershell', 'cmd',
+  'python', 'python3', 'node', 'deno', 'bun', 'perl', 'ruby', 'php',
+];
+
+function commandOf(input: unknown): string | undefined {
+  if (typeof input !== 'object' || input === null || !('command' in input) || typeof input.command !== 'string') return undefined;
+  // 全空白的命令没有内容可判，交给工具自己那条校验去报稳定码，不在这一层当成看不透的命令。
+  return input.command.trim() === '' ? undefined : input.command;
+}
+
+// 命令文本能不能走自动放行：第一个词是脚本解释器时不能；没有命令文本的调用（读文件一类）不受这条影响。
+function canAutoApprove(command: string | undefined): boolean {
+  if (command === undefined) return true;
+  const first = command.trim().split(/[\s;|&]+/)[0];
+  return !INTERPRETERS.includes(first);
+}
+
+// 要去询问时把原因一起交出去：解析器不可用、命令里有哪种看不透的构造、以及按哪一种语法读的，
+// 界面上要说得出来（I8）。那一句是界面直接念出来的话，本项目界面说中文；要机器认的东西在稳定码那一格（D93）。
+function askReason(parsed: Awaited<ReturnType<typeof parseCommand>> | undefined, target: NetworkTarget | undefined, shell: ShellSelection | undefined): string | undefined {
+  const kind = shell?.kind ?? 'bash';
+  if (parsed?.kind === 'unavailable') return `${kind} 的命令语法解析器用不了：${parsed.detail}`;
+  if (parsed?.kind === 'unsupported') return `${kind} 的这一条命令没能完整读下来：${parsed.construct}`;
+  if (target?.class === 'loopback' || target?.class === 'private') {
+    return `地址 ${target.addresses.join(', ')} 属于 ${target.class}，这一次取回要你明确点头`;
+  }
+  return undefined;
+}
+
+// ask 是宿主交进来的询问通道，与适配器无关（内核对外接口）。没有这条通道时，需要询问的调用按拒绝处理。
+export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEFAULT_THRESHOLDS, ask }: DecisionChainOptions = {}): DecisionChain {
+  if (mode !== 'ask' && mode !== 'auto') throw new KernelError('policy_mode_unknown');
+  if (!(thresholds.consecutive >= 1) || !(thresholds.total >= 1)) throw new KernelError('policy_thresholds_required');
+
+  let current = mode;
+  // 配置那一份是默认，会话可以覆盖它（D101）：`configured` 留着，是为了能说出「退回配置默认」退到哪儿。
+  let configured = mode;
+  let source: PolicyModeSource = 'config';
+  let currentRules = rules;
+  let forcedToAsk = false;
+  let consecutive = 0;
+  let total = 0;
+  const guards = new Set<PolicyGuard>();
+
+  function record(denied: boolean): void {
+    if (denied) {
+      consecutive += 1;
+      total += 1;
+      // 达到阈值就回落到逐次询问，这是整条链上唯一一处档位变化，而且只往更严的方向走。
+      if (consecutive >= thresholds.consecutive || total >= thresholds.total) forcedToAsk = true;
+    } else {
+      consecutive = 0;
+    }
+  }
+
+  return {
+    // 守卫返回一段拒绝理由或者什么都不返回（I4）：没有 allow 这个返回值，后一个守卫撤销不了前一个的拒绝。
+    guard(check: PolicyGuard) {
+      if (typeof check !== 'function') throw new KernelError('guard_check_required');
+      guards.add(check);
+      return () => guards.delete(check);
+    },
+
+    get mode() {
+      return forcedToAsk ? 'ask' : current;
+    },
+
+    // 现在生效的这一档出自哪一件：配置那一份默认，还是这一份会话覆盖的（D101）。被拒绝阈值压下来另有一格 `forced`。
+    get modeSource() {
+      return source;
+    },
+
+    configuredMode() {
+      return configured;
+    },
+
+    // 交回配置那一份默认：会话覆盖只在运行期存在，这一具宿主退出之后没有。
+    resetMode() {
+      current = configured;
+      source = 'config';
+    },
+
+    setMode(next: PolicyMode) {
+      if (next !== 'ask' && next !== 'auto') throw new KernelError('policy_mode_unknown');
+      current = next;
+      source = 'session';
+    },
+
+    // 配置文件里那一条默认改了：没有自己覆盖过档位的会话跟着走，覆盖过的那一份不动（D101）。
+    setConfiguredMode(next: PolicyMode) {
+      if (next !== 'ask' && next !== 'auto') throw new KernelError('policy_mode_unknown');
+      configured = next;
+      if (source === 'config') current = next;
+    },
+
+    // 规则表可以从界面写入（方案 7.3：接受之后立即作用于后续判定）。守卫、拒绝计数与强制询问状态都不动。
+    setRules(next: PolicyRule[]) {
+      if (!Array.isArray(next)) throw new KernelError('policy_rules_invalid');
+      currentRules = next;
+    },
+
+    get rules() {
+      return currentRules;
+    },
+
+    denials() {
+      return { consecutive, total };
+    },
+
+    async evaluate({ tool, input, target, shell, capability }: PolicyCall): Promise<PolicyVerdict> {
+      if (typeof tool !== 'string' || tool === '') throw new KernelError('policy_call_tool_required');
+      // 判定看的能力名由工具自己声明（D52）：`mcp.call` 的一次调用真正用的是 `mcp:<服务器>/<工具>`，
+      // 规则表、守卫与问出去的那一句都按这个名字走，登记表里的名字只用于找到这件工具。
+      const named = capability ?? tool;
+      // 提问那一件不进这条链（D107）：审批问的是「能不能做这一件操作」，它问的是「这一件事该怎么办」。
+      // 让档位决定「能不能向人问一句」会把两条链叠成一次审批提示；这个名字不写成规则表里的一格，
+      // 因为它是这条链自己的一步，不是用户可以调的放行。
+      if (capability === undefined && UNASKED.has(named)) {
+        return { decision: 'allow', via: 'unasked', capability: named, level: current, ...(forcedToAsk ? { forced: true } : {}) };
+      }
+
+      const command = commandOf(input);
+      const effective = forcedToAsk ? 'ask' : current;
+      // 判定这一格要说清当时生效的是哪一份档位：配置写的是 `current`，被拒绝阈值压下来是另一回事（D77）。
+      const judged = (decision: PolicyVerdict['decision'], via: string, extra: Omit<PolicyVerdict, 'decision' | 'via' | 'capability' | 'level' | 'forced'>): PolicyVerdict => ({
+        decision,
+        via,
+        capability: named,
+        level: current,
+        ...(forcedToAsk ? { forced: true } : {}),
+        ...extra,
+      });
+      const candidates = currentRules.filter((item) => item.tool === named);
+      // 命令文本先过一次语法解析：能拆成可信的分段就逐段套规则，拆不出来就整条按无法完整处理对待。
+      // 读哪一种语法由 Host 的那一份选择决定（D59），判定与执行看的不是同一份东西就没有意义。
+      const parsed = command === undefined ? undefined : await parseCommand(command, shell?.kind);
+      const segments = parsed?.kind === 'segments' ? parsed.segments : undefined;
+      // 没有命令文本的调用（读文件一类）整次调用就是一段：规则表照旧套，只是套在一个空的分段上。
+      const parts = command === undefined ? [undefined] : segments;
+      // 答复里带上解析出的分段：会话记录要读得出这条文本按那一种语法被读成了什么（D59）。
+      // 没有命令文本的调用与解析不出分段的调用都不带这个字段，答复形状与加这一条之前一样。
+      const answer = (via: string, rule?: PolicyRule) => judged('allow', via, {
+        ...(segments === undefined ? {} : { segments }),
+        ...(rule?.match === undefined ? {} : { rule: rule.match }),
+      });
+
+      const refuse = (code: string, via: string, reason: string, rule?: string, reply?: string): PolicyVerdict => {
+        record(true);
+        return judged('deny', via, {
+          code,
+          reason,
+          ...(rule === undefined ? {} : { rule }),
+          ...(reply === undefined ? {} : { answer: reply }),
+        });
+      };
+
+      // 网络目标的类别先收紧（D58）：用不了的 URL 与「根本不该被取回的地址」这一类不进后面的顺序。
+      if (target !== undefined && (target.failure !== undefined || target.class === undefined)) {
+        return refuse('policy_denied', 'target', `分不出这一个网络目标的类别（${target.failure ?? 'unsupported'}）`);
+      }
+      if (target?.class === 'link-local' || target?.class === 'unspecified') {
+        return refuse('policy_denied', 'target', `${target.class} 这一类地址（链路本地、元数据端点、组播与保留段）不在这一趟运行里取回`);
+      }
+      const loopOrPrivate = target?.class === 'loopback' || target?.class === 'private';
+
+      // 命中的规则里只要有拒绝就拒绝：链只能收紧，写在拒绝规则前面的放行规则不能把它压掉（I4）。
+      // 拒绝对整条文本与每一个分段都生效，`git status | rm x` 才拦得住。
+      const denied = candidates.find((item) => item.decision === 'deny'
+        && (matches(command, item.match) || (segments ?? []).some((segment) => matches(segment, item.match))));
+      if (denied) {
+        return refuse('policy_denied', 'rule', denied.reason ?? `${named} 被规则表拒绝`, denied.match);
+      }
+
+      for (const check of guards) {
+        const reason = check({ tool: named, input, command });
+        if (typeof reason === 'string') return refuse('guard_denied', 'guard', reason);
+      }
+
+      const allowed = candidates.filter((item) => item.decision === 'allow');
+      // 盖住这一次的那一条放行规则要留名字：D77 那一格说的是命中了哪一条，而不是只说通过了。
+      const covering = () => (parts === undefined ? undefined : allowed.find((item) => parts.every((segment) => matches(segment, item.match))));
+      let covered;
+      if (loopOrPrivate) {
+        // 环回与内网至少问到一次：放行规则写得再宽也算没盖住，因为「哪一个地址」不是字符串看得出来的。
+        covered = undefined;
+      } else if (command === undefined) {
+        // 没有命令文本的调用（读文件一类）不受语法这一层影响：自动档直接放行，
+        // 逐次询问这一档仍然要有放行规则盖住它。
+        covered = effective === 'auto' ? null : covering();
+      } else if (effective === 'auto') {
+        // 自动档按语法放行：整棵树可信，而且每一段的第一个词都不是脚本解释器（D17 第三条）。
+        // 解释器外壳不因为能解析里面那个字符串就剥掉，`bash -lc "git status"` 仍然要问。
+        covered = segments !== undefined && segments.every((segment) => canAutoApprove(segment)) ? null : undefined;
+      } else {
+        // 逐次询问这一档：放行规则要盖住每一个分段，解析不出分段就等于盖不住。
+        covered = segments !== undefined && parts?.every((segment) => allowed.some((item) => matches(segment, item.match)))
+          ? covering()
+          : undefined;
+      }
+      if (covered !== undefined) {
+        record(false);
+        return covered === null ? answer('auto') : answer('rules', covered);
+      }
+
+      // 走到这里都要问：自动档遇到看不透的命令不自动放行，只降档到逐次询问，并把原因交出去（D17、I8）。
+      const reason = askReason(parsed, target, shell);
+      if (typeof ask !== 'function') return refuse('ask_unavailable', 'ask', reason ?? '这一条连接上没有问人的通道', undefined, 'unavailable');
+      // 答复这一次要点头就得多看一眼：同一条文本在两种语法下能自动放行的面积不一样，答的是哪一种、跑的是哪一个可执行文件，
+      // 只有 Host 这一侧知道（D59）。没有命令文本的调用不带这两个字段，答复的形状与加这一条之前一样。
+      // 档位与它的来源跟着这一次询问一起交出去：界面看着别的那一份会话时，解释这一条的不能是另一份会话的档位（审阅 C08）。
+      // `policyForced` 说的是这一档被连着拒绝压下来了：界面上那句来源按这一件说（审阅 C08、D93）。
+      const question: PolicyQuestion = {
+        tool: named,
+        input,
+        command,
+        reason,
+        policy: effective,
+        policySource: source,
+        policyForced: forcedToAsk,
+        ...(shell === undefined ? {} : { shell: shell.kind, executable: shell.executable }),
+      };
+      if (await ask(question) !== true) return refuse('ask_declined', 'ask', 'the user declined', undefined, 'deny');
+      record(false);
+      return judged('allow', 'ask', { ...(segments === undefined ? {} : { segments }), answer: 'allow' });
+    },
+  };
+}

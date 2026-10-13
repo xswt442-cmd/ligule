@@ -441,7 +441,7 @@ test('opening a session with no record on disk is refused, and an unknown method
 });
 
 // 同一份协议的第二种载体（D33 的终端界面走的就是这一条）：Host 与客户端在同一个进程里，
-// 两端是两根内存流，帧的写法与子进程那一条一模一样，协议与 connection.js 都没有为它改动。
+// 两端是两根内存流，帧的写法与子进程那一条一模一样，协议与 connection.ts 都没有为它改动。
 test('the same protocol runs over an in-memory carrier inside one process', async () => {
   await withEndpoint(async (baseUrl) => {
     const directory = await mkdtemp(join(tmpdir(), 'ligule-memory-'));
@@ -1222,7 +1222,7 @@ test('one host keeps two projects apart, and a host without a loader says so', a
       (error) => error.code === 'host_project_root_missing',
       '这一条路不存在说出来，不把它当成一份没有会话的项目',
     );
-    // 开会话也走同一处分类：拒绝发生在装载之前，记录那一路的建目录（`src/session/session.js`）就不会把拼错的那一条路建出来。
+    // 开会话也走同一处分类：拒绝发生在装载之前，记录那一路的建目录（`src/session/session.ts`）就不会把拼错的那一条路建出来。
     await assert.rejects(
       client.request('session.create', { projectRoot: join(root, 'never-created') }),
       (error) => error.code === 'host_project_root_missing',

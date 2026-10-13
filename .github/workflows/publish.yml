@@ -82,14 +82,15 @@ jobs:
       - name: install locked dependencies
         run: npm ci
 
-      - name: syntax check every module
+      - name: test
+        run: npm test
+
+      - name: syntax check compiled modules and checks
         shell: bash
         run: |
           set -euo pipefail
-          for file in src/*.js scripts/*.js test/*.js; do node --check "$file"; done
-
-      - name: test
-        run: npm test
+          find dist -type f -name '*.js' -print0 | xargs -0 -r -n 1 node --check
+          for file in scripts/*.js test/*.js; do node --check "$file"; done
 
       - name: check the packed artifact
         run: npm run check-pack

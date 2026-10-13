@@ -64,7 +64,12 @@ export function createSubagentPlugin(deps: SubagentDeps) {
           const session = createSessionLog({
             directory: deps.directory,
             id,
-            meta: () => ({ projectRoot: deps.config.workspaceRoot ?? deps.config.boundary, mode: modeIdentity }),
+            meta: () => ({
+              projectRoot: typeof deps.config.workspaceRoot === 'string'
+                ? deps.config.workspaceRoot
+                : typeof deps.config.boundary === 'string' ? deps.config.boundary : undefined,
+              mode: modeIdentity,
+            }),
           });
           const child = createKernel({
             config: deps.config,

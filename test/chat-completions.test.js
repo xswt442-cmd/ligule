@@ -173,7 +173,7 @@ test('a streamed answer asks for usage and hands back the one it got', async () 
 
 test('a cancel that lands while the stream is still open reports provider_cancelled', async () => {
   // 第 94 步在真端点上撞到的那条：流已经在吐内容时打断，Node 交回的是只带数字码的 AbortError，
-  // 界面那一侧认的是稳定码，所以这一处要在模型层就换掉（src/model/http.js 的 cancelMapped）。
+  // 界面那一侧认的是稳定码，所以这一处要在模型层就换掉（src/model/http.ts 的 cancelMapped）。
   await withEndpoint(async (response) => {
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: '第一段' } }] })}\n\n`);

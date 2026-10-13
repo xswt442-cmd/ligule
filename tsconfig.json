@@ -1,8 +1,7 @@
 {
   "compilerOptions": {
-    // 旧的 JS 文件跟着一起出到 dist/，但不做类型检查；新写的模块按 strict 那一套走（D47）。
-    "allowJs": true,
-    "checkJs": false,
+    // Node 运行时仅从 TypeScript 源码编译；发行包仍使用 dist/ 下的 JavaScript。
+    "allowJs": false,
     "outDir": "dist",
     "rootDir": "src",
     "target": "es2023",
