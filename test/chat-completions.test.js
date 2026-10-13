@@ -77,6 +77,22 @@ test('tool call fragments arriving by index are assembled into one call', async 
   });
 });
 
+test('null usage on ordinary SSE chunks does not discard a tool call', async () => {
+  await withEndpoint(async (response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(sseBody([
+      ...TOOL_CALL_CHUNKS.map(chunk => ({ ...chunk, usage: null })),
+      { choices: [], usage: { prompt_tokens: 31, completion_tokens: 9 } },
+    ]));
+  }, async (baseUrl) => {
+    const events = await collect(provider(baseUrl).stream({ system: '', messages: [], tools: [] }));
+    assert.deepEqual(events.filter(event => event.type === 'tool-call'), [
+      { type: 'tool-call', id: 'call_1', name: 'read', args: { path: 'note.txt' } },
+    ]);
+    assert.deepEqual(events.at(-1), { type: 'usage', input: 31, output: 9 });
+  });
+});
+
 test('the request body carries the shape this form names, and the address is the one from config', async () => {
   await withEndpoint(async (response) => {
     response.writeHead(200, { 'content-type': 'text/event-stream' });

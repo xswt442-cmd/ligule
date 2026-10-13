@@ -1,0 +1,139 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { PassThrough } from 'node:stream';
+import { fileURLToPath } from 'node:url';
+import { createElement } from 'react';
+import { render } from 'ink';
+import { modeDirectories } from '../dist/kernel/modes.js';
+import { modeOptions } from '../dist/tui/mode-options.js';
+import { completeFrame } from './helpers/frames.js';
+import { waitFor, withTuiHost } from './helpers/tui-host.js';
+
+const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
+const options = {
+  config: {
+    model: {
+      services: [{
+        id: 'alpha',
+        name: 'Alpha',
+        api: 'chat-completions',
+        baseURL: 'http://127.0.0.1',
+        apiKeyEnv: 'LIGULE_TUI_TEST_API_KEY',
+        models: ['first-model', 'second-model'],
+      }],
+      selection: { provider: 'alpha', model: 'first-model' },
+    },
+  },
+  interactive: true,
+};
+
+function fakeTerminal() {
+  const stdin = new PassThrough();
+  stdin.isTTY = true;
+  stdin.setRawMode = () => stdin;
+  stdin.ref = () => {};
+  stdin.unref = () => {};
+  const stdout = new PassThrough();
+  stdout.isTTY = true;
+  stdout.columns = 100;
+  stdout.rows = 36;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk.toString(); });
+  return { stdin, stdout, frame: () => completeFrame(painted) };
+}
+
+async function until(terminal, condition) {
+  await waitFor(() => condition(terminal.frame()), {
+    within: 10_000,
+    every: 10,
+    read: terminal.frame,
+  });
+}
+
+test('TUI control panels select a model, mode, and policy without running a request or changing the draft', async () => {
+  let homeDirectory = '';
+  await withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+    const { App } = await import('../dist/tui/app.js');
+    const terminal = fakeTerminal();
+    const modes = {
+      read: () => modeOptions(modeDirectories(projectDirectory, shippedModes, homeDirectory)),
+    };
+    const instance = render(createElement(App, {
+      client,
+      sessionId,
+      info: { boundary: projectDirectory, model: 'first-model' },
+      modes,
+      stdout: terminal.stdout,
+      interactive: true,
+    }), {
+      stdin: terminal.stdin,
+      stdout: terminal.stdout,
+      exitOnCtrlC: false,
+      patchConsole: false,
+      interactive: true,
+    });
+    try {
+      await until(terminal, (frame) => frame.includes('Ctrl+P') && frame.includes('first-model'));
+      terminal.stdin.write('keep this draft');
+      await until(terminal, (frame) => frame.includes('keep this draft'));
+
+      terminal.stdin.write('\u0010');
+      await until(terminal, (frame) => frame.includes('Alpha / first-model'));
+      terminal.stdin.write('\u001b[B');
+      await until(terminal, (frame) => frame.includes('› Alpha / second-model'));
+      terminal.stdin.write('\r');
+      await until(terminal, () => requests.some((request) => request.method === 'model.select'));
+      const modelRequest = requests.find((request) => request.method === 'model.select');
+      assert.deepEqual(modelRequest.params, { sessionId, provider: 'alpha', model: 'second-model' });
+      await until(terminal, (frame) => frame.includes('模型 second-model'));
+      assert.equal((await client.request('status.get', { sessionId })).selectedModel, 'second-model');
+      assert.equal(requests.filter((request) => request.method === 'run.start').length, 0);
+      await until(terminal, (frame) => frame.includes('keep this draft'));
+
+      terminal.stdin.write('\u0014');
+      await until(terminal, (frame) => frame.includes('minimal') && frame.includes('full'));
+      terminal.stdin.write('\u001b[A');
+      await until(terminal, (frame) => frame.includes('› full'));
+      terminal.stdin.write('\r');
+      await until(terminal, () => requests.some((request) => request.method === 'mode.set'));
+      assert.equal(requests.find((request) => request.method === 'mode.set').params.name, 'full');
+      await until(terminal, (frame) => frame.includes('工具模式 full'));
+      assert.equal((await client.request('status.get', { sessionId })).mode, 'full');
+
+      const beforePolicy = await client.request('session.read', { sessionId });
+      terminal.stdin.write('\u0001');
+      await until(terminal, (frame) => frame.includes('自动判定') || frame.includes('Automatic decisions'));
+      terminal.stdin.write('\u001b[B');
+      await until(terminal, (frame) => frame.includes('› 自动判定') || frame.includes('› Automatic decisions'));
+      terminal.stdin.write('\r');
+      await until(terminal, () => requests.some((request) => request.method === 'policy.set'));
+      assert.equal(requests.find((request) => request.method === 'policy.set').params.mode, 'auto');
+      await until(terminal, (frame) => frame.includes('审批 自动判定'));
+      const afterPolicy = await client.request('status.get', { sessionId });
+      const afterPolicyRecord = await client.request('session.read', { sessionId });
+      assert.equal(afterPolicy.policy, 'auto');
+      assert.equal(afterPolicyRecord.header.projectRoot, beforePolicy.header.projectRoot);
+      assert.equal(afterPolicyRecord.header.projectRoot, projectDirectory);
+      assert.match(terminal.frame(), /keep this draft/);
+
+      terminal.stdin.write('\u0015');
+      await until(terminal, (frame) => !frame.includes('keep this draft'));
+      terminal.stdin.write('/help');
+      await until(terminal, (frame) => frame.includes('/help'));
+      terminal.stdin.write('\r');
+      await until(terminal, (frame) => frame.includes('命令'));
+      terminal.stdin.write('\u001b[C');
+      await until(terminal, (frame) => frame.includes('按键'));
+      terminal.stdin.write('\u001b');
+      await until(terminal, (frame) => !frame.includes('提示模板'));
+      assert.equal(requests.filter((request) => request.method === 'run.start').length, 0);
+      const transcript = await client.request('session.read', { sessionId });
+      assert.equal(transcript.events.some((event) => event.kind === 'user'), false);
+    } finally {
+      instance.unmount();
+    }
+  }, {
+    ...options,
+    setup: ({ homeDirectory: home }) => { homeDirectory = home; },
+  });
+});

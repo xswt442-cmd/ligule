@@ -21,7 +21,7 @@ async function withApp(context, run) {
   const wait = (condition) => waitFor(condition, { read: frame });
   const type = async (text) => { stdin.write(text); await delay(50); stdin.write('\r'); };
   try {
-    await wait(() => frame().includes('policy:ask'));
+    await wait(() => frame().includes('审批 逐次审批'));
     await run({ frame, output, stdin, type, wait, stdout });
   } finally {
     instance.unmount();
