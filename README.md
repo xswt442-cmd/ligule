@@ -68,6 +68,10 @@ apiKeyEnv = "MODEL_API_KEY"
 
 把密钥放入 `apiKeyEnv` 指定的环境变量。桌面设置还支持多个服务与模型，并可将密钥保存到系统凭据库。设置 `LIGULE_HOME` 可将用户数据根改为另一绝对路径。工作区目录决定项目归属，`boundary` 单独限制文件工具可以访问的范围。
 
+## 开发
+
+开发本仓库需 Node.js 24 或更新版本和 pnpm 12.9.1。在仓库根目录运行 `pnpm install --frozen-lockfile` 安装开发依赖。其余构建和检查步骤见[贡献与验证](docs/development/CONTRIBUTING.zh-cn.md)。
+
 ## 文档
 
 - [更新记录](CHANGELOG.md)

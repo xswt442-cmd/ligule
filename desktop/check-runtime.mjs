@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { releaseManifest } from '../scripts/pack-release.js';
+import { assertNoForeignNativeDirectories, assertSymlinksInside } from '../scripts/runtime-tree.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const desktopRoot = join(root, 'desktop');
@@ -16,6 +17,8 @@ const packageJson = releaseManifest();
 const nodePath = join(runtimeRoot, 'node', process.platform === 'win32' ? 'node.exe' : 'node');
 const app = join(runtimeRoot, 'app');
 const appModules = join(app, 'node_modules');
+await assertSymlinksInside(app);
+await assertNoForeignNativeDirectories(appModules, target);
 const providerPackage = `@vscode/ripgrep-${target}`;
 delete process.env.NODE_PATH;
 delete process.env.NODE_OPTIONS;
@@ -31,6 +34,9 @@ if (checkerNode !== runtimeNode) {
 }
 const vendoredPackage = JSON.parse(await readFile(join(app, 'package.json'), 'utf8'));
 if (vendoredPackage.name !== packageJson.name || vendoredPackage.version !== packageJson.version
+  || vendoredPackage.packageManager !== undefined
+  || vendoredPackage.devDependencies !== undefined
+  || vendoredPackage.scripts !== undefined
   || JSON.stringify(vendoredPackage.dependencies) !== JSON.stringify(packageJson.dependencies)
   || JSON.stringify(vendoredPackage.optionalDependencies) !== JSON.stringify(packageJson.optionalDependencies)) {
   throw new Error('the vendored app package manifest does not match the generated release manifest');
@@ -45,8 +51,8 @@ if (tools.split(/\r?\n/u).filter(Boolean).length !== 9) throw new Error('the ven
 
 const library = await import(pathToFileURL(join(app, 'dist', 'index.js')).href);
 const requireFromApp = createRequire(join(app, 'package.json'));
-const insideAppModules = async (name) => {
-  const modulePath = await realpath(requireFromApp.resolve(name));
+const insideAppModules = async (name, resolver = requireFromApp) => {
+  const modulePath = await realpath(resolver.resolve(name));
   const relativeModule = relative(appModules, modulePath);
   if (relativeModule === '..' || relativeModule.startsWith(`..${sep}`) || isAbsolute(relativeModule)) {
     throw new Error(`${name} resolved outside the vendored runtime tree: ${modulePath}`);
@@ -68,8 +74,9 @@ const keyringBindings = {
 };
 const keyringBinding = keyringBindings[target];
 if (keyringBinding === undefined) throw new Error(`no keyring binding is listed for ${target}`);
-await insideAppModules(keyringBinding);
-const keyring = requireFromApp('@napi-rs/keyring');
+const keyringRequire = createRequire(requireFromApp.resolve('@napi-rs/keyring'));
+await insideAppModules(keyringBinding, keyringRequire);
+const keyring = keyringRequire('@napi-rs/keyring');
 if (typeof keyring.AsyncEntry !== 'function') throw new Error('the vendored keyring native module did not load');
 
 const backend = await library.resolveRipgrep({});
@@ -77,9 +84,10 @@ if (typeof backend?.executable !== 'string' || !isAbsolute(backend.executable)) 
   throw new Error(`the vendored search backend is unavailable: ${JSON.stringify(backend)}`);
 }
 const backendPath = await realpath(backend.executable);
-const provider = await import(pathToFileURL(requireFromApp.resolve('@vscode/ripgrep')).href);
+const ripgrepRequire = createRequire(requireFromApp.resolve('@vscode/ripgrep'));
+const provider = await import(pathToFileURL(ripgrepRequire.resolve('@vscode/ripgrep')).href);
 if (await realpath(provider.rgPath) !== backendPath) throw new Error('@vscode/ripgrep and the Ligule host resolved different search binaries');
-const expectedPackage = await realpath(join(appModules, providerPackage));
+const expectedPackage = await realpath(dirname(ripgrepRequire.resolve(`${providerPackage}/package.json`)));
 const relativeBackend = relative(expectedPackage, backendPath);
 if (relativeBackend === '..' || relativeBackend.startsWith(`..${sep}`) || isAbsolute(relativeBackend)) {
   throw new Error(`the search backend is outside ${expectedPackage}: ${backendPath}`);

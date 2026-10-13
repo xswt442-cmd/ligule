@@ -1,11 +1,16 @@
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { access } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolvePackageBin } from './package-bin.mjs';
 
 const desktopRoot = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = dirname(desktopRoot);
+const rootRequire = createRequire(join(repositoryRoot, 'package.json'));
+const desktopRequire = createRequire(join(desktopRoot, 'package.json'));
+const frontendRequire = createRequire(join(desktopRoot, 'frontend', 'package.json'));
 const electronArguments = process.argv.slice(2);
 const children = new Set();
 const environment = { ...process.env, LIGULE_DESKTOP_CSP_NONCE: randomBytes(32).toString('base64') };
@@ -65,15 +70,18 @@ async function stopChildren() {
 process.once('SIGINT', () => void stopChildren());
 process.once('SIGTERM', () => void stopChildren());
 
-await access(join(repositoryRoot, 'node_modules', 'typescript', 'bin', 'tsc'));
+const typescript = resolvePackageBin(rootRequire, 'typescript', 'tsc');
+const viteEntry = resolvePackageBin(frontendRequire, 'vite');
+const electronEntry = resolvePackageBin(desktopRequire, 'electron');
+await access(typescript);
 await run(process.execPath, [
-  join(repositoryRoot, 'node_modules', 'typescript', 'bin', 'tsc'),
+  typescript,
   '-p',
   join(desktopRoot, 'electron', 'tsconfig.json'),
 ], desktopRoot);
 
 const vite = start(process.execPath, [
-  join(desktopRoot, 'frontend', 'node_modules', 'vite', 'bin', 'vite.js'),
+  viteEntry,
   '--host',
   'localhost',
   '--port',
@@ -83,7 +91,7 @@ const vite = start(process.execPath, [
 await waitForFrontend(vite);
 
 const electron = start(process.execPath, [
-  join(desktopRoot, 'node_modules', 'electron', 'cli.js'),
+  electronEntry,
   '.',
   '--dev',
   ...electronArguments,

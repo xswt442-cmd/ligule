@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { parse, parseAllDocuments } from 'yaml';
 import { releaseManifest } from '../scripts/pack-release.js';
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
@@ -53,18 +54,35 @@ test('workflows take the Node version from their own env instead of repeating it
   }
 });
 
-test('each npm package manifest agrees with its lockfile', () => {
-  for (const [manifestPath, lockPath] of [
-    ['../package.json', '../package-lock.json'],
-    ['../desktop/package.json', '../desktop/package-lock.json'],
-    ['../desktop/frontend/package.json', '../desktop/frontend/package-lock.json'],
-  ]) {
+test('the pinned pnpm workspace lock covers all manifests and dependency specifiers', () => {
+  const root = JSON.parse(read('../package.json'));
+  assert.equal(root.packageManager, 'pnpm@12.9.1');
+  assert.equal(releaseManifest().packageManager, undefined, 'the npm release manifest must not pin the workspace package manager');
+  const workspace = parse(read('../pnpm-workspace.yaml'));
+  assert.deepEqual(workspace.packages, ['.', 'desktop', 'desktop/frontend']);
+  const documents = parseAllDocuments(read('../pnpm-lock.yaml'));
+  assert.ok(documents.length >= 2, 'the pinned package manager must be recorded in the environment lock document');
+  for (const document of documents) assert.deepEqual(document.errors, [], 'pnpm-lock.yaml must parse as multi-document YAML');
+  const environment = documents[0].toJSON();
+  assert.equal(environment.lockfileVersion, '9.0');
+  assert.equal(environment.importers['.'].packageManagerDependencies.pnpm.version, '12.9.1');
+  const lock = documents.at(-1).toJSON();
+  assert.equal(lock.lockfileVersion, '9.0');
+  const packages = [
+    ['.', '../package.json'],
+    ['desktop', '../desktop/package.json'],
+    ['desktop/frontend', '../desktop/frontend/package.json'],
+  ];
+  assert.deepEqual(Object.keys(lock.importers).sort(), packages.map(([path]) => path).sort());
+  for (const [path, manifestPath] of packages) {
     const manifest = JSON.parse(read(manifestPath));
-    const lock = JSON.parse(read(lockPath));
-    assert.equal(lock.name, manifest.name, `${lockPath} package name disagrees with ${manifestPath}`);
-    assert.equal(lock.version, manifest.version, `${lockPath} version disagrees with ${manifestPath}`);
-    assert.equal(lock.packages[''].name, manifest.name, `${lockPath} root package name disagrees with ${manifestPath}`);
-    assert.equal(lock.packages[''].version, manifest.version, `${lockPath} root package version disagrees with ${manifestPath}`);
+    const importer = lock.importers[path];
+    for (const type of ['dependencies', 'devDependencies', 'optionalDependencies']) {
+      assert.deepEqual(Object.keys(importer[type] ?? {}).sort(), Object.keys(manifest[type] ?? {}).sort(), `${path} ${type} entries disagree`);
+      for (const [name, specifier] of Object.entries(manifest[type] ?? {})) {
+        assert.equal(importer[type][name].specifier, specifier, `${path} ${type}.${name} specifier disagrees`);
+      }
+    }
   }
 });
 

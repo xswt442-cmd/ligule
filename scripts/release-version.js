@@ -41,19 +41,12 @@ export function requestedVersionAtRoot(repositoryRoot, requestedVersion) {
   return resolveVersion(manifest.version, requestedVersion);
 }
 
-function updateJsonFile(path, expectedVersion, nextVersion, { lock = false } = {}) {
+function updateJsonFile(path, expectedVersion, nextVersion) {
   const document = JSON.parse(readFileSync(path, 'utf8'));
   if (document.version !== expectedVersion) {
     throw new Error(`${path} version is ${document.version}, expected ${expectedVersion}`);
   }
   document.version = nextVersion;
-  if (lock) {
-    const rootPackage = document.packages?.[''];
-    if (rootPackage?.version !== expectedVersion) {
-      throw new Error(`${path} root package version is ${rootPackage?.version}, expected ${expectedVersion}`);
-    }
-    rootPackage.version = nextVersion;
-  }
   return `${JSON.stringify(document, null, 2)}\n`;
 }
 
@@ -104,17 +97,14 @@ export function versionFileUpdates(repositoryRoot, requestedVersion) {
   parseVersion(currentVersion);
   const version = resolveVersion(currentVersion, requestedVersion);
   const updates = new Map();
-  const addJson = (relativePath, options) => {
+  const addJson = (relativePath) => {
     const path = join(repositoryRoot, relativePath);
-    updates.set(path, updateJsonFile(path, currentVersion, version, options));
+    updates.set(path, updateJsonFile(path, currentVersion, version));
   };
 
   addJson('package.json');
-  addJson('package-lock.json', { lock: true });
   addJson('desktop/package.json');
-  addJson('desktop/package-lock.json', { lock: true });
   addJson('desktop/frontend/package.json');
-  addJson('desktop/frontend/package-lock.json', { lock: true });
 
   const sourcePath = join(repositoryRoot, 'src', 'version.ts');
   updates.set(sourcePath, updateSourceVersion(sourcePath, currentVersion, version));

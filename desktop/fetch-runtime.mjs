@@ -1,14 +1,14 @@
-// 桌面壳的自包含运行时（D34）：安装包要能装到没有这份仓库的机器上就跑起来，
-// 所以随包带两样东西——一份钉住版本的 Node，和 ligule 自己的运行时树（构建出来的 dist 加它需要的依赖）。
-// 依赖树按当前构建目标安装，只把当前平台的可选原生依赖复制进运行时目录。
-// 用法：node desktop/fetch-runtime.mjs [--force]
+// 准备桌面安装包的独立 Node 和由 workspace lockfile 部署的 Ligule 生产运行树。
+// 用法：pnpm --filter ligule run prepare-runtime
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { existsSync, readFileSync } from 'node:fs';
+import spawn from 'cross-spawn';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { releaseManifest } from '../scripts/pack-release.js';
+import { assertSymlinksInside, pruneForeignNativeDirectories } from '../scripts/runtime-tree.js';
 
 const root = resolve(fileURLToPath(new URL('.', import.meta.url)), '..');
 const vendor = join(root, 'desktop', 'vendor');
@@ -78,110 +78,44 @@ async function sha256Checked(target2) {
   return target2;
 }
 
-// 生产依赖的目录名：从 package.json 的 dependencies 出发，按锁文件里已经装好的那份递归收。
-// 可选依赖里只有这份清单进树；koffi 在 Windows 上供 Job Object 那条绑定用，在别的系统上装不上也不进树。
-const RUNTIME_OPTIONAL = ['koffi'];
-
-function productionPackages() {
-  const manifest = JSON.parse(readFileSyncSync(join(root, 'package.json')));
-  const wanted = new Set(Object.keys(manifest.dependencies ?? {}));
-  const modules = join(root, 'node_modules');
-  const found = new Set();
-  for (const name of RUNTIME_OPTIONAL) {
-    if (!existsSync(join(modules, name))) {
-      if (process.platform === 'win32') throw new Error(`${name} is missing but win32 needs it at runtime`);
-      continue;
-    }
-    wanted.add(name);
-  }
-  for (const name of wanted) collect(name);
-  function collect(name) {
-    if (found.has(name)) return;
-    const directory = join(modules, name);
-    if (!existsSync(directory)) {
-      throw new Error(`${name} is a required runtime dependency but is not installed`);
-    }
-    found.add(name);
-    const pkg = JSON.parse(readFileSyncSync(join(directory, 'package.json')));
-    for (const dependency of Object.keys(pkg.dependencies ?? {})) collect(dependency);
-    for (const dependency of Object.keys(pkg.optionalDependencies ?? {})) {
-      if (existsSync(join(modules, dependency))) collect(dependency);
-    }
-  }
-  return [...found].sort();
-}
-
-function readFileSyncSync(path) {
-  // 同步读：依赖树只有几十次读，写成异步反而要把整段收集改成 await 链。
-  return readFileSync(path, 'utf8');
-}
-
-// 一份运行树只带本目标那一个平台的原生块（见文件头那句）：`prebuilds/<平台>-<架构>` 与 koffi 的
-// libc 目录里只留与目标相符的那一份，gyp 的中间物目录 `obj.target` 也不进树。
-// AppImage 的 linuxdeploy 对 AppDir 里每个 ELF 跑 patchelf 并解析依赖，撞上 musl 那份 koffi 绑定
-// （找不到 libc.musl-x86_64.so.1）整包失败；中间物里的 `.o` 连 patchelf 都过不去。
-const NATIVE_DIR = /^(linux|musl|darwin|win32|freebsd|android)[-_](x64|arm64|ia32|armhf|armv7l)$/;
-const nativeDir = target.replace('-', '_');
-function keepNative(name) {
-  if (name === 'obj.target') return false;
-  const normalized = name.replaceAll('-', '_');
-  return NATIVE_DIR.test(normalized) ? normalized === nativeDir : true;
-}
-
-async function copyTree(from, to, keep = () => true) {
-  await mkdir(to, { recursive: true });
-  for (const entry of await readdir(from, { withFileTypes: true })) {
-    const source = join(from, entry.name);
-    const target = join(to, entry.name);
-    if (entry.isDirectory()) {
-      if (!keep(entry.name)) continue;
-      await copyTree(source, target, keep);
-    } else await copyFile(source, target);
-  }
-}
-
 async function fetchAppTree() {
   const app = join(vendor, 'app');
-  // 运行时树是构建产物：没有就先构建，不要交出一份装得上、起不来的安装包。
   if (!existsSync(join(root, 'dist', 'cli.js'))) {
-    throw new Error('dist/cli.js is missing; run npm run build before vendoring the runtime tree');
+    throw new Error('dist/cli.js is missing; run `pnpm --filter ligule run build` before preparing the runtime tree');
   }
   await rm(app, { recursive: true, force: true });
-  await mkdir(join(app, 'node_modules'), { recursive: true });
-  await copyTree(join(root, 'dist'), join(app, 'dist'));
-  await copyTree(join(root, 'modes'), join(app, 'modes'));
-  const packageJson = releaseManifest();
-  await writeFile(join(app, 'package.json'), `${JSON.stringify(packageJson, null, 2)}\n`, 'utf8');
-  await copyFile(join(root, 'LICENSE'), join(app, 'LICENSE'));
-  for (const name of productionPackages()) {
-    await copyTree(join(root, 'node_modules', name), join(app, 'node_modules', name), keepNative);
+  const packageManager = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).packageManager;
+  const expectedVersion = /^pnpm@(\d+\.\d+\.\d+)$/.exec(packageManager ?? '')?.[1];
+  const userAgent = process.env.npm_config_user_agent ?? '';
+  const runningVersion = /^pnpm\/(\d+\.\d+\.\d+)/.exec(userAgent)?.[1];
+  const pnpmCli = process.env.npm_execpath;
+  if (expectedVersion === undefined || runningVersion !== expectedVersion || pnpmCli === undefined || !basename(pnpmCli).toLowerCase().includes('pnpm')) {
+    throw new Error(`run this script through the pinned ${packageManager ?? 'pnpm workspace'} command`);
   }
-  const foreign = await listForeignNative(app);
-  if (foreign.length > 0) {
-    throw new Error(`the runtime tree still carries native dirs for another target: ${foreign.slice(0, 5).join(', ')}`);
+  const args = ['--filter=ligule', '--prod', 'deploy', app];
+  const isJavaScriptCli = /\.(?:cjs|mjs|js)$/i.test(pnpmCli);
+  const result = spawn.sync(isJavaScriptCli ? process.execPath : pnpmCli, isJavaScriptCli ? [pnpmCli, ...args] : args, {
+    cwd: root,
+    stdio: 'inherit',
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(`pnpm deploy exited with status ${result.status ?? 'unknown'}`);
+  const manifest = releaseManifest();
+  delete manifest.devDependencies;
+  delete manifest.scripts;
+  await writeFile(join(app, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+  for (const metadataPath of [
+    join(app, 'pnpm-lock.yaml'),
+    join(app, 'pnpm-workspace.yaml'),
+    join(app, 'node_modules', '.modules.yaml'),
+    join(app, 'node_modules', '.pnpm-workspace-state-v1.json'),
+    join(app, 'node_modules', '.pnpm', 'lock.yaml'),
+  ]) {
+    await rm(metadataPath, { force: true });
   }
-  const files = await countFiles(app);
-  console.log(`vendored the runtime tree -> ${app} (${files} files, native for ${nativeDir})`);
-}
-
-// 复制过后的复核：谓词换掉或漏传时这里当场死，不把多出来的原生块交给 linuxdeploy 才发现。
-async function listForeignNative(directory) {
-  const found = [];
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    const path = join(directory, entry.name);
-    if (!keepNative(entry.name)) found.push(path);
-    else found.push(...(await listForeignNative(path)));
-  }
-  return found;
-}
-
-async function countFiles(directory) {
-  let total = 0;
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
-    total += entry.isDirectory() ? await countFiles(join(directory, entry.name)) : 1;
-  }
-  return total;
+  await pruneForeignNativeDirectories(join(app, 'node_modules'), target);
+  await assertSymlinksInside(app);
+  console.log(`deployed the locked production runtime -> ${app} (${target})`);
 }
 
 await fetchNode();

@@ -6,41 +6,39 @@ The repository contains the Node.js runtime, TUI, and Electron desktop app. Read
 
 ## Set up and validate
 
-Use Node.js 24 or newer. From the repository root, install the locked dependencies and run the core checks:
+Use Node.js 24 or newer. The workspace pins pnpm to 12.9.1. From the repository root, install the locked dependencies and run the core checks:
 
 ```sh
-npm ci
-npm test
-npm run check-pack
+pnpm install --frozen-lockfile
+pnpm test
+pnpm check-pack
+pnpm verify-install
 ```
 
-`npm test` builds `dist/` and runs the automated test suite. `check-pack` inspects the npm artifact. The release workflow also installs the packed artifact into a clean consumer and tests the host binary provided by `@vscode/ripgrep`.
+`pnpm test` builds `dist/` and runs the automated test suite; `pnpm check-pack` inspects the CLI npm artifact; `pnpm verify-install` installs it into a clean consumer and performs a real search. The consumer install uses npm to verify the CLI's npm installation path.
 
-For the desktop frontend, install its dependencies and run its checks and build:
+## Desktop development
 
-```sh
-npm --prefix desktop/frontend ci
-npm --prefix desktop/frontend run check
-npm --prefix desktop/frontend run build
-```
-
-Desktop checks also need the Main and frontend dependencies, then the Host, security, and frontend checks:
+Prepare the local runtime tree and Electron binary, then run the frontend checks:
 
 ```sh
-npm --prefix desktop ci
-npm --prefix desktop/frontend ci
+pnpm --filter ligule run build
+pnpm --filter ligule run prepare-runtime
+pnpm --filter ligule-desktop exec install-electron
+pnpm exec tsc -p desktop/electron/tsconfig.json
 node --experimental-strip-types --test desktop/electron/test/host.test.ts desktop/electron/test/security.test.ts
-npm --prefix desktop/frontend run check
-npm --prefix desktop/frontend run build
+pnpm --filter ligule-desktop-frontend run check
+pnpm --filter ligule-desktop-frontend run build
+pnpm --filter ligule-desktop run dev
 ```
 
-To launch the complete desktop app, run `npm --prefix desktop run dev` from the repository root. Electron Main starts the Node Host, and installers use the built frontend.
+Installer builds, real-window checks, and native platform acceptance steps are in the [desktop development guide](../../desktop/README.en.md).
 
 ## Keep changes verifiable
 
-Document behavior from the implementation and its tests. Keep user-facing claims consistent in the Chinese and English guides, and distinguish automated coverage from platform or human verification. Do not put credentials, personal session records, or generated `desktop/vendor/` files in commits. Update a lockfile with its package manifest when a dependency changes.
+Document behavior from the implementation and its tests. Keep user-facing claims consistent in the Chinese and English guides, and distinguish automated coverage from platform or human verification. Do not put credentials, personal session records, or generated `desktop/vendor/` files in commits. Update `pnpm-lock.yaml` when a dependency changes.
 
-The CI workflow checks the core package on Windows and Linux, exercises native credential storage on all four desktop targets, and builds the desktop installers on Windows x64, Linux x64, macOS arm64, and macOS x64. CI build artifacts are validation outputs; they are not public releases. The release workflow and current release state are documented in the [release checklist](RELEASE.en.md).
+CI reports the core tests, clean CLI consumer install, native credential checks on all four desktop targets, and Electron installer builds on Windows x64, Linux x64, macOS arm64, and macOS x64 separately. CI artifacts are validation outputs, not public releases. The release workflow and status are documented in the [release checklist](RELEASE.en.md).
 
 ## Related guides
 
