@@ -212,8 +212,8 @@ body {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
-  padding: 1rem 0.75rem 0.6rem;
+  gap: 0.25rem;
+  padding: 0.75rem 0.625rem 0.5rem;
   background: var(--bg-sunk);
   border-inline-end: 0;
   min-height: 0;
@@ -225,7 +225,7 @@ body {
   gap: 0.5rem;
   font-weight: 650;
   letter-spacing: 0.01em;
-  padding: 0.15rem 0.5rem 0.75rem;
+  padding: 0 0.5rem 0.5rem;
 }
 
 .brand > .icon-button { margin-inline-start: auto; }
@@ -236,7 +236,7 @@ body {
   align-items: center;
   gap: 0.5rem;
   width: 100%;
-  padding: 0.5rem 0.6rem;
+  padding: 0.25rem 0.6rem;
   border: 1px solid transparent;
   border-radius: var(--radius);
   background: transparent;
@@ -393,9 +393,9 @@ body {
      中栏那一列溢出页面 33 到 100 像素，发送钮掉到 605（P5 三个宽度的读数）。 */
   flex-wrap: nowrap;
   gap: var(--space-3);
-  min-block-size: 68px;
+  min-block-size: 56px;
   flex-shrink: 0;
-  padding: var(--space-3) var(--space-5);
+  padding: var(--space-2) var(--space-4);
   border-block-end: 0;
   background: var(--bg);
 }
@@ -838,14 +838,14 @@ button:disabled {
 .composer {
   display: flex;
   flex-direction: column;
-  gap: 0.4rem;
+  gap: 0.25rem;
   inline-size: min(calc(100% - 48px), var(--stream));
   margin-inline: auto;
   margin-block: var(--space-3) 0;
   padding: var(--space-2) var(--space-3) var(--space-1);
   background: var(--bg-raised);
   border: 1px solid var(--line);
-  border-radius: 20px;
+  border-radius: 14px;
   box-shadow: 0 3px 18px rgb(0 0 0 / 4%);
 }
 
@@ -1244,7 +1244,7 @@ button.icon-button:hover:not(:disabled) {
 .stream-row {
   inline-size: min(calc(100% - 48px), var(--stream));
   margin-inline: auto;
-  padding: var(--space-2) 0;
+  padding: var(--space-1) 0;
 }
 
 /* 视口上下那两条带：更早那一格排在最上，空着的那一句排在中间。 */
@@ -1274,9 +1274,9 @@ button.icon-button:hover:not(:disabled) {
 
 .composer .composer-input {
   inline-size: 100%;
-  min-block-size: 76px;
+  min-block-size: 56px;
   max-block-size: 28vh;
-  padding: var(--space-2);
+  padding: var(--space-1) var(--space-2);
   color: var(--fg);
   background: transparent;
   border: 0;
@@ -1292,7 +1292,7 @@ button.icon-button:hover:not(:disabled) {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-1) var(--space-1) var(--space-2);
+  padding: var(--space-1);
   min-width: 0;
   flex-wrap: wrap;
 }
@@ -1639,7 +1639,7 @@ button.send:hover:not(:disabled) {
   margin: auto;
   z-index: 31;
   display: grid;
-  grid-template-columns: 12.5rem minmax(0, 1fr);
+  grid-template-columns: 11rem minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr);
   inline-size: min(960px, 94vw);
   block-size: min(760px, 88vh);
@@ -1656,7 +1656,7 @@ button.send:hover:not(:disabled) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 18px 24px;
+  padding: 10px 18px;
   border-block-end: 1px solid var(--line);
   font-size: var(--text-lg);
 }
@@ -1665,7 +1665,7 @@ button.send:hover:not(:disabled) {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
-  padding: 20px 12px;
+  padding: 12px 8px;
   background: var(--bg-sunk);
   border-inline-end: 1px solid var(--line);
 }
@@ -1674,14 +1674,18 @@ button.send:hover:not(:disabled) {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
+  padding: 6px var(--space-3);
   color: var(--fg-muted);
   background: transparent;
   border: 1px solid transparent;
   border-radius: var(--radius);
   text-align: start;
   font-size: var(--text-md);
+  white-space: normal;
+  line-height: 1.4;
 }
+
+.sheet-nav button > span { min-width: 0; }
 
 .sheet-nav button:hover {
   color: var(--fg);
@@ -1698,14 +1702,14 @@ button.send:hover:not(:disabled) {
 .sheet-body {
   min-height: 0;
   overflow-y: auto;
-  padding: 24px 32px 40px;
+  padding: 16px 24px 24px;
 }
 
 .sheet-row {
   display: flex;
   align-items: flex-start;
   gap: var(--space-5);
-  padding: 18px 0;
+  padding: 10px 0;
   border-block-end: 1px solid var(--line);
 }
 
@@ -1731,6 +1735,12 @@ button.send:hover:not(:disabled) {
   color: var(--fg-muted);
   font-size: var(--text-xs);
 }
+
+.shortcut-settings .sheet-row { align-items: center; gap: 16px; }
+.shortcut-settings .sheet-label { flex-basis: 46%; }
+.shortcut-settings .sheet-value { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 8px; }
+.shortcut-settings .sheet-value > code { flex: 1; min-width: 6rem; font-size: var(--text-sm); overflow-wrap: anywhere; }
+.shortcut-settings .sheet-hint { flex-basis: 100%; }
 
 .sheet-value select,
 .sheet-value input,
@@ -1891,7 +1901,7 @@ button.mini.chip b {
   min-width: 0;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-1) var(--space-2);
+  padding: 0 var(--space-2);
   color: var(--fg-muted);
   background: var(--bg-sunk);
   border: 1px solid var(--line);
@@ -2315,9 +2325,9 @@ button.pill:hover {
 .menu-separator { height: 1px; margin: 5px 4px; background: var(--line); }
 .action-error { font-size: var(--text-xs); color: var(--bad); }
 .settings-intro h2 { margin: 0 0 8px; font-size: 1.3rem; font-weight: 600; }
-.settings-intro p { margin: 0 0 24px; color: var(--fg-muted); font-size: var(--text-sm); }
+.settings-intro p { margin: 0 0 16px; color: var(--fg-muted); font-size: var(--text-sm); }
 
-.service-row { display: flex; align-items: center; gap: 12px; padding: 18px 0; border-bottom: 1px solid var(--line); }
+.service-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); }
 .service-row > div { display: grid; flex: 1; gap: 4px; min-width: 0; }
 .service-row strong { font-size: var(--text-md); font-weight: 550; }
 .service-row div > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-muted); font-size: var(--text-xs); }
@@ -2325,9 +2335,9 @@ button.pill:hover {
 .service-default { margin-inline-start: 10px; padding: 3px 6px; font-size: var(--text-xs); border-radius: 5px; background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
 .add-service { display: inline-flex; gap: 7px; align-items: center; margin-top: 20px; }
 .model-empty { color: var(--fg-muted); margin: 32px 0; font-size: var(--text-md); }
-.service-fields { display: grid; gap: 18px; border: 0; margin: 0; padding: 0; }
+.service-fields { display: grid; gap: 12px; border: 0; margin: 0; padding: 0; }
 .service-fields label, .service-advanced label { display: grid; gap: 8px; color: var(--fg); font-size: var(--text-sm); }
-.service-fields input, .service-fields textarea, .service-fields select { width: 100%; min-width: 0; background: var(--bg); padding: 10px 12px; }
+.service-fields input, .service-fields textarea, .service-fields select { width: 100%; min-width: 0; background: var(--bg); padding: 6px 10px; }
 .service-fields textarea { resize: vertical; font-family: var(--mono); }
 .service-fields summary { color: var(--fg-muted); cursor: pointer; font-size: var(--text-sm); }
 .service-advanced { display: grid; gap: 16px; padding-top: 18px; }

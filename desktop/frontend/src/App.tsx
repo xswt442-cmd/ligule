@@ -1695,7 +1695,7 @@ export function App({ transport }: { transport: Transport }) {
         <textarea
           className="composer-input"
           ref={composerRef}
-          rows={3}
+          rows={2}
           value={draft}
           // 接一份会话的那一段里不接新字：这一段屏幕上还是上一份的草稿，敲进去的会落在错的归属上（方案 5.1、审阅 F5）。
           readOnly={closing || reading || starting || inputOwner !== sessionId || !settingsReady}

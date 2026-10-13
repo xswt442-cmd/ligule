@@ -6,7 +6,7 @@ import { NotificationPanel } from './NotificationPanel';
 import { PolicyRules } from './PolicyRules';
 import { Group, Modal, Row } from './ui';
 import { holdReasons, report, type EditGate } from '../edit-gate';
-import { CURRENT, KEYMAP, conflictsIn, formatKeys, setCapturing, specOf, type KeyAction, type KeyView } from '../hotkeys';
+import { CURRENT, KEYMAP, conflictsIn, formatKeys, parseSpec, setCapturing, specOf, type KeyAction, type KeyView } from '../hotkeys';
 import { PALETTES, type Palette, type Settings } from '../settings';
 import { code, type Client } from '../protocol';
 import type { WorkspaceRoster } from '../rail';
@@ -252,8 +252,8 @@ const KEY_LABELS: Record<KeyAction, [string, string]> = {
   palette: ['打开命令面板', 'Open command palette'],
   sidebar: ['收起或展开侧栏', 'Show or hide the sidebar'],
   'copy-answer': ['复制最后一条回答', 'Copy the latest answer'],
-  interrupt: ['收起浮层；浮层关闭后打断本轮', 'Close overlays, then interrupt the round'],
-  send: ['发送；运行时排到后面', 'Send, or queue while a round runs'],
+  interrupt: ['关闭浮层或停止本轮', 'Close overlay or stop turn'],
+  send: ['发送或加入队列', 'Send or queue a message'],
   'send-alt': ['发送', 'Send'],
   newline: ['换行', 'Insert a new line'],
   'history-older': ['向上翻输入历史', 'Move back in input history'],
@@ -284,6 +284,8 @@ function Keys({ settings, patch, notice }: { settings: Settings; patch: Settings
     };
     const onKey = (event: KeyboardEvent) => {
       event.preventDefault();
+      // 录制只消费这次按键，不能在结束录制后继续触发全局动作。
+      event.stopImmediatePropagation();
       if (event.key === 'Escape') {
         stop();
         return;
@@ -319,16 +321,16 @@ function Keys({ settings, patch, notice }: { settings: Settings; patch: Settings
     patch({ keys: next });
   };
   const views = [...new Set(Object.values(KEYMAP).map((binding) => binding.view))] as KeyView[];
-  return <>
+  return <div className="shortcut-settings">
     {notice === '' ? null : <p className="stub">{notice}</p>}
     {refused === '' ? null : <p className="session-note" data-tone="bad">{refused}</p>}
     {views.map((view) => <Fragment key={view}>
       <Group title={t(...KEY_VIEWS[view])}>
         {(Object.entries(KEYMAP) as [KeyAction, (typeof KEYMAP)[KeyAction]][])
           .filter(([, binding]) => binding.view === view)
-          .map(([action]) => <Row key={action} label={t(...KEY_LABELS[action])} note={settings.keys[action] === undefined ? t('当前使用默认键。', 'Using the default key.') : t(`自定义键：${settings.keys[action]}`, `Custom key: ${settings.keys[action]}`)}>
-            <code>{formatKeys(CURRENT[action])}</code>
-            <button type="button" onClick={() => { setRefused(''); setListening(listening === action ? null : action); }}>
+          .map(([action]) => <Row key={action} label={t(...KEY_LABELS[action])}>
+            <code>{formatKeys(parseSpec(settings.keys[action] ?? '') ?? KEYMAP[action].spec)}</code>
+            <button type="button" aria-label={t(`更改快捷键：${KEY_LABELS[action][0]}`, `Change shortcut: ${KEY_LABELS[action][1]}`)} onClick={() => { setRefused(''); setListening(listening === action ? null : action); }}>
               {listening === action ? t('按下新键（Esc 取消）', 'Press a new key (Esc to cancel)') : t('更改', 'Change')}
             </button>
             {settings.keys[action] === undefined ? null : <button type="button" onClick={() => restore(action)}>{t('恢复默认', 'Reset')}</button>}
@@ -338,7 +340,7 @@ function Keys({ settings, patch, notice }: { settings: Settings; patch: Settings
     <Row label={t('恢复所有默认键位', 'Reset all keyboard shortcuts')} note={t('清除这台设备上的个人键位。', 'Clear custom shortcuts on this device.')}>
       <button type="button" onClick={() => { setRefused(''); patch({ keys: {} }); }}>{t('恢复默认', 'Reset')}</button>
     </Row>
-  </>;
+  </div>;
 }
 
 // 模型服务经 Host 保存到用户默认或项目本地配置，会话的模型选择由输入区管理。
