@@ -6,7 +6,7 @@
 $ErrorActionPreference = 'Stop'
 
 $source = Join-Path $PSScriptRoot 'assets/app-icon.png'
-$icons = Join-Path $PSScriptRoot 'src-tauri/icons'
+$icons = Join-Path $PSScriptRoot 'icons'
 if (-not (Test-Path $source)) { throw "the icon source is missing: $source" }
 New-Item -ItemType Directory -Force -Path $icons | Out-Null
 

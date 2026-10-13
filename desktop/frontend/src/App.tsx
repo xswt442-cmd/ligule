@@ -495,14 +495,13 @@ export function App({ transport }: { transport: Transport }) {
   }, [client, notify, sessionId]);
 
   useEffect(() => {
-    transport.onFault?.((reason) => {
+    const removeFault = transport.onFault?.((reason) => {
       setLink(reason);
       if (!connectionLost.current) notify('disconnected');
       connectionLost.current = true;
     });
-    if (sessionId === null) return;
-    const timer = setInterval(() => void beat(), 3_000);
-    return () => clearInterval(timer);
+    const timer = sessionId === null ? undefined : setInterval(() => void beat(), 3_000);
+    return () => { if (timer !== undefined) clearInterval(timer); if (typeof removeFault === 'function') removeFault(); };
   }, [beat, notify, sessionId, transport]);
 
   const jumpToLatest = useCallback(() => {

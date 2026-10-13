@@ -2,13 +2,11 @@
 
 [简体中文](README.md) · [English](README.en.md)
 
-桌面应用由 `frontend/` 中的 React 与 TypeScript 前端、`src-tauri/` 中的 Rust 与 Tauri 壳，以及 Node Host 组成。前端通过 Tauri 调用 Host 协议；Rust 壳管理窗口并转发按行分隔的消息帧。业务逻辑和会话状态由 Node 管理。完整调用路径见[架构说明](../docs/development/ARCHITECTURE.zh-cn.md)。
+桌面应用由 `electron/` 中的 Electron Main 与 Preload、`frontend/` 中的 React 前端，以及独立 Node Host 组成。Main 只管理窗口和 Host 进程，业务逻辑与会话状态由 Node Host 管理。
 
-## 环境要求
+## 环境与依赖
 
-需要 Node.js 24 或更新版本和稳定版 Rust 工具链。Windows 构建需要 WebView2；Linux 构建需要 [CI 工作流](../.github/workflows/ci.yml)列出的 Tauri 系统库。macOS 使用对应架构的原生 runner。支持的安装目标及验收状态见[发行清单](../docs/development/RELEASE.zh-cn.md)。
-
-从仓库根目录安装各个依赖树：
+使用 Node.js 24 或更新版本。分别安装仓库、桌面壳和前端依赖：
 
 ```sh
 npm ci
@@ -16,70 +14,72 @@ npm --prefix desktop ci
 npm --prefix desktop/frontend ci
 ```
 
-## 启动开发环境
+Electron `44.7.0`、electron-builder `26.15.3` 与 `@electron/fuses` `2.1.3` 固定为桌面目录的开发依赖。
 
-同时启动 Vite 前端和 Tauri 壳：
+## 启动开发应用
+
+先构建核心并准备本机的 Node 运行时和 Host 运行树，再从仓库根目录运行桌面开发入口：
 
 ```sh
+npm run build
+node desktop/fetch-runtime.mjs
 npm --prefix desktop run dev
 ```
 
-壳会启动 Node Host。桌面窗口中的前端使用 Tauri 传输；`dev/` 页面也可以连接本地假 Host，单独检查界面。
+开发入口先编译 Electron TypeScript，再启动固定在 `http://localhost:5188/` 的 Vite 服务和 Electron。只有该入口会向 Electron 传入 `--dev`。
 
 ## 检查前端
-
-运行前端断言和生产构建：
 
 ```sh
 npm --prefix desktop/frontend run check
 npm --prefix desktop/frontend run build
 ```
 
-## 检查 Rust 壳
+## 验收
 
-从仓库根目录运行：
+自动化检查、真实窗口测试和安装器验收的程序位于 `electron/test/`；运行日志与验收记录留在被 Git 忽略的 `desktop/testplace/readings/`，不会随仓库分发。在 Windows 上按顺序运行：
 
 ```sh
-cd desktop/src-tauri
-cargo fmt --check
-cargo test
+node node_modules/typescript/bin/tsc -p desktop/electron/tsconfig.json
+node --experimental-strip-types --test desktop/electron/test/host.test.ts desktop/electron/test/security.test.ts
+desktop/vendor/node/node.exe --experimental-strip-types --test desktop/electron/test/process-tree.test.ts
+desktop/vendor/node/node.exe desktop/electron/test/run-native-security.mjs
+desktop/vendor/node/node.exe desktop/electron/test/run-native-features.mjs
+desktop/vendor/node/node.exe desktop/electron/test/run-stub-model.mjs
+desktop/vendor/node/node.exe desktop/electron/test/run-packaged-smoke.mjs
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File desktop/electron/test/run-installer-smoke.ps1
 ```
 
-前端构建会先运行 TypeScript 检查，再由 Vite 打包。Rust 测试覆盖进程入口解析、按行转发消息帧、Host 替换、托盘和通知输入规则。CI 在各自的平台 runner 上构建安装包；这些构建产物用于验证，只有正式发布后才是公开安装包。
+从 Git Bash 直接启动 Electron 之前要先执行 `unset ELECTRON_RUN_AS_NODE NODE_OPTIONS NODE_PATH`，否则测试脚本会被当成普通 Node 脚本执行。真实窗口与安装器用例只使用隔离的测试工作区和数据根，证据写入被忽略的 `desktop/testplace/readings/`。`run-native-features.mjs` 只在 Windows 上提供保存对话框自动化；`run-real-model.mjs` 还需要本机凭据记录，并依赖共享运行时的流式解析修复。
 
-## 构建安装包
+## 构建应用
 
-按顺序完成以下步骤：
+先构建核心包并准备当前操作系统和架构对应的 Node 运行时：
 
-1. 构建核心包：
+```sh
+npm run build
+node desktop/fetch-runtime.mjs
+```
 
-   ```sh
-   npm run build
-   ```
+再从仓库根目录执行桌面构建：
 
-2. 在目标平台准备 Node 运行时目录：
+```sh
+npm --prefix desktop run build
+```
 
-   ```sh
-   node desktop/fetch-runtime.mjs
-   ```
+`npm --prefix desktop run build:dir` 生成未安装目录，适合检查 `app.asar` 与随包资源。`build:win`、`build:linux`、`build:mac` 分别生成 Windows x64 NSIS、Linux x64 AppImage 与 deb、macOS 本机架构 DMG。macOS arm64 与 x64 需要分别在对应架构的机器上构建，并先准备该机的运行时。构建会拒绝与本机架构或 Node 运行时标记不符的架构参数。发行构建不会自动发布，也不使用开发者证书签名或公证。为保证 Apple Silicon 上启用 fuses 的应用可以启动，arm64 macOS 构建会重置 Electron 要求的 ad-hoc 签名。
 
-3. 构建桌面安装包：
+`fetch-runtime.mjs` 按 [`node-pin.json`](node-pin.json) 下载并验证 Node 归档，再准备 `vendor/node/` 与 `vendor/app/`。打包后 Node 与 Host 运行树位于应用资源目录，应用代码、前端文件和图标位于 `app.asar`。构建会关闭 Electron 的 RunAsNode、NODE_OPTIONS 和命令行调试开关，并要求应用从 `app.asar` 加载；Windows 与 macOS 的打包配置同时启用归档完整性检查。
 
-   ```sh
-   npm --prefix desktop run build
-   ```
-
-`fetch-runtime.mjs` 会下载 [`node-pin.json`](node-pin.json) 指定的 Node 归档、验证校验和，并将构建产物和生产依赖复制到 `desktop/vendor/`。运行时目录与平台相关，不要在不同操作系统或架构之间复用。Tauri 会将其打入安装包。目标平台的安装包格式由 `tauri.*.conf.json` 指定。
-
-输出位置和安装包格式见[发行清单](../docs/development/RELEASE.zh-cn.md)。如需在打包前检查随包运行时，可使用当前平台 `desktop/vendor/node/` 下的 Node 执行 `desktop/check-runtime.mjs`。
+安装包写入 `desktop/release/`。目标平台的运行时必须在对应平台和架构上准备，不能复用其他平台生成的 `vendor/`。
 
 ## 应用图标
 
-[`assets/app-icon.png`](assets/app-icon.png) 是源图。在 Windows 上，运行以下命令重新生成前端与 Tauri 图标：
+[`assets/app-icon.png`](assets/app-icon.png) 是源图。在 Windows 上重新生成桌面图标：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File desktop/make-icons.ps1
 node desktop/make-ico.mjs
 ```
 
-脚本将生成文件写入 `desktop/frontend/public/` 和 `desktop/src-tauri/icons/`。提交前检查生成结果。
+脚本将 PNG 和 ICO 图标写入 `desktop/icons/`，并将前端使用的 PNG 写入 `desktop/frontend/public/`。

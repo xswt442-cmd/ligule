@@ -39,7 +39,7 @@ async function fetchNode() {
     const printed = execFileSync(nodeExe, ['--version'], { encoding: 'utf8' }).trim();
     if (printed === pin.version) return console.log(`node ${printed} already vendored for ${target}`);
   }
-  const scratchRoot = join(root, 'testplace');
+  const scratchRoot = join(root, 'desktop', 'testplace', 'tmp');
   await mkdir(scratchRoot, { recursive: true });
   const temporary = await mkdtemp(join(scratchRoot, 'node-runtime-'));
   try {

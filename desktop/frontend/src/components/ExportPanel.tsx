@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react';
-import { save } from '@tauri-apps/plugin-dialog';
+import { saveExportPath } from '../bridge';
 import { code, type Client } from '../protocol';
 import { Icon } from './Icon';
 import { useText } from '../locale';
@@ -24,7 +24,7 @@ export function ExportPanel({ client, sessionId }: { client: Client; sessionId: 
     setPhase('picking');
     let destination: string | null;
     try {
-      destination = await save({ defaultPath: `ligule-${sessionId.slice(0, 8)}.md`, filters: [{ name: 'Markdown', extensions: ['md'] }] });
+      destination = await saveExportPath(`ligule-${sessionId.slice(0, 8)}.md`);
     } catch (error) {
       setPhase('idle');
       setNote({ text: t('保存对话框无法打开。', 'Could not open the save dialog.'), code: code(error), bad: true });
