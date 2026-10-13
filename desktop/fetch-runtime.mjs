@@ -97,6 +97,7 @@ async function fetchAppTree() {
   const result = spawn.sync(isJavaScriptCli ? process.execPath : pnpmCli, isJavaScriptCli ? [pnpmCli, ...args] : args, {
     cwd: root,
     stdio: 'inherit',
+    env: { ...process.env, PNPM_CONFIG_NODE_LINKER: 'hoisted' },
   });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`pnpm deploy exited with status ${result.status ?? 'unknown'}`);
