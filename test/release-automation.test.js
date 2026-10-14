@@ -243,6 +243,7 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
 
   assert.deepEqual(tag.on.workflow_dispatch.inputs.action.options, ['prepare', 'tag']);
   assert.deepEqual(tag.on.workflow_dispatch.inputs.product.options, ['cli', 'desktop']);
+  assert.equal(tag.jobs['create-tag'].steps.find((step) => step.uses === 'actions/setup-node@v5').with['package-manager-cache'], false);
   const prepare = tag.jobs.prepare.steps.map((step) => step.run ?? '').join('\n');
   const createTag = tag.jobs['create-tag'].steps.map((step) => step.run ?? '').join('\n');
   assert.match(prepare, /release-version\.js resolve "\$PRODUCT"/);
