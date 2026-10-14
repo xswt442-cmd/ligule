@@ -449,6 +449,7 @@ if ($null -eq $dialog) { throw ('Owned Save dialog was not found. Owned windows:
 $dialogTitle = [NativeTestWindowEnumeration]::Title($dialogHandle)
 $fileNameCondition = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::AutomationIdProperty, '1001')
 $expectedFileName = [System.IO.Path]::GetFileName($TargetPath)
+$expectedDisplayStem = [System.IO.Path]::GetFileNameWithoutExtension($TargetPath)
 $fileNameField = $null
 $fileNameValue = $null
 $fileNameSource = $null
@@ -466,7 +467,8 @@ while ((Get-Date) -lt $fileNameDeadline -and $stableFileNameReads -lt 2) {
       $observedFileName = $fileNameField.Current.Name
       $fileNameSource = 'NameFallbackForUnsupportedValuePattern'
     }
-    if ($observedFileName -eq $expectedFileName) { $stableFileNameReads += 1 }
+    # Windows can hide a known extension in the filename control; the returned full path is checked by the caller.
+    if ($observedFileName -eq $expectedFileName -or $observedFileName -eq $expectedDisplayStem) { $stableFileNameReads += 1 }
     else { $stableFileNameReads = 0 }
     $fileNameValue = $observedFileName
   }
