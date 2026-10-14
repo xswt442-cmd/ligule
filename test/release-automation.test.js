@@ -4,7 +4,7 @@ import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promi
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import { changelogSection, releaseNotesForTag } from '../scripts/release-notes.js';
+import { changelogSection, desktopDownloadTable, releaseNotesForTag } from '../scripts/release-notes.js';
 import { createDesktopReleaseManifest, verifyDesktopReleaseManifests } from '../scripts/desktop-release-manifest.js';
 import { githubAssetName, verifyDesktopDraft } from '../scripts/verify-desktop-draft.js';
 import { prepareRelease, requestedVersionAtRoot, resolveVersion } from '../scripts/release-version.js';
@@ -129,7 +129,41 @@ test('release notes select each product changelog and matching bilingual version
     assert.match(cliNotes, /npm install -g ligule@0\.0\.1/);
     assert.match(cliNotes, /npmjs\.com\/package\/ligule\/v\/0\.0\.1/);
     assert.match(cliNotes, /this GitHub Release contains bilingual notes/);
-    assert.match(releaseNotesForTag(directory, 'desktop-v2.4.1'), /SHA-256/);
+    const desktopPreview = releaseNotesForTag(directory, 'desktop-v2.4.1');
+    assert.match(desktopPreview, /SHA-256/);
+    assert.match(desktopPreview, /\| Windows x64 \| NSIS/);
+    assert.match(desktopPreview, /\| Linux x64 \| AppImage/);
+    assert.match(desktopPreview, /\| Linux x64 \| deb/);
+    assert.match(desktopPreview, /releases\/tag\/desktop-v2\.4\.1#assets/);
+    assert.doesNotMatch(desktopPreview, /draft Release after platform validation|草稿 Release/);
+    const commit = 'a'.repeat(40);
+    const manifest = {
+      schemaVersion: 1,
+      product: 'desktop',
+      tag: 'desktop-v2.4.1',
+      version: '2.4.1',
+      sourceCommit: commit,
+      assets: [
+        { target: 'windows-x64', architecture: 'x64', name: `ligule-desktop-v2.4.1-windows-x64-${commit.slice(0, 12)}-ligule Setup 2.4.1.exe`, sha256: 'b'.repeat(64) },
+        { target: 'linux-x64', architecture: 'x64', name: `ligule-desktop-v2.4.1-linux-x64-${commit.slice(0, 12)}-ligule-2.4.1.AppImage`, sha256: 'c'.repeat(64) },
+        { target: 'linux-x64', architecture: 'x64', name: `ligule-desktop-v2.4.1-linux-x64-${commit.slice(0, 12)}-ligule-desktop_2.4.1_amd64.deb`, sha256: 'd'.repeat(64) },
+      ],
+    };
+    const downloadableNotes = releaseNotesForTag(directory, 'desktop-v2.4.1', { manifest });
+    assert.match(downloadableNotes, /releases\/download\/desktop-v2\.4\.1\/.*-ligule\.Setup\.2\.4\.1\.exe/);
+    assert.match(downloadableNotes, /releases\/download\/desktop-v2\.4\.1\/.*\.AppImage/);
+    assert.match(downloadableNotes, /releases\/download\/desktop-v2\.4\.1\/.*\.deb/);
+    assert.match(downloadableNotes, /desktop-release-manifest\.json/);
+    assert.doesNotMatch(downloadableNotes, /%20|草稿 Release/);
+    assert.throws(() => desktopDownloadTable('cli-v2.4.1'), /Desktop tag/);
+    assert.throws(() => releaseNotesForTag(directory, 'cli-v0.0.1', { manifest }), /do not accept/);
+    assert.throws(() => releaseNotesForTag(directory, 'desktop-v2.4.1', { manifest: { ...manifest, tag: 'desktop-v2.4.2' } }), /verified manifest/);
+    assert.throws(() => releaseNotesForTag(directory, 'desktop-v2.4.1', {
+      manifest: { ...manifest, assets: manifest.assets.slice(0, 2) },
+    }), /verified manifest/);
+    assert.throws(() => releaseNotesForTag(directory, 'desktop-v2.4.1', {
+      manifest: { ...manifest, assets: manifest.assets.map((asset, i) => i === 0 ? { ...asset, name: '../unsafe.exe' } : asset) },
+    }), /missing or duplicate Desktop asset|invalid asset identity/);
     assert.throws(() => requestedVersionAtRoot(directory, 'unknown', 'patch'), /product must be cli or desktop/);
     assert.throws(() => requestedVersionAtRoot(directory, '__proto__', 'patch'), /product must be cli or desktop/);
     assert.throws(() => changelogSection(CHANGELOG, '0.0.2'), /exactly one/);
@@ -380,6 +414,7 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
     'unverified macOS installers must not enter the formal Desktop release asset set');
   const draft = release.jobs.draft.steps.map((step) => step.run ?? '').join('\n');
   assert.match(draft, /desktop-release-manifest\.js verify/);
+  assert.match(draft, /release-notes\.js "\$TAG" --manifest dist-release\/desktop-release-manifest\.json/);
   assert.match(draft, /gh release create "\$TAG" --verify-tag[^\n]*--draft/);
   assert.match(draft, /refusing to modify published Release/);
   assert.match(draft, /gh release upload "\$TAG"/);

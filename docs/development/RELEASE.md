@@ -17,6 +17,14 @@ Ligule 分为两条独立发行线，版本可分别推进：
 4. **Desktop 草稿：** 手动运行 [`release.yml`](../../.github/workflows/release.yml)，输入 `desktop-vX.Y.Z` 并保持 `publish=false`。工作流从标签提交构建 Windows 与 Linux 三种安装包、校验发行资产并创建或补齐 GitHub Release 草稿。
 5. **公开 Desktop：** 检查草稿说明、三种安装包和 SHA-256 后，再运行同一工作流并设置 `publish=true`。工作流重新核对标签与全部资产，检查 `desktop-publish` Environment 已配置必需审核者，然后等待该 Environment 审批；获批后才公开 Release。
 
+## Release Notes 内容与下载表规范
+
+- **两条产品线各自维护 Changelog：** `CHANGELOG.md` 对应 CLI/TUI，`desktop/CHANGELOG.md` 对应 Desktop。每个正式版本要有简体中文与英文的**具体变化说明**，优先按功能、交互、安全与兼容性分组；不允许只写“优化体验、修复问题”等没有场景的空泛句子。小型修复可只写实际变动，不必凑条数。
+- **CLI/TUI：** 说明交互模式、工作区/会话行为、可靠性变化与使用条件；`release-notes.js` 自动加上 Node.js 版本、安装命令和 npm 包链接，不上传重复安装包。
+- **Desktop：** 说明架构变动、工作区/审批与保存导出、原生运行时以及支持平台范围；`release-notes.js` 自动生成“操作系统 / 安装包格式 / 适用情况 / 下载”表格。正式 Release 的直链必须来自先通过 SHA-256 和来源校验的 `desktop-release-manifest.json`；不要根据版本号猜测安装包名称，更不能保留“稍后上传草稿附件”的占位文案。
+- Desktop 的 `publish=false` 草稿工作流在完成 `desktop-release-manifest.js verify` 后调用 `release-notes.js desktop-vX.Y.Z --manifest dist-release/desktop-release-manifest.json`。预览时不提供 manifest 只生成平台表和附件区链接，**不会伪造文件直链**。Notes 另附 `SHA256SUMS` 和 manifest 文件地址；macOS 未经过正式验证，不列为可下载目标。
+- 已公开 Release 的说明如需修订，应验证对应真实 Tag、安装包资产和目标 Registry 后修改 Release 正文；不移动 Tag、不覆盖二进制，不会因此重新发布 npm 包。
+
 版本、更新记录和发布渠道必须保持产品隔离。不要重用标签或 npm 版本。重试前先检查 [GitHub Releases](https://github.com/xswt442-cmd/ligule/releases) 与 [npm 包](https://www.npmjs.com/package/ligule)。正式发布前须为 `npm-publish` 和 `desktop-publish` GitHub Environments 配置必需审核者。
 
 随包 Node 运行时及其归档校验值以 [`desktop/node-pin.json`](../../desktop/node-pin.json) 为准。修改运行时版本时更新该文件并验证各目标安装包。

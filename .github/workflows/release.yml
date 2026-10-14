@@ -239,7 +239,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node scripts/release-notes.js "$TAG" > "$RUNNER_TEMP/release-notes.md"
+          node scripts/release-notes.js "$TAG" --manifest dist-release/desktop-release-manifest.json > "$RUNNER_TEMP/release-notes.md"
           if gh release view "$TAG" --json isDraft --jq .isDraft > "$RUNNER_TEMP/release-state" 2>/dev/null; then
             if [ "$(cat "$RUNNER_TEMP/release-state")" != true ]; then echo "::error::refusing to modify published Release ${TAG}"; exit 1; fi
             echo "Draft ${TAG} exists; preserving its title and notes." >> "$GITHUB_STEP_SUMMARY"
