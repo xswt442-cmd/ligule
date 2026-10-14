@@ -21,6 +21,8 @@ const report = {
   cases: {},
   nativeFaults: [],
   notificationClick: { status: 'unverified', reason: '系统通知点击没有可靠的真人等效自动化方式。' },
+  savePathRequests: [],
+  savePathCompletions: [],
 };
 
 if (process.platform !== 'win32') throw new Error('native feature dialog automation currently requires Windows');
@@ -118,6 +120,73 @@ try {
   assert.equal(selectReadout.action, 'select');
   assert.equal(await fileExists(selectedPath), false, 'choosing an export location must not write the export file');
 
+  const exportSessions = await sendCommand('prepare-export-sessions');
+  assert.ok(typeof exportSessions.sessionA === 'string' && typeof exportSessions.sessionB === 'string');
+  const invalidExport = await sendCommand('invalid-export-path', exportSessions.sessionA);
+  report.cases.invalidExportPath = invalidExport;
+  assert.equal(invalidExport.error, 'host_export_write_failed');
+  assert.equal(invalidExport.blocker, 'preserve this file');
+  assert.equal(invalidExport.targetExists, false);
+
+  const notificationFor = sessionId => ({
+    title: 'ligule',
+    body: 'Turn completed',
+    target: JSON.stringify({ sessionId, projectRoot: workspaceDirectory }),
+    openLabel: 'Open conversation',
+  });
+  report.cases.notificationA = await sendCommand('show-notification', notificationFor(exportSessions.sessionA), 15_000);
+  report.cases.notificationAClick = await sendCommand('click-latest-notification');
+  assert.equal(JSON.parse(report.cases.notificationAClick.target).sessionId, exportSessions.sessionA);
+  await waitForSessionTitle('Export race A');
+  const staleExportPath = join(documentsDirectory, `ligule-${exportSessions.sessionA.slice(0, 8)}.md`);
+  assert.equal(await fileExists(staleExportPath), false);
+  report.cases.exportPanelOpen = await sendCommand('open-export-panel');
+  assert.equal(report.cases.exportPanelOpen?.error, undefined, `could not open ExportPanel: ${report.cases.exportPanelOpen?.error ?? 'unknown error'}`);
+  report.cases.notificationB = await sendCommand('show-notification', notificationFor(exportSessions.sessionB), 15_000);
+  report.cases.exportPanelBeforeClick = await sendCommand('inspect-export-ui');
+  report.cases.exportButtonClick = await sendCommand('click-export');
+  assert.equal(report.cases.exportButtonClick?.error, undefined, `could not click ExportPanel: ${report.cases.exportButtonClick?.error ?? 'unknown error'}`);
+  report.cases.exportPanelAfterClick = await sendCommand('inspect-export-ui');
+  const staleDialog = await runDialogControl('observe', electronProcess.pid, staleExportPath);
+  report.cases.notificationBClick = await sendCommand('click-latest-notification');
+  assert.equal(JSON.parse(report.cases.notificationBClick.target).sessionId, exportSessions.sessionB);
+  const deliveredTarget = await waitForNotificationTarget(exportSessions.sessionB);
+  const staleSelection = await runDialogControl('select', electronProcess.pid, staleExportPath);
+  const stalePickerResult = await waitForSavePathResult(`ligule-${exportSessions.sessionA.slice(0, 8)}.md`);
+  assert.equal(resolve(stalePickerResult.selectedPath), resolve(staleExportPath), 'the stale picker must return the exact path inside the isolated documents directory');
+  const switchedTitle = await waitForSessionTitle('Export race B');
+  await delay(400);
+  const staleExportWritten = await fileExists(staleExportPath);
+  report.cases.exportAfterNotificationSessionSwitch = {
+    previousSession: 'Export race A',
+    notificationTargetDelivered: deliveredTarget,
+    activeSession: switchedTitle,
+    dialogObserved: staleDialog.action === 'observe',
+    selectedPath: staleSelection.selectedPath,
+    pickerResult: stalePickerResult.selectedPath,
+    fileCreatedAfterPanelUnmount: staleExportWritten,
+  };
+  assert.equal(staleExportWritten, false, 'a save dialog result for an unmounted session must not start Host export');
+
+  const reopenedExportPanel = await sendCommand('open-export-panel');
+  report.cases.exportPanelReopenedAfterSwitch = { label: reopenedExportPanel };
+  assert.match(reopenedExportPanel, /导出会话|Export session/u);
+  const cancelledExportPath = join(documentsDirectory, `ligule-${exportSessions.sessionB.slice(0, 8)}.md`);
+  const cancelledExportName = `ligule-${exportSessions.sessionB.slice(0, 8)}.md`;
+  const beforeCancelCompletion = report.savePathCompletions.length;
+  await sendCommand('click-export');
+  const cancelledDialog = await runDialogControl('cancel', electronProcess.pid, cancelledExportPath);
+  const cancelledPickerResult = await waitForSavePathResult(cancelledExportName, beforeCancelCompletion);
+  await delay(250);
+  report.cases.exportDialogCancel = {
+    result: cancelledPickerResult.selectedPath,
+    automation: cancelledDialog,
+    fileCreated: await fileExists(cancelledExportPath),
+  };
+  assert.equal(cancelledDialog.action, 'cancel');
+  assert.equal(report.cases.exportDialogCancel.result, null);
+  assert.equal(report.cases.exportDialogCancel.fileCreated, false, 'a cancelled dialog must not produce an export file');
+
   const trayUpdate = await sendCommand('update-tray');
   assert.equal(trayUpdate, undefined);
   report.cases.tray = await sendCommand('inspect-tray-window');
@@ -195,6 +264,14 @@ function handleMessage(message) {
     report.notificationClickObserved = message.target;
     return;
   }
+  if (message.type === 'save-path-requested') {
+    report.savePathRequests.push({ defaultName: message.defaultName, at: new Date().toISOString() });
+    return;
+  }
+  if (message.type === 'save-path-completed') {
+    report.savePathCompletions.push({ defaultName: message.defaultName, selectedPath: message.selectedPath, at: new Date().toISOString() });
+    return;
+  }
   if (message.type === 'result') {
     const waiter = pending.get(message.id);
     if (waiter === undefined) return;
@@ -211,7 +288,8 @@ function sendCommand(action, value, timeoutMs = 20_000) {
     .finally(() => pending.delete(id));
   const message = { id, action };
   if (action === 'show-notification') message.notification = value;
-  if (action === 'save-export-path') message.defaultName = value;
+  else if (action === 'save-export-path') message.defaultName = value;
+  else if (value !== undefined) message.value = value;
   electronProcess.send(message, error => {
     if (error !== null && error !== undefined) {
       pending.get(id)?.reject(error);
@@ -224,6 +302,42 @@ function sendCommand(action, value, timeoutMs = 20_000) {
 async function runDialogControl(mode, ownerPid, targetPath) {
   const result = await runPowerShell(powershellScript, [mode, String(ownerPid), targetPath], 40_000);
   return JSON.parse(result);
+}
+
+async function waitForSessionTitle(expected) {
+  const deadline = Date.now() + 20_000;
+  let actual = '';
+  while (Date.now() < deadline) {
+    actual = await sendCommand('session-title', undefined, 5_000);
+    if (actual === expected) return actual;
+    await delay(100);
+  }
+  throw new Error(`notification_target_session_not_opened:${expected}:${actual}`);
+}
+
+async function waitForNotificationTarget(sessionId) {
+  const deadline = Date.now() + 10_000;
+  let targets = [];
+  while (Date.now() < deadline) {
+    targets = await sendCommand('notification-targets', undefined, 5_000);
+    const target = targets.map(value => {
+      try { return typeof value === 'string' ? JSON.parse(value) : value; }
+      catch { return null; }
+    }).find(value => value?.sessionId === sessionId);
+    if (target !== undefined) return target;
+    await delay(50);
+  }
+  throw new Error(`notification_target_not_delivered_to_renderer:${sessionId}:${JSON.stringify(targets)}`);
+}
+
+async function waitForSavePathResult(defaultName, afterIndex = 0) {
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    const result = report.savePathCompletions.slice(afterIndex).find(item => item.defaultName === defaultName);
+    if (result !== undefined) return result;
+    await delay(50);
+  }
+  throw new Error(`native_save_path_result_missing:${defaultName}:${JSON.stringify(report.savePathCompletions)}`);
 }
 
 function runPowerShell(scriptPath, args, timeoutMs) {
@@ -283,6 +397,11 @@ public static class NativeTestWindowEnumeration {
     }, IntPtr.Zero);
     return windows.ToArray();
   }
+  public static uint OwnerProcess(IntPtr window) {
+    uint processId;
+    GetWindowThreadProcessId(window, out processId);
+    return processId;
+  }
   public static string Title(IntPtr window) {
     var text = new System.Text.StringBuilder(512);
     GetWindowText(window, text, text.Capacity);
@@ -328,20 +447,52 @@ while ((Get-Date) -lt $deadline -and $null -eq $dialog) {
 }
 if ($null -eq $dialog) { throw ('Owned Save dialog was not found. Owned windows: ' + ($lastWindows -join ' | ')) }
 $dialogTitle = [NativeTestWindowEnumeration]::Title($dialogHandle)
+$fileNameCondition = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::AutomationIdProperty, '1001')
+$expectedFileName = [System.IO.Path]::GetFileName($TargetPath)
+$fileNameField = $null
+$fileNameValue = $null
+$fileNameSource = $null
+$stableFileNameReads = 0
+$fileNameDeadline = (Get-Date).AddSeconds(5)
+while ((Get-Date) -lt $fileNameDeadline -and $stableFileNameReads -lt 2) {
+  $fileNameField = $dialog.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $fileNameCondition)
+  if ($null -ne $fileNameField) {
+    try {
+      $valuePattern = $fileNameField.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+      $observedFileName = $valuePattern.Current.Value
+      if ($observedFileName -ne '') { $fileNameSource = 'ValuePattern' }
+      else { $observedFileName = $fileNameField.Current.Name; $fileNameSource = 'NameFallbackForEmptyValuePattern' }
+    } catch {
+      $observedFileName = $fileNameField.Current.Name
+      $fileNameSource = 'NameFallbackForUnsupportedValuePattern'
+    }
+    if ($observedFileName -eq $expectedFileName) { $stableFileNameReads += 1 }
+    else { $stableFileNameReads = 0 }
+    $fileNameValue = $observedFileName
+  }
+  if ($stableFileNameReads -lt 2) { Start-Sleep -Milliseconds 100 }
+}
+if ($stableFileNameReads -lt 2) {
+  $fieldName = if ($null -eq $fileNameField) { '<missing>' } else { $fileNameField.Current.Name }
+  $fieldAutomationId = if ($null -eq $fileNameField) { '<missing>' } else { $fileNameField.Current.AutomationId }
+  throw ('Save dialog filename mismatch: expected=' + $expectedFileName + ' observed=' + $fileNameValue + ' source=' + $fileNameSource + ' name=' + $fieldName + ' automationId=' + $fieldAutomationId)
+}
+$leaveOpen = $false
 if ($Mode -eq 'cancel') {
   [NativeTestWindowEnumeration]::InvokeDialogCommand($dialogHandle, 2)
+} elseif ($Mode -eq 'observe') {
+  $leaveOpen = $true
 } elseif ($Mode -eq 'select') {
-  $fileNameCondition = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::AutomationIdProperty, '1001')
-  $fileNameField = $dialog.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $fileNameCondition)
-  if ($null -eq $fileNameField -or $fileNameField.Current.Name -ne [System.IO.Path]::GetFileName($TargetPath)) { throw 'The Save dialog did not present the requested file name' }
   [NativeTestWindowEnumeration]::InvokeDialogCommand($dialogHandle, 1)
 } else { throw 'Unknown dialog action' }
-$closeDeadline = (Get-Date).AddSeconds(15)
-while ((Get-Date) -lt $closeDeadline -and [NativeTestWindowEnumeration]::Exists($dialogHandle)) {
-  Start-Sleep -Milliseconds 200
+if (-not $leaveOpen -and ($Mode -eq 'cancel' -or $Mode -eq 'select')) {
+  $closeDeadline = (Get-Date).AddSeconds(15)
+  while ((Get-Date) -lt $closeDeadline -and [NativeTestWindowEnumeration]::Exists($dialogHandle)) {
+    Start-Sleep -Milliseconds 200
+  }
 }
-if ([NativeTestWindowEnumeration]::Exists($dialogHandle)) { throw 'The Save dialog remained open after the button action' }
-[pscustomobject]@{ action = $Mode; ownerPid = $OwnerProcessId; dialogTitle = $dialogTitle; dialogHandle = $dialogHandle.ToInt64(); selectedPath = $(if ($Mode -eq 'select') { $TargetPath } else { $null }); closed = $true } | ConvertTo-Json -Compress
+if (-not $leaveOpen -and ($Mode -eq 'cancel' -or $Mode -eq 'select') -and [NativeTestWindowEnumeration]::Exists($dialogHandle) -and [NativeTestWindowEnumeration]::OwnerProcess($dialogHandle) -eq $OwnerProcessId -and [NativeTestWindowEnumeration]::Title($dialogHandle) -eq $dialogTitle) { throw 'The Save dialog remained open after the button action' }
+[pscustomobject]@{ action = $Mode; ownerPid = $OwnerProcessId; dialogTitle = $dialogTitle; dialogHandle = $dialogHandle.ToInt64(); selectedPath = $(if ($Mode -eq 'select') { $TargetPath } else { $null }); closed = -not [NativeTestWindowEnumeration]::Exists($dialogHandle) } | ConvertTo-Json -Compress
 `;
 }
 
