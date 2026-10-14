@@ -3,6 +3,7 @@ import { createWriteStream, existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const electronDirectory = dirname(testDirectory);
@@ -11,10 +12,10 @@ const repositoryRoot = dirname(desktopDirectory);
 const testRoot = join(desktopDirectory, 'testplace');
 const temporaryParent = join(testRoot, 'tmp');
 const evidenceParent = join(testRoot, 'readings');
-const electronExecutable = join(desktopDirectory, 'node_modules', 'electron', 'dist', 'electron.exe');
+const electronExecutable = createRequire(join(desktopDirectory, 'package.json'))('electron');
 const electronPackagePath = join(desktopDirectory, 'node_modules', 'electron', 'package.json');
 const harnessPath = join(testDirectory, 'native-security.cjs');
-const nodeExecutable = join(desktopDirectory, 'vendor', 'node', 'node.exe');
+const nodeExecutable = join(desktopDirectory, 'vendor', 'node', process.platform === 'win32' ? 'node.exe' : 'node');
 const hostCli = join(repositoryRoot, 'dist', 'cli.js');
 const hostEntry = join(electronDirectory, 'dist', 'host-entry.js');
 const frontend = join(desktopDirectory, 'frontend', 'dist', 'index.html');
@@ -52,7 +53,7 @@ const child = spawn(electronExecutable, args, {
   cwd: repositoryRoot,
   env: environment,
   stdio: ['ignore', 'pipe', 'pipe'],
-  windowsHide: true,
+  windowsHide: process.platform === 'win32',
 });
 child.stdout.pipe(stdout);
 child.stderr.pipe(stderr);
@@ -78,7 +79,7 @@ try {
   harnessReport = null;
 }
 const status = {
-  command: 'electron.exe --user-data-dir=<isolated> desktop/electron/test/native-security.cjs',
+  command: `${basename(electronExecutable)} --user-data-dir=<isolated> desktop/electron/test/native-security.cjs`,
   electron: JSON.parse(await readFile(electronPackagePath, 'utf8')).version,
   exitCode: code,
   signal,

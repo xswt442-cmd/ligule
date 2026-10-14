@@ -7,9 +7,13 @@ import { registerDesktopIpc } from './ipc.js';
 import { APP_PAGE, DEV_PAGE, approvedPage } from './security.js';
 import { registerAppScheme, installResourceProtocol, createApplicationWindow } from './secure-window.js';
 
+const APP_USER_MODEL_ID = 'app.ligule.desktop';
+const DEVELOPMENT_APP_USER_MODEL_ID = `${APP_USER_MODEL_ID}.dev`;
+const appUserModelId = app.isPackaged ? APP_USER_MODEL_ID : DEVELOPMENT_APP_USER_MODEL_ID;
+
 registerAppScheme();
 app.enableSandbox();
-app.setAppUserModelId('app.ligule.desktop');
+app.setAppUserModelId(appUserModelId);
 const development = !app.isPackaged && process.argv.includes('--dev');
 const page = development ? DEV_PAGE : APP_PAGE;
 let window: BrowserWindow;
@@ -68,6 +72,13 @@ async function boot(): Promise<void> {
     preload: join(__dirname, 'preload.js'), iconPath: join(app.getAppPath(), 'icons', 'icon.png'),
     page, development, nonce: development ? process.env.LIGULE_DESKTOP_CSP_NONCE : undefined,
   });
+  if (process.platform === 'win32') {
+    window.setAppDetails({
+      appId: appUserModelId,
+      appIconPath: app.isPackaged ? process.execPath : join(app.getAppPath(), 'icons', 'icon.ico'),
+      appIconIndex: 0,
+    });
+  }
   window.webContents.on('did-finish-load', () => { rendererAvailable = true; });
   window.webContents.on('render-process-gone', () => { rendererAvailable = false; });
   window.webContents.on('destroyed', () => { rendererAvailable = false; });

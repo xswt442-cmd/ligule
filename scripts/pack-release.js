@@ -1,14 +1,14 @@
-import { execFileSync } from 'node:child_process';
 import { chmod, copyFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execNpm } from './npm-cli.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
-const npmCli = process.env.npm_execpath;
 
 export function releaseManifest() {
   const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+  delete manifest.packageManager;
   if (typeof manifest.dependencies?.['@vscode/ripgrep'] !== 'string') {
     throw new Error('package.json must declare @vscode/ripgrep as a runtime dependency');
   }
@@ -29,14 +29,13 @@ function packInfo(output, label) {
 }
 
 export async function packRelease(destination) {
-  if (!npmCli) throw new Error('run through npm so npm_execpath identifies npm on this platform');
   const finalManifest = releaseManifest();
   const destinationDirectory = resolve(root, destination);
   await mkdir(join(root, 'testplace', 'tmp'), { recursive: true });
   const temporaryRoot = await mkdtemp(join(root, 'testplace', 'tmp', 'release-pack-'));
   const stagedPackage = join(temporaryRoot, 'package');
   try {
-    const dryRun = execFileSync(process.execPath, [npmCli, 'pack', '--dry-run', '--json'], {
+    const dryRun = execNpm(['pack', '--dry-run', '--json'], {
       cwd: root,
       encoding: 'utf8',
     });
@@ -57,7 +56,7 @@ export async function packRelease(destination) {
     if (!included.has('package.json')) throw new Error('npm pack did not include package.json');
     await writeFile(join(stagedPackage, 'package.json'), `${JSON.stringify(finalManifest, null, 2)}\n`, 'utf8');
     await mkdir(destinationDirectory, { recursive: true });
-    const finalOutput = execFileSync(process.execPath, [npmCli, 'pack', '--json', '--pack-destination', destinationDirectory], {
+    const finalOutput = execNpm(['pack', '--json', '--pack-destination', destinationDirectory], {
       cwd: stagedPackage,
       encoding: 'utf8',
     });
@@ -78,6 +77,6 @@ export async function packRelease(destination) {
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const destination = process.argv[2] ?? 'testplace/pack';
-  if (process.argv.length > 3) throw new Error('usage: npm run pack-release -- [destination]');
+  if (process.argv.length > 3) throw new Error('usage: pnpm --filter ligule run pack-release [destination]');
   await packRelease(destination);
 }

@@ -1,36 +1,34 @@
-name: release
+name: desktop-release-draft
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Published npm tag whose bilingual changelog becomes a draft Release
+        description: Existing reviewed Desktop tag on main (for example desktop-v0.0.4)
         type: string
         required: true
-  workflow_call:
-    inputs:
-      tag:
-        description: Published npm tag whose bilingual changelog becomes a draft Release
-        type: string
-        required: true
-
-permissions:
-  contents: read
 
 env:
   PRIMARY_NODE_VERSION: '24'
 
 concurrency:
-  group: release-${{ inputs.tag }}
+  group: desktop-release-${{ inputs.tag }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
-  draft:
-    name: create the draft Release when it is missing
+  preflight:
+    name: validate the Desktop tag and main CI
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     permissions:
-      contents: write
+      actions: read
+      contents: read
+    outputs:
+      tag: ${{ steps.identity.outputs.tag }}
+      version: ${{ steps.identity.outputs.version }}
+      commit: ${{ steps.identity.outputs.commit }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -42,43 +40,245 @@ jobs:
         with:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
 
-      - name: validate the tag and published npm package
-        id: release
-        env:
-          TAG: ${{ inputs.tag }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! [[ "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "::error::tag must use vX.Y.Z form"
-            exit 1
-          fi
-          git fetch --no-tags --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
-          git fetch --no-tags --force origin +refs/heads/main:refs/remotes/origin/main
-          commit=$(git rev-parse "${TAG}^{commit}")
-          git merge-base --is-ancestor "$commit" refs/remotes/origin/main
-          version=${TAG#v}
-          tagged_version=$(git show "${TAG}:package.json" | node -e "let input='';process.stdin.on('data',chunk=>input+=chunk).on('end',()=>process.stdout.write(JSON.parse(input).version))")
-          test "$tagged_version" = "$version"
-          git checkout --detach "$commit"
-          node scripts/release-notes.js "$TAG" > "$RUNNER_TEMP/release-notes.md"
-          npm view "ligule@${version}" version --json | grep -F "${version}" >/dev/null
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - name: create a draft without replacing an existing one
+      - name: validate Desktop tag identity and main ancestry
+        id: identity
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          if ! [[ "$TAG" =~ ^desktop-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Desktop workflow accepts only desktop-vX.Y.Z tags"; exit 1
+          fi
+          git fetch --no-tags --force origin +refs/heads/main:refs/remotes/origin/main
+          git fetch --no-tags --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          commit=$(git rev-parse "${TAG}^{commit}")
+          git merge-base --is-ancestor "$commit" refs/remotes/origin/main
+          git checkout --detach "$commit"
+          version=${TAG#desktop-v}
+          package_version=$(git show "${TAG}:desktop/package.json" | node -e "let input='';process.stdin.on('data',chunk=>input+=chunk).on('end',()=>process.stdout.write(JSON.parse(input).version))")
+          if [ "$package_version" != "$version" ]; then echo "::error::tag does not match desktop/package.json"; exit 1; fi
+          git show "${TAG}:desktop/CHANGELOG.md" | grep -F "## [${version}]" >/dev/null
+          node scripts/release-notes.js "$TAG" >/dev/null
+          run_json=$(gh run list --workflow ci.yml --branch main --event push --commit "$commit" --limit 100 --json databaseId,headSha,status,conclusion,createdAt \
+            | jq -c --arg commit "$commit" '[.[] | select(.headSha == $commit)] | sort_by(.createdAt) | reverse | .[0] // empty')
+          if [ -z "$run_json" ]; then echo "::error::no main CI run exists for $commit"; exit 1; fi
+          run_id=$(jq -r .databaseId <<< "$run_json")
+          gh run watch "$run_id" --exit-status
+          result=$(gh run view "$run_id" --json headSha,conclusion)
+          if [ "$(jq -r .headSha <<< "$result")" != "$commit" ] || [ "$(jq -r .conclusion <<< "$result")" != success ]; then
+            echo "::error::main CI did not pass for the exact Desktop tag SHA"; exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build Desktop on ${{ matrix.target }}
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows-x64
+            os: windows-latest
+            node: desktop/vendor/node/node.exe
+            build: build:win
+          - target: linux-x64
+            os: ubuntu-22.04
+            node: desktop/vendor/node/node
+            build: build:linux
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.preflight.outputs.commit }}
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.9.1
+          run_install: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: install Linux native build and Electron runtime libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3 xvfb libgtk-3-0 libnss3 libgbm1 libasound2 libxss1 libxtst6 libatk-bridge2.0-0 libdrm2 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libxkbcommon0 libatspi2.0-0 libsecret-1-0
+
+      - name: install frozen workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: build the Host runtime tree
+        run: pnpm --filter ligule run build
+
+      - name: test Electron Host and security contracts
+        run: node --experimental-strip-types --test desktop/electron/test/host.test.ts desktop/electron/test/security.test.ts
+
+      - name: check and build the frontend
+        run: |
+          pnpm --filter ligule-desktop-frontend run check
+          pnpm --filter ligule-desktop-frontend run build
+
+      - name: prepare the target Node runtime and Host resources
+        run: pnpm --filter ligule run prepare-runtime
+
+      - name: check the packaged runtime tree
+        shell: bash
+        run: ${{ matrix.node }} desktop/check-runtime.mjs --vendor desktop/vendor
+
+      - name: build the Electron installer
+        run: |
+          pnpm --filter ligule-desktop exec install-electron
+          pnpm --filter ligule-desktop run ${{ matrix.build }}
+
+      - name: test Windows Host process-tree cleanup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & (Join-Path $PWD 'desktop/vendor/node/node.exe') --experimental-strip-types --test desktop/electron/test/process-tree.test.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: test POSIX Host process-group cleanup and orphan watchdog
+        if: runner.os != 'Windows'
+        shell: bash
+        run: ${{ matrix.node }} --experimental-strip-types --test desktop/electron/test/posix-process-tree.test.ts
+
+      - name: test packaged Electron windows
+        shell: pwsh
+        run: |
+          $node = if ($IsWindows) { Join-Path $PWD 'desktop/vendor/node/node.exe' } else { Join-Path $PWD 'desktop/vendor/node/node' }
+          if ($IsLinux) { & xvfb-run -a $node desktop/electron/test/run-native-security.mjs; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & xvfb-run -a $node desktop/electron/test/run-stub-model.mjs }
+          else { & $node desktop/electron/test/run-native-security.mjs; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & $node desktop/electron/test/run-stub-model.mjs }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: inspect generated installers and bind them to tag source
+        shell: bash
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          COMMIT: ${{ needs.preflight.outputs.commit }}
+          TARGET: ${{ matrix.target }}
+          RUN_ID: ${{ github.run_id }}
+        run: node scripts/desktop-release-manifest.js create --directory desktop/release --output "$RUNNER_TEMP/desktop-release/${TARGET}" --version "$VERSION" --target "$TARGET" --commit "$COMMIT" --run-id "$RUN_ID"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-release-${{ needs.preflight.outputs.tag }}-${{ matrix.target }}-${{ needs.preflight.outputs.commit }}
+          path: ${{ runner.temp }}/desktop-release/${{ matrix.target }}/*
+          if-no-files-found: error
+          retention-days: 30
+
+  draft:
+    name: verify required Windows and Linux installers and create or complete a draft
+    needs: [preflight, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.preflight.outputs.commit }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-release-${{ needs.preflight.outputs.tag }}-windows-x64-${{ needs.preflight.outputs.commit }}
+          path: dist-release/windows-x64
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-release-${{ needs.preflight.outputs.tag }}-linux-x64-${{ needs.preflight.outputs.commit }}
+          path: dist-release/linux-x64
+
+      - name: recheck the tag and current main ancestry
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+          COMMIT: ${{ needs.preflight.outputs.commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --force origin +refs/heads/main:refs/remotes/origin/main "refs/tags/${TAG}:refs/tags/${TAG}"
+          test "$(git rev-parse "${TAG}^{commit}")" = "$COMMIT"
+          git merge-base --is-ancestor "$COMMIT" refs/remotes/origin/main
+
+      - name: verify required installer hashes, platform targets, and provenance
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          COMMIT: ${{ needs.preflight.outputs.commit }}
+          RUN_ID: ${{ github.run_id }}
+        run: node scripts/desktop-release-manifest.js verify --directory dist-release --version "$VERSION" --commit "$COMMIT" --run-id "$RUN_ID"
+
+      - name: create a draft Release without replacing published content
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release-notes.js "$TAG" > "$RUNNER_TEMP/release-notes.md"
           if gh release view "$TAG" --json isDraft --jq .isDraft > "$RUNNER_TEMP/release-state" 2>/dev/null; then
-            if [ "$(cat "$RUNNER_TEMP/release-state")" != true ]; then
-              echo "::error::refusing to modify the already published Release ${TAG}"
-              exit 1
-            fi
-            echo "::notice::draft Release ${TAG} already exists; preserving its title, body, and assets"
-            echo "Preserved existing draft Release ${TAG}; title, body, and assets were not changed." >> "$GITHUB_STEP_SUMMARY"
+            if [ "$(cat "$RUNNER_TEMP/release-state")" != true ]; then echo "::error::refusing to modify published Release ${TAG}"; exit 1; fi
+            echo "Draft ${TAG} exists; preserving its title and notes." >> "$GITHUB_STEP_SUMMARY"
           else
             gh release create "$TAG" --verify-tag --title "$TAG" --draft --notes-file "$RUNNER_TEMP/release-notes.md"
           fi
+
+      - name: upload checksums and installers without clobbering
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" != true ]; then
+            echo "::error::Release ${TAG} is no longer a draft; refusing upload"
+            exit 1
+          fi
+          expected_names=$(jq -r '.assets[].name' dist-release/desktop-release-manifest.json)
+          expected_names=$(printf '%s\n%s\n' "$expected_names" SHA256SUMS desktop-release-manifest.json)
+          existing_names=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+          printf '%s\n' "$expected_names" | sed '/^$/d' | LC_ALL=C sort -u > "$RUNNER_TEMP/expected-release-assets"
+          printf '%s\n' "$existing_names" | sed '/^$/d' | LC_ALL=C sort -u > "$RUNNER_TEMP/existing-release-asset-names"
+          LC_ALL=C comm -13 "$RUNNER_TEMP/expected-release-assets" "$RUNNER_TEMP/existing-release-asset-names" > "$RUNNER_TEMP/unexpected-release-assets"
+          if [ -s "$RUNNER_TEMP/unexpected-release-assets" ]; then
+            echo "::error::draft Release contains assets outside the verified set; inspect them manually before retrying"
+            cat "$RUNNER_TEMP/unexpected-release-assets" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/existing-release-assets"
+          while IFS= read -r name; do
+            [ -n "$name" ] || continue
+            case "$name" in
+              SHA256SUMS) file="dist-release/SHA256SUMS" ;;
+              desktop-release-manifest.json) file="dist-release/desktop-release-manifest.json" ;;
+              *) file=$(find dist-release -type f -name "$name" -print -quit) ;;
+            esac
+            test -f "$file"
+            expected_hash=$(sha256sum "$file" | cut -d' ' -f1)
+            if printf '%s\n' "$existing_names" | grep -Fxq "$name"; then
+              gh release download "$TAG" --pattern "$name" --dir "$RUNNER_TEMP/existing-release-assets"
+              existing_file="$RUNNER_TEMP/existing-release-assets/$name"
+              existing_hash=$(sha256sum "$existing_file" | cut -d' ' -f1)
+              if [ "$existing_hash" != "$expected_hash" ]; then echo "::error::published asset name has different bytes: ${name}"; exit 1; fi
+              echo "Existing draft asset has identical SHA-256; skipped ${name}." >> "$GITHUB_STEP_SUMMARY"
+            else
+              gh release upload "$TAG" "$file"
+            fi
+          done <<< "$expected_names"
+          echo "Verified ${TAG} draft assets against source commit ${{ needs.preflight.outputs.commit }}." >> "$GITHUB_STEP_SUMMARY"

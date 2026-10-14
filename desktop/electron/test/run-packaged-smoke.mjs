@@ -13,11 +13,18 @@ if (appDirectoryArgument >= 0 && (suppliedAppDirectory === undefined || !isAbsol
   throw new Error('--app-dir_requires_an_absolute_directory');
 }
 const packagedDirectory = suppliedAppDirectory === undefined
-  ? join(desktopDirectory, 'release', 'win-unpacked')
+  ? defaultPackagedDirectory()
   : resolve(suppliedAppDirectory);
-const applicationExecutable = join(packagedDirectory, 'ligule.exe');
-const resourcesDirectory = join(packagedDirectory, 'resources');
-const hostNode = join(resourcesDirectory, 'node', 'node.exe');
+const applicationBundle = process.platform === 'darwin'
+  ? packagedDirectory.toLowerCase().endsWith('.app') ? packagedDirectory : join(packagedDirectory, 'ligule.app')
+  : packagedDirectory;
+const applicationExecutable = process.platform === 'darwin'
+  ? join(applicationBundle, 'Contents', 'MacOS', 'ligule')
+  : join(applicationBundle, process.platform === 'win32' ? 'ligule.exe' : 'ligule');
+const resourcesDirectory = process.platform === 'darwin'
+  ? join(applicationBundle, 'Contents', 'Resources')
+  : join(applicationBundle, 'resources');
+const hostNode = join(resourcesDirectory, 'node', process.platform === 'win32' ? 'node.exe' : 'node');
 const hostCli = join(resourcesDirectory, 'app', 'dist', 'cli.js');
 const hostEntry = join(resourcesDirectory, 'host-entry.js');
 const testRoot = join(desktopDirectory, 'testplace');
@@ -25,7 +32,6 @@ const temporaryParent = join(testRoot, 'tmp');
 const evidenceParent = join(testRoot, 'readings');
 const requiredFiles = [applicationExecutable, hostNode, hostCli, hostEntry];
 const missing = requiredFiles.filter(path => !existsSync(path));
-if (process.platform !== 'win32') throw new Error('packaged_smoke_requires_windows');
 if (missing.length > 0) throw new Error(`packaged_application_resources_missing:${missing.map(path => basename(path)).join(',')}`);
 
 await mkdir(temporaryParent, { recursive: true });
@@ -60,6 +66,19 @@ let devTools;
 let exitCode = 0;
 let processExit;
 let timedOut = false;
+
+function defaultPackagedDirectory() {
+  if (process.platform === 'win32') return join(desktopDirectory, 'release', 'win-unpacked');
+  if (process.platform === 'linux') return join(desktopDirectory, 'release', 'linux-unpacked');
+  if (process.platform === 'darwin') {
+    const candidates = [
+      join(desktopDirectory, 'release', `mac-${process.arch}`),
+      join(desktopDirectory, 'release', 'mac'),
+    ];
+    return candidates.find(directory => existsSync(join(directory, 'ligule.app'))) ?? candidates[0];
+  }
+  throw new Error(`packaged_smoke_platform_unsupported:${process.platform}`);
+}
 
 function record(name, status, detail) {
   const result = { name, status, detail };
@@ -194,17 +213,29 @@ async function connectDevTools() {
 }
 
 async function processSnapshot() {
-  const executable = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-  const script = "$all = Get-CimInstance Win32_Process; $all | Select-Object @{Name='pid';Expression={$_.ProcessId}},@{Name='parentPid';Expression={$_.ParentProcessId}},@{Name='executable';Expression={$_.ExecutablePath}},@{Name='commandLine';Expression={$_.CommandLine}} | ConvertTo-Json -Compress -Depth 3";
-  const output = execFileSync(executable, ['-NoProfile', '-NonInteractive', '-Command', script], {
+  if (process.platform === 'win32') {
+    const executable = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    const script = "$all = Get-CimInstance Win32_Process; $all | Select-Object @{Name='pid';Expression={$_.ProcessId}},@{Name='parentPid';Expression={$_.ParentProcessId}},@{Name='executable';Expression={$_.ExecutablePath}},@{Name='commandLine';Expression={$_.CommandLine}} | ConvertTo-Json -Compress -Depth 3";
+    const output = execFileSync(executable, ['-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 15_000,
+      maxBuffer: 16 * 1024 * 1024,
+    }).trim();
+    if (output === '') return [];
+    const parsed = JSON.parse(output);
+    return Array.isArray(parsed) ? parsed : [parsed];
+  }
+
+  const output = execFileSync('ps', ['-ww', '-axo', 'pid=,ppid=,command='], {
     encoding: 'utf8',
-    windowsHide: true,
     timeout: 15_000,
     maxBuffer: 16 * 1024 * 1024,
-  }).trim();
-  if (output === '') return [];
-  const parsed = JSON.parse(output);
-  return Array.isArray(parsed) ? parsed : [parsed];
+  });
+  return output.split(/\r?\n/u).flatMap(line => {
+    const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/u.exec(line);
+    return match === null ? [] : [{ pid: Number(match[1]), parentPid: Number(match[2]), commandLine: match[3] }];
+  });
 }
 
 function descendantOf(processList, childPid, ancestorPid) {
@@ -221,14 +252,17 @@ function descendantOf(processList, childPid, ancestorPid) {
 }
 
 async function hostProcessFor(mainPid) {
-  const expectedNode = resolve(hostNode).toLowerCase();
+  const expectedNode = resolve(hostNode);
   return waitUntil(async () => {
     const processes = await processSnapshot();
     return processes.find(item => {
       if (Number(item.pid) === Number(mainPid)) return false;
-      const executable = typeof item.executable === 'string' ? resolve(item.executable).toLowerCase() : '';
       const commandLine = typeof item.commandLine === 'string' ? item.commandLine.toLowerCase() : '';
-      return executable === expectedNode
+      const executable = typeof item.executable === 'string' ? resolve(item.executable) : '';
+      const sameRuntime = process.platform === 'win32'
+        ? executable.toLowerCase() === expectedNode.toLowerCase()
+        : commandLine.includes(expectedNode.toLowerCase());
+      return sameRuntime
         && commandLine.includes('host-entry.js')
         && descendantOf(processes, item.pid, mainPid);
     }) ?? false;
@@ -244,6 +278,7 @@ async function prepareIsolatedWorkspace() {
     cwd: resolve(resourcesDirectory, 'app'),
     env: environment,
     stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+    detached: process.platform !== 'win32',
     windowsHide: true,
   });
   processIds.preflightHost = preflight.pid;
@@ -355,7 +390,7 @@ async function startApplication() {
     cwd: repositoryRoot,
     env: environment,
     stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: false,
+    windowsHide: process.platform === 'win32',
   });
   applicationProcess.stdout.pipe(stdout);
   applicationProcess.stderr.pipe(stderr);

@@ -81,9 +81,12 @@ export class NativeServices {
       throw new Error('The export file name is invalid');
     }
     try {
-      const result = await dialog.showSaveDialog(this.options.window, {
+      const options: Electron.SaveDialogOptions = {
         defaultPath: join(app.getPath('documents'), defaultName),
-      });
+      };
+      if (process.platform === 'linux') options.properties = ['showOverwriteConfirmation'];
+      const result = await dialog.showSaveDialog(this.options.window, options);
+      if (this.disposed || this.options.window.isDestroyed()) return null;
       return result.canceled ? null : result.filePath ?? null;
     } catch {
       this.reportFault('export-dialog-failed');

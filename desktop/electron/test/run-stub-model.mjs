@@ -9,6 +9,7 @@ import { createServer } from 'node:http';
 import { basename, dirname, join, relative, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const electronDirectory = dirname(testDirectory);
@@ -17,9 +18,9 @@ const repositoryRoot = dirname(desktopDirectory);
 const testRoot = join(desktopDirectory, 'testplace');
 const temporaryParent = join(testRoot, 'tmp');
 const evidenceParent = join(testRoot, 'readings');
-const executable = join(desktopDirectory, 'node_modules', 'electron', 'dist', 'electron.exe');
+const executable = createRequire(join(desktopDirectory, 'package.json'))('electron');
 const harness = join(testDirectory, 'run-real-model.cjs');
-const node = join(desktopDirectory, 'vendor', 'node', 'node.exe');
+const node = join(desktopDirectory, 'vendor', 'node', process.platform === 'win32' ? 'node.exe' : 'node');
 const cli = join(repositoryRoot, 'dist', 'cli.js');
 const hostEntry = join(electronDirectory, 'dist', 'host-entry.js');
 const frontend = join(desktopDirectory, 'frontend', 'dist', 'index.html');
@@ -27,7 +28,6 @@ const electronModules = ['secure-window.js', 'security.js', 'ipc.js', 'host.js',
   .map(name => join(electronDirectory, 'dist', name));
 const required = [executable, harness, node, cli, hostEntry, frontend, ...electronModules, join(desktopDirectory, 'assets', 'app-icon.png')];
 const missing = required.filter(path => !existsSync(path));
-if (process.platform !== 'win32') throw new Error('stub_model_harness_requires_windows');
 if (missing.length > 0) throw new Error(`stub_model_prerequisite_missing:${missing.map(basename).join(',')}`);
 
 const PROOF_FILES = [
@@ -167,6 +167,7 @@ async function registerIsolatedWorkspace() {
     cwd: repositoryRoot,
     env: environment,
     stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+    detached: process.platform !== 'win32',
     windowsHide: true,
   });
   preflight.stderr.on('data', () => {});
@@ -265,7 +266,7 @@ for (const line of standardOutput.split(/\r?\n/u)) {
 }
 
 const report = {
-  command: 'desktop/vendor/node/node.exe desktop/electron/test/run-stub-model.mjs',
+  command: `${relative(repositoryRoot, node)} desktop/electron/test/run-stub-model.mjs`,
   provider: 'local-stub',
   providerNote: '本地 stub 模型：只验证 Desktop 窗口、审批与取消联动，不构成真实模型验收。',
   platform: process.platform,

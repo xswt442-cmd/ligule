@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { copyFile, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { createInterface } from 'node:readline';
@@ -15,7 +16,7 @@ const HOST_ENTRY = join(ELECTRON_ROOT, 'dist', 'host-entry.js');
 const NODE = join(DESKTOP_ROOT, 'vendor', 'node', 'node.exe');
 const VENDORED_DIST = join(DESKTOP_ROOT, 'vendor', 'app', 'dist');
 const RUNTIME_NODE_MODULES = join(DESKTOP_ROOT, 'vendor', 'app', 'node_modules');
-const NODE_VERSION = 'v24.21.0';
+const NODE_VERSION = JSON.parse(readFileSync(join(DESKTOP_ROOT, 'node-pin.json'), 'utf8')).version as string;
 const { HostController } = createRequire(join(ELECTRON_ROOT, 'package.json'))('./dist/host.js') as {
   HostController: new (options: {
     node: string;

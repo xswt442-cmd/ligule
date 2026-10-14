@@ -7,9 +7,9 @@
 常用命令：
 
 ```sh
-npm --prefix desktop run dev
-npm --prefix desktop run build
-npm --prefix desktop/frontend run check
+pnpm --filter ligule-desktop run dev
+pnpm --filter ligule-desktop run build
+pnpm --filter ligule-desktop-frontend run check
 node --experimental-strip-types --test desktop/electron/test/host.test.ts desktop/electron/test/security.test.ts
 desktop/vendor/node/node.exe desktop/electron/test/run-native-security.mjs
 desktop/vendor/node/node.exe desktop/electron/test/run-native-features.mjs

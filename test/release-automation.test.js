@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { parse } from 'smol-toml';
 import { parse as parseYaml } from 'yaml';
 import { changelogSection, releaseNotesForTag } from '../scripts/release-notes.js';
-import { prepareRelease, resolveVersion } from '../scripts/release-version.js';
+import { createDesktopReleaseManifest, verifyDesktopReleaseManifests } from '../scripts/desktop-release-manifest.js';
+import { prepareRelease, requestedVersionAtRoot, resolveVersion } from '../scripts/release-version.js';
 
 const CHANGELOG = `# 更新记录 / Changelog
 
@@ -35,36 +35,27 @@ const CHANGELOG = `# 更新记录 / Changelog
 Initial public release.
 `;
 
-function lockfile(name, version) {
-  return { name, version, lockfileVersion: 3, packages: { '': { name, version } } };
-}
-
 async function writeJson(path, value) {
   await mkdir(join(path, '..'), { recursive: true });
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }
 
 async function fixture() {
-  const directory = await mkdtemp(join(process.cwd(), 'testplace', 'tmp', 'release-automation-'));
+  const parent = join(process.cwd(), 'testplace', 'tmp');
+  await mkdir(parent, { recursive: true });
+  const directory = await mkdtemp(join(parent, 'release-automation-'));
   const version = '0.0.1';
+  const desktopVersion = '2.4.1';
   const packageManifest = { name: 'ligule', version, dependencies: { '@vscode/ripgrep': '1.18.0' }, optionalDependencies: {} };
   await writeJson(join(directory, 'package.json'), packageManifest);
-  await writeJson(join(directory, 'package-lock.json'), lockfile('ligule', version));
-  await writeJson(join(directory, 'desktop', 'package.json'), { name: 'ligule-desktop', version });
-  await writeJson(join(directory, 'desktop', 'package-lock.json'), lockfile('ligule-desktop', version));
-  await writeJson(join(directory, 'desktop', 'frontend', 'package.json'), { name: 'ligule-desktop-frontend', version });
-  await writeJson(join(directory, 'desktop', 'frontend', 'package-lock.json'), lockfile('ligule-desktop-frontend', version));
-  await writeJson(join(directory, 'desktop', 'src-tauri', 'tauri.conf.json'), { version });
+  await writeJson(join(directory, 'desktop', 'package.json'), { name: 'ligule-desktop', version: desktopVersion });
+  await writeJson(join(directory, 'desktop', 'frontend', 'package.json'), { name: 'ligule-desktop-frontend', private: true, version: '7.6.5' });
+  const lock = "lockfileVersion: '9.0'\n\nimporters:\n  .: {}\n  desktop: {}\n  desktop/frontend: {}\n";
+  await writeFile(join(directory, 'pnpm-lock.yaml'), lock, 'utf8');
   await mkdir(join(directory, 'src'), { recursive: true });
   await writeFile(join(directory, 'src', 'version.ts'), `// Keep this comment.\nexport const VERSION = '${version}';\n`, 'utf8');
-  await mkdir(join(directory, 'desktop', 'src-tauri'), { recursive: true });
-  await writeFile(join(directory, 'desktop', 'src-tauri', 'Cargo.toml'), `[package]\nname = "ligule-desktop"\nversion = "${version}"\nedition = "2021"\n\n[dependencies]\n# Keep dependency notes.\n`, 'utf8');
-  await writeFile(join(directory, 'desktop', 'src-tauri', 'Cargo.lock'), `version = 4\n\n[[package]]\nname = "ligule-desktop"\nversion = "${version}"\n\n[[package]]\nname = "other"\nversion = "1.0.0"\n`, 'utf8');
-  await mkdir(join(directory, 'docs', 'development'), { recursive: true });
-  for (const path of ['RELEASE.zh-cn.md', 'RELEASE.en.md']) {
-    await writeFile(join(directory, 'docs', 'development', path), `| \`ligule\` | package | \`${version}\` |\n`, 'utf8');
-  }
   await writeFile(join(directory, 'CHANGELOG.md'), CHANGELOG, 'utf8');
+  await writeFile(join(directory, 'desktop', 'CHANGELOG.md'), CHANGELOG.replace('0.0.1', desktopVersion), 'utf8');
   return directory;
 }
 
@@ -72,37 +63,44 @@ test('version requests resolve supported bump types and reject invalid or older 
   assert.equal(resolveVersion('0.0.2', 'patch'), '0.0.3');
   assert.equal(resolveVersion('0.0.2', 'minor'), '0.1.0');
   assert.equal(resolveVersion('0.0.2', 'major'), '1.0.0');
-  assert.equal(resolveVersion('0.0.2', '0.0.2'), '0.0.2');
-  assert.throws(() => resolveVersion('0.0.2', '0.0.1'), /older than current/);
+  assert.throws(() => resolveVersion('0.0.2', '0.0.2'), /must be newer than current/);
+  assert.throws(() => resolveVersion('0.0.2', '0.0.1'), /must be newer than current/);
   assert.throws(() => resolveVersion('0.0.2', 'v0.0.3'), /stable X\.Y\.Z/);
 });
 
-test('release preparation updates package, lock, Tauri, Cargo, and runtime versions while preserving unrelated data', async () => {
+test('CLI preparation changes only CLI files and leaves Desktop files byte-for-byte unchanged', async () => {
   const directory = await fixture();
   try {
-    const result = prepareRelease(directory, 'patch');
+    const desktopFiles = ['desktop/package.json', 'desktop/frontend/package.json', 'desktop/CHANGELOG.md'];
+    const before = await Promise.all(desktopFiles.map(async (path) => [path, await readFile(join(directory, path))]));
+    const result = prepareRelease(directory, 'cli', 'patch');
     assert.equal(result.version, '0.0.2');
-    assert.ok(result.files.some((path) => path.endsWith('Cargo.lock')));
-    const rootLock = JSON.parse(await readFile(join(directory, 'package-lock.json'), 'utf8'));
-    assert.equal(rootLock.version, '0.0.2');
-    assert.equal(rootLock.packages[''].version, '0.0.2');
-    const shellConfig = JSON.parse(await readFile(join(directory, 'desktop/src-tauri/tauri.conf.json'), 'utf8'));
-    assert.equal(shellConfig.version, '0.0.2');
-    const cargoToml = parse(await readFile(join(directory, 'desktop/src-tauri/Cargo.toml'), 'utf8'));
-    assert.equal(cargoToml.package.version, '0.0.2');
-    assert.match(await readFile(join(directory, 'desktop/src-tauri/Cargo.toml'), 'utf8'), /# Keep dependency notes\./);
-    const cargoLock = parse(await readFile(join(directory, 'desktop/src-tauri/Cargo.lock'), 'utf8'));
-    assert.equal(cargoLock.package[0].version, '0.0.2');
-    assert.equal(cargoLock.package[1].version, '1.0.0');
-    for (const path of ['RELEASE.zh-cn.md', 'RELEASE.en.md']) {
-      assert.match(await readFile(join(directory, 'docs/development', path), 'utf8'), /\| `ligule` \| package \| `0\.0\.2` \|/);
-    }
+    assert.equal(result.tag, 'cli-v0.0.2');
+    assert.deepEqual(result.files.map((path) => path.replaceAll('\\', '/')), ['CHANGELOG.md', 'package.json', 'src/version.ts']);
+    for (const [path, contents] of before) assert.deepEqual(await readFile(join(directory, path)), contents, path);
+    assert.equal(JSON.parse(await readFile(join(directory, 'package.json'), 'utf8')).version, '0.0.2');
+    assert.equal(await readFile(join(directory, 'pnpm-lock.yaml'), 'utf8'), "lockfileVersion: '9.0'\n\nimporters:\n  .: {}\n  desktop: {}\n  desktop/frontend: {}\n");
     assert.match(await readFile(join(directory, 'src/version.ts'), 'utf8'), /Keep this comment/);
     assert.match(await readFile(join(directory, 'src/version.ts'), 'utf8'), /VERSION = '0\.0\.2'/);
-    const changelog = await readFile(join(directory, 'CHANGELOG.md'), 'utf8');
-    assert.match(changelog, /^## \[Unreleased\]\n\n### 简体中文[\s\S]*?## \[0\.0\.2\]/m);
-    assert.match(changelog, /^## \[0\.0\.2\] - \d{4}-\d{2}-\d{2}$/m);
-    assert.match(changelog, /修复待发布的缺陷/);
+    assert.match(await readFile(join(directory, 'CHANGELOG.md'), 'utf8'), /修复待发布的缺陷/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('Desktop preparation changes only Desktop installer metadata and its changelog', async () => {
+  const directory = await fixture();
+  try {
+    const cliFiles = ['package.json', 'src/version.ts', 'CHANGELOG.md', 'desktop/frontend/package.json'];
+    const before = await Promise.all(cliFiles.map(async (path) => [path, await readFile(join(directory, path))]));
+    const lock = await readFile(join(directory, 'pnpm-lock.yaml'));
+    const result = prepareRelease(directory, 'desktop', 'patch');
+    assert.equal(result.version, '2.4.2');
+    assert.equal(result.tag, 'desktop-v2.4.2');
+    assert.deepEqual(result.files.map((path) => path.replaceAll('\\', '/')), ['desktop/CHANGELOG.md', 'desktop/package.json']);
+    for (const [path, contents] of before) assert.deepEqual(await readFile(join(directory, path)), contents, path);
+    assert.deepEqual(await readFile(join(directory, 'pnpm-lock.yaml')), lock);
+    assert.equal(JSON.parse(await readFile(join(directory, 'desktop/package.json'), 'utf8')).version, '2.4.2');
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -112,7 +110,7 @@ test('release preparation rejects an incomplete bilingual entry before writing v
   const directory = await fixture();
   try {
     await writeFile(join(directory, 'CHANGELOG.md'), '# Changelog\n\n## [Unreleased]\n\n### 简体中文\n\n只有中文。\n', 'utf8');
-    await assert.rejects(async () => prepareRelease(directory, 'patch'), /needs content under ### English/);
+    await assert.rejects(async () => prepareRelease(directory, 'cli', 'patch'), /needs content under ### English/);
     const manifest = JSON.parse(await readFile(join(directory, 'package.json'), 'utf8'));
     assert.equal(manifest.version, '0.0.1');
   } finally {
@@ -120,104 +118,210 @@ test('release preparation rejects an incomplete bilingual entry before writing v
   }
 });
 
-test('release notes use only the matching bilingual version section and add asset guidance', () => {
-  const notes = releaseNotesForTag(CHANGELOG, 'v0.0.1');
-  assert.match(notes, /初始公开版本/);
-  assert.match(notes, /Initial public release/);
-  assert.match(notes, /SHA-256/);
-  assert.doesNotMatch(notes, /待发布的缺陷/);
-  assert.throws(() => changelogSection(CHANGELOG, '0.0.2'), /exactly one/);
-  assert.throws(() => releaseNotesForTag(CHANGELOG, '0.0.1'), /vX\.Y\.Z/);
+test('release notes select each product changelog and matching bilingual version section', async () => {
+  const directory = await fixture();
+  try {
+    const cliNotes = releaseNotesForTag(directory, 'cli-v0.0.1');
+    assert.match(cliNotes, /初始公开版本/);
+    assert.match(cliNotes, /Initial public release/);
+    assert.doesNotMatch(cliNotes, /下载|Downloads/);
+    assert.match(releaseNotesForTag(directory, 'desktop-v2.4.1'), /SHA-256/);
+    assert.throws(() => requestedVersionAtRoot(directory, 'unknown', 'patch'), /product must be cli or desktop/);
+    assert.throws(() => requestedVersionAtRoot(directory, '__proto__', 'patch'), /product must be cli or desktop/);
+    assert.throws(() => changelogSection(CHANGELOG, '0.0.2'), /exactly one/);
+    assert.throws(() => releaseNotesForTag(directory, 'v0.0.1'), /cli-vX\.Y\.Z/);
+    await writeFile(join(directory, 'desktop', 'CHANGELOG.md'), CHANGELOG, 'utf8');
+    assert.throws(() => releaseNotesForTag(directory, 'desktop-v2.4.1'), /exactly one/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
-test('release workflows separate version PRs, tag creation, npm publication, and draft notes', () => {
-  const workflow = (name) => parseYaml(readFileSync(new URL(`../.github/workflows/${name}.yml`, import.meta.url), 'utf8'));
-  const tagWorkflow = workflow('tag');
-  const publishWorkflow = workflow('publish');
-  const releaseWorkflow = workflow('release');
-  const ciWorkflow = workflow('ci');
-  const tagInputs = tagWorkflow.on.workflow_dispatch.inputs;
+test('Desktop release manifests require Windows and Linux installers and bind them to the tagged source', async () => {
+  const directory = await fixture();
+  const output = join(directory, 'artifacts');
+  const commit = 'a'.repeat(40);
+  const runId = '12345';
+  try {
+    await mkdir(output, { recursive: true });
+    for (const [target, names] of Object.entries({
+      'windows-x64': ['Ligule Setup 2.4.2.exe'],
+      'linux-x64': ['Ligule-2.4.2.AppImage', 'ligule_2.4.2_amd64.deb'],
+    })) {
+      const targetDirectory = join(output, target);
+      await mkdir(targetDirectory);
+      const sourceDirectory = join(directory, `${target}-source`);
+      await mkdir(sourceDirectory);
+      for (const name of names) await writeFile(join(sourceDirectory, name), `${target}:${name}`);
+      createDesktopReleaseManifest({ directory: sourceDirectory, outputDirectory: targetDirectory, version: '2.4.2', target, commit, runId });
+    }
+    const result = verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit, runId });
+    assert.deepEqual(result.targets, ['linux-x64', 'windows-x64']);
+    assert.equal(result.assets.length, 3);
+    const stableManifestPath = join(output, 'desktop-release-manifest.json');
+    const stableManifest = await readFile(stableManifestPath);
+    assert.doesNotMatch(stableManifest.toString(), /workflowRunId/);
+    assert.throws(() => createDesktopReleaseManifest({ directory: output, version: '2.4.2', target: 'macos-arm64', commit, runId }), /unsupported desktop target/);
 
-  assert.deepEqual(tagInputs.action.options, ['prepare', 'tag']);
-  assert.deepEqual(Object.keys(tagInputs).sort(), ['action', 'version']);
-  const prepareCommands = tagWorkflow.jobs.prepare.steps.map((step) => step.run ?? '').join('\n');
-  const tagCommands = tagWorkflow.jobs['create-tag'].steps.map((step) => step.run ?? '').join('\n');
-  assert.match(prepareCommands, /gh pr create --base main/);
-  assert.match(prepareCommands, /Updates the main package, desktop manifests, and bilingual release checklist/);
-  assert.match(prepareCommands, /installs or extracts each desktop artifact and runs the bundled search-backend check/);
-  assert.match(prepareCommands, /Verify first launch, tray, and notifications on each desktop platform before publishing/);
-  assert.doesNotMatch(prepareCommands, /platform package versions/);
-  assert.match(prepareCommands, /git add[^\n]*docs\/development\/RELEASE\.zh-cn\.md[^\n]*docs\/development\/RELEASE\.en\.md/);
-  assert.doesNotMatch(prepareCommands, /npm test|npm run check-pack/);
-  const tagGate = tagWorkflow.jobs['create-tag'].steps.find((step) => step.name === 'require the default branch');
-  assert.match(tagGate.run, /test "\$GITHUB_REF" = refs\/heads\/main/);
-  assert.doesNotMatch(tagCommands, /WINDOWS_X64|LINUX_X64|MACOS_ARM64|MACOS_X64|all four platform validations/);
-  assert.match(tagCommands, /gh run list --workflow ci\.yml --branch main --event push --commit/);
-  assert.doesNotMatch(tagCommands, /gh workflow run ci\.yml/);
-  assert.match(tagCommands, /main_head.*COMMIT/s);
-  assert.match(tagCommands, /git push origin "v\$\{VERSION\}"/);
-  assert.ok(publishWorkflow.on.workflow_dispatch, 'npm publishing must be manually dispatched');
-  assert.equal(publishWorkflow.on.push, undefined, 'a tag push must not publish npm packages');
-  assert.equal(publishWorkflow.jobs.approval.environment, 'npm-publish');
-  assert.equal(publishWorkflow.jobs.platforms, undefined, 'platform binaries are supplied by @vscode/ripgrep');
-  assert.ok(publishWorkflow.jobs.verify.steps.some((step) => step.run === 'npm run build'),
-    'the tarball verifier needs the tagged host entry points in its clean checkout');
-  const syntaxCheck = publishWorkflow.jobs.checks.steps.find((step) => step.name === 'syntax check compiled modules and checks');
-  assert.match(syntaxCheck.run, /find dist -type f -name '\*\.js'/,
-    'release checks must syntax-check the emitted JavaScript after the TypeScript build');
-  assert.doesNotMatch(syntaxCheck.run, /src\/\*\.js/,
-    'release checks must not require TypeScript source to have JavaScript filenames');
-  assert.ok(publishWorkflow.jobs.npm.needs.includes('approval'), 'the main package must wait for approval');
-  const publishJob = publishWorkflow.jobs.npm;
-  const tarballIdentity = publishJob.steps.find((step) => step.name === 'verify tarball identity');
-  assert.match(tarballIdentity.run, /echo "path=\.\/\$file"/,
-    'npm must receive the tarball as a relative file path, not a GitHub shorthand');
-  assert.match(publishJob.steps.find((step) => step.name === 'publish with trusted publishing').run,
-    /npm publish .*\$\{\{ steps\.tarball\.outputs\.path \}\}/);
-  assert.equal(publishJob.permissions['id-token'], 'write', 'the publish job must authenticate with npm through OIDC');
-  assert.equal(publishJob.env, undefined, 'the publish job must not receive a long-lived npm token');
-  const setupNode = publishJob.steps.find((step) => step.uses?.startsWith('actions/setup-node@'));
-  assert.equal(setupNode.with['node-version'], '${{ env.PRIMARY_NODE_VERSION }}');
-  assert.equal(setupNode.with['registry-url'], 'https://registry.npmjs.org');
-  assert.ok(publishJob.steps.some((step) => step.run?.includes('npm install --global npm@11.5.1')),
-    'the publish job must install the minimum npm version required for trusted publishing');
-  assert.doesNotMatch(JSON.stringify(publishJob), /NPM_TOKEN|NODE_AUTH_TOKEN/,
-    'the publish job must not use npm token authentication');
-  assert.ok(publishWorkflow.jobs['release-notes'].needs.includes('npm'));
-  assert.equal(publishWorkflow.jobs['release-notes'].uses, './.github/workflows/release.yml');
-  assert.ok(releaseWorkflow.on.workflow_call, 'publish.yml must be able to call the release workflow');
-  assert.ok(releaseWorkflow.on.workflow_dispatch, 'draft recovery must be manually available');
-  const releaseCommands = releaseWorkflow.jobs.draft.steps.map((step) => step.run ?? '').join('\n');
-  assert.match(releaseCommands, /--notes-file/);
-  assert.match(releaseCommands, /preserving its title, body, and assets/);
-  assert.doesNotMatch(releaseCommands, /gh release edit/);
-  assert.doesNotMatch(releaseCommands, /--generate-notes/);
+    const incompleteLinux = join(directory, 'incomplete-linux');
+    await mkdir(incompleteLinux);
+    await writeFile(join(incompleteLinux, 'ligule_2.4.2.AppImage'), 'AppImage');
+    await writeFile(join(incompleteLinux, 'ligule_2.4.2_amd64.deb'), 'first Debian package');
+    await writeFile(join(incompleteLinux, 'ligule_2.4.2_arm64.deb'), 'second Debian package');
+    assert.throws(() => createDesktopReleaseManifest({ directory: incompleteLinux, version: '2.4.2', target: 'linux-x64', commit, runId }), /exactly one \.deb installer; found 2/);
+    const missingLinux = join(directory, 'missing-linux');
+    await mkdir(missingLinux);
+    await writeFile(join(missingLinux, 'ligule_2.4.2.AppImage'), 'AppImage');
+    assert.throws(() => createDesktopReleaseManifest({ directory: missingLinux, version: '2.4.2', target: 'linux-x64', commit, runId }), /exactly one \.deb installer; found 0/);
 
-  const ciText = JSON.stringify(ciWorkflow);
-  assert.doesNotMatch(ciText, /build-rg|local-search/, 'CI must use the upstream dependency for clean installs');
-  assert.deepEqual(ciWorkflow.on.push.branches, ['main', 'dev'], 'feature branch checks should run from the pull request event only');
-  assert.ok(Object.hasOwn(ciWorkflow.on, 'pull_request'), 'pull requests must keep the full cross-platform CI matrix');
-  const desktopPackage = JSON.parse(readFileSync(new URL('../desktop/package.json', import.meta.url), 'utf8'));
-  assert.equal(desktopPackage.scripts.build, 'node ./build.mjs', 'desktop builds must run the AppImage repair wrapper');
-  const desktopJob = ciWorkflow.jobs.desktop;
-  assert.deepEqual(desktopJob.strategy.matrix.include.map(({ id }) => id), [
-    'windows-x64', 'linux-x64', 'macos-arm64', 'macos-x64',
-  ]);
-  const desktopSteps = desktopJob.steps;
-  const runtimeCheckIndex = desktopSteps.findIndex((step) => step.name === 'run the vendored tree on its own');
-  const installerBuildIndex = desktopSteps.findIndex((step) => step.name === 'build the installer');
-  assert.ok(runtimeCheckIndex >= 0 && runtimeCheckIndex < installerBuildIndex,
-    'each native desktop target must execute the bundled runtime check before building its installer');
-  assert.match(desktopSteps[runtimeCheckIndex].run, /desktop\/check-runtime\.mjs/);
-  const windowsBundleCheck = desktopSteps.find((step) => step.name === 'install the Windows bundle and check its runtime');
-  const linuxBundleCheck = desktopSteps.find((step) => step.name === 'extract Linux bundles and check their runtimes');
-  const macBundleCheck = desktopSteps.find((step) => step.name === 'verify the macOS signature and disk image');
-  assert.ok(windowsBundleCheck && linuxBundleCheck && macBundleCheck,
-    'every desktop OS must inspect its actual installer after bundling');
-  for (const step of [windowsBundleCheck, linuxBundleCheck, macBundleCheck]) {
-    assert.match(step.run, /desktop\/check-runtime\.mjs/);
+    for (const target of result.targets) {
+      createDesktopReleaseManifest({
+        directory: join(directory, `${target}-source`),
+        outputDirectory: join(output, target),
+        version: '2.4.2',
+        target,
+        commit,
+        runId: '67890',
+      });
+    }
+    verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit, runId: '67890' });
+    assert.deepEqual(await readFile(stableManifestPath), stableManifest,
+      'rebuilding identical installers in a different workflow run must keep the public manifest byte-for-byte stable');
+
+    const optionalMacDirectory = join(output, 'macos-arm64');
+    await mkdir(optionalMacDirectory);
+    await writeFile(join(optionalMacDirectory, 'Ligule-2.4.2.dmg'), 'optional, unverified DMG');
+    assert.throws(() => verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit, runId: '67890' }), /unexpected Desktop release target: macos-arm64/);
+    await rm(optionalMacDirectory, { recursive: true });
+
+    const unexpectedRootAsset = join(output, 'unexpected.dmg');
+    await writeFile(unexpectedRootAsset, 'unverified DMG');
+    assert.throws(() => verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit, runId: '67890' }), /unexpected file in Desktop release set: unexpected\.dmg/);
+    await rm(unexpectedRootAsset);
+
+    const unexpectedTargetAsset = join(output, 'linux-x64', 'unexpected.dmg');
+    await writeFile(unexpectedTargetAsset, 'unverified DMG');
+    assert.throws(() => verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit, runId: '67890' }), /unexpected file for linux-x64: unexpected\.dmg/);
+    await rm(unexpectedTargetAsset);
+
+    const windowsManifestPath = join(output, 'windows-x64', 'desktop-release-manifest-windows-x64.json');
+    const windowsManifestBytes = await readFile(windowsManifestPath);
+    await rm(windowsManifestPath);
+    assert.throws(() => verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit, runId: '67890' }), /missing or invalid manifest for windows-x64/);
+    await writeFile(windowsManifestPath, windowsManifestBytes);
+
+    const linuxManifestPath = join(output, 'linux-x64', 'desktop-release-manifest-linux-x64.json');
+    const linuxManifestBytes = await readFile(linuxManifestPath);
+    const extraAssetManifest = JSON.parse(linuxManifestBytes);
+    extraAssetManifest.assets.push({ name: 'unexpected.dmg', sha256: '0'.repeat(64) });
+    await writeFile(linuxManifestPath, `${JSON.stringify(extraAssetManifest, null, 2)}\n`);
+    assert.throws(() => verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit, runId: '67890' }), /unexpected installer count/);
+    await writeFile(linuxManifestPath, linuxManifestBytes);
+
+    const malformedLinux = JSON.parse(linuxManifestBytes);
+    malformedLinux.assets[0].name = malformedLinux.assets[1].name;
+    await writeFile(linuxManifestPath, `${JSON.stringify(malformedLinux, null, 2)}\n`);
+    assert.throws(() => verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit, runId: '67890' }), /exactly one \.AppImage installer/);
+    await writeFile(linuxManifestPath, linuxManifestBytes);
+
+    const manifest = JSON.parse(await readFile(windowsManifestPath, 'utf8'));
+    await writeFile(join(output, 'windows-x64', manifest.assets[0].name), 'altered installer');
+    assert.throws(() => verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit, runId: '67890' }), /checksum mismatch/);
+    assert.throws(() => verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit: 'b'.repeat(40), runId: '67890' }), /does not match/);
+    assert.throws(() => verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit, runId: '99999' }), /does not match/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
-  assert.ok(desktopSteps.indexOf(windowsBundleCheck) > installerBuildIndex);
-  assert.ok(desktopSteps.indexOf(linuxBundleCheck) > installerBuildIndex);
-  assert.ok(desktopSteps.indexOf(macBundleCheck) > installerBuildIndex);
+});
+
+test('release workflows isolate CLI publication from Desktop draft releases and build process tests after compilation', () => {
+  const workflow = (name) => parseYaml(readFileSync(new URL(`../.github/workflows/${name}.yml`, import.meta.url), 'utf8'));
+  const tag = workflow('tag');
+  const publish = workflow('publish');
+  const release = workflow('release');
+  const ci = workflow('ci');
+
+  assert.deepEqual(tag.on.workflow_dispatch.inputs.action.options, ['prepare', 'tag']);
+  assert.deepEqual(tag.on.workflow_dispatch.inputs.product.options, ['cli', 'desktop']);
+  const prepare = tag.jobs.prepare.steps.map((step) => step.run ?? '').join('\n');
+  const createTag = tag.jobs['create-tag'].steps.map((step) => step.run ?? '').join('\n');
+  assert.match(prepare, /release-version\.js resolve "\$PRODUCT"/);
+  assert.match(prepare, /release-version\.js prepare "\$PRODUCT"/);
+  assert.match(prepare, /if \[ "\$PRODUCT" = cli \]; then[\s\S]*desktop\/CHANGELOG\.md/);
+  assert.match(createTag, /\$\{PRODUCT\}-v\$\{VERSION\}/);
+  assert.match(createTag, /gh run list --workflow ci\.yml --branch main --event push --commit/);
+  assert.match(createTag, /git merge-base --is-ancestor|main_head/);
+  assert.match(createTag, /git ls-remote --exit-code --tags/);
+
+  assert.ok(publish.on.workflow_dispatch);
+  assert.equal(publish.on.push, undefined);
+  assert.equal(publish.jobs['release-notes'], undefined);
+  assert.match(JSON.stringify(publish.jobs.preflight), /npm-publish must have at least one required reviewer/);
+  assert.match(JSON.stringify(publish.jobs.preflight), /required_reviewers/);
+  assert.equal(publish.jobs.approval.environment, 'npm-publish');
+  assert.equal(publish.jobs.npm.permissions['id-token'], 'write');
+  assert.doesNotMatch(JSON.stringify(publish.jobs.npm), /NPM_TOKEN|NODE_AUTH_TOKEN/);
+  assert.match(JSON.stringify(publish.jobs.preflight), /cli-v/);
+  assert.ok(JSON.stringify(publish).includes('pnpm install --frozen-lockfile'));
+  assert.ok(JSON.stringify(publish.jobs.npm).includes('npm publish --provenance --access public'));
+  assert.ok(publish.jobs.checks.steps.some((step) => step.run?.includes('pnpm --filter ligule run pack-release dist-tarball')));
+  assert.ok(publish.jobs.verify.steps.some((step) => step.run?.startsWith('pnpm --filter ligule run verify-install ')));
+  assert.doesNotMatch(JSON.stringify(publish.jobs.npm), /pnpm|registry-version/,
+    'the OIDC publication job consumes the already checked registry result and does not depend on an uninstalled helper');
+  assert.equal(publish.jobs.npm.needs.includes('registry-check'), true);
+  const registrySteps = publish.jobs['registry-check'].steps;
+  const registryCommand = registrySteps.find((step) => step.name === 'compare the package tarball with the registry').run;
+  assert.match(registryCommand, /pnpm --filter ligule run --silent registry-version "ligule@/);
+  assert.doesNotMatch(registryCommand, /registry-version --/);
+  assert.ok(registrySteps.some((step) => step.run === 'pnpm install --frozen-lockfile'));
+  assert.ok(registrySteps.findIndex((step) => step.uses === 'pnpm/action-setup@v4')
+    < registrySteps.findIndex((step) => step.uses === 'actions/setup-node@v5'),
+  'pnpm must exist before setup-node configures pnpm caching');
+
+  assert.ok(release.on.workflow_dispatch);
+  assert.equal(release.on.workflow_call, undefined);
+  assert.equal(release.on.push, undefined);
+  assert.match(JSON.stringify(release.jobs.preflight), /desktop-v/);
+  assert.match(JSON.stringify(release.jobs.preflight), /git merge-base --is-ancestor/);
+  assert.equal(release.jobs.build.steps[0].with.ref, '${{ needs.preflight.outputs.commit }}');
+  assert.deepEqual(release.jobs.build.strategy.matrix.include.map(({ target }) => target), [
+    'windows-x64', 'linux-x64',
+  ]);
+  assert.equal(ci.jobs.desktop['continue-on-error'], "${{ startsWith(matrix.id, 'macos-') }}");
+  assert.equal(ci.jobs.credentials['continue-on-error'], "${{ startsWith(matrix.os, 'macos-') }}");
+  assert.equal(ci.on.workflow_dispatch.inputs.include_macos.default, false);
+  const matrixVariants = (expression) => [...expression.matchAll(/'(\[[\s\S]*?\])'/g)].map(([, json]) => JSON.parse(json));
+  assert.match(ci.jobs.credentials.strategy.matrix.os, /github\.event_name == 'workflow_dispatch' && inputs\.include_macos/);
+  assert.deepEqual(matrixVariants(ci.jobs.credentials.strategy.matrix.os), [
+    ['windows-latest', 'ubuntu-22.04', 'macos-15', 'macos-15-intel'],
+    ['windows-latest', 'ubuntu-22.04'],
+  ]);
+  assert.match(ci.jobs.desktop.strategy.matrix.include, /github\.event_name == 'workflow_dispatch' && inputs\.include_macos/);
+  assert.deepEqual(matrixVariants(ci.jobs.desktop.strategy.matrix.include).map((matrix) => matrix.map(({ id }) => id)), [
+    ['windows-x64', 'linux-x64', 'macos-arm64', 'macos-x64'],
+    ['windows-x64', 'linux-x64'],
+  ]);
+  assert.doesNotMatch(JSON.stringify(release.jobs.draft), /macos|\.dmg/i,
+    'unverified macOS installers must not enter the formal Desktop release asset set');
+  const draft = release.jobs.draft.steps.map((step) => step.run ?? '').join('\n');
+  assert.match(draft, /desktop-release-manifest\.js verify/);
+  assert.match(draft, /gh release create "\$TAG" --verify-tag[^\n]*--draft/);
+  assert.match(draft, /refusing to modify published Release/);
+  assert.match(draft, /gh release upload "\$TAG"/);
+  assert.match(draft, /comm -13/);
+  assert.match(draft, /draft Release contains assets outside the verified set/);
+  assert.doesNotMatch(draft, /--clobber|gh release edit/);
+
+  const desktopSteps = ci.jobs.desktop.steps;
+  const installerBuild = desktopSteps.findIndex((step) => step.name === 'build the Electron installer');
+  const windowsTree = desktopSteps.findIndex((step) => step.name === 'test Windows Host Job Object process-tree cleanup');
+  const posixTree = desktopSteps.findIndex((step) => step.name === 'test POSIX Host process-group cleanup and orphan watchdog');
+  assert.ok(installerBuild >= 0 && windowsTree > installerBuild && posixTree > installerBuild,
+    'process-tree tests require compiled Host runtime output from the installer build');
+  for (const steps of [desktopSteps, release.jobs.build.steps]) {
+    const hostBuild = steps.findIndex((step) => step.name === 'build the Host runtime tree');
+    const hostTests = steps.findIndex((step) => step.name === 'test Electron Host and security contracts');
+    assert.ok(hostBuild >= 0 && hostTests > hostBuild,
+      'real Host tests require dist/cli.js from the root build in a fresh checkout');
+  }
 });

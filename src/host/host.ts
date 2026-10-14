@@ -1685,7 +1685,7 @@ export function createHost({
   return host;
 }
 
-// 标准输入输出那一种载体的入口：Tauri 壳或者脚本把这个进程起起来，两端各读写一行 JSON。
+// 标准输入输出那一种载体的入口：Electron Main 或脚本启动进程，两端各读写一行 JSON。
 export function serveHost({ input = process.stdin, output = process.stdout, config, ...rest }: HostOptions & { input?: Readable; output?: Writable }): Host {
   const host = createHost({ config, ...rest });
   const connection = createConnection({

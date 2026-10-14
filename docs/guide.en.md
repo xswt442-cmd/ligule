@@ -25,19 +25,19 @@ ligule provides a command line, a terminal UI, and a desktop UI. All three use t
 
 ### Start your first conversation
 
-1. Choose the CLI and TUI, or the desktop app. Install the CLI and TUI with `npm install -g ligule`; start the desktop app from a published installer.
+1. Choose the CLI and TUI, or the desktop app. Install the CLI and TUI with `npm install -g ligule`; install the desktop package for your operating system and architecture.
 2. Configure a model service: use “Settings → Model services” in the desktop app, or follow [Configure a model service](#configure-a-model-service) for the CLI and TUI.
 3. From a project directory, run `ligule run "Review the project structure and suggest improvements"` for one turn or run `ligule` to open the TUI. In the desktop app, select a workspace, start a conversation, and send a message.
 
 ### Install and launch
 
-The command line package requires Node.js 24 or newer. Install the version currently published on npm:
+The command line package requires Node.js 24 or newer. Install the CLI and TUI from npm:
 
 ```sh
 npm install -g ligule
 ```
 
-Version 0.0.2 has not been released; the version in the repository does not mean that its npm package or desktop installers are available. Use a desktop installer published for your platform. The Windows desktop app requires the WebView2 runtime.
+After installation, run `ligule --version` to check the CLI and TUI version. The desktop app uses Electron; install the package for your operating system and architecture.
 
 From a project directory, run `ligule run "Review the project structure and suggest improvements"` to make one request. For daily use, run `ligule` to open the terminal UI or launch the installed ligule desktop app. `ligule tui` remains available as a compatibility command. The terminal UI requires an interactive terminal; use `ligule run` in scripts and pipelines.
 

@@ -70,6 +70,8 @@ module.exports = {
   },
   nsis: { oneClick: false, allowToChangeInstallationDirectory: true },
   linux: {
+    executableName: 'ligule',
+    maintainer: 'xswt442-cmd <xswt442@gmail.com>',
     target: [
       { target: 'AppImage', arch: ['x64'] },
       { target: 'deb', arch: ['x64'] },

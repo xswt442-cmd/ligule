@@ -1,15 +1,20 @@
-name: tag
+name: product-tag
 
 on:
   workflow_dispatch:
     inputs:
       action:
-        description: Prepare a version PR or create a tag after the main CI succeeds
+        description: Prepare a product version PR or tag its reviewed main commit
         type: choice
         required: true
         options: [prepare, tag]
+      product:
+        description: Product with an independent version and changelog
+        type: choice
+        required: true
+        options: [cli, desktop]
       version:
-        description: Stable version (X.Y.Z), or patch/minor/major for prepare
+        description: Stable X.Y.Z, or patch/minor/major for prepare
         type: string
         required: true
 
@@ -17,7 +22,7 @@ env:
   PRIMARY_NODE_VERSION: '24'
 
 concurrency:
-  group: tag-${{ inputs.action }}-${{ inputs.version }}
+  group: product-tag-${{ inputs.product }}-${{ inputs.action }}-${{ inputs.version }}
   cancel-in-progress: false
 
 permissions:
@@ -41,51 +46,67 @@ jobs:
       - name: require the default branch
         run: test "$GITHUB_REF" = refs/heads/main
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.9.1
+          run_install: false
+
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
-          cache: npm
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
 
-      - name: install locked dependencies
-        run: npm ci
+      - name: install frozen workspace dependencies
+        run: pnpm install --frozen-lockfile
 
-      - name: resolve version and prepare release files
+      - name: resolve product version and prepare its release files
         id: version
         shell: bash
         env:
+          PRODUCT: ${{ inputs.product }}
           REQUESTED_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          version=$(node scripts/release-version.js resolve "$REQUESTED_VERSION")
-          if git ls-remote --exit-code --tags origin "refs/tags/v${version}" >/dev/null 2>&1; then
-            echo "::error::tag v${version} already exists"
+          version=$(node scripts/release-version.js resolve "$PRODUCT" "$REQUESTED_VERSION")
+          tag="${PRODUCT}-v${version}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "::error::tag ${tag} already exists"
             exit 1
           fi
-          branch="release/v${version}"
+          branch="release/${tag}"
           if git ls-remote --exit-code --heads origin "refs/heads/${branch}" >/dev/null 2>&1; then
             echo "::error::branch ${branch} already exists; inspect it before retrying"
             exit 1
           fi
           git switch -c "$branch"
-          node scripts/release-version.js prepare "$version"
+          node scripts/release-version.js prepare "$PRODUCT" "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
 
-      - name: push the version branch
+      - name: push the product version branch
         id: push
         env:
+          PRODUCT: ${{ inputs.product }}
           BRANCH: ${{ steps.version.outputs.branch }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package.json package-lock.json desktop src/version.ts docs/development/RELEASE.zh-cn.md docs/development/RELEASE.en.md CHANGELOG.md
-          git commit -m "chore(release): v${{ steps.version.outputs.version }}"
+          if [ "$PRODUCT" = cli ]; then
+            git add package.json src/version.ts CHANGELOG.md
+          else
+            git add desktop/package.json desktop/CHANGELOG.md
+          fi
+          git commit -m "chore(release): ${TAG}"
           git push origin "$BRANCH"
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      # Pushes made with GITHUB_TOKEN do not start push workflows. Dispatch the normal matrix explicitly
-      # so the PR has all four installer artifacts and a complete CI result for this exact commit.
-      - name: run the full platform CI
+      - name: run the full platform CI for the version commit
         id: ci
         env:
           GH_TOKEN: ${{ github.token }}
@@ -103,34 +124,30 @@ jobs:
             if [ -n "$run_id" ]; then break; fi
             sleep 5
           done
-          if [ -z "$run_id" ]; then
-            echo "::error::could not find the CI run for $COMMIT"
-            exit 1
-          fi
+          if [ -z "$run_id" ]; then echo "::error::could not find CI run for $COMMIT"; exit 1; fi
           gh run watch "$run_id" --exit-status
-          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
           echo "url=$(gh run view "$run_id" --json url --jq .url)" >> "$GITHUB_OUTPUT"
 
-      - name: open the version pull request
+      - name: open the product version pull request
         env:
           GH_TOKEN: ${{ github.token }}
+          PRODUCT: ${{ inputs.product }}
           BRANCH: ${{ steps.version.outputs.branch }}
           VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
           CI_URL: ${{ steps.ci.outputs.url }}
         shell: bash
         run: |
           set -euo pipefail
           cat > "$RUNNER_TEMP/release-pr.md" <<EOF
-          ## Version preparation
+          ## Product version preparation
 
-          - Updates the main package, desktop manifests, and bilingual release checklist to \`v${VERSION}\`.
-          - Promotes the bilingual \`[Unreleased]\` entry in \`CHANGELOG.md\` to this version.
-          - Full four-platform CI passed for this exact commit: ${CI_URL}
-          - The CI run installs or extracts each desktop artifact and runs the bundled search-backend check on all four targets.
+          - Updates only the ${PRODUCT} product version and changelog for `${TAG}`.
+          - Frozen workspace dependencies and the full four-target CI passed for this version commit: ${CI_URL}
 
-          Merge after reviewing the generated version diff and CI results. Verify first launch, tray, and notifications on each desktop platform before publishing the GitHub Release.
+          Review the version diff and CI result, then merge this PR into `main`. Desktop installers will be rebuilt from the exact tagged commit after tagging.
           EOF
-          gh pr create --base main --head "$BRANCH" --title "chore(release): v${VERSION}" --body-file "$RUNNER_TEMP/release-pr.md"
+          gh pr create --base main --head "$BRANCH" --title "chore(release): ${TAG}" --body-file "$RUNNER_TEMP/release-pr.md"
 
   create-tag:
     if: inputs.action == 'tag'
@@ -151,71 +168,56 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
-          cache: npm
 
-      - name: validate version and changelog
+      - name: validate product version, changelog, main ancestry, and CI
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
+          PRODUCT: ${{ inputs.product }}
           VERSION: ${{ inputs.version }}
         shell: bash
         run: |
           set -euo pipefail
           if ! [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "::error::version must use stable X.Y.Z form"
-            exit 1
+            echo "::error::version must use stable X.Y.Z form"; exit 1
           fi
-          test "$(node -p "require('./package.json').version")" = "$VERSION"
-          node scripts/release-notes.js "v${VERSION}" >/dev/null
-          if git ls-remote --exit-code --tags origin "refs/tags/v${VERSION}" >/dev/null 2>&1; then
-            echo "::error::tag v${VERSION} already exists"
-            exit 1
+          TAG="${PRODUCT}-v${VERSION}"
+          if [ "$PRODUCT" = cli ]; then manifest=package.json; else manifest=desktop/package.json; fi
+          test "$(node -p "require('./$manifest').version")" = "$VERSION"
+          node scripts/release-notes.js "$TAG" >/dev/null
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::error::tag ${TAG} already exists"; exit 1
           fi
           commit=$(git rev-parse HEAD)
-          if [ "$commit" != "$GITHUB_SHA" ]; then
-            echo "::error::checked out $commit instead of the requested main commit $GITHUB_SHA"
-            exit 1
-          fi
+          test "$commit" = "$GITHUB_SHA"
           git fetch --no-tags --force origin +refs/heads/main:refs/remotes/origin/main
           main_head=$(git rev-parse refs/remotes/origin/main)
-          if [ "$commit" != "$main_head" ]; then
-            echo "::error::main moved before tagging: requested $commit, current main is $main_head"
-            exit 1
-          fi
-          run_json=$(gh run list --workflow ci.yml --branch main --event push --commit "$commit" --limit 100 \
-            --json databaseId,headSha,status,conclusion,createdAt \
+          if [ "$commit" != "$main_head" ]; then echo "::error::main moved before tagging"; exit 1; fi
+          run_json=$(gh run list --workflow ci.yml --branch main --event push --commit "$commit" --limit 100 --json databaseId,headSha,status,conclusion,createdAt \
             | jq -c --arg commit "$commit" '[.[] | select(.headSha == $commit)] | sort_by(.createdAt) | reverse | .[0] // empty')
-          if [ -z "$run_json" ]; then
-            echo "::error::no main push CI run exists for $commit"
-            exit 1
-          fi
+          if [ -z "$run_json" ]; then echo "::error::no main push CI run exists for $commit"; exit 1; fi
           run_id=$(jq -r .databaseId <<< "$run_json")
           gh run watch "$run_id" --exit-status
-          run_result=$(gh run view "$run_id" --json headSha,conclusion)
-          if [ "$(jq -r .headSha <<< "$run_result")" != "$commit" ] || [ "$(jq -r .conclusion <<< "$run_result")" != success ]; then
-            echo "::error::the full CI run for $commit did not succeed"
-            exit 1
+          result=$(gh run view "$run_id" --json headSha,conclusion)
+          if [ "$(jq -r .headSha <<< "$result")" != "$commit" ] || [ "$(jq -r .conclusion <<< "$result")" != success ]; then
+            echo "::error::full CI did not pass for $commit"; exit 1
           fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
           echo "ci_url=$(gh run view "$run_id" --json url --jq .url)" >> "$GITHUB_OUTPUT"
 
-      - name: create and push the annotated tag
+      - name: create and push the annotated product tag
         env:
-          VERSION: ${{ inputs.version }}
+          TAG: ${{ steps.release.outputs.tag }}
           COMMIT: ${{ steps.release.outputs.commit }}
           CI_URL: ${{ steps.release.outputs.ci_url }}
-          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           git fetch --no-tags --force origin +refs/heads/main:refs/remotes/origin/main
-          main_head=$(git rev-parse refs/remotes/origin/main)
-          if [ "$main_head" != "$COMMIT" ]; then
-            echo "::error::main moved after CI validation: checked $COMMIT, current main is $main_head"
-            exit 1
-          fi
+          test "$(git rev-parse refs/remotes/origin/main)" = "$COMMIT"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "v${VERSION}" -m "v${VERSION}"
-          git push origin "v${VERSION}"
-          echo "Created v${VERSION} from ${COMMIT}. CI: ${CI_URL}" >> "$GITHUB_STEP_SUMMARY"
+          git tag -a "$TAG" -m "$TAG"
+          git push origin "$TAG"
+          echo "Created ${TAG} from ${COMMIT}. CI: ${CI_URL}" >> "$GITHUB_STEP_SUMMARY"

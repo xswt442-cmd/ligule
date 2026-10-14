@@ -68,6 +68,10 @@ apiKeyEnv = "MODEL_API_KEY"
 
 Set the environment variable named by `apiKeyEnv`. Desktop settings also support multiple services and models, and can store keys in the system credential store. Set `LIGULE_HOME` to an absolute path to move the user data root. The workspace directory identifies the project; `boundary` separately limits which paths file tools can access.
 
+## Development
+
+Development requires Node.js 24 or newer and pnpm 12.9.1. Run `pnpm install --frozen-lockfile` from the repository root to install development dependencies. See [Contributing and checks](docs/development/CONTRIBUTING.en.md) for the remaining build and validation steps.
+
 ## Documentation
 
 - [更新记录 / Changelog](CHANGELOG.md)

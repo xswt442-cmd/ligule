@@ -1,10 +1,15 @@
 import { existsSync, readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolvePackageBin } from './package-bin.mjs';
 
 const desktopRoot = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = dirname(desktopRoot);
+const rootRequire = createRequire(join(repositoryRoot, 'package.json'));
+const desktopRequire = createRequire(join(desktopRoot, 'package.json'));
+const frontendRequire = createRequire(join(desktopRoot, 'frontend', 'package.json'));
 const buildArguments = process.argv.slice(2);
 const requestedArchitectures = getRequestedArchitectures(buildArguments);
 
@@ -63,22 +68,22 @@ if (!runtimeStamp.startsWith(`${process.platform}-${process.arch}:`)) {
 }
 
 run([
-  join(repositoryRoot, 'node_modules', 'typescript', 'bin', 'tsc'),
+  resolvePackageBin(rootRequire, 'typescript', 'tsc'),
   '-p',
   join(desktopRoot, 'electron', 'tsconfig.json'),
 ], desktopRoot);
 const hostEntry = join(desktopRoot, 'electron', 'dist', 'host-entry.js');
 if (!existsSync(hostEntry)) throw new Error(`compiled Host entry is missing: ${hostEntry}`);
 run([
-  join(desktopRoot, 'frontend', 'node_modules', 'typescript', 'bin', 'tsc'),
+  resolvePackageBin(frontendRequire, 'typescript', 'tsc'),
   '--noEmit',
 ], join(desktopRoot, 'frontend'));
 run([
-  join(desktopRoot, 'frontend', 'node_modules', 'vite', 'bin', 'vite.js'),
+  resolvePackageBin(frontendRequire, 'vite'),
   'build',
 ], join(desktopRoot, 'frontend'));
 run([
-  join(desktopRoot, 'node_modules', 'electron-builder', 'cli.js'),
+  resolvePackageBin(desktopRequire, 'electron-builder'),
   '--config',
   join(desktopRoot, 'electron-builder.cjs'),
   '--publish',

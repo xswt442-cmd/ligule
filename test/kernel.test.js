@@ -411,15 +411,19 @@ test('a configuration object that is not a folded snapshot is rejected', () => {
   );
 });
 
-test('every manifest that carries the release version agrees', () => {
+test('the Electron package manifests carry valid release versions', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   assert.equal(VERSION, pkg.version);
-  // 桌面安装包与 npm 主包独立发行；运行时依赖由主包锁定。
-  const jsons = ['../desktop/package.json', '../desktop/frontend/package.json', '../desktop/src-tauri/tauri.conf.json'];
-  for (const path of jsons) {
-    assert.equal(JSON.parse(readFileSync(new URL(path, import.meta.url), 'utf8')).version, pkg.version, path);
+  const desktop = JSON.parse(readFileSync(new URL('../desktop/package.json', import.meta.url), 'utf8'));
+  const frontend = JSON.parse(readFileSync(new URL('../desktop/frontend/package.json', import.meta.url), 'utf8'));
+  for (const [name, manifest] of [['root', pkg], ['desktop', desktop], ['frontend', frontend]]) {
+    assert.match(manifest.version, /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/, `${name} version must be stable X.Y.Z`);
   }
-  const cargo = readFileSync(new URL('../desktop/src-tauri/Cargo.toml', import.meta.url), 'utf8');
-  assert.equal(/^version = "([^"]+)"/m.exec(cargo)[1], pkg.version, 'Cargo.toml');
+  assert.equal(pkg.name, 'ligule');
+  assert.equal(desktop.name, 'ligule-desktop');
+  assert.equal(desktop.private, true);
+  assert.equal(frontend.private, true);
+  assert.equal(desktop.main, 'electron/dist/main.js');
+  assert.equal(desktop.scripts.build, 'node ./build.mjs');
   assert.equal(pkg.dependencies['@vscode/ripgrep'], '1.18.0');
 });

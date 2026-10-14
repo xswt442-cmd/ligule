@@ -87,6 +87,7 @@ async function registerIsolatedWorkspace() {
     cwd: repositoryRoot,
     env: environment,
     stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+    detached: process.platform !== 'win32',
     windowsHide: true,
   });
   preflight.stderr.on('data', () => {});
