@@ -2,6 +2,7 @@
 // 与 messages.ts 共用 model/http.ts 那一层：地址、重试、SSE 帧与凭据都不在这里重复。
 // 两处的实际差别只有三件：请求体的字段形状、工具调用参数的载体（一边是内容块里的 JSON 片段，一边是按下标分片的字符串），
 // 以及工具结果是一条独立的 `role:"tool"` 消息而不是并进 user 那一条。
+import { createHash } from 'node:crypto';
 import { KernelError } from '../kernel/error.js';
 import {
   apiRoot, assertAllAnswered, DEFAULT_RETRY, open, parseSse, readCredential, resolveCapabilities, resultText,
@@ -52,6 +53,14 @@ interface StreamToolCall {
   json: string;
 }
 
+const WIRE_TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/u;
+const WIRE_TOOL_ALIAS_PREFIX = 'ligule_';
+
+interface ToolNameMapping {
+  encode(name: string): string;
+  decode(name: string): string;
+}
+
 function isJsonRecord(value: unknown): value is JsonRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -92,7 +101,53 @@ export function chatCompletionsCapabilities(requested: Readonly<Record<string, u
   });
 }
 
-function toWireMessages(view: readonly ModelMessage[], system: string): ChatWireMessage[] {
+function toolNameMapping(request: ModelRequest): ToolNameMapping {
+  const names = new Set<string>();
+  for (const tool of request.tools ?? []) names.add(tool.name);
+  for (const message of request.messages ?? []) {
+    if (message.role === 'assistant') {
+      for (const call of message.toolCalls ?? []) names.add(call.name);
+    }
+  }
+
+  const encoded = new Set([...names].filter((name) => !WIRE_TOOL_NAME.test(name)));
+  const aliasOf = (name: string) => `${WIRE_TOOL_ALIAS_PREFIX}${createHash('sha256').update(name).digest('hex').slice(0, 48)}`;
+  // An invalid name's alias can equal a separate valid tool name. Encode that original name too,
+  // repeating until the alias namespace no longer overlaps any unencoded original name.
+  while (true) {
+    const aliases = new Map<string, string>();
+    for (const name of encoded) {
+      const alias = aliasOf(name);
+      const previous = aliases.get(alias);
+      if (previous !== undefined && previous !== name) {
+        throw new KernelError('provider_tool_name_collision', { detail: `${previous} and ${name} share a wire alias` });
+      }
+      aliases.set(alias, name);
+    }
+    const collisions = [...names].filter((name) => !encoded.has(name) && aliases.has(name));
+    if (collisions.length === 0) break;
+    for (const name of collisions) encoded.add(name);
+  }
+
+  const toWire = new Map<string, string>();
+  const fromWire = new Map<string, string>();
+  for (const name of names) {
+    const wireName = encoded.has(name) ? aliasOf(name) : name;
+    const previous = fromWire.get(wireName);
+    if (previous !== undefined && previous !== name) {
+      throw new KernelError('provider_tool_name_collision', { detail: `${previous} and ${name} share wire name ${wireName}` });
+    }
+    toWire.set(name, wireName);
+    fromWire.set(wireName, name);
+  }
+  return {
+    encode: (name) => toWire.get(name) ?? name,
+    // Unknown model output remains unknown so the Host kernel can reject it by its original name.
+    decode: (name) => fromWire.get(name) ?? name,
+  };
+}
+
+function toWireMessages(view: readonly ModelMessage[], system: string, toolNames: ToolNameMapping): ChatWireMessage[] {
   // 系统段在这一种形状里是消息列表的第一条，不是请求体上的一个字段。
   const messages: ChatWireMessage[] = system === '' ? [] : [{ role: 'system', content: system }];
   assertAllAnswered(view);
@@ -109,7 +164,7 @@ function toWireMessages(view: readonly ModelMessage[], system: string): ChatWire
           tool_calls: calls.map((call) => ({
             id: call.id,
             type: 'function',
-            function: { name: call.name, arguments: JSON.stringify(call.args ?? {}) },
+            function: { name: toolNames.encode(call.name), arguments: JSON.stringify(call.args ?? {}) },
           })),
         }),
       });
@@ -136,6 +191,7 @@ export function createChatCompletionsProvider({
   const effective = chatCompletionsCapabilities(capabilities);
 
   async function* stream(request: ModelRequest, { signal }: { readonly signal?: AbortSignal | null } = {}): AsyncGenerator<ProviderEvent> {
+    const toolNames = toolNameMapping(request);
     const response = await open(`${root}/chat/completions`, {
       method: 'POST',
       redirect: 'error',
@@ -147,7 +203,7 @@ export function createChatCompletionsProvider({
       },
       body: JSON.stringify({
         model,
-        messages: toWireMessages(request.messages ?? [], request.system ?? ''),
+        messages: toWireMessages(request.messages ?? [], request.system ?? '', toolNames),
         stream: effective.streaming,
         // 流式也要最后那一条用量（压缩的压力线要看端点真实报回的那一份）：这一格由能力声明决定，
         // 不认它的代理把 model.capabilities 里的 streamUsage 降成 false，两条线退回本地估算。
@@ -157,7 +213,7 @@ export function createChatCompletionsProvider({
         ...(request.tools?.length === 0 || request.tools === undefined ? {} : {
           tools: request.tools.map((tool) => ({
             type: 'function',
-            function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+            function: { name: toolNames.encode(tool.name), description: tool.description, parameters: tool.parameters },
           })),
         }),
       }),
@@ -200,7 +256,7 @@ export function createChatCompletionsProvider({
       if (call.id === undefined || call.name === '') {
         throw new KernelError('provider_stream_invalid', { detail: 'a tool call without an id or a name' });
       }
-      yield { type: 'tool-call', id: call.id, name: call.name, args: parseArgs(call.json) };
+      yield { type: 'tool-call', id: call.id, name: toolNames.decode(call.name), args: parseArgs(call.json) };
     }
     // 用量在那一条没有 choices 的收尾分片上；没有报回来时不交这一条，压缩的那一条判据宁可只用本地估算。
     if (usage !== undefined) {
