@@ -3,18 +3,13 @@ name: product-tag
 on:
   workflow_dispatch:
     inputs:
-      action:
-        description: Prepare a product version PR or tag its reviewed main commit
-        type: choice
-        required: true
-        options: [prepare, tag]
       product:
         description: Product with an independent version and changelog
         type: choice
         required: true
         options: [cli, desktop]
       version:
-        description: Stable X.Y.Z, or patch/minor/major for prepare
+        description: Version X.Y.Z already reviewed on the current main commit
         type: string
         required: true
 
@@ -22,135 +17,14 @@ env:
   PRIMARY_NODE_VERSION: '24'
 
 concurrency:
-  group: product-tag-${{ inputs.product }}-${{ inputs.action }}-${{ inputs.version }}
+  group: product-tag-${{ inputs.product }}-${{ inputs.version }}
   cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  prepare:
-    if: inputs.action == 'prepare'
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    permissions:
-      actions: write
-      contents: write
-      pull-requests: write
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: main
-          fetch-depth: 0
-
-      - name: require the default branch
-        run: test "$GITHUB_REF" = refs/heads/main
-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 12.9.1
-          run_install: false
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: ${{ env.PRIMARY_NODE_VERSION }}
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
-
-      - name: install frozen workspace dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: resolve product version and prepare its release files
-        id: version
-        shell: bash
-        env:
-          PRODUCT: ${{ inputs.product }}
-          REQUESTED_VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          version=$(node scripts/release-version.js resolve "$PRODUCT" "$REQUESTED_VERSION")
-          tag="${PRODUCT}-v${version}"
-          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
-            echo "::error::tag ${tag} already exists"
-            exit 1
-          fi
-          branch="release/${tag}"
-          if git ls-remote --exit-code --heads origin "refs/heads/${branch}" >/dev/null 2>&1; then
-            echo "::error::branch ${branch} already exists; inspect it before retrying"
-            exit 1
-          fi
-          git switch -c "$branch"
-          node scripts/release-version.js prepare "$PRODUCT" "$version"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "branch=$branch" >> "$GITHUB_OUTPUT"
-
-      - name: push the product version branch
-        id: push
-        env:
-          PRODUCT: ${{ inputs.product }}
-          BRANCH: ${{ steps.version.outputs.branch }}
-          VERSION: ${{ steps.version.outputs.version }}
-          TAG: ${{ steps.version.outputs.tag }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if [ "$PRODUCT" = cli ]; then
-            git add package.json src/version.ts CHANGELOG.md
-          else
-            git add desktop/package.json desktop/CHANGELOG.md
-          fi
-          git commit -m "chore(release): ${TAG}"
-          git push origin "$BRANCH"
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
-      - name: run the full platform CI for the version commit
-        id: ci
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BRANCH: ${{ steps.version.outputs.branch }}
-          COMMIT: ${{ steps.push.outputs.sha }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          dispatched_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          gh workflow run ci.yml --ref "$BRANCH"
-          run_id=""
-          for attempt in $(seq 1 60); do
-            run_id=$(gh run list --workflow ci.yml --branch "$BRANCH" --event workflow_dispatch --limit 20 --json databaseId,headSha,createdAt \
-              | jq -r --arg commit "$COMMIT" --arg since "$dispatched_at" '[.[] | select(.headSha == $commit and (.createdAt | fromdateiso8601) >= ($since | fromdateiso8601))][0].databaseId // empty')
-            if [ -n "$run_id" ]; then break; fi
-            sleep 5
-          done
-          if [ -z "$run_id" ]; then echo "::error::could not find CI run for $COMMIT"; exit 1; fi
-          gh run watch "$run_id" --exit-status
-          echo "url=$(gh run view "$run_id" --json url --jq .url)" >> "$GITHUB_OUTPUT"
-
-      - name: open the product version pull request
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PRODUCT: ${{ inputs.product }}
-          BRANCH: ${{ steps.version.outputs.branch }}
-          VERSION: ${{ steps.version.outputs.version }}
-          TAG: ${{ steps.version.outputs.tag }}
-          CI_URL: ${{ steps.ci.outputs.url }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          cat > "$RUNNER_TEMP/release-pr.md" <<EOF
-          ## Product version preparation
-
-          - Updates only the ${PRODUCT} product version and changelog for `${TAG}`.
-          - Frozen workspace dependencies and the full four-target CI passed for this version commit: ${CI_URL}
-
-          Review the version diff and CI result, then merge this PR into `main`. Desktop installers will be rebuilt from the exact tagged commit after tagging.
-          EOF
-          gh pr create --base main --head "$BRANCH" --title "chore(release): ${TAG}" --body-file "$RUNNER_TEMP/release-pr.md"
-
   create-tag:
-    if: inputs.action == 'tag'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
