@@ -44,6 +44,7 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          package-manager-cache: false
 
       - name: validate Desktop tag identity and main ancestry
         id: identity
@@ -199,6 +200,7 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          package-manager-cache: false
 
       - uses: actions/download-artifact@v4
         with:
@@ -329,6 +331,7 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          package-manager-cache: false
 
       - uses: actions/download-artifact@v4
         with:
