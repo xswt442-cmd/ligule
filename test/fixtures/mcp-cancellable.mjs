@@ -1,10 +1,10 @@
-import { rename, writeFile } from 'node:fs/promises';
+import { appendFile, rename, writeFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
-const [pidPath, listStartedPath, callStartedPath, initializeDelay = '0', listDelay = '0'] = process.argv.slice(2);
+const [pidPath, listStartedPath, callStartedPath, initializeDelay = '0', listDelay = '0', disconnectAfterCall = 'false'] = process.argv.slice(2);
 
 async function wait(milliseconds, signal) {
   if (signal.aborted) throw signal.reason;
@@ -28,7 +28,8 @@ server.setRequestHandler(ListToolsRequestSchema, async (_request, extra) => {
   };
 });
 server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-  await writeFile(callStartedPath, String(Date.now()));
+  await appendFile(callStartedPath, `${Date.now()}\n`);
+  if (disconnectAfterCall === 'true') process.exit(0);
   await wait(request.params.arguments.milliseconds, extra.signal);
   return { content: [{ type: 'text', text: `waited ${request.params.arguments.milliseconds} ms` }] };
 });
