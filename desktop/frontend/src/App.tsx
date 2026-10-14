@@ -986,6 +986,7 @@ export function App({ transport }: { transport: Transport }) {
   // 把没答的询问作废，再让壳换一具进程，最后用 `session.open` 接回原来那一份会话。
   // 接回来时这一份会话排着的几句交回草稿（`reclaimQueue`），界面不自动发；人为取消那一路不受这里影响。
   const reconnect = useCallback(async () => {
+    if (reconnecting.current) return;
     reconnecting.current = true;
     client.discard('host_restarted');
     setAsks([]);

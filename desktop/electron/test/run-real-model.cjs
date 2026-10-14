@@ -73,7 +73,7 @@ async function check(name, action) {
     note(name, '通过', detail);
   } catch (error) {
     failed = true;
-    note(name, '失败', '真实模型交互未达到预期；只记录稳定错误码。', stableErrorCode(error));
+    note(name, '失败', `交互未达到预期，位置 ${safeErrorLocation(error)}；只记录稳定错误码。`, stableErrorCode(error));
   }
 }
 
@@ -358,13 +358,16 @@ async function runChecks() {
       const reconnectButton = `[...document.querySelectorAll('.banner[role="alert"] button')].find((button) => /重新连接|Reconnect/u.test(button.textContent ?? '')) ?? null`;
       await waitFor(`${reconnectButton} !== null`, 30_000, 'disconnected_banner_missing');
       const clickAt = Date.now();
-      await evaluate(`(${reconnectButton}).click(); true`);
+      await evaluate(`{ const button = (${reconnectButton}); button.click(); button.click(); } true`);
       let cleared = false;
       while (Date.now() < clickAt + 45_000) {
         if (await evaluate(`${reconnectButton} === null`)) { cleared = true; break; }
         await new Promise(resolvePromise => setTimeout(resolvePromise, 1_000));
       }
       if (!cleared) throw Object.assign(new Error('reconnect_did_not_recover'), { code: 'reconnect_did_not_recover' });
+      if (await evaluate(`/无法启动后端|Could not start the host/u.test(document.body.innerText)`)) {
+        throw Object.assign(new Error('repeated_reconnect_started_another_lifecycle'), { code: 'repeated_reconnect_started_another_lifecycle' });
+      }
       // 横幅消失只说明壳已经换了一具进程：`session.open` 可能还在路上，接回原来那一份之前
       // `session.read` 会答 session_not_open。等 Host 真的持有这一份会话再断言，最多 25 秒。
       const reopenDeadline = Date.now() + 25_000;
