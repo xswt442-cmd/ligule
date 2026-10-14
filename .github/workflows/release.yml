@@ -83,6 +83,7 @@ jobs:
 
   build:
     name: build Desktop on ${{ matrix.target }}
+    if: ${{ !inputs.publish }}
     needs: preflight
     strategy:
       fail-fast: false
@@ -185,6 +186,7 @@ jobs:
 
   draft:
     name: verify required Windows and Linux installers and create or complete a draft
+    if: ${{ !inputs.publish }}
     needs: [preflight, build]
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -260,7 +262,7 @@ jobs:
           expected_names=$(jq -r '.assets[].name' dist-release/desktop-release-manifest.json)
           expected_names=$(printf '%s\n%s\n' "$expected_names" SHA256SUMS desktop-release-manifest.json)
           existing_names=$(gh release view "$TAG" --json assets --jq '.assets[].name')
-          printf '%s\n' "$expected_names" | sed '/^$/d' | LC_ALL=C sort -u > "$RUNNER_TEMP/expected-release-assets"
+          printf '%s\n' "$expected_names" | sed '/^$/d' | sed 's/ /./g' | LC_ALL=C sort -u > "$RUNNER_TEMP/expected-release-assets"
           printf '%s\n' "$existing_names" | sed '/^$/d' | LC_ALL=C sort -u > "$RUNNER_TEMP/existing-release-asset-names"
           LC_ALL=C comm -13 "$RUNNER_TEMP/expected-release-assets" "$RUNNER_TEMP/existing-release-asset-names" > "$RUNNER_TEMP/unexpected-release-assets"
           if [ -s "$RUNNER_TEMP/unexpected-release-assets" ]; then
@@ -278,9 +280,10 @@ jobs:
             esac
             test -f "$file"
             expected_hash=$(sha256sum "$file" | cut -d' ' -f1)
-            if printf '%s\n' "$existing_names" | grep -Fxq "$name"; then
-              gh release download "$TAG" --pattern "$name" --dir "$RUNNER_TEMP/existing-release-assets"
-              existing_file="$RUNNER_TEMP/existing-release-assets/$name"
+            remote_name=$(printf '%s' "$name" | sed 's/ /./g')
+            if printf '%s\n' "$existing_names" | grep -Fxq "$remote_name"; then
+              gh release download "$TAG" --pattern "$remote_name" --dir "$RUNNER_TEMP/existing-release-assets"
+              existing_file="$RUNNER_TEMP/existing-release-assets/$remote_name"
               existing_hash=$(sha256sum "$existing_file" | cut -d' ' -f1)
               if [ "$existing_hash" != "$expected_hash" ]; then echo "::error::published asset name has different bytes: ${name}"; exit 1; fi
               echo "Existing draft asset has identical SHA-256; skipped ${name}." >> "$GITHUB_STEP_SUMMARY"
@@ -293,7 +296,7 @@ jobs:
   publish-preflight:
     name: require configured Desktop release reviewers
     if: inputs.publish
-    needs: [preflight, draft]
+    needs: preflight
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -315,7 +318,7 @@ jobs:
   publish:
     name: publish the verified Desktop Release
     if: inputs.publish
-    needs: [preflight, build, draft, publish-preflight]
+    needs: [preflight, publish-preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: desktop-publish
@@ -325,7 +328,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ needs.preflight.outputs.commit }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - uses: actions/setup-node@v5
@@ -333,53 +336,29 @@ jobs:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
           package-manager-cache: false
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: desktop-release-${{ needs.preflight.outputs.tag }}-windows-x64-${{ needs.preflight.outputs.commit }}
-          path: dist-release/windows-x64
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: desktop-release-${{ needs.preflight.outputs.tag }}-linux-x64-${{ needs.preflight.outputs.commit }}
-          path: dist-release/linux-x64
-
-      - name: reverify source artifacts and public draft assets
+      - name: verify the existing draft and publish after approval
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.preflight.outputs.tag }}
-          VERSION: ${{ needs.preflight.outputs.version }}
           COMMIT: ${{ needs.preflight.outputs.commit }}
-          RUN_ID: ${{ github.run_id }}
         shell: bash
         run: |
           set -euo pipefail
-          node scripts/desktop-release-manifest.js verify --directory dist-release --version "$VERSION" --commit "$COMMIT" --run-id "$RUN_ID"
-          release_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq 'select(.draft == true) | .id')
-          if [ -z "$release_id" ]; then echo "::error::expected an unpublished draft Release for ${TAG}"; exit 1; fi
+          if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" != true ]; then
+            echo "::error::expected an unpublished draft Release for ${TAG}"; exit 1
+          fi
+          # A prior successful workflow must have built and verified this source commit.
+          successful_runs=$(gh run list --workflow release.yml --branch main --event workflow_dispatch --commit "$COMMIT" --limit 100 --json conclusion,headSha \
+            | jq -r --arg sha "$COMMIT" '[.[] | select(.headSha == $sha and .conclusion == "success")] | length')
+          if [ "$successful_runs" -lt 1 ]; then
+            echo "::error::no successful Desktop draft workflow for ${COMMIT}"; exit 1
+          fi
           mkdir -p dist-release/published
           gh release download "$TAG" --dir dist-release/published
-          jq -r '.assets[].name' dist-release/desktop-release-manifest.json | LC_ALL=C sort -u > "$RUNNER_TEMP/expected-assets"
-          printf '%s\n' SHA256SUMS desktop-release-manifest.json | cat - "$RUNNER_TEMP/expected-assets" | LC_ALL=C sort -u > "$RUNNER_TEMP/expected-release-files"
-          find dist-release/published -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort -u > "$RUNNER_TEMP/actual-release-files"
-          diff -u "$RUNNER_TEMP/expected-release-files" "$RUNNER_TEMP/actual-release-files"
-          cmp dist-release/SHA256SUMS dist-release/published/SHA256SUMS
-          cmp dist-release/desktop-release-manifest.json dist-release/published/desktop-release-manifest.json
-          while IFS= read -r name; do
-            expected=$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .sha256' dist-release/desktop-release-manifest.json)
-            actual=$(sha256sum "dist-release/published/${name}" | cut -d' ' -f1)
-            if [ "$actual" != "$expected" ]; then echo "::error::draft asset checksum mismatch: ${name}"; exit 1; fi
-          done < "$RUNNER_TEMP/expected-assets"
-          (cd dist-release/published && sha256sum --check SHA256SUMS)
-          echo "Reverified all Desktop release assets for ${COMMIT}." >> "$GITHUB_STEP_SUMMARY"
-
-      - name: publish the approved draft
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.preflight.outputs.tag }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          release_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq 'select(.draft == true) | .id')
-          if [ -z "$release_id" ]; then echo "::error::expected an unpublished draft Release for ${TAG}"; exit 1; fi
+          node scripts/verify-desktop-draft.js dist-release/published "$TAG" "$COMMIT"
+          # GitHub's releases/tags endpoint returns 404 for drafts.
+          release_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --paginate \
+            | jq -sr --arg tag "$TAG" '[.[][] | select(.tag_name == $tag and .draft == true) | .id] | if length == 1 then .[0] else empty end')
+          if [ -z "$release_id" ]; then echo "::error::draft Release disappeared before publication"; exit 1; fi
           gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" -F draft=false --jq 'select(.draft == false) | .html_url'
           echo "Published verified Desktop Release ${TAG}." >> "$GITHUB_STEP_SUMMARY"
