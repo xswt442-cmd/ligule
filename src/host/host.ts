@@ -1135,8 +1135,8 @@ export function createHost({
       // 一件坏扩展不带走整次运行：它自己的登记全撤掉，别一条诊断，装载继续（D37 的承诺只到暴露面为止）。
       logger?.log?.('extension is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
     }
-    // 应用一份模式：先按新清单挑出提示词片段，再撤销上一次那一项收紧，然后装上新的片段。
-    // 挑片段放在撤销之前：那一格写错了名字时不该留下「旧的已撤、新的没上」这一中间状态。
+    // 应用一份模式：先按新清单挑出提示词片段，叠加新工具限制并装好片段，最后才撤销旧限制。
+    // 任一步校验或装配失败都保留旧模式，避免出错后工具清单意外变宽。
     // 记录里这一条是给「两条用户输入之间各自用的是哪一份清单」用的（I2、I5）；
     // 收紧只减不加，被藏起来的那几件仍然留在登记表里（I4）。
     state.adopt = async (file) => {
@@ -1151,14 +1151,25 @@ export function createHost({
             }
             return found;
           });
-      state.mode.undo();
+      // applyMode validates against the full registered tool set and adds its own restriction.
+      // Install it while the old restriction is still active so a rejected mode cannot expose the full set.
       const applied = applyMode(kernel, file);
-      const fragmentUndo = selected.map((fragment, index) => prompt.fragment({
-        name: `extension:${fragment.name}`,
-        anchor: 2 + index,
-        text: fragment.text,
-        maxBytes: limitsOf(config).promptFragmentBytes,
-      }));
+      const fragmentUndo: (() => void)[] = [];
+      try {
+        selected.forEach((fragment, index) => {
+          fragmentUndo.push(prompt.fragment({
+            name: `extension:${fragment.name}`,
+            anchor: 2 + index,
+            text: fragment.text,
+            maxBytes: limitsOf(config).promptFragmentBytes,
+          }));
+        });
+      } catch (error) {
+        for (const remove of fragmentUndo.reverse()) remove();
+        applied.undo();
+        throw error;
+      }
+      state.mode.undo();
       const tools = kernel.manifest().map((entry) => entry.name);
       Object.assign(state.mode, {
         file,
