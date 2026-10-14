@@ -168,6 +168,7 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          package-manager-cache: false
 
       - name: validate product version, changelog, main ancestry, and CI
         id: release
