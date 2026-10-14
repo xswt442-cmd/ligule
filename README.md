@@ -24,7 +24,7 @@ ligule 是一个为项目工作、共享同一套 Agent 内核的 AI 助手，�
 | TUI | 在终端持续对话与管理会话 | `ligule` |
 | Desktop | 使用工作区侧栏、图形设置和会话操作 | 安装对应平台的桌面包后启动 |
 
-CLI 与 TUI 需要 Node.js 24 或更新版本。TUI 需要交互式终端；脚本和管道使用 `ligule run`。桌面包的平台、系统要求和验证状态见[发行清单](docs/development/RELEASE.zh-cn.md)。
+CLI 与 TUI 需要 Node.js 24 或更新版本。TUI 需要交互式终端；脚本和管道使用 `ligule run`。桌面包的平台范围和维护者发行流程见[发行说明](docs/development/RELEASE.md)。
 
 ## 快速开始
 
@@ -79,7 +79,7 @@ apiKeyEnv = "MODEL_API_KEY"
 - [架构说明（中文）](docs/development/ARCHITECTURE.zh-cn.md) · [Architecture (English)](docs/development/ARCHITECTURE.en.md)
 - [术语表（中文）](docs/development/GLOSSARY.zh-cn.md) · [Glossary (English)](docs/development/GLOSSARY.en.md)
 - [贡献与验证（中文）](docs/development/CONTRIBUTING.zh-cn.md) · [Contributing and checks (English)](docs/development/CONTRIBUTING.en.md)
-- [维护者发行清单（中文）](docs/development/RELEASE.zh-cn.md) · [Release checklist (English)](docs/development/RELEASE.en.md)
+- [维护者发行说明](docs/development/RELEASE.md)
 
 ## LICENSE
 

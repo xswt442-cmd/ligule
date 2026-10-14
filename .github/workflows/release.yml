@@ -7,6 +7,11 @@ on:
         description: Existing reviewed Desktop tag on main (for example desktop-v0.0.4)
         type: string
         required: true
+      publish:
+        description: Publish the verified draft after desktop-publish Environment approval
+        type: boolean
+        required: true
+        default: false
 
 env:
   PRIMARY_NODE_VERSION: '24'
@@ -282,3 +287,96 @@ jobs:
             fi
           done <<< "$expected_names"
           echo "Verified ${TAG} draft assets against source commit ${{ needs.preflight.outputs.commit }}." >> "$GITHUB_STEP_SUMMARY"
+
+  publish-preflight:
+    name: require configured Desktop release reviewers
+    if: inputs.publish
+    needs: [preflight, draft]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: require configured desktop-publish reviewers
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          environment=$(gh api "repos/${GITHUB_REPOSITORY}/environments/desktop-publish")
+          if ! jq -e '[.protection_rules[]? | select(.type == "required_reviewers" and (.reviewers | length > 0))] | length > 0' <<< "$environment" >/dev/null; then
+            echo "::error::desktop-publish must have at least one required reviewer configured before Desktop publication"
+            exit 1
+          fi
+          echo "desktop-publish required reviewers are configured." >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: publish the verified Desktop Release
+    if: inputs.publish
+    needs: [preflight, build, draft, publish-preflight]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: desktop-publish
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.preflight.outputs.commit }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-release-${{ needs.preflight.outputs.tag }}-windows-x64-${{ needs.preflight.outputs.commit }}
+          path: dist-release/windows-x64
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-release-${{ needs.preflight.outputs.tag }}-linux-x64-${{ needs.preflight.outputs.commit }}
+          path: dist-release/linux-x64
+
+      - name: reverify source artifacts and public draft assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          COMMIT: ${{ needs.preflight.outputs.commit }}
+          RUN_ID: ${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/desktop-release-manifest.js verify --directory dist-release --version "$VERSION" --commit "$COMMIT" --run-id "$RUN_ID"
+          release_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq 'select(.draft == true) | .id')
+          if [ -z "$release_id" ]; then echo "::error::expected an unpublished draft Release for ${TAG}"; exit 1; fi
+          mkdir -p dist-release/published
+          gh release download "$TAG" --dir dist-release/published
+          jq -r '.assets[].name' dist-release/desktop-release-manifest.json | LC_ALL=C sort -u > "$RUNNER_TEMP/expected-assets"
+          printf '%s\n' SHA256SUMS desktop-release-manifest.json | cat - "$RUNNER_TEMP/expected-assets" | LC_ALL=C sort -u > "$RUNNER_TEMP/expected-release-files"
+          find dist-release/published -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort -u > "$RUNNER_TEMP/actual-release-files"
+          diff -u "$RUNNER_TEMP/expected-release-files" "$RUNNER_TEMP/actual-release-files"
+          cmp dist-release/SHA256SUMS dist-release/published/SHA256SUMS
+          cmp dist-release/desktop-release-manifest.json dist-release/published/desktop-release-manifest.json
+          while IFS= read -r name; do
+            expected=$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .sha256' dist-release/desktop-release-manifest.json)
+            actual=$(sha256sum "dist-release/published/${name}" | cut -d' ' -f1)
+            if [ "$actual" != "$expected" ]; then echo "::error::draft asset checksum mismatch: ${name}"; exit 1; fi
+          done < "$RUNNER_TEMP/expected-assets"
+          (cd dist-release/published && sha256sum --check SHA256SUMS)
+          echo "Reverified all Desktop release assets for ${COMMIT}." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: publish the approved draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq 'select(.draft == true) | .id')
+          if [ -z "$release_id" ]; then echo "::error::expected an unpublished draft Release for ${TAG}"; exit 1; fi
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" -F draft=false --jq 'select(.draft == false) | .html_url'
+          echo "Published verified Desktop Release ${TAG}." >> "$GITHUB_STEP_SUMMARY"

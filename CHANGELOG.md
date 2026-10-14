@@ -8,7 +8,11 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ### 简体中文
 
+- 改进 TUI 的工作区信任、会话控制和启动错误提示。
+
 ### English
+
+- Improve TUI workspace trust, session controls, and startup error guidance.
 
 ## [0.0.3] - 2026-10-12
 
