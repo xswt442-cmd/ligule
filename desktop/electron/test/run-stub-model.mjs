@@ -22,6 +22,7 @@ const executable = createRequire(join(desktopDirectory, 'package.json'))('electr
 const harness = join(testDirectory, 'run-real-model.cjs');
 const node = join(desktopDirectory, 'vendor', 'node', process.platform === 'win32' ? 'node.exe' : 'node');
 const cli = join(repositoryRoot, 'dist', 'cli.js');
+const mcpFixture = join(repositoryRoot, 'test', 'fixtures', 'mcp-minimal.mjs');
 const hostEntry = join(electronDirectory, 'dist', 'host-entry.js');
 const frontend = join(desktopDirectory, 'frontend', 'dist', 'index.html');
 const electronModules = ['secure-window.js', 'security.js', 'ipc.js', 'host.js', 'runtime.js', 'native.js', 'preload.js', 'host-entry.js']
@@ -38,6 +39,7 @@ const providerLabel = '本地 stub 模型';
 const providerRequests = [];
 // 宿主崩溃演练用：置为 true 后新到的这一发请求只登记、不回复，界面侧就能停在「请求已发出、还没答案」的那一刻。
 let hangRequests = false;
+const skillMcpProof = { catalogLoaded: false, skillActivated: false, mcpDefinitionLoaded: false, mcpCallSucceeded: false };
 
 function streamChunk(response, chunk) {
   response.write(`data: ${JSON.stringify(chunk)}\n\n`);
@@ -48,11 +50,18 @@ function jsonResponse(response, status, body) {
   response.end(`${JSON.stringify(body)}\n`);
 }
 
+function respondWithTool(response, name, args, id) {
+  streamChunk(response, { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id, type: 'function', function: { name, arguments: JSON.stringify(args) } }] } }] });
+  streamChunk(response, { choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] });
+  response.write('data: [DONE]\n\n');
+  response.end();
+}
+
 const server = createServer(async (request, response) => {
   const url = request.url ?? '';
   if (url.startsWith('/stub/')) {
     if (request.method === 'GET' && url === '/stub/state') {
-      jsonResponse(response, 200, { requests: providerRequests.length, hang: hangRequests });
+      jsonResponse(response, 200, { requests: providerRequests.length, hang: hangRequests, skillMcpProof });
       return;
     }
     if (request.method === 'POST' && url === '/stub/hang') {
@@ -77,12 +86,17 @@ const server = createServer(async (request, response) => {
   const lastUser = [...messages].reverse().find(message => message.role === 'user');
   const prompt = typeof lastUser?.content === 'string' ? lastUser.content : '';
   const followup = messages.at(-1)?.role === 'tool';
+  const workflowMarker = 'desktop-skill-mcp-load-proof';
+  const workflowStart = messages.findLastIndex(message => message.role === 'user' && typeof message.content === 'string' && message.content.includes(workflowMarker));
+  const workflowStep = workflowStart < 0 ? -1 : messages.slice(workflowStart + 1).filter(message => message.role === 'tool').length;
   const target = PROOF_FILES.find(item => prompt.includes(item.name));
   providerRequests.push({
     stream: body.stream === true,
     toolCount: Array.isArray(body.tools) ? body.tools.length : 0,
     followup,
     toolCall: followup ? null : target?.name ?? null,
+    skillMcpStep: workflowStep < 0 ? null : workflowStep,
+    ...(workflowStep < 0 ? {} : { skillMcpProof: { ...skillMcpProof } }),
     hung: hangRequests,
   });
   // 只登记不回复：连接保持打开，Host 那一侧就一直停在「等这一发回答」上。
@@ -96,8 +110,52 @@ const server = createServer(async (request, response) => {
     response.end();
   };
   if (followup) {
+    if (workflowStep === 1) {
+      const skill = body.tools?.find(item => item.function?.name === 'skill');
+      const inspect = body.tools?.find(item => item.function?.description?.startsWith('Look up what an MCP server offers'));
+      const call = body.tools?.find(item => item.function?.description?.startsWith('Call one MCP tool whose definition you have inspected'));
+      const system = messages.filter(message => message.role === 'system').map(message => message.content ?? '').join('\n');
+      skillMcpProof.catalogLoaded = system.includes('desktop-smoke:') && skill !== undefined && inspect !== undefined && call !== undefined;
+      skillMcpProof.skillActivated = String(messages.at(-1)?.content ?? '').includes('SKILL_LOAD_PROOF');
+      if (skill === undefined || inspect === undefined || call === undefined) {
+        jsonResponse(response, 500, { error: { message: 'stub_skill_mcp_catalog_missing' } });
+        return;
+      }
+      respondWithTool(response, inspect.function.name, { server: 'fixture', tool: 'echo' }, 'stub-skill-mcp-inspect');
+      return;
+    }
+    if (workflowStep === 2) {
+      const call = body.tools?.find(item => item.function?.description?.startsWith('Call one MCP tool whose definition you have inspected'));
+      try {
+        const envelope = JSON.parse(String(messages.at(-1)?.content ?? ''));
+        const definition = JSON.parse(envelope.text);
+        const digest = definition.schemaDigest;
+        skillMcpProof.mcpDefinitionLoaded = definition.name === 'echo' && typeof digest === 'string' && digest.length === 12;
+        if (call === undefined || !skillMcpProof.mcpDefinitionLoaded) throw new Error('stub_mcp_definition_missing');
+        respondWithTool(response, call.function.name, {
+          server: 'fixture',
+          tool: 'echo',
+          arguments: JSON.stringify({ value: 'MCP_LOADING_PROOF' }),
+          schemaDigest: digest,
+        }, 'stub-skill-mcp-call');
+      } catch (error) {
+        jsonResponse(response, 500, { error: { message: error instanceof Error ? error.message : 'stub_mcp_definition_invalid' } });
+      }
+      return;
+    }
+    if (workflowStep === 3) {
+      const envelope = JSON.parse(String(messages.at(-1)?.content ?? '{}'));
+      skillMcpProof.mcpCallSucceeded = String(envelope.text ?? '').includes('echo: MCP_LOADING_PROOF');
+      streamChunk(response, { choices: [{ index: 0, delta: { content: 'Skill 已激活，MCP fixture 已返回 MCP_LOADING_PROOF。' } }] });
+      finish('stop');
+      return;
+    }
     streamChunk(response, { choices: [{ index: 0, delta: { content: '已按界面决定停止，目标文件没有被写入。' } }] });
     finish('stop');
+    return;
+  }
+  if (workflowStep === 0) {
+    respondWithTool(response, 'skill', { action: 'activate', name: 'desktop-smoke' }, 'stub-skill-mcp-activate');
     return;
   }
   if (target !== undefined) {
@@ -130,12 +188,33 @@ const evidenceRoot = join(evidenceParent, `stub-model-${runId}`);
 const isolatedHome = join(temporaryRoot, 'ligule-home');
 const userData = join(temporaryRoot, 'electron-user-data');
 const workspace = join(temporaryRoot, 'workspaces', 'project');
+const skillDirectory = join(workspace, '.agents', 'skills', 'desktop-smoke');
+const schemaPath = join(temporaryRoot, 'mcp-echo-schema.json');
 await Promise.all([
   mkdir(isolatedHome, { recursive: true }),
   mkdir(userData, { recursive: true }),
   mkdir(workspace, { recursive: true }),
+  mkdir(skillDirectory, { recursive: true }),
   mkdir(evidenceRoot, { recursive: true }),
 ]);
+await writeFile(join(skillDirectory, 'SKILL.md'), [
+  '---',
+  'name: desktop-smoke',
+  'description: Verify that a project skill loads and can use its configured MCP fixture.',
+  'metadata:',
+  '  ligule-requires: mcp:fixture',
+  '---',
+  '',
+  'SKILL_LOAD_PROOF: this project skill was activated in the isolated Electron acceptance run.',
+  'When requested, use the fixture MCP server echo tool with MCP_LOADING_PROOF.',
+  '',
+].join('\n'), 'utf8');
+await writeFile(schemaPath, `${JSON.stringify({
+  type: 'object',
+  properties: { value: { type: 'string' } },
+  required: ['value'],
+  additionalProperties: false,
+}, null, 2)}\n`, 'utf8');
 await writeFile(join(isolatedHome, 'config.toml'), [
   '[model]',
   'api = "chat-completions"',
@@ -145,6 +224,11 @@ await writeFile(join(isolatedHome, 'config.toml'), [
   '',
   '[policy]',
   'mode = "ask"',
+  '',
+  '[mcp.servers.fixture]',
+  `command = ${JSON.stringify(node)}`,
+  `args = ${JSON.stringify([mcpFixture, schemaPath])}`,
+  `cwd = ${JSON.stringify(workspace)}`,
   '',
 ].join('\n'), { encoding: 'utf8', mode: 0o600 });
 
@@ -272,6 +356,7 @@ const report = {
   platform: process.platform,
   endpoint,
   providerRequests,
+  skillMcpProof,
   childExitCode,
   childSignal,
   results,

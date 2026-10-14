@@ -42,6 +42,8 @@ pnpm --filter ligule-desktop-frontend run build
 
 自动化检查、真实窗口测试和安装器验收的程序位于 `electron/test/`；运行日志与验收记录留在被 Git 忽略的 `desktop/testplace/readings/`，不会随仓库分发。安装依赖、准备根 Host 和目标 Node 后，先运行桌面构建以生成 Electron Main、Frontend 和目标平台应用，再执行真实窗口测试。`run-installer-smoke.ps1` 还需要先生成 Windows NSIS 安装包。
 
+`run-stub-model.mjs` 会启动真实 Electron 主进程、生产 Preload、`app://` 窗口和独立 Node Host；只有模型端点由本机确定性 stub 替代。它在隔离项目中写入测试 Skill，并配置真实 stdio MCP fixture，检查 Skill 目录发现、激活与正文加载、MCP 工具定义披露、Skill 激活审批、`mcp.inspect` 审批、`mcp.call` 审批、真实 MCP 子进程调用和结果入会话。该用例不需要真实模型密钥，也不等同于真实模型验收。
+
 ```sh
 pnpm exec tsc -p desktop/electron/tsconfig.json
 node --experimental-strip-types --test desktop/electron/test/host.test.ts desktop/electron/test/security.test.ts
@@ -71,6 +73,8 @@ desktop/vendor/node/node.exe desktop/electron/test/run-native-features.mjs
 desktop/vendor/node/node.exe desktop/electron/test/run-packaged-smoke.mjs
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File desktop/electron/test/run-installer-smoke.ps1
 ```
+
+要单独运行带 Skill 与 MCP 流程的真实 Electron stub 验收，在仓库根目录执行 `desktop/vendor/node/node.exe desktop/electron/test/run-stub-model.mjs`。它会构建证据报告并在成功后删除自己的临时项目；失败时会保留临时项目与日志以供排查。
 
 Linux 使用 `xvfb-run -a` 运行 `run-native-security.mjs`、`run-stub-model.mjs` 和 `run-packaged-smoke.mjs`；macOS 直接运行这些测试。POSIX `posix-process-tree.test.ts` 验证受控停止与 Main 强杀后的孤儿 Host watchdog；Windows 用 `process-tree.test.ts` 验证 Job Object。`run-native-features.mjs` 的保存对话框和托盘自动化仅支持 Windows。系统通知点击没有自动化验收入口，必须记为未执行；托盘、通知和点击跳转仍需按目标系统人工实机检查。真实窗口测试使用隔离工作区和数据根。
 
