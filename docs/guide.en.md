@@ -25,19 +25,19 @@ ligule provides a command line, a terminal UI, and a desktop UI. All three use t
 
 ### Start your first conversation
 
-1. Choose the CLI and TUI, or the desktop app. Install the CLI and TUI with `npm install -g ligule`; start the desktop app from a published installer.
+1. Choose the CLI and TUI, or the desktop app. Install the CLI and TUI with `npm install -g ligule`; install the desktop package for your operating system and architecture.
 2. Configure a model service: use “Settings → Model services” in the desktop app, or follow [Configure a model service](#configure-a-model-service) for the CLI and TUI.
 3. From a project directory, run `ligule run "Review the project structure and suggest improvements"` for one turn or run `ligule` to open the TUI. In the desktop app, select a workspace, start a conversation, and send a message.
 
 ### Install and launch
 
-The command line package requires Node.js 24 or newer. Install the version currently published on npm:
+The command line package requires Node.js 24 or newer. Install the CLI and TUI from npm:
 
 ```sh
 npm install -g ligule
 ```
 
-Version 0.0.2 has not been released; the version in the repository does not mean that its npm package or desktop installers are available. Use a desktop installer published for your platform. The Windows desktop app requires the WebView2 runtime.
+After installation, run `ligule --version` to check the CLI and TUI version. The desktop app uses Electron; install the package for your operating system and architecture.
 
 From a project directory, run `ligule run "Review the project structure and suggest improvements"` to make one request. For daily use, run `ligule` to open the terminal UI or launch the installed ligule desktop app. `ligule tui` remains available as a compatibility command. The terminal UI requires an interactive terminal; use `ligule run` in scripts and pipelines.
 
@@ -46,6 +46,8 @@ Run `ligule --help` to list commands. `ligule sessions` lists sessions for the c
 ### Workspaces and data
 
 The command line and terminal UI use the current directory as the default workspace. On first launch, the desktop app creates and registers `ligule/default-workspace` under the system Documents directory. New sessions then use the selected default workspace. Add other workspaces from the desktop sidebar to view their sessions.
+
+Before loading project configuration, guides, or skills in a new directory, the terminal UI asks whether you trust it, with Exit selected by default. Trust and continue remembers that exact directory; subdirectories require their own confirmation. Use `/trust` for details or `/trust revoke` to revoke trust and exit. Trust does not approve tools or change approval rules or access boundaries. Project `AGENTS.md` files use the existing instruction loader and cannot grant system permissions. Each launch displays the Ligule mark, version, workspace, and help hint.
 
 Each session belongs to one workspace. The terminal UI prepares a new session when it starts. The desktop app restores the last session at launch, or prepares a new one when there is no previous session. Session records are stored in the `sessions/` directory under the data root by default.
 
@@ -65,7 +67,9 @@ selection = { provider = "deepseek", model = "deepseek-chat" }
 
 Set each service's `api` to `chat-completions` or `messages`; `models` lists its available models. Put the API key in the environment variable named by `apiKeyEnv`. The desktop model services page can also save a key in the operating system credential store. A non-empty environment variable takes priority. Linux uses Secret Service and reports an error when it is unavailable. The legacy single-service fields `model.api`, `model.baseURL`, and `model.model` remain supported; if that configuration omits `apiKeyEnv`, ligule reads `LIGULE_API_KEY`.
 
-The default service and model apply to new sessions. Use the model menu beside the composer to select a model for the current desktop session. In the terminal UI, use `/model` to list services and `/model <service> <model>` to switch. A session selection does not change the global default. If you switch models while a session is running, the change applies after the current turn.
+The default service and model apply to new sessions. Use the model menu beside the composer to select a model for the current desktop session. In the terminal UI, press Ctrl+P or use `/model` to open the model list, or use `/model <service> <model>` to switch directly. A session selection does not change the global default. If you switch models while a session is running, the change applies after the current turn.
+
+Use `/credentials` in the terminal UI to check the current model's credential reference and source: environment, OS credential store, or not set. It never displays the key. `provider_credential_missing` means that reference has no key in the launching environment or the credential store for the current data root. Restart the terminal program after changing environment variables, or save a key through Desktop Model services. Both interfaces must use the same `LIGULE_HOME` to access the same stored credentials.
 
 ### Sessions and input
 
@@ -103,7 +107,9 @@ When the desktop app shows a connection banner, select “Reconnect” to restar
 
 In desktop Settings under General, choose Follow system, 简体中文, or English. Appearance offers six palettes: Ink, Parchment, Sky, Graphite, Forest, and Dusk. You can also adjust the font size, sidebar width, and panel position. Set the CLI and terminal UI language with `--lang zh`, `--lang zh-CN`, `--lang en`, or `--lang auto`; `zh-CN` and `zh` both select Simplified Chinese.
 
-Common terminal UI shortcuts: Enter sends; Shift+Enter or Ctrl+N inserts a new line; Esc cancels the turn; Ctrl+C exits; Ctrl+O browses history; Ctrl+R searches input history; Ctrl+G opens the draft in an external editor; Ctrl+Z and Ctrl+Y undo or redo draft edits. Use `/bind` to view or change shortcuts.
+Common terminal UI shortcuts: Enter sends; Shift+Enter or Ctrl+N inserts a new line; Esc cancels the turn; Ctrl+C exits; Ctrl+O browses history; Ctrl+R searches input history; Ctrl+G opens the draft in an external editor; Ctrl+Z and Ctrl+Y undo or redo draft edits. Ctrl+P selects a model, Ctrl+T selects a tool mode, and Ctrl+A selects an approval mode. The row below the composer shows the active bindings. Use `/bind` to view or change shortcuts. Normal exit saves drafts and queues; restored queues remain paused, and `/quit` is not restored as a draft.
+
+`/help` opens a categorized panel above the composer without writing help into the session transcript. Left and Right switch between commands, keys, and prompt templates. Up, Down, PageUp, and PageDown browse the content; Esc closes the panel and returns to the draft. Choice lists also use Up, Down, Enter, and Esc. All these bindings can be changed with `/bind`.
 
 Common desktop shortcuts: Ctrl+K opens the command palette; Ctrl+B hides or shows the sidebar; Ctrl+Shift+C copies the latest answer; Enter or Ctrl+Enter sends; Shift+Enter inserts a new line. Esc closes an open panel first, then cancels a running turn. View or change shortcuts under “Keyboard shortcuts” in Settings.
 

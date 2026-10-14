@@ -1,10 +1,18 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getStaticTOMLValue, parseForESLint } from 'toml-eslint-parser';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const STABLE_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+const PRODUCTS = {
+  cli: { manifest: 'package.json', changelog: 'CHANGELOG.md', source: 'src/version.ts', tagPrefix: 'cli-v' },
+  desktop: { manifest: 'desktop/package.json', changelog: 'desktop/CHANGELOG.md', tagPrefix: 'desktop-v' },
+};
+
+function productFiles(product) {
+  if (!Object.hasOwn(PRODUCTS, product)) throw new Error(`product must be cli or desktop: ${product}`);
+  return PRODUCTS[product];
+}
 
 function parseVersion(version) {
   const match = STABLE_VERSION.exec(version);
@@ -31,66 +39,24 @@ export function resolveVersion(currentVersion, requestedVersion) {
     parseVersion(requestedVersion);
     nextVersion = requestedVersion;
   }
-  if (compareVersions(nextVersion, currentVersion) < 0) {
-    throw new Error(`release version ${nextVersion} is older than current version ${currentVersion}`);
+  if (compareVersions(nextVersion, currentVersion) <= 0) {
+    throw new Error(`release version ${nextVersion} must be newer than current version ${currentVersion}`);
   }
   return nextVersion;
 }
 
-export function requestedVersionAtRoot(repositoryRoot, requestedVersion) {
-  const manifest = JSON.parse(readFileSync(join(repositoryRoot, 'package.json'), 'utf8'));
-  return resolveVersion(manifest.version, requestedVersion);
+export function requestedVersionAtRoot(repositoryRoot, product, requestedVersion) {
+  const { manifest } = productFiles(product);
+  const currentVersion = JSON.parse(readFileSync(join(repositoryRoot, manifest), 'utf8')).version;
+  return resolveVersion(currentVersion, requestedVersion);
 }
 
-function tableAt(ast, expectedKey, kind) {
-  const top = ast.body.find((node) => node.type === 'TOMLTopLevelTable');
-  const matches = top.body.filter((node) => node.type === 'TOMLTable'
-    && node.kind === kind
-    && JSON.stringify(getStaticTOMLValue(node.key)) === JSON.stringify(expectedKey));
-  if (matches.length !== 1) throw new Error(`expected one TOML ${kind} table ${expectedKey.join('.')}, found ${matches.length}`);
-  return matches[0];
-}
-
-function valueOf(table, key) {
-  const matches = table.body.filter((node) => node.type === 'TOMLKeyValue'
-    && JSON.stringify(getStaticTOMLValue(node.key)) === JSON.stringify([key]));
-  if (matches.length !== 1) throw new Error(`expected one TOML key ${key}, found ${matches.length}`);
-  return matches[0];
-}
-
-function replaceTomlValue(source, table, key, expectedValue, nextValue, path) {
-  const entry = valueOf(table, key);
-  const currentValue = getStaticTOMLValue(entry.value);
-  if (currentValue !== expectedValue) throw new Error(`${path} ${key} is ${currentValue}, expected ${expectedValue}`);
-  const [start, end] = entry.value.range;
-  const next = `${source.slice(0, start)}${JSON.stringify(nextValue)}${source.slice(end)}`;
-  parseForESLint(next);
-  return next;
-}
-
-function updateTomlFile(path, table, key, expectedValue, nextValue) {
-  const source = readFileSync(path, 'utf8');
-  const ast = parseForESLint(source).ast;
-  const targetTable = typeof table === 'function'
-    ? table(ast)
-    : tableAt(ast, table.key, table.kind);
-  return replaceTomlValue(source, targetTable, key, expectedValue, nextValue, path);
-}
-
-function updateJsonFile(path, expectedVersion, nextVersion, { lock = false, config = false } = {}) {
+function updateJsonFile(path, expectedVersion, nextVersion) {
   const document = JSON.parse(readFileSync(path, 'utf8'));
   if (document.version !== expectedVersion) {
     throw new Error(`${path} version is ${document.version}, expected ${expectedVersion}`);
   }
   document.version = nextVersion;
-  if (lock) {
-    const rootPackage = document.packages?.[''];
-    if (rootPackage?.version !== expectedVersion) {
-      throw new Error(`${path} root package version is ${rootPackage?.version}, expected ${expectedVersion}`);
-    }
-    rootPackage.version = nextVersion;
-  }
-  if (config && document.version !== nextVersion) throw new Error(`${path} did not accept version ${nextVersion}`);
   return `${JSON.stringify(document, null, 2)}\n`;
 }
 
@@ -104,36 +70,14 @@ function updateSourceVersion(path, expectedVersion, nextVersion) {
   return `${source.slice(0, match.index)}export const VERSION = '${nextVersion}';${source.slice(match.index + match[0].length)}`;
 }
 
-function updateReleaseDocVersion(path, expectedVersion, nextVersion) {
-  const source = readFileSync(path, 'utf8');
-  const pattern = new RegExp(`^(\\| \x60ligule\x60 \\|[^\\r\\n]*\\| )\x60${expectedVersion}\x60( \\|)$`, 'm');
-  if (!pattern.test(source)) throw new Error(`${path} must list ligule@${expectedVersion} in its package table`);
-  return source.replace(pattern, `$1\x60${nextVersion}\x60$2`);
-}
-
-function updateCargoLock(source, expectedVersion, nextVersion, path) {
-  const ast = parseForESLint(source).ast;
-  const top = ast.body.find((node) => node.type === 'TOMLTopLevelTable');
-  const matches = top.body.filter((table) => {
-    if (table.type !== 'TOMLTable' || table.kind !== 'array'
-      || JSON.stringify(getStaticTOMLValue(table.key)) !== JSON.stringify(['package'])) return false;
-    const name = table.body.find((entry) => entry.type === 'TOMLKeyValue'
-      && JSON.stringify(getStaticTOMLValue(entry.key)) === JSON.stringify(['name']));
-    return name !== undefined && getStaticTOMLValue(name.value) === 'ligule-desktop';
-  });
-  if (matches.length !== 1) throw new Error(`${path} must have one ligule-desktop package entry`);
-  const next = replaceTomlValue(source, matches[0], 'version', expectedVersion, nextVersion, path);
-  return next;
-}
-
-function changelogWithRelease(changelog, version, date = new Date().toISOString().slice(0, 10)) {
+export function changelogWithRelease(changelog, version, date = new Date().toISOString().slice(0, 10)) {
   const lines = changelog.split(/\r?\n/);
   const releaseHeading = `## [${version}]`;
   if (lines.some((line) => line === releaseHeading || line.startsWith(`${releaseHeading} `))) {
-    throw new Error(`CHANGELOG.md already has a ${version} entry`);
+    throw new Error(`changelog already has a ${version} entry`);
   }
   const unreleased = lines.flatMap((line, index) => line === '## [Unreleased]' ? [index] : []);
-  if (unreleased.length !== 1) throw new Error(`CHANGELOG.md must have exactly one [Unreleased] section`);
+  if (unreleased.length !== 1) throw new Error('changelog must have exactly one [Unreleased] section');
   const index = unreleased[0];
   const end = lines.findIndex((line, lineIndex) => lineIndex > index && line.startsWith('## '));
   const section = lines.slice(index + 1, end < 0 ? lines.length : end).join('\n').trim();
@@ -143,67 +87,44 @@ function changelogWithRelease(changelog, version, date = new Date().toISOString(
     const nextHeading = sectionLines.findIndex((line, lineIndex) => lineIndex > position && line.startsWith('### '));
     if (position < 0 || sectionLines.slice(position + 1, nextHeading < 0 ? sectionLines.length : nextHeading)
       .every((line) => line.trim().length === 0)) {
-      throw new Error(`CHANGELOG.md [Unreleased] section needs content under ${language}`);
+      throw new Error(`changelog [Unreleased] section needs content under ${language}`);
     }
   }
   lines.splice(index, 1, '## [Unreleased]', '', '### 简体中文', '', '### English', '', `${releaseHeading} - ${date}`);
   return `${lines.join('\n').replace(/\n*$/, '\n')}`;
 }
 
-export function versionFileUpdates(repositoryRoot, requestedVersion) {
-  const packagePath = join(repositoryRoot, 'package.json');
+export function versionFileUpdates(repositoryRoot, product, requestedVersion) {
+  const files = productFiles(product);
+  const packagePath = join(repositoryRoot, files.manifest);
   const currentVersion = JSON.parse(readFileSync(packagePath, 'utf8')).version;
   parseVersion(currentVersion);
   const version = resolveVersion(currentVersion, requestedVersion);
-  const updates = new Map();
-  const addJson = (relativePath, options) => {
-    const path = join(repositoryRoot, relativePath);
-    updates.set(path, updateJsonFile(path, currentVersion, version, options));
-  };
-
-  addJson('package.json');
-  addJson('package-lock.json', { lock: true });
-  addJson('desktop/package.json');
-  addJson('desktop/package-lock.json', { lock: true });
-  addJson('desktop/frontend/package.json');
-  addJson('desktop/frontend/package-lock.json', { lock: true });
-  addJson('desktop/src-tauri/tauri.conf.json', { config: true });
-
-  const sourcePath = join(repositoryRoot, 'src', 'version.js');
-  updates.set(sourcePath, updateSourceVersion(sourcePath, currentVersion, version));
-
-  for (const path of ['docs/development/RELEASE.zh-cn.md', 'docs/development/RELEASE.en.md']) {
-    const absolutePath = join(repositoryRoot, path);
-    updates.set(absolutePath, updateReleaseDocVersion(absolutePath, currentVersion, version));
+  const updates = new Map([[packagePath, updateJsonFile(packagePath, currentVersion, version)]]);
+  if (files.source) {
+    const sourcePath = join(repositoryRoot, files.source);
+    updates.set(sourcePath, updateSourceVersion(sourcePath, currentVersion, version));
   }
-
-  const cargoPath = join(repositoryRoot, 'desktop', 'src-tauri', 'Cargo.toml');
-  updates.set(cargoPath, updateTomlFile(cargoPath, { key: ['package'], kind: 'standard' }, 'version', currentVersion, version));
-  const cargoLockPath = join(repositoryRoot, 'desktop', 'src-tauri', 'Cargo.lock');
-  updates.set(cargoLockPath, updateCargoLock(readFileSync(cargoLockPath, 'utf8'), currentVersion, version, cargoLockPath));
-
-  const changelogPath = join(repositoryRoot, 'CHANGELOG.md');
+  const changelogPath = join(repositoryRoot, files.changelog);
   updates.set(changelogPath, changelogWithRelease(readFileSync(changelogPath, 'utf8'), version));
   return { version, updates };
 }
 
-export function prepareRelease(repositoryRoot, requestedVersion) {
-  const { version, updates } = versionFileUpdates(repositoryRoot, requestedVersion);
+export function prepareRelease(repositoryRoot, product, requestedVersion) {
+  const { version, updates } = versionFileUpdates(repositoryRoot, product, requestedVersion);
   for (const [path, contents] of updates) writeFileSync(path, contents, 'utf8');
-  return { version, files: [...updates.keys()].map((path) => path.slice(repositoryRoot.length + 1)).sort() };
+  return { version, product, tag: `${productFiles(product).tagPrefix}${version}`, files: [...updates.keys()].map((path) => path.slice(repositoryRoot.length + 1)).sort() };
 }
 
-const [command, request] = process.argv.slice(2);
+const [command, product, request] = process.argv.slice(2);
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  if (command !== 'prepare' || request === undefined || process.argv.length > 4) {
-    if (command === 'resolve' && request !== undefined && process.argv.length === 4) {
-      process.stdout.write(`${requestedVersionAtRoot(root, request)}\n`);
-    } else {
-      throw new Error('usage: node scripts/release-version.js <resolve|prepare> <patch|minor|major|X.Y.Z>');
-    }
+  if (!['resolve', 'prepare'].includes(command) || request === undefined || process.argv.length > 5) {
+    throw new Error('usage: node scripts/release-version.js <resolve|prepare> <cli|desktop> <patch|minor|major|X.Y.Z>');
+  }
+  if (command === 'resolve') {
+    process.stdout.write(`${requestedVersionAtRoot(root, product, request)}\n`);
   } else {
-    const result = prepareRelease(root, request);
-    process.stdout.write(`${result.version}\n`);
-    process.stdout.write(`${result.files.join('\n')}\n`);
+    const result = prepareRelease(root, product, request);
+    process.stdout.write(`${result.version}\n${result.tag}\n${result.files.join('\n')}\n`);
   }
 }

@@ -34,6 +34,8 @@ export const UI_COMMANDS = Object.freeze([
   { name: 'help', usage: '/help', text: '列出命令与按键', hint: '', whenRunning: true },
   { name: 'mode', usage: '/mode [名字]', text: '查看或切换工具模式', hint: '[名字]', whenRunning: true },
   { name: 'model', usage: '/model [服务 模型]', text: '列出模型服务，或切换当前会话的模型', hint: '[服务 模型]', whenRunning: true },
+  { name: 'credentials', usage: '/credentials', text: '检查当前模型的凭据状态', hint: '', whenRunning: true },
+  { name: 'trust', usage: '/trust [revoke]', text: '查看工作区信任，或撤销信任并退出', hint: '[revoke]', whenRunning: false },
   { name: 'policy', usage: '/policy [ask|auto|reset]', text: '查看或修改审批方式', hint: '[ask|auto|reset]', whenRunning: true },
   { name: 'status', usage: '/status', text: '查看会话状态', hint: '', whenRunning: true },
   { name: 'compact', usage: '/compact', text: '压缩上下文（需要 limits.contextTokens）', hint: '', whenRunning: true },
@@ -60,6 +62,8 @@ const ENGLISH_COMMANDS: Record<CommandName, readonly [string, string, string]> =
   help: ['/help', 'List commands and shortcuts', ''],
   mode: ['/mode [name]', 'Show or change the tool mode', '[name]'],
   model: ['/model [service model]', 'List services or change this session’s model', '[service model]'],
+  credentials: ['/credentials', 'Check credentials for the current model', ''],
+  trust: ['/trust [revoke]', 'View workspace trust, or revoke it and exit', '[revoke]'],
   policy: ['/policy [ask|auto|reset]', 'Show or change the approval mode', '[ask|auto|reset]'],
   status: ['/status', 'Show session status', ''],
   compact: ['/compact', 'Compact context (requires limits.contextTokens)', ''],
@@ -177,11 +181,6 @@ export function candidatesOf(
   return [...fromUi, ...fromTemplates].slice(0, limit);
 }
 
-export interface HelpGroup {
-  readonly title: string;
-  readonly entries: readonly { readonly key: string; readonly action: string }[];
-}
-
 // 中日韩那一段与全角标点在一个字符位上占两列：按字符数补齐会歪，按列数补齐才对得齐（界面里全是中英混排）。
 export function displayWidth(text: string): number {
   if (text.length > 32) return stringWidth(text);
@@ -190,38 +189,6 @@ export function displayWidth(text: string): number {
   const width = stringWidth(text);
   if (widthCache.size < WIDTH_CACHE_LIMIT) widthCache.set(text, width);
   return width;
-}
-
-function padTo(text: string, columns: number): string {
-  return `${text}${' '.repeat(Math.max(0, columns - displayWidth(text)))}`;
-}
-
-// 放得下就并排，放不下整组往下一层，每一列的宽度取它那一段里最宽的一行。
-export function flowGroups(groups: readonly HelpGroup[], width: number, gap = 4): string[] {
-  const blocks = groups.map((group) => {
-    const keyWidth = group.entries.reduce((widest, entry) => Math.max(widest, displayWidth(entry.key)), 0);
-    const lines = [
-      group.title,
-      ...group.entries.map((entry) => `${padTo(entry.key, keyWidth + 2)}${entry.action}`),
-    ];
-    return { lines, width: lines.reduce((widest, line) => Math.max(widest, displayWidth(line)), 0) };
-  });
-  const total = blocks.reduce((sum, block) => sum + block.width, 0) + gap * Math.max(0, blocks.length - 1);
-  if (blocks.length > 1 && total <= width) {
-    const height = blocks.reduce((tallest, block) => Math.max(tallest, block.lines.length), 0);
-    const rows: string[] = [];
-    for (let index = 0; index < height; index += 1) {
-      const cells = blocks.map((block) => padTo(block.lines[index] ?? '', block.width));
-      rows.push(cells.join(' '.repeat(gap)).trimEnd());
-    }
-    return rows;
-  }
-  const lines: string[] = [];
-  for (const [index, block] of blocks.entries()) {
-    if (index > 0) lines.push('');
-    lines.push(...block.lines);
-  }
-  return lines;
 }
 
 /** 宿主从记录目录扫出来的那一栏里，界面要画的几格（`sessions.list` 交回的形状，D73）。 */

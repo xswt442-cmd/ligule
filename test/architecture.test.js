@@ -11,6 +11,20 @@ import {
 
 const sourceDirectory = fileURLToPath(new URL('../src/', import.meta.url));
 
+function filesBelow(directory) {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(directory, entry.name);
+    return entry.isDirectory() ? filesBelow(path) : [path];
+  });
+}
+
+test('runtime source files use TypeScript only', () => {
+  const javascript = filesBelow(sourceDirectory)
+    .filter((path) => ['.js', '.mjs', '.cjs'].some((extension) => path.endsWith(extension)))
+    .map((path) => path.slice(sourceDirectory.length));
+  assert.deepEqual(javascript, []);
+});
+
 function tool(name, run, execution) {
   return { name, description: `the ${name} tool`, parameters: { type: 'object', properties: {} }, execution, run };
 }

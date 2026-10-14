@@ -1,14 +1,6 @@
-// 发布物检查：跑一次 npm pack，解开打出来的那个包，按 package.json 声明的入口逐个查文件在不在，
-// 再把解出来的目录当成一个已经安装好的 ligule，从一个空的消费者目录里 import 一次。
-// npm test 发现不了这两类问题：测试直接从 src/ 导入，绕过了 files 白名单和 exports。
-//
-// 跑法：npm run check-pack
-//
-// npm 自己启动的是 npm.cmd 那个批处理包装，而 Windows 上的 Node 不允许不经 shell 直接启动
-// .cmd 文件（spawnSync 报 EINVAL）。npm 在子进程环境里放了 npm_execpath，指向它真正的入口
-// JavaScript 文件，所以这里用 node.exe 加那个文件来跑 npm。tar 与 node.exe 都是真正的可执行文件。
+// npm tarball 的文件白名单与入口检查。真实消费者安装和运行由 verify-install.js 覆盖。
 import { execFileSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { releaseManifest } from './pack-release.js';
@@ -16,17 +8,11 @@ import { releaseManifest } from './pack-release.js';
 const repo = fileURLToPath(new URL('..', import.meta.url));
 const packDir = join(repo, 'testplace', 'pack');
 const work = join(packDir, 'check');
-const npmCli = process.env.npm_execpath;
-if (!npmCli) {
-  throw new Error('run it as `npm run check-pack` - only npm itself can tell Node which file to launch on Windows');
-}
 
-// 发布物里带的是构建出来的 `dist/`（D47）：没先构建就跑这个检查，报出来的是「tarball 缺文件」，看不出缺的其实是那一步构建。
 if (!existsSync(join(repo, 'dist', 'index.js'))) {
-  throw new Error('dist/index.js is missing; run `npm run build` before checking the packaged artifact');
+  throw new Error('dist/index.js is missing; run `pnpm --filter ligule run build` before checking the packaged artifact');
 }
 
-// exports 可以写成字符串，也可以写成带条件的对象，这里把所有字符串取值收齐。
 function collectTargets(value, found = []) {
   if (typeof value === 'string') found.push(value);
   else if (value && typeof value === 'object') for (const item of Object.values(value)) collectTargets(item, found);
@@ -41,93 +27,23 @@ try {
   const tarball = `${pkg.name}-${pkg.version}.tgz`;
   mkdirSync(packDir, { recursive: true });
   execFileSync(process.execPath, [join(repo, 'scripts', 'pack-release.js'), 'testplace/pack'], { cwd: repo, stdio: 'inherit' });
-  if (!existsSync(join(packDir, tarball))) {
-    throw new Error(`npm pack did not produce testplace/pack/${tarball}`);
-  }
-  // GNU tar 把带冒号的路径当成远程设备（`E:\...` 会被理解成去连主机 `E`），
-  // 所以传给 tar 的只有相对仓库根、用斜杠分开的路径。
-  execFileSync('tar', ['-xzf', `testplace/pack/${tarball}`, '-C', 'testplace/pack/check'], { cwd: repo, stdio: 'inherit' });
+  if (!existsSync(join(packDir, tarball))) throw new Error(`npm pack did not produce testplace/pack/${tarball}`);
 
+  execFileSync('tar', ['-xzf', `testplace/pack/${tarball}`, '-C', 'testplace/pack/check'], { cwd: repo, stdio: 'inherit' });
   const shipped = join(work, 'package');
   const manifest = JSON.parse(readFileSync(join(shipped, 'package.json'), 'utf8'));
+  if (JSON.stringify(manifest.dependencies) !== JSON.stringify(pkg.dependencies)) {
+    throw new Error(`${tarball} does not carry the release manifest's dependencies`);
+  }
   if (JSON.stringify(manifest.optionalDependencies) !== JSON.stringify(pkg.optionalDependencies)) {
     throw new Error(`${tarball} does not carry the release manifest's optional dependencies`);
   }
-  const declared = [
-    ...collectTargets(manifest.exports),
-    ...collectTargets(manifest.bin),
-  ];
+  const declared = [...collectTargets(manifest.exports), ...collectTargets(manifest.bin)];
   if (declared.length === 0) throw new Error('package.json declares neither exports nor bin, nothing to check');
   for (const target of declared) {
-    if (!existsSync(join(shipped, target))) {
-      throw new Error(`${tarball} is missing ${target}, which package.json points at`);
-    }
+    if (!existsSync(join(shipped, target))) throw new Error(`${tarball} is missing ${target}, which package.json points at`);
   }
-
-  const consumer = join(work, 'consumer');
-  mkdirSync(join(consumer, 'node_modules'), { recursive: true });
-  renameSync(shipped, join(consumer, 'node_modules', 'ligule'));
-  // 消费者要能解析到运行时依赖，否则 import 到依赖那一行就断了。只复制 `dependencies` 的传递闭包，
-  // 不联网、不跑第二次安装：devDependencies 现在有了（测试用的 MCP 参考服务器），整棵复制过去会让这项检查读不出
-  // 「发布物自己够不够用」——那一条正是它存在的理由。
-  const repoModules = join(repo, 'node_modules');
-  const needed = new Set(Object.keys(pkg.dependencies ?? {}));
-  for (const name of needed) {
-    const manifest = join(repoModules, name, 'package.json');
-    if (!existsSync(manifest)) continue;
-    const dependencyManifest = JSON.parse(readFileSync(manifest, 'utf8'));
-    for (const dependency of Object.keys(dependencyManifest.dependencies ?? {})) needed.add(dependency);
-    // 原生绑定以按平台安装的可选包交付，这些包仍属于运行时闭包。
-    for (const dependency of Object.keys(dependencyManifest.optionalDependencies ?? {})) {
-      if (existsSync(join(repoModules, dependency))) needed.add(dependency);
-    }
-  }
-  for (const name of needed) {
-    const from = join(repoModules, name);
-    if (!existsSync(from)) throw new Error(`${name} is a declared runtime dependency but is not installed; run npm install`);
-    cpSync(from, join(consumer, 'node_modules', name), { recursive: true });
-  }
-  writeFileSync(join(consumer, 'package.json'), `${JSON.stringify({ name: 'ligule-consumer', version: '0.0.0', private: true }, null, 2)}\n`);
-  writeFileSync(
-    join(consumer, 'probe.mjs'),
-    [
-      "import { createKernel, createMcpPlugin, createMcpRegistry, execTool, flagLayer, KernelError, mcpServerConfigs, parseCommand, resolveShell, withNativeExitCode } from 'ligule';",
-      "if (typeof KernelError !== 'function') throw new Error('KernelError is missing from the installed package');",
-      // 两份 tree-sitter 语法是原生插件：装不上时判定只会一路降级成「问」，界面看不出来，所以在这里当场读一次。
-      "if ((await parseCommand('git status')).kind !== 'segments') {",
-      "  throw new Error('the installed package cannot parse bash text: its grammar did not come along');",
-      "}",
-      "if ((await parseCommand('git status', 'powershell')).kind !== 'segments') {",
-      "  throw new Error('the installed package cannot parse PowerShell text: its grammar did not come along');",
-      "}",
-      "if (flagLayer(['limits.readBytes = 100']).limits?.readBytes !== 100) {",
-      "  throw new Error('the installed package cannot parse a dotted override, its TOML dependency did not come along');",
-      "}",
-      // 官方 SDK 是第六条约定依赖：`import 'ligule'` 就会加载它，缺了这里就断，不是等到接服务器才发现。
-      "if (typeof createMcpRegistry !== 'function' || typeof mcpServerConfigs !== 'function') throw new Error('the installed package cannot reach the MCP client layer');",
-      "if (createMcpPlugin(createMcpRegistry(mcpServerConfigs({}))).setup(createKernel()) !== undefined) { /* no servers: nothing registered */ }",
-      "const kernel = createKernel();",
-      "if (kernel.manifest().length !== 0) throw new Error('the installed kernel ships tools');",
-      "const dispose = kernel.register({",
-      "  name: 'smoke',",
-      "  description: 'installed package smoke test',",
-      "  parameters: { type: 'object', properties: {} },",
-      "  run: async () => 'ok',",
-      "});",
-      "const [tool] = kernel.manifest();",
-      "if (!tool || tool.name !== 'smoke' || Object.keys(tool).length !== 3) {",
-      "  throw new Error(`unexpected manifest entry: ${JSON.stringify(tool)}`);",
-      "}",
-      "dispose();",
-      "if (kernel.manifest().length !== 0) throw new Error('dispose did not remove the tool');",
-      "const shell = withNativeExitCode(resolveShell({}), 'node --version');",
-      "const command = await execTool.run({ command: 'node --version' }, { config: { boundary: process.cwd() }, shell });",
-      "if (command.exitCode !== 0 || !command.text.includes(process.version)) throw new Error('the installed package cannot execute a real command');",
-      "console.log('installed package works');",
-    ].join('\n'),
-  );
-  execFileSync(process.execPath, ['probe.mjs'], { cwd: consumer, stdio: 'inherit' });
-  console.log(`pack check ok: ${tarball}`);
+  process.stdout.write(`pack check ok: ${tarball}\n`);
 } finally {
   rmSync(work, { recursive: true, force: true });
 }

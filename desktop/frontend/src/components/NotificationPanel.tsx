@@ -33,7 +33,7 @@ export function NotificationPanel({ preferences, bridge, problem, onChange }: {
     if (bridge === undefined) return;
     setRequesting(true);
     setFailure(null);
-    try { setPermission(await bridge.requestPermission() === 'granted'); }
+    try { setPermission(await bridge.permission()); }
     catch { setFailure('notification_permission_unavailable'); }
     finally { setRequesting(false); }
   };
@@ -48,14 +48,14 @@ export function NotificationPanel({ preferences, bridge, problem, onChange }: {
         <Switch.Root id={`notifications-${kind}`} className="notification-switch" checked={preferences[kind]} disabled={!preferences.enabled} onCheckedChange={checked => onChange({ ...preferences, [kind]: checked })}><Switch.Thumb /></Switch.Root>
       </div>)}
     </Group>
-    <Group title={t('系统权限', 'System permission')}>
+    <Group title={t('系统通知支持', 'System notification support')}>
       {bridge === undefined ? <p className="stub">{t('系统通知仅在桌面应用中可用。', 'System notifications are available in the desktop app.')}</p>
         : <>
-          <p className="stub">{failure !== null ? t('无法读取通知权限，请重试。', 'Could not check notification permission. Try again.')
-            : permission === null ? t('正在读取通知权限…', 'Checking notification permission…')
-            : permission ? t('应用已允许请求通知；系统设置和勿扰模式仍可能阻止显示。', 'The app can request notifications. System settings and Do Not Disturb may still suppress them.')
-              : t('请允许 ligule 发送通知，并检查系统通知设置。', 'Allow notifications for ligule and check your system notification settings.')}</p>
-          <button type="button" disabled={requesting} onClick={() => void request()}>{t('检查通知权限', 'Check notification permission')}</button>
+          <p className="stub">{failure !== null ? t('无法检查系统通知支持，请重试。', 'Could not check notification support. Try again.')
+            : permission === null ? t('正在检查系统通知支持…', 'Checking notification support…')
+            : permission ? t('系统支持原生通知。是否允许显示由系统设置管理，应用无法直接读取授权状态；勿扰模式也可能隐藏通知。', 'Native notifications are supported. Authorization is managed in system settings and cannot be read by the app; Do Not Disturb may also hide notifications.')
+              : t('当前环境不支持系统通知。', 'System notifications are not supported in this environment.')}</p>
+          <button type="button" disabled={requesting} onClick={() => void request()}>{t('重新检查', 'Check again')}</button>
         </>}
       {(failure ?? problem) !== null && <div className="session-note" data-tone="bad">
         <p>{t('通知暂不可用。请检查系统通知权限和通知服务。', 'Notifications are unavailable. Check system permission and the notification service.')}</p>

@@ -1,5 +1,5 @@
-import { useCallback, useState } from 'react';
-import { save } from '@tauri-apps/plugin-dialog';
+import { useCallback, useLayoutEffect, useRef, useState } from 'react';
+import { saveExportPath } from '../bridge';
 import { code, type Client } from '../protocol';
 import { Icon } from './Icon';
 import { useText } from '../locale';
@@ -14,9 +14,21 @@ export function ExportPanel({ client, sessionId }: { client: Client; sessionId: 
   const [written, setWritten] = useState<string[]>([]);
   const [skipped, setSkipped] = useState<Exported['skipped']>([]);
   const [failed, setFailed] = useState<Exported['failed']>([]);
+  const operation = useRef(0);
+
+  useLayoutEffect(() => {
+    setPhase('idle');
+    setNote(null);
+    setWritten([]);
+    setSkipped([]);
+    setFailed([]);
+    return () => { operation.current += 1; };
+  }, [client, sessionId]);
 
   const exportNow = useCallback(async () => {
     if (sessionId === null) return;
+    const request = ++operation.current;
+    const isCurrent = (): boolean => operation.current === request;
     setNote(null);
     setWritten([]);
     setSkipped([]);
@@ -24,12 +36,14 @@ export function ExportPanel({ client, sessionId }: { client: Client; sessionId: 
     setPhase('picking');
     let destination: string | null;
     try {
-      destination = await save({ defaultPath: `ligule-${sessionId.slice(0, 8)}.md`, filters: [{ name: 'Markdown', extensions: ['md'] }] });
+      destination = await saveExportPath(`ligule-${sessionId.slice(0, 8)}.md`);
     } catch (error) {
+      if (!isCurrent()) return;
       setPhase('idle');
       setNote({ text: t('保存对话框无法打开。', 'Could not open the save dialog.'), code: code(error), bad: true });
       return;
     }
+    if (!isCurrent()) return;
     if (destination === null) {
       setPhase('idle');
       setNote({ text: t('已取消导出。', 'Export cancelled.'), bad: false });
@@ -38,14 +52,16 @@ export function ExportPanel({ client, sessionId }: { client: Client; sessionId: 
     setPhase('writing');
     try {
       const done = await client.call('session.export', { sessionId, path: destination }, 60_000) as Exported;
+      if (!isCurrent()) return;
       setWritten(done.written);
       setSkipped(done.skipped);
       setFailed(done.failed);
       setNote({ text: t('导出处理已完成。', 'Export request finished.'), bad: false });
     } catch (error) {
+      if (!isCurrent()) return;
       setNote({ text: t('导出失败。', 'Export failed.'), code: code(error), bad: true });
     } finally {
-      setPhase('idle');
+      if (isCurrent()) setPhase('idle');
     }
   }, [client, sessionId, t]);
 

@@ -1,6 +1,6 @@
-// 客户端协议这一层的界面侧读法（D30、D33）。方法与参数模式的定义在后端（`src/host/protocol.js`），
+// 客户端协议这一层的界面侧读法（D30、D33）。方法与参数模式的定义在后端（`src/host/protocol.ts`），
 // 这里不复制那张表，只按帧的形状收发：请求带 id 与 method，答复带同一个 id，通报带 notify。
-// 传输由外面交进来（桌面壳走 Tauri 的命令与事件），这一层不认识载体。
+// Transport 由桌面桥提供；协议客户端不依赖 Electron。
 import type { NotificationBridge } from './notifications';
 
 export type Frame = {
@@ -22,7 +22,7 @@ export type Transport = {
   onFrame: (handle: (text: string) => void) => void;
   onLog: (handle: (text: string) => void) => void;
   // 载体自己报的故障：帧发不出去了。协议帧里没有这一类，所以它从载体那一侧进来。
-  onFault?: (handle: (reason: string) => void) => void;
+  onFault?: (handle: (reason: string) => void) => void | (() => void);
   // 换一具后端进程。壳里那是 `host_restart` 一条命令；开发时那一份假宿主用它重新答话（第 65 步）。
   restart?: () => Promise<void>;
   // 首次使用时那一份默认工作区：壳把系统文档目录下那一具交回来，不在那儿就建出来（方案 5.5.3）。
@@ -105,6 +105,18 @@ export function createClient(transport: Transport): Client {
   }
 
   transport.onFrame((text) => receive(text));
+  transport.onFault?.(() => discard('host_closed'));
+
+  function discard(reason: string): number {
+    let dropped = 0;
+    for (const [id, waiter] of [...pending]) {
+      if (waiter.timer !== undefined) clearTimeout(waiter.timer);
+      pending.delete(id);
+      waiter.reject(Object.assign(new Error(reason), { code: reason }));
+      dropped += 1;
+    }
+    return dropped;
+  }
 
   return {
     call(method, params, timeoutMs = 0) {
@@ -133,15 +145,6 @@ export function createClient(transport: Transport): Client {
     },
     waiting: () => pending.size,
     counts: () => ({ ...counts }),
-    discard(reason) {
-      let dropped = 0;
-      for (const [id, waiter] of [...pending]) {
-        if (waiter.timer !== undefined) clearTimeout(waiter.timer);
-        pending.delete(id);
-        waiter.reject(Object.assign(new Error(reason), { code: reason }));
-        dropped += 1;
-      }
-      return dropped;
-    },
+    discard,
   };
 }

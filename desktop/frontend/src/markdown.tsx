@@ -56,7 +56,7 @@ function safeHref(href: string): string {
 }
 
 // 代码围栏上那一枚复制：交出去的是这一段没上色之前的原文，不是画面上带了标签的那一份。
-// 剪贴板走 WebView2 自带的 `navigator.clipboard`，不引依赖。成与不成都要说一句：
+// 剪贴板通过 Chromium 提供的 `navigator.clipboard` 访问，不引依赖。成与不成都要说一句：
 // 看得到代码却拿不走，比默默不动要查得好。
 function CodeBlock({ code }: { code: Tokens.Code }) {
   const [said, setSaid] = useState('');

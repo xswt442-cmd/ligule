@@ -23,10 +23,10 @@ export type InkKey = {
   end?: boolean;
 };
 
-export type KeyView = '全局' | '输入' | '补全清单' | '路径候选' | '反查' | '会话列表' | '完整历史' | '审批' | '提问';
+export type KeyView = '全局' | '输入' | '补全清单' | '路径候选' | '反查' | '会话列表' | '完整历史' | '审批' | '提问' | '面板';
 
 export type TerminalAction =
-  | 'quit' | 'expand-or-history' | 'editor' | 'search-open' | 'interrupt'
+  | 'quit' | 'expand-or-history' | 'editor' | 'search-open' | 'interrupt' | 'model-picker' | 'mode-picker' | 'policy-picker'
   | 'send' | 'newline' | 'newline-alt' | 'history-up' | 'history-down' | 'history-up-shift' | 'history-down-shift' | 'queue-recall' | 'queue-recall-alt' | 'undo-draft' | 'redo-draft'
   | 'complete' | 'complete-up' | 'complete-down' | 'complete-close'
   | 'pick-path' | 'pick-path-alt' | 'path-up' | 'path-down' | 'path-close'
@@ -36,18 +36,22 @@ export type TerminalAction =
   | 'mark-up' | 'mark-down' | 'copy-selection' | 'view-close'
   | 'approval-cancel' | 'approve' | 'deny'
   | 'approval-up' | 'approval-down' | 'approval-page-up' | 'approval-page-down' | 'approval-top' | 'approval-bottom'
-  | 'question-back';
+  | 'question-back'
+  | 'panel-up' | 'panel-down' | 'panel-page-up' | 'panel-page-down' | 'panel-left' | 'panel-right' | 'panel-select' | 'panel-close';
 
 export type Binding = { readonly spec: string; readonly view: KeyView; readonly label: string };
 
 export const ENGLISH_VIEWS: Record<KeyView, string> = {
   全局: 'Global', 输入: 'Composer', 补全清单: 'Commands', 路径候选: 'Files',
-  反查: 'Input history', 会话列表: 'Sessions', 完整历史: 'Transcript', 审批: 'Approvals', 提问: 'Questions',
+  反查: 'Input history', 会话列表: 'Sessions', 完整历史: 'Transcript', 审批: 'Approvals', 提问: 'Questions', 面板: 'Panels',
 };
 
 export const ENGLISH_LABELS: Record<TerminalAction, string> = {
   quit: 'Exit', 'expand-or-history': 'Browse transcript or expand approval details',
   editor: 'Edit draft in VISUAL or EDITOR', 'search-open': 'Search input history', interrupt: 'Stop this turn and pause the queue',
+  'model-picker': 'Select a model', 'mode-picker': 'Select a tool mode', 'policy-picker': 'Select an approval mode',
+  'panel-up': 'Previous item or line', 'panel-down': 'Next item or line', 'panel-page-up': 'Previous page', 'panel-page-down': 'Next page',
+  'panel-left': 'Previous help category', 'panel-right': 'Next help category', 'panel-select': 'Confirm selection', 'panel-close': 'Close panel and keep the draft',
   send: 'Send, or queue while running', newline: 'New line', 'newline-alt': 'New line',
   'history-up': 'Move up, or recall earlier input on a single line', 'history-down': 'Move down, or recall newer input',
   'history-up-shift': 'Move up', 'history-down-shift': 'Move down',
@@ -74,6 +78,18 @@ export const KEYMAP: Readonly<Record<TerminalAction, Binding>> = {
   'editor': { spec: 'ctrl+g', view: '全局', label: '把草稿交给 EDITOR 或 VISUAL 指的那一个编辑器' },
   'search-open': { spec: 'ctrl+r', view: '全局', label: '起一次输入历史反查' },
   'interrupt': { spec: 'escape', view: '全局', label: '打断这一轮；排着的几条一起停下' },
+  'model-picker': { spec: 'ctrl+p', view: '全局', label: '选择模型' },
+  'mode-picker': { spec: 'ctrl+t', view: '全局', label: '选择工具模式' },
+  'policy-picker': { spec: 'ctrl+a', view: '全局', label: '选择审批方式' },
+
+  'panel-up': { spec: 'arrowup', view: '面板', label: '上一项或上一行' },
+  'panel-down': { spec: 'arrowdown', view: '面板', label: '下一项或下一行' },
+  'panel-page-up': { spec: 'pageup', view: '面板', label: '上一页' },
+  'panel-page-down': { spec: 'pagedown', view: '面板', label: '下一页' },
+  'panel-left': { spec: 'arrowleft', view: '面板', label: '上一个帮助分类' },
+  'panel-right': { spec: 'arrowright', view: '面板', label: '下一个帮助分类' },
+  'panel-select': { spec: 'enter', view: '面板', label: '确认选择' },
+  'panel-close': { spec: 'escape', view: '面板', label: '关闭面板并保留草稿' },
 
   'send': { spec: 'enter', view: '输入', label: '发送这一句；跑着的时候排到后面' },
   'newline': { spec: 'shift+enter', view: '输入', label: '换行' },
@@ -183,6 +199,10 @@ export function defaultSpecs(): Record<TerminalAction, string> {
 // 换的时机只有一处（`applyOverrides`），所以它是一份要改就整份改的表，不是散在各调用点的开关。
 export const CURRENT = defaultSpecs();
 
+function isTerminalAction(value: string): value is TerminalAction {
+  return Object.hasOwn(KEYMAP, value);
+}
+
 /** 一串人写的键名（`Ctrl+Shift+K`、`enter`）读成规范写法；认不出来交回 null，不猜。 */
 export function parseSpec(text: string): string | null {
   const parts = text.trim().toLowerCase().split('+').map((part) => part.trim());
@@ -197,14 +217,14 @@ export function parseSpec(text: string): string | null {
 }
 
 /** 换上个人那一份覆盖：读不懂的键名与表里没有的动作名都交回去，有效的那一些照样落下来。 */
-export function applyOverrides(overrides: Record<string, string>): { readonly applied: string[]; readonly refused: string[] } {
-  const applied: string[] = [];
+export function applyOverrides(overrides: Record<string, string>): { readonly applied: TerminalAction[]; readonly refused: string[] } {
+  const applied: TerminalAction[] = [];
   const refused: string[] = [];
   for (const [action, text] of Object.entries(overrides)) {
-    if (!Object.prototype.hasOwnProperty.call(CURRENT, action)) { refused.push(`${action}（表里没有这一个动作）`); continue; }
+    if (!isTerminalAction(action)) { refused.push(`${action}（表里没有这一个动作）`); continue; }
     const spec = parseSpec(text);
     if (spec === null) { refused.push(`${action}: ${text}`); continue; }
-    CURRENT[action as TerminalAction] = spec;
+    CURRENT[action] = spec;
     applied.push(action);
   }
   return { applied, refused };

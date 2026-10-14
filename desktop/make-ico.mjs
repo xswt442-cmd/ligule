@@ -5,7 +5,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const directory = new URL('./src-tauri/icons/', import.meta.url).pathname.replace(/^\//, '');
+const directory = new URL('./icons/', import.meta.url).pathname.replace(/^\//, '');
 const entries = [['32x32.png', 32], ['128x128.png', 128], ['128x128@2x.png', 256]];
 
 const images = entries.map(([name, size]) => ({ size, bytes: readFileSync(join(directory, name)) }));

@@ -2,12 +2,21 @@
   "name": "ligule-desktop",
   "private": true,
   "version": "0.0.3",
-  "description": "桌面壳的构建入口：Tauri 命令行认的是这一层（src-tauri 是本目录的直接子目录），前端的构建由壳的配置去拉起。",
+  "description": "Ligule Electron desktop application",
+  "homepage": "https://github.com/xswt442-cmd/ligule#readme",
+  "main": "electron/dist/main.js",
   "scripts": {
-    "dev": "tauri dev",
-    "build": "node ./build.mjs"
+    "dev": "node ./dev.mjs",
+    "build": "node ./build.mjs",
+    "build:dir": "node ./build.mjs --dir",
+    "build:win": "node ./build.mjs --win nsis",
+    "build:linux": "node ./build.mjs --linux appimage deb",
+    "build:mac": "node ./build.mjs --mac dmg"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.12.1"
+    "@electron/fuses": "2.1.3",
+    "electron": "44.7.0",
+    "electron-builder": "26.15.3",
+    "builder-util": "26.15.3"
   }
 }

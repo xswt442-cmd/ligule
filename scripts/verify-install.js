@@ -1,25 +1,22 @@
-// 全新安装验证：打一份 tarball，在一个空目录里让 npm 真的装一次，再按发布验收那几件事读一遍。
-// `check-pack` 那一格把开发树的依赖复制给消费者，它证明的是「文件带齐了」；这一格证明的是「声明装得出来」。
-// 其余依赖从 tarball 里的 package.json 解析、下载并安装，不从本仓库的 `node_modules` 复制。
+// 全新安装验证：打一份 tarball，在空消费者中用 npm 安装，并通过已安装的 CLI 和包导出运行完整探针。
 //
-// 跑法：npm run verify-install [-- tarball]
+// 跑法：pnpm --filter ligule run verify-install [tarball]
 // 带一个 tarball 路径时用它，不再自己打：发布流水线要在同一批字节上先验后发，那一份身份就是 artifact 里的那一个文件。
 import { spawnSync, execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
 import { releaseManifest } from './pack-release.js';
+import { execNpm } from './npm-cli.js';
 
 const repo = fileURLToPath(new URL('..', import.meta.url));
 const packDir = join(repo, 'testplace', 'pack');
 const consumer = join(packDir, 'install', 'consumer');
 const args = process.argv.slice(2);
-if (args.length > 1 || args.some((arg) => arg.startsWith('--'))) throw new Error('usage: npm run verify-install -- [tarball]');
+if (args.length > 1 || args.some((arg) => arg.startsWith('--'))) throw new Error('usage: pnpm --filter ligule run verify-install [tarball]');
 const given = args[0];
-const npmCli = process.env.npm_execpath;
-if (!npmCli) throw new Error('run it as `npm run verify-install` - only npm itself can tell Node which file to launch on Windows');
 if (given === undefined && !existsSync(join(repo, 'dist', 'index.js'))) {
-  throw new Error('dist/index.js is missing; run `npm run build` before verifying a fresh install');
+  throw new Error('dist/index.js is missing; run `pnpm --filter ligule run build` before verifying a fresh install');
 }
 
 const pkg = releaseManifest();
@@ -46,7 +43,7 @@ if (!existsSync(tarball)) throw new Error(`npm pack did not produce ${tarball}`)
 const installEnvironment = Object.fromEntries(Object.entries(process.env)
   .filter(([name]) => name.toLowerCase() !== 'npm_config_allow_scripts'));
 try {
-  execFileSync(process.execPath, [npmCli, 'install', tarball, '--no-audit', '--no-fund'], {
+  execNpm(['install', tarball, '--no-audit', '--no-fund'], {
     cwd: consumer,
     env: installEnvironment,
     encoding: 'utf8',
@@ -99,10 +96,49 @@ if (!`${tui.stdout}${tui.stderr}`.includes('tui_terminal_required')) {
 }
 readings.push('tui: refuses with tui_terminal_required on a non-interactive terminal');
 
-// 两种命令语法与搜索后端都从装好的那一份里跑：原生语法插件或搜索二进制没带上来时，这一段就断。
+// 消费者只看 tarball 声明：加载内核、解析配置和命令、执行工具与 MCP、使用 grammar 和搜索后端。
 writeFileSync(join(consumer, 'probe.mjs'), `
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { parseCommand, resolveRipgrep, searchWithRipgrep } from 'ligule';
+import { createKernel, createMcpPlugin, createMcpRegistry, execTool, flagLayer, KernelError, mcpServerConfigs, parseCommand, resolveRipgrep, resolveShell, searchWithRipgrep, withNativeExitCode } from 'ligule';
+
+if (typeof KernelError !== 'function') throw new Error('KernelError is missing from the installed package');
+if (flagLayer(['limits.readBytes = 100']).limits?.readBytes !== 100) {
+  throw new Error('the installed package cannot parse a dotted override, its TOML dependency did not come along');
+}
+console.log('TOML override: parsed');
+
+const mcpKernel = createKernel();
+const mcpDispose = createMcpPlugin(createMcpRegistry(mcpServerConfigs({}))).setup(mcpKernel);
+if (typeof mcpDispose !== 'function' || mcpKernel.manifest().length !== 0) {
+  throw new Error('an empty MCP registry registered tools or omitted its disposer');
+}
+mcpDispose();
+console.log('MCP registry: initialized without servers');
+
+const kernel = createKernel();
+if (kernel.manifest().length !== 0) throw new Error('the installed kernel ships tools');
+const dispose = kernel.register({
+  name: 'smoke',
+  description: 'installed package smoke test',
+  parameters: { type: 'object', properties: {} },
+  run: async () => 'ok',
+});
+const [tool] = kernel.manifest();
+if (!tool || tool.name !== 'smoke' || Object.keys(tool).length !== 3) {
+  throw new Error(\`unexpected manifest entry: \${JSON.stringify(tool)}\`);
+}
+dispose();
+if (kernel.manifest().length !== 0) throw new Error('dispose did not remove the tool');
+console.log('kernel registry: add and dispose');
+
+const command = await execTool.run(
+  { command: 'node --version' },
+  { config: { boundary: process.cwd() }, shell: withNativeExitCode(resolveShell({}), 'node --version') },
+);
+if (command.exitCode !== 0 || !command.text.includes(process.version)) {
+  throw new Error('the installed package cannot execute a real command');
+}
+console.log('command execution: node --version');
 
 const bash = await parseCommand('git status');
 const pwsh = await parseCommand('Get-ChildItem -Recurse | Select-Object -First 3');

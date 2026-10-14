@@ -4,11 +4,10 @@ testplace
 # 项目成品本地配置
 .ligule/
 
-# RUST 的构建产物与编译期生成的 schema 目录 & 前端的依赖与构建输出
-desktop/src-tauri/target/
-desktop/src-tauri/gen/
+# 桌面端的依赖、构建产物和安装包
 desktop/frontend/node_modules/
 desktop/frontend/dist/
+desktop/release/
 
 # 随安装包分发的 Node 运行时与运行时树
 desktop/vendor/

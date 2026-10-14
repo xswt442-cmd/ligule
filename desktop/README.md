@@ -2,84 +2,107 @@
 
 [简体中文](README.md) · [English](README.en.md)
 
-桌面应用由 `frontend/` 中的 React 与 TypeScript 前端、`src-tauri/` 中的 Rust 与 Tauri 壳，以及 Node Host 组成。前端通过 Tauri 调用 Host 协议；Rust 壳管理窗口并转发按行分隔的消息帧。业务逻辑和会话状态由 Node 管理。完整调用路径见[架构说明](../docs/development/ARCHITECTURE.zh-cn.md)。
+桌面应用由 `electron/` 中的 Electron Main 与 Preload、`frontend/` 中的 React 前端，以及独立 Node Host 组成。Main 只管理窗口和 Host 进程，业务逻辑与会话状态由 Node Host 管理。
 
-## 环境要求
+## 环境与依赖
 
-需要 Node.js 24 或更新版本和稳定版 Rust 工具链。Windows 构建需要 WebView2；Linux 构建需要 [CI 工作流](../.github/workflows/ci.yml)列出的 Tauri 系统库。macOS 使用对应架构的原生 runner。支持的安装目标及验收状态见[发行清单](../docs/development/RELEASE.zh-cn.md)。
-
-从仓库根目录安装各个依赖树：
+使用 Node.js 24 或更新版本。仓库在根 `package.json` 中固定 pnpm 版本；从根目录冻结安装全部工作区依赖：
 
 ```sh
-npm ci
-npm --prefix desktop ci
-npm --prefix desktop/frontend ci
+pnpm install --frozen-lockfile
 ```
 
-## 启动开发环境
-
-同时启动 Vite 前端和 Tauri 壳：
+Electron `44.7.0`、electron-builder `26.15.3`、`@electron/fuses` `2.1.3` 与 `builder-util` `26.15.3` 固定为桌面包的开发依赖。Electron npm 包不自动下载平台二进制；安装工作区依赖后，通过它提供的 CLI 为当前操作系统和架构安装匹配版本：
 
 ```sh
-npm --prefix desktop run dev
+pnpm --filter ligule-desktop exec install-electron
 ```
 
-壳会启动 Node Host。桌面窗口中的前端使用 Tauri 传输；`dev/` 页面也可以连接本地假 Host，单独检查界面。
+## 启动开发应用
+
+先构建核心、准备本机的 Node 运行时和 Host 运行树，并安装 Electron 二进制，再从仓库根目录运行桌面开发入口：
+
+```sh
+pnpm --filter ligule run build
+pnpm --filter ligule run prepare-runtime
+pnpm --filter ligule-desktop exec install-electron
+pnpm --filter ligule-desktop run dev
+```
+
+开发入口先编译 Electron TypeScript，再启动固定在 `http://localhost:5188/` 的 Vite 服务和 Electron。只有该入口会向 Electron 传入 `--dev`。
 
 ## 检查前端
 
-运行前端断言和生产构建：
-
 ```sh
-npm --prefix desktop/frontend run check
-npm --prefix desktop/frontend run build
+pnpm --filter ligule-desktop-frontend run check
+pnpm --filter ligule-desktop-frontend run build
 ```
 
-## 检查 Rust 壳
+## 验收
 
-从仓库根目录运行：
+自动化检查、真实窗口测试和安装器验收的程序位于 `electron/test/`；运行日志与验收记录留在被 Git 忽略的 `desktop/testplace/readings/`，不会随仓库分发。安装依赖、准备根 Host 和目标 Node 后，先运行桌面构建以生成 Electron Main、Frontend 和目标平台应用，再执行真实窗口测试。`run-installer-smoke.ps1` 还需要先生成 Windows NSIS 安装包。
 
 ```sh
-cd desktop/src-tauri
-cargo fmt --check
-cargo test
+pnpm exec tsc -p desktop/electron/tsconfig.json
+node --experimental-strip-types --test desktop/electron/test/host.test.ts desktop/electron/test/security.test.ts
 ```
 
-前端构建会先运行 TypeScript 检查，再由 Vite 打包。Rust 测试覆盖进程入口解析、按行转发消息帧、Host 替换、托盘和通知输入规则。CI 在各自的平台 runner 上构建安装包；这些构建产物用于验证，只有正式发布后才是公开安装包。
+在 Linux 和 macOS 上用随包 Node 检查 POSIX 进程组，并启动真实窗口。Linux 需要 `xvfb-run` 提供图形会话：
 
-## 构建安装包
+```sh
+desktop/vendor/node/node --experimental-strip-types --test desktop/electron/test/posix-process-tree.test.ts
+# Linux
+xvfb-run -a desktop/vendor/node/node desktop/electron/test/run-native-security.mjs
+xvfb-run -a desktop/vendor/node/node desktop/electron/test/run-stub-model.mjs
+xvfb-run -a desktop/vendor/node/node desktop/electron/test/run-packaged-smoke.mjs --app-dir <解包应用的绝对路径>
+# macOS
+desktop/vendor/node/node desktop/electron/test/run-native-security.mjs
+desktop/vendor/node/node desktop/electron/test/run-stub-model.mjs
+desktop/vendor/node/node desktop/electron/test/run-packaged-smoke.mjs --app-dir <ligule.app 的绝对路径>
+```
 
-按顺序完成以下步骤：
+Windows 使用随包 Node 运行 Job Object 检查和原生对话框测试，并执行 NSIS 隔离安装验收：
 
-1. 构建核心包：
+```powershell
+desktop/vendor/node/node.exe --experimental-strip-types --test desktop/electron/test/process-tree.test.ts
+desktop/vendor/node/node.exe desktop/electron/test/run-native-security.mjs
+desktop/vendor/node/node.exe desktop/electron/test/run-stub-model.mjs
+desktop/vendor/node/node.exe desktop/electron/test/run-native-features.mjs
+desktop/vendor/node/node.exe desktop/electron/test/run-packaged-smoke.mjs
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File desktop/electron/test/run-installer-smoke.ps1
+```
 
-   ```sh
-   npm run build
-   ```
+Linux 使用 `xvfb-run -a` 运行 `run-native-security.mjs`、`run-stub-model.mjs` 和 `run-packaged-smoke.mjs`；macOS 直接运行这些测试。POSIX `posix-process-tree.test.ts` 验证受控停止与 Main 强杀后的孤儿 Host watchdog；Windows 用 `process-tree.test.ts` 验证 Job Object。`run-native-features.mjs` 的保存对话框和托盘自动化仅支持 Windows。系统通知点击没有自动化验收入口，必须记为未执行；托盘、通知和点击跳转仍需按目标系统人工实机检查。真实窗口测试使用隔离工作区和数据根。
 
-2. 在目标平台准备 Node 运行时目录：
+## 构建应用
 
-   ```sh
-   node desktop/fetch-runtime.mjs
-   ```
+先构建核心包并准备当前操作系统和架构对应的 Node 运行时：
 
-3. 构建桌面安装包：
+```sh
+pnpm --filter ligule run build
+pnpm --filter ligule run prepare-runtime
+pnpm --filter ligule-desktop exec install-electron
+```
 
-   ```sh
-   npm --prefix desktop run build
-   ```
+再从仓库根目录执行桌面构建：
 
-`fetch-runtime.mjs` 会下载 [`node-pin.json`](node-pin.json) 指定的 Node 归档、验证校验和，并将构建产物和生产依赖复制到 `desktop/vendor/`。运行时目录与平台相关，不要在不同操作系统或架构之间复用。Tauri 会将其打入安装包。目标平台的安装包格式由 `tauri.*.conf.json` 指定。
+```sh
+pnpm --filter ligule-desktop run build
+```
 
-输出位置和安装包格式见[发行清单](../docs/development/RELEASE.zh-cn.md)。如需在打包前检查随包运行时，可使用当前平台 `desktop/vendor/node/` 下的 Node 执行 `desktop/check-runtime.mjs`。
+`pnpm --filter ligule-desktop run build:dir` 生成未安装目录，适合检查 `app.asar` 与随包资源。`build:win`、`build:linux`、`build:mac` 分别生成 Windows x64 NSIS、Linux x64 AppImage 与 deb、macOS 本机架构 DMG。macOS arm64 与 x64 需要分别在对应架构的机器上构建，并先准备该机的运行时。构建会拒绝与本机架构或 Node 运行时标记不符的架构参数。发行构建不会自动发布，也不使用开发者证书签名或公证。为保证 Apple Silicon 上启用 fuses 的应用可以启动，arm64 macOS 构建会重置 Electron 要求的 ad-hoc 签名。
+
+`pnpm --filter ligule run prepare-runtime` 会校验根 `packageManager` 指定的 pnpm 版本，再调用 `fetch-runtime.mjs` 下载并验证 [`node-pin.json`](node-pin.json) 中的 Node 归档，准备 `vendor/node/` 与 `vendor/app/`。打包后 Node 与 Host 运行树位于应用资源目录，应用代码、前端文件和图标位于 `app.asar`。构建会关闭 Electron 的 RunAsNode、NODE_OPTIONS 和命令行调试开关，并要求应用从 `app.asar` 加载；Windows 与 macOS 的打包配置同时启用归档完整性检查。
+
+安装包写入 `desktop/release/`。目标平台的运行时必须在对应平台和架构上准备，不能复用其他平台生成的 `vendor/`。
 
 ## 应用图标
 
-[`assets/app-icon.png`](assets/app-icon.png) 是源图。在 Windows 上，运行以下命令重新生成前端与 Tauri 图标：
+[`assets/app-icon.png`](assets/app-icon.png) 是源图。在 Windows 上重新生成桌面图标：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File desktop/make-icons.ps1
 node desktop/make-ico.mjs
 ```
 
-脚本将生成文件写入 `desktop/frontend/public/` 和 `desktop/src-tauri/icons/`。提交前检查生成结果。
+脚本将 PNG 和 ICO 图标写入 `desktop/icons/`，并将前端使用的 PNG 写入 `desktop/frontend/public/`。

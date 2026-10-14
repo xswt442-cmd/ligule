@@ -1,0 +1,290 @@
+// 本地 stub 模型的 Desktop 回归：用同一套真实窗口驱动 harness（run-real-model.cjs），
+// 但把 Host 指向本进程内的固定 SSE 服务，验证审批拒绝与流式取消的界面联动。
+// 它替代不了真实模型验收：证据目录 `stub-model-*`、报告名 `stub-model.json`、
+// 场景名前缀与 provider 字段都写明这是本地 stub。真实模型验收仍走 run-real-model.mjs。
+import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import { basename, dirname, join, relative, sep } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+
+const testDirectory = dirname(fileURLToPath(import.meta.url));
+const electronDirectory = dirname(testDirectory);
+const desktopDirectory = dirname(electronDirectory);
+const repositoryRoot = dirname(desktopDirectory);
+const testRoot = join(desktopDirectory, 'testplace');
+const temporaryParent = join(testRoot, 'tmp');
+const evidenceParent = join(testRoot, 'readings');
+const executable = createRequire(join(desktopDirectory, 'package.json'))('electron');
+const harness = join(testDirectory, 'run-real-model.cjs');
+const node = join(desktopDirectory, 'vendor', 'node', process.platform === 'win32' ? 'node.exe' : 'node');
+const cli = join(repositoryRoot, 'dist', 'cli.js');
+const hostEntry = join(electronDirectory, 'dist', 'host-entry.js');
+const frontend = join(desktopDirectory, 'frontend', 'dist', 'index.html');
+const electronModules = ['secure-window.js', 'security.js', 'ipc.js', 'host.js', 'runtime.js', 'native.js', 'preload.js', 'host-entry.js']
+  .map(name => join(electronDirectory, 'dist', name));
+const required = [executable, harness, node, cli, hostEntry, frontend, ...electronModules, join(desktopDirectory, 'assets', 'app-icon.png')];
+const missing = required.filter(path => !existsSync(path));
+if (missing.length > 0) throw new Error(`stub_model_prerequisite_missing:${missing.map(basename).join(',')}`);
+
+const PROOF_FILES = [
+  { name: 'model-denial-proof.txt', content: 'DENIED' },
+  { name: 'model-allow-proof.txt', content: 'ALLOWED' },
+];
+const providerLabel = '本地 stub 模型';
+const providerRequests = [];
+// 宿主崩溃演练用：置为 true 后新到的这一发请求只登记、不回复，界面侧就能停在「请求已发出、还没答案」的那一刻。
+let hangRequests = false;
+
+function streamChunk(response, chunk) {
+  response.write(`data: ${JSON.stringify(chunk)}\n\n`);
+}
+
+function jsonResponse(response, status, body) {
+  response.writeHead(status, { 'content-type': 'application/json' });
+  response.end(`${JSON.stringify(body)}\n`);
+}
+
+const server = createServer(async (request, response) => {
+  const url = request.url ?? '';
+  if (url.startsWith('/stub/')) {
+    if (request.method === 'GET' && url === '/stub/state') {
+      jsonResponse(response, 200, { requests: providerRequests.length, hang: hangRequests });
+      return;
+    }
+    if (request.method === 'POST' && url === '/stub/hang') {
+      const parts = [];
+      for await (const chunk of request) parts.push(chunk);
+      const body = parts.length === 0 ? {} : JSON.parse(Buffer.concat(parts).toString('utf8'));
+      hangRequests = body.hang === true;
+      jsonResponse(response, 200, { hang: hangRequests });
+      return;
+    }
+    jsonResponse(response, 404, { error: 'stub_control_path_unknown' });
+    return;
+  }
+  if (request.method !== 'POST' || !url.endsWith('/chat/completions')) {
+    jsonResponse(response, 404, { error: { message: 'stub_model_path_unknown' } });
+    return;
+  }
+  const chunks = [];
+  for await (const chunk of request) chunks.push(chunk);
+  const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  const lastUser = [...messages].reverse().find(message => message.role === 'user');
+  const prompt = typeof lastUser?.content === 'string' ? lastUser.content : '';
+  const followup = messages.at(-1)?.role === 'tool';
+  const target = PROOF_FILES.find(item => prompt.includes(item.name));
+  providerRequests.push({
+    stream: body.stream === true,
+    toolCount: Array.isArray(body.tools) ? body.tools.length : 0,
+    followup,
+    toolCall: followup ? null : target?.name ?? null,
+    hung: hangRequests,
+  });
+  // 只登记不回复：连接保持打开，Host 那一侧就一直停在「等这一发回答」上。
+  if (hangRequests) return;
+  response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
+  let closed = false;
+  response.on('close', () => { closed = true; });
+  const finish = reason => {
+    streamChunk(response, { choices: [{ index: 0, finish_reason: reason, delta: {} }] });
+    response.write('data: [DONE]\n\n');
+    response.end();
+  };
+  if (followup) {
+    streamChunk(response, { choices: [{ index: 0, delta: { content: '已按界面决定停止，目标文件没有被写入。' } }] });
+    finish('stop');
+    return;
+  }
+  if (target !== undefined) {
+    const args = JSON.stringify({ path: target.name, content: target.content });
+    const split = Math.ceil(args.length / 2);
+    streamChunk(response, { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: `stub_call_${target.name}`, type: 'function', function: { name: 'create', arguments: '' } }] } }] });
+    streamChunk(response, { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: args.slice(0, split) } }] } }] });
+    streamChunk(response, { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: args.slice(split) } }] } }] });
+    finish('tool_calls');
+    return;
+  }
+  for (let index = 0; index < 200 && !closed; index += 1) {
+    streamChunk(response, { choices: [{ index: 0, delta: { content: `本地 stub 模型第 ${index + 1} 段文本，用于验证界面流式取消。` } }] });
+    await delay(60);
+  }
+  if (!closed) finish('stop');
+});
+
+await new Promise((resolvePromise, reject) => {
+  server.once('error', reject);
+  server.listen(0, '127.0.0.1', resolvePromise);
+});
+const endpoint = `http://127.0.0.1:${server.address().port}/v1`;
+
+const runId = new Date().toISOString().replace(/[:.]/gu, '-');
+await mkdir(temporaryParent, { recursive: true });
+await mkdir(evidenceParent, { recursive: true });
+const temporaryRoot = await mkdtemp(join(temporaryParent, `stub-model-${runId}-`));
+const evidenceRoot = join(evidenceParent, `stub-model-${runId}`);
+const isolatedHome = join(temporaryRoot, 'ligule-home');
+const userData = join(temporaryRoot, 'electron-user-data');
+const workspace = join(temporaryRoot, 'workspaces', 'project');
+await Promise.all([
+  mkdir(isolatedHome, { recursive: true }),
+  mkdir(userData, { recursive: true }),
+  mkdir(workspace, { recursive: true }),
+  mkdir(evidenceRoot, { recursive: true }),
+]);
+await writeFile(join(isolatedHome, 'config.toml'), [
+  '[model]',
+  'api = "chat-completions"',
+  `baseURL = ${JSON.stringify(endpoint)}`,
+  'model = "stub-model"',
+  'apiKeyEnv = "LIGULE_API_KEY"',
+  '',
+  '[policy]',
+  'mode = "ask"',
+  '',
+].join('\n'), { encoding: 'utf8', mode: 0o600 });
+
+const environment = { ...process.env };
+for (const name of Object.keys(environment)) {
+  if (/(?:_API_KEY|_ACCESS_TOKEN|_SECRET|_PASSWORD)$/iu.test(name)) delete environment[name];
+}
+for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'ELECTRON_RUN_AS_NODE', 'LIGULE_API_KEY']) delete environment[name];
+environment.LIGULE_HOME = isolatedHome;
+environment.LIGULE_API_KEY = 'stub-model-key';
+environment.LIGULE_REAL_MODEL_WORKSPACE = workspace;
+environment.LIGULE_REAL_MODEL_EVIDENCE = evidenceRoot;
+environment.LIGULE_REAL_MODEL_USER_DATA = userData;
+environment.LIGULE_MODEL_PROVIDER_LABEL = providerLabel;
+environment.LIGULE_MODEL_EVIDENCE_NAME = 'stub-model';
+environment.LIGULE_STUB_CONTROL = `http://127.0.0.1:${server.address().port}/stub`;
+
+async function registerIsolatedWorkspace() {
+  const preflight = spawn(node, [hostEntry, cli], {
+    cwd: repositoryRoot,
+    env: environment,
+    stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+    detached: process.platform !== 'win32',
+    windowsHide: true,
+  });
+  preflight.stderr.on('data', () => {});
+  let output = '';
+  let responseTimer;
+  const response = new Promise((resolvePromise, reject) => {
+    responseTimer = setTimeout(() => {
+      preflight.kill();
+      reject(new Error('stub_model_workspace_registration_timeout'));
+    }, 20_000);
+    preflight.once('error', error => { clearTimeout(responseTimer); reject(error); });
+    preflight.stdout.setEncoding('utf8');
+    preflight.stdout.on('data', chunk => {
+      output += chunk;
+      let end = output.indexOf('\n');
+      while (end >= 0) {
+        const line = output.slice(0, end).trim();
+        output = output.slice(end + 1);
+        try {
+          const frame = JSON.parse(line);
+          if (frame.id === 'stub-model-workspace-default') {
+            clearTimeout(responseTimer);
+            resolvePromise(frame);
+          }
+        } catch {}
+        end = output.indexOf('\n');
+      }
+    });
+  });
+  const exit = new Promise(resolvePromise => {
+    preflight.once('error', () => resolvePromise({ exitCode: 1, signal: null }));
+    preflight.once('exit', (exitCode, signal) => resolvePromise({ exitCode, signal }));
+  });
+  preflight.stdin.write(`${JSON.stringify({
+    id: 'stub-model-workspace-default',
+    method: 'workspace.default.set',
+    params: { directory: workspace, name: 'Stub model verification' },
+  })}\n`);
+  try {
+    const frame = await response;
+    if (frame.error !== undefined) throw new Error(`stub_model_workspace_registration_failed:${frame.error.code ?? 'host_error'}`);
+    preflight.stdin.end();
+    preflight.disconnect();
+    const processExit = await exit;
+    if (processExit.exitCode !== 0) throw new Error('stub_model_workspace_registration_host_exit');
+  } catch (error) {
+    clearTimeout(responseTimer);
+    if (preflight.exitCode === null) preflight.kill();
+    await exit.catch(() => {});
+    throw error;
+  }
+}
+
+let childExitCode = null;
+let childSignal = null;
+let standardOutput = '';
+let standardError = '';
+try {
+  await registerIsolatedWorkspace();
+  const child = spawn(executable, [`--user-data-dir=${userData}`, harness], {
+    cwd: repositoryRoot,
+    env: environment,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  delete environment.LIGULE_API_KEY;
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', chunk => { standardOutput += chunk; });
+  child.stderr.on('data', chunk => { standardError += chunk; });
+  const timeout = setTimeout(() => child.kill(), 240_000);
+  const exit = await new Promise((resolvePromise, reject) => {
+    child.once('error', reject);
+    child.once('close', (exitCode, exitSignal) => resolvePromise({ exitCode, exitSignal }));
+  });
+  clearTimeout(timeout);
+  childExitCode = exit.exitCode;
+  childSignal = exit.exitSignal;
+} catch (error) {
+  standardError += `${error instanceof Error ? error.message : String(error)}\n`;
+  childExitCode = 1;
+} finally {
+  server.close();
+}
+
+const results = [];
+for (const line of standardOutput.split(/\r?\n/u)) {
+  const text = line.trim();
+  if (!text.startsWith('{')) continue;
+  try {
+    const parsed = JSON.parse(text);
+    if (typeof parsed?.name === 'string' && typeof parsed?.status === 'string') {
+      results.push({ name: parsed.name, status: parsed.status, ...(typeof parsed.code === 'string' ? { code: parsed.code } : {}), ...(typeof parsed.detail === 'string' ? { detail: parsed.detail } : {}) });
+    }
+  } catch {}
+}
+
+const report = {
+  command: `${relative(repositoryRoot, node)} desktop/electron/test/run-stub-model.mjs`,
+  provider: 'local-stub',
+  providerNote: '本地 stub 模型：只验证 Desktop 窗口、审批与取消联动，不构成真实模型验收。',
+  platform: process.platform,
+  endpoint,
+  providerRequests,
+  childExitCode,
+  childSignal,
+  results,
+};
+const evidenceFile = join(evidenceRoot, 'run.json');
+await writeFile(evidenceFile, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+const passed = childExitCode === 0 && results.length > 0 && results.every(item => item.status === '通过' || item.status === '未执行');
+if (!passed) {
+  await writeFile(join(evidenceRoot, 'stdout.log'), standardOutput, 'utf8');
+  await writeFile(join(evidenceRoot, 'stderr.log'), standardError, 'utf8');
+  console.error(`stub model verification did not pass; evidence: ${relative(desktopDirectory, evidenceRoot).split(sep).join('/')}`);
+  process.exitCode = 1;
+} else {
+  await rm(temporaryRoot, { recursive: true, force: true });
+  console.log(`stub model verification passed; evidence: ${relative(desktopDirectory, evidenceRoot).split(sep).join('/')}`);
+}

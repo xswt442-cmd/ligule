@@ -12,6 +12,7 @@ import { waitFor, withTuiHost } from './helpers/tui-host.js';
 import { completeFrame } from './helpers/frames.js';
 import { HISTORY_LIMIT, historyPathOf, loadHistory, pushHistory, rememberHistory } from '../dist/kernel/input-history.js';
 import { SEARCH_ROWS, searchHistory } from '../dist/tui/history.js';
+import { helpEntries, helpTabTitle } from '../dist/tui/help.js';
 
 let rows = {};
 let missing = '';
@@ -28,7 +29,7 @@ try {
 
 const options = { skip: missing === '' ? false : missing };
 const editorFixture = fileURLToPath(new URL('./fixtures/editor.mjs', import.meta.url));
-const { foldText, editDraft, projectRecord, buildStatusLine, contextSegment, findRecord, branchOf, detailTitle, helpLines, routeInput, candidatesOf, describeChange, displayWidth, flowGroups, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, findLines, mentionToken, insertMention, resolveSessionId, SESSION_ROWS, isTypingRun } = rows;
+const { foldText, editDraft, projectRecord, buildStatusLine, contextSegment, findRecord, branchOf, detailTitle, routeInput, candidatesOf, describeChange, displayWidth, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, findLines, mentionToken, insertMention, resolveSessionId, SESSION_ROWS, isTypingRun } = rows;
 const quoted = (value) => `"${value.replaceAll('"', '\\"')}"`;
 const plainOutput = (value) => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
 
@@ -137,32 +138,43 @@ test('the app paints the session line and the input hint onto the terminal', opt
   await waitFor(() => requests.some((request) => request.method === 'status.get'), { read: () => painted });
   await delay(300);
   instance.unmount();
-  await waitFor(() => /mode:minimal  policy:ask/.test(painted), { read: () => painted });
+  await waitFor(() => /工具模式 minimal/.test(painted) && /审批 逐次审批/.test(painted), { read: () => painted });
 
-  assert.match(painted, new RegExp(`${status.model} · 会话 ${sessionId.slice(0, 8)}`));
-  // 随包的基础提示进了估算那一段（D102），窄终端上这一行的尾巴会被截掉：工具件数在装得下的宽度里才断言。
-  assert.match(painted, /mode:minimal  policy:ask/);
+  assert.match(painted, /欢迎使用 Ligule/);
+  assert.match(painted, new RegExp(`会话 ${sessionId.slice(0, 8)}`));
+  const configurationLine = plainOutput(painted).split(/\r?\n/u).filter((line) => line.includes('模型 ') && line.includes('工具模式 ')).at(-1);
+  assert.ok(configurationLine, '模型、工具模式和审批方式共用一行底部配置');
+  assert.equal(configurationLine.split(status.model).length - 1, 1, '模型名在底部配置行只显示一次');
+  assert.match(painted, /工具模式 minimal/);
+  assert.match(painted, /审批 逐次审批/);
   assert.match(painted, /\/ 命令/);
 }));
 
-test('the status line names the mode and the decision level separately', options, () => {
-  const status = { mode: 'minimal', pendingMode: null, policy: 'ask', tools: ['read', 'find'], eventCount: 3 };
-  assert.equal(
-    buildStatusLine({ head: '', sessionId: 'abcdef0123456789', status, running: false, seconds: 0, expanded: false }),
-    '会话 abcdef01 · mode:minimal  policy:ask  tools:2 · 记录 3 条',
-  );
-  // 待生效写成 mode:a→b（D41）。
-  assert.match(buildStatusLine({ head: '', sessionId: 'abcdef0123456789', status: { ...status, pendingMode: 'full' } }), /mode:minimal→full/);
-  // 宽度不够先丢工具数：模式与档位才说得出这一轮能做什么（D40）。
-  const narrow = buildStatusLine({ head: '', sessionId: 'abcdef0123456789', status, columns: 30 });
-  assert.doesNotMatch(narrow, /tools:/);
-  assert.match(narrow, /mode:minimal  policy:ask/);
+test('the metadata line contains session, context, record and runtime hints', options, () => {
+  const status = {
+    mode: 'minimal', pendingMode: null, policy: 'ask', tools: ['read', 'find'], eventCount: 3,
+    usage: { window: 200_000, threshold: 160_000, estimated: 42_000 },
+  };
+  const line = buildStatusLine({ sessionId: 'abcdef0123456789', boundary: 'C:\\workspace\\project', status, running: true, seconds: 12.7, expanded: true, columns: 180 });
+  assert.match(line, /会话 abcdef01/);
+  assert.match(line, /C:\\workspace\\project/);
+  assert.match(line, /ctx:~42000\/200000/);
+  assert.match(line, /记录 3 条/);
+  assert.match(line, /12 秒.*Esc.*打断/);
+  assert.match(line, /已展开.*收起/);
+  assert.doesNotMatch(line, /minimal|policy|test-model|model:/);
+  assert.equal(contextSegment(null), '');
+  assert.equal(contextSegment(undefined), '');
+  const noWindow = buildStatusLine({ sessionId: 'abcdef0123456789', status: { ...status, usage: undefined }, running: false, seconds: 0, expanded: false });
+  assert.doesNotMatch(noWindow, /ctx:/);
+  assert.doesNotMatch(noWindow, /minimal|policy|model:/);
 });
 
-test('English terminal labels preserve model content, paths and commands', options, () => {
-  const help = helpLines({ templates: [] }, 120, 'en').join('\n');
+test('English terminal labels preserve model content, paths and command help entries', options, () => {
+  const help = [...helpEntries('commands', [], 'en'), ...helpEntries('keys', [], 'en'), ...helpEntries('templates', [], 'en')]
+    .map((entry) => `${entry.key} ${entry.description}`).join('\n');
   assert.match(help, /\/model \[service model\]/);
-  assert.match(help, /Keyboard|Keys/);
+  assert.match(help, /Global/);
   assert.doesNotMatch(help, /[\u3400-\u9fff]/u);
   assert.equal(candidatesOf('/mo', [], 8, 'en').find(command => command.name === 'model').hint, '[service model]');
   assert.deepEqual(projectRecord({ kind: 'user', text: '中文问题' }, 'en'), [{ kind: 'question', text: '中文问题' }]);
@@ -259,35 +271,22 @@ test('the candidate list narrows on what is typed and appends host templates', o
 });
 
 // `/help` 那几行：放得下就并排，放不下整组往下一层，两种都不截字（D81）。
-test('help groups flow side by side when there is room and stack when there is not', options, () => {
-  const groups = [
-    { title: 'A', entries: [{ key: '/aa', action: 'x' }] },
-    { title: 'B', entries: [{ key: '/bb', action: 'yy' }, { key: '/ccc', action: 'z' }] },
-  ];
-  const wide = flowGroups(groups, 120);
-  assert.equal(wide.length, 3, '行数是最高那一组的行数');
-  assert.match(wide[0], /^A\s+B$/);
-  assert.deepEqual(flowGroups(groups, 12), ['A', '/aa  x', '', 'B', '/bb   yy', '/ccc  z']);
-});
-
 // 补足空格按终端里实际占的列数算：一个汉字占两列，算字符数只算一个。
-test('padding counts the columns a character takes in the terminal', options, () => {
+test('display width counts wide Chinese characters and emoji columns', options, () => {
   assert.equal(displayWidth('a中'), 3);
-  const rows2 = flowGroups([
-    { title: '命令', entries: [{ key: '/a', action: '读' }] },
-    { title: '按键', entries: [{ key: 'Ctrl+O', action: 'x' }] },
-  ], 40);
-  assert.equal(rows2[0], '命令      按键');
-  assert.equal(rows2[1], '/a  读    Ctrl+O  x');
+  assert.equal(displayWidth('🦕'), 2);
 });
 
-test('help lists the templates the host reports and says where they come from', options, () => {
-  const painted = helpLines({ templates: [{ command: 'git:release:prepare', description: '准备一次发布', hint: '' }] }, 400).join('\n');
-  assert.match(painted, /\/mode/);
-  assert.match(painted, /git:release:prepare/);
-  assert.match(painted, /Tab\s+补全/);
-  assert.match(helpLines({ templates: [] }, 400).join('\n'), /在 \.ligule\/prompts/);
-  assert.match(helpLines(null, 400).join('\n'), /命令/);
+test('help entries preserve host templates and keep the empty state brief', options, () => {
+  assert.equal(helpTabTitle('commands', 'zh'), '命令');
+  assert.deepEqual(
+    helpEntries('templates', [{ command: 'git:release:prepare', description: '准备一次发布', hint: '' }], 'zh'),
+    [{ key: '/git:release:prepare', description: '准备一次发布' }],
+  );
+  const empty = helpEntries('templates', [], 'zh');
+  assert.equal(empty.length, 1);
+  assert.match(empty[0].description, /没有可用提示模板/);
+  assert.doesNotMatch(`${empty[0].key} ${empty[0].description}`, /\.ligule|prompts|~/u);
 });
 
 // 这一条验证终端补全后由真实 Host 展开模板，并把结果送进本地 HTTP 模型端点。
@@ -474,7 +473,7 @@ test('input typed while a round runs queues up and flushes in order', options, a
 }, { delayMs: 1_800 }));
 
 // 状态行上那一段上下文压力（D82、第 43 步）：没写窗口时整段不出现，不是写一个 0 上去。
-test('the status line reports context pressure only when a window is written', options, () => {
+test('the metadata line reports context pressure only when a window is written', options, () => {
   assert.equal(contextSegment(null), '');
   assert.equal(contextSegment(undefined), '');
   assert.equal(contextSegment({ window: 200_000, threshold: 160_000, estimated: 42_000 }), 'ctx:~42000/200000');
@@ -484,42 +483,49 @@ test('the status line reports context pressure only when a window is written', o
     mode: 'full', pendingMode: null, policy: 'ask', tools: ['a', 'b'], eventCount: 4,
     denials: { consecutive: 0, total: 0 }, usage: { window: 200_000, threshold: 160_000, estimated: 42_000 },
   };
-  const draw = (columns) => buildStatusLine({ head: '', sessionId: 'x', status, running: false, seconds: 0, expanded: false, columns });
+  const draw = (columns) => buildStatusLine({ sessionId: 'x', status, running: false, seconds: 0, expanded: false, columns });
   assert.match(draw(200), /ctx:~42000\/200000/);
-  // 挤的时候先丢工具数，再丢上下文那一段：那两段都从别处读得出来，模式与档位留着。
-  assert.doesNotMatch(draw(64), /tools:/);
   assert.match(draw(64), /ctx:~/);
-  assert.doesNotMatch(draw(40), /ctx:/);
+  assert.doesNotMatch(draw(200), /mode:|policy:|tools:/);
   assert.ok(UI_COMMANDS.some((command) => command.name === 'compact'), '/compact 在命令表里');
 });
 
-// 那一段长路径配窄终端时的退让顺序（实现顺序第 126 步之后补的读数）：先把它缩成最后一级目录名，
-// 再动那两段从 `/status` 也读得出来的，挤到最后留的是模式、档位与那句打断提示。
-test('the status line shortens a long path before it drops what changes', options, () => {
+test('the metadata line shortens the workspace path and keeps the interrupt hint when narrow', options, () => {
   const status = {
     mode: 'minimal', pendingMode: null, policy: 'ask', policySource: 'session', tools: ['a', 'b', 'c'], eventCount: 1234,
     denials: { consecutive: 0, total: 0 }, usage: { window: 200_000, threshold: 160_000, estimated: 42_000 },
   };
   const args = {
-    head: 'deepseek-chat · ', sessionId: 'abcdef0123456789', status, seconds: 12.7,
+    sessionId: 'abcdef0123456789', status, seconds: 12.7,
     boundary: 'C:\\Users\\20411\\AppData\\Local\\Temp\\ligule-tui-7Rm2Qx\\project',
   };
   const idle = { running: false, expanded: false };
-  const busy = { running: true, expanded: true };
+  const busy = { running: true, expanded: false };
   const draw = (columns, extra) => buildStatusLine({ ...args, ...extra, columns });
-  // 旧写法在 120 列就把工具数、上下文与整段路径一起丢光，这里三段都留着，路径只剩最后一级。
-  assert.ok(displayWidth(draw(120, idle)) <= 120);
-  assert.match(draw(120, idle), / · project · mode:minimal  policy:ask\(会话\)  ctx:~42000\/200000  tools:3/);
-  assert.doesNotMatch(draw(120, idle), /Temp\\/);
-  assert.match(draw(100, idle), /deepseek-chat/);
-  assert.doesNotMatch(draw(100, idle), /tools:/);
-  assert.doesNotMatch(draw(80, idle), /deepseek-chat/);
-  assert.match(draw(80, idle), /记录 1234 条/);
-  // 跑着的那一轮里，走掉的不会是那句打断提示与档位上那个标记。
-  assert.match(draw(60, busy), /policy:ask\(会话\)/);
-  assert.match(draw(60, busy), /打断/);
-  assert.doesNotMatch(draw(60, busy), /记录 1234 条/);
+  assert.match(draw(180, idle), /C:\\Users\\20411\\AppData\\Local\\Temp\\ligule-tui-7Rm2Qx\\project/);
+  assert.match(draw(60, idle), / · project · /);
+  assert.doesNotMatch(draw(60, idle), /Temp\\/);
+  assert.match(draw(30, busy), /Esc.*打断/);
+  assert.doesNotMatch(draw(180, idle), /minimal|policy|model:|tools:/);
 });
+
+test('a mode change during an active turn becomes effective on the next turn', options, async () => withTuiHost(async ({ client, sessionId, providerRequests }) => {
+  const running = client.request('run.start', { sessionId, input: 'hold the current mode for this turn' });
+  try {
+    await waitFor(() => providerRequests.length > 0, { within: 10_000, read: () => `provider requests: ${providerRequests.length}` });
+    const switched = await client.request('mode.set', { sessionId, name: 'full' });
+    assert.equal(switched.pending, 'full');
+    const during = await client.request('status.get', { sessionId });
+    assert.equal(during.mode, 'minimal');
+    assert.equal(during.pendingMode, 'full');
+    await running;
+    const after = await client.request('status.get', { sessionId });
+    assert.equal(after.mode, 'full');
+    assert.equal(after.pendingMode, null);
+  } finally {
+    await running.catch(() => {});
+  }
+}, { delayMs: 1_800 }));
 
 // 第 44 步：`/sessions` 画的那几行与 `/resume` 认的那个 id。列表来自宿主，界面不去开盘（D81 边界一）。
 test('the session listing is one row per record and an id prefix resolves to one of them', options, () => {
@@ -1170,12 +1176,11 @@ test('Ctrl+Z walks the draft back a unit at a time and Ctrl+Y takes it back', op
   }
 }));
 
-// 终端里那一条 `/policy`：档位是两件来源，屏幕上说的是这一份会话改的那一份（D101、实现顺序第 122 步）。
-test('/policy overrides the tier for this session alone and says so on the status line', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+// 底部配置行随 `/policy` 修改更新，会话级设置在会话退出后撤销（D101、实现顺序第 122 步）。
+test('/policy changes the session setting and updates the bottom configuration line', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
   const { PassThrough } = await import('node:stream');
-  const { setTimeout: delay } = await import('node:timers/promises');
   const { App } = await import('../dist/tui/app.js');
   const stdout = new PassThrough();
   stdout.columns = 120;
@@ -1192,20 +1197,19 @@ test('/policy overrides the tier for this session alone and says so on the statu
   const spoken = (text) => strip(painted).includes(text);
   const type = async (line) => {
     stdin.write(line);
-    await delay(40);
+    await waitFor(() => lastFrame().includes(`› ${line}`), { within: 10_000, read: lastFrame });
     stdin.write('\r');
   };
   const configDefault = (await client.request('status.get', { sessionId })).policy;
   const other = configDefault === 'ask' ? 'auto' : 'ask';
+  const policyLabel = (policy) => policy === 'auto' ? '自动判定' : '逐次审批';
   try {
     await waitFor(() => lastFrame().includes('描述任务'), { read: lastFrame });
-    await type('/policy');
-    await waitFor(() => spoken(`审批方式：${configDefault}（配置默认）`), { read: () => painted });
-
     await type(`/policy ${other}`);
     await waitFor(() => requests.some((request) => request.method === 'policy.set'), { read: () => strip(painted).slice(-700) });
     await waitFor(() => spoken(`当前会话审批方式：${other}`), { read: () => strip(painted).slice(-700) });
     assert.equal((await client.request('status.get', { sessionId })).policySource, 'session');
+    await waitFor(() => lastFrame().includes(`审批 ${policyLabel(other)}`), { read: lastFrame });
 
     await type('/policy sometimes');
     await waitFor(() => spoken('用法：/policy ask|auto|reset'), { read: () => painted });
@@ -1213,6 +1217,7 @@ test('/policy overrides the tier for this session alone and says so on the statu
     await type('/policy reset');
     await waitFor(() => spoken(`已恢复默认审批方式：${configDefault}`), { read: () => painted });
     assert.equal((await client.request('status.get', { sessionId })).policySource, 'config');
+    await waitFor(() => lastFrame().includes(`审批 ${policyLabel(configDefault)}`), { read: lastFrame });
   } finally {
     instance.unmount();
   }

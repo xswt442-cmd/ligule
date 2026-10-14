@@ -77,6 +77,22 @@ test('tool call fragments arriving by index are assembled into one call', async 
   });
 });
 
+test('null usage on ordinary SSE chunks does not discard a tool call', async () => {
+  await withEndpoint(async (response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(sseBody([
+      ...TOOL_CALL_CHUNKS.map(chunk => ({ ...chunk, usage: null })),
+      { choices: [], usage: { prompt_tokens: 31, completion_tokens: 9 } },
+    ]));
+  }, async (baseUrl) => {
+    const events = await collect(provider(baseUrl).stream({ system: '', messages: [], tools: [] }));
+    assert.deepEqual(events.filter(event => event.type === 'tool-call'), [
+      { type: 'tool-call', id: 'call_1', name: 'read', args: { path: 'note.txt' } },
+    ]);
+    assert.deepEqual(events.at(-1), { type: 'usage', input: 31, output: 9 });
+  });
+});
+
 test('the request body carries the shape this form names, and the address is the one from config', async () => {
   await withEndpoint(async (response) => {
     response.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -173,7 +189,7 @@ test('a streamed answer asks for usage and hands back the one it got', async () 
 
 test('a cancel that lands while the stream is still open reports provider_cancelled', async () => {
   // 第 94 步在真端点上撞到的那条：流已经在吐内容时打断，Node 交回的是只带数字码的 AbortError，
-  // 界面那一侧认的是稳定码，所以这一处要在模型层就换掉（src/model/http.js 的 cancelMapped）。
+  // 界面那一侧认的是稳定码，所以这一处要在模型层就换掉（src/model/http.ts 的 cancelMapped）。
   await withEndpoint(async (response) => {
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: '第一段' } }] })}\n\n`);

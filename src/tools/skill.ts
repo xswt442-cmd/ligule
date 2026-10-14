@@ -10,10 +10,11 @@ import type { SkillEntry, SkillRegistry } from '../kernel/skills.js';
 
 const ACTIONS = ['search', 'activate', 'read'];
 
-// 能力在不在按这一次运行真的交给模型的那一份清单判（I2）：被模式藏起来的工具满足不了声明，
-// 正如声明本身产生不了工具（D51）。`mcp:` 前缀的那种要等 MCP 接上（D60），在那之前一律算缺。
-function hasCapability(token: string, visible: string[]): boolean {
-  return token.startsWith('mcp:') ? false : visible.includes(token);
+// 工具能力按这一次运行真的交给模型的那一份清单判（I2）：被模式藏起来的工具满足不了声明，
+// 正如声明本身产生不了工具（D51）。`mcp:<server>` 只检查配置里有没有这台服务器，不会因此启动进程（D56）。
+function hasCapability(token: string, visible: string[], mcpServers: string[]): boolean {
+  if (token.startsWith('mcp:')) return mcpServers.includes(token.slice('mcp:'.length));
+  return visible.includes(token);
 }
 
 function capped(text: string, maxBytes: number, detail: string): string {
@@ -37,7 +38,7 @@ async function namedSkill(registry: SkillRegistry, name: unknown): Promise<Skill
 }
 
 // visibleTools 由装载侧的插件闭包递进来：判定要看的是这一次运行的真实状态，不是配置里写过什么。
-export function createSkillTool(registry: SkillRegistry, visibleTools: () => string[]) {
+export function createSkillTool(registry: SkillRegistry, visibleTools: () => string[], mcpServers: () => string[] = () => []) {
   return {
     name: 'skill',
   readOnly: true,
@@ -74,7 +75,7 @@ export function createSkillTool(registry: SkillRegistry, visibleTools: () => str
       }
       const skill = await namedSkill(registry, args.name);
       if (args.action === 'activate') {
-        const missing = skill.requires.filter((token) => !hasCapability(token, visibleTools()));
+        const missing = skill.requires.filter((token) => !hasCapability(token, visibleTools(), mcpServers()));
         if (missing.length > 0) {
           throw new KernelError('skill_missing_capability', {
             detail: `${skill.name} requires ${missing.join(', ')}, none of which is available; loading a skill grants nothing`,
@@ -108,11 +109,11 @@ export function createSkillTool(registry: SkillRegistry, visibleTools: () => str
   };
 }
 
-export function createSkillPlugin(registry: SkillRegistry) {
+export function createSkillPlugin(registry: SkillRegistry, mcpServers: () => string[] = () => []) {
   return {
     name: 'ligule-skills',
     setup(kernel: { manifest(): { name: string }[]; register(tool: unknown): () => void }) {
-      return kernel.register(createSkillTool(registry, () => kernel.manifest().map((tool) => tool.name)));
+      return kernel.register(createSkillTool(registry, () => kernel.manifest().map((tool) => tool.name), mcpServers));
     },
   };
 }

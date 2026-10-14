@@ -1,12 +1,11 @@
 // 查询 npm 版本；只有 E404 表示缺少版本，其余查询失败都阻止发布。
-import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { spawnNpm } from './npm-cli.js';
 
 const [specification, tarball] = process.argv.slice(2);
-const npmCli = process.env.npm_execpath;
-if (!npmCli || !specification) throw new Error('run through npm with a package version specification');
-const result = spawnSync(process.execPath, [npmCli, 'view', specification, '--json'], {
+if (!specification) throw new Error('provide a package version specification');
+const result = spawnNpm(['view', specification, '--json'], {
   encoding: 'utf8', timeout: 60_000, windowsHide: true,
 });
 let metadata;

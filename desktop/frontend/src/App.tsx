@@ -17,6 +17,8 @@ import { SessionMenu } from './components/SessionMenu';
 import { SessionActions } from './components/SessionActions';
 import { DiagnosticsPanel } from './components/DiagnosticsPanel';
 import { ModelPicker } from './components/ModelPicker';
+import { WorkspacePicker } from './components/WorkspacePicker';
+import { PolicyPicker } from './components/PolicyPicker';
 import { ExportPanel } from './components/ExportPanel';
 import { HelpPanel } from './components/HelpPanel';
 import { UsageMeter } from './components/UsageMeter';
@@ -340,6 +342,7 @@ export function App({ transport }: { transport: Transport }) {
   const dockEdits = useRef<string[]>([]);
   dockEdits.current = holdReasons(dockGate);
   const [settingsSection, setSettingsSection] = useState<'general' | 'model' | 'keys' | 'notifications'>('general');
+  const openModelSettings = useCallback(() => { setSettingsSection('model'); setSettingsOpen(true); }, []);
   const [notificationProblem, setNotificationProblem] = useState<string | null>(null);
   const [diagnosticLogs, setDiagnosticLogs] = useState<string[]>([]);
   const [notificationDestination, setNotificationDestination] = useState<NotificationTarget | null>(null);
@@ -492,14 +495,13 @@ export function App({ transport }: { transport: Transport }) {
   }, [client, notify, sessionId]);
 
   useEffect(() => {
-    transport.onFault?.((reason) => {
+    const removeFault = transport.onFault?.((reason) => {
       setLink(reason);
       if (!connectionLost.current) notify('disconnected');
       connectionLost.current = true;
     });
-    if (sessionId === null) return;
-    const timer = setInterval(() => void beat(), 3_000);
-    return () => clearInterval(timer);
+    const timer = sessionId === null ? undefined : setInterval(() => void beat(), 3_000);
+    return () => { if (timer !== undefined) clearInterval(timer); if (typeof removeFault === 'function') removeFault(); };
   }, [beat, notify, sessionId, transport]);
 
   const jumpToLatest = useCallback(() => {
@@ -927,7 +929,7 @@ export function App({ transport }: { transport: Transport }) {
       }
       const params = createCallOf(named, current, landing);
       await prefsSettled.current;
-      if (openRequest.current !== request) return;
+      if (openRequest.current !== request) return false;
       newParameters.current = params;
       opening.current = null;
       active.current = null;
@@ -946,8 +948,10 @@ export function App({ transport }: { transport: Transport }) {
       setWalk(-1);
       setSettings((current) => ({ ...current, lastSession: null }));
       composerRef.current?.focus();
+      return true;
     } catch (error) {
       setRows((current) => [...current, metaRow('error', `无法新建会话：${code(error)}`, `Could not create a conversation: ${code(error)}`)]);
+      return false;
     } finally {
       if (openRequest.current === request) setReading(false);
     }
@@ -1265,16 +1269,17 @@ export function App({ transport }: { transport: Transport }) {
   const setPolicy = useCallback(async (mode: 'ask' | 'auto' | null) => {
     if (sessionId === null) return;
     try {
-      const result = await client.call('policy.set', { sessionId, mode }) as { policy: string; policySource: string };
-      setRows((current) => [...current, metaRow('meta', mode === null
+      const result = await client.call('policy.set', { sessionId, mode: mode ?? 'default' }, 15_000) as { policy: string; policySource: string };
+      if (active.current === sessionId) setRows((current) => [...current, metaRow('meta', mode === null
         ? `已恢复配置默认审批方式：${result.policy}。`
         : `本会话审批方式已改为 ${result.policy}。`, mode === null
         ? `Restored the configured approval mode: ${result.policy}.`
         : `Approval mode for this conversation changed to ${result.policy}.`)]);
     } catch (error) {
-      setRows((current) => [...current, metaRow('error', `更改审批方式失败：${code(error)}`, `Could not change approval mode: ${code(error)}`)]);
+      if (active.current === sessionId) setRows((current) => [...current, metaRow('error', `更改审批方式失败：${code(error)}`, `Could not change approval mode: ${code(error)}`)]);
+      throw error;
     }
-    void refreshStatus(sessionId);
+    await refreshStatus(sessionId);
   }, [client, refreshStatus, sessionId]);
 
   // 手动压缩走 `session.compact`（D83）：压的是模型那一份上下文，画面上的行仍然来自整份记录。
@@ -1569,6 +1574,7 @@ export function App({ transport }: { transport: Transport }) {
             verbosity={verbosity}
             flash={row.seq !== undefined && row.seq === flash}
             branch={row.kind === 'round' ? (at) => void branchFrom(at) : undefined}
+            onModels={row.kind === 'round' ? openModelSettings : undefined}
           />}
           // 上翻、补页和定位期间关闭自动跟随，保留当前阅读位置。
           followOutput={!olderLoading && pinned && wanted === null && flash === null ? 'auto' : false}
@@ -1632,6 +1638,14 @@ export function App({ transport }: { transport: Transport }) {
       </div>}
 
       <footer className="composer">
+        {sessionId === null && <WorkspacePicker client={client} directory={projectRoot} revision={sessionsRevision}
+          disabled={closing || reading || starting || !settingsReady}
+          onSelect={async (root) => {
+            const text = draft;
+            if (!await newSession(root)) throw new Error('workspace_selection_cancelled');
+            setDraft(text);
+            patch({ projects: [...new Set([...settings.projects, root])], hiddenProjects: settings.hiddenProjects.filter(item => item !== root) });
+          }} />}
         {queue.items.length === 0 ? null : (
           <div className="queue">
             <div className="queue-head">
@@ -1693,7 +1707,7 @@ export function App({ transport }: { transport: Transport }) {
         <textarea
           className="composer-input"
           ref={composerRef}
-          rows={3}
+          rows={2}
           value={draft}
           // 接一份会话的那一段里不接新字：这一段屏幕上还是上一份的草稿，敲进去的会落在错的归属上（方案 5.1、审阅 F5）。
           readOnly={closing || reading || starting || inputOwner !== sessionId || !settingsReady}
@@ -1757,12 +1771,12 @@ export function App({ transport }: { transport: Transport }) {
               if (sessionId === null) { patch({ newSelections: { ...settings.newSelections, [projectRoot]: selection } }); return; }
               await client.call('model.select', { sessionId, ...selection }, 15_000);
               await refreshStatus(sessionId);
-            }} onManage={() => { setSettingsSection('model'); setSettingsOpen(true); }} />
+            }} onManage={openModelSettings} />
           <Popover.Root open={sessionMenuOpen} onOpenChange={setSessionMenuOpen}>
-            <Popover.Trigger asChild><button type="button" className="composer-choice" disabled={sessionId === null} title={t('工具与审批', 'Tools and approvals')}><span>{status?.mode ?? t('工具模式', 'Tool mode')}</span><Icon name="fold" size={12} /></button></Popover.Trigger>
-            <SessionMenu status={status} onSetMode={(name) => void setMode(name)} onSetPolicy={(mode) => void setPolicy(mode)} />
+            <Popover.Trigger asChild><button type="button" className="composer-choice" disabled={sessionId === null} title={t('工具模式', 'Tool mode')}><span>{status?.mode ?? t('工具模式', 'Tool mode')}</span><Icon name="fold" size={12} /></button></Popover.Trigger>
+            <SessionMenu status={status} onSetMode={(name) => void setMode(name)} />
           </Popover.Root>
-          {status !== null && <span className="composer-policy">{status.policy === 'ask' ? t('按需审批', 'Ask for approval') : t('自动审批', 'Auto approval')}</span>}
+          <PolicyPicker key={sessionId ?? '$new'} status={status} disabled={closing || reading || starting} onSelect={setPolicy} />
           <span className="bar-spacer" />
           {running && <button className="icon-button stop-button" type="button" title={t('停止本轮', 'Stop this turn')} aria-label={t('停止本轮', 'Stop this turn')} onClick={() => void cancel()}><Icon name="stop" size={15} /></button>}
           <button className="send" type="button" title={running ? t('加入队列', 'Add to queue') : t('发送', 'Send')} aria-label={t('发送', 'Send')} disabled={closing || reading || starting || !settingsReady || draft.trim() === ''} onClick={() => void send()}><Icon name="send" size={19} /></button>

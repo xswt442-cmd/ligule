@@ -2,85 +2,107 @@
 
 [简体中文](README.md) · [English](README.en.md)
 
-The desktop app has a React and TypeScript frontend in [`frontend/`](frontend/), a Rust and Tauri shell in [`src-tauri/`](src-tauri/), and a Node Host process. The frontend owns presentation and sends Host protocol calls through Tauri. The shell manages windows and forwards newline-delimited frames; business logic and session state stay in Node. See the [architecture guide](../docs/development/ARCHITECTURE.en.md) for the complete request path.
+The desktop app consists of the Electron Main and Preload processes in `electron/`, the React frontend in `frontend/`, and an independent Node Host. Main manages windows and the Host process; business logic and session state stay in the Node Host.
 
-## Prerequisites
+## Requirements and dependencies
 
-Use Node.js 24 or newer and the stable Rust toolchain. Windows builds require WebView2. Linux builds require the Tauri system libraries listed in the [CI workflow](../.github/workflows/ci.yml). macOS builds use the target runner's native architecture. Supported installer targets and verification status are listed in the [release checklist](../docs/development/RELEASE.en.md).
-
-Install each package tree from the repository root:
+Use Node.js 24 or newer. The root `package.json` pins pnpm; install the workspace dependencies from the repository root with the lockfile frozen:
 
 ```sh
-npm ci
-npm --prefix desktop ci
-npm --prefix desktop/frontend ci
+pnpm install --frozen-lockfile
+```
+
+Electron `44.7.0`, electron-builder `26.15.3`, `@electron/fuses` `2.1.3`, and `builder-util` `26.15.3` are pinned as desktop development dependencies. The Electron npm package does not download its platform binary automatically; install the matching binary for the current operating system and architecture with its CLI:
+
+```sh
+pnpm --filter ligule-desktop exec install-electron
 ```
 
 ## Start the development app
 
-Start the Vite frontend and Tauri shell together:
+Build the core package, prepare the local Node runtime and Host tree, and install the Electron binary before starting the desktop development entry from the repository root:
 
 ```sh
-npm --prefix desktop run dev
+pnpm --filter ligule run build
+pnpm --filter ligule run prepare-runtime
+pnpm --filter ligule-desktop exec install-electron
+pnpm --filter ligule-desktop run dev
 ```
 
-The shell starts the Node Host. The frontend uses the Tauri transport in a desktop window; its `dev/` page can also run against a local fake Host for focused interface checks.
+The development entry compiles the Electron TypeScript, then starts Vite at the fixed address `http://localhost:5188/` and Electron. Only this entry passes `--dev` to Electron.
 
 ## Check the frontend
 
-Run the frontend assertions and production build with:
-
 ```sh
-npm --prefix desktop/frontend run check
-npm --prefix desktop/frontend run build
+pnpm --filter ligule-desktop-frontend run check
+pnpm --filter ligule-desktop-frontend run build
 ```
 
-## Check the Rust shell
+## Acceptance
 
-From the repository root, run:
+Automated checks, real-window tests, and installer acceptance drivers live in `electron/test/`; run logs and acceptance notes remain in the Git-ignored `desktop/testplace/readings/` and are not distributed with the repository. Install dependencies, prepare the root Host and target Node runtime, then build the desktop app to generate Electron Main, the frontend, and the target application before running real-window tests. `run-installer-smoke.ps1` also requires a Windows NSIS installer build.
 
 ```sh
-cd desktop/src-tauri
-cargo fmt --check
-cargo test
+pnpm exec tsc -p desktop/electron/tsconfig.json
+node --experimental-strip-types --test desktop/electron/test/host.test.ts desktop/electron/test/security.test.ts
 ```
 
-The frontend build runs TypeScript checking before Vite. The Rust tests cover process entry resolution, line-based frame forwarding, host replacement, tray and notification input rules. CI builds each installer target on its matching platform runner; those artifacts are validation outputs until a release is published.
+On Linux and macOS, use the vendored Node to check POSIX process groups and start real windows. Linux needs `xvfb-run` for a display:
 
-## Build an installer
+```sh
+desktop/vendor/node/node --experimental-strip-types --test desktop/electron/test/posix-process-tree.test.ts
+# Linux
+xvfb-run -a desktop/vendor/node/node desktop/electron/test/run-native-security.mjs
+xvfb-run -a desktop/vendor/node/node desktop/electron/test/run-stub-model.mjs
+xvfb-run -a desktop/vendor/node/node desktop/electron/test/run-packaged-smoke.mjs --app-dir <absolute-path-to-extracted-app>
+# macOS
+desktop/vendor/node/node desktop/electron/test/run-native-security.mjs
+desktop/vendor/node/node desktop/electron/test/run-stub-model.mjs
+desktop/vendor/node/node desktop/electron/test/run-packaged-smoke.mjs --app-dir <absolute-path-to-ligule.app>
+```
 
-Complete these steps in order:
+On Windows, use the vendored Node for the Job Object and native-dialog checks, then run the isolated NSIS installer acceptance:
 
-1. Build the core package:
+```powershell
+desktop/vendor/node/node.exe --experimental-strip-types --test desktop/electron/test/process-tree.test.ts
+desktop/vendor/node/node.exe desktop/electron/test/run-native-security.mjs
+desktop/vendor/node/node.exe desktop/electron/test/run-stub-model.mjs
+desktop/vendor/node/node.exe desktop/electron/test/run-native-features.mjs
+desktop/vendor/node/node.exe desktop/electron/test/run-packaged-smoke.mjs
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File desktop/electron/test/run-installer-smoke.ps1
+```
 
-   ```sh
-   npm run build
-   ```
+On Linux, wrap `run-native-security.mjs`, `run-stub-model.mjs`, and `run-packaged-smoke.mjs` with `xvfb-run -a`; macOS can run them directly. `posix-process-tree.test.ts` checks controlled shutdown and the orphan Host watchdog after forced Main termination; Windows uses `process-tree.test.ts` for Job Object behavior. Save-dialog and tray automation in `run-native-features.mjs` only runs on Windows. Notification clicks have no automated acceptance entry and must be recorded as not run; tray, notification, and click behavior still need manual checks on each target system. Real-window tests use isolated workspaces and data roots.
 
-2. Prepare the Node runtime tree on the target platform:
+## Build the app
 
-   ```sh
-   node desktop/fetch-runtime.mjs
-   ```
+Build the core package and prepare the Node runtime for the current operating system and architecture:
 
-3. Build the desktop installer:
+```sh
+pnpm --filter ligule run build
+pnpm --filter ligule run prepare-runtime
+pnpm --filter ligule-desktop exec install-electron
+```
 
-   ```sh
-   npm --prefix desktop run build
-   ```
+Then run the desktop build from the repository root:
 
-The app bundles a pinned Node runtime and a production runtime tree.
-`fetch-runtime.mjs` downloads the Node archive named in [`node-pin.json`](node-pin.json), verifies its checksum, and copies the built app plus production dependencies into `desktop/vendor/`. The runtime tree is platform-specific and is generated locally. Tauri embeds it when building the installer. The target-specific bundle format comes from `tauri.*.conf.json`; do not reuse `desktop/vendor/` across operating systems or architectures.
+```sh
+pnpm --filter ligule-desktop run build
+```
 
-The output locations and installer formats are recorded in the [release checklist](../docs/development/RELEASE.en.md). To inspect the bundled runtime before building, run `desktop/check-runtime.mjs` with the Node executable under `desktop/vendor/node/` for the current platform.
+`pnpm --filter ligule-desktop run build:dir` creates an unpacked app directory for checking `app.asar` and packaged resources. `build:win`, `build:linux`, and `build:mac` create Windows x64 NSIS, Linux x64 AppImage and deb, and a DMG for the local macOS architecture. Build the arm64 and x64 macOS targets separately on machines with the matching architecture, after preparing that machine's runtime. The build rejects architecture flags that do not match the machine or the vendored Node runtime marker. Builds do not publish, use a Developer ID certificate, or notarize the app. To let a fused arm64 macOS app launch, the build resets Electron's required ad-hoc signature.
+
+`pnpm --filter ligule run prepare-runtime` verifies the pnpm version declared by the root `packageManager`, then calls `fetch-runtime.mjs` to download and verify the Node archive in [`node-pin.json`](node-pin.json) and prepare `vendor/node/` and `vendor/app/`. The packaged Node and Host runtime tree live in the application resources directory; the app code, frontend files, and icons live in `app.asar`. The build disables Electron's RunAsNode, NODE_OPTIONS, and command-line inspection switches and requires Electron to load the app from `app.asar`. The Windows and macOS builds also enable embedded archive integrity validation.
+
+Installers are written to `desktop/release/`. Prepare the runtime on the matching platform and architecture; do not reuse `vendor/` from another target.
 
 ## Application icons
 
-[`assets/app-icon.png`](assets/app-icon.png) is the source image. On Windows, regenerate the frontend and Tauri icon assets with:
+[`assets/app-icon.png`](assets/app-icon.png) is the source image. Regenerate desktop icons on Windows with:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File desktop/make-icons.ps1
 node desktop/make-ico.mjs
 ```
 
-The scripts write generated files under `desktop/frontend/public/` and `desktop/src-tauri/icons/`. Review the resulting assets before committing them.
+The scripts write the PNG and ICO files to `desktop/icons/` and the frontend PNG to `desktop/frontend/public/`.
