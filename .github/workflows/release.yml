@@ -118,6 +118,9 @@ jobs:
       - name: install frozen workspace dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: build the Host runtime tree
+        run: pnpm --filter ligule run build
+
       - name: test Electron Host and security contracts
         run: node --experimental-strip-types --test desktop/electron/test/host.test.ts desktop/electron/test/security.test.ts
 
@@ -125,9 +128,6 @@ jobs:
         run: |
           pnpm --filter ligule-desktop-frontend run check
           pnpm --filter ligule-desktop-frontend run build
-
-      - name: build the Host runtime tree
-        run: pnpm --filter ligule run build
 
       - name: prepare the target Node runtime and Host resources
         run: pnpm --filter ligule run prepare-runtime

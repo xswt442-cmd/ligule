@@ -318,4 +318,10 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
   const posixTree = desktopSteps.findIndex((step) => step.name === 'test POSIX Host process-group cleanup and orphan watchdog');
   assert.ok(installerBuild >= 0 && windowsTree > installerBuild && posixTree > installerBuild,
     'process-tree tests require compiled Host runtime output from the installer build');
+  for (const steps of [desktopSteps, release.jobs.build.steps]) {
+    const hostBuild = steps.findIndex((step) => step.name === 'build the Host runtime tree');
+    const hostTests = steps.findIndex((step) => step.name === 'test Electron Host and security contracts');
+    assert.ok(hostBuild >= 0 && hostTests > hostBuild,
+      'real Host tests require dist/cli.js from the root build in a fresh checkout');
+  }
 });
