@@ -1,0 +1,39 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# Review real behavioral and security regressions, not historical phase notes.
+language: zh-CN
+tone_instructions: >-
+  请简洁、具体地说明问题与复现条件，优先报告真实的正确性、安全边界、
+  兼容性及发布风险；不要重复格式化建议、猜测性重构建议或已有 CI 结果。
+  对发现的问题指出受影响的文件、执行路径和可行修复方向。
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  # Maintainers own bilingual PR descriptions; avoid rewriting them.
+  high_level_summary: false
+  poem: false
+  # Review comments are advisory; required CI, not asynchronous bot status,
+  # remains the merge gate.
+  commit_status: false
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - dev
+      - main
+  path_instructions:
+    - path: "src/**"
+      instructions: >-
+        Host owns sessions, policy, tool authorization and persistent state.
+        Watch for boundary/workspace identity mix-ups, approval routing bugs,
+        untrusted inputs bypassing policy, and cancellation or recovery replays.
+    - path: "desktop/**"
+      instructions: >-
+        Electron Renderer and Preload must not expose arbitrary Node or IPC
+        primitives. Main handles native UI and Host lifecycle; Node Host
+        retains policy and session authority. Check platform-specific packaging.
+    - path: ".github/workflows/**"
+      instructions: >-
+        Check independent cli-v*/desktop-v* tags, main ancestry and CI gates,
+        immutable published assets, exact SHA-256 verification, OIDC npm
+        publishing, and required Environment approval. Never relax these gates.
