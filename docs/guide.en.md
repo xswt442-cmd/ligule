@@ -117,6 +117,14 @@ The desktop app provides five kinds of system notifications: a question needs an
 
 When the tray is available, closing the window hides it while background sessions continue. The tray menu follows the interface language: “打开 ligule” / “Open ligule” restores the window, and “退出 ligule” / “Quit ligule” lists affected sessions and asks whether to interrupt work before quitting. If the tray is unavailable, closing the window asks for confirmation before quitting.
 
+### Local MCP and permissions
+
+`mcp.servers.<name>` supports stdio servers: `command` names one executable, `args` is an argument array, and `cwd` is an optional working directory. Values in `env` must use `${ENVIRONMENT_VARIABLE}` references. Servers start on demand. The model reads a tool definition and digest through `mcp.inspect`, then submits JSON arguments matching that definition through `mcp.call`. Changed definitions require disclosure again.
+
+MCP calls enter Host Policy as `mcp:<server>/<tool>`. A configured server runs as an external process. The file tools' `boundary` does not provide an operating system sandbox for that process or restrict arbitrary server resources. Configure trusted servers and control their access with server-specific directory restrictions, operating system isolation, and Policy. File tool boundaries do not define external process permissions.
+
+Cancelling a turn cancels the pending MCP request; check any side effects already produced by the server. Unexpected disconnection fails the call without automatic reconnection or replay. Check the external state, reconnect the desktop Host or restart the terminal UI, and disclose the tools again. A Skill's MCP dependency check only verifies that the server is configured; it does not establish connectivity or grant permission to call its tools.
+
 ### Common errors
 
 - `tui_terminal_required`: Run `ligule` in an interactive terminal; use `ligule run` in a script.
