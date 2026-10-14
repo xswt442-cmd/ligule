@@ -159,7 +159,9 @@ test('the CLI bilingual changelog section generates CLI release notes without De
   assert.match(notes, /初始公开版本/);
   assert.match(notes, /Initial public release/);
   assert.doesNotMatch(notes, /SHA-256|Downloads/);
-  assert.doesNotMatch(notes, /运行 `ligule`/);
+  assert.match(notes, /运行 `ligule`/);
+  assert.match(notes, /npm install -g ligule@0\.0\.1/);
+  assert.doesNotMatch(notes, /desktop-release-manifest\.json|\.AppImage|\.deb/);
 });
 
 test('docs 根目录只放双语使用手册，且都有正文', () => {
