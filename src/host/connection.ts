@@ -46,6 +46,20 @@ export function createConnection({ input, output, onFault }: ConnectionOptions):
   let notificationHandler: ((message: Record<string, unknown>) => void) | undefined;
   let closed = false;
 
+  function closeConnection(): void {
+    if (closed) return;
+    closed = true;
+    // 一条载体流结束就结束整条连接：另一方向即便还开着，也不能再完成请求与答复。
+    for (const settleWith of responders.values()) settleWith.reject(new KernelError('connection_closed'));
+    responders.clear();
+  }
+
+  function fault(error: Error): void {
+    closeConnection();
+    // 流错误先收尾请求，再把原始错误交给装载侧诊断；error listener 同时避免未监听事件触发进程级异常。
+    onFault?.(error);
+  }
+
   function write(message: Record<string, unknown>): void {
     // 对端已经不在了：这一条送出去也没人收，丢掉不是故障，会话记录才是事实源（I5）。
     if (closed) return;
@@ -130,11 +144,12 @@ export function createConnection({ input, output, onFault }: ConnectionOptions):
     }
   });
   input.on('end', () => {
-    closed = true;
-    // 对端退出后不会再答复：已经发出去、还没答复的那些请求要有明确的收尾，否则等它的调用一直挂着。
-    for (const settleWith of responders.values()) settleWith.reject(new KernelError('connection_closed'));
-    responders.clear();
+    closeConnection();
   });
+  input.on('close', closeConnection);
+  input.on('error', fault);
+  output.on('close', closeConnection);
+  output.on('error', fault);
 
   return {
     // 装进来的分发器负责这一侧收到的请求；通报另装一个，它没有答复可交。
