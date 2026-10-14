@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { changelogSection, releaseNotesForTag } from '../scripts/release-notes.js';
 import { createDesktopReleaseManifest, verifyDesktopReleaseManifests } from '../scripts/desktop-release-manifest.js';
+import { githubAssetName, verifyDesktopDraft } from '../scripts/verify-desktop-draft.js';
 import { prepareRelease, requestedVersionAtRoot, resolveVersion } from '../scripts/release-version.js';
 
 const CHANGELOG = `# 更新记录 / Changelog
@@ -234,6 +235,59 @@ test('Desktop release manifests require Windows and Linux installers and bind th
   }
 });
 
+test('published Desktop draft verification accepts GitHub-normalized names but rejects tampering', async () => {
+  const directory = await fixture();
+  const artifacts = join(directory, 'artifacts');
+  const draft = join(directory, 'draft');
+  const commit = 'a'.repeat(40);
+  const version = '2.4.2';
+  const tag = 'desktop-v2.4.2';
+  try {
+    await mkdir(artifacts, { recursive: true });
+    await mkdir(draft);
+    for (const [target, names] of Object.entries({
+      'windows-x64': ['Ligule Setup 2.4.2.exe'],
+      'linux-x64': ['Ligule-2.4.2.AppImage', 'ligule_2.4.2_amd64.deb'],
+    })) {
+      const source = join(directory, `${target}-source`);
+      const output = join(artifacts, target);
+      await mkdir(source);
+      await mkdir(output);
+      for (const name of names) await writeFile(join(source, name), `${target}:${name}`);
+      createDesktopReleaseManifest({ directory: source, outputDirectory: output, version, target, commit, runId: '100' });
+    }
+    verifyDesktopReleaseManifests({ directory: artifacts, version, commit, runId: '100' });
+    for (const file of ['SHA256SUMS', 'desktop-release-manifest.json']) {
+      await copyFile(join(artifacts, file), join(draft, file));
+    }
+    const manifest = JSON.parse(await readFile(join(artifacts, 'desktop-release-manifest.json'), 'utf8'));
+    for (const asset of manifest.assets) {
+      await copyFile(join(artifacts, asset.target, asset.name), join(draft, githubAssetName(asset.name)));
+    }
+
+    assert.equal(githubAssetName('Ligule Setup 2.4.2.exe'), 'Ligule.Setup.2.4.2.exe');
+    assert.equal(verifyDesktopDraft(draft, tag, commit).assets, 3);
+    assert.throws(() => verifyDesktopDraft(draft, tag, 'b'.repeat(40)), /source commit/);
+
+    const win = manifest.assets.find((asset) => asset.target === 'windows-x64');
+    const winName = githubAssetName(win.name);
+    await writeFile(join(draft, winName), 'tampered installer');
+    assert.throws(() => verifyDesktopDraft(draft, tag, commit), /SHA-256 mismatch/);
+    await copyFile(join(artifacts, win.target, win.name), join(draft, winName));
+
+    await writeFile(join(draft, 'unverified.dmg'), 'untrusted asset');
+    assert.throws(() => verifyDesktopDraft(draft, tag, commit), /missing or unexpected assets/);
+    await rm(join(draft, 'unverified.dmg'));
+
+    await writeFile(join(draft, 'SHA256SUMS'), 'incorrect checksums\n');
+    assert.throws(() => verifyDesktopDraft(draft, tag, commit), /SHA256SUMS does not match/);
+    await copyFile(join(artifacts, 'SHA256SUMS'), join(draft, 'SHA256SUMS'));
+    assert.equal(verifyDesktopDraft(draft, tag, commit).assets, 3);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('release workflows isolate CLI publication from Desktop draft releases and build process tests after compilation', () => {
   const workflow = (name) => parseYaml(readFileSync(new URL(`../.github/workflows/${name}.yml`, import.meta.url), 'utf8'));
   const tag = workflow('tag');
@@ -321,8 +375,13 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
   assert.equal(release.jobs.publish.environment, 'desktop-publish');
   assert.match(JSON.stringify(release.jobs['publish-preflight']), /desktop-publish must have at least one required reviewer/);
   const publishDesktop = release.jobs.publish.steps.map((step) => step.run ?? '').join('\n');
-  assert.match(publishDesktop, /desktop-release-manifest\.js verify/);
-  assert.match(publishDesktop, /sha256sum --check SHA256SUMS/);
+  assert.match(publishDesktop, /verify-desktop-draft\.js/);
+  assert.match(publishDesktop, /gh release download/);
+  assert.equal(release.jobs.build.if, '${{ !inputs.publish }}');
+  assert.equal(release.jobs.draft.if, '${{ !inputs.publish }}');
+  assert.deepEqual(release.jobs.publish.needs, ['preflight', 'publish-preflight']);
+  assert.equal(release.jobs.publish.steps[0].with.ref, '${{ github.sha }}');
+  assert.doesNotMatch(JSON.stringify(release.jobs.publish), /actions\/download-artifact/);
   assert.match(publishDesktop, /PATCH .*releases\/\$\{release_id\}.*draft=false/);
 
   const desktopSteps = ci.jobs.desktop.steps;
