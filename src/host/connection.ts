@@ -156,10 +156,18 @@ export function createConnection({ input, output, onFault }: ConnectionOptions):
     },
 
     request(method: string, params?: unknown): Promise<unknown> {
+      if (closed) return Promise.reject(new KernelError('connection_closed'));
       const id = `${origin}${counter}`;
       counter += 1;
-      write({ id, method, params });
-      return new Promise<unknown>((resolve, reject) => responders.set(id, { resolve, reject }));
+      return new Promise<unknown>((resolve, reject) => {
+        responders.set(id, { resolve, reject });
+        try {
+          write({ id, method, params });
+        } catch (error) {
+          responders.delete(id);
+          reject(error);
+        }
+      });
     },
   };
 }
