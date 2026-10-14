@@ -90,6 +90,51 @@ test('an output error reports the original fault and rejects pending and future 
   input.destroy();
 });
 
+test('an output close prevents both queued and later inbound requests from executing', async () => {
+  const input = new PassThrough();
+  const output = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+  const connection = createConnection({ input, output });
+  const dispatched = [];
+  connection.onRequest(({ method }) => {
+    dispatched.push(method);
+    return { performed: true };
+  });
+
+  try {
+    // The first line has already scheduled its dispatch when the reply channel closes.
+    input.write(`${JSON.stringify({ id: 'before-close', method: 'tool.write' })}\n`);
+    output.emit('close');
+    input.write(`${JSON.stringify({ id: 'after-close', method: 'tool.delete' })}\n`);
+    await delay(0);
+    assert.deepEqual(dispatched, [], 'neither RPC may mutate state without a reply channel');
+    await assert.rejects(connection.request('status.get'), (error) => error.code === 'connection_closed');
+  } finally {
+    input.destroy();
+    output.destroy();
+  }
+});
+
+test('closing the output during an inbound batch stops dispatching later lines', async () => {
+  const input = new PassThrough();
+  const output = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+  const connection = createConnection({ input, output });
+  const dispatched = [];
+  connection.onNotification(() => { output.emit('close'); });
+  connection.onRequest(({ method }) => { dispatched.push(method); return 'ok'; });
+
+  try {
+    input.write(
+      `${JSON.stringify({ notify: 'shutdown' })}\n`
+      + `${JSON.stringify({ id: 'late-request', method: 'tool.write' })}\n`,
+    );
+    await delay(0);
+    assert.deepEqual(dispatched, [], 'remaining lines in the same chunk must be dropped');
+  } finally {
+    input.destroy();
+    output.destroy();
+  }
+});
+
 test('a synchronous response arriving during write settles the request', async () => {
   const input = new PassThrough();
   const output = new Writable({

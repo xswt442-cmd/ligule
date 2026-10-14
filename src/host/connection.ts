@@ -45,11 +45,15 @@ export function createConnection({ input, output, onFault }: ConnectionOptions):
   let handler: ((message: HostRequest) => unknown | Promise<unknown>) | undefined;
   let notificationHandler: ((message: Record<string, unknown>) => void) | undefined;
   let closed = false;
+  let buffer = '';
 
   function closeConnection(): void {
     if (closed) return;
     closed = true;
-    // 一条载体流结束就结束整条连接：另一方向即便还开着，也不能再完成请求与答复。
+    buffer = '';
+    input.off('data', onData);
+    input.pause();
+    // 一条载体流结束就结束整条连接：停止接收后续 RPC，另一方向即便还开着也不能再完成请求与答复。
     for (const settleWith of responders.values()) settleWith.reject(new KernelError('connection_closed'));
     responders.clear();
   }
@@ -81,6 +85,7 @@ export function createConnection({ input, output, onFault }: ConnectionOptions):
   }
 
   function handleLine(line: string): void {
+    if (closed) return;
     let message;
     try {
       const parsed: unknown = JSON.parse(line);
@@ -106,7 +111,11 @@ export function createConnection({ input, output, onFault }: ConnectionOptions):
       // 交给装进来的分发器；它报的错误按同一行送回去，请求方永远有一条答复顶着。
       const request: HostRequest = { ...message, id: message.id, method: message.method };
       Promise.resolve()
-        .then(() => handler?.(request))
+        .then(() => {
+          // 输入行可能已排队；关闭后禁止触发有副作用的 Host 分发。
+          if (closed) return;
+          return handler?.(request);
+        })
         .then(
           // 分发器交出 undefined 是「这一条我自己答复」：客户端收到审批就是这样，要等人按键之后才回。
           // 在这里自动答一个 undefined 会把对面那一次等待变成一次拒绝。
@@ -131,18 +140,20 @@ export function createConnection({ input, output, onFault }: ConnectionOptions):
     settle(message.id, message);
   }
 
-  let buffer = '';
-  input.setEncoding('utf8');
-  input.on('data', (chunk: string | Buffer) => {
+  function onData(chunk: string | Buffer): void {
+    if (closed) return;
     buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
     let end = buffer.indexOf('\n');
-    while (end >= 0) {
+    while (end >= 0 && !closed) {
       const line = buffer.slice(0, end).trim();
       buffer = buffer.slice(end + 1);
       if (line !== '') handleLine(line);
       end = buffer.indexOf('\n');
     }
-  });
+  }
+
+  input.setEncoding('utf8');
+  input.on('data', onData);
   input.on('end', () => {
     closeConnection();
   });
