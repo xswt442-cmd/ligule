@@ -1,6 +1,6 @@
 {
   "name": "ligule",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "packageManager": "pnpm@12.9.1",
   "description": "共享会话与工具内核的命令行、终端和桌面 AI 助手。An AI agent harness with shared sessions and tools across CLI, terminal, and desktop interfaces.",
   "type": "module",
