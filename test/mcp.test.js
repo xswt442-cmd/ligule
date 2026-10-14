@@ -59,15 +59,56 @@ test('arguments honor numeric, enum, and union schema constraints', () => {
     properties: {
       milliseconds: { type: 'integer', minimum: 1 },
       format: { enum: ['short', 'long'] },
+      email: { type: 'string', format: 'email' },
       value: { anyOf: [{ type: 'string' }, { type: 'number', minimum: 0 }] },
     },
-    required: ['milliseconds', 'format', 'value'],
+    required: ['milliseconds', 'format', 'email', 'value'],
     additionalProperties: false,
   };
-  assert.deepEqual(validateToolArguments({ milliseconds: 1, format: 'short', value: 0 }, schema), []);
-  assert.match(validateToolArguments({ milliseconds: 0, format: 'short', value: 0 }, schema).join('; '), /minimum|>=/i);
-  assert.match(validateToolArguments({ milliseconds: 1, format: 'wide', value: 0 }, schema).join('; '), /allowed values/i);
-  assert.match(validateToolArguments({ milliseconds: 1, format: 'short', value: false }, schema).join('; '), /anyOf|valid/i);
+  assert.deepEqual(validateToolArguments({ milliseconds: 1, format: 'short', email: 'agent@example.com', value: 0 }, schema), []);
+  assert.match(validateToolArguments({ milliseconds: 0, format: 'short', email: 'agent@example.com', value: 0 }, schema).join('; '), /minimum|>=/i);
+  assert.match(validateToolArguments({ milliseconds: 1, format: 'wide', email: 'agent@example.com', value: 0 }, schema).join('; '), /allowed values/i);
+  assert.match(validateToolArguments({ milliseconds: 1, format: 'short', email: 'invalid', value: 0 }, schema).join('; '), /email/);
+  assert.match(validateToolArguments({ milliseconds: 1, format: 'short', email: 'agent@example.com', value: false }, schema).join('; '), /anyOf|valid/i);
+});
+
+test('a changed schema reusing its $id is validated from the new definition', () => {
+  const id = '$id';
+  const schema = (minimum) => ({
+    [id]: 'urn:ligule:mcp:test:changed-schema',
+    type: 'object',
+    properties: { value: { type: 'integer', minimum } },
+    required: ['value'],
+  });
+  assert.deepEqual(validateToolArguments({ value: 1 }, schema(1)), []);
+  assert.match(validateToolArguments({ value: 1 }, schema(10)).join('; '), />= 10/);
+});
+
+test('the default schema dialect is Draft 2020-12 and prefixItems are enforced', () => {
+  const schema = {
+    type: 'object',
+    properties: {
+      values: { type: 'array', prefixItems: [{ const: 'only' }], items: false, title: 'one value' },
+    },
+    required: ['values'],
+    description: 'This standard annotation is accepted.',
+  };
+  assert.deepEqual(validateToolArguments({ values: ['only'] }, schema), []);
+  assert.notDeepEqual(validateToolArguments({ values: ['other'] }, schema), []);
+  assert.notDeepEqual(validateToolArguments({ values: ['only', 'extra'] }, schema), []);
+});
+
+test('an explicit Draft 7 schema is supported and unsupported dialects fail closed', () => {
+  const schema = {
+    $schema: 'http://json-schema.org/draft-07/schema#',
+    type: 'object',
+    properties: { start: { type: 'boolean' }, end: { type: 'boolean' } },
+    dependencies: { start: ['end'] },
+  };
+  assert.deepEqual(validateToolArguments({ start: true, end: false }, schema), []);
+  assert.match(validateToolArguments({ start: true }, schema).join('; '), /dependency|end/);
+  assert.notDeepEqual(validateToolArguments({}, { $schema: 'http://json-schema.org/draft-04/schema#', type: 'object' }), []);
+  assert.notDeepEqual(validateToolArguments({}, { type: 'object', properties: { value: { type: 'string', unknownConstraint: true } } }), []);
 });
 
 test('an invalid tool schema fails closed with the existing argument error code', async () => {

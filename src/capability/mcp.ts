@@ -9,6 +9,9 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { Ajv } from 'ajv';
+import { Ajv2020 } from 'ajv/dist/2020.js';
+import * as formatsModule from 'ajv-formats';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv';
@@ -90,11 +93,29 @@ function definitionOf(raw: { name?: unknown; description?: unknown; inputSchema?
   };
 }
 
-const jsonSchemaValidator = new AjvJsonSchemaValidator();
+const DRAFT_2020_12 = 'https://json-schema.org/draft/2020-12/schema';
+const DRAFT_7 = 'http://json-schema.org/draft-07/schema#';
 
 export function validateToolArguments(args: unknown, schema: Record<string, unknown>): string[] {
   try {
-    const validate = jsonSchemaValidator.getValidator<Record<string, unknown>>({ type: 'object', ...schema } as JsonSchemaType);
+    const declaredDialect = schema.$schema;
+    const options = {
+      allErrors: true,
+      strictSchema: true,
+      strictTypes: false,
+      strictTuples: false,
+      validateFormats: true,
+      validateSchema: true,
+    };
+    const ajv = declaredDialect === undefined || declaredDialect === DRAFT_2020_12
+      ? new Ajv2020(options)
+      : declaredDialect === DRAFT_7
+        ? new Ajv(options)
+        : undefined;
+    if (ajv === undefined) return [`tool schema dialect is unsupported: ${String(declaredDialect)}`];
+    formatsModule.default.default(ajv as Ajv);
+    const validator = new AjvJsonSchemaValidator(ajv as Ajv);
+    const validate = validator.getValidator<Record<string, unknown>>({ type: 'object', ...schema } as JsonSchemaType);
     const result = validate(args);
     return result.valid ? [] : [result.errorMessage ?? 'arguments do not match the tool schema'];
   } catch (error) {
