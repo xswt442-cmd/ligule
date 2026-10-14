@@ -6,8 +6,6 @@ import { fileURLToPath } from 'node:url';
 const TARGETS = {
   'windows-x64': { extensions: ['.exe'], architecture: 'x64' },
   'linux-x64': { extensions: ['.AppImage', '.deb'], architecture: 'x64' },
-  'macos-arm64': { extensions: ['.dmg'], architecture: 'arm64' },
-  'macos-x64': { extensions: ['.dmg'], architecture: 'x64' },
 };
 
 function sha256(path) {
@@ -59,6 +57,15 @@ export function createDesktopReleaseManifest({ directory, outputDirectory = dire
 
 export function verifyDesktopReleaseManifests({ directory, version, commit, runId }) {
   const expectedTargets = Object.keys(TARGETS).sort();
+  const allowedRootFiles = new Set(['SHA256SUMS', 'desktop-release-manifest.json']);
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    if (entry.isDirectory() && !expectedTargets.includes(entry.name)) {
+      throw new Error(`unexpected Desktop release target: ${entry.name}`);
+    }
+    if (!entry.isDirectory() && !allowedRootFiles.has(entry.name)) {
+      throw new Error(`unexpected file in Desktop release set: ${entry.name}`);
+    }
+  }
   const manifests = expectedTargets.map((expectedTarget) => {
     const manifestPath = join(directory, expectedTarget, `desktop-release-manifest-${expectedTarget}.json`);
     try {
@@ -97,6 +104,16 @@ export function verifyDesktopReleaseManifests({ directory, version, commit, runI
       }
       checksums.push(`${asset.sha256}  ${asset.name}`);
       consolidatedAssets.push({ ...asset, target: manifest.target, architecture: manifest.architecture });
+    }
+    const allowedFiles = new Set([
+      ...manifest.assets.map(({ name }) => name),
+      `desktop-release-manifest-${manifest.target}.json`,
+      `SHA256SUMS-${manifest.target}`,
+    ]);
+    for (const entry of readdirSync(targetDirectory, { withFileTypes: true })) {
+      if (!entry.isFile() || !allowedFiles.has(entry.name)) {
+        throw new Error(`unexpected file for ${manifest.target}: ${entry.name}`);
+      }
     }
   }
   writeFileSync(join(directory, 'SHA256SUMS'), `${checksums.sort().join('\n')}\n`);

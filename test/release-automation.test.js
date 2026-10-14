@@ -137,7 +137,7 @@ test('release notes select each product changelog and matching bilingual version
   }
 });
 
-test('desktop artifact manifests bind installer hashes to version, target, source commit, and run', async () => {
+test('Desktop release manifests require Windows and Linux installers and bind them to the tagged source', async () => {
   const directory = await fixture();
   const output = join(directory, 'artifacts');
   const commit = 'a'.repeat(40);
@@ -147,32 +147,36 @@ test('desktop artifact manifests bind installer hashes to version, target, sourc
     for (const [target, names] of Object.entries({
       'windows-x64': ['Ligule Setup 2.4.2.exe'],
       'linux-x64': ['Ligule-2.4.2.AppImage', 'ligule_2.4.2_amd64.deb'],
-      'macos-arm64': ['Ligule-2.4.2.dmg'],
-      'macos-x64': ['Ligule-2.4.2.dmg'],
     })) {
       const targetDirectory = join(output, target);
       await mkdir(targetDirectory);
-      const sourceDirectory = join(targetDirectory, 'source');
+      const sourceDirectory = join(directory, `${target}-source`);
       await mkdir(sourceDirectory);
       for (const name of names) await writeFile(join(sourceDirectory, name), `${target}:${name}`);
       createDesktopReleaseManifest({ directory: sourceDirectory, outputDirectory: targetDirectory, version: '2.4.2', target, commit, runId });
     }
     const result = verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit, runId });
-    assert.deepEqual(result.targets, ['linux-x64', 'macos-arm64', 'macos-x64', 'windows-x64']);
-    assert.equal(result.assets.length, 5);
+    assert.deepEqual(result.targets, ['linux-x64', 'windows-x64']);
+    assert.equal(result.assets.length, 3);
     const stableManifestPath = join(output, 'desktop-release-manifest.json');
     const stableManifest = await readFile(stableManifestPath);
     assert.doesNotMatch(stableManifest.toString(), /workflowRunId/);
+    assert.throws(() => createDesktopReleaseManifest({ directory: output, version: '2.4.2', target: 'macos-arm64', commit, runId }), /unsupported desktop target/);
 
-    const incompleteLinux = join(output, 'incomplete-linux');
+    const incompleteLinux = join(directory, 'incomplete-linux');
     await mkdir(incompleteLinux);
+    await writeFile(join(incompleteLinux, 'ligule_2.4.2.AppImage'), 'AppImage');
     await writeFile(join(incompleteLinux, 'ligule_2.4.2_amd64.deb'), 'first Debian package');
     await writeFile(join(incompleteLinux, 'ligule_2.4.2_arm64.deb'), 'second Debian package');
-    assert.throws(() => createDesktopReleaseManifest({ directory: incompleteLinux, version: '2.4.2', target: 'linux-x64', commit, runId }), /exactly one \.AppImage installer; found 0/);
+    assert.throws(() => createDesktopReleaseManifest({ directory: incompleteLinux, version: '2.4.2', target: 'linux-x64', commit, runId }), /exactly one \.deb installer; found 2/);
+    const missingLinux = join(directory, 'missing-linux');
+    await mkdir(missingLinux);
+    await writeFile(join(missingLinux, 'ligule_2.4.2.AppImage'), 'AppImage');
+    assert.throws(() => createDesktopReleaseManifest({ directory: missingLinux, version: '2.4.2', target: 'linux-x64', commit, runId }), /exactly one \.deb installer; found 0/);
 
     for (const target of result.targets) {
       createDesktopReleaseManifest({
-        directory: join(output, target, 'source'),
+        directory: join(directory, `${target}-source`),
         outputDirectory: join(output, target),
         version: '2.4.2',
         target,
@@ -184,18 +188,47 @@ test('desktop artifact manifests bind installer hashes to version, target, sourc
     assert.deepEqual(await readFile(stableManifestPath), stableManifest,
       'rebuilding identical installers in a different workflow run must keep the public manifest byte-for-byte stable');
 
+    const optionalMacDirectory = join(output, 'macos-arm64');
+    await mkdir(optionalMacDirectory);
+    await writeFile(join(optionalMacDirectory, 'Ligule-2.4.2.dmg'), 'optional, unverified DMG');
+    assert.throws(() => verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit, runId: '67890' }), /unexpected Desktop release target: macos-arm64/);
+    await rm(optionalMacDirectory, { recursive: true });
+
+    const unexpectedRootAsset = join(output, 'unexpected.dmg');
+    await writeFile(unexpectedRootAsset, 'unverified DMG');
+    assert.throws(() => verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit, runId: '67890' }), /unexpected file in Desktop release set: unexpected\.dmg/);
+    await rm(unexpectedRootAsset);
+
+    const unexpectedTargetAsset = join(output, 'linux-x64', 'unexpected.dmg');
+    await writeFile(unexpectedTargetAsset, 'unverified DMG');
+    assert.throws(() => verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit, runId: '67890' }), /unexpected file for linux-x64: unexpected\.dmg/);
+    await rm(unexpectedTargetAsset);
+
+    const windowsManifestPath = join(output, 'windows-x64', 'desktop-release-manifest-windows-x64.json');
+    const windowsManifestBytes = await readFile(windowsManifestPath);
+    await rm(windowsManifestPath);
+    assert.throws(() => verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit, runId: '67890' }), /missing or invalid manifest for windows-x64/);
+    await writeFile(windowsManifestPath, windowsManifestBytes);
+
     const linuxManifestPath = join(output, 'linux-x64', 'desktop-release-manifest-linux-x64.json');
     const linuxManifestBytes = await readFile(linuxManifestPath);
+    const extraAssetManifest = JSON.parse(linuxManifestBytes);
+    extraAssetManifest.assets.push({ name: 'unexpected.dmg', sha256: '0'.repeat(64) });
+    await writeFile(linuxManifestPath, `${JSON.stringify(extraAssetManifest, null, 2)}\n`);
+    assert.throws(() => verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit, runId: '67890' }), /unexpected installer count/);
+    await writeFile(linuxManifestPath, linuxManifestBytes);
+
     const malformedLinux = JSON.parse(linuxManifestBytes);
     malformedLinux.assets[0].name = malformedLinux.assets[1].name;
     await writeFile(linuxManifestPath, `${JSON.stringify(malformedLinux, null, 2)}\n`);
     assert.throws(() => verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit, runId: '67890' }), /exactly one \.AppImage installer/);
     await writeFile(linuxManifestPath, linuxManifestBytes);
 
-    const manifest = JSON.parse(await readFile(join(output, 'macos-x64', 'desktop-release-manifest-macos-x64.json'), 'utf8'));
-    await writeFile(join(output, 'macos-x64', manifest.assets[0].name), 'altered installer');
+    const manifest = JSON.parse(await readFile(windowsManifestPath, 'utf8'));
+    await writeFile(join(output, 'windows-x64', manifest.assets[0].name), 'altered installer');
     assert.throws(() => verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit, runId: '67890' }), /checksum mismatch/);
     assert.throws(() => verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit: 'b'.repeat(40), runId: '67890' }), /does not match/);
+    assert.throws(() => verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit, runId: '99999' }), /does not match/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -252,8 +285,24 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
   assert.match(JSON.stringify(release.jobs.preflight), /git merge-base --is-ancestor/);
   assert.equal(release.jobs.build.steps[0].with.ref, '${{ needs.preflight.outputs.commit }}');
   assert.deepEqual(release.jobs.build.strategy.matrix.include.map(({ target }) => target), [
-    'windows-x64', 'linux-x64', 'macos-arm64', 'macos-x64',
+    'windows-x64', 'linux-x64',
   ]);
+  assert.equal(ci.jobs.desktop['continue-on-error'], "${{ startsWith(matrix.id, 'macos-') }}");
+  assert.equal(ci.jobs.credentials['continue-on-error'], "${{ startsWith(matrix.os, 'macos-') }}");
+  assert.equal(ci.on.workflow_dispatch.inputs.include_macos.default, false);
+  const matrixVariants = (expression) => [...expression.matchAll(/'(\[[\s\S]*?\])'/g)].map(([, json]) => JSON.parse(json));
+  assert.match(ci.jobs.credentials.strategy.matrix.os, /github\.event_name == 'workflow_dispatch' && inputs\.include_macos/);
+  assert.deepEqual(matrixVariants(ci.jobs.credentials.strategy.matrix.os), [
+    ['windows-latest', 'ubuntu-22.04', 'macos-15', 'macos-15-intel'],
+    ['windows-latest', 'ubuntu-22.04'],
+  ]);
+  assert.match(ci.jobs.desktop.strategy.matrix.include, /github\.event_name == 'workflow_dispatch' && inputs\.include_macos/);
+  assert.deepEqual(matrixVariants(ci.jobs.desktop.strategy.matrix.include).map((matrix) => matrix.map(({ id }) => id)), [
+    ['windows-x64', 'linux-x64', 'macos-arm64', 'macos-x64'],
+    ['windows-x64', 'linux-x64'],
+  ]);
+  assert.doesNotMatch(JSON.stringify(release.jobs.draft), /macos|\.dmg/i,
+    'unverified macOS installers must not enter the formal Desktop release asset set');
   const draft = release.jobs.draft.steps.map((step) => step.run ?? '').join('\n');
   assert.match(draft, /desktop-release-manifest\.js verify/);
   assert.match(draft, /gh release create "\$TAG" --verify-tag[^\n]*--draft/);

@@ -5,6 +5,12 @@ on:
     branches: [main, dev]
   pull_request:
   workflow_dispatch:
+    inputs:
+      include_macos:
+        description: Run optional macOS compatibility jobs
+        type: boolean
+        required: false
+        default: false
 
 env:
   PRIMARY_NODE_VERSION: '24'
@@ -20,11 +26,12 @@ jobs:
   credentials:
     name: native credentials on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ startsWith(matrix.os, 'macos-') }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-22.04, macos-15, macos-15-intel]
+        os: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.include_macos && '["windows-latest","ubuntu-22.04","macos-15","macos-15-intel"]' || '["windows-latest","ubuntu-22.04"]') }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -130,33 +137,12 @@ jobs:
   desktop:
     name: Electron desktop on ${{ matrix.id }}
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ startsWith(matrix.id, 'macos-') }}
     timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - id: windows-x64
-            os: windows-latest
-            node: desktop/vendor/node/node.exe
-            build: build:win
-            artifact: desktop/release/*.exe
-          - id: linux-x64
-            os: ubuntu-22.04
-            node: desktop/vendor/node/node
-            build: build:linux
-            artifact: |
-              desktop/release/*.AppImage
-              desktop/release/*.deb
-          - id: macos-arm64
-            os: macos-15
-            node: desktop/vendor/node/node
-            build: build:mac
-            artifact: desktop/release/*.dmg
-          - id: macos-x64
-            os: macos-15-intel
-            node: desktop/vendor/node/node
-            build: build:mac
-            artifact: desktop/release/*.dmg
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.include_macos && '[{"id":"windows-x64","os":"windows-latest","node":"desktop/vendor/node/node.exe","build":"build:win","artifact":"desktop/release/*.exe"},{"id":"linux-x64","os":"ubuntu-22.04","node":"desktop/vendor/node/node","build":"build:linux","artifact":"desktop/release/*.AppImage\ndesktop/release/*.deb"},{"id":"macos-arm64","os":"macos-15","node":"desktop/vendor/node/node","build":"build:mac","artifact":"desktop/release/*.dmg"},{"id":"macos-x64","os":"macos-15-intel","node":"desktop/vendor/node/node","build":"build:mac","artifact":"desktop/release/*.dmg"}]' || '[{"id":"windows-x64","os":"windows-latest","node":"desktop/vendor/node/node.exe","build":"build:win","artifact":"desktop/release/*.exe"},{"id":"linux-x64","os":"ubuntu-22.04","node":"desktop/vendor/node/node","build":"build:linux","artifact":"desktop/release/*.AppImage\ndesktop/release/*.deb"}]') }}
     steps:
       - uses: actions/checkout@v5
         with:

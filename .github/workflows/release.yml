@@ -90,14 +90,6 @@ jobs:
             os: ubuntu-22.04
             node: desktop/vendor/node/node
             build: build:linux
-          - target: macos-arm64
-            os: macos-15
-            node: desktop/vendor/node/node
-            build: build:mac
-          - target: macos-x64
-            os: macos-15-intel
-            node: desktop/vendor/node/node
-            build: build:mac
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
@@ -186,7 +178,7 @@ jobs:
           retention-days: 30
 
   draft:
-    name: verify all four installers and create or complete a draft
+    name: verify required Windows and Linux installers and create or complete a draft
     needs: [preflight, build]
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -213,16 +205,6 @@ jobs:
           name: desktop-release-${{ needs.preflight.outputs.tag }}-linux-x64-${{ needs.preflight.outputs.commit }}
           path: dist-release/linux-x64
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: desktop-release-${{ needs.preflight.outputs.tag }}-macos-arm64-${{ needs.preflight.outputs.commit }}
-          path: dist-release/macos-arm64
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: desktop-release-${{ needs.preflight.outputs.tag }}-macos-x64-${{ needs.preflight.outputs.commit }}
-          path: dist-release/macos-x64
-
       - name: recheck the tag and current main ancestry
         env:
           TAG: ${{ needs.preflight.outputs.tag }}
@@ -234,7 +216,7 @@ jobs:
           test "$(git rev-parse "${TAG}^{commit}")" = "$COMMIT"
           git merge-base --is-ancestor "$COMMIT" refs/remotes/origin/main
 
-      - name: verify all installer hashes, platform targets, and provenance
+      - name: verify required installer hashes, platform targets, and provenance
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
           COMMIT: ${{ needs.preflight.outputs.commit }}

@@ -8,14 +8,14 @@ Ligule 的 CLI 与 Desktop 使用独立版本和更新记录。根目录的 `pac
 
 ## 桌面目标
 
-| 目标 | 安装包 | 系统要求 | 自动化包检查 |
+| 目标 | 安装包 | 当前发行状态 | 自动化包检查 |
 |---|---|---|---|
-| Windows x64 | NSIS `.exe` | Windows 10 或更新版本；Electron 内嵌 Chromium，不需要 WebView2 | 安装并检查随包运行时；运行 Windows Host 进程树测试 |
-| Linux x64 | `.AppImage` 与 `.deb` | 声明支持 Ubuntu 22.04 与 Debian 12 | 检查两种安装包并运行随包运行时检查 |
-| macOS Apple Silicon | `.dmg` | macOS 13.5 或更新版本 | 验证 DMG 与随包运行时 |
-| macOS Intel | `.dmg` | macOS 13.5 或更新版本 | 验证 DMG 与随包运行时 |
+| Windows x64 | NSIS `.exe` | 必需 Desktop 发行资产 | 安装并检查随包运行时；运行 Windows Host 进程树测试 |
+| Linux x64 | `.AppImage` 与 `.deb` | 必需 Desktop 发行资产；Ubuntu 22.04 与 Debian 12 为声明目标 | 检查两种安装包并运行随包运行时检查 |
+| macOS Apple Silicon | `.dmg` | 手动 opt-in 的可选 CI 构建；不属于当前发行资产集合 | `workflow_dispatch` 设 `include_macos=true` 才运行；失败不阻断必需工作流，未验收 DMG 不得加入正式 Release |
+| macOS Intel | `.dmg` | 手动 opt-in 的可选 CI 构建；不属于当前发行资产集合 | `workflow_dispatch` 设 `include_macos=true` 才运行；失败不阻断必需工作流，未验收 DMG 不得加入正式 Release |
 
-Electron 平台列表注明支持 Windows 10 及更新版本、macOS Ventura 及更新版本，见 [Electron 平台支持说明](https://github.com/electron/electron/blob/main/README.md#platform-support)。Windows 安装包内含 Electron 自带的 Chromium 渲染器，不依赖 Microsoft Edge WebView2 运行时。macOS 安装包使用 ad-hoc 签名，不进行公证。自动检查不能代替目标系统上的首次启动、托盘、通知和系统特定行为验收。
+Electron 平台列表注明支持 Windows 10 及更新版本、macOS Ventura 及更新版本，见 [Electron 平台支持说明](https://github.com/electron/electron/blob/main/README.md#platform-support)。Windows 安装包内含 Electron 自带的 Chromium 渲染器，不依赖 Microsoft Edge WebView2 运行时。macOS CI 检查需在手动 `workflow_dispatch` 中选择 `include_macos=true`，且失败不会阻断 Windows/Linux 必需关口；macOS 构建使用 ad-hoc 签名且不公证。当前发行流程仅要求 Windows NSIS 与 Linux AppImage/deb。macOS DMG 在完成对应架构验收并更新发行契约之前，不属于正式发行资产。自动检查不能代替目标系统上的首次启动、托盘、通知和系统特定行为验收。
 
 四个平台均随包提供 Node.js v24.21.0。归档 SHA-256 固定在 `desktop/node-pin.json`；更换运行时版本时要同步更新该来源和随包运行时测试。Linux 目标要求 glibc 2.28 或更新版本，见 [Node.js v24.21.0 平台要求](https://github.com/nodejs/node/blob/v24.21.0/BUILDING.md#platform-list)。
 
@@ -37,7 +37,7 @@ npm 包 `ligule` 包含内核、CLI、TUI、手册和运行时依赖。全局安
 1. **准备产品版本。** 在 `main` 上手动运行 [`tag.yml`](../../.github/workflows/tag.yml)，选择 `prepare`，再选择 `cli` 或 `desktop`，输入 `patch`、`minor`、`major` 或 `X.Y.Z`。工作流只更新所选产品的版本和更新记录，推送审查分支，并对该精确提交运行完整 CI 后创建 PR。审查并合并 PR。
 2. **创建产品标签。** 在 `main` 上再次运行 `tag.yml`，选择 `tag`，并使用相同产品和已合并版本。工作流拒绝已有标签，要求 `main` 指向所选提交，并确认该 SHA 的完整 `main` push CI 成功，然后创建注释标签 `cli-vX.Y.Z` 或 `desktop-vX.Y.Z`。
 3. **发布 CLI 到 npm。** 手动运行 [`publish.yml`](../../.github/workflows/publish.yml)，输入 `cli-vX.Y.Z`。工作流验证主分支祖先关系和该精确标签 SHA 的 CI 成功状态，对该提交运行测试、打包、npm registry 精确 tarball 检查，并在空 npm 消费者中安装 tarball。工作流还会通过 GitHub API 检查现有 `npm-publish` Environment 至少配置一名必需审核者；未配置时会 fail closed。检查通过后，发布仍需经过该 Environment，并使用 npm Trusted Publishing/OIDC。Desktop 标签不能触发或满足此流程。
-4. **生成 Desktop 草稿。** 在 `main` 上手动运行 [`release.yml`](../../.github/workflows/release.yml)，输入 `desktop-vX.Y.Z`。工作流重新确认标签属于 `main` 且该 SHA 的 main CI 成功，再从完全相同的提交构建 Windows x64、Linux x64、macOS arm64 与 macOS x64 安装包。安装包文件名绑定版本、目标和源码 SHA；每次运行的构建清单会将产物字节绑定到该工作流运行。公开清单和校验文件只记录稳定的版本、源码、目标、文件名与 SHA-256 身份，因此相同产物可以重试补齐草稿。发现意外附件或字节冲突时会停止并要求人工检查；已有草稿说明会保留，已公开 Release 不会被修改。
-5. **审阅并公开 Desktop 草稿。** 核对安装包校验值，并在目标系统检查首次启动、托盘、通知和系统特定行为。所有检查通过后，在 GitHub 手动公开草稿；工作流本身不会公开 Release。
+4. **生成 Desktop 草稿。** 在 `main` 上手动运行 [`release.yml`](../../.github/workflows/release.yml)，输入 `desktop-vX.Y.Z`。工作流重新确认标签属于 `main` 且该 SHA 的 main CI 成功，再从完全相同的提交构建 Windows x64 NSIS 与 Linux x64 AppImage/deb。只有这三类安装包进入必须完整的 manifest 和 Release 草稿；macOS CI 任务失败不会阻断 Windows/Linux，但 macOS DMG 不会由此进入正式资产集合。安装包文件名绑定版本、目标和源码 SHA；每次运行的构建清单会将产物字节绑定到该工作流运行。公开清单和校验文件只记录稳定的版本、源码、目标、文件名与 SHA-256 身份，因此相同产物可以重试补齐草稿。发现缺失/额外资产或字节冲突时会停止并要求人工检查；已有草稿说明会保留，已公开 Release 不会被修改。
+5. **审阅并公开 Desktop 草稿。** 核对必需安装包校验值，并在 Windows 与 Linux 目标环境检查首次启动和系统特定行为。只有完成发布审查后，才在 GitHub 手动公开草稿；工作流本身不会公开 Release。macOS DMG 只有在对应架构真实验收并明确纳入新的发行契约后才能单独发布。
 
 CLI 与 Desktop 更新记录各自独立。准备某一产品版本时，不会修改另一产品的清单、更新记录、运行时版本或前端私有版本。单纯调整版本不需要更新依赖锁文件。
