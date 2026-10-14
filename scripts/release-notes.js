@@ -34,7 +34,7 @@ export function parseReleaseTag(tag) {
 function releaseNotesFromChangelog(changelog, tag) {
   const { product, version } = parseReleaseTag(tag);
   const section = changelogSection(changelog, version);
-  if (product === 'cli') return section;
+  if (product === 'cli') return `${section}\n\n---\n\n## 安装 / Install\n\n\`npm install -g ligule@${version}\`\n\n[在 npm 查看此版本 / View this version on npm](https://www.npmjs.com/package/ligule/v/${version})\n\nCLI/TUI 通过 npm 分发；此 GitHub Release 仅提供双语更新说明，不附带安装包。\n\nCLI/TUI is distributed through npm; this GitHub Release contains bilingual notes, not installable artifacts.\n`;
   return `${section}\n\n---\n\n## 下载 / Downloads\n\n桌面安装包与 SHA-256 校验值会在完成平台验收后加入此草稿 Release。\n\nDesktop installers and SHA-256 checksums are added to this draft Release after platform validation.\n`;
 }
 

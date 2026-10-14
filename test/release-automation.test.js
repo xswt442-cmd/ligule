@@ -126,6 +126,9 @@ test('release notes select each product changelog and matching bilingual version
     assert.match(cliNotes, /初始公开版本/);
     assert.match(cliNotes, /Initial public release/);
     assert.doesNotMatch(cliNotes, /下载|Downloads/);
+    assert.match(cliNotes, /npm install -g ligule@0\.0\.1/);
+    assert.match(cliNotes, /npmjs\.com\/package\/ligule\/v\/0\.0\.1/);
+    assert.match(cliNotes, /this GitHub Release contains bilingual notes/);
     assert.match(releaseNotesForTag(directory, 'desktop-v2.4.1'), /SHA-256/);
     assert.throws(() => requestedVersionAtRoot(directory, 'unknown', 'patch'), /product must be cli or desktop/);
     assert.throws(() => requestedVersionAtRoot(directory, '__proto__', 'patch'), /product must be cli or desktop/);
@@ -298,7 +301,7 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
   assert.deepEqual(tag.on.workflow_dispatch.inputs.action.options, ['prepare', 'tag']);
   assert.deepEqual(tag.on.workflow_dispatch.inputs.product.options, ['cli', 'desktop']);
   assert.equal(tag.jobs['create-tag'].steps.find((step) => step.uses === 'actions/setup-node@v5').with['package-manager-cache'], false);
-  for (const [workflowConfig, jobName] of [[publish, 'npm'], [release, 'preflight'], [release, 'draft'], [release, 'publish']]) {
+  for (const [workflowConfig, jobName] of [[publish, 'npm'], [publish, 'github-notes'], [release, 'preflight'], [release, 'draft'], [release, 'publish']]) {
     const setup = workflowConfig.jobs[jobName].steps.find((step) => step.uses === 'actions/setup-node@v5');
     assert.equal(setup?.with['package-manager-cache'], false,
       `${jobName} must disable pnpm auto-caching when pnpm is not installed`);
@@ -315,7 +318,18 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
 
   assert.ok(publish.on.workflow_dispatch);
   assert.equal(publish.on.push, undefined);
-  assert.equal(publish.jobs['release-notes'], undefined);
+  const cliNotesJob = publish.jobs['github-notes'];
+  assert.deepEqual(cliNotesJob.needs, ['preflight', 'npm']);
+  assert.equal(cliNotesJob.permissions.contents, 'write');
+  assert.equal(cliNotesJob.steps[0].with.ref, '${{ needs.preflight.outputs.commit }}');
+  const cliNotesScript = cliNotesJob.steps.map((step) => step.run ?? '').join('\n');
+  assert.match(cliNotesScript, /npm view "ligule@\$\{VERSION\}" version/);
+  assert.match(cliNotesScript, /release-notes\.js "\$TAG"/);
+  assert.match(cliNotesScript, /gh release create "\$TAG"/);
+  assert.match(cliNotesScript, /--latest=false/);
+  assert.match(cliNotesScript, /if existing=\$\(gh release view/);
+  assert.match(cliNotesScript, /\[ "\$existing" != false \]/);
+  assert.doesNotMatch(cliNotesScript, /npm publish/);
   assert.match(JSON.stringify(publish.jobs.preflight), /npm-publish must have at least one required reviewer/);
   assert.match(JSON.stringify(publish.jobs.preflight), /required_reviewers/);
   assert.equal(publish.jobs.approval.environment, 'npm-publish');
