@@ -18,7 +18,6 @@ const enPath = join(repoRoot, 'docs', 'guide.en.md');
 const bilingualPairs = [
   [join(repoRoot, 'README.md'), join(repoRoot, 'README.en.md')],
   [join(repoRoot, 'desktop', 'README.md'), join(repoRoot, 'desktop', 'README.en.md')],
-  [join(repoRoot, 'docs', 'development', 'RELEASE.zh-cn.md'), join(repoRoot, 'docs', 'development', 'RELEASE.en.md')],
   [zhPath, enPath],
   [join(repoRoot, 'docs', 'development', 'ARCHITECTURE.zh-cn.md'), join(repoRoot, 'docs', 'development', 'ARCHITECTURE.en.md')],
   [join(repoRoot, 'docs', 'development', 'GLOSSARY.zh-cn.md'), join(repoRoot, 'docs', 'development', 'GLOSSARY.en.md')],
@@ -27,6 +26,7 @@ const bilingualPairs = [
 const maintainedDocs = [
   ...bilingualPairs.flatMap((pair) => pair),
   join(repoRoot, 'CHANGELOG.md'),
+  join(repoRoot, 'docs', 'development', 'RELEASE.md'),
 ];
 // 工程指南八份：根那一份放全局规则，七份局部的放在各自代码旁边（`src/` 的五个目录、桌面两层）。
 const guides = [
@@ -141,11 +141,11 @@ test('README 有使用手册、架构和贡献说明入口', () => {
   assert.match(readme, /docs\/development\/ARCHITECTURE\.zh-cn\.md/);
   assert.match(readme, /docs\/development\/GLOSSARY\.zh-cn\.md/);
   assert.match(readme, /docs\/development\/CONTRIBUTING\.zh-cn\.md/);
-  assert.match(readme, /docs\/development\/RELEASE\.zh-cn\.md/);
+  assert.match(readme, /docs\/development\/RELEASE\.md/);
   assert.match(englishReadme, /docs\/development\/ARCHITECTURE\.en\.md/);
   assert.match(englishReadme, /docs\/development\/GLOSSARY\.en\.md/);
   assert.match(englishReadme, /docs\/development\/CONTRIBUTING\.en\.md/);
-  assert.match(englishReadme, /docs\/development\/RELEASE\.en\.md/);
+  assert.match(englishReadme, /docs\/development\/RELEASE\.md/);
   assert.match(readme, /CHANGELOG\.md/);
   assert.match(englishReadme, /CHANGELOG\.md/);
   assert.ok(manifest.files.includes('README.en.md'), 'the English README must be included in the npm package');
@@ -183,8 +183,7 @@ test('development 文档文件名使用大写主体与小写语言标记', () =>
     'CONTRIBUTING.zh-cn.md',
     'GLOSSARY.en.md',
     'GLOSSARY.zh-cn.md',
-    'RELEASE.en.md',
-    'RELEASE.zh-cn.md',
+    'RELEASE.md',
   ]);
 });
 

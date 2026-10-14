@@ -281,6 +281,7 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
   assert.ok(release.on.workflow_dispatch);
   assert.equal(release.on.workflow_call, undefined);
   assert.equal(release.on.push, undefined);
+  assert.equal(release.on.workflow_dispatch.inputs.publish.default, false);
   assert.match(JSON.stringify(release.jobs.preflight), /desktop-v/);
   assert.match(JSON.stringify(release.jobs.preflight), /git merge-base --is-ancestor/);
   assert.equal(release.jobs.build.steps[0].with.ref, '${{ needs.preflight.outputs.commit }}');
@@ -311,6 +312,12 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
   assert.match(draft, /comm -13/);
   assert.match(draft, /draft Release contains assets outside the verified set/);
   assert.doesNotMatch(draft, /--clobber|gh release edit/);
+  assert.equal(release.jobs.publish.environment, 'desktop-publish');
+  assert.match(JSON.stringify(release.jobs['publish-preflight']), /desktop-publish must have at least one required reviewer/);
+  const publishDesktop = release.jobs.publish.steps.map((step) => step.run ?? '').join('\n');
+  assert.match(publishDesktop, /desktop-release-manifest\.js verify/);
+  assert.match(publishDesktop, /sha256sum --check SHA256SUMS/);
+  assert.match(publishDesktop, /PATCH .*releases\/\$\{release_id\}.*draft=false/);
 
   const desktopSteps = ci.jobs.desktop.steps;
   const installerBuild = desktopSteps.findIndex((step) => step.name === 'build the Electron installer');

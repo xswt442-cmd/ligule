@@ -4,7 +4,7 @@
 
 These terms describe current ligule behavior. Protocol method names and configuration keys keep their code spelling.
 
-| Term | 中文 | Meaning in ligule |
+| English term | 中文术语 | Meaning in ligule |
 |---|---|---|
 | **Kernel** | 内核 | The runtime that registers tools, validates calls, applies policy, runs allowed tools, and records their results. It starts with an empty tool registry. |
 | **Host** | 宿主 | The Node.js owner of a project environment and its open sessions. It assembles the kernel, model provider, policy, session records, extensions, and client protocol. |

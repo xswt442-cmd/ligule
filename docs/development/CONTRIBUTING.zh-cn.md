@@ -38,7 +38,7 @@ pnpm --filter ligule-desktop run dev
 
 从实现和测试描述行为。保持中文与英文使用手册中的用户可见行为一致，并区分自动化覆盖、平台验证和人工验证。提交中不要加入凭据、个人会话记录或生成的 `desktop/vendor/` 文件。依赖变动要同时更新包清单和 `pnpm-lock.yaml`。
 
-CI 分开报告核心测试、CLI 干净消费者安装、四种目标平台的原生凭据检查，以及 Windows x64、Linux x64、macOS arm64 和 macOS x64 的 Electron 安装包构建。CI 构建产物用于验证，不等于公开发行。发行流程和状态见[维护者发行清单](RELEASE.zh-cn.md)。
+CI 分开报告核心测试、CLI 干净消费者安装、四种目标平台的原生凭据检查，以及 Windows x64、Linux x64、macOS arm64 和 macOS x64 的 Electron 安装包构建。CI 构建产物用于验证，不等于公开发行。维护者发行范围和流程见[发行说明](RELEASE.md)。
 
 ## 相关文档
 

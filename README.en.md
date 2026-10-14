@@ -24,7 +24,7 @@ ligule is an AI assistant for project work that shares one Agent kernel across t
 | TUI | Ongoing conversations and session management in a terminal | `ligule` |
 | Desktop | Workspace sidebar, visual settings, and session actions | Install the desktop package for your platform |
 
-The CLI and TUI require Node.js 24 or newer. The TUI requires an interactive terminal; use `ligule run` in scripts and pipelines. Desktop targets, system requirements, and verification status are listed in the [release checklist](docs/development/RELEASE.en.md).
+The CLI and TUI require Node.js 24 or newer. The TUI requires an interactive terminal; use `ligule run` in scripts and pipelines. Desktop release scope and the maintainer procedure are documented in the Chinese [release guide](docs/development/RELEASE.md).
 
 ## Quick start
 
@@ -79,7 +79,7 @@ Development requires Node.js 24 or newer and pnpm 12.9.1. Run `pnpm install --fr
 - [架构说明（中文）](docs/development/ARCHITECTURE.zh-cn.md) · [Architecture (English)](docs/development/ARCHITECTURE.en.md)
 - [术语表（中文）](docs/development/GLOSSARY.zh-cn.md) · [Glossary (English)](docs/development/GLOSSARY.en.md)
 - [贡献与验证（中文）](docs/development/CONTRIBUTING.zh-cn.md) · [Contributing and checks (English)](docs/development/CONTRIBUTING.en.md)
-- [维护者发行清单（中文）](docs/development/RELEASE.zh-cn.md) · [Release checklist (English)](docs/development/RELEASE.en.md)
+- [维护者发行说明](docs/development/RELEASE.md)
 
 ## License
 

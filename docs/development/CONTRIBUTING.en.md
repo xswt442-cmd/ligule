@@ -38,7 +38,7 @@ Installer builds, real-window checks, and native platform acceptance steps are i
 
 Document behavior from the implementation and its tests. Keep user-facing claims consistent in the Chinese and English guides, and distinguish automated coverage from platform or human verification. Do not put credentials, personal session records, or generated `desktop/vendor/` files in commits. Update `pnpm-lock.yaml` when a dependency changes.
 
-CI reports the core tests, clean CLI consumer install, native credential checks on all four desktop targets, and Electron installer builds on Windows x64, Linux x64, macOS arm64, and macOS x64 separately. CI artifacts are validation outputs, not public releases. The release workflow and status are documented in the [release checklist](RELEASE.en.md).
+CI reports the core tests, clean CLI consumer install, native credential checks on all four desktop targets, and Electron installer builds on Windows x64, Linux x64, macOS arm64, and macOS x64 separately. CI artifacts are validation outputs, not public releases. The Chinese maintainer release scope and procedure are documented in the [release guide](RELEASE.md).
 
 ## Related guides
 
