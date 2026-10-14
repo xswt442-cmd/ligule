@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { DropdownMenu, Popover } from 'radix-ui';
 import { Icon } from './Icon';
 import { useLocale, useText } from '../locale';
-import { groupByWorkspace, type RailLayout, type WorkspaceRoster, visibleRoots } from '../rail';
+import { groupByWorkspace, loadWorkspacePages, type RailLayout, type WorkspaceRoster, visibleRoots } from '../rail';
 import { code, type Client } from '../protocol';
 import { keepEscape } from './ui';
 
@@ -140,13 +140,7 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
     if (generation !== loadGeneration.current) return;
     const asked = visibleRoots(read, projects.filter(root => !isHidden(root))).filter(root => !isHidden(root));
     setVisible(asked);
-    const pages = await Promise.all(asked.map(async (root) => {
-      try {
-        return { root, sessions: (await client.call('sessions.list', root === '' ? {} : { projectRoot: root }, 15_000) as { sessions: SessionSummary[] }).sessions, failed: '' };
-      } catch (error) {
-        return { root, sessions: [] as SessionSummary[], failed: code(error) };
-      }
-    }));
+    const pages = await loadWorkspacePages(asked, client);
     if (generation !== loadGeneration.current) return;
     const all: SessionSummary[] = [];
     const found = new Map<string, string>();
@@ -458,10 +452,7 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
               </DropdownMenu.Portal>
             </DropdownMenu.Root>
           </h3>
-          {isFolded && <div className="rail-empty">{t(`已收起 ${sessions.length} 个会话`, `${sessions.length} conversations collapsed`)}</div>}
-          {!isFolded && sessions.length === 0 && <div className="rail-empty">
-            {group.sessions.length === 0 ? t('此工作区还没有会话。', 'No conversations in this workspace yet.') : t('归档会话已隐藏。', 'Archived conversations are hidden.')}
-          </div>}
+          {!isFolded && sessions.length === 0 && group.sessions.length > 0 && <div className="rail-empty">{t('归档会话已隐藏。', 'Archived conversations are hidden.')}</div>}
           {!isFolded && sessions.map(sessionRow)}
         </section>;
       })}
