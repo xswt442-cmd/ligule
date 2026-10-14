@@ -2,7 +2,7 @@
 // 协议层用的是官方 SDK，服务器用的是官方那个文件系统参考服务器；摘要与陈旧那两条读的是我们自己那一段逻辑。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -47,15 +47,85 @@ test('arguments are checked against the definition the server declared', () => {
     additionalProperties: false,
   };
   assert.deepEqual(validateToolArguments({ path: 'a.txt', lines: 3, tags: ['x'] }, schema), []);
-  assert.match(validateToolArguments({}, schema).join('; '), /path is required/);
+  assert.match(validateToolArguments({}, schema).join('; '), /required property 'path'/);
   assert.match(validateToolArguments({ path: 3 }, schema).join('; '), /must be string/);
-  assert.match(validateToolArguments({ path: 'a', tags: [1] }, schema).join('; '), /tags\[0] must be string/);
-  assert.match(validateToolArguments({ path: 'a', other: 1 }, schema).join('; '), /other is not declared/);
+  assert.match(validateToolArguments({ path: 'a', tags: [1] }, schema).join('; '), /tags\/0 must be string/);
+  assert.match(validateToolArguments({ path: 'a', other: 1 }, schema).join('; '), /additional properties/);
+});
+
+test('arguments honor numeric, enum, and union schema constraints', () => {
+  const schema = {
+    type: 'object',
+    properties: {
+      milliseconds: { type: 'integer', minimum: 1 },
+      format: { enum: ['short', 'long'] },
+      email: { type: 'string', format: 'email' },
+      value: { anyOf: [{ type: 'string' }, { type: 'number', minimum: 0 }] },
+    },
+    required: ['milliseconds', 'format', 'email', 'value'],
+    additionalProperties: false,
+  };
+  assert.deepEqual(validateToolArguments({ milliseconds: 1, format: 'short', email: 'agent@example.com', value: 0 }, schema), []);
+  assert.match(validateToolArguments({ milliseconds: 0, format: 'short', email: 'agent@example.com', value: 0 }, schema).join('; '), /minimum|>=/i);
+  assert.match(validateToolArguments({ milliseconds: 1, format: 'wide', email: 'agent@example.com', value: 0 }, schema).join('; '), /allowed values/i);
+  assert.match(validateToolArguments({ milliseconds: 1, format: 'short', email: 'invalid', value: 0 }, schema).join('; '), /email/);
+  assert.match(validateToolArguments({ milliseconds: 1, format: 'short', email: 'agent@example.com', value: false }, schema).join('; '), /anyOf|valid/i);
+});
+
+test('a changed schema reusing its $id is validated from the new definition', () => {
+  const id = '$id';
+  const schema = (minimum) => ({
+    [id]: 'urn:ligule:mcp:test:changed-schema',
+    type: 'object',
+    properties: { value: { type: 'integer', minimum } },
+    required: ['value'],
+  });
+  assert.deepEqual(validateToolArguments({ value: 1 }, schema(1)), []);
+  assert.match(validateToolArguments({ value: 1 }, schema(10)).join('; '), />= 10/);
+});
+
+test('the default schema dialect is Draft 2020-12 and prefixItems are enforced', () => {
+  const schema = {
+    type: 'object',
+    properties: {
+      values: { type: 'array', prefixItems: [{ const: 'only' }], items: false, title: 'one value' },
+    },
+    required: ['values'],
+    description: 'This standard annotation is accepted.',
+  };
+  assert.deepEqual(validateToolArguments({ values: ['only'] }, schema), []);
+  assert.notDeepEqual(validateToolArguments({ values: ['other'] }, schema), []);
+  assert.notDeepEqual(validateToolArguments({ values: ['only', 'extra'] }, schema), []);
+});
+
+test('an explicit Draft 7 schema is supported and unsupported dialects fail closed', () => {
+  const schema = {
+    $schema: 'http://json-schema.org/draft-07/schema#',
+    type: 'object',
+    properties: { start: { type: 'boolean' }, end: { type: 'boolean' } },
+    dependencies: { start: ['end'] },
+  };
+  assert.deepEqual(validateToolArguments({ start: true, end: false }, schema), []);
+  assert.match(validateToolArguments({ start: true }, schema).join('; '), /dependency|end/);
+  assert.notDeepEqual(validateToolArguments({}, { $schema: 'http://json-schema.org/draft-04/schema#', type: 'object' }), []);
+  assert.notDeepEqual(validateToolArguments({}, { type: 'object', properties: { value: { type: 'string', unknownConstraint: true } } }), []);
+});
+
+test('an invalid tool schema fails closed with the existing argument error code', async () => {
+  const registry = fakeRegistry('aaaa', { type: 'bogus' });
+  const disclosed = { seen: new Set(['fs/read_file@aaaa']) };
+  const { callTool } = createMcpTools(registry, disclosed);
+  assert.notDeepEqual(validateToolArguments({}, { type: 'bogus' }), []);
+  await assert.rejects(
+    () => callTool.run({ server: 'fs', tool: 'read_file', arguments: '{}', schemaDigest: 'aaaa' }),
+    (error) => error.code === 'mcp_arguments_invalid',
+  );
+  assert.deepEqual(registry.calls, [], 'a call with a schema that cannot compile never reaches the server');
 });
 
 // 一台假的服务器，只用来把「定义换了」这一件事演出来：真实协议的那一段在下面那几条里跑。
-function fakeRegistry(digest = 'aaaa') {
-  const definition = { name: 'read_file', description: 'read one file', digest, inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] }, annotations: { readOnlyHint: true } };
+function fakeRegistry(digest = 'aaaa', inputSchema = { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] }) {
+  const definition = { name: 'read_file', description: 'read one file', digest, inputSchema, annotations: { readOnlyHint: true } };
   const calls = [];
   return {
     calls,
@@ -173,6 +243,38 @@ test('a real stdio server answers inspect and call through the registry', async 
     () => kernel.call('mcp.inspect', { server: 'gone' }),
     (error) => error.code === 'mcp_server_unknown',
   );
+  } finally {
+    await registry.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Host Policy denies a real MCP write under the server root', async () => {
+  const scratch = join(process.cwd(), 'testplace');
+  await mkdir(scratch, { recursive: true });
+  const root = await mkdtemp(join(scratch, 'mcp-policy-'));
+  const target = join(root, 'denied.txt');
+  const configs = mcpServerConfigs({
+    mcp: { servers: { fs: { command: process.execPath, args: [serverEntry, root] } } },
+  });
+  const registry = createMcpRegistry(configs);
+  const kernel = createKernel({
+    config: createConfig({ user: { boundary: root } }),
+    policy: createDecisionChain({ mode: 'auto', rules: [{ tool: 'mcp:fs/write_file', decision: 'deny', reason: 'test denial' }] }),
+  });
+  loadAssembly(kernel, [createMcpPlugin(registry)]);
+  try {
+    const definition = await kernel.call('mcp.inspect', { server: 'fs', tool: 'write_file' });
+    await assert.rejects(
+      () => kernel.call('mcp.call', {
+        server: 'fs',
+        tool: 'write_file',
+        arguments: JSON.stringify({ path: target, content: 'must not be written' }),
+        schemaDigest: definition.schemaDigest,
+      }),
+      (error) => error.code === 'policy_denied',
+    );
+    await assert.rejects(() => access(target), { code: 'ENOENT' });
   } finally {
     await registry.close();
     await rm(root, { recursive: true, force: true });

@@ -45,6 +45,24 @@ export function createConnection({ input, output, onFault }: ConnectionOptions):
   let handler: ((message: HostRequest) => unknown | Promise<unknown>) | undefined;
   let notificationHandler: ((message: Record<string, unknown>) => void) | undefined;
   let closed = false;
+  let buffer = '';
+
+  function closeConnection(): void {
+    if (closed) return;
+    closed = true;
+    buffer = '';
+    input.off('data', onData);
+    input.pause();
+    // 一条载体流结束就结束整条连接：停止接收后续 RPC，另一方向即便还开着也不能再完成请求与答复。
+    for (const settleWith of responders.values()) settleWith.reject(new KernelError('connection_closed'));
+    responders.clear();
+  }
+
+  function fault(error: Error): void {
+    closeConnection();
+    // 流错误先收尾请求，再把原始错误交给装载侧诊断；error listener 同时避免未监听事件触发进程级异常。
+    onFault?.(error);
+  }
 
   function write(message: Record<string, unknown>): void {
     // 对端已经不在了：这一条送出去也没人收，丢掉不是故障，会话记录才是事实源（I5）。
@@ -67,6 +85,7 @@ export function createConnection({ input, output, onFault }: ConnectionOptions):
   }
 
   function handleLine(line: string): void {
+    if (closed) return;
     let message;
     try {
       const parsed: unknown = JSON.parse(line);
@@ -92,7 +111,11 @@ export function createConnection({ input, output, onFault }: ConnectionOptions):
       // 交给装进来的分发器；它报的错误按同一行送回去，请求方永远有一条答复顶着。
       const request: HostRequest = { ...message, id: message.id, method: message.method };
       Promise.resolve()
-        .then(() => handler?.(request))
+        .then(() => {
+          // 输入行可能已排队；关闭后禁止触发有副作用的 Host 分发。
+          if (closed) return;
+          return handler?.(request);
+        })
         .then(
           // 分发器交出 undefined 是「这一条我自己答复」：客户端收到审批就是这样，要等人按键之后才回。
           // 在这里自动答一个 undefined 会把对面那一次等待变成一次拒绝。
@@ -117,24 +140,27 @@ export function createConnection({ input, output, onFault }: ConnectionOptions):
     settle(message.id, message);
   }
 
-  let buffer = '';
-  input.setEncoding('utf8');
-  input.on('data', (chunk: string | Buffer) => {
+  function onData(chunk: string | Buffer): void {
+    if (closed) return;
     buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
     let end = buffer.indexOf('\n');
-    while (end >= 0) {
+    while (end >= 0 && !closed) {
       const line = buffer.slice(0, end).trim();
       buffer = buffer.slice(end + 1);
       if (line !== '') handleLine(line);
       end = buffer.indexOf('\n');
     }
-  });
+  }
+
+  input.setEncoding('utf8');
+  input.on('data', onData);
   input.on('end', () => {
-    closed = true;
-    // 对端退出后不会再答复：已经发出去、还没答复的那些请求要有明确的收尾，否则等它的调用一直挂着。
-    for (const settleWith of responders.values()) settleWith.reject(new KernelError('connection_closed'));
-    responders.clear();
+    closeConnection();
   });
+  input.on('close', closeConnection);
+  input.on('error', fault);
+  output.on('close', closeConnection);
+  output.on('error', fault);
 
   return {
     // 装进来的分发器负责这一侧收到的请求；通报另装一个，它没有答复可交。
@@ -156,10 +182,18 @@ export function createConnection({ input, output, onFault }: ConnectionOptions):
     },
 
     request(method: string, params?: unknown): Promise<unknown> {
+      if (closed) return Promise.reject(new KernelError('connection_closed'));
       const id = `${origin}${counter}`;
       counter += 1;
-      write({ id, method, params });
-      return new Promise<unknown>((resolve, reject) => responders.set(id, { resolve, reject }));
+      return new Promise<unknown>((resolve, reject) => {
+        responders.set(id, { resolve, reject });
+        try {
+          write({ id, method, params });
+        } catch (error) {
+          responders.delete(id);
+          reject(error);
+        }
+      });
     },
   };
 }

@@ -9,8 +9,13 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { Ajv } from 'ajv';
+import { Ajv2020 } from 'ajv/dist/2020.js';
+import * as formatsModule from 'ajv-formats';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv';
+import type { JsonSchemaType } from '@modelcontextprotocol/sdk/validation';
 import { KernelError } from '../kernel/error.js';
 import { VERSION } from '../version.js';
 
@@ -88,52 +93,34 @@ function definitionOf(raw: { name?: unknown; description?: unknown; inputSchema?
   };
 }
 
-// 一条 MCP 工具声明的参数按声明校验（D14 的精神），用的是最小一份 JSON Schema 子集：
-// 对象、必填、类型三种，数组与嵌套按声明递归下去；认不出的构造按「校验不了」报出去而不是放行。
-function checkAgainstSchema(value: unknown, schema: Record<string, unknown>, at: string, problems: string[]): void {
-  const type = schema.type;
-  if (type === 'object') {
-    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-      problems.push(`${at} must be an object`);
-      return;
-    }
-    const properties = (schema.properties ?? {}) as Record<string, Record<string, unknown>>;
-    for (const name of (schema.required ?? []) as string[]) {
-      if ((value as Record<string, unknown>)[name] === undefined) problems.push(`${at}.${name} is required`);
-    }
-    for (const [name, item] of Object.entries(value as Record<string, unknown>)) {
-      const declared = properties[name];
-      if (declared === undefined) {
-        if (schema.additionalProperties === false) problems.push(`${at}.${name} is not declared by the tool`);
-        continue;
-      }
-      checkAgainstSchema(item, declared, `${at}.${name}`, problems);
-    }
-    return;
-  }
-  if (type === 'array') {
-    if (!Array.isArray(value)) { problems.push(`${at} must be an array`); return; }
-    const items = schema.items as Record<string, unknown> | undefined;
-    if (items !== undefined) value.forEach((item, index) => checkAgainstSchema(item, items, `${at}[${index}]`, problems));
-    return;
-  }
-  if (type === undefined) return;
-  const kinds: Record<string, () => boolean> = {
-    string: () => typeof value === 'string',
-    number: () => typeof value === 'number',
-    integer: () => Number.isInteger(value),
-    boolean: () => typeof value === 'boolean',
-    null: () => value === null,
-  };
-  const isType = kinds[String(type)];
-  if (isType === undefined) problems.push(`${at} declares a type this checker does not know (${String(type)})`);
-  else if (!isType()) problems.push(`${at} must be ${type}`);
-}
+const DRAFT_2020_12 = 'https://json-schema.org/draft/2020-12/schema';
+const DRAFT_7 = 'http://json-schema.org/draft-07/schema#';
 
 export function validateToolArguments(args: unknown, schema: Record<string, unknown>): string[] {
-  const problems: string[] = [];
-  checkAgainstSchema(args, { type: 'object', ...schema }, 'arguments', problems);
-  return problems;
+  try {
+    const declaredDialect = schema.$schema;
+    const options = {
+      allErrors: true,
+      strictSchema: true,
+      strictTypes: false,
+      strictTuples: false,
+      validateFormats: true,
+      validateSchema: true,
+    };
+    const ajv = declaredDialect === undefined || declaredDialect === DRAFT_2020_12
+      ? new Ajv2020(options)
+      : declaredDialect === DRAFT_7
+        ? new Ajv(options)
+        : undefined;
+    if (ajv === undefined) return [`tool schema dialect is unsupported: ${String(declaredDialect)}`];
+    formatsModule.default.default(ajv as Ajv);
+    const validator = new AjvJsonSchemaValidator(ajv as Ajv);
+    const validate = validator.getValidator<Record<string, unknown>>({ type: 'object', ...schema } as JsonSchemaType);
+    const result = validate(args);
+    return result.valid ? [] : [result.errorMessage ?? 'arguments do not match the tool schema'];
+  } catch (error) {
+    return [`tool schema cannot be validated: ${error instanceof Error ? error.message : String(error)}`];
+  }
 }
 
 // 一份 MCP 配置折成要连的服务器列表：名字来自配置里的键，顺序按名字排，这样同一份文件两次装载得到同一张表。

@@ -332,7 +332,11 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
   const release = workflow('release');
   const ci = workflow('ci');
 
-  assert.deepEqual(tag.on.workflow_dispatch.inputs.action.options, ['prepare', 'tag']);
+  assert.equal(tag.on.workflow_dispatch.inputs.action, undefined,
+    'version preparation must be handled in normal development, not by a release-specific PR');
+  assert.deepEqual(Object.keys(tag.jobs), ['create-tag']);
+  assert.equal(tag.permissions.contents, 'read');
+  assert.deepEqual(tag.jobs['create-tag'].permissions, { actions: 'read', contents: 'write' });
   assert.deepEqual(tag.on.workflow_dispatch.inputs.product.options, ['cli', 'desktop']);
   assert.equal(tag.jobs['create-tag'].steps.find((step) => step.uses === 'actions/setup-node@v5').with['package-manager-cache'], false);
   for (const [workflowConfig, jobName] of [[publish, 'npm'], [publish, 'github-notes'], [release, 'preflight'], [release, 'draft'], [release, 'publish']]) {
@@ -340,11 +344,14 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
     assert.equal(setup?.with['package-manager-cache'], false,
       `${jobName} must disable pnpm auto-caching when pnpm is not installed`);
   }
-  const prepare = tag.jobs.prepare.steps.map((step) => step.run ?? '').join('\n');
   const createTag = tag.jobs['create-tag'].steps.map((step) => step.run ?? '').join('\n');
-  assert.match(prepare, /release-version\.js resolve "\$PRODUCT"/);
-  assert.match(prepare, /release-version\.js prepare "\$PRODUCT"/);
-  assert.match(prepare, /if \[ "\$PRODUCT" = cli \]; then[\s\S]*desktop\/CHANGELOG\.md/);
+  assert.doesNotMatch(JSON.stringify(tag), /gh pr create|release\/\$\{tag\}|release\/\$\{TAG\}|pull-requests: write|git push origin "\$BRANCH"/i,
+    'Tag workflow must not create product-specific PRs or version branches');
+  assert.equal(tag.jobs['create-tag'].steps[0].with.ref, '${{ github.sha }}');
+  assert.match(createTag, /test "\$GITHUB_REF" = refs\/heads\/main/);
+  assert.match(createTag, /package\.json; else manifest=desktop\/package\.json/);
+  assert.match(createTag, /node scripts\/release-notes\.js "\$TAG"/);
+  assert.match(createTag, /\$commit" != "\$main_head/);
   assert.match(createTag, /\$\{PRODUCT\}-v\$\{VERSION\}/);
   assert.match(createTag, /gh run list --workflow ci\.yml --branch main --event push --commit/);
   assert.match(createTag, /git merge-base --is-ancestor|main_head/);

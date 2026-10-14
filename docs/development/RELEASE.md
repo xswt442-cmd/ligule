@@ -11,8 +11,8 @@ Ligule 分为两条独立发行线，版本可分别推进：
 
 ## 发行流程
 
-1. 在 `main` 上手动运行 [`tag.yml`](../../.github/workflows/tag.yml)，选择 `prepare` 和 `cli` 或 `desktop`，输入目标版本（例如 `0.0.4`）。工作流只更新所选产品的版本与更新记录，先对提交运行完整 CI，再创建审查 PR。审核并合并该 PR，等待合并提交的 `main` CI 成功。
-2. 再运行 `tag.yml`，选择 `tag` 和相同产品版本。工作流确认标签尚不存在、提交属于 `main` 且该提交的必需 CI 已成功，然后创建 `cli-vX.Y.Z` 或 `desktop-vX.Y.Z` 标签。
+1. **在正常开发集成中准备版本，不创建版本专用 PR。** 在 `dev` 的功能/修复集成分支上维护对应产品的 `CHANGELOG.md` 或 `desktop/CHANGELOG.md`，确保 `[Unreleased]` 有真实、双语的变更说明；在准备发布时运行 `node scripts/release-version.js prepare cli minor`、`node scripts/release-version.js prepare desktop 0.1.0` 等命令（两种产品分别执行，`patch` / `minor` / `major` 或确切 `X.Y.Z` 均可）。该命令仅修改指定产品的版本和 Changelog，**不会生成 Tag、发布或提交**。检查 diff、运行测试，随正常开发/集成提交进入 `dev`，再按仓库常规审查/合入流程进入 `main`。不为版本准备再额外创建 `release/*` 分支或版本专用 PR。
+2. **在经过审查且 CI 成功的 `main` 上手动打 Tag。** 等待最终 `main` **同一 SHA** 的必需 CI 成功；在 `main` 上手动运行 [`tag.yml`](../../.github/workflows/tag.yml)，只需选择 `product=cli|desktop` 与已提交的精确 `version=X.Y.Z`。工作流检查产品 manifest 版本、双语 Changelog、Tag 不存在、运行提交等于当前 `main` HEAD、该提交的 `main` push CI 成功，之后才创建对应的 annotated `cli-vX.Y.Z` 或 `desktop-vX.Y.Z` Tag。若 CI 尚未通过、`main` 前进、版本不匹配或 Tag 已存在，**失败关闭，不做自动版本提交、强制 Tag 或跳过审查**。Tag 创建与后续正式发布仍是两项独立的人工动作。
 3. **CLI/TUI：** 手动运行 [`publish.yml`](../../.github/workflows/publish.yml)，输入 `cli-vX.Y.Z`。工作流检查版本、提交、CI、npm 上的版本和安装包；发布使用 npm Trusted Publishing/OIDC，并要求 `npm-publish` GitHub Environment 配置必需审核者。**仅在 npm 发布流程成功且 Registry 可查后**，工作流使用标签提交的 `CHANGELOG.md` 创建独立的 `CLI/TUI vX.Y.Z` GitHub Release（中英文 Notes、安装命令与 npm 链接，**不附安装包，也不抢占 Desktop 的 Latest 标记**）。重试时保留已有公开 Release，不自动覆盖已有正文或重新执行已存在版本的 npm 发布。
 4. **Desktop 草稿：** 手动运行 [`release.yml`](../../.github/workflows/release.yml)，输入 `desktop-vX.Y.Z` 并保持 `publish=false`。工作流从标签提交构建 Windows 与 Linux 三种安装包、校验发行资产并创建或补齐 GitHub Release 草稿。
 5. **公开 Desktop：** 检查草稿说明、三种安装包和 SHA-256 后，再运行同一工作流并设置 `publish=true`。工作流重新核对标签与全部资产，检查 `desktop-publish` Environment 已配置必需审核者，然后等待该 Environment 审批；获批后才公开 Release。
