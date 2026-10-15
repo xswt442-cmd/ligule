@@ -83,7 +83,7 @@ The desktop app saves drafts and queues separately for each workspace and sessio
 
 The default approval mode asks before each tool call. In the terminal UI, press `y` to allow a requested call or `n` to refuse it. In the desktop app, use the Allow or Refuse buttons on the approval card. Expand the card to inspect the requested action or change.
 
-In the terminal UI, use `/policy ask` to ask each time, `/policy auto` to select automatic decisions, or `/policy reset` to restore the configured default. Automatic decisions still follow deny rules, guards, command syntax checks, and target-address checks. Commands that cannot be verified safely fall back to asking. The tool and approval menu beside the desktop composer provides the same controls. A session override affects only that session. “Approval rules” in Settings saves the default or a project-local rule table. Saved approval modes and rules affect the next decision immediately.
+In the terminal UI, use `/policy ask` to ask each time, `/policy auto` to select automatic decisions, or `/policy reset` to restore the configured default. Automatic decisions still follow deny rules, guards, command syntax checks, and target-address checks. Commands that cannot be verified safely fall back to asking. The tool and approval menu beside the desktop composer can also change the current session. Choosing “No approval” opens a confirmation first. Once enabled, tool calls no longer prompt individually; workspace boundaries, deny rules, and safety guards still apply. Commands that cannot be parsed safely, private network targets, and actions that require extra approval are denied. “Approval rules” in Settings can save the default mode to user or project-local configuration. Saved approval modes and rules affect the next decision immediately.
 
 Desktop Settings has General, Appearance, Model services, Approval rules, Notifications, and Keyboard shortcuts sections. When saving model settings, choose the user or project-local configuration layer. Running sessions apply model configuration changes after the current turn. Higher-priority configuration still takes precedence. If you leave a settings page with unsaved changes, the app asks whether to discard them.
 
@@ -116,6 +116,14 @@ Common desktop shortcuts: Ctrl+K opens the command palette; Ctrl+B hides or show
 The desktop app provides five kinds of system notifications: a question needs an answer, an action needs approval, a turn completes, a turn fails, or the connection is interrupted. In Settings under Notifications, enable or disable all notifications and each kind separately. Clicking a notification opens its conversation. App permission and system notification settings affect delivery. Notifications show the conversation name and status without prompts, tool commands, or keys. Real notification behavior has not yet been verified on every target platform.
 
 When the tray is available, closing the window hides it while background sessions continue. The tray menu follows the interface language: “打开 ligule” / “Open ligule” restores the window, and “退出 ligule” / “Quit ligule” lists affected sessions and asks whether to interrupt work before quitting. If the tray is unavailable, closing the window asks for confirmation before quitting.
+
+### Local MCP and permissions
+
+`mcp.servers.<name>` supports stdio servers: `command` names one executable, `args` is an argument array, and `cwd` is an optional working directory. Values in `env` must use `${ENVIRONMENT_VARIABLE}` references. Servers start on demand. The model reads a tool definition and digest through `mcp.inspect`, then submits JSON arguments matching that definition through `mcp.call`. Changed definitions require disclosure again.
+
+MCP calls enter Host Policy as `mcp:<server>/<tool>`. A configured server runs as an external process. The file tools' `boundary` does not provide an operating system sandbox for that process or restrict arbitrary server resources. Configure trusted servers and control their access with server-specific directory restrictions, operating system isolation, and Policy. File tool boundaries do not define external process permissions.
+
+Cancelling a turn cancels the pending MCP request; check any side effects already produced by the server. Unexpected disconnection fails the call without automatic reconnection or replay. Check the external state, reconnect the desktop Host or restart the terminal UI, and disclose the tools again. A Skill's MCP dependency check only verifies that the server is configured; it does not establish connectivity or grant permission to call its tools.
 
 ### Common errors
 

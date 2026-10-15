@@ -14,11 +14,27 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ### 简体中文
 
-- 改进 TUI 的工作区信任、会话控制和启动错误提示。
+#### 终端界面与工作区
+
+- 改进 TUI 的工作区信任提示与访问边界处理，让在项目目录中进行文件和命令操作时的授权决策更清楚。
+- 优化会话控制与状态反馈，便于在终端中继续对话、取消操作和恢复已有会话；会话数据仍由共享 Host 维护。
+
+#### 稳定性与使用方式
+
+- 完善启动失败时的提示与排查信息，帮助识别工作区、终端环境或模型配置相关的问题。
+- CLI 与 TUI 仍通过同一个 npm 包分发：在交互式终端运行 `ligule` 打开 TUI，单轮任务使用 `ligule run "任务内容"`；继续沿用现有的工具审批和会话恢复能力。
 
 ### English
 
-- Improve TUI workspace trust, session controls, and startup error guidance.
+#### Terminal UI and workspaces
+
+- Improved workspace trust prompts and access-boundary handling in the TUI, making authorization decisions clearer before filesystem and command operations in a project.
+- Refined session controls and status feedback for continuing conversations, cancelling operations, and resuming sessions; the shared Host continues to own session data.
+
+#### Reliability and usage
+
+- Improved startup failure messages and troubleshooting guidance for issues involving the workspace, terminal environment, or model configuration.
+- CLI and TUI remain part of the same npm package: run `ligule` in an interactive terminal for the TUI or `ligule run "task"` for one-off requests. Existing tool approval and session recovery capabilities remain available.
 
 ## [0.0.3] - 2026-10-12
 

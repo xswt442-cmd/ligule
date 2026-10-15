@@ -8,6 +8,12 @@ export type ModelCatalog = {
   sources: Record<string, string>;
 };
 
+// 切换预设只改正在编辑的服务配置；已有服务的身份和凭据引用不能变。
+export function presetService(preset: Pick<ModelService, 'name' | 'api' | 'baseURL'>, previous: ModelService | null, existing: boolean, generatedId: string): ModelService {
+  const id = existing && previous !== null ? previous.id : generatedId;
+  return { id, ...preset, apiKeyEnv: existing && previous !== null ? previous.apiKeyEnv : `LIGULE_${id.toUpperCase()}_KEY`, models: [] };
+}
+
 export function legacyService(catalog: ModelCatalog): ModelService | null {
   const { api, baseURL, model, apiKeyEnv } = catalog.model;
   if ((api !== 'messages' && api !== 'chat-completions') || !baseURL || !model) return null;

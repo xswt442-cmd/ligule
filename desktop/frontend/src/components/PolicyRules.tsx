@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { code, type Client } from '../protocol';
 import { WRITABLE_LAYERS } from '../config-layers';
 import { Icon } from './Icon';
-import { Row } from './ui';
+import { Modal, Row } from './ui';
 import { useText } from '../locale';
 
 type Rule = { tool: string; match?: string; decision: 'allow' | 'deny'; reason?: string };
@@ -51,6 +51,7 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
   const [layer, setLayer] = useState('user');
   const [saving, setSaving] = useState(false);
   const [editing, setEditing] = useState<{ index: number; rule: Rule } | null>(null);
+  const [confirmNever, setConfirmNever] = useState(false);
   const held = saving
     ? t('“审批规则”正在保存；尚未收到结果。', 'Approval rules are saving; the result has not arrived yet.')
     : editing === null
@@ -101,7 +102,7 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
     if (fresh !== null) setNote({ text: `${saved} ${describe(fresh.rules?.length ?? 0)}`, bad: false });
   };
 
-  const setMode = async (mode: 'ask' | 'auto') => {
+  const setMode = async (mode: 'ask' | 'auto' | 'never') => {
     setSaving(true);
     try {
       await client.call('config.set', { field: 'policy.mode', value: mode, layer, version: versionOf(), ...target }, 30_000);
@@ -176,13 +177,15 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
         <select
           value={shown.policyMode ?? ''}
           disabled={saving}
-          onChange={(event) => { if (event.target.value !== '') void setMode(event.target.value as 'ask' | 'auto'); }}
+          onChange={(event) => { if (event.target.value === 'never') setConfirmNever(true); else if (event.target.value !== '') void setMode(event.target.value as 'ask' | 'auto'); }}
         >
           <option value="">{t('未设置', 'Not set')}</option>
           <option value="ask">ask — {t('未被放行规则覆盖的调用需要批准', 'Calls not covered by an allow rule require approval')}</option>
           <option value="auto">auto — {t('由守卫与命令语法判定，放行规则不参与', 'Guards and command parsing decide; allow rules do not apply')}</option>
+          <option value="never">never — {t('跳过逐项批准；越界、拒绝规则和模糊操作仍会被拒绝', 'Skip per-action approval; boundaries, deny rules, and ambiguous operations still block')}</option>
         </select>
       </Row>
+      {shown.policyMode === 'never' && <p className="session-note" data-tone="bad">{t('完全不需审批已设为配置默认。工具仍受工作区边界、拒绝规则和安全守卫约束。', 'No approval is the configured default. Workspace boundaries, deny rules, and safety guards still apply.')}</p>}
 
       <h3 className="group-label">{t(`规则（${rules.length} 条）`, `Rules (${rules.length})`)}</h3>
       <p className="sheet-note">{t('在逐次询问模式下，复合命令的每一段都要被同一条放行规则覆盖，才会跳过询问。禁止规则作用于整条命令及各段，放行规则不能覆盖它。', 'In ask mode, one allow rule must cover every part of a compound command to skip approval. A deny rule applies to the full command and each part; an allow rule cannot override it.')}</p>
@@ -228,6 +231,7 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
           </div>
         </div>}
     </>}
+    {confirmNever && <Modal title={t('启用完全不需审批？', 'Enable no-approval mode?')} className="confirm" onClose={() => setConfirmNever(false)}><h2 className="confirm-lead">{t('此配置会应用于使用该默认值的会话。', 'This default applies to sessions that inherit it.')}</h2><p className="confirm-note">{t('工具调用不会逐项等待批准，可能修改工作区文件或运行命令。工作区边界、拒绝规则与安全守卫仍生效；需要额外审批或无法安全判定的操作会被拒绝。', 'Tool calls will not wait for individual approval and may modify workspace files or run commands. Workspace boundaries, deny rules, and safety guards remain active; operations requiring extra approval or a safe determination will be denied.')}</p><div className="confirm-actions"><button type="button" onClick={() => setConfirmNever(false)}>{t('取消', 'Cancel')}</button><button type="button" className="primary-button" onClick={() => { setConfirmNever(false); void setMode('never'); }}>{t('确认启用', 'Enable')}</button></div></Modal>}
   </>;
 }
 

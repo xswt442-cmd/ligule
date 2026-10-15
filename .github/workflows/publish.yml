@@ -269,3 +269,64 @@ jobs:
       - name: publish with trusted publishing
         if: needs.registry-check.outputs.state == 'missing'
         run: npm publish --provenance --access public "${{ steps.tarball.outputs.path }}"
+
+  github-notes:
+    name: publish CLI release notes to GitHub
+    needs: [preflight, npm]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.preflight.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          package-manager-cache: false
+
+      - name: verify npm publication and publish versioned release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          COMMIT: ${{ needs.preflight.outputs.commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$COMMIT"
+          git fetch --no-tags origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          test "$(git rev-parse "${TAG}^{commit}")" = "$COMMIT"
+
+          # npm can take a few minutes to expose a newly published version.
+          npm_version=""
+          for attempt in $(seq 1 20); do
+            npm_version=$(npm view "ligule@${VERSION}" version --registry=https://registry.npmjs.org --prefer-online 2>/dev/null || true)
+            if [ "$npm_version" = "$VERSION" ]; then break; fi
+            sleep 15
+          done
+          if [ "$npm_version" != "$VERSION" ]; then
+            echo "::error::npm registry does not expose ligule@${VERSION}; GitHub CLI notes will not be published"
+            exit 1
+          fi
+
+          node scripts/release-notes.js "$TAG" > "$RUNNER_TEMP/cli-release-notes.md"
+          # Preserve existing public notes on retries; never overwrite or publish a draft.
+          if existing=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$existing" != false ]; then
+              echo "::error::CLI GitHub Release exists as a draft; manual review required"
+              exit 1
+            fi
+            echo "GitHub Release $TAG already exists; keeping its notes unchanged." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          gh release create "$TAG" \
+            --title "CLI/TUI v${VERSION}" \
+            --notes-file "$RUNNER_TEMP/cli-release-notes.md" \
+            --verify-tag \
+            --latest=false
+          echo "Published CLI/TUI notes for $TAG; distribution remains on npm." >> "$GITHUB_STEP_SUMMARY"

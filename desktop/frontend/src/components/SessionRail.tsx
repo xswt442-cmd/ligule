@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { DropdownMenu, Popover } from 'radix-ui';
 import { Icon } from './Icon';
 import { useLocale, useText } from '../locale';
-import { groupByWorkspace, type RailLayout, type WorkspaceRoster, visibleRoots } from '../rail';
+import { groupByWorkspace, loadWorkspacePages, type RailLayout, type WorkspaceRoster, visibleRoots } from '../rail';
 import { code, type Client } from '../protocol';
 import { keepEscape } from './ui';
 
@@ -107,9 +107,11 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
   const locale = useLocale();
   const [layout, setLayout] = useState<RailLayout>({ groups: [], loose: [] });
   const [folded, setFolded] = useState<Record<string, boolean>>({});
+  const [otherFolded, setOtherFolded] = useState(false);
   const [failures, setFailures] = useState<RailFailure[]>([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState('');
+  const [searchExpanded, setSearchExpanded] = useState(false);
   const [only, setOnly] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
   const [hits, setHits] = useState<SearchHit[] | null>(null);
@@ -122,7 +124,12 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
   const [visible, setVisible] = useState<string[]>(['']);
   const loadGeneration = useRef(0);
   const searchGeneration = useRef(0);
+  const searchInput = useRef<HTMLInputElement>(null);
   const isHidden = useCallback((root: string) => root !== '' && hidden.some(item => pathKey(item) === pathKey(root)), [hidden]);
+
+  useEffect(() => {
+    if (searchExpanded) searchInput.current?.focus({ preventScroll: true });
+  }, [searchExpanded]);
 
   const load = useCallback(async () => {
     const generation = ++loadGeneration.current;
@@ -140,13 +147,7 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
     if (generation !== loadGeneration.current) return;
     const asked = visibleRoots(read, projects.filter(root => !isHidden(root))).filter(root => !isHidden(root));
     setVisible(asked);
-    const pages = await Promise.all(asked.map(async (root) => {
-      try {
-        return { root, sessions: (await client.call('sessions.list', root === '' ? {} : { projectRoot: root }, 15_000) as { sessions: SessionSummary[] }).sessions, failed: '' };
-      } catch (error) {
-        return { root, sessions: [] as SessionSummary[], failed: code(error) };
-      }
-    }));
+    const pages = await loadWorkspacePages(asked, client);
     if (generation !== loadGeneration.current) return;
     const all: SessionSummary[] = [];
     const found = new Map<string, string>();
@@ -284,7 +285,7 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
       key={item.id}
       type="button"
       className={`session-item${active ? ' active' : ''}${item.archived === true ? ' archived' : ''}`}
-      title={item.id}
+      title={`${title} · ${item.id}`}
       aria-label={`${title}${statuses.length === 0 ? '' : `, ${statuses.join(', ')}`}`}
       onClick={() => onOpen(item.id, root === undefined || root === '' ? undefined : root)}
     >
@@ -302,40 +303,71 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
   const visibleSessions = (items: SessionSummary[]) => showArchived ? items : items.filter(item => item.archived !== true);
   const visibleLoose = visibleSessions(layout.loose);
   const reportFailure = (failure: RailFailure) => failureText(t, failure.label, failure.code);
+  const closeSearch = () => {
+    searchGeneration.current += 1;
+    setQuery('');
+    setHits(null);
+    setSearchExpanded(false);
+  };
 
   return <div className="sessions">
-    <div className="rail-find">
+    {searchExpanded ? <div className="rail-controls rail-search-row">
       <label className="rail-search">
         <Icon name="search" size={13} />
         <input
+          ref={searchInput}
           type="search"
           value={query}
-          placeholder={only ? t('查找当前会话', 'Search this conversation') : t('查找所有会话', 'Search conversations')}
+          placeholder={only ? t('查找当前会话', 'Search this conversation') : t('搜索会话名称', 'Search conversation names')}
           aria-label={only ? t('仅在当前会话中查找', 'Search only this conversation') : t('在所有可见项目中查找', 'Search visible workspaces')}
           onChange={(event) => {
             searchGeneration.current += 1;
             setQuery(event.target.value);
           }}
           onKeyDown={(event) => {
-            if (event.key !== 'Enter' || event.nativeEvent.isComposing || event.keyCode === 229 || query.trim() === '') return;
+            if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+            if (event.key === 'Escape') { event.preventDefault(); closeSearch(); return; }
+            if (event.key !== 'Enter' || query.trim() === '') return;
             event.preventDefault();
             void search(query.trim());
           }}
         />
-        {query !== '' && <button type="button" className="search-clear" aria-label={t('清空查找', 'Clear search')} onClick={() => setQuery('')}><Icon name="close" size={12} /></button>}
       </label>
-      <button
-        type="button"
-        className={`rail-scope${only ? ' on' : ''}`}
-        aria-pressed={only}
-        disabled={current === null}
+      <button type="button" className={`rail-scope${only ? ' on' : ''}`} aria-pressed={only} disabled={current === null}
         title={t('只查当前会话，包括完整的溢出结果。', 'Search only this conversation, including complete spilled results.')}
-        onClick={() => {
-          searchGeneration.current += 1;
-          setOnly(value => !value);
-        }}
-      >{t('当前', 'This chat')}</button>
-    </div>
+        onClick={() => { searchGeneration.current += 1; setOnly(value => !value); }}>{t('当前', 'This chat')}</button>
+      <button type="button" className="search-clear" aria-label={t('关闭搜索', 'Close search')} title={t('关闭搜索', 'Close search')} onClick={closeSearch}><Icon name="close" size={12} /></button>
+    </div> : <div className="rail-heading rail-controls">
+      <strong>{t('工作区', 'Workspaces')}</strong>
+      <button type="button" className="icon-button" aria-label={t('刷新会话列表', 'Refresh conversations')} title={t('刷新会话列表', 'Refresh conversations')} onClick={() => void load()}><Icon name="refresh" size={14} /></button>
+      <button type="button" className="icon-button" aria-label={t('搜索会话', 'Search conversations')} title={t('搜索会话', 'Search conversations')} aria-expanded={false} onClick={() => { setPopoverOpen(false); setSearchExpanded(true); }}><Icon name="search" size={15} /></button>
+      <Popover.Root open={popoverOpen} onOpenChange={setPopoverOpen}>
+        <Popover.Trigger asChild><button type="button" className="icon-button" aria-label={t('添加工作区', 'Add workspace')} title={t('添加工作区', 'Add workspace')}><Icon name="plus" size={16} /></button></Popover.Trigger>
+        <Popover.Portal>
+          <Popover.Content className="workspace-pop" side="bottom" align="start" sideOffset={6} aria-label={t('添加工作区', 'Add workspace')} onEscapeKeyDown={keepEscape}>
+            <label>
+              <span>{t('现有目录', 'Existing directory')}</span>
+              <input type="text" value={projectDraft} placeholder={t('输入目录路径', 'Enter a directory path')} aria-label={t('工作区目录路径', 'Workspace directory path')} title={projectDraft} disabled={addingProject}
+                onChange={(event) => { setProjectDraft(event.target.value); setProjectFailure(''); }}
+                onKeyDown={(event) => {
+                  if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+                  if (event.key === 'Enter') { event.preventDefault(); void addProject(); }
+                }}
+              />
+            </label>
+            {projectFailure !== '' && <div className="workspace-failure" role="alert">{projectFailure}</div>}
+            <div>
+              <Popover.Close asChild><button type="button" disabled={addingProject}>{t('取消', 'Cancel')}</button></Popover.Close>
+              <button type="button" disabled={addingProject || projectDraft.trim() === ''} onClick={() => void addProject()}>{addingProject ? t('检查中…', 'Checking…') : t('确认', 'Add')}</button>
+            </div>
+            {hidden.length > 0 && <section>
+              <h4>{t('已从侧栏隐藏', 'Hidden from sidebar')}</h4>
+              {hidden.map(root => <p key={root}><span title={root}>{pathLeaf(root) || root}</span><button type="button" onClick={() => restoreWorkspace(root)}>{t('恢复', 'Restore')}</button></p>)}
+            </section>}
+          </Popover.Content>
+        </Popover.Portal>
+      </Popover.Root>
+    </div>}
 
     {hits !== null && searchNote !== '' && <div className="rail-warning" role="status">{searchNote}</div>}
     {hits !== null && hits.length === 0 && searchNote === '' && <div className="rail-empty">
@@ -362,53 +394,6 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
     })}
 
     {hits === null && <>
-      <div className="rail-heading">
-        <strong>{t('工作区', 'Workspaces')}</strong>
-        <button type="button" className="icon-button" aria-label={t('刷新会话列表', 'Refresh conversations')} title={t('刷新会话列表', 'Refresh conversations')} onClick={() => void load()}><Icon name="refresh" size={14} /></button>
-        <Popover.Root open={popoverOpen} onOpenChange={setPopoverOpen}>
-          <Popover.Trigger asChild>
-            <button type="button" className="icon-button" aria-label={t('添加工作区', 'Add workspace')} title={t('添加工作区', 'Add workspace')}><Icon name="plus" size={16} /></button>
-          </Popover.Trigger>
-          <Popover.Portal>
-            <Popover.Content className="workspace-pop" side="bottom" align="start" sideOffset={6} aria-label={t('添加工作区', 'Add workspace')} onEscapeKeyDown={keepEscape}>
-              <label>
-                <span>{t('现有目录', 'Existing directory')}</span>
-                <input
-                  type="text"
-                  value={projectDraft}
-                  placeholder={t('输入目录路径', 'Enter a directory path')}
-                  aria-label={t('工作区目录路径', 'Workspace directory path')}
-                  title={projectDraft}
-                  disabled={addingProject}
-                  onChange={(event) => { setProjectDraft(event.target.value); setProjectFailure(''); }}
-                  onKeyDown={(event) => {
-                    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
-                    if (event.key === 'Enter') {
-                      event.preventDefault();
-                      void addProject();
-                    }
-                  }}
-                />
-              </label>
-              {projectFailure !== '' && <div className="workspace-failure" role="alert">{projectFailure}</div>}
-              <div>
-                <Popover.Close asChild><button type="button" disabled={addingProject}>{t('取消', 'Cancel')}</button></Popover.Close>
-                <button type="button" disabled={addingProject || projectDraft.trim() === ''} onClick={() => void addProject()}>
-                  {addingProject ? t('检查中…', 'Checking…') : t('确认', 'Add')}
-                </button>
-              </div>
-              {hidden.length > 0 && <section>
-                <h4>{t('已从侧栏隐藏', 'Hidden from sidebar')}</h4>
-                {hidden.map(root => <p key={root}>
-                  <span title={root}>{pathLeaf(root) || root}</span>
-                  <button type="button" onClick={() => restoreWorkspace(root)}>{t('恢复', 'Restore')}</button>
-                </p>)}
-              </section>}
-            </Popover.Content>
-          </Popover.Portal>
-        </Popover.Root>
-      </div>
-
       {failures.length > 0 && <details className="rail-warning">
         <summary>{t('有工作区无法读取', 'Some workspaces could not be read')} · {failures.length}</summary>
         <div>
@@ -436,7 +421,7 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
               onClick={() => setFolded(now => ({ ...now, [group.identity]: !now[group.identity] }))}
             >
               <Icon name={isFolded ? 'unfold' : 'fold'} size={13} />
-              <Icon name="folder" size={14} />
+              <Icon name={isFolded ? 'folder' : 'folderOpen'} size={14} />
               <span className="group-root">{group.label}{group.isDefault ? ` · ${t('默认', 'Default')}` : ''}</span>
             </button>
             <span className="group-count">{sessions.length}</span>
@@ -458,16 +443,13 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
               </DropdownMenu.Portal>
             </DropdownMenu.Root>
           </h3>
-          {isFolded && <div className="rail-empty">{t(`已收起 ${sessions.length} 个会话`, `${sessions.length} conversations collapsed`)}</div>}
-          {!isFolded && sessions.length === 0 && <div className="rail-empty">
-            {group.sessions.length === 0 ? t('此工作区还没有会话。', 'No conversations in this workspace yet.') : t('归档会话已隐藏。', 'Archived conversations are hidden.')}
-          </div>}
+          {!isFolded && sessions.length === 0 && group.sessions.length > 0 && <div className="rail-empty">{t('归档会话已隐藏。', 'Archived conversations are hidden.')}</div>}
           {!isFolded && sessions.map(sessionRow)}
         </section>;
       })}
       {visibleLoose.length > 0 && <section className="rail-loose">
-        <h3 className="group-label"><Icon name="folder" size={14} /><span className="group-root">{t('其他会话', 'Other conversations')}</span><span className="group-count">{visibleLoose.length}</span></h3>
-        {visibleLoose.map(sessionRow)}
+        <h3 className="group-label"><button type="button" className="group-fold" aria-expanded={!otherFolded} onClick={() => setOtherFolded(value => !value)}><Icon name={otherFolded ? 'unfold' : 'fold'} size={13} /><Icon name="folder" size={14} /><span className="group-root">{t('其他会话', 'Other conversations')}</span></button><span className="group-count">{visibleLoose.length}</span></h3>
+        {!otherFolded && visibleLoose.map(sessionRow)}
       </section>}
       {archivedCount > 0 && <button type="button" className="rail-archive" aria-pressed={showArchived} onClick={() => setShowArchived(value => !value)}>
         {showArchived ? t('隐藏归档', 'Hide archived') : t(`显示归档会话 ${archivedCount}`, `Show archived conversations ${archivedCount}`)}

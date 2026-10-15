@@ -442,6 +442,181 @@ test('opening a session with no record on disk is refused, and an unknown method
 
 // 同一份协议的第二种载体（D33 的终端界面走的就是这一条）：Host 与客户端在同一个进程里，
 // 两端是两根内存流，帧的写法与子进程那一条一模一样，协议与 connection.ts 都没有为它改动。
+
+test('serveHost releases the Host exactly once when either carrier stream closes or fails', async () => {
+  for (const origin of ['input-close', 'input-error', 'output-close', 'output-error']) {
+    const pair = createMemoryConnectionPair();
+    const config = createConfig({
+      user: { boundary: process.cwd(), model: { api: 'chat-completions', baseURL: 'https://example.test/v1', model: 'dummy' }, policy: { mode: 'ask' } },
+    });
+    const host = serveHost({ ...pair.host, config, provider: providerFromConfig(config), policy: config.policy });
+    const release = host.release.bind(host);
+    let released = 0;
+    host.release = () => { released += 1; return release(); };
+    if (origin === 'input-close') pair.host.input.emit('close');
+    else if (origin === 'input-error') pair.host.input.emit('error', new Error('read failed'));
+    else if (origin === 'output-close') pair.host.output.emit('close');
+    else pair.host.output.emit('error', new Error('write failed'));
+    pair.host.input.emit('end');
+    pair.host.output.emit('close');
+    assert.equal(released, 1, origin);
+    await host.release();
+    pair.host.input.destroy();
+    pair.host.output.destroy();
+  }
+});
+
+
+test('model discovery binds stored credentials to an allowed project endpoint, not arbitrary HTTPS targets', async () => {
+  const reference = 'LIGULE_BOUND_MODEL_TEST_KEY';
+  const prior = process.env[reference];
+  const originalFetch = globalThis.fetch;
+  process.env[reference] = 'stored-discovery-secret';
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, authorization: options.headers.authorization });
+    return new Response(JSON.stringify({ data: [{ id: 'listed-model' }] }), {
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+  const config = createConfig({ user: {
+    boundary: process.cwd(), policy: { mode: 'ask' },
+    model: {
+      api: 'chat-completions', baseURL: 'https://legacy.example/v1', model: 'legacy-model', apiKeyEnv: reference,
+      services: [{ id: 'saved', name: 'Saved', api: 'chat-completions', baseURL: 'https://saved.example/v1', apiKeyEnv: reference, models: ['saved-model'] }],
+    },
+  } });
+  const pair = createMemoryConnectionPair();
+  const host = serveHost({ ...pair.host, config, configLayers: { user: { model: config.model } }, provider: providerFromConfig(config), policy: config.policy });
+  const client = createConnection(pair.client);
+  const discover = (baseURL, key = reference, extra = {}) => client.request('models.discover', {
+    api: 'chat-completions', baseURL, reference: key, ...extra,
+  });
+  try {
+    await assert.rejects(discover('https://attacker.example/v1'), { code: 'model_discovery_credential_unbound' });
+    await assert.rejects(discover('https://saved.example/v1', 'ANOTHER_VALID_REFERENCE'), { code: 'model_discovery_credential_unbound' });
+    assert.equal(calls.length, 0, 'no credential can be sent to arbitrary target or by unbound reference');
+    assert.deepEqual((await discover('https://saved.example/v1')).models, ['listed-model']);
+    assert.deepEqual((await discover('https://legacy.example/v1')).models, ['listed-model']);
+    assert.equal(calls.length, 2);
+    assert.ok(calls.every(call => call.authorization === 'Bearer stored-discovery-secret'));
+    assert.deepEqual((await discover('https://preview.example/v1', 'PREVIEW_KEY', { temporaryKey: 'user-typed-preview' })).models, ['listed-model']);
+    assert.equal(calls[2].authorization, 'Bearer user-typed-preview');
+    await assert.rejects(discover('https://saved.example/v1', reference, { projectRoot: '/unrecognized-discovery-workspace' }),
+      { code: 'host_project_root_unsupported' });
+    assert.equal(calls.length, 3);
+  } finally {
+    pair.client.output.end();
+    await host.release();
+    pair.client.input.destroy();
+    pair.host.input.destroy();
+    if (prior === undefined) delete process.env[reference];
+    else process.env[reference] = prior;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+
+test('untrusted workspace model services cannot borrow the user keyring or environment credential', async () => {
+  const reference = 'LIGULE_USER_ONLY_DISCOVERY_SECRET';
+  const before = process.env[reference];
+  const originalFetch = globalThis.fetch;
+  process.env[reference] = 'sensitive-user-key';
+  const fetches = [];
+  globalThis.fetch = async (url, options) => {
+    fetches.push({ url, authorization: options.headers.authorization });
+    return new Response(JSON.stringify({ data: [{ id: 'expected-model' }] }), {
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+  const trustedService = {
+    id: 'safe', name: 'Trusted', api: 'chat-completions', baseURL: 'https://safe.example/v1',
+    apiKeyEnv: reference, models: ['expected-model'],
+  };
+  const maliciousService = {
+    ...trustedService, id: 'poisoned', name: 'Shared project', baseURL: 'https://attacker.example/v1',
+  };
+  const user = {
+    boundary: process.cwd(), policy: { mode: 'ask' },
+    model: {
+      api: 'chat-completions', baseURL: 'https://legacy-safe.example/v1', model: 'legacy-model',
+      apiKeyEnv: reference, services: [trustedService],
+    },
+  };
+  const project = {
+    model: {
+      api: 'chat-completions', baseURL: maliciousService.baseURL, model: 'project-model',
+      apiKeyEnv: reference, services: [maliciousService],
+    },
+  };
+  const local = { model: { services: [{ ...maliciousService, id: 'local-poison' }] } };
+  const flag = { model: { services: [{ ...maliciousService, id: 'flag-poison' }] } };
+  const config = createConfig({ user, project, local, flag });
+  const pair = createMemoryConnectionPair();
+  const host = serveHost({
+    ...pair.host, config, configLayers: { user, project, local, flag },
+    provider: providerFromConfig(config), policy: config.policy,
+  });
+  const client = createConnection(pair.client);
+  const discover = (baseURL, extra = {}) => client.request('models.discover', {
+    api: 'chat-completions', baseURL, reference, ...extra,
+  });
+  try {
+    await assert.rejects(discover('https://attacker.example/v1'), { code: 'model_discovery_credential_unbound' });
+    assert.equal(fetches.length, 0, 'all untrusted layer services must fail before credential resolution and fetch');
+    assert.deepEqual((await discover('https://safe.example/v1')).models, ['expected-model']);
+    assert.deepEqual((await discover('https://legacy-safe.example/v1')).models, ['expected-model']);
+    assert.ok(fetches.every(({ authorization }) => authorization === 'Bearer sensitive-user-key'));
+    assert.deepEqual((await discover('https://attacker.example/v1', { temporaryKey: 'explicitly-entered-key' })).models, ['expected-model']);
+    assert.equal(fetches.at(-1).authorization, 'Bearer explicitly-entered-key',
+      'project-provided endpoints can only receive the key explicitly supplied for this request');
+  } finally {
+    pair.client.output.end();
+    await host.release();
+    pair.client.input.destroy();
+    pair.host.input.destroy();
+    globalThis.fetch = originalFetch;
+    if (before === undefined) delete process.env[reference];
+    else process.env[reference] = before;
+  }
+});
+
+test('a project-only configured model cannot resolve existing credentials for discovery', async () => {
+  const reference = 'LIGULE_PROJECT_ONLY_LEAK_TEST';
+  const prior = process.env[reference];
+  const oldFetch = globalThis.fetch;
+  process.env[reference] = 'must-not-escape';
+  let fetchCount = 0;
+  globalThis.fetch = async () => { fetchCount += 1; throw new Error('network must never be called'); };
+  const project = { model: {
+    api: 'chat-completions', baseURL: 'https://attacker.example/v1', model: 'project-model',
+    apiKeyEnv: reference,
+    services: [{ id: 'attacker', name: 'Attacker', api: 'chat-completions',
+      baseURL: 'https://attacker.example/v1', apiKeyEnv: reference, models: ['foo'] }],
+  } };
+  const config = createConfig({ user: { boundary: process.cwd(), policy: { mode: 'ask' } }, project });
+  const pair = createMemoryConnectionPair();
+  const host = serveHost({
+    ...pair.host, config, configLayers: { project },
+    provider: providerFromConfig(config), policy: config.policy,
+  });
+  const client = createConnection(pair.client);
+  try {
+    await assert.rejects(client.request('models.discover', {
+      api: 'chat-completions', baseURL: 'https://attacker.example/v1', reference,
+    }), { code: 'model_discovery_credential_unbound' });
+    assert.equal(fetchCount, 0);
+  } finally {
+    pair.client.output.end();
+    await host.release();
+    pair.client.input.destroy();
+    pair.host.input.destroy();
+    globalThis.fetch = oldFetch;
+    if (prior === undefined) delete process.env[reference];
+    else process.env[reference] = prior;
+  }
+});
+
 test('the same protocol runs over an in-memory carrier inside one process', async () => {
   await withEndpoint(async (baseUrl) => {
     const directory = await mkdtemp(join(tmpdir(), 'ligule-memory-'));
@@ -1516,6 +1691,9 @@ test('a session overrides the approval tier without touching the settings file',
     const after = await connection.request('status.get', { sessionId });
     assert.equal(after.policy, 'auto');
     assert.equal(after.policySource, 'session');
+    const noApproval = await connection.request('policy.set', { sessionId, mode: 'never' });
+    assert.equal(noApproval.policy, 'never');
+    assert.equal((await connection.request('status.get', { sessionId })).policy, 'never');
     const back = await connection.request('policy.set', { sessionId, mode: 'default' });
     assert.equal(back.policySource, 'config');
     assert.equal(back.policy, before.policy);

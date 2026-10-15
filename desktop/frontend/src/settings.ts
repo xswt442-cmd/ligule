@@ -19,6 +19,10 @@ export type Settings = {
   // 配色方案：六套具名方案选一枚，落在根元素的 `data-palette` 上。存本机界面偏好，不进记录、不进配置（D90）。
   palette: Palette;
   font: 'small' | 'medium' | 'large';
+  fontUi: number;
+  fontUser: number;
+  fontAssistant: number;
+  transcriptLineHeight: number;
   sidebar: number;
   dock: 'right' | 'left';
   verbosity: Verbosity;
@@ -44,6 +48,10 @@ export const defaultSettings: Settings = {
   newSelections: {},
   palette: 'ink',
   font: 'medium',
+  fontUi: 16,
+  fontUser: 14,
+  fontAssistant: 14,
+  transcriptLineHeight: 1.6,
   sidebar: 280,
   dock: 'right',
   verbosity: 'standard',
@@ -116,6 +124,11 @@ export function settingsFrom(raw: unknown): Settings {
     notifications: notificationsFrom(value.notifications),
     palette: oneOf(value.palette, [...PALETTES], 'ink'),
     font: oneOf(value.font, ['small', 'medium', 'large'], 'medium'),
+    fontUi: clamped(value.fontUi, 10, 24, value.font === 'small' ? 15 : value.font === 'large' ? 18 : 16),
+    fontUser: clamped(value.fontUser, 12, 32, 14),
+    fontAssistant: clamped(value.fontAssistant, 12, 32, 14),
+    transcriptLineHeight: typeof value.transcriptLineHeight === 'number' && value.transcriptLineHeight >= 1.2 && value.transcriptLineHeight <= 2.4
+      ? Math.round(value.transcriptLineHeight * 10) / 10 : 1.6,
     sidebar: clamped(value.sidebar, 264, 420, defaultSettings.sidebar),
     dock: oneOf(value.dock, ['right', 'left'], 'right'),
     verbosity: oneOf(value.verbosity, VERBOSITY, 'standard'),

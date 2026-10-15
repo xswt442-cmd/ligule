@@ -73,7 +73,7 @@ async function check(name, action) {
     note(name, '通过', detail);
   } catch (error) {
     failed = true;
-    note(name, '失败', '真实模型交互未达到预期；只记录稳定错误码。', stableErrorCode(error));
+    note(name, '失败', `交互未达到预期，位置 ${safeErrorLocation(error)}；只记录稳定错误码。`, stableErrorCode(error));
   }
 }
 
@@ -198,6 +198,10 @@ async function createApplication() {
             code: event.code,
             tool: event.tool,
             resultKind: event.result?.kind,
+            resultFailed: event.result?.failed === true,
+            resultHasSkillProof: JSON.stringify(event.result?.content ?? null).includes('SKILL_LOAD_PROOF'),
+            resultHasSchemaDigest: JSON.stringify(event.result?.content ?? null).includes('schemaDigest'),
+            resultHasMcpProof: JSON.stringify(event.result?.content ?? null).includes('echo: MCP_LOADING_PROOF'),
             resultCode: event.result?.code,
           }));
         }
@@ -216,6 +220,24 @@ async function waitFor(expression, timeoutMs, failureCode) {
     await new Promise(resolvePromise => setTimeout(resolvePromise, 150));
   }
   throw Object.assign(new Error(failureCode), { code: failureCode });
+}
+
+async function allowApproval(tool, previousCount, failureCode) {
+  const expected = JSON.stringify(tool);
+  await waitFor(
+    `window.__realModelFrames.filter(frame => frame.method === 'approval.request').length > ${previousCount}`
+      + ` && document.querySelector('.approval .row-tool')?.textContent.trim() === ${expected}`,
+    15_000,
+    failureCode,
+  );
+  const clicked = await evaluate(`(() => {
+    const card = [...document.querySelectorAll('.approval')].find(item => item.querySelector('.row-tool')?.textContent.trim() === ${expected});
+    const button = card?.querySelector('button[data-tone="allow"]');
+    if (button === undefined || button === null) return false;
+    button.click();
+    return true;
+  })()`);
+  if (clicked !== true) throw Object.assign(new Error(`${tool}_approval_action_missing`), { code: `${tool.replace(/[^a-z0-9]+/giu, '_')}_approval_action_missing` });
 }
 
 async function enterAndSend(text) {
@@ -315,6 +337,52 @@ async function runChecks() {
     return '真实 Host 请求 create 审批；界面允许后由 Host 写入目标文件并记录 result';
   });
 
+  const stubControl = process.env.LIGULE_STUB_CONTROL;
+  if (typeof stubControl === 'string' && stubControl !== '') {
+    await check(`${providerLabel}Skill 与 MCP 装载`, async () => {
+      if (typeof sessionId !== 'string') throw Object.assign(new Error('skill_mcp_session_unavailable'), { code: 'skill_mcp_session_unavailable' });
+      const approvalCount = await evaluate(`window.__realModelFrames.filter(frame => frame.method === 'approval.request').length`);
+      await enterAndSend('执行 desktop-skill-mcp-load-proof：激活 desktop-smoke Skill，按其说明检查 MCP echo，并完成加载验证。');
+      await waitFor(`window.__realModelFrames.filter(frame => frame.method === 'approval.request').length > ${approvalCount}`, 60_000, 'skill_activation_approval_missing');
+      const skillApproval = await evaluate(`window.__realModelFrames.filter(frame => frame.method === 'approval.request').at(-1)?.approvalTool ?? null`);
+      if (skillApproval !== 'skill') throw Object.assign(new Error('skill_activation_approval_not_requested'), { code: 'skill_activation_approval_not_requested' });
+      await allowApproval('skill', approvalCount, 'skill_mcp_approval_card_missing');
+      await waitFor(`window.__realModelFrames.filter(frame => frame.method === 'approval.request').length > ${approvalCount + 1}`, 60_000, 'mcp_inspect_approval_missing');
+      const inspectApproval = await evaluate(`window.__realModelFrames.filter(frame => frame.method === 'approval.request').at(-1)?.approvalTool ?? null`);
+      if (inspectApproval !== 'mcp.inspect') throw Object.assign(new Error('mcp_inspect_approval_not_requested'), { code: 'mcp_inspect_approval_not_requested' });
+      await allowApproval('mcp.inspect', approvalCount + 1, 'mcp_inspect_approval_card_missing');
+      await waitFor(`window.__realModelFrames.filter(frame => frame.method === 'approval.request').length > ${approvalCount + 2}`, 60_000, 'mcp_call_approval_missing');
+      const mcpApproval = await evaluate(`window.__realModelFrames.filter(frame => frame.method === 'approval.request').at(-1)?.approvalTool ?? null`);
+      if (mcpApproval !== 'mcp:fixture/echo') throw Object.assign(new Error('mcp_effective_capability_approval_not_requested'), { code: 'mcp_effective_capability_approval_not_requested' });
+      await allowApproval('mcp:fixture/echo', approvalCount + 2, 'mcp_approval_card_missing');
+      await waitForSessionIdle(60_000, 'skill_mcp_turn_did_not_finish');
+
+      const record = await requestHost('session.read', { sessionId, fullResults: true });
+      const events = record.events ?? [];
+      const skill = events.findLast(event => event.kind === 'tool' && event.tool === 'skill');
+      const inspect = events.findLast(event => event.kind === 'tool' && event.tool === 'mcp.inspect');
+      const call = events.findLast(event => event.kind === 'tool' && event.tool === 'mcp.call');
+      if (skill?.resultKind !== 'result' || skill.resultFailed) throw Object.assign(new Error('skill_activation_result_missing'), { code: 'skill_activation_result_missing' });
+      if (skill.resultHasSkillProof !== true) throw Object.assign(new Error('project_skill_body_not_loaded'), { code: 'project_skill_body_not_loaded' });
+      if (inspect?.resultKind !== 'result' || inspect.resultFailed) throw Object.assign(new Error('mcp_stdio_tool_definition_not_loaded'), { code: 'mcp_stdio_tool_definition_not_loaded' });
+      if (inspect.resultHasSchemaDigest !== true) throw Object.assign(new Error('mcp_definition_digest_missing'), { code: 'mcp_definition_digest_missing' });
+      if (call?.resultKind !== 'result' || call.resultFailed) throw Object.assign(new Error('mcp_tool_call_not_completed'), { code: 'mcp_tool_call_not_completed' });
+      if (call.resultHasMcpProof !== true) throw Object.assign(new Error('mcp_fixture_result_missing'), { code: 'mcp_fixture_result_missing' });
+
+      const response = await fetch(`${stubControl}/state`);
+      const state = await response.json();
+      for (const [key, code] of [
+        ['catalogLoaded', 'skill_mcp_catalog_not_loaded'],
+        ['skillActivated', 'skill_mcp_skill_not_activated'],
+        ['mcpDefinitionLoaded', 'skill_mcp_definition_not_loaded'],
+        ['mcpCallSucceeded', 'skill_mcp_call_not_completed'],
+      ]) {
+        if (state.skillMcpProof?.[key] !== true) throw Object.assign(new Error(code), { code });
+      }
+      return '真实 Electron 窗口通过 Node Host 装载项目 Skill，启动 stdio MCP fixture、读取 echo 定义并完成经审批的工具调用';
+    });
+  }
+
   await check(`${providerLabel}流式取消`, async () => {
     if (typeof sessionId !== 'string') throw Object.assign(new Error('approval_session_unavailable'), { code: 'approval_session_unavailable' });
     await enterAndSend('请用中文连续写一篇很长的说明，至少输出三千字，不要调用工具。');
@@ -328,7 +396,6 @@ async function runChecks() {
   });
 
   // 只在本地 stub 提供方下执行：真实提供方无法按需制造「请求已发出、永远没有答案」的那一刻。
-  const stubControl = process.env.LIGULE_STUB_CONTROL;
   if (typeof stubControl === 'string' && stubControl !== '') {
     await check(`${providerLabel}宿主崩溃后的界面重连`, async () => {
       if (typeof sessionId !== 'string') throw Object.assign(new Error('approval_session_unavailable'), { code: 'approval_session_unavailable' });
@@ -358,13 +425,16 @@ async function runChecks() {
       const reconnectButton = `[...document.querySelectorAll('.banner[role="alert"] button')].find((button) => /重新连接|Reconnect/u.test(button.textContent ?? '')) ?? null`;
       await waitFor(`${reconnectButton} !== null`, 30_000, 'disconnected_banner_missing');
       const clickAt = Date.now();
-      await evaluate(`(${reconnectButton}).click(); true`);
+      await evaluate(`{ const button = (${reconnectButton}); button.click(); button.click(); } true`);
       let cleared = false;
       while (Date.now() < clickAt + 45_000) {
         if (await evaluate(`${reconnectButton} === null`)) { cleared = true; break; }
         await new Promise(resolvePromise => setTimeout(resolvePromise, 1_000));
       }
       if (!cleared) throw Object.assign(new Error('reconnect_did_not_recover'), { code: 'reconnect_did_not_recover' });
+      if (await evaluate(`/无法启动后端|Could not start the host/u.test(document.body.innerText)`)) {
+        throw Object.assign(new Error('repeated_reconnect_started_another_lifecycle'), { code: 'repeated_reconnect_started_another_lifecycle' });
+      }
       // 横幅消失只说明壳已经换了一具进程：`session.open` 可能还在路上，接回原来那一份之前
       // `session.read` 会答 session_not_open。等 Host 真的持有这一份会话再断言，最多 25 秒。
       const reopenDeadline = Date.now() + 25_000;

@@ -1,6 +1,6 @@
 // 左侧栏那一份分组规则的唯一检查：跑 `node dev/rail.check.mjs`，坏了就非零退出（方案 5.5.4）。
 import assert from 'node:assert/strict';
-import { createCallOf, groupByWorkspace, visibleRoots } from '../src/rail.ts';
+import { createCallOf, groupByWorkspace, loadWorkspacePages, visibleRoots } from '../src/rail.ts';
 
 const base = {
   formatVersion: 1,
@@ -70,5 +70,30 @@ assert.deepEqual(
   ['e:\\work\\beta', 'e:\\work\\alpha'],
   '登记里每一具工作区都有自己的组，窗口没指着它也一样：还没有会话的那一组排后面，人能在那里面新建',
 );
+
+let pendingCalls = 0;
+let peakPendingCalls = 0;
+let busyCalls = 0;
+const client = {
+  async call(method, params) {
+    assert.equal(method, 'sessions.list');
+    assert.ok(params.projectRoot.startsWith('C:\\stress\\workspace-'));
+    if (pendingCalls >= 64) {
+      busyCalls += 1;
+      throw new Error('desktop_ipc_busy');
+    }
+    pendingCalls += 1;
+    peakPendingCalls = Math.max(peakPendingCalls, pendingCalls);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    pendingCalls -= 1;
+    return { sessions: [] };
+  },
+};
+const stressRoots = Array.from({ length: 128 }, (_, index) => `C:\\stress\\workspace-${index}`);
+const pages = await loadWorkspacePages(stressRoots, client);
+assert.equal(pages.length, 128, '每个登记工作区都应得到独立结果');
+assert.equal(busyCalls, 0, '批量读取不能把 Electron IPC 并发上限打满');
+assert.ok(peakPendingCalls <= 8, `侧栏读取并发应受限，实际峰值为 ${peakPendingCalls}`);
+assert.equal(pages.filter((page) => page.failed !== '').length, 0, '有效批次不应把 IPC 拥塞误报为工作区不可读');
 
 console.log('左侧栏的分组检查通过');

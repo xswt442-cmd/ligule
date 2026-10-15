@@ -307,3 +307,61 @@ test('a switch asked for during a round takes effect only once that round ends',
     }
   });
 });
+
+test('a rejected mode switch preserves the current tools through the next round and recovery', async () => {
+  await withLayout(async ({ directories, projectRoot }) => {
+    await writeMode(directories, 'user', 'readonly', complete('["read"]'));
+    await writeMode(directories, 'user', 'invalid', complete('["read", "not-registered"]'));
+    await writeMode(directories, 'user', 'missing-prompt', 'tools = ["find"]\nprompt = ["absent"]\n');
+    const config = createConfig({
+      user: {
+        boundary: projectRoot,
+        model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model' },
+        policy: { mode: 'ask' },
+      },
+    });
+    const requests = [];
+    const provider = {
+      capabilities: MESSAGES_CAPABILITIES,
+      model: 'test-model',
+      async *stream(request) {
+        requests.push(request);
+        yield { type: 'text', text: 'ok' };
+      },
+    };
+    const pair = createMemoryConnectionPair();
+    const host = serveHost({
+      input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy,
+      modeName: 'readonly', modePaths: directories,
+    });
+    const connection = createConnection(pair.client);
+    try {
+      const { sessionId } = await connection.request('session.create', {});
+      assert.deepEqual((await connection.request('status.get', { sessionId })).tools, ['read']);
+
+      await assert.rejects(
+        connection.request('mode.set', { sessionId, name: 'invalid' }),
+        (error) => error.code === 'mode_tool_unregistered',
+      );
+      await assert.rejects(
+        connection.request('mode.set', { sessionId, name: 'missing-prompt' }),
+        (error) => error.code === 'mode_prompt_unavailable',
+      );
+      const afterFailures = await connection.request('status.get', { sessionId });
+      assert.equal(afterFailures.mode, 'readonly');
+      assert.deepEqual(afterFailures.tools, ['read']);
+
+      await connection.request('session.close', { sessionId });
+      await connection.request('session.open', { sessionId });
+      const recovered = await connection.request('status.get', { sessionId });
+      assert.equal(recovered.mode, 'readonly');
+      assert.deepEqual(recovered.tools, ['read']);
+
+      await connection.request('run.start', { sessionId, input: 'continue under the current mode' });
+      assert.deepEqual(requests[0].tools.map((tool) => tool.name), ['read']);
+    } finally {
+      pair.client.output.end();
+      await host.release();
+    }
+  });
+});

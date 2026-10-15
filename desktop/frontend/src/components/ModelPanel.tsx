@@ -1,13 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { code, type Client } from '../protocol';
 import { useText } from '../locale';
-import { legacyService, type ModelCatalog, type ModelService } from '../model-catalog';
+import { legacyService, presetService, type ModelCatalog, type ModelService } from '../model-catalog';
 import { Icon } from './Icon';
 import { Modal } from './ui';
 import { HoldSheet } from './HoldSheet';
 
 type Editor = { service: ModelService; models: string; key: string; original: string };
 type Credential = { source: 'environment' | 'keyring' | 'missing'; configured: boolean };
+const PRESETS = {
+  deepseek: { name: 'DeepSeek', api: 'chat-completions' as const, baseURL: 'https://api.deepseek.com/v1' },
+  openai: { name: 'OpenAI', api: 'chat-completions' as const, baseURL: 'https://api.openai.com/v1' },
+  anthropic: { name: 'Anthropic', api: 'messages' as const, baseURL: 'https://api.anthropic.com/v1' },
+};
 
 export function ModelPanel({ client, projectRoot, onEdit }: {
   client: Client;
@@ -26,6 +31,10 @@ export function ModelPanel({ client, projectRoot, onEdit }: {
   const [failure, setFailure] = useState('');
   const [note, setNote] = useState('');
   const [confirm, setConfirm] = useState<{ type: 'service' | 'key'; service: ModelService } | null>(null);
+  const [discovered, setDiscovered] = useState<string[] | null>(null);
+  const [chosenModels, setChosenModels] = useState<string[]>([]);
+  const [modelQuery, setModelQuery] = useState('');
+  const [selectedPreset, setSelectedPreset] = useState('custom');
   const request = useRef(0);
   const project = projectRoot === '' ? {} : { projectRoot };
   const changed = editor !== null && (editor.key !== '' || JSON.stringify({ ...editor.service, models: editor.models }) !== editor.original);
@@ -57,6 +66,7 @@ export function ModelPanel({ client, projectRoot, onEdit }: {
   }, [client, reference, validReference]);
 
   const begin = (service?: ModelService) => {
+    setSelectedPreset('custom');
     const id = `service_${crypto.randomUUID().slice(0, 8)}`;
     const value: ModelService = service === undefined
       ? { id, name: '', api: 'chat-completions', baseURL: '', apiKeyEnv: `LIGULE_${id.toUpperCase()}_KEY`, models: [] }
@@ -69,6 +79,30 @@ export function ModelPanel({ client, projectRoot, onEdit }: {
     setNote('');
   };
   const patch = (part: Partial<ModelService>) => setEditor(current => current === null ? null : { ...current, service: { ...current.service, ...part } });
+  const applyPreset = (id: keyof typeof PRESETS | 'custom') => {
+    setSelectedPreset(id);
+    if (id === 'custom') return;
+    const preset = PRESETS[id];
+    const existing = editor !== null && (catalog?.services ?? []).some(service => service.id === editor.service.id);
+    const service = presetService(preset, editor?.service ?? null, existing, `${id}_${crypto.randomUUID().slice(0, 8)}`);
+    setEditor({ service, models: '', key: editor?.key ?? '', original: existing ? editor.original : JSON.stringify({ ...service, models: '' }) });
+    setLayer(catalog?.sources['model.services'] === 'local' ? 'projectLocal' : 'user');
+    setFailure('');
+    setNote('');
+  };
+  const fetchModels = async () => {
+    if (editor === null || busy) return;
+    setBusy(true); setFailure(''); setNote('');
+    try {
+      // 获取模型仅使用本次输入的密钥；只有显式保存服务才允许修改凭据库。
+      const answer = await client.call('models.discover', { ...project, api: editor.service.api, baseURL: editor.service.baseURL, reference: editor.service.apiKeyEnv, ...(editor.key === '' ? {} : { temporaryKey: editor.key }) }, 20_000) as { models: string[] };
+      setDiscovered(answer.models);
+      setChosenModels(answer.models);
+      setModelQuery('');
+      if (answer.models.length === 0) setNote(t('服务没有返回可用模型，请手动填写模型标识。', 'The service returned no models. Enter model IDs manually.'));
+    } catch (error) { setFailure(code(error)); }
+    finally { setBusy(false); }
+  };
   const write = async (field: string, value: unknown, snapshot: ModelCatalog) => {
     const version = snapshot.layers.find(item => item.layer === layer)?.version;
     if (version === undefined) throw Object.assign(new Error('config_write_unsupported'), { code: 'config_write_unsupported' });
@@ -134,11 +168,23 @@ export function ModelPanel({ client, projectRoot, onEdit }: {
   const legacy = catalog === null ? null : legacyService(catalog);
   const defaultChoices = [...(legacy === null ? [] : [legacy]), ...services].flatMap(service => service.models.map(model => ({ service, model, value: JSON.stringify([service.id, model]) })));
   const defaultSelection = catalog?.selection ?? (legacy !== null ? { provider: 'legacy', model: legacy.models[0] } : services.length === 0 ? null : { provider: services[0].id, model: services[0].models[0] });
+  const filteredModels = discovered?.filter(model => model.toLowerCase().includes(modelQuery.trim().toLowerCase())) ?? [];
+  const failureMessage = failure === 'provider_credential_missing'
+    ? t('请填写 API Key 或设置对应环境变量，再获取模型。', 'Enter an API key or set its environment variable, then fetch models.')
+    : failure === 'model_discovery_credential_unbound'
+      ? t('已存储密钥仅限用户级配置中绑定的服务端点。请确认地址并填写临时 Key，或将服务保存到用户级设置。', 'Stored keys require an endpoint bound in user-level settings. Verify the address and enter a temporary key, or save the service in user-level settings.')
+      : failure === 'model_discovery_insecure_transport'
+      ? t('获取模型要求 HTTPS，或使用本机回环地址。', 'Model discovery requires HTTPS or a local loopback address.')
+      : failure === 'model_discovery_failed'
+        ? t('无法从服务获取模型。请检查网络、服务地址和凭据。', 'Could not fetch models. Check the network, endpoint, and credential.')
+      : failure === 'model_discovery_unsupported'
+        ? t('此协议暂不支持自动获取模型，请手动填写。', 'Automatic model discovery is unavailable for this protocol. Enter models manually.')
+        : t('操作未完成，请检查填写内容或凭据设施。', 'Could not complete the action. Check the fields or credential store.');
 
   return <div className="model-settings">
     <div className="settings-intro"><h2>{t('模型服务', 'Model services')}</h2><p>{t('保存服务与模型，在输入区切换。密钥使用系统凭据库，环境变量优先。', 'Save services and models, then switch in the composer. API keys use the system credential store; environment variables take priority.')}</p></div>
     {note && <p className="inline-notice" role="status">{note}</p>}
-    {failure && <div className="inline-notice" role="alert"><span>{failure === 'config_version_stale' ? t('配置已被修改，请刷新后重试。', 'Configuration changed. Refresh and retry.') : t('操作未完成，请检查填写内容或凭据设施。', 'Could not complete the action. Check the fields or credential store.')}</span><details><summary>{t('详情', 'Details')}</summary><code>{failure}</code></details><button type="button" disabled={busy} onClick={() => void load().catch(error => setFailure(code(error)))}>{t('刷新', 'Refresh')}</button></div>}
+    {failure && <div className="inline-notice" role="alert"><span>{failure === 'config_version_stale' ? t('配置已被修改，请刷新后重试。', 'Configuration changed. Refresh and retry.') : failureMessage}</span><details><summary>{t('详情', 'Details')}</summary><code>{failure}</code></details><button type="button" disabled={busy} onClick={() => void load().catch(error => setFailure(code(error)))}>{t('刷新', 'Refresh')}</button></div>}
     {editor === null ? <>
       {defaultChoices.length > 0 && <label className="service-default-select">{t('默认模型', 'Default model')}<select disabled={busy} value={JSON.stringify([defaultSelection?.provider, defaultSelection?.model])} onChange={event => { const choice = defaultChoices.find(item => item.value === event.target.value); if (choice !== undefined) void selectDefault(choice.service, choice.model); }}>{defaultChoices.map(choice => <option key={choice.value} value={choice.value}>{choice.service.id === 'legacy' ? t('现有配置', 'Existing configuration') : choice.service.name} / {choice.model}</option>)}</select></label>}
       {legacy !== null && <div className="service-row"><Icon name="spark" /><div><strong>{t('现有模型配置', 'Existing model configuration')}</strong><span>{legacy.models[0]}</span></div><button type="button" onClick={() => begin(legacy)}>{t('另存为服务', 'Save as a service')}</button></div>}
@@ -146,16 +192,20 @@ export function ModelPanel({ client, projectRoot, onEdit }: {
       {catalog !== null && services.length === 0 && legacy === null && <p className="model-empty">{t('添加第一个服务，即可开始对话。', 'Add your first service to start a conversation.')}</p>}
       <button type="button" className="add-service" disabled={catalog === null} onClick={() => begin()}><Icon name="plus" size={15} />{t('添加服务', 'Add service')}</button>
     </> : <form className="service-form" onSubmit={(event) => { event.preventDefault(); void save(); }}><fieldset className="service-fields" disabled={busy}>
+      <label>{t('快速配置', 'Quick setup')}<select value={selectedPreset} onChange={event => applyPreset(event.target.value as keyof typeof PRESETS | 'custom')}><option value="custom">{t('自定义兼容服务', 'Custom compatible service')}</option><option value="deepseek">DeepSeek</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option></select></label>
       <label>{t('服务名称', 'Service name')}<input value={editor.service.name} maxLength={100} onChange={event => patch({ name: event.target.value })} placeholder={t('例如 DeepSeek', 'For example, DeepSeek')} required /></label>
       <label>{t('接口类型', 'API type')}<select value={editor.service.api} onChange={event => patch({ api: event.target.value as ModelService['api'] })}><option value="chat-completions">Chat Completions</option><option value="messages">Messages</option></select></label>
       <label>{t('服务地址', 'Base URL')}<input type="url" value={editor.service.baseURL} onChange={event => patch({ baseURL: event.target.value })} placeholder="https://api.example.com/v1" required /></label>
-      <label>{t('模型', 'Models')}<textarea value={editor.models} onChange={event => setEditor({ ...editor, models: event.target.value })} placeholder={t('每行一个模型标识', 'One model ID per line')} rows={3} required /></label>
+      <label>{t('模型', 'Models')}<textarea value={editor.models} onChange={event => setEditor({ ...editor, models: event.target.value })} placeholder={t('每行一个模型标识；也可以从服务获取', 'One model ID per line, or fetch them from the service')} rows={3} required /></label>
+      <button type="button" disabled={busy || editor.service.api !== 'chat-completions' || editor.service.baseURL.trim() === '' || !/^[A-Za-z_][A-Za-z0-9_]{0,127}$/u.test(editor.service.apiKeyEnv)} onClick={() => void fetchModels()}>{busy ? t('正在获取模型…', 'Fetching models…') : t('获取可用模型', 'Fetch available models')}</button>
+      {editor.service.api !== 'chat-completions' && <p className="field-help">{t('当前协议不提供兼容的模型目录接口，请手动填写模型标识。', 'This protocol has no compatible model directory endpoint. Enter model IDs manually.')}</p>}
       <label>{t('API Key', 'API key')}<input type="password" autoComplete="new-password" value={editor.key} disabled={credential?.source === 'environment'} onChange={event => setEditor({ ...editor, key: event.target.value })} placeholder={credential?.configured ? t('已设置。输入新密钥可替换。', 'Configured. Enter a new key to replace it.') : t('输入密钥，或使用环境变量', 'Enter a key, or use an environment variable')} /></label>
       <p className="field-help">{credential?.source === 'environment' ? t('当前由环境变量提供。请在启动环境中修改或删除。', 'Supplied by the environment. Change or remove it in the launching environment.') : credentialError ? t('系统凭据库暂不可用。可以设置下方环境变量。', 'System credential store is unavailable. You can use the environment variable below.') : t('保存后不显示密钥原文。留空会保留已存密钥。', 'Saved keys are not shown. Leave blank to keep the stored key.')}</p>
       {credential?.source === 'keyring' && <button type="button" className="text-button" onClick={() => setConfirm({ type: 'key', service: editor.service })}>{t('删除已存密钥', 'Delete stored key')}</button>}
       <details><summary>{t('凭据引用与保存位置', 'Credential reference and save location')}</summary><div className="service-advanced"><label>{t('环境变量名', 'Environment variable')}<input value={editor.service.apiKeyEnv} onChange={event => patch({ apiKeyEnv: event.target.value })} pattern="[A-Za-z_][A-Za-z0-9_]*" maxLength={128} required /></label><label>{t('保存到', 'Save to')}<select value={layer} onChange={event => setLayer(event.target.value)}><option value="user">{t('用户配置', 'User configuration')}</option><option value="projectLocal">{t('项目本地配置', 'Project local configuration')}</option></select></label></div></details>
       <div className="form-actions"><button type="button" disabled={busy} onClick={() => { if (changed) setLeaving(true); else setEditor(null); }}>{t('返回列表', 'Back to services')}</button><button type="submit" className="primary-button" disabled={busy || !validReference}>{busy ? t('保存中…', 'Saving…') : t('保存服务', 'Save service')}</button></div>
     </fieldset></form>}
+    {discovered !== null && <Modal title={t('选择要添加的模型', 'Choose models to add')} className="confirm model-discovery" onClose={() => setDiscovered(null)}><h2 className="confirm-lead">{t(`服务返回 ${discovered.length} 个模型`, `The service returned ${discovered.length} models`)}</h2><div className="model-discovery-tools"><input aria-label={t('搜索模型', 'Search models')} placeholder={t('搜索模型', 'Search models')} value={modelQuery} onChange={event => setModelQuery(event.target.value)} /><button type="button" disabled={discovered.length === 0} onClick={() => setChosenModels(chosenModels.length === discovered.length ? [] : discovered)}>{chosenModels.length === discovered.length ? t('取消全选', 'Deselect all') : t('全选', 'Select all')}</button></div><div className="model-discovery-list">{discovered.length === 0 ? <p className="stub">{t('服务没有返回模型。', 'The service returned no models.')}</p> : filteredModels.length === 0 ? <p className="stub">{t('没有匹配的模型。', 'No matching models.')}</p> : filteredModels.map(model => <label key={model}><input type="checkbox" checked={chosenModels.includes(model)} onChange={event => setChosenModels(current => event.target.checked ? [...current, model] : current.filter(item => item !== model))} /><span>{model}</span></label>)}</div><div className="confirm-actions"><button type="button" onClick={() => setDiscovered(null)}>{t('取消', 'Cancel')}</button><button type="button" className="primary-button" disabled={chosenModels.length === 0} onClick={() => { const current = editor?.models.split('\n').map(item => item.trim()).filter(Boolean) ?? []; setEditor(value => value === null ? null : { ...value, models: [...new Set([...current, ...chosenModels])].join('\n') }); setDiscovered(null); }}>{t(`添加所选（${chosenModels.length}）`, `Add selected (${chosenModels.length})`)}</button></div></Modal>}
     {confirm !== null && <Modal title={confirm.type === 'key' ? t('删除密钥？', 'Delete API key?') : t('删除服务？', 'Delete service?')} className="confirm" onClose={() => { if (!busy) setConfirm(null); }}><h2 className="confirm-lead">{confirm.type === 'key' ? t('删除已存密钥？', 'Delete the stored API key?') : t(`删除服务“${confirm.service.name}”？`, `Delete “${confirm.service.name}”?`)}</h2><p className="confirm-note">{confirm.type === 'key' ? t('使用相同凭据引用的服务都将受到影响。', 'All services using this credential reference will be affected.') : t('会话记录和已存密钥将保留。在用会话保留当前连接，直到重新选择。', 'Conversation history and stored keys are kept. Sessions using this service retain their connection until another selection is made.')}</p><div className="confirm-actions"><button type="button" disabled={busy} onClick={() => setConfirm(null)}>{t('取消', 'Cancel')}</button><button type="button" disabled={busy} onClick={() => void remove()}>{t('删除', 'Delete')}</button></div></Modal>}
     {leaving && <HoldSheet lead={t('放弃未保存的修改？', 'Discard unsaved changes?')} reasons={[t('模型服务有未保存的修改', 'Model service has unsaved changes')]} onStay={() => setLeaving(false)} onLeave={() => { setLeaving(false); setEditor(null); }} />}
   </div>;

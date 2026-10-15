@@ -44,7 +44,8 @@ import { createAskUserPlugin } from '../tools/ask-user.js';
 import { createMcpRegistry, mcpServerConfigs, type McpRegistry } from '../capability/mcp.js';
 import { createMessagesProvider } from '../model/messages.js';
 import { createChatCompletionsProvider } from '../model/chat-completions.js';
-import { DEFAULT_RETRY, type ProviderCapabilities, type RetryPolicy } from '../model/http.js';
+import { discoverModels } from '../model/discovery.js';
+import { apiRoot, DEFAULT_RETRY, type ProviderCapabilities, type RetryPolicy } from '../model/http.js';
 import type { ModelProvider, ModelRequest, ProviderEvent } from '../kernel/loop.js';
 import { createConnection, type Connection, type HostRequest } from './connection.js';
 import { APPROVAL_METHOD, QUESTION_METHOD, isApproved, validateCall, type HostMethodParams } from './protocol.js';
@@ -692,7 +693,7 @@ export function createHost({
       return { applies };
     }
     if (env.policy?.mode === effective) return { applies: [] };
-    if (effective !== 'ask' && effective !== 'auto') throw new KernelError('policy_mode_unknown');
+    if (effective !== 'ask' && effective !== 'auto' && effective !== 'never') throw new KernelError('policy_mode_unknown');
     const applies: { sessionId: string; when: 'now' }[] = [];
     for (const [id, state] of sessions) {
       if (state.environment !== env) continue;
@@ -1135,8 +1136,8 @@ export function createHost({
       // 一件坏扩展不带走整次运行：它自己的登记全撤掉，别一条诊断，装载继续（D37 的承诺只到暴露面为止）。
       logger?.log?.('extension is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
     }
-    // 应用一份模式：先按新清单挑出提示词片段，再撤销上一次那一项收紧，然后装上新的片段。
-    // 挑片段放在撤销之前：那一格写错了名字时不该留下「旧的已撤、新的没上」这一中间状态。
+    // 应用一份模式：先按新清单挑出提示词片段，叠加新工具限制并装好片段，最后才撤销旧限制。
+    // 任一步校验或装配失败都保留旧模式，避免出错后工具清单意外变宽。
     // 记录里这一条是给「两条用户输入之间各自用的是哪一份清单」用的（I2、I5）；
     // 收紧只减不加，被藏起来的那几件仍然留在登记表里（I4）。
     state.adopt = async (file) => {
@@ -1151,14 +1152,25 @@ export function createHost({
             }
             return found;
           });
-      state.mode.undo();
+      // applyMode validates against the full registered tool set and adds its own restriction.
+      // Install it while the old restriction is still active so a rejected mode cannot expose the full set.
       const applied = applyMode(kernel, file);
-      const fragmentUndo = selected.map((fragment, index) => prompt.fragment({
-        name: `extension:${fragment.name}`,
-        anchor: 2 + index,
-        text: fragment.text,
-        maxBytes: limitsOf(config).promptFragmentBytes,
-      }));
+      const fragmentUndo: (() => void)[] = [];
+      try {
+        selected.forEach((fragment, index) => {
+          fragmentUndo.push(prompt.fragment({
+            name: `extension:${fragment.name}`,
+            anchor: 2 + index,
+            text: fragment.text,
+            maxBytes: limitsOf(config).promptFragmentBytes,
+          }));
+        });
+      } catch (error) {
+        for (const remove of fragmentUndo.reverse()) remove();
+        applied.undo();
+        throw error;
+      }
+      state.mode.undo();
       const tools = kernel.manifest().map((entry) => entry.name);
       Object.assign(state.mode, {
         file,
@@ -1471,8 +1483,8 @@ export function createHost({
           const state = open(sessionId);
           const mode = requiredString(message.params.mode, 'mode');
           if (mode === 'default') state.chain.resetMode();
-          else if (mode === 'ask' || mode === 'auto') state.chain.setMode(mode);
-          else throw new KernelError('policy_mode_unknown', { detail: 'mode must be ask, auto, or default' });
+          else if (mode === 'ask' || mode === 'auto' || mode === 'never') state.chain.setMode(mode);
+          else throw new KernelError('policy_mode_unknown', { detail: 'mode must be ask, auto, never, or default' });
           return { policy: state.chain.mode, policySource: state.chain.modeSource, policyDefault: state.chain.configuredMode() };
         }
         case 'mode.set': {
@@ -1559,6 +1571,29 @@ export function createHost({
           if (state.running === undefined) state.generation = generation;
           else state.pendingGeneration = generation;
           return { model: provider.model, serviceId: selection.provider, when: state.running === undefined ? 'now' : 'round' };
+        }
+        case 'models.discover': {
+          // 已保存的凭据只能发往它所绑定的服务。新建服务尚未保存时，只有显式提供的临时 Key 可以预览。
+          if (message.params.temporaryKey === undefined) {
+            const env = await environmentFor(message.params.projectRoot);
+            // 项目共享配置可以引用任意环境变量名，不能据此授予系统凭据读取权。
+            // 只信任用户级配置中的服务/旧模型端点绑定；项目及本机/flag 覆盖只能使用显式 temporaryKey。
+            if (env.store !== undefined) await env.store.read(); // 刷新用户配置层（不使用合并后的 values）。
+            const trusted = env.layers.user?.model;
+            const model = isRecord(trusted) ? trusted : {};
+            const requestedURL = new URL(apiRoot(message.params.baseURL)).href;
+            const matches = (api: unknown, baseURL: unknown, reference: unknown) =>
+              api === message.params.api && reference === message.params.reference &&
+              typeof baseURL === 'string' && new URL(apiRoot(baseURL)).href === requestedURL;
+            const saved = modelServices(model.services).some((service) => matches(service.api, service.baseURL, service.apiKeyEnv));
+            const legacy = typeof model.model === 'string' &&
+              matches(model.api, model.baseURL, model.apiKeyEnv ?? 'LIGULE_API_KEY');
+            if (!saved && !legacy) throw new KernelError('model_discovery_credential_unbound');
+          }
+          return { models: await discoverModels({
+            api: message.params.api, baseURL: message.params.baseURL,
+            reference: message.params.reference, temporaryKey: message.params.temporaryKey,
+          }) };
         }
         case 'credentials.status':
           return await credentialStatus(requiredString(message.params.reference, 'reference'));
@@ -1693,10 +1728,10 @@ export function serveHost({ input = process.stdin, output = process.stdout, conf
     output,
     // 一行读不出来的东西不是任何一次调用的失败，它是这条连接的问题：说清楚，让客户端自己决定要不要重开进程。
     onFault: (error) => connection.notify({ notify: 'fault', code: errorCode(error), detail: errorDetail(error) }),
+    onClose: () => {
+      void host.release().catch((error: unknown) => rest.logger?.error?.('host release failed', { code: errorCode(error), detail: errorMessage(error) }));
+    },
   });
   connection.onRequest((message) => host.handle(message, connection));
-  input.on('end', () => {
-    void host.release().catch((error: unknown) => rest.logger?.error?.('host release failed', { code: errorCode(error), detail: errorMessage(error) }));
-  });
   return host;
 }

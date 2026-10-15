@@ -3,6 +3,7 @@
 // 客户端走的是它平时那条解析路径；分片切在工具调用的参数中间，攒不出一次调用就当场暴露。
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import {
   CHAT_COMPLETIONS_CAPABILITIES, chatCompletionsCapabilities, createChatCompletionsProvider, readTool,
@@ -21,8 +22,9 @@ async function withEndpoint(respond, run) {
     const body = [];
     for await (const chunk of request) body.push(chunk);
     const text = Buffer.concat(body).toString('utf8');
-    requests.push({ url: request.url, headers: request.headers, body: text === '' ? undefined : JSON.parse(text) });
-    await respond(response);
+    const observed = { url: request.url, headers: request.headers, body: text === '' ? undefined : JSON.parse(text) };
+    requests.push(observed);
+    await respond(response, observed);
   });
   const port = await listenFetchable(server);
   process.env[API_KEY_ENV] = 'test-key';
@@ -135,6 +137,84 @@ test('the request body carries the shape this form names, and the address is the
     // 另一种约定也要能用：OpenAI 自己的 base_url 含 /v1，这时不重复补。
     await collect(provider(`${baseUrl}/v1`).stream({ system: '', messages: [], tools: [] }));
     assert.equal(requests[1].url, '/v1/chat/completions');
+  });
+});
+
+test('invalid tool names use collision-free wire aliases in tools, history, and returned calls', async () => {
+  const longUnicodeName = `读取${'项目文件'.repeat(30)}`;
+  const inspectAlias = `ligule_${createHash('sha256').update('mcp.inspect').digest('hex').slice(0, 48)}`;
+  const historyAlias = `ligule_${createHash('sha256').update('mcp.call').digest('hex').slice(0, 48)}`;
+  const calls = [];
+  await withEndpoint(async (response, request) => {
+    const toolNames = (request.body.tools ?? []).map((tool) => tool.function.name);
+    const historyNames = (request.body.messages ?? []).flatMap((message) =>
+      (message.tool_calls ?? []).map((call) => call.function.name));
+    const allNames = [...toolNames, ...historyNames];
+    calls.push({ toolNames, historyNames });
+    if (allNames.some((name) => !/^[A-Za-z0-9_-]{1,64}$/u.test(name))) {
+      response.writeHead(400, { 'content-type': 'application/json' });
+      response.end('{"error":{"message":"invalid function name"}}');
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    const returnedName = calls.length === 1 ? toolNames[0]
+      : calls.length === 2 ? historyAlias
+        : calls.length === 3 ? 'read' : 'mcp.unregistered';
+    response.end(sseBody([{
+      choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: `call_${calls.length}`, type: 'function', function: { name: returnedName, arguments: '{}' } }] } }],
+    }]));
+  }, async (baseUrl, requests) => {
+    const tools = [
+      { name: 'mcp.inspect', description: 'inspect', parameters: { type: 'object' } },
+      { name: 'mcp.call', description: 'call', parameters: { type: 'object' } },
+      { name: 'read', description: 'read', parameters: { type: 'object' } },
+      { name: longUnicodeName, description: 'unicode', parameters: { type: 'object' } },
+      { name: inspectAlias, description: 'an original name equal to another name’s alias', parameters: { type: 'object' } },
+    ];
+    const first = await collect(provider(baseUrl).stream({ system: '', messages: [], tools }));
+    assert.deepEqual(first.filter((event) => event.type === 'tool-call'), [
+      { type: 'tool-call', id: 'call_1', name: 'mcp.inspect', args: {} },
+    ]);
+    const firstNames = requests[0].body.tools.map((tool) => tool.function.name);
+    assert.equal(new Set(firstNames).size, firstNames.length, 'wire names stay unique when an original name matches an alias');
+    assert.equal(firstNames[2], 'read', 'a valid short name is unchanged');
+    assert.ok(firstNames.every((name) => /^[A-Za-z0-9_-]{1,64}$/u.test(name)));
+    assert.notEqual(firstNames[0], 'mcp.inspect');
+    assert.notEqual(firstNames[1], 'mcp.call');
+    assert.notEqual(firstNames[3], longUnicodeName);
+    assert.notEqual(firstNames[4], inspectAlias, 'the colliding original name is encoded too');
+
+    const recovered = await collect(provider(baseUrl).stream({
+      system: '',
+      tools: [{ name: 'read', description: 'read', parameters: { type: 'object' } }],
+      messages: [
+        { role: 'assistant', text: '', toolCalls: [{ id: 'old-call', name: 'mcp.call', args: {} }] },
+        { role: 'tool', id: 'old-call', tool: 'mcp.call', content: 'done', failed: false },
+      ],
+    }));
+    assert.deepEqual(recovered.filter((event) => event.type === 'tool-call'), [
+      { type: 'tool-call', id: 'call_2', name: 'mcp.call', args: {} },
+    ]);
+    assert.equal(requests[1].body.tools[0].function.name, 'read');
+    assert.deepEqual(calls[1].historyNames, [historyAlias], 'a no-longer-current historical tool name is still wire-safe');
+
+    const unchanged = await collect(provider(baseUrl).stream({
+      system: '',
+      tools: [{ name: 'read', description: 'read', parameters: { type: 'object' } }],
+      messages: [{ role: 'user', text: 'continue' }],
+    }));
+    assert.deepEqual(unchanged.filter((event) => event.type === 'tool-call'), [
+      { type: 'tool-call', id: 'call_3', name: 'read', args: {} },
+    ], 'a legal short response name stays unchanged');
+
+    const unknown = await collect(provider(baseUrl).stream({
+      system: '',
+      tools: [{ name: 'read', description: 'read', parameters: { type: 'object' } }],
+      messages: [{ role: 'user', text: 'continue' }],
+    }));
+    assert.deepEqual(unknown.filter((event) => event.type === 'tool-call'), [
+      { type: 'tool-call', id: 'call_4', name: 'mcp.unregistered', args: {} },
+    ], 'unknown names pass through unchanged for the Host kernel to reject');
   });
 });
 

@@ -52,13 +52,13 @@ async function waitForProcessExit(pid) {
   throw new Error(`mcp_fixture_process_still_running: ${pid}`);
 }
 
-function registryFor(directory, { initializeDelay = 0, listDelay = 0 } = {}) {
+function registryFor(directory, { initializeDelay = 0, listDelay = 0, disconnectAfterCall = false } = {}) {
   const pidPath = join(directory, 'mcp.pid');
   const listStartedPath = join(directory, 'list.started');
   const callStartedPath = join(directory, 'call.started');
   const configs = mcpServerConfigs({ mcp: { servers: { slow: {
     command: process.execPath,
-    args: [fixturePath, pidPath, listStartedPath, callStartedPath, String(initializeDelay), String(listDelay)],
+    args: [fixturePath, pidPath, listStartedPath, callStartedPath, String(initializeDelay), String(listDelay), String(disconnectAfterCall)],
   } } } });
   return { registry: createMcpRegistry(configs), pidPath, listStartedPath, callStartedPath };
 }
@@ -89,6 +89,57 @@ test('the SDK cancels a real delayed MCP tool call through AbortSignal', async (
       await registry.close();
     }
     await waitForProcessExit(Number(await readFile(pidPath, 'utf8')));
+  });
+});
+
+test('a timed out call is not replayed and the same connection can serve a later call', async () => {
+  await withDirectory(async (directory) => {
+    const { registry, pidPath, callStartedPath } = registryFor(directory);
+    try {
+      await registry.definition('slow', 'wait');
+      const error = await rejectedQuickly(registry.call('slow', 'wait', { milliseconds: 30000 }, AbortSignal.timeout(100)));
+      assert.ok(error instanceof Error);
+      const recovered = await registry.call('slow', 'wait', { milliseconds: 1 });
+      assert.equal(recovered.content[0].text, 'waited 1 ms');
+      assert.equal((await readFile(callStartedPath, 'utf8')).trim().split(/\r?\n/).length, 2, 'the timed out call was dispatched once');
+    } finally {
+      await registry.close();
+    }
+    await waitForProcessExit(Number(await readFile(pidPath, 'utf8')));
+  });
+});
+
+test('a real stdio disconnect fails without retry, then a new registry explicitly reconnects', async () => {
+  await withDirectory(async (directory) => {
+    const disconnected = registryFor(directory, { disconnectAfterCall: true });
+    let oldProcessId;
+    try {
+      await disconnected.registry.definition('slow', 'wait');
+      oldProcessId = Number(await readFile(disconnected.pidPath, 'utf8'));
+      await rejectedQuickly(disconnected.registry.call('slow', 'wait', { milliseconds: 1 }));
+      await waitForProcessExit(oldProcessId);
+      await rejectedQuickly(disconnected.registry.toolsOf('slow'));
+      assert.equal(Number(await readFile(disconnected.pidPath, 'utf8')), oldProcessId, 'the registry did not start another server process');
+      assert.equal((await readFile(disconnected.callStartedPath, 'utf8')).trim().split(/\r?\n/).length, 1, 'the disconnected call was dispatched once');
+    } finally {
+      await disconnected.registry.close();
+    }
+    await waitForProcessExit(oldProcessId);
+
+    const rebuilt = registryFor(directory);
+    let newProcessId;
+    try {
+      const definition = await rebuilt.registry.definition('slow', 'wait');
+      newProcessId = Number(await readFile(rebuilt.pidPath, 'utf8'));
+      assert.notEqual(newProcessId, oldProcessId, 'explicit registry recreation starts a new server process');
+      const recovered = await rebuilt.registry.call('slow', 'wait', { milliseconds: 1 });
+      assert.equal(recovered.content[0].text, 'waited 1 ms');
+      assert.equal((await readFile(rebuilt.callStartedPath, 'utf8')).trim().split(/\r?\n/).length, 2, 'only the explicitly issued call reached the new process');
+      assert.equal(definition.name, 'wait');
+    } finally {
+      await rebuilt.registry.close();
+    }
+    await waitForProcessExit(newProcessId);
   });
 });
 

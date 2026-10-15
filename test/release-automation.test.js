@@ -4,7 +4,7 @@ import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promi
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import { changelogSection, releaseNotesForTag } from '../scripts/release-notes.js';
+import { changelogSection, desktopDownloadTable, releaseNotesForTag } from '../scripts/release-notes.js';
 import { createDesktopReleaseManifest, verifyDesktopReleaseManifests } from '../scripts/desktop-release-manifest.js';
 import { githubAssetName, verifyDesktopDraft } from '../scripts/verify-desktop-draft.js';
 import { prepareRelease, requestedVersionAtRoot, resolveVersion } from '../scripts/release-version.js';
@@ -126,7 +126,44 @@ test('release notes select each product changelog and matching bilingual version
     assert.match(cliNotes, /初始公开版本/);
     assert.match(cliNotes, /Initial public release/);
     assert.doesNotMatch(cliNotes, /下载|Downloads/);
-    assert.match(releaseNotesForTag(directory, 'desktop-v2.4.1'), /SHA-256/);
+    assert.match(cliNotes, /npm install -g ligule@0\.0\.1/);
+    assert.match(cliNotes, /npmjs\.com\/package\/ligule\/v\/0\.0\.1/);
+    assert.match(cliNotes, /this GitHub Release contains bilingual notes/);
+    const desktopPreview = releaseNotesForTag(directory, 'desktop-v2.4.1');
+    assert.match(desktopPreview, /SHA-256/);
+    assert.match(desktopPreview, /\| Windows x64 \| NSIS/);
+    assert.match(desktopPreview, /\| Linux x64 \| AppImage/);
+    assert.match(desktopPreview, /\| Linux x64 \| deb/);
+    assert.match(desktopPreview, /releases\/tag\/desktop-v2\.4\.1#assets/);
+    assert.doesNotMatch(desktopPreview, /draft Release after platform validation|草稿 Release/);
+    const commit = 'a'.repeat(40);
+    const manifest = {
+      schemaVersion: 1,
+      product: 'desktop',
+      tag: 'desktop-v2.4.1',
+      version: '2.4.1',
+      sourceCommit: commit,
+      assets: [
+        { target: 'windows-x64', architecture: 'x64', name: `ligule-desktop-v2.4.1-windows-x64-${commit.slice(0, 12)}-ligule Setup 2.4.1.exe`, sha256: 'b'.repeat(64) },
+        { target: 'linux-x64', architecture: 'x64', name: `ligule-desktop-v2.4.1-linux-x64-${commit.slice(0, 12)}-ligule-2.4.1.AppImage`, sha256: 'c'.repeat(64) },
+        { target: 'linux-x64', architecture: 'x64', name: `ligule-desktop-v2.4.1-linux-x64-${commit.slice(0, 12)}-ligule-desktop_2.4.1_amd64.deb`, sha256: 'd'.repeat(64) },
+      ],
+    };
+    const downloadableNotes = releaseNotesForTag(directory, 'desktop-v2.4.1', { manifest });
+    assert.match(downloadableNotes, /releases\/download\/desktop-v2\.4\.1\/.*-ligule\.Setup\.2\.4\.1\.exe/);
+    assert.match(downloadableNotes, /releases\/download\/desktop-v2\.4\.1\/.*\.AppImage/);
+    assert.match(downloadableNotes, /releases\/download\/desktop-v2\.4\.1\/.*\.deb/);
+    assert.match(downloadableNotes, /desktop-release-manifest\.json/);
+    assert.doesNotMatch(downloadableNotes, /%20|草稿 Release/);
+    assert.throws(() => desktopDownloadTable('cli-v2.4.1'), /Desktop tag/);
+    assert.throws(() => releaseNotesForTag(directory, 'cli-v0.0.1', { manifest }), /do not accept/);
+    assert.throws(() => releaseNotesForTag(directory, 'desktop-v2.4.1', { manifest: { ...manifest, tag: 'desktop-v2.4.2' } }), /verified manifest/);
+    assert.throws(() => releaseNotesForTag(directory, 'desktop-v2.4.1', {
+      manifest: { ...manifest, assets: manifest.assets.slice(0, 2) },
+    }), /verified manifest/);
+    assert.throws(() => releaseNotesForTag(directory, 'desktop-v2.4.1', {
+      manifest: { ...manifest, assets: manifest.assets.map((asset, i) => i === 0 ? { ...asset, name: '../unsafe.exe' } : asset) },
+    }), /missing or duplicate Desktop asset|invalid asset identity/);
     assert.throws(() => requestedVersionAtRoot(directory, 'unknown', 'patch'), /product must be cli or desktop/);
     assert.throws(() => requestedVersionAtRoot(directory, '__proto__', 'patch'), /product must be cli or desktop/);
     assert.throws(() => changelogSection(CHANGELOG, '0.0.2'), /exactly one/);
@@ -295,19 +332,26 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
   const release = workflow('release');
   const ci = workflow('ci');
 
-  assert.deepEqual(tag.on.workflow_dispatch.inputs.action.options, ['prepare', 'tag']);
+  assert.equal(tag.on.workflow_dispatch.inputs.action, undefined,
+    'version preparation must be handled in normal development, not by a release-specific PR');
+  assert.deepEqual(Object.keys(tag.jobs), ['create-tag']);
+  assert.equal(tag.permissions.contents, 'read');
+  assert.deepEqual(tag.jobs['create-tag'].permissions, { actions: 'read', contents: 'write' });
   assert.deepEqual(tag.on.workflow_dispatch.inputs.product.options, ['cli', 'desktop']);
   assert.equal(tag.jobs['create-tag'].steps.find((step) => step.uses === 'actions/setup-node@v5').with['package-manager-cache'], false);
-  for (const [workflowConfig, jobName] of [[publish, 'npm'], [release, 'preflight'], [release, 'draft'], [release, 'publish']]) {
+  for (const [workflowConfig, jobName] of [[publish, 'npm'], [publish, 'github-notes'], [release, 'preflight'], [release, 'draft'], [release, 'publish']]) {
     const setup = workflowConfig.jobs[jobName].steps.find((step) => step.uses === 'actions/setup-node@v5');
     assert.equal(setup?.with['package-manager-cache'], false,
       `${jobName} must disable pnpm auto-caching when pnpm is not installed`);
   }
-  const prepare = tag.jobs.prepare.steps.map((step) => step.run ?? '').join('\n');
   const createTag = tag.jobs['create-tag'].steps.map((step) => step.run ?? '').join('\n');
-  assert.match(prepare, /release-version\.js resolve "\$PRODUCT"/);
-  assert.match(prepare, /release-version\.js prepare "\$PRODUCT"/);
-  assert.match(prepare, /if \[ "\$PRODUCT" = cli \]; then[\s\S]*desktop\/CHANGELOG\.md/);
+  assert.doesNotMatch(JSON.stringify(tag), /gh pr create|release\/\$\{tag\}|release\/\$\{TAG\}|pull-requests: write|git push origin "\$BRANCH"/i,
+    'Tag workflow must not create product-specific PRs or version branches');
+  assert.equal(tag.jobs['create-tag'].steps[0].with.ref, '${{ github.sha }}');
+  assert.match(createTag, /test "\$GITHUB_REF" = refs\/heads\/main/);
+  assert.match(createTag, /package\.json; else manifest=desktop\/package\.json/);
+  assert.match(createTag, /node scripts\/release-notes\.js "\$TAG"/);
+  assert.match(createTag, /\$commit" != "\$main_head/);
   assert.match(createTag, /\$\{PRODUCT\}-v\$\{VERSION\}/);
   assert.match(createTag, /gh run list --workflow ci\.yml --branch main --event push --commit/);
   assert.match(createTag, /git merge-base --is-ancestor|main_head/);
@@ -315,7 +359,18 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
 
   assert.ok(publish.on.workflow_dispatch);
   assert.equal(publish.on.push, undefined);
-  assert.equal(publish.jobs['release-notes'], undefined);
+  const cliNotesJob = publish.jobs['github-notes'];
+  assert.deepEqual(cliNotesJob.needs, ['preflight', 'npm']);
+  assert.equal(cliNotesJob.permissions.contents, 'write');
+  assert.equal(cliNotesJob.steps[0].with.ref, '${{ needs.preflight.outputs.commit }}');
+  const cliNotesScript = cliNotesJob.steps.map((step) => step.run ?? '').join('\n');
+  assert.match(cliNotesScript, /npm view "ligule@\$\{VERSION\}" version/);
+  assert.match(cliNotesScript, /release-notes\.js "\$TAG"/);
+  assert.match(cliNotesScript, /gh release create "\$TAG"/);
+  assert.match(cliNotesScript, /--latest=false/);
+  assert.match(cliNotesScript, /if existing=\$\(gh release view/);
+  assert.match(cliNotesScript, /\[ "\$existing" != false \]/);
+  assert.doesNotMatch(cliNotesScript, /npm publish/);
   assert.match(JSON.stringify(publish.jobs.preflight), /npm-publish must have at least one required reviewer/);
   assert.match(JSON.stringify(publish.jobs.preflight), /required_reviewers/);
   assert.equal(publish.jobs.approval.environment, 'npm-publish');
@@ -366,6 +421,7 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
     'unverified macOS installers must not enter the formal Desktop release asset set');
   const draft = release.jobs.draft.steps.map((step) => step.run ?? '').join('\n');
   assert.match(draft, /desktop-release-manifest\.js verify/);
+  assert.match(draft, /release-notes\.js "\$TAG" --manifest dist-release\/desktop-release-manifest\.json/);
   assert.match(draft, /gh release create "\$TAG" --verify-tag[^\n]*--draft/);
   assert.match(draft, /refusing to modify published Release/);
   assert.match(draft, /gh release upload "\$TAG"/);

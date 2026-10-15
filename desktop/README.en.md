@@ -42,6 +42,8 @@ pnpm --filter ligule-desktop-frontend run build
 
 Automated checks, real-window tests, and installer acceptance drivers live in `electron/test/`; run logs and acceptance notes remain in the Git-ignored `desktop/testplace/readings/` and are not distributed with the repository. Install dependencies, prepare the root Host and target Node runtime, then build the desktop app to generate Electron Main, the frontend, and the target application before running real-window tests. `run-installer-smoke.ps1` also requires a Windows NSIS installer build.
 
+`run-stub-model.mjs` launches the real Electron Main process, production Preload, `app://` window, and independent Node Host; only the model endpoint is replaced by a deterministic local stub. In an isolated project it creates a test Skill and configures a real stdio MCP fixture, then checks Skill discovery, activation and body loading, MCP tool-definition disclosure, approval for Skill activation, approval for `mcp.inspect`, approval for `mcp.call`, the real MCP child process call, and the result recorded in the session. It needs no real model credential and does not count as real-model acceptance.
+
 ```sh
 pnpm exec tsc -p desktop/electron/tsconfig.json
 node --experimental-strip-types --test desktop/electron/test/host.test.ts desktop/electron/test/security.test.ts
@@ -71,6 +73,8 @@ desktop/vendor/node/node.exe desktop/electron/test/run-native-features.mjs
 desktop/vendor/node/node.exe desktop/electron/test/run-packaged-smoke.mjs
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File desktop/electron/test/run-installer-smoke.ps1
 ```
+
+To run the real-Electron stub acceptance with Skill and MCP coverage by itself, run `desktop/vendor/node/node.exe desktop/electron/test/run-stub-model.mjs` from the repository root. It writes an evidence report and removes its own temporary project after success; a failure retains the project and logs for diagnosis.
 
 On Linux, wrap `run-native-security.mjs`, `run-stub-model.mjs`, and `run-packaged-smoke.mjs` with `xvfb-run -a`; macOS can run them directly. `posix-process-tree.test.ts` checks controlled shutdown and the orphan Host watchdog after forced Main termination; Windows uses `process-tree.test.ts` for Job Object behavior. Save-dialog and tray automation in `run-native-features.mjs` only runs on Windows. Notification clicks have no automated acceptance entry and must be recorded as not run; tray, notification, and click behavior still need manual checks on each target system. Real-window tests use isolated workspaces and data roots.
 

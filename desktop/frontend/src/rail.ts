@@ -1,6 +1,7 @@
 // 左侧栏那一份分组规则（方案 5.5.4）：只有创建时指名了工作区的会话在上面成组，其余的在下面直接排列。
 // 归组读的是记录首行那两格（身份与来源），不是「这条路径等不等于现在的默认目录」：默认目录换了，旧的会话不挪位置。
 import type { SessionSummary } from './components/SessionRail';
+import { code, type Client } from './protocol.ts';
 
 /** 一条路经的最后那一段：Windows 与 POSIX 的分隔符都算。 */
 function leafOf(path: string): string {
@@ -12,6 +13,28 @@ export type WorkspaceRow = { identity: string; directory: string; name: string }
 
 /** 那份持久登记的形状（方案 5.5.1）：`workspaces.list` 交回的就是这一份，默认那一格指的是 `identity`。 */
 export type WorkspaceRoster = { default: string | null; workspaces: WorkspaceRow[] };
+
+export type WorkspaceSessionsPage = { root: string; sessions: SessionSummary[]; failed: string };
+
+export async function loadWorkspacePages(roots: string[], client: Pick<Client, 'call'>): Promise<WorkspaceSessionsPage[]> {
+  const pages = new Array<WorkspaceSessionsPage>(roots.length);
+  let next = 0;
+  const readNext = async () => {
+    while (next < roots.length) {
+      const index = next++;
+      const root = roots[index];
+      try {
+        const result = await client.call('sessions.list', root === '' ? {} : { projectRoot: root }, 15_000) as { sessions: SessionSummary[] };
+        pages[index] = { root, sessions: result.sessions, failed: '' };
+      } catch (error) {
+        pages[index] = { root, sessions: [], failed: code(error) };
+      }
+    }
+  };
+  const workers = Math.min(8, roots.length);
+  await Promise.all(Array.from({ length: workers }, () => readNext()));
+  return pages;
+}
 
 export type RailGroup = {
   identity: string;
