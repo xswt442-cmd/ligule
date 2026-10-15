@@ -38,7 +38,7 @@ export const EDITABLE: Readonly<Record<string, EditableField>> = {
   'model.apiKeyEnv': { path: ['model', 'apiKeyEnv'], kind: 'envName' },
   'model.services': { path: ['model', 'services'], kind: 'services' },
   'model.selection': { path: ['model', 'selection'], kind: 'selection' },
-  'policy.mode': { path: ['policy', 'mode'], kind: 'enum', oneOf: ['ask', 'auto'] },
+  'policy.mode': { path: ['policy', 'mode'], kind: 'enum', oneOf: ['ask', 'auto', 'never'] },
   'policy.rules': { path: ['policy', 'rules'], kind: 'rules' },
 };
 

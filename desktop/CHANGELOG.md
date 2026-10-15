@@ -10,6 +10,22 @@ This file records Ligule Desktop installer and application changes only. CLI upd
 
 ### English
 
+## [0.0.5] - 2026-10-15
+
+### 简体中文
+
+- 改善桌面侧栏搜索焦点、工作区分组和停止本轮操作的可见性；支持折叠其他会话。
+- 添加 DeepSeek、OpenAI 与 Anthropic 服务预设，以及 OpenAI 兼容服务的模型发现和多选；凭据使用系统凭据库或环境变量引用。
+- 增加需明确确认的「完全不需审批」档位；工作区边界、拒绝规则和安全守卫仍然生效。
+- 外观设置增加独立的界面、用户消息和模型回复 px 字号，以及可调会话行距；审批设置内容支持键盘和滚轮滚动。
+
+### English
+
+- Improved desktop search focus, workspace grouping, and stop-turn visibility; the Other conversations group can be collapsed.
+- Added DeepSeek, OpenAI, and Anthropic service presets plus model discovery and multi-select for OpenAI-compatible endpoints; credentials use the OS credential store or environment-variable references.
+- Added a no-approval tier that requires explicit confirmation; workspace boundaries, deny rules, and safety guards remain active.
+- Added independent px controls for interface, user-message, and assistant-message fonts, adjustable transcript line spacing, and keyboard/scroll-wheel access to approval settings.
+
 ## [0.0.4] - 2026-10-14
 
 ### 简体中文

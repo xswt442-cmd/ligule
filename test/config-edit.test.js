@@ -128,6 +128,8 @@ test('a key with the same name in another table is not the one being changed', (
 test('each field only takes a value of its own shape', () => {
   assert.equal(encodeValue(field('model.api'), 'chat-completions').literal, '"chat-completions"');
   assert.throws(() => encodeValue(field('model.api'), 'openai'), (error) => error.code === 'config_field_value');
+  assert.equal(encodeValue(field('policy.mode'), 'never').literal, '"never"');
+  assert.throws(() => encodeValue(field('policy.mode'), 'yolo'), (error) => error.code === 'config_field_value');
   // 带查询的地址是可以写的（那是那一家端点的路径形状），地址里塞凭据不收（D13）。
   assert.equal(encodeValue(field('model.baseURL'), 'https://a.example.com:443/v1?api=k').value, 'https://a.example.com:443/v1?api=k');
   assert.throws(() => encodeValue(field('model.baseURL'), 'https://user:pass@a.example.com/v1'), (error) => /credentials/.test(error.detail), '凭据不写进配置（D13）');

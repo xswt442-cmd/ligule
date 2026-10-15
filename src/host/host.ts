@@ -44,6 +44,7 @@ import { createAskUserPlugin } from '../tools/ask-user.js';
 import { createMcpRegistry, mcpServerConfigs, type McpRegistry } from '../capability/mcp.js';
 import { createMessagesProvider } from '../model/messages.js';
 import { createChatCompletionsProvider } from '../model/chat-completions.js';
+import { discoverModels } from '../model/discovery.js';
 import { DEFAULT_RETRY, type ProviderCapabilities, type RetryPolicy } from '../model/http.js';
 import type { ModelProvider, ModelRequest, ProviderEvent } from '../kernel/loop.js';
 import { createConnection, type Connection, type HostRequest } from './connection.js';
@@ -692,7 +693,7 @@ export function createHost({
       return { applies };
     }
     if (env.policy?.mode === effective) return { applies: [] };
-    if (effective !== 'ask' && effective !== 'auto') throw new KernelError('policy_mode_unknown');
+    if (effective !== 'ask' && effective !== 'auto' && effective !== 'never') throw new KernelError('policy_mode_unknown');
     const applies: { sessionId: string; when: 'now' }[] = [];
     for (const [id, state] of sessions) {
       if (state.environment !== env) continue;
@@ -1482,8 +1483,8 @@ export function createHost({
           const state = open(sessionId);
           const mode = requiredString(message.params.mode, 'mode');
           if (mode === 'default') state.chain.resetMode();
-          else if (mode === 'ask' || mode === 'auto') state.chain.setMode(mode);
-          else throw new KernelError('policy_mode_unknown', { detail: 'mode must be ask, auto, or default' });
+          else if (mode === 'ask' || mode === 'auto' || mode === 'never') state.chain.setMode(mode);
+          else throw new KernelError('policy_mode_unknown', { detail: 'mode must be ask, auto, never, or default' });
           return { policy: state.chain.mode, policySource: state.chain.modeSource, policyDefault: state.chain.configuredMode() };
         }
         case 'mode.set': {
@@ -1571,6 +1572,8 @@ export function createHost({
           else state.pendingGeneration = generation;
           return { model: provider.model, serviceId: selection.provider, when: state.running === undefined ? 'now' : 'round' };
         }
+        case 'models.discover':
+          return { models: await discoverModels({ api: message.params.api, baseURL: message.params.baseURL, reference: message.params.reference }) };
         case 'credentials.status':
           return await credentialStatus(requiredString(message.params.reference, 'reference'));
         case 'credentials.set':

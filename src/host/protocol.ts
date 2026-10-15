@@ -236,6 +236,16 @@ export const METHODS = Object.freeze({
       required: ['sessionId', 'provider', 'model'],
     },
   },
+  'models.discover': {
+    description: 'Discover model IDs from the configured OpenAI-compatible endpoint using the credential reference; never return or log the credential',
+    parameters: {
+      type: 'object',
+      properties: {
+        api: { type: 'string' }, baseURL: { type: 'string' }, reference: { type: 'string' },
+      },
+      required: ['api', 'baseURL', 'reference'],
+    },
+  },
   'credentials.set': {
     description: 'Store a secret in the system credential store; an active environment override prevents changes',
     parameters: { type: 'object', properties: { reference: { type: 'string' }, value: { type: 'string' } }, required: ['reference', 'value'] },
@@ -299,7 +309,7 @@ export const METHODS = Object.freeze({
     description: 'Override the approval tier for this session only, or go back to the tier the settings file writes; the new tier applies to the tool decisions that follow',
     parameters: {
       type: 'object',
-      properties: { sessionId: SESSION_ID, mode: { type: 'string', description: "'ask', 'auto', or 'default' to drop this session's override" } },
+      properties: { sessionId: SESSION_ID, mode: { type: 'string', description: "'ask', 'auto', 'never', or 'default' to drop this session's override" } },
       required: ['sessionId', 'mode'],
     },
   },

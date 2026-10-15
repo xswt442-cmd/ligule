@@ -14,7 +14,7 @@ These terms describe current ligule behavior. Protocol method names and configur
 | **Capability** | 能力 | Host-side code that performs an operation requiring access to the operating system or environment, such as path resolution, process execution, or network access. A capability is not necessarily a model-callable tool. A policy verdict's `capability` field labels the operation evaluated. |
 | **Tool mode** | 工具模式 | A named selection of registered tools and prompt fragments. A mode controls the model's available tool manifest; it does not grant approval. |
 | **Approval policy** | 审批策略 | The decision rules applied to a tool call after argument and target checks. A policy can allow, refuse, or ask the user. The session may override the configured approval mode. |
-| **Approval mode** | 审批方式 | The selected approval tier, such as ask for each call or automatic decisions. It is one setting used by the approval policy decision chain. |
+| **Approval mode** | 审批方式 | The selected approval tier: ask for each call, automatic decisions, or no per-call approval. Deny rules, guards, and workspace boundaries still constrain every tier. |
 | **Workspace** | 工作区 | A registered real directory used as a project's identity and default location for new sessions. Multiple workspaces can be active in one desktop window. |
 | **Project root** | 项目根目录 | The directory whose configuration, resources, and sessions belong to a Host project environment. It may differ from the tool access boundary. |
 | **Boundary** | 访问边界 | The filesystem scope enforced by file tools. It controls which paths a tool may access; it does not determine session ownership. |

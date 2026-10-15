@@ -78,7 +78,7 @@ export function SettingsDialog(props: SettingsProps) {
           onClick={() => leave(() => setSection(id))}
         ><Icon name={sectionIcon(id)} size={14} /><span>{sectionTitle(id, t)}</span></button>)}
       </nav>
-      <div className="sheet-body" role="tabpanel">
+      <div className="sheet-body" role="tabpanel" tabIndex={0}>
         {props.notificationPending && <p className="session-note">{t('关闭设置后将打开通知对应的会话。', 'Close settings to open the conversation from your notification.')}</p>}
         {section === 'general' && <General client={props.client} language={settings.language} patch={patch} />}
         {section === 'appearance' && <Appearance settings={settings} patch={patch} />}
@@ -215,12 +215,21 @@ function Appearance({ settings, patch }: { settings: Settings; patch: SettingsPr
       </div>
     </Group>
     <Group title={t('文字与栏宽', 'Text and layout')}>
-      <Row label={t('字号', 'Font size')}>
-        <select value={settings.font} onChange={(event) => patch({ font: event.target.value as Settings['font'] })}>
-          <option value="small">{t('小', 'Small')}</option>
-          <option value="medium">{t('中', 'Medium')}</option>
-          <option value="large">{t('大', 'Large')}</option>
-        </select>
+      <Row label={t('界面字号', 'Interface font size')} note={`${settings.fontUi} px`}>
+        <input aria-label={t('界面字号（像素）', 'Interface font size (pixels)')} type="range" min={10} max={24} step={1} value={settings.fontUi} onChange={(event) => patch({ fontUi: Number(event.target.value) })} />
+        <input aria-label={t('界面字号数值', 'Interface font size value')} type="number" min={10} max={24} step={1} value={settings.fontUi} onChange={(event) => patch({ fontUi: Math.max(10, Math.min(24, Number(event.target.value) || 10)) })} />
+      </Row>
+      <Row label={t('用户消息字号', 'User message font size')} note={`${settings.fontUser} px`}>
+        <input aria-label={t('用户消息字号（像素）', 'User message font size (pixels)')} type="range" min={12} max={32} step={1} value={settings.fontUser} onChange={(event) => patch({ fontUser: Number(event.target.value) })} />
+        <input aria-label={t('用户消息字号数值', 'User message font size value')} type="number" min={12} max={32} step={1} value={settings.fontUser} onChange={(event) => patch({ fontUser: Math.max(12, Math.min(32, Number(event.target.value) || 12)) })} />
+      </Row>
+      <Row label={t('模型回复字号', 'Assistant reply font size')} note={`${settings.fontAssistant} px`}>
+        <input aria-label={t('模型回复字号（像素）', 'Assistant reply font size (pixels)')} type="range" min={12} max={32} step={1} value={settings.fontAssistant} onChange={(event) => patch({ fontAssistant: Number(event.target.value) })} />
+        <input aria-label={t('模型回复字号数值', 'Assistant font size value')} type="number" min={12} max={32} step={1} value={settings.fontAssistant} onChange={(event) => patch({ fontAssistant: Math.max(12, Math.min(32, Number(event.target.value) || 12)) })} />
+      </Row>
+      <Row label={t('会话正文行距', 'Conversation line spacing')} note={`${settings.transcriptLineHeight.toFixed(1)}× · ${Math.round(settings.fontAssistant * settings.transcriptLineHeight)} px`}>
+        <input aria-label={t('会话正文行距', 'Conversation line spacing')} type="range" min={1.2} max={2.4} step={0.1} value={settings.transcriptLineHeight} onChange={(event) => patch({ transcriptLineHeight: Number(event.target.value) })} />
+        <output>{settings.transcriptLineHeight.toFixed(1)}×</output>
       </Row>
       <Row label={t('侧栏宽度', 'Sidebar width')} note={t(`${settings.sidebar} 像素；也可以拖动侧栏分隔线。`, `${settings.sidebar} px. You can also drag the sidebar divider.`)}>
         <input type="range" min={264} max={420} step={4} value={settings.sidebar} onChange={(event) => patch({ sidebar: Number(event.target.value) })} />

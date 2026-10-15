@@ -1516,6 +1516,9 @@ test('a session overrides the approval tier without touching the settings file',
     const after = await connection.request('status.get', { sessionId });
     assert.equal(after.policy, 'auto');
     assert.equal(after.policySource, 'session');
+    const noApproval = await connection.request('policy.set', { sessionId, mode: 'never' });
+    assert.equal(noApproval.policy, 'never');
+    assert.equal((await connection.request('status.get', { sessionId })).policy, 'never');
     const back = await connection.request('policy.set', { sessionId, mode: 'default' });
     assert.equal(back.policySource, 'config');
     assert.equal(back.policy, before.policy);

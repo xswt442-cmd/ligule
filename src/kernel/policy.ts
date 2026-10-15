@@ -12,7 +12,7 @@ import type { NetworkTarget } from '../capability/network.js';
 import type { ShellSelection } from '../capability/shell.js';
 import type { PolicyRule } from './config-edit.js';
 
-export type PolicyMode = 'ask' | 'auto';
+export type PolicyMode = 'ask' | 'auto' | 'never';
 export type PolicyModeSource = 'config' | 'session';
 
 export function isPolicyRule(value: unknown): value is PolicyRule {
@@ -127,7 +127,7 @@ function askReason(parsed: Awaited<ReturnType<typeof parseCommand>> | undefined,
 
 // ask 是宿主交进来的询问通道，与适配器无关（内核对外接口）。没有这条通道时，需要询问的调用按拒绝处理。
 export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEFAULT_THRESHOLDS, ask }: DecisionChainOptions = {}): DecisionChain {
-  if (mode !== 'ask' && mode !== 'auto') throw new KernelError('policy_mode_unknown');
+  if (mode !== 'ask' && mode !== 'auto' && mode !== 'never') throw new KernelError('policy_mode_unknown');
   if (!(thresholds.consecutive >= 1) || !(thresholds.total >= 1)) throw new KernelError('policy_thresholds_required');
 
   let current = mode;
@@ -160,7 +160,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
     },
 
     get mode() {
-      return forcedToAsk ? 'ask' : current;
+      return forcedToAsk && current !== 'never' ? 'ask' : current;
     },
 
     // 现在生效的这一档出自哪一件：配置那一份默认，还是这一份会话覆盖的（D101）。被拒绝阈值压下来另有一格 `forced`。
@@ -179,14 +179,14 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
     },
 
     setMode(next: PolicyMode) {
-      if (next !== 'ask' && next !== 'auto') throw new KernelError('policy_mode_unknown');
+      if (next !== 'ask' && next !== 'auto' && next !== 'never') throw new KernelError('policy_mode_unknown');
       current = next;
       source = 'session';
     },
 
     // 配置文件里那一条默认改了：没有自己覆盖过档位的会话跟着走，覆盖过的那一份不动（D101）。
     setConfiguredMode(next: PolicyMode) {
-      if (next !== 'ask' && next !== 'auto') throw new KernelError('policy_mode_unknown');
+      if (next !== 'ask' && next !== 'auto' && next !== 'never') throw new KernelError('policy_mode_unknown');
       configured = next;
       if (source === 'config') current = next;
     },
@@ -218,7 +218,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       }
 
       const command = commandOf(input);
-      const effective = forcedToAsk ? 'ask' : current;
+      const effective = forcedToAsk && current !== 'never' ? 'ask' : current;
       // 判定这一格要说清当时生效的是哪一份档位：配置写的是 `current`，被拒绝阈值压下来是另一回事（D77）。
       const judged = (decision: PolicyVerdict['decision'], via: string, extra: Omit<PolicyVerdict, 'decision' | 'via' | 'capability' | 'level' | 'forced'>): PolicyVerdict => ({
         decision,
@@ -289,6 +289,10 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         // 自动档按语法放行：整棵树可信，而且每一段的第一个词都不是脚本解释器（D17 第三条）。
         // 解释器外壳不因为能解析里面那个字符串就剥掉，`bash -lc "git status"` 仍然要问。
         covered = segments !== undefined && segments.every((segment) => canAutoApprove(segment)) ? null : undefined;
+      } else if (effective === 'never') {
+        // Explicit no-approval mode skips the confirmation gate only after hard target checks,
+        // deny rules, and guards have passed. Ambiguous commands and private targets fail closed.
+        covered = command === undefined || segments !== undefined ? null : undefined;
       } else {
         // 逐次询问这一档：放行规则要盖住每一个分段，解析不出分段就等于盖不住。
         covered = segments !== undefined && parts?.every((segment) => allowed.some((item) => matches(segment, item.match)))
@@ -297,7 +301,11 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       }
       if (covered !== undefined) {
         record(false);
-        return covered === null ? answer('auto') : answer('rules', covered);
+        return covered === null ? answer(effective === 'never' ? 'never' : 'auto') : answer('rules', covered);
+      }
+
+      if (effective === 'never') {
+        return refuse('policy_denied', 'never', 'this operation requires approval, which is disabled for this session');
       }
 
       // 走到这里都要问：自动档遇到看不透的命令不自动放行，只降档到逐次询问，并把原因交出去（D17、I8）。

@@ -107,6 +107,7 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
   const locale = useLocale();
   const [layout, setLayout] = useState<RailLayout>({ groups: [], loose: [] });
   const [folded, setFolded] = useState<Record<string, boolean>>({});
+  const [otherFolded, setOtherFolded] = useState(false);
   const [failures, setFailures] = useState<RailFailure[]>([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState('');
@@ -278,7 +279,7 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
       key={item.id}
       type="button"
       className={`session-item${active ? ' active' : ''}${item.archived === true ? ' archived' : ''}`}
-      title={item.id}
+      title={`${title} · ${item.id}`}
       aria-label={`${title}${statuses.length === 0 ? '' : `, ${statuses.join(', ')}`}`}
       onClick={() => onOpen(item.id, root === undefined || root === '' ? undefined : root)}
     >
@@ -457,8 +458,8 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
         </section>;
       })}
       {visibleLoose.length > 0 && <section className="rail-loose">
-        <h3 className="group-label"><Icon name="folder" size={14} /><span className="group-root">{t('其他会话', 'Other conversations')}</span><span className="group-count">{visibleLoose.length}</span></h3>
-        {visibleLoose.map(sessionRow)}
+        <h3 className="group-label"><button type="button" className="group-fold" aria-expanded={!otherFolded} onClick={() => setOtherFolded(value => !value)}><Icon name={otherFolded ? 'unfold' : 'fold'} size={13} /><Icon name="folder" size={14} /><span className="group-root">{t('其他会话', 'Other conversations')}</span></button><span className="group-count">{visibleLoose.length}</span></h3>
+        {!otherFolded && visibleLoose.map(sessionRow)}
       </section>}
       {archivedCount > 0 && <button type="button" className="rail-archive" aria-pressed={showArchived} onClick={() => setShowArchived(value => !value)}>
         {showArchived ? t('隐藏归档', 'Hide archived') : t(`显示归档会话 ${archivedCount}`, `Show archived conversations ${archivedCount}`)}

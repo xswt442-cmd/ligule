@@ -89,7 +89,7 @@ function responseCount(value: Record<string, unknown>, field: string): number {
 function policyOf(value: unknown): CliPolicy | undefined {
   if (value === undefined || !isRecord(value)) return undefined;
   const mode = value.mode;
-  if (mode !== undefined && mode !== 'ask' && mode !== 'auto') throw new KernelError('policy_mode_unknown');
+  if (mode !== undefined && mode !== 'ask' && mode !== 'auto' && mode !== 'never') throw new KernelError('policy_mode_unknown');
   let rules: PolicyRule[] | undefined;
   if (value.rules !== undefined) {
     if (!Array.isArray(value.rules) || !value.rules.every(isPolicyRule)) throw new KernelError('policy_rules_invalid');

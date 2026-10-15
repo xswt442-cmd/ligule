@@ -597,9 +597,12 @@ export function App({ transport }: { transport: Transport }) {
   useEffect(() => {
     const root = document.documentElement;
     root.dataset.palette = settings.palette;
-    root.dataset.font = settings.font;
     root.style.setProperty('--sidebar', `${settings.sidebar}px`);
-  }, [settings.font, settings.palette, settings.sidebar]);
+    root.style.setProperty('--ui-font-size', `${settings.fontUi}px`);
+    root.style.setProperty('--user-message-font-size', `${settings.fontUser}px`);
+    root.style.setProperty('--assistant-message-font-size', `${settings.fontAssistant}px`);
+    root.style.setProperty('--transcript-line-height', String(settings.transcriptLineHeight));
+  }, [settings.fontAssistant, settings.fontUi, settings.fontUser, settings.palette, settings.sidebar, settings.transcriptLineHeight]);
 
   const patch = useCallback((part: Partial<Settings>) => {
     if (part.collapsed !== undefined) setMobileSidebar(!part.collapsed);
@@ -1266,8 +1269,8 @@ export function App({ transport }: { transport: Transport }) {
     void refreshStatus(sessionId);
   }, [client, refreshStatus, sessionId]);
 
-  // 换审批档位走 `policy.set`（交付四）：这一份会话临时改 ask 或 auto，`null` 退回配置默认那一档。
-  const setPolicy = useCallback(async (mode: 'ask' | 'auto' | null) => {
+  // 换审批档位走 `policy.set`：这一份会话临时改审批方式，`null` 退回配置默认那一档。
+  const setPolicy = useCallback(async (mode: 'ask' | 'auto' | 'never' | null) => {
     if (sessionId === null) return;
     try {
       const result = await client.call('policy.set', { sessionId, mode: mode ?? 'default' }, 15_000) as { policy: string; policySource: string };
