@@ -45,7 +45,7 @@ import { createMcpRegistry, mcpServerConfigs, type McpRegistry } from '../capabi
 import { createMessagesProvider } from '../model/messages.js';
 import { createChatCompletionsProvider } from '../model/chat-completions.js';
 import { discoverModels } from '../model/discovery.js';
-import { DEFAULT_RETRY, type ProviderCapabilities, type RetryPolicy } from '../model/http.js';
+import { apiRoot, DEFAULT_RETRY, type ProviderCapabilities, type RetryPolicy } from '../model/http.js';
 import type { ModelProvider, ModelRequest, ProviderEvent } from '../kernel/loop.js';
 import { createConnection, type Connection, type HostRequest } from './connection.js';
 import { APPROVAL_METHOD, QUESTION_METHOD, isApproved, validateCall, type HostMethodParams } from './protocol.js';
@@ -1572,8 +1572,26 @@ export function createHost({
           else state.pendingGeneration = generation;
           return { model: provider.model, serviceId: selection.provider, when: state.running === undefined ? 'now' : 'round' };
         }
-        case 'models.discover':
-          return { models: await discoverModels({ api: message.params.api, baseURL: message.params.baseURL, reference: message.params.reference, temporaryKey: message.params.temporaryKey }) };
+        case 'models.discover': {
+          // 已保存的凭据只能发往它所绑定的服务。新建服务尚未保存时，只有显式提供的临时 Key 可以预览。
+          if (message.params.temporaryKey === undefined) {
+            const env = await environmentFor(message.params.projectRoot);
+            const values = env.store === undefined ? env.config : (await env.store.read()).values;
+            const model = isRecord(values.model) ? values.model : {};
+            const requestedURL = new URL(apiRoot(message.params.baseURL)).href;
+            const matches = (api: unknown, baseURL: unknown, reference: unknown) =>
+              api === message.params.api && reference === message.params.reference &&
+              typeof baseURL === 'string' && new URL(apiRoot(baseURL)).href === requestedURL;
+            const saved = modelServices(model.services).some((service) => matches(service.api, service.baseURL, service.apiKeyEnv));
+            const legacy = typeof model.model === 'string' &&
+              matches(model.api, model.baseURL, model.apiKeyEnv ?? 'LIGULE_API_KEY');
+            if (!saved && !legacy) throw new KernelError('model_discovery_credential_unbound');
+          }
+          return { models: await discoverModels({
+            api: message.params.api, baseURL: message.params.baseURL,
+            reference: message.params.reference, temporaryKey: message.params.temporaryKey,
+          }) };
+        }
         case 'credentials.status':
           return await credentialStatus(requiredString(message.params.reference, 'reference'));
         case 'credentials.set':

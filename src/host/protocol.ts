@@ -242,7 +242,7 @@ export const METHODS = Object.freeze({
       type: 'object',
       properties: {
         api: { type: 'string' }, baseURL: { type: 'string' }, reference: { type: 'string' },
-        temporaryKey: { type: 'string' },
+        temporaryKey: { type: 'string' }, projectRoot: { type: 'string' },
       },
       required: ['api', 'baseURL', 'reference'],
     },

@@ -466,6 +466,56 @@ test('serveHost releases the Host exactly once when either carrier stream closes
   }
 });
 
+
+test('model discovery binds stored credentials to an allowed project endpoint, not arbitrary HTTPS targets', async () => {
+  const reference = 'LIGULE_BOUND_MODEL_TEST_KEY';
+  const prior = process.env[reference];
+  const originalFetch = globalThis.fetch;
+  process.env[reference] = 'stored-discovery-secret';
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, authorization: options.headers.authorization });
+    return new Response(JSON.stringify({ data: [{ id: 'listed-model' }] }), {
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+  const config = createConfig({ user: {
+    boundary: process.cwd(), policy: { mode: 'ask' },
+    model: {
+      api: 'chat-completions', baseURL: 'https://legacy.example/v1', model: 'legacy-model', apiKeyEnv: reference,
+      services: [{ id: 'saved', name: 'Saved', api: 'chat-completions', baseURL: 'https://saved.example/v1', apiKeyEnv: reference, models: ['saved-model'] }],
+    },
+  } });
+  const pair = createMemoryConnectionPair();
+  const host = serveHost({ ...pair.host, config, provider: providerFromConfig(config), policy: config.policy });
+  const client = createConnection(pair.client);
+  const discover = (baseURL, key = reference, extra = {}) => client.request('models.discover', {
+    api: 'chat-completions', baseURL, reference: key, ...extra,
+  });
+  try {
+    await assert.rejects(discover('https://attacker.example/v1'), { code: 'model_discovery_credential_unbound' });
+    await assert.rejects(discover('https://saved.example/v1', 'ANOTHER_VALID_REFERENCE'), { code: 'model_discovery_credential_unbound' });
+    assert.equal(calls.length, 0, 'no credential can be sent to arbitrary target or by unbound reference');
+    assert.deepEqual((await discover('https://saved.example/v1')).models, ['listed-model']);
+    assert.deepEqual((await discover('https://legacy.example/v1')).models, ['listed-model']);
+    assert.equal(calls.length, 2);
+    assert.ok(calls.every(call => call.authorization === 'Bearer stored-discovery-secret'));
+    assert.deepEqual((await discover('https://preview.example/v1', 'PREVIEW_KEY', { temporaryKey: 'user-typed-preview' })).models, ['listed-model']);
+    assert.equal(calls[2].authorization, 'Bearer user-typed-preview');
+    await assert.rejects(discover('https://saved.example/v1', reference, { projectRoot: '/unrecognized-discovery-workspace' }),
+      { code: 'host_project_root_unsupported' });
+    assert.equal(calls.length, 3);
+  } finally {
+    pair.client.output.end();
+    await host.release();
+    pair.client.input.destroy();
+    pair.host.input.destroy();
+    if (prior === undefined) delete process.env[reference];
+    else process.env[reference] = prior;
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('the same protocol runs over an in-memory carrier inside one process', async () => {
   await withEndpoint(async (baseUrl) => {
     const directory = await mkdtemp(join(tmpdir(), 'ligule-memory-'));

@@ -95,7 +95,7 @@ export function ModelPanel({ client, projectRoot, onEdit }: {
     setBusy(true); setFailure(''); setNote('');
     try {
       // 获取模型仅使用本次输入的密钥；只有显式保存服务才允许修改凭据库。
-      const answer = await client.call('models.discover', { api: editor.service.api, baseURL: editor.service.baseURL, reference: editor.service.apiKeyEnv, ...(editor.key === '' ? {} : { temporaryKey: editor.key }) }, 20_000) as { models: string[] };
+      const answer = await client.call('models.discover', { ...project, api: editor.service.api, baseURL: editor.service.baseURL, reference: editor.service.apiKeyEnv, ...(editor.key === '' ? {} : { temporaryKey: editor.key }) }, 20_000) as { models: string[] };
       setDiscovered(answer.models);
       setChosenModels(answer.models);
       setModelQuery('');
@@ -171,7 +171,9 @@ export function ModelPanel({ client, projectRoot, onEdit }: {
   const filteredModels = discovered?.filter(model => model.toLowerCase().includes(modelQuery.trim().toLowerCase())) ?? [];
   const failureMessage = failure === 'provider_credential_missing'
     ? t('请填写 API Key 或设置对应环境变量，再获取模型。', 'Enter an API key or set its environment variable, then fetch models.')
-    : failure === 'model_discovery_insecure_transport'
+    : failure === 'model_discovery_credential_unbound'
+      ? t('服务地址或密钥引用已更改。请填写临时 Key 获取模型，或先保存服务配置。', 'The endpoint or key reference has changed. Enter a temporary key to fetch models, or save the service first.')
+      : failure === 'model_discovery_insecure_transport'
       ? t('获取模型要求 HTTPS，或使用本机回环地址。', 'Model discovery requires HTTPS or a local loopback address.')
       : failure === 'model_discovery_failed'
         ? t('无法从服务获取模型。请检查网络、服务地址和凭据。', 'Could not fetch models. Check the network, endpoint, and credential.')
