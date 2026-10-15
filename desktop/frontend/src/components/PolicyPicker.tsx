@@ -38,9 +38,6 @@ export function PolicyPicker({ status, disabled, onSelect }: {
     <DropdownMenu.Portal><DropdownMenu.Content className="menu policy-picker" side="top" align="start" sideOffset={8} onEscapeKeyDown={keepEscape}>
       <DropdownMenu.Label className="model-group-name">{t('审批方式', 'Approval mode')}</DropdownMenu.Label>
       {choices.map(choice => <DropdownMenu.Item key={choice.value} disabled={busy || active === choice.value} onSelect={event => { event.preventDefault(); if (choice.mode === 'never') { setOpen(false); setConfirmNever(true); } else void choose(choice.mode); }}><span>{choice.label}</span>{active === choice.value && <Icon name="check" size={14} />}</DropdownMenu.Item>)}
-      <p className="policy-picker-note">{t('所有操作仍受工作区边界和拒绝规则约束。', 'Workspace boundaries and deny rules always apply.')}</p>
-      <p className="policy-picker-note">{t('无审批只跳过逐项确认；安全守卫仍会拒绝越界或无法安全判定的操作。', 'No approval skips per-action confirmation only; safety guards still deny out-of-bound or ambiguous operations.')}</p>
-      {status?.policySource === 'config' && <p className="policy-picker-note">{t('当前使用配置默认值。', 'Currently using the configured default.')}</p>}
       {busy && <p className="policy-picker-note" role="status">{t('正在更新审批方式…', 'Updating approval mode…')}</p>}
       {failure && <div className="workspace-picker-error" role="alert"><span>{t('审批方式未更新。', 'Approval mode was not updated.')}</span><code>{failure}</code></div>}
     </DropdownMenu.Content></DropdownMenu.Portal>
