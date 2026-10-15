@@ -36,7 +36,11 @@ export async function discoverModels(input: { api: unknown; baseURL: unknown; re
   }
   if (!response.ok) throw new KernelError('model_discovery_failed', { detail: `HTTP ${response.status}` });
   const size = Number(response.headers.get('content-length') ?? 0);
-  if (Number.isFinite(size) && size > MAX_RESPONSE_BYTES) throw new KernelError('model_discovery_response_too_large');
+  if (Number.isFinite(size) && size > MAX_RESPONSE_BYTES) {
+    // 不继续读取已知超限的目录；关闭响应体，避免长连接占用资源。
+    void response.body?.cancel().catch(() => {});
+    throw new KernelError('model_discovery_response_too_large');
+  }
   const reader = response.body?.getReader();
   if (reader === undefined) throw new KernelError('model_discovery_response_invalid');
   const chunks: Uint8Array[] = [];
@@ -47,7 +51,8 @@ export async function discoverModels(input: { api: unknown; baseURL: unknown; re
       if (next.done) break;
       length += next.value.byteLength;
       if (length > MAX_RESPONSE_BYTES) {
-        await reader.cancel();
+        // 即使上游拒绝取消，也应稳定报告响应超限，而非传输错误。
+        try { await reader.cancel(); } catch { /* best-effort cleanup */ }
         throw new KernelError('model_discovery_response_too_large');
       }
       chunks.push(next.value);
@@ -55,6 +60,8 @@ export async function discoverModels(input: { api: unknown; baseURL: unknown; re
   } catch (cause) {
     if (cause instanceof KernelError) throw cause;
     throw new KernelError('model_discovery_failed', { cause });
+  } finally {
+    reader.releaseLock();
   }
   const bytes = new Uint8Array(length);
   let offset = 0;
