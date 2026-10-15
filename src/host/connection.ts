@@ -15,6 +15,7 @@ export interface ConnectionOptions {
   readonly input: Readable;
   readonly output: Writable;
   readonly onFault?: (error: Error) => void;
+  readonly onClose?: () => void;
 }
 
 export interface Connection {
@@ -38,7 +39,7 @@ function messageText(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
-export function createConnection({ input, output, onFault }: ConnectionOptions): Connection {
+export function createConnection({ input, output, onFault, onClose }: ConnectionOptions): Connection {
   const responders = new Map<string, Responder>();
   const origin = randomUUID().slice(0, 8);
   let counter = 0;
@@ -56,6 +57,7 @@ export function createConnection({ input, output, onFault }: ConnectionOptions):
     // 一条载体流结束就结束整条连接：停止接收后续 RPC，另一方向即便还开着也不能再完成请求与答复。
     for (const settleWith of responders.values()) settleWith.reject(new KernelError('connection_closed'));
     responders.clear();
+    onClose?.();
   }
 
   function fault(error: Error): void {

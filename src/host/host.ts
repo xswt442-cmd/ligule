@@ -1573,7 +1573,7 @@ export function createHost({
           return { model: provider.model, serviceId: selection.provider, when: state.running === undefined ? 'now' : 'round' };
         }
         case 'models.discover':
-          return { models: await discoverModels({ api: message.params.api, baseURL: message.params.baseURL, reference: message.params.reference }) };
+          return { models: await discoverModels({ api: message.params.api, baseURL: message.params.baseURL, reference: message.params.reference, temporaryKey: message.params.temporaryKey }) };
         case 'credentials.status':
           return await credentialStatus(requiredString(message.params.reference, 'reference'));
         case 'credentials.set':
@@ -1707,10 +1707,10 @@ export function serveHost({ input = process.stdin, output = process.stdout, conf
     output,
     // 一行读不出来的东西不是任何一次调用的失败，它是这条连接的问题：说清楚，让客户端自己决定要不要重开进程。
     onFault: (error) => connection.notify({ notify: 'fault', code: errorCode(error), detail: errorDetail(error) }),
+    onClose: () => {
+      void host.release().catch((error: unknown) => rest.logger?.error?.('host release failed', { code: errorCode(error), detail: errorMessage(error) }));
+    },
   });
   connection.onRequest((message) => host.handle(message, connection));
-  input.on('end', () => {
-    void host.release().catch((error: unknown) => rest.logger?.error?.('host release failed', { code: errorCode(error), detail: errorMessage(error) }));
-  });
   return host;
 }

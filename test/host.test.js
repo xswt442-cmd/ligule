@@ -442,6 +442,30 @@ test('opening a session with no record on disk is refused, and an unknown method
 
 // 同一份协议的第二种载体（D33 的终端界面走的就是这一条）：Host 与客户端在同一个进程里，
 // 两端是两根内存流，帧的写法与子进程那一条一模一样，协议与 connection.ts 都没有为它改动。
+
+test('serveHost releases the Host exactly once when either carrier stream closes or fails', async () => {
+  for (const origin of ['input-close', 'input-error', 'output-close', 'output-error']) {
+    const pair = createMemoryConnectionPair();
+    const config = createConfig({
+      user: { boundary: process.cwd(), model: { api: 'chat-completions', baseURL: 'https://example.test/v1', model: 'dummy' }, policy: { mode: 'ask' } },
+    });
+    const host = serveHost({ ...pair.host, config, provider: providerFromConfig(config), policy: config.policy });
+    const release = host.release.bind(host);
+    let released = 0;
+    host.release = () => { released += 1; return release(); };
+    if (origin === 'input-close') pair.host.input.emit('close');
+    else if (origin === 'input-error') pair.host.input.emit('error', new Error('read failed'));
+    else if (origin === 'output-close') pair.host.output.emit('close');
+    else pair.host.output.emit('error', new Error('write failed'));
+    pair.host.input.emit('end');
+    pair.host.output.emit('close');
+    assert.equal(released, 1, origin);
+    await host.release();
+    pair.host.input.destroy();
+    pair.host.output.destroy();
+  }
+});
+
 test('the same protocol runs over an in-memory carrier inside one process', async () => {
   await withEndpoint(async (baseUrl) => {
     const directory = await mkdtemp(join(tmpdir(), 'ligule-memory-'));

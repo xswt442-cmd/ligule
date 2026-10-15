@@ -135,6 +135,23 @@ test('closing the output during an inbound batch stops dispatching later lines',
   }
 });
 
+
+test('transport close invokes onClose once across all shutdown event paths', async () => {
+  const input = new PassThrough();
+  const output = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+  let count = 0;
+  const connection = createConnection({ input, output, onClose: () => { count += 1; } });
+  output.emit('close');
+  input.emit('end');
+  input.emit('close');
+  output.emit('error', new Error('late output fault'));
+  await delay(0);
+  assert.equal(count, 1);
+  await assert.rejects(connection.request('status.get'), { code: 'connection_closed' });
+  input.destroy();
+  output.destroy();
+});
+
 test('a synchronous response arriving during write settles the request', async () => {
   const input = new PassThrough();
   const output = new Writable({
