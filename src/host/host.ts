@@ -1576,8 +1576,11 @@ export function createHost({
           // 已保存的凭据只能发往它所绑定的服务。新建服务尚未保存时，只有显式提供的临时 Key 可以预览。
           if (message.params.temporaryKey === undefined) {
             const env = await environmentFor(message.params.projectRoot);
-            const values = env.store === undefined ? env.config : (await env.store.read()).values;
-            const model = isRecord(values.model) ? values.model : {};
+            // 项目共享配置可以引用任意环境变量名，不能据此授予系统凭据读取权。
+            // 只信任用户级配置中的服务/旧模型端点绑定；项目及本机/flag 覆盖只能使用显式 temporaryKey。
+            if (env.store !== undefined) await env.store.read(); // 刷新用户配置层（不使用合并后的 values）。
+            const trusted = env.layers.user?.model;
+            const model = isRecord(trusted) ? trusted : {};
             const requestedURL = new URL(apiRoot(message.params.baseURL)).href;
             const matches = (api: unknown, baseURL: unknown, reference: unknown) =>
               api === message.params.api && reference === message.params.reference &&

@@ -172,7 +172,7 @@ export function ModelPanel({ client, projectRoot, onEdit }: {
   const failureMessage = failure === 'provider_credential_missing'
     ? t('请填写 API Key 或设置对应环境变量，再获取模型。', 'Enter an API key or set its environment variable, then fetch models.')
     : failure === 'model_discovery_credential_unbound'
-      ? t('服务地址或密钥引用已更改。请填写临时 Key 获取模型，或先保存服务配置。', 'The endpoint or key reference has changed. Enter a temporary key to fetch models, or save the service first.')
+      ? t('已存储密钥仅限用户级配置中绑定的服务端点。请确认地址并填写临时 Key，或将服务保存到用户级设置。', 'Stored keys require an endpoint bound in user-level settings. Verify the address and enter a temporary key, or save the service in user-level settings.')
       : failure === 'model_discovery_insecure_transport'
       ? t('获取模型要求 HTTPS，或使用本机回环地址。', 'Model discovery requires HTTPS or a local loopback address.')
       : failure === 'model_discovery_failed'

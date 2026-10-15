@@ -237,7 +237,7 @@ export const METHODS = Object.freeze({
     },
   },
   'models.discover': {
-    description: 'Discover model IDs from the configured OpenAI-compatible endpoint using the credential reference; never return or log the credential',
+    description: 'Discover model IDs using a temporary key or a credential bound to a trusted user-level service endpoint; never return or log the credential',
     parameters: {
       type: 'object',
       properties: {
