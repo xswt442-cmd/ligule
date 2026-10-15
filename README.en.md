@@ -1,62 +1,68 @@
-# ligule
+<div align="center">
+  <img src="docs/app-icon.png" alt="Ligule" width="88" height="88">
+  <h1>Ligule</h1>
+  <p>A CLI, TUI, and desktop AI assistant built around one Agent kernel</p>
+  <p>
+    <a href="README.md">简体中文</a> ·
+    <a href="https://github.com/xswt442-cmd/ligule/releases/latest">Downloads and releases</a> ·
+    <a href="CHANGELOG.md">Changelog</a>
+  </p>
+  <p>
+    <a href="https://github.com/xswt442-cmd/ligule/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/xswt442-cmd/ligule/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+    <a href="https://img.shields.io/npm/v/ligule"><img alt="npm" src="https://img.shields.io/npm/v/ligule?label=CLI%20%2F%20TUI&color=4d6bfe"></a>
+    <a href="https://github.com/xswt442-cmd/ligule/releases/latest"><img alt="Desktop release" src="https://img.shields.io/github/v/release/xswt442-cmd/ligule?label=Desktop&color=657483"></a>
+    <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-22c55e.svg"></a>
+  </p>
+</div>
 
-[![npm](https://img.shields.io/npm/v/ligule?label=npm&color=4d6bfe)](https://www.npmjs.com/package/ligule)
-[![Node.js](https://img.shields.io/static/v1?label=node&message=%3E%3D24&color=339933&logo=node.js&logoColor=white)](https://nodejs.org)
-[![license](https://img.shields.io/badge/license-MIT-22c55e.svg)](./LICENSE)
+## Downloads
 
-[简体中文](README.md) · [English](README.en.md)
+Get the latest desktop release from [GitHub Releases](https://github.com/xswt442-cmd/ligule/releases/latest). Each version includes checksums and release notes.
 
-<p align="center"><img src="docs/app-icon.png" alt="ligule app icon" width="112"></p>
+| Platform | Installer |
+| --- | --- |
+| Windows x64 | NSIS installer (`.exe`) |
+| Linux x64 | AppImage (`.AppImage`) or Debian/Ubuntu package (`.deb`) |
 
-ligule is an AI assistant for project work that shares one Agent kernel across three interfaces. All three share tool execution, approvals, model requests, and session records.
-
-## What you can do
-
-- **Keep project work in context:** sessions belong to workspaces, with branching from completed turns and Markdown export.
-- **Control tool actions:** apply approval rules or review calls one at a time; checkpoints compact context, and session records support recovery.
-- **Choose an interface:** use the CLI for scripts; the TUI and desktop app share the same Agent kernel.
-
-## Choose an interface
-
-| Interface | Best for | Start with |
-|---|---|---|
-| CLI | Scripts, pipelines, and one-off tasks | `ligule run "Review the project structure and suggest improvements"` |
-| TUI | Ongoing conversations and session management in a terminal | `ligule` |
-| Desktop | Workspace sidebar, visual settings, and session actions | Install the desktop package for your platform |
-
-The CLI and TUI require Node.js 24 or newer. The TUI requires an interactive terminal; use `ligule run` in scripts and pipelines. Desktop release scope and the maintainer procedure are documented in the Chinese [release guide](docs/development/RELEASE.md).
-
-## Quick start
-
-Before your first request, configure a model service as described under “Configuration and data” below.
-
-Install the CLI and TUI:
+Install the CLI and TUI from npm:
 
 ```sh
 npm install -g ligule
 ```
 
-### Command line
+## Features
+
+- **Shared project context:** sessions belong to workspaces, with branching from completed turns and Markdown export.
+- **Controlled tool use:** configure approval rules or review calls individually; extend the assistant with files, commands, Skills, and MCP.
+- **Three interfaces:** use the CLI for scripts and one-off tasks, or the TUI and desktop app for ongoing work.
+
+## Agent framework
+
+The Node.js Host runs the Agent Loop and manages model requests, project configuration, and append-only session records. The kernel starts with an empty tool registry; the Host assembles plugins that register tools. Every model-requested tool call passes argument validation, target resolution, and approval policy before an allowed tool executes and its result is recorded. The CLI and TUI call the Host in-process. Electron Main manages a separate Host child process for the desktop app, while the React UI communicates through a sandboxed Preload API. All three interfaces share the same Agent execution and session semantics.
+
+## Quick start
+
+The CLI and TUI require Node.js 24 or newer. Configure a model service as described below before your first request.
+
+Run a one-off task in a project directory:
 
 ```sh
 cd /path/to/your-project
 ligule run "Review the project structure and suggest improvements"
 ```
 
-### Terminal UI
+Start the terminal UI:
 
 ```sh
 cd /path/to/your-project
 ligule
 ```
 
-### Desktop app
+The desktop app prepares a default workspace on first launch. Change the default directory for new sessions in Settings.
 
-Download the desktop installer from [GitHub Releases](https://github.com/xswt442-cmd/ligule/releases). On first launch, the desktop app prepares a default workspace. You can change the default directory for new sessions in Settings.
+## Configuration
 
-## Configuration and data
-
-Model service settings are read from `~/.ligule/config.toml` by default. Minimal example:
+Model service settings are read from `~/.ligule/config.toml` by default:
 
 ```toml
 [model]
@@ -66,21 +72,16 @@ model = "model-name"
 apiKeyEnv = "MODEL_API_KEY"
 ```
 
-Set the environment variable named by `apiKeyEnv`. Desktop settings also support multiple services and models, and can store keys in the system credential store. Set `LIGULE_HOME` to an absolute path to move the user data root. The workspace directory identifies the project; `boundary` separately limits which paths file tools can access.
-
-## Development
-
-Development requires Node.js 24 or newer and pnpm 12.9.1. Run `pnpm install --frozen-lockfile` from the repository root to install development dependencies. See [Contributing and checks](docs/development/CONTRIBUTING.en.md) for the remaining build and validation steps.
+Set the environment variable named by `apiKeyEnv`. Desktop settings also support multiple services and the OS credential store. Set `LIGULE_HOME` to an absolute path to move the user data root. The workspace directory identifies the project, while `boundary` separately limits which paths file tools can access.
 
 ## Documentation
 
-- [更新记录 / Changelog](CHANGELOG.md)
-- [简体中文使用手册](docs/guide.zh-CN.md) · [English user guide](docs/guide.en.md)
-- [架构说明（中文）](docs/development/ARCHITECTURE.zh-cn.md) · [Architecture (English)](docs/development/ARCHITECTURE.en.md)
-- [术语表（中文）](docs/development/GLOSSARY.zh-cn.md) · [Glossary (English)](docs/development/GLOSSARY.en.md)
-- [贡献与验证（中文）](docs/development/CONTRIBUTING.zh-cn.md) · [Contributing and checks (English)](docs/development/CONTRIBUTING.en.md)
-- [维护者发行说明](docs/development/RELEASE.md)
+- [简体中文使用手册](docs/guide.zh-CN.md) · [User guide](docs/guide.en.md)
+- [架构说明（中文）](docs/development/ARCHITECTURE.zh-cn.md) · [Architecture](docs/development/ARCHITECTURE.en.md)
+- [贡献与验证（中文）](docs/development/CONTRIBUTING.zh-cn.md) · [Contributing and checks](docs/development/CONTRIBUTING.en.md)
+- [Changelog](CHANGELOG.md) · [Desktop changelog](desktop/CHANGELOG.md)
+- [Maintainer release procedure](docs/development/RELEASE.md)
 
 ## License
 
-[MIT](./LICENSE)
+[MIT](LICENSE)
