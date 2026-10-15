@@ -51,6 +51,35 @@ test('model discovery closes oversized HTTP bodies without masking the size erro
   }
 });
 
+
+test('model discovery forbids credential transmission over remote HTTP but permits loopback and ephemeral keys', async () => {
+  const reference = 'LIGULE_DISCOVERY_TLS_TEST';
+  const previous = process.env[reference];
+  const originalFetch = globalThis.fetch;
+  process.env[reference] = 'stored-value';
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, authorization: options.headers.authorization });
+    return new Response(JSON.stringify({ data: [{ id: 'ephemeral-model' }] }), {
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+  try {
+    await assert.rejects(discoverModels({ api: 'chat-completions', baseURL: 'http://remote.example/v1', reference }), { code: 'model_discovery_insecure_transport' });
+    assert.equal(calls.length, 0, 'remote HTTP must fail before any network request');
+    assert.deepEqual(await discoverModels({ api: 'chat-completions', baseURL: 'http://127.0.0.1:3000/v1', reference, temporaryKey: 'unsaved-preview' }), ['ephemeral-model']);
+    assert.equal(calls[0].authorization, 'Bearer unsaved-preview', 'temporary key must be scoped to the preview request');
+    assert.deepEqual(await discoverModels({ api: 'chat-completions', baseURL: 'https://remote.example/v1', reference }), ['ephemeral-model']);
+    assert.equal(calls[1].authorization, 'Bearer stored-value', 'normal HTTPS discovery still resolves the configured reference');
+    await assert.rejects(discoverModels({ api: 'chat-completions', baseURL: 'https://remote.example/v1', reference, temporaryKey: '' }), { code: 'credential_value_invalid' });
+    assert.equal(calls.length, 2, 'invalid temporary keys must not reach fetch');
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previous === undefined) delete process.env[reference];
+    else process.env[reference] = previous;
+  }
+});
+
 test('model discovery rejects malformed catalogs and limits the result size', () => {
   assert.throws(() => discoveredModelIds({ models: [] }), { code: 'model_discovery_response_invalid' });
   const models = Array.from({ length: 140 }, (_, index) => ({ id: `model-${index}` }));

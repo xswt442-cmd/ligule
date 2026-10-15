@@ -16,14 +16,22 @@ export function discoveredModelIds(value: unknown): string[] {
   return [...new Set(ids)].slice(0, 128);
 }
 
-export async function discoverModels(input: { api: unknown; baseURL: unknown; reference: unknown }): Promise<string[]> {
+export async function discoverModels(input: { api: unknown; baseURL: unknown; reference: unknown; temporaryKey?: unknown }): Promise<string[]> {
   if (input.api !== 'chat-completions') throw new KernelError('model_discovery_unsupported');
   if (typeof input.reference !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]{0,127}$/u.test(input.reference)) {
     throw new KernelError('credential_reference_invalid');
   }
-  const apiKey = await resolveCredential(input.reference);
-  if (apiKey === undefined) throw new KernelError('provider_credential_missing');
   const root = apiRoot(input.baseURL);
+  const address = new URL(root);
+  const loopback = address.hostname === 'localhost' || address.hostname === '127.0.0.1' || address.hostname === '[::1]';
+  if (address.protocol !== 'https:' && !(address.protocol === 'http:' && loopback)) {
+    throw new KernelError('model_discovery_insecure_transport');
+  }
+  if (input.temporaryKey !== undefined && (typeof input.temporaryKey !== 'string' || input.temporaryKey.length === 0 || input.temporaryKey.includes('\0') || Buffer.byteLength(input.temporaryKey, 'utf8') > 16 * 1024)) {
+    throw new KernelError('credential_value_invalid');
+  }
+  const apiKey = input.temporaryKey === undefined ? await resolveCredential(input.reference) : input.temporaryKey;
+  if (apiKey === undefined) throw new KernelError('provider_credential_missing');
   let response: Response;
   try {
     response = await fetch(`${root}/models`, {

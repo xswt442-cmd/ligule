@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { code, type Client } from '../protocol';
 import { useText } from '../locale';
-import { legacyService, type ModelCatalog, type ModelService } from '../model-catalog';
+import { legacyService, presetService, type ModelCatalog, type ModelService } from '../model-catalog';
 import { Icon } from './Icon';
 import { Modal } from './ui';
 import { HoldSheet } from './HoldSheet';
@@ -83,9 +83,9 @@ export function ModelPanel({ client, projectRoot, onEdit }: {
     setSelectedPreset(id);
     if (id === 'custom') return;
     const preset = PRESETS[id];
-    const serviceId = `${id}_${crypto.randomUUID().slice(0, 8)}`;
-    const service: ModelService = { id: serviceId, ...preset, apiKeyEnv: `LIGULE_${serviceId.toUpperCase()}_KEY`, models: [] };
-    setEditor({ service, models: '', key: '', original: JSON.stringify({ ...service, models: '' }) });
+    const existing = editor !== null && (catalog?.services ?? []).some(service => service.id === editor.service.id);
+    const service = presetService(preset, editor?.service ?? null, existing, `${id}_${crypto.randomUUID().slice(0, 8)}`);
+    setEditor({ service, models: '', key: editor?.key ?? '', original: existing ? editor.original : JSON.stringify({ ...service, models: '' }) });
     setLayer(catalog?.sources['model.services'] === 'local' ? 'projectLocal' : 'user');
     setFailure('');
     setNote('');
@@ -94,12 +94,8 @@ export function ModelPanel({ client, projectRoot, onEdit }: {
     if (editor === null || busy) return;
     setBusy(true); setFailure(''); setNote('');
     try {
-      if (editor.key !== '') {
-        await client.call('credentials.set', { reference: editor.service.apiKeyEnv, value: editor.key }, 30_000);
-        setEditor(current => current === null ? null : { ...current, key: '' });
-        setCredential({ source: 'keyring', configured: true });
-      }
-      const answer = await client.call('models.discover', { api: editor.service.api, baseURL: editor.service.baseURL, reference: editor.service.apiKeyEnv }, 20_000) as { models: string[] };
+      // 获取模型仅使用本次输入的密钥；只有显式保存服务才允许修改凭据库。
+      const answer = await client.call('models.discover', { api: editor.service.api, baseURL: editor.service.baseURL, reference: editor.service.apiKeyEnv, ...(editor.key === '' ? {} : { temporaryKey: editor.key }) }, 20_000) as { models: string[] };
       setDiscovered(answer.models);
       setChosenModels(answer.models);
       setModelQuery('');
@@ -175,8 +171,10 @@ export function ModelPanel({ client, projectRoot, onEdit }: {
   const filteredModels = discovered?.filter(model => model.toLowerCase().includes(modelQuery.trim().toLowerCase())) ?? [];
   const failureMessage = failure === 'provider_credential_missing'
     ? t('请填写 API Key 或设置对应环境变量，再获取模型。', 'Enter an API key or set its environment variable, then fetch models.')
-    : failure === 'model_discovery_failed'
-      ? t('无法从服务获取模型。请检查网络、服务地址和凭据。', 'Could not fetch models. Check the network, endpoint, and credential.')
+    : failure === 'model_discovery_insecure_transport'
+      ? t('获取模型要求 HTTPS，或使用本机回环地址。', 'Model discovery requires HTTPS or a local loopback address.')
+      : failure === 'model_discovery_failed'
+        ? t('无法从服务获取模型。请检查网络、服务地址和凭据。', 'Could not fetch models. Check the network, endpoint, and credential.')
       : failure === 'model_discovery_unsupported'
         ? t('此协议暂不支持自动获取模型，请手动填写。', 'Automatic model discovery is unavailable for this protocol. Enter models manually.')
         : t('操作未完成，请检查填写内容或凭据设施。', 'Could not complete the action. Check the fields or credential store.');
