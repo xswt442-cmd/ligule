@@ -23,7 +23,7 @@ export function PolicyPicker({ status, disabled, onSelect }: {
     setBusy(true);
     setFailure('');
     try { await onSelect(value); setOpen(false); }
-    catch (error) { setFailure(code(error)); }
+    catch (error) { setFailure(code(error)); setOpen(true); }
     finally { setBusy(false); }
   };
   const choices = [

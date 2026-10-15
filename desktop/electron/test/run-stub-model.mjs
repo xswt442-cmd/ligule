@@ -42,6 +42,7 @@ let hangRequests = false;
 const skillMcpProof = { catalogLoaded: false, skillActivated: false, mcpDefinitionLoaded: false, mcpCallSucceeded: false };
 
 function streamChunk(response, chunk) {
+  if (!response.headersSent) response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
   response.write(`data: ${JSON.stringify(chunk)}\n\n`);
 }
 
@@ -101,7 +102,6 @@ const server = createServer(async (request, response) => {
   });
   // 只登记不回复：连接保持打开，Host 那一侧就一直停在「等这一发回答」上。
   if (hangRequests) return;
-  response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
   let closed = false;
   response.on('close', () => { closed = true; });
   const finish = reason => {
@@ -144,8 +144,14 @@ const server = createServer(async (request, response) => {
       return;
     }
     if (workflowStep === 3) {
-      const envelope = JSON.parse(String(messages.at(-1)?.content ?? '{}'));
-      skillMcpProof.mcpCallSucceeded = String(envelope.text ?? '').includes('echo: MCP_LOADING_PROOF');
+      let envelope;
+      try { envelope = JSON.parse(String(messages.at(-1)?.content ?? '')); }
+      catch { skillMcpProof.mcpCallSucceeded = false; jsonResponse(response, 500, { error: { message: 'stub_mcp_call_result_invalid' } }); return; }
+      skillMcpProof.mcpCallSucceeded = typeof envelope?.text === 'string' && envelope.text.includes('echo: MCP_LOADING_PROOF');
+      if (!skillMcpProof.mcpCallSucceeded) {
+        jsonResponse(response, 500, { error: { message: 'stub_mcp_call_failed' } });
+        return;
+      }
       streamChunk(response, { choices: [{ index: 0, delta: { content: 'Skill 已激活，MCP fixture 已返回 MCP_LOADING_PROOF。' } }] });
       finish('stop');
       return;
