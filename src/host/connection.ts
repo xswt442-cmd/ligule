@@ -61,9 +61,9 @@ export function createConnection({ input, output, onFault, onClose }: Connection
   }
 
   function fault(error: Error): void {
-    closeConnection();
-    // 流错误先收尾请求，再把原始错误交给装载侧诊断；error listener 同时避免未监听事件触发进程级异常。
-    onFault?.(error);
+    // 输入出错时输出可能仍可写：先尽力通报，再关闭连接。通报失败也必须释放资源。
+    try { onFault?.(error); } catch { /* the fault channel may be broken too */ }
+    finally { closeConnection(); }
   }
 
   function write(message: Record<string, unknown>): void {

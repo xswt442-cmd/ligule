@@ -152,6 +152,42 @@ test('transport close invokes onClose once across all shutdown event paths', asy
   output.destroy();
 });
 
+
+test('input fault is delivered before shutdown while output is writable', async () => {
+  const input = new PassThrough();
+  const frames = [];
+  const output = new Writable({ write(chunk, _encoding, done) { frames.push(JSON.parse(chunk.toString('utf8'))); done(); } });
+  let closed = 0;
+  let connection;
+  connection = createConnection({
+    input, output,
+    onFault: (error) => connection.notify({ notify: 'fault', code: 'input_failed', detail: error.message }),
+    onClose: () => { closed += 1; },
+  });
+  input.emit('error', new Error('read broke'));
+  assert.deepEqual(frames, [{ notify: 'fault', code: 'input_failed', detail: 'read broke' }]);
+  assert.equal(closed, 1);
+  await assert.rejects(connection.request('status.get'), { code: 'connection_closed' });
+  input.destroy();
+  output.destroy();
+});
+
+test('failed fault notification cannot prevent connection cleanup', async () => {
+  const input = new PassThrough();
+  const output = new Writable({ write(_chunk, _encoding, done) { done(); } });
+  let closed = 0;
+  const connection = createConnection({
+    input, output,
+    onFault: () => { throw new Error('notification unavailable'); },
+    onClose: () => { closed += 1; },
+  });
+  input.emit('error', new Error('input broke'));
+  assert.equal(closed, 1);
+  await assert.rejects(connection.request('status.get'), { code: 'connection_closed' });
+  input.destroy();
+  output.destroy();
+});
+
 test('a synchronous response arriving during write settles the request', async () => {
   const input = new PassThrough();
   const output = new Writable({
