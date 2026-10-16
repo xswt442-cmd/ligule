@@ -28,6 +28,9 @@ This guide is for contributors reading or changing the repository. It explains c
 flowchart LR
   CLI[CLI] -->|in process| Host[Node Host]
   TUI[React and Ink] -->|in memory protocol| Host
+  External[Local MCP client] -->|stdio MCP| MCP[MCP adapter]
+  MCP --> Control[Process-local control]
+  Control --> Host
   Web[React desktop UI] <-->|sandboxed Preload and IPC| Main[Electron Main]
   Main <-->|newline-delimited frames| Child[Node Host process]
   Child --> HostLogic[Host and kernel]
@@ -44,6 +47,10 @@ flowchart LR
 ```
 
 `ligule run` and the default `ligule` invocation (or the compatible `ligule tui` command) create a Host in the Node process that owns the interface. The TUI sends protocol messages over an in-memory connection. The desktop frontend communicates with Electron Main through a fixed sandboxed Preload API; Main forwards protocol frames to the independent Node Host and manages windows, native interactions, and process lifecycle. The Host owns sessions, project state, policy, and model requests. See the [CLI](../../tui/src/cli.ts), [TUI adapter](../../tui/src/tui/start.ts), [frame transport](../../core/src/host/connection.ts), [Electron IPC](../../desktop/electron/ipc.ts), and [Preload API](../../desktop/electron/preload.ts).
+
+The [project environment loader](../../core/src/host/environment.ts) supplies configuration layers and extension sources to CLI and Desktop Host entries. The [provider factory](../../core/src/host/provider.ts) validates the selected model wire format, capabilities and retry settings; an unconfigured Host accepts settings requests and rejects model runs explicitly. The [session mode transaction](../../core/src/host/session-mode.ts) owns restriction installation, prompt fragments, rollback, and the persisted mode fact. Host keeps session locks, active turns, routing and resource cleanup. TUI record projection lives in [transcript.ts](../../tui/src/tui/transcript.ts); Desktop's [stream buffer](../../desktop/frontend/src/session-stream.ts) separates partial output by session.
+
+`ligule mcp-server --project <absolute-root>` exposes seven local control tools through the [MCP adapter](../../core/src/host/mcp-server.ts). The [control facade](../../core/src/host/control.ts) calls the same Host, tracks process-local operations, scopes access to opened sessions in the authorized project, and denies approval requests. Disconnect cancels runs and releases session locks. Persistent recovery uses Session JSONL; operation IDs are not durable. See the [MCP user guide](../mcp/guide.en.md).
 
 ### Kernel, plugins, tools, and capabilities
 

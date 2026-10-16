@@ -37,6 +37,10 @@ npm install -g ligule
 - **可控的工具操作**：按规则或逐次审批；提供文件、命令、Skills、MCP 等扩展能力。
 - **多种使用入口**：CLI 适合脚本与单次任务，TUI 和桌面版适合持续工作。
 
+## 本地 MCP
+
+外部 Agent 可通过 stdio 启动 `ligule mcp-server --project <绝对项目路径>`，使用受限工具操作该项目中的会话。审批请求会被拒绝，操作编号只在当前 Server 进程内有效。详见[本地 MCP 指南](https://github.com/xswt442-cmd/ligule/blob/main/docs/mcp/guide.zh-CN.md)和[英文指南](https://github.com/xswt442-cmd/ligule/blob/main/docs/mcp/guide.en.md)。
+
 ## Agent 框架
 
 Ligule 以 Node.js Host 运行 Agent Loop，管理模型请求、项目配置和追加式会话记录。Kernel 从空工具注册表开始，由 Host 装配插件注册工具；模型发起的工具调用先经过参数校验、目标解析和审批策略，再执行获准的工具并记录结果。CLI 与 TUI 在 Node.js 进程内调用 Host；桌面版由 Electron Main 管理独立 Host 子进程，React 界面通过沙盒 Preload API 通信。三种入口因此共用同一套 Agent 执行与会话语义。

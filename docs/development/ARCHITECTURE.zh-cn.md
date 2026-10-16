@@ -28,6 +28,9 @@
 flowchart LR
   CLI[命令行] -->|进程内调用| Host[Node Host]
   TUI[React 与 Ink] -->|内存协议| Host
+  External[本地 MCP 客户端] -->|stdio MCP| MCP[MCP 适配器]
+  MCP --> Control[进程内控制门面]
+  Control --> Host
   Web[React 桌面界面] <-->|沙盒 Preload 与 IPC| Main[Electron Main]
   Main <-->|按行分隔的消息帧| Child[Node Host 子进程]
   Child --> HostLogic[Host 与内核]
@@ -44,6 +47,10 @@ flowchart LR
 ```
 
 `ligule run` 与直接运行 `ligule`（或使用兼容命令 `ligule tui`）会在界面所属的 Node.js 进程中创建 Host。TUI 通过内存连接发送协议消息。桌面前端只通过固定的沙盒 Preload API 与 Electron Main 通信；Main 将协议帧转发给独立 Node Host，并管理窗口、原生交互和进程生命周期。Node Host 管项目环境、会话、审批与模型请求。入口分别见[命令行](../../tui/src/cli.ts)、[TUI 启动器](../../tui/src/tui/start.ts)、[消息连接](../../core/src/host/connection.ts)、[Electron IPC](../../desktop/electron/ipc.ts)和[Preload API](../../desktop/electron/preload.ts)。
+
+[项目环境装载模块](../../core/src/host/environment.ts) 为 CLI 与 Desktop Host 入口提供同一次读取的配置层与扩展来源。[Provider 构造模块](../../core/src/host/provider.ts) 校验模型协议、能力声明与重试设置；未配置模型的 Host 可以接收设置请求，模型运行明确失败。[会话模式事务](../../core/src/host/session-mode.ts) 负责安装工具限制、提示片段、失败回收和模式事实记录；Host 继续持有会话锁、活跃轮次、协议路由与资源清理。TUI 的记录投影位于 [transcript.ts](../../tui/src/tui/transcript.ts)，Desktop 的[流式缓冲](../../desktop/frontend/src/session-stream.ts) 按会话隔离未落盘输出。
+
+`ligule mcp-server --project <绝对项目根>` 通过 [MCP 适配器](../../core/src/host/mcp-server.ts) 暴露七个本地控制工具。[控制门面](../../core/src/host/control.ts) 调用同一 Host，维护进程内 operation 状态，只访问授权项目中已打开的会话，并拒绝审批请求。连接关闭时取消运行并释放会话锁；持久恢复依靠 Session JSONL，operation ID 不持久化。使用方法见 [MCP 用户指南](../mcp/guide.zh-CN.md)。
 
 ### Kernel、插件、工具与能力
 

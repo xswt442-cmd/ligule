@@ -37,6 +37,10 @@ npm install -g ligule
 - **Controlled tool use:** configure approval rules or review calls individually; extend the assistant with files, commands, Skills, and MCP.
 - **Three interfaces:** use the CLI for scripts and one-off tasks, or the TUI and desktop app for ongoing work.
 
+## Local MCP
+
+An external agent can start `ligule mcp-server --project <absolute-project-path>` over stdio and use its limited tools to work with sessions in that project. Approval requests are denied, and operation IDs last only for the current server process. See the [local MCP guide](https://github.com/xswt442-cmd/ligule/blob/main/docs/mcp/guide.en.md) and the [简体中文指南](https://github.com/xswt442-cmd/ligule/blob/main/docs/mcp/guide.zh-CN.md).
+
 ## Agent framework
 
 The Node.js Host runs the Agent Loop and manages model requests, project configuration, and append-only session records. The kernel starts with an empty tool registry; the Host assembles plugins that register tools. Every model-requested tool call passes argument validation, target resolution, and approval policy before an allowed tool executes and its result is recorded. The CLI and TUI call the Host in-process. Electron Main manages a separate Host child process for the desktop app, while the React UI communicates through a sandboxed Preload API. All three interfaces share the same Agent execution and session semantics.
