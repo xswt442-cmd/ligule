@@ -883,16 +883,22 @@ export function createHost({
   async function readForClient(
     session: SessionLog,
     sessionId: string,
-    { fullResults, limit, before }: { fullResults?: boolean; limit?: number; before?: number } = {},
+    { fullResults, limit, before, at }: { fullResults?: boolean; limit?: number; before?: number; at?: number } = {},
     env: ProjectEnvironment = defaultEnvironment,
   ) {
     const events = await session.read();
     const header = await session.header();
-    // 游标归属那一格要说清它认不认得：不是这一份记录里的事件序号就是失效的游标，不静默当成第一页（E03）。
-    if (before !== undefined && !events.some((event) => event.seq === before)) {
-      throw new KernelError('session_cursor_invalid', { detail: `${sessionId} has no event ${before}` });
+    if (at !== undefined && before !== undefined) {
+      throw new KernelError('protocol_args_invalid', { detail: 'session.read at and before are mutually exclusive' });
     }
-    const page = (before === undefined ? events : events.filter((event) => event.seq < before)).slice(-(limit ?? events.length));
+    // 游标归属那一格要说清它认不认得：不是这一份记录里的事件序号就是失效的游标，不静默当成第一页（E03）。
+    const cursor = at ?? before;
+    if (cursor !== undefined && !events.some((event) => event.seq === cursor)) {
+      throw new KernelError('session_cursor_invalid', { detail: `${sessionId} has no event ${cursor}` });
+    }
+    const page = at !== undefined
+      ? events.filter((event) => event.seq === at)
+      : (before === undefined ? events : events.filter((event) => event.seq < before)).slice(-(limit ?? events.length));
     return {
       sessionId,
       events: fullResults ? await fillSpills(page, env) : page,
@@ -906,7 +912,7 @@ export function createHost({
   // 一次读记录：开着的那一份读它自己的内核，派生支线那一份读它在磁盘上的记录，两个入口不分两种形状。
   // 这一处不读别的磁盘目录：这一次动作的语义是「把我这一份会话的事实拿回来」，不是记录目录的浏览器；
   // 发现历史会话归 sessions，接上别的会话归 session.open。分页与溢出正文的参数原样交给 `readForClient`。
-  async function readRecord(id: string, params: { fullResults?: boolean; limit?: number; before?: number }) {
+  async function readRecord(id: string, params: { fullResults?: boolean; limit?: number; before?: number; at?: number }) {
     const state = sessions.get(id);
     if (state !== undefined) return await readForClient(state.session, id, params, state.environment);
     // 派生支线那一份不在这轮的内核里（跑完就把装配撤了，D71），界面读它用的是这同一次动作（D74）。
@@ -1360,7 +1366,7 @@ export function createHost({
         }
         case 'session.read': {
           // 交回的是记录本身：客户端晚到了也能把已经发生过的事画出来（I5）。
-          // 历史那一页由 `limit` 与 `before` 说（方案 4.1）：支线那份读的是同一套分页，两个入口不分两种形状。
+          // 历史分页由 `limit` 与 `before` 说，`at` 精确取一条记录（方案 4.1）；支线也走同一读取路径。
           return await readRecord(sessionId, message.params);
         }
         case 'session.export': {

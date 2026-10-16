@@ -153,13 +153,14 @@ export const METHODS = Object.freeze({
     },
   },
   'session.read': {
-    description: 'Read the events of an open session, oldest first, so a client that arrives late can show what happened; `limit` and `before` ask for one history page instead of the whole record',
+    description: 'Read events from an open session. Use `limit` and `before` for a history page, or `at` to read exactly one event by sequence number; `at` and `before` cannot be combined',
     parameters: { type: 'object', properties: {
       sessionId: SESSION_ID,
       fullResults: { type: 'boolean', description: 'read complete spilled tool results for display; the record and model view stay unchanged' },
       // 事件序号就是那条稳定游标：往回翻页要说出这一页最早的那一条，翻页期间新到的事件只追加在末尾（E03）。
       limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'take at most this many of the newest events in the requested range' },
       before: { type: 'integer', minimum: 1, description: 'read events older than this sequence number; it has to name an event in this record' },
+      at: { type: 'integer', minimum: 1, description: 'read exactly the event with this sequence number; it has to exist in this record and cannot be combined with before' },
     }, required: ['sessionId'] },
   },
   // 第十二条只为界面多出来的方法：一份记录写成 markdown 并落到人选定的那个位置（方案 6A）。
