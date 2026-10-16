@@ -14,7 +14,7 @@ async function stageReferences({ projectDirectory }) {
   await mkdir(reference, { recursive: true });
   await Promise.all([
     copyFile(repositoryFile('../tui/package.json'), join(reference, 'package.json')),
-    copyFile(repositoryFile('../test/fixtures/register-workspace.mjs'), join(reference, 'register-workspace.mjs')),
+    copyFile(repositoryFile('./fixtures/register-workspace.mjs'), join(reference, 'register-workspace.mjs')),
     copyFile(repositoryFile('../docs/development/ARCHITECTURE.en.md'), join(reference, 'ARCHITECTURE.en.md')),
   ]);
 }

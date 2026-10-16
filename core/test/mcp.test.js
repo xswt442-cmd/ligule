@@ -287,7 +287,7 @@ test('a server that moved its definition is caught over the real protocol', asyn
   const schema = join(root, 'schema.json');
   await writeFile(schema, JSON.stringify({ type: 'object', properties: { value: { type: 'string' } }, required: ['value'] }));
   const registry = createMcpRegistry(mcpServerConfigs({
-    mcp: { servers: { fx: { command: process.execPath, args: [fileURLToPath(new URL('fixtures/mcp-minimal.mjs', import.meta.url)), schema] } } },
+    mcp: { servers: { fx: { command: process.execPath, args: [fileURLToPath(new URL('../../tests/fixtures/mcp-minimal.mjs', import.meta.url)), schema] } } },
   }));
   const kernel = createKernel({ config: createConfig({ user: { boundary: root } }), policy: createDecisionChain({ mode: 'auto' }) });
   loadAssembly(kernel, [createMcpPlugin(registry)]);

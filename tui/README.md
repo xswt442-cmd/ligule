@@ -78,11 +78,11 @@ apiKeyEnv = "MODEL_API_KEY"
 ## 文档
 
 - [使用手册（简体中文）](docs/guide.zh-CN.md) · [User guide (English)](docs/guide.en.md)
-- [架构说明（中文）](docs/development/ARCHITECTURE.zh-cn.md) · [Architecture (English)](docs/development/ARCHITECTURE.en.md)
-- [术语表（中文）](docs/development/GLOSSARY.zh-cn.md) · [Glossary (English)](docs/development/GLOSSARY.en.md)
-- [贡献与验证（中文）](docs/development/CONTRIBUTING.zh-cn.md) · [Contributing and checks (English)](docs/development/CONTRIBUTING.en.md)
-- [更新记录](CHANGELOG.md) · [桌面版更新记录](../desktop/CHANGELOG.md)
-- [维护者发行流程](docs/development/RELEASE.md)
+- [架构说明（中文）](https://github.com/xswt442-cmd/ligule/blob/main/docs/development/ARCHITECTURE.zh-cn.md) · [Architecture (English)](https://github.com/xswt442-cmd/ligule/blob/main/docs/development/ARCHITECTURE.en.md)
+- [术语表（中文）](https://github.com/xswt442-cmd/ligule/blob/main/docs/development/GLOSSARY.zh-cn.md) · [Glossary (English)](https://github.com/xswt442-cmd/ligule/blob/main/docs/development/GLOSSARY.en.md)
+- [贡献与验证（中文）](https://github.com/xswt442-cmd/ligule/blob/main/docs/development/CONTRIBUTING.zh-cn.md) · [Contributing and checks (English)](https://github.com/xswt442-cmd/ligule/blob/main/docs/development/CONTRIBUTING.en.md)
+- [更新记录](CHANGELOG.md) · [桌面版更新记录](https://github.com/xswt442-cmd/ligule/blob/main/desktop/CHANGELOG.md)
+- [维护者发行流程](https://github.com/xswt442-cmd/ligule/blob/main/docs/development/RELEASE.md)
 
 ## 许可证
 

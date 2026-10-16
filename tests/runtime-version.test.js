@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { parse, parseAllDocuments } from '../core/node_modules/yaml/dist/index.js';
 import { releaseManifest } from '../scripts/pack-release.js';
 
@@ -33,6 +33,33 @@ test('the package description carries both languages', () => {
   const description = JSON.parse(read('../tui/package.json')).description;
   assert.match(description, /[\u4e00-\u9fff]/, 'the Chinese part of the description is missing');
   assert.match(description, /[A-Za-z]{4,}\s+[A-Za-z]{4,}/, 'the English part of the description is missing');
+});
+
+test('Core workspace metadata is private, documented, and licensed without a product version', () => {
+  const core = JSON.parse(read('../core/package.json'));
+  assert.equal(core.name, '@ligule/core');
+  assert.equal(core.private, true);
+  assert.equal(Object.hasOwn(core, 'version'), false);
+  assert.ok(core.files.includes('README.md'));
+  assert.ok(core.files.includes('LICENSE'));
+  assert.match(read('../core/README.md'), /no independent version, changelog, npm publication, or release tag/);
+  assert.match(read('../core/README.md'), /tui → core ← desktop/);
+  assert.match(read('../core/LICENSE'), /MIT License/);
+});
+
+test('fixtures have one owner: Core, TUI, or shared cross-module tests', () => {
+  const owners = new Map();
+  for (const directory of ['core/test/fixtures', 'tui/test/fixtures', 'tests/fixtures']) {
+    for (const name of readdirSync(new URL(`../${directory}/`, import.meta.url))) {
+      const previous = owners.get(name);
+      assert.equal(previous, undefined, `${name} is duplicated in ${previous} and ${directory}`);
+      owners.set(name, directory);
+    }
+  }
+  assert.equal(owners.get('mcp-minimal.mjs'), 'tests/fixtures');
+  assert.equal(owners.get('register-workspace.mjs'), 'tests/fixtures');
+  assert.equal(owners.get('editor.mjs'), 'tui/test/fixtures');
+  assert.equal(owners.get('credential-read.mjs'), 'core/test/fixtures');
 });
 
 test('the ripgrep runtime uses the upstream platform-selecting dependency', () => {

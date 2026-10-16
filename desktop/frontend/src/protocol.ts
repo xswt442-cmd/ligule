@@ -1,4 +1,4 @@
-// 客户端协议这一层的界面侧读法（D30、D33）。方法与参数模式的定义在后端（`src/host/protocol.ts`），
+// 客户端协议这一层的界面侧读法（D30、D33）。方法与参数模式的定义在后端（`core/src/host/protocol.ts`），
 // 这里不复制那张表，只按帧的形状收发：请求带 id 与 method，答复带同一个 id，通报带 notify。
 // Transport 由桌面桥提供；协议客户端不依赖 Electron。
 import type { NotificationBridge } from './notifications';

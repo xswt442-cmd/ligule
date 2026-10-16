@@ -98,7 +98,7 @@ test('那份登记读不懂就当场拒，不当成空的', () => {
 test('两具进程同时登记时两条都留下，替身与锁都不留', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ligule-reg-race-'));
   const path = join(root, 'workspaces.json');
-  const fixture = fileURLToPath(new URL('./fixtures/register-workspace.mjs', import.meta.url));
+  const fixture = fileURLToPath(new URL('../../tests/fixtures/register-workspace.mjs', import.meta.url));
   try {
     await Promise.all(['alpha', 'beta', 'alpha', 'beta'].map(async (one) => {
       const directory = join(root, one);

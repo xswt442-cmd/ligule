@@ -1,4 +1,4 @@
-// `status.get` 交回的那一格形状（D82、D86）。方法与参数模式定义在后端 `src/host/protocol.ts`，
+// `status.get` 交回的那一格形状（D82、D86）。方法与参数模式定义在后端 `core/src/host/protocol.ts`，
 // 这里只留界面要读的那几格：读不到的字段不参与画，画出来的都在这一份上。
 export type Usage = {
   window: number;

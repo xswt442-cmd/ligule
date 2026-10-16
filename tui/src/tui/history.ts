@@ -1,5 +1,5 @@
 // 终端界面那一栏反查（D81 边界二）：从共用的那一份输入历史里筛出含这一段的那几条。
-// 历史文件本身在内核那一侧（`src/kernel/input-history.ts`），桌面与终端读写的都是它。
+// 历史文件本身在内核那一侧（`core/src/kernel/input-history.ts`），桌面与终端读写的都是它。
 /** 反查那几行的条数上限：清单超过这个数就挡住输入框本身了。 */
 export const SEARCH_ROWS = 8;
 

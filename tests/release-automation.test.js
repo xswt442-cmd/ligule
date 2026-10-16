@@ -453,5 +453,3 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
       'real Host tests require tui/dist/cli.js from the workspace build in a fresh checkout');
   }
 });
-
-\n

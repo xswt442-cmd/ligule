@@ -18,7 +18,9 @@
     "README.md",
     "README.en.md",
     "CHANGELOG.md",
-    "docs",
+    "docs/guide.zh-CN.md",
+    "docs/guide.en.md",
+    "docs/app-icon.png",
     "LICENSE"
   ],
   "bundledDependencies": ["@ligule/core"],

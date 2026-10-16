@@ -45,7 +45,11 @@ if (vendoredPackage.name !== packageJson.name || vendoredPackage.version !== pac
 const coreRoot = join(app, 'node_modules', '@ligule', 'core');
 const hostEntry = join(coreRoot, 'dist', 'host', 'desktop-entry.js');
 const shippedMode = join(coreRoot, 'modes', 'minimal.toml');
-if (!existsSync(hostEntry) || !existsSync(shippedMode)) throw new Error('the Desktop runtime is missing its Core Host entry or shipped modes');
+if (!existsSync(hostEntry) || !existsSync(shippedMode)
+  || !existsSync(join(coreRoot, 'README.md')) || !existsSync(join(coreRoot, 'LICENSE'))) {
+  throw new Error('the Desktop runtime is missing Core metadata, Host entry, or shipped modes');
+}
+if (existsSync(join(coreRoot, 'test'))) throw new Error('the Desktop runtime must not include Core test fixtures');
 const library = await import(pathToFileURL(join(coreRoot, 'dist', 'index.js')).href);
 const requireFromApp = createRequire(join(app, 'package.json'));
 const insideAppModules = async (name, resolver = requireFromApp) => {

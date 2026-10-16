@@ -101,11 +101,8 @@ jobs:
           cache-dependency-path: pnpm-lock.yaml
       - name: install
         run: pnpm install --frozen-lockfile
-      - name: syntax check source, scripts, and tests
-        shell: bash
-        run: |
-          set -e
-          for f in $(find core/src tui/src scripts test core/test tui/test -name '*.js'); do node --check "$f"; done
+      - name: syntax check JavaScript source and tests
+        run: pnpm check:syntax
       - name: test
         run: pnpm test
 

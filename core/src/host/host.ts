@@ -385,7 +385,7 @@ export function hostProviderFromConfig(config: ConfigSnapshot): HostProvider {
   }
 }
 
-// 会话记录落在哪儿由 `src/session/list.js` 那一处说:同一件事在两处各写一次,列表与宿主就会读到两个目录(D73)。
+// 会话记录落在哪儿由 `core/src/session/list.js` 那一处说:同一件事在两处各写一次,列表与宿主就会读到两个目录(D73)。
 // 循环的上限来自配置文件，形状在这里就查：只写其中一项时另一项照默认值补，
 // 缺值传下去会让「迭代上限」变成 undefined，那一轮一次都不跑，报出来的码还说不出为什么。
 function loopLimitsOf(config: HostConfigSnapshot): LoopLimits {
@@ -588,7 +588,7 @@ export function createHost({
     await classifyProjectRoot(asked);
     const loaded = prepareEnvironment(await loadEnvironment(projectRoot));
     // 同一台机器上同一目录可以有多种写法（大小写、斜杠方向、尾部分隔符、链接）：写法不同不算身份不符。
-    // 与 `src/session/list.ts` 筛记录头部用的是同一条规矩。
+    // 与 `core/src/session/list.ts` 筛记录头部用的是同一条规矩。
     if (resolve(loaded.projectRoot) !== asked && workspaceIdentity(loaded.projectRoot) !== askedIdentity) {
       throw new KernelError('host_project_root_mismatch', { detail: `asked for ${projectRoot}, the layers give ${loaded.projectRoot}` });
     }

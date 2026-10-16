@@ -3,9 +3,9 @@
 // 跑法：pnpm --filter ligule run verify-install [tarball]
 // 带一个 tarball 路径时用它，不再自己打：发布流水线要在同一批字节上先验后发，那一份身份就是 artifact 里的那一个文件。
 import { spawnSync, execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { releaseManifest } from './pack-release.js';
 import { execNpm } from './npm-cli.js';
 
@@ -60,11 +60,21 @@ try {
   throw error;
 }
 
-const installed = JSON.parse(readFileSync(join(consumer, 'node_modules', pkg.name, 'package.json'), 'utf8'));
+const installedPackageDirectory = join(consumer, 'node_modules', pkg.name);
+const installed = JSON.parse(readFileSync(join(installedPackageDirectory, 'package.json'), 'utf8'));
 if (installed.version !== pkg.version) throw new Error(`the consumer got ${installed.version}, package.json says ${pkg.version}`);
+if (Object.values(installed.dependencies ?? {}).some((specifier) => specifier.startsWith('workspace:'))) {
+  throw new Error('the published package manifest retained a pnpm workspace dependency');
+}
 const bundledCoreDirectory = join(consumer, 'node_modules', pkg.name, 'node_modules', '@ligule', 'core');
 if (!existsSync(join(bundledCoreDirectory, 'dist', 'index.js')) || !existsSync(join(bundledCoreDirectory, 'modes', 'minimal.toml'))) {
   throw new Error('the installed npm package does not contain the complete private Core runtime');
+}
+const installedPackageRoot = realpathSync(installedPackageDirectory);
+const installedCoreRoot = realpathSync(bundledCoreDirectory);
+const relativeCore = relative(installedPackageRoot, installedCoreRoot);
+if (relativeCore === '..' || relativeCore.startsWith(`..${sep}`) || isAbsolute(relativeCore)) {
+  throw new Error(`the installed Core package resolved outside the TUI tarball: ${installedCoreRoot}`);
 }
 const coreManifest = JSON.parse(readFileSync(join(bundledCoreDirectory, 'package.json'), 'utf8'));
 if (coreManifest.private !== true) throw new Error('the bundled Core package must remain private');

@@ -78,11 +78,11 @@ Set the environment variable named by `apiKeyEnv`. Desktop settings also support
 ## Documentation
 
 - [简体中文使用手册](docs/guide.zh-CN.md) · [User guide](docs/guide.en.md)
-- [架构说明（中文）](docs/development/ARCHITECTURE.zh-cn.md) · [Architecture](docs/development/ARCHITECTURE.en.md)
-- [术语表（中文）](docs/development/GLOSSARY.zh-cn.md) · [Glossary](docs/development/GLOSSARY.en.md)
-- [贡献与验证（中文）](docs/development/CONTRIBUTING.zh-cn.md) · [Contributing and checks](docs/development/CONTRIBUTING.en.md)
-- [Changelog](CHANGELOG.md) · [Desktop changelog](../desktop/CHANGELOG.md)
-- [Maintainer release procedure](docs/development/RELEASE.md)
+- [架构说明（中文）](https://github.com/xswt442-cmd/ligule/blob/main/docs/development/ARCHITECTURE.zh-cn.md) · [Architecture](https://github.com/xswt442-cmd/ligule/blob/main/docs/development/ARCHITECTURE.en.md)
+- [术语表（中文）](https://github.com/xswt442-cmd/ligule/blob/main/docs/development/GLOSSARY.zh-cn.md) · [Glossary](https://github.com/xswt442-cmd/ligule/blob/main/docs/development/GLOSSARY.en.md)
+- [贡献与验证（中文）](https://github.com/xswt442-cmd/ligule/blob/main/docs/development/CONTRIBUTING.zh-cn.md) · [Contributing and checks](https://github.com/xswt442-cmd/ligule/blob/main/docs/development/CONTRIBUTING.en.md)
+- [Changelog](CHANGELOG.md) · [Desktop changelog](https://github.com/xswt442-cmd/ligule/blob/main/desktop/CHANGELOG.md)
+- [Maintainer release procedure](https://github.com/xswt442-cmd/ligule/blob/main/docs/development/RELEASE.md)
 
 ## License
 

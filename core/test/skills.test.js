@@ -15,7 +15,7 @@ import {
 } from '../dist/index.js';
 
 const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
-// 四个来源目录在临时根下的相对写法，先后与 src/kernel/skills.ts 那一条一致（D57）。
+// 四个来源目录在临时根下的相对写法，先后与 core/src/kernel/skills.ts 那一条一致（D57）。
 const SOURCES = [
   join('project', '.ligule', 'skills'),
   join('project', '.agents', 'skills'),

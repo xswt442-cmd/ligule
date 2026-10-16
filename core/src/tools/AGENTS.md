@@ -1,6 +1,6 @@
 # Tools
 
-The repository [Agent guide](../../../AGENTS.md) applies here. This directory contains model-callable tool contracts and their implementations. Platform and filesystem primitives live under [`src/capability/`](../capability/); every tool call still enters through the kernel.
+The repository [Agent guide](../../../AGENTS.md) applies here. This directory contains model-callable tool contracts and their implementations. Platform and filesystem primitives live under [`core/src/capability/`](../capability/); every tool call still enters through the kernel.
 
 ## Filesystem tools
 

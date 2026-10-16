@@ -1,5 +1,5 @@
 // 界面上 `@` 要的候选文件从这一处来：宿主读目录，界面不开盘（D81 边界一、方案 5.3）。
-// 走的是文件工具那一份遍历（`src/tools/common.ts` 的 `walkFiles`），所以候选的先后与模型自己列目录时看到的是同一套顺序。
+// 走的是文件工具那一份遍历（`core/src/tools/common.ts` 的 `walkFiles`），所以候选的先后与模型自己列目录时看到的是同一套顺序。
 // 符号链接不进候选也不跟：`walkFiles` 只认普通文件与目录，指向边界之外的链接因此天然扩大不了可见范围。
 import { KernelError } from '../kernel/error.js';
 import { walkFiles } from '../tools/common.js';

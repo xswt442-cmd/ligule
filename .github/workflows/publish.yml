@@ -121,8 +121,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          pnpm check:syntax
           find core/dist tui/dist -type f -name '*.js' -print0 | xargs -0 -r -n 1 node --check
-          for file in scripts/*.js test/*.js core/test/*.js tui/test/*.js; do node --check "$file"; done
 
       - name: check the packed artifact
         run: pnpm --filter ligule run check-pack

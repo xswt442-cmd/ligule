@@ -39,9 +39,14 @@ try {
     throw new Error(`${tarball} does not carry the release manifest's optional dependencies`);
   }
   const bundledCore = join(shipped, 'node_modules', '@ligule', 'core');
-  if (!existsSync(join(bundledCore, 'dist', 'index.js')) || !existsSync(join(bundledCore, 'modes', 'minimal.toml'))) {
-    throw new Error(`${tarball} is missing the bundled @ligule/core runtime or its shipped modes`);
+  if (!existsSync(join(bundledCore, 'dist', 'index.js')) || !existsSync(join(bundledCore, 'modes', 'minimal.toml'))
+    || !existsSync(join(bundledCore, 'README.md')) || !existsSync(join(bundledCore, 'LICENSE'))) {
+    throw new Error(`${tarball} is missing the bundled @ligule/core runtime, modes, README, or license`);
   }
+  for (const testPath of ['test', 'tests', 'core/test', 'tui/test']) {
+    if (existsSync(join(shipped, testPath))) throw new Error(`${tarball} must not contain test files: ${testPath}`);
+  }
+  if (existsSync(join(bundledCore, 'test'))) throw new Error(`${tarball} must not bundle Core test fixtures`);
   const declared = [...collectTargets(manifest.exports), ...collectTargets(manifest.bin)];
   if (declared.length === 0) throw new Error('package.json declares neither exports nor bin, nothing to check');
   for (const target of declared) {

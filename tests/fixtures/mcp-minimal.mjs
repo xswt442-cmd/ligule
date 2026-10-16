@@ -2,9 +2,9 @@
 // 工具声明每次 tools/list 都从 argv[2] 指定的那份 JSON 重新读一次：进程不动而定义能换，
 // 这一段是官方文件系统服务器演不出来的（它的声明编译在里面）。
 import { readFileSync } from 'node:fs';
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { Server } from '../../core/node_modules/@modelcontextprotocol/sdk/dist/esm/server/index.js';
+import { StdioServerTransport } from '../../core/node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '../../core/node_modules/@modelcontextprotocol/sdk/dist/esm/types.js';
 
 const schemaPath = process.argv[2];
 const readSchema = () => JSON.parse(readFileSync(schemaPath, 'utf8'));

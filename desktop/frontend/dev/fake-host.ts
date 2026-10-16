@@ -1,5 +1,5 @@
 // 只在开发时用的那一份假宿主（不进打包产物：`vite build` 的入口是 index.html，这一份从 dev.html 进来）。
-// 它按 `src/host/protocol.ts` 那张表的帧形状说话，为的是把界面上每一条真实分支都演出来：流式增量、
+// 它按 `core/src/host/protocol.ts` 那张表的帧形状说话，为的是把界面上每一条真实分支都演出来：流式增量、
 // 刚落盘的事件、审批的反向请求、错误码、用量与压力、会话列表与支线。真宿主跑起来要有端点，
 // 这一份不需要：界面改动的对错因此能在浏览器里当场看，也能在检查里当场断。
 import type { Transport } from '../src/protocol';
@@ -27,7 +27,7 @@ const markdown = [
   'if (estimated * factor > threshold) await compact();',
   '```',
   '',
-  '细节在 [压缩那一段](src/session/compaction.ts) 里，外链走另一条路：[example](https://example.com/)。一轮压完大约从十万降到两万。',
+  '细节在 [压缩那一段](core/src/session/compaction.ts) 里，外链走另一条路：[example](https://example.com/)。一轮压完大约从十万降到两万。',
 ].join('\n');
 
 // 溢出文件里的那一整段：只有 `fullResults` 这一格交回来，记录里留着的是截断后的那一份。
@@ -127,8 +127,8 @@ const sessions: Listed[] = [
 
 // `paths.list` 演的那一份项目里的文件：斜杠书写、相对项目根，与宿主交回的是同一形状（方案 5.3）。
 const PROJECT_FILES = [
-  'AGENTS.md', 'README.md', 'modes/full.toml', 'modes/minimal.toml',
-  'notes/readings-2.md', 'notes/readings-3.md', 'notes/读数 第三版.md', 'src/host/host.js', 'src/kernel/loop.js',
+  'AGENTS.md', 'README.md', 'core/modes/full.toml', 'core/modes/minimal.toml',
+  'notes/readings-2.md', 'notes/readings-3.md', 'notes/读数 第三版.md', 'core/src/host/host.js', 'core/src/kernel/loop.js',
 ];
 
 // 假宿主手里那四层配置：值与那一份的版本。版本演成一个递增的串，够把「读回来时带着、写的时候交回来比对」

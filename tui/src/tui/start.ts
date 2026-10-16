@@ -1,4 +1,4 @@
-// 终端界面的启动（D33）：Host 与界面在同一个进程里，两端换成内存载体（src/host/memory.ts）。
+// 终端界面的启动（D33）：Host 与界面在同一个进程里，两端换成内存载体（core/src/host/memory.ts）。
 // 界面读的是与桌面壳同一份协议：session.create、run.start、两条通报，以及 Host 反过来的那一次审批请求。
 // ink 与 react 是可选依赖，缺了它们这一条命令报 tui_dependency_missing，命令行其余部分照旧能跑。
 import { createElement } from 'react';

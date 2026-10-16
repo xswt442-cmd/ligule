@@ -28,9 +28,8 @@ const maintainedDocs = [
   ...bilingualPairs.flatMap((pair) => pair),
   join(repoRoot, 'tui', 'CHANGELOG.md'),
   join(repoRoot, 'docs', 'development', 'RELEASE.md'),
-  ...readdirSync(join(repoRoot, 'tui', 'docs'), { recursive: true })
-    .filter((path) => path.endsWith('.md'))
-    .map((path) => join(repoRoot, 'tui', 'docs', path)),
+  join(repoRoot, 'tui', 'docs', 'guide.zh-CN.md'),
+  join(repoRoot, 'tui', 'docs', 'guide.en.md'),
 ];
 // 工程指南八份：根那一份放全局规则，七份局部规则放在模块和 Desktop 子目录内。
 const guides = [
@@ -141,9 +140,9 @@ test('workspace and TUI READMEs point to module and product documentation', () =
   assert.match(rootReadme, /core\/.*tui\/.*desktop\//s);
   assert.match(rootReadme, /docs\/development\/ARCHITECTURE\.zh-cn\.md/);
   assert.match(readme, /docs\/guide\.zh-CN\.md/);
-  assert.match(readme, /docs\/development\/ARCHITECTURE\.zh-cn\.md/);
-  assert.match(readme, /docs\/development\/RELEASE\.md/);
-  assert.match(englishReadme, /docs\/development\/ARCHITECTURE\.en\.md/);
+  assert.match(readme, /github\.com\/xswt442-cmd\/ligule\/blob\/main\/docs\/development\/ARCHITECTURE\.zh-cn\.md/);
+  assert.match(readme, /github\.com\/xswt442-cmd\/ligule\/blob\/main\/docs\/development\/RELEASE\.md/);
+  assert.match(englishReadme, /github\.com\/xswt442-cmd\/ligule\/blob\/main\/docs\/development\/ARCHITECTURE\.en\.md/);
   assert.match(readme, /CHANGELOG\.md/);
   assert.match(englishReadme, /CHANGELOG\.md/);
   assert.ok(manifest.files.includes('README.en.md'), 'the English README must be included in the npm package');
