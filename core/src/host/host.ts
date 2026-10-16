@@ -42,11 +42,9 @@ import { createMcpPlugin } from '../tools/mcp.js';
 import { createSubagentPlugin } from '../tools/subagent.js';
 import { createAskUserPlugin } from '../tools/ask-user.js';
 import { createMcpRegistry, mcpServerConfigs, type McpRegistry } from '../capability/mcp.js';
-import { createMessagesProvider } from '../model/messages.js';
-import { createChatCompletionsProvider } from '../model/chat-completions.js';
 import { discoverModels } from '../model/discovery.js';
-import { apiRoot, DEFAULT_RETRY, type ProviderCapabilities, type RetryPolicy } from '../model/http.js';
-import type { ModelProvider, ModelRequest, ProviderEvent } from '../kernel/loop.js';
+import { apiRoot } from '../model/http.js';
+import type { ModelRequest, ProviderEvent } from '../kernel/loop.js';
 import { createConnection, type Connection, type HostRequest } from './connection.js';
 import { APPROVAL_METHOD, QUESTION_METHOD, isApproved, validateCall, type HostMethodParams } from './protocol.js';
 import { type ConfigSnapshot } from '../kernel/config.js';
@@ -58,6 +56,8 @@ import type { TemplateRegistry } from '../kernel/templates.js';
 import type { PolicyRule } from '../kernel/config-edit.js';
 import type { ToolDefinition } from '../kernel/kernel.js';
 import { adoptSessionMode, type SessionModeState } from './session-mode.js';
+import { providerFromConfig, hostProviderFromConfig, type HostProvider } from './provider.js';
+export { providerFromConfig, hostProviderFromConfig } from './provider.js';
 
 interface HostConfigSnapshot extends ConfigSnapshot {
   readonly boundary?: string;
@@ -68,14 +68,6 @@ interface HostConfigSnapshot extends ConfigSnapshot {
   readonly policy?: Record<string, unknown>;
   readonly prompt?: { readonly static?: string };
   readonly instructions?: Record<string, unknown> & { readonly maxBytes?: number; readonly current?: string };
-}
-
-interface HostProvider extends ModelProvider {
-  readonly name: string;
-  readonly model: string | null;
-  readonly pending?: true;
-  readonly capabilities?: ProviderCapabilities;
-  withModel(model: string): HostProvider;
 }
 
 interface PolicyConfig {
@@ -305,81 +297,6 @@ function exportRecordOf(event: SessionEvent): ExportRecord | undefined {
     };
   }
   return record;
-}
-
-// 重试边界也在配置里；形状在这里就查：非整数的 maxAttempts 让「第几次了」比不出大小，
-// 每次传输失败就悄悄变成不重试，而看不出为什么不重试。
-function retryOf(model: Record<string, unknown>): RetryPolicy {
-  if (model.retry !== undefined && !isRecord(model.retry)) {
-    throw new KernelError('host_retry_invalid', { detail: 'retry must be an object' });
-  }
-  const retry = { ...DEFAULT_RETRY, ...(isRecord(model.retry) ? model.retry : {}) };
-  const positiveInteger = (value: unknown, key: 'maxAttempts' | 'baseDelayMs'): number => {
-    if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
-      throw new KernelError('host_retry_invalid', { detail: `${key} must be an integer of at least 1` });
-    }
-    return value;
-  };
-  const boolean = (value: unknown, key: 'retry429' | 'retry5xx' | 'retryTransport'): boolean => {
-    if (typeof value !== 'boolean') throw new KernelError('host_retry_invalid', { detail: `${key} must be a boolean` });
-    return value;
-  };
-  return Object.freeze({
-    maxAttempts: positiveInteger(retry.maxAttempts, 'maxAttempts'),
-    baseDelayMs: positiveInteger(retry.baseDelayMs, 'baseDelayMs'),
-    retry429: boolean(retry.retry429, 'retry429'),
-    retry5xx: boolean(retry.retry5xx, 'retry5xx'),
-    retryTransport: boolean(retry.retryTransport, 'retryTransport'),
-  });
-}
-
-// 服务地址与模型名从配置快照读，凭据只在发请求时从环境变量读（D13）。
-// 线上形状由 `model.api` 指名（D31）：不按地址猜，猜错的请求体只会换来一句说不出原因的 400。
-// 能力项只能把该种形状声明的上限调低，那一条判据由各自的声明把守，这里只负责把配置送到它面前。
-export function providerFromConfig(config: ConfigSnapshot): HostProvider {
-  if (!isRecord(config.model)) throw new KernelError('host_model_config_missing', { detail: 'config.model.baseURL and config.model.model' });
-  const model = resolveModel(config.model);
-  const api = model.api;
-  if (api !== 'messages' && api !== 'chat-completions') {
-    throw new KernelError('provider_api_form_required', { detail: 'model.api must be "messages" or "chat-completions"' });
-  }
-  const apiKeyEnv = model.apiKeyEnv;
-  if (apiKeyEnv !== undefined && typeof apiKeyEnv !== 'string') {
-    throw new KernelError('provider_credential_missing', { detail: 'model.apiKeyEnv must be a string' });
-  }
-  const capabilities = model.capabilities;
-  if (capabilities !== undefined && !isRecord(capabilities)) {
-    throw new KernelError('provider_capability_invalid', { detail: 'model.capabilities must be a table' });
-  }
-  const options = {
-    baseUrl: model.baseURL,
-    model: model.model,
-    ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }),
-    ...(capabilities === undefined ? {} : { capabilities }),
-    retry: retryOf(model),
-  };
-  if (api === 'messages') return createMessagesProvider(options);
-  return createChatCompletionsProvider(options);
-}
-
-/** 缺那几格时宿主先立起来的这一枚：形状与真提供方一样，进程收得住请求，设置的「模型与端点」那一栏才写得进去（U59）。
- *  真要发一轮时把缺的字段原样说出去；写完那几格由 `adoptGeneration` 换上真那一份，这一枚就退场。 */
-function pendingProvider(error: KernelError): HostProvider {
-  const refuse = () => {
-    throw error;
-  };
-  return { name: 'pending', model: null, pending: true, withModel: refuse, stream: async function* () { refuse(); } };
-}
-
-/** 宿主这一路用的提供方：不像命令行那样当场把进程带走。命令行与终端那两路仍旧当场报错——那是人坐在终端前，越早说越好。 */
-export function hostProviderFromConfig(config: ConfigSnapshot): HostProvider {
-  try {
-    return providerFromConfig(config);
-  } catch (error) {
-    if (!['host_model_config_missing', 'provider_api_form_required', 'provider_base_url_required', 'provider_model_required', 'model_service_not_found', 'model_not_available'].includes(errorCode(error) ?? '')) throw error;
-    if (!(error instanceof KernelError)) throw error;
-    return pendingProvider(error);
-  }
 }
 
 // 会话记录落在哪儿由 `core/src/session/list.js` 那一处说:同一件事在两处各写一次,列表与宿主就会读到两个目录(D73)。

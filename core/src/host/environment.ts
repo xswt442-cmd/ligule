@@ -2,7 +2,8 @@ import { createConfig } from '../kernel/config.js';
 import { loadConfigLayers } from '../kernel/config-file.js';
 import { extensionSources } from '../kernel/extensions.js';
 import { DEFAULT_MODE, modeDirectories } from '../kernel/modes.js';
-import { hostProviderFromConfig, type createHost, type EnvironmentSeed } from './host.js';
+import { hostProviderFromConfig } from './provider.js';
+import type { createHost, EnvironmentSeed } from './host.js';
 
 /** Read all project resources from the same configuration-layer snapshot. */
 export async function loadProjectConfig(projectRoot: string, flags: string[] = []) {
