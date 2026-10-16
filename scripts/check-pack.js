@@ -32,6 +32,7 @@ try {
   execFileSync('tar', ['-xzf', `testplace/pack/${tarball}`, '-C', 'testplace/pack/check'], { cwd: repo, stdio: 'inherit' });
   const shipped = join(work, 'package');
   const manifest = JSON.parse(readFileSync(join(shipped, 'package.json'), 'utf8'));
+  if (manifest.bin?.ligule !== './dist/cli.js') throw new Error(`${tarball} is missing the ligule CLI entry required by the MCP server command`);
   if (JSON.stringify(manifest.dependencies) !== JSON.stringify(pkg.dependencies)) {
     throw new Error(`${tarball} does not carry the release manifest's dependencies`);
   }
@@ -42,6 +43,9 @@ try {
   if (!existsSync(join(bundledCore, 'dist', 'index.js')) || !existsSync(join(bundledCore, 'modes', 'minimal.toml'))
     || !existsSync(join(bundledCore, 'README.md')) || !existsSync(join(bundledCore, 'LICENSE'))) {
     throw new Error(`${tarball} is missing the bundled @ligule/core runtime, modes, README, or license`);
+  }
+  if (!existsSync(join(bundledCore, 'dist', 'host', 'control.js'))) {
+    throw new Error(`${tarball} is missing the Host control module required by the MCP server`);
   }
   for (const testPath of ['test', 'tests', 'core/test', 'tui/test']) {
     if (existsSync(join(shipped, testPath))) throw new Error(`${tarball} must not contain test files: ${testPath}`);
