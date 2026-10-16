@@ -9,7 +9,7 @@ import { KernelError } from '../kernel/error.js';
 import { createKernel, type Kernel } from '../kernel/kernel.js';
 import { loadAssembly, type Assembly, type Plugin } from '../kernel/assembly.js';
 import { loadExtensions, type ExtensionDiagnostic } from '../kernel/extensions.js';
-import { applyMode, DEFAULT_MODE, loadMode, type ModeDirectories, type ModeFile } from '../kernel/modes.js';
+import { DEFAULT_MODE, loadMode, type ModeDirectories, type ModeFile } from '../kernel/modes.js';
 import { readRegistry, registerWorkspace, setDefaultWorkspace, workspaceIdentity } from '../kernel/workspace.js';
 import { historyPathOf, loadHistory, rememberHistory } from '../kernel/input-history.js';
 import { parsePrefsJson, prefsPathOf, readPrefs, savePrefs } from '../kernel/desktop-prefs.js';
@@ -57,6 +57,7 @@ import type { SkillRegistry } from '../kernel/skills.js';
 import type { TemplateRegistry } from '../kernel/templates.js';
 import type { PolicyRule } from '../kernel/config-edit.js';
 import type { ToolDefinition } from '../kernel/kernel.js';
+import { adoptSessionMode, type SessionModeState } from './session-mode.js';
 
 interface HostConfigSnapshot extends ConfigSnapshot {
   readonly boundary?: string;
@@ -153,11 +154,7 @@ interface AdoptionResult {
   readonly failure?: { code: string; detail?: string };
 }
 
-interface ModeState {
-  file: ModeFile | undefined;
-  tools: string[];
-  undo(): void;
-}
+type ModeState = SessionModeState;
 
 interface HostSessionBase {
   readonly id: string;
@@ -1140,56 +1137,15 @@ export function createHost({
     // 任一步校验或装配失败都保留旧模式，避免出错后工具清单意外变宽。
     // 记录里这一条是给「两条用户输入之间各自用的是哪一份清单」用的（I2、I5）；
     // 收紧只减不加，被藏起来的那几件仍然留在登记表里（I4）。
-    state.adopt = async (file) => {
-      const selected = file.prompt === '*'
-        ? [...fragments]
-        : file.prompt.map((name) => {
-            const found = fragments.find((entry) => entry.name === name);
-            if (found === undefined) {
-              throw new KernelError('mode_prompt_unavailable', {
-                detail: `${name} (mode ${file.name}; registered: ${fragments.map((entry) => entry.name).join(', ') || 'none'})`,
-              });
-            }
-            return found;
-          });
-      // applyMode validates against the full registered tool set and adds its own restriction.
-      // Install it while the old restriction is still active so a rejected mode cannot expose the full set.
-      const applied = applyMode(kernel, file);
-      const fragmentUndo: (() => void)[] = [];
-      try {
-        selected.forEach((fragment, index) => {
-          fragmentUndo.push(prompt.fragment({
-            name: `extension:${fragment.name}`,
-            anchor: 2 + index,
-            text: fragment.text,
-            maxBytes: limitsOf(config).promptFragmentBytes,
-          }));
-        });
-      } catch (error) {
-        for (const remove of fragmentUndo.reverse()) remove();
-        applied.undo();
-        throw error;
-      }
-      state.mode.undo();
-      const tools = kernel.manifest().map((entry) => entry.name);
-      Object.assign(state.mode, {
-        file,
-        tools,
-        undo: () => {
-          for (const remove of fragmentUndo.slice().reverse()) remove();
-          applied.undo();
-        },
-      });
-      // 同一份清单不重复记：重新attach 到一份已有记录上不写东西（客户端接上来读不该改动事实源）。
-      // 名字、来源或那一栏工具变了才记一条，让「这一条输入用的是哪一份」在记录里读得出来（I5）。
-      const last = (await session.read()).filter((event) => event.kind === 'mode').at(-1);
-      const lastTools = Array.isArray(last?.tools) && last.tools.every((tool): tool is string => typeof tool === 'string')
-        ? last.tools
-        : undefined;
-      if (last === undefined || last.name !== file.name || last.layer !== file.layer || lastTools?.join(' ') !== tools.join(' ') || last.digest !== file.digest) {
-        await session.append({ kind: 'mode', name: file.name, layer: file.layer, path: file.path, tools, digest: file.digest });
-      }
-    };
+    state.adopt = (file) => adoptSessionMode({
+      file,
+      kernel,
+      prompt,
+      fragments,
+      promptFragmentBytes: limitsOf(config).promptFragmentBytes,
+      session,
+      mode: state.mode,
+    });
     // 模式选中的那一栏工具与那几段片段在装载之后才生效（D35、D44）：清单里写了本次没有登记的名字会在这里失败，
     // 而不是静默少一件。
     // 打开一份已有的记录时，先把没人回答的那几次派发补成规范的工具结果（D72）：这一条只在可写的恢复路径上做一次，
