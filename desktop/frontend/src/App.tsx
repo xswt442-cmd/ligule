@@ -33,6 +33,7 @@ import type { Status } from './status';
 import { loadSettings, mergeQueueIntoDraft, readSettings, saveSettings, type Settings } from './settings';
 import { LocaleProvider, localeOf, useText } from './locale';
 import { notificationOf, notificationTarget, type NotificationKind, type NotificationTarget } from './notifications';
+import { SessionStreamBuffer } from './session-stream';
 
 type Branch = { seq: number; id: string; task: string };
 
@@ -260,7 +261,9 @@ export function App({ transport }: { transport: Transport }) {
   const [rows, setRows] = useState<Row[]>([]);
   const [live, setLive] = useState({ text: '', reasoning: '' });
   // 流式那半截按会话各存一份：后台那一轮的片段留着，切回来先补上它，不等那一条落进记录（方案 3.1、审阅 F4）。
-  const liveBySession = useRef(new Map<string, { text: string; reasoning: string }>());
+  const liveStreamRef = useRef<SessionStreamBuffer | null>(null);
+  if (liveStreamRef.current === null) liveStreamRef.current = new SessionStreamBuffer();
+  const liveBySession = liveStreamRef.current;
   const terminalBySession = useRef(new Map<string, number>());
   // 跑着的时候新到的询问排在后面：一次问一件事，答一件再画下一件。
   const [asks, setAsks] = useState<Ask[]>([]);
@@ -647,15 +650,12 @@ export function App({ transport }: { transport: Transport }) {
       // 每一轮流式进来的那半截按会话各存一份：看着别的那一份时它也在长，切回来要先看见已经收到的那一段，
       // 不等那一条落进记录（方案 3.1 的后台会话继续运行、审阅 F4）。
       const owner = message.sessionId ?? '';
-      const held = liveBySession.current.get(owner) ?? { text: '', reasoning: '' };
       const inView = owner === active.current;
       if (message.notify === 'delta') {
         const event = message.event as { type?: string; text?: string } | undefined;
-        if (event?.type === 'text') held.text += event.text ?? '';
-        else if (event?.type === 'reasoning') held.reasoning += event.text ?? '';
-        else return;
-        liveBySession.current.set(owner, held);
-        if (inView) setLive({ ...held });
+        const held = liveBySession.append(owner, event?.type ?? '', event?.text ?? '');
+        if (held === null) return;
+        if (inView) setLive(held);
         return;
       }
       if (message.notify === 'event') {
@@ -669,11 +669,8 @@ export function App({ transport }: { transport: Transport }) {
           }
         }
         // 刚落盘的那一条取代流式期间的那半截：记录是事实源（I5）。后台那一份收掉的是它自己那半截。
-        if (record?.kind === 'assistant') held.text = '';
-        if (record?.kind === 'reasoning') held.reasoning = '';
-        if (held.text === '' && held.reasoning === '') liveBySession.current.delete(owner);
-        else liveBySession.current.set(owner, held);
-        if (inView) setLive({ ...held });
+        const held = liveBySession.settle(owner, record?.kind ?? '');
+        if (inView) setLive(held);
         if (!inView) return;
         if (record?.kind === 'assistant') {
           for (const call of record.toolCalls ?? []) dispatchAt.current.set(call.id, Date.now());
@@ -799,7 +796,7 @@ export function App({ transport }: { transport: Transport }) {
     readerScrolling.current = false;
     setPinned(true);
     // 切回来时先把它自己那半截流式回答摆上：这一轮还在跑的话，记录里要到那一条落盘才有全文，中间这几秒不能是空的（审阅 F4）。
-    setLive({ ...(liveBySession.current.get(id) ?? { text: '', reasoning: '' }) });
+    setLive(liveBySession.read(id));
     setWanted(null);
     setInputOwner(null);
     dispatchAt.current.clear();
@@ -1076,7 +1073,7 @@ export function App({ transport }: { transport: Transport }) {
       // 会挡住排在后面的另一份会话，也让人以为旧答案还交得出去。
       dropQueriesOf(own, '这一轮已经收尾');
       // 这一轮收尾了：它名下那半截流式片段不再有内容要补（最后那一条由记录说话），这一格不留着（审阅 F4）。
-      liveBySession.current.delete(own);
+      liveBySession.clear(own);
       if (inView()) setLive({ text: '', reasoning: '' });
       // 只有它自己那一份会话的这一轮结束才让它发下一条；别的会话的轮次收尾不替它发（方案 5.2）。
       allowSend.current.add(own);
