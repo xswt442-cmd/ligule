@@ -6,6 +6,7 @@
   "homepage": "https://github.com/xswt442-cmd/ligule#readme",
   "main": "electron/dist/main.js",
   "scripts": {
+    "prepare-runtime": "node ./fetch-runtime.mjs",
     "dev": "node ./dev.mjs",
     "build": "node ./build.mjs",
     "build:dir": "node ./build.mjs --dir",
@@ -18,5 +19,8 @@
     "electron": "44.7.0",
     "electron-builder": "26.15.3",
     "builder-util": "26.15.3"
+  },
+  "dependencies": {
+    "@ligule/core": "workspace:*"
   }
 }

@@ -227,6 +227,7 @@ app.whenReady().then(async () => {
   });
   host = new HostController({
     ...runtime,
+    hostEntry: runtime.hostEntry,
     cwd: workspaceRoot,
     entry: path.join(compiledRoot, 'host-entry.js'),
     onFrame: frame => {

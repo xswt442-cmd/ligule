@@ -21,8 +21,8 @@ const evidenceParent = join(testRoot, 'readings');
 const executable = createRequire(join(desktopDirectory, 'package.json'))('electron');
 const harness = join(testDirectory, 'run-real-model.cjs');
 const node = join(desktopDirectory, 'vendor', 'node', process.platform === 'win32' ? 'node.exe' : 'node');
-const cli = join(repositoryRoot, 'dist', 'cli.js');
-const mcpFixture = join(repositoryRoot, 'test', 'fixtures', 'mcp-minimal.mjs');
+const cli = join(repositoryRoot, 'core', 'dist', 'host', 'desktop-entry.js');
+const mcpFixture = join(repositoryRoot, 'core', 'test', 'fixtures', 'mcp-minimal.mjs');
 const hostEntry = join(electronDirectory, 'dist', 'host-entry.js');
 const frontend = join(desktopDirectory, 'frontend', 'dist', 'index.html');
 const electronModules = ['secure-window.js', 'security.js', 'ipc.js', 'host.js', 'runtime.js', 'native.js', 'preload.js', 'host-entry.js']

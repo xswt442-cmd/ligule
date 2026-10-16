@@ -24,6 +24,7 @@ yarn-error.log*
 dist/
 build/
 coverage/
+*.tsbuildinfo
 
 # Package artifacts
 *.tgz

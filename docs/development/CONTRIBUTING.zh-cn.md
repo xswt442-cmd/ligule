@@ -22,8 +22,8 @@ pnpm verify-install
 准备本机运行树、Electron 二进制和前端检查：
 
 ```sh
-pnpm --filter ligule run build
-pnpm --filter ligule run prepare-runtime
+pnpm run build:core
+pnpm run prepare-runtime
 pnpm --filter ligule-desktop exec install-electron
 pnpm exec tsc -p desktop/electron/tsconfig.json
 node --experimental-strip-types --test desktop/electron/test/host.test.ts desktop/electron/test/security.test.ts

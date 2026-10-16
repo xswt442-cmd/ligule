@@ -49,7 +49,7 @@ test('HostController stop kills a detached POSIX Host and its real descendant pr
   const faults: string[] = [];
   const controller = new HostController({
     node: NODE,
-    cli,
+    hostEntry: cli,
     cwd: root,
     env: { ...process.env },
     onFrame: frame => frames.push(frame),
@@ -105,7 +105,7 @@ test('host-entry kills its POSIX process group after the Main parent is forcibly
   const controllerPath = join(ELECTRON_ROOT, 'dist', 'host.js');
   await writeFile(helperPath, [
     `const { HostController } = require(${JSON.stringify(controllerPath)});`,
-    `const controller = new HostController({ node: ${JSON.stringify(NODE)}, cli: ${JSON.stringify(cli)}, entry: ${JSON.stringify(HOST_ENTRY)}, cwd: ${JSON.stringify(root)}, env: { ...process.env }, onFrame: frame => process.stdout.write(JSON.stringify({ hostPid: controller.pid, descendantPid: JSON.parse(frame).descendantPid }) + '\\n'), onFault: fault => process.stderr.write(fault + '\\n') });`,
+    `const controller = new HostController({ node: ${JSON.stringify(NODE)}, hostEntry: ${JSON.stringify(cli)}, entry: ${JSON.stringify(HOST_ENTRY)}, cwd: ${JSON.stringify(root)}, env: { ...process.env }, onFrame: frame => process.stdout.write(JSON.stringify({ hostPid: controller.pid, descendantPid: JSON.parse(frame).descendantPid }) + '\\n'), onFault: fault => process.stderr.write(fault + '\\n') });`,
     'controller.start().then(() => process.stdout.write(JSON.stringify({ hostPid: controller.pid }) + "\\n")).catch(error => { process.stderr.write(String(error) + "\\n"); process.exitCode = 1; });',
     'setInterval(() => {}, 1000);',
     '',

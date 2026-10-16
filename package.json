@@ -1,83 +1,24 @@
 {
-  "name": "ligule",
-  "version": "0.0.4",
-  "packageManager": "pnpm@12.9.1",
-  "description": "共享会话与工具内核的命令行、终端和桌面 AI 助手。An AI agent harness with shared sessions and tools across CLI, terminal, and desktop interfaces.",
+  "name": "@ligule/workspace",
+  "private": true,
   "type": "module",
-  "bin": {
-    "ligule": "./dist/cli.js"
-  },
-  "exports": {
-    ".": "./dist/index.js",
-    "./package.json": "./package.json"
-  },
-  "files": [
-    "dist",
-    "modes",
-    "docs",
-    "README.md",
-    "README.en.md",
-    "CHANGELOG.md",
-    "AGENTS.md",
-    "LICENSE"
-  ],
+  "packageManager": "pnpm@12.9.1",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "test": "tsc -p tsconfig.json && node --test --import ./test/hooks/isolated-data-root.mjs test/*.test.js",
-    "prepare-runtime": "node desktop/fetch-runtime.mjs",
-    "check-pack": "node scripts/check-pack.js",
-    "pack-release": "node scripts/pack-release.js",
-    "verify-install": "node scripts/verify-install.js",
+    "build": "pnpm exec tsc -b tsconfig.json",
+    "build:core": "pnpm --filter @ligule/core run build",
+    "build:tui": "pnpm --filter ligule run build",
+    "test:core": "pnpm --filter @ligule/core run test",
+    "test:tui": "pnpm --filter ligule run test",
+    "test:integration": "node --test --import ./test/hooks/isolated-data-root.mjs tests/*.test.js",
+    "test": "pnpm run build && pnpm run test:core && pnpm run test:tui && pnpm run test:integration",
+    "check-pack": "pnpm --filter ligule run check-pack",
+    "verify-install": "pnpm --filter ligule run verify-install",
+    "prepare-runtime": "pnpm --filter ligule-desktop run prepare-runtime",
     "registry-version": "node scripts/registry-version.js"
   },
-  "engines": {
-    "node": ">=24"
-  },
-  "author": "xswt442-cmd",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/xswt442-cmd/ligule.git"
-  },
-  "homepage": "https://github.com/xswt442-cmd/ligule#readme",
-  "bugs": {
-    "url": "https://github.com/xswt442-cmd/ligule/issues"
-  },
-  "keywords": [
-    "agent",
-    "harness",
-    "agent-harness",
-    "tui"
-  ],
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.32.0",
-    "@napi-rs/keyring": "2.1.1",
-    "@vscode/ripgrep": "1.18.0",
-    "ajv": "8.20.0",
-    "ajv-formats": "3.0.1",
-    "cross-spawn": "7.0.6",
-    "proper-lockfile": "4.1.2",
-    "smol-toml": "^1.9.0",
-    "toml-eslint-parser": "1.0.3",
-    "tree-sitter": "^0.25.1",
-    "tree-sitter-bash": "^0.25.1",
-    "tree-sitter-pwsh": "0.38.1",
-    "yaml": "^2.9.1"
-  },
-  "optionalDependencies": {
-    "highlight.js": "11.12.0",
-    "ink": "^7.1.1",
-    "koffi": "3.1.1",
-    "marked": "18.0.14",
-    "react": "^19.3.0",
-    "string-width": "8.3.0"
-  },
   "devDependencies": {
-    "@modelcontextprotocol/server-filesystem": "^2026.8.31",
-    "@types/cross-spawn": "^6.0.6",
     "@types/node": "^24.19.1",
-    "@types/proper-lockfile": "^4.1.4",
-    "@types/react": "^19.3.0",
+    "cross-spawn": "7.0.6",
     "typescript": "^5.9.3"
   }
 }

@@ -16,7 +16,7 @@ const electronExecutable = createRequire(join(desktopDirectory, 'package.json'))
 const electronPackagePath = join(desktopDirectory, 'node_modules', 'electron', 'package.json');
 const harnessPath = join(testDirectory, 'native-security.cjs');
 const nodeExecutable = join(desktopDirectory, 'vendor', 'node', process.platform === 'win32' ? 'node.exe' : 'node');
-const hostCli = join(repositoryRoot, 'dist', 'cli.js');
+const hostCli = join(repositoryRoot, 'core', 'dist', 'host', 'desktop-entry.js');
 const hostEntry = join(electronDirectory, 'dist', 'host-entry.js');
 const frontend = join(desktopDirectory, 'frontend', 'dist', 'index.html');
 const buildFiles = [electronExecutable, harnessPath, nodeExecutable, hostCli, hostEntry, frontend];

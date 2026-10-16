@@ -124,7 +124,7 @@ async function runMainCrashCase(): Promise<void> {
   const source = mainParentSource({
     hostControllerPath,
     node: NODE,
-    cli: fixture.cli,
+    hostEntry: fixture.cli,
     entry: HOST_ENTRY,
     cwd: fixture.root,
   });
@@ -178,7 +178,7 @@ async function runMainCrashCase(): Promise<void> {
 function createController(fixture: { root: string; cli: string }, onFrame: (frame: string) => void): TestHostController {
   return new HostController({
     node: NODE,
-    cli: fixture.cli,
+    hostEntry: fixture.cli,
     entry: HOST_ENTRY,
     cwd: fixture.root,
     env: { ...process.env },
@@ -227,11 +227,11 @@ setInterval(() => {}, 1000);
 `;
 }
 
-function mainParentSource(options: { hostControllerPath: string; node: string; cli: string; entry: string; cwd: string }): string {
+function mainParentSource(options: { hostControllerPath: string; node: string; hostEntry: string; entry: string; cwd: string }): string {
   return `const { HostController } = require(${JSON.stringify(options.hostControllerPath)});
 const controller = new HostController({
   node: ${JSON.stringify(options.node)},
-  cli: ${JSON.stringify(options.cli)},
+  hostEntry: ${JSON.stringify(options.hostEntry)},
   entry: ${JSON.stringify(options.entry)},
   cwd: ${JSON.stringify(options.cwd)},
   env: { ...process.env },

@@ -1,5 +1,5 @@
 // 准备桌面安装包的独立 Node 和由 workspace lockfile 部署的 Ligule 生产运行树。
-// 用法：pnpm --filter ligule run prepare-runtime
+// 用法：pnpm run prepare-runtime
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import spawn from 'cross-spawn';
@@ -7,7 +7,6 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises
 import { existsSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { releaseManifest } from '../scripts/pack-release.js';
 import { assertSymlinksInside, pruneForeignNativeDirectories } from '../scripts/runtime-tree.js';
 
 const root = resolve(fileURLToPath(new URL('.', import.meta.url)), '..');
@@ -80,8 +79,8 @@ async function sha256Checked(target2) {
 
 async function fetchAppTree() {
   const app = join(vendor, 'app');
-  if (!existsSync(join(root, 'dist', 'cli.js'))) {
-    throw new Error('dist/cli.js is missing; run `pnpm --filter ligule run build` before preparing the runtime tree');
+  if (!existsSync(join(root, 'core', 'dist', 'host', 'desktop-entry.js'))) {
+    throw new Error('Core Host entry is missing; run `pnpm run build:core` before preparing the runtime tree');
   }
   await rm(app, { recursive: true, force: true });
   const packageManager = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).packageManager;
@@ -92,7 +91,7 @@ async function fetchAppTree() {
   if (expectedVersion === undefined || runningVersion !== expectedVersion || pnpmCli === undefined || !basename(pnpmCli).toLowerCase().includes('pnpm')) {
     throw new Error(`run this script through the pinned ${packageManager ?? 'pnpm workspace'} command`);
   }
-  const args = ['--filter=ligule', '--prod', 'deploy', app];
+  const args = ['--filter=ligule-desktop', '--prod', 'deploy', app];
   const isJavaScriptCli = /\.(?:cjs|mjs|js)$/i.test(pnpmCli);
   const result = spawn.sync(isJavaScriptCli ? process.execPath : pnpmCli, isJavaScriptCli ? [pnpmCli, ...args] : args, {
     cwd: root,
@@ -101,7 +100,8 @@ async function fetchAppTree() {
   });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`pnpm deploy exited with status ${result.status ?? 'unknown'}`);
-  const manifest = releaseManifest();
+  const manifest = JSON.parse(await readFile(join(root, 'desktop', 'package.json'), 'utf8'));
+  manifest.dependencies['@ligule/core'] = '*';
   delete manifest.devDependencies;
   delete manifest.scripts;
   await writeFile(join(app, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');

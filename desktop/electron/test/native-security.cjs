@@ -118,6 +118,7 @@ async function createApplication() {
   const runtime = resolveHostRuntime({ repositoryRoot, node: bundledNode, environment: process.env });
   host = new HostController({
     ...runtime,
+    hostEntry: runtime.hostEntry,
     cwd: workspaceRoot,
     entry: join(desktopRoot, 'electron', 'dist', 'host-entry.js'),
     onFrame: frame => {

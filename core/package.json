@@ -1,0 +1,72 @@
+{
+  "name": "@ligule/core",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./capability/*.js": {
+      "types": "./dist/capability/*.d.ts",
+      "import": "./dist/capability/*.js"
+    },
+    "./host/*.js": {
+      "types": "./dist/host/*.d.ts",
+      "import": "./dist/host/*.js"
+    },
+    "./kernel/*.js": {
+      "types": "./dist/kernel/*.d.ts",
+      "import": "./dist/kernel/*.js"
+    },
+    "./model/*.js": {
+      "types": "./dist/model/*.d.ts",
+      "import": "./dist/model/*.js"
+    },
+    "./session/*.js": {
+      "types": "./dist/session/*.d.ts",
+      "import": "./dist/session/*.js"
+    },
+    "./tools/*.js": {
+      "types": "./dist/tools/*.d.ts",
+      "import": "./dist/tools/*.js"
+    },
+    "./modes/*": "./modes/*",
+    "./package.json": "./package.json"
+  },
+  "files": ["dist", "modes", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "tsc -b tsconfig.json",
+    "test": "pnpm run build && node --test --import ../test/hooks/isolated-data-root.mjs test/*.test.js"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.0",
+    "@napi-rs/keyring": "2.1.1",
+    "@vscode/ripgrep": "1.18.0",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "cross-spawn": "7.0.6",
+    "proper-lockfile": "4.1.2",
+    "smol-toml": "^1.9.0",
+    "toml-eslint-parser": "1.0.3",
+    "tree-sitter": "^0.25.1",
+    "tree-sitter-bash": "^0.25.1",
+    "tree-sitter-pwsh": "0.38.1",
+    "yaml": "^2.9.1"
+  },
+  "optionalDependencies": {
+    "koffi": "3.1.1"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/server-filesystem": "^2026.8.31",
+    "@types/cross-spawn": "^6.0.6",
+    "@types/node": "^24.19.1",
+    "@types/proper-lockfile": "^4.1.4",
+    "typescript": "^5.9.3"
+  }
+}

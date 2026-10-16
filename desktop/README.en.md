@@ -23,8 +23,8 @@ pnpm --filter ligule-desktop exec install-electron
 Build the core package, prepare the local Node runtime and Host tree, and install the Electron binary before starting the desktop development entry from the repository root:
 
 ```sh
-pnpm --filter ligule run build
-pnpm --filter ligule run prepare-runtime
+pnpm run build:core
+pnpm run prepare-runtime
 pnpm --filter ligule-desktop exec install-electron
 pnpm --filter ligule-desktop run dev
 ```
@@ -83,8 +83,8 @@ On Linux, wrap `run-native-security.mjs`, `run-stub-model.mjs`, and `run-package
 Build the core package and prepare the Node runtime for the current operating system and architecture:
 
 ```sh
-pnpm --filter ligule run build
-pnpm --filter ligule run prepare-runtime
+pnpm run build:core
+pnpm run prepare-runtime
 pnpm --filter ligule-desktop exec install-electron
 ```
 
@@ -96,7 +96,7 @@ pnpm --filter ligule-desktop run build
 
 `pnpm --filter ligule-desktop run build:dir` creates an unpacked app directory for checking `app.asar` and packaged resources. `build:win`, `build:linux`, and `build:mac` create Windows x64 NSIS, Linux x64 AppImage and deb, and a DMG for the local macOS architecture. Build the arm64 and x64 macOS targets separately on machines with the matching architecture, after preparing that machine's runtime. The build rejects architecture flags that do not match the machine or the vendored Node runtime marker. Builds do not publish, use a Developer ID certificate, or notarize the app. To let a fused arm64 macOS app launch, the build resets Electron's required ad-hoc signature.
 
-`pnpm --filter ligule run prepare-runtime` verifies the pnpm version declared by the root `packageManager`, then calls `fetch-runtime.mjs` to download and verify the Node archive in [`node-pin.json`](node-pin.json) and prepare `vendor/node/` and `vendor/app/`. The packaged Node and Host runtime tree live in the application resources directory; the app code, frontend files, and icons live in `app.asar`. The build disables Electron's RunAsNode, NODE_OPTIONS, and command-line inspection switches and requires Electron to load the app from `app.asar`. The Windows and macOS builds also enable embedded archive integrity validation.
+`pnpm run prepare-runtime` verifies the pnpm version declared by the root `packageManager`, then calls `fetch-runtime.mjs` to download and verify the Node archive in [`node-pin.json`](node-pin.json) and prepare `vendor/node/` and `vendor/app/`. The packaged Node and Host runtime tree live in the application resources directory; the app code, frontend files, and icons live in `app.asar`. The build disables Electron's RunAsNode, NODE_OPTIONS, and command-line inspection switches and requires Electron to load the app from `app.asar`. The Windows and macOS builds also enable embedded archive integrity validation.
 
 Installers are written to `desktop/release/`. Prepare the runtime on the matching platform and architecture; do not reuse `vendor/` from another target.
 

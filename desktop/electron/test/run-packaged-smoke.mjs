@@ -25,7 +25,7 @@ const resourcesDirectory = process.platform === 'darwin'
   ? join(applicationBundle, 'Contents', 'Resources')
   : join(applicationBundle, 'resources');
 const hostNode = join(resourcesDirectory, 'node', process.platform === 'win32' ? 'node.exe' : 'node');
-const hostCli = join(resourcesDirectory, 'app', 'dist', 'cli.js');
+const hostCli = join(resourcesDirectory, 'app', 'node_modules', '@ligule', 'core', 'dist', 'host', 'desktop-entry.js');
 const hostEntry = join(resourcesDirectory, 'host-entry.js');
 const testRoot = join(desktopDirectory, 'testplace');
 const temporaryParent = join(testRoot, 'tmp');

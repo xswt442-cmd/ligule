@@ -3,12 +3,12 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createConfig } from '../../dist/kernel/config.js';
-import { createConnection } from '../../dist/host/connection.js';
-import { createMemoryConnectionPair } from '../../dist/host/memory.js';
-import { serveHost } from '../../dist/host/host.js';
-import { createChatCompletionsProvider } from '../../dist/model/chat-completions.js';
-import { modeDirectories } from '../../dist/kernel/modes.js';
+import { createConfig } from '../../core/dist/kernel/config.js';
+import { createConnection } from '../../core/dist/host/connection.js';
+import { createMemoryConnectionPair } from '../../core/dist/host/memory.js';
+import { serveHost } from '../../core/dist/host/host.js';
+import { createChatCompletionsProvider } from '../../core/dist/model/chat-completions.js';
+import { modeDirectories } from '../../core/dist/kernel/modes.js';
 import { fileURLToPath } from 'node:url';
 import { listenFetchable } from './port.js';
 
@@ -104,7 +104,7 @@ export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {},
       ...extra,
     } });
     const provider = createChatCompletionsProvider({ baseUrl, model: 'local-test-model', apiKeyEnv: 'LIGULE_TUI_TEST_API_KEY' });
-    const modesDirectory = fileURLToPath(new URL('../../modes/', import.meta.url));
+    const modesDirectory = fileURLToPath(new URL('../../core/modes/', import.meta.url));
     // 一具宿主接第二项目录时走这一条路（方案 3.2）：按指名的那一份根重算一份环境，其余格子与默认那一份同源。
     // 配置那一格拼写是 `baseURL`，提供方工厂要的是 `baseUrl`：两边各按各的名字给，不混用。
     const modelShape = { api: 'chat-completions', baseURL: baseUrl, model: 'local-test-model', apiKeyEnv: 'LIGULE_TUI_TEST_API_KEY' };

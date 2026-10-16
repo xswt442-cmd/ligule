@@ -1,20 +1,7 @@
 {
-  "compilerOptions": {
-    // Node 运行时仅从 TypeScript 源码编译；发行包仍使用 dist/ 下的 JavaScript。
-    "allowJs": false,
-    "outDir": "dist",
-    "rootDir": "src",
-    "target": "es2023",
-    "lib": ["es2023"],
-    "module": "nodenext",
-    "moduleResolution": "nodenext",
-    "strict": true,
-    // 只用可剥离的语法：enum、namespace 与参数属性这类需要生成的写法不接受，和运行时能直接读源码这条路保持一致。
-    "erasableSyntaxOnly": true,
-    "verbatimModuleSyntax": true,
-    "noEmitOnError": true,
-    "skipLibCheck": true,
-    "types": ["node"]
-  },
-  "include": ["src"]
+  "files": [],
+  "references": [
+    { "path": "./core" },
+    { "path": "./tui" }
+  ]
 }

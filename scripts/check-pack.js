@@ -9,8 +9,8 @@ const repo = fileURLToPath(new URL('..', import.meta.url));
 const packDir = join(repo, 'testplace', 'pack');
 const work = join(packDir, 'check');
 
-if (!existsSync(join(repo, 'dist', 'index.js'))) {
-  throw new Error('dist/index.js is missing; run `pnpm --filter ligule run build` before checking the packaged artifact');
+if (!existsSync(join(repo, 'tui', 'dist', 'index.js')) || !existsSync(join(repo, 'core', 'dist', 'index.js'))) {
+  throw new Error('TUI or Core build output is missing; run `pnpm run build` before checking the packaged artifact');
 }
 
 function collectTargets(value, found = []) {
@@ -37,6 +37,10 @@ try {
   }
   if (JSON.stringify(manifest.optionalDependencies) !== JSON.stringify(pkg.optionalDependencies)) {
     throw new Error(`${tarball} does not carry the release manifest's optional dependencies`);
+  }
+  const bundledCore = join(shipped, 'node_modules', '@ligule', 'core');
+  if (!existsSync(join(bundledCore, 'dist', 'index.js')) || !existsSync(join(bundledCore, 'modes', 'minimal.toml'))) {
+    throw new Error(`${tarball} is missing the bundled @ligule/core runtime or its shipped modes`);
   }
   const declared = [...collectTargets(manifest.exports), ...collectTargets(manifest.bin)];
   if (declared.length === 0) throw new Error('package.json declares neither exports nor bin, nothing to check');

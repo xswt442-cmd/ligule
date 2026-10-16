@@ -9,7 +9,7 @@ export type HostFault = 'spawn-failed' | 'stdout-invalid-utf8' | 'stdout-frame-t
 
 export interface HostControllerOptions {
   node: string;
-  cli: string;
+  hostEntry: string;
   entry?: string;
   cwd: string;
   env: NodeJS.ProcessEnv;
@@ -48,8 +48,8 @@ export class HostController {
     let child: ChildProcessWithoutNullStreams;
     try {
       const arguments_ = this.options.entry === undefined
-        ? [this.options.cli, 'host']
-        : [this.options.entry, this.options.cli];
+        ? [this.options.hostEntry, 'host']
+        : [this.options.entry, this.options.hostEntry];
       const stdio: ('pipe' | 'ipc')[] = this.options.entry === undefined
         ? ['pipe', 'pipe', 'pipe']
         : ['pipe', 'pipe', 'pipe', 'ipc'];

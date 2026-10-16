@@ -22,8 +22,8 @@ pnpm verify-install
 Prepare the local runtime tree and Electron binary, then run the frontend checks:
 
 ```sh
-pnpm --filter ligule run build
-pnpm --filter ligule run prepare-runtime
+pnpm run build:core
+pnpm run prepare-runtime
 pnpm --filter ligule-desktop exec install-electron
 pnpm exec tsc -p desktop/electron/tsconfig.json
 node --experimental-strip-types --test desktop/electron/test/host.test.ts desktop/electron/test/security.test.ts

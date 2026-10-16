@@ -1,10 +1,9 @@
 // 用随包的 Node 检查桌面运行树中的命令行、原生模块与搜索后端。
 import { createRequire } from 'node:module';
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
-import { execFileSync } from 'node:child_process';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { releaseManifest } from '../scripts/pack-release.js';
 import { assertNoForeignNativeDirectories, assertSymlinksInside } from '../scripts/runtime-tree.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -13,7 +12,8 @@ const options = parseOptions(process.argv.slice(2));
 const runtimeRoot = options.resources ?? options.vendor ?? join(desktopRoot, 'vendor');
 const target = `${process.platform}-${process.arch}`;
 const nodePin = JSON.parse(await readFile(join(root, 'desktop', 'node-pin.json'), 'utf8'));
-const packageJson = releaseManifest();
+const packageJson = JSON.parse(await readFile(join(desktopRoot, 'package.json'), 'utf8'));
+packageJson.dependencies['@ligule/core'] = '*';
 const nodePath = join(runtimeRoot, 'node', process.platform === 'win32' ? 'node.exe' : 'node');
 const app = join(runtimeRoot, 'app');
 const appModules = join(app, 'node_modules');
@@ -42,14 +42,11 @@ if (vendoredPackage.name !== packageJson.name || vendoredPackage.version !== pac
   throw new Error('the vendored app package manifest does not match the generated release manifest');
 }
 
-const cli = join(app, 'dist', 'cli.js');
-const commandEnv = { ...process.env, NODE_PATH: '' };
-const version = execFileSync(nodePath, [cli, '--version'], { cwd: app, env: commandEnv, encoding: 'utf8' }).trim();
-if (version !== packageJson.version) throw new Error(`the vendored CLI reported ${version}, expected ${packageJson.version}`);
-const tools = execFileSync(nodePath, [cli, 'tools'], { cwd: app, env: commandEnv, encoding: 'utf8' }).trim();
-if (tools.split(/\r?\n/u).filter(Boolean).length !== 9) throw new Error('the vendored CLI must expose the nine bundled tools');
-
-const library = await import(pathToFileURL(join(app, 'dist', 'index.js')).href);
+const coreRoot = join(app, 'node_modules', '@ligule', 'core');
+const hostEntry = join(coreRoot, 'dist', 'host', 'desktop-entry.js');
+const shippedMode = join(coreRoot, 'modes', 'minimal.toml');
+if (!existsSync(hostEntry) || !existsSync(shippedMode)) throw new Error('the Desktop runtime is missing its Core Host entry or shipped modes');
+const library = await import(pathToFileURL(join(coreRoot, 'dist', 'index.js')).href);
 const requireFromApp = createRequire(join(app, 'package.json'));
 const insideAppModules = async (name, resolver = requireFromApp) => {
   const modulePath = await realpath(resolver.resolve(name));
@@ -114,7 +111,7 @@ try {
   await rm(temporary, { recursive: true, force: true });
 }
 
-console.log(`runtime check passed: Node ${process.version}; ligule ${version}; tools; bash and PowerShell grammars; keyring; ${providerPackage} search; ${options.resources === undefined ? 'vendor' : 'resources'}=${runtimeRoot}`);
+console.log(`runtime check passed: Node ${process.version}; @ligule/core Host; modes; bash and PowerShell grammars; keyring; ${providerPackage} search; ${options.resources === undefined ? 'vendor' : 'resources'}=${runtimeRoot}`);
 
 function parseOptions(args) {
   const parsed = { resources: undefined, vendor: undefined };

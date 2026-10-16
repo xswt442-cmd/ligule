@@ -15,8 +15,8 @@ const consumer = join(packDir, 'install', 'consumer');
 const args = process.argv.slice(2);
 if (args.length > 1 || args.some((arg) => arg.startsWith('--'))) throw new Error('usage: pnpm --filter ligule run verify-install [tarball]');
 const given = args[0];
-if (given === undefined && !existsSync(join(repo, 'dist', 'index.js'))) {
-  throw new Error('dist/index.js is missing; run `pnpm --filter ligule run build` before verifying a fresh install');
+if (given === undefined && (!existsSync(join(repo, 'tui', 'dist', 'index.js')) || !existsSync(join(repo, 'core', 'dist', 'index.js')))) {
+  throw new Error('TUI or Core build output is missing; run `pnpm run build` before verifying a fresh install');
 }
 
 const pkg = releaseManifest();
@@ -62,6 +62,12 @@ try {
 
 const installed = JSON.parse(readFileSync(join(consumer, 'node_modules', pkg.name, 'package.json'), 'utf8'));
 if (installed.version !== pkg.version) throw new Error(`the consumer got ${installed.version}, package.json says ${pkg.version}`);
+const bundledCoreDirectory = join(consumer, 'node_modules', pkg.name, 'node_modules', '@ligule', 'core');
+if (!existsSync(join(bundledCoreDirectory, 'dist', 'index.js')) || !existsSync(join(bundledCoreDirectory, 'modes', 'minimal.toml'))) {
+  throw new Error('the installed npm package does not contain the complete private Core runtime');
+}
+const coreManifest = JSON.parse(readFileSync(join(bundledCoreDirectory, 'package.json'), 'utf8'));
+if (coreManifest.private !== true) throw new Error('the bundled Core package must remain private');
 if (JSON.stringify(installed.dependencies) !== JSON.stringify(pkg.dependencies)) {
   throw new Error('the consumer did not receive the release manifest dependencies');
 }
@@ -99,9 +105,10 @@ readings.push('tui: refuses with tui_terminal_required on a non-interactive term
 // 消费者只看 tarball 声明：加载内核、解析配置和命令、执行工具与 MCP、使用 grammar 和搜索后端。
 writeFileSync(join(consumer, 'probe.mjs'), `
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { createKernel, createMcpPlugin, createMcpRegistry, execTool, flagLayer, KernelError, mcpServerConfigs, parseCommand, resolveRipgrep, resolveShell, searchWithRipgrep, withNativeExitCode } from 'ligule';
+import { createKernel, createMcpPlugin, createMcpRegistry, execTool, flagLayer, KernelError, mcpServerConfigs, parseCommand, resolveRipgrep, resolveShell, searchWithRipgrep, withNativeExitCode, VERSION } from 'ligule';
 
 if (typeof KernelError !== 'function') throw new Error('KernelError is missing from the installed package');
+if (VERSION !== '${pkg.version}') throw new Error('the TUI compatibility entry did not preserve VERSION');
 if (flagLayer(['limits.readBytes = 100']).limits?.readBytes !== 100) {
   throw new Error('the installed package cannot parse a dotted override, its TOML dependency did not come along');
 }
@@ -152,7 +159,7 @@ const found = typeof backend?.executable === 'string' && existsSync(backend.exec
 if (!found) {
   throw new Error(\`search backend is missing for the supported target: \${JSON.stringify(backend)}\`);
 }
-console.log(\`search backend: @vscode/ripgrep@${pkg.dependencies['@vscode/ripgrep']}; \${backend.executable}\`);
+console.log(\`search backend: @vscode/ripgrep@${coreManifest.dependencies['@vscode/ripgrep']}; \${backend.executable}\`);
 mkdirSync('fixture', { recursive: true });
 writeFileSync('fixture/needle.txt', 'LIGULE-INSTALL-NEEDLE\\n');
 const hits = await searchWithRipgrep({ executable: backend.executable, boundary: process.cwd(), target: 'fixture', pattern: 'LIGULE-INSTALL-NEEDLE', limit: 5 });

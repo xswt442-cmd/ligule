@@ -161,6 +161,7 @@ async function createApplication() {
   const runtime = resolveHostRuntime({ repositoryRoot, node, environment: process.env });
   host = new HostController({
     ...runtime,
+    hostEntry: runtime.hostEntry,
     entry: join(desktopRoot, 'electron', 'dist', 'host-entry.js'),
     onFrame: frame => {
       if (mainWindow !== undefined && !mainWindow.isDestroyed()) mainWindow.webContents.send('ligule:host-frame', frame);

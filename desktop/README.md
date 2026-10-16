@@ -23,8 +23,8 @@ pnpm --filter ligule-desktop exec install-electron
 先构建核心、准备本机的 Node 运行时和 Host 运行树，并安装 Electron 二进制，再从仓库根目录运行桌面开发入口：
 
 ```sh
-pnpm --filter ligule run build
-pnpm --filter ligule run prepare-runtime
+pnpm run build:core
+pnpm run prepare-runtime
 pnpm --filter ligule-desktop exec install-electron
 pnpm --filter ligule-desktop run dev
 ```
@@ -83,8 +83,8 @@ Linux 使用 `xvfb-run -a` 运行 `run-native-security.mjs`、`run-stub-model.mj
 先构建核心包并准备当前操作系统和架构对应的 Node 运行时：
 
 ```sh
-pnpm --filter ligule run build
-pnpm --filter ligule run prepare-runtime
+pnpm run build:core
+pnpm run prepare-runtime
 pnpm --filter ligule-desktop exec install-electron
 ```
 
@@ -96,7 +96,7 @@ pnpm --filter ligule-desktop run build
 
 `pnpm --filter ligule-desktop run build:dir` 生成未安装目录，适合检查 `app.asar` 与随包资源。`build:win`、`build:linux`、`build:mac` 分别生成 Windows x64 NSIS、Linux x64 AppImage 与 deb、macOS 本机架构 DMG。macOS arm64 与 x64 需要分别在对应架构的机器上构建，并先准备该机的运行时。构建会拒绝与本机架构或 Node 运行时标记不符的架构参数。发行构建不会自动发布，也不使用开发者证书签名或公证。为保证 Apple Silicon 上启用 fuses 的应用可以启动，arm64 macOS 构建会重置 Electron 要求的 ad-hoc 签名。
 
-`pnpm --filter ligule run prepare-runtime` 会校验根 `packageManager` 指定的 pnpm 版本，再调用 `fetch-runtime.mjs` 下载并验证 [`node-pin.json`](node-pin.json) 中的 Node 归档，准备 `vendor/node/` 与 `vendor/app/`。打包后 Node 与 Host 运行树位于应用资源目录，应用代码、前端文件和图标位于 `app.asar`。构建会关闭 Electron 的 RunAsNode、NODE_OPTIONS 和命令行调试开关，并要求应用从 `app.asar` 加载；Windows 与 macOS 的打包配置同时启用归档完整性检查。
+`pnpm run prepare-runtime` 会校验根 `packageManager` 指定的 pnpm 版本，再调用 `fetch-runtime.mjs` 下载并验证 [`node-pin.json`](node-pin.json) 中的 Node 归档，准备 `vendor/node/` 与 `vendor/app/`。打包后 Node 与 Host 运行树位于应用资源目录，应用代码、前端文件和图标位于 `app.asar`。构建会关闭 Electron 的 RunAsNode、NODE_OPTIONS 和命令行调试开关，并要求应用从 `app.asar` 加载；Windows 与 macOS 的打包配置同时启用归档完整性检查。
 
 安装包写入 `desktop/release/`。目标平台的运行时必须在对应平台和架构上准备，不能复用其他平台生成的 `vendor/`。
 

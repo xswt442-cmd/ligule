@@ -92,7 +92,7 @@ function releaseNotesFromChangelog(changelog, tag, manifest) {
 
 export function releaseNotesForTag(repositoryRoot, tag, { manifest } = {}) {
   const { product } = parseReleaseTag(tag);
-  const changelogPath = product === 'cli' ? 'CHANGELOG.md' : 'desktop/CHANGELOG.md';
+  const changelogPath = product === 'cli' ? 'tui/CHANGELOG.md' : 'desktop/CHANGELOG.md';
   return releaseNotesFromChangelog(readFileSync(join(repositoryRoot, changelogPath), 'utf8'), tag, manifest);
 }
 

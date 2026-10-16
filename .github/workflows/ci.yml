@@ -47,7 +47,7 @@ jobs:
       - name: install and build
         run: |
           pnpm install --frozen-lockfile
-          pnpm --filter ligule run build
+          pnpm run build
       - name: prepare persistent Secret Service
         if: runner.os == 'Linux'
         run: |
@@ -58,7 +58,7 @@ jobs:
         run: |
           dbus-run-session -- bash -e -c '
             printf "%s" "ligule-ci-test-password" | gnome-keyring-daemon --unlock --components=secrets
-            LIGULE_CREDENTIAL_NATIVE_REQUIRED=1 node --test test/credentials.test.js test/credential-unavailable.test.js
+            LIGULE_CREDENTIAL_NATIVE_REQUIRED=1 node --test core/test/credentials.test.js core/test/credential-unavailable.test.js
           '
       - name: prepare an isolated macOS keychain
         id: keychain
@@ -74,7 +74,7 @@ jobs:
         if: runner.os != 'Linux'
         env:
           LIGULE_CREDENTIAL_NATIVE_REQUIRED: '1'
-        run: node --test test/credentials.test.js test/credential-unavailable.test.js
+        run: node --test core/test/credentials.test.js core/test/credential-unavailable.test.js
       - name: remove the test keychain
         if: always() && runner.os == 'macOS' && steps.keychain.outcome == 'success'
         run: security delete-keychain "$PWD/testplace/tmp/credentials.keychain-db"
@@ -105,9 +105,9 @@ jobs:
         shell: bash
         run: |
           set -e
-          for f in $(find src scripts test -name '*.js'); do node --check "$f"; done
+          for f in $(find core/src tui/src scripts test core/test tui/test -name '*.js'); do node --check "$f"; done
       - name: test
-        run: pnpm --filter ligule run test
+        run: pnpm test
 
   cli-package:
     name: CLI package and clean consumer
@@ -128,7 +128,7 @@ jobs:
       - name: install and build
         run: |
           pnpm install --frozen-lockfile
-          pnpm --filter ligule run build
+          pnpm run build
       - name: check the packed artifact
         run: pnpm --filter ligule run check-pack
       - name: install the packed artifact into an empty consumer
@@ -163,7 +163,7 @@ jobs:
       - name: install locked packages
         run: pnpm install --frozen-lockfile
       - name: build the Host runtime tree
-        run: pnpm --filter ligule run build
+        run: pnpm run build:core
       - name: test Electron Host and security contracts
         run: node --experimental-strip-types --test desktop/electron/test/host.test.ts desktop/electron/test/security.test.ts
       - name: check and build the frontend
@@ -171,7 +171,7 @@ jobs:
           pnpm --filter ligule-desktop-frontend run check
           pnpm --filter ligule-desktop-frontend run build
       - name: prepare the target Node runtime and Host resources
-        run: pnpm --filter ligule run prepare-runtime
+        run: pnpm run prepare-runtime
       - name: run the packaged runtime tree checks
         shell: bash
         run: ${{ matrix.node }} desktop/check-runtime.mjs --vendor desktop/vendor
