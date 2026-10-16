@@ -89,7 +89,7 @@ interface HostExtensions {
   readonly installedDirectory?: string;
 }
 
-interface EnvironmentSeed {
+export interface EnvironmentSeed {
   readonly config: HostConfigSnapshot;
   readonly provider: HostProvider;
   readonly policy?: PolicyConfig;

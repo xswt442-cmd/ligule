@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
-import { createConfig } from '@ligule/core/kernel/config.js';
+import { loadProjectConfig } from '@ligule/core/host/environment.js';
 import { languageOf, textOf, type Locale } from '@ligule/core/kernel/locale.js';
 import { loadConfigLayers } from '@ligule/core/kernel/config-file.js';
 import { createConfigStore } from '@ligule/core/kernel/config-store.js';
@@ -230,12 +230,7 @@ function cliConfig(snapshot: ConfigSnapshot, projectRoot: string): CliConfig {
 }
 
 async function configSnapshot(projectRoot = process.cwd()): Promise<{ config: CliConfig; extensions: Awaited<ReturnType<typeof extensionSources>>; layers: Awaited<ReturnType<typeof loadConfigLayers>> }> {
-  const layers = await loadConfigLayers({ projectRoot, flags });
-  // 边界的默认值就是这一次指的那一根：命令行在哪里跑（或 `--project` 指了哪一根），工具就在哪里读写。任何一层配置写的 boundary 都盖得过它。
-  const user = { boundary: projectRoot, ...layers.user };
-  // 扩展的来源在同一次装载里算出来（D68）：项目层与本地层里写的路径不算，那一条挡住的判断在这里看得见。
-  const extensions = await extensionSources({ ...layers, user }, { projectRoot });
-  const snapshot = createConfig({ ...layers, user });
+  const { config: snapshot, extensions, layers } = await loadProjectConfig(projectRoot, flags);
   const config = cliConfig(snapshot, projectRoot);
   setLocale(config);
   return { config, extensions, layers };
@@ -251,9 +246,8 @@ function resolveMode(config: CliConfig): { modeName: string; modePaths: ModeDire
 // 走的是命令行自己启动时同一批函数：配置那几层、提供方、模式与扩展来源都按那一个项目根重算。
 // `--mode` 是这一次运行的覆盖，不跟着进另一个项目的环境；要换清单由 `session.open` 的 `mode` 那一格指名。
 async function projectEnvironment(projectRoot: string) {
-  const layers = await loadConfigLayers({ projectRoot, flags });
-  const user = { boundary: projectRoot, ...layers.user };
-  const config = cliConfig(createConfig({ ...layers, user }), projectRoot);
+  const { config: snapshot, layers, extensions } = await loadProjectConfig(projectRoot, flags);
+  const config = cliConfig(snapshot, projectRoot);
   return {
     config,
     provider: hostProviderFromConfig(config),
@@ -262,7 +256,7 @@ async function projectEnvironment(projectRoot: string) {
     layers,
     modeName: config.mode ?? DEFAULT_MODE,
     modePaths: modeDirectories(projectRoot, shippedModes),
-    extensions: await extensionSources({ ...layers, user }, { projectRoot }),
+    extensions,
   };
 }
 
