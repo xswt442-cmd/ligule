@@ -46,6 +46,8 @@ module.exports = {
   appId: 'app.ligule.desktop',
   productName: 'ligule',
   electronDist: 'node_modules/electron/dist',
+  // Electron Main/Renderer are JS-only. Core plus native bindings run in the separate pinned Node Host under extraResources.
+  npmRebuild: false,
   asar: true,
   files: [
     'electron/dist/**/*.js',
@@ -54,6 +56,7 @@ module.exports = {
     'frontend/dist/**/*',
     'icons/**/*',
     'package.json',
+    '!node_modules/**',
   ],
   extraResources: [
     { from: 'electron/dist/host-entry.js', to: 'host-entry.js' },

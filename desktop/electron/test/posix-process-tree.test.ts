@@ -18,7 +18,7 @@ const NODE_VERSION = JSON.parse(readFileSync(join(DESKTOP_ROOT, 'node-pin.json')
 const { HostController } = createRequire(join(ELECTRON_ROOT, 'package.json'))('./dist/host.js') as {
   HostController: new (options: {
     node: string;
-    cli: string;
+    hostEntry: string;
     entry?: string;
     cwd: string;
     env: NodeJS.ProcessEnv;
@@ -43,13 +43,13 @@ test('HostController stop kills a detached POSIX Host and its real descendant pr
   await mkdir(TEMP_ROOT, { recursive: true });
   const root = await mkdtemp(join(TEMP_ROOT, `posix-process-tree-${process.pid}-`));
   assertInsideTempRoot(root);
-  const cli = await createCliFixture(root);
+  const hostEntry = await createCliFixture(root);
 
   const frames: string[] = [];
   const faults: string[] = [];
   const controller = new HostController({
     node: NODE,
-    hostEntry: cli,
+    hostEntry,
     cwd: root,
     env: { ...process.env },
     onFrame: frame => frames.push(frame),
@@ -100,12 +100,12 @@ test('host-entry kills its POSIX process group after the Main parent is forcibly
   await mkdir(TEMP_ROOT, { recursive: true });
   const root = await mkdtemp(join(TEMP_ROOT, `posix-main-crash-${process.pid}-`));
   assertInsideTempRoot(root);
-  const cli = await createCliFixture(root);
+  const hostEntry = await createCliFixture(root);
   const helperPath = join(root, 'main-helper.cjs');
   const controllerPath = join(ELECTRON_ROOT, 'dist', 'host.js');
   await writeFile(helperPath, [
     `const { HostController } = require(${JSON.stringify(controllerPath)});`,
-    `const controller = new HostController({ node: ${JSON.stringify(NODE)}, hostEntry: ${JSON.stringify(cli)}, entry: ${JSON.stringify(HOST_ENTRY)}, cwd: ${JSON.stringify(root)}, env: { ...process.env }, onFrame: frame => process.stdout.write(JSON.stringify({ hostPid: controller.pid, descendantPid: JSON.parse(frame).descendantPid }) + '\\n'), onFault: fault => process.stderr.write(fault + '\\n') });`,
+    `const controller = new HostController({ node: ${JSON.stringify(NODE)}, hostEntry: ${JSON.stringify(hostEntry)}, entry: ${JSON.stringify(HOST_ENTRY)}, cwd: ${JSON.stringify(root)}, env: { ...process.env }, onFrame: frame => process.stdout.write(JSON.stringify({ hostPid: controller.pid, descendantPid: JSON.parse(frame).descendantPid }) + '\\n'), onFault: fault => process.stderr.write(fault + '\\n') });`,
     'controller.start().then(() => process.stdout.write(JSON.stringify({ hostPid: controller.pid }) + "\\n")).catch(error => { process.stderr.write(String(error) + "\\n"); process.exitCode = 1; });',
     'setInterval(() => {}, 1000);',
     '',

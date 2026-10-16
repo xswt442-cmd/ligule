@@ -14,13 +14,13 @@ const TEMP_ROOT = join(DESKTOP_ROOT, 'testplace', 'tmp');
 const EVIDENCE_ROOT = join(DESKTOP_ROOT, 'testplace', 'readings');
 const HOST_ENTRY = join(ELECTRON_ROOT, 'dist', 'host-entry.js');
 const NODE = join(DESKTOP_ROOT, 'vendor', 'node', 'node.exe');
-const VENDORED_DIST = join(DESKTOP_ROOT, 'vendor', 'app', 'dist');
+const VENDORED_CORE_DIST = join(DESKTOP_ROOT, 'vendor', 'app', 'node_modules', '@ligule', 'core', 'dist');
 const RUNTIME_NODE_MODULES = join(DESKTOP_ROOT, 'vendor', 'app', 'node_modules');
 const NODE_VERSION = JSON.parse(readFileSync(join(DESKTOP_ROOT, 'node-pin.json'), 'utf8')).version as string;
 const { HostController } = createRequire(join(ELECTRON_ROOT, 'package.json'))('./dist/host.js') as {
   HostController: new (options: {
     node: string;
-    cli: string;
+    hostEntry: string;
     entry: string;
     cwd: string;
     env: NodeJS.ProcessEnv;
@@ -105,7 +105,7 @@ async function runControllerCase(options: ControllerCaseOptions): Promise<void> 
     if (ownedPids.length > 0) {
       const remaining = await waitForProcessesToExit(ownedPids, 10_000);
       if (remaining.length > 0) {
-        await terminateKnownProcessTree(remaining, ownedPids[0], fixture.cli);
+        await terminateKnownProcessTree(remaining, ownedPids[0], fixture.hostEntry);
         const afterCleanup = await waitForProcessesToExit(ownedPids, 10_000);
         if (afterCleanup.length > 0) throw new Error('test-owned Host processes remain after targeted cleanup');
       }
@@ -124,7 +124,7 @@ async function runMainCrashCase(): Promise<void> {
   const source = mainParentSource({
     hostControllerPath,
     node: NODE,
-    hostEntry: fixture.cli,
+    hostEntry: fixture.hostEntry,
     entry: HOST_ENTRY,
     cwd: fixture.root,
   });
@@ -166,7 +166,7 @@ async function runMainCrashCase(): Promise<void> {
       const pids = [processIds.hostPid, processIds.descendantPid];
       const remaining = await waitForProcessesToExit(pids, 10_000);
       if (remaining.length > 0) {
-        await terminateKnownProcessTree(remaining, processIds.hostPid, fixture.cli);
+        await terminateKnownProcessTree(remaining, processIds.hostPid, fixture.hostEntry);
         const afterCleanup = await waitForProcessesToExit(pids, 10_000);
         if (afterCleanup.length > 0) throw new Error('test-owned Host processes remain after targeted cleanup');
       }
@@ -175,10 +175,10 @@ async function runMainCrashCase(): Promise<void> {
   }
 }
 
-function createController(fixture: { root: string; cli: string }, onFrame: (frame: string) => void): TestHostController {
+function createController(fixture: { root: string; hostEntry: string }, onFrame: (frame: string) => void): TestHostController {
   return new HostController({
     node: NODE,
-    hostEntry: fixture.cli,
+    hostEntry: fixture.hostEntry,
     entry: HOST_ENTRY,
     cwd: fixture.root,
     env: { ...process.env },
@@ -187,20 +187,21 @@ function createController(fixture: { root: string; cli: string }, onFrame: (fram
   });
 }
 
-async function createFixture(name: string, exitOnStdinEnd: boolean): Promise<{ root: string; cli: string }> {
+async function createFixture(name: string, exitOnStdinEnd: boolean): Promise<{ root: string; hostEntry: string }> {
   const root = join(TEMP_ROOT, `process-tree-${name}-${process.pid}-${Date.now()}`);
   assertInsideTempRoot(root);
   const capability = join(root, 'dist', 'capability');
   const kernel = join(root, 'dist', 'kernel');
-  await Promise.all([mkdir(capability, { recursive: true }), mkdir(kernel, { recursive: true })]);
+  const hostDirectory = join(root, 'dist', 'host');
+  await Promise.all([mkdir(capability, { recursive: true }), mkdir(kernel, { recursive: true }), mkdir(hostDirectory, { recursive: true })]);
   await Promise.all([
-    copyFile(join(VENDORED_DIST, 'capability', 'win32-job.js'), join(capability, 'win32-job.js')),
-    copyFile(join(VENDORED_DIST, 'kernel', 'error.js'), join(kernel, 'error.js')),
+    copyFile(join(VENDORED_CORE_DIST, 'capability', 'win32-job.js'), join(capability, 'win32-job.js')),
+    copyFile(join(VENDORED_CORE_DIST, 'kernel', 'error.js'), join(kernel, 'error.js')),
     symlink(RUNTIME_NODE_MODULES, join(root, 'dist', 'node_modules'), 'junction'),
   ]);
-  const cli = join(root, 'dist', 'cli.js');
-  await writeFile(cli, cliSource(exitOnStdinEnd), 'utf8');
-  return { root, cli };
+  const hostEntry = join(hostDirectory, 'desktop-entry.js');
+  await writeFile(hostEntry, cliSource(exitOnStdinEnd), 'utf8');
+  return { root, hostEntry };
 }
 
 async function removeFixture(path: string): Promise<void> {
@@ -334,9 +335,9 @@ async function waitForProcessesToExist(pids: number[], timeoutMs: number): Promi
   return await queryWin32Processes(pids);
 }
 
-async function terminateKnownProcessTree(rows: Win32ProcessRow[], hostPid: number, cli: string): Promise<void> {
+async function terminateKnownProcessTree(rows: Win32ProcessRow[], hostPid: number, hostEntry: string): Promise<void> {
   const host = rows.find(item => item.ProcessId === hostPid);
-  if (host?.CommandLine?.includes(HOST_ENTRY) && host.CommandLine.includes(cli)) process.kill(hostPid);
+  if (host?.CommandLine?.includes(HOST_ENTRY) && host.CommandLine.includes(hostEntry)) process.kill(hostPid);
   const descendant = rows.find(item => item.ParentProcessId === hostPid && item.CommandLine?.includes('-e "setInterval(() => {}, 1000)"'));
   if (descendant !== undefined) process.kill(descendant.ProcessId);
 }

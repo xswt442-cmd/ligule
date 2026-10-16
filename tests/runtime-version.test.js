@@ -129,3 +129,10 @@ test('the vendored Node targets use the documented pin file', () => {
   }
   assert.match(releaseGuide, /desktop\/node-pin\.json/);
 });
+
+test('Electron excludes Core native dependencies from the Electron ABI bundle', () => {
+  const builder = read('../desktop/electron-builder.cjs');
+  assert.match(builder, /npmRebuild:\s*false/);
+  assert.match(builder, /'!node_modules\/\*\*'/);
+  assert.match(builder, /from: 'vendor\/app', to: 'app'/);
+});
