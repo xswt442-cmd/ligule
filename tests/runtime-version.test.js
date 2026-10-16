@@ -136,3 +136,31 @@ test('Electron excludes Core native dependencies from the Electron ABI bundle', 
   assert.match(builder, /'!node_modules\/\*\*'/);
   assert.match(builder, /from: 'vendor\/app', to: 'app'/);
 });
+
+test('the Desktop runtime deploy contains only its manifest and production dependencies', () => {
+  const desktop = JSON.parse(read('../desktop/package.json'));
+  const fetchRuntime = read('../desktop/fetch-runtime.mjs');
+  const checker = read('../desktop/check-runtime.mjs');
+  const builder = read('../desktop/electron-builder.cjs');
+  const metadataCleanup = fetchRuntime.indexOf('for (const metadataPath of [');
+  const deployValidation = fetchRuntime.indexOf('await assertDeploySourceShape(stagedApp);');
+  const packageProjection = fetchRuntime.indexOf("await rename(join(stagedApp, 'package.json'), join(projectedApp, 'package.json'));");
+  const moduleProjection = fetchRuntime.indexOf("await rename(join(stagedApp, 'node_modules'), join(projectedApp, 'node_modules'));");
+  const runtimeCheck = checker.slice(checker.indexOf('async function assertRuntimeAppContents'));
+
+  assert.deepEqual(desktop.files, ['package.json']);
+  assert.ok(metadataCleanup >= 0 && metadataCleanup < deployValidation, 'pnpm deploy metadata is removed before validating the staging package');
+  assert.ok(deployValidation < packageProjection && packageProjection < moduleProjection, 'the validated deploy is explicitly projected to only its manifest and dependencies');
+  assert.match(fetchRuntime, /const stagedApp = join\(stagingRoot, 'package'\)/);
+  assert.match(fetchRuntime, /const projectedApp = join\(stagingRoot, 'runtime-app'\)/);
+  assert.match(fetchRuntime, /README\.en\.md/);
+  assert.match(fetchRuntime, /electron\/dist\/\*/);
+  assert.match(fetchRuntime, /assertInsideRuntimeStaging\(stagingRoot, scratchRoot\)/);
+  assert.match(builder, /\{ from: 'vendor\/app', to: 'app', filter: \['package\.json'\] \}/);
+  assert.match(builder, /\{ from: 'vendor\/app\/node_modules', to: 'app\/node_modules' \}/);
+  assert.match(checker, /await assertRuntimeAppContents\(app\)/);
+  assert.match(checker, /the Desktop runtime app root has unexpected or missing entries/);
+  assert.match(runtimeCheck, /\['node_modules', 'directory'\]/);
+  assert.match(runtimeCheck, /\['package.json', 'file'\]/);
+  assert.doesNotMatch(runtimeCheck, /README\.md|LICENSE/);
+});

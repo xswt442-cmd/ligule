@@ -1,7 +1,7 @@
 // 用随包的 Node 检查桌面运行树中的命令行、原生模块与搜索后端。
 import { createRequire } from 'node:module';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { assertNoForeignNativeDirectories, assertSymlinksInside } from '../scripts/runtime-tree.js';
@@ -17,6 +17,7 @@ packageJson.dependencies['@ligule/core'] = '*';
 const nodePath = join(runtimeRoot, 'node', process.platform === 'win32' ? 'node.exe' : 'node');
 const app = join(runtimeRoot, 'app');
 const appModules = join(app, 'node_modules');
+await assertRuntimeAppContents(app);
 await assertSymlinksInside(app);
 await assertNoForeignNativeDirectories(appModules, target);
 const providerPackage = `@vscode/ripgrep-${target}`;
@@ -144,5 +145,22 @@ function assertInsideTestplace(path, directory) {
   const relativePath = relative(resolve(directory), resolve(path));
   if (relativePath === '' || relativePath === '..' || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
     throw new Error(`temporary runtime check path must be inside desktop/testplace/tmp: ${path}`);
+  }
+}
+
+async function assertRuntimeAppContents(appRoot) {
+  const entries = await readdir(appRoot, { withFileTypes: true });
+  const allowed = new Map([
+    ['node_modules', 'directory'],
+    ['package.json', 'file'],
+  ]);
+  const unexpected = entries.filter((entry) => {
+    const type = allowed.get(entry.name);
+    return type === undefined || (type === 'directory' ? !entry.isDirectory() : !entry.isFile());
+  }).map((entry) => entry.name);
+  const hasPackage = entries.some((entry) => entry.name === 'package.json' && entry.isFile());
+  const hasModules = entries.some((entry) => entry.name === 'node_modules' && entry.isDirectory());
+  if (!hasPackage || !hasModules || unexpected.length > 0) {
+    throw new Error(`the Desktop runtime app root has unexpected or missing entries: ${unexpected.join(', ') || 'package.json or node_modules is missing'}`);
   }
 }

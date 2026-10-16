@@ -61,7 +61,7 @@ module.exports = {
   extraResources: [
     { from: 'electron/dist/host-entry.js', to: 'host-entry.js' },
     { from: 'vendor/node', to: 'node' },
-    { from: 'vendor/app', to: 'app' },
+    { from: 'vendor/app', to: 'app', filter: ['package.json'] },
     { from: 'vendor/app/node_modules', to: 'app/node_modules' },
   ],
   directories: { output: 'release' },
