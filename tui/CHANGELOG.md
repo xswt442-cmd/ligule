@@ -8,7 +8,11 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ### 简体中文
 
+- 增加 `ligule mcp-server --project <绝对目录>` 本地 stdio MCP 入口，支持创建与接回会话、后台运行、状态查询、分页读取和取消；需要人工审批的操作直接拒绝，operation ID 仅在当前进程内有效。
+
 ### English
+
+- Added `ligule mcp-server --project <absolute-directory>` for local stdio MCP control: create or resume sessions, run tasks in the background, query status, page through records, and cancel. Operations requiring human approval are denied; operation IDs are process-local.
 
 ## [0.0.4] - 2026-10-14
 
