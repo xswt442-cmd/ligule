@@ -9,10 +9,12 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 ### 简体中文
 
 - 安装包中的 Node 运行树只包含产品清单和生产依赖；构建与运行资源检查会拒绝源码、测试材料和嵌套部署目录。
+- 当文件权限边界与项目目录不同时，会话归属、项目设置与重启恢复仍使用实际项目目录。
 
 ### English
 
 - Restricted the packaged Node runtime tree to its product manifest and production dependencies; build and runtime-resource checks reject source files, test material, and nested deployment directories.
+- Session ownership, project settings, and restart recovery use the actual project directory when it differs from the filesystem permission boundary.
 
 ## [0.0.5] - 2026-10-15
 

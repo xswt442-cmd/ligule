@@ -8,6 +8,7 @@ import { createConnection } from '../core/dist/host/connection.js';
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
 const cli = join(repository, 'tui', 'dist', 'cli.js');
+const desktopEntry = join(repository, 'core', 'dist', 'host', 'desktop-entry.js');
 
 function deadline(pending, label) {
   let timer;
@@ -15,6 +16,29 @@ function deadline(pending, label) {
     timer = setTimeout(() => reject(new Error(`${label} did not finish`)), 10_000);
   });
   return Promise.race([pending, expired]).finally(() => clearTimeout(timer));
+}
+
+function startDesktop(projectRoot, dataRoot) {
+  const child = spawn(process.execPath, [desktopEntry], {
+    cwd: projectRoot,
+    env: { ...process.env, LIGULE_HOME: dataRoot },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const exited = new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', resolve);
+  });
+  child.stderr.resume();
+  const client = createConnection({ input: child.stdout, output: child.stdin });
+  return {
+    child,
+    client,
+    async stop() {
+      child.stdin.end();
+      try { await deadline(exited, 'release DesktopEntry Host'); }
+      finally { if (child.exitCode === null) child.kill(); }
+    },
+  };
 }
 
 test('a real unconfigured host opens another workspace while settings remain available', async () => {
@@ -149,6 +173,63 @@ test('workspace history and local configuration keep their identity when the per
     await host.client.request('session.open', { sessionId: a.sessionId });
     assert.equal((await host.client.request('status.get', { sessionId: a.sessionId })).model, 'saved-for-first');
     assert.equal((await host.client.request('session.read', { sessionId: a.sessionId })).header.projectRoot, first);
+  } finally {
+    await host.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('DesktopEntry keeps workspace identity separate from a shared permission boundary', async () => {
+  const scratch = join(repository, 'testplace', 'tmp');
+  await mkdir(scratch, { recursive: true });
+  const root = await mkdtemp(join(scratch, 'desktop-workspace-boundary-'));
+  const first = join(root, 'first');
+  const second = join(root, 'second');
+  const boundary = join(root, 'boundary');
+  const data = join(root, 'data');
+  await Promise.all([first, second, boundary, data].map((path) => mkdir(path, { recursive: true })));
+  await writeFile(join(data, 'config.toml'), `boundary = ${JSON.stringify(boundary)}\n`, 'utf8');
+  let host = startDesktop(first, data);
+  try {
+    const a = await deadline(host.client.request('session.create', {}), 'create DesktopEntry first workspace session');
+    const aRecord = await deadline(host.client.request('session.read', { sessionId: a.sessionId }), 'read DesktopEntry first session');
+    assert.equal(aRecord.header.projectRoot, first, 'the first session header follows DesktopEntry cwd, not the permission boundary');
+
+    const b = await deadline(host.client.request('session.create', { projectRoot: second }), 'create DesktopEntry second workspace session');
+    const bRecord = await deadline(host.client.request('session.read', { sessionId: b.sessionId }), 'read DesktopEntry second session');
+    assert.equal(bRecord.header.projectRoot, second);
+    assert.deepEqual((await host.client.request('sessions.list', { projectRoot: first })).sessions.map((item) => item.id), [a.sessionId]);
+    assert.deepEqual((await host.client.request('sessions.list', { projectRoot: second })).sessions.map((item) => item.id), [b.sessionId]);
+
+    for (const projectRoot of [first, second]) {
+      const shown = await host.client.request('config.get', { projectRoot });
+      const projectLayer = shown.layers.find((layer) => layer.layer === 'projectLocal');
+      await host.client.request('config.set', {
+        projectRoot, field: 'policy.mode', value: 'never', layer: 'projectLocal', version: projectLayer.version,
+      });
+      const localConfig = await readFile(join(projectRoot, '.ligule', 'config.local.toml'), 'utf8');
+      assert.match(localConfig, /\[policy\]/);
+      assert.match(localConfig, /mode = "never"/);
+    }
+    assert.equal((await host.client.request('config.get', { projectRoot: first })).policyMode, 'never');
+    assert.equal((await host.client.request('config.get', { projectRoot: second })).policyMode, 'never');
+    await assert.rejects(readFile(join(boundary, '.ligule', 'config.local.toml')), (error) => error.code === 'ENOENT');
+    await host.stop();
+
+    host = startDesktop(first, data);
+    const listedFirst = await deadline(host.client.request('sessions.list', {}), 'list default DesktopEntry workspace after restart');
+    assert.deepEqual(listedFirst.sessions.map((item) => item.id), [a.sessionId]);
+    const listedSecond = await host.client.request('sessions.list', { projectRoot: second });
+    assert.deepEqual(listedSecond.sessions.map((item) => item.id), [b.sessionId]);
+    await host.client.request('session.open', { sessionId: a.sessionId });
+    await host.client.request('session.open', { sessionId: b.sessionId, projectRoot: second });
+    assert.equal((await host.client.request('session.read', { sessionId: a.sessionId })).header.projectRoot, first);
+    assert.equal((await host.client.request('session.read', { sessionId: b.sessionId })).header.projectRoot, second);
+    assert.equal((await host.client.request('config.get', { projectRoot: first })).policyMode, 'never');
+    assert.equal((await host.client.request('config.get', { projectRoot: second })).policyMode, 'never');
+    assert.match(await readFile(join(first, '.ligule', 'config.local.toml'), 'utf8'), /mode = "never"/);
+    assert.match(await readFile(join(second, '.ligule', 'config.local.toml'), 'utf8'), /mode = "never"/);
+    await host.stop();
   } finally {
     await host.stop();
     await rm(root, { recursive: true, force: true });

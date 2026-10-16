@@ -1,3 +1,4 @@
+import { resolve } from 'node:path';
 import { createConfig } from '../kernel/config.js';
 import { loadConfigLayers } from '../kernel/config-file.js';
 import { extensionSources } from '../kernel/extensions.js';
@@ -16,11 +17,13 @@ export async function loadProjectConfig(projectRoot: string, flags: string[] = [
 
 export async function loadHostEnvironment(projectRoot: string, shippedModes: string, flags: string[] = []): Promise<EnvironmentSeed> {
   const loaded = await loadProjectConfig(projectRoot, flags);
+  const config: EnvironmentSeed['config'] = Object.freeze({ ...loaded.config, workspaceRoot: resolve(projectRoot) });
   return {
     ...loaded,
-    provider: hostProviderFromConfig(loaded.config),
-    policy: loaded.config.policy as Parameters<typeof createHost>[0]['policy'],
-    modeName: typeof loaded.config.mode === 'string' ? loaded.config.mode : DEFAULT_MODE,
+    config,
+    provider: hostProviderFromConfig(config),
+    policy: config.policy as Parameters<typeof createHost>[0]['policy'],
+    modeName: typeof config.mode === 'string' ? config.mode : DEFAULT_MODE,
     modePaths: modeDirectories(projectRoot, shippedModes),
   };
 }
