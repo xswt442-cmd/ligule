@@ -10,6 +10,8 @@ Ligule CLI 可以通过标准输入输出启动本地 MCP Server。它让外部 
 npm install -g ligule
 ```
 
+先进入目标项目目录，交互式运行一次 `ligule`，确认信任该工作区后退出。MCP Server 必须使用相同的操作系统用户和 `LIGULE_HOME`，才能读取已有信任记录。Server 在读取项目配置前检查信任；未信任时以 `control_project_untrusted` 退出，不在 stdio 上弹出信任提示，也不提供通过 MCP 授予信任的工具。工作区信任不等于工具审批，既有 Policy 和审批拒绝规则仍然生效。
+
 在 MCP 客户端配置中，将 `ligule` 作为 stdio 子进程启动，并为它指定一个绝对项目目录。例如：
 
 ```json

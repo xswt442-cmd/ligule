@@ -191,6 +191,7 @@ import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const corePackage = join(${JSON.stringify(bundledCoreDirectory)}, 'package.json');
 const coreRequire = createRequire(corePackage);
@@ -201,6 +202,8 @@ const expected = [
   'ligule_session_create', 'ligule_session_list', 'ligule_session_open', 'ligule_session_read',
 ].sort();
 const projectRoot = ${JSON.stringify(mcpProject)};
+const { setTrusted } = await import(pathToFileURL(join(${JSON.stringify(bundledCoreDirectory)}, 'dist', 'kernel', 'workspace-trust.js')).href);
+await setTrusted(projectRoot, true, join(${JSON.stringify(mcpHome)}, 'tui-trust.json'));
 const transport = new StdioClientTransport({
   command: process.execPath,
   args: [join(${JSON.stringify(installedPackageRoot)}, 'dist', 'cli.js'), 'mcp-server', '--project', projectRoot],

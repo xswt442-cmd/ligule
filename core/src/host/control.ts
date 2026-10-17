@@ -105,7 +105,11 @@ export function createControl(host: Host, projectRoot: string) {
       if (!Array.isArray(result.sessions)) throw new KernelError('host_response_invalid');
       return { sessions: result.sessions.map((item: unknown) => {
         const entry = record(item);
-        return { sessionId: entry.id, name: entry.name, archived: entry.archived, createdAt: entry.createdAt };
+        if (typeof entry.name !== 'string' || (entry.createdAt !== null && typeof entry.createdAt !== 'string')) {
+          throw new KernelError('host_response_invalid');
+        }
+        return { sessionId: entry.id, name: entry.name.slice(0, 120), archived: entry.archived,
+          createdAt: entry.createdAt === null ? null : entry.createdAt.slice(0, 128) };
       }) };
     },
     start(sessionId: string, input: string) {

@@ -5,6 +5,7 @@ import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { connectMcp } from '../test/helpers/mcp-control.mjs';
+import { setTrusted } from '../core/dist/kernel/workspace-trust.js';
 import { listenFetchable } from '../core/test/helpers/port.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -140,6 +141,7 @@ async function runFailureCase({ name, api, endpoint, expectedCode }) {
     '',
   ].join('\n');
   await writeFile(join(home, 'config.toml'), config, { flag: 'wx' });
+  await setTrusted(projectRoot, true, join(home, 'tui-trust.json'));
 
   let connection;
   try {

@@ -7,6 +7,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema, McpError, ErrorCode, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import { createConfig } from '../kernel/config.js';
 import { KernelError } from '../kernel/error.js';
+import { isTrusted } from '../kernel/workspace-trust.js';
 import { createHost } from './host.js';
 import { loadHostEnvironment } from './environment.js';
 import { createControl, controlErrorCode } from './control.js';
@@ -61,6 +62,7 @@ export async function serveMcp({ projectRoot, version, flags = [], modeName }: {
     authorizedRoot = await realpath(projectRoot);
     if (!(await stat(authorizedRoot)).isDirectory()) throw new KernelError('control_project_required');
   } catch { throw new KernelError('control_project_required'); }
+  if (!(await isTrusted(authorizedRoot))) throw new KernelError('control_project_untrusted');
   const shippedModes = fileURLToPath(new URL('../../modes/', import.meta.url));
   const { layers, ...environment } = await loadHostEnvironment(authorizedRoot, shippedModes, flags);
   const host = createHost({ ...environment,

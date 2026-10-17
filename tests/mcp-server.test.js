@@ -7,9 +7,10 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { listenFetchable } from '../test/helpers/port.js';
 import { connectMcp } from '../test/helpers/mcp-control.mjs';
+import { setTrusted } from '../core/dist/kernel/workspace-trust.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const workspaceRoot = resolve(process.env.LIGULE_MCP_E2E_WORKSPACE_ROOT ?? resolve(repoRoot, '..'));
+const workspaceRoot = resolve(process.env.LIGULE_MCP_E2E_WORKSPACE_ROOT ?? repoRoot);
 const testplaceRoot = resolve(process.env.LIGULE_MCP_E2E_TESTPLACE_ROOT ?? join(workspaceRoot, 'testplace'));
 const cliPath = resolve(process.env.LIGULE_MCP_CLI ?? join(repoRoot, 'tui', 'dist', 'cli.js'));
 const sdkRoot = resolve(process.env.LIGULE_MCP_SDK_ROOT ?? join(repoRoot, 'core', 'node_modules', '@modelcontextprotocol', 'sdk'));
@@ -77,7 +78,10 @@ async function waitForChildPid(client, sessionId, operationId, pidFile, label) {
   const until = Date.now() + 5_000;
   while (Date.now() < until) {
     const pidText = await readFile(pidFile, 'utf8').catch(() => undefined);
-    if (pidText !== undefined) return Number(pidText);
+    if (pidText !== undefined) {
+      const pid = Number(pidText);
+      if (Number.isInteger(pid) && pid > 0 && processIsAlive(pid)) return pid;
+    }
     const status = toolData(await client.callTool({ name: 'ligule_run_status', arguments: { operationId } }), `${label}_status`);
     if (status.state !== 'running') {
       const page = toolData(await client.callTool({ name: 'ligule_session_read', arguments: { sessionId, limit: 50 } }), `${label}_records`);
@@ -145,13 +149,19 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
   await Promise.all([mkdir(projectRoot), mkdir(dataRoot)]);
   await mkdir(sessionDirectory);
 
-  const childScript = join(projectRoot, 'cancel-child.mjs');
-  const childPidFile = join(projectRoot, 'cancel-child.pid');
   const approvalMarker = join(projectRoot, 'approval-denied.txt');
-  await writeFile(childScript,
-    "import { writeFileSync } from 'node:fs';\nwriteFileSync('cancel-child.pid', String(process.pid));\nsetInterval(() => {}, 1000);\n",
-  );
-  const execCommand = 'node cancel-child.mjs';
+  const childPidFiles = {
+    cancel: join(projectRoot, 'cancel-child.pid'),
+    disconnect: join(projectRoot, 'disconnect-child.pid'),
+  };
+  const execCommands = { cancel: 'node cancel-child.mjs', disconnect: 'node disconnect-child.mjs' };
+  await Promise.all(Object.entries(execCommands).map(async ([name, command]) => {
+    const scriptName = command.slice('node '.length);
+    const pidName = childPidFiles[name].slice(projectRoot.length + 1);
+    await writeFile(join(projectRoot, scriptName),
+      `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(pidName)}, String(process.pid));\nsetInterval(() => {}, 1000);\n`,
+    );
+  }));
 
   const apiKeyName = 'LIGULE_MCP_E2E_API_KEY';
   const apiKey = 'local-stub-key';
@@ -189,9 +199,12 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
       }
       let tool;
       let args;
-      if (lastUser.includes('MCP_E2E_EXEC_CANCEL') || lastUser.includes('MCP_E2E_EXEC_DISCONNECT')) {
+      if (lastUser.includes('MCP_E2E_EXEC_CANCEL')) {
         tool = 'exec';
-        args = { command: execCommand };
+        args = { command: execCommands.cancel };
+      } else if (lastUser.includes('MCP_E2E_EXEC_DISCONNECT')) {
+        tool = 'exec';
+        args = { command: execCommands.disconnect };
       } else if (lastUser.includes('MCP_E2E_APPROVAL_DENIED')) {
         tool = 'create';
         args = { path: 'approval-denied.txt', content: 'must not be written' };
@@ -227,7 +240,12 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     '',
     '[[policy.rules]]',
     'tool = "exec"',
-    `match = ${tomlString(execCommand)}`,
+    `match = ${tomlString(execCommands.cancel)}`,
+    'decision = "allow"',
+    '',
+    '[[policy.rules]]',
+    'tool = "exec"',
+    `match = ${tomlString(execCommands.disconnect)}`,
     'decision = "allow"',
     '',
     '[host]',
@@ -245,6 +263,7 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
   await mkdir(foreignRoot);
 
   const connect = async () => {
+    await setTrusted(projectRoot, true, join(dataRoot, 'tui-trust.json'));
     const context = await connectMcp({ cliPath, projectRoot, dataRoot, apiKeyName, apiKey, sdkRoot });
     contexts.push(context);
     clients.add(context);
@@ -296,8 +315,18 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     const opened = toolData(await first.client.callTool({ name: 'ligule_session_open', arguments: { projectRoot: project, sessionId } }), 'session_open');
     assert.equal(opened.sessionId, sessionId);
     recordTrace(trace, 'session_open_existing', { sessionId });
+    const legacy = toolData(await first.client.callTool({ name: 'ligule_session_create', arguments: { projectRoot: project } }), 'session_create_legacy_fixture');
+    const legacyPath = join(sessionDirectory, `${legacy.sessionId}.jsonl`);
+    await writeFile(legacyPath, `${JSON.stringify({ kind: 'session', formatVersion: 1, sessionId: legacy.sessionId,
+      projectRoot: project, createdAt: 'c'.repeat(140) })}\n${JSON.stringify({ seq: 1, kind: 'label', name: 'n'.repeat(140) })}\n`);
     const sessions = toolData(await first.client.callTool({ name: 'ligule_session_list', arguments: { projectRoot: project, limit: 20 } }), 'session_list');
     assert.ok(sessions.sessions.some((session) => session.sessionId === sessionId));
+    const normalizedLegacy = sessions.sessions.find((session) => session.sessionId === legacy.sessionId);
+    assert.equal(normalizedLegacy.name.length, 120, 'legacy session names are bounded at the MCP boundary');
+    assert.equal(normalizedLegacy.createdAt.length, 128, 'legacy timestamps are bounded at the MCP boundary');
+    const legacyLines = (await readFile(legacyPath, 'utf8')).trimEnd().split('\n').map((line) => JSON.parse(line));
+    assert.equal(legacyLines[0].createdAt.length, 140, 'MCP normalization does not rewrite the stored timestamp');
+    assert.equal(legacyLines[1].name.length, 140, 'MCP normalization does not rewrite the stored name');
     recordTrace(trace, 'session_list', { count: sessions.sessions.length, includesCreated: true });
 
     const foreignCreate = await first.client.callTool({ name: 'ligule_session_create', arguments: { projectRoot: foreignRoot } });
@@ -376,7 +405,7 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     });
 
     const cancelRun = toolData(await first.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_E2E_EXEC_CANCEL' } }), 'run_start_cancel_child');
-    const cancelPid = await waitForChildPid(first.client, sessionId, cancelRun.operationId, childPidFile, 'exec_cancel');
+    const cancelPid = await waitForChildPid(first.client, sessionId, cancelRun.operationId, childPidFiles.cancel, 'exec_cancel');
     assert.ok(Number.isInteger(cancelPid) && cancelPid > 0);
     const concurrent = await first.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'must be rejected' } });
     toolFailure(concurrent, 'run_already_running', 'run_start_concurrent');
@@ -403,8 +432,9 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     await close(locked);
 
     const disconnectRun = toolData(await first.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_E2E_EXEC_DISCONNECT' } }), 'run_start_disconnect_child');
-    const disconnectPid = await waitForChildPid(first.client, sessionId, disconnectRun.operationId, childPidFile, 'exec_disconnect');
+    const disconnectPid = await waitForChildPid(first.client, sessionId, disconnectRun.operationId, childPidFiles.disconnect, 'exec_disconnect');
     assert.ok(Number.isInteger(disconnectPid) && disconnectPid > 0);
+    assert.notEqual(disconnectPid, cancelPid, 'disconnect run starts a fresh child process');
     const closeAt = performance.now();
     await close(first);
     const closeMs = Math.round(performance.now() - closeAt);

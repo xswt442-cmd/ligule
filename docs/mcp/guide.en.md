@@ -10,6 +10,8 @@ Use Node.js 24 or newer and install the Ligule CLI:
 npm install -g ligule
 ```
 
+First enter the target project directory, run `ligule` interactively, confirm workspace trust, and exit. The MCP server must use the same operating system user and `LIGULE_HOME` to read that trust record. It checks trust before reading project configuration and exits with `control_project_untrusted` for an untrusted project. It does not prompt over stdio or expose an MCP tool to grant trust. Workspace trust does not approve tool actions; existing Policy and approval denial rules still apply.
+
 Configure your MCP client to start `ligule` as a stdio child process and provide an absolute project directory:
 
 ```json
