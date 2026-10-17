@@ -352,6 +352,7 @@ export function App({ transport }: { transport: Transport }) {
   }, [t]);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [modelCatalogRevision, setModelCatalogRevision] = useState(0);
   const settingsEdits = useRef<string[]>([]);
   const reportSettingsEdits = useCallback((reasons: string[]) => { settingsEdits.current = reasons; }, []);
   const dockEdits = useRef<string[]>([]);
@@ -1800,7 +1801,7 @@ export function App({ transport }: { transport: Transport }) {
           }}
         />
         <div className="composer-bar">
-          <ModelPicker key={projectRoot} client={client} projectRoot={projectRoot}
+          <ModelPicker key={`${projectRoot}:${modelCatalogRevision}`} client={client} projectRoot={projectRoot}
             disabled={closing || starting || reading || !settingsReady} pending={status?.pendingModel !== undefined && status.pendingModel !== null}
             selection={status?.selectedModel ? { provider: status.pendingServiceId ?? status.serviceId, model: status.pendingModel ?? status.selectedModel } : settings.newSelections[projectRoot] ?? null}
             onSelect={async (selection) => {
@@ -1848,7 +1849,7 @@ export function App({ transport }: { transport: Transport }) {
       waiting={panelProps.waiting}
       onReconnect={() => void reconnect()}
       onEdit={reportSettingsEdits}
-      onClose={() => { setSettingsOpen(false); if (sessionId !== null) void refreshStatus(sessionId); }}
+      onClose={() => { setSettingsOpen(false); setModelCatalogRevision((current) => current + 1); if (sessionId !== null) void refreshStatus(sessionId); }}
     />}
     {quitHold !== null && <HoldSheet
       lead={t('退出会丢弃以下未保存的设置：', 'Exiting will discard these unsaved settings:')}
