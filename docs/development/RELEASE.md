@@ -28,3 +28,5 @@ Ligule 分为两条独立发行线，版本可分别推进：
 版本、更新记录和发布渠道必须保持产品隔离。不要重用标签或 npm 版本。重试前先检查 [GitHub Releases](https://github.com/xswt442-cmd/ligule/releases) 与 [npm 包](https://www.npmjs.com/package/ligule)。正式发布前须为 `npm-publish` 和 `desktop-publish` GitHub Environments 配置必需审核者。
 
 随包 Node 运行时及其归档校验值以 [`desktop/node-pin.json`](../../desktop/node-pin.json) 为准。修改运行时版本时更新该文件并验证各目标安装包。
+
+打包前构建当前 Core，并在对应平台重新执行 `pnpm run prepare-runtime`。Desktop 部署、构建与运行树检查，以及 CLI npm staging，逐文件核对 Core 的编译输出、模式、README 和许可证；任何缺失、多余或内容差异均拒绝继续。该检查确认产品实际包含当前构建的 Core，不能代替安装后行为验收。

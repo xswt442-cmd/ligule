@@ -153,13 +153,14 @@ export const METHODS = Object.freeze({
     },
   },
   'session.read': {
-    description: 'Read the events of an open session, oldest first, so a client that arrives late can show what happened; `limit` and `before` ask for one history page instead of the whole record',
+    description: 'Read events from an open session. Use `limit` and `before` for a history page, or `at` to read exactly one event by sequence number; `at` and `before` cannot be combined',
     parameters: { type: 'object', properties: {
       sessionId: SESSION_ID,
       fullResults: { type: 'boolean', description: 'read complete spilled tool results for display; the record and model view stay unchanged' },
       // 事件序号就是那条稳定游标：往回翻页要说出这一页最早的那一条，翻页期间新到的事件只追加在末尾（E03）。
       limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'take at most this many of the newest events in the requested range' },
       before: { type: 'integer', minimum: 1, description: 'read events older than this sequence number; it has to name an event in this record' },
+      at: { type: 'integer', minimum: 1, description: 'read exactly the event with this sequence number; it has to exist in this record and cannot be combined with before' },
     }, required: ['sessionId'] },
   },
   // 第十二条只为界面多出来的方法：一份记录写成 markdown 并落到人选定的那个位置（方案 6A）。
@@ -185,7 +186,7 @@ export const METHODS = Object.freeze({
     parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
   },
   'status.get': {
-    description: 'Read what the Host currently holds for this session',
+    description: 'Read the Host state for this session, including its live phase and model output budget when a run is active',
     parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
   },
   // 工作区那份持久登记的读与写（方案 5.5.1、5.5.2、5.5.3）：清单与默认选择都在应用数据根里，
@@ -337,8 +338,8 @@ export const APPROVAL_METHOD = 'approval.request' as const;
 export const QUESTION_METHOD = 'question.request' as const;
 
 // Host 交回的通知名。delta 来自流式接收期间，event 是会话记录里刚落盘的那一条（I5：记录是唯一事实源），
-// fault 是这条连接本身的问题——一行读不出来时没有对应的请求可以答复，只能说给对端听。
-export const NOTIFICATIONS = Object.freeze(['delta', 'event', 'fault'] as const);
+// progress 是当前会话的活动快照，fault 是这条连接本身的问题——一行读不出来时没有对应的请求可以答复，只能说给对端听。
+export const NOTIFICATIONS = Object.freeze(['delta', 'event', 'fault', 'progress'] as const);
 
 for (const [name, method] of Object.entries(METHODS)) {
   // 这张表交给客户端读，子集之外的构造等于承诺一件客户端做不到的事，所以在这里当场失败。

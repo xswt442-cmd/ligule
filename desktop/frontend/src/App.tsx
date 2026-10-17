@@ -33,6 +33,7 @@ import type { Status } from './status';
 import { loadSettings, mergeQueueIntoDraft, readSettings, saveSettings, type Settings } from './settings';
 import { LocaleProvider, localeOf, useText } from './locale';
 import { notificationOf, notificationTarget, type NotificationKind, type NotificationTarget } from './notifications';
+import { SessionStreamBuffer } from './session-stream';
 
 type Branch = { seq: number; id: string; task: string };
 
@@ -260,7 +261,9 @@ export function App({ transport }: { transport: Transport }) {
   const [rows, setRows] = useState<Row[]>([]);
   const [live, setLive] = useState({ text: '', reasoning: '' });
   // 流式那半截按会话各存一份：后台那一轮的片段留着，切回来先补上它，不等那一条落进记录（方案 3.1、审阅 F4）。
-  const liveBySession = useRef(new Map<string, { text: string; reasoning: string }>());
+  const liveStreamRef = useRef<SessionStreamBuffer | null>(null);
+  if (liveStreamRef.current === null) liveStreamRef.current = new SessionStreamBuffer();
+  const liveBySession = liveStreamRef.current;
   const terminalBySession = useRef(new Map<string, number>());
   // 跑着的时候新到的询问排在后面：一次问一件事，答一件再画下一件。
   const [asks, setAsks] = useState<Ask[]>([]);
@@ -324,6 +327,18 @@ export function App({ transport }: { transport: Transport }) {
   const [settings, setSettings] = useState(readSettings);
   const language = localeOf(settings.language);
   const t = useCallback((chinese: string, english: string) => language === 'zh' ? chinese : english, [language]);
+  const progress = status?.progress ?? null;
+  const progressPhase = progress === null ? '' : {
+    preparing: t('准备上下文', 'Preparing context'),
+    model_request: t('请求模型', 'Requesting model'),
+    tool_execution: t('执行工具', 'Running tools'),
+    compaction: t('压缩上下文', 'Compacting context'),
+    awaiting_approval: t('等待审批', 'Waiting for approval'),
+    awaiting_input: t('等待用户输入', 'Waiting for your input'),
+    settling: t('正在收尾', 'Finishing'),
+  }[progress.phase];
+  const progressIdleSeconds = progress === null ? 0 : Math.max(0, Math.floor((tick - progress.lastProgressAt) / 1000));
+  const progressLabel = `${progressPhase || t('运行中', 'Running')} · ${progressIdleSeconds}${t('秒无新进展', 's without progress')} · ${progress?.modelCalls ?? 0} ${t('次模型调用', 'model calls')} · ${progress?.toolCalls ?? 0} ${t('个工具调用', 'tool calls')}${status?.outputTokens === null || status?.outputTokens === undefined ? '' : ` · ${status.outputTokens} ${t('个输出token', 'output tokens')}`}`;
   const panelTitle = useCallback((item: Panel<PanelProps>) => {
     const titles: Record<string, [string, string]> = {
       'panel.diagnostics': ['诊断', 'Diagnostics'],
@@ -337,6 +352,7 @@ export function App({ transport }: { transport: Transport }) {
   }, [t]);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [modelCatalogRevision, setModelCatalogRevision] = useState(0);
   const settingsEdits = useRef<string[]>([]);
   const reportSettingsEdits = useCallback((reasons: string[]) => { settingsEdits.current = reasons; }, []);
   const dockEdits = useRef<string[]>([]);
@@ -647,15 +663,25 @@ export function App({ transport }: { transport: Transport }) {
       // 每一轮流式进来的那半截按会话各存一份：看着别的那一份时它也在长，切回来要先看见已经收到的那一段，
       // 不等那一条落进记录（方案 3.1 的后台会话继续运行、审阅 F4）。
       const owner = message.sessionId ?? '';
-      const held = liveBySession.current.get(owner) ?? { text: '', reasoning: '' };
       const inView = owner === active.current;
+      if (message.notify === 'progress') {
+        if (inView) {
+          const progress = message.progress === null || message.progress === undefined
+            ? null
+            : message.progress as Status['progress'];
+          setStatus((current) => current === null ? current : {
+            ...current,
+            running: progress !== null,
+            progress,
+          });
+        }
+        return;
+      }
       if (message.notify === 'delta') {
         const event = message.event as { type?: string; text?: string } | undefined;
-        if (event?.type === 'text') held.text += event.text ?? '';
-        else if (event?.type === 'reasoning') held.reasoning += event.text ?? '';
-        else return;
-        liveBySession.current.set(owner, held);
-        if (inView) setLive({ ...held });
+        const held = liveBySession.append(owner, event?.type ?? '', event?.text ?? '');
+        if (held === null) return;
+        if (inView) setLive(held);
         return;
       }
       if (message.notify === 'event') {
@@ -669,11 +695,8 @@ export function App({ transport }: { transport: Transport }) {
           }
         }
         // 刚落盘的那一条取代流式期间的那半截：记录是事实源（I5）。后台那一份收掉的是它自己那半截。
-        if (record?.kind === 'assistant') held.text = '';
-        if (record?.kind === 'reasoning') held.reasoning = '';
-        if (held.text === '' && held.reasoning === '') liveBySession.current.delete(owner);
-        else liveBySession.current.set(owner, held);
-        if (inView) setLive({ ...held });
+        const held = liveBySession.settle(owner, record?.kind ?? '');
+        if (inView) setLive(held);
         if (!inView) return;
         if (record?.kind === 'assistant') {
           for (const call of record.toolCalls ?? []) dispatchAt.current.set(call.id, Date.now());
@@ -799,7 +822,7 @@ export function App({ transport }: { transport: Transport }) {
     readerScrolling.current = false;
     setPinned(true);
     // 切回来时先把它自己那半截流式回答摆上：这一轮还在跑的话，记录里要到那一条落盘才有全文，中间这几秒不能是空的（审阅 F4）。
-    setLive({ ...(liveBySession.current.get(id) ?? { text: '', reasoning: '' }) });
+    setLive(liveBySession.read(id));
     setWanted(null);
     setInputOwner(null);
     dispatchAt.current.clear();
@@ -1017,6 +1040,16 @@ export function App({ transport }: { transport: Transport }) {
           }
         }
         await openSession(sessionId, undefined, true);
+      } else {
+        try {
+          await client.call('workspaces.list', {}, 15_000);
+          connectionLost.current = false;
+          setLink(null);
+          setSessionsRevision((current) => current + 1);
+        } catch (error) {
+          setLink(code(error));
+          setRows((current) => [...current, metaRow('error', `无法重新连接后端：${code(error)}`, `Could not reconnect to the host: ${code(error)}`)]);
+        }
       }
     } finally {
       // 这一格必须在每一条路上都清掉：留着会让之后每一次重连都点在「还在重连」上，队列也永远不点火。
@@ -1076,7 +1109,7 @@ export function App({ transport }: { transport: Transport }) {
       // 会挡住排在后面的另一份会话，也让人以为旧答案还交得出去。
       dropQueriesOf(own, '这一轮已经收尾');
       // 这一轮收尾了：它名下那半截流式片段不再有内容要补（最后那一条由记录说话），这一格不留着（审阅 F4）。
-      liveBySession.current.delete(own);
+      liveBySession.clear(own);
       if (inView()) setLive({ text: '', reasoning: '' });
       // 只有它自己那一份会话的这一轮结束才让它发下一条；别的会话的轮次收尾不替它发（方案 5.2）。
       allowSend.current.add(own);
@@ -1550,7 +1583,7 @@ export function App({ transport }: { transport: Transport }) {
           <strong id="session-title">{sessionId === null ? t('新会话', 'New conversation') : sessionLabel.name || t('未命名会话', 'Untitled conversation')}</strong>
           <span className="muted" id="session-note" title={projectRoot}>{projectRoot.split(/[\\/]/).filter(Boolean).at(-1) ?? t('默认工作区', 'Default workspace')}</span>
         </div>
-        {running && <span className="running-label"><span className="status-dot" />{t('运行中', 'Running')} {seconds}s</span>}
+        {running && <span className="running-label" aria-live="polite" title={progressLabel}><span className="status-dot" /><span className="running-detail">{progressLabel}</span></span>}
         {status?.usage && <UsageMeter usage={status.usage} running={running} seconds={seconds} />}
         <button className="icon-button" type="button" title={`${t('命令面板', 'Command palette')} (${formatKeys(CURRENT['palette'])})`} aria-label={t('命令面板', 'Command palette')} onClick={() => setPaletteOpen(true)}><Icon name="search" size={17} /></button>
         {sessionId !== null && <SessionActions key={sessionId} client={client} sessionId={sessionId} name={sessionLabel.name} archived={sessionLabel.archived}
@@ -1768,7 +1801,7 @@ export function App({ transport }: { transport: Transport }) {
           }}
         />
         <div className="composer-bar">
-          <ModelPicker key={projectRoot} client={client} projectRoot={projectRoot}
+          <ModelPicker key={`${projectRoot}:${modelCatalogRevision}`} client={client} projectRoot={projectRoot}
             disabled={closing || starting || reading || !settingsReady} pending={status?.pendingModel !== undefined && status.pendingModel !== null}
             selection={status?.selectedModel ? { provider: status.pendingServiceId ?? status.serviceId, model: status.pendingModel ?? status.selectedModel } : settings.newSelections[projectRoot] ?? null}
             onSelect={async (selection) => {
@@ -1816,7 +1849,7 @@ export function App({ transport }: { transport: Transport }) {
       waiting={panelProps.waiting}
       onReconnect={() => void reconnect()}
       onEdit={reportSettingsEdits}
-      onClose={() => { setSettingsOpen(false); if (sessionId !== null) void refreshStatus(sessionId); }}
+      onClose={() => { setSettingsOpen(false); setModelCatalogRevision((current) => current + 1); if (sessionId !== null) void refreshStatus(sessionId); }}
     />}
     {quitHold !== null && <HoldSheet
       lead={t('退出会丢弃以下未保存的设置：', 'Exiting will discard these unsaved settings:')}

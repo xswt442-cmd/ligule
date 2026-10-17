@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
-import { createConfig } from '@ligule/core/kernel/config.js';
+import { loadProjectConfig } from '@ligule/core/host/environment.js';
 import { languageOf, textOf, type Locale } from '@ligule/core/kernel/locale.js';
 import { loadConfigLayers } from '@ligule/core/kernel/config-file.js';
 import { createConfigStore } from '@ligule/core/kernel/config-store.js';
@@ -230,12 +230,7 @@ function cliConfig(snapshot: ConfigSnapshot, projectRoot: string): CliConfig {
 }
 
 async function configSnapshot(projectRoot = process.cwd()): Promise<{ config: CliConfig; extensions: Awaited<ReturnType<typeof extensionSources>>; layers: Awaited<ReturnType<typeof loadConfigLayers>> }> {
-  const layers = await loadConfigLayers({ projectRoot, flags });
-  // 边界的默认值就是这一次指的那一根：命令行在哪里跑（或 `--project` 指了哪一根），工具就在哪里读写。任何一层配置写的 boundary 都盖得过它。
-  const user = { boundary: projectRoot, ...layers.user };
-  // 扩展的来源在同一次装载里算出来（D68）：项目层与本地层里写的路径不算，那一条挡住的判断在这里看得见。
-  const extensions = await extensionSources({ ...layers, user }, { projectRoot });
-  const snapshot = createConfig({ ...layers, user });
+  const { config: snapshot, extensions, layers } = await loadProjectConfig(projectRoot, flags);
   const config = cliConfig(snapshot, projectRoot);
   setLocale(config);
   return { config, extensions, layers };
@@ -251,9 +246,8 @@ function resolveMode(config: CliConfig): { modeName: string; modePaths: ModeDire
 // 走的是命令行自己启动时同一批函数：配置那几层、提供方、模式与扩展来源都按那一个项目根重算。
 // `--mode` 是这一次运行的覆盖，不跟着进另一个项目的环境；要换清单由 `session.open` 的 `mode` 那一格指名。
 async function projectEnvironment(projectRoot: string) {
-  const layers = await loadConfigLayers({ projectRoot, flags });
-  const user = { boundary: projectRoot, ...layers.user };
-  const config = cliConfig(createConfig({ ...layers, user }), projectRoot);
+  const { config: snapshot, layers, extensions } = await loadProjectConfig(projectRoot, flags);
+  const config = cliConfig(snapshot, projectRoot);
   return {
     config,
     provider: hostProviderFromConfig(config),
@@ -262,7 +256,7 @@ async function projectEnvironment(projectRoot: string) {
     layers,
     modeName: config.mode ?? DEFAULT_MODE,
     modePaths: modeDirectories(projectRoot, shippedModes),
-    extensions: await extensionSources({ ...layers, user }, { projectRoot }),
+    extensions,
   };
 }
 
@@ -587,6 +581,16 @@ if (invalidLanguage) {
       printFailure(fields.code ?? 'cli_policy_failed', fields.detail);
     }
   }
+} else if (command === 'mcp-server') {
+  try {
+    if (projectFlag === undefined || rest.length > 0 || jsonFlag) throw new KernelError('control_project_required');
+    const { serveMcp } = await import('@ligule/core/host/mcp-server.js');
+    await serveMcp({ projectRoot: projectFlag, version: pkg.version, flags, modeName: modeFlag });
+  } catch (error) {
+    const { controlErrorCode } = await import('@ligule/core/host/control.js');
+    process.stderr.write(`${controlErrorCode(error)}\n`);
+    process.exitCode = 1;
+  }
 } else if (command === 'host') {
   // 桌面壳或者脚本起这一个进程，两端各读写一行 JSON（D30）：本机不开端口，审批与事件都走这条连接。
   try {
@@ -645,6 +649,7 @@ if (invalidLanguage) {
   console.log(t(`ligule ${pkg.version} - 开发版本，请勿用于正式环境。`, `ligule ${pkg.version} - development build; do not use in production.`));
   console.log(t('命令：tools、skills、extensions、sessions、workspaces、policy <session-id>、run <text>、resume <id> <text>、call <tool> [json-args]、tui、host、--version', 'Commands: tools, skills, extensions, sessions, workspaces, policy <session-id>, run <text>, resume <id> <text>, call <tool> [json-args], tui, host, --version'));
   console.log(t('直接运行 ligule 打开终端界面；tui 子命令仍可使用。', 'Run ligule without a command to open the terminal UI; the tui subcommand remains available.'));
+  console.log(t('mcp-server --project <绝对目录>：启动本地 stdio MCP 外控；审批请求直接拒绝。', 'mcp-server --project <absolute-directory>: start local stdio MCP control; approval requests are denied.'));
   console.log(t('选项：--config <key.path=value>（可重复）、--mode <name>、--lang <zh|en|auto>', 'Options: --config <key.path=value> (repeatable), --mode <name>, --lang <zh|en|auto>'));
   console.log(t('run、tui 和 host 从配置读取 model.api、model.baseURL 与 model.model；密钥由 model.apiKeyEnv 指定，未设置时读取 LIGULE_API_KEY。', 'run, tui and host read model.api, model.baseURL and model.model from config; the key uses model.apiKeyEnv, or LIGULE_API_KEY when unset.'));
   console.log(t('run、tui 和 host 默认使用 minimal 模式；--mode 可覆盖 mode 配置。tools 和 call 不读取模式。', 'run, tui and host use the minimal mode by default; --mode overrides the mode config. tools and call do not read a mode.'));

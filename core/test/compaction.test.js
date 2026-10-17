@@ -12,17 +12,19 @@ import {
   compactionLimitsOf,
   createCompaction,
   createConfig,
+  createKernel,
   createLoop,
   createSessionLog,
   cutPoint,
   estimateTokens,
   loadCheckpoint,
 } from '../dist/index.js';
+import { resolveModel } from '../dist/kernel/model-services.js';
 
 const SUMMARY = 'SUMMARY OF THE EARLIER TURNS';
 const LONG = 'x'.repeat(2000);
 const limits = { contextTokens: 4_000, compactThresholdRatio: 0.8, compactRetainRatio: 0.16, resultBytes: 16_000 };
-const kernel = { manifest: () => [], execution: () => 'serial', call: async () => ({ ok: true }) };
+const kernel = createKernel();
 const prompt = { render: () => 'the system prefix' };
 
 // 假提供方：按脚本回答。看见那句摘要指令就答摘要，否则按 script 依次交事件或抛错。
@@ -162,11 +164,17 @@ test('a provider failure that is not about length leaves the record alone', asyn
 // 本地估算修正过才谈得上压力：端点报回的真实用量比本地大时，那条线要跟着提前响（D75）。
 test('the local estimate is corrected by the usage the endpoint reports back', async () => {
   await withSession(async ({ directory, id, session }) => {
-    await session.append({ kind: 'user', text: '短' });
-    await session.append({ kind: 'assistant', text: '也短' });
+    const kernel = createKernel({ session: { directory, append: session.append.bind(session) } });
+    kernel.register({ name: 'noop', description: 'Record a completed no-op', parameters: { type: 'object', properties: {} }, run: () => ({ ok: true }) });
+    await session.append({ kind: 'user', text: '短'.repeat(200) });
+    await session.append({ kind: 'assistant', text: '也短'.repeat(200) });
     const provider = fakeProvider([
-      [{ type: 'tool-call', id: 'c1', name: 'noop', args: {} }, { type: 'usage', input: 12_000, output: 20 }],
-      [{ type: 'text', text: '第二轮' }],
+      [
+        { type: 'tool-call', id: 'c1', name: 'noop', args: {} },
+        { type: 'usage', input: 12_000, output: 20 },
+        { type: 'finish', reason: 'tool_calls' },
+      ],
+      [{ type: 'text', text: '第二轮' }, { type: 'finish', reason: 'stop' }],
     ]);
     const compaction = createCompaction({ provider, session, directory, id, limits });
     const result = await createLoop({ kernel, provider, prompt, session, compaction }).run('第三句', {});
@@ -255,6 +263,18 @@ test('compaction stays off until the model window is configured', () => {
       `${JSON.stringify(written)} is refused rather than silently disabling the line`,
     );
   }
+});
+
+test('service model context changes the compaction window with the selected model', () => {
+  const services = [{
+    id: 'local', name: 'Local', api: 'chat-completions', baseURL: 'https://example.test/v1', apiKeyEnv: 'KEY', models: ['small', 'large'],
+    modelSettings: [{ id: 'small', contextTokens: 24000 }, { id: 'large', contextTokens: 96000 }],
+  }];
+  const config = createConfig({ user: { model: { services }, limits: {} } });
+  const small = resolveModel(config.model, { provider: 'local', model: 'small' });
+  const large = resolveModel(config.model, { provider: 'local', model: 'large' });
+  assert.equal(compactionLimitsOf(config, small.serviceContextTokens).contextTokens, 24000);
+  assert.equal(compactionLimitsOf(config, large.serviceContextTokens).contextTokens, 96000);
 });
 
 // 端点报回的用量落成一条记录事件（D82）：界面与恢复读的是记录，不是上一次进程留在内存里的那个数。

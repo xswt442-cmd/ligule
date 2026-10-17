@@ -61,7 +61,7 @@ module.exports = {
   extraResources: [
     { from: 'electron/dist/host-entry.js', to: 'host-entry.js' },
     { from: 'vendor/node', to: 'node' },
-    { from: 'vendor/app', to: 'app' },
+    { from: 'vendor/app', to: 'app', filter: ['package.json'] },
     { from: 'vendor/app/node_modules', to: 'app/node_modules' },
   ],
   directories: { output: 'release' },
@@ -80,6 +80,13 @@ module.exports = {
       { target: 'deb', arch: ['x64'] },
     ],
     category: 'Utility',
+  },
+  deb: {
+    depends: [
+      'libgtk-3-0', 'libnotify4', 'libnss3', 'libxss1', 'libxtst6',
+      'xdg-utils', 'libatspi2.0-0', 'libuuid1', 'libsecret-1-0',
+      'libgbm1', 'libasound2t64 | libasound2',
+    ],
   },
   mac: { target: [{ target: 'dmg' }], identity: null },
 };

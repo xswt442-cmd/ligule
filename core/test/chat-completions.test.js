@@ -75,6 +75,7 @@ test('tool call fragments arriving by index are assembled into one call', async 
       { type: 'text', text: 'Let me ' },
       { type: 'text', text: 'read it.' },
       { type: 'tool-call', id: 'call_1', name: 'read', args: { path: 'note.txt' } },
+      { type: 'finish', reason: 'tool_calls' },
     ]);
   });
 });
@@ -91,7 +92,8 @@ test('null usage on ordinary SSE chunks does not discard a tool call', async () 
     assert.deepEqual(events.filter(event => event.type === 'tool-call'), [
       { type: 'tool-call', id: 'call_1', name: 'read', args: { path: 'note.txt' } },
     ]);
-    assert.deepEqual(events.at(-1), { type: 'usage', input: 31, output: 9 });
+    assert.deepEqual(events.find((event) => event.type === 'usage'), { type: 'usage', input: 31, output: 9 });
+    assert.deepEqual(events.at(-1), { type: 'finish', reason: 'tool_calls' });
   });
 });
 
@@ -162,7 +164,7 @@ test('invalid tool names use collision-free wire aliases in tools, history, and 
         : calls.length === 3 ? 'read' : 'mcp.unregistered';
     response.end(sseBody([{
       choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: `call_${calls.length}`, type: 'function', function: { name: returnedName, arguments: '{}' } }] } }],
-    }]));
+    }, { choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] }]));
   }, async (baseUrl, requests) => {
     const tools = [
       { name: 'mcp.inspect', description: 'inspect', parameters: { type: 'object' } },
@@ -253,11 +255,13 @@ test('a streamed answer asks for usage and hands back the one it got', async () 
     response.end(sseBody([
       { choices: [{ index: 0, delta: { content: 'hi' } }] },
       { choices: [], usage: { prompt_tokens: 900, completion_tokens: 12 } },
+      { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
     ]));
   }, async (baseUrl, requests) => {
     assert.deepEqual(await collect(provider(baseUrl).stream({ system: '', tools: [], messages: [{ role: 'user', text: 'x' }] })), [
       { type: 'text', text: 'hi' },
       { type: 'usage', input: 900, output: 12 },
+      { type: 'finish', reason: 'stop' },
     ]);
     assert.deepEqual(requests[0].body.stream_options, { include_usage: true });
 

@@ -100,6 +100,20 @@ pnpm --filter ligule-desktop run build
 
 安装包写入 `desktop/release/`。目标平台的运行时必须在对应平台和架构上准备，不能复用其他平台生成的 `vendor/`。
 
+Linux deb 声明 GBM 与 ALSA 运行库，以及 Electron 的基础桌面依赖。用 `apt install ./<安装包>.deb` 安装以便解析这些依赖；AppImage 仍要求系统提供相应图形和音频运行库。
+
+Core 修改后重新执行 `pnpm run build:core` 和 `pnpm run prepare-runtime`。部署、构建与 `check-runtime.mjs` 会逐文件核对 Core 的 `dist/`、`modes/`、README 和许可证；运行树过时、缺失或多出文件时直接失败。入口文件存在不能代替运行树内容一致。
+
+## 模型目录原生验收
+
+在 Windows 完成 Core、前端与 Electron 编译后运行：
+
+```powershell
+desktop/vendor/node/node.exe desktop/electron/test/run-model-catalog-native.mjs
+```
+
+脚本使用隔离数据目录、真实 Electron 窗口和 Node Host，以及本地 HTTP 协议测试服务，验证模型表格、发现合并、保存校验、模型选择和请求额度；不调用真实模型、不读取个人密钥。证据默认保存在 `desktop/testplace/readings/model-catalog/` 和 `desktop/testplace/shots/model-catalog/`。可用 `--evidence-dir=<绝对路径>` 与 `--shots-dir=<绝对路径>` 显式指定输出位置。
+
 ## 应用图标
 
 [`assets/app-icon.png`](assets/app-icon.png) 是源图。在 Windows 上重新生成桌面图标：

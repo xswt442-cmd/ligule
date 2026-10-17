@@ -60,9 +60,9 @@ npm install -g ligule
 ```toml
 [model]
 services = [
-  { id = "deepseek", name = "DeepSeek", api = "chat-completions", baseURL = "https://api.deepseek.com/v1", apiKeyEnv = "DEEPSEEK_API_KEY", models = ["deepseek-chat"] },
+  { id = "deepseek", name = "DeepSeek", api = "chat-completions", baseURL = "https://api.deepseek.com/v1", apiKeyEnv = "DEEPSEEK_API_KEY", models = ["deepseek-flash"] },
 ]
-selection = { provider = "deepseek", model = "deepseek-chat" }
+selection = { provider = "deepseek", model = "deepseek-flash" }
 ```
 
 每项服务的 `api` 可设为 `chat-completions` 或 `messages`，`models` 列出该服务可选的模型。把密钥放入 `apiKeyEnv` 指定的环境变量；桌面版也可以把密钥保存到操作系统凭据库。非空环境变量优先；Linux 使用 Secret Service，服务不可用时会明确报错。旧的单服务 `model.api`、`model.baseURL` 和 `model.model` 配置仍受支持；这类配置未填写 `apiKeyEnv` 时使用 `LIGULE_API_KEY`。
@@ -71,6 +71,24 @@ selection = { provider = "deepseek", model = "deepseek-chat" }
 
 终端界面使用 `/credentials` 检查当前模型的凭据引用和来源，只显示环境变量、系统凭据或未设置，不显示密钥。`provider_credential_missing` 表示当前引用在这次启动的环境和对应数据根的系统凭据库中均没有密钥。环境变量修改后应重新启动终端程序；也可通过桌面「模型服务」保存到系统凭据库。两端需要使用同一 `LIGULE_HOME` 才能访问同一份凭据。
 
+#### 模型输出预算
+
+桌面「设置 → 模型服务」的每个服务都有模型配置表，可手动添加、删除模型，并填写显示名称、上下文窗口与最大输出 token 数。留空的数值继承现有配置；填写数字时使用完整的正整数，例如 `128000`。显示名称不改变发送到服务的模型标识。支持模型发现的服务可以一键获取并填入目录；已有模型的名称和参数保留，获取列表不会探测 token 上限。目录修改在「保存服务」后生效。
+
+逐模型设置保存在同一服务的可选 `modelSettings` 列表中，`id` 对应 `models` 中的模型标识，例如 `modelSettings = [{ id = "custom-model", name = "我的模型", contextTokens = 128000, outputTokens = 16384 }]`。选中该模型时，其上下文窗口用于压缩判断，输出额度用于实际请求。不同服务中同名模型的设置互相独立；旧的纯模型标识列表仍可使用。
+
+`model.outputTokens` 是每次请求的最大输出 token 预算，未设置时保留默认 8192。可以在 `[model]` 下显式填写 `outputTokens = 16384`；该字段也支持现有 `config.set` 配置接口。预算必须是正整数，并且不能超过已核实的模型上限、显式配置的能力限制或上下文窗口。
+
+默认输出预算也必须满足配置的上下文窗口；如果把上下文设得低于默认预算，需要同时填写不超过该窗口的输出额度。无效配置会明确拒绝，不自动缩小预算。
+
+当前内置的更高上限适用于官方 `https://api.deepseek.com` 端点的 `deepseek-flash`、`deepseek-v4-pro`，同时覆盖 Chat Completions 和 Anthropic 兼容 Messages。其他服务和未经核实的模型在没有逐模型声明时保留 8192 的保守限制；逐模型 `outputTokens` 可声明自定义服务支持的更高额度，请按服务的实际能力填写。声明不能提高已核实的官方模型上限，也不能超过显式能力限制或选中模型的上下文窗口。高于有效上限时报 `provider_output_budget_unsupported`，非法值时报 `provider_output_budget_invalid`，不会静默改成较低预算。模型或服务切换会重新核对限制。
+
+旧的 `model.capabilities.maxOutputTokens` 继续只能降低适配器声明的限制，填写 16384 不会提高原有 8192 上限。需要更高预算时使用 `model.outputTokens`，并核对是否还存在较低的旧能力限制。配置更新在会话轮次边界生效；正在执行的一轮保持原有预算。
+
+模型设置保存前会校验完整的有效配置；拒绝时配置文件保持原样。用户层变更还会单独检查共享默认配置、其他已加载项目和会话显式选择的模型；更高优先级的项目或命令行设置仍然生效。首次设置可以逐字段保存尚未完整的模型配置，以便继续填写其余字段。
+
+两种 API 均支持 `model.capabilities.streaming = false`，请求改为接收普通 JSON 响应。完成判定、输出预算、工具校验和取消规则与流式响应一致；该设置只改变响应传输方式，不改变工具权限或自动重试范围。
+
 ### 会话和输入
 
 终端界面使用 `/sessions` 浏览当前工作区的会话，使用 `/resume <编号> [模式名]` 恢复会话；编号可以使用唯一前缀。桌面版使用左侧栏切换会话；顶部会话菜单提供重命名、归档、取消归档、分支、导出、查看子任务、刷新记录和压缩上下文。
@@ -78,6 +96,22 @@ selection = { provider = "deepseek", model = "deepseek-chat" }
 在输入框中键入 `@` 可以查找当前工作区中的文件。选择候选文件只会把路径放进草稿，不会发送消息。按 Enter 发送；长消息按 Shift+Enter 换行。运行中的会话收到的新消息会排队，按顺序发送。取消本轮也会暂停队列；可以查看队列、继续发送，或把排队消息收回草稿。重连后排队消息会回到草稿，不会自动发送。
 
 桌面版按工作区和会话分别保存草稿与队列；关闭窗口后再次打开仍可恢复。终端界面按工作区和会话保存输入草稿与队列。两种界面共用已发送消息的输入历史。
+
+运行时，终端和桌面状态栏显示 Host 确认的阶段：准备上下文、请求模型、执行工具、压缩上下文、等待审批或输入、收尾。没有新事件的时长从最后一次真实模型输出或工具活动计算，不能据此断定请求已经失败。工具进程结束后，Agent 仍可能继续请求模型；程序不会因为固定的无进展时限自动取消本轮。
+
+模型正常结束且有有效正文或工具调用才算完成。输出被截断、只有推理或空白正文、流未完整结束时，本轮记录为失败；已有部分正文保留，已经执行的工具不自动重做。可以查看记录后明确提交新任务或取消当前任务。
+
+| 错误码 | 含义 |
+| --- | --- |
+| `provider_output_exhausted` | 模型明确报告已到输出预算，结果未完整完成 |
+| `provider_empty_response` | 正常结束但没有有效正文或工具调用 |
+| `provider_stream_incomplete` | 缺少协议结束标记、结束原因或完整分片 |
+| `provider_stream_interrupted` | 响应流读取中断 |
+| `provider_finish_reason_invalid` | 提供方返回了不支持的结束原因 |
+| `provider_tool_call_invalid` | 工具调用缺少有效标识、名称或出现重复标识 |
+| `provider_tool_args_invalid` | 工具参数不是合法 JSON，未执行该批调用 |
+
+HTTP 错误只显示状态码及必要的固定错误分类，不显示网关原始正文或非法工具参数。开始读取成功响应正文前的可重试故障（传输失败及按配置可重试的 429/5xx）遵守已配置次数和退避；响应正文读取开始后的断流不自动重发整个请求。用户主动取消仍记录为 `cancelled`。
 
 ### 审批和设置
 

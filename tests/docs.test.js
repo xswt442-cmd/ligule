@@ -20,6 +20,7 @@ const bilingualPairs = [
   [join(repoRoot, 'tui', 'README.md'), join(repoRoot, 'tui', 'README.en.md')],
   [join(repoRoot, 'desktop', 'README.md'), join(repoRoot, 'desktop', 'README.en.md')],
   [zhPath, enPath],
+  [join(repoRoot, 'docs', 'mcp', 'guide.zh-CN.md'), join(repoRoot, 'docs', 'mcp', 'guide.en.md')],
   [join(repoRoot, 'docs', 'development', 'ARCHITECTURE.zh-cn.md'), join(repoRoot, 'docs', 'development', 'ARCHITECTURE.en.md')],
   [join(repoRoot, 'docs', 'development', 'GLOSSARY.zh-cn.md'), join(repoRoot, 'docs', 'development', 'GLOSSARY.en.md')],
   [join(repoRoot, 'docs', 'development', 'CONTRIBUTING.zh-cn.md'), join(repoRoot, 'docs', 'development', 'CONTRIBUTING.en.md')],
@@ -124,7 +125,7 @@ test('双语手册的多服务 TOML 示例相同且符合实际配置格式', ()
   assert.deepEqual(resolveModel(zh.model), {
     api: 'chat-completions',
     baseURL: 'https://api.deepseek.com/v1',
-    model: 'deepseek-chat',
+    model: 'deepseek-flash',
     apiKeyEnv: 'DEEPSEEK_API_KEY',
     services: zh.model.services,
     selection: zh.model.selection,

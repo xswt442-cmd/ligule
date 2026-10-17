@@ -5,6 +5,7 @@
   "description": "Ligule Electron desktop application",
   "homepage": "https://github.com/xswt442-cmd/ligule#readme",
   "main": "electron/dist/main.js",
+  "files": ["package.json"],
   "scripts": {
     "prepare-runtime": "node ./fetch-runtime.mjs",
     "dev": "node ./dev.mjs",

@@ -267,11 +267,7 @@ test('a mode narrows the capability tools and cannot reach the disclosure entry'
         model: 'test-model',
         async *stream(request) {
           requests.push(request);
-          yield { type: 'message_start', message: { usage: {} } };
-          yield { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } };
-          yield { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } };
-          yield { type: 'content_block_stop', index: 0 };
-          yield { type: 'message_stop' };
+          yield { type: 'text', text: 'ok' };
         },
       };
       const pair = createMemoryConnectionPair();

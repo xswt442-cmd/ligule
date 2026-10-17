@@ -26,7 +26,7 @@ export type WriteRequest = {
 /** 一个可写字段：落在哪一条路径、值按什么形状收。 */
 export type EditableField = {
   readonly path: readonly [string, string];
-  readonly kind: 'string' | 'enum' | 'url' | 'envName' | 'rules' | 'services' | 'selection';
+  readonly kind: 'string' | 'enum' | 'url' | 'envName' | 'rules' | 'services' | 'selection' | 'positiveInteger';
   readonly oneOf?: readonly string[];
 };
 
@@ -38,6 +38,7 @@ export const EDITABLE: Readonly<Record<string, EditableField>> = {
   'model.apiKeyEnv': { path: ['model', 'apiKeyEnv'], kind: 'envName' },
   'model.services': { path: ['model', 'services'], kind: 'services' },
   'model.selection': { path: ['model', 'selection'], kind: 'selection' },
+  'model.outputTokens': { path: ['model', 'outputTokens'], kind: 'positiveInteger' },
   'policy.mode': { path: ['policy', 'mode'], kind: 'enum', oneOf: ['ask', 'auto', 'never'] },
   'policy.rules': { path: ['policy', 'rules'], kind: 'rules' },
 };
@@ -51,6 +52,12 @@ export function editableField(field: unknown): EditableField {
 
 /** 值先按字段的形状收下来，再交回一份 TOML 写法与一份读回来核对要用的值。 */
 export function encodeValue(field: EditableField, value: unknown): { literal: string; value: unknown } {
+  if (field.kind === 'positiveInteger') {
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+      throw new KernelError('config_field_value', { detail: 'takes a positive safe integer' });
+    }
+    return { literal: String(value), value };
+  }
   if (field.kind === 'services') {
     const services = modelServices(value);
     return { literal: servicesLiteral(services), value: services };
@@ -311,6 +318,7 @@ export async function readConfigLayer(file: string): Promise<{ version: string; 
 export async function writeConfigField(
   file: string,
   request: WriteRequest,
+  validate?: (candidate: Record<string, unknown>) => void | Promise<void>,
 ): Promise<{ version: string; created: boolean; rules?: PolicyRule[] }> {
   const definition = editableField(request.field);
   if (typeof request.version !== 'string') throw new KernelError('config_field_value', { detail: 'the version read from that file is required' });
@@ -373,6 +381,7 @@ export async function writeConfigField(
         throw new KernelError('config_edit_verify_failed', { detail: `${definition.path.join('.')} reads back as ${JSON.stringify(landed)}` });
       }
     }
+    await validate?.(parsed);
     const handle = await open(temporary, 'wx', mode ?? 0o600);
     temporaryCreated = true;
     try {

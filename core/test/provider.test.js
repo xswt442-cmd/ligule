@@ -6,7 +6,7 @@ import { setImmediate } from 'node:timers';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
-  capabilitiesOf, createConfig, createKernel, createLoop, createMessagesProvider, createSessionLog,
+  capabilitiesOf, createConfig, createKernel, createLoop, createMessagesProvider, createChatCompletionsProvider, createSessionLog,
   DEFAULT_RETRY, MESSAGES_CAPABILITIES, readTool,
 } from '../dist/index.js';
 import { fetchablePort, listenFetchable } from './helpers/port.js';
@@ -15,7 +15,15 @@ const API_KEY_ENV = 'LIGULE_TEST_API_KEY';
 const FAST_RETRY = { ...DEFAULT_RETRY, baseDelayMs: 1 };
 
 function sseBody(events) {
-  return events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join('');
+  const shaped = events.map((event) => ({ ...event }));
+  const stopIndex = shaped.findIndex((event) => event.type === 'message_stop');
+  if (stopIndex >= 0) {
+    const reason = shaped.some((event) => event.content_block?.type === 'tool_use') ? 'tool_use' : 'end_turn';
+    const delta = shaped.find((event) => event.type === 'message_delta');
+    if (delta) delta.delta = { ...delta.delta, stop_reason: delta.delta?.stop_reason ?? reason };
+    else shaped.splice(stopIndex, 0, { type: 'message_delta', delta: { stop_reason: reason } });
+  }
+  return shaped.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join('');
 }
 
 const EMPTY_TURN = [{ type: 'message_start', message: { usage: {} } }, { type: 'message_stop' }];
@@ -55,6 +63,14 @@ function provider(baseUrl, extra = {}) {
   return createMessagesProvider({ baseUrl, model: 'test-model', apiKeyEnv: API_KEY_ENV, retry: FAST_RETRY, ...extra });
 }
 
+function chatProvider(baseUrl, extra = {}) {
+  return createChatCompletionsProvider({ baseUrl: `${baseUrl}/v1`, model: 'test-model', apiKeyEnv: API_KEY_ENV, retry: FAST_RETRY, ...extra });
+}
+
+function chatSse(frames, done = true) {
+  return `${frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join('')}${done ? 'data: [DONE]\n\n' : ''}`;
+}
+
 test('a tool call is assembled while the stream is still arriving', async () => {
   const turn = [
     { type: 'message_start', message: { usage: {} } },
@@ -88,6 +104,7 @@ test('a tool call is assembled while the stream is still arriving', async () => 
       { type: 'text', text: 'let me ' },
       { type: 'text', text: 'look' },
       { type: 'tool-call', id: 'call_1', name: 'read', args: { path: 'note.txt' } },
+      { type: 'finish', reason: 'tool_calls' },
     ]);
     assert.equal(requests.length, 1);
     assert.equal(requests[0].url, '/v1/messages');
@@ -128,6 +145,7 @@ test('a reasoning block becomes reasoning events while the answer stays separate
     assert.deepEqual(await collect(provider(baseUrl).stream({ system: '', tools: [], messages: [] })), [
       { type: 'reasoning', text: 'the file is one line' },
       { type: 'text', text: 'reading it' },
+      { type: 'finish', reason: 'stop' },
     ]);
   });
 });
@@ -164,7 +182,7 @@ test('a content block type nobody named is still refused', async () => {
   }, async (baseUrl) => {
     await assert.rejects(
       collect(provider(baseUrl).stream({ system: '', tools: [], messages: [] })),
-      (error) => error.code === 'provider_content_unsupported' && /audio/.test(error.detail),
+      (error) => error.code === 'provider_content_unsupported' && error.detail === 'unsupported content block type',
     );
   });
 });
@@ -229,7 +247,7 @@ test('a retryable status is retried up to the boundary and a non-retryable one i
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.end(sseBody(EMPTY_TURN));
   }, async (baseUrl, requests) => {
-    assert.deepEqual(await collect(provider(baseUrl).stream({})), []);
+    assert.deepEqual(await collect(provider(baseUrl).stream({})), [{ type: 'finish', reason: 'stop' }]);
     assert.equal(requests.length, 3);
   });
 
@@ -239,7 +257,7 @@ test('a retryable status is retried up to the boundary and a non-retryable one i
   }, async (baseUrl, requests) => {
     await assert.rejects(
       () => collect(provider(baseUrl, { retry: { ...FAST_RETRY, maxAttempts: 2 } }).stream({})),
-      (error) => error.code === 'provider_http_error' && error.detail.startsWith('503'),
+      (error) => error.code === 'provider_http_error' && error.detail === 'HTTP 503',
     );
     assert.equal(requests.length, 2, '尝试次数不超过定下的边界');
   });
@@ -259,6 +277,8 @@ test('a tool call whose arguments are not valid JSON reports a stable code', asy
     { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'call_1', name: 'read' } },
     { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"path":' } },
     { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+    { type: 'message_stop' },
   ];
   await withEndpoint(async (attempt, response) => {
     response.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -266,8 +286,70 @@ test('a tool call whose arguments are not valid JSON reports a stable code', asy
   }, async (baseUrl) => {
     await assert.rejects(
       () => collect(provider(baseUrl).stream({})),
-      (error) => error.code === 'provider_tool_args_invalid' && error.detail === '{"path":',
+      (error) => error.code === 'provider_tool_args_invalid' && error.detail !== '{"path":' && error.cause === undefined,
     );
+  });
+});
+
+test('Messages completion reason is explicit and output exhaustion is distinct', async () => {
+  const makeTurn = (reason) => [
+    { type: 'message_start', message: { usage: {} } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: reason } },
+    { type: 'message_stop' },
+  ];
+  await withEndpoint(async (_attempt, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(sseBody(makeTurn('end_turn')));
+  }, async (baseUrl) => {
+    assert.deepEqual((await collect(provider(baseUrl).stream({}))).at(-1), { type: 'finish', reason: 'stop' });
+  });
+  await withEndpoint(async (_attempt, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(sseBody(makeTurn('max_tokens')));
+  }, async (baseUrl) => {
+    assert.deepEqual((await collect(provider(baseUrl).stream({}))).at(-1), { type: 'finish', reason: 'max_tokens' });
+  });
+});
+
+test('Chat Completions exposes protocol completion and lets length override partial tool JSON', async () => {
+  const normal = [
+    { choices: [{ index: 0, delta: { content: 'answer' }, finish_reason: null }] },
+    { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+  ];
+  await withEndpoint(async (_attempt, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(chatSse(normal));
+  }, async (baseUrl) => {
+    assert.deepEqual(await collect(chatProvider(baseUrl).stream({})), [
+      { type: 'text', text: 'answer' },
+      { type: 'finish', reason: 'stop' },
+    ]);
+  });
+
+  const exhausted = [
+    { choices: [{ index: 0, delta: { content: 'partial', tool_calls: [{ index: 0, id: 'call_1', function: { name: 'read', arguments: '{"path":' } }] }, finish_reason: null }] },
+    { choices: [{ index: 0, delta: {}, finish_reason: 'length' }] },
+  ];
+  await withEndpoint(async (_attempt, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(chatSse(exhausted));
+  }, async (baseUrl) => {
+    assert.deepEqual(await collect(chatProvider(baseUrl).stream({})), [
+      { type: 'text', text: 'partial' },
+      { type: 'finish', reason: 'length' },
+    ]);
+  });
+});
+
+test('Chat Completions requires its DONE terminator', async () => {
+  await withEndpoint(async (_attempt, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(chatSse([{ choices: [{ index: 0, delta: { content: 'partial' }, finish_reason: 'stop' }] }], false));
+  }, async (baseUrl) => {
+    await assert.rejects(() => collect(chatProvider(baseUrl).stream({})), (error) => error.code === 'provider_stream_incomplete');
   });
 });
 
@@ -299,7 +381,7 @@ test('a stream that ends inside a frame is reported instead of dropped', async (
   }, async (baseUrl) => {
     await assert.rejects(
       () => collect(provider(baseUrl).stream({})),
-      (error) => error.code === 'provider_stream_invalid' && error.detail === 'the stream ended inside a frame',
+      (error) => error.code === 'provider_stream_incomplete',
     );
   });
 });
@@ -437,6 +519,7 @@ test('the usage the endpoint reports comes back as one event at the end', async 
     assert.deepEqual(await collect(provider(baseUrl).stream({ system: '', tools: [], messages: [] })), [
       { type: 'text', text: 'hi' },
       { type: 'usage', input: 1500, output: 7 },
+      { type: 'finish', reason: 'stop' },
     ]);
   });
 });

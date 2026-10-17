@@ -28,6 +28,9 @@ This guide is for contributors reading or changing the repository. It explains c
 flowchart LR
   CLI[CLI] -->|in process| Host[Node Host]
   TUI[React and Ink] -->|in memory protocol| Host
+  External[Local MCP client] -->|stdio MCP| MCP[MCP adapter]
+  MCP --> Control[Process-local control]
+  Control --> Host
   Web[React desktop UI] <-->|sandboxed Preload and IPC| Main[Electron Main]
   Main <-->|newline-delimited frames| Child[Node Host process]
   Child --> HostLogic[Host and kernel]
@@ -44,6 +47,10 @@ flowchart LR
 ```
 
 `ligule run` and the default `ligule` invocation (or the compatible `ligule tui` command) create a Host in the Node process that owns the interface. The TUI sends protocol messages over an in-memory connection. The desktop frontend communicates with Electron Main through a fixed sandboxed Preload API; Main forwards protocol frames to the independent Node Host and manages windows, native interactions, and process lifecycle. The Host owns sessions, project state, policy, and model requests. See the [CLI](../../tui/src/cli.ts), [TUI adapter](../../tui/src/tui/start.ts), [frame transport](../../core/src/host/connection.ts), [Electron IPC](../../desktop/electron/ipc.ts), and [Preload API](../../desktop/electron/preload.ts).
+
+The [project environment loader](../../core/src/host/environment.ts) supplies configuration layers and extension sources to CLI and Desktop Host entries. The [provider factory](../../core/src/host/provider.ts) validates the selected model wire format, capabilities and retry settings; an unconfigured Host accepts settings requests and rejects model runs explicitly. The [session mode transaction](../../core/src/host/session-mode.ts) owns restriction installation, prompt fragments, rollback, and the persisted mode fact. Host keeps session locks, active turns, routing and resource cleanup. TUI record projection lives in [transcript.ts](../../tui/src/tui/transcript.ts); Desktop's [stream buffer](../../desktop/frontend/src/session-stream.ts) separates partial output by session.
+
+`ligule mcp-server --project <absolute-root>` exposes seven local control tools through the [MCP adapter](../../core/src/host/mcp-server.ts). The [control facade](../../core/src/host/control.ts) calls the same Host, tracks process-local operations, scopes access to opened sessions in the authorized project, and denies approval requests. Disconnect cancels runs and releases session locks. Persistent recovery uses Session JSONL; operation IDs are not durable. See the [MCP user guide](../mcp/guide.en.md).
 
 ### Kernel, plugins, tools, and capabilities
 
@@ -63,6 +70,12 @@ The [Agent Loop](../../core/src/kernel/loop.ts) performs one user turn and any m
 6. Append one terminal turn event for completion, cancellation, or failure.
 
 The [model adapters](../../core/src/model/) implement the supported HTTP message formats. The Host selects a provider from the effective model service and reads credentials only when making a request.
+
+HTTP adapters require their protocol terminator and a supported finish reason. They emit a `finish` event; the Loop rejects output exhaustion and empty responses before declaring completion. Complete tool-call batches are parsed and schema-checked before execution. Schema refusals become tool results that the model can handle; invalid provider JSON or an incomplete stream fails the turn without replaying tools. Compaction summaries apply the same completion checks before writing a checkpoint.
+
+`model.outputTokens` is the request budget, distinct from legacy capability reductions. Services retain their compatible string `models` list and optionally attach `modelSettings` entries keyed by model ID. The selected entry supplies its display name, context window, and request output budget. A per-model output declaration can raise the conservative default for an unknown endpoint; it cannot raise verified endpoint/model ceilings or explicit capability reductions. Legacy configurations without that declaration retain their conservative ceiling. The [budget resolver](../../core/src/model/output-budget.ts) validates the effective limits; the same selected context window controls Host compaction. Provider reconstruction and session generation adoption keep changes at turn boundaries.
+
+Host run progress is ephemeral, scoped to one active session/run, and derived from Loop, compaction, and approval/input events. `status.get` and `progress` notifications expose phase/timestamps/counts; TUI and Desktop display that shared state. Activity notifications are coalesced while the Host snapshot retains actual event times. Terminal cleanup clears progress. No progress heartbeat is written into Session JSONL, and no default inactivity timer cancels runs.
 
 ### One Agent Loop turn
 
@@ -141,6 +154,8 @@ flowchart TD
 ```
 
 Configuration layers are combined into a snapshot while the Host creates a project environment. The session JSONL is the source for messages and tool outcomes. Checkpoints and spill files contain derived data that can be validated or retrieved. History browsing and export read the record and available sidecars; a UI cache is not the source of session facts. The user data root and project workspace separately own user-level data and project attribution.
+
+Configuration edits hold the target file lock through version checking, TOML editing, effective-configuration validation, and atomic replacement. The Host validates model changes before persistence, including shared defaults without project overrides, shared user changes in other loaded projects, and explicit session model selections. Rejected edits do not modify the file. Valid changes still apply at the existing session turn boundary. Both streaming SSE and non-streaming JSON adapters emit the same completion, usage, text, reasoning, and tool-call events into the Loop.
 
 ### Host protocol and clients
 

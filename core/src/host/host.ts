@@ -9,7 +9,7 @@ import { KernelError } from '../kernel/error.js';
 import { createKernel, type Kernel } from '../kernel/kernel.js';
 import { loadAssembly, type Assembly, type Plugin } from '../kernel/assembly.js';
 import { loadExtensions, type ExtensionDiagnostic } from '../kernel/extensions.js';
-import { applyMode, DEFAULT_MODE, loadMode, type ModeDirectories, type ModeFile } from '../kernel/modes.js';
+import { DEFAULT_MODE, loadMode, type ModeDirectories, type ModeFile } from '../kernel/modes.js';
 import { readRegistry, registerWorkspace, setDefaultWorkspace, workspaceIdentity } from '../kernel/workspace.js';
 import { historyPathOf, loadHistory, rememberHistory } from '../kernel/input-history.js';
 import { parsePrefsJson, prefsPathOf, readPrefs, savePrefs } from '../kernel/desktop-prefs.js';
@@ -27,6 +27,7 @@ import { branchSession } from '../session/branch.js';
 import { listProjectFiles } from './paths.js';
 import { branchSessionId, exportMarkdown, writeExport, type ExportRecord } from './export.js';
 import { createCompaction } from '../session/compaction.js';
+import { usageEvent } from '../session/usage.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
 import { foldLabel } from '../session/format.js';
 import { SPILL_NAME, resultLimit } from '../kernel/result.js';
@@ -34,7 +35,7 @@ import { limitsOf } from '../capability/limits.js';
 import { loadInstructions, DEFAULT_INSTRUCTION_BYTES } from '../capability/instructions.js';
 import { SKILL_METADATA_BUDGET_BYTES, discoverSkills, formatSkillCatalog, skillDirectories } from '../kernel/skills.js';
 import { discoverTemplates, expandTemplate, findTemplate, parseInvocation, templateDirectories } from '../kernel/templates.js';
-import { createLoop, DEFAULT_LOOP_LIMITS, type LoopResult } from '../kernel/loop.js';
+import { createLoop, DEFAULT_LOOP_LIMITS, type LoopCompaction, type LoopProgressEvent, type LoopProgressPhase, type LoopResult } from '../kernel/loop.js';
 import { minimalPlugin } from '../tools/minimal.js';
 import { networkPlugin } from '../tools/network.js';
 import { createSkillPlugin } from '../tools/skill.js';
@@ -42,14 +43,12 @@ import { createMcpPlugin } from '../tools/mcp.js';
 import { createSubagentPlugin } from '../tools/subagent.js';
 import { createAskUserPlugin } from '../tools/ask-user.js';
 import { createMcpRegistry, mcpServerConfigs, type McpRegistry } from '../capability/mcp.js';
-import { createMessagesProvider } from '../model/messages.js';
-import { createChatCompletionsProvider } from '../model/chat-completions.js';
 import { discoverModels } from '../model/discovery.js';
-import { apiRoot, DEFAULT_RETRY, type ProviderCapabilities, type RetryPolicy } from '../model/http.js';
-import type { ModelProvider, ModelRequest, ProviderEvent } from '../kernel/loop.js';
+import { apiRoot } from '../model/http.js';
+import type { ModelRequest, ProviderEvent } from '../kernel/loop.js';
 import { createConnection, type Connection, type HostRequest } from './connection.js';
 import { APPROVAL_METHOD, QUESTION_METHOD, isApproved, validateCall, type HostMethodParams } from './protocol.js';
-import { type ConfigSnapshot } from '../kernel/config.js';
+import { createConfig, type ConfigSnapshot } from '../kernel/config.js';
 import type { LoggerBackend } from '../kernel/log.js';
 import type { LoopLimits } from '../kernel/loop.js';
 import type { LoadedLayers, createConfigStore } from '../kernel/config-store.js';
@@ -57,6 +56,9 @@ import type { SkillRegistry } from '../kernel/skills.js';
 import type { TemplateRegistry } from '../kernel/templates.js';
 import type { PolicyRule } from '../kernel/config-edit.js';
 import type { ToolDefinition } from '../kernel/kernel.js';
+import { adoptSessionMode, type SessionModeState } from './session-mode.js';
+import { providerFromConfig, hostProviderFromConfig, type HostProvider } from './provider.js';
+export { providerFromConfig, hostProviderFromConfig } from './provider.js';
 
 interface HostConfigSnapshot extends ConfigSnapshot {
   readonly boundary?: string;
@@ -67,14 +69,6 @@ interface HostConfigSnapshot extends ConfigSnapshot {
   readonly policy?: Record<string, unknown>;
   readonly prompt?: { readonly static?: string };
   readonly instructions?: Record<string, unknown> & { readonly maxBytes?: number; readonly current?: string };
-}
-
-interface HostProvider extends ModelProvider {
-  readonly name: string;
-  readonly model: string | null;
-  readonly pending?: true;
-  readonly capabilities?: ProviderCapabilities;
-  withModel(model: string): HostProvider;
 }
 
 interface PolicyConfig {
@@ -89,7 +83,7 @@ interface HostExtensions {
   readonly installedDirectory?: string;
 }
 
-interface EnvironmentSeed {
+export interface EnvironmentSeed {
   readonly config: HostConfigSnapshot;
   readonly provider: HostProvider;
   readonly policy?: PolicyConfig;
@@ -153,11 +147,7 @@ interface AdoptionResult {
   readonly failure?: { code: string; detail?: string };
 }
 
-interface ModeState {
-  file: ModeFile | undefined;
-  tools: string[];
-  undo(): void;
-}
+type ModeState = SessionModeState;
 
 interface HostSessionBase {
   readonly id: string;
@@ -170,8 +160,24 @@ interface HostSessionBase {
   pendingGeneration?: SessionGeneration;
   pending?: ModeFile;
   running?: AbortController;
+  compaction?: ReturnType<typeof createCompaction> | null;
+  progress?: HostRunProgress;
+  progressId?: string;
+  waitingForApproval?: number;
+  waitingForInput?: number;
+  progressNotificationAt?: number;
   operation?: Promise<unknown>;
   adopt(file: ModeFile): Promise<void>;
+}
+
+interface HostRunProgress {
+  readonly phase: LoopProgressPhase;
+  readonly startedAt: number;
+  readonly phaseStartedAt: number;
+  readonly lastProgressAt: number;
+  readonly modelCalls: number;
+  readonly toolCalls: number;
+  readonly outputTokens: number | null;
 }
 
 interface HostSessionState extends HostSessionBase {
@@ -182,7 +188,8 @@ interface HostSessionState extends HostSessionBase {
   readonly extensions: Awaited<ReturnType<typeof loadExtensions>>;
   readonly templates: TemplateRegistry;
   readonly loop: ReturnType<typeof createLoop>;
-  readonly compaction: ReturnType<typeof createCompaction> | null;
+  compaction: ReturnType<typeof createCompaction> | null;
+  readonly rebuildCompaction: (model: Record<string, unknown>) => ReturnType<typeof createCompaction> | null;
 }
 
 export interface Host {
@@ -310,81 +317,6 @@ function exportRecordOf(event: SessionEvent): ExportRecord | undefined {
   return record;
 }
 
-// 重试边界也在配置里；形状在这里就查：非整数的 maxAttempts 让「第几次了」比不出大小，
-// 每次传输失败就悄悄变成不重试，而看不出为什么不重试。
-function retryOf(model: Record<string, unknown>): RetryPolicy {
-  if (model.retry !== undefined && !isRecord(model.retry)) {
-    throw new KernelError('host_retry_invalid', { detail: 'retry must be an object' });
-  }
-  const retry = { ...DEFAULT_RETRY, ...(isRecord(model.retry) ? model.retry : {}) };
-  const positiveInteger = (value: unknown, key: 'maxAttempts' | 'baseDelayMs'): number => {
-    if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
-      throw new KernelError('host_retry_invalid', { detail: `${key} must be an integer of at least 1` });
-    }
-    return value;
-  };
-  const boolean = (value: unknown, key: 'retry429' | 'retry5xx' | 'retryTransport'): boolean => {
-    if (typeof value !== 'boolean') throw new KernelError('host_retry_invalid', { detail: `${key} must be a boolean` });
-    return value;
-  };
-  return Object.freeze({
-    maxAttempts: positiveInteger(retry.maxAttempts, 'maxAttempts'),
-    baseDelayMs: positiveInteger(retry.baseDelayMs, 'baseDelayMs'),
-    retry429: boolean(retry.retry429, 'retry429'),
-    retry5xx: boolean(retry.retry5xx, 'retry5xx'),
-    retryTransport: boolean(retry.retryTransport, 'retryTransport'),
-  });
-}
-
-// 服务地址与模型名从配置快照读，凭据只在发请求时从环境变量读（D13）。
-// 线上形状由 `model.api` 指名（D31）：不按地址猜，猜错的请求体只会换来一句说不出原因的 400。
-// 能力项只能把该种形状声明的上限调低，那一条判据由各自的声明把守，这里只负责把配置送到它面前。
-export function providerFromConfig(config: ConfigSnapshot): HostProvider {
-  if (!isRecord(config.model)) throw new KernelError('host_model_config_missing', { detail: 'config.model.baseURL and config.model.model' });
-  const model = resolveModel(config.model);
-  const api = model.api;
-  if (api !== 'messages' && api !== 'chat-completions') {
-    throw new KernelError('provider_api_form_required', { detail: 'model.api must be "messages" or "chat-completions"' });
-  }
-  const apiKeyEnv = model.apiKeyEnv;
-  if (apiKeyEnv !== undefined && typeof apiKeyEnv !== 'string') {
-    throw new KernelError('provider_credential_missing', { detail: 'model.apiKeyEnv must be a string' });
-  }
-  const capabilities = model.capabilities;
-  if (capabilities !== undefined && !isRecord(capabilities)) {
-    throw new KernelError('provider_capability_invalid', { detail: 'model.capabilities must be a table' });
-  }
-  const options = {
-    baseUrl: model.baseURL,
-    model: model.model,
-    ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }),
-    ...(capabilities === undefined ? {} : { capabilities }),
-    retry: retryOf(model),
-  };
-  if (api === 'messages') return createMessagesProvider(options);
-  return createChatCompletionsProvider(options);
-}
-
-/** 缺那几格时宿主先立起来的这一枚：形状与真提供方一样，进程收得住请求，设置的「模型与端点」那一栏才写得进去（U59）。
- *  真要发一轮时把缺的字段原样说出去；写完那几格由 `adoptGeneration` 换上真那一份，这一枚就退场。 */
-function pendingProvider(error: KernelError): HostProvider {
-  const refuse = () => {
-    throw error;
-  };
-  return { name: 'pending', model: null, pending: true, withModel: refuse, stream: async function* () { refuse(); } };
-}
-
-/** 宿主这一路用的提供方：不像命令行那样当场把进程带走。命令行与终端那两路仍旧当场报错——那是人坐在终端前，越早说越好。 */
-export function hostProviderFromConfig(config: ConfigSnapshot): HostProvider {
-  try {
-    return providerFromConfig(config);
-  } catch (error) {
-    if (!['host_model_config_missing', 'provider_api_form_required', 'provider_base_url_required', 'provider_model_required', 'model_service_not_found', 'model_not_available'].includes(errorCode(error) ?? '')) throw error;
-    if (!(error instanceof KernelError)) throw error;
-    return pendingProvider(error);
-  }
-}
-
 // 会话记录落在哪儿由 `core/src/session/list.js` 那一处说:同一件事在两处各写一次,列表与宿主就会读到两个目录(D73)。
 // 循环的上限来自配置文件，形状在这里就查：只写其中一项时另一项照默认值补，
 // 缺值传下去会让「迭代上限」变成 undefined，那一轮一次都不跑，报出来的码还说不出为什么。
@@ -402,15 +334,16 @@ function loopLimitsOf(config: HostConfigSnapshot): LoopLimits {
   };
 }
 
-// 压缩的两条线（D75、U43）：窗口那一格必须写出来，两条比例才有意义——窗口是模型事实，不是策略参数。
-// 没写就整条不启用（交回 undefined，宿主不给这一份会话挂压缩），写了但形状不对当场报出去，
+// 压缩的两条线（D75、U43）：窗口优先取选中模型的声明值，否则取 limits.contextTokens；窗口是模型事实，不是策略参数。
+// 两处都没写就不启用（交回 undefined，宿主不给这一份会话挂压缩），写了但形状不对当场报出去，
 // 因为一条 NaN 的线会让每一次请求都算不出「超没超」，看上去是压缩从不触发。
 // 保留量还必须严格小于压力线，否则压完还是越线，而看不出来为什么一直在压（dsh 同一条约束）。
-export function compactionLimitsOf(config: HostConfigSnapshot) {
+export function compactionLimitsOf(config: HostConfigSnapshot, selectedContextTokens?: unknown) {
   const limits = limitsOf(config);
-  if (limits.contextTokens === undefined) return undefined;
-  if (typeof limits.contextTokens !== 'number' || !Number.isFinite(limits.contextTokens) || limits.contextTokens <= 0) {
-    throw new KernelError('host_compaction_limits_invalid', { detail: `contextTokens must be a positive number, got ${JSON.stringify(limits.contextTokens)}` });
+  const contextTokens = selectedContextTokens ?? limits.contextTokens;
+  if (contextTokens === undefined) return undefined;
+  if (typeof contextTokens !== 'number' || !Number.isSafeInteger(contextTokens) || contextTokens <= 0) {
+    throw new KernelError('host_compaction_limits_invalid', { detail: `contextTokens must be a positive safe integer, got ${JSON.stringify(contextTokens)}` });
   }
   const compactThresholdRatio = limits.compactThresholdRatio;
   const compactRetainRatio = limits.compactRetainRatio;
@@ -426,7 +359,7 @@ export function compactionLimitsOf(config: HostConfigSnapshot) {
     });
   }
   return {
-    contextTokens: limits.contextTokens,
+    contextTokens,
     compactThresholdRatio,
     compactRetainRatio,
     resultBytes: resultLimit(config),
@@ -442,10 +375,12 @@ function observedProvider(provider: HostProvider, onDelta: (event: ProviderEvent
     get model() { return provider.model; },
     get pending() { return provider.pending; },
     get capabilities() { return provider.capabilities; },
+    get requiresCompletion() { return provider.requiresCompletion; },
+    get outputTokens() { return provider.outputTokens; },
     withModel(model) { return observedProvider(provider.withModel(model), onDelta); },
     async *stream(request: ModelRequest, options?: { readonly signal?: AbortSignal }) {
       for await (const event of provider.stream(request, options)) {
-        onDelta(event);
+        if (event.type !== 'finish') onDelta(event);
         yield event;
       }
     },
@@ -461,8 +396,31 @@ function currentProvider(read: () => HostProvider): HostProvider {
     get model() { return read().model; },
     get pending() { return read().pending; },
     get capabilities() { return read().capabilities; },
+    get requiresCompletion() { return read().requiresCompletion; },
+    get outputTokens() { return read().outputTokens; },
     withModel(model) { return read().withModel(model); },
     stream(request, options) { return read().stream(request, options); },
+  };
+}
+
+function compactionProgressProvider(provider: HostProvider, onProgress: (event: LoopProgressEvent) => void): HostProvider {
+  return {
+    get name() { return provider.name; },
+    get model() { return provider.model; },
+    get pending() { return provider.pending; },
+    get capabilities() { return provider.capabilities; },
+    get requiresCompletion() { return provider.requiresCompletion; },
+    get outputTokens() { return provider.outputTokens; },
+    withModel(model) { return compactionProgressProvider(provider.withModel(model), onProgress); },
+    async *stream(request, options) {
+      onProgress({ kind: 'phase', phase: 'compaction', modelCalls: 0, toolCalls: 0 });
+      for await (const event of provider.stream(request, options)) {
+        if (event.type === 'text' || event.type === 'reasoning' || event.type === 'tool-call') {
+          onProgress({ kind: 'activity', phase: 'compaction', activity: 'model_output', modelCalls: 0, toolCalls: 0 });
+        }
+        yield event;
+      }
+    },
   };
 }
 
@@ -652,22 +610,32 @@ export function createHost({
       if (state.environment !== env) continue;
       const ownGeneration = state.pendingGeneration ?? state.generation;
       if (ownGeneration.explicit === true) {
-        if (key !== 'services' || modelSelectionOf(ownGeneration.model)?.provider === 'legacy') continue;
-        const ownModel: Record<string, unknown> = { ...ownGeneration.model, services: effective };
+        const selection = modelSelectionOf(ownGeneration.model);
+        if (key === 'services' && selection?.provider === 'legacy') continue;
+        if (key !== 'services' && key !== 'outputTokens') continue;
+        const ownModel: Record<string, unknown> = key === 'services'
+          ? { ...ownGeneration.model, services: effective }
+          : { ...ownGeneration.model, outputTokens: effective };
         let ownProvider: HostProvider;
         try { ownProvider = deriveProvider({ ...env.config, model: ownModel }); }
         catch (error) { sessionFailure = { code: errorCode(error) ?? 'provider_rebuild_failed' }; continue; }
         const previous = resolveModel(ownGeneration.model);
         const next = resolveModel(ownModel);
-        if (['api', 'baseURL', 'apiKeyEnv', 'model'].every((field) => previous[field] === next[field])) continue;
+        if (['api', 'baseURL', 'apiKeyEnv', 'model', 'outputTokens', 'serviceOutputLimit', 'serviceContextTokens'].every((field) => previous[field] === next[field])) continue;
         const generation: SessionGeneration = { provider: ownProvider, model: ownModel, explicit: true };
-        if (state.running === undefined) { state.generation = generation; state.pendingGeneration = undefined; applies.push({ sessionId: id, when: 'now' }); }
+        if (state.running === undefined) {
+          state.generation = generation;
+          state.pendingGeneration = undefined;
+          state.compaction = state.rebuildCompaction(generation.model);
+          applies.push({ sessionId: id, when: 'now' });
+        }
         else { state.pendingGeneration = generation; applies.push({ sessionId: id, when: 'round' }); }
         continue;
       }
       if (state.running === undefined) {
         state.generation = { provider, model };
         state.pendingGeneration = undefined;
+        state.compaction = state.rebuildCompaction(model);
         applies.push({ sessionId: id, when: 'now' });
       } else {
         state.pendingGeneration = { provider, model };
@@ -798,28 +766,118 @@ export function createHost({
     return { sessionId: state.id, ...foldLabel(await state.session.read()) };
   }
 
-  async function execute<T>(state: HostSessionState, action: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  function publishProgress(state: HostSessionState, connection: HostClientConnection): void {
+    state.progressNotificationAt = Date.now();
+    connection.notify({ notify: 'progress', sessionId: state.id, progress: state.progress ?? null });
+  }
+
+  function changeProgressPhase(state: HostSessionState, connection: HostClientConnection, phase: LoopProgressPhase): void {
+    if (state.progress === undefined || state.progress.phase === phase) return;
+    state.progress = { ...state.progress, phase, phaseStartedAt: Date.now() };
+    publishProgress(state, connection);
+  }
+
+  function observeLoopProgress(
+    state: HostSessionState,
+    connection: HostClientConnection,
+    runId: string,
+    event: LoopProgressEvent,
+  ): void {
+    if (state.progress === undefined || state.progressId !== runId) return;
+    const now = Date.now();
+    const phase = event.kind === 'phase' ? event.phase : state.progress.phase;
+    const phaseChanged = phase !== state.progress.phase;
+    state.progress = {
+      ...state.progress,
+      phase,
+      ...(phaseChanged ? { phaseStartedAt: now } : {}),
+      ...(event.kind === 'activity' ? { lastProgressAt: now } : {}),
+      modelCalls: Math.max(state.progress.modelCalls, event.modelCalls),
+      toolCalls: Math.max(state.progress.toolCalls, event.toolCalls),
+    };
+    if (event.kind === 'phase' || phaseChanged || event.activity === 'tool'
+      || now - (state.progressNotificationAt ?? 0) >= 100) publishProgress(state, connection);
+  }
+
+  function beginProgress(
+    state: HostSessionState,
+    connection: HostClientConnection,
+    phase: LoopProgressPhase,
+  ): { readonly id: string; readonly report: (event: LoopProgressEvent) => void } {
+    const now = Date.now();
+    const id = randomUUID();
+    state.progressId = id;
+    state.progress = {
+      phase,
+      startedAt: now,
+      phaseStartedAt: now,
+      lastProgressAt: now,
+      modelCalls: 0,
+      toolCalls: 0,
+      outputTokens: state.generation.provider.outputTokens ?? null,
+    };
+    state.waitingForApproval = 0;
+    state.waitingForInput = 0;
+    publishProgress(state, connection);
+    return { id, report: (event) => observeLoopProgress(state, connection, id, event) };
+  }
+
+  function updateWaitingForUser(
+    state: HostSessionState,
+    connection: HostClientConnection,
+    waiting: boolean,
+    kind: 'approval' | 'input',
+  ): void {
+    const field = kind === 'approval' ? 'waitingForApproval' : 'waitingForInput';
+    state[field] = Math.max(0, (state[field] ?? 0) + (waiting ? 1 : -1));
+    if ((state.waitingForInput ?? 0) > 0) changeProgressPhase(state, connection, 'awaiting_input');
+    else if ((state.waitingForApproval ?? 0) > 0) changeProgressPhase(state, connection, 'awaiting_approval');
+    else if (state.progress?.phase === 'awaiting_input' || state.progress?.phase === 'awaiting_approval') {
+      changeProgressPhase(state, connection, 'tool_execution');
+    }
+  }
+
+  async function execute<T>(
+    state: HostSessionState,
+    action: (signal: AbortSignal, report: (event: LoopProgressEvent) => void) => Promise<T>,
+    connection: HostClientConnection,
+    initialPhase: LoopProgressPhase = 'preparing',
+  ): Promise<T> {
     if (state.running !== undefined) throw new KernelError('run_already_running', { detail: state.id });
     const controller = new AbortController();
+    const progress = beginProgress(state, connection, initialPhase);
     const settleAsks = (): void => { for (const settle of state.asks) settle(); };
     controller.signal.addEventListener('abort', settleAsks, { once: true });
     state.running = controller;
     const operation = (async (): Promise<T> => {
       try {
-        return await action(controller.signal);
+        return await action(controller.signal, progress.report);
       } finally {
         controller.signal.removeEventListener('abort', settleAsks);
         state.running = undefined;
-        if (state.pending !== undefined) {
-          const next = state.pending;
-          state.pending = undefined;
-          await state.adopt(next);
-        }
-        // 生成参数在整轮收尾之后、下一条输入受理之前采用（方案 7.3 第二行）：这一轮里跑完的循环、压缩与派生体
-        // 用的都是开始时那一份，跑到一半换端点会让一轮里发出过两种请求体，记录也就对不上一次完整的回答。
-        if (state.pendingGeneration !== undefined) {
-          state.generation = state.pendingGeneration;
-          state.pendingGeneration = undefined;
+        changeProgressPhase(state, connection, 'settling');
+        try {
+          if (state.pending !== undefined) {
+            const next = state.pending;
+            state.pending = undefined;
+            await state.adopt(next);
+          }
+          // 生成参数在整轮收尾之后、下一条输入受理之前采用（方案 7.3 第二行）：这一轮里跑完的循环、压缩与派生体
+          // 用的都是开始时那一份，跑到一半换端点会让一轮里发出过两种请求体，记录也就对不上一次完整的回答。
+          if (state.pendingGeneration !== undefined) {
+            state.generation = state.pendingGeneration;
+            state.pendingGeneration = undefined;
+            state.compaction = state.rebuildCompaction(state.generation.model);
+          }
+        } finally {
+          if (state.progressId === progress.id) {
+            state.progress = undefined;
+            state.progressId = undefined;
+            state.waitingForApproval = 0;
+            state.waitingForInput = 0;
+            state.progressNotificationAt = undefined;
+            publishProgress(state, connection);
+          }
         }
       }
     })();
@@ -886,16 +944,22 @@ export function createHost({
   async function readForClient(
     session: SessionLog,
     sessionId: string,
-    { fullResults, limit, before }: { fullResults?: boolean; limit?: number; before?: number } = {},
+    { fullResults, limit, before, at }: { fullResults?: boolean; limit?: number; before?: number; at?: number } = {},
     env: ProjectEnvironment = defaultEnvironment,
   ) {
     const events = await session.read();
     const header = await session.header();
-    // 游标归属那一格要说清它认不认得：不是这一份记录里的事件序号就是失效的游标，不静默当成第一页（E03）。
-    if (before !== undefined && !events.some((event) => event.seq === before)) {
-      throw new KernelError('session_cursor_invalid', { detail: `${sessionId} has no event ${before}` });
+    if (at !== undefined && before !== undefined) {
+      throw new KernelError('protocol_args_invalid', { detail: 'session.read at and before are mutually exclusive' });
     }
-    const page = (before === undefined ? events : events.filter((event) => event.seq < before)).slice(-(limit ?? events.length));
+    // 游标归属那一格要说清它认不认得：不是这一份记录里的事件序号就是失效的游标，不静默当成第一页（E03）。
+    const cursor = at ?? before;
+    if (cursor !== undefined && !events.some((event) => event.seq === cursor)) {
+      throw new KernelError('session_cursor_invalid', { detail: `${sessionId} has no event ${cursor}` });
+    }
+    const page = at !== undefined
+      ? events.filter((event) => event.seq === at)
+      : (before === undefined ? events : events.filter((event) => event.seq < before)).slice(-(limit ?? events.length));
     return {
       sessionId,
       events: fullResults ? await fillSpills(page, env) : page,
@@ -909,7 +973,7 @@ export function createHost({
   // 一次读记录：开着的那一份读它自己的内核，派生支线那一份读它在磁盘上的记录，两个入口不分两种形状。
   // 这一处不读别的磁盘目录：这一次动作的语义是「把我这一份会话的事实拿回来」，不是记录目录的浏览器；
   // 发现历史会话归 sessions，接上别的会话归 session.open。分页与溢出正文的参数原样交给 `readForClient`。
-  async function readRecord(id: string, params: { fullResults?: boolean; limit?: number; before?: number }) {
+  async function readRecord(id: string, params: { fullResults?: boolean; limit?: number; before?: number; at?: number }) {
     const state = sessions.get(id);
     if (state !== undefined) return await readForClient(state.session, id, params, state.environment);
     // 派生支线那一份不在这轮的内核里（跑完就把装配撤了，D71），界面读它用的是这同一次动作（D74）。
@@ -995,6 +1059,7 @@ export function createHost({
           settle = () => resolve(false);
         });
         state.asks.add(settle);
+        updateWaitingForUser(state as HostSessionState, connection, true, 'approval');
         try {
           // 后端那两样只在真有一条命令要判时带上：没有命令文本的调用（读文件一类）不该在答复里多出一个空字段，
           // 否则同一条协议在按行转递的载体上与在进程内的那一种上读到的形状就不一样。
@@ -1014,6 +1079,7 @@ export function createHost({
           ]);
         } finally {
           state.asks.delete(settle);
+          updateWaitingForUser(state as HostSessionState, connection, false, 'approval');
         }
       },
     });
@@ -1053,6 +1119,7 @@ export function createHost({
           settle = () => resolve('cancelled');
         });
         state.asks.add(settle);
+        updateWaitingForUser(state as HostSessionState, connection, true, 'input');
         try {
           const outcome = await Promise.race([
             // 不设等待上限：等人回答不是失败。取消由这一发的 signal 那侧收，请求身份就是那一帧的 id。
@@ -1070,6 +1137,7 @@ export function createHost({
           throw new KernelError('ask_user_host_gone', { detail: `${id}: ${errorMessage(error) ?? String(error)}` });
         } finally {
           state.asks.delete(settle);
+          updateWaitingForUser(state as HostSessionState, connection, false, 'input');
         }
       },
     })];
@@ -1140,56 +1208,15 @@ export function createHost({
     // 任一步校验或装配失败都保留旧模式，避免出错后工具清单意外变宽。
     // 记录里这一条是给「两条用户输入之间各自用的是哪一份清单」用的（I2、I5）；
     // 收紧只减不加，被藏起来的那几件仍然留在登记表里（I4）。
-    state.adopt = async (file) => {
-      const selected = file.prompt === '*'
-        ? [...fragments]
-        : file.prompt.map((name) => {
-            const found = fragments.find((entry) => entry.name === name);
-            if (found === undefined) {
-              throw new KernelError('mode_prompt_unavailable', {
-                detail: `${name} (mode ${file.name}; registered: ${fragments.map((entry) => entry.name).join(', ') || 'none'})`,
-              });
-            }
-            return found;
-          });
-      // applyMode validates against the full registered tool set and adds its own restriction.
-      // Install it while the old restriction is still active so a rejected mode cannot expose the full set.
-      const applied = applyMode(kernel, file);
-      const fragmentUndo: (() => void)[] = [];
-      try {
-        selected.forEach((fragment, index) => {
-          fragmentUndo.push(prompt.fragment({
-            name: `extension:${fragment.name}`,
-            anchor: 2 + index,
-            text: fragment.text,
-            maxBytes: limitsOf(config).promptFragmentBytes,
-          }));
-        });
-      } catch (error) {
-        for (const remove of fragmentUndo.reverse()) remove();
-        applied.undo();
-        throw error;
-      }
-      state.mode.undo();
-      const tools = kernel.manifest().map((entry) => entry.name);
-      Object.assign(state.mode, {
-        file,
-        tools,
-        undo: () => {
-          for (const remove of fragmentUndo.slice().reverse()) remove();
-          applied.undo();
-        },
-      });
-      // 同一份清单不重复记：重新attach 到一份已有记录上不写东西（客户端接上来读不该改动事实源）。
-      // 名字、来源或那一栏工具变了才记一条，让「这一条输入用的是哪一份」在记录里读得出来（I5）。
-      const last = (await session.read()).filter((event) => event.kind === 'mode').at(-1);
-      const lastTools = Array.isArray(last?.tools) && last.tools.every((tool): tool is string => typeof tool === 'string')
-        ? last.tools
-        : undefined;
-      if (last === undefined || last.name !== file.name || last.layer !== file.layer || lastTools?.join(' ') !== tools.join(' ') || last.digest !== file.digest) {
-        await session.append({ kind: 'mode', name: file.name, layer: file.layer, path: file.path, tools, digest: file.digest });
-      }
-    };
+    state.adopt = (file) => adoptSessionMode({
+      file,
+      kernel,
+      prompt,
+      fragments,
+      promptFragmentBytes: limitsOf(config).promptFragmentBytes,
+      session,
+      mode: state.mode,
+    });
     // 模式选中的那一栏工具与那几段片段在装载之后才生效（D35、D44）：清单里写了本次没有登记的名字会在这里失败，
     // 而不是静默少一件。
     // 打开一份已有的记录时，先把没人回答的那几次派发补成规范的工具结果（D72）：这一条只在可写的恢复路径上做一次，
@@ -1218,24 +1245,45 @@ export function createHost({
     }
     // 压缩挂在这一份会话上（D75）：两条触发都在循环里问它，摘要那一次调用走未装饰的提供方——
     // 它的流式增量不该转给客户端，而它写完检查点就退出这一轮的事，事件日志一条都不动。
-    // 配置没写 `limits.contextTokens` 时这一件是 null：窗口大小是模型事实，不猜，正常聊天照跑。
-    const limits = compactionLimitsOf(config);
-    const compaction = limits === undefined ? null : createCompaction({
-      provider: live,
-      session,
-      directory,
-      id,
-      limits,
-      logger,
-      requestPrefix: () => ({ system: prompt.render(), tools: kernel.manifest() }),
-    });
+    // 选中模型与全局配置都没写窗口时这一件是 null：窗口大小是模型事实，不猜，正常聊天照跑。
+    const rebuildCompaction = (model: Record<string, unknown>) => {
+      const selectedModel = resolveModel(model);
+      const limits = compactionLimitsOf(config, selectedModel.serviceContextTokens);
+      return limits === undefined ? null : createCompaction({
+        provider: compactionProgressProvider(live, (event) => {
+          if (state.progressId !== undefined) observeLoopProgress(state as HostSessionState, connection, state.progressId, event);
+        }),
+        session,
+        directory,
+        id,
+        limits,
+        logger,
+        requestPrefix: () => ({ system: prompt.render(), tools: kernel.manifest() }),
+      });
+    };
+    const compaction = rebuildCompaction(state.generation.model ?? {});
+    const loopCompaction: LoopCompaction = {
+      prepare: (request, signal) => state.compaction?.prepare(request, signal) ?? Promise.resolve(request.messages),
+      recover: (error, request, signal) => state.compaction?.recover(error, request, signal) ?? Promise.resolve(null),
+      observe: async (request, events) => {
+        const current = state.compaction;
+        if (current !== undefined && current !== null) await current.observe(request, events);
+        else {
+          const usage = usageEvent(request, events);
+          if (usage !== null) await session.append(usage);
+        }
+      },
+    };
     const loop = createLoop({
       kernel,
       provider: observedProvider(live, (event) => connection.notify({ notify: 'delta', sessionId: id, event })),
       prompt,
       session,
       limits: loopLimitsOf(config),
-      compaction,
+      compaction: loopCompaction,
+      onProgress: (event) => {
+        if (state.progressId !== undefined) observeLoopProgress(state as HostSessionState, connection, state.progressId, event);
+      },
       // 开轮时那一份生效参数的快照（D104）：读的是这一份会话现在的那几格，不是装载那一次的配置。
       // `apiKeyEnv` 交回的是变量名，不是变量的值（D13）。
       turnContext: () => {
@@ -1253,7 +1301,7 @@ export function createHost({
       },
     });
     // 一份会话一份状态，审批的等待与正在跑的那一轮都记在这里。
-    return Object.assign(state, { chain, kernel, assembly, extensions: installedExtensions, mcp, loop, templates, compaction });
+    return Object.assign(state, { chain, kernel, assembly, extensions: installedExtensions, mcp, loop, templates, compaction, rebuildCompaction });
     } catch (error) {
       try {
         for (const dispose of cleanup.reverse()) await dispose();
@@ -1272,6 +1320,7 @@ export function createHost({
     env: ProjectEnvironment = defaultEnvironment,
     workspaceOrigin?: 'explicit' | 'default',
   ): Promise<{ sessionId: string }> {
+    if (closing !== undefined) throw new KernelError('host_closed');
     const pending = build(id, connection, recover, mode, env, workspaceOrigin).then((state) => {
       sessions.set(id, state);
       return { sessionId: id };
@@ -1404,7 +1453,7 @@ export function createHost({
         }
         case 'session.read': {
           // 交回的是记录本身：客户端晚到了也能把已经发生过的事画出来（I5）。
-          // 历史那一页由 `limit` 与 `before` 说（方案 4.1）：支线那份读的是同一套分页，两个入口不分两种形状。
+          // 历史分页由 `limit` 与 `before` 说，`at` 精确取一条记录（方案 4.1）；支线也走同一读取路径。
           return await readRecord(sessionId, message.params);
         }
         case 'session.export': {
@@ -1457,7 +1506,7 @@ export function createHost({
         }
         case 'run.start': {
           const state = open(sessionId);
-          return await execute(state, async (signal) => {
+          return await execute(state, async (signal, report) => {
           // 模板展开排在这一轮开始之前（D54）：交进循环的是展开后的文本，记录里另外留着人打的那一行、
           // 参数、模板来源与内容摘要。查不到的那一行斜杠在这里就报出去，不带着没展开的原文进模型。
           const invocation = parseInvocation(input);
@@ -1468,8 +1517,8 @@ export function createHost({
             text = expanded.text;
             user = { raw: input, arguments: expanded.arguments, source: expanded.source, digest: expanded.digest };
           }
-          return await state.loop.run(text, { signal, user });
-          });
+          return await state.loop.run(text, { signal, user, onProgress: report });
+          }, connection);
         }
         case 'run.cancel': {
           const state = open(sessionId);
@@ -1514,6 +1563,7 @@ export function createHost({
           return {
             sessionId,
             running: state.running !== undefined,
+            progress: state.progress ?? null,
             // 交给模型的那一栏，不是登记表的全部（I2）：被模式藏起来的几件不在这儿。
             tools: state.kernel.manifest().map((entry) => entry.name),
             mode: state.mode.file?.name ?? null,
@@ -1522,6 +1572,7 @@ export function createHost({
             // 这一份会话现在打的是哪一份模型，以及等在它轮次边界上的那一份（方案 7.1 的三种读数、7.3 第二行）。
             // 读的是会话自己那一格而不是项目环境那一份：写完未采用与已采用在这两格里是分得开的。
             model: state.generation.provider.model ?? null,
+            outputTokens: state.generation.provider.outputTokens ?? null,
             selectedModel: modelSelectionOf(state.generation.model)?.model ?? state.generation.provider.model ?? null,
             serviceId: modelSelectionOf(state.generation.model)?.provider ?? resolveModel(state.generation.model).serviceId ?? 'legacy',
             pendingServiceId: state.pendingGeneration === undefined ? null : modelSelectionOf(state.pendingGeneration.model)?.provider ?? null,
@@ -1568,7 +1619,10 @@ export function createHost({
           const provider = deriveProvider({ ...state.environment.config, model });
           const generation = { model, provider, explicit: true };
           await state.session.append({ kind: 'modelSelection', ignorable: true, provider: selection.provider, model: selection.model });
-          if (state.running === undefined) state.generation = generation;
+          if (state.running === undefined) {
+            state.generation = generation;
+            state.compaction = state.rebuildCompaction(model);
+          }
           else state.pendingGeneration = generation;
           return { model: provider.model, serviceId: selection.provider, when: state.running === undefined ? 'now' : 'round' };
         }
@@ -1650,15 +1704,39 @@ export function createHost({
           const rule = Object.values(given).every((item) => item === undefined) ? undefined : given;
           const env = await environmentFor(message.params.projectRoot);
           if (env.store === undefined) throw new KernelError('config_write_unsupported');
-          if (field === 'model.selection') {
-            const fresh = await env.store.read();
-            deriveProvider({ ...env.config, model: { ...env.config.model, ...fresh.values.model, selection: modelSelection(value) } });
-          }
-          if (field === 'model.services') {
-            const fresh = await env.store.read();
-            if (fresh.values.model?.selection !== undefined) resolveModel({ ...fresh.values.model, services: modelServices(value) });
-          }
-          const { key, table, shadowed, shadowedBy, changed, effective, layers, ...saved } = await env.store.write({ layer, field, value, version, op, index, rule });
+          const { key, table, shadowed, shadowedBy, changed, effective, layers, ...saved } = await env.store.write({ layer, field, value, version, op, index, rule }, async (candidate, editedLayer) => {
+            if (!field.startsWith('model.')) return;
+            if (layer === 'user') hostProviderFromConfig(createConfig({ user: editedLayer }));
+            for (const target of layer === 'user' ? [...environments.values()] : [env]) {
+              if (target.store === undefined) continue;
+              const own = target === env ? candidate : await target.store.preview(layer, editedLayer);
+              const config = { ...target.config, ...own };
+              // 首启可逐字段填写尚未完整的模型配置；完整配置的能力错误必须在写入前拒绝。
+              hostProviderFromConfig(config);
+              if (field === 'model.selection') deriveProvider(config);
+              if (field === 'model.services' && isRecord(config.model)) {
+                if (config.model.selection !== undefined) resolveModel(config.model);
+                for (const service of modelServices(config.model.services)) {
+                  for (const setting of service.modelSettings ?? []) {
+                    deriveProvider({
+                      ...config,
+                      model: { ...config.model, selection: { provider: service.id, model: setting.id } },
+                    });
+                  }
+                }
+              }
+              if (field !== 'model.outputTokens' && field !== 'model.services') continue;
+              for (const state of sessions.values()) {
+                if (state.environment !== target) continue;
+                const generation = state.pendingGeneration ?? state.generation;
+                if (generation.explicit !== true) continue;
+                if (field === 'model.services' && modelSelectionOf(generation.model)?.provider === 'legacy') continue;
+                const key = field === 'model.outputTokens' ? 'outputTokens' : 'services';
+                const effective = isRecord(config.model) ? config.model[key] : undefined;
+                deriveProvider({ ...config, model: { ...generation.model, [key]: effective } });
+              }
+            }
+          });
           // 白名单里那几条模型字段都是提供方要读的那几格，所以写完就问一句：哪一份会话现在就换，哪一份等自己那一轮的边界。
           // 采用的依据是落盘之后按层序重折出来的那一份有效值，不是刚写进去的那一个（方案 7.1、D8）：
           // 更上面那一层还写着它时，前后折出来是同一份，会话一份都不动、`applies` 交回空，界面由 `shadowed` 与 `shadowedBy` 说出是哪一层盖着它。
@@ -1689,7 +1767,7 @@ export function createHost({
           // 压不动只可能是那一种：留下保留预算之后一段里找不到能切的边界。
           if (done === null) throw new KernelError('compact_nothing_to_cut', { detail: sessionId });
           return { sessionId, ...done };
-          });
+          }, connection, 'compaction');
         }
         default:
           // validateCall 已经拦住了不认识的方法，走到这里说明分发表与协议表不是同一份。

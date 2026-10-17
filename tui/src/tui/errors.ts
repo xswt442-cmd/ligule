@@ -1,6 +1,38 @@
 import type { Locale } from '@ligule/core/kernel/locale.js';
 
 const FAILURE_TEXT: Readonly<Record<string, Readonly<Record<Locale, string>>>> = {
+  provider_output_exhausted: {
+    zh: '模型达到输出预算，回答未完整完成。先检查已有结果，再调整 model.outputTokens 或缩小任务。',
+    en: 'The model reached its output budget before completing. Inspect existing results, then adjust model.outputTokens or reduce the task.',
+  },
+  provider_empty_response: {
+    zh: '模型没有返回有效正文或工具调用。查看记录后决定是否重新提交。',
+    en: 'The model returned no useful text or tool calls. Inspect the record before deciding whether to submit again.',
+  },
+  provider_stream_incomplete: {
+    zh: '模型响应缺少完整结束标记或分片。检查接口兼容性，并先查看已有结果。',
+    en: 'The model response lacks a complete terminator or frame. Check API compatibility and inspect existing results first.',
+  },
+  provider_stream_interrupted: {
+    zh: '模型响应在读取途中中断。工具不会自动重做，请先查看已有结果。',
+    en: 'Reading the model response was interrupted. Tools are not replayed automatically; inspect existing results first.',
+  },
+  provider_finish_reason_invalid: {
+    zh: '模型服务返回了不支持的结束原因。请检查接口类型与兼容性。',
+    en: 'The model service returned an unsupported finish reason. Check its API type and compatibility.',
+  },
+  provider_tool_call_invalid: {
+    zh: '模型返回的工具调用缺少有效标识或名称，或标识重复。请检查模型服务兼容性。',
+    en: 'The model returned a tool call with a missing or duplicate identity, or missing name. Check model service compatibility.',
+  },
+  provider_output_budget_invalid: {
+    zh: '输出预算无效。请把 model.outputTokens 设置为有效范围内的正整数。',
+    en: 'The output budget is invalid. Set model.outputTokens to a positive integer within the supported range.',
+  },
+  provider_output_budget_unsupported: {
+    zh: '输出预算超过当前模型或配置允许的上限。请降低 model.outputTokens 或选择支持该预算的服务。',
+    en: 'The output budget exceeds this model or configuration limit. Lower model.outputTokens or select a service that supports it.',
+  },
   provider_credential_missing: {
     zh: '模型凭据尚未设置。用 /credentials 查看凭据引用，并通过环境变量或桌面模型服务保存凭据。',
     en: 'The model credential is not set. Use /credentials to view its reference, then set it in the environment or save it through Desktop model services.',

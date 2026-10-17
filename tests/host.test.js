@@ -26,6 +26,7 @@ const TOOL_TURN = [
   { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'call_1', name: 'read' } },
   { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"path": "note.txt"}' } },
   { type: 'content_block_stop', index: 0 },
+  { type: 'message_delta', delta: { stop_reason: 'tool_use' } },
   { type: 'message_stop' },
 ];
 
@@ -34,6 +35,7 @@ const TEXT_TURN = [
   { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
   { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'the file says so' } },
   { type: 'content_block_stop', index: 0 },
+  { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
   { type: 'message_stop' },
 ];
 
@@ -955,7 +957,7 @@ test('config.set writes one whitelisted field and reports a concurrent edit inst
       assert.equal(user.exists, true);
       assert.equal(local.version, '', '那一份项目本机覆盖还没写过：版本是空串');
       assert.ok(!JSON.stringify(first.layers).includes(home), '帧里没有文件路径：那格只说层名与版本');
-      assert.deepEqual(first.sources, { 'model.api': 'user', 'model.model': 'user', 'model.baseURL': 'none', 'model.apiKeyEnv': 'none', 'model.services': 'none', 'model.selection': 'none', 'policy.mode': 'none', 'policy.rules': 'none' }, '来源包含当前全部可写字段，未写的字段为 none');
+      assert.deepEqual(first.sources, { 'model.api': 'user', 'model.model': 'user', 'model.baseURL': 'none', 'model.apiKeyEnv': 'none', 'model.services': 'none', 'model.selection': 'none', 'model.outputTokens': 'none', 'policy.mode': 'none', 'policy.rules': 'none' }, '来源包含当前全部可写字段，未写的字段为 none');
 
       const written = await connection.request('config.set', { field: 'model.model', value: '新的', layer: 'user', version: user.version });
       assert.equal(written.created, false);
@@ -1524,10 +1526,26 @@ test('a history page names its own end and an older page picks up where it stopp
     assert.equal(whole.hasMore, false, '不带那一格就是整份记录，前面没有更早的');
     assert.ok(whole.events.length > tail.events.length, '整份读仍然比一页多');
 
+    const picked = whole.events.find((event) => event.seq === newest.events[1].seq);
+    const exact = await connection.request('session.read', { sessionId, at: newest.events[1].seq });
+    assert.deepEqual(exact.events, [picked], 'at 精确读回指定的那一条事件');
+    assert.equal(exact.endSeq, picked.seq);
+    assert.equal(exact.hasMore, picked.seq > 1, '单条读取仍报告它之前是否有记录');
+
     await assert.rejects(
       connection.request('session.read', { sessionId, before: 9999 }),
       (error) => error.code === 'session_cursor_invalid',
       '认不出这一份记录里那条序号的游标要说失效，不能静默当成第一页',
+    );
+    await assert.rejects(
+      connection.request('session.read', { sessionId, at: 9999 }),
+      (error) => error.code === 'session_cursor_invalid',
+      '不存在的精确事件序号要说游标失效',
+    );
+    await assert.rejects(
+      connection.request('session.read', { sessionId, at: 1, before: 2 }),
+      (error) => error.code === 'protocol_args_invalid',
+      '精确读取与向前分页不能同时指定',
     );
   });
 });
@@ -1758,6 +1776,9 @@ test('a restarted Host reads back the spilled body and the stored duration of th
     const stored = tool.durationMs ?? tool.result?.durationMs;
     const body = JSON.stringify(tool.result?.content ?? '');
     assert.equal(typeof stored, 'number', `那次工具调用没带上实际耗时：${body.slice(0, 200)}`);
+    const exact = await host.client.request('session.read', { sessionId, at: tool.seq, fullResults: true });
+    assert.equal(exact.events.length, 1, '精确读取只返回这一条工具结果');
+    assert.ok(JSON.stringify(exact.events[0].result?.content ?? '').includes('这一段正文要长到越过那一格上限'), '精确读取仍补回该条溢出的完整正文');
 
     await host.client.request('session.close', { sessionId });
     const again = startAnother();

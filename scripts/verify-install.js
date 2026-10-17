@@ -78,6 +78,7 @@ if (relativeCore === '..' || relativeCore.startsWith(`..${sep}`) || isAbsolute(r
 }
 const coreManifest = JSON.parse(readFileSync(join(bundledCoreDirectory, 'package.json'), 'utf8'));
 if (coreManifest.private !== true) throw new Error('the bundled Core package must remain private');
+if (installed.bin?.ligule !== './dist/cli.js') throw new Error('the installed npm package does not declare the ligule CLI entry');
 if (JSON.stringify(installed.dependencies) !== JSON.stringify(pkg.dependencies)) {
   throw new Error('the consumer did not receive the release manifest dependencies');
 }
@@ -180,6 +181,93 @@ if (JSON.stringify(hits).includes('LIGULE-INSTALL-NEEDLE') === false) throw new 
 const probe = spawnSync(process.execPath, ['probe.mjs'], { cwd: consumer, env, encoding: 'utf8' });
 if (probe.status !== 0) throw new Error(`the installed package failed its own probe: ${(probe.stderr ?? '').slice(0, 500)}`);
 for (const line of probe.stdout.trim().split('\n')) readings.push(line);
+
+const mcpProject = join(consumer, 'mcp-project');
+const mcpHome = join(consumer, 'mcp-home');
+mkdirSync(mcpProject, { recursive: true });
+mkdirSync(mcpHome, { recursive: true });
+writeFileSync(join(consumer, 'mcp-probe.mjs'), `
+import assert from 'node:assert/strict';
+import { writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+const corePackage = join(${JSON.stringify(bundledCoreDirectory)}, 'package.json');
+const coreRequire = createRequire(corePackage);
+const { Client } = coreRequire('@modelcontextprotocol/sdk/client');
+const { StdioClientTransport, getDefaultEnvironment } = coreRequire('@modelcontextprotocol/sdk/client/stdio.js');
+const expected = [
+  'ligule_run_cancel', 'ligule_run_start', 'ligule_run_status',
+  'ligule_session_create', 'ligule_session_list', 'ligule_session_open', 'ligule_session_read',
+].sort();
+const projectRoot = ${JSON.stringify(mcpProject)};
+const { setTrusted } = await import(pathToFileURL(join(${JSON.stringify(bundledCoreDirectory)}, 'dist', 'kernel', 'workspace-trust.js')).href);
+await setTrusted(projectRoot, true, join(${JSON.stringify(mcpHome)}, 'tui-trust.json'));
+const transport = new StdioClientTransport({
+  command: process.execPath,
+  args: [join(${JSON.stringify(installedPackageRoot)}, 'dist', 'cli.js'), 'mcp-server', '--project', projectRoot],
+  cwd: ${JSON.stringify(consumer)},
+  env: { ...getDefaultEnvironment(), LIGULE_HOME: ${JSON.stringify(mcpHome)} },
+  stderr: 'pipe',
+});
+const client = new Client({ name: 'ligule-install-probe', version: '0.0.0' });
+async function call(name, args) {
+  const result = await client.callTool({ name, arguments: args });
+  assert.notEqual(result.isError, true, name + ' returned an MCP tool error');
+  assert.equal(typeof result.structuredContent, 'object', name + ' structured result');
+  return result.structuredContent;
+}
+let timeout;
+try {
+  const probe = (async () => {
+    await client.connect(transport);
+    const { tools } = await client.listTools();
+    assert.deepEqual(tools.map(({ name }) => name).sort(), expected, 'published MCP tool names');
+    for (const tool of tools) {
+      assert.equal(tool.inputSchema?.type, 'object', tool.name + ' input schema');
+      assert.equal(typeof tool.description, 'string', tool.name + ' description');
+    }
+    const existingSession = process.argv[2];
+    if (existingSession === undefined) {
+      const created = await call('ligule_session_create', { projectRoot });
+      assert.equal(typeof created.sessionId, 'string', 'created session ID');
+      const listed = await call('ligule_session_list', { projectRoot, limit: 50 });
+      assert.ok(listed.sessions.some(({ sessionId }) => sessionId === created.sessionId), 'created session appears in project list');
+      await call('ligule_session_open', { projectRoot, sessionId: created.sessionId });
+      const history = await call('ligule_session_read', { sessionId: created.sessionId, limit: 10 });
+      assert.equal(history.sessionId, created.sessionId);
+      assert.ok(Array.isArray(history.records));
+      writeFileSync(join(process.cwd(), 'mcp-session-id'), created.sessionId + '\\n');
+      console.log('stdio MCP: initialize, tools/list, create/list/open/read passed');
+    } else {
+      await call('ligule_session_open', { projectRoot, sessionId: existingSession });
+      const history = await call('ligule_session_read', { sessionId: existingSession, limit: 10 });
+      assert.equal(history.sessionId, existingSession);
+      assert.ok(Array.isArray(history.records));
+      console.log('stdio MCP: reopened the session after client disconnect; record lock was released');
+    }
+  })();
+  await Promise.race([probe, new Promise((_, reject) => {
+    timeout = setTimeout(() => reject(new Error('MCP client operation timed out')), 30_000);
+  })]);
+} finally {
+  if (timeout !== undefined) clearTimeout(timeout);
+  await client.close();
+}
+`, 'utf8');
+
+const mcpProbe = spawnSync(process.execPath, ['mcp-probe.mjs'], { cwd: consumer, env, encoding: 'utf8', timeout: 45_000 });
+if (mcpProbe.status !== 0) {
+  throw new Error(`the installed package failed its stdio MCP probe (status=${mcpProbe.status}, signal=${mcpProbe.signal}, error=${mcpProbe.error?.message ?? 'none'}): ${(mcpProbe.stderr ?? '').slice(0, 1200)}`);
+}
+for (const line of mcpProbe.stdout.trim().split('\n')) readings.push(line);
+const createdSessionId = readFileSync(join(consumer, 'mcp-session-id'), 'utf8').trim();
+const reopenProbe = spawnSync(process.execPath, ['mcp-probe.mjs', createdSessionId], { cwd: consumer, env, encoding: 'utf8', timeout: 45_000 });
+if (reopenProbe.status !== 0) {
+  throw new Error(`the installed MCP server could not reopen its session after disconnect (status=${reopenProbe.status}, signal=${reopenProbe.signal}, error=${reopenProbe.error?.message ?? 'none'}): ${(reopenProbe.stderr ?? '').slice(0, 1200)}`);
+}
+for (const line of reopenProbe.stdout.trim().split('\n')) readings.push(line);
 
 for (const line of readings) process.stdout.write(`${line}\n`);
 process.stdout.write(`fresh install ok: ${pkg.name}-${pkg.version}.tgz\n`);

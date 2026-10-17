@@ -12,6 +12,7 @@ import { editInExternalEditor } from './editor.js';
 import { copyToClipboard, lastAnswer } from './clipboard.js';
 import { titleEscape, titleText } from './output.js';
 import { runtimeFailureText } from './errors.js';
+import { capabilityOf, projectRecord, resultParts, type TranscriptItem, type TuiRecord } from './transcript.js';
 import { VERSION } from '../version.js';
 import { ChoicePanel, HelpPanel, type PanelChoice } from './panels.js';
 import { markdownLines } from './markdown.js';
@@ -80,18 +81,6 @@ interface DraftState {
   readonly caret: number;
 }
 
-type TuiRecord = SessionEvent;
-
-interface TranscriptItem {
-  kind: string;
-  text: string;
-  tool?: string;
-  code?: string;
-  exitCode?: number;
-  spilled?: string;
-  seq?: number;
-}
-
 interface TuiStatus {
   readonly model?: string | null;
   readonly pendingModel?: string | null;
@@ -103,8 +92,19 @@ interface TuiStatus {
   readonly eventCount: number;
   readonly denials: { readonly consecutive: number; readonly total: number };
   readonly usage?: { readonly estimated: number; readonly window: number; readonly threshold: number } | null;
+  readonly progress?: TuiProgress | null;
   readonly templates?: readonly TemplateCommand[];
   readonly [key: string]: unknown;
+}
+
+interface TuiProgress {
+  readonly phase: 'preparing' | 'model_request' | 'tool_execution' | 'compaction' | 'awaiting_approval' | 'awaiting_input' | 'settling';
+  readonly startedAt: number;
+  readonly phaseStartedAt: number;
+  readonly lastProgressAt: number;
+  readonly modelCalls: number;
+  readonly toolCalls: number;
+  readonly outputTokens: number | null;
 }
 
 interface DetailState {
@@ -295,7 +295,6 @@ export function isTypingRun(before: DraftState, after: DraftState): boolean {
   return parts.length === 1 && !/\s/u.test(parts[0].segment);
 }
 
-// 工具结果的内容可以是串，也可以是结构化的一段（read 交回的是 {text: ...}）；界面这一处只画文本。
 const textOf = (value: unknown): string => (typeof value === 'string' ? value : JSON.stringify(value ?? '', null, 2));
 
 // 长内容默认折起来：行数与字数各给一个上限，剩下的一行说明还有多少字（Ctrl+O 展开）。
@@ -309,75 +308,7 @@ export function foldText(text: unknown, expanded: boolean, limit = FOLD_LINES, m
   return { shown: cut, hidden: full.length - cut.length };
 }
 
-// 工具交回的那一份形状是 { text, 附带几格 }：界面画正文，附带那几格画在抬头那一行。
-// 正文之外真正要看得见的是两件事——命令跑出来的退出码，与一次 `mcp.call` 真正用的能力名（D52、D59、D77）。
-interface TuiToolResult {
-  readonly content?: unknown;
-  readonly reason?: unknown;
-  readonly failed?: unknown;
-  readonly kind?: unknown;
-  readonly code?: unknown;
-  readonly spilled?: unknown;
-}
-
-export function resultParts(result: TuiToolResult): { text: string; exitCode?: unknown; capability?: unknown } {
-  const payload = isRecord(result.content) ? result.content : {};
-  return {
-    text: typeof payload.text === 'string' ? payload.text : textOf(result.reason ?? result.content),
-    exitCode: payload.exitCode,
-    capability: payload.effectiveCapability,
-  };
-}
-
-// `mcp.call` 这个名字对人不说明任何事：判定链、审批框与记录里读的都是 `mcp:<服务器>/<工具>`，画出来的也该是那一串。
-export function capabilityOf(name: string, args?: Record<string, unknown>): string {
-  if (name === 'mcp.call' && typeof args?.server === 'string' && typeof args?.tool === 'string') return `mcp:${args.server}/${args.tool}`;
-  return name;
-}
-
-// 一条记录画成一行或者几行：助手那一条可能带着若干次工具调用，工具调用与结果各占一行。
-export function projectRecord(record: TuiRecord, locale: Locale = 'zh'): TranscriptItem[] {
-  const t = (zh: string, en: string) => chooseText(locale, zh, en);
-  if (record.kind === 'turn') {
-    const names: Readonly<Record<string, readonly [string, string]>> = { completed: ['本轮已完成', 'Turn completed'], cancelled: ['本轮已取消', 'Turn cancelled'], failed: ['本轮失败', 'Turn failed'], interrupted: ['本轮意外中断', 'Turn interrupted'] };
-    const label = typeof record.status === 'string' ? names[record.status] : undefined;
-    const guidance = typeof record.code === 'string' ? runtimeFailureText(record.code, locale) : undefined;
-    return label === undefined ? [] : [{ kind: record.status === 'failed' ? 'error' : 'meta', text: `${chooseText(locale, label[0], label[1])}${typeof record.code === 'string' ? ` (${record.code})` : ''}${guidance === undefined ? '' : `\n${guidance}`}` }];
-  }
-  // 人打的那一行原样画出来（D54）：展开后的那一份是给模型的，回看时要对得上当时敲了什么。
-  if (record.kind === 'user') return [{ kind: 'question', text: typeof record.raw === 'string' ? record.raw : typeof record.text === 'string' ? record.text : '' }];
-  if (record.kind === 'reasoning') return [{ kind: 'reasoning', text: typeof record.text === 'string' ? record.text : '' }];
-  if (record.kind === 'assistant') {
-    const rows: TranscriptItem[] = typeof record.text !== 'string' || record.text === '' ? [] : [{ kind: 'answer', text: record.text }];
-    const calls = Array.isArray(record.toolCalls) ? record.toolCalls.filter((call): call is Record<string, unknown> => isRecord(call) && typeof call.name === 'string') : [];
-    for (const call of calls) rows.push({ kind: 'call', tool: capabilityOf(String(call.name), isRecord(call.args) ? call.args : undefined), text: JSON.stringify(call.args ?? {}) });
-    return rows;
-  }
-  if (record.kind === 'tool') {
-    const result = isRecord(record.result) ? record.result : {};
-    const kind = result.failed !== true ? 'result' : result.kind === 'refusal' ? 'refusal' : 'failure';
-    const parts = resultParts(result);
-    const row: TranscriptItem = { kind, tool: typeof parts.capability === 'string' ? parts.capability : capabilityOf(typeof record.tool === 'string' ? record.tool : '', isRecord(record.args) ? record.args : undefined), text: parts.text };
-    if (typeof result.code === 'string') row.code = result.code;
-    if (typeof parts.exitCode === 'number') row.exitCode = parts.exitCode;
-    if (typeof result.spilled === 'string') row.spilled = result.spilled;
-    return [row];
-  }
-  if (record.kind === 'mode') {
-    // 模式生效是一件会改变模型能做什么的事，画在转录里，让人看得见是哪一条输入之后换的（I5）。
-    const name = typeof record.name === 'string' ? record.name : '';
-    const layer = typeof record.layer === 'string' ? record.layer : '';
-    return [{ kind: 'meta', text: t(`工具模式：${name}（${MODE_LAYERS[layer] ?? layer}）`, `Tool mode: ${name} (${layer})`) }];
-  }
-  if (record.kind === 'label') {
-    // 名字与归档是这份会话自己的事实，改在哪一条输入之后要看得见（I5、实现顺序第 75 步）。
-    const parts = [];
-    if (typeof record.name === 'string') parts.push(t(`名称：${record.name}`, `Name: ${record.name}`));
-    if (typeof record.archived === 'boolean') parts.push(record.archived ? t('已归档', 'Archived') : t('已取消归档', 'Restored from archive'));
-    return parts.length === 0 ? [] : [{ kind: 'meta', text: parts.join('，') }];
-  }
-  return [];
-}
+export { capabilityOf, projectRecord, resultParts };
 
 // 状态行上的那一段上下文压力：当前投影的估算、窗口，外加越线没有（D82）。没写窗口时宿主交出 null，这一段整块不出现。
 // 估算是本地量法乘上端点报回的修正系数，前面那个波浪号说的是它不是端点给的确数。
@@ -403,9 +334,10 @@ interface StatusLineOptions {
   readonly expanded: boolean;
   readonly columns?: number;
   readonly locale?: Locale;
+  readonly now?: number;
 }
 
-export function buildStatusLine({ sessionId, boundary, status, running, seconds, expanded, columns, locale = 'zh' }: StatusLineOptions): string {
+export function buildStatusLine({ sessionId, boundary, status, running, seconds, expanded, columns, locale = 'zh', now = Date.now() }: StatusLineOptions): string {
   const t = (zh: string, en: string) => chooseText(locale, zh, en);
   const id = `${chooseText(locale, '会话', 'session')} ${sessionId.slice(0, 8)}`;
   const root = boundary === undefined ? '' : boundary;
@@ -414,8 +346,22 @@ export function buildStatusLine({ sessionId, boundary, status, running, seconds,
   const context = contextSegment(status.usage, locale);
   const parts: string[] = [];
   if (context !== '') parts.push(context);
+  const progress = status.progress;
+  const phaseHint = progress === undefined || progress === null ? '' : {
+    preparing: t('准备上下文', 'Preparing context'),
+    model_request: t('请求模型', 'Requesting model'),
+    tool_execution: t('执行工具', 'Running tools'),
+    compaction: t('压缩上下文', 'Compacting context'),
+    awaiting_approval: t('等待审批', 'Waiting for approval'),
+    awaiting_input: t('等待用户输入', 'Waiting for your input'),
+    settling: t('正在收尾', 'Finishing'),
+  }[progress.phase];
+  const idleSeconds = progress === undefined || progress === null ? 0 : Math.max(0, Math.floor((now - progress.lastProgressAt) / 1000));
+  const progressHint = running && progress !== undefined && progress !== null
+    ? `${phaseHint} · ${progress.modelCalls} ${t('次模型调用', 'model calls')} · ${progress.toolCalls} ${t('个工具调用', 'tool calls')} · ${idleSeconds}${t('秒无新进展', 's without progress')}${progress.outputTokens === null ? '' : ` · ${progress.outputTokens} ${t('输出token', 'output tokens')}`}`
+    : '';
   // 打断与展开那两句跟在条数之后：挤的时候条数先走，这两句留着。
-  const hints = (running ? t(` · ${Math.floor(seconds)} 秒，${keyHint('interrupt')} 打断`, ` · ${Math.floor(seconds)}s, ${keyHint('interrupt')} to stop`) : '')
+  const hints = (running ? `${progressHint === '' ? '' : ` · ${progressHint}`}${t(` · ${Math.floor(seconds)} 秒，${keyHint('interrupt')} 打断`, ` · ${Math.floor(seconds)}s, ${keyHint('interrupt')} to stop`)}` : '')
     + (expanded ? t(` · 已展开（${keyHint('expand-or-history')} 收起）`, ` · expanded (${keyHint('expand-or-history')} to close)`) : '');
   let tail = `${chooseText(locale, `记录 ${status.eventCount} 条`, `${status.eventCount} events`)}${hints}`;
   let shown = parts;
@@ -427,6 +373,11 @@ export function buildStatusLine({ sessionId, boundary, status, running, seconds,
   if (over()) shown = shown.filter((part) => !part.startsWith('ctx:'));
   if (over()) base = id;
   if (over()) tail = hints === '' ? '' : hints.slice(3);
+  if (over() && running && progress !== undefined && progress !== null) {
+    shown = [];
+    tail = `${phaseHint} · ${idleSeconds}${t('秒无新进展', 's without progress')} · ${keyHint('interrupt')} ${t('打断', 'stop')}`;
+    if (over()) base = '';
+  }
   return line();
 }
 
@@ -693,7 +644,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
 
   // 手停下来 400 毫秒才写这一份：敲字那一段不碰磁盘，而退出与崩溃前那一句已经落下了。
   useEffect(() => {
-    if (inputs === undefined) return;
+    if (inputs === undefined || !inputState.current.has(sessionId)) return;
     const own = sessionId;
     const root = info.boundary ?? '';
     const timer = setTimeout(() => {
@@ -755,6 +706,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   useEffect(() => {
     const onNotification = (message: Record<string, unknown>) => {
       if (message.sessionId !== sessionId) return;
+      if (message.notify === 'progress') {
+        const progress = isRecord(message.progress) ? message.progress as unknown as TuiProgress : null;
+        setStatus((current) => current === null ? current : { ...current, running: progress !== null, progress });
+        return;
+      }
       if (message.notify === 'delta') {
         const delta = isRecord(message.event) ? message.event : undefined;
         const piece = typeof delta?.text === 'string' ? delta.text : '';

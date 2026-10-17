@@ -116,6 +116,7 @@ export function createCompaction({ provider, session, directory, id, limits, log
     // 那一次的请求自己也要放进窗口：预算按修正后的量法算，否则系数大的那一份会把摘要请求本身顶超长。
     const excerpt = `${previous === undefined ? '' : `Earlier summary:\n${previous}\n\n`}${fitExcerpt(flatten(events), Math.max(1, Math.floor((threshold - 1024) / factor)))}`;
     const parts: string[] = [];
+    let finish: ProviderEvent | undefined;
     const request: ModelRequest = {
       system: '',
       tools: [],
@@ -126,8 +127,17 @@ export function createCompaction({ provider, session, directory, id, limits, log
       { signal },
     )) {
       if (event.type === 'text') parts.push(event.text);
+      if (event.type === 'finish') finish = event;
+      if (event.type === 'tool-call') throw new KernelError('provider_tool_call_invalid', { detail: 'a compaction summary cannot call tools' });
     }
-    return parts.join('').trim();
+    if (signal?.aborted) throw new KernelError('provider_cancelled');
+    if (provider.requiresCompletion === true && finish === undefined) throw new KernelError('provider_stream_incomplete');
+    if (finish?.type === 'finish' && (finish.reason === 'length' || finish.reason === 'max_tokens')) {
+      throw new KernelError('provider_output_exhausted');
+    }
+    const text = parts.join('').trim();
+    if (text === '') throw new KernelError('provider_empty_response');
+    return text;
   }
 
   // 一次压缩：算切点、请模型写摘要、把摘要与它顶掉的范围写成检查点。做不成时说清是哪一条，交回 null。

@@ -35,6 +35,153 @@ test('a turn without tool calls ends the run and the provider is asked once', as
   assert.deepEqual(provider.requests[0].messages, [{ role: 'user', text: 'question' }]);
 });
 
+test('loop progress reports real request and tool phases in execution order', async () => {
+  const progress = [];
+  const provider = scriptedProvider([
+    [{ type: 'text', text: 'checking' }, { type: 'tool-call', id: 'call_1', name: 'peek', args: {} }],
+    [{ type: 'text', text: 'answer' }],
+  ]);
+  const kernel = kernelWith([tool('peek', async () => ({ text: 'one line' }))]);
+  await createLoop({ kernel, provider, onProgress: (event) => progress.push(event) }).run('go');
+  assert.deepEqual(progress.filter((event) => event.kind === 'phase').map((event) => event.phase), [
+    'preparing', 'model_request', 'tool_execution', 'preparing', 'model_request', 'settling',
+  ]);
+  assert.ok(progress.some((event) => event.kind === 'activity' && event.activity === 'model_output'));
+  assert.ok(progress.some((event) => event.kind === 'activity' && event.activity === 'tool'));
+  assert.equal(progress.at(-1).modelCalls, 2);
+  assert.equal(progress.at(-1).toolCalls, 1);
+});
+
+test('empty output and reasoning-only output fail with one persistent terminal', async () => {
+  const root = await mkdtemp(join(process.cwd(), 'testplace', 'loop-'));
+  try {
+    for (const [id, events] of [
+      ['empty', [{ type: 'finish', reason: 'stop' }]],
+      ['reasoning', [{ type: 'reasoning', text: 'thinking' }, { type: 'finish', reason: 'stop' }]],
+    ]) {
+      const session = createSessionLog({ directory: root, id });
+      const kernel = createKernel({ config: createConfig({ user: { boundary: root } }), session });
+      await assert.rejects(
+        () => createLoop({ kernel, provider: scriptedProvider([events]), session }).run('go'),
+        (error) => error.code === 'provider_empty_response',
+      );
+      const records = await session.read();
+      assert.deepEqual(records.filter((event) => event.kind === 'turn').map((event) => [event.status, event.code]), [
+        ['failed', 'provider_empty_response'],
+      ]);
+      assert.equal(records.filter((event) => event.kind === 'turn').length, 1);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('providers that require protocol completion do not treat iterable EOF as success', async () => {
+  const session = createSessionLog({ directory: await mkdtemp(join(process.cwd(), 'testplace', 'loop-')), id: 'missing-finish' });
+  try {
+    const kernel = createKernel({ config: createConfig({ user: { boundary: session.directory } }), session });
+    const provider = { requiresCompletion: true, async *stream() { yield { type: 'text', text: 'partial' }; } };
+    await assert.rejects(
+      () => createLoop({ kernel, provider, session }).run('go'),
+      (error) => error.code === 'provider_stream_incomplete',
+    );
+    const events = await session.read();
+    assert.ok(events.some((event) => event.kind === 'assistant' && event.text === 'partial'));
+    assert.equal(events.filter((event) => event.kind === 'turn').length, 1);
+    assert.equal(events.at(-1).code, 'provider_stream_incomplete');
+  } finally {
+    await rm(session.directory, { recursive: true, force: true });
+  }
+});
+
+test('all tool arguments are preflighted before any tool in the response can run', async () => {
+  const root = await mkdtemp(join(process.cwd(), 'testplace', 'loop-'));
+  try {
+    const session = createSessionLog({ directory: root, id: 'batch-preflight' });
+    const kernel = createKernel({ config: createConfig({ user: { boundary: root } }), session });
+    const ran = [];
+    kernel.register(tool('side_effect', async () => { ran.push('side_effect'); return { text: 'changed' }; }));
+    kernel.register({
+      ...tool('needs_value', async () => { ran.push('needs_value'); return { text: 'unexpected' }; }),
+      parameters: { type: 'object', properties: { value: { type: 'string' } }, required: ['value'] },
+    });
+    const provider = scriptedProvider([
+      [
+        { type: 'tool-call', id: 'one', name: 'side_effect', args: {} },
+        { type: 'tool-call', id: 'two', name: 'needs_value', args: {} },
+      ],
+      [{ type: 'text', text: 'the rejected call was corrected' }],
+    ]);
+    const result = await createLoop({ kernel, provider, session }).run('go');
+    assert.equal(result.text, 'the rejected call was corrected');
+    assert.deepEqual(ran, []);
+    const records = await session.read();
+    assert.equal(records.filter((event) => event.kind === 'tool').length, 2);
+    assert.deepEqual(records.filter((event) => event.kind === 'tool').map((event) => event.result.code), ['tool_skipped', 'tool_args_invalid']);
+    assert.equal(records.filter((event) => event.kind === 'turn').length, 1);
+    assert.equal(records.at(-1).status, 'completed');
+    assert.equal(provider.requests.length, 2);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('output exhaustion preserves partial text and answers any incomplete calls without executing them', async () => {
+  const root = await mkdtemp(join(process.cwd(), 'testplace', 'loop-'));
+  try {
+    const session = createSessionLog({ directory: root, id: 'output-exhausted' });
+    const kernel = createKernel({ config: createConfig({ user: { boundary: root } }), session });
+    const ran = [];
+    kernel.register(tool('side_effect', async () => { ran.push('side_effect'); return { text: 'changed' }; }));
+    const provider = scriptedProvider([[
+      { type: 'text', text: 'partial answer' },
+      { type: 'tool-call', id: 'call_1', name: 'side_effect', args: {} },
+      { type: 'finish', reason: 'length' },
+    ]]);
+    await assert.rejects(
+      () => createLoop({ kernel, provider, session }).run('go'),
+      (error) => error.code === 'provider_output_exhausted',
+    );
+    assert.deepEqual(ran, []);
+    const events = await session.read();
+    assert.ok(events.some((event) => event.kind === 'assistant' && event.text === 'partial answer'));
+    assert.equal(events.filter((event) => event.kind === 'tool').length, 1);
+    assert.equal(events.filter((event) => event.kind === 'turn').length, 1);
+    assert.equal(events.at(-1).code, 'provider_output_exhausted');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a provider failure after partial output preserves trace and does not dispatch collected calls', async () => {
+  const root = await mkdtemp(join(process.cwd(), 'testplace', 'loop-'));
+  try {
+    const session = createSessionLog({ directory: root, id: 'partial-stream-failure' });
+    const kernel = createKernel({ config: createConfig({ user: { boundary: root } }), session });
+    const ran = [];
+    kernel.register(tool('side_effect', async () => { ran.push('side_effect'); return { text: 'changed' }; }));
+    const provider = {
+      async *stream() {
+        yield { type: 'text', text: 'partial answer' };
+        yield { type: 'tool-call', id: 'call_1', name: 'side_effect', args: {} };
+        throw new KernelError('provider_tool_args_invalid', { detail: 'tool arguments are not valid JSON' });
+      },
+    };
+    await assert.rejects(
+      () => createLoop({ kernel, provider, session }).run('go'),
+      (error) => error.code === 'provider_tool_args_invalid',
+    );
+    assert.deepEqual(ran, []);
+    const events = await session.read();
+    assert.ok(events.some((event) => event.kind === 'assistant' && event.text === 'partial answer'));
+    assert.equal(events.filter((event) => event.kind === 'tool').length, 1);
+    assert.equal(events.filter((event) => event.kind === 'turn').length, 1);
+    assert.equal(events.at(-1).code, 'provider_tool_args_invalid');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('the iteration limit and the model call budget each stop the run with their own code', async () => {
   const always = [[{ type: 'tool-call', name: 'noop' }]];
   const provider = scriptedProvider([...always, ...always, ...always, ...always]);

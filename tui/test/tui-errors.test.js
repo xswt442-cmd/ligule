@@ -15,6 +15,14 @@ const actionableCodes = [
   'provider_http_error',
   'provider_stream_invalid',
   'provider_tool_args_invalid',
+  'provider_output_exhausted',
+  'provider_empty_response',
+  'provider_stream_incomplete',
+  'provider_stream_interrupted',
+  'provider_finish_reason_invalid',
+  'provider_tool_call_invalid',
+  'provider_output_budget_invalid',
+  'provider_output_budget_unsupported',
 ];
 
 test('known runtime failures give next steps in Chinese and English', () => {

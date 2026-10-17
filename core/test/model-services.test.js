@@ -21,6 +21,32 @@ test('service validation rejects unknown fields, duplicate ids, unsafe URLs, and
   assert.throws(() => resolveModel({ services: [service] }, { provider: service.id, model: 'missing' }), error => error.code === 'model_not_available');
 });
 
+test('per-model settings validate ids, fields, uniqueness, and safe token budgets', () => {
+  const valid = { ...service, modelSettings: [{ id: service.models[0], name: 'Reasoner', contextTokens: 64000, outputTokens: 32000 }] };
+  assert.deepEqual(modelServices([valid])[0].modelSettings, valid.modelSettings);
+  const invalid = [
+    [{ ...service, modelSettings: [{ id: 'missing', outputTokens: 100 }] }],
+    [{ ...service, modelSettings: [{ id: service.models[0], outputTokens: 100 }, { id: service.models[0], contextTokens: 200 }] }],
+    [{ ...service, modelSettings: [{ id: service.models[0], outputTokens: 101, contextTokens: 100 }] }],
+    [{ ...service, modelSettings: [{ id: service.models[0], outputTokens: -1 }] }],
+    [{ ...service, modelSettings: [{ id: service.models[0], outputTokens: 1.5 }] }],
+    [{ ...service, modelSettings: [JSON.parse('{"id":"deepseek-reasoner","outputTokens":100,"__proto__":{"polluted":true}}')] }],
+    [{ ...service, modelSettings: [{ id: service.models[0], unsupported: true }] }],
+  ];
+  for (const value of invalid) assert.throws(() => modelServices(value), error => error.code === 'model_service_invalid');
+  const resolved = resolveModel({ services: [valid] }, { provider: service.id, model: service.models[0] });
+  assert.equal(resolved.outputTokens, 32000);
+  assert.equal(resolved.serviceOutputLimit, true);
+  assert.equal(resolved.serviceContextTokens, 64000);
+  assert.equal(resolveModel({ services: [service] }, { provider: service.id, model: service.models[0] }).serviceOutputLimit, undefined);
+  const forged = resolveModel({ api: service.api, baseURL: service.baseURL, model: service.models[0], serviceOutputLimit: true, serviceContextTokens: 1 });
+  assert.equal(forged.serviceOutputLimit, undefined);
+  assert.equal(forged.serviceContextTokens, undefined);
+  const switched = resolveModel({ services: [valid], serviceOutputLimit: true, serviceContextTokens: 1 }, { provider: service.id, model: service.models[1] });
+  assert.equal(switched.serviceOutputLimit, undefined);
+  assert.equal(switched.serviceContextTokens, undefined);
+});
+
 test('service and default selection use versioned TOML writes and preserve unrelated bytes', async () => {
   const scratch = join(process.cwd(), 'testplace', 'tmp');
   await mkdir(scratch, { recursive: true });
@@ -38,6 +64,11 @@ test('service and default selection use versioned TOML writes and preserve unrel
     assert.equal(resolveModel(parse(await readFile(file, 'utf8')).model).model, service.models[1]);
     await writeConfigField(file, { field: 'model.services', value: [{ ...service, name: 'Updated' }], version: selected.version });
     assert.equal((await readFile(file, 'utf8')).startsWith(untouched), true);
+    const withSettings = [{ ...service, modelSettings: [{ id: service.models[1], name: 'Custom', contextTokens: 96_000, outputTokens: 32_000 }] }];
+    const settingsWrite = await writeConfigField(file, { field: 'model.services', value: withSettings, version: configVersion(await readFile(file, 'utf8')) });
+    assert.deepEqual(structuredClone(parse(await readFile(file, 'utf8')).model.services), withSettings);
+    assert.equal(resolveModel(parse(await readFile(file, 'utf8')).model, { provider: service.id, model: service.models[1] }).outputTokens, 32_000);
+    assert.ok(settingsWrite.version);
     const commented = '[model]\nservices = [\n# keep this service comment\n{ id = "x", name = "X", api = "messages", baseURL = "https://example.test", apiKeyEnv = "KEY", models = ["m"] }\n]\n';
     await writeFile(file, commented, 'utf8');
     await assert.rejects(writeConfigField(file, { field: 'model.services', value: [service], version: configVersion(commented) }), error => error.code === 'config_edit_shape_unsupported');

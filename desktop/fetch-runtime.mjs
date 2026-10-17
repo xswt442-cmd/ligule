@@ -3,11 +3,12 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import spawn from 'cross-spawn';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertSymlinksInside, pruneForeignNativeDirectories } from '../scripts/runtime-tree.js';
+import { assertCoreRuntimeMatches } from '../scripts/core-runtime.js';
 
 const root = resolve(fileURLToPath(new URL('.', import.meta.url)), '..');
 const vendor = join(root, 'desktop', 'vendor');
@@ -82,41 +83,123 @@ async function fetchAppTree() {
   if (!existsSync(join(root, 'core', 'dist', 'host', 'desktop-entry.js'))) {
     throw new Error('Core Host entry is missing; run `pnpm run build:core` before preparing the runtime tree');
   }
-  await rm(app, { recursive: true, force: true });
-  const packageManager = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).packageManager;
-  const expectedVersion = /^pnpm@(\d+\.\d+\.\d+)$/.exec(packageManager ?? '')?.[1];
-  const userAgent = process.env.npm_config_user_agent ?? '';
-  const runningVersion = /^pnpm\/(\d+\.\d+\.\d+)/.exec(userAgent)?.[1];
-  const pnpmCli = process.env.npm_execpath;
-  if (expectedVersion === undefined || runningVersion !== expectedVersion || pnpmCli === undefined || !basename(pnpmCli).toLowerCase().includes('pnpm')) {
-    throw new Error(`run this script through the pinned ${packageManager ?? 'pnpm workspace'} command`);
+  const scratchRoot = join(root, 'desktop', 'testplace', 'tmp');
+  await mkdir(scratchRoot, { recursive: true });
+  const stagingRoot = await mkdtemp(join(scratchRoot, 'desktop-runtime-'));
+  const stagedApp = join(stagingRoot, 'package');
+  const projectedApp = join(stagingRoot, 'runtime-app');
+  try {
+    const packageManager = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).packageManager;
+    const expectedVersion = /^pnpm@(\d+\.\d+\.\d+)$/.exec(packageManager ?? '')?.[1];
+    const userAgent = process.env.npm_config_user_agent ?? '';
+    const runningVersion = /^pnpm\/(\d+\.\d+\.\d+)/.exec(userAgent)?.[1];
+    const pnpmCli = process.env.npm_execpath;
+    if (expectedVersion === undefined || runningVersion !== expectedVersion || pnpmCli === undefined || !basename(pnpmCli).toLowerCase().includes('pnpm')) {
+      throw new Error(`run this script through the pinned ${packageManager ?? 'pnpm workspace'} command`);
+    }
+    const args = ['--filter=ligule-desktop', '--prod', 'deploy', stagedApp];
+    const isJavaScriptCli = /\.(?:cjs|mjs|js)$/i.test(pnpmCli);
+    const result = spawn.sync(isJavaScriptCli ? process.execPath : pnpmCli, isJavaScriptCli ? [pnpmCli, ...args] : args, {
+      cwd: root,
+      stdio: 'inherit',
+      env: { ...process.env, PNPM_CONFIG_NODE_LINKER: 'hoisted' },
+    });
+    if (result.error) throw result.error;
+    if (result.status !== 0) throw new Error(`pnpm deploy exited with status ${result.status ?? 'unknown'}`);
+    const manifest = JSON.parse(await readFile(join(root, 'desktop', 'package.json'), 'utf8'));
+    manifest.dependencies['@ligule/core'] = '*';
+    delete manifest.devDependencies;
+    delete manifest.scripts;
+    await writeFile(join(stagedApp, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+    for (const metadataPath of [
+      join(stagedApp, 'pnpm-lock.yaml'),
+      join(stagedApp, 'pnpm-workspace.yaml'),
+      join(stagedApp, 'node_modules', '.modules.yaml'),
+      join(stagedApp, 'node_modules', '.pnpm-workspace-state-v1.json'),
+      join(stagedApp, 'node_modules', '.pnpm', 'lock.yaml'),
+    ]) {
+      await rm(metadataPath, { force: true });
+    }
+    await assertDeploySourceShape(stagedApp);
+    await assertSymlinksInside(stagedApp);
+    await mkdir(projectedApp);
+    await rename(join(stagedApp, 'package.json'), join(projectedApp, 'package.json'));
+    await rename(join(stagedApp, 'node_modules'), join(projectedApp, 'node_modules'));
+    await assertRuntimeAppContents(projectedApp);
+    await pruneForeignNativeDirectories(join(projectedApp, 'node_modules'), target);
+    await assertSymlinksInside(projectedApp);
+    await assertRuntimeAppContents(projectedApp);
+    await assertCoreRuntimeMatches(join(root, 'core'), join(projectedApp, 'node_modules', '@ligule', 'core'));
+
+    await rm(app, { recursive: true, force: true });
+    await rename(projectedApp, app);
+    await assertRuntimeAppContents(app);
+    await assertSymlinksInside(app);
+    console.log(`deployed the locked production runtime -> ${app} (${target})`);
+  } finally {
+    assertInsideRuntimeStaging(stagingRoot, scratchRoot);
+    await rm(stagingRoot, { recursive: true, force: true });
   }
-  const args = ['--filter=ligule-desktop', '--prod', 'deploy', app];
-  const isJavaScriptCli = /\.(?:cjs|mjs|js)$/i.test(pnpmCli);
-  const result = spawn.sync(isJavaScriptCli ? process.execPath : pnpmCli, isJavaScriptCli ? [pnpmCli, ...args] : args, {
-    cwd: root,
-    stdio: 'inherit',
-    env: { ...process.env, PNPM_CONFIG_NODE_LINKER: 'hoisted' },
-  });
-  if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(`pnpm deploy exited with status ${result.status ?? 'unknown'}`);
-  const manifest = JSON.parse(await readFile(join(root, 'desktop', 'package.json'), 'utf8'));
-  manifest.dependencies['@ligule/core'] = '*';
-  delete manifest.devDependencies;
-  delete manifest.scripts;
-  await writeFile(join(app, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
-  for (const metadataPath of [
-    join(app, 'pnpm-lock.yaml'),
-    join(app, 'pnpm-workspace.yaml'),
-    join(app, 'node_modules', '.modules.yaml'),
-    join(app, 'node_modules', '.pnpm-workspace-state-v1.json'),
-    join(app, 'node_modules', '.pnpm', 'lock.yaml'),
-  ]) {
-    await rm(metadataPath, { force: true });
+}
+
+async function assertDeploySourceShape(stagedApp) {
+  const entries = await readdir(stagedApp, { withFileTypes: true });
+  const allowed = new Map([
+    ['node_modules', 'directory'],
+    ['package.json', 'file'],
+    ['README.md', 'file'],
+    ['README.en.md', 'file'],
+    ['LICENSE', 'file'],
+    ['electron', 'directory'],
+  ]);
+  const unexpected = entries.filter((entry) => {
+    const type = allowed.get(entry.name);
+    return type === undefined || (type === 'directory' ? !entry.isDirectory() : !entry.isFile());
+  }).map((entry) => entry.name);
+  const electron = entries.find((entry) => entry.name === 'electron');
+  if (electron !== undefined) {
+    const electronEntries = await readdir(join(stagedApp, 'electron'), { withFileTypes: true });
+    const dist = electronEntries.find((entry) => entry.name === 'dist');
+    if (electronEntries.length !== 1 || dist?.isDirectory() !== true) {
+      unexpected.push('electron/*');
+    } else {
+      const distEntries = await readdir(join(stagedApp, 'electron', 'dist'), { withFileTypes: true });
+      if (distEntries.length !== 1 || distEntries[0].name !== 'main.js' || !distEntries[0].isFile()) {
+        unexpected.push('electron/dist/*');
+      }
+    }
   }
-  await pruneForeignNativeDirectories(join(app, 'node_modules'), target);
-  await assertSymlinksInside(app);
-  console.log(`deployed the locked production runtime -> ${app} (${target})`);
+  const hasPackage = entries.some((entry) => entry.name === 'package.json' && entry.isFile());
+  const hasModules = entries.some((entry) => entry.name === 'node_modules' && entry.isDirectory());
+  if (!hasPackage || !hasModules || unexpected.length > 0) {
+    throw new Error(`pnpm deploy produced unexpected Desktop package files: ${unexpected.join(', ') || 'package.json or node_modules is missing'}`);
+  }
+}
+
+async function assertRuntimeAppContents(appRoot) {
+  const entries = await readdir(appRoot, { withFileTypes: true });
+  const allowed = new Map([
+    ['node_modules', 'directory'],
+    ['package.json', 'file'],
+  ]);
+  const unexpected = entries.filter((entry) => {
+    const type = allowed.get(entry.name);
+    return type === undefined || (type === 'directory' ? !entry.isDirectory() : !entry.isFile());
+  }).map((entry) => entry.name);
+  const hasPackage = entries.some((entry) => entry.name === 'package.json' && entry.isFile());
+  const hasModules = entries.some((entry) => entry.name === 'node_modules' && entry.isDirectory());
+  if (!hasPackage || !hasModules || unexpected.length > 0) {
+    throw new Error(`the Desktop runtime app root has unexpected or missing entries: ${unexpected.join(', ') || 'package.json or node_modules is missing'}`);
+  }
+}
+
+function assertInsideRuntimeStaging(path, directory) {
+  const rootPath = resolve(directory);
+  const targetPath = resolve(path);
+  const relativePath = relative(rootPath, targetPath);
+  if (relativePath === '' || relativePath === '..' || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
+    throw new Error(`temporary Desktop runtime path must remain inside desktop/testplace/tmp: ${path}`);
+  }
 }
 
 await fetchNode();

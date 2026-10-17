@@ -60,9 +60,9 @@ In the desktop app, open “Model services” under “Settings” to add multip
 ```toml
 [model]
 services = [
-  { id = "deepseek", name = "DeepSeek", api = "chat-completions", baseURL = "https://api.deepseek.com/v1", apiKeyEnv = "DEEPSEEK_API_KEY", models = ["deepseek-chat"] },
+  { id = "deepseek", name = "DeepSeek", api = "chat-completions", baseURL = "https://api.deepseek.com/v1", apiKeyEnv = "DEEPSEEK_API_KEY", models = ["deepseek-flash"] },
 ]
-selection = { provider = "deepseek", model = "deepseek-chat" }
+selection = { provider = "deepseek", model = "deepseek-flash" }
 ```
 
 Set each service's `api` to `chat-completions` or `messages`; `models` lists its available models. Put the API key in the environment variable named by `apiKeyEnv`. The desktop model services page can also save a key in the operating system credential store. A non-empty environment variable takes priority. Linux uses Secret Service and reports an error when it is unavailable. The legacy single-service fields `model.api`, `model.baseURL`, and `model.model` remain supported; if that configuration omits `apiKeyEnv`, ligule reads `LIGULE_API_KEY`.
@@ -71,6 +71,24 @@ The default service and model apply to new sessions. Use the model menu beside t
 
 Use `/credentials` in the terminal UI to check the current model's credential reference and source: environment, OS credential store, or not set. It never displays the key. `provider_credential_missing` means that reference has no key in the launching environment or the credential store for the current data root. Restart the terminal program after changing environment variables, or save a key through Desktop Model services. Both interfaces must use the same `LIGULE_HOME` to access the same stored credentials.
 
+#### Model output budget
+
+Each service under Desktop “Settings → Model services” has a model configuration table. Add or remove models and edit their display names, context windows, and maximum output tokens. Blank limits inherit existing configuration; enter full positive integers such as `128000`. Display names do not change the model ID sent to the service. Services supporting discovery can fetch and add models in one action; existing names and limits are preserved. Discovery does not infer token limits. Apply catalog edits with “Save service”.
+
+Per-model settings use the optional `modelSettings` list within the service. Each `id` references an ID in `models`, for example `modelSettings = [{ id = "custom-model", name = "My model", contextTokens = 128000, outputTokens = 16384 }]`. The selected model's context window controls compaction and its output budget controls actual requests. Identically named models in different services keep independent settings. Existing ID-only catalogs remain compatible.
+
+`model.outputTokens` sets the maximum output-token budget for each request. The default remains 8192. Set `outputTokens = 16384` under `[model]`, or use the existing `config.set` interface. The value must be a positive integer within verified model limits, explicitly configured capability limits, and the context window.
+
+The default output budget must also fit the configured context window. If the context window is smaller than that default, explicitly set an output budget no larger than the window. Invalid configurations fail explicitly rather than silently reducing the budget.
+
+Higher built-in limits currently cover `deepseek-flash` and `deepseek-v4-pro` at the official `https://api.deepseek.com` endpoint, for Chat Completions and Anthropic-compatible Messages. Other endpoints and unverified models retain the conservative 8192 limit without a per-model declaration. A per-model `outputTokens` setting can declare a higher budget supported by a custom service; enter a value supported by that service. Declarations cannot raise verified official ceilings, configured capability limits, or the selected model's context window. An excessive budget fails with `provider_output_budget_unsupported`; an invalid value fails with `provider_output_budget_invalid`. There is no silent reduction. Switching models or services recalculates the applicable limits.
+
+The legacy `model.capabilities.maxOutputTokens` can still only lower the adapter's declared limit: writing 16384 there does not raise the original 8192 ceiling. Use `model.outputTokens` for a higher request budget and check for a lower legacy capability override. Configuration changes apply at turn boundaries; an active turn keeps its existing budget.
+
+Model settings are validated against the complete effective configuration before saving. A rejected setting leaves the configuration file unchanged. User-layer changes also validate the shared defaults on their own, other loaded projects, and explicitly selected session models; higher-priority project or command-line settings retain their precedence. Initial setup may save incomplete model fields so the remaining fields can be filled in.
+
+Both APIs support `model.capabilities.streaming = false`. Requests then use ordinary JSON responses, with the same completion, output-budget, tool validation, and cancellation rules as streaming responses. This setting changes response delivery, not tool permissions or automatic retry scope.
+
 ### Sessions and input
 
 In the terminal UI, use `/sessions` to browse sessions in the current workspace and `/resume <id> [mode]` to resume one; you can use a unique ID prefix. In the desktop app, switch sessions from the sidebar. The conversation menu provides rename, archive, restore, branch, export, view subtasks, refresh, and compact context actions.
@@ -78,6 +96,22 @@ In the terminal UI, use `/sessions` to browse sessions in the current workspace 
 Type `@` in the composer to find files in the current workspace. Selecting a file suggestion inserts its path into the draft without sending the message. Press Enter to send; press Shift+Enter for a new line. Messages sent while a session is running are queued and sent in order. Cancelling a turn pauses the queue. View the queue, resume sending, or move queued messages back into the draft. After reconnecting, queued messages return to the draft and are not sent automatically.
 
 The desktop app saves drafts and queues separately for each workspace and session, and restores them when reopened. The terminal UI saves its draft and queue for each workspace and session. Both interfaces share the history of sent messages.
+
+While running, terminal and desktop status show the phase confirmed by the Host: preparing context, requesting the model, executing tools, compacting, waiting for approval or input, or settling. Time without progress measures the interval since actual model output or tool activity; it does not prove a failure. After a command exits, the Agent may request the model again. There is no fixed inactivity timeout that automatically cancels a turn.
+
+A response completes only after a normal protocol ending with useful text or tool calls. Truncated output, reasoning-only or blank responses, and incomplete streams fail the turn. Partial text remains in the record, and executed tools are not automatically replayed. Inspect the record before explicitly submitting another task or cancelling the active one.
+
+| Error code | Meaning |
+| --- | --- |
+| `provider_output_exhausted` | The provider reached its output budget; the response is incomplete |
+| `provider_empty_response` | Normal ending without useful text or tool calls |
+| `provider_stream_incomplete` | Missing protocol terminator, finish reason, or complete frame |
+| `provider_stream_interrupted` | Reading the response body was interrupted |
+| `provider_finish_reason_invalid` | Unsupported provider finish reason |
+| `provider_tool_call_invalid` | Missing or duplicated call identity, or missing tool name |
+| `provider_tool_args_invalid` | Tool arguments are invalid JSON; the batch was not executed |
+
+HTTP errors show the status and necessary fixed classification, without raw gateway bodies or malformed tool arguments. Retryable transport failures and configured retryable HTTP 429/5xx responses follow the configured attempt and backoff limits before a successful response body is read. An interruption after body reading begins does not automatically replay the whole request. Explicit user cancellation remains `cancelled`.
 
 ### Approvals and settings
 

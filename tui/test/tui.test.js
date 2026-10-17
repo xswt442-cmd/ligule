@@ -170,6 +170,33 @@ test('the metadata line contains session, context, record and runtime hints', op
   assert.doesNotMatch(noWindow, /minimal|policy|model:/);
 });
 
+test('the metadata line identifies the Host phase and elapsed time since actual progress', options, () => {
+  const status = {
+    mode: 'minimal', policy: 'ask', tools: [], eventCount: 1,
+    progress: {
+      phase: 'model_request', startedAt: 1_000, phaseStartedAt: 2_000, lastProgressAt: 4_000,
+      modelCalls: 2, toolCalls: 1, outputTokens: 16_384,
+    },
+  };
+  const line = buildStatusLine({ sessionId: 'session-id', status, running: true, seconds: 6, expanded: false, now: 11_000 });
+  assert.match(line, /请求模型/);
+  assert.match(line, /2 次模型调用/);
+  assert.match(line, /1 个工具调用/);
+  assert.match(line, /7秒无新进展/);
+  const english = buildStatusLine({ sessionId: 'session-id', status, running: true, seconds: 6, expanded: false, locale: 'en', now: 11_000 });
+  assert.match(english, /Requesting model/);
+  assert.match(english, /7s without progress/);
+  for (const locale of ['zh', 'en']) {
+    for (const columns of [60, 80, 120]) {
+      const narrow = buildStatusLine({ sessionId: 'session-id', status, running: true, seconds: 6,
+        expanded: false, now: 11_000, locale, columns });
+      assert.ok(displayWidth(narrow) <= columns, `${locale} progress exceeds ${columns} columns`);
+      assert.match(narrow, locale === 'zh' ? /请求模型/ : /Requesting model/);
+      assert.match(narrow, /7/);
+    }
+  }
+});
+
 test('English terminal labels preserve model content, paths and command help entries', options, () => {
   const help = [...helpEntries('commands', [], 'en'), ...helpEntries('keys', [], 'en'), ...helpEntries('templates', [], 'en')]
     .map((entry) => `${entry.key} ${entry.description}`).join('\n');

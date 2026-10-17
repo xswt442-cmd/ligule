@@ -11,11 +11,14 @@ Use Node.js 24 or newer. The workspace pins pnpm to 12.9.1. From the repository 
 ```sh
 pnpm install --frozen-lockfile
 pnpm test
+pnpm check:syntax
 pnpm check-pack
 pnpm verify-install
 ```
 
 `pnpm test` builds `dist/` and runs the automated test suite; `pnpm check-pack` inspects the CLI npm artifact; `pnpm verify-install` installs it into a clean consumer and performs a real search. The consumer install uses npm to verify the CLI's npm installation path.
+
+The MCP integration in `tests/mcp-server.test.js` uses a real SDK stdio client, a local HTTP model endpoint, persistent Session records, Policy decisions and child processes. Run it directly with `node --test --import ./test/hooks/isolated-data-root.mjs tests/mcp-server.test.js`. The standalone client in `test/helpers/mcp-control.mjs` accepts explicit installed CLI and SDK paths so the same control calls can be checked outside the checkout. See the [MCP guide](../mcp/guide.en.md) for tool and permission semantics. A deterministic model endpoint does not count as a real external model service test.
 
 ## Desktop development
 

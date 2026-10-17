@@ -75,6 +75,7 @@ export interface Kernel {
   execution(name: string): 'parallel' | 'serial';
   register(tool: ToolDefinition): () => void;
   manifest(): ToolManifestEntry[];
+  validateCall(name: string, args: unknown): { readonly code?: 'tool_not_found' | 'tool_args_invalid'; readonly detail?: string };
   restrict(names: readonly string[]): () => void;
   call(name: string, args?: unknown, options?: { readonly callId?: string; readonly signal?: AbortSignal }): Promise<unknown>;
 }
@@ -241,6 +242,18 @@ export function createKernel(options: KernelOptions = {}): Kernel {
           description: tool.description,
           parameters: structuredClone(tool.parameters),
         }));
+    },
+
+    // Pure preflight for a model response batch: checks registration and the same schema subset as call(),
+    // without policy evaluation, session writes, approval, or tool execution.
+    validateCall(name, args) {
+      const tool = tools.get(name);
+      if (!tool) return { code: 'tool_not_found', detail: `no tool named "${name}" is registered for this run` };
+      const violations = validateArgs(tool.parameters, args);
+      if (violations.length > 0 || !isPlainObject(args)) {
+        return { code: 'tool_args_invalid', detail: violations.length > 0 ? violations.join('; ') : 'arguments must be an object' };
+      }
+      return {};
     },
 
     // 拒绝只收紧：后一次 restrict() 不撤销前一次的拒绝，卸载自己这一项也不解除重叠的那一份。

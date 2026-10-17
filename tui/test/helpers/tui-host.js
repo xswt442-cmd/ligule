@@ -80,6 +80,7 @@ export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {},
       if (response.destroyed) return;
       const frames = [
         { choices: [{ index: 0, delta: call ? { tool_calls: [{ index: 0, id: randomUUID(), type: 'function', function: { name: operation.tool, arguments: JSON.stringify(operation.args) } }] } : { content: answer } }] },
+        { choices: [{ index: 0, delta: {}, finish_reason: call ? 'tool_calls' : 'stop' }] },
         { choices: [], usage: { prompt_tokens: rawBody.byteLength, completion_tokens: Buffer.byteLength(answer) } },
       ];
       response.writeHead(200, { 'content-type': 'text/event-stream' });
