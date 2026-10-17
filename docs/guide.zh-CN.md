@@ -73,9 +73,15 @@ selection = { provider = "deepseek", model = "deepseek-flash" }
 
 #### 模型输出预算
 
+桌面「设置 → 模型服务」的每个服务都有模型配置表，可手动添加、删除模型，并填写显示名称、上下文窗口与最大输出 token 数。留空的数值继承现有配置；填写数字时使用完整的正整数，例如 `128000`。显示名称不改变发送到服务的模型标识。支持模型发现的服务可以一键获取并填入目录；已有模型的名称和参数保留，获取列表不会探测 token 上限。目录修改在「保存服务」后生效。
+
+逐模型设置保存在同一服务的可选 `modelSettings` 列表中，`id` 对应 `models` 中的模型标识，例如 `modelSettings = [{ id = "custom-model", name = "我的模型", contextTokens = 128000, outputTokens = 16384 }]`。选中该模型时，其上下文窗口用于压缩判断，输出额度用于实际请求。不同服务中同名模型的设置互相独立；旧的纯模型标识列表仍可使用。
+
 `model.outputTokens` 是每次请求的最大输出 token 预算，未设置时保留默认 8192。可以在 `[model]` 下显式填写 `outputTokens = 16384`；该字段也支持现有 `config.set` 配置接口。预算必须是正整数，并且不能超过已核实的模型上限、显式配置的能力限制或上下文窗口。
 
-当前内置的更高上限适用于官方 `https://api.deepseek.com` 端点的 `deepseek-flash`、`deepseek-v4-pro`，同时覆盖 Chat Completions 和 Anthropic 兼容 Messages。其他服务和未经核实的模型保留 8192 的保守限制。高于有效上限时报 `provider_output_budget_unsupported`，非法值时报 `provider_output_budget_invalid`，不会静默改成较低预算。模型或服务切换会重新核对限制。
+默认输出预算也必须满足配置的上下文窗口；如果把上下文设得低于默认预算，需要同时填写不超过该窗口的输出额度。无效配置会明确拒绝，不自动缩小预算。
+
+当前内置的更高上限适用于官方 `https://api.deepseek.com` 端点的 `deepseek-flash`、`deepseek-v4-pro`，同时覆盖 Chat Completions 和 Anthropic 兼容 Messages。其他服务和未经核实的模型在没有逐模型声明时保留 8192 的保守限制；逐模型 `outputTokens` 可声明自定义服务支持的更高额度，请按服务的实际能力填写。声明不能提高已核实的官方模型上限，也不能超过显式能力限制或选中模型的上下文窗口。高于有效上限时报 `provider_output_budget_unsupported`，非法值时报 `provider_output_budget_invalid`，不会静默改成较低预算。模型或服务切换会重新核对限制。
 
 旧的 `model.capabilities.maxOutputTokens` 继续只能降低适配器声明的限制，填写 16384 不会提高原有 8192 上限。需要更高预算时使用 `model.outputTokens`，并核对是否还存在较低的旧能力限制。配置更新在会话轮次边界生效；正在执行的一轮保持原有预算。
 

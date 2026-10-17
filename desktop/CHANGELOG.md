@@ -8,6 +8,8 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 ### 简体中文
 
+- 模型服务提供可编辑的模型目录表，支持逐模型名称、上下文窗口和最大输出 token 数；一键获取列表并保留手动参数，设置实际用于选中模型的请求与压缩。
+
 - 安装包中的 Node 运行树只包含产品清单和生产依赖；构建与运行资源检查会拒绝源码、测试材料和嵌套部署目录。
 - 当文件权限边界与项目目录不同时，会话归属、项目设置与重启恢复仍使用实际项目目录。
 - 状态栏显示 Host 确认的运行阶段与无进展时长；长标题保留状态和操作按钮的显示空间。
@@ -16,6 +18,8 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 - 修复没有选中会话时重连后断连横幅残留；Linux deb 增加 GBM 和 ALSA 运行依赖声明。
 
 ### English
+
+- Added editable model catalogs with per-model display names, context windows, and maximum output tokens. Fetching adds models while preserving manual settings; the selected model's limits control actual requests and compaction.
 
 - Restricted the packaged Node runtime tree to its product manifest and production dependencies; build and runtime-resource checks reject source files, test material, and nested deployment directories.
 - Session ownership, project settings, and restart recovery use the actual project directory when it differs from the filesystem permission boundary.

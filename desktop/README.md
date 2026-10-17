@@ -104,6 +104,16 @@ Linux deb 声明 GBM 与 ALSA 运行库，以及 Electron 的基础桌面依赖�
 
 Core 修改后重新执行 `pnpm run build:core` 和 `pnpm run prepare-runtime`。部署、构建与 `check-runtime.mjs` 会逐文件核对 Core 的 `dist/`、`modes/`、README 和许可证；运行树过时、缺失或多出文件时直接失败。入口文件存在不能代替运行树内容一致。
 
+## 模型目录原生验收
+
+在 Windows 完成 Core、前端与 Electron 编译后运行：
+
+```powershell
+desktop/vendor/node/node.exe desktop/electron/test/run-model-catalog-native.mjs
+```
+
+脚本使用隔离数据目录、真实 Electron 窗口和 Node Host，以及本地 HTTP 协议测试服务，验证模型表格、发现合并、保存校验、模型选择和请求额度；不调用真实模型、不读取个人密钥。证据默认保存在 `desktop/testplace/readings/model-catalog/` 和 `desktop/testplace/shots/model-catalog/`。可用 `--evidence-dir=<绝对路径>` 与 `--shots-dir=<绝对路径>` 显式指定输出位置。
+
 ## 应用图标
 
 [`assets/app-icon.png`](assets/app-icon.png) 是源图。在 Windows 上重新生成桌面图标：

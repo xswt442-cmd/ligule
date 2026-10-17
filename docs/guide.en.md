@@ -73,9 +73,15 @@ Use `/credentials` in the terminal UI to check the current model's credential re
 
 #### Model output budget
 
+Each service under Desktop “Settings → Model services” has a model configuration table. Add or remove models and edit their display names, context windows, and maximum output tokens. Blank limits inherit existing configuration; enter full positive integers such as `128000`. Display names do not change the model ID sent to the service. Services supporting discovery can fetch and add models in one action; existing names and limits are preserved. Discovery does not infer token limits. Apply catalog edits with “Save service”.
+
+Per-model settings use the optional `modelSettings` list within the service. Each `id` references an ID in `models`, for example `modelSettings = [{ id = "custom-model", name = "My model", contextTokens = 128000, outputTokens = 16384 }]`. The selected model's context window controls compaction and its output budget controls actual requests. Identically named models in different services keep independent settings. Existing ID-only catalogs remain compatible.
+
 `model.outputTokens` sets the maximum output-token budget for each request. The default remains 8192. Set `outputTokens = 16384` under `[model]`, or use the existing `config.set` interface. The value must be a positive integer within verified model limits, explicitly configured capability limits, and the context window.
 
-Higher built-in limits currently cover `deepseek-flash` and `deepseek-v4-pro` at the official `https://api.deepseek.com` endpoint, for Chat Completions and Anthropic-compatible Messages. Other endpoints and unverified models retain the conservative 8192 limit. An excessive budget fails with `provider_output_budget_unsupported`; an invalid value fails with `provider_output_budget_invalid`. There is no silent reduction. Switching models or services recalculates the applicable limits.
+The default output budget must also fit the configured context window. If the context window is smaller than that default, explicitly set an output budget no larger than the window. Invalid configurations fail explicitly rather than silently reducing the budget.
+
+Higher built-in limits currently cover `deepseek-flash` and `deepseek-v4-pro` at the official `https://api.deepseek.com` endpoint, for Chat Completions and Anthropic-compatible Messages. Other endpoints and unverified models retain the conservative 8192 limit without a per-model declaration. A per-model `outputTokens` setting can declare a higher budget supported by a custom service; enter a value supported by that service. Declarations cannot raise verified official ceilings, configured capability limits, or the selected model's context window. An excessive budget fails with `provider_output_budget_unsupported`; an invalid value fails with `provider_output_budget_invalid`. There is no silent reduction. Switching models or services recalculates the applicable limits.
 
 The legacy `model.capabilities.maxOutputTokens` can still only lower the adapter's declared limit: writing 16384 there does not raise the original 8192 ceiling. Use `model.outputTokens` for a higher request budget and check for a lower legacy capability override. Configuration changes apply at turn boundaries; an active turn keeps its existing budget.
 
