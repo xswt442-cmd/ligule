@@ -18,7 +18,7 @@ pnpm verify-install
 
 `pnpm test` 会构建 `dist/` 并运行自动化测试；`pnpm check-pack` 检查 CLI npm 包产物；`pnpm verify-install` 会将该产物安装到干净的消费者环境并运行真实搜索。消费者安装使用 npm，以验证 CLI 的 npm 安装路径。
 
-`tests/mcp-server.test.js` 通过真实 SDK stdio 客户端、本地 HTTP 模型端点、持久 Session 记录、Policy 与子进程验证外控。可单独运行 `node --test --import ./test/hooks/isolated-data-root.mjs tests/mcp-server.test.js`。`test/helpers/mcp-control.mjs` 独立客户端接受明确的已安装 CLI 和 SDK 路径，可在检出目录之外检查相同控制调用。工具与权限语义见 [MCP 指南](../mcp/guide.zh-CN.md)。确定性模型端点测试不代表真实外部模型服务验收。
+`tests/mcp-server.test.js` 通过真实 SDK stdio 客户端、本地 HTTP 模型端点、持久 Session 记录、Policy 与子进程验证外控。可单独运行 `node --test --import ./test/hooks/isolated-data-root.mjs tests/mcp-server.test.js`。`test/helpers/mcp-control.mjs` 独立客户端接受明确的已安装 CLI 和 SDK 路径，可在检出目录之外检查相同控制调用。工具与权限语义见 [MCP 指南](../mcp/mcp-guide.zh-CN.md)。确定性模型端点测试不代表真实外部模型服务验收。
 
 ## 桌面开发
 
@@ -35,7 +35,7 @@ pnpm --filter ligule-desktop-frontend run build
 pnpm --filter ligule-desktop run dev
 ```
 
-安装包构建、真实窗口和各平台原生验收步骤见[桌面开发说明](../../desktop/README.md)。
+安装包构建、真实窗口和各平台原生验收步骤见[桌面开发说明](DESKTOP.zh-cn.md)。
 
 ## 让改动可核验
 

@@ -20,15 +20,18 @@ const bilingualPairs = [
   [join(repoRoot, 'tui', 'README.md'), join(repoRoot, 'tui', 'README.en.md')],
   [join(repoRoot, 'desktop', 'README.md'), join(repoRoot, 'desktop', 'README.en.md')],
   [zhPath, enPath],
-  [join(repoRoot, 'docs', 'mcp', 'guide.zh-CN.md'), join(repoRoot, 'docs', 'mcp', 'guide.en.md')],
+  [join(repoRoot, 'docs', 'mcp', 'mcp-guide.zh-CN.md'), join(repoRoot, 'docs', 'mcp', 'mcp-guide.en.md')],
   [join(repoRoot, 'docs', 'development', 'ARCHITECTURE.zh-cn.md'), join(repoRoot, 'docs', 'development', 'ARCHITECTURE.en.md')],
   [join(repoRoot, 'docs', 'development', 'GLOSSARY.zh-cn.md'), join(repoRoot, 'docs', 'development', 'GLOSSARY.en.md')],
   [join(repoRoot, 'docs', 'development', 'CONTRIBUTING.zh-cn.md'), join(repoRoot, 'docs', 'development', 'CONTRIBUTING.en.md')],
+  [join(repoRoot, 'docs', 'development', 'DESKTOP.zh-cn.md'), join(repoRoot, 'docs', 'development', 'DESKTOP.en.md')],
 ];
 const maintainedDocs = [
   ...bilingualPairs.flatMap((pair) => pair),
   join(repoRoot, 'tui', 'CHANGELOG.md'),
   join(repoRoot, 'docs', 'development', 'RELEASE.md'),
+  join(repoRoot, 'docs', 'development', 'DESKTOP.zh-cn.md'),
+  join(repoRoot, 'docs', 'development', 'DESKTOP.en.md'),
   join(repoRoot, 'tui', 'docs', 'guide.zh-CN.md'),
   join(repoRoot, 'tui', 'docs', 'guide.en.md'),
 ];
@@ -133,19 +136,22 @@ test('双语手册的多服务 TOML 示例相同且符合实际配置格式', ()
   });
 });
 
-test('workspace and TUI READMEs point to module and product documentation', () => {
+test('workspace and product READMEs present the products and link to maintained documentation', () => {
   const manifest = JSON.parse(readFileSync(join(repoRoot, 'tui', 'package.json'), 'utf8'));
   const rootReadme = readFileSync(join(repoRoot, 'README.md'), 'utf8');
   const readme = readFileSync(join(repoRoot, 'tui', 'README.md'), 'utf8');
   const englishReadme = readFileSync(join(repoRoot, 'tui', 'README.en.md'), 'utf8');
-  assert.match(rootReadme, /core\/.*tui\/.*desktop\//s);
+  assert.match(rootReadme, /共享 Agent Core/);
   assert.match(rootReadme, /docs\/development\/ARCHITECTURE\.zh-cn\.md/);
   assert.match(readme, /docs\/guide\.zh-CN\.md/);
-  assert.match(readme, /github\.com\/xswt442-cmd\/ligule\/blob\/main\/docs\/development\/ARCHITECTURE\.zh-cn\.md/);
-  assert.match(readme, /github\.com\/xswt442-cmd\/ligule\/blob\/main\/docs\/development\/RELEASE\.md/);
-  assert.match(englishReadme, /github\.com\/xswt442-cmd\/ligule\/blob\/main\/docs\/development\/ARCHITECTURE\.en\.md/);
+  assert.match(readme, /\.\.\/docs\/development\/CONTRIBUTING\.zh-cn\.md/);
+  assert.match(englishReadme, /\.\.\/docs\/development\/CONTRIBUTING\.en\.md/);
+  assert.doesNotMatch(readme, /github\.com\/xswt442-cmd\/ligule\/blob\/main/);
+  assert.doesNotMatch(englishReadme, /github\.com\/xswt442-cmd\/ligule\/blob\/main/);
   assert.match(readme, /CHANGELOG\.md/);
   assert.match(englishReadme, /CHANGELOG\.md/);
+  assert.doesNotMatch(readFileSync(join(repoRoot, 'desktop', 'README.md'), 'utf8'), /pnpm|desktop\/vendor|testplace\/readings/);
+  assert.doesNotMatch(readFileSync(join(repoRoot, 'desktop', 'README.en.md'), 'utf8'), /pnpm|desktop\/vendor|testplace\/readings/);
   assert.ok(manifest.files.includes('README.en.md'), 'the English README must be included in the npm package');
   assert.ok(manifest.files.some((file) => file.includes('CHANGELOG.md')), 'the version history must be included in the npm package');
 });
@@ -181,6 +187,8 @@ test('development 文档文件名使用大写主体与小写语言标记', () =>
     'ARCHITECTURE.zh-cn.md',
     'CONTRIBUTING.en.md',
     'CONTRIBUTING.zh-cn.md',
+    'DESKTOP.en.md',
+    'DESKTOP.zh-cn.md',
     'GLOSSARY.en.md',
     'GLOSSARY.zh-cn.md',
     'RELEASE.md',

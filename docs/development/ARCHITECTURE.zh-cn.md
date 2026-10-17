@@ -50,7 +50,7 @@ flowchart LR
 
 [项目环境装载模块](../../core/src/host/environment.ts) 为 CLI 与 Desktop Host 入口提供同一次读取的配置层与扩展来源。[Provider 构造模块](../../core/src/host/provider.ts) 校验模型协议、能力声明与重试设置；未配置模型的 Host 可以接收设置请求，模型运行明确失败。[会话模式事务](../../core/src/host/session-mode.ts) 负责安装工具限制、提示片段、失败回收和模式事实记录；Host 继续持有会话锁、活跃轮次、协议路由与资源清理。TUI 的记录投影位于 [transcript.ts](../../tui/src/tui/transcript.ts)，Desktop 的[流式缓冲](../../desktop/frontend/src/session-stream.ts) 按会话隔离未落盘输出。
 
-`ligule mcp-server --project <绝对项目根>` 通过 [MCP 适配器](../../core/src/host/mcp-server.ts) 暴露七个本地控制工具。[控制门面](../../core/src/host/control.ts) 调用同一 Host，维护进程内 operation 状态，只访问授权项目中已打开的会话，并拒绝审批请求。连接关闭时取消运行并释放会话锁；持久恢复依靠 Session JSONL，operation ID 不持久化。使用方法见 [MCP 用户指南](../mcp/guide.zh-CN.md)。
+`ligule mcp-server --project <绝对项目根>` 通过 [MCP 适配器](../../core/src/host/mcp-server.ts) 暴露七个本地控制工具。[控制门面](../../core/src/host/control.ts) 调用同一 Host，维护进程内 operation 状态，只访问授权项目中已打开的会话，并拒绝审批请求。连接关闭时取消运行并释放会话锁；持久恢复依靠 Session JSONL，operation ID 不持久化。使用方法见 [MCP 用户指南](../mcp/mcp-guide.zh-CN.md)。
 
 ### Kernel、插件、工具与能力
 
