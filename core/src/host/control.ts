@@ -176,8 +176,8 @@ export function createControl(host: Host, projectRoot: string) {
     release(): Promise<void> {
       if (closing !== undefined) return closing;
       closing = (async () => {
-        await Promise.allSettled([...pending]);
         await host.release();
+        await Promise.allSettled([...pending]);
         await Promise.all([...operations.values()].map((found) => found.settled));
         sessions.clear();
       })();

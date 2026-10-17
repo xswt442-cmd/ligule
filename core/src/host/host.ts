@@ -1320,6 +1320,7 @@ export function createHost({
     env: ProjectEnvironment = defaultEnvironment,
     workspaceOrigin?: 'explicit' | 'default',
   ): Promise<{ sessionId: string }> {
+    if (closing !== undefined) throw new KernelError('host_closed');
     const pending = build(id, connection, recover, mode, env, workspaceOrigin).then((state) => {
       sessions.set(id, state);
       return { sessionId: id };
