@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolvePackageBin } from './package-bin.mjs';
 import { assertCoreRuntimeMatches } from '../scripts/core-runtime.js';
-import { assertSymlinksInside } from '../scripts/runtime-tree.js';
+import { assertNoForeignNativeDirectories, assertSymlinksInside } from '../scripts/runtime-tree.js';
 
 const desktopRoot = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = dirname(desktopRoot);
@@ -65,6 +65,7 @@ if (missingRuntimePaths.length > 0) {
   throw new Error(`desktop runtime resources are missing: ${missingRuntimePaths.join(', ')}`);
 }
 await assertSymlinksInside(join(desktopRoot, 'vendor', 'app'));
+await assertNoForeignNativeDirectories(join(desktopRoot, 'vendor', 'app', 'node_modules'), `${process.platform}-${process.arch}`);
 await assertCoreRuntimeMatches(
   join(repositoryRoot, 'core'),
   join(desktopRoot, 'vendor', 'app', 'node_modules', '@ligule', 'core'),
