@@ -259,13 +259,13 @@ try {
 
 const mcpProbe = spawnSync(process.execPath, ['mcp-probe.mjs'], { cwd: consumer, env, encoding: 'utf8', timeout: 45_000 });
 if (mcpProbe.status !== 0) {
-  throw new Error(`the installed package failed its stdio MCP probe: ${(mcpProbe.stderr ?? '').slice(0, 1200)}`);
+  throw new Error(`the installed package failed its stdio MCP probe (status=${mcpProbe.status}, signal=${mcpProbe.signal}, error=${mcpProbe.error?.message ?? 'none'}): ${(mcpProbe.stderr ?? '').slice(0, 1200)}`);
 }
 for (const line of mcpProbe.stdout.trim().split('\n')) readings.push(line);
 const createdSessionId = readFileSync(join(consumer, 'mcp-session-id'), 'utf8').trim();
 const reopenProbe = spawnSync(process.execPath, ['mcp-probe.mjs', createdSessionId], { cwd: consumer, env, encoding: 'utf8', timeout: 45_000 });
 if (reopenProbe.status !== 0) {
-  throw new Error(`the installed MCP server could not reopen its session after disconnect: ${(reopenProbe.stderr ?? '').slice(0, 1200)}`);
+  throw new Error(`the installed MCP server could not reopen its session after disconnect (status=${reopenProbe.status}, signal=${reopenProbe.signal}, error=${reopenProbe.error?.message ?? 'none'}): ${(reopenProbe.stderr ?? '').slice(0, 1200)}`);
 }
 for (const line of reopenProbe.stdout.trim().split('\n')) readings.push(line);
 
