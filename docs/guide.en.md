@@ -111,7 +111,7 @@ A response completes only after a normal protocol ending with useful text or too
 | `provider_tool_call_invalid` | Missing or duplicated call identity, or missing tool name |
 | `provider_tool_args_invalid` | Tool arguments are invalid JSON; the batch was not executed |
 
-HTTP errors show the status and necessary fixed classification, without raw gateway bodies or malformed tool arguments. Retryable failures before a response follow the configured attempt and backoff limits. A stream interruption does not automatically replay the whole request. Explicit user cancellation remains `cancelled`.
+HTTP errors show the status and necessary fixed classification, without raw gateway bodies or malformed tool arguments. Retryable transport failures and configured retryable HTTP 429/5xx responses follow the configured attempt and backoff limits before a successful response body is read. An interruption after body reading begins does not automatically replay the whole request. Explicit user cancellation remains `cancelled`.
 
 ### Approvals and settings
 
