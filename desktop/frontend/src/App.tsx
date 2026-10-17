@@ -1039,6 +1039,16 @@ export function App({ transport }: { transport: Transport }) {
           }
         }
         await openSession(sessionId, undefined, true);
+      } else {
+        try {
+          await client.call('workspaces.list', {});
+          connectionLost.current = false;
+          setLink(null);
+          setSessionsRevision((current) => current + 1);
+        } catch (error) {
+          setLink(code(error));
+          setRows((current) => [...current, metaRow('error', `无法重新连接后端：${code(error)}`, `Could not reconnect to the host: ${code(error)}`)]);
+        }
       }
     } finally {
       // 这一格必须在每一条路上都清掉：留着会让之后每一次重连都点在「还在重连」上，队列也永远不点火。
