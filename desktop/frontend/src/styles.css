@@ -2339,7 +2339,7 @@ button.pill:hover {
 .workspace-failure { display: grid; gap: 6px; padding: 12px 0; border-bottom: 1px solid var(--line); }
 .workspace-failure span, .workspace-failure code { min-width: 0; overflow-wrap: anywhere; }
 .rail-group { margin-block-start: 0.28em; padding: 0.16em 0.2em 0.12em; border: 1px solid color-mix(in srgb, var(--fg-muted) 16%, var(--line)); border-radius: 0.45em; }
-.rail-group .group-label { font-size: var(--text-md); color: var(--fg); font-weight: 550; }
+.rail-group .group-label { font-size: var(--text-md); color: var(--fg); font-weight: 400; }
 .rail-group .group-count { font-size: var(--text-xs); font-weight: 400; color: var(--fg-muted); }
 .rail-group .group-fold[aria-expanded="true"] > .icon:nth-child(2) { color: var(--accent); }
 .rail-group:not(:has(.session-item)) { margin-block-start: 0.2rem; padding-block: 0; border-color: transparent; background: transparent; }
