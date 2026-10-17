@@ -89,11 +89,16 @@ try {
             $report.uninstalled = -not (Test-Path -LiteralPath (Join-Path $installRoot 'ligule.exe'))
             if (-not $report.uninstalled -or $removal.ExitCode -ne 0) { $exitCode = 1 }
             if ($report.uninstalled -and (Test-Path -LiteralPath $installRoot -PathType Container)) {
-                $remaining = @(Get-ChildItem -LiteralPath $installRoot -Force -Recurse -ErrorAction Stop)
-                $report.remainingInstallEntries = $remaining.Count
-                if ($remaining.Count -eq 0) {
-                    Remove-Item -LiteralPath $installRoot -Force -ErrorAction Stop
-                } else {
+                try {
+                    $remaining = @(Get-ChildItem -LiteralPath $installRoot -Force -Recurse -ErrorAction Stop)
+                    $report.remainingInstallEntries = $remaining.Count
+                    if ($remaining.Count -eq 0) {
+                        Remove-Item -LiteralPath $installRoot -Force -ErrorAction Stop
+                    } else {
+                        $exitCode = 1
+                    }
+                } catch {
+                    $report.cleanupError = $_.Exception.Message
                     $exitCode = 1
                 }
             } else {

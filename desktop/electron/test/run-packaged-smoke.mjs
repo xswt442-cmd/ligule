@@ -1,6 +1,7 @@
 import { spawn, execFileSync } from 'node:child_process';
 import { createWriteStream, existsSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { finished } from 'node:stream/promises';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -861,6 +862,7 @@ async function startApplication() {
   modelApiKey = undefined;
   processExit = new Promise(resolvePromise => applicationProcess.once('close', (code, signal) => resolvePromise({ code, signal })));
   processIds.main = applicationProcess.pid;
+  return { stdout, stderr };
 }
 
 async function recordReport() {
@@ -1071,21 +1073,7 @@ async function run() {
     return;
   }
 
-  const stdout = createWriteStream(join(evidenceRoot, 'stdout.log'));
-  const stderr = createWriteStream(join(evidenceRoot, 'stderr.log'));
-  applicationProcess = spawn(applicationExecutable, [
-    `--user-data-dir=${userDataDirectory}`,
-    '--remote-debugging-port=0',
-  ], {
-    cwd: repositoryRoot,
-    env: environment,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: false,
-  });
-  applicationProcess.stdout.pipe(stdout);
-  applicationProcess.stderr.pipe(stderr);
-  processExit = new Promise(resolvePromise => applicationProcess.once('close', (code, signal) => resolvePromise({ code, signal })));
-  processIds.main = applicationProcess.pid;
+  const { stdout, stderr } = await startApplication();
   const deadline = setTimeout(() => { timedOut = true; applicationProcess.kill(); }, 150_000);
   try {
     await runChecks();
@@ -1124,6 +1112,11 @@ async function run() {
     devTools?.socket.close();
     stdout?.end();
     stderr?.end();
+    try {
+      await Promise.all([stdout, stderr].filter(stream => stream !== undefined).map(stream => finished(stream)));
+    } catch {
+      exitCode = 1;
+    }
   }
 }
 
