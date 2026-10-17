@@ -1042,7 +1042,7 @@ export function App({ transport }: { transport: Transport }) {
         await openSession(sessionId, undefined, true);
       } else {
         try {
-          await client.call('workspaces.list', {});
+          await client.call('workspaces.list', {}, 15_000);
           connectionLost.current = false;
           setLink(null);
           setSessionsRevision((current) => current + 1);
