@@ -100,6 +100,8 @@ pnpm --filter ligule-desktop run build
 
 安装包写入 `desktop/release/`。目标平台的运行时必须在对应平台和架构上准备，不能复用其他平台生成的 `vendor/`。
 
+Linux deb 声明 GBM 与 ALSA 运行库，以及 Electron 的基础桌面依赖。用 `apt install ./<安装包>.deb` 安装以便解析这些依赖；AppImage 仍要求系统提供相应图形和音频运行库。
+
 Core 修改后重新执行 `pnpm run build:core` 和 `pnpm run prepare-runtime`。部署、构建与 `check-runtime.mjs` 会逐文件核对 Core 的 `dist/`、`modes/`、README 和许可证；运行树过时、缺失或多出文件时直接失败。入口文件存在不能代替运行树内容一致。
 
 ## 应用图标

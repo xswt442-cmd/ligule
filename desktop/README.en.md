@@ -100,6 +100,8 @@ pnpm --filter ligule-desktop run build
 
 Installers are written to `desktop/release/`. Prepare the runtime on the matching platform and architecture; do not reuse `vendor/` from another target.
 
+The Linux deb declares GBM and ALSA runtime libraries alongside Electron's basic desktop dependencies. Install it with `apt install ./<package>.deb` so these dependencies are resolved. AppImage still requires the corresponding graphics and audio runtime libraries from the system.
+
 After changing Core, rerun `pnpm run build:core` and `pnpm run prepare-runtime`. Deployment, builds, and `check-runtime.mjs` compare every file in Core's `dist/`, `modes/`, README, and license with the current build. Stale, missing, or extra files fail the check; an existing entry point alone does not establish runtime consistency.
 
 ## Application icons
