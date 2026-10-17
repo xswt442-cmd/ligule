@@ -71,6 +71,12 @@ The [Agent Loop](../../core/src/kernel/loop.ts) performs one user turn and any m
 
 The [model adapters](../../core/src/model/) implement the supported HTTP message formats. The Host selects a provider from the effective model service and reads credentials only when making a request.
 
+HTTP adapters require their protocol terminator and a supported finish reason. They emit a `finish` event; the Loop rejects output exhaustion and empty responses before declaring completion. Complete tool-call batches are parsed and schema-checked before execution. Schema refusals become tool results that the model can handle; invalid provider JSON or an incomplete stream fails the turn without replaying tools. Compaction summaries apply the same completion checks before writing a checkpoint.
+
+`model.outputTokens` is the request budget, distinct from legacy capability reductions. The [budget resolver](../../core/src/model/output-budget.ts) constrains it using verified endpoint/model ceilings and configured limits. Unknown endpoints retain the adapter's conservative ceiling; arbitrary project values cannot declare a higher model capability. Provider reconstruction and session generation adoption keep changes at turn boundaries.
+
+Host run progress is ephemeral, scoped to one active session/run, and derived from Loop, compaction, and approval/input events. `status.get` and `progress` notifications expose phase/timestamps/counts; TUI and Desktop display that shared state. Activity notifications are coalesced while the Host snapshot retains actual event times. Terminal cleanup clears progress. No progress heartbeat is written into Session JSONL, and no default inactivity timer cancels runs.
+
 ### One Agent Loop turn
 
 ```mermaid
@@ -148,6 +154,8 @@ flowchart TD
 ```
 
 Configuration layers are combined into a snapshot while the Host creates a project environment. The session JSONL is the source for messages and tool outcomes. Checkpoints and spill files contain derived data that can be validated or retrieved. History browsing and export read the record and available sidecars; a UI cache is not the source of session facts. The user data root and project workspace separately own user-level data and project attribution.
+
+Configuration edits hold the target file lock through version checking, TOML editing, effective-configuration validation, and atomic replacement. The Host validates model changes before persistence, including shared defaults without project overrides, shared user changes in other loaded projects, and explicit session model selections. Rejected edits do not modify the file. Valid changes still apply at the existing session turn boundary. Both streaming SSE and non-streaming JSON adapters emit the same completion, usage, text, reasoning, and tool-call events into the Loop.
 
 ### Host protocol and clients
 

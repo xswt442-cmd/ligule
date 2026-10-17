@@ -125,7 +125,7 @@ test('双语手册的多服务 TOML 示例相同且符合实际配置格式', ()
   assert.deepEqual(resolveModel(zh.model), {
     api: 'chat-completions',
     baseURL: 'https://api.deepseek.com/v1',
-    model: 'deepseek-chat',
+    model: 'deepseek-flash',
     apiKeyEnv: 'DEEPSEEK_API_KEY',
     services: zh.model.services,
     selection: zh.model.selection,
