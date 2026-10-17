@@ -1,11 +1,11 @@
 // 用随包的 Node 检查桌面运行树中的命令行、原生模块与搜索后端。
 import { createRequire } from 'node:module';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
-import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { releaseManifest } from '../scripts/pack-release.js';
 import { assertNoForeignNativeDirectories, assertSymlinksInside } from '../scripts/runtime-tree.js';
+import { assertCoreRuntimeMatches } from '../scripts/core-runtime.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const desktopRoot = join(root, 'desktop');
@@ -13,10 +13,12 @@ const options = parseOptions(process.argv.slice(2));
 const runtimeRoot = options.resources ?? options.vendor ?? join(desktopRoot, 'vendor');
 const target = `${process.platform}-${process.arch}`;
 const nodePin = JSON.parse(await readFile(join(root, 'desktop', 'node-pin.json'), 'utf8'));
-const packageJson = releaseManifest();
+const packageJson = JSON.parse(await readFile(join(desktopRoot, 'package.json'), 'utf8'));
+packageJson.dependencies['@ligule/core'] = '*';
 const nodePath = join(runtimeRoot, 'node', process.platform === 'win32' ? 'node.exe' : 'node');
 const app = join(runtimeRoot, 'app');
 const appModules = join(app, 'node_modules');
+await assertRuntimeAppContents(app);
 await assertSymlinksInside(app);
 await assertNoForeignNativeDirectories(appModules, target);
 const providerPackage = `@vscode/ripgrep-${target}`;
@@ -42,14 +44,16 @@ if (vendoredPackage.name !== packageJson.name || vendoredPackage.version !== pac
   throw new Error('the vendored app package manifest does not match the generated release manifest');
 }
 
-const cli = join(app, 'dist', 'cli.js');
-const commandEnv = { ...process.env, NODE_PATH: '' };
-const version = execFileSync(nodePath, [cli, '--version'], { cwd: app, env: commandEnv, encoding: 'utf8' }).trim();
-if (version !== packageJson.version) throw new Error(`the vendored CLI reported ${version}, expected ${packageJson.version}`);
-const tools = execFileSync(nodePath, [cli, 'tools'], { cwd: app, env: commandEnv, encoding: 'utf8' }).trim();
-if (tools.split(/\r?\n/u).filter(Boolean).length !== 9) throw new Error('the vendored CLI must expose the nine bundled tools');
-
-const library = await import(pathToFileURL(join(app, 'dist', 'index.js')).href);
+const coreRoot = join(app, 'node_modules', '@ligule', 'core');
+await assertCoreRuntimeMatches(join(root, 'core'), coreRoot);
+const hostEntry = join(coreRoot, 'dist', 'host', 'desktop-entry.js');
+const shippedMode = join(coreRoot, 'modes', 'minimal.toml');
+if (!existsSync(hostEntry) || !existsSync(shippedMode)
+  || !existsSync(join(coreRoot, 'README.md')) || !existsSync(join(coreRoot, 'LICENSE'))) {
+  throw new Error('the Desktop runtime is missing Core metadata, Host entry, or shipped modes');
+}
+if (existsSync(join(coreRoot, 'test'))) throw new Error('the Desktop runtime must not include Core test fixtures');
+const library = await import(pathToFileURL(join(coreRoot, 'dist', 'index.js')).href);
 const requireFromApp = createRequire(join(app, 'package.json'));
 const insideAppModules = async (name, resolver = requireFromApp) => {
   const modulePath = await realpath(resolver.resolve(name));
@@ -114,7 +118,7 @@ try {
   await rm(temporary, { recursive: true, force: true });
 }
 
-console.log(`runtime check passed: Node ${process.version}; ligule ${version}; tools; bash and PowerShell grammars; keyring; ${providerPackage} search; ${options.resources === undefined ? 'vendor' : 'resources'}=${runtimeRoot}`);
+console.log(`runtime check passed: Node ${process.version}; @ligule/core Host; modes; bash and PowerShell grammars; keyring; ${providerPackage} search; ${options.resources === undefined ? 'vendor' : 'resources'}=${runtimeRoot}`);
 
 function parseOptions(args) {
   const parsed = { resources: undefined, vendor: undefined };
@@ -143,5 +147,22 @@ function assertInsideTestplace(path, directory) {
   const relativePath = relative(resolve(directory), resolve(path));
   if (relativePath === '' || relativePath === '..' || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
     throw new Error(`temporary runtime check path must be inside desktop/testplace/tmp: ${path}`);
+  }
+}
+
+async function assertRuntimeAppContents(appRoot) {
+  const entries = await readdir(appRoot, { withFileTypes: true });
+  const allowed = new Map([
+    ['node_modules', 'directory'],
+    ['package.json', 'file'],
+  ]);
+  const unexpected = entries.filter((entry) => {
+    const type = allowed.get(entry.name);
+    return type === undefined || (type === 'directory' ? !entry.isDirectory() : !entry.isFile());
+  }).map((entry) => entry.name);
+  const hasPackage = entries.some((entry) => entry.name === 'package.json' && entry.isFile());
+  const hasModules = entries.some((entry) => entry.name === 'node_modules' && entry.isDirectory());
+  if (!hasPackage || !hasModules || unexpected.length > 0) {
+    throw new Error(`the Desktop runtime app root has unexpected or missing entries: ${unexpected.join(', ') || 'package.json or node_modules is missing'}`);
   }
 }

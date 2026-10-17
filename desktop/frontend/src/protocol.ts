@@ -1,6 +1,6 @@
-// 客户端协议这一层的界面侧读法（D30、D33）。方法与参数模式的定义在后端（`src/host/protocol.ts`），
-// 这里不复制那张表，只按帧的形状收发：请求带 id 与 method，答复带同一个 id，通报带 notify。
-// Transport 由桌面桥提供；协议客户端不依赖 Electron。
+// 桌面客户端按 Host 协议收发请求和通知。方法及参数定义由 `core/src/host/protocol.ts` 维护。
+// 请求包含 id 和 method，答复使用相同 id，通知使用 notify 字段。
+// Transport 由桌面桥注入，协议客户端不依赖 Electron。
 import type { NotificationBridge } from './notifications';
 
 export type Frame = {
@@ -11,6 +11,7 @@ export type Frame = {
   error?: { code?: string; message?: string };
   notify?: string;
   sessionId?: string;
+  progress?: unknown;
   event?: Record<string, unknown>;
   code?: string;
   detail?: string;
@@ -21,22 +22,22 @@ export type Transport = {
   send: (frame: string) => void;
   onFrame: (handle: (text: string) => void) => void;
   onLog: (handle: (text: string) => void) => void;
-  // 载体自己报的故障：帧发不出去了。协议帧里没有这一类，所以它从载体那一侧进来。
+  // 传输层错误，例如无法发送协议帧；这类错误不属于协议响应。
   onFault?: (handle: (reason: string) => void) => void | (() => void);
-  // 换一具后端进程。壳里那是 `host_restart` 一条命令；开发时那一份假宿主用它重新答话（第 65 步）。
+  // 重启后端进程；生产环境由 Electron 壳处理，开发测试传输可自行实现。
   restart?: () => Promise<void>;
-  // 首次使用时那一份默认工作区：壳把系统文档目录下那一具交回来，不在那儿就建出来（方案 5.5.3）。
-  // 载体交不出这一格时界面不猜：没有可用的工作区就请人自己选一具，不去用宿主继承的那个进程目录。
+  // 首次使用时由 Electron 壳返回默认工作区，必要时创建该目录。
+  // 无法获取默认目录时要求用户自行选择，不使用 Host 继承的当前工作目录。
   defaultWorkspace?: () => Promise<string>;
-  // 退出请求从壳那一侧进来：托盘「退出」、macOS 的 Cmd+Q 与关掉最后一扇窗口在壳那里汇成同一条（方案 6.4）。
-  // 界面说出受影响的会话、等人点头，再由 `quit` 真的收。载体没有这两格时界面不猜，也不自己不退出。
+  // 托盘退出、macOS Cmd+Q 和关闭最后一个窗口都会触发此请求。
+  // 界面列出受影响的会话并等待用户确认，再调用 `quit` 完成退出；不支持确认的传输不会自行退出。
   onQuit?: (handle: () => void) => void;
   quit?: () => Promise<void>;
 };
 
 export type Client = {
-  // timeoutMs 只给那一个调用用：一轮模型跑几分钟是正常事，不能拿一个全局上限去砍它。
-  // 交回来的是帧里那一格 result，这一层不认识它的形状，所以每个调用方自己说明读成什么。
+  // `timeoutMs` 仅限制当前请求，避免全局超时中断长时间模型轮次。
+  // 返回未经解释的协议结果，由调用方负责校验其结构。
   call: (method: string, params: Record<string, unknown>, timeoutMs?: number) => Promise<unknown>;
   reply: (id: string, result: unknown) => void;
   receive: (text: string) => { kind: string; message?: Frame };
@@ -44,12 +45,11 @@ export type Client = {
   onRequest: (handle: (message: Frame) => void) => void;
   waiting: () => number;
   counts: () => { sent: number; received: number };
-  // 旧的那一具宿主不会再答复了：把这些等待按一个稳定码收尾，交回收尾了几条（第 65 步）。
+  // Host 进程重启后无法答复旧请求；以稳定错误码结束这些等待，并返回已结束请求数量。
   discard: (reason: string) => number;
 };
 
-// 界面上要说得出的是那一个稳定码（D93）。宿主回的错误带码，客户端自己造的错误（超时、载体断了）只有 message，
-// 再外面一层可能什么都不是；这一处把三种形状收敛成一个码。
+// 将 Host 错误、客户端生成的超时或传输错误统一为稳定错误码，供界面显示和判断。
 export function code(error: unknown): string {
   const shaped = error as { code?: string; message?: string };
   return shaped.code ?? shaped.message ?? String(error);

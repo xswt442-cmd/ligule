@@ -1,6 +1,6 @@
-// 助手那一段的 Markdown 画法（D89）。走 `marked` 的词法拿记号，记号由这里映射成元素：
-// 不吃 `marked.parse` 交回的 HTML 串，模型写的成对尖括号因此不会变成可执行的标签。
-// 唯一接受 HTML 串的位置是代码围栏：`highlight.js` 输出的那一段只含它自己生成的类名与转义后的文本。
+// 使用 `marked` 解析 Markdown 标记，再由本组件映射为 React 元素。
+// 不渲染 `marked.parse` 返回的 HTML，避免模型输出的标签被浏览器执行。
+// 代码围栏仅显示经 `highlight.js` 处理并转义的代码文本。
 import type { ReactNode } from 'react';
 import { useState } from 'react';
 import { Lexer, type Token, type Tokens } from 'marked';
@@ -12,7 +12,7 @@ const inlineLexer = new Lexer({ gfm: true, breaks: false });
 function highlight(code: string, language: string | undefined): string {
   const lang = language === undefined || language === '' ? 'plaintext' : language;
   if (hljs.getLanguage(lang) === undefined) return escapeHtml(code);
-  // 上色失败不能把整段代码弄丢：读不懂的语言就按原文画。
+  // 高亮失败时保留原始代码文本。
   try {
     return hljs.highlight(code, { language: lang, ignoreIllegals: true }).value;
   } catch {
@@ -24,7 +24,7 @@ function escapeHtml(text: string): string {
   return text.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c] as string);
 }
 
-// 行内那几种记号：加粗、斜体、删除线、行内代码、链接、换行。链接只放 http(s) 与 mailto，别的 scheme 只留文字。
+// 支持加粗、斜体、删除线、行内代码、链接和换行；链接仅允许 http(s) 与 mailto 协议。
 function inline(nodes: Token[] | string, key: string): ReactNode[] {
   const tokens = typeof nodes === 'string' ? inlineLexer.inlineTokens(nodes) : nodes;
   return tokens.map((token, index) => renderInline(token, `${key}:${index}`));
@@ -45,7 +45,7 @@ function renderInline(token: Token, key: string): ReactNode {
       if (href === '') return <span key={key}>{body}</span>;
       return <a key={key} href={href} title={at.title} target="_blank" rel="noreferrer noopener">{body}</a>;
     }
-    // 行内 html 与 tag 记号一律按文字画：那是模型写的字符，不是界面要执行的标签。
+    // 将行内 HTML 标记作为普通文本显示，不执行模型生成的标签。
     default: return <span key={key}>{typeof (token as { raw?: string }).raw === 'string' ? (token as { raw: string }).raw : ''}</span>;
   }
 }
@@ -55,9 +55,8 @@ function safeHref(href: string): string {
   return /^(https?|mailto)$/i.test(scheme) ? href : '';
 }
 
-// 代码围栏上那一枚复制：交出去的是这一段没上色之前的原文，不是画面上带了标签的那一份。
-// 剪贴板通过 Chromium 提供的 `navigator.clipboard` 访问，不引依赖。成与不成都要说一句：
-// 看得到代码却拿不走，比默默不动要查得好。
+// 复制代码围栏中的原始文本，不复制高亮后的展示内容。
+// 使用 Chromium 提供的 `navigator.clipboard`；复制成功或失败时都显示明确结果。
 function CodeBlock({ code }: { code: Tokens.Code }) {
   const [said, setSaid] = useState('');
   return <div className="md-code-wrap">
@@ -121,7 +120,7 @@ function block(tokens: Token[], key: string): ReactNode[] {
       return;
     }
     if (token.type === 'def') return;
-    // 认不了的记号（含 html 块）按原文画出来：宁可看见尖括号，也不要执行它。
+    // 未支持的标记（包括 HTML 块）按原文显示，不执行其中内容。
     out.push(<p key={id}>{(at as { raw?: string; text?: string }).raw ?? (at as { text?: string }).text ?? ''}</p>);
   });
   return out;

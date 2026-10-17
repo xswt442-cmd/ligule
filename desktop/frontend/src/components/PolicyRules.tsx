@@ -9,7 +9,7 @@ type Rule = { tool: string; match?: string; decision: 'allow' | 'deny'; reason?:
 type Shown = {
   rules?: Rule[];
   rulesSource?: string;
-  // 配置文件里此刻写着的那一份默认档：没写这一条时宿主交回的是空，界面不猜一档（方案 3A）。
+  // 配置中的默认策略；未配置时由 Host 返回空值，界面不自行推断。
   policyMode?: string;
   sources?: Record<string, string>;
   layers?: { layer: string; version: string; exists: boolean }[];
@@ -42,7 +42,7 @@ const blankRule = (): Rule => ({ tool: '', match: '', decision: 'allow', reason:
 export function PolicyRules({ client, projectRoot, onEdit }: {
   client: Client;
   projectRoot: string;
-  /** 这一栏手里攥着没写进配置的东西时报给父层，空串是收回（审阅 G2）。 */
+  /** 向父级报告尚未保存的编辑；空字符串表示撤回该报告。 */
   onEdit?: (reason: string) => void;
 }) {
   const t = useText();

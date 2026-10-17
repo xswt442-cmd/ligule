@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": ["helpers/port.ts", "helpers/tui-host.ts"]
+}

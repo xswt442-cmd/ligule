@@ -2,7 +2,7 @@ import { Fold } from './Fold';
 import { useText } from '../locale';
 import type { RowProps } from './types';
 
-// 未允许与失败是同一类形状：这一次没做成，差别在稳定码上（D93 把码原样带出来）。
+// 拒绝和失败使用相同的数据结构，通过稳定错误码区分。
 export function ProblemRow({ row, verbosity }: RowProps) {
   const t = useText();
   return <article className={`row ${row.kind}`} data-kind={row.kind} data-failed="true">

@@ -1,24 +1,23 @@
-// 每个测试进程一份假的个人主目录：宿主的登记、终端界面的键位与历史、技能与模式的个人层都落进这一份，
-// 不碰这台机器真正的那一份（D110）。挂在 `npm test` 的 `--import` 上，因此每个测试文件的子进程起来时先经过这里。
-// 这里动的是主目录那两格，`LIGULE_HOME` 反过来清掉：那些按参数注入主目录的检查照各自那一份走，
-// 要验数据根覆盖的那两条自己写这个变量，不共用这一份。
+// 每个测试进程使用独立的临时主目录，避免读写开发者机器上的个人配置、会话、按键、技能和模式。
+// `npm test` 通过 Node 的 `--import` 加载本文件，因此每个测试进程都会先设置隔离环境。
+// 清除 `LIGULE_HOME`，让依赖 HOME 的代码使用这个临时目录；显式验证 `LIGULE_HOME` 的测试自行设置该变量。
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const home = mkdtempSync(join(tmpdir(), 'ligule-test-home-'));
-// CI 检出时没有忽略目录，测试进程先创建仓库内的暂存目录。
+// CI 检出后可能还没有临时目录，因此由测试进程创建它。
 mkdirSync(join(process.cwd(), 'testplace'), { recursive: true });
 delete process.env.LIGULE_HOME;
-// 两个都写：Node 在 Windows 上读 `USERPROFILE`，在 POSIX 上读 `HOME`。
+// Node 在 Windows 上读取 `USERPROFILE`，在 POSIX 系统上读取 `HOME`。
 process.env.HOME = home;
 process.env.USERPROFILE = home;
 
-// 退出时删掉：删不动就留着，那一些目录在系统临时目录里，下一次清理会带走。
+// 进程退出时清理临时主目录。若系统仍有进程占用文件，清理失败不应覆盖原测试结果。
 process.on('exit', () => {
   try {
     rmSync(home, { recursive: true, force: true });
   } catch {
-    /* 刚退出的子进程还握着那一份目录句柄时删不掉，不影响检查结果 */
+    /* 子进程仍占用目录时可能无法立即删除；这不应覆盖测试结果。 */
   }
 });

@@ -1,21 +1,21 @@
-// 键盘层那一份表的检查：跑 `node dev/hotkeys.check.mjs`。
+// 检查快捷键映射、按键显示和输入行为。
 import assert from 'node:assert/strict';
 import { CURRENT, KEYMAP, actionOf, conflictsIn, defaultSpecs, formatKeys, isCapturing, isComposing, loadBindings, parseSpec, setCapturing, specOf } from '../src/hotkeys.ts';
 import { insertMention, mentionToken } from '../src/mentions.ts';
 import { mergeQueueIntoDraft } from '../src/settings.ts';
 
-// 认键与说键读的是同一份表（方案 6.1）：这一记按键落的是哪一个动作，与按钮上写的那一串字，一处改了另一处跟着改。
+// 按键处理与界面显示共用同一份快捷键定义。
 assert.equal(actionOf({ key: 'k', ctrlKey: true }, '窗口'), 'palette');
 assert.equal(actionOf({ key: 'K', metaKey: true }, '窗口'), 'palette', 'Cmd 与 Ctrl 在这一层认成同一记修饰键');
 assert.equal(actionOf({ key: 'b', ctrlKey: true }, '窗口'), 'sidebar');
 assert.equal(actionOf({ key: 'c', ctrlKey: true, shiftKey: true }, '窗口'), 'copy-answer');
-// 复制选中的文字、普通输入与没有修饰键的那一些都不该被窗口那一层接走。
+// 未匹配的快捷键应交给浏览器和当前输入控件处理。
 assert.equal(actionOf({ key: 'c', ctrlKey: true }, '窗口'), null);
 assert.equal(actionOf({ key: 'k', shiftKey: true }, '窗口'), null);
-// Esc 在两个范围里落的是两件事：候选清单开着时收的是清单，都收完了才轮到打断这一轮。
+// 候选列表打开时，Escape 先关闭列表；列表关闭后才中断当前轮次。
 assert.equal(actionOf({ key: 'Escape' }, '候选清单'), 'hide-candidate');
 assert.equal(actionOf({ key: 'Escape' }, '窗口'), 'interrupt');
-// 同一记 Enter 在输入坞是发送，在候选清单是选中：不同范围共用不算冲突，同范围撞了要报出来。
+// 同一个按键可在不同界面区域执行不同动作，但不能在同一区域绑定多个动作。
 assert.equal(actionOf({ key: 'Enter' }, '输入坞'), 'send');
 assert.equal(actionOf({ key: 'Enter' }, '候选清单'), 'pick-candidate');
 assert.deepEqual(conflictsIn('输入坞', defaultSpecs()), []);
@@ -25,12 +25,12 @@ assert.equal(formatKeys('arrowup'), '↑');
 assert.equal(formatKeys('escape'), 'Esc');
 assert.equal(formatKeys('ctrl+'), 'ctrl+', '读不懂的写法原样交回，不编出一个键名');
 assert.equal(specOf({ key: 'Control' }), null, '光按修饰键不是一记绑定');
-// 表里每一条都要有键、有说法、有范围，且那串键认得回来：提示清单就是照着这一份表排的。
+// 每个默认绑定都应包含动作说明和作用范围，且能正确解析回对应动作。
 for (const [action, binding] of Object.entries(KEYMAP)) {
   assert.ok(binding.label !== '' && binding.view !== '', `${action} 要说得出做什么与落在哪一个范围`);
   assert.equal(actionOf({ key: binding.spec.split('+').at(-1), ...(binding.spec.includes('ctrl') ? { ctrlKey: true } : {}), ...(binding.spec.includes('shift') ? { shiftKey: true } : {}) }, binding.view), action, `${action} 的默认键认得回来`);
 }
-// 个人覆盖那一条路：读得开的落下、读不开的一条条报出来，认键与说键跟着一起换（方案 6.1）。
+// 加载用户覆盖项时，应应用有效绑定并逐项报告无效绑定。
 assert.equal(parseSpec('Ctrl+Shift+K'), 'ctrl+shift+k');
 assert.equal(parseSpec('esc'), 'escape');
 assert.equal(parseSpec('hyper+k'), null, '表里没有的那一个修饰键不猜');
@@ -48,18 +48,18 @@ assert.equal(isCapturing(), false);
 setCapturing(true);
 assert.equal(isCapturing(), true, '录一记新键的那一段里，窗口这一层要知道自己该不接键');
 setCapturing(false);
-// 输入法组合期间的那一格：`isComposing` 是标准写法，229 是各浏览器在组合中一贯交回的 keyCode。
+// 输入法组合期间的按键不应触发快捷键；兼容浏览器使用的 229 keyCode。
 assert.equal(isComposing({ isComposing: true, key: 'Enter' }), true);
 assert.equal(isComposing({ keyCode: 229, key: 'Process' }), true);
 assert.equal(isComposing({ key: 'Escape' }), false);
 assert.equal(isComposing({ isComposing: false, keyCode: 27, key: 'Escape' }), false, 'Esc 自己不该被当成组合按键，否则面板与打断这一轮都关不掉了');
-// `@` 那一段路径引用：与终端那一侧同一条规则，两处认出来的东西不该不一样（方案 5.3）。
+// 桌面端路径引用应与终端使用相同的解析规则。
 assert.deepEqual(mentionToken('先看 @notes/rea', 13), { start: 3, text: 'notes/rea' });
 assert.deepEqual(mentionToken('@a', 2), { start: 0, text: 'a' });
 assert.equal(mentionToken('邮箱是me@li', 8), null, '紧贴在字后面的 @ 不是路径引用');
 assert.equal(mentionToken('@notes/rea 后面还有字', 8), null, '笔落在一段中间时不替换');
 assert.deepEqual(insertMention('先看 @rea', 7, 3, 'notes/readings-3.md'), { draft: '先看 @notes/readings-3.md ', caret: 24 });
-// 重连之后排着的几句收回草稿：按先后拼在草稿后面，草稿原来那句留在最前；空草稿就从第一条起拼（交付五）。
+// 重连后将排队内容按原顺序接到草稿末尾；草稿为空时不添加空行。
 assert.equal(mergeQueueIntoDraft('先前的一句', ['第二句', '第三句']), '先前的一句\n\n第二句\n\n第三句');
 assert.equal(mergeQueueIntoDraft('', ['第一条', '第二条']), '第一条\n\n第二条', '空草稿时不留一个前导空行');
 assert.equal(mergeQueueIntoDraft('', []), '', '没有排着的句时草稿不动');

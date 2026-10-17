@@ -1,0 +1,11 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "allowJs": true,
+    "rootDir": ".."
+  },
+  "include": ["release-automation.test.ts", "../scripts/*.js", "../scripts/desktop-release-manifest.ts"]
+}

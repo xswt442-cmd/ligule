@@ -1,4 +1,4 @@
-// 左侧栏那一份分组规则的唯一检查：跑 `node dev/rail.check.mjs`，坏了就非零退出（方案 5.5.4）。
+// 检查侧栏的工作区分组、顺序和工作区列表读取。
 import assert from 'node:assert/strict';
 import { createCallOf, groupByWorkspace, loadWorkspacePages, visibleRoots } from '../src/rail.ts';
 
@@ -28,16 +28,16 @@ assert.equal(layout.groups[0].root, 'E:\\work\\alpha', '完整路径留在组上
 assert.deepEqual(layout.groups[1].sessions, [], '这一扇窗口另外指着的那份工作区还没有会话也要有自己那一组');
 assert.deepEqual(layout.loose.map((one) => one.id), ['c', 'd'], '没指名工作区的与更早的记录直接排在下面，来源为 default 的也不成组');
 
-// 首行没写身份、只写了目录的那一份：按目录成组，位置仍由来源那一格决定。
+// 缺少工作区身份时，使用项目目录作为分组身份。
 const keyed = groupByWorkspace([session('e', { projectRoot: '/srv/delta', workspaceOrigin: 'explicit' })]);
 assert.equal(keyed.groups.length, 1);
 assert.equal(keyed.groups[0].identity, '/srv/delta');
 assert.equal(keyed.loose.length, 0);
 
-// 空清单不造假的一组。
+// 没有会话时不应生成空工作区分组。
 assert.deepEqual(groupByWorkspace([]), { groups: [], loose: [] });
 
-// 那份持久登记是组名与「默认」那一枚标签的来源（方案 5.5.1）：登记里改过的显示名顶上，默认那一格指着的带标签。
+// 工作区登记提供自定义名称和默认工作区标记。
 const alpha = { identity: 'e:\\work\\alpha', directory: 'E:\\work\\alpha', name: '改过的名字', firstSeen: '2026-10-01T00:00:00.000Z', lastSeen: '2026-10-09T00:00:00.000Z' };
 const explicit = session('a', { projectRoot: 'E:\\work\\alpha', workspace: 'e:\\work\\alpha', workspaceOrigin: 'explicit' });
 const named = groupByWorkspace([explicit], [], { default: 'e:\\work\\alpha', workspaces: [alpha] });
@@ -45,19 +45,19 @@ assert.equal(named.groups[0].label, '改过的名字', '组名读登记里那一
 assert.equal(named.groups[0].isDefault, true, '默认那一格指着谁，谁就带那一枚标签');
 assert.equal(groupByWorkspace([explicit], [], { default: null, workspaces: [alpha] }).groups[0].isDefault, false, '没有默认那一格时哪一组都不带标签');
 
-// 登记记着的位置与记录里的路径写法不同：组上那份目录取登记里最后记下的一处（方案 5.5.1）。
+// 工作区登记中的路径和显示名称应优先用于分组信息。
 const moved = groupByWorkspace([session('b', { projectRoot: 'E:\\work\\beta', workspace: 'e:\\work\\beta', workspaceOrigin: 'explicit' })], [],
   { default: null, workspaces: [{ identity: 'e:\\work\\beta', directory: 'E:/work/beta', name: 'beta', firstSeen: '', lastSeen: '' }] });
 assert.equal(moved.groups[0].root, 'E:/work/beta', '在那一具工作区里新建时递出去的是登记里记着的那一处');
 assert.equal(moved.groups[0].label, 'beta', '显示名也在登记那一行里');
 
-// 新建会话要递出去的那一格：人选的算 explicit，界面退出来的那一份算 default，三格都没有就不指名（方案 5.5.3）。
+// 创建会话时，显式选择优先于当前工作区和默认工作区。
 assert.deepEqual(createCallOf('E:/work/alpha', 'E:/work/beta', 'E:/work/gamma'), { projectRoot: 'E:/work/alpha', workspaceOrigin: 'explicit' }, '人选的那一具优先');
 assert.deepEqual(createCallOf(undefined, 'E:/work/beta', 'E:/work/gamma'), { projectRoot: 'E:/work/beta', workspaceOrigin: 'default' }, '眼前这一份会话所在的项目是界面退出来的');
 assert.deepEqual(createCallOf(undefined, undefined, 'E:/work/gamma'), { projectRoot: 'E:/work/gamma', workspaceOrigin: 'default' }, '登记里的默认那一具也是退出来的，不是人选的');
 assert.deepEqual(createCallOf(undefined, undefined, undefined), {}, '三格都没有时不指名，由宿主用它自己那一份项目环境');
 
-// 那份持久登记决定侧栏看得见哪几项目录（审阅 F3）：终端界面登记的非默认工作区，这一扇窗口没指着它也要扫一遍。
+// 侧栏应列出登记过的工作区，包括当前窗口未选中的工作区。
 const roster = {
   default: 'e:\\work\\beta',
   workspaces: [alpha, { identity: 'e:\\work\\beta', directory: 'E:\\work\\beta', name: 'beta', firstSeen: '', lastSeen: '' }],

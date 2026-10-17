@@ -97,7 +97,7 @@ export class NativeServices {
   notificationPermission(): boolean {
     if (this.disposed) return false;
     try {
-      // Electron 44 只能报告系统通知是否受支持，不能读取操作系统的授权状态。
+      // Electron 44 只能报告系统是否支持通知，无法读取操作系统的通知授权状态。
       return Notification.isSupported();
     } catch {
       this.reportFault('notification-support-check-failed');
@@ -110,7 +110,7 @@ export class NativeServices {
       this.reportFault('notification-unsupported');
       return 'denied';
     }
-    // Electron 44 没有请求或读取操作系统通知授权状态的原生接口。
+    // Electron 44 没有请求或读取操作系统通知授权状态的接口。
     this.reportFault('notification-permission-unavailable');
     return 'default';
   }

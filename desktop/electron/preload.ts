@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type { IpcRendererEvent } from 'electron';
 import type { DesktopApi, DesktopNotification } from './api.js';
 
-// 沙盒 Preload 的运行期只依赖 Electron；接口不暴露事件对象或动态通道。
+// 沙盒 Preload 只依赖 Electron；公开接口不传递原生事件对象，也不允许调用动态通道。
 if (process.isMainFrame) {
   const subscriptions = new Set<() => void>();
   type EventChannel = 'ligule:host-frame' | 'ligule:host-log' | 'ligule:host-fault' | 'ligule:quit-requested' | 'ligule:notification-open';

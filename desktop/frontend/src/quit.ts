@@ -1,20 +1,20 @@
-// 退出前那一句「谁会受影响」由界面说：壳只把请求送过来，哪一份在跑、哪一张卡在等人、哪一份还排着句子
-// 只有界面知道（方案 6.4、D24）。这里只算那张清单，不碰退出本身。
+// 界面负责列出退出会影响的活动会话；Electron 壳只负责转发退出请求。
+// 此函数只汇总会话状态，不执行退出操作。
 
 export type QuitInput = {
-  /** 有轮次在跑的会话编号。 */
+  /** 当前有轮次运行的会话编号。 */
   running: string[];
-  /** 有一张审批卡等人答的会话编号。 */
+  /** 存在待答审批的会话编号。 */
   approvals: string[];
-  /** 有一道题等人答的会话编号。 */
+  /** 存在待答问题的会话编号。 */
   questions: string[];
-  /** 每份会话自己排着的那几句：只有还没发出去的才算。 */
+  /** 各会话中尚未发送的队列条数。 */
   queued: Record<string, { items: string[] }>;
 };
 
 export type QuitRow = { sessionId: string; reasons: string[] };
 
-// 一份会话可以同时有几件事，那几条并在一行里说完，不占几行让人自己数（同一次退出里同一份会话只说一次）。
+// 同一会话可能同时有多个待处理状态；将它们合并为一项退出影响说明。
 export function blockedSessions(input: QuitInput): QuitRow[] {
   const rows = new Map<string, string[]>();
   const add = (id: string, reason: string) => {

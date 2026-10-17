@@ -57,7 +57,7 @@ jobs:
             echo "::error::version must use stable X.Y.Z form"; exit 1
           fi
           TAG="${PRODUCT}-v${VERSION}"
-          if [ "$PRODUCT" = cli ]; then manifest=package.json; else manifest=desktop/package.json; fi
+          if [ "$PRODUCT" = cli ]; then manifest=tui/package.json; else manifest=desktop/package.json; fi
           test "$(node -p "require('./$manifest').version")" = "$VERSION"
           node scripts/release-notes.js "$TAG" >/dev/null
           if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then

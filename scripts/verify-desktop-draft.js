@@ -8,7 +8,7 @@ const TARGETS = {
   'windows-x64': ['.exe'],
 };
 
-// GitHub normalizes spaces in Release asset names to dots on upload.
+// GitHub 上传 Release 资产时会将文件名中的空格替换为句点。
 export function githubAssetName(name) {
   if (typeof name !== 'string' || name.length === 0 || name.includes('/') || name.includes('\\')) {
     throw new Error('invalid release asset name');

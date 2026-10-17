@@ -1,0 +1,67 @@
+{
+  "name": "ligule",
+  "version": "0.0.4",
+  "description": "共享会话与工具内核的命令行和终端 AI 助手。An AI agent harness for the command line and terminal.",
+  "type": "module",
+  "bin": {
+    "ligule": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "README.en.md",
+    "CHANGELOG.md",
+    "docs/guide.zh-CN.md",
+    "docs/guide.en.md",
+    "docs/app-icon.png",
+    "LICENSE"
+  ],
+  "bundledDependencies": ["@ligule/core"],
+  "engines": {
+    "node": ">=24"
+  },
+  "author": "xswt442-cmd",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xswt442-cmd/ligule.git",
+    "directory": "tui"
+  },
+  "homepage": "https://github.com/xswt442-cmd/ligule#readme",
+  "bugs": {
+    "url": "https://github.com/xswt442-cmd/ligule/issues"
+  },
+  "keywords": ["agent", "harness", "agent-harness", "tui"],
+  "scripts": {
+    "build": "tsc -b tsconfig.json",
+    "test": "pnpm --filter @ligule/core run build && pnpm run build && node --experimental-strip-types --test --import ../test/hooks/isolated-data-root.mjs test/*.test.js",
+    "check-pack": "node ../scripts/check-pack.js",
+    "pack-release": "node ../scripts/pack-release.js",
+    "verify-install": "node ../scripts/verify-install.js",
+    "registry-version": "node ../scripts/registry-version.js"
+  },
+  "dependencies": {
+    "@ligule/core": "workspace:*",
+    "proper-lockfile": "4.1.2"
+  },
+  "optionalDependencies": {
+    "highlight.js": "11.12.0",
+    "ink": "^7.1.1",
+    "marked": "18.0.14",
+    "react": "^19.3.0",
+    "string-width": "8.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.1",
+    "@types/proper-lockfile": "^4.1.4",
+    "@types/react": "^19.3.0",
+    "typescript": "^5.9.3"
+  }
+}

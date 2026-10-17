@@ -1,11 +1,10 @@
-// 全新安装验证：打一份 tarball，在空消费者中用 npm 安装，并通过已安装的 CLI 和包导出运行完整探针。
+// 在空项目中安装打包文件，并通过 CLI、包导出和 MCP 服务检查真实安装结果。
 //
-// 跑法：pnpm --filter ligule run verify-install [tarball]
-// 带一个 tarball 路径时用它，不再自己打：发布流水线要在同一批字节上先验后发，那一份身份就是 artifact 里的那一个文件。
+// 可传入已构建的 tarball，确保发布验收与后续发布使用同一份文件。
 import { spawnSync, execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { releaseManifest } from './pack-release.js';
 import { execNpm } from './npm-cli.js';
 
@@ -15,17 +14,16 @@ const consumer = join(packDir, 'install', 'consumer');
 const args = process.argv.slice(2);
 if (args.length > 1 || args.some((arg) => arg.startsWith('--'))) throw new Error('usage: pnpm --filter ligule run verify-install [tarball]');
 const given = args[0];
-if (given === undefined && !existsSync(join(repo, 'dist', 'index.js'))) {
-  throw new Error('dist/index.js is missing; run `pnpm --filter ligule run build` before verifying a fresh install');
+if (given === undefined && (!existsSync(join(repo, 'tui', 'dist', 'index.js')) || !existsSync(join(repo, 'core', 'dist', 'index.js')))) {
+  throw new Error('TUI or Core build output is missing; run `pnpm run build` before verifying a fresh install');
 }
 
 const pkg = releaseManifest();
 const tarball = given === undefined ? join(packDir, `${pkg.name}-${pkg.version}.tgz`) : resolve(given);
 rmSync(join(packDir, 'install'), { recursive: true, force: true });
 mkdirSync(consumer, { recursive: true });
-// 消费者自己的清单：空目录里只写这一份，装进去的依赖全部来自 tarball 的声明。
-// 那四件带原生绑定的依赖要在安装时跑自己的脚本；把「允许哪些依赖跑脚本」写成包内的一格，是收得紧的 npm 唯一收的形式
-// （命令行与用户级配置里的白名单在项目范围内的安装里都不算）。普通 npm 不读这一格，装出来完全一样。
+// 为隔离的消费者创建独立清单；安装依赖只依据被测 tarball 的声明。
+// 这四个依赖需要安装脚本来构建原生绑定。消费者清单显式允许这些脚本，避免沿用调用环境中的 npm 白名单设置。
 const consumerManifest = {
   name: 'ligule-consumer',
   version: '0.0.0',
@@ -38,8 +36,7 @@ if (given === undefined) {
 }
 if (!existsSync(tarball)) throw new Error(`npm pack did not produce ${tarball}`);
 
-// 一次真实安装：解析、下载与安装脚本都按声明走，装不出来就是声明本身有问题。
-// npm run 会把用户配置传成环境变量；项目安装的脚本策略必须读消费者清单与 .npmrc。
+// 清除调用环境中的脚本白名单变量，避免它影响安装策略。
 const installEnvironment = Object.fromEntries(Object.entries(process.env)
   .filter(([name]) => name.toLowerCase() !== 'npm_config_allow_scripts'));
 try {
@@ -52,7 +49,7 @@ try {
 } catch (error) {
   const text = `${error.stdout ?? ''}${error.stderr ?? ''}${(error.output ?? []).join('')}${error.message ?? ''}`;
   process.stdout.write(text.split(/\r?\n/).filter((line) => line.trim() !== '').slice(-12).join('\n'));
-  // 收得紧的 npm 会把「哪些依赖可以跑安装脚本」当成项目范围内必须显式批准的策略；这一格要说清去哪儿改，别留一个裸的退出码。
+  // 如果 npm 仍拒绝这些安装脚本，指出可检查的项目配置和拒绝原因。
   if (text.includes('EALLOWSCRIPTS')) {
     throw new Error('npm 拒绝了这一次安装里依赖自带的安装脚本（EALLOWSCRIPTS）。它只认包内那一格白名单（消费者 package.json 的 allowScripts）或项目 .npmrc，'
       + '这一份脚本已经写了那一格仍然被拒，说明这台机器上的 npm 收得比声明更紧。普通 npm 环境（发布流水线那一条）不受这一条影响。');
@@ -60,8 +57,25 @@ try {
   throw error;
 }
 
-const installed = JSON.parse(readFileSync(join(consumer, 'node_modules', pkg.name, 'package.json'), 'utf8'));
+const installedPackageDirectory = join(consumer, 'node_modules', pkg.name);
+const installed = JSON.parse(readFileSync(join(installedPackageDirectory, 'package.json'), 'utf8'));
 if (installed.version !== pkg.version) throw new Error(`the consumer got ${installed.version}, package.json says ${pkg.version}`);
+if (Object.values(installed.dependencies ?? {}).some((specifier) => specifier.startsWith('workspace:'))) {
+  throw new Error('the published package manifest retained a pnpm workspace dependency');
+}
+const bundledCoreDirectory = join(consumer, 'node_modules', pkg.name, 'node_modules', '@ligule', 'core');
+if (!existsSync(join(bundledCoreDirectory, 'dist', 'index.js')) || !existsSync(join(bundledCoreDirectory, 'modes', 'minimal.toml'))) {
+  throw new Error('the installed npm package does not contain the complete private Core runtime');
+}
+const installedPackageRoot = realpathSync(installedPackageDirectory);
+const installedCoreRoot = realpathSync(bundledCoreDirectory);
+const relativeCore = relative(installedPackageRoot, installedCoreRoot);
+if (relativeCore === '..' || relativeCore.startsWith(`..${sep}`) || isAbsolute(relativeCore)) {
+  throw new Error(`the installed Core package resolved outside the TUI tarball: ${installedCoreRoot}`);
+}
+const coreManifest = JSON.parse(readFileSync(join(bundledCoreDirectory, 'package.json'), 'utf8'));
+if (coreManifest.private !== true) throw new Error('the bundled Core package must remain private');
+if (installed.bin?.ligule !== './dist/cli.js') throw new Error('the installed npm package does not declare the ligule CLI entry');
 if (JSON.stringify(installed.dependencies) !== JSON.stringify(pkg.dependencies)) {
   throw new Error('the consumer did not receive the release manifest dependencies');
 }
@@ -70,7 +84,7 @@ if (JSON.stringify(installed.optionalDependencies) !== JSON.stringify(pkg.option
 }
 if (existsSync(join(consumer, 'node_modules', 'typescript'))) throw new Error('devDependencies came along into the consumer');
 
-// 走用户实际用的那一条路：`.bin` 里的包装脚本，Windows 上是那一个 .cmd。
+// 通过 npm 安装生成的命令包装脚本启动 CLI；Windows 使用对应的 .cmd 文件。
 const env = {
   ...process.env,
   PATH: `${join(consumer, 'node_modules', '.bin')}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH ?? ''}`,
@@ -89,19 +103,20 @@ const counted = tools.stdout.split('\n').filter((line) => line.trim() !== '').le
 if (tools.status !== 0 || counted !== 9) throw new Error(`${pkg.name} tools listed ${counted}, expected 9`);
 readings.push(`tools: ${counted}`);
 
-// TUI 那一格在非交互终端里必须明确拒绝并给出稳定码：这一条同时证明入口链上的模块都装齐了。
+// 非交互终端启动 TUI 时应返回稳定错误码；这也会加载并检查 TUI 入口依赖。
 const tui = run(['tui']);
 if (!`${tui.stdout}${tui.stderr}`.includes('tui_terminal_required')) {
   throw new Error(`${pkg.name} tui on a non-interactive terminal did not report tui_terminal_required: ${(tui.stdout + tui.stderr).slice(0, 200)}`);
 }
 readings.push('tui: refuses with tui_terminal_required on a non-interactive terminal');
 
-// 消费者只看 tarball 声明：加载内核、解析配置和命令、执行工具与 MCP、使用 grammar 和搜索后端。
+// 从已安装包加载 Core，检查配置解析、命令解析、工具执行、MCP 和搜索后端。
 writeFileSync(join(consumer, 'probe.mjs'), `
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { createKernel, createMcpPlugin, createMcpRegistry, execTool, flagLayer, KernelError, mcpServerConfigs, parseCommand, resolveRipgrep, resolveShell, searchWithRipgrep, withNativeExitCode } from 'ligule';
+import { createKernel, createMcpPlugin, createMcpRegistry, execTool, flagLayer, KernelError, mcpServerConfigs, parseCommand, resolveRipgrep, resolveShell, searchWithRipgrep, withNativeExitCode, VERSION } from 'ligule';
 
 if (typeof KernelError !== 'function') throw new Error('KernelError is missing from the installed package');
+if (VERSION !== '${pkg.version}') throw new Error('the TUI compatibility entry did not preserve VERSION');
 if (flagLayer(['limits.readBytes = 100']).limits?.readBytes !== 100) {
   throw new Error('the installed package cannot parse a dotted override, its TOML dependency did not come along');
 }
@@ -152,7 +167,7 @@ const found = typeof backend?.executable === 'string' && existsSync(backend.exec
 if (!found) {
   throw new Error(\`search backend is missing for the supported target: \${JSON.stringify(backend)}\`);
 }
-console.log(\`search backend: @vscode/ripgrep@${pkg.dependencies['@vscode/ripgrep']}; \${backend.executable}\`);
+console.log(\`search backend: @vscode/ripgrep@${coreManifest.dependencies['@vscode/ripgrep']}; \${backend.executable}\`);
 mkdirSync('fixture', { recursive: true });
 writeFileSync('fixture/needle.txt', 'LIGULE-INSTALL-NEEDLE\\n');
 const hits = await searchWithRipgrep({ executable: backend.executable, boundary: process.cwd(), target: 'fixture', pattern: 'LIGULE-INSTALL-NEEDLE', limit: 5 });
@@ -163,6 +178,93 @@ if (JSON.stringify(hits).includes('LIGULE-INSTALL-NEEDLE') === false) throw new 
 const probe = spawnSync(process.execPath, ['probe.mjs'], { cwd: consumer, env, encoding: 'utf8' });
 if (probe.status !== 0) throw new Error(`the installed package failed its own probe: ${(probe.stderr ?? '').slice(0, 500)}`);
 for (const line of probe.stdout.trim().split('\n')) readings.push(line);
+
+const mcpProject = join(consumer, 'mcp-project');
+const mcpHome = join(consumer, 'mcp-home');
+mkdirSync(mcpProject, { recursive: true });
+mkdirSync(mcpHome, { recursive: true });
+writeFileSync(join(consumer, 'mcp-probe.mjs'), `
+import assert from 'node:assert/strict';
+import { writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+const corePackage = join(${JSON.stringify(bundledCoreDirectory)}, 'package.json');
+const coreRequire = createRequire(corePackage);
+const { Client } = coreRequire('@modelcontextprotocol/sdk/client');
+const { StdioClientTransport, getDefaultEnvironment } = coreRequire('@modelcontextprotocol/sdk/client/stdio.js');
+const expected = [
+  'ligule_run_cancel', 'ligule_run_start', 'ligule_run_status',
+  'ligule_session_create', 'ligule_session_list', 'ligule_session_open', 'ligule_session_read',
+].sort();
+const projectRoot = ${JSON.stringify(mcpProject)};
+const { setTrusted } = await import(pathToFileURL(join(${JSON.stringify(bundledCoreDirectory)}, 'dist', 'kernel', 'workspace-trust.js')).href);
+await setTrusted(projectRoot, true, join(${JSON.stringify(mcpHome)}, 'tui-trust.json'));
+const transport = new StdioClientTransport({
+  command: process.execPath,
+  args: [join(${JSON.stringify(installedPackageRoot)}, 'dist', 'cli.js'), 'mcp-server', '--project', projectRoot],
+  cwd: ${JSON.stringify(consumer)},
+  env: { ...getDefaultEnvironment(), LIGULE_HOME: ${JSON.stringify(mcpHome)} },
+  stderr: 'pipe',
+});
+const client = new Client({ name: 'ligule-install-probe', version: '0.0.0' });
+async function call(name, args) {
+  const result = await client.callTool({ name, arguments: args });
+  assert.notEqual(result.isError, true, name + ' returned an MCP tool error');
+  assert.equal(typeof result.structuredContent, 'object', name + ' structured result');
+  return result.structuredContent;
+}
+let timeout;
+try {
+  const probe = (async () => {
+    await client.connect(transport);
+    const { tools } = await client.listTools();
+    assert.deepEqual(tools.map(({ name }) => name).sort(), expected, 'published MCP tool names');
+    for (const tool of tools) {
+      assert.equal(tool.inputSchema?.type, 'object', tool.name + ' input schema');
+      assert.equal(typeof tool.description, 'string', tool.name + ' description');
+    }
+    const existingSession = process.argv[2];
+    if (existingSession === undefined) {
+      const created = await call('ligule_session_create', { projectRoot });
+      assert.equal(typeof created.sessionId, 'string', 'created session ID');
+      const listed = await call('ligule_session_list', { projectRoot, limit: 50 });
+      assert.ok(listed.sessions.some(({ sessionId }) => sessionId === created.sessionId), 'created session appears in project list');
+      await call('ligule_session_open', { projectRoot, sessionId: created.sessionId });
+      const history = await call('ligule_session_read', { sessionId: created.sessionId, limit: 10 });
+      assert.equal(history.sessionId, created.sessionId);
+      assert.ok(Array.isArray(history.records));
+      writeFileSync(join(process.cwd(), 'mcp-session-id'), created.sessionId + '\\n');
+      console.log('stdio MCP: initialize, tools/list, create/list/open/read passed');
+    } else {
+      await call('ligule_session_open', { projectRoot, sessionId: existingSession });
+      const history = await call('ligule_session_read', { sessionId: existingSession, limit: 10 });
+      assert.equal(history.sessionId, existingSession);
+      assert.ok(Array.isArray(history.records));
+      console.log('stdio MCP: reopened the session after client disconnect; record lock was released');
+    }
+  })();
+  await Promise.race([probe, new Promise((_, reject) => {
+    timeout = setTimeout(() => reject(new Error('MCP client operation timed out')), 30_000);
+  })]);
+} finally {
+  if (timeout !== undefined) clearTimeout(timeout);
+  await client.close();
+}
+`, 'utf8');
+
+const mcpProbe = spawnSync(process.execPath, ['mcp-probe.mjs'], { cwd: consumer, env, encoding: 'utf8', timeout: 45_000 });
+if (mcpProbe.status !== 0) {
+  throw new Error(`the installed package failed its stdio MCP probe (status=${mcpProbe.status}, signal=${mcpProbe.signal}, error=${mcpProbe.error?.message ?? 'none'}): ${(mcpProbe.stderr ?? '').slice(0, 1200)}`);
+}
+for (const line of mcpProbe.stdout.trim().split('\n')) readings.push(line);
+const createdSessionId = readFileSync(join(consumer, 'mcp-session-id'), 'utf8').trim();
+const reopenProbe = spawnSync(process.execPath, ['mcp-probe.mjs', createdSessionId], { cwd: consumer, env, encoding: 'utf8', timeout: 45_000 });
+if (reopenProbe.status !== 0) {
+  throw new Error(`the installed MCP server could not reopen its session after disconnect (status=${reopenProbe.status}, signal=${reopenProbe.signal}, error=${reopenProbe.error?.message ?? 'none'}): ${(reopenProbe.stderr ?? '').slice(0, 1200)}`);
+}
+for (const line of reopenProbe.stdout.trim().split('\n')) readings.push(line);
 
 for (const line of readings) process.stdout.write(`${line}\n`);
 process.stdout.write(`fresh install ok: ${pkg.name}-${pkg.version}.tgz\n`);

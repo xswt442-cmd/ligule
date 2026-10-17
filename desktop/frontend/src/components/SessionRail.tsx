@@ -1,7 +1,7 @@
-// 左侧栏那一份会话列表：读的是 `sessions.list`，按项目根分组（D91）。
-// 记录目录只有宿主那一侧开盘，这里不猜有什么会话，读回来的就是全部。
-// 查找走 `sessions.search`：那一段文字在记录里的哪一处由宿主说清，界面只管把自己这一份递到那一条上（方案 4.2）。
-// 组名与「默认」那一枚标签读的是 `workspaces.list` 那份持久登记：这一栏只是它的一个读者，收起或列不出来都不改那份文件（方案 5.5.1）。
+// 左侧栏通过 `sessions.list` 读取全部会话，并按项目根分组。
+// Host 独占会话目录的读取；前端不猜测磁盘中还存在哪些记录。
+// 搜索由 `sessions.search` 解析命中位置，前端负责打开会话并定位。
+// 工作区名称和默认标记来自 `workspaces.list`；此栏只展示，不修改登记表。
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { DropdownMenu, Popover } from 'radix-ui';
 import { Icon } from './Icon';
@@ -53,16 +53,16 @@ export type SearchHit = {
   seq: number;
   kind: string;
   text: string;
-  // 摘录出自那一次结果，而整段溢出在另一个文件里：那一段中间的部分没有在这儿搜过。
+  // 摘录来自记录中的结果摘要；溢出文件中未搜索的中间内容不会出现在这里。
   spilled?: string;
 };
 
 export type SessionSummary = {
   id: string;
-  // 没有首行的现存记录读作版本 0（D73）。
+  // 无首行的旧记录按版本 0 读取。
   formatVersion: number;
   projectRoot: string;
-  // 归组用的那两格（方案 5.5.3、5.5.4）：空串说的是首行没写这两格，与「默认那一具」是两件事。
+  // 使用记录首行中的工作区身份和来源分组；空值表示元数据未记录，不表示默认工作区。
   workspace?: string;
   workspaceOrigin?: string;
   createdAt: string | null;
@@ -70,10 +70,10 @@ export type SessionSummary = {
   events: number;
   lastSeq: number;
   mode: { name: string; layer: string; digest: string } | null;
-  // 人起的名字；没起过是空串。归档只改这一栏怎么画，记录还在，也接得回来（方案 4.2、实现顺序第 75 步）。
+  // 显示用户设置的名称；未命名时为空。归档只改变列表状态，记录仍可恢复。
   name?: string;
   archived?: boolean;
-  // 有几条派发留在记录里没有结果：恢复时它们会被补成未知结果（D72）。
+  // 显示尚无结果的已派发调用数；恢复时这些调用会被标记为结果未知。
   unanswered: number;
   truncatedBytes: number;
   error?: { code: string; detail: string };
@@ -90,17 +90,17 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
   current: string | null;
   onOpen: (id: string, projectRoot?: string) => void;
   onOpenHit: (hit: SearchHit, projectRoot?: string) => void;
-  // 宿主那边多出一份记录时（分支之后），这一栏要重读一次才说得出新的那一份存在（方案 4.3）。
+  // 会话创建或分支后重新读取列表，以显示新记录。
   revision: number;
-  // 界面手里那两份运行事实：哪几份会话此刻有自己的轮次在跑，哪一份刚跑完一轮而人还没看着（方案 3.1）。
+  // 显示各会话的运行状态和未读完成状态。
   running: string[];
   unread: string[];
-  // 这一扇窗口另外看着哪几项目录（方案 3.2）：记录在哪个目录、工具在哪个目录读写，由宿主按那一份项目环境说；界面只递这一份清单。
+  // 提供当前窗口额外关注的项目目录；会话归属和工具边界由 Host 的项目环境决定。
   projects: string[];
   hidden: string[];
   onHidden: (roots: string[]) => void;
   onProjects: (roots: string[]) => void;
-  // 在那一份项目里新建一份会话（方案 3.2）：不给目录就落在这一具宿主自己的项目。
+  // 在指定项目中创建会话；未指定时使用 Host 默认项目。
   onCreate: (root?: string) => void;
 }) {
   const t = useText();
@@ -170,7 +170,7 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
     setLoading(false);
   }, [client, projects, hidden, isHidden, t]);
 
-  // 换默认工作区只有这一处落笔：写完重读那份登记，画面上那一枚开关说的就是宿主存下来之后的样子（方案 5.5.1、5.5.3）。
+  // 默认工作区只通过此入口更新；保存后重新读取登记表，以显示 Host 实际保存的值。
   const markDefault = useCallback(async (root: string, clearing: boolean) => {
     try {
       await client.call('workspace.default.set', { directory: clearing ? '' : root }, 15_000);
@@ -253,9 +253,8 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
     void load();
   }, [load, revision]);
 
-  // 查的是磁盘上那几份记录，敲一个字扫一遍太贵：等手停下问一次。
-  // E04 那一条随敲随筛，因为它筛的已经是读回手里的那一份列表；这一条要宿主开盘。
-  // 还在读列表时先不问：那一份目录清单要等那一次读回来才成形，早问一步搜的是不全的几项目录（审阅 F3）。
+  // 搜索需要扫描会话记录，因此在用户停止输入后再发送请求。
+  // 若会话列表仍在加载，先等待列表结果，避免遗漏项目目录中的记录。
   useEffect(() => {
     const generation = ++searchGeneration.current;
     const needle = query.trim();

@@ -21,8 +21,8 @@ const evidenceParent = join(testRoot, 'readings');
 const executable = createRequire(join(desktopDirectory, 'package.json'))('electron');
 const harness = join(testDirectory, 'run-real-model.cjs');
 const node = join(desktopDirectory, 'vendor', 'node', process.platform === 'win32' ? 'node.exe' : 'node');
-const cli = join(repositoryRoot, 'dist', 'cli.js');
-const mcpFixture = join(repositoryRoot, 'test', 'fixtures', 'mcp-minimal.mjs');
+const cli = join(repositoryRoot, 'core', 'dist', 'host', 'desktop-entry.js');
+const mcpFixture = join(repositoryRoot, 'tests', 'fixtures', 'mcp-minimal.mjs');
 const hostEntry = join(electronDirectory, 'dist', 'host-entry.js');
 const frontend = join(desktopDirectory, 'frontend', 'dist', 'index.html');
 const electronModules = ['secure-window.js', 'security.js', 'ipc.js', 'host.js', 'runtime.js', 'native.js', 'preload.js', 'host-entry.js']
@@ -37,7 +37,7 @@ const PROOF_FILES = [
 ];
 const providerLabel = '本地 stub 模型';
 const providerRequests = [];
-// 宿主崩溃演练用：置为 true 后新到的这一发请求只登记、不回复，界面侧就能停在「请求已发出、还没答案」的那一刻。
+// 启用后只记录新请求而不返回响应，用于验证界面在请求等待期间的行为。
 let hangRequests = false;
 const skillMcpProof = { catalogLoaded: false, skillActivated: false, mcpDefinitionLoaded: false, mcpCallSucceeded: false };
 
@@ -100,7 +100,7 @@ const server = createServer(async (request, response) => {
     ...(workflowStep < 0 ? {} : { skillMcpProof: { ...skillMcpProof } }),
     hung: hangRequests,
   });
-  // 只登记不回复：连接保持打开，Host 那一侧就一直停在「等这一发回答」上。
+  // 保持连接打开但不返回响应，使 Host 持续等待模型结果。
   if (hangRequests) return;
   let closed = false;
   response.on('close', () => { closed = true; });

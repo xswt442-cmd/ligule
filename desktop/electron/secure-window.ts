@@ -126,7 +126,7 @@ function installSessionSecurity(targetSession: Session, owner: WebContents, page
     return;
   }
 
-  // 普通复制只允许受管理顶层页面写入文本；读取及其他浏览器权限继续拒绝。
+  // 仅允许受管理的顶层页面写入剪贴板文本；读取剪贴板和其他浏览器权限一律拒绝。
   const canWriteClipboard = (contents: WebContents | null, permission: string, mainFrame: boolean, url?: string): boolean =>
     contents === owner && !owner.isDestroyed() && permission === 'clipboard-sanitized-write' && mainFrame
     && typeof url === 'string' && approvedPage(url, page) && approvedPage(owner.mainFrame.url, page);

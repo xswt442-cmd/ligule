@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 
 const PINNED_NODE_VERSION = 'v24.21.0';
 
@@ -13,7 +13,7 @@ export interface RuntimeLocationOptions {
 
 export interface HostRuntime {
   node: string;
-  cli: string;
+  hostEntry: string;
   cwd: string;
   env: NodeJS.ProcessEnv;
 }
@@ -22,11 +22,11 @@ export function resolveHostRuntime(options: RuntimeLocationOptions): HostRuntime
   const environment = options.environment ?? process.env;
   const resourcesPath = options.resourcesPath;
   const bundledApp = resourcesPath === undefined ? undefined : join(resourcesPath, 'app');
-  const cli = resourcesPath !== undefined
-    ? join(bundledApp as string, 'dist', 'cli.js')
-    : options.repositoryRoot === undefined ? undefined : join(options.repositoryRoot, 'dist', 'cli.js');
-  if (cli === undefined || !existsSync(cli)) throw new Error('Host CLI was not found at its fixed runtime location');
-  const appRoot = dirname(dirname(cli));
+  const hostEntry = resourcesPath !== undefined
+    ? join(bundledApp as string, 'node_modules', '@ligule', 'core', 'dist', 'host', 'desktop-entry.js')
+    : options.repositoryRoot === undefined ? undefined : join(options.repositoryRoot, 'core', 'dist', 'host', 'desktop-entry.js');
+  if (hostEntry === undefined || !existsSync(hostEntry)) throw new Error('Core Host entry was not found at its fixed runtime location');
+  const appRoot = resourcesPath !== undefined ? bundledApp as string : options.repositoryRoot as string;
   const node = resourcesPath !== undefined
     ? join(resourcesPath, 'node', process.platform === 'win32' ? 'node.exe' : 'node')
     : options.node;
@@ -34,7 +34,7 @@ export function resolveHostRuntime(options: RuntimeLocationOptions): HostRuntime
   validateNode24(node, environment);
   return {
     node,
-    cli: resolve(cli),
+    hostEntry: resolve(hostEntry),
     cwd: resolve(appRoot),
     env: sanitizedHostEnvironment(environment),
   };

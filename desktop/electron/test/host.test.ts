@@ -40,7 +40,7 @@ test('transfers complete JSON frames from and to a real Node child process', asy
   const faults: HostFault[] = [];
   const controller = new HostController({
     node: process.execPath,
-    cli,
+    hostEntry: cli,
     cwd: directory,
     env: process.env,
     onFrame: (frame) => frames.push(frame),
@@ -67,7 +67,7 @@ test('assembles a real 16 MiB stdout frame within a bounded time', async () => {
   const cli = join(directory, 'fixture.js');
   const frames: string[] = [];
   const faults: HostFault[] = [];
-  const controller = new HostController({ node: process.execPath, cli, cwd: directory, env: process.env, onFrame: (frame) => frames.push(frame), onFault: (fault) => faults.push(fault) });
+  const controller = new HostController({ node: process.execPath, hostEntry: cli, cwd: directory, env: process.env, onFrame: (frame) => frames.push(frame), onFault: (fault) => faults.push(fault) });
   const frameBytes = 16 * 1024 * 1024;
   const prefix = '{"value":"';
   const suffix = '"}';
@@ -94,7 +94,7 @@ test('validates stdout JSON without forwarding malformed or oversized lines', as
   const faults: HostFault[] = [];
   const controller = new HostController({
     node: process.execPath,
-    cli,
+    hostEntry: cli,
     cwd: directory,
     env: process.env,
     onFrame: (frame) => frames.push(frame),
@@ -116,7 +116,7 @@ test('rejects an oversized stdout frame from a real Node child process', async (
   const cli = join(directory, 'fixture.js');
   const frames: string[] = [];
   const faults: HostFault[] = [];
-  const controller = new HostController({ node: process.execPath, cli, cwd: directory, env: process.env, onFrame: (frame) => frames.push(frame), onFault: (fault) => faults.push(fault) });
+  const controller = new HostController({ node: process.execPath, hostEntry: cli, cwd: directory, env: process.env, onFrame: (frame) => frames.push(frame), onFault: (fault) => faults.push(fault) });
   const frameBytes = 16 * 1024 * 1024;
   const prefix = '{"value":"';
   const suffix = '"}';
@@ -139,7 +139,7 @@ test('isolates an old write callback across a real Node child restart', async ()
   const faults: HostFault[] = [];
   let restartStarted = false;
   let oldWriteSettledAfterRestart = false;
-  const controller = new HostController({ node: process.execPath, cli, cwd: directory, env: process.env, onFrame: (frame) => frames.push(frame), onFault: (fault) => faults.push(fault) });
+  const controller = new HostController({ node: process.execPath, hostEntry: cli, cwd: directory, env: process.env, onFrame: (frame) => frames.push(frame), onFault: (fault) => faults.push(fault) });
   try {
     await writeFile(cli, "const fs = require('node:fs'); const first = !fs.existsSync('started'); fs.writeFileSync('started', 'yes'); process.stdout.write(JSON.stringify({ ready: first ? 1 : 2 }) + '\\n'); if (first) setInterval(() => {}, 1000); else require('node:readline').createInterface({ input: process.stdin }).on('line', (line) => process.stdout.write(line + '\\n'));\n", 'utf8');
     await controller.start();
@@ -182,7 +182,7 @@ test('starts the actual Node 24 Ligule Host and accepts an opaque protocol frame
   const root = resolve(import.meta.dirname, '../../..');
   const frames: string[] = [];
   const faults: HostFault[] = [];
-  const controller = new HostController({ node: process.execPath, cli: join(root, 'dist', 'cli.js'), cwd: root, env: sanitizedHostEnvironment({ ...process.env, LIGULE_HOME: directory }), onFrame: (frame) => frames.push(frame), onFault: (fault) => faults.push(fault) });
+  const controller = new HostController({ node: process.execPath, hostEntry: join(root, 'core', 'dist', 'host', 'desktop-entry.js'), cwd: root, env: sanitizedHostEnvironment({ ...process.env, LIGULE_HOME: directory }), onFrame: (frame) => frames.push(frame), onFault: (fault) => faults.push(fault) });
   try {
     await controller.start();
     await controller.send('{"id":"opaque-1","method":"unsupported.desktop.probe","params":{}}');

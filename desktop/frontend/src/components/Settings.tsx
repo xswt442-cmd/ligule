@@ -22,7 +22,7 @@ export type SettingsProps = {
   initialSection?: SectionId;
   client: Client;
   sessionId: string | null;
-  // 配置那两栏读与写的是哪一份项目：跟着眼前这一份会话走（方案 3.2、审阅 F3）。
+  // 当前会话所属项目决定配置读取和写入的项目范围。
   projectRoot: string;
   status: Status | null;
   settings: Settings;
@@ -30,7 +30,7 @@ export type SettingsProps = {
   notificationProblem: string | null;
   notificationPending: boolean;
   patch: (part: Partial<Settings>) => void;
-  // 键位那一栏要说的两件都在外面读回来：本机那一格里落不下来的那几条，与现在这一份表。
+  // 快捷键设置显示偏好读取失败信息和当前有效绑定。
   keyNotice: string;
   link: string | null;
   counts: { sent: number; received: number };
@@ -182,7 +182,7 @@ function General({ client, language, patch }: {
   </>;
 }
 
-// 配色方案的名字与一句说明：界面上那一枚色板按这一份表排，颜色从 `data-palette` 那一个块自己读，不写在这里。
+// 配色名称和说明；实际颜色定义在 `styles.css` 的 `data-palette` 变量中。
 const PALETTE_NAMES: Record<Palette, [string, string]> = {
   ink: ['墨青', 'Ink'],
   parchment: ['羊皮纸', 'Parchment'],
@@ -293,7 +293,7 @@ function Keys({ settings, patch, notice }: { settings: Settings; patch: Settings
     };
     const onKey = (event: KeyboardEvent) => {
       event.preventDefault();
-      // 录制只消费这次按键，不能在结束录制后继续触发全局动作。
+      // 快捷键录制期间消费按键，避免同时触发全局动作。
       event.stopImmediatePropagation();
       if (event.key === 'Escape') {
         stop();
@@ -302,7 +302,7 @@ function Keys({ settings, patch, notice }: { settings: Settings; patch: Settings
       const spec = specOf(event);
       if (spec === null) return;
       const binding = KEYMAP[listening];
-      // 同一个范围里那一记键已经落在别的事上就拒：存下去的表必须是这一份界面按得动的。
+      // 同一作用范围内已有动作绑定该按键时拒绝保存。
       const clash = conflictsIn(binding.view, { ...CURRENT, [listening]: spec });
       if (clash.length > 0) {
         const [first, second] = clash[0];

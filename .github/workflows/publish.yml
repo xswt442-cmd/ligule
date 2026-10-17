@@ -66,12 +66,12 @@ jobs:
             echo "::error::main CI did not pass for the exact CLI tag SHA"; exit 1
           fi
           version=${TAG#cli-v}
-          package_version=$(git show "${TAG}:package.json" | node -e "let input='';process.stdin.on('data',chunk=>input+=chunk).on('end',()=>process.stdout.write(JSON.parse(input).version))")
+          package_version=$(git show "${TAG}:tui/package.json" | node -e "let input='';process.stdin.on('data',chunk=>input+=chunk).on('end',()=>process.stdout.write(JSON.parse(input).version))")
           if [ "$package_version" != "$version" ]; then
             echo "::error::${TAG} does not match package.json version ${package_version}"
             exit 1
           fi
-          git show "${TAG}:CHANGELOG.md" | grep -F "## [${version}]" >/dev/null
+          git show "${TAG}:tui/CHANGELOG.md" | grep -F "## [${version}]" >/dev/null
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
@@ -115,14 +115,14 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: test
-        run: pnpm --filter ligule run test
+        run: pnpm test
 
       - name: syntax check compiled modules and checks
         shell: bash
         run: |
           set -euo pipefail
-          find dist -type f -name '*.js' -print0 | xargs -0 -r -n 1 node --check
-          for file in scripts/*.js test/*.js; do node --check "$file"; done
+          pnpm check:syntax
+          find core/dist tui/dist -type f -name '*.js' -print0 | xargs -0 -r -n 1 node --check
 
       - name: check the packed artifact
         run: pnpm --filter ligule run check-pack
@@ -219,7 +219,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: build the host entry points for verification
-        run: pnpm --filter ligule run build
+        run: pnpm run build
 
       - uses: actions/download-artifact@v4
         with:

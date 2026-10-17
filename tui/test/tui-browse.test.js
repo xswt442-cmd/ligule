@@ -1,0 +1,119 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { access } from 'node:fs/promises';
+import { PassThrough } from 'node:stream';
+import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
+import { createElement } from 'react';
+import { render } from 'ink';
+import { completeFrame } from './helpers/frames.js';
+import { App } from '../dist/tui/app.js';
+import { waitFor, withTuiHost } from './helpers/tui-host.ts';
+
+async function withApp(context, run) {
+  const stdout = Object.assign(new PassThrough(), { columns: 80, rows: 24, isTTY: true });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref() {}, unref() {} });
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const frame = () => completeFrame(painted);
+  const output = () => painted.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
+  const instance = render(createElement(App, { client: context.client, sessionId: context.sessionId, stdout, info: { boundary: context.config.boundary } }), { stdout, stdin, patchConsole: false, exitOnCtrlC: false, interactive: true });
+  const wait = (condition) => waitFor(condition, { read: frame });
+  const type = async (text) => { stdin.write(text); await delay(50); stdin.write('\r'); };
+  try {
+    await wait(() => frame().includes('审批 逐次审批'));
+    await run({ frame, output, stdin, type, wait, stdout });
+  } finally {
+    instance.unmount();
+  }
+}
+
+test('complete history opens in a bounded viewport and keyboard navigation reaches both ends', async () => {
+  await withTuiHost(async (context) => withApp(context, async ({ frame, output, stdin, type, wait }) => {
+    const text = Array.from({ length: 60 }, (_, index) => `历史行 ${index}`).join('\n');
+    await type(text);
+    await wait(() => context.notifications.some((notice) => notice.event?.kind === 'assistant'));
+    await delay(80);
+    stdin.write('\x0f');
+    await wait(() => frame().includes('完整历史'));
+    stdin.write('\x1b[H');
+    await wait(() => frame().includes('历史行 0') && /\b1\/[1-9]\d* 行 ·/.test(frame()));
+    assert.ok(frame().split('\n').length <= 24, '动态历史视图受终端高度约束');
+    stdin.write('\x1b[6~');
+    await wait(() => !/\b1\/\d+ 行/.test(frame()));
+    stdin.write('\x1b[F');
+    await wait(() => frame().includes('历史行 59'));
+    stdin.write('\x1b');
+    await wait(() => !frame().includes('完整历史'));
+  }));
+});
+
+test('an approval exposes its entire change through pages and Escape cancels without writing', async () => {
+  await withTuiHost(async (context) => withApp(context, async ({ frame, output, stdin, type, wait }) => {
+    const content = Array.from({ length: 40 }, (_, index) => `待审批内容 ${index}`).join('\n');
+    await type(JSON.stringify({ tool: 'create', args: { path: 'approval.md', content } }));
+    await wait(() => frame().includes('允许执行 create？'));
+    stdin.write('\x0f');
+    await wait(() => frame().includes('新内容:'));
+    await wait(() => /改动 1\/\d+ 行/.test(frame()));
+    stdin.write('\x1b[F');
+    await wait(() => frame().includes('待审批内容 39'));
+    stdin.write('\x1b');
+    await wait(() => output().includes('本轮已取消'));
+    await assert.rejects(access(join(context.config.boundary, 'approval.md')), (error) => error.code === 'ENOENT');
+    assert.ok(context.requests.some((request) => request.method === 'run.cancel'));
+  }));
+});
+
+// 提问面板逐题收集答案，并在最后一题提交后一次性返回；非选项输入作为自由回答。
+const askFrame = () => JSON.stringify({
+  tool: 'ask_user_question',
+  args: {
+    questions: JSON.stringify([
+      { question: '要装哪一份依赖管理器？', header: '依赖', options: [{ label: 'npm' }, { label: 'pnpm', description: '装得更快' }] },
+      { question: '还有别的要一起改吗？', multiSelect: true },
+    ]),
+  },
+});
+
+test('a question answers one item per Enter, lets an unsubmitted answer be changed and sends them together', async () => {
+  await withTuiHost(async (context) => withApp(context, async ({ frame, output, stdin, type, wait }) => {
+    await type(askFrame());
+    await wait(() => frame().includes('等待回答 1/2'));
+    assert.ok(frame().includes('2. pnpm —— 装得更快'), '题面画出那几条选项与它们的说明');
+    assert.ok(frame().includes('没有回答时限'), '画面说明回答不会超时');
+
+    await type('2');
+    await wait(() => frame().includes('等待回答 2/2'));
+    await wait(() => frame().includes('1. pnpm'));
+
+    // 尚未提交的答案可以修改：草稿为空时按左键返回上一题，并恢复之前输入的内容。
+    stdin.write('\x1b[D');
+    await wait(() => frame().includes('等待回答 1/2'));
+    stdin.write('\x7f');
+    // 分开发送退格和后续字符，避免假终端将它们合并后漏掉退格输入。
+    await delay(150);
+    await type('1');
+    await wait(() => frame().includes('等待回答 2/2') && frame().includes('1. npm'));
+
+    await type('顺手把 README 也改一下');
+    await wait(() => output().includes('本轮已完成'));
+    const sent = JSON.stringify(context.providerRequests.at(-1));
+    assert.ok(sent.includes('答：npm'), '交回模型的是改过那一份，不是第一次写的');
+    assert.ok(sent.includes('答：顺手把 README 也改一下'));
+  }), { interactive: true });
+});
+
+// 取消提问后应终止当前等待，并从画面中移除未回答的问题。
+test('interrupting the round takes the pending question away with it', async () => {
+  await withTuiHost(async (context) => withApp(context, async ({ frame, output, type, wait }) => {
+    await type(askFrame());
+    await wait(() => frame().includes('等待回答 1/2'));
+    await context.client.request('run.cancel', { sessionId: context.sessionId });
+    await wait(() => output().includes('本轮已取消'));
+    await delay(120);
+    assert.ok(!frame().includes('等待回答'), '取消后提问卡已关闭');
+    const { events } = await context.client.request('session.read', { sessionId: context.sessionId });
+    assert.ok(events.some((event) => event.result?.code === 'ask_user_cancelled'), '记录里说的是这一题被取消，不是超时');
+  }), { interactive: true });
+});

@@ -1,5 +1,4 @@
-// 投影那一份取值规则的唯一检查：跑 `node dev/rows.check.mjs`，坏了就非零退出。
-// 它 import 的是同目录树上那份 `src/rows.ts`，Node 直接剥类型跑，不需要构建产物。
+// 检查 Host 事件如何转换为桌面端转录行和状态提示。
 import assert from 'node:assert/strict';
 import { capabilityOf, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn } from '../src/rows.ts';
 
@@ -63,7 +62,7 @@ assert.equal(write.summary, 'notes/readings.md：写入 4 行');
 assert.equal(write.english.summary, 'notes/readings.md: write 4 lines');
 assert.deepEqual(write.english.notes, ['Allowed automatically (auto)']);
 assert.deepEqual(write.diff, { removed: 0, added: 4 });
-// 审批那一格展开的两段内容都来自参数：整份写入没有一份读过的原文可画，编辑才有（方案 5.4）。
+// 写入审批只显示待写入内容；编辑审批同时显示匹配内容和替换内容。
 const writeChange = changeOf('write', { path: 'notes/readings.md', content: 'a\nb' });
 assert.match(changeBody(writeChange, { content: 'a\nb' }), /^写入完整文件/);
 assert.ok(!changeBody(writeChange, { content: 'a\nb' }).includes('原内容:'), '没读过的原文不编造');
@@ -100,7 +99,7 @@ assert.equal(failure.notes.length, 4);
 assert.deepEqual(failure.notes.slice(0, 3), ['退出码 1', '完整结果：result-3-1a2b3c4d.json', '审批通过 (ask) · 规则：命令逐次询问']);
 assert.match(failure.notes[3], /^用时 2\.\d 秒$/);
 
-// 记录里带着内核量的那一格时画的是它：重开这份会话也还在，不靠界面活着的那一段（第 66 步）。
+// 工具耗时来自会话记录，因此重新打开会话后仍可显示。
 const recorded = projectRecord({
   kind: 'tool', tool: 'exec', callId: 'c5', args: { command: 'npm test' }, durationMs: 640,
   result: { failed: false, content: { text: 'ok' } },
@@ -134,13 +133,13 @@ assert.deepEqual(repaired.notes, ['中断恢复 · 外部操作结果未知']);
 assert.equal(projectRecord({ kind: 'assistant', text: '', toolCalls: [{ id: 'c6', name: 'skill' }] })[0].text, '');
 assert.deepEqual(projectRecord({ kind: 'usage', input: 1 }), []);
 
-// 每一行带着它来自哪一条事件：查找的命中说的是那一个序号，跳到那一行要靠它（方案 4.2、实现顺序第 77 步）。
+// 转录行保留来源事件序号，供搜索结果定位到对应记录。
 const stamped = projectRecord({ seq: 12, kind: 'assistant', text: '两句', toolCalls: [{ id: 'c9', name: 'read', args: {} }] });
 assert.deepEqual(stamped.map((row) => row.seq), [12, 12], '一条记录出来的每一行都认得自己是哪一条事件');
 assert.equal(metaRow('meta', '界面自己写的一行').seq, undefined, '界面自己写的那几行没有序号可对');
 assert.equal(metaRow('meta', '界面自己写的一行', 'A system notice').english.text, 'A system notice', '系统行保留可切换的英文文本');
 
-// 展示档那一格筛的是行的种类：虚拟视口要量每一行的高度，藏着不画的那几类不进列表（D90、U48）。
+// 展示级别决定哪些转录行进入虚拟列表。
 const answered = projectRecord({ kind: 'assistant', text: '一句' })[0];
 const reasoned = projectRecord({ kind: 'reasoning', text: '一段' })[0];
 const resulted = projectRecord({ kind: 'tool', tool: 'read', callId: 'c7', args: {}, result: { content: { text: 'x' } } })[0];
@@ -148,7 +147,7 @@ assert.ok(shownIn('detailed', reasoned) && shownIn('detailed', resulted), '全�
 assert.ok(shownIn('standard', resulted) && !shownIn('standard', reasoned), '标准档藏推理段');
 assert.ok(shownIn('brief', answered) && !shownIn('brief', reasoned) && !shownIn('brief', resulted), '简略档只留问答');
 
-// 一轮开始时的完整参数快照画成一行小字：档位来自哪一处都写在行里；内核没落这一条时（记录里没这一种事件）就不产行。
+// 仅在会话记录包含回合参数事件时生成参数摘要行。
 const ctx = projectRecord({ seq: 3, kind: 'turnContext', model: 'gpt-x', mode: 'full', policy: 'auto', policySource: 'session' })[0];
 assert.equal(ctx.kind, 'context');
 assert.equal(ctx.text, '本轮参数：gpt-x · full · auto');
@@ -158,8 +157,8 @@ assert.ok(shownIn('detailed', ctx) && shownIn('full', ctx));
 assert.equal(projectRecord({ seq: 4, kind: 'turnContext', policy: 'ask', policySource: 'config' })[0].text, '本轮参数：ask', '缺少的参数不编造');
 assert.equal(projectRecord({ kind: 'turnContext', model: null })[0], undefined);
 assert.equal(projectRecord({ seq: 5, kind: 'turnContext' })[0], undefined, '几个读数都没有时这一行整个不画');
-// 会话浮层里那几格读自 status.get：档位与它的来源是两格，界面上才说得出「现在生效的是配置默认还是会话临时改的」。
-// 一张提问卡收掉时留下的那一句：题面与已经打下的字都要读得到，没打的那一道说清没打（审阅 F2、方案 R1）。
+// 会话状态摘要应保留参数值及其来源。
+// 提问卡关闭后，转录应记录题目和用户已填写的答案；未回答的题目应明确标记。
 const echoAsk = { questions: [{ id: 'q1', question: '用哪一种格式' }, { id: 'q2', question: '要不要带表头' }] };
 assert.equal(
   questionEcho(echoAsk, { q1: { picked: ['CSV'], extra: ' 压缩一份 ' }, q2: { picked: [], extra: '' } }),

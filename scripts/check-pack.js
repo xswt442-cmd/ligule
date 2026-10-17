@@ -9,8 +9,8 @@ const repo = fileURLToPath(new URL('..', import.meta.url));
 const packDir = join(repo, 'testplace', 'pack');
 const work = join(packDir, 'check');
 
-if (!existsSync(join(repo, 'dist', 'index.js'))) {
-  throw new Error('dist/index.js is missing; run `pnpm --filter ligule run build` before checking the packaged artifact');
+if (!existsSync(join(repo, 'tui', 'dist', 'index.js')) || !existsSync(join(repo, 'core', 'dist', 'index.js'))) {
+  throw new Error('TUI or Core build output is missing; run `pnpm run build` before checking the packaged artifact');
 }
 
 function collectTargets(value, found = []) {
@@ -32,12 +32,25 @@ try {
   execFileSync('tar', ['-xzf', `testplace/pack/${tarball}`, '-C', 'testplace/pack/check'], { cwd: repo, stdio: 'inherit' });
   const shipped = join(work, 'package');
   const manifest = JSON.parse(readFileSync(join(shipped, 'package.json'), 'utf8'));
+  if (manifest.bin?.ligule !== './dist/cli.js') throw new Error(`${tarball} is missing the ligule CLI entry required by the MCP server command`);
   if (JSON.stringify(manifest.dependencies) !== JSON.stringify(pkg.dependencies)) {
     throw new Error(`${tarball} does not carry the release manifest's dependencies`);
   }
   if (JSON.stringify(manifest.optionalDependencies) !== JSON.stringify(pkg.optionalDependencies)) {
     throw new Error(`${tarball} does not carry the release manifest's optional dependencies`);
   }
+  const bundledCore = join(shipped, 'node_modules', '@ligule', 'core');
+  if (!existsSync(join(bundledCore, 'dist', 'index.js')) || !existsSync(join(bundledCore, 'modes', 'minimal.toml'))
+    || !existsSync(join(bundledCore, 'README.md')) || !existsSync(join(bundledCore, 'LICENSE'))) {
+    throw new Error(`${tarball} is missing the bundled @ligule/core runtime, modes, README, or license`);
+  }
+  if (!existsSync(join(bundledCore, 'dist', 'host', 'control.js'))) {
+    throw new Error(`${tarball} is missing the Host control module required by the MCP server`);
+  }
+  for (const testPath of ['test', 'tests', 'core/test', 'tui/test']) {
+    if (existsSync(join(shipped, testPath))) throw new Error(`${tarball} must not contain test files: ${testPath}`);
+  }
+  if (existsSync(join(bundledCore, 'test'))) throw new Error(`${tarball} must not bundle Core test fixtures`);
   const declared = [...collectTargets(manifest.exports), ...collectTargets(manifest.bin)];
   if (declared.length === 0) throw new Error('package.json declares neither exports nor bin, nothing to check');
   for (const target of declared) {

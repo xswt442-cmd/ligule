@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const STABLE_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const PRODUCTS = {
-  cli: { manifest: 'package.json', changelog: 'CHANGELOG.md', source: 'src/version.ts', tagPrefix: 'cli-v' },
+  cli: { manifest: 'tui/package.json', changelog: 'tui/CHANGELOG.md', source: 'tui/src/version.ts', tagPrefix: 'cli-v' },
   desktop: { manifest: 'desktop/package.json', changelog: 'desktop/CHANGELOG.md', tagPrefix: 'desktop-v' },
 };
 

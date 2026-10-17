@@ -1,12 +1,12 @@
-// 界面这一侧的槽位注册表，与内核那份同一形状（I7、`src/kernel/slots.ts`）：
-// 宿主先声明槽位收什么，内容再挂进来；卸载走注册返回的那个动作，表里不留残迹。
-// 加一个面板、一枚状态标记就是多注册一项描述，渲染主干不动。
+// Desktop 前端的槽位定义与 `core/src/kernel/slots.ts` 保持一致。
+// Host 声明槽位数据类型，插件注册内容；卸载时执行注册返回的清理函数。
+// 新增面板或状态项只需添加槽位描述，不需修改主渲染流程。
 import type { ReactNode } from 'react';
 
 export type Panel<P> = {
   id: string;
   title: string;
-  /** 还没有实现的面板：菜单里看得见，点开说的是缺的那一件在哪。 */
+  /** 尚未实现的面板，用于显示功能占位说明。 */
   pending?: boolean;
   view: (props: P) => ReactNode;
 };

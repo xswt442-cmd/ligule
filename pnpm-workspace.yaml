@@ -1,5 +1,6 @@
 packages:
-  - .
+  - core
+  - tui
   - desktop
   - desktop/frontend
 

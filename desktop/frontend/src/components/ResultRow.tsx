@@ -2,7 +2,7 @@ import { Fold } from './Fold';
 import { useText } from '../locale';
 import type { RowProps } from './types';
 
-// 结果卡片那一行读数：退出码、溢出文件、判定那一条、支线、用时（D77、D94）。
+// 结果卡片显示退出码、溢出文件、权限判定、派生会话和运行时长。
 export function ResultRow({ row, verbosity }: RowProps) {
   const t = useText();
   return <article className="row result" data-kind="result">

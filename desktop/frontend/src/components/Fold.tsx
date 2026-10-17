@@ -2,8 +2,8 @@ import { useState } from 'react';
 import { useText } from '../locale';
 import type { Verbosity } from './types';
 
-// 长正文默认只给一屏高度，多出来的靠「看全文」那一格（D94）。
-// 展开与收起是界面一侧的状态：不回写记录，也不进配置（D81 边界二）。
+// 长文本默认限制为一屏高度，并提供展开查看入口。
+// 展开状态由界面维护，不写入会话记录或配置。
 const LINES = 12;
 const CHARS = 600;
 

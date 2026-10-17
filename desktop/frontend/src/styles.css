@@ -1,23 +1,23 @@
-/* 六套配色共用布局、控件和排版变量。 */
+/* 所有配色共用布局、控件和排版变量。 */
 
 :root {
-  /* 默认那一套是「墨青」（深色）。几何与刻度放在这一处，颜色变量在下面的配色块里给。 */
+  /* 默认使用深色「墨青」主题；这里定义全局尺寸和间距，主题颜色在下方定义。 */
   --radius: 8px;
-  /* 一套刻度：间距六级、字号五档、一条内容列（D97、方案 4.1）。
-     字号只有这一种写法：全部 rem，取值随根字号整倍缩放。「字号」那一格换的就是根字号，
-     所以正文、控件、辅助与标题同时动，不会有哪一格钉死在像素上。 */
+  /* 全局间距、字号和内容列宽度。
+     字号统一使用 rem，并随根字号缩放；调整字号设置时，
+     正文、控件、辅助文字和标题会按同一比例缩放。 */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
   --space-4: 16px;
   --space-5: 24px;
   --space-6: 32px;
-  --text-xs: 0.75rem;      /* 中档 12 像素：时间戳与用量这一类 */
-  --text-sm: 0.8125rem;    /* 13：辅助说明 */
-  --text-md: 0.875rem;     /* 14：控件上的字 */
-  --text-lg: 0.9375rem;    /* 15：正文 */
-  --text-xl: 1.125rem;     /* 18：标题 */
-  /* 常用控件的命中区下限（方案 4.1）：约 32 像素起。图标按钮与行内的小片同一条线。 */
+  --text-xs: 0.75rem;      /* 12 像素：时间戳和用量信息 */
+  --text-sm: 0.8125rem;    /* 13 像素：辅助说明 */
+  --text-md: 0.875rem;     /* 14 像素：控件文字 */
+  --text-lg: 0.9375rem;    /* 15 像素：正文 */
+  --text-xl: 1.125rem;     /* 18 像素：标题 */
+  /* 常用控件的最小点击高度约为 32 像素，包括图标按钮和行内标签。 */
   --hit: 32px;
   --stream: 850px;
   --shadow-pop: 0 18px 40px rgb(0 0 0 / 35%);
@@ -26,11 +26,11 @@
   --mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", monospace;
 }
 
-/* 六套配色都只改这几枚颜色变量。每套的正文、次要文字、边界与状态色都按对比度算过取值，
-   `--on-accent` 是那枚满色发送按钮上的图形色，深底配浅色强调时用深色、浅底配深色强调时用白色。
-   同一组选择器也落到带 `data-palette` 的任意元素上：外观那一格里预览某一套的色板靠这一点，不需要写死颜色。 */
+/* 每种主题只覆盖颜色变量，并保证正文、辅助文字、边界和状态颜色满足对比度要求。
+   `--on-accent` 定义强调色按钮上的图标颜色：深色背景搭配浅色强调时使用深色，浅色背景搭配深色强调时使用白色。
+   将 `data-palette` 加到任意元素上即可预览对应配色，无需改变页面主题。 */
 
-/* 墨青：原来的深色默认那一套，取值不动。 */
+/* 墨青：默认深色主题。 */
 :root,
 [data-palette="ink"] {
   color-scheme: dark;
@@ -48,7 +48,7 @@
   --bad: #e0655c;
 }
 
-/* 羊皮纸：暖米色底，深色墨字。 */
+/* 羊皮纸：暖色浅底和深色文字。 */
 :root[data-palette="parchment"],
 [data-palette="parchment"] {
   color-scheme: light;
@@ -66,7 +66,7 @@
   --bad: #a52a1e;
 }
 
-/* 蓝天：冷白蓝底，一条够深的蓝色强调。 */
+/* 蓝天：冷色浅底和深蓝强调色。 */
 :root[data-palette="sky"],
 [data-palette="sky"] {
   color-scheme: light;
@@ -84,7 +84,7 @@
   --bad: #b02a1e;
 }
 
-/* 石墨：中性深色，低饱和；琥珀色作强调。 */
+/* 石墨：低饱和深色主题，以琥珀色强调。 */
 :root[data-palette="graphite"],
 [data-palette="graphite"] {
   color-scheme: dark;
@@ -102,7 +102,7 @@
   --bad: #e07168;
 }
 
-/* 森林：深绿底，浅色字，绿色强调。 */
+/* 森林：深绿底色、浅色文字和绿色强调色。 */
 :root[data-palette="forest"],
 [data-palette="forest"] {
   color-scheme: dark;
@@ -120,7 +120,7 @@
   --bad: #e07168;
 }
 
-/* 黄昏：暖深色，琥珀色强调。 */
+/* 黄昏：暖色深底和琥珀色强调。 */
 :root[data-palette="dusk"],
 [data-palette="dusk"] {
   color-scheme: dark;
@@ -161,7 +161,7 @@ body {
   overflow: hidden;
 }
 
-/* 侧栏可拖 264–420；收起时那两格都不占位；面板可以停到左边（D90）。 */
+/* 侧栏宽度可拖动调整；收起时侧栏和面板不占用布局空间。 */
 .frame[data-collapsed="true"] .sidebar,
 .frame[data-collapsed="true"] .splitter {
   display: none;
@@ -175,7 +175,7 @@ body {
 
 .splitter {
   flex: 0 0 5px;
-  /* 看得见的那一条细线由 ::before 画，命中区比它宽：五像素那一条在鼠标底下太窄，抓不稳（第 105 步）。 */
+  /* ::before 绘制可见分隔线；扩大命中区，方便鼠标拖动。 */
   position: relative;
   cursor: col-resize;
   background: transparent;
@@ -196,11 +196,11 @@ body {
 
 :root { font-size: var(--ui-font-size, 16px); }
 
-/* ---------- 侧栏 ---------- */
+/* 侧栏 */
 
 .sidebar {
   flex: 0 0 var(--sidebar);
-  /* 弹性项的默认最小宽度是内容自己撑出来的那一条：不写成 0，一条不能断行的长路径会把整栏抬到它那么宽。 */
+  /* 允许弹性项缩小，避免长路径撑宽整个侧栏。 */
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -288,9 +288,9 @@ body {
   color: var(--fg);
 }
 
-/* ---------- 左侧栏那一份会话列表（D91）---------- */
+/* 左侧栏会话列表 */
 
-/* 槽位那一格自己不成布局，内容要能撑满并滚动（I7、D25）。 */
+/* 槽位容器参与布局，并允许内容填满可用高度后滚动。 */
 .rail-slot {
   flex: 1;
   min-height: 0;
@@ -323,7 +323,7 @@ body {
   border-color: var(--accent);
 }
 
-/* 另外看着的那几项目录：一行一格，长路径在那一格里头收成省略号，整条路径写在一格的提示里。 */
+/* 额外工作区列表：长路径截断显示，完整路径放入提示文本。 */
 .rail-projects {
   display: grid;
   gap: 0.3rem;
@@ -344,7 +344,7 @@ body {
   justify-self: start;
 }
 
-/* 栏里的一句说明：空状态、预览与写好了都画成中性，只有读不回来与没写进去那一句报警（方案 4.3 那一句）。 */
+/* 空状态、预览和成功状态使用中性色；读取或保存失败时使用错误样式。 */
 .session-note {
   padding: 0.4rem 0.5rem;
   border: 1px dashed var(--line);
@@ -367,7 +367,7 @@ body {
   padding-top: 0.6rem;
 }
 
-/* ---------- 中栏 ---------- */
+/* 主栏 */
 
 .center {
   flex: 1 1 auto;
@@ -380,9 +380,7 @@ body {
 .topbar {
   display: flex;
   align-items: center;
-  /* 顶栏只占一行，装不下的胶囊在那一排里横着滚：整页不许滚动，竖向的让步由转录与审批卡那两格出，
-     所以顶栏既不能缩也不能往上长。800×600 里让它换行时，六枚胶囊折成三行、顶栏长到 206 高，
-     中栏那一列溢出页面 33 到 100 像素，发送钮掉到 605（P5 三个宽度的读数）。 */
+  /* 顶栏保持单行且不缩小，内容过多时横向滚动；纵向空间由转录区和审批卡调整。 */
   flex-wrap: nowrap;
   gap: var(--space-3);
   min-block-size: 56px;
@@ -407,6 +405,7 @@ body {
 
 #session-title,
 #session-note {
+  max-width: 100%;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -420,8 +419,7 @@ body {
 .pills {
   display: flex;
   align-items: center;
-  /* 顶栏那一行的等高纪律在上面 `.topbar`：这一排自己横着滚，装不下的胶囊滚过去看，同一条会话菜单里也有一份。
-     一行装不下就横着滚而不是折行：折出来的第二行把整条顶栏抬高，转录跟着矮一截。 */
+  /* 内容过多时横向滚动，不换行，避免顶栏增高并挤压转录区。 */
   flex-wrap: nowrap;
   gap: var(--space-2);
   margin-inline-start: auto;
@@ -431,8 +429,7 @@ body {
   scrollbar-width: none;
 }
 
-/* 一个面板包着一排胶囊：那一排横着排、不被左边那一段挤窄。一枚胶囊都不许换行——折出第二行时整条顶栏跟着长高，
-   转录被压掉一半。装不下的部分由上面这一格横着滚。 */
+/* 状态标签保持单行且不缩小；空间不足时由父容器横向滚动。 */
 .pills > span {
   display: flex;
   align-items: center;
@@ -455,8 +452,7 @@ body {
   border-color: color-mix(in srgb, var(--warn) 45%, var(--line));
 }
 
-/* 按钮、输入、选择器与文本框共用一份尺寸（方案 4.1）：命中区约 32 像素起、字走控件那一档。
-   要嵌在别一格里面的（查找那一格里的输入、色板、代码块角落那枚复制）自己把边与底色改掉。 */
+/* 按钮、输入框、选择器和文本框共享最小点击高度与控件字号。嵌入式控件可单独覆盖边框和背景。 */
 input[type="range"],
 input[type="checkbox"],
 input[type="radio"] {
@@ -498,8 +494,7 @@ button:disabled {
 .conversation {
   position: relative;
   flex: 1;
-  /* 转录那一格只吃剩下的空间，审批卡与横幅再高也留 6rem 那一格地板：800×600 里带审批卡时它被压到只剩一行高，
-     整段对话看不见（审阅第三节第 1 条：有界滚动那两格之后它要留下来一行以上）。 */
+  /* 转录区至少保留 6rem 高度，避免审批卡和横幅挤压掉全部对话内容。 */
   min-height: 6rem;
   overflow: hidden;
 }
@@ -578,16 +573,16 @@ button:disabled {
 .turn-explanation { margin: 6px 0; color: var(--fg-muted); font-size: var(--text-sm); line-height: 1.5; }
 .turn-recovery { margin: 2px 0 6px; font-size: var(--text-sm); }
 
-/* 工作步骤展示的四个档位在读进来的那些行上筛（`shownIn`）：虚拟视口要量每一行的高度，藏着不画的行只会量到零（D32、D90、U48）。 */
+/* `shownIn` 过滤当前展示档不包含的转录行。 */
 
-/* ---------- 工具卡片（D94）---------- */
+/* 工具卡片 */
 
 .row-tool {
   color: var(--fg);
   font-weight: 600;
 }
 
-/* 抬头下面那一行说的是对着哪个对象：命令文本、路径、那一项 MCP 能力名。 */
+/* 标题下方显示实际操作对象，例如命令、路径或 MCP 工具。 */
 .row-target {
   margin-top: 0.3rem;
   color: var(--fg-muted);
@@ -618,7 +613,7 @@ button:disabled {
   border-color: color-mix(in srgb, var(--bad) 40%, var(--line));
 }
 
-/* 长正文默认一屏高，多出来的靠「看全文」；展开是界面一侧的状态。 */
+/* 长正文默认限制高度，展开状态由前端维护。 */
 .row-body[data-folded="true"] {
   max-height: 9rem;
   overflow: hidden;
@@ -640,7 +635,7 @@ button:disabled {
   color: var(--accent);
 }
 
-/* 长转录窗口上方那一个把手：往前要一段，不是一次全挂上。 */
+/* 长转录按页向前加载，避免一次读取全部历史。 */
 .earlier {
   align-self: center;
   padding: 0.25rem 0.8rem;
@@ -656,14 +651,13 @@ button:disabled {
   border-color: var(--accent);
 }
 
-/* ---------- 审批与输入 ---------- */
+/* 审批和输入 */
 
 .approval {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  /* 窗口矮到装不下这一格与输入坞时，让这一格自己缩，缩出去的那一截在正文里滚；
-     答复那两枚留在下面，不必滚到卡片末尾才按得到。 */
+  /* 窗口高度不足时允许审批区缩小并滚动；答复按钮保持可见。 */
   min-height: 0;
   inline-size: min(100%, var(--stream));
   margin-inline: auto;
@@ -674,24 +668,23 @@ button:disabled {
   background: color-mix(in srgb, var(--warn) 8%, var(--bg-raised));
 }
 
-/* 上面那条 display: flex 会盖掉 hidden 属性自带的 display: none。 */
+/* 显式处理 hidden 属性，因为 display:flex 会覆盖浏览器默认的隐藏样式。 */
 .approval[hidden] {
   display: none;
 }
 
-/* 卡片里滚的那一截：项目、可执行文件与要改的内容都在这一格里，矮窗口下不够高时不出答复那一行。 */
+/* 审批详情区域可滚动，避免窗口较矮时遮住答复按钮。 */
 .approval-body {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
   min-height: 0;
-  /* 800×600 里那一格没有上限时，正文把转录挤成 0 高（P5 量到的）。上限给这一格自己，多出来的部分滚；
-     下面那两枚答复的按钮不在这一格里，不必滚到卡片末尾才按得到。 */
+  /* 限制审批详情的最大高度并滚动其内容；答复按钮位于此区域之外，保持可见。 */
   max-height: min(24rem, 32vh);
   overflow: auto;
 }
 
-/* 矮窗口里再多让一段给转录：那一格的地板不跟着窗口缩，这一格的正文自己滚（审阅第三节第 1 条）。 */
+/* 窗口较矮时进一步缩小审批详情，让转录保持可见。 */
 @media (max-height: 700px) {
   .approval-body {
     max-height: min(16rem, 24vh);
@@ -717,7 +710,7 @@ button:disabled {
   color: var(--fg-muted);
 }
 
-/* 卡片自己不定字号：`--stream` 用的是 ch，字号一变这一格的宽度就和转录那一条列错开了。 */
+/* 审批卡继承字号，保持 `ch` 计算的宽度与转录列一致。 */
 .approval-reason {
   margin: 0;
   color: var(--fg-muted);
@@ -730,7 +723,7 @@ button:disabled {
   gap: var(--space-2);
 }
 
-/* ---------- 模型提问那一格（D107）：与审批卡同一套刻度，只把「等人回答」这件事说清楚 ---------- */
+/* 模型提问卡片 */
 
 .question {
   display: flex;
@@ -774,7 +767,7 @@ button:disabled {
   letter-spacing: 0.06em;
 }
 
-/* 一道题一格：题目、选项与那一行自己写的字属于同一次回答。 */
+/* 每个问题及其选项和文本输入组成一项答复。 */
 .question-item {
   display: flex;
   flex-direction: column;
@@ -798,7 +791,7 @@ button:disabled {
   display: flex;
   align-items: baseline;
   gap: var(--space-2);
-  /* 命中的那一横条整段可点：只有圆点可点时窄窗里要点很多次才中。 */
+  /* 整行都可点击，方便在窄窗口中选择选项。 */
   min-block-size: var(--hit);
   padding-inline: var(--space-1);
 }
@@ -842,7 +835,7 @@ button:disabled {
   box-shadow: 0 3px 18px rgb(0 0 0 / 4%);
 }
 
-/* ---------- 右侧面板与菜单 ---------- */
+/* 右侧面板和菜单 */
 
 .dock {
   flex: 0 0 var(--dock);
@@ -897,7 +890,7 @@ button:disabled {
   font-size: var(--text-md);
 }
 
-/* 功能那一格：位置与高亮由 radix 的浮层算，这一处只管形状与条目尺寸（方案 4.2）。 */
+/* Radix 管理菜单位置和焦点；此处只定义菜单样式和条目尺寸。 */
 .menu {
   min-inline-size: 200px;
   padding: 0.3rem;
@@ -919,7 +912,7 @@ button:disabled {
   background: color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
-/* 菜单与面板标题上那枚「待实现」：功能项摆出来，但一眼看得出它指向空处。 */
+/* 标记尚未实现的菜单项。 */
 .menu-tag {
   margin-inline-start: 0.5rem;
   color: var(--fg-muted);
@@ -932,8 +925,7 @@ button:disabled {
   flex: 1;
 }
 
-/* 窄窗口让右侧面板改成覆盖层，侧栏与中栏照常排着（dsh 的次序：右栏先让位，中栏最后才压到最小）。
-   侧栏在这一档不自动收窄：把会话列表与新建藏掉会留下一栏空的，收起与展开只由人按下那一枚或键位决定。 */
+/* 窄窗口中右侧面板覆盖主界面；侧栏和主栏保持原布局，侧栏仍由用户控制收起或展开。 */
 @media (max-width: 1180px) {
   .dock {
     position: fixed;
@@ -943,9 +935,9 @@ button:disabled {
   }
 }
 
-/* 跳回最新：贴在底部时不占位，人往上翻过才出现在转录与输入框之间（D88 那一份外壳形状）。 */
+/* 阅读位置不在底部时，在转录区和输入框之间显示“跳回最新”按钮。 */
 .jump-latest {
-  /* 浮在转录下沿，不给这一列添高度：挂在流里时它出现与收掉各占一段高度，转录跟着高一下矮一下。 */
+  /* 按钮悬浮在转录下沿，不改变转录区高度。 */
   position: absolute;
   bottom: 0.5rem;
   left: 50%;
@@ -964,7 +956,7 @@ button:disabled {
   border-color: var(--accent);
 }
 
-/* ---------- Markdown 的那一层（D89）---------- */
+/* Markdown 内容 */
 .markdown > :first-child { margin-top: 0; }
 .markdown > :last-child { margin-bottom: 0; }
 .markdown p { margin: 0.45rem 0; }
@@ -994,7 +986,7 @@ button:disabled {
 }
 .md-code code { font-family: var(--mono); font-size: 1em; line-height: 1.55; background: none; padding: 0; }
 
-/* 代码围栏下面那一行：一枚复制按钮加一句结果，靠右排，不去抢代码块左边那一列的位置。 */
+/* 代码块下方的复制按钮和结果提示右对齐，不影响代码文本布局。 */
 .md-code-wrap { margin: 0.5rem 0; }
 .md-code-wrap .md-code { margin: 0; }
 .code-copy-row { display: flex; gap: 0.5rem; align-items: center; justify-content: flex-end; margin: 0.25rem 0 0; }
@@ -1004,7 +996,7 @@ button:disabled {
 .md-table th { background: var(--bg-raised); color: var(--fg-muted); font-weight: 600; }
 .markdown blockquote { margin: 0.5rem 0; padding-left: 0.7rem; border-left: 3px solid var(--line); color: var(--fg-muted); }
 
-/* ---------- 顶部状态、用量条与断连横幅（D82、D86、D93）---------- */
+/* 顶部状态、用量条和断连横幅 */
 
 .usage {
   position: relative;
@@ -1062,9 +1054,7 @@ button:disabled {
   font-size: var(--text-sm);
 }
 
-/* 横幅里那一句原因（`code`）与说明（`span`）都只留一行，装不下的是它们：800×600 里那句主机错误自己折成三行，
-   横幅从 59 长到 101，把这一档的列高顶溢出（P5 量到，发送钮掉到 605）。`strong` 是「这一条连接不在了」那一句，
-   中日韩文本任意字都能断行，所以它既不折也不缩。 */
+/* 错误码和说明保持单行并截断，避免横幅增高挤压转录区；连接状态文本不换行。 */
 .banner strong {
   flex: none;
   white-space: nowrap;
@@ -1103,7 +1093,7 @@ button:disabled {
   color: var(--fg);
 }
 
-/* ---------- 命令面板与键盘层（D92）---------- */
+/* 命令面板和快捷键 */
 
 .palette {
   position: fixed;
@@ -1171,7 +1161,7 @@ button:disabled {
   font-size: var(--text-sm);
 }
 
-/* ---------- 外观那一格面板里的控件（D90）---------- */
+/* 外观设置控件 */
 
 .dock-body label {
   display: flex;
@@ -1192,10 +1182,9 @@ button:disabled {
   font: inherit;
 }
 
-/* ---------- 第二版排版（第 56 步，D97）---------- */
+/* 应用布局 */
 
-/* 这一段定几何：刻度、一条居中内容列、顶栏一行、输入坞自带那一排控件、底部一条状态。
-   同名规则以这一段为准，取值都来自 :root 那一份刻度。 */
+/* 定义居中内容列、单行顶栏、输入控件和底部状态栏；尺寸来自根级变量。 */
 
 .icon {
   flex: none;
@@ -1216,7 +1205,7 @@ button:disabled {
 button.icon-button {
   display: inline-grid;
   place-items: center;
-  /* 顶栏那一行不换行，两枚按钮的命中区不能被挤扁：让出去的空间由标题与胶囊那一排给。 */
+  /* 顶栏不换行并保持按钮点击区尺寸；标题和状态标签使用剩余空间。 */
   flex: none;
   inline-size: 28px;
   block-size: 28px;
@@ -1233,14 +1222,14 @@ button.icon-button:hover:not(:disabled) {
   border-color: var(--line);
 }
 
-/* 虚拟视口管滚动，74 字那一栏落到每一条上：一条一个外壳，行与行之间的间隔由外壳的上下内边距给（U48）。 */
+/* 虚拟视口负责滚动；每条记录使用独立行容器，行距由上下内边距控制。 */
 .stream-row {
   inline-size: min(calc(100% - 48px), var(--stream));
   margin-inline: auto;
   padding: var(--space-1) 0;
 }
 
-/* 视口上下那两条带：更早那一格排在最上，空着的那一句排在中间。 */
+/* 转录视口的顶部状态条显示历史加载状态，空状态提示居中显示。 */
 .stream-band {
   display: flex;
   flex-direction: column;
@@ -1294,7 +1283,7 @@ button.icon-button:hover:not(:disabled) {
   flex: 1;
 }
 
-/* 排着的那几条：贴在输入坞顶上，人看得见自己敲了什么、现在走不走得出去（方案 5.2）。 */
+/* 输入队列显示在输入框上方，展示排队内容和发送状态。 */
 .queue {
   display: flex;
   flex-direction: column;
@@ -1303,7 +1292,7 @@ button.icon-button:hover:not(:disabled) {
   background: var(--bg-sunk);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  /* 排着的句子多起来时这一格自己滚，不去挤转录那一格：条带整份撑高过一次，矮窗里转录被压到只剩一行（审阅第三节第 1 条）。 */
+  /* 队列过长时只滚动队列区域，不压缩转录区。 */
   max-height: min(9rem, 26vh);
   overflow: auto;
 }
@@ -1388,7 +1377,7 @@ button.send:hover:not(:disabled) {
   font-family: var(--mono);
 }
 
-/* 会话列表那一格的第二版行形状：时间靠左、条数靠右、编号与读数各一行（D91、D97）。 */
+/* 会话列表行：时间靠左，条数靠右，编号和状态分别显示。 */
 
 .group-label {
   display: flex;
@@ -1411,7 +1400,7 @@ button.send:hover:not(:disabled) {
   white-space: nowrap;
 }
 
-/* 那一组的标题行自己就是把手：整行按下去收起或展开，折了没有由 aria-expanded 说出去（方案 5.5.4）。 */
+/* 工作区标题行可点击以折叠或展开分组，状态通过 `aria-expanded` 暴露。 */
 .group-fold {
   display: flex;
   align-items: center;
@@ -1440,7 +1429,7 @@ button.send:hover:not(:disabled) {
   white-space: nowrap;
 }
 
-/* 人起的那个名字是这一行的标题，编号退到下面；归档的那一份整条压暗，仍在列表里（实现顺序第 75 步）。 */
+/* 自定义会话名称作为标题显示，编号移至副行；归档会话降低对比度但仍保留在列表中。 */
 .session-name {
   color: var(--fg);
   font-weight: 400;
@@ -1493,7 +1482,7 @@ button.send:hover:not(:disabled) {
   margin-inline-end: var(--space-1);
 }
 
-/* ---------- 转录行的第二版（第 57 步，D97）---------- */
+/* 转录行样式 */
 
 .row-verb,
 .row-target-inline {
@@ -1544,14 +1533,14 @@ button.send:hover:not(:disabled) {
   padding: var(--space-1) var(--space-2);
 }
 
-/* 调用卡片那一份参数：收起时整块不占位，抬头那一行就是全部（D97）。 */
+/* 工具调用详情折叠时不占据额外空间，标题行显示摘要。 */
 .row-body[data-folded="tight"] {
   display: none;
 }
 
-/* ---------- 设置那一个对话框（第 58 步，D98）---------- */
+/* 设置对话框 */
 
-/* 弹窗的两层：这一层铺满窗口当底，`.sheet` 与 `.palette` 自己定位在它上面（radix 把它们送到 body 末尾）。 */
+/* 对话框底层覆盖窗口；`.sheet` 和 `.palette` 由 Radix 定位在其上方。 */
 .overlay {
   position: fixed;
   inset: 0;
@@ -1559,7 +1548,7 @@ button.send:hover:not(:disabled) {
   background: rgb(0 0 0 / 45%);
 }
 
-/* 退出前那一张确认：单列、比设置那张小；两条动作并排落在下面，左边那枚是默认（返回应用）。 */
+/* 退出确认对话框采用较窄布局，底部并排显示两个操作，默认按钮位于左侧。 */
 .confirm {
   position: fixed;
   inset: 0;
@@ -1798,10 +1787,10 @@ button.mini.chip b {
   font-weight: 600;
 }
 
-/* ---------- 审批与断连那两格的第二版（第 59 步，D97）---------- */
+/* 审批和断连提示 */
 
-/* 审批卡片与输入坞都落到转录那一条居中列上，不再各占一份宽度。横幅占整栏宽，它说的是这一条连接的事。 */
-/* 卡片是纵向弹性列，把手不跟着拉满整行。 */
+/* 审批卡片和输入区与转录使用同一居中列；连接横幅占据整栏宽度。 */
+/* 审批卡片按内容高度排列，不拉伸填满整行。 */
 .approval .fold-toggle {
   align-self: flex-start;
 }
@@ -1824,14 +1813,14 @@ button.mini.chip b {
   border-color: var(--line);
 }
 
-/* 档位那一格说的是这一档怎么走到问人这一格，读自 `status.get`，界面不据此改判定（D81 边界三）。 */
+/* 策略说明根据 `status.get` 的状态显示；界面不据此执行权限判定。 */
 .approval-tier {
   margin-inline-start: auto;
   color: var(--fg-muted);
   font-size: var(--text-xs);
 }
 
-/* ---------- 上下文用量的浮层（第 60 步，D96）---------- */
+/* 上下文用量浮层 */
 
 .usage-trigger {
   display: inline-flex;
@@ -1886,7 +1875,7 @@ button.mini.chip b {
   text-align: end;
 }
 
-/* ---------- 左侧栏的查找（第 77 步，方案 4.2）---------- */
+/* 左侧栏搜索 */
 
 .rail-find {
   display: flex;
@@ -1908,7 +1897,7 @@ button.mini.chip b {
   border-radius: var(--radius);
 }
 
-/* 只看这一份那一枚按下去换了说法：读的那一格从「这些会话」变成「这一份」，深一层读的是溢出文件里那一段。 */
+/* 搜索范围按钮在全局会话和当前会话之间切换；当前会话搜索包含溢出文件内容。 */
 .rail-scope {
   flex: none;
   padding: var(--space-1) var(--space-2);
@@ -1955,7 +1944,7 @@ button.mini.chip b {
 
 .rail-search input:focus-visible { outline: none; box-shadow: none; }
 
-/* 浏览器自带的那一枚清空把手与下面那一枚是同一件事，留一枚。 */
+/* 隐藏浏览器自带的清空按钮，只显示自定义按钮。 */
 .rail-search input::-webkit-search-cancel-button {
   display: none;
 }
@@ -2020,7 +2009,7 @@ button.mini.chip b {
   color: var(--fg-muted);
 }
 
-/* 查找落到的那一行亮一会儿：说的是「跳到这一条」，不是这一行与别的那些不同。 */
+/* 短暂高亮搜索定位到的记录。 */
 .row-flash {
   animation: hit-flash 2.5s ease-out 1;
   border-radius: var(--radius);
@@ -2038,7 +2027,7 @@ button.mini.chip b {
   }
 }
 
-/* ---------- 一轮完整结束那一行与分支的把手（第 81 步，方案 4.3）---------- */
+/* 轮次完成状态和分支入口 */
 
 .row.round {
   display: flex;
@@ -2067,7 +2056,7 @@ button.mini.chip b {
   border-color: var(--accent);
 }
 
-/* 会话这一侧那一格浮层（第 105 步）：模式与档位跟着会话走，挂在顶栏那两枚小牌子下面。 */
+/* 会话菜单中的模式和策略面板入口。 */
 .topbar {
   position: relative;
 }
@@ -2083,7 +2072,7 @@ button.pill:hover {
   border-color: var(--accent);
 }
 
-/* 浮层的位置由 radix 的 popper 内联样式决定，这里只写形状：一处 `position` 都不留，免得两套说法打架。 */
+/* 浮层位置由 Radix 提供；此处只定义外观，避免与其定位样式冲突。 */
 .session-menu {
   z-index: 31;
   inline-size: min(420px, 92vw);
@@ -2127,7 +2116,7 @@ button.pill:hover {
   line-height: 1.5;
 }
 
-/* 会话浮层里分成模式与审批档位两个分区：分区名 + 一条分隔 + 里面的行。 */
+/* 会话面板分为模式和审批策略两个分区。 */
 .sm-group {
   display: flex;
   flex-direction: column;
@@ -2148,8 +2137,7 @@ button.pill:hover {
   letter-spacing: 0.05em;
 }
 
-/* ---------- 分区的形状：一格标题 + 一条分隔 + 若干行（交付二）---------- */
-/* 一处用一次，把混在一起的信息分开：标题说这一格是什么，行才是内容。不引入第二套视觉，只用同一刻度。 */
+/* 分区使用一致的标题、分隔线和内容行布局。 */
 
 .region-group {
   display: flex;
@@ -2171,7 +2159,7 @@ button.pill:hover {
   letter-spacing: 0.05em;
 }
 
-/* 一轮开始那一条参数快照：排在转录里的一行小字，比正文暗一档，不抢回答与问题的位置。 */
+/* 轮次参数快照以较弱的文字样式显示，不与回答和问题争夺视觉焦点。 */
 .row.context {
   padding: var(--space-1) var(--space-2);
   border: 0;
@@ -2182,7 +2170,7 @@ button.pill:hover {
   font-size: var(--text-sm);
 }
 
-/* ---------- 外观那几格：配色方案的色板（交付三）---------- */
+/* 外观设置中的配色选项 */
 
 .swatch-list {
   display: flex;
@@ -2213,7 +2201,7 @@ button.pill:hover {
   color: var(--fg);
 }
 
-/* 每一枚色板里那一格小样：三色块是这一套方案自己的颜色，与当前选中哪一套无关。 */
+/* 色板预览始终展示对应主题的颜色，不受当前所选主题影响。 */
 .swatch-chips {
   display: flex;
   overflow: hidden;
@@ -2231,7 +2219,7 @@ button.pill:hover {
   white-space: nowrap;
 }
 
-/* ---------- 审批规则那一格：一行一条规则，右侧是它的动作 ---------- */
+/* 审批规则列表 */
 
 .rule-row {
   display: flex;
@@ -2275,9 +2263,9 @@ button.pill:hover {
   overflow-wrap: anywhere;
 }
 
-/* ---------- 只给读屏器念的那一行 ---------- */
+/* 屏幕阅读器专用文本 */
 
-/* 对话框在屏幕上已有看得见的标题时，radix 要的那一枚标题只交给读屏器：占位收成 1 像素，不外溢。 */
+/* 可见标题已存在时，Radix 所需的辅助标题只供屏幕阅读器使用，不影响布局。 */
 .sr-only {
   position: absolute;
   width: 1px;
@@ -2323,7 +2311,8 @@ button.pill:hover {
 .workspace-picker input { min-width: 0; width: 100%; }
 .workspace-picker-error { display: grid; gap: 6px; color: var(--bad); }
 .workspace-picker-error code { overflow-wrap: anywhere; }
-.running-label { display: flex; align-items: center; gap: 6px; font-size: var(--text-xs); color: var(--fg-muted); white-space: nowrap; }
+.running-label { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 40vw; font-size: var(--text-xs); color: var(--fg-muted); white-space: nowrap; }
+.running-detail { overflow: hidden; text-overflow: ellipsis; }
 .status-dot, .unread-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
 .status-dot { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 12%, transparent); }
 .session-trailing { display: inline-flex; align-items: center; gap: 6px; flex: none; color: var(--fg-muted); }
@@ -2337,7 +2326,7 @@ button.pill:hover {
 .workspace-failure { display: grid; gap: 6px; padding: 12px 0; border-bottom: 1px solid var(--line); }
 .workspace-failure span, .workspace-failure code { min-width: 0; overflow-wrap: anywhere; }
 .rail-group { margin-block-start: 0.28em; padding: 0.16em 0.2em 0.12em; border: 1px solid color-mix(in srgb, var(--fg-muted) 16%, var(--line)); border-radius: 0.45em; }
-.rail-group .group-label { font-size: var(--text-md); color: var(--fg); font-weight: 550; }
+.rail-group .group-label { font-size: var(--text-md); color: var(--fg); font-weight: 400; }
 .rail-group .group-count { font-size: var(--text-xs); font-weight: 400; color: var(--fg-muted); }
 .rail-group .group-fold[aria-expanded="true"] > .icon:nth-child(2) { color: var(--accent); }
 .rail-group:not(:has(.session-item)) { margin-block-start: 0.2rem; padding-block: 0; border-color: transparent; background: transparent; }
@@ -2374,7 +2363,28 @@ button.pill:hover {
 .service-fields { display: grid; gap: 12px; border: 0; margin: 0; padding: 0; }
 .service-fields label, .service-advanced label { display: grid; gap: 8px; color: var(--fg); font-size: var(--text-sm); }
 .service-fields input, .service-fields textarea, .service-fields select { width: 100%; min-width: 0; background: var(--bg); padding: 6px 10px; }
-.service-fields textarea { resize: vertical; font-family: var(--mono); }
+.service-model-catalog { min-width: 0; margin-block: 6px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg-sunk); }
+.model-catalog-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 14px 8px; }
+.model-catalog-heading h3 { margin: 0; font-size: var(--text-sm); font-weight: 550; }
+.model-catalog-heading h3 span { margin-inline-start: 8px; color: var(--fg-muted); font-size: var(--text-xs); font-weight: 400; }
+.model-catalog-heading button { flex: none; font-size: var(--text-xs); }
+.model-catalog-help { margin: 0; padding: 0 14px 12px; color: var(--fg-muted); font-size: var(--text-xs); line-height: 1.6; }
+.model-table-scroll { overflow-x: auto; max-height: 420px; scrollbar-gutter: stable; }
+.model-config-table { width: 100%; min-width: 650px; border-collapse: collapse; table-layout: fixed; }
+.model-config-table th { position: sticky; top: 0; z-index: 1; background: var(--bg-sunk); text-align: start; color: var(--fg-muted); font-size: var(--text-xs); font-weight: 500; padding: 8px 10px; border-block: 1px solid var(--line); }
+.model-config-table th:nth-child(1) { width: 27%; }
+.model-config-table th:nth-child(2) { width: 25%; }
+.model-config-table th:nth-child(3), .model-config-table th:nth-child(4) { width: 21%; }
+.model-config-table th:last-child { width: 42px; }
+.model-config-table td { padding: 8px 6px; border-bottom: 1px solid var(--line); }
+.model-config-table td:first-child { padding-inline-start: 12px; }
+.model-config-table td:last-child { padding-inline-end: 12px; }
+.service-fields .model-config-table input { font-size: var(--text-xs); padding: 8px; border-radius: 7px; }
+.model-config-table input[type="number"] { font-variant-numeric: tabular-nums; }
+.model-remove-row:hover { color: var(--bad); }
+.model-config-table .model-catalog-empty { padding: 24px 14px; color: var(--fg-muted); font-size: var(--text-sm); text-align: center; }
+.model-add-row { display: inline-flex; align-items: center; gap: 6px; margin: 10px 12px; font-size: var(--text-xs); }
+@media (max-width: 760px) { .model-catalog-heading { align-items: flex-start; flex-direction: column; } }
 .service-fields summary { color: var(--fg-muted); cursor: pointer; font-size: var(--text-sm); }
 .service-advanced { display: grid; gap: 16px; padding-top: 18px; }
 .field-help { margin: -8px 0 0; color: var(--fg-muted); font-size: var(--text-xs); }
@@ -2390,12 +2400,6 @@ button.primary-button { background: var(--accent); color: var(--on-accent); bord
 .model-option { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .model-option span { white-space: normal; overflow-wrap: anywhere; }
 .model-picker-error { padding: 10px; font-size: var(--text-xs); color: var(--bad); display: grid; gap: 4px; }
-.model-discovery { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; gap: 10px; }
-.model-discovery-tools { display: flex; align-items: center; gap: 8px; }
-.model-discovery-tools input { min-width: 0; flex: 1; }
-.model-discovery-list { min-height: 0; max-height: min(52vh, 480px); overflow: auto; border-block: 1px solid var(--line); }
-.model-discovery-list label { display: flex; align-items: center; gap: 10px; padding: 8px 4px; overflow-wrap: anywhere; }
-.model-discovery-list input { flex: none; }
 .service-default-select { display: grid; gap: 9px; margin-bottom: 16px; font-size: var(--text-sm); }
 .service-default-select select { width: 100%; }
 

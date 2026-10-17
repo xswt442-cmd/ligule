@@ -1,0 +1,145 @@
+// Host 通过此模块读写配置，并由此解析层名与文件的对应关系。
+// 仅用户配置和当前项目的本地配置可写；项目共享配置随代码库维护，命令行和管理端配置只读。
+// 只读层优先级更高时，写入较低层不会改变当前有效值。
+import { configPaths } from './config-file.js';
+import {
+  EDITABLE,
+  editableField,
+  readConfigLayer,
+  rulesOfLayer,
+  writeConfigField,
+  type PolicyRule,
+  type WriteRequest,
+} from './config-edit.js';
+import { KernelError } from './error.js';
+import { createConfig, type ConfigSnapshot } from './config.js';
+
+const LAYERS = ['user', 'projectLocal'];
+// 按优先级从高到低查找配置值：命令行、本地项目、共享项目、用户配置。
+const PRECEDENCE = ['flag', 'local', 'project', 'user'] as const;
+type Source = typeof PRECEDENCE[number] | 'none';
+
+/** 加载时读取的四层配置。`read()` 会刷新两个可写层的当前文件内容。 */
+export type LoadedLayers = Partial<Record<(typeof PRECEDENCE)[number], Record<string, unknown>>>;
+
+const inLayer = (layer: Record<string, unknown> | undefined, path: readonly string[]): boolean => {
+  let node: unknown = layer;
+  for (const part of path) {
+    if (typeof node !== 'object' || node === null || !(part in node)) return false;
+    node = (node as Record<string, unknown>)[part];
+  }
+  return true;
+};
+
+/** 指定配置层中的字段值；字段不存在时返回 undefined。 */
+const valueIn = (layer: Record<string, unknown> | undefined, path: readonly string[]): unknown =>
+  path.reduce<unknown>((node, part) => (node as Record<string, unknown>)[part], layer);
+
+// 规则编号对应数组顺序，因此界面中的第 N 条对应文件中的第 N 个 `[[policy.rules]]`。
+const RULES_FIELD = 'policy.rules';
+
+export function createConfigStore({ projectRoot, userHome, layers = {} }: { projectRoot: string; userHome?: string; layers?: LoadedLayers }) {
+  const files = configPaths(projectRoot, userHome);
+  const pathOf = (layer: string): string => {
+    if (layer === 'user') return files.user;
+    if (layer === 'projectLocal') return files.local;
+    throw new KernelError('config_layer_unknown', { detail: `writable layers: ${LAYERS.join(', ')}` });
+  };
+  // 将界面使用的层名映射到加载器配置对象中的键，例如 `projectLocal` 对应 `local`。
+  const keyOfLayer = (layer: string) => (layer === 'user' ? 'user' : 'local');
+  const holderOf = (field: string) => PRECEDENCE.find((layer) => inLayer(layers[layer], editableField(field).path));
+  const sourceOf = (field: string): Source => holderOf(field) ?? 'none';
+  // 按优先级从高到低返回第一个定义该字段的配置值。
+  const valueOf = (field: string): unknown => {
+    const layer = holderOf(field);
+    return layer === undefined ? undefined : valueIn(layers[layer], editableField(field).path);
+  };
+  // 配置层中的规则数组整体替换低优先级数组，不会逐条合并。
+  const effectiveRules = (): PolicyRule[] => {
+    for (const layer of PRECEDENCE) {
+      const rules = (layers[layer]?.policy as Record<string, unknown> | undefined)?.rules;
+      if (Array.isArray(rules)) return rules as PolicyRule[];
+    }
+    return [];
+  };
+  // 白名单中的标量字段；规则表作为整体单独处理。
+  const scalarFields = Object.keys(EDITABLE).filter((field) => editableField(field).kind !== 'rules');
+  // 将白名单标量按配置文件结构组合为 `model` 和 `policy` 两组字段。
+  const foldValues = (): Record<string, Record<string, unknown>> => {
+    const values: Record<string, Record<string, unknown>> = {};
+    for (const field of scalarFields) {
+      const [table, key] = editableField(field).path;
+      (values[table] ??= {})[key] = valueOf(field);
+    }
+    return values;
+  };
+  // 一次读取两个可写层的文件，并同时返回字段值、字段来源、有效规则和用于后续写入的版本。
+  // 只读的项目共享层和命令行层保持加载时的快照，不伪装成文件当前内容。
+  // 此接口只供设置页面读取，不影响权限判定、模型提供方或会话记录。
+  const readNow = async () => {
+    const readLayers = await Promise.all(
+      LAYERS.map(async (layer) => {
+        const { version, table } = await readConfigLayer(pathOf(layer));
+        layers[keyOfLayer(layer)] = table;
+        // 只有实际定义规则表的配置层才返回来源；未定义时不伪装成空数组。
+        const written = inLayer(table, ['policy', 'rules']);
+        return { layer, version, exists: version !== '', ...(written ? { rules: rulesOfLayer(table) } : {}) };
+      }),
+    );
+    return {
+      layers: readLayers,
+      // 返回每个白名单字段当前由哪一层提供。`flag` 表示只读的命令行 `--config` 层。
+      sources: Object.fromEntries(Object.keys(EDITABLE).map((field) => [field, sourceOf(field)])),
+      values: foldValues(),
+      // 返回当前生效的规则表及其来源，供界面展示和编辑。
+      rules: effectiveRules(),
+      rulesSource: sourceOf(RULES_FIELD),
+    };
+  };
+  const preview = async (layer: string, table: Record<string, unknown>): Promise<ConfigSnapshot> => {
+    pathOf(layer);
+    await readNow();
+    return createConfig({ ...layers, [keyOfLayer(layer)]: table });
+  };
+  return {
+    read: readNow,
+    preview,
+    write(request: WriteRequest & { layer: string }, validate?: (candidate: ConfigSnapshot, editedLayer: Record<string, unknown>) => void | Promise<void>) {
+      const definition = editableField(request.field);
+      const file = pathOf(request.layer);
+      // 规则表整体替换，因此只能写入当前提供生效规则表的配置层。
+      // 在其他层写入部分规则会遮蔽现有规则，导致界面无法按当前列表顺序修改它们。
+      if (definition.kind === 'rules') {
+        const source = sourceOf(RULES_FIELD);
+        const holder = keyOfLayer(request.layer);
+        if (source !== 'none' && source !== holder) {
+          throw new KernelError('config_rules_elsewhere', { detail: `the rule table in effect is written by the ${source} layer, not ${request.layer}` });
+        }
+      }
+      // 写入前记录当前有效值，以便判断本次写入是否改变了运行配置。
+      // 如果更高优先级层覆盖该字段，写入前后有效值相同，运行中的配置不会变化。
+      const before = definition.kind === 'rules' ? JSON.stringify(effectiveRules()) : JSON.stringify(valueOf(request.field));
+      return writeConfigField(file, request, validate === undefined ? undefined : async (table) => {
+        await validate(await preview(request.layer, table), table);
+      }).then(async (written) => {
+        // 保存后重新计算有效值和来源，并从同一次读取中取得版本号。
+        // 这样可以基于一致状态报告写入是否影响当前运行配置。
+        const fresh = await readNow();
+        const source = definition.kind === 'rules' ? fresh.rulesSource : fresh.sources[request.field];
+        const holder = keyOfLayer(request.layer);
+        const effective = definition.kind === 'rules' ? fresh.rules : fresh.values[definition.path[0]]?.[definition.path[1]];
+        return {
+          ...written,
+          // 返回受影响的模型字段，供 Host 更新提供方，而无需重复维护字段白名单。
+          key: definition.path[1],
+          table: definition.path[0],
+          shadowed: source !== holder,
+          shadowedBy: source !== holder ? source : undefined,
+          changed: JSON.stringify(effective) !== before,
+          effective,
+          layers: fresh.layers,
+        };
+      });
+    },
+  };
+}

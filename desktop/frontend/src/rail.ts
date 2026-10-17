@@ -1,9 +1,9 @@
-// 左侧栏那一份分组规则（方案 5.5.4）：只有创建时指名了工作区的会话在上面成组，其余的在下面直接排列。
-// 归组读的是记录首行那两格（身份与来源），不是「这条路径等不等于现在的默认目录」：默认目录换了，旧的会话不挪位置。
+// 左侧栏只将创建时明确指定工作区的会话分组；其他会话直接列出。
+// 分组依据是记录首行保存的工作区身份和来源，不随默认目录变化而移动旧会话。
 import type { SessionSummary } from './components/SessionRail';
 import { code, type Client } from './protocol.ts';
 
-/** 一条路经的最后那一段：Windows 与 POSIX 的分隔符都算。 */
+/** 返回路径末尾的目录名，兼容 Windows 和 POSIX 分隔符。 */
 function leafOf(path: string): string {
   const parts = path.split(/[\\/]+/).filter((one) => one !== '');
   return parts.length === 0 ? path : parts[parts.length - 1];
@@ -11,7 +11,7 @@ function leafOf(path: string): string {
 
 export type WorkspaceRow = { identity: string; directory: string; name: string };
 
-/** 那份持久登记的形状（方案 5.5.1）：`workspaces.list` 交回的就是这一份，默认那一格指的是 `identity`。 */
+/** `workspaces.list` 返回的持久工作区登记结构；默认工作区通过 `identity` 标识。 */
 export type WorkspaceRoster = { default: string | null; workspaces: WorkspaceRow[] };
 
 export type WorkspaceSessionsPage = { root: string; sessions: SessionSummary[]; failed: string };
@@ -40,22 +40,22 @@ export type RailGroup = {
   identity: string;
   root: string;
   label: string;
-  // 登记里那一格默认选择指的就是这一组（方案 5.5.1）：由 `workspaces.list` 交回，界面不自己记。
+  // 默认工作区身份由 `workspaces.list` 返回，界面不单独保存。
   isDefault: boolean;
   sessions: SessionSummary[];
 };
 
 export type RailLayout = { groups: RailGroup[]; loose: SessionSummary[] };
 
-/** 归档的沉到本组底下，其余按宿主给的回读顺序（宿主已按最近动过排序）。 */
+/** 将已归档会话排在组内末尾，其余会话保持 Host 按最近活动排序后的顺序。 */
 function withinGroup(items: SessionSummary[]): SessionSummary[] {
   return [...items].sort((left, right) => Number(left.archived === true) - Number(right.archived === true));
 }
 
 /**
- * 分组：`workspaceOrigin === 'explicit'` 的按 `workspace` 身份成组；其余进 `loose`。
- * `watched` 是这一扇窗口另外指着的那几项目录——还没有会话的那几份也要有自己那一组，人才能在它里面新建。
- * `registry` 是那份持久登记：组名与目录优先取登记里的那一行，人改过显示名就不用目录那一段（方案 5.5.1）。
+ * 将 `workspaceOrigin === 'explicit'` 的会话按 `workspace` 身份分组，其余放入 `loose`。
+ * `watched` 包含窗口中额外关注的目录，即使目录还没有会话也要显示，便于从中创建会话。
+ * `registry` 是持久工作区登记表；优先使用登记中的自定义名称，没有名称时使用目录名。
  */
 export function groupByWorkspace(sessions: SessionSummary[], watched: string[] = [], registry: WorkspaceRoster = { default: null, workspaces: [] }): RailLayout {
   const groups = new Map<string, RailGroup>();
@@ -74,13 +74,13 @@ export function groupByWorkspace(sessions: SessionSummary[], watched: string[] =
       loose.push(item);
       continue;
     }
-    // 身份那一格是归组的键；首行没写身份的记录（更早的版本）用它的目录当键，位置仍由来源那一格决定。
+    // 使用工作区身份分组；旧记录没有身份时以目录作为分组键，来源仍由首行元数据决定。
     const root = item.projectRoot === '' ? item.workspace ?? '' : item.projectRoot;
     add(item.workspace ?? root, root, item);
   }
   for (const root of watched) {
     if (root === '') continue;
-    // 那一具工作区在登记里有一行时，身份取那一行：记录首行里写的是内核折过的身份，两边同一把键才不会被拆成两组。
+    // 工作区已登记时使用登记中的身份，与记录首行的归一化身份保持一致。
     const identity = registry.workspaces.find((one) => one.directory === root)?.identity
       ?? sessions.find((item) => item.projectRoot === root)?.workspace
       ?? root;
@@ -95,9 +95,9 @@ export function groupByWorkspace(sessions: SessionSummary[], watched: string[] =
 }
 
 /**
- * 侧栏看得见的那几项目录（审阅 F3）：那份持久登记是主要来源，窗口另外指着的那几份跟着一起扫。
- * 只按窗口那一份清单走的话，终端界面登记的非默认工作区里的记录列不出来——登记存在不等于找得回来。
- * 第一项固定是 `''`：那一个不指名，读的是这一具宿主自己的项目环境。
+ * 返回侧栏可展示的工作区，优先使用持久登记，并合并窗口额外关注的目录。
+ * 仅使用窗口目录会漏掉由 TUI 登记的非默认工作区。
+ * 第一项固定为 `''`，表示 Host 的默认项目环境。
  */
 export function visibleRoots(registry: WorkspaceRoster, watched: string[]): string[] {
   const out = [''];
@@ -112,8 +112,8 @@ export function visibleRoots(registry: WorkspaceRoster, watched: string[]): stri
 }
 
 /**
- * 新建一份会话要递出去的那一格（方案 5.5.3）：人选的那一具算 `explicit`，界面自己退出来的那一份算 `default`，
- * 三格都没有就不指名，由宿主用它自己那一份项目环境。
+ * 构造新会话的工作区来源：用户选择的目录为 `explicit`，界面提供的默认目录为 `default`。
+ * 两者都没有时不指定项目，由 Host 使用默认环境。
  */
 export function createCallOf(named: string | undefined, current: string | undefined, fallback: string | undefined): { projectRoot?: string; workspaceOrigin?: 'explicit' | 'default' } {
   const asked = named ?? current ?? fallback;

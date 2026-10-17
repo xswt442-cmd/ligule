@@ -9,7 +9,7 @@ export type HostFault = 'spawn-failed' | 'stdout-invalid-utf8' | 'stdout-frame-t
 
 export interface HostControllerOptions {
   node: string;
-  cli: string;
+  hostEntry: string;
   entry?: string;
   cwd: string;
   env: NodeJS.ProcessEnv;
@@ -30,7 +30,7 @@ export class HostController {
     this.options = options;
   }
 
-  // 只供主进程自己使用（诊断与真实窗口验收）：定位当前那一具 Host，不向 Renderer 暴露进程信息。
+  // 供主进程诊断和窗口验收定位当前 Host；不要向 Renderer 暴露进程信息。
   get pid(): number | undefined {
     return this.child?.pid;
   }
@@ -48,8 +48,8 @@ export class HostController {
     let child: ChildProcessWithoutNullStreams;
     try {
       const arguments_ = this.options.entry === undefined
-        ? [this.options.cli, 'host']
-        : [this.options.entry, this.options.cli];
+        ? [this.options.hostEntry, 'host']
+        : [this.options.entry, this.options.hostEntry];
       const stdio: ('pipe' | 'ipc')[] = this.options.entry === undefined
         ? ['pipe', 'pipe', 'pipe']
         : ['pipe', 'pipe', 'pipe', 'ipc'];
@@ -69,7 +69,7 @@ export class HostController {
     this.pendingWrites = 0;
     this.readFrames(child, generation);
     child.stderr.on('data', () => {
-      // stderr 只排空，绝不把原始诊断内容交给界面。
+      // 只读取并丢弃 stderr，避免把原始诊断内容传到界面。
     });
     child.stderr.on('error', () => this.fault(generation, 'stderr-read-failed'));
     child.stdin.on('error', () => this.fault(generation, 'write-failed'));
