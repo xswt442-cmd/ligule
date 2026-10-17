@@ -644,7 +644,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
 
   // 手停下来 400 毫秒才写这一份：敲字那一段不碰磁盘，而退出与崩溃前那一句已经落下了。
   useEffect(() => {
-    if (inputs === undefined) return;
+    if (inputs === undefined || !inputState.current.has(sessionId)) return;
     const own = sessionId;
     const root = info.boundary ?? '';
     const timer = setTimeout(() => {
