@@ -5,7 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createConfig, createKernel, createLoop, createSessionLog, KernelError, KernelRuntimeError } from '../dist/index.js';
 
-// 这里交进去的是按 D13 那个形状写的脚本化提供方：本文件测的是循环，不是任何一家端点。
+// 脚本化提供方只用于驱动循环；本文件不测试具体模型端点。
 function scriptedProvider(turns, fallback = [{ type: 'text', text: 'done' }]) {
   const requests = [];
   return {
@@ -431,7 +431,7 @@ test('what the model is shown next is rebuilt from the session log', async () =>
   }
 });
 
-// 推理段进记录、不进投影（D32）：界面与重开时要能看见它，而下一轮的请求体里没有它的位置。
+// 推理内容写入会话记录并在界面和恢复时保留，但不会进入下一轮请求。
 test('reasoning is recorded and kept out of what the model is asked next', async () => {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'loop-'));
   try {
@@ -453,7 +453,7 @@ test('reasoning is recorded and kept out of what the model is asked next', async
   }
 });
 
-// 轮次终态（D113）：每条用户输入对应一条完成、取消或失败记录，不进模型投影与检查点哈希。
+// 每条用户输入都会记录完成、取消或失败状态；这些终态事件不进入模型投影或检查点哈希。
 test('completed and budget-exhausted rounds each leave one terminal event', async () => {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'loop-'));
   try {

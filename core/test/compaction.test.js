@@ -1,4 +1,4 @@
-// 压缩的两条触发、切点与那一次修正（D75、D76，实现顺序第 37 步）。
+// 验证上下文压缩的触发条件、截断位置和校准行为。
 // 端点是本地假的那一个：要验的是「什么时候压、压完投影是什么、压几次」，不是某一家端点的报错文案。
 import test from 'node:test';
 import { estimateRequest } from '../dist/session/compaction.js';
@@ -118,7 +118,7 @@ test('pressure over the line compacts once and the next request carries the summ
 
 const overflow = new KernelError('provider_http_error', { detail: '400 the input is longer than the maximum context length' });
 
-// 超长那一条只在端点报回之后走，而整个运行只允许一次压缩加一次重试（D75）。
+// 端点返回用量后才检查是否超出上下文预算；一轮最多压缩一次并重试一次。
 test('an endpoint overflow answer gets one compaction and one retry', async () => {
   await withSession(async ({ directory, id, session }) => {
     await fill(session, 2);
@@ -161,7 +161,7 @@ test('a provider failure that is not about length leaves the record alone', asyn
   });
 });
 
-// 本地估算修正过才谈得上压力：端点报回的真实用量比本地大时，那条线要跟着提前响（D75）。
+// 当端点报告的用量高于本地估算时，后续压缩应更早触发。
 test('the local estimate is corrected by the usage the endpoint reports back', async () => {
   await withSession(async ({ directory, id, session }) => {
     const kernel = createKernel({ session: { directory, append: session.append.bind(session) } });
@@ -186,7 +186,7 @@ test('the local estimate is corrected by the usage the endpoint reports back', a
   });
 });
 
-// 检查点里只有摘要与范围，没有任何「模型以前知道过」的那几格；被顶掉的那些事件仍然在日志里（D76、I5）。
+// 检查点只保存摘要和事件范围；被压缩的事件仍保留在会话日志中。
 test('the checkpoint carries no disclosure state and the log keeps every event', async () => {
   await withSession(async ({ directory, id, session }) => {
     await fill(session, 4);
@@ -203,7 +203,7 @@ test('the checkpoint carries no disclosure state and the log keeps every event',
   });
 });
 
-// 第二次压缩从上一次保留的边界开始，并把上一次的摘要当作输入（D75）。
+// 连续压缩从上次保留的边界继续，并将已有摘要作为输入。
 test('the next compaction starts at the kept boundary and feeds the previous summary in', async () => {
   await withSession(async ({ directory, id, session }) => {
     const provider = fakeProvider([[{ type: 'text', text: 'one' }], [{ type: 'text', text: 'two' }], [{ type: 'text', text: 'three' }]]);
@@ -230,7 +230,7 @@ test('the next compaction starts at the kept boundary and feeds the previous sum
   });
 });
 
-// 摘要文本也受注入那一层的上限约束（I6）：超了整份溢出到文件，检查点里留可取回的引用。
+// 摘要文本也受上下文预算限制；超出时写入溢出文件，并在检查点中保留引用。
 test('an oversized summary spills to a file with a retrievable reference', async () => {
   await withSession(async ({ directory, id, session }) => {
     await fill(session, 4);
@@ -244,7 +244,7 @@ test('an oversized summary spills to a file with a retrievable reference', async
   });
 });
 
-// 窗口那一格没写就不启用压缩（D75 修订，2026-10-05 定）：0.8 与 0.16 是策略参数可以给缺省，
+// 未配置上下文窗口时不启用压缩；压缩阈值和保留比例可以使用默认值，
 // 窗口大小是模型事实——猜大了会让摘要请求自己超窗，所以没配置的人正常聊天照跑而不自动压。
 test('compaction stays off until the model window is configured', () => {
   assert.equal(compactionLimitsOf(createConfig({ user: { limits: {} } })), undefined);
@@ -277,7 +277,7 @@ test('service model context changes the compaction window with the selected mode
   assert.equal(compactionLimitsOf(config, large.serviceContextTokens).contextTokens, 96000);
 });
 
-// 端点报回的用量落成一条记录事件（D82）：界面与恢复读的是记录，不是上一次进程留在内存里的那个数。
+// 端点报告的用量写入会话记录，界面和恢复流程都从记录中读取。
 test('the usage an endpoint reports lands in the record and never in the projection', async () => {
   await withSession(async ({ directory, id, session }) => {
     await fill(session, 2);
@@ -299,7 +299,7 @@ test('the usage an endpoint reports lands in the record and never in the project
   });
 });
 
-// 重开一份会话不该从「从没校准过」重新开始：系数从记录里最后一条用量算回来（D82）。
+// 重开会话后应从最后一条用量记录恢复估算系数。
 test('a fresh compaction over a record that carries usage starts calibrated', async () => {
   await withSession(async ({ directory, id, session }) => {
     await fill(session, 2);
@@ -314,7 +314,7 @@ test('a fresh compaction over a record that carries usage starts calibrated', as
   });
 });
 
-// 手动那一条与自动那两条走同一次摘要生成；切不动时说清切不动（D83）。
+// 手动和自动压缩使用相同的摘要流程；无法压缩时返回明确结果。
 test('a manual compaction writes the same checkpoint and says when there is nothing to cut', async () => {
   await withSession(async ({ directory, id, session }) => {
     const compaction = createCompaction({ provider: fakeProvider([], 'MANUAL SUMMARY'), session, directory, id, limits });
@@ -329,7 +329,7 @@ test('a manual compaction writes the same checkpoint and says when there is noth
   });
 });
 
-// 摘要比它顶掉的那一段还长时不压（第 43 步补的那一条护栏）：那种检查点只会让模型少读历史、多读一份摘要，
+// 摘要比将被压缩的历史更长时不应压缩，否则模型读到的内容反而更多，
 // 而它顶掉的那一段再也不会被读到——压不动就说清压不动。
 test('a summary that would not shrink the projection is refused', async () => {
   await withSession(async ({ directory, id, session }) => {
@@ -352,7 +352,7 @@ test('a summary that would not shrink the projection is refused', async () => {
   });
 });
 
-// 不进投影的那几种事件不吃保留量：轮次标记与用量插进去，切点不动（实现顺序第 68 步）。
+// 不参与模型投影的轮次标记和用量事件不计入保留量，也不会移动截断位置。
 test('the cut point ignores events that never reach the model', () => {
   const long = (count) => 'x'.repeat(count);
   const mixed = [

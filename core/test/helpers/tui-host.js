@@ -31,7 +31,7 @@ function observeFrames(stream, visit) {
 // 能在 10 秒内落不下来（单独跑那一份时 1.6 秒就过），所以这一格留到 60 秒：成立就立刻返回，绿的运行不变慢。
 // read 只在没等到时交出画面供报告用。
 // 默认给到 150 秒：并发跑整份时一具假终端要跟十几份测试抢进程，等一帧画出来的墙钟不是单机那一档。
-// 判据不变——条件不成立仍然当场失败（U52 那一条），只是把「慢」与「错」分开。
+// 条件不成立时立即失败，并把运行超时与其他错误分别报告。
 export async function waitFor(condition, { within = 150_000, every = 30, read = () => '' } = {}) {
   const deadline = Date.now() + within;
   for (;;) {
@@ -106,7 +106,7 @@ export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {},
     } });
     const provider = createChatCompletionsProvider({ baseUrl, model: 'local-test-model', apiKeyEnv: 'LIGULE_TUI_TEST_API_KEY' });
     const modesDirectory = fileURLToPath(new URL('../../../core/modes/', import.meta.url));
-    // 一具宿主接第二项目录时走这一条路（方案 3.2）：按指名的那一份根重算一份环境，其余格子与默认那一份同源。
+    // 同一 Host 打开第二个项目时，按指定目录重新加载环境；其余配置仍使用默认来源。
     // 配置那一格拼写是 `baseURL`，提供方工厂要的是 `baseUrl`：两边各按各的名字给，不混用。
     const modelShape = { api: 'chat-completions', baseURL: baseUrl, model: 'local-test-model', apiKeyEnv: 'LIGULE_TUI_TEST_API_KEY' };
     const providerShape = { baseUrl, model: 'local-test-model', apiKeyEnv: 'LIGULE_TUI_TEST_API_KEY' };
@@ -139,7 +139,7 @@ export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {},
       if (typeof message.notify === 'string') notifications.push(message);
     });
     host = serveHost({ ...pair.host, config, provider, policy: config.policy, loadEnvironment,
-      // 客户端声明它答得了模型的提问（D107）：这一格与终端壳、桌面壳走的是同一条入口。
+      // 客户端声明支持回答模型提问，与终端和桌面客户端使用相同的协议字段。
       interactive,
       modeName: 'minimal', modePaths: modeDirectories(projectDirectory, modesDirectory, homeDirectory),
     });

@@ -1,5 +1,4 @@
-// 判定结果那一格（D77、实现顺序第 38 步）：进记录、不进模型可见投影，也不改检查点算出来的那一段哈希；
-// 汇总读的是这份记录，内核里没有第二份计数器。
+// 判定结果只写入会话记录，不进入模型投影或检查点哈希；汇总直接从记录计算。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -36,7 +35,7 @@ test('the summary counts three buckets per capability name, not per registered t
   );
   assert.deepEqual(exec.codes, { policy_denied: 1, ask_declined: 1 });
   assert.deepEqual(exec.rules, { 'rm *': 1 });
-  // 被拒绝阈值压到逐次询问的那一次写成一个单独的档位读法（D77 那一格说的「来源那条规则或档位」）。
+  // 连续拒绝达到阈值后转为逐次询问，并在记录中标明该决策来源。
   assert.deepEqual(exec.levels, { auto: 2, 'auto→ask': 1 });
   // 没有判定链的那一次调用不在这份汇总里：那一格没有，就不猜。
   assert.equal(counts.some((item) => item.capability === 'write'), false);
@@ -49,7 +48,7 @@ test('the printed lines are the same numbers as the structured ones', () => {
   assert.deepEqual(JSON.parse(JSON.stringify(summarizeVerdicts(events)))[1].capability, 'mcp:fs/read_file');
 });
 
-// 这一格是给人与排错读的：模型那一侧的形状、以及检查点算出来的那一段哈希都不该因为它变（D12、D75）。
+// 判定摘要仅供界面和排错使用，不改变模型输入或检查点哈希。
 test('the verdict stays out of the model view and out of the checkpoint hash', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'ligule-verdicts-'));
   const id = 'verdicts-session';

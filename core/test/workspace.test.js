@@ -1,4 +1,4 @@
-// 工作区的身份与那份持久登记（D110、方案 5.5.1 与 5.5.2）：别名归成一个身份、一条身份只有一条记录、读不懂就当场拒。
+// 验证工作区别名归一、持久登记唯一性，以及无效登记的错误处理。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile as callbackExecFile } from 'node:child_process';
@@ -70,7 +70,7 @@ test('同一具工作区登记两次只有一条，第一次看见的时间留�
   });
 });
 
-// 默认选择那一格：指过去之前先把那一条登记写下，所以它永远指得着一条真实的登记（方案 5.5.1）。
+// 设置默认工作区前先写入登记，确保默认选择始终指向有效记录。
 test('默认选择指过去时先登记那一条，退掉时登记一条都不少', async () => {
   await withWorkspace(async (directory, root) => {
     const path = join(root, 'workspaces.json');
@@ -134,7 +134,7 @@ async function withHost(run) {
       connection: createConnection(pair.client),
       project,
       home,
-      // 首行是那份会话落在哪一具工作区的原始说法：不经过列表那一层，直接读文件（记录在数据根会话区，D110）。
+      // 直接读取会话首行中的工作区信息，不依赖工作区列表。
       headerOf: async (sessionId) => JSON.parse((await readFile(join(home, 'sessions', `${sessionId}.jsonl`), 'utf8')).split('\n')[0]),
     });
   } finally {
@@ -165,7 +165,7 @@ test('建会话的那一侧把这一具工作区登记进应用数据根，并�
   });
 });
 
-// 来源那一格由客户端说：桌面可能指名一份目录而那一份正是它的默认工作区，指没指名推不出这一层意思（方案 5.5.3）。
+// 工作区来源由客户端明确提供；即使目录恰好是默认工作区，也不能仅凭路径推断来源。
 test('客户端说了来源就按它写，说不认识的值就把这一次请求拒掉', async () => {
   await withHost(async ({ connection, project, headerOf }) => {
     const named = await connection.request('session.create', { projectRoot: project, workspaceOrigin: 'explicit' });

@@ -1,4 +1,4 @@
-// 第 34 步的验收（D73、D78）：列表从记录目录扫出来，恢复用记录里最后生效的那份模式清单并比摘要。
+// 会话列表从记录目录读取；恢复时使用记录中最后生效的模式清单并校验摘要。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { appendFile, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
@@ -33,7 +33,7 @@ async function withSessions(run) {
   }
 }
 
-// 缺省解析改成数据根会话区（D110）之后，「跟着边界还是跟着配置」这一条在 `test/adopt.test.js` 里按新合同验。
+// 默认会话目录由数据根决定；迁移旧目录的行为由 `adopt.test.js` 覆盖。
 
 test('the listing reads each record once and reports what a resume would need', async () => {
   await withSessions(async (root, directory) => {
@@ -88,7 +88,7 @@ test('the listing reads each record once and reports what a resume would need', 
       truncatedBytes: 0,
     });
 
-    // 没有首行的那一份归它物理所在的这一项目录：按这一项目录筛时它要列得出来，人才找得回旧会话（U60 选定）。
+    // 缺少首行的旧会话按文件所在项目归属，按该项目筛选时仍应列出。
     const filtered = await listSessions(directory, { projectRoot: root });
     assert.deepEqual(filtered.map((item) => item.id), ['fresh', 'legacy']);
     assert.equal(filtered[1].projectRoot, root, '归属那一格写的是扫的那一项目录，不虚构首行里的那一份');
@@ -118,7 +118,7 @@ test('headerless records inherit only a physical legacy project, never a request
 });
 
 // 名字与归档标记是记录里的那几条 `label`：后写的盖掉前写的那一件，一条只说另一件时这一件沿用。
-// 它也不进模型那一份：读回来的历史与发给模型的上下文是两件事（I5、实现顺序第 75 步）。
+// 标签与归档信息只用于会话记录和界面显示，不进入模型上下文。
 test('a label folds into the listing and stays out of what the model is shown', async () => {
   await withSessions(async (root, directory) => {
     const log = createSessionLog({ directory, id: 'named', meta: () => ({ projectRoot: root }) });
@@ -140,7 +140,7 @@ test('a search says which record a hit is in and which event it is', async () =>
     for (const line of ['alpha 一', 'alpha 二', 'alpha 三', 'alpha 四', 'alpha 五']) await many.append({ kind: 'user', text: line });
     const older = createSessionLog({ directory, id: 'older', meta: () => ({ projectRoot: root }) });
     await older.append({ kind: 'user', text: '第一段\n   alpha   第二段' });
-    // 派生支线那一份不参与查：它接不回来，读它走主干那一侧（D74）。
+    // 分支会话不参与主会话搜索；应通过主会话的记录读取分支内容。
     await writeFile(join(directory, 'newer.sub-1.jsonl'), `${JSON.stringify({ seq: 0, kind: 'user', text: 'alpha 写在支线里' })}\n`);
     // 读不出来的那一份不参与查：列表那一行已经带着稳定码说清它读不懂，这里不报第二次，也不猜它写过什么。
     await writeFile(join(directory, 'broken.jsonl'), `${JSON.stringify({ seq: 0, kind: 'nonsense' })}\n`);
@@ -252,7 +252,7 @@ const provider = {
   },
 };
 
-// 第 44 步：列表与恢复这两件事都从宿主那一边出去，界面不必自己去读记录目录，也不必自己算那一份模式清单。
+// 会话列表与恢复都由 Host 提供，客户端无需读取记录目录或计算模式清单。
 async function withHost(root, run) {
   const config = createConfig({
     user: {
@@ -298,7 +298,7 @@ test('the host hands out the listing and resumes under the mode that record last
       await assert.rejects(connection.request('sessions.list', { limit: 0 }), (error) => error.code === 'protocol_args_invalid',
         '条数写 0 是自己跟自己矛盾，不接');
 
-      // 宿主装配时带着 full，打开那一份记录时用的却是记录里最后生效的 minimal（D78）。
+      // 即使 Host 当前使用 `full`，恢复时仍应采用记录中最后生效的 `minimal` 模式。
       await connection.request('session.open', { sessionId: 'ran' });
       assert.equal((await connection.request('status.get', { sessionId: 'ran' })).mode, 'minimal');
       // 摘要变了要在这里报出来，让客户端指名一份再来——不静默换成磁盘上现在那一份，也不静默退回缺省。

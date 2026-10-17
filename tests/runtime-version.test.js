@@ -24,7 +24,7 @@ test('the runtime floor is one value across package metadata, README and workflo
     const declared = firstGroup(read(`../.github/workflows/${file}`), /PRIMARY_NODE_VERSION: '(\d+)'/, file);
     assert.equal(declared, engines, `${file} and engines.node disagree`);
   }
-  // 类型描述的是另一个大版本的运行时时，新写的 TypeScript 模块会用上这一档 Node 没有的接口，本机测试也照样绿。
+  // 保持 Node 与类型定义的主版本一致，避免本地类型检查通过但目标运行时缺少接口。
   const types = firstGroup(pkg.devDependencies['@types/node'], /^\^?(\d+)\./, 'devDependencies @types/node');
   assert.equal(types, engines, '@types/node describes a different Node major version than engines.node');
 });
@@ -116,7 +116,7 @@ test('the pinned pnpm workspace lock covers all manifests and dependency specifi
   }
 });
 
-// 运行时归档与校验值以 desktop/node-pin.json 为唯一来源，维护文档指向该文件。
+// Node 运行时的版本与校验值由 desktop/node-pin.json 统一维护，发行文档链接到该文件。
 test('the vendored Node targets use the documented pin file', () => {
   const pin = JSON.parse(read('../desktop/node-pin.json'));
   const releaseGuide = read('../docs/development/RELEASE.md');

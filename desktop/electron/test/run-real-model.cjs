@@ -19,7 +19,7 @@ let sessionId;
 let sequence = 0;
 let failed = false;
 let phase = 'load_application';
-// 同一个窗口驱动 harness 既服务真实模型验收，也服务本地 stub 模型回归；标签只影响报告文字，不改变被测行为。
+// 真实模型验收和本地 stub 回归共用窗口驱动程序；提供方标签只用于报告。
 const providerLabel = process.env.LIGULE_MODEL_PROVIDER_LABEL ?? '真实模型';
 const evidenceName = process.env.LIGULE_MODEL_EVIDENCE_NAME ?? 'real-model';
 
@@ -29,7 +29,7 @@ if ([workspaceRoot, evidenceRoot, userDataRoot, isolatedHome].some(value => type
 
 app.setPath('userData', userDataRoot);
 app.enableSandbox();
-// 证据必须在销毁窗口之后写出；保持应用存活到显式 quit，避免 window-all-closed 提前结束进程而写出空报告。
+// 销毁窗口后再写报告；忽略 window-all-closed，避免 Electron 提前退出。
 app.on('window-all-closed', () => {});
 const secureWindow = require('../dist/secure-window.js');
 const security = require('../dist/security.js');
@@ -324,7 +324,7 @@ async function runChecks() {
     await waitFor(`window.__realModelFrames.filter(frame => frame.method === 'approval.request').length > ${before}`, 100_000, 'model_approval_wait_timeout');
     await waitFor(`document.querySelector('.approval button[data-tone="allow"]')`, 15_000, 'approval_card_not_rendered');
     await evaluate(`document.querySelector('.approval button[data-tone="allow"]').click(); true`);
-    // 允许后 Host 需要先执行工具再收尾；轮询到「本轮已结束且已记录 result」再断言，避免读到上一轮的状态。
+    // Host 可能先执行工具再结束回合；等待回合结束且工具结果写入后再检查状态。
     const deadline = Date.now() + 30_000;
     let summary = null;
     while (Date.now() < deadline) {
@@ -396,7 +396,7 @@ async function runChecks() {
     return `收到真实 text 增量 ${summary.deltaCount ?? 1} 次后按界面停止；Host 写入 cancelled 终态`;
   });
 
-  // 只在本地 stub 提供方下执行：真实提供方无法按需制造「请求已发出、永远没有答案」的那一刻。
+  // 仅本地 stub 可稳定模拟请求发出后一直没有响应的情况。
   if (typeof stubControl === 'string' && stubControl !== '') {
     await check(`${providerLabel}宿主崩溃后的界面重连`, async () => {
       if (typeof sessionId !== 'string') throw Object.assign(new Error('approval_session_unavailable'), { code: 'approval_session_unavailable' });
@@ -421,8 +421,7 @@ async function runChecks() {
       const killedPid = host.pid;
       assert.equal(typeof killedPid, 'number', 'host_pid_unavailable');
       process.kill(killedPid);
-      // 页面可能有不止一条 role="alert" 横幅（例如偏好保存失败也带一个重试按钮），
-      // 所以按按钮文字定位断连横幅，不能取第一条横幅的第一个按钮。
+      // 页面可能同时显示多个 alert；按按钮文字定位断连提示中的重试按钮。
       const reconnectButton = `[...document.querySelectorAll('.banner[role="alert"] button')].find((button) => /重新连接|Reconnect/u.test(button.textContent ?? '')) ?? null`;
       await waitFor(`${reconnectButton} !== null`, 30_000, 'disconnected_banner_missing');
       const clickAt = Date.now();
@@ -436,8 +435,7 @@ async function runChecks() {
       if (await evaluate(`/无法启动后端|Could not start the host/u.test(document.body.innerText)`)) {
         throw Object.assign(new Error('repeated_reconnect_started_another_lifecycle'), { code: 'repeated_reconnect_started_another_lifecycle' });
       }
-      // 横幅消失只说明壳已经换了一具进程：`session.open` 可能还在路上，接回原来那一份之前
-      // `session.read` 会答 session_not_open。等 Host 真的持有这一份会话再断言，最多 25 秒。
+      // 断连提示消失只表示新 Host 已启动；等待它重新打开原会话后再读取会话状态。
       const reopenDeadline = Date.now() + 25_000;
       let reopened = false;
       while (Date.now() < reopenDeadline) {

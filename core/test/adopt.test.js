@@ -1,4 +1,4 @@
-// 默认会话目录位于数据根，旧位置的一次性复制校验可重跑、原件保留（D110）。
+// 验证会话迁移会将旧位置的记录复制到数据根，保留原件，并能安全重跑。
 // 测试使用临时目录与独立 Node 进程核对锁和发布行为。
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -51,8 +51,8 @@ test('legacy session files are copied once into the data root and the originals 
     assert.deepEqual(first.copied.sort(), ['aaa.checkpoint.json', 'aaa.jsonl', 'result-3-abcdef01.json']);
     assert.deepEqual(first.unknown, ['notes.txt'], '不认识的条目列出来、不复制');
     assert.equal(await readFile(join(legacy, 'aaa.jsonl'), 'utf8'), '{"seq":0,"kind":"tool","result":{"spilled":"result-3-abcdef01.json"}}\n', '原件保留');
-    // 补齐的那一份保住记录自己的时间：`updatedAt` 读的是文件时间，列表按它排序（POSIX 的 copyFile 会改成此刻）。
-    // `utimes` 走 Date（只到整毫秒），源时间带毫秒以下的小数位时两边差在这一格以内；列表显示到毫秒，已经一致。
+    // 复制时保留源文件的修改时间，因为会话列表按该时间排序。
+    // 文件系统时间可能存在毫秒以下的精度差异；列表只显示到毫秒，因此比较到毫秒即可。
     const [source, copied] = await Promise.all([stat(join(legacy, 'aaa.jsonl')), stat(join(target, 'aaa.jsonl'))]);
     assert.ok(Math.abs(copied.mtimeMs - source.mtimeMs) <= 1, `补齐不改那一份自己的时间：${copied.mtimeMs} 对 ${source.mtimeMs}`);
 
@@ -60,7 +60,7 @@ test('legacy session files are copied once into the data root and the originals 
     assert.deepEqual(second.copied, [], '再跑只做比对');
     assert.deepEqual(second.already.sort(), ['aaa.checkpoint.json', 'aaa.jsonl', 'result-3-abcdef01.json']);
 
-    // 目标已有同编号而字节不同：停下交回，不覆盖目标那一份。
+    // 目标目录中已有同 ID 但内容不同的记录时，应报错并保留目标文件。
     await writeFile(join(target, 'aaa.jsonl'), 'changed\n', 'utf8');
     const third = await adoptLegacySessions(legacy, target);
     assert.deepEqual(third.conflicts, ['aaa.jsonl']);

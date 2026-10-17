@@ -1,4 +1,4 @@
-// 两端共用的那一份输入历史（方案 5.5.6）：终端界面与宿主各开各的进程，写的是同一个文件。
+// 终端界面和宿主运行在不同进程中，但共用同一份输入历史文件。
 // 那一次读—改—写要跨进程排队，所以除了并发排队，还量一把被人占着的锁。
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';

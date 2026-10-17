@@ -1,4 +1,4 @@
-// 第 24 步的验收（D45、D49、D54）：两处目录与递归的命令名、头部的 schema、展开的四种形状、
+// 验证提示模板的查找目录、递归命令名、头部格式和展开方式，
 // 记录里同时留着原始那一行与来源摘要，以及各界面画的是人打的那一句话。
 // 目录与文件是真临时目录，Host 与提供方请求体走的是那条真内存通道，没有假实现。
 import test from 'node:test';
@@ -39,7 +39,7 @@ test('nested directories become colon names and the project layer wins', async (
     await place('user', 'standup.md', `${head('write a standup')}Today I did $ARGUMENTS\n`);
     const registry = await discoverTemplates(directories);
     assert.deepEqual(registry.templates.map((template) => template.command), ['git:release:prepare', 'review:security', 'standup']);
-    // 同名两份时胜出的是靠近仓库那一份，与被压掉的那一份都要说得出在哪（D36 同一条层序）。
+    // 同名模板按目录优先级选择，并能报告胜出和被覆盖模板的位置。
     const kept = registry.templates.find((template) => template.command === 'review:security');
     assert.equal(kept.description, 'review one file');
     assert.equal(kept.layer, 'project');
@@ -156,7 +156,7 @@ test('the Host expands before the loop and the record keeps both that line and t
       model: 'test-model',
       async *stream(request) {
         requests.push(request);
-        // 循环读的是提供方交回的那一串规范事件（D13），这里只留文本那一条。
+        // 循环消费提供方返回的标准事件；此处只生成文本事件。
         yield { type: 'text', text: 'ok' };
       },
     };
@@ -175,7 +175,7 @@ test('the Host expands before the loop and the record keeps both that line and t
       assert.equal(result.text, 'ok');
       // 模型看见的是展开后的那一份。
       assert.deepEqual(requests[0].messages.at(-1), { role: 'user', text: 'Review src/a.ts\n' });
-      // 记录里五样都在，而它仍是一条普通 user event（D53）。
+      // 模板展开信息完整写入记录，但事件仍保持普通用户消息类型。
       const { events } = await connection.request('session.read', { sessionId });
       const user = events.find((event) => event.kind === 'user');
       assert.equal(user.raw, '/review:security src/a.ts "API notes"');

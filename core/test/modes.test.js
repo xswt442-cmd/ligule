@@ -1,4 +1,4 @@
-// 第 22 步的验收（D35、D43、D44、D46）：模式文件的三层查找、两格的形状、错误码，
+// 验证模式文件的查找顺序、字段格式和错误码，
 // 以及装载之后真的收紧了交给模型的那一栏工具。临时目录是真的目录层级，工具是真的最小清单，
 // 提供方只用来把请求体交回来看见 tools 那一栏，没有假实现。
 import test from 'node:test';
@@ -78,14 +78,14 @@ test('a name that could escape the mode directories is refused before any read',
   });
 });
 
-// 两格每一格都要写：写了名字却没生效的那一格，比少写一格更难查（I2）。
+// 模式配置中的两个字段都必须提供，避免字段遗漏后模式看似生效却未按预期工作。
 test('both fields are required and nothing else is accepted', async () => {
   await withLayout(async ({ directories }) => {
     const cases = [
       ['tools = ["read"]\n', 'mode_field_missing'],
       ['prompt = []\n', 'mode_field_missing'],
       [`${complete('["read"]')}extra = 1\n`, 'mode_field_unknown'],
-      // 模式不管技能与扩展的来源（D46）：写这一格就是写了一格没人读的东西，认不出来就报出去。
+      // 模式不能配置技能或扩展来源；遇到未支持的字段时应明确报错。
       [`${complete('["read"]')}sources = ["./plugin.ts"]\n`, 'mode_field_unknown'],
       ['tools = "read"\nprompt = []\n', 'mode_field_invalid'],
       [complete('["read", "read"]'), 'mode_field_duplicate'],
@@ -111,7 +111,7 @@ test('the project layer wins whole, and its file still cannot name what the load
   });
 });
 
-// prompt 这一格挑的是扩展登记进来的片段（D35 留下的那一格，第 29 步接上）：装载这一处只解析名字。
+// `prompt` 字段选择扩展注册的提示片段；模式加载时只解析片段名称。
 test('the prompt field keeps the names it was written with, selection happens at load', async () => {
   await withLayout(async ({ directories }) => {
     await writeMode(directories, 'user', 'review', 'tools = ["read"]\nprompt = ["notes"]\n');
@@ -129,7 +129,7 @@ function kernelWithMinimal() {
   return kernel;
 }
 
-// 固定披露入口（`skill`）不在这份名单里，所以模式既选不到它也藏不掉它（D63）。
+// 固定的 `skill` 工具不受模式清单控制，始终可用。
 function kernelWithDisclosure() {
   const kernel = createKernel({ config: createConfig({ user: { boundary: process.cwd() } }) });
   loadAssembly(kernel, [minimalPlugin, createSkillPlugin({ skills: [], diagnostics: [] })]);
@@ -166,7 +166,7 @@ test('applying a mode narrows what the model is offered, and "*" offers everythi
     const kernel = kernelWithMinimal();
     applyMode(kernel, await loadMode('readonly', directories));
     assert.deepEqual(kernel.manifest().map((entry) => entry.name), ['find', 'read', 'search']);
-    // 登记表本身没被改动：被藏起来的三件仍然在，只是不再交给模型，也不允许被绕过去调用（I4）。
+    // 隐藏工具仍保留在注册表中，但不会提供给模型或接受直接调用。
     assert.equal(kernel.list().length, MINIMAL.length);
     const shipped = modeDirectories(projectRoot, shippedModes, userHome);
     assert.deepEqual(applyMode(kernelWithMinimal(), await loadMode('full', shipped)).tools, MINIMAL);
@@ -230,7 +230,7 @@ test('a session built by the Host asks the provider with only the mode-selected 
   }
 });
 
-// 第 25 步的验收（D41）：轮中不打断，本轮结束才换清单，生效之前再选一次当前那份就是撤回。
+// 模式变更在当前轮次结束后生效；生效前再次选择当前模式会撤销待处理的变更。
 test('a switch asked for during a round takes effect only once that round ends', async () => {
   await withLayout(async ({ directories, projectRoot, userHome }) => {
     await writeMode(directories, 'user', 'readonly', complete('["read"]'));

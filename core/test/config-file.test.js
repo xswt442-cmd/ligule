@@ -4,8 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createConfig, flagLayer, loadConfigLayers } from '../dist/index.js';
 
-// 用户主目录与项目根都建在 testplace/ 下的临时目录里：装载侧读哪三份文件由这两个根决定，
-// 测试因此不碰真实的 ~/.ligule，也不依赖进程环境。
+// 用户主目录和项目根都使用临时目录，避免读取真实的用户配置或依赖环境变量。
 async function withLayers(run) {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'config-'));
   const home = join(root, 'home');
@@ -19,7 +18,7 @@ async function withLayers(run) {
   }
 }
 
-// 这两条都走真实的文件与折叠那一条路：项目层那一份可能出自别人写的仓库，日期时间是 TOML 里正当的写法。
+// 两项测试都通过真实文件加载和配置合并；项目配置也可能包含合法的 TOML 日期时间值。
 test('a project file holding a __proto__ table is refused when the layers fold', async () => {
   await withLayers(async ({ home, project }) => {
     await writeFile(join(project, '.ligule', 'config.toml'), '["__proto__"]\npolluted = 1\n');

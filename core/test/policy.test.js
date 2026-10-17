@@ -2,8 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDecisionChain, createKernel, KernelError } from '../dist/index.js';
 
-// 判定这一格除了 decision、code、reason、segments 之外还带能力名、档位与走的那条路（D77）。
-// 这一份检查比的是那条链的顺序与结论，那几栏单独在第 38 步那一条里比，这里先摘掉。
+// 判定结果还包含能力名称、审批档位和所用的决策路径。本文件关注规则顺序与结论。
 async function judged(chain, call) {
   const { capability, level, via, forced, rule, answer, ...rest } = await chain.evaluate(call);
   return rest;
@@ -45,7 +44,7 @@ test('an asked call follows the answer, and a missing channel denies', async () 
   assert.equal((await createDecisionChain({}).evaluate({ tool: 'read', input: {} })).code, 'ask_unavailable');
 });
 
-// 那一次询问带着自己那一份档位与来源（审阅 C08）：界面看着别的那一份会话时，解释这一条的不能是另一份的档位，
+// 审批请求携带发起会话自身的档位和来源，避免界面查看其他会话时显示错误的审批依据，
 // 也不能把「被连着拒绝压下来」说成「配置文件里写着逐次询问」。
 test('the question names the tier and the source of the chain that asked', async () => {
   const plain = asked(true);
@@ -135,7 +134,7 @@ test('every segment of a pipeline has to be covered before an asked call is allo
   assert.equal(calls[0].command, 'git status | grep x');
   assert.equal(calls[0].reason, undefined);
 
-  // 几条放行规则各盖住一段不算盖住整条：判定要说得出命中了哪一条（D77），说不出来就问。
+  // 多条放行规则不能拼接成一条完整许可；无法指出匹配规则时应继续询问用户。
   const second = asked(true);
   const across = createDecisionChain({
     rules: [{ tool: 'exec', decision: 'allow', match: 'git status' }, { tool: 'exec', decision: 'allow', match: 'grep x' }],
@@ -263,7 +262,7 @@ test('the kernel runs every call through the decision chain and reports the code
   assert.equal(await kernel.call('exec', { command: 'ls' }), 'ran');
 });
 
-// 判定读哪一种语法由 Host 的那一份选择决定（D59）：同一行文本在两个后端下可以得出不同结论。
+// Host 选择命令语法后，策略按同一种语法解析并判定；不同后端可能对同一文本得出不同结论。
 const POWERSHELL = { kind: 'powershell', executable: 'pwsh.exe', prefix: ['-Command'], tail: '' };
 
 test('the PowerShell backend judges only its own narrow subset', async () => {
@@ -286,7 +285,7 @@ test('the PowerShell backend judges only its own narrow subset', async () => {
   assert.equal(calls[0].shell, 'powershell');
   assert.equal(calls[0].executable, 'pwsh.exe');
 
-  // 以脚本解释器开头这一段两边都不放（D17 第三条），换后端不把它放宽。
+  // 两种命令后端都拒绝以脚本解释器开头的命令。
   assert.equal(
     (await chain.evaluate({ tool: 'exec', input: { command: 'python -c "print(1)"' }, shell: POWERSHELL })).decision,
     'allow',
@@ -294,7 +293,7 @@ test('the PowerShell backend judges only its own narrow subset', async () => {
   assert.deepEqual(calls.map((call) => call.command), ['git status | grep x', 'python -c "print(1)"']);
 });
 
-// 档位的两件来源与规则表可以整张换掉（D100、D101）。
+// 验证审批档位来源和规则表可以分别完整替换。
 test('the tier has two sources and the rule table can be replaced in place', async () => {
   const chain = createDecisionChain({ mode: 'ask', rules: [], ask: async () => true });
   assert.equal(chain.mode, 'ask');

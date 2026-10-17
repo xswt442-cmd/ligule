@@ -1,4 +1,4 @@
-// 方案 6A 的验收：一份记录排成 markdown、落到人选定的那个位置，这件事只有宿主这一份实现。
+// 验证宿主能将会话记录导出为 Markdown 并写入用户指定的位置。
 // 排版是纯计算；那一次写出走真的协议与真的临时目录，落点由调用方给。
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -91,7 +91,7 @@ test('session.export needs both a session and a destination', async () => withTu
     '目的地说不出就落到调用之前，不去猜一个位置');
 }));
 
-// 支线那几份文件的名字是宿主按前缀算出来的，原生对话框只就主干那一个位置问过要不要覆盖（审阅 F6）。
+// 分支文件名由宿主生成；原生文件对话框只询问主会话文件是否覆盖。
 // 已经有人占着的那一个位置不盖，报出来；主文件与其余目标各报各的结果。
 test('a branch file already sitting at that name is left alone and named', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'ligule-export-target-'));
@@ -110,7 +110,7 @@ test('a branch file already sitting at that name is left alone and named', async
   }
 });
 
-// 两次导出同时奔同一个支线目标（审阅 R1 的第二行）：先 `access` 再覆盖式写会把这段时间差说成「两边都写成了」，
+// 两次导出同时写入同一分支目标时，先检查再覆盖会造成竞争，
 // 磁盘上实际留下的只有后落笔那一份的正文。独占创建让其中一次拿到已存在这一条，交回的逐份结果与磁盘一致。
 test('two exports racing for one branch target leave one file and one truthful answer', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'ligule-export-race-'));
@@ -133,7 +133,7 @@ test('two exports racing for one branch target leave one file and one truthful a
   }
 });
 
-// 一份写失败不把它已经落盘的同伴抹掉：交回的是逐份结果（审阅 F6 的第二句）。
+// 某个文件写入失败时保留其他已成功导出的文件，并逐项返回结果。
 // 这里让主文件那一个位置是一个目录（写它必然失败），支线那一份是新的：一份失败与一份写成要各说各的。
 test('one target that cannot be written is named while the others stay reported', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'ligule-export-partial-'));

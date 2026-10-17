@@ -1,7 +1,5 @@
-// 终端界面的行、输入与折叠（D33 的第二种客户端）。ink 与 react 是可选依赖，装不上时这一份整份跳过，
-// 与那两条比较真实检索后端的检查同一个处理：不能假造一个后端来通过。
-// 每一具渲染都向 ink 传 `interactive: true`：环境里有 CI 那一个变量时 ink 自己走非交互那一条路，画面不再更新，
-// 而这几条检查要验的正是交互那一档。
+// 覆盖终端界面的渲染、输入和折叠行为。Ink 与 React 未安装时跳过这些测试。
+// 显式启用交互渲染，避免 CI 环境变量让 Ink 停止更新画面。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { appendFile, cp, mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
@@ -69,7 +67,7 @@ test('a refusal reads as a refusal, a failure as a failure, and structured conte
   );
   const [row] = projectRecord({ kind: 'tool', tool: 'read', result: { kind: 'result', failed: false, code: undefined, content: { text: 'a body' } } });
   assert.equal(row.kind, 'result');
-  // 工具交回的是 { text, ...附带 }，界面画的是正文那一格，不是整层信封（第 41 步）。
+  // 工具结果只显示 `text` 正文，不显示其他元数据。
   assert.equal(row.text, 'a body', '正文画正文');
 });
 
@@ -77,15 +75,15 @@ test('a record kind the terminal does not draw yields no rows instead of guessin
   assert.deepEqual(projectRecord({ kind: 'something-new' }), []);
 });
 
-// 斜杠开头的输入先查界面那张表；表里没有的这一行要原样落到 run.start，宿主才展开得开提示模板（D24、D81）。
+// 未知斜杠命令应原样交给 `run.start`，由 Host 展开提示模板。
 test('a slash line the UI table does not own goes to the host as one message', options, () => {
   assert.deepEqual(routeInput('  读一下 note.txt  ', false), { kind: 'run', text: '读一下 note.txt' });
   assert.deepEqual(routeInput('/tools', false), { kind: 'command', name: 'tools', argument: '' });
   assert.deepEqual(routeInput('/MODE now', false), { kind: 'command', name: 'mode', argument: 'now' });
-  // 这一条就是第 40 步修掉的缺陷：模板命令在界面表里没有，但它不是「没有这条命令」。
+  // 模板命令不在界面命令表中，仍应由 Host 正常处理。
   assert.deepEqual(routeInput('/git:release:prepare 3', false), { kind: 'run', text: '/git:release:prepare 3' });
   assert.deepEqual(routeInput('/', false), { kind: 'command', name: 'help', argument: '' });
-  // 存在但这一轮跑着的时候不能用，说的话与「界面没有这一条」不一样。
+  // 运行中的命令不可用时，应与未知命令返回不同的提示。
   assert.deepEqual(routeInput('/new', true), { kind: 'blocked', usage: '/new' });
   assert.deepEqual(routeInput('/new', false), { kind: 'command', name: 'new', argument: '' });
 });
@@ -98,7 +96,7 @@ test('the draft edits around a caret instead of only appending', options, () => 
   assert.deepEqual(editDraft('abcd', 0, '', { end: true }), { draft: 'abcd', caret: 4 });
   assert.deepEqual(editDraft('rm -rf  ', 8, 'w', { ctrl: true }), { draft: 'rm ', caret: 3 });
   assert.deepEqual(editDraft('oops', 4, 'u', { ctrl: true }), { draft: '', caret: 0 });
-  // 粘贴一次交回一整段：所有字符都进草稿，光标落在末尾。
+  // 一次粘贴应将全部内容写入草稿，并将光标移到末尾。
   assert.deepEqual(editDraft('> ', 2, 'a\nb', {}), { draft: '> a\nb', caret: 5 });
 });
 
@@ -107,10 +105,10 @@ test('long content folds to a few lines and counts what is hidden', options, () 
   assert.deepEqual(foldText(six, false), { shown: '1\n2\n3', hidden: 6 });
   assert.deepEqual(foldText(six, true), { shown: six, hidden: 0 });
   assert.deepEqual(foldText('one\n two', false, 1), { shown: 'one', hidden: 5 });
-  // 一整段没有换行的 JSON 也要折得住，否则一块长文本就把屏幕压掉了。
+  // 无换行的长 JSON 也应折行显示，避免超出终端宽度。
   const long = 'x'.repeat(500);
   assert.deepEqual(foldText(long, false, 3, 400), { shown: 'x'.repeat(400), hidden: 100 });
-  // 结构化的一段内容按文本折，不出现 [object Object]。
+  // 结构化内容应按文本折行显示，不应出现 `[object Object]`。
   assert.equal(foldText({ text: 'a body' }, false).shown.includes('[object Object]'), false);
 });
 
@@ -134,7 +132,7 @@ test('the app paints the session line and the input hint onto the terminal', opt
     createElement(App, { client, sessionId, info: { model: 'test-model' }, interactive: false }),
     { stdout, stdin, exitOnCtrlC: false, patchConsole: false },
   );
-  // 这一具渲染走的就是非交互那一条路：收掉时才写一次，所以状态要先落定，等宿主收到界面自己发的那一次 `status.get`。
+  // 非交互渲染只在结束时输出一次；等待界面发送 `status.get` 后再检查最终状态。
   await waitFor(() => requests.some((request) => request.method === 'status.get'), { read: () => painted });
   await delay(300);
   instance.unmount();
@@ -226,30 +224,30 @@ test('a mode switch and an expanded template both reach the transcript', options
 test('/show takes the number from the record, not the row on screen', options, () => {
   const events = [{ seq: 0, kind: 'mode' }, { seq: 1, kind: 'user', text: 'hi' }];
   assert.deepEqual(findRecord(events, '1'), { record: events[1] });
-  // 序号写错形状与写了一个没有的号是两类问题，说的话得不一样（空序号是另一个动作：收起，不走这里）。
+  // 格式错误的编号和不存在的编号应返回不同提示；空编号用于折叠，不走这条错误路径。
   assert.equal(findRecord(events, 'third').code, 'tui_show_needs_a_number');
   assert.equal(findRecord(events, '-1').code, 'tui_show_needs_a_number');
   assert.equal(findRecord(events, '7').record, null);
 });
 
-// 支线入口用的序号就是父记录里那条派生结果的序号，而支线 id 从那条结果的内容里读（D71、D74）。
+// 派生会话使用父记录中对应结果的编号，并从结果内容读取派生会话 ID。
 test('/sub reads the branch reference out of the delegation result', options, () => {
   assert.ok(UI_COMMANDS.some((command) => command.name === 'sub'), 'the command is listed in help');
   const branch = { kind: 'tool', tool: 'subagent', result: { failed: false, content: { sessionId: 'parent.sub-1', text: 'done' } } };
   assert.deepEqual(branchOf({ seq: 4, ...branch }), { sessionId: 'parent.sub-1' });
   assert.equal(branchOf({ seq: 4, kind: 'tool', tool: 'read', result: { content: { sessionId: 'x' } } }).code, 'tui_sub_needs_a_branch');
   assert.equal(branchOf({ seq: 4, kind: 'user', text: 'hi' }).code, 'tui_sub_needs_a_branch');
-  // 结果内容超过注入上限时整段溢出到文件（I6），那一条记录里就没有 sessionId 这一格了。
+  // 结果过长时内容写入文件，记录中不包含 sessionId。
   const spilled = { seq: 4, kind: 'tool', tool: 'subagent', result: { failed: false, content: 'a truncated string', spilled: 'result-1.json' } };
   assert.deepEqual(branchOf(spilled), { code: 'tui_sub_reference_spilled', spilled: 'result-1.json' });
 
-  // 那一格的标题先说清在哪条线上：主干与支线各有一套序号；收起那一句跟着命令名走。
+  // 标题应标明主会话或派生会话，因为两者的记录编号各自独立。
   assert.equal(detailTitle({ seq: 3, kind: 'assistant' }), '记录 3（assistant）的完整内容 · /show 收起');
   assert.match(detailTitle({ seq: 4, kind: 'subagent', branch: 'parent.sub-1' }), /^支线 parent\.sub-1，父记录第 4 那一次派生/);
   assert.match(detailTitle({ seq: 4, kind: 'subagent', branch: 'parent.sub-1' }), /支线自己的 · \/sub 收起$/);
 });
 
-// 审批框上要看得见答的是哪一种语法、跑起来会是哪一个可执行文件（D59）：同一条文本在两种后端下的结论可以相反。
+// 审批提示应显示命令语法和实际执行的程序，因为不同后端可能对同一命令给出不同结论。
 test('the approval box names the shell backend and its executable', options, async () => withTuiHost(async ({ client, sessionId }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
@@ -266,7 +264,7 @@ test('the approval box names the shell backend and its executable', options, asy
   const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   try {
     const run = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command: 'node --version | node --version' } }) });
-    // 答复要在询问画出来之后给：那一句 'n' 早到一步就落进草稿，这一轮就没人结束了。
+    // 等待确认提示渲染后再输入拒绝答案，避免按键进入草稿。
     await waitFor(() => /执行环境 (powershell|bash) · /.test(painted), { read: () => painted });
     stdin.write('n');
     await run;
@@ -279,13 +277,13 @@ test('the approval box names the shell backend and its executable', options, asy
   assert.match(painted, /执行环境 (powershell|bash) · /);
 }));
 
-// 候选清单：界面那张表在前，宿主交出来的模板在后，都按前缀收窄（D81）。
+// 命令补全先列出界面命令，再列出 Host 提供的模板，并按输入前缀筛选。
 test('the candidate list narrows on what is typed and appends host templates', options, () => {
   const templates = [{ command: 'git:release:prepare', description: '准备一次发布', hint: '<序号>' }];
   assert.deepEqual(candidatesOf('读一下', templates), []);
-  // 光打一个斜杠就给整张表是噪音：等第一个字母。
+  // 只输入斜杠时不显示候选，避免列出整张命令表。
   assert.deepEqual(candidatesOf('/', templates), []);
-  // 已经在写参数了就不再压着清单。
+  // 开始输入参数后关闭候选列表。
   assert.deepEqual(candidatesOf('/mode ', templates), []);
   const [only] = candidatesOf('/mo', templates);
   assert.deepEqual([only.name, only.hint, only.source], ['mode', '[名字]', 'ui']);
@@ -293,12 +291,12 @@ test('the candidate list narrows on what is typed and appends host templates', o
     candidatesOf('/git', templates).map((c) => [c.name, c.source, c.text]),
     [['git:release:prepare', 'template', '准备一次发布']],
   );
-  // 前缀越短候选越多，但画出来的行数有上限。
+  // 限制候选行数，避免短前缀显示过多结果。
   assert.ok(candidatesOf('/', [{ command: 'a' }, { command: 'b' }]).length <= 8);
 });
 
-// `/help` 那几行：放得下就并排，放不下整组往下一层，两种都不截字（D81）。
-// 补足空格按终端里实际占的列数算：一个汉字占两列，算字符数只算一个。
+// 帮助条目按终端宽度排版，空间不足时整体换行，不截断文本。
+// 列宽按终端显示宽度计算，以正确处理汉字等双宽字符。
 test('display width counts wide Chinese characters and emoji columns', options, () => {
   assert.equal(displayWidth('a中'), 3);
   assert.equal(displayWidth('🦕'), 2);
@@ -316,7 +314,7 @@ test('help entries preserve host templates and keep the empty state brief', opti
   assert.doesNotMatch(`${empty[0].key} ${empty[0].description}`, /\.ligule|prompts|~/u);
 });
 
-// 这一条验证终端补全后由真实 Host 展开模板，并把结果送进本地 HTTP 模型端点。
+// 验证终端补全后由 Host 展开模板，并将结果发送到本地 HTTP 模型端点。
 test('typing a template command completes it and expands through the host', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, providerRequests }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
@@ -342,7 +340,7 @@ test('typing a template command completes it and expands through the host', opti
     stdin.write('\r');
     await waitFor(() => providerRequests.some((request) => request.messages.some((message) => message.role === 'user' && message.content === 'Prepare release 3.\n')), { read: () => plainOutput(painted) });
   } finally {
-    // 断言失败也要收掉这一具渲染：没 unmount 的 Ink 会留着输入与计时器把测试进程拖住。
+    // 无论断言是否通过都卸载 Ink，避免输入监听和计时器阻止测试进程退出。
     instance.unmount();
   }
 }, { setup: async ({ projectDirectory }) => {
@@ -353,7 +351,7 @@ test('typing a template command completes it and expands through the host', opti
   await cp(fileURLToPath(new URL('./fixtures/git-release-prepare.md', import.meta.url)), join(templateDirectory, 'prepare.md'));
 } }));
 
-// 助手那一段的结构看得见：围栏里的内容一行不动，标题与列表分出来，强调与行内代码带上各自的范围名（第 41、96 步）。
+// 助手消息应保留代码围栏内容，并为标题、列表、强调和行内代码标注样式范围。
 test('markdown text splits into the shapes a terminal can show', options, () => {
   assert.deepEqual(markdownLines('## 要做三件事\n- 读 `note.txt`\n- **改** 一处\n1. 跑一次\n'), [
     { kind: 'heading', text: '要做三件事' },
@@ -361,21 +359,21 @@ test('markdown text splits into the shapes a terminal can show', options, () => 
     { kind: 'list', text: '· 改 一处', spans: [{ text: '· ' }, { text: '改', scope: 'md-strong' }, { text: ' 一处' }] },
     { kind: 'list', text: '1. 跑一次' },
   ]);
-  // 围栏里的一行 `#` 是代码，不是标题；尾随空格也留着。
+  // 代码围栏中的 `#` 不作为标题解析，行尾空格也应保留。
   const shellLines = markdownLines('```sh\n# 注释   \nls -la\n```');
   assert.deepEqual(shellLines.map(({ kind, text }) => ({ kind, text })), [{ kind: 'code', text: '# 注释   ' }, { kind: 'code', text: 'ls -la' }]);
   assert.ok(shellLines[0].spans.some((span) => span.scope?.startsWith('comment')), '代码注释带高亮范围');
   const jsLines = markdownLines('```js\nconst a = 1\n```');
   assert.equal(jsLines[0].text, 'const a = 1', '高亮不改变代码正文');
   assert.ok(jsLines[0].spans.some((span) => span.scope?.startsWith('keyword')), 'JavaScript 关键字带高亮范围');
-  // 链接留下文字与地址；成对的星号只留包住的文字，但那一句的范围名留着（第 96 步：斜体要画得出来）。
+  // 保留链接文字和地址；去掉 Markdown 标记，同时保留斜体的样式范围。
   assert.deepEqual(markdownLines('看 [文档](https://example.com/a) 与 a*b*c'), [
     { kind: 'text', text: '看 文档 (https://example.com/a) 与 abc', spans: [{ text: '看 文档 (https://example.com/a) 与 a' }, { text: 'b', scope: 'md-em' }, { text: 'c' }] },
   ]);
   assert.deepEqual(markdownLines('第一行\n\n第二行'), [{ kind: 'text', text: '第一行' }, { kind: 'text', text: '' }, { kind: 'text', text: '第二行' }]);
 });
 
-// 一次调用画出来的是判定链真正用的那串能力名，不是 `mcp.call` 那件工具的名字（D52、D77）。
+// 工具调用显示策略检查使用的能力名，而不是通用的 `mcp.call` 工具名。
 test('an MCP call shows the capability it actually used', options, () => {
   assert.equal(capabilityOf('mcp.call', { server: 'fs', tool: 'read_file' }), 'mcp:fs/read_file');
   assert.equal(capabilityOf('mcp.call', { server: 'fs' }), 'mcp.call', '参数不完整时不拼一个半截的名字');
@@ -386,25 +384,25 @@ test('an MCP call shows the capability it actually used', options, () => {
   assert.deepEqual([done.tool, done.text], ['mcp:fs/read_file', 'a body']);
 });
 
-// 一次 exec 的退出码画在抬头那一行：一段非零码的输出与一段成功输出不该画得一样（D59 量过这个差别）。
+// 命令结果的标题行应显示退出码，以区分成功和失败。
 test('an exec result names its exit code and a spilled one names its file', options, () => {
   const [ok] = projectRecord({ kind: 'tool', tool: 'exec', result: { kind: 'result', failed: false, content: { text: 'done', exitCode: 0 } } });
   assert.deepEqual([ok.tool, ok.text, ok.exitCode], ['exec', 'done', 0]);
   const [spilled] = projectRecord({ kind: 'tool', tool: 'read', result: { kind: 'result', failed: false, content: { text: 'a body' }, spilled: 'result-3.json' } });
   assert.equal(spilled.spilled, 'result-3.json');
-  // 被拒的那一条没有 content 可画，理由就是那一行。
+  // 拒绝结果没有 content，界面应显示拒绝理由。
   const [refused] = projectRecord({ kind: 'tool', tool: 'write', result: { kind: 'refusal', failed: true, code: 'ask_declined', reason: 'the user declined', content: '' } });
   assert.deepEqual(refused, { kind: 'refusal', tool: 'write', text: 'the user declined', code: 'ask_declined' });
 });
 
-// 审批框那一格要说得出改的是什么，整份文件内容不写在屏幕上（第 41 步）。
+// 文件修改审批应说明变更内容，不在界面中显示完整文件正文。
 test('the approval box sums the change instead of dumping the payload', options, () => {
   assert.equal(changeSummary('write', { path: 'note.txt', content: 'a\nb\nc' }), 'note.txt：写入 3 行');
   assert.equal(changeSummary('edit', { path: 'note.txt', anchor: 'a\nb', replacement: 'x' }), 'note.txt：替换 2 行，写入 1 行');
   assert.equal(changeSummary('delete', { path: 'note.txt' }), '将 note.txt 移入回收站');
   assert.equal(changeSummary('exec', { command: 'ls' }), '', '命令那一行文本由 detail 那一条说，这里不重复');
   assert.equal(changeSummary('write', { content: 'a\nb' }), '', '参数里没有路径就不编造一个对象');
-  // 审批那一格展开的两段内容来自参数本身：没读过的正文不画，删除那一件没有正文（方案 5.4）。
+  // 审批详情只展示工具参数提供的内容；未读取的正文和已删除文件的内容不显示。
   const edit = describeChange('edit', { path: 'note.txt', anchor: 'a\nb', replacement: 'x' });
   assert.equal(edit.before, 'a\nb');
   assert.equal(edit.after, 'x');
@@ -415,7 +413,7 @@ test('the approval box sums the change instead of dumping the payload', options,
   assert.match(removed.action, /回收站/);
 });
 
-// 助手那一段画到屏幕上时结构要看得见：这一条走的是真的渲染路径，不是只看纯函数的返回值。
+// 通过真实渲染路径检查助手消息的结构化显示。
 test('an answer with markdown shapes paints a heading, a list and highlighted code from the host', options, async () => withTuiHost(async ({ client, sessionId }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
@@ -449,14 +447,14 @@ test('an answer with markdown shapes paints a heading, a list and highlighted co
   assert.match(painted, /\x1B\[35mconst\x1B\[39m/, '代码关键字通过高亮颜色呈现');
 }));
 
-// 排队的短句只画前 64 字：这一格的作用是说「排了几条」，不是把整句话再印一遍。
+// 队列预览最多显示每条消息的前 64 个字符，避免重复展示完整内容。
 test('a queued line is clipped to one row', options, () => {
   assert.equal(queuedLine('短的一句'), '短的一句');
   assert.equal(queuedLine('x'.repeat(70)).length, 65);
   assert.match(queuedLine('x'.repeat(70)), /…$/);
 });
 
-// 跑着的那一轮里回车不会丢掉那一句：排进来的按先后在本轮结束后发出，空草稿上按退格收回最后一条（D81 边界二）。
+// 运行期间按 Enter 会将消息加入队列；本轮结束后按顺序发送，空草稿时按退格可收回最后一条。
 test('input typed while a round runs queues up and flushes in order', options, async () => withTuiHost(async ({ client, sessionId, requests }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
@@ -472,9 +470,9 @@ test('input typed while a round runs queues up and flushes in order', options, a
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
 
   const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
-  // 文本与回车分两次写：一段中文后面紧跟 `\r` 时被同一个 chunk 吃掉，真键盘上是两次按键。
+  // 分开发送文本和回车，模拟键盘的两次独立输入。
   const type = async (text) => { stdin.write(text); await delay(80); stdin.write('\r'); await delay(200); };
-  // 只看最后一帧：Ink 把每一帧续写在同一个流里，取尾巴会连上一帧的内容一起读。
+  // 从完整输出流读取最新一帧，避免旧帧内容干扰断言。
   const lastFrame = () => completeFrame(painted);
   try {
     await waitFor(() => painted.includes('描述任务'), { read: () => painted });
@@ -487,19 +485,19 @@ test('input typed while a round runs queues up and flushes in order', options, a
     await waitFor(() => /排队 2 · 第三条/.test(lastFrame()), { read: () => lastFrame() });
     assert.deepEqual(started(), ['第一条'], '跑着的时候不再开第二轮');
 
-    // 草稿空着时按退格：最后排进来的那一条回到草稿，队列少一条。
+    // 草稿为空时按退格，将队列最后一条消息移回草稿。
     stdin.write('\x7f');
     await waitFor(() => /第三条/.test(lastFrame()) && (lastFrame().match(/排队 \d/g) ?? []).length === 1, { read: () => lastFrame() });
 
     await waitFor(() => started().length === 2, { within: 20_000, read: () => painted });
     assert.deepEqual(started(), ['第一条', '第二条'], '本轮结束后按先后接上');
   } finally {
-    // 断言失败也要收掉这一具渲染：没 unmount 的 Ink 会留着输入与计时器把测试进程拖住。
+    // 无论断言是否通过都卸载 Ink，避免输入监听和计时器阻止测试进程退出。
     instance.unmount();
   }
 }, { delayMs: 1_800 }));
 
-// 状态行上那一段上下文压力（D82、第 43 步）：没写窗口时整段不出现，不是写一个 0 上去。
+// 未提供上下文窗口时，状态行不显示上下文占用信息。
 test('the metadata line reports context pressure only when a window is written', options, () => {
   assert.equal(contextSegment(null), '');
   assert.equal(contextSegment(undefined), '');
@@ -554,7 +552,7 @@ test('a mode change during an active turn becomes effective on the next turn', o
   }
 }, { delayMs: 1_800 }));
 
-// 第 44 步：`/sessions` 画的那几行与 `/resume` 认的那个 id。列表来自宿主，界面不去开盘（D81 边界一）。
+// `/sessions` 从 Host 获取会话列表，`/resume` 使用列表中对应的会话 ID。
 test('the session listing is one row per record and an id prefix resolves to one of them', options, () => {
   const listed = [
     { id: '5f3c1234-aaaa-bbbb-cccc-dddddddddddd', updatedAt: '2026-10-05T09:12:34.567Z', events: 12, mode: { name: 'full' }, unanswered: 0 },
@@ -573,13 +571,13 @@ test('the session listing is one row per record and an id prefix resolves to one
   assert.equal(resolveSessionId('nope', listed).code, 'tui_session_not_listed');
   assert.equal(resolveSessionId('', listed).code, 'tui_session_ambiguous', '空的那一段对上的是一份都对不上，而不是随便挑一份');
 
-  // 换会话把人从正在跑的那一轮带走，那一轮落下来的事件从此没人看；只读的那一条不受影响。
+  // 切换会话后不再接收旧会话运行产生的事件，但仍可读取旧会话记录。
   assert.equal(routeInput('/resume 5f3c', true).kind, 'blocked');
   assert.equal(routeInput('/new', true).kind, 'blocked');
   assert.equal(routeInput('/sessions', true).kind, 'command');
 });
 
-// 第 76 步：查回来的是「哪一份会话的第几条」，那一行要同时说清这两个值（方案 4.2）。
+// 查询结果应同时显示会话 ID 和记录编号。
 test('a search hit line names the session and the event to open', options, () => {
   assert.deepEqual(findLines([
     { sessionId: '5f3c1234-aaaa-bbbb-cccc-dddddddddddd', seq: 7, kind: 'tool', text: 'npm run 读数 跑完了', name: '读数那一份', spilled: 'result-7-abcdef12.json' },
@@ -593,8 +591,8 @@ test('a search hit line names the session and the event to open', options, () =>
   assert.equal(routeInput('/find 读数', true).kind, 'command', '查一份读过的记录不改任何东西，跑着的时候也能查');
 });
 
-// 接上另一份记录时画面上换的是整份投影：那几行来自记录，不来自界面自己留着的东西（I5）。
-// 这里先在当前会话上画一行，再换过去——少了 `Static` 上那个 key，短时的那一份一条都画不出来。
+// 切换会话后，已提交的记录应完整替换为新会话内容。
+// 先渲染当前会话，再切换到另一个会话，以验证 `Static` 的 key 会触发正确更新。
 test('resuming a session repaints that record as the transcript', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
@@ -641,7 +639,7 @@ test('resuming a session repaints that record as the transcript', options, async
   }
 }));
 
-// `/find` 的那一次查询交给宿主：界面不开记录目录，画面上那一行说的是哪一份会话的第几条（D81 边界一）。
+// `/find` 将查询交给 Host，并显示匹配记录所属的会话 ID 和记录编号。
 test('finding a phrase shows which session each hit is in', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
@@ -683,7 +681,7 @@ test('finding a phrase shows which session each hit is in', options, async () =>
   }
 }));
 
-// 分支的两个入口落在终端的同一条命令上：不带序号复制到此刻的末端，带序号复制到那一轮完整结束那一条（方案 4.3）。
+// 创建分支时，不带编号从当前末尾分支；指定编号时从该轮完整结束的记录分支。
 test('branching copies the record and switches onto the new session', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
@@ -709,7 +707,7 @@ test('branching copies the record and switches onto the new session', options, a
     stdin.write('\r');
     const shown = () => plainOutput(painted.slice(before));
     await waitFor(() => shown().includes('已创建分支会话'), { read: shown });
-    // 接上去走的是 `/resume` 那一条路，它自己会说一句；等这一句而不是等毫秒，两条都在同一帧序列里落下。
+    // 通过 `/resume` 恢复会话，并等待命令的实际输出后再检查。
     await waitFor(() => shown().includes('已恢复会话'), { read: shown });
     const branched = requests.filter((request) => request.method === 'session.branch');
     assert.equal(branched.length, 1);
@@ -735,7 +733,7 @@ test('branching copies the record and switches onto the new session', options, a
   }
 }));
 
-// 输入历史跨会话留住（第 45 步）：那一份文件与翻它的两条动作。这一层不依赖 ink，所以不跟着界面那几条一起跳过。
+// 输入历史按会话持久保存；相关检查不依赖 Ink，因此单独运行。
 test('the history keeps the newest sentence first and one place per sentence', () => {
   assert.deepEqual(pushHistory([], '  把 note.txt 读一遍 '), ['把 note.txt 读一遍'], '首尾空白不算内容');
   assert.deepEqual(pushHistory(['a', 'b'], 'a'), ['a', 'b'], '同一句再说一次不占两个位置');
@@ -768,7 +766,7 @@ test('the history file reads valid entries and reports a malformed line', async 
   }
 });
 
-// 上下键翻的是那一份跨会话的历史，Ctrl+R 从里面找；两处都只改草稿，发出去的仍是 `run.start`。
+// 上下键浏览跨会话输入历史，Ctrl+R 搜索历史；这些操作只修改草稿，发送仍通过 `run.start`。
 test('the arrow keys recall the last sentence and Ctrl+R searches the history', options, async () => withTuiHost(async ({ client, sessionId, requests }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
@@ -791,7 +789,7 @@ test('the arrow keys recall the last sentence and Ctrl+R searches the history', 
     info: {},
     interactive: true,
     stdout,
-    // 交回写完的清单是那一格的合同（方案 5.5.6）：这一份替身按同一条形状走，界面采用它交回的那一份。
+    // 测试客户端返回已修改的审批内容，界面应显示客户端返回的结果。
     history: { entries: fileEntries, remember: async (text) => { remembered.push(text); return pushHistory(fileEntries, text); } },
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   const lastFrame = () => completeFrame(painted);
@@ -803,7 +801,7 @@ test('the arrow keys recall the last sentence and Ctrl+R searches the history', 
     assert.deepEqual(requests.filter((request) => request.method === 'run.start').map((request) => request.params.input), ['把这条记进历史']);
     assert.deepEqual(remembered, ['把这条记进历史'], '发出去的那一句才交给那一份文件');
 
-    // 上下键往上翻：第一条就是刚发出去的那一句，因为它排到了历史最前面。
+    // 按上键后，最近发送的消息应成为草稿历史中的第一项。
     stdin.write('\x1B[A');
     await waitFor(() => lastFrame().includes('把这条记进历史'), { read: lastFrame });
 
@@ -821,7 +819,7 @@ test('the arrow keys recall the last sentence and Ctrl+R searches the history', 
   }
 }));
 
-// Ctrl+G 把草稿交给外部编辑器：真实子进程修改临时草稿后，界面读回该内容。
+// Ctrl+G 将草稿交给外部编辑器，并在编辑器保存后读回修改内容。
 test('Ctrl+G hands the draft to the editor and reads back what it wrote', options, async () => withTuiHost(async ({ client, sessionId }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
@@ -845,7 +843,7 @@ test('Ctrl+G hands the draft to the editor and reads back what it wrote', option
     stdin.write('草稿里的一半');
     await delay(200);
     stdin.write('\x07');
-    // 编辑器是一个真子进程：等它写回的那一份回到草稿最上面那一帧，再判这一帧。
+    // 等待编辑器子进程写回内容，并确认更新后的草稿出现在终端中。
     await waitFor(() => /草稿里的一半 edited/.test(lastFrame()), { read: lastFrame });
     const frame = lastFrame();
     assert.match(frame, /草稿里的一半 edited/, '编辑器写回的那一份回到草稿里');
@@ -878,9 +876,8 @@ test('Ctrl+G says the editor is not configured instead of guessing one', options
   }
 }));
 
-// 外部编辑器那一条的失败路径也要把临时目录收掉：那一份草稿里可能是刚写的一半代码。
-// 数的是自己那一个目录里的东西，不是整机临时目录：并行跑几份检查时，别人那一份短暂存在的 `ligule-editor-*`
-// 会在两次列举之间出现或消失，按全局列表比就把自己的断言挂在别人的时序上。临时目录指到一处私有的下面，两份互不影响。
+// 外部编辑器失败时也要清理当前测试创建的临时目录。
+// 只检查当前测试的目录，避免并行测试创建或删除临时文件影响断言。
 test('a failed editor run leaves no temporary directory behind', async () => {
   const { editInExternalEditor } = await import('../dist/tui/editor.js');
   const sandbox = await mkdtemp(join(tmpdir(), 'ligule-editor-sandbox-'));
@@ -903,7 +900,7 @@ test('a failed editor run leaves no temporary directory behind', async () => {
   }
 });
 
-// 整段粘贴走的是另一条通道：那一段文本进草稿，里面的换行不发起一轮（方案 5.1）。
+// 多行粘贴作为一整段写入草稿，其中的换行不会提交消息。
 test('a pasted block lands in the draft without sending it', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
@@ -922,7 +919,7 @@ test('a pasted block lands in the draft without sending it', options, async () =
     const esc = String.fromCharCode(27);
     const line = String.fromCharCode(10);
     const before = painted.length;
-    // bracketed paste 的那一串：首尾是标记，中间带着换行。没有这一对标记时，那些换行就是一记记 Enter。
+    // bracketed paste 标记包住的多行文本应作为粘贴内容处理；标记外的换行表示 Enter。
     stdin.write(`${esc}[200~把这段读一遍${line}注意第三行${esc}[201~`);
     const shown = () => plainOutput(painted.slice(before));
     await waitFor(() => shown().includes('注意第三行'), { read: shown });
@@ -936,7 +933,7 @@ test('a pasted block lands in the draft without sending it', options, async () =
   }
 }));
 
-// 取消这一轮之后队列是停着的：剩下的那几条不自己发，收回来或接着走都由人再说一次（方案 5.2）。
+// 取消当前轮次后，队列应暂停，直到用户收回消息或明确继续。
 test('cancelling a round leaves the queued sentences paused', options, async () => withTuiHost(async ({ client, sessionId, requests }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
@@ -965,7 +962,7 @@ test('cancelling a round leaves the queued sentences paused', options, async () 
 
     stdin.write('\x1b');
     await waitFor(() => /队列已暂停/.test(painted), { read: () => painted });
-    // 被打断的那一轮收自己的尾：等这一句出来，而不是等一个固定的毫秒数。
+    // 等待取消结果出现后再继续检查队列状态。
     await waitFor(() => /本轮已取消/.test(painted), { read: () => painted });
     assert.deepEqual(started(), ['第一条'], '暂停中的队列在这一轮结束后不自己发');
 
@@ -974,7 +971,7 @@ test('cancelling a round leaves the queued sentences paused', options, async () 
     assert.match(lastFrame(), /排队 1 · 第二条/, '剩下那一条还排着');
     assert.match(lastFrame(), /第三条/, '收回的那一条在草稿上，没丢');
 
-    // 收回来的一句照常再发一次：暂停只管排着的那几条。这一轮自己收尾时也不把暂停中的那条带出去。
+    // 收回的消息可正常发送；暂停队列中的其他消息不会随当前轮次结束而自动发送。
     stdin.write('\r');
     await waitFor(() => started().includes('第三条'), { read: () => painted });
     await waitFor(() => /本轮已完成/.test(painted), { read: () => painted });
@@ -988,7 +985,7 @@ test('cancelling a round leaves the queued sentences paused', options, async () 
   }
 }, { delayMs: 1_800 }));
 
-// 草稿与排着的几句跨退出留住：一行一份会话，同一份再写换掉旧的那一行，两句都没了就不留这一行。
+// 草稿和待发送队列按会话保存；再次保存会替换旧内容，全部清空后删除该会话的存储记录。
 test('the input file keeps one line per session and drops emptied ones', async () => {
   const { mkdir, mkdtemp, readFile, rm } = await import('node:fs/promises');
   const { join, resolve } = await import('node:path');
@@ -1017,7 +1014,7 @@ test('the input file keeps one line per session and drops emptied ones', async (
   }
 });
 
-// 界面读回来的是那一份会话自己的那一句：排着的几句恢复成暂停，不替人发（方案 5.1、5.2）。
+// 恢复会话时读取该会话的草稿和队列；恢复的队列保持暂停，不自动发送。
 test('a reopened session takes back its own draft and a paused queue', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
@@ -1054,7 +1051,7 @@ test('a reopened session takes back its own draft and a paused queue', options, 
   }
 }));
 
-// `@` 那一段的识别与插入：句首或空白之后的 `@` 才算，选中之后落笔处在那一段之后。
+// 只识别句首或空白后的 `@`；选择候选后在引用文本后继续输入。
 test('an @ fragment is recognised at a word boundary and inserts a path', () => {
   assert.deepEqual(mentionToken('看一下 @notes/rea', 14), { start: 4, text: 'notes/rea' });
   assert.deepEqual(mentionToken('@a', 2), { start: 0, text: 'a' }, '句首的 @ 也算');
@@ -1064,7 +1061,7 @@ test('an @ fragment is recognised at a word boundary and inserts a path', () => 
     { draft: '看一下 @notes/readings-3.md ', caret: 25 }, '换掉那一段并留一个空格，后面的字不动');
 });
 
-// 候选由宿主列出来：界面不开目录；清单开着时 Enter 是选中，不是发送（方案 5.3）。
+// 文件候选由 Host 提供；候选列表打开时，Enter 选择候选而不发送消息。
 test('an @ fragment asks the host for project files and Enter picks one', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
@@ -1111,7 +1108,7 @@ test('an @ fragment asks the host for project files and Enter picks one', option
     stdin.write('\x1b');
     await waitFor(() => !lastFrame().includes('Esc 收起'), { read: lastFrame });
 
-    // 那一次查询还没回来时 Enter 什么都不做：不选一条没选过的候选，也不把这一句发出去。
+    // 候选尚未返回时，Enter 不选择候选，也不发送当前消息。
     stdin.write(' @x');
     await delay(60);
     stdin.write('\r');
@@ -1123,7 +1120,7 @@ test('an @ fragment asks the host for project files and Enter picks one', option
   }
 }));
 
-// 撤销的单位怎么划：连着在末尾打的字算一段，空格、插到中间、粘贴进来的那一段各算一段（方案 6.1）。
+// 连续追加的文本作为一个撤销单元；空格、插入到中间的文本和粘贴内容各自单独成组。
 test('one undo unit is a typing run, not one keystroke', options, () => {
   assert.equal(isTypingRun({ draft: 'ab', caret: 2 }, { draft: 'abc', caret: 3 }), true);
   assert.equal(isTypingRun({ draft: 'ab', caret: 2 }, { draft: 'ab ', caret: 3 }), false, '打下的那个空格自己成一段');
@@ -1133,9 +1130,9 @@ test('one undo unit is a typing run, not one keystroke', options, () => {
   assert.equal(isTypingRun({ draft: '👍', caret: 2 }, { draft: '👍👍', caret: 4 }), true, '一个字素算一个单位，成对的那一种不算两个');
 });
 
-// Ctrl+Z 退一段、Ctrl+Y 再拿回来：这一处走的是真按键喂进渲染那一条路，撤销不发任何东西出去。
+// 通过真实按键事件验证 Ctrl+Z 和 Ctrl+Y；撤销与重做只修改草稿，不发送消息。
 test('the frame reader waits for the closing marker before reading', () => {
-  // 那一帧写完的标志是同步输出的结束符：没等到它的画面不当成已经画出来的那一份，否则负载下会把半帧读成一个状态。
+  // 等待同步输出结束标记，避免把尚未完成的画面当作当前状态。
   assert.equal(completeFrame('\x1B[?2026h› 第一段草稿\x1B[?2026l\x1B[?2026h› 第一段').includes('草稿'), true, '写完的那一帧读得到');
   assert.equal(completeFrame('\x1B[?2026h› 只有开头').includes('只有开头'), false, '还没写完的那一帧不算画面');
   assert.equal(completeFrame('\x1B[?2026h› 旧的一帧\x1B[?2026l\x1B[?2026h› 新的一帧\x1B[?2026l'), '› 新的一帧', '读的是最后写完的那一帧');
@@ -1159,9 +1156,9 @@ test('Ctrl+Z walks the draft back a unit at a time and Ctrl+Y takes it back', op
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   const lastFrame = () => completeFrame(painted);
   const started = () => requests.filter((request) => request.method === 'run.start').length;
-  // 光标处那一段有反色标记，画面里那串字中间夹着样式码：认草稿内容时先把它们去掉。
+  // 去除光标反色对应的 ANSI 样式码后，再检查草稿文本。
   const shown = () => plainOutput(lastFrame());
-  // 认草稿那一行读的是写完的那一帧：负载下一帧可能分几次写出去，半帧会被读成「这句没了」。
+  // 只从完整输出帧读取草稿，避免将分段到达的输出误判为空。
   const paintedText = async (text, note) => {
     await waitFor(() => shown().includes(text), { read: shown });
     assert.ok(shown().includes(text), note);
@@ -1169,7 +1166,7 @@ test('Ctrl+Z walks the draft back a unit at a time and Ctrl+Y takes it back', op
   try {
     await waitFor(() => shown().includes('描述任务'), { read: shown });
 
-    // 连着打的五个字是一段：一次 Ctrl+Z 整段没了，再按 Ctrl+Y 又整段回来。
+    // 连续输入的文本作为一组撤销，再次重做后应完整恢复。
     stdin.write('第一段草稿');
     await waitFor(() => shown().includes('第一段草稿'), { read: shown });
     stdin.write('\x1a');
@@ -1177,16 +1174,15 @@ test('Ctrl+Z walks the draft back a unit at a time and Ctrl+Y takes it back', op
     stdin.write('\x19');
     await waitFor(() => shown().includes('第一段草稿'), { read: shown });
 
-    // 退回来之后接着打的字是另一段：一次退回整段，原来那一段留着。
-    // 认「这一段没了」读的字面要够独特：状态行里带着会话 id 那串十六进制，两个 ASCII 字母随时可能撞上它，
-    // 撞上了这一条就永远等不成，而撤销与重做本身是对的。
+    // 撤销后继续输入会形成新的撤销组，不影响之前的文本。
+    // 使用较长的文本断言，避免短文本与状态行中的会话 ID 偶然匹配。
     stdin.write('第二段');
     await delay(60);
     stdin.write('\x1a');
     await waitFor(() => !shown().includes('第二段'), { read: shown });
     await paintedText('第一段草稿', '退掉后打的那一段时，原来那一段还在');
 
-    // 光标挪开之后再打的字又是一段：退一次只去掉那一个字符。
+    // 移动光标后输入会形成新的撤销组，撤销时只删除新输入的字符。
     stdin.write('甲');
     await delay(60);
     stdin.write('\x1b[D');
@@ -1203,7 +1199,7 @@ test('Ctrl+Z walks the draft back a unit at a time and Ctrl+Y takes it back', op
   }
 }));
 
-// 底部配置行随 `/policy` 修改更新，会话级设置在会话退出后撤销（D101、实现顺序第 122 步）。
+// `/policy` 更新后状态行应同步变化；会话级配置在退出会话后恢复。
 test('/policy changes the session setting and updates the bottom configuration line', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
@@ -1218,7 +1214,7 @@ test('/policy changes the session setting and updates the bottom configuration l
   const instance = render(createElement(App, {
     client, sessionId, info: { boundary: projectDirectory }, interactive: true,
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
-  // 终端里那一格会换行：比对之前把控制序列与换行去掉，长句被拆开也算同一句话。
+  // 终端可能折行；比较前去除控制序列和换行，按完整文本检查提示。
   const strip = (text) => text.replace(/\x1B\[[0-9;?]*[A-Za-z]/g, '').replace(/[\r\n]+/g, '');
   const lastFrame = () => completeFrame(painted);
   const spoken = (text) => strip(painted).includes(text);

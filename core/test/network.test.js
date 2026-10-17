@@ -1,4 +1,4 @@
-// 第 27 步的验收（D48、D58）：地址分类、判定链那一层的收紧、批准与连接绑在同一次解析上、逐跳重判、超时与字节上限。
+// 验证网络地址分类、策略审批、重定向重检、超时和响应字节上限。
 // 服务器是真的（本机环回上一个 http.Server），内核与判定链走的是同一条调用路径；
 // 只有 DNS 那一步换成一张固定的表——要判的是分类与「连的是批准过的那个地址」，不是运营商今天给哪一个 IP。
 import test from 'node:test';
@@ -248,7 +248,7 @@ test('the session record shows which host and which addresses were fetched', asy
     assert.deepEqual(events.map((event) => event.kind), ['tool']);
     assert.equal(events[0].tool, 'fetch');
     assert.equal(events[0].result.content.text, 'hello from the note');
-    // 记录里看得见取了哪一个域名、实际字节数与按哪一类地址放行（D58）。
+    // 记录中包含请求域名、实际响应字节数和允许访问的地址类型。
     assert.equal(events[0].result.content.host, '127.0.0.1');
     assert.deepEqual(events[0].result.content.addresses, ['127.0.0.1']);
     assert.equal(events[0].result.content.bytes, 19);

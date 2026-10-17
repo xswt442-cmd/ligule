@@ -1,5 +1,4 @@
-// 客户端那一层的两条检查：答复按 id 对上；超时那一条把等待中的调用收掉。
-// 跑 `node dev/protocol.check.mjs`，坏了就非零退出。
+// 检查客户端如何匹配协议响应、处理超时并在重连时清理等待中的调用。
 import assert from 'node:assert/strict';
 import { createClient } from '../src/protocol.ts';
 
@@ -26,7 +25,7 @@ reply({ id: sent[1].id, error: { code: 'run_not_running', message: '没在跑' }
 await assert.rejects(failed, { code: 'run_not_running' });
 assert.equal(client.waiting(), 0);
 
-// 那一个调用不回：超时把这一格收掉，之后迟到的答复不再动它。
+// 请求超时后应清除等待状态，迟到的响应不得再次完成该请求。
 const timeout = client.call('session.read', { sessionId: 's1' }, 20);
 await assert.rejects(timeout, { code: 'host_unanswered' });
 assert.equal(client.waiting(), 0);
@@ -42,7 +41,7 @@ const reconnectRetry = client.call('workspaces.list', {}, 20);
 reply({ id: sent.at(-1).id, result: { workspaces: [] } });
 assert.deepEqual(await reconnectRetry, { workspaces: [] }, 'a subsequent reconnect request can complete');
 
-// 换了一具宿主：还没答复的那些调用按一个稳定码收尾，之后迟到的答复不再动它们（第 65 步）。
+// Host 重启时应以稳定错误结束所有未完成调用。
 const left = client.call('run.start', { sessionId: 's1', input: 'a' });
 const right = client.call('status.get', { sessionId: 's1' });
 assert.equal(client.waiting(), 2);
@@ -55,7 +54,7 @@ const receivedBeforeLateReply = client.counts().received;
 reply({ id: sent[sent.length - 2].id, result: { iterations: 1 } });
 assert.equal(client.counts().received, receivedBeforeLateReply + 1, '迟到的那一份答复仍然被读掉，只是没人等它');
 
-// 通报与反向请求不算答复：它们没有 id。
+// 通知没有请求 ID，不应结束任何等待中的调用。
 let seen = '';
 client.onNotification((message) => {
   seen = message.notify;

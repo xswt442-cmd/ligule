@@ -1,4 +1,4 @@
-// 第 33 步的验收（D72、D79）：崩溃留下的那次派发补成一条规范的工具结果，只读的那一侧不改盘，补一次就够。
+// 恢复时将崩溃前未完成的工具调用补成规范结果；只读检查不写入，恢复操作可重复执行。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
@@ -49,7 +49,7 @@ test('reopening a record repairs it once, and reading it changes nothing', async
     await log.append({ kind: 'turnContext', ignorable: true, userSeq: user.seq, model: 'm' });
     await log.append(dispatched(2, 'call_x', 'exec', { command: 'make' }));
 
-    // 只读的那一侧（协议里的 session.read 走的就是这一条）报告缺口而不写盘（D72）。
+    // `session.read` 只报告未完成的调用，不修改会话文件。
     const before = await readFile(join(directory, 'crashed.jsonl'), 'utf8');
     assert.equal((await createSessionLog({ directory, id: 'crashed' }).read()).length, 3);
     assert.equal(await readFile(join(directory, 'crashed.jsonl'), 'utf8'), before, '读一遍没有改动这份记录');

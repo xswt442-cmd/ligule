@@ -1,6 +1,5 @@
-// 一个最小的真 stdio MCP 服务器，只用来验证「定义悄悄换了」这一条（D52、D60）。
-// 工具声明每次 tools/list 都从 argv[2] 指定的那份 JSON 重新读一次：进程不动而定义能换，
-// 这一段是官方文件系统服务器演不出来的（它的声明编译在里面）。
+// 为 MCP 集成测试启动一个 stdio 服务器。每次收到 `tools/list` 时都重新读取命令行指定的 JSON，
+// 这样测试可以在服务器进程保持运行时更换工具输入模式。
 import { readFileSync } from 'node:fs';
 import { Server } from '../../core/node_modules/@modelcontextprotocol/sdk/dist/esm/server/index.js';
 import { StdioServerTransport } from '../../core/node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js';

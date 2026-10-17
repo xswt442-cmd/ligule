@@ -1,4 +1,4 @@
-// 一次登记的子进程入口：跨进程那一条检查要用真的两具进程，进程内那条队列证明不了锁（D110、方案 5.5.1）。
+// 在独立进程中登记工作区，用于验证多个进程并发访问时的文件锁行为。
 import { registerWorkspace } from '../../core/dist/kernel/workspace.js';
 
 const [path, directory] = process.argv.slice(2);

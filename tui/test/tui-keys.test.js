@@ -1,5 +1,4 @@
-// 个人键位那一份表的检查（方案 6.1、第 87 步）。这几条会换模块级的那一份当前键位，所以单独一份文件：
-// 同一个文件里的顶层检查是并发调度的，把 `send` 改走会波及同文件里别的喂按键的检查——那类检查跑的是默认那一份表。
+// 这些测试会替换模块级键位配置，因此放在独立文件中，避免并行测试互相影响。
 import test from 'node:test';
 import { completeFrame } from './helpers/frames.js';
 import assert from 'node:assert/strict';
@@ -36,7 +35,7 @@ test('the key table is the one place both the dispatch and the names on screen r
   assert.equal(hit('send', '', { return: true, shift: true }), false, '带 Shift 的那一记不是发送');
   assert.equal(formatKeys('pageup'), 'PageUp');
   assert.equal(keyHint('list-up', 'list-down'), '↑/↓', '提示里那一串键名也从同一份表拼出来');
-  // 默认那一份表里同一个范围不撞：撞了就说明界面写着的那一记键与按下落的事对不上。
+  // 默认配置中的同一按键范围不能重复绑定，否则帮助提示会与实际动作不一致。
   for (const view of [...new Set(Object.values(KEYMAP).map((binding) => binding.view))]) {
     assert.deepEqual(conflictsIn(view, CURRENT), [], `${view} 里那几记键不撞`);
   }
@@ -99,7 +98,7 @@ test('/bind changes what a key does and what the screen says about it', options,
     keys: { read: async () => ({ overrides: {}, refused: [] }), write: async (next) => { written.push(next); } },
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   const lastFrame = () => completeFrame(painted);
-  // 说出来的那几句是提交过的行：`Static` 只打一次，读它要看整段流，不能只看最后一帧。
+  // 已发送的消息由 `Static` 只渲染一次，因此检查完整输出流。
   const spoken = (text) => painted.includes(text);
   try {
     await waitFor(() => lastFrame().includes('描述任务'), { read: lastFrame });
@@ -110,7 +109,7 @@ test('/bind changes what a key does and what the screen says about it', options,
     assert.match(lastFrame(), /Ctrl\+X 换行/, '输入行那句说明跟着换：说的那串字与按键落的事是同一处来的');
     assert.deepEqual(written.at(-1), { newline: 'ctrl+x' }, '那一条覆盖写进本机那一格');
 
-    // 同一范围里那一记键已经落在别的事上：这一条拒，且说得出撞在哪两件事上，也不写进本机那一格。
+    // 同一范围内的按键冲突应被拒绝，并指出冲突的动作，同时不保存覆盖配置。
     stdin.write('/bind send ctrl+x');
     await delay(40);
     stdin.write('\r');
@@ -124,7 +123,7 @@ test('/bind changes what a key does and what the screen says about it', options,
     await waitFor(() => spoken('newline 已恢复为 Shift+Enter'), { read: () => painted });
     assert.deepEqual(written.at(-1), {}, '取消那一条覆盖之后，本机那一格是空的');
 
-    // 那一记键空出来了：把它派给发送，按下它就走发送，Enter 反倒不再发。
+    // 覆盖按键绑定后，应执行新绑定的发送动作，Enter 不再触发送。
     stdin.write('/bind send ctrl+x');
     await delay(40);
     stdin.write('\r');

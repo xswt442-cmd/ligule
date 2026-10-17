@@ -125,7 +125,7 @@ test('a tool call is assembled while the stream is still arriving', async () => 
   });
 });
 
-// 推理段是一种内容块（D32）：它作为 reasoning 事件交出去，与答案分开，签名攒着不外传。
+// 推理内容作为 `reasoning` 事件与答案分开传递，签名信息不会向外暴露。
 test('a reasoning block becomes reasoning events while the answer stays separate', async () => {
   const turn = [
     { type: 'message_start', message: { usage: {} } },
@@ -483,7 +483,7 @@ test('one real round trip: the second request body is what the record rebuilds i
         { role: 'assistant', content: [{ type: 'tool_use', id: 'call_1', name: 'read', input: { path: 'note.txt' } }] },
         { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_1', content: '{"text":"the body"}', is_error: false }] },
       ]);
-      // 请求体里的每一条都来自记录，记录里的每一条都能投影回去（I5）；最后那一轮助手消息在请求之后才落盘。
+      // 请求体由会话记录投影生成；最后一条助手消息会在请求结束后写入记录。
       assert.deepEqual(await session.modelView(), [
         { role: 'user', text: 'read the note' },
         { role: 'assistant', text: '', toolCalls: [{ id: 'call_1', name: 'read', args: { path: 'note.txt' } }] },
@@ -501,7 +501,7 @@ test('one real round trip: the second request body is what the record rebuilds i
   }
 });
 
-// 端点报回的用量作为一条 usage 事件交出去：压缩的那一条压力判据要拿它修正本地估算（D75）。
+// 端点报告的用量会作为 `usage` 事件传递，供上下文预算估算校准使用。
 // 这一种形状把它拆在两处，输入的在 message_start（含缓存里读回来的那一段），输出的在 message_delta。
 test('the usage the endpoint reports comes back as one event at the end', async () => {
   const turn = [
@@ -524,8 +524,7 @@ test('the usage the endpoint reports comes back as one event at the end', async 
   });
 });
 
-// 端口助手自己那一条：真起一张服务表，交回来的那一个端口要真的能被 fetch 用到（审阅 C11：
-// 原先那一格自己造了假的 listen/close/once/address，证明不了 Node 的服务生命周期，换成真服务与真纯函数两格）。
+// 端口辅助函数使用真实 HTTP 服务验证，返回的端口必须能被 fetch 访问。
 test('the endpoint helper hands back a port that fetch really reaches', async () => {
   const server = createServer((_request, response) => {
     response.writeHead(200, { 'content-type': 'text/plain' });
@@ -541,8 +540,7 @@ test('the endpoint helper hands back a port that fetch really reaches', async ()
   }
 });
 
-// 那一张拒用表是这一版 Node 的事实（整片扫出来的），这一格测的是真函数本身而不是照它重写的另一份：
-// 拒用的几个与放行的几个各验一次，另外 1024 以下这一份一个也不放（那一截只有 80 与 443 可用，这里不需要）。
+// 验证 Node 当前不允许监听的端口和可监听端口，并确认 1024 以下端口不会被选择。
 test('the refused-port table answers for the real predicate', () => {
   for (const port of [1719, 5060, 6000, 6665, 10080]) assert.equal(fetchablePort(port), false, `${port} 是 fetch 拒用的那一个`);
   assert.equal(fetchablePort(45123), true);

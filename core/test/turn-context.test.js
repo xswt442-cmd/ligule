@@ -1,4 +1,4 @@
-// 每轮那一份生效参数冻进记录（D104、实现顺序第 125 步）：一次受理留一条，投影与请求体读不到它。
+// 每轮开始时的生效参数会写入记录，但不会进入模型投影或请求体。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -49,10 +49,10 @@ test('one round freezes the parameters in effect at its start into one record ev
     assert.equal(snapshots[0].policySource, 'config', '没人改过档位时说的是配置那一份');
     assert.equal(snapshots[0].text, undefined, '快照不装正文');
 
-    // 交回界面之前先确认它没进模型那一份上下文（D75 的白名单同一件事）。
+    // 确认回传给界面的快照没有进入模型上下文。
     const last = requests.at(-1);
     assert.ok(!JSON.stringify(last.messages).includes('turnContext'), '请求体里读不到这一条');
-    // 配置四层都没写静态段时，交出去的系统提示是随包那一份基础提示（D102）。
+    // 各配置层都未设置静态提示时，系统提示使用随包提供的默认内容。
     assert.match(JSON.stringify(last), /ligule/, '随包的基础提示进了请求');
     const reopened = await connection.request('status.get', { sessionId });
     assert.ok(reopened.eventCount >= events.length, '状态上的条数与记录同源');
@@ -63,7 +63,7 @@ test('one round freezes the parameters in effect at its start into one record ev
   }
 });
 
-// 会话覆盖过档位之后，那一轮留下的快照说的是覆盖那一份（D101 与 D104 合起来才读得出「当时按哪一档跑的」）。
+// 会话覆盖审批档位后，记录的轮次快照应保留当时实际使用的档位。
 test('the snapshot names the tier the round actually ran on after a session override', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'ligule-turn-tier-'));
   const config = createConfig({
@@ -71,7 +71,7 @@ test('the snapshot names the tier the round actually ran on after a session over
       boundary: directory,
       model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model' },
       policy: { mode: 'ask' },
-      // 写了静态段的那一层整份换掉随包那一份，不是在它后面追加（D102、D8 的标量合并语义）。
+      // 配置层中的静态提示会完整替换随包默认内容，不会追加在默认内容之后。
       prompt: { static: '只看这一句' },
     },
   });

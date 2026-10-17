@@ -104,7 +104,7 @@ test('a parameter schema outside the supported subset fails at registration and 
     () => kernel.register(makeTool('read', { parameters: { type: 'object', properties: {}, required: ['path'] } })),
     (error) => error.detail.includes('required names "path" which is not in properties'),
   );
-  // 上下界只在数值类型上校验得了：写在字符串上就是一句内核不会兑现的承诺（D14）。
+  // 上下界必须是数值；字符串形式无法用于内核校验。
   assert.throws(
     () => kernel.register(makeTool('read', {
       parameters: { type: 'object', properties: { path: { type: 'string', minimum: 1 } } },
@@ -162,7 +162,7 @@ test('a call whose arguments do not match the schema fails before the decision c
   }
 });
 
-// 实际执行那一段时间记在事件外层（实现顺序第 66 步）。计时在判定放行之后开始，所以等人答复那一段不在里面。
+// 工具执行耗时写在事件外层，并从策略允许执行后开始计时，不包含等待用户审批的时间。
 test('a tool record carries how long the tool ran, and approval waiting is not in it', async () => {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'kernel-'));
   try {
@@ -178,7 +178,7 @@ test('a tool record carries how long the tool ran, and approval waiting is not i
     const [ran] = await session.read();
     assert.ok(Number.isInteger(ran.durationMs), `那一格是整数毫秒，读到的是 ${ran.durationMs}`);
     assert.ok(ran.durationMs >= 0 && ran.durationMs < 200, `只算这一次执行，读到的是 ${ran.durationMs}`);
-    // 那一格不进模型可见投影：投影按种类取固定的那几格（D12）。
+    // 该字段不进入模型可见投影；投影只包含事件类型对应的固定字段。
     assert.ok(!(JSON.stringify(await session.modelView())).includes('durationMs'));
 
     // 没执行的调用没有这一格：规则拒绝的那一条根本没跑起来。

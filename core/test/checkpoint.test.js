@@ -1,5 +1,5 @@
-// 检查点那一份派生文件（D75、实现顺序第 36 步）：范围与哈希对上时投影读它，任何一处对不上就整份作废、回原始日志。
-// 事件日志一条都不动，所以这里比的是「读出来的投影」而不是「写过什么」。
+// 检查点是可重建的派生文件：范围和哈希匹配时用于投影，任一校验失败就回读原始日志。
+// 检查点不会修改事件日志，因此测试比较读取到的投影内容。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -52,7 +52,7 @@ test('a checkpoint whose range and hash match takes that range out of the model 
   });
 });
 
-// 每一种对不上的写法要说清是哪一个条件，并且投出来的是原始日志那一份（D75：派生文件可弃）。
+// 每种校验失败都应说明原因，并使用原始日志生成投影。
 test('a checkpoint that does not line up is void and the raw log projects as if it were never there', async () => {
   const cases = [
     ['checkpoint_absent', undefined],
@@ -80,12 +80,12 @@ test('a checkpoint that does not line up is void and the raw log projects as if 
       assert.deepEqual(await session.modelView(), plain, `${reason} falls back to the raw log`);
     }
 
-    // 换一段范围：那一段重算出来的哈希不是这一份。
+    // 更改检查点范围，使其摘要与记录不再匹配。
     await write(directory, id, { ...base, fromSeq: 1, toSeq: 3 });
     assert.equal((await loadCheckpoint({ directory, id, events })).reason, 'checkpoint_digest_mismatch');
     assert.deepEqual(await session.modelView(), plain);
 
-    // 改掉那一段里的一个字节：哈希对不上，而读出来的还是原始日志那一份（不改写日志，也不改写它）。
+    // 修改范围内的一个字符后，哈希校验应失败，并继续从原始日志生成投影。
     const bytes = await readFile(path, 'utf8');
     await writeFile(path, bytes.replace('第一个问题', '第一个问题改过'));
     const edited = await session.read();
@@ -95,7 +95,7 @@ test('a checkpoint that does not line up is void and the raw log projects as if 
   });
 });
 
-// 哈希的输入只由参与重建的那几格决定：一次性的传输身份（调用 id、溢出用的文件名）与后来才出现的外层字段都不进输入（D75）。
+// 哈希只覆盖重建投影所需的数据，不包含调用 ID、溢出文件名等传输字段。
 test('the hash input leaves out transport identity and fields this build does not know', async () => {
   const decorated = (token) => EVENTS.slice(0, 3).map((event, index) => ({
     ...event,
@@ -108,16 +108,16 @@ test('the hash input leaves out transport identity and fields this build does no
     assert.equal(prefixDigest(decorated('one')), prefixDigest(decorated('two')), 'a different call id is the same history');
     const checkpoint = createCheckpoint({ id, events: events.slice(0, 3), text: '前几轮的话', fromSeq: 0, toSeq: 2 });
 
-    // 给记录加一个这一具程序不认识的外层字段之后，旧检查点仍然有效：输入按固定的那几格拼。
-    // 执行耗时那一格（第 66 步）也是外层字段，同样不动哈希。
+    // 添加未知外层字段后，检查点仍然有效，因为哈希只覆盖固定字段。
+    // 执行耗时是事件的外层字段，不参与哈希。
     const widened = events.map((event) => ({ ...event, thinkingTokens: 12, durationMs: 40 }));
     assert.deepEqual(usableCheckpoint(checkpoint, id, widened), { checkpoint, reason: '' });
     assert.notEqual(prefixDigest(widened), prefixDigest(widened.map((event) => ({ ...event, text: `${event.text}.` }))), 'a real content change still moves the hash');
   });
 });
 
-// `usage` 那一格不进哈希输入，也不该占出一个「缺号」来（D82 与 D75 的交界处）：
-// 它进了记录之后，一份本来对得上的检查点不该因此作废。
+// `usage` 不参与哈希，也不会让投影事件的序号出现空缺：
+// 写入用量事件后，原本有效的检查点仍应通过校验。
 test('a usage event inside the covered range leaves the checkpoint alone', () => {
   const id = 'usage-in-range';
   const events = [
@@ -129,6 +129,6 @@ test('a usage event inside the covered range leaves the checkpoint alone', () =>
   const checkpoint = createCheckpoint({ id, events: events.slice(0, 3), text: '一份摘要', fromSeq: 0, toSeq: 2 });
   assert.equal(prefixDigest(events), prefixDigest(events.filter((event) => event.kind !== 'usage')), '用量那一格不参与输入');
   assert.deepEqual(usableCheckpoint(checkpoint, id, events), { checkpoint, reason: '' }, '序号还是连着的，检查点照用');
-  // 反过来读：谁把它当成「可以略过的那一种」丢掉，那段范围就缺号——这正是它要在 WRITTEN_KINDS 里的理由。
+  // 若把用量事件从序号范围中跳过，事件范围就会不连续，因此它必须计入已写入事件类型。
   assert.equal(usableCheckpoint(checkpoint, id, events.filter((event) => event.kind !== 'usage')).reason, 'checkpoint_range_missing');
 });

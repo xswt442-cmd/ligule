@@ -15,7 +15,7 @@ async function withDirectory(run) {
   }
 }
 
-// 首行是会话元信息，不是一条事件；这几份测试要读的是事件那几行（D73）。
+// 首行保存会话元信息，不属于事件；以下测试检查后续事件记录。
 async function eventLines(path) {
   const bytes = await readFile(path, 'utf8');
   return bytes.split('\n').filter((line) => line !== '').map(JSON.parse).filter((event) => event.kind !== 'session');
@@ -40,7 +40,7 @@ test('what the model sees is rebuildable from the log, byte for byte', async () 
     const session = createSessionLog({ directory, id: 'run-1' });
     const written = await session.append({ kind: 'tool', tool: 'read', args: { path: 'note.txt' }, result: { content: 'kept exactly' } });
     assert.equal(written.seq, 0);
-    // 首行说清这一份是哪一版格式（D73），事件那几行仍然按写出去的字节原样躺在文件里。
+    // 首行记录格式版本，后续事件内容按原始字节写入文件。
     assert.deepEqual(await eventLines(session.path), [written]);
     assert.equal((await eventBytes(session.path)).toString('utf8'), `${JSON.stringify(written)}\n`);
 
@@ -53,7 +53,7 @@ test('what the model sees is rebuildable from the log, byte for byte', async () 
   });
 });
 
-// 一组标为并发的工具调用会同时把结果写进同一份记录（D29），先后要一个个排出来。
+// 并发工具调用共享同一份会话记录，写入操作必须按顺序完成。
 test('appends that arrive at the same time still take turns on the sequence', async () => {
   await withDirectory(async (directory) => {
     const session = createSessionLog({ directory, id: 'run-7' });
@@ -104,7 +104,7 @@ test('a half line ending in an incomplete multi-byte sequence is cut on the byte
 
 test('a log that cannot be written reports a code and leaves nothing behind', async () => {
   await withDirectory(async (directory) => {
-    // 会话目录的位置上放一个普通文件：装载记录的第一步就会失败，失败点在任何写入之前。
+    // 会话目录路径指向普通文件时，读取应立即失败且不能写入任何内容。
     const blocked = join(directory, 'blocked');
     await writeFile(blocked, 'not a directory');
     const session = createSessionLog({ directory: blocked, id: 'run' });

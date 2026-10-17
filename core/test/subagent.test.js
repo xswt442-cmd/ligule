@@ -1,4 +1,4 @@
-// 第 31 步的验收（D71）：派生体过同一条判定链、登记表里没有 `subagent` 自己、记录另开一份支线。
+// 派生会话复用同一套策略判定，不会把 `subagent` 工具暴露给自身，并写入独立分支记录。
 // 内核、判定链、会话记录与循环都是真的；提供方按脚本回答，因为它只负责把「下一步做什么」这件事说出来。
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -77,7 +77,7 @@ test('the derived agent runs on the parent decision chain and cannot delegate ag
   assert.equal(result.text, 'I could not delete it');
   assert.equal(result.sessionId, 'parent.sub-1');
   assert.equal(result.iterations >= 2, true);
-  // 档位是共用的：子会话里那一次拒绝计入父链的计数（D71 第一条）。
+  // 子会话使用父会话的审批档位，拒绝次数也计入父会话。
   assert.equal(chain.denials().total >= 1, true);
   assert.equal(JSON.stringify(provider.requests[1].tools).includes('"subagent"'), false, '派生体不能再派');
   assert.ok(JSON.stringify(provider.requests[1].tools).includes('"read"'));
@@ -86,7 +86,7 @@ test('the derived agent runs on the parent decision chain and cannot delegate ag
   const files = await readdir(session.directory);
   assert.deepEqual(files.sort(), ['parent.jsonl', 'parent.sub-1.jsonl']);
   const side = (await readFile(join(session.directory, 'parent.sub-1.jsonl'), 'utf8')).split('\n').filter(Boolean).map(JSON.parse);
-  // 支线记录也有一份首行（D73）：它说清这一份是谁的哪一次派生，读的人不必猜。
+  // 分支记录首行说明父会话和派生关系。
   assert.equal(side[0].kind, 'session');
   assert.equal(side[0].sessionId, 'parent.sub-1');
   const sideEvents = side.filter((event) => event.kind !== 'session');
@@ -124,7 +124,7 @@ test('a task is required, and a mode is only looked up when this run has mode di
   );
 });
 
-// 父会话选了哪一份模式，派生体就在那一份下跑（D71 的档位继承也包括这一格）：藏起来的工具它同样看不见。
+// 派生会话继承父会话的模式和审批档位，因此也看不到该模式隐藏的工具。
 test("the derived agent runs under the mode the parent session picked", async () => {
   const boundary = await workspace();
   const config = createConfig({ user: { boundary } });

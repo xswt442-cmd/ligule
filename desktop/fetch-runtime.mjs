@@ -15,7 +15,7 @@ const vendor = join(root, 'desktop', 'vendor');
 const force = process.argv.includes('--force');
 
 const pin = JSON.parse(await readFile(join(root, 'desktop', 'node-pin.json'), 'utf8'));
-// 目标默认就是本机这一个：运行树里的原生绑定（tree-sitter 与 koffi 的 `.node`）只能来自真正跑着它们的那个平台。
+// 默认目标是当前平台；运行树中的原生绑定（tree-sitter 和 koffi 的 `.node`）必须与目标平台一致。
 const target = `${process.platform}-${process.arch}`;
 const archived = pin.targets[target];
 if (archived === undefined) {
@@ -29,8 +29,7 @@ async function sha256(path) {
   return hash.digest('hex');
 }
 
-// Node 的可执行文件：位置、目标与版本三样都对上才跳过下载。只按「文件在不在」判断，
-// 一台机器上换平台准备时会把上一个平台的Node 当成已经备好的那一份。
+// 只有可执行文件的位置、目标平台和版本都匹配时才跳过下载，避免把其他平台的 Node 误认为可用。
 const nodeExe = join(vendor, 'node', target.startsWith('win32') ? 'node.exe' : 'node');
 const stamp = join(vendor, 'node', '.vendored');
 async function fetchNode() {
@@ -53,8 +52,8 @@ async function fetchNode() {
       const bsdtar = join(process.env.SystemRoot ?? 'C:\\WINDOWS', 'System32', 'tar.exe');
       execFileSync(bsdtar, ['-xf', download, '--strip-components=1', '-C', outDir, `${inner}node.exe`, `${inner}LICENSE`]);
     } else {
-      // 归档里可执行文件在 `bin/` 下面，而壳找的是随包目录里的 `node/<可执行文件名>`：取掉两层前缀落下来，
-      // 再把可执行位补上——解包工具的属主规则不是我们要依赖的东西。许可跟着 Node 本体一起进包。
+      // 将归档中 `bin/` 下的可执行文件放到运行树的 `node/` 目录，并显式添加执行权限。
+      // 同时把 Node 的许可证文件放入发行包。
       execFileSync('tar', ['-xf', download, '--strip-components=2', '-C', outDir, `${inner}bin/node`]);
       execFileSync('tar', ['-xf', download, '--strip-components=1', '-C', outDir, `${inner}LICENSE`]);
       await chmod(nodeExe, 0o755);

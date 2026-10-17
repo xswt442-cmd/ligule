@@ -7,12 +7,10 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const repo = dirname(dirname(fileURLToPath(import.meta.url)));
-// 命令行按构建产物验（D47）：src/ 里有 .ts，源码那一份不能直接跑，跑起来的那一份就是发布出去的那一份。
+// 命令行测试运行构建产物，验证用户实际安装后使用的入口。
 const cli = join(repo, 'dist', 'cli.js');
 
-// 每一次 spawn 出去的命令行都会读真实主目录下的用户层配置，那一份属于这台机器而不是这份仓库：
-// 它写了 `model.apiKeyEnv` 就会盖掉测试自己设的 `LIGULE_API_KEY`，于是本机配了什么，测试就跟着变红。
-// 所以把 HOME 与 USERPROFILE 指到一个空的临时目录，用户层读到的是不存在。
+// 子进程会读取用户级配置。使用空的临时主目录，避免本机的 `model.apiKeyEnv` 覆盖测试凭据并影响结果。
 const isolatedHome = mkdtempSync(join(tmpdir(), 'ligule-cli-home-'));
 const childEnv = { ...process.env, HOME: isolatedHome, USERPROFILE: isolatedHome };
 after(() => rmSync(isolatedHome, { recursive: true, force: true }));
@@ -30,8 +28,7 @@ test('tools prints the members of the minimal manifest plus the first-party opti
 });
 
 test('call runs a tool in the same process and prints what it returned', () => {
-  // 边界指到 src：默认边界是整个仓库，那一次遍历会走进 testplace/，
-  // 而并行跑的测试正在那里建删临时目录，扫到一半目录就不在了。
+  // 将文件边界限制在 src，避免默认扫描整个仓库时碰到其他并行测试创建或删除的临时目录。
   const found = capture('call', 'find', JSON.stringify({ pattern: '*.ts', path: 'src' }), '--config', 'boundary = "src"');
   assert.ok(found.ok, found.stderr);
   assert.match(found.stdout, /^cli\.ts$/m);
@@ -53,12 +50,12 @@ test('a failure prints its stable code on stderr and exits non-zero', () => {
   const noName = capture('call');
   assert.match(noName.stderr, /cli_call_needs_a_tool_name/);
 
-  // 站在终端前的人看的是那一句说明，不只是码（D19 把码与文本分开就是这个用意）。
+  // 同时检查面向用户的错误说明和稳定错误码。
   const missingFile = capture('call', 'read', JSON.stringify({ path: 'no-such-file-anywhere.txt' }));
   assert.match(missingFile.stderr, /^path_not_found: there is nothing to read at /);
 });
 
-// 打错的命令不是一次成功：帮助文本走 stdout、退出码 0，调用方是个脚本就分不出来。
+// 未知命令应返回非零退出码，供终端用户和调用脚本识别错误。
 test('an unknown command fails, while explicit help remains available', () => {
   const unknown = capture('frobnicate');
   assert.equal(unknown.ok, false);
@@ -156,7 +153,7 @@ test('skills lists what this directory would load and says why anything was skip
   mkdirSync(join(project, '.ligule', 'skills', 'broken'), { recursive: true });
   writeFileSync(join(project, '.ligule', 'skills', 'broken', 'SKILL.md'), '---\nname: broken\n---\nbody\n');
   mkdirSync(home, { recursive: true });
-  // 用户那一层指到临时目录：不碰真实 HOME，两个平台的取值入口都设上。
+  // 将 HOME 和 USERPROFILE 都指向临时目录，避免读取真实用户配置。
   const env = { ...process.env, HOME: home, USERPROFILE: home };
   try {
     const listed = spawnSync(process.execPath, [cli, 'skills', '--lang', 'en'], { cwd: project, encoding: 'utf8', env });
@@ -170,7 +167,7 @@ test('skills lists what this directory would load and says why anything was skip
     const none = spawnSync(process.execPath, [cli, 'skills', '--lang', 'en'], { cwd: empty, encoding: 'utf8', env });
     assert.equal(none.status, 0, none.stderr);
     assert.match(none.stdout, /No skills loaded/);
-    // 一份都没有时把扫过的四个位置说出来：「装了但没生效」最难自查。
+    // 未加载任何 Skill 时，列出已检查的位置，方便用户排查配置。
     assert.match(none.stdout, /Looked in .*[\\/]empty[\\/]\.ligule[\\/]/);
     assert.equal(none.stdout.split('\n').filter((line) => line.includes('Looked in')).length, 4);
   } finally {
@@ -178,7 +175,7 @@ test('skills lists what this directory would load and says why anything was skip
   }
 });
 
-// 判定汇总读的就是那一份记录（D77）：不建内核、不开会话，内核里也没有第二份计数器可读。
+// 汇总结果直接读取会话记录，不需要创建内核、会话或额外计数器。
 test('policy summarises the decisions one session recorded', () => {
   const root = mkdtempSync(join(tmpdir(), 'ligule-cli-policy-'));
   const project = join(root, 'project');
@@ -213,8 +210,7 @@ test('policy summarises the decisions one session recorded', () => {
   }
 });
 
-// 第 44 步的验收：命令行交出来的那几行与协议 `sessions.list` 交出去的是同一批字段，
-// 两边都读同一个扫描器，界面那一边不必自己再拼一遍（D73）。
+// 命令行和 `sessions.list` 应返回相同的会话字段，并共用同一个扫描器。
 test('the printed session list is the same rows the scanner produces', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ligule-cli-sessions-'));
   const directory = join(root, '.ligule', 'sessions');

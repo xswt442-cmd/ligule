@@ -26,12 +26,7 @@ function observeFrames(stream, visit) {
   });
 }
 
-// 等一个条件成立。固定毫秒的等待在负载高的机器上会先于渲染到期：检查会假红，
-// 靠画面决定下一步的写法还会把那一轮永远等下去。几份终端界面的检查并行跑时，一条本机回环上的模型往返
-// 能在 10 秒内落不下来（单独跑那一份时 1.6 秒就过），所以这一格留到 60 秒：成立就立刻返回，绿的运行不变慢。
-// read 只在没等到时交出画面供报告用。
-// 默认给到 150 秒：并发跑整份时一具假终端要跟十几份测试抢进程，等一帧画出来的墙钟不是单机那一档。
-// 判据不变——条件不成立仍然当场失败（U52 那一条），只是把「慢」与「错」分开。
+// 轮询条件直到成立或超时；超时时附上最近的终端输出，便于定位失败原因。
 export async function waitFor(condition, { within = 150_000, every = 30, read = () => '' } = {}) {
   const deadline = Date.now() + within;
   for (;;) {
@@ -106,8 +101,7 @@ export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {},
     } });
     const provider = createChatCompletionsProvider({ baseUrl, model: 'local-test-model', apiKeyEnv: 'LIGULE_TUI_TEST_API_KEY' });
     const modesDirectory = fileURLToPath(new URL('../../../core/modes/', import.meta.url));
-    // 一具宿主接第二项目录时走这一条路（方案 3.2）：按指名的那一份根重算一份环境，其余格子与默认那一份同源。
-    // 配置那一格拼写是 `baseURL`，提供方工厂要的是 `baseUrl`：两边各按各的名字给，不混用。
+    // 为指定项目目录创建独立环境，并使用配置与 Provider 工厂各自要求的属性名。
     const modelShape = { api: 'chat-completions', baseURL: baseUrl, model: 'local-test-model', apiKeyEnv: 'LIGULE_TUI_TEST_API_KEY' };
     const providerShape = { baseUrl, model: 'local-test-model', apiKeyEnv: 'LIGULE_TUI_TEST_API_KEY' };
     const loadEnvironment = async (projectRoot) => {
@@ -139,7 +133,7 @@ export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {},
       if (typeof message.notify === 'string') notifications.push(message);
     });
     host = serveHost({ ...pair.host, config, provider, policy: config.policy, loadEnvironment,
-      // 客户端声明它答得了模型的提问（D107）：这一格与终端壳、桌面壳走的是同一条入口。
+      // 测试客户端可以响应模型发起的问题。
       interactive,
       modeName: 'minimal', modePaths: modeDirectories(projectDirectory, modesDirectory, homeDirectory),
     });
@@ -152,7 +146,7 @@ export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {},
         if (pair !== undefined) pair.client.output.end();
         if (host !== undefined) await host.release();
       } finally {
-        // 那台 HTTP 服务一定要关掉：它开着的时候整个测试进程退不出去，收尾失败报出来的就只剩一个挂住。
+        // 关闭本地 HTTP 服务，确保测试结束后不遗留活动句柄。
         if (server.listening) {
           server.closeAllConnections();
           await new Promise((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()));

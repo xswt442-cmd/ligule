@@ -65,8 +65,7 @@ test('an approval exposes its entire change through pages and Escape cancels wit
   }));
 });
 
-// 模型的提问（D107）：一次一到四道题，逐题作答，最后一题回车才把整份答复交回去。
-// 编号命中选项就算选中，其余文本原样作为自由回答——这条走的是真按键，不是直接调那一个回调。
+// 提问面板逐题收集答案，并在最后一题提交后一次性返回；非选项输入作为自由回答。
 const askFrame = () => JSON.stringify({
   tool: 'ask_user_question',
   args: {
@@ -88,11 +87,11 @@ test('a question answers one item per Enter, lets an unsubmitted answer be chang
     await wait(() => frame().includes('等待回答 2/2'));
     await wait(() => frame().includes('1. pnpm'));
 
-    // 上一题还没交出去，要能改：草稿空着时按 ← 退回那一题，刚才写的原文回到草稿里，删掉重写就是改过的那一份。
+    // 尚未提交的答案可以修改：草稿为空时按左键返回上一题，并恢复之前输入的内容。
     stdin.write('\x1b[D');
     await wait(() => frame().includes('等待回答 1/2'));
     stdin.write('\x7f');
-    // 退格与下一个字之间要留一拍：连着写时假终端把两串字节交在同一次投递里，那一记退格就没落到画面上。
+    // 分开发送退格和后续字符，避免假终端将它们合并后漏掉退格输入。
     await delay(150);
     await type('1');
     await wait(() => frame().includes('等待回答 2/2') && frame().includes('1. npm'));
@@ -105,7 +104,7 @@ test('a question answers one item per Enter, lets an unsubmitted answer be chang
   }), { interactive: true });
 });
 
-// 取消是这一格唯一能走掉的路：打断这一轮之后画面不再留着那道没人答的题。
+// 取消提问后应终止当前等待，并从画面中移除未回答的问题。
 test('interrupting the round takes the pending question away with it', async () => {
   await withTuiHost(async (context) => withApp(context, async ({ frame, output, type, wait }) => {
     await type(askFrame());

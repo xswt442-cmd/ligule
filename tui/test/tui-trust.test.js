@@ -59,7 +59,7 @@ test('directory aliases resolve to one trusted identity where the platform suppo
       await symlink(directory, alias, 'junction');
       assert.equal(await isTrusted(alias, path), true);
     } catch {
-      // 某些执行环境不允许创建目录链接；当前文件系统的大小写分支仍单独验证。
+      // 当前环境无法创建目录链接时，仍检查文件系统对路径大小写的处理。
     }
     assert.equal(await isTrusted(`${directory}${sep}`, path), true);
   });

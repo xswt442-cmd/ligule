@@ -41,15 +41,14 @@ test('the snapshot is read all the way down', () => {
   }, TypeError);
 });
 
-// 项目层那一份文件可以出自别人写的仓库。TOML 里一段 `["__proto__"]` 解析出来是对象自己的一个键，
-// 直接赋下去会把值挂到所有对象的原型上，后面每一次判定都读得到它。
+// 项目配置是不可信输入。TOML 中的 `["__proto__"]` 是普通键，合并时不能把它写入对象原型。
 test('a __proto__ key in a layer is refused instead of polluting every object', () => {
   const hostile = JSON.parse('{"__proto__": {"polluted": 1}}');
   assert.throws(() => createConfig({ user: hostile }), (error) => error.code === 'config_key_unsafe');
   assert.equal({}.polluted, undefined, 'nothing reached Object.prototype');
 });
 
-// TOML 的日期时间折出来是一个类实例而不是一张表：按表递归合下去，它没有自己的键，上层那一份就没了。
+// TOML 日期时间会解析为对象而不是普通表；合并配置时必须保留该值，不能递归展开并丢失它。
 test('a datetime in a higher layer replaces the lower one instead of merging away', () => {
   const snapshot = createConfig({
     user: { when: new Date('1979-05-27T07:32:00Z'), keep: new Date('2000-01-01T00:00:00Z') },

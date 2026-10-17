@@ -1,4 +1,4 @@
-// 第 30 步的验收（D52、D60）：配置形状、按声明校验参数、披露与摘要、真实 stdio 服务器一条往返。
+// 验证 MCP 配置、工具参数校验、工具说明和摘要，以及 stdio 服务器通信。
 // 协议层用的是官方 SDK，服务器用的是官方那个文件系统参考服务器；摘要与陈旧那两条读的是我们自己那一段逻辑。
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -281,7 +281,7 @@ test('Host Policy denies a real MCP write under the server root', async () => {
   }
 });
 
-// 一台不动的服务器，定义换了：摘要跟着换，旧摘要的调用被挡住，重新 inspect 之后才放行（D52）。
+// 服务器工具定义变化后摘要应更新；旧摘要的调用需等重新检查后才能继续。
 test('a server that moved its definition is caught over the real protocol', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ligule-mcp-fixture-'));
   const schema = join(root, 'schema.json');
@@ -314,7 +314,7 @@ test('a server that moved its definition is caught over the real protocol', asyn
   }
 });
 
-// 两件固定工具是披露入口：模式藏不掉它们，也挑不动它们（D63 同一条规则，MCP 这一格一样成立）。
+// 固定的 MCP 披露工具不受模式筛选，始终可用。
 test('a mode can neither select nor hide the two MCP tools', async () => {
   const kernel = createKernel({ config: createConfig({ user: { boundary: process.cwd() } }) });
   loadAssembly(kernel, [createMcpPlugin({ servers: () => ['fx'], toolsOf: async () => [], definition: async () => ({}), call: async () => ({}) })]);

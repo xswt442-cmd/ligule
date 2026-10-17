@@ -30,14 +30,14 @@ test('an interpreter wrapper stays one segment: the shell is not unwrapped', asy
   assert.deepEqual(await parseCommand('bash -lc "git status"'), { kind: 'segments', segments: ['bash -lc "git status"'] });
 });
 
-// PowerShell 那一档比 bash 窄（D59、D66）：只放「简单命令 + ASCII 字面参数」，管道连一条都不放。
+// PowerShell 只允许简单命令和 ASCII 字面参数，不允许管道。
 test('the PowerShell subset takes a literal command with literal arguments', async () => {
   assert.deepEqual(await parseCommand('git status', 'powershell'), { kind: 'segments', segments: ['git status'] });
   assert.deepEqual(await parseCommand('Get-ChildItem -Recurse -Force', 'powershell'), {
     kind: 'segments',
     segments: ['Get-ChildItem -Recurse -Force'],
   });
-  // `--flag=value` 在这一份 grammar 里是一个整参数，不需要先遮蔽那个等号（U35 实测的差别）。
+  // `--flag=value` 是一个完整参数，等号不需要额外处理。
   assert.deepEqual(await parseCommand('npm install --name=git', 'powershell'), {
     kind: 'segments',
     segments: ['npm install --name=git'],

@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { createDecisionChain, createConfig, createKernel, createSessionLog, execTool, resolveShell, withNativeExitCode } from '../dist/index.js';
 import { decode } from '../dist/capability/exec.js';
 
-// 后端由 Host 选定再交进来（D59），这里读的就是这一具机器上的那一份选择。
+// Host 选择命令后端并传入这里；测试使用当前机器实际支持的后端。
 // 被测的是 exec 自己的那几件事（头尾分页、标准输入、取消、退出码），所以脚本片段落到一个临时文件里再跑：
 // Windows PowerShell 5.1 把传给原生命令的引号参数重排过一次，`<`、`>` 与 `=>` 都会被截掉（本机 2026-10-03 实测），
 // 那段文本能不能原样送到 node 手上是 PowerShell 的事情，不是这一件工具的事情。斜杠两种 shell 都认，路径统一写成正斜杠。
@@ -97,7 +97,7 @@ test('the decision chain sees the command text before anything is spawned', asyn
   );
 });
 
-// 记录里三样都要看得见（D59）：按哪一种语法判的、实际起的是哪一个可执行文件、这条文本被读成了哪几段。
+// 记录应说明使用的语法、启动的可执行文件，以及命令解析出的各段参数。
 test('the record names the backend a command was judged and run under', async () => {
   const session = createSessionLog({ directory: mkdtempSync(join(directory, 'record-')), id: 'backend' });
   const kernel = createKernel({

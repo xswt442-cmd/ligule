@@ -1,7 +1,6 @@
-// 全新安装验证：打一份 tarball，在空消费者中用 npm 安装，并通过已安装的 CLI 和包导出运行完整探针。
+// 在空项目中安装打包文件，并通过 CLI、包导出和 MCP 服务检查真实安装结果。
 //
-// 跑法：pnpm --filter ligule run verify-install [tarball]
-// 带一个 tarball 路径时用它，不再自己打：发布流水线要在同一批字节上先验后发，那一份身份就是 artifact 里的那一个文件。
+// 可传入已构建的 tarball，确保发布验收与后续发布使用同一份文件。
 import { spawnSync, execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -23,9 +22,8 @@ const pkg = releaseManifest();
 const tarball = given === undefined ? join(packDir, `${pkg.name}-${pkg.version}.tgz`) : resolve(given);
 rmSync(join(packDir, 'install'), { recursive: true, force: true });
 mkdirSync(consumer, { recursive: true });
-// 消费者自己的清单：空目录里只写这一份，装进去的依赖全部来自 tarball 的声明。
-// 那四件带原生绑定的依赖要在安装时跑自己的脚本；把「允许哪些依赖跑脚本」写成包内的一格，是收得紧的 npm 唯一收的形式
-// （命令行与用户级配置里的白名单在项目范围内的安装里都不算）。普通 npm 不读这一格，装出来完全一样。
+// 为隔离的消费者创建独立清单；安装依赖只依据被测 tarball 的声明。
+// 这四个依赖需要安装脚本来构建原生绑定。消费者清单显式允许这些脚本，避免沿用调用环境中的 npm 白名单设置。
 const consumerManifest = {
   name: 'ligule-consumer',
   version: '0.0.0',
@@ -38,8 +36,7 @@ if (given === undefined) {
 }
 if (!existsSync(tarball)) throw new Error(`npm pack did not produce ${tarball}`);
 
-// 一次真实安装：解析、下载与安装脚本都按声明走，装不出来就是声明本身有问题。
-// npm run 会把用户配置传成环境变量；项目安装的脚本策略必须读消费者清单与 .npmrc。
+// 清除调用环境中的脚本白名单变量，避免它影响安装策略。
 const installEnvironment = Object.fromEntries(Object.entries(process.env)
   .filter(([name]) => name.toLowerCase() !== 'npm_config_allow_scripts'));
 try {
@@ -52,7 +49,7 @@ try {
 } catch (error) {
   const text = `${error.stdout ?? ''}${error.stderr ?? ''}${(error.output ?? []).join('')}${error.message ?? ''}`;
   process.stdout.write(text.split(/\r?\n/).filter((line) => line.trim() !== '').slice(-12).join('\n'));
-  // 收得紧的 npm 会把「哪些依赖可以跑安装脚本」当成项目范围内必须显式批准的策略；这一格要说清去哪儿改，别留一个裸的退出码。
+  // 如果 npm 仍拒绝这些安装脚本，指出可检查的项目配置和拒绝原因。
   if (text.includes('EALLOWSCRIPTS')) {
     throw new Error('npm 拒绝了这一次安装里依赖自带的安装脚本（EALLOWSCRIPTS）。它只认包内那一格白名单（消费者 package.json 的 allowScripts）或项目 .npmrc，'
       + '这一份脚本已经写了那一格仍然被拒，说明这台机器上的 npm 收得比声明更紧。普通 npm 环境（发布流水线那一条）不受这一条影响。');
@@ -87,7 +84,7 @@ if (JSON.stringify(installed.optionalDependencies) !== JSON.stringify(pkg.option
 }
 if (existsSync(join(consumer, 'node_modules', 'typescript'))) throw new Error('devDependencies came along into the consumer');
 
-// 走用户实际用的那一条路：`.bin` 里的包装脚本，Windows 上是那一个 .cmd。
+// 通过 npm 安装生成的命令包装脚本启动 CLI；Windows 使用对应的 .cmd 文件。
 const env = {
   ...process.env,
   PATH: `${join(consumer, 'node_modules', '.bin')}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH ?? ''}`,
@@ -106,14 +103,14 @@ const counted = tools.stdout.split('\n').filter((line) => line.trim() !== '').le
 if (tools.status !== 0 || counted !== 9) throw new Error(`${pkg.name} tools listed ${counted}, expected 9`);
 readings.push(`tools: ${counted}`);
 
-// TUI 那一格在非交互终端里必须明确拒绝并给出稳定码：这一条同时证明入口链上的模块都装齐了。
+// 非交互终端启动 TUI 时应返回稳定错误码；这也会加载并检查 TUI 入口依赖。
 const tui = run(['tui']);
 if (!`${tui.stdout}${tui.stderr}`.includes('tui_terminal_required')) {
   throw new Error(`${pkg.name} tui on a non-interactive terminal did not report tui_terminal_required: ${(tui.stdout + tui.stderr).slice(0, 200)}`);
 }
 readings.push('tui: refuses with tui_terminal_required on a non-interactive terminal');
 
-// 消费者只看 tarball 声明：加载内核、解析配置和命令、执行工具与 MCP、使用 grammar 和搜索后端。
+// 从已安装包加载 Core，检查配置解析、命令解析、工具执行、MCP 和搜索后端。
 writeFileSync(join(consumer, 'probe.mjs'), `
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { createKernel, createMcpPlugin, createMcpRegistry, execTool, flagLayer, KernelError, mcpServerConfigs, parseCommand, resolveRipgrep, resolveShell, searchWithRipgrep, withNativeExitCode, VERSION } from 'ligule';

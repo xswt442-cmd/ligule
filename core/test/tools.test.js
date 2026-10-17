@@ -244,7 +244,7 @@ test('search of an explicit file inside a skipped directory still reads that fil
   });
 });
 
-// 换后端不换行为（D18）：命中行与顺序都要相同。这里没有二进制文件，所以两边连最后一行的
+// 两种搜索后端应返回相同的命中行和顺序。测试目录没有二进制文件，因此两种后端都不应出现
 // 跳过标记都不该出现——那条标记只属于自己遍历那一条，它知道自己跳过了什么，外部后端不交这个数。
 test('the external backend and our own walk return the same hits in the same order', async () => {
   await withWorkspace(async (workspace) => {
@@ -279,7 +279,7 @@ test('the external backend gives the same text twice over', async () => {
   });
 });
 
-// 检索的子进程要在边界里跑，配置里那个相对路径不能跟着子进程的当前目录走（本机实测：跟着走就是 ENOENT）。
+// 搜索子进程必须在项目边界内运行；相对配置路径按项目根解析，不受子进程工作目录影响。
 test('a relative ripgrepPath is read against the process directory, not the boundary', async () => {
   await withWorkspace(async (workspace) => {
     const { logged, context: searchContext } = recordingContext(workspace, { ripgrepPath: relative(process.cwd(), builtRipgrep) });

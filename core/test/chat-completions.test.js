@@ -1,6 +1,6 @@
-// 第 11.5 步的验收：Chat Completions 那一种线上形状（D31）。
-// 与 test/provider.test.js 同一种测法——本地起一个真实 HTTP 服务，按 SSE 一帧一帧写出去，
-// 客户端走的是它平时那条解析路径；分片切在工具调用的参数中间，攒不出一次调用就当场暴露。
+// 验证 Chat Completions API 的请求与响应格式。
+// 使用本地 HTTP 服务按 SSE 返回数据，并通过实际解析路径处理响应。
+// 测试将数据分片切在工具参数中间，验证客户端能正确拼接调用。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -47,7 +47,7 @@ function provider(baseUrl, extra = {}) {
   return createChatCompletionsProvider({ baseUrl, model: 'test-model', apiKeyEnv: API_KEY_ENV, ...extra });
 }
 
-// 一次调用分三片到达，文本从中间穿过；整段响应再按 7 个字节切开写，切点落在 JSON 里。
+// 一个工具调用分三段到达，文本事件穿插其中；响应再按 7 字节切分，部分切点位于 JSON 内部。
 const TOOL_CALL_CHUNKS = [
   { choices: [{ index: 0, delta: { role: 'assistant', content: '' } }] },
   { choices: [{ index: 0, delta: { reasoning_content: 'the file is one line' } }] },
@@ -69,7 +69,7 @@ test('tool call fragments arriving by index are assembled into one call', async 
     response.end();
   }, async (baseUrl) => {
     const events = await collect(provider(baseUrl).stream({ system: '', messages: [], tools: [] }));
-    // 文本与推理按到达顺序交出；调用没有「这一块结束」那一种事件，攒到流收尾再交，顺序按 index。
+    // 文本和推理按到达顺序输出；工具调用在流结束前聚合，并按索引排序。
     assert.deepEqual(events, [
       { type: 'reasoning', text: 'the file is one line' },
       { type: 'text', text: 'Let me ' },
@@ -113,14 +113,14 @@ test('the request body carries the shape this form names, and the address is the
     }));
 
     const { url, headers, body } = requests[0];
-    // 地址按给出的那一份用：这里给的是没有 /v1 的根（DeepSeek 那一类），路径就是 /chat/completions。
+    // 未包含 `/v1` 的基础地址直接追加 `/chat/completions`。
     assert.equal(url, '/chat/completions');
     assert.equal(headers.authorization, 'Bearer test-key');
     assert.equal(body.model, 'test-model');
     assert.equal(body.stream, true);
     assert.equal(body.max_tokens, CHAT_COMPLETIONS_CAPABILITIES.maxOutputTokens);
     assert.equal(body.parallel_tool_calls, true);
-    // 系统段在这一种形状里是消息列表的第一条；工具定义套在 function 下面；结果是一条 role:"tool" 的消息。
+    // 系统提示是消息列表的第一项；工具定义嵌套在 `function` 中；工具结果使用 `tool` 角色。
     assert.deepEqual(body.messages, [
       { role: 'system', content: 'rules here' },
       { role: 'user', content: 'read the note' },
@@ -136,7 +136,7 @@ test('the request body carries the shape this form names, and the address is the
       function: { name: 'read', description: readTool.description, parameters: readTool.parameters },
     }]);
 
-    // 另一种约定也要能用：OpenAI 自己的 base_url 含 /v1，这时不重复补。
+    // 基础地址已包含 `/v1` 时，不应重复添加该路径。
     await collect(provider(`${baseUrl}/v1`).stream({ system: '', messages: [], tools: [] }));
     assert.equal(requests[1].url, '/v1/chat/completions');
   });
@@ -247,8 +247,8 @@ test('the declared limits of this form can be lowered by config but not raised',
   assert.throws(() => chatCompletionsCapabilities({ vision: true }), (error) => error.code === 'provider_capability_unknown');
 });
 
-// 流式也要把用量要回来（压缩的那一条压力判据看的是端点真实报回的那一份，D75）：
-// 那一族端点不写 stream_options 就不交 usage，而它落在一条没有 choices 的收尾分片上。
+// 流式响应中的用量会用于校准上下文长度估算：
+// 这类端点只有在请求包含 `stream_options` 时才会返回用量；用量位于没有 `choices` 的结束分片中。
 test('a streamed answer asks for usage and hands back the one it got', async () => {
   await withEndpoint(async (response) => {
     response.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -265,15 +265,15 @@ test('a streamed answer asks for usage and hands back the one it got', async () 
     ]);
     assert.deepEqual(requests[0].body.stream_options, { include_usage: true });
 
-    // 不认这一格的兼容代理把 streamUsage 降成 false：少一条用量，别少一次请求。
+  // 不支持 `stream_options` 的兼容代理会关闭 `streamUsage`，但仍应正常发送请求。
     await collect(provider(baseUrl, { capabilities: { streamUsage: false } }).stream({ system: '', tools: [], messages: [] }));
     assert.equal(requests[1].body.stream_options, undefined);
   });
 });
 
 test('a cancel that lands while the stream is still open reports provider_cancelled', async () => {
-  // 第 94 步在真端点上撞到的那条：流已经在吐内容时打断，Node 交回的是只带数字码的 AbortError，
-  // 界面那一侧认的是稳定码，所以这一处要在模型层就换掉（core/src/model/http.ts 的 cancelMapped）。
+  // 流开始输出后取消请求时，Node 会返回只带数字码的 AbortError，
+  // 模型层将 Node 的错误映射为界面使用的稳定错误码。
   await withEndpoint(async (response) => {
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: '第一段' } }] })}\n\n`);

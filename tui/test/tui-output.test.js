@@ -1,5 +1,5 @@
-// 第 46 步的验收：终端标题那一串、剪贴板那一段字节，以及 `/export` 那一条按键走到写出那两份文件。
-// 编码是纯计算；`/export` 那一条走真的 Ink 渲染路径喂按键，排版的检查在 test/host-export.test.js。
+// 覆盖终端标题、剪贴板编码，以及通过 Ink 输入 `/export` 后写出的文件。
+// `/export` 的排版和 Host 行为由 `test/host-export.test.js` 覆盖。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -63,7 +63,7 @@ test('/export writes real host and subagent records as markdown', options, async
     let runFinished = false;
     const run = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'subagent', args: { task: '支线导出验证' } }) })
       .finally(() => { runFinished = true; });
-    // 询问画出来才答：答早了那一句 'y' 落进草稿，这一轮就没人结束，检查会一直等到作业超时。
+    // 等审批提示渲染后再输入答案，避免按键先进入草稿而没有完成审批。
     await waitFor(() => runFinished || painted.includes('允许执行 subagent？'), { within: 20_000, read: () => painted });
     if (!runFinished) stdin.write('y');
     await run;

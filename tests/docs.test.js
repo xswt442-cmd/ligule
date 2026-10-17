@@ -1,6 +1,4 @@
-// 仓库文档的检查：受维护的 Markdown 链接可达，两份手册章节与标识符一致，
-// README 有使用与开发文档入口，八份指南都在默认预算内并按目录装载。
-// 这一处不建内核：读的是仓库里的 markdown。
+// 检查维护中的文档链接、双语手册结构、README 入口和工程指南装载行为。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
@@ -32,7 +30,7 @@ const maintainedDocs = [
   join(repoRoot, 'tui', 'docs', 'guide.zh-CN.md'),
   join(repoRoot, 'tui', 'docs', 'guide.en.md'),
 ];
-// 工程指南八份：根那一份放全局规则，七份局部规则放在模块和 Desktop 子目录内。
+// 根指南描述全局规则，局部指南描述各模块和 Desktop 子目录的约定。
 const guides = [
   'AGENTS.md',
   join('desktop', 'AGENTS.md'),
@@ -54,7 +52,7 @@ const localGuides = [
 ];
 const guidePath = (guide) => join(repoRoot, guide);
 
-/** 标题换成 GitHub 那一种锚点：小写、去掉除字母数字与连字符以外的字符、空格换成连字符。 */
+/** 按 GitHub 的标题规则生成锚点。 */
 function slug(heading) {
   return heading.trim().toLowerCase()
     .replace(/`/g, '')
@@ -66,7 +64,7 @@ function anchors(text) {
   return new Set(text.split('\n').filter((line) => /^#{1,6}\s/.test(line)).map((line) => slug(line.replace(/^#+\s/, ''))));
 }
 
-/** markdown 里所有链接目标，带锚点的那一段留着。 */
+/** 提取 Markdown 链接目标，包括可选锚点。 */
 function links(text) {
   return [...text.matchAll(/\[[^\]]*\]\(([^)\s]+)\)/g)].map((match) => match[1]);
 }
@@ -190,9 +188,7 @@ test('development 文档文件名使用大写主体与小写语言标记', () =>
   ]);
 });
 
-// 工程指南分几份放之后要守的两条：每份都能整份读进默认读入上限，且每一处都以默认预算完整装载。
-// 装载那一条按这一份仓库自己的目录跑，不建临时夹具：夹具验的是机制，这里验的是这份布局。
-// 预算那一格用的是默认值，并当场看有没有截断标记——「必要规则在默认总预算内完整装载」说的就是这一件事（审阅 C09）。
+// 检查每份工程指南都能在默认读取预算内完整加载，并验证真实目录布局的加载顺序。
 test('每份工程指南都在默认读入上限之内，且每一处都以默认预算完整装载', async () => {
   for (const guide of guides) {
     const bytes = Buffer.byteLength(readFileSync(guidePath(guide), 'utf8'), 'utf8');
@@ -200,7 +196,7 @@ test('每份工程指南都在默认读入上限之内，且每一处都以默�
   }
   const rootGuide = readFileSync(guidePath(guides[0]), 'utf8');
   for (const guide of guides.slice(1)) {
-    // 根那一份按目录指过去（每一处局部的都叫 `AGENTS.md`，写全名会把预算吃在同一个词上）。
+    // 根指南必须通过目录路径提及每份局部指南。
     assert.ok(rootGuide.includes(posix.dirname(guide.split(sep).join('/')) + '/'), `AGENTS.md 没有指向 ${guide} 所在的那个目录`);
   }
   const atRoot = await loadInstructions({ boundary: repoRoot, current: repoRoot });
@@ -208,8 +204,7 @@ test('每份工程指南都在默认读入上限之内，且每一处都以默�
   assert.ok(!atRoot.text.includes('[Instruction budget'), '默认预算下根那一份被截断了');
   for (const directory of localGuides) {
     const loaded = await loadInstructions({ boundary: repoRoot, current: directory });
-    // 目录套目录时上溯会走到不止一份局部指南（`desktop/frontend/` 之外还有 `desktop/` 那一份），
-    // 所以这里只要求第一层是项目根那一份、其余都是目录级，并且这一处自己的那一份在最后。
+    // 嵌套目录可能加载多份局部指南；根指南应先加载，当前目录的指南应最后加载。
     assert.equal(loaded.files[0].layer, 'project', `${directory} 处没有先装载根那一份`);
     assert.ok(loaded.files.slice(1).every((file) => file.layer === 'directory'), `${directory} 处的目录级层标错了`);
     assert.equal(resolve(loaded.files[loaded.files.length - 1].path), resolve(directory, 'AGENTS.md'), `${directory} 那一份没有连根那一份一起装载`);

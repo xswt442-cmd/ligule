@@ -1,4 +1,4 @@
-// 应用数据根的解析（D110，方案 5.5.2）：「根在哪儿」只由一处回答，配置、模式、技能、提示模板、扩展与终端界面都读它。
+// 配置、模式、技能、提示模板、扩展和终端界面都从同一个函数获取应用数据根。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';

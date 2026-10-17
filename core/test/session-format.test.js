@@ -1,4 +1,4 @@
-// 第 32 步的验收（D73）：一份记录的第一行说清它是哪一版格式、属于哪一个项目、开局用哪一份模式清单，
+// 会话记录首行说明格式版本、所属项目和初始模式清单，
 // 而读的时候版本或事件种类读不懂就拒绝重建，不是静默跳过。
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -50,7 +50,7 @@ test('a record that never picked a mode says so by leaving the field out', async
   });
 });
 
-// 宿主打开一份会话时总要先读一遍（模式那条去重要看记录里最后一条），这一次读不该把该写的首行挡掉（D73）。
+// 宿主打开会话时需要读取记录以恢复模式，但这次读取不能阻止缺失的首行正常写入。
 test('a record read before its first write still gets its first line', async () => {
   await withDirectory(async (directory) => {
     const session = createSessionLog({ directory, id: 'read-first', meta: { projectRoot: '/repo' } });
@@ -73,7 +73,7 @@ test('a record written before the first line existed still reads and continues',
 
     const next = await session.append({ kind: 'user', text: 'three' });
     assert.equal(next.seq, 2, '接在已有记录之后，不重复用号');
-    // 一份开始就没有首行的记录不会被就地补一个头：那等于把同一份历史改成两种形状（D73）。
+// 不为缺少首行的旧记录补写元信息，避免改变原有记录格式。
     assert.equal(await session.header(), undefined);
     assert.equal((await readFile(path, 'utf8')).split('\n').filter(Boolean).length, 3);
   });
@@ -123,8 +123,7 @@ test('a second header line is a refusal, not a second session', async () => {
   });
 });
 
-// 端点报回的用量进记录（D82）：它带着 `ignorable` 那一格，可这一具程序写得出来也读得回来，
-// 所以序号连着——检查点那段范围不会因为它多占一个号就缺号。它也不进投影（D12）。
+// 用量事件会写入并从记录中读回。它不参与模型投影，但保留连续的事件序号，避免检查点范围出现空缺。
 test('the usage event this build writes comes back out of a record', async () => {
   await withDirectory(async (directory) => {
     const session = createSessionLog({ directory, id: 'usage-kept' });

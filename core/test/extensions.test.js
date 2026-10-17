@@ -1,4 +1,4 @@
-// 第 29 步的验收（D37、D46、D68）：扩展从哪几处来、递出去的面有多大、装坏了留什么。
+// 验证扩展的查找位置、可用接口，以及加载失败时的行为。
 // 临时目录里的模块是真的 ESM 文件，用真的动态 import 跑；内核、判定链、提示词组装也都是真的。
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';

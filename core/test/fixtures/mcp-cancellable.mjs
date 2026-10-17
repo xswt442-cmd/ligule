@@ -34,7 +34,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   return { content: [{ type: 'text', text: `waited ${request.params.arguments.milliseconds} ms` }] };
 });
 
-// 标记文件出现时必须已包含完整 PID，取消握手才能安全确认子进程退出。
+// 写入标记文件前先保存完整 PID，供测试在取消时确认子进程已退出。
 const pendingPidPath = `${pidPath}.${process.pid}.tmp`;
 await writeFile(pendingPidPath, String(process.pid));
 await rename(pendingPidPath, pidPath);

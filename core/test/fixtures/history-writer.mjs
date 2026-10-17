@@ -1,4 +1,4 @@
-// 一具进程往两端共用的那份输入历史里写一句：跨进程那一半的锁只有真起进程才证明得了。
+// 子进程向终端和桌面共用的输入历史追加内容，用于验证跨进程写入锁。
 import { rememberHistory } from '../../dist/kernel/input-history.js';
 
 const [path, sentence] = process.argv.slice(2);

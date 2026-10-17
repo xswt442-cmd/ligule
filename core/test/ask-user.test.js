@@ -1,4 +1,4 @@
-// 模型提问那件工具的装载与等待（D107、方案 4.4）：装载侧只给声明支持交互的客户端登记，等的是真答复。
+// 验证提问工具只会装载到支持交互的客户端，并等待客户端给出真实答复。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -11,7 +11,7 @@ const QUESTIONS = JSON.stringify([
   { question: '目标目录在哪里？' },
 ]);
 
-// 一次宿主：提供方先让模型发起提问，答完之后第二次才收尾；客户端答不答由这一格说。
+// 提供方先发起提问，再在下一轮结束运行；客户端答复由测试选项控制。
 async function withAskingHost(run, { interactive = true, modeName, answer, policy = { mode: 'auto' } }) {
   const directory = await mkdtemp(join(tmpdir(), 'ligule-ask-'));
   const config = createConfig({ user: { boundary: directory, model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model' }, policy } });
@@ -51,7 +51,7 @@ test('an interactive client gets the asking tool in the default mode and the rou
   await withAskingHost(async (connection, { requests, seen }) => {
     const { sessionId } = await connection.request('session.create', {});
     await connection.request('run.start', { sessionId, input: '第一轮' });
-    // 最小模式那一份清单写的是八件的名字：这一件不在其中也照样进了模型可见清单，因为模式管不到它（D63 同一条规则）。
+    // 提问工具不受模式清单筛选，仍会出现在模型可用工具中。
     assert.ok(requests[0].tools.some((tool) => tool.name === 'ask_user_question'), '默认最小模式下模型就该看得见这一件');
     const asked = seen.filter((message) => message.method === 'question.request');
     assert.equal(asked.length, 1, '一次调用发一份请求，答复里带着题目自己来');
@@ -64,12 +64,12 @@ test('an interactive client gets the asking tool in the default mode and the rou
     assert.match(result.result.content.text, /整份重写/, '答的内容原样进结果');
     assert.match(result.result.content.text, /目标目录在哪里/, '没答的那一道也在正文里说没答');
     assert.equal(result.result.content.answers.length, 1, '结构化那一格只带真答了的那一道');
-    // 第二次请求读得到那一段结果：本轮确实等到答复才继续。
+    // 后续请求包含用户答复，证明本轮在收到答复后继续运行。
     assert.ok(JSON.stringify(requests[1].messages).includes('整份重写'), '答复进了模型的上下文');
   }, { interactive: true, answer: () => ({ answers: [{ id: 'q1', selected: ['整份重写'] }] }) });
 });
 
-// 逐次询问的档位问的是「能不能做这一件操作」；向人提问不是一项要批准的操作，两句话不该叠成两次提示（D107）。
+// 逐次审批只针对工具操作；向用户提问本身不需要再经过审批。
 test('the asking tool answers one question request and no approval request even on the ask tier', async () => {
   await withAskingHost(async (connection, { seen }) => {
     const { sessionId } = await connection.request('session.create', {});
@@ -97,10 +97,10 @@ test('cancelling the round settles the waiting question with its own code', asyn
   await withAskingHost(async (connection, { seen }) => {
     const { sessionId } = await connection.request('session.create', {});
     const running = connection.request('run.start', { sessionId, input: '第一轮' });
-    // 等到请求发出去再取消：这一格演的是人看见问题之后按了取消，不是没人答。
+    // 等待问题送达客户端后再取消，模拟用户主动取消提问。
     for (let tries = 0; tries < 400 && seen.length === 0; tries += 1) await new Promise((done) => setTimeout(done, 10));
     await connection.request('run.cancel', { sessionId });
-    // 取消的那一轮以 `loop_cancelled` 收场（那一次调用自己的码留在工具结果里，两件事各说各的）。
+    // 整轮以 `loop_cancelled` 结束，同时工具结果保留提问调用自身的结果码。
     await running.catch((error) => assert.equal(error.code, 'loop_cancelled'));
     const { events } = await connection.request('session.read', { sessionId });
     const result = events.find((event) => event.kind === 'tool' && event.tool === 'ask_user_question');

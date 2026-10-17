@@ -1,4 +1,4 @@
-// 第 23 步的验收（D45、D49 到 D57）：四个目录的先后与同名诊断、头部的 schema 校验、预算内联与超预算的回落、
+// 验证技能目录的查找顺序、同名诊断、头部格式校验和内容预算，
 // `skill` 三个动作各自的边界与限额、缺能力时什么都不改，以及目录真的进到交给模型的那一份请求里。
 // 目录、文件、内核与记录都是真的，提供方只用来把请求体交回来看见 tools 那一栏与 system 那一段。
 import test from 'node:test';
@@ -15,7 +15,7 @@ import {
 } from '../dist/index.js';
 
 const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
-// 四个来源目录在临时根下的相对写法，先后与 core/src/kernel/skills.ts 那一条一致（D57）。
+// 临时根下的四个来源目录与技能加载器使用相同的优先顺序。
 const SOURCES = [
   join('project', '.ligule', 'skills'),
   join('project', '.agents', 'skills'),
@@ -96,14 +96,14 @@ test('the catalog inlines every name and description until the budget is spent',
     assert.match(inlined, /- pdf-tools: read a report/);
     assert.match(inlined, /action "activate"/);
 
-    // 说明按规范那档最多 1024 字符（D49），所以要八份顶满的技能才把 8 KB 的预算用完（D55）。
+    // 每份技能说明最多 1024 个字符，因此八份完整说明正好用完 8 KB 预算。
     for (const [number, index] of [1, 2, 3, 0, 1, 2, 3, 0].entries()) {
       await place(index, `big${number + 1}`, `${header({ name: `big${number + 1}`, description: 'd'.repeat(1000) })}body\n`);
     }
     const registry = await discoverSkills(directories);
     const fallback = formatSkillCatalog(registry);
     assert.ok(Buffer.byteLength(fallback, 'utf8') <= SKILL_METADATA_BUDGET_BYTES);
-    // 超预算不列半份目录：那一句使用说明是唯一稳定注入的东西（D55）。
+    // 超出预算时不注入部分目录，只保留稳定的使用说明。
     assert.match(fallback, /too many to list here/);
     assert.doesNotMatch(fallback, /- big1:/);
     assert.ok(Buffer.byteLength(formatSkillCatalog(registry, 1_000_000), 'utf8') > SKILL_METADATA_BUDGET_BYTES);
@@ -134,7 +134,7 @@ test('activate hands over the instructions without the header and names the supp
     assert.match(value.text, /references\/guide\.md/);
     assert.match(value.text, /Open the file, then summarise/);
     assert.doesNotMatch(value.text, /description: read a report/);
-    // 同一份内容两次激活给出同一个摘要：改了 SKILL.md 才换（D53 判「模型看的还是旧版」的依据）。
+    // 同一内容重复激活时摘要不变；修改 `SKILL.md` 后摘要才会更新。
     const again = await kernel.call('skill', { action: 'activate', name: 'pdf-tools' });
     assert.equal(value.text.match(/digest ([0-9a-f]{12})/)[1], again.text.match(/digest ([0-9a-f]{12})/)[1]);
   });
@@ -150,7 +150,7 @@ test('a declared capability that is not there stops activation and changes nothi
     assert.equal(error.code, 'skill_missing_capability');
     assert.match(error.detail, /browser/);
     assert.match(error.detail, /mcp:github/);
-    // 声明不产生工具也不改档位：登记表与之前一字不差（D51、I4）。
+    // 技能声明不会注册新工具或改变模式，工具登记表保持不变。
     assert.deepEqual(kernel.list(), before);
     assert.match((await kernel.call('skill', { action: 'activate', name: 'needs-read' })).text, /body/);
   });
@@ -193,11 +193,11 @@ test('read stays inside that one skill directory and pages by bytes', async () =
       action: 'read', name: 'withfiles', path: 'references/guide.md', offsetBytes: 40,
     });
     assert.doesNotMatch(last.text, /truncated/);
-    // SKILL.md 自己也在这一份边界之内：它是技能根里的一个文件，不该由技能边界外面那条规则管（D50）。
+    // `SKILL.md` 位于技能根目录内，应受技能目录边界约束。
     assert.match((await kernel.call('skill', { action: 'read', name: 'withfiles', path: 'SKILL.md' })).text, /name: withfiles/);
     for (const path of ['../outside.md', '../../outside.md', '/etc/hosts']) {
       const error = await kernel.call('skill', { action: 'read', name: 'withfiles', path }).catch((failure) => failure);
-      // 技能根与工作区边界是两套，越出技能根就报自己的码（D50）。
+      // 越出技能根目录时返回技能专用的边界错误。
       assert.equal(error.code, 'skill_path_escapes_root', path);
     }
     const missing = await kernel.call('skill', { action: 'read', name: 'withfiles', path: 'nope.md' }).catch((f) => f);
@@ -236,7 +236,7 @@ test('one disclosure is an ordinary tool call in the session record', async () =
     await kernel.call('skill', { action: 'activate', name: 'recorded' });
     await kernel.call('skill', { action: 'activate', name: 'absent' }).catch(() => {});
     const events = await session.read();
-    // 披露没有自己的事件类型：它就是一条普通的工具调用，失败的也一样进记录（D53、I9）。
+    // 技能内容披露使用普通工具调用事件；失败结果也会写入记录。
     assert.deepEqual(events.map((event) => [event.kind, event.tool]), [['tool', 'skill'], ['tool', 'skill']]);
     assert.equal(events[0].result.failed, false);
     assert.equal(events[1].result.failed, true);
@@ -291,13 +291,13 @@ test('a mode narrows the capability tools and cannot reach the disclosure entry'
     assert.equal(everything.tools.length, 11);
     assert.match(everything.system, /- pdf-tools: read a report/);
 
-    // 模式只筛直接能力工具：藏掉其余几件之后 `skill` 仍然留着（D63），目录那一段也跟着留着。
+    // 模式只筛选能力工具；固定的 `skill` 工具和技能目录仍会保留。
     const readonly = await capture('readonly');
     assert.deepEqual(readonly.tools.map((entry) => entry.name), ['read', 'skill']);
     assert.match(readonly.system, /- pdf-tools: read a report/);
     const minimal = await capture(DEFAULT_MODE);
     assert.ok(minimal.tools.some((entry) => entry.name === 'skill'));
-    // 可选的第一方工具由模式装上或藏掉：`minimal` 里没写 `fetch` 就看不见它（D48）。
+    // 模式可以隐藏可选的第一方工具；`minimal` 未列出的 `fetch` 不会提供给模型。
     assert.ok(!minimal.tools.some((entry) => entry.name === 'fetch'), 'minimal keeps the optional tool out');
     assert.equal(minimal.tools.length, 9);
   });

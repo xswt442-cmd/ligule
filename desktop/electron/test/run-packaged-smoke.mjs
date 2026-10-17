@@ -542,7 +542,7 @@ async function prepareIsolatedWorkspace() {
     preflight.once('error', reject);
   });
   preflight.stderr.on('data', () => {
-    // Host stderr 只排空，不把其内容写进证据。
+    // 读取并丢弃 Host 的标准错误输出，避免子进程因管道缓冲区已满而阻塞。
   });
   preflight.stdin.write(`${JSON.stringify({
     id: 'packaged-workspace-default',
