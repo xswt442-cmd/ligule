@@ -82,3 +82,51 @@ test('both provider protocols put the configured request budget on the real wire
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+test('service model budgets are sent for the selected model on the real wire', async () => {
+  const requests = [];
+  const server = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    requests.push(JSON.parse(Buffer.concat(chunks).toString()));
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+  });
+  const port = await listenFetchable(server);
+  const previous = process.env.BUDGET_TEST_KEY;
+  process.env.BUDGET_TEST_KEY = 'synthetic-budget-key';
+  const service = {
+    id: 'custom', name: 'Custom', api: 'chat-completions', baseURL: `http://127.0.0.1:${port}/v1`, apiKeyEnv: 'BUDGET_TEST_KEY',
+    models: ['small', 'large'],
+    modelSettings: [
+      { id: 'small', contextTokens: 24000, outputTokens: 4096 },
+      { id: 'large', contextTokens: 96000, outputTokens: 32768 },
+    ],
+  };
+  try {
+    for (const model of service.models) {
+      const provider = providerFromConfig({ model: { services: [service], selection: { provider: 'custom', model } } });
+      for await (const event of provider.stream({ system: '', tools: [], messages: [] })) assert.ok(event.type);
+    }
+    assert.deepEqual(requests.map((request) => [request.model, request.max_tokens]), [['small', 4096], ['large', 32768]]);
+    assert.equal(providerFromConfig({ model: { services: [{ ...service, modelSettings: [{ id: 'small', contextTokens: 12000 }] }], selection: { provider: 'custom', model: 'small' } } }).outputTokens, 8192,
+      'a context-only declaration is checked against the default output budget');
+    assert.throws(() => providerFromConfig({ model: { services: [{ ...service, modelSettings: [{ id: 'small', contextTokens: 4096 }] }], selection: { provider: 'custom', model: 'small' } } }),
+      (error) => error.code === 'provider_output_budget_unsupported');
+    assert.throws(() => providerFromConfig({ model: { api: 'chat-completions', baseURL: 'https://proxy.example/v1', model: 'local-model', outputTokens: 32768, serviceOutputLimit: true } }),
+      (error) => error.code === 'provider_output_budget_unsupported', 'user configuration cannot forge the internal service declaration');
+    const configured = providerFromConfig({ model: { services: [service], selection: { provider: 'custom', model: 'large' } } });
+    assert.equal(configured.withModel('small').outputTokens, 4096, 'switching within a service resolves that model\'s own budget');
+    assert.throws(() => configured.withModel('another-model'), (error) => error.code === 'model_not_available');
+    const officialService = {
+      id: 'official', name: 'Official', api: 'chat-completions', baseURL: 'https://api.deepseek.com/v1', apiKeyEnv: 'BUDGET_TEST_KEY',
+      models: ['deepseek-flash'], modelSettings: [{ id: 'deepseek-flash', outputTokens: 500000 }],
+    };
+    assert.throws(() => providerFromConfig({ model: { services: [officialService], selection: { provider: 'official', model: 'deepseek-flash' } } }),
+      (error) => error.code === 'provider_output_budget_unsupported');
+  } finally {
+    if (previous === undefined) delete process.env.BUDGET_TEST_KEY; else process.env.BUDGET_TEST_KEY = previous;
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

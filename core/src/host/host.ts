@@ -27,6 +27,7 @@ import { branchSession } from '../session/branch.js';
 import { listProjectFiles } from './paths.js';
 import { branchSessionId, exportMarkdown, writeExport, type ExportRecord } from './export.js';
 import { createCompaction } from '../session/compaction.js';
+import { usageEvent } from '../session/usage.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
 import { foldLabel } from '../session/format.js';
 import { SPILL_NAME, resultLimit } from '../kernel/result.js';
@@ -34,7 +35,7 @@ import { limitsOf } from '../capability/limits.js';
 import { loadInstructions, DEFAULT_INSTRUCTION_BYTES } from '../capability/instructions.js';
 import { SKILL_METADATA_BUDGET_BYTES, discoverSkills, formatSkillCatalog, skillDirectories } from '../kernel/skills.js';
 import { discoverTemplates, expandTemplate, findTemplate, parseInvocation, templateDirectories } from '../kernel/templates.js';
-import { createLoop, DEFAULT_LOOP_LIMITS, type LoopProgressEvent, type LoopProgressPhase, type LoopResult } from '../kernel/loop.js';
+import { createLoop, DEFAULT_LOOP_LIMITS, type LoopCompaction, type LoopProgressEvent, type LoopProgressPhase, type LoopResult } from '../kernel/loop.js';
 import { minimalPlugin } from '../tools/minimal.js';
 import { networkPlugin } from '../tools/network.js';
 import { createSkillPlugin } from '../tools/skill.js';
@@ -159,6 +160,7 @@ interface HostSessionBase {
   pendingGeneration?: SessionGeneration;
   pending?: ModeFile;
   running?: AbortController;
+  compaction?: ReturnType<typeof createCompaction> | null;
   progress?: HostRunProgress;
   progressId?: string;
   waitingForApproval?: number;
@@ -186,7 +188,8 @@ interface HostSessionState extends HostSessionBase {
   readonly extensions: Awaited<ReturnType<typeof loadExtensions>>;
   readonly templates: TemplateRegistry;
   readonly loop: ReturnType<typeof createLoop>;
-  readonly compaction: ReturnType<typeof createCompaction> | null;
+  compaction: ReturnType<typeof createCompaction> | null;
+  readonly rebuildCompaction: (model: Record<string, unknown>) => ReturnType<typeof createCompaction> | null;
 }
 
 export interface Host {
@@ -331,15 +334,16 @@ function loopLimitsOf(config: HostConfigSnapshot): LoopLimits {
   };
 }
 
-// 压缩的两条线（D75、U43）：窗口那一格必须写出来，两条比例才有意义——窗口是模型事实，不是策略参数。
-// 没写就整条不启用（交回 undefined，宿主不给这一份会话挂压缩），写了但形状不对当场报出去，
+// 压缩的两条线（D75、U43）：窗口优先取选中模型的声明值，否则取 limits.contextTokens；窗口是模型事实，不是策略参数。
+// 两处都没写就不启用（交回 undefined，宿主不给这一份会话挂压缩），写了但形状不对当场报出去，
 // 因为一条 NaN 的线会让每一次请求都算不出「超没超」，看上去是压缩从不触发。
 // 保留量还必须严格小于压力线，否则压完还是越线，而看不出来为什么一直在压（dsh 同一条约束）。
-export function compactionLimitsOf(config: HostConfigSnapshot) {
+export function compactionLimitsOf(config: HostConfigSnapshot, selectedContextTokens?: unknown) {
   const limits = limitsOf(config);
-  if (limits.contextTokens === undefined) return undefined;
-  if (typeof limits.contextTokens !== 'number' || !Number.isFinite(limits.contextTokens) || limits.contextTokens <= 0) {
-    throw new KernelError('host_compaction_limits_invalid', { detail: `contextTokens must be a positive number, got ${JSON.stringify(limits.contextTokens)}` });
+  const contextTokens = selectedContextTokens ?? limits.contextTokens;
+  if (contextTokens === undefined) return undefined;
+  if (typeof contextTokens !== 'number' || !Number.isSafeInteger(contextTokens) || contextTokens <= 0) {
+    throw new KernelError('host_compaction_limits_invalid', { detail: `contextTokens must be a positive safe integer, got ${JSON.stringify(contextTokens)}` });
   }
   const compactThresholdRatio = limits.compactThresholdRatio;
   const compactRetainRatio = limits.compactRetainRatio;
@@ -355,7 +359,7 @@ export function compactionLimitsOf(config: HostConfigSnapshot) {
     });
   }
   return {
-    contextTokens: limits.contextTokens,
+    contextTokens,
     compactThresholdRatio,
     compactRetainRatio,
     resultBytes: resultLimit(config),
@@ -617,15 +621,21 @@ export function createHost({
         catch (error) { sessionFailure = { code: errorCode(error) ?? 'provider_rebuild_failed' }; continue; }
         const previous = resolveModel(ownGeneration.model);
         const next = resolveModel(ownModel);
-        if (['api', 'baseURL', 'apiKeyEnv', 'model', 'outputTokens'].every((field) => previous[field] === next[field])) continue;
+        if (['api', 'baseURL', 'apiKeyEnv', 'model', 'outputTokens', 'serviceOutputLimit', 'serviceContextTokens'].every((field) => previous[field] === next[field])) continue;
         const generation: SessionGeneration = { provider: ownProvider, model: ownModel, explicit: true };
-        if (state.running === undefined) { state.generation = generation; state.pendingGeneration = undefined; applies.push({ sessionId: id, when: 'now' }); }
+        if (state.running === undefined) {
+          state.generation = generation;
+          state.pendingGeneration = undefined;
+          state.compaction = state.rebuildCompaction(generation.model);
+          applies.push({ sessionId: id, when: 'now' });
+        }
         else { state.pendingGeneration = generation; applies.push({ sessionId: id, when: 'round' }); }
         continue;
       }
       if (state.running === undefined) {
         state.generation = { provider, model };
         state.pendingGeneration = undefined;
+        state.compaction = state.rebuildCompaction(model);
         applies.push({ sessionId: id, when: 'now' });
       } else {
         state.pendingGeneration = { provider, model };
@@ -857,6 +867,7 @@ export function createHost({
           if (state.pendingGeneration !== undefined) {
             state.generation = state.pendingGeneration;
             state.pendingGeneration = undefined;
+            state.compaction = state.rebuildCompaction(state.generation.model);
           }
         } finally {
           if (state.progressId === progress.id) {
@@ -1234,26 +1245,42 @@ export function createHost({
     }
     // 压缩挂在这一份会话上（D75）：两条触发都在循环里问它，摘要那一次调用走未装饰的提供方——
     // 它的流式增量不该转给客户端，而它写完检查点就退出这一轮的事，事件日志一条都不动。
-    // 配置没写 `limits.contextTokens` 时这一件是 null：窗口大小是模型事实，不猜，正常聊天照跑。
-    const limits = compactionLimitsOf(config);
-    const compaction = limits === undefined ? null : createCompaction({
-      provider: compactionProgressProvider(live, (event) => {
-        if (state.progressId !== undefined) observeLoopProgress(state as HostSessionState, connection, state.progressId, event);
-      }),
-      session,
-      directory,
-      id,
-      limits,
-      logger,
-      requestPrefix: () => ({ system: prompt.render(), tools: kernel.manifest() }),
-    });
+    // 选中模型与全局配置都没写窗口时这一件是 null：窗口大小是模型事实，不猜，正常聊天照跑。
+    const rebuildCompaction = (model: Record<string, unknown>) => {
+      const selectedModel = resolveModel(model);
+      const limits = compactionLimitsOf(config, selectedModel.serviceContextTokens);
+      return limits === undefined ? null : createCompaction({
+        provider: compactionProgressProvider(live, (event) => {
+          if (state.progressId !== undefined) observeLoopProgress(state as HostSessionState, connection, state.progressId, event);
+        }),
+        session,
+        directory,
+        id,
+        limits,
+        logger,
+        requestPrefix: () => ({ system: prompt.render(), tools: kernel.manifest() }),
+      });
+    };
+    const compaction = rebuildCompaction(state.generation.model ?? {});
+    const loopCompaction: LoopCompaction = {
+      prepare: (request, signal) => state.compaction?.prepare(request, signal) ?? Promise.resolve(request.messages),
+      recover: (error, request, signal) => state.compaction?.recover(error, request, signal) ?? Promise.resolve(null),
+      observe: async (request, events) => {
+        const current = state.compaction;
+        if (current !== undefined && current !== null) await current.observe(request, events);
+        else {
+          const usage = usageEvent(request, events);
+          if (usage !== null) await session.append(usage);
+        }
+      },
+    };
     const loop = createLoop({
       kernel,
       provider: observedProvider(live, (event) => connection.notify({ notify: 'delta', sessionId: id, event })),
       prompt,
       session,
       limits: loopLimitsOf(config),
-      compaction,
+      compaction: loopCompaction,
       onProgress: (event) => {
         if (state.progressId !== undefined) observeLoopProgress(state as HostSessionState, connection, state.progressId, event);
       },
@@ -1274,7 +1301,7 @@ export function createHost({
       },
     });
     // 一份会话一份状态，审批的等待与正在跑的那一轮都记在这里。
-    return Object.assign(state, { chain, kernel, assembly, extensions: installedExtensions, mcp, loop, templates, compaction });
+    return Object.assign(state, { chain, kernel, assembly, extensions: installedExtensions, mcp, loop, templates, compaction, rebuildCompaction });
     } catch (error) {
       try {
         for (const dispose of cleanup.reverse()) await dispose();
@@ -1591,7 +1618,10 @@ export function createHost({
           const provider = deriveProvider({ ...state.environment.config, model });
           const generation = { model, provider, explicit: true };
           await state.session.append({ kind: 'modelSelection', ignorable: true, provider: selection.provider, model: selection.model });
-          if (state.running === undefined) state.generation = generation;
+          if (state.running === undefined) {
+            state.generation = generation;
+            state.compaction = state.rebuildCompaction(model);
+          }
           else state.pendingGeneration = generation;
           return { model: provider.model, serviceId: selection.provider, when: state.running === undefined ? 'now' : 'round' };
         }
@@ -1683,7 +1713,17 @@ export function createHost({
               // 首启可逐字段填写尚未完整的模型配置；完整配置的能力错误必须在写入前拒绝。
               hostProviderFromConfig(config);
               if (field === 'model.selection') deriveProvider(config);
-              if (field === 'model.services' && isRecord(config.model) && config.model.selection !== undefined) resolveModel(config.model);
+              if (field === 'model.services' && isRecord(config.model)) {
+                if (config.model.selection !== undefined) resolveModel(config.model);
+                for (const service of modelServices(config.model.services)) {
+                  for (const setting of service.modelSettings ?? []) {
+                    deriveProvider({
+                      ...config,
+                      model: { ...config.model, selection: { provider: service.id, model: setting.id } },
+                    });
+                  }
+                }
+              }
               if (field !== 'model.outputTokens' && field !== 'model.services') continue;
               for (const state of sessions.values()) {
                 if (state.environment !== target) continue;

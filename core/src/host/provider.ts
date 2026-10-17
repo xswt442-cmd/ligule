@@ -46,7 +46,8 @@ function retryOf(model: Record<string, unknown>): RetryPolicy {
 /** Select the declared wire format and capabilities; credentials resolve at request time. */
 export function providerFromConfig(config: ConfigSnapshot): HostProvider {
   if (!isRecord(config.model)) throw new KernelError('host_model_config_missing', { detail: 'config.model.baseURL and config.model.model' });
-  const model = resolveModel(config.model);
+  const configuredModel = config.model;
+  const model = resolveModel(configuredModel);
   const api = model.api;
   if (api !== 'messages' && api !== 'chat-completions') {
     throw new KernelError('provider_api_form_required', { detail: 'model.api must be "messages" or "chat-completions"' });
@@ -65,11 +66,24 @@ export function providerFromConfig(config: ConfigSnapshot): HostProvider {
     ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }),
     ...(capabilities === undefined ? {} : { capabilities }),
     ...(model.outputTokens === undefined ? {} : { outputTokens: model.outputTokens }),
-    ...(isRecord(config.limits) && config.limits.contextTokens !== undefined ? { contextTokens: config.limits.contextTokens } : {}),
+    ...(model.serviceOutputLimit === true ? { declaredOutputLimit: model.outputTokens } : {}),
+    ...(model.serviceContextTokens !== undefined
+      ? { contextTokens: model.serviceContextTokens }
+      : isRecord(config.limits) && config.limits.contextTokens !== undefined ? { contextTokens: config.limits.contextTokens } : {}),
     retry: retryOf(model),
   };
-  if (api === 'messages') return createMessagesProvider(options);
-  return createChatCompletionsProvider(options);
+  const provider = api === 'messages' ? createMessagesProvider(options) : createChatCompletionsProvider(options);
+  if (model.serviceId === undefined || model.serviceId === 'legacy') return provider;
+  const serviceId = model.serviceId;
+  return Object.freeze({
+    ...provider,
+    withModel(next: string) {
+      return providerFromConfig({
+        ...config,
+        model: { ...configuredModel, selection: { provider: serviceId, model: next } },
+      });
+    },
+  });
 }
 
 function pendingProvider(error: KernelError): HostProvider {

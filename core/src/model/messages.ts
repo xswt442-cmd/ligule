@@ -20,6 +20,7 @@ interface MessagesProviderOptions {
   readonly apiKeyEnv?: string;
   readonly capabilities?: Readonly<Record<string, unknown>>;
   readonly outputTokens?: unknown;
+  readonly declaredOutputLimit?: unknown;
   readonly contextTokens?: unknown;
   readonly retry?: RetryPolicy;
 }
@@ -142,6 +143,7 @@ export function createMessagesProvider({
   apiKeyEnv = 'LIGULE_API_KEY',
   capabilities,
   outputTokens,
+  declaredOutputLimit,
   contextTokens,
   retry = DEFAULT_RETRY,
 }: MessagesProviderOptions = {}): ModelProvider {
@@ -151,6 +153,7 @@ export function createMessagesProvider({
   const budget = resolveOutputTokens({ baseUrl: root, model, requested: outputTokens,
     defaultTokens: effective.maxOutputTokens,
     configuredLimit: capabilities?.maxOutputTokens === undefined ? undefined : effective.maxOutputTokens,
+    ...(declaredOutputLimit === undefined ? {} : { declaredOutputLimit }),
     contextLimit: contextTokens });
 
   async function* stream(request: ModelRequest, { signal }: { readonly signal?: AbortSignal | null } = {}): AsyncGenerator<ProviderEvent> {
@@ -352,7 +355,8 @@ export function createMessagesProvider({
     stream,
     // 换模型是显式的一步：交回一个新的提供方，不在失败时悄悄改用别的模型（D13）。
     withModel(next: string) {
-      return createMessagesProvider({ baseUrl, model: next, apiKeyEnv, capabilities, outputTokens, contextTokens, retry });
+      return createMessagesProvider({ baseUrl, model: next, apiKeyEnv, capabilities, outputTokens,
+        ...(next === model ? { declaredOutputLimit, contextTokens } : {}), retry });
     },
   };
   return Object.freeze(provider);

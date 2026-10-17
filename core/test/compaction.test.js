@@ -19,6 +19,7 @@ import {
   estimateTokens,
   loadCheckpoint,
 } from '../dist/index.js';
+import { resolveModel } from '../dist/kernel/model-services.js';
 
 const SUMMARY = 'SUMMARY OF THE EARLIER TURNS';
 const LONG = 'x'.repeat(2000);
@@ -262,6 +263,18 @@ test('compaction stays off until the model window is configured', () => {
       `${JSON.stringify(written)} is refused rather than silently disabling the line`,
     );
   }
+});
+
+test('service model context changes the compaction window with the selected model', () => {
+  const services = [{
+    id: 'local', name: 'Local', api: 'chat-completions', baseURL: 'https://example.test/v1', apiKeyEnv: 'KEY', models: ['small', 'large'],
+    modelSettings: [{ id: 'small', contextTokens: 24000 }, { id: 'large', contextTokens: 96000 }],
+  }];
+  const config = createConfig({ user: { model: { services }, limits: {} } });
+  const small = resolveModel(config.model, { provider: 'local', model: 'small' });
+  const large = resolveModel(config.model, { provider: 'local', model: 'large' });
+  assert.equal(compactionLimitsOf(config, small.serviceContextTokens).contextTokens, 24000);
+  assert.equal(compactionLimitsOf(config, large.serviceContextTokens).contextTokens, 96000);
 });
 
 // 端点报回的用量落成一条记录事件（D82）：界面与恢复读的是记录，不是上一次进程留在内存里的那个数。
