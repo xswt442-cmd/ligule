@@ -10,11 +10,17 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 - 安装包中的 Node 运行树只包含产品清单和生产依赖；构建与运行资源检查会拒绝源码、测试材料和嵌套部署目录。
 - 当文件权限边界与项目目录不同时，会话归属、项目设置与重启恢复仍使用实际项目目录。
+- 状态栏显示 Host 确认的运行阶段与无进展时长；长标题保留状态和操作按钮的显示空间。
+- 共享 Core 区分正常完成、空回复、输出耗尽及断流，安全拒绝非法工具批次，并支持显式输出预算和双 API 非流式 JSON 响应。
+- 模型配置在写入前验证共享默认层、项目有效配置和会话显式选择，拒绝时保持文件原文；构建与运行树校验拒绝过时的 Core 内容和越界链接。
 
 ### English
 
 - Restricted the packaged Node runtime tree to its product manifest and production dependencies; build and runtime-resource checks reject source files, test material, and nested deployment directories.
 - Session ownership, project settings, and restart recovery use the actual project directory when it differs from the filesystem permission boundary.
+- Status shows Host-confirmed run phases and time without progress; long titles retain space for status and action buttons.
+- Shared Core distinguishes normal completion, empty replies, exhausted output, and interrupted bodies, safely rejects invalid tool batches, and supports explicit output budgets and non-streaming JSON responses for both APIs.
+- Model configuration validates shared defaults, effective project settings, and explicit session selections before writing; rejected edits preserve the file. Build and runtime-tree checks reject stale Core content and links escaping the runtime.
 
 ## [0.0.5] - 2026-10-15
 
