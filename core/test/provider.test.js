@@ -9,7 +9,7 @@ import {
   capabilitiesOf, createConfig, createKernel, createLoop, createMessagesProvider, createChatCompletionsProvider, createSessionLog,
   DEFAULT_RETRY, MESSAGES_CAPABILITIES, readTool,
 } from '../dist/index.js';
-import { fetchablePort, listenFetchable } from './helpers/port.js';
+import { fetchablePort, listenFetchable } from './helpers/port.ts';
 
 const API_KEY_ENV = 'LIGULE_TEST_API_KEY';
 const FAST_RETRY = { ...DEFAULT_RETRY, baseDelayMs: 1 };

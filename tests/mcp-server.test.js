@@ -5,7 +5,7 @@ import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
-import { listenFetchable } from '../test/helpers/port.js';
+import { listenFetchable } from '../test/helpers/port.ts';
 import { connectMcp } from '../test/helpers/mcp-control.mjs';
 import { setTrusted } from '../core/dist/kernel/workspace-trust.js';
 

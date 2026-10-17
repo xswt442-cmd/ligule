@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createMessagesProvider, DEFAULT_RETRY } from '../dist/index.js';
-import { listenFetchable } from './helpers/port.js';
+import { listenFetchable } from './helpers/port.ts';
 
 const API_KEY_ENV = 'LIGULE_HTTP_FAULT_TEST_KEY';
 const FAST_RETRY = { ...DEFAULT_RETRY, baseDelayMs: 1 };

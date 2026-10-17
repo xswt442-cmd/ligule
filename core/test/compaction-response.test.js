@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createCompaction, createSessionLog, providerFromConfig } from '../dist/index.js';
-import { listenFetchable } from './helpers/port.js';
+import { listenFetchable } from './helpers/port.ts';
 
 for (const api of ['chat-completions', 'messages']) {
   for (const empty of [false, true]) {

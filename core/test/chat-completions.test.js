@@ -8,7 +8,7 @@ import { createServer } from 'node:http';
 import {
   CHAT_COMPLETIONS_CAPABILITIES, chatCompletionsCapabilities, createChatCompletionsProvider, readTool,
 } from '../dist/index.js';
-import { listenFetchable } from './helpers/port.js';
+import { listenFetchable } from './helpers/port.ts';
 
 const API_KEY_ENV = 'LIGULE_TEST_API_KEY';
 

@@ -10,7 +10,7 @@ import { serveHost } from '../../dist/host/host.js';
 import { createChatCompletionsProvider } from '../../dist/model/chat-completions.js';
 import { modeDirectories } from '../../dist/kernel/modes.js';
 import { fileURLToPath } from 'node:url';
-import { listenFetchable } from './port.js';
+import { listenFetchable } from './port.ts';
 
 function observeFrames(stream, visit) {
   let buffer = '';

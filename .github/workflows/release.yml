@@ -175,7 +175,7 @@ jobs:
           COMMIT: ${{ needs.preflight.outputs.commit }}
           TARGET: ${{ matrix.target }}
           RUN_ID: ${{ github.run_id }}
-        run: node scripts/desktop-release-manifest.js create --directory desktop/release --output "$RUNNER_TEMP/desktop-release/${TARGET}" --version "$VERSION" --target "$TARGET" --commit "$COMMIT" --run-id "$RUN_ID"
+        run: node --experimental-strip-types scripts/desktop-release-manifest.ts create --directory desktop/release --output "$RUNNER_TEMP/desktop-release/${TARGET}" --version "$VERSION" --target "$TARGET" --commit "$COMMIT" --run-id "$RUN_ID"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -230,7 +230,7 @@ jobs:
           VERSION: ${{ needs.preflight.outputs.version }}
           COMMIT: ${{ needs.preflight.outputs.commit }}
           RUN_ID: ${{ github.run_id }}
-        run: node scripts/desktop-release-manifest.js verify --directory dist-release --version "$VERSION" --commit "$COMMIT" --run-id "$RUN_ID"
+        run: node --experimental-strip-types scripts/desktop-release-manifest.ts verify --directory dist-release --version "$VERSION" --commit "$COMMIT" --run-id "$RUN_ID"
 
       - name: create a draft Release without replacing published content
         env:

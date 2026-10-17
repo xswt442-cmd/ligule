@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml } from '../core/node_modules/yaml/dist/index.js';
 import { changelogSection, desktopDownloadTable, releaseNotesForTag } from '../scripts/release-notes.js';
-import { createDesktopReleaseManifest, verifyDesktopReleaseManifests } from '../scripts/desktop-release-manifest.js';
+import { createDesktopReleaseManifest, verifyDesktopReleaseManifests } from '../scripts/desktop-release-manifest.ts';
 import { githubAssetName, verifyDesktopDraft } from '../scripts/verify-desktop-draft.js';
 import { prepareRelease, requestedVersionAtRoot, resolveVersion } from '../scripts/release-version.js';
 
@@ -36,7 +36,17 @@ const CHANGELOG = `# 更新记录 / Changelog
 Initial public release.
 `;
 
-async function writeJson(path, value) {
+type WorkflowStep = { name?: string; run?: string; uses?: string; with?: Record<string, any> };
+type WorkflowJob = {
+  steps: WorkflowStep[];
+  strategy: any;
+  needs: any;
+  permissions: any;
+  [key: string]: any;
+};
+type Workflow = { on: any; jobs: Record<string, WorkflowJob>; permissions: any };
+
+async function writeJson(path: string, value: unknown): Promise<void> {
   await mkdir(join(path, '..'), { recursive: true });
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }
@@ -73,7 +83,7 @@ test('CLI preparation changes only CLI files and leaves Desktop files byte-for-b
   const directory = await fixture();
   try {
     const desktopFiles = ['desktop/package.json', 'desktop/frontend/package.json', 'desktop/CHANGELOG.md'];
-    const before = await Promise.all(desktopFiles.map(async (path) => [path, await readFile(join(directory, path))]));
+    const before = await Promise.all(desktopFiles.map(async (path): Promise<[string, Buffer]> => [path, await readFile(join(directory, path))]));
     const result = prepareRelease(directory, 'cli', 'patch');
     assert.equal(result.version, '0.0.2');
     assert.equal(result.tag, 'cli-v0.0.2');
@@ -93,7 +103,7 @@ test('Desktop preparation changes only Desktop installer metadata and its change
   const directory = await fixture();
   try {
     const cliFiles = ['tui/package.json', 'tui/src/version.ts', 'tui/CHANGELOG.md', 'desktop/frontend/package.json'];
-    const before = await Promise.all(cliFiles.map(async (path) => [path, await readFile(join(directory, path))]));
+    const before = await Promise.all(cliFiles.map(async (path): Promise<[string, Buffer]> => [path, await readFile(join(directory, path))]));
     const lock = await readFile(join(directory, 'pnpm-lock.yaml'));
     const result = prepareRelease(directory, 'desktop', 'patch');
     assert.equal(result.version, '2.4.2');
@@ -250,13 +260,13 @@ test('Desktop release manifests require Windows and Linux installers and bind th
 
     const linuxManifestPath = join(output, 'linux-x64', 'desktop-release-manifest-linux-x64.json');
     const linuxManifestBytes = await readFile(linuxManifestPath);
-    const extraAssetManifest = JSON.parse(linuxManifestBytes);
+    const extraAssetManifest = JSON.parse(linuxManifestBytes.toString('utf8'));
     extraAssetManifest.assets.push({ name: 'unexpected.dmg', sha256: '0'.repeat(64) });
     await writeFile(linuxManifestPath, `${JSON.stringify(extraAssetManifest, null, 2)}\n`);
     assert.throws(() => verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit, runId: '67890' }), /unexpected installer count/);
     await writeFile(linuxManifestPath, linuxManifestBytes);
 
-    const malformedLinux = JSON.parse(linuxManifestBytes);
+    const malformedLinux = JSON.parse(linuxManifestBytes.toString('utf8'));
     malformedLinux.assets[0].name = malformedLinux.assets[1].name;
     await writeFile(linuxManifestPath, `${JSON.stringify(malformedLinux, null, 2)}\n`);
     assert.throws(() => verifyDesktopReleaseManifests({ directory: output, version: '2.4.2', commit, runId: '67890' }), /exactly one \.AppImage installer/);
@@ -297,7 +307,9 @@ test('published Desktop draft verification accepts GitHub-normalized names but r
     for (const file of ['SHA256SUMS', 'desktop-release-manifest.json']) {
       await copyFile(join(artifacts, file), join(draft, file));
     }
-    const manifest = JSON.parse(await readFile(join(artifacts, 'desktop-release-manifest.json'), 'utf8'));
+    const manifest = JSON.parse(await readFile(join(artifacts, 'desktop-release-manifest.json'), 'utf8')) as {
+      assets: { target: string; name: string }[];
+    };
     for (const asset of manifest.assets) {
       await copyFile(join(artifacts, asset.target, asset.name), join(draft, githubAssetName(asset.name)));
     }
@@ -307,6 +319,7 @@ test('published Desktop draft verification accepts GitHub-normalized names but r
     assert.throws(() => verifyDesktopDraft(draft, tag, 'b'.repeat(40)), /source commit/);
 
     const win = manifest.assets.find((asset) => asset.target === 'windows-x64');
+    assert.ok(win);
     const winName = githubAssetName(win.name);
     await writeFile(join(draft, winName), 'tampered installer');
     assert.throws(() => verifyDesktopDraft(draft, tag, commit), /SHA-256 mismatch/);
@@ -326,7 +339,7 @@ test('published Desktop draft verification accepts GitHub-normalized names but r
 });
 
 test('release workflows isolate CLI publication from Desktop draft releases and build process tests after compilation', () => {
-  const workflow = (name) => parseYaml(readFileSync(new URL(`../.github/workflows/${name}.yml`, import.meta.url), 'utf8'));
+  const workflow = (name: string): Workflow => parseYaml(readFileSync(new URL(`../.github/workflows/${name}.yml`, import.meta.url), 'utf8')) as Workflow;
   const tag = workflow('tag');
   const publish = workflow('publish');
   const release = workflow('release');
@@ -338,16 +351,17 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
   assert.equal(tag.permissions.contents, 'read');
   assert.deepEqual(tag.jobs['create-tag'].permissions, { actions: 'read', contents: 'write' });
   assert.deepEqual(tag.on.workflow_dispatch.inputs.product.options, ['cli', 'desktop']);
-  assert.equal(tag.jobs['create-tag'].steps.find((step) => step.uses === 'actions/setup-node@v5').with['package-manager-cache'], false);
-  for (const [workflowConfig, jobName] of [[publish, 'npm'], [publish, 'github-notes'], [release, 'preflight'], [release, 'draft'], [release, 'publish']]) {
+  assert.equal(tag.jobs['create-tag'].steps.find((step) => step.uses === 'actions/setup-node@v5')?.with?.['package-manager-cache'], false);
+  const setupJobs: [Workflow, string][] = [[publish, 'npm'], [publish, 'github-notes'], [release, 'preflight'], [release, 'draft'], [release, 'publish']];
+  for (const [workflowConfig, jobName] of setupJobs) {
     const setup = workflowConfig.jobs[jobName].steps.find((step) => step.uses === 'actions/setup-node@v5');
-    assert.equal(setup?.with['package-manager-cache'], false,
+    assert.equal(setup?.with?.['package-manager-cache'], false,
       `${jobName} must disable pnpm auto-caching when pnpm is not installed`);
   }
   const createTag = tag.jobs['create-tag'].steps.map((step) => step.run ?? '').join('\n');
   assert.doesNotMatch(JSON.stringify(tag), /gh pr create|release\/\$\{tag\}|release\/\$\{TAG\}|pull-requests: write|git push origin "\$BRANCH"/i,
     'Tag workflow must not create product-specific PRs or version branches');
-  assert.equal(tag.jobs['create-tag'].steps[0].with.ref, '${{ github.sha }}');
+  assert.equal(tag.jobs['create-tag'].steps[0].with?.ref, '${{ github.sha }}');
   assert.match(createTag, /test "\$GITHUB_REF" = refs\/heads\/main/);
   assert.match(createTag, /package\.json; else manifest=desktop\/package\.json/);
   assert.match(createTag, /node scripts\/release-notes\.js "\$TAG"/);
@@ -362,7 +376,7 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
   const cliNotesJob = publish.jobs['github-notes'];
   assert.deepEqual(cliNotesJob.needs, ['preflight', 'npm']);
   assert.equal(cliNotesJob.permissions.contents, 'write');
-  assert.equal(cliNotesJob.steps[0].with.ref, '${{ needs.preflight.outputs.commit }}');
+  assert.equal(cliNotesJob.steps[0].with?.ref, '${{ needs.preflight.outputs.commit }}');
   const cliNotesScript = cliNotesJob.steps.map((step) => step.run ?? '').join('\n');
   assert.match(cliNotesScript, /npm view "ligule@\$\{VERSION\}" version/);
   assert.match(cliNotesScript, /release-notes\.js "\$TAG"/);
@@ -385,7 +399,8 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
     'the OIDC publication job consumes the already checked registry result and does not depend on an uninstalled helper');
   assert.equal(publish.jobs.npm.needs.includes('registry-check'), true);
   const registrySteps = publish.jobs['registry-check'].steps;
-  const registryCommand = registrySteps.find((step) => step.name === 'compare the package tarball with the registry').run;
+  const registryCommand = registrySteps.find((step) => step.name === 'compare the package tarball with the registry')?.run;
+  assert.ok(registryCommand);
   assert.match(registryCommand, /pnpm --filter ligule run --silent registry-version "ligule@/);
   assert.doesNotMatch(registryCommand, /registry-version --/);
   assert.ok(registrySteps.some((step) => step.run === 'pnpm install --frozen-lockfile'));
@@ -399,28 +414,29 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
   assert.equal(release.on.workflow_dispatch.inputs.publish.default, false);
   assert.match(JSON.stringify(release.jobs.preflight), /desktop-v/);
   assert.match(JSON.stringify(release.jobs.preflight), /git merge-base --is-ancestor/);
-  assert.equal(release.jobs.build.steps[0].with.ref, '${{ needs.preflight.outputs.commit }}');
-  assert.deepEqual(release.jobs.build.strategy.matrix.include.map(({ target }) => target), [
+  assert.equal(release.jobs.build.steps[0].with?.ref, '${{ needs.preflight.outputs.commit }}');
+  assert.deepEqual(release.jobs.build.strategy.matrix.include.map(({ target }: { target: string }) => target), [
     'windows-x64', 'linux-x64',
   ]);
   assert.equal(ci.jobs.desktop['continue-on-error'], "${{ startsWith(matrix.id, 'macos-') }}");
   assert.equal(ci.jobs.credentials['continue-on-error'], "${{ startsWith(matrix.os, 'macos-') }}");
   assert.equal(ci.on.workflow_dispatch.inputs.include_macos.default, false);
-  const matrixVariants = (expression) => [...expression.matchAll(/'(\[[\s\S]*?\])'/g)].map(([, json]) => JSON.parse(json));
+  const matrixVariants = (expression: string): ({ id?: string } | string)[][] => [...expression.matchAll(/'(\[[\s\S]*?\])'/g)]
+    .map(([, json]) => JSON.parse(json) as ({ id?: string } | string)[]);
   assert.match(ci.jobs.credentials.strategy.matrix.os, /github\.event_name == 'workflow_dispatch' && inputs\.include_macos/);
   assert.deepEqual(matrixVariants(ci.jobs.credentials.strategy.matrix.os), [
     ['windows-latest', 'ubuntu-22.04', 'macos-15', 'macos-15-intel'],
     ['windows-latest', 'ubuntu-22.04'],
   ]);
   assert.match(ci.jobs.desktop.strategy.matrix.include, /github\.event_name == 'workflow_dispatch' && inputs\.include_macos/);
-  assert.deepEqual(matrixVariants(ci.jobs.desktop.strategy.matrix.include).map((matrix) => matrix.map(({ id }) => id)), [
+  assert.deepEqual(matrixVariants(ci.jobs.desktop.strategy.matrix.include).map((matrix) => matrix.map((item) => typeof item === 'string' ? item : item.id)), [
     ['windows-x64', 'linux-x64', 'macos-arm64', 'macos-x64'],
     ['windows-x64', 'linux-x64'],
   ]);
   assert.doesNotMatch(JSON.stringify(release.jobs.draft), /macos|\.dmg/i,
     'unverified macOS installers must not enter the formal Desktop release asset set');
   const draft = release.jobs.draft.steps.map((step) => step.run ?? '').join('\n');
-  assert.match(draft, /desktop-release-manifest\.js verify/);
+  assert.match(draft, /desktop-release-manifest\.ts verify/);
   assert.match(draft, /release-notes\.js "\$TAG" --manifest dist-release\/desktop-release-manifest\.json/);
   assert.match(draft, /gh release create "\$TAG" --verify-tag[^\n]*--draft/);
   assert.match(draft, /refusing to modify published Release/);
@@ -436,7 +452,7 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
   assert.equal(release.jobs.build.if, '${{ !inputs.publish }}');
   assert.equal(release.jobs.draft.if, '${{ !inputs.publish }}');
   assert.deepEqual(release.jobs.publish.needs, ['preflight', 'publish-preflight']);
-  assert.equal(release.jobs.publish.steps[0].with.ref, '${{ github.sha }}');
+  assert.equal(release.jobs.publish.steps[0].with?.ref, '${{ github.sha }}');
   assert.doesNotMatch(JSON.stringify(release.jobs.publish), /actions\/download-artifact/);
   assert.match(publishDesktop, /PATCH .*releases\/\$\{release_id\}.*draft=false/);
 

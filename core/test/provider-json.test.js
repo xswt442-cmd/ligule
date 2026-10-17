@@ -5,7 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createChatCompletionsProvider } from '../dist/model/chat-completions.js';
 import { createMessagesProvider } from '../dist/model/messages.js';
 import { createKernel, createLoop } from '../dist/index.js';
-import { listenFetchable } from './helpers/port.js';
+import { listenFetchable } from './helpers/port.ts';
 
 const KEY_NAME = 'LIGULE_NONSTREAM_TEST_KEY';
 const RETRY = { maxAttempts: 1, baseDelayMs: 0, retry429: false, retry5xx: false, retryTransport: false };

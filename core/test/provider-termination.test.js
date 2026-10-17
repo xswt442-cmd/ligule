@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { createChatCompletionsProvider } from '../dist/model/chat-completions.js';
 import { createMessagesProvider } from '../dist/model/messages.js';
-import { listenFetchable } from './helpers/port.js';
+import { listenFetchable } from './helpers/port.ts';
 
 async function responseEvents(api, frames) {
   const server = createServer(async (request, response) => {

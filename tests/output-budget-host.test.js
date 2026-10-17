@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createConnection } from '../core/dist/host/connection.js';
-import { listenFetchable } from '../test/helpers/port.js';
+import { listenFetchable } from '../test/helpers/port.ts';
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
 

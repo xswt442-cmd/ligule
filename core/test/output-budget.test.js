@@ -4,7 +4,7 @@ import { providerFromConfig } from '../dist/host/provider.js';
 import { createConfig } from '../dist/kernel/config.js';
 import { editableField, encodeValue } from '../dist/kernel/config-edit.js';
 import { createServer } from 'node:http';
-import { listenFetchable } from './helpers/port.js';
+import { listenFetchable } from './helpers/port.ts';
 
 const official = { api: 'chat-completions', baseURL: 'https://api.deepseek.com/v1', model: 'deepseek-flash' };
 

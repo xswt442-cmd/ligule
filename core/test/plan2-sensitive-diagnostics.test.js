@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { createChatCompletionsProvider, DEFAULT_RETRY } from '../dist/index.js';
-import { listenFetchable } from './helpers/port.js';
+import { listenFetchable } from './helpers/port.ts';
 
 const ARGUMENT_SENTINEL = 'synthetic-tool-argument-sentinel-not-a-credential';
 const API_KEY_ENV = `LIGULE_PLAN2_DIAGNOSTIC_${randomUUID().replaceAll('-', '')}`;

@@ -1,17 +1,17 @@
-// 检查客户端如何匹配协议响应、处理超时并在重连时清理等待中的调用。
+// 检查客户端如何匹配响应、处理超时并清理重连前的等待调用。
 import assert from 'node:assert/strict';
-import { createClient } from '../src/protocol.ts';
+import { createClient, type Frame, type Transport } from '../src/protocol.ts';
 
-const sent = [];
-const handlers = [];
-const transport = {
-  send: (text) => sent.push(JSON.parse(text)),
-  onFrame: (handle) => handlers.push(handle),
+const sent: Frame[] = [];
+const handlers: Array<(text: string) => void> = [];
+const transport: Transport = {
+  send: (text: string) => sent.push(JSON.parse(text) as Frame),
+  onFrame: (handle: (text: string) => void) => handlers.push(handle),
   onLog: () => undefined,
 };
 const client = createClient(transport);
 
-const reply = (frame) => handlers[0](JSON.stringify(frame));
+const reply = (frame: Frame) => handlers[0](JSON.stringify(frame));
 
 const answered = client.call('status.get', { sessionId: 's1' });
 assert.equal(sent[0].method, 'status.get');
@@ -33,12 +33,12 @@ reply({ id: sent[2].id, result: { events: [] } });
 assert.equal(client.counts().received, 3);
 
 const reconnectTimeout = client.call('workspaces.list', {}, 20);
-const reconnectId = sent.at(-1).id;
+const reconnectId = sent.at(-1)!.id;
 await assert.rejects(reconnectTimeout, { code: 'host_unanswered' });
 assert.equal(client.waiting(), 0, 'an unanswered workspace request releases its waiter');
 reply({ id: reconnectId, result: { workspaces: [] } });
 const reconnectRetry = client.call('workspaces.list', {}, 20);
-reply({ id: sent.at(-1).id, result: { workspaces: [] } });
+reply({ id: sent.at(-1)!.id, result: { workspaces: [] } });
 assert.deepEqual(await reconnectRetry, { workspaces: [] }, 'a subsequent reconnect request can complete');
 
 // Host 重启时应以稳定错误结束所有未完成调用。
@@ -55,7 +55,7 @@ reply({ id: sent[sent.length - 2].id, result: { iterations: 1 } });
 assert.equal(client.counts().received, receivedBeforeLateReply + 1, '迟到的那一份答复仍然被读掉，只是没人等它');
 
 // 通知没有请求 ID，不应结束任何等待中的调用。
-let seen = '';
+let seen: string | undefined = '';
 client.onNotification((message) => {
   seen = message.notify;
 });

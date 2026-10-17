@@ -2,6 +2,10 @@
   "files": [],
   "references": [
     { "path": "./core" },
-    { "path": "./tui" }
+    { "path": "./tui" },
+    { "path": "./scripts" },
+    { "path": "./test" },
+    { "path": "./tests" },
+    { "path": "./tui/test" }
   ]
 }

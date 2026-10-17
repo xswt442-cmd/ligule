@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { open, parseSse, DEFAULT_RETRY } from '../dist/model/http.js';
-import { listenFetchable } from './helpers/port.js';
+import { listenFetchable } from './helpers/port.ts';
 
 const SENTINEL = 'PLAN2_SYNTHETIC_PRIVATE_SENTINEL_NEVER_LOG';
 const RETRY = { ...DEFAULT_RETRY, maxAttempts: 1, baseDelayMs: 1 };

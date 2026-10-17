@@ -6,19 +6,47 @@ import { fileURLToPath } from 'node:url';
 const TARGETS = {
   'windows-x64': { extensions: ['.exe'], architecture: 'x64' },
   'linux-x64': { extensions: ['.AppImage', '.deb'], architecture: 'x64' },
+} as const;
+
+type DesktopTarget = keyof typeof TARGETS;
+type ReleaseAsset = { name: string; sha256: string; target?: DesktopTarget; architecture?: string };
+type TargetReleaseManifest = {
+  schemaVersion: 1;
+  product: 'desktop';
+  tag: string;
+  version: string;
+  architecture: string;
+  target: DesktopTarget;
+  sourceCommit: string;
+  workflowRunId: string;
+  assets: ReleaseAsset[];
 };
 
-function sha256(path) {
+function sha256(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
-function requireTarget(target) {
+function requireTarget(target: string): typeof TARGETS[DesktopTarget] {
   if (!Object.hasOwn(TARGETS, target)) throw new Error(`unsupported desktop target: ${target}`);
-  const config = TARGETS[target];
+  const config = TARGETS[target as DesktopTarget];
   return config;
 }
 
-export function createDesktopReleaseManifest({ directory, outputDirectory = directory, version, target, commit, runId }) {
+export function createDesktopReleaseManifest({
+  directory,
+  outputDirectory = directory,
+  version,
+  target,
+  commit,
+  runId,
+}: {
+  directory: string;
+  outputDirectory?: string;
+  version: string;
+  target: string;
+  commit: string;
+  runId: string | number;
+}): TargetReleaseManifest {
   const config = requireTarget(target);
   mkdirSync(outputDirectory, { recursive: true });
   if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) throw new Error(`invalid version: ${version}`);
@@ -40,12 +68,12 @@ export function createDesktopReleaseManifest({ directory, outputDirectory = dire
     return { name: publishedName, sha256: sha256(destination) };
   });
   const manifest = {
-    schemaVersion: 1,
-    product: 'desktop',
+    schemaVersion: 1 as const,
+    product: 'desktop' as const,
     tag: `desktop-v${version}`,
     version,
     architecture: config.architecture,
-    target,
+    target: target as DesktopTarget,
     sourceCommit: commit,
     workflowRunId: String(runId),
     assets,
@@ -55,11 +83,16 @@ export function createDesktopReleaseManifest({ directory, outputDirectory = dire
   return manifest;
 }
 
-export function verifyDesktopReleaseManifests({ directory, version, commit, runId }) {
-  const expectedTargets = Object.keys(TARGETS).sort();
+export function verifyDesktopReleaseManifests({ directory, version, commit, runId }: {
+  directory: string;
+  version: string;
+  commit: string;
+  runId: string | number;
+}): { targets: DesktopTarget[]; assets: string[] } {
+  const expectedTargets = Object.keys(TARGETS).sort() as DesktopTarget[];
   const allowedRootFiles = new Set(['SHA256SUMS', 'desktop-release-manifest.json']);
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    if (entry.isDirectory() && !expectedTargets.includes(entry.name)) {
+    if (entry.isDirectory() && !expectedTargets.includes(entry.name as DesktopTarget)) {
       throw new Error(`unexpected Desktop release target: ${entry.name}`);
     }
     if (!entry.isDirectory() && !allowedRootFiles.has(entry.name)) {
@@ -69,15 +102,19 @@ export function verifyDesktopReleaseManifests({ directory, version, commit, runI
   const manifests = expectedTargets.map((expectedTarget) => {
     const manifestPath = join(directory, expectedTarget, `desktop-release-manifest-${expectedTarget}.json`);
     try {
-      return { expectedTarget, directory: join(directory, expectedTarget), value: JSON.parse(readFileSync(manifestPath, 'utf8')) };
+      return {
+        expectedTarget,
+        directory: join(directory, expectedTarget),
+        value: JSON.parse(readFileSync(manifestPath, 'utf8')) as TargetReleaseManifest,
+      };
     } catch (error) {
       throw new Error(`missing or invalid manifest for ${expectedTarget}`, { cause: error });
     }
   });
   const targets = manifests.map(({ value }) => value.target);
-  const names = new Set();
+  const names = new Set<string>();
   const checksums = [];
-  const consolidatedAssets = [];
+  const consolidatedAssets: (ReleaseAsset & { target: DesktopTarget; architecture: string })[] = [];
   for (const { expectedTarget, directory: targetDirectory, value: manifest } of manifests) {
     const config = requireTarget(manifest.target);
     if (manifest.schemaVersion !== 1 || manifest.product !== 'desktop' || manifest.target !== expectedTarget
@@ -129,7 +166,7 @@ export function verifyDesktopReleaseManifests({ directory, version, commit, runI
   return { targets, assets: [...names].sort() };
 }
 
-function argumentsMap(args) {
+function argumentsMap(args: string[]): Map<string, string> {
   const options = new Map();
   for (let index = 0; index < args.length; index += 2) {
     if (!args[index]?.startsWith('--') || args[index + 1] === undefined) throw new Error(`invalid argument near ${args[index]}`);
@@ -144,12 +181,24 @@ if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(
   const directory = resolve(options.get('directory') ?? 'desktop/release');
   const outputDirectory = resolve(options.get('output') ?? directory);
   if (command === 'create') {
-    const manifest = createDesktopReleaseManifest({ directory, outputDirectory, version: options.get('version'), target: options.get('target'), commit: options.get('commit'), runId: options.get('run-id') });
+    const manifest = createDesktopReleaseManifest({
+      directory,
+      outputDirectory,
+      version: options.get('version') as string,
+      target: options.get('target') as string,
+      commit: options.get('commit') as string,
+      runId: options.get('run-id') as string,
+    });
     process.stdout.write(`${JSON.stringify(manifest)}\n`);
   } else if (command === 'verify') {
-    const result = verifyDesktopReleaseManifests({ directory, version: options.get('version'), commit: options.get('commit'), runId: options.get('run-id') });
+    const result = verifyDesktopReleaseManifests({
+      directory,
+      version: options.get('version') as string,
+      commit: options.get('commit') as string,
+      runId: options.get('run-id') as string,
+    });
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } else {
-    throw new Error('usage: node scripts/desktop-release-manifest.js <create|verify> --directory PATH --version X.Y.Z --target TARGET --commit SHA --run-id ID');
+    throw new Error('usage: node --experimental-strip-types scripts/desktop-release-manifest.ts <create|verify> --directory PATH --version X.Y.Z --target TARGET --commit SHA --run-id ID');
   }
 }

@@ -39,7 +39,8 @@
   "files": ["dist", "modes", "README.md", "LICENSE"],
   "scripts": {
     "build": "tsc -b tsconfig.json",
-    "test": "pnpm run build && node --test --import ../test/hooks/isolated-data-root.mjs test/*.test.js"
+    "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
+    "test": "pnpm run build && pnpm run typecheck:test && node --experimental-strip-types --test --import ../test/hooks/isolated-data-root.mjs test/*.test.js"
   },
   "engines": {
     "node": ">=24"

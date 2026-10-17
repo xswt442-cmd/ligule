@@ -8,7 +8,7 @@ import { createElement } from 'react';
 import { render } from 'ink';
 import { completeFrame } from './helpers/frames.js';
 import { App } from '../dist/tui/app.js';
-import { waitFor, withTuiHost } from './helpers/tui-host.js';
+import { waitFor, withTuiHost } from './helpers/tui-host.ts';
 
 async function withApp(context, run) {
   const stdout = Object.assign(new PassThrough(), { columns: 80, rows: 24, isTTY: true });

@@ -6,7 +6,7 @@ import { appendFile, cp, mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { waitFor, withTuiHost } from './helpers/tui-host.js';
+import { waitFor, withTuiHost } from './helpers/tui-host.ts';
 import { completeFrame } from './helpers/frames.js';
 import { HISTORY_LIMIT, historyPathOf, loadHistory, pushHistory, rememberHistory } from '../../core/dist/kernel/input-history.js';
 import { SEARCH_ROWS, searchHistory } from '../dist/tui/history.js';
