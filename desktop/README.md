@@ -9,7 +9,7 @@ Ligule Desktop 提供会话、模型服务和审批设置的图形界面。它�
 - [项目主页与功能介绍](../README.md)
 - [桌面版使用手册](../docs/guide.zh-CN.md)
 - [Desktop 更新记录](CHANGELOG.md)
-- [桌面开发与验收说明](../docs/development/DESKTOP.zh-cn.md)
+- [贡献与验证](../docs/development/CONTRIBUTING.zh-cn.md)
 - [维护者发行流程](../docs/development/RELEASE.md)
 
 桌面安装包和校验信息见 [GitHub Releases](https://github.com/xswt442-cmd/ligule/releases/latest)。

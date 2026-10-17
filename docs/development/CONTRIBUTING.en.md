@@ -35,7 +35,7 @@ pnpm --filter ligule-desktop-frontend run build
 pnpm --filter ligule-desktop run dev
 ```
 
-Installer builds, real-window checks, and native platform acceptance steps are in the [desktop development guide](DESKTOP.en.md).
+Cross-platform installers, real-window checks, and native acceptance require the matching Electron runtime. Before running acceptance, confirm that the build target and runtime architecture match the operating system; report platform coverage from checks actually run.
 
 ## Keep changes verifiable
 

@@ -57,7 +57,6 @@ Configure services and models in Desktop Settings. The CLI/TUI use the same conf
 - [本地 MCP 指南](docs/mcp/mcp-guide.zh-CN.md) · [Local MCP guide](docs/mcp/mcp-guide.en.md)
 - [架构说明](docs/development/ARCHITECTURE.zh-cn.md) · [Architecture](docs/development/ARCHITECTURE.en.md)
 - [贡献与验证](docs/development/CONTRIBUTING.zh-cn.md) · [Contributing and checks](docs/development/CONTRIBUTING.en.md)
-- [桌面开发说明](docs/development/DESKTOP.zh-cn.md) · [Desktop development](docs/development/DESKTOP.en.md)
 - [CLI/TUI changelog](tui/CHANGELOG.md) · [Desktop changelog](desktop/CHANGELOG.md)
 - [Maintainer release procedure](docs/development/RELEASE.md)
 

@@ -24,14 +24,11 @@ const bilingualPairs = [
   [join(repoRoot, 'docs', 'development', 'ARCHITECTURE.zh-cn.md'), join(repoRoot, 'docs', 'development', 'ARCHITECTURE.en.md')],
   [join(repoRoot, 'docs', 'development', 'GLOSSARY.zh-cn.md'), join(repoRoot, 'docs', 'development', 'GLOSSARY.en.md')],
   [join(repoRoot, 'docs', 'development', 'CONTRIBUTING.zh-cn.md'), join(repoRoot, 'docs', 'development', 'CONTRIBUTING.en.md')],
-  [join(repoRoot, 'docs', 'development', 'DESKTOP.zh-cn.md'), join(repoRoot, 'docs', 'development', 'DESKTOP.en.md')],
 ];
 const maintainedDocs = [
   ...bilingualPairs.flatMap((pair) => pair),
   join(repoRoot, 'tui', 'CHANGELOG.md'),
   join(repoRoot, 'docs', 'development', 'RELEASE.md'),
-  join(repoRoot, 'docs', 'development', 'DESKTOP.zh-cn.md'),
-  join(repoRoot, 'docs', 'development', 'DESKTOP.en.md'),
   join(repoRoot, 'tui', 'docs', 'guide.zh-CN.md'),
   join(repoRoot, 'tui', 'docs', 'guide.en.md'),
 ];
@@ -187,8 +184,6 @@ test('development 文档文件名使用大写主体与小写语言标记', () =>
     'ARCHITECTURE.zh-cn.md',
     'CONTRIBUTING.en.md',
     'CONTRIBUTING.zh-cn.md',
-    'DESKTOP.en.md',
-    'DESKTOP.zh-cn.md',
     'GLOSSARY.en.md',
     'GLOSSARY.zh-cn.md',
     'RELEASE.md',

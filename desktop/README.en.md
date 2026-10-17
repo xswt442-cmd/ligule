@@ -9,7 +9,7 @@ Ligule Desktop provides a graphical interface for sessions, model services, and 
 - [Project homepage and product overview](../README.en.md)
 - [Desktop user guide](../docs/guide.en.md)
 - [Desktop changelog](CHANGELOG.md)
-- [Desktop development and acceptance](../docs/development/DESKTOP.en.md)
+- [Contributing and checks](../docs/development/CONTRIBUTING.en.md)
 - [Maintainer release procedure](../docs/development/RELEASE.md)
 
 Desktop installers and checksums are available from [GitHub Releases](https://github.com/xswt442-cmd/ligule/releases/latest).

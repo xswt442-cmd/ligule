@@ -35,7 +35,7 @@ pnpm --filter ligule-desktop-frontend run build
 pnpm --filter ligule-desktop run dev
 ```
 
-安装包构建、真实窗口和各平台原生验收步骤见[桌面开发说明](DESKTOP.zh-cn.md)。
+跨平台安装包、真实窗口和平台原生验收使用对应平台的 Electron 运行时。运行验收前，确认构建目标、运行时架构与当前操作系统一致；只根据实际执行结果记录平台覆盖情况。
 
 ## 让改动可核验
 

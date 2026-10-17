@@ -1,6 +1,6 @@
 # Desktop
 
-`desktop/` 包含 Electron Main、沙盒 Preload 与 React Renderer，仓库根指南同样适用。前端规则见 [frontend/AGENTS.md](frontend/AGENTS.md)。构建和运行说明见 [桌面开发说明](../docs/development/DESKTOP.zh-cn.md)。桌面目录不进入 npm 包。
+`desktop/` 包含 Electron Main、沙盒 Preload 与 React Renderer，仓库根指南同样适用。前端规则见 [frontend/AGENTS.md](frontend/AGENTS.md)。构建和运行说明见 [贡献与验证](../docs/development/CONTRIBUTING.zh-cn.md)。桌面目录不进入 npm 包。
 
 `electron/` 的 Main 只管理窗口、原生交互、受管理的 Host 进程和不透明协议帧。独立 Node 24 Host 是唯一业务运行时；Kernel、Policy、Session、配置与凭据由 Host 处理。Main 不导入这些业务模块，也不改写协议帧的业务字段。
 

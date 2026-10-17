@@ -57,7 +57,6 @@ ligule run "检查项目结构并提出建议"
 - [本地 MCP 指南（中文）](docs/mcp/mcp-guide.zh-CN.md) · [Local MCP guide](docs/mcp/mcp-guide.en.md)
 - [架构说明](docs/development/ARCHITECTURE.zh-cn.md) · [Architecture](docs/development/ARCHITECTURE.en.md)
 - [贡献与验证](docs/development/CONTRIBUTING.zh-cn.md) · [Contributing and checks](docs/development/CONTRIBUTING.en.md)
-- [桌面开发说明](docs/development/DESKTOP.zh-cn.md) · [Desktop development](docs/development/DESKTOP.en.md)
 - [CLI/TUI 更新记录](tui/CHANGELOG.md) · [桌面版更新记录](desktop/CHANGELOG.md)
 - [维护者发行流程](docs/development/RELEASE.md)
 
