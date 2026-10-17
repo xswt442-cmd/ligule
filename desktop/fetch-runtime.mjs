@@ -8,6 +8,7 @@ import { existsSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertSymlinksInside, pruneForeignNativeDirectories } from '../scripts/runtime-tree.js';
+import { assertCoreRuntimeMatches } from '../scripts/core-runtime.js';
 
 const root = resolve(fileURLToPath(new URL('.', import.meta.url)), '..');
 const vendor = join(root, 'desktop', 'vendor');
@@ -128,6 +129,7 @@ async function fetchAppTree() {
     await pruneForeignNativeDirectories(join(projectedApp, 'node_modules'), target);
     await assertSymlinksInside(projectedApp);
     await assertRuntimeAppContents(projectedApp);
+    await assertCoreRuntimeMatches(join(root, 'core'), join(projectedApp, 'node_modules', '@ligule', 'core'));
 
     await rm(app, { recursive: true, force: true });
     await rename(projectedApp, app);

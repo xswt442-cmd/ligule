@@ -100,6 +100,8 @@ pnpm --filter ligule-desktop run build
 
 安装包写入 `desktop/release/`。目标平台的运行时必须在对应平台和架构上准备，不能复用其他平台生成的 `vendor/`。
 
+Core 修改后重新执行 `pnpm run build:core` 和 `pnpm run prepare-runtime`。部署、构建与 `check-runtime.mjs` 会逐文件核对 Core 的 `dist/`、`modes/`、README 和许可证；运行树过时、缺失或多出文件时直接失败。入口文件存在不能代替运行树内容一致。
+
 ## 应用图标
 
 [`assets/app-icon.png`](assets/app-icon.png) 是源图。在 Windows 上重新生成桌面图标：

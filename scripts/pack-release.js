@@ -3,6 +3,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
+import { assertCoreRuntimeMatches } from './core-runtime.js';
+import { assertSymlinksInside } from './runtime-tree.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 
@@ -55,6 +57,8 @@ export async function packRelease(destination) {
   const stagedPackage = join(temporaryRoot, 'package');
   try {
     deployTui(stagedPackage);
+    await assertSymlinksInside(stagedPackage);
+    await assertCoreRuntimeMatches(join(root, 'core'), join(stagedPackage, 'node_modules', '@ligule', 'core'));
     await writeFile(join(stagedPackage, 'package.json'), `${JSON.stringify(finalManifest, null, 2)}\n`, 'utf8');
     const dryRun = execPnpm(['--dir', stagedPackage, 'pack', '--dry-run', '--json', '--ignore-workspace'], { cwd: root, encoding: 'utf8' });
     const sourceInfo = packInfo(dryRun, 'deployed dry run');

@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { assertNoForeignNativeDirectories, assertSymlinksInside } from '../scripts/runtime-tree.js';
+import { assertCoreRuntimeMatches } from '../scripts/core-runtime.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const desktopRoot = join(root, 'desktop');
@@ -44,6 +45,7 @@ if (vendoredPackage.name !== packageJson.name || vendoredPackage.version !== pac
 }
 
 const coreRoot = join(app, 'node_modules', '@ligule', 'core');
+await assertCoreRuntimeMatches(join(root, 'core'), coreRoot);
 const hostEntry = join(coreRoot, 'dist', 'host', 'desktop-entry.js');
 const shippedMode = join(coreRoot, 'modes', 'minimal.toml');
 if (!existsSync(hostEntry) || !existsSync(shippedMode)
