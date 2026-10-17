@@ -30,7 +30,6 @@ let observedCsp;
 let phase = 'startup';
 let diagnosticSnapshot;
 let rpcId = 0;
-const frames = [];
 const environmentKey = 'LIGULE_MODEL_CATALOG_KEY';
 const verifyReopen = process.env.LIGULE_MODEL_CATALOG_VERIFY_REOPEN === '1';
 
