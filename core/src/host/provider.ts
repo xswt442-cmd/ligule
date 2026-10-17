@@ -11,6 +11,7 @@ export interface HostProvider extends ModelProvider {
   readonly model: string | null;
   readonly pending?: true;
   readonly capabilities?: ProviderCapabilities;
+  readonly outputTokens?: number;
   withModel(model: string): HostProvider;
 }
 
@@ -63,6 +64,8 @@ export function providerFromConfig(config: ConfigSnapshot): HostProvider {
     model: model.model,
     ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }),
     ...(capabilities === undefined ? {} : { capabilities }),
+    ...(model.outputTokens === undefined ? {} : { outputTokens: model.outputTokens }),
+    ...(isRecord(config.limits) && config.limits.contextTokens !== undefined ? { contextTokens: config.limits.contextTokens } : {}),
     retry: retryOf(model),
   };
   if (api === 'messages') return createMessagesProvider(options);

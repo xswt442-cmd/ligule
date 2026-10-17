@@ -12,6 +12,7 @@ import {
   compactionLimitsOf,
   createCompaction,
   createConfig,
+  createKernel,
   createLoop,
   createSessionLog,
   cutPoint,
@@ -22,7 +23,7 @@ import {
 const SUMMARY = 'SUMMARY OF THE EARLIER TURNS';
 const LONG = 'x'.repeat(2000);
 const limits = { contextTokens: 4_000, compactThresholdRatio: 0.8, compactRetainRatio: 0.16, resultBytes: 16_000 };
-const kernel = { manifest: () => [], execution: () => 'serial', call: async () => ({ ok: true }) };
+const kernel = createKernel();
 const prompt = { render: () => 'the system prefix' };
 
 // 假提供方：按脚本回答。看见那句摘要指令就答摘要，否则按 script 依次交事件或抛错。
@@ -162,11 +163,17 @@ test('a provider failure that is not about length leaves the record alone', asyn
 // 本地估算修正过才谈得上压力：端点报回的真实用量比本地大时，那条线要跟着提前响（D75）。
 test('the local estimate is corrected by the usage the endpoint reports back', async () => {
   await withSession(async ({ directory, id, session }) => {
-    await session.append({ kind: 'user', text: '短' });
-    await session.append({ kind: 'assistant', text: '也短' });
+    const kernel = createKernel({ session: { directory, append: session.append.bind(session) } });
+    kernel.register({ name: 'noop', description: 'Record a completed no-op', parameters: { type: 'object', properties: {} }, run: () => ({ ok: true }) });
+    await session.append({ kind: 'user', text: '短'.repeat(200) });
+    await session.append({ kind: 'assistant', text: '也短'.repeat(200) });
     const provider = fakeProvider([
-      [{ type: 'tool-call', id: 'c1', name: 'noop', args: {} }, { type: 'usage', input: 12_000, output: 20 }],
-      [{ type: 'text', text: '第二轮' }],
+      [
+        { type: 'tool-call', id: 'c1', name: 'noop', args: {} },
+        { type: 'usage', input: 12_000, output: 20 },
+        { type: 'finish', reason: 'tool_calls' },
+      ],
+      [{ type: 'text', text: '第二轮' }, { type: 'finish', reason: 'stop' }],
     ]);
     const compaction = createCompaction({ provider, session, directory, id, limits });
     const result = await createLoop({ kernel, provider, prompt, session, compaction }).run('第三句', {});

@@ -27,8 +27,7 @@ export const DEFAULT_RETRY: RetryPolicy = Object.freeze({
   retryTransport: true,
 });
 
-// 错误详情里带的响应正文长度上限：网关出错时可能交回一整页 HTML，说明留一段就够。
-const DETAIL_BYTES = 500;
+export const SSE_DONE = Symbol('sse-done');
 
 // 提供方声明的能力上限是配置不能突破的那一条线：布尔项只能关不能开，数值项取更小的那个。
 export function resolveCapabilities(
@@ -46,7 +45,9 @@ export function resolveCapabilities(
       if (typeof value !== 'boolean') throw new KernelError('provider_capability_invalid', { detail: `${key} must be a boolean` });
       effective[key] = value && declaredValue;
     } else {
-      if (typeof value !== 'number') throw new KernelError('provider_capability_invalid', { detail: `${key} must be a number` });
+      if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+        throw new KernelError('provider_capability_invalid', { detail: `${key} must be a positive safe integer` });
+      }
       effective[key] = Math.min(value, declaredValue);
     }
   }
@@ -61,7 +62,7 @@ export function apiRoot(baseUrl: unknown): string {
   try {
     parsed = new URL(baseUrl);
   } catch {
-    throw new KernelError('provider_base_url_invalid', { detail: baseUrl });
+    throw new KernelError('provider_base_url_invalid', { detail: 'a full HTTP(S) root is required' });
   }
   if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) {
     throw new KernelError('provider_base_url_invalid', { detail: 'an HTTP(S) root without credentials, query, or fragment' });
@@ -81,6 +82,37 @@ export async function readCredential(apiKeyEnv: string): Promise<string> {
 
 function backoffMs(baseDelayMs: number, attempt: number): number {
   return baseDelayMs * 2 ** (attempt - 1) * (0.9 + Math.random() * 0.2);
+}
+
+async function httpFailureDetail(response: Response): Promise<string> {
+  const status = `HTTP ${response.status}`;
+  if (![400, 413].includes(response.status) || response.body === null) {
+    await response.body?.cancel();
+    return status;
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let text = '';
+  let remaining = 8192;
+  try {
+    while (remaining > 0) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const bytes = value.subarray(0, remaining);
+      text += decoder.decode(bytes, { stream: true });
+      remaining -= bytes.length;
+    }
+  } catch (error) {
+    if (isAbortError(error)) throw new KernelError('provider_cancelled');
+    return status;
+  } finally {
+    try { await reader.cancel(); } catch { /* Preserve the safe HTTP classification. */ }
+    reader.releaseLock();
+  }
+  // Preserve the existing one-time context recovery using a fixed classification,
+  // without carrying arbitrary gateway prose or request secrets into diagnostics.
+  return /\b(context_length_exceeded|maximum context length|context window|prompt is too long|input is too long)\b/iu.test(text)
+    ? `${status} context_length_exceeded` : status;
 }
 
 // 重试只覆盖建立响应这一步：流已经开始往外吐内容之后再重试，会把同一段内容重复交给模型。
@@ -108,10 +140,9 @@ export async function open(url: string, init: RequestInit, retry: RetryPolicy): 
     if (response.ok) return response;
     const retryable = (response.status === 429 && retry.retry429) || (response.status >= 500 && retry.retry5xx);
     if (!retryable || attempt >= retry.maxAttempts) {
-      // 网关不一定交回 JSON，状态码是这一层唯一可靠的依据，响应正文只作为说明，截一段就够。
-      const body = (await response.text()).slice(0, DETAIL_BYTES);
-      throw new KernelError('provider_http_error', { detail: `${response.status} ${body}`.trimEnd() });
+      throw new KernelError('provider_http_error', { detail: await httpFailureDetail(response) });
     }
+    await response.body?.cancel();
     await wait(attempt);
   }
 }
@@ -124,16 +155,49 @@ function isAbortError(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'name' in error && error.name === 'AbortError';
 }
 
+export async function readJson(response: Response, signal?: AbortSignal | null): Promise<unknown> {
+  if (response.body === null) throw new KernelError('provider_stream_missing');
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let completed = false;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        completed = true;
+        break;
+      }
+      if (value !== undefined) chunks.push(value);
+    }
+    if (signal?.aborted) throw new KernelError('provider_cancelled');
+  } catch (error) {
+    if (signal?.aborted || isAbortError(error)) throw new KernelError('provider_cancelled');
+    throw new KernelError('provider_stream_interrupted', { detail: 'the response body could not be read completely' });
+  } finally {
+    if (!completed) {
+      try { await reader.cancel(); } catch { /* Keep the response read classification. */ }
+    }
+    reader.releaseLock();
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+  } catch {
+    throw new KernelError('provider_stream_invalid', { detail: 'response body is not valid JSON' });
+  }
+}
+
 async function* cancelMapped(source: AsyncIterable<Uint8Array>): AsyncGenerator<Uint8Array> {
   try {
     for await (const chunk of source) yield chunk;
   } catch (error) {
     if (isAbortError(error)) throw new KernelError('provider_cancelled', { cause: error });
-    throw error;
+    throw new KernelError('provider_stream_interrupted', { detail: 'the response body could not be read completely' });
   }
 }
 
-export async function* parseSse(body: ReadableStream<Uint8Array>): AsyncGenerator<unknown> {
+export async function* parseSse(
+  body: ReadableStream<Uint8Array>, { includeDone = false }: { readonly includeDone?: boolean } = {},
+): AsyncGenerator<unknown> {
   const decoder = new TextDecoder();
   let buffer = '';
   const reader = body.getReader();
@@ -170,17 +234,21 @@ export async function* parseSse(body: ReadableStream<Uint8Array>): AsyncGenerato
         .filter((line) => line.startsWith('data:'))
         .map((line) => line.slice(5).trim())
         .join('\n');
-      if (data === '' || data === '[DONE]') continue;
+      if (data === '') continue;
+      if (data === '[DONE]') {
+        if (includeDone) yield SSE_DONE;
+        continue;
+      }
       try {
         const parsed: unknown = JSON.parse(data);
         yield parsed;
-      } catch (error) {
-        throw new KernelError('provider_stream_invalid', { cause: error, detail: data });
+      } catch {
+        throw new KernelError('provider_stream_invalid', { detail: `invalid SSE JSON (${data.length} characters)` });
       }
     }
   }
   // 流结束时还剩下没有以空行收尾的半帧：里面可能是一次没交出去的工具调用，报出来而不是悄悄丢掉。
-  if (buffer.trim() !== '') throw new KernelError('provider_stream_invalid', { detail: 'the stream ended inside a frame' });
+  if (buffer.trim() !== '') throw new KernelError('provider_stream_incomplete', { detail: 'the stream ended inside a frame' });
 }
 
 // 助手那一轮里每个调用都得有对应的结果，缺一条端点就把整份请求拒掉，而且从外面的报错看不出缺在哪一条。

@@ -26,6 +26,7 @@ const TOOL_TURN = [
   { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'call_1', name: 'read' } },
   { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"path": "note.txt"}' } },
   { type: 'content_block_stop', index: 0 },
+  { type: 'message_delta', delta: { stop_reason: 'tool_use' } },
   { type: 'message_stop' },
 ];
 
@@ -34,6 +35,7 @@ const TEXT_TURN = [
   { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
   { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'the file says so' } },
   { type: 'content_block_stop', index: 0 },
+  { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
   { type: 'message_stop' },
 ];
 
@@ -955,7 +957,7 @@ test('config.set writes one whitelisted field and reports a concurrent edit inst
       assert.equal(user.exists, true);
       assert.equal(local.version, '', '那一份项目本机覆盖还没写过：版本是空串');
       assert.ok(!JSON.stringify(first.layers).includes(home), '帧里没有文件路径：那格只说层名与版本');
-      assert.deepEqual(first.sources, { 'model.api': 'user', 'model.model': 'user', 'model.baseURL': 'none', 'model.apiKeyEnv': 'none', 'model.services': 'none', 'model.selection': 'none', 'policy.mode': 'none', 'policy.rules': 'none' }, '来源包含当前全部可写字段，未写的字段为 none');
+      assert.deepEqual(first.sources, { 'model.api': 'user', 'model.model': 'user', 'model.baseURL': 'none', 'model.apiKeyEnv': 'none', 'model.services': 'none', 'model.selection': 'none', 'model.outputTokens': 'none', 'policy.mode': 'none', 'policy.rules': 'none' }, '来源包含当前全部可写字段，未写的字段为 none');
 
       const written = await connection.request('config.set', { field: 'model.model', value: '新的', layer: 'user', version: user.version });
       assert.equal(written.created, false);

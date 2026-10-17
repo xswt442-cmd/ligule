@@ -186,7 +186,7 @@ export const METHODS = Object.freeze({
     parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
   },
   'status.get': {
-    description: 'Read what the Host currently holds for this session',
+    description: 'Read the Host state for this session, including its live phase and model output budget when a run is active',
     parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
   },
   // 工作区那份持久登记的读与写（方案 5.5.1、5.5.2、5.5.3）：清单与默认选择都在应用数据根里，
@@ -338,8 +338,8 @@ export const APPROVAL_METHOD = 'approval.request' as const;
 export const QUESTION_METHOD = 'question.request' as const;
 
 // Host 交回的通知名。delta 来自流式接收期间，event 是会话记录里刚落盘的那一条（I5：记录是唯一事实源），
-// fault 是这条连接本身的问题——一行读不出来时没有对应的请求可以答复，只能说给对端听。
-export const NOTIFICATIONS = Object.freeze(['delta', 'event', 'fault'] as const);
+// progress 是当前会话的活动快照，fault 是这条连接本身的问题——一行读不出来时没有对应的请求可以答复，只能说给对端听。
+export const NOTIFICATIONS = Object.freeze(['delta', 'event', 'fault', 'progress'] as const);
 
 for (const [name, method] of Object.entries(METHODS)) {
   // 这张表交给客户端读，子集之外的构造等于承诺一件客户端做不到的事，所以在这里当场失败。

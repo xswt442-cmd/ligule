@@ -4,8 +4,9 @@
 // 以及工具结果是一条独立的 `role:"tool"` 消息而不是并进 user 那一条。
 import { createHash } from 'node:crypto';
 import { KernelError } from '../kernel/error.js';
+import { resolveOutputTokens } from './output-budget.js';
 import {
-  apiRoot, assertAllAnswered, DEFAULT_RETRY, open, parseSse, readCredential, resolveCapabilities, resultText,
+  apiRoot, assertAllAnswered, DEFAULT_RETRY, open, parseSse, readCredential, readJson, resolveCapabilities, resultText, SSE_DONE,
   type ProviderCapabilities, type RetryPolicy,
 } from './http.js';
 import type { ModelMessage, ModelRequest, ProviderEvent } from '../kernel/loop.js';
@@ -22,13 +23,17 @@ interface ChatCompletionsProviderOptions {
   readonly model?: unknown;
   readonly apiKeyEnv?: string;
   readonly capabilities?: Readonly<Record<string, unknown>>;
+  readonly outputTokens?: unknown;
+  readonly contextTokens?: unknown;
   readonly retry?: RetryPolicy;
 }
 
 interface ModelProvider {
+  readonly requiresCompletion: true;
   readonly name: string;
   readonly model: string;
   readonly capabilities: ChatCompletionsCapabilities;
+  readonly outputTokens: number;
   stream(request: ModelRequest, options?: { readonly signal?: AbortSignal | null }): AsyncGenerator<ProviderEvent>;
   withModel(model: string): ModelProvider;
 }
@@ -181,6 +186,8 @@ export function createChatCompletionsProvider({
   model,
   apiKeyEnv = 'LIGULE_API_KEY',
   capabilities,
+  outputTokens,
+  contextTokens,
   retry = DEFAULT_RETRY,
 }: ChatCompletionsProviderOptions = {}): ModelProvider {
   // 地址按给出的那一份用：这一种形状的约定是 base_url 已经含 /v1（OpenAI 自己的 base_url 就是
@@ -189,6 +196,10 @@ export function createChatCompletionsProvider({
   const root = apiRoot(baseUrl);
   if (typeof model !== 'string' || model === '') throw new KernelError('provider_model_required');
   const effective = chatCompletionsCapabilities(capabilities);
+  const budget = resolveOutputTokens({ baseUrl: root, model, requested: outputTokens,
+    defaultTokens: effective.maxOutputTokens,
+    configuredLimit: capabilities?.maxOutputTokens === undefined ? undefined : effective.maxOutputTokens,
+    contextLimit: contextTokens });
 
   async function* stream(request: ModelRequest, { signal }: { readonly signal?: AbortSignal | null } = {}): AsyncGenerator<ProviderEvent> {
     const toolNames = toolNameMapping(request);
@@ -198,7 +209,7 @@ export function createChatCompletionsProvider({
       signal,
       headers: {
         'content-type': 'application/json',
-        'accept': 'text/event-stream',
+        'accept': effective.streaming ? 'text/event-stream' : 'application/json',
         'authorization': `Bearer ${await readCredential(apiKeyEnv)}`,
       },
       body: JSON.stringify({
@@ -208,7 +219,7 @@ export function createChatCompletionsProvider({
         // 流式也要最后那一条用量（压缩的压力线要看端点真实报回的那一份）：这一格由能力声明决定，
         // 不认它的代理把 model.capabilities 里的 streamUsage 降成 false，两条线退回本地估算。
         ...(effective.streaming && effective.streamUsage ? { stream_options: { include_usage: true } } : {}),
-        max_tokens: effective.maxOutputTokens,
+        max_tokens: budget,
         parallel_tool_calls: effective.parallelToolCalls,
         ...(request.tools?.length === 0 || request.tools === undefined ? {} : {
           tools: request.tools.map((tool) => ({
@@ -220,17 +231,84 @@ export function createChatCompletionsProvider({
     }, retry);
     if (response.body === null) throw new KernelError('provider_stream_missing');
 
+    if (!effective.streaming) {
+      const completion = asRecord(await readJson(response, signal), 'a completion response is not an object');
+      if (!Array.isArray(completion.choices) || completion.choices.length !== 1) {
+        throw new KernelError('provider_stream_incomplete');
+      }
+      const choice = asRecord(completion.choices[0], 'a completion choice is not an object');
+      const message = asRecord(choice.message, 'a completion message is not an object');
+      if (message.role !== undefined && message.role !== 'assistant') throw new KernelError('provider_stream_invalid', { detail: 'completion message is not an assistant message' });
+      if (message.content !== undefined && message.content !== null && typeof message.content !== 'string') {
+        throw new KernelError('provider_stream_invalid', { detail: 'completion content is not text' });
+      }
+      const text = typeof message.content === 'string' ? message.content : '';
+      const reasoning = typeof message.reasoning_content === 'string' ? message.reasoning_content : '';
+      if (text !== '') yield { type: 'text', text };
+      if (reasoning !== '') yield { type: 'reasoning', text: reasoning };
+      const finishReason = choice.finish_reason;
+      const reason = finishReason === 'stop'
+        ? 'stop'
+        : finishReason === 'tool_calls'
+          ? 'tool_calls'
+          : finishReason === 'length'
+            ? 'length'
+            : undefined;
+      if (reason === undefined) {
+        if (typeof finishReason !== 'string') throw new KernelError('provider_stream_incomplete');
+        throw new KernelError('provider_finish_reason_invalid');
+      }
+      if (reason !== 'length') {
+        const calls = message.tool_calls === undefined || message.tool_calls === null
+          ? []
+          : Array.isArray(message.tool_calls)
+            ? message.tool_calls
+            : (() => { throw new KernelError('provider_stream_invalid', { detail: 'completion tool_calls is not an array' }); })();
+        const callIds = new Set<string>();
+        const parsed = calls.map((rawCall) => {
+          const call = asRecord(rawCall, 'a completion tool call is not an object');
+          const id = typeof call.id === 'string' ? call.id : '';
+          if (id === '' || callIds.has(id)) throw new KernelError('provider_tool_call_invalid');
+          callIds.add(id);
+          const functionValue = asRecord(call.function, 'a completion tool function is not an object');
+          const name = typeof functionValue.name === 'string' ? functionValue.name : '';
+          if (name === '') throw new KernelError('provider_tool_call_invalid');
+          const args = functionValue.arguments === undefined ? '' : functionValue.arguments;
+          if (typeof args !== 'string') throw new KernelError('provider_tool_args_invalid', { detail: 'tool arguments are not valid JSON' });
+          return { type: 'tool-call' as const, id, name: toolNames.decode(name), args: parseArgs(args) };
+        });
+        for (const call of parsed) yield call;
+      }
+      const usage = completion.usage === undefined || completion.usage === null
+        ? undefined
+        : asRecord(completion.usage, 'completion usage is not an object');
+      if (usage !== undefined) {
+        yield { type: 'usage', input: Number(usage.prompt_tokens ?? 0), output: Number(usage.completion_tokens ?? 0) };
+      }
+      yield { type: 'finish', reason };
+      return;
+    }
+
     // 一次工具调用的参数按 index 分片到达，中间没有「这一块结束了」那一种事件，
     // 所以全部攒到流收尾再交出去；循环本来也是在流结束后才用这些调用（D20）。
     const calls = new Map<number, StreamToolCall>();
     let usage: JsonRecord | undefined;
-    for await (const rawChunk of parseSse(response.body)) {
+    let finishReason: unknown;
+    let done = false;
+    for await (const rawChunk of parseSse(response.body, { includeDone: true })) {
+      if (rawChunk === SSE_DONE) {
+        if (done) throw new KernelError('provider_stream_invalid', { detail: 'duplicate stream terminator' });
+        done = true;
+        continue;
+      }
+      if (done) throw new KernelError('provider_stream_invalid', { detail: 'data follows the stream terminator' });
       const chunk = asRecord(rawChunk, 'a stream chunk is not an object');
       // 普通分片的 usage 可以为 null；只有实际用量对象进入累计结果。
       if (chunk.usage !== undefined && chunk.usage !== null) usage = asRecord(chunk.usage, 'a stream usage value is not an object');
       const choices = Array.isArray(chunk.choices) ? chunk.choices : [];
       for (const rawChoice of choices) {
         const choice = asRecord(rawChoice, 'a stream choice is not an object');
+        if (choice.finish_reason !== undefined && choice.finish_reason !== null) finishReason = choice.finish_reason;
         const delta = asRecord(choice.delta ?? {}, 'a stream delta is not an object');
         if (typeof delta.content === 'string' && delta.content !== '') yield { type: 'text', text: delta.content };
         // 推理段在这一种形状里是增量上的一个平行字段（D32），DeepSeek 那一类用的名字是 reasoning_content。
@@ -252,26 +330,43 @@ export function createChatCompletionsProvider({
         }
       }
     }
-    for (const [, call] of [...calls.entries()].sort((left, right) => left[0] - right[0])) {
-      if (call.id === undefined || call.name === '') {
-        throw new KernelError('provider_stream_invalid', { detail: 'a tool call without an id or a name' });
-      }
-      yield { type: 'tool-call', id: call.id, name: toolNames.decode(call.name), args: parseArgs(call.json) };
+    if (!done || typeof finishReason !== 'string') throw new KernelError('provider_stream_incomplete');
+    const reason = finishReason === 'stop'
+      ? 'stop'
+      : finishReason === 'tool_calls'
+        ? 'tool_calls'
+        : finishReason === 'length'
+          ? 'length'
+          : undefined;
+    if (reason === undefined) throw new KernelError('provider_finish_reason_invalid');
+    if (reason !== 'length') {
+      const callIds = new Set<string>();
+      const parsed = [...calls.entries()].sort((left, right) => left[0] - right[0]).map(([, call]) => {
+        if (call.id === undefined || call.id === '' || call.name === '' || callIds.has(call.id)) {
+          throw new KernelError('provider_tool_call_invalid');
+        }
+        callIds.add(call.id);
+        return { type: 'tool-call' as const, id: call.id, name: toolNames.decode(call.name), args: parseArgs(call.json) };
+      });
+      for (const call of parsed) yield call;
     }
     // 用量在那一条没有 choices 的收尾分片上；没有报回来时不交这一条，压缩的那一条判据宁可只用本地估算。
     if (usage !== undefined) {
       yield { type: 'usage', input: Number(usage.prompt_tokens ?? 0), output: Number(usage.completion_tokens ?? 0) };
     }
+    yield { type: 'finish', reason };
   }
 
   const provider = {
     name: 'chat-completions',
+    requiresCompletion: true as const,
     model,
     capabilities: effective,
+    outputTokens: budget,
     stream,
     // 换模型是显式的一步：交回一个新的提供方，不在失败时悄悄改用别的模型（D13）。
     withModel(next: string) {
-      return createChatCompletionsProvider({ baseUrl, model: next, apiKeyEnv, capabilities, retry });
+      return createChatCompletionsProvider({ baseUrl, model: next, apiKeyEnv, capabilities, outputTokens, contextTokens, retry });
     },
   };
   return Object.freeze(provider);
@@ -284,6 +379,6 @@ function parseArgs(json: string): unknown {
     const parsed: unknown = JSON.parse(json);
     return parsed;
   } catch (error) {
-    throw new KernelError('provider_tool_args_invalid', { cause: error, detail: json });
+    throw new KernelError('provider_tool_args_invalid', { detail: 'tool arguments are not valid JSON' });
   }
 }

@@ -13,6 +13,7 @@ import {
   type WriteRequest,
 } from './config-edit.js';
 import { KernelError } from './error.js';
+import { createConfig, type ConfigSnapshot } from './config.js';
 
 const LAYERS = ['user', 'projectLocal'];
 // 从最高优先级往下找那一个键落在哪一层：命令行盖过本机覆盖，本机覆盖盖过项目共享，项目共享盖过使用者默认（D8）。
@@ -98,9 +99,15 @@ export function createConfigStore({ projectRoot, userHome, layers = {} }: { proj
       rulesSource: sourceOf(RULES_FIELD),
     };
   };
+  const preview = async (layer: string, table: Record<string, unknown>): Promise<ConfigSnapshot> => {
+    pathOf(layer);
+    await readNow();
+    return createConfig({ ...layers, [keyOfLayer(layer)]: table });
+  };
   return {
     read: readNow,
-    write(request: WriteRequest & { layer: string }) {
+    preview,
+    write(request: WriteRequest & { layer: string }, validate?: (candidate: ConfigSnapshot, editedLayer: Record<string, unknown>) => void | Promise<void>) {
       const definition = editableField(request.field);
       const file = pathOf(request.layer);
       // 规则表整份替换（D8 的合并语义），所以在哪一层写就只可能是写着生效那一份的那一层：
@@ -115,7 +122,9 @@ export function createConfigStore({ projectRoot, userHome, layers = {} }: { proj
       // 落笔之前先记下这一条现在折出来的是哪一份：宿主要说的是「这一笔有没有改变当前生效的那一份」，
       // 不是「这一笔写进去的是什么值」——更上面那一层本来就写着它时，前后是同一份，运行里什么都不会变。
       const before = definition.kind === 'rules' ? JSON.stringify(effectiveRules()) : JSON.stringify(valueOf(request.field));
-      return writeConfigField(file, request).then(async (written) => {
+      return writeConfigField(file, request, validate === undefined ? undefined : async (table) => {
+        await validate(await preview(request.layer, table), table);
+      }).then(async (written) => {
         // 落盘之后按层序重折一次，交回的是「这一条现在生效的是哪一份值、由哪一层写着」，不是刚写进去的那一个值（D8、方案 7.1）。
         // 读的是这一遍，版本也是这一遍的：宿主随后要说「保存了但当前运行没变」，两句必须出自同一时刻的文件。
         const fresh = await readNow();

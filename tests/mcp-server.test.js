@@ -104,7 +104,7 @@ function processIsAlive(pid) {
 
 function sse(response, delta) {
   const frames = [
-    { choices: [{ index: 0, delta }] },
+    { choices: [{ index: 0, delta, finish_reason: delta.tool_calls === undefined ? 'stop' : 'tool_calls' }] },
     { choices: [], usage: { prompt_tokens: 20, completion_tokens: 5 } },
   ];
   response.writeHead(200, { 'content-type': 'text/event-stream' });

@@ -33,9 +33,11 @@ export interface ModelRequest {
 export type ProviderEvent =
   | { readonly type: 'text' | 'reasoning'; readonly text: string }
   | { readonly type: 'tool-call'; readonly id: string; readonly name: string; readonly args: unknown }
-  | { readonly type: 'usage'; readonly input: number; readonly output: number };
+  | { readonly type: 'usage'; readonly input: number; readonly output: number }
+  | { readonly type: 'finish'; readonly reason: 'stop' | 'tool_calls' | 'length' | 'max_tokens' };
 
 export interface ModelProvider {
+  readonly requiresCompletion?: true;
   stream(request: ModelRequest, options?: { readonly signal?: AbortSignal }): AsyncIterable<ProviderEvent>;
 }
 
@@ -70,7 +72,14 @@ export interface LoopOptions {
   readonly completesRun?: readonly string[];
   readonly compaction?: LoopCompaction | null;
   readonly turnContext?: (() => Record<string, unknown>) | null;
+  readonly onProgress?: (event: LoopProgressEvent) => void;
 }
+
+export type LoopProgressPhase = 'preparing' | 'model_request' | 'tool_execution' | 'compaction' | 'awaiting_approval' | 'awaiting_input' | 'settling';
+
+export type LoopProgressEvent =
+  | { readonly kind: 'phase'; readonly phase: LoopProgressPhase; readonly modelCalls: number; readonly toolCalls: number }
+  | { readonly kind: 'activity'; readonly phase: LoopProgressPhase; readonly activity: 'model_output' | 'tool'; readonly modelCalls: number; readonly toolCalls: number };
 
 export interface LoopResult {
   readonly text: string;
@@ -82,6 +91,7 @@ export interface LoopResult {
 export interface LoopRunOptions {
   readonly signal?: AbortSignal;
   readonly user?: Record<string, unknown>;
+  readonly onProgress?: (event: LoopProgressEvent) => void;
 }
 
 type TurnStatus = 'completed' | 'cancelled' | 'failed';
@@ -149,7 +159,7 @@ function restOf(groups: readonly CallGroup[], groupIndex: number, index = -1): T
 }
 
 export function createLoop({
-  kernel, provider, prompt, session, limits = DEFAULT_LOOP_LIMITS, completesRun = [], compaction = null, turnContext = null,
+  kernel, provider, prompt, session, limits = DEFAULT_LOOP_LIMITS, completesRun = [], compaction = null, turnContext = null, onProgress,
 }: LoopOptions) {
   if (typeof provider?.stream !== 'function') throw new KernelError('loop_provider_required');
   const completing = new Set(completesRun);
@@ -158,14 +168,17 @@ export function createLoop({
     // signal 由适配器或上层交进来；每一轮自己再派生一个取消令牌，工具、提供方与本循环看到的是同一次取消。
     // options.user 是宿主交进来的那一条用户记录的附加字段（模板展开时是原始调用、参数、来源与摘要，D54）：
     // 循环只把它们并进记录，模型看见的仍然是 input 那一份文本。
-    async run(input: string, { signal, user }: LoopRunOptions = {}): Promise<LoopResult> {
+    async run(input: string, { signal, user, onProgress: runProgress }: LoopRunOptions = {}): Promise<LoopResult> {
+      const progress = runProgress ?? onProgress;
       const controller = new AbortController();
       const forward = () => controller.abort(signal?.reason);
       if (signal?.aborted) forward();
       else signal?.addEventListener('abort', forward, { once: true });
       let calls = 0;
+      let toolCallCount = 0;
       let iterations = 0;
       let text = '';
+      let phase: LoopProgressPhase = 'preparing';
       let userSeq: number | undefined;
       let terminalAttempted = false;
 
@@ -193,11 +206,21 @@ export function createLoop({
         });
       }
 
+      function reportPhase(next: LoopProgressPhase): void {
+        phase = next;
+        progress?.({ kind: 'phase', phase, modelCalls: calls, toolCalls: toolCallCount });
+      }
+
+      function reportActivity(activity: 'model_output' | 'tool'): void {
+        progress?.({ kind: 'activity', phase, activity, modelCalls: calls, toolCalls: toolCallCount });
+      }
+
       try {
         if (session) userSeq = sequenceOf(await session.append({ kind: 'user', text: input, ...user }));
         // 快照写入失败也收为这一条用户输入的失败终态；Host 在接受输入前失败时没有 userSeq，不会造事件。
         if (session && turnContext !== null) await session.append({ kind: 'turnContext', ignorable: true, userSeq, ...turnContext() });
         for (let iteration = 1; iteration <= limits.iterations; iteration += 1) {
+          reportPhase('preparing');
           if (calls >= limits.modelCalls) throw new KernelError('loop_model_budget_exhausted');
           iterations = iteration;
           calls += 1;
@@ -211,7 +234,10 @@ export function createLoop({
           // 流式接收期间就开始拼装工具调用（D13）。
           for (let attempt = 0; ; attempt += 1) {
             try {
+              reportPhase('model_request');
               for await (const event of provider.stream({ system, tools, messages: modelMessagesOf(messages) }, { signal: controller.signal })) {
+                if (event.type === 'tool-call') toolCallCount += 1;
+                if (event.type === 'text' || event.type === 'reasoning' || event.type === 'tool-call') reportActivity('model_output');
                 events.push(event);
               }
               break;
@@ -221,7 +247,19 @@ export function createLoop({
               const retried = attempt === 0 && compaction !== null
                 ? await compaction.recover(error, { system, tools, messages }, controller.signal)
                 : null;
-              if (retried === null) throw error;
+              if (retried === null) {
+                const partialText = events.flatMap((event) => event.type === 'text' ? [event.text] : []).join('');
+                const partialReasoning = events.flatMap((event) => event.type === 'reasoning' ? [event.text] : []).join('');
+                const partialCalls = events.flatMap((event) => event.type === 'tool-call'
+                  ? [{ id: event.id, name: event.name, args: event.args ?? {} }]
+                  : []);
+                if (session && (partialText !== '' || partialReasoning !== '' || partialCalls.length > 0)) {
+                  if (partialReasoning !== '') await session.append({ kind: 'reasoning', text: partialReasoning });
+                  await session.append({ kind: 'assistant', text: partialText, toolCalls: partialCalls });
+                }
+                await answerRemaining(partialCalls, 'the provider response did not finish');
+                throw error;
+              }
               events.length = 0;
               messages = retried;
             }
@@ -243,17 +281,46 @@ export function createLoop({
           // 而下一轮的请求体里没有它的位置，进了投影就是每轮重复占一份上下文。
           if (session && reasoning !== '') await session.append({ kind: 'reasoning', text: reasoning });
           if (session) await session.append({ kind: 'assistant', text, toolCalls });
+          const finish = events.findLast((event) => event.type === 'finish');
+          if (provider.requiresCompletion === true && finish === undefined) {
+            await answerRemaining(toolCalls, 'the provider response ended without a completion signal');
+            throw new KernelError('provider_stream_incomplete');
+          }
+          if (finish?.type === 'finish' && (finish.reason === 'length' || finish.reason === 'max_tokens')) {
+            await answerRemaining(toolCalls, 'the provider response reached its output limit before completion');
+            throw new KernelError('provider_output_exhausted');
+          }
+          if (toolCalls.length === 0 && text.trim() === '') throw new KernelError('provider_empty_response');
+          const validation = toolCalls.map((call) => kernel.validateCall(call.name, call.args));
+          const invalidIndex = validation.findIndex((result) => result.code !== undefined);
+          if (invalidIndex >= 0) {
+            if (session) {
+              for (const [index, call] of toolCalls.entries()) {
+                const outcome = validation[index];
+                await session.append({
+                  kind: 'tool', tool: call.name, callId: call.id, args: call.args,
+                  result: failureOf(outcome.code ?? 'tool_skipped', {
+                    content: outcome.detail ?? 'another call in this response was invalid',
+                  }),
+                });
+              }
+            }
+            continue;
+          }
           if (toolCalls.length === 0) {
             await markTurn('completed');
             return { text, iterations: iteration, modelCalls: calls };
           }
 
+          reportPhase('tool_execution');
           const groups = groupCalls(toolCalls, (name) => kernel.execution(name));
           for (const [groupIndex, group] of groups.entries()) {
+            reportActivity('tool');
             const settled = await Promise.allSettled(
               group.calls.map((call) => kernel.call(call.name, call.args, { signal: controller.signal, callId: call.id })),
             );
             for (const [index, outcome] of settled.entries()) {
+              reportActivity('tool');
               // 工具没做成都已经由内核包成稳定码并记进会话，循环带着这条失败继续问模型；
               // 停住这一轮的只有内核自身的故障，以及不属于内核错误的意外（那是缺陷，不吞）。
               if (outcome.status === 'rejected' && (!(outcome.reason instanceof KernelError) || outcome.reason instanceof KernelRuntimeError)) {
@@ -281,6 +348,7 @@ export function createLoop({
         await markTurn(TURN_CANCEL_CODES.has(code) ? 'cancelled' : 'failed', { code });
         throw error;
       } finally {
+        reportPhase('settling');
         signal?.removeEventListener('abort', forward);
       }
     },
