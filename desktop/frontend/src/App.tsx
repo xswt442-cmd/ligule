@@ -327,6 +327,18 @@ export function App({ transport }: { transport: Transport }) {
   const [settings, setSettings] = useState(readSettings);
   const language = localeOf(settings.language);
   const t = useCallback((chinese: string, english: string) => language === 'zh' ? chinese : english, [language]);
+  const progress = status?.progress ?? null;
+  const progressPhase = progress === null ? '' : {
+    preparing: t('准备上下文', 'Preparing context'),
+    model_request: t('请求模型', 'Requesting model'),
+    tool_execution: t('执行工具', 'Running tools'),
+    compaction: t('压缩上下文', 'Compacting context'),
+    awaiting_approval: t('等待审批', 'Waiting for approval'),
+    awaiting_input: t('等待用户输入', 'Waiting for your input'),
+    settling: t('正在收尾', 'Finishing'),
+  }[progress.phase];
+  const progressIdleSeconds = progress === null ? 0 : Math.max(0, Math.floor((tick - progress.lastProgressAt) / 1000));
+  const progressLabel = `${progressPhase || t('运行中', 'Running')} · ${progressIdleSeconds}${t('秒无新进展', 's without progress')} · ${progress?.modelCalls ?? 0} ${t('次模型调用', 'model calls')} · ${progress?.toolCalls ?? 0} ${t('个工具调用', 'tool calls')}${status?.outputTokens === null || status?.outputTokens === undefined ? '' : ` · ${status.outputTokens} ${t('个输出token', 'output tokens')}`}`;
   const panelTitle = useCallback((item: Panel<PanelProps>) => {
     const titles: Record<string, [string, string]> = {
       'panel.diagnostics': ['诊断', 'Diagnostics'],
@@ -651,6 +663,19 @@ export function App({ transport }: { transport: Transport }) {
       // 不等那一条落进记录（方案 3.1 的后台会话继续运行、审阅 F4）。
       const owner = message.sessionId ?? '';
       const inView = owner === active.current;
+      if (message.notify === 'progress') {
+        if (inView) {
+          const progress = message.progress === null || message.progress === undefined
+            ? null
+            : message.progress as Status['progress'];
+          setStatus((current) => current === null ? current : {
+            ...current,
+            running: progress !== null,
+            progress,
+          });
+        }
+        return;
+      }
       if (message.notify === 'delta') {
         const event = message.event as { type?: string; text?: string } | undefined;
         const held = liveBySession.append(owner, event?.type ?? '', event?.text ?? '');
@@ -1547,7 +1572,7 @@ export function App({ transport }: { transport: Transport }) {
           <strong id="session-title">{sessionId === null ? t('新会话', 'New conversation') : sessionLabel.name || t('未命名会话', 'Untitled conversation')}</strong>
           <span className="muted" id="session-note" title={projectRoot}>{projectRoot.split(/[\\/]/).filter(Boolean).at(-1) ?? t('默认工作区', 'Default workspace')}</span>
         </div>
-        {running && <span className="running-label"><span className="status-dot" />{t('运行中', 'Running')} {seconds}s</span>}
+        {running && <span className="running-label" aria-live="polite" title={progressLabel}><span className="status-dot" /><span className="running-detail">{progressLabel}</span></span>}
         {status?.usage && <UsageMeter usage={status.usage} running={running} seconds={seconds} />}
         <button className="icon-button" type="button" title={`${t('命令面板', 'Command palette')} (${formatKeys(CURRENT['palette'])})`} aria-label={t('命令面板', 'Command palette')} onClick={() => setPaletteOpen(true)}><Icon name="search" size={17} /></button>
         {sessionId !== null && <SessionActions key={sessionId} client={client} sessionId={sessionId} name={sessionLabel.name} archived={sessionLabel.archived}

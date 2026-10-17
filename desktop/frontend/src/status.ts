@@ -22,6 +22,7 @@ export type Status = {
   pendingMode: string | null;
   model: string | null;
   selectedModel: string | null;
+  outputTokens: number | null;
   pendingModel: string | null;
   serviceId: string;
   pendingServiceId: string | null;
@@ -34,4 +35,15 @@ export type Status = {
   templates: { command: string; description: string; hint: string | null }[];
   // 窗口那一格没写时宿主交出 null：两条触发都不启用，压力条整块不出现（D75）。
   usage: Usage | null;
+  progress: RunProgress | null;
+};
+
+export type RunProgress = {
+  phase: 'preparing' | 'model_request' | 'tool_execution' | 'compaction' | 'awaiting_approval' | 'awaiting_input' | 'settling';
+  startedAt: number;
+  phaseStartedAt: number;
+  lastProgressAt: number;
+  modelCalls: number;
+  toolCalls: number;
+  outputTokens: number | null;
 };
