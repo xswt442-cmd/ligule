@@ -636,15 +636,23 @@ async function startUiSession(input) {
   const target = JSON.stringify(input);
   await devTools.evaluate(`(() => {
     const textarea = document.querySelector('textarea.composer-input');
-    const send = document.querySelector('button.send');
-    if (!(textarea instanceof HTMLTextAreaElement) || !(send instanceof HTMLButtonElement)) throw new Error('composer_controls_missing');
+    if (!(textarea instanceof HTMLTextAreaElement)) throw new Error('composer_controls_missing');
     const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
     if (setter === undefined) throw new Error('composer_value_setter_missing');
     setter.call(textarea, ${target});
     textarea.dispatchEvent(new Event('input', { bubbles: true }));
-    send.click();
     return true;
   })()`);
+  await waitUntil(async () => await devTools.evaluate(`(() => {
+    const textarea = document.querySelector('textarea.composer-input');
+    const send = document.querySelector('button.send');
+    return textarea instanceof HTMLTextAreaElement
+      && send instanceof HTMLButtonElement
+      && textarea.value === ${target}
+      && !textarea.readOnly
+      && !send.disabled;
+  })()`), 10_000, 'composer_send_ready');
+  await devTools.evaluate(`document.querySelector('button.send').click(); true`);
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     const files = (await enumerateFiles(join(liguleHome, 'sessions'))).filter(path => path.endsWith('.jsonl'));
@@ -758,6 +766,30 @@ async function runInterruptedRequest(sessionId, alreadyStarted = false) {
 async function runNoSessionReconnect() {
   const initialHost = Number(processIds.initialHost);
   if (!Number.isSafeInteger(initialHost)) throw new Error('initial_host_pid_missing');
+  await waitUntil(async () => await devTools.evaluate(`(() => {
+    const textarea = document.querySelector('textarea.composer-input');
+    const workspace = document.querySelector('button.workspace-choice');
+    const model = document.querySelector('button.composer-choice');
+    const prefsFailure = [...document.querySelectorAll('.center .banner[role="alert"]')]
+      .some(banner => /无法保存更改|Could not save changes/u.test(banner.textContent ?? ''));
+    return textarea instanceof HTMLTextAreaElement
+      && workspace instanceof HTMLButtonElement
+      && model instanceof HTMLButtonElement
+      && !textarea.readOnly
+      && !workspace.disabled
+      && !model.disabled
+      && !prefsFailure;
+  })()`), 30_000, 'initial_preferences_ready');
+  const currentWorkspace = await devTools.evaluate(`document.querySelector('button.workspace-choice')?.title ?? ''`);
+  if (currentWorkspace !== workspace) {
+    await devTools.evaluate(`document.querySelector('button.workspace-choice').click(); true`);
+    await waitUntil(async () => await devTools.evaluate(`([...document.querySelectorAll('[role="option"]')].some(option => option.title === ${JSON.stringify(workspace)}))`), 15_000, 'default_workspace_option_loaded');
+    await devTools.evaluate(`([...document.querySelectorAll('[role="option"]')].find(option => option.title === ${JSON.stringify(workspace)})?.click(), true)`);
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('button.workspace-choice')?.title === ${JSON.stringify(workspace)}`), 15_000, 'default_workspace_selected');
+  }
+  if (interruptionMode !== undefined) {
+    await waitUntil(async () => await devTools.evaluate(`(document.querySelector('button.composer-choice')?.textContent ?? '').includes('deepseek-flash')`), 15_000, 'interruption_model_loaded');
+  }
   killHostImmediately(initialHost);
   await hostProcessGone(initialHost);
   const reconnectSelector = `([...document.querySelectorAll('.banner[role="alert"] button')]
