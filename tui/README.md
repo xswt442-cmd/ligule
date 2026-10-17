@@ -3,6 +3,10 @@
   <h1>Ligule CLI / TUI</h1>
   <p>命令行与终端 AI 助手，通过 npm 发布</p>
   <p><a href="README.en.md">English</a> · <a href="CHANGELOG.md">更新记录</a></p>
+  <p>
+    <a href="https://img.shields.io/npm/v/ligule"><img alt="npm" src="https://img.shields.io/npm/v/ligule?label=CLI%20%2F%20TUI&color=4d6bfe"></a>
+    <a href="https://nodejs.org"><img alt="Node.js" src="https://img.shields.io/static/v1?label=node&message=%3E%3D24&color=339933&logo=node.js&logoColor=white"></a>
+  </p>
 </div>
 
 ```sh
