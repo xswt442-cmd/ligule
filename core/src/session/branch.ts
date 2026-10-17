@@ -1,6 +1,5 @@
-// 分支：把一份记录的前缀复制成一份新会话，父那一份一个字都不动（方案 4.3）。
-// 两个入口共用这一处：不指名边界就是整份复制（复制时父会话跑到哪儿就带到哪儿），
-// 指名一个轮次标记的序号就复制到那一条为止——只有正常完整结束的那一轮留下标记（D68 那一条 `turn`）。
+// 创建分支时将父记录前缀复制到新会话，保持父记录不变。
+// 未指定位置时复制完整记录；指定事件序号时，仅复制到该完整结束轮次。
 import { randomUUID } from 'node:crypto';
 import { readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -12,7 +11,7 @@ import { parseSessionBytes } from './record.js';
 export interface BranchResult {
   sessionId: string;
   parentSessionId: string;
-  // 复制停在哪儿：那一条事件的序号，父会话后来追加的不进这一份。
+  // 分支复制的末尾事件序号；父会话后续事件不会进入分支。
   at: number;
   events: number;
 }
@@ -21,8 +20,8 @@ function unavailable(detail: string): KernelError {
   return new KernelError('session_branch_point_unavailable', { detail });
 }
 
-// 复制的是那些行本身，不是重新拼出来的：未知但标了可跳过的那些条、以及谁多写的一格都原样带过去，
-// 序号也接着父那一份连续（D73）。首行那一份元信息除外——新会话写自己那一份；没有首行的现存记录不丢事件。
+// 原样复制事件行，包括可忽略的未知事件和未识别字段，并保持序号连续。
+// 新分支使用自己的首行元数据；没有首行的旧记录仍保留全部事件。
 function prefixLines(text: string, boundary: number): string[] {
   const kept: string[] = [];
   for (const line of text.split('\n')) {
@@ -62,8 +61,8 @@ export async function branchSession(
   const last = record.events.at(-1);
   const boundary = at ?? (last?.seq ?? -1);
   if (at !== undefined) {
-    // 一个轮次的分支点就是它那一条标记：标记写在正常收尾的那一刻，取消、失败与上限都留不下它（D68）。
-    // 旧记录证明不了边界时不猜一个点出来——那一种会话走整份复制那一个入口。
+    // 只有正常结束轮次对应的标记可作为分支点；取消、失败和达到上限的轮次没有标记。
+    // 旧记录无法证明轮次边界时返回错误，不猜测分支位置。
     const marker = record.events.find((event) => event.kind === 'turn' && event.seq === at && event.status === 'completed');
     if (marker === undefined) {
       throw unavailable(`${parentSessionId} has no completed turn at event ${at}; copying the whole record takes no \`at\``);
@@ -74,17 +73,17 @@ export async function branchSession(
   const header = createSessionHeader({
     id,
     projectRoot,
-    // 支线抄的是来源那一份首行：它落在哪一具工作区、当初怎么落到那儿的（方案 5.5.4「分支继承来源会话的实际工作区与显示归属」）。
-    // 父侧那一格没有说过这两件事，就还是不写，不拿现在的目录或默认值替它猜一个来源。
+    // 分支继承父记录中的工作区身份和来源。
+    // 父记录未保存这些信息时，分支也保持未指定，不用当前目录或默认值补猜。
     workspace: record.header?.workspace ?? (projectRoot === undefined || projectRoot === '' ? undefined : workspaceIdentity(projectRoot)),
     workspaceOrigin: record.header?.workspaceOrigin,
     createdAt: new Date().toISOString(),
     mode: modeInForce(kept, record.header?.mode),
   });
-  // 这一份是谁的分支、停在哪儿：新会话的身份事实，随首行一起写，模型看不见它。
+  // 将父会话 ID 和分支位置写入新会话的元数据，不发送给模型。
   const written = [JSON.stringify({ ...header, branchOf: parentSessionId, branchAt: boundary }), ...kept];
   const path = join(directory, `${id}.jsonl`);
-  // 先写临时名再改名：列表只认 `.jsonl`，所以一份没写完的分支不会先出现在那儿（方案 4.3）。
+  // 先写入临时文件再重命名，避免未完成的分支出现在 `.jsonl` 列表中。
   const temporary = `${path}.tmp`;
   try {
     await writeFile(temporary, `${written.join('\n')}\n`, 'utf8');

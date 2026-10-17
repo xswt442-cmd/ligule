@@ -1,5 +1,5 @@
-// 模型接口的共用一层（D13、D31）：地址校验、重试边界、SSE 帧解析与凭据读取。
-// 两种线上形状（Messages 兼容与 Chat Completions 兼容）共用这一份；差别只在各自的适配器里。
+// 共享模型 HTTP 能力：地址校验、重试策略、SSE 解析和凭据读取。
+// Messages 与 Chat Completions 适配器共用此模块。
 import { setTimeout as sleep } from 'node:timers/promises';
 import { KernelError } from '../kernel/error.js';
 import { resolveCredential } from '../kernel/credentials.js';
@@ -17,8 +17,8 @@ export interface ProviderCapabilities {
   readonly [name: string]: boolean | number;
 }
 
-// 重试边界照 Codex 的 RetryPolicy 那三条可重试类别：429、5xx、传输。请求构造错误与响应内容不可解析永不重试。
-// 默认值是本项目自定的起点，配置层可以覆盖。
+// 只重试 HTTP 429、5xx 和传输错误；请求构造错误和响应解析错误不重试。
+// 重试次数和退避时间使用默认值，也可由配置层调整。
 export const DEFAULT_RETRY: RetryPolicy = Object.freeze({
   maxAttempts: 3,
   baseDelayMs: 500,
@@ -29,7 +29,7 @@ export const DEFAULT_RETRY: RetryPolicy = Object.freeze({
 
 export const SSE_DONE = Symbol('sse-done');
 
-// 提供方声明的能力上限是配置不能突破的那一条线：布尔项只能关不能开，数值项取更小的那个。
+// 配置不能突破提供方声明的能力上限：布尔能力只能关闭，数值限制取更小值。
 export function resolveCapabilities(
   declared: ProviderCapabilities,
   requested: Readonly<Record<string, unknown>> = {},
@@ -54,8 +54,8 @@ export function resolveCapabilities(
   return Object.freeze(effective);
 }
 
-// 服务地址必须是 HTTP(S) 的根：不带凭据、查询与片段，否则同一份配置在不同宿主下会打到不同地方。
-// 这里只管校验与去掉末尾的斜杠；要不要补 /v1 是形状自己的事，交给各自的适配器。
+// 服务地址必须是无凭据、查询和片段的 HTTP(S) 根地址，避免请求目标随运行环境变化。
+// 此处只校验地址并去除尾部斜杠；是否需要 `/v1` 由各接口适配器决定。
 export function apiRoot(baseUrl: unknown): string {
   if (typeof baseUrl !== 'string' || baseUrl === '') throw new KernelError('provider_base_url_required');
   let parsed;
@@ -71,7 +71,7 @@ export function apiRoot(baseUrl: unknown): string {
   return base;
 }
 
-// 凭据在发请求时才读：进程运行期间换过密钥不必重建提供方，配置快照里也始终没有它。
+// 发送请求时才解析凭据；运行中更新密钥不需要重建提供方，配置快照也不保存密钥值。
 export async function readCredential(apiKeyEnv: string): Promise<string> {
   const apiKey = await resolveCredential(apiKeyEnv);
   if (apiKey === undefined) {
@@ -109,15 +109,14 @@ async function httpFailureDetail(response: Response): Promise<string> {
     try { await reader.cancel(); } catch { /* Preserve the safe HTTP classification. */ }
     reader.releaseLock();
   }
-  // Preserve the existing one-time context recovery using a fixed classification,
-  // without carrying arbitrary gateway prose or request secrets into diagnostics.
+  // 使用固定分类执行一次上下文超限恢复，不将网关原文或请求凭据写入诊断。
   return /\b(context_length_exceeded|maximum context length|context window|prompt is too long|input is too long)\b/iu.test(text)
     ? `${status} context_length_exceeded` : status;
 }
 
-// 重试只覆盖建立响应这一步：流已经开始往外吐内容之后再重试，会把同一段内容重复交给模型。
+// 只在响应开始前重试；流式内容一旦开始发送，再重试会导致重复内容。
 export async function open(url: string, init: RequestInit, retry: RetryPolicy): Promise<Response> {
-  // 退避期间被取消也算取消，不能把定时器抛出的 AbortError 原样交出去。
+  // 退避等待期间收到取消信号时，转换为统一的取消错误码。
   const wait = async (attempt: number): Promise<void> => {
     try {
       await sleep(backoffMs(retry.baseDelayMs, attempt), undefined, { signal: init.signal ?? undefined });
@@ -147,10 +146,9 @@ export async function open(url: string, init: RequestInit, retry: RetryPolicy): 
   }
 }
 
-// SSE 的一帧以空行结束，一帧里的 data 行可以连着几行；其余字段与注释行不带内容。
-// 终止符 `[DONE]` 是 Chat Completions 那一种形状的收尾，它不是一段 JSON，所以在这里跳过。
-// 流正在往外吐内容时取消，Node 交回的是只带一个数字码的 AbortError：两种形状都从这一处过，
-// 所以取消要在这里就换成 `provider_cancelled`，否则界面收到的是一条认不出来的失败。
+// SSE 帧以空行结束，多个 `data` 行合并处理；其他字段和注释行不包含事件数据。
+// `[DONE]` 是 Chat Completions 的结束标记，不是 JSON，需跳过。
+// 流式请求取消时将 Node 的 AbortError 转换为 `provider_cancelled`，供客户端统一处理。
 function isAbortError(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'name' in error && error.name === 'AbortError';
 }
@@ -247,11 +245,11 @@ export async function* parseSse(
       }
     }
   }
-  // 流结束时还剩下没有以空行收尾的半帧：里面可能是一次没交出去的工具调用，报出来而不是悄悄丢掉。
+// 流结束时若仍有未完成帧，返回解析错误，避免静默丢失不完整工具调用。
   if (buffer.trim() !== '') throw new KernelError('provider_stream_incomplete', { detail: 'the stream ended inside a frame' });
 }
 
-// 助手那一轮里每个调用都得有对应的结果，缺一条端点就把整份请求拒掉，而且从外面的报错看不出缺在哪一条。
+// 每个 assistant 工具调用都必须有对应结果；缺少结果会使后续请求被服务端拒绝。
 export function assertAllAnswered(view: readonly ModelMessage[]): void {
   const answered = new Set(view.filter((entry) => entry.role === 'tool').map((entry) => entry.id));
   for (const entry of view) {
@@ -264,7 +262,7 @@ export function assertAllAnswered(view: readonly ModelMessage[]): void {
   }
 }
 
-// 工具交回的结果形状各家都要一段文本：不是字符串的那一份按 JSON 序列化。
+// 将工具结果转换为服务端要求的文本；非字符串结果使用 JSON 序列化。
 export function resultText(content: unknown): string | undefined {
   return typeof content === 'string' ? content : JSON.stringify(content);
 }

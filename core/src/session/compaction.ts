@@ -1,6 +1,6 @@
-// 上下文压缩（D75、实现顺序第 37 步）：把投影里靠前的那一段交给模型写一份摘要，摘要与它顶掉的范围写进检查点。
-// 两条触发分开走：压力那条在请求拼好之后本地量一次（本地估算要用端点上一次交回的真实用量修正，低估会让它永远不响），
-// 超长那条只在端点报回之后走，并且整个运行只允许一次压缩加一次重试。事件日志一条都不动（D75）。
+// 压缩时将较早的模型上下文交给模型总结，并在检查点中记录摘要和被替换的事件范围。
+// 压力触发在请求发送前根据本地估算判断，估算值会用服务端报告的用量校准。
+// 超长触发只在服务端报告上下文超限后执行；一次运行最多压缩并重试一次。原始事件日志保持不变。
 import { writeFile } from 'node:fs/promises';
 import { checkpointPath, createCheckpoint, loadCheckpoint, PROJECTED_KINDS } from './checkpoint.js';
 import { spillContent } from '../kernel/result.js';
@@ -10,12 +10,11 @@ import { estimateRequest, estimateTokens, usageEvent } from './usage.js';
 import type { LoopCompactionRequest, ModelProvider, ModelRequest, ModelTool, ProviderEvent } from '../kernel/loop.js';
 export { estimateRequest, estimateTokens } from './usage.js';
 
-// 切点：从后往前累加，越过保留预算之后那一条之后的第一个 user 或 assistant 就是切点。
-// 切在工具结果上会把上一条助手消息里的那次调用留下没人回答，请求体就不合法了（I5 的投影要能拼出请求）。
-// 连一条都放不下的时候（预算比最后一条还小）只能留下最后那一条 user 或 assistant：
-// 一个空的投影拼不出请求，而压过头比压不动更可查。
+// 从记录末尾向前累计 Token；超过保留预算后，选择最近的 user 或 assistant 事件作为切点。
+// 不在工具结果上切分，以免丢失与它配对的助手工具调用，破坏模型请求结构。
+// 如果预算连一条消息都容不下，至少保留最后一条 user 或 assistant 消息，避免生成空上下文。
 export function cutPoint(events: SessionEvent[], budgetTokens: number, measure: (event: SessionEvent) => number = estimateTokens): number | null {
-  // 切点看的是模型请求里那一段：推理段、模式、用量与轮次标记都不进投影，也就不吃保留量（D32、D75）。
+  // 切点仅计算模型上下文投影；推理、模式、用量和轮次标记不进入投影，也不占保留预算。
   const list = events.filter((event) => PROJECTED_KINDS.includes(String(event.kind)));
   let total = 0;
   for (let index = list.length - 1; index >= 0; index -= 1) {
@@ -34,7 +33,7 @@ export function cutPoint(events: SessionEvent[], budgetTokens: number, measure: 
   return null;
 }
 
-// 交给写摘要那一次的内容是这一段的扁平日志：角色前缀加文本，工具那几条留名字与结果。
+// 摘要请求使用扁平消息记录：普通消息包含角色和文本，工具消息保留名称与结果。
 function flatten(events: SessionEvent[]): string {
   const lines: string[] = [];
   for (const event of events) {
@@ -55,13 +54,13 @@ const INSTRUCTION = 'Write a summary of the transcript excerpt below so a later 
   + 'Keep every decision, still-open question, tool outcome, path, command, code fragment and identifier that matters; write each of them exactly as it appeared. '
   + 'Write the prose in the language the conversation is written in, or the language it asks for. Plain prose, no preamble.\n\n';
 
-// 摘要那一次的输入本身也可能长过窗口：过长的话留后段（近处的事更要紧），前段丢掉的部位留一句话。
-// 上一次的摘要不在这段里截：第二次压缩要把它当输入带进去，截掉了就等于把边界之前的事整段丢了。
+// 摘要输入也可能超过模型窗口；超限时保留较新的内容，并说明已省略更早部分。
+// 保留先前生成的摘要，避免后续压缩丢失它总结的早期上下文。
 function fitExcerpt(text: string, budgetTokens: number): string {
   const bytes = Buffer.from(text, 'utf8');
   const limit = budgetTokens * 4;
   if (bytes.length <= limit) return text;
-  // 按字节切可能把多字节字符切成一半，那半个字符在下一句里以替换符出现，内容本身没有丢。
+  // 字节截断可能切开多字节字符；使用解码后的文本继续处理，避免返回无效编码。
   return `[earlier turns dropped from this excerpt]\n${bytes.subarray(bytes.length - limit).toString('utf8')}`;
 }
 
@@ -70,7 +69,7 @@ export function createCompaction({ provider, session, directory, id, limits, log
   session: {
     read: () => Promise<SessionEvent[]>;
     modelView: () => Promise<unknown[]>;
-    // 用量落进记录要有这一件（D82）；只读的那几处（列表、检查）建出来的压缩件不写。
+    // 只有可写会话才记录 Token 用量；列表和检查等只读路径不写入事件。
     append?: (event: Record<string, unknown>) => Promise<unknown>;
   };
   directory: string;
@@ -82,15 +81,15 @@ export function createCompaction({ provider, session, directory, id, limits, log
   if (!(limits.compactRetainRatio < limits.compactThresholdRatio)) {
     throw new Error('compaction_retain_must_be_below_threshold');
   }
-  // 压力线与保留预算使用同一个窗口（D75）。
+  // 压力阈值和保留预算以同一个上下文窗口计算。
   const threshold = Math.floor(limits.contextTokens * limits.compactThresholdRatio);
   const retained = Math.floor(limits.contextTokens * limits.compactRetainRatio);
-  // 本地估算与端点真实用量之间的修正系数：一次都没报回来时是 1（那就是压力那条不响的另一种说法）。
+  // 本地估算与服务端用量的校准系数；尚无服务端用量时使用 1。
   let factor = 1;
   let overflowTried = false;
 
-  // 记录里最后一条 `usage` 事件算出系数（D82）：重开一份会话不该从「从没校准过」重新开始。
-  // 那一条同时留着当时那次本地估算，所以系数能从记录本身算回来，不需要上一次进程还在内存里的东西。
+  // 从最近的 `usage` 事件恢复校准系数，让会话重开后继续使用先前的校准结果。
+  // 事件同时保存本地估算和服务端用量，因此无需依赖上一个进程的内存状态。
   let seeded = false;
   async function lastUsage(): Promise<SessionEvent | null> {
     const events = await session.read();
@@ -113,7 +112,7 @@ export function createCompaction({ provider, session, directory, id, limits, log
   }
 
   async function summarise(events: SessionEvent[], previous: string | undefined, signal?: AbortSignal): Promise<string> {
-    // 那一次的请求自己也要放进窗口：预算按修正后的量法算，否则系数大的那一份会把摘要请求本身顶超长。
+    // 摘要请求本身也计入窗口预算，并使用校准后的估算，避免请求自身超出模型限制。
     const excerpt = `${previous === undefined ? '' : `Earlier summary:\n${previous}\n\n`}${fitExcerpt(flatten(events), Math.max(1, Math.floor((threshold - 1024) / factor)))}`;
     const parts: string[] = [];
     let finish: ProviderEvent | undefined;
@@ -140,20 +139,19 @@ export function createCompaction({ provider, session, directory, id, limits, log
     return text;
   }
 
-  // 一次压缩：算切点、请模型写摘要、把摘要与它顶掉的范围写成检查点。做不成时说清是哪一条，交回 null。
+  // 计算切点、请求摘要并写入检查点。无法压缩时返回具体原因和 null 结果。
   async function compact(signal?: AbortSignal): Promise<{ fromSeq: number; toSeq: number; tokensBefore: number; tokensAfter: number } | null> {
     await seedFromRecord();
     const events = await session.read();
     const { checkpoint } = await loadCheckpoint({ directory, id, events });
     const fromSeq = checkpoint?.fromSeq ?? 0;
     const tail = events.filter((event) => event.seq >= fromSeq);
-    // 不进投影的那几种事件既不占保留量，也不算「压完还剩多少」：切点那一处已经过滤，
-    // 这里再按同一份名单算剩下的那一段（D32、D75）。
+    // 被排除在模型投影之外的事件不占用保留预算，也不计入压缩后的 Token 数。
     const projected = tail.filter((event) => PROJECTED_KINDS.includes(String(event.kind)));
-    // 切点用的也是修正过的那一份量法：不然压力线按真实用量响，切点按本地字节切，压完还是越线。
+    // 使用校准后的估算计算切点，确保压缩后按同一口径检查压力阈值。
     const cut = cutPoint(tail, retained, (event) => estimateTokens(event) * factor);
     if (cut === null) return null;
-    // 覆盖范围按记录写：检查点校验的是那一段序号连续，与哪几种事件进投影无关。
+    // 检查点保存连续的事件序号范围；范围不依赖事件是否进入模型投影。
     const covered = tail.filter((event) => event.seq < cut);
     if (covered.length === 0) return null;
     const tokensBefore = estimateTokens(await session.modelView());
@@ -169,14 +167,14 @@ export function createCompaction({ provider, session, directory, id, limits, log
       logger?.log?.('compaction summary came back empty', { sessionId: id });
       return null;
     }
-    // 摘要文本受注入那一层的上限约束（I6）：超了整份溢出到文件，检查点里留可取回的引用。
+    // 摘要受工具结果字节上限约束；超限时保存到溢出文件，并在检查点中记录读取引用。
     const kept = await spillContent(text, {
       limit: limits.resultBytes,
       directory,
       name: `summary-${fromSeq}-${cut}.txt`,
     });
-    // 压完不比压之前小就不要压：一份把 25 token 换成 144 token 的检查点只是多一个要校验的文件，
-    // 而它顶着的那一段历史再也不会被模型读到。手动那一条尤其要说清「压不动」。
+    // 压缩结果必须小于原投影，否则检查点只增加文件和验证成本，却让原有历史无法再进入模型上下文。
+    // 手动压缩时返回明确的“无法缩短”结果。
     const remaining = projected.filter((event) => event.seq >= cut);
     const tokensAfter = estimateTokens(kept) + remaining.reduce((sum, event) => sum + estimateTokens(event), 0);
     if (tokensAfter >= tokensBefore) {
@@ -188,7 +186,7 @@ export function createCompaction({ provider, session, directory, id, limits, log
     await writeFile(checkpointPath(directory, id), JSON.stringify(
       createCheckpoint({ id, events: covered, text: kept, fromSeq, toSeq: Number(covered[covered.length - 1].seq) }),
     ), 'utf8');
-    // 那两个数是按本地量法算的，比较用的是修正后的那一份：系数一起记出去，读的人才对得上为什么这次会响。
+    // 保存本地估算和校准系数，使读取记录的一方可以还原触发压缩时的计算依据。
     logger?.log?.('session compacted', {
       sessionId: id,
       fromSeq,
@@ -200,7 +198,7 @@ export function createCompaction({ provider, session, directory, id, limits, log
     return { fromSeq, toSeq: Number(covered[covered.length - 1].seq), tokensBefore, tokensAfter };
   }
 
-  // 端点报回超长的那一种：状态码 400 一类里那些说得清是窗口不够的写法。
+  // 识别服务端明确报告的上下文超限错误，通常是 HTTP 400 响应。
   function isOverflow(error: unknown): boolean {
     const value = error as { code?: string; detail?: string };
     if (value?.code !== 'provider_http_error' || typeof value.detail !== 'string') return false;
@@ -210,14 +208,14 @@ export function createCompaction({ provider, session, directory, id, limits, log
   return {
     tokens: () => ({ threshold, retained, factor }),
 
-    // 状态行与命令行读的那一份：窗口、压力线、当前投影的估算，加上记录里最后一次报回的用量（D82）。
+    // 为状态和命令行提供上下文窗口、压力阈值、当前估算和最近一次服务端用量。
     async context(): Promise<{
       window: number;
       threshold: number;
       retained: number;
       estimated: number;
       factor: number;
-      // 本地估算用的是哪一种量法（D86）。界面那一格「（request-v1）」读的就是这一格。
+      // 返回本地估算使用的算法标识，供界面显示。
       measurement: string;
       reported: { seq: number; input: number; output: number | null } | null;
     }> {
@@ -239,10 +237,10 @@ export function createCompaction({ provider, session, directory, id, limits, log
       };
     },
 
-    // 手动那一条（D83）：轮没在跑的时候压一次，压不动就说清压不动。
+    // 手动压缩只能在没有活动轮次时执行；无法缩短时返回明确结果。
     compactNow: (signal?: AbortSignal) => compact(signal),
 
-    // 请求拼好之后量一次压力：越线就先压一次，压完了用新投影。
+    // 在构造请求后检查上下文压力；超出阈值时先压缩，再使用新投影发送请求。
     async prepare(request: LoopCompactionRequest, signal?: AbortSignal): Promise<unknown[]> {
       await seedFromRecord();
       if (estimateRequest(request) * factor <= threshold) return request.messages;
@@ -251,7 +249,7 @@ export function createCompaction({ provider, session, directory, id, limits, log
       return await session.modelView();
     },
 
-    // 超长那条：整个运行只试一次；不是超长、压过一次的、或压不成的都交回 null，让原来那个错误说话。
+    // 超长错误每次运行最多处理一次。其他错误、已重试过或无法压缩时返回 null，让原错误继续传递。
     async recover(error: unknown, request: LoopCompactionRequest, signal?: AbortSignal): Promise<unknown[] | null> {
       if (overflowTried || !isOverflow(error)) return null;
       overflowTried = true;
@@ -268,16 +266,16 @@ export function createCompaction({ provider, session, directory, id, limits, log
       return await session.modelView();
     },
 
-    // 端点交回真实用量时用它修正本地估算（低估会让压力那条永远不响），并把这一格落进记录（D82）。
-    // 端点读数与本地估算都包含系统提示、工具定义与消息，固定前缀不会被当作历史的增长比例。
+    // 服务端报告用量后校准本地估算并写入会话记录，避免持续低估导致压力触发失效。
+    // 服务端和本地估算都包含系统提示、工具定义与消息，因此固定前缀不会被误判为历史增长。
     async observe(request: LoopCompactionRequest, events: ProviderEvent[]): Promise<void> {
       const usage = usageEvent(request, events);
       if (usage === null) return;
-      // 这一次报回的比记录里那一条更近，不必再从历史算。
+      // 使用当前响应中的最新用量，无需再从历史记录查找。
       seeded = true;
       factor = usage.input / usage.estimated;
       if (typeof session.append !== 'function') return;
-      // 本地那一份估算一起留：系数要能从记录算回来，而这一格不进检查点的哈希输入（D75 的白名单只认三种）。
+      // 同时保存本地估算，以便从记录恢复校准系数；用量事件不参与检查点哈希。
       await session.append(usage);
     },
   };

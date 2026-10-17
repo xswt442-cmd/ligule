@@ -1,9 +1,8 @@
-// 终端那一份键位表：一记按键落的是哪一个动作，与画面上说出来的一串字，读的是同一处（方案 6.1）。
-// 动作名是稳定标识；个人覆盖换掉的是那一个动作的键，动作名不动。
-// 范围那一格是必需的：Enter 在输入里是发送，在路径候选里是选中，在会话列表里是接过来——同一记键，三处各有各的落。
-// 同一范围里撞在一起是冲突，要报出来；不同范围共用一记键不算，但要说清各自落在哪儿。
+// 键位表将按键映射到动作，界面提示和实际操作共用此定义。
+// 动作名保持稳定，用户覆盖只更改对应按键。
+// 绑定按作用范围区分；同一范围内冲突，不同范围可以复用同一按键。
 
-/** Ink 交回的那一记按键的形状（只列这一处用到的那几格）。 */
+/** Ink 返回的按键事件中本模块使用的字段。 */
 export type InkKey = {
   ctrl?: boolean;
   meta?: boolean;
@@ -96,12 +95,12 @@ export const KEYMAP: Readonly<Record<TerminalAction, Binding>> = {
   'newline-alt': { spec: 'ctrl+n', view: '输入', label: '换行（与 Shift+Enter 同一件事）' },
   'history-up': { spec: 'arrowup', view: '输入', label: '往上：草稿有多行时移动光标，单行时翻本机输入历史' },
   'history-down': { spec: 'arrowdown', view: '输入', label: '往下：草稿有多行时移动光标，已经在历史里时翻回去' },
-  // 有些终端把带 Shift 的上下键报成另一串（CSI u），与光按上下键不是同一记。两条都收，光标才会在两种终端里都动得了。
+  // 兼容终端对 Shift+方向键使用的 CSI u 编码。
   'history-up-shift': { spec: 'shift+arrowup', view: '输入', label: '往上（带 Shift 的那一记，与 ↑ 同一件事）' },
   'history-down-shift': { spec: 'shift+arrowdown', view: '输入', label: '往下（带 Shift 的那一记，与 ↓ 同一件事）' },
   'queue-recall': { spec: 'backspace', view: '输入', label: '草稿空着时收回排着的最后一条' },
   'queue-recall-alt': { spec: 'delete', view: '输入', label: '草稿空着时收回排着的最后一条（与退格同一件事）' },
-  // Ink 使用 raw mode，Ctrl+Z 的字节交给界面，不触发 POSIX 作业控制。
+  // raw mode 下 Ctrl+Z 会作为按键事件交给应用，不触发 POSIX 作业控制。
   'undo-draft': { spec: 'ctrl+z', view: '输入', label: '退回草稿的上一次改动' },
   'redo-draft': { spec: 'ctrl+y', view: '输入', label: '把刚退回的那一段再拿回来' },
 
@@ -154,22 +153,22 @@ export const KEYMAP: Readonly<Record<TerminalAction, Binding>> = {
   'approval-top': { spec: 'home', view: '审批', label: '跳到那一段改动的开头' },
   'approval-bottom': { spec: 'end', view: '审批', label: '跳到那一段改动的末尾' },
 
-  // 答题那几格里回车就是交出这一题，草稿里的光标还得靠左走：所以退回上一题那一记只在草稿空着时落。
+  // 问题面板中 Enter 提交答案；草稿非空时保留左方向键的光标移动行为。
   'question-back': { spec: 'arrowleft', view: '提问', label: '草稿空着时回到上一题，把刚才写的答话放回草稿里改' },
 };
 
-// Ink 对修饰键交回的是那一键自己的名字（`Control`、`Meta`）：光按住修饰键不是一记能用光自己的绑定。
+// 单独按下 `Control` 或 `Meta` 不构成有效快捷键。
 const BARE_MODIFIERS = ['control', 'shift', 'alt', 'meta'];
 const MODIFIERS = ['ctrl', 'shift', 'alt', 'meta'];
 
-// 一记按键在界面上的写法：画面说「PageUp」而表里写的是 `pageup`，这一处负责那一张对照。
+// 将规范按键名称映射为界面显示名称，例如 `pageup` 显示为 `PageUp`。
 const KEY_NAMES: Readonly<Record<string, string>> = {
   enter: 'Enter', escape: 'Esc', tab: 'Tab', backspace: 'Backspace', delete: 'Delete',
   arrowup: '↑', arrowdown: '↓', arrowleft: '←', arrowright: '→',
   pageup: 'PageUp', pagedown: 'PageDown', home: 'Home', end: 'End', ' ': '空格',
 };
 
-/** 把 Ink 交回的这一记按键读成规范写法（`ctrl+r`、`shift+enter`、`arrowup`）。 */
+/** 将 Ink 按键事件转换为规范名称，例如 `ctrl+r`、`shift+enter` 和 `arrowup`。 */
 export function specOf(input: string, key: InkKey): string | null {
   const named = key.escape === true ? 'escape'
     : key.pageUp === true ? 'pageup' : key.pageDown === true ? 'pagedown'
@@ -185,7 +184,7 @@ export function specOf(input: string, key: InkKey): string | null {
   }
   const typed = input.toLowerCase();
   if (BARE_MODIFIERS.includes(typed)) return null;
-  // 带 Ctrl 的那一些认的是字母本身：终端里 Ctrl+Shift+A 与 Ctrl+A 交回的是同一串，不分出这一层就不写进表。
+  // 终端可能将 Ctrl+Shift+字母和 Ctrl+字母编码为相同事件，因此不单独登记这类组合。
   if (key.ctrl === true && input.length === 1) return `ctrl+${typed}`;
   if (input.trim() === '') return null;
   return typed;
@@ -195,15 +194,15 @@ export function defaultSpecs(): Record<TerminalAction, string> {
   return Object.fromEntries(Object.entries(KEYMAP).map(([action, binding]) => [action, binding.spec])) as Record<TerminalAction, string>;
 }
 
-// 当前那一份：个人覆盖换的是这一格的内容，读它的两处（按键落点与画面说法）跟着一起换。
-// 换的时机只有一处（`applyOverrides`），所以它是一份要改就整份改的表，不是散在各调用点的开关。
+// 当前生效的键位表；用户覆盖同时影响按键处理和界面提示。
+// 覆盖只在 `applyOverrides` 中应用，避免不同调用点使用不一致的绑定。
 export const CURRENT = defaultSpecs();
 
 function isTerminalAction(value: string): value is TerminalAction {
   return Object.hasOwn(KEYMAP, value);
 }
 
-/** 一串人写的键名（`Ctrl+Shift+K`、`enter`）读成规范写法；认不出来交回 null，不猜。 */
+/** 将用户输入的键名转换为规范格式；无法识别时返回 null。 */
 export function parseSpec(text: string): string | null {
   const parts = text.trim().toLowerCase().split('+').map((part) => part.trim());
   if (parts.some((part) => part === '')) return null;
@@ -216,7 +215,7 @@ export function parseSpec(text: string): string | null {
   return [...mods, named].join('+');
 }
 
-/** 换上个人那一份覆盖：读不懂的键名与表里没有的动作名都交回去，有效的那一些照样落下来。 */
+/** 应用用户键位覆盖；返回未知动作和无效按键，其他有效绑定照常应用。 */
 export function applyOverrides(overrides: Record<string, string>): { readonly applied: TerminalAction[]; readonly refused: string[] } {
   const applied: TerminalAction[] = [];
   const refused: string[] = [];
@@ -230,22 +229,22 @@ export function applyOverrides(overrides: Record<string, string>): { readonly ap
   return { applied, refused };
 }
 
-/** 某一范围里现在的键位撞在一起的那几条。 */
+/** 返回指定作用范围内发生冲突的快捷键绑定。 */
 export function conflictsNow(view: KeyView): [TerminalAction, TerminalAction][] {
   return conflictsIn(view, CURRENT);
 }
 
-/** 这一记按键落的是不是那一个动作。调用那一处已经站在哪个范围里，这里只比键。 */
+/** 检查按键是否与指定动作匹配；调用方负责选择作用范围。 */
 export function hit(action: TerminalAction, input: string, key: InkKey, bindings: Record<TerminalAction, string> = CURRENT): boolean {
   return specOf(input, key) === bindings[action];
 }
 
-/** 把几记动作的键拼成一句提示里的写法（`PageUp/PageDown`）。提示与按键落的读的是同一份表（方案 6.1）。 */
+/** 将多个动作的按键合并为提示文本，例如 `PageUp/PageDown`。 */
 export function keyHint(...actions: TerminalAction[]): string {
   return actions.map((action) => formatKeys(CURRENT[action])).join('/');
 }
 
-/** 一记按键的规范写法换成界面上的那一串（`ctrl+shift+a` 换成 `Ctrl+Shift+A`）。读不懂的写法原样交回。 */
+/** 将规范按键名转换为界面显示格式；未知名称原样返回。 */
 export function formatKeys(spec: string): string {
   const parts = spec.trim().toLowerCase().split('+');
   if (parts.length === 0 || parts.some((part) => part === '')) return spec;
@@ -257,7 +256,7 @@ export function formatKeys(spec: string): string {
   return tail === null ? spec : [...head, tail].join('+');
 }
 
-/** 同一个范围里两记键撞在一起时交回那两动作的名字；不同范围共用一记键不算撞。 */
+/** 返回同一作用范围内共享按键的动作对；不同范围的同键绑定不算冲突。 */
 export function conflictsIn(view: KeyView, bindings: Record<TerminalAction, string>): [TerminalAction, TerminalAction][] {
   const seen = new Map<string, TerminalAction>();
   const found: [TerminalAction, TerminalAction][] = [];

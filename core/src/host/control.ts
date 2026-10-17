@@ -20,13 +20,13 @@ function record(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-/** Public failures deliberately exclude Host details, paths, credentials and causes. */
+/** 对外错误不包含 Host 内部信息、路径、凭据或原始错误原因。 */
 export function controlErrorCode(error: unknown): string {
   const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
   return typeof code === 'string' && /^[a-z][a-z0-9_]{0,79}$/.test(code) ? code : 'control_failed';
 }
 
-/** One local controller owns one Host; operation IDs have this controller's lifetime. */
+/** 每个本地控制器独立拥有一个 Host；操作 ID 仅在该控制器存续期间有效。 */
 export function createControl(host: Host, projectRoot: string) {
   const sessions = new Set<string>();
   const operations = new Map<string, Operation>();
@@ -177,7 +177,7 @@ export function createControl(host: Host, projectRoot: string) {
       if (closing !== undefined) return closing;
       closing = (async () => {
         const failures: unknown[] = [];
-        // Observe completion failures before Host cancellation can settle active runs.
+        // 在 Host 取消活动任务前先处理已完成任务的错误。
         const settled = Promise.allSettled([...operations.values()].map((found) => found.settled));
         try { await host.release(); }
         catch (error) { failures.push(error); }

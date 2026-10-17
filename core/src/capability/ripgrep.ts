@@ -1,6 +1,6 @@
-// 内容检索的外部后端（D18）：随包分发的那一份 ripgrep，或者配置里指明的可执行文件。
-// 探测就是跑一次 `--version`：只查文件在不在说明不了它能不能执行。
-// 探测不到就把原因交给调用方去记日志，检索回落到 Node 自己遍历（I8 要显式报告，不静默降级）。
+// 内容搜索使用随包 ripgrep 或配置指定的外部可执行文件。
+// 通过运行 `--version` 检查程序是否可用，而不只检查文件是否存在。
+// 探测失败时返回原因，由调用方记录并选择 Node 遍历实现。
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
 import { KernelError } from '../kernel/error.js';
@@ -30,7 +30,7 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
-// 上游 wrapper 按当前 Node 平台解析对应的可选二进制。
+// 上游 wrapper 根据当前 Node 平台选择对应的可选二进制。
 async function packaged(target: string): Promise<string | undefined> {
   if (target !== `${process.platform}-${process.arch}`) return undefined;
   try {
@@ -56,7 +56,7 @@ function probe(executable: string): Promise<RipgrepResolution> {
   });
 }
 
-// 一次运行里每个来源只探测一次：探测要起一个进程，每次检索都探一遍太贵。
+// 每个进程对每个来源只探测一次，避免每次搜索都启动探测进程。
 const probed = new Map<string, RipgrepResolution>();
 
 export async function resolveRipgrep({ path, platform = process.platform, arch = process.arch }: ResolveRipgrepOptions = {}): Promise<RipgrepResolution> {
@@ -64,18 +64,16 @@ export async function resolveRipgrep({ path, platform = process.platform, arch =
   const key = path === undefined ? target : resolve(process.cwd(), path);
   const cached = probed.get(key);
   if (cached !== undefined) return cached;
-  // 配置里写的是相对路径时，按启动这个进程的那个目录算：检索要在边界内跑，
-  // 子进程的当前目录会被换成边界，相对的可执行文件路径不能跟着它走。
+  // 相对可执行文件路径以 Host 启动目录解析；搜索子进程的工作目录会设为文件访问边界。
   const candidate = path === undefined ? await packaged(target) : key;
   const result = candidate === undefined ? { code: 'search_backend_missing' } : await probe(candidate);
   probed.set(key, result);
   return result;
 }
 
-// 与 Node 那一条遍历交出同一形状的行：相对边界、用斜杠书写的路径，接行号与该行内容。
-// 命中数到上限就终止子进程，不把整份输出读进内存（I6）。
-// ripgrep 在 Windows 上打印的是反斜杠，以 `.` 为目标时还带一层 `.\` 前缀（本机 ripgrep 15.0.0 实测），
-// 而命中那一行的内容里也可能有反斜杠，所以只改路径那一段。
+// 输出格式与 Node 遍历一致：相对边界的正斜杠路径、行号和匹配内容。
+// 达到命中上限时终止子进程，避免将完整输出读入内存。
+// Windows 输出路径使用反斜杠，目标为当前目录时还会带 `./` 前缀；只规范化路径部分，不修改匹配文本。
 const LINE = /^(.+?):(\d+):([\s\S]*)$/;
 
 function normalize(line: string): string {
@@ -95,18 +93,14 @@ export function searchWithRipgrep({
   signal,
 }: SearchOptions): Promise<SearchResult> {
   return new Promise((resolve, reject) => {
-    // 已经取消就不起这个进程：起了再杀会留一个短暂的孤儿，而且调用方拿到的该是取消而不是后端故障。
+    // 已收到取消信号时不启动子进程，直接返回取消结果。
     if (signal?.aborted) {
       reject(new KernelError('search_cancelled', { detail: 'the content search was cancelled before it started' }));
       return;
     }
-    // `--no-config` 挡住宿主环境里的 RIPGREP_CONFIG_PATH 与二进制旁边的 rg.conf：
-    // 那份配置能塞进 `--pre`，等于让每次检索都执行一个外人指定的程序。
-    // 排除项每个名字写两条：`!**/node_modules` 让遍历根本不进这个目录，
-    // `!**/node_modules/**` 管的是搜索目标本身落在里面时的情况，那一条前一种匹配不到。
-    // 不带 `**/` 的 `!node_modules/**` 只排得掉搜索根下那一层，嵌套的 a/node_modules 还能命中；
-    // 加了才与 Node 遍历「任意深度都跳过」一致（本机 ripgrep 15.2.0 实测）。
-    // 默认多线程，命中顺序两次运行就不一样；`--sort path` 按路径排序，才守住同一输入同一输出。
+    // `--no-config` 禁用环境变量和程序旁的配置文件，防止通过 `--pre` 执行未经授权的程序。
+    // 每个排除目录配置遍历排除规则和目标文件排除规则，以覆盖任意目录深度。
+    // 按路径排序，确保相同输入获得稳定的结果顺序。
     const child = spawn(executable, [
       '--no-config', '--no-ignore', '--hidden', '--no-heading', '--with-filename', '--line-number',
       '--fixed-strings', '--sort', 'path',
@@ -119,8 +113,8 @@ export function searchWithRipgrep({
     let stderr = '';
     let settled = false;
 
-    // 取消、命中数够用、进程自己结束三条路都可能是先到那一条，所以只结算一次；
-    // 取消算取消，不算后端故障，监听器在结算之后撤掉，不留在一个长期存在的信号上。
+    // 取消、达到命中上限和进程退出都可能触发结束；只结算一次。
+    // 取消按取消结果返回，结束后移除信号监听器。
     const settle = (finish: () => void): void => {
       if (settled) return;
       settled = true;
@@ -132,11 +126,11 @@ export function searchWithRipgrep({
       settle(() => reject(new KernelError('search_cancelled', { detail: 'the content search was cancelled before it finished' })));
     };
     signal?.addEventListener('abort', cancel, { once: true });
-    // 起进程到挂上监听之间信号也可能已经变了，那种情况补一次取消，不要把这一趟扫完才回话。
+    // 子进程启动与注册监听之间也可能收到取消信号；此时立即终止，不等待搜索完成。
     if (signal?.aborted) cancel();
 
     const consume = (chunk: Buffer): void => {
-      // 已经够数并终止了子进程，之后到达的输出不再收，否则命中数会越过上限。
+      // 达到命中上限并终止子进程后，忽略迟到的输出。
       if (truncated) return;
       pending += chunk.toString('utf8');
       let end;
@@ -157,7 +151,7 @@ export function searchWithRipgrep({
     child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8'); });
     child.on('error', (error) => settle(() => reject(new KernelError('search_backend_failed', { cause: error, detail: `the search backend could not run: ${errorCode(error) ?? errorMessage(error)}` }))));
     child.on('close', (code: number | null) => {
-      // ripgrep 没有命中时以 1 退出，那是结果不是故障；2 才是它自己出错。
+    // ripgrep 以 1 表示没有匹配，属于正常结果；退出码 2 表示执行错误。
       if (code === 0 || code === 1 || truncated) settle(() => resolve({ hits, truncated }));
       else settle(() => reject(new KernelError('search_backend_failed', { detail: stderr.trim() || `ripgrep exited with ${code}` })));
     });

@@ -1,6 +1,6 @@
-// 删除的两条去处（D3、D18）：操作系统的回收站，探测不到就回落到本项目自己管的目录。
-// 平台代码只待在这一层：Windows 走外壳接口，Linux 走 freedesktop 的 Trash 规范，macOS 没有后端。
-// 探测结果在一次运行里只算一次，它是一条平台事实，运行期间不会变。
+// 删除内容优先移入操作系统回收站；系统功能不可用时使用项目管理的回收目录。
+// 平台实现集中在此处：Windows 使用系统接口，Linux 遵循 FreeDesktop Trash 规范，macOS 暂无系统后端。
+// 每个进程只探测一次系统回收站能力。
 import { spawn } from 'node:child_process';
 import { access, constants, mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -25,7 +25,7 @@ function errorMessage(error: unknown): unknown {
   return typeof error === 'object' && error !== null && 'message' in error ? error.message : undefined;
 }
 
-// 交给 powershell 的目标路径走环境变量，不拼进命令文本：路径里带引号或分号也构不成第二条命令。
+// 通过环境变量将目标路径传给 PowerShell，避免引号或分号被解释为额外命令。
 const SEND_COMMAND = [
   'Add-Type -AssemblyName Microsoft.VisualBasic',
   '$target = $env:LIGULE_TRASH_TARGET',
@@ -36,12 +36,12 @@ const SEND_COMMAND = [
   '}',
 ].join(' ');
 
-// 探测只确认 powershell 与那个外壳类型都在，不删任何东西：探测不该在用户的回收站里留下痕迹。
+// 探测只验证 PowerShell 和系统回收站接口可用，不执行删除操作。
 const PROBE_COMMAND = 'Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem] | Out-Null';
 
 function runPowershell(command: string, env?: Record<string, string>): Promise<void> {
   return new Promise((resolve, reject) => {
-    // stdout 也接成 ignore：这条命令不往标准输出写东西，但一旦写了而没人读，管道满了子进程就永远等在这里。
+    // 丢弃 stdout，避免子进程写满管道后阻塞。
     const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
       env: { ...process.env, ...env },
       windowsHide: true,
@@ -72,8 +72,8 @@ function trashRoot(): string {
   return join(typeof data === 'string' && data !== '' ? data : join(homedir(), '.local', 'share'), 'Trash');
 }
 
-// freedesktop 的 Trash 规范：内容进 files/，同名的一份 .trashinfo 进 info/，
-// 里面写原路径（百分号编码）与删除时间，还原靠的就是这两项。
+// FreeDesktop Trash 将内容写入 `files/`，并在 `info/` 中保存对应的 `.trashinfo` 文件。
+// 元数据记录百分号编码的原路径和删除时间，供还原时使用。
 export const freedesktopTrash = {
   name: 'freedesktop trash',
   async probe(): Promise<void> {
@@ -87,14 +87,13 @@ export const freedesktopTrash = {
     const files = join(root, 'files');
     const base = basename(target);
     const info = `[Trash Info]\nPath=${encodeTrashPath(target)}\nDeletionDate=${deletionDate(new Date())}\n`;
-    // ponytail: 名字是先看一眼有没有、再独占建信息文件来占住的；检查与改名之间仍有一个窗口，
-    // 别的程序正好在那一刻放进同一个文件就会撞上。上限是这条，升级路线是先建一个空的同名硬链接占位再改名。
+    // 先检查目标名称，再独占创建元数据文件；如果其他程序同时占用该名称，则尝试下一个名称。
     for (let attempt = 0; ; attempt += 1) {
       const name = attempt === 0 ? base : `${base}.${attempt}`;
       const infoPath = join(root, 'info', `${name}.trashinfo`);
       if (await exists(join(files, name))) continue;
       try {
-        // 独占创建：两次删除同时挑中同一个名字时，只有一个能建出这份信息文件，另一个往后加计数。
+        // 使用独占创建处理并发删除；冲突时递增名称后缀并重试。
         await writeFile(infoPath, info, { flag: 'wx' });
       } catch (error) {
         const code = errorCode(error);
@@ -104,13 +103,11 @@ export const freedesktopTrash = {
       try {
         await rename(target, join(files, name));
       } catch (error) {
-        // 移不进去就把占名的信息文件删掉：留着它就是回收站里一个没有内容的条目。
-        // 这里删不掉也不上报，移动失败才是调用方要看的那一条。
+        // 移动失败时清理已创建的元数据文件，避免留下无内容的回收站条目。
         try {
           await rm(infoPath, { force: true });
         } catch {}
-        // 回收站与目标不在同一个文件系统上时 rename 报 EXDEV：规范要求那种情况用挂载点自己的回收站，
-        // 本实现不做那一层，交回给调用方回落到项目内那个目录。
+        // 跨文件系统重命名会返回 EXDEV；此实现不处理挂载点回收站，交由调用方使用项目回收目录。
         const code = errorCode(error);
         if (code === 'EXDEV') {
           throw new KernelError('recycle_cross_device', { cause: error, detail: `${target} and the trash are on different filesystems` });
@@ -122,15 +119,14 @@ export const freedesktopTrash = {
   },
 };
 
-// 规范要的是本地时间的 YYYY-MM-DDThh:mm:ss：截一刀 ISO 串得到的是 UTC，
-// 还原界面按本地时间去读就把删除时间报差了几个小时。
+// 按规范使用本地时间格式 `YYYY-MM-DDThh:mm:ss`，避免将 UTC 时间误显示为本地删除时间。
 function deletionDate(now: Date): string {
   const pad = (value: number): string => String(value).padStart(2, '0');
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
     + `T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
 }
 
-// 规范里的 Path 是百分号编码的绝对路径，分隔符本身不编码。
+// 元数据中的 Path 使用百分号编码的绝对路径，路径分隔符保持原样。
 function encodeTrashPath(target: string): string {
   return target.split('/').map(encodeURIComponent).join('/');
 }
@@ -148,9 +144,8 @@ const CANDIDATES: Partial<Record<NodeJS.Platform, RecycleBackend>> = { win32: wi
 
 let resolved: RecyclerResolution | undefined;
 
-// 按平台取那一个候选并探测它。探测不通过就没有系统回收站可用，调用方回落到自己管的目录；
-// 探测结果里的码交给调用方去记日志，不在这里静默吞掉（I8）。
-// 只有本机那一个平台的结果会记下来：探测要起一个进程，每次删除都探一遍太贵。
+// 选择当前平台的回收站后端并探测可用性；不可用时由调用方使用项目回收目录。
+// 返回探测错误供调用方记录日志。每个进程只缓存当前平台的探测结果。
 export async function resolveRecycler(platform: NodeJS.Platform = process.platform): Promise<RecyclerResolution> {
   if (platform === process.platform && resolved !== undefined) return resolved;
   const result = await resolveOnce(platform);

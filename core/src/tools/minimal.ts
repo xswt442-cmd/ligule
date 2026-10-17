@@ -1,5 +1,5 @@
-// 最小配置：默认运行的全部内容是一条显式清单，不是「关掉一大堆之后的结果」（I1、D3）。
-// 内核本身仍然一件工具都不提供，这一份清单是装载侧交出去的第一个插件。
+// 默认运行的工具由显式清单定义；未列入清单的能力不会自动加载。
+// Kernel 不内置工具；最小工具集由加载器通过插件显式注册。
 import { createTool, deleteTool, editTool, writeTool } from './write.js';
 import { findTool, readTool, searchTool } from './read-only.js';
 import { execTool } from '../capability/exec.js';

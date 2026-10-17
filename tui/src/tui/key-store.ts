@@ -1,6 +1,5 @@
-// 个人键位存在本机这一份文件里：它是界面上的方便物，不进会话记录、不进模型上下文、也不进项目的业务配置（方案 6.1、D81 边界二）。
-// 形状是一份 JSON 对象：动作名 → 那一串键的写法。表里没有的动作名与读不懂的键名在 read 那一步就拒掉，
-// 因为「读坏了整份用默认」不如「那一条说清楚为什么没落下来」——键位错了让人以为按键坏了。
+// 用户快捷键保存在本地独立文件中，不写入会话记录、模型上下文或项目配置。
+// 文件为 JSON 对象，将动作名称映射到按键写法。未知动作或无效按键会返回诊断，不静默恢复默认值。
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -11,7 +10,7 @@ export function keyPathOf(home = homedir()): string {
   return join(dataRoot(home), 'tui-keys.json');
 }
 
-/** 读那一份覆盖：读不懂的一格都不落下，交回的是有效的那一些与拒掉的的名字。 */
+/** 读取快捷键覆盖；返回有效绑定和无法应用的动作名称。 */
 export async function readKeys(path = keyPathOf()): Promise<{ overrides: Record<string, string>; refused: string[] }> {
   let text;
   try {
@@ -41,7 +40,7 @@ export async function readKeys(path = keyPathOf()): Promise<{ overrides: Record<
 
 let writing: Promise<void> = Promise.resolve();
 
-/** 整份重写：一次只留一份在写，同进程里连着改两次不会交错。先写临时文件再改名，不留半份。 */
+/** 串行写入完整文件，先写临时文件再原子替换，避免留下部分内容。 */
 export function writeKeys(path: string, overrides: Record<string, string>): Promise<void> {
   writing = writing.then(async () => {
     await mkdir(dirname(path), { recursive: true });

@@ -1,11 +1,7 @@
-// 模式是一份命名的装配清单（D35、D43、D46）：两格——`tools` 选本次运行注册表里的哪几件直接能力工具交给模型，
-// `prompt` 选哪几段提示词片段。它不描述系统里有哪些技能、装了哪些扩展，也不描述权限：
-// 那几件事各有各的持有者，Mode ≠ Capability Registry ≠ Policy。固定披露入口（`skill`）也不在这一格里（D63）。
-// 一个模式一份 TOML，文件名就是模式名（D43）。查找从低到高分三层：随包那一份、`~/.ligule/modes/`、
-// `<项目根>/.ligule/modes/`；同名只取最高那层的整份，不做跨层合并——把「这一次运行装了什么」写成两处，
-// 读的时候就对不上了（D35 放弃「模式引用模式」是同一条理由）。
-// `prompt` 这一格这一轮只解析与校验：片段按名选择要等提示词片段注册表（第 29 步的扩展载体），
-// 写了内容而装载还不接，当场失败，不装作生效了。
+// 模式是具名装配清单：`tools` 选择交给模型的已登记工具，`prompt` 选择提示词片段。
+// 模式不定义技能、扩展或权限策略；这些分别由对应登记表和 Policy 管理。固定的 `skill` 披露入口不受模式筛选。
+// 每个 TOML 文件定义一个模式，文件名就是模式名。查找顺序为随包、用户、项目；同名时采用优先级最高的整份文件，不跨层合并。
+// 这里负责解析并校验提示词片段名称；实际名称会在扩展注册完成后由 Host 验证。
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -15,7 +11,7 @@ import { CONFIG_DIRECTORY, dataRoot } from './config-file.js';
 import { KernelError } from './error.js';
 
 export const MODE_DIRECTORY = 'modes';
-// 不选模式时装的是随包的这一份，也就是 D3 那八件，行为与阶段一相同。
+// 未指定模式时使用随包提供的默认模式。
 export const DEFAULT_MODE = 'minimal';
 const MODE_FIELDS = ['tools', 'prompt'];
 
@@ -27,8 +23,8 @@ export interface ModeFile {
   path: string;
   tools: string[] | '*';
   prompt: string[] | '*';
-  // 这份清单内容的摘要：恢复一次会话时靠它判断「同名的那一份还是不是当时那一份」（D78）。
-  // 算的是文件正文的字节，注释与空白也算——写的人改了一个字就该让人看见。
+  // 恢复会话时用摘要确认同名模式文件是否仍与打开会话时相同。
+  // 摘要覆盖完整文件内容，包括注释和空白。
   digest: string;
 }
 
@@ -38,8 +34,8 @@ export interface ModeDirectories {
   project: string;
 }
 
-// 内核在装载之后交给 applyMode 的是这两件事：读出模式能选的那一栏工具，以及把没选中的藏起来（I4 只收紧）。
-// 固定披露入口不在这份名单里（D63），模式也就藏不掉它。
+// Host 使用解析结果选择可用工具和提示词片段；模式只能缩小工具集合。
+// 固定披露入口不在可选清单中，不能由模式隐藏。
 export interface ModeTarget {
   list(): string[];
   selectable(): string[];
@@ -55,8 +51,7 @@ export function modeDirectories(projectRoot: string, shippedDirectory: string, u
   };
 }
 
-// 模式名直接拼进路径：带斜杠或 `..` 的名字会指着这三个目录之外去读文件，太长的名字在文件系统里没有意义，
-// 所以形状与长度都在这里一次查掉。
+// 模式名会拼入搜索路径，因此校验字符和长度，避免目录穿越或无效文件名。
 function checkedName(name: string): string {
   if (typeof name !== 'string' || name.length > 64 || !/^[a-z0-9][a-z0-9._-]*$/.test(name)) {
     throw new KernelError('mode_name_invalid', { detail: String(name) });
@@ -64,7 +59,7 @@ function checkedName(name: string): string {
   return name;
 }
 
-// 从最高那一层往下找，第一个存在的文件就是这一份模式的全文。
+// 按优先级从高到低查找；第一个存在的文件完整定义该模式。
 async function readDocument(name: string, directories: ModeDirectories): Promise<{ layer: ModeLayer; path: string; text: string }> {
   const order: { layer: ModeLayer; directory: string }[] = [
     { layer: 'project', directory: directories.project },
@@ -79,7 +74,7 @@ async function readDocument(name: string, directories: ModeDirectories): Promise
     try {
       text = await readFile(path, 'utf8');
     } catch (error) {
-      // 三层里任何一层都可以没有这个名字，缺文件继续往下找；其余读失败是真问题。
+      // 某一层没有该模式时继续查找下一层；其他读取错误都应直接返回。
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
       throw new KernelError('mode_file_read_failed', { cause: error, detail: `${candidate.layer}: ${path}` });
     }
@@ -97,7 +92,7 @@ function readNameList(value: unknown, field: string, path: string): string[] {
     if (typeof item !== 'string' || item === '') {
       throw new KernelError('mode_field_invalid', { detail: `${field} takes non-empty strings only: ${path}` });
     }
-    // 同名两次没有第二种含义，收下只会让「选了哪几件」在别处读出来是另一回事。
+    // 重复的工具或提示片段名称没有有效含义，因此拒绝该清单。
     if (names.includes(item)) throw new KernelError('mode_field_duplicate', { detail: `${field} names ${item} twice: ${path}` });
     names.push(item);
   }
@@ -115,7 +110,7 @@ export async function loadMode(name: string, directories: ModeDirectories): Prom
   try {
     document = parse(file.text);
   } catch (error) {
-    // 写坏的模式不该以「少了一格」的形式静默生效。
+    // 模式字段格式错误时应报错，不能静默忽略。
     throw new KernelError('mode_file_invalid', { cause: error, detail: `${file.layer}: ${file.path}` });
   }
   if (document === null || typeof document !== 'object' || Array.isArray(document)) {
@@ -123,26 +118,22 @@ export async function loadMode(name: string, directories: ModeDirectories): Prom
   }
   const fields = document as Record<string, unknown>;
   for (const key of Object.keys(fields)) {
-    // 认不出的格名会被整份忽略，写的人以为生效了而没有——列在这里而不是默默收下。
+    // 未知字段会导致校验失败，避免配置作者误以为该字段已生效。
     if (!MODE_FIELDS.includes(key)) throw new KernelError('mode_field_unknown', { detail: `${key}: ${file.path}` });
   }
   for (const key of MODE_FIELDS) {
     if (fields[key] === undefined) throw new KernelError('mode_field_missing', { detail: `${key} (required by every mode): ${file.path}` });
   }
   const tools = readNames(fields.tools, 'tools', file.path, true);
-  // `prompt` 这一格挑的是扩展登记进来的提示词片段（D35 留下的那一格，第 29 步之后才有可选的值）：
-  // 装载这一处只解析与校验形状，「哪一个名字在本次登记里没有」要等扩展装完才知道，那一问在 Host 的 adopt 里报
-  // `mode_prompt_unavailable`。
+  // `prompt` 选择扩展登记的提示词片段。此处只校验名称格式；Host 会在扩展加载后确认名称是否存在，缺失时返回 `mode_prompt_unavailable`。
   const prompt = readNames(fields.prompt, 'prompt', file.path, true);
-  // 摘要算的是这两格的规范化写法（顺序固定在这里），与做法同 D70 的那条定义摘要：同名而内容变了要读得出来（D78）。
+  // 摘要根据规范化后的工具和提示词名称顺序计算，用于检测同名模式内容是否改变。
   const digest = createHash('sha256').update(JSON.stringify({ tools, prompt })).digest('hex').slice(0, 12);
   return { name, layer: file.layer, path: file.path, tools, prompt, digest };
 }
 
-// 选中的一栏与注册表对得上才算数：模式写了一件本次运行没登记的工具，那是清单写错，
-// 而不是「少一件」——静默少一件会让装配清单读出来的与模型看见的不是一回事（I2）。
-// 交回的 undo 是运行中换模式要用的一样东西：上一次的收紧必须先撤销，新的清单才谈得上生效（D41）。
-// 撤销只撤自己那一项，别的 restrict() 追加的拒绝仍然在（I4）。
+// 模式引用未登记的工具时返回错误，不静默删去该项，以免实际工具清单与配置不符。
+// 返回的撤销函数用于切换模式时移除本次限制，不会撤销其他调用添加的拒绝规则。
 export function applyMode(kernel: ModeTarget, mode: ModeFile): { tools: string[]; undo: () => void } {
   const registered = kernel.list();
   const selectable = kernel.selectable();
@@ -152,7 +143,7 @@ export function applyMode(kernel: ModeTarget, mode: ModeFile): { tools: string[]
     if (!registered.includes(name)) {
       throw new KernelError('mode_tool_unregistered', { detail: `${name} (mode ${mode.name}; registered: ${registered.join(', ') || 'none'})` });
     }
-    // 披露入口不是模式能写的一格（D63）：写它的名字是清单写错了，静默收下只会让人以为把那件关掉了。
+    // 模式不能选择固定披露工具；若清单包含其名称，按无效配置处理。
     if (!selectable.includes(name)) {
       throw new KernelError('mode_tool_not_selectable', { detail: `${name} is a fixed disclosure tool (mode ${mode.name})` });
     }

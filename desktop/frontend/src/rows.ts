@@ -1,6 +1,6 @@
-// 会话记录 → 界面行的投影。记录是事实源（I5），这里只画已经落盘的那一份与流式期间的那半截；
-// 后端的记录形状在 `core/src/session/session.ts`，界面这一侧不认识别的。
-// 卡片上每一格的取值规则写在 D94：抬头说的是这一件做成了什么，正文只给内容，不给信封。
+// 将会话记录投影为界面行。显示已落盘事件和当前流式片段。
+// 记录结构由 `core/src/session/session.ts` 定义；此模块只负责展示数据。
+// 卡片标题显示操作结果，正文显示面向用户的内容。
 
 export type ToolCall = { id: string; name: string; args?: Record<string, unknown> };
 
@@ -19,15 +19,15 @@ export type Record_ = {
   kind: string;
   name?: string;
   archived?: boolean;
-  // 模板展开过的那一条用户记录另留着人打的那一行（D54）：画的是这一份，交给模型的是 text。
+  // 模板展开后保留原始用户输入；界面显示原文，模型收到展开后的 `text`。
   text?: string;
   raw?: string;
   toolCalls?: ToolCall[];
   tool?: string;
   callId?: string;
-  // 这一次执行花了多久，由内核记在事件外层（第 66 步）。没执行的调用与恢复补写的那一条没有这一格。
+  // 执行耗时由 Kernel 写入事件。未执行或恢复补写结果的调用没有耗时。
   durationMs?: number;
-  // 工具那一条记录留着交进去的参数（`core/src/kernel/kernel.ts` 的 call），派生支线那一格要说得出交的是哪件事。
+  // 工具调用记录保存输入参数，供派生结果说明其来源。
   args?: Record<string, unknown>;
   result?: {
     kind?: string;
@@ -37,23 +37,23 @@ export type Record_ = {
     content?: unknown;
     spilled?: string;
   };
-  // 判定真正用的那一格（D77）：进记录、不进模型可见投影，界面读得到。
+  // 权限判定结果写入记录并显示在界面中，但不进入模型上下文。
   verdict?: Verdict;
-  // 一轮正常完整结束留下的那一条事实（D68）：它是一处可选的分支点（方案 4.3）。
+  // 完整结束的轮次可作为会话分支点。
   status?: string;
   code?: string;
   iterations?: number;
   modelCalls?: number;
-  // 一轮开始时交回的那一份完整参数快照（`session.read` 里的一条 `turnContext`）。内核没落这一条时这几格都不出现。
+  // `session.read` 返回的轮次参数快照；记录中没有该事件时不显示对应数据。
   model?: string | null;
   policy?: string;
   policySource?: string;
   mode?: string;
-  // 崩溃之后由恢复路径补上的那一条（D72、D85）。
+  // 标记由恢复流程补写的结果。
   recovery?: { assistantSeq?: number; safeToRedo?: boolean };
 };
 
-// 展示档那一格决定哪几行进得来：虚拟视口要量每一行的高度，藏着不画的行留在列表里只会量到零（D90、U48）。
+// 根据展示设置过滤记录类型，避免虚拟列表测量不渲染的行。
 export const shownIn = (verbosity: string, row: Row): boolean =>
   !(verbosity === 'brief' && (row.kind === 'reasoning' || row.kind === 'call' || row.kind === 'result' || row.kind === 'context'))
   && !(verbosity === 'standard' && (row.kind === 'reasoning' || row.kind === 'context'));
@@ -63,30 +63,30 @@ export type Row = {
   kind: 'question' | 'answer' | 'reasoning' | 'call' | 'result' | 'refusal' | 'failure' | 'round' | 'context' | 'meta' | 'error';
   text: string;
   status?: string;
-  // 这一行来自记录里哪一条事件（D73 那个稳定序号）。界面自己写的那几行没有它。
+  // 对应的会话事件序号；界面本地生成的行没有该字段。
   seq?: number;
-  // 生效的能力名：`mcp.call` 这一件画的是 `mcp:<服务器>/<工具>`，与判定链读的那一串一致（D52）。
+  // 实际执行的能力名称；MCP 调用显示 `mcp:<服务器>/<工具>`。
   tool?: string;
   code?: string;
   callId?: string;
-  // 抬头下面那一行：参数摘要或改动摘要，说的是对着哪个对象（D94）。
+  // 卡片标题下方显示目标对象和操作摘要。
   summary?: string;
-  // 抬头右侧那几枚读数：退出码、溢出文件、判定、支线、耗时。
+  // 卡片右侧显示退出码、溢出文件、判定、派生会话和耗时等状态。
   notes?: string[];
-  // 系统摘要与读数同时保留两种文字；切换语言不改模型正文和工具输出。
+  // 系统摘要和状态读数保留中英文版本；切换语言不修改模型正文或工具输出。
   english?: { text?: string; summary?: string; notes?: string[] };
-  // 写入类那一张卡片上的加减行数：换掉多少行、换上多少行（D94）。
+  // 写入操作的变更行数：删除行数和新增行数。
   diff?: { added: number; removed: number };
 };
 
-// 工具结果的内容可以是串，也可以是结构化的一段（read 交回的是 {text: ...}）。
+// 工具结果可以是字符串或包含 `text` 字段的结构化对象。
 export function textOf(value: unknown): string {
   if (typeof value === 'string') return value;
   if (value === undefined || value === null) return '';
   return JSON.stringify(value, null, 2);
 }
 
-// `mcp.call` 这个名字对人不说明任何事：判定链、审批框与记录里读的都是那一串能力名。
+// 将 `mcp.call` 显示为实际能力名称，供权限说明和审批卡阅读。
 export function capabilityOf(name?: string, args?: Record<string, unknown>): string {
   if (name === 'mcp.call' && typeof args?.server === 'string' && typeof args?.tool === 'string') {
     return `mcp:${args.server}/${args.tool}`;
@@ -94,7 +94,7 @@ export function capabilityOf(name?: string, args?: Record<string, unknown>): str
   return name ?? '';
 }
 
-// 工具交回的那一份形状是 { text, 附带几格 }：正文画 text，附带那几格进抬头那一行。
+// 结构化工具结果将 `text` 显示为正文，其余允许字段用于卡片状态。
 function payloadOf(result: Record_['result']): { text?: string; exitCode?: unknown; effectiveCapability?: unknown; sessionId?: unknown } {
   const content = result?.content;
   return typeof content === 'object' && content !== null
@@ -102,10 +102,9 @@ function payloadOf(result: Record_['result']): { text?: string; exitCode?: unkno
     : {};
 }
 
-// 写入类那一句改动摘要与加减行数说的是同一件事：路径、换掉多少行、换上多少行。
-// 参数里没有路径就不编造一个：摘要行宁可空着，也不画 `?.md` 那种形状。
-// `action`、`before`、`after` 是给审批那一格看的差异（方案 5.4）：说清实际动的是哪一件、去掉哪一段、换上哪一段。
-// 没读过的正文一概不画：删除只说移进回收站；整份写入不猜目标是新建还是覆盖，那一件由内核那条规则管。
+// 写入摘要显示目标路径及删除、新增行数；缺少路径时不生成占位路径。
+// 审批详情使用 `action`、`before` 和 `after` 展示目标及变更内容。
+// 未读取的正文不显示。删除仅说明移入回收站；整份写入不推测目标文件是否已存在。
 export type Change = { summary: string; diff?: { added: number; removed: number }; action: string; before: string; after: string };
 
 export function changeOf(tool: string, args: Record<string, unknown>, locale: 'zh' | 'en' = 'zh'): Change {
@@ -140,8 +139,8 @@ export function changeOf(tool: string, args: Record<string, unknown>, locale: 'z
   return none;
 }
 
-// 审批那一格展开的正文：写入类那三件画成「去掉哪一段、换上哪一段」，段首带减号与加号（方案 5.4）。
-// 与终端那一侧同一条规则、两份写法；其余的调用还是把参数交出去，不编内容。
+// 审批详情将写入操作显示为删除和新增内容，并使用减号和加号标记。
+// 其他工具按原参数显示，不补造内容。
 export function changeBody(change: Change, args: Record<string, unknown>, locale: 'zh' | 'en' = 'zh'): string {
   const t = (zh: string, en: string) => locale === 'zh' ? zh : en;
   if (change.action === '') return typeof args.content === 'string' ? args.content : JSON.stringify(args, null, 2);
@@ -153,7 +152,7 @@ export function changeBody(change: Change, args: Record<string, unknown>, locale
   ].join('\n');
 }
 
-// 一次调用对人说清它动的是哪个对象：命令文本、路径、地址、那一项 MCP 能力名，都没有就退回一行参数。
+// 优先用命令、路径、地址或 MCP 能力名说明操作对象；都不存在时显示参数摘要。
 function argSummary(tool: string, args: Record<string, unknown>): string {
   if (tool === 'ask_user_question') {
     let questions: unknown = args.questions;
@@ -161,7 +160,7 @@ function argSummary(tool: string, args: Record<string, unknown>): string {
       try {
         questions = JSON.parse(questions);
       } catch {
-        // 无效参数的原文保留在展开详情中。
+        // 格式无效时在展开详情中保留原始参数。
         return '';
       }
     }
@@ -175,13 +174,13 @@ function argSummary(tool: string, args: Record<string, unknown>): string {
   }
   const single = args.command ?? args.path ?? args.url ?? args.pattern ?? args.query ?? args.task;
   if (typeof single === 'string' && single !== '') return single;
-  // `mcp.call` 的能力名已经在抬头上，摘要只给那一份输入（D52）。
+  // MCP 能力名称已显示在标题中，摘要只展示调用输入。
   const rest = tool === 'mcp.call' ? { ...args, server: undefined, tool: undefined } : args;
   const line = JSON.stringify(rest);
   return line.length > 160 ? `${line.slice(0, 160)}…` : line;
 }
 
-// 判定那一格说人话：没问人就成了、问过才成、不允许，外加命中的规则与档位（D77、D94）。
+// 将判定结果、审批状态、命中规则和策略档位转换为界面文案。
 function verdictNote(verdict: Verdict, locale: 'zh' | 'en'): string {
   const t = (zh: string, en: string) => locale === 'zh' ? zh : en;
   if (typeof verdict.decision !== 'string') return '';
@@ -206,7 +205,7 @@ function toolNotes(record: Record_, result: NonNullable<Record_['result']>, loca
   return notes;
 }
 
-// 一次调用没有参数时，正文那一个空对象不该占一行。
+// 没有参数时不显示空对象。
 function argsText(args: Record<string, unknown> | undefined): string {
   return args === undefined || Object.keys(args).length === 0 ? '' : textOf(args);
 }
@@ -218,8 +217,8 @@ export function metaRow(kind: 'meta' | 'error', text: string, english?: string):
   return { id: nextId(), kind, text, ...(english === undefined ? {} : { english: { text: english } }) };
 }
 
-// 记录里那一格是内核自己量的实际执行时间，不含审批等待（第 66 步）。
-// 界面这一侧量到的那一段是发出到交回之间，含等人答复，所以只在跑着的那一轮读得到。
+// 记录中的耗时由 Kernel 测量，不包含审批等待。
+// 界面计时包含等待时间，因此只用于当前仍在运行的轮次。
 function secondsNote(ms: number, locale: 'zh' | 'en' = 'zh'): string {
   const seconds = ms / 1000;
   const shown = seconds < 10 ? seconds.toFixed(1) : Math.round(seconds);
@@ -230,8 +229,8 @@ export function durationNote(startedAt: number, now: number): string {
   return secondsNote(now - startedAt);
 }
 
-// 一张提问卡收掉时留下的那一句（审阅 F2）：题面与已经打下的字都读得到。
-// 一次请求只有一次答复（D107），卡片收掉之后那些字不会再交出去，所以要留在转录里。
+// 关闭提问卡片时将题目和已输入答案留在转录中。
+// 每个请求只能答复一次；卡片关闭后内容不能再提交给 Host。
 export function questionEcho(ask: { questions: { id: string; question: string }[] }, drafts: Record<string, { picked: string[]; extra: string }> = {}, locale: 'zh' | 'en' = 'zh'): string {
   return ask.questions.map((question, index) => {
     const typed = [...(drafts[question.id]?.picked ?? []), (drafts[question.id]?.extra ?? '').trim()].filter((one) => one !== '');
@@ -244,14 +243,14 @@ export function questionEcho(ask: { questions: { id: string; question: string }[
 }
 
 export function projectRecord(record: Record_, options: { startedAt?: number; now?: number } = {}): Row[] {
-  // 每一行带着它来自记录里哪一条事件：查找的命中说的是那一条事件的序号，跳到那一行要靠它（方案 4.2、实现顺序第 77 步）。
+  // 每行保留来源事件序号，供搜索结果定位到对应记录。
   const at = record.seq === undefined ? {} : { seq: record.seq };
   return projected(record, options).map((row) => ({ ...row, ...at }));
 }
 
 function projected(record: Record_, options: { startedAt?: number; now?: number }): Row[] {
   if (record.kind === 'user') return [{ id: nextId(), kind: 'question', text: record.raw ?? record.text ?? '' }];
-  // 一轮开始时的参数快照画成那一轮里的一行小字：内核还没落这一条时这一路不产行（读回来的记录里就没有它）。
+  // 有轮次参数快照时添加一行摘要；记录中没有快照时不生成该行。
   if (record.kind === 'turnContext') {
     const facts = [record.model, record.mode, record.policy].filter((part): part is string => typeof part === 'string' && part !== '');
     if (facts.length === 0) return [];
@@ -259,7 +258,7 @@ function projected(record: Record_, options: { startedAt?: number; now?: number 
     return [{ id: nextId(), kind: 'context', text: `本轮参数：${values}`, english: { text: `Turn settings: ${values}` } }];
   }
   if (record.kind === 'reasoning') return [{ id: nextId(), kind: 'reasoning', text: record.text ?? '' }];
-  // 一轮正常完整结束留下一条事实，那也是一处可选的分支点（D68、方案 4.3）：它画出一行，「从这里分支」挂在那一行上。
+  // 完整结束的轮次作为分支点显示，并提供创建分支的入口。
   if (record.kind === 'turn') {
     const states: Record<string, string> = { completed: '本轮已完成', cancelled: '本轮已取消', failed: '本轮失败', interrupted: '本轮意外中断' };
     const status = record.status ?? '';
@@ -288,7 +287,7 @@ function projected(record: Record_, options: { startedAt?: number; now?: number 
     const notes = toolNotes(record, result, 'zh');
     const englishNotes = toolNotes(record, result, 'en');
     const change = changeOf(record.tool ?? '', record.args ?? {});
-    // 记录里有的那一格优先：它跟着记录走，重开这份会话也还在。
+    // 优先使用记录中保存的字段，确保重开会话后仍保持一致。
     const duration = typeof record.durationMs === 'number' ? record.durationMs
       : options.startedAt === undefined ? undefined : (options.now ?? Date.now()) - options.startedAt;
     if (duration !== undefined) {
@@ -307,7 +306,7 @@ function projected(record: Record_, options: { startedAt?: number; now?: number 
       diff: change.diff,
       notes,
       english: { notes: englishNotes, summary: changeOf(record.tool ?? '', record.args ?? {}, 'en').summary },
-      // 失败与未允许那一格带着说不出去的原因，正文读它，不读那层信封（D93）。
+      // 失败和拒绝结果显示原因正文，不显示协议封装字段。
       text: typeof payload.text === 'string' ? payload.text : textOf(result.reason ?? result.content),
     }];
   }

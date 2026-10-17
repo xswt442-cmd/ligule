@@ -2,7 +2,7 @@ import type { RowProps } from './types';
 import { useText } from '../locale';
 import { turnFailure } from '../turn-failure';
 
-// 一轮完整结束那一行：它说得出这一轮收在什么上，也是「从这里分支」那一个把手所在（D68、方案 4.3）。
+// 完整结束轮次显示最终状态，并提供从该轮创建分支的入口。
 export function RoundRow({ row, branch, onModels }: RowProps) {
   const t = useText();
   const at = branch === undefined || row.status !== 'completed' ? undefined : row.seq;

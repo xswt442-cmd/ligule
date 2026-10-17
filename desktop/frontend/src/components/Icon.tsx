@@ -1,8 +1,8 @@
 import type { LucideIcon } from 'lucide-react';
 import { ArrowUp, Bell, Check, ChevronDown, ChevronRight, Clock, Copy, Download, Folder, FolderOpen, HelpCircle, List, MoreHorizontal, PanelLeft, Plus, RefreshCw, Search, Settings, Sparkles, Square, Trash2, TriangleAlert, X } from 'lucide-react';
 
-// 图标统一走 lucide：一套 24 的视图框、一种线条，尺寸与描边在这一处定，调用方只挑名字。
-// 界面只开这一份口子：新增图标要在下面这张表里挂号，不让某一格里随手引一枚别的形状。
+// 统一使用 Lucide 图标，并在此处设置视图框、尺寸和描边。
+// 组件仅接受下方登记的图标名称，新增图标需先加入列表。
 const SHAPES = {
   plus: Plus,
   send: ArrowUp,

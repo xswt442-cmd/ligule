@@ -1,7 +1,5 @@
-// 内核的工具表从空开始：新建的内核不提供任何能力（I1），它所能做的一切都由 register() 登记进来。
-//
-// 内核不引入传输层、界面框架和适配器。命令行与桌面壳是同一个对象之上的适配器，
-// 新增一个适配器不改动这里的任何一行。
+// 新建 Kernel 时工具表为空；只有通过 `register()` 登记的工具才能被调用。
+// Kernel 不依赖传输层、界面框架或客户端适配器，CLI 和 Desktop 共用同一套工具与策略逻辑。
 import { randomUUID } from 'node:crypto';
 import { KernelError } from './error.js';
 import { createConfig, type ConfigSnapshot } from './config.js';
@@ -99,29 +97,29 @@ function errorMessage(error: unknown): string | undefined {
   return typeof error.message === 'string' ? error.message : undefined;
 }
 
-// options.config 是装载侧折好的配置快照，options.logger 是宿主自己的日志后端（D8、D26），
-// options.policy 是这条调用要过的判定链（D15），options.session 是这次运行的会话记录（D11）。
-// 不传判定链时内核只查登记表与拒绝集，不传会话记录时调用不落盘。
+// `options.config` 是加载器生成的配置快照，`options.logger` 是 Host 提供的日志接口。
+// `options.policy` 决定调用如何判定，`options.session` 负责记录本次运行。
+// 未提供策略时只检查工具登记和拒绝规则；未提供会话时不写入记录。
 export function createKernel(options: KernelOptions = {}): Kernel {
   const config = options.config ?? createConfig({});
-  // 快照必须是 createConfig 折出来的那一份：工具读到的是同一个对象，宿主之后改不动它。
+  // 使用 `createConfig` 生成的冻结快照，确保工具读取期间配置不会被修改。
   if (!Object.isFrozen(config)) throw new KernelError('config_snapshot_must_be_frozen');
   const policy = options.policy;
   const session = options.session;
   const logger = createLogger(options.logger);
-  // 本次运行的文件观察记录，与工具表同寿：读过的文件登记在这里，覆盖之前要对上它（D3）。
+  // 文件观察记录与工具表具有相同生命周期；覆盖文件前必须与此前读取的版本匹配。
   const observations = createObservationLog();
   const context = Object.freeze({ config, logger, observations });
 
   const tools = new Map<string, RegisteredTool>();
-  // 宿主交给内核的按工具名拒绝集。每一项由一次 restrict() 追加，可以重叠。
+  // 按工具名维护 Host 添加的拒绝规则；多次 `restrict()` 可以为同一工具添加多条规则。
   const restrictions: Set<string>[] = [];
 
   function isDenied(name: string): boolean {
     return restrictions.some((denied) => denied.has(name));
   }
 
-  // 注入给模型的这一份受字节上限约束，超限时完整内容另存一个文件，记录里留下可取回的引用（D19、I6）。
+  // 限制注入模型的工具结果字节数；超限内容另存文件，记录中保留可读取的引用。
   async function withinLimit(
     result: ReturnType<typeof refusalOf> | ReturnType<typeof failureOf> | ReturnType<typeof resultOf>,
     directory: string,
@@ -144,36 +142,34 @@ export function createKernel(options: KernelOptions = {}): Kernel {
     await session.append({ ...entry, result: await withinLimit(result, session.directory) });
   }
 
-  // 失败记进会话再抛出去：码给调用方分支，detail 是给模型看的那一份说明（D19）。
+  // 失败先写入会话记录再交给调用方；稳定错误码供分支判断，说明文字供模型查看。
   async function fail(entry: ToolEvent, error: KernelError): Promise<never> {
     await record(entry, failureOf(error.code, error.detail === undefined ? undefined : { content: error.detail }));
     throw error;
   }
 
   const kernel: Kernel = {
-    // 本次运行登记了哪些工具，从这一处读出（I2）。
+    // 返回本次运行中已登记的工具。
     list() {
       return [...tools.keys()].sort();
     },
 
-    // 登记时声明过「重做一次不会在本机之外多留下什么」的那几件名字：恢复措辞按这一格分开说（D79）。
-    // 判定不读它，模型也读不到它（I3、D12）。
+    // 返回声明为可安全重试的工具名称。此字段仅用于恢复说明，不参与权限判定，也不会发给模型。
     readOnly() {
       return [...tools.values()].filter((tool) => tool.readOnly).map((tool) => tool.name).sort();
     },
 
-    // 模式能从哪几件里挑：登记表里去掉固定披露入口（D63）。被模式藏起来不该是一种可能，
-    // 否则默认档位下模型连发现技能的入口都没有，而注册表里明明有东西。
+    // 返回可供模式选择的工具名称，排除固定披露入口。
     selectable() {
       return [...tools.values()].filter((tool) => !tool.disclosure).map((tool) => tool.name).sort();
     },
 
-    // 循环按这一条决定分组：没有声明、或者登记名不存在，一律按串行处理（D29）。
+    // 返回循环使用的执行分组；未声明或引用未知分组的工具按串行执行。
     execution(name: string) {
       return tools.get(name)?.execution ?? 'serial';
     },
 
-    // 登记返回反注册动作。重名是错误，不覆盖前一个，也不丢弃后一个。
+    // 返回用于撤销本次登记的函数。重复名称会报错，不覆盖现有工具。
     register(tool: ToolDefinition) {
       if (!tool || typeof tool.name !== 'string' || tool.name === '') {
         throw new KernelError('tool_name_required');
@@ -184,7 +180,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       if (typeof tool.run !== 'function') {
         throw new KernelError('tool_run_required');
       }
-      // 参数模式顶层必须是对象，这条判据由本项目写进内核（D14）。
+      // 参数模式顶层必须是对象。
       const schema = tool.parameters;
       if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
         throw new KernelError('tool_parameters_must_be_object');
@@ -197,42 +193,40 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       }
       let parameters;
       try {
-        // 存下与插件那个对象断开的一份拷贝：插件之后修改自己交出的模式，改动不到已登记的清单。
+        // 保存独立副本，避免插件后续修改对象时改变已登记的参数模式。
         parameters = structuredClone(schema);
       } catch {
-        // structuredClone 对函数和 Symbol 抛 DataCloneError，这样的模式与 JSON 不能无损往返。
+        // `structuredClone` 无法复制函数和 Symbol；这类值无法通过 JSON 往返。
         throw new KernelError('tool_parameters_not_serializable');
       }
-      // 检查的是要存下的那一份：模式只能用受控子集里的构造，子集之外的当场拒（D14）。
+      // 只允许受控参数模式子集中的构造。
       assertSupportedSchema(parameters);
-      // 只留名字、描述、参数模式那三项，插件附带的其他字段进不了模型可见清单（D12）。
-      // 执行策略声明按工具名留在内核这一侧，循环读它，模型看不见（D29、I3）。
-      // 披露入口也留在内核这一侧：固定那几件工具由注册表里有没有内容决定，不进模式的选择范围（D63）。
-      // 哪个参数是要取回的目标同样留在内核这一侧：判定链看的是解析之后的地址类别，不是模型写的字符串（D58）。
-      // 哪个参数是一段命令文本也留在这里：那一段要按 Host 选定的那种语法解析后再判（D59）。
+      // 模型清单只包含名称、说明和参数模式，不暴露插件附带字段。
+      // 工具执行策略保存在 Kernel 中，供循环读取，不发给模型。
+      // 固定披露工具不受模式筛选影响，其可用性由登记表决定。
+      // 网络目标和命令文本的元数据保留在 Kernel 中，供权限判定使用解析后的地址和命令语法。
       const entry: RegisteredTool = {
         name: tool.name,
         description: tool.description,
         parameters,
         execution: tool.execution === 'parallel' ? 'parallel' : 'serial',
         disclosure: tool.disclosure === true,
-        // 一件工具可以自己声明「重做一次不会在本机之外多留下什么」：恢复时的那句话按这一格分开说（D79）。
-        // 声明不参与判定，判定读的还是每一次调用自己（I3）。
+        // 工具可声明重试是否会产生额外副作用；该声明只用于恢复说明，不参与权限判定。
         readOnly: tool.readOnly === true,
         targetArgument: typeof tool.targetArgument === 'string' ? tool.targetArgument : undefined,
         commandArgument: typeof tool.commandArgument === 'string' ? tool.commandArgument : undefined,
-        // 一件工具可以声明「这一次调用真正用的能力是什么」：MCP 的两件固定工具靠它把 `mcp:<服务器>/<工具>` 交出去（D52）。
+        // 工具可提供实际能力名称；MCP 工具用它传递 `mcp:<服务器>/<工具>` 身份。
         capability: typeof tool.capability === 'function' ? tool.capability : undefined,
         run: tool.run,
       };
       tools.set(tool.name, entry);
       return () => {
-        // 只撤销自己这一次登记：同名工具被再次登记之后，旧的卸载动作不能删掉新的那一个。
+        // 只撤销本次登记，避免旧的卸载函数删除之后重新登记的同名工具。
         if (tools.get(tool.name) === entry) tools.delete(tool.name);
       };
     },
 
-    // 被拒绝的工具在生成清单之前删掉。每项的 parameters 是新拷贝，调用方修改影响不到内核保存的那份。
+    // 生成模型清单前移除被拒绝的工具，并复制参数模式，避免调用方修改 Kernel 保存的数据。
     manifest() {
       return [...tools.values()]
         .filter((tool) => !isDenied(tool.name))
@@ -244,8 +238,8 @@ export function createKernel(options: KernelOptions = {}): Kernel {
         }));
     },
 
-    // Pure preflight for a model response batch: checks registration and the same schema subset as call(),
-    // without policy evaluation, session writes, approval, or tool execution.
+    // 预检模型返回的一批调用：检查工具是否已登记，并使用与 `call()` 相同的参数模式校验。
+    // 预检不执行权限判定、不写入会话、不请求审批，也不运行工具。
     validateCall(name, args) {
       const tool = tools.get(name);
       if (!tool) return { code: 'tool_not_found', detail: `no tool named "${name}" is registered for this run` };
@@ -256,30 +250,28 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       return {};
     },
 
-    // 拒绝只收紧：后一次 restrict() 不撤销前一次的拒绝，卸载自己这一项也不解除重叠的那一份。
-    // 名字对不上任何已登记工具时什么都不拦，规则表可以写出本次运行没有装载的工具。
+    // 拒绝规则只能增加限制；撤销一条规则不会移除其他重叠规则。
+    // 未登记工具名的拒绝规则保留在规则表中，但不会匹配本次运行中的工具。
     restrict(names: readonly string[]) {
       const denied = new Set(names);
       restrictions.push(denied);
       return () => {
-        // 重复卸载只撤销自己那一项，不能删掉别的 restrict() 追加的拒绝。
+        // 重复调用此函数只移除本次添加的规则，不影响其他 `restrict()` 规则。
         const index = restrictions.indexOf(denied);
         if (index >= 0) restrictions.splice(index, 1);
       };
     },
 
-    // 每次失败都带一个让调用方可以分支的稳定错误码（I9）。
-    // 工具从第二个参数的 context 里读配置快照与日志接口，不自己去拿（D8、D26）；
-    // options.signal 是这次调用的取消边界，由循环或适配器交进来（D20）。
-    // 判定链在这一步上，所以没有任何一条执行路径绕得开它；每一次拒绝、失败与成功都进会话记录。
+    // 每种失败都返回稳定错误码，供调用方分支处理。
+    // 工具从 context 读取配置快照和日志接口；取消信号由循环或适配器传入。
+    // 所有调用都经过权限判定，并将拒绝、失败和成功结果写入会话记录。
     async call(name: string, args?: unknown, options: { readonly callId?: string; readonly signal?: AbortSignal } = {}) {
-      // options.callId 是模型那一次调用的 id，进记录用来把工具结果挂回助手那一轮（D11、D13）。
+      // `options.callId` 用于将工具结果关联到模型发起的调用。
       const entry: ToolEvent = { kind: 'tool', tool: name, callId: options.callId, args };
       const tool = tools.get(name);
       if (!tool) {
-        // 没登记的名字也要留下一条结果：助手那一轮已经带着这次调用，记录里少一条跟它的 id 对上，
-        // 下一次请求体里那个调用就悬空，端点会把整份请求拒掉，而代价只是模型打错了一个名字。
-        // 参照实现同样是交回一条错误结果而不是抛一个没人接收的异常（Cline 的循环）。
+        // 即使工具未登记也要记录失败结果，确保本轮中的每个模型调用都有对应结果。
+        // 否则下一次请求会包含没有结果的工具调用，并被模型服务拒绝。
         await fail(entry, new KernelError('tool_not_found', { detail: `no tool named "${name}" is registered for this run` }));
         return undefined;
       }
@@ -287,8 +279,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
         await record(entry, refusalOf('tool_denied', 'the tool is restricted for this run'));
         throw new KernelError('tool_denied');
       }
-      // 参数校验排在判定链之前：形状不对的调用不是一次有意义的调用，
-      // 送去询问只会让用户为一次注定失败的调用做决定，也不该把拒绝计数推上去。
+      // 先校验参数再运行权限判定。格式错误的调用无法成功，不能要求用户审批，也不应增加拒绝计数。
       const violations = validateArgs(tool.parameters, args);
       if (violations.length > 0) {
         await fail(entry, new KernelError('tool_args_invalid', { detail: violations.join('; ') }));
@@ -298,13 +289,12 @@ export function createKernel(options: KernelOptions = {}): Kernel {
         await fail(entry, new KernelError('tool_args_invalid', { detail: 'arguments must be an object' }));
         return undefined;
       }
-      // 目标地址在这里解析一次：判定链判断的就是这一次解析出的地址，工具随后连的也是这几个地址（D58）。
-      // 分两次解析的话，链条批准了一个 IP 而连接自己又查一次 DNS，两次可以不是同一个地址。
+      // 只解析一次网络目标，并将同一结果传给权限判定和执行。
+      // 避免 DNS 在审批和连接之间变化，导致实际连接地址与批准地址不同。
       const targetAddress = tool.targetArgument === undefined ? undefined : args[tool.targetArgument];
       const network = typeof targetAddress === 'string' ? await resolveTarget(targetAddress) : undefined;
-      // 解释器在这里选定一次（D59）：判定链读的就是这一份选择所用的语法，工具随后起的也是这一个可执行文件。
-      // 配置显式写了哪一种而机器上没有时报稳定码并留一条失败记录，不换成另一份——换掉的那一种语法没被读过，
-      // 「跑的是一件 exec」与「这条文本按哪种语法解析出了什么」必须是同一条记录里的两栏。
+      // 只选择一次命令解释器，并将同一后端用于语法解析、权限判定和执行。
+      // 配置指定的解释器不可用时返回错误，不自动切换到另一种语法或程序。
       let shell;
       if (tool.commandArgument !== undefined && typeof args?.[tool.commandArgument] === 'string') {
         try {
@@ -317,36 +307,36 @@ export function createKernel(options: KernelOptions = {}): Kernel {
         entry.shell = { kind: shell.kind, executable: shell.executable };
       }
       if (policy) {
-        // 声明了自己能力的那件工具按它给的能力判（D52）：`mcp.call` 这个名字对判定没有意义。
+        // 有能力元数据的工具按其声明的实际能力名称进行判定，例如 `mcp:<服务器>/<工具>`。
         const capability = tool.capability?.(args);
         const verdict = await policy.evaluate({ tool: name, input: args, target: network, shell, capability });
-        // 判定真正用的那一格结果进记录（D77）：哪一档、走的是哪一条路、命中哪条规则、问过之后答了什么。
-        // 这一格不进模型可见投影（D12：模型只看名字、描述与参数模式），也不进检查点那段哈希的输入。
+        // 会话记录保存权限判定结果，包括策略档位、匹配规则和审批答复。
+        // 该结果仅供客户端查看，不加入模型上下文或检查点摘要。
         const recordedVerdict: Record<string, unknown> = {};
         for (const field of VERDICT_FIELDS) {
           if (verdict[field] !== undefined) recordedVerdict[field] = verdict[field];
         }
         entry.verdict = recordedVerdict;
         if (verdict.decision !== 'allow') {
-          // 拒绝理由进日志与记录，抛出去的那一份只带错误码（D19 把文本与码分开）。
+          // 拒绝理由写入日志和会话记录；返回值只包含稳定错误码。
           const code = verdict.code ?? 'policy_denied';
           const reason = verdict.reason ?? '';
           logger.log(`tool ${name} is not allowed`, { tool: name, code, reason });
           await record(entry, refusalOf(code, reason));
           throw new KernelError(code);
         }
-        // 解析出的分段跟着答复回来：记录里要读得出这条文本被读成了哪几段（D59）。
+        // 在结果中保留解析出的命令分段，便于从记录中确认实际判定了哪些命令。
         if (entry.shell !== undefined && shell !== undefined) {
           if (verdict.segments !== undefined) entry.shell.segments = verdict.segments;
-          // 退出码那一段尾巴补不补，看的是判定读出来的那一条：整条文本就是一条简单命令，而且那个名字在这台机器上
-          // 是一个可执行文件。没有判定链时不补——那时没有「这条文本被读成一条原生命令」这个事实，宁可少一个退出码。
+          // 只有判定结果确认命令是单条原生命令且首个程序可执行时，才附加退出码。
+          // 未运行权限判定时无法确认命令形状，因此不附加退出码。
           shell = withNativeExitCode(shell, verdict.segments?.length === 1 ? verdict.segments[0] : undefined);
           if (shell.tail !== '') entry.shell.tail = shell.tail;
         }
       }
       let value;
-      // 这一次执行花了多久，记在事件外层（实现顺序第 66 步）。计时从判定放行之后开始，所以审批等的那一段不在里面。
-      // 单调时钟：墙上时间被调过一次，也不会把这一格变成负数或者一个很长的数。
+      // 将执行耗时写入事件；计时从权限判定通过后开始，不包含等待审批的时间。
+      // 使用单调时钟，避免系统时间调整影响耗时结果。
       const startedAt = process.hrtime.bigint();
       const timed = () => {
         entry.durationMs = Number((process.hrtime.bigint() - startedAt) / 1_000_000n);
@@ -354,13 +344,12 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       try {
         value = await tool.run(args, { ...context, signal: options.signal, target: network, shell });
       } catch (error) {
-        // 工具没把错误包成内核错误码时由内核接住：统一成一个稳定码，原始错误进 cause，
-        // 它自己的消息作为给模型看的那一份说明。半成品工具抛出的异常不该停住循环，
-        // 所以这一类同样作为一条失败事件进会话记录，模型下一轮看得见（D19、D20）。
+        // 工具抛出未包装的错误时，转换为稳定错误码并将原始错误保存在 cause 中。
+        // 错误说明会写入会话记录并提供给模型，避免单个工具异常中断整个循环。
         const failure = error instanceof KernelError
           ? error
           : new KernelError('tool_failed', { cause: error, detail: errorMessage(error) });
-        // 失败与取消也真的跑了那一段时间，那一格照记；没执行的调用（拒绝、参数不合法、被跳过）走不到这一行。
+        // 失败和取消的调用也记录实际执行耗时；拒绝、参数错误和跳过的调用不会进入此处。
         timed();
         await fail(entry, failure);
       }

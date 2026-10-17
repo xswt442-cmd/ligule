@@ -2,7 +2,7 @@ export type SessionStream = { text: string; reasoning: string };
 
 const EMPTY_STREAM: SessionStream = { text: '', reasoning: '' };
 
-/** Keeps partial assistant output separate until its owning session records it. */
+/** 暂存助手的流式输出，直到对应会话将其写入记录。 */
 export class SessionStreamBuffer {
   private readonly sessions = new Map<string, SessionStream>();
 

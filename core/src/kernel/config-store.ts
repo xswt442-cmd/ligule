@@ -1,7 +1,6 @@
-// 宿主持有的那两格配置读写口（方案 7.2 与 7.1）：层名到文件的对应关系在这里，界面上的说法只到层名。
-// 可写的只有两层：使用者默认那一份，与当前项目的本机覆盖那一份。项目共享的 `config.toml` 不在这一批里，
-// 那个文件跟着仓库走，改它等于替别人改（7.2 表里那一格写的是本机覆盖）。命令行与管理端那两层是只读的。
-// 只读那一层还管着一件事：值本来就是它写的话，改文件盖不过它（D8 的次序、方案 7.1 的「不能声称改低层文件即可生效」）。
+// Host 通过此模块读写配置，并由此解析层名与文件的对应关系。
+// 仅用户配置和当前项目的本地配置可写；项目共享配置随代码库维护，命令行和管理端配置只读。
+// 只读层优先级更高时，写入较低层不会改变当前有效值。
 import { configPaths } from './config-file.js';
 import {
   EDITABLE,
@@ -16,11 +15,11 @@ import { KernelError } from './error.js';
 import { createConfig, type ConfigSnapshot } from './config.js';
 
 const LAYERS = ['user', 'projectLocal'];
-// 从最高优先级往下找那一个键落在哪一层：命令行盖过本机覆盖，本机覆盖盖过项目共享，项目共享盖过使用者默认（D8）。
+// 按优先级从高到低查找配置值：命令行、本地项目、共享项目、用户配置。
 const PRECEDENCE = ['flag', 'local', 'project', 'user'] as const;
 type Source = typeof PRECEDENCE[number] | 'none';
 
-/** 装载那一次读到的四层对象。`read()` 每跑一次就把可写的那两层换成文件此刻的内容（方案 3A）。 */
+/** 加载时读取的四层配置。`read()` 会刷新两个可写层的当前文件内容。 */
 export type LoadedLayers = Partial<Record<(typeof PRECEDENCE)[number], Record<string, unknown>>>;
 
 const inLayer = (layer: Record<string, unknown> | undefined, path: readonly string[]): boolean => {
@@ -32,11 +31,11 @@ const inLayer = (layer: Record<string, unknown> | undefined, path: readonly stri
   return true;
 };
 
-/** 那一条路径在那一层里写着的值；没写时是 undefined。 */
+/** 指定配置层中的字段值；字段不存在时返回 undefined。 */
 const valueIn = (layer: Record<string, unknown> | undefined, path: readonly string[]): unknown =>
   path.reduce<unknown>((node, part) => (node as Record<string, unknown>)[part], layer);
 
-// 规则表里的一条在画面上排第几，说的是那一张数组表的顺序：界面上「第 3 条」与文件里第三个 `[[policy.rules]]` 是同一件事。
+// 规则编号对应数组顺序，因此界面中的第 N 条对应文件中的第 N 个 `[[policy.rules]]`。
 const RULES_FIELD = 'policy.rules';
 
 export function createConfigStore({ projectRoot, userHome, layers = {} }: { projectRoot: string; userHome?: string; layers?: LoadedLayers }) {
@@ -46,16 +45,16 @@ export function createConfigStore({ projectRoot, userHome, layers = {} }: { proj
     if (layer === 'projectLocal') return files.local;
     throw new KernelError('config_layer_unknown', { detail: `writable layers: ${LAYERS.join(', ')}` });
   };
-  // 界面上那一个层名与装载侧那一份键的对应：`projectLocal` 写的就是 `local` 那一层。
+  // 将界面使用的层名映射到加载器配置对象中的键，例如 `projectLocal` 对应 `local`。
   const keyOfLayer = (layer: string) => (layer === 'user' ? 'user' : 'local');
   const holderOf = (field: string) => PRECEDENCE.find((layer) => inLayer(layers[layer], editableField(field).path));
   const sourceOf = (field: string): Source => holderOf(field) ?? 'none';
-  // 一条字段现在折出来的是哪一份值：从高到低那几层里第一个写着它的地方取。
+  // 按优先级从高到低返回第一个定义该字段的配置值。
   const valueOf = (field: string): unknown => {
     const layer = holderOf(field);
     return layer === undefined ? undefined : valueIn(layers[layer], editableField(field).path);
   };
-  // 折完那一张规则表：数组整份替换（D8 的合并语义），所以生效的那一份出自最高的那一层。
+  // 配置层中的规则数组整体替换低优先级数组，不会逐条合并。
   const effectiveRules = (): PolicyRule[] => {
     for (const layer of PRECEDENCE) {
       const rules = (layers[layer]?.policy as Record<string, unknown> | undefined)?.rules;
@@ -63,9 +62,9 @@ export function createConfigStore({ projectRoot, userHome, layers = {} }: { proj
     }
     return [];
   };
-  // 白名单里那几条标量字段（规则表是另一类，交回的是整张表）。
+  // 白名单中的标量字段；规则表作为整体单独处理。
   const scalarFields = Object.keys(EDITABLE).filter((field) => editableField(field).kind !== 'rules');
-  // 那几条标量折出来的一份值，按配置文件自己的形状分层：`{ model: { api, baseURL, model, apiKeyEnv }, policy: { mode } }`。
+  // 将白名单标量按配置文件结构组合为 `model` 和 `policy` 两组字段。
   const foldValues = (): Record<string, Record<string, unknown>> => {
     const values: Record<string, Record<string, unknown>> = {};
     for (const field of scalarFields) {
@@ -74,27 +73,25 @@ export function createConfigStore({ projectRoot, userHome, layers = {} }: { proj
     }
     return values;
   };
-  // 设置那一栏要读的东西一次读齐（方案 3A）：可写的那两层各读一遍文件，界面上的值、每一条由哪一层写着、
-  // 生效的那张规则表与它的来源、以及写的时候要带回去的那一份版本，全部出自这一遍。
-  // 只读的那两层（项目共享与命令行）留在装载那一次读到的那一份上：这一栏改不了它们，
-  // 正在跑的这一份环境用的也是那一次读到的，说成文件此刻的内容反而对不上。
-  // 这一处只读不写：判定链、提供方与记录都不从这儿取东西，打开设置那一栏改不了正在执行的权限。
+  // 一次读取两个可写层的文件，并同时返回字段值、字段来源、有效规则和用于后续写入的版本。
+  // 只读的项目共享层和命令行层保持加载时的快照，不伪装成文件当前内容。
+  // 此接口只供设置页面读取，不影响权限判定、模型提供方或会话记录。
   const readNow = async () => {
     const readLayers = await Promise.all(
       LAYERS.map(async (layer) => {
         const { version, table } = await readConfigLayer(pathOf(layer));
         layers[keyOfLayer(layer)] = table;
-        // 规则表那一格只有写着它的那一层才交回：别的层没有这一张表就是没有，不交回一份空数组让人以为被盖住了。
+        // 只有实际定义规则表的配置层才返回来源；未定义时不伪装成空数组。
         const written = inLayer(table, ['policy', 'rules']);
         return { layer, version, exists: version !== '', ...(written ? { rules: rulesOfLayer(table) } : {}) };
       }),
     );
     return {
       layers: readLayers,
-      // 白名单里每一条现在由哪一层写着（方案 7.1 的来源那一格）。`flag` 是命令行 `--config` 写的那一层，只读。
+      // 返回每个白名单字段当前由哪一层提供。`flag` 表示只读的命令行 `--config` 层。
       sources: Object.fromEntries(Object.keys(EDITABLE).map((field) => [field, sourceOf(field)])),
       values: foldValues(),
-      // 现在生效的那一张规则表与它出自哪一层（方案 7.1 的三种读数）：界面上列规则、改规则都读这一份。
+      // 返回当前生效的规则表及其来源，供界面展示和编辑。
       rules: effectiveRules(),
       rulesSource: sourceOf(RULES_FIELD),
     };
@@ -110,8 +107,8 @@ export function createConfigStore({ projectRoot, userHome, layers = {} }: { proj
     write(request: WriteRequest & { layer: string }, validate?: (candidate: ConfigSnapshot, editedLayer: Record<string, unknown>) => void | Promise<void>) {
       const definition = editableField(request.field);
       const file = pathOf(request.layer);
-      // 规则表整份替换（D8 的合并语义），所以在哪一层写就只可能是写着生效那一份的那一层：
-      // 往另一层加一条，交回的是「只有这一条」的表，改一条也指不到生效那一份里的第几条。
+      // 规则表整体替换，因此只能写入当前提供生效规则表的配置层。
+      // 在其他层写入部分规则会遮蔽现有规则，导致界面无法按当前列表顺序修改它们。
       if (definition.kind === 'rules') {
         const source = sourceOf(RULES_FIELD);
         const holder = keyOfLayer(request.layer);
@@ -119,21 +116,21 @@ export function createConfigStore({ projectRoot, userHome, layers = {} }: { proj
           throw new KernelError('config_rules_elsewhere', { detail: `the rule table in effect is written by the ${source} layer, not ${request.layer}` });
         }
       }
-      // 落笔之前先记下这一条现在折出来的是哪一份：宿主要说的是「这一笔有没有改变当前生效的那一份」，
-      // 不是「这一笔写进去的是什么值」——更上面那一层本来就写着它时，前后是同一份，运行里什么都不会变。
+      // 写入前记录当前有效值，以便判断本次写入是否改变了运行配置。
+      // 如果更高优先级层覆盖该字段，写入前后有效值相同，运行中的配置不会变化。
       const before = definition.kind === 'rules' ? JSON.stringify(effectiveRules()) : JSON.stringify(valueOf(request.field));
       return writeConfigField(file, request, validate === undefined ? undefined : async (table) => {
         await validate(await preview(request.layer, table), table);
       }).then(async (written) => {
-        // 落盘之后按层序重折一次，交回的是「这一条现在生效的是哪一份值、由哪一层写着」，不是刚写进去的那一个值（D8、方案 7.1）。
-        // 读的是这一遍，版本也是这一遍的：宿主随后要说「保存了但当前运行没变」，两句必须出自同一时刻的文件。
+        // 保存后重新计算有效值和来源，并从同一次读取中取得版本号。
+        // 这样可以基于一致状态报告写入是否影响当前运行配置。
         const fresh = await readNow();
         const source = definition.kind === 'rules' ? fresh.rulesSource : fresh.sources[request.field];
         const holder = keyOfLayer(request.layer);
         const effective = definition.kind === 'rules' ? fresh.rules : fresh.values[definition.path[0]]?.[definition.path[1]];
         return {
           ...written,
-          // 那一个字段落在提供方配置的哪一格上：宿主按这一格重算提供方，不必知道白名单的全表（方案 7.3）。
+          // 返回受影响的模型字段，供 Host 更新提供方，而无需重复维护字段白名单。
           key: definition.path[1],
           table: definition.path[0],
           shadowed: source !== holder,

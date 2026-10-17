@@ -1,4 +1,4 @@
-// 本机剪贴板程序的调用边界：平台编码、进程启动与管道错误都在能力层处理。
+// 此能力负责调用系统剪贴板，并处理平台编码、进程启动和管道错误。
 import { spawn } from 'node:child_process';
 
 const BACKENDS: Partial<Record<NodeJS.Platform, { readonly program: string; readonly args: readonly string[] }>> = {

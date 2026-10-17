@@ -1,6 +1,5 @@
-// 调用参数的受控子集（D14）：内置工具的参数模式只用这些构造，内核自己校验，不引通用校验库。
-// 子集之外的构造在注册期就拒：模式已经作为清单交给模型，内核不校验的构造等于承诺了一件做不到的事。
-// 外部带来的完整 JSON Schema 要先经一层独立适配降到这个子集，那一层当前没有使用者。
+// 工具参数模式使用受控子集，由 Kernel 负责校验，不依赖通用校验库。
+// 注册时拒绝 Kernel 无法执行的校验构造。外部 JSON Schema 如需使用，必须先转换为该子集。
 import { KernelError } from './error.js';
 
 const ROOT_KEYS = ['type', 'properties', 'required', 'description'];
@@ -12,7 +11,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-// 注册期用：把子集之外的构造连它的路径一次报全，插件作者不必一轮改一处。
+// 注册时列出所有不支持构造及其路径，便于一次修正完整模式。
 export function assertSupportedSchema(schema: Record<string, unknown>): void {
   const violations = [];
   for (const key of Object.keys(schema)) {
@@ -39,9 +38,7 @@ export function assertSupportedSchema(schema: Record<string, unknown>): void {
       if (leaf.description !== undefined && typeof leaf.description !== 'string') {
         violations.push(`${name}.description must be a string`);
       }
-      // 上下界只在数值类型上校验得了。D14 定的判据是「内核不校验的构造等于承诺一件做不到的事」，
-      // 所以字符串上的 minimum 要在注册期就指名拒掉：收下之后它一点作用也没有，用的人看不出来；
-      // 非有限的界值同样生效不了（任何数与 NaN 比都小于 false）。
+      // 数值边界只适用于 integer 和 number 字段，且必须是有限数值。
       for (const bound of ['minimum', 'maximum']) {
         if (leaf[bound] === undefined) continue;
         if (typeof leaf[bound] !== 'number' || !Number.isFinite(leaf[bound])) {
@@ -53,7 +50,7 @@ export function assertSupportedSchema(schema: Record<string, unknown>): void {
       if (typeof leaf.type === 'string' && NUMBER_TYPES.includes(leaf.type)
         && typeof leaf.minimum === 'number' && typeof leaf.maximum === 'number'
         && Number.isFinite(leaf.minimum) && Number.isFinite(leaf.maximum) && leaf.minimum > leaf.maximum) {
-        // 反过来的一对界值会让这个参数无解：那是写错了模式，当场说清楚比每次调用都拒更好。
+        // 下限大于上限时没有合法值，应在注册时报告无效模式。
         violations.push(`${name} has minimum above maximum`);
       }
     }
@@ -71,8 +68,8 @@ export function assertSupportedSchema(schema: Record<string, unknown>): void {
   }
 }
 
-// 调用期用：按上面那个子集校验参数，返回违规列表，空列表就是合法。
-// 模式里没有声明的键按 JSON Schema 的默认放过，多一个键不算失败。
+// 调用时使用受控子集校验参数，返回所有违规项；空列表表示合法。
+// 未声明字段按 JSON Schema 默认规则允许。
 export function validateArgs(schema: Record<string, unknown>, args: unknown): string[] {
   if (!isPlainObject(args)) return ['arguments must be an object'];
   const violations = [];

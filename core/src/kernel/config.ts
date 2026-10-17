@@ -1,27 +1,24 @@
-// 五层配置折成一个只读快照（D8）。LAYER_ORDER 由低到高，同一件事在两层各写一次时由靠后的那一层生效。
-// 这里只管折：谁去读这些层的文件与命令行标志属于装载侧，内核拿到的是已经折好的快照。
+// 将五层配置合并为只读快照。`LAYER_ORDER` 按优先级从低到高排列，后续层覆盖前序层。
+// 文件和命令行参数由加载器读取；Kernel 只接收已合并配置。
 import { KernelError } from './error.js';
 
-// 层名与 D8 定的五层一一对应：用户 < 项目 < 本地 < 命令行标志 < 管理端。
+// 配置层优先级：用户、项目共享、项目本地、命令行参数、管理端。
 export const LAYER_ORDER = ['user', 'project', 'local', 'flag', 'managed'] as const;
 export type ConfigLayer = typeof LAYER_ORDER[number];
 export type ConfigSnapshot = Readonly<Record<string, unknown>>;
 
-// 只有「一张表」才算可合并的对象：类实例（TOML 的日期时间就是这么一个）没有自己的键，
-// 按表递归合下去，上层那一份的值会被悄悄丢掉。
+// 只有普通对象按字段递归合并；日期时间等类实例整体替换，避免丢失其内部值。
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const proto = Object.getPrototypeOf(value);
   return proto === Object.prototype || proto === null;
 }
 
-// 嵌套对象按键逐个合，数组与标量整份替换：一层写的是「局部覆盖」，
-// 逐项合并数组会把两层的列表接成一条谁都没写过的列表。
-// 装载侧合并同一层里的多条命令行覆盖时用的是同一个函数，两处语义不会走岔。
+// 嵌套对象按键合并，数组和标量整体替换，避免拼接出任何配置层都未声明的数组。
+// 同一函数也用于合并单层中的多条命令行覆盖。
 export function mergeInto(target: Record<string, unknown>, source: Record<string, unknown>): void {
   for (const [key, value] of Object.entries(source)) {
-    // 项目层那一份文件可能出自别人写的仓库，`["__proto__"]` 这样一段会把值挂到所有对象的原型上，
-    // 后面的每一次判定都读得到它。这不是配置里该有的东西，指名报出去，不默默收下也不悄悄丢掉。
+    // 拒绝 `__proto__` 键，防止不可信的项目配置修改对象原型并影响后续权限判定。
     if (key === '__proto__') throw new KernelError('config_key_unsafe', { detail: key });
     if (isPlainObject(value) && isPlainObject(target[key])) mergeInto(target[key], value);
     else target[key] = structuredClone(value);
@@ -39,7 +36,7 @@ function deepFreeze(value: unknown): unknown {
 export function createConfig(layers: unknown): ConfigSnapshot {
   if (!isPlainObject(layers)) throw new KernelError('config_layers_must_be_object');
   for (const name of Object.keys(layers)) {
-    // 层名写错时那一层的内容会整个没人读，所以在这里当场失败而不是默默少折一层。
+    // 未知配置层会导致整层被忽略，因此必须立即返回错误。
     if (!LAYER_ORDER.some((layer) => layer === name)) throw new KernelError('config_layer_unknown');
     if (layers[name] !== undefined && !isPlainObject(layers[name])) throw new KernelError('config_layer_must_be_object');
   }

@@ -1,11 +1,9 @@
-// `subagent`：把一块活交给一个派生执行体（D71，实现顺序第 31 步）。
+// `subagent` 将任务交给独立的派生执行。
 //
-// 派生体是同进程里的另一个循环：一份新内核、一份新的会话记录、同一份提供方与配置。三条不能让步的地方写在
-// D71 里：判定档位继承父会话那一条链（派生体不能比父会话更松）、只允许一层（派生体的登记表里没有 `subagent`
-// 自己）、记录各一份（那一段要能单独重建，I5）。
+// 派生执行在同一进程中运行独立循环，使用新的 Kernel 和会话记录，并继承父会话的提供方与配置。
+// 它沿用父会话的权限判定、不能递归启动其他子 Agent，且拥有独立记录以便恢复。
 //
-// 这一件工具是内核之外的一方插件：内核自己不提供任何能力（I1）。它也不并发：第一版一次只跑一个派生体（D29 的
-// 并发字段没动）。
+// 该工具通过插件注册，不属于 Kernel 内置能力。当前每个父会话一次只运行一个派生任务。
 import { createKernel } from '../kernel/kernel.js';
 import { createLoop, DEFAULT_LOOP_LIMITS } from '../kernel/loop.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
@@ -59,7 +57,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
           }
           counter += 1;
           const id = `${deps.sessionId}.sub-${counter}`;
-          // 首行在第一次落笔时才写，所以模式身份先留一个格子，等到那一份清单选定再填（D73）。
+            // 首行在首次写入时生成；模式选择确定后再补入模式身份。
           let modeIdentity: { name: string; layer: string } | undefined;
           const session = createSessionLog({
             directory: deps.directory,
@@ -73,12 +71,12 @@ export function createSubagentPlugin(deps: SubagentDeps) {
           });
           const child = createKernel({
             config: deps.config,
-            // 判定链是父会话那一条实例：拒绝计数与降到逐次询问这件事跟着共用，换一份链就等于给派生体另起一档（D71）。
+            // 派生执行复用父会话的权限判定实例，包括拒绝计数和强制审批状态。
             policy: deps.chain,
             session,
             logger: deps.logger,
           });
-          // 派生体的工具来自父会话那一套插件，里面没有 `subagent` 自己：一层是「谁在跑」读得出来的下界。
+          // 派生执行继承父会话的插件工具，但不注册 `subagent`，从而禁止递归派生。
           const assembly = loadAssembly(child, deps.plugins);
           const prompt = createPromptAssembly({ static: deps.prompt.staticPrefix });
           try {

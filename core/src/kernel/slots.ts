@@ -1,7 +1,6 @@
-// 类型化槽位注册表（I7）：界面内容全部经注册表挂载，宿主不硬编码任何插件的名字。
-// 槽位里放的是不透明载荷：宿主声明每个槽位收什么形状，插件只往已声明的槽位挂东西。
-// 界面在另一个进程里，读不到这一张表（D30），所以桌面壳的前端自己声明了一份同形状的（`desktop/frontend/slots.js`）；
-// 把这一张表里的内容交回客户端还没有做，等的是宿主侧真的有东西可挂。
+// 界面扩展通过类型化槽位注册，Host 不需要写死插件名称。
+// 每个槽位由 Host 声明数据类型，插件只能向已声明槽位添加内容。
+// Desktop 前端运行在另一个进程，因此维护对应的槽位定义；Host 尚未将槽位内容传给客户端。
 import { KernelError } from './error.js';
 
 export interface SlotDefinition {
@@ -25,12 +24,12 @@ export function createSlotRegistry(slots: readonly SlotDefinition[]): SlotRegist
   const filled = new Map<string, { payload: unknown }[]>();
 
   return {
-    // 宿主声明过的槽位名，从这里读，不是从插件的注册动作里推断。
+    // 返回 Host 声明的槽位名称，而不是从插件注册项推断。
     names() {
       return [...declared.keys()].sort();
     },
 
-    // 注册返回反注册动作；插件卸载时走这一个动作，槽位表里不残留它的东西。
+    // 注册返回撤销函数；插件卸载时调用该函数移除自身内容。
     register(slotName: string, payload: unknown) {
       const accepts = declared.get(slotName);
       if (accepts === undefined) throw new KernelError('slot_unknown');
@@ -48,7 +47,7 @@ export function createSlotRegistry(slots: readonly SlotDefinition[]): SlotRegist
       };
     },
 
-    // 宿主渲染时按槽位取内容；没有内容时返回空数组。
+    // Host 按槽位读取内容；未注册内容时返回空数组。
     list(slotName: string) {
       if (!declared.has(slotName)) throw new KernelError('slot_unknown');
       return (filled.get(slotName) ?? []).map((entry) => entry.payload);

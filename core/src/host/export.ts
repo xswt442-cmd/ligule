@@ -1,9 +1,9 @@
-// 导出的一整件（方案 6A）：一份记录写成 markdown 并落盘。读记录与补溢出正文由宿主那一次读取交出，
-// 这一层只管排版与写文件；界面那一侧只负责由人选定目的地。
+// 将会话记录导出为 Markdown。记录和溢出内容由 Host 读取，此模块负责排版和写文件。
+// 用户界面负责选择目标路径。
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
-/** 一次导出的逐份结果：写成了哪几份、哪一份因为已经存在没去盖、哪一份写失败与它的码。 */
+/** 导出结果中每个文件的状态，包括已写入、目标已存在和写入失败。 */
 export interface Exported {
   readonly written: readonly string[];
   readonly skipped: readonly { id: string; path?: string; code: string }[];
@@ -24,7 +24,7 @@ export interface ExportRecord {
 
 const fence = (value: string) => `\`\`\`\n${value.replace(/\n+$/, '')}\n\`\`\``;
 
-// 结果那一段给人看的是正文：结构化那一格取 `text`，其余整份写出来，失败时补上稳定码。
+// 优先显示结构化结果中的 `text` 字段；其他结果序列化为文本，失败时附带稳定错误码。
 function resultBody(record: ExportRecord): string {
   const content = record.result?.content;
   if (typeof content === 'string') return content;
@@ -34,19 +34,19 @@ function resultBody(record: ExportRecord): string {
   return JSON.stringify({ content, code: record.result?.code, spilled: record.result?.spilled }, null, 2);
 }
 
-// 父记录里那条派生结果带着支线自己的 id（D71）；整段溢出到文件时记录里就没有这一格。
+// 派生结果可能将支线 ID 存在溢出文件中，需在读取完整结果后提取。
 export function branchSessionId(record: ExportRecord): string | undefined {
   if (record.kind !== 'tool' || record.tool !== 'subagent') return undefined;
   const id = (record.result?.content as { sessionId?: unknown } | undefined)?.sessionId;
   return typeof id === 'string' && id !== '' ? id : undefined;
 }
 
-/** 一份记录写成一份 markdown：每一次工具调用与那一次的结果各成一段，序号留着，回看时能对上 `/show`。 */
+/** 将会话记录写为 Markdown；工具调用及其结果分别成段，并保留事件序号供 `/show` 定位。 */
 export function exportMarkdown(events: readonly ExportRecord[], meta: { id: string; projectRoot?: string; createdAt?: string | null; unfinished?: boolean }): string {
   const lines: string[] = [`# ligule 会话 ${meta.id}`, ''];
   if (meta.projectRoot !== undefined && meta.projectRoot !== '') lines.push(`- 项目根：${meta.projectRoot}`, '');
   if (meta.createdAt !== undefined && meta.createdAt !== null) lines.push(`- 开始：${meta.createdAt}`, '');
-  // 记下的末端是那一次读取的末端，不是那一轮结束的地方：这一句让人知道后面还会写。
+  // 导出末尾序号表示本次读取的快照边界，不表示会话轮次已结束。
   if (meta.unfinished === true) lines.push('> 导出这一刻这一份会话还在跑：这份文件到记录落到那一条为止，后面写进来的不在这份里。', '');
   for (const record of events) {
     if (record.kind === 'user') lines.push(`## 第 ${record.seq} 条 · 你说`, '', record.raw ?? record.text ?? '', '');
@@ -64,15 +64,14 @@ export function exportMarkdown(events: readonly ExportRecord[], meta: { id: stri
     } else if (record.kind === 'mode') {
       lines.push(`> 第 ${record.seq} 条：模式 ${record.name}（${record.layer ?? ''}）生效`, '');
     }
-    // `session` 首行与 `usage` 那一条是元信息与读数，不作为一段：那份文件给人读历史，不是给人读表格。
+    // `session` 首行和 `usage` 事件是元数据，不作为会话内容段落导出。
   }
   return `${lines.join('\n').trimEnd()}\n`;
 }
 
-/** 导出的那几份文件：主干一份，每一条派生支线另写一份，文件名里带着那条支线自己的 id。
- *  主干那一个位置是人在原生保存对话框里选定并确认过的（终端那一路是他自己打的那一条路径），所以它写下去；
- *  同前缀的支线文件没有人看过那一份已经存在没有，就不盖（审阅 F6）：交回 `export_target_exists` 与那一条路径。
- *  每份文件各报各的结果：那一份没写成，说的是这一份，主文件已经落在哪里也一起交回。 */
+/** 导出主会话和各个派生会话；派生文件名包含对应 ID。
+ * 主文件写入用户确认的目标路径。已有同名派生文件时不覆盖，并返回 `export_target_exists`。
+ * 每个文件单独报告写入结果，并返回主文件路径。 */
 export async function writeExport(path: string, main: string, branches: readonly { id: string; text: string }[]): Promise<Exported> {
   await mkdir(dirname(path), { recursive: true });
   const written: string[] = [];
@@ -88,12 +87,12 @@ export async function writeExport(path: string, main: string, branches: readonly
   for (const branch of branches) {
     const branchPath = `${stem}.${branch.id}.md`;
     try {
-      // 独占创建：先 `access` 再覆盖式写会把两份导出之间的时间差当成「这里没人写过」。
+      // 使用独占创建，避免检查路径和写入之间的竞态覆盖已有文件。
       await writeFile(branchPath, branch.text, { flag: 'wx' });
       written.push(branchPath);
     } catch (cause) {
       const code = String((cause as { code?: string }).code ?? 'write_failed');
-      // 目标已经在那儿：那一份文件的正文不是这一次导出的，谁也不该去盖它（审阅 F6）。
+      // 目标文件已存在时不覆盖其内容。
       if (code === 'EEXIST') skipped.push({ id: branch.id, path: branchPath, code: 'export_target_exists' });
       else failed.push({ path: branchPath, code });
     }

@@ -1,6 +1,6 @@
 export { clipboardPayload, copyToClipboard, writeClipboard, type ClipboardResult } from '@ligule/core/capability/clipboard.js';
 
-// 复制的是最近那一条回答：记录里最后一条有正文的 assistant 事件，流式期间那半截不算（那条还没落盘）。
+// 复制记录中最近一条带正文的助手事件，不复制尚未落盘的流式内容。
 export function lastAnswer(events: readonly { kind?: string; text?: string }[]): string {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index];

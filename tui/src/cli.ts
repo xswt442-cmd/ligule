@@ -1,7 +1,6 @@
 #!/usr/bin/env node
-// CLI 适配器：与内核同进程直接调用，不起端口（D23、实现顺序第 13 步）。
-// 它自己不持有任何能力：装载的是那份显式的最小清单，内核一件工具都没有（I1）。
-// `host` 这一条是另一件事：它把同一个内核作为 Host 进程起起来，等一条标准输入输出上的客户端连接（D30）。
+// CLI 在当前进程中直接调用 Host，不会开启网络端口。
+// 默认任务只装载显式选择的工具清单；`host` 命令则以独立进程启动 Host，并等待 stdio 客户端连接。
 import { existsSync, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
@@ -112,11 +111,11 @@ function policyOf(value: unknown): CliPolicy | undefined {
 const packageValue: unknown = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 if (!isRecord(packageValue) || typeof packageValue.version !== 'string') throw new KernelError('cli_package_version_invalid');
 const pkg = { version: packageValue.version };
-// 随包的模式目录与 `dist/` 同级：从本模块往上一层就是包根，本地检出与解包之后是同一个相对位置。
+// 随包模式目录与 `dist/` 同级；此相对路径在源码检出和 npm 安装包中保持一致。
 const shippedModes = dirname(fileURLToPath(import.meta.resolve('@ligule/core/modes/minimal.toml')));
 
-// `--config a.b=c` 可以出现多次；`--mode <名字>` 与 `--project <根>` 各取一个值；`--json` 是个旗子。
-// 它们都从位置参数里挑出来。
+// `--config a.b=c` 可重复；`--mode <名字>` 和 `--project <根>` 各接受一个值；`--json` 不接受值。
+// 这些选项都从位置参数中解析。
 const flags: string[] = [];
 const positional: string[] = [];
 const argv = process.argv.slice(2);
@@ -145,7 +144,7 @@ for (let index = 0; index < argv.length; index += 1) {
     continue;
   }
   if (arg === '--project') {
-    // 列表按项目根过滤；写了这个旗子却没给值与 `--mode` 同一类处理，不静默当成没写。
+    // 按项目根过滤列表。选项已出现但没有值时返回错误，不把它当成未指定。
     const value = argv[index + 1];
     if (value === undefined) {
       missingProjectValue = true;
@@ -236,15 +235,14 @@ async function configSnapshot(projectRoot = process.cwd()): Promise<{ config: Cl
   return { config, extensions, layers };
 }
 
-// 模式名按 D44：`--mode` 覆盖一次运行，否则读配置里的 `mode`，两处都没写就是随包的 minimal。
-// 交出去的是名字加那三层目录，装载在 Host 那一侧做：运行中换模式要用同一套查找（D41）。
+// `--mode` 优先于配置中的 `mode`；两者都未设置时使用随包的 minimal 模式。
+// 将模式名称和搜索目录交给 Host 加载，使启动和运行时切换使用相同规则。
 function resolveMode(config: CliConfig): { modeName: string; modePaths: ModeDirectories } {
   return { modeName: modeFlag ?? config.mode ?? DEFAULT_MODE, modePaths: modeDirectories(process.cwd(), shippedModes) };
 }
 
-// 一具宿主可以接多个项目，这是宿主按项目根再装载一份环境的那条路（方案 3.1、实现顺序第 69 步）。
-// 走的是命令行自己启动时同一批函数：配置那几层、提供方、模式与扩展来源都按那一个项目根重算。
-// `--mode` 是这一次运行的覆盖，不跟着进另一个项目的环境；要换清单由 `session.open` 的 `mode` 那一格指名。
+// Host 可按项目根为多个项目分别加载环境，复用 CLI 启动时相同的配置、提供方、模式和扩展解析逻辑。
+// `--mode` 只覆盖本次运行；切换到其他项目时需通过 `session.open` 的 `mode` 参数选择模式。
 async function projectEnvironment(projectRoot: string) {
   const { config: snapshot, layers, extensions } = await loadProjectConfig(projectRoot, flags);
   const config = cliConfig(snapshot, projectRoot);
@@ -252,7 +250,7 @@ async function projectEnvironment(projectRoot: string) {
     config,
     provider: hostProviderFromConfig(config),
     policy: config.policy,
-    // 四层原样交回：宿主给这一份项目环境建它自己的可写层存储，设置那一栏读写都按这一个项目算（方案 3.2）。
+    // 原样传递四层配置；Host 为每个项目创建独立的可写层存储。
     layers,
     modeName: config.mode ?? DEFAULT_MODE,
     modePaths: modeDirectories(projectRoot, shippedModes),
@@ -267,7 +265,7 @@ async function installedKernel() {
   return kernel;
 }
 
-// 码是给脚本分支的，后面那一句是给站在终端前的人看的（D19 把码与文本分开就是为了两边各取一样）。
+// 错误码供脚本分支判断，后面的文字供终端用户阅读。
 function printFailure(code: string, detail?: string): void {
   const guidance = runtimeFailureText(code, locale ?? languageOf('auto'));
   console.error(guidance === undefined ? (detail === undefined || detail === '' ? code : `${code}: ${detail}`) : `${code}: ${guidance}`);
@@ -296,32 +294,30 @@ async function kernelOrFail(): Promise<ReturnType<typeof createKernel> | undefin
   }
 }
 
-// 打印一次真实轮次（第 13 步第三条）：这具 Host 在同进程里驱动一遍，事件的出口是终端，
-// 审批也问在终端上。走的是协议那一层，与桌面壳起进程时看到的是同一份东西。
+// 在当前进程中通过 Host 协议运行一轮任务，将事件和审批请求交给终端处理。
 function printNotification(message: Record<string, unknown>): void {
   const event = isRecord(message.event) ? message.event : undefined;
   if (message.notify === 'delta') {
     if (event?.type === 'text' && typeof event.text === 'string') process.stdout.write(event.text);
-    // 推理段走标准错误：答案那一份要留给管道另一头的脚本，想看的的人在终端里看得见（D32）。
+    // 将推理内容写入标准错误，标准输出保留给管道另一端的脚本读取。
     if (event?.type === 'reasoning' && typeof event.text === 'string') process.stderr.write(event.text);
   } else if (message.notify === 'event' && event?.kind === 'reasoning') {
     process.stderr.write('\n');
   } else if (message.notify === 'event' && event?.kind === 'assistant') {
-    // 只有流上真的吐过字才收那一行，纯工具调用那一轮的文本是空的，不该留一个空行。
+    // 只有收到文本内容时才结束输出行，纯工具调用不会留下空行。
     if (event.text !== '') process.stdout.write('\n');
   } else if (message.notify === 'event' && event?.kind === 'tool') {
     const result = isRecord(event.result) ? event.result : {};
     console.log(`· ${String(event.tool ?? '')}: ${result.failed ? String(result.code ?? '') : t('成功', 'ok')}`);
   } else if (message.notify === 'event' && event?.kind === 'user') {
-    // 模板展开过的那一条画原始那一行（D54）：终端里回声要等于人打的字。
+    // 模板展开后仍显示用户输入的原文，保持终端回显与实际输入一致。
     console.log(`> ${String(event.raw ?? event.text ?? '')}`);
   } else if (message.notify === 'fault') {
     console.error(message.detail === undefined ? message.code : `${message.code}: ${message.detail}`);
   }
 }
 
-// 审批问在终端上。行从进程一开头就收着：`echo y | ligule run` 那一种把答复写在问题之前，
-// 那时无人在等，行也不能丢——readline 建得早，才拿得到已经到达的那一行，问出去才有答复可读。
+// 审批在终端中处理。进程启动时就开始读取输入，以免 `echo y | ligule run` 在问题出现前发送的答复丢失。
 function terminalApprovals(): { ask(question: string): Promise<string | undefined>; close(): void } {
   const reader = createInterface({ input: process.stdin, output: process.stderr });
   const queued: string[] = [];
@@ -342,7 +338,7 @@ function terminalApprovals(): { ask(question: string): Promise<string | undefine
     answer(undefined);
   });
   return {
-    // 交回 undefined 就是「没有答复」，调用方按不允许处理。
+    // 返回 undefined 表示用户未作答，调用方会按拒绝处理。
     async ask(question: string): Promise<string | undefined> {
       process.stderr.write(question);
       let line: string | undefined;
@@ -351,7 +347,7 @@ function terminalApprovals(): { ask(question: string): Promise<string | undefine
       else line = await new Promise<string | undefined>((resolve) => {
         waiter = resolve;
       });
-      // 人敲的那一下回车由终端回显；答复是从管道里进来的时没人回显，不补这一行就会和下一行接在一起。
+      // 终端会回显用户输入的换行；管道输入不会回显，因此需要在这里补一个换行。
       if (!process.stdin.isTTY) process.stderr.write(`${line ?? ''}\n`);
       return line;
     },
@@ -372,12 +368,12 @@ async function runOneRound(
   const approvals = terminalApprovals();
   const connection: Pick<Connection, 'notify' | 'request'> = {
     notify: printNotification,
-    // 这一路答得了的请求只有审批那一种：一次询问，答允许或不允许。模型的提问不在这一路装载，纯命令行的下一次调用没人替它答（D107）。
+    // 该终端输入通道只处理允许或拒绝审批。普通命令行没有可回答模型提问的交互界面。
     request: async (method, params) => {
       if (method !== 'approval.request') throw new KernelError('protocol_method_unknown', { detail: method });
       const fields = isRecord(params) ? params : {};
       const described = typeof fields.command === 'string' ? fields.command : JSON.stringify(fields.args);
-      // 命令文本后面说清是哪一种语法、哪一个可执行文件（D59）：同一条文本在两种语法下要问不该问是两回事。
+      // 同时展示命令使用的语法和可执行文件，帮助用户判断命令会如何运行。
       const backend = typeof fields.shell !== 'string' ? '' : ` (${fields.shell}: ${typeof fields.executable === 'string' ? fields.executable : ''})`;
       const tool = typeof fields.tool === 'string' ? fields.tool : 'tool';
       const answer = await approvals.ask(t(`允许 ${tool} ${described}${backend}？[y/N] `, `Allow ${tool} ${described}${backend}? [y/N] `));
@@ -385,9 +381,8 @@ async function runOneRound(
     },
   };
   try {
-    // 给了 id 就是接着那一份记录往下走：记录不在就是没有这次会话，不新建一份空记录顶上去（D73）。
-    // 用哪一份模式清单由宿主定（D78、第 44 步）：`--mode` 写了就作为那一个参数递过去，
-    // 没写时宿主取记录里最后生效的那一条并比它的摘要，这一侧不再另算一遍。
+    // 指定会话编号时只能恢复已有记录；记录不存在就返回错误，不创建空会话。
+    // `--mode` 有值时传给 Host；否则由 Host 从记录恢复模式并校验其摘要。
     const opened = responseRecord(await (sessionId === undefined
       ? await host.handle({ method: 'session.create', params: {} }, connection)
       : await host.handle({ method: 'session.open', params: { sessionId, ...(modeFlag === undefined ? {} : { mode: modeFlag }) } }, connection)));
@@ -415,12 +410,11 @@ if (invalidLanguage) {
 } else if (command === '--version' || command === '-v') {
   console.log(pkg.version);
 } else if (command === 'tools') {
-  // 默认运行装的就是那份显式的最小清单（D3）。
+  // 默认任务只装载明确配置的最小工具清单。
   const kernel = await kernelOrFail();
   if (kernel) for (const name of kernel.list()) console.log(name);
 } else if (command === 'extensions') {
-  // 与 `ligule skills` 同一类只读排错入口（D64）：说清这一具机器会加载哪几个文件、哪些路径被 D68 那条规则挡掉，
-  // 不 import 任何一份扩展——一条诊断命令不该执行别人的代码。
+  // 只读列出 CLI 会加载的扩展文件和被过滤的路径，不导入扩展代码。
   try {
     const { extensions } = await configSnapshot();
     for (const path of extensions.paths) console.log(path);
@@ -434,14 +428,14 @@ if (invalidLanguage) {
     printFailure(fields.code ?? 'cli_extensions_failed', fields.detail);
   }
 } else if (command === 'skills') {
-  // 只读的诊断入口：装载侧扫一遍那四个目录，把载入的与被丢下的都说出来，不起内核也不读模型配置。
-  // 客户端协议不为这件事扩，日志留完整记录，提示词里只带一个计数（D64）。
+  // 只读扫描配置的技能目录，报告成功加载和被忽略的条目；不启动 Kernel，也不读取模型配置。
+  // 完整诊断留在日志中，提示词仅包含计数摘要。
   try {
     const directories = skillDirectories(process.cwd());
     const registry = await discoverSkills(directories);
     for (const skill of registry.skills) console.log(`${skill.name}\t${skill.root}`);
     if (registry.skills.length === 0) {
-      // 「装了但没生效」最难自查，所以一份都没有时把扫过的位置说出来。
+      // 没有发现技能时也列出已扫描的位置，便于排查技能为何未加载。
       console.log(t('没有已加载的技能', 'No skills loaded'));
       for (const directory of directories) console.log(t(`  已检查 ${directory}`, `  Looked in ${directory}`));
     }
@@ -492,7 +486,7 @@ if (invalidLanguage) {
     }
   }
 } else if (command === 'resume') {
-  // 接着一次已经跑过的会话往下走（D73、D78）：那一份记录不在就是没有这次会话，模式清单取记录里最后生效的那一条。
+  // 恢复已有会话；记录不存在时返回错误，模式清单从记录中最后生效的设置恢复。
   const [sessionId, ...textParts] = rest;
   const text = textParts.join(' ').trim();
   if (sessionId === undefined) {
@@ -509,14 +503,13 @@ if (invalidLanguage) {
     }
   }
 } else if (command === 'sessions') {
-  // 只读地列出跑过的会话（D73）：扫记录目录，不建索引也不开会话；耗时打在这一行上，U38 要的就是这个数。
+  // 只读扫描会话记录目录，不创建索引或打开会话，并报告扫描耗时。
   try {
-    // `--project <根>` 指了哪一根就读哪一根的那一层：记录目录本身是按项目层配出来的，
-    // 只在当前目录下筛项目根等于没读那个项目。
+    // `--project <根>` 指定项目后，读取该项目配置的记录目录；只在当前目录中过滤无法读取其他项目记录。
     const { config } = await configSnapshot(projectFlag);
     const directory = sessionDirectory(config);
-    // 缺省目录下没有这一份项目的新记录时，先按 D110 的整理把旧位置补齐一份（原件保留、可重跑）：
-    // 整理失败明确报告，不能把读取失败说成没有旧记录。
+    // 数据根目录中没有该项目的新记录时，先从旧位置迁移记录和附属文件并保留原件。
+    // 迁移失败时明确报告错误，不把读取失败误报为空列表。
     const adopted = await adoptForSessionDirectory(config, directory);
     if (adopted !== null && (adopted.copied.length > 0 || adopted.conflicts.length > 0)) {
       console.error(t(`已整理旧会话：复制 ${adopted.copied.length} 项，冲突 ${adopted.conflicts.length}${adopted.conflicts.length === 0 ? '' : `（${adopted.conflicts.join(', ')}）`}`, `Legacy sessions adopted: copied ${adopted.copied.length}, conflicts ${adopted.conflicts.length}${adopted.conflicts.length === 0 ? '' : ` (${adopted.conflicts.join(', ')})`}`));
@@ -539,8 +532,8 @@ if (invalidLanguage) {
     printFailure(fields.code ?? 'cli_sessions_failed', fields.detail);
   }
 } else if (command === 'workspaces') {
-  // 读那份持久的登记（D110、方案 5.5.1）：宿主在真的建会话与真的接会话那两处写下每一条，这一条只读它，不建内核。
-  // 界面上那一栏列不出来的工作区仍然在这份清单里：登记不是「最近八个路径」那一类列表。
+  // 只读 Host 持久化的工作区登记表，不启动 Kernel。
+  // 登记表保留所有已登记工作区，不会因界面显示条数受限而丢失条目。
   try {
     const path = registryPathOf();
     const registry = await readRegistry(path);
@@ -559,7 +552,7 @@ if (invalidLanguage) {
     printFailure(fields.code ?? 'cli_workspaces_failed', fields.detail);
   }
 } else if (command === 'policy') {
-  // 判定结果的汇总（D77）：读那一份记录算出来，内核里没有第二份计数器；这一条也不建内核、不开会话。
+  // 从会话记录中汇总权限判定结果；不启动 Kernel 或打开会话。
   const [sessionId] = rest;
   if (sessionId === undefined) {
     printFailure('cli_policy_needs_the_session_id', t('policy 需要会话编号，例如 ligule policy 5f3c', 'policy needs a session ID, for example ligule policy 5f3c'));
@@ -592,24 +585,23 @@ if (invalidLanguage) {
     process.exitCode = 1;
   }
 } else if (command === 'host') {
-  // 桌面壳或者脚本起这一个进程，两端各读写一行 JSON（D30）：本机不开端口，审批与事件都走这条连接。
+  // Desktop 或脚本启动此进程后，双方通过 stdio 逐行交换 JSON；本地不开放网络端口。
   try {
     const { config, extensions, layers } = await configSnapshot();
-    // 可写的那两层由启动这一侧算出路径：宿主只认「哪一层、哪一个白名单字段、读回的那一份版本」，说不出文件在哪（方案 7.2）。
-    // 装载那一次读到的四层对象一起交进去：来源那一格要说得出一条值现在由哪一层写着，`--config` 那一层是只读的（方案 7.1）。
-    // 这一格跟着 `ligule host` 起：设置那一栏在桌面壳里，终端与 `ligule run` 都没有要写配置的入口。
+    // 启动端负责解析可写配置层的路径；Host 只接收层名、允许字段和读取版本。
+    // 同时传入四层配置以便报告值的来源；`--config` 层只读。
+    // `ligule host` 提供配置写入接口，普通 TUI 和 `ligule run` 不开放此入口。
     serveHost({
       config,
-      // 还没配上模型时宿主照样起来收请求：那一栏要写得进去才谈得上配上（U59）。发起一轮时才说缺哪几格。
+      // 模型尚未配置时仍启动 Host，以便客户端先写入设置；提交任务时再报告缺少的字段。
       provider: hostProviderFromConfig(config),
       policy: config.policy,
       extensions,
       loadEnvironment: projectEnvironment,
-      // 桌面壳那一侧答得了模型的提问，也答得了审批：这一进程只由壳或脚本起，客户端在界面的另一头（D107）。
+      // 由 Desktop 或脚本启动时，客户端可以回答模型提问和审批请求。
       interactive: true,
-      // 装载那一次读到的四层交进宿主，可写那两层的存储由宿主按项目环境各建一份：设置那一栏说的是
-      // 「哪一个项目的哪一层文件」，读与写都落在它自己身上（方案 3.2、审阅 F3）。
-      // 路径与文件名在这里算，宿主说不出也换不到（方案 7.2）：它只认层名、白名单字段与读回的那一份版本。
+      // 将四层配置交给 Host，由 Host 为每个项目环境创建可写层的存储。
+      // 启动端解析路径和文件名；Host 只接收层名、允许字段和读取版本。
       configLayers: layers,
       configStoreFor: (projectRoot, ownLayers) => createConfigStore({ projectRoot, layers: ownLayers }),
       ...resolveMode(config),
@@ -619,17 +611,16 @@ if (invalidLanguage) {
     printFailure(fields.code ?? 'cli_host_failed', fields.detail);
   }
 } else if (command === 'tui' || command === undefined) {
-  // 终端界面是协议的第二个客户端（D33）：与 Host 同进程、走内存载体，界面只读协议帧。
-  // 它需要真终端：管道那头没有 raw mode，按键与重画都无从谈起。
+  // TUI 是另一个 Host 协议客户端，在同一进程中通过内存连接通信，只处理协议帧。
+  // TUI 需要交互式终端；管道不支持 raw mode、按键输入或屏幕重绘。
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     printFailure('tui_terminal_required', t('tui 需要交互式终端；在脚本中请使用 ligule run', 'tui needs an interactive terminal; use ligule run from a script'));
   } else {
     try {
-      // React 与 Ink 在第一次被加载时按 NODE_ENV 选构建，所以这一行要在动态导入之前。
-      // 开发版把界面拖贵了一倍：两千条记录的转录下提交一行是 2.6 毫秒对 1.4 毫秒，进程常驻 155 MiB 对 114 MiB。
+      // React 和 Ink 会在首次导入时根据 NODE_ENV 选择构建版本，因此必须先设置环境再动态导入。
       process.env.NODE_ENV = 'production';
       const { confirmWorkspaceTrust } = await import('./tui/trust.js');
-      // 项目信任先于项目配置和资源装载；拒绝时不创建 Host 或会话。
+      // 在读取项目配置和资源前确认目录信任；用户拒绝时不创建 Host 或会话。
       if (await confirmWorkspaceTrust(process.cwd(), { locale: locale ?? languageOf('auto') })) {
         const { config, extensions } = await configSnapshot();
         const { runTui } = await import('./tui/start.js');
@@ -656,6 +647,6 @@ if (invalidLanguage) {
   console.log(t('skills 列出已加载的技能与未加载原因；它不读取模型配置。', 'skills lists loaded skills and why others were skipped; it does not read model config.'));
   console.log(t('个人配置位于 ~/.ligule；可用绝对路径设置 LIGULE_HOME。', 'Personal config lives in ~/.ligule; set LIGULE_HOME to use an absolute path.'));
 } else {
-  // 打错的命令不该走帮助文本再退出 0：调用方是个脚本时，0 加一段帮助就是一次成功。
+  // 未知命令应以失败状态退出，避免脚本把帮助文本误判为成功。
   printFailure('cli_command_unknown', t(`“${command}”不是有效命令；运行 ligule --help 查看命令列表`, `"${command}" is not a command; run ligule --help to list commands`));
 }

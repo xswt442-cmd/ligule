@@ -1,8 +1,7 @@
-// 交出去的那一样文本：终端标题上那一串（D81 边界二：不写进会话记录）。
-// 导出的那一份 markdown 在宿主那一侧（`core/src/host/export.ts`，方案 6A），两个界面共用那一份。
+// 终端标题通过控制序列写出，不进入会话记录。
+// Markdown 导出由 Host 统一处理，CLI/TUI 和 Desktop 共用该实现。
 
-// 标题那一串来自模型名与项目根这类位置，去掉能终止转义序列的控制字符与双向格式码：
-// 一串带 ESC 或 BEL 的文本写进标题就等于在替这个终端写它自己的指令。
+// 写入终端标题前移除控制字符和双向格式字符，防止模型名或路径注入终端控制序列。
 const CONTROL = /[\u0000-\u001F\u007F-\u009F\u200E-\u200F\u202A-\u202E\u2066-\u2069]/g;
 
 export function titleText({ model, boundary, sessionId }: { model?: string; boundary?: string; sessionId: string }): string {
@@ -10,7 +9,7 @@ export function titleText({ model, boundary, sessionId }: { model?: string; boun
   return parts.join(' · ').replace(CONTROL, '').slice(0, 120);
 }
 
-/** 终端标题走 OSC 那一条：`\x1B]0;<那一串>\x1B\\`。收尾用 ST 而不是 BEL，与那一串里可能有的字符都不冲突。 */
+/** 使用 OSC 设置终端标题，并以 ST 结束控制序列，避免与标题内容冲突。 */
 export function titleEscape(title: string): string {
   return `\u001B]0;${title}\u001B\\`;
 }

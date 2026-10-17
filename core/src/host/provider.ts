@@ -43,7 +43,7 @@ function retryOf(model: Record<string, unknown>): RetryPolicy {
   });
 }
 
-/** Select the declared wire format and capabilities; credentials resolve at request time. */
+/** 选择配置声明的接口格式和能力；凭据在发送请求时解析。 */
 export function providerFromConfig(config: ConfigSnapshot): HostProvider {
   if (!isRecord(config.model)) throw new KernelError('host_model_config_missing', { detail: 'config.model.baseURL and config.model.model' });
   const configuredModel = config.model;
@@ -91,7 +91,7 @@ function pendingProvider(error: KernelError): HostProvider {
   return { name: 'pending', model: null, pending: true, withModel: refuse, stream: async function* () { refuse(); } };
 }
 
-/** A Host without model settings still accepts configuration requests; runs fail explicitly. */
+/** 未配置模型服务时 Host 仍可处理配置请求；开始轮次时明确返回配置错误。 */
 export function hostProviderFromConfig(config: ConfigSnapshot): HostProvider {
   try {
     return providerFromConfig(config);

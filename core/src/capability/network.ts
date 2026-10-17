@@ -1,14 +1,13 @@
-// 网络目标的解析、分类与取回（D58）。判定建立在解析之后的地址上，而且连接用的就是这一次批准的那些地址：
-// 「查一次 DNS 判断、再让 HTTP 客户端自己查第二次」的两次结果可以不是同一个地址，那一次的允许也就盖不住实际连过去的那一个。
-// 主机名继续用于 Host 头、TLS SNI 与证书校验；只有建立连接时改成用已经批准的地址。
+// 网络目标解析、权限分类和连接使用同一组 DNS 结果，确保实际连接的地址就是已批准地址。
+// 主机名仍用于 Host 头、TLS SNI 和证书校验；建立连接时将 DNS 结果固定为已批准地址。
 import { lookup } from 'node:dns/promises';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import type { ClientRequestArgs } from 'node:http';
 import { KernelError } from '../kernel/error.js';
 
-// public 走正常规则；loopback 与 private 至少问到一次；link-local（含云主机的元数据端点）与
-// unspecified（未指定、组播、保留段这一类根本不该被取回的地址）一律拒。
+// 公网地址按普通规则判定；环回和私有地址至少需要一次审批。
+// 链路本地地址（含云元数据地址）和未指定、组播、保留地址一律拒绝。
 export type TargetClass = 'public' | 'loopback' | 'private' | 'link-local' | 'unspecified';
 export type TargetFailure = 'unsupported' | 'unresolved';
 
@@ -54,8 +53,8 @@ const wordsOf = (text: string): number[] | undefined => {
   return words;
 };
 
-// IPv6 手写一个够用的解析器，落到字节再判：URL 会把 ::ffff:127.0.0.1 规范化成 ::ffff:7f00:1，
-// 按字符串前缀判就会把环回看成公网，尾段写成 IPv4 与写成十六进制必须是同一个结果。
+// 将 IPv6 地址解析为字节后分类，正确识别 IPv4 映射地址。
+// 例如 `::ffff:127.0.0.1` 和 `::ffff:7f00:1` 必须归为同一地址类别。
 function parseV6(address: string): number[] | undefined {
   const lowered = address.toLowerCase().split('%')[0];
   if (!lowered.includes(':')) return undefined;
@@ -112,7 +111,7 @@ export function classifyAddress(address: string): TargetClass {
 
 const familyOf = (address: string): 4 | 6 => (address.includes(':') ? 6 : 4);
 
-// 最严的那一个地址算这一跳的类别：一个名字里混进一个内网地址就是内网。
+// 对一次 DNS 查询返回的所有地址采用最严格类别；只要包含私有地址，目标就按私有地址处理。
 function strictest(classes: TargetClass[]): TargetClass {
   const order: TargetClass[] = ['unspecified', 'link-local', 'private', 'loopback', 'public'];
   return order.find((rank) => classes.includes(rank)) ?? 'public';
@@ -125,7 +124,7 @@ async function resolveAddresses(host: string, resolve: (host: string) => Promise
   return resolve(bare);
 }
 
-// 一次解析出这一次要用的地址。解析不出与不支持是两种要告诉人的事，都不按「当公网算」处理。
+// 一次解析并返回本次连接使用的地址。解析失败和协议不支持分别报错，不将它们视为公网。
 export async function resolveTarget(url: unknown, options: { resolve?: (host: string) => Promise<string[]> } = {}): Promise<NetworkTarget> {
   const resolve = options.resolve ?? (async (host: string) => (await lookup(host, { all: true })).map((entry) => entry.address));
   const text = typeof url === 'string' ? url : String(url);
@@ -161,9 +160,8 @@ export async function resolveTarget(url: unknown, options: { resolve?: (host: st
   };
 }
 
-// 连的是地址，写的是名字：Host 头与 TLS SNI 取主机名，证书按主机名校验（Node 拿 servername 那一个做身份检查）。
-// lookup 只交回批准过的那几个地址，socket 不再自己问一次 DNS。
-// 连接时只交回批准过的那一个地址：Node 的 lookup 钩子就是给这种用法留的，不必引入 HTTP 依赖。
+// 连接使用已批准的 IP 地址，但 Host 头、TLS SNI 和证书校验仍使用原始主机名。
+// 自定义 lookup 只返回已批准的地址，防止 socket 再次查询 DNS。
 type LookupOption = NonNullable<ClientRequestArgs['lookup']>;
 
 function pinnedLookup(address: string): LookupOption {
@@ -236,8 +234,8 @@ function connect(target: NetworkTarget, approved: NetworkTarget, { maxBytes, tim
   });
 }
 
-// 只跟同源的重定向：换了主机或端口就要一次新的批准，而一次取回里不该再弹第二个询问。
-// 每一跳重新解析并按同一张表重判——批准给的是「那一个名字的这些地址」，不是远端接下来想去的任何地方。
+// 只跟随同源重定向，避免跳转到其他主机或端口。
+// 每一跳都重新解析并应用相同规则，不能将当前主机的批准扩展到重定向目标。
 export async function fetchTarget(approved: NetworkTarget, { maxBytes, timeoutMs, redirectLimit, signal, resolve }: {
   maxBytes: number;
   timeoutMs: number;

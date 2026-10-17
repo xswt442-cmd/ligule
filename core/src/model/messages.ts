@@ -1,5 +1,5 @@
-// Messages 兼容那一种线上形状（D13、D31）：Anthropic 的 `POST <base>/v1/messages`，鉴权头 `x-api-key`。
-// 地址、重试、SSE 与凭据都在 model/http.ts 那一层；这里只有形状本身：请求体怎么拼、事件怎么折回内部形状。
+// Anthropic Messages 接口使用 `POST <base>/v1/messages` 和 `x-api-key` 鉴权。
+// HTTP 地址、重试、SSE 解析和凭据处理由 `model/http.ts` 共用；此适配器负责请求和事件格式。
 import { KernelError } from '../kernel/error.js';
 import { resolveOutputTokens } from './output-budget.js';
 import {
@@ -81,7 +81,7 @@ function booleanCapability(value: boolean | number, name: string): boolean {
   return value;
 }
 
-// 提供方声明的能力上限。配置请求的每一项都不能超过这里。
+// 提供方声明的能力上限；配置不能超过这些值。
 export const MESSAGES_CAPABILITIES: MessagesCapabilities = Object.freeze({
   streaming: true,
   parallelToolCalls: false,
@@ -99,14 +99,13 @@ export function capabilitiesOf(requested: Readonly<Record<string, unknown>> = {}
   });
 }
 
-// 这一种形状的端点挂在 /v1 下面；地址末尾已经有了就不重复补（dsh 的 messages-api 同一条规则）。
+// Messages 端点位于 `/v1` 下；baseURL 已包含该路径时不重复追加。
 function messagesRoot(baseUrl: unknown): string {
   const root = apiRoot(baseUrl);
   return root.endsWith('/v1') ? root : `${root}/v1`;
 }
 
-// 把重建出来的会话投影折成 Messages 的 messages：连续的几条工具结果并进同一条 user 消息，
-// 因为端点要求工具结果紧跟在发出调用的那条助手消息之后。
+// 将会话投影转换为 Messages 请求；连续工具结果合并到一条 user 消息中，紧跟对应的 assistant 工具调用。
 function toWireMessages(view: readonly ModelMessage[]): MessagesWireMessage[] {
   const messages: MessagesWireMessage[] = [];
   assertAllAnswered(view);
@@ -240,7 +239,7 @@ export function createMessagesProvider({
 
     const blocks = new Map<number, MessageBlockState>();
     let started = false;
-    // 用量攒在这里，流收尾时才交一条：这一种形状把它拆在两处——`message_start` 给输入的，`message_delta` 给输出的。
+    // 汇总输入和输出用量，待流结束后一起返回；输入数据来自 `message_start`，输出数据来自 `message_delta`。
     let inputTokens = 0;
     let outputTokens = 0;
     let stopReason: unknown;
@@ -250,7 +249,7 @@ export function createMessagesProvider({
     for await (const rawEvent of parseSse(response.body)) {
       const event = asRecord(rawEvent, 'an event is not an object');
       if (stopped) throw new KernelError('provider_stream_invalid', { detail: 'an event follows message_stop' });
-      // 端点可以增加自己的事件类型，带内容的那几类之外的都跳过。
+      // 忽略不包含内容的扩展事件类型。
       if (event.type === 'message_start') {
         if (started) throw new KernelError('provider_stream_invalid', { detail: 'duplicate message_start' });
         started = true;
@@ -258,7 +257,7 @@ export function createMessagesProvider({
         const usageValue = asRecord(message, 'message_start has an invalid message');
         const usage = typeof usageValue.usage === 'object' && usageValue.usage !== null ? usageValue.usage : {};
         const usageRecord = asRecord(usage, 'message_start has invalid usage');
-        // 窗口占的是这几段之和：缓存里读回来的那一段同样是这一轮请求的上下文（压缩的压力线要看它）。
+        // 上下文窗口按所有内容块总量计算，包括缓存读取的内容。
         inputTokens = Number(usageRecord.input_tokens ?? 0) + Number(usageRecord.cache_read_input_tokens ?? 0)
           + Number(usageRecord.cache_creation_input_tokens ?? 0);
         outputTokens = Number(usageRecord.output_tokens ?? 0);
@@ -286,8 +285,8 @@ export function createMessagesProvider({
             json: '',
           });
         }
-        // 推理段是一种内容块（D32）：认出来，把它的内容增量作为 reasoning 事件交出去。
-        // 签名先攒着不外传——把带签名的推理块回传是 Anthropic 原生端点那一类要求，接上之后再补。
+        // 将推理内容块转换为 reasoning 事件。
+        // 签名字段仅用于原生 Anthropic 端点，目前不传回内部事件。
         else if (content.type === 'thinking' || content.type === 'redacted_thinking') blocks.set(index, { kind: 'reasoning' });
         else throw new KernelError('provider_content_unsupported', { detail: 'unsupported content block type' });
       } else if (event.type === 'content_block_delta') {
@@ -341,7 +340,7 @@ export function createMessagesProvider({
         args: call.json === '' ? call.input : parseArgs(call.json) }));
       for (const call of parsed) yield call;
     }
-    // 一条都没报回来时不交这一条：压缩的那一条判据宁可沿用本地估算，也不把一个 0 当成真实用量。
+    // 缺少用量时不生成 usage 事件，避免将 0 误当作真实用量；压缩继续使用本地估算。
     if (inputTokens > 0 || outputTokens > 0) yield { type: 'usage', input: inputTokens, output: outputTokens };
     yield { type: 'finish', reason };
   }
@@ -353,7 +352,7 @@ export function createMessagesProvider({
     capabilities: effective,
     outputTokens: budget,
     stream,
-    // 换模型是显式的一步：交回一个新的提供方，不在失败时悄悄改用别的模型（D13）。
+    // 模型切换必须由调用方明确请求；失败时不自动改用其他模型。
     withModel(next: string) {
       return createMessagesProvider({ baseUrl, model: next, apiKeyEnv, capabilities, outputTokens,
         ...(next === model ? { declaredOutputLimit, contextTokens } : {}), retry });
@@ -362,7 +361,7 @@ export function createMessagesProvider({
   return Object.freeze(provider);
 }
 
-// 参数解析不了当场报出去，不等流结束（D13）。空片段是一次没有参数的调用，不是缺参数。
+// 参数无法解析时立即报错，不等待流结束。空参数片段表示无参数调用，不等于参数缺失。
 function parseArgs(json: string): unknown {
   if (json === '') return {};
   try {

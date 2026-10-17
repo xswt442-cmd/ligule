@@ -1,7 +1,6 @@
-// 工作区的身份与那份持久登记（D110、方案 5.5.1 与 5.5.2）。
-// 身份是「哪一个目录」，不是「哪一串字符」：Windows 上同一个目录可以有大小写、分隔符、盘符、尾部斜杠与链接多种写法，
-// 登记、缓存与筛选都按归一之后的那一个值比，别名不会各占一条。
-// 清单存在应用数据根里，界面上那一栏只是它的一个读者：侧栏收起或列不出来都不该让一个工作区从登记里消失。
+// 工作区使用持久身份登记表进行管理。
+// 身份基于目录，不基于路径文本；大小写、分隔符、盘符、尾斜杠和链接等别名会归一为同一身份。
+// 登记表保存在应用数据根目录中，界面仅作为读取方，不能因隐藏工作区而删除登记。
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -13,7 +12,7 @@ import { KernelError, KernelRuntimeError } from './error.js';
 
 export const REGISTRY_VERSION = 1;
 
-// 登记那一把锁的租期：一次读—改—写在毫秒级完成，超出这些秒数就是写下它的人半路没了。
+// 登记表读—改—写通常会立即完成；超时表示持锁进程可能已经退出。
 export const REGISTRY_LOCK_STALE_MS = 5_000;
 
 export type WorkspaceEntry = {
@@ -30,7 +29,7 @@ export type WorkspaceRegistry = {
   workspaces: WorkspaceEntry[];
 };
 
-/** 归一出一个目录的可比写法。目录不存在或读不动时用解析出来的那一条路：这一处不判存在性，那是装载那一步的事。 */
+/** 返回用于比较目录身份的规范路径；不在此处检查目录是否存在或可读。 */
 function canonicalOf(directory: string): { identity: string; directory: string } {
   if (typeof directory !== 'string' || directory.trim() === '') {
     throw new KernelError('workspace_directory_required', { detail: String(directory) });
@@ -45,14 +44,14 @@ function canonicalOf(directory: string): { identity: string; directory: string }
   if (process.platform === 'win32') {
     const stripped = real.replace(/^\\\\\?\\/, '').replace(/[\\/]+$/, '');
     const rooted = /^[A-Za-z]:$/.test(stripped) ? `${stripped}\\` : stripped;
-    // 盘符大小写与整条路的大小写都不参与身份：那台机器上它们指的是同一个目录。
+    // Windows 路径比较不区分盘符或目录名称大小写。
     return { identity: rooted.toLowerCase(), directory: rooted };
   }
   const rooted = real.replace(/\/+$/, '');
   return { identity: rooted === '' ? '/' : rooted, directory: rooted };
 }
 
-/** 那一个目录的身份值：登记、缓存与记录筛选共用的那一个键。 */
+/** 生成供登记表、缓存和记录筛选共用的目录身份键。 */
 export function workspaceIdentity(directory: string): string {
   return canonicalOf(directory).identity;
 }
@@ -79,7 +78,7 @@ function checkedEntry(value: unknown): WorkspaceEntry {
   };
 }
 
-/** 读那份登记：文件不在就是空的一份，读不懂或形状不对当场拒掉——静默当成空的等于把人的工作区清单丢了。 */
+/** 读取工作区登记；文件不存在时返回空表，内容损坏或格式无效时返回错误。 */
 export function parseRegistry(text: string): WorkspaceRegistry {
   let parsed: unknown;
   try {
@@ -114,11 +113,11 @@ export async function readRegistry(path = registryPathOf()): Promise<WorkspaceRe
   return parseRegistry(text);
 }
 
-// 登记是一次读—改—写：两具宿主同时记下自己的工作区时，后一份不能把前一份抹掉。
-// 跨进程那一半用 `proper-lockfile`（与写会话记录那把锁同一套设施），进程内那一半再排一条队。
+// 登记更新采用读—改—写，避免并发 Host 覆盖彼此的变更。
+// 使用 `proper-lockfile` 协调进程间访问，并在进程内串行执行更新。
 let writing: Promise<unknown> = Promise.resolve();
 
-/** 那把锁：拿到就交回一个释放动作；等不到就说清是哪一份文件被占着。 */
+/** 获取登记表文件锁；成功时返回释放函数，失败时报告被锁定的路径。 */
 async function acquireRegistryLock(path: string): Promise<() => Promise<void>> {
   try {
     return await lockfile.lock(path, {
@@ -133,7 +132,7 @@ async function acquireRegistryLock(path: string): Promise<() => Promise<void>> {
   }
 }
 
-/** 一条身份的记录：第一次见就添一条，之后只动 `lastSeen` 与显示名。 */
+/** 记录工作区身份；首次出现时新增条目，之后更新最近使用时间和显示名称。 */
 function upsertEntry(registry: WorkspaceRegistry, canonical: { identity: string; directory: string }, name: string | undefined, now: string): void {
   const known = registry.workspaces.find((one) => one.identity === canonical.identity);
   if (known === undefined) {
@@ -152,8 +151,8 @@ function upsertEntry(registry: WorkspaceRegistry, canonical: { identity: string;
 }
 
 /**
- * 改这份文件的那一个入口：锁在里面取，替身文件名带随机段并独占创建，改名之后不留半个文件；同进程里连着改排成一条队。
- * 改的是读回来的那一份对象，所以两具宿主同时登记时各自那一条都在。
+ * 更新登记表时先获取文件锁，再创建唯一的临时文件并原子替换原文件。
+ * 进程内的更新排队执行；每次都从锁内读取的最新内容开始修改。
  */
 function mutateRegistry(path: string, mutate: (registry: WorkspaceRegistry) => void): Promise<WorkspaceRegistry> {
   const next = writing.then(async () => {
@@ -178,7 +177,7 @@ function mutateRegistry(path: string, mutate: (registry: WorkspaceRegistry) => v
   return next;
 }
 
-/** 记下这一次用到的工作区：一个身份只有一条，`firstSeen` 留着，`lastSeen` 与显示名跟着这一次走。 */
+/** 登记最近使用的工作区；同一身份只保留一条记录。 */
 export function registerWorkspace(directory: string, { path = registryPathOf(), name = undefined as string | undefined, now = new Date().toISOString() } = {}): Promise<WorkspaceRegistry> {
   const canonical = canonicalOf(directory);
   return mutateRegistry(path, (registry) => {
@@ -187,8 +186,8 @@ export function registerWorkspace(directory: string, { path = registryPathOf(), 
 }
 
 /**
- * 把默认选择定在那一具工作区上：先记下它再指过去，默认那一格因此永远指得着一条登记。
- * 交回 null 是退掉默认：没有哪一具工作区算默认，界面新建一份时得自己指名那一具。
+ * 设置默认工作区时先确保该工作区已登记，再保存其身份。
+ * 传入 null 会清除默认选择。
  */
 export function setDefaultWorkspace(directory: string | null, { path = registryPathOf(), name = undefined as string | undefined, now = new Date().toISOString() } = {}): Promise<WorkspaceRegistry> {
   if (directory === null) {

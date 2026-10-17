@@ -1,8 +1,6 @@
-// 系统提示组装（D9）：静态段在前，接一个分界标记，登记的动态片段在后，最后是尾部追加。
-// 两个装配口：replace 换掉分界标记之前的静态段，append 排在已经组装好的文本之后。
-// 静态段、分界标记、动态片段、尾部追加，四段按这个顺序排，空的那一段不留空行。
-// 分界标记总是出现：它划出可以整份复用的那一段静态前缀，派生的子执行体拿同一份静态前缀字节
-// 就能命中缓存；标记本身随开关进出，反而会让前缀字节每次都变。
+// 系统提示由静态段、分界标记、动态片段和尾部追加依次组成。
+// `replace` 替换分界标记前的静态段；`append` 在完整提示末尾追加文本。
+// 空段不产生额外空行。分界标记始终保留，以便不同执行复用相同静态前缀并命中模型缓存。
 import { KernelError } from './error.js';
 
 export const PROMPT_BOUNDARY = '--- ligule: dynamic context below ---';
@@ -26,8 +24,8 @@ export interface PromptAssembly {
   render(): string;
 }
 
-// 片段被截时留下一行看得见的标记（I6）：上限算在完整结果上，标记自己也算字节。
-// 预算小到连标记都放不下时仍然交回标记，因为「这里少了一段」必须看得见，而这么小的预算是配置错误。
+// 动态片段超限时添加可见截断标记；标记本身也计入字节预算。
+// 预算不足以容纳标记时仍返回标记，说明配置预算过小。
 function cap(text: string, maxBytes: number, name: string): string {
   const bytes = Buffer.from(text, 'utf8');
   if (bytes.length <= maxBytes) return text;
@@ -42,7 +40,7 @@ function cap(text: string, maxBytes: number, name: string): string {
 export function createPromptAssembly(options: PromptAssemblyOptions = {}): PromptAssembly {
   const fragments: PromptFragment[] = [];
   return {
-    // 静态前缀是子执行体可以直接复用的那一份字节：同一个装配器渲染两次得到的是同一个字符串。
+    // 静态前缀保持稳定；同一装配器的重复渲染返回相同内容。
     get staticPrefix() {
       return options.replace ?? options.static ?? '';
     },
@@ -63,7 +61,7 @@ export function createPromptAssembly(options: PromptAssemblyOptions = {}): Promp
         .sort((left, right) => left.anchor - right.anchor || left.name.localeCompare(right.name))
         .map((fragment) => cap(fragment.text, fragment.maxBytes, fragment.name))
         .join('\n\n');
-      // 静态段、分界标记、动态片段、尾部追加，空的那一段不留空行。
+      // 按固定顺序组合各段，并忽略空段。
       return [this.staticPrefix, PROMPT_BOUNDARY, dynamic, options.append ?? ''].filter((part) => part !== '').join('\n\n');
     },
   };

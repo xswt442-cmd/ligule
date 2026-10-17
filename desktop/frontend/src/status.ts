@@ -1,13 +1,13 @@
-// `status.get` 交回的那一格形状（D82、D86）。方法与参数模式定义在后端 `core/src/host/protocol.ts`，
-// 这里只留界面要读的那几格：读不到的字段不参与画，画出来的都在这一份上。
+// `status.get` 返回的数据结构。协议方法和参数模式由 `core/src/host/protocol.ts` 定义。
+// 此处只声明界面使用的字段；缺少字段时不参与渲染。
 export type Usage = {
   window: number;
   threshold: number;
   retained: number;
   estimated: number;
-  // 修正系数：宿主按端点报回的用量算出来，没有可算的依据时是 1（D86）。
+  // Host 根据服务端用量计算的 Token 估算校准系数；无校准数据时为 1。
   factor: number;
-  // 量法的名字。本地估算一直是整份请求那一种，记作 `request-v1`（D86）。
+  // 本地 Token 估算方法的标识。
   measurement: string;
   reported: { seq: number; input: number; output: number | null } | null;
 };
@@ -16,7 +16,7 @@ export type Status = {
   sessionId: string;
   running: boolean;
   tools: string[];
-  // 模式名与判定档位是两样东西，字段也分开（D40：界面上 `mode` 这个词不该同时指两处）。
+  // 当前模式名称与权限策略是不同字段，分别维护。
   mode: string | null;
   modeLayer: string | null;
   pendingMode: string | null;
@@ -27,13 +27,13 @@ export type Status = {
   serviceId: string;
   pendingServiceId: string | null;
   policy: string;
-  // 现在生效的档位来自哪一层：配置默认还是会话临时改的（`status.get`、`policy.set` 都交回这一格）。
+  // 当前策略来源：配置默认值或会话运行期覆盖。
   policySource: 'config' | 'session';
   denials: { consecutive: number; total: number };
   eventCount: number;
-  // 装载着的提示模板：命令面板里那几条入口读的就是这一份（D92、D54）。
+  // 已加载的提示模板列表，供命令面板显示。
   templates: { command: string; description: string; hint: string | null }[];
-  // 窗口那一格没写时宿主交出 null：两条触发都不启用，压力条整块不出现（D75）。
+  // 上下文窗口未知时 Host 返回 null；此时不启用压缩或显示压力条。
   usage: Usage | null;
   progress: RunProgress | null;
 };

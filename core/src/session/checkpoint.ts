@@ -1,13 +1,13 @@
-// 检查点（D75、实现顺序第 36 步）：压缩不改动事件日志，摘要与它顶掉的那一段范围写进同目录下的另一份文件。
-// 派生文件随时可以整份作废：投影前按日志里那一段重算规范化输入与前缀哈希，对不上就不读它，从原始日志整段重建。
-// 这一份坏了不该停住一次运行，所以这里一条内核自身的故障都不抛——事实源是事件日志，不是它。
+// 检查点将压缩摘要及其覆盖范围保存在独立文件中，不修改事件日志。
+// 读取前根据事件日志重新计算规范化输入和哈希；校验失败时忽略检查点并从日志重建。
+// 事件日志是事实来源，检查点损坏不会中断会话恢复。
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { SessionEvent } from './format.js';
 
 export const CHECKPOINT_FORMAT_VERSION = 1;
-// 哈希输入的那一份规范化写法自己带一个版本：给记录加一个无关的外层字段不该让所有旧检查点集体作废（D75）。
+// 哈希输入包含独立版本号，避免无关记录字段变化使所有检查点失效。
 export const CHECKPOINT_INPUT_VERSION = 1;
 
 export interface Checkpoint {
@@ -25,14 +25,14 @@ export interface CheckpointRead {
   reason: string;
 }
 
-// 只有参与模型请求重建的那几种事件进输入：推理段不进投影（D32），模式那一条是装配事实而不是对话内容。
-// 压缩算预算用的是同一份名单：切点与「压完还剩多少」都按模型请求里那一段算。
+// 仅将参与模型请求重建的事件放入哈希输入；推理和模式事件不属于模型投影。
+// 压缩切点和压缩后预算也使用相同事件集合。
 export const PROJECTED_KINDS = ['user', 'assistant', 'tool'];
 
 const textOf = (value: unknown): string => (typeof value === 'string' ? value : JSON.stringify(value ?? null));
 
-// 参与重建的字段按固定顺序拼进去，一次性的传输身份不进输入（调用 id、写盘时刻、溢出用的文件名）。
-// 位置数组而不是对象：拼出来的串只由这一处决定，将来改形状时改的是这个函数与那一格版本号。
+// 按固定顺序选择重建请求所需字段，排除调用 ID、写入时间和溢出文件名等传输信息。
+// 使用位置数组生成稳定输入；格式变化时更新此函数和对应版本号。
 function canonicalInput(events: SessionEvent[]): string {
   return JSON.stringify(events
     .filter((event) => PROJECTED_KINDS.includes(String(event.kind)))
@@ -55,7 +55,7 @@ export function checkpointPath(directory: string, id: string): string {
   return join(directory, `${id}.checkpoint.json`);
 }
 
-// 检查点说的是「这一段的这些事件我替它们说话」，所以它的哈希就是那一段重算出来的那一份。
+// 检查点覆盖范围的哈希由该范围内事件重新计算。
 export function createCheckpoint({
   id,
   events,
@@ -80,7 +80,7 @@ export function createCheckpoint({
   };
 }
 
-// 范围对得上、哈希对得上、版本对得上，这一份才用；任何一条对不上交回 null 与那一条的名字，投影走原始日志。
+// 只有范围、哈希和版本全部匹配时才使用检查点；否则返回失败原因并从原始日志生成投影。
 export function usableCheckpoint(checkpoint: unknown, id: string, events: SessionEvent[]): CheckpointRead {
   const value = checkpoint as Partial<Checkpoint> | null | undefined;
   if (typeof value !== 'object' || value === null) return { checkpoint: null, reason: 'checkpoint_shape' };
@@ -97,7 +97,7 @@ export function usableCheckpoint(checkpoint: unknown, id: string, events: Sessio
     return { checkpoint: null, reason: 'checkpoint_range_shape' };
   }
   const covered = events.filter((event) => event.seq >= fromSeq && event.seq <= toSeq);
-  // 范围里缺号（记录被截过、或者那段根本不在这份日志里）时重算出来的哈希对不上是巧合，对得上才是运气，都不该用。
+  // 覆盖范围必须对应连续事件；缺少事件时拒绝使用检查点，即使计算出的哈希偶然匹配。
   if (covered.length !== toSeq - fromSeq + 1) return { checkpoint: null, reason: 'checkpoint_range_missing' };
   if (digest !== prefixDigest(covered)) return { checkpoint: null, reason: 'checkpoint_digest_mismatch' };
   return { checkpoint: value as Checkpoint, reason: '' };

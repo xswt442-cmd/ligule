@@ -1,12 +1,10 @@
-// PowerShell 的语法判定（D59、D66）：命令文本交给 tree-sitter-pwsh 解析一次，
-// 只有整棵树都落在「简单命令 + ASCII 字面参数」这一档里，才把每个 command 交出去逐段套规则。
-// 管道、子表达式、脚本块、splatting、调用运算符、重定向、类型字面量、注释、动态表达式、未知节点与解析失败
-// 都按「无法完整处理」对待（I8：说得出是哪一种构造），不猜。
-// 那一份 grammar 是精确钉版本的第五条运行时依赖（D66），要用动态 import 才拿得到：
-// 它是带顶层 await 的 ESM，require 会报 ERR_REQUIRE_ASYNC_MODULE（本机 2026-10-03 实测）。
+// 使用 tree-sitter-pwsh 解析 PowerShell 命令。
+// 仅接受简单命令和 ASCII 字面参数，并将每个命令分段交给权限规则检查。
+// 管道、子表达式、脚本块、重定向、动态表达式、未知节点和解析失败都会返回无法识别的原因，不猜测其含义。
+// grammar 是 ESM 模块，需使用动态 import 加载。
 
-// 认下来的命名节点：一条命令的名字、参数分隔、字面量参数与引号包住的字面串，再加上语句分隔那一层。
-// 要加一个新的节点类型，先说清它能不能把一条文本变成别的执行路径；说不清就不加。
+// 只接受命令名称、参数分隔符、字面参数、引号字符串和语句分隔符等已支持的节点。
+// 新增语法节点前必须确认它不会改变命令执行路径。
 const ALLOWED_NAMED = new Set([
   'program', 'statement_list', 'pipeline', 'pipeline_chain', 'pipeline_chain_tail',
   'command', 'command_name', 'command_elements', 'command_argument_sep',
@@ -15,15 +13,13 @@ const ALLOWED_NAMED = new Set([
   'integer_literal', 'decimal_integer_literal',
 ]);
 
-// 认下来的标点：两种引号与两条语句连接符。`|` 不在其中——PowerShell 的管道传的是对象，
-// 前一段是什么类型只有运行时知道，判定读不出「后一段拿到的到底是什么」（D59）。
+// 仅接受引号和两种语句连接符。PowerShell 管道传递运行时对象，静态解析无法确认下一段收到的类型，因此不支持 `|`。
 const ALLOWED_TOKENS = new Set(['"', "'", ';', '&&']);
 
-// PowerShell 把这批 Unicode 字符当作语法别名（弯引号就是引号、长破折号就是 `-`），而树把它们留在字面量中间。
-// 整个拼写家族一起挡掉，不去猜某一位到底是不是结构。
+// PowerShell 会将部分 Unicode 字符作为引号或连字符别名；为避免解析与执行行为不一致，拒绝包含这些字符的命令。
 const UNICODE_ALIASES = /[‘’“”–—―]/;
 
-// 字面参数的形状：可打印 ASCII，且不含 `$` 与反引号——那两位在 PowerShell 里是变量替换与转义的起点。
+// 字面参数仅接受可打印 ASCII，且不允许 `$` 和反引号，以排除变量展开和转义。
 const LITERAL = /^[ -~]+$/;
 function isLiteral(text: string): boolean {
   return LITERAL.test(text) && !text.includes('$') && !text.includes('`');
@@ -56,13 +52,13 @@ interface ParserConstructor {
 
 let loading: Promise<GrammarParser | undefined> | undefined;
 
-// 解析器加载失败不能让内核起不来（D18 的显式报告）：记下来，交出去的是「这一档用不了」而不是异常。
+// 解析器加载失败不应阻止 Kernel 启动；保存失败原因，并将该语法标记为不可用。
 function loadParser(): Promise<GrammarParser | undefined> {
   if (loading === undefined) {
     loading = (async () => {
       try {
         const treeSitter = (await import('tree-sitter')) as unknown as { default: ParserConstructor };
-        // 那一份包的 `main` 写的是不带扩展名的目录（`bindings/node`），nodenext 认不出这种写法，所以按位置直接引它自己的入口。
+        // 包入口不含 NodeNext 可识别的扩展名，因此通过包内路径加载绑定入口。
         const grammar = (await import('tree-sitter-pwsh/bindings/node/index.js')) as unknown as { default: unknown };
         const parser = new treeSitter.default();
         parser.setLanguage(grammar.default);
@@ -84,8 +80,7 @@ function analyse(root: SyntaxNode, text: string): ParsedCommand {
     const node = pending[index];
     if (node.isNamed) {
       if (!ALLOWED_NAMED.has(node.type)) return { kind: 'unsupported', construct: node.type };
-      // 双引号在 PowerShell 里会展开变量与子表达式，树把 `$(...)` 单列成一个节点，但 `$x` 只是串里的文本；
-      // 认不下展开之后的形状就等于猜，所以带这两位的一律不去猜。
+      // 双引号字符串可能展开变量或子表达式；解析器无法确认展开结果，因此拒绝包含 `$` 或 `$(` 的参数。
       if (node.type === 'expandable_string_literal' && (node.text.includes('$') || node.text.includes('`'))) {
         return { kind: 'unsupported', construct: 'an expandable string' };
       }
@@ -107,8 +102,8 @@ function analyse(root: SyntaxNode, text: string): ParsedCommand {
   };
 }
 
-// 三种结果与 bash 那一份同形：`segments` 是逐段判的依据，`unsupported` 带一个构造名，`unavailable` 说明这一档用不了。
-// 解析这一步自己抛异常也归到「用不了」：那是 grammar 的问题，不是命令的内容，判定不该把它读成一条看不透的命令。
+// 返回可供逐段判定的 `segments`、带构造名称的 `unsupported`，或说明解析器不可用的 `unavailable`。
+// 解析器异常属于解析器故障，不能误报为命令语法不受支持。
 export async function parsePowerShell(text: string): Promise<ParsedCommand> {
   const parser = await loadParser();
   if (parser === undefined) {

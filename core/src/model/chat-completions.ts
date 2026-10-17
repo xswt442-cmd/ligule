@@ -1,7 +1,6 @@
-// Chat Completions 兼容那一种线上形状（D31）：OpenAI 的 `POST <base>/chat/completions`，鉴权头 `Authorization: Bearer`。
-// 与 messages.ts 共用 model/http.ts 那一层：地址、重试、SSE 帧与凭据都不在这里重复。
-// 两处的实际差别只有三件：请求体的字段形状、工具调用参数的载体（一边是内容块里的 JSON 片段，一边是按下标分片的字符串），
-// 以及工具结果是一条独立的 `role:"tool"` 消息而不是并进 user 那一条。
+// OpenAI Chat Completions 接口使用 `POST <base>/chat/completions` 和 Bearer 鉴权。
+// HTTP 地址、重试、SSE 解析和凭据处理由 `model/http.ts` 共用。
+// 此适配器负责请求体结构、流式工具参数组装，以及独立 `role:"tool"` 结果消息。
 import { createHash } from 'node:crypto';
 import { KernelError } from '../kernel/error.js';
 import { resolveOutputTokens } from './output-budget.js';
@@ -92,8 +91,7 @@ export const CHAT_COMPLETIONS_CAPABILITIES: ChatCompletionsCapabilities = Object
   streaming: true,
   parallelToolCalls: true,
   maxOutputTokens: 8192,
-  // 流式请求要不要带 `stream_options:{include_usage:true}` 去要那一条用量（D75 的压力线要用真实用量修正本地估算）。
-  // 这一族里绝大多数端点认这一格，不认的那一些把它降成 false：少一条用量，压缩的压力线退回本地估算，聊天照跑。
+  // 按提供方能力决定是否请求流式 Token 用量；不支持该字段的端点会关闭此选项。
   streamUsage: true,
 });
 
@@ -118,8 +116,7 @@ function toolNameMapping(request: ModelRequest): ToolNameMapping {
 
   const encoded = new Set([...names].filter((name) => !WIRE_TOOL_NAME.test(name)));
   const aliasOf = (name: string) => `${WIRE_TOOL_ALIAS_PREFIX}${createHash('sha256').update(name).digest('hex').slice(0, 48)}`;
-  // An invalid name's alias can equal a separate valid tool name. Encode that original name too,
-  // repeating until the alias namespace no longer overlaps any unencoded original name.
+  // 无效工具名的别名可能与另一个有效名称冲突；持续编码冲突名称，直到别名不再重叠。
   while (true) {
     const aliases = new Map<string, string>();
     for (const name of encoded) {
@@ -148,13 +145,13 @@ function toolNameMapping(request: ModelRequest): ToolNameMapping {
   }
   return {
     encode: (name) => toWire.get(name) ?? name,
-    // Unknown model output remains unknown so the Host kernel can reject it by its original name.
+    // 保留未知工具名称，由 Host Kernel 按原名称拒绝调用。
     decode: (name) => fromWire.get(name) ?? name,
   };
 }
 
 function toWireMessages(view: readonly ModelMessage[], system: string, toolNames: ToolNameMapping): ChatWireMessage[] {
-  // 系统段在这一种形状里是消息列表的第一条，不是请求体上的一个字段。
+  // Chat Completions 将系统提示作为消息列表首项发送。
   const messages: ChatWireMessage[] = system === '' ? [] : [{ role: 'system', content: system }];
   assertAllAnswered(view);
   for (const entry of view) {
@@ -164,7 +161,7 @@ function toWireMessages(view: readonly ModelMessage[], system: string, toolNames
       const calls = entry.toolCalls ?? [];
       messages.push({
         role: 'assistant',
-        // 只有调用没有文本的那一轮，content 交 null：交空串会让有些兼容层把它当成一段要续写的内容。
+        // 只有工具调用且没有正文时使用 null，避免兼容服务将空字符串视为续写内容。
         content: entry.text === '' && calls.length > 0 ? null : entry.text,
         ...(calls.length === 0 ? {} : {
           tool_calls: calls.map((call) => ({
@@ -175,7 +172,7 @@ function toWireMessages(view: readonly ModelMessage[], system: string, toolNames
         }),
       });
     } else {
-      // 每个调用一条结果，按调用 id 对上；这一种形状没有「几条结果并进一条消息」那一条规则。
+      // 每个工具调用单独发送一条结果消息，并使用调用 ID 关联。
       messages.push({ role: 'tool', tool_call_id: entry.id, content: resultText(entry.content) });
     }
   }
@@ -192,9 +189,7 @@ export function createChatCompletionsProvider({
   contextTokens,
   retry = DEFAULT_RETRY,
 }: ChatCompletionsProviderOptions = {}): ModelProvider {
-  // 地址按给出的那一份用：这一种形状的约定是 base_url 已经含 /v1（OpenAI 自己的 base_url 就是
-  // `https://api.openai.com/v1`），而 DeepSeek 那一种把 base_url 写作 `https://api.deepseek.com`、
-  // 路径直接是 /chat/completions（2026-10-02 从其文档「首次调用 API」一节读到）。补一个 /v1 会打断后一种。
+  // 直接使用配置中的 baseURL；不同兼容服务对 `/v1` 前缀的要求不同，不在此处补写路径。
   const root = apiRoot(baseUrl);
   if (typeof model !== 'string' || model === '') throw new KernelError('provider_model_required');
   const effective = chatCompletionsCapabilities(capabilities);
@@ -219,8 +214,7 @@ export function createChatCompletionsProvider({
         model,
         messages: toWireMessages(request.messages ?? [], request.system ?? '', toolNames),
         stream: effective.streaming,
-        // 流式也要最后那一条用量（压缩的压力线要看端点真实报回的那一份）：这一格由能力声明决定，
-        // 不认它的代理把 model.capabilities 里的 streamUsage 降成 false，两条线退回本地估算。
+        // 根据提供方能力决定是否请求最终用量；不支持时由压缩逻辑继续使用本地估算。
         ...(effective.streaming && effective.streamUsage ? { stream_options: { include_usage: true } } : {}),
         max_tokens: budget,
         parallel_tool_calls: effective.parallelToolCalls,
@@ -292,8 +286,7 @@ export function createChatCompletionsProvider({
       return;
     }
 
-    // 一次工具调用的参数按 index 分片到达，中间没有「这一块结束了」那一种事件，
-    // 所以全部攒到流收尾再交出去；循环本来也是在流结束后才用这些调用（D20）。
+    // 工具参数按索引分片传输，没有单独的参数结束事件，因此收集完整流后再返回调用。
     const calls = new Map<number, StreamToolCall>();
     let usage: JsonRecord | undefined;
     let finishReason: unknown;
@@ -306,7 +299,7 @@ export function createChatCompletionsProvider({
       }
       if (done) throw new KernelError('provider_stream_invalid', { detail: 'data follows the stream terminator' });
       const chunk = asRecord(rawChunk, 'a stream chunk is not an object');
-      // 普通分片的 usage 可以为 null；只有实际用量对象进入累计结果。
+      // 普通流式分片的 usage 可能为 null；只保留实际用量对象。
       if (chunk.usage !== undefined && chunk.usage !== null) usage = asRecord(chunk.usage, 'a stream usage value is not an object');
       const choices = Array.isArray(chunk.choices) ? chunk.choices : [];
       for (const rawChoice of choices) {
@@ -314,7 +307,7 @@ export function createChatCompletionsProvider({
         if (choice.finish_reason !== undefined && choice.finish_reason !== null) finishReason = choice.finish_reason;
         const delta = asRecord(choice.delta ?? {}, 'a stream delta is not an object');
         if (typeof delta.content === 'string' && delta.content !== '') yield { type: 'text', text: delta.content };
-        // 推理段在这一种形状里是增量上的一个平行字段（D32），DeepSeek 那一类用的名字是 reasoning_content。
+        // 推理内容作为独立增量字段处理；部分服务使用 `reasoning_content` 字段名。
         if (typeof delta.reasoning_content === 'string' && delta.reasoning_content !== '') {
           yield { type: 'reasoning', text: delta.reasoning_content };
         }
@@ -353,7 +346,7 @@ export function createChatCompletionsProvider({
       });
       for (const call of parsed) yield call;
     }
-    // 用量在那一条没有 choices 的收尾分片上；没有报回来时不交这一条，压缩的那一条判据宁可只用本地估算。
+    // 最终用量通常位于没有 choices 的结束分片中；缺少时不生成用量事件，压缩逻辑使用本地估算。
     if (usage !== undefined) {
       yield { type: 'usage', input: Number(usage.prompt_tokens ?? 0), output: Number(usage.completion_tokens ?? 0) };
     }
@@ -367,7 +360,7 @@ export function createChatCompletionsProvider({
     capabilities: effective,
     outputTokens: budget,
     stream,
-    // 换模型是显式的一步：交回一个新的提供方，不在失败时悄悄改用别的模型（D13）。
+    // 模型切换必须由调用方明确请求；失败时不自动切换到其他模型。
     withModel(next: string) {
       return createChatCompletionsProvider({ baseUrl, model: next, apiKeyEnv, capabilities, outputTokens,
         ...(next === model ? { declaredOutputLimit, contextTokens } : {}), retry });
@@ -376,7 +369,7 @@ export function createChatCompletionsProvider({
   return Object.freeze(provider);
 }
 
-// 参数解析不了当场报出去（D13）。空片段是一次没有参数的调用，不是缺参数。
+// 参数无法解析时立即报错。空参数片段表示无参数调用，不等同于参数缺失。
 function parseArgs(json: string): unknown {
   if (json === '') return {};
   try {

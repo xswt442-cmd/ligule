@@ -1,5 +1,5 @@
-// 只读三件（最小配置的成员，D3）：`read`、`find`、`search`。
-// 每一条交回的内容受字节与条数上限约束，超限时在文本里留下一行看得见的标记（I6）。
+// 只读工具包括 `read`、`find` 和 `search`。
+// 返回内容受字节数和条目数限制；超出限制时在结果中说明。
 import { readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { KernelError } from '../kernel/error.js';
@@ -36,7 +36,7 @@ export const readTool = {
     const offset = args.offsetBytes ?? 0;
     const slice = bytes.subarray(offset, offset + readBytes);
     const left = bytes.length - offset - slice.length;
-    // 只有从头完整读到尾才算一次观察：截断那一份没看见的部分会在覆盖时丢掉。
+    // 只有完整读取文件后才记录观察版本；截断读取不能作为覆盖文件的依据。
     if (offset === 0 && left <= 0) observations?.observe(target, versionOf(bytes));
     const text = slice.toString('utf8')
       + (left > 0 ? marker(`truncated: ${slice.length} of ${bytes.length - offset} bytes shown, continue with offsetBytes=${offset + slice.length}`) : '');
@@ -57,14 +57,13 @@ export const findTool = {
     required: ['pattern'],
   },
   async run(args: FindArguments, { config, signal }: FileToolContext) {
-    // 取消边界（D20）：先判一次，再在每一份文件之前判一次，两条后端交回的码相同。
+    // 开始搜索前和读取每个文件前都检查取消信号，两个检查点返回相同错误码。
     if (signal?.aborted) throw new KernelError('find_cancelled', { detail: 'the file listing was cancelled before it finished' });
     const { resultCount } = limitsOf(config);
     const boundary = boundaryOf(config);
     const cwd = workingDirectoryOf(config);
     const root = await resolveWithin(boundary, args.path ?? '.', { cwd });
-    // 遍历的起点必须是目录：交给 walkFiles 的话，readdir 会对文件抛原始的 ENOTDIR，
-    // 那一类错误没有稳定码，判定链与调用方都没法分支。
+    // 遍历起点必须是目录。先检查类型并返回稳定错误，避免 `walkFiles` 抛出原始 ENOTDIR。
     if (await kindOfTarget(root) !== 'directory') {
       throw new KernelError('find_path_not_directory', { detail: `find starts from a directory, but ${args.path} is a file` });
     }
@@ -81,9 +80,8 @@ export const findTool = {
   },
 } satisfies ToolDefinition<FindArguments>;
 
-// 检索有两条后端：外部的 ripgrep（随包分发的那一份，或者配置里指明的可执行文件）与 Node 自己遍历。
-// ponytail: 回落那一条是逐行做字面匹配，代价是每次搜索线性扫过 scanFiles 个文件、scanBytes 字节，
-// 而且这两个扫描预算只在回落那条上生效；外部后端可用时只有命中数上限参与。
+// 搜索优先使用 ripgrep，可使用随包版本或配置指定的可执行文件；不可用时由 Node 遍历文件。
+// Node 回退实现逐行匹配，并受扫描文件数和扫描字节数限制；ripgrep 使用结果数上限。
 export const searchTool = {
   name: 'search',
   readOnly: true,
@@ -97,22 +95,20 @@ export const searchTool = {
     required: ['pattern'],
   },
   async run(args: SearchArguments, { config, logger, signal }: FileToolContext) {
-    // 取消边界（D20）：外部后端那一条把同一个信号交给子进程，这一条在每份文件之前判一次。
+    // 将同一取消信号传给 ripgrep 子进程；Node 遍历则在读取每个文件前检查。
     if (signal?.aborted) throw new KernelError('search_cancelled', { detail: 'the content search was cancelled before it finished' });
     const { resultCount, scanBytes, scanFiles } = limitsOf(config);
     const boundary = boundaryOf(config);
     const cwd = workingDirectoryOf(config);
 
-    // 有外部后端就用它：八千个文件的树上一秒出头，自己遍历要三倍耗时（本机实测）。
-    // 探测不到就回落到自己遍历，回落的原因写进日志（I8）。
+    // ripgrep 可用时优先使用；不可用时改由 Node 遍历，并在日志中记录回退原因。
     const configuredRipgrepPath = config.ripgrepPath;
     if (configuredRipgrepPath !== undefined && typeof configuredRipgrepPath !== 'string') {
       throw new KernelError('search_backend_failed', { detail: 'ripgrepPath must be a string' });
     }
     const backend = await resolveRipgrep({ path: configuredRipgrepPath });
     if ('executable' in backend) {
-      // 目标要先判存在：ripgrep 对着不存在的路径以自己的退出码报错，
-      // 那条路走会交出一个说「后端故障」的码，而回落那条给的是 path_not_found。
+      // 先检查目标路径，确保 ripgrep 和 Node 回退实现都返回一致的路径错误。
       const root = await resolveWithin(boundary, args.path ?? '.', { cwd });
       if (args.path !== undefined) await kindOfTarget(root);
       const found = await searchWithRipgrep({
@@ -137,23 +133,22 @@ export const searchTool = {
     let binaries = 0;
     let stopped = '';
 
-    // 返回 false 表示这一趟该停了：命中数用完，或者扫描预算见底。
+    // 返回 false 表示已达到结果数或扫描预算上限，应停止本次搜索。
     async function scan(target: string): Promise<boolean> {
       const file = toPosix(relative(cwd, target));
       const bytes = await readFile(target);
-      // 含零字节的按二进制对待，跳过去看下一份：外部后端那种文件也不交命中。
+      // 含零字节的文件视为二进制文件并跳过，与 ripgrep 的行为保持一致。
       if (bytes.includes(0)) {
         binaries += 1;
         return true;
       }
-      // 预算按累计扫过的字节算，这一份放不下时后面的每一份都放不下，
-      // 继续读下去只是把文件一份份读进内存再丢掉。
+      // 扫描预算按累计字节计算。达到上限后停止读取，避免继续把不会处理的文件载入内存。
       if (scannedBytes + bytes.length > scanBytes) {
         stopped = `incomplete: ${scanBytes} bytes scanned, the rest of the tree was not read`;
         return false;
       }
       scannedBytes += bytes.length;
-      // 行尾的回车属于换行符本身，不属于行的内容：外部后端也不把它交回来，两边都去掉。
+      // 移除 CRLF 中的回车符，与外部搜索后端返回的行内容保持一致。
       const lines = bytes.toString('utf8').split('\n').map((line) => line.replace(/\r$/, ''));
       for (let index = 0; index < lines.length; index += 1) {
         if (!lines[index].includes(args.pattern)) continue;
@@ -166,8 +161,7 @@ export const searchTool = {
       return true;
     }
 
-    // 描述里写的「文件或子目录」两种都成立：给定 path 时按它实际是哪种分派，
-    // 把目录当文件读会抛原始的 EISDIR，没有稳定码。
+    // `path` 可以指定文件或目录；先区分目标类型，避免把目录作为文件读取并产生原始 EISDIR。
     async function* candidates(): AsyncGenerator<string> {
       const skipped = skippedDirectories(config);
       if (args.path === undefined) {
@@ -177,12 +171,12 @@ export const searchTool = {
       }
       const root = await resolveWithin(boundary, args.path, { cwd });
       if (await kindOfTarget(root) === 'file') {
-        // 点名到文件就搜这一个文件：外部后端对显式给出的文件不套排除项，两边要一样。
+        // 显式指定文件时只搜索该文件，不应用目录遍历时的排除项，与 ripgrep 行为保持一致。
         yield root;
         return;
       }
-      // 点名到目录时，落在跳过的那几棵里面就不搜——外部后端那种情况下也不交命中，
-      // 因为它按相对边界的路径套排除项。要读那些路径里的文件用 `read`。
+      // 指定目录位于排除目录内时不搜索，与 ripgrep 按相对路径应用排除项的行为一致。
+      // 如需读取被排除目录中的文件，请使用 `read`。
       if (toPosix(relative(boundary, root)).split('/').some((part) => skipped.includes(part))) return;
       for await (const file of walkFiles(root, skipped)) yield join(root, file);
     }
@@ -191,14 +185,14 @@ export const searchTool = {
       if (signal?.aborted) throw new KernelError('search_cancelled', { detail: 'the content search was cancelled before it finished' });
       scannedFiles += 1;
       if (scannedFiles > scanFiles) {
-        // 剩下没走的那一截没数过，所以标记里说「没读完」而不是报一个数不清的数。
+        // 尚未遍历的文件数量未知，因此只标记扫描未完成，不猜测剩余数量。
         stopped = `incomplete: ${scanFiles} file(s) scanned, the rest of the tree was not read`;
         break;
       }
       if (!(await scan(target))) break;
     }
 
-    // 标记里分开说三件事：命中数用完、扫描预算或文件数见底、跳过了几份二进制。
+    // 分别说明是否达到结果上限、扫描预算上限，以及跳过的二进制文件数量。
     const notes = stopped === '' ? [] : [stopped];
     if (binaries > 0) notes.push(`${binaries} binary file(s) skipped`);
     return { text: (hits.length === 0 ? '(no matches)' : hits.join('\n')) + (notes.length === 0 ? '' : marker(notes.join('; '))) };

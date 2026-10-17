@@ -1,6 +1,6 @@
-// 传输边界的一种实现（D30）：一条消息一行 JSON，读两端各一条流。
-// 这一层不认识协议里的方法名，只认识三种消息：带 method 的请求、带同一 id 而没有 method 的答复、带 notify 的通报。
-// 两个方向各自数 id，所以同一时刻客户端的请求与 Host 的审批请求不会撞到同一个号。
+// 通过两条流传输 JSONL 消息，每行一个 JSON 对象。
+// 传输层只识别带 method 的请求、带相同 id 的答复，以及带 notify 的通知，不解释具体方法。
+// 请求 ID 按方向分别分配，避免客户端请求和 Host 审批请求冲突。
 import { randomUUID } from 'node:crypto';
 import type { Readable, Writable } from 'node:stream';
 import { KernelError } from '../kernel/error.js';
@@ -54,20 +54,20 @@ export function createConnection({ input, output, onFault, onClose }: Connection
     buffer = '';
     input.off('data', onData);
     input.pause();
-    // 一条载体流结束就结束整条连接：停止接收后续 RPC，另一方向即便还开着也不能再完成请求与答复。
+    // 任一传输流关闭后结束连接并停止接收请求，即使另一方向仍打开。
     for (const settleWith of responders.values()) settleWith.reject(new KernelError('connection_closed'));
     responders.clear();
     onClose?.();
   }
 
   function fault(error: Error): void {
-    // 输入出错时输出可能仍可写：先尽力通报，再关闭连接。通报失败也必须释放资源。
+    // 输入出错时尝试发送错误通知后关闭连接；即使通知失败也必须释放资源。
     try { onFault?.(error); } catch { /* the fault channel may be broken too */ }
     finally { closeConnection(); }
   }
 
   function write(message: Record<string, unknown>): void {
-    // 对端已经不在了：这一条送出去也没人收，丢掉不是故障，会话记录才是事实源（I5）。
+    // 对端已断开时无需再发送消息；会话记录仍是持久事实来源。
     if (closed) return;
     const encoded = JSON.stringify(message);
     if (encoded !== undefined) output.write(`${encoded}\n`);
@@ -100,7 +100,7 @@ export function createConnection({ input, output, onFault, onClose }: Connection
       onFault?.(new KernelError('protocol_message_unaddressed'));
       return;
     }
-    // 通报没有人答复，所以它带着名字而没有 id。
+    // 通知不需要答复，因此只包含通知名称，不包含请求 ID。
     if (typeof message?.notify === 'string' && message.id === undefined) {
       notificationHandler?.(message);
       return;
@@ -110,21 +110,21 @@ export function createConnection({ input, output, onFault, onClose }: Connection
       return;
     }
     if (typeof message.method === 'string') {
-      // 交给装进来的分发器；它报的错误按同一行送回去，请求方永远有一条答复顶着。
+      // 请求交给注入的分发器；错误也以响应帧返回，确保每个请求都有答复。
       const request: HostRequest = { ...message, id: message.id, method: message.method };
       Promise.resolve()
         .then(() => {
-          // 输入行可能已排队；关闭后禁止触发有副作用的 Host 分发。
+          // 关闭期间可能仍有输入行排队，不能再调用有副作用的 Host 方法。
           if (closed) return;
           return handler?.(request);
         })
         .then(
-          // 分发器交出 undefined 是「这一条我自己答复」：客户端收到审批就是这样，要等人按键之后才回。
-          // 在这里自动答一个 undefined 会把对面那一次等待变成一次拒绝。
+          // 分发器返回 undefined 表示响应由 Host 后续发送，例如等待用户审批。
+          // 不能在这里自动响应，否则会把待审批请求误判为拒绝。
           (result) => {
             if (result !== undefined) write({ id: message.id, result });
           },
-          // 对面按码分支，看得见的解释在 detail 里；底层原因（一个 fetch 失败）在 cause 里，不带上就只剩一个码。
+          // 响应保留稳定错误码、用户可读说明和底层 cause，供客户端区分和诊断。
           (error: unknown) => {
             const fields = isRecord(error) ? error : {};
             const cause = isRecord(fields.cause) ? fields.cause : {};
@@ -165,7 +165,7 @@ export function createConnection({ input, output, onFault, onClose }: Connection
   output.on('error', fault);
 
   return {
-    // 装进来的分发器负责这一侧收到的请求；通报另装一个，它没有答复可交。
+    // 请求分发器处理入站请求；通知发送器处理不需要答复的消息。
     onRequest(next) {
       handler = next;
     },
@@ -178,7 +178,7 @@ export function createConnection({ input, output, onFault, onClose }: Connection
       write(message);
     },
 
-    // 答复对端发出来的那一次请求：带同一个 id 而没有 method，与通报分开写，读的人不用记形状。
+    // 响应复用原请求 ID，且不含 method；与通知帧分别编码。
     reply(id, result) {
       write({ id, result });
     },

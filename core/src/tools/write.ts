@@ -1,5 +1,5 @@
-// 写操作四件（D3）：`create`、`write`、`edit`、`delete`。
-// 四条语义约束落在工具内部，每条带一个稳定错误码；`delete` 的去处由能力提供者那一层给（D18）。
+// 写操作包括 `create`、`write`、`edit` 和 `delete`。
+// 每种操作在工具内部执行语义校验并返回稳定错误码；删除目标由能力提供方选择去处。
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname, join, relative } from 'node:path';
@@ -31,7 +31,7 @@ export const createTool = {
   async run(args: CreateArguments, { config, observations }: WriteToolContext) {
     const boundary = boundaryOf(config);
     const target = await resolveWithin(boundary, args.path, { forWrite: true, cwd: workingDirectoryOf(config) });
-    // 已存在就报错、一个字节都不写：覆盖是 write 的动作，分开才让判定链看得见差别（D3）。
+    // 目标已存在时拒绝创建，不覆盖任何内容；覆盖操作由 `write` 处理。
     if (await existsOrFails(target)) {
       throw new KernelError('create_target_exists', { detail: `${args.path} already exists; use write to replace its whole content or edit to change one part of it` });
     }
@@ -53,10 +53,9 @@ export const writeTool = {
     },
     required: ['path', 'content'],
   },
-  // 与 create 互斥：这一件只在目标已存在时成立，新建走 create，判定链因此分得开两种动作（D3）。
-  // 覆盖之前必须对上一次完整观察的版本令牌，令牌对不上就说明文件在读过之后变了。
-  // ponytail: 校验与写入之间有一个竞态窗口，并发写者能钻进去；这一层挡的是模型拿着过时的内容覆盖，
-  // 不是并发控制。升级路线是把「按版本替换」下沉到能力提供者的后端原子地做。
+  // `write` 仅修改已存在文件；新建由 `create` 处理。
+  // 覆盖前必须匹配此前完整读取时记录的版本，拒绝使用过时内容覆盖文件。
+  // 版本检查与写入不是底层原子操作，不能防止并发写入之间的竞态。
   async run(args: WriteArguments, { config, observations }: WriteToolContext) {
     const boundary = boundaryOf(config);
     const target = await resolveWithin(boundary, args.path, { forWrite: true, cwd: workingDirectoryOf(config) });
@@ -103,14 +102,14 @@ export const editTool = {
     try {
       text = await readFile(target, 'utf8');
     } catch (error) {
-      // 目标不存在时 create 才是那件成立的动作（D3）。
+      // 目标不存在时应使用 `create`。
       const code = errorCode(error);
       if (code === 'ENOENT') throw new KernelError('edit_target_missing', { detail: `${args.path} does not exist; create is the tool for a file that is not there yet` });
       throw new KernelError('path_resolve_failed', { cause: error, detail: `reading ${args.path} failed: ${code ?? errorMessage(error)}` });
     }
     const hits = text.split(args.anchor).length - 1;
     if (hits === 0) throw new KernelError('edit_anchor_not_found', { detail: `the anchor does not appear in ${args.path}` });
-    // 多重匹配时选哪一处由模型决定是不可审计的，所以要求定位串唯一（D3）。
+    // 定位字符串必须唯一匹配，避免模型在多个位置中任意选择修改目标。
     if (hits > 1) {
       throw new KernelError('edit_anchor_ambiguous', { detail: `the anchor appears ${hits} times in ${args.path}; widen it until one occurrence is left` });
     }
@@ -139,8 +138,8 @@ export const deleteTool = {
     if (name === '') throw new KernelError('delete_target_is_boundary', { detail: 'the workspace boundary itself cannot be moved into the trash; name a file or directory inside it' });
     if (!(await existsOrFails(target))) throw new KernelError('delete_target_missing', { detail: `there is nothing at ${args.path} to move into the trash` });
 
-    // 去处由配置的 trashBackend 定：auto 是「有系统回收站就用它，没有就用项目内那个目录」，
-    // system 与 managed 各自固定一条路径，那条路径不成立时报错，不悄悄换另一条。
+    // 删除去处由 `trashBackend` 配置决定。`auto` 优先使用系统回收站，否则使用项目回收目录。
+    // `system` 和 `managed` 固定使用指定后端；后端不可用时返回错误，不自动切换。
     const backend = config.trashBackend ?? 'auto';
     if (backend !== 'auto' && backend !== 'system' && backend !== 'managed') {
       throw new KernelError('delete_trash_backend_unknown', { detail: `"${backend}" is not a trash backend; the choices are auto, system and managed` });
@@ -154,7 +153,7 @@ export const deleteTool = {
           observations?.forget(target);
           return { text: `sent ${name} to the ${recycler.name}` };
         } catch (error) {
-          // 送不进去（例如回收站与目标不在同一个文件系统上）就回落，并把原因写进日志（I8）。
+          // 系统回收站无法接收目标时，回退到项目回收目录并记录原因。
           if (backend === 'system') throw error;
           logger.log(`the ${recycler.name} refused this deletion, falling back to ${trashDirectory}`, { tool: 'delete', code: errorCode(error) });
         }
@@ -165,7 +164,7 @@ export const deleteTool = {
       }
     }
     await mkdir(join(boundary, trashDirectory), { recursive: true });
-    // 回收站里的名字带上时间戳与一段随机后缀，避免同一毫秒内两次删除同名撞车。
+    // 使用时间戳和随机后缀生成回收文件名，避免同名目标同时删除时冲突。
     await rename(target, join(boundary, trashDirectory, `${Date.now()}-${randomUUID().slice(0, 8)}--${name.split('/').join('__')}`));
     observations?.forget(target);
     return { text: `moved ${name} into ${trashDirectory}` };

@@ -1,8 +1,7 @@
-// 命令文本的语法级判断（D15、D17、D59）：按 Host 选定的那一种解释器挑一份 parser。
-// bash 用 tree-sitter 的 bash 语法解析一次，只有整棵树都落在支持的语法子集里，才把每个 command 叶子交出去逐段套规则；
-// 树里出现子集之外的构造、解析报错、或者解析器根本加载不起来，三种都按「无法完整处理」对待。
-// PowerShell 那一条路走 `powershell.js` 里更窄的子集（D59、D66），两边交回同一种结果形状。
-// 解析器是原生插件，加载失败不能让内核起不来，所以这里是懒加载并把失败记下来（D18 的显式报告）。
+// 根据 Host 选定的解释器解析命令，再逐段应用权限规则。
+// Bash 仅接受解析树完全位于支持子集内的命令；不支持的语法、解析错误或解析器故障均按无法完整识别处理。
+// PowerShell 使用 `powershell.js` 中更严格的语法子集，两种解析器返回相同结果结构。
+// 解析器采用延迟加载；加载失败时记录原因，不阻止 Kernel 启动。
 import { createRequire } from 'node:module';
 import { parsePowerShell } from './powershell.js';
 import type TreeSitterParser from 'tree-sitter';
@@ -14,18 +13,18 @@ type ParsedCommand =
 
 type LoadedParser = { parser: TreeSitterParser } | { detail: string };
 
-// 允许的命名单点，照 Codex 那一份清单：容器、命令与字面量，没有替换、重定向与控制流。
+// 支持的语法节点包括命令、参数和字面量；不支持替换、重定向或控制流。
 const SUPPORTED_KINDS = new Set([
   'program', 'list', 'pipeline', 'command', 'command_name',
   'word', 'string', 'string_content', 'raw_string', 'number', 'concatenation',
 ]);
 
-// 允许的标点与操作符：只有安全的连接符与两种引号，括号、反引号、重定向一律不在其中。
+// 仅接受安全的命令连接符和两种引号；括号、反引号及重定向不在支持范围内。
 const SUPPORTED_TOKENS = new Set(['&&', '||', ';', '|', '"', "'"]);
 
 let loaded: LoadedParser | undefined;
 
-// tree-sitter 是 CommonJS 的原生绑定，用 require 拿；静态 import 会在加载失败时把整个进程带走。
+// tree-sitter 使用 CommonJS 原生绑定，通过 require 加载，避免导入失败时终止整个进程。
 function messageOf(error: unknown): string {
   if ((typeof error === 'object' && error !== null) || typeof error === 'function') {
     if ('message' in error && typeof error.message === 'string') return error.message;
@@ -49,7 +48,7 @@ function loadParser(): LoadedParser {
 }
 
 function analyse(tree: TreeSitterParser.Tree, text: string): ParsedCommand {
-  // 解析不了就整条按无法处理对待，不去猜哪一段是模型想写的。
+  // 解析失败时拒绝整条命令，不猜测模型意图。
   if (tree.rootNode.hasError) return { kind: 'unsupported', construct: 'a syntax error' };
   const commands: TreeSitterParser.SyntaxNode[] = [];
   const stack: TreeSitterParser.SyntaxNode[] = [tree.rootNode];
@@ -68,7 +67,7 @@ function analyse(tree: TreeSitterParser.Tree, text: string): ParsedCommand {
       stack.push(child);
     }
   }
-  // 遍历用的是栈，交出去之前按在原文里的位置排回来。
+  // 使用栈遍历语法树，返回前按命令在原文中的位置排序。
   commands.sort((left, right) => left.startIndex - right.startIndex);
   const segments = commands
     .map((node) => text.slice(node.startIndex, node.endIndex).trim())
@@ -77,9 +76,8 @@ function analyse(tree: TreeSitterParser.Tree, text: string): ParsedCommand {
   return { kind: 'segments', segments };
 }
 
-// 三种结果：`segments` 是逐段判的依据；`unsupported` 带一个说明是哪种构造的字段；
-// `unavailable` 说明解析器这一次运行里用不了，按语法自动放行这条能力整个关掉。
-// 交回的都是 Promise：PowerShell 那一份 grammar 只能用动态 import 拿（D66），bash 那一条也一起走异步，两条路的调用形状相同。
+// 返回 `segments` 供逐段判定，`unsupported` 标明不支持的语法，`unavailable` 表示解析器不可用。
+// 解析器均通过异步接口加载，确保 Bash 和 PowerShell 使用相同调用方式。
 export function parseCommand(text: string, kind: string = 'bash'): Promise<ParsedCommand> {
   if (typeof text !== 'string' || text.trim() === '') return Promise.resolve({ kind: 'unsupported', construct: 'no command' });
   if (kind === 'powershell') return parsePowerShell(text);

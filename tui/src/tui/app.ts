@@ -1,7 +1,6 @@
-// 终端界面的行、输入与状态（D33 的第二种客户端）。这里不读帧也不写帧：帧由 core/src/host/connection.ts 那一层交进来，
-// 这一层只把会话记录与流式增量画成行，并把按键变成协议里的调用。
-// 纯函数（editDraft、foldText、projectRecord、branchOf、detailTitle 与 commands.ts 里那几张表）都从这里交出去，
-// 检查在 test/tui.test.js，不靠真终端也能验；画面本身跑 `ligule` 看。
+// TUI 负责显示会话记录和流式内容，并将键盘操作转换为 Host 协议调用。
+// 协议帧由 `core/src/host/connection.ts` 处理；此处不直接读写帧。
+// 纯函数和命令表从此模块导出，供自动检查和界面复用。
 import { resolve } from 'node:path';
 import { createElement as h, Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Static, Text, useApp, useInput, usePaste } from 'ink';
@@ -39,13 +38,13 @@ import type { CredentialStatus } from '@ligule/core/kernel/credentials.js';
 
 const SPINNER = ['⠋', '⠙', '', '⠸', '⠼', '⠴', '⠦', '', '⠇', '⠏'];
 const FOLD_LINES = 3;
-// 模式来自哪一层，画给人看的是中文，记录里那三个名字与装载那一侧一致（D43）。
+// 显示模式来源的中文名称；记录值与 Host 返回的来源标识保持一致。
 const MODE_LAYERS: Readonly<Record<string, string>> = { shipped: '随包', user: '全局', project: '项目' };
-// 清单最多画几行：再长就把屏幕顶到输入框以外，人看不到自己在敲什么。
+// 限制列表高度，避免内容挤出输入区域。
 const CANDIDATE_ROWS = 6;
-// 路径候选一次问宿主 8 条：这一处画的是文件名，多几行也读不完，而宿主的 `limit` 比它更宽。
+// 每次向 Host 请求最多八条路径候选，避免列表超出屏幕。
 const MENTION_ROWS = 8;
-// 「没在问哪一段」的形状：真实的落笔处起点不可能是 -1，所以它跟任何一段都对不上。
+// 表示当前没有文本组合输入；有效光标位置不会是 -1。
 const NO_TOKEN = { start: -1, text: '' } as const;
 const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
@@ -257,12 +256,12 @@ interface QuestionState {
   readonly custom?: string;
 }
 
-// 那几张表与那几个纯函数交给检查里用（test/tui.test.js），界面自己只走这一处出口。
+// 将命令表和纯函数导出，供测试及其他界面逻辑使用。
 export { SESSION_ROWS, UI_COMMANDS, answerOf, candidatesOf, describeChange, displayWidth, findLines, findUiCommand, insertMention, mentionToken, resolveSessionId, routeInput, sessionLines } from './commands.js';
 export { KEYMAP, CURRENT, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec, specOf } from './keymap.js';
 export { markdownLines } from './markdown.js';
 
-// 草稿的编辑：左右移光标、Home/End 与 Ctrl+A/E 跳两端、Ctrl+W 删前一个词、Ctrl+U 清空、其余可打印字符插在光标处。
+// 草稿编辑支持移动光标、跳到行首尾、删除前一词、清空草稿和插入可打印字符。
 export function editDraft(draft: string, caret: number, input: string, key: InkKey): DraftState {
   const boundaries = [...GRAPHEMES.segment(draft)].map((part) => part.index);
   const previous = boundaries.filter((index) => index < caret).at(-1) ?? 0;
@@ -273,7 +272,7 @@ export function editDraft(draft: string, caret: number, input: string, key: InkK
   if (key.end || (key.ctrl && input === 'e')) return { draft, caret: draft.length };
   if (key.ctrl && input === 'u') return { draft: '', caret: 0 };
   if (key.ctrl && input === 'w') {
-    // 先跳过光标前的空白，再删一个词：连着空白一起删会让「rm -rf  」整段消失。
+    // 删除前先跳过光标前的空白，避免连同前一个词一起误删。
     const head = draft.slice(0, caret).replace(/\s+$/, '').replace(/[\p{L}\p{N}_.\-/]+$/u, '');
     return { draft: head + draft.slice(caret), caret: head.length };
   }
@@ -285,9 +284,9 @@ export function editDraft(draft: string, caret: number, input: string, key: InkK
   return { draft: draft.slice(0, caret) + input + draft.slice(caret), caret: caret + input.length };
 }
 
-// 撤销的「一个单位」怎么划：连着在末尾打出来的字算一个单位，退格、删词、粘贴、换行各算一个（方案 6.1）。
-// 划线段的判据只有这一个：前一份是后一份的开头、多出来的正好是一个字素、那一头落在末尾、且不是空白。
-// 空白单独成一段，打错「两个字之间的那个空格」时能退回打空格之前，而不是整句一起没。
+// 连续追加的文本合并为一个撤销单位；退格、删词、粘贴和换行各自形成独立单位。
+// 合并要求新草稿以旧草稿开头，新增部分恰好一个字素、位于末尾且不是空白。
+// 空白单独作为撤销单位，便于只撤销误输入的空格。
 export function isTypingRun(before: DraftState, after: DraftState): boolean {
   if (before.caret !== before.draft.length || after.caret !== after.draft.length) return false;
   if (!after.draft.startsWith(before.draft)) return false;
@@ -297,8 +296,7 @@ export function isTypingRun(before: DraftState, after: DraftState): boolean {
 
 const textOf = (value: unknown): string => (typeof value === 'string' ? value : JSON.stringify(value ?? '', null, 2));
 
-// 长内容默认折起来：行数与字数各给一个上限，剩下的一行说明还有多少字（Ctrl+O 展开）。
-// 只按行数折的话，一段没有换行的 JSON 会整块压在屏幕上。
+// 长内容按行数和字数双重限制折叠，并显示剩余字数；Ctrl+O 展开查看。
 export function foldText(text: unknown, expanded: boolean, limit = FOLD_LINES, maxChars = 400): { shown: string; hidden: number } {
   const full = textOf(text);
   if (expanded === true) return { shown: full, hidden: 0 };
@@ -310,8 +308,8 @@ export function foldText(text: unknown, expanded: boolean, limit = FOLD_LINES, m
 
 export { capabilityOf, projectRecord, resultParts };
 
-// 状态行上的那一段上下文压力：当前投影的估算、窗口，外加越线没有（D82）。没写窗口时宿主交出 null，这一段整块不出现。
-// 估算是本地量法乘上端点报回的修正系数，前面那个波浪号说的是它不是端点给的确数。
+// 上下文状态显示当前投影估算、模型窗口和是否超过压力线。窗口未知时隐藏整段状态。
+// Token 数是本地估算值，并使用波浪号标明，避免误认为模型服务返回的精确用量。
 interface ContextUsage {
   readonly estimated: number;
   readonly window: number;
@@ -323,8 +321,8 @@ export function contextSegment(usage: ContextUsage | null | undefined, locale: L
   return `ctx:~${usage.estimated}/${usage.window}${usage.estimated > usage.threshold ? chooseText(locale, ' 超限', ' over limit') : ''}`;
 }
 
-// 元数据行保留会话、目录、上下文和运行状态；模型与控制入口在输入框下单独显示。
-// 宽度不足时先缩短目录，再隐藏上下文和记录数，保留取消提示。
+// 元数据行显示会话、目录、上下文和运行状态；模型与控制入口显示在输入框下方。
+// 空间不足时先截短目录，再隐藏上下文和记录数，并保留取消提示。
 interface StatusLineOptions {
   readonly sessionId: string;
   readonly boundary?: string;
@@ -360,12 +358,12 @@ export function buildStatusLine({ sessionId, boundary, status, running, seconds,
   const progressHint = running && progress !== undefined && progress !== null
     ? `${phaseHint} · ${progress.modelCalls} ${t('次模型调用', 'model calls')} · ${progress.toolCalls} ${t('个工具调用', 'tool calls')} · ${idleSeconds}${t('秒无新进展', 's without progress')}${progress.outputTokens === null ? '' : ` · ${progress.outputTokens} ${t('输出token', 'output tokens')}`}`
     : '';
-  // 打断与展开那两句跟在条数之后：挤的时候条数先走，这两句留着。
+  // 空间不足时优先隐藏条数，保留中断和展开提示。
   const hints = (running ? `${progressHint === '' ? '' : ` · ${progressHint}`}${t(` · ${Math.floor(seconds)} 秒，${keyHint('interrupt')} 打断`, ` · ${Math.floor(seconds)}s, ${keyHint('interrupt')} to stop`)}` : '')
     + (expanded ? t(` · 已展开（${keyHint('expand-or-history')} 收起）`, ` · expanded (${keyHint('expand-or-history')} to close)`) : '');
   let tail = `${chooseText(locale, `记录 ${status.eventCount} 条`, `${status.eventCount} events`)}${hints}`;
   let shown = parts;
-  // 列数读不到时不裁：宁可让终端自己折行，也不要按一个猜的宽度丢东西。
+  // 无法读取终端宽度时不截断文本，由终端自行换行。
   const line = () => [base, ...shown, tail].filter(part => part !== '').join(' · ');
   const over = () => columns !== undefined && columns > 0 && displayWidth(line()) > columns;
   const leaf = root === '' ? '' : root.split(/[\\/]/).filter(Boolean).pop() ?? '';
@@ -381,28 +379,27 @@ export function buildStatusLine({ sessionId, boundary, status, running, seconds,
   return line();
 }
 
-// `/show` 要的是记录里那个稳定的序号，不是画面上的第几行：行会随投影变，序号不会（D40）。
+// `/show` 使用稳定的事件序号，不使用可能随投影变化的屏幕行号。
 export function findRecord(events: readonly TuiRecord[], argument: string): { readonly code: string } | { readonly record: TuiRecord | null } {
   const seq = Number(argument);
   if (!Number.isInteger(seq) || seq < 0) return { code: 'tui_show_needs_a_number' };
   return { record: events.find((event) => event.seq === seq) ?? null };
 }
 
-// `/sub` 用的也是同一套序号，指向父记录里那条派生结果：支线会话 id 写在那一条的结果内容里（D71），
-// 界面不猜文件名，也不为支线多要一次别的动作（D74）。
+// `/sub` 使用父记录中的事件序号定位派生结果，并从结果中读取支线会话 ID。
 export function branchOf(record: TuiRecord | undefined): { readonly code: 'tui_sub_needs_a_branch' } | { readonly sessionId: string } | { readonly code: 'tui_sub_reference_spilled'; readonly spilled: string | undefined } {
   if (record?.kind !== 'tool' || record.tool !== 'subagent') return { code: 'tui_sub_needs_a_branch' };
   const result = isRecord(record.result) ? record.result : undefined;
   const content = isRecord(result?.content) ? result.content : undefined;
   const sessionId = content?.sessionId;
-  // 结果内容超过注入上限时整段溢出到文件（I6），那一条记录里就没有 sessionId 这一格。
+  // 结果超出限制时存入溢出文件；此时支线 ID 可能不在记录内容中。
   if (typeof sessionId !== 'string' || sessionId === '') {
     return { code: 'tui_sub_reference_spilled', spilled: typeof result?.spilled === 'string' ? result.spilled : undefined };
   }
   return { sessionId };
 }
 
-// 那一格的标题先说清画的是哪一条线：主干与支线各有一套序号，混着看读出来的是错的因果（D74）。
+// 标题注明当前显示的是主会话还是派生会话，因为两者使用各自的事件序号。
 interface DetailTitleOptions {
   readonly seq: number | null;
   readonly kind: string;
@@ -414,8 +411,8 @@ export function detailTitle(detail: DetailTitleOptions, locale: Locale = 'zh'): 
   return chooseText(locale, `支线 ${detail.branch}，父记录第 ${detail.seq} 那一次派生 · 这里的序号是支线自己的 · /sub 收起`, `Subtask ${detail.branch}, from event ${detail.seq} · sequence numbers belong to this subtask · /sub to close`);
 }
 
-// 助手的 Markdown 按终端列数排版，代码按语言上色，内容完整保留。
-// 强调那几种记号（加粗、斜体、删除线、行内代码）在这一层画出来：范围名到 Ink 那几格的对应只有这一处（第 96 步）。
+// 按终端宽度排版助手的 Markdown，并按语言高亮代码，保留原文内容。
+// 加粗、斜体、删除线和行内代码的样式映射统一在此处维护。
 const MARK_STYLES: Readonly<Record<string, Record<string, unknown>>> = {
   'md-strong': { bold: true },
   'md-em': { italic: true },
@@ -438,13 +435,13 @@ function MarkdownRows({ text, columns = 80 }: { readonly text: string; readonly 
   }));
 }
 
-// 审批问的是「要不要做这一件」，那一句改动得先看得见：写入类工具的参数里带着全文或那两段，界面上算个行数就够。
+// 审批卡显示写入操作的目标和变更摘要，便于用户检查后再决定是否允许。
 export function changeSummary(tool: string, args: Record<string, unknown>, locale: Locale = 'zh'): string {
   return describeChange(tool, args, locale).summary;
 }
 
-// 审批框展开的那一段：写入类那三件说清实际动的是哪一件、要去掉哪一段、要换上哪一段（方案 5.4）。
-// 两段内容都带行首的减号与加号，读的人不必自己对照；没读过的正文不画，删除那一条只说移进回收站。
+// 展开写入类审批时显示目标路径、原内容和新内容，并分别加上减号与加号。
+// 未读取过的内容不展示；删除操作只说明文件会移入回收站。
 function approvalBody(tool: string, args: Record<string, unknown>, locale: Locale = 'zh'): string {
   const t = (zh: string, en: string) => chooseText(locale, zh, en);
   const change = describeChange(tool, args, locale);
@@ -469,7 +466,7 @@ function Row({ row, expanded, columns, locale = 'zh' }: { readonly row: Transcri
   if (row.kind === 'call') return h(Text, { color: 'yellow' }, `→ ${row.tool} ${foldText(row.text, expanded, 1).shown}`);
   if (row.kind === 'result') {
     const folded = foldText(row.text, expanded);
-    // 抬头那一行说的是这一件做成了什么：命令带退出码，溢出带那个文件名（I6 的那一条引用要看得见）。
+    // 标题行显示操作结果；命令显示退出码，溢出内容显示存储文件名。
     const note = [row.exitCode === undefined ? '' : t(`退出码 ${row.exitCode}`, `exit ${row.exitCode}`), row.spilled === undefined ? '' : t(`整段在 ${row.spilled}`, `full result: ${row.spilled}`)].filter((part) => part !== '').join(' · ');
     return h(Fragment, null,
       h(Text, { color: 'green' }, `✓ ${row.tool}${note === '' ? '' : `（${note}）`}`),
@@ -482,24 +479,23 @@ function Row({ row, expanded, columns, locale = 'zh' }: { readonly row: Transcri
   return h(Text, { color: 'red' }, `! ${row.text}`);
 }
 
-// 队列里那一条画之前先裁短：一行装不下一整句话，而这一格的作用只是让人看见排了几条。
+// 队列预览截短为单行，避免长消息撑开输入区。
 export function queuedLine(text: string, limit = 64): string {
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
 
-// 一道题在画面上怎么写：选中的那几条与自由回答各占一段，两样都没有就说这一格是空的（D107）。
-// `undefined` 是还没走到那一题，`null` 是走到过、回车交的是空的一句——两者交回宿主之后都记成「没有回答」，画面上要说清是哪一种。
+// 问题卡显示选项和自由回答。`undefined` 表示尚未回答，`null` 表示已提交空答复。
 const answeredLine = (answer: AskAnswer | null | undefined, locale: Locale = 'zh') => answer === undefined ? chooseText(locale, '尚未回答', 'Not answered')
   : answer === null ? chooseText(locale, '已跳过', 'Skipped')
   : [answer.selected.join(', '), answer.custom].filter((one) => one !== '' && one !== undefined).join('; ') || chooseText(locale, '未回答', 'Not answered');
 
-// 那一格下面说的是「怎么答」：有选项时要把编号那条写出来，人不然只会照着题面写一句自由回答（D107）。
+// 有选项时明确说明如何选择，避免用户误以为只接受自由文本。
 const optionHint = (question: AskQuestion, locale: Locale = 'zh') => question.options.length === 0
   ? chooseText(locale, '输入回答', 'Type your answer')
   : question.multiSelect ? chooseText(locale, '输入回答或多个选项编号', 'Type an answer or multiple option numbers') : chooseText(locale, '输入回答或选项编号', 'Type an answer or an option number');
 
-// 没有把那一份共用文件接进来时（调用方不给了历史）的历史：句子仍留在这一个进程里，退出就不在了。
-// 模块级一份：`remember` 交回写完的清单是这一格的合同，每次渲染新建一个对象会让界面的依赖一路变。
+// 未提供持久化接口时，输入历史只保存在当前进程中，退出后丢失。
+// 持久化接口返回写入后的列表，供组件直接使用并保持依赖稳定。
 const processHistory: TuiInputHistory = {
   entries: [],
   remember: async (text) => {
@@ -519,7 +515,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [rows, setRows] = useState<TranscriptItem[]>([]);
   const [live, setLive] = useState({ text: '', reasoning: '' });
   const [ask, setAsk] = useState<AskState | null>(null);
-  // 模型的提问（D107）：一次请求一到四道题，答一道前进一道，答完最后一道才把答复交回去。
+  // 一个提问请求包含一至四道题；逐题填写，最后一题提交后统一发送答复。
   const [query, setQuery] = useState<QuestionState | null>(null);
   const [running, setRunning] = useState(false);
   const [tick, setTick] = useState(0);
@@ -531,9 +527,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const pickerRequest = useRef(0);
   const [draft, setDraft] = useState('');
   const [caret, setCaret] = useState(0);
-  // 草稿的撤销栈（方案 6.1）：人在这一格里改出来的每一段，落笔时先把当时那一格的草稿与光标留下来，Ctrl+Z 退回它、Ctrl+Y 再拿回来。
-  // 只留在这一次打开的内存里：跨退出留住的是第 84 步那两格，退出之后退回刚才打的字没有意义。
-  // stack 与 future 各 100 份（ponytail: 上限写在这一处，一句草稿远够用；要更长就换成按字节预算的环形缓冲）。
+  // 撤销栈保存每次编辑前的草稿和光标位置；Ctrl+Z 撤销，Ctrl+Y 重做。
+  // 撤销记录只保存在当前进程；草稿本身通过持久化输入状态跨退出保存。
+  // 撤销和重做各保留最近 100 个状态。
   const undo = useRef<UndoState>({ stack: [], future: [], kind: null, before: { draft: '', caret: 0 } });
   useEffect(() => {
     const cell = undo.current;
@@ -542,12 +538,12 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     cell.before = current;
     if (current.draft === previous.draft) { cell.kind = null; return; }
     const run = isTypingRun(previous, current);
-    // 连着打的字并上一个单位：退一次是一段，不是一个字符。
+    // 连续输入的字符合并为一个撤销单位。
     if (run && cell.kind === 'insert') return;
     cell.stack = [...cell.stack.slice(-99), previous];
     cell.kind = run ? 'insert' : 'text';
   }, [draft, caret]);
-  // 草稿整份换掉的那几处走这一条：那不是一次可退回的改动，清空栈也别让 Ctrl+Z 把另一份会话的草稿翻回来。
+  // 用于替换整份草稿并清空撤销栈，避免撤销到其他会话的输入。
   const resetDraft = useCallback((text: string) => {
     const cell = undo.current;
     cell.stack = [];
@@ -557,39 +553,37 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     setDraft(text);
     setCaret(text.length);
   }, []);
-  // 输入历史跨会话留住（D81 边界二：它存在界面自己那一份文件里，不进会话记录）。
-  // 文件里的先后就是这里的先后，最新的排在第一个，上下键从第一个往下翻就是往旧处翻。
+  // 输入历史跨会话保存，不写入会话记录。最新输入位于列表前端，方向键向下浏览更早内容。
   const [entries, setEntries] = useState(history.entries);
   const [historyAt, setHistoryAt] = useState(-1);
   const [historyDraft, setHistoryDraft] = useState('');
-  // Ctrl+R 那一次反查：查询串与移到第几条匹配；不在反查中时这一格是 null。
+  // Ctrl+R 反向搜索的查询文本和当前匹配位置；未搜索时为 null。
   const [search, setSearch] = useState<SearchState | null>(null);
   const [status, setStatus] = useState<TuiStatus | null>(null);
-  // 详情画在动态区里：`Static` 不回画已提交的行，所以「看那一条」只能是把它再画一次（D39、D40）。
+  // `Static` 不会重绘已提交行，因此查看单条详情时在动态区重新绘制。
   const [detail, setDetail] = useState<DetailState | null>(null);
-  // 斜杠输入时的选中位置：候选每次从草稿现算，这里只记住人移到第几条（D81）。
+  // 斜杠命令候选的当前选择索引；候选内容始终从草稿重新计算。
   const [pick, setPick] = useState(0);
-  // Esc 收起候选时记下收起的是哪一段草稿：改一个字就该重新露出来，不需要另一个开关。
+  // 记住按 Esc 关闭候选时的草稿；输入变化后重新显示候选。
   const [dismissedAt, setDismissedAt] = useState<string | null>(null);
-  // 跑着的那一轮里回车排进来的那几条：只在界面一侧，不进记录也不进内核（D81 边界二）。
+  // 运行期间通过 Enter 提交的消息先排在界面队列中，不立即写入会话记录。
   const [queue, setQueue] = useState<string[]>([]);
-  // 取消这一轮之后队列停下等人：剩余的那几条不自己发出去（方案 5.2）。
+  // 取消当前轮次后暂停队列，等待用户明确继续。
   const [queuePaused, setQueuePaused] = useState(false);
-  // 落笔处那一段 `@` 路径引用的候选：清单由宿主列出来，界面不开盘（方案 5.3、D81 边界一）。
+  // `@` 路径候选由 Host 提供，TUI 不直接扫描文件。
   const [mention, setMention] = useState<MentionState | null>(null);
-  // Esc 收起的是当下这一个词：接着改字会重新问，原样不动时不再弹出来挡住输入。
+  // 按 Esc 暂时关闭当前候选；草稿改变后再查询，文本未变时不重复弹出。
   const [hiddenMention, setHiddenMention] = useState('');
   const mentionWanted = useRef<ReturnType<typeof mentionToken> | typeof NO_TOKEN>(NO_TOKEN);
   const mentionAsked = useRef<ReturnType<typeof mentionToken> | typeof NO_TOKEN>(NO_TOKEN);
-  // 退出之后流已经关了：那时候再落一行会让 Ink 往关掉的输出上写，报出来的是 `write after end`，
-  // 而不是那一句真正想说的话。这一格只用来让迟到的答复与状态刷新不再往画面上写。
+  // Ink 结束后禁止继续写入，避免迟到的答复或状态更新触发 `write after end`。
   const alive = useRef(true);
   useEffect(() => () => { alive.current = false; }, []);
   const push = useCallback((...added: TranscriptItem[]) => {
     if (!alive.current) return;
     setRows((current) => [...current, ...added]);
   }, []);
-  // 个人键位那一份覆盖读自本机的另一份文件，写也写回那里：不进记录、不进模型上下文、不进项目的业务配置（方案 6.1、D81 边界二）。
+  // 用户快捷键覆盖存放在独立的本地文件中，不进入会话记录、模型上下文或项目配置。
   const [keyOverrides, setKeyOverrides] = useState<Record<string, string>>({});
   useEffect(() => {
     if (keys === undefined) return;
@@ -600,13 +594,12 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       for (const action of outcome.applied) applied[action] = CURRENT[action];
       setKeyOverrides(applied);
       const refused = [...loaded.refused, ...outcome.refused];
-      // 落不下来的那几条一条条说出来：剩下的那些照样按默认那一份走，但「你以为改掉了其实没有」这件事要说得见。
+      // 逐项报告无法保存的快捷键覆盖；其他有效覆盖和默认快捷键继续生效。
       if (refused.length > 0) push({ kind: 'meta', text: t(`${refused.length} 项快捷键无效，使用默认值：${refused.join('、')}`, `${refused.length} invalid shortcuts use defaults: ${refused.join(', ')}`) });
       else if (outcome.applied.length > 0) push({ kind: 'meta', text: t(`已加载 ${outcome.applied.length} 项自定义快捷键（/bind 查看）`, `Loaded ${outcome.applied.length} custom shortcuts (/bind to browse)`) });
     })();
   }, [keys, push, t]);
-  // 排着的那几条与草稿都属于那一份会话：换看别的一份时把这一份收起来，换回来再摊开——
-  // 既不把没发的话送到另一份会话里，也不把它丢掉（方案 5.2「队列按会话隔离」）。
+  // 草稿和队列按会话隔离；切换会话时保存当前状态，切回后恢复，避免误发或丢失输入。
   const inputState = useRef(new Map<string, SessionInputState>());
   const viewedSession = useRef(sessionId);
   useEffect(() => {
@@ -619,8 +612,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     viewedSession.current = sessionId;
   }, [draft, queue, queuePaused, sessionId]);
 
-  // 退出之前没发出去的那一句与排着的几句留在本机这一份文件里：接上哪一份会话就读哪一份（方案 5.1）。
-  // 只在本次没摊开过的那一份上读一次；读回来时人已切走的丢掉，不盖到另一份的草稿上。
+  // 退出前将未发送草稿和队列持久化到本地输入状态文件，并按会话恢复。
+  // 每份会话只在首次恢复时读取；响应返回前若已切换会话则丢弃，避免覆盖其他会话草稿。
   const inputNow = useRef({ draft: '', queue: [] as string[] });
   inputNow.current = { draft, queue };
   useEffect(() => {
@@ -632,9 +625,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       const saved = await inputs.read(root, own);
       if (viewedSession.current !== own) return;
       inputState.current.set(own, { queue: saved.queued, queuePaused: saved.queued.length > 0, draft: saved.draft });
-      // 那一句读回来的路上人已经自己敲了字：以他敲的为准，不拿一份旧的盖过去。
+      // 恢复期间若用户已输入新内容，保留新输入，不用旧草稿覆盖。
       if (saved.draft !== '' && inputNow.current.draft === '') resetDraft(saved.draft);
-      // 排着的几句恢复成暂停：那几句当时还没发出去，重启之后自己发是替人做了他没要的决定（方案 5.2）。
+      // 恢复后的队列保持暂停，避免重启后自动发送用户尚未确认的消息。
       if (saved.queued.length > 0 && inputNow.current.queue.length === 0) {
         setQueue(saved.queued);
         setQueuePaused(true);
@@ -642,7 +635,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     })().catch(() => inputState.current.delete(own));
   }, [info.boundary, inputs, sessionId]);
 
-  // 手停下来 400 毫秒才写这一份：敲字那一段不碰磁盘，而退出与崩溃前那一句已经落下了。
+  // 输入停止 400 毫秒后保存，减少连续输入期间的磁盘写入，同时保留退出前的最新草稿。
   useEffect(() => {
     if (inputs === undefined || !inputState.current.has(sessionId)) return;
     const own = sessionId;
@@ -653,18 +646,17 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     return () => clearTimeout(timer);
   }, [draft, info.boundary, inputs, push, queue, sessionId, t]);
 
-  // 落笔处那一段 `@` 交给宿主去列：等手停下 160 毫秒再问一次，答回来时那一段已经变了就丢掉（方案 5.3）。
-  // 传输那一层没有中途取消的办法，所以「慢请求可取消」在这儿做到的是「不落到画面上」。
+  // `@` 候选查询在输入停止 160 毫秒后发送；查询期间文本变化时忽略旧响应。
+  // 传输层不支持中途取消，因此通过丢弃过期结果避免更新界面。
   useEffect(() => {
     const token = mentionToken(draft, caret);
     if (token === null) { setMention(null); mentionAsked.current = NO_TOKEN; return; }
     mentionWanted.current = token;
     if (hiddenMention === token.text) { mentionAsked.current = NO_TOKEN; return; }
-    // 「上一次问的是哪一段」放在 ref 而不是 state：写进 state 会让本条 effect 重跑，
-    // 那一次重跑先把已经排好的那一下问撤销掉，接着又因为这一段没变而不再重问，画面就停在等那一下上。
+    // 用 ref 保存上一次查询文本，避免更新 state 触发 effect 重跑并取消已安排的请求。
      const asked = mentionAsked.current;
      if (asked !== null && asked.start === token.start && asked.text === token.text) return;
-    // 换了一个词就把手里那几条旧的候选放下：清单留着，Enter 就会把人没选过的那一条插进去。
+    // 查询文本变化后清除旧候选，避免 Enter 插入与当前输入不匹配的路径。
     mentionAsked.current = token;
     setMention({ ...token, paths: [], chosen: 0, stopped: 'pending' });
     const timer = setTimeout(() => {
@@ -685,7 +677,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [approvalCursor, setApprovalCursor] = useState(0);
 
   const refreshStatus = useCallback(async () => {
-    // 界面已经收掉了：这一处不去敲那条已经关掉的连接，免得一次迟到的收尾变成一条没人接的错误。
+    // Ink 已退出时不再向已关闭的连接发送状态更新。
     if (!alive.current) return;
     try {
       const current = await client.request('status.get', { sessionId });
@@ -722,7 +714,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         if (!isSessionEvent(message.event)) return;
         const event = message.event;
         if (event.kind === 'turn') terminalReceived.current = true;
-        // 刚落盘的那一条取代流式期间的那半截：记录是事实源（I5），界面按它重画。
+        // 持久化事件到达后，以记录事件替换流式占位内容。
         if (event.kind === 'assistant') setLive((current) => ({ ...current, text: '' }));
         if (event.kind === 'reasoning') setLive((current) => ({ ...current, reasoning: '' }));
         push(...projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq })));
@@ -734,7 +726,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       if (!isRecord(message.params)) return;
       const params = message.params;
       if (message.method === 'question.request') {
-        // 终端界面一次盯一份会话：别的那一份问过来的题在这一格里答不了（审批那一条同一处门）。
+        // TUI 只显示当前会话的问题；后台会话的问题无法从当前终端界面回答。
         const asked = params;
         if (asked.sessionId !== sessionId || !Array.isArray(asked.questions) || asked.questions.length === 0 || !asked.questions.every(isAskQuestion)) return;
         pickerRequest.current += 1;
@@ -756,8 +748,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       setSessionPicker(null);
       setSearch(null);
       setExpanded(false);
-      // 画出来的那一行说的是什么对象：命令文本、路径、目标地址，或者那一项 MCP 能力名。
-      // 写入类的参数里带着整份文件内容，那一段不进这一行——行数写在下面那一行里，全文走 `/show`。
+      // 审批摘要显示操作对象，例如命令、路径、网络地址或 MCP 工具。
+      // 写入内容不在摘要行中重复显示；此处显示行数，完整内容可通过 `/show` 查看。
       const shown = typeof params.command === 'string' ? params.command : typeof args.path === 'string' ? args.path : typeof args.url === 'string' ? args.url : typeof args.server === 'string' ? `mcp:${args.server}/${typeof args.tool === 'string' ? args.tool : ''}` : '';
       setAsk({
         id: message.id,
@@ -766,7 +758,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         change: changeSummary(params.tool, args, locale),
         reason: typeof params.reason === 'string' ? params.reason : '',
         content: approvalBody(params.tool, args, locale),
-        // 用哪一种语法判的、跑的是哪一个可执行文件：答的是这一条命令，看得见的该是这两样（D59）。
+        // 显示本次判定和执行使用的命令语法及可执行文件。
         backend: typeof params.shell === 'string' ? `${params.shell} · ${typeof params.executable === 'string' ? params.executable : ''}` : '',
       });
     };
@@ -775,14 +767,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     void refreshStatus();
   }, [client, locale, push, refreshStatus, sessionId]);
 
-  // 终端标题画出模型、项目根与这一份会话：切会话时那一串跟着换，任务栏与窗口列表里就能认出是哪一份。
-  // 没有真终端时不写：那串转义序列落在管道里会成为别人读到的字节。
+  // 终端标题显示模型、项目根和当前会话，切换会话时同步更新。
+  // 非交互终端不写标题控制序列，避免污染管道输出。
   useEffect(() => {
     if (stdout?.isTTY !== true) return;
     stdout.write(titleEscape(titleText({ model: status?.model ?? info.model, boundary: info.boundary, sessionId })));
   }, [info.boundary, info.model, sessionId, status?.model, stdout]);
 
-  // 跑着的时候走一个计时器：一格转圈、一秒一格，Esc 能打断这件事要看得见。
+  // 轮次运行时显示转圈状态和经过时间，让用户知道任务仍在执行且可取消。
   useEffect(() => {
     if (!running) {
       setSeconds(0);
@@ -796,8 +788,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   }, [running]);
 
   const remember = useCallback((text: string) => {
-    // 发出去的那一句才进历史：排进队列的那几条等真正发出去时各自进一次，翻历史看到的都是真说过的话。
-    // 先按眼前这一份排一下，箭头键不必等那一次写；写完再把画面换成锁内那一份清单——另一端那句也跟着进来（方案 5.5.6）。
+    // 只有实际发送的输入才加入历史；队列消息在发送时分别记录。
+    // 先立即更新本地列表以响应按键，再替换为 Host 锁内更新后的共享列表。
     setEntries((current) => pushHistory(current, text));
     void history.remember(text).then(
       (written) => setEntries(written),
@@ -815,8 +807,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       if (!terminalReceived.current) push({ kind: 'meta', text: t('本轮已完成', 'Turn completed') });
     } catch (error) {
       const code = errorCode(error) ?? 'run_failed';
-      // 打断落在还在跑的模型调用上时端点那一头交回 `provider_cancelled`，落在两组调用之间才是 `loop_cancelled`，
-      // 落在等一个人回答的那一次提问上才是 `ask_user_cancelled`：人要读的是同一句——这一轮是他停下来的（方案 5.2、D107）。
+      // 根据取消位置显示对应错误码：模型请求为 `provider_cancelled`，调用组之间为 `loop_cancelled`，等待用户答复为 `ask_user_cancelled`。
       if (!terminalReceived.current) {
         if (code === 'loop_cancelled' || code === 'provider_cancelled' || code === 'ask_user_cancelled') push({ kind: 'meta', text: t('本轮已取消', 'Turn cancelled') });
         else push({ kind: 'error', text: `${t(`运行失败：${code}`, `Run failed: ${code}`)}${runtimeFailureText(code, locale) === undefined ? '' : `\n${runtimeFailureText(code, locale)}`}` });
@@ -824,14 +815,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     } finally {
       setAsk(null);
       setLive({ text: '', reasoning: '' });
-      // 这一轮结束了，还没答完的那几道题也不再有人等：宿主那一侧把取消记成一条结果，画面上这一格跟着收掉（D107）。
+      // 轮次取消后 Host 会记录未答问题的结果，界面移除对应问题卡片。
       setQuery(null);
       setRunning(false);
       void refreshStatus();
     }
   }, [client, push, refreshStatus, remember, sessionId, t]);
 
-  // 命令一律收到第一个词，后面的整段作为参数交进来（/mode 要用）。
+  // 按第一个词解析命令，完整保留其余文本作为参数。
   const closePanel = useCallback(() => {
     pickerRequest.current += 1;
     setPanel(null);
@@ -933,7 +924,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     }
     if (name === 'copy') {
       void (async () => {
-        // 复制的是记录里最后那一条回答：流式期间那半截还没落盘，复制它等于复制一份没成形的文本（I5）。
+        // 只复制记录中已落盘的最后一条回答，不复制尚未完成的流式片段。
         const read = await client.request('session.read', { sessionId }).catch((error: unknown) => requestFailure(error, 'session_read_failed'));
         if ('code' in read) {
           push({ kind: 'error', text: t(`无法读取记录：${read.code}`, `Could not read conversation: ${read.code}`) });
@@ -957,14 +948,13 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         return;
       }
       void (async () => {
-        // 排版与落盘都在宿主那一侧（方案 6A），这里只把人打的那一条路径按当前目录定成目的地：
-        // 宿主可能在别的进程里，相对路径要按敲下这一行的位置算。
+        // 排版和写入由 Host 完成；这里仅根据当前工作目录解析用户提供的目标路径。
         const done = await client.request('session.export', { sessionId, path: resolve(argument) }).catch((error: unknown) => requestFailure(error, 'session_export_failed'));
         if ('code' in done) {
           push({ kind: 'error', text: t(`导出失败：${done.code}`, `Export failed: ${done.code}`) });
           return;
         }
-        // 没写出去的那几份分两种：那一条支线的记录读不回来，与那一个位置已经有同名文件而这一份没人确认过要不要盖（审阅 F6）。
+        // 区分派生会话记录读取失败和目标文件已存在两种无法导出的情况。
         for (const item of done.skipped) {
           push({ kind: 'error', text: item.code === 'export_target_exists'
             ? t(`文件已存在，已跳过：${item.path ?? item.id}`, `File already exists; skipped: ${item.path ?? item.id}`)
@@ -979,7 +969,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     }
     if (name === 'sessions') {
       void (async () => {
-        // 列表来自宿主扫的那一份目录（第 34 步那个扫描器）：界面不去开盘，事实源仍然只有那一份（D81 边界一）。
+        // 会话列表由 Host 扫描，TUI 不直接访问记录目录。
         const listed = await client.request('sessions.list', { projectRoot: info.boundary }).catch((error: unknown) => requestFailure(error, 'session_list_failed'));
         if ('code' in listed) {
           push({ kind: 'error', text: t(`无法读取会话列表：${listed.code}`, `Could not list sessions: ${listed.code}`) });
@@ -1002,8 +992,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         return;
       }
       void (async () => {
-        // 查的也是宿主扫的那一份记录目录，界面不开盘（D81 边界一）；交回的是「哪一份会话的第几条」（方案 4.2）。
-        // 当前这一份另问一次并指名道姓：那一次结果溢出在文件里的整段正文也进来，跨会话那一种只读到记录留着的那一头一尾。
+        // 搜索由 Host 扫描记录并返回会话和事件序号；TUI 不直接访问记录目录。
+        // 搜索当前会话时读取溢出文件中的完整内容，跨会话搜索只检查记录内的文本。
         const [listed, deep] = await Promise.all([
           client.request('sessions.search', { query: wanted, projectRoot: info.boundary }).catch((error: unknown) => requestFailure(error, 'session_search_failed')),
           client.request('sessions.search', { query: wanted, sessionId }).catch((error: unknown) => requestFailure(error, 'session_search_failed')),
@@ -1028,8 +1018,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         runCommand('sessions');
         return;
       }
-      // 第二个词是那一份模式清单的名字：摘要变了时 D78 要一次显式的选择，界面上没有 `--mode` 这一格，
-      // 这个位置就是它的等价物——否则那一次拒绝在终端里没有任何走下去的路。
+      // 第二个词指定恢复会话时使用的模式；模式摘要变化时，用户必须明确选择模式才能继续。
       const [wanted, chosenMode] = argument.split(/\s+/);
       void (async () => {
         const listed = await client.request('sessions.list', { projectRoot: info.boundary }).catch((error: unknown) => requestFailure(error, 'session_list_failed'));
@@ -1049,7 +1038,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           push({ kind: 'meta', text: t('已打开此会话', 'This session is already open') });
           return;
         }
-        // 打开那一份记录时宿主会先补没人回答的派发，再按记录里最后生效的模式清单装配（D72、D78）。
+        // Host 打开记录时会恢复未完成调用，并使用记录中最后生效的模式。
         const opened = await client.request('session.open', { sessionId: picked.id, ...(chosenMode === undefined ? {} : { mode: chosenMode }) })
           .catch((error: unknown) => requestFailure(error, 'session_open_failed'));
         if ('code' in opened) {
@@ -1063,13 +1052,13 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           push({ kind: 'error', text: t(`会话已打开，但无法读取记录：${read.code}`, `Session opened, but conversation could not be read: ${read.code}`) });
           return;
         }
-        // 换走的那一份在宿主里还占着一次装配与那一份记录锁：终端一次只看一份会话，看走的那一份收掉（D85）。
-        // 请求先发、答复后等：换会话 id 与换那一栏记录要在同一帧里落笔，`Static` 的 items 按索引决定补画哪几行，
-        // 中间插一次 await 就把它拆成两帧，少画的那一段正是接过来的那一份记录。收不掉也不是接不上的理由，只在 meta 那一行说一句。
+        // TUI 一次只持有一个会话，切换时释放前一会话的运行状态和记录锁。
+        // 在同一次渲染中更新会话 ID 和记录内容，确保 Ink 的 Static 列表能按索引正确补画。
+        // 释放失败不会阻止打开新会话，但会显示诊断信息。
         const retiring = client.request('session.close', { sessionId }).catch((error: unknown) => requestFailure(error, 'session_close_failed'));
         setSessionId(picked.id);
         setSessionPicker(null);
-        // 投影从那份记录重建，而不是接着画：换过来的这一份里发生过什么，只有记录说得出（I5）。
+        // 根据记录重建转录，不沿用前一会话的画面状态。
         setRows(read.events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq }))));
         setLive({ text: '', reasoning: '' });
         setDetail(null);
@@ -1085,8 +1074,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     if (name === 'branch') {
-      // 两个入口在这一条命令上合成一个：不带序号是整份复制，带一个序号是带到那一轮完整结束那一条（方案 4.3）。
-      // 序号读不出整数就当场说清：一个猜出来的分支点比没有分支点更坏（4.3「不猜测历史分支点」）。
+      // 不指定序号时复制整个会话；指定整数时从该已完成轮次创建分支。
+      // 序号无效时明确报错，不猜测分支位置。
       const wanted = argument.trim();
       const at = wanted === '' ? undefined : Number(wanted);
       if (at !== undefined && !Number.isInteger(at)) {
@@ -1100,14 +1089,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           return;
         }
         push({ kind: 'meta', text: t(`已创建分支会话 ${branched.sessionId.slice(0, 8)}（截至记录 ${branched.at}）`, `Created branch ${branched.sessionId.slice(0, 8)} through event ${branched.at}`) });
-        // 接上去走的是 `/resume` 那一条路：打开、读回、投影、收掉上一份，一次只看一份会话（D85）。
-        // 那一份没配上的派发由这一次打开补成未知结果，补它用的是分支自己的装配（D72、方案 4.3）。
+        // 通过 `/resume` 打开新分支，读取记录并替换当前会话。
+        // 未完成调用在新分支首次打开时恢复为结果未知。
         runCommand('resume', branched.sessionId);
       })();
       return;
     }
     if (name === 'bind') {
-      // 改的是那一个动作的键，动作名不动：画面上说的那串字与按键落的事都从同一份表读，改完两处一起变（方案 6.1）。
+      // 只修改动作对应的按键，动作名称保持稳定；显示文本和实际按键行为共用同一配置。
       const parts = argument.trim().split(/\s+/).filter((part) => part !== '');
       const save = (next: Record<string, string>) => {
         if (keys === undefined) {
@@ -1160,7 +1149,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         push({ kind: 'error', text: t(`无效按键：${text ?? ''}。例如 Ctrl+Shift+K、enter、pageup`, `Invalid key: ${text ?? ''}. Examples: Ctrl+Shift+K, enter, pageup`) });
         return;
       }
-      // 先按这一条试一遍：同一个范围里两记键要落同一件事就拒，存下去的表必须是自己按得动的。
+      // 保存前校验按键绑定，拒绝同一作用范围内的冲突。
       const clash = conflictsIn(binding.view, { ...CURRENT, [action]: spec });
       if (clash.length > 0) {
         push({ kind: 'error', text: t(`${formatKeys(spec)} 在${binding.view}中冲突：${clash[0].join(' / ')}`, `${formatKeys(spec)} conflicts in ${ENGLISH_VIEWS[binding.view]}: ${clash[0].join(' / ')}`) });
@@ -1174,7 +1163,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     if (name === 'queue') {
-      // 队列是界面一侧那几行字：这一处只答「怎么走下去」与「收回到哪儿」，不动记录（D81 边界二、方案 5.2）。
+      // 队列由界面暂存；此命令只负责继续发送或将消息收回草稿，不修改会话记录。
       const [action, ordinal] = argument.split(/\s+/);
       if (action === undefined || action === '' || action === 'list') {
         push({ kind: 'meta', text: queue.length === 0 ? t('队列为空', 'Queue is empty')
@@ -1192,8 +1181,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
             : t(`队列已继续：${queue.length} 条待发送`, `Queue resumed: ${queue.length} pending`) });
         return;
       }
-      // 丢出去的那一条不扔：它回到草稿，那才是人写东西的那一格（5.2「取消项仍能恢复文本」）。
-      // 走到这一条时那行命令自己已经从草稿清掉了，所以草稿是空的那一格，不会把两句拼在一起。
+      // 将收回的消息放回草稿，保留用户输入。
+      // 命令已从草稿中移除，因此恢复后的草稿不会与命令文本拼接。
       if (action === 'drop') {
         const wanted = ordinal === undefined ? queue.length : Number(ordinal);
         const at = wanted - 1;
@@ -1244,7 +1233,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     if (name === 'name' || name === 'archive' || name === 'unarchive') {
-      // 名字与归档标记由宿主写成记录里的一条事实：界面不留第二份，两端读的是同一份（方案 4.2、实现顺序第 75 步）。
+      // 会话名称和归档状态由 Host 写入记录，TUI 不维护第二份副本。
       const label = name === 'name' ? { name: argument.trim() } : { archived: name === 'archive' };
       if (name === 'name' && label.name === '') {
         push({ kind: 'error', text: t('请输入会话名称：/name <名称>', 'Enter a session name: /name <name>') });
@@ -1264,7 +1253,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       void (async () => {
         setRunning(true);
         try {
-        // 压这一件事归宿主：要调模型、要写检查点（D83）。界面只把结果说清楚，包括三种不肯压的情况。
+        // Host 负责调用模型生成摘要并写入检查点；TUI 显示成功或无法压缩的原因。
         const done = await client.request('session.compact', { sessionId }).catch((error: unknown) => requestFailure(error, 'session_compact_failed'));
         if ('code' in done) {
           push({ kind: 'error', text: t(`无法压缩上下文：${done.code}`, `Could not compact context: ${done.code}`) });
@@ -1412,7 +1401,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           push({ kind: 'error', text: t(`子任务编号未保留；请查看完整结果 ${branch.spilled ?? ''}`, `Subtask ID is unavailable; see the full result ${branch.spilled ?? ''}`) });
           return;
         }
-        // 支线那份走的是同一次读记录的动作：它不在这轮的内核里，但它是同一目录下的另一份会话记录（D74）。
+        // 派生会话通过相同的记录读取接口读取；它没有当前运行时状态。
         const read = await client.request('session.read', { sessionId: branch.sessionId, fullResults: true }).catch((error: unknown) => requestFailure(error, 'session_read_failed'));
         if ('code' in read) {
           push({ kind: 'error', text: t(`无法读取子任务：${read.code}`, `Could not read subtask: ${read.code}`) });
@@ -1454,8 +1443,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     }, (error: unknown) => push({ kind: 'error', text: t(`无法选择模型：${errorCode(error) ?? 'model_select_failed'}`, `Could not select model: ${errorCode(error) ?? 'model_select_failed'}`) }));
   }, [choices, panel, closePanel, runCommand, client, sessionId, refreshStatus, push, t]);
 
-  // 答一道题：回车把这一题的答话记下并走到下一题，最后一题答完才把整份答复交回去（D107）。
-  // 空着回车也往前走：那一题在宿主那里记成「没有回答」，模型读到的就是没答，不是界面替它编的一个答案。
+  // 每次回车提交当前问题并进入下一题；完成最后一题后统一发送全部答案。
+  // 空回车表示未回答该题，由 Host 按未答记录，不由界面补造答案。
   const answerQuery = useCallback((text: string) => {
     const head = query;
     if (head === null) return;
@@ -1477,7 +1466,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   }, [client, push, query, resetDraft, t]);
 
   const send = useCallback((text: string) => {
-    // 答题这一格开着时回车交的是这一题的答话，不是新的一轮；斜杠开头的仍按命令走，人还能用 /status 与 /queue（D107）。
+    // 问题面板打开时，回车提交当前答案；斜杠命令仍可运行，例如 `/status` 和 `/queue`。
     if (query !== null && !text.trim().startsWith('/')) {
       answerQuery(text);
       return;
@@ -1491,7 +1480,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     setHistoryAt(-1);
     setPick(0);
     setDismissedAt(null);
-    // 跑着的那一轮里，要交给模型的那一句进队列：这一轮结束后按先后发出，回车不会把那一句丢掉。
+    // 轮次运行期间的消息加入队列，结束后按顺序发送。
     if (route.kind === 'run' && running) {
       setQueue((current) => [...current, route.text]);
       return;
@@ -1510,8 +1499,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     void submit(route.text);
   }, [answerQuery, locale, push, query, remember, runCommand, running, submit, t]);
 
-  // 本轮结束后把队列里的第一条发出去：一次只发一条，剩下的接着排；被打断也算这一轮结束（D20）。
-  // 人按下取消之后队列是停着的：那时不自动发，剩下的每一句都要等一次显式的继续（方案 5.2）。
+  // 轮次结束后每次发送一条队列消息；取消后队列保持暂停，需用户明确继续。
   useEffect(() => {
     if (running || queuePaused || queue.length === 0) return;
     const [next, ...rest] = queue;
@@ -1519,7 +1507,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     void submit(next);
   }, [queue, queuePaused, running, submit]);
 
-  // 打断这一轮这一处动作有两个入口（审批框上的 Esc 与平时的 Esc），停下队列这件事只在一份说明里做。
+  // 审批面板和普通输入共用同一取消处理，统一暂停队列。
   const cancelRound = useCallback(() => {
     if (queue.length > 0) {
       setQueuePaused(true);
@@ -1528,7 +1516,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     void client.request('run.cancel', { sessionId }).catch((error) => push({ kind: 'error', text: error.code ?? 'run_cancel_failed' }));
   }, [client, push, queue.length, sessionId, t]);
 
-  // 候选每次从当前草稿算出来：草稿改一个字清单就跟着变，不需要再维护一份状态（D81）。
+  // 候选由当前草稿计算，输入变化后自动更新。
   const templates = status?.templates ?? [];
   const picks = panel !== null || dismissedAt === draft || search !== null || detail !== null || sessionPicker !== null || ask !== null || query !== null ? [] : candidatesOf(draft, templates, undefined, locale);
   const chosen = picks.length === 0 ? 0 : Math.min(pick, picks.length - 1);
@@ -1540,7 +1528,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const approvalLines = useMemo(() => ask === null ? [] : wrapLine(ask.content, Math.max(1, geometry.columns - 6)), [ask?.content, geometry.columns]);
   const approvalHeight = Math.max(1, geometry.rows - 12);
   const approvalView = viewportPosition(approvalCursor, approvalLines.length, approvalHeight);
-  // 答题那一格要画的几样：题面、已经走过的几道各自记成了什么、这是不是最后一道（D107）。
+  // 问题面板显示题目、已提交答案和当前题是否为最后一题。
   const asking = query === null ? null : {
     count: query.questions.length,
     current: query.questions[query.at],
@@ -1603,8 +1591,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       }
       return;
     }
-    // 答题那一格：← 在草稿空着时退回上一题，把那一题刚才写的原文放回草稿里改；改完再回车，交出去的是改过的那一份。
-    // 草稿非空时这一记仍归光标移动——答题要写得了一句话，退回上一题是偶尔做的事（D107）。
+    // 草稿为空时，左方向键返回上一题并恢复原答案供修改。
+    // 草稿非空时保留普通光标移动行为。
     if (query !== null && draft === '' && hit('question-back', input, key)) {
       const back = Math.max(0, query.at - 1);
       resetDraft(query.picked[query.questions[back].id]?.raw ?? '');
@@ -1619,7 +1607,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         });
         return;
       }
-      // 带着 Shift 的那两记先落进「扩选」那两条，移动本身跟着走：选中的起点就是那一次按下落下的位置。
+      // Shift+左右方向键扩展选择范围，光标按对应方向移动。
       const marked = hit('mark-up', input, key) || hit('mark-down', input, key);
       const up = hit('view-up', input, key) || hit('mark-up', input, key);
       const down = hit('view-down', input, key) || hit('mark-down', input, key);
@@ -1647,8 +1635,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       }
       if (input !== '' && !key.ctrl && !key.meta) setSessionPicker(null);
     }
-    // Ctrl+G 把草稿交给外面那一份编辑器：这一段文本走一份临时文件，回来的是它写回的那一份。
-    // 让出终端这件事归 Ink（raw mode 与重画都在它手里），否则编辑器与界面抢同一把输入。
+    // Ctrl+G 使用外部编辑器修改草稿，并通过临时文件传递文本。
+    // 由 Ink 暂停 raw mode 并恢复终端，避免编辑器与界面争用输入。
     if (hit('editor', input, key)) {
       if (info.editor === undefined || info.editor === '') {
         push({ kind: 'error', text: t('请先设置 VISUAL 或 EDITOR 环境变量', 'Set the VISUAL or EDITOR environment variable first') });
@@ -1670,7 +1658,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     if (hit('search-open', input, key) && search === null) {
-      // 起一次反查：查询串从空开始，接着打的每个字符都往它后面加。
+      // 开始反向搜索，查询文本初始为空，后续输入逐字符追加。
       setSearch({ query: '', at: 0 });
       return;
     }
@@ -1699,7 +1687,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         return;
       }
       if (hit('search-back', input, key) || hit('search-back-alt', input, key)) {
-        // 查询串空着时再按退格就是退出反查，不是把空格当内容删。
+        // 查询文本为空时按退格退出搜索，而不是删除内容。
         setSearch(search.query === '' ? null : { query: search.query.slice(0, -1), at: 0 });
         return;
       }
@@ -1708,8 +1696,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       }
       return;
     }
-    // 路径候选开着时这几记按键归清单：Enter 是选中那一条，不是发送（方案 5.3「选中候选不能触发发送」）。
-    // 一条候选都没有时 Enter 照旧发这一句——那时清单上说的是「没有对得上的文件」，不该把发送挡住。
+    // 路径候选打开且有结果时，Enter 用于选择，不发送消息。
+    // 没有候选时 Enter 仍发送当前输入。
     if (mention !== null && ask === null && query === null && detail === null && sessionPicker === null && search === null) {
       if (hit('path-close', input, key)) {
         setHiddenMention(mention.text);
@@ -1717,7 +1705,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         return;
       }
       const picking = hit('pick-path', input, key) || hit('pick-path-alt', input, key);
-      // 那一次查询还没回来时 Enter 什么都不做：既不是选一条旧的候选，也不是把这一句发出去（方案 5.3）。
+      // 候选查询未完成时，Enter 不选择旧结果，也不发送消息。
       if (mention.stopped === 'pending' && picking) return;
       if (mention.paths.length > 0 && picking) {
         const picked = mention.paths[Math.min(mention.chosen, mention.paths.length - 1)];
@@ -1737,7 +1725,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     if (picks.length > 0) {
       if (hit('complete', input, key)) {
         const picked = picks[chosen];
-        // 带参数提示的那一条补完留一个空格，光标落在要写参数的地方；不带的补完就能直接发。
+        // 命令有参数提示时，补全后追加空格并将光标留在参数位置。
         const completed = `/${picked.name}${picked.hint === '' ? '' : ' '}`;
         setDraft(completed);
         setCaret(completed.length);
@@ -1785,7 +1773,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     if (hit('undo-draft', input, key) || hit('redo-draft', input, key)) {
-      // 退回去与再退回来：两侧各留一份栈，Ctrl+Z 退过头还能用 Ctrl+Y 拿回来——多退一步不是真的把那句草稿丢掉。
+      // 撤销和重做使用独立历史栈，允许恢复已撤销的草稿内容。
       const cell = undo.current;
       const back = hit('undo-draft', input, key);
       const target = (back ? cell.stack : cell.future).at(-1);
@@ -1805,7 +1793,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     if ((hit('queue-recall', input, key) || hit('queue-recall-alt', input, key)) && draft === '' && queue.length > 0) {
-      // 草稿已经空着时按退格，最后排进来的那一条收回草稿里：打错的那一句要能改，不必重新打一遍。
+      // 草稿为空时按退格，将队列最后一条收回草稿供修改。
       setQueue((current) => current.slice(0, -1));
       const last = queue[queue.length - 1];
       setDraft(last);
@@ -1819,18 +1807,17 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         setCaret(caret + 1);
         return;
       }
-      // 空着回车本来什么都不发；答题那一格开着时它说的是「这一道不答」，要往前走下一道（D107）。
+      // 问题面板打开时，空回车表示跳过当前题；普通输入状态下不发送空消息。
       if (draft.trim() !== '' || query !== null) send(draft);
       return;
     }
     const edited = editDraft(draft, caret, input.replace(/\r\n?/g, '\n'), key);
     setDraft(edited.draft);
     setCaret(edited.caret);
-  // 没有真终端时不开这一路：Ink 在拿不到 raw mode 的输入上是报错而不是降级（检查里就传 interactive: false）。
+  // 仅在交互式终端中启动 Ink；非交互终端使用命令行模式。
   }, { isActive: interactive });
 
-  // 整段粘贴走 Ink 的另一条通道：这一条开着时它替终端打上 bracketed paste，粘进来的那一段是一整串文本，
-  // 不会被拆成一串按键——所以粘贴里的换行不会发一轮，审批框上的 `y` 也不会被粘贴按下去（方案 5.1、5.4）。
+  // 通过 Ink 的 bracketed paste 通道一次接收整段粘贴内容，不将换行解释为发送或审批按键。
   usePaste((text) => {
     if (panel !== null) return;
     const inserted = editDraft(draft, caret, text.replace(/\r\n?/g, '\n'), {});
@@ -1842,8 +1829,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const foldedLive = foldText(live.reasoning, expanded, 1);
 
   return h(Fragment, null,
-    // 一换会话就重画整份：`Static` 只补索引往后新增的行，接上来的那一份记录比当前这一份短时，
-    // 不加这个 key 就一条都画不出来（第 44 步）。会话 id 正是这一串行的归属，拿它当 key 不用另记一个计数。
+    // 会话切换时用会话 ID 重建静态转录，避免新记录短于旧记录时沿用旧行索引。
     h(Static<TranscriptItem>, { key: sessionId, items: sessionId === firstSessionId ? [{ kind: 'welcome', text: '' }, ...rows] : rows, children: (row, index) => row.kind === 'welcome'
       ? h(Box, { key: index, flexDirection: 'column', alignItems: 'center', marginY: 1 },
           h(Text, { bold: true, color: 'green' }, `❧  ligule  v${VERSION}`),

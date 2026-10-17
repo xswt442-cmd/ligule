@@ -1,4 +1,4 @@
-// 旧记录整理（D110）：完整保留有效记录与附属文件，原件不动，重复运行只比对。
+// 迁移旧记录时保留有效记录、附属文件和原件；重复执行只比较，不重复写入。
 import { constants, createReadStream } from 'node:fs';
 import { copyFile, link, lstat, mkdir, open, readdir, readFile, rm, stat, utimes } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';

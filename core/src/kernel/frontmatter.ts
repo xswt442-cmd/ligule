@@ -1,4 +1,4 @@
-// 头部与正文的分界只切一次：技能与提示模板用同一种 YAML frontmatter（D49），
+// 技能和提示模板共用 YAML frontmatter 解析；只分割一次头部与正文。
 // 各自的字段与上限由各自的 schema 判，这里只管「哪一段是头部」。
 const OPENING = /^---[ \t]*\r?\n/;
 const CLOSING = /^---[ \t]*$/m;

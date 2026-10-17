@@ -5,7 +5,7 @@ export interface ModelRequest {
   readonly messages: unknown[];
 }
 
-// ponytail: 字节数除以四只提供粗估；端点用量校准整个请求，语言偏差仍需真实使用数据核对。
+// 按字节数除以四得到粗略 Token 估算；具体偏差由服务端用量持续校准。
 export function estimateTokens(value: unknown): number {
   return Math.ceil(Buffer.byteLength(JSON.stringify(value ?? ''), 'utf8') / 4);
 }

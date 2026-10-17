@@ -1,25 +1,24 @@
-// 桌面的键位层：一记按键落的是哪一个动作，与界面说出来的一串字，读的是同一份表。
-// 动作名是稳定标识；个人覆盖换掉的是那一个动作的键，动作名不动（方案 6.1 已定的那一条）。
-// 按键表与画面上的说明读同一份东西：提示写着 Ctrl+K 而实际落下的是另一记键，这种不一致在这一层里进不来。
+// 按键到动作的映射和界面显示说明共用同一份绑定表。
+// 动作名称保持稳定，用户覆盖只修改对应按键。
+// 这样可以确保提示中的按键与实际触发的动作一致。
 
 export type KeyAction = 'palette' | 'sidebar' | 'copy-answer' | 'interrupt'
   | 'send' | 'send-alt' | 'newline' | 'history-older' | 'history-newer'
   | 'pick-candidate' | 'complete-candidate' | 'candidate-older' | 'candidate-newer' | 'hide-candidate';
 
-// 视图那一格说的是一记键在哪个范围里落。同一个范围里两记键撞在一起是冲突；
-// 不同范围共用一记键（Enter 在输入坞是发送、在候选清单里是选中）不算，但要说清各自落在哪儿。
+// `view` 指定按键作用范围。同一范围内的按键冲突；不同范围可以复用按键，例如输入区和候选列表都使用 Enter。
 export type KeyView = '窗口' | '输入坞' | '候选清单';
 
 export type KeyEvent = { key: string; ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean; altKey?: boolean };
 
 export type Binding = { readonly spec: string; readonly view: KeyView; readonly label: string };
 
-// 修饰键的先后固定写在这一处：认键与说键都按这一种形状，换键的人照同一串拼。
+// 修饰键顺序固定，规范化和显示都使用同一顺序。
 const MODIFIERS = ['ctrl', 'shift', 'alt', 'meta'] as const;
-// 光按住修饰键时浏览器交回的是那一个键自己的名字（`Control`、`Meta`），它不是一记能用光自己的绑定。
+// 单独按下 `Control` 或 `Meta` 等修饰键不构成有效绑定。
 const BARE_MODIFIERS = ['control', 'shift', 'alt', 'meta'];
 
-// 一记按键在界面上的写法：Ctrl+Shift+C、Enter、↑。
+// 按键的界面显示格式，例如 Ctrl+Shift+C、Enter 和方向键。
 const KEY_NAMES: Readonly<Record<string, string>> = {
   enter: 'Enter', escape: 'Esc', tab: 'Tab', backspace: 'Backspace', delete: 'Delete',
   arrowup: '↑', arrowdown: '↓', arrowleft: '←', arrowright: '→',
@@ -43,7 +42,7 @@ export const KEYMAP: Readonly<Record<KeyAction, Binding>> = {
   'hide-candidate': { spec: 'escape', view: '候选清单', label: '收起这一个词的候选' },
 };
 
-/** 一记按键的规范写法（`ctrl+shift+c`）换成界面上的那一串（`Ctrl+Shift+C`）。读不懂的写法交回原样。 */
+/** 将规范按键名称（如 `ctrl+shift+c`）转换为界面格式（如 `Ctrl+Shift+C`）；无法识别时原样返回。 */
 export function formatKeys(spec: string): string {
   const parts = spec.trim().toLowerCase().split('+');
   if (parts.length === 0 || parts.some((part) => part === '')) return spec;
@@ -56,7 +55,7 @@ export function formatKeys(spec: string): string {
   return [...head, tail].join('+');
 }
 
-/** 这一记按键落的是哪一个动作。`view` 只收那一个范围里的绑定，所以候选清单开着时 Enter 认成选中而不是发送。 */
+/** 根据按键和作用范围查找动作；候选列表打开时 Enter 对应选择，不对应发送。 */
 export function actionOf(event: KeyEvent, view: KeyView, bindings: Record<KeyAction, string> = CURRENT): KeyAction | null {
   const typed = specOf(event);
   if (typed === null) return null;
@@ -66,7 +65,7 @@ export function actionOf(event: KeyEvent, view: KeyView, bindings: Record<KeyAct
   return null;
 }
 
-/** 把一记按键读成规范写法：修饰键按固定先后排，最后一格是键名。字母不分大小写，Cmd 与 Ctrl 认成同一记修饰键。 */
+/** 将按键转换为规范写法：修饰键使用固定顺序，字母不区分大小写，Cmd 与 Ctrl 统一处理。 */
 export function specOf(event: KeyEvent): string | null {
   const named = event.key.toLowerCase();
   if (BARE_MODIFIERS.includes(named)) return null;
@@ -82,10 +81,10 @@ export function defaultSpecs(): Record<KeyAction, string> {
   return Object.fromEntries(Object.entries(KEYMAP).map(([action, binding]) => [action, binding.spec])) as Record<KeyAction, string>;
 }
 
-// 当前那一份：个人覆盖换的是这一格的内容，按键落点与画面说法读的都是它。
+// 当前生效的按键绑定；实际动作和界面说明都从此表读取。
 export const CURRENT = defaultSpecs();
 
-/** 一串人写的键名（`Ctrl+Shift+K`）读成规范写法；认不出来交回 null，不猜。 */
+/** 将用户输入的按键名称转换为规范格式；无法识别时返回 null。 */
 export function parseSpec(text: string): string | null {
   const parts = text.trim().toLowerCase().split('+').map((part) => part.trim());
   if (parts.some((part) => part === '')) return null;
@@ -97,7 +96,7 @@ export function parseSpec(text: string): string | null {
   return [...mods, key].join('+');
 }
 
-/** 换上那一份覆盖：先整份退回默认再落有效的那一些，表里没有的名字与读不懂的键名一条条报出来。 */
+/** 应用用户覆盖前恢复默认绑定，再应用有效项，并报告未知动作或无效按键。 */
 export function loadBindings(overrides: Record<string, string>): { readonly applied: number; readonly refused: string[] } {
   const defaults = defaultSpecs();
   for (const [action, spec] of Object.entries(defaults)) CURRENT[action as KeyAction] = spec;
@@ -114,7 +113,7 @@ export function loadBindings(overrides: Record<string, string>): { readonly appl
   return { applied, refused };
 }
 
-/** 同一个范围里两记键撞在一起时交回那两动作的名字；不同范围共用一记键不算撞。 */
+/** 返回同一作用范围内按键冲突的动作；不同范围复用按键不算冲突。 */
 export function conflictsIn(view: KeyView, bindings: Record<KeyAction, string>): [KeyAction, KeyAction][] {
   const seen = new Map<string, KeyAction>();
   const found: [KeyAction, KeyAction][] = [];
@@ -128,13 +127,13 @@ export function conflictsIn(view: KeyView, bindings: Record<KeyAction, string>):
   return found;
 }
 
-// 输入法还在拼的那一段：这一记按键属于候选词那一层，不是界面要听的那一条。
-// `isComposing` 是标准的那一格，229 是各浏览器在组合期间一贯交回的 keyCode。
+// 输入法组合期间的按键由输入法处理，不交给界面快捷键。
+// 浏览器通过 `isComposing` 或兼容用的 keyCode 229 标记组合状态。
 export function isComposing(event: { isComposing?: boolean; keyCode?: number }): boolean {
   return event.isComposing === true || event.keyCode === 229;
 }
 
-// 正在录一记新键时，窗口那一层不接任何全局键：那一记按键属于「要换成什么」，不属于动作。
+// 录制快捷键时暂停窗口级快捷操作，避免录入的按键同时触发动作。
 let capturing = false;
 export function setCapturing(on: boolean): void {
   capturing = on;

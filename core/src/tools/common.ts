@@ -1,5 +1,5 @@
-// 文件工具的共享部分：路径的书写形式、截断标记、按路径序遍历边界、存在与类型判断。
-// 遍历顺序与两条检索后端的排序规则是同一套：都按路径序交回，同一输入两次运行得到同一份结果。
+// 文件工具共用路径处理、截断标记、边界遍历、存在性和类型检查。
+// 目录遍历按路径排序，确保重复查询返回稳定顺序。
 import { readFile, readdir, stat } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import { join, relative, sep } from 'node:path';
@@ -13,11 +13,10 @@ export function marker(detail: string): string {
   return `\n[${detail}]`;
 }
 
-// 深度优先遍历边界内的文件，交出相对边界、用斜杠书写的路径。
-// 排序把目录名后面补一个斜杠再比，于是文件与子目录按路径的字典序交错出现：
-// `src.txt` 排在 `src/app.js` 前面，与外部后端按路径排序那一条一样。
-// 顺序固定下来，同一份文件树两次扫出来的结果与截断时留下的那一截才相同。
-// 跳过的目录由调用方给，遍历只负责按上面的顺序走。
+// 深度优先遍历边界内的文件，并返回相对路径和正斜杠分隔符。
+// 目录路径排序时补上尾斜杠，使文件和子目录按路径字典序交错排列。
+// 稳定顺序也确保结果截断时每次保留相同文件。
+// 排除目录由调用方提供。
 export async function* walkFiles(root: string, skipped: readonly string[], directory = root): AsyncGenerator<string> {
   const entries = await readdir(directory, { withFileTypes: true });
   entries.sort((left, right) => (orderKey(left) < orderKey(right) ? -1 : 1));
@@ -66,7 +65,7 @@ export async function existsOrFails(path: string): Promise<boolean> {
   }
 }
 
-// 目录还是文件，两种工具都按这个分派；不存在时给一个可以分支的码，而不是让 readdir 与 readFile 抛原始错误。
+// 统一检查目标是文件还是目录；路径不存在时返回稳定错误码，不传递原始 `readdir` 或 `readFile` 错误。
 export async function kindOfTarget(path: string): Promise<'directory' | 'file'> {
   try {
     return (await stat(path)).isDirectory() ? 'directory' : 'file';

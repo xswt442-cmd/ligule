@@ -1,7 +1,6 @@
-// 提示模板注册表（D45、D54）：两处目录——`<项目根>/.ligule/prompts/` 与 `~/.ligule/prompts/`，项目层优先。
-// 命令名从相对路径推出来（`git/release/prepare.md` 就是 `/git:release:prepare`），头部不再写 `name`，
-// 免得路径与字段成为两份真相。目录要递归：嵌套本身就是人组织这些文件的方式。
-// 展开只发生在 Host（D54）：命令行、终端界面与桌面前端因此看到的是同一份展开结果与同一条记录。
+// 提示模板从用户目录和项目目录加载，项目模板优先。
+// 命令名称由相对路径生成，例如 `git/release/prepare.md` 对应 `/git:release:prepare`。
+// 目录递归扫描；模板只由 Host 展开，确保 CLI、TUI 和 Desktop 使用相同结果。
 import { createHash } from 'node:crypto';
 import { readFile, readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -13,18 +12,18 @@ import { KernelError } from './error.js';
 
 export const PROMPTS_DIRECTORY = 'prompts';
 const TEMPLATE_SUFFIX = '.md';
-// 目录名与文件名一起构成命令名，所以每一段都要能被人敲出来：小写字母、数字与单个连字符（与技能名同一档）。
+// 目录和文件名共同构成命令名称；每段只能使用小写字母、数字和单个连字符。
 const NAME_SEGMENT = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const DESCRIPTION_LIMIT = 1024;
 const SKIPPED_DIRECTORIES = ['node_modules', '.git'];
-// 第一版只认这两种占位（D54）：全部参数与位置参数。默认值与切片等真实模板需要时再补。
-// 同一条写法用两遍：一次替换，一次判断模板里到底有没有占位，所以只留一份模式。
+// 支持完整参数和位置参数两种占位符。
+// 同一套正则用于占位符替换和检测。
 const PLACEHOLDER_SOURCE = '\\$ARGUMENTS|\\$([1-9])(?![0-9])';
 const PLACEHOLDER = new RegExp(PLACEHOLDER_SOURCE, 'g');
 const HAS_PLACEHOLDER = new RegExp(PLACEHOLDER_SOURCE);
 
 export interface TemplateEntry {
-  // 命令名不含前导斜杠：斜杠是界面与用户之间的那一层写法，注册表里存的是名字本身。
+  // 注册表保存不带前导斜杠的命令名；斜杠只用于用户输入。
   command: string;
   description: string;
   hint: string | undefined;
@@ -50,7 +49,7 @@ export interface ExpandedTemplate {
   digest: string;
 }
 
-// 先后两条与模式文件同一条规则（D36、D43）：靠近仓库的那一份胜出。
+// 加载顺序与模式文件一致：项目模板优先于用户模板。
 export function templateDirectories(projectRoot: string, userHome = homedir()): { layer: TemplateEntry['layer']; directory: string }[] {
   if (typeof projectRoot !== 'string' || projectRoot === '') throw new KernelError('template_project_root_required');
   return [
@@ -68,7 +67,7 @@ async function markdownFiles(directory: string, found: string[] = []): Promise<s
   try {
     entries = await readdir(directory, { withFileTypes: true });
   } catch (error) {
-    // 两处目录本来就可以都没有：少一处不是错误，其余读失败才是。
+    // 模板目录可以不存在；其他读取错误应直接返回。
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return found;
     throw new KernelError('template_directory_read_failed', { cause: error, detail: directory });
   }
@@ -114,7 +113,7 @@ export async function discoverTemplates(directories: { layer: TemplateEntry['lay
     for (const file of await markdownFiles(directory)) {
       const command = commandOf(directory, file);
       const segments = command.split(':');
-      // 命令名要能原样被打出来：段名里有一个不认的字符，这个模板就进不了调用那一条路。
+      // 命令名称必须能由用户原样输入；路径段含非法字符时拒绝该模板。
       if (!segments.every((segment) => NAME_SEGMENT.test(segment))) {
         diagnostics.push({ code: 'template_command_invalid', detail: `${command} from ${file} (segments are lowercase letters, digits and single hyphens)`, path: file });
         continue;
@@ -148,8 +147,7 @@ export async function discoverTemplates(directories: { layer: TemplateEntry['lay
   };
 }
 
-// 只有形状是「合法命令名」的那一段才算调用：`/etc/hosts 看一下` 里的斜杠不是命令，
-// 而 `/revew foo` 这种拼错的形状必须说一声，静默把原文交给模型只会让人以为模板没生效。
+// 只有符合命令名格式的斜杠前缀才作为模板调用；未知或拼错的命令需明确报错。
 const INVOCATION = /^\/([a-z0-9]+(?:-[a-z0-9]+)*(?::[a-z0-9]+(?:-[a-z0-9]+)*)*)(?=\s|$)/;
 
 export function parseInvocation(text: string): { command: string; arguments: string } | undefined {
@@ -171,8 +169,7 @@ export function findTemplate(registry: TemplateRegistry, command: string): Templ
   return found;
 }
 
-// 参数按 shell 那一套引号切。
-// 引号不成对就报出去：静默把半截引号当成内容，展开出来的是用户没说的那句话。
+// 使用 shell 引号规则解析参数；引号不配对时返回错误，避免改变用户输入含义。
 export function splitArguments(text: string): string[] {
   const tokens: string[] = [];
   let current = '';
@@ -212,10 +209,10 @@ export async function expandTemplate(template: TemplateEntry, argumentText: stri
     throw new KernelError('template_file_read_failed', { cause: error, detail: template.file });
   }
   const body = splitFrontmatter(bytes.toString('utf8')).body;
-  // 一次扫完两种占位：先替 `$ARGUMENTS` 再替 `$1` 的话，参数里带一个 `$1` 就会被第二次替换吃掉。
+  // 同时替换两类占位符，避免参数中的 `$1` 被第二次替换。
   const text = body.replace(PLACEHOLDER, (match, digit: string | undefined) =>
     (digit === undefined ? args.join(' ') : args[Number(digit) - 1] ?? ''));
-  // 模板一个占位都没写而人带了参数时，把参数原文接在正文之后：那几句话是用户输入的，丢掉等于没收到。
+  // 模板没有占位符但用户提供了参数时，将参数原文追加到模板正文之后。
   const appended = argumentText !== '' && !HAS_PLACEHOLDER.test(body);
   return {
     text: appended ? `${text.trimEnd()}\n\n${argumentText}\n` : text,

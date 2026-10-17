@@ -43,7 +43,7 @@ export async function adoptSessionMode({
         }
         return found;
       });
-  // Install the new restriction while the old one is active; a rejected mode must not expose the full tool set.
+  // 在旧模式仍生效时安装新限制；新模式被拒绝时不能短暂开放全部工具。
   const applied = applyMode(kernel, file);
   const fragmentUndo: (() => void)[] = [];
   try {
@@ -70,7 +70,7 @@ export async function adoptSessionMode({
       applied.undo();
     },
   });
-  // Reattaching an unchanged mode must not alter the session log; its last record is the durable selection fact.
+  // 重新应用相同模式时不修改会话记录；最后一条模式事件是持久选择事实。
   const last = (await session.read()).filter((event) => event.kind === 'mode').at(-1);
   const lastTools = Array.isArray(last?.tools) && last.tools.every((tool): tool is string => typeof tool === 'string')
     ? last.tools

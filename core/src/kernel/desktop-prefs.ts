@@ -8,7 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { dataRoot } from './config-file.js';
 import { KernelError, KernelRuntimeError } from './error.js';
 
-/** 一份偏好文档的字节上限。 */
+/** 偏好文档的最大字节数。 */
 export const DESKTOP_PREFS_LIMIT_BYTES = 1024 * 1024;
 
 const PREFS_LOCK_STALE_MS = 10_000;
@@ -58,18 +58,18 @@ async function readPrefsFile(path: string): Promise<{ settings: Record<string, u
   };
 }
 
-/** 读偏好文档：文件不存在时返回空对象；坏文档与超限文档明确报错。 */
+/** 读取偏好文档；文件不存在时返回空对象，格式错误或超限时返回错误。 */
 export async function loadPrefs(path = prefsPathOf()): Promise<Record<string, unknown>> {
   return (await readPrefsFile(resolve(path))).settings;
 }
 
-/** 读取偏好与其字节版本；缺失文件的版本为空串。 */
+/** 同时读取偏好文档和内容版本；文件缺失时版本为空字符串。 */
 export async function readPrefs(path = prefsPathOf()): Promise<{ settings: Record<string, unknown>; version: string }> {
   const { settings, version } = await readPrefsFile(resolve(path));
   return { settings, version };
 }
 
-/** 界面交来的那一份必须是能解析的对象：坏东西不进文件。 */
+/** 校验界面提交的值是可解析对象后才写入文件。 */
 export function parsePrefsJson(json: string): Record<string, unknown> {
   return parsePrefsBytes(Buffer.from(json, 'utf8'));
 }
@@ -114,7 +114,7 @@ async function acquirePrefsLock(path: string): Promise<PrefsLock> {
   };
 }
 
-// 进程内排队避免本进程同时写同一份文档；文件锁再保护其他 Host 进程。
+// 进程内串行化写入，并使用文件锁协调其他 Host 进程。
 const pendingSaves = new Map<string, Promise<{ settings: Record<string, unknown>; version: string }>>();
 
 export async function savePrefs(
@@ -139,7 +139,7 @@ export async function savePrefs(
       temporary = `${target}.${randomUUID()}.tmp`;
       await writeFile(temporary, bytes, { flag: 'wx', mode: 0o600 });
       await chmod(temporary, before.mode ?? 0o600);
-      // Windows 的短暂文件占用会阻止替换；等待期间继续持锁并核对文件版本。
+      // Windows 文件暂时被占用时，等待期间继续持锁并重新校验版本。
       for (let attempt = 0; ; attempt += 1) {
         lock.assertOwned();
         if ((await readPrefsFile(target)).version !== before.version) {

@@ -6,7 +6,7 @@ import { DEFAULT_MODE, modeDirectories } from '../kernel/modes.js';
 import { hostProviderFromConfig } from './provider.js';
 import type { createHost, EnvironmentSeed } from './host.js';
 
-/** Read all project resources from the same configuration-layer snapshot. */
+/** 从同一份配置层快照读取项目资源。 */
 export async function loadProjectConfig(projectRoot: string, flags: string[] = []) {
   const layers = await loadConfigLayers({ projectRoot, flags });
   const user = { boundary: projectRoot, ...layers.user };

@@ -1,5 +1,5 @@
-// 终端界面的草稿与排着的那几句（D81 边界二、方案 5.1）：跨退出留住的一小份文件，不进会话记录也不进内核。
-// 一行一份会话：`{ projectRoot, sessionId, draft, queued }`，同一份会话再写一次就换掉旧的那一行，最新的排在最后。
+// TUI 草稿和队列保存在独立文件中，跨退出保留，不写入会话记录。
+// 每行对应一个 `{ projectRoot, sessionId, draft, queued }` 状态；更新时替换旧行并移到末尾。
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -8,7 +8,7 @@ import { dataRoot } from '@ligule/core/kernel/config-file.js';
 
 export type SavedInput = { projectRoot: string; sessionId: string; draft: string; queued: string[] };
 
-/** 最多留多少份会话的：再老的会话人也不再回去接着写了。 */
+/** 限制可持久保存的会话输入状态数量。 */
 export const INPUT_LIMIT = 50;
 const DRAFT_LIMIT = 8000;
 const QUEUE_LIMIT = 20;
@@ -17,7 +17,7 @@ export function inputPathOf(userHome = homedir()): string {
   return join(dataRoot(userHome), 'tui-input.jsonl');
 }
 
-// 读不懂的那一行跳过：这一份是界面上的方便之物，不是事实源，坏一行不该让整份会话都开不了。
+// 忽略格式无效的单行输入状态，不让辅助数据损坏阻止会话打开。
 export function parseInputs(bytes: string): SavedInput[] {
   const found: SavedInput[] = [];
   for (const line of bytes.split('\n')) {
@@ -49,11 +49,11 @@ async function load(path: string): Promise<SavedInput[]> {
   }
 }
 
-/** 那一份会话留下的那一句草稿与排着的几句；没留过就是空的。 */
+/** 返回会话的草稿和待发送队列；未保存时返回空值。 */
 export async function readInput(path: string, projectRoot: string, sessionId: string): Promise<SavedInput> {
   const entries = await load(path);
   const empty = { projectRoot, sessionId, draft: '', queued: [] as string[] };
-  // 同 id 在不同项目根下是两份会话：两格都对上才算这一份的。
+  // 同一 ID 可能属于不同项目，必须同时匹配项目根和会话 ID。
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
     if (entry === undefined) continue;
@@ -64,13 +64,12 @@ export async function readInput(path: string, projectRoot: string, sessionId: st
 
 const pendingWrites = new Map<string, Promise<void>>();
 
-/** 整份重写而不是追加：同一份会话只留最新的一行，文件也不跟着会话数一直涨。
- * ponytail: 一次保存重写 50 行以内的小文件，换的是「崩在半路也不留下半行」——先写临时文件再改名。 */
+/** 整体重写并为每个会话只保留一行；先写临时文件再重命名，避免留下半行。 */
 export async function rememberInput(path: string, entry: SavedInput): Promise<void> {
   const previous = pendingWrites.get(path) ?? Promise.resolve();
   const current = previous.catch(() => {}).then(async () => {
     const kept = (await load(path)).filter((item) => !(item.sessionId === entry.sessionId && item.projectRoot === entry.projectRoot));
-    // 两句都没了就不留这一行：那一格本来就是为了留住没发出去的话。
+    // 草稿和队列都为空时删除该会话的状态行。
     const next = entry.draft === '' && entry.queued.length === 0 ? kept : [...kept, entry].slice(-INPUT_LIMIT);
     if (next.length === 0) {
       await rm(path, { force: true });

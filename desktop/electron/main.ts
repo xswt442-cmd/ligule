@@ -36,7 +36,7 @@ function requestQuit(): void {
     emit('ligule:quit-requested');
     return;
   }
-  // 界面进程不可用时，系统对话框仍允许用户确认中断后台任务。
+  // Renderer 不可用时仍显示系统对话框，让用户确认是否中断后台任务。
   if (quitDialogOpen) return;
   quitDialogOpen = true;
   void dialog.showMessageBox({

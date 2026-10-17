@@ -1,6 +1,5 @@
-// Host 进程的主体（D30）：会话、循环、工具与权限的真实状态都在这一侧，界面客户端只是协议的另一个端点。
-// 加这一层不改动内核任何一行：要往外发的每一件事都有现成的注入口——
-// 提供方与判定链由构造参数交进来，落盘的事件从会话记录那一条路上过一遍。
+// Host 管理会话、Agent 循环、工具和策略状态；客户端通过协议与它通信。
+// 模型提供方与策略由外部注入，会话事件通过会话记录接口持久化。
 import { randomUUID } from 'node:crypto';
 import type { Readable, Writable } from 'node:stream';
 import { access, readFile, realpath, stat } from 'node:fs/promises';
@@ -242,7 +241,7 @@ function modelSelectionOf(model: Record<string, unknown>): ModelSelection | unde
     : undefined;
 }
 
-// 会话名字的上限：列表那一行还要放得下时间与条数，名字过长就该换一份短的（实现顺序第 75 步）。
+// 会话名称需要为列表中的时间和条目数留出显示空间。
 export const SESSION_NAME_MAX = 120;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -317,9 +316,8 @@ function exportRecordOf(event: SessionEvent): ExportRecord | undefined {
   return record;
 }
 
-// 会话记录落在哪儿由 `core/src/session/list.js` 那一处说:同一件事在两处各写一次,列表与宿主就会读到两个目录(D73)。
-// 循环的上限来自配置文件，形状在这里就查：只写其中一项时另一项照默认值补，
-// 缺值传下去会让「迭代上限」变成 undefined，那一轮一次都不跑，报出来的码还说不出为什么。
+// 通过 Session 模块解析记录目录，确保 Host 与会话列表使用同一位置。
+// 缺少循环上限时补入默认值，避免未定义的上限让循环无法执行。
 function loopLimitsOf(config: HostConfigSnapshot): LoopLimits {
   const limits = { ...DEFAULT_LOOP_LIMITS, ...(isRecord(config.loop) ? config.loop : {}) };
   const positiveInteger = (value: unknown, key: 'iterations' | 'modelCalls'): number => {
@@ -334,10 +332,9 @@ function loopLimitsOf(config: HostConfigSnapshot): LoopLimits {
   };
 }
 
-// 压缩的两条线（D75、U43）：窗口优先取选中模型的声明值，否则取 limits.contextTokens；窗口是模型事实，不是策略参数。
-// 两处都没写就不启用（交回 undefined，宿主不给这一份会话挂压缩），写了但形状不对当场报出去，
-// 因为一条 NaN 的线会让每一次请求都算不出「超没超」，看上去是压缩从不触发。
-// 保留量还必须严格小于压力线，否则压完还是越线，而看不出来为什么一直在压（dsh 同一条约束）。
+// 优先采用所选模型声明的上下文窗口，其次采用配置的备用值；两者都未设置时关闭压缩。
+// 立即拒绝无效上限，因为非有限窗口无法用于计算上下文压力。
+// 保留预算必须小于压力阈值，压缩后才能将请求控制在阈值以内。
 export function compactionLimitsOf(config: HostConfigSnapshot, selectedContextTokens?: unknown) {
   const limits = limitsOf(config);
   const contextTokens = selectedContextTokens ?? limits.contextTokens;
@@ -366,9 +363,8 @@ export function compactionLimitsOf(config: HostConfigSnapshot, selectedContextTo
   };
 }
 
-// 流式接收期间把每一条事件抄一份送出去，交回给循环的那一份原样不动。
-// 抄的是转手而不是重搭一份：提供方声明的能力、模型名与换模型的路径都要留着看得见，
-// 而这一份会话的提供方会在整轮的边界上换一次（方案 7.3），抄成一份快照就会把后面那几轮固定在旧的端点上。
+// 将流式事件转发给客户端，同时把原事件交回循环。
+// 保留提供方能力和模型信息；每轮开始时解析当前提供方，使配置变更从下一轮生效。
 function observedProvider(provider: HostProvider, onDelta: (event: ProviderEvent) => void): HostProvider {
   return {
     get name() { return provider.name; },
@@ -387,9 +383,8 @@ function observedProvider(provider: HostProvider, onDelta: (event: ProviderEvent
   };
 }
 
-// 「这一轮用哪一份提供方」落在会话自己那一格上：三处消费者（主循环、压缩、派生执行体）都只调用 `stream`，
-// 所以这里交出的是一句转手——被调用时才去读当前那一份。换提供方因此只发生在整轮的边界上，
-// 一轮之内不会出现只换了主循环而别处仍打旧端点的那种事（方案 7.3 第二行）。
+// 主循环、压缩和派生执行都通过此包装器调用模型。
+// 调用时再解析提供方，确保同一轮使用同一配置，后续轮次可采用新配置。
 function currentProvider(read: () => HostProvider): HostProvider {
   return {
     get name() { return read().name; },
@@ -424,7 +419,7 @@ function compactionProgressProvider(provider: HostProvider, onProgress: (event: 
   };
 }
 
-// 落盘的每一条都抄一份送出去：记录里的事与客户端看见的事同源，客户端看见的就是已经写下来的。
+// 会话接口将事件写入记录后，再把它转发给客户端。
 function observedSession(session: SessionLog, onEvent: (event: SessionEvent) => void): SessionLog {
   return {
     ...session,
@@ -436,9 +431,9 @@ function observedSession(session: SessionLog, onEvent: (event: SessionEvent) => 
   };
 }
 
-// 界面能看到的配置由这一处拼出来（实现顺序第 67 步）。每一格要先是字符串，不是字符串就不交。
-// 地址只留协议、主机、端口与路径：用户名、密码、查询参数与片段常常装的就是凭据，不原样交回。
-// 地址解析不出来时也不猜，交回没有这一格，界面上说「读不出来或没写」。
+// 只从明确允许的字符串字段构造公开配置。
+// 删除 URL 中可能包含密钥的用户名、密码、查询参数和片段。
+// 无法解析 URL 时省略该字段，不猜测其内容。
 function shownText(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
@@ -464,20 +459,18 @@ export function shownConfigOf(config: ConfigSnapshot) {
   };
 }
 
-// modeName 与 modePaths 是一对：给了名字就要能给那三层目录，运行中换模式要用同一套查找（D41、D44）。
-// 扩展来源由装载侧算好交进来（D68：项目层与本地层里写的路径不算）：paths 是要加载的文件，
-// ignored 是那些被这条规则挡掉的路径，它们进日志而不是静默消失。
+// 同时解析模式名称和搜索路径，确保启动与运行时切换使用同一规则。
+// 扩展来源由加载器提供；`paths` 会被加载，`ignored` 会写入诊断记录。
 export function createHost({
   config, provider, plugins = [minimalPlugin, networkPlugin], policy, logger, modeName, modePaths, skillRegistry,
   templateRegistry, extensions = { paths: [], ignored: [] }, loadEnvironment, configStore, configLayers, configStoreFor,
   deriveProvider = providerFromConfig, interactive = false,
 }: HostOptions): Host {
-  // 一份项目环境：这个项目自己的配置快照、提供方、判定档位、模式目录、记录目录与那两格可写的配置文件（方案 3.1 与 3.2）。
-  // 校验在装载这一刻做完：一条坏配置不该等到模型第一次调用才炸（D60）。
-  // 边界是工具读写的位置，也是指令文件上溯的止点，两边都读它，缺一处就说缺一处。
-  // 那两格可写的配置文件跟着环境走：设置那一栏说的是「哪一个项目的哪一层文件」，读与写都落在它自己身上（方案 3.2、审阅 F3）。
-  // 使用者默认那一层是所有项目共用的那一份文件，项目共享与本机覆盖各是这一个项目自己的（D8 的层序）。
-  // 存储由装载侧建（`configStoreFor`）：路径、文件名与用户目录的位置都在那一侧算，宿主只认层名、字段与读回的那一份版本（方案 7.2）。
+  // 每个项目环境持有自己的配置快照、提供方、策略、模式、记录目录和可写配置层。
+  // 在加载环境时校验配置，避免等到第一次模型请求才发现错误。
+  // 文件系统边界同时限制工具访问范围和指令文件向上查找的范围。
+  // 用户配置由所有项目共享；项目共享层和本地层只属于各自项目。
+  // 加载器负责解析配置文件路径；Host 通过层名、允许字段和版本读写配置。
   function prepareEnvironment(own: EnvironmentSeed): ProjectEnvironment {
     if (!Object.isFrozen(own.config)) throw new KernelError('host_config_must_be_frozen');
     if (typeof own.config.boundary !== 'string' || own.config.boundary === '') throw new KernelError('host_boundary_required');
@@ -508,16 +501,16 @@ export function createHost({
 
   const defaultEnvironment = prepareEnvironment({
     config, provider, policy, modeName, modePaths, skillRegistry, templateRegistry, extensions,
-    // 装载那一次读到的四层交进来，存储就在宿主这一侧按那一份建：来源那一格要说得出一条值现在由哪一层写着（方案 7.1）。
-    // `configStore` 是启动那一份环境已有的存储，装载侧自己建好时用这一条（`ligule host` 走的是 `configLayers`）。
+    // 根据加载器提供的配置层创建存储，以便读取时返回每个值的来源。
+    // 加载器已创建存储时直接复用。
     layers: configLayers,
     store: configStore,
   });
-  // 按项目根存一张表：同一份项目环境只装载一次，之后开这一项目的会话与列这一项目的记录都读它。
+  // 每个归一化项目根目录只缓存一个环境，供该项目的会话与列表操作复用。
   const environments = new Map<string, ProjectEnvironment>([[defaultEnvironment.projectRoot, defaultEnvironment]]);
 
-  // 项目根自己先分一次类：不存在、不是目录、读不动是三件事，各给一个稳定码（方案 2A）。
-  // 记录目录不存在不在这一处管：一份正常的新项目还没有会话，那一条由 `listSessions` 交回空列表。
+  // 对路径不存在、目标不是目录和目录不可读分别返回稳定错误。
+  // 新项目还没有记录目录是正常状态，会话列表应返回空结果。
   async function classifyProjectRoot(asked: string): Promise<void> {
     try {
       if (!(await stat(asked)).isDirectory()) throw new KernelError('host_project_root_not_directory', { detail: asked });
@@ -525,28 +518,25 @@ export function createHost({
       if (error instanceof KernelError) throw error;
       const reason = errorCode(error);
       if (reason === 'ENOENT') throw new KernelError('host_project_root_missing', { detail: asked });
-      // 路上有一段是文件：那一段不是目录，与「这一条路不存在」说的不是同一件事。
+      // 区分路径中有文件阻断和目标路径不存在这两种情况。
       if (reason === 'ENOTDIR') throw new KernelError('host_project_root_not_directory', { detail: asked });
       throw new KernelError('host_project_root_unreadable', { detail: `${asked}: ${reason ?? String(error)}` });
     }
   }
 
-  // 取这一份项目环境。没指名就是宿主自己那一份；指名了别的项目而装载侧没给那条路就说清不支持，
-  // 不悄悄用当前这一份项目环境去读另一项目的记录（方案 3.2：不能在另一个项目里悄悄继续）。
+  // 未指定项目时使用 Host 的默认环境。指定项目尚未加载时返回不支持错误，不能借默认环境读取。
   async function environmentFor(projectRoot: unknown): Promise<ProjectEnvironment> {
     if (projectRoot === undefined || projectRoot === null || projectRoot === '') return defaultEnvironment;
     if (typeof projectRoot !== 'string') throw new KernelError('host_project_root_invalid');
     const asked = resolve(projectRoot);
     const askedIdentity = workspaceIdentity(projectRoot);
-    // 缓存按装载出来的那一份根存（关会话时删的也是那一个名字），认的时候先比 resolve 之后的位置，再比归一后的身份：
-    // 同一目录的两种写法共用一份环境，不会各存一份、关的时候漏一把（D110）。
+    // 同时比较解析后的根路径和归一化身份，让同一目录的不同写法共用缓存环境。
     const known = [...environments.values()].find((each) => resolve(each.projectRoot) === asked || workspaceIdentity(each.projectRoot) === askedIdentity);
     if (known !== undefined) return known;
     if (loadEnvironment === undefined) throw new KernelError('host_project_root_unsupported', { detail: String(projectRoot).slice(0, 200) });
     await classifyProjectRoot(asked);
     const loaded = prepareEnvironment(await loadEnvironment(projectRoot));
-    // 同一台机器上同一目录可以有多种写法（大小写、斜杠方向、尾部分隔符、链接）：写法不同不算身份不符。
-    // 与 `core/src/session/list.ts` 筛记录头部用的是同一条规矩。
+    // 大小写、分隔符、末尾斜线和链接可能指向同一目录；工作区身份与会话列表采用相同的归一规则。
     if (resolve(loaded.projectRoot) !== asked && workspaceIdentity(loaded.projectRoot) !== askedIdentity) {
       throw new KernelError('host_project_root_mismatch', { detail: `asked for ${projectRoot}, the layers give ${loaded.projectRoot}` });
     }
@@ -554,8 +544,8 @@ export function createHost({
     return loaded;
   }
 
-  // 真的在一具工作区里建了会话或接了会话，就把它登记一次：那份清单是持久的，侧栏列出来的只是它的一个读者（D110、方案 5.5.1）。
-  // 记不上去要说出来：会话照开，缺口在日志里看得见，人的清单上不会静默少一个工作区。
+  // 在工作区中创建或打开会话后登记该工作区。
+  // 登记失败会写入日志，但不会阻止会话打开。
   async function noteWorkspace(environment: ProjectEnvironment): Promise<void> {
     try {
       await registerWorkspace(environment.projectRoot);
@@ -578,15 +568,13 @@ export function createHost({
     return state;
   }
 
-  // 刚写进配置的那一个字段落在哪一份提供方上，由这一处算。写入侧交回的是落盘之后按层序重折出来的那一份值，
-  // 不是刚写进去的那一个（方案 7.1、D8）：更上面那一层（项目共享、本机覆盖、命令行）还写着它时，
-  // 这一笔改了文件却没改变任何会话在打的东西，那种写入要说成「当前运行没变」，不能报成采用了。
-  // 基座用的是这一份项目环境此刻的那一份完整生成选择，不是装载那一次的快照：连着改两条字段，后一次盖不掉前一次。
-  // 装载那一次的配置快照不动：正在跑的这一份环境用的就是它。`config.get` 读的是可写那两层文件的此刻内容（方案 3A），
-  // 会话现在打的那一份从 `status.get` 读；两份读数各自说一件事，界面把它们分开摆。
+  // 每次写入后都根据已保存的配置层重新计算有效提供方。
+  // 如果更高优先级的配置层仍提供旧值，就说明当前运行配置没有改变。
+  // 后续字段更新以环境的最新配置为基础，连续编辑时不会覆盖先前修改。
+  // 启动时的配置快照保持不变。`config.get` 返回可写文件的内容，`status.get` 返回会话当前使用的提供方。
   function adoptGeneration(env: ProjectEnvironment, key: string, effective: unknown): AdoptionResult {
-    // 折不出来时也要把这半份记下：连着填的下一格接在它上面。退回装载那一次的快照就永远攒不齐——
-    // 首启没有 `[model]` 时四格就是这么各填各的，提供方换不上、第一轮发不出去（U59 首启检查量到）。
+    // 保留尚未完整的模型配置，让后续字段写入可以继续补齐。
+    // 首次配置时即使还没有 `[model]` 表也适用。
     const base = env.generation ?? { provider: env.provider, model: env.pendingModel ?? modelConfigOf(env.config) };
     const model: Record<string, unknown> = { ...base.model, [key]: effective };
     let provider: HostProvider;
@@ -597,12 +585,11 @@ export function createHost({
       return { applies: [], failure: { code: errorCode(error) ?? 'provider_rebuild_failed', detail: errorMessage(error) } };
     }
     env.pendingModel = undefined;
-    // 折出来的那几格一格没变，就没有任何东西要采用：一条没改变的写入报成「采用了」，
-    // 界面会说出没发生过的事（方案 7.3 的 `applies` 说的是真实生效边界）。
+    // 有效提供方未变化时报告未应用，返回结果应反映实际运行状态。
     const changed = new Set<string>([...Object.keys(base.model ?? {}), ...Object.keys(model)]);
     if ([...changed].every((field) => base.model?.[field] === model[field])) return { applies: [] };
     env.generation = { provider, model };
-    // 这一格项目环境的提供方跟着走：新开的会话读的是它，于是继承的是最近一次真正生效的那一份（方案 7.2）。
+    // 更新环境中的提供方，让新会话使用最新的有效配置。
     env.provider = provider;
     const applies: { sessionId: string; when: 'now' | 'round' }[] = [];
     let sessionFailure;
@@ -645,8 +632,8 @@ export function createHost({
     return { applies, ...(sessionFailure === undefined ? {} : { failure: sessionFailure }) };
   }
 
-  // 档位与规则表的生效边界是「下一次判定」（方案 7.3 第一行）：已经派发出去的那一次调用不受这一笔影响。
-  // 配置里的默认改了才动会话，会话自己覆盖过档位的那一份不动（D101）；规则表整份替换，只有配置那一层写着它（D8）。
+  // 策略和规则变更从下一次权限判定开始生效，不影响已派发的调用。
+  // 更新继承配置默认值的会话，保留会话级覆盖，并替换配置中的规则集合。
   function adoptPolicy(env: ProjectEnvironment, key: string, effective: unknown): AdoptionResult {
     if (key === 'rules') {
       if (JSON.stringify(env.policy?.rules ?? []) === JSON.stringify(effective ?? [])) return { applies: [] };
@@ -672,17 +659,16 @@ export function createHost({
     return { applies };
   }
 
-  // 这一格项目环境按层序折出来的那一份有效值：写完之后每一份都各折一次，因为大家共用使用者默认、
-  // 各自有项目共享与本机覆盖那两层（D8、方案 3.2）。折不出来的环境（装载侧没给四层）不参与这一遍。
+  // 根据发生变化的配置层重新计算各个已加载环境。环境共享用户设置，各自拥有项目共享层和本地层。
+  // 配置层不完整的环境不参与更新。
   async function effectiveOf(env: ProjectEnvironment, table: string, key: string): Promise<unknown> {
     if (env.store === undefined) return undefined;
     const fresh = await env.store.read();
     return key === 'rules' ? fresh.rules : fresh.values?.[table]?.[key];
   }
 
-  // 一次写入影响哪一些项目环境由层名说：使用者默认那一层是所有已装载项目共用的那一份文件，
-  // 本机覆盖只属于它自己那一个项目（方案 3.2、审阅 F3）。每一份环境用的是它自己折出来的那一份，
-  // 被本项目那两层盖着的会话不会因为别人往低一层写就换掉在打的东西（方案 7.1、D8）。
+  // 用户设置影响所有已加载项目；项目本地设置只影响所属项目。
+  // 分别重算每个环境，保留更高优先级项目配置的覆盖效果。
   async function adoptWritten(
     env: ProjectEnvironment,
     layer: string,
@@ -694,7 +680,7 @@ export function createHost({
     const applies: { sessionId: string; when: 'now' | 'round' }[] = [];
     let failure: { code: string; detail?: string } | undefined;
     for (const target of layer === 'user' ? [...environments.values()] : [env]) {
-      // 写入那一份环境：折前折后是同一份值时什么都不采用，那一格环境早就在打这一份（审阅 F1 的那一句「未改变当前运行」）。
+      // 有效配置未变化时保留当前提供方。
       if (target === env && changed === false) continue;
       const own = target === env ? effective : await effectiveOf(target, table, key);
       if (own === undefined) continue;
@@ -705,36 +691,34 @@ export function createHost({
     return { applies, ...(failure === undefined ? {} : { failure }) };
   }
 
-  // 一次装配的收尾：MCP 的子进程、扩展的监听、模板登记表与那一份记录锁，四样都只在这一份会话里存在过（D60、D37、D85）。
-  // 记录本身一个字都不动：它是事实源，收掉的只是宿主里这一份活着的装配（I1）。
+  // 释放会话的 MCP 子进程、扩展监听器、模板登记表和记录锁。
+  // 会话记录继续保存在磁盘上；这里只清理运行时状态。
   async function retire(state: HostSessionState): Promise<void> {
-    // 那一轮的失败不是收尾的失败：取消、提供方断流这些事实已经写在记录里了，这里只等它跑完（D11）。
+    // 失败或取消结果已经写入记录；收尾只等待轮次结束，不覆盖其结果。
     await state.operation?.catch(() => undefined);
     try {
       await state.mcp.close();
       state.extensions.dispose();
       state.assembly.dispose();
     } finally {
-      // 收尾失败也要把这一份从表里摘出去并交回记录锁：留着它，界面再也收不掉，锁也一直占着（D85）。
+      // 即使释放资源失败，也要移除会话并释放记录锁，避免客户端无法关闭会话。
       sessions.delete(state.id);
       await state.session.close();
     }
   }
 
-  // 这一个项目根上最后一份会话收了，那份项目环境就退出这张表：下一次开这一根的会话重新读配置那几层（方案 3.1）。
-  // 宿主自己那一份不退，它没有装载侧可回去重算。
+  // 项目最后一个会话关闭后移除其环境，让下次打开时重新加载配置。
+  // Host 默认环境没有加载器入口可重建，因此继续保留。
   function evictEnvironment(environment: ProjectEnvironment): void {
     if (environment === defaultEnvironment) return;
     for (const other of sessions.values()) if (other.environment === environment) return;
     environments.delete(environment.projectRoot);
   }
 
-  // 列清单与查记录扫的是同一格目录，两条路共用这一处判断（方案 3.2）。
-  // 指名的项目还没装载过、装载侧又给不出那条路时，照当前这一份目录扫，过滤条件继续生效——
-  // 扫一遍磁盘上的记录不逼出装载。
-  // 这一份项目此刻的记录目录：第一次读之前先把旧位置（工作区目录下 `.ligule/sessions`）的记录一次性补齐到
-  // 数据根会话区（D110）：补齐旧目录中的记录与附属文件，保留原件，
-  // 同一环境共享进行中的整理；忙写者保留重试机会，读取或写入失败由调用者处理。
+  // 会话列表和记录读取使用同一个解析后的目录。
+  // 列出尚未加载的项目不会创建环境，只在现有目录中应用查询条件。
+  // 首次读取前，将旧记录及其附属文件迁入数据根目录中的会话目录，并保留原件。
+  // 同一环境中的并发迁移共用一次操作；锁被占用时允许重试，读写错误交给调用方处理。
   async function scanDirectory(projectRoot: string): Promise<string> {
     const unloaded = projectRoot !== undefined && !environments.has(projectRoot) && loadEnvironment === undefined;
     const environment = unloaded ? defaultEnvironment : await environmentFor(projectRoot);
@@ -761,7 +745,7 @@ export function createHost({
     return environment.directory;
   }
 
-  // 名字与归档标记读回的是记录里那几条 `label` 折出来的当前值：宿主不另存一份，两端看的是同一份事实（I5、方案 4.2）。
+  // 从记录标签推导当前会话名称和归档状态，让 Host 与客户端使用同一事实来源。
   async function labelOf(state: HostSessionState): Promise<{ sessionId: string; name: string; archived: boolean }> {
     return { sessionId: state.id, ...foldLabel(await state.session.read()) };
   }
@@ -862,8 +846,8 @@ export function createHost({
             state.pending = undefined;
             await state.adopt(next);
           }
-          // 生成参数在整轮收尾之后、下一条输入受理之前采用（方案 7.3 第二行）：这一轮里跑完的循环、压缩与派生体
-          // 用的都是开始时那一份，跑到一半换端点会让一轮里发出过两种请求体，记录也就对不上一次完整的回答。
+          // 当前轮次结束、接受下一条输入前应用生成设置。
+          // 这样一轮中的循环、压缩和派生执行会使用相同的提供方配置。
           if (state.pendingGeneration !== undefined) {
             state.generation = state.pendingGeneration;
             state.pendingGeneration = undefined;
@@ -889,14 +873,14 @@ export function createHost({
     }
   }
 
-  // `<主干 id>.sub-<序号>` 是派生支线的名字（D71）：它的主干在这条连接上打开着，这一条才读得到（D74）。
+  // 派生会话编号由父会话编号和序号组成；只有父会话在当前 Host 中打开时才能读取。
   function branchOwner(id: string): string | undefined {
     const matched = /^(.+)\.sub-(\d+)$/.exec(id);
     return matched !== null && sessions.has(matched[1]) ? matched[1] : undefined;
   }
 
-  // 会话 id 那个串是从客户端来的，要拼成记录文件名：带目录分隔符时拼出的路径会走到记录目录外面。
-  // 形状在这里查一次，打开、读取与支线三条路共用同一处，形状不对都报同一个码，不混进「找不到这份会话」。
+  // 使用客户端提供的会话编号拼接记录路径前先校验，拒绝分隔符和格式错误的编号。
+  // 打开、读取和创建分支都使用同一校验规则。
   function assertSessionId(id: unknown): asserts id is string {
     if (typeof id !== 'string' || id === '' || id === '.' || id === '..'
       || id.includes('/') || id.includes('\\') || id.includes(':') || id.includes('\0')) {
@@ -909,7 +893,7 @@ export function createHost({
     return join(env.directory, `${id}.jsonl`);
   }
 
-  // 溢出的那一份完整正文只在被读到的那一页上取：一次读一百条时不该把整份记录的结果文件都翻一遍。
+  // 只为当前页包含的记录读取溢出文件。
   async function fillSpills(events: SessionEvent[], env: ProjectEnvironment): Promise<SessionEvent[]> {
     const base = await realpath(env.directory);
     const complete = [];
@@ -938,9 +922,8 @@ export function createHost({
     return complete;
   }
 
-  // 一页历史（实现顺序第 72 步，方案 4.1）：游标用的是记录里那一条事件自己的序号，它稳定且单调，
-  // 所以往回翻只说「比这一页最早那一条更早」，翻页期间新事件只追加在末尾，旧页不重复也不漏。
-  // 交回的 `endSeq` 是这一次读到的快照末端，`hasMore` 说这一页之前还有没有更早的。
+  // 使用稳定递增的事件序号分页；向前读取时以当前页第一条序号为边界。
+  // 翻页期间追加的新事件不会造成旧记录重复或遗漏。`endSeq` 标记本次快照的末尾，`hasMore` 表示是否还有更早记录。
   async function readForClient(
     session: SessionLog,
     sessionId: string,
@@ -952,7 +935,7 @@ export function createHost({
     if (at !== undefined && before !== undefined) {
       throw new KernelError('protocol_args_invalid', { detail: 'session.read at and before are mutually exclusive' });
     }
-    // 游标归属那一格要说清它认不认得：不是这一份记录里的事件序号就是失效的游标，不静默当成第一页（E03）。
+    // 游标未指向当前会话的事件时应返回错误，不能静默退回第一页。
     const cursor = at ?? before;
     if (cursor !== undefined && !events.some((event) => event.seq === cursor)) {
       throw new KernelError('session_cursor_invalid', { detail: `${sessionId} has no event ${cursor}` });
@@ -970,13 +953,13 @@ export function createHost({
     };
   }
 
-  // 一次读记录：开着的那一份读它自己的内核，派生支线那一份读它在磁盘上的记录，两个入口不分两种形状。
-  // 这一处不读别的磁盘目录：这一次动作的语义是「把我这一份会话的事实拿回来」，不是记录目录的浏览器；
-  // 发现历史会话归 sessions，接上别的会话归 session.open。分页与溢出正文的参数原样交给 `readForClient`。
+  // 打开中的会话从运行时读取，派生会话从已保存记录读取；两者使用相同的响应结构。
+  // 此方法只读取指定会话。使用会话列表查找记录，使用 `session.open` 重新打开会话。
+  // 分页和溢出内容选项原样交给 `readForClient`。
   async function readRecord(id: string, params: { fullResults?: boolean; limit?: number; before?: number; at?: number }) {
     const state = sessions.get(id);
     if (state !== undefined) return await readForClient(state.session, id, params, state.environment);
-    // 派生支线那一份不在这轮的内核里（跑完就把装配撤了，D71），界面读它用的是这同一次动作（D74）。
+    // 父轮次结束后，派生会话没有运行时状态，因此从已保存记录读取。
     assertSessionId(id);
     const owner = branchOwner(id);
     if (owner === undefined) throw new KernelError('session_not_open', { detail: id });
@@ -989,10 +972,9 @@ export function createHost({
     return await readForClient(createSessionLog({ directory: env.directory, id }), id, params, env);
   }
 
-  // 一个会话一套内核、判定链与循环：判定链里的拒绝计数与档位按会话存活（D15、D17）。
-  // ask 是这条会话的审批通道：客户端不在答复里说允许，就按不允许处理（D16 的询问走内核对外接口）。
-  // 取消落在审批还没答复的时候要把这个问题收掉：答复不会再来了，而判定链在这里抛出，
-  // 那一次调用就在记录里没人回答，之后每一轮都拼不出合法请求体（D11）。
+  // 每个会话拥有自己的 Kernel、权限状态和循环。
+  // 审批请求属于发起它的会话；客户端未明确允许时一律拒绝。
+  // 等待审批期间取消轮次时，结束待处理请求并记录拒绝结果。
   async function build(
     id: string,
     connection: HostClientConnection,
@@ -1001,20 +983,20 @@ export function createHost({
     env: ProjectEnvironment = defaultEnvironment,
     workspaceOrigin?: 'explicit' | 'default',
   ): Promise<HostSessionState> {
-    // 这一份会话读的项目环境就是它所属那一个：下面这些名字从这里取，不再读宿主闭包里的那一份（方案 3.1）。
+    // 从会话所属的项目环境解析项目级资源。
     const { config, provider, policy, modePaths, directory, mcpConfigs, extensions, skillRegistry, templateRegistry } = env;
-    // 扩展收事件的那一条通道（D37）：刚落盘的这一条同时送给客户端与扩展，两边读的是同一份事实（I5）。
+    // 将已持久化的会话事件同时发送给客户端和已加载扩展。
     const listeners: ((event: SessionEvent) => void)[] = [];
     const asks = new Set<() => void>();
     const modeState: ModeState = { file: undefined, tools: [], undo: () => {} };
-    // 首行那份元信息在第一次落笔时才写，所以模式身份用一条取当前值的函数给：建会话的那一刻常常还没选过模式（D73）。
+    // 新会话可能尚未选择模式，因此在创建记录时再解析模式身份。
     const session = observedSession(createSessionLog({
       directory,
       id,
       meta: () => ({
         projectRoot: env.projectRoot,
-        // 首行记下这一份会话落在哪一具工作区、是怎么落到那儿的（D110、方案 5.5.3）：
-        // 界面分组读的是这两格，不是「路径等不等于现在的默认目录」。接回一份现存会话时没有这一格可写——那份记录的首行早写好了。
+        // 在记录首行保存工作区身份和来源，供客户端稳定分组。
+        // 现有会话已包含这些元数据，重新打开时不要改写首行。
         workspace: workspaceIdentity(env.projectRoot),
         ...(workspaceOrigin === undefined ? {} : { workspaceOrigin }),
         mode: modeState.file === undefined ? undefined : { name: modeState.file.name, layer: modeState.file.layer },
@@ -1023,9 +1005,7 @@ export function createHost({
       connection.notify({ notify: 'event', sessionId: id, event });
       for (const listener of listeners) listener(event);
     });
-    // 新开的一份会话继承的是这一份项目环境此刻的那一份完整生成选择（方案 7.2、D101 的「新会话按当前配置」）：
-    // `config.model` 是装载那一次的快照，保存过模型字段之后它仍是旧的那一份，直接从它起会让状态与轮次记录分家。
-    // 没写过任何东西时 `env.generation` 还不存在，那时用的就是装载那一次的快照与它算出来的提供方。
+    // 新会话继承项目当前有效的生成设置。配置写入后，初始快照可能已过期，优先读取环境的最新设置。
     const state: HostSessionBase = {
       id,
       session,
@@ -1038,7 +1018,7 @@ export function createHost({
       generation: env.generation ?? { provider, model: modelConfigOf(config) },
       adopt: async () => {},
     };
-    // 三处消费者读的都是这一句转手，它到调用时才去取 `state.generation` 里那一份（方案 7.3）。
+    // 调用时解析生成设置，让循环、压缩和派生执行都能读取会话的最新配置。
     const live = currentProvider(() => state.generation.provider);
     await session.acquire();
     const cleanup = [];
@@ -1061,17 +1041,15 @@ export function createHost({
         state.asks.add(settle);
         updateWaitingForUser(state as HostSessionState, connection, true, 'approval');
         try {
-          // 后端那两样只在真有一条命令要判时带上：没有命令文本的调用（读文件一类）不该在答复里多出一个空字段，
-          // 否则同一条协议在按行转递的载体上与在进程内的那一种上读到的形状就不一样。
-          // 那一份会话属于哪一项目录跟着请求一起交出去：客户端看着别的那一份时也要答得出这一条，答的是那一个项目里的这件事。
-          // 档位与它的来源也一起交出去，读的是这一次判定自己那一条链：界面看着别的那一份会话时，解释这一条的不能是另一份的档位（审阅 C08）。
+          // 只有命令调用才返回命令后端和解析分段，保证进程内与按行协议的响应结构一致。
+          // 同时返回所属项目和策略状态，以便客户端在切换前台会话后仍能解释本次判定。
           const request = connection.request(APPROVAL_METHOD, {
             sessionId: id, projectRoot: env.projectRoot, tool, args: input, command, reason, policy, policySource, policyForced,
             ...(shell === undefined ? {} : { shell, executable }),
           });
           return await Promise.race([
             request.then(isApproved, (error) => {
-              // 客户端把答复写成一次失败：这是它的问题，说出来，同时这一条按不允许处理，记录仍然完整。
+              // 记录客户端审批答复失败并拒绝调用，确保每个请求都有对应结果。
               logger?.log?.(`approval failed for ${tool}`, { tool, code: errorCode(error), reason: errorMessage(error) });
               return false;
             }),
@@ -1084,34 +1062,31 @@ export function createHost({
       },
     });
     const kernel = createKernel({ config, policy: chain, session, logger });
-    // 技能注册表是一条系统事实（D46）：磁盘上有几份技能与模式选了哪几件无关（D45、D57）。
-    // 装载侧可以交进已经查好的一份（测试与以后的重载），没交就在这里扫那四个目录。
-    // 一份都没有时不改工具表也不加片段：多一件没人用的工具会改掉每次请求的前缀字节（D12）。
+    // 技能登记表反映已发现的技能，不随当前模式改变。
+    // 优先复用加载器提供的登记表，否则从配置目录中发现技能。
+    // 没有可用技能时不注册技能工具或提示词片段。
     const skills = skillRegistry ?? await discoverSkills(skillDirectories(env.projectRoot));
     for (const diagnostic of skills.diagnostics) {
-      // 头部解不开与被同名压掉的那一份都不静默：装载侧留一条日志，提示词里那一段说明也带上计数（D49、D57）。
+      // 在加载诊断和提示词摘要中报告格式错误或被同名技能覆盖的技能。
       logger?.log?.('skill is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
     }
-    // MCP 的两件固定工具按配置里有没有服务器登记（D52、D60）：一件都没配时这一格是空的，模型可见清单不涨。
+    // 只有配置了 MCP Server 时才注册 MCP 工具。
     const mcp = createMcpRegistry(mcpConfigs);
     cleanup.push(() => mcp.close());
     const loaded = skills.skills.length === 0 ? plugins : [...plugins, createSkillPlugin(skills, () => mcp.servers())];
-    // 提示模板也是装载侧扫出来的事实（D45）：两处目录，靠近仓库的那一份胜出。展开发生在这一侧，
-    // 三个客户端因此不必各写一份替换规则（D54）。
+    // 加载器负责发现提示模板并处理项目优先级；模板由 Host 展开，确保所有客户端使用相同规则。
     const templates = templateRegistry ?? await discoverTemplates(templateDirectories(env.projectRoot));
     for (const diagnostic of templates.diagnostics) {
       logger?.log?.('prompt template is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
     }
-    // 提示词的组装器先建好：扩展登记的那几段要进这一份，模式 `prompt` 那一格挑的也就是这几段（D35、D46）。
-    // 配置四层都没写静态段时用随包的那一份基础提示（D102）：写了就用写的，标量整份替换。
+    // 根据扩展片段和当前模式选中的名称组装提示词。
+    // 所有配置层都未设置基础提示词时，使用随包提供的版本。
     const prompt = createPromptAssembly({ static: config.prompt?.static ?? BASE_SYSTEM_PROMPT });
-    // 派生执行体那一件工具（D71）：它拿到的插件是这一套减去 `subagent` 自己（一层是「谁在跑」读得出来的下界），
-    // 判定链沿用这一条实例，静态前缀沿用这一份（同一串字节让端点的缓存对派生体也成立，D9）。
-    // 提供方直接用未装饰的那一份：派生体的流式事件不往客户端转，那一段的进度在它自己的记录里（与 pi 的差别记在 D71）。
+    // 派生执行继承父会话的策略和静态提示词前缀，但不能再注册子 Agent。
+    // 直接使用底层提供方；派生事件记录在其独立会话中。
     const basePlugins = [...loaded, createMcpPlugin(mcp)];
-    // 提问那一件只挂在父会话上（D107、方案 4.4）：派生支线没有能答复的人，那一条链走不到客户端的界面上。
-    // 它不进上面那条判定链：审批问的是能不能做这一件操作，提问问的是这一件事该怎么办，两件事各问各的。
-    // 客户端不声明支持交互时装都不装——命令行那一路问出去没人能答，模型看见一件用不了的工具比看不见更糟。
+    // 提问属于父会话，因为派生执行没有客户端可以回答。
+    // 提问和审批走不同流程；只有支持交互回答的客户端才注册提问工具。
     const asked = interactive === false ? [] : [createAskUserPlugin({
       ask: async (questions) => {
         let settle = (): void => {};
@@ -1122,7 +1097,7 @@ export function createHost({
         updateWaitingForUser(state as HostSessionState, connection, true, 'input');
         try {
           const outcome = await Promise.race([
-            // 不设等待上限：等人回答不是失败。取消由这一发的 signal 那侧收，请求身份就是那一帧的 id。
+            // 等待用户回答不设超时。取消使用当前轮次对应的 signal 和请求编号。
             connection.request(QUESTION_METHOD, { sessionId: id, projectRoot: env.projectRoot, questions }),
             cancelled,
           ]);
@@ -1132,7 +1107,7 @@ export function createHost({
           return outcome;
         } catch (error) {
           if (error instanceof KernelError) throw error;
-          // 客户端把答复写成一次失败，或者那条通道本身断了：这里没有可以替人答的值，说清是哪一种。
+          // 明确返回客户端答复失败或通道断开；Host 不能代替用户编造答案。
           logger?.log?.('ask user request failed', { sessionId: id, code: errorCode(error), reason: errorMessage(error) ?? String(error) });
           throw new KernelError('ask_user_host_gone', { detail: `${id}: ${errorMessage(error) ?? String(error)}` });
         } finally {
@@ -1155,8 +1130,7 @@ export function createHost({
       loopLimits: loopLimitsOf(config),
     })]);
     cleanup.push(() => assembly.dispose());
-    // 项目指令文件那四层是装载侧交给提示词的一段（D10、第 9.5 步留下的那一半）：
-    // 装载器自己的预算算在完整文本上，片段登记时按同一个数，两处不会各截一次。
+    // 加载器已按字节预算处理项目指令片段，这里直接登记，避免重复截断。
     const maxBytes = config.instructions?.maxBytes ?? DEFAULT_INSTRUCTION_BYTES;
     const instructions = await loadInstructions({
       ...config.instructions,
@@ -1164,14 +1138,13 @@ export function createHost({
       current: resolve(env.projectRoot, config.instructions?.current ?? '.'),
     });
     prompt.fragment({ name: 'instructions', anchor: 0, text: instructions.text, maxBytes });
-    // 目录整份内联还是只留一句使用说明由预算判（D55）。有技能就有这一段：
-    // 披露入口不在模式的选择范围里，模式藏不掉它（D63）。
+    // 根据预算完整加入技能元数据，或改用简短的技能发现说明。
+    // 所有模式都保留技能披露工具。
     if (skills.skills.length > 0) {
       prompt.fragment({ name: 'skills', anchor: 1, text: formatSkillCatalog(skills), maxBytes: SKILL_METADATA_BUDGET_BYTES });
     }
-    // 扩展的装载（D37、D68）：来源由装载侧算好交进来，这一处只管按次序 import、递出窄接口、留下反注册动作。
-    // 窄接口只有那四件——注册工具、注册提示词片段、收事件、请求一次能力操作。这就是契约承诺的暴露面；
-    // 它不是限制：进程内的模块技术上能做 Node 能做任何事，所以判定链、路径边界与参数校验对每一次调用照常生效（D37）。
+    // 按加载器解析的来源顺序加载扩展，只提供声明过的注册、事件和能力接口。
+    // 每个已注册工具仍须经过 Kernel 参数校验和权限判定。
     const fragments: ExtensionPromptFragment[] = [];
     for (const diagnostic of extensions.ignored) {
       logger?.log?.('extension source is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
@@ -1181,7 +1154,7 @@ export function createHost({
         return kernel.register(checkedToolDefinition(tool));
       },
       registerFragment: (fragment) => {
-        // 两个扩展抢同一个片段名会让「这一格选了谁」读不出来：报出去，让后装的那一件自己改名字。
+        // 拒绝重复的提示片段名称，确保模式选择只会命中一个扩展。
         if (fragments.some((entry) => entry.name === fragment.name)) throw new KernelError('extension_fragment_duplicate', { detail: fragment.name });
         fragments.push(fragment);
         return () => {
@@ -1196,18 +1169,16 @@ export function createHost({
           if (index >= 0) state.listeners.splice(index, 1);
         };
       },
-      // 请求一次能力操作走的就是内核那一条 call：判定链、会话记录与参数校验一件都少不了（D37、D11）。
+      // 能力请求通过 Kernel 执行，以应用参数校验、权限判定和会话记录。
       request: (tool, args) => kernel.call(tool, args),
     });
     cleanup.push(() => installedExtensions.dispose());
     for (const diagnostic of installedExtensions.diagnostics) {
-      // 一件坏扩展不带走整次运行：它自己的登记全撤掉，别一条诊断，装载继续（D37 的承诺只到暴露面为止）。
+      // 扩展加载失败时撤销它的登记、记录诊断，然后继续加载其他扩展。
       logger?.log?.('extension is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
     }
-    // 应用一份模式：先按新清单挑出提示词片段，叠加新工具限制并装好片段，最后才撤销旧限制。
-    // 任一步校验或装配失败都保留旧模式，避免出错后工具清单意外变宽。
-    // 记录里这一条是给「两条用户输入之间各自用的是哪一份清单」用的（I2、I5）；
-    // 收紧只减不加，被藏起来的那几件仍然留在登记表里（I4）。
+    // 应用模式时，先校验并安装新的提示片段和工具限制，再撤销旧限制。
+    // 任何一步失败都保留旧模式。记录成功变更；模式只能隐藏已登记工具，不能添加工具。
     state.adopt = (file) => adoptSessionMode({
       file,
       kernel,
@@ -1217,17 +1188,14 @@ export function createHost({
       session,
       mode: state.mode,
     });
-    // 模式选中的那一栏工具与那几段片段在装载之后才生效（D35、D44）：清单里写了本次没有登记的名字会在这里失败，
-    // 而不是静默少一件。
-    // 打开一份已有的记录时，先把没人回答的那几次派发补成规范的工具结果（D72）：这一条只在可写的恢复路径上做一次，
-    // 读的那几处（`session.read`、界面、列表）报告缺口而不改盘。新建的那一份里没有待补的东西。
+    // 根据扩展登记的工具和提示片段校验模式选择。
+    // 只有以可写方式打开会话时才恢复未完成的工具调用；只读路径不修改记录。
     if (recover) {
       const repaired = await repairUnresolvedCalls(session, { readOnly: new Set(kernel.readOnly()) });
       for (const event of repaired) logger?.log?.('unanswered tool call repaired', { sessionId: id, callId: event.callId, tool: event.tool });
     }
-    // 用哪一份模式清单：客户端显式选了就用它；打开一份已有记录时取记录里最后生效的那一条并比它的摘要（D78）；
-    // 两者都没有时保持装配时那一份。静默换成磁盘上现在这一份等于在别人没选过的范围里决定这一次能用什么，
-    // 所以摘要变了要报 `resume_mode_changed`，由人显式选一次之后才继续。
+    // 优先采用客户端选定的模式；否则恢复记录中的模式并校验摘要。
+    // 模式定义已变化时要求用户明确选择，避免静默改变可用工具。
     let wanted = explicitMode ?? modeName;
     if (explicitMode === undefined && recover && modePaths !== undefined) {
       const last = (await session.read()).filter((event) => event.kind === 'mode').at(-1);
@@ -1243,9 +1211,8 @@ export function createHost({
       if (modePaths === undefined) throw new KernelError('host_mode_paths_required');
       await state.adopt(await loadMode(wanted, modePaths));
     }
-    // 压缩挂在这一份会话上（D75）：两条触发都在循环里问它，摘要那一次调用走未装饰的提供方——
-    // 它的流式增量不该转给客户端，而它写完检查点就退出这一轮的事，事件日志一条都不动。
-    // 选中模型与全局配置都没写窗口时这一件是 null：窗口大小是模型事实，不猜，正常聊天照跑。
+    // 压缩属于会话。摘要请求使用底层提供方，不向客户端转发流式内容。
+    // 未配置模型上下文窗口时关闭压缩。
     const rebuildCompaction = (model: Record<string, unknown>) => {
       const selectedModel = resolveModel(model);
       const limits = compactionLimitsOf(config, selectedModel.serviceContextTokens);
@@ -1284,8 +1251,7 @@ export function createHost({
       onProgress: (event) => {
         if (state.progressId !== undefined) observeLoopProgress(state as HostSessionState, connection, state.progressId, event);
       },
-      // 开轮时那一份生效参数的快照（D104）：读的是这一份会话现在的那几格，不是装载那一次的配置。
-      // `apiKeyEnv` 交回的是变量名，不是变量的值（D13）。
+      // 在轮次开始时保存有效生成设置的快照。`apiKeyEnv` 是环境变量名，不是密钥值。
       turnContext: () => {
         const model = resolveModel(state.generation.model ?? {});
         return {
@@ -1300,7 +1266,7 @@ export function createHost({
         };
       },
     });
-    // 一份会话一份状态，审批的等待与正在跑的那一轮都记在这里。
+    // 当前轮次和待处理审批都限定在所属会话内。
     return Object.assign(state, { chain, kernel, assembly, extensions: installedExtensions, mcp, loop, templates, compaction, rebuildCompaction });
     } catch (error) {
       try {
@@ -1341,7 +1307,7 @@ export function createHost({
         case 'session.create': {
           const id = randomUUID();
           const origin = message.params.workspaceOrigin;
-          // 来源由客户端说：桌面可能指名一份目录而那一份正是它的默认工作区，指没指名推不出这一层意思（方案 5.5.3）。
+          // 保留客户端是否明确选择项目这一信息；只看路径无法区分显式选择和默认项目。
           if (origin !== undefined && origin !== 'explicit' && origin !== 'default') {
             throw new KernelError('workspace_origin_unknown', { detail: `${origin}; the call takes 'explicit' or 'default', or nothing at all` });
           }
@@ -1352,12 +1318,11 @@ export function createHost({
           return created;
         }
         case 'session.open': {
-          // 已经在这具宿主里开着的会话读它自己那一份项目环境，与 `session.read` 同一个形状：
-          // 不带 `projectRoot` 的接回（重读手里那一份、刚在别项目录里建好的那一份）按默认那一份去找记录，会报出假的 `session_not_found`。
+          // 按会话所属项目定位已打开的会话，与 `session.read` 使用相同规则。
+          // 未指定项目根目录时，可能会在错误目录中查找其他项目创建的会话。
           if (sessions.has(sessionId)) {
-            // 已经在这具宿主里开着的会话，接回来是一次纯读：正在跑的那一轮不因这一次重装配、也不因这一次收线（审阅 F4）。
-            // `run_already_running` 说的是「别在跑着的时候收掉这一份会话」那一条路（`session.close`），看着它不是那件事。
-            // 指了模式就按 D41 那条边界走：空着的立刻采用，跑着的等自己那一轮收尾，这一处不越过去。
+            // 重新打开当前 Host 已拥有的会话只读状态，不得打断正在运行的轮次。
+            // 会话空闲时立即应用新模式；轮次运行期间则等到边界再应用。
             const state = open(sessionId);
             if (message.params.mode !== undefined) {
               if (state.environment.modePaths === undefined) throw new KernelError('host_mode_paths_required');
@@ -1367,30 +1332,29 @@ export function createHost({
             }
             return { sessionId };
           }
-          // 指名了项目就取那一份项目环境：记录在哪个目录、工具在哪个目录读写，都由它说（方案 3.2）。
+          // 从明确选择的项目环境中解析会话记录目录和工具访问边界。
           const env = await environmentFor(message.params.projectRoot);
-          // 派生支线那一份记录说的是父侧那一次派生做过什么，它不是一份等着接回来的会话：把它当主干接开，
-          // 人就在一份没人负责的对账单上继续写（D71、D74）。读它仍然走 `session.read` 带那一条支线的编号。
+          // 派生会话记录是只读历史，不能恢复为可写会话；通过 `session.read` 读取。
           const branch = /^(.+)\.sub-(\d+)$/.exec(sessionId);
           if (branch !== null) {
             throw new KernelError('session_is_branch', { detail: `${sessionId} is a derived branch of ${branch[1]}; open the parent, or read that record with session.read` });
           }
-          // 记录不在磁盘上就是没有这份会话，把它当新的一次空记录打开会让人以为恢复成功了。
-          // 形状不对的 id 先报自己那个码，不混进「找不到这份会话」。
+          // 会话不存在时不要创建空记录，避免把打开失败误报为恢复成功。
+          // 先校验编号，保留格式错误对应的错误码。
           const path = recordPathOf(sessionId, env);
           try {
             await access(path);
           } catch {
             throw new KernelError('session_not_found', { detail: sessionId });
           }
-          // 接开还没装过的那一份：模式变更仍受当前轮次的边界约束。
+          // 新打开的会话也在轮次边界应用模式变更。
           const opened = await buildSession(sessionId, connection, true, message.params.mode, env);
           await noteWorkspace(env);
           return opened;
         }
         case 'session.close': {
           const state = open(sessionId);
-          // 正在跑的那一轮不由这一次动作收尾：界面要先发 `run.cancel`，这里不暗中打断（D11 那一轮的结果要有人写进记录）。
+          // 关闭前必须由客户端明确取消运行中的轮次，确保结果已记录。
           if (state.running !== undefined) throw new KernelError('run_already_running', { detail: sessionId });
           await retire(state);
           evictEnvironment(state.environment);
@@ -1399,10 +1363,10 @@ export function createHost({
         case 'session.label': {
           const state = open(sessionId);
           const { name, archived } = message.params;
-          // 什么都不改的一次调用没有意义，说出来比写一条空事件好。
+          // 请求没有造成变化时不写入会话事件。
           if (name === undefined && archived === undefined) throw new KernelError('session_label_empty', { detail: sessionId });
           const trimmed = name?.trim() ?? '';
-          // 名字由人写、给列表那一行看：控制字符会把排版弄坏，整条空白不算一个名字（方案 4.2）。
+          // 会话名称会显示在列表中，因此拒绝控制字符和纯空白名称。
           if (name !== undefined && (trimmed === '' || trimmed.length > SESSION_NAME_MAX || /[\u0000-\u001f\u007f]/.test(name))) {
             throw new KernelError('session_name_invalid', { detail: `wanted 1-${SESSION_NAME_MAX} visible characters` });
           }
@@ -1415,29 +1379,26 @@ export function createHost({
           return await labelOf(state);
         }
         case 'session.branch': {
-          // 分支不要求父会话停下来：复制的是记录里已经落下的那几条，父后来追加的不进这一份（方案 4.3）。
-          // 那一份记录里没配上的派发留给分支第一次打开时补（D72）：补用的是分支自己的装配与那份记录锁，不在父侧动盘。
+          // 分支只复制已经写入的记录；父会话之后产生的事件仍留在父记录中。
+          // 新分支首次打开时，在自己的记录锁内恢复未完成调用。
           const state = sessions.get(sessionId);
           assertSessionId(sessionId);
           const env = state?.environment ?? await environmentFor(message.params.projectRoot);
           return await branchSession(env.directory, sessionId, { at: message.params.at, projectRoot: env.projectRoot });
         }
         case 'sessions.list': {
-          // 与 `ligule sessions` 走的是同一个扫描器（D73）：协议只是把它递到界面那一边，
-          // 记录目录仍然只有宿主这一处开盘。
-          // 不指名项目时说当前这一具：记录区是数据根里共用的一处，分得出项目的是首行那一格（D110、方案 5.5.4）。
+          // 与 CLI 共用会话扫描器，并从记录元数据解析项目归属。
           const { projectRoot, limit } = message.params;
           const scope = projectRoot ?? defaultEnvironment.projectRoot;
           return { sessions: await listSessions(await scanDirectory(scope), { projectRoot: scope, limit }) };
         }
         case 'sessions.search': {
-          // 第七条只为界面多出来的方法：扫的还是那一处记录目录，与列表同一个开盘处（方案 4.2）。
-          // 空白的查询在所有记录里都能对上，那一份结果没有意义，所以在这里就拒掉，不扫一遍磁盘再说。
+          // 搜索会话列表使用的同一目录，并在扫描记录前拒绝空查询。
           const { projectRoot, sessionId: scoped, limit } = message.params;
           const needle = requiredString(message.params.query, 'query').trim();
           if (needle === '') throw new KernelError('search_query_empty', { detail: 'a search query has to say what to look for' });
-          // 指名一份就读那一份记录，溢出在另一个文件里的那一段也读：一次会话内的查找不该只看记录留着的那一头一尾。
-          // 那一份会话开着就读它自己那一个项目的目录，与 `session.read` 同一处说法；形状不对先报自己那个码。
+          // 在所选会话的项目目录中搜索完整记录，包括溢出文件。
+          // 解析记录路径前先校验会话编号。
           if (scoped !== undefined) assertSessionId(scoped);
           const open = scoped === undefined ? undefined : sessions.get(scoped);
           const root = open !== undefined ? undefined : projectRoot ?? defaultEnvironment.projectRoot;
@@ -1445,20 +1406,20 @@ export function createHost({
           return { hits: await searchSessions(directory, { query: needle, sessionId: scoped, projectRoot: root, limit }) };
         }
         case 'paths.list': {
-          // 第九条只为界面多出来的方法：`@` 要的候选文件由宿主这一侧列出来，界面不开盘（方案 5.3、D81 边界一）。
-          // 要哪一个项目就装载哪一个：这一处不猜边界，装载不了那条路的项目根报 `host_project_root_unsupported`（方案 3.2）。
+          // 由 Host 查找 `@` 文件候选，前端不直接扫描项目文件。
+          // 加载所选项目环境；无法加载时返回 `host_project_root_unsupported`。
           const { projectRoot, query, limit } = message.params;
           const env = await environmentFor(projectRoot);
           return await listProjectFiles(env.projectRoot, typeof query === 'string' ? query : '', limit);
         }
         case 'session.read': {
-          // 交回的是记录本身：客户端晚到了也能把已经发生过的事画出来（I5）。
-          // 历史分页由 `limit` 与 `before` 说，`at` 精确取一条记录（方案 4.1）；支线也走同一读取路径。
+          // 返回已持久化记录，让客户端重连后可以恢复会话内容。
+          // `limit` 和 `before` 用于分页，`at` 指定一条事件；派生会话也走同一读取流程。
           return await readRecord(sessionId, message.params);
         }
         case 'session.export': {
-          // 导出交给 Node 这一侧：读完整记录、补溢出正文、排版、落盘四件都在这里（方案 6A），界面只管选目的地。
-          // 那一条路径是人在原生保存对话框里自己选的，不是模型工具的一次写出，因此不套项目边界；返回路径不等于写成。
+          // Host 负责读取和排版完整记录并写出文件，客户端只选择目标路径。
+          // 用户通过保存对话框选择的导出路径不属于模型工具写入，不受项目边界限制。
           const record = await readRecord(sessionId, { fullResults: true });
           const header: SessionHeader | undefined = record.header ?? undefined;
           const exportRecords = record.events.flatMap((event) => {
@@ -1469,10 +1430,10 @@ export function createHost({
             id: sessionId,
             projectRoot: header?.projectRoot,
             createdAt: header?.createdAt ?? null,
-            // 还在跑的那一轮此刻没有末端：那份文件说到记录落到哪一条为止，后面写进来的不在里面（方案 6A）。
+            // 先确定导出快照的末尾序号，避免读取期间追加的新事件混入本次导出。
             unfinished: sessions.get(sessionId)?.running !== undefined,
           });
-          // 支线那几份还是同一次读记录的动作（D74）：父记录里那条派生结果带着支线自己的 id。
+          // 同时导出父会话记录引用的派生会话内容。
           const branches = [];
           const skipped = [];
           for (const event of record.events) {
@@ -1494,21 +1455,20 @@ export function createHost({
             branches.push({ id: branchId, text: exportMarkdown(branchEvents, { id: branchId, projectRoot: header?.projectRoot }) });
           }
           try {
-            // 逐份结果从这一处交回：写成了哪几份、哪一份位置已经有人占着、哪一份写失败（审阅 F6）。
-            // 那一份没写成说的是那一份，主文件落在哪里一起交回，不并成一句整体失败。
+            // 对每个导出文件分别返回结果，包括路径冲突和写入失败，并附上主文件路径。
             const done = await writeExport(requiredString(message.params.path, 'path'), main, branches);
             return { written: done.written, skipped: [...skipped, ...done.skipped], failed: done.failed };
           } catch (cause) {
             if (cause instanceof KernelError) throw cause;
-            // 那一个位置连目录都建不出来（路径落在一个文件下面、没有写权限）：这一句说的是整批没开始写。
+            // 无法创建目标目录时，报告整批导出尚未开始。
             throw new KernelError('host_export_write_failed', { cause, detail: `${message.params.path}: ${errorMessage(cause) ?? String(cause)}` });
           }
         }
         case 'run.start': {
           const state = open(sessionId);
           return await execute(state, async (signal, report) => {
-          // 模板展开排在这一轮开始之前（D54）：交进循环的是展开后的文本，记录里另外留着人打的那一行、
-          // 参数、模板来源与内容摘要。查不到的那一行斜杠在这里就报出去，不带着没展开的原文进模型。
+          // 开始轮次前展开提示模板，同时保留原始输入和模板元数据。
+          // 未知模板命令应返回错误，不能把未展开的文本发送给模型。
           const invocation = parseInvocation(input);
           let text = input;
           let user;
@@ -1523,12 +1483,12 @@ export function createHost({
         case 'run.cancel': {
           const state = open(sessionId);
           if (state.running === undefined) throw new KernelError('run_not_running', { detail: sessionId });
-          // 取消由循环那条边界接手：工具、提供方与循环看到的是同一次取消（D20）。
+          // 通过当前循环处理取消，让工具和模型请求收到同一个取消信号。
           state.running.abort();
           return { cancelled: true };
         }
         case 'policy.set': {
-          // 档位是两件：配置那一份默认与这一份会话的覆盖（D101）。这里只动覆盖那一件，配置文件一个字不写。
+          // 只修改会话级策略覆盖，不改写配置中的默认值。
           const state = open(sessionId);
           const mode = requiredString(message.params.mode, 'mode');
           if (mode === 'default') state.chain.resetMode();
@@ -1538,13 +1498,13 @@ export function createHost({
         }
         case 'mode.set': {
           const state = open(sessionId);
-          // 名字在这里就读成清单：坏清单在请求这一次就说出来，而不是等本轮结束应用时才炸（D44）。
+          // 返回模式清单前先解析并校验清单内容。
           const modePaths = state.environment.modePaths;
           if (modePaths === undefined) throw new KernelError('host_mode_paths_required');
           const requested = await loadMode(requiredString(message.params.name, 'name'), modePaths);
           const current = state.mode.file;
           if (current !== undefined && current.name === requested.name && current.layer === requested.layer) {
-            // 又选了一遍当前这一份：那是在撤回上一次待生效的请求，不写任何东西（D41）。
+            // 再次选择当前模式会撤销待生效变更，不写入事件。
             state.pending = undefined;
           } else if (state.running === undefined) {
             await state.adopt(requested);
@@ -1564,51 +1524,48 @@ export function createHost({
             sessionId,
             running: state.running !== undefined,
             progress: state.progress ?? null,
-            // 交给模型的那一栏，不是登记表的全部（I2）：被模式藏起来的几件不在这儿。
+            // 只返回当前模式可用的工具，不返回全部已登记工具。
             tools: state.kernel.manifest().map((entry) => entry.name),
             mode: state.mode.file?.name ?? null,
             modeLayer: state.mode.file?.layer ?? null,
             pendingMode: state.pending?.name ?? null,
-            // 这一份会话现在打的是哪一份模型，以及等在它轮次边界上的那一份（方案 7.1 的三种读数、7.3 第二行）。
-            // 读的是会话自己那一格而不是项目环境那一份：写完未采用与已采用在这两格里是分得开的。
+            // 返回会话当前使用的模型，以及等待下一轮边界生效的设置。
             model: state.generation.provider.model ?? null,
             outputTokens: state.generation.provider.outputTokens ?? null,
             selectedModel: modelSelectionOf(state.generation.model)?.model ?? state.generation.provider.model ?? null,
             serviceId: modelSelectionOf(state.generation.model)?.provider ?? resolveModel(state.generation.model).serviceId ?? 'legacy',
             pendingServiceId: state.pendingGeneration === undefined ? null : modelSelectionOf(state.pendingGeneration.model)?.provider ?? null,
             pendingModel: state.pendingGeneration?.provider.model ?? null,
-            // 判定档位与模式名是两样东西，字段也各写各的（D40：状态行上 `mode:` 与 `policy:`）。
-            // 档位这一格现在有两件来源：配置那一份默认与会话自己的覆盖（D101），界面要说得出眼下生效的出自哪一件。
+            // 分别返回当前模式和策略，并说明策略来自配置默认值还是会话覆盖。
             policy: state.chain.mode,
             policySource: state.chain.modeSource,
             policyDefault: state.chain.configuredMode(),
             denials: state.chain.denials(),
-            // 条数而不是内容：内容走 session.read。
+            // 这里只返回条数；记录内容由 `session.read` 提供。
             eventCount: (await state.session.read()).length,
-            // 名字、说明与参数提示三样交出去，为的是界面上那一串候选：展开仍然只在这地方做一次（D24、D81）。
+            // 返回工具名称、说明和参数模式，供客户端选择工具。
             templates: state.templates.templates.map(({ command, description, hint }) => ({ command, description, hint })),
-            // 上下文压力那一格（D82）：窗口、压力线、当前投影的估算，加上记录里最后一次报回的用量。
-            // 没写窗口时整格是 null，画面上那一段就不出现——那不是「还没压到」，是「线还没定」。
+            // 返回上下文窗口、压力阈值、投影 Token 数和提供方最近报告的用量。
+            // 模型窗口未知时返回 null，因为此时无法估算上下文压力。
             usage: state.compaction === null ? null : await state.compaction.context(),
           };
         }
         case 'workspaces.list':
-          // 那份登记才是持久清单，侧栏只是它的一个读者（方案 5.5.1）：界面收起、窗口关掉都不减一条。
-          // 交回整份对象，`default` 那一格跟着走——界面要点出「默认」那一枚标签，得有身份值可比。
+          // 返回持久工作区登记表及默认工作区身份，供客户端显示。
           return await readRegistry();
         case 'workspace.default.set': {
-          // 空的是退掉默认，不需要那一条路真的存在；指了名的先分一次类，不存在、不是目录、读不动各给一个稳定码（方案 2A）。
+          // 空身份用于清除默认工作区。校验指定路径，并分别报告路径不存在、目标不是目录和目录不可读。
           const directory = String(message.params.directory).trim();
           if (directory === '') return await setDefaultWorkspace(null);
           await classifyProjectRoot(resolve(directory));
           return await setDefaultWorkspace(directory, { name: message.params.name });
         }
         case 'history.read':
-          // 那一份文件的位置由宿主定（与那份登记同一处）：界面说不出要到哪一份文件，也拿不到数据根里别的文件。
+          // 偏好文件路径由 Host 管理，客户端不能指定数据根目录下的任意文件。
           return { entries: await loadHistory() };
         case 'history.append': {
-          // 发出去的那一句进最前面，同句的旧那一份让位过来，尾上超预算的那几条丢掉；交回写完之后那一份清单，
-          // 也就是锁内那一次读—改—写的结果：取锁之前自己拼的那一份不算上另一端刚落下的一句。
+          // 将最新发送的输入放在最前面，删除重复项，并裁剪到配置的条数上限。
+          // 返回在锁内完成读—改—写后的结果。
           return { entries: await rememberHistory(historyPathOf(), [String(message.params.text)]) };
         }
         case 'model.select': {
@@ -1627,11 +1584,11 @@ export function createHost({
           return { model: provider.model, serviceId: selection.provider, when: state.running === undefined ? 'now' : 'round' };
         }
         case 'models.discover': {
-          // 已保存的凭据只能发往它所绑定的服务。新建服务尚未保存时，只有显式提供的临时 Key 可以预览。
+          // 已保存密钥只能用于绑定的服务；未保存的服务必须明确提供临时密钥。
           if (message.params.temporaryKey === undefined) {
             const env = await environmentFor(message.params.projectRoot);
-            // 项目共享配置可以引用任意环境变量名，不能据此授予系统凭据读取权。
-            // 只信任用户级配置中的服务/旧模型端点绑定；项目及本机/flag 覆盖只能使用显式 temporaryKey。
+            // 项目配置可以引用环境变量，但不能据此授权读取系统凭据。
+            // 只信任用户配置中的服务绑定；项目、本地和命令行覆盖必须使用临时密钥。
             if (env.store !== undefined) await env.store.read(); // 刷新用户配置层（不使用合并后的 values）。
             const trusted = env.layers.user?.model;
             const model = isRecord(trusted) ? trusted : {};
@@ -1657,20 +1614,17 @@ export function createHost({
         case 'credentials.delete':
           return { deleted: await deleteCredential(requiredString(message.params.reference, 'reference')) };
         case 'prefs.read':
-          // 桌面草稿与界面偏好那一份文档的位置也由宿主定（与输入历史同一处，方案 5.5.2）。
+          // 桌面草稿和偏好文件由 Host 管理。
           return await readPrefs();
         case 'prefs.write': {
           const value = parsePrefsJson(String(message.params.json));
           return await savePrefs(prefsPathOf(), value, { version: requiredString(message.params.version, 'version') });
         }
         case 'config.get': {
-          // 边界在「结果由固定那几格拼出来」这一句上，不在参数校验上：子集校验放过模式里没声明的键（D14）。
-          // 白名单的理由：配置合并除 `__proto__` 之外接受任何键，项目层那一份可能出自别人写的仓库（D8）。
-          // 凭据只走环境变量是一条约定，不是拦阻（D13、D60），所以交出整份快照证明不了帧里没有别的东西。
-          // 值、来源与各层文件的版本出自同一遍读取（方案 3A）：界面上那三样说的是同一时刻的那一份文件。
-          // 版本是写的时候要比对的那一份：光有值比不出「别人也改过」。
-          // 指名了项目就读那一份项目的两层文件：设置那一栏说的是「哪一个项目的哪一层」（方案 3.2、审阅 F3）。
-          // 帧里不出现那一个根：界面上选的是哪一份项目由它自己带着，宿主把位置说进帧里是另一条规矩不允许的（D13）。
+          // 使用明确的允许字段构造响应；参数模式本身允许出现未声明的属性。
+          // 项目配置是不可信输入，可能包含凭据或其他私密内容。
+          // 同一遍读取值、来源和文件版本，确保客户端得到一致快照。
+          // 只读取所选项目的可写配置层。请求携带项目身份，响应不返回项目路径。
           const env = await environmentFor(message.params.projectRoot);
           if (env.store === undefined) return {
             ...shownConfigOf(env.config),
@@ -1683,7 +1637,7 @@ export function createHost({
             ...shownConfigOf(values),
             services: modelServices(values.model?.services),
             selection: values.model?.selection === undefined ? null : modelSelection(values.model.selection),
-            // 配置里写着的默认档：这一格说的是文件里现在那一份，正在生效的那一份从 `status.get` 读（D40、D101）。
+            // 返回配置中的默认策略；`status.get` 返回会话当前生效的策略。
             policyMode: values.policy.mode,
             layers,
             sources,
@@ -1692,14 +1646,13 @@ export function createHost({
           };
         }
         case 'config.set': {
-          // 字段表、值的形状与「哪一层落在哪一个文件」都由那一格配置里的写入侧持有：这一处只转发，
-          // 界面说不出文件路径，也说不出白名单之外的键（方案 7.2）。
+          // 配置存储负责允许字段、值校验和配置层到文件的映射；Host 只转发这些字段。
           if (defaultEnvironment.store === undefined) throw new KernelError('config_write_unsupported');
           const { value, op, index, ruleTool, ruleDecision, ruleMatch, ruleReason } = message.params;
           const field = requiredString(message.params.field, 'field');
           const layer = requiredString(message.params.layer, 'layer');
           const version = requiredString(message.params.version, 'version');
-          // 规则的四格在协议表里各是一个字符串：校验器认形状，宿主这一侧 `checkedRule` 认内容（D100）。
+          // 协议层校验字段类型，`checkedRule` 校验规则内容。
           const given = { tool: ruleTool, decision: ruleDecision, match: ruleMatch, reason: ruleReason };
           const rule = Object.values(given).every((item) => item === undefined) ? undefined : given;
           const env = await environmentFor(message.params.projectRoot);
@@ -1711,7 +1664,7 @@ export function createHost({
               if (target.store === undefined) continue;
               const own = target === env ? candidate : await target.store.preview(layer, editedLayer);
               const config = { ...target.config, ...own };
-              // 首启可逐字段填写尚未完整的模型配置；完整配置的能力错误必须在写入前拒绝。
+              // 首次设置允许逐项填写未完成的模型配置；完整配置中的能力错误必须在写入前拒绝。
               hostProviderFromConfig(config);
               if (field === 'model.selection') deriveProvider(config);
               if (field === 'model.services' && isRecord(config.model)) {
@@ -1737,11 +1690,10 @@ export function createHost({
               }
             }
           });
-          // 白名单里那几条模型字段都是提供方要读的那几格，所以写完就问一句：哪一份会话现在就换，哪一份等自己那一轮的边界。
-          // 采用的依据是落盘之后按层序重折出来的那一份有效值，不是刚写进去的那一个（方案 7.1、D8）：
-          // 更上面那一层还写着它时，前后折出来是同一份，会话一份都不动、`applies` 交回空，界面由 `shadowed` 与 `shadowedBy` 说出是哪一层盖着它。
-          // 那一条值本来就是命令行 `--config` 写着的话，也在这一条里：`shadowedBy` 说的是 `flag`。
-          // 档位与规则表是另一类：接受之后立即作用于后续判定（方案 7.3 第一行），不等轮次边界。
+          // 按配置层优先级计算写入后的有效模型服务设置。
+          // 返回立即采用变更的会话；其他会话在下一轮边界采用。
+          // 更高优先级配置覆盖本次写入时，不改变会话，并说明覆盖来源。
+          // 策略和审批规则变更从下一次判定开始生效。
           const adoption = await adoptWritten(env, layer, table, key, effective, changed);
           return {
             ...saved,
@@ -1755,7 +1707,7 @@ export function createHost({
         }
         case 'session.compact': {
           const state = open(sessionId);
-          // 压的是下一次请求要用的那一份投影，正在跑的这一轮的上下文已经在路上：这时候压改变不了它（D83）。
+          // 压缩只影响下一次请求的上下文，无法改变已经发出的请求。
           if (state.running !== undefined) throw new KernelError('compact_turn_running', { detail: sessionId });
           if (state.compaction === null) {
             throw new KernelError('compact_window_unset', { detail: 'limits.contextTokens is not written, so there is no window to compact against' });
@@ -1764,18 +1716,18 @@ export function createHost({
           const compaction = state.compaction;
           if (compaction === null) throw new KernelError('compact_window_unset');
           const done = await compaction.compactNow(signal);
-          // 压不动只可能是那一种：留下保留预算之后一段里找不到能切的边界。
+          // 保留预算后找不到可用事件边界时，返回无法压缩的结果。
           if (done === null) throw new KernelError('compact_nothing_to_cut', { detail: sessionId });
           return { sessionId, ...done };
           }, connection, 'compaction');
         }
         default:
-          // validateCall 已经拦住了不认识的方法，走到这里说明分发表与协议表不是同一份。
+          // 执行到此处说明分发表与协议中的方法定义不一致。
           throw new KernelError('protocol_method_unhandled', { detail: message.method });
       }
     },
 
-    // 一条连接断开时把它还占着的那一轮停下来，然后按装配清单的逆序把插件撤掉（I7）。
+    // 连接断开时取消该连接正在运行的轮次，并按加载顺序的逆序释放插件。
     release(): Promise<void> {
       if (closing !== undefined) return closing;
       const states = [...sessions.values()];
@@ -1798,13 +1750,13 @@ export function createHost({
   return host;
 }
 
-// 标准输入输出那一种载体的入口：Electron Main 或脚本启动进程，两端各读写一行 JSON。
+// Electron Main 和脚本使用的标准输入输出传输层；双方每行交换一个 JSON 帧。
 export function serveHost({ input = process.stdin, output = process.stdout, config, ...rest }: HostOptions & { input?: Readable; output?: Writable }): Host {
   const host = createHost({ config, ...rest });
   const connection = createConnection({
     input,
     output,
-    // 一行读不出来的东西不是任何一次调用的失败，它是这条连接的问题：说清楚，让客户端自己决定要不要重开进程。
+    // 格式错误的帧属于连接错误，不是某个请求失败；将错误交给客户端决定是否重连。
     onFault: (error) => connection.notify({ notify: 'fault', code: errorCode(error), detail: errorDetail(error) }),
     onClose: () => {
       void host.release().catch((error: unknown) => rest.logger?.error?.('host release failed', { code: errorCode(error), detail: errorMessage(error) }));

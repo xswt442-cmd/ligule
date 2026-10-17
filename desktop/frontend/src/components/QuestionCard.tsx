@@ -4,7 +4,7 @@ import { useText } from '../locale';
 export type QuestionOption = { label: string; description?: string };
 export type Question = { id: string; question: string; header?: string; options: QuestionOption[]; multiSelect: boolean };
 export type QuestionAsk = { id: string; sessionId: string; project: string; questions: Question[] };
-/** 一张卡上打下的那些字：卡片收掉时由外面留成一条可读的记录，所以一路送出去一份（审阅 F2）。 */
+/** 保存卡片中的已输入答案；关闭卡片时由父级写入会话记录。 */
 export type QuestionDrafts = Record<string, { picked: string[]; extra: string }>;
 
 const answered = (draft: { picked: string[]; extra: string }) => draft.picked.length > 0 || draft.extra.trim() !== '';

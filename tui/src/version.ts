@@ -1,2 +1,2 @@
-// 版本号只有这一处写死：内核、命令行与 MCP 客户端都读它，`test/kernel.test.js` 断言它与各份发行清单是同一次发布。
+// 产品版本只在此处定义；Core、CLI 和 MCP 客户端均从此处读取。
 export const VERSION = '0.0.4';

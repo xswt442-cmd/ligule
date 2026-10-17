@@ -1,5 +1,5 @@
-// 解析器提供 TOML 节点与跨度，编辑器只替换允许修改的值和规则表。
-// 写入前校验版本及完整语义；非目标注释、键序与字节保持原样。
+// TOML 解析器提供语法节点和文本范围；编辑器只修改允许字段和规则表。
+// 写入前校验文件版本和完整配置，同时保留其他注释、键顺序和原始字节。
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
@@ -10,10 +10,10 @@ import { isDeepStrictEqual } from 'node:util';
 import { KernelError, KernelRuntimeError } from './error.js';
 import { modelSelection, modelServices, selectionLiteral, servicesLiteral } from './model-services.js';
 
-/** 一条工具规则：判定链里 `[[policy.rules]]` 的那一项。 */
+/** `[[policy.rules]]` 中的一条工具规则。 */
 export type PolicyRule = { tool: string; match?: string; decision: 'allow' | 'deny'; reason?: string };
 
-/** 一次写入的请求：标量字段带 `value`，规则表带 `op` 与 `rule`（`update`、`remove` 还要 `index`）。 */
+/** 配置写入请求：标量字段使用 `value`，规则表使用 `op` 和 `rule`；更新或删除还需提供 `index`。 */
 export type WriteRequest = {
   field: string;
   version: string;
@@ -23,14 +23,14 @@ export type WriteRequest = {
   rule?: unknown;
 };
 
-/** 一个可写字段：落在哪一条路径、值按什么形状收。 */
+/** 可写配置字段及其文件路径和允许的值类型。 */
 export type EditableField = {
   readonly path: readonly [string, string];
   readonly kind: 'string' | 'enum' | 'url' | 'envName' | 'rules' | 'services' | 'selection' | 'positiveInteger';
   readonly oneOf?: readonly string[];
 };
 
-// 白名单由宿主持有：客户端说不出这一个键之外的事，也指不出一个文件路径（方案 7.2）。
+// Host 维护可写字段白名单；客户端不能指定其他键或文件路径。
 export const EDITABLE: Readonly<Record<string, EditableField>> = {
   'model.api': { path: ['model', 'api'], kind: 'enum', oneOf: ['messages', 'chat-completions'] },
   'model.model': { path: ['model', 'model'], kind: 'string' },
@@ -50,7 +50,7 @@ export function editableField(field: unknown): EditableField {
   return EDITABLE[field];
 }
 
-/** 值先按字段的形状收下来，再交回一份 TOML 写法与一份读回来核对要用的值。 */
+/** 校验字段值，并返回用于 TOML 写入和回读比较的表示。 */
 export function encodeValue(field: EditableField, value: unknown): { literal: string; value: unknown } {
   if (field.kind === 'positiveInteger') {
     if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
@@ -86,7 +86,7 @@ export function encodeValue(field: EditableField, value: unknown): { literal: st
     if (url.protocol !== 'http:' && url.protocol !== 'https:') {
       throw new KernelError('config_field_value', { detail: 'takes an http or https URL' });
     }
-    // 凭据只走环境变量（D13、D60）：把 key 塞进地址里再写进配置文件，等于把秘密放进每一份读得到这份配置的地方。
+    // 凭据通过环境变量引用；不要将密钥写入 URL 或配置文件。
     if (url.username !== '' || url.password !== '') {
       throw new KernelError('config_field_value', { detail: 'credentials do not belong in the address' });
     }
@@ -97,7 +97,7 @@ export function encodeValue(field: EditableField, value: unknown): { literal: st
   return { literal: JSON.stringify(text), value: text };
 }
 
-// TOML 结构与键路径来自 AST；只在原文中替换 AST 给出的跨度。
+// 使用 AST 中的 TOML 结构和键路径，只替换原文中对应的跨度。
 type ParsedPair = { node: AST.TOMLKeyValue; path: (string | number)[] };
 type ParsedDocument = { root: AST.TOMLProgram; tables: AST.TOMLTable[]; pairs: ParsedPair[] };
 type TextEdit = { start: number; end: number; text: string };
@@ -230,13 +230,13 @@ function appendTomlTable(text: string, table: string, key: string, literal: stri
   return `${text}${prefix}[${table}]${eol}${key} = ${literal}${eol}`;
 }
 
-/** 在原文里换掉那一个值：注释、其余键、键的顺序与每一行的换行形状都留着。键不存在时在那一张表里补一行。 */
+/** 在原文中替换指定值并保留其他字节；键不存在时在对应表中新增一行。 */
 export function editTomlValue(text: string, path: readonly [string, string], literal: string, structured = false): { text: string; created: boolean } {
   const parsed = parseDocument(text);
   const existing = parsed.pairs.find((pair) => sameTomlPath(pair.path, path));
   if (existing !== undefined) {
     if (structured) {
-      // 受管数组或表内有注释时拒绝整值替换，保持原文；可用原文编辑器调整。
+      // 受管数组或表包含注释时拒绝整体替换，避免丢失手工编辑内容。
       if (parsed.root.comments.some((comment) => comment.range[0] > existing.node.value.range[0] && comment.range[1] < existing.node.value.range[1])) {
         throw new KernelError('config_edit_shape_unsupported', { detail: 'the managed value contains comments; edit this value in the config file' });
       }
@@ -293,12 +293,12 @@ export function editTomlValue(text: string, path: readonly [string, string], lit
   return { text: appendTomlTable(text, tableName, key, literal), created: true };
 }
 
-/** 一份文件内容的版本：界面上读回来带着它，写的时候原样交回来核对。 */
+/** 文件内容版本；客户端写入时必须提交最近读取的版本。 */
 export function configVersion(text: string): string {
   return createHash('sha256').update(text).digest('hex');
 }
 
-/** 一份设置文件读一遍：版本与解析出来的那张表出自同一次读（方案 3A）。文件不在时版本是空串、表是空的。 */
+/** 一次读取设置文件并返回对应版本；文件不存在时返回空版本和空表。 */
 export async function readConfigLayer(file: string): Promise<{ version: string; table: Record<string, unknown> }> {
   let text: string;
   try {
@@ -314,7 +314,7 @@ export async function readConfigLayer(file: string): Promise<{ version: string; 
   }
 }
 
-/** 一次写入：锁住这一份文件，核对版本、做那一次动作、整份读回来核对、先写临时文件再改名。 */
+/** 锁定文件、校验版本、应用修改并回读验证，最后通过临时文件和重命名原子写入。 */
 export async function writeConfigField(
   file: string,
   request: WriteRequest,
@@ -351,8 +351,8 @@ export async function writeConfigField(
       }
       exists = false;
     }
-    // 版本比对与替换在同一次持锁里做：先比对、再无保护地覆盖，等于把另一进程刚写的那一份丢掉。
-    // 那份文件不在时版本是空串——它与「有一份但是空的」不是同一件事，后者交回的是空文本的哈希。
+    // 版本比较和写入都在同一文件锁内完成，避免覆盖其他进程的更新。
+    // 文件不存在时使用空版本；已存在的空文件仍使用其内容哈希。
     if ((exists ? configVersion(current) : '') !== request.version) {
       throw new KernelError('config_version_stale', { detail: `${target} changed since it was read; nothing was written` });
     }
@@ -369,7 +369,7 @@ export async function writeConfigField(
       : editTomlValue(current, definition.path, scalar.literal, definition.kind === 'services' || definition.kind === 'selection');
     const parsed = read(edited.text, 'config_edit_verify_failed');
     if (scalar === undefined) {
-      // 核对的是整张表：别的项被这一趟动过，也要在这里说出来。
+      // 比较整个规则表，检测写入期间其他规则是否发生变化。
       const landed = digestRules(rulesOfLayer(parsed));
       const wanted = digestRules(expectedRules(before, op as RuleOp, index, rule));
       if (landed !== wanted) {
@@ -410,7 +410,7 @@ export async function writeConfigField(
   }
 }
 
-// ---- 工具规则表：`[[policy.rules]]` 的整块增删改（D100）----
+// `[[policy.rules]]` 规则表的增删改。
 
 const RULE_FIELDS = ['tool', 'match', 'decision', 'reason'] as const;
 const RULE_OPS = ['add', 'update', 'remove'] as const;
@@ -431,7 +431,7 @@ function checkedIndex(index: unknown): number {
   return index;
 }
 
-/** 规则的形状由宿主持有：认不下的键、空的值与非法的动作都不写进文件。 */
+/** 校验规则字段、非空值和动作类型；无效规则不得写入文件。 */
 export function checkedRule(input: unknown): PolicyRule {
   if (input === null || typeof input !== 'object' || Array.isArray(input)) {
     throw new KernelError('config_rule_invalid', { detail: `a rule is an object of: ${RULE_FIELDS.join(', ')}` });
@@ -466,7 +466,7 @@ export function checkedRule(input: unknown): PolicyRule {
   };
 }
 
-/** 在原文里对规则表做一次动作：新增一项、换掉那一项里的键、删掉那一项。表之外的字节一个不动。 */
+/** 在原文中添加、更新或删除一条规则，并保留规则表之外的字节。 */
 const RULES_PATH = ['policy', 'rules'] as const;
 
 function ruleTables(document: ParsedDocument): AST.TOMLTable[] {
@@ -577,7 +577,7 @@ export function editRuleTable(text: string, op: RuleOp, index: number, rule?: Po
   return { text: applyTextEdits(text, edits), created: false };
 }
 
-/** 交回一张表里读出来的那些项：认不下的形状报出来，不静默少一项。 */
+/** 解析规则表；遇到无效条目时返回错误，不静默丢弃。 */
 export function rulesOfLayer(parsed: Record<string, unknown>): PolicyRule[] {
   const policy = parsed.policy;
   if (policy === undefined) return [];
@@ -600,7 +600,7 @@ export function rulesOfLayer(parsed: Record<string, unknown>): PolicyRule[] {
   });
 }
 
-/** 按同一次动作算出读回来该长成什么样。 */
+/** 根据本次修改计算预期的回读结果。 */
 export function expectedRules(current: PolicyRule[], op: RuleOp, index: number, rule?: PolicyRule): PolicyRule[] {
   const list = current.map((item) => ({ ...item }));
   if (op === 'add') list.push({ ...(rule as PolicyRule) });
@@ -617,7 +617,7 @@ export function expectedRules(current: PolicyRule[], op: RuleOp, index: number, 
   return list;
 }
 
-// 核对用的写法：键的顺序在这里定下来，两边同一个函数，文件里多写的未知键不参与比较。
+// 统一生成比较用的规则表示；未知字段不参与比较。
 export function digestRules(list: PolicyRule[]): string {
   return list
     .map((rule) => RULE_FIELDS.map((key) => `${key}=${JSON.stringify(rule[key] ?? '')}`).join(' '))

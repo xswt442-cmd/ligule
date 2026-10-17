@@ -9,7 +9,7 @@ export type ModelCatalog = {
   sources: Record<string, string>;
 };
 
-// 切换预设只改正在编辑的服务配置；已有服务的身份和凭据引用不能变。
+// 切换预设只修改当前编辑的服务配置，保留服务 ID 和凭据引用。
 export function presetService(preset: Pick<ModelService, 'name' | 'api' | 'baseURL'>, previous: ModelService | null, existing: boolean, generatedId: string): ModelService {
   const id = existing && previous !== null ? previous.id : generatedId;
   return { id, ...preset, apiKeyEnv: existing && previous !== null ? previous.apiKeyEnv : `LIGULE_${id.toUpperCase()}_KEY`, models: [] };
@@ -31,7 +31,7 @@ export function modelRows(service: ModelService): ModelRow[] {
   return service.models.map(id => newModelRow(id, service.modelSettings?.find(item => item.id === id)));
 }
 
-/** Discovery adds IDs while retaining manually edited names and token limits. */
+/** 合并发现结果时补入模型 ID，并保留用户编辑过的名称和 Token 限制。 */
 export function mergeModelRows(rows: ModelRow[], discovered: string[]): ModelRow[] {
   const ids = new Set(rows.map(row => row.id.trim()));
   const next = [...rows];

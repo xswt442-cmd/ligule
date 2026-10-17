@@ -37,19 +37,19 @@ import { SessionStreamBuffer } from './session-stream';
 
 type Branch = { seq: number; id: string; task: string };
 
-// 流式期间的那半截排在已落盘的那些行之后，id 固定：每次增量都换 id 会让那一行重建，展开状态就丢了。
+// 流式输出显示在已落盘记录之后，并保持固定 ID，避免每个增量都重建行并丢失展开状态。
 const LIVE_REASONING: Row = { id: -2, kind: 'reasoning', text: '' };
 const LIVE_ANSWER: Row = { id: -1, kind: 'answer', text: '' };
 
-// 一次往前要一页的事件数：打开一份会话读最近这一页，更早的按游标继续要（方案 4.1）。
+// 每次向前读取一页事件；打开会话时先取最近页，再按游标读取更早记录。
 const RENDER_WINDOW = 400;
-// 虚拟视口里第一条的起始编号：往前插一页就把它减去插进去的行数，那一条的序号在插页前后不变，视口就停在它上面（U48）。
-// 这一格要留成正数，所以从一个足够大的数起：往前每插一页就从它里面减掉插进去的行数，起得太小会减成负数。
+// 虚拟列表中首条记录的全局索引。前插一页后同步减少已插入行数，保持当前阅读位置不变。
+// 初始值留有足够余量，避免多次前插后索引变成负数。
 const FIRST_INDEX = 100_000;
 
 type StreamContext = { hasMore: boolean; loading: boolean; showEarlier: () => Promise<void> };
 
-// 行组件保持固定身份；界面上下文不作为 DOM 属性传递。
+// 为记录行提供稳定身份；界面上下文只作为组件属性传递，不写入 DOM。
 function StreamItem({ children, style, item: _item, context: _context, ...rest }: ItemProps<Row> & ContextProp<StreamContext>) {
   return <div {...rest} style={style} className="stream-row">{children}</div>;
 }
@@ -65,7 +65,7 @@ function StreamHeader({ context }: ContextProp<StreamContext>) {
 
 const STREAM_COMPONENTS: Components<Row, StreamContext> = { Item: StreamItem, Header: StreamHeader };
 
-// 按实际可见项记住阅读位置；全局项号转换为当前数据下标。
+// 保存当前可见行的位置，并将全局索引转换为当前列表下标。
 function streamAnchor(rows: Row[], firstIndex: number): { id: number; offset: number } | null {
   const scroller = document.querySelector<HTMLElement>('[data-virtuoso-scroller="true"]');
   if (scroller === null) return null;
@@ -84,19 +84,19 @@ type PanelProps = {
   status: Status | null;
   sessionId: string | null;
   running: boolean;
-  // 别的那些会话里还有几轮在跑：顶栏那一枚牌子要说得出「另一份也在跑」（方案 3.1「后台会话继续运行」）。
+  // 统计其他会话中正在运行的轮次，供顶栏显示后台活动状态。
   othersRunning: number;
-  // 左侧栏要按会话画出「这一份在跑」与「刚跑完一轮没看着」：这两格都是界面手里的运行事实（方案 3.1 的侧栏那一串）。
+  // 左侧栏按会话显示运行状态和未读完成状态。
   runningIds: string[];
   unread: string[];
-  // 这一扇窗口另外看着哪几项目录（方案 3.2）：那份清单存在界面偏好里，加与去都写回它。
+  // 当前窗口额外显示的工作区保存在界面偏好中。
   projects: string[];
   onProjects: (roots: string[]) => void;
-  // 这一份窗口现在看着的那一份会话属于哪一个项目：配置那两栏读与写都跟着它（方案 3.2、审阅 F3）。
+  // 当前会话所属项目决定模型配置和审批规则的读取与写入范围。
   projectRoot: string;
-  // 在那一份项目里新建一份会话：不给目录就落在这一具宿主自己的项目（方案 3.2）。
+  // 在指定项目中创建会话；未指定时使用 Host 的默认项目。
   createIn: (root?: string) => void;
-  // 这一栏手里攥着没写进配置的东西时报给这一层，关掉或换掉它之前先问一句（审阅 G2）。
+  // 当前设置页有未保存编辑时，关闭或切换前先请求用户确认。
   onEdit?: (reason: string) => void;
   seconds: number;
   waiting: number;
@@ -105,23 +105,23 @@ type PanelProps = {
   logs: string[];
   onReconnect: () => void;
   openSession: (id: string, projectRoot?: string) => void;
-  // 查找命中说的是一份会话里的第几条：接上那一份，再跳到那一行（方案 4.2）。
+  // 搜索结果包含会话和事件序号；先打开会话，再定位到该事件。
   openHit: (hit: SearchHit, projectRoot?: string) => void;
-  // 宿主多出一份记录时（分支之后）左侧栏重读一次的信号（方案 4.3）。
+  // 新建分支后递增此值，触发左侧栏重新加载会话列表。
   sessionsRevision: number;
   settings: Settings;
   patch: (part: Partial<Settings>) => void;
 };
 
-// 「没在问哪一段」的形状：真实的落笔处起点不可能是 -1，所以它跟任何一段都对不上。
+// 表示当前没有文本组合输入；有效光标位置不会是 -1。
 const NO_TOKEN = { start: -1, text: '' };
-// 视口参数保持对象身份，避免短记录反复测量和重排。
+// 保持视口配置对象稳定，避免短记录重复测量和重排。
 const VIEWPORT_INCREASE = { top: 240, bottom: 600 };
 
-// 已经接上的几项。右侧那一片面板说的是这一份会话现在的情况，与会话浮层里能改的那几格不重复摆控制。
+// 已打开的会话。右侧面板显示当前会话状态，不重复提供会话浮层已有的控制项。
 /**
- * 那份持久登记里默认那一具的目录（方案 5.5.1、5.5.3）：没设过默认、读不回来都算「没有」。
- * 桌面不拿宿主继承的进程目录当自己的工作区，所以第一份会话落在这一格上，而不是落在 cwd。
+ * 返回持久工作区登记中的默认目录。未设置默认目录或读取失败时返回 undefined。
+ * Desktop 不使用 Host 继承的进程当前目录作为工作区。
  */
 async function defaultWorkspaceOf(client: Client): Promise<string | undefined> {
   const roster = await client.call('workspaces.list', {}, 15_000).catch(() => null) as WorkspaceRoster | null;
@@ -129,8 +129,8 @@ async function defaultWorkspaceOf(client: Client): Promise<string | undefined> {
 }
 
 /**
- * 首次使用那一次：向壳要系统文档目录下那一具默认工作区，并把这份选择写进那份登记，让它下次启动还在、左侧栏也看得见（方案 5.5.3）。
- * 取不到、建不成或登记没写成，都交回那一句原因——静默改用别的目录是这一格明令不许的。
+ * 首次启动时请 Electron 壳创建默认工作区并登记选择，以便后续启动和侧栏继续使用。
+ * 获取目录、创建目录或写入登记失败时返回原因，不自动切换到其他目录。
  */
 async function registerShellWorkspace(getDirectory: () => Promise<string>, client: Client): Promise<{ directory?: string; failed?: string }> {
   try {
@@ -161,12 +161,12 @@ const menuPanels: Panel<PanelProps>[] = [
   {
     id: 'panel.help',
     title: '使用手册',
-    // 读的是随包的两份手册正文，不读磁盘、不等站点：这一栏与当前会话无关，所以不用任何 props。
+    // 直接显示随包的使用手册内容，不读取磁盘或请求网络；该面板与当前会话无关。
     view: () => <HelpPanel />,
   },
 ];
 
-// 左侧栏那一项：读的是 `sessions.list`，挂的是声明好的那个槽位（D91、I7）。
+// 左侧栏从 `sessions.list` 读取会话，并通过已声明的界面槽位渲染。
 const railPanels: Panel<PanelProps>[] = [
   {
     id: 'rail.sessions',
@@ -177,8 +177,8 @@ const railPanels: Panel<PanelProps>[] = [
   },
 ];
 
-// 派生支线（D74）：入口作为一个面板挂进类型化槽位，渲染主干不写支线这件事。
-// 支线 id 读自父记录那条 subagent 结果，读它用的还是那一次读记录的动作——协议表里没为支线加方法。
+// 派生会话通过类型化槽位显示，不将支线逻辑写进主转录组件。
+// 支线编号来自父记录中的 subagent 结果；读取仍使用现有会话记录接口。
 function branchOf(record: Record_): Branch | null {
   if (record.kind !== 'tool' || record.tool !== 'subagent') return null;
   const content = record.result?.content as { sessionId?: unknown } | undefined;
@@ -197,7 +197,7 @@ function BranchPanel({ client, sessionId, verbosity }: { client: Client; session
     setShown(null);
     setNote(null);
     if (sessionId === null) return;
-    // 每次打开面板重扫一遍父记录：派生体跑完才有那条结果，第一版不做实时流（D74）。
+    // 每次打开面板时重新读取父记录，因为派生结果只在任务结束后写入。
     void (async () => {
       try {
         const { events } = await client.call('session.read', { sessionId, fullResults: true }) as { events: Record_[] };
@@ -260,62 +260,59 @@ export function App({ transport }: { transport: Transport }) {
   const booted = useRef(false);
   const [rows, setRows] = useState<Row[]>([]);
   const [live, setLive] = useState({ text: '', reasoning: '' });
-  // 流式那半截按会话各存一份：后台那一轮的片段留着，切回来先补上它，不等那一条落进记录（方案 3.1、审阅 F4）。
+  // 按会话分别保存流式片段；切回后台会话时可先显示尚未落盘的输出。
   const liveStreamRef = useRef<SessionStreamBuffer | null>(null);
   if (liveStreamRef.current === null) liveStreamRef.current = new SessionStreamBuffer();
   const liveBySession = liveStreamRef.current;
   const terminalBySession = useRef(new Map<string, number>());
-  // 跑着的时候新到的询问排在后面：一次问一件事，答一件再画下一件。
+  // 同一会话的待答问题按顺序排队，一次显示一个。
   const [asks, setAsks] = useState<Ask[]>([]);
-  // 本轮收尾时要知道那一份会话还剩几条没答：这一格由渲染之后同步，不在那一条收尾路径的依赖里读 `asks`（那会读到旧的一份）。
+  // 保存每个会话剩余的待答问题数，供轮次结束处理使用；在渲染后同步以避免读取旧状态。
   const asksLeft = useRef<Ask[]>([]);
   useEffect(() => { asksLeft.current = asks; }, [asks]);
-  // 模型的提问与审批各一张卡、各一条链：审批答「能不能做这一件」，提问答「这一件事该怎么办」（D107）。
+  // 提问和审批使用不同卡片与请求流程：审批决定是否允许操作，提问收集用户信息。
   const [queries, setQueries] = useState<QuestionAsk[]>([]);
-  // 与审批那一条收尾同一格做法：收尾的路径要说出那一份会话还剩几道题没交，也要拿到已经打下的字（审阅 F2）。
+  // 轮次结束时需要知道该会话剩余问题数和用户已输入的答案。
   const queriesLeft = useRef<QuestionAsk[]>([]);
   useEffect(() => { queriesLeft.current = queries; }, [queries]);
-  // 一张卡上打下的字一路送到这一格：卡片收掉之后题面与那些字留成转录里的一条记录，而那张卡不再能提交（方案 R1）。
+  // 暂存卡片中的答案；卡片关闭后将问题和答案写入转录，并禁止重复提交。
   const questionDrafts = useRef(new Map<string, QuestionDrafts>());
-  // 收尾时那一份会话不在眼前：那一句留在它自己名下，等下一次接它时一起落下。
+  // 会话不在前台时暂存其问题和答案，等重新打开该会话时再写入记录。
   const pendingEchoes = useRef(new Map<string, Array<{ zh: string; en: string }>>());
   const keepQuestionDraft = useCallback((id: string, drafts: QuestionDrafts) => { questionDrafts.current.set(id, drafts); }, []);
-  // 跑着的那几轮各属于哪一份会话（方案 3.1「后台会话继续运行」与 5.2「队列按会话隔离」）：
-  // 一具 Host 给每份会话自己的信号与判定链（`state.running` 按会话存），界面这一侧也跟着按会话记，
-  // 「本轮结束」与那几句画面只说得上它自己那一份会话；切走看着另一份时不替那一份发话、也不替那一份画收尾。
+  // 每个会话独立维护运行状态、取消信号和输入队列。
+  // 轮次完成状态只更新所属会话，切换前台会话不会改变其他会话的显示。
   const [runningIds, setRunningIds] = useState<string[]>([]);
   const running = sessionId !== null && runningIds.includes(sessionId);
   const othersRunning = runningIds.filter((id) => id !== sessionId).length;
-  // 每一轮什么时候起的：顶上那枚「正在跑几秒」说的是眼前这一份的那一轮，不是别的那一份的。
+  // 保存各会话轮次的开始时间；顶栏只显示当前会话的运行时长。
   const roundStart = useRef(new Map<string, number>());
   const [tick, setTick] = useState(Date.now());
   const seconds = sessionId === null ? 0 : Math.max(0, Math.floor((tick - (roundStart.current.get(sessionId) ?? tick)) / 1000));
-  // 某一轮收尾时人不在那一份的画面上：那份会话在左侧栏里挂一个「刚跑完一轮」的记号，切过去就消（方案 3.1 的未读结果）。
+  // 后台会话结束时标记为有未读结果；用户切回该会话时清除标记。
   const [unread, setUnread] = useState<string[]>([]);
-  // 该发队首的那些会话：自己那一轮收尾时记下它自己，人按下「继续发」时记下眼前这一份。
-  // 别的那一份的轮次结束时记下的是它自己，眼前这一份对不上，因此不会被它带着发出去（方案 5.2 那句）。
-  // 这一格用 ref 不用 state：它只在「已经有别的东西重渲染」的那一次被读，不需要自己推动渲染。
+  // 记录允许继续发送队列的会话 ID；只在该会话自身结束或用户明确选择继续时设置。
+  // 使用 ref 保存该控制标记，不额外触发界面渲染。
   const allowSend = useRef(new Set<string>());
   const [status, setStatus] = useState<Status | null>(null);
   const [draft, setDraft] = useState('');
   const [caret, setCaret] = useState(0);
-  // 落笔处那一段 `@` 路径引用的候选：清单由宿主列出来，界面不开盘（方案 5.3、D81 边界一）。
+  // `@` 路径候选由 Host 提供，前端不扫描项目目录。
   const [mention, setMention] = useState<null | { start: number; text: string; paths: string[]; chosen: number; stopped: string; root: string; failed?: string }>(null);
-  // Esc 收起的是当下这一个词：接着改字会重新问，原样不动时不再弹出来挡住输入。
+  // 按 Esc 暂时关闭当前候选；输入文本改变后重新查询相应候选。
   const [hiddenMention, setHiddenMention] = useState('');
   const mentionWanted = useRef(NO_TOKEN);
   const mentionAsked = useRef(NO_TOKEN);
-  // 草稿与队列存本机时用的那一个项目身份，读自那份记录的头部；写不进去说过一次就不再重复。
+  // 从会话记录首行读取草稿和队列所属的项目身份；保存失败时只提示一次。
   const [projectRoot, setProjectRoot] = useState('');
-  // 屏幕上这一格草稿属于哪一份会话：接一份会话要等两次调用回来才摊开它自己的那一格，
-  // 中间那一段里 `sessionId` 已经换了而草稿还是上一份的——那时保存会把上一句写进新的那一份名下。
+  // 当前草稿所属的会话。打开会话时，需等恢复请求完成后再保存草稿，避免把旧草稿写入新会话。
   const [inputOwner, setInputOwner] = useState<string | null>(null);
   const saveWarned = useRef(false);
-  // 重连进行中：这一段时间里不发任何排着的句子，也不让「本轮结束就发队首」那一条 effect 点火（D103）。
+  // Host 重连期间暂停发送队列，也不触发轮次结束后的自动发送。
   const reconnecting = useRef(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [panel, setPanel] = useState<Panel<PanelProps> | null>(null);
-  // 右侧那一栏攥着没写完的编辑（或正写着一笔没读回答复）时，关闭与换栏都先问那一句（审阅 G2）。
+  // 右侧面板存在未保存编辑或进行中的写入时，关闭或切换前先确认。
   const [dockGate, setDockGate] = useState<EditGate>({});
   const [dockHold, setDockHold] = useState<{ reasons: string[]; go: () => void } | null>(null);
   const reportDock = useCallback((reason: string) => setDockGate((now) => reportEdit(now, 'dock', reason)), []);
@@ -379,12 +376,12 @@ export function App({ transport }: { transport: Transport }) {
       await bridge.show(notificationOf(kind, currentLanguage, target, known?.name ?? ''));
     }).catch(error => setNotificationProblem(code(error)));
   }, [transport]);
-  // 退出请求带来的那一张确认：清单是空的就不画，那种情况直接交回退出。
+  // 仅当退出会影响活动会话时显示确认对话框。
   const [quitRows, setQuitRows] = useState<QuitRow[]>([]);
   const [quitHold, setQuitHold] = useState<string[] | null>(null);
   const quitting = useRef(false);
   const [closing, setClosing] = useState(false);
-  // 会话这一侧那一格浮层（模式与档位）：入口是顶栏那两枚小牌子（第 105 步）。
+  // 当前会话的模式和策略面板由顶栏对应按钮打开。
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const [reading, setReading] = useState(false);
   const verbosity = settings.verbosity;
@@ -397,52 +394,51 @@ export function App({ transport }: { transport: Transport }) {
     media.addEventListener('change', change);
     return () => media.removeEventListener('change', change);
   }, []);
-  // 输入历史在宿主那一侧的那一份共用文件里，终端界面读写的是同一个（D90、方案 5.5.6）：界面手里只是它的一个读法，-1 说的是当前那份草稿。
+  // 输入历史由 Host 在共享文件中维护；界面使用 `-1` 表示当前未发送草稿。
   const [history, setHistory] = useState<string[]>([]);
   const [walk, setWalk] = useState(-1);
-  // 运行中敲进去的那几句排在界面这一侧：每份会话各排各的，取消这一轮之后停下等一次显式的继续（方案 5.2）。
+  // 运行期间的新输入按会话保存在前端队列中；取消后暂停，等待用户明确继续。
   const [queues, setQueues] = useState<Record<string, { items: string[]; paused: boolean }>>({});
   const queue = queues[sessionId ?? ''] ?? { items: [] as string[], paused: false };
   const patchQueue = useCallback((own: string, next: (current: { items: string[]; paused: boolean }) => { items: string[]; paused: boolean }) => {
     setQueues((current) => ({ ...current, [own]: next(current[own] ?? { items: [], paused: false }) }));
   }, []);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
-  // 眼前看着的那一份会话：在接会话的那一处与 `opening` 同步写下，别的那一份的答复与状态不摊到这一份的格子上。
+  // 当前前台会话 ID，与会话打开状态同步更新；后台会话的响应不得覆盖前台状态。
   const active = useRef<string | null>(null);
-  // 跟随最新：画面停在最后一行时新内容进来就滚到底；人往上翻过就不再自动滚，给一个跳回最新的按钮。
+  // 阅读位置在底部时自动跟随新内容；用户向上滚动后暂停跟随，并显示返回最新内容的按钮。
   const list = useRef<VirtuosoHandle | null>(null);
   const [pinned, setPinned] = useState(true);
-  // 只有读者实际滚动才改变跟随意图，尺寸测量和原生定位不视为阅读操作。
+  // 只有用户滚动会改变跟随状态；布局测量和程序定位不视为用户滚动。
   const readerScrolling = useRef(false);
-  // 历史读到哪一条了：`before` 是这一页最早那一条事件的序号，`hasMore` 说宿主那一边还有没有更早的（方案 4.1）。
-  // 界面手里只有读过的这几页，整份记录留在宿主那一边（实现顺序第 73 步）。
+  // `before` 保存当前最早事件的序号，`hasMore` 表示 Host 是否还有更早记录。
+  // 前端只保留已加载页面，完整记录由 Host 持有。
   const [page, setPage] = useState<{ before: number; hasMore: boolean } | null>(null);
   const [olderLoading, setOlderLoading] = useState(false);
   const [firstIndex, setFirstIndex] = useState(FIRST_INDEX);
   const prependAnchor = useRef<{ id: number; offset: number; request: number } | null>(null);
   const renderedStream = useRef({ rows: [] as Row[], firstIndex: FIRST_INDEX, verbosity });
-  // 画面要落到哪一条：查找的命中，或者上一次读到的那一个位置（方案 4.2、6.2）。
+  // 当前跳转目标，来源可以是搜索结果或恢复的阅读位置。
   const [wanted, setWanted] = useState<{ sessionId: string; seq: number; kind: string } | null>(null);
   const [stamp, setStamp] = useState(0);
   const [initialIndex, setInitialIndex] = useState<FlatIndexLocationWithAlign>({ index: 'LAST', align: 'end' });
-  // 分支写完一份新记录，左侧栏要重读一次才说得出它存在（方案 4.3）；这一枚编号就是那一次重读的信号。
+  // 分支创建成功后触发左侧栏重新加载会话列表。
   const [sessionsRevision, setSessionsRevision] = useState(0);
-  // 每一份会话读到哪儿了：键是会话编号，值是画面最上面那一行的事件序号。切回来时还在手里这一页之内才落回去。
+  // 按会话保存最上方可见事件序号；切回时仅在该记录已加载的页面范围内恢复位置。
   const anchors = useRef(new Map<string, number>());
-  // 这一次读的是哪一份记录的答复：中途又切走时，旧的那一份答复不能落到新的画面上（方案 6.2）。
+  // 标记当前读取请求所属会话，切换会话后丢弃过期响应。
   const opening = useRef<string | null>(null);
-  // 接会话这一动作每发起一次换一个号：只看会话编号分不出 A→B→A 里那两次接 A，旧那次的收尾会把新那次的保护解掉。
+  // 每次打开会话都生成新的请求编号，避免 A→B→A 时旧请求释放新请求的输入保护。
   const openRequest = useRef(0);
-  // 跳到的那一行亮一小段：一屏里几十行都在，不落个记号认不出停在哪一条。
+  // 短暂高亮定位目标，帮助用户在长转录中确认跳转位置。
   const [flash, setFlash] = useState<number | null>(null);
-  // 那一次派发是什么时候交出去的：只为算用时，键是调用 id（D94）。
+  // 按调用 ID 记录派发时间，用于计算工具运行耗时。
   const dispatchAt = useRef(new Map<string, number>());
-  // 这一条连接还在不在：null 是在，其余是那一侧报回来的说法（D93 原样带出）。
+  // 记录 Host 连接状态；null 表示连接正常，其他值是 Host 返回的错误信息。
   const [link, setLink] = useState<string | null>(null);
   const connectionLost = useRef(false);
 
-  // 这一扇窗口打开时读那一份共用的历史一次，换一具宿主时再读一次。读不回来就当没有这一份：
-  // 写那一路由宿主先读文件再合并，读失败不会把另一端写下的句子挤掉。
+  // 窗口打开和 Host 重启时读取共享输入历史。读取失败时按空列表显示；写入由 Host 在锁内合并，避免覆盖其他客户端的更新。
   useEffect(() => {
     client.call('history.read', {}, 15_000).then(
       (read) => setHistory((read as { entries: string[] }).entries),
@@ -450,10 +446,9 @@ export function App({ transport }: { transport: Transport }) {
     );
   }, [client]);
 
-  // 桌面那一份偏好以应用数据根里的文档为准（方案 5.5.2）：打开窗口时从宿主读回来；数据根里还没有这一份
-  // 而 WebView 缓存里留着旧内容时，把那旧内容一次性交上去（此后的权威副本在数据根）。
-  // 读回来之前先不落笔：让第一屏的默认值盖掉数据根里那一份真内容，是会丢草稿的那一种错。
-  // 接会话那一路也要等它落定：缓存里那一份在读取回来之前是旧的，拿它恢复草稿会把文档里那一句盖成空。
+  // 桌面偏好以应用数据根中的文档为准，打开窗口时从 Host 读取。
+  // 只有该文档不存在且 WebView 缓存仍有内容时，才将缓存迁入数据根。
+  // 读取完成前不保存默认值，避免覆盖已有草稿或队列。
   const prefsSettled = useRef<Promise<void>>(Promise.resolve());
   const [settingsReady, setSettingsReady] = useState(false);
   const unsavedInputs = useRef(new Map<string, { root: string; id: string; draft?: string; items?: string[] }>());
@@ -480,7 +475,7 @@ export function App({ transport }: { transport: Transport }) {
         throw error;
       },
     );
-    // 失败在横幅中呈现；接会话的流程等待同一结果并停止恢复，不能据缓存覆盖文件。
+    // 读取失败显示在横幅中；会话恢复也等待此结果，避免用缓存覆盖正式偏好。
     void settled.catch(() => undefined);
     prefsSettled.current = settled;
     return () => {
@@ -488,15 +483,15 @@ export function App({ transport }: { transport: Transport }) {
     };
   }, [client, prefsRevision]);
 
-  // 本轮计时：有轮在跑就一秒走一格，画面按眼前那一份会话自己那一轮的起点算秒数。
+  // 每秒更新当前会话的运行时长。
   useEffect(() => {
     if (runningIds.length === 0) return;
     const timer = setInterval(() => setTick(Date.now()), 1000);
     return () => clearInterval(timer);
   }, [runningIds]);
 
-  // 每 3 秒问一次状态：那是协议里已有的一条只读调用，答不上来就是这一条连接不在了。
-  // 界面这一侧只能重问一次；后端进程起不来那一段是壳的事，协议表里没有那一条命令。
+  // 每三秒通过只读状态请求检查连接；请求失败时由界面发起一次重连。
+  // Host 进程的启动和重启由 Electron 壳负责。
   const beat = useCallback(async (timeoutMs = 5_000) => {
     if (sessionId === null) return;
     try {
@@ -526,8 +521,7 @@ export function App({ transport }: { transport: Transport }) {
     setPinned(true);
   }, []);
 
-  // 「显示更早」要的那一页仍在宿主那一边：游标是这一页最早那一条事件的序号，它稳定也单调，
-  // 所以翻页期间新到的事实在末尾追加，手里这一页不重复也不漏（方案 4.1、实现顺序第 73 步）。
+  // 更早的记录由 Host 分页读取；游标采用当前页最早事件的稳定序号。
   const showEarlier = useCallback(async () => {
     if (sessionId === null || page === null || !page.hasMore || olderLoading) return;
     const request = openRequest.current;
@@ -538,7 +532,7 @@ export function App({ transport }: { transport: Transport }) {
     try {
       const older = await client.call('session.read',
         { sessionId, before: page.before, limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean };
-      // 这一页读回来的时候人已经切走了：过期答复不改新画面的行数，也不动它的游标（方案 6.2）。
+      // 用户已切换会话时忽略过期响应，不更改新会话的列表和游标。
       if (opening.current !== sessionId || openRequest.current !== request) return;
       const added = older.events.flatMap((record) => projectRecord(record));
       const rendered = renderedStream.current;
@@ -546,8 +540,7 @@ export function App({ transport }: { transport: Transport }) {
       const anchor = addedShown === 0 ? null : streamAnchor(rendered.rows, rendered.firstIndex);
       prependAnchor.current = anchor === null ? null : { ...anchor, request };
       restoring = anchor !== null;
-      // 往前插一页要同时把起始编号减去插进去的行数：那一行的序号在插页前后不变，视口就停在它上面（U48）。
-      // 减去的是真的进列表那几行：展示档筛掉的行不在 `visible` 里，按整页的行数减会让视口锚到别的那一行。
+      // 前插一页时按实际加入 `visible` 的行数调整全局起始索引，保持视口锚点不变。
       setFirstIndex((current) => current - addedShown);
       setRows((current) => [...added, ...current]);
       setPage({ before: older.events.length === 0 ? page.before : Number(older.events[0]?.seq), hasMore: older.hasMore });
@@ -558,8 +551,8 @@ export function App({ transport }: { transport: Transport }) {
     }
   }, [client, olderLoading, page, sessionId]);
 
-  // 草稿与排着的几句按「哪一项目录下的哪一份会话」存：数据根里那一份文档是正式副本，WebView 里只当第一屏缓存（方案 5.5.2）。
-  // 切换、打开设置、看历史与断连都不丢这一句，退出再打开时接得回来（方案 5.1）。写不进去要说一句，别让人以为它已经存住了。
+  // 草稿和队列按项目与会话保存到 Host 管理的偏好文档；WebView 存储只用于首屏缓存。
+  // 切换会话、打开设置、查看历史或断连时保留输入。保存失败时明确提示用户。
   const persistInputs = useCallback(async () => {
     if (!settingsReady) throw Object.assign(new Error('prefs_reload_required'), { code: 'prefs_reload_required' });
     const stored = readSettings();
@@ -573,9 +566,9 @@ export function App({ transport }: { transport: Transport }) {
       const root = notificationSessions.current.get(id)?.root;
       if (root !== undefined) remember(root, id, { items: queue.items });
     }
-    // 重新读取偏好会替换缓存；失败前其他会话尚未保存的输入仍从内存补回。
+    // 重新读取会替换缓存；读取失败时保留内存中其他会话尚未保存的输入。
     const pending = new Map(unsavedInputs.current);
-    // 空的那一格不留：草稿清空、队列发完，那一行整个从存储里去掉，不留着旧内容。
+    // 草稿为空且队列已发完时删除该会话的偏好条目。
     const put = <T extends { length: number }>(table: Record<string, Record<string, T>>, root: string, id: string, value: T): Record<string, Record<string, T>> => {
       const row = { ...(table[root] ?? {}) };
       if (value.length === 0) delete row[id];
@@ -609,7 +602,7 @@ export function App({ transport }: { transport: Transport }) {
     });
   }, [inputOwner, persistInputs, sessionId, settingsReady]);
 
-  // 配色、字号与侧栏宽度落在根元素上：那几组 CSS 变量在 `data-palette` 与 `:root` 那一格读（D90）。
+  // 将配色、字号和侧栏宽度写入根元素的 CSS 变量。
   useEffect(() => {
     const root = document.documentElement;
     root.dataset.palette = settings.palette;
@@ -625,7 +618,7 @@ export function App({ transport }: { transport: Transport }) {
     setSettings((current) => ({ ...current, ...part }));
   }, []);
 
-  // 键位从界面偏好那一格读回来：整份先退回默认，再落有效的那一些；读不懂的一条条说出来（方案 6.1）。
+  // 从偏好读取键位覆盖；先恢复默认，再应用有效覆盖，并报告无效项。
   const [keyNotice, setKeyNotice] = useState('');
   useEffect(() => {
     const outcome = loadBindings(settings.keys);
@@ -633,8 +626,8 @@ export function App({ transport }: { transport: Transport }) {
       : t(`${outcome.refused.length} 条快捷键无效，已使用默认键：${outcome.refused.join('、')}`, `${outcome.refused.length} invalid shortcuts use their defaults: ${outcome.refused.join(', ')}`));
   }, [settings.keys, t]);
 
-  // 拖那一条分隔线改侧栏宽度：范围与设置面板里那根滑杆是同一份（D90）。
-  // 指针要抓住：拖到别处（转录的滚动条、另一侧的面板）时 move 也还得送到这一处来。
+  // 拖动分隔线调整侧栏宽度，范围与设置面板的滑杆一致。
+  // 捕获指针后，即使光标移到转录区或侧栏外，拖动事件仍会送到此处。
   const startDrag = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     const startX = event.clientX;
     const startWidth = settings.sidebar;
@@ -660,8 +653,7 @@ export function App({ transport }: { transport: Transport }) {
         setRows((current) => [...current, metaRow('error', `连接错误：${message.code} ${message.detail ?? ''}`, `Connection error: ${message.code} ${message.detail ?? ''}`)]);
         return;
       }
-      // 每一轮流式进来的那半截按会话各存一份：看着别的那一份时它也在长，切回来要先看见已经收到的那一段，
-      // 不等那一条落进记录（方案 3.1 的后台会话继续运行、审阅 F4）。
+      // 按会话保存流式片段，后台会话继续输出时也能在切回后立即显示已收到内容。
       const owner = message.sessionId ?? '';
       const inView = owner === active.current;
       if (message.notify === 'progress') {
@@ -694,14 +686,14 @@ export function App({ transport }: { transport: Transport }) {
             else if (record.status === 'failed' || record.status === 'interrupted') notify('failed', owner);
           }
         }
-        // 刚落盘的那一条取代流式期间的那半截：记录是事实源（I5）。后台那一份收掉的是它自己那半截。
+        // 记录事件写入后，以持久事件替换对应会话的流式片段。
         const held = liveBySession.settle(owner, record?.kind ?? '');
         if (inView) setLive(held);
         if (!inView) return;
         if (record?.kind === 'assistant') {
           for (const call of record.toolCalls ?? []) dispatchAt.current.set(call.id, Date.now());
         }
-        // 记录里不带逐条时间戳，用时这一格只有界面活着的那一轮量得到（D94、U50）。
+        // 事件不保存逐条计时；运行时长由界面在轮次进行期间测量。
         const started = record?.kind === 'tool' && record.callId !== undefined ? dispatchAt.current.get(record.callId) : undefined;
         if (started !== undefined && record?.callId !== undefined) dispatchAt.current.delete(record.callId);
         const added = projectRecord(record, started === undefined ? {} : { startedAt: started });
@@ -710,7 +702,7 @@ export function App({ transport }: { transport: Transport }) {
     });
 
     client.onRequest((message) => {
-      // 提问那一发（D107）：一次请求一到四道题，答复按题目自己的编号回去，与审批各走一条链。
+      // 用户提问一次可以包含多道题，答复按题目编号关联；此流程与审批分开处理。
       if (message.method === 'question.request') {
         const asked = message.params as { sessionId?: string; projectRoot?: string; questions?: QuestionAsk['questions'] };
         const owner = asked.sessionId;
@@ -718,22 +710,22 @@ export function App({ transport }: { transport: Transport }) {
         if (typeof owner !== 'string' || owner === '' || !Array.isArray(items)) return;
         const id = message.id ?? '';
         if (!queriesLeft.current.some(one => one.id === id)) notify('question', owner, asked.projectRoot ?? '');
-        // 同一个编号不排两张卡：一张卡答一次。
+        // 同一个请求编号只保留一张卡，且只能答复一次。
         setQueries((current) => current.some((one) => one.id === id) ? current : [...current, { id, sessionId: owner, project: asked.projectRoot ?? '', questions: items }]);
         return;
       }
-      // Host 朝界面发出去的请求到此只有两种：审批与提问。
+      // Host 发出的交互请求分为审批和用户提问。
       if (message.method !== 'approval.request') return;
       const params = message.params as { sessionId?: string; projectRoot?: string; tool?: string; command?: string; args?: Record<string, unknown>; reason?: string; shell?: string; executable?: string; policy?: string; policySource?: string; policyForced?: boolean };
-      // 询问归那一份会话，不归眼前看着的那一份：别的那一份在等，也得让人看得见、答得掉（实现顺序第 71 步）。
+      // 请求属于发起它的会话；即使会话在后台等待，也必须显示并允许答复。
       const asked = params?.sessionId;
       if (typeof asked !== 'string' || asked === '') return;
       const tool = params.tool ?? '';
       notify('approval', asked, params.projectRoot ?? '');
       const args = params.args ?? {};
-      // 画出来的那一句说的是哪个对象：命令文本、路径、目标地址，或者那一项 MCP 能力名（D67）。
+      // 审批摘要说明实际操作对象，例如命令、路径、目标地址或 MCP 工具。
       const detail = String(params.command ?? args.path ?? args.url ?? capabilityOf(tool, args));
-      // 展开那一段画的是实际动的是哪一件与两段内容；其余的调用把参数交出去，命令那一类参数是空的就不给把手（方案 5.4）。
+      // 展开审批详情时显示具体操作和变更内容；无可展示内容的调用不显示展开入口。
       const change = changeOf(tool, args);
       const content = changeBody(change, args);
       const englishChange = changeOf(tool, args, 'en');
@@ -745,9 +737,9 @@ export function App({ transport }: { transport: Transport }) {
         detail,
         change: change.summary,
         reason: params.reason ?? '',
-        // 用哪一种语法判的、跑的是哪一个可执行文件：答的是这一条命令，看得见的该是这两样（D59）。
+        // 显示权限判定使用的命令语法和实际执行文件。
         backend: params.shell === undefined ? '' : `${params.shell} · ${params.executable ?? ''}`,
-        // 档位、它的来源与是不是被连着拒绝压下来的：这三样跟着那一次询问一起回来，说的都是问那一份会话（审阅 C08）。
+        // 同时显示本次审批使用的策略、策略来源和是否因连续拒绝而收紧。
         policy: params.policy ?? '',
         policySource: params.policySource ?? '',
         policyForced: params.policyForced === true,
@@ -756,14 +748,14 @@ export function App({ transport }: { transport: Transport }) {
       }]);
     });
 
-    // 后端进程的标准错误输出走到这里：它不是协议帧，是那一侧打印的东西。
+    // 显示 Host 进程的标准错误输出；它不属于协议帧。
     transport.onLog((line) => setDiagnosticLogs((current) => [...current, line].slice(-50)));
   }, [client, notify, transport]);
 
   const refreshStatus = useCallback(async (id: string) => {
     try {
       const next = await client.call('status.get', { sessionId: id }) as Status;
-      // 答复回来时人已经切到别的那一份：这一份的状态不摊到那一份的格子上。
+      // 用户已切换会话时，不将该请求的响应写入当前会话状态。
       if (active.current !== id) return;
       setStatus(next);
     } catch (error) {
@@ -771,13 +763,12 @@ export function App({ transport }: { transport: Transport }) {
     }
   }, [client]);
 
-  // 询问是宿主那一侧在等的一件事，不随看着的是哪一份会话而变化：换走时不清空，否则那一条派发给谁答。
-  // 只有那一轮自己收尾（跑完、被打断）或那具宿主换掉时，才收掉它名下的那些询问。
+  // 待答请求保留在所属会话中，切换前台会话时不清除。
+  // 只有该会话轮次结束、取消或 Host 重启时才清理请求。
   const dropAsksOf = useCallback((id: string) => setAsks((current) => current.filter((ask) => ask.sessionId !== id)), [setAsks]);
 
-  // 提问也按它自己那一份会话收尾（审阅 F2）：那一轮跑完、被打断、或换了宿主之后，这次问的已经没有人在等答复，
-  // 卡片继续摆在能答的那一栏会做两件错事——挡住排在后面的另一份会话，还让人以为旧答案交得出去。
-  // 收掉之前把题面与已经打下的字留成一条记录：那是人打过的字，不是可以无声丢掉的东西（方案 R1）。
+  // 会话轮次结束、取消或 Host 重启后，未答问题不再等待响应。
+  // 移除卡片前将题目和已输入内容写入记录，避免丢失用户输入。
   const dropQueriesOf = useCallback((id: string, reason: string) => {
     const left = queriesLeft.current.filter((one) => one.sessionId === id);
     if (left.length === 0) return;
@@ -789,28 +780,24 @@ export function App({ transport }: { transport: Transport }) {
         en: `${questionEcho(one, drafts, 'en')} (${reasonEnglish}; the question is closed)`,
       };
     });
-    // 收尾那几句只画在那一份自己的画面上：人这时候切走了，那句话先押在这一份名下，切回来跟着那一次读落下（方案 3.1 同一条规矩）。
+    // 在后台结束的会话将完成提示暂存到自身状态，切回时再显示。
     if (active.current === id) setRows((current) => [...current, metaRow('meta', lines.map((line) => line.zh).join('\n'), lines.map((line) => line.en).join('\n'))]);
     else pendingEchoes.current.set(id, [...(pendingEchoes.current.get(id) ?? []), ...lines]);
     for (const one of left) questionDrafts.current.delete(one.id);
     setQueries((current) => current.filter((one) => one.sessionId !== id));
   }, [setQueries]);
 
-  // 换会话先让 Host 那一份接上：记录不在磁盘上就是没有这份会话，`session.open` 会说清（D78）。
-  // 已经打开的那一份复用状态，不重开，所以这一个动作对当前会话也是安全的。
-  // 给了 `hit` 就一口气往回读到那一条进来，并把「要落到哪一条」与那些行同一批交出去：
-  // 数据先变长、跳转晚一帧的话，贴在末行那一条会先把画面拉回去（U48、方案 6.2）。
-  // `reclaimQueue` 只有重连那一条路给：宿主换了一具之后，那几句排着的不再留成暂停的队列，而是按先后收回草稿等一次显式的发送。
-  // 正常换会话与点开一份会话仍把排着的几条恢复成暂停（方案 5.1、5.2），那一条不变。
+  // 切换会话时先通过 Host 打开记录；已打开的会话复用现有状态。
+  // 指定搜索结果时一并读取到目标事件，并同时更新定位目标，避免列表扩展后视口短暂滚到末尾。
+  // Host 重启后将暂停队列按顺序移回草稿，等待用户明确发送；普通切换会话时队列仍保持暂停。
   const openSession = useCallback(async (id: string, hit?: SearchHit, reclaimQueue = false, askedRoot?: string) => {
     const savedAnchor = anchors.current.get(id);
     opening.current = id;
     const request = ++openRequest.current;
-    // 看着的是哪一份与「正在接的是哪一份」同一处定下来：状态那一次读紧跟在几次读后面，
-    // 落在渲染提交之后的那一格会把这一次读判成过期，标题上的条数就停在上一份那一份。
+    // 同步更新前台会话和打开状态，再读取会话状态，避免渲染提交后将有效响应误判为过期。
     active.current = id;
     setSessionId(id);
-    // 切回来看这一份时，它那个「刚跑完一轮」的记号就消掉（方案 3.1 的未读结果只用来指「还没看着」）。
+    // 会话进入前台后清除其未读完成标记。
     setUnread((current) => current.filter((item) => item !== id));
     setMobileSidebar(false);
     setRows([]);
@@ -821,26 +808,25 @@ export function App({ transport }: { transport: Transport }) {
     setInitialIndex({ index: 'LAST', align: 'end' });
     readerScrolling.current = false;
     setPinned(true);
-    // 切回来时先把它自己那半截流式回答摆上：这一轮还在跑的话，记录里要到那一条落盘才有全文，中间这几秒不能是空的（审阅 F4）。
+    // 切回会话时立即显示其尚未落盘的流式输出，避免正在运行的轮次暂时显示为空。
     setLive(liveBySession.read(id));
     setWanted(null);
     setInputOwner(null);
     dispatchAt.current.clear();
     setReading(true);
     try {
-      // 两条都带超时：那一边不回话时要显示失败那一种状态，不能一直停在「在读那份记录…」。
-      // 指名了另一项目录就把它一起递过去：宿主按那一份项目环境取记录、算工具目录，身份不对时它自己报回来（方案 3.2）。
+      // 为记录读取设置超时，避免客户端一直停留在加载状态。
+      // 指定项目时同时传递项目根目录，由 Host 选择对应环境并验证记录归属。
       await client.call('session.open', askedRoot === undefined || askedRoot === '' ? { sessionId: id } : { sessionId: id, projectRoot: askedRoot }, 15_000);
-      // fullResults 那一格是给界面读的：溢出文件里的整段正文这才到得了画面（记录本身不动）。
-      // 只取最近这一页：更早的靠「显示更早」那一格按游标往前要（方案 4.1、实现顺序第 73 步）。
+      // 请求完整工具结果以读取溢出文件内容；只读取最近一页，更早记录由分页操作加载。
       const newest = await client.call('session.read', { sessionId: id, limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean; header: { projectRoot?: string } | null; label: { name: string; archived: boolean } };
       if (openRequest.current !== request) return;
-      // 接上这一份时把它自己那两格摊回来：草稿是当时没发出去的那一句，排着的几条恢复成暂停（方案 5.1、5.2）。
+      // 打开会话时恢复其草稿和暂停队列。
       const root = newest.header?.projectRoot ?? '';
       notificationSessions.current.set(id, { root, name: newest.label.name });
       setSessionLabel(newest.label);
       setProjectRoot(root);
-      // 缓存里那一份要等偏好从数据根读回来之后才是新的：恢复草稿与队列读的是那之后的缓存。
+      // 等 Host 读取偏好完成后再恢复草稿和队列，避免使用过期缓存。
       await prefsSettled.current;
       if (openRequest.current !== request) return;
       const stored = readSettings();
@@ -848,7 +834,7 @@ export function App({ transport }: { transport: Transport }) {
       const storedDraft = unsaved?.draft ?? stored.drafts[root]?.[id] ?? '';
       const restored = unsaved?.items ?? stored.queued[root]?.[id] ?? [];
       if (reclaimQueue && restored.length > 0) {
-        // 重连之后：排着的几句按先后收回草稿，队列清空、取消暂停，界面不自动发其中任何一句。
+        // 重连后将队列按顺序移回草稿并清空队列，不自动发送任何内容。
         setDraft(mergeQueueIntoDraft(storedDraft, restored));
         patchQueue(id, () => ({ items: [], paused: false }));
       } else {
@@ -862,28 +848,28 @@ export function App({ transport }: { transport: Transport }) {
       while (hit !== undefined && hit.seq < Number(events[0]?.seq ?? 0) && hasMore) {
         const older = await client.call('session.read',
           { sessionId: id, before: Number(events[0]?.seq), limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean };
-        // 人在这几页读回来的时候切走了：这一份答复过期，不落到新的画面上（方案 6.2）。
+        // 用户已切换会话时忽略过期响应，不更新当前页面。
         if (openRequest.current !== request) return;
         if (older.events.length === 0) { hasMore = false; break; }
         events = [...older.events, ...events];
         hasMore = older.hasMore;
       }
-      // 那一份会话不在画面时收掉的提问留下的那一句，跟着这一次读一起落下：那一轮的事只说得上它自己那一份画面。
+      // 将后台会话中已关闭问题卡片的题目和答案写入该会话记录。
       const kept = pendingEchoes.current.get(id) ?? [];
       pendingEchoes.current.delete(id);
       setRows([...events.flatMap((record) => projectRecord(record)), ...kept.map((line) => metaRow('meta', line.zh, line.en))]);
       setPage({ before: Number(events[0]?.seq ?? 1), hasMore });
-      // 上一次读到的位置还在手里这一页之内就落回去；落不回就停在末尾，不替他改展示档，也不往前多读页。
+      // 如果保存的阅读位置仍在已加载页面中就恢复该位置；否则停在末尾，不改变展示档或自动加载更多页面。
       const back = savedAnchor !== undefined && savedAnchor > Number(events[0]?.seq) && savedAnchor < Number(events.at(-1)?.seq)
         ? { sessionId: id, seq: savedAnchor, kind: 'anchor' }
         : null;
       setWanted(hit ?? back);
     } catch (error) {
-      // 过期那一次的失败不说在新那一次的画面上：那一份会话可能已经接上了，报的是别处的旧账。
+      // 忽略旧请求的失败，避免将过期错误显示在当前会话中。
       if (openRequest.current === request) setRows((current) => [...current, metaRow('error', `无法打开会话：${code(error)}`, `Could not open conversation: ${code(error)}`)]);
       return false;
     } finally {
-      // 只有还是这一次在接的时候才收输入保护：旧那一次的收尾把新那一次的锁解开，人就会在答复还没回来时发出去。
+      // 只有当前打开请求完成后才解除输入保护，避免旧请求提前解锁新请求。
       if (openRequest.current === request) setReading(false);
     }
     if (openRequest.current !== request) return;
@@ -936,8 +922,8 @@ export function App({ transport }: { transport: Transport }) {
     setPinned(true);
     setReading(true);
     try {
-      // 指名了哪一具工作区就在哪一个项目里建；没指名时先看眼前这一份会话在哪一项目录，再退到那份登记里的默认那一具，
-      // 登记里没有就问壳要系统文档目录下那一具并登记成默认。来源那一格按这几档说清是谁选的（方案 3.2、5.5.3）。
+      // 优先使用明确选择的工作区；否则沿用当前会话的项目，再使用登记的默认工作区。
+      // 尚无默认工作区时请 Electron 壳创建并登记一个，同时记录选择来源。
       const named = root === undefined || root === '' ? undefined : root;
       const current = undefined;
       let landing: string | undefined;
@@ -991,11 +977,10 @@ export function App({ transport }: { transport: Transport }) {
     else void newSession();
   }, [settingsReady, settings.lastSession, newSession, openSession]);
 
-  // 查找命中那一条交给接会话那一个动作：读到位与落笔在同一批里，跳转那一处只认这一份会话的第几条（方案 4.2）。
+  // 搜索命中交给会话打开流程处理，使读取到目标记录与定位操作同步完成。
   const openHit = useCallback((hit: SearchHit, root?: string) => void openSession(hit.sessionId, hit, false, root), [openSession]);
 
-  // 两个分支入口共用这一处：不给 `at` 是整份复制——复制到的就是这一刻记录落到哪儿为止；
-  // 给一个轮次标记就是复制到那一轮为止。父那一份一个字不动（方案 4.3）。
+  // 从当前位置或指定轮次创建分支；省略 `at` 时复制当前完整记录。父会话保持不变。
   const branchFrom = useCallback(async (at?: number) => {
     if (sessionId === null) return;
     try {
@@ -1008,15 +993,14 @@ export function App({ transport }: { transport: Transport }) {
     }
   }, [client, openSession, sessionId]);
 
-  // 重连（实现顺序第 65 步）：旧的那一具宿主不会再答复了，先把发出去的请求按一个稳定码收尾，
-  // 把没答的询问作废，再让壳换一具进程，最后用 `session.open` 接回原来那一份会话。
-  // 接回来时这一份会话排着的几句交回草稿（`reclaimQueue`），界面不自动发；人为取消那一路不受这里影响。
+  // 重连时将旧请求以稳定错误码结束并清除待答请求，然后让 Electron 壳重启 Host。
+  // 新 Host 通过 `session.open` 恢复当前会话，并将暂停队列移回草稿，不自动发送。
   const reconnect = useCallback(async () => {
     if (reconnecting.current) return;
     reconnecting.current = true;
     client.discard('host_restarted');
     setAsks([]);
-    // 换了一具宿主，旧的那一发请求身份就作废了：题面与已经打下的字各自留成一条可读的记录，不自动发给新的宿主（方案 4.4、审阅 F2）。
+    // Host 重启后旧请求编号失效；将未完成的问题和已输入答案写入记录，不自动提交给新 Host。
     for (const owner of new Set(queriesLeft.current.map((one) => one.sessionId))) dropQueriesOf(owner, '宿主换了一具');
     setRunningIds([]);
     try {
@@ -1027,8 +1011,7 @@ export function App({ transport }: { transport: Transport }) {
         return;
       }
       if (sessionId !== null) {
-        // 刚被硬杀的那一具宿主把写入租约留在原地，最多十秒过期（`SESSION_LOCK_STALE_MS` 那一格）：重连常常正好落在这段里。
-        // 等它过期再接这一份，最多十二秒；等不到就交给下面那一次读去说「那份会话接不上」，人再按一次重连。
+        // Host 被强制结束后，记录锁可能要等租约过期。等待锁最多十二秒；超时后提示用户重试。
         const deadline = Date.now() + 12_000;
         for (;;) {
           try {
@@ -1052,7 +1035,7 @@ export function App({ transport }: { transport: Transport }) {
         }
       }
     } finally {
-      // 这一格必须在每一条路上都清掉：留着会让之后每一次重连都点在「还在重连」上，队列也永远不点火。
+      // 所有重连结果都要清除重连状态，避免后续无法再次重连或恢复队列。
       reconnecting.current = false;
     }
   }, [client, dropQueriesOf, openSession, projectRoot, sessionId, setAsks, setRunningIds, transport]);
@@ -1062,19 +1045,19 @@ export function App({ transport }: { transport: Transport }) {
     await openSession(sessionId);
   }, [sessionId, openSession]);
 
-  // 输入与轮次终态按所属会话处理；后台结果不改变当前会话的队列。
+  // 按输入所属会话处理输入和轮次结束状态；后台结果不改变当前会话的队列。
   const submit = useCallback(async (text: string, own = sessionId) => {
     if (quitting.current || text === '' || own === null) return;
     const inView = () => active.current === own;
-    // 这一份会话自己跑着的时候回车不丢话：那一句排在界面这一侧，它自己那一轮结束后按先后发出（方案 5.2、D81 边界二：不进记录）。
+    // 会话运行期间的输入加入前端队列，轮次结束后按顺序发送，不写入会话记录。
     if (runningIds.includes(own)) {
       if (inView()) { setDraft(''); setWalk(-1); }
       patchQueue(own, (current) => ({ ...current, items: [...current.items, text] }));
       return;
     }
     if (inView()) { setDraft(''); setWalk(-1); }
-    // 发出去的那一句进那一份共用的历史：宿主读文件、把这一句挪到最前、写回来，界面采用它交回的那一份清单。
-    // 写不进去时按眼前这一份继续走（这一句在这一扇窗口里还翻得回来），发送本身不等这一格（方案 5.5.6）。
+    // 发送成功后由 Host 更新共享输入历史，界面采用其返回结果。
+    // 历史写入失败时保留本地输入历史，且不阻止消息发送。
     void client.call('history.append', { text }, 15_000).then(
       (written) => setHistory((written as { entries: string[] }).entries),
       () => setHistory((current) => [text, ...current.filter((item) => item !== text)]),
@@ -1087,11 +1070,10 @@ export function App({ transport }: { transport: Transport }) {
       await client.call('run.start', { sessionId: own, input: text });
     } catch (error) {
       const stopped = code(error);
-      // 打断落在还在跑的模型调用上时端点那一头交回 `provider_cancelled`，落在两组调用之间才是 `loop_cancelled`，
-      // 落在等一个人回答的那一次提问上才是 `ask_user_cancelled`：人要读的是同一句——这一轮是他停下来的（方案 5.2、D107）。
+      // 根据取消发生位置返回不同错误码：模型请求中为 `provider_cancelled`，调用组之间为 `loop_cancelled`，等待用户答复时为 `ask_user_cancelled`。
       const cancelled = stopped === 'loop_cancelled' || stopped === 'provider_cancelled' || stopped === 'ask_user_cancelled';
-      // 没被宿主受理的那一句不丢：连接上的那几种失败说明这一句在记录里根本没有落过，把它放回草稿等一次显式的发送
-      // （方案 5.1「未受理失败恢复文本」）。受理过之后才失败的那一种不在此列——那句话已经在记录里了。
+      // Host 尚未接受的输入没有写入记录，因此恢复到草稿并等待用户重发。
+      // Host 接受后发生的失败不在此列，因为输入已经保存在会话记录中。
       if (inView() && (stopped === 'host_unanswered' || stopped === 'host_closed' || stopped === 'host_restarted')) setDraft((current) => mergeQueueIntoDraft(current, [text]));
       if (inView() && terminalBySession.current.get(own) === previousTerminal) setRows((current) => [...current, metaRow(cancelled ? 'meta' : 'error', cancelled ? '本轮已取消' : `无法开始本轮：${stopped}`, cancelled ? 'Turn cancelled' : `Could not start the turn: ${stopped}`)]);
       if (cancelled) patchQueue(own, (current) => ({ ...current, paused: true }));
@@ -1099,33 +1081,30 @@ export function App({ transport }: { transport: Transport }) {
     } finally {
       setRunningIds((current) => current.filter((id) => id !== own));
       roundStart.current.delete(own);
-      // 这一轮收尾了：它名下那些没答的询问由宿主按「不允许」结了，界面上不再留着让人去答——留着的原因要说一句（方案 5.4）。
+      // 轮次结束后 Host 会拒绝未答审批；移除界面中的待答卡片并说明原因。
       const left = asksLeft.current.filter((ask) => ask.sessionId === own).length;
       if (left > 0 && inView()) {
         setRows((current) => [...current, metaRow('meta', `本轮结束时有 ${left} 个问题未回答，已按未允许处理。`, `${left} unanswered question(s) were closed as refused when the turn ended.`)]);
       }
       dropAsksOf(own);
-      // 那一份会话的提问跟着同一轮收尾（审阅 F2）：旧的宿主不再等答复，那张卡继续摆在能答的那一栏
-      // 会挡住排在后面的另一份会话，也让人以为旧答案还交得出去。
+      // 轮次结束后移除该会话的待答问题卡片，避免旧请求阻挡其他会话或接受过期答复。
       dropQueriesOf(own, '这一轮已经收尾');
-      // 这一轮收尾了：它名下那半截流式片段不再有内容要补（最后那一条由记录说话），这一格不留着（审阅 F4）。
+      // 轮次结束后移除该会话的流式片段；最终内容由已落盘记录提供。
       liveBySession.clear(own);
       if (inView()) setLive({ text: '', reasoning: '' });
-      // 只有它自己那一份会话的这一轮结束才让它发下一条；别的会话的轮次收尾不替它发（方案 5.2）。
+      // 只有该会话自己的轮次结束后才继续发送其队列；其他会话结束不会触发发送。
       allowSend.current.add(own);
-      // 收尾时人不在这一份的画面上：给那一份会话挂一个「刚跑完一轮」的记号，切过去就消（方案 3.1 的未读结果）。
+      // 后台会话结束时标记为有未读结果，切回时再清除。
       if (!inView()) setUnread((current) => [...new Set([...current, own])]);
       void refreshStatus(own);
     }
   }, [client, dropAsksOf, dropQueriesOf, notify, patchQueue, refreshStatus, runningIds, sessionId, t]);
 
-  // 本轮收尾后把排着的第一条发出去：一次只发一条。暂停着就一条也不发——那几句是人在跑着的时候敲进来的，
-  // 他按下的是取消，剩下怎么走要他再说一次（方案 5.2）。断着连接与重连那一段也不算「本轮收尾」：
-  // 那一句会发给已经不在了的那一具宿主（D103）。
-  // 「该发的那一份」对不上眼前这一份时什么都不发：后台那一轮的完成不能启动另一份会话的输入（方案 5.2 那句），
-  // 那几句排在后面的要人切回去、或按下「继续发」才走。
+  // 轮次结束后每次只发送队首一条。队列暂停时不发送，等待用户明确继续。
+  // 连接断开或正在重连时不发送，避免将输入交给已退出的 Host。
+  // 只有前台会话的队列可以自动继续；后台会话需切回前台或由用户显式继续。
   useEffect(() => {
-    // 与 `send` 同一条门槛：身份与草稿归属还没跟上这一份之前，排着的第一条也不发出去（审阅 F5）。
+    // 与 `send` 使用相同的会话归属检查；草稿归属同步前不发送队列。
     if (quitting.current || reading || inputOwner !== sessionId) return;
     if (running || link !== null || reconnecting.current || sessionId === null) return;
     if (!allowSend.current.has(sessionId)) return;
@@ -1137,7 +1116,7 @@ export function App({ transport }: { transport: Transport }) {
     void submit(next, sessionId);
   }, [inputOwner, patchQueue, queues, reading, running, sessionId, submit]);
 
-  // 收回来的那一句回到草稿：草稿上还有字时不动它，界面不把两句拼在一起（方案 5.2「取消项仍能恢复文本」）。
+  // 将队列项收回草稿；草稿已有内容时保留原文，不拼接两段输入。
   const recoverQueueItem = useCallback((index: number, all: boolean) => {
     if (sessionId === null || draft !== '') return;
     const own = queues[sessionId] ?? { items: [], paused: false };
@@ -1151,9 +1130,8 @@ export function App({ transport }: { transport: Transport }) {
       : (current) => ({ ...current, items: current.items.filter((_, at) => at !== index) }));
   }, [draft, patchQueue, queues, sessionId]);
 
-  // 接一份会话的那一段里不发出去任何东西：`sessionId` 已经换了而草稿与归属还是上一份的，
-  // 这时候按回车或按发送那一枚会把上一句按新的那一份身份落进记录（审阅 F5）。
-  // 这一段里输入坞同时是只读的（下面 `readOnly` 那一格），人新打的字不会被随后恢复草稿那一步盖掉。
+  // 打开新会话时，输入区域保持只读，直到会话 ID、草稿和归属信息同步完成。
+  // 避免将旧会话草稿写入新会话，也避免恢复草稿时覆盖用户刚输入的内容。
   const send = useCallback(async () => {
     const text = draft.trim();
     if (quitting.current || reading || creating.current || !settingsReady || inputOwner !== sessionId || text === '') return;
@@ -1193,27 +1171,27 @@ export function App({ transport }: { transport: Transport }) {
     }
   }, [client, draft, inputOwner, openSession, projectRoot, reading, sessionId, settings.newSelections, settingsReady, submit, t]);
 
-  // 取消哪一份会话的那一轮由 `own` 说定：默认是眼前这一份，另一份会话的提问卡取消的是它自己那一份（审阅 F1）。
+  // `own` 指定取消目标会话；默认取消当前前台会话。
   const cancel = useCallback(async (own = sessionId) => {
     if (own === null) return;
-    // 停下的是那一份会话自己那一轮：另一份会话在跑不由这一枚按钮管（顶栏那枚牌子说出有几份在跑）。
-    // 按下取消就是「剩下的别自己走」：那几条留在那一份会话名下，等一次显式的继续（方案 5.2）。
+    // 只取消目标会话的轮次，不影响其他会话。
+    // 取消会暂停该会话队列，后续输入需由用户明确继续。
     if ((queues[own]?.items.length ?? 0) > 0) patchQueue(own, (current) => ({ ...current, paused: true }));
     try {
       await client.call('run.cancel', { sessionId: own });
     } catch (error) {
-      // 这一句说的是那一份会话的取消，画在它的画面里：人这时候切走了，这一句等切回来由记录补。
+      // 取消状态属于目标会话；用户切走时暂存提示，切回后显示。
       if (active.current === own) setRows((current) => [...current, metaRow('meta', `取消失败：${code(error)}`, `Could not cancel: ${code(error)}`)]);
     }
   }, [client, patchQueue, queues, sessionId]);
 
-  // 退出请求来了要读的是「当下」这一份状态：订阅只挂一次，所以跟着状态换的是 ref 里那一份快照（与 `asksLeft` 同一种写法）。
+  // 退出请求使用最新会话状态；订阅保持稳定，通过 ref 读取更新后的快照。
   const quitInput = useRef<QuitInput>({ running: [], approvals: [], questions: [], queued: {} });
   useEffect(() => {
     quitInput.current = { running: runningIds, approvals: asks.map((ask) => ask.sessionId), questions: queries.map((query) => query.sessionId), queued: queues };
   }, [asks, queues, queries, runningIds]);
 
-  // 退出前等待正式保存完成；保存失败保持窗口与输入，队列在退出期间不能继续发送。
+  // 退出前等待偏好保存完成；保存失败时保留窗口和输入，并暂停队列发送。
   const quitApp = useCallback(async () => {
     if (quitting.current) return;
     quitting.current = true;
@@ -1244,18 +1222,17 @@ export function App({ transport }: { transport: Transport }) {
     });
   }, [transport]);
 
-  // 等手停下 160 毫秒问一次；答回来时那一段已经改了就把那一次丢掉。传输那一层没有中途取消，
-  // 所以 5.3 那一条「慢请求可取消」在这儿做到的是不落到画面上。
+  // 输入停止 160 毫秒后查询候选；响应到达时若查询文本已变化则丢弃。
+  // 传输层不支持取消正在执行的请求，因此通过忽略过期响应避免更新界面。
   useEffect(() => {
     const token = mentionToken(draft, caret);
     if (token === null) { setMention(null); mentionAsked.current = NO_TOKEN; return; }
     mentionWanted.current = token;
     if (hiddenMention === token.text) { mentionAsked.current = NO_TOKEN; return; }
-    // 「上一次问的是哪一段」放在 ref 而不是 state：写进 state 会让本条 effect 重跑，
-    // 那一次重跑先把已经排好的那一下问撤销掉，接着又因为这一段没变而不再重问，画面就停在等那一下上。
+    // 用 ref 保存上次查询文本，避免更新 state 触发 effect 重跑并撤销已安排的查询。
     const asked = mentionAsked.current;
     if (asked.start === token.start && asked.text === token.text) return;
-    // 换了一个词就把手里那几条旧的候选放下：清单留着，Enter 就会把人没选过的那一条插进去。
+    // 查询文本变化后清除旧候选，避免用户选中与当前输入不匹配的结果。
     mentionAsked.current = token;
     setMention({ ...token, paths: [], chosen: 0, stopped: 'pending', root: projectRoot });
     const timer = setTimeout(() => {
@@ -1274,7 +1251,7 @@ export function App({ transport }: { transport: Transport }) {
     return () => clearTimeout(timer);
   }, [caret, client, draft, hiddenMention, projectRoot]);
 
-  // 选中一条候选：那一段 `@…` 换成 `@路径␣`，笔落到那一段之后，后面已写的字不动（方案 5.3）。
+  // 选择候选后将对应的 `@…` 替换为 `@路径 `，光标移到替换内容之后并保留后续文本。
   const pickMention = useCallback((path: string) => {
     if (mention === null) return;
     const merged = insertMention(draft, caret, mention.start, path);
@@ -1286,7 +1263,7 @@ export function App({ transport }: { transport: Transport }) {
     composerRef.current?.focus();
   }, [caret, draft, mention]);
 
-  // 切模式走协议里那一条 `mode.set`（D65）：坏清单在那一刻就报稳定码，不静默换成随包的那一份。
+  // 通过 `mode.set` 切换模式；无效清单返回稳定错误码，不静默回退到默认模式。
   const setMode = useCallback(async (name: string) => {
     if (sessionId === null || name === '') return;
     try {
@@ -1302,7 +1279,7 @@ export function App({ transport }: { transport: Transport }) {
     void refreshStatus(sessionId);
   }, [client, refreshStatus, sessionId]);
 
-  // 换审批档位走 `policy.set`：这一份会话临时改审批方式，`null` 退回配置默认那一档。
+  // 通过 `policy.set` 修改当前会话的策略；传入 `null` 时恢复配置默认值。
   const setPolicy = useCallback(async (mode: 'ask' | 'auto' | 'never' | null) => {
     if (sessionId === null) return;
     try {
@@ -1319,7 +1296,7 @@ export function App({ transport }: { transport: Transport }) {
     await refreshStatus(sessionId);
   }, [client, refreshStatus, sessionId]);
 
-  // 手动压缩走 `session.compact`（D83）：压的是模型那一份上下文，画面上的行仍然来自整份记录。
+  // 通过 `session.compact` 压缩模型上下文；转录仍从完整会话记录构建。
   const compact = useCallback(async () => {
     if (sessionId === null) return;
     try {
@@ -1343,7 +1320,7 @@ export function App({ transport }: { transport: Transport }) {
     );
   }, [rows]);
 
-  // 命令面板只做入口：那一条落下去的还是界面本来就会做的那一件事（D92）。
+  // 命令面板只触发界面已有操作，不实现另一套操作逻辑。
   const commands = useMemo<Command[]>(() => [
     { id: 'session.new', title: t('新建会话', 'New conversation'), run: () => void newSession() },
     { id: 'session.read', title: t('刷新记录', 'Refresh conversation'), run: () => void readBack() },
@@ -1369,20 +1346,20 @@ export function App({ transport }: { transport: Transport }) {
     const head = asks.find((ask) => ask.sessionId === sessionId);
     if (head === undefined) return;
     setAsks((current) => current.filter((ask) => ask.id !== head.id));
-    // 答复按那一次请求的编号回去，看着的是哪一份会话不影响它落到哪一轮。
-    // 回声那一行只画在它自己那一份会话的转录里：别的那一份的答复不属于眼前这一段。
+    // 答复按原请求编号返回，与当前前台会话无关。
+    // 答案回显只写入发起请求的会话转录。
     if (head.sessionId === sessionId) {
-      // 先把这一条记在界面上再发答复：答复一发出去，Host 那一边就往下跑，工具结果可能比这一行先到。
+      // 先更新本地转录再发送答复，因为 Host 收到答复后可能立即返回工具结果。
       setRows((current) => [...current, metaRow('meta', `${decision === 'allow' ? '已允许' : '已拒绝'} ${head.tool}${head.detail === '' ? '' : `：${head.detail.slice(0, 60)}`}`, `${decision === 'allow' ? 'Allowed' : 'Refused'} ${head.tool}${head.detail === '' ? '' : `: ${head.detail.slice(0, 60)}`}`)]);
     }
     client.reply(head.id, { decision });
-    // 答完把焦点从那一枚按钮上移开：焦点还停在按钮上时，下一次 Enter 会再按一次同一枚按钮——那是误批准的一条路（方案 5.4）。
-    // 移开之后交给输入坞：只用键盘的人答完接着说话，焦点丢给页面就要从页头重新 Tab 过去（第 94 步量到 42 次）。
+    // 答复后移走按钮焦点，避免下一次 Enter 重复提交。
+    // 将焦点移至输入框，让键盘用户可以继续输入。
     (document.activeElement as HTMLElement | null)?.blur();
     composerRef.current?.focus();
   }, [asks, client, sessionId]);
 
-  // 提问只交一次答复：交出去就把这张卡收掉，之后再按没有对象可答（一次请求一次答复，D107）。
+  // 每个提问请求只能答复一次；提交后立即移除对应卡片。
   const answerQuestion = useCallback((answers: { id: string; selected: string[]; custom?: string }[]) => {
     const head = queries.find((query) => query.sessionId === sessionId);
     if (head === undefined) return;
@@ -1392,18 +1369,18 @@ export function App({ transport }: { transport: Transport }) {
       setRows((current) => [...current, metaRow('meta', `${answers.length}/${head.questions.length} 个问题已回答，其余已标记为未回答。`, `${answers.length} of ${head.questions.length} questions answered; the rest were marked unanswered.`)]);
     }
     client.reply(head.id, { answers });
-    // 与审批那两枚一样：答完把焦点从按钮上移开，免得下一次 Enter 又按一次同一枚。
+    // 答复后移走按钮焦点，防止 Enter 重复提交。
     (document.activeElement as HTMLElement | null)?.blur();
     composerRef.current?.focus();
   }, [client, queries, sessionId]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      // 输入法正在拼的那一段里，Esc 属于取消候选词，Enter 属于选中候选词：这一路都不能替人收面板或打断这一轮（方案 5.1、5.4）。
+      // 输入法组合期间，Esc 用于取消候选，Enter 用于选择候选；不要将它们用于关闭面板或取消轮次。
       if (isComposing(event)) return;
-      // 设置那一栏正在录一记新键：这一记按键属于「换成什么」，窗口这一层不接（方案 6.1）。
+      // 设置页正在录制快捷键时，不处理窗口级按键动作。
       if (isCapturing()) return;
-      // 按键落的是哪一个动作读这一份表，界面上说出来的一串字也从同一处取（方案 6.1）。
+      // 从同一键位表解析按键动作并生成界面显示文本。
       const action = actionOf(event, '窗口');
       if (action !== null && action !== 'interrupt') {
         event.preventDefault();
@@ -1412,11 +1389,10 @@ export function App({ transport }: { transport: Transport }) {
         else copyLastAnswer();
         return;
       }
-      // 收层那一条顺序排在打断这一轮之前：面板、右侧抽屉，都收完了才轮到取消。
+      // 先关闭面板和抽屉，再处理轮次取消。
       if (specOf(event) !== CURRENT['interrupt']) return;
-      // 那一层浮层（命令面板、这一份会话、设置、功能菜单）的 Esc 归 radix 收：它收层时把这一记键标成已处理。
-      // 状态那一格在这里靠不住——这一记按键是离散事件，radix 收到 React 里先改完状态并重画，键才冒到 document，
-      // 这一条读到的已经是收层之后的那一份。按「这记键有没有人接过」判，才只收一层。
+      // Radix 负责关闭命令面板、会话菜单、设置和其他浮层，并标记 Esc 已处理。
+      // React 状态可能在按键事件到达 document 前更新，因此根据事件是否已处理判断是否继续关闭其他层。
       if (event.defaultPrevented) return;
       if (panel !== null) leaveDock(() => setPanel(null));
       else if (running) void cancel();
@@ -1426,11 +1402,10 @@ export function App({ transport }: { transport: Transport }) {
   }, [cancel, collapsed, copyLastAnswer, leaveDock, panel, patch, running]);
 
   const streamContext = useMemo(() => ({ hasMore: page?.hasMore === true, loading: olderLoading, showEarlier }), [olderLoading, page?.hasMore, showEarlier]);
-  // 展示档没放进来那几类行不进列表：虚拟视口要量每一行的高度，藏着不画的行留在列表里只会量到零（D90、U48）。
+  // 按展示设置过滤转录行；虚拟列表不能保留不渲染的行，否则高度测量会得到零。
   const shown = useMemo(() => rows.filter((row) => shownIn(verbosity, row)), [rows, verbosity]);
-  // 流式那半截排在已落盘的那些行之后：它是这一轮的末尾，画到开头去就把因果倒过来了。
-  // 这一份数组交给视口当数据：身份必须稳住（只在真有变化时才换），否则每渲染一个新数组会让视口
-  // 反复认为数据变化，导致短记录持续重排。
+  // 将流式内容追加在已落盘记录之后，保持事件顺序。
+  // 仅在转录内容变化时替换数组，避免每次渲染都触发虚拟列表重新测量。
   const visible = useMemo(() => (live.reasoning === '' && live.text === '' ? shown : [
     ...shown,
     ...(live.reasoning === '' || !shownIn(verbosity, LIVE_REASONING) ? [] : [{ ...LIVE_REASONING, text: live.reasoning }]),
@@ -1450,7 +1425,7 @@ export function App({ transport }: { transport: Transport }) {
       setOlderLoading(false);
       return;
     }
-    // 数据提交和前插尺寸补偿后定位；完成测量前保持补页状态，关闭自动跟随。
+    // 等数据提交并补偿前插高度后再定位；测量完成前暂停自动跟随。
     const frame = requestAnimationFrame(() => {
       if (prependAnchor.current !== anchor || anchor.request !== openRequest.current) return;
       list.current?.scrollIntoView({
@@ -1467,15 +1442,15 @@ export function App({ transport }: { transport: Transport }) {
     return () => cancelAnimationFrame(frame);
   }, [visible]);
 
-  // 记住这一份会话读到哪儿：画面最上面那一行的事件序号，切回来时按它落回去（方案 6.2）。
-  // 回调保持身份，避免无关渲染引发视口重新订阅。
+  // 保存各会话当前最上方可见事件序号，切回时恢复阅读位置。
+  // 保持回调身份稳定，避免无关渲染导致视口重复订阅。
   const onRangeChanged = useCallback(({ startIndex }: { startIndex: number }) => {
     if (reading) return;
     const row = visible[startIndex - firstIndex];
     if (row?.seq !== undefined && sessionId !== null) anchors.current.set(sessionId, row.seq);
   }, [visible, firstIndex, reading, sessionId]);
 
-  // 定位请求只消费一次；高亮期间的补页和内容更新继续使用同一视口。
+  // 每个定位请求只执行一次；高亮期间的补页和内容更新沿用当前视口。
   useLayoutEffect(() => {
     if (wanted === null) return;
     const at = visible.findIndex((row) => row.seq === wanted.seq);
@@ -1488,18 +1463,18 @@ export function App({ transport }: { transport: Transport }) {
       setWanted(null);
       return;
     }
-    // 上一次读到的那一行不在画出来的这几类里（展示档筛掉了它）：就停在末尾，不替他改档位，也不在转录里写字。
+    // 目标事件被展示设置过滤时停在转录末尾，不修改展示设置或记录。
     if (wanted.kind === 'anchor') {
       setWanted(null);
       return;
     }
-    // 记录里有这一行而画面上没有：是当前展示档把那一类行筛掉了，收到全量才看得见它（D90）。
+    // 记录中存在但当前列表中没有该事件时，说明展示设置已过滤其类型。
     const held = rows.find((row) => row.seq === wanted.seq);
     if (held !== undefined && !shownIn(verbosity, held)) {
       patch({ verbosity: 'detailed' });
       return;
     }
-    // 读到的那几页里没有这一行：它不画在转录里（比如它是一份会话的名字）。说出来，不让人等一次不会来的跳转。
+    // 已读取页面中找不到目标事件时显示提示，不等待无法完成的跳转。
     setWanted(null);
     setRows((current) => [...current, metaRow('meta', wanted.kind === 'label'
       ? `记录 ${wanted.seq} 是会话名称，显示在标题和侧栏中。`
@@ -1508,8 +1483,8 @@ export function App({ transport }: { transport: Transport }) {
       : `Event ${wanted.seq} is not a displayable record.`)]);
   }, [patch, rows, verbosity, visible, wanted]);
 
-  // 那一段亮只亮一会儿：它说的是「跳到这一条」，不是「这一条与别的那些不一样」。
-  // `stamp` 也在读数里：连着跳同一行时那一个值不变，不看它就没法重新起那一段计时。
+  // 定位目标只短暂高亮，表示刚刚跳转到此处。
+  // `stamp` 确保重复跳到同一事件时也会重新开始高亮计时。
   useEffect(() => {
     if (flash === null) return;
     const timer = setTimeout(() => {
@@ -1613,7 +1588,7 @@ export function App({ transport }: { transport: Transport }) {
             branch={row.kind === 'round' ? (at) => void branchFrom(at) : undefined}
             onModels={row.kind === 'round' ? openModelSettings : undefined}
           />}
-          // 上翻、补页和定位期间关闭自动跟随，保留当前阅读位置。
+          // 用户向上滚动、加载旧页或定位时暂停自动跟随，保留阅读位置。
           followOutput={!olderLoading && pinned && wanted === null && flash === null ? 'auto' : false}
           atBottomThreshold={40}
           onWheelCapture={(event) => { if (event.deltaY !== 0) readerScrolling.current = true; }}
@@ -1646,7 +1621,7 @@ export function App({ transport }: { transport: Transport }) {
         active={sessionId}
         onOpen={(id: string) => void openSession(id)}
         onSubmit={answerQuestion}
-        // 取消的是这一张卡自己那一份会话的那一轮：页面切到另一份正在跑的会话时，这一枚按钮不能替那一份停下来（审阅 F1）。
+        // 取消当前卡片所属会话的轮次；前台切换后不能误停其他会话。
         onCancel={() => void cancel(currentQueries[0].sessionId)}
         onDraft={keepQuestionDraft}
       />}
@@ -1694,7 +1669,7 @@ export function App({ transport }: { transport: Transport }) {
               <button type="button" className="mini chip" title={queue.paused ? t('继续发送队列', 'Resume queue') : t('暂停发送队列', 'Pause queue')}
                 onClick={() => {
                   if (sessionId === null) return;
-                  // 按下「继续发」是这一份会话自己要走了：只有这条路和它自己那一轮结束能让它发下一条（方案 5.2）。
+                  // 只有用户明确继续或该会话轮次结束后，才发送队列中的下一条。
                   if (queue.paused) allowSend.current.add(sessionId);
                   patchQueue(sessionId, (current) => ({ ...current, paused: !current.paused }));
                 }}>
@@ -1746,7 +1721,7 @@ export function App({ transport }: { transport: Transport }) {
           ref={composerRef}
           rows={2}
           value={draft}
-          // 接一份会话的那一段里不接新字：这一段屏幕上还是上一份的草稿，敲进去的会落在错的归属上（方案 5.1、审阅 F5）。
+          // 会话切换期间禁用输入，避免将文本保存到错误会话。
           readOnly={closing || reading || starting || inputOwner !== sessionId || !settingsReady}
           placeholder={t('描述任务，使用 @ 引用文件', 'Describe a task, use @ to reference a file')}
           onChange={(event) => {
@@ -1754,12 +1729,12 @@ export function App({ transport }: { transport: Transport }) {
             setCaret(event.target.selectionStart ?? event.target.value.length);
             setWalk(-1);
           }}
-          // 落笔处也认：点一下别处或用方向键挪笔时，那一段 `@` 可能已经不是原来那一段了。
+          // 插入路径前再次验证光标位置和 `@` 查询文本，防止选择过期候选。
           onSelect={(event) => setCaret(event.currentTarget.selectionStart ?? 0)}
           onKeyDown={(event) => {
-            // 组合期间的 Enter 与上下键都是候选词那一路的按键，界面不接：不发这一句，也不翻本机历史（方案 5.1）。
+            // 输入法组合期间的 Enter 和方向键交给输入法，不用于发送消息或浏览历史。
             if (isComposing(event.nativeEvent)) return;
-            // 清单开着时这几记按键归清单那一层：Enter 与 Tab 是选中那一条，不是发送（方案 5.3「选中候选不能触发发送」）。
+            // 候选列表打开时，Enter 和 Tab 用于选择候选，不发送消息。
             if (mention !== null) {
               const candidate = actionOf(event, '候选清单');
               if (candidate === 'hide-candidate') {
@@ -1767,12 +1742,12 @@ export function App({ transport }: { transport: Transport }) {
                 setMention(null);
                 return;
               }
-              // 那一次查询还没回来时 Enter 与 Tab 什么都不做：既不选一条旧的候选，也不把这一句发出去。
+              // 候选查询尚未完成时，Enter 和 Tab 不选择旧结果，也不发送消息。
               if (mention.stopped === 'pending' && (candidate === 'pick-candidate' || candidate === 'complete-candidate')) {
                 event.preventDefault();
                 return;
               }
-              // 选中与换一条都要手里真的有几条：一条都没有时这两记键落回输入坞那一份，Enter 照旧发这一句。
+              // 只有存在候选时才拦截 Enter 和 Tab；没有候选时 Enter 仍发送消息。
               if (candidate !== null && mention.paths.length > 0) {
                 event.preventDefault();
                 if (candidate === 'pick-candidate' || candidate === 'complete-candidate') {
@@ -1790,7 +1765,7 @@ export function App({ transport }: { transport: Transport }) {
               void send();
               return;
             }
-            // 只在空草稿或已经在历史里走的时候接这两个键：否则它们该移动光标。
+            // 仅在草稿为空或正在浏览历史时处理历史导航键；其他情况下保留光标移动行为。
             if (typed !== 'history-older' && typed !== 'history-newer') return;
             if (draft !== '' && walk < 0) return;
             if (history.length === 0) return;

@@ -1,4 +1,4 @@
-// markdown 的结构由解析器读取，代码的词法种类由高亮库提供；这一层只负责终端显示。
+// Markdown 结构由解析器生成，代码标记由语法高亮库提供；本模块负责终端渲染。
 import { marked, type MarkedToken, type Token } from 'marked';
 import highlight, { type Emitter } from 'highlight.js';
 import { displayWidth } from './commands.js';
@@ -43,8 +43,8 @@ for (const name of highlight.listLanguages()) {
 }
 renderer.configure({ __emitter: TerminalEmitter });
 
-// 强调那几种记号在这一层只带一个范围名，怎么画由界面决定（第 96 步：加粗、斜体、删除线与行内代码）。
-// 这一个前缀与 highlight.js 那一套的范围名分开：那两个来源的数字不会撞在一起。
+// 粗体、斜体、删除线和行内代码使用统一的样式范围。
+// 自定义范围前缀与 highlight.js 的语法范围区分开，避免命名冲突。
 export const EMPHASIS = {
   strong: 'md-strong',
   em: 'md-em',
@@ -57,7 +57,7 @@ function inline(tokens: readonly Token[]): MarkdownSpan[] {
   const push = (text: string, scope?: string): void => {
     if (text === '') return;
     const last = spans.at(-1);
-    // 挨着同一种范围的两段合成一段：画出来一样，读的人少看几节。
+    // 合并相邻且样式相同的片段，减少渲染节点。
     if (last !== undefined && last.scope === scope) {
       spans[spans.length - 1] = scope === undefined ? { text: last.text + text } : { text: last.text + text, scope };
       return;
@@ -83,7 +83,7 @@ function inlineText(tokens: readonly Token[]): string {
   return inline(tokens).map((span) => span.text).join('');
 }
 
-// 行首的前缀（缩进、列表的记号、引用那一竖）算这一行的一段，跟着别的段一起画；后面那一段没有范围时并进它。
+// 将缩进、列表标记和引用符号作为行首片段；未设置样式的后续文本并入该片段。
 function prefixed(prefix: string, spans: MarkdownSpan[]): MarkdownSpan[] {
   if (prefix === '') return spans;
   const [first, ...rest] = spans;
@@ -91,7 +91,7 @@ function prefixed(prefix: string, spans: MarkdownSpan[]): MarkdownSpan[] {
   return first.scope === undefined ? [{ text: prefix + first.text }, ...rest] : [{ text: prefix }, ...spans];
 }
 
-// 一行只在真有强调或行内代码时带 spans：纯文字那些行保持原样，别的消费者（复制、表格）不必多看一格。
+// 仅在行内包含强调或代码时生成 spans；纯文本行保持原始字符串，便于复制和表格使用。
 function withSpans(kind: MarkdownLine['kind'], spans: MarkdownSpan[]): MarkdownLine {
   const text = spans.map((span) => span.text).join('');
   return spans.some((span) => span.scope !== undefined) ? { kind, text, spans } : { kind, text };
@@ -144,7 +144,7 @@ export function markdownLines(text: string, columns = 80): MarkdownLine[] {
           const marker = token.ordered ? `${Number(token.start) + index}. ` : '· ';
           const task = item.task ? `[${item.checked === true ? 'x' : ' '}] ` : '';
           const spans = prefixed(prefix + marker + task, inline(item.tokens.flatMap((part) => (part as { tokens?: Token[] }).tokens ?? [part])));
-          // 列表那一行收尾的空格不进 spans：行尾的空白画出来看不见，留在文字里才是原来那一行。
+          // 列表行末尾的空格不加入 spans，保留原始文本供复制使用。
           const trimmed = withSpans('list', spans);
           lines.push({ ...trimmed, text: trimmed.text.trimEnd() });
         }

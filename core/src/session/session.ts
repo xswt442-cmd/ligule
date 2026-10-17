@@ -1,8 +1,8 @@
-// 会话记录：一条追加式 JSONL 事件日志是唯一事实源，恢复与重建都从它算出来（D11、I5）。
-// 写失败时把长度退回写之前、崩溃留下的半行截掉，这两条做法与 dsh 相同：半行会让下一次重试用同一个序号写两遍。
-// 新建的一份先写首行（会话元信息与格式版本），读的时候版本或事件种类读不懂就拒绝重建（D73）。
-// 上下文压缩不改动这一份：摘要写进同目录下的另一份文件，投影前按那一段事件重算哈希，对不上就整份不读它（D75）。
-// 读写失败都是内核自身的故障（KernelRuntimeError）：记录已经不可信，循环要停住，不当成工具没做成那一类。
+// 会话以追加式 JSONL 事件记录作为事实来源；恢复和模型上下文都从记录重建。
+// 写入失败时回退文件长度，清除未完成的末行，避免重试时产生重复序号。
+// 新记录首行保存会话元数据和格式版本；版本或事件类型无法识别时拒绝重建。
+// 压缩摘要和检查点保存在独立文件中。读取前会验证覆盖事件的哈希，校验失败时忽略检查点。
+// 记录读写失败会抛出 `KernelRuntimeError` 并中止循环，不能当作普通工具失败处理。
 import { mkdir, open, truncate, type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 import { KernelError, KernelRuntimeError } from '../kernel/error.js';
@@ -45,16 +45,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /**
  * @param {{ directory: string, id: string, meta?: { projectRoot?: string, mode?: { name: string, layer: string } } |
  *   (() => { projectRoot?: string, mode?: { name: string, layer: string } } | undefined) }} options
- *   `meta` 是首行那一份会话元信息的来源（D73）：它可以是一个函数，因为建会话的时候常常还没决定用哪份模式清单。
+ *   `meta` 提供首行会话元数据；可以使用函数，以便在创建记录时解析最终模式。
  */
 export function createSessionLog({ directory, id, meta }: CreateSessionLogOptions): SessionLog {
   if (typeof directory !== 'string' || directory === '') throw new KernelError('session_directory_required');
   if (typeof id !== 'string' || id === '') throw new KernelError('session_id_required');
   const path = join(directory, `${id}.jsonl`);
   let nextSeq = 0;
-  // 首行只在该写的那一次写：读一遍与写一条都要先知道文件末尾是什么样（D73）。
-  // 这里记住两件事——最后一个序号，以及这份文件是不是还空着（没首行也没事件）。
-  // 只用一次「先读后写」的顺序就把 needsHeader 关掉是错的：宿主打开一份会话时总是先读一遍记录。
+  // 首行元数据只写一次。读写前需知道现有记录的末尾序号，以及文件是否仍为空。
+  // Host 打开会话时会先读取记录，因此读取操作不能清除待写首行的状态。
   let needsHeader = false;
   let writableProbed = false;
   let ownership: SessionLock | undefined;
@@ -76,8 +75,8 @@ export function createSessionLog({ directory, id, meta }: CreateSessionLogOption
     return record;
   }
 
-  // 第一次动这一份文件之前先看清它的尾部：序号要接在最后一条之后，否则一次恢复后的第一条会与已有的一条同号；
-  // 一份空文件（没有首行也没有事件）才是新建，那种才写首行（D73）。
+  // 首次写入前读取文件尾部，确保新事件序号紧接最后一条记录。
+  // 只有完全空的文件才会写入新会话首行。
   async function probe(): Promise<boolean> {
     if (writableProbed) return needsHeader;
     const { events, header, lastSeq } = await loadEvents(true);
@@ -97,7 +96,7 @@ export function createSessionLog({ directory, id, meta }: CreateSessionLogOption
         ...(typeof meta === 'function' ? meta() ?? {} : meta ?? {}),
         createdAt: new Date().toISOString(),
       })));
-      // 首行占了文件的第一行，但它不占事件的序号：下一条事件仍然从 0 号数起。
+      // 首行不计入事件序号，因此首个事件仍从 0 开始。
       needsHeader = false;
     }
     lines.push(JSON.stringify(written));
@@ -123,10 +122,10 @@ export function createSessionLog({ directory, id, meta }: CreateSessionLogOption
       await handle.sync();
     } catch (error) {
       writableProbed = false;
-      // 半行留在文件里会让下一次重试用同一个序号写两遍，所以先把长度退回写入之前，再报原错误。
+      // 回退到写入前的文件长度，避免重试时重复写入相同序号，然后继续抛出原始错误。
       await close();
-      // stat 自己就失败时长度是不知道的，这时什么都不截：截到 0 是把整份记录丢了，
-      // 留下的半行由下一次持有锁的写入检查修复，同样不会重复用号。
+      // 无法读取原文件长度时不截断文件，以免丢失已有记录。
+      // 下一次持有锁的写入会检查并修复末尾残缺行。
       try {
         if (size !== undefined) await truncate(path, size);
       } catch (rollbackError) {
@@ -139,12 +138,11 @@ export function createSessionLog({ directory, id, meta }: CreateSessionLogOption
     return written;
   }
 
-  // 并发执行的那一组工具调用会同时往这一份记录里写（D29），序号与退回长度都要按顺序算：
-  // 两次写互相插进来，轻则两个事件同一个号，重则一次失败的回滚把另一条已经写好的记录截掉。
-  // 同一实例的读取也排队，避免读取尚未写完的追加与更新序号。
+  // 并发工具调用可能同时写入同一记录，因此序号分配、写入和失败回退必须串行执行。
+  // 同一实例的读取也排队，避免读到未完成的追加或过期序号。
   let pending: Promise<unknown> = Promise.resolve();
 
-  // 前一次的结果不决定这一次做不做，所以上一个失败也往下走；失败仍然交回给它自己的调用方。
+  // 一次写入失败不会阻止队列中的下一次写入；每个错误仍返回给原调用方。
   function serialize<T>(action: () => Promise<T>): Promise<T> {
     const result = pending.then(action, action);
     pending = result.then(() => undefined, () => undefined);
@@ -166,8 +164,8 @@ export function createSessionLog({ directory, id, meta }: CreateSessionLogOption
     });
   }
 
-  // 读回全部事件。首行那份会话元信息不算事件，它由 header() 单独交出去（D73）。
-  // 读也顺手刷新那两个记号：先读后写是宿主的常态（模式去重要先读一遍），不能让一次读把该写的首行挡掉。
+  // 读取全部事件；首行元数据由 `header()` 单独提供，不属于事件。
+  // 同时刷新末尾序号和空文件状态，确保先读后写时仍能补写首行元数据。
   async function readOnce(): Promise<SessionEvent[]> {
     const { events, header, lastSeq, truncatedBytes } = await loadEvents();
     if (truncatedBytes > 0) writableProbed = false;
@@ -192,13 +190,12 @@ export function createSessionLog({ directory, id, meta }: CreateSessionLogOption
       if (lease !== undefined) await lease.release();
     }),
     read: () => serialize(readOnce),
-    // 没有首行的现存记录读出来是 undefined：那一份按 legacy-v0 读，不被就地补一个头。
+    // 旧记录没有首行时按 legacy-v0 读取，不在读取过程中修改文件。
     header: () => serialize(async () => (await loadEvents()).header),
 
-    // 模型上一轮看见的那一份，从记录算出来（I5）。助手那一轮与工具结果都要投影：
-    // 请求体里的工具结果要按调用 id 挂在助手那一轮的调用上，只投影工具结果拼不出合法的请求。
-    // 推理段那一种事件不在这里出现（D32）：它进了记录是为了界面与重开时能看见，不是要回传给模型。
-    // 同目录下有一份对得上的检查点时，它顶掉的那一段换成摘要那一条，之后的照原样投（D75）：日志一条都没动。
+    // 从记录重建模型上次看到的上下文。投影必须包含助手调用和对应工具结果，才能生成合法请求。
+    // 推理事件保留在记录中供界面查看，不发送给模型。
+    // 检查点通过校验时，用摘要替换其覆盖范围，后续事件保持原样；原始日志不会被修改。
     async modelView(): Promise<unknown[]> {
       const events = await this.read();
       const { checkpoint } = await loadCheckpoint({ directory, id, events });
@@ -218,8 +215,8 @@ export function createSessionLog({ directory, id, meta }: CreateSessionLogOption
         } else if (event.kind === 'assistant') {
           view.push({ role: 'assistant', text: event.text, toolCalls: event.toolCalls });
         } else if (event.kind === 'tool') {
-          // 拒绝那一条的 reason 是给人的，content 是给模型的：留空字符串，模型只会以为工具通道坏了，
-          // 于是把同一件事再问七轮（本机 2026-10-02 实测）。失败时把码与理由拼成一句给模型看。
+          // `reason` 面向用户，`content` 面向模型。拒绝结果需将错误码和原因写入 `content`，
+          // 否则模型无法区分策略拒绝和空工具响应。
           if (!isRecord(event.result)) throw new TypeError('a tool event has no result object');
           const result = event.result;
           const content = result.content === '' && result.failed ? `${result.code}: ${result.reason ?? 'no output'}` : result.content;

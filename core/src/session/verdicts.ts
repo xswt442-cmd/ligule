@@ -1,5 +1,5 @@
-// 判定结果的汇总（D77、实现顺序第 38 步）：读一份会话记录算出来，内核里不另存第二份计数器。
-// 三档说的是「没问人就成了」「问过人」「没让做」，加上命中的规则与拒绝的码：档位是不是太粗，要靠这几格答。
+// 从会话记录汇总权限判定，不在 Kernel 中另存计数器。
+// 结果区分自动允许、用户审批和拒绝，并包含命中规则及拒绝码。
 import type { SessionEvent } from './format.js';
 
 export interface VerdictCounts {
@@ -23,7 +23,7 @@ interface RecordedVerdict {
   answer?: unknown;
 }
 
-// 被拒绝阈值压到逐次询问的那一次算哪一档：写成 `ask(forced)`，因为它既不是配置里的那一份档位，也不是一般的问。
+// 因连续拒绝触发的强制审批单独标记为 `ask(forced)`，区别于配置策略的一般审批。
 function levelOf(verdict: RecordedVerdict): string {
   const level = typeof verdict.level === 'string' ? verdict.level : 'unknown';
   return verdict.forced === true ? `${level}→ask` : level;
@@ -38,7 +38,7 @@ export function summarizeVerdicts(events: SessionEvent[]): VerdictCounts[] {
   for (const event of events) {
     if (event.kind !== 'tool') continue;
     const verdict = event.verdict as RecordedVerdict | undefined;
-    // 没有判定链的那一次调用（单元测试与以后可能有的旁路）不留这一格，也就不进这份汇总。
+    // 未经过权限判定的调用不参与统计。
     if (typeof verdict?.decision !== 'string') continue;
     const capability = typeof verdict.capability === 'string' && verdict.capability !== ''
       ? verdict.capability
@@ -47,7 +47,7 @@ export function summarizeVerdicts(events: SessionEvent[]): VerdictCounts[] {
       ?? { capability, auto: 0, asked: 0, allowed: 0, denied: 0, codes: {}, rules: {}, levels: {} };
     byCapability.set(capability, item);
     bump(item.levels, levelOf(verdict));
-    // 命中的规则两种结果都要数：放行规则写宽了与拒绝规则拦住了什么，是同一份证据（D77）。
+    // 同时统计放行和拒绝规则的命中次数，用于评估规则效果。
     if (typeof verdict.rule === 'string' && verdict.rule !== '') bump(item.rules, verdict.rule);
     if (verdict.decision === 'deny') {
       item.denied += 1;
@@ -62,7 +62,7 @@ export function summarizeVerdicts(events: SessionEvent[]): VerdictCounts[] {
   return [...byCapability.values()].sort((left, right) => left.capability.localeCompare(right.capability));
 }
 
-// 一行一个能力名：给人看的这一份与上面那份是同一批数，不另算一遍。
+// 每个能力名称单独汇总，展示值直接来自结构化统计结果。
 export function formatVerdicts(counts: VerdictCounts[]): string[] {
   return counts.map((item) => {
     const rules = Object.entries(item.rules).map(([rule, count]) => `"${rule}"×${count}`).join(' ');

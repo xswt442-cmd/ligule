@@ -1,28 +1,27 @@
-// 崩溃留下的那一段（D72、D79）：助手那一轮已经带着一次工具调用，记录里却没有对得上的结果。
-// 这一格既不是失败也不是取消——派发意图可靠地记下来了，外部副作用做没做、做了几次不知道。
-// 补出来的是一条正常的工具结果：交付方要的配对关系仍然成立，模型看得见的是「结果未知」这一句本身。
+// 进程异常结束后，记录可能包含工具调用，却没有对应结果。
+// 此时无法确认外部副作用是否发生，也无法安全重放调用。
+// 恢复时补写普通工具结果，明确说明调用结果未知，并保持请求与结果配对。
 import type { PendingSessionEvent, SessionEvent } from './format.js';
 
 export interface UnresolvedCall {
   tool: string;
   callId: string;
   args: unknown;
-  // 补出来的那一条要指回它补的是哪一次派发（D72）。
+  // 记录被补写结果所对应的原始调用 ID。
   assistantSeq: number;
 }
 
 const OUTCOME_UNKNOWN = 'tool_outcome_unknown';
 
-// 两种说法只在一件事上分开：这一件工具在本机这一侧改不改东西。
-// 只读的可以按需重做；可能改了外部状态的要先看现状，别把一个副作用做成两个。
+// 根据工具是否可能改变外部状态，选择相应的恢复说明。
+// 只读调用可安全重试；可能产生副作用的调用需先检查实际状态。
 const TEXT_READ_ONLY = 'This call was dispatched, but no result was recorded before the run ended. '
   + 'This tool does not change anything on this machine, so run it again if the answer is still needed.';
 const TEXT_MAY_CHANGE = 'This call was dispatched, but no result was recorded before the run ended, '
   + 'so its external effect may or may not have happened. Do not repeat it: read the current state first '
   + '(the file, the directory, the target) and only then decide whether to run it again.';
 
-// 记录里的每一条工具结果都带着那一次调用的 `callId`，所以配对关系读得出来；
-// 一次助手事件里的调用没有结果，就是这一次运行留下的开放尾巴。
+// 工具结果通过 `callId` 关联其调用；助手事件中没有结果的调用属于未完成尾部。
 export function findUnresolvedCalls(events: SessionEvent[]): UnresolvedCall[] {
   const answered = new Set(
     events.filter((event) => event.kind === 'tool').map((event) => String(event.callId)),
@@ -44,8 +43,8 @@ export function findUnresolvedCalls(events: SessionEvent[]): UnresolvedCall[] {
   return unresolved;
 }
 
-// turnContext、未答复的助手调用和尾部没有助手答复的 user 都能证明一轮已经开始。
-// 没有这些证据的旧记录保持原样，避免把旧版已完成轮次补成中断。
+// `turnContext`、未完成工具调用或没有后续助手答复的用户事件都可证明轮次已开始。
+// 缺少这些证据时保持旧记录不变，避免误报已完成轮次。
 function findUnfinishedTurns(events: SessionEvent[]): number[] {
   const users = events.filter((event) => event.kind === 'user' && Number.isInteger(event.seq));
   const userSeqs = new Set(users.map((event) => Number(event.seq)));
@@ -91,7 +90,7 @@ export function buildRepairEvents(
         code: OUTCOME_UNKNOWN,
         reason: safeToRedo ? 'dispatched without a recorded result; this tool reads only' : 'dispatched without a recorded result; its effect may have landed',
       },
-      // 这一格是给界面与排错看的：那一次派发是哪条助手事件，补的是不是可以重做（D72）。
+      // 标记对应的助手事件和工具是否可以安全重试，供界面与诊断使用。
       recovery: { assistantSeq: call.assistantSeq, safeToRedo },
     };
   });
@@ -102,8 +101,8 @@ export interface RepairSession {
   append(event: PendingSessionEvent): Promise<SessionEvent>;
 }
 
-// 补只补一次：第二次再扫的时候那些调用已经各自有了结果这一条，一个都不会再补——幂等是这么来的，
-// 不需要额外的标记（D72）。可写的恢复路径才调这一条；读的那几处（`session.read`、界面、列表）报告缺口而不改盘。
+// 已有结果的调用不会重复补写，因此恢复操作是幂等的。
+// 仅可写恢复流程会调用此函数；`session.read`、界面和列表只报告缺口，不修改记录。
 export async function repairUnresolvedCalls(
   session: RepairSession,
   { readOnly }: { readOnly: Set<string> },

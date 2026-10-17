@@ -1,5 +1,5 @@
-// 终端界面的命令表与候选清单（D81）。这里只做「画哪几条、命中哪一条」这类纯计算。
-// 命令的内容一律来自宿主：提示模板由宿主交出、展开也归宿主（D24、D49），界面不留第二份事实源。
+// 终端命令表和候选清单的纯计算逻辑。
+// 命令和提示模板由 Host 提供并展开，界面不维护副本。
 import stringWidth from 'string-width';
 import type { AskAnswer, AskQuestion } from '@ligule/core/tools/ask-user.js';
 import { textOf, type Locale } from '@ligule/core/kernel/locale.js';
@@ -11,11 +11,11 @@ export interface UiCommand {
   readonly usage: string;
   readonly text: string;
   readonly hint: string;
-  /** 跑着的那一轮里还能不能用：换会话会把人从这一轮带走，那一轮落下来的事件就没人在看。 */
+  /** 该命令能否在轮次运行期间使用。 */
   readonly whenRunning: boolean;
 }
 
-/** 宿主交出来的那一份提示模板，字段与 `status.get` 里那一格同名。 */
+/** Host 返回的提示模板结构，与 `status.get` 中的字段保持一致。 */
 export interface TemplateCommand {
   readonly command: string;
   readonly description?: string;
@@ -29,7 +29,7 @@ export interface Candidate {
   readonly source: 'ui' | 'template';
 }
 
-// 表的先后就是清单里的先后：常用的排在前，不按字母排（参照 codex 那条「枚举顺序即呈现顺序」）。
+// 命令按使用频率排序；此顺序也是帮助列表中的显示顺序。
 export const UI_COMMANDS = Object.freeze([
   { name: 'help', usage: '/help', text: '列出命令与按键', hint: '', whenRunning: true },
   { name: 'mode', usage: '/mode [名字]', text: '查看或切换工具模式', hint: '[名字]', whenRunning: true },
@@ -95,9 +95,8 @@ export function findUiCommand(name: string): UiCommand | undefined {
   return UI_COMMANDS.find((command) => command.name === name);
 }
 
-// 写入类那一句改动说的是同一件事的两头：动的是哪一个对象、要去掉哪一段、要换上哪一段（方案 5.4）。
-// 没读过的内容一律不编：删除那一条只说把哪一个对象移进回收站，正文一概不画；
-// 整份写入时目标在不在由内核那条规则管（覆盖之前要先读全），界面不替它断言那是新建还是覆盖。
+// 写入摘要说明操作对象、删除内容和新增内容。
+// 不显示未读取的正文；删除只说明移入回收站，整份写入不推测目标是新建还是覆盖。
 export type Change = { readonly summary: string; readonly action: string; readonly before: string; readonly after: string };
 
 export function describeChange(tool: string, args: Record<string, unknown>, locale: Locale = 'zh'): Change {
@@ -105,7 +104,7 @@ export function describeChange(tool: string, args: Record<string, unknown>, loca
   const path = typeof args.path === 'string' ? args.path : '';
   const count = (value: unknown) => String(value ?? '').split('\n').length;
   const empty: Change = { summary: '', action: '', before: '', after: '' };
-  // 参数里没有路径就不编造一个对象：摘要行宁可空着，展开那一段照样把正文交出去（与桌面前端同一条规则）。
+  // 缺少路径时不生成目标摘要；展开详情仍显示原始参数。
   if (path === '') return empty;
   if ((tool === 'write' || tool === 'create') && typeof args.content === 'string') {
     return {
@@ -137,8 +136,8 @@ export type InputRoute =
 
 const INVOCATION = /^\/([^\s]*)(?:\s+([\s\S]*))?$/;
 
-// 一条输入落向哪里。斜杠开头的先查这张表，表里没有就整行交给宿主——提示模板只有宿主那侧展开得开（D24、D81）。
-// `blocked` 是「这条命令存在，但这一轮跑着的时候不能用」，说的话与「没有这条命令」不是一回事。
+// 将用户输入分类为内置命令或 Host 处理的提示模板。未知斜杠命令交给 Host 展开。
+// `blocked` 表示命令存在但当前轮次不能执行，与未知命令分开处理。
 export function routeInput(text: string, running: boolean): InputRoute {
   const trimmed = text.trim();
   const matched = INVOCATION.exec(trimmed);
@@ -153,7 +152,7 @@ export function routeInput(text: string, running: boolean): InputRoute {
 
 const CANDIDATE_LIMIT = 8;
 
-// 只有名字那一段还在敲的时候给候选：一旦打了空格就是在写参数，清单压在那儿只会挡住输入。
+// 仅在用户输入命令名称时显示候选；出现空格后按参数输入处理。
 export function candidatesOf(
   draft: string,
   templates: readonly TemplateCommand[] = [],
@@ -181,7 +180,7 @@ export function candidatesOf(
   return [...fromUi, ...fromTemplates].slice(0, limit);
 }
 
-// 中日韩那一段与全角标点在一个字符位上占两列：按字符数补齐会歪，按列数补齐才对得齐（界面里全是中英混排）。
+// 按终端显示列宽对齐表格，正确处理全角和中日韩字符的双列宽度。
 export function displayWidth(text: string): number {
   if (text.length > 32) return stringWidth(text);
   const known = widthCache.get(text);
@@ -191,25 +190,25 @@ export function displayWidth(text: string): number {
   return width;
 }
 
-/** 宿主从记录目录扫出来的那一栏里，界面要画的几格（`sessions.list` 交回的形状，D73）。 */
+/** `sessions.list` 返回的会话数据中，界面需要展示的字段。 */
 export interface SessionRow {
   readonly id: string;
   readonly updatedAt: string;
   readonly events: number;
   readonly mode: { readonly name: string } | null;
-  /** 人给这份会话起的名字；没起过是空串（实现顺序第 75 步）。 */
+  /** 用户设置的会话名称；未命名时为空字符串。 */
   readonly name?: string;
-  /** 归档只改列表怎么展示：记录还在，也接得回来（方案 4.2）。 */
+  /** 归档状态只影响列表显示，记录仍可恢复。 */
   readonly archived?: boolean;
   readonly unanswered: number;
   readonly truncatedBytes?: number;
   readonly error?: { readonly code: string; readonly detail: string };
 }
 
-/** 列表的条数上限：界面上一次画五十行已经把终端滚出一屏，U38 那条「要不要建索引」要的是日常使用的数字。 */
+/** 限制一次显示的会话条数，避免列表超出终端可用空间。 */
 export const SESSION_ROWS = 20;
 
-// 一栏一行。id 整串写出来，因为 `/resume` 后面要跟的就是这一串；时间是记录文件的写入时间，UTC。
+// 每个会话显示为一行。完整 ID 可直接用于 `/resume`，时间取记录文件的 UTC 修改时间。
 export function sessionLines(listed: readonly SessionRow[], current = '', locale: Locale = 'zh'): string[] {
   const t = (zh: string, en: string) => textOf(locale, zh, en);
   if (listed.length === 0) return [t('此工作区暂无会话', 'No sessions in this workspace')];
@@ -227,7 +226,7 @@ export function sessionLines(listed: readonly SessionRow[], current = '', locale
   ].filter((cell) => cell !== '').join('  '));
 }
 
-/** 宿主从记录目录里查出来的那一条命中（`sessions.search` 交回的形状，方案 4.2）。 */
+/** `sessions.search` 返回的单条搜索结果。 */
 export interface SearchRow {
   readonly sessionId: string;
   readonly seq: number;
@@ -237,11 +236,10 @@ export interface SearchRow {
   readonly spilled?: string;
 }
 
-// 那一条记录里的事件种类，画给人看的是中文；认不出的一种原样画出来，不猜它是什么。
+// 将已知事件类型显示为中文；未知类型原样显示。
 const HIT_KINDS: Record<string, string> = { user: '问', assistant: '答', reasoning: '推理', tool: '工具', label: '名字' };
 
-// 一行一条命中：会话编号写开头八段——`/resume` 要的就是这一串，在这份列表里唯一对上就接得回来；
-// 序号交给 `/show`，所以两处都整串写出来，不省略。
+// 每行显示一条命中。会话 ID 前缀用于 `/resume`，事件序号用于 `/show`。
 export function findLines(listed: readonly SearchRow[], current = '', locale: Locale = 'zh'): string[] {
   const t = (zh: string, en: string) => textOf(locale, zh, en);
   return listed.map((hit) => [
@@ -254,11 +252,10 @@ export function findLines(listed: readonly SearchRow[], current = '', locale: Lo
   ].filter((cell) => cell !== '').join('  '));
 }
 
-// 界面上 `@` 的那一段：正被写的一个路径引用。`@` 要在句首或空白之后才算，邮箱与 `a@b` 那一种不弹候选。
+// 识别当前输入中的 `@` 路径引用；`@` 必须位于行首或空白之后，以避免匹配邮箱地址。
 const MENTION = /(?:^|(\s))@([^\s]*)$/;
 
-/** 落笔处往回找那一个还没写完的路径引用；没有就是 null。`start` 是 `@` 的位置。
- * 笔落在一段中间（后面还跟着字）时不算：那时替换会把人已写好的那一段截断。 */
+/** 查找光标前尚未完成的路径引用；`start` 是 `@` 的位置。光标后已有文本时不匹配，以免替换时截断内容。 */
 export function mentionToken(draft: string, caret: number): { readonly start: number; readonly text: string } | null {
   const after = draft.slice(caret);
   if (after !== '' && !/^\s/.test(after)) return null;
@@ -267,16 +264,15 @@ export function mentionToken(draft: string, caret: number): { readonly start: nu
   return { start: caret - matched[2].length - 1, text: matched[2] };
 }
 
-/** 选中一条候选后的草稿与落笔处：那一段 `@…` 换成 `@路径␣`，后面已写的字保留。 */
+/** 选择候选后将 `@…` 替换为 `@路径 `，保留后续文本并更新光标位置。 */
 export function insertMention(draft: string, caret: number, start: number, path: string): { readonly draft: string; readonly caret: number } {
   const inserted = `@${path} `;
   return { draft: draft.slice(0, start) + inserted + draft.slice(caret), caret: start + inserted.length };
 }
 
-/** 前缀对上的那一份，或者一条说明为什么对不上——猜一份是把人带去他没选过的会话里。 */export type SessionPick = { readonly id: string } | { readonly code: 'tui_session_ambiguous' | 'tui_session_not_listed' };
+/** 返回唯一匹配的会话，或说明前缀不匹配或不唯一。 */export type SessionPick = { readonly id: string } | { readonly code: 'tui_session_ambiguous' | 'tui_session_not_listed' };
 
-// `ligule sessions` 里那一串 id 太长，敲一半是自然会做的事：在这份列表里唯一对上才算认。
-// 列表按项目根过滤过，所以别的项目根下的会话不会被这一条接走。
+// 支持通过会话 ID 前缀恢复，但必须在当前项目列表中唯一匹配。
 export function resolveSessionId(argument: string, listed: readonly SessionRow[]): SessionPick {
   const wanted = argument.trim().toLowerCase();
   const exact = listed.find((item) => item.id.toLowerCase() === wanted);
@@ -287,9 +283,8 @@ export function resolveSessionId(argument: string, listed: readonly SessionRow[]
 }
 
 /**
- * 模型那一道题在终端里怎么答（D107）：写的是一到四这一个范围内的纯编号就选中那几条选项，其余文本原样作为自由回答记下，空着就是这一题不答。
- * 不做「答话里出现了某一条选项的名字」那种匹配：猜人要说什么，不如把编号写清楚——与审批那一格同一立场（D81）。
- * 单选那一格收到两个编号时按自由回答记，不把人选过的那一条悄悄丢掉一半。
+ * 有效选项编号用于选择对应选项；其他文本按自由回答原样保存，空输入表示未回答。
+ * 不从自由文本猜测选项。单选题收到多个编号时按自由文本处理，避免静默丢弃输入。
  */
 export function answerOf(question: AskQuestion, text: string): AskAnswer | null {
   const trimmed = text.trim();

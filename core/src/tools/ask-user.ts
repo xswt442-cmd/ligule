@@ -1,17 +1,16 @@
-// 模型向人提问那一件工具（D107）：一次调用问一到四道题，等真人回答，答完才交回结果。
+// `ask_user_question` 向用户提出一至四个问题，并等待答复后返回结果。
 //
-// 参数里的题目写成一段 JSON 文本：内核认下的参数子集（D14）只有标量，没有「对象数组」这一构造，
-// 而提问天生是嵌套形状。`mcp.call` 的 `arguments` 走的是同一条路（D52），校验在装载这一侧按声明做，
-// 模型可见的模式因此不随客户端形状变化。
+// 问题以 JSON 文本传递，因为 Kernel 参数模式子集不支持嵌套对象数组。
+// MCP 工具参数也使用相同文本形式，由 Host 根据工具声明校验。
 //
-// 这一件不进审批判定：审批问的是「能不能做这件操作」，提问问的是「这件事该怎么办」，两件事各自一条请求答复链。
+// 提问与审批使用不同请求和答复流程：审批判断是否允许操作，提问收集用户信息。
 import { KernelError } from '../kernel/error.js';
 
 export type AskOption = { label: string; description?: string };
 export type AskQuestion = { id: string; question: string; header?: string; options: AskOption[]; multiSelect: boolean };
 export type AskAnswer = { id: string; selected: string[]; custom?: string };
 
-// 题数与长度都有上限：一次问八道、每道二十个选项会把两张界面都挤出屏幕，也不让人一次读完。
+// 限制问题数、每题选项数和文本长度，确保请求可读且界面能够显示。
 const MAX_QUESTIONS = 4;
 const MAX_OPTIONS = 4;
 const MAX_QUESTION = 600;
@@ -27,7 +26,7 @@ const text = (value: unknown, limit: number, at: string): string => {
   return value;
 };
 
-/** 把模型交来的那段题目文本变成规范化的题目清单：编号由这一侧按顺序给，模型说不出重复或漏号的编号。 */
+/** 解析并规范化模型提供的问题，由此处生成顺序 ID，避免编号重复或缺失。 */
 export function checkedQuestions(input: unknown): AskQuestion[] {
   let parsed: unknown = input;
   if (typeof input === 'string') {
@@ -69,7 +68,7 @@ export function checkedQuestions(input: unknown): AskQuestion[] {
   });
 }
 
-/** 客户端交回的答复按题目编号对上：编号对不上的丢掉，一道题都没答就报告这条请求没拿到回答。 */
+/** 按题目 ID 匹配客户端答复；忽略未知 ID，且没有任何有效答复时返回未回答错误。 */
 export function checkedAnswers(questions: readonly AskQuestion[], reply: unknown): AskAnswer[] {
   const items = (reply as { answers?: unknown } | null)?.answers;
   if (!Array.isArray(items)) throw new KernelError('ask_user_answer_invalid', { detail: 'the reply holds no answers array' });
@@ -86,7 +85,7 @@ export function checkedAnswers(questions: readonly AskQuestion[], reply: unknown
   return answers;
 }
 
-/** 交回给模型的那一段正文：题目与答案配着读，模型不必再从结构化那一格里拼一遍语义。 */
+/** 将问题和答案组合成模型可读的文本，避免模型重复解释结构化字段。 */
 export function answersText(questions: readonly AskQuestion[], answers: readonly AskAnswer[]): string {
   return questions.map((question, index) => {
     const answer = answers.find((one) => one.id === question.id);
@@ -97,7 +96,7 @@ export function answersText(questions: readonly AskQuestion[], answers: readonly
 }
 
 export interface AskUserToolDeps {
-  /** 发起一次请求并等回答：宿主那一侧交出的是那一条链的 promise，取消由 signal 说。 */
+  /** 向客户端发送问题并等待答复；signal 取消时结束等待。 */
   ask: (questions: readonly AskQuestion[], signal?: AbortSignal) => Promise<unknown>;
 }
 
@@ -107,7 +106,7 @@ export function createAskUserPlugin(deps: AskUserToolDeps) {
     setup(kernel: { register(tool: unknown): () => void }) {
       return kernel.register({
         name: 'ask_user_question',
-        // 模式不能把这一件关掉：一次模式写错就让人看不见模型的问题，而这张清单是模型此刻能做什么的披露入口（D63 同一条规则）。
+        // 提问工具是固定交互入口，不受模式筛选，避免模式配置错误导致用户无法回答模型问题。
         disclosure: true,
         description: 'Ask the user one to four questions and wait for a real answer. Use it when a choice or missing information blocks the next step; do not guess an answer or scan the user\'s text for one. Pass "questions" as a JSON array text of objects holding "question", optionally "header" (a short label), "options" (up to four objects with "label" and optional "description") and "multiSelect" (true when several choices may be picked). Every question also takes a free-text answer. The result carries the answers in the order you asked.',
         parameters: {

@@ -1,10 +1,10 @@
-// 还没写进配置的编辑攥在各栏自己的状态里，而离开它的入口在父层：设置的四个出口、右侧面板的关闭与切换。
-// 这一份表是两边唯一的桥——栏里报一句上来，父层在离开之前先问一遍（审阅 G2）。
+// 各设置区在本地状态中保留未保存编辑；关闭或切换由父级处理。
+// 设置页和右侧面板共用此接口，以便离开前统一确认。
 export type EditGate = Record<string, string>;
 
-/** 一栏把自己那一句报上来，空串是收回。内容没变时交回同一个对象：界面不为一句重复的报话再画一轮。 */
+/** 设置区更新未保存文本；传入空串会移除该项。内容未变时返回原对象，避免无效渲染。 */
 export function report(gate: EditGate, key: string, reason: string): EditGate {
-  // 没报过的那一格读成空串：收回一份本来就空着的东西，不该算一次变化。
+  // 未登记的设置区按空内容处理；移除空内容不会改变状态。
   const now = gate[key] ?? '';
   if (now === reason) return gate;
   const next = { ...gate };
@@ -13,7 +13,7 @@ export function report(gate: EditGate, key: string, reason: string): EditGate {
   return next;
 }
 
-/** 拦住离开的那几句：一句都没有就可以直接走。 */
+/** 判断是否存在需要确认的未保存编辑。 */
 export function holdReasons(gate: EditGate): string[] {
   return Object.values(gate).filter((reason) => reason !== '');
 }

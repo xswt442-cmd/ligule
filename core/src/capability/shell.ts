@@ -1,6 +1,6 @@
-// `exec` 用哪一个解释器由 Host 定（D59）：模型侧仍然只有一件 `exec`，配置 `exec.shell` 取 `auto`、`bash`、`powershell`，
-// `auto` 按平台探测挑一份。选择要进会话记录（种类 + 实际解析出来的可执行文件），因为判定链读的是那一种语法下的解析结果。
-// 探测不动用进程：已知位置直接 stat，其余按 PATH 逐目录 stat。
+// Host 根据 `exec.shell` 配置为 `exec` 选择 `auto`、`bash` 或 `powershell`。
+// 将所选语法和实际可执行文件写入记录，确保权限判定和执行使用同一解释器。
+// 通过检查文件路径探测解释器，不启动进程。
 import { existsSync } from 'node:fs';
 import { delimiter, join, win32 } from 'node:path';
 import { KernelError } from '../kernel/error.js';
@@ -9,11 +9,11 @@ export type ShellKind = 'bash' | 'powershell';
 
 export interface ShellSelection {
   kind: ShellKind;
-  // 实际起起来的那一个可执行文件：记录里要看得见它，不接受「大概是系统默认 shell」这种含糊。
+  // 记录实际启动的可执行文件，避免把解释器记录成含糊的系统默认值。
   executable: string;
-  // 解释器自己的参数，命令文本作为最后一个参数交进去。
+  // 解释器参数列表；命令文本作为最后一个参数传入。
   prefix: string[];
-  // 跟在命令文本后面的一段固定文本，只在能证明这一条是原生命令时才补（`withNativeExitCode`）。
+  // 仅当 `withNativeExitCode` 确认命令是原生命令时，才追加这段退出码处理代码。
   tail: string;
 }
 
@@ -25,25 +25,23 @@ interface ShellProbe {
 
 const CHOICES = ['auto', 'bash', 'powershell'];
 
-// `-NoProfile` 不加载使用者的 profile（那里面装着别人的函数与别名，同一条文本会跑出另一回事），
-// `-NonInteractive` 让它不等人。pi 还带 `-ExecutionPolicy Bypass`（同文件 `:122`）：那一条绕过的是脚本文件那一档，
-// 这里递进去的是一段命令文本，策略管不到它，所以不替使用者改动机器的执行策略。
+// `-NoProfile` 避免用户配置文件中的函数和别名改变命令含义；`-NonInteractive` 禁止等待交互输入。
+// 命令通过 `-Command` 参数传入，不需要修改系统执行策略。
 const POWERSHELL_PREFIX = ['-NoProfile', '-NonInteractive', '-Command'];
 const BASH_PREFIX = ['-c'];
 
-// Windows PowerShell 5.1 在 `-Command` 下把失败的原生命令一律交回 1，命令真正的退出码留在 `$LASTEXITCODE` 里
-// （本机 2026-10-03 实测：`node` 里 `process.exit(7)`，交回来的是 1，补上这一段之后交回来的是 7）。
-// 这一段不能对所有 PowerShell 命令统一补：cmdlet 失败不改 `$LASTEXITCODE`，补上去就把一次失败读成上一条原生命令的退出码，
-// 常常是 0，也就是成功。所以只补在能证明「这一条是原生命令」的那一次调用上（`withNativeExitCode`）。
+// Windows PowerShell 5.1 通过 `-Command` 返回 1 表示失败的原生命令，而实际退出码保存在 `$LASTEXITCODE`。
+// 不能对所有命令都读取该变量，因为 cmdlet 失败不会更新它，可能误用上一条原生命令的退出码。
+// 因此只在 `withNativeExitCode` 确认命令为原生命令时追加退出码处理。
 const POWERSHELL_TAIL = '; exit $LASTEXITCODE';
 
 function known(directory: string | undefined, ...parts: string[]): string | undefined {
-  // 这些位置属于目标平台那一台 Windows 机器，与本项目跑在什么平台上无关，所以按 Windows 的规则拼：
-  // 用平台自己的 `join` 在 POSIX 上会拼出 `C:\Program Files/Git/bin/bash.exe` 那种两可的形状，谁都不认。
+  // 这些路径表示 Windows 目标机上的位置，应始终使用 Windows 路径规则拼接。
+  // 在 POSIX 主机上使用平台默认分隔符会生成 Windows 无法识别的路径。
   return directory === undefined || directory === '' ? undefined : win32.join(directory, ...parts);
 }
 
-// 名字里带路径分隔符的当成一个位置直接看，其余按 PATH 逐目录找。
+// 名称包含路径分隔符时直接检查该路径；否则逐个检查 PATH 目录。
 function locate(name: string, environment: Record<string, string | undefined>): string | undefined {
   if (name.includes('/') || name.includes('\\')) return existsSync(name) ? name : undefined;
   for (const directory of (environment.PATH ?? environment.Path ?? '').split(delimiter)) {
@@ -54,8 +52,8 @@ function locate(name: string, environment: Record<string, string | undefined>): 
   return undefined;
 }
 
-// Windows 上按名字调用时可省略的后缀来自 PATHEXT：PATH 上真实存在的是 `git.exe`，`git` 这个文件不存在。
-// 只试 PATHEXT 里那几个，不试 `.ps1`——一个模块脚本不是一条原生命令，补退出码尾巴对它没有意义。
+// Windows 可执行文件后缀来自 PATHEXT，例如 PATH 中可能只有 `git.exe`。
+// 不将 `.ps1` 视为原生命令，避免对脚本附加不适用的退出码处理。
 function windowsExtensions(environment: Record<string, string | undefined>): string[] {
   return (environment.PATHEXT ?? '.EXE;.CMD;.BAT;.COM').split(';').filter((entry) => entry !== '');
 }
@@ -74,9 +72,9 @@ function firstFound(
 }
 
 function bashCandidates(platform: NodeJS.Platform, environment: Record<string, string | undefined>): (string | undefined)[] {
-  // POSIX 上先要 /bin/bash，再退到 PATH 上的 bash，最后是 sh（pi 的次序）。
+  // POSIX 系统依次尝试 `/bin/bash`、PATH 中的 `bash` 和 `sh`。
   if (platform !== 'win32') return ['/bin/bash', 'bash', 'sh'];
-  // Windows 上没有系统自带的 bash，找的是 Git for Windows 装的那一份。
+  // Windows 的 Bash 来自 Git for Windows。
   return [
     known(environment.ProgramFiles, 'Git', 'bin', 'bash.exe'),
     known(environment['ProgramFiles(x86)'], 'Git', 'bin', 'bash.exe'),
@@ -86,12 +84,12 @@ function bashCandidates(platform: NodeJS.Platform, environment: Record<string, s
 }
 
 function powershellCandidates(platform: NodeJS.Platform): string[] {
-  // PowerShell 7 在 PATH 上叫 pwsh，Windows 自带的那一份叫 powershell；先要新的一份。
+  // 优先使用 PowerShell 7（`pwsh`），再使用 Windows 自带的 `powershell`。
   return platform === 'win32' ? ['pwsh.exe', 'powershell.exe'] : ['pwsh', 'powershell'];
 }
 
-// 交回这一具 Host 该用哪一个解释器。`auto` 在 Windows 上先看 PowerShell 再看 Git Bash，在别的平台上用 bash；
-// 显式写了哪一种就只要那一种——拿不到时报稳定码，不会另起一份解释器，因为换掉的那一种正是判定链读过的语法。
+// `auto` 在 Windows 上依次选择 PowerShell 和 Git Bash，在其他平台上选择 Bash。
+// 显式指定解释器时只使用该解释器；找不到时返回稳定错误，不替换成另一种语法。
 export function resolveShell(
   config: { exec?: { shell?: unknown } },
   { platform = process.platform, environment = process.env, locateExecutable = locate }: ShellProbe = {},
@@ -115,9 +113,9 @@ export function resolveShell(
   throw new KernelError('exec_shell_unavailable', { detail: `exec.shell="${requested}" but nothing matched ${looked}` });
 }
 
-// 判定链把这条文本读成「一条简单命令」之后才来问这一句：命令名在这台机器上是一个可执行文件，才补那段退出码尾巴。
-// 名字落在 PATH 之外（cmdlet、函数、别名）时不补——宁可交回 PowerShell 自己的那一个 1，也不交回上一条原生命令留下的旧值。
-// 只给一条命令补：分号与 `&&` 串起来的那几种，`$LASTEXITCODE` 说的是最后那一条，前几条的失败会被盖掉。
+// 只有权限判定已将输入识别为单条简单命令，且命令名解析为可执行文件时，才附加退出码处理。
+// cmdlet、函数和别名不使用 `$LASTEXITCODE`，避免返回上一条原生命令留下的值。
+// 仅支持单条命令；使用分号或 `&&` 组合的命令可能覆盖前面命令的退出码。
 export function withNativeExitCode(
   shell: ShellSelection,
   command: string | undefined,

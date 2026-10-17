@@ -1,6 +1,6 @@
 // 内核提供边界解析：把模型交来的路径解析成边界内的绝对路径（部件一节的内核判定链与能力提供者）。
 // 两类越界都拒绝：路径字符串里的上级引用越界，以及符号链接或硬链接指向边界之外（验证清单第 5 条）。
-// 这里只做判断，不做约束：真正的文件与进程约束由能力提供者的后端负责（D18）。
+// 此模块只判定边界；实际文件和进程约束由能力后端执行。
 import { realpath, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { KernelError } from '../kernel/error.js';

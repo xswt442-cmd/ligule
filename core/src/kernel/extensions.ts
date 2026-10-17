@@ -1,11 +1,8 @@
-// 扩展的装载与窄接口（D37、D68、第 29 步）。
+// 扩展只从用户明确安装的目录、用户配置或命令行指定的路径加载。
+// 项目配置不能控制 Host 加载可执行代码；其中的扩展路径会作为诊断报告，而不会静默忽略。
 //
-// 来源只有两处：使用者明确安装进来的目录，与用户层配置或命令行写出来的路径。项目层与本地层里写的扩展路径不算
-// （D68：仓库里的东西不该决定宿主进程加载什么代码），它们变成一条看得见的诊断而不是静默丢掉。
-//
-// 递给扩展的是宿主交出的那四件（D37）：注册工具、注册提示词片段、收事件、请求一次能力操作。这一份对象就是
-// 契约承诺的全部暴露面；它不是「限制」——进程内加载的模块技术上能做任何 Node 代码能做的事，所以判定链、路径边界
-// 与参数校验对每一次调用照常生效，不把安全建立在扩展的自我约束上。
+// 扩展接口提供工具注册、提示片段注册、事件通知和能力请求。
+// 扩展代码与 Host 运行在同一进程，接口不是操作系统沙箱；每次工具调用仍需经过权限判定、路径边界和参数校验。
 import { readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
@@ -40,7 +37,7 @@ interface SourceOptions {
   readDirectory?: (path: string) => Promise<string[]>;
 }
 
-// 配置里那一格只认字符串数组：写成一个对象或一个字符串都是清单读不出来的东西，报出去而不是猜。
+// 配置来源必须是字符串数组；其他类型返回明确错误，不尝试猜测其含义。
 function entriesOf(layer: Record<string, unknown> | undefined): string[] | { invalid: string } {
   const value = layer?.extensions;
   if (value === undefined) return [];
@@ -53,15 +50,15 @@ async function installedIn(directory: string, readDirectory: (path: string) => P
   try {
     names = await readDirectory(directory);
   } catch (error) {
-    // 没有这个目录是正常状态：一行都没装过，与「装过但读不了」是两回事，后者才要一条诊断。
+    // 安装目录不存在时视为空列表；其他读取错误需报告诊断。
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw new KernelError('extension_directory_read_failed', { cause: error, detail: `${directory}: ${(error as Error).message}` });
   }
   return names.filter((name) => name.endsWith('.js')).sort().map((name) => join(directory, name));
 }
 
-// 交回这一具 Host 该加载哪些文件：安装目录里的每一份，加上用户层与命令行显式写出来的路径。
-// 项目层与本地层里写的路径进 ignored，一条都不加载（D68）。
+// 返回 Host 应加载的扩展文件：安装目录内容及用户层、命令行显式指定的路径。
+// 项目层和本地层中的路径列入 `ignored`，不会加载。
 export async function extensionSources(layers: SourceLayers = {}, { projectRoot, userHome = homedir(), readDirectory = readdir }: SourceOptions) {
   const relativeTo = (entry: string) => (isAbsolute(entry) ? entry : resolve(projectRoot, entry));
   const ignored: ExtensionDiagnostic[] = [];
@@ -87,7 +84,7 @@ export async function extensionSources(layers: SourceLayers = {}, { projectRoot,
     }
   }
   const installed = await installedIn(join(dataRoot(userHome), 'extensions'), readDirectory);
-  // 同一个文件被安装目录与配置各写一次时只加载一次：路径先归一，再看谁先出现。
+  // 对路径归一后去重，避免同一扩展通过多个来源重复加载。
   const seen = new Set<string>();
   const paths: string[] = [];
   for (const path of [...installed, ...declared]) {
@@ -107,7 +104,7 @@ interface LoadOptions {
   importModule?: (url: string) => Promise<{ default?: unknown }>;
 }
 
-// 一件扩展装上了什么，撤的时候只撤它自己那一份：坏掉的那一件不该留下半截，也不该带走别人已经装上的东西。
+// 每个扩展只撤销自己注册的内容；加载失败时不留下部分注册，也不影响其他扩展。
 export async function loadExtensions(paths: string[], options: LoadOptions) {
   const loaded: { name: string; path: string }[] = [];
   const diagnostics: ExtensionDiagnostic[] = [];
@@ -120,7 +117,7 @@ export async function loadExtensions(paths: string[], options: LoadOptions) {
       const factory = imported.default;
       if (typeof factory !== 'function') throw new KernelError('extension_shape_invalid', { detail: 'the module has no default export to call' });
       const name = factory.name === '' ? path : factory.name;
-      // 递出去的就是这四件（D37）：连「你是哪一个扩展」都不给，扩展能做的全部事情都在这张表里。
+      // 只暴露扩展 API 中声明的能力，不额外提供扩展身份或 Host 内部对象。
       const config = {
         registerTool: (tool: unknown) => {
           const remove = options.registerTool(tool);
@@ -140,7 +137,7 @@ export async function loadExtensions(paths: string[], options: LoadOptions) {
             try {
               handler(event);
             } catch (error) {
-              // 半成品扩展抛的未知错误不该停住这一轮：记一条，继续跑（内核自己的故障是另一类，走另一条码）。
+              // 将扩展抛出的未知错误记录为诊断并继续处理；Kernel 自身错误仍按独立错误路径抛出。
               diagnostics.push({ code: 'extension_handler_failed', path, detail: error instanceof Error ? error.message : String(error) });
             }
           });

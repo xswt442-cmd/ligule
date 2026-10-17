@@ -1,4 +1,4 @@
-// 三方法的日志接口注入给所有组件（D26）：必需 debug 与 log，可选 error，后端由宿主自己接。
+// 向组件注入统一日志接口：`debug` 和 `log` 必需，`error` 可选；具体实现由 Host 提供。
 // 宿主没有交 logger 时不产生任何输出：内核不写死输出目标，也不假设那里有一个终端可写。
 import { KernelError } from './error.js';
 

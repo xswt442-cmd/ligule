@@ -1,8 +1,8 @@
-// 技能注册表（D45、D55、D56、D57）：磁盘上现在有哪些技能是一条系统事实，与模式选了哪几件无关（D46）。
-// 发现走四个固定目录的先后，同名只取最靠前那一份的整份，被忽略的那一份留一条诊断（D57）；
-// 目录里出现 SKILL.md 就当技能根，不再往里递归找第二份（D45）。
-// 头部是 YAML frontmatter（D49）：`name` 与 `description` 必填，`metadata` 里本项目只读 `ligule-requires` 那一键（D56）。
-// 一份技能的头部解不开就整份不载入，但原因不静默：诊断交给装载侧记日志，也汇进系统提示里那一句说明。
+// 技能登记表反映磁盘中发现的技能，与当前模式选择无关。
+// 按固定目录顺序搜索，同名技能保留优先级最高的版本，并记录被忽略版本的诊断。
+// 含有 `SKILL.md` 的目录就是技能根，不再递归搜索嵌套技能。
+// `SKILL.md` 使用 YAML frontmatter，必须包含 `name` 和 `description`；此项目只读取 `metadata.ligule-requires`。
+// frontmatter 无效时不加载技能，并将原因写入日志和系统提示摘要。
 import { createHash } from 'node:crypto';
 import { readFile, readdir, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -15,20 +15,20 @@ import { KernelError } from './error.js';
 
 export const SKILL_FILE = 'SKILL.md';
 export const SKILLS_DIRECTORY = 'skills';
-// 名字的字符集与两个长度上限照 Agent Skills 规范那一档（D49）：超限是头部写错了，不是「少一段说明」还能继续。
+// 技能名称按 Agent Skills 规范校验字符集和长度；超限时拒绝加载。
 const NAME_LIMIT = 64;
 const NAME_FORM = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const DESCRIPTION_LIMIT = 1024;
-// 元数据预算是一个常量（D55）：这一段字节每一次请求都要付，把它做成配置项等于让每台机器重新调一次。
+// 元数据使用固定字节预算，避免每次请求携带过多重复内容。
 export const SKILL_METADATA_BUDGET_BYTES = 8_000;
-// 规范位置那一棵目录树里不属于技能的东西，与文件工具用的是同两个名字。
+// 技能搜索目录使用与文件工具相同的排除目录名称。
 const SKIPPED_DIRECTORIES = ['node_modules', '.git'];
 
 export interface SkillEntry {
   name: string;
   description: string;
   requires: string[];
-  // 技能根：含 SKILL.md 的那一个目录。`read` 动作的文件边界就是它，与工作区边界是两套（D50）。
+  // 技能根目录由 `SKILL.md` 所在目录决定；技能文件读取限制在该目录内，与工作区边界分开。
   root: string;
   file: string;
 }
@@ -44,7 +44,7 @@ export interface SkillRegistry {
   diagnostics: SkillDiagnostic[];
 }
 
-// 先后是固定的四步，不是「扫到哪个算哪个」：同名两份时，取哪一份必须与遍历顺序、文件时间都无关（D57）。
+// 按固定顺序搜索四类目录，确保同名技能选择不受文件系统遍历顺序影响。
 export function skillDirectories(projectRoot: string, userHome = homedir()): string[] {
   if (typeof projectRoot !== 'string' || projectRoot === '') throw new KernelError('skill_project_root_required');
   return [
@@ -64,9 +64,9 @@ async function readIfExists(path: string): Promise<string | undefined> {
   }
 }
 
-// 头部与正文按同一处切（frontmatter.ts）：交给模型的是正文，头部是装载侧读过的结构化字段。
+// 由 `frontmatter.ts` 分离元数据和正文；模型只接收正文。
 
-// `metadata` 那一格按规范是自由键值（D49）：认不出的键原样留着，只把本项目要读的那一键取出来。
+// frontmatter 中的其他 metadata 键保持原样，只解析此项目使用的 `ligule-requires`。
 function readRequires(metadata: unknown): string[] {
   if (metadata === null || typeof metadata !== 'object' || Array.isArray(metadata)) return [];
   const declared = (metadata as Record<string, unknown>)['ligule-requires'];
@@ -103,13 +103,13 @@ function checkedSkill(text: string, file: string): SkillEntry {
   return { name, description, requires: readRequires(fields.metadata), root: resolve(file, '..'), file };
 }
 
-// 一个目录里直接放着的子目录才是技能根；没有 SKILL.md 的那一种整棵跳过，往里递归找第二份是 D45 不要的形状。
+// 只有直接包含 `SKILL.md` 的子目录才算技能；没有该文件的目录整棵跳过，不向下递归。
 async function childrenOf(directory: string): Promise<string[]> {
   let entries;
   try {
     entries = await readdir(directory, { withFileTypes: true });
   } catch (error) {
-    // 四个目录本来就可以少几个：没有这一处不是错误，其余读失败才是。
+    // 搜索目录可以不存在；其他读取错误应返回诊断。
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw new KernelError('skill_directory_read_failed', { cause: error, detail: directory });
   }
@@ -151,8 +151,8 @@ export async function discoverSkills(directories: string[]): Promise<SkillRegist
   return { skills, diagnostics };
 }
 
-// 预算算在整段上：标题、每一条说明与末尾那句诊断都在这一格里（I6）。
-// 超了就整份目录都不内联——半份说明比一句「用 search 去查」更难读（D55）。
+// 元数据预算包含标题、技能说明和诊断摘要。
+// 超出预算时不内联部分元数据，改为提示模型使用搜索工具查找技能。
 const CATALOG_HEADING = 'Skills are packaged instructions kept on disk. Each line is `name: description`. '
   + 'Call skill with action "activate" and the name to load one; its supporting files come back with action "read".';
 const CATALOG_FALLBACK = 'Skills are packaged instructions kept on disk, and there are too many to list here. '
@@ -169,18 +169,17 @@ export function formatSkillCatalog(registry: SkillRegistry, budgetBytes = SKILL_
 
 const wordsOf = (text: string): string[] => text.toLowerCase().split(/[^a-z0-9]+/).filter((word) => word !== '');
 
-// 词法打分，不引检索库（D55）：`name` 的精确与前缀匹配先排，其余按 `name` 与 `description` 上的 BM25 一类计分。
-// 技能数量在这一步还是几十份的量，这一点面积上词法能区分开的东西已经够区分。
+// 使用词法相关度排序，不依赖额外检索库。技能名称精确或前缀匹配优先，其余结果按名称和说明的 BM25 分数排序。
 export function searchSkills(skills: SkillEntry[], query: string, limit = 5): SkillEntry[] {
   const wanted = [...new Set(wordsOf(query))];
   if (skills.length === 0 || wanted.length === 0) return [];
   const needle = query.trim().toLowerCase();
-  // 名字里的词比说明里的词更能说明「就是这一个」，所以名字算两遍：同一条 BM25 计分上，词频翻倍就是权重翻倍。
+  // 技能名称比说明更能区分技能，因此名称词项在 BM25 评分中加倍。
   const documents = skills.map((skill) => ({ skill, words: wordsOf(`${skill.name} ${skill.name} ${skill.description}`) }));
   const average = documents.reduce((total, document) => total + document.words.length, 0) / documents.length;
   const scored = documents.map((document) => {
     const name = document.skill.name.toLowerCase();
-    // 名字对上比内容对上更有意义，这一档先于词法分（D55）。
+    // 名称匹配优先于全文相关度评分。
     const direct = name === needle ? 4 : name.startsWith(needle) ? 2 : 0;
     let lexical = 0;
     for (const word of wanted) {
@@ -199,8 +198,8 @@ export function searchSkills(skills: SkillEntry[], query: string, limit = 5): Sk
     .map((item) => item.skill);
 }
 
-// 正文与摘要一次读齐：摘要算在原始字节上，改了 SKILL.md 就换一个摘要（D53 要的是能判出「模型看的还是旧版」）。
-// 交回模型的那一份去掉了头部：头部是装载侧读过的结构化字段，重复注入只是占预算。
+// 一次读取正文和摘要；摘要基于原始字节，文件更改后会更新。
+// 交给模型的内容不包含 frontmatter，避免重复注入已解析的元数据。
 export async function readSkillBody(skill: SkillEntry): Promise<{ body: string; bytes: number; digest: string }> {
   const bytes = await readFile(skill.file).catch((error: NodeJS.ErrnoException) => {
     throw new KernelError('skill_file_read_failed', { cause: error, detail: skill.file });
@@ -213,8 +212,8 @@ export async function readSkillBody(skill: SkillEntry): Promise<{ body: string; 
   };
 }
 
-// 支撑文件的清单与读取都锁在那一个技能根里（D50）：工作区的 `read` 管不到这里，这里也越不出边界。
-// 词法与真实路径各查一次：前者拦 `../`，后者拦符号链接，两条都报同一个码，越界就是越界。
+// 技能资源列举和读取都限制在所属技能目录内，不使用工作区文件工具的边界。
+// 同时检查路径文本和解析后的真实路径，拦截 `../` 和越界符号链接，并返回稳定错误码。
 async function withinRoot(skill: SkillEntry, path: string): Promise<string> {
   const absolute = resolve(skill.root, path);
   if (!isWithin(skill.root, absolute)) {

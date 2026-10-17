@@ -1,10 +1,10 @@
-// `mcp.inspect` 与 `mcp.call` 两件固定工具（D52、D60，实现顺序第 30 步）。
+// 固定提供 `mcp.inspect` 和 `mcp.call` 两个工具。
 //
-// 模型长期只看到这两件：服务器各自的工具要先用 `inspect` 看清楚定义与摘要，才能被 `call` 调用。
-// 两件都是披露入口，因此不在模式的选择范围里（与 `skill` 同一格规则，D63）。
+// 模型必须先通过 `inspect` 查看服务器工具的定义和摘要，之后才能调用 `call`。
+// 两者都是披露入口，不受模式筛选。
 //
-// `call` 的参数里 `arguments` 是一段 JSON 文本而不是对象：内核认下来的参数模式子集（D14）没有「任意形状的嵌套对象」
-// 这一构造，而 MCP 声明的输入形状本来就是任意的——把校验放到 Host 这一侧按声明做，模型可见的模式才不随连接变化（D52）。
+// `call.arguments` 使用 JSON 文本，因为 Kernel 参数模式子集不支持任意嵌套对象。
+// Host 根据已披露的服务器定义校验参数，保持模型可见模式稳定。
 import { KernelError } from '../kernel/error.js';
 import type { McpRegistry, ToolDefinition } from '../capability/mcp.js';
 import { validateToolArguments } from '../capability/mcp.js';
@@ -45,7 +45,7 @@ export function createMcpTools(registry: Pick<McpRegistry, 'servers' | 'toolsOf'
           };
         }
         const found = await registry.definition(args.server, args.tool, signal);
-        // 披露状态记在这里：模型看见的那一份定义与它的摘要，之后 `call` 要对着它问。
+        // 保存已披露的工具定义及摘要，后续 `call` 必须与此定义匹配。
         disclosed.seen.add(key(args.server, args.tool, found.digest));
         return {
           text: JSON.stringify({ name: found.name, description: found.description, inputSchema: found.inputSchema, annotations: found.annotations, schemaDigest: found.digest }, null, 2),
@@ -69,12 +69,11 @@ export function createMcpTools(registry: Pick<McpRegistry, 'servers' | 'toolsOf'
         },
         required: ['server', 'tool', 'arguments', 'schemaDigest'],
       },
-      // 这一次调用真正用的能力是 `mcp:<服务器>/<工具>`，不是 `mcp.call` 这个名字（D52）：
-      // 读一个文件与删一份数据不该退化成同一种操作，判定链要看见那两者的差别。
+      // 按 `mcp:<server>/<tool>` 实际能力名称进行权限判定，而不是使用通用名称 `mcp.call`。
       capability: (args: { server?: string; tool?: string }) => `mcp:${args.server}/${args.tool}`,
       async run(args: { server: string; tool: string; arguments: string; schemaDigest: string }, { signal }: { signal?: AbortSignal } = {}) {
         const found = await registry.definition(args.server, args.tool, signal);
-        // 看过的那一版与服务器现在的这一版是两件事：先问有没有看过，再问看的是不是旧的一版（D52）。
+        // 先确认该工具已披露，再校验调用是否仍与服务器当前定义一致。
         if (!disclosed.seen.has(key(args.server, args.tool, args.schemaDigest))) {
           throw new KernelError('mcp_not_disclosed', {
             detail: `run mcp.inspect on ${args.server} ${args.tool} and read its definition before calling it`,
@@ -107,7 +106,7 @@ export function createMcpPlugin(registry: Pick<McpRegistry, 'servers' | 'toolsOf
   return {
     name: 'ligule-mcp',
     setup(kernel: { register(tool: unknown): () => void }) {
-      // 一件服务器都没配时不登记：多两件没人用的工具会改掉每次请求的前缀字节（D12）。
+      // 未配置服务器时不登记 MCP 工具，避免向模型暴露不可用入口。
       if (registry.servers().length === 0) return () => {};
       const undoCall = kernel.register(callTool);
       const undoInspect = kernel.register(inspectTool);

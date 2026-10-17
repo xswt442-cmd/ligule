@@ -10,9 +10,9 @@ interface OutputBudget {
   readonly contextLimit?: unknown;
 }
 
-// Official model limits: https://api-docs.deepseek.com/quick_start/pricing/
-// Unknown endpoints retain the adapter's conservative limit unless a service model explicitly declares its output ceiling.
-// Such a declaration does not override a verified model limit, a configured lower capability, or the context window.
+// 已核实的 DeepSeek 模型上限以其官方文档为准：https://api-docs.deepseek.com/quick_start/pricing/
+// 未知服务使用适配器的保守默认值，除非模型配置明确声明更高的输出上限。
+// 声明值不能覆盖已核实的模型上限、较低的配置能力或上下文窗口限制。
 function verifiedLimit(baseUrl: string, model: string): number | undefined {
   const url = new URL(baseUrl);
   if (url.origin !== 'https://api.deepseek.com'

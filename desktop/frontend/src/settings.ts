@@ -1,13 +1,12 @@
-// Host 把界面设置存在数据根；`ligule.ui` 缓存首屏，只在数据根版本为空时迁移。
-// 读取失败时不写磁盘；草稿和队列保留完整内容，由 Host 检查文档大小。
+// Host 将界面设置保存在数据根；`ligule.ui` 仅缓存首屏，只有正式文档不存在时才迁移缓存。
+// 读取失败时不写入磁盘；草稿和队列保持完整，由 Host 校验文档大小。
 import type { Verbosity } from './components/types';
 import type { Client } from './protocol';
 import type { Language } from './locale';
 import type { ModelSelection } from './model-catalog';
 import { defaultNotifications, notificationsFrom, type NotificationPreferences } from './notifications.ts';
 
-// 六套具名配色：墨青（默认，深色）、羊皮纸（暖米色）、蓝天（冷白蓝）、石墨（中性深色）、森林（深绿）、黄昏（暖深琥珀）。
-// 取值在 `styles.css` 的 `data-palette` 变量块里；这里只认名字。
+// 支持六种具名配色，具体颜色定义在 `styles.css` 的 `data-palette` 变量中。
 export const PALETTES = ['ink', 'parchment', 'sky', 'graphite', 'forest', 'dusk'] as const;
 export type Palette = (typeof PALETTES)[number];
 
@@ -16,7 +15,7 @@ export type Settings = {
   notifications: NotificationPreferences;
   lastSession: { id: string; projectRoot: string } | null;
   newSelections: Record<string, ModelSelection>;
-  // 配色方案：六套具名方案选一枚，落在根元素的 `data-palette` 上。存本机界面偏好，不进记录、不进配置（D90）。
+  // 选中的配色应用到根元素的 `data-palette`，并保存在本地界面偏好中。
   palette: Palette;
   font: 'small' | 'medium' | 'large';
   fontUi: number;
@@ -27,13 +26,12 @@ export type Settings = {
   dock: 'right' | 'left';
   verbosity: Verbosity;
   collapsed: boolean;
-  // 草稿与排着的几句都按「哪一项目录下的哪一份会话」放：两份会话不共用一格草稿，退出再打开还在（方案 5.1）。
+  // 草稿和队列按项目与会话分别保存，不同会话之间不会共用输入状态。
   drafts: Record<string, Record<string, string>>;
   queued: Record<string, Record<string, string[]>>;
-  // 个人键位：动作名 → 那一串键的写法。它属于本机的界面偏好，不进记录、不进模型上下文、也不进项目的业务配置（方案 6.1）。
+  // 用户快捷键覆盖将动作名称映射到按键写法，保存在本地界面偏好中。
   keys: Record<string, string>;
-  // 这一扇窗口另外看着哪几项目录（方案 3.2 的第二、第三个项目）：只是界面这边的清单，
-  // 落笔与生效都在宿主那一边按每一份会话自己的项目环境算。
+  // 保存当前窗口额外关注的项目目录；会话配置和权限仍由 Host 根据所属项目决定。
   projects: string[];
   hiddenProjects: string[];
 };
@@ -67,7 +65,7 @@ const oneOf = <T extends string>(value: unknown, allowed: T[], fallback: T): T =
   allowed.includes(value as T) ? value as T : fallback;
 const clamped = (value: unknown, low: number, high: number, fallback: number): number =>
   typeof value === 'number' && value >= low && value <= high ? Math.round(value) : fallback;
-// 键位那一张表只认「名字 → 一串键的写法」这一种形状；那串写法读不读得开归键位那一层判，这里不重复一份判断。
+// 键位覆盖只接受“动作名称到按键写法”的映射；按键写法由 hotkeys 模块校验。
 const stringMap = (value: unknown): Record<string, string> => {
   if (typeof value !== 'object' || value === null) return {};
   const out: Record<string, string> = {};
@@ -75,13 +73,12 @@ const stringMap = (value: unknown): Record<string, string> => {
   return out;
 };
 
-// 另外看着哪几项目录：只留写得出来的那几条并去重（方案 3.2）。这一份清单不再按「最近八条」截断：
-// 它只是这一扇窗口想看着的那几份，登记在应用数据根里的那一份才是持久的（D110、方案 5.5.1），
-// 退掉一条只改这一栏画什么，记录、归属与历史都不动。
+// 额外关注目录只保留有效路径并去重，不限制条目数。
+// 此列表只控制当前窗口显示哪些目录；持久工作区登记由 Host 单独维护。
 const rootList = (value: unknown): string[] =>
   Array.isArray(value) ? [...new Set(value.filter((each): each is string => typeof each === 'string' && each !== ''))] : [];
 
-// 那两张表只认写得出来的形状：一格草稿是串，一排是串数组，别的一律丢掉，不猜它想表达什么。
+// 草稿必须是字符串，队列必须是字符串数组；其他格式均视为无效。
 const draftTable = (value: unknown): Record<string, Record<string, string>> => {
   if (typeof value !== 'object' || value === null) return {};
   const out: Record<string, Record<string, string>> = {};
@@ -111,7 +108,7 @@ const queueTable = (value: unknown): Record<string, Record<string, string[]>> =>
   return out;
 };
 
-// 从已解析的那一份值收出一份认得的设置：数据根里读回来的与缓存里读回来的都过这一处。
+// 规范化已解析的设置，供正式文档和首屏缓存共用。
 export function settingsFrom(raw: unknown): Settings {
   const value = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<Settings>;
   return {
@@ -151,7 +148,7 @@ export function readSettings(): Settings {
   return settingsFrom(raw);
 }
 
-/** 读取本地缓存原文；只有 Host 报告空版本时才考虑迁移。 */
+/** 读取本地首屏缓存；仅当 Host 报告正式文档不存在时才迁移。 */
 export function cachedSettingsJson(): string {
   try {
     return localStorage.getItem(KEY) ?? '';
@@ -160,12 +157,12 @@ export function cachedSettingsJson(): string {
   }
 }
 
-// 缓存写不进去只影响第一屏快几毫秒，不影响可恢复性，所以不上报（上报的是数据根那一份写不进去）。
+// 首屏缓存写入失败不影响持久数据，因此不作为保存错误报告。
 export function cacheSettings(settings: Settings): void {
   try {
     localStorage.setItem(KEY, JSON.stringify(settings));
   } catch {
-    // 缓存是尽力而为的那一份。
+    // 首屏缓存写入失败可以忽略。
   }
 }
 
@@ -228,7 +225,7 @@ function writeSettings(client: Client, state: ClientSettingsState, settings: Set
   });
 }
 
-/** 从 Host 读取设置版本；只有成功读取后，该 Client 才能保存。 */
+/** 从 Host 读取设置版本；读取成功后客户端才可以写入。 */
 export function loadSettings(client: Client): Promise<Settings> {
   let state = clientSettings.get(client);
   if (state === undefined) {
@@ -274,7 +271,7 @@ export function loadSettings(client: Client): Promise<Settings> {
   return loading;
 }
 
-/** 缓存保留首屏状态；正式写入必须使用最近一次成功读取的版本。 */
+/** 更新首屏缓存；正式保存必须使用最近一次成功读取的版本。 */
 export async function saveSettings(client: Client, settings: Settings): Promise<void> {
   cacheSettings(settings);
   const state = clientSettings.get(client);
@@ -284,8 +281,8 @@ export async function saveSettings(client: Client, settings: Settings): Promise<
   await writeSettings(client, state, settings);
 }
 
-// 重连之后这一份会话排着的几句交回草稿：按先后拼在草稿后面，原来那一句留在最前，界面不自动发其中任何一句。
-// 人为取消那一路不走这一处（那一条由输入坞留着队列并暂停，另有收回的把手）。
+// Host 重连后将暂停队列按顺序追加到草稿，保留原草稿在前，不自动发送。
+// 用户主动取消时不调用此函数，队列仍保留在输入区并保持暂停。
 export function mergeQueueIntoDraft(draft: string, items: string[]): string {
   return [draft, ...items].filter((text) => text !== '').join('\n\n');
 }
