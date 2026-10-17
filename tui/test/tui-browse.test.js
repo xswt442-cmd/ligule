@@ -36,9 +36,8 @@ test('complete history opens in a bounded viewport and keyboard navigation reach
     await delay(80);
     stdin.write('\x0f');
     await wait(() => frame().includes('完整历史'));
-    await delay(100);
     stdin.write('\x1b[H');
-    await wait(() => frame().includes('1/') && frame().includes('行 ·'));
+    await wait(() => frame().includes('历史行 0') && /\b1\/[1-9]\d* 行 ·/.test(frame()));
     assert.ok(frame().split('\n').length <= 24, '动态历史视图受终端高度约束');
     stdin.write('\x1b[6~');
     await wait(() => !/\b1\/\d+ 行/.test(frame()));
