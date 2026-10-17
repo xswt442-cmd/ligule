@@ -176,10 +176,21 @@ export function createControl(host: Host, projectRoot: string) {
     release(): Promise<void> {
       if (closing !== undefined) return closing;
       closing = (async () => {
-        await host.release();
-        await Promise.allSettled([...pending]);
-        await Promise.all([...operations.values()].map((found) => found.settled));
-        sessions.clear();
+        const failures: unknown[] = [];
+        // Observe completion failures before Host cancellation can settle active runs.
+        const settled = Promise.allSettled([...operations.values()].map((found) => found.settled));
+        try { await host.release(); }
+        catch (error) { failures.push(error); }
+        try {
+          await Promise.allSettled([...pending]);
+          const results = await settled;
+          for (const result of results) if (result.status === 'rejected') failures.push(result.reason);
+        } catch (error) {
+          failures.push(error);
+        } finally {
+          sessions.clear();
+        }
+        if (failures.length > 0) throw failures[0];
       })();
       return closing;
     },

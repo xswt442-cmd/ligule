@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { mkdir, readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
+import { setTimeout as delay, setImmediate as tick } from 'node:timers/promises';
 import { createControl } from '../core/dist/host/control.js';
 import { createHost } from '../core/dist/host/host.js';
 import { createConfig } from '../core/dist/kernel/config.js';
@@ -57,6 +57,77 @@ test('controller shutdown cancels a real Host run before draining a delayed read
     }
   }, { delayMs: 2500 });
 });
+
+for (const [hostFails, earlyOperation] of [[true, false], [false, false], [true, true]]) {
+  test(`shutdown preserves ${hostFails ? 'the original Host error' : 'the operation error'} with ${earlyOperation ? 'an early' : 'a late'} operation failure`, async () => {
+    await withTuiHost(async ({ config, projectDirectory, providerRequests, sessionDirectory }) => {
+      const disposeFailure = new Error('plugin_dispose_failed');
+      const operationFailure = new Error('operation_completion_failed');
+      const readGate = Promise.withResolvers();
+      const reading = Promise.withResolvers();
+      const operationGate = Promise.withResolvers();
+      const hostFinished = Promise.withResolvers();
+      let originalHostError;
+      const provider = createChatCompletionsProvider({ baseUrl: config.model.baseURL, model: config.model.model, apiKeyEnv: config.model.apiKeyEnv });
+      const host = createHost({ config, provider, plugins: [{ name: 'release-check', setup: () => () => {
+        if (hostFails) throw disposeFailure;
+      } }] });
+      const control = createControl({
+        async handle(message, connection) {
+          try {
+            const result = await host.handle(message, connection);
+            if (message.method === 'session.read') { reading.resolve(); await readGate.promise; }
+            return result;
+          } catch (error) {
+            if (message.method === 'run.start') {
+              await operationGate.promise;
+              // Exercise an unexpected failure while classifying a real cancelled run.
+              throw { get code() { throw operationFailure; } };
+            }
+            throw error;
+          }
+        },
+        async release() {
+          try { await host.release(); }
+          catch (error) { originalHostError = error; throw error; }
+          finally { hostFinished.resolve(); }
+        },
+      }, projectDirectory);
+      let pendingRead;
+      let outcome;
+      let closed = false;
+      try {
+        const { sessionId } = await control.create(projectDirectory);
+        control.start(sessionId, 'wait for cancellation');
+        await waitFor(() => providerRequests.length > 0);
+        pendingRead = control.read(sessionId, undefined, 10);
+        await reading.promise;
+        const shutdown = control.release();
+        outcome = shutdown.then(() => { closed = true; return {}; }, error => { closed = true; return { error }; });
+        assert.equal(control.release(), shutdown);
+        await hostFinished.promise;
+        if (earlyOperation) operationGate.resolve();
+        await tick();
+        assert.equal(closed, false, 'Host failure does not skip pending requests');
+        readGate.resolve();
+        await pendingRead;
+        await tick();
+        if (!earlyOperation) assert.equal(closed, false, 'operation completion is drained after requests');
+        operationGate.resolve();
+        const result = await outcome;
+        assert.equal(result.error, hostFails ? originalHostError : operationFailure);
+        if (hostFails) assert.ok(originalHostError.errors.includes(disposeFailure));
+        assert.equal(control.release(), shutdown, 'repeated close retains the original result');
+        assert.equal((await readdir(sessionDirectory)).filter(name => name.endsWith('.lock')).length, 1,
+          'only the outer fixture session retains its lock');
+      } finally {
+        readGate.resolve();
+        operationGate.resolve();
+        await Promise.allSettled([pendingRead, outcome, host.release()]);
+      }
+    }, { delayMs: 2500 });
+  });
+}
 
 test('shutdown refuses session construction after a concurrent project load finishes', async () => {
   await withTuiHost(async ({ config, directory }) => {
