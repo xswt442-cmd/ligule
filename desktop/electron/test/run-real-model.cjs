@@ -106,8 +106,8 @@ async function requestHost(method, params = {}) {
 
 async function sessionSummary() {
   if (typeof sessionId !== 'string') throw Object.assign(new Error('real_model_session_missing'), { code: 'real_model_session_missing' });
-  const record = await requestHost('session.read', { sessionId, fullResults: true });
   const status = await requestHost('status.get', { sessionId });
+  const record = await requestHost('session.read', { sessionId, fullResults: true });
   return {
     running: status.running,
     turns: record.events.filter(event => event.kind === 'turn').map(event => ({ status: event.status, code: event.code })),
