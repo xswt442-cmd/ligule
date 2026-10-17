@@ -92,8 +92,19 @@ interface TuiStatus {
   readonly eventCount: number;
   readonly denials: { readonly consecutive: number; readonly total: number };
   readonly usage?: { readonly estimated: number; readonly window: number; readonly threshold: number } | null;
+  readonly progress?: TuiProgress | null;
   readonly templates?: readonly TemplateCommand[];
   readonly [key: string]: unknown;
+}
+
+interface TuiProgress {
+  readonly phase: 'preparing' | 'model_request' | 'tool_execution' | 'compaction' | 'awaiting_approval' | 'awaiting_input' | 'settling';
+  readonly startedAt: number;
+  readonly phaseStartedAt: number;
+  readonly lastProgressAt: number;
+  readonly modelCalls: number;
+  readonly toolCalls: number;
+  readonly outputTokens: number | null;
 }
 
 interface DetailState {
@@ -323,9 +334,10 @@ interface StatusLineOptions {
   readonly expanded: boolean;
   readonly columns?: number;
   readonly locale?: Locale;
+  readonly now?: number;
 }
 
-export function buildStatusLine({ sessionId, boundary, status, running, seconds, expanded, columns, locale = 'zh' }: StatusLineOptions): string {
+export function buildStatusLine({ sessionId, boundary, status, running, seconds, expanded, columns, locale = 'zh', now = Date.now() }: StatusLineOptions): string {
   const t = (zh: string, en: string) => chooseText(locale, zh, en);
   const id = `${chooseText(locale, '会话', 'session')} ${sessionId.slice(0, 8)}`;
   const root = boundary === undefined ? '' : boundary;
@@ -334,8 +346,22 @@ export function buildStatusLine({ sessionId, boundary, status, running, seconds,
   const context = contextSegment(status.usage, locale);
   const parts: string[] = [];
   if (context !== '') parts.push(context);
+  const progress = status.progress;
+  const phaseHint = progress === undefined || progress === null ? '' : {
+    preparing: t('准备上下文', 'Preparing context'),
+    model_request: t('请求模型', 'Requesting model'),
+    tool_execution: t('执行工具', 'Running tools'),
+    compaction: t('压缩上下文', 'Compacting context'),
+    awaiting_approval: t('等待审批', 'Waiting for approval'),
+    awaiting_input: t('等待用户输入', 'Waiting for your input'),
+    settling: t('正在收尾', 'Finishing'),
+  }[progress.phase];
+  const idleSeconds = progress === undefined || progress === null ? 0 : Math.max(0, Math.floor((now - progress.lastProgressAt) / 1000));
+  const progressHint = running && progress !== undefined && progress !== null
+    ? `${phaseHint} · ${progress.modelCalls} ${t('次模型调用', 'model calls')} · ${progress.toolCalls} ${t('个工具调用', 'tool calls')} · ${idleSeconds}${t('秒无新进展', 's without progress')}${progress.outputTokens === null ? '' : ` · ${progress.outputTokens} ${t('输出token', 'output tokens')}`}`
+    : '';
   // 打断与展开那两句跟在条数之后：挤的时候条数先走，这两句留着。
-  const hints = (running ? t(` · ${Math.floor(seconds)} 秒，${keyHint('interrupt')} 打断`, ` · ${Math.floor(seconds)}s, ${keyHint('interrupt')} to stop`) : '')
+  const hints = (running ? `${progressHint === '' ? '' : ` · ${progressHint}`}${t(` · ${Math.floor(seconds)} 秒，${keyHint('interrupt')} 打断`, ` · ${Math.floor(seconds)}s, ${keyHint('interrupt')} to stop`)}` : '')
     + (expanded ? t(` · 已展开（${keyHint('expand-or-history')} 收起）`, ` · expanded (${keyHint('expand-or-history')} to close)`) : '');
   let tail = `${chooseText(locale, `记录 ${status.eventCount} 条`, `${status.eventCount} events`)}${hints}`;
   let shown = parts;
@@ -347,6 +373,11 @@ export function buildStatusLine({ sessionId, boundary, status, running, seconds,
   if (over()) shown = shown.filter((part) => !part.startsWith('ctx:'));
   if (over()) base = id;
   if (over()) tail = hints === '' ? '' : hints.slice(3);
+  if (over() && running && progress !== undefined && progress !== null) {
+    shown = [];
+    tail = `${phaseHint} · ${idleSeconds}${t('秒无新进展', 's without progress')} · ${keyHint('interrupt')} ${t('打断', 'stop')}`;
+    if (over()) base = '';
+  }
   return line();
 }
 
@@ -675,6 +706,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   useEffect(() => {
     const onNotification = (message: Record<string, unknown>) => {
       if (message.sessionId !== sessionId) return;
+      if (message.notify === 'progress') {
+        const progress = isRecord(message.progress) ? message.progress as unknown as TuiProgress : null;
+        setStatus((current) => current === null ? current : { ...current, running: progress !== null, progress });
+        return;
+      }
       if (message.notify === 'delta') {
         const delta = isRecord(message.event) ? message.event : undefined;
         const piece = typeof delta?.text === 'string' ? delta.text : '';
