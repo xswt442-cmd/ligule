@@ -11,6 +11,14 @@ test('GitHub PR template matches the canonical engineering template', () => {
   assert.deepEqual(applied, canonical);
 });
 
+test('PR Skill copies match the canonical engineering files', () => {
+  for (const path of ['SKILL.md', 'CREDITS.md', 'agents/openai.yaml']) {
+    const canonical = readFileSync(new URL(`../skills/pr/${path}`, import.meta.url));
+    const applied = readFileSync(new URL(`../../../.agents/skills/pr/${path}`, import.meta.url));
+    assert.deepEqual(applied, canonical, `PR Skill copy differs: ${path}`);
+  }
+});
+
 test('engineering guideline, PR template, and skill are consistent', () => {
   const standard = readFileSync(new URL('../ENGINEERING_STANDARD.md', import.meta.url), 'utf8');
   const skill = readFileSync(new URL('../skills/pr/SKILL.md', import.meta.url), 'utf8');
