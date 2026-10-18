@@ -166,7 +166,7 @@ try {
   }
   console.log('command execution: node --version');
 } catch (error) {
-  if (process.platform === 'win32' || process.platform === 'linux'
+  if (detected.capabilities.process === 'full'
     || error?.code !== 'permission_process_isolation_unavailable') throw error;
   console.log('command execution: refused without process ownership');
 }
