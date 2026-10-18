@@ -103,3 +103,62 @@ test('trusted permission changes require separate confirmations and survive reop
     assert.equal(changes.some((event) => event.profile === 'full-access' && event.confirmedFullAccess === true), true);
   }, { permissionControl: true, permission: permissionWithOwnedProcesses });
 });
+
+test('new sessions accept elevated permission only from a confirmed trusted UI request', async () => {
+  await withTuiHost(async ({ client }) => {
+    await assert.rejects(
+      client.request('session.create', {
+        initialPermissionProfile: 'full-access', initialPermissionNetwork: 'unrestricted',
+        confirmInitialFullAccess: true, confirmInitialNetwork: true,
+      }),
+      { code: 'permission_control_unavailable' },
+    );
+  });
+
+  await withTuiHost(async ({ client }) => {
+    const request = {
+      initialMode: 'minimal', initialPolicy: 'auto',
+      initialPermissionProfile: 'full-access', initialPermissionNetwork: 'unrestricted',
+      confirmInitialFullAccess: true,
+    };
+    await assert.rejects(client.request('session.create', request), { code: 'permission_network_confirmation_required' });
+
+    const created = await client.request('session.create', { ...request, confirmInitialNetwork: true });
+    const status = await client.request('status.get', { sessionId: created.sessionId });
+    assert.equal(status.permission.profile, 'full-access');
+    assert.equal(status.permission.network, 'unrestricted');
+    assert.equal(status.mode, 'minimal');
+    assert.equal(status.policy, 'auto');
+    const records = await client.request('session.read', { sessionId: created.sessionId });
+    const permission = records.events.find((event) => event.kind === 'sessionPermission');
+    assert.equal(permission.source, 'trusted-ui');
+    assert.equal(permission.confirmedFullAccess, true);
+    assert.equal(permission.confirmedNetwork, true);
+    await client.request('session.close', { sessionId: created.sessionId });
+
+    const workspaceWrite = await client.request('session.create', {
+      initialPermissionProfile: 'workspace-write', initialPermissionNetwork: 'policy',
+      confirmInitialFullAccess: true, confirmInitialNetwork: true,
+    });
+    const workspaceRecords = await client.request('session.read', { sessionId: workspaceWrite.sessionId });
+    const workspacePermission = workspaceRecords.events.find((event) => event.kind === 'sessionPermission');
+    assert.equal(workspacePermission.source, 'trusted-ui');
+    assert.equal(workspacePermission.profile, 'workspace-write');
+    assert.equal(workspacePermission.confirmedFullAccess, false);
+    assert.equal(workspacePermission.confirmedNetwork, false);
+    await client.request('session.close', { sessionId: workspaceWrite.sessionId });
+  }, { permissionControl: true, permission: permissionWithOwnedProcesses });
+});
+
+test('permission events record only confirmations required by the change', async () => {
+  await withTuiHost(async ({ client, sessionId }) => {
+    await client.request('permission.set', {
+      sessionId, permissionProfile: 'workspace-write', confirmFullAccess: true, confirmNetwork: true,
+    });
+    const records = await client.request('session.read', { sessionId });
+    const permission = records.events.filter((event) => event.kind === 'sessionPermission').at(-1);
+    assert.equal(permission.profile, 'workspace-write');
+    assert.equal(permission.confirmedFullAccess, false);
+    assert.equal(permission.confirmedNetwork, false);
+  }, { permissionControl: true, permission: permissionWithOwnedProcesses });
+});

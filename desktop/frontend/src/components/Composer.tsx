@@ -13,13 +13,16 @@ import { useText } from '../locale';
 import type { Client } from '../protocol';
 import type { Status } from '../status';
 import type { Settings } from '../settings';
+import type { PermissionConfirmations, PermissionTarget } from '../permission-control';
 
 export type MessageQueue = { items: string[]; paused: boolean };
 
 export function Composer({ client, sessionId, projectRoot, status, settings, settingsReady, closing, reading, starting, running, inputOwner,
-  draft, composerRef, queue, mention, sessionMenuOpen, modelCatalogRevision, workspaceRevision, othersRunning,
+  draft, composerRef, queue, mention, sessionMenuOpen, initialMode, initialPolicy, initialPermission, initialPermissionConfirmations,
+  newSessionSettingsRevision, modelCatalogRevision, workspaceRevision, othersRunning,
   onDraftChange, onCaretChange, onWalkChange, onDraftKeyDown, onSelectWorkspace, onToggleQueue, onRecoverQueueItem,
-  onPickMention, onSelectModel, onManageModel, onSessionMenuChange, onSetMode, onSetPolicy, onPermissionStatus, onStop, onSend,
+  onPickMention, onSelectModel, onManageModel, onSessionMenuChange, onSetMode, onSetPolicy,
+  onInitialPermissionChange, onPermissionStatus, onStop, onSend,
 }: {
   client: Client;
   sessionId: string | null;
@@ -37,6 +40,11 @@ export function Composer({ client, sessionId, projectRoot, status, settings, set
   queue: MessageQueue;
   mention: MentionState | null;
   sessionMenuOpen: boolean;
+  initialMode: string | null;
+  initialPolicy: 'ask' | 'auto' | 'never' | null;
+  initialPermission: PermissionTarget;
+  initialPermissionConfirmations: PermissionConfirmations;
+  newSessionSettingsRevision: number;
   modelCatalogRevision: number;
   workspaceRevision: number;
   othersRunning: number;
@@ -51,8 +59,9 @@ export function Composer({ client, sessionId, projectRoot, status, settings, set
   onSelectModel: (selection: ModelSelection) => Promise<void>;
   onManageModel: () => void;
   onSessionMenuChange: (open: boolean) => void;
-  onSetMode: (name: string) => void;
+  onSetMode: (name: string | null) => void;
   onSetPolicy: (mode: 'ask' | 'auto' | 'never' | null) => Promise<void>;
+  onInitialPermissionChange: (target: PermissionTarget, confirmations: PermissionConfirmations) => void;
   onPermissionStatus: (status: Status) => void;
   onStop: () => void;
   onSend: () => void;
@@ -132,11 +141,16 @@ export function Composer({ client, sessionId, projectRoot, status, settings, set
           selection={selection}
           onSelect={onSelectModel} onManage={onManageModel} />
         <Popover.Root open={sessionMenuOpen} onOpenChange={onSessionMenuChange}>
-          <Popover.Trigger asChild><button type="button" className="composer-choice" disabled={sessionId === null} title={t('工具模式', 'Tool mode')}><span>{status?.mode ?? t('工具模式', 'Tool mode')}</span><Icon name="fold" size={12} /></button></Popover.Trigger>
-          <SessionMenu status={status} onSetMode={onSetMode} />
+          <Popover.Trigger asChild><button type="button" className="composer-choice" disabled={disabled} title={t('工具模式', 'Tool mode')}><span>{sessionId === null
+            ? initialMode ?? t('默认工具', 'Default mode')
+            : status?.mode ?? t('工具模式', 'Tool mode')}</span><Icon name="fold" size={12} /></button></Popover.Trigger>
+          <SessionMenu key={`${sessionId ?? '$new'}:${newSessionSettingsRevision}`} status={status} selectedMode={initialMode} onSetMode={onSetMode} />
         </Popover.Root>
-        <PolicyPicker key={sessionId ?? '$new'} status={status} disabled={closing || reading || starting} onSelect={onSetPolicy} />
-        <PermissionPicker key={`permission:${sessionId ?? '$new'}`} client={client} sessionId={sessionId} status={status} running={running} onStatus={onPermissionStatus} />
+        <PolicyPicker key={`${sessionId ?? '$new'}:${newSessionSettingsRevision}`} status={status} initialPolicy={initialPolicy} disabled={disabled || closing || reading || starting} onSelect={onSetPolicy} />
+        <PermissionPicker key={`permission:${sessionId ?? '$new'}:${newSessionSettingsRevision}`} client={client} sessionId={sessionId} status={status}
+          initialPermission={initialPermission} initialConfirmations={initialPermissionConfirmations}
+          disabled={disabled || closing || reading || starting} running={running}
+          onInitialChange={onInitialPermissionChange} onStatus={onPermissionStatus} />
         <span className="bar-spacer" />
         {running && <button className="icon-button stop-button" type="button" title={t('停止本轮', 'Stop this turn')} aria-label={t('停止本轮', 'Stop this turn')} onClick={onStop}><Icon name="stop" size={15} /></button>}
         <button className="send" type="button" title={running ? t('加入队列', 'Add to queue') : t('发送', 'Send')} aria-label={t('发送', 'Send')} disabled={disabled || draft.trim() === ''} onClick={onSend}><Icon name="send" size={19} /></button>

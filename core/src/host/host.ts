@@ -149,6 +149,11 @@ interface SessionGeneration {
 interface InitialSessionSettings {
   readonly mode?: string;
   readonly policy?: Exclude<PolicyMode, 'default'>;
+  readonly permission?: {
+    readonly context: PermissionContext;
+    readonly confirmedFullAccess: boolean;
+    readonly confirmedNetwork: boolean;
+  };
   readonly loopIterations?: number;
   readonly persistLoopIterations: boolean;
   readonly generation: SessionGeneration;
@@ -692,6 +697,32 @@ export function createHost({
       }
       policy = params.initialPolicy;
     }
+    const hasInitialPermission = params.initialPermissionProfile !== undefined || params.initialPermissionNetwork !== undefined;
+    let initialPermission: InitialSessionSettings['permission'];
+    if (hasInitialPermission) {
+      if (!permissionControl) throw new KernelError('permission_control_unavailable');
+      const profile = params.initialPermissionProfile ?? permission.profile;
+      const network = params.initialPermissionNetwork ?? permission.network;
+      if (profile !== 'read-only' && profile !== 'workspace-write' && profile !== 'full-access') {
+        throw new KernelError('permission_profile_invalid');
+      }
+      if (network !== 'policy' && network !== 'unrestricted' && network !== 'disabled') {
+        throw new KernelError('permission_network_mode_invalid');
+      }
+      const confirmedFullAccess = profile === 'full-access' && params.confirmInitialFullAccess === true;
+      const confirmedNetwork = network === 'unrestricted' && params.confirmInitialNetwork === true;
+      if (profile === 'full-access' && !confirmedFullAccess) {
+        throw new KernelError('permission_full_access_confirmation_required');
+      }
+      if (network === 'unrestricted' && !confirmedNetwork) {
+        throw new KernelError('permission_network_confirmation_required');
+      }
+      initialPermission = {
+        context: createPermissionContext(profile, network, permission.capabilities),
+        confirmedFullAccess,
+        confirmedNetwork,
+      };
+    }
     const options: { outputTokens?: number; thinkingEffort?: HostGenerationOptions['thinkingEffort'] } = {};
     if (params.initialOutputTokens !== undefined) {
       if (!Number.isSafeInteger(params.initialOutputTokens) || params.initialOutputTokens < 1) {
@@ -724,6 +755,7 @@ export function createHost({
     return {
       ...(mode === undefined ? {} : { mode }),
       ...(policy === undefined ? {} : { policy }),
+      ...(initialPermission === undefined ? {} : { permission: initialPermission }),
       ...(loopIterations === undefined ? {} : { loopIterations }),
       persistLoopIterations: loopIterations !== undefined,
       generation: { provider, model, ...(selection === undefined ? {} : { explicit: true }), options },
@@ -1213,7 +1245,7 @@ export function createHost({
       environment: env,
       permission: recover
         ? createPermissionContext('read-only', 'policy', permission.capabilities)
-        : permission,
+        : initial?.permission?.context ?? permission,
       loopIterations: initial?.loopIterations ?? configuredLoopLimits.iterations,
       loopModelCalls: configuredLoopLimits.modelCalls,
       generation: initial?.generation ?? env.generation ?? { provider, model: modelConfigOf(config), options: {} },
@@ -1253,12 +1285,21 @@ export function createHost({
         }
       }
     } else {
-      await session.append({
-        kind: 'sessionPermission',
-        profile: state.permission.profile,
-        network: state.permission.network,
-        source: 'host-default',
-      });
+      await session.append(initial?.permission === undefined
+        ? {
+            kind: 'sessionPermission',
+            profile: state.permission.profile,
+            network: state.permission.network,
+            source: 'host-default',
+          }
+        : {
+            kind: 'sessionPermission',
+            profile: state.permission.profile,
+            network: state.permission.network,
+            source: 'trusted-ui',
+            confirmedFullAccess: initial.permission.confirmedFullAccess,
+            confirmedNetwork: initial.permission.confirmedNetwork,
+          });
     }
     const chain = createDecisionChain({
       ...policy,
@@ -1769,8 +1810,10 @@ export function createHost({
         profile: next.profile,
         network: next.network,
         source: 'trusted-ui',
-        confirmedFullAccess: confirmFullAccess === true,
-        confirmedNetwork: confirmNetwork === true,
+        confirmedFullAccess: next.profile === 'full-access'
+          && state.permission.profile !== 'full-access' && confirmFullAccess === true,
+        confirmedNetwork: next.network === 'unrestricted'
+          && state.permission.network !== 'unrestricted' && confirmNetwork === true,
       });
       await retire(state);
       await buildSession(state.id, connection, true, undefined, state.environment);
@@ -1803,6 +1846,7 @@ export function createHost({
             origin ?? (message.params.projectRoot === undefined ? 'default' : 'explicit'), initial);
           await noteWorkspace(env);
           const hasInitialSettings = message.params.initialMode !== undefined || message.params.initialPolicy !== undefined
+            || message.params.initialPermissionProfile !== undefined || message.params.initialPermissionNetwork !== undefined
             || message.params.initialProvider !== undefined || message.params.initialModel !== undefined
             || message.params.initialThinkingEffort !== undefined || message.params.initialOutputTokens !== undefined
             || message.params.initialLoopIterations !== undefined;

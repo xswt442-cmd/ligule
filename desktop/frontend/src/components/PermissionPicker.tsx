@@ -2,21 +2,26 @@ import { useEffect, useState } from 'react';
 import { Popover } from 'radix-ui';
 import { code, type Client } from '../protocol';
 import { useText } from '../locale';
-import type { PermissionConfirmation, PermissionConfirmations } from '../permission-control';
+import type { PermissionConfirmation, PermissionConfirmations, PermissionTarget } from '../permission-control';
 import { canChangePermission, changePermissionAndRefresh, permissionConfirmations, permissionOf, PermissionRefreshError, readPermissionStatus } from '../permission-control';
 import type { PermissionEnforcement, PermissionNetwork, PermissionProfile, SessionPermission, Status } from '../status';
 import { Icon } from './Icon';
 import { keepEscape, Modal } from './ui';
 
-export function PermissionPicker({ client, sessionId, status, running, onStatus }: {
+export function PermissionPicker({ client, sessionId, status, initialPermission, initialConfirmations, disabled, running, onInitialChange, onStatus }: {
   client: Client;
   sessionId: string | null;
   status: Status | null;
+  initialPermission: PermissionTarget;
+  initialConfirmations: PermissionConfirmations;
+  disabled: boolean;
   running: boolean;
+  onInitialChange: (target: PermissionTarget, confirmations: PermissionConfirmations) => void;
   onStatus: (status: Status) => void;
 }) {
   const t = useText();
   const permission = permissionOf(status);
+  const current = sessionId === null ? initialPermission : { profile: permission.profile, network: permission.network };
   const [open, setOpen] = useState(false);
   const [profile, setProfile] = useState<PermissionProfile>(permission.profile);
   const [network, setNetwork] = useState<PermissionNetwork>(permission.network);
@@ -27,23 +32,36 @@ export function PermissionPicker({ client, sessionId, status, running, onStatus 
   const [confirmed, setConfirmed] = useState<PermissionConfirmations>({ fullAccess: false, network: false });
 
   useEffect(() => {
-    setProfile(permission.profile);
-    setNetwork(permission.network);
+    setProfile(current.profile);
+    setNetwork(current.network);
     setNeedsRefresh(false);
-  }, [permission.profile, permission.network]);
+  }, [current.profile, current.network]);
 
   const target = { profile, network };
-  const canEdit = canChangePermission(status, running, busy || needsRefresh);
-  const hasChanges = profile !== permission.profile || network !== permission.network;
-  const unavailableStatus = status === null || status.permission === undefined || permission.execution.code === 'permission_status_unavailable';
+  const canEdit = sessionId === null ? !disabled && !busy && !needsRefresh : canChangePermission(status, running, busy || needsRefresh || disabled);
+  const hasChanges = profile !== current.profile || network !== current.network;
+  const unavailableStatus = sessionId !== null && (status === null || status.permission === undefined || permission.execution.code === 'permission_status_unavailable');
   const isRunning = running || status?.running === true;
   const changeState = busy ? t('正在更新', 'Updating')
     : needsRefresh ? t('需要刷新状态', 'Status refresh required')
+      : sessionId === null ? t('创建会话时应用', 'Applied when the conversation starts')
       : isRunning ? t('运行中，暂不可更改', 'Unavailable while running')
         : permission.changeAllowed ? t('允许更改', 'Allowed') : t('不允许更改', 'Not allowed');
 
   const save = async (confirmationsForChange: PermissionConfirmations) => {
-    if (!canEdit || status === null) return;
+    if (!canEdit) return;
+    if (sessionId === null) {
+      onInitialChange(target, {
+        fullAccess: target.profile === 'full-access' && (confirmationsForChange.fullAccess
+          || current.profile === 'full-access' && initialConfirmations.fullAccess),
+        network: target.network === 'unrestricted' && (confirmationsForChange.network
+          || current.network === 'unrestricted' && initialConfirmations.network),
+      });
+      setNeedsRefresh(false);
+      setOpen(false);
+      return;
+    }
+    if (status === null) return;
     setBusy(true);
     setFailure('');
     try {
@@ -66,7 +84,7 @@ export function PermissionPicker({ client, sessionId, status, running, onStatus 
 
   const apply = () => {
     if (!canEdit || !hasChanges) return;
-    const required = permissionConfirmations(permission, target);
+    const required = permissionConfirmations({ ...permission, profile: current.profile, network: current.network }, target);
     setConfirmed({ fullAccess: false, network: false });
     if (required.length === 0) {
       void save({ fullAccess: false, network: false });
@@ -118,16 +136,16 @@ export function PermissionPicker({ client, sessionId, status, running, onStatus 
   return <>
     <Popover.Root open={open} onOpenChange={(next) => {
       setOpen(next);
-      if (next && status !== null) {
-        setProfile(permission.profile);
-        setNetwork(permission.network);
+      if (next) {
+        setProfile(current.profile);
+        setNetwork(current.network);
         setFailure('');
       }
     }}>
       <Popover.Trigger asChild>
-        <button type="button" className="composer-choice permission-trigger" disabled={sessionId === null || status === null || busy}
-          title={t('当前会话的操作系统权限', 'Operating-system permissions for this session')}>
-          <Icon name="shield" size={14} /><span>{t('权限', 'Permissions')} · {profileLabel(permission.profile, t)}</span><Icon name="fold" size={12} />
+        <button type="button" className="composer-choice permission-trigger" disabled={disabled || (sessionId !== null && (status === null || busy))}
+          title={sessionId === null ? t('新会话的操作系统权限', 'Operating-system permissions for the new conversation') : t('当前会话的操作系统权限', 'Operating-system permissions for this conversation')}>
+          <Icon name="shield" size={14} /><span>{t('权限', 'Permissions')} · {profileLabel(current.profile, t)}</span><Icon name="fold" size={12} />
         </button>
       </Popover.Trigger>
       <Popover.Portal>
@@ -143,8 +161,8 @@ export function PermissionPicker({ client, sessionId, status, running, onStatus 
           )}</p>
 
           <div className="permission-current">
-            <span>{t('当前会话', 'Current session')}</span>
-            <strong>{profileLabel(permission.profile, t)} · {networkLabel(permission.network, t)}</strong>
+            <span>{sessionId === null ? t('新会话', 'New conversation') : t('当前会话', 'Current conversation')}</span>
+            <strong>{profileLabel(current.profile, t)} · {networkLabel(current.network, t)}</strong>
           </div>
           <div className="permission-change-state">
             <span>{t('权限更改', 'Permission changes')}</span>
@@ -172,25 +190,29 @@ export function PermissionPicker({ client, sessionId, status, running, onStatus 
             </label>
           </div>
 
-          <div className="permission-capabilities" aria-label={t('平台隔离能力', 'Platform sandbox capabilities')}>
-            <strong>{t('平台隔离能力', 'Platform sandbox capabilities')}</strong>
-            <Capability label={t('读取文件', 'File reads')} value={permission.capabilities.filesystemRead} />
-            <Capability label={t('写入文件', 'File writes')} value={permission.capabilities.filesystemWrite} />
-            <Capability label={t('网络隔离', 'Network isolation')} value={permission.capabilities.network} />
-            <Capability label={t('进程隔离', 'Process isolation')} value={permission.capabilities.process} />
-          </div>
+          {sessionId === null
+            ? <p className="permission-note" role="status">{t('平台能力会在创建会话时由 Host 检查；不支持的操作仍会被拒绝。', 'The Host checks platform capabilities when it creates the conversation; unsupported operations remain denied.')}</p>
+            : <>
+              <div className="permission-capabilities" aria-label={t('平台隔离能力', 'Platform sandbox capabilities')}>
+                <strong>{t('平台隔离能力', 'Platform sandbox capabilities')}</strong>
+                <Capability label={t('读取文件', 'File reads')} value={permission.capabilities.filesystemRead} />
+                <Capability label={t('写入文件', 'File writes')} value={permission.capabilities.filesystemWrite} />
+                <Capability label={t('网络隔离', 'Network isolation')} value={permission.capabilities.network} />
+                <Capability label={t('进程隔离', 'Process isolation')} value={permission.capabilities.process} />
+              </div>
 
-          <div className="permission-execution" role="status">
-            <strong>{t('命令执行', 'Command execution')}: {permission.execution.available ? t('可用', 'Available') : t('不可用', 'Unavailable')}</strong>
-            {!permission.execution.available && <p>{executionReason(permission, t)}</p>}
-          </div>
+              <div className="permission-execution" role="status">
+                <strong>{t('命令执行', 'Command execution')}: {permission.execution.available ? t('可用', 'Available') : t('不可用', 'Unavailable')}</strong>
+                {!permission.execution.available && <p>{executionReason(permission, t)}</p>}
+              </div>
+            </>}
 
           {unavailableStatus && <p className="permission-note" role="status">{t(
             '无法读取 Host 的权限状态。界面按只读处理，并禁用更改。',
             'The Host permission status is unavailable. This session is treated as read-only and changes are disabled.',
           )}</p>}
-          {isRunning && <p className="permission-note" role="status">{t('会话运行期间不能更改权限。', 'Permissions cannot change while this session is running.')}</p>}
-          {!unavailableStatus && !permission.changeAllowed && <p className="permission-note" role="status">{t(
+          {sessionId !== null && isRunning && <p className="permission-note" role="status">{t('会话运行期间不能更改权限。', 'Permissions cannot change while the session is running.')}</p>}
+          {sessionId !== null && !unavailableStatus && !permission.changeAllowed && <p className="permission-note" role="status">{t(
             permission.changeReason === 'permission_extension_restart_required'
               ? '当前会话仍加载着扩展代码，Host 不能在同一进程内安全降低权限。先禁用扩展并重启 Host，再更改权限。'
               : permission.changeReason === 'permission_session_running'
@@ -206,7 +228,7 @@ export function PermissionPicker({ client, sessionId, status, running, onStatus 
           {needsRefresh && <button type="button" disabled={busy} onClick={() => void refresh()}>{t('刷新权限状态', 'Refresh permission status')}</button>}
 
           <div className="permission-actions">
-            <button type="button" disabled={!hasChanges || busy} onClick={() => { setProfile(permission.profile); setNetwork(permission.network); setFailure(''); }}>{t('放弃更改', 'Discard changes')}</button>
+            <button type="button" disabled={!hasChanges || busy} onClick={() => { setProfile(current.profile); setNetwork(current.network); setFailure(''); }}>{t('放弃更改', 'Discard changes')}</button>
             <button type="button" className="primary-button" disabled={!canEdit || !hasChanges} onClick={apply}>
               {busy ? t('正在更改…', 'Updating…') : t('应用更改', 'Apply changes')}
             </button>

@@ -34,6 +34,7 @@ import { notificationOf, notificationTarget, type NotificationKind, type Notific
 import { SessionStreamBuffer } from './session-stream';
 import { Composer } from './components/Composer';
 import type { MentionState } from './mentions';
+import type { PermissionConfirmations, PermissionTarget } from './permission-control';
 
 // 流式输出显示在已落盘记录之后，并保持固定 ID，避免每个增量都重建行并丢失展开状态。
 const LIVE_REASONING: Row = { id: -2, kind: 'reasoning', text: '' };
@@ -77,6 +78,8 @@ type PanelProps = {
 
 // 表示当前没有文本组合输入；有效光标位置不会是 -1。
 const NO_TOKEN = { start: -1, text: '' };
+const DEFAULT_NEW_SESSION_PERMISSION: PermissionTarget = { profile: 'read-only', network: 'policy' };
+const NO_PERMISSION_CONFIRMATIONS: PermissionConfirmations = { fullAccess: false, network: false };
 // 已打开的会话。右侧面板显示当前会话状态，不重复提供会话浮层已有的控制项。
 /**
  * 返回持久工作区登记中的默认目录。未设置默认目录或读取失败时返回 undefined。
@@ -188,6 +191,11 @@ export function App({ transport }: { transport: Transport }) {
   // 使用 ref 保存该控制标记，不额外触发界面渲染。
   const allowSend = useRef(new Set<string>());
   const [status, setStatus] = useState<Status | null>(null);
+  const [newSessionSettingsRevision, setNewSessionSettingsRevision] = useState(0);
+  const [newSessionMode, setNewSessionMode] = useState<string | null>(null);
+  const [newSessionPolicy, setNewSessionPolicy] = useState<'ask' | 'auto' | 'never' | null>(null);
+  const [newSessionPermission, setNewSessionPermission] = useState<PermissionTarget>(DEFAULT_NEW_SESSION_PERMISSION);
+  const [newSessionPermissionConfirmations, setNewSessionPermissionConfirmations] = useState<PermissionConfirmations>(NO_PERMISSION_CONFIRMATIONS);
   const [draft, setDraft] = useState('');
   const [caret, setCaret] = useState(0);
   // `@` 路径候选由 Host 提供，前端不扫描项目目录。
@@ -808,6 +816,8 @@ export function App({ transport }: { transport: Transport }) {
 
   const newSession = useCallback(async (root?: string) => {
     const request = ++openRequest.current;
+    setNewSessionSettingsRevision((revision) => revision + 1);
+    setSessionMenuOpen(false);
     prependAnchor.current = null;
     setOlderLoading(false);
     setInitialIndex({ index: 'LAST', align: 'end' });
@@ -836,6 +846,10 @@ export function App({ transport }: { transport: Transport }) {
       await prefsSettled.current;
       if (openRequest.current !== request) return false;
       newParameters.current = params;
+      setNewSessionMode(null);
+      setNewSessionPolicy(null);
+      setNewSessionPermission(DEFAULT_NEW_SESSION_PERMISSION);
+      setNewSessionPermissionConfirmations(NO_PERMISSION_CONFIRMATIONS);
       opening.current = null;
       active.current = null;
       setMobileSidebar(false);
@@ -1036,7 +1050,20 @@ export function App({ transport }: { transport: Transport }) {
     creating.current = true;
     const request = openRequest.current;
     try {
-      const created = await client.call('session.create', newParameters.current, 15_000) as { sessionId: string };
+      const hasPermissionOverride = newSessionPermission.profile !== DEFAULT_NEW_SESSION_PERMISSION.profile
+        || newSessionPermission.network !== DEFAULT_NEW_SESSION_PERMISSION.network;
+      const createParameters = {
+        ...newParameters.current,
+        ...(newSessionMode === null ? {} : { initialMode: newSessionMode }),
+        ...(newSessionPolicy === null ? {} : { initialPolicy: newSessionPolicy }),
+        ...(hasPermissionOverride ? {
+          initialPermissionProfile: newSessionPermission.profile,
+          initialPermissionNetwork: newSessionPermission.network,
+          confirmInitialFullAccess: newSessionPermissionConfirmations.fullAccess,
+          confirmInitialNetwork: newSessionPermissionConfirmations.network,
+        } : {}),
+      };
+      const created = await client.call('session.create', createParameters, 15_000) as { sessionId: string };
       if (openRequest.current !== request) return;
       const selection = settings.newSelections[projectRoot];
       if (selection !== undefined) await client.call('model.select', { sessionId: created.sessionId, ...selection }, 15_000);
@@ -1062,7 +1089,7 @@ export function App({ transport }: { transport: Transport }) {
       creating.current = false;
       setStarting(false);
     }
-  }, [client, draft, inputOwner, openSession, projectRoot, reading, sessionId, settings.newSelections, settingsReady, submit, t]);
+  }, [client, draft, inputOwner, newSessionMode, newSessionPermission, newSessionPermissionConfirmations, newSessionPolicy, openSession, projectRoot, reading, sessionId, settings.newSelections, settingsReady, submit, t]);
 
   // `own` 指定取消目标会话；默认取消当前前台会话。
   const cancel = useCallback(async (own = sessionId) => {
@@ -1157,10 +1184,14 @@ export function App({ transport }: { transport: Transport }) {
   }, [caret, draft, mention]);
 
   // 通过 `mode.set` 切换模式；无效清单返回稳定错误码，不静默回退到默认模式。
-  const setMode = useCallback(async (name: string) => {
-    if (sessionId === null || name === '') return;
+  const setMode = useCallback(async (name: string | null) => {
+    if (sessionId === null) {
+      setNewSessionMode(name === '' || name === 'default' ? null : name);
+      return;
+    }
+    if (name === '') return;
     try {
-      const result = await client.call('mode.set', { sessionId, name }) as { mode: string; pending: string | null };
+      const result = await client.call('mode.set', { sessionId, name: name ?? 'default' }) as { mode: string; pending: string | null };
       setRows((current) => [...current, metaRow('meta', result.pending === null
         ? `模式已切换为 ${result.mode}。`
         : `本轮结束后将切换为 ${result.pending} 模式。`, result.pending === null
@@ -1174,7 +1205,10 @@ export function App({ transport }: { transport: Transport }) {
 
   // 通过 `policy.set` 修改当前会话的策略；传入 `null` 时恢复配置默认值。
   const setPolicy = useCallback(async (mode: 'ask' | 'auto' | 'never' | null) => {
-    if (sessionId === null) return;
+    if (sessionId === null) {
+      setNewSessionPolicy(mode);
+      return;
+    }
     try {
       const result = await client.call('policy.set', { sessionId, mode: mode ?? 'default' }, 15_000) as { policy: string; policySource: string };
       if (active.current === sessionId) setRows((current) => [...current, metaRow('meta', mode === null
@@ -1587,6 +1621,11 @@ export function App({ transport }: { transport: Transport }) {
         queue={queue}
         mention={mention}
         sessionMenuOpen={sessionMenuOpen}
+        initialMode={newSessionMode}
+        initialPolicy={newSessionPolicy}
+        initialPermission={newSessionPermission}
+        initialPermissionConfirmations={newSessionPermissionConfirmations}
+        newSessionSettingsRevision={newSessionSettingsRevision}
         modelCatalogRevision={modelCatalogRevision}
         workspaceRevision={sessionsRevision}
         othersRunning={othersRunning}
@@ -1603,6 +1642,10 @@ export function App({ transport }: { transport: Transport }) {
         onSessionMenuChange={setSessionMenuOpen}
         onSetMode={(name) => void setMode(name)}
         onSetPolicy={setPolicy}
+        onInitialPermissionChange={(target, confirmations) => {
+          setNewSessionPermission(target);
+          setNewSessionPermissionConfirmations(confirmations);
+        }}
         onPermissionStatus={(next) => { if (active.current === next.sessionId) setStatus(next); }}
         onStop={() => void cancel()}
         onSend={() => void send()}

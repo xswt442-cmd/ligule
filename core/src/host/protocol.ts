@@ -34,6 +34,10 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly model?: string;
   readonly initialMode?: string;
   readonly initialPolicy?: string;
+  readonly initialPermissionProfile?: string;
+  readonly initialPermissionNetwork?: string;
+  readonly confirmInitialFullAccess?: boolean;
+  readonly confirmInitialNetwork?: boolean;
   readonly initialProvider?: string;
   readonly initialModel?: string;
   readonly initialThinkingEffort?: string;
@@ -73,6 +77,10 @@ export const METHODS = Object.freeze({
         workspaceOrigin: { type: 'string', description: "how this session landed on that workspace: 'explicit' when the client chose it, 'default' when it is the one the client falls back to" },
         initialMode: { type: 'string', description: 'optional mode to apply before returning the new session' },
         initialPolicy: { type: 'string', description: 'optional session policy override: ask, auto, or never' },
+        initialPermissionProfile: { type: 'string', description: 'optional initial file and command permission; interactive clients only' },
+        initialPermissionNetwork: { type: 'string', description: 'optional initial network permission; interactive clients only' },
+        confirmInitialFullAccess: { type: 'boolean', description: 'confirmation for granting full-access permission to a new session' },
+        confirmInitialNetwork: { type: 'boolean', description: 'confirmation for granting unrestricted network access to a new session' },
         initialProvider: { type: 'string', description: 'provider ID for an initial model selection; must be paired with initialModel' },
         initialModel: { type: 'string', description: 'model ID for an initial model selection; must be paired with initialProvider' },
         initialThinkingEffort: { type: 'string', description: 'provider-supported effort to apply before the first run' },
