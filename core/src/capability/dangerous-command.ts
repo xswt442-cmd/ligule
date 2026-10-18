@@ -657,9 +657,16 @@ async function inspectInvocation(
   const findExec = findExecChildren(invocation, shell, tracker.current);
   if (findExec?.rootSweep === true) return { kind: 'hard-deny', reason: DELETE_ROOT_REASON };
 
-  let approval: Risk = deletion ?? process;
+  let approval: Risk = invocation.executableDynamic === true
+    ? { kind: 'approval', reason: WRAPPER_REASON }
+    : deletion ?? process;
   if (findExec?.hasExecutor === true) approval ??= { kind: 'approval', reason: WRAPPER_REASON };
   if (findExec?.incomplete === true) approval ??= { kind: 'approval', reason: WRAPPER_REASON };
+  for (const nested of invocation.executableNested ?? []) {
+    const nestedResult = await inspectInvocation(nested, shell, { current: cloneDirectory(tracker.current), stack: [] }, depth + 1);
+    if (nestedResult?.kind === 'hard-deny') return nestedResult;
+    approval ??= nestedResult;
+  }
   for (const argument of invocation.arguments) {
     for (const nested of argument.nested) {
       const nestedResult = await inspectInvocation(nested, shell, { current: cloneDirectory(tracker.current), stack: [] }, depth + 1);
@@ -709,7 +716,10 @@ async function inspectInvocation(
     }
   }
 
-  if (!invocation.nested && !invocation.pipeline) updateDirectory(invocation, shell, tracker);
+  if (!invocation.nested && !invocation.pipeline) {
+    if (invocation.executableDynamic === true) tracker.current = { kind: 'unknown', workspaceParts: [] };
+    else updateDirectory(invocation, shell, tracker);
+  }
   return approval;
 }
 

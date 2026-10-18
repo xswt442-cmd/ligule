@@ -189,6 +189,10 @@ test('hard denied commands remain denied across modes, allow rules, and affirmat
   const encodedRemoval = Buffer.from('Remove-Item -Path "$env:USERPROFILE\\*" -Recurse -Force', 'utf16le').toString('base64');
   const commands = [
     ['bash', 'rm -rf ~'],
+    ['bash', "'rm' -rf /"],
+    ['bash', '"rm" -rf /'],
+    ['bash', 'r""m -rf /'],
+    ['bash', '$(rm -rf ~)'],
     ['bash', 'rm -rf /*'],
     ['bash', 'sudo env APP_MODE=test command exec bash -c "rm -rf ~/*"'],
     ['bash', 'sudo -u builder env -u TMPDIR rm -rf ~'],
@@ -375,6 +379,15 @@ test('script runners and direct script paths cannot pass automatic approval', as
     assert.equal(result.via, 'ask', command);
   }
   assert.equal(calls.length, commands.length);
+});
+
+test('automatic approval uses the decoded Bash executable name', async () => {
+  const { calls, ask } = asked(true);
+  const chain = createDecisionChain({ mode: 'auto', ask });
+  const result = await chain.evaluate({ tool: 'exec', input: { command: 'b""ash -c "echo ready"' } });
+  assert.equal(result.decision, 'allow');
+  assert.equal(result.via, 'ask');
+  assert.equal(calls.length, 1);
 });
 
 test('find execution callbacks inspect only the parsed executable position', async () => {

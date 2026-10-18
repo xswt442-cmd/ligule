@@ -97,6 +97,21 @@ test('AST inspection preserves wrapper arguments and nested Bash commands', asyn
   assert.equal(backtick.invocations[0].arguments[0].nested[0].executable, 'rm');
 });
 
+test('Bash executable names are decoded from literals and mark dynamic names', async () => {
+  for (const command of ["'rm' -rf /", '"rm" -rf /', 'r""m -rf /', 'b""ash -c echo']) {
+    const inspection = await inspectCommand(command);
+    assert.equal(inspection.invocations[0].executable, command.startsWith('b') ? 'bash' : 'rm', command);
+    assert.equal(inspection.invocations[0].executableDynamic, false, command);
+  }
+
+  const dynamic = await inspectCommand(`${String.fromCharCode(36)}command -rf /`);
+  assert.equal(dynamic.parsed.kind, 'unsupported');
+  assert.equal(dynamic.invocations[0].executableDynamic, true);
+
+  const substitution = await inspectCommand(`${String.fromCharCode(36)}(rm -rf ~)`);
+  assert.equal(substitution.invocations[0].executableNested?.[0]?.executable, 'rm');
+});
+
 test('AST inspection preserves PowerShell variables, aliases, and subexpressions', async () => {
   const removal = await inspectCommand('Remove-Item -Path "$env:USERPROFILE\\*" -Recurse -Force', 'powershell');
   assert.equal(removal.parsed.kind, 'unsupported');

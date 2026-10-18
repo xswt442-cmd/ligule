@@ -21,6 +21,8 @@ export interface ParsedCommandArgument {
 
 export interface ParsedCommandInvocation {
   readonly executable: string;
+  readonly executableDynamic?: boolean;
+  readonly executableNested?: readonly ParsedCommandInvocation[];
   readonly arguments: readonly ParsedCommandArgument[];
   readonly nested: boolean;
   readonly pipeline: boolean;
@@ -131,6 +133,9 @@ function bashArgumentValue(node: TreeSitterParser.SyntaxNode, inDoubleQuote = fa
   if (node.type === 'raw_string') {
     return { value: source.slice(1, -1), dynamic: false, tildeExpansion: false };
   }
+  if (node.type === 'string' && (source === "''" || source === '""')) {
+    return { value: '', dynamic: false, tildeExpansion: false };
+  }
   if (node.type === 'simple_expansion') {
     return { value: source, dynamic: true, tildeExpansion: false };
   }
@@ -195,11 +200,19 @@ function bashArgument(node: TreeSitterParser.SyntaxNode, text: string): ParsedCo
 function bashInvocation(node: TreeSitterParser.SyntaxNode, text: string, nested: boolean, pipeline: boolean): ParsedCommandInvocation {
   const children = childrenOf(node);
   const commandName = children.find((child) => child.type === 'command_name');
-  const executable = commandName?.text ?? '';
+  const decoded = commandName === undefined ? undefined : bashArgumentValue(commandName);
+  const executable = decoded?.value ?? commandName?.text ?? '';
   const args = children
     .filter((child) => child !== commandName)
     .map((child) => bashArgument(child, text));
-  return { executable, arguments: args, nested, pipeline };
+  return {
+    executable,
+    executableDynamic: decoded === undefined || decoded.value === undefined || decoded.dynamic || decoded.tildeExpansion,
+    executableNested: commandName === undefined ? [] : nestedBashCommands(commandName, text),
+    arguments: args,
+    nested,
+    pipeline,
+  };
 }
 
 function commandCount(node: TreeSitterParser.SyntaxNode): number {

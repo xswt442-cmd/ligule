@@ -2,7 +2,7 @@
 // 任一步拒绝后都不能被后续步骤放行；前面的步骤拒绝时不会询问用户。
 // 命令先按 Host 选择的语法解析，再逐段检查。任一段命中拒绝规则就拒绝整条命令，无法确认安全时转交审批。
 // 自动放行不会执行脚本解释器命令，因为它们可以运行任意代码；解析时也不会剥除解释器外壳。
-import { inspectCommand, type ParsedCommand } from '../capability/command.js';
+import { inspectCommand, type CommandInspection, type ParsedCommand } from '../capability/command.js';
 import { classifyDangerousCommand } from '../capability/dangerous-command.js';
 import { KernelError } from './error.js';
 import { matches } from './match.js';
@@ -118,15 +118,17 @@ function commandCwd(input: unknown): string | undefined {
     : undefined;
 }
 
-// 脚本解释器命令不能自动放行；没有命令文本的调用不受此限制。
-function canAutoApprove(command: string | undefined): boolean {
-  if (command === undefined) return true;
-  const first = /^(?:"([^"]+)"|'([^']+)'|(\S+))/u.exec(command.trim());
-  const source = first?.[1] ?? first?.[2] ?? first?.[3] ?? '';
-  if (source.includes('/') || source.includes('\\')) return false;
-  const executable = source.replaceAll('\\', '/').split('/').at(-1) ?? '';
-  const name = executable.toLowerCase().replace(/\.(?:exe|cmd|bat|com)$/u, '');
-  return !INTERPRETERS.includes(name) && !COMMAND_WRAPPERS.includes(name) && !SCRIPT_EXTENSIONS.test(name);
+// 自动放行使用与危险命令分类相同的解析结果；动态命令名和解释器包装必须逐次审批。
+function canAutoApprove(inspection: CommandInspection | undefined): boolean {
+  if (inspection?.parsed.kind !== 'segments' || inspection.invocations.length === 0) return false;
+  return inspection.invocations.every((invocation) => {
+    if (invocation.executableDynamic === true || (invocation.executableNested?.length ?? 0) > 0) return false;
+    const source = invocation.executable;
+    if (source.includes('/') || source.includes('\\')) return false;
+    const executable = source.replaceAll('\\', '/').split('/').at(-1) ?? '';
+    const name = executable.toLowerCase().replace(/\.(?:exe|cmd|bat|com)$/u, '');
+    return !INTERPRETERS.includes(name) && !COMMAND_WRAPPERS.includes(name) && !SCRIPT_EXTENSIONS.test(name);
+  });
 }
 
 // 需要审批时附上解析器状态、无法识别的命令构造和所用语法，让界面可以说明原因。
@@ -279,7 +281,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
           ? 'this tool has no permission classification and requires per-call approval'
           : undefined;
       if (command !== undefined) {
-        if (segments !== undefined && !segments.every(canAutoApprove)) {
+        if (segments !== undefined && !canAutoApprove(inspection)) {
           requiresManualApproval = true;
           manualApprovalReason ??= '命令使用脚本解释器或包装器，需要逐次审批';
         }
@@ -328,11 +330,11 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       } else if (effective === 'auto') {
         // 自动策略只放行可完整解析且每段首词都不是脚本解释器的命令。
         // 不剥离解释器包装；例如 `bash -lc "git status"` 仍须审批。
-        covered = segments !== undefined && segments.every((segment) => canAutoApprove(segment)) ? null : undefined;
+        covered = segments !== undefined && canAutoApprove(inspection) ? null : undefined;
       } else if (effective === 'never') {
         // 显式关闭审批只跳过确认步骤；目标检查、拒绝规则和守卫仍然生效。
         // 命令含糊、由解释器执行或目标属于私有网络时仍按拒绝处理。
-        covered = command === undefined || (segments !== undefined && segments.every(canAutoApprove)) ? null : undefined;
+        covered = command === undefined || (segments !== undefined && canAutoApprove(inspection)) ? null : undefined;
       } else {
         // 逐次审批要求放行规则覆盖每个命令分段；无法解析的命令不能视为已覆盖。
         covered = segments !== undefined && parts?.every((segment) => allowed.some((item) => matches(segment, item.match)))
