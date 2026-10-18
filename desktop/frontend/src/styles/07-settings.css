@@ -1,0 +1,336 @@
+/* 设置对话框 */
+
+/* 对话框底层覆盖窗口；`.sheet` 和 `.palette` 由 Radix 定位在其上方。 */
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: rgb(0 0 0 / 45%);
+}
+
+/* 退出确认对话框采用较窄布局，底部并排显示两个操作，默认按钮位于左侧。 */
+.confirm {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  z-index: 31;
+  display: grid;
+  align-content: start;
+  gap: var(--space-2);
+  inline-size: min(30rem, 92vw);
+  max-block-size: 82vh;
+  padding: var(--space-3) 1.1rem;
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius) * 1.5);
+  box-shadow: var(--shadow-pop);
+  overflow: auto;
+}
+
+.confirm-lead {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.confirm-list {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: grid;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+}
+
+.confirm-list span {
+  margin-left: var(--space-2);
+  color: var(--fg-muted);
+}
+
+.confirm-note {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+.confirm-actions {
+  display: flex;
+  gap: var(--space-2);
+  justify-content: flex-end;
+}
+
+.confirm-actions button {
+  padding: var(--space-1) var(--space-3);
+  border-radius: 999px;
+  font-size: var(--text-sm);
+}
+
+.confirm-actions button[data-tone="stay"] {
+  color: var(--bg-raised);
+  background: var(--ok);
+  border-color: var(--ok);
+}
+
+.confirm-actions button[data-tone="quit"],
+.confirm-actions button[data-tone="discard"] {
+  color: var(--fg);
+  background: var(--bg-sunk);
+  border-color: var(--line);
+}
+
+.sheet {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  z-index: 31;
+  display: grid;
+  grid-template-columns: 11rem minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  inline-size: min(960px, 94vw);
+  block-size: min(760px, 88vh);
+  max-block-size: 88vh;
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius) * 1.5);
+  box-shadow: var(--shadow-pop);
+  overflow: hidden;
+}
+
+.sheet-head {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 18px;
+  border-block-end: 1px solid var(--line);
+  font-size: var(--text-lg);
+}
+
+.sheet-nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: 12px 8px;
+  background: var(--bg-sunk);
+  border-inline-end: 1px solid var(--line);
+}
+
+.sheet-nav button {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 6px var(--space-3);
+  color: var(--fg-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  text-align: start;
+  font-size: var(--text-md);
+  white-space: normal;
+  line-height: 1.4;
+}
+
+.sheet-nav button > span { min-width: 0; }
+
+.sheet-nav button:hover {
+  color: var(--fg);
+  background: var(--bg-raised);
+  border: 1px solid transparent;
+}
+
+.sheet-nav button.active {
+  color: var(--fg);
+  background: var(--bg-raised);
+  border-color: transparent;
+}
+
+.sheet-body {
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 16px 24px 24px;
+}
+
+.sheet-body:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+.sheet-row .sheet-value > input[type="number"] { inline-size: 5.25rem; }
+
+.sheet-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-5);
+  padding: 10px 0;
+  border-block-end: 1px solid var(--line);
+}
+
+.sheet-row:last-child {
+  border-block-end: 0;
+}
+
+.sheet-label {
+  flex: 0 0 9rem;
+  color: var(--fg);
+  font-size: var(--text-md);
+}
+
+.sheet-value {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  flex: 1;
+  min-width: 0;
+}
+
+.sheet-hint {
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
+
+.shortcut-settings .sheet-row { align-items: center; gap: 16px; }
+.shortcut-settings .sheet-label { flex-basis: 46%; }
+.shortcut-settings .sheet-value { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 8px; }
+.shortcut-settings .sheet-value > code { flex: 1; min-width: 6rem; font-size: var(--text-sm); overflow-wrap: anywhere; }
+.shortcut-settings .sheet-hint { flex-basis: 100%; }
+
+.sheet-value select,
+.sheet-value input,
+.sheet-value button {
+  inline-size: fit-content;
+  padding: var(--space-1) var(--space-2);
+  color: var(--fg);
+  background: var(--bg-sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font: inherit;
+  font-size: var(--text-sm);
+}
+
+.sheet-value input[type="range"] {
+  inline-size: 14rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.sheet-value .value {
+  color: var(--fg);
+  font-size: var(--text-md);
+}
+
+.sheet-value .mono {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+}
+
+.inline-field {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.sheet-note {
+  margin: var(--space-4) 0 0;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+button.mini.chip {
+  padding: 2px var(--space-2);
+  color: var(--fg-muted);
+  background: var(--bg-sunk);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: var(--text-xs);
+}
+
+button.mini.chip b {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+/* 审批和断连提示 */
+
+/* 审批卡片和输入区与转录使用同一居中列；连接横幅占据整栏宽度。 */
+/* 审批卡片按内容高度排列，不拉伸填满整行。 */
+.approval .fold-toggle {
+  align-self: flex-start;
+}
+
+.approval-actions button {
+  padding: var(--space-1) var(--space-3);
+  border-radius: 999px;
+  font-size: var(--text-sm);
+}
+
+.approval-actions button[data-tone="allow"] {
+  color: var(--bg-raised);
+  background: var(--ok);
+  border-color: var(--ok);
+}
+
+.approval-actions button[data-tone="deny"] {
+  color: var(--fg);
+  background: var(--bg-sunk);
+  border-color: var(--line);
+}
+
+/* 策略说明根据 `status.get` 的状态显示；界面不据此执行权限判定。 */
+.approval-tier {
+  margin-inline-start: auto;
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
+
+/* 上下文用量浮层 */
+
+.usage-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 2px var(--space-2);
+  color: inherit;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.usage-trigger:hover,
+.usage-trigger:focus-visible,
+.usage[data-open="true"] .usage-trigger {
+  background: var(--bg-sunk);
+  border-color: var(--line);
+}
+
+.usage-pop {
+  position: absolute;
+  inset-block-start: calc(100% + var(--space-2));
+  inset-inline-end: 0;
+  z-index: 6;
+  display: grid;
+  gap: var(--space-1);
+  inline-size: 22rem;
+  padding: var(--space-3);
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-pop);
+}
+
+.usage-row {
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+  justify-content: space-between;
+  font-size: var(--text-xs);
+}
+
+.usage-row span {
+  color: var(--fg-muted);
+  flex: none;
+}
+
+.usage-row b {
+  font-weight: 500;
+  text-align: end;
+}

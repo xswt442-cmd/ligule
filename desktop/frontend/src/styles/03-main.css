@@ -1,0 +1,283 @@
+/* 主栏 */
+
+.center {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  /* 顶栏保持单行且不缩小，内容过多时横向滚动；纵向空间由转录区和审批卡调整。 */
+  flex-wrap: nowrap;
+  gap: var(--space-3);
+  min-block-size: 56px;
+  flex-shrink: 0;
+  padding: var(--space-2) var(--space-4);
+  border-block-end: 0;
+  background: var(--bg);
+}
+
+.title {
+  display: flex;
+  flex-direction: column;
+  align-items: baseline;
+  gap: 1px;
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+
+#session-title {
+  font-size: var(--text-lg);
+}
+
+#session-title,
+#session-note {
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.muted {
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+.pills {
+  display: flex;
+  align-items: center;
+  /* 内容过多时横向滚动，不换行，避免顶栏增高并挤压转录区。 */
+  flex-wrap: nowrap;
+  gap: var(--space-2);
+  margin-inline-start: auto;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+/* 状态标签保持单行且不缩小；空间不足时由父容器横向滚动。 */
+.pills > span {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+}
+
+.pill {
+  padding: 2px var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-raised);
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+
+.pill[data-tone="running"] {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--line));
+}
+
+/* 按钮、输入框、选择器和文本框共享最小点击高度与控件字号。嵌入式控件可单独覆盖边框和背景。 */
+input[type="range"],
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--accent);
+}
+
+button,
+input:not([type="range"]),
+select,
+textarea {
+  min-block-size: var(--hit);
+  padding: 0.36rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  color: inherit;
+  font: inherit;
+  font-size: var(--text-md);
+}
+
+button {
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+select {
+  white-space: nowrap;
+}
+
+button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--line));
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.conversation {
+  position: relative;
+  flex: 1;
+  /* 转录区至少保留 6rem 高度，避免审批卡和横幅挤压掉全部对话内容。 */
+  min-height: 6rem;
+  overflow: hidden;
+}
+
+.row {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  padding: var(--space-3) var(--space-4);
+}
+
+.row.question {
+  align-self: flex-end;
+  max-inline-size: 88%;
+  background: var(--bg-sunk);
+  border-color: var(--line);
+}
+
+.row.answer {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  padding: var(--space-1) 0;
+  background: transparent;
+  border: 0;
+}
+
+.row-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+}
+
+.row-body {
+  margin-top: var(--space-1);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: var(--text-md);
+  line-height: var(--transcript-line-height, 1.6);
+}
+
+.row.reasoning {
+  color: var(--fg-muted);
+  font-size: var(--text-md);
+}
+
+.row.call,
+.row.result {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+}
+
+.state-ok {
+  color: var(--ok);
+}
+
+.state-bad {
+  color: var(--bad);
+}
+
+.row.meta,
+.row.error {
+  background: transparent;
+  border-style: dashed;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+.row.error {
+  color: var(--bad);
+}
+
+.turn-explanation { margin: 6px 0; color: var(--fg-muted); font-size: var(--text-sm); line-height: 1.5; }
+.turn-recovery { margin: 2px 0 6px; font-size: var(--text-sm); }
+
+/* `shownIn` 过滤当前展示档不包含的转录行。 */
+
+/* 工具卡片 */
+
+.row-tool {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+/* 标题下方显示实际操作对象，例如命令、路径或 MCP 工具。 */
+.row-target {
+  margin-top: 0.3rem;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.row-note {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 0.42rem;
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+  background: var(--bg-sunk);
+}
+
+.row-code {
+  border-radius: var(--radius);
+  padding: 0 0.35rem;
+  font-size: var(--text-xs);
+  color: var(--bad);
+  background: color-mix(in srgb, var(--bad) 14%, var(--bg-sunk));
+}
+
+.row.refusal .row-note,
+.row.failure .row-note {
+  border-color: color-mix(in srgb, var(--bad) 40%, var(--line));
+}
+
+/* 长正文默认限制高度，展开状态由前端维护。 */
+.row-body[data-folded="true"] {
+  max-height: 9rem;
+  overflow: hidden;
+}
+
+.fold-toggle {
+  margin-top: 0.3rem;
+  padding: 0;
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+.fold-toggle:hover {
+  color: var(--accent);
+}
+
+/* 长转录按页向前加载，避免一次读取全部历史。 */
+.earlier {
+  align-self: center;
+  padding: 0.25rem 0.8rem;
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+  background: var(--bg-sunk);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+
+.earlier:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}

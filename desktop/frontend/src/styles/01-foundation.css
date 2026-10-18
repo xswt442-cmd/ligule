@@ -1,0 +1,197 @@
+/* 所有配色共用布局、控件和排版变量。 */
+
+:root {
+  /* 默认使用深色「墨青」主题；这里定义全局尺寸和间距，主题颜色在下方定义。 */
+  --radius: 8px;
+  /* 全局间距、字号和内容列宽度。
+     字号统一使用 rem，并随根字号缩放；调整字号设置时，
+     正文、控件、辅助文字和标题会按同一比例缩放。 */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --text-xs: 0.75rem;      /* 12 像素：时间戳和用量信息 */
+  --text-sm: 0.8125rem;    /* 13 像素：辅助说明 */
+  --text-md: 0.875rem;     /* 14 像素：控件文字 */
+  --text-lg: 0.9375rem;    /* 15 像素：正文 */
+  --text-xl: 1.125rem;     /* 18 像素：标题 */
+  /* 常用控件的最小点击高度约为 32 像素，包括图标按钮和行内标签。 */
+  --hit: 32px;
+  --stream: 850px;
+  --shadow-pop: 0 18px 40px rgb(0 0 0 / 35%);
+  --sidebar: 280px;
+  --dock: 420px;
+  --mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", monospace;
+}
+
+/* 每种主题只覆盖颜色变量，并保证正文、辅助文字、边界和状态颜色满足对比度要求。
+   `--on-accent` 定义强调色按钮上的图标颜色：深色背景搭配浅色强调时使用深色，浅色背景搭配深色强调时使用白色。
+   将 `data-palette` 加到任意元素上即可预览对应配色，无需改变页面主题。 */
+
+/* 墨青：默认深色主题。 */
+:root,
+[data-palette="ink"] {
+  color-scheme: dark;
+  --bg: #12141a;
+  --bg-raised: #191c24;
+  --bg-sunk: #0e1015;
+  --fg: #e6e8ee;
+  --fg-muted: #8b93a7;
+  --line: #262b38;
+  --accent: #4d6bfe;
+  --accent-strong: #6480ff;
+  --on-accent: #ffffff;
+  --ok: #34c07a;
+  --warn: #e0a34a;
+  --bad: #e0655c;
+}
+
+/* 羊皮纸：暖色浅底和深色文字。 */
+:root[data-palette="parchment"],
+[data-palette="parchment"] {
+  color-scheme: light;
+  --bg: #faf7ef;
+  --bg-raised: #fffcf6;
+  --bg-sunk: #f1ebde;
+  --fg: #2b271d;
+  --fg-muted: #756c5f;
+  --line: #e3dccd;
+  --accent: #9a3412;
+  --accent-strong: #9a3412;
+  --on-accent: #ffffff;
+  --ok: #3b6b1f;
+  --warn: #8a5a12;
+  --bad: #a52a1e;
+}
+
+/* 蓝天：冷色浅底和深蓝强调色。 */
+:root[data-palette="sky"],
+[data-palette="sky"] {
+  color-scheme: light;
+  --bg: #eef3f9;
+  --bg-raised: #ffffff;
+  --bg-sunk: #dce7f3;
+  --fg: #122031;
+  --fg-muted: #46596e;
+  --line: #b7c8dd;
+  --accent: #1f5fd6;
+  --accent-strong: #1f5fd6;
+  --on-accent: #ffffff;
+  --ok: #1a6b40;
+  --warn: #8a5a12;
+  --bad: #b02a1e;
+}
+
+/* 石墨：低饱和深色主题，以琥珀色强调。 */
+:root[data-palette="graphite"],
+[data-palette="graphite"] {
+  color-scheme: dark;
+  --bg: #1b1d1f;
+  --bg-raised: #242729;
+  --bg-sunk: #141618;
+  --fg: #e5e7e8;
+  --fg-muted: #9aa1a6;
+  --line: #34383c;
+  --accent: #c98a2e;
+  --accent-strong: #d99a3f;
+  --on-accent: #1b1d1f;
+  --ok: #5fbf87;
+  --warn: #e0a94a;
+  --bad: #e07168;
+}
+
+/* 森林：深绿底色、浅色文字和绿色强调色。 */
+:root[data-palette="forest"],
+[data-palette="forest"] {
+  color-scheme: dark;
+  --bg: #0f1a14;
+  --bg-raised: #16241c;
+  --bg-sunk: #0b1310;
+  --fg: #e2ede5;
+  --fg-muted: #8fa897;
+  --line: #263a2e;
+  --accent: #54c08a;
+  --accent-strong: #54c08a;
+  --on-accent: #0f1a14;
+  --ok: #4fc07a;
+  --warn: #d9b45a;
+  --bad: #e07168;
+}
+
+/* 黄昏：暖色深底和琥珀色强调。 */
+:root[data-palette="dusk"],
+[data-palette="dusk"] {
+  color-scheme: dark;
+  --bg: #1a140f;
+  --bg-raised: #241c15;
+  --bg-sunk: #120e0a;
+  --fg: #efe6da;
+  --fg-muted: #a89886;
+  --line: #3a2e22;
+  --accent: #e0a94a;
+  --accent-strong: #e0a94a;
+  --on-accent: #1a140f;
+  --ok: #5fbf87;
+  --warn: #e0a94a;
+  --bad: #e0756a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: var(--text-lg)/1.6 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+  overflow: hidden;
+}
+
+.frame {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* 侧栏宽度可拖动调整；收起时侧栏和面板不占用布局空间。 */
+.frame[data-collapsed="true"] .sidebar,
+.frame[data-collapsed="true"] .splitter {
+  display: none;
+}
+
+.frame[data-dock="left"] .dock {
+  order: -1;
+  border-inline-start: 0;
+  border-inline-end: 1px solid var(--line);
+}
+
+.splitter {
+  flex: 0 0 5px;
+  /* ::before 绘制可见分隔线；扩大命中区，方便鼠标拖动。 */
+  position: relative;
+  cursor: col-resize;
+  background: transparent;
+  touch-action: none;
+}
+
+.splitter::before {
+  content: '';
+  position: absolute;
+  inset: 0 2px;
+  background: transparent;
+}
+
+.splitter:hover::before,
+.splitter:active::before {
+  background: var(--accent);
+}
+
+:root { font-size: var(--ui-font-size, 16px); }

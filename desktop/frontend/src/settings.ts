@@ -6,7 +6,7 @@ import type { Language } from './locale';
 import type { ModelSelection } from './model-catalog';
 import { defaultNotifications, notificationsFrom, type NotificationPreferences } from './notifications.ts';
 
-// 支持六种具名配色，具体颜色定义在 `styles.css` 的 `data-palette` 变量中。
+// 支持六种具名配色，具体颜色定义在 `styles/01-foundation.css` 的 `data-palette` 变量中。
 export const PALETTES = ['ink', 'parchment', 'sky', 'graphite', 'forest', 'dusk'] as const;
 export type Palette = (typeof PALETTES)[number];
 
