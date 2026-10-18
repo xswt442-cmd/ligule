@@ -533,6 +533,8 @@ test('operator tools configure real sessions, answer Host interactions, and run 
       tool = 'ask_user_question'; args = { questions: JSON.stringify([{ question: 'Which option should be used?', options: [{ label: 'Option A' }, { label: 'Option B' }] }]) };
     } else if (userText.includes('MCP_OPERATOR_SENSITIVE_APPROVAL')) {
       tool = 'exec'; args = { command: `node -e "require('node:fs').writeFileSync('operator-secret-executed.txt','unexpected')" 'Bearer synthetic-secret-token'` };
+    } else if (userText.includes('MCP_OPERATOR_SENSITIVE_HEADER')) {
+      tool = 'create'; args = { path: 'operator-secret-executed.txt', content: 'X-API-Key: synthetic-header-secret' };
     }
     if (tool === undefined) { sse(response, { content: 'operator task completed' }); return; }
     callId += 1;
@@ -649,6 +651,16 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     assert.equal(sensitiveDone.pendingInteractions.length, 0);
     assert.ok(sensitiveDone.events.some((event) => event.kind === 'interaction.rejected' && event.code === 'control_interaction_sensitive'));
     await assert.rejects(access(markerSensitive), (error) => error.code === 'ENOENT', 'sensitive approval data is denied before the command side effect');
+
+    const sensitiveHeaderRun = toolData(await context.client.callTool({ name: 'ligule_run_start', arguments: {
+      sessionId, input: 'MCP_OPERATOR_SENSITIVE_HEADER',
+    } }), 'operator_sensitive_header_run');
+    const sensitiveHeaderDone = await waitForOutcome(context.client, sensitiveHeaderRun.operationId);
+    assert.equal(sensitiveHeaderDone.state, 'done');
+    assert.equal(sensitiveHeaderDone.pendingInteractions.length, 0, 'credential header must not become an approvable interaction');
+    assert.ok(sensitiveHeaderDone.events.some((event) =>
+      event.kind === 'interaction.rejected' && event.code === 'control_interaction_sensitive'));
+    await assert.rejects(access(markerSensitive), (error) => error.code === 'ENOENT', 'credential header is rejected without writing the file');
 
     const staleRun = toolData(await context.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_OPERATOR_APPROVE' } }), 'operator_stale_approval_run');
     const staleApproval = await waitFor(async () => {

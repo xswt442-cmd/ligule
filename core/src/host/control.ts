@@ -88,6 +88,8 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 function containsSensitiveMaterial(value: unknown): boolean {
   if (typeof value === 'string') {
     return /\bBearer\s+\S+/iu.test(value)
+      || /\b(?:Authorization|Proxy-Authorization)\s*:\s*(?:Basic|Digest|Token)\s+\S+/iu.test(value)
+      || /(?:^|[^A-Za-z0-9_-])(?:x[-_]api[-_]key|api[-_]?key|access[-_]?token|refresh[-_]?token|client[-_]?secret|password|passwd|secret)\s*[:=]\s*["']?[^\s"'\x00-\x1f]+/iu.test(value)
       || /\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{20,})\b/u.test(value)
       || /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/u.test(value)
       || /https?:\/\/[^\s/@:]+:[^\s/@]+@/iu.test(value);
