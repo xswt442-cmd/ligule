@@ -242,13 +242,17 @@ async function allowApproval(tool, previousCount, failureCode) {
 }
 
 async function selectNewSessionPermission(profile) {
+  await waitFor(`(() => {
+    const trigger = document.querySelector('button.permission-trigger');
+    return trigger !== null && !trigger.disabled;
+  })()`, 20_000, 'new_session_permission_control_unavailable');
   const opened = await evaluate(`(() => {
     const trigger = document.querySelector('button.permission-trigger');
-    if (trigger === null) return false;
+    if (trigger === null || trigger.disabled) return false;
     trigger.click();
     return true;
   })()`);
-  if (opened !== true) throw Object.assign(new Error('new_session_permission_control_missing'), { code: 'new_session_permission_control_missing' });
+  if (opened !== true) throw Object.assign(new Error('new_session_permission_control_unavailable'), { code: 'new_session_permission_control_unavailable' });
   await waitFor(`document.querySelector('.permission-panel select') !== null`, 5_000, 'new_session_permission_panel_missing');
   const selected = await evaluate(`(() => {
     const field = document.querySelector('.permission-panel select');
