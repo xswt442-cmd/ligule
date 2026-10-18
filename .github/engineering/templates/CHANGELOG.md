@@ -16,7 +16,7 @@ This changelog records completed, meaningful product changes. GitHub Release not
 
 <!-- 示例：正式发行时将已完成的更新归入对应版本；实际文件不要保留此示例。
 
-## [1.2.3] - 2026-01-01
+## [X.Y.Z] - YYYY-MM-DD
 
 ### 简体中文
 

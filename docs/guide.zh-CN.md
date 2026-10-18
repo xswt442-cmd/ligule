@@ -121,7 +121,7 @@ HTTP 错误只显示状态码及必要的固定错误分类，不显示网关原
 
 Permission 单独控制会话可访问的操作系统资源，Policy 决定允许的操作是否需要审批或必须拒绝。在 TUI 输入 `/permission`，或在桌面版输入区打开权限菜单，可以查看和更改当前会话的 Permission；新会话也可在发送第一条消息前选择文件/命令档位与网络模式。`read-only` 禁止文件工具写入；`workspace-write` 允许文件工具在配置的路径边界内写入；`full-access` 放宽命令的操作系统隔离，启用时需要再次确认。内置文件工具仍受路径边界约束。网络也单独设置为 `policy`、`disabled` 或 `unrestricted`；不受限网络需要再次确认。新会话创建时由 Host 应用所选档位；需要确认的升档由 Host 校验并记录可信界面的确认来源。Permission 状态显示平台的文件读写、网络与进程隔离能力，以及当前 Shell 是否可用。
 
-Shell 只有在平台后端能满足该档位要求的隔离能力时才会执行；能力不足或 Sandbox 不可用时会拒绝执行。当前 Linux 使用 bubblewrap，但文件读取和写入能力标为 `partial`，所以 `read-only` 与 `workspace-write` 档位下 Shell 不可用；Windows 当前没有 OS Sandbox 后端，这两个档位下 Shell 同样不可用。`full-access` 下 Shell 直接使用当前操作系统用户的权限，且要求网络设为 `unrestricted` 和进程管理能力可用。该档位不会绕过 Policy 的拒绝规则和危险操作硬拒绝。已加载扩展属于可信代码，直接使用操作系统能力时不经过 Host 的 Policy 判定；降低权限前必须先关闭扩展并重启 Host。
+Shell 只有在平台后端能满足该档位要求的隔离能力时才会执行；能力不足或 Sandbox 不可用时会拒绝执行。当前 Linux 使用 bubblewrap，但文件读取和写入能力标为 `partial`，所以 `read-only` 与 `workspace-write` 档位下 Shell 不可用；Windows 当前没有 OS Sandbox 后端，这两个档位下 Shell 同样不可用。macOS 当前没有受支持的进程管理或 OS Sandbox 后端，因此所有档位下都无法使用 Shell。`full-access` 下 Shell 直接使用当前操作系统用户的权限，且要求网络设为 `unrestricted` 和进程管理能力可用。该档位不会绕过 Policy 的拒绝规则和危险操作硬拒绝。已加载扩展属于可信代码，直接使用操作系统能力时不经过 Host 的 Policy 判定；降低权限前必须先关闭扩展并重启 Host。
 
 桌面版「设置」分为常规、外观、模型服务、审批规则、通知和快捷键。模型配置选择用户默认或项目本地层后保存；运行中的会话会在本轮结束后采用模型配置变更。高优先级配置仍覆盖较低层的设置。离开含有未保存内容的设置页面时，界面会先询问是否丢弃修改。
 

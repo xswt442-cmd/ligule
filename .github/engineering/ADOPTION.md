@@ -12,9 +12,9 @@
 
 ## 2. 规范源与项目副本
 
-权威源集中保存在本私有维护仓库的 `.github/engineering/`。产品仓库中的 PR 模板、PR Skill 与工程规则是经过各项目审查的本地副本；产品文档必须可独立阅读，不要求贡献者能访问私有规范源。不要让各项目各自修改独立的“全局标准”。
+权威源集中保存在本规范源目录 `.github/engineering/`。产品仓库中的 PR 模板、PR Skill 与工程规则是经过各项目审查的本地副本；产品文档必须可独立阅读，不要求贡献者能访问规范源。不要让各项目各自修改独立的“全局标准”。
 
-对采用统一 PR 模板的仓库，可在本维护仓库根目录运行：
+对采用统一 PR 模板的仓库，可在本仓库根目录运行：
 
 ~~~sh
 node .github/engineering/scripts/sync-pr.mjs --check /path/to/repo
@@ -29,7 +29,7 @@ node .github/engineering/scripts/sync-pr.mjs --apply /path/to/repo
 | --- | --- |
 | 文件内容 | 没有真实个人目录、私人 SSH 别名、仅本机可用配置、秘密或一次性部署流水 |
 | README | 面向使用者，功能与支持范围真实、语言精简；无重构动机、Agent 日志、内部任务列表或未来功能宣传 |
-| CHANGELOG | 每版本双语，按，不预留空类别；仅记录已实现变化及必要兼容性影响 |
+| CHANGELOG | 每版本双语，按变更类型分组，不预留空类别；仅记录已实现变化及必要兼容性影响 |
 | Release | 从 Tag 的 CHANGELOG 派生正文，必要安装内容来自已验证资产 |
 | RELEASE.md | 只有可重复的发布验证和回滚步骤 |
 | ARCHITECTURE | 反映当前代码边界，没有过期环境快照 |

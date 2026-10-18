@@ -19,7 +19,7 @@
 | 版本变化 | `CHANGELOG.md` | 已实现的重要变化、修复、兼容性与升级影响 |
 | 发布公告 | GitHub Releases | 从该 Tag 的 CHANGELOG 指定版本自动生成 |
 | 发布操作 | `docs/development/RELEASE.md` | 可重复的准备、发布、验收和回滚步骤 |
-| 项目架构 | `docs/development/ARCHITECTURE.zh-CN.md` / `.en.md` | 当前架构、职责、数据流、系统边界 |
+| 项目架构 | `docs/development/ARCHITECTURE.zh-cn.md` / `.en.md` | 当前架构、职责、数据流、系统边界 |
 | API（可选） | `docs/development/API.zh-CN.md` / `.en.md` | 接口契约、参数、错误与鉴权 |
 | 部署（可选） | `docs/development/DEPLOYMENT.zh-CN.md` / `.en.md` | 通用配置、部署和故障排查 |
 | 术语表（可选） | `docs/development/GLOSSARY.zh-CN.md` / `.en.md` | 专有名词、缩写、核心概念与命名 |
