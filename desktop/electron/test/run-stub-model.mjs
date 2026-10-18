@@ -3,6 +3,7 @@
 // 它替代不了真实模型验收：证据目录 `stub-model-*`、报告名 `stub-model.json`、
 // 场景名前缀与 provider 字段都写明这是本地 stub。真实模型验收仍走 run-real-model.mjs。
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -40,6 +41,13 @@ const providerRequests = [];
 // 启用后只记录新请求而不返回响应，用于验证界面在请求等待期间的行为。
 let hangRequests = false;
 const skillMcpProof = { skillToolAvailable: false, skillActivated: false, mcpInspectAvailable: false, mcpCallAvailable: false };
+const mcpInspectWireName = wireToolName('mcp.inspect');
+const mcpCallWireName = wireToolName('mcp.call');
+
+function wireToolName(name) {
+  if (/^[A-Za-z0-9_-]{1,64}$/u.test(name)) return name;
+  return `ligule_${createHash('sha256').update(name).digest('hex').slice(0, 48)}`;
+}
 
 function streamChunk(response, chunk) {
   if (!response.headersSent) response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
@@ -112,8 +120,8 @@ const server = createServer(async (request, response) => {
   if (followup) {
     if (workflowStep === 1) {
       const skill = body.tools?.find(item => item.function?.name === 'skill');
-      const inspect = body.tools?.find(item => item.function?.description?.startsWith('Look up what an MCP server offers'));
-      const call = body.tools?.find(item => item.function?.description?.startsWith('Call one MCP tool whose definition you have inspected'));
+      const inspect = body.tools?.find(item => item.function?.name === mcpInspectWireName);
+      const call = body.tools?.find(item => item.function?.name === mcpCallWireName);
       skillMcpProof.skillToolAvailable = skill !== undefined;
       skillMcpProof.skillActivated = String(messages.at(-1)?.content ?? '').includes('SKILL_LOAD_PROOF');
       skillMcpProof.mcpInspectAvailable = inspect !== undefined;

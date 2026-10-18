@@ -319,10 +319,8 @@ async function runChecks() {
 
   const workspaceRegistration = await requestHost('workspaces.list');
   assert.ok(workspaceRegistration.workspaces.some(item => resolve(item.directory) === resolve(workspaceRoot)), 'isolated_workspace_not_registered');
-  if (typeof process.env.LIGULE_STUB_CONTROL === 'string' && process.env.LIGULE_STUB_CONTROL !== '') {
-    // 新会话默认只读；审批用例先通过真实设置控件授予工作区文件工具写入权限。
-    await selectNewSessionPermission('workspace-write');
-  }
+  // 新会话默认只读；审批用例先通过真实设置控件授予工作区文件工具写入权限。
+  await selectNewSessionPermission('workspace-write');
 
   await check(`${providerLabel}工具审批拒绝`, async () => {
     await enterAndSend('请调用 create 工具，在项目根目录创建 model-denial-proof.txt，内容只写 DENIED。必须先调用工具，再简短说明结果。');
