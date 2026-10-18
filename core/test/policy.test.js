@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { homedir } from 'node:os';
 import { createDecisionChain, createKernel, KernelError } from '../dist/index.js';
+import { createPermissionContext } from '../dist/kernel/permission.js';
+import { classifyDangerousCommand } from '../dist/capability/dangerous-command.js';
 
 // 判定结果还包含能力名称、审批档位和所用的决策路径。本文件关注规则顺序与结论。
 async function judged(chain, call) {
@@ -107,6 +110,32 @@ test('no-approval mode does not turn repeated denials into approval prompts', as
   assert.equal(asked, 0);
 });
 
+test('auto policy requires manual approval for external and unclassified tools even when an allow rule matches', async () => {
+  for (const access of ['external', 'unknown']) {
+    const { calls, ask } = asked(true);
+    const chain = createDecisionChain({
+      mode: 'auto',
+      rules: [{ tool: 'mcp:fs/remove', decision: 'allow', match: '*' }],
+      ask,
+    });
+    const result = await chain.evaluate({
+      tool: 'mcp.call', capability: 'mcp:fs/remove', access, input: { arguments: '{}' },
+    });
+    assert.equal(result.decision, 'allow');
+    assert.equal(result.via, 'ask');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].tool, 'mcp:fs/remove');
+    assert.match(calls[0].reason, /external process|permission classification/u);
+  }
+
+  let askedCount = 0;
+  const never = createDecisionChain({ mode: 'never', ask: async () => { askedCount += 1; return true; } });
+  const refused = await never.evaluate({ tool: 'mcp.call', capability: 'mcp:fs/remove', access: 'external', input: {} });
+  assert.equal(refused.decision, 'deny');
+  assert.equal(refused.code, 'policy_denied');
+  assert.equal(askedCount, 0);
+});
+
 test('a deny rule wins over an allow rule written earlier in the table', async () => {
   const { calls, ask } = asked(true);
   const chain = createDecisionChain({
@@ -154,6 +183,229 @@ test('a deny rule catches a segment hidden behind a pipe', async () => {
     'policy_denied',
   );
   assert.equal(calls.length, 0);
+});
+
+test('hard denied commands remain denied across modes, allow rules, and affirmative asks', async () => {
+  const encodedRemoval = Buffer.from('Remove-Item -Path "$env:USERPROFILE\\*" -Recurse -Force', 'utf16le').toString('base64');
+  const commands = [
+    ['bash', 'rm -rf ~'],
+    ['bash', 'rm -rf /*'],
+    ['bash', 'sudo env APP_MODE=test command exec bash -c "rm -rf ~/*"'],
+    ['bash', 'sudo -u builder env -u TMPDIR rm -rf ~'],
+    ['bash', "sh -c 'find /home/* -type f -delete'"],
+    ['bash', 'command env taskkill /IM python.exe /F'],
+    ['bash', '/bin/rm --recursive --force /'],
+    ['bash', 'sudo /usr/bin/rm -fr "$HOME"'],
+    ['bash', 'echo ready; env /bin/rm -rf /home'],
+    ['bash', 'find / -type f -delete'],
+    ['bash', String.raw`find . -exec rm -rf ~ \;`],
+    ['bash', String.raw`find . -execdir sh -c 'rm -rf ~' \;`],
+    ['bash', String.raw`find / -type f -exec rm -f {} +`],
+    ['bash', 'xargs rm -rf ~'],
+    ['bash', 'cd /home/tester && rm -rf ./*'],
+    ['bash', 'cd /home/tester/project && cd .. && rm -rf ./*'],
+    ['bash', 'cd / && find . -type f -delete'],
+    ['bash', 'bash -c "echo $(rm -rf ~)"'],
+    ['bash', String.raw`bash -c "rm -rf \"$HOME\"/*"`],
+    ['bash', 'su -c "rm -rf ~"'],
+    ['bash', 'pwsh -Command "Remove-Item -Path $env:USERPROFILE\\* -Recurse -Force"'],
+    ['bash', `pwsh -enc ${encodedRemoval}`],
+    ['powershell', 'pwsh -c "Remove-Item -Path C:\\* -Recurse -Force"'],
+    ['powershell', 'Remove-Item -Path $HOME -Recurse -Force'],
+    ['powershell', 'Remove-Item -Path "$env:USERPROFILE\\*" -Recurse -Force'],
+    ['powershell', 'Remove-Item -Path C:\\* -Recurse -Force'],
+    ['powershell', 'ri $env:USERPROFILE -Force -Recurse'],
+    ['powershell', 'Remove-Item -Recurse -Force "C:\\Users\\tester"'],
+    ['bash', 'bash -c "rm -rf ~ | echo x"'],
+    ['powershell', 'pwsh -Command "Remove-Item -Path \'C:\\*\' -Recurse -Force"'],
+    ['powershell', 'Write-Output ready; Remove-Item $HOME -Recurse -Force'],
+    ['bash', 'pkill -f python'],
+    ['bash', 'pkill -f .'],
+    ['bash', 'kill -KILL -1'],
+    ['bash', 'kill -9 0'],
+    ['bash', 'killall -u alice -f .*'],
+    ['bash', '/usr/bin/killall python3'],
+    ['powershell', 'Stop-Process -Name python -Force'],
+    ['powershell', 'Stop-Process -Name * -Force'],
+    ['powershell', 'taskkill /IM python.exe /F'],
+    ['powershell', 'taskkill /IM * /F'],
+  ];
+  for (const mode of ['ask', 'auto', 'never']) {
+    const { calls, ask } = asked(...commands.map(() => true));
+    const chain = createDecisionChain({
+      mode,
+      ask,
+      rules: [{ tool: 'exec', decision: 'allow', match: '*' }],
+    });
+    for (const [kind, command] of commands) {
+      const result = await chain.evaluate({ tool: 'exec', input: { command }, shell: { ...POWERSHELL, kind } });
+      assert.deepEqual({ decision: result.decision, via: result.via, forced: result.forced, code: result.code }, {
+        decision: 'deny', via: 'hard-deny', forced: true, code: 'policy_hard_denied',
+      }, `${mode}: ${command}`);
+      assert.equal(typeof result.reason, 'string');
+    }
+    assert.equal(calls.length, 0, `${mode} never asks a user to approve a hard denied command`);
+  }
+});
+
+test('the dangerous-command parser follows known wrappers and safe PowerShell encoding', async () => {
+  const encodedScript = Buffer.from("Remove-Item -Path 'C:\\*' -Recurse -Force", 'utf16le').toString('base64');
+  const commands = [
+    ['bash', 'sudo env APP_MODE=test command exec bash -c "rm -rf ~/*"'],
+    ['bash', 'sudo -u builder env -u TMPDIR rm -rf ~'],
+    ['bash', 'bash -c "rm -rf ~ | echo x"'],
+    ['bash', 'rm -rf /*'],
+    ['bash', "sh -c 'find /home/* -type f -delete'"],
+    ['powershell', 'Remove-Item -Path \'C:\\*\' -Recurse -Force'],
+    ['bash', 'pwsh -Command "Remove-Item -Path \'C:\\*\' -Recurse -Force"'],
+    ['bash', `powershell.exe -EncodedCommand ${encodedScript}`],
+  ];
+  for (const [kind, command] of commands) {
+    const match = await classifyDangerousCommand(command, kind);
+    assert.equal(typeof match?.reason, 'string', `${kind}: ${command}`);
+  }
+
+  const scopedCleanup = [
+    ['bash', 'bash -c "rm -rf ~/project/dist"'],
+    ['bash', 'rm -rf $HOME/project/dist'],
+    ['powershell', 'pwsh -Command "Remove-Item -Path $HOME\\project\\dist -Recurse -Force"'],
+  ];
+  for (const [kind, command] of scopedCleanup) {
+    assert.equal((await classifyDangerousCommand(command, kind))?.kind, 'approval', `${kind}: ${command}`);
+  }
+  assert.equal((await classifyDangerousCommand(`rm -rf "${homedir()}/*"`, 'bash'))?.kind, 'hard-deny');
+  assert.equal(await classifyDangerousCommand('echo rm -rf ~', 'bash'), undefined);
+  assert.equal(await classifyDangerousCommand('printf pkill -f python', 'bash'), undefined);
+});
+
+test('an undecodable PowerShell command is not classified as a hard denial', async () => {
+  assert.equal((await classifyDangerousCommand('pwsh -EncodedCommand not-base64', 'bash'))?.kind, 'approval');
+});
+
+test('ordinary workspace cleanup and unrelated process operations are not hard denied', async () => {
+  const commands = [
+    ['bash', 'rm -rf ./dist'],
+    ['bash', 'rm -rf ~/project/dist'],
+    ['bash', 'find ./build -type f -delete'],
+    ['bash', 'pkill -f node'],
+    ['powershell', 'Remove-Item -Path .\\dist -Recurse -Force'],
+    ['powershell', 'Remove-Item -Path "$HOME\\project\\dist" -Recurse -Force'],
+    ['powershell', 'Stop-Process -Id 1234 -Force'],
+  ];
+  const { calls, ask } = asked(...commands.map(() => true));
+  const chain = createDecisionChain({ mode: 'ask', ask });
+  for (const [kind, command] of commands) {
+    const result = await chain.evaluate({ tool: 'exec', input: { command }, shell: { ...POWERSHELL, kind } });
+    assert.equal(result.decision, 'allow', command);
+    assert.equal(result.via, 'ask', command);
+  }
+  assert.equal(calls.length, commands.length);
+});
+
+test('confirmed dangerous operations in wrapper arguments remain hard denied', async () => {
+  const commands = [
+    'mystery-wrapper rm -rf ~',
+    'mystery-wrapper bash -c "rm -rf ~/*"',
+    'mystery-wrapper pkill -f python',
+  ];
+  for (const mode of ['ask', 'auto', 'never']) {
+    const { calls, ask } = asked(...commands.map(() => true));
+    const chain = createDecisionChain({
+      mode,
+      ask,
+      rules: [{ tool: 'exec', decision: 'allow', match: '*' }],
+    });
+    for (const command of commands) {
+      const result = await chain.evaluate({ tool: 'exec', input: { command } });
+      assert.equal(result.decision, 'deny', `${mode}: ${command}`);
+      assert.equal(result.via, 'hard-deny', `${mode}: ${command}`);
+      assert.equal(result.code, 'policy_hard_denied', `${mode}: ${command}`);
+    }
+    assert.equal(calls.length, 0, `${mode} cannot approve an identified hard-denied operation`);
+  }
+});
+
+test('scoped deletions and single-process termination require approval in automatic mode', async () => {
+  const commands = [
+    ['bash', 'rm -rf ./dist'],
+    ['bash', 'find ./build -type f -delete'],
+    ['bash', String.raw`find ./build -exec rm -rf ./dist \;`],
+    ['bash', String.raw`find ./build -exec echo rm -rf ~ \;`],
+    ['bash', 'kill 1234'],
+    ['powershell', 'Stop-Process -Id 1234 -Force'],
+    ['powershell', 'taskkill /PID 1234 /F'],
+  ];
+  for (const mode of ['ask', 'auto', 'never']) {
+    const { calls, ask } = asked(...commands.map(() => true));
+    const chain = createDecisionChain({
+      mode,
+      ask,
+      rules: [{ tool: 'exec', decision: 'allow', match: '*' }],
+    });
+    for (const [kind, command] of commands) {
+      const result = await chain.evaluate({ tool: 'exec', input: { command }, shell: { ...POWERSHELL, kind } });
+      if (mode === 'never') {
+        assert.equal(result.decision, 'deny', `${command} must remain denied without an approval channel`);
+        assert.equal(result.via, 'never');
+      } else {
+        assert.equal(result.decision, 'allow', `${command} requires the affirmative per-call answer`);
+        assert.equal(result.via, 'ask');
+      }
+    }
+    assert.equal(calls.length, mode === 'never' ? 0 : commands.length);
+  }
+});
+
+test('script runners and direct script paths cannot pass automatic approval', async () => {
+  const commands = [
+    ['bash', 'npm run build'],
+    ['bash', 'pnpm test'],
+    ['bash', 'yarn build'],
+    ['bash', 'npx some-tool'],
+    ['bash', 'make all'],
+    ['bash', `awk 'BEGIN { system("rm -rf ~") }'`],
+    ['bash', './scripts/check.sh'],
+    ['powershell', '.\\scripts\\check.ps1'],
+  ];
+  const { calls, ask } = asked(...commands.map(() => true));
+  const chain = createDecisionChain({ mode: 'auto', ask, rules: [{ tool: 'exec', decision: 'allow', match: '*' }] });
+  for (const [kind, command] of commands) {
+    const result = await chain.evaluate({ tool: 'exec', input: { command }, shell: { ...POWERSHELL, kind } });
+    assert.equal(result.decision, 'allow', `${command} needs the affirmative per-call answer`);
+    assert.equal(result.via, 'ask', command);
+  }
+  assert.equal(calls.length, commands.length);
+});
+
+test('find execution callbacks inspect only the parsed executable position', async () => {
+  const { calls, ask } = asked(true, true, true);
+  const chain = createDecisionChain({ mode: 'auto', ask, rules: [{ tool: 'exec', decision: 'allow', match: '*' }] });
+  const echoCallback = await chain.evaluate({ tool: 'exec', input: { command: String.raw`find . -exec echo rm -rf ~ \;` } });
+  assert.equal(echoCallback.decision, 'allow');
+  assert.equal(echoCallback.via, 'ask');
+
+  const xargsEcho = await chain.evaluate({ tool: 'exec', input: { command: 'xargs echo rm -rf ~' } });
+  assert.equal(xargsEcho.decision, 'allow');
+  assert.equal(xargsEcho.via, 'ask');
+
+  const awkProgram = await chain.evaluate({ tool: 'exec', input: { command: `awk 'BEGIN { system("rm -rf ~") }'` } });
+  assert.equal(awkProgram.decision, 'allow');
+  assert.equal(awkProgram.via, 'ask', 'embedded awk programs remain unparsed and cannot pass auto approval');
+  assert.equal(calls.length, 3);
+});
+
+test('directory changes are followed for broad relative deletion and pipelines do not change the parent directory', async () => {
+  const chain = createDecisionChain({ mode: 'auto', ask: async () => true });
+  const homeDeletion = await chain.evaluate({ tool: 'exec', input: { command: 'cd /home/alice && rm -rf ./*' } });
+  assert.equal(homeDeletion.via, 'hard-deny');
+  assert.equal(homeDeletion.code, 'policy_hard_denied');
+
+  const rootDeletion = await chain.evaluate({ tool: 'exec', input: { command: 'Set-Location C:\\Users\\alice; Remove-Item * -Recurse -Force' }, shell: POWERSHELL });
+  assert.equal(rootDeletion.via, 'hard-deny');
+
+  const pipeline = await chain.evaluate({ tool: 'exec', input: { command: 'cd /home/alice | rm -rf ./*' } });
+  assert.equal(pipeline.via, 'ask');
+  assert.equal(pipeline.decision, 'allow');
 });
 
 test('a command the parser cannot fully understand is asked about, with the reason', async () => {
@@ -246,12 +498,16 @@ test('the kernel runs every call through the decision chain and reports the code
         { tool: 'exec', decision: 'allow', match: 'ls' },
       ],
     }),
+    permission: createPermissionContext('full-access', 'unrestricted', {
+      filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
+    }),
     logger: { debug: () => {}, log: (message, fields) => seen.push(fields), error: () => {} },
   });
   kernel.register({
     name: 'exec',
     description: 'run a command',
     parameters: { type: 'object', properties: { command: { type: 'string' } } },
+    access: 'exec',
     run: async () => 'ran',
   });
   await assert.rejects(

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -52,6 +53,21 @@ async function assertStopped(processId) {
   assert.fail(`owned process ${processId} is still running`);
 }
 
+async function assertLinuxStopped(processId) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try {
+      const stat = await readFile(`/proc/${processId}/stat`, 'utf8');
+      if (stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0] === 'Z') return;
+    } catch (error) {
+      if (error.code === 'ENOENT') return;
+      throw error;
+    }
+    await delay(20);
+  }
+  assert.fail(`owned Linux process ${processId} is still running`);
+}
+
 function startTree(directory, marker) {
   const command = `node "${descendant.replace(/\\/g, '/')}" tree "${marker.replace(/\\/g, '/')}"`;
   const shell = withNativeExitCode(resolveShell({}), command);
@@ -60,6 +76,29 @@ function startTree(directory, marker) {
   owned.child.stderr.resume();
   return owned;
 }
+
+test('guardian IPC disconnect reclaims its Linux descendants', {
+  skip: process.platform === 'linux' ? false : 'Linux subreaper verification',
+}, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'owned-linux-command-'));
+  const marker = join(directory, 'linux-leaf.json');
+  const owned = startTree(directory, marker);
+  owned.child.stdout.resume();
+  owned.child.stderr.resume();
+  const outcome = assert.rejects(owned.completion, (error) => error.code === 'exec_cancelled');
+  try {
+    const leaf = await waitForDescendant(marker);
+    owned.child.disconnect();
+    owned.cancel();
+    await outcome;
+    await assertLinuxStopped(leaf.processId);
+    await assertLinuxStopped(leaf.parentId);
+  } finally {
+    if (owned.child.connected) owned.child.disconnect();
+    await outcome;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('cancellation during startup and execution terminates the entire owned command tree', options, async () => {
   await withDirectory(async (directory) => {

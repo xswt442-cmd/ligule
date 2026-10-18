@@ -23,7 +23,7 @@ import { minimalPlugin } from '@ligule/core/tools/minimal.js';
 import { networkPlugin } from '@ligule/core/tools/network.js';
 import { createHost, providerFromConfig, hostProviderFromConfig, serveHost } from '@ligule/core/host/host.js';
 import { KernelError } from '@ligule/core/kernel/error.js';
-import { runtimeFailureText } from './tui/errors.js';
+import { providerDiagnosticText, runtimeFailureText } from './tui/errors.js';
 import type { ConfigSnapshot } from '@ligule/core/kernel/config.js';
 import { isPolicyRule, type PolicyMode, type PolicyThresholds } from '@ligule/core/kernel/policy.js';
 import type { PolicyRule } from '@ligule/core/kernel/config-edit.js';
@@ -55,6 +55,7 @@ interface CliErrorFields {
   readonly code?: string;
   readonly detail?: string;
   readonly message?: string;
+  readonly diagnostics?: unknown;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -67,6 +68,7 @@ function errorFields(error: unknown): CliErrorFields {
     ...(typeof error.code === 'string' ? { code: error.code } : {}),
     ...(typeof error.detail === 'string' ? { detail: error.detail } : {}),
     ...(typeof error.message === 'string' ? { message: error.message } : {}),
+    ...(error.diagnostics === undefined ? {} : { diagnostics: error.diagnostics }),
   };
 }
 
@@ -271,9 +273,13 @@ async function installedKernel() {
 }
 
 // 错误码供脚本分支判断，后面的文字供终端用户阅读。
-function printFailure(code: string, detail?: string): void {
+function printFailure(code: string, detail?: string, diagnostics?: unknown): void {
   const guidance = runtimeFailureText(code, locale ?? languageOf('auto'));
-  console.error(guidance === undefined ? (detail === undefined || detail === '' ? code : `${code}: ${detail}`) : `${code}: ${guidance}`);
+  const diagnostic = providerDiagnosticText(diagnostics, locale ?? languageOf('auto'));
+  console.error([
+    guidance === undefined ? (detail === undefined || detail === '' ? code : `${code}: ${detail}`) : `${code}: ${guidance}`,
+    ...(diagnostic === undefined ? [] : [diagnostic]),
+  ].join('\n'));
   process.exitCode = 1;
 }
 
@@ -489,7 +495,7 @@ if (invalidLanguage) {
       await runOneRound(config, resolveMode(config), extensions, text);
     } catch (error) {
       const fields = errorFields(error);
-      printFailure(fields.code ?? 'cli_run_failed', fields.detail);
+      printFailure(fields.code ?? 'cli_run_failed', fields.detail, fields.diagnostics);
     }
   }
 } else if (command === 'resume') {
@@ -506,7 +512,7 @@ if (invalidLanguage) {
       await runOneRound(config, resolveMode(config), extensions, text, sessionId);
     } catch (error) {
       const fields = errorFields(error);
-      printFailure(fields.code ?? 'cli_resume_failed', fields.detail);
+      printFailure(fields.code ?? 'cli_resume_failed', fields.detail, fields.diagnostics);
     }
   }
 } else if (command === 'sessions') {

@@ -1,10 +1,14 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createDecisionChain, createConfig, createKernel, createSessionLog, execTool, resolveShell, withNativeExitCode } from '../dist/index.js';
+import { setTimeout as delay } from 'node:timers/promises';
+import {
+  createDecisionChain, createConfig, createKernel, createPermissionContext, createSessionLog,
+  execTool, resolveShell, withNativeExitCode,
+} from '../dist/index.js';
 import { decode } from '../dist/capability/exec.js';
 
 // Host 选择命令后端并传入这里；测试使用当前机器实际支持的后端。
@@ -13,6 +17,9 @@ import { decode } from '../dist/capability/exec.js';
 // 那段文本能不能原样送到 node 手上是 PowerShell 的事情，不是这一件工具的事情。斜杠两种 shell 都认，路径统一写成正斜杠。
 // 命令写成 `node "<脚本>"` 这种一条简单原生命令的形状，退出码那一段尾巴才按内核那一条规则补得上。
 const shell = resolveShell({});
+const fullAccess = createPermissionContext('full-access', 'unrestricted', {
+  filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
+});
 const directory = mkdtempSync(join(tmpdir(), 'ligule-exec-'));
 // 这一份跑完就收掉：留在系统临时目录里的话，每跑一次 `npm test` 就多一份，几十次之后没人会再去清。
 after(() => rmSync(directory, { recursive: true, force: true }));
@@ -23,8 +30,39 @@ function nodeCommand(code) {
   return `node "${script}"`;
 }
 
-function run(command, limits, signal) {
-  return execTool.run({ command }, { config: { boundary: process.cwd(), limits }, signal, shell: withNativeExitCode(shell, command) });
+function run(command, limits, signal, permission = fullAccess) {
+  return execTool.run({ command }, {
+    config: { boundary: process.cwd(), limits }, permission, signal,
+    shell: withNativeExitCode(shell, command),
+  });
+}
+
+function processIsRunning(pid) {
+  if (process.platform === 'linux') {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0] !== 'Z';
+    } catch (error) {
+      if (error.code === 'ENOENT') return false;
+      throw error;
+    }
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error.code === 'ESRCH') return false;
+    throw error;
+  }
+}
+
+async function assertStopped(pid) {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    if (!processIsRunning(pid)) return;
+    await delay(20);
+  }
+  assert.fail(`test-owned descendant process ${pid} remained alive`);
 }
 
 test('exec returns the command output and its exit code', async () => {
@@ -78,16 +116,112 @@ test('an abort terminates the command tree instead of waiting for it', async () 
   assert.ok(Date.now() - started < 5000, 'the cancelled call should settle long before the command would');
 });
 
+test('the configured execution timeout terminates a command with a distinct error code', async () => {
+  const started = Date.now();
+  await assert.rejects(
+    () => run(nodeCommand('setTimeout(() => {}, 20000)'), { execTimeoutMs: 150 }),
+    (error) => error.code === 'exec_timeout',
+  );
+  assert.ok(Date.now() - started < 5000, 'the timeout should settle long before the command would');
+});
+
+test('execution timeout configuration stays within its fixed bound', async () => {
+  await assert.rejects(
+    () => run(nodeCommand('console.log("unused")'), { execTimeoutMs: 0 }),
+    (error) => error.code === 'exec_timeout_invalid',
+  );
+  await assert.rejects(
+    () => run(nodeCommand('console.log("unused")'), { execTimeoutMs: 600_001 }),
+    (error) => error.code === 'exec_timeout_invalid',
+  );
+  await assert.rejects(
+    () => run(nodeCommand('console.log("unused")'), { execTimeoutMs: null }),
+    (error) => error.code === 'exec_timeout_invalid',
+  );
+});
+
+test('the execution layer fails closed when permission or an enforcing backend is unavailable', async () => {
+  await assert.rejects(
+    () => execTool.run({ command: 'node -e "process.exit(0)"' }, {
+      config: { boundary: process.cwd() }, shell,
+    }),
+    (error) => error.code === 'exec_permission_required',
+  );
+  const networkLimitedFullAccess = createPermissionContext('full-access', 'policy', {
+    filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
+  });
+  await assert.rejects(
+    () => run(nodeCommand('console.log("unused")'), undefined, undefined, networkLimitedFullAccess),
+    (error) => error.code === 'permission_network_isolation_unavailable',
+  );
+  const workspaceWrite = createPermissionContext('workspace-write', 'disabled', {
+    filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
+  });
+  await assert.rejects(
+    () => run(nodeCommand('console.log("unused")'), undefined, undefined, workspaceWrite),
+    (error) => error.code === 'permission_sandbox_unavailable',
+  );
+});
+
+test('the child receives approved environment variables without provider secrets', async () => {
+  const secretName = 'LIGULE_EXEC_TEST_PROVIDER_SECRET';
+  process.env[secretName] = 'exec-test-secret-sentinel';
+  try {
+    const result = await run(nodeCommand(`console.log(process.env[${JSON.stringify(secretName)}] ?? 'not-inherited')`));
+    assert.equal(result.text.trim(), 'not-inherited');
+  } finally {
+    delete process.env[secretName];
+  }
+});
+
+test('timeout terminates a detached descendant without leaving it alive', async () => {
+  const childPidFile = join(directory, `child-${(counter += 1)}.pid`).replace(/\\/g, '/');
+  const script = [
+    'const { spawn } = require("node:child_process");',
+    'const { writeFileSync } = require("node:fs");',
+    'const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });',
+    `writeFileSync(${JSON.stringify(childPidFile)}, String(child.pid));`,
+    'setInterval(() => {}, 1000);',
+  ].join('');
+  await assert.rejects(
+    () => run(nodeCommand(script), { execTimeoutMs: 3_000 }),
+    (error) => error.code === 'exec_timeout',
+  );
+  const pid = Number(readFileSync(childPidFile, 'utf8'));
+  await assertStopped(pid);
+});
+
+test('cancellation terminates a detached descendant without leaving it alive', async () => {
+  const childPidFile = join(directory, `cancel-child-${(counter += 1)}.pid`).replace(/\\/g, '/');
+  const script = [
+    'const { spawn } = require("node:child_process");',
+    'const { writeFileSync } = require("node:fs");',
+    'const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });',
+    `writeFileSync(${JSON.stringify(childPidFile)}, String(child.pid));`,
+    'setInterval(() => {}, 1000);',
+  ].join('');
+  const controller = new AbortController();
+  const execution = run(nodeCommand(script), undefined, controller.signal);
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline && !existsSync(childPidFile)) await delay(10);
+  assert.ok(existsSync(childPidFile), 'the command should record its owned child PID before cancellation');
+  const pid = Number(readFileSync(childPidFile, 'utf8'));
+  controller.abort();
+  await assert.rejects(() => execution, (error) => error.code === 'exec_cancelled');
+  await assertStopped(pid);
+});
+
 test('an empty command line and a working directory outside the boundary are rejected', async () => {
   await assert.rejects(() => run('   '), (error) => error.code === 'exec_command_required');
   await assert.rejects(
-    () => execTool.run({ command: 'dir', cwd: '..' }, { config: { boundary: process.cwd() }, shell }),
+    () => execTool.run({ command: 'dir', cwd: '..' }, { config: { boundary: process.cwd() }, permission: fullAccess, shell }),
     (error) => error.code === 'path_escapes_boundary',
   );
 });
 
 test('the decision chain sees the command text before anything is spawned', async () => {
   const kernel = createKernel({
+    permission: fullAccess,
     policy: createDecisionChain({ rules: [{ tool: 'exec', decision: 'deny', match: 'rm *' }] }),
   });
   kernel.register(execTool);
@@ -102,6 +236,7 @@ test('the record names the backend a command was judged and run under', async ()
   const session = createSessionLog({ directory: mkdtempSync(join(directory, 'record-')), id: 'backend' });
   const kernel = createKernel({
     config: createConfig({ user: { boundary: process.cwd() } }),
+    permission: fullAccess,
     policy: createDecisionChain({ mode: 'auto' }),
     session,
   });

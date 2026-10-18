@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
 import { KernelError } from '../kernel/error.js';
+import type { ProviderDiagnostic } from '../kernel/error.js';
 import { checkedAnswers, type AskQuestion } from '../tools/ask-user.js';
 import { APPROVAL_METHOD, QUESTION_METHOD } from './protocol.js';
 import type { Host } from './host.js';
@@ -22,6 +23,7 @@ interface Operation {
   readonly sessionId: string;
   state: OperationState;
   code?: string;
+  diagnostics?: ProviderDiagnostic;
   summary?: string;
   phase?: string;
   progress?: Record<string, unknown> | null;
@@ -316,6 +318,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     return {
       operationId: found.operationId, sessionId: found.sessionId, state: found.state,
       ...(found.code === undefined ? {} : { code: found.code }),
+      ...(found.diagnostics === undefined ? {} : { diagnostics: found.diagnostics }),
       ...(found.summary === undefined ? {} : { summary: found.summary }),
       phase: found.phase ?? null,
       waitingFor: found.phase === 'awaiting_approval' ? 'approval' : found.phase === 'awaiting_input' ? 'input' : null,
@@ -348,7 +351,10 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
 
   function publishFinished(found: Operation): void {
     const kind = found.state === 'done' ? 'run.completed' : found.state === 'cancelled' ? 'run.cancelled' : 'run.failed';
-    publish(found, kind, { ...(found.code === undefined ? {} : { code: found.code }) });
+    publish(found, kind, {
+      ...(found.code === undefined ? {} : { code: found.code }),
+      ...(found.diagnostics === undefined ? {} : { diagnostics: found.diagnostics }),
+    });
   }
 
   function startOne(sessionId: string, input: string, queueItemId?: string) {
@@ -374,6 +380,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
       },
     ).catch((error: unknown) => {
       found.code = controlErrorCode(error);
+      if (error instanceof KernelError && error.diagnostics !== undefined) found.diagnostics = error.diagnostics;
       found.state = ['provider_cancelled', 'loop_cancelled', 'ask_user_cancelled'].includes(found.code) ? 'cancelled' : 'failed';
     }).then(() => {
       settleInteractions(found);

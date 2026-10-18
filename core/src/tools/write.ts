@@ -19,6 +19,7 @@ type WriteToolContext = Pick<ToolContext, 'config' | 'observations' | 'logger'>;
 
 export const createTool = {
   name: 'create',
+  access: 'write',
   description: 'Create a new text file relative to the working directory, within the workspace boundary. Fails when the file already exists.',
   parameters: {
     type: 'object',
@@ -44,6 +45,7 @@ export const createTool = {
 
 export const writeTool = {
   name: 'write',
+  access: 'write',
   description: 'Replace the whole content of an existing text file relative to the working directory, within the workspace boundary. The file must have been read in this run and must not have changed since. Use create for a file that does not exist yet.',
   parameters: {
     type: 'object',
@@ -82,6 +84,7 @@ export const writeTool = {
 
 export const editTool = {
   name: 'edit',
+  access: 'write',
   description: 'Replace one unique occurrence of an anchor in an existing file relative to the working directory, within the workspace boundary.',
   parameters: {
     type: 'object',
@@ -122,6 +125,7 @@ export const editTool = {
 
 export const deleteTool = {
   name: 'delete',
+  access: 'write',
   description: 'Move a file or directory relative to the working directory, within the workspace boundary, into the trash: the system recycle bin where there is one, otherwise a trash directory inside the boundary. Nothing is deleted in place.',
   parameters: {
     type: 'object',

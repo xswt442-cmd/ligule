@@ -95,10 +95,14 @@ Windows 路径示例：
 
 MCP Server 使用 Ligule 已有的配置、模型服务、工具和 Policy。未启动 `--operator` 时，需要人工审批的操作会被拒绝；启动该选项后，只能答复真实待决请求。Server 不提供任意 Host RPC 或任意配置文件写入工具。它只使用本地 stdio，不开启网络监听。stdio 客户端与 Server 使用同一操作系统用户权限，请只配置可信的本地 MCP 客户端。
 
+`--operator` 不会授予或提升会话 Permission，也不能更改 OS 资源边界。Permission 默认由可信交互式 TUI 或 Desktop Host 管理；MCP Server 不能通过 `ligule_session_configure` 修改它。MCP 工具调用仍经过会话的 Permission 与 Policy 判定。受限 Shell 只在平台 Sandbox 满足所需能力时运行；当前 Linux bubblewrap 的文件系统隔离报告为 `partial`，Windows 没有 OS Sandbox 后端，因此这两个平台上的 `read-only` 和 `workspace-write` 会话均不能运行 Shell。`full-access` 需要在交互式界面单独确认；这不会让 Policy 的硬拒绝可被覆盖。
+
 任务状态和 `operationId` 只保存在当前 Server 进程中；每个进程保留最多 256 个操作记录。达到上限后，新任务会从已结束的操作中淘汰创建时间最早的一条；被淘汰的 `operationId` 不可再查询。如果所有保留的操作都仍在运行，新任务会以容量错误拒绝。Server 退出或重启后，旧 `operationId` 不可恢复。会话记录仍由 Host 持久保存，可重新启动 Server、接回会话并读取历史，但这不会恢复旧进程中的运行状态。
 
 一个 Server 进程最多接管 64 个不同会话。重复接回已经由该进程接管的会话不占用额外名额。达到上限后，无法再创建或接管新会话；重启 Server 才会释放这些名额。没有运行的会话也会一直占用名额到 Server 退出。
 
 客户端断开或 Server 收到终止信号时，Server 会取消仍在运行的任务、等待 Host 调用结束并释放会话锁与扩展资源。已写入会话记录的内容仍可在重启后读取，断开不会恢复未完成的任务或旧 `operationId`。
+
+要在 Desktop 中查看 MCP 会话，Desktop 与 MCP Server 需使用相同的 `LIGULE_HOME` 和有效会话目录。Desktop 会话侧栏会列出同一目录中的会话；Server 持有会话锁时，侧栏条目可见，但 Desktop 不能同时打开该会话。客户端断开后 Server 释放锁，用户刷新侧栏即可打开已保存的会话记录。两个进程使用不同的数据根或会话目录时，会话列表彼此独立。
 
 工具调用和记录内容会交给 MCP 客户端。请只连接可访问该项目数据的客户端，并在需要时检查其日志和数据保留方式。

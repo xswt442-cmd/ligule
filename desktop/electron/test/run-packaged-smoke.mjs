@@ -990,6 +990,8 @@ async function runChecks() {
 
   if (interruptionMode === undefined) {
     await check('clipboard write permission from the packaged secure page', async () => {
+      await devTools.call('Page.bringToFront');
+      await waitUntil(async () => await devTools.evaluate('document.hasFocus()'), 5_000, 'packaged_window_focus');
       const value = `Ligule packaged smoke ${Date.now()}`;
       const result = await devTools.evaluate(`(async () => {
         if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') return { available: false };

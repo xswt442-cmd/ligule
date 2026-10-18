@@ -1,5 +1,7 @@
 export { createKernel } from './kernel/kernel.js';
 export { KernelError, KernelRuntimeError } from './kernel/error.js';
+export { createPermissionContext, permissionDenial, DEFAULT_PERMISSION_CONTEXT } from './kernel/permission.js';
+export type { PermissionProfile, PermissionNetwork, PermissionEnforcement, PermissionAccess, PermissionCapabilities, PermissionContext, PermissionDenial } from './kernel/permission.js';
 export { createConfig, LAYER_ORDER } from './kernel/config.js';
 export { loadConfigLayers, flagLayer, configPaths } from './kernel/config-file.js';
 export { createLogger } from './kernel/log.js';

@@ -18,7 +18,7 @@ function scriptedProvider(turns, fallback = [{ type: 'text', text: 'done' }]) {
 }
 
 function tool(name, run, execution) {
-  return { name, description: `the ${name} tool`, parameters: { type: 'object', properties: {} }, execution, run };
+  return { name, description: `the ${name} tool`, access: 'read', parameters: { type: 'object', properties: {} }, execution, run };
 }
 
 function kernelWith(tools) {
@@ -71,6 +71,29 @@ test('empty output and reasoning-only output fail with one persistent terminal',
       ]);
       assert.equal(records.filter((event) => event.kind === 'turn').length, 1);
     }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a provider failure keeps its safe diagnostics in the persistent turn event', async () => {
+  const root = await mkdtemp(join(process.cwd(), 'testplace', 'loop-'));
+  try {
+    const session = createSessionLog({ directory: root, id: 'provider-diagnostic' });
+    const kernel = createKernel({ config: createConfig({ user: { boundary: root } }), session });
+    const diagnostics = {
+      category: 'server', status: 503, attempts: 3,
+      responseReceived: true, streamReceived: false, recoverable: true,
+    };
+    const provider = {
+      async *stream() { throw new KernelError('provider_http_error', { diagnostics }); },
+    };
+    await assert.rejects(
+      () => createLoop({ kernel, provider, session }).run('go'),
+      (error) => error.code === 'provider_http_error' && assert.deepEqual(error.diagnostics, diagnostics) === undefined,
+    );
+    const turn = (await session.read()).find((event) => event.kind === 'turn');
+    assert.deepEqual(turn.diagnostics, diagnostics);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -342,7 +342,11 @@ export function createLoop({
         throw new KernelError('loop_iteration_limit');
       } catch (error) {
         const code = failureCode(error);
-        await markTurn(TURN_CANCEL_CODES.has(code) ? 'cancelled' : 'failed', { code });
+        const diagnostics = error instanceof KernelError ? error.diagnostics : undefined;
+        await markTurn(TURN_CANCEL_CODES.has(code) ? 'cancelled' : 'failed', {
+          code,
+          ...(diagnostics === undefined ? {} : { diagnostics }),
+        });
         throw error;
       } finally {
         reportPhase('settling');

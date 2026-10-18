@@ -7,8 +7,12 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   createConfig, createDecisionChain, createKernel, createSessionLog, createSubagentPlugin,
-  minimalPlugin, networkPlugin,
+  createPermissionContext, minimalPlugin, networkPlugin,
 } from '../dist/index.js';
+
+const fullAccess = createPermissionContext('full-access', 'unrestricted', {
+  filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
+});
 
 const text = (value) => [
   { type: 'message_start', message: { usage: {} } },
@@ -62,7 +66,7 @@ test('the derived agent runs on the parent decision chain and cannot delegate ag
     text('the child reported back'),                     // 父：说完这一轮，交回一段文本
   ]);
   const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'parent' });
-  const kernel = createKernel({ config, policy: chain, session });
+  const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
   createSubagentPlugin({
     config,
     provider,

@@ -8,20 +8,30 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ### 简体中文
 
-- 共享模型服务配置支持逐模型上下文窗口和输出额度，按当前选择应用于请求与压缩，兼容原有模型标识列表。
+**新增**
 
-- 增加 `ligule mcp-server --project <绝对目录>` 本地 stdio MCP 入口，支持创建与接回会话、后台运行、状态查询、分页读取和取消；需要人工审批的操作直接拒绝，operation ID 仅在当前进程内有效。
-- 完整校验模型终止原因，区分空回复、输出耗尽、协议不完整及断流；非法工具批次不执行副作用，诊断不包含原始参数或网关错误正文。
+- 增加会话 Permission 控制，可查看平台隔离能力并单独更改文件/命令档位与网络模式；启用 `full-access` 或不受限网络需要确认，Sandbox 能力不足时 Shell 会拒绝执行。
+- 增加 `ligule mcp-server --project <绝对目录>` 本地 stdio MCP 入口，支持会话管理、任务运行与取消、状态查询和记录分页。显式启用 `--operator` 后可修改受支持的会话设置，并答复真实待决的审批或提问；operation ID 和消息队列仅在当前进程内有效。
 - 增加 `model.outputTokens` 请求预算与双 API 非流式 JSON 响应支持；模型设置在完整配置校验通过后才保存，拒绝时保留文件原文并保护其他项目的启动。
+
+**改进**
+
+- 共享模型服务配置支持逐模型上下文窗口和输出额度，按当前选择应用于请求与压缩，兼容原有模型标识列表。
+- 完整校验模型终止原因，区分空回复、输出耗尽、协议不完整及断流；非法工具批次不执行副作用，诊断不包含原始参数或网关错误正文。
 - TUI 显示 Host 确认的运行阶段与无进展时长，并提供可操作的 Provider 错误提示。
 
 ### English
 
-- Shared service configuration supports per-model context windows and output budgets for requests and compaction, while preserving existing model ID lists.
+**Added**
 
-- Added `ligule mcp-server --project <absolute-directory>` for local stdio MCP control: create or resume sessions, run tasks in the background, query status, page through records, and cancel. Operations requiring human approval are denied; operation IDs are process-local.
-- Validate model finish reasons and distinguish empty replies, exhausted output, incomplete protocols, and interrupted bodies. Invalid tool batches have no side effects, and diagnostics omit raw arguments and gateway error bodies.
+- Added per-session Permission controls to inspect platform isolation capabilities and change file/command profiles separately from network mode. Enabling `full-access` or unrestricted networking requires confirmation; Shell is denied when sandbox capabilities are insufficient.
+- Added `ligule mcp-server --project <absolute-directory>` for local stdio MCP control: manage sessions, run and cancel tasks, query status, and page through records. Explicit `--operator` mode can change supported session settings and answer real pending approvals or questions; operation IDs and the message queue are process-local.
 - Added the `model.outputTokens` request budget and non-streaming JSON responses for both APIs. Model settings are saved only after complete configuration validation; rejected edits preserve file contents and other projects' startup behavior.
+
+**Improved**
+
+- Shared service configuration supports per-model context windows and output budgets for requests and compaction, while preserving existing model ID lists.
+- Validate model finish reasons and distinguish empty replies, exhausted output, incomplete protocols, and interrupted bodies. Invalid tool batches have no side effects, and diagnostics omit raw arguments and gateway error bodies.
 - TUI status shows Host-confirmed run phases and time without progress, with actionable Provider error messages.
 
 ## [0.0.4] - 2026-10-14

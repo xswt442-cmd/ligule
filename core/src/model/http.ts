@@ -2,6 +2,7 @@
 // Messages 与 Chat Completions 适配器共用此模块。
 import { setTimeout as sleep } from 'node:timers/promises';
 import { KernelError } from '../kernel/error.js';
+import type { ProviderDiagnostic, ProviderDiagnosticCategory } from '../kernel/error.js';
 import { resolveCredential } from '../kernel/credentials.js';
 import type { ModelMessage } from '../kernel/loop.js';
 
@@ -84,65 +85,161 @@ function backoffMs(baseDelayMs: number, attempt: number): number {
   return baseDelayMs * 2 ** (attempt - 1) * (0.9 + Math.random() * 0.2);
 }
 
-async function httpFailureDetail(response: Response): Promise<string> {
+interface ProviderResponseContext {
+  readonly attempts: number;
+  readonly status?: number;
+  readonly responseReceived: boolean;
+  readonly streamReceived: boolean;
+}
+
+const responseContexts = new WeakMap<Response, ProviderResponseContext>();
+const streamContexts = new WeakMap<ReadableStream<Uint8Array>, ProviderResponseContext>();
+
+function diagnostic(
+  category: ProviderDiagnosticCategory,
+  context: ProviderResponseContext | undefined,
+  streamReceived = false,
+  recoverable = false,
+): ProviderDiagnostic {
+  return {
+    category,
+    ...(context?.status === undefined ? {} : { status: context.status }),
+    attempts: context?.attempts ?? 1,
+    responseReceived: context?.responseReceived ?? context?.status !== undefined,
+    streamReceived: streamReceived || context?.streamReceived === true,
+    recoverable,
+  };
+}
+
+function providerError(
+  code: string,
+  category: ProviderDiagnosticCategory,
+  context: ProviderResponseContext | undefined,
+  options: { readonly detail?: string; readonly cause?: unknown; readonly streamReceived?: boolean; readonly recoverable?: boolean } = {},
+): KernelError {
+  return new KernelError(code, {
+    ...(options.detail === undefined ? {} : { detail: options.detail }),
+    ...(options.cause === undefined ? {} : { cause: options.cause }),
+    diagnostics: diagnostic(category, context, options.streamReceived, options.recoverable),
+  });
+}
+
+function httpFailureCategory(status: number): ProviderDiagnosticCategory {
+  if (status === 401 || status === 403) return 'authentication';
+  if (status === 429) return 'rate_limit';
+  if (status >= 500) return 'server';
+  if (status >= 400) return 'client';
+  return 'http';
+}
+
+function abortFailure(
+  error: unknown,
+  signal: AbortSignal | null | undefined,
+  context: ProviderResponseContext,
+  streamReceived = false,
+): KernelError {
+  const errorName = typeof error === 'object' && error !== null && 'name' in error ? error.name : undefined;
+  const reason = signal?.reason;
+  const reasonName = typeof reason === 'object' && reason !== null && 'name' in reason ? reason.name : undefined;
+  if (errorName === 'TimeoutError' || reasonName === 'TimeoutError') {
+    return providerError('provider_timeout', 'transport', context, { streamReceived, recoverable: false });
+  }
+  return providerError('provider_cancelled', 'cancelled', context, { streamReceived });
+}
+
+async function httpFailureDetail(
+  response: Response,
+  context: ProviderResponseContext,
+  signal?: AbortSignal | null,
+): Promise<{ readonly detail: string; readonly streamReceived: boolean }> {
   const status = `HTTP ${response.status}`;
   if (![400, 413].includes(response.status) || response.body === null) {
     await response.body?.cancel();
-    return status;
+    return { detail: status, streamReceived: false };
   }
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let text = '';
   let remaining = 8192;
+  let streamReceived = false;
   try {
     while (remaining > 0) {
       const { done, value } = await reader.read();
       if (done) break;
+      streamReceived = streamReceived || value.byteLength > 0;
       const bytes = value.subarray(0, remaining);
       text += decoder.decode(bytes, { stream: true });
       remaining -= bytes.length;
     }
   } catch (error) {
-    if (isAbortError(error)) throw new KernelError('provider_cancelled');
-    return status;
+    if (signal?.aborted || isAbortError(error)) {
+      throw abortFailure(error, signal, context, streamReceived);
+    }
+    return { detail: status, streamReceived };
   } finally {
     try { await reader.cancel(); } catch { /* Preserve the safe HTTP classification. */ }
     reader.releaseLock();
   }
   // 使用固定分类执行一次上下文超限恢复，不将网关原文或请求凭据写入诊断。
-  return /\b(context_length_exceeded|maximum context length|context window|prompt is too long|input is too long)\b/iu.test(text)
-    ? `${status} context_length_exceeded` : status;
+  return {
+    detail: /\b(context_length_exceeded|maximum context length|context window|prompt is too long|input is too long)\b/iu.test(text)
+      ? `${status} context_length_exceeded` : status,
+    streamReceived,
+  };
 }
 
 // 只在响应开始前重试；流式内容一旦开始发送，再重试会导致重复内容。
 export async function open(url: string, init: RequestInit, retry: RetryPolicy): Promise<Response> {
   // 退避等待期间收到取消信号时，转换为统一的取消错误码。
-  const wait = async (attempt: number): Promise<void> => {
+  const wait = async (attempt: number, context?: ProviderResponseContext): Promise<void> => {
     try {
       await sleep(backoffMs(retry.baseDelayMs, attempt), undefined, { signal: init.signal ?? undefined });
     } catch (error) {
-      throw new KernelError('provider_cancelled', { cause: error });
+      const activeContext = context ?? { attempts: attempt, responseReceived: false, streamReceived: false };
+      throw abortFailure(error, init.signal, activeContext);
     }
   };
+  let responseReceived = false;
+  let streamReceived = false;
   for (let attempt = 1; ; attempt += 1) {
     let response;
     try {
       response = await fetch(url, init);
     } catch (error) {
-      if (isAbortError(error)) throw new KernelError('provider_cancelled', { cause: error });
+      const context: ProviderResponseContext = { attempts: attempt, responseReceived, streamReceived };
+      if (init.signal?.aborted || isAbortError(error)) {
+        throw abortFailure(error, init.signal, context);
+      }
       if (!retry.retryTransport || attempt >= retry.maxAttempts) {
-        throw new KernelError('provider_transport_failed', { cause: error });
+        throw providerError('provider_transport_failed', 'transport', context, {
+          cause: error,
+          recoverable: retry.retryTransport,
+        });
       }
       await wait(attempt);
       continue;
     }
-    if (response.ok) return response;
+    responseReceived = true;
+    const context: ProviderResponseContext = { attempts: attempt, status: response.status, responseReceived, streamReceived };
+    responseContexts.set(response, context);
+    if (response.body !== null) streamContexts.set(response.body, context);
+    if (response.ok) {
+      if (response.body === null) {
+        throw providerError('provider_stream_missing', 'invalid_response', context);
+      }
+      return response;
+    }
     const retryable = (response.status === 429 && retry.retry429) || (response.status >= 500 && retry.retry5xx);
     if (!retryable || attempt >= retry.maxAttempts) {
-      throw new KernelError('provider_http_error', { detail: await httpFailureDetail(response) });
+      const failure = await httpFailureDetail(response, context, init.signal);
+      throw providerError('provider_http_error', httpFailureCategory(response.status), context, {
+        detail: failure.detail,
+        streamReceived: failure.streamReceived,
+        recoverable: retryable,
+      });
     }
     await response.body?.cancel();
-    await wait(attempt);
+    await wait(attempt, context);
   }
 }
 
@@ -150,14 +247,21 @@ export async function open(url: string, init: RequestInit, retry: RetryPolicy): 
 // `[DONE]` 是 Chat Completions 的结束标记，不是 JSON，需跳过。
 // 流式请求取消时将 Node 的 AbortError 转换为 `provider_cancelled`，供客户端统一处理。
 function isAbortError(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && 'name' in error && error.name === 'AbortError';
+  return typeof error === 'object' && error !== null && 'name' in error
+    && (error.name === 'AbortError' || error.name === 'TimeoutError');
 }
 
 export async function readJson(response: Response, signal?: AbortSignal | null): Promise<unknown> {
-  if (response.body === null) throw new KernelError('provider_stream_missing');
-  const reader = response.body.getReader();
+  const context = responseContexts.get(response);
+  if (response.body === null) {
+    throw providerError('provider_stream_missing', 'invalid_response', context);
+  }
+  const body = response.body;
+  const bodyContext = streamContexts.get(body) ?? context ?? { attempts: 1, responseReceived: false, streamReceived: false };
+  const reader = body.getReader();
   const chunks: Uint8Array[] = [];
   let completed = false;
+  let streamReceived = false;
   try {
     for (;;) {
       const { done, value } = await reader.read();
@@ -165,12 +269,22 @@ export async function readJson(response: Response, signal?: AbortSignal | null):
         completed = true;
         break;
       }
-      if (value !== undefined) chunks.push(value);
+      if (value !== undefined) {
+        streamReceived = streamReceived || value.byteLength > 0;
+        chunks.push(value);
+      }
     }
-    if (signal?.aborted) throw new KernelError('provider_cancelled');
+    if (signal?.aborted) {
+      throw abortFailure(signal.reason, signal, bodyContext, streamReceived);
+    }
   } catch (error) {
-    if (signal?.aborted || isAbortError(error)) throw new KernelError('provider_cancelled');
-    throw new KernelError('provider_stream_interrupted', { detail: 'the response body could not be read completely' });
+    if (error instanceof KernelError) throw error;
+    if (signal?.aborted || isAbortError(error)) {
+      throw abortFailure(error, signal, bodyContext, streamReceived);
+    }
+    throw providerError('provider_stream_interrupted', 'stream', bodyContext, {
+      detail: 'the response body could not be read completely', streamReceived, recoverable: false,
+    });
   } finally {
     if (!completed) {
       try { await reader.cancel(); } catch { /* Keep the response read classification. */ }
@@ -180,24 +294,19 @@ export async function readJson(response: Response, signal?: AbortSignal | null):
   try {
     return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
   } catch {
-    throw new KernelError('provider_stream_invalid', { detail: 'response body is not valid JSON' });
-  }
-}
-
-async function* cancelMapped(source: AsyncIterable<Uint8Array>): AsyncGenerator<Uint8Array> {
-  try {
-    for await (const chunk of source) yield chunk;
-  } catch (error) {
-    if (isAbortError(error)) throw new KernelError('provider_cancelled', { cause: error });
-    throw new KernelError('provider_stream_interrupted', { detail: 'the response body could not be read completely' });
+    throw providerError('provider_stream_invalid', 'invalid_response', bodyContext, {
+      detail: 'response body is not valid JSON', streamReceived,
+    });
   }
 }
 
 export async function* parseSse(
-  body: ReadableStream<Uint8Array>, { includeDone = false }: { readonly includeDone?: boolean } = {},
+  body: ReadableStream<Uint8Array>, { includeDone = false, signal }: { readonly includeDone?: boolean; readonly signal?: AbortSignal | null } = {},
 ): AsyncGenerator<unknown> {
   const decoder = new TextDecoder();
   let buffer = '';
+  const context = streamContexts.get(body) ?? { attempts: 1, responseReceived: false, streamReceived: false };
+  let streamReceived = false;
   const reader = body.getReader();
   async function* chunks(): AsyncGenerator<Uint8Array> {
     let completed = false;
@@ -208,8 +317,18 @@ export async function* parseSse(
           completed = true;
           return;
         }
-        if (value !== undefined) yield value;
+        if (value !== undefined) {
+          streamReceived = streamReceived || value.byteLength > 0;
+          yield value;
+        }
       }
+    } catch (error) {
+      if (signal?.aborted || isAbortError(error)) {
+        throw abortFailure(error, signal, context, streamReceived);
+      }
+      throw providerError('provider_stream_interrupted', 'stream', context, {
+        detail: 'the response body could not be read completely', streamReceived, recoverable: false,
+      });
     } finally {
       if (!completed) {
         try {
@@ -221,7 +340,7 @@ export async function* parseSse(
       reader.releaseLock();
     }
   }
-  for await (const chunk of cancelMapped(chunks())) {
+  for await (const chunk of chunks()) {
     buffer += decoder.decode(chunk, { stream: true }).replace(/\r/g, '');
     let end: number;
     while ((end = buffer.indexOf('\n\n')) >= 0) {
@@ -241,12 +360,18 @@ export async function* parseSse(
         const parsed: unknown = JSON.parse(data);
         yield parsed;
       } catch {
-        throw new KernelError('provider_stream_invalid', { detail: `invalid SSE JSON (${data.length} characters)` });
+        throw providerError('provider_stream_invalid', 'invalid_response', context, {
+          detail: `invalid SSE JSON (${data.length} characters)`, streamReceived,
+        });
       }
     }
   }
 // 流结束时若仍有未完成帧，返回解析错误，避免静默丢失不完整工具调用。
-  if (buffer.trim() !== '') throw new KernelError('provider_stream_incomplete', { detail: 'the stream ended inside a frame' });
+if (buffer.trim() !== '') {
+    throw providerError('provider_stream_incomplete', 'invalid_response', context, {
+      detail: 'the stream ended inside a frame', streamReceived,
+    });
+  }
 }
 
 // 每个 assistant 工具调用都必须有对应结果；缺少结果会使后续请求被服务端拒绝。

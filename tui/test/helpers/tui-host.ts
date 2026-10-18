@@ -7,6 +7,8 @@ import type { PassThrough } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createConfig } from '../../../core/dist/kernel/config.js';
 import type { ConfigSnapshot } from '../../../core/dist/kernel/config.js';
+import { createPermissionContext, type PermissionContext } from '../../../core/dist/kernel/permission.js';
+import { detectPermissionCapabilities } from '../../../core/dist/capability/permission-capabilities.js';
 import { createConnection } from '../../../core/dist/host/connection.js';
 import type { Connection } from '../../../core/dist/host/connection.js';
 import { createMemoryConnectionPair } from '../../../core/dist/host/memory.js';
@@ -55,7 +57,16 @@ type TuiHostOptions = {
   setup?: (paths: TuiHostSetupPaths) => void | Promise<void>;
   config?: Record<string, unknown>;
   interactive?: boolean;
+  permission?: PermissionContext;
 };
+
+export async function measuredPermissionContext(
+  profile: PermissionContext['profile'],
+  network: PermissionContext['network'],
+): Promise<PermissionContext> {
+  const snapshot = await detectPermissionCapabilities();
+  return createPermissionContext(profile, network, snapshot.capabilities);
+}
 
 function observeFrames(stream: PassThrough, visit: (message: Record<string, unknown>) => void): void {
   let buffer = '';
@@ -90,6 +101,7 @@ export async function withTuiHost<TResult>(run: (context: TuiHostContext) => TRe
   setup,
   config: extra = {},
   interactive = false,
+  permission,
 }: TuiHostOptions = {}): Promise<TResult> {
   const testplace = resolve('testplace');
   await mkdir(testplace, { recursive: true });
@@ -191,6 +203,8 @@ export async function withTuiHost<TResult>(run: (context: TuiHostContext) => TRe
     host = serveHost({ ...pair.host, config, provider, policy: config.policy, loadEnvironment,
       // 测试客户端可以响应模型发起的问题。
       interactive,
+      ...(permission === undefined ? {} : { permission }),
+      permissionControl: true,
       modeName: 'minimal', modePaths: modeDirectories(projectDirectory, modesDirectory, homeDirectory),
     });
     const client = createConnection(pair.client);

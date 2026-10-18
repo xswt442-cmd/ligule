@@ -1603,6 +1603,7 @@ export function App({ transport }: { transport: Transport }) {
         onSessionMenuChange={setSessionMenuOpen}
         onSetMode={(name) => void setMode(name)}
         onSetPolicy={setPolicy}
+        onPermissionStatus={(next) => { if (active.current === next.sessionId) setStatus(next); }}
         onStop={() => void cancel()}
         onSend={() => void send()}
       />

@@ -10,8 +10,12 @@ import {
   createConfig, createConnection, createDecisionChain, createKernel, createMcpPlugin, createMcpRegistry, createMcpTools, createMemoryConnectionPair, loadAssembly, MESSAGES_CAPABILITIES, serveHost,
   mcpServerConfigs, validateToolArguments,
 } from '../dist/index.js';
+import { createPermissionContext } from '../dist/kernel/permission.js';
 
 const serverEntry = fileURLToPath(new URL('../node_modules/@modelcontextprotocol/server-filesystem/dist/index.js', import.meta.url));
+const externalPermission = createPermissionContext('full-access', 'unrestricted', {
+  filesystemRead: 'unavailable', filesystemWrite: 'unavailable', network: 'unavailable', process: 'full',
+});
 
 test('the server config takes a plain command and only ${NAME} credential references', () => {
   const configs = mcpServerConfigs({
@@ -33,6 +37,37 @@ test('the server config takes a plain command and only ${NAME} credential refere
   assert.deepEqual(mcpServerConfigs(configsToConfig(undefined, { command: 'mcp-server-stdio' })), [
     { name: 'fs', command: 'mcp-server-stdio', args: [], env: {}, cwd: undefined },
   ]);
+});
+
+test('an MCP child inherits runtime variables and only explicitly referenced secrets', async () => {
+  const ambientName = 'LIGULE_MCP_AMBIENT_SECRET';
+  const explicitName = 'LIGULE_MCP_EXPLICIT_SECRET';
+  const previous = { ambient: process.env[ambientName], explicit: process.env[explicitName] };
+  process.env[ambientName] = 'ambient-test-secret';
+  process.env[explicitName] = 'explicit-test-secret';
+  const fixture = fileURLToPath(new URL('../../tests/fixtures/mcp-environment.mjs', import.meta.url));
+  const registry = createMcpRegistry(mcpServerConfigs({
+    mcp: { servers: { env: {
+      command: process.execPath,
+      args: [fixture],
+      env: { MCP_FIXTURE_TOKEN: '${' + explicitName + '}' },
+    } } },
+  }));
+  try {
+    await registry.toolsOf('env');
+    const response = await registry.call('env', 'inspect_environment', {});
+    assert.deepEqual(JSON.parse(response.content[0].text), {
+      ambient: null,
+      explicit: 'explicit-test-secret',
+      pathAvailable: true,
+    });
+  } finally {
+    await registry.close();
+    if (previous.ambient === undefined) delete process.env[ambientName];
+    else process.env[ambientName] = previous.ambient;
+    if (previous.explicit === undefined) delete process.env[explicitName];
+    else process.env[explicitName] = previous.explicit;
+  }
 });
 
 function configsToConfig(env, tools = { command: 'node' }) {
@@ -183,11 +218,12 @@ test('the decision chain judges the effective capability, not mcp.call', async (
     rules: [{ tool: 'mcp:fs/edit_file', decision: 'deny', reason: 'editing through MCP is not allowed' }],
     ask: async (call) => {
       asked.push(call);
-      return false;
+      return true;
     },
   });
   const kernel = createKernel({
     config: createConfig({ user: { boundary: process.cwd() } }),
+    permission: externalPermission,
     policy: chain,
   });
   kernel.register(callTool);
@@ -202,6 +238,7 @@ test('the decision chain judges the effective capability, not mcp.call', async (
   });
   await kernel.call('mcp.call', { server: 'fs', tool: 'read_file', arguments: '{"path":"a.txt"}', schemaDigest: 'aaaa' });
   assert.deepEqual(seenByGuard, ['mcp:fs/read_file'], '守卫与规则表看见的都是那一条能力名');
+  assert.deepEqual(asked.map((call) => call.tool), ['mcp:fs/read_file'], 'auto policy still asks before an external MCP operation');
 });
 
 test('nothing is registered when no server is configured', () => {
@@ -221,7 +258,8 @@ test('a real stdio server answers inspect and call through the registry', async 
   const registry = createMcpRegistry(configs);
   const kernel = createKernel({
     config: createConfig({ user: { boundary: process.cwd() } }),
-    policy: createDecisionChain({ mode: 'auto' }),
+    permission: externalPermission,
+    policy: createDecisionChain({ mode: 'auto', ask: async () => true }),
   });
   loadAssembly(kernel, [createMcpPlugin(registry)]);
   try {
@@ -260,7 +298,8 @@ test('Host Policy denies a real MCP write under the server root', async () => {
   const registry = createMcpRegistry(configs);
   const kernel = createKernel({
     config: createConfig({ user: { boundary: root } }),
-    policy: createDecisionChain({ mode: 'auto', rules: [{ tool: 'mcp:fs/write_file', decision: 'deny', reason: 'test denial' }] }),
+    permission: externalPermission,
+    policy: createDecisionChain({ mode: 'auto', ask: async () => true, rules: [{ tool: 'mcp:fs/write_file', decision: 'deny', reason: 'test denial' }] }),
   });
   loadAssembly(kernel, [createMcpPlugin(registry)]);
   try {
@@ -289,7 +328,11 @@ test('a server that moved its definition is caught over the real protocol', asyn
   const registry = createMcpRegistry(mcpServerConfigs({
     mcp: { servers: { fx: { command: process.execPath, args: [fileURLToPath(new URL('../../tests/fixtures/mcp-minimal.mjs', import.meta.url)), schema] } } },
   }));
-  const kernel = createKernel({ config: createConfig({ user: { boundary: root } }), policy: createDecisionChain({ mode: 'auto' }) });
+  const kernel = createKernel({
+    config: createConfig({ user: { boundary: root } }),
+    permission: externalPermission,
+    policy: createDecisionChain({ mode: 'auto', ask: async () => true }),
+  });
   loadAssembly(kernel, [createMcpPlugin(registry)]);
   try {
   const first = await kernel.call('mcp.inspect', { server: 'fx', tool: 'echo' });
@@ -316,7 +359,7 @@ test('a server that moved its definition is caught over the real protocol', asyn
 
 // 固定的 MCP 披露工具不受模式筛选，始终可用。
 test('a mode can neither select nor hide the two MCP tools', async () => {
-  const kernel = createKernel({ config: createConfig({ user: { boundary: process.cwd() } }) });
+  const kernel = createKernel({ config: createConfig({ user: { boundary: process.cwd() } }), permission: externalPermission });
   loadAssembly(kernel, [createMcpPlugin({ servers: () => ['fx'], toolsOf: async () => [], definition: async () => ({}), call: async () => ({}) })]);
   assert.deepEqual(kernel.list(), ['mcp.call', 'mcp.inspect']);
   assert.deepEqual(kernel.selectable(), [], '登记了但不在模式能挑的范围里');
@@ -338,7 +381,10 @@ test('the host wires the two tools from the config, and not when there is no ser
   });
   const provider = { capabilities: MESSAGES_CAPABILITIES, model: 'm', async *stream() { yield { type: 'text', text: 'ok' }; } };
   const pair = createMemoryConnectionPair();
-  const host = serveHost({ input: pair.host.input, output: pair.host.output, config: withServer, provider, policy: withServer.policy });
+  const host = serveHost({
+    input: pair.host.input, output: pair.host.output, config: withServer, provider, policy: withServer.policy,
+    permission: externalPermission,
+  });
   const connection = createConnection(pair.client);
   try {
     const { sessionId } = await connection.request('session.create', {});

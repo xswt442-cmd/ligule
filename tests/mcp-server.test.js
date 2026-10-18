@@ -6,6 +6,13 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { LoggingMessageNotificationSchema } from '../core/node_modules/@modelcontextprotocol/sdk/dist/esm/types.js';
+import { createConnection } from '../core/dist/host/connection.js';
+import { hostProviderFromConfig, serveHost } from '../core/dist/host/host.js';
+import { createMemoryConnectionPair } from '../core/dist/host/memory.js';
+import { detectPermissionCapabilities } from '../core/dist/capability/permission-capabilities.js';
+import { createConfig } from '../core/dist/kernel/config.js';
+import { modeDirectories } from '../core/dist/kernel/modes.js';
+import { createPermissionContext } from '../core/dist/kernel/permission.js';
 import { listenFetchable } from '../test/helpers/port.ts';
 import { connectMcp } from '../test/helpers/mcp-control.mjs';
 import { setTrusted } from '../core/dist/kernel/workspace-trust.js';
@@ -75,38 +82,6 @@ async function findHistoryRecord(client, sessionId, predicate) {
   }
 }
 
-async function waitForChildPid(client, sessionId, operationId, pidFile, label) {
-  const until = Date.now() + 5_000;
-  while (Date.now() < until) {
-    const pidText = await readFile(pidFile, 'utf8').catch(() => undefined);
-    if (pidText !== undefined) {
-      const pid = Number(pidText);
-      if (Number.isInteger(pid) && pid > 0 && processIsAlive(pid)) return pid;
-    }
-    const status = toolData(await client.callTool({ name: 'ligule_run_status', arguments: { operationId } }), `${label}_status`);
-    if (status.state !== 'running') {
-      const page = toolData(await client.callTool({ name: 'ligule_session_read', arguments: { sessionId, limit: 50 } }), `${label}_records`);
-      const outcomes = page.records.filter((item) => item.kind === 'tool').map((item) => {
-        const record = JSON.parse(item.json);
-        return { tool: record.tool, kind: record.result?.kind, code: record.result?.code, content: record.result?.content };
-      });
-      throw new Error(`${label}_finished_without_child:${status.state}:${status.code ?? ''}:${JSON.stringify(outcomes)}`);
-    }
-    await delay(25);
-  }
-  throw new Error(`${label}_child_pid_timeout`);
-}
-
-function processIsAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    if (error.code === 'ESRCH') return false;
-    throw error;
-  }
-}
-
 function sse(response, delta) {
   const frames = [
     { choices: [{ index: 0, delta, finish_reason: delta.tool_calls === undefined ? 'stop' : 'tool_calls' }] },
@@ -118,6 +93,65 @@ function sse(response, delta) {
 
 function tomlString(value) {
   return JSON.stringify(value.replaceAll('\\', '/'));
+}
+
+async function seedFullAccessSession({ projectRoot, sessionDirectory, homeDirectory, baseURL, apiKeyName, capabilities }) {
+  const config = createConfig({ user: {
+    boundary: projectRoot,
+    workspaceRoot: projectRoot,
+    host: { sessionDirectory },
+    model: {
+      api: 'chat-completions',
+      baseURL,
+      model: 'operator-e2e-local',
+      apiKeyEnv: apiKeyName,
+      services: [{
+        id: 'deepseek', name: 'DeepSeek', api: 'chat-completions',
+        baseURL: 'https://api.deepseek.com/v1', apiKeyEnv: 'OPERATOR_DEEPSEEK_KEY', models: ['deepseek-flash'],
+      }],
+    },
+    policy: { mode: 'ask' },
+    limits: { contextTokens: 200000 },
+    loop: { iterations: 8, modelCalls: 16 },
+  } });
+  const permission = createPermissionContext('read-only', 'policy', capabilities);
+  const pair = createMemoryConnectionPair();
+  const host = serveHost({
+    input: pair.host.input,
+    output: pair.host.output,
+    config,
+    provider: hostProviderFromConfig(config),
+    policy: config.policy,
+    interactive: true,
+    permission,
+    permissionControl: true,
+    modeName: 'minimal',
+    modePaths: modeDirectories(projectRoot, fileURLToPath(new URL('../core/modes/', import.meta.url)), homeDirectory),
+  });
+  const client = createConnection(pair.client);
+  try {
+    const created = await client.request('session.create', {
+      projectRoot,
+      initialMode: 'minimal',
+      initialPolicy: 'ask',
+      initialProvider: 'deepseek',
+      initialModel: 'deepseek-flash',
+      initialThinkingEffort: 'high',
+      initialOutputTokens: 128000,
+      initialLoopIterations: 5,
+    });
+    await client.request('permission.set', {
+      sessionId: created.sessionId,
+      permissionProfile: 'full-access',
+      permissionNetwork: 'unrestricted',
+      confirmFullAccess: true,
+      confirmNetwork: true,
+    });
+    return created.sessionId;
+  } finally {
+    pair.client.output.end();
+    await host.release();
+  }
 }
 
 function gate() {
@@ -151,25 +185,14 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
   await mkdir(sessionDirectory);
 
   const approvalMarker = join(projectRoot, 'approval-denied.txt');
-  const childPidFiles = {
-    cancel: join(projectRoot, 'cancel-child.pid'),
-    disconnect: join(projectRoot, 'disconnect-child.pid'),
-  };
-  const execCommands = { cancel: 'node cancel-child.mjs', disconnect: 'node disconnect-child.mjs' };
-  await Promise.all(Object.entries(execCommands).map(async ([name, command]) => {
-    const scriptName = command.slice('node '.length);
-    const pidName = childPidFiles[name].slice(projectRoot.length + 1);
-    await writeFile(join(projectRoot, scriptName),
-      `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(pidName)}, String(process.pid));\nsetInterval(() => {}, 1000);\n`,
-    );
-  }));
-
   const apiKeyName = 'LIGULE_MCP_E2E_API_KEY';
   const apiKey = 'local-stub-key';
   const httpRequests = [];
   const providerGates = new Map([
     ['MCP_E2E_GATE_A', gate()],
     ['MCP_E2E_GATE_B', gate()],
+    ['MCP_E2E_CANCEL_GATE', gate()],
+    ['MCP_E2E_DISCONNECT_GATE', gate()],
   ]);
   let callId = 0;
   const endpoint = createServer(async (request, response) => {
@@ -179,7 +202,7 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       assert.equal(request.headers.authorization, `Bearer ${apiKey}`);
       const lastUser = body.messages.filter((message) => message.role === 'user').at(-1)?.content ?? '';
-      const inputTags = ['MCP_E2E_DELAYED', 'MCP_E2E_LARGE_', 'MCP_E2E_EXEC_CANCEL', 'MCP_E2E_EXEC_DISCONNECT', 'MCP_E2E_APPROVAL_DENIED']
+      const inputTags = ['MCP_E2E_DELAYED', 'MCP_E2E_LARGE_', 'MCP_E2E_CANCEL_GATE', 'MCP_E2E_EXEC_BLOCKED', 'MCP_E2E_DISCONNECT_GATE', 'MCP_E2E_APPROVAL_DENIED']
         .filter((tag) => lastUser.includes(tag));
       httpRequests.push({ url: request.url, model: body.model, inputTags, lastRole: body.messages.at(-1)?.role,
         toolNames: (body.tools ?? []).map((tool) => tool.function?.name) });
@@ -201,12 +224,9 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
       }
       let tool;
       let args;
-      if (lastUser.includes('MCP_E2E_EXEC_CANCEL')) {
+      if (lastUser.includes('MCP_E2E_EXEC_BLOCKED')) {
         tool = 'exec';
-        args = { command: execCommands.cancel };
-      } else if (lastUser.includes('MCP_E2E_EXEC_DISCONNECT')) {
-        tool = 'exec';
-        args = { command: execCommands.disconnect };
+        args = { command: 'node --version' };
       } else if (lastUser.includes('MCP_E2E_APPROVAL_DENIED')) {
         tool = 'create';
         args = { path: 'approval-denied.txt', content: 'must not be written' };
@@ -239,16 +259,6 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     '',
     '[policy]',
     'mode = "ask"',
-    '',
-    '[[policy.rules]]',
-    'tool = "exec"',
-    `match = ${tomlString(execCommands.cancel)}`,
-    'decision = "allow"',
-    '',
-    '[[policy.rules]]',
-    'tool = "exec"',
-    `match = ${tomlString(execCommands.disconnect)}`,
-    'decision = "allow"',
     '',
     '[host]',
     `sessionDirectory = ${tomlString(sessionDirectory)}`,
@@ -412,16 +422,23 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
       aState: cancelledA.state, bStateAfterCancelA: stillRunningB.state, bFinalState: completedB.state,
     });
 
-    const cancelRun = toolData(await first.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_E2E_EXEC_CANCEL' } }), 'run_start_cancel_child');
-    const cancelPid = await waitForChildPid(first.client, sessionId, cancelRun.operationId, childPidFiles.cancel, 'exec_cancel');
-    assert.ok(Number.isInteger(cancelPid) && cancelPid > 0);
+    const cancelRun = toolData(await first.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_E2E_CANCEL_GATE' } }), 'run_start_cancel_gate');
+    await providerGates.get('MCP_E2E_CANCEL_GATE').entered;
     const concurrent = await first.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'must be rejected' } });
     toolFailure(concurrent, 'run_already_running', 'run_start_concurrent');
-    const cancelled = toolData(await first.client.callTool({ name: 'ligule_run_cancel', arguments: { operationId: cancelRun.operationId } }), 'run_cancel_child');
-    assert.equal(cancelled.terminated, true);
+    const cancelled = toolData(await first.client.callTool({ name: 'ligule_run_cancel', arguments: { operationId: cancelRun.operationId } }), 'run_cancel_gate');
     assert.equal(cancelled.state, 'cancelled');
-    await waitFor(() => !processIsAlive(cancelPid), `cancelled exec process ${cancelPid} to exit`);
-    recordTrace(trace, 'run_cancel_and_exec_tree_exit', { operationId: cancelRun.operationId, state: cancelled.state, childExited: true, concurrentCode: toolFailureCode(concurrent) });
+    providerGates.get('MCP_E2E_CANCEL_GATE').release();
+    recordTrace(trace, 'run_cancel_is_scoped_to_active_operation', { operationId: cancelRun.operationId, state: cancelled.state, concurrentCode: toolFailureCode(concurrent) });
+
+    const blockedExec = toolData(await first.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_E2E_EXEC_BLOCKED' } }), 'run_start_restricted_exec');
+    assert.equal((await waitForOutcome(first.client, blockedExec.operationId)).state, 'done');
+    const blockedExecResult = await findHistoryRecord(first.client, sessionId, (record) => record.kind === 'tool' && record.json.includes('node --version'));
+    assert.ok(blockedExecResult, 'the restricted command attempt is recorded');
+    const blockedExecRecord = JSON.parse(blockedExecResult.record.json);
+    assert.equal(blockedExecRecord.result.kind, 'refusal');
+    assert.equal(blockedExecRecord.result.code, 'permission_sandbox_unavailable');
+    recordTrace(trace, 'default_mcp_permission_refuses_shell', { code: blockedExecRecord.result.code, sideEffectStarted: false });
 
     const approvalRun = toolData(await first.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_E2E_APPROVAL_DENIED' } }), 'run_start_approval');
     const approvalDone = await waitForOutcome(first.client, approvalRun.operationId);
@@ -430,8 +447,8 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     const deniedToolRecord = await findHistoryRecord(first.client, sessionId, (record) => record.kind === 'tool' && record.json.includes('approval-denied.txt'));
     const deniedTool = deniedToolRecord === undefined ? undefined : JSON.parse(deniedToolRecord.record.json);
     assert.equal(deniedTool?.result?.kind, 'refusal');
-    assert.equal(deniedTool?.result?.code, 'ask_declined');
-    recordTrace(trace, 'approval_denied_without_side_effect', { operationId: approvalRun.operationId, state: approvalDone.state, refusalCode: deniedTool.result.code, markerAbsent: true });
+    assert.equal(deniedTool?.result?.code, 'permission_read_only');
+    recordTrace(trace, 'default_mcp_permission_refuses_write', { operationId: approvalRun.operationId, state: approvalDone.state, refusalCode: deniedTool.result.code, markerAbsent: true });
 
     const locked = await connect();
     const lockedResult = await locked.client.callTool({ name: 'ligule_session_open', arguments: { projectRoot: project, sessionId } });
@@ -439,16 +456,14 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     recordTrace(trace, 'cross_process_session_lock', { sessionId, errorCode: toolFailureCode(lockedResult) });
     await close(locked);
 
-    const disconnectRun = toolData(await first.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_E2E_EXEC_DISCONNECT' } }), 'run_start_disconnect_child');
-    const disconnectPid = await waitForChildPid(first.client, sessionId, disconnectRun.operationId, childPidFiles.disconnect, 'exec_disconnect');
-    assert.ok(Number.isInteger(disconnectPid) && disconnectPid > 0);
-    assert.notEqual(disconnectPid, cancelPid, 'disconnect run starts a fresh child process');
+    const disconnectRun = toolData(await first.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_E2E_DISCONNECT_GATE' } }), 'run_start_disconnect_gate');
+    await providerGates.get('MCP_E2E_DISCONNECT_GATE').entered;
     const closeAt = performance.now();
     await close(first);
+    providerGates.get('MCP_E2E_DISCONNECT_GATE').release();
     const closeMs = Math.round(performance.now() - closeAt);
     assert.ok(closeMs < 2_000, `stdio disconnect took ${closeMs}ms to release the Host`);
-    await waitFor(() => !processIsAlive(disconnectPid), `disconnected exec process ${disconnectPid} to exit`);
-    recordTrace(trace, 'stdio_disconnect_releases_active_run', { operationId: disconnectRun.operationId, closeMs, childExited: true });
+    recordTrace(trace, 'stdio_disconnect_releases_active_run', { operationId: disconnectRun.operationId, closeMs });
 
     const resumed = await connect();
     const reattached = toolData(await resumed.client.callTool({ name: 'ligule_session_open', arguments: { projectRoot: project, sessionId } }), 'session_open_after_restart');
@@ -470,6 +485,7 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     });
     throw error;
   } finally {
+    for (const waiting of providerGates.values()) waiting.release();
     for (const context of [...clients]) {
       try { await close(context); } catch (error) { recordTrace(trace, 'cleanup_error', { code: error instanceof Error ? error.name : 'unknown' }); }
     }
@@ -487,6 +503,8 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
 });
 
 test('operator tools configure real sessions, answer Host interactions, and run bounded queues', { timeout: 60_000 }, async (t) => {
+  const measured = await detectPermissionCapabilities();
+  if (measured.capabilities.process !== 'full') return t.skip('the platform process ownership backend is unavailable');
   const parent = resolve(process.env.LIGULE_MCP_E2E_TEMP_ROOT ?? join(testplaceRoot, 'tmp'));
   await mkdir(parent, { recursive: true });
   const tempRoot = await mkdtemp(join(parent, 'mcp-operator-e2e-'));
@@ -553,8 +571,20 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     '[policy]', 'mode = "ask"', '', '[host]', `sessionDirectory = ${tomlString(sessionDirectory)}`,
     '', '[limits]', 'contextTokens = 200000', '', '[loop]', 'iterations = 8', 'modelCalls = 16', '',
   ].join('\n'));
-  await setTrusted(projectRoot, true, join(dataRoot, 'tui-trust.json'));
-  let context = await connectMcp({ cliPath, projectRoot, dataRoot, apiKeyName, apiKey: fixtureCredential, sdkRoot, operator: true });
+  let preauthorizedSessionId;
+  let context;
+  try {
+    await setTrusted(projectRoot, true, join(dataRoot, 'tui-trust.json'));
+    preauthorizedSessionId = await seedFullAccessSession({
+      projectRoot, sessionDirectory, homeDirectory: dataRoot, baseURL, apiKeyName, capabilities: measured.capabilities,
+    });
+    context = await connectMcp({ cliPath, projectRoot, dataRoot, apiKeyName, apiKey: fixtureCredential, sdkRoot, operator: true });
+  } catch (error) {
+    endpoint.closeAllConnections();
+    await new Promise((done) => endpoint.close(done));
+    await rm(tempRoot, { recursive: true, force: true });
+    throw error;
+  }
   const notifications = [];
   context.client.setNotificationHandler(LoggingMessageNotificationSchema, (notification) => { notifications.push(notification); });
   try {
@@ -571,8 +601,10 @@ test('operator tools configure real sessions, answer Host interactions, and run 
         thinking: { effort: 'high' }, outputTokens: 128000, loopIterations: 5,
       },
     } }), 'operator_session_create');
-    const sessionId = created.sessionId;
     assert.equal(created.settingsApplied, true);
+    const sessionId = preauthorizedSessionId;
+    const opened = toolData(await context.client.callTool({ name: 'ligule_session_open', arguments: { projectRoot: project, sessionId } }), 'operator_open_preconfigured_session');
+    assert.equal(opened.sessionId, sessionId);
 
     const readSettings = toolData(await context.client.callTool({ name: 'ligule_session_configure', arguments: { sessionId } }), 'session_configure_read');
     assert.equal(readSettings.applies, 'unchanged');

@@ -6,10 +6,13 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import {
   createConfig, createConnection, createMemoryConnectionPair, createMcpRegistry, MESSAGES_CAPABILITIES,
-  modeDirectories, mcpServerConfigs, serveHost,
+  modeDirectories, mcpServerConfigs, serveHost, createPermissionContext,
 } from '../dist/index.js';
 
 const fixturePath = fileURLToPath(new URL('./fixtures/mcp-cancellable.mjs', import.meta.url));
+const externalPermission = createPermissionContext('full-access', 'unrestricted', {
+  filesystemRead: 'unavailable', filesystemWrite: 'unavailable', network: 'unavailable', process: 'full',
+});
 
 async function withDirectory(run) {
   const testplace = resolve('testplace');
@@ -218,10 +221,16 @@ test('Host shutdown cancels an MCP operation and ends its stdio server', { timeo
       config,
       provider,
       policy: config.policy,
+      permission: externalPermission,
+      interactive: true,
       modeName: 'minimal',
       modePaths: modeDirectories(project, fileURLToPath(new URL('../modes/', import.meta.url)), home),
     });
     const client = createConnection(pair.client);
+    client.onRequest(async (message) => {
+      if (message.method === 'approval.request') return { decision: 'allow' };
+      throw new Error(`unexpected client request: ${message.method}`);
+    });
     try {
       const { sessionId } = await client.request('session.create', {});
       await client.request('run.start', {

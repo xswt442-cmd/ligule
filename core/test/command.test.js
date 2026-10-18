@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseCommand } from '../dist/index.js';
+import { inspectCommand } from '../dist/capability/command.js';
 
 test('a simple command is one segment and the safe operators split it into several', async () => {
   assert.deepEqual(await parseCommand('git status'), { kind: 'segments', segments: ['git status'] });
@@ -77,4 +78,39 @@ test('a PowerShell argument that is not a plain ASCII literal is reported instea
   // 解析报错与不认识的后缀运算都按无法完整处理对待，不降级成「按 bash 的直觉读一遍」。
   assert.deepEqual(await parseCommand('git log --author="Jane Doe"', 'powershell'), { kind: 'unsupported', construct: 'a syntax error' });
   assert.deepEqual(await parseCommand('git log -1', 'powershell'), { kind: 'unsupported', construct: 'expression_with_unary_operator' });
+});
+
+test('AST inspection preserves wrapper arguments and nested Bash commands', async () => {
+  const wrapped = await inspectCommand('bash -c "rm -rf ~ | echo x"');
+  assert.equal(wrapped.invocations[0].executable, 'bash');
+  assert.deepEqual(wrapped.invocations[0].arguments.map((argument) => argument.value), ['-c', 'rm -rf ~ | echo x']);
+
+  const escaped = await inspectCommand(String.raw`bash -c "rm -rf \"$HOME\"/*"`);
+  assert.equal(escaped.invocations[0].arguments[1].value, 'rm -rf "$HOME"/*');
+
+  const substitution = await inspectCommand('echo $(rm -rf ~)');
+  assert.equal(substitution.parsed.kind, 'unsupported');
+  assert.equal(substitution.invocations[0].executable, 'echo');
+  assert.equal(substitution.invocations[0].arguments[0].nested[0].executable, 'rm');
+
+  const backtick = await inspectCommand('echo `rm -rf ~`');
+  assert.equal(backtick.invocations[0].arguments[0].nested[0].executable, 'rm');
+});
+
+test('AST inspection preserves PowerShell variables, aliases, and subexpressions', async () => {
+  const removal = await inspectCommand('Remove-Item -Path "$env:USERPROFILE\\*" -Recurse -Force', 'powershell');
+  assert.equal(removal.parsed.kind, 'unsupported');
+  assert.equal(removal.invocations[0].executable, 'Remove-Item');
+  assert.equal(removal.invocations[0].arguments[1].value, '$env:USERPROFILE\\*');
+
+  const quotedRoot = await inspectCommand("Remove-Item -Path 'C:\\*' -Recurse -Force", 'powershell');
+  assert.equal(quotedRoot.invocations[0].arguments[1].value, 'C:\\*');
+
+  const wrapper = await inspectCommand('pwsh -enc SGVsbG8=');
+  assert.equal(wrapper.invocations[0].executable, 'pwsh');
+  assert.deepEqual(wrapper.invocations[0].arguments.map((argument) => argument.value), ['-enc', 'SGVsbG8=']);
+
+  const substitution = await inspectCommand('Write-Output $(Remove-Item -Path C:\\* -Recurse -Force)', 'powershell');
+  assert.equal(substitution.invocations[0].executable, 'Write-Output');
+  assert.equal(substitution.invocations[0].arguments[0].nested[0].executable, 'Remove-Item');
 });

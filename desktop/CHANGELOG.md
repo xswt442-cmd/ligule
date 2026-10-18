@@ -8,24 +8,40 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 ### 简体中文
 
+**新增**
+
+- 增加会话 Permission 控制面板，可查看平台隔离能力并单独更改文件/命令档位与网络模式；启用 `full-access` 或不受限网络需要确认，Sandbox 能力不足时 Shell 会拒绝执行。
 - 模型服务提供可编辑的模型目录表，支持逐模型名称、上下文窗口和最大输出 token 数；一键获取列表并保留手动参数，设置实际用于选中模型的请求与压缩。
+
+**改进**
 
 - 安装包中的 Node 运行树只包含产品清单和生产依赖；构建与运行资源检查会拒绝源码、测试材料和嵌套部署目录。
 - 当文件权限边界与项目目录不同时，会话归属、项目设置与重启恢复仍使用实际项目目录。
 - 状态栏显示 Host 确认的运行阶段与无进展时长；长标题保留状态和操作按钮的显示空间。
 - 共享 Core 区分正常完成、空回复、输出耗尽及断流，安全拒绝非法工具批次，并支持显式输出预算和双 API 非流式 JSON 响应。
 - 模型配置在写入前验证共享默认层、项目有效配置和会话显式选择，拒绝时保持文件原文；构建与运行树校验拒绝过时的 Core 内容和越界链接。
+
+**修复**
+
 - 修复没有选中会话时重连后断连横幅残留；Linux deb 增加 GBM 和 ALSA 运行依赖声明。
 
 ### English
 
+**Added**
+
+- Added a per-session Permission panel to inspect platform isolation capabilities and change file/command profiles separately from network mode. Enabling `full-access` or unrestricted networking requires confirmation; Shell is denied when sandbox capabilities are insufficient.
 - Added editable model catalogs with per-model display names, context windows, and maximum output tokens. Fetching adds models while preserving manual settings; the selected model's limits control actual requests and compaction.
+
+**Improved**
 
 - Restricted the packaged Node runtime tree to its product manifest and production dependencies; build and runtime-resource checks reject source files, test material, and nested deployment directories.
 - Session ownership, project settings, and restart recovery use the actual project directory when it differs from the filesystem permission boundary.
 - Status shows Host-confirmed run phases and time without progress; long titles retain space for status and action buttons.
 - Shared Core distinguishes normal completion, empty replies, exhausted output, and interrupted bodies, safely rejects invalid tool batches, and supports explicit output budgets and non-streaming JSON responses for both APIs.
 - Model configuration validates shared defaults, effective project settings, and explicit session selections before writing; rejected edits preserve the file. Build and runtime-tree checks reject stale Core content and links escaping the runtime.
+
+**Fixed**
+
 - Fixed the disconnected banner remaining after reconnecting without a selected session; the Linux deb now declares GBM and ALSA runtime dependencies.
 
 ## [0.0.5] - 2026-10-15

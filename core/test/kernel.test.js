@@ -4,13 +4,18 @@ import { readFileSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
-  createConfig, createDecisionChain, createKernel, createSessionLog, KernelError, minimalTools,
+  createConfig, createDecisionChain, createKernel, createPermissionContext, createSessionLog, KernelError, minimalTools,
 } from '../dist/index.js';
+
+const toolFailurePermission = createPermissionContext('workspace-write', 'policy', {
+  filesystemRead: 'unavailable', filesystemWrite: 'full', network: 'full', process: 'full',
+});
 
 function makeTool(name, overrides = {}) {
   return {
     name,
     description: `the ${name} tool`,
+    access: 'read',
     parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
     run: async () => 'ok',
     ...overrides,
@@ -133,6 +138,22 @@ test('a numeric bound on a numeric parameter registers and is enforced per call'
   await assert.rejects(() => kernel.call('read', { n: 0 }), (error) => error.code === 'tool_args_invalid');
   await assert.rejects(() => kernel.call('read', { n: 4 }), (error) => error.code === 'tool_args_invalid');
   assert.equal(await kernel.call('read', { n: 2 }), 'ok');
+});
+
+test('the default read-only permission denies writes and tools without a classified access', async () => {
+  const kernel = createKernel();
+  kernel.register(makeTool('write', { access: 'write', parameters: { type: 'object', properties: {} } }));
+  kernel.register(makeTool('unclassified', { access: undefined, parameters: { type: 'object', properties: {} } }));
+
+  assert.deepEqual(kernel.manifest(), []);
+  await assert.rejects(
+    kernel.call('write', {}),
+    (error) => error.code === 'permission_read_only',
+  );
+  await assert.rejects(
+    kernel.call('unclassified', {}),
+    (error) => error.code === 'permission_external_access_requires_full_access',
+  );
 });
 
 test('a call whose arguments do not match the schema fails before the decision chain and is recorded', async () => {
@@ -324,7 +345,7 @@ test('every tool failure leaves the model a sentence to act on', async () => {
   try {
     await writeFile(join(root, 'note.txt'), 'seed content\n');
     const session = createSessionLog({ directory: root, id: 'messages' });
-    const kernel = createKernel({ config: createConfig({ user: { boundary: root } }), session });
+    const kernel = createKernel({ config: createConfig({ user: { boundary: root } }), permission: toolFailurePermission, session });
     for (const tool of minimalTools) kernel.register(tool);
     const failures = [
       ['read', { path: 'missing.txt' }],

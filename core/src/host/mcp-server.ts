@@ -11,12 +11,20 @@ import { isTrusted } from '../kernel/workspace-trust.js';
 import { createHost } from './host.js';
 import { loadHostEnvironment } from './environment.js';
 import { createControl, controlErrorCode, type McpInitialSettings, type McpSessionChanges } from './control.js';
+import { createInteractivePermissionContext } from '../capability/permission-capabilities.js';
 
 const id = { type: 'string', minLength: 1, maxLength: 160 };
 const root = { type: 'string', minLength: 1, maxLength: 4096, description: 'Absolute project root authorized when this server started.' };
+const providerDiagnostic = { type: 'object', additionalProperties: false, properties: {
+  category: { type: 'string', enum: ['authentication', 'rate_limit', 'client', 'server', 'http', 'transport', 'stream', 'invalid_response', 'cancelled'] },
+  status: { type: 'integer', minimum: 100, maximum: 599 },
+  attempts: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+  responseReceived: { type: 'boolean' }, streamReceived: { type: 'boolean' }, recoverable: { type: 'boolean' },
+}, required: ['category', 'attempts', 'responseReceived', 'streamReceived', 'recoverable'] };
 const operationProperties = {
   operationId: id, sessionId: id, state: { type: 'string', enum: ['running', 'done', 'failed', 'cancelled'] },
   code: { type: 'string' }, summary: { type: 'string', maxLength: 2048 },
+  diagnostics: providerDiagnostic,
   phase: { type: ['string', 'null'] },
   waitingFor: { type: ['string', 'null'], enum: ['approval', 'input', null] },
   progress: { type: ['object', 'null'], properties: {
@@ -32,7 +40,8 @@ const operationProperties = {
     cursor: { type: 'integer', minimum: 1 }, kind: { type: 'string' }, at: { type: 'number' }, sessionId: id, operationId: id,
     phase: { type: ['string', 'null'] }, progress: { type: 'object' }, code: { type: 'string' },
     requestId: id, interactionType: { type: 'string', enum: ['approval', 'question'] }, decision: { type: 'string', enum: ['allow', 'deny'] },
-    answered: { type: 'integer' }, eventSeq: { type: ['integer', 'null'] }, eventKind: { type: 'string' },
+    answered: { type: 'integer' }, diagnostics: providerDiagnostic,
+    eventSeq: { type: ['integer', 'null'] }, eventKind: { type: 'string' },
     queueItemId: id, newOperationId: id, inputCharacters: { type: 'integer' }, cleared: { type: 'integer' },
   }, ['cursor', 'kind', 'at', 'sessionId', 'operationId']) },
   nextCursor: { type: 'integer', minimum: 0 }, hasMoreEvents: { type: 'boolean' }, eventGap: { type: 'boolean' },
@@ -80,6 +89,20 @@ const configurationOutput = object({
   effective: { type: 'object', additionalProperties: false, properties: {
     mode: { type: ['string', 'null'] },
     loopIterations: { type: 'integer', minimum: 1 },
+    permission: { type: 'object', additionalProperties: false, properties: {
+      profile: { type: 'string', enum: ['read-only', 'workspace-write', 'full-access'] },
+      network: { type: 'string', enum: ['policy', 'unrestricted', 'disabled'] },
+      capabilities: { type: 'object', additionalProperties: false, properties: {
+        filesystemRead: { type: 'string', enum: ['full', 'partial', 'unavailable'] },
+        filesystemWrite: { type: 'string', enum: ['full', 'partial', 'unavailable'] },
+        network: { type: 'string', enum: ['full', 'partial', 'unavailable'] },
+        process: { type: 'string', enum: ['full', 'partial', 'unavailable'] },
+      }, required: ['filesystemRead', 'filesystemWrite', 'network', 'process'] },
+      execution: { type: 'object', additionalProperties: false, properties: {
+        available: { type: 'boolean' }, code: { type: ['string', 'null'] }, reason: { type: ['string', 'null'] },
+      }, required: ['available', 'code', 'reason'] },
+      changeAllowed: { type: 'boolean' }, changeReason: { type: 'string' },
+    }, required: ['profile', 'network', 'capabilities', 'execution', 'changeAllowed'] },
     policy: { type: 'object', additionalProperties: false, properties: {
       mode: { type: 'string', enum: ['ask', 'auto', 'never'] }, source: { type: 'string' }, default: { type: 'string' },
     }, required: ['mode', 'source', 'default'] },
@@ -90,7 +113,7 @@ const configurationOutput = object({
       }, required: ['supported', 'efforts', 'defaultEffort', 'effort'] },
       outputTokens: { type: ['integer', 'null'] }, contextTokens: { type: ['integer', 'null'] }, maxOutputTokens: { type: ['integer', 'null'] },
     }, required: ['model', 'thinking', 'outputTokens', 'contextTokens', 'maxOutputTokens'] },
-  }, required: ['mode', 'loopIterations', 'policy', 'generation'] },
+  }, required: ['mode', 'loopIterations', 'policy', 'permission', 'generation'] },
   pending: { type: ['object', 'null'], additionalProperties: false, properties: {
     mode: { type: ['string', 'null'] },
     loopIterations: { type: ['integer', 'null'], minimum: 1 },
@@ -109,6 +132,8 @@ const configurationOutput = object({
       truncated: { type: 'boolean' },
     }, required: ['modes', 'invalid', 'truncated'] },
     policies: { type: 'array', items: { type: 'string' } },
+    permissionProfiles: { type: 'array', items: { type: 'string', enum: ['read-only', 'workspace-write', 'full-access'] } },
+    permissionNetworks: { type: 'array', items: { type: 'string', enum: ['policy', 'unrestricted', 'disabled'] } },
     services: { type: 'array', items: object({
       id, name: { type: 'string' }, api: { type: 'string', enum: ['chat-completions', 'messages'] },
       models: { type: 'array', items: object({
@@ -118,7 +143,7 @@ const configurationOutput = object({
         }, required: ['supported', 'efforts', 'defaultEffort'] },
       }, ['id', 'thinking']) },
     }, ['id', 'name', 'api', 'models']) },
-  }, required: ['modes', 'policies', 'services'] },
+  }, required: ['modes', 'policies', 'permissionProfiles', 'permissionNetworks', 'services'] },
   denials: { type: 'object', additionalProperties: false, properties: {
     consecutive: { type: 'integer', minimum: 0 }, total: { type: 'integer', minimum: 0 },
   }, required: ['consecutive', 'total'] },
@@ -202,9 +227,11 @@ export async function serveMcp({ projectRoot, version, flags = [], modeName, ope
   if (!(await isTrusted(authorizedRoot))) throw new KernelError('control_project_untrusted');
   const shippedModes = fileURLToPath(new URL('../../modes/', import.meta.url));
   const { layers, ...environment } = await loadHostEnvironment(authorizedRoot, shippedModes, flags);
+  const permission = await createInteractivePermissionContext();
   const host = createHost({ ...environment,
     config: createConfig({ user: { ...environment.config, workspaceRoot: authorizedRoot } }),
     configLayers: layers,
+    permission,
     ...(modeName === undefined ? {} : { modeName }),
     interactive: operator,
   });

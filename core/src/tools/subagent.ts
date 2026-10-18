@@ -14,6 +14,7 @@ import { createDecisionChain } from '../kernel/policy.js';
 import { createLogger } from '../kernel/log.js';
 import { loadAssembly } from '../kernel/assembly.js';
 import { KernelError } from '../kernel/error.js';
+import type { PermissionContext } from '../kernel/permission.js';
 
 type LoopOptions = Parameters<typeof createLoop>[0];
 
@@ -39,6 +40,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
     setup(kernel: { register(tool: unknown): () => void }) {
       return kernel.register({
         name: 'subagent',
+        access: 'inherit',
         description: 'Delegate one piece of work to a derived agent that runs with this run\'s decision level and its own session record.',
         parameters: {
           type: 'object',
@@ -48,7 +50,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
           },
           required: ['task'],
         },
-        async run(args: { task?: string; mode?: string }, { signal }: { signal?: AbortSignal }) {
+        async run(args: { task?: string; mode?: string }, { signal, permission }: { signal?: AbortSignal; permission: PermissionContext }) {
           if (typeof args.task !== 'string' || args.task.trim() === '') {
             throw new KernelError('subagent_task_required', { detail: 'the derived agent needs a task to work on' });
           }
@@ -75,6 +77,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
             policy: deps.chain,
             session,
             logger: deps.logger,
+            permission,
           });
           // 派生执行继承父会话的插件工具，但不注册 `subagent`，从而禁止递归派生。
           const assembly = loadAssembly(child, deps.plugins);

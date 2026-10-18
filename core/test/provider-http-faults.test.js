@@ -12,6 +12,19 @@ function provider(baseUrl, retry = FAST_RETRY) {
   return createMessagesProvider({ baseUrl, model: 'http-fault-test', apiKeyEnv: API_KEY_ENV, retry });
 }
 
+function diagnostic(error, expected) {
+  assert.deepEqual(error.diagnostics, expected);
+  assert.equal(JSON.stringify(error.diagnostics).includes('synthetic-http-fault-key'), false);
+}
+
+function categoryForStatus(status) {
+  if (status === 401 || status === 403) return 'authentication';
+  if (status === 429) return 'rate_limit';
+  if (status >= 500) return 'server';
+  if (status >= 400) return 'client';
+  return 'http';
+}
+
 async function collect(stream) {
   const events = [];
   for await (const event of stream) events.push(event);
@@ -26,7 +39,9 @@ async function withEndpoint(respond, run) {
       method: request.method,
       url: request.url,
       responseClosed: new Promise((resolve) => response.once('close', resolve)),
+      responseFinished: false,
     };
+    response.once('finish', () => { record.responseFinished = true; });
     requests.push(record);
     await respond(requests.length, response);
   });
@@ -64,7 +79,15 @@ test('real HTTP 429 and 500/503 responses retry only until success or configured
     }, async (baseUrl, requests) => {
       await assert.rejects(
         () => collect(provider(baseUrl, { ...FAST_RETRY, maxAttempts: 2 }).stream({})),
-        (error) => error.code === 'provider_http_error' && error.detail.startsWith(`HTTP ${status}`),
+        (error) => {
+          assert.equal(error.code, 'provider_http_error');
+          assert.equal(error.detail.startsWith(`HTTP ${status}`), true);
+          diagnostic(error, {
+            category: categoryForStatus(status), status, attempts: 2,
+            responseReceived: true, streamReceived: false, recoverable: true,
+          });
+          return true;
+        },
       );
       assert.equal(requests.length, 2, `${status} exhaustion respects maxAttempts`);
     });
@@ -79,7 +102,15 @@ test('permanent 400, 401, and 403 responses fail without another HTTP request', 
     }, async (baseUrl, requests) => {
       await assert.rejects(
         () => collect(provider(baseUrl).stream({})),
-        (error) => error.code === 'provider_http_error' && error.detail.startsWith(`HTTP ${status}`),
+        (error) => {
+          assert.equal(error.code, 'provider_http_error');
+          assert.equal(error.detail.startsWith(`HTTP ${status}`), true);
+          diagnostic(error, {
+            category: categoryForStatus(status), status, attempts: 1,
+            responseReceived: true, streamReceived: status === 400, recoverable: false,
+          });
+          return true;
+        },
       );
       assert.equal(requests.length, 1, `${status} is not retried`);
     });
@@ -97,7 +128,15 @@ test('disabled 429, 5xx, and transport retry categories fail after one real requ
     }, async (baseUrl, requests) => {
       await assert.rejects(
         () => collect(provider(baseUrl, retry).stream({})),
-        (error) => error.code === 'provider_http_error' && error.detail.startsWith(`HTTP ${status}`),
+        (error) => {
+          assert.equal(error.code, 'provider_http_error');
+          assert.equal(error.detail.startsWith(`HTTP ${status}`), true);
+          diagnostic(error, {
+            category: categoryForStatus(status), status, attempts: 1,
+            responseReceived: true, streamReceived: false, recoverable: false,
+          });
+          return true;
+        },
       );
       assert.equal(requests.length, 1, `${status} retry disabled means one request`);
     });
@@ -108,7 +147,14 @@ test('disabled 429, 5xx, and transport retry categories fail after one real requ
   }, async (baseUrl, requests) => {
     await assert.rejects(
       () => collect(provider(baseUrl, { ...FAST_RETRY, retryTransport: false }).stream({})),
-      (error) => error.code === 'provider_transport_failed',
+      (error) => {
+        assert.equal(error.code, 'provider_transport_failed');
+        diagnostic(error, {
+          category: 'transport', attempts: 1,
+          responseReceived: false, streamReceived: false, recoverable: false,
+        });
+        return true;
+      },
     );
     assert.equal(requests.length, 1, 'transport retry disabled means one request');
   });
@@ -123,7 +169,14 @@ test('connection refusal and socket close before response headers use bounded tr
   try {
     await assert.rejects(
       () => collect(provider(refusedUrl, { ...FAST_RETRY, maxAttempts: 2 }).stream({})),
-      (error) => error.code === 'provider_transport_failed',
+      (error) => {
+        assert.equal(error.code, 'provider_transport_failed');
+        diagnostic(error, {
+          category: 'transport', attempts: 2,
+          responseReceived: false, streamReceived: false, recoverable: true,
+        });
+        return true;
+      },
     );
   } finally {
     delete process.env[API_KEY_ENV];
@@ -134,9 +187,71 @@ test('connection refusal and socket close before response headers use bounded tr
   }, async (baseUrl, requests) => {
     await assert.rejects(
       () => collect(provider(baseUrl, { ...FAST_RETRY, maxAttempts: 2 }).stream({})),
-      (error) => error.code === 'provider_transport_failed',
+      (error) => {
+        assert.equal(error.code, 'provider_transport_failed');
+        diagnostic(error, {
+          category: 'transport', attempts: 2,
+          responseReceived: false, streamReceived: false, recoverable: true,
+        });
+        return true;
+      },
     );
     assert.equal(requests.length, 2, 'pre-header socket closes are retried only to the configured bound');
+  });
+
+  await withEndpoint((attempt, response) => {
+    if (attempt === 1) {
+      response.writeHead(503);
+      response.end();
+    } else response.socket.destroy();
+  }, async (baseUrl, requests) => {
+    await assert.rejects(
+      () => collect(provider(baseUrl, { ...FAST_RETRY, maxAttempts: 2 }).stream({})),
+      (error) => {
+        assert.equal(error.code, 'provider_transport_failed');
+        diagnostic(error, {
+          category: 'transport', attempts: 2,
+          responseReceived: true, streamReceived: false, recoverable: true,
+        });
+        return true;
+      },
+    );
+    assert.equal(requests.length, 2, 'diagnostics retain an earlier HTTP response when the final retry has no headers');
+  });
+});
+
+test('abort before response headers is reported as cancellation rather than transport failure', async () => {
+  await withEndpoint(() => {}, async (baseUrl, requests) => {
+    const controller = new AbortController();
+    const pending = collect(provider(baseUrl).stream({}, { signal: controller.signal }));
+    while (requests.length === 0) await delay(1);
+    controller.abort();
+    await assert.rejects(pending, (error) => {
+      assert.equal(error.code, 'provider_cancelled');
+      diagnostic(error, {
+        category: 'cancelled', attempts: 1,
+        responseReceived: false, streamReceived: false, recoverable: false,
+      });
+      return true;
+    });
+    assert.equal(requests.length, 1);
+  });
+});
+
+test('an AbortSignal timeout is reported as a transport timeout, not user cancellation', async () => {
+  await withEndpoint(() => {}, async (baseUrl, requests) => {
+    await assert.rejects(
+      () => collect(provider(baseUrl).stream({}, { signal: AbortSignal.timeout(20) })),
+      (error) => {
+        assert.equal(error.code, 'provider_timeout');
+        diagnostic(error, {
+          category: 'transport', attempts: 1,
+          responseReceived: false, streamReceived: false, recoverable: false,
+        });
+        return true;
+      },
+    );
+    assert.equal(requests.length, 1);
   });
 });
 
@@ -152,7 +267,14 @@ test('once SSE has delivered content, a socket interruption never replays the HT
     const seen = [];
     await assert.rejects(async () => {
       for await (const event of provider(baseUrl).stream({})) seen.push(event);
-    }, (error) => error.code === 'provider_stream_interrupted');
+    }, (error) => {
+      assert.equal(error.code, 'provider_stream_interrupted');
+      diagnostic(error, {
+        category: 'stream', status: 200, attempts: 1,
+        responseReceived: true, streamReceived: true, recoverable: false,
+      });
+      return true;
+    });
     assert.deepEqual(seen, [{ type: 'text', text: 'partial' }]);
     assert.equal(requests.length, 1, 'an interrupted stream is not automatically replayed');
   });
@@ -184,17 +306,46 @@ test('a clean HTTP EOF without the provider stop event is not a successful turn'
   });
 });
 
+test('an HTTP success without a response body is classified as an invalid response', async () => {
+  await withEndpoint((_attempt, response) => {
+    response.writeHead(204);
+    response.end();
+  }, async (baseUrl, requests) => {
+    await assert.rejects(
+      () => collect(provider(baseUrl).stream({})),
+      (error) => {
+        assert.equal(error.code, 'provider_stream_missing');
+        diagnostic(error, {
+          category: 'invalid_response', status: 204, attempts: 1,
+          responseReceived: true, streamReceived: false, recoverable: false,
+        });
+        return true;
+      },
+    );
+    assert.equal(requests.length, 1);
+  });
+});
+
 test('abort during retry backoff returns promptly without an extra request', async (t) => {
   await withEndpoint((_attempt, response) => {
     response.writeHead(503);
-    response.end('retry later');
+    response.write('retry later');
   }, async (baseUrl, requests) => {
     const controller = new AbortController();
     const started = performance.now();
     const pending = collect(provider(baseUrl, { ...FAST_RETRY, baseDelayMs: 10_000 }).stream({}, { signal: controller.signal }));
     while (requests.length === 0) await delay(1);
+    await requests[0].responseClosed;
+    assert.equal(requests[0].responseFinished, false, 'the client canceled the HTTP response body');
     controller.abort();
-    await assert.rejects(pending, (error) => error.code === 'provider_cancelled');
+    await assert.rejects(pending, (error) => {
+      assert.equal(error.code, 'provider_cancelled');
+      diagnostic(error, {
+        category: 'cancelled', status: 503, attempts: 1,
+        responseReceived: true, streamReceived: false, recoverable: false,
+      });
+      return true;
+    });
     const elapsedMs = performance.now() - started;
     assert.equal(requests.length, 1, 'backoff cancellation prevents the next attempt');
     assert.ok(elapsedMs < 1_000, `cancelled backoff took ${elapsedMs.toFixed(1)}ms`);
@@ -214,7 +365,14 @@ test('abort during an active SSE read closes the HTTP response without another r
     const iterator = provider(baseUrl).stream({}, { signal: controller.signal });
     assert.deepEqual(await iterator.next(), { done: false, value: { type: 'text', text: 'started' } });
     controller.abort();
-    await assert.rejects(() => iterator.next(), (error) => error.code === 'provider_cancelled');
+    await assert.rejects(() => iterator.next(), (error) => {
+      assert.equal(error.code, 'provider_cancelled');
+      diagnostic(error, {
+        category: 'cancelled', status: 200, attempts: 1,
+        responseReceived: true, streamReceived: true, recoverable: false,
+      });
+      return true;
+    });
     assert.equal(requests.length, 1, 'an active SSE cancellation never opens a second request');
     await Promise.race([
       requests[0].responseClosed,

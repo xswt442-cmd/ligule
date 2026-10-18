@@ -308,7 +308,7 @@ export function createChatCompletionsProvider({
     let usage: JsonRecord | undefined;
     let finishReason: unknown;
     let done = false;
-    for await (const rawChunk of parseSse(response.body, { includeDone: true })) {
+    for await (const rawChunk of parseSse(response.body, { includeDone: true, signal })) {
       if (rawChunk === SSE_DONE) {
         if (done) throw new KernelError('provider_stream_invalid', { detail: 'duplicate stream terminator' });
         done = true;

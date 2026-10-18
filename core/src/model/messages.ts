@@ -248,7 +248,7 @@ export function createMessagesProvider({
     let stopped = false;
     const toolCalls: { id: string; name: string; input: unknown; json: string }[] = [];
     const callIds = new Set<string>();
-    for await (const rawEvent of parseSse(response.body)) {
+    for await (const rawEvent of parseSse(response.body, { signal })) {
       const event = asRecord(rawEvent, 'an event is not an object');
       if (stopped) throw new KernelError('provider_stream_invalid', { detail: 'an event follows message_stop' });
       // 忽略不包含内容的扩展事件类型。

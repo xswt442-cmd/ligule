@@ -1,16 +1,96 @@
 // `exec` 负责命令执行和进程生命周期。Host 选择解释器并传入此处。
-// Windows 进程由 Job Object 管理，POSIX 进程加入独立进程组。
-// 调用方通过 signal 取消执行；此工具不设置超时。
+// Windows 进程由 Job Object 管理，Linux 命令由子收养者守护进程管理；受限 Profile 使用可用的 OS Sandbox。
+// 调用方通过 signal 取消执行，配置上限同时限制命令运行时间。
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { chmod, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { KernelError } from '../kernel/error.js';
 import { resolveWithin } from './paths.js';
 import { boundaryOf, limitsOf, workingDirectoryOf, type CapabilityConfig } from './limits.js';
-import { spawnWindowsCommand } from './windows-command.js';
+import { spawnWindowsCommand, type OwnedWindowsCommand } from './windows-command.js';
+import { buildLinuxSandbox, type PermissionCapabilities } from './sandbox-linux.js';
+import type { PermissionContext } from '../kernel/permission.js';
 import type { ShellSelection } from './shell.js';
 
 type ExecArguments = { command?: unknown; cwd?: string };
-type ExecContext = { config: CapabilityConfig; signal?: AbortSignal; shell?: ShellSelection };
+type ExecContext = { config: CapabilityConfig; permission: PermissionContext; signal?: AbortSignal; shell?: ShellSelection };
 type ExecResult = { text: string; exitCode: number | null };
+
+const MAX_EXEC_TIMEOUT_MS = 600_000;
+const EXEC_ENVIRONMENT = new Set([
+  'appdata', 'ci', 'comspec', 'force_color', 'home', 'homedrive', 'homepath', 'lang', 'lc_all',
+  'localappdata', 'no_color', 'path', 'pathext', 'systemdrive', 'systemroot', 'term', 'tmp',
+  'temp', 'tmpdir', 'userprofile', 'windir',
+]);
+const SANDBOX_ENVIRONMENT = new Set(['CI', 'FORCE_COLOR', 'LANG', 'NO_COLOR', 'TERM']);
+
+function executionEnvironment(): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (value !== undefined && EXEC_ENVIRONMENT.has(name.toLowerCase())) environment[name] = value;
+  }
+  return environment;
+}
+
+function sandboxEnvironment(environment: NodeJS.ProcessEnv): Record<string, string> {
+  const allowed: Record<string, string> = {};
+  for (const [name, value] of Object.entries(environment)) {
+    if (value !== undefined && SANDBOX_ENVIRONMENT.has(name.toUpperCase())) allowed[name.toUpperCase()] = value;
+  }
+  return allowed;
+}
+
+function executionTimeout(config: CapabilityConfig): number {
+  const configured = config.limits?.execTimeoutMs;
+  const timeout = configured === undefined ? limitsOf(config).execTimeoutMs : configured;
+  if (typeof timeout !== 'number' || !Number.isSafeInteger(timeout) || timeout < 1 || timeout > MAX_EXEC_TIMEOUT_MS) {
+    throw new KernelError('exec_timeout_invalid', {
+      detail: `limits.execTimeoutMs must be a positive safe integer no greater than ${MAX_EXEC_TIMEOUT_MS}`,
+    });
+  }
+  return timeout;
+}
+
+function permissionMode(permission: PermissionContext | undefined): 'direct' | 'sandboxed' {
+  if (permission === undefined) throw new KernelError('exec_permission_required');
+  if (!['read-only', 'workspace-write', 'full-access'].includes(permission.profile)) {
+    throw new KernelError('permission_profile_invalid');
+  }
+  if (!['policy', 'unrestricted', 'disabled'].includes(permission.network)) {
+    throw new KernelError('permission_network_mode_invalid');
+  }
+  if (permission.profile === 'full-access') {
+    if (permission.network !== 'unrestricted') {
+      throw new KernelError('permission_network_isolation_unavailable', {
+        detail: 'full-access shell execution requires unrestricted network access on this backend',
+      });
+    }
+    if (process.platform !== 'win32' && process.platform !== 'linux') {
+      throw new KernelError('permission_process_isolation_unavailable', {
+        detail: `the ${process.platform} exec backend cannot guarantee ownership of detached descendants`,
+      });
+    }
+    return 'direct';
+  }
+  if (process.platform !== 'linux') {
+    throw new KernelError('permission_sandbox_unavailable', {
+      detail: `the ${process.platform} exec backend cannot enforce the ${permission.profile} profile`,
+    });
+  }
+  return 'sandboxed';
+}
+
+function requireFullCapability(
+  capabilities: PermissionCapabilities,
+  name: keyof PermissionCapabilities,
+  code: string,
+): void {
+  if (capabilities[name] !== 'full') {
+    throw new KernelError(code, { detail: `the Linux exec backend reported ${name}=${capabilities[name]}` });
+  }
+}
 
 // Windows 命令输出可能使用控制台 OEM 编码，不能始终按 UTF-8 解码。
 // 先尝试严格 UTF-8；失败时读取当前代码页并按该编码解码，代码页信息在进程内缓存。
@@ -65,8 +145,36 @@ function killTree(child: ChildProcess): void {
   }
 }
 
+async function confirmProcessGroupStopped(pid: number): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  for (;;) {
+    try {
+      process.kill(-pid, 0);
+    } catch (error) {
+      if (errorCode(error) === 'ESRCH') return;
+      throw new KernelError('exec_terminate_failed', { cause: error, detail: 'the command process group could not be checked after termination' });
+    }
+    if (Date.now() >= deadline) {
+      throw new KernelError('exec_terminate_failed', { detail: 'the command process group remained alive after termination' });
+    }
+    await delay(20);
+  }
+}
+
+async function createPrivateTempDir(): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), 'ligule-exec-'));
+  try {
+    await chmod(directory, 0o700);
+    return directory;
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true });
+    throw new KernelError('exec_sandbox_setup_failed', { cause: error, detail: 'the private temporary directory could not be secured' });
+  }
+}
+
 export const execTool = {
   name: 'exec',
+  access: 'exec' as const,
   description: 'Run a command line with the shell backend the host chose. The default working directory is the workspace root; an explicit cwd is relative to that root and must resolve inside the workspace boundary.',
   // 该命令必须使用 Kernel 选定的解释器；解析、权限判定、执行记录均依据同一后端。
   commandArgument: 'command',
@@ -78,33 +186,89 @@ export const execTool = {
     },
     required: ['command'],
   },
-  async run(args: ExecArguments, { config, signal, shell }: ExecContext): Promise<ExecResult> {
+  async run(args: ExecArguments, { config, permission, signal, shell }: ExecContext): Promise<ExecResult> {
     if (typeof args.command !== 'string' || args.command.trim() === '') {
       throw new KernelError('exec_command_required', { detail: 'the command to run is missing' });
     }
     if (shell === undefined) throw new KernelError('exec_shell_unavailable', { detail: 'the host did not select a shell backend for exec' });
+    const mode = permissionMode(permission);
+    const timeoutMs = executionTimeout(config);
     const { execBytes } = limitsOf(config);
     const boundary = boundaryOf(config);
     const workspaceRoot = workingDirectoryOf(config);
     const cwd = args.cwd === undefined
       ? await resolveWithin(boundary, '.', { cwd: workspaceRoot })
       : await resolveWithin(boundary, args.cwd, { cwd: workspaceRoot });
-    // 使用 Kernel 指定的 shell，确保权限判定和实际执行采用同一语法及可执行文件。
-    // POSIX 下创建独立进程组以便整体取消；Windows 下由守护进程分配 Job Object。隐藏 Windows 控制台窗口。
-    // stdin 设为不可读，避免等待输入的命令在无人交互时一直挂起。
     const commandArgs = [...shell.prefix, `${args.command}${shell.tail}`];
-    const owned = process.platform === 'win32' ? spawnWindowsCommand(shell.executable, commandArgs, cwd) : null;
-    const child = owned?.child ?? spawn(shell.executable, commandArgs, {
-      cwd,
-      detached: process.platform !== 'win32',
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    const environment = executionEnvironment();
+    let executable = shell.executable;
+    let argv = commandArgs;
+    let privateTempDir: string | undefined;
+    if (mode === 'sandboxed') {
+      if (permission === undefined || permission.profile === 'full-access') throw new KernelError('exec_permission_required');
+      if (signal?.aborted) throw new KernelError('exec_cancelled', { detail: 'the run was cancelled before the command started' });
+      privateTempDir = await createPrivateTempDir();
+      try {
+        const result = await buildLinuxSandbox({
+          profile: permission.profile,
+          network: permission.network === 'unrestricted' ? 'unrestricted' : 'disabled',
+          workspaceRoot: boundary,
+          cwd,
+          privateTempDir,
+          executable: shell.executable,
+          argv: commandArgs,
+          environment: sandboxEnvironment(environment),
+        });
+        if (!result.available) {
+          throw new KernelError('permission_sandbox_unavailable', { detail: result.reason });
+        }
+        if (permission.profile === 'read-only') {
+          requireFullCapability(result.capabilities, 'filesystemRead', 'permission_sandbox_unavailable');
+          requireFullCapability(result.capabilities, 'filesystemWrite', 'permission_sandbox_unavailable');
+        } else {
+          requireFullCapability(result.capabilities, 'filesystemWrite', 'permission_sandbox_unavailable');
+        }
+        requireFullCapability(result.capabilities, 'process', 'permission_process_isolation_unavailable');
+        requireFullCapability(result.capabilities, 'network', 'permission_network_isolation_unavailable');
+        executable = result.executable;
+        argv = result.argv;
+      } catch (error) {
+        await rm(privateTempDir, { recursive: true, force: true });
+        privateTempDir = undefined;
+        if (error instanceof KernelError) throw error;
+        throw new KernelError('exec_sandbox_setup_failed', { cause: error });
+      }
+    }
+
+    if (signal?.aborted) {
+      if (privateTempDir !== undefined) await rm(privateTempDir, { recursive: true, force: true });
+      throw new KernelError('exec_cancelled', { detail: 'the run was cancelled before the command started' });
+    }
+
+    let owned: OwnedWindowsCommand | null;
+    let child: ChildProcess;
+    try {
+      owned = process.platform === 'win32' || process.platform === 'linux'
+        ? spawnWindowsCommand(executable, argv, cwd, environment)
+        : null;
+      child = owned?.child ?? spawn(executable, argv, {
+        cwd,
+        env: environment,
+        detached: false,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (error) {
+      if (privateTempDir !== undefined) await rm(privateTempDir, { recursive: true, force: true });
+      if (error instanceof KernelError) throw error;
+      throw new KernelError('exec_spawn_failed', { cause: error, detail: error instanceof Error ? error.message : undefined });
+    }
     const stdout = child.stdout;
     const stderr = child.stderr;
     if (stdout === null || stderr === null) {
       if (owned === null) killTree(child);
       else owned.cancel();
+      if (privateTempDir !== undefined) await rm(privateTempDir, { recursive: true, force: true });
       throw new KernelError('exec_spawn_failed', { detail: 'the command process did not provide output pipes' });
     }
     const half = Math.floor(execBytes / 2);
@@ -130,25 +294,77 @@ export const execTool = {
     stdout.on('data', collect);
     stderr.on('data', collect);
 
-    let cancelled = false;
-    const abort = (): void => {
-      cancelled = true;
-      if (owned === null) killTree(child);
-      else owned.cancel();
+    let termination: 'cancelled' | 'timeout' | undefined;
+    let terminationFailure: unknown;
+    const terminate = (reason: 'cancelled' | 'timeout'): void => {
+      if (termination !== undefined) return;
+      termination = reason;
+      try {
+        if (owned === null) killTree(child);
+        else owned.cancel();
+      } catch (error) {
+        terminationFailure = error;
+        if (owned === null) {
+          try { child.kill('SIGKILL'); } catch (fallbackError) { terminationFailure = fallbackError; }
+        }
+      }
     };
+    const abort = (): void => terminate('cancelled');
     const completion: Promise<number | null> = owned?.completion ?? new Promise((resolve, reject) => {
       child.once('error', reject);
       child.once('close', resolve);
     });
+    const timer = setTimeout(() => terminate('timeout'), timeoutMs);
     if (signal?.aborted) abort();
     else signal?.addEventListener('abort', abort, { once: true });
     let exitCode: number | null;
+    let completionFailure: unknown;
+    let completionFailed = false;
+    let processGroupRemains = false;
     try {
       exitCode = await completion;
+    } catch (error) {
+      exitCode = null;
+      completionFailure = error;
+      completionFailed = true;
+      if (termination !== undefined && errorCode(error) === 'exec_terminate_failed') {
+        terminationFailure = error;
+      }
     } finally {
+      clearTimeout(timer);
       signal?.removeEventListener('abort', abort);
+      if (termination !== undefined && owned === null && child.pid !== undefined) {
+        try {
+          await confirmProcessGroupStopped(child.pid);
+        } catch (error) {
+          terminationFailure ??= error;
+          processGroupRemains = true;
+        }
+      }
+      if (privateTempDir !== undefined && !processGroupRemains) {
+        try {
+          await rm(privateTempDir, { recursive: true, force: true });
+        } catch (error) {
+          throw new KernelError('exec_sandbox_cleanup_failed', { cause: error, detail: 'the private temporary directory could not be removed' });
+        }
+      }
     }
-    if (cancelled) throw new KernelError('exec_cancelled', { detail: 'the command was terminated because the run was cancelled' });
+    if (termination !== undefined) {
+      if (terminationFailure !== undefined) {
+        throw new KernelError('exec_terminate_failed', { cause: terminationFailure, detail: 'the command process tree could not be terminated' });
+      }
+      if (termination === 'timeout') {
+        throw new KernelError('exec_timeout', { detail: `the command exceeded its ${timeoutMs}ms execution limit` });
+      }
+      throw new KernelError('exec_cancelled', { detail: 'the command was terminated because the run was cancelled' });
+    }
+    if (completionFailed) {
+      if (completionFailure instanceof KernelError) throw completionFailure;
+      throw new KernelError('exec_spawn_failed', {
+        cause: completionFailure,
+        detail: completionFailure instanceof Error ? completionFailure.message : undefined,
+      });
+    }
     return { text: pageOutput(total, head, tail, execBytes), exitCode };
   },
 };

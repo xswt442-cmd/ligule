@@ -10,9 +10,11 @@ import { createObservationLog, type ObservationLog } from '../session/observe.js
 import { resolveTarget, type NetworkTarget } from '../capability/network.js';
 import { resolveShell, withNativeExitCode, type ShellKind, type ShellSelection } from '../capability/shell.js';
 import { assertSupportedSchema, validateArgs } from './schema.js';
+import { DEFAULT_PERMISSION_CONTEXT, isPermissionAccess, permissionDenial, type PermissionAccess, type PermissionContext } from './permission.js';
 
 export interface ToolContext {
   readonly config: ConfigSnapshot;
+  readonly permission: PermissionContext;
   readonly logger: Logger;
   readonly observations: ObservationLog;
   readonly signal?: AbortSignal;
@@ -35,6 +37,7 @@ export interface ToolDefinition<TArgs = unknown> {
   readonly execution?: 'parallel' | 'serial';
   readonly disclosure?: boolean;
   readonly readOnly?: boolean;
+  readonly access?: PermissionAccess;
   readonly targetArgument?: string;
   readonly commandArgument?: string;
   capability?: BivariantCapability<TArgs>;
@@ -46,6 +49,7 @@ interface RegisteredTool extends ToolDefinition {
   readonly execution: 'parallel' | 'serial';
   readonly disclosure: boolean;
   readonly readOnly: boolean;
+  readonly access: PermissionAccess;
 }
 
 export interface ToolManifestEntry {
@@ -64,6 +68,9 @@ export interface KernelOptions {
   readonly policy?: DecisionChain;
   readonly session?: KernelSession;
   readonly logger?: LoggerBackend;
+  // Omitted low-level callers receive a read-only context with execution unavailable.
+  readonly permission?: PermissionContext;
+  readonly permissionForCall?: () => PermissionContext;
 }
 
 export interface Kernel {
@@ -85,6 +92,7 @@ interface ToolEvent extends Record<string, unknown> {
   args: unknown;
   shell?: { kind: ShellKind; executable: string; segments?: string[]; tail?: string };
   verdict?: Record<string, unknown>;
+  permission?: Record<string, unknown>;
   durationMs?: number;
 }
 
@@ -105,11 +113,16 @@ export function createKernel(options: KernelOptions = {}): Kernel {
   // 使用 `createConfig` 生成的冻结快照，确保工具读取期间配置不会被修改。
   if (!Object.isFrozen(config)) throw new KernelError('config_snapshot_must_be_frozen');
   const policy = options.policy;
+  const permission = options.permission ?? DEFAULT_PERMISSION_CONTEXT;
   const session = options.session;
   const logger = createLogger(options.logger);
   // 文件观察记录与工具表具有相同生命周期；覆盖文件前必须与此前读取的版本匹配。
   const observations = createObservationLog();
   const context = Object.freeze({ config, logger, observations });
+
+  function currentPermission(): PermissionContext {
+    return options.permissionForCall?.() ?? permission;
+  }
 
   const tools = new Map<string, RegisteredTool>();
   // 按工具名维护 Host 添加的拒绝规则；多次 `restrict()` 可以为同一工具添加多条规则。
@@ -156,12 +169,15 @@ export function createKernel(options: KernelOptions = {}): Kernel {
 
     // 返回声明为可安全重试的工具名称。此字段仅用于恢复说明，不参与权限判定，也不会发给模型。
     readOnly() {
-      return [...tools.values()].filter((tool) => tool.readOnly).map((tool) => tool.name).sort();
+      const activePermission = currentPermission();
+      return [...tools.values()].filter((tool) => tool.readOnly && permissionDenial(activePermission, tool.access) === undefined)
+        .map((tool) => tool.name).sort();
     },
 
-    // 返回可供模式选择的工具名称，排除固定披露入口。
+    // 模式只选择已登记的工具；当前 Permission 单独决定哪些工具进入模型清单。
     selectable() {
-      return [...tools.values()].filter((tool) => !tool.disclosure).map((tool) => tool.name).sort();
+      return [...tools.values()].filter((tool) => !tool.disclosure)
+        .map((tool) => tool.name).sort();
     },
 
     // 返回循环使用的执行分组；未声明或引用未知分组的工具按串行执行。
@@ -191,6 +207,8 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       if (tools.has(tool.name)) {
         throw new KernelError('tool_already_registered');
       }
+      const access = tool.access ?? 'unknown';
+      if (!isPermissionAccess(access)) throw new KernelError('tool_access_unknown');
       let parameters;
       try {
         // 保存独立副本，避免插件后续修改对象时改变已登记的参数模式。
@@ -213,6 +231,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
         disclosure: tool.disclosure === true,
         // 工具可声明重试是否会产生额外副作用；该声明只用于恢复说明，不参与权限判定。
         readOnly: tool.readOnly === true,
+        access,
         targetArgument: typeof tool.targetArgument === 'string' ? tool.targetArgument : undefined,
         commandArgument: typeof tool.commandArgument === 'string' ? tool.commandArgument : undefined,
         // 工具可提供实际能力名称；MCP 工具用它传递 `mcp:<服务器>/<工具>` 身份。
@@ -228,8 +247,9 @@ export function createKernel(options: KernelOptions = {}): Kernel {
 
     // 生成模型清单前移除被拒绝的工具，并复制参数模式，避免调用方修改 Kernel 保存的数据。
     manifest() {
+      const activePermission = currentPermission();
       return [...tools.values()]
-        .filter((tool) => !isDenied(tool.name))
+        .filter((tool) => !isDenied(tool.name) && permissionDenial(activePermission, tool.access) === undefined)
         .sort((left, right) => (left.name < right.name ? -1 : 1))
         .map((tool) => ({
           name: tool.name,
@@ -289,6 +309,21 @@ export function createKernel(options: KernelOptions = {}): Kernel {
         await fail(entry, new KernelError('tool_args_invalid', { detail: 'arguments must be an object' }));
         return undefined;
       }
+      const activePermission = currentPermission();
+      const denied = permissionDenial(activePermission, tool.access);
+      if (denied !== undefined) {
+        entry.permission = {
+          decision: 'deny',
+          source: 'kernel-preflight',
+          profile: activePermission.profile,
+          network: activePermission.network,
+          code: denied.code,
+          reason: denied.reason,
+        };
+        logger.log(`tool ${name} is not permitted`, { tool: name, code: denied.code, reason: denied.reason });
+        await record(entry, refusalOf(denied.code, denied.reason));
+        throw new KernelError(denied.code, { detail: denied.reason });
+      }
       // 只解析一次网络目标，并将同一结果传给权限判定和执行。
       // 避免 DNS 在审批和连接之间变化，导致实际连接地址与批准地址不同。
       const targetAddress = tool.targetArgument === undefined ? undefined : args[tool.targetArgument];
@@ -309,7 +344,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       if (policy) {
         // 有能力元数据的工具按其声明的实际能力名称进行判定，例如 `mcp:<服务器>/<工具>`。
         const capability = tool.capability?.(args);
-        const verdict = await policy.evaluate({ tool: name, input: args, target: network, shell, capability });
+        const verdict = await policy.evaluate({ tool: name, input: args, target: network, shell, capability, access: tool.access });
         // 会话记录保存权限判定结果，包括策略档位、匹配规则和审批答复。
         // 该结果仅供客户端查看，不加入模型上下文或检查点摘要。
         const recordedVerdict: Record<string, unknown> = {};
@@ -342,7 +377,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
         entry.durationMs = Number((process.hrtime.bigint() - startedAt) / 1_000_000n);
       };
       try {
-        value = await tool.run(args, { ...context, signal: options.signal, target: network, shell });
+        value = await tool.run(args, { ...context, permission: activePermission, signal: options.signal, target: network, shell });
       } catch (error) {
         // 工具抛出未包装的错误时，转换为稳定错误码并将原始错误保存在 cause 中。
         // 错误说明会写入会话记录并提供给模型，避免单个工具异常中断整个循环。

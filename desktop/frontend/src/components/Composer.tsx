@@ -3,6 +3,7 @@ import { Popover } from 'radix-ui';
 import { Icon } from './Icon';
 import { ModelPicker } from './ModelPicker';
 import { PolicyPicker } from './PolicyPicker';
+import { PermissionPicker } from './PermissionPicker';
 import { SessionMenu } from './SessionMenu';
 import { WorkspacePicker } from './WorkspacePicker';
 import type { MentionState } from '../mentions';
@@ -18,7 +19,7 @@ export type MessageQueue = { items: string[]; paused: boolean };
 export function Composer({ client, sessionId, projectRoot, status, settings, settingsReady, closing, reading, starting, running, inputOwner,
   draft, composerRef, queue, mention, sessionMenuOpen, modelCatalogRevision, workspaceRevision, othersRunning,
   onDraftChange, onCaretChange, onWalkChange, onDraftKeyDown, onSelectWorkspace, onToggleQueue, onRecoverQueueItem,
-  onPickMention, onSelectModel, onManageModel, onSessionMenuChange, onSetMode, onSetPolicy, onStop, onSend,
+  onPickMention, onSelectModel, onManageModel, onSessionMenuChange, onSetMode, onSetPolicy, onPermissionStatus, onStop, onSend,
 }: {
   client: Client;
   sessionId: string | null;
@@ -52,6 +53,7 @@ export function Composer({ client, sessionId, projectRoot, status, settings, set
   onSessionMenuChange: (open: boolean) => void;
   onSetMode: (name: string) => void;
   onSetPolicy: (mode: 'ask' | 'auto' | 'never' | null) => Promise<void>;
+  onPermissionStatus: (status: Status) => void;
   onStop: () => void;
   onSend: () => void;
 }) {
@@ -134,6 +136,7 @@ export function Composer({ client, sessionId, projectRoot, status, settings, set
           <SessionMenu status={status} onSetMode={onSetMode} />
         </Popover.Root>
         <PolicyPicker key={sessionId ?? '$new'} status={status} disabled={closing || reading || starting} onSelect={onSetPolicy} />
+        <PermissionPicker key={`permission:${sessionId ?? '$new'}`} client={client} sessionId={sessionId} status={status} running={running} onStatus={onPermissionStatus} />
         <span className="bar-spacer" />
         {running && <button className="icon-button stop-button" type="button" title={t('停止本轮', 'Stop this turn')} aria-label={t('停止本轮', 'Stop this turn')} onClick={onStop}><Icon name="stop" size={15} /></button>}
         <button className="send" type="button" title={running ? t('加入队列', 'Add to queue') : t('发送', 'Send')} aria-label={t('发送', 'Send')} disabled={disabled || draft.trim() === ''} onClick={onSend}><Icon name="send" size={19} /></button>

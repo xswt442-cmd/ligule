@@ -113,7 +113,13 @@ readings.push('tui: refuses with tui_terminal_required on a non-interactive term
 // 从已安装包加载 Core，检查配置解析、命令解析、工具执行、MCP 和搜索后端。
 writeFileSync(join(consumer, 'probe.mjs'), `
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { createKernel, createMcpPlugin, createMcpRegistry, execTool, flagLayer, KernelError, mcpServerConfigs, parseCommand, resolveRipgrep, resolveShell, searchWithRipgrep, withNativeExitCode, VERSION } from 'ligule';
+import { pathToFileURL } from 'node:url';
+
+const coreRoot = ${JSON.stringify(bundledCoreDirectory)};
+const { detectPermissionCapabilities } = await import(pathToFileURL(join(coreRoot, 'dist', 'capability', 'permission-capabilities.js')).href);
+const { createPermissionContext } = await import(pathToFileURL(join(coreRoot, 'dist', 'kernel', 'permission.js')).href);
 
 if (typeof KernelError !== 'function') throw new Error('KernelError is missing from the installed package');
 if (VERSION !== '${pkg.version}') throw new Error('the TUI compatibility entry did not preserve VERSION');
@@ -136,6 +142,8 @@ const dispose = kernel.register({
   name: 'smoke',
   description: 'installed package smoke test',
   parameters: { type: 'object', properties: {} },
+  access: 'read',
+  readOnly: true,
   run: async () => 'ok',
 });
 const [tool] = kernel.manifest();
@@ -146,14 +154,22 @@ dispose();
 if (kernel.manifest().length !== 0) throw new Error('dispose did not remove the tool');
 console.log('kernel registry: add and dispose');
 
-const command = await execTool.run(
-  { command: 'node --version' },
-  { config: { boundary: process.cwd() }, shell: withNativeExitCode(resolveShell({}), 'node --version') },
-);
-if (command.exitCode !== 0 || !command.text.includes(process.version)) {
-  throw new Error('the installed package cannot execute a real command');
+const detected = await detectPermissionCapabilities();
+const permission = createPermissionContext('full-access', 'unrestricted', detected.capabilities);
+try {
+  const command = await execTool.run(
+    { command: 'node --version' },
+    { config: { boundary: process.cwd() }, permission, shell: withNativeExitCode(resolveShell({}), 'node --version') },
+  );
+  if (command.exitCode !== 0 || !command.text.includes(process.version)) {
+    throw new Error('the installed package cannot execute a real command');
+  }
+  console.log('command execution: node --version');
+} catch (error) {
+  if (process.platform === 'win32' || process.platform === 'linux'
+    || error?.code !== 'permission_process_isolation_unavailable') throw error;
+  console.log('command execution: refused without process ownership');
 }
-console.log('command execution: node --version');
 
 const bash = await parseCommand('git status');
 const pwsh = await parseCommand('Get-ChildItem -Recurse | Select-Object -First 3');

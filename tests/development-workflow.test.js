@@ -5,7 +5,7 @@ import { copyFile, mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { withTuiHost } from '../test/helpers/tui-host.ts';
+import { measuredPermissionContext, withTuiHost } from '../test/helpers/tui-host.ts';
 
 const repositoryFile = (relativePath) => fileURLToPath(new URL(relativePath, import.meta.url));
 
@@ -21,19 +21,26 @@ async function stageReferences({ projectDirectory }) {
 
 async function callTool(context, tool, args) {
   const { client, sessionId } = context;
-  const before = (await client.request('session.read', { sessionId })).events;
+  const before = (await client.request('session.read', { sessionId, fullResults: true })).events;
   const lastSeq = before.at(-1)?.seq ?? -1;
   await client.request('run.start', { sessionId, input: JSON.stringify({ tool, args }) });
-  const { events } = await client.request('session.read', { sessionId });
+  const { events } = await client.request('session.read', { sessionId, fullResults: true });
   const result = events.findLast((event) => event.kind === 'tool' && event.tool === tool && event.seq > lastSeq);
   assert.ok(result, `the real Host did not record the ${tool} tool result`);
   assert.equal(result.result.failed, false, `${tool} failed: ${JSON.stringify(result.result)}`);
   return result.result.content;
 }
 
-test('G01–G04: isolated Node project, defect repair, repository README, design note, and session recovery', async () => {
+test('G01–G04: isolated Node project, defect repair, repository README, design note, and session recovery', async (t) => {
+  const permission = await measuredPermissionContext('full-access', 'unrestricted');
+  if (permission.capabilities.process !== 'full') return t.skip('the platform process ownership backend is unavailable');
   await withTuiHost(async (context) => {
     const { client, projectDirectory, sessionDirectory, sessionId, providerRequests } = context;
+    // 只回应 Host 实际提出的命令审批；Permission 仍由本测试使用平台实测能力显式设置。
+    client.onRequest(async (message) => {
+      assert.equal(message.method, 'approval.request');
+      return { decision: 'allow' };
+    });
 
     // G01: create a small runnable project and test it through the Host's exec tool.
     await callTool(context, 'create', {
@@ -148,5 +155,7 @@ test('G01–G04: isolated Node project, defect repair, repository README, design
   }, {
     setup: stageReferences,
     config: { policy: { mode: 'auto' } },
+    interactive: true,
+    permission,
   });
 });

@@ -3,8 +3,12 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
-  createConfig, createDecisionChain, createKernel, createSessionLog, execTool, readTool, refusalOf,
+  createConfig, createDecisionChain, createKernel, createPermissionContext, createSessionLog, execTool, readTool, refusalOf,
 } from '../dist/index.js';
+
+const fullAccess = createPermissionContext('full-access', 'unrestricted', {
+  filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
+});
 
 async function withDirectory(run) {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'session-'));
@@ -125,6 +129,7 @@ test('an oversized result in a session directory that does not exist yet still s
     kernel.register({
       name: 'chatty',
       description: 'returns more than the result limit',
+      access: 'read',
       parameters: { type: 'object', properties: {} },
       run: async () => ({ text: 'z'.repeat(400) }),
     });
@@ -141,7 +146,10 @@ test('a refusal and a failure each carry their own code into the log', async () 
   await withDirectory(async (directory) => {
     const session = createSessionLog({ directory, id: 'run-3' });
     const kernel = kernelWith(session, {
-      kernel: { policy: createDecisionChain({ mode: 'auto', rules: [{ tool: 'exec', decision: 'deny', match: 'rm *', reason: 'no deleting' }] }) },
+      kernel: {
+        permission: fullAccess,
+        policy: createDecisionChain({ mode: 'auto', rules: [{ tool: 'exec', decision: 'deny', match: 'rm *', reason: 'no deleting' }] }),
+      },
     });
     kernel.register(execTool);
     await assert.rejects(() => kernel.call('exec', { command: 'rm -rf /tmp/nowhere' }), (error) => error.code === 'policy_denied');
@@ -163,6 +171,7 @@ test('an oversized result keeps a retrievable reference instead of the whole tex
     kernel.register({
       name: 'chatty',
       description: 'returns more than the result limit',
+      access: 'read',
       parameters: { type: 'object', properties: {} },
       run: async () => ({ text: 'y'.repeat(500) }),
     });

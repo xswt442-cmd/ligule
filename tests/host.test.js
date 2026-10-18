@@ -10,6 +10,8 @@ import { join, dirname } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createConnection, createConfig, createMemoryConnectionPair, MESSAGES_CAPABILITIES, METHODS, NOTIFICATIONS, providerFromConfig, hostProviderFromConfig, resolveShell, serveHost } from '../core/dist/index.js';
+import { detectPermissionCapabilities } from '../core/dist/capability/permission-capabilities.js';
+import { createPermissionContext } from '../core/dist/kernel/permission.js';
 import { shownConfigOf } from '../core/dist/host/host.js';
 import { createConfigStore } from '../core/dist/kernel/config-store.js';
 import { configVersion } from '../core/dist/kernel/config-edit.js';
@@ -160,7 +162,7 @@ test('a client over stdio drives one round, answers one approval and watches the
     const events = notifications.filter((message) => message.notify === 'event').map((message) => message.event);
     // 模式事件先记录本轮使用的工具清单。
     // 轮次完成事件跟在最后一条助手事件之后，且不会进入模型投影。
-    assert.deepEqual(events.map((event) => event.kind), ['mode', 'user', 'turnContext', 'assistant', 'tool', 'assistant', 'turn']);
+    assert.deepEqual(events.map((event) => event.kind), ['sessionPermission', 'mode', 'user', 'turnContext', 'assistant', 'tool', 'assistant', 'turn']);
     assert.equal(events.find((event) => event.kind === 'tool').result.content.text, 'the body', 'the tool result the client saw is the file content');
 
     // 客户端收到的事件与会话记录中的事件一致，通知也包含相同的序号。
@@ -172,7 +174,7 @@ test('a client over stdio drives one round, answers one approval and watches the
     assert.equal(lines[0].sessionId, sessionId);
     const recorded = lines.slice(1);
     assert.deepEqual(recorded.map((event) => event.seq), events.map((event) => event.seq));
-    assert.match(recorded[0].digest, /^[0-9a-f]{12}$/, '模式事件带着那一份清单的摘要，恢复时比的就是它（D78）');
+    assert.match(recorded.find((event) => event.kind === 'mode').digest, /^[0-9a-f]{12}$/, '模式事件带着那一份清单的摘要，恢复时比的就是它（D78）');
 
     const status = await host.client.request('status.get', { sessionId });
     assert.equal(status.running, false);
@@ -253,7 +255,7 @@ test('a second Host process opens the same record, so the session lives in the H
       const reopened = await second.client.request('session.read', { sessionId });
       assert.equal(reopened.sessionId, sessionId);
       // 第二个进程加载同一清单并读取记录，不应改变会话文件。
-      assert.deepEqual(reopened.events.map((event) => event.kind), ['mode', 'user', 'turnContext', 'assistant', 'tool', 'assistant', 'turn']);
+      assert.deepEqual(reopened.events.map((event) => event.kind), ['sessionPermission', 'mode', 'user', 'turnContext', 'assistant', 'tool', 'assistant', 'turn']);
       assert.equal(reopened.events.find((event) => event.kind === 'tool').result.content.text, 'the body');
       const status = await second.client.request('status.get', { sessionId });
       assert.equal(status.running, false);
@@ -663,7 +665,10 @@ test('the same protocol runs over an in-memory carrier inside one process', asyn
 
 // 审批那一次问的不只是「要不要跑」：同一条文本在两种语法下能自动放行的面积不一样，
 // 审批请求应显示所用的命令语法和目标可执行文件；拒绝后不启动进程。
-test('an approval for a command names the shell backend the host chose', async () => {
+test('an approval for a command names the shell backend the host chose', async (t) => {
+  const measured = await detectPermissionCapabilities();
+  if (measured.capabilities.process !== 'full') return t.skip('the platform process ownership backend is unavailable');
+  const permission = createPermissionContext('full-access', 'unrestricted', measured.capabilities);
   const directory = await mkdtemp(join(tmpdir(), 'ligule-host-shell-'));
   const config = createConfig({
     user: {
@@ -687,7 +692,7 @@ test('an approval for a command names the shell backend the host chose', async (
     },
   };
   const pair = createMemoryConnectionPair();
-  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy });
+  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy, permission });
   const approvals = [];
   const connection = createConnection(pair.client);
   connection.onRequest(async (message) => {
@@ -1571,7 +1576,7 @@ test('a search over the records names the session and the event each hit is in',
     const { sessionId } = await connection.request('session.create', {});
     await connection.request('run.start', { sessionId, input: '读数那一段跑一遍' });
     const hits = (await connection.request('sessions.search', { query: '读数' })).hits;
-    assert.deepEqual([hits[0].sessionId, hits[0].kind, hits[0].seq], [sessionId, 'user', 0], '命中的是记录里那一条用户输入');
+    assert.deepEqual([hits[0].sessionId, hits[0].kind, hits[0].seq], [sessionId, 'user', 1], '会话 Permission 事实先占一条记录，命中仍指向用户输入');
     assert.ok(hits[0].text.includes('读数'), '摘录带着命中那一段');
     assert.ok(hits.every((hit) => hit.sessionId === sessionId), '这个项目根下只跑过这一份会话');
     assert.deepEqual((await connection.request('sessions.search', { query: '没有这段文字' })).hits, [], '查不到不是错误');

@@ -5,6 +5,7 @@ import type { Readable, Writable } from 'node:stream';
 import { access, readFile, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { KernelError } from '../kernel/error.js';
+import { createPermissionContext, DEFAULT_PERMISSION_CONTEXT, permissionDenial, type PermissionContext, type PermissionNetwork, type PermissionProfile } from '../kernel/permission.js';
 import { createKernel, type Kernel } from '../kernel/kernel.js';
 import { loadAssembly, type Assembly, type Plugin } from '../kernel/assembly.js';
 import { loadExtensions, type ExtensionDiagnostic } from '../kernel/extensions.js';
@@ -129,6 +130,8 @@ interface HostOptions {
   readonly configStoreFor?: (projectRoot: string, layers: LoadedLayers) => ReturnType<typeof createConfigStore>;
   readonly deriveProvider?: (config: ConfigSnapshot, generation?: HostGenerationOptions) => HostProvider;
   readonly interactive?: boolean;
+  readonly permission?: PermissionContext;
+  readonly permissionControl?: boolean;
 }
 
 interface RuntimeConfig extends HostConfigSnapshot {
@@ -165,6 +168,7 @@ interface HostSessionBase {
   readonly listeners: ((event: SessionEvent) => void)[];
   readonly asks: Set<() => void>;
   readonly environment: ProjectEnvironment;
+  permission: PermissionContext;
   readonly mode: ModeState;
   loopIterations: number;
   readonly loopModelCalls: number;
@@ -173,6 +177,7 @@ interface HostSessionBase {
   pendingGeneration?: SessionGeneration;
   pending?: ModeFile;
   running?: AbortController;
+  permissionChanging?: boolean;
   compaction?: ReturnType<typeof createCompaction> | null;
   progress?: HostRunProgress;
   progressId?: string;
@@ -253,6 +258,29 @@ function modelSelectionOf(model: Record<string, unknown>): ModelSelection | unde
   return isRecord(model.selection) && typeof model.selection.provider === 'string' && typeof model.selection.model === 'string'
     ? { provider: model.selection.provider, model: model.selection.model }
     : undefined;
+}
+
+function permissionView(permission: PermissionContext, changeAllowed: boolean, changeReason?: string): Record<string, unknown> {
+  const execDenial = permissionDenial(permission, 'exec');
+  return {
+    profile: permission.profile,
+    network: permission.network,
+    capabilities: permission.capabilities,
+    execution: execDenial === undefined
+      ? { available: true, code: null, reason: null }
+      : { available: false, code: execDenial.code, reason: execDenial.reason },
+    changeAllowed,
+    ...(changeReason === undefined ? {} : { changeReason }),
+  };
+}
+
+function sessionPermissionView(state: HostSessionState, controlAllowed: boolean): Record<string, unknown> {
+  const changeReason = !controlAllowed ? 'permission_control_unavailable'
+    : state.running !== undefined ? 'permission_session_running'
+      : state.permissionChanging === true ? 'permission_change_in_progress'
+        : state.extensions.loaded.length > 0 ? 'permission_extension_restart_required'
+          : undefined;
+  return permissionView(state.permission, changeReason === undefined, changeReason);
 }
 
 function checkedSessionModel(model: Record<string, unknown>, selection: ModelSelection): Record<string, unknown> {
@@ -550,7 +578,7 @@ export function shownConfigOf(config: ConfigSnapshot) {
 export function createHost({
   config, provider, plugins = [minimalPlugin, networkPlugin], policy, logger, modeName, modePaths, skillRegistry,
   templateRegistry, extensions = { paths: [], ignored: [] }, loadEnvironment, configStore, configLayers, configStoreFor,
-  deriveProvider = providerFromConfig, interactive = false,
+  deriveProvider = providerFromConfig, interactive = false, permission = DEFAULT_PERMISSION_CONTEXT, permissionControl = false,
 }: HostOptions): Host {
   // 每个项目环境持有自己的配置快照、提供方、策略、模式、记录目录和可写配置层。
   // 在加载环境时校验配置，避免等到第一次模型请求才发现错误。
@@ -988,6 +1016,7 @@ export function createHost({
     connection: HostClientConnection,
     initialPhase: LoopProgressPhase = 'preparing',
   ): Promise<T> {
+    if (state.permissionChanging) throw new KernelError('permission_change_in_progress', { detail: state.id });
     if (state.running !== undefined) throw new KernelError('run_already_running', { detail: state.id });
     const controller = new AbortController();
     const progress = beginProgress(state, connection, initialPhase);
@@ -1182,6 +1211,9 @@ export function createHost({
       mode: modeState,
       pending: undefined,
       environment: env,
+      permission: recover
+        ? createPermissionContext('read-only', 'policy', permission.capabilities)
+        : permission,
       loopIterations: initial?.loopIterations ?? configuredLoopLimits.iterations,
       loopModelCalls: configuredLoopLimits.modelCalls,
       generation: initial?.generation ?? env.generation ?? { provider, model: modelConfigOf(config), options: {} },
@@ -1194,6 +1226,10 @@ export function createHost({
     try {
     if (recover) {
       const events = await session.read();
+      const savedPermission = events.filter((event) => event.kind === 'sessionPermission').at(-1);
+      if (savedPermission !== undefined) {
+        state.permission = createPermissionContext(savedPermission.profile, savedPermission.network, permission.capabilities);
+      }
       const savedLoopIterations = events.filter((event) => event.kind === 'sessionLoopIterations').at(-1)?.iterations;
       if (savedLoopIterations !== undefined) {
         if (typeof savedLoopIterations !== 'number' || !Number.isSafeInteger(savedLoopIterations) || savedLoopIterations < 1) {
@@ -1216,6 +1252,13 @@ export function createHost({
           state.generation = { provider: deriveProvider({ ...config, model }, {}), model, explicit: true, options: {} };
         }
       }
+    } else {
+      await session.append({
+        kind: 'sessionPermission',
+        profile: state.permission.profile,
+        network: state.permission.network,
+        source: 'host-default',
+      });
     }
     const chain = createDecisionChain({
       ...policy,
@@ -1248,7 +1291,7 @@ export function createHost({
       },
     });
     if (initial?.policy !== undefined) chain.setMode(initial.policy);
-    const kernel = createKernel({ config, policy: chain, session, logger });
+    const kernel = createKernel({ config, policy: chain, session, logger, permissionForCall: () => state.permission });
     // 技能登记表反映已发现的技能，不随当前模式改变。
     // 优先复用加载器提供的登记表，否则从配置目录中发现技能。
     // 没有可用技能时不注册技能工具或提示词片段。
@@ -1333,10 +1376,18 @@ export function createHost({
     // 按加载器解析的来源顺序加载扩展，只提供声明过的注册、事件和能力接口。
     // 每个已注册工具仍须经过 Kernel 参数校验和权限判定。
     const fragments: ExtensionPromptFragment[] = [];
-    for (const diagnostic of extensions.ignored) {
+    const extensionsEnabled = state.permission.profile === 'full-access' && state.permission.network === 'unrestricted';
+    const extensionDiagnostics = extensionsEnabled ? extensions.ignored : [
+      ...extensions.ignored,
+      ...extensions.paths.map((path) => ({
+        code: 'extension_requires_full_access', path,
+        detail: 'extensions run inside the Host process and require full-access with unrestricted network permission',
+      })),
+    ];
+    for (const diagnostic of extensionDiagnostics) {
       logger?.log?.('extension source is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
     }
-    const installedExtensions = await loadExtensions(extensions.paths, {
+    const installedExtensions = await loadExtensions(extensionsEnabled ? extensions.paths : [], {
       registerTool: (tool) => {
         return kernel.register(checkedToolDefinition(tool));
       },
@@ -1560,10 +1611,17 @@ export function createHost({
         mode: state.mode.file?.name ?? null,
         loopIterations: state.loopIterations,
         policy: { mode: state.chain.mode, source: state.chain.modeSource, default: state.chain.configuredMode() },
+        permission: sessionPermissionView(state, permissionControl),
         generation: generationView(state.generation),
       },
       pending,
-      available: { modes, policies: ['ask', 'auto', 'never', 'default'], services },
+      available: {
+        modes,
+        policies: ['ask', 'auto', 'never', 'default'],
+        permissionProfiles: ['read-only', 'workspace-write', 'full-access'],
+        permissionNetworks: ['policy', 'unrestricted', 'disabled'],
+        services,
+      },
       denials: state.chain.denials(),
     };
   }
@@ -1671,6 +1729,58 @@ export function createHost({
     return { ...(await sessionConfiguration(state)), applies: state.running === undefined ? 'now' : 'next_round' };
   }
 
+  async function setPermission(
+    state: HostSessionState,
+    connection: HostClientConnection,
+    profileValue: unknown,
+    networkValue: unknown,
+    confirmFullAccess: unknown,
+    confirmNetwork: unknown,
+  ): Promise<Record<string, unknown>> {
+    if (!permissionControl) throw new KernelError('permission_control_unavailable');
+    if (state.permissionChanging) throw new KernelError('permission_change_in_progress', { detail: state.id });
+    if (state.running !== undefined) throw new KernelError('permission_session_running', { detail: state.id });
+    if (profileValue !== 'read-only' && profileValue !== 'workspace-write' && profileValue !== 'full-access') {
+      throw new KernelError('permission_profile_invalid');
+    }
+    const network = networkValue === undefined ? state.permission.network : networkValue;
+    if (network !== 'policy' && network !== 'unrestricted' && network !== 'disabled') {
+      throw new KernelError('permission_network_mode_invalid');
+    }
+    if (profileValue === 'full-access' && state.permission.profile !== 'full-access' && confirmFullAccess !== true) {
+      throw new KernelError('permission_full_access_confirmation_required');
+    }
+    if (network === 'unrestricted' && state.permission.network !== 'unrestricted' && confirmNetwork !== true) {
+      throw new KernelError('permission_network_confirmation_required');
+    }
+    const next = createPermissionContext(profileValue, network, state.permission.capabilities);
+    if (next.profile === state.permission.profile && next.network === state.permission.network) {
+      return { sessionId: state.id, permission: sessionPermissionView(state, permissionControl), applies: 'unchanged' };
+    }
+    if (state.extensions.loaded.length > 0 && (next.profile !== 'full-access' || next.network !== 'unrestricted')) {
+      throw new KernelError('permission_extension_restart_required', {
+        detail: 'a loaded extension runs as trusted code in this Host process; close it before lowering this session permission',
+      });
+    }
+    state.permissionChanging = true;
+    try {
+      await state.session.append({
+        kind: 'sessionPermission',
+        profile: next.profile,
+        network: next.network,
+        source: 'trusted-ui',
+        confirmedFullAccess: confirmFullAccess === true,
+        confirmedNetwork: confirmNetwork === true,
+      });
+      await retire(state);
+      await buildSession(state.id, connection, true, undefined, state.environment);
+      const reopened = open(state.id);
+      return { sessionId: reopened.id, permission: sessionPermissionView(reopened, permissionControl), applies: 'now' };
+    } finally {
+      if (sessions.get(state.id) === state) state.permissionChanging = false;
+    }
+  }
+
   const host: Host = {
     async handle(rawMessage: Pick<HostRequest, 'method' | 'params'>, connection: HostClientConnection): Promise<unknown> {
       if (closing !== undefined) throw new KernelError('host_closed');
@@ -1736,6 +1846,7 @@ export function createHost({
         case 'session.close': {
           const state = open(sessionId);
           // 关闭前必须由客户端明确取消运行中的轮次，确保结果已记录。
+          if (state.permissionChanging) throw new KernelError('permission_change_in_progress', { detail: sessionId });
           if (state.running !== undefined) throw new KernelError('run_already_running', { detail: sessionId });
           await retire(state);
           evictEnvironment(state.environment);
@@ -1870,24 +1981,35 @@ export function createHost({
         }
         case 'policy.set': {
           // 只修改会话级策略覆盖，不改写配置中的默认值。
-          const state = open(sessionId);
           const mode = requiredString(message.params.mode, 'mode');
-          await serializeSessionConfiguration(sessionId, async () => {
+          return await serializeSessionConfiguration(sessionId, async () => {
+            const state = open(sessionId);
             await configureSession(state, { policy: mode });
+            return { policy: state.chain.mode, policySource: state.chain.modeSource, policyDefault: state.chain.configuredMode() };
           });
-          return { policy: state.chain.mode, policySource: state.chain.modeSource, policyDefault: state.chain.configuredMode() };
+        }
+        case 'permission.set': {
+          return await serializeSessionConfiguration(sessionId, () => setPermission(
+            open(sessionId),
+            connection,
+            message.params.permissionProfile,
+            message.params.permissionNetwork,
+            message.params.confirmFullAccess,
+            message.params.confirmNetwork,
+          ));
         }
         case 'mode.set': {
-          const state = open(sessionId);
-          await serializeSessionConfiguration(sessionId, async () => {
-            await configureSession(state, { mode: requiredString(message.params.name, 'name') });
+          const name = requiredString(message.params.name, 'name');
+          return await serializeSessionConfiguration(sessionId, async () => {
+            const state = open(sessionId);
+            await configureSession(state, { mode: name });
+            return {
+              mode: state.mode.file?.name ?? null,
+              layer: state.mode.file?.layer ?? null,
+              pending: state.pending?.name ?? null,
+              tools: state.kernel.manifest().map((entry) => entry.name),
+            };
           });
-          return {
-            mode: state.mode.file?.name ?? null,
-            layer: state.mode.file?.layer ?? null,
-            pending: state.pending?.name ?? null,
-            tools: state.kernel.manifest().map((entry) => entry.name),
-          };
         }
         case 'status.get': {
           const state = open(sessionId);
@@ -1918,6 +2040,7 @@ export function createHost({
             policy: state.chain.mode,
             policySource: state.chain.modeSource,
             policyDefault: state.chain.configuredMode(),
+            permission: sessionPermissionView(state, permissionControl),
             denials: state.chain.denials(),
             // 这里只返回条数；记录内容由 `session.read` 提供。
             eventCount: (await state.session.read()).length,
@@ -1929,8 +2052,7 @@ export function createHost({
           };
         }
         case 'session.configure': {
-          const state = open(sessionId);
-          return await serializeSessionConfiguration(sessionId, () => configureSession(state, message.params));
+          return await serializeSessionConfiguration(sessionId, () => configureSession(open(sessionId), message.params));
         }
         case 'workspaces.list':
           // 返回持久工作区登记表及默认工作区身份，供客户端显示。

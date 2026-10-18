@@ -1,6 +1,6 @@
 import { textOf as chooseText, type Locale } from '@ligule/core/kernel/locale.js';
 import type { SessionEvent } from '@ligule/core/session/format.js';
-import { runtimeFailureText } from './errors.js';
+import { providerDiagnosticText, runtimeFailureText } from './errors.js';
 
 // SessionEvent 是记录事实源；投影只生成展示行，不改记录，也不把行号当作事件序号。
 export type TuiRecord = SessionEvent;
@@ -52,7 +52,8 @@ export function projectRecord(record: TuiRecord, locale: Locale = 'zh'): Transcr
     const names: Readonly<Record<string, readonly [string, string]>> = { completed: ['本轮已完成', 'Turn completed'], cancelled: ['本轮已取消', 'Turn cancelled'], failed: ['本轮失败', 'Turn failed'], interrupted: ['本轮意外中断', 'Turn interrupted'] };
     const label = typeof record.status === 'string' ? names[record.status] : undefined;
     const guidance = typeof record.code === 'string' ? runtimeFailureText(record.code, locale) : undefined;
-    return label === undefined ? [] : [{ kind: record.status === 'failed' ? 'error' : 'meta', text: `${chooseText(locale, label[0], label[1])}${typeof record.code === 'string' ? ` (${record.code})` : ''}${guidance === undefined ? '' : `\n${guidance}`}` }];
+    const diagnostics = providerDiagnosticText(record.diagnostics, locale);
+    return label === undefined ? [] : [{ kind: record.status === 'failed' ? 'error' : 'meta', text: `${chooseText(locale, label[0], label[1])}${typeof record.code === 'string' ? ` (${record.code})` : ''}${guidance === undefined ? '' : `\n${guidance}`}${diagnostics === undefined ? '' : `\n${diagnostics}`}` }];
   }
   if (record.kind === 'user') return [{ kind: 'question', text: typeof record.raw === 'string' ? record.raw : typeof record.text === 'string' ? record.text : '' }];
   if (record.kind === 'reasoning') return [{ kind: 'reasoning', text: typeof record.text === 'string' ? record.text : '' }];

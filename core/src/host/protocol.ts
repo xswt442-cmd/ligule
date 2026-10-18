@@ -15,6 +15,10 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly workspaceOrigin?: string;
   readonly mode?: string;
   readonly policy?: string;
+  readonly permissionProfile?: string;
+  readonly permissionNetwork?: string;
+  readonly confirmFullAccess?: boolean;
+  readonly confirmNetwork?: boolean;
   readonly name?: string;
   readonly archived?: boolean;
   readonly at?: number;
@@ -352,6 +356,21 @@ export const METHODS = Object.freeze({
       type: 'object',
       properties: { sessionId: SESSION_ID, mode: { type: 'string', description: "'ask', 'auto', 'never', or 'default' to drop this session's override" } },
       required: ['sessionId', 'mode'],
+    },
+  },
+  // Permission 选择由 TUI/Desktop 的显式用户操作发起；MCP Server 不提供对应工具。
+  'permission.set': {
+    description: 'Change the OS resource permission for this session after trusted UI confirmation; the session is rebuilt before another run starts',
+    parameters: {
+      type: 'object',
+      properties: {
+        sessionId: SESSION_ID,
+        permissionProfile: { type: 'string', description: 'read-only, workspace-write, or full-access' },
+        permissionNetwork: { type: 'string', description: 'policy, unrestricted, or disabled' },
+        confirmFullAccess: { type: 'boolean', description: 'true only after the UI has shown and received confirmation for full-access' },
+        confirmNetwork: { type: 'boolean', description: 'true only after the UI has shown and received confirmation for unrestricted network access' },
+      },
+      required: ['sessionId', 'permissionProfile'],
     },
   },
   'mode.set': {

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
-  createConfig, createKernel, createObservationLog, createTool, deleteTool, editTool, freedesktopTrash, readTool,
+  createConfig, createKernel, createObservationLog, createPermissionContext, createTool, deleteTool, editTool, freedesktopTrash, readTool,
   readOnlyTools, resolveRecycler, writeTool, writeTools,
 } from '../dist/index.js';
 
@@ -20,6 +20,9 @@ async function withWorkspace(run) {
 
 // 日志接口与观察记录都由内核注入，这里按内核给的形状自己建一份，直接调工具。
 const silentLogger = { debug: () => {}, log: () => {} };
+const workspaceWrite = createPermissionContext('workspace-write', 'disabled', {
+  filesystemRead: 'unavailable', filesystemWrite: 'unavailable', network: 'unavailable', process: 'unavailable',
+});
 
 function context(workspace, limits, extra) {
   return { config: { boundary: workspace, limits, ...extra }, logger: silentLogger };
@@ -284,7 +287,7 @@ test('a successful edit refreshes the observation and a delete drops it', async 
 test('write goes through the kernel and its failures reach the session log', async () => {
   await withWorkspace(async (workspace) => {
     await writeFile(join(workspace, 'note.txt'), 'one');
-    const kernel = createKernel({ config: createConfig({ user: { boundary: workspace } }) });
+    const kernel = createKernel({ config: createConfig({ user: { boundary: workspace } }), permission: workspaceWrite });
     kernel.register(readTool);
     kernel.register(writeTool);
     await assert.rejects(

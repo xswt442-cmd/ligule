@@ -9,12 +9,15 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_LIMITS, MESSAGES_CAPABILITIES, DEFAULT_MODE, SKILL_METADATA_BUDGET_BYTES,
-  createConnection, createConfig, createKernel, createMemoryConnectionPair, createSessionLog, createSkillPlugin,
+  createConnection, createConfig, createKernel, createMemoryConnectionPair, createPermissionContext, createSessionLog, createSkillPlugin,
   discoverSkills, formatSkillCatalog, loadAssembly, minimalPlugin, modeDirectories, mcpServerConfigs, searchSkills,
   serveHost, skillDirectories,
 } from '../dist/index.js';
 
 const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
+const modeTestPermission = createPermissionContext('workspace-write', 'policy', {
+  filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
+});
 // 临时根下的四个来源目录与技能加载器使用相同的优先顺序。
 const SOURCES = [
   join('project', '.ligule', 'skills'),
@@ -272,7 +275,8 @@ test('a mode narrows the capability tools and cannot reach the disclosure entry'
       };
       const pair = createMemoryConnectionPair();
       const host = serveHost({
-        input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy, modeName, modePaths, skillRegistry: registry,
+        input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy, permission: modeTestPermission,
+        modeName, modePaths, skillRegistry: registry,
       });
       const connection = createConnection(pair.client);
       try {

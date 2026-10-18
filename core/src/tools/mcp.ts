@@ -23,6 +23,7 @@ export function createMcpTools(registry: Pick<McpRegistry, 'servers' | 'toolsOf'
   return {
     inspectTool: {
       name: 'mcp.inspect',
+      access: 'external',
       readOnly: true,
       disclosure: true,
       description: `Look up what an MCP server offers, one level at a time. ${LEVELS}`,
@@ -57,6 +58,7 @@ export function createMcpTools(registry: Pick<McpRegistry, 'servers' | 'toolsOf'
     },
     callTool: {
       name: 'mcp.call',
+      access: 'external',
       disclosure: true,
       description: 'Call one MCP tool whose definition you have inspected. Pass its arguments as a JSON object text.',
       parameters: {

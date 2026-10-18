@@ -50,7 +50,7 @@ flowchart LR
 
 [项目环境装载模块](../../core/src/host/environment.ts) 为 CLI 与 Desktop Host 入口提供同一次读取的配置层与扩展来源。[Provider 构造模块](../../core/src/host/provider.ts) 校验模型协议、能力声明与重试设置；未配置模型的 Host 可以接收设置请求，模型运行明确失败。[会话模式事务](../../core/src/host/session-mode.ts) 负责安装工具限制、提示片段、失败回收和模式事实记录；Host 继续持有会话锁、活跃轮次、协议路由与资源清理。TUI 的记录投影位于 [transcript.ts](../../tui/src/tui/transcript.ts)，Desktop 的[流式缓冲](../../desktop/frontend/src/session-stream.ts) 按会话隔离未落盘输出。
 
-`ligule mcp-server --project <绝对项目根>` 通过 [MCP 适配器](../../core/src/host/mcp-server.ts) 暴露七个本地控制工具。[控制门面](../../core/src/host/control.ts) 调用同一 Host，维护进程内 operation 状态，只访问授权项目中已打开的会话，并拒绝审批请求。连接关闭时取消运行并释放会话锁；持久恢复依靠 Session JSONL，operation ID 不持久化。使用方法见 [MCP 用户指南](../mcp/mcp-guide.zh-CN.md)。
+`ligule mcp-server --project <绝对项目根>` 通过 [MCP 适配器](../../core/src/host/mcp-server.ts) 暴露十个本地控制工具。[控制门面](../../core/src/host/control.ts) 调用同一 Host，维护进程内 operation 状态，并将会话操作限制在启动时授权的项目内。默认模式拒绝需要审批的操作；明确启用 `--operator` 后，客户端可以答复真实待决的审批与提问，并修改受支持的会话设置，但不能覆盖硬拒绝。连接关闭时会取消运行并释放会话锁；Session JSONL 持久保存会话记录，operation ID 和消息队列只在当前进程内有效。使用方法见 [MCP 用户指南](../mcp/mcp-guide.zh-CN.md)。
 
 ### Kernel、插件、工具与能力
 
@@ -59,6 +59,8 @@ Kernel 从空工具注册表开始。Host 通过[装配器](../../core/src/kerne
 工具是模型可调用的契约，包含名称、说明、JSON 参数模式和执行函数。工具实现可以调用 [`core/src/capability/`](../../core/src/capability/) 下的平台能力，例如路径检查、命令执行、网络解析或剪贴板访问。能力本身不会自动成为模型可调用工具。审批结果中的 `capability` 字段用于标记本次判定的操作。
 
 模型提出的每个工具调用都会进入 [`kernel.call`](../../core/src/kernel/kernel.ts)。Kernel 先检查工具注册和参数，再解析声明的命令或网络目标，随后调用审批判定链。判定链按既定顺序应用限制、守卫、配置规则、自动审批条件和用户审批。只有获准的调用会进入工具实现。Kernel 会记录判定结果，以及完成、拒绝或失败的工具结果；模型清单只包含工具名称、说明和参数模式。
+
+Host 为每个会话持有独立的 Permission 与 Policy 状态。Permission 在 Kernel 判定之前按工具的资源访问类别检查读、写、命令、网络和外部进程；Policy 随后决定是否审批或拒绝。交互式 TUI 与 Desktop 可更改会话 Permission，启用 `full-access` 和 `unrestricted` 网络分别需要确认。命令执行使用 [`permission-capabilities.ts`](../../core/src/capability/permission-capabilities.ts) 探测平台能力；当前只实现 Linux bubblewrap Sandbox，Windows 没有文件系统 Sandbox。Linux bubblewrap 的文件系统读写能力报告为 `partial`，因此受限档位的 Shell 会在 Kernel 预检中拒绝；`full-access` Shell 使用当前操作系统用户权限，并要求不受限网络与进程管理能力可用。MCP `--operator` 不管理 Permission，硬拒绝也不能通过审批覆盖。
 
 ### 一次 Agent Loop
 
@@ -111,6 +113,12 @@ sequenceDiagram
 5. 通过 Kernel 执行工具调用，将结果写入记录，再按模型响应继续迭代。
 6. 在本轮完成、取消或失败时写入一条终态。
 
+[模型适配器](../../core/src/model/) 实现当前支持的 HTTP 消息格式。Host 根据生效的模型服务选择 Provider，并只在发送请求时读取凭据。HTTP 适配器要求响应包含协议终止标记和受支持的结束原因，并发出 `finish` 事件；Loop 在判定完成前拒绝输出耗尽或空响应。工具调用批次会在执行前完整解析并校验参数模式。参数校验拒绝会作为工具结果交给模型处理；Provider JSON 无效或流中断会使本轮失败，且不会重放工具调用。上下文压缩摘要也经过相同的完成检查后才写入检查点。
+
+`model.outputTokens` 表示本次请求的输出预算，与旧版能力上限调整相互独立。模型服务保留字符串形式的 `models` 列表，并可按模型 ID 配置 `modelSettings`，包括显示名称、上下文窗口和请求输出预算。模型级输出声明可以提高未知端点的保守默认值，但不能超过已核实的端点或模型上限，也不能覆盖显式能力限制。未设置该声明的旧配置仍使用保守上限。[预算解析器](../../core/src/model/output-budget.ts)会校验生效限制；同一模型的上下文窗口也控制 Host 的压缩。Provider 重建和会话生成设置变更在轮次边界生效。
+
+Host 的运行进度仅在当前活跃会话与任务期间存在，由 Loop、压缩、审批和提问事件生成。`status.get` 与 `progress` 通知提供阶段、时间和计数；TUI 与 Desktop 展示同一状态。Host 会合并短时间内重复的活动通知，但保留实际进度时间；任务结束时清除进度。进度心跳不会写入 Session JSONL，默认也不会因无活动超时而取消任务。
+
 ### 会话记录与恢复
 
 追加式 [JSONL 会话记录](../../core/src/session/session.ts)是对话事实来源。首行记录会话标识和项目信息；之后的事件记录用户与助手消息、工具调用和结果、轮次状态、模型选择及其他状态。会话锁阻止多个进程同时写入同一记录。
@@ -144,6 +152,8 @@ flowchart TD
 ```
 
 配置层在 Host 启动项目环境时合并成快照。会话 JSONL 是消息和工具结果的来源；检查点与旁路文件保存可重新校验或取回的派生内容。历史浏览和导出读取记录与可用旁路文件，不以界面缓存作为会话事实来源。用户数据根和项目工作区分别管理用户级资料与项目归属。
+
+配置编辑在版本校验、TOML 修改、生效配置校验和原子替换期间持有目标文件锁。Host 会在保存前校验模型变更，包括共享默认值、其他已载入项目的共享设置以及会话显式选择；拒绝的变更不会修改文件。通过校验的配置仍在现有会话轮次边界生效。SSE 流式响应与非流式 JSON 适配器会向 Loop 提供相同的完成状态、用量、文本、推理和工具调用事件。
 
 ### Host 协议与客户端
 

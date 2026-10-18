@@ -4,6 +4,7 @@ import { PassThrough, Writable } from 'node:stream';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createConnection } from '../dist/host/connection.js';
+import { KernelError } from '../dist/kernel/error.js';
 
 test('a request made after the input closes rejects instead of waiting forever', async () => {
   const input = new PassThrough();
@@ -186,6 +187,33 @@ test('failed fault notification cannot prevent connection cleanup', async () => 
   await assert.rejects(connection.request('status.get'), { code: 'connection_closed' });
   input.destroy();
   output.destroy();
+});
+
+test('provider diagnostics cross Host protocol errors without exposing provider response content', async () => {
+  const toHost = new PassThrough();
+  const toClient = new PassThrough();
+  const host = createConnection({ input: toHost, output: toClient });
+  const client = createConnection({ input: toClient, output: toHost });
+  const diagnostics = {
+    category: 'rate_limit', status: 429, attempts: 2,
+    responseReceived: true, streamReceived: false, recoverable: true,
+  };
+  host.onRequest(() => { throw new KernelError('provider_http_error', {
+    detail: 'HTTP 429', diagnostics,
+  }); });
+
+  try {
+    await assert.rejects(client.request('run.start'), (error) => {
+      assert.equal(error.code, 'provider_http_error');
+      assert.deepEqual(error.diagnostics, diagnostics);
+      assert.equal(Object.isFrozen(error.diagnostics), true);
+      assert.equal(JSON.stringify(error).includes('response body'), false);
+      return true;
+    });
+  } finally {
+    toHost.destroy();
+    toClient.destroy();
+  }
 });
 
 test('a synchronous response arriving during write settles the request', async () => {

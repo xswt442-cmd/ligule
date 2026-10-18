@@ -106,6 +106,7 @@ export function createAskUserPlugin(deps: AskUserToolDeps) {
     setup(kernel: { register(tool: unknown): () => void }) {
       return kernel.register({
         name: 'ask_user_question',
+        access: 'interaction',
         // 提问工具是固定交互入口，不受模式筛选，避免模式配置错误导致用户无法回答模型问题。
         disclosure: true,
         description: 'Ask the user one to four questions and wait for a real answer. Use it when a choice or missing information blocks the next step; do not guess an answer or scan the user\'s text for one. Pass "questions" as a JSON array text of objects holding "question", optionally "header" (a short label), "options" (up to four objects with "label" and optional "description") and "multiSelect" (true when several choices may be picked). Every question also takes a free-text answer. The result carries the answers in the order you asked.',

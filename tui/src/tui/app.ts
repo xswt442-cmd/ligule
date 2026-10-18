@@ -10,7 +10,7 @@ import { searchHistory } from './history.js';
 import { editInExternalEditor } from './editor.js';
 import { copyToClipboard, lastAnswer } from './clipboard.js';
 import { titleEscape, titleText } from './output.js';
-import { runtimeFailureText } from './errors.js';
+import { providerDiagnosticText, runtimeFailureText } from './errors.js';
 import { capabilityOf, projectRecord, resultParts, type TranscriptItem, type TuiRecord } from './transcript.js';
 import { VERSION } from '../version.js';
 import { ChoicePanel, HelpPanel, type PanelChoice } from './panels.js';
@@ -87,6 +87,19 @@ interface TuiStatus {
   readonly pendingMode?: string | null;
   readonly policy: string;
   readonly policySource?: string;
+  readonly permission?: {
+    readonly profile: 'read-only' | 'workspace-write' | 'full-access';
+    readonly network: 'policy' | 'unrestricted' | 'disabled';
+    readonly capabilities: {
+      readonly filesystemRead: 'full' | 'partial' | 'unavailable';
+      readonly filesystemWrite: 'full' | 'partial' | 'unavailable';
+      readonly network: 'full' | 'partial' | 'unavailable';
+      readonly process: 'full' | 'partial' | 'unavailable';
+    };
+    readonly execution: { readonly available: boolean; readonly code: string | null; readonly reason: string | null };
+    readonly changeAllowed: boolean;
+    readonly changeReason?: string;
+  };
   readonly tools: readonly string[];
   readonly eventCount: number;
   readonly denials: { readonly consecutive: number; readonly total: number };
@@ -127,7 +140,7 @@ interface SearchState {
   readonly at: number;
 }
 
-type PickerKind = 'model' | 'mode' | 'policy';
+type PickerKind = 'model' | 'mode' | 'policy' | 'permission' | 'permission-network' | 'permission-confirm-full' | 'permission-confirm-network';
 interface RuntimeChoice extends PanelChoice {
   readonly selection?: ModelSelection;
 }
@@ -227,6 +240,7 @@ interface TuiRequestResults {
   readonly 'run.start': LoopResult;
   readonly 'run.cancel': { readonly cancelled: boolean };
   readonly 'status.get': TuiStatus;
+  readonly 'permission.set': { readonly sessionId: string; readonly permission: NonNullable<TuiStatus['permission']>; readonly applies: 'now' | 'unchanged' };
   readonly 'model.select': { readonly model: string | null; readonly serviceId: string; readonly when: 'now' | 'round' };
   readonly 'config.get': TuiConfigResult;
   readonly 'credentials.status': CredentialStatus;
@@ -344,6 +358,10 @@ export function buildStatusLine({ sessionId, boundary, status, running, seconds,
   const context = contextSegment(status.usage, locale);
   const parts: string[] = [];
   if (context !== '') parts.push(context);
+  if (status.permission !== undefined) {
+    const permission = status.permission;
+    parts.push(`perm: ${permission.profile} · ${permission.network} · ${permission.execution.available ? t('Shell 可用', 'Shell available') : t('Shell 受限', 'Shell restricted')}`);
+  }
   const progress = status.progress;
   const phaseHint = progress === undefined || progress === null ? '' : {
     preparing: t('准备上下文', 'Preparing context'),
@@ -369,6 +387,7 @@ export function buildStatusLine({ sessionId, boundary, status, running, seconds,
   const leaf = root === '' ? '' : root.split(/[\\/]/).filter(Boolean).pop() ?? '';
   if (over()) base = `${id}${leaf === '' ? '' : ` · ${leaf}`}`;
   if (over()) shown = shown.filter((part) => !part.startsWith('ctx:'));
+  if (over()) shown = shown.filter((part) => !part.startsWith('perm:'));
   if (over()) base = id;
   if (over()) tail = hints === '' ? '' : hints.slice(3);
   if (over() && running && progress !== undefined && progress !== null) {
@@ -807,10 +826,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       if (!terminalReceived.current) push({ kind: 'meta', text: t('本轮已完成', 'Turn completed') });
     } catch (error) {
       const code = errorCode(error) ?? 'run_failed';
+      const diagnostics = providerDiagnosticText(isRecord(error) ? error.diagnostics : undefined, locale);
       // 根据取消位置显示对应错误码：模型请求为 `provider_cancelled`，调用组之间为 `loop_cancelled`，等待用户答复为 `ask_user_cancelled`。
       if (!terminalReceived.current) {
         if (code === 'loop_cancelled' || code === 'provider_cancelled' || code === 'ask_user_cancelled') push({ kind: 'meta', text: t('本轮已取消', 'Turn cancelled') });
-        else push({ kind: 'error', text: `${t(`运行失败：${code}`, `Run failed: ${code}`)}${runtimeFailureText(code, locale) === undefined ? '' : `\n${runtimeFailureText(code, locale)}`}` });
+        else push({ kind: 'error', text: `${t(`运行失败：${code}`, `Run failed: ${code}`)}${runtimeFailureText(code, locale) === undefined ? '' : `\n${runtimeFailureText(code, locale)}`}${diagnostics === undefined ? '' : `\n${diagnostics}`}` });
       }
     } finally {
       setAsk(null);
@@ -827,6 +847,50 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     pickerRequest.current += 1;
     setPanel(null);
   }, []);
+
+  const changePermission = useCallback(async ({
+    profile,
+    network,
+    confirmFullAccess = false,
+    confirmNetwork = false,
+  }: {
+    readonly profile?: 'read-only' | 'workspace-write' | 'full-access';
+    readonly network?: 'policy' | 'unrestricted' | 'disabled';
+    readonly confirmFullAccess?: boolean;
+    readonly confirmNetwork?: boolean;
+  }) => {
+    const own = sessionId;
+    const current = await client.request('status.get', { sessionId: own }).catch((error: unknown) => requestFailure(error, 'status_read_failed'));
+    if ('code' in current || current.permission === undefined) {
+      push({ kind: 'error', text: t(`无法读取当前权限：${'code' in current ? current.code : 'permission_status_unavailable'}`, `Could not read current permissions: ${'code' in current ? current.code : 'permission_status_unavailable'}`) });
+      return;
+    }
+    if (!current.permission.changeAllowed) {
+      setStatus(current);
+      push({ kind: 'error', text: t('此连接不能修改会话权限；请使用受信任的本地 TUI 或 Desktop 操作。', 'This connection cannot change session permissions; use a trusted local TUI or Desktop action.') });
+      return;
+    }
+    const changed = await client.request('permission.set', {
+      sessionId: own,
+      permissionProfile: profile ?? current.permission.profile,
+      ...(network === undefined ? {} : { permissionNetwork: network }),
+      ...(confirmFullAccess ? { confirmFullAccess: true } : {}),
+      ...(confirmNetwork ? { confirmNetwork: true } : {}),
+    }).catch((error: unknown) => requestFailure(error, 'permission_change_failed'));
+    if ('code' in changed) {
+      push({ kind: 'error', text: t(`无法修改会话权限：${changed.code}`, `Could not change session permissions: ${changed.code}`) });
+      return;
+    }
+    const refreshed = await client.request('status.get', { sessionId: own }).catch(() => null);
+    if (activeSession.current === own) setStatus(refreshed);
+    const effective = refreshed?.permission ?? changed.permission;
+    push({ kind: 'meta', text: [
+      t(`权限已更新：${effective.profile} · 网络 ${effective.network}`, `Permissions updated: ${effective.profile} · network ${effective.network}`),
+      effective.execution.available
+        ? t('Shell 隔离：可用', 'Shell sandbox: available')
+        : t(`Shell 隔离：不可用（${effective.execution.code ?? effective.execution.reason ?? '原因未知'}）`, `Shell sandbox: unavailable (${effective.execution.code ?? effective.execution.reason ?? 'unknown reason'})`),
+    ].join('\n') });
+  }, [client, push, sessionId, t]);
 
   const exitTui = useCallback((savedDraft = inputNow.current.draft) => {
     if (inputs === undefined) { app.exit(); return; }
@@ -861,12 +925,57 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         available = (await modes.read()).map(mode => ({ id: mode.name, label: mode.name,
           description: t(`来源：${MODE_LAYERS[mode.layer] ?? mode.layer}。只改变模型可用工具和提示，不授予权限。`, `Source: ${mode.layer}. Selects tools and prompts without granting permissions.`),
         }));
-      } else {
+      } else if (kind === 'policy') {
         available = [
           { id: 'ask', label: t('逐次审批', 'Ask for each tool'), description: t('工具执行前询问；已有拒绝规则和访问边界继续生效。', 'Ask before tools execute; denial rules and access boundaries still apply.') },
           { id: 'auto', label: t('自动判定', 'Automatic decisions'), description: t('由现有规则判定；仍可能请求审批，访问边界不变。', 'Use the existing rules; approvals may still be requested and access boundaries stay unchanged.') },
           { id: 'reset', label: t('使用配置默认', 'Use configured default'), description: t('撤销当前会话的审批方式覆盖。', 'Clear this session’s approval-mode override.') },
         ];
+      } else {
+        const current = await client.request('status.get', { sessionId: own });
+        if (activeSession.current !== own || pickerRequest.current !== token) return;
+        setStatus(current);
+        const permission = current.permission;
+        if (permission === undefined) throw new Error('permission_status_unavailable');
+        if (!permission.changeAllowed) {
+          available = [];
+          if (permission.changeReason !== undefined) {
+            push({ kind: 'meta', text: t(
+              `权限暂不可更改：${permission.changeReason}`,
+              `Permissions cannot be changed now: ${permission.changeReason}`,
+            ) });
+          }
+        } else if (kind === 'permission') {
+          const capabilities = permission.capabilities;
+          const enforcement = [
+            `${t('读取', 'read')} ${capabilities.filesystemRead}`,
+            `${t('写入', 'write')} ${capabilities.filesystemWrite}`,
+            `${t('网络', 'network')} ${capabilities.network}`,
+            `${t('进程', 'process')} ${capabilities.process}`,
+          ].join(' · ');
+          available = [
+            { id: 'read-only', label: t('只读 · read-only', 'Read only · read-only'), description: t(`当前：${permission.profile} · 网络 ${permission.network} · 隔离能力：${enforcement} · Shell ${permission.execution.available ? '可用' : `不可用（${permission.execution.code ?? '能力不足'}）`}`, `Current: ${permission.profile} · network ${permission.network} · isolation: ${enforcement} · Shell ${permission.execution.available ? 'available' : `unavailable (${permission.execution.code ?? 'capability limits'})`}`) },
+            { id: 'workspace-write', label: t('工作区可写 · workspace-write', 'Workspace write · workspace-write'), description: t('文件工具限制在工作区；Shell 仅在报告完整隔离时开放。', 'File tools stay within the workspace; Shell runs only when full isolation is available.') },
+            { id: 'full-access', label: t('完整访问 · full-access', 'Full access · full-access'), description: t('需要再次确认。范围仍受当前 OS 用户权限和 Policy 硬拒绝约束。', 'Requires a second confirmation. OS user permissions and hard Policy denials still apply.') },
+            { id: 'network', label: t(`网络：${permission.network}`, `Network: ${permission.network}`), description: t('单独设置网络访问；这不会改变文件权限档位。', 'Configure network access separately; this does not change the filesystem profile.') },
+          ];
+        } else if (kind === 'permission-network') {
+          available = [
+            { id: 'policy', label: t('按 Policy 控制 · policy', 'Controlled by Policy · policy'), description: t('网络工具继续经过 Policy；Shell 只能在后端能阻止其联网时执行。', 'Network tools stay subject to Policy; Shell runs only when the backend can block its network access.') },
+            { id: 'disabled', label: t('禁用网络 · disabled', 'Disable network · disabled'), description: t('拒绝网络工具和 Shell 的网络访问。', 'Deny network tools and Shell network access.') },
+            { id: 'unrestricted', label: t('不受限网络 · unrestricted', 'Unrestricted network · unrestricted'), description: t('需要再次确认；Shell、MCP 和扩展可访问当前 OS 用户可用的网络。', 'Requires a second confirmation; Shell, MCP, and extensions can use the network available to this OS user.') },
+          ];
+        } else if (kind === 'permission-confirm-full') {
+          available = [
+            { id: 'confirm', label: t('我确认启用 full-access', 'Confirm full-access'), description: t(`允许当前 OS 用户可访问的文件和进程。Policy 与硬拒绝适用于 Host 工具调用；已加载的扩展是可信代码，可绕过这些检查直接使用 OS 能力。当前 Shell：${permission.execution.available ? '可用' : `不可用（${permission.execution.code ?? permission.execution.reason ?? '隔离能力不足'}）`}`, `Allow files and processes available to the current OS user. Policy and hard denials apply to Host tool calls; loaded extensions are trusted code and can use OS capabilities directly. Shell: ${permission.execution.available ? 'available' : `unavailable (${permission.execution.code ?? permission.execution.reason ?? 'sandbox limits'})`}`) },
+            { id: 'cancel', label: t('取消', 'Cancel') },
+          ];
+        } else {
+          available = [
+            { id: 'confirm', label: t('我确认启用不受限网络', 'Confirm unrestricted network'), description: t('命令、MCP 服务器和扩展可能向外发送数据；普通工具审批和危险操作硬拒绝仍按原规则执行。', 'Commands, MCP servers, and extensions may send data externally; ordinary tool approvals and hard dangerous-operation denials remain active.') },
+            { id: 'cancel', label: t('取消', 'Cancel') },
+          ];
+        }
       }
       if (activeSession.current !== own || pickerRequest.current !== token) return;
       if (kind === 'model' && available.length === 0) {
@@ -1226,9 +1335,13 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         const current = await client.request('status.get', { sessionId }).catch(() => null);
         setStatus(current);
         const context = contextSegment(current?.usage, locale);
+        const permission = current?.permission === undefined ? '' : t(
+          ` · 权限 ${current.permission.profile} · 网络 ${current.permission.network} · Shell ${current.permission.execution.available ? '可用' : `不可用（${current.permission.execution.code ?? '能力不足'}）`}`,
+          ` · permission ${current.permission.profile} · network ${current.permission.network} · Shell ${current.permission.execution.available ? 'available' : `unavailable (${current.permission.execution.code ?? 'capability limits'})`}`,
+        );
         push({ kind: 'meta', text: current === null ? t('无法读取状态', 'Could not read status')
           : t(`工具模式 ${current.mode ?? '-'} · 审批 ${current.policy} · 连续拒绝 ${current.denials.consecutive} / 累计 ${current.denials.total} · ${current.eventCount} 条记录`, `Mode ${current.mode ?? '-'} · approvals ${current.policy} · denials ${current.denials.consecutive} consecutive / ${current.denials.total} total · ${current.eventCount} events`)
-            + (context === '' ? '' : ` · ${context}`) });
+            + permission + (context === '' ? '' : ` · ${context}`) });
       })();
       return;
     }
@@ -1348,6 +1461,36 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       })();
       return;
     }
+    if (name === 'permission') {
+      const [target, value, ...extra] = argument.trim().split(/\s+/).filter((part) => part !== '');
+      if (target === undefined) { openPicker('permission'); return; }
+      if (extra.length > 0) {
+        push({ kind: 'error', text: t('用法：/permission [read-only|workspace-write|full-access|network [policy|disabled|unrestricted]]', 'Usage: /permission [read-only|workspace-write|full-access|network [policy|disabled|unrestricted]]') });
+        return;
+      }
+      if (target === 'network') {
+        if (value === undefined) { openPicker('permission-network'); return; }
+        if (value !== 'policy' && value !== 'disabled' && value !== 'unrestricted') {
+          push({ kind: 'error', text: t('网络选项须为 policy、disabled 或 unrestricted。', 'Network must be policy, disabled, or unrestricted.') });
+        } else if (value === 'unrestricted') {
+          openPicker('permission-confirm-network');
+        } else {
+          void changePermission({ network: value });
+        }
+        return;
+      }
+      if (target !== 'read-only' && target !== 'workspace-write' && target !== 'full-access') {
+        push({ kind: 'error', text: t('用法：/permission [read-only|workspace-write|full-access|network [policy|disabled|unrestricted]]', 'Usage: /permission [read-only|workspace-write|full-access|network [policy|disabled|unrestricted]]') });
+        return;
+      }
+      if (target === 'full-access') {
+        if (status?.permission?.profile === 'full-access') void changePermission({ profile: target });
+        else openPicker('permission-confirm-full');
+      } else {
+        void changePermission({ profile: target });
+      }
+      return;
+    }
     if (name === 'show') {
       void (async () => {
         if (argument === '') {
@@ -1425,14 +1568,34 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     push({ kind: 'error', text: t(`未知命令：/${name}（/help 查看）`, `Unknown command: /${name} (/help to browse)`) });
-  }, [app, client, info, keyOverrides, keys, locale, push, queue, queuePaused, refreshStatus, sessionId, status, stdout, t, trust, openPicker, exitTui]);
+  }, [app, changePermission, client, info, keyOverrides, keys, locale, push, queue, queuePaused, refreshStatus, sessionId, status, stdout, t, trust, openPicker, exitTui]);
 
   const chooseOption = useCallback((id: string) => {
     const choice = choices.find(item => item.id === id);
     if (choice === undefined || panel === null || panel === 'help') return;
+    const currentPanel = panel;
     closePanel();
+    if (currentPanel === 'permission') {
+      if (id === 'network') { openPicker('permission-network'); return; }
+      if (id === 'full-access') { openPicker('permission-confirm-full'); return; }
+      if (id === 'read-only' || id === 'workspace-write') void changePermission({ profile: id });
+      return;
+    }
+    if (currentPanel === 'permission-network') {
+      if (id === 'unrestricted') { openPicker('permission-confirm-network'); return; }
+      if (id === 'policy' || id === 'disabled') void changePermission({ network: id });
+      return;
+    }
+    if (currentPanel === 'permission-confirm-full') {
+      if (id === 'confirm') void changePermission({ profile: 'full-access', confirmFullAccess: true });
+      return;
+    }
+    if (currentPanel === 'permission-confirm-network') {
+      if (id === 'confirm') void changePermission({ network: 'unrestricted', confirmNetwork: true });
+      return;
+    }
     if (choice.selection === undefined) {
-      runCommand(panel, choice.id);
+      runCommand(currentPanel, choice.id);
       return;
     }
     const own = sessionId;
@@ -1441,7 +1604,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       await refreshStatus();
       push({ kind: 'meta', text: changed.when === 'round' ? t(`下轮使用 ${changed.model}`, `${changed.model} will apply next turn`) : t(`已切换至 ${changed.model}`, `Switched to ${changed.model}`) });
     }, (error: unknown) => push({ kind: 'error', text: t(`无法选择模型：${errorCode(error) ?? 'model_select_failed'}`, `Could not select model: ${errorCode(error) ?? 'model_select_failed'}`) }));
-  }, [choices, panel, closePanel, runCommand, client, sessionId, refreshStatus, push, t]);
+  }, [choices, panel, closePanel, openPicker, changePermission, runCommand, client, sessionId, refreshStatus, push, t]);
 
   // 每次回车提交当前问题并进入下一题；完成最后一题后统一发送全部答案。
   // 空回车表示未回答该题，由 Host 按未答记录，不由界面补造答案。
@@ -1902,9 +2065,21 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     h(HelpPanel, { active: panel === 'help', interactive, templates, locale, columns: geometry.columns - 4, height: Math.max(1, geometry.rows - 13), onClose: closePanel }),
     h(ChoicePanel, {
       active: panel !== null && panel !== 'help', interactive,
-      title: panel === 'model' ? t('选择模型', 'Select model') : panel === 'mode' ? t('选择工具模式', 'Select tool mode') : t('选择审批方式', 'Select approval mode'),
+      title: panel === 'model' ? t('选择模型', 'Select model')
+        : panel === 'mode' ? t('选择工具模式', 'Select tool mode')
+          : panel === 'policy' ? t('选择审批方式', 'Select approval mode')
+            : panel === 'permission' ? t('会话权限', 'Session permissions')
+              : panel === 'permission-network' ? t('设置网络权限', 'Set network access')
+                : panel === 'permission-confirm-full' ? t('确认完整访问', 'Confirm full access')
+                  : panel === 'permission-confirm-network' ? t('确认不受限网络', 'Confirm unrestricted network')
+                    : '',
       options: choices,
-      selected: panel === 'model' ? `${status?.serviceId}:${status?.selectedModel ?? status?.model}` : panel === 'mode' ? status?.mode ?? undefined : status?.policy,
+      selected: panel === 'model' ? `${status?.serviceId}:${status?.selectedModel ?? status?.model}`
+        : panel === 'mode' ? status?.mode ?? undefined
+          : panel === 'policy' ? status?.policy
+            : panel === 'permission' ? status?.permission?.profile
+              : panel === 'permission-network' ? status?.permission?.network
+                : undefined,
       locale, columns: geometry.columns - 4, height: Math.max(1, Math.min(7, geometry.rows - 16)), loading: choicesLoading, onClose: closePanel, onSelect: (choice: PanelChoice) => chooseOption(choice.id),
     }),
     h(Box, { flexDirection: 'column', borderStyle: 'single', borderTop: true, borderBottom: true, borderLeft: false, borderRight: false, borderColor: running ? 'yellow' : 'cyan', paddingX: 1 }, h(Box, null,

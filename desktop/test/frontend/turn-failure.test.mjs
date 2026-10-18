@@ -15,3 +15,15 @@ test('response completion and budget errors have actionable bilingual Desktop ex
     assert.doesNotMatch(explanation[1], /[\u3400-\u9fff]/u);
   }
 });
+
+test('Provider errors retain only safe HTTP diagnostics in the session turn summary', () => {
+  const failure = turnFailure('provider_http_error', {
+    category: 'authentication', status: 401, attempts: 2,
+    responseReceived: true, streamReceived: false, recoverable: false,
+    url: 'https://user:secret@example.invalid/?key=private',
+  });
+  assert.match(failure.diagnostic[0], /HTTP 401.*身份认证.*尝试 2 次.*收到响应/u);
+  assert.match(failure.diagnostic[1], /HTTP 401.*authentication.*2 attempts.*response received/u);
+  assert.doesNotMatch(failure.diagnostic.join(' '), /secret|private|example\.invalid/u);
+  assert.equal(turnFailure('provider_http_error', { category: 'http', attempts: 0 }).diagnostic, undefined);
+});

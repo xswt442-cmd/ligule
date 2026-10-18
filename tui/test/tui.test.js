@@ -6,7 +6,7 @@ import { appendFile, cp, mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { waitFor, withTuiHost } from './helpers/tui-host.ts';
+import { measuredPermissionContext, waitFor, withTuiHost } from './helpers/tui-host.ts';
 import { completeFrame } from './helpers/frames.js';
 import { HISTORY_LIMIT, historyPathOf, loadHistory, pushHistory, rememberHistory } from '../../core/dist/kernel/input-history.js';
 import { SEARCH_ROWS, searchHistory } from '../dist/tui/history.js';
@@ -248,7 +248,10 @@ test('/sub reads the branch reference out of the delegation result', options, ()
 });
 
 // 审批提示应显示命令语法和实际执行的程序，因为不同后端可能对同一命令给出不同结论。
-test('the approval box names the shell backend and its executable', options, async () => withTuiHost(async ({ client, sessionId }) => {
+test('the approval box names the shell backend and its executable', options, async (t) => {
+  const permission = await measuredPermissionContext('full-access', 'unrestricted');
+  if (permission.capabilities.process !== 'full') return t.skip('the platform process ownership backend is unavailable');
+  await withTuiHost(async ({ client, sessionId }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
   const { PassThrough } = await import('node:stream');
@@ -275,7 +278,8 @@ test('the approval box names the shell backend and its executable', options, asy
   assert.match(painted, /允许执行 exec？/);
   assert.match(painted, /node --version \| node --version/);
   assert.match(painted, /执行环境 (powershell|bash) · /);
-}));
+  }, { permission });
+});
 
 // 命令补全先列出界面命令，再列出 Host 提供的模板，并按输入前缀筛选。
 test('the candidate list narrows on what is typed and appends host templates', options, () => {
