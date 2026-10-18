@@ -186,9 +186,9 @@ export const METHODS = Object.freeze({
     parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
   },
   // 工作区登记表和默认选择保存在应用数据根目录中。
-  // 客户端只读取登记表；它只能更改默认选择，登记项由创建或打开会话时写入。
+  // 客户端可读取登记、设置默认项或移除登记；移除前必须先清除默认项。
   'workspaces.list': {
-    description: 'Read the durable workspace roster and its default selection from the application data root; the interface list is a reader of it, so a workspace a person stopped watching is still here',
+    description: 'Read the durable workspace roster and its default selection from the application data root; a workspace removed from one window stays registered until explicitly removed',
     parameters: { type: 'object', properties: {} },
   },
   'workspace.default.set': {
@@ -199,6 +199,14 @@ export const METHODS = Object.freeze({
         directory: { type: 'string', description: 'the workspace to make default; blank means no workspace is the default' },
         name: { type: 'string', description: 'the label to show for it; absent keeps the last segment of the directory' },
       },
+      required: ['directory'],
+    },
+  },
+  'workspace.remove': {
+    description: 'Remove a workspace from the durable roster without changing its directory or session records; the default workspace must be cleared first',
+    parameters: {
+      type: 'object',
+      properties: { directory: { type: 'string', description: 'the registered workspace directory to remove' } },
       required: ['directory'],
     },
   },

@@ -45,7 +45,7 @@ Run `ligule --help` to list commands. `ligule sessions` lists sessions for the c
 
 ### Workspaces and data
 
-The command line and terminal UI use the current directory as the default workspace. On first launch, the desktop app creates and registers `ligule/default-workspace` under the system Documents directory. New sessions then use the selected default workspace. Add other workspaces from the desktop sidebar to view their sessions.
+The command line and terminal UI use the current directory as the default workspace. On first launch, the desktop app creates and registers `ligule/default-workspace` under the system Documents directory. New sessions then use the selected default workspace. Add other workspaces from the desktop sidebar to view their sessions. The workspace menu can hide a sidebar entry or remove its registration. Clear the default selection first; removal is blocked while a session is running in that directory. Removing a registration leaves the project directory, files, and session records untouched. Add the workspace again to view its existing sessions.
 
 Before loading project configuration, guides, or skills in a new directory, the terminal UI asks whether you trust it, with Exit selected by default. Trust and continue remembers that exact directory; subdirectories require their own confirmation. Use `/trust` for details or `/trust revoke` to revoke trust and exit. Trust does not approve tools or change approval rules or access boundaries. Project `AGENTS.md` files use the existing instruction loader and cannot grant system permissions. Each launch displays the Ligule mark, version, workspace, and help hint.
 

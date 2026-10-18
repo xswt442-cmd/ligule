@@ -9,7 +9,7 @@ import { createKernel, type Kernel } from '../kernel/kernel.js';
 import { loadAssembly, type Assembly, type Plugin } from '../kernel/assembly.js';
 import { loadExtensions, type ExtensionDiagnostic } from '../kernel/extensions.js';
 import { DEFAULT_MODE, loadMode, type ModeDirectories, type ModeFile } from '../kernel/modes.js';
-import { readRegistry, registerWorkspace, setDefaultWorkspace, workspaceIdentity } from '../kernel/workspace.js';
+import { readRegistry, registerWorkspace, setDefaultWorkspace, unregisterWorkspace, workspaceIdentity } from '../kernel/workspace.js';
 import { historyPathOf, loadHistory, rememberHistory } from '../kernel/input-history.js';
 import { parsePrefsJson, prefsPathOf, readPrefs, savePrefs } from '../kernel/desktop-prefs.js';
 import { credentialStatus, deleteCredential, storeCredential } from '../kernel/credentials.js';
@@ -1559,6 +1559,16 @@ export function createHost({
           if (directory === '') return await setDefaultWorkspace(null);
           await classifyProjectRoot(resolve(directory));
           return await setDefaultWorkspace(directory, { name: message.params.name });
+        }
+        case 'workspace.remove': {
+          const directory = message.params.directory;
+          if (typeof directory !== 'string' || directory.trim() === '') throw new KernelError('workspace_directory_required');
+          await classifyProjectRoot(resolve(directory));
+          const identity = workspaceIdentity(directory);
+          // 运行中的会话继续使用原工作区；先等该轮结束，再从登记表移除。
+          const running = [...sessions.values()].find((state) => workspaceIdentity(state.environment.projectRoot) === identity && state.running !== undefined);
+          if (running !== undefined) throw new KernelError('workspace_in_use', { detail: directory });
+          return await unregisterWorkspace(directory);
         }
         case 'history.read':
           // 偏好文件路径由 Host 管理，客户端不能指定数据根目录下的任意文件。
