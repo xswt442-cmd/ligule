@@ -250,6 +250,19 @@ function modelSelectionOf(model: Record<string, unknown>): ModelSelection | unde
     : undefined;
 }
 
+function checkedSessionModel(model: Record<string, unknown>, selection: ModelSelection): Record<string, unknown> {
+  const resolved = resolveModel(model, selection);
+  if (selection.provider === 'legacy') {
+    const inherited = { ...model };
+    delete inherited.selection;
+    const configured = resolveModel(inherited);
+    if (configured.serviceId !== 'legacy' || configured.model !== selection.model) {
+      throw new KernelError('model_not_available');
+    }
+  }
+  return resolved;
+}
+
 function generationSelectionOf(event: SessionEvent): ModelSelection | undefined {
   if (event.selection === null) return undefined;
   if (event.selection === undefined) {
@@ -630,6 +643,7 @@ export function createHost({
       selection = modelSelection({ provider: params.initialProvider, model: params.initialModel });
       const latest = env.store === undefined ? env.config : (await env.store.read()).values;
       model = { ...modelConfigOf(env.config), ...(isRecord(latest.model) ? latest.model : {}), selection };
+      checkedSessionModel(model, selection);
     }
     let policy: Exclude<PolicyMode, 'default'> | undefined;
     if (params.initialPolicy !== undefined) {
@@ -1477,7 +1491,7 @@ export function createHost({
         };
       }),
     }));
-    if (services.length === 0 && typeof modelConfig.model === 'string' && typeof modelConfig.api === 'string') {
+    if (typeof modelConfig.model === 'string' && typeof modelConfig.api === 'string' && typeof modelConfig.baseURL === 'string') {
       const thinking = thinkingCapabilityOf(modelConfig.api, modelConfig.baseURL, modelConfig.model);
       services.push({
         id: 'legacy', name: 'Legacy model', api: modelConfig.api,
@@ -1570,6 +1584,7 @@ export function createHost({
       const selection = modelSelection({ provider: params.provider, model: params.model });
       const latest = state.environment.store === undefined ? state.environment.config : (await state.environment.store.read()).values;
       model = { ...modelConfigOf(state.environment.config), ...(isRecord(latest.model) ? latest.model : {}), selection };
+      checkedSessionModel(model, selection);
       explicit = true;
     }
 

@@ -555,6 +555,10 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     const names = (await context.client.listTools()).tools.map((tool) => tool.name).sort();
     assert.equal(names.length, 10);
     const project = await realpath(projectRoot);
+    const invalidInitialModel = await context.client.callTool({ name: 'ligule_session_create', arguments: {
+      projectRoot: project, initial: { model: { provider: 'legacy', model: 'not-in-this-config' } },
+    } });
+    toolFailure(invalidInitialModel, 'model_not_available', 'unlisted_initial_model');
     const created = toolData(await context.client.callTool({ name: 'ligule_session_create', arguments: {
       projectRoot: project, initial: { mode: 'minimal', policy: 'ask', outputTokens: 2048 },
     } }), 'operator_session_create');
@@ -566,6 +570,10 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     assert.equal(readSettings.effective.policy.mode, 'ask');
     assert.equal(readSettings.effective.generation.outputTokens, 2048);
     assert.ok(readSettings.available.services.some((service) => service.id === 'legacy' && service.models[0].id === 'operator-e2e-local'));
+    const invalidConfiguredModel = await context.client.callTool({ name: 'ligule_session_configure', arguments: {
+      sessionId, changes: { model: { provider: 'legacy', model: 'not-in-this-config' } },
+    } });
+    toolFailure(invalidConfiguredModel, 'model_not_available', 'unlisted_session_model');
     const generationChanged = toolData(await context.client.callTool({ name: 'ligule_session_configure', arguments: {
       sessionId, changes: { model: { provider: 'legacy', model: 'operator-e2e-local' }, outputTokens: 2048 },
     } }), 'session_configure_model_and_budget');
