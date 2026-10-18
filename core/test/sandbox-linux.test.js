@@ -18,6 +18,7 @@ after(() => {
 
 function fixture(t) {
   if (!linux) return undefined;
+  mkdirSync(testDirectory, { recursive: true });
   const root = mkdtempSync(join(testDirectory, 'sandbox-linux-'));
   temporaryDirectories.add(root);
   const runtimeDirectory = process.env.XDG_RUNTIME_DIR ?? `/run/user/${process.getuid()}`;
