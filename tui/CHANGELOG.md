@@ -8,6 +8,12 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ### 简体中文
 
+### English
+
+## [0.0.5] - 2026-10-19
+
+### 简体中文
+
 **新增**
 
 - 增加会话 Permission 控制，可查看平台隔离能力并单独更改文件/命令档位与网络模式；启用 `full-access` 或不受限网络需要确认，Sandbox 能力不足时 Shell 会拒绝执行。
@@ -16,6 +22,7 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 **改进**
 
+- 权限变更记录只会在本次操作实际启用完全访问或不受限网络时标记对应确认。
 - 共享模型服务配置支持逐模型上下文窗口和输出额度，按当前选择应用于请求与压缩，兼容原有模型标识列表。
 - 完整校验模型终止原因，区分空回复、输出耗尽、协议不完整及断流；非法工具批次不执行副作用，诊断不包含原始参数或网关错误正文。
 - TUI 显示 Host 确认的运行阶段与无进展时长，并提供可操作的 Provider 错误提示。
@@ -30,6 +37,7 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 **Improved**
 
+- Permission records mark a confirmation only when that change grants full access or unrestricted networking.
 - Shared service configuration supports per-model context windows and output budgets for requests and compaction, while preserving existing model ID lists.
 - Validate model finish reasons and distinguish empty replies, exhausted output, incomplete protocols, and interrupted bodies. Invalid tool batches have no side effects, and diagnostics omit raw arguments and gateway error bodies.
 - TUI status shows Host-confirmed run phases and time without progress, with actionable Provider error messages.

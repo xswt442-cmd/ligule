@@ -8,8 +8,15 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 ### 简体中文
 
+### English
+
+## [0.0.6] - 2026-10-19
+
+### 简体中文
+
 **新增**
 
+- 新会话发送第一条消息前可设置工具模式、审批方式、文件/命令权限与网络模式；完全访问和不受限网络仍需分别确认，并由 Host 记录确认来源。
 - 增加会话 Permission 控制面板，可查看平台隔离能力并单独更改文件/命令档位与网络模式；启用 `full-access` 或不受限网络需要确认，Sandbox 能力不足时 Shell 会拒绝执行。
 - 模型服务提供可编辑的模型目录表，支持逐模型名称、上下文窗口和最大输出 token 数；一键获取列表并保留手动参数，设置实际用于选中模型的请求与压缩。
 
@@ -29,6 +36,7 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 **Added**
 
+- New conversations can select a tool mode, approval mode, file/command permission profile, and network mode before the first message. Full access and unrestricted networking still require separate confirmations, which the Host records with their source.
 - Added a per-session Permission panel to inspect platform isolation capabilities and change file/command profiles separately from network mode. Enabling `full-access` or unrestricted networking requires confirmation; Shell is denied when sandbox capabilities are insufficient.
 - Added editable model catalogs with per-model display names, context windows, and maximum output tokens. Fetching adds models while preserving manual settings; the selected model's limits control actual requests and compaction.
 
