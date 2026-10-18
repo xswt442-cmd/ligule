@@ -2111,7 +2111,6 @@ export function createHost({
         case 'workspace.remove': {
           const directory = message.params.directory;
           if (typeof directory !== 'string' || directory.trim() === '') throw new KernelError('workspace_directory_required');
-          await classifyProjectRoot(resolve(directory));
           const identity = workspaceIdentity(directory);
           // 运行中的会话继续使用原工作区；先等该轮结束，再从登记表移除。
           const running = [...sessions.values()].find((state) => workspaceIdentity(state.environment.projectRoot) === identity && state.running !== undefined);
@@ -2127,9 +2126,9 @@ export function createHost({
           return { entries: await rememberHistory(historyPathOf(), [String(message.params.text)]) };
         }
         case 'model.select': {
-          const state = open(sessionId);
           const selection = modelSelection({ provider: message.params.provider, model: message.params.model });
           return await serializeSessionConfiguration(sessionId, async () => {
+            const state = open(sessionId);
             await configureSession(state, { provider: selection.provider, model: selection.model });
             const generation = state.pendingGeneration ?? state.generation;
             return { model: generation.provider.model, serviceId: selection.provider, when: state.running === undefined ? 'now' : 'round' };

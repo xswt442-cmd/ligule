@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { createConnection, createConfig, createMemoryConnectionPair, MESSAGES_CAPABILITIES, METHODS, NOTIFICATIONS, providerFromConfig, hostProviderFromConfig, resolveShell, serveHost } from '../core/dist/index.js';
 import { detectPermissionCapabilities } from '../core/dist/capability/permission-capabilities.js';
 import { createPermissionContext } from '../core/dist/kernel/permission.js';
-import { shownConfigOf } from '../core/dist/host/host.js';
+import { createHost, shownConfigOf } from '../core/dist/host/host.js';
 import { createConfigStore } from '../core/dist/kernel/config-store.js';
 import { configVersion } from '../core/dist/kernel/config-edit.js';
 import { historyPathOf, rememberHistory } from '../core/dist/kernel/input-history.js';
@@ -1320,6 +1320,88 @@ test('a saved generation choice lands now on an idle session and at the round ed
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('model selection checks the live session after waiting in its configuration queue', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-model-select-queue-'));
+  const home = join(root, 'home');
+  const project = join(root, 'project');
+  await Promise.all([mkdir(join(home, '.ligule'), { recursive: true }), mkdir(project)]);
+  const endpoint = 'http://127.0.0.1:1/v1';
+  await writeFile(join(home, '.ligule', 'config.toml'), [
+    '[model]',
+    'api = "chat-completions"',
+    `baseURL = "${endpoint}"`,
+    'model = "local-a"',
+    'apiKeyEnv = "HOST_SELECT_TEST_KEY"',
+    `services = [{ id = "local", name = "Local", api = "chat-completions", baseURL = "${endpoint}", apiKeyEnv = "HOST_SELECT_TEST_KEY", models = ["local-a", "local-b"] }]`,
+    'selection = { provider = "local", model = "local-a" }',
+    '',
+    '[policy]',
+    'mode = "auto"',
+  ].join('\n'));
+  const baseStore = createConfigStore({ projectRoot: project, userHome: home });
+  const readEntered = Promise.withResolvers();
+  const readGate = Promise.withResolvers();
+  let holdNextRead = false;
+  const configStore = {
+    ...baseStore,
+    async read() {
+      if (holdNextRead) {
+        holdNextRead = false;
+        readEntered.resolve();
+        await readGate.promise;
+      }
+      return baseStore.read();
+    },
+  };
+  const service = {
+    id: 'local', name: 'Local', api: 'chat-completions', baseURL: endpoint,
+    apiKeyEnv: 'HOST_SELECT_TEST_KEY', models: ['local-a', 'local-b'],
+  };
+  const config = createConfig({ user: {
+    boundary: project,
+    model: {
+      api: service.api, baseURL: endpoint, model: 'local-a', apiKeyEnv: service.apiKeyEnv,
+      services: [service], selection: { provider: 'local', model: 'local-a' },
+    },
+    policy: { mode: 'auto' },
+  } });
+  const provider = {
+    model: 'local-a', capabilities: MESSAGES_CAPABILITIES,
+    async *stream() { yield { type: 'text', text: 'unused' }; },
+  };
+  const host = createHost({
+    config,
+    provider,
+    policy: config.policy,
+    configStore,
+    deriveProvider: (next) => ({ ...provider, model: next.model.model }),
+  });
+  const connection = {
+    notify() {},
+    async request() { throw new Error('model selection does not request user approval'); },
+  };
+  try {
+    const { sessionId } = await host.handle({ method: 'session.create', params: {} }, connection);
+    holdNextRead = true;
+    const firstSelection = host.handle({ method: 'model.select', params: { sessionId, provider: 'local', model: 'local-a' } }, connection)
+      .catch((error) => error);
+    await Promise.race([
+      readEntered.promise,
+      delay(3_000).then(() => { throw new Error('the first model selection did not reach its configuration read'); }),
+    ]);
+    const queuedSelection = host.handle({ method: 'model.select', params: { sessionId, provider: 'local', model: 'local-b' } }, connection);
+    await host.handle({ method: 'session.close', params: { sessionId } }, connection);
+    readGate.resolve();
+    await firstSelection;
+    await assert.rejects(queuedSelection, (error) => error.code === 'session_not_open');
+  } finally {
+    readGate.resolve();
+    await host.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 // 会话列表只包含指定项目记录目录中的会话；未加载的项目环境会返回不支持错误。
 // 无效项目根分别返回稳定错误码；有效项目没有记录目录时返回空列表。
 test('one host keeps two projects apart, and a host without a loader says so', async () => {

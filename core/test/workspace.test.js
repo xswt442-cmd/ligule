@@ -220,7 +220,7 @@ test('协议交回那份登记，默认选择指得着一条登记，空的那�
   });
 });
 
-test('Host 删除工作区登记前要求目录存在，且保留项目和会话文件', async () => {
+test('Host removes workspace registration without changing project or session files', async () => {
   await withHost(async ({ connection, project, home }) => {
     await writeFile(join(project, 'keep.txt'), 'project files stay');
     const { sessionId } = await connection.request('session.create', {});
@@ -239,8 +239,12 @@ test('Host 删除工作区登记前要求目录存在，且保留项目和会话
     const restored = await connection.request('workspace.default.set', { directory: project });
     assert.equal(restored.workspaces[0].identity, workspaceIdentity(project));
     assert.ok((await connection.request('sessions.list', { projectRoot: project })).sessions.some((item) => item.id === sessionId));
+    await connection.request('workspace.default.set', { directory: '' });
+    await rm(project, { recursive: true, force: true });
+    const removedAfterMove = await connection.request('workspace.remove', { directory: project });
+    assert.equal(removedAfterMove.workspaces.length, 0, 'moved project can be removed by its old registered path');
     await assert.rejects(() => connection.request('workspace.remove', { directory: join(project, 'missing') }),
-      (error) => error.code === 'host_project_root_missing');
+      (error) => error.code === 'workspace_not_registered');
   });
 });
 
