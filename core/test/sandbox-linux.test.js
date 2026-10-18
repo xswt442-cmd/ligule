@@ -4,6 +4,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, lstatSync, linkSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { once } from 'node:events';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildLinuxSandbox } from '../dist/capability/sandbox-linux.js';
@@ -21,8 +22,7 @@ function fixture(t) {
   mkdirSync(testDirectory, { recursive: true });
   const root = mkdtempSync(join(testDirectory, 'sandbox-linux-'));
   temporaryDirectories.add(root);
-  const runtimeDirectory = process.env.XDG_RUNTIME_DIR ?? `/run/user/${process.getuid()}`;
-  const privateTempDir = mkdtempSync(join(runtimeDirectory, 'ligule-sandbox-private-'));
+  const privateTempDir = mkdtempSync(join(tmpdir(), 'ligule-sandbox-private-'));
   chmodSync(privateTempDir, 0o700);
   temporaryDirectories.add(privateTempDir);
   t.after(() => {
