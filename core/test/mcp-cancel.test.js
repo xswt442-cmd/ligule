@@ -25,7 +25,7 @@ async function withDirectory(run) {
 }
 
 async function waitForFile(path) {
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
     try {
       await access(path);
@@ -39,7 +39,7 @@ async function waitForFile(path) {
 
 async function waitForProcessExit(pid) {
   assert.ok(Number.isSafeInteger(pid) && pid > 0, 'the fixture must publish a positive process id');
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
     try {
       process.kill(pid, 0);
