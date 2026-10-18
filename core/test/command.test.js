@@ -104,6 +104,23 @@ test('Bash executable names are decoded from literals and mark dynamic names', a
     assert.equal(inspection.invocations[0].executableDynamic, false, command);
   }
 
+  const escaped = await inspectCommand(String.raw`r\m -rf /`);
+  assert.equal(escaped.invocations[0].executable, 'rm');
+  assert.equal(escaped.invocations[0].executableDynamic, false);
+
+  const ansiC = await inspectCommand(String.raw`$'r\x6d' -rf /`);
+  assert.equal(ansiC.invocations[0].executable, 'rm');
+  assert.equal(ansiC.invocations[0].executableDynamic, false);
+
+  const escapedPath = await inspectCommand(String.raw`rm -rf /home\/alice`);
+  assert.equal(escapedPath.invocations[0].arguments[1].value, '/home/alice');
+
+  const ansiCPath = await inspectCommand(String.raw`rm -rf $'\x2f'`);
+  assert.equal(ansiCPath.invocations[0].arguments[1].value, '/');
+
+  const unknownAnsiEscape = await inspectCommand(String.raw`$'r\q' -rf /`);
+  assert.equal(unknownAnsiEscape.invocations[0].executableDynamic, true);
+
   const dynamic = await inspectCommand(`${String.fromCharCode(36)}command -rf /`);
   assert.equal(dynamic.parsed.kind, 'unsupported');
   assert.equal(dynamic.invocations[0].executableDynamic, true);

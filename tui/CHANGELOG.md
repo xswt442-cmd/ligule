@@ -26,6 +26,7 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 - 共享模型服务配置支持逐模型上下文窗口和输出额度，按当前选择应用于请求与压缩，兼容原有模型标识列表。
 - 完整校验模型终止原因，区分空回复、输出耗尽、协议不完整及断流；非法工具批次不执行副作用，诊断不包含原始参数或网关错误正文。
 - 危险操作分类和自动审批统一使用解析后的 Bash 命令名；引号与字面片段拼接不能绕过硬拒绝或解释器审批。
+- Bash 危险命令检查会解码未加引号的转义和可识别的 ANSI-C 字符串；不完整或不支持的转义仍需逐次审批。
 - TUI 显示 Host 确认的运行阶段与无进展时长，并提供可操作的 Provider 错误提示。
 
 ### English
@@ -42,6 +43,7 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 - Shared service configuration supports per-model context windows and output budgets for requests and compaction, while preserving existing model ID lists.
 - Validate model finish reasons and distinguish empty replies, exhausted output, incomplete protocols, and interrupted bodies. Invalid tool batches have no side effects, and diagnostics omit raw arguments and gateway error bodies.
 - Dangerous-operation checks and automatic approval use the same parsed Bash executable name, so quoting or literal concatenation cannot bypass hard denials or interpreter approval.
+- Bash dangerous-command checks decode unquoted escapes and recognized ANSI-C strings; incomplete or unsupported escapes remain approval-gated.
 - TUI status shows Host-confirmed run phases and time without progress, with actionable Provider error messages.
 
 ## [0.0.4] - 2026-10-14

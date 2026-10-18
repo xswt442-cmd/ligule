@@ -118,10 +118,92 @@ function decodeDoubleQuotedContent(value: string): string {
   return value.replace(/\\([$`"\\\n])/gu, (_match, character: string) => character === '\n' ? '' : character);
 }
 
+function decodeUnquotedWord(value: string): string | undefined {
+  let decoded = '';
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (character !== '\\') {
+      decoded += character;
+      continue;
+    }
+    const escaped = value[++index];
+    if (escaped === undefined) return undefined;
+    if (escaped !== '\n') decoded += escaped;
+  }
+  return decoded;
+}
+
+function decodeAnsiCEscapes(value: string): string | undefined {
+  // 只还原能明确表示的 ANSI-C 转义；未知或非 ASCII 数值转义保留为待审批值。
+  const simpleEscapes: Readonly<Record<string, string>> = {
+    a: '\u0007', b: '\b', e: '\u001b', E: '\u001b', f: '\f', n: '\n',
+    r: '\r', t: '\t', v: '\u000b', '\\': '\\', "'": "'", '"': '"', '?': '?',
+  };
+  let decoded = '';
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (character !== '\\') {
+      decoded += character;
+      continue;
+    }
+
+    const escaped = value[++index];
+    if (escaped === undefined) return undefined;
+    const simple = simpleEscapes[escaped];
+    if (simple !== undefined) {
+      decoded += simple;
+      continue;
+    }
+
+    if (escaped === 'c') {
+      const control = value[++index];
+      if (control === undefined || !/^[\x40-\x5f?]$/iu.test(control)) return undefined;
+      const code = control === '?' ? 0x7f : control.toUpperCase().charCodeAt(0) & 0x1f;
+      if (code === 0) return undefined;
+      decoded += String.fromCharCode(code);
+      continue;
+    }
+
+    if (escaped === 'x') {
+      const digits = value.slice(index + 1).match(/^[0-9a-f]{1,2}/iu)?.[0];
+      if (digits === undefined) return undefined;
+      const code = Number.parseInt(digits, 16);
+      if (code === 0 || code > 0x7f) return undefined;
+      decoded += String.fromCharCode(code);
+      index += digits.length;
+      continue;
+    }
+
+    if (escaped === 'u' || escaped === 'U') {
+      const length = escaped === 'u' ? 4 : 8;
+      const digits = value.slice(index + 1, index + 1 + length);
+      if (digits.length !== length || !/^[0-9a-f]+$/iu.test(digits)) return undefined;
+      const code = Number.parseInt(digits, 16);
+      if (code === 0 || code > 0x7f) return undefined;
+      decoded += String.fromCharCode(code);
+      index += length;
+      continue;
+    }
+
+    if (/^[0-7]$/u.test(escaped)) {
+      const digits = `${escaped}${value.slice(index + 1).match(/^[0-7]{0,2}/u)?.[0] ?? ''}`;
+      const code = Number.parseInt(digits, 8);
+      if (code === 0 || code > 0x7f) return undefined;
+      decoded += String.fromCharCode(code);
+      index += digits.length - 1;
+      continue;
+    }
+
+    return undefined;
+  }
+  return decoded;
+}
+
 function bashArgumentValue(node: TreeSitterParser.SyntaxNode, inDoubleQuote = false): BashArgumentValue {
   const source = node.text;
   if (node.type === 'word' && node.childCount === 0) {
-    return { value: source, dynamic: false, tildeExpansion: /^~(?:\/|$)/u.test(source) };
+    const value = decodeUnquotedWord(source);
+    return { value, dynamic: value === undefined, tildeExpansion: /^~(?:\/|$)/u.test(source) };
   }
   if (node.type === 'number' || node.type === 'string_content') {
     return {
@@ -132,6 +214,12 @@ function bashArgumentValue(node: TreeSitterParser.SyntaxNode, inDoubleQuote = fa
   }
   if (node.type === 'raw_string') {
     return { value: source.slice(1, -1), dynamic: false, tildeExpansion: false };
+  }
+  if (node.type === 'ansi_c_string') {
+    const value = source.startsWith("$'") && source.endsWith("'")
+      ? decodeAnsiCEscapes(source.slice(2, -1))
+      : undefined;
+    return { value, dynamic: value === undefined, tildeExpansion: false };
   }
   if (node.type === 'string' && (source === "''" || source === '""')) {
     return { value: '', dynamic: false, tildeExpansion: false };

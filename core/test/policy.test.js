@@ -192,6 +192,13 @@ test('hard denied commands remain denied across modes, allow rules, and affirmat
     ['bash', "'rm' -rf /"],
     ['bash', '"rm" -rf /'],
     ['bash', 'r""m -rf /'],
+    ['bash', String.raw`r\m -rf /`],
+    ['bash', String.raw`$'rm' -rf /`],
+    ['bash', String.raw`$'r\x6d' -rf /`],
+    ['bash', String.raw`$'r\155' -rf /`],
+    ['bash', String.raw`rm -rf $'\x2f'`],
+    ['bash', String.raw`rm -rf $'\057'`],
+    ['bash', String.raw`rm -rf /home\/alice`],
     ['bash', '$(rm -rf ~)'],
     ['bash', 'rm -rf /*'],
     ['bash', 'sudo env APP_MODE=test command exec bash -c "rm -rf ~/*"'],
@@ -272,6 +279,8 @@ test('the dangerous-command parser follows known wrappers and safe PowerShell en
   const scopedCleanup = [
     ['bash', 'bash -c "rm -rf ~/project/dist"'],
     ['bash', 'rm -rf $HOME/project/dist'],
+    ['bash', String.raw`rm -rf /tmp/x\ y`],
+    ['bash', String.raw`rm -rf \~`],
     ['powershell', 'pwsh -Command "Remove-Item -Path $HOME\\project\\dist -Recurse -Force"'],
   ];
   for (const [kind, command] of scopedCleanup) {
@@ -284,6 +293,12 @@ test('the dangerous-command parser follows known wrappers and safe PowerShell en
 
 test('an undecodable PowerShell command is not classified as a hard denial', async () => {
   assert.equal((await classifyDangerousCommand('pwsh -EncodedCommand not-base64', 'bash'))?.kind, 'approval');
+});
+
+test('an undecodable Bash ANSI-C command remains approval-gated', async () => {
+  for (const command of [String.raw`$'r\q' -rf /`, String.raw`$'rm\x' -rf /`]) {
+    assert.equal((await classifyDangerousCommand(command, 'bash'))?.kind, 'approval', command);
+  }
 });
 
 test('ordinary workspace cleanup and unrelated process operations are not hard denied', async () => {
