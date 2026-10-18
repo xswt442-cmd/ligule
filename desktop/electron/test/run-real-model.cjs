@@ -241,6 +241,32 @@ async function allowApproval(tool, previousCount, failureCode) {
   if (clicked !== true) throw Object.assign(new Error(`${tool}_approval_action_missing`), { code: `${tool.replace(/[^a-z0-9]+/giu, '_')}_approval_action_missing` });
 }
 
+async function selectNewSessionPermission(profile) {
+  const opened = await evaluate(`(() => {
+    const trigger = document.querySelector('button.permission-trigger');
+    if (trigger === null) return false;
+    trigger.click();
+    return true;
+  })()`);
+  if (opened !== true) throw Object.assign(new Error('new_session_permission_control_missing'), { code: 'new_session_permission_control_missing' });
+  await waitFor(`document.querySelector('.permission-panel select') !== null`, 5_000, 'new_session_permission_panel_missing');
+  const selected = await evaluate(`(() => {
+    const field = document.querySelector('.permission-panel select');
+    const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
+    setter.call(field, ${JSON.stringify(profile)});
+    field.dispatchEvent(new Event('change', { bubbles: true }));
+    return field.value;
+  })()`);
+  if (selected !== profile) throw Object.assign(new Error('new_session_permission_selection_failed'), { code: 'new_session_permission_selection_failed' });
+  await waitFor(`document.querySelector('.permission-panel button.primary-button')?.disabled === false`, 5_000, 'new_session_permission_apply_disabled');
+  await evaluate(`document.querySelector('.permission-panel button.primary-button').click(); true`);
+  await waitFor(`(() => {
+    const label = document.querySelector('button.permission-trigger')?.textContent ?? '';
+    return document.querySelector('.permission-panel') === null
+      && (label.includes('工作区可写') || label.includes('Workspace write'));
+  })()`, 5_000, 'new_session_permission_not_applied');
+}
+
 async function enterAndSend(text) {
   await waitFor(`document.querySelector('textarea.composer-input') && !document.querySelector('textarea.composer-input').readOnly`, 20_000, 'composer_locked');
   const escaped = JSON.stringify(text);
@@ -293,6 +319,10 @@ async function runChecks() {
 
   const workspaceRegistration = await requestHost('workspaces.list');
   assert.ok(workspaceRegistration.workspaces.some(item => resolve(item.directory) === resolve(workspaceRoot)), 'isolated_workspace_not_registered');
+  if (typeof process.env.LIGULE_STUB_CONTROL === 'string' && process.env.LIGULE_STUB_CONTROL !== '') {
+    // 新会话默认只读；审批用例先通过真实设置控件授予工作区文件工具写入权限。
+    await selectNewSessionPermission('workspace-write');
+  }
 
   await check(`${providerLabel}工具审批拒绝`, async () => {
     await enterAndSend('请调用 create 工具，在项目根目录创建 model-denial-proof.txt，内容只写 DENIED。必须先调用工具，再简短说明结果。');
@@ -340,47 +370,36 @@ async function runChecks() {
 
   const stubControl = process.env.LIGULE_STUB_CONTROL;
   if (typeof stubControl === 'string' && stubControl !== '') {
-    await check(`${providerLabel}Skill 与 MCP 装载`, async () => {
+    await check(`${providerLabel}Skill 与 MCP 权限边界`, async () => {
       if (typeof sessionId !== 'string') throw Object.assign(new Error('skill_mcp_session_unavailable'), { code: 'skill_mcp_session_unavailable' });
       const approvalCount = await evaluate(`window.__realModelFrames.filter(frame => frame.method === 'approval.request').length`);
-      await enterAndSend('执行 desktop-skill-mcp-load-proof：激活 desktop-smoke Skill，按其说明检查 MCP echo，并完成加载验证。');
+      await enterAndSend('执行 desktop-skill-mcp-load-proof：激活 desktop-smoke Skill，检查当前会话是否提供 MCP 工具，并简短说明权限边界。');
       await waitFor(`window.__realModelFrames.filter(frame => frame.method === 'approval.request').length > ${approvalCount}`, 60_000, 'skill_activation_approval_missing');
       const skillApproval = await evaluate(`window.__realModelFrames.filter(frame => frame.method === 'approval.request').at(-1)?.approvalTool ?? null`);
       if (skillApproval !== 'skill') throw Object.assign(new Error('skill_activation_approval_not_requested'), { code: 'skill_activation_approval_not_requested' });
       await allowApproval('skill', approvalCount, 'skill_mcp_approval_card_missing');
-      await waitFor(`window.__realModelFrames.filter(frame => frame.method === 'approval.request').length > ${approvalCount + 1}`, 60_000, 'mcp_inspect_approval_missing');
-      const inspectApproval = await evaluate(`window.__realModelFrames.filter(frame => frame.method === 'approval.request').at(-1)?.approvalTool ?? null`);
-      if (inspectApproval !== 'mcp.inspect') throw Object.assign(new Error('mcp_inspect_approval_not_requested'), { code: 'mcp_inspect_approval_not_requested' });
-      await allowApproval('mcp.inspect', approvalCount + 1, 'mcp_inspect_approval_card_missing');
-      await waitFor(`window.__realModelFrames.filter(frame => frame.method === 'approval.request').length > ${approvalCount + 2}`, 60_000, 'mcp_call_approval_missing');
-      const mcpApproval = await evaluate(`window.__realModelFrames.filter(frame => frame.method === 'approval.request').at(-1)?.approvalTool ?? null`);
-      if (mcpApproval !== 'mcp:fixture/echo') throw Object.assign(new Error('mcp_effective_capability_approval_not_requested'), { code: 'mcp_effective_capability_approval_not_requested' });
-      await allowApproval('mcp:fixture/echo', approvalCount + 2, 'mcp_approval_card_missing');
       await waitForSessionIdle(60_000, 'skill_mcp_turn_did_not_finish');
 
       const record = await requestHost('session.read', { sessionId, fullResults: true });
       const events = record.events ?? [];
       const skill = events.findLast(event => event.kind === 'tool' && event.tool === 'skill');
-      const inspect = events.findLast(event => event.kind === 'tool' && event.tool === 'mcp.inspect');
-      const call = events.findLast(event => event.kind === 'tool' && event.tool === 'mcp.call');
       if (skill?.resultKind !== 'result' || skill.resultFailed) throw Object.assign(new Error('skill_activation_result_missing'), { code: 'skill_activation_result_missing' });
       if (skill.resultHasSkillProof !== true) throw Object.assign(new Error('project_skill_body_not_loaded'), { code: 'project_skill_body_not_loaded' });
-      if (inspect?.resultKind !== 'result' || inspect.resultFailed) throw Object.assign(new Error('mcp_stdio_tool_definition_not_loaded'), { code: 'mcp_stdio_tool_definition_not_loaded' });
-      if (inspect.resultHasSchemaDigest !== true) throw Object.assign(new Error('mcp_definition_digest_missing'), { code: 'mcp_definition_digest_missing' });
-      if (call?.resultKind !== 'result' || call.resultFailed) throw Object.assign(new Error('mcp_tool_call_not_completed'), { code: 'mcp_tool_call_not_completed' });
-      if (call.resultHasMcpProof !== true) throw Object.assign(new Error('mcp_fixture_result_missing'), { code: 'mcp_fixture_result_missing' });
+      if (events.some(event => event.kind === 'tool' && (event.tool === 'mcp.inspect' || event.tool === 'mcp.call'))) {
+        throw Object.assign(new Error('mcp_tool_exposed_to_restricted_session'), { code: 'mcp_tool_exposed_to_restricted_session' });
+      }
 
       const response = await fetch(`${stubControl}/state`);
       const state = await response.json();
-      for (const [key, code] of [
-        ['catalogLoaded', 'skill_mcp_catalog_not_loaded'],
-        ['skillActivated', 'skill_mcp_skill_not_activated'],
-        ['mcpDefinitionLoaded', 'skill_mcp_definition_not_loaded'],
-        ['mcpCallSucceeded', 'skill_mcp_call_not_completed'],
+      for (const [key, expected, code] of [
+        ['skillToolAvailable', true, 'skill_mcp_skill_tool_not_available'],
+        ['skillActivated', true, 'skill_mcp_skill_not_activated'],
+        ['mcpInspectAvailable', false, 'mcp_inspect_exposed_to_restricted_session'],
+        ['mcpCallAvailable', false, 'mcp_call_exposed_to_restricted_session'],
       ]) {
-        if (state.skillMcpProof?.[key] !== true) throw Object.assign(new Error(code), { code });
+        if (state.skillMcpProof?.[key] !== expected) throw Object.assign(new Error(code), { code });
       }
-      return '真实 Electron 窗口通过 Node Host 装载项目 Skill，启动 stdio MCP fixture、读取 echo 定义并完成经审批的工具调用';
+      return '真实 Electron 窗口装载项目 Skill；workspace-write 会话没有向模型开放 MCP 工具，也没有记录 MCP 调用';
     });
   }
 

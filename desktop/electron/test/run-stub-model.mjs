@@ -39,7 +39,7 @@ const providerLabel = '本地 stub 模型';
 const providerRequests = [];
 // 启用后只记录新请求而不返回响应，用于验证界面在请求等待期间的行为。
 let hangRequests = false;
-const skillMcpProof = { catalogLoaded: false, skillActivated: false, mcpDefinitionLoaded: false, mcpCallSucceeded: false };
+const skillMcpProof = { skillToolAvailable: false, skillActivated: false, mcpInspectAvailable: false, mcpCallAvailable: false };
 
 function streamChunk(response, chunk) {
   if (!response.headersSent) response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
@@ -114,45 +114,13 @@ const server = createServer(async (request, response) => {
       const skill = body.tools?.find(item => item.function?.name === 'skill');
       const inspect = body.tools?.find(item => item.function?.description?.startsWith('Look up what an MCP server offers'));
       const call = body.tools?.find(item => item.function?.description?.startsWith('Call one MCP tool whose definition you have inspected'));
-      const system = messages.filter(message => message.role === 'system').map(message => message.content ?? '').join('\n');
-      skillMcpProof.catalogLoaded = system.includes('desktop-smoke:') && skill !== undefined && inspect !== undefined && call !== undefined;
+      skillMcpProof.skillToolAvailable = skill !== undefined;
       skillMcpProof.skillActivated = String(messages.at(-1)?.content ?? '').includes('SKILL_LOAD_PROOF');
-      if (skill === undefined || inspect === undefined || call === undefined) {
-        jsonResponse(response, 500, { error: { message: 'stub_skill_mcp_catalog_missing' } });
-        return;
-      }
-      respondWithTool(response, inspect.function.name, { server: 'fixture', tool: 'echo' }, 'stub-skill-mcp-inspect');
-      return;
-    }
-    if (workflowStep === 2) {
-      const call = body.tools?.find(item => item.function?.description?.startsWith('Call one MCP tool whose definition you have inspected'));
-      try {
-        const envelope = JSON.parse(String(messages.at(-1)?.content ?? ''));
-        const definition = JSON.parse(envelope.text);
-        const digest = definition.schemaDigest;
-        skillMcpProof.mcpDefinitionLoaded = definition.name === 'echo' && typeof digest === 'string' && digest.length === 12;
-        if (call === undefined || !skillMcpProof.mcpDefinitionLoaded) throw new Error('stub_mcp_definition_missing');
-        respondWithTool(response, call.function.name, {
-          server: 'fixture',
-          tool: 'echo',
-          arguments: JSON.stringify({ value: 'MCP_LOADING_PROOF' }),
-          schemaDigest: digest,
-        }, 'stub-skill-mcp-call');
-      } catch (error) {
-        jsonResponse(response, 500, { error: { message: error instanceof Error ? error.message : 'stub_mcp_definition_invalid' } });
-      }
-      return;
-    }
-    if (workflowStep === 3) {
-      let envelope;
-      try { envelope = JSON.parse(String(messages.at(-1)?.content ?? '')); }
-      catch { skillMcpProof.mcpCallSucceeded = false; jsonResponse(response, 500, { error: { message: 'stub_mcp_call_result_invalid' } }); return; }
-      skillMcpProof.mcpCallSucceeded = typeof envelope?.text === 'string' && envelope.text.includes('echo: MCP_LOADING_PROOF');
-      if (!skillMcpProof.mcpCallSucceeded) {
-        jsonResponse(response, 500, { error: { message: 'stub_mcp_call_failed' } });
-        return;
-      }
-      streamChunk(response, { choices: [{ index: 0, delta: { content: 'Skill 已激活，MCP fixture 已返回 MCP_LOADING_PROOF。' } }] });
+      skillMcpProof.mcpInspectAvailable = inspect !== undefined;
+      skillMcpProof.mcpCallAvailable = call !== undefined;
+      streamChunk(response, { choices: [{ index: 0, delta: { content: inspect === undefined || call === undefined
+        ? 'Skill 已激活；当前会话权限没有开放 MCP 工具。'
+        : 'Skill 已激活；检测到 MCP 工具。' } }] });
       finish('stop');
       return;
     }
@@ -212,7 +180,7 @@ await writeFile(join(skillDirectory, 'SKILL.md'), [
   '---',
   '',
   'SKILL_LOAD_PROOF: this project skill was activated in the isolated Electron acceptance run.',
-  'When requested, use the fixture MCP server echo tool with MCP_LOADING_PROOF.',
+      'If this session does not expose MCP tools, explain that its permissions keep them unavailable.',
   '',
 ].join('\n'), 'utf8');
 await writeFile(schemaPath, `${JSON.stringify({
