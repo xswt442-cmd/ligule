@@ -34,8 +34,10 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly initialModel?: string;
   readonly initialThinkingEffort?: string;
   readonly initialOutputTokens?: number;
+  readonly initialLoopIterations?: number;
   readonly thinkingEffort?: string;
   readonly outputTokens?: number;
+  readonly loopIterations?: number;
   readonly resetModel?: boolean;
   readonly resetThinking?: boolean;
   readonly resetOutputTokens?: boolean;
@@ -71,6 +73,7 @@ export const METHODS = Object.freeze({
         initialModel: { type: 'string', description: 'model ID for an initial model selection; must be paired with initialProvider' },
         initialThinkingEffort: { type: 'string', description: 'provider-supported effort to apply before the first run' },
         initialOutputTokens: { type: 'integer', minimum: 1, description: 'optional session output-token limit; the Host enforces model and context ceilings' },
+        initialLoopIterations: { type: 'integer', minimum: 1, description: 'optional maximum model/tool iterations for each user turn in this session' },
       },
       description: 'a session starts on the project the Host was launched on; naming another project is optional',
     },
@@ -204,7 +207,7 @@ export const METHODS = Object.freeze({
     parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
   },
   'session.configure': {
-    description: 'Read or change one session-owned category: mode, policy, model and generation settings. Generation changes apply at the next turn boundary and never write configuration files.',
+    description: 'Read or change one session-owned category: mode, policy, model generation, or the per-turn iteration limit. Loop-limit changes apply at the next turn boundary and never write configuration files.',
     parameters: { type: 'object', properties: {
       sessionId: SESSION_ID,
       mode: { type: 'string', description: 'select a mode; default restores the mode configured for this project' },
@@ -213,6 +216,7 @@ export const METHODS = Object.freeze({
       model: { type: 'string', description: 'model ID for a model selection; must be paired with provider' },
       thinkingEffort: { type: 'string', description: 'a value advertised by the selected provider, or default to inherit the provider default' },
       outputTokens: { type: 'integer', minimum: 1, description: 'session output-token maximum bounded by the provider and context window' },
+      loopIterations: { type: 'integer', minimum: 1, description: 'maximum model/tool iterations per user turn in this session' },
       resetModel: { type: 'boolean', description: 'restore the model selection inherited from the current project configuration' },
       resetThinking: { type: 'boolean', description: 'inherit the selected provider default thinking behavior' },
       resetOutputTokens: { type: 'boolean', description: 'inherit the selected provider output-token setting' },

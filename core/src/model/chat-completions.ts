@@ -3,7 +3,7 @@
 // 此适配器负责请求体结构、流式工具参数组装，以及独立 `role:"tool"` 结果消息。
 import { createHash } from 'node:crypto';
 import { KernelError } from '../kernel/error.js';
-import { resolveOutputTokens } from './output-budget.js';
+import { outputTokenCeiling, resolveOutputTokens } from './output-budget.js';
 import { checkedThinkingEffort, thinkingCapabilityOf, type DeepSeekThinkingEffort } from './thinking.js';
 import {
   apiRoot, assertAllAnswered, DEFAULT_RETRY, open, parseSse, readCredential, readJson, resolveCapabilities, resultText, SSE_DONE,
@@ -202,11 +202,13 @@ export function createChatCompletionsProvider({
   const thinkingEffort = requestedThinkingEffort === undefined
     ? undefined
     : checkedThinkingEffort(requestedThinkingEffort, thinkingCapability);
-  const budget = resolveOutputTokens({ baseUrl: root, model, requested: outputTokens,
+  const budgetLimits = {
     defaultTokens: effective.maxOutputTokens,
     configuredLimit: capabilities?.maxOutputTokens === undefined ? undefined : effective.maxOutputTokens,
     ...(declaredOutputLimit === undefined ? {} : { declaredOutputLimit }),
-    contextLimit: contextTokens });
+  };
+  const maxOutputTokens = outputTokenCeiling({ baseUrl: root, model, ...budgetLimits });
+  const budget = resolveOutputTokens({ baseUrl: root, model, requested: outputTokens, ...budgetLimits, contextLimit: contextTokens });
 
   async function* stream(request: ModelRequest, { signal }: { readonly signal?: AbortSignal | null } = {}): AsyncGenerator<ProviderEvent> {
     const toolNames = toolNameMapping(request);
@@ -373,6 +375,7 @@ export function createChatCompletionsProvider({
     requiresCompletion: true as const,
     model,
     capabilities: effective,
+    maxOutputTokens,
     outputTokens: budget,
     ...(thinkingEffort === undefined ? {} : { thinkingEffort }),
     stream,

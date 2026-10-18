@@ -146,6 +146,8 @@ interface SessionGeneration {
 interface InitialSessionSettings {
   readonly mode?: string;
   readonly policy?: Exclude<PolicyMode, 'default'>;
+  readonly loopIterations?: number;
+  readonly persistLoopIterations: boolean;
   readonly generation: SessionGeneration;
   readonly persistGeneration: boolean;
 }
@@ -164,6 +166,9 @@ interface HostSessionBase {
   readonly asks: Set<() => void>;
   readonly environment: ProjectEnvironment;
   readonly mode: ModeState;
+  loopIterations: number;
+  readonly loopModelCalls: number;
+  pendingLoopIterations?: number;
   generation: SessionGeneration;
   pendingGeneration?: SessionGeneration;
   pending?: ModeFile;
@@ -391,6 +396,13 @@ function loopLimitsOf(config: HostConfigSnapshot): LoopLimits {
   return {
     iterations: positiveInteger(limits.iterations, 'iterations'),
     modelCalls: positiveInteger(limits.modelCalls, 'modelCalls'),
+  };
+}
+
+function sessionLoopLimits(state: HostSessionBase): LoopLimits {
+  return {
+    get iterations() { return state.loopIterations; },
+    get modelCalls() { return state.loopModelCalls; },
   };
 }
 
@@ -665,6 +677,13 @@ export function createHost({
       }
       options.thinkingEffort = params.initialThinkingEffort as HostGenerationOptions['thinkingEffort'];
     }
+    let loopIterations: number | undefined;
+    if (params.initialLoopIterations !== undefined) {
+      if (!Number.isSafeInteger(params.initialLoopIterations) || params.initialLoopIterations < 1) {
+        throw new KernelError('host_loop_limits_invalid', { detail: 'iterations must be a positive safe integer' });
+      }
+      loopIterations = params.initialLoopIterations;
+    }
     const persistGeneration = selection !== undefined || Object.keys(options).length > 0;
     const provider = persistGeneration ? deriveProvider({ ...env.config, model }, options) : env.generation?.provider ?? env.provider;
     const mode = params.initialMode === undefined
@@ -677,6 +696,8 @@ export function createHost({
     return {
       ...(mode === undefined ? {} : { mode }),
       ...(policy === undefined ? {} : { policy }),
+      ...(loopIterations === undefined ? {} : { loopIterations }),
+      persistLoopIterations: loopIterations !== undefined,
       generation: { provider, model, ...(selection === undefined ? {} : { explicit: true }), options },
       persistGeneration,
     };
@@ -993,6 +1014,10 @@ export function createHost({
             state.pendingGeneration = undefined;
             state.compaction = state.rebuildCompaction(state.generation.model);
           }
+          if (state.pendingLoopIterations !== undefined) {
+            state.loopIterations = state.pendingLoopIterations;
+            state.pendingLoopIterations = undefined;
+          }
         } finally {
           if (state.progressId === progress.id) {
             state.progress = undefined;
@@ -1130,6 +1155,7 @@ export function createHost({
     const listeners: ((event: SessionEvent) => void)[] = [];
     const asks = new Set<() => void>();
     const modeState: ModeState = { file: undefined, tools: [], undo: () => {} };
+    const configuredLoopLimits = loopLimitsOf(config);
     // 新会话可能尚未选择模式，因此在创建记录时再解析模式身份。
     const session = observedSession(createSessionLog({
       directory,
@@ -1156,6 +1182,8 @@ export function createHost({
       mode: modeState,
       pending: undefined,
       environment: env,
+      loopIterations: initial?.loopIterations ?? configuredLoopLimits.iterations,
+      loopModelCalls: configuredLoopLimits.modelCalls,
       generation: initial?.generation ?? env.generation ?? { provider, model: modelConfigOf(config), options: {} },
       adopt: async () => {},
     };
@@ -1166,6 +1194,13 @@ export function createHost({
     try {
     if (recover) {
       const events = await session.read();
+      const savedLoopIterations = events.filter((event) => event.kind === 'sessionLoopIterations').at(-1)?.iterations;
+      if (savedLoopIterations !== undefined) {
+        if (typeof savedLoopIterations !== 'number' || !Number.isSafeInteger(savedLoopIterations) || savedLoopIterations < 1) {
+          throw new KernelError('host_loop_limits_invalid', { detail: 'saved iterations must be a positive safe integer' });
+        }
+        state.loopIterations = savedLoopIterations;
+      }
       const saved = events.filter((event) => event.kind === 'sessionGeneration' || event.kind === 'modelSelection').at(-1);
       if (saved !== undefined) {
         const baseModel = { ...(env.generation?.model ?? modelConfigOf(config)) };
@@ -1279,7 +1314,7 @@ export function createHost({
       plugins: basePlugins,
       modePaths,
       modeFile: () => state.mode.file,
-      loopLimits: loopLimitsOf(config),
+      loopLimits: sessionLoopLimits(state),
     })]);
     cleanup.push(() => assembly.dispose());
     // 加载器已按字节预算处理项目指令片段，这里直接登记，避免重复截断。
@@ -1366,6 +1401,9 @@ export function createHost({
     if (initial?.persistGeneration === true) {
       await session.append(sessionGenerationEvent(state.generation));
     }
+    if (initial?.persistLoopIterations === true && initial.loopIterations !== undefined) {
+      await session.append({ kind: 'sessionLoopIterations', ignorable: true, iterations: initial.loopIterations });
+    }
     // 压缩属于会话。摘要请求使用底层提供方，不向客户端转发流式内容。
     // 未配置模型上下文窗口时关闭压缩。
     const rebuildCompaction = (model: Record<string, unknown>) => {
@@ -1401,7 +1439,7 @@ export function createHost({
       provider: observedProvider(live, (event) => connection.notify({ notify: 'delta', sessionId: id, event })),
       prompt,
       session,
-      limits: loopLimitsOf(config),
+      limits: sessionLoopLimits(state),
       compaction: loopCompaction,
       onProgress: (event) => {
         if (state.progressId !== undefined) observeLoopProgress(state as HostSessionState, connection, state.progressId, event);
@@ -1467,7 +1505,7 @@ export function createHost({
       },
       outputTokens: generation.provider.outputTokens ?? null,
       contextTokens: generation.provider.contextTokens ?? null,
-      maxOutputTokens: generation.provider.capabilities?.maxOutputTokens ?? null,
+      maxOutputTokens: generation.provider.maxOutputTokens ?? null,
     });
     const latest = state.environment.store === undefined
       ? state.environment.config
@@ -1508,10 +1546,11 @@ export function createHost({
     const modes = state.environment.modePaths === undefined
       ? { modes: [], invalid: [], truncated: false }
       : await listModes(state.environment.modePaths);
-    const pending = state.pendingGeneration === undefined && state.pending === undefined
+    const pending = state.pendingGeneration === undefined && state.pending === undefined && state.pendingLoopIterations === undefined
       ? null
       : {
           mode: state.pending?.name ?? null,
+          loopIterations: state.pendingLoopIterations ?? null,
           generation: state.pendingGeneration === undefined ? null : generationView(state.pendingGeneration),
         };
     return {
@@ -1519,6 +1558,7 @@ export function createHost({
       applies: 'unchanged',
       effective: {
         mode: state.mode.file?.name ?? null,
+        loopIterations: state.loopIterations,
         policy: { mode: state.chain.mode, source: state.chain.modeSource, default: state.chain.configuredMode() },
         generation: generationView(state.generation),
       },
@@ -1531,10 +1571,11 @@ export function createHost({
   async function configureSession(state: HostSessionState, params: HostMethodParams): Promise<Record<string, unknown>> {
     const modeChanged = params.mode !== undefined;
     const policyChanged = params.policy !== undefined;
+    const loopChanged = params.loopIterations !== undefined;
     const generationChanged = params.provider !== undefined || params.model !== undefined
       || params.thinkingEffort !== undefined || params.outputTokens !== undefined
       || params.resetModel === true || params.resetThinking === true || params.resetOutputTokens === true;
-    const categories = Number(modeChanged) + Number(policyChanged) + Number(generationChanged);
+    const categories = Number(modeChanged) + Number(policyChanged) + Number(loopChanged) + Number(generationChanged);
     if (categories > 1) throw new KernelError('session_configure_one_category');
     if (categories === 0) return await sessionConfiguration(state);
 
@@ -1564,6 +1605,22 @@ export function createHost({
       else if (params.policy === 'ask' || params.policy === 'auto' || params.policy === 'never') state.chain.setMode(params.policy);
       else throw new KernelError('policy_mode_unknown');
       return { ...(await sessionConfiguration(state)), applies: 'next_decision' };
+    }
+
+    if (loopChanged) {
+      const iterations = params.loopIterations;
+      if (typeof iterations !== 'number' || !Number.isSafeInteger(iterations) || iterations < 1) {
+        throw new KernelError('host_loop_limits_invalid', { detail: 'iterations must be a positive safe integer' });
+      }
+      if (iterations === (state.pendingLoopIterations ?? state.loopIterations)) {
+        return { ...(await sessionConfiguration(state)), applies: 'unchanged' };
+      }
+      await state.session.append({ kind: 'sessionLoopIterations', ignorable: true, iterations });
+      if (state.running === undefined) {
+        state.loopIterations = iterations;
+        state.pendingLoopIterations = undefined;
+      } else state.pendingLoopIterations = iterations;
+      return { ...(await sessionConfiguration(state)), applies: state.running === undefined ? 'now' : 'next_round' };
     }
 
     const hasProvider = params.provider !== undefined;
@@ -1637,7 +1694,8 @@ export function createHost({
           await noteWorkspace(env);
           const hasInitialSettings = message.params.initialMode !== undefined || message.params.initialPolicy !== undefined
             || message.params.initialProvider !== undefined || message.params.initialModel !== undefined
-            || message.params.initialThinkingEffort !== undefined || message.params.initialOutputTokens !== undefined;
+            || message.params.initialThinkingEffort !== undefined || message.params.initialOutputTokens !== undefined
+            || message.params.initialLoopIterations !== undefined;
           return hasInitialSettings ? { ...created, settingsApplied: true } : created;
         }
         case 'session.open': {

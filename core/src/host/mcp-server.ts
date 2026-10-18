@@ -52,13 +52,15 @@ const sessionChanges = {
     model: { type: ['object', 'null'], additionalProperties: false, properties: { provider: id, model: { type: 'string', minLength: 1, maxLength: 256 } }, required: ['provider', 'model'] },
     thinking: { type: ['object', 'null'], additionalProperties: false, properties: { effort: { type: 'string', enum: ['default', 'none', 'low', 'high', 'max'] } }, required: ['effort'] },
     outputTokens: { type: ['integer', 'null'], minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+    loopIterations: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
   },
   oneOf: [
     { maxProperties: 0 },
     { required: ['mode'], maxProperties: 1 },
     { required: ['policy'], maxProperties: 1 },
+    { required: ['loopIterations'], maxProperties: 1 },
     {
-      not: { anyOf: [{ required: ['mode'] }, { required: ['policy'] }] },
+      not: { anyOf: [{ required: ['mode'] }, { required: ['policy'] }, { required: ['loopIterations'] }] },
       anyOf: [{ required: ['model'] }, { required: ['thinking'] }, { required: ['outputTokens'] }],
     },
   ],
@@ -70,12 +72,14 @@ const initialSettings = {
     model: { type: 'object', additionalProperties: false, properties: { provider: id, model: { type: 'string', minLength: 1, maxLength: 256 } }, required: ['provider', 'model'] },
     thinking: { type: 'object', additionalProperties: false, properties: { effort: { type: 'string', enum: ['default', 'none', 'low', 'high', 'max'] } }, required: ['effort'] },
     outputTokens: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+    loopIterations: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
   },
 };
 const configurationOutput = object({
   sessionId: id,
   effective: { type: 'object', additionalProperties: false, properties: {
     mode: { type: ['string', 'null'] },
+    loopIterations: { type: 'integer', minimum: 1 },
     policy: { type: 'object', additionalProperties: false, properties: {
       mode: { type: 'string', enum: ['ask', 'auto', 'never'] }, source: { type: 'string' }, default: { type: 'string' },
     }, required: ['mode', 'source', 'default'] },
@@ -86,9 +90,10 @@ const configurationOutput = object({
       }, required: ['supported', 'efforts', 'defaultEffort', 'effort'] },
       outputTokens: { type: ['integer', 'null'] }, contextTokens: { type: ['integer', 'null'] }, maxOutputTokens: { type: ['integer', 'null'] },
     }, required: ['model', 'thinking', 'outputTokens', 'contextTokens', 'maxOutputTokens'] },
-  }, required: ['mode', 'policy', 'generation'] },
+  }, required: ['mode', 'loopIterations', 'policy', 'generation'] },
   pending: { type: ['object', 'null'], additionalProperties: false, properties: {
     mode: { type: ['string', 'null'] },
+    loopIterations: { type: ['integer', 'null'], minimum: 1 },
     generation: { type: ['object', 'null'], additionalProperties: false, properties: {
       model: { type: 'object', additionalProperties: false, properties: { provider: { type: 'string' }, model: { type: 'string' } }, required: ['provider', 'model'] },
       thinking: { type: 'object', additionalProperties: false, properties: {
@@ -96,7 +101,7 @@ const configurationOutput = object({
       }, required: ['supported', 'efforts', 'defaultEffort', 'effort'] },
       outputTokens: { type: ['integer', 'null'] }, contextTokens: { type: ['integer', 'null'] }, maxOutputTokens: { type: ['integer', 'null'] },
     }, required: ['model', 'thinking', 'outputTokens', 'contextTokens', 'maxOutputTokens'] },
-  }, required: ['mode', 'generation'] },
+  }, required: ['mode', 'loopIterations', 'generation'] },
   available: { type: 'object', additionalProperties: false, properties: {
     modes: { type: 'object', additionalProperties: false, properties: {
       modes: { type: 'array', maxItems: 128, items: object({ name: { type: 'string', maxLength: 64 }, layer: { type: 'string' } }, ['name', 'layer']) },
@@ -135,14 +140,14 @@ const replyOutput = object({ requestId: id, sessionId: id, operationId: id, type
   decision: { type: 'string', enum: ['allow', 'deny'] }, answered: { type: 'integer' }, resolved: { type: 'boolean' } },
 ['requestId', 'sessionId', 'operationId', 'type', 'resolved']);
 const tools: Tool[] = [
-  { name: 'ligule_session_create', description: 'Create a writable session in the authorized project. Returns its sessionId. At most 64 open sessions per server. Optional initial settings require --operator and are applied before the session is returned.',
+  { name: 'ligule_session_create', description: 'Create a writable session in the authorized project. Returns its sessionId. At most 64 open sessions per server. Optional initial settings, including the per-turn loop limit, require --operator and are applied before the session is returned.',
     inputSchema: object({ projectRoot: root, initial: initialSettings }, ['projectRoot']), outputSchema: sessionOutput },
   { name: 'ligule_session_open', description: 'Resume a persistent session in the authorized project. Missing, locked or foreign sessions fail. No operation IDs survive server restart.',
     inputSchema: object({ projectRoot: root, sessionId: id }, ['projectRoot', 'sessionId']), outputSchema: sessionOutput },
   { name: 'ligule_session_list', description: 'List up to 50 persistent sessions belonging to the authorized project. Open one before reading its records.',
     inputSchema: object({ projectRoot: root, limit: { type: 'integer', minimum: 1, maximum: 50, default: 20 } }, ['projectRoot']),
     outputSchema: object({ sessions: { type: 'array', maxItems: 50, items: object({ sessionId: id, name: { type: 'string', maxLength: 120 }, archived: { type: 'boolean' }, createdAt: { type: ['string', 'null'], maxLength: 128 } }, ['sessionId', 'name', 'archived', 'createdAt']) } }, ['sessions']) },
-  { name: 'ligule_session_configure', description: 'Read this session’s effective and pending settings plus available modes, providers, models and verified thinking controls. Changes are session-scoped, require --operator, and apply only at documented turn boundaries.',
+  { name: 'ligule_session_configure', description: 'Read this session’s effective and pending settings plus available modes, providers, models and verified thinking controls. Set loopIterations to change the per-turn model/tool iteration cap. Changes are session-scoped, require --operator, and apply at documented turn boundaries.',
     inputSchema: object({ sessionId: id, changes: sessionChanges }, ['sessionId']), outputSchema: configurationOutput },
   { name: 'ligule_interaction_reply', description: 'Reply once to a real pending approval or question bound to its session and request ID. Approval replies require --operator; hard denials remain final.',
     inputSchema: object({

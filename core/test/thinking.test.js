@@ -38,6 +38,7 @@ test('verified thinking effort, output budget, and assistant reasoning reach the
   };
   try {
     const provider = providerFromConfig({ model: { ...official, serviceContextTokens: 32_768 } }, { thinkingEffort: 'high', outputTokens: 16_384 });
+    assert.equal(provider.maxOutputTokens, 393_216, 'the verified model output ceiling is separate from the current request budget and context window');
     const messages = [
       { role: 'assistant', text: '', reasoning: 'continue this verified reasoning', toolCalls: [{ id: 'call-1', name: 'read', args: { path: 'README.md' } }] },
       { role: 'tool', id: 'call-1', tool: 'read', content: 'file read' },

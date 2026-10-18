@@ -53,7 +53,7 @@ export interface SessionRecord {
 // 当前程序会写入的事件类型。未知事件仅在标记为 `ignorable` 时允许跳过，其他情况拒绝读取。
 // `usage` 虽不进入模型投影，但其序号仍用于校验检查点范围，因此必须保留。
 // `label` 保存会话名称和归档状态；这些信息供界面使用，不进入模型上下文。
-const WRITTEN_KINDS = ['session', 'user', 'reasoning', 'assistant', 'tool', 'mode', 'usage', 'turn', 'label', 'turnContext', 'modelSelection', 'sessionGeneration'];
+const WRITTEN_KINDS = ['session', 'user', 'reasoning', 'assistant', 'tool', 'mode', 'usage', 'turn', 'label', 'turnContext', 'modelSelection', 'sessionGeneration', 'sessionLoopIterations'];
 
 export function createSessionHeader({
   id,

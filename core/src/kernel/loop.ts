@@ -38,6 +38,7 @@ export type ProviderEvent =
 
 export interface ModelProvider {
   readonly requiresCompletion?: true;
+  readonly maxOutputTokens?: number;
   stream(request: ModelRequest, options?: { readonly signal?: AbortSignal }): AsyncIterable<ProviderEvent>;
 }
 
@@ -125,7 +126,7 @@ function modelMessagesOf(values: readonly unknown[]): ModelMessage[] {
   });
 }
 
-export const DEFAULT_LOOP_LIMITS: LoopLimits = Object.freeze({ iterations: 32, modelCalls: 64 });
+export const DEFAULT_LOOP_LIMITS: LoopLimits = Object.freeze({ iterations: 64, modelCalls: 64 });
 
 const TURN_CANCEL_CODES = new Set(['provider_cancelled', 'loop_cancelled', 'ask_user_cancelled']);
 

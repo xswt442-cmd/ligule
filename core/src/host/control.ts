@@ -66,6 +66,7 @@ export interface McpInitialSettings {
   readonly model?: { readonly provider: string; readonly model: string };
   readonly thinking?: { readonly effort: 'none' | 'low' | 'high' | 'max' | 'default' } | null;
   readonly outputTokens?: number | null;
+  readonly loopIterations?: number;
 }
 
 export interface McpSessionChanges {
@@ -74,6 +75,7 @@ export interface McpSessionChanges {
   readonly model?: { readonly provider: string; readonly model: string } | null;
   readonly thinking?: { readonly effort: 'none' | 'low' | 'high' | 'max' | 'default' } | null;
   readonly outputTokens?: number | null;
+  readonly loopIterations?: number;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -278,6 +280,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
           ...(initialThinking === undefined || initialThinking === null || initialThinking.effort === 'default'
             ? {} : { initialThinkingEffort: initialThinking.effort }),
           ...(initial.outputTokens === undefined || initial.outputTokens === null ? {} : { initialOutputTokens: initial.outputTokens }),
+          ...(initial.loopIterations === undefined ? {} : { initialLoopIterations: initial.loopIterations }),
         }),
       } }, connection));
       if (typeof result.sessionId !== 'string') throw new KernelError('host_response_invalid');
@@ -444,6 +447,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     else if (changes?.thinking !== undefined) params.thinkingEffort = changes.thinking.effort;
     if (changes?.outputTokens === null) params.resetOutputTokens = true;
     else if (changes?.outputTokens !== undefined) params.outputTokens = changes.outputTokens;
+    if (changes?.loopIterations !== undefined) params.loopIterations = changes.loopIterations;
     return await tracked(host.handle({ method: 'session.configure', params }, connection)).then(record);
   }
 

@@ -544,6 +544,7 @@ test('operator tools configure real sessions, answer Host interactions, and run 
   await writeFile(join(dataRoot, 'config.toml'), [
     '[model]', 'api = "chat-completions"', `baseURL = ${tomlString(baseURL)}`,
     'model = "operator-e2e-local"', `apiKeyEnv = "${apiKeyName}"`, '',
+    'services = [{ id = "deepseek", name = "DeepSeek", api = "chat-completions", baseURL = "https://api.deepseek.com/v1", apiKeyEnv = "OPERATOR_DEEPSEEK_KEY", models = ["deepseek-flash"] }]', '',
     '[policy]', 'mode = "ask"', '', '[host]', `sessionDirectory = ${tomlString(sessionDirectory)}`,
     '', '[limits]', 'contextTokens = 200000', '', '[loop]', 'iterations = 8', 'modelCalls = 16', '',
   ].join('\n'));
@@ -560,7 +561,10 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     } });
     toolFailure(invalidInitialModel, 'model_not_available', 'unlisted_initial_model');
     const created = toolData(await context.client.callTool({ name: 'ligule_session_create', arguments: {
-      projectRoot: project, initial: { mode: 'minimal', policy: 'ask', outputTokens: 2048 },
+      projectRoot: project, initial: {
+        mode: 'minimal', policy: 'ask', model: { provider: 'deepseek', model: 'deepseek-flash' },
+        thinking: { effort: 'high' }, outputTokens: 128000, loopIterations: 5,
+      },
     } }), 'operator_session_create');
     const sessionId = created.sessionId;
     assert.equal(created.settingsApplied, true);
@@ -568,16 +572,30 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     const readSettings = toolData(await context.client.callTool({ name: 'ligule_session_configure', arguments: { sessionId } }), 'session_configure_read');
     assert.equal(readSettings.applies, 'unchanged');
     assert.equal(readSettings.effective.policy.mode, 'ask');
-    assert.equal(readSettings.effective.generation.outputTokens, 2048);
+    assert.equal(readSettings.effective.loopIterations, 5);
+    assert.equal(readSettings.effective.generation.model.provider, 'deepseek');
+    assert.equal(readSettings.effective.generation.thinking.supported, true);
+    assert.equal(readSettings.effective.generation.thinking.effort, 'high');
+    assert.equal(readSettings.effective.generation.outputTokens, 128000);
+    assert.equal(readSettings.effective.generation.maxOutputTokens, 393216,
+      'MCP exposes the verified DeepSeek model ceiling instead of the adapter default');
     assert.ok(readSettings.available.services.some((service) => service.id === 'legacy' && service.models[0].id === 'operator-e2e-local'));
+    const configuredLoop = toolData(await context.client.callTool({ name: 'ligule_session_configure', arguments: {
+      sessionId, changes: { loopIterations: 7 },
+    } }), 'session_configure_loop_limit');
+    assert.equal(configuredLoop.applies, 'now');
+    assert.equal(configuredLoop.effective.loopIterations, 7);
     const invalidConfiguredModel = await context.client.callTool({ name: 'ligule_session_configure', arguments: {
       sessionId, changes: { model: { provider: 'legacy', model: 'not-in-this-config' } },
     } });
     toolFailure(invalidConfiguredModel, 'model_not_available', 'unlisted_session_model');
     const generationChanged = toolData(await context.client.callTool({ name: 'ligule_session_configure', arguments: {
-      sessionId, changes: { model: { provider: 'legacy', model: 'operator-e2e-local' }, outputTokens: 2048 },
+      sessionId, changes: {
+        model: { provider: 'legacy', model: 'operator-e2e-local' }, thinking: null, outputTokens: 2048,
+      },
     } }), 'session_configure_model_and_budget');
     assert.equal(generationChanged.applies, 'now');
+    assert.equal(generationChanged.effective.generation.maxOutputTokens, 8192);
     const modeChanged = toolData(await context.client.callTool({ name: 'ligule_session_configure', arguments: { sessionId, changes: { mode: 'full' } } }), 'session_configure_mode_full');
     assert.equal(modeChanged.applies, 'now');
     assert.equal(modeChanged.effective.mode, 'full');
@@ -603,6 +621,10 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     assert.equal(approval.details.args.path, 'operator-approved.txt');
     assert.equal(approvalStatus.waitingFor, 'approval');
     const foreignSession = toolData(await context.client.callTool({ name: 'ligule_session_create', arguments: { projectRoot: project } }), 'operator_foreign_session');
+    const foreignSettings = toolData(await context.client.callTool({ name: 'ligule_session_configure', arguments: {
+      sessionId: foreignSession.sessionId,
+    } }), 'operator_project_loop_default');
+    assert.equal(foreignSettings.effective.loopIterations, 8, 'a session without an override inherits [loop].iterations');
     const wrongType = await context.client.callTool({ name: 'ligule_interaction_reply', arguments: {
       sessionId, requestId: approval.requestId, type: 'question', answers: [{ id: 'q1', selected: ['Option A'] }],
     } });
@@ -687,6 +709,11 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     const pendingBudget = toolData(await context.client.callTool({ name: 'ligule_session_configure', arguments: { sessionId, changes: { outputTokens: 512 } } }), 'queue_pending_budget');
     assert.equal(pendingBudget.applies, 'next_round');
     assert.equal(pendingBudget.pending.generation.outputTokens, 512);
+    const pendingLoop = toolData(await context.client.callTool({ name: 'ligule_session_configure', arguments: {
+      sessionId, changes: { loopIterations: 11 },
+    } }), 'queue_pending_loop_limit');
+    assert.equal(pendingLoop.applies, 'next_round');
+    assert.equal(pendingLoop.pending.loopIterations, 11);
     const queuedFirst = toolData(await context.client.callTool({ name: 'ligule_session_send', arguments: { sessionId, input: 'queued first' } }), 'queue_first');
     const queuedSecond = toolData(await context.client.callTool({ name: 'ligule_session_send', arguments: { sessionId, input: 'queued second' } }), 'queue_second');
     assert.equal(queuedFirst.queued, true);
@@ -702,6 +729,8 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     assert.equal(requests.find((body) => body.messages.filter((message) => message.role === 'user').at(-1)?.content === 'queued first')?.max_tokens, 512);
     const tailStatus = toolData(await context.client.callTool({ name: 'ligule_run_status', arguments: { operationId: firstQueuedOperation } }), 'queue_tail_status');
     assert.equal(tailStatus.queue.length, 0);
+    const appliedLoop = toolData(await context.client.callTool({ name: 'ligule_session_configure', arguments: { sessionId } }), 'queue_applied_loop_limit');
+    assert.equal(appliedLoop.effective.loopIterations, 11);
     toolData(await context.client.callTool({ name: 'ligule_session_configure', arguments: { sessionId, changes: { outputTokens: 1024 } } }), 'queue_restore_budget');
     const cancelRun = toolData(await context.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_OPERATOR_CANCEL_GATE' } }), 'queue_cancel_run');
     await cancelGate.entered;
@@ -727,6 +756,7 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     const restored = toolData(await context.client.callTool({ name: 'ligule_session_configure', arguments: { sessionId } }), 'operator_settings_after_restart');
     assert.equal(restored.effective.generation.outputTokens, 1024, 'generation settings replay from Session JSONL after server restart');
     assert.equal(restored.effective.generation.model.model, 'operator-e2e-local');
+    assert.equal(restored.effective.loopIterations, 11, 'session loop overrides replay from Session JSONL after server restart');
     const staleOperation = await context.client.callTool({ name: 'ligule_run_status', arguments: { operationId: simple.operationId } });
     toolFailure(staleOperation, 'operation_not_found', 'operator_old_operation_after_restart');
   } finally {

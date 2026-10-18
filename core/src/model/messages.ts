@@ -1,7 +1,7 @@
 // Anthropic Messages 接口使用 `POST <base>/v1/messages` 和 `x-api-key` 鉴权。
 // HTTP 地址、重试、SSE 解析和凭据处理由 `model/http.ts` 共用；此适配器负责请求和事件格式。
 import { KernelError } from '../kernel/error.js';
-import { resolveOutputTokens } from './output-budget.js';
+import { outputTokenCeiling, resolveOutputTokens } from './output-budget.js';
 import {
   apiRoot, assertAllAnswered, DEFAULT_RETRY, open, parseSse, readCredential, readJson, resolveCapabilities, resultText,
   type ProviderCapabilities, type RetryPolicy,
@@ -149,11 +149,13 @@ export function createMessagesProvider({
   const root = messagesRoot(baseUrl);
   if (typeof model !== 'string' || model === '') throw new KernelError('provider_model_required');
   const effective = capabilitiesOf(capabilities);
-  const budget = resolveOutputTokens({ baseUrl: root, model, requested: outputTokens,
+  const budgetLimits = {
     defaultTokens: effective.maxOutputTokens,
     configuredLimit: capabilities?.maxOutputTokens === undefined ? undefined : effective.maxOutputTokens,
     ...(declaredOutputLimit === undefined ? {} : { declaredOutputLimit }),
-    contextLimit: contextTokens });
+  };
+  const maxOutputTokens = outputTokenCeiling({ baseUrl: root, model, ...budgetLimits });
+  const budget = resolveOutputTokens({ baseUrl: root, model, requested: outputTokens, ...budgetLimits, contextLimit: contextTokens });
 
   async function* stream(request: ModelRequest, { signal }: { readonly signal?: AbortSignal | null } = {}): AsyncGenerator<ProviderEvent> {
     const response = await open(`${root}/messages`, {
@@ -350,6 +352,7 @@ export function createMessagesProvider({
     requiresCompletion: true as const,
     model,
     capabilities: effective,
+    maxOutputTokens,
     outputTokens: budget,
     stream,
     // 模型切换必须由调用方明确请求；失败时不自动改用其他模型。
