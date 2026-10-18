@@ -512,6 +512,11 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     requests.push(body);
     const last = body.messages.at(-1);
     const userText = body.messages.filter((message) => message.role === 'user').at(-1)?.content ?? '';
+    if (userText.includes('MCP_OPERATOR_LOOP_LIMIT')) {
+      callId += 1;
+      sse(response, { tool_calls: [{ index: 0, id: `operator-call-${callId}`, type: 'function', function: { name: 'find', arguments: JSON.stringify({ pattern: '*' }) } }] });
+      return;
+    }
     if (last?.role === 'tool') { sse(response, { content: 'operator task completed' }); return; }
     const waiting = userText.includes('MCP_OPERATOR_QUEUE_GATE') ? queueGate
       : userText.includes('MCP_OPERATOR_CANCEL_GATE') ? cancelGate : undefined;
@@ -585,6 +590,21 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     } }), 'session_configure_loop_limit');
     assert.equal(configuredLoop.applies, 'now');
     assert.equal(configuredLoop.effective.loopIterations, 7);
+    const cappedSession = toolData(await context.client.callTool({ name: 'ligule_session_create', arguments: {
+      projectRoot: project, initial: { mode: 'full', policy: 'auto', loopIterations: 2 },
+    } }), 'operator_loop_cap_session');
+    const loopRun = toolData(await context.client.callTool({ name: 'ligule_run_start', arguments: {
+      sessionId: cappedSession.sessionId, input: 'MCP_OPERATOR_LOOP_LIMIT',
+    } }), 'operator_loop_cap_run');
+    const loopFailure = await waitForOutcome(context.client, loopRun.operationId);
+    assert.equal(loopFailure.state, 'failed');
+    assert.equal(loopFailure.code, 'loop_iteration_limit');
+    const loopTerminal = await findHistoryRecord(context.client, cappedSession.sessionId,
+      (record) => record.kind === 'turn' && record.json.includes('loop_iteration_limit'));
+    assert.ok(loopTerminal, 'the configured loop cap records a failed turn instead of silently stopping');
+    const loopTurn = JSON.parse(loopTerminal.record.json);
+    assert.equal(loopTurn.iterations, 2);
+    assert.equal(loopTurn.modelCalls, 2);
     const invalidConfiguredModel = await context.client.callTool({ name: 'ligule_session_configure', arguments: {
       sessionId, changes: { model: { provider: 'legacy', model: 'not-in-this-config' } },
     } });
