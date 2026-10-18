@@ -15,7 +15,7 @@ export interface ToolCall {
 
 export type ModelMessage =
   | { readonly role: 'user'; readonly text: string }
-  | { readonly role: 'assistant'; readonly text: string; readonly toolCalls?: readonly ToolCall[] }
+  | { readonly role: 'assistant'; readonly text: string; readonly toolCalls?: readonly ToolCall[]; readonly reasoning?: string }
   | { readonly role: 'tool'; readonly id?: string; readonly tool?: string; readonly content: unknown; readonly failed?: boolean; readonly code?: string };
 
 export interface ModelTool {
@@ -112,8 +112,8 @@ function isModelMessage(value: unknown): value is ModelMessage {
   if (value.role === 'user') return 'text' in value && typeof value.text === 'string';
   if (value.role === 'assistant') {
     if (!('text' in value) || typeof value.text !== 'string') return false;
-    return !('toolCalls' in value) || value.toolCalls === undefined
-      || (Array.isArray(value.toolCalls) && value.toolCalls.every(isToolCall));
+    if ('reasoning' in value && value.reasoning !== undefined && typeof value.reasoning !== 'string') return false;
+    return !('toolCalls' in value) || value.toolCalls === undefined || (Array.isArray(value.toolCalls) && value.toolCalls.every(isToolCall));
   }
   return value.role === 'tool' && (!('id' in value) || value.id === undefined || typeof value.id === 'string') && 'content' in value;
 }
@@ -252,7 +252,8 @@ export function createLoop({
                   : []);
                 if (session && (partialText !== '' || partialReasoning !== '' || partialCalls.length > 0)) {
                   if (partialReasoning !== '') await session.append({ kind: 'reasoning', text: partialReasoning });
-                  await session.append({ kind: 'assistant', text: partialText, toolCalls: partialCalls });
+                  await session.append({ kind: 'assistant', text: partialText, toolCalls: partialCalls,
+                    ...(partialReasoning === '' ? {} : { reasoning: partialReasoning }) });
                 }
                 await answerRemaining(partialCalls, 'the provider response did not finish');
                 throw error;
@@ -275,7 +276,7 @@ export function createLoop({
             : []);
           // 推理事件写入记录供界面和恢复查看，但不进入模型投影，以免后续请求重复占用上下文。
           if (session && reasoning !== '') await session.append({ kind: 'reasoning', text: reasoning });
-          if (session) await session.append({ kind: 'assistant', text, toolCalls });
+          if (session) await session.append({ kind: 'assistant', text, toolCalls, ...(reasoning === '' ? {} : { reasoning }) });
           const finish = events.findLast((event) => event.type === 'finish');
           if (provider.requiresCompletion === true && finish === undefined) {
             await answerRemaining(toolCalls, 'the provider response ended without a completion signal');

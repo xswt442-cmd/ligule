@@ -8,12 +8,12 @@ import { KernelError } from '../kernel/error.js';
 import { createKernel, type Kernel } from '../kernel/kernel.js';
 import { loadAssembly, type Assembly, type Plugin } from '../kernel/assembly.js';
 import { loadExtensions, type ExtensionDiagnostic } from '../kernel/extensions.js';
-import { DEFAULT_MODE, loadMode, type ModeDirectories, type ModeFile } from '../kernel/modes.js';
+import { DEFAULT_MODE, listModes, loadMode, type ModeDirectories, type ModeFile } from '../kernel/modes.js';
 import { readRegistry, registerWorkspace, setDefaultWorkspace, unregisterWorkspace, workspaceIdentity } from '../kernel/workspace.js';
 import { historyPathOf, loadHistory, rememberHistory } from '../kernel/input-history.js';
 import { parsePrefsJson, prefsPathOf, readPrefs, savePrefs } from '../kernel/desktop-prefs.js';
 import { credentialStatus, deleteCredential, storeCredential } from '../kernel/credentials.js';
-import { modelServices, modelSelection, resolveModel, type ModelSelection } from '../kernel/model-services.js';
+import { modelServices, modelSelection, resolveModel, type ModelSelection, type ModelService } from '../kernel/model-services.js';
 import { createDecisionChain, isPolicyRule, type DecisionChain, type PolicyMode, type PolicyThresholds } from '../kernel/policy.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
@@ -44,6 +44,7 @@ import { createAskUserPlugin } from '../tools/ask-user.js';
 import { createMcpRegistry, mcpServerConfigs, type McpRegistry } from '../capability/mcp.js';
 import { discoverModels } from '../model/discovery.js';
 import { apiRoot } from '../model/http.js';
+import { thinkingCapabilityOf } from '../model/thinking.js';
 import type { ModelRequest, ProviderEvent } from '../kernel/loop.js';
 import { createConnection, type Connection, type HostRequest } from './connection.js';
 import { APPROVAL_METHOD, QUESTION_METHOD, isApproved, validateCall, type HostMethodParams } from './protocol.js';
@@ -56,7 +57,7 @@ import type { TemplateRegistry } from '../kernel/templates.js';
 import type { PolicyRule } from '../kernel/config-edit.js';
 import type { ToolDefinition } from '../kernel/kernel.js';
 import { adoptSessionMode, type SessionModeState } from './session-mode.js';
-import { providerFromConfig, hostProviderFromConfig, type HostProvider } from './provider.js';
+import { providerFromConfig, hostProviderFromConfig, type HostGenerationOptions, type HostProvider } from './provider.js';
 export { providerFromConfig, hostProviderFromConfig } from './provider.js';
 
 interface HostConfigSnapshot extends ConfigSnapshot {
@@ -126,7 +127,7 @@ interface HostOptions {
   readonly configStore?: ReturnType<typeof createConfigStore>;
   readonly configLayers?: LoadedLayers;
   readonly configStoreFor?: (projectRoot: string, layers: LoadedLayers) => ReturnType<typeof createConfigStore>;
-  readonly deriveProvider?: (config: ConfigSnapshot) => HostProvider;
+  readonly deriveProvider?: (config: ConfigSnapshot, generation?: HostGenerationOptions) => HostProvider;
   readonly interactive?: boolean;
 }
 
@@ -139,6 +140,14 @@ interface SessionGeneration {
   readonly provider: HostProvider;
   readonly model: Record<string, unknown>;
   readonly explicit?: boolean;
+  readonly options: HostGenerationOptions;
+}
+
+interface InitialSessionSettings {
+  readonly mode?: string;
+  readonly policy?: Exclude<PolicyMode, 'default'>;
+  readonly generation: SessionGeneration;
+  readonly persistGeneration: boolean;
 }
 
 interface AdoptionResult {
@@ -239,6 +248,46 @@ function modelSelectionOf(model: Record<string, unknown>): ModelSelection | unde
   return isRecord(model.selection) && typeof model.selection.provider === 'string' && typeof model.selection.model === 'string'
     ? { provider: model.selection.provider, model: model.selection.model }
     : undefined;
+}
+
+function generationSelectionOf(event: SessionEvent): ModelSelection | undefined {
+  if (event.selection === null) return undefined;
+  if (event.selection === undefined) {
+    if (typeof event.provider !== 'string' || typeof event.model !== 'string') return undefined;
+    return modelSelection({ provider: event.provider, model: event.model });
+  }
+  return modelSelection(event.selection);
+}
+
+function generationOptionsOf(event: SessionEvent): HostGenerationOptions {
+  const options: { outputTokens?: number; thinkingEffort?: HostGenerationOptions['thinkingEffort'] } = {};
+  const outputTokens = event.outputTokensOverride ?? event.outputTokens;
+  if (outputTokens !== undefined && outputTokens !== null) {
+    if (typeof outputTokens !== 'number' || !Number.isSafeInteger(outputTokens) || outputTokens < 1) {
+      throw new KernelError('session_generation_invalid', { detail: 'outputTokens must be a positive safe integer' });
+    }
+    options.outputTokens = outputTokens;
+  }
+  if (event.thinkingEffort !== undefined && event.thinkingEffort !== null) {
+    if (typeof event.thinkingEffort !== 'string') throw new KernelError('session_generation_invalid', { detail: 'thinkingEffort must be text' });
+    options.thinkingEffort = event.thinkingEffort as HostGenerationOptions['thinkingEffort'];
+  }
+  return options;
+}
+
+function sessionGenerationEvent(generation: SessionGeneration): Record<string, unknown> {
+  const selection = generation.explicit === true ? modelSelectionOf(generation.model) : undefined;
+  return selection === undefined
+    ? {
+        kind: 'sessionGeneration', ignorable: true, selection: null,
+        thinkingEffort: generation.options.thinkingEffort ?? null,
+        outputTokensOverride: generation.options.outputTokens ?? null,
+      }
+    : {
+        kind: 'modelSelection', ignorable: true, ...selection,
+        thinkingEffort: generation.options.thinkingEffort ?? null,
+        outputTokensOverride: generation.options.outputTokens ?? null,
+      };
 }
 
 // 会话名称需要为列表中的时间和条目数留出显示空间。
@@ -373,7 +422,11 @@ function observedProvider(provider: HostProvider, onDelta: (event: ProviderEvent
     get capabilities() { return provider.capabilities; },
     get requiresCompletion() { return provider.requiresCompletion; },
     get outputTokens() { return provider.outputTokens; },
+    get contextTokens() { return provider.contextTokens; },
+    get thinkingCapability() { return provider.thinkingCapability; },
+    get thinkingEffort() { return provider.thinkingEffort; },
     withModel(model) { return observedProvider(provider.withModel(model), onDelta); },
+    withGeneration(options) { return observedProvider(provider.withGeneration(options), onDelta); },
     async *stream(request: ModelRequest, options?: { readonly signal?: AbortSignal }) {
       for await (const event of provider.stream(request, options)) {
         if (event.type !== 'finish') onDelta(event);
@@ -393,7 +446,11 @@ function currentProvider(read: () => HostProvider): HostProvider {
     get capabilities() { return read().capabilities; },
     get requiresCompletion() { return read().requiresCompletion; },
     get outputTokens() { return read().outputTokens; },
+    get contextTokens() { return read().contextTokens; },
+    get thinkingCapability() { return read().thinkingCapability; },
+    get thinkingEffort() { return read().thinkingEffort; },
     withModel(model) { return read().withModel(model); },
+    withGeneration(options) { return read().withGeneration(options); },
     stream(request, options) { return read().stream(request, options); },
   };
 }
@@ -406,7 +463,11 @@ function compactionProgressProvider(provider: HostProvider, onProgress: (event: 
     get capabilities() { return provider.capabilities; },
     get requiresCompletion() { return provider.requiresCompletion; },
     get outputTokens() { return provider.outputTokens; },
+    get contextTokens() { return provider.contextTokens; },
+    get thinkingCapability() { return provider.thinkingCapability; },
+    get thinkingEffort() { return provider.thinkingEffort; },
     withModel(model) { return compactionProgressProvider(provider.withModel(model), onProgress); },
+    withGeneration(options) { return compactionProgressProvider(provider.withGeneration(options), onProgress); },
     async *stream(request, options) {
       onProgress({ kind: 'phase', phase: 'compaction', modelCalls: 0, toolCalls: 0 });
       for await (const event of provider.stream(request, options)) {
@@ -508,6 +569,21 @@ export function createHost({
   });
   // 每个归一化项目根目录只缓存一个环境，供该项目的会话与列表操作复用。
   const environments = new Map<string, ProjectEnvironment>([[defaultEnvironment.projectRoot, defaultEnvironment]]);
+  const sessionConfigurationTails = new Map<string, Promise<void>>();
+
+  async function serializeSessionConfiguration<T>(sessionId: string, action: () => Promise<T>): Promise<T> {
+    const previous = sessionConfigurationTails.get(sessionId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.catch(() => {}).then(() => gate);
+    sessionConfigurationTails.set(sessionId, tail);
+    await previous.catch(() => {});
+    try { return await action(); }
+    finally {
+      release();
+      if (sessionConfigurationTails.get(sessionId) === tail) sessionConfigurationTails.delete(sessionId);
+    }
+  }
 
   // 对路径不存在、目标不是目录和目录不可读分别返回稳定错误。
   // 新项目还没有记录目录是正常状态，会话列表应返回空结果。
@@ -544,6 +620,54 @@ export function createHost({
     return loaded;
   }
 
+  async function initialSessionSettings(env: ProjectEnvironment, params: HostMethodParams): Promise<InitialSessionSettings> {
+    const hasProvider = params.initialProvider !== undefined;
+    const hasModel = params.initialModel !== undefined;
+    if (hasProvider !== hasModel) throw new KernelError('session_model_selection_invalid', { detail: 'initialProvider and initialModel must be supplied together' });
+    let selection: ModelSelection | undefined;
+    let model = { ...(env.generation?.model ?? env.pendingModel ?? modelConfigOf(env.config)) };
+    if (hasProvider && hasModel) {
+      selection = modelSelection({ provider: params.initialProvider, model: params.initialModel });
+      const latest = env.store === undefined ? env.config : (await env.store.read()).values;
+      model = { ...modelConfigOf(env.config), ...(isRecord(latest.model) ? latest.model : {}), selection };
+    }
+    let policy: Exclude<PolicyMode, 'default'> | undefined;
+    if (params.initialPolicy !== undefined) {
+      if (params.initialPolicy !== 'ask' && params.initialPolicy !== 'auto' && params.initialPolicy !== 'never') {
+        throw new KernelError('policy_mode_unknown');
+      }
+      policy = params.initialPolicy;
+    }
+    const options: { outputTokens?: number; thinkingEffort?: HostGenerationOptions['thinkingEffort'] } = {};
+    if (params.initialOutputTokens !== undefined) {
+      if (!Number.isSafeInteger(params.initialOutputTokens) || params.initialOutputTokens < 1) {
+        throw new KernelError('provider_output_budget_invalid');
+      }
+      options.outputTokens = params.initialOutputTokens;
+    }
+    if (params.initialThinkingEffort !== undefined && params.initialThinkingEffort !== 'default') {
+      if (!['none', 'low', 'high', 'max'].includes(params.initialThinkingEffort)) {
+        throw new KernelError('provider_thinking_effort_invalid');
+      }
+      options.thinkingEffort = params.initialThinkingEffort as HostGenerationOptions['thinkingEffort'];
+    }
+    const persistGeneration = selection !== undefined || Object.keys(options).length > 0;
+    const provider = persistGeneration ? deriveProvider({ ...env.config, model }, options) : env.generation?.provider ?? env.provider;
+    const mode = params.initialMode === undefined
+      ? undefined
+      : params.initialMode === 'default' ? env.modeName ?? DEFAULT_MODE : requiredString(params.initialMode, 'initialMode');
+    if (mode !== undefined) {
+      if (env.modePaths === undefined) throw new KernelError('host_mode_paths_required');
+      await loadMode(mode, env.modePaths);
+    }
+    return {
+      ...(mode === undefined ? {} : { mode }),
+      ...(policy === undefined ? {} : { policy }),
+      generation: { provider, model, ...(selection === undefined ? {} : { explicit: true }), options },
+      persistGeneration,
+    };
+  }
+
   // 在工作区中创建或打开会话后登记该工作区。
   // 登记失败会写入日志，但不会阻止会话打开。
   async function noteWorkspace(environment: ProjectEnvironment): Promise<void> {
@@ -575,11 +699,11 @@ export function createHost({
   function adoptGeneration(env: ProjectEnvironment, key: string, effective: unknown): AdoptionResult {
     // 保留尚未完整的模型配置，让后续字段写入可以继续补齐。
     // 首次配置时即使还没有 `[model]` 表也适用。
-    const base = env.generation ?? { provider: env.provider, model: env.pendingModel ?? modelConfigOf(env.config) };
+    const base = env.generation ?? { provider: env.provider, model: env.pendingModel ?? modelConfigOf(env.config), options: {} };
     const model: Record<string, unknown> = { ...base.model, [key]: effective };
     let provider: HostProvider;
     try {
-      provider = deriveProvider({ ...env.config, model });
+      provider = deriveProvider({ ...env.config, model }, {});
     } catch (error) {
       env.pendingModel = model;
       return { applies: [], failure: { code: errorCode(error) ?? 'provider_rebuild_failed', detail: errorMessage(error) } };
@@ -588,7 +712,7 @@ export function createHost({
     // 有效提供方未变化时报告未应用，返回结果应反映实际运行状态。
     const changed = new Set<string>([...Object.keys(base.model ?? {}), ...Object.keys(model)]);
     if ([...changed].every((field) => base.model?.[field] === model[field])) return { applies: [] };
-    env.generation = { provider, model };
+    env.generation = { provider, model, options: {} };
     // 更新环境中的提供方，让新会话使用最新的有效配置。
     env.provider = provider;
     const applies: { sessionId: string; when: 'now' | 'round' }[] = [];
@@ -604,12 +728,12 @@ export function createHost({
           ? { ...ownGeneration.model, services: effective }
           : { ...ownGeneration.model, outputTokens: effective };
         let ownProvider: HostProvider;
-        try { ownProvider = deriveProvider({ ...env.config, model: ownModel }); }
+        try { ownProvider = deriveProvider({ ...env.config, model: ownModel }, ownGeneration.options); }
         catch (error) { sessionFailure = { code: errorCode(error) ?? 'provider_rebuild_failed' }; continue; }
         const previous = resolveModel(ownGeneration.model);
         const next = resolveModel(ownModel);
         if (['api', 'baseURL', 'apiKeyEnv', 'model', 'outputTokens', 'serviceOutputLimit', 'serviceContextTokens'].every((field) => previous[field] === next[field])) continue;
-        const generation: SessionGeneration = { provider: ownProvider, model: ownModel, explicit: true };
+        const generation: SessionGeneration = { provider: ownProvider, model: ownModel, explicit: true, options: ownGeneration.options };
         if (state.running === undefined) {
           state.generation = generation;
           state.pendingGeneration = undefined;
@@ -620,12 +744,14 @@ export function createHost({
         continue;
       }
       if (state.running === undefined) {
-        state.generation = { provider, model };
+        const ownProvider = deriveProvider({ ...env.config, model }, state.generation.options);
+        state.generation = { provider: ownProvider, model, options: state.generation.options };
         state.pendingGeneration = undefined;
         state.compaction = state.rebuildCompaction(model);
         applies.push({ sessionId: id, when: 'now' });
       } else {
-        state.pendingGeneration = { provider, model };
+        const ownProvider = deriveProvider({ ...env.config, model }, state.generation.options);
+        state.pendingGeneration = { provider: ownProvider, model, options: state.generation.options };
         applies.push({ sessionId: id, when: 'round' });
       }
     }
@@ -982,6 +1108,7 @@ export function createHost({
     explicitMode?: string,
     env: ProjectEnvironment = defaultEnvironment,
     workspaceOrigin?: 'explicit' | 'default',
+    initial?: InitialSessionSettings,
   ): Promise<HostSessionState> {
     // 从会话所属的项目环境解析项目级资源。
     const { config, provider, policy, modePaths, directory, mcpConfigs, extensions, skillRegistry, templateRegistry } = env;
@@ -1015,7 +1142,7 @@ export function createHost({
       mode: modeState,
       pending: undefined,
       environment: env,
-      generation: env.generation ?? { provider, model: modelConfigOf(config) },
+      generation: initial?.generation ?? env.generation ?? { provider, model: modelConfigOf(config), options: {} },
       adopt: async () => {},
     };
     // 调用时解析生成设置，让循环、压缩和派生执行都能读取会话的最新配置。
@@ -1024,11 +1151,21 @@ export function createHost({
     const cleanup = [];
     try {
     if (recover) {
-      const previous = (await session.read()).filter((event) => event.kind === 'modelSelection').at(-1);
-      if (previous !== undefined) {
-        const selection = modelSelection({ provider: previous.provider, model: previous.model });
-        const model = { ...(env.generation?.model ?? config.model), selection };
-        state.generation = { provider: hostProviderFromConfig({ ...config, model }), model, explicit: true };
+      const events = await session.read();
+      const saved = events.filter((event) => event.kind === 'sessionGeneration' || event.kind === 'modelSelection').at(-1);
+      if (saved !== undefined) {
+        const baseModel = { ...(env.generation?.model ?? modelConfigOf(config)) };
+        const selection = generationSelectionOf(saved);
+        const model = selection === undefined ? baseModel : { ...baseModel, selection };
+        const options = generationOptionsOf(saved);
+        state.generation = { provider: deriveProvider({ ...config, model }, options), model, explicit: selection !== undefined, options };
+      } else {
+        const previous = events.filter((event) => event.kind === 'modelSelection').at(-1);
+        if (previous !== undefined) {
+          const selection = modelSelection({ provider: previous.provider, model: previous.model });
+          const model = { ...(env.generation?.model ?? modelConfigOf(config)), selection };
+          state.generation = { provider: deriveProvider({ ...config, model }, {}), model, explicit: true, options: {} };
+        }
       }
     }
     const chain = createDecisionChain({
@@ -1061,6 +1198,7 @@ export function createHost({
         }
       },
     });
+    if (initial?.policy !== undefined) chain.setMode(initial.policy);
     const kernel = createKernel({ config, policy: chain, session, logger });
     // 技能登记表反映已发现的技能，不随当前模式改变。
     // 优先复用加载器提供的登记表，否则从配置目录中发现技能。
@@ -1196,8 +1334,8 @@ export function createHost({
     }
     // 优先采用客户端选定的模式；否则恢复记录中的模式并校验摘要。
     // 模式定义已变化时要求用户明确选择，避免静默改变可用工具。
-    let wanted = explicitMode ?? modeName;
-    if (explicitMode === undefined && recover && modePaths !== undefined) {
+    let wanted = initial?.mode ?? explicitMode ?? modeName;
+    if (initial?.mode === undefined && explicitMode === undefined && recover && modePaths !== undefined) {
       const last = (await session.read()).filter((event) => event.kind === 'mode').at(-1);
       if (last !== undefined) {
         wanted = chooseResumeMode({
@@ -1210,6 +1348,9 @@ export function createHost({
     if (wanted !== undefined) {
       if (modePaths === undefined) throw new KernelError('host_mode_paths_required');
       await state.adopt(await loadMode(wanted, modePaths));
+    }
+    if (initial?.persistGeneration === true) {
+      await session.append(sessionGenerationEvent(state.generation));
     }
     // 压缩属于会话。摘要请求使用底层提供方，不向客户端转发流式内容。
     // 未配置模型上下文窗口时关闭压缩。
@@ -1256,6 +1397,8 @@ export function createHost({
         const model = resolveModel(state.generation.model ?? {});
         return {
           model: state.generation.provider.model ?? null,
+          outputTokens: state.generation.provider.outputTokens ?? null,
+          thinkingEffort: state.generation.options.thinkingEffort ?? 'default',
           ...(typeof model.baseURL === 'string' ? { baseURL: model.baseURL } : {}),
           serviceId: model.serviceId,
           api: model.api ?? null,
@@ -1285,14 +1428,175 @@ export function createHost({
     mode?: string,
     env: ProjectEnvironment = defaultEnvironment,
     workspaceOrigin?: 'explicit' | 'default',
+    initial?: InitialSessionSettings,
   ): Promise<{ sessionId: string }> {
     if (closing !== undefined) throw new KernelError('host_closed');
-    const pending = build(id, connection, recover, mode, env, workspaceOrigin).then((state) => {
+    const pending = build(id, connection, recover, mode, env, workspaceOrigin, initial).then((state) => {
       sessions.set(id, state);
       return { sessionId: id };
     });
     building.add(pending);
     return pending.finally(() => building.delete(pending));
+  }
+
+  async function sessionConfiguration(state: HostSessionState): Promise<Record<string, unknown>> {
+    const generationView = (generation: SessionGeneration) => ({
+      model: {
+        provider: typeof resolveModel(generation.model).serviceId === 'string' ? resolveModel(generation.model).serviceId : 'legacy',
+        model: generation.provider.model,
+      },
+      thinking: {
+        supported: generation.provider.thinkingCapability !== undefined,
+        efforts: generation.provider.thinkingCapability?.efforts ?? [],
+        defaultEffort: generation.provider.thinkingCapability?.defaultEffort ?? null,
+        effort: generation.options.thinkingEffort ?? 'default',
+      },
+      outputTokens: generation.provider.outputTokens ?? null,
+      contextTokens: generation.provider.contextTokens ?? null,
+      maxOutputTokens: generation.provider.capabilities?.maxOutputTokens ?? null,
+    });
+    const latest = state.environment.store === undefined
+      ? state.environment.config
+      : (await state.environment.store.read()).values;
+    const modelConfig = isRecord(latest.model) ? latest.model : modelConfigOf(state.environment.config);
+    const services: Record<string, unknown>[] = modelServices(modelConfig.services).map((service) => ({
+      id: service.id,
+      name: service.name,
+      api: service.api,
+      models: service.models.map((model) => {
+        const settings = service.modelSettings?.find((one) => one.id === model);
+        const thinking = thinkingCapabilityOf(service.api, service.baseURL, model);
+        return {
+          id: model,
+          ...(settings?.name === undefined ? {} : { name: settings.name }),
+          ...(settings?.contextTokens === undefined ? {} : { contextTokens: settings.contextTokens }),
+          ...(settings?.outputTokens === undefined ? {} : { outputTokens: settings.outputTokens }),
+          thinking: thinking === undefined
+            ? { supported: false, efforts: [], defaultEffort: null }
+            : { supported: true, efforts: thinking.efforts, defaultEffort: thinking.defaultEffort },
+        };
+      }),
+    }));
+    if (services.length === 0 && typeof modelConfig.model === 'string' && typeof modelConfig.api === 'string') {
+      const thinking = thinkingCapabilityOf(modelConfig.api, modelConfig.baseURL, modelConfig.model);
+      services.push({
+        id: 'legacy', name: 'Legacy model', api: modelConfig.api,
+        models: [{
+          id: modelConfig.model,
+          ...(typeof modelConfig.serviceContextTokens === 'number' ? { contextTokens: modelConfig.serviceContextTokens } : {}),
+          ...(typeof modelConfig.outputTokens === 'number' ? { outputTokens: modelConfig.outputTokens } : {}),
+          thinking: thinking === undefined
+            ? { supported: false, efforts: [], defaultEffort: null }
+            : { supported: true, efforts: thinking.efforts, defaultEffort: thinking.defaultEffort },
+        }],
+      });
+    }
+    const modes = state.environment.modePaths === undefined
+      ? { modes: [], invalid: [], truncated: false }
+      : await listModes(state.environment.modePaths);
+    const pending = state.pendingGeneration === undefined && state.pending === undefined
+      ? null
+      : {
+          mode: state.pending?.name ?? null,
+          generation: state.pendingGeneration === undefined ? null : generationView(state.pendingGeneration),
+        };
+    return {
+      sessionId: state.id,
+      applies: 'unchanged',
+      effective: {
+        mode: state.mode.file?.name ?? null,
+        policy: { mode: state.chain.mode, source: state.chain.modeSource, default: state.chain.configuredMode() },
+        generation: generationView(state.generation),
+      },
+      pending,
+      available: { modes, policies: ['ask', 'auto', 'never', 'default'], services },
+      denials: state.chain.denials(),
+    };
+  }
+
+  async function configureSession(state: HostSessionState, params: HostMethodParams): Promise<Record<string, unknown>> {
+    const modeChanged = params.mode !== undefined;
+    const policyChanged = params.policy !== undefined;
+    const generationChanged = params.provider !== undefined || params.model !== undefined
+      || params.thinkingEffort !== undefined || params.outputTokens !== undefined
+      || params.resetModel === true || params.resetThinking === true || params.resetOutputTokens === true;
+    const categories = Number(modeChanged) + Number(policyChanged) + Number(generationChanged);
+    if (categories > 1) throw new KernelError('session_configure_one_category');
+    if (categories === 0) return await sessionConfiguration(state);
+
+    if (modeChanged) {
+      const requestedName = params.mode === 'default' ? state.environment.modeName ?? DEFAULT_MODE : requiredString(params.mode, 'mode');
+      if (state.environment.modePaths === undefined) throw new KernelError('host_mode_paths_required');
+      const requested = await loadMode(requestedName, state.environment.modePaths);
+      const current = state.mode.file;
+      let applies: 'now' | 'next_round' | 'unchanged' = 'unchanged';
+      if (current?.name === requested.name && current.layer === requested.layer) {
+        if (state.pending !== undefined) {
+          state.pending = undefined;
+          applies = state.running === undefined ? 'now' : 'next_round';
+        }
+      } else if (state.running === undefined) {
+        await state.adopt(requested);
+        applies = 'now';
+      } else {
+        state.pending = requested;
+        applies = 'next_round';
+      }
+      return { ...(await sessionConfiguration(state)), applies };
+    }
+
+    if (policyChanged) {
+      if (params.policy === 'default') state.chain.resetMode();
+      else if (params.policy === 'ask' || params.policy === 'auto' || params.policy === 'never') state.chain.setMode(params.policy);
+      else throw new KernelError('policy_mode_unknown');
+      return { ...(await sessionConfiguration(state)), applies: 'next_decision' };
+    }
+
+    const hasProvider = params.provider !== undefined;
+    const hasModel = params.model !== undefined;
+    if (hasProvider !== hasModel) throw new KernelError('session_model_selection_invalid');
+    if (params.resetModel === true && (hasProvider || hasModel)) throw new KernelError('session_configure_conflict');
+    if (params.resetThinking === true && params.thinkingEffort !== undefined) throw new KernelError('session_configure_conflict');
+    if (params.resetOutputTokens === true && params.outputTokens !== undefined) throw new KernelError('session_configure_conflict');
+
+    const previous = state.pendingGeneration ?? state.generation;
+    let model = previous.model;
+    let explicit = previous.explicit === true;
+    if (params.resetModel === true) {
+      const latest = state.environment.store === undefined ? state.environment.config : (await state.environment.store.read()).values;
+      model = { ...modelConfigOf(state.environment.config), ...(isRecord(latest.model) ? latest.model : {}) };
+      explicit = false;
+    } else if (hasProvider && hasModel) {
+      const selection = modelSelection({ provider: params.provider, model: params.model });
+      const latest = state.environment.store === undefined ? state.environment.config : (await state.environment.store.read()).values;
+      model = { ...modelConfigOf(state.environment.config), ...(isRecord(latest.model) ? latest.model : {}), selection };
+      explicit = true;
+    }
+
+    const options: { outputTokens?: number; thinkingEffort?: HostGenerationOptions['thinkingEffort'] } = { ...previous.options };
+    if (params.resetOutputTokens === true) delete options.outputTokens;
+    else if (params.outputTokens !== undefined) {
+      if (!Number.isSafeInteger(params.outputTokens) || params.outputTokens < 1) throw new KernelError('provider_output_budget_invalid');
+      options.outputTokens = params.outputTokens;
+    }
+    if (params.resetThinking === true || params.thinkingEffort === 'default') delete options.thinkingEffort;
+    else if (params.thinkingEffort !== undefined) {
+      if (!['none', 'low', 'high', 'max'].includes(params.thinkingEffort)) throw new KernelError('provider_thinking_effort_invalid');
+      options.thinkingEffort = params.thinkingEffort as HostGenerationOptions['thinkingEffort'];
+    }
+    const provider = deriveProvider({ ...state.environment.config, model }, options);
+    const generation: SessionGeneration = { provider, model, ...(explicit ? { explicit: true } : {}), options };
+    const before = JSON.stringify({ model: previous.model, explicit: previous.explicit === true, options: previous.options });
+    const after = JSON.stringify({ model, explicit, options });
+    if (before === after) return { ...(await sessionConfiguration(state)), applies: 'unchanged' };
+    const compaction = state.running === undefined ? state.rebuildCompaction(model) : undefined;
+    await state.session.append(sessionGenerationEvent(generation));
+    if (state.running === undefined) {
+      state.generation = generation;
+      state.pendingGeneration = undefined;
+      state.compaction = compaction ?? null;
+    } else state.pendingGeneration = generation;
+    return { ...(await sessionConfiguration(state)), applies: state.running === undefined ? 'now' : 'next_round' };
   }
 
   const host: Host = {
@@ -1312,10 +1616,14 @@ export function createHost({
             throw new KernelError('workspace_origin_unknown', { detail: `${origin}; the call takes 'explicit' or 'default', or nothing at all` });
           }
           const env = await environmentFor(message.params.projectRoot);
+          const initial = await initialSessionSettings(env, message.params);
           const created = await buildSession(id, connection, false, undefined, env,
-            origin ?? (message.params.projectRoot === undefined ? 'default' : 'explicit'));
+            origin ?? (message.params.projectRoot === undefined ? 'default' : 'explicit'), initial);
           await noteWorkspace(env);
-          return created;
+          const hasInitialSettings = message.params.initialMode !== undefined || message.params.initialPolicy !== undefined
+            || message.params.initialProvider !== undefined || message.params.initialModel !== undefined
+            || message.params.initialThinkingEffort !== undefined || message.params.initialOutputTokens !== undefined;
+          return hasInitialSettings ? { ...created, settingsApplied: true } : created;
         }
         case 'session.open': {
           // 按会话所属项目定位已打开的会话，与 `session.read` 使用相同规则。
@@ -1491,26 +1799,16 @@ export function createHost({
           // 只修改会话级策略覆盖，不改写配置中的默认值。
           const state = open(sessionId);
           const mode = requiredString(message.params.mode, 'mode');
-          if (mode === 'default') state.chain.resetMode();
-          else if (mode === 'ask' || mode === 'auto' || mode === 'never') state.chain.setMode(mode);
-          else throw new KernelError('policy_mode_unknown', { detail: 'mode must be ask, auto, never, or default' });
+          await serializeSessionConfiguration(sessionId, async () => {
+            await configureSession(state, { policy: mode });
+          });
           return { policy: state.chain.mode, policySource: state.chain.modeSource, policyDefault: state.chain.configuredMode() };
         }
         case 'mode.set': {
           const state = open(sessionId);
-          // 返回模式清单前先解析并校验清单内容。
-          const modePaths = state.environment.modePaths;
-          if (modePaths === undefined) throw new KernelError('host_mode_paths_required');
-          const requested = await loadMode(requiredString(message.params.name, 'name'), modePaths);
-          const current = state.mode.file;
-          if (current !== undefined && current.name === requested.name && current.layer === requested.layer) {
-            // 再次选择当前模式会撤销待生效变更，不写入事件。
-            state.pending = undefined;
-          } else if (state.running === undefined) {
-            await state.adopt(requested);
-          } else {
-            state.pending = requested;
-          }
+          await serializeSessionConfiguration(sessionId, async () => {
+            await configureSession(state, { mode: requiredString(message.params.name, 'name') });
+          });
           return {
             mode: state.mode.file?.name ?? null,
             layer: state.mode.file?.layer ?? null,
@@ -1536,6 +1834,13 @@ export function createHost({
             serviceId: modelSelectionOf(state.generation.model)?.provider ?? resolveModel(state.generation.model).serviceId ?? 'legacy',
             pendingServiceId: state.pendingGeneration === undefined ? null : modelSelectionOf(state.pendingGeneration.model)?.provider ?? null,
             pendingModel: state.pendingGeneration?.provider.model ?? null,
+            contextTokens: state.generation.provider.contextTokens ?? null,
+            thinking: {
+              available: state.generation.provider.thinkingCapability?.efforts ?? [],
+              defaultEffort: state.generation.provider.thinkingCapability?.defaultEffort ?? null,
+              effective: state.generation.options.thinkingEffort ?? 'default',
+              pending: state.pendingGeneration?.options.thinkingEffort ?? null,
+            },
             // 分别返回当前模式和策略，并说明策略来自配置默认值还是会话覆盖。
             policy: state.chain.mode,
             policySource: state.chain.modeSource,
@@ -1549,6 +1854,10 @@ export function createHost({
             // 模型窗口未知时返回 null，因为此时无法估算上下文压力。
             usage: state.compaction === null ? null : await state.compaction.context(),
           };
+        }
+        case 'session.configure': {
+          const state = open(sessionId);
+          return await serializeSessionConfiguration(sessionId, () => configureSession(state, message.params));
         }
         case 'workspaces.list':
           // 返回持久工作区登记表及默认工作区身份，供客户端显示。
@@ -1580,18 +1889,12 @@ export function createHost({
         }
         case 'model.select': {
           const state = open(sessionId);
-          const fresh = state.environment.store === undefined ? { model: state.environment.config.model ?? {} } : (await state.environment.store.read()).values;
           const selection = modelSelection({ provider: message.params.provider, model: message.params.model });
-          const model = { ...(state.environment.config.model ?? {}), ...fresh.model, selection };
-          const provider = deriveProvider({ ...state.environment.config, model });
-          const generation = { model, provider, explicit: true };
-          await state.session.append({ kind: 'modelSelection', ignorable: true, provider: selection.provider, model: selection.model });
-          if (state.running === undefined) {
-            state.generation = generation;
-            state.compaction = state.rebuildCompaction(model);
-          }
-          else state.pendingGeneration = generation;
-          return { model: provider.model, serviceId: selection.provider, when: state.running === undefined ? 'now' : 'round' };
+          return await serializeSessionConfiguration(sessionId, async () => {
+            await configureSession(state, { provider: selection.provider, model: selection.model });
+            const generation = state.pendingGeneration ?? state.generation;
+            return { model: generation.provider.model, serviceId: selection.provider, when: state.running === undefined ? 'now' : 'round' };
+          });
         }
         case 'models.discover': {
           // 已保存密钥只能用于绑定的服务；未保存的服务必须明确提供临时密钥。
@@ -1696,7 +1999,7 @@ export function createHost({
                 if (field === 'model.services' && modelSelectionOf(generation.model)?.provider === 'legacy') continue;
                 const key = field === 'model.outputTokens' ? 'outputTokens' : 'services';
                 const effective = isRecord(config.model) ? config.model[key] : undefined;
-                deriveProvider({ ...config, model: { ...generation.model, [key]: effective } });
+                deriveProvider({ ...config, model: { ...generation.model, [key]: effective } }, generation.options);
               }
             }
           });

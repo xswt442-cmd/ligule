@@ -13,7 +13,7 @@ import { createMemoryConnectionPair } from '../../../core/dist/host/memory.js';
 import type { MemoryConnectionPair } from '../../../core/dist/host/memory.js';
 import { serveHost } from '../../../core/dist/host/host.js';
 import type { Host } from '../../../core/dist/host/host.js';
-import { createChatCompletionsProvider } from '../../../core/dist/model/chat-completions.js';
+import { providerFromConfig } from '../../../core/dist/host/provider.js';
 import { modeDirectories } from '../../../core/dist/kernel/modes.js';
 import { fileURLToPath } from 'node:url';
 import { listenFetchable } from './port.ts';
@@ -156,11 +156,10 @@ export async function withTuiHost<TResult>(run: (context: TuiHostContext) => TRe
       policy: { mode: 'ask' },
       ...extra,
     } }) as TestConfig;
-    const provider = createChatCompletionsProvider({ baseUrl, model: 'local-test-model', apiKeyEnv: 'LIGULE_TUI_TEST_API_KEY' });
+    const provider = providerFromConfig(config);
     const modesDirectory = fileURLToPath(new URL('../../../core/modes/', import.meta.url));
-    // 为指定项目目录创建独立环境，并使用配置与 Provider 工厂各自要求的属性名。
+    // 为指定项目目录创建独立配置环境。
     const modelShape = { api: 'chat-completions', baseURL: baseUrl, model: 'local-test-model', apiKeyEnv: 'LIGULE_TUI_TEST_API_KEY' };
-    const providerShape = { baseUrl, model: 'local-test-model', apiKeyEnv: 'LIGULE_TUI_TEST_API_KEY' };
     const loadEnvironment = async (projectRoot: string) => {
       const sessions = join(projectRoot, 'sessions');
       await mkdir(sessions, { recursive: true });
@@ -174,7 +173,7 @@ export async function withTuiHost<TResult>(run: (context: TuiHostContext) => TRe
       } }) as TestConfig;
       return {
         config: other,
-        provider: createChatCompletionsProvider(providerShape),
+        provider: providerFromConfig(other),
         policy: other.policy,
         modeName: 'minimal',
         modePaths: modeDirectories(projectRoot, modesDirectory, homeDirectory),

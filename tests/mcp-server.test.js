@@ -5,6 +5,7 @@ import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
+import { LoggingMessageNotificationSchema } from '../core/node_modules/@modelcontextprotocol/sdk/dist/esm/types.js';
 import { listenFetchable } from '../test/helpers/port.ts';
 import { connectMcp } from '../test/helpers/mcp-control.mjs';
 import { setTrusted } from '../core/dist/kernel/workspace-trust.js';
@@ -180,7 +181,8 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
       const lastUser = body.messages.filter((message) => message.role === 'user').at(-1)?.content ?? '';
       const inputTags = ['MCP_E2E_DELAYED', 'MCP_E2E_LARGE_', 'MCP_E2E_EXEC_CANCEL', 'MCP_E2E_EXEC_DISCONNECT', 'MCP_E2E_APPROVAL_DENIED']
         .filter((tag) => lastUser.includes(tag));
-      httpRequests.push({ url: request.url, model: body.model, inputTags, lastRole: body.messages.at(-1)?.role });
+      httpRequests.push({ url: request.url, model: body.model, inputTags, lastRole: body.messages.at(-1)?.role,
+        toolNames: (body.tools ?? []).map((tool) => tool.function?.name) });
       if (body.messages.at(-1)?.role === 'tool') {
         sse(response, { content: 'MCP task finished' });
         return;
@@ -283,8 +285,8 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     const listed = await first.client.listTools();
     const toolNames = listed.tools.map((tool) => tool.name).sort();
     assert.deepEqual(toolNames, [
-      'ligule_run_cancel', 'ligule_run_start', 'ligule_run_status', 'ligule_session_create',
-      'ligule_session_list', 'ligule_session_open', 'ligule_session_read',
+      'ligule_interaction_reply', 'ligule_run_cancel', 'ligule_run_start', 'ligule_run_status', 'ligule_session_configure', 'ligule_session_create',
+      'ligule_session_list', 'ligule_session_open', 'ligule_session_read', 'ligule_session_send',
     ]);
     const readSchema = listed.tools.find((tool) => tool.name === 'ligule_session_read').inputSchema;
     assert.ok(readSchema.properties.at && readSchema.properties.offset, 'tools/list publishes bounded exact-event chunk reads');
@@ -312,6 +314,10 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     const created = toolData(await first.client.callTool({ name: 'ligule_session_create', arguments: { projectRoot: project } }), 'session_create');
     const sessionId = created.sessionId;
     recordTrace(trace, 'session_create', { sessionId });
+    const readOnlySettings = toolData(await first.client.callTool({ name: 'ligule_session_configure', arguments: { sessionId } }), 'default_session_settings_read');
+    assert.equal(readOnlySettings.applies, 'unchanged');
+    const unauthorizedChange = await first.client.callTool({ name: 'ligule_session_configure', arguments: { sessionId, changes: { outputTokens: 1024 } } });
+    toolFailure(unauthorizedChange, 'control_operator_required', 'default_settings_change_denied');
     const opened = toolData(await first.client.callTool({ name: 'ligule_session_open', arguments: { projectRoot: project, sessionId } }), 'session_open');
     assert.equal(opened.sessionId, sessionId);
     recordTrace(trace, 'session_open_existing', { sessionId });
@@ -351,6 +357,8 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     assert.equal(delayed.state, 'running');
     const running = toolData(await first.client.callTool({ name: 'ligule_run_status', arguments: { operationId: delayed.operationId } }), 'run_status_running');
     assert.equal(running.state, 'running');
+    const firstProviderRequest = await waitFor(() => httpRequests.find((entry) => entry.inputTags.includes('MCP_E2E_DELAYED')), 'delayed HTTP request');
+    assert.ok(!firstProviderRequest.toolNames.includes('ask_user_question'), 'question tool is not registered without operator authorization');
     recordTrace(trace, 'run_start_returns_before_provider', { operationId: delayed.operationId, startMs, state: running.state });
     const delayedDone = await waitForOutcome(first.client, delayed.operationId);
     assert.equal(delayedDone.state, 'done');
@@ -475,5 +483,238 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     await writeFile(logPath, `${trace.map((entry) => JSON.stringify(entry)).join('\n')}\n`);
     t.diagnostic(`MCP E2E trace: ${logPath}`);
     await rm(verifiedTempRoot, { recursive: true, force: true });
+  }
+});
+
+test('operator tools configure real sessions, answer Host interactions, and run bounded queues', { timeout: 60_000 }, async (t) => {
+  const parent = resolve(process.env.LIGULE_MCP_E2E_TEMP_ROOT ?? join(testplaceRoot, 'tmp'));
+  await mkdir(parent, { recursive: true });
+  const tempRoot = await mkdtemp(join(parent, 'mcp-operator-e2e-'));
+  const projectRoot = join(tempRoot, 'project');
+  const dataRoot = join(tempRoot, 'data');
+  const sessionDirectory = join(projectRoot, 'sessions');
+  await Promise.all([mkdir(projectRoot), mkdir(dataRoot)]);
+  await mkdir(sessionDirectory);
+  const apiKeyName = 'LIGULE_MCP_OPERATOR_E2E_API_KEY';
+  const fixtureCredential = 'local-operator-test-key';
+  const markerAllowed = join(projectRoot, 'operator-approved.txt');
+  const markerDenied = join(projectRoot, 'operator-denied.txt');
+  const markerHardDenied = join(projectRoot, 'policy-forbidden.txt');
+  const markerSensitive = join(projectRoot, 'operator-secret-executed.txt');
+  const requests = [];
+  const queueGate = gate();
+  const cancelGate = gate();
+  let callId = 0;
+  const endpoint = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    requests.push(body);
+    const last = body.messages.at(-1);
+    const userText = body.messages.filter((message) => message.role === 'user').at(-1)?.content ?? '';
+    if (last?.role === 'tool') { sse(response, { content: 'operator task completed' }); return; }
+    const waiting = userText.includes('MCP_OPERATOR_QUEUE_GATE') ? queueGate
+      : userText.includes('MCP_OPERATOR_CANCEL_GATE') ? cancelGate : undefined;
+    if (waiting !== undefined) {
+      waiting.markStarted();
+      await waiting.waiting;
+      if (!response.destroyed) sse(response, { content: 'gate released' });
+      return;
+    }
+    let tool;
+    let args;
+    if (userText.includes('MCP_OPERATOR_APPROVE')) {
+      tool = 'create'; args = { path: 'operator-approved.txt', content: 'approved by the operator' };
+    } else if (userText.includes('MCP_OPERATOR_DENY')) {
+      tool = 'create'; args = { path: 'operator-denied.txt', content: 'must remain absent' };
+    } else if (userText.includes('MCP_OPERATOR_HARD_DENY')) {
+      tool = 'create'; args = { path: 'policy-forbidden.txt', content: 'policy must remain final' };
+    } else if (userText.includes('MCP_OPERATOR_QUESTION')) {
+      tool = 'ask_user_question'; args = { questions: JSON.stringify([{ question: 'Which option should be used?', options: [{ label: 'Option A' }, { label: 'Option B' }] }]) };
+    } else if (userText.includes('MCP_OPERATOR_SENSITIVE_APPROVAL')) {
+      tool = 'exec'; args = { command: `node -e "require('node:fs').writeFileSync('operator-secret-executed.txt','unexpected')" 'Bearer synthetic-secret-token'` };
+    }
+    if (tool === undefined) { sse(response, { content: 'operator task completed' }); return; }
+    callId += 1;
+    sse(response, { tool_calls: [{ index: 0, id: `operator-call-${callId}`, type: 'function', function: { name: tool, arguments: JSON.stringify(args) } }] });
+  });
+  const baseURL = `http://127.0.0.1:${await listenFetchable(endpoint)}/v1`;
+  await writeFile(join(dataRoot, 'config.toml'), [
+    '[model]', 'api = "chat-completions"', `baseURL = ${tomlString(baseURL)}`,
+    'model = "operator-e2e-local"', `apiKeyEnv = "${apiKeyName}"`, '',
+    '[policy]', 'mode = "ask"', '', '[host]', `sessionDirectory = ${tomlString(sessionDirectory)}`,
+    '', '[limits]', 'contextTokens = 200000', '', '[loop]', 'iterations = 8', 'modelCalls = 16', '',
+  ].join('\n'));
+  await setTrusted(projectRoot, true, join(dataRoot, 'tui-trust.json'));
+  let context = await connectMcp({ cliPath, projectRoot, dataRoot, apiKeyName, apiKey: fixtureCredential, sdkRoot, operator: true });
+  const notifications = [];
+  context.client.setNotificationHandler(LoggingMessageNotificationSchema, (notification) => { notifications.push(notification); });
+  try {
+    const names = (await context.client.listTools()).tools.map((tool) => tool.name).sort();
+    assert.equal(names.length, 10);
+    const project = await realpath(projectRoot);
+    const created = toolData(await context.client.callTool({ name: 'ligule_session_create', arguments: {
+      projectRoot: project, initial: { mode: 'minimal', policy: 'ask', outputTokens: 2048 },
+    } }), 'operator_session_create');
+    const sessionId = created.sessionId;
+    assert.equal(created.settingsApplied, true);
+
+    const readSettings = toolData(await context.client.callTool({ name: 'ligule_session_configure', arguments: { sessionId } }), 'session_configure_read');
+    assert.equal(readSettings.applies, 'unchanged');
+    assert.equal(readSettings.effective.policy.mode, 'ask');
+    assert.equal(readSettings.effective.generation.outputTokens, 2048);
+    assert.ok(readSettings.available.services.some((service) => service.id === 'legacy' && service.models[0].id === 'operator-e2e-local'));
+    const generationChanged = toolData(await context.client.callTool({ name: 'ligule_session_configure', arguments: {
+      sessionId, changes: { model: { provider: 'legacy', model: 'operator-e2e-local' }, outputTokens: 2048 },
+    } }), 'session_configure_model_and_budget');
+    assert.equal(generationChanged.applies, 'now');
+    const modeChanged = toolData(await context.client.callTool({ name: 'ligule_session_configure', arguments: { sessionId, changes: { mode: 'full' } } }), 'session_configure_mode_full');
+    assert.equal(modeChanged.applies, 'now');
+    assert.equal(modeChanged.effective.mode, 'full');
+    toolData(await context.client.callTool({ name: 'ligule_session_configure', arguments: { sessionId, changes: { mode: 'minimal' } } }), 'session_configure_mode_minimal');
+    const unsupported = await context.client.callTool({ name: 'ligule_session_configure', arguments: { sessionId, changes: { thinking: { effort: 'high' } } } });
+    toolFailure(unsupported, 'provider_thinking_unsupported', 'unsupported_thinking');
+    await assert.rejects(context.client.callTool({ name: 'ligule_session_configure', arguments: { sessionId, changes: { mode: 'minimal', policy: 'ask' } } }),
+      (error) => error.code === -32602, 'schema rejects cross-category partial configuration');
+    const changed = toolData(await context.client.callTool({ name: 'ligule_session_configure', arguments: { sessionId, changes: { outputTokens: 1024 } } }), 'session_configure_output');
+    assert.equal(changed.applies, 'now');
+    assert.equal(changed.effective.generation.outputTokens, 1024);
+    const simple = toolData(await context.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_OPERATOR_WIRE_BUDGET' } }), 'operator_budget_run');
+    assert.equal((await waitForOutcome(context.client, simple.operationId)).state, 'done');
+    assert.equal(requests.find((body) => body.messages.at(-1)?.content === 'MCP_OPERATOR_WIRE_BUDGET')?.max_tokens, 1024);
+
+    const approveRun = toolData(await context.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_OPERATOR_APPROVE' } }), 'operator_approval_run');
+    const approvalStatus = await waitFor(async () => {
+      const status = toolData(await context.client.callTool({ name: 'ligule_run_status', arguments: { operationId: approveRun.operationId } }), 'operator_approval_status');
+      return status.pendingInteractions.some((interaction) => interaction.type === 'approval') ? status : undefined;
+    }, 'approval request');
+    const approval = approvalStatus.pendingInteractions.find((interaction) => interaction.type === 'approval');
+    assert.equal(approval.details.tool, 'create');
+    assert.equal(approval.details.args.path, 'operator-approved.txt');
+    assert.equal(approvalStatus.waitingFor, 'approval');
+    const foreignSession = toolData(await context.client.callTool({ name: 'ligule_session_create', arguments: { projectRoot: project } }), 'operator_foreign_session');
+    const wrongType = await context.client.callTool({ name: 'ligule_interaction_reply', arguments: {
+      sessionId, requestId: approval.requestId, type: 'question', answers: [{ id: 'q1', selected: ['Option A'] }],
+    } });
+    toolFailure(wrongType, 'control_interaction_type_mismatch', 'wrong_interaction_type');
+    const wrongSession = await context.client.callTool({ name: 'ligule_interaction_reply', arguments: {
+      sessionId: foreignSession.sessionId, requestId: approval.requestId, type: 'approval', decision: 'allow',
+    } });
+    toolFailure(wrongSession, 'control_interaction_session_mismatch', 'cross_session_reply');
+    const accepted = toolData(await context.client.callTool({ name: 'ligule_interaction_reply', arguments: {
+      sessionId, requestId: approval.requestId, type: 'approval', decision: 'allow',
+    } }), 'operator_approval_reply');
+    assert.equal(accepted.resolved, true);
+    assert.equal((await waitForOutcome(context.client, approveRun.operationId)).state, 'done');
+    assert.equal(await readFile(markerAllowed, 'utf8'), 'approved by the operator');
+    const repeated = await context.client.callTool({ name: 'ligule_interaction_reply', arguments: {
+      sessionId, requestId: approval.requestId, type: 'approval', decision: 'allow',
+    } });
+    toolFailure(repeated, 'control_interaction_stale', 'duplicate_approval_reply');
+
+    const denyRun = toolData(await context.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_OPERATOR_DENY' } }), 'operator_denial_run');
+    const denyStatus = await waitFor(async () => {
+      const status = toolData(await context.client.callTool({ name: 'ligule_run_status', arguments: { operationId: denyRun.operationId } }), 'operator_denial_status');
+      return status.pendingInteractions.find((interaction) => interaction.type === 'approval');
+    }, 'denial request');
+    toolData(await context.client.callTool({ name: 'ligule_interaction_reply', arguments: {
+      sessionId, requestId: denyStatus.requestId, type: 'approval', decision: 'deny',
+    } }), 'operator_denial_reply');
+    assert.equal((await waitForOutcome(context.client, denyRun.operationId)).state, 'done');
+    await assert.rejects(access(markerDenied), (error) => error.code === 'ENOENT');
+
+    toolData(await context.client.callTool({ name: 'ligule_session_configure', arguments: { sessionId, changes: { policy: 'never' } } }), 'operator_set_never');
+    const hardDenyRun = toolData(await context.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_OPERATOR_HARD_DENY' } }), 'operator_hard_deny_run');
+    const hardDenyDone = await waitForOutcome(context.client, hardDenyRun.operationId);
+    assert.equal(hardDenyDone.state, 'done');
+    assert.equal(hardDenyDone.pendingInteractions.length, 0, 'a Policy hard denial is not exposed as an overridable approval');
+    await assert.rejects(access(markerHardDenied), (error) => error.code === 'ENOENT');
+    toolData(await context.client.callTool({ name: 'ligule_session_configure', arguments: { sessionId, changes: { policy: 'ask' } } }), 'operator_restore_ask');
+
+    const questionRun = toolData(await context.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_OPERATOR_QUESTION' } }), 'operator_question_run');
+    const questionStatus = await waitFor(async () => {
+      const status = toolData(await context.client.callTool({ name: 'ligule_run_status', arguments: { operationId: questionRun.operationId } }), 'operator_question_status');
+      return status.pendingInteractions.find((interaction) => interaction.type === 'question');
+    }, 'question request');
+    assert.equal(questionStatus.details.questions[0].question, 'Which option should be used?');
+    toolData(await context.client.callTool({ name: 'ligule_interaction_reply', arguments: {
+      sessionId, requestId: questionStatus.requestId, type: 'question', answers: [{ id: 'q1', selected: ['Option B'] }],
+    } }), 'operator_question_reply');
+    assert.equal((await waitForOutcome(context.client, questionRun.operationId)).state, 'done');
+    assert.ok((await findHistoryRecord(context.client, sessionId, (entry) => entry.kind === 'tool' && entry.json.includes('Option B'))));
+
+    const sensitiveRun = toolData(await context.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_OPERATOR_SENSITIVE_APPROVAL' } }), 'operator_sensitive_approval_run');
+    const sensitiveDone = await waitForOutcome(context.client, sensitiveRun.operationId);
+    assert.equal(sensitiveDone.state, 'done');
+    assert.equal(sensitiveDone.pendingInteractions.length, 0);
+    assert.ok(sensitiveDone.events.some((event) => event.kind === 'interaction.rejected' && event.code === 'control_interaction_sensitive'));
+    await assert.rejects(access(markerSensitive), (error) => error.code === 'ENOENT', 'sensitive approval data is denied before the command side effect');
+
+    const staleRun = toolData(await context.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_OPERATOR_APPROVE' } }), 'operator_stale_approval_run');
+    const staleApproval = await waitFor(async () => {
+      const status = toolData(await context.client.callTool({ name: 'ligule_run_status', arguments: { operationId: staleRun.operationId } }), 'operator_stale_approval_status');
+      return status.pendingInteractions.find((interaction) => interaction.type === 'approval');
+    }, 'approval to cancel');
+    const cancelledInteractionRun = toolData(await context.client.callTool({ name: 'ligule_run_cancel', arguments: { operationId: staleRun.operationId } }), 'cancel_pending_approval');
+    assert.equal(cancelledInteractionRun.state, 'cancelled');
+    const lateReply = await context.client.callTool({ name: 'ligule_interaction_reply', arguments: {
+      sessionId, requestId: staleApproval.requestId, type: 'approval', decision: 'allow',
+    } });
+    toolFailure(lateReply, 'control_interaction_stale', 'late_reply_after_cancel');
+
+    const queuedRun = toolData(await context.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_OPERATOR_QUEUE_GATE' } }), 'queue_gate_run');
+    await queueGate.entered;
+    const pendingBudget = toolData(await context.client.callTool({ name: 'ligule_session_configure', arguments: { sessionId, changes: { outputTokens: 512 } } }), 'queue_pending_budget');
+    assert.equal(pendingBudget.applies, 'next_round');
+    assert.equal(pendingBudget.pending.generation.outputTokens, 512);
+    const queuedFirst = toolData(await context.client.callTool({ name: 'ligule_session_send', arguments: { sessionId, input: 'queued first' } }), 'queue_first');
+    const queuedSecond = toolData(await context.client.callTool({ name: 'ligule_session_send', arguments: { sessionId, input: 'queued second' } }), 'queue_second');
+    assert.equal(queuedFirst.queued, true);
+    toolData(await context.client.callTool({ name: 'ligule_session_send', arguments: { sessionId, action: 'cancel_queued', queueItemId: queuedSecond.queueItemId } }), 'queue_cancel_second');
+    queueGate.release();
+    assert.equal((await waitForOutcome(context.client, queuedRun.operationId)).state, 'done');
+    const firstQueuedOperation = await waitFor(async () => {
+      const status = toolData(await context.client.callTool({ name: 'ligule_run_status', arguments: { operationId: queuedRun.operationId } }), 'queue_completed_status');
+      return status.events.find((event) => event.kind === 'queue.started')?.newOperationId;
+    }, 'auto-started queued run');
+    assert.equal((await waitForOutcome(context.client, firstQueuedOperation)).state, 'done');
+    await waitFor(() => requests.some((body) => body.messages.filter((message) => message.role === 'user').at(-1)?.content === 'queued first'), 'queued Provider request');
+    assert.equal(requests.find((body) => body.messages.filter((message) => message.role === 'user').at(-1)?.content === 'queued first')?.max_tokens, 512);
+    const tailStatus = toolData(await context.client.callTool({ name: 'ligule_run_status', arguments: { operationId: firstQueuedOperation } }), 'queue_tail_status');
+    assert.equal(tailStatus.queue.length, 0);
+    toolData(await context.client.callTool({ name: 'ligule_session_configure', arguments: { sessionId, changes: { outputTokens: 1024 } } }), 'queue_restore_budget');
+    const cancelRun = toolData(await context.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_OPERATOR_CANCEL_GATE' } }), 'queue_cancel_run');
+    await cancelGate.entered;
+    const remainsQueued = toolData(await context.client.callTool({ name: 'ligule_session_send', arguments: { sessionId, input: 'continue after cancellation' } }), 'queue_cancel_pending');
+    const cancelledRun = toolData(await context.client.callTool({ name: 'ligule_run_cancel', arguments: { operationId: cancelRun.operationId } }), 'queue_cancel_active');
+    assert.equal(cancelledRun.state, 'cancelled');
+    assert.equal(cancelledRun.queuePaused, true);
+    assert.equal(cancelledRun.queue.length, 1);
+    cancelGate.release();
+    const continued = toolData(await context.client.callTool({ name: 'ligule_session_send', arguments: { sessionId, action: 'continue' } }), 'queue_continue');
+    assert.ok(continued.currentOperationId);
+    assert.equal((await waitForOutcome(context.client, continued.currentOperationId)).state, 'done');
+    assert.ok(notifications.length > 0, 'stdio client receives best-effort event notifications');
+    const paged = toolData(await context.client.callTool({ name: 'ligule_run_status', arguments: { operationId: firstQueuedOperation, after: 0, limit: 1 } }), 'event_page');
+    assert.equal(paged.events.length, 1);
+    assert.equal(paged.events[0].cursor, 1);
+    assert.equal(paged.hasMoreEvents, true);
+    t.diagnostic(`operator MCP notifications received: ${notifications.length}`);
+    await context.close();
+    context = await connectMcp({ cliPath, projectRoot, dataRoot, apiKeyName, apiKey: fixtureCredential, sdkRoot, operator: true });
+    const reopened = toolData(await context.client.callTool({ name: 'ligule_session_open', arguments: { projectRoot: project, sessionId } }), 'operator_session_reopen');
+    assert.equal(reopened.sessionId, sessionId);
+    const restored = toolData(await context.client.callTool({ name: 'ligule_session_configure', arguments: { sessionId } }), 'operator_settings_after_restart');
+    assert.equal(restored.effective.generation.outputTokens, 1024, 'generation settings replay from Session JSONL after server restart');
+    assert.equal(restored.effective.generation.model.model, 'operator-e2e-local');
+    const staleOperation = await context.client.callTool({ name: 'ligule_run_status', arguments: { operationId: simple.operationId } });
+    toolFailure(staleOperation, 'operation_not_found', 'operator_old_operation_after_restart');
+  } finally {
+    queueGate.release();
+    cancelGate.release();
+    await context.close();
+    endpoint.closeAllConnections();
+    await new Promise((done) => endpoint.close(done));
+    await rm(tempRoot, { recursive: true, force: true });
   }
 });

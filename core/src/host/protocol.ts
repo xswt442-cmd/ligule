@@ -14,6 +14,7 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly projectRoot?: string;
   readonly workspaceOrigin?: string;
   readonly mode?: string;
+  readonly policy?: string;
   readonly name?: string;
   readonly archived?: boolean;
   readonly at?: number;
@@ -27,6 +28,17 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly text?: string;
   readonly provider?: string;
   readonly model?: string;
+  readonly initialMode?: string;
+  readonly initialPolicy?: string;
+  readonly initialProvider?: string;
+  readonly initialModel?: string;
+  readonly initialThinkingEffort?: string;
+  readonly initialOutputTokens?: number;
+  readonly thinkingEffort?: string;
+  readonly outputTokens?: number;
+  readonly resetModel?: boolean;
+  readonly resetThinking?: boolean;
+  readonly resetOutputTokens?: boolean;
   readonly reference?: string;
   readonly value?: unknown;
   readonly json?: string;
@@ -53,6 +65,12 @@ export const METHODS = Object.freeze({
         // 客户端明确说明工作区来源，因为指定的目录也可能正是默认工作区。
         // 未提供来源时，Host 根据是否提供工作区路径区分显式选择与默认工作区。
         workspaceOrigin: { type: 'string', description: "how this session landed on that workspace: 'explicit' when the client chose it, 'default' when it is the one the client falls back to" },
+        initialMode: { type: 'string', description: 'optional mode to apply before returning the new session' },
+        initialPolicy: { type: 'string', description: 'optional session policy override: ask, auto, or never' },
+        initialProvider: { type: 'string', description: 'provider ID for an initial model selection; must be paired with initialModel' },
+        initialModel: { type: 'string', description: 'model ID for an initial model selection; must be paired with initialProvider' },
+        initialThinkingEffort: { type: 'string', description: 'provider-supported effort to apply before the first run' },
+        initialOutputTokens: { type: 'integer', minimum: 1, description: 'optional session output-token limit; the Host enforces model and context ceilings' },
       },
       description: 'a session starts on the project the Host was launched on; naming another project is optional',
     },
@@ -184,6 +202,21 @@ export const METHODS = Object.freeze({
   'status.get': {
     description: 'Read the Host state for this session, including its live phase and model output budget when a run is active',
     parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
+  },
+  'session.configure': {
+    description: 'Read or change one session-owned category: mode, policy, model and generation settings. Generation changes apply at the next turn boundary and never write configuration files.',
+    parameters: { type: 'object', properties: {
+      sessionId: SESSION_ID,
+      mode: { type: 'string', description: 'select a mode; default restores the mode configured for this project' },
+      policy: { type: 'string', description: 'ask, auto, never, or default to restore the project policy' },
+      provider: { type: 'string', description: 'provider ID for a model selection; must be paired with model' },
+      model: { type: 'string', description: 'model ID for a model selection; must be paired with provider' },
+      thinkingEffort: { type: 'string', description: 'a value advertised by the selected provider, or default to inherit the provider default' },
+      outputTokens: { type: 'integer', minimum: 1, description: 'session output-token maximum bounded by the provider and context window' },
+      resetModel: { type: 'boolean', description: 'restore the model selection inherited from the current project configuration' },
+      resetThinking: { type: 'boolean', description: 'inherit the selected provider default thinking behavior' },
+      resetOutputTokens: { type: 'boolean', description: 'inherit the selected provider output-token setting' },
+    }, required: ['sessionId'] },
   },
   // 工作区登记表和默认选择保存在应用数据根目录中。
   // 客户端可读取登记、设置默认项或移除登记；移除前必须先清除默认项。

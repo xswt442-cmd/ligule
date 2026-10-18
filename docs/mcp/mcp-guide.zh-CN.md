@@ -38,17 +38,40 @@ Windows 路径示例：
 }
 ```
 
-每个 MCP Server 进程只授权启动时指定的一个项目。客户端可通过 MCP `tools/list` 读取七个工具的参数 schema 和说明：
+每个 MCP Server 进程只授权启动时指定的一个项目。客户端通过 MCP `tools/list` 发现十个工具及其参数 schema：
 
 - `ligule_session_create`：在授权项目中创建会话。
 - `ligule_session_open`：接回已有会话。列表中的会话需要先接回，之后才能提交任务或读取记录。
 - `ligule_session_list`：有界列出授权项目中的会话。
+- `ligule_session_configure`：读取会话当前/待生效的设置和实际可用选项；操控者模式可修改会话设置。
+- `ligule_interaction_reply`：对真实待决的审批或提问作一次性答复；只接受原会话和请求编号。
+- `ligule_session_send`：空闲时开始新一轮，运行中按顺序排入下一轮消息，也可继续或清理队列。
 - `ligule_run_start`：提交一条任务，返回当前进程内的 `operationId` 和会话编号。
 - `ligule_run_status`：查询任务是否仍在运行、已完成、失败或取消。
 - `ligule_session_read`：分页读取会话记录。
 - `ligule_run_cancel`：按 `operationId` 取消相应任务。
 
-推荐顺序是先创建或接回会话，再调用 `ligule_run_start`；随后轮询 `ligule_run_status` 并用 `ligule_session_read` 读取新增记录。需要停止时调用 `ligule_run_cancel`。工具参数以运行中的 `tools/list` schema 为准。
+推荐顺序是先创建或接回会话，再读取 `ligule_session_configure`。提交任务后轮询 `ligule_run_status`；根据 `phase`、`waitingFor` 和 `pendingInteractions` 继续等待或审阅后答复。完成后用 `ligule_session_read` 查看新增记录。状态通知通过 MCP logging 尽力发送；通知不可用时轮询仍可读取同一状态。需要停止时调用 `ligule_run_cancel`。工具参数以运行中的 `tools/list` schema 为准。
+
+## 操控者授权与会话设置
+
+默认启动参数不包含操控者授权。此时审批请求按既有行为拒绝，Host 不注册 `ask_user_question`，配置查询仍可用，设置修改与交互答复返回 `control_operator_required`。只有本地 MCP 客户端配置明确加入 `--operator`，才能启用回复和会话设置：
+
+```json
+{"command":"ligule","args":["mcp-server","--project","/absolute/path/to/project","--operator"]}
+```
+
+`--operator` 代表本机操控者明确授权这个 stdio 客户端。它允许回答 Policy 判为 `ask` 的审批、回答真实提问，以及修改单个会话的 Mode、Policy、模型和生成参数；它不更改文件边界、工作区信任或硬拒绝规则。Policy 为 `never`、工具校验失败、工作区越界等固定拒绝不能被审批答复覆盖。审批内容展示真实工具和操作参数；如果 Host 无法完整、安全地展示请求，就会拒绝该请求。
+
+新会话可在 `ligule_session_create` 的 `initial` 中一次性设置 `mode`、`policy`、`model`、`thinking`、`outputTokens`。已打开会话使用 `ligule_session_configure` 的 `changes`。单次更新只能改一个类别：Mode、Policy 或生成设置；生成设置类别内部可同时改模型、思考档位和输出上限。混合类别的请求会被 schema 拒绝，避免部分生效。设置只属于该会话，不改配置文件。Mode 与模型/生成设置保存在 Session JSONL 中，并在重新接回时恢复；Policy 覆盖沿用 Host 的运行期行为，重新接回后采用项目配置默认值。运行期间的生成设置在下一轮开始时生效，Policy 在之后的工具判定生效，不能改变已经等待中的审批。响应中的 `applies` 明确给出时机。
+
+模型和服务选项来自当前 Host 配置。`thinking` 只列出已核实的模型能力；当前仅官方 DeepSeek Chat Completions 端点上列出的模型支持 `none/low/high/max`。兼容网关不会自动继承此能力。输出 Token 数必须在服务声明、已核实模型上限及上下文窗口的共同范围内，否则返回稳定错误码。使用 `null` 清除模型、思考或输出上限的会话覆盖。
+
+## 运行阶段与消息队列
+
+`ligule_run_status` 保留 `running/done/failed/cancelled` 四种终态兼容状态，并返回阶段、等待类型、进度、待决交互及有界事件。每个操作保留最近 128 个事件；使用 `after` 游标增量读取，单次最多 50 条。若事件缓存已覆盖旧游标，`eventGap` 会提示需要从现有状态重新同步。运行和等待交互时状态仍是 `running`。
+
+`ligule_session_send` 最多缓存 16 条下一轮消息，每条不超过 65,536 个字符。空闲会话立即开始一轮并返回 `operationId`；运行中的消息按接收顺序排队。运行正常完成后自动执行下一条，并在来源操作的事件流发布 `queue.started` 与新 `operationId`，即使新一轮很快结束也能查询。运行取消或失败会暂停队列，调用 `continue` 才继续；可用 `cancel_queued` 删除指定条目，或用 `clear_queue` 清空剩余条目。该队列只在 Server 进程内存在，重启后不恢复，也不会重放不确定的副作用。正在等待审批或提问时，排队消息不会替代交互答复。
 
 成功结果同时提供 `structuredContent` 和 JSON 文本 `content`。工具执行失败时返回 `isError: true`，从文本 `content` 中解析 JSON 的 `code` 字段，例如 `session_locked` 或 `operation_not_found`；失败结果没有成功形状的 `structuredContent`。未知工具或不符合 schema 的参数返回 MCP 协议错误。运行状态只包含固定摘要和错误码，模型正文与工具结果通过会话记录读取。
 
@@ -70,7 +93,7 @@ Windows 路径示例：
 
 `--project` 必须是绝对路径。会话、运行和读取都限制在启动时授权的项目内；`ligule_session_list` 返回的会话需通过 `ligule_session_open` 接回后才能操作。项目目录标识会话归属，`boundary` 仍独立限制文件工具可访问的路径。
 
-MCP Server 使用 Ligule 已有的配置、模型服务、工具和 Policy。需要人工审批的操作会被拒绝；Server 不提供自动审批、Policy 修改、任意 Host RPC 或任意配置写入工具。它只使用本地 stdio，不开启网络监听，也不会因 MCP 客户端连接而提升工具权限。stdio 客户端与 Server 使用同一操作系统用户权限，请只配置可信的本地 MCP 客户端。
+MCP Server 使用 Ligule 已有的配置、模型服务、工具和 Policy。未启动 `--operator` 时，需要人工审批的操作会被拒绝；启动该选项后，只能答复真实待决请求。Server 不提供任意 Host RPC 或任意配置文件写入工具。它只使用本地 stdio，不开启网络监听。stdio 客户端与 Server 使用同一操作系统用户权限，请只配置可信的本地 MCP 客户端。
 
 任务状态和 `operationId` 只保存在当前 Server 进程中；每个进程保留最多 256 个操作记录。达到上限后，新任务会从已结束的操作中淘汰创建时间最早的一条；被淘汰的 `operationId` 不可再查询。如果所有保留的操作都仍在运行，新任务会以容量错误拒绝。Server 退出或重启后，旧 `operationId` 不可恢复。会话记录仍由 Host 持久保存，可重新启动 Server、接回会话并读取历史，但这不会恢复旧进程中的运行状态。
 

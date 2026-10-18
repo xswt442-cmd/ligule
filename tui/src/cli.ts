@@ -114,7 +114,7 @@ const pkg = { version: packageValue.version };
 // 随包模式目录与 `dist/` 同级；此相对路径在源码检出和 npm 安装包中保持一致。
 const shippedModes = dirname(fileURLToPath(import.meta.resolve('@ligule/core/modes/minimal.toml')));
 
-// `--config a.b=c` 可重复；`--mode <名字>` 和 `--project <根>` 各接受一个值；`--json` 不接受值。
+// `--config a.b=c` 可重复；`--mode <名字>` 和 `--project <根>` 各接受一个值；`--json` 与 `--operator` 不接受值。
 // 这些选项都从位置参数中解析。
 const flags: string[] = [];
 const positional: string[] = [];
@@ -127,8 +127,13 @@ let modeFlag: string | undefined;
 let projectFlag: string | undefined;
 let langFlag: string | undefined;
 let jsonFlag = false;
+let operatorFlag = false;
 for (let index = 0; index < argv.length; index += 1) {
   const arg = argv[index];
+  if (arg === '--operator') {
+    operatorFlag = true;
+    continue;
+  }
   if (arg === '--json') {
     jsonFlag = true;
     continue;
@@ -407,6 +412,8 @@ if (invalidLanguage) {
   printFailure('cli_mode_needs_a_value', t('--mode 需要模式名称，例如 --mode full', '--mode needs a mode name, for example --mode full'));
 } else if (missingProjectValue) {
   printFailure('cli_project_needs_a_value', t('--project 需要项目根目录，用于筛选列表', '--project needs a project root to filter the listing'));
+} else if (operatorFlag && command !== 'mcp-server') {
+  printFailure('cli_operator_requires_mcp_server', t('--operator 只能与 mcp-server 一起使用', '--operator is only valid with mcp-server'));
 } else if (command === '--version' || command === '-v') {
   console.log(pkg.version);
 } else if (command === 'tools') {
@@ -578,7 +585,7 @@ if (invalidLanguage) {
   try {
     if (projectFlag === undefined || rest.length > 0 || jsonFlag) throw new KernelError('control_project_required');
     const { serveMcp } = await import('@ligule/core/host/mcp-server.js');
-    await serveMcp({ projectRoot: projectFlag, version: pkg.version, flags, modeName: modeFlag });
+    await serveMcp({ projectRoot: projectFlag, version: pkg.version, flags, modeName: modeFlag, operator: operatorFlag });
   } catch (error) {
     const { controlErrorCode } = await import('@ligule/core/host/control.js');
     process.stderr.write(`${controlErrorCode(error)}\n`);
@@ -640,8 +647,9 @@ if (invalidLanguage) {
   console.log(t(`ligule ${pkg.version} - 开发版本，请勿用于正式环境。`, `ligule ${pkg.version} - development build; do not use in production.`));
   console.log(t('命令：tools、skills、extensions、sessions、workspaces、policy <session-id>、run <text>、resume <id> <text>、call <tool> [json-args]、tui、host、--version', 'Commands: tools, skills, extensions, sessions, workspaces, policy <session-id>, run <text>, resume <id> <text>, call <tool> [json-args], tui, host, --version'));
   console.log(t('直接运行 ligule 打开终端界面；tui 子命令仍可使用。', 'Run ligule without a command to open the terminal UI; the tui subcommand remains available.'));
-  console.log(t('mcp-server --project <绝对目录>：启动本地 stdio MCP 外控；审批请求直接拒绝。', 'mcp-server --project <absolute-directory>: start local stdio MCP control; approval requests are denied.'));
-  console.log(t('选项：--config <key.path=value>（可重复）、--mode <name>、--lang <zh|en|auto>', 'Options: --config <key.path=value> (repeatable), --mode <name>, --lang <zh|en|auto>'));
+  console.log(t('mcp-server --project <绝对目录>：启动本地 stdio MCP 控制器；默认拒绝审批并禁用会话设置修改。', 'mcp-server --project <absolute-directory>: start a local stdio MCP controller; by default it denies approvals and disables session setting changes.'));
+  console.log(t('mcp-server --operator：明确授权该本地 MCP 客户端读取并回应真实待决的审批/提问，以及修改会话级设置；Policy 的拒绝规则仍生效。', 'mcp-server --operator: authorize this local MCP client to review and answer real pending approvals/questions and change session settings; Policy denials remain in force.'));
+  console.log(t('选项：--config <key.path=value>（可重复）、--mode <name>、--project <绝对目录>、--operator、--lang <zh|en|auto>', 'Options: --config <key.path=value> (repeatable), --mode <name>, --project <absolute-directory>, --operator, --lang <zh|en|auto>'));
   console.log(t('run、tui 和 host 从配置读取 model.api、model.baseURL 与 model.model；密钥由 model.apiKeyEnv 指定，未设置时读取 LIGULE_API_KEY。', 'run, tui and host read model.api, model.baseURL and model.model from config; the key uses model.apiKeyEnv, or LIGULE_API_KEY when unset.'));
   console.log(t('run、tui 和 host 默认使用 minimal 模式；--mode 可覆盖 mode 配置。tools 和 call 不读取模式。', 'run, tui and host use the minimal mode by default; --mode overrides the mode config. tools and call do not read a mode.'));
   console.log(t('skills 列出已加载的技能与未加载原因；它不读取模型配置。', 'skills lists loaded skills and why others were skipped; it does not read model config.'));

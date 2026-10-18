@@ -10,31 +10,154 @@ import { KernelError } from '../kernel/error.js';
 import { isTrusted } from '../kernel/workspace-trust.js';
 import { createHost } from './host.js';
 import { loadHostEnvironment } from './environment.js';
-import { createControl, controlErrorCode } from './control.js';
+import { createControl, controlErrorCode, type McpInitialSettings, type McpSessionChanges } from './control.js';
 
 const id = { type: 'string', minLength: 1, maxLength: 160 };
 const root = { type: 'string', minLength: 1, maxLength: 4096, description: 'Absolute project root authorized when this server started.' };
 const operationProperties = {
   operationId: id, sessionId: id, state: { type: 'string', enum: ['running', 'done', 'failed', 'cancelled'] },
   code: { type: 'string' }, summary: { type: 'string', maxLength: 2048 },
+  phase: { type: ['string', 'null'] },
+  waitingFor: { type: ['string', 'null'], enum: ['approval', 'input', null] },
+  progress: { type: ['object', 'null'], properties: {
+    phase: { type: 'string' }, startedAt: { type: 'number' }, phaseStartedAt: { type: 'number' },
+    lastProgressAt: { type: 'number' }, modelCalls: { type: 'integer' }, toolCalls: { type: 'integer' }, outputTokens: { type: ['integer', 'null'] },
+  } },
+  updatedAt: { type: 'number' },
+  pendingInteractions: { type: 'array', maxItems: 8, items: object({
+    requestId: id, sessionId: id, operationId: id, type: { type: 'string', enum: ['approval', 'question'] },
+    createdAt: { type: 'number' }, details: { type: 'object' },
+  }, ['requestId', 'sessionId', 'operationId', 'type', 'createdAt', 'details']) },
+  events: { type: 'array', maxItems: 50, items: object({
+    cursor: { type: 'integer', minimum: 1 }, kind: { type: 'string' }, at: { type: 'number' }, sessionId: id, operationId: id,
+    phase: { type: ['string', 'null'] }, progress: { type: 'object' }, code: { type: 'string' },
+    requestId: id, interactionType: { type: 'string', enum: ['approval', 'question'] }, decision: { type: 'string', enum: ['allow', 'deny'] },
+    answered: { type: 'integer' }, eventSeq: { type: ['integer', 'null'] }, eventKind: { type: 'string' },
+    queueItemId: id, newOperationId: id, inputCharacters: { type: 'integer' }, cleared: { type: 'integer' },
+  }, ['cursor', 'kind', 'at', 'sessionId', 'operationId']) },
+  nextCursor: { type: 'integer', minimum: 0 }, hasMoreEvents: { type: 'boolean' }, eventGap: { type: 'boolean' },
+  firstAvailableCursor: { type: 'integer', minimum: 1 }, currentOperationId: { type: ['string', 'null'] },
+  queue: { type: 'array', maxItems: 16, items: object({ queueItemId: id, acceptedAt: { type: 'number' }, inputCharacters: { type: 'integer' } }, ['queueItemId', 'acceptedAt', 'inputCharacters']) },
+  queuePaused: { type: 'boolean' },
 };
 function object(properties: Record<string, object>, required: string[]) {
   return { type: 'object' as const, properties, required, additionalProperties: false };
 }
 const operationOutput = object(operationProperties, ['operationId', 'sessionId', 'state']);
-const sessionOutput = object({ sessionId: id }, ['sessionId']);
+const sessionOutput = object({ sessionId: id, settingsApplied: { type: 'boolean' } }, ['sessionId']);
+const sessionChanges = {
+  type: 'object', additionalProperties: false, properties: {
+    mode: { type: 'string', maxLength: 64 },
+    policy: { type: 'string', enum: ['ask', 'auto', 'never', 'default'] },
+    model: { type: ['object', 'null'], additionalProperties: false, properties: { provider: id, model: { type: 'string', minLength: 1, maxLength: 256 } }, required: ['provider', 'model'] },
+    thinking: { type: ['object', 'null'], additionalProperties: false, properties: { effort: { type: 'string', enum: ['default', 'none', 'low', 'high', 'max'] } }, required: ['effort'] },
+    outputTokens: { type: ['integer', 'null'], minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+  },
+  oneOf: [
+    { maxProperties: 0 },
+    { required: ['mode'], maxProperties: 1 },
+    { required: ['policy'], maxProperties: 1 },
+    {
+      not: { anyOf: [{ required: ['mode'] }, { required: ['policy'] }] },
+      anyOf: [{ required: ['model'] }, { required: ['thinking'] }, { required: ['outputTokens'] }],
+    },
+  ],
+};
+const initialSettings = {
+  type: 'object', additionalProperties: false, properties: {
+    mode: { type: 'string', maxLength: 64 },
+    policy: { type: 'string', enum: ['ask', 'auto', 'never'] },
+    model: { type: 'object', additionalProperties: false, properties: { provider: id, model: { type: 'string', minLength: 1, maxLength: 256 } }, required: ['provider', 'model'] },
+    thinking: { type: 'object', additionalProperties: false, properties: { effort: { type: 'string', enum: ['default', 'none', 'low', 'high', 'max'] } }, required: ['effort'] },
+    outputTokens: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+  },
+};
+const configurationOutput = object({
+  sessionId: id,
+  effective: { type: 'object', additionalProperties: false, properties: {
+    mode: { type: ['string', 'null'] },
+    policy: { type: 'object', additionalProperties: false, properties: {
+      mode: { type: 'string', enum: ['ask', 'auto', 'never'] }, source: { type: 'string' }, default: { type: 'string' },
+    }, required: ['mode', 'source', 'default'] },
+    generation: { type: 'object', additionalProperties: false, properties: {
+      model: { type: 'object', additionalProperties: false, properties: { provider: { type: 'string' }, model: { type: 'string' } }, required: ['provider', 'model'] },
+      thinking: { type: 'object', additionalProperties: false, properties: {
+        supported: { type: 'boolean' }, efforts: { type: 'array', items: { type: 'string' } }, defaultEffort: { type: ['string', 'null'] }, effort: { type: 'string' },
+      }, required: ['supported', 'efforts', 'defaultEffort', 'effort'] },
+      outputTokens: { type: ['integer', 'null'] }, contextTokens: { type: ['integer', 'null'] }, maxOutputTokens: { type: ['integer', 'null'] },
+    }, required: ['model', 'thinking', 'outputTokens', 'contextTokens', 'maxOutputTokens'] },
+  }, required: ['mode', 'policy', 'generation'] },
+  pending: { type: ['object', 'null'], additionalProperties: false, properties: {
+    mode: { type: ['string', 'null'] },
+    generation: { type: ['object', 'null'], additionalProperties: false, properties: {
+      model: { type: 'object', additionalProperties: false, properties: { provider: { type: 'string' }, model: { type: 'string' } }, required: ['provider', 'model'] },
+      thinking: { type: 'object', additionalProperties: false, properties: {
+        supported: { type: 'boolean' }, efforts: { type: 'array', items: { type: 'string' } }, defaultEffort: { type: ['string', 'null'] }, effort: { type: 'string' },
+      }, required: ['supported', 'efforts', 'defaultEffort', 'effort'] },
+      outputTokens: { type: ['integer', 'null'] }, contextTokens: { type: ['integer', 'null'] }, maxOutputTokens: { type: ['integer', 'null'] },
+    }, required: ['model', 'thinking', 'outputTokens', 'contextTokens', 'maxOutputTokens'] },
+  }, required: ['mode', 'generation'] },
+  available: { type: 'object', additionalProperties: false, properties: {
+    modes: { type: 'object', additionalProperties: false, properties: {
+      modes: { type: 'array', maxItems: 128, items: object({ name: { type: 'string', maxLength: 64 }, layer: { type: 'string' } }, ['name', 'layer']) },
+      invalid: { type: 'array', maxItems: 128, items: object({ name: { type: 'string', maxLength: 64 }, code: { type: 'string' } }, ['name', 'code']) },
+      truncated: { type: 'boolean' },
+    }, required: ['modes', 'invalid', 'truncated'] },
+    policies: { type: 'array', items: { type: 'string' } },
+    services: { type: 'array', items: object({
+      id, name: { type: 'string' }, api: { type: 'string', enum: ['chat-completions', 'messages'] },
+      models: { type: 'array', items: object({
+        id: { type: 'string', maxLength: 256 }, name: { type: 'string' }, contextTokens: { type: 'integer', minimum: 1 }, outputTokens: { type: 'integer', minimum: 1 },
+        thinking: { type: 'object', additionalProperties: false, properties: {
+          supported: { type: 'boolean' }, efforts: { type: 'array', items: { type: 'string' } }, defaultEffort: { type: ['string', 'null'] },
+        }, required: ['supported', 'efforts', 'defaultEffort'] },
+      }, ['id', 'thinking']) },
+    }, ['id', 'name', 'api', 'models']) },
+  }, required: ['modes', 'policies', 'services'] },
+  denials: { type: 'object', additionalProperties: false, properties: {
+    consecutive: { type: 'integer', minimum: 0 }, total: { type: 'integer', minimum: 0 },
+  }, required: ['consecutive', 'total'] },
+  applies: { type: 'string', enum: ['now', 'next_round', 'next_decision', 'unchanged'] },
+}, ['sessionId', 'effective', 'pending', 'available', 'denials', 'applies']);
+const queueOutput = object({
+  sessionId: id, accepted: { type: 'boolean' }, queued: { type: 'boolean' }, queueItemId: id,
+  operationId: id, state: { type: 'string', enum: ['running', 'done', 'failed', 'cancelled'] },
+  currentOperationId: { type: ['string', 'null'] },
+  queue: operationProperties.queue, queuePaused: { type: 'boolean' },
+  action: { type: 'string', enum: ['send', 'continue', 'cancel_queued', 'clear_queue'] }, cleared: { type: 'integer' },
+}, ['sessionId']);
+const approvalAnswers = { type: 'array', minItems: 1, maxItems: 4, items: object({
+  id: { type: 'string', minLength: 1, maxLength: 16 },
+  selected: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 80 } },
+  custom: { type: 'string', maxLength: 4000 },
+}, ['id', 'selected']) };
+const replyOutput = object({ requestId: id, sessionId: id, operationId: id, type: { type: 'string', enum: ['approval', 'question'] },
+  decision: { type: 'string', enum: ['allow', 'deny'] }, answered: { type: 'integer' }, resolved: { type: 'boolean' } },
+['requestId', 'sessionId', 'operationId', 'type', 'resolved']);
 const tools: Tool[] = [
-  { name: 'ligule_session_create', description: 'Create a writable session in the authorized project. Returns its sessionId. At most 64 open sessions per server.',
-    inputSchema: object({ projectRoot: root }, ['projectRoot']), outputSchema: sessionOutput },
+  { name: 'ligule_session_create', description: 'Create a writable session in the authorized project. Returns its sessionId. At most 64 open sessions per server. Optional initial settings require --operator and are applied before the session is returned.',
+    inputSchema: object({ projectRoot: root, initial: initialSettings }, ['projectRoot']), outputSchema: sessionOutput },
   { name: 'ligule_session_open', description: 'Resume a persistent session in the authorized project. Missing, locked or foreign sessions fail. No operation IDs survive server restart.',
     inputSchema: object({ projectRoot: root, sessionId: id }, ['projectRoot', 'sessionId']), outputSchema: sessionOutput },
   { name: 'ligule_session_list', description: 'List up to 50 persistent sessions belonging to the authorized project. Open one before reading its records.',
     inputSchema: object({ projectRoot: root, limit: { type: 'integer', minimum: 1, maximum: 50, default: 20 } }, ['projectRoot']),
     outputSchema: object({ sessions: { type: 'array', maxItems: 50, items: object({ sessionId: id, name: { type: 'string', maxLength: 120 }, archived: { type: 'boolean' }, createdAt: { type: ['string', 'null'], maxLength: 128 } }, ['sessionId', 'name', 'archived', 'createdAt']) } }, ['sessions']) },
-  { name: 'ligule_run_start', description: 'Submit text and return immediately while the real Host runs in the background. One active run per session. Poll status and read records. IDs are process-local; the server keeps 256 recent operations and evicts the oldest completed one when full. Approval requests are denied; this tool cannot approve or change policy.',
+  { name: 'ligule_session_configure', description: 'Read this session’s effective and pending settings plus available modes, providers, models and verified thinking controls. Changes are session-scoped, require --operator, and apply only at documented turn boundaries.',
+    inputSchema: object({ sessionId: id, changes: sessionChanges }, ['sessionId']), outputSchema: configurationOutput },
+  { name: 'ligule_interaction_reply', description: 'Reply once to a real pending approval or question bound to its session and request ID. Approval replies require --operator; hard denials remain final.',
+    inputSchema: object({
+      sessionId: id, requestId: id, type: { type: 'string', enum: ['approval', 'question'] },
+      decision: { type: 'string', enum: ['allow', 'deny'] }, answers: approvalAnswers,
+    }, ['sessionId', 'requestId', 'type']), outputSchema: replyOutput },
+  { name: 'ligule_session_send', description: 'Send a user message immediately or queue it for the next turn. Use actions to continue a paused queue, cancel one queued message, or clear queued messages. The queue is process-local and is not replayed after restart.',
+    inputSchema: object({
+      sessionId: id, action: { type: 'string', enum: ['send', 'continue', 'cancel_queued', 'clear_queue'], default: 'send' },
+      input: { type: 'string', minLength: 1, maxLength: 65536 }, queueItemId: id,
+    }, ['sessionId']), outputSchema: queueOutput },
+  { name: 'ligule_run_start', description: 'Submit text and return immediately while the real Host runs in the background. One active run per session. Poll status and read records. IDs are process-local; the server keeps 256 recent operations and evicts the oldest completed one when full.',
     inputSchema: object({ sessionId: id, input: { type: 'string', minLength: 1, maxLength: 65536 } }, ['sessionId', 'input']), outputSchema: operationOutput },
-  { name: 'ligule_run_status', description: 'Read the actual Host outcome: running, done, failed or cancelled, plus a bounded text summary or stable error code. Unknown or previous-process IDs fail.',
-    inputSchema: object({ operationId: id }, ['operationId']), outputSchema: operationOutput },
+  { name: 'ligule_run_status', description: 'Read the actual Host state, progress, pending interactions, queued messages, and bounded events after a cursor. Operation IDs are process-local; reopen the session after restart and read durable records.',
+    inputSchema: object({ operationId: id, after: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 50, default: 20 } }, ['operationId']), outputSchema: operationOutput },
   { name: 'ligule_run_cancel', description: 'Cancel this known operation and wait for Host cleanup. Reports terminated only after it settles. Completed operations keep their outcome; other sessions are unaffected.',
     inputSchema: object({ operationId: id }, ['operationId']), outputSchema: object({ ...operationProperties, terminated: { type: 'boolean' } }, ['operationId', 'sessionId', 'state', 'terminated']) },
   { name: 'ligule_session_read', description: 'Read real persistent records, newest page first (records inside a page are chronological). Use nextBefore as before for older pages. Each json field is a record JSON fragment, at most 8192 UTF-16 characters. If nextOffset is non-null, call with at=that seq and offset=nextOffset until null, concatenating fragments before JSON.parse. at and before are exclusive. This preserves complete large records without unbounded responses.',
@@ -47,14 +170,23 @@ interface Arguments {
   sessionId?: string;
   operationId?: string;
   input?: string;
+  initial?: McpInitialSettings;
+  changes?: McpSessionChanges;
+  requestId?: string;
+  type?: 'approval' | 'question';
+  decision?: 'allow' | 'deny';
+  answers?: { id: string; selected: string[]; custom?: string }[];
+  action?: 'send' | 'continue' | 'cancel_queued' | 'clear_queue';
+  queueItemId?: string;
   limit?: number;
   before?: number;
   at?: number;
   offset?: number;
+  after?: number;
 }
 
-export async function serveMcp({ projectRoot, version, flags = [], modeName }: {
-  projectRoot: string; version: string; flags?: string[]; modeName?: string;
+export async function serveMcp({ projectRoot, version, flags = [], modeName, operator = false }: {
+  projectRoot: string; version: string; flags?: string[]; modeName?: string; operator?: boolean;
 }): Promise<void> {
   if (!isAbsolute(projectRoot)) throw new KernelError('control_project_required');
   let authorizedRoot: string;
@@ -69,12 +201,20 @@ export async function serveMcp({ projectRoot, version, flags = [], modeName }: {
     config: createConfig({ user: { ...environment.config, workspaceRoot: authorizedRoot } }),
     configLayers: layers,
     ...(modeName === undefined ? {} : { modeName }),
-    interactive: false,
+    interactive: operator,
   });
-  const control = createControl(host, authorizedRoot);
   const server = new Server({ name: 'ligule', version }, {
-    capabilities: { tools: {} },
-    instructions: 'One local stdio controller for the explicitly authorized project. List tools, create/open a session, start a run, poll status/read records, optionally cancel. Policy approval requests are denied. Disconnect cancels active runs and releases locks. Operation IDs last only for this process. Session JSONL persists.',
+    capabilities: { tools: {}, logging: {} },
+    instructions: operator
+      ? 'One local stdio operator for the explicitly authorized project. This server was launched with --operator, so session-only settings and replies to real pending approvals/questions are available. Policy decisions still run in Host; hard denials cannot be overridden. Poll status for progress and pending interactions; notifications are best-effort. Disconnect cancels active runs and releases locks. Operation IDs and queued messages are process-local; Session JSONL persists.'
+      : 'One local stdio controller for the explicitly authorized project. Session creation/open/list, run start/status/cancel, session configuration reads, message sending and record paging are available. Settings changes and replies to approvals/questions require restarting with the explicit --operator flag. Policy approval requests are denied in this mode. Disconnect cancels active runs and releases locks. Operation IDs and queued messages are process-local; Session JSONL persists.',
+  });
+  const control = createControl(host, authorizedRoot, {
+    operator,
+    onEvent(event) {
+      void server.sendLoggingMessage({ level: 'info', logger: 'ligule', data: event })
+        .catch(() => { process.stderr.write('mcp_notification_delivery_failed\n'); });
+    },
   });
   const ajv = new Ajv({ strict: false });
   const validators = new Map(tools.map((tool) => [tool.name, ajv.compile(tool.inputSchema)]));
@@ -89,11 +229,18 @@ export async function serveMcp({ projectRoot, version, flags = [], modeName }: {
     try {
       let result: Record<string, unknown>;
       switch (request.params.name) {
-        case 'ligule_session_create': result = await control.create(input.projectRoot!); break;
+        case 'ligule_session_create': result = await control.create(input.projectRoot!, input.initial); break;
         case 'ligule_session_open': result = await control.open(input.projectRoot!, input.sessionId!); break;
         case 'ligule_session_list': result = await control.list(input.projectRoot!, input.limit ?? 20); break;
+        case 'ligule_session_configure': result = await control.configure(input.sessionId!, input.changes); break;
+        case 'ligule_interaction_reply': result = control.replyInteraction({
+          sessionId: input.sessionId!, requestId: input.requestId!, type: input.type!,
+          ...(input.decision === undefined ? {} : { decision: input.decision }),
+          ...(input.answers === undefined ? {} : { answers: input.answers }),
+        }); break;
+        case 'ligule_session_send': result = control.send(input.sessionId!, input.action ?? 'send', input.input, input.queueItemId); break;
         case 'ligule_run_start': result = control.start(input.sessionId!, input.input!); break;
-        case 'ligule_run_status': result = control.status(input.operationId!); break;
+        case 'ligule_run_status': result = control.status(input.operationId!, input.after ?? 0, input.limit ?? 20); break;
         case 'ligule_run_cancel': result = await control.cancel(input.operationId!); break;
         case 'ligule_session_read': result = await control.read(input.sessionId!, input.before, input.limit ?? 20, input.at, input.offset); break;
         default: throw new KernelError('tool_unknown');

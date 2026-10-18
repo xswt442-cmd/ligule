@@ -8,7 +8,7 @@ import type { SessionEvent } from './format.js';
 
 export const CHECKPOINT_FORMAT_VERSION = 1;
 // 哈希输入包含独立版本号，避免无关记录字段变化使所有检查点失效。
-export const CHECKPOINT_INPUT_VERSION = 1;
+export const CHECKPOINT_INPUT_VERSION = 2;
 
 export interface Checkpoint {
   formatVersion: number;
@@ -40,7 +40,7 @@ function canonicalInput(events: SessionEvent[]): string {
       if (event.kind === 'user') return [event.seq, 'user', textOf(event.text)];
       if (event.kind === 'assistant') {
         const calls = (event.toolCalls as { name?: unknown; args?: unknown }[] | undefined) ?? [];
-        return [event.seq, 'assistant', textOf(event.text), calls.map((call) => [textOf(call?.name), call?.args ?? null])];
+        return [event.seq, 'assistant', textOf(event.text), textOf(event.reasoning), calls.map((call) => [textOf(call?.name), call?.args ?? null])];
       }
       const result = event.result as { failed?: boolean; code?: unknown; content?: unknown } | undefined;
       return [event.seq, 'tool', textOf(event.tool), result?.failed === true, result?.code ?? null, textOf(result?.content)];

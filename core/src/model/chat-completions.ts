@@ -4,6 +4,7 @@
 import { createHash } from 'node:crypto';
 import { KernelError } from '../kernel/error.js';
 import { resolveOutputTokens } from './output-budget.js';
+import { checkedThinkingEffort, thinkingCapabilityOf, type DeepSeekThinkingEffort } from './thinking.js';
 import {
   apiRoot, assertAllAnswered, DEFAULT_RETRY, open, parseSse, readCredential, readJson, resolveCapabilities, resultText, SSE_DONE,
   type ProviderCapabilities, type RetryPolicy,
@@ -25,6 +26,7 @@ interface ChatCompletionsProviderOptions {
   readonly outputTokens?: unknown;
   readonly declaredOutputLimit?: unknown;
   readonly contextTokens?: unknown;
+  readonly thinkingEffort?: unknown;
   readonly retry?: RetryPolicy;
 }
 
@@ -34,6 +36,7 @@ interface ModelProvider {
   readonly model: string;
   readonly capabilities: ChatCompletionsCapabilities;
   readonly outputTokens: number;
+  readonly thinkingEffort?: DeepSeekThinkingEffort;
   stream(request: ModelRequest, options?: { readonly signal?: AbortSignal | null }): AsyncGenerator<ProviderEvent>;
   withModel(model: string): ModelProvider;
 }
@@ -49,7 +52,7 @@ type ChatToolMessage = { readonly role: 'tool'; readonly tool_call_id: string | 
 type ChatWireMessage =
   | { readonly role: 'system'; readonly content: string }
   | { readonly role: 'user'; readonly content: string }
-  | { readonly role: 'assistant'; readonly content: string | null; readonly tool_calls?: readonly ChatToolCall[] }
+  | { readonly role: 'assistant'; readonly content: string | null; readonly reasoning_content?: string; readonly tool_calls?: readonly ChatToolCall[] }
   | ChatToolMessage;
 
 interface StreamToolCall {
@@ -150,7 +153,7 @@ function toolNameMapping(request: ModelRequest): ToolNameMapping {
   };
 }
 
-function toWireMessages(view: readonly ModelMessage[], system: string, toolNames: ToolNameMapping): ChatWireMessage[] {
+function toWireMessages(view: readonly ModelMessage[], system: string, toolNames: ToolNameMapping, preserveReasoning: boolean): ChatWireMessage[] {
   // Chat Completions 将系统提示作为消息列表首项发送。
   const messages: ChatWireMessage[] = system === '' ? [] : [{ role: 'system', content: system }];
   assertAllAnswered(view);
@@ -163,6 +166,7 @@ function toWireMessages(view: readonly ModelMessage[], system: string, toolNames
         role: 'assistant',
         // 只有工具调用且没有正文时使用 null，避免兼容服务将空字符串视为续写内容。
         content: entry.text === '' && calls.length > 0 ? null : entry.text,
+        ...(preserveReasoning && entry.reasoning !== undefined ? { reasoning_content: entry.reasoning } : {}),
         ...(calls.length === 0 ? {} : {
           tool_calls: calls.map((call) => ({
             id: call.id,
@@ -187,12 +191,17 @@ export function createChatCompletionsProvider({
   outputTokens,
   declaredOutputLimit,
   contextTokens,
+  thinkingEffort: requestedThinkingEffort,
   retry = DEFAULT_RETRY,
 }: ChatCompletionsProviderOptions = {}): ModelProvider {
   // 直接使用配置中的 baseURL；不同兼容服务对 `/v1` 前缀的要求不同，不在此处补写路径。
   const root = apiRoot(baseUrl);
   if (typeof model !== 'string' || model === '') throw new KernelError('provider_model_required');
   const effective = chatCompletionsCapabilities(capabilities);
+  const thinkingCapability = thinkingCapabilityOf('chat-completions', root, model);
+  const thinkingEffort = requestedThinkingEffort === undefined
+    ? undefined
+    : checkedThinkingEffort(requestedThinkingEffort, thinkingCapability);
   const budget = resolveOutputTokens({ baseUrl: root, model, requested: outputTokens,
     defaultTokens: effective.maxOutputTokens,
     configuredLimit: capabilities?.maxOutputTokens === undefined ? undefined : effective.maxOutputTokens,
@@ -201,6 +210,26 @@ export function createChatCompletionsProvider({
 
   async function* stream(request: ModelRequest, { signal }: { readonly signal?: AbortSignal | null } = {}): AsyncGenerator<ProviderEvent> {
     const toolNames = toolNameMapping(request);
+    const body = {
+      model,
+      messages: toWireMessages(request.messages ?? [], request.system ?? '', toolNames,
+        thinkingCapability !== undefined && thinkingEffort !== 'none'),
+      stream: effective.streaming,
+      // 根据提供方能力决定是否请求最终用量；不支持时由压缩逻辑继续使用本地估算。
+      ...(effective.streaming && effective.streamUsage ? { stream_options: { include_usage: true } } : {}),
+      max_tokens: budget,
+      parallel_tool_calls: effective.parallelToolCalls,
+      ...(thinkingEffort === undefined ? {} : {
+        thinking: { type: thinkingEffort === 'none' ? 'disabled' : 'enabled' },
+        reasoning_effort: thinkingEffort,
+      }),
+      ...(request.tools?.length === 0 || request.tools === undefined ? {} : {
+        tools: request.tools.map((tool) => ({
+          type: 'function',
+          function: { name: toolNames.encode(tool.name), description: tool.description, parameters: tool.parameters },
+        })),
+      }),
+    };
     const response = await open(`${root}/chat/completions`, {
       method: 'POST',
       redirect: 'error',
@@ -210,21 +239,7 @@ export function createChatCompletionsProvider({
         'accept': effective.streaming ? 'text/event-stream' : 'application/json',
         'authorization': `Bearer ${await readCredential(apiKeyEnv)}`,
       },
-      body: JSON.stringify({
-        model,
-        messages: toWireMessages(request.messages ?? [], request.system ?? '', toolNames),
-        stream: effective.streaming,
-        // 根据提供方能力决定是否请求最终用量；不支持时由压缩逻辑继续使用本地估算。
-        ...(effective.streaming && effective.streamUsage ? { stream_options: { include_usage: true } } : {}),
-        max_tokens: budget,
-        parallel_tool_calls: effective.parallelToolCalls,
-        ...(request.tools?.length === 0 || request.tools === undefined ? {} : {
-          tools: request.tools.map((tool) => ({
-            type: 'function',
-            function: { name: toolNames.encode(tool.name), description: tool.description, parameters: tool.parameters },
-          })),
-        }),
-      }),
+      body: JSON.stringify(body),
     }, retry);
     if (response.body === null) throw new KernelError('provider_stream_missing');
 
@@ -359,11 +374,13 @@ export function createChatCompletionsProvider({
     model,
     capabilities: effective,
     outputTokens: budget,
+    ...(thinkingEffort === undefined ? {} : { thinkingEffort }),
     stream,
     // 模型切换必须由调用方明确请求；失败时不自动切换到其他模型。
     withModel(next: string) {
       return createChatCompletionsProvider({ baseUrl, model: next, apiKeyEnv, capabilities, outputTokens,
-        ...(next === model ? { declaredOutputLimit, contextTokens } : {}), retry });
+        ...(next === model ? { declaredOutputLimit, contextTokens } : {}),
+        ...(requestedThinkingEffort === undefined ? {} : { thinkingEffort: requestedThinkingEffort }), retry });
     },
   };
   return Object.freeze(provider);

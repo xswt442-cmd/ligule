@@ -201,6 +201,7 @@ export function createSessionLog({ directory, id, meta }: CreateSessionLogOption
       const { checkpoint } = await loadCheckpoint({ directory, id, events });
       const view = [];
       let summarized = false;
+      let reasoning = '';
       for (const event of events) {
         const covered = checkpoint !== null && event.seq >= checkpoint.fromSeq && event.seq <= checkpoint.toSeq;
         if (covered) {
@@ -211,9 +212,15 @@ export function createSessionLog({ directory, id, meta }: CreateSessionLogOption
           continue;
         }
         if (event.kind === 'user') {
+          reasoning = '';
           view.push({ role: 'user', text: event.text });
+        } else if (event.kind === 'reasoning') {
+          reasoning += typeof event.text === 'string' ? event.text : '';
         } else if (event.kind === 'assistant') {
-          view.push({ role: 'assistant', text: event.text, toolCalls: event.toolCalls });
+          const assistantReasoning = typeof event.reasoning === 'string' ? event.reasoning : reasoning;
+          view.push({ role: 'assistant', text: event.text, toolCalls: event.toolCalls,
+            ...(assistantReasoning === '' ? {} : { reasoning: assistantReasoning }) });
+          reasoning = '';
         } else if (event.kind === 'tool') {
           // `reason` 面向用户，`content` 面向模型。拒绝结果需将错误码和原因写入 `content`，
           // 否则模型无法区分策略拒绝和空工具响应。

@@ -96,6 +96,12 @@ test('--version prints the package version and --help lists the commands', () =>
   assert.match(capture('--help').stdout, /(?:Commands: tools, skills, extensions, sessions|命令：tools、skills、extensions、sessions)/);
 });
 
+test('--operator is accepted only with the MCP server command', () => {
+  const result = capture('tools', '--operator');
+  assert.equal(result.ok, false);
+  assert.match(result.stderr, /cli_operator_requires_mcp_server/);
+});
+
 test('--lang selects help text without requiring a model configuration', () => {
   const english = capture('--help', '--lang', 'en');
   assert.equal(english.ok, true, english.stderr);
