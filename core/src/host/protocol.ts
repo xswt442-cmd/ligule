@@ -53,6 +53,19 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly value?: unknown;
   readonly json?: string;
   readonly version?: string;
+  readonly grantId?: string;
+  readonly grantName?: string;
+  readonly defaultPermissionProfile?: string;
+  readonly maxPermissionProfile?: string;
+  readonly defaultNetwork?: string;
+  readonly maxNetwork?: string;
+  readonly defaultPolicy?: string;
+  readonly allowedPolicyAsk?: boolean;
+  readonly allowedPolicyAuto?: boolean;
+  readonly allowedPolicyNever?: boolean;
+  readonly allowOperator?: boolean;
+  readonly confirmUnrestrictedNetwork?: boolean;
+  readonly expiresAt?: string;
   readonly field?: string;
   readonly layer?: string;
   readonly op?: string;
@@ -324,6 +337,38 @@ export const METHODS = Object.freeze({
       },
       required: ['json', 'version'],
     },
+  },
+  // Delegation grants persist outside session preferences and are available only through trusted local clients.
+  'agent-control.list': {
+    description: 'Read the local Agent Control grants and the version needed for a conflict-checked create or revoke operation',
+    parameters: { type: 'object', properties: {} },
+  },
+  'agent-control.create': {
+    description: 'Create a project-bound Agent Control grant after the trusted UI has separately confirmed any full-access and unrestricted-network ceiling',
+    parameters: { type: 'object', properties: {
+      version: { type: 'string' },
+      grantName: { type: 'string' },
+      projectRoot: { type: 'string' },
+      defaultPermissionProfile: { type: 'string' },
+      maxPermissionProfile: { type: 'string' },
+      defaultNetwork: { type: 'string' },
+      maxNetwork: { type: 'string' },
+      defaultPolicy: { type: 'string' },
+      allowedPolicyAsk: { type: 'boolean' },
+      allowedPolicyAuto: { type: 'boolean' },
+      allowedPolicyNever: { type: 'boolean' },
+      allowOperator: { type: 'boolean' },
+      confirmFullAccess: { type: 'boolean' },
+      confirmUnrestrictedNetwork: { type: 'boolean' },
+      expiresAt: { type: 'string' },
+    }, required: ['version', 'grantName', 'projectRoot', 'defaultPermissionProfile', 'maxPermissionProfile', 'defaultNetwork', 'maxNetwork', 'defaultPolicy', 'allowOperator', 'confirmFullAccess', 'confirmUnrestrictedNetwork', 'expiresAt'] },
+  },
+  'agent-control.revoke': {
+    description: 'Revoke a persisted Agent Control grant using the version returned by agent-control.list',
+    parameters: { type: 'object', properties: {
+      grantId: { type: 'string' },
+      version: { type: 'string' },
+    }, required: ['grantId', 'version'] },
   },
   // 客户端只能读取配置白名单中的字段，不能请求文件路径或其他配置内容。
   'config.get': {

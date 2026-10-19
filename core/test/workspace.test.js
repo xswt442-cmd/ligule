@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 
 const execFile = promisify(callbackExecFile);
-import { MESSAGES_CAPABILITIES, createConfig, createConnection, createMemoryConnectionPair, serveHost } from '../dist/index.js';
+import { listWorkspaceSessions, MESSAGES_CAPABILITIES, createConfig, createConnection, createMemoryConnectionPair, createSessionLog, serveHost, sessionDirectory } from '../dist/index.js';
 import { listSessions } from '../dist/session/list.js';
 import { parseRegistry, readRegistry, registerWorkspace, setDefaultWorkspace, unregisterWorkspace, workspaceIdentity } from '../dist/kernel/workspace.js';
 
@@ -150,12 +150,14 @@ async function withHost(run, provider = { capabilities: MESSAGES_CAPABILITIES, m
   try {
     const config = createConfig({ user: { boundary: project, model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model' } } });
     host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy });
+    const recordDirectory = sessionDirectory({ boundary: project, workspaceRoot: project });
     return await run({
       connection: createConnection(pair.client),
       project,
       home,
       // 直接读取会话首行中的工作区信息，不依赖工作区列表。
-      headerOf: async (sessionId) => JSON.parse((await readFile(join(home, 'sessions', `${sessionId}.jsonl`), 'utf8')).split('\n')[0]),
+      recordDirectory,
+      headerOf: async (sessionId) => JSON.parse((await readFile(join(recordDirectory, `${sessionId}.jsonl`), 'utf8')).split('\n')[0]),
     });
   } finally {
     pair.client.output.end();
@@ -179,9 +181,55 @@ test('建会话的那一侧把这一具工作区登记进应用数据根，并�
     const header = await headerOf(sessionId);
     assert.equal(header.workspace, workspaceIdentity(project), '首行记下这一份会话落在哪一具工作区');
     assert.equal(header.workspaceOrigin, 'default', '客户端没指名项目根，来源就是它当前那一具');
-    const [listed] = await listSessions(join(home, 'sessions'), { projectRoot: project });
+    const [listed] = await listWorkspaceSessions({ boundary: project, workspaceRoot: project }, { projectRoot: project });
     assert.equal(listed.workspace, header.workspace, '列表把这两格一起交出去，界面分组读它而不是读路径相等');
     assert.equal(listed.workspaceOrigin, 'default');
+  });
+});
+
+test('legacy sessions appear in read-only listings and move into the workspace folder only when opened', async () => {
+  await withHost(async ({ connection, project, home, recordDirectory }) => {
+    const legacyDirectory = join(home, 'sessions');
+    const sessionId = 'legacy-session';
+    const foreignSessionId = 'foreign-session';
+    const foreignProject = join(home, 'another-project');
+    await mkdir(legacyDirectory, { recursive: true });
+    const legacy = createSessionLog({
+      directory: legacyDirectory,
+      id: sessionId,
+      meta: () => ({ projectRoot: project, workspace: workspaceIdentity(project) }),
+    });
+    await legacy.append({ kind: 'user', text: 'keep this history' });
+    const projectLegacyDirectory = join(project, '.ligule', 'sessions');
+    const localLegacy = createSessionLog({
+      directory: projectLegacyDirectory,
+      id: sessionId,
+      meta: () => ({ projectRoot: project, workspace: workspaceIdentity(project) }),
+    });
+    await localLegacy.append({ kind: 'user', text: 'older project-local copy' });
+    const foreign = createSessionLog({
+      directory: legacyDirectory,
+      id: foreignSessionId,
+      meta: () => ({ projectRoot: foreignProject, workspace: workspaceIdentity(foreignProject) }),
+    });
+    await foreign.append({ kind: 'user', text: 'belongs to another workspace' });
+    const legacyPath = join(legacyDirectory, `${sessionId}.jsonl`);
+    const original = await readFile(legacyPath);
+
+    const listed = await connection.request('sessions.list', { projectRoot: project });
+    assert.ok(listed.sessions.some((item) => item.id === sessionId));
+    assert.equal(listed.sessions.some((item) => item.id === foreignSessionId), false, '共享旧目录按首行工作区筛选');
+    const hits = await connection.request('sessions.search', { projectRoot: project, query: 'keep this history' });
+    assert.equal(hits.hits[0].sessionId, sessionId, '搜索也只读扫描旧目录');
+    await assert.rejects(readFile(join(recordDirectory, `${sessionId}.jsonl`)), (error) => error.code === 'ENOENT', '只读列表不迁移旧记录');
+
+    await connection.request('session.open', { sessionId, projectRoot: project });
+    const resumed = await connection.request('session.read', { sessionId });
+    assert.ok(resumed.events.some((event) => event.kind === 'user' && event.text === 'keep this history'), 'the former shared data-root copy takes precedence over its older project-local source');
+    await connection.request('session.close', { sessionId });
+    assert.deepEqual(await readFile(legacyPath), original, '旧位置保留原件');
+    assert.ok((await readFile(join(recordDirectory, `${sessionId}.jsonl`))).length >= original.length, '明确打开时复制到工作区目录');
+    await assert.rejects(readFile(join(recordDirectory, `${foreignSessionId}.jsonl`)), (error) => error.code === 'ENOENT', '打开一个工作区时不复制其他工作区记录');
   });
 });
 
@@ -221,7 +269,7 @@ test('协议交回那份登记，默认选择指得着一条登记，空的那�
 });
 
 test('Host removes workspace registration without changing project or session files', async () => {
-  await withHost(async ({ connection, project, home }) => {
+  await withHost(async ({ connection, project, recordDirectory }) => {
     await writeFile(join(project, 'keep.txt'), 'project files stay');
     const { sessionId } = await connection.request('session.create', {});
     await connection.request('run.start', { sessionId, input: '登记工作区' });
@@ -234,7 +282,7 @@ test('Host removes workspace registration without changing project or session fi
     await connection.request('workspace.default.set', { directory: '' });
     const removed = await connection.request('workspace.remove', { directory: project });
     assert.equal(removed.workspaces.length, 0);
-    assert.equal(await readFile(join(home, 'sessions', `${sessionId}.jsonl`), 'utf8').then(() => true), true);
+    assert.equal(await readFile(join(recordDirectory, `${sessionId}.jsonl`), 'utf8').then(() => true), true);
     assert.equal(await readFile(join(project, 'keep.txt'), 'utf8'), 'project files stay');
     const restored = await connection.request('workspace.default.set', { directory: project });
     assert.equal(restored.workspaces[0].identity, workspaceIdentity(project));

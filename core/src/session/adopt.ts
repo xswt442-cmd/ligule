@@ -3,6 +3,7 @@ import { constants, createReadStream } from 'node:fs';
 import { copyFile, link, lstat, mkdir, open, readdir, readFile, rm, stat, utimes } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
+import { dataRoot } from '../kernel/config-file.js';
 import { SPILL_NAME } from '../kernel/result.js';
 import { KernelRuntimeError } from '../kernel/error.js';
 import { workspaceIdentity } from '../kernel/workspace.js';
@@ -183,6 +184,7 @@ async function copyRecord(
   target: string,
   names: Set<string>,
   legacyProjectRoot: string | undefined,
+  expectedProjectRoot: string | undefined,
   report: AdoptionReport,
 ): Promise<void> {
   const sourcePath = join(legacy, name);
@@ -240,6 +242,15 @@ async function copyRecord(
       report.unknown.push(name);
       return;
     }
+    if (expectedProjectRoot !== undefined) {
+      const recordedRoot = typeof parsed.header?.projectRoot === 'string' && parsed.header.projectRoot !== ''
+        ? parsed.header.projectRoot
+        : legacyProjectRoot;
+      if (recordedRoot === undefined || workspaceIdentity(recordedRoot) !== workspaceIdentity(expectedProjectRoot)) {
+        report.unknown.push(name);
+        return;
+      }
+    }
     const record = recordBytes(name, source, parsed, legacyProjectRoot);
     if (record === undefined) {
       report.unknown.push(name);
@@ -295,7 +306,11 @@ async function copyRecord(
   }
 }
 
-export async function adoptLegacySessions(legacy: string, target: string): Promise<AdoptionReport> {
+export async function adoptLegacySessions(
+  legacy: string,
+  target: string,
+  { projectRoot = undefined as string | undefined, sessionId = undefined as string | undefined } = {},
+): Promise<AdoptionReport> {
   const report: AdoptionReport = { copied: [], already: [], conflicts: [], unknown: [], busy: [] };
   let entries: string[];
   try {
@@ -304,13 +319,16 @@ export async function adoptLegacySessions(legacy: string, target: string): Promi
     if (isMissing(cause)) return report;
     throw failure('session_adoption_read_failed', legacy, cause);
   }
+  const names = new Set(entries);
+  const legacyProjectRoot = projectRootOfLegacyDirectory(legacy);
+  const records = entries.filter((name) => RECORD.test(name)
+    && (sessionId === undefined || name === `${sessionId}.jsonl`)).sort();
+  if (records.length === 0) return report;
   await mkdir(target, { recursive: true }).catch((cause) => {
     throw failure('session_adoption_write_failed', target, cause);
   });
-  const names = new Set(entries);
-  const legacyProjectRoot = projectRootOfLegacyDirectory(legacy);
-  const records = entries.filter((name) => RECORD.test(name)).sort();
-  for (const name of records) await copyRecord(name, legacy, target, names, legacyProjectRoot, report);
+  for (const name of records) await copyRecord(name, legacy, target, names, legacyProjectRoot, projectRoot, report);
+  if (sessionId !== undefined) return report;
   for (const name of entries) {
     if (name.endsWith('.lock') || RECORD.test(name)) continue;
     if (!CHECKPOINT.test(name) && !SPILL_NAME.test(name)) report.unknown.push(name);
@@ -321,12 +339,29 @@ export async function adoptLegacySessions(legacy: string, target: string): Promi
 
 /** 缺省解析出来的记录目录才做整理；项目根优先来自 Host 的实际工作区身份。 */
 export async function adoptForSessionDirectory(
-  config: { boundary: string; workspaceRoot?: string; host?: { sessionDirectory?: unknown } },
+  config: { boundary: string; workspaceRoot?: string; userHome?: string; host?: { sessionDirectory?: unknown } },
   directory: string,
   projectRoot?: string,
+  sessionId?: string,
 ): Promise<AdoptionReport | null> {
   const configured = config.host?.sessionDirectory;
   if (typeof configured === 'string' && configured !== '') return null;
   const legacyProjectRoot = config.workspaceRoot ?? projectRoot ?? config.boundary;
-  return adoptLegacySessions(join(legacyProjectRoot, '.ligule', 'sessions'), directory);
+  const sources = [
+    join(dataRoot(config.userHome), 'sessions'),
+    join(legacyProjectRoot, '.ligule', 'sessions'),
+  ].filter((source, index, all) => resolve(source) !== resolve(directory)
+    && all.findIndex((candidate) => resolve(candidate) === resolve(source)) === index);
+  const combined: AdoptionReport = { copied: [], already: [], conflicts: [], unknown: [], busy: [] };
+  for (const source of sources) {
+    const report = await adoptLegacySessions(source, directory, { projectRoot: legacyProjectRoot, sessionId });
+    combined.copied.push(...report.copied);
+    combined.already.push(...report.already);
+    combined.conflicts.push(...report.conflicts);
+    combined.unknown.push(...report.unknown);
+    combined.busy.push(...report.busy);
+    const selected = sessionId === undefined ? undefined : `${sessionId}.jsonl`;
+    if (selected !== undefined && [report.copied, report.already, report.conflicts, report.busy].some((items) => items.includes(selected))) break;
+  }
+  return combined;
 }

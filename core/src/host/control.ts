@@ -69,6 +69,7 @@ export interface McpInitialSettings {
   readonly thinking?: { readonly effort: 'none' | 'low' | 'high' | 'max' | 'default' } | null;
   readonly outputTokens?: number | null;
   readonly loopIterations?: number;
+  readonly permission?: { readonly profile: 'read-only' | 'workspace-write' | 'full-access'; readonly network: 'policy' | 'unrestricted' | 'disabled' };
 }
 
 export interface McpSessionChanges {
@@ -78,6 +79,10 @@ export interface McpSessionChanges {
   readonly thinking?: { readonly effort: 'none' | 'low' | 'high' | 'max' | 'default' } | null;
   readonly outputTokens?: number | null;
   readonly loopIterations?: number;
+  readonly permission?: {
+    readonly profile?: 'read-only' | 'workspace-write' | 'full-access';
+    readonly network?: 'policy' | 'unrestricted' | 'disabled';
+  };
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -123,6 +128,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
   const queues = new Map<string, SessionQueue>();
   const operator = options.operator === true;
   let closing: Promise<void> | undefined;
+  let closingCode = 'control_closed';
   let opening = 0;
   const pending = new Set<Promise<unknown>>();
 
@@ -246,7 +252,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
   }
 
   function ready(): void {
-    if (closing !== undefined) throw new KernelError('control_closed');
+    if (closing !== undefined) throw new KernelError(closingCode);
   }
 
   function owned(sessionId: string): void {
@@ -272,6 +278,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
       ready();
       const initialModel = initial?.model;
       const initialThinking = initial?.thinking;
+      const initialPermission = initial?.permission;
       const result = record(await host.handle({ method, params: {
         projectRoot,
         ...(sessionId === undefined ? {} : { sessionId }),
@@ -283,6 +290,10 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
             ? {} : { initialThinkingEffort: initialThinking.effort }),
           ...(initial.outputTokens === undefined || initial.outputTokens === null ? {} : { initialOutputTokens: initial.outputTokens }),
           ...(initial.loopIterations === undefined ? {} : { initialLoopIterations: initial.loopIterations }),
+          ...(initialPermission === undefined ? {} : {
+            initialPermissionProfile: initialPermission.profile,
+            initialPermissionNetwork: initialPermission.network,
+          }),
         }),
       } }, connection));
       if (typeof result.sessionId !== 'string') throw new KernelError('host_response_invalid');
@@ -455,7 +466,12 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     if (changes?.outputTokens === null) params.resetOutputTokens = true;
     else if (changes?.outputTokens !== undefined) params.outputTokens = changes.outputTokens;
     if (changes?.loopIterations !== undefined) params.loopIterations = changes.loopIterations;
-    return await tracked(host.handle({ method: 'session.configure', params }, connection)).then(record);
+    if (changes?.permission?.profile !== undefined) params.permissionProfile = changes.permission.profile;
+    if (changes?.permission?.network !== undefined) params.permissionNetwork = changes.permission.network;
+    const result = record(await tracked(host.handle({ method: 'session.configure', params }, connection)));
+    if (changes?.permission === undefined) return { ...result, requested: changes ?? null };
+    const effective = record(await tracked(host.handle({ method: 'session.configure', params: { sessionId } }, connection)));
+    return { ...effective, requested: changes };
   }
 
   function send(sessionId: string, action: 'send' | 'continue' | 'cancel_queued' | 'clear_queue', input?: string, queueItemId?: string) {
@@ -548,6 +564,12 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
         await found.settled;
       }
       return { ...status(found), terminated: found.state !== 'running' };
+    },
+    invalidate(code: string): Promise<void> {
+      if (closing !== undefined) return closing;
+      if (!/^[a-z][a-z0-9_]{0,79}$/.test(code)) throw new KernelError('control_error_code_invalid');
+      closingCode = code;
+      return this.release();
     },
     async read(sessionId: string, before: number | undefined, limit: number, at?: number, offset = 0) {
       owned(sessionId);

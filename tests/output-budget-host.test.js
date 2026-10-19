@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createConnection } from '../core/dist/host/connection.js';
+import { sessionDirectory } from '../core/dist/session/list.js';
 import { listenFetchable } from '../test/helpers/port.ts';
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
@@ -38,6 +39,16 @@ function startHost(project, home) {
       finally { if (child.exitCode === null) child.kill(); }
     },
   };
+}
+
+function sessionDirectoryAt(home, project) {
+  const previous = process.env.LIGULE_HOME;
+  process.env.LIGULE_HOME = home;
+  try { return sessionDirectory({ boundary: project, workspaceRoot: project }); }
+  finally {
+    if (previous === undefined) delete process.env.LIGULE_HOME;
+    else process.env.LIGULE_HOME = previous;
+  }
 }
 
 test('Host applies budgets at turn boundaries, retains explicit model selection, and reloads them after restart', async () => {
@@ -224,6 +235,7 @@ test('a model context added after session creation reaches the existing loop and
   const project = join(root, 'project');
   const home = join(root, 'home');
   await Promise.all([mkdir(project), mkdir(home)]);
+  const recordDirectory = sessionDirectoryAt(home, project);
   const requests = [];
   const server = createServer(async (request, response) => {
     const chunks = [];
@@ -268,7 +280,7 @@ test('a model context added after session creation reaches the existing loop and
     assert.equal(requests.filter((entry) => entry.summary).length, 1, 'the existing loop uses the newly selected context window');
     assert.equal(requests.at(-1).body.model, 'local-b');
     assert.equal(requests.at(-1).body.max_tokens, 512);
-    const checkpoint = await readFile(join(home, 'sessions', `${sessionId}.checkpoint.json`), 'utf8');
+    const checkpoint = await readFile(join(recordDirectory, `${sessionId}.checkpoint.json`), 'utf8');
     assert.equal(JSON.parse(checkpoint).sessionId, sessionId);
     await host.stop();
     host = undefined;

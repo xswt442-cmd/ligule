@@ -5,6 +5,11 @@ import type { Readable, Writable } from 'node:stream';
 import { access, readFile, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { KernelError } from '../kernel/error.js';
+import {
+  assertDelegationPermission, assertDelegationPolicy, createDelegationGrant, delegationPathOf,
+  listDelegationGrants, recordDelegationEvent, requireDelegationGrant, revokeDelegationGrant,
+  type CreateDelegationGrantInput, type DelegationGrant,
+} from './agent-control.js';
 import { createPermissionContext, DEFAULT_PERMISSION_CONTEXT, permissionDenial, type PermissionContext, type PermissionNetwork, type PermissionProfile } from '../kernel/permission.js';
 import { createKernel, type Kernel } from '../kernel/kernel.js';
 import { loadAssembly, type Assembly, type Plugin } from '../kernel/assembly.js';
@@ -20,9 +25,9 @@ import { createPromptAssembly } from '../kernel/prompt.js';
 import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
 import { createSessionLog, type SessionLog } from '../session/session.js';
 import type { SessionEvent, SessionHeader } from '../session/format.js';
-import { chooseResumeMode, listSessions, sessionDirectory } from '../session/list.js';
+import { chooseResumeMode, listWorkspaceSessions, sessionDirectories, sessionDirectory } from '../session/list.js';
 import { adoptForSessionDirectory } from '../session/adopt.js';
-import { searchSessions } from '../session/search.js';
+import { searchSessionDirectories } from '../session/search.js';
 import { branchSession } from '../session/branch.js';
 import { listProjectFiles } from './paths.js';
 import { branchSessionId, exportMarkdown, writeExport, type ExportRecord } from './export.js';
@@ -109,8 +114,6 @@ interface ProjectEnvironment extends Omit<EnvironmentSeed, 'layers' | 'store' | 
   policy?: PolicyConfig;
   generation?: SessionGeneration;
   pendingModel?: Record<string, unknown>;
-  legacyAdopted?: boolean;
-  adopting?: Promise<unknown>;
 }
 
 interface HostOptions {
@@ -132,6 +135,12 @@ interface HostOptions {
   readonly interactive?: boolean;
   readonly permission?: PermissionContext;
   readonly permissionControl?: boolean;
+  readonly agentControl?: {
+    readonly grantId: string;
+    readonly storePath: string;
+    readonly operator: boolean;
+    validate(): Promise<DelegationGrant>;
+  };
 }
 
 interface RuntimeConfig extends HostConfigSnapshot {
@@ -584,6 +593,7 @@ export function createHost({
   config, provider, plugins = [minimalPlugin, networkPlugin], policy, logger, modeName, modePaths, skillRegistry,
   templateRegistry, extensions = { paths: [], ignored: [] }, loadEnvironment, configStore, configLayers, configStoreFor,
   deriveProvider = providerFromConfig, interactive = false, permission = DEFAULT_PERMISSION_CONTEXT, permissionControl = false,
+  agentControl,
 }: HostOptions): Host {
   // 每个项目环境持有自己的配置快照、提供方、策略、模式、记录目录和可写配置层。
   // 在加载环境时校验配置，避免等到第一次模型请求才发现错误。
@@ -628,6 +638,23 @@ export function createHost({
   // 每个归一化项目根目录只缓存一个环境，供该项目的会话与列表操作复用。
   const environments = new Map<string, ProjectEnvironment>([[defaultEnvironment.projectRoot, defaultEnvironment]]);
   const sessionConfigurationTails = new Map<string, Promise<void>>();
+  const canControlPermission = permissionControl || agentControl?.operator === true;
+  let knownGrant: DelegationGrant | undefined;
+
+  async function activeDelegation(): Promise<DelegationGrant | undefined> {
+    if (agentControl === undefined) return undefined;
+    knownGrant = await agentControl.validate();
+    return knownGrant;
+  }
+
+  async function assertDelegationProject(grant: DelegationGrant, root: string): Promise<void> {
+    let actual: string;
+    try { actual = await realpath(root); }
+    catch { throw new KernelError('agent_control_project_forbidden'); }
+    const expected = process.platform === 'win32' ? grant.projectRoot.toLowerCase() : grant.projectRoot;
+    const found = process.platform === 'win32' ? actual.toLowerCase() : actual;
+    if (found !== expected) throw new KernelError('agent_control_project_forbidden');
+  }
 
   async function serializeSessionConfiguration<T>(sessionId: string, action: () => Promise<T>): Promise<T> {
     const previous = sessionConfigurationTails.get(sessionId) ?? Promise.resolve();
@@ -678,7 +705,17 @@ export function createHost({
     return loaded;
   }
 
-  async function initialSessionSettings(env: ProjectEnvironment, params: HostMethodParams): Promise<InitialSessionSettings> {
+  async function readOnlySessionConfig(projectRoot: string): Promise<RuntimeConfig> {
+    try {
+      return (await environmentFor(projectRoot)).config;
+    } catch (error) {
+      if (loadEnvironment !== undefined || errorCode(error) !== 'host_project_root_unsupported') throw error;
+      // A Host without a project loader can still browse a known workspace's stored history without loading project config.
+      return { ...defaultEnvironment.config, boundary: projectRoot, workspaceRoot: projectRoot };
+    }
+  }
+
+  async function initialSessionSettings(env: ProjectEnvironment, params: HostMethodParams, grant?: DelegationGrant): Promise<InitialSessionSettings> {
     const hasProvider = params.initialProvider !== undefined;
     const hasModel = params.initialModel !== undefined;
     if (hasProvider !== hasModel) throw new KernelError('session_model_selection_invalid', { detail: 'initialProvider and initialModel must be supplied together' });
@@ -691,16 +728,20 @@ export function createHost({
       checkedSessionModel(model, selection);
     }
     let policy: Exclude<PolicyMode, 'default'> | undefined;
-    if (params.initialPolicy !== undefined) {
-      if (params.initialPolicy !== 'ask' && params.initialPolicy !== 'auto' && params.initialPolicy !== 'never') {
+    const requestedPolicy = params.initialPolicy ?? grant?.defaultPolicy;
+    if (requestedPolicy !== undefined) {
+      if (requestedPolicy !== 'ask' && requestedPolicy !== 'auto' && requestedPolicy !== 'never') {
         throw new KernelError('policy_mode_unknown');
       }
-      policy = params.initialPolicy;
+      if (grant !== undefined) assertDelegationPolicy(grant, requestedPolicy);
+      policy = requestedPolicy;
     }
     const hasInitialPermission = params.initialPermissionProfile !== undefined || params.initialPermissionNetwork !== undefined;
     let initialPermission: InitialSessionSettings['permission'];
     if (hasInitialPermission) {
-      if (!permissionControl) throw new KernelError('permission_control_unavailable');
+      if (!permissionControl && agentControl?.operator !== true) {
+        throw new KernelError(agentControl === undefined ? 'permission_control_unavailable' : 'agent_control_operator_required');
+      }
       const profile = params.initialPermissionProfile ?? permission.profile;
       const network = params.initialPermissionNetwork ?? permission.network;
       if (profile !== 'read-only' && profile !== 'workspace-write' && profile !== 'full-access') {
@@ -709,12 +750,17 @@ export function createHost({
       if (network !== 'policy' && network !== 'unrestricted' && network !== 'disabled') {
         throw new KernelError('permission_network_mode_invalid');
       }
-      const confirmedFullAccess = profile === 'full-access' && params.confirmInitialFullAccess === true;
-      const confirmedNetwork = network === 'unrestricted' && params.confirmInitialNetwork === true;
-      if (profile === 'full-access' && !confirmedFullAccess) {
+      if (grant !== undefined) assertDelegationPermission(grant, profile, network);
+      const confirmedFullAccess = grant === undefined
+        ? profile === 'full-access' && params.confirmInitialFullAccess === true
+        : profile === 'full-access' && grant.confirmedFullAccess;
+      const confirmedNetwork = grant === undefined
+        ? network === 'unrestricted' && params.confirmInitialNetwork === true
+        : network === 'unrestricted' && grant.confirmedUnrestrictedNetwork;
+      if (grant === undefined && profile === 'full-access' && !confirmedFullAccess) {
         throw new KernelError('permission_full_access_confirmation_required');
       }
-      if (network === 'unrestricted' && !confirmedNetwork) {
+      if (grant === undefined && network === 'unrestricted' && !confirmedNetwork) {
         throw new KernelError('permission_network_confirmation_required');
       }
       initialPermission = {
@@ -934,36 +980,6 @@ export function createHost({
     if (environment === defaultEnvironment) return;
     for (const other of sessions.values()) if (other.environment === environment) return;
     environments.delete(environment.projectRoot);
-  }
-
-  // 会话列表和记录读取使用同一个解析后的目录。
-  // 列出尚未加载的项目不会创建环境，只在现有目录中应用查询条件。
-  // 首次读取前，将旧记录及其附属文件迁入数据根目录中的会话目录，并保留原件。
-  // 同一环境中的并发迁移共用一次操作；锁被占用时允许重试，读写错误交给调用方处理。
-  async function scanDirectory(projectRoot: string): Promise<string> {
-    const unloaded = projectRoot !== undefined && !environments.has(projectRoot) && loadEnvironment === undefined;
-    const environment = unloaded ? defaultEnvironment : await environmentFor(projectRoot);
-    if (environment.legacyAdopted !== true) {
-      environment.adopting ??= (async () => {
-        const report = await adoptForSessionDirectory(environment.config, environment.directory, environment.projectRoot);
-        if (report !== null && (report.copied.length > 0 || report.conflicts.length > 0 || report.unknown.length > 0 || report.busy.length > 0)) {
-          logger?.log?.('legacy session adoption', {
-            projectRoot: environment.projectRoot,
-            copied: report.copied,
-            conflicts: report.conflicts,
-            unknown: report.unknown,
-            busy: report.busy,
-          });
-        }
-        environment.legacyAdopted = report === null || report.busy.length === 0;
-      })();
-      try {
-        await environment.adopting;
-      } finally {
-        environment.adopting = undefined;
-      }
-    }
-    return environment.directory;
   }
 
   // 从记录标签推导当前会话名称和归档状态，让 Host 与客户端使用同一事实来源。
@@ -1262,6 +1278,8 @@ export function createHost({
       if (savedPermission !== undefined) {
         state.permission = createPermissionContext(savedPermission.profile, savedPermission.network, permission.capabilities);
       }
+      const grant = await activeDelegation();
+      if (grant !== undefined) assertDelegationPermission(grant, state.permission.profile, state.permission.network);
       const savedLoopIterations = events.filter((event) => event.kind === 'sessionLoopIterations').at(-1)?.iterations;
       if (savedLoopIterations !== undefined) {
         if (typeof savedLoopIterations !== 'number' || !Number.isSafeInteger(savedLoopIterations) || savedLoopIterations < 1) {
@@ -1285,21 +1303,32 @@ export function createHost({
         }
       }
     } else {
-      await session.append(initial?.permission === undefined
+      const grant = await activeDelegation();
+      await session.append(grant !== undefined
         ? {
             kind: 'sessionPermission',
             profile: state.permission.profile,
             network: state.permission.network,
-            source: 'host-default',
+            source: 'agent-control',
+            grantId: grant.id,
+            confirmedFullAccess: state.permission.profile === 'full-access' && grant.confirmedFullAccess,
+            confirmedNetwork: state.permission.network === 'unrestricted' && grant.confirmedUnrestrictedNetwork,
           }
-        : {
-            kind: 'sessionPermission',
-            profile: state.permission.profile,
-            network: state.permission.network,
-            source: 'trusted-ui',
-            confirmedFullAccess: initial.permission.confirmedFullAccess,
-            confirmedNetwork: initial.permission.confirmedNetwork,
-          });
+        : initial?.permission === undefined
+          ? {
+              kind: 'sessionPermission',
+              profile: state.permission.profile,
+              network: state.permission.network,
+              source: 'host-default',
+            }
+          : {
+              kind: 'sessionPermission',
+              profile: state.permission.profile,
+              network: state.permission.network,
+              source: 'trusted-ui',
+              confirmedFullAccess: initial.permission.confirmedFullAccess,
+              confirmedNetwork: initial.permission.confirmedNetwork,
+            });
     }
     const chain = createDecisionChain({
       ...policy,
@@ -1331,6 +1360,8 @@ export function createHost({
         }
       },
     });
+    const grant = await activeDelegation();
+    if (grant !== undefined) chain.setMode(grant.defaultPolicy);
     if (initial?.policy !== undefined) chain.setMode(initial.policy);
     const kernel = createKernel({ config, policy: chain, session, logger, permissionForCall: () => state.permission });
     // 技能登记表反映已发现的技能，不随当前模式改变。
@@ -1652,7 +1683,7 @@ export function createHost({
         mode: state.mode.file?.name ?? null,
         loopIterations: state.loopIterations,
         policy: { mode: state.chain.mode, source: state.chain.modeSource, default: state.chain.configuredMode() },
-        permission: sessionPermissionView(state, permissionControl),
+        permission: sessionPermissionView(state, canControlPermission),
         generation: generationView(state.generation),
       },
       pending,
@@ -1664,19 +1695,32 @@ export function createHost({
         services,
       },
       denials: state.chain.denials(),
+      delegation: knownGrant === undefined ? null : {
+        grantId: knownGrant.id,
+        maxPermissionProfile: knownGrant.maxPermissionProfile,
+        maxNetwork: knownGrant.maxNetwork,
+        allowedPolicies: knownGrant.allowedPolicies,
+      },
     };
   }
 
-  async function configureSession(state: HostSessionState, params: HostMethodParams): Promise<Record<string, unknown>> {
+  async function configureSession(state: HostSessionState, params: HostMethodParams, connection: HostClientConnection): Promise<Record<string, unknown>> {
     const modeChanged = params.mode !== undefined;
     const policyChanged = params.policy !== undefined;
+    const permissionChanged = params.permissionProfile !== undefined || params.permissionNetwork !== undefined;
     const loopChanged = params.loopIterations !== undefined;
     const generationChanged = params.provider !== undefined || params.model !== undefined
       || params.thinkingEffort !== undefined || params.outputTokens !== undefined
       || params.resetModel === true || params.resetThinking === true || params.resetOutputTokens === true;
-    const categories = Number(modeChanged) + Number(policyChanged) + Number(loopChanged) + Number(generationChanged);
+    const categories = Number(modeChanged) + Number(policyChanged) + Number(permissionChanged) + Number(loopChanged) + Number(generationChanged);
     if (categories > 1) throw new KernelError('session_configure_one_category');
     if (categories === 0) return await sessionConfiguration(state);
+    if (agentControl !== undefined && !agentControl.operator) throw new KernelError('agent_control_operator_required');
+
+    if (permissionChanged) {
+      return await setPermission(state, connection, params.permissionProfile ?? state.permission.profile,
+        params.permissionNetwork, undefined, undefined);
+    }
 
     if (modeChanged) {
       const requestedName = params.mode === 'default' ? state.environment.modeName ?? DEFAULT_MODE : requiredString(params.mode, 'mode');
@@ -1700,9 +1744,21 @@ export function createHost({
     }
 
     if (policyChanged) {
-      if (params.policy === 'default') state.chain.resetMode();
-      else if (params.policy === 'ask' || params.policy === 'auto' || params.policy === 'never') state.chain.setMode(params.policy);
+      if (params.policy === 'default') {
+        const grant = await activeDelegation();
+        if (grant !== undefined) assertDelegationPolicy(grant, state.chain.configuredMode());
+        state.chain.resetMode();
+      } else if (params.policy === 'ask' || params.policy === 'auto' || params.policy === 'never') {
+        const grant = await activeDelegation();
+        if (grant !== undefined) assertDelegationPolicy(grant, params.policy);
+        state.chain.setMode(params.policy);
+      }
       else throw new KernelError('policy_mode_unknown');
+      if (agentControl !== undefined && params.policy !== 'default') {
+        await recordDelegationEvent(agentControl.storePath, {
+          kind: 'grant.used', grantId: agentControl.grantId, policy: params.policy as 'ask' | 'auto' | 'never',
+        });
+      }
       return { ...(await sessionConfiguration(state)), applies: 'next_decision' };
     }
 
@@ -1778,7 +1834,9 @@ export function createHost({
     confirmFullAccess: unknown,
     confirmNetwork: unknown,
   ): Promise<Record<string, unknown>> {
-    if (!permissionControl) throw new KernelError('permission_control_unavailable');
+    const grant = await activeDelegation();
+    if (!permissionControl && agentControl === undefined) throw new KernelError('permission_control_unavailable');
+    if (agentControl !== undefined && !agentControl.operator) throw new KernelError('agent_control_operator_required');
     if (state.permissionChanging) throw new KernelError('permission_change_in_progress', { detail: state.id });
     if (state.running !== undefined) throw new KernelError('permission_session_running', { detail: state.id });
     if (profileValue !== 'read-only' && profileValue !== 'workspace-write' && profileValue !== 'full-access') {
@@ -1788,15 +1846,27 @@ export function createHost({
     if (network !== 'policy' && network !== 'unrestricted' && network !== 'disabled') {
       throw new KernelError('permission_network_mode_invalid');
     }
-    if (profileValue === 'full-access' && state.permission.profile !== 'full-access' && confirmFullAccess !== true) {
+    if (grant !== undefined) {
+      try { assertDelegationPermission(grant, profileValue, network); }
+      catch (error) {
+        await recordDelegationEvent(agentControl!.storePath, {
+          kind: 'permission.denied', grantId: grant.id,
+          ...(typeof profileValue === 'string' ? { permissionProfile: profileValue as PermissionProfile } : {}),
+          ...(typeof network === 'string' ? { network: network as PermissionNetwork } : {}),
+          code: error instanceof KernelError ? error.code : 'agent_control_permission_exceeds_grant',
+        });
+        throw error;
+      }
+    }
+    if (grant === undefined && profileValue === 'full-access' && state.permission.profile !== 'full-access' && confirmFullAccess !== true) {
       throw new KernelError('permission_full_access_confirmation_required');
     }
-    if (network === 'unrestricted' && state.permission.network !== 'unrestricted' && confirmNetwork !== true) {
+    if (grant === undefined && network === 'unrestricted' && state.permission.network !== 'unrestricted' && confirmNetwork !== true) {
       throw new KernelError('permission_network_confirmation_required');
     }
     const next = createPermissionContext(profileValue, network, state.permission.capabilities);
     if (next.profile === state.permission.profile && next.network === state.permission.network) {
-      return { sessionId: state.id, permission: sessionPermissionView(state, permissionControl), applies: 'unchanged' };
+      return { sessionId: state.id, permission: sessionPermissionView(state, canControlPermission), applies: 'unchanged' };
     }
     if (state.extensions.loaded.length > 0 && (next.profile !== 'full-access' || next.network !== 'unrestricted')) {
       throw new KernelError('permission_extension_restart_required', {
@@ -1805,20 +1875,28 @@ export function createHost({
     }
     state.permissionChanging = true;
     try {
+      if (grant !== undefined) {
+        await recordDelegationEvent(agentControl!.storePath, {
+          kind: 'permission.selected', grantId: grant.id, permissionProfile: next.profile, network: next.network,
+        });
+      }
       await state.session.append({
         kind: 'sessionPermission',
         profile: next.profile,
         network: next.network,
-        source: 'trusted-ui',
-        confirmedFullAccess: next.profile === 'full-access'
-          && state.permission.profile !== 'full-access' && confirmFullAccess === true,
-        confirmedNetwork: next.network === 'unrestricted'
-          && state.permission.network !== 'unrestricted' && confirmNetwork === true,
+        source: grant === undefined ? 'trusted-ui' : 'agent-control',
+        ...(grant === undefined ? {} : { grantId: grant.id }),
+        confirmedFullAccess: grant === undefined
+          ? next.profile === 'full-access' && state.permission.profile !== 'full-access' && confirmFullAccess === true
+          : next.profile === 'full-access' && grant.confirmedFullAccess,
+        confirmedNetwork: grant === undefined
+          ? next.network === 'unrestricted' && state.permission.network !== 'unrestricted' && confirmNetwork === true
+          : next.network === 'unrestricted' && grant.confirmedUnrestrictedNetwork,
       });
       await retire(state);
       await buildSession(state.id, connection, true, undefined, state.environment);
       const reopened = open(state.id);
-      return { sessionId: reopened.id, permission: sessionPermissionView(reopened, permissionControl), applies: 'now' };
+      return { sessionId: reopened.id, permission: sessionPermissionView(reopened, canControlPermission), applies: 'now' };
     } finally {
       if (sessions.get(state.id) === state) state.permissionChanging = false;
     }
@@ -1831,6 +1909,12 @@ export function createHost({
       validateCall(rawMessage.method, rawParams);
       const message: HostRequestWithParams = { ...rawMessage, params: rawParams };
       const { sessionId = '', input = '' } = message.params;
+      const grant = await activeDelegation();
+      if (grant !== undefined) {
+        await assertDelegationProject(grant, message.params.projectRoot ?? defaultEnvironment.projectRoot);
+        const ownedState = sessions.get(sessionId);
+        if (ownedState !== undefined) await assertDelegationProject(grant, ownedState.environment.projectRoot);
+      }
 
       switch (message.method) {
         case 'session.create': {
@@ -1841,9 +1925,10 @@ export function createHost({
             throw new KernelError('workspace_origin_unknown', { detail: `${origin}; the call takes 'explicit' or 'default', or nothing at all` });
           }
           const env = await environmentFor(message.params.projectRoot);
-          const initial = await initialSessionSettings(env, message.params);
+          const initial = await initialSessionSettings(env, message.params, grant);
           const created = await buildSession(id, connection, false, undefined, env,
             origin ?? (message.params.projectRoot === undefined ? 'default' : 'explicit'), initial);
+          if (grant !== undefined) await recordDelegationEvent(agentControl!.storePath, { kind: 'grant.used', grantId: grant.id });
           await noteWorkspace(env);
           const hasInitialSettings = message.params.initialMode !== undefined || message.params.initialPolicy !== undefined
             || message.params.initialPermissionProfile !== undefined || message.params.initialPermissionNetwork !== undefined
@@ -1859,6 +1944,7 @@ export function createHost({
             // 重新打开当前 Host 已拥有的会话只读状态，不得打断正在运行的轮次。
             // 会话空闲时立即应用新模式；轮次运行期间则等到边界再应用。
             const state = open(sessionId);
+            if (grant !== undefined) await recordDelegationEvent(agentControl!.storePath, { kind: 'grant.used', grantId: grant.id });
             if (message.params.mode !== undefined) {
               if (state.environment.modePaths === undefined) throw new KernelError('host_mode_paths_required');
               const requested = await loadMode(message.params.mode, state.environment.modePaths);
@@ -1879,11 +1965,36 @@ export function createHost({
           const path = recordPathOf(sessionId, env);
           try {
             await access(path);
-          } catch {
-            throw new KernelError('session_not_found', { detail: sessionId });
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+            const filename = `${sessionId}.jsonl`;
+            const legacy = sessionDirectories(env.config).slice(1);
+            let legacyRecord = false;
+            for (const directory of legacy) {
+              try {
+                await access(join(directory, filename));
+                legacyRecord = true;
+                break;
+              } catch (legacyError) {
+                if ((legacyError as NodeJS.ErrnoException).code !== 'ENOENT') throw legacyError;
+              }
+            }
+            if (!legacyRecord) throw new KernelError('session_not_found', { detail: sessionId });
+            const adopted = await adoptForSessionDirectory(env.config, env.directory, env.projectRoot, sessionId);
+            if (adopted?.busy.includes(filename)) throw new KernelError('session_locked', { detail: sessionId });
+            if (adopted?.conflicts.includes(filename)) {
+              throw new KernelError('session_adoption_write_failed', { detail: `${sessionId}: existing legacy records conflict` });
+            }
+            try {
+              await access(path);
+            } catch (adoptionError) {
+              if ((adoptionError as NodeJS.ErrnoException).code !== 'ENOENT') throw adoptionError;
+              throw new KernelError('session_not_found', { detail: sessionId });
+            }
           }
           // 新打开的会话也在轮次边界应用模式变更。
           const opened = await buildSession(sessionId, connection, true, message.params.mode, env);
+          if (grant !== undefined) await recordDelegationEvent(agentControl!.storePath, { kind: 'grant.used', grantId: grant.id });
           await noteWorkspace(env);
           return opened;
         }
@@ -1923,10 +2034,11 @@ export function createHost({
           return await branchSession(env.directory, sessionId, { at: message.params.at, projectRoot: env.projectRoot });
         }
         case 'sessions.list': {
-          // 与 CLI 共用会话扫描器，并从记录元数据解析项目归属。
+          // 当前与旧目录都只读扫描；迁移只在用户明确打开旧会话时发生。
           const { projectRoot, limit } = message.params;
           const scope = projectRoot ?? defaultEnvironment.projectRoot;
-          return { sessions: await listSessions(await scanDirectory(scope), { projectRoot: scope, limit }) };
+          const config = await readOnlySessionConfig(scope);
+          return { sessions: await listWorkspaceSessions(config, { projectRoot: scope, limit }) };
         }
         case 'sessions.search': {
           // 搜索会话列表使用的同一目录，并在扫描记录前拒绝空查询。
@@ -1937,9 +2049,16 @@ export function createHost({
           // 解析记录路径前先校验会话编号。
           if (scoped !== undefined) assertSessionId(scoped);
           const open = scoped === undefined ? undefined : sessions.get(scoped);
-          const root = open !== undefined ? undefined : projectRoot ?? defaultEnvironment.projectRoot;
-          const directory = open?.environment.directory ?? await scanDirectory(projectRoot ?? defaultEnvironment.projectRoot);
-          return { hits: await searchSessions(directory, { query: needle, sessionId: scoped, projectRoot: root, limit }) };
+          const scope = projectRoot ?? defaultEnvironment.projectRoot;
+          const config = open?.environment.config ?? await readOnlySessionConfig(scope);
+          return {
+            hits: await searchSessionDirectories(sessionDirectories(config), {
+              query: needle,
+              sessionId: scoped,
+              projectRoot: open === undefined ? scope : undefined,
+              limit,
+            }),
+          };
         }
         case 'paths.list': {
           // 由 Host 查找 `@` 文件候选，前端不直接扫描项目文件。
@@ -2028,7 +2147,7 @@ export function createHost({
           const mode = requiredString(message.params.mode, 'mode');
           return await serializeSessionConfiguration(sessionId, async () => {
             const state = open(sessionId);
-            await configureSession(state, { policy: mode });
+            await configureSession(state, { policy: mode }, connection);
             return { policy: state.chain.mode, policySource: state.chain.modeSource, policyDefault: state.chain.configuredMode() };
           });
         }
@@ -2046,7 +2165,7 @@ export function createHost({
           const name = requiredString(message.params.name, 'name');
           return await serializeSessionConfiguration(sessionId, async () => {
             const state = open(sessionId);
-            await configureSession(state, { mode: name });
+            await configureSession(state, { mode: name }, connection);
             return {
               mode: state.mode.file?.name ?? null,
               layer: state.mode.file?.layer ?? null,
@@ -2084,8 +2203,14 @@ export function createHost({
             policy: state.chain.mode,
             policySource: state.chain.modeSource,
             policyDefault: state.chain.configuredMode(),
-            permission: sessionPermissionView(state, permissionControl),
+            permission: sessionPermissionView(state, canControlPermission),
             denials: state.chain.denials(),
+            delegation: knownGrant === undefined ? null : {
+              grantId: knownGrant.id,
+              maxPermissionProfile: knownGrant.maxPermissionProfile,
+              maxNetwork: knownGrant.maxNetwork,
+              allowedPolicies: knownGrant.allowedPolicies,
+            },
             // 这里只返回条数；记录内容由 `session.read` 提供。
             eventCount: (await state.session.read()).length,
             // 返回工具名称、说明和参数模式，供客户端选择工具。
@@ -2096,7 +2221,7 @@ export function createHost({
           };
         }
         case 'session.configure': {
-          return await serializeSessionConfiguration(sessionId, () => configureSession(open(sessionId), message.params));
+          return await serializeSessionConfiguration(sessionId, () => configureSession(open(sessionId), message.params, connection));
         }
         case 'workspaces.list':
           // 返回持久工作区登记表及默认工作区身份，供客户端显示。
@@ -2129,7 +2254,7 @@ export function createHost({
           const selection = modelSelection({ provider: message.params.provider, model: message.params.model });
           return await serializeSessionConfiguration(sessionId, async () => {
             const state = open(sessionId);
-            await configureSession(state, { provider: selection.provider, model: selection.model });
+            await configureSession(state, { provider: selection.provider, model: selection.model }, connection);
             const generation = state.pendingGeneration ?? state.generation;
             return { model: generation.provider.model, serviceId: selection.provider, when: state.running === undefined ? 'now' : 'round' };
           });
@@ -2170,6 +2295,38 @@ export function createHost({
         case 'prefs.write': {
           const value = parsePrefsJson(String(message.params.json));
           return await savePrefs(prefsPathOf(), value, { version: requiredString(message.params.version, 'version') });
+        }
+        case 'agent-control.list': {
+          if (!permissionControl) throw new KernelError('agent_control_trusted_ui_required');
+          return await listDelegationGrants(delegationPathOf());
+        }
+        case 'agent-control.create': {
+          if (!permissionControl) throw new KernelError('agent_control_trusted_ui_required');
+          const input: CreateDelegationGrantInput = {
+            name: requiredString(message.params.grantName, 'grantName'),
+            projectRoot: requiredString(message.params.projectRoot, 'projectRoot'),
+            defaultPermissionProfile: message.params.defaultPermissionProfile as PermissionProfile,
+            maxPermissionProfile: message.params.maxPermissionProfile as PermissionProfile,
+            defaultNetwork: message.params.defaultNetwork as PermissionNetwork,
+            maxNetwork: message.params.maxNetwork as PermissionNetwork,
+            defaultPolicy: message.params.defaultPolicy as CreateDelegationGrantInput['defaultPolicy'],
+            allowedPolicies: [
+              ...(message.params.allowedPolicyAsk === true ? ['ask' as const] : []),
+              ...(message.params.allowedPolicyAuto === true ? ['auto' as const] : []),
+              ...(message.params.allowedPolicyNever === true ? ['never' as const] : []),
+            ],
+            allowOperator: message.params.allowOperator as boolean,
+            confirmFullAccess: message.params.confirmFullAccess as boolean,
+            confirmUnrestrictedNetwork: message.params.confirmUnrestrictedNetwork as boolean,
+            expiresAt: message.params.expiresAt === '' ? null : requiredString(message.params.expiresAt, 'expiresAt'),
+          };
+          return await createDelegationGrant(delegationPathOf(), input, requiredString(message.params.version, 'version'));
+        }
+        case 'agent-control.revoke': {
+          if (!permissionControl) throw new KernelError('agent_control_trusted_ui_required');
+          return await revokeDelegationGrant(
+            delegationPathOf(), requiredString(message.params.grantId, 'grantId'), requiredString(message.params.version, 'version'),
+          );
         }
         case 'config.get': {
           // 使用明确的允许字段构造响应；参数模式本身允许出现未声明的属性。

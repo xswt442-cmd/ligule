@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   buildRepairEvents, createConnection, createConfig, createMemoryConnectionPair, createSessionLog,
-  findUnresolvedCalls, providerFromConfig, repairUnresolvedCalls, serveHost,
+  findUnresolvedCalls, providerFromConfig, repairUnresolvedCalls, serveHost, sessionDirectory,
 } from '../dist/index.js';
 import { prefixDigest } from '../dist/session/checkpoint.js';
 import { branchSession } from '../dist/session/branch.js';
@@ -72,8 +72,9 @@ test('reopening a record repairs it once, and reading it changes nothing', async
     assert.deepEqual(turns.map(({ status, code, userSeq }) => ({ status, code, userSeq })), [
       { status: 'interrupted', code: 'host_restarted', userSeq: user.seq },
     ]);
-    assert.equal((await readFile(join(directory, 'crashed.jsonl'), 'utf8')).trim().split('\n').length, 6,
-      '首行、原有三条事件、工具结果与中断终态');
+    const relocated = await readFile(join(sessionDirectory(config), 'crashed.jsonl'), 'utf8');
+    assert.equal(relocated.trim().split('\n').length, 6, '新工作区副本包含首行、原有事件、工具结果与中断终态');
+    assert.equal(await readFile(join(directory, 'crashed.jsonl'), 'utf8'), before, '旧共享记录作为迁移来源保持不变');
   } finally {
     if (previousHome === undefined) delete process.env.LIGULE_HOME;
     else process.env.LIGULE_HOME = previousHome;

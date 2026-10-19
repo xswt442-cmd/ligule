@@ -7,8 +7,10 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema, McpError, ErrorCode, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import { createConfig } from '../kernel/config.js';
 import { KernelError } from '../kernel/error.js';
+import { createPermissionContext } from '../kernel/permission.js';
 import { isTrusted } from '../kernel/workspace-trust.js';
 import { createHost } from './host.js';
+import { delegationPathOf, recordDelegationEvent, requireDelegationGrant } from './agent-control.js';
 import { loadHostEnvironment } from './environment.js';
 import { createControl, controlErrorCode, type McpInitialSettings, type McpSessionChanges } from './control.js';
 import { createInteractivePermissionContext } from '../capability/permission-capabilities.js';
@@ -62,14 +64,19 @@ const sessionChanges = {
     thinking: { type: ['object', 'null'], additionalProperties: false, properties: { effort: { type: 'string', enum: ['default', 'none', 'low', 'high', 'max'] } }, required: ['effort'] },
     outputTokens: { type: ['integer', 'null'], minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
     loopIterations: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+    permission: { type: 'object', additionalProperties: false, minProperties: 1, properties: {
+      profile: { type: 'string', enum: ['read-only', 'workspace-write', 'full-access'] },
+      network: { type: 'string', enum: ['policy', 'unrestricted', 'disabled'] },
+    } },
   },
   oneOf: [
     { maxProperties: 0 },
     { required: ['mode'], maxProperties: 1 },
     { required: ['policy'], maxProperties: 1 },
     { required: ['loopIterations'], maxProperties: 1 },
+    { required: ['permission'], maxProperties: 1 },
     {
-      not: { anyOf: [{ required: ['mode'] }, { required: ['policy'] }, { required: ['loopIterations'] }] },
+      not: { anyOf: [{ required: ['mode'] }, { required: ['policy'] }, { required: ['loopIterations'] }, { required: ['permission'] }] },
       anyOf: [{ required: ['model'] }, { required: ['thinking'] }, { required: ['outputTokens'] }],
     },
   ],
@@ -82,32 +89,51 @@ const initialSettings = {
     thinking: { type: 'object', additionalProperties: false, properties: { effort: { type: 'string', enum: ['default', 'none', 'low', 'high', 'max'] } }, required: ['effort'] },
     outputTokens: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
     loopIterations: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
-  },
-};
-const configurationOutput = object({
-  sessionId: id,
-  effective: { type: 'object', additionalProperties: false, properties: {
-    mode: { type: ['string', 'null'] },
-    loopIterations: { type: 'integer', minimum: 1 },
     permission: { type: 'object', additionalProperties: false, properties: {
       profile: { type: 'string', enum: ['read-only', 'workspace-write', 'full-access'] },
       network: { type: 'string', enum: ['policy', 'unrestricted', 'disabled'] },
-      capabilities: { type: 'object', additionalProperties: false, properties: {
-        filesystemRead: { type: 'string', enum: ['full', 'partial', 'unavailable'] },
-        filesystemWrite: { type: 'string', enum: ['full', 'partial', 'unavailable'] },
-        network: { type: 'string', enum: ['full', 'partial', 'unavailable'] },
-        process: { type: 'string', enum: ['full', 'partial', 'unavailable'] },
-      }, required: ['filesystemRead', 'filesystemWrite', 'network', 'process'] },
-      execution: { type: 'object', additionalProperties: false, properties: {
-        available: { type: 'boolean' }, code: { type: ['string', 'null'] }, reason: { type: ['string', 'null'] },
-      }, required: ['available', 'code', 'reason'] },
-      changeAllowed: { type: 'boolean' }, changeReason: { type: 'string' },
-    }, required: ['profile', 'network', 'capabilities', 'execution', 'changeAllowed'] },
+    }, required: ['profile', 'network'] },
+  },
+};
+const permissionOutput = object({
+  profile: { type: 'string', enum: ['read-only', 'workspace-write', 'full-access'] },
+  network: { type: 'string', enum: ['policy', 'unrestricted', 'disabled'] },
+  capabilities: object({
+    filesystemRead: { type: 'string', enum: ['full', 'partial', 'unavailable'] },
+    filesystemWrite: { type: 'string', enum: ['full', 'partial', 'unavailable'] },
+    network: { type: 'string', enum: ['full', 'partial', 'unavailable'] },
+    process: { type: 'string', enum: ['full', 'partial', 'unavailable'] },
+  }, ['filesystemRead', 'filesystemWrite', 'network', 'process']),
+  execution: object({ available: { type: 'boolean' }, code: { type: ['string', 'null'] }, reason: { type: ['string', 'null'] } }, ['available', 'code', 'reason']),
+  changeAllowed: { type: 'boolean' }, changeReason: { type: 'string' },
+}, ['profile', 'network', 'capabilities', 'execution', 'changeAllowed']);
+const delegationOutput = { type: ['object', 'null'], additionalProperties: false, properties: {
+  grantId: id,
+  maxPermissionProfile: { type: 'string', enum: ['read-only', 'workspace-write', 'full-access'] },
+  maxNetwork: { type: 'string', enum: ['policy', 'unrestricted', 'disabled'] },
+  allowedPolicies: { type: 'array', items: { type: 'string', enum: ['ask', 'auto', 'never'] } },
+}, required: ['grantId', 'maxPermissionProfile', 'maxNetwork', 'allowedPolicies'] };
+const requestedChanges = { type: ['object', 'null'], additionalProperties: false, properties: {
+  mode: { type: 'string' }, policy: { type: 'string' }, model: { type: ['object', 'null'] },
+  thinking: { type: ['object', 'null'] }, outputTokens: { type: ['integer', 'null'] }, loopIterations: { type: 'integer' },
+  permission: { type: 'object', additionalProperties: false, properties: {
+    profile: { type: 'string', enum: ['read-only', 'workspace-write', 'full-access'] },
+    network: { type: 'string', enum: ['policy', 'unrestricted', 'disabled'] },
+  } },
+} };
+const configurationOutput = object({
+  sessionId: id,
+  requested: requestedChanges,
+  delegation: delegationOutput,
+  effective: { type: 'object', additionalProperties: false, properties: {
+    mode: { type: ['string', 'null'] },
+    loopIterations: { type: 'integer', minimum: 1 },
+    permission: permissionOutput,
     policy: { type: 'object', additionalProperties: false, properties: {
       mode: { type: 'string', enum: ['ask', 'auto', 'never'] }, source: { type: 'string' }, default: { type: 'string' },
     }, required: ['mode', 'source', 'default'] },
     generation: { type: 'object', additionalProperties: false, properties: {
-      model: { type: 'object', additionalProperties: false, properties: { provider: { type: 'string' }, model: { type: 'string' } }, required: ['provider', 'model'] },
+      model: { type: 'object', additionalProperties: false, properties: { provider: { type: 'string' }, model: { type: ['string', 'null'] } }, required: ['provider', 'model'] },
       thinking: { type: 'object', additionalProperties: false, properties: {
         supported: { type: 'boolean' }, efforts: { type: 'array', items: { type: 'string' } }, defaultEffort: { type: ['string', 'null'] }, effort: { type: 'string' },
       }, required: ['supported', 'efforts', 'defaultEffort', 'effort'] },
@@ -118,7 +144,7 @@ const configurationOutput = object({
     mode: { type: ['string', 'null'] },
     loopIterations: { type: ['integer', 'null'], minimum: 1 },
     generation: { type: ['object', 'null'], additionalProperties: false, properties: {
-      model: { type: 'object', additionalProperties: false, properties: { provider: { type: 'string' }, model: { type: 'string' } }, required: ['provider', 'model'] },
+      model: { type: 'object', additionalProperties: false, properties: { provider: { type: 'string' }, model: { type: ['string', 'null'] } }, required: ['provider', 'model'] },
       thinking: { type: 'object', additionalProperties: false, properties: {
         supported: { type: 'boolean' }, efforts: { type: 'array', items: { type: 'string' } }, defaultEffort: { type: ['string', 'null'] }, effort: { type: 'string' },
       }, required: ['supported', 'efforts', 'defaultEffort', 'effort'] },
@@ -148,7 +174,7 @@ const configurationOutput = object({
     consecutive: { type: 'integer', minimum: 0 }, total: { type: 'integer', minimum: 0 },
   }, required: ['consecutive', 'total'] },
   applies: { type: 'string', enum: ['now', 'next_round', 'next_decision', 'unchanged'] },
-}, ['sessionId', 'effective', 'pending', 'available', 'denials', 'applies']);
+}, ['sessionId', 'requested', 'delegation', 'effective', 'pending', 'available', 'denials', 'applies']);
 const queueOutput = object({
   sessionId: id, accepted: { type: 'boolean' }, queued: { type: 'boolean' }, queueItemId: id,
   operationId: id, state: { type: 'string', enum: ['running', 'done', 'failed', 'cancelled'] },
@@ -215,8 +241,8 @@ interface Arguments {
   after?: number;
 }
 
-export async function serveMcp({ projectRoot, version, flags = [], modeName, operator = false }: {
-  projectRoot: string; version: string; flags?: string[]; modeName?: string; operator?: boolean;
+export async function serveMcp({ projectRoot, version, flags = [], modeName, operator = false, grantId }: {
+  projectRoot: string; version: string; flags?: string[]; modeName?: string; operator?: boolean; grantId?: string;
 }): Promise<void> {
   if (!isAbsolute(projectRoot)) throw new KernelError('control_project_required');
   let authorizedRoot: string;
@@ -225,29 +251,59 @@ export async function serveMcp({ projectRoot, version, flags = [], modeName, ope
     if (!(await stat(authorizedRoot)).isDirectory()) throw new KernelError('control_project_required');
   } catch { throw new KernelError('control_project_required'); }
   if (!(await isTrusted(authorizedRoot))) throw new KernelError('control_project_untrusted');
+  const grantStorePath = delegationPathOf();
+  const grant = grantId === undefined ? undefined : await requireDelegationGrant(grantStorePath, grantId, authorizedRoot);
+  if (grant !== undefined && operator && !grant.allowOperator) throw new KernelError('agent_control_operator_not_allowed');
+  const operatorEnabled = operator && (grant === undefined || grant.allowOperator);
   const shippedModes = fileURLToPath(new URL('../../modes/', import.meta.url));
   const { layers, ...environment } = await loadHostEnvironment(authorizedRoot, shippedModes, flags);
-  const permission = await createInteractivePermissionContext();
+  const capabilities = await createInteractivePermissionContext();
+  const permission = grant === undefined ? capabilities
+    : createPermissionContext(grant.defaultPermissionProfile, grant.defaultNetwork, capabilities.capabilities);
+  const agentControl = grant === undefined ? undefined : {
+    grantId: grant.id,
+    storePath: grantStorePath,
+    operator: operatorEnabled,
+    validate: () => requireDelegationGrant(grantStorePath, grant.id, authorizedRoot),
+  };
   const host = createHost({ ...environment,
     config: createConfig({ user: { ...environment.config, workspaceRoot: authorizedRoot } }),
     configLayers: layers,
     permission,
     ...(modeName === undefined ? {} : { modeName }),
-    interactive: operator,
+    interactive: operatorEnabled,
+    ...(agentControl === undefined ? {} : { agentControl }),
   });
+  if (grant !== undefined) await recordDelegationEvent(grantStorePath, { kind: 'grant.used', grantId: grant.id });
   const server = new Server({ name: 'ligule', version }, {
     capabilities: { tools: {}, logging: {} },
-    instructions: operator
-      ? 'One local stdio operator for the explicitly authorized project. This server was launched with --operator, so session-only settings and replies to real pending approvals/questions are available. Policy decisions still run in Host; hard denials cannot be overridden. Poll status for progress and pending interactions; notifications are best-effort. Disconnect cancels active runs and releases locks. Operation IDs and queued messages are process-local; Session JSONL persists.'
-      : 'One local stdio controller for the explicitly authorized project. Session creation/open/list, run start/status/cancel, session configuration reads, message sending and record paging are available. Settings changes and replies to approvals/questions require restarting with the explicit --operator flag. Policy approval requests are denied in this mode. Disconnect cancels active runs and releases locks. Operation IDs and queued messages are process-local; Session JSONL persists.',
+    instructions: grant === undefined
+      ? operatorEnabled
+        ? 'One local stdio operator for the explicitly authorized project. This server was launched with --operator, so session-only settings and replies to real pending approvals/questions are available. Policy decisions still run in Host; hard denials cannot be overridden. Poll status for progress and pending interactions; notifications are best-effort. Disconnect cancels active runs and releases locks. Operation IDs and queued messages are process-local; Session JSONL persists.'
+        : 'One local stdio controller for the explicitly authorized project. Session creation/open/list, run start/status/cancel, session configuration reads, message sending and record paging are available. Settings changes and replies to approvals/questions require restarting with the explicit --operator flag. Policy approval requests are denied in this mode. Disconnect cancels active runs and releases locks. Operation IDs and queued messages are process-local; Session JSONL persists.'
+      : `One local stdio controller for project ${grant.projectRoot}, bounded by grant ${grant.id} (${grant.maxPermissionProfile}, network up to ${grant.maxNetwork}, policies: ${grant.allowedPolicies.join(', ')}). The grant is not remote identity authentication and does not override OS sandbox limits or hard Policy denials.${operatorEnabled ? ' --operator also allows ordinary approved interactions.' : ' Settings changes and replies to ordinary approvals/questions are disabled.'} Disconnect cancels active runs and releases locks.`,
   });
   const control = createControl(host, authorizedRoot, {
-    operator,
+    operator: operatorEnabled,
     onEvent(event) {
       void server.sendLoggingMessage({ level: 'info', logger: 'ligule', data: event })
         .catch(() => { process.stderr.write('mcp_notification_delivery_failed\n'); });
     },
   });
+  let grantWatch: NodeJS.Timeout | undefined;
+  if (agentControl !== undefined) {
+    const checkGrant = () => {
+      grantWatch = setTimeout(() => {
+        void agentControl.validate().then(checkGrant, async (error: unknown) => {
+          grantWatch = undefined;
+          try { await control.invalidate(controlErrorCode(error)); }
+          catch { process.stderr.write('mcp_grant_shutdown_failed\n'); }
+        });
+      }, 500);
+      grantWatch.unref();
+    };
+    checkGrant();
+  }
   const ajv = new Ajv({ strict: false });
   const validators = new Map(tools.map((tool) => [tool.name, ajv.compile(tool.inputSchema)]));
   const outputs = new Map(tools.map((tool) => [tool.name, ajv.compile(tool.outputSchema!)]));
@@ -259,6 +315,13 @@ export async function serveMcp({ projectRoot, version, flags = [], modeName, ope
     if (!validate(args)) throw new McpError(ErrorCode.InvalidParams, 'tool_args_invalid');
     const input: Arguments = args;
     try {
+      if (agentControl !== undefined) {
+        try { await agentControl.validate(); }
+        catch (error) {
+          await control.invalidate(controlErrorCode(error));
+          throw error;
+        }
+      }
       let result: Record<string, unknown>;
       switch (request.params.name) {
         case 'ligule_session_create': result = await control.create(input.projectRoot!, input.initial); break;
@@ -277,7 +340,8 @@ export async function serveMcp({ projectRoot, version, flags = [], modeName, ope
         case 'ligule_session_read': result = await control.read(input.sessionId!, input.before, input.limit ?? 20, input.at, input.offset); break;
         default: throw new KernelError('tool_unknown');
       }
-      if (!outputs.get(request.params.name)!(result)) throw new KernelError('host_response_invalid');
+      const outputValid = outputs.get(request.params.name)!(result);
+      if (!outputValid) throw new KernelError('host_response_invalid');
       return { content: [{ type: 'text' as const, text: JSON.stringify(result) }], structuredContent: result };
     } catch (error) {
       const result = { code: controlErrorCode(error) };
@@ -315,5 +379,6 @@ export async function serveMcp({ projectRoot, version, flags = [], modeName, ope
     process.stdout.off('error', close);
     process.off('SIGINT', close);
     process.off('SIGTERM', close);
+    if (grantWatch !== undefined) clearTimeout(grantWatch);
   }
 }
