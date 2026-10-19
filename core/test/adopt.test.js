@@ -4,10 +4,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { adoptForSessionDirectory, adoptLegacySessions, prefixDigest, sessionDirectory } from '../dist/index.js';
+import { adoptForSessionDirectory, adoptLegacySessions, listWorkspaceSessions, prefixDigest, sessionDirectories, sessionDirectory } from '../dist/index.js';
 
 function startNode(source, args = []) {
   return spawn(process.execPath, ['--input-type=module', '-e', source, ...args], { stdio: ['pipe', 'pipe', 'pipe'] });
@@ -23,16 +23,58 @@ async function waitForOutput(child) {
   throw new Error(`child exited before reporting readiness: ${output}`);
 }
 
-test('the default session directory is the data root one, and host.sessionDirectory stays on top', async () => {
+test('workspace sessions use a readable path folder under the user data root', async () => {
   const home = await mkdtemp(join(tmpdir(), 'ligule-session-dir-'));
+  const project = join(home, 'project');
   const previous = process.env.LIGULE_HOME;
   delete process.env.LIGULE_HOME;
   try {
-    assert.equal(sessionDirectory({ boundary: join(home, 'project'), userHome: home }), join(home, '.ligule', 'sessions'));
-    assert.equal(sessionDirectory({ boundary: join(home, 'project'), userHome: home, host: { sessionDirectory: join(home, 'given') } }), join(home, 'given'));
+    const config = { boundary: project, workspaceRoot: project, userHome: home };
+    const directory = sessionDirectory(config);
+    assert.equal(dirname(dirname(directory)), join(home, '.ligule', 'workspaces'));
+    assert.equal(basename(directory), 'sessions');
+    assert.match(basename(dirname(directory)), /-project--[a-f0-9]{16}$/);
+    assert.equal(sessionDirectory({ ...config, workspaceRoot: join(project, '.') }), directory, '路径别名使用同一目录');
+    assert.notEqual(sessionDirectory({ ...config, workspaceRoot: join(home, 'other') }), directory, '不同工作区分开存放');
+    assert.equal(sessionDirectory({ ...config, host: { sessionDirectory: join(home, 'given') } }), join(home, 'given'));
+    assert.deepEqual(sessionDirectories({ ...config, host: { sessionDirectory: join(home, 'given') } }), [join(home, 'given')]);
   } finally {
     if (previous !== undefined) process.env.LIGULE_HOME = previous;
     await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('workspace session listing reads new and legacy locations without migrating files', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-session-read-only-list-'));
+  const home = join(root, 'home');
+  const project = join(root, 'project');
+  const other = join(root, 'other');
+  const previous = process.env.LIGULE_HOME;
+  delete process.env.LIGULE_HOME;
+  try {
+    await Promise.all([mkdir(home), mkdir(project), mkdir(other)]);
+    const shared = join(home, '.ligule', 'sessions');
+    const local = join(project, '.ligule', 'sessions');
+    await Promise.all([mkdir(shared, { recursive: true }), mkdir(local, { recursive: true })]);
+    const sharedRecord = join(shared, 'shared-match.jsonl');
+    const otherRecord = join(shared, 'other-project.jsonl');
+    const unknownRecord = join(shared, 'unknown.jsonl');
+    const localRecord = join(local, 'project-local.jsonl');
+    await writeFile(sharedRecord, `${JSON.stringify({ kind: 'session', formatVersion: 2, sessionId: 'shared-match', projectRoot: project })}\n`);
+    await writeFile(otherRecord, `${JSON.stringify({ kind: 'session', formatVersion: 2, sessionId: 'other-project', projectRoot: other })}\n`);
+    await writeFile(unknownRecord, '{"seq":0,"kind":"user","text":"unknown"}\n');
+    await writeFile(localRecord, '{"seq":0,"kind":"user","text":"local"}\n');
+    const before = await readFile(sharedRecord);
+    const config = { boundary: project, workspaceRoot: project, userHome: home };
+
+    const listed = await listWorkspaceSessions(config);
+
+    assert.deepEqual(new Set(listed.map((item) => item.id)), new Set(['shared-match', 'project-local']));
+    assert.deepEqual(await readFile(sharedRecord), before, '读取不改共享旧记录');
+    await assert.rejects(access(sessionDirectory(config)), (error) => error.code === 'ENOENT', '读取不创建新的会话目录');
+  } finally {
+    if (previous !== undefined) process.env.LIGULE_HOME = previous;
+    await rm(root, { recursive: true, force: true });
   }
 });
 
@@ -351,6 +393,49 @@ test('a headerless record in a shared directory stays unknown to adoption', asyn
     assert.deepEqual(report.unknown, ['unknown.jsonl']);
     assert.equal(await readFile(join(target, 'unknown.jsonl')).then(() => true, () => false), false);
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a headerless record in the user data sessions directory is not assigned to a home workspace', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-adopt-user-data-'));
+  const previous = process.env.LIGULE_HOME;
+  try {
+    const home = join(root, 'home');
+    const data = join(root, 'data');
+    const shared = join(data, 'sessions');
+    const target = join(root, 'target');
+    process.env.LIGULE_HOME = data;
+    await mkdir(shared, { recursive: true });
+    await writeFile(join(shared, 'unknown.jsonl'), '{"seq":0,"kind":"user","text":"unknown"}\n');
+    const report = await adoptLegacySessions(shared, target, { projectRoot: home, userHome: home });
+    assert.deepEqual(report.unknown, ['unknown.jsonl']);
+    await assert.rejects(readFile(join(target, 'unknown.jsonl')), { code: 'ENOENT' });
+  } finally {
+    if (previous === undefined) delete process.env.LIGULE_HOME;
+    else process.env.LIGULE_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Windows path casing cannot make the shared user data sessions directory look project-owned', async (t) => {
+  if (process.platform !== 'win32') return t.skip('Windows path casing applies only on Windows');
+  const root = await mkdtemp(join(tmpdir(), 'ligule-adopt-user-data-case-'));
+  const previous = process.env.LIGULE_HOME;
+  try {
+    const home = join(root, 'home');
+    const data = join(root, 'Data');
+    const shared = join(data, 'sessions');
+    const target = join(root, 'target');
+    process.env.LIGULE_HOME = data.toUpperCase();
+    await mkdir(shared, { recursive: true });
+    await writeFile(join(shared, 'unknown.jsonl'), '{"seq":0,"kind":"user","text":"unknown"}\n');
+    const report = await adoptLegacySessions(shared, target, { projectRoot: home, userHome: home });
+    assert.deepEqual(report.unknown, ['unknown.jsonl']);
+    await assert.rejects(readFile(join(target, 'unknown.jsonl')), { code: 'ENOENT' });
+  } finally {
+    if (previous === undefined) delete process.env.LIGULE_HOME;
+    else process.env.LIGULE_HOME = previous;
     await rm(root, { recursive: true, force: true });
   }
 });

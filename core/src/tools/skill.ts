@@ -40,6 +40,7 @@ async function namedSkill(registry: SkillRegistry, name: unknown): Promise<Skill
 export function createSkillTool(registry: SkillRegistry, visibleTools: () => string[], mcpServers: () => string[] = () => []) {
   return {
     name: 'skill',
+    access: 'read',
   readOnly: true,
     // 技能工具是固定披露入口，不受模式筛选；有已登记技能时始终可用。
     disclosure: true,

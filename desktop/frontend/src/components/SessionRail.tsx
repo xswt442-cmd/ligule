@@ -1,18 +1,19 @@
 // 左侧栏通过 `sessions.list` 读取全部会话，并按项目根分组。
 // Host 独占会话目录的读取；前端不猜测磁盘中还存在哪些记录。
 // 搜索由 `sessions.search` 解析命中位置，前端负责打开会话并定位。
-// 工作区名称和默认标记来自 `workspaces.list`；此栏只展示，不修改登记表。
+// 工作区名称和默认标记来自 Host 登记表；隐藏只影响侧栏，删除只移除登记项。
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { DropdownMenu, Popover } from 'radix-ui';
+import { Popover } from 'radix-ui';
 import { Icon } from './Icon';
-import { useLocale, useText } from '../locale';
+import { useText } from '../locale';
 import { groupByWorkspace, loadWorkspacePages, type RailLayout, type WorkspaceRoster, visibleRoots } from '../rail';
 import { code, type Client } from '../protocol';
-import { keepEscape } from './ui';
-
-const HIT_KINDS: Record<string, readonly [string, string]> = {
-  user: ['问', 'User'], assistant: ['答', 'Assistant'], reasoning: ['推理', 'Reasoning'], tool: ['工具', 'Tool'], label: ['名字', 'Name'],
-};
+import { keepEscape, Modal } from './ui';
+import { SessionItem } from './rail/SessionItem';
+import { WorkspaceGroup } from './rail/WorkspaceGroup';
+import { SessionSearch } from './rail/SessionSearch';
+import type { SearchHit, SessionSummary } from './rail/types';
+export type { SearchHit, SessionSummary } from './rail/types';
 
 const PROJECT_FAILURES: Record<string, readonly [string, string]> = {
   host_project_root_missing: ['目录不存在', 'Directory does not exist'],
@@ -23,6 +24,9 @@ const PROJECT_FAILURES: Record<string, readonly [string, string]> = {
   workspace_registry_invalid: ['工作区登记无法读取', 'Workspace registry cannot be read'],
   workspace_registry_version: ['工作区登记版本不受支持', 'Workspace registry version is unsupported'],
   workspace_registry_locked: ['工作区登记正在更新', 'Workspace registry is being updated'],
+  workspace_default_cannot_remove: ['请先取消默认工作区，再删除登记。', 'Clear the default workspace before removing its registration.'],
+  workspace_not_registered: ['工作区已经不在登记表中。', 'This workspace is no longer registered.'],
+  workspace_in_use: ['工作区中有正在运行的会话，结束后再试。', 'A session is running in this workspace. Try again when it finishes.'],
 };
 
 type RailFailure = { root: string; label: string; code: string };
@@ -47,44 +51,6 @@ function failureText(t: (chinese: string, english: string) => string, label: str
   return `${label}: ${message === undefined ? t('读取失败', 'Could not read') : t(message[0], message[1])}`;
 }
 
-export type SearchHit = {
-  sessionId: string;
-  name?: string;
-  seq: number;
-  kind: string;
-  text: string;
-  // 摘录来自记录中的结果摘要；溢出文件中未搜索的中间内容不会出现在这里。
-  spilled?: string;
-};
-
-export type SessionSummary = {
-  id: string;
-  // 无首行的旧记录按版本 0 读取。
-  formatVersion: number;
-  projectRoot: string;
-  // 使用记录首行中的工作区身份和来源分组；空值表示元数据未记录，不表示默认工作区。
-  workspace?: string;
-  workspaceOrigin?: string;
-  createdAt: string | null;
-  updatedAt: string;
-  events: number;
-  lastSeq: number;
-  mode: { name: string; layer: string; digest: string } | null;
-  // 显示用户设置的名称；未命名时为空。归档只改变列表状态，记录仍可恢复。
-  name?: string;
-  archived?: boolean;
-  // 显示尚无结果的已派发调用数；恢复时这些调用会被标记为结果未知。
-  unanswered: number;
-  truncatedBytes: number;
-  error?: { code: string; detail: string };
-};
-
-function sessionDate(iso: string, locale: string): string {
-  const at = new Date(iso);
-  if (Number.isNaN(at.getTime())) return iso;
-  return new Intl.DateTimeFormat(locale, { month: 'short', day: 'numeric' }).format(at);
-}
-
 export function SessionRail({ client, current, onOpen, onOpenHit, revision, running, unread, projects, hidden, onHidden, onProjects, onCreate }: {
   client: Client;
   current: string | null;
@@ -104,7 +70,6 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
   onCreate: (root?: string) => void;
 }) {
   const t = useText();
-  const locale = useLocale();
   const [layout, setLayout] = useState<RailLayout>({ groups: [], loose: [] });
   const [folded, setFolded] = useState<Record<string, boolean>>({});
   const [otherFolded, setOtherFolded] = useState(false);
@@ -120,6 +85,9 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
   const [projectDraft, setProjectDraft] = useState('');
   const [projectFailure, setProjectFailure] = useState('');
   const [addingProject, setAddingProject] = useState(false);
+  const [removeTarget, setRemoveTarget] = useState<{ root: string; isDefault: boolean } | null>(null);
+  const [removeFailure, setRemoveFailure] = useState<{ message: string; code: string } | null>(null);
+  const [removing, setRemoving] = useState(false);
   const [rootsById, setRootsById] = useState(new Map<string, string>());
   const [visible, setVisible] = useState<string[]>(['']);
   const loadGeneration = useRef(0);
@@ -212,6 +180,26 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
     onHidden(hidden.filter(item => pathKey(item) !== pathKey(root)));
   };
 
+  const removeWorkspace = async () => {
+    if (removeTarget === null || removing || removeTarget.isDefault) return;
+    setRemoving(true);
+    setRemoveFailure(null);
+    try {
+      await client.call('workspace.remove', { directory: removeTarget.root }, 15_000);
+      searchGeneration.current += 1;
+      setHits(null);
+      onHidden(hidden.filter(item => pathKey(item) !== pathKey(removeTarget.root)));
+      onProjects(projects.filter(item => pathKey(item) !== pathKey(removeTarget.root)));
+      setRemoveTarget(null);
+      void load();
+    } catch (error) {
+      const errorCode = code(error);
+      setRemoveFailure({ message: failureText(t, removeTarget.root, errorCode), code: errorCode });
+    } finally {
+      setRemoving(false);
+    }
+  };
+
   const search = useCallback(async (needle: string) => {
     const generation = ++searchGeneration.current;
     setSearchNote('');
@@ -270,32 +258,15 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
     return () => clearTimeout(timer);
   }, [query, search, loading]);
 
-  const sessionRow = (item: SessionSummary) => {
-    const active = item.id === current;
-    const isRunning = running.includes(item.id);
-    const isUnread = unread.includes(item.id);
-    const root = item.projectRoot !== '' ? item.projectRoot : rootsById.get(item.id);
-    const title = item.name?.trim() || `${t('未命名会话', 'Untitled session')} ${item.id.slice(0, 8)}`;
-    const statuses = [
-      isRunning ? t('正在运行', 'Running') : '',
-      isUnread ? t('有新回复', 'Unread reply') : '',
-    ].filter(Boolean);
-    return <button
-      key={item.id}
-      type="button"
-      className={`session-item${active ? ' active' : ''}${item.archived === true ? ' archived' : ''}`}
-      title={`${title} · ${item.id}`}
-      aria-label={`${title}${statuses.length === 0 ? '' : `, ${statuses.join(', ')}`}`}
-      onClick={() => onOpen(item.id, root === undefined || root === '' ? undefined : root)}
-    >
-      <span className="session-name">{title}</span>
-      <span className="session-trailing">
-        <time className="session-date" dateTime={item.updatedAt}>{sessionDate(item.updatedAt, locale === 'zh' ? 'zh-CN' : 'en-US')}</time>
-        {isRunning && <span className="status-dot" role="img" aria-label={t('正在运行', 'Running')} title={t('正在运行', 'Running')} />}
-        {isUnread && <span className="unread-dot" role="img" aria-label={t('有新回复', 'Unread reply')} title={t('有新回复', 'Unread reply')} />}
-      </span>
-    </button>;
-  };
+  const sessionRow = (item: SessionSummary) => <SessionItem
+    key={item.id}
+    item={item}
+    current={current}
+    running={running.includes(item.id)}
+    unread={unread.includes(item.id)}
+    root={item.projectRoot !== '' ? item.projectRoot : rootsById.get(item.id)}
+    onOpen={onOpen}
+  />;
 
   const archivedCount = [...layout.groups.flatMap(group => group.sessions), ...layout.loose]
     .filter(item => item.archived === true).length;
@@ -310,33 +281,7 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
   };
 
   return <div className="sessions">
-    {searchExpanded ? <div className="rail-controls rail-search-row">
-      <label className="rail-search">
-        <Icon name="search" size={13} />
-        <input
-          ref={searchInput}
-          type="search"
-          value={query}
-          placeholder={only ? t('查找当前会话', 'Search this conversation') : t('搜索会话名称', 'Search conversation names')}
-          aria-label={only ? t('仅在当前会话中查找', 'Search only this conversation') : t('在所有可见项目中查找', 'Search visible workspaces')}
-          onChange={(event) => {
-            searchGeneration.current += 1;
-            setQuery(event.target.value);
-          }}
-          onKeyDown={(event) => {
-            if (event.nativeEvent.isComposing || event.keyCode === 229) return;
-            if (event.key === 'Escape') { event.preventDefault(); closeSearch(); return; }
-            if (event.key !== 'Enter' || query.trim() === '') return;
-            event.preventDefault();
-            void search(query.trim());
-          }}
-        />
-      </label>
-      <button type="button" className={`rail-scope${only ? ' on' : ''}`} aria-pressed={only} disabled={current === null}
-        title={t('只查当前会话，包括完整的溢出结果。', 'Search only this conversation, including complete spilled results.')}
-        onClick={() => { searchGeneration.current += 1; setOnly(value => !value); }}>{t('当前', 'This chat')}</button>
-      <button type="button" className="search-clear" aria-label={t('关闭搜索', 'Close search')} title={t('关闭搜索', 'Close search')} onClick={closeSearch}><Icon name="close" size={12} /></button>
-    </div> : <div className="rail-heading rail-controls">
+    {!searchExpanded && <div className="rail-heading rail-controls">
       <strong>{t('工作区', 'Workspaces')}</strong>
       <button type="button" className="icon-button" aria-label={t('刷新会话列表', 'Refresh conversations')} title={t('刷新会话列表', 'Refresh conversations')} onClick={() => void load()}><Icon name="refresh" size={14} /></button>
       <button type="button" className="icon-button" aria-label={t('搜索会话', 'Search conversations')} title={t('搜索会话', 'Search conversations')} aria-expanded={false} onClick={() => { setPopoverOpen(false); setSearchExpanded(true); }}><Icon name="search" size={15} /></button>
@@ -367,30 +312,21 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
         </Popover.Portal>
       </Popover.Root>
     </div>}
-
-    {hits !== null && searchNote !== '' && <div className="rail-warning" role="status">{searchNote}</div>}
-    {hits !== null && hits.length === 0 && searchNote === '' && <div className="rail-empty">
-      {only ? t(`当前会话中没有找到“${query.trim()}”。`, `No matches in this conversation for “${query.trim()}”.`)
-        : t(`可见项目中没有找到“${query.trim()}”。`, `No matches in visible workspaces for “${query.trim()}”.`)}
-    </div>}
-    {hits?.map((hit) => {
-      const root = rootsById.get(hit.sessionId);
-      const kind = HIT_KINDS[hit.kind];
-      return <button
-        key={`${hit.sessionId}:${hit.seq}`}
-        type="button"
-        className="hit-item"
-        title={`${hit.sessionId} · ${t('第', '#')}${hit.seq}`}
-        onClick={() => onOpenHit(hit, root === undefined || root === '' ? undefined : root)}
-      >
-        <span className="hit-where">
-          {kind === undefined ? hit.kind : t(kind[0], kind[1])} {t(`第 ${hit.seq} 条`, `#${hit.seq}`)}
-          <span className="hit-session">{hit.name?.trim() || hit.sessionId.slice(0, 8)}</span>
-        </span>
-        <span className="hit-text">{hit.text}</span>
-        {hit.spilled !== undefined && <span className="hit-note">{t('完整结果在', 'Full result in')} {hit.spilled}</span>}
-      </button>;
-    })}
+    <SessionSearch
+      expanded={searchExpanded}
+      query={query}
+      only={only}
+      current={current}
+      inputRef={searchInput}
+      hits={hits}
+      note={searchNote}
+      rootsById={rootsById}
+      onQueryChange={(value) => { searchGeneration.current += 1; setQuery(value); }}
+      onScopeToggle={() => { searchGeneration.current += 1; setOnly((value) => !value); }}
+      onClose={closeSearch}
+      onSearch={(value) => void search(value)}
+      onOpenHit={onOpenHit}
+    />
 
     {hits === null && <>
       {failures.length > 0 && <details className="rail-warning">
@@ -410,41 +346,17 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
       {layout.groups.map((group) => {
         const sessions = visibleSessions(group.sessions);
         const isFolded = folded[group.identity] === true;
-        return <section className="rail-group" key={group.identity}>
-          <h3 className="group-label">
-            <button
-              type="button"
-              className="group-fold"
-              aria-expanded={!isFolded}
-              title={group.root}
-              onClick={() => setFolded(now => ({ ...now, [group.identity]: !now[group.identity] }))}
-            >
-              <Icon name={isFolded ? 'unfold' : 'fold'} size={13} />
-              <Icon name={isFolded ? 'folder' : 'folderOpen'} size={14} />
-              <span className="group-root">{group.label}{group.isDefault ? ` · ${t('默认', 'Default')}` : ''}</span>
-            </button>
-            <span className="group-count">{sessions.length}</span>
-            <button type="button" className="group-new" title={t(`在 ${group.label} 中新建会话`, `New conversation in ${group.label}`)} aria-label={t(`在 ${group.label} 中新建会话`, `New conversation in ${group.label}`)} onClick={() => onCreate(group.root)}>
-              <Icon name="plus" size={15} />
-            </button>
-            <DropdownMenu.Root>
-              <DropdownMenu.Trigger asChild>
-                <button type="button" className="icon-button group-menu" aria-label={t(`${group.label}工作区菜单`, `${group.label} workspace menu`)} title={t('工作区菜单', 'Workspace menu')}><Icon name="more" size={17} /></button>
-              </DropdownMenu.Trigger>
-              <DropdownMenu.Portal>
-                <DropdownMenu.Content className="menu" align="end" sideOffset={4} onEscapeKeyDown={keepEscape}>
-                  <DropdownMenu.Item onSelect={() => void markDefault(group.root, group.isDefault)}>
-                    {group.isDefault ? t('取消默认工作区', 'Clear default workspace') : t('设为默认工作区', 'Set as default workspace')}
-                  </DropdownMenu.Item>
-                  <DropdownMenu.Separator className="menu-separator" />
-                  <DropdownMenu.Item onSelect={() => hideWorkspace(group.root)}>{t('从侧栏移除', 'Remove from sidebar')}</DropdownMenu.Item>
-                </DropdownMenu.Content>
-              </DropdownMenu.Portal>
-            </DropdownMenu.Root>
-          </h3>
-          {!isFolded && sessions.length === 0 && group.sessions.length > 0 && <div className="rail-empty">{t('归档会话已隐藏。', 'Archived conversations are hidden.')}</div>}
-          {!isFolded && sessions.map(sessionRow)}
-        </section>;
+        return <WorkspaceGroup
+          key={group.identity}
+          group={group}
+          sessions={sessions}
+          folded={isFolded}
+          onToggle={(identity) => setFolded((now) => ({ ...now, [identity]: !now[identity] }))}
+          onCreate={onCreate}
+          onSetDefault={(root, clearing) => void markDefault(root, clearing)}
+          onHide={hideWorkspace}
+          onRemove={(root, isDefault) => { setRemoveFailure(null); setRemoveTarget({ root, isDefault }); }}
+        >{sessions.map(sessionRow)}</WorkspaceGroup>;
       })}
       {visibleLoose.length > 0 && <section className="rail-loose">
         <h3 className="group-label"><button type="button" className="group-fold" aria-expanded={!otherFolded} onClick={() => setOtherFolded(value => !value)}><Icon name={otherFolded ? 'unfold' : 'fold'} size={13} /><Icon name="folder" size={14} /><span className="group-root">{t('其他会话', 'Other conversations')}</span></button><span className="group-count">{visibleLoose.length}</span></h3>
@@ -454,5 +366,16 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
         {showArchived ? t('隐藏归档', 'Hide archived') : t(`显示归档会话 ${archivedCount}`, `Show archived conversations ${archivedCount}`)}
       </button>}
     </>}
+    {removeTarget !== null && <Modal title={t('删除工作区登记', 'Remove workspace registration')} className="confirm" onClose={() => { if (!removing) setRemoveTarget(null); }}>
+      <h2 className="confirm-lead">{t('从 Ligule 工作区列表中删除这一项？', 'Remove this entry from Ligule’s workspace list?')}</h2>
+      <p className="confirm-note">{removeTarget.root}</p>
+      <p className="confirm-note">{t('只删除登记项。项目目录、文件和会话历史会保留。', 'Only the registration is removed. The project directory, files, and session history stay in place.')}</p>
+      {removeTarget.isDefault && <p className="session-note" data-tone="bad">{t('这是默认工作区。请先到设置中取消默认选择，再重试。', 'This is the default workspace. Clear its default selection in Settings, then try again.')}</p>}
+      {removeFailure !== null && <div className="session-note" data-tone="bad" role="alert"><p>{removeFailure.message}</p><code>{removeFailure.code}</code></div>}
+      <div className="confirm-actions">
+        <button type="button" disabled={removing} onClick={() => setRemoveTarget(null)}>{t('取消', 'Cancel')}</button>
+        <button type="button" className="primary-button" disabled={removing || removeTarget.isDefault} onClick={() => void removeWorkspace()}>{removing ? t('正在删除…', 'Removing…') : t('删除登记', 'Remove registration')}</button>
+      </div>
+    </Modal>}
   </div>;
 }

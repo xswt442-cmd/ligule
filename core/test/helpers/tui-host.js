@@ -41,7 +41,8 @@ export async function waitFor(condition, { within = 150_000, every = 30, read = 
   }
 }
 
-export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {}, interactive = false } = {}) {  const testplace = resolve('testplace');
+export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {}, interactive = false, permissionControl = false, permission, extensions, agentControl } = {}) {
+  const testplace = resolve('testplace');
   await mkdir(testplace, { recursive: true });
   const directory = await mkdtemp(join(testplace, 'tui-host-'));
   const absoluteDirectory = resolve(directory);
@@ -53,6 +54,9 @@ export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {},
   const sessionDirectory = join(directory, 'sessions');
   await Promise.all([mkdir(homeDirectory), mkdir(projectDirectory)]);
   await setup?.({ directory, projectDirectory, homeDirectory, sessionDirectory });
+  const agentControlOptions = typeof agentControl === 'function'
+    ? await agentControl({ directory, projectDirectory, homeDirectory, sessionDirectory })
+    : agentControl;
 
   const envKeys = ['HOME', 'USERPROFILE', 'LIGULE_TUI_TEST_API_KEY'];
   const previousEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
@@ -141,6 +145,10 @@ export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {},
     host = serveHost({ ...pair.host, config, provider, policy: config.policy, loadEnvironment,
       // 客户端声明支持回答模型提问，与终端和桌面客户端使用相同的协议字段。
       interactive,
+      ...(permission === undefined ? {} : { permission }),
+      ...(extensions === undefined ? {} : { extensions }),
+      ...(agentControlOptions === undefined ? {} : { agentControl: agentControlOptions }),
+      permissionControl,
       modeName: 'minimal', modePaths: modeDirectories(projectDirectory, modesDirectory, homeDirectory),
     });
     const client = createConnection(pair.client);

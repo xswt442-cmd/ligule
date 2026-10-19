@@ -3,7 +3,13 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { rgPath } from '@vscode/ripgrep';
-import { createKernel, createObservationLog, createTool, deleteTool, editTool, execTool, findTool, readOnlyTools, readTool, resolveShell, searchTool, withNativeExitCode, writeTool } from '../dist/index.js';
+import {
+  createKernel, createObservationLog, createPermissionContext, createTool, deleteTool, editTool,
+  execTool, findTool, readOnlyTools, readTool, resolveShell, searchTool, withNativeExitCode, writeTool,
+} from '../dist/index.js';
+import { bindScript } from '../dist/capability/script-binding.js';
+import { boundaryOf, workingDirectoryOf } from '../dist/capability/limits.js';
+import { resolveWithin } from '../dist/capability/paths.js';
 
 const builtRipgrep = rgPath;
 
@@ -34,6 +40,9 @@ async function withWorkspace(run) {
 }
 
 const silentLogger = { debug: () => {}, log: () => {} };
+const fullAccess = createPermissionContext('full-access', 'unrestricted', {
+  filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
+});
 
 function context(workspace, limits, extra) {
   return { config: { boundary: workspace, limits, ...extra }, logger: silentLogger };
@@ -132,10 +141,16 @@ test('exec uses the workspace root by default and validates an explicit child wo
     await writeFile(script, 'console.log(process.cwd())');
     const shell = resolveShell({});
     const command = `node "${script.replace(/\\/g, '/')}"`;
-    const run = (config, cwd) => execTool.run(
-      { command, ...(cwd === undefined ? {} : { cwd }) },
-      { config, shell: withNativeExitCode(shell, command) },
-    );
+    const run = async (config, cwd) => {
+      const boundary = boundaryOf(config);
+      const workspaceRoot = workingDirectoryOf(config);
+      const workingDirectory = await resolveWithin(boundary, cwd ?? '.', { cwd: workspaceRoot });
+      const scriptBinding = await bindScript({ command, shell, boundary, workspaceRoot, cwd: workingDirectory, permission: fullAccess });
+      return execTool.run(
+        { command, ...(cwd === undefined ? {} : { cwd }) },
+        { config, permission: fullAccess, shell: withNativeExitCode(shell, command), scriptBinding },
+      );
+    };
     assert.equal((await run({ boundary: workspace, workspaceRoot: workspace })).text.trim(), workspace);
     assert.equal((await run({ boundary: workspace, workspaceRoot: workspace }, 'src')).text.trim(), child);
     await assert.rejects(run({ boundary: child, workspaceRoot: workspace }), { code: 'path_escapes_boundary' });

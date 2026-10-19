@@ -1,0 +1,345 @@
+/* 右侧面板和菜单 */
+
+.dock {
+  flex: 0 0 var(--dock);
+  display: flex;
+  flex-direction: column;
+  inline-size: var(--dock);
+  min-inline-size: 300px;
+  border-inline-start: 1px solid var(--line);
+  background: var(--bg-sunk);
+  min-height: 0;
+}
+
+.dock[hidden] {
+  display: none;
+}
+
+.dock-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.7rem 0.9rem;
+  border-block-end: 1px solid var(--line);
+}
+
+.dock-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.8rem 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.dock-body h3 {
+  margin: 0.4rem 0 0;
+  font-size: var(--text-md);
+}
+
+.dock-body ul {
+  margin: 0;
+  padding-inline-start: 1.1rem;
+  color: var(--fg-muted);
+  font-size: var(--text-md);
+}
+
+.stub {
+  padding: 0.6rem 0.7rem;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  color: var(--fg-muted);
+  font-size: var(--text-md);
+}
+
+/* Radix 管理菜单位置和焦点；此处只定义菜单样式和条目尺寸。 */
+.menu {
+  min-inline-size: 200px;
+  padding: 0.3rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-pop);
+  z-index: 40;
+}
+
+.menu [role="menuitem"] {
+  min-block-size: var(--hit);
+  padding: 0.36rem 0.65rem;
+  border-radius: 6px;
+  font-size: var(--text-md);
+}
+
+.menu [role="menuitem"][data-highlighted] {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+/* 标记尚未实现的菜单项。 */
+.menu-tag {
+  margin-inline-start: 0.5rem;
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
+
+.dock-title {
+  display: flex;
+  align-items: baseline;
+  flex: 1;
+}
+
+/* 窄窗口中右侧面板覆盖主界面；侧栏和主栏保持原布局，侧栏仍由用户控制收起或展开。 */
+@media (max-width: 1180px) {
+  .dock {
+    position: fixed;
+    inset-block: 0;
+    inset-inline-end: 0;
+    z-index: 15;
+  }
+}
+
+/* 阅读位置不在底部时，在转录区和输入框之间显示“跳回最新”按钮。 */
+.jump-latest {
+  /* 按钮悬浮在转录下沿，不改变转录区高度。 */
+  position: absolute;
+  bottom: 0.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 0.25rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-raised);
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.jump-latest:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
+/* Markdown 内容 */
+.markdown > :first-child { margin-top: 0; }
+.markdown > :last-child { margin-bottom: 0; }
+.markdown p { margin: 0.45rem 0; }
+.md-h { margin: 0.9rem 0 0.35rem; line-height: 1.35; }
+.md-h1 { font-size: var(--text-xl); }
+.md-h2 { font-size: 1rem; }
+.md-h3 { font-size: var(--text-lg); }
+.md-h4, .md-h5, .md-h6 { font-size: var(--text-md); color: var(--fg-muted); }
+.markdown ul, .markdown ol { margin: 0.4rem 0; padding-left: 1.3rem; }
+.markdown li { margin: 0.15rem 0; }
+.markdown a { color: var(--accent-strong); }
+.inline-code, .row-body code:not(.hljs) {
+  font-family: var(--mono);
+  font-size: 1em;
+  background: var(--bg-sunk);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0 3px;
+}
+.md-code {
+  margin: 0.5rem 0;
+  padding: 0.6rem 0.7rem;
+  background: var(--bg-sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow-x: auto;
+}
+.md-code code { font-family: var(--mono); font-size: 1em; line-height: 1.55; background: none; padding: 0; }
+
+/* 代码块下方的复制按钮和结果提示右对齐，不影响代码文本布局。 */
+.md-code-wrap { margin: 0.5rem 0; }
+.md-code-wrap .md-code { margin: 0; }
+.code-copy-row { display: flex; gap: 0.5rem; align-items: center; justify-content: flex-end; margin: 0.25rem 0 0; }
+.code-copy { font-size: var(--text-xs); }
+.md-table { margin: 0.5rem 0; border-collapse: collapse; width: 100%; font-size: 1em; line-height: normal; }
+.md-table th, .md-table td { border: 1px solid var(--line); padding: 0.3rem 0.5rem; text-align: left; vertical-align: top; }
+.md-table th { background: var(--bg-raised); color: var(--fg-muted); font-weight: 600; }
+.markdown blockquote { margin: 0.5rem 0; padding-left: 0.7rem; border-left: 3px solid var(--line); color: var(--fg-muted); }
+
+/* 顶部状态、用量条和断连横幅 */
+
+.usage {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.usage-bar {
+  position: relative;
+  display: inline-block;
+  width: 6.5rem;
+  height: 0.42rem;
+  overflow: hidden;
+  background: var(--bg-sunk);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+
+.usage-fill {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  background: color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+.usage-bar[data-over="true"] .usage-fill {
+  background: color-mix(in srgb, var(--warn) 75%, transparent);
+}
+
+.usage-line {
+  position: absolute;
+  inset-block: -2px;
+  width: 2px;
+  background: var(--fg-muted);
+}
+
+.usage-text {
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: var(--space-2);
+  margin: 0 var(--space-4) var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  color: var(--fg);
+  background: color-mix(in srgb, var(--bad) 12%, var(--bg-raised));
+  border: 1px solid color-mix(in srgb, var(--bad) 50%, var(--line));
+  border-radius: var(--radius);
+  font-size: var(--text-sm);
+}
+
+/* 错误码和说明保持单行并截断，避免横幅增高挤压转录区；连接状态文本不换行。 */
+.banner strong {
+  flex: none;
+  white-space: nowrap;
+}
+
+.banner span,
+.banner code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.banner code {
+  color: var(--bad);
+}
+
+.banner details {
+  min-inline-size: 0;
+  max-inline-size: 50%;
+  overflow-wrap: anywhere;
+}
+
+.banner details[open] {
+  max-block-size: 20vh;
+  overflow: auto;
+}
+
+.banner button {
+  margin-inline-start: auto;
+  flex: none;
+  padding: 0.2rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-sunk);
+  color: var(--fg);
+}
+
+/* 命令面板和快捷键 */
+
+.palette {
+  position: fixed;
+  inset-block-start: 12vh;
+  inset-inline-start: 50%;
+  transform: translateX(-50%);
+  z-index: 31;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  width: min(34rem, 90vw);
+  padding: 0.6rem;
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-pop);
+}
+
+.palette input {
+  padding: 0.45rem 0.6rem;
+  color: var(--fg);
+  background: var(--bg-sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font: inherit;
+}
+.palette ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.palette li button {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.8rem;
+  width: 100%;
+  padding: 0.4rem 0.5rem;
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  text-align: start;
+}
+
+.palette li[aria-selected="true"] button {
+  background: var(--bg-sunk);
+  border-color: var(--line);
+}
+
+.palette-note {
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.palette-empty {
+  padding: 0.5rem;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+/* 外观设置控件 */
+
+.dock-body label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-block: 0.55rem;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+.dock-body select,
+.dock-body input[type="range"] {
+  padding: 0.25rem 0.4rem;
+  color: var(--fg);
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font: inherit;
+}

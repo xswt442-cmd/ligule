@@ -137,3 +137,53 @@ test('TUI control panels select a model, mode, and policy without running a requ
     setup: ({ homeDirectory: home }) => { homeDirectory = home; },
   });
 });
+
+test('TUI requires separate confirmation for full-access and unrestricted network permissions', async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+  const { App } = await import('../dist/tui/app.js');
+  const terminal = fakeTerminal();
+  const instance = render(createElement(App, {
+    client,
+    sessionId,
+    info: { boundary: projectDirectory },
+    stdout: terminal.stdout,
+    interactive: true,
+  }), {
+    stdin: terminal.stdin,
+    stdout: terminal.stdout,
+    exitOnCtrlC: false,
+    patchConsole: false,
+    interactive: true,
+  });
+  try {
+    await until(terminal, (frame) => frame.includes('read-only'));
+    terminal.stdin.write('/permission full-access');
+    await until(terminal, (frame) => frame.includes('/permission full-access'));
+    terminal.stdin.write('\r');
+    await until(terminal, (frame) => frame.includes('我确认启用 full-access'));
+    assert.equal(requests.some((request) => request.method === 'permission.set'), false);
+    terminal.stdin.write('\r');
+    await until(terminal, () => requests.some((request) => request.method === 'permission.set'));
+    const fullAccessRequest = requests.find((request) => request.method === 'permission.set');
+    assert.equal(fullAccessRequest.params.confirmFullAccess, true);
+    assert.equal(fullAccessRequest.params.permissionProfile, 'full-access');
+    await until(terminal, (frame) => frame.includes('权限已更新：full-access'));
+    assert.equal((await client.request('status.get', { sessionId })).permission.profile, 'full-access');
+
+    const beforeNetwork = requests.filter((request) => request.method === 'permission.set').length;
+    terminal.stdin.write('/permission network unrestricted');
+    await until(terminal, (frame) => frame.includes('/permission network unrestricted'));
+    terminal.stdin.write('\r');
+    await until(terminal, (frame) => frame.includes('我确认启用不受限网络'));
+    assert.equal(requests.filter((request) => request.method === 'permission.set').length, beforeNetwork);
+    terminal.stdin.write('\r');
+    await until(terminal, () => requests.filter((request) => request.method === 'permission.set').length === beforeNetwork + 1);
+    const networkRequest = requests.filter((request) => request.method === 'permission.set').at(-1);
+    assert.equal(networkRequest.params.confirmNetwork, true);
+    assert.equal(networkRequest.params.permissionNetwork, 'unrestricted');
+    await until(terminal, (frame) => frame.includes('权限已更新：full-access · 网络 unrestricted'));
+    assert.equal((await client.request('status.get', { sessionId })).permission.network, 'unrestricted');
+    assert.equal(requests.filter((request) => request.method === 'run.start').length, 0);
+  } finally {
+    instance.unmount();
+  }
+}, { interactive: true }));

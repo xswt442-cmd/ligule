@@ -1,6 +1,7 @@
 // 会话列表直接扫描记录目录，不构建索引或额外元数据表。
 // 从每条记录读取格式版本、项目归属、更新时间、事件数、最后生效模式和未完成调用数量。
 import { readdir, readFile, stat } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { dataRoot } from '../kernel/config-file.js';
 import { KernelError } from '../kernel/error.js';
@@ -37,6 +38,7 @@ export function chooseResumeMode({
 
 export interface SessionDirectoryConfig {
   boundary: string;
+  workspaceRoot?: string;
   // 返回数据根路径，与用户配置层使用同一目录。
   userHome?: string;
   host?: { sessionDirectory?: unknown };
@@ -68,8 +70,54 @@ export interface SessionSummary {
 export function sessionDirectory(config: SessionDirectoryConfig): string {
   const configured = config.host?.sessionDirectory;
   if (typeof configured === 'string' && configured !== '') return configured;
-  // 默认会话目录位于数据根中，与用户配置同根；项目文件边界不影响记录位置。
-  return join(dataRoot(config.userHome), 'sessions');
+  const workspace = config.workspaceRoot ?? config.boundary;
+  const identity = workspaceIdentity(workspace);
+  const prettyPath = workspaceFolderLabel(identity);
+  const suffix = createHash('sha256').update(identity).digest('hex').slice(0, 16);
+  return join(dataRoot(config.userHome), 'workspaces', `${prettyPath}--${suffix}`, 'sessions');
+}
+
+function workspaceFolderLabel(identity: string): string {
+  const windowsDrive = /^([a-z]):[\\/]/i.exec(identity);
+  if (windowsDrive !== null) {
+    const parts = identity.slice(windowsDrive[0].length).split(/[\\/]+/u).filter(Boolean);
+    return `${windowsDrive[1].toLowerCase()}--${parts.map(safePathPart).join('-')}`.slice(0, 120);
+  }
+  const unc = /^\\\\([^\\]+)[\\/]+(.+)$/u.exec(identity);
+  if (unc !== null) {
+    const parts = [unc[1], ...unc[2].split(/[\\/]+/u)].filter(Boolean);
+    return `unc--${parts.map(safePathPart).join('-')}`.slice(0, 120);
+  }
+  const parts = identity.split(/[\\/]+/u).filter(Boolean);
+  return `root-${parts.map(safePathPart).join('-')}`.slice(0, 120);
+}
+
+function safePathPart(part: string): string {
+  return part.replace(/[^\p{L}\p{N}_-]/gu, '-');
+}
+
+/** Existing paths are read for discovery; writes happen only when a user opens a legacy session. */
+export function sessionDirectories(config: SessionDirectoryConfig): string[] {
+  const configured = config.host?.sessionDirectory;
+  const primary = sessionDirectory(config);
+  if (typeof configured === 'string' && configured !== '') return [primary];
+  const workspace = config.workspaceRoot ?? config.boundary;
+  const candidates = [
+    join(dataRoot(config.userHome), 'sessions'),
+    join(workspace, '.ligule', 'sessions'),
+  ];
+  const seen = new Set([pathIdentity(primary)]);
+  return [primary, ...candidates.filter((candidate) => {
+    const identity = pathIdentity(candidate);
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  })];
+}
+
+function pathIdentity(path: string): string {
+  const absolute = resolve(path);
+  return process.platform === 'win32' ? absolute.toLowerCase() : absolute;
 }
 
 function projectRootOfLegacyDirectory(directory: string): string | undefined {
@@ -158,4 +206,19 @@ export async function listSessions(
   }
   summaries.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   return limit === undefined ? summaries : summaries.slice(0, limit);
+}
+
+/** Lists one workspace across its current and legacy locations without copying or repairing records. */
+export async function listWorkspaceSessions(
+  config: SessionDirectoryConfig,
+  { projectRoot = config.workspaceRoot ?? config.boundary, limit = undefined as number | undefined } = {},
+): Promise<SessionSummary[]> {
+  const directories = sessionDirectories(config);
+  const groups = await Promise.all(directories.map((directory) => listSessions(directory, { projectRoot })));
+  const records = new Map<string, SessionSummary>();
+  for (const group of groups) {
+    for (const item of group) if (!records.has(item.id)) records.set(item.id, item);
+  }
+  const sorted = [...records.values()].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  return limit === undefined ? sorted : sorted.slice(0, limit);
 }

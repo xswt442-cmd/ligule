@@ -55,7 +55,7 @@ test('the listing reads each record once and reports what a resume would need', 
     const [firstItem, legacy] = listed;
     assert.deepEqual(firstItem, {
       id: 'fresh',
-      formatVersion: 1,
+    formatVersion: 2,
       projectRoot: root,
       workspace: workspaceIdentity(root),
       workspaceOrigin: 'default',

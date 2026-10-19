@@ -8,7 +8,7 @@ import { createElement } from 'react';
 import { render } from 'ink';
 import { completeFrame } from './helpers/frames.js';
 import { App } from '../dist/tui/app.js';
-import { waitFor, withTuiHost } from './helpers/tui-host.ts';
+import { measuredPermissionContext, waitFor, withTuiHost } from './helpers/tui-host.ts';
 
 async function withApp(context, run) {
   const stdout = Object.assign(new PassThrough(), { columns: 80, rows: 24, isTTY: true });
@@ -49,6 +49,7 @@ test('complete history opens in a bounded viewport and keyboard navigation reach
 });
 
 test('an approval exposes its entire change through pages and Escape cancels without writing', async () => {
+  const permission = await measuredPermissionContext('full-access', 'policy');
   await withTuiHost(async (context) => withApp(context, async ({ frame, output, stdin, type, wait }) => {
     const content = Array.from({ length: 40 }, (_, index) => `待审批内容 ${index}`).join('\n');
     await type(JSON.stringify({ tool: 'create', args: { path: 'approval.md', content } }));
@@ -62,7 +63,7 @@ test('an approval exposes its entire change through pages and Escape cancels wit
     await wait(() => output().includes('本轮已取消'));
     await assert.rejects(access(join(context.config.boundary, 'approval.md')), (error) => error.code === 'ENOENT');
     assert.ok(context.requests.some((request) => request.method === 'run.cancel'));
-  }));
+  }), { permission });
 });
 
 // 提问面板逐题收集答案，并在最后一题提交后一次性返回；非选项输入作为自由回答。

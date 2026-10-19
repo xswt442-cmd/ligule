@@ -14,6 +14,11 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly projectRoot?: string;
   readonly workspaceOrigin?: string;
   readonly mode?: string;
+  readonly policy?: string;
+  readonly permissionProfile?: string;
+  readonly permissionNetwork?: string;
+  readonly confirmFullAccess?: boolean;
+  readonly confirmNetwork?: boolean;
   readonly name?: string;
   readonly archived?: boolean;
   readonly at?: number;
@@ -27,10 +32,40 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly text?: string;
   readonly provider?: string;
   readonly model?: string;
+  readonly initialMode?: string;
+  readonly initialPolicy?: string;
+  readonly initialPermissionProfile?: string;
+  readonly initialPermissionNetwork?: string;
+  readonly confirmInitialFullAccess?: boolean;
+  readonly confirmInitialNetwork?: boolean;
+  readonly initialProvider?: string;
+  readonly initialModel?: string;
+  readonly initialThinkingEffort?: string;
+  readonly initialOutputTokens?: number;
+  readonly initialLoopIterations?: number;
+  readonly thinkingEffort?: string;
+  readonly outputTokens?: number;
+  readonly loopIterations?: number;
+  readonly resetModel?: boolean;
+  readonly resetThinking?: boolean;
+  readonly resetOutputTokens?: boolean;
   readonly reference?: string;
   readonly value?: unknown;
   readonly json?: string;
   readonly version?: string;
+  readonly grantId?: string;
+  readonly grantName?: string;
+  readonly defaultPermissionProfile?: string;
+  readonly maxPermissionProfile?: string;
+  readonly defaultNetwork?: string;
+  readonly maxNetwork?: string;
+  readonly defaultPolicy?: string;
+  readonly allowedPolicyAsk?: boolean;
+  readonly allowedPolicyAuto?: boolean;
+  readonly allowedPolicyNever?: boolean;
+  readonly allowOperator?: boolean;
+  readonly confirmUnrestrictedNetwork?: boolean;
+  readonly expiresAt?: string;
   readonly field?: string;
   readonly layer?: string;
   readonly op?: string;
@@ -53,6 +88,17 @@ export const METHODS = Object.freeze({
         // 客户端明确说明工作区来源，因为指定的目录也可能正是默认工作区。
         // 未提供来源时，Host 根据是否提供工作区路径区分显式选择与默认工作区。
         workspaceOrigin: { type: 'string', description: "how this session landed on that workspace: 'explicit' when the client chose it, 'default' when it is the one the client falls back to" },
+        initialMode: { type: 'string', description: 'optional mode to apply before returning the new session' },
+        initialPolicy: { type: 'string', description: 'optional session policy override: ask, auto, or never' },
+        initialPermissionProfile: { type: 'string', description: 'optional initial file and command permission; interactive clients only' },
+        initialPermissionNetwork: { type: 'string', description: 'optional initial network permission; interactive clients only' },
+        confirmInitialFullAccess: { type: 'boolean', description: 'confirmation for granting full-access permission to a new session' },
+        confirmInitialNetwork: { type: 'boolean', description: 'confirmation for granting unrestricted network access to a new session' },
+        initialProvider: { type: 'string', description: 'provider ID for an initial model selection; must be paired with initialModel' },
+        initialModel: { type: 'string', description: 'model ID for an initial model selection; must be paired with initialProvider' },
+        initialThinkingEffort: { type: 'string', description: 'provider-supported effort to apply before the first run' },
+        initialOutputTokens: { type: 'integer', minimum: 1, description: 'optional session output-token limit; the Host enforces model and context ceilings' },
+        initialLoopIterations: { type: 'integer', minimum: 1, description: 'optional maximum model/tool iterations for each user turn in this session' },
       },
       description: 'a session starts on the project the Host was launched on; naming another project is optional',
     },
@@ -185,10 +231,26 @@ export const METHODS = Object.freeze({
     description: 'Read the Host state for this session, including its live phase and model output budget when a run is active',
     parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
   },
+  'session.configure': {
+    description: 'Read or change one session-owned category: mode, policy, model generation, or the per-turn iteration limit. Loop-limit changes apply at the next turn boundary and never write configuration files.',
+    parameters: { type: 'object', properties: {
+      sessionId: SESSION_ID,
+      mode: { type: 'string', description: 'select a mode; default restores the mode configured for this project' },
+      policy: { type: 'string', description: 'ask, auto, never, or default to restore the project policy' },
+      provider: { type: 'string', description: 'provider ID for a model selection; must be paired with model' },
+      model: { type: 'string', description: 'model ID for a model selection; must be paired with provider' },
+      thinkingEffort: { type: 'string', description: 'a value advertised by the selected provider, or default to inherit the provider default' },
+      outputTokens: { type: 'integer', minimum: 1, description: 'session output-token maximum bounded by the provider and context window' },
+      loopIterations: { type: 'integer', minimum: 1, description: 'maximum model/tool iterations per user turn in this session' },
+      resetModel: { type: 'boolean', description: 'restore the model selection inherited from the current project configuration' },
+      resetThinking: { type: 'boolean', description: 'inherit the selected provider default thinking behavior' },
+      resetOutputTokens: { type: 'boolean', description: 'inherit the selected provider output-token setting' },
+    }, required: ['sessionId'] },
+  },
   // 工作区登记表和默认选择保存在应用数据根目录中。
-  // 客户端只读取登记表；它只能更改默认选择，登记项由创建或打开会话时写入。
+  // 客户端可读取登记、设置默认项或移除登记；移除前必须先清除默认项。
   'workspaces.list': {
-    description: 'Read the durable workspace roster and its default selection from the application data root; the interface list is a reader of it, so a workspace a person stopped watching is still here',
+    description: 'Read the durable workspace roster and its default selection from the application data root; a workspace removed from one window stays registered until explicitly removed',
     parameters: { type: 'object', properties: {} },
   },
   'workspace.default.set': {
@@ -199,6 +261,14 @@ export const METHODS = Object.freeze({
         directory: { type: 'string', description: 'the workspace to make default; blank means no workspace is the default' },
         name: { type: 'string', description: 'the label to show for it; absent keeps the last segment of the directory' },
       },
+      required: ['directory'],
+    },
+  },
+  'workspace.remove': {
+    description: 'Remove a workspace from the durable roster without changing its directory or session records; the default workspace must be cleared first',
+    parameters: {
+      type: 'object',
+      properties: { directory: { type: 'string', description: 'the registered workspace directory to remove' } },
       required: ['directory'],
     },
   },
@@ -268,6 +338,38 @@ export const METHODS = Object.freeze({
       required: ['json', 'version'],
     },
   },
+  // Delegation grants persist outside session preferences and are available only through trusted local clients.
+  'agent-control.list': {
+    description: 'Read the local Agent Control grants and the version needed for a conflict-checked create or revoke operation',
+    parameters: { type: 'object', properties: {} },
+  },
+  'agent-control.create': {
+    description: 'Create a project-bound Agent Control grant after the trusted UI has separately confirmed any full-access and unrestricted-network ceiling',
+    parameters: { type: 'object', properties: {
+      version: { type: 'string' },
+      grantName: { type: 'string' },
+      projectRoot: { type: 'string' },
+      defaultPermissionProfile: { type: 'string' },
+      maxPermissionProfile: { type: 'string' },
+      defaultNetwork: { type: 'string' },
+      maxNetwork: { type: 'string' },
+      defaultPolicy: { type: 'string' },
+      allowedPolicyAsk: { type: 'boolean' },
+      allowedPolicyAuto: { type: 'boolean' },
+      allowedPolicyNever: { type: 'boolean' },
+      allowOperator: { type: 'boolean' },
+      confirmFullAccess: { type: 'boolean' },
+      confirmUnrestrictedNetwork: { type: 'boolean' },
+      expiresAt: { type: 'string' },
+    }, required: ['version', 'grantName', 'projectRoot', 'defaultPermissionProfile', 'maxPermissionProfile', 'defaultNetwork', 'maxNetwork', 'defaultPolicy', 'allowOperator', 'confirmFullAccess', 'confirmUnrestrictedNetwork', 'expiresAt'] },
+  },
+  'agent-control.revoke': {
+    description: 'Revoke a persisted Agent Control grant using the version returned by agent-control.list',
+    parameters: { type: 'object', properties: {
+      grantId: { type: 'string' },
+      version: { type: 'string' },
+    }, required: ['grantId', 'version'] },
+  },
   // 客户端只能读取配置白名单中的字段，不能请求文件路径或其他配置内容。
   'config.get': {
     description: 'Read the configuration this interface may show: the host builds the answer from the whitelisted fields it owns, and those values, the layer writing each one and the version of every writable settings file come from one read, so no path can be asked for and no credential ever comes from configuration (D13, D60)',
@@ -307,6 +409,21 @@ export const METHODS = Object.freeze({
       type: 'object',
       properties: { sessionId: SESSION_ID, mode: { type: 'string', description: "'ask', 'auto', 'never', or 'default' to drop this session's override" } },
       required: ['sessionId', 'mode'],
+    },
+  },
+  // Permission 选择由 TUI/Desktop 的显式用户操作发起；MCP Server 不提供对应工具。
+  'permission.set': {
+    description: 'Change the OS resource permission for this session after trusted UI confirmation; the session is rebuilt before another run starts',
+    parameters: {
+      type: 'object',
+      properties: {
+        sessionId: SESSION_ID,
+        permissionProfile: { type: 'string', description: 'read-only, workspace-write, or full-access' },
+        permissionNetwork: { type: 'string', description: 'policy, unrestricted, or disabled' },
+        confirmFullAccess: { type: 'boolean', description: 'true only after the UI has shown and received confirmation for full-access' },
+        confirmNetwork: { type: 'boolean', description: 'true only after the UI has shown and received confirmation for unrestricted network access' },
+      },
+      required: ['sessionId', 'permissionProfile'],
     },
   },
   'mode.set': {

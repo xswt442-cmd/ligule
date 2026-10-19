@@ -6,6 +6,7 @@ import { render, type RenderOptions } from 'ink';
 import { createConnection } from '@ligule/core/host/connection.js';
 import { createMemoryConnectionPair } from '@ligule/core/host/memory.js';
 import { serveHost } from '@ligule/core/host/host.js';
+import { createInteractivePermissionContext } from '@ligule/core/capability/permission-capabilities.js';
 import { App } from './app.js';
 import type { TuiClient } from './app.js';
 import type { Locale } from '@ligule/core/kernel/locale.js';
@@ -35,8 +36,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export async function runTui({ config, provider, policy, logger, modeName, modePaths, extensions, locale = 'zh', stdout = process.stdout, stdin = process.stdin, stderr = process.stderr, editor = process.env.VISUAL || process.env.EDITOR, historyFile = historyPathOf(), inputFile = inputPathOf(), keyFile = keyPathOf() }: RunTuiOptions): Promise<void> {
   const pair = createMemoryConnectionPair();
+  const permission = await createInteractivePermissionContext();
   // 启动 TUI 前已确认 stdin 和 stdout 连接交互式终端，因此可以处理用户提问。
-  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy, logger, modeName, modePaths, extensions, interactive: true });
+  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy, logger, modeName, modePaths, extensions, interactive: true, permission, permissionControl: true });
   // 内存连接与此处创建的 Host 配对；`TuiClient` 定义协议方法在本进程中的响应结构。
   const client = createConnection(pair.client) as TuiClient;
   try {

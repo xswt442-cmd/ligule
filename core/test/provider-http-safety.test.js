@@ -21,6 +21,7 @@ function safeFailure(code) {
   return (error) => {
     assert.equal(error.code, code);
     assert.equal((String(error.detail) + String(error.cause) + error.stack).includes(SENTINEL), false);
+    assert.equal(JSON.stringify(error.diagnostics ?? {}).includes(SENTINEL), false);
     return true;
   };
 }
@@ -30,7 +31,15 @@ test('Provider HTTP failure does not expose an upstream response body', async ()
     response.writeHead(401);
     response.end(`invalid authorization: ${SENTINEL}`);
   }, async (url) => {
-    await assert.rejects(open(url, { method: 'POST' }, RETRY), safeFailure('provider_http_error'));
+    await assert.rejects(open(url, { method: 'POST' }, RETRY), (error) => {
+      safeFailure('provider_http_error')(error);
+      assert.deepEqual(error.diagnostics, {
+        category: 'authentication', status: 401, attempts: 1,
+        responseReceived: true, streamReceived: false, recoverable: false,
+      });
+      assert.equal(JSON.stringify(error.diagnostics).includes(url), false);
+      return true;
+    });
   });
 });
 
@@ -42,7 +51,15 @@ test('Malformed SSE JSON does not expose response text through details or causes
     const response = await open(url, { method: 'POST' }, RETRY);
     await assert.rejects(async () => {
       for await (const event of parseSse(response.body)) assert.fail(`unexpected event ${typeof event}`);
-    }, safeFailure('provider_stream_invalid'));
+    }, (error) => {
+      safeFailure('provider_stream_invalid')(error);
+      assert.equal(error.diagnostics.category, 'invalid_response');
+      assert.equal(error.diagnostics.attempts, 1);
+      assert.equal(error.diagnostics.responseReceived, true);
+      assert.equal(error.diagnostics.streamReceived, true);
+      assert.equal(error.diagnostics.recoverable, false);
+      return true;
+    });
   });
 });
 

@@ -1,6 +1,7 @@
 // 将会话记录投影为界面行。显示已落盘事件和当前流式片段。
 // 记录结构由 `core/src/session/session.ts` 定义；此模块只负责展示数据。
 // 卡片标题显示操作结果，正文显示面向用户的内容。
+import type { ProviderDiagnostic } from './status';
 
 export type ToolCall = { id: string; name: string; args?: Record<string, unknown> };
 
@@ -42,6 +43,7 @@ export type Record_ = {
   // 完整结束的轮次可作为会话分支点。
   status?: string;
   code?: string;
+  diagnostics?: ProviderDiagnostic;
   iterations?: number;
   modelCalls?: number;
   // `session.read` 返回的轮次参数快照；记录中没有该事件时不显示对应数据。
@@ -68,6 +70,7 @@ export type Row = {
   // 实际执行的能力名称；MCP 调用显示 `mcp:<服务器>/<工具>`。
   tool?: string;
   code?: string;
+  diagnostics?: ProviderDiagnostic;
   callId?: string;
   // 卡片标题下方显示目标对象和操作摘要。
   summary?: string;
@@ -262,7 +265,9 @@ function projected(record: Record_, options: { startedAt?: number; now?: number 
   if (record.kind === 'turn') {
     const states: Record<string, string> = { completed: '本轮已完成', cancelled: '本轮已取消', failed: '本轮失败', interrupted: '本轮意外中断' };
     const status = record.status ?? '';
-    return states[status] === undefined ? [] : [{ id: nextId(), kind: 'round', status, code: record.code, text: states[status] }];
+    return states[status] === undefined ? [] : [{
+      id: nextId(), kind: 'round', status, code: record.code, diagnostics: record.diagnostics, text: states[status],
+    }];
   }
   if (record.kind === 'assistant') {
     const rows: Row[] = record.text === '' || record.text === undefined

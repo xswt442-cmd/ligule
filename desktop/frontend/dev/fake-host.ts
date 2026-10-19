@@ -203,6 +203,8 @@ let status = {
   ],
   usage: { window: 200_000, threshold: 160_000, retained: 32_000, estimated: 41_512, factor: 0.48, reported: { seq: 6, input: 8351, output: 126 }, measurement: 'request-v1' },
 };
+let preferences: Record<string, unknown> = {};
+let preferencesVersion = 1;
 
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -455,6 +457,21 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
           rules: policyRules,
           rulesSource: RULES_SOURCE,
         });
+      case 'prefs.read':
+        return reply({ version: `dev-${preferencesVersion}`, settings: preferences });
+      case 'prefs.write': {
+        if (params.version !== `dev-${preferencesVersion}`) return fail('prefs_version_stale', '开发设置已变化，请重新读取后再保存');
+        if (typeof params.json !== 'string') return fail('prefs_json_invalid', '设置内容必须是 JSON 对象');
+        let parsed: unknown;
+        try { parsed = JSON.parse(params.json); }
+        catch { return fail('prefs_json_invalid', '设置内容必须是 JSON 对象'); }
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+          return fail('prefs_json_invalid', '设置内容必须是 JSON 对象');
+        }
+        preferences = parsed as Record<string, unknown>;
+        preferencesVersion += 1;
+        return reply({ version: `dev-${preferencesVersion}` });
+      }
       case 'config.set': {
         // 演的是真宿主那四件事：字段与层的白名单、版本比对、值形状、写完谁什么时候用上（第 90、91、93 步）。
         const field = String(params.field);

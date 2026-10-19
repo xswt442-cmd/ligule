@@ -1,41 +1,40 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { DropdownMenu, Popover } from 'radix-ui';
-import { Virtuoso, type Components, type ContextProp, type FlatIndexLocationWithAlign, type ItemProps, type VirtuosoHandle } from 'react-virtuoso';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { DropdownMenu } from 'radix-ui';
+import { type FlatIndexLocationWithAlign, type VirtuosoHandle } from 'react-virtuoso';
 import { code, createClient, type Client, type Transport } from './protocol';
 import { ApprovalCard, type Ask } from './components/ApprovalCard';
 import { QuestionCard, type QuestionAsk, type QuestionDrafts } from './components/QuestionCard';
 import { Icon } from './components/Icon';
 import { SettingsDialog } from './components/Settings';
+import { BranchPanel } from './components/BranchPanel';
 import { HoldSheet } from './components/HoldSheet';
 import { QuitSheet } from './components/QuitSheet';
 import { holdReasons, report as reportEdit, type EditGate } from './edit-gate';
 import { blockedSessions, type QuitInput, type QuitRow } from './quit';
-import { RowView } from './components/RowView';
-import { SessionRail, type SearchHit } from './components/SessionRail';
+import { SessionRail } from './components/SessionRail';
+import type { SearchHit } from './components/rail/types';
 import { createCallOf, type WorkspaceRoster } from './rail';
-import { SessionMenu } from './components/SessionMenu';
 import { SessionActions } from './components/SessionActions';
 import { DiagnosticsPanel } from './components/DiagnosticsPanel';
-import { ModelPicker } from './components/ModelPicker';
-import { WorkspacePicker } from './components/WorkspacePicker';
-import { PolicyPicker } from './components/PolicyPicker';
 import { ExportPanel } from './components/ExportPanel';
 import { HelpPanel } from './components/HelpPanel';
 import { UsageMeter } from './components/UsageMeter';
+import { TranscriptViewport, FIRST_INDEX, streamAnchor } from './components/TranscriptViewport';
 import { Palette, type Command } from './components/Palette';
 import { keepEscape } from './components/ui';
 import { CURRENT, actionOf, formatKeys, isCapturing, isComposing, loadBindings, specOf } from './hotkeys';
 import { insertMention, mentionToken } from './mentions';
-import type { Verbosity } from './components/types';
+import type { ModelSelection } from './model-catalog';
 import { createSlotRegistry, SLOTS, type Panel } from './slots';
 import { capabilityOf, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn, type Record_, type Row } from './rows';
 import type { Status } from './status';
 import { loadSettings, mergeQueueIntoDraft, readSettings, saveSettings, type Settings } from './settings';
-import { LocaleProvider, localeOf, useText } from './locale';
+import { LocaleProvider, localeOf } from './locale';
 import { notificationOf, notificationTarget, type NotificationKind, type NotificationTarget } from './notifications';
 import { SessionStreamBuffer } from './session-stream';
-
-type Branch = { seq: number; id: string; task: string };
+import { Composer } from './components/Composer';
+import type { MentionState } from './mentions';
+import type { PermissionConfirmations, PermissionTarget } from './permission-control';
 
 // 流式输出显示在已落盘记录之后，并保持固定 ID，避免每个增量都重建行并丢失展开状态。
 const LIVE_REASONING: Row = { id: -2, kind: 'reasoning', text: '' };
@@ -43,42 +42,6 @@ const LIVE_ANSWER: Row = { id: -1, kind: 'answer', text: '' };
 
 // 每次向前读取一页事件；打开会话时先取最近页，再按游标读取更早记录。
 const RENDER_WINDOW = 400;
-// 虚拟列表中首条记录的全局索引。前插一页后同步减少已插入行数，保持当前阅读位置不变。
-// 初始值留有足够余量，避免多次前插后索引变成负数。
-const FIRST_INDEX = 100_000;
-
-type StreamContext = { hasMore: boolean; loading: boolean; showEarlier: () => Promise<void> };
-
-// 为记录行提供稳定身份；界面上下文只作为组件属性传递，不写入 DOM。
-function StreamItem({ children, style, item: _item, context: _context, ...rest }: ItemProps<Row> & ContextProp<StreamContext>) {
-  return <div {...rest} style={style} className="stream-row">{children}</div>;
-}
-
-function StreamHeader({ context }: ContextProp<StreamContext>) {
-  const t = useText();
-  return <div className="stream-band">
-    {context?.hasMore === true && <button type="button" className="earlier" disabled={context.loading} onClick={() => void context.showEarlier()}>
-      {context.loading ? t('正在加载…', 'Loading…') : t('加载更早记录', 'Load earlier records')}
-    </button>}
-  </div>;
-}
-
-const STREAM_COMPONENTS: Components<Row, StreamContext> = { Item: StreamItem, Header: StreamHeader };
-
-// 保存当前可见行的位置，并将全局索引转换为当前列表下标。
-function streamAnchor(rows: Row[], firstIndex: number): { id: number; offset: number } | null {
-  const scroller = document.querySelector<HTMLElement>('[data-virtuoso-scroller="true"]');
-  if (scroller === null) return null;
-  const bounds = scroller.getBoundingClientRect();
-  for (const item of scroller.querySelectorAll<HTMLElement>('[data-item-index]')) {
-    const rect = item.getBoundingClientRect();
-    if (rect.bottom <= bounds.top || rect.top >= bounds.bottom) continue;
-    const row = rows[Number(item.dataset.itemIndex) - firstIndex];
-    if (row !== undefined) return { id: row.id, offset: rect.top - bounds.top };
-  }
-  return null;
-}
-
 type PanelProps = {
   client: Client;
   status: Status | null;
@@ -115,9 +78,8 @@ type PanelProps = {
 
 // 表示当前没有文本组合输入；有效光标位置不会是 -1。
 const NO_TOKEN = { start: -1, text: '' };
-// 保持视口配置对象稳定，避免短记录重复测量和重排。
-const VIEWPORT_INCREASE = { top: 240, bottom: 600 };
-
+const DEFAULT_NEW_SESSION_PERMISSION: PermissionTarget = { profile: 'read-only', network: 'policy' };
+const NO_PERMISSION_CONFIRMATIONS: PermissionConfirmations = { fullAccess: false, network: false };
 // 已打开的会话。右侧面板显示当前会话状态，不重复提供会话浮层已有的控制项。
 /**
  * 返回持久工作区登记中的默认目录。未设置默认目录或读取失败时返回 undefined。
@@ -177,72 +139,6 @@ const railPanels: Panel<PanelProps>[] = [
   },
 ];
 
-// 派生会话通过类型化槽位显示，不将支线逻辑写进主转录组件。
-// 支线编号来自父记录中的 subagent 结果；读取仍使用现有会话记录接口。
-function branchOf(record: Record_): Branch | null {
-  if (record.kind !== 'tool' || record.tool !== 'subagent') return null;
-  const content = record.result?.content as { sessionId?: unknown } | undefined;
-  if (typeof content?.sessionId !== 'string' || content.sessionId === '') return null;
-  return { seq: record.seq ?? 0, id: content.sessionId, task: String(record.args?.task ?? '') };
-}
-
-function BranchPanel({ client, sessionId, verbosity }: { client: Client; sessionId: string | null; verbosity: Verbosity }) {
-  const t = useText();
-  const [branches, setBranches] = useState<Branch[]>([]);
-  const [shown, setShown] = useState<{ id: string; rows: Row[] } | null>(null);
-  const [note, setNote] = useState<{ kind: 'parent' | 'branch'; code: string } | null>(null);
-
-  useEffect(() => {
-    setBranches([]);
-    setShown(null);
-    setNote(null);
-    if (sessionId === null) return;
-    // 每次打开面板时重新读取父记录，因为派生结果只在任务结束后写入。
-    void (async () => {
-      try {
-        const { events } = await client.call('session.read', { sessionId, fullResults: true }) as { events: Record_[] };
-        setBranches(events.map(branchOf).filter((item): item is Branch => item !== null));
-      } catch (error) {
-        setNote({ kind: 'parent', code: code(error) });
-      }
-    })();
-  }, [client, sessionId]);
-
-  const open = useCallback(async (id: string) => {
-    setNote(null);
-    try {
-      const { events } = await client.call('session.read', { sessionId: id, fullResults: true }) as { events: Record_[] };
-      setShown({ id, rows: events.flatMap((record) => projectRecord(record)) });
-    } catch (error) {
-      setNote({ kind: 'branch', code: code(error) });
-    }
-  }, [client]);
-
-  if (branches.length === 0) {
-    return <p className="stub">{note === null ? t('当前会话没有子任务。', 'This conversation has no subtasks.') : t(
-      `${note.kind === 'parent' ? '无法读取会话记录' : '无法读取子任务'}：${note.code}`,
-      `Could not load ${note.kind === 'parent' ? 'conversation history' : 'subtask'}: ${note.code}`,
-    )}</p>;
-  }
-  return <>
-    <h3>{t(`${branches.length} 个子任务`, `${branches.length} subtasks`)}</h3>
-    <ul>{branches.map((branch) => <li key={branch.id}>
-      <button type="button" onClick={() => void open(branch.id)}>{t(`记录 ${branch.seq}`, `Event ${branch.seq}`)}</button>
-      <span className="muted"> {branch.task === '' ? t('（无任务说明）', '(no task description)') : branch.task.slice(0, 60)}</span>
-    </li>)}</ul>
-    {shown !== null && <>
-      <h3>{t(`子任务 ${shown.id}`, `Subtask ${shown.id}`)}</h3>
-      <div className="conversation">
-        {shown.rows.filter((row) => shownIn(verbosity, row)).map((row) => <RowView key={row.id} row={row} verbosity={verbosity} />)}
-      </div>
-    </>}
-    {note !== null && <p className="stub">{t(
-      `${note.kind === 'parent' ? '无法读取会话记录' : '无法读取子任务'}：${note.code}`,
-      `Could not load ${note.kind === 'parent' ? 'conversation history' : 'subtask'}: ${note.code}`,
-    )}</p>}
-  </>;
-}
-
 export function App({ transport }: { transport: Transport }) {
   const client = useMemo(() => createClient(transport), [transport]);
   const registry = useMemo(() => {
@@ -295,10 +191,15 @@ export function App({ transport }: { transport: Transport }) {
   // 使用 ref 保存该控制标记，不额外触发界面渲染。
   const allowSend = useRef(new Set<string>());
   const [status, setStatus] = useState<Status | null>(null);
+  const [newSessionSettingsRevision, setNewSessionSettingsRevision] = useState(0);
+  const [newSessionMode, setNewSessionMode] = useState<string | null>(null);
+  const [newSessionPolicy, setNewSessionPolicy] = useState<'ask' | 'auto' | 'never' | null>(null);
+  const [newSessionPermission, setNewSessionPermission] = useState<PermissionTarget>(DEFAULT_NEW_SESSION_PERMISSION);
+  const [newSessionPermissionConfirmations, setNewSessionPermissionConfirmations] = useState<PermissionConfirmations>(NO_PERMISSION_CONFIRMATIONS);
   const [draft, setDraft] = useState('');
   const [caret, setCaret] = useState(0);
   // `@` 路径候选由 Host 提供，前端不扫描项目目录。
-  const [mention, setMention] = useState<null | { start: number; text: string; paths: string[]; chosen: number; stopped: string; root: string; failed?: string }>(null);
+  const [mention, setMention] = useState<MentionState | null>(null);
   // 按 Esc 暂时关闭当前候选；输入文本改变后重新查询相应候选。
   const [hiddenMention, setHiddenMention] = useState('');
   const mentionWanted = useRef(NO_TOKEN);
@@ -716,7 +617,7 @@ export function App({ transport }: { transport: Transport }) {
       }
       // Host 发出的交互请求分为审批和用户提问。
       if (message.method !== 'approval.request') return;
-      const params = message.params as { sessionId?: string; projectRoot?: string; tool?: string; command?: string; args?: Record<string, unknown>; reason?: string; shell?: string; executable?: string; policy?: string; policySource?: string; policyForced?: boolean };
+      const params = message.params as { sessionId?: string; projectRoot?: string; tool?: string; command?: string; args?: Record<string, unknown>; reason?: string; shell?: string; executable?: string; policy?: string; policySource?: string; policyForced?: boolean; scriptBinding?: { path?: string; sha256?: string; interpreter?: string; workspaceRoot?: string; permission?: { profile?: string; network?: string; capabilities?: Record<string, string> } } };
       // 请求属于发起它的会话；即使会话在后台等待，也必须显示并允许答复。
       const asked = params?.sessionId;
       if (typeof asked !== 'string' || asked === '') return;
@@ -743,8 +644,8 @@ export function App({ transport }: { transport: Transport }) {
         policy: params.policy ?? '',
         policySource: params.policySource ?? '',
         policyForced: params.policyForced === true,
-        content,
-        english: { change: englishChange.summary, content: changeBody(englishChange, args, 'en') },
+        content: params.scriptBinding === undefined ? content : `${content}\n\n${t('脚本审批绑定', 'Script approval binding')}:\n${t('路径', 'Path')}: ${params.scriptBinding.path ?? ''}\nSHA-256: ${params.scriptBinding.sha256 ?? ''}\n${t('解释器', 'Interpreter')}: ${params.scriptBinding.interpreter ?? ''}\n${t('工作区', 'Workspace')}: ${params.scriptBinding.workspaceRoot ?? ''}\n${t('权限', 'Permission')}: ${params.scriptBinding.permission?.profile ?? ''} / ${params.scriptBinding.permission?.network ?? ''}\n${JSON.stringify(params.scriptBinding.permission?.capabilities ?? {})}`,
+        english: { change: englishChange.summary, content: params.scriptBinding === undefined ? changeBody(englishChange, args, 'en') : `${changeBody(englishChange, args, 'en')}\n\nScript approval binding:\nPath: ${params.scriptBinding.path ?? ''}\nSHA-256: ${params.scriptBinding.sha256 ?? ''}\nInterpreter: ${params.scriptBinding.interpreter ?? ''}\nWorkspace: ${params.scriptBinding.workspaceRoot ?? ''}\nPermission: ${params.scriptBinding.permission?.profile ?? ''} / ${params.scriptBinding.permission?.network ?? ''}\n${JSON.stringify(params.scriptBinding.permission?.capabilities ?? {})}` },
       }]);
     });
 
@@ -915,6 +816,8 @@ export function App({ transport }: { transport: Transport }) {
 
   const newSession = useCallback(async (root?: string) => {
     const request = ++openRequest.current;
+    setNewSessionSettingsRevision((revision) => revision + 1);
+    setSessionMenuOpen(false);
     prependAnchor.current = null;
     setOlderLoading(false);
     setInitialIndex({ index: 'LAST', align: 'end' });
@@ -943,6 +846,10 @@ export function App({ transport }: { transport: Transport }) {
       await prefsSettled.current;
       if (openRequest.current !== request) return false;
       newParameters.current = params;
+      setNewSessionMode(null);
+      setNewSessionPolicy(null);
+      setNewSessionPermission(DEFAULT_NEW_SESSION_PERMISSION);
+      setNewSessionPermissionConfirmations(NO_PERMISSION_CONFIRMATIONS);
       opening.current = null;
       active.current = null;
       setMobileSidebar(false);
@@ -1143,7 +1050,20 @@ export function App({ transport }: { transport: Transport }) {
     creating.current = true;
     const request = openRequest.current;
     try {
-      const created = await client.call('session.create', newParameters.current, 15_000) as { sessionId: string };
+      const hasPermissionOverride = newSessionPermission.profile !== DEFAULT_NEW_SESSION_PERMISSION.profile
+        || newSessionPermission.network !== DEFAULT_NEW_SESSION_PERMISSION.network;
+      const createParameters = {
+        ...newParameters.current,
+        ...(newSessionMode === null ? {} : { initialMode: newSessionMode }),
+        ...(newSessionPolicy === null ? {} : { initialPolicy: newSessionPolicy }),
+        ...(hasPermissionOverride ? {
+          initialPermissionProfile: newSessionPermission.profile,
+          initialPermissionNetwork: newSessionPermission.network,
+          confirmInitialFullAccess: newSessionPermissionConfirmations.fullAccess,
+          confirmInitialNetwork: newSessionPermissionConfirmations.network,
+        } : {}),
+      };
+      const created = await client.call('session.create', createParameters, 15_000) as { sessionId: string };
       if (openRequest.current !== request) return;
       const selection = settings.newSelections[projectRoot];
       if (selection !== undefined) await client.call('model.select', { sessionId: created.sessionId, ...selection }, 15_000);
@@ -1169,7 +1089,7 @@ export function App({ transport }: { transport: Transport }) {
       creating.current = false;
       setStarting(false);
     }
-  }, [client, draft, inputOwner, openSession, projectRoot, reading, sessionId, settings.newSelections, settingsReady, submit, t]);
+  }, [client, draft, inputOwner, newSessionMode, newSessionPermission, newSessionPermissionConfirmations, newSessionPolicy, openSession, projectRoot, reading, sessionId, settings.newSelections, settingsReady, submit, t]);
 
   // `own` 指定取消目标会话；默认取消当前前台会话。
   const cancel = useCallback(async (own = sessionId) => {
@@ -1264,10 +1184,14 @@ export function App({ transport }: { transport: Transport }) {
   }, [caret, draft, mention]);
 
   // 通过 `mode.set` 切换模式；无效清单返回稳定错误码，不静默回退到默认模式。
-  const setMode = useCallback(async (name: string) => {
-    if (sessionId === null || name === '') return;
+  const setMode = useCallback(async (name: string | null) => {
+    if (sessionId === null) {
+      setNewSessionMode(name === '' || name === 'default' ? null : name);
+      return;
+    }
+    if (name === '') return;
     try {
-      const result = await client.call('mode.set', { sessionId, name }) as { mode: string; pending: string | null };
+      const result = await client.call('mode.set', { sessionId, name: name ?? 'default' }) as { mode: string; pending: string | null };
       setRows((current) => [...current, metaRow('meta', result.pending === null
         ? `模式已切换为 ${result.mode}。`
         : `本轮结束后将切换为 ${result.pending} 模式。`, result.pending === null
@@ -1281,7 +1205,10 @@ export function App({ transport }: { transport: Transport }) {
 
   // 通过 `policy.set` 修改当前会话的策略；传入 `null` 时恢复配置默认值。
   const setPolicy = useCallback(async (mode: 'ask' | 'auto' | 'never' | null) => {
-    if (sessionId === null) return;
+    if (sessionId === null) {
+      setNewSessionPolicy(mode);
+      return;
+    }
     try {
       const result = await client.call('policy.set', { sessionId, mode: mode ?? 'default' }, 15_000) as { policy: string; policySource: string };
       if (active.current === sessionId) setRows((current) => [...current, metaRow('meta', mode === null
@@ -1521,6 +1448,60 @@ export function App({ transport }: { transport: Transport }) {
 
   const currentQueries = queries.filter((query) => query.sessionId === sessionId);
   const currentAsks = asks.filter((ask) => ask.sessionId === sessionId);
+  const handleDraftKeyDown = useCallback((event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if (isComposing(event.nativeEvent)) return;
+    if (mention !== null) {
+      const candidate = actionOf(event, '候选清单');
+      if (candidate === 'hide-candidate') {
+        setHiddenMention(mention.text);
+        setMention(null);
+        return;
+      }
+      if (mention.stopped === 'pending' && (candidate === 'pick-candidate' || candidate === 'complete-candidate')) {
+        event.preventDefault();
+        return;
+      }
+      if (candidate !== null && mention.paths.length > 0) {
+        event.preventDefault();
+        if (candidate === 'pick-candidate' || candidate === 'complete-candidate') {
+          pickMention(mention.paths[Math.min(mention.chosen, mention.paths.length - 1)]);
+          return;
+        }
+        const step = candidate === 'candidate-older' ? -1 : 1;
+        setMention({ ...mention, chosen: (mention.chosen + step + mention.paths.length) % mention.paths.length });
+        return;
+      }
+    }
+    const typed = actionOf(event, '输入坞');
+    if (typed === 'send' || typed === 'send-alt') {
+      event.preventDefault();
+      void send();
+      return;
+    }
+    if (typed !== 'history-older' && typed !== 'history-newer') return;
+    if (draft !== '' && walk < 0) return;
+    if (history.length === 0) return;
+    event.preventDefault();
+    const next = typed === 'history-older' ? Math.min(walk + 1, history.length - 1) : walk - 1;
+    setWalk(next);
+    setDraft(next < 0 ? '' : history[Math.max(next, 0)] ?? '');
+  }, [draft, history, mention, pickMention, send, walk]);
+  const toggleQueue = useCallback(() => {
+    if (sessionId === null) return;
+    if (queue.paused) allowSend.current.add(sessionId);
+    patchQueue(sessionId, (current) => ({ ...current, paused: !current.paused }));
+  }, [patchQueue, queue.paused, sessionId]);
+  const selectWorkspace = useCallback(async (root: string) => {
+    const text = draft;
+    if (!await newSession(root)) throw new Error('workspace_selection_cancelled');
+    setDraft(text);
+    patch({ projects: [...new Set([...settings.projects, root])], hiddenProjects: settings.hiddenProjects.filter(item => item !== root) });
+  }, [draft, newSession, patch, settings.hiddenProjects, settings.projects]);
+  const selectModel = useCallback(async (selection: ModelSelection) => {
+    if (sessionId === null) { patch({ newSelections: { ...settings.newSelections, [projectRoot]: selection } }); return; }
+    await client.call('model.select', { sessionId, ...selection }, 15_000);
+    await refreshStatus(sessionId);
+  }, [client, patch, projectRoot, refreshStatus, sessionId, settings.newSelections]);
   return <LocaleProvider language={settings.language}><div className="frame" data-collapsed={collapsed ? 'true' : undefined} data-mobile-sidebar={narrow && mobileSidebar ? 'true' : undefined} data-dock={settings.dock}>
     <aside className="sidebar">
       <div className="brand"><img src="/icon.png" alt="" width="23" height="23" /><span>ligule</span><button type="button" className="icon-button" aria-label={t('收起侧栏', 'Hide sidebar')} onClick={() => patch({ collapsed: true })}><Icon name="sidebar" /></button></div>
@@ -1567,52 +1548,26 @@ export function App({ transport }: { transport: Transport }) {
           onTasks={() => setPanel(menuPanels.find((item) => item.id === 'panel.branch') ?? null)} onRefresh={() => void readBack()} onCompact={() => void compact()} />}
       </header>
 
-      {/* 转录只挂视口里那几十行：读回来的那一页全在数据里，画出来的由视口决定（U48、方案 6.2）。
-          记录里一行都没有时不挂视口：这一版的视口没有空状态那个槽位，那一句写在视口外面，否则人面对的是一片空白。
-          展示档筛掉全部那一种不算空记录，视口照旧挂着，「显示更早」那一格才留在画面上（D90）。 */}
-      <div className="conversation" aria-live="polite">
-        {rows.length === 0 ? <div className="stream-band">{reading
-          ? <p className="placeholder">{t('正在打开会话…', 'Opening conversation…')}</p>
-          : <div className="welcome"><img src="/icon.png" alt="" width="42" height="42" /><h1>{t('从一个想法开始', 'Start with an idea')}</h1><p>{t('提问、编写代码，或一起完成项目。', 'Ask a question, write code, or work on a project together.')}</p></div>}</div> : <Virtuoso
-          key={`stream-${stamp}`}
-          ref={list}
-          style={{ height: '100%' }}
-          data={visible}
-          firstItemIndex={firstIndex}
-          initialTopMostItemIndex={initialIndex}
-          computeItemKey={(_index, row) => row.id}
-          itemContent={(_index, row) => <RowView
-            row={row}
-            verbosity={verbosity}
-            flash={row.seq !== undefined && row.seq === flash}
-            branch={row.kind === 'round' ? (at) => void branchFrom(at) : undefined}
-            onModels={row.kind === 'round' ? openModelSettings : undefined}
-          />}
-          // 用户向上滚动、加载旧页或定位时暂停自动跟随，保留阅读位置。
-          followOutput={!olderLoading && pinned && wanted === null && flash === null ? 'auto' : false}
-          atBottomThreshold={40}
-          onWheelCapture={(event) => { if (event.deltaY !== 0) readerScrolling.current = true; }}
-          onPointerDownCapture={() => { readerScrolling.current = true; }}
-          onTouchStartCapture={() => { readerScrolling.current = true; }}
-          onKeyDownCapture={(event) => {
-            if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) readerScrolling.current = true;
-          }}
-          onScroll={(event) => {
-            if (!readerScrolling.current) return;
-            const scroller = event.currentTarget;
-            const atBottom = scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= 40;
-            setPinned((current) => current === atBottom ? current : atBottom);
-          }}
-          isScrolling={(scrolling) => { if (!scrolling) readerScrolling.current = false; }}
-          rangeChanged={onRangeChanged}
-          increaseViewportBy={VIEWPORT_INCREASE}
-          context={streamContext}
-          components={STREAM_COMPONENTS}
-        />}
-        {/* 离开末行时浮出来的那一枚：挂在转录这一格外面要占一段高度，出现与收掉时转录跟着换高，
-            所以画在转录里面、绝对定位。 */}
-        {!pinned && <button className="jump-latest" type="button" onClick={jumpToLatest}>{t('回到最新', 'Jump to latest')}</button>}
-      </div>
+      <TranscriptViewport
+        rows={visible}
+        hasRecords={rows.length > 0}
+        reading={reading}
+        verbosity={verbosity}
+        flash={flash}
+        onBranch={(at) => void branchFrom(at)}
+        onModels={openModelSettings}
+        pinned={pinned}
+        setPinned={setPinned}
+        follow={!olderLoading && pinned && wanted === null && flash === null}
+        initialIndex={initialIndex}
+        list={list}
+        firstIndex={firstIndex}
+        stamp={stamp}
+        streamContext={streamContext}
+        readerScrolling={readerScrolling}
+        onRangeChanged={onRangeChanged}
+        onJumpToLatest={jumpToLatest}
+      />
 
       {currentQueries.length > 0 && <QuestionCard
         key={currentQueries[0].id}
@@ -1649,152 +1604,52 @@ export function App({ transport }: { transport: Transport }) {
         <button type="button" className="icon-button" aria-label={t('关闭提示', 'Dismiss')} onClick={() => setNotificationProblem(null)}><Icon name="close" size={14} /></button>
       </div>}
 
-      <footer className="composer">
-        {sessionId === null && <WorkspacePicker client={client} directory={projectRoot} revision={sessionsRevision}
-          disabled={closing || reading || starting || !settingsReady}
-          onSelect={async (root) => {
-            const text = draft;
-            if (!await newSession(root)) throw new Error('workspace_selection_cancelled');
-            setDraft(text);
-            patch({ projects: [...new Set([...settings.projects, root])], hiddenProjects: settings.hiddenProjects.filter(item => item !== root) });
-          }} />}
-        {queue.items.length === 0 ? null : (
-          <div className="queue">
-            <div className="queue-head">
-              <span className="mini">{t(`${queue.items.length} 条待发送`, `${queue.items.length} queued`)} · {queue.paused
-                ? t('已暂停；本轮剩余消息不会自动发送', 'Paused; remaining messages will not send automatically')
-                : running
-                  ? t('本轮结束后按顺序发送', 'Send in order after this turn')
-                  : t('会话空闲；收回消息后再发送', 'Conversation is idle; recover messages to send them')} </span>
-              <button type="button" className="mini chip" title={queue.paused ? t('继续发送队列', 'Resume queue') : t('暂停发送队列', 'Pause queue')}
-                onClick={() => {
-                  if (sessionId === null) return;
-                  // 只有用户明确继续或该会话轮次结束后，才发送队列中的下一条。
-                  if (queue.paused) allowSend.current.add(sessionId);
-                  patchQueue(sessionId, (current) => ({ ...current, paused: !current.paused }));
-                }}>
-                {queue.paused ? t('继续发送', 'Resume') : t('暂停发送', 'Pause')}
-              </button>
-              <button type="button" className="mini chip" disabled={draft !== ''}
-                title={draft === '' ? t('将队列消息移回草稿', 'Move queued messages back to the draft') : t('请先发送或排入当前草稿', 'Send or queue the current draft first')}
-                onClick={() => recoverQueueItem(0, true)}>{t('全部收回', 'Recover all')}</button>
-            </div>
-            {queue.items.map((item, index) => (
-              <div className="queue-item" key={`${index}:${item}`}>
-                <span className="queue-text">{item}</span>
-                <button type="button" className="mini chip" disabled={draft !== ''}
-                  title={draft === '' ? t('将此消息移回草稿', 'Move this message back to the draft') : t('请先发送或排入当前草稿', 'Send or queue the current draft first')}
-                  onClick={() => recoverQueueItem(index, false)}>{t('收回', 'Recover')}</button>
-              </div>
-            ))}
-          </div>
-        )}
-        {mention === null ? null : (
-          <div className="queue" role="listbox" aria-label={t('项目文件', 'Project files')}>
-            <span className="mini">{t('项目', 'Project')} {mention.root === '' ? t('无法读取目录', 'directory unavailable') : mention.root} · {t(`文件名包含“${mention.text}”`, `File names containing “${mention.text}”`)}</span>
-            {mention.paths.length === 0 ? (
-              <span className="mini">{mention.stopped === 'error'
-                ? t(`无法列出项目文件：${mention.failed}`, `Could not list project files: ${mention.failed}`)
-                : mention.stopped === 'pending'
-                  ? t('正在列出项目文件…', 'Listing project files…')
-                  : mention.stopped === 'budget'
-                    ? t(`已查过的文件中没有“${mention.text}”匹配项；可以缩小搜索范围。`, `No match for “${mention.text}” in the files checked. Narrow the search.`)
-                    : t(`没有文件名包含“${mention.text}”的项目文件。`, `No project file name contains “${mention.text}”.`)}</span>
-            ) : mention.paths.map((path, index) => (
-              <div className="queue-item" key={path} role="option" aria-selected={index === mention.chosen}>
-                <span className="queue-text">{path}</span>
-                <button type="button" className="mini chip" onClick={() => pickMention(path)}>{t('插入', 'Insert')}</button>
-              </div>
-            ))}
-            {mention.paths.length > 0 && mention.stopped === 'budget'
-              && <span className="mini">{t('已达到搜索范围上限；请缩小搜索范围。', 'Search limit reached. Narrow the search.')}</span>}
-            {mention.paths.length > 0 && mention.stopped === 'unreadable'
-              && <span className="mini">{t('部分目录无法读取，结果可能不完整。', 'Some directories could not be read; results may be incomplete.')}</span>}
-            {mention.paths.length > 0 && <span className="mini">{t(
-              `${formatKeys(CURRENT['pick-candidate'])} 或 ${formatKeys(CURRENT['complete-candidate'])} 选择 · ${formatKeys(CURRENT['candidate-older'])}/${formatKeys(CURRENT['candidate-newer'])} 切换 · ${formatKeys(CURRENT['hide-candidate'])} 关闭`,
-              `${formatKeys(CURRENT['pick-candidate'])} or ${formatKeys(CURRENT['complete-candidate'])} to select · ${formatKeys(CURRENT['candidate-older'])}/${formatKeys(CURRENT['candidate-newer'])} to move · ${formatKeys(CURRENT['hide-candidate'])} to close`,
-            )}</span>}
-          </div>
-        )}
-        <textarea
-          className="composer-input"
-          ref={composerRef}
-          rows={2}
-          value={draft}
-          // 会话切换期间禁用输入，避免将文本保存到错误会话。
-          readOnly={closing || reading || starting || inputOwner !== sessionId || !settingsReady}
-          placeholder={t('描述任务，使用 @ 引用文件', 'Describe a task, use @ to reference a file')}
-          onChange={(event) => {
-            setDraft(event.target.value);
-            setCaret(event.target.selectionStart ?? event.target.value.length);
-            setWalk(-1);
-          }}
-          // 插入路径前再次验证光标位置和 `@` 查询文本，防止选择过期候选。
-          onSelect={(event) => setCaret(event.currentTarget.selectionStart ?? 0)}
-          onKeyDown={(event) => {
-            // 输入法组合期间的 Enter 和方向键交给输入法，不用于发送消息或浏览历史。
-            if (isComposing(event.nativeEvent)) return;
-            // 候选列表打开时，Enter 和 Tab 用于选择候选，不发送消息。
-            if (mention !== null) {
-              const candidate = actionOf(event, '候选清单');
-              if (candidate === 'hide-candidate') {
-                setHiddenMention(mention.text);
-                setMention(null);
-                return;
-              }
-              // 候选查询尚未完成时，Enter 和 Tab 不选择旧结果，也不发送消息。
-              if (mention.stopped === 'pending' && (candidate === 'pick-candidate' || candidate === 'complete-candidate')) {
-                event.preventDefault();
-                return;
-              }
-              // 只有存在候选时才拦截 Enter 和 Tab；没有候选时 Enter 仍发送消息。
-              if (candidate !== null && mention.paths.length > 0) {
-                event.preventDefault();
-                if (candidate === 'pick-candidate' || candidate === 'complete-candidate') {
-                  pickMention(mention.paths[Math.min(mention.chosen, mention.paths.length - 1)]);
-                  return;
-                }
-                const step = candidate === 'candidate-older' ? -1 : 1;
-                setMention({ ...mention, chosen: (mention.chosen + step + mention.paths.length) % mention.paths.length });
-                return;
-              }
-            }
-            const typed = actionOf(event, '输入坞');
-            if (typed === 'send' || typed === 'send-alt') {
-              event.preventDefault();
-              void send();
-              return;
-            }
-            // 仅在草稿为空或正在浏览历史时处理历史导航键；其他情况下保留光标移动行为。
-            if (typed !== 'history-older' && typed !== 'history-newer') return;
-            if (draft !== '' && walk < 0) return;
-            if (history.length === 0) return;
-            event.preventDefault();
-            const next = typed === 'history-older' ? Math.min(walk + 1, history.length - 1) : walk - 1;
-            setWalk(next);
-            setDraft(next < 0 ? '' : history[Math.max(next, 0)] ?? '');
-          }}
-        />
-        <div className="composer-bar">
-          <ModelPicker key={`${projectRoot}:${modelCatalogRevision}`} client={client} projectRoot={projectRoot}
-            disabled={closing || starting || reading || !settingsReady} pending={status?.pendingModel !== undefined && status.pendingModel !== null}
-            selection={status?.selectedModel ? { provider: status.pendingServiceId ?? status.serviceId, model: status.pendingModel ?? status.selectedModel } : settings.newSelections[projectRoot] ?? null}
-            onSelect={async (selection) => {
-              if (sessionId === null) { patch({ newSelections: { ...settings.newSelections, [projectRoot]: selection } }); return; }
-              await client.call('model.select', { sessionId, ...selection }, 15_000);
-              await refreshStatus(sessionId);
-            }} onManage={openModelSettings} />
-          <Popover.Root open={sessionMenuOpen} onOpenChange={setSessionMenuOpen}>
-            <Popover.Trigger asChild><button type="button" className="composer-choice" disabled={sessionId === null} title={t('工具模式', 'Tool mode')}><span>{status?.mode ?? t('工具模式', 'Tool mode')}</span><Icon name="fold" size={12} /></button></Popover.Trigger>
-            <SessionMenu status={status} onSetMode={(name) => void setMode(name)} />
-          </Popover.Root>
-          <PolicyPicker key={sessionId ?? '$new'} status={status} disabled={closing || reading || starting} onSelect={setPolicy} />
-          <span className="bar-spacer" />
-          {running && <button className="icon-button stop-button" type="button" title={t('停止本轮', 'Stop this turn')} aria-label={t('停止本轮', 'Stop this turn')} onClick={() => void cancel()}><Icon name="stop" size={15} /></button>}
-          <button className="send" type="button" title={running ? t('加入队列', 'Add to queue') : t('发送', 'Send')} aria-label={t('发送', 'Send')} disabled={closing || reading || starting || !settingsReady || draft.trim() === ''} onClick={() => void send()}><Icon name="send" size={19} /></button>
-        </div>
-      </footer>
-      <div className="composer-hint"><span>{formatKeys(CURRENT.send)} {t('发送', 'to send')} · {formatKeys(CURRENT.newline)} {t('换行', 'for a new line')}</span>{othersRunning > 0 && <span>{othersRunning} {t('个后台任务', 'background tasks')}</span>}</div>
+      <Composer
+        client={client}
+        sessionId={sessionId}
+        projectRoot={projectRoot}
+        status={status}
+        settings={settings}
+        settingsReady={settingsReady}
+        closing={closing}
+        reading={reading}
+        starting={starting}
+        running={running}
+        inputOwner={inputOwner}
+        draft={draft}
+        composerRef={composerRef}
+        queue={queue}
+        mention={mention}
+        sessionMenuOpen={sessionMenuOpen}
+        initialMode={newSessionMode}
+        initialPolicy={newSessionPolicy}
+        initialPermission={newSessionPermission}
+        initialPermissionConfirmations={newSessionPermissionConfirmations}
+        newSessionSettingsRevision={newSessionSettingsRevision}
+        modelCatalogRevision={modelCatalogRevision}
+        workspaceRevision={sessionsRevision}
+        othersRunning={othersRunning}
+        onDraftChange={setDraft}
+        onCaretChange={setCaret}
+        onWalkChange={setWalk}
+        onDraftKeyDown={handleDraftKeyDown}
+        onSelectWorkspace={selectWorkspace}
+        onToggleQueue={toggleQueue}
+        onRecoverQueueItem={(index, all) => recoverQueueItem(index, all)}
+        onPickMention={pickMention}
+        onSelectModel={selectModel}
+        onManageModel={openModelSettings}
+        onSessionMenuChange={setSessionMenuOpen}
+        onSetMode={(name) => void setMode(name)}
+        onSetPolicy={setPolicy}
+        onInitialPermissionChange={(target, confirmations) => {
+          setNewSessionPermission(target);
+          setNewSessionPermissionConfirmations(confirmations);
+        }}
+        onPermissionStatus={(next) => { if (active.current === next.sessionId) setStatus(next); }}
+        onStop={() => void cancel()}
+        onSend={() => void send()}
+      />
     </main>
 
     {panel !== null && <aside className="dock">

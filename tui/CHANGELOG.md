@@ -8,20 +8,48 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ### 简体中文
 
-- 共享模型服务配置支持逐模型上下文窗口和输出额度，按当前选择应用于请求与压缩，兼容原有模型标识列表。
+### English
 
-- 增加 `ligule mcp-server --project <绝对目录>` 本地 stdio MCP 入口，支持创建与接回会话、后台运行、状态查询、分页读取和取消；需要人工审批的操作直接拒绝，operation ID 仅在当前进程内有效。
-- 完整校验模型终止原因，区分空回复、输出耗尽、协议不完整及断流；非法工具批次不执行副作用，诊断不包含原始参数或网关错误正文。
+## [0.0.5] - 2026-10-19
+
+### 简体中文
+
+**新增**
+
+- 增加会话 Permission 控制，可查看平台隔离能力并单独更改文件/命令档位与网络模式；启用 `full-access` 或不受限网络需要确认，Sandbox 能力不足时 Shell 会拒绝执行。
+- 增加 `ligule mcp-server --project <绝对目录>` 本地 stdio MCP 入口，支持会话管理、任务运行与取消、状态查询和记录分页。显式启用 `--operator` 后可修改受支持的会话设置，并答复真实待决的审批或提问；operation ID 和消息队列仅在当前进程内有效。
 - 增加 `model.outputTokens` 请求预算与双 API 非流式 JSON 响应支持；模型设置在完整配置校验通过后才保存，拒绝时保留文件原文并保护其他项目的启动。
+
+**改进**
+
+- `/control list` 显示授权来源；旧记录没有来源时明确标注未记录，不推断创建渠道。
+- 权限变更记录只会在本次操作实际启用完全访问或不受限网络时标记对应确认。
+- 共享模型服务配置支持逐模型上下文窗口和输出额度，按当前选择应用于请求与压缩，兼容原有模型标识列表。
+- 完整校验模型终止原因，区分空回复、输出耗尽、协议不完整及断流；非法工具批次不执行副作用，诊断不包含原始参数或网关错误正文。
+- 危险操作分类和自动审批统一使用解析后的 Bash 命令名；引号与字面片段拼接不能绕过硬拒绝或解释器审批。
+- Bash 危险命令检查会解码未加引号的转义和可识别的 ANSI-C 字符串；不完整或不支持的转义仍需逐次审批。
+- Node/Python 脚本审批显示规范路径、SHA-256、解释器、工作区和 Permission；审批等待期间这些内容发生变化会拒绝执行，无法安全绑定的脚本形式也会拒绝运行。
+- Permission 变更会保留当前会话的 Policy 覆盖和拒绝状态，并在重新打开会话时恢复；旧格式会话仍可读取，但拒绝写入其不支持的设置事件。
 - TUI 显示 Host 确认的运行阶段与无进展时长，并提供可操作的 Provider 错误提示。
 
 ### English
 
-- Shared service configuration supports per-model context windows and output budgets for requests and compaction, while preserving existing model ID lists.
+**Added**
 
-- Added `ligule mcp-server --project <absolute-directory>` for local stdio MCP control: create or resume sessions, run tasks in the background, query status, page through records, and cancel. Operations requiring human approval are denied; operation IDs are process-local.
-- Validate model finish reasons and distinguish empty replies, exhausted output, incomplete protocols, and interrupted bodies. Invalid tool batches have no side effects, and diagnostics omit raw arguments and gateway error bodies.
+- Added per-session Permission controls to inspect platform isolation capabilities and change file/command profiles separately from network mode. Enabling `full-access` or unrestricted networking requires confirmation; Shell is denied when sandbox capabilities are insufficient.
+- Added `ligule mcp-server --project <absolute-directory>` for local stdio MCP control: manage sessions, run and cancel tasks, query status, and page through records. Explicit `--operator` mode can change supported session settings and answer real pending approvals or questions; operation IDs and the message queue are process-local.
 - Added the `model.outputTokens` request budget and non-streaming JSON responses for both APIs. Model settings are saved only after complete configuration validation; rejected edits preserve file contents and other projects' startup behavior.
+
+**Improved**
+
+- `/control list` shows grant origin; legacy grants with no recorded origin are labeled as unknown instead of inferred.
+- Permission records mark a confirmation only when that change grants full access or unrestricted networking.
+- Shared service configuration supports per-model context windows and output budgets for requests and compaction, while preserving existing model ID lists.
+- Validate model finish reasons and distinguish empty replies, exhausted output, incomplete protocols, and interrupted bodies. Invalid tool batches have no side effects, and diagnostics omit raw arguments and gateway error bodies.
+- Dangerous-operation checks and automatic approval use the same parsed Bash executable name, so quoting or literal concatenation cannot bypass hard denials or interpreter approval.
+- Bash dangerous-command checks decode unquoted escapes and recognized ANSI-C strings; incomplete or unsupported escapes remain approval-gated.
+- Node/Python script approvals show the canonical path, SHA-256, interpreter, workspace, and Permission. Changes while approval is pending refuse execution, and script forms that cannot be safely bound are refused.
+- Permission changes preserve the current session's Policy override and denial state across reopen. Legacy session records remain readable but refuse unsupported setting events.
 - TUI status shows Host-confirmed run phases and time without progress, with actionable Provider error messages.
 
 ## [0.0.4] - 2026-10-14

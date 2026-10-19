@@ -86,7 +86,7 @@ const server = createServer(async (request, response) => {
       return;
     }
     response.writeHead(200, { 'content-type': 'application/json' });
-    response.end(JSON.stringify({ data: [{ id: 'model-a' }, { id: 'model-b' }] }));
+    response.end(JSON.stringify({ data: [{ id: 'model-a' }, { id: 'model-b' }, { id: 'model-c' }] }));
     return;
   }
   if (request.method === 'POST' && url.pathname === '/v1/chat/completions') {

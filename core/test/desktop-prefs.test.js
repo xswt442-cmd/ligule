@@ -67,7 +67,7 @@ function startWindowsFileHolder({ path, root, holdMilliseconds }) {
 }
 
 async function waitForHolderMarker(holder, markerPath) {
-  const deadline = Date.now() + 15_000;
+  const deadline = Date.now() + 45_000;
   while (Date.now() < deadline) {
     try {
       if ((await readFile(markerPath, 'utf8')) === 'ready') return true;
@@ -77,7 +77,12 @@ async function waitForHolderMarker(holder, markerPath) {
     if (holder.exit !== null) throw new Error(`Windows 文件占用进程提前退出：${holder.stderr}`);
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  throw new Error(`Windows 文件占用进程没有创建标记：${holder.stderr}`);
+  const status = holder.exit === null ? 'still running' : JSON.stringify(holder.exit);
+  if (holder.exit === null) {
+    holder.child.kill();
+    await holder.exited;
+  }
+  throw new Error(`Windows 文件占用进程没有创建标记（${status}）：${holder.stderr}`);
 }
 
 async function waitForPendingSave(root, holder, outcome) {
@@ -209,7 +214,10 @@ windowsTest('desktop preferences: a brief Windows file handle allows the save to
     assert.deepEqual(await readPrefs(path), saved);
     await assertNoWriteArtifacts(root);
   } finally {
-    if (holder.exit === null) await holder.exited;
+    if (holder.exit === null) {
+      holder.child.kill();
+      await holder.exited;
+    }
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -245,7 +253,10 @@ windowsTest('desktop preferences: a sustained Windows file handle preserves the 
     assert.deepEqual(await readPrefs(path), retry);
     await assertNoWriteArtifacts(root);
   } finally {
-    if (holder.exit === null) await holder.exited;
+    if (holder.exit === null) {
+      holder.child.kill();
+      await holder.exited;
+    }
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -281,7 +292,10 @@ windowsTest('desktop preferences: an external Windows write during a held save m
     assert.deepEqual(exit, { code: 0, signal: null }, holder.stderr);
     await assertNoWriteArtifacts(root);
   } finally {
-    if (holder.exit === null) await holder.exited;
+    if (holder.exit === null) {
+      holder.child.kill();
+      await holder.exited;
+    }
     await rm(root, { recursive: true, force: true });
   }
 });

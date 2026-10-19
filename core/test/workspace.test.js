@@ -2,16 +2,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile as callbackExecFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { basename, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 
 const execFile = promisify(callbackExecFile);
-import { MESSAGES_CAPABILITIES, createConfig, createConnection, createMemoryConnectionPair, serveHost } from '../dist/index.js';
+import { listWorkspaceSessions, MESSAGES_CAPABILITIES, createConfig, createConnection, createMemoryConnectionPair, createSessionLog, serveHost, sessionDirectory } from '../dist/index.js';
 import { listSessions } from '../dist/session/list.js';
-import { parseRegistry, readRegistry, registerWorkspace, setDefaultWorkspace, workspaceIdentity } from '../dist/kernel/workspace.js';
+import { parseRegistry, readRegistry, registerWorkspace, setDefaultWorkspace, unregisterWorkspace, workspaceIdentity } from '../dist/kernel/workspace.js';
 
 /** 临时根里真建一个目录：身份读的是磁盘上那一份，夹具就得是真的。 */
 async function withWorkspace(run) {
@@ -85,6 +85,27 @@ test('默认选择指过去时先登记那一条，退掉时登记一条都不�
   });
 });
 
+test('取消登记只移除工作区行，默认登记必须先清除', async () => {
+  await withWorkspace(async (directory, root) => {
+    const path = join(root, 'workspaces.json');
+    const other = join(root, 'Other');
+    await mkdir(other);
+    await registerWorkspace(directory, { path });
+    await registerWorkspace(other, { path });
+    await setDefaultWorkspace(directory, { path });
+
+    await assert.rejects(() => unregisterWorkspace(directory, { path }),
+      (error) => error.code === 'workspace_default_cannot_remove');
+    await setDefaultWorkspace(null, { path });
+    const updated = await unregisterWorkspace(directory, { path });
+    assert.deepEqual(updated.workspaces.map((entry) => entry.directory), [other]);
+    assert.equal(updated.default, null);
+    assert.equal((await readRegistry(path)).workspaces.length, 1);
+    await assert.rejects(() => unregisterWorkspace(directory, { path }),
+      (error) => error.code === 'workspace_not_registered');
+  });
+});
+
 test('那份登记读不懂就当场拒，不当成空的', () => {
   assert.throws(() => parseRegistry('{'), (error) => error.code === 'workspace_registry_invalid');
   assert.throws(() => parseRegistry(JSON.stringify({ version: 2, default: null, workspaces: [] })), (error) => error.code === 'workspace_registry_version');
@@ -119,7 +140,7 @@ test('两具进程同时登记时两条都留下，替身与锁都不留', async
 });
 
 /** 一具宿主连同它的数据根与项目目录：临时建、用完删，三遍检查共用同一套装配。 */
-async function withHost(run) {
+async function withHost(run, provider = { capabilities: MESSAGES_CAPABILITIES, model: 'test-model', async *stream() { yield { type: 'text', text: 'ok' }; } }) {
   const home = await mkdtemp(join(tmpdir(), 'ligule-ws-home-'));
   const project = await mkdtemp(join(tmpdir(), 'ligule-ws-proj-'));
   const previous = process.env.LIGULE_HOME;
@@ -128,14 +149,15 @@ async function withHost(run) {
   let host;
   try {
     const config = createConfig({ user: { boundary: project, model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model' } } });
-    const provider = { capabilities: MESSAGES_CAPABILITIES, model: 'test-model', async *stream() { yield { type: 'text', text: 'ok' }; } };
     host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy });
+    const recordDirectory = sessionDirectory({ boundary: project, workspaceRoot: project });
     return await run({
       connection: createConnection(pair.client),
       project,
       home,
       // 直接读取会话首行中的工作区信息，不依赖工作区列表。
-      headerOf: async (sessionId) => JSON.parse((await readFile(join(home, 'sessions', `${sessionId}.jsonl`), 'utf8')).split('\n')[0]),
+      recordDirectory,
+      headerOf: async (sessionId) => JSON.parse((await readFile(join(recordDirectory, `${sessionId}.jsonl`), 'utf8')).split('\n')[0]),
     });
   } finally {
     pair.client.output.end();
@@ -159,9 +181,55 @@ test('建会话的那一侧把这一具工作区登记进应用数据根，并�
     const header = await headerOf(sessionId);
     assert.equal(header.workspace, workspaceIdentity(project), '首行记下这一份会话落在哪一具工作区');
     assert.equal(header.workspaceOrigin, 'default', '客户端没指名项目根，来源就是它当前那一具');
-    const [listed] = await listSessions(join(home, 'sessions'), { projectRoot: project });
+    const [listed] = await listWorkspaceSessions({ boundary: project, workspaceRoot: project }, { projectRoot: project });
     assert.equal(listed.workspace, header.workspace, '列表把这两格一起交出去，界面分组读它而不是读路径相等');
     assert.equal(listed.workspaceOrigin, 'default');
+  });
+});
+
+test('legacy sessions appear in read-only listings and move into the workspace folder only when opened', async () => {
+  await withHost(async ({ connection, project, home, recordDirectory }) => {
+    const legacyDirectory = join(home, 'sessions');
+    const sessionId = 'legacy-session';
+    const foreignSessionId = 'foreign-session';
+    const foreignProject = join(home, 'another-project');
+    await mkdir(legacyDirectory, { recursive: true });
+    const legacy = createSessionLog({
+      directory: legacyDirectory,
+      id: sessionId,
+      meta: () => ({ projectRoot: project, workspace: workspaceIdentity(project) }),
+    });
+    await legacy.append({ kind: 'user', text: 'keep this history' });
+    const projectLegacyDirectory = join(project, '.ligule', 'sessions');
+    const localLegacy = createSessionLog({
+      directory: projectLegacyDirectory,
+      id: sessionId,
+      meta: () => ({ projectRoot: project, workspace: workspaceIdentity(project) }),
+    });
+    await localLegacy.append({ kind: 'user', text: 'older project-local copy' });
+    const foreign = createSessionLog({
+      directory: legacyDirectory,
+      id: foreignSessionId,
+      meta: () => ({ projectRoot: foreignProject, workspace: workspaceIdentity(foreignProject) }),
+    });
+    await foreign.append({ kind: 'user', text: 'belongs to another workspace' });
+    const legacyPath = join(legacyDirectory, `${sessionId}.jsonl`);
+    const original = await readFile(legacyPath);
+
+    const listed = await connection.request('sessions.list', { projectRoot: project });
+    assert.ok(listed.sessions.some((item) => item.id === sessionId));
+    assert.equal(listed.sessions.some((item) => item.id === foreignSessionId), false, '共享旧目录按首行工作区筛选');
+    const hits = await connection.request('sessions.search', { projectRoot: project, query: 'keep this history' });
+    assert.equal(hits.hits[0].sessionId, sessionId, '搜索也只读扫描旧目录');
+    await assert.rejects(readFile(join(recordDirectory, `${sessionId}.jsonl`)), (error) => error.code === 'ENOENT', '只读列表不迁移旧记录');
+
+    await connection.request('session.open', { sessionId, projectRoot: project });
+    const resumed = await connection.request('session.read', { sessionId });
+    assert.ok(resumed.events.some((event) => event.kind === 'user' && event.text === 'keep this history'), 'the former shared data-root copy takes precedence over its older project-local source');
+    await connection.request('session.close', { sessionId });
+    assert.deepEqual(await readFile(legacyPath), original, '旧位置保留原件');
+    assert.ok((await readFile(join(recordDirectory, `${sessionId}.jsonl`))).length >= original.length, '明确打开时复制到工作区目录');
+    await assert.rejects(readFile(join(recordDirectory, `${foreignSessionId}.jsonl`)), (error) => error.code === 'ENOENT', '打开一个工作区时不复制其他工作区记录');
   });
 });
 
@@ -198,4 +266,55 @@ test('协议交回那份登记，默认选择指得着一条登记，空的那�
       await rm(other, { recursive: true, force: true });
     }
   });
+});
+
+test('Host removes workspace registration without changing project or session files', async () => {
+  await withHost(async ({ connection, project, recordDirectory }) => {
+    await writeFile(join(project, 'keep.txt'), 'project files stay');
+    const { sessionId } = await connection.request('session.create', {});
+    await connection.request('run.start', { sessionId, input: '登记工作区' });
+    const before = await readRegistry();
+    assert.equal(before.workspaces.length, 1);
+
+    await connection.request('workspace.default.set', { directory: project });
+    await assert.rejects(() => connection.request('workspace.remove', { directory: project }),
+      (error) => error.code === 'workspace_default_cannot_remove');
+    await connection.request('workspace.default.set', { directory: '' });
+    const removed = await connection.request('workspace.remove', { directory: project });
+    assert.equal(removed.workspaces.length, 0);
+    assert.equal(await readFile(join(recordDirectory, `${sessionId}.jsonl`), 'utf8').then(() => true), true);
+    assert.equal(await readFile(join(project, 'keep.txt'), 'utf8'), 'project files stay');
+    const restored = await connection.request('workspace.default.set', { directory: project });
+    assert.equal(restored.workspaces[0].identity, workspaceIdentity(project));
+    assert.ok((await connection.request('sessions.list', { projectRoot: project })).sessions.some((item) => item.id === sessionId));
+    await connection.request('workspace.default.set', { directory: '' });
+    await rm(project, { recursive: true, force: true });
+    const removedAfterMove = await connection.request('workspace.remove', { directory: project });
+    assert.equal(removedAfterMove.workspaces.length, 0, 'moved project can be removed by its old registered path');
+    await assert.rejects(() => connection.request('workspace.remove', { directory: join(project, 'missing') }),
+      (error) => error.code === 'workspace_not_registered');
+  });
+});
+
+test('工作区仍有运行中的会话时 Host 拒绝删除登记', async () => {
+  let enteredStream;
+  const entered = new Promise((resolve) => { enteredStream = resolve; });
+  const provider = {
+    capabilities: MESSAGES_CAPABILITIES,
+    model: 'test-model',
+    async *stream(_request, { signal }) {
+      enteredStream();
+      await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+      yield { type: 'text', text: 'stopped' };
+    },
+  };
+  await withHost(async ({ connection, project }) => {
+    const { sessionId } = await connection.request('session.create', {});
+    const starting = connection.request('run.start', { sessionId, input: '保持运行' });
+    await entered;
+    await assert.rejects(() => connection.request('workspace.remove', { directory: project }),
+      (error) => error.code === 'workspace_in_use');
+    await connection.request('run.cancel', { sessionId });
+    await starting.catch(() => undefined);
+  }, provider);
 });

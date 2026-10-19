@@ -10,7 +10,7 @@ import { searchHistory } from './history.js';
 import { editInExternalEditor } from './editor.js';
 import { copyToClipboard, lastAnswer } from './clipboard.js';
 import { titleEscape, titleText } from './output.js';
-import { runtimeFailureText } from './errors.js';
+import { providerDiagnosticText, runtimeFailureText } from './errors.js';
 import { capabilityOf, projectRecord, resultParts, type TranscriptItem, type TuiRecord } from './transcript.js';
 import { VERSION } from '../version.js';
 import { ChoicePanel, HelpPanel, type PanelChoice } from './panels.js';
@@ -87,6 +87,19 @@ interface TuiStatus {
   readonly pendingMode?: string | null;
   readonly policy: string;
   readonly policySource?: string;
+  readonly permission?: {
+    readonly profile: 'read-only' | 'workspace-write' | 'full-access';
+    readonly network: 'policy' | 'unrestricted' | 'disabled';
+    readonly capabilities: {
+      readonly filesystemRead: 'full' | 'partial' | 'unavailable';
+      readonly filesystemWrite: 'full' | 'partial' | 'unavailable';
+      readonly network: 'full' | 'partial' | 'unavailable';
+      readonly process: 'full' | 'partial' | 'unavailable';
+    };
+    readonly execution: { readonly available: boolean; readonly code: string | null; readonly reason: string | null };
+    readonly changeAllowed: boolean;
+    readonly changeReason?: string;
+  };
   readonly tools: readonly string[];
   readonly eventCount: number;
   readonly denials: { readonly consecutive: number; readonly total: number };
@@ -127,7 +140,52 @@ interface SearchState {
   readonly at: number;
 }
 
-type PickerKind = 'model' | 'mode' | 'policy';
+type PickerKind = 'model' | 'mode' | 'policy' | 'permission' | 'permission-network' | 'permission-confirm-full' | 'permission-confirm-network'
+  | 'control' | 'control-action' | 'control-revoke-confirm';
+type AgentGrant = {
+  readonly id: string;
+  readonly name: string;
+  readonly projectRoot: string;
+  readonly source: 'trusted-ui' | 'legacy';
+  readonly defaultPermissionProfile: 'read-only' | 'workspace-write' | 'full-access';
+  readonly maxPermissionProfile: 'read-only' | 'workspace-write' | 'full-access';
+  readonly defaultNetwork: 'disabled' | 'policy' | 'unrestricted';
+  readonly maxNetwork: 'disabled' | 'policy' | 'unrestricted';
+  readonly defaultPolicy: 'ask' | 'auto' | 'never';
+  readonly allowedPolicies: readonly ('ask' | 'auto' | 'never')[];
+  readonly allowOperator: boolean;
+  readonly createdAt: string;
+  readonly expiresAt: string | null;
+  readonly revokedAt: string | null;
+};
+type AgentControlSnapshot = { readonly version: string; readonly grants: readonly AgentGrant[] };
+type ControlWizardValues = {
+  name?: string;
+  defaultPermissionProfile?: AgentGrant['defaultPermissionProfile'];
+  maxPermissionProfile?: AgentGrant['maxPermissionProfile'];
+  defaultNetwork?: AgentGrant['defaultNetwork'];
+  maxNetwork?: AgentGrant['maxNetwork'];
+  defaultPolicy?: AgentGrant['defaultPolicy'];
+  allowedPolicies?: ('ask' | 'auto' | 'never')[];
+  allowOperator?: boolean;
+  expiresAt?: string | null;
+  confirmFullAccess?: boolean;
+  confirmUnrestrictedNetwork?: boolean;
+};
+type ControlWizard = { readonly step: number; readonly values: ControlWizardValues };
+
+function agentMcpConfig(grant: AgentGrant): string {
+  const args = ['mcp-server', '--project', grant.projectRoot, '--grant', grant.id];
+  if (grant.allowOperator) args.push('--operator');
+  return JSON.stringify({ mcpServers: { ligule: { command: 'ligule', args } } }, null, 2);
+}
+
+function controlWizardNext(step: number, values: ControlWizardValues): number {
+  if (step === 8) return values.maxPermissionProfile === 'full-access' ? 9 : values.maxNetwork === 'unrestricted' ? 10 : -1;
+  if (step === 9) return values.maxNetwork === 'unrestricted' ? 10 : -1;
+  if (step === 10) return -1;
+  return step + 1;
+}
 interface RuntimeChoice extends PanelChoice {
   readonly selection?: ModelSelection;
 }
@@ -227,11 +285,15 @@ interface TuiRequestResults {
   readonly 'run.start': LoopResult;
   readonly 'run.cancel': { readonly cancelled: boolean };
   readonly 'status.get': TuiStatus;
+  readonly 'permission.set': { readonly sessionId: string; readonly permission: NonNullable<TuiStatus['permission']>; readonly applies: 'now' | 'unchanged' };
   readonly 'model.select': { readonly model: string | null; readonly serviceId: string; readonly when: 'now' | 'round' };
   readonly 'config.get': TuiConfigResult;
   readonly 'credentials.status': CredentialStatus;
   readonly 'mode.set': { readonly mode: string | null; readonly layer: string | null; readonly pending: string | null; readonly tools: string[] };
   readonly 'policy.set': { readonly policy: string; readonly policySource: string; readonly policyDefault: string };
+  readonly 'agent-control.list': AgentControlSnapshot;
+  readonly 'agent-control.create': AgentControlSnapshot;
+  readonly 'agent-control.revoke': AgentControlSnapshot;
   readonly 'session.compact': { readonly sessionId: string; readonly [key: string]: unknown };
 }
 
@@ -344,6 +406,10 @@ export function buildStatusLine({ sessionId, boundary, status, running, seconds,
   const context = contextSegment(status.usage, locale);
   const parts: string[] = [];
   if (context !== '') parts.push(context);
+  if (status.permission !== undefined) {
+    const permission = status.permission;
+    parts.push(`perm: ${permission.profile} · ${permission.network} · ${permission.execution.available ? t('Shell 可用', 'Shell available') : t('Shell 受限', 'Shell restricted')}`);
+  }
   const progress = status.progress;
   const phaseHint = progress === undefined || progress === null ? '' : {
     preparing: t('准备上下文', 'Preparing context'),
@@ -369,6 +435,7 @@ export function buildStatusLine({ sessionId, boundary, status, running, seconds,
   const leaf = root === '' ? '' : root.split(/[\\/]/).filter(Boolean).pop() ?? '';
   if (over()) base = `${id}${leaf === '' ? '' : ` · ${leaf}`}`;
   if (over()) shown = shown.filter((part) => !part.startsWith('ctx:'));
+  if (over()) shown = shown.filter((part) => !part.startsWith('perm:'));
   if (over()) base = id;
   if (over()) tail = hints === '' ? '' : hints.slice(3);
   if (over() && running && progress !== undefined && progress !== null) {
@@ -438,6 +505,10 @@ function MarkdownRows({ text, columns = 80 }: { readonly text: string; readonly 
 // 审批卡显示写入操作的目标和变更摘要，便于用户检查后再决定是否允许。
 export function changeSummary(tool: string, args: Record<string, unknown>, locale: Locale = 'zh'): string {
   return describeChange(tool, args, locale).summary;
+}
+
+export function controlTargetFromChoice(id: string, current: string | null): string | null {
+  return id.startsWith('grant:') ? id.slice('grant:'.length) : current;
 }
 
 // 展开写入类审批时显示目标路径、原内容和新内容，并分别加上减号与加号。
@@ -524,6 +595,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [panel, setPanel] = useState<PickerKind | 'help' | null>(null);
   const [choices, setChoices] = useState<RuntimeChoice[]>([]);
   const [choicesLoading, setChoicesLoading] = useState(false);
+  const [controlSnapshot, setControlSnapshot] = useState<AgentControlSnapshot | null>(null);
+  const [controlTarget, setControlTarget] = useState<string | null>(null);
+  const [controlWizard, setControlWizard] = useState<ControlWizard | null>(null);
   const pickerRequest = useRef(0);
   const [draft, setDraft] = useState('');
   const [caret, setCaret] = useState(0);
@@ -751,13 +825,15 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       // 审批摘要显示操作对象，例如命令、路径、网络地址或 MCP 工具。
       // 写入内容不在摘要行中重复显示；此处显示行数，完整内容可通过 `/show` 查看。
       const shown = typeof params.command === 'string' ? params.command : typeof args.path === 'string' ? args.path : typeof args.url === 'string' ? args.url : typeof args.server === 'string' ? `mcp:${args.server}/${typeof args.tool === 'string' ? args.tool : ''}` : '';
+      const binding = isRecord(params.scriptBinding) ? params.scriptBinding : undefined;
+      const bindingText = binding === undefined ? '' : `\n\n${chooseText(locale, '脚本审批绑定', 'Script approval binding')}\n${chooseText(locale, '路径', 'Path')}: ${String(binding.path ?? '')}\nSHA-256: ${String(binding.sha256 ?? '')}\n${chooseText(locale, '解释器', 'Interpreter')}: ${String(binding.interpreter ?? '')}\n${chooseText(locale, '工作区', 'Workspace')}: ${String(binding.workspaceRoot ?? '')}\n${chooseText(locale, '权限', 'Permission')}: ${isRecord(binding.permission) ? `${String(binding.permission.profile ?? '')} / ${String(binding.permission.network ?? '')} / ${JSON.stringify(binding.permission.capabilities ?? {})}` : ''}`;
       setAsk({
         id: message.id,
         tool: params.tool,
         detail: shown === '' ? JSON.stringify(args) : String(shown),
         change: changeSummary(params.tool, args, locale),
         reason: typeof params.reason === 'string' ? params.reason : '',
-        content: approvalBody(params.tool, args, locale),
+        content: `${approvalBody(params.tool, args, locale)}${bindingText}`,
         // 显示本次判定和执行使用的命令语法及可执行文件。
         backend: typeof params.shell === 'string' ? `${params.shell} · ${typeof params.executable === 'string' ? params.executable : ''}` : '',
       });
@@ -807,10 +883,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       if (!terminalReceived.current) push({ kind: 'meta', text: t('本轮已完成', 'Turn completed') });
     } catch (error) {
       const code = errorCode(error) ?? 'run_failed';
+      const diagnostics = providerDiagnosticText(isRecord(error) ? error.diagnostics : undefined, locale);
       // 根据取消位置显示对应错误码：模型请求为 `provider_cancelled`，调用组之间为 `loop_cancelled`，等待用户答复为 `ask_user_cancelled`。
       if (!terminalReceived.current) {
         if (code === 'loop_cancelled' || code === 'provider_cancelled' || code === 'ask_user_cancelled') push({ kind: 'meta', text: t('本轮已取消', 'Turn cancelled') });
-        else push({ kind: 'error', text: `${t(`运行失败：${code}`, `Run failed: ${code}`)}${runtimeFailureText(code, locale) === undefined ? '' : `\n${runtimeFailureText(code, locale)}`}` });
+        else push({ kind: 'error', text: `${t(`运行失败：${code}`, `Run failed: ${code}`)}${runtimeFailureText(code, locale) === undefined ? '' : `\n${runtimeFailureText(code, locale)}`}${diagnostics === undefined ? '' : `\n${diagnostics}`}` });
       }
     } finally {
       setAsk(null);
@@ -828,6 +905,50 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     setPanel(null);
   }, []);
 
+  const changePermission = useCallback(async ({
+    profile,
+    network,
+    confirmFullAccess = false,
+    confirmNetwork = false,
+  }: {
+    readonly profile?: 'read-only' | 'workspace-write' | 'full-access';
+    readonly network?: 'policy' | 'unrestricted' | 'disabled';
+    readonly confirmFullAccess?: boolean;
+    readonly confirmNetwork?: boolean;
+  }) => {
+    const own = sessionId;
+    const current = await client.request('status.get', { sessionId: own }).catch((error: unknown) => requestFailure(error, 'status_read_failed'));
+    if ('code' in current || current.permission === undefined) {
+      push({ kind: 'error', text: t(`无法读取当前权限：${'code' in current ? current.code : 'permission_status_unavailable'}`, `Could not read current permissions: ${'code' in current ? current.code : 'permission_status_unavailable'}`) });
+      return;
+    }
+    if (!current.permission.changeAllowed) {
+      setStatus(current);
+      push({ kind: 'error', text: t('此连接不能修改会话权限；请使用受信任的本地 TUI 或 Desktop 操作。', 'This connection cannot change session permissions; use a trusted local TUI or Desktop action.') });
+      return;
+    }
+    const changed = await client.request('permission.set', {
+      sessionId: own,
+      permissionProfile: profile ?? current.permission.profile,
+      ...(network === undefined ? {} : { permissionNetwork: network }),
+      ...(confirmFullAccess ? { confirmFullAccess: true } : {}),
+      ...(confirmNetwork ? { confirmNetwork: true } : {}),
+    }).catch((error: unknown) => requestFailure(error, 'permission_change_failed'));
+    if ('code' in changed) {
+      push({ kind: 'error', text: t(`无法修改会话权限：${changed.code}`, `Could not change session permissions: ${changed.code}`) });
+      return;
+    }
+    const refreshed = await client.request('status.get', { sessionId: own }).catch(() => null);
+    if (activeSession.current === own) setStatus(refreshed);
+    const effective = refreshed?.permission ?? changed.permission;
+    push({ kind: 'meta', text: [
+      t(`权限已更新：${effective.profile} · 网络 ${effective.network}`, `Permissions updated: ${effective.profile} · network ${effective.network}`),
+      effective.execution.available
+        ? t('Shell 隔离：可用', 'Shell sandbox: available')
+        : t(`Shell 隔离：不可用（${effective.execution.code ?? effective.execution.reason ?? '原因未知'}）`, `Shell sandbox: unavailable (${effective.execution.code ?? effective.execution.reason ?? 'unknown reason'})`),
+    ].join('\n') });
+  }, [client, push, sessionId, t]);
+
   const exitTui = useCallback((savedDraft = inputNow.current.draft) => {
     if (inputs === undefined) { app.exit(); return; }
     void inputs.write(info.boundary ?? '', sessionId, savedDraft, inputNow.current.queue).then(
@@ -836,7 +957,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     );
   }, [app, inputs, info.boundary, sessionId, push, t]);
 
-  const openPicker = useCallback((kind: PickerKind) => {
+  const openPicker = useCallback((kind: PickerKind, requestedControlTarget = controlTarget) => {
     const token = ++pickerRequest.current;
     const own = sessionId;
     setDetail(null);
@@ -848,7 +969,37 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     setChoicesLoading(true);
     void (async () => {
       let available: RuntimeChoice[];
-      if (kind === 'model') {
+      if (kind === 'control') {
+        const snapshot = await client.request('agent-control.list', {}) as AgentControlSnapshot;
+        setControlSnapshot(snapshot);
+        available = [
+          { id: 'create', label: t('新建外控授权', 'Create a grant'), description: t('开始逐项填写授权上限和到期时间。', 'Enter the grant limits and expiry one step at a time.') },
+          ...snapshot.grants.map((grant) => {
+            const state = grant.revokedAt !== null ? t('已撤销', 'revoked')
+              : grant.expiresAt !== null && Date.parse(grant.expiresAt) <= Date.now() ? t('已到期', 'expired') : t('可用', 'available');
+            return {
+              id: `grant:${grant.id}`,
+              label: `${grant.name} · ${state}`,
+              description: `${grant.maxPermissionProfile} · ${grant.maxNetwork} · ${grant.projectRoot} · ${t('进程在线状态未知', 'process status unknown')}`,
+            };
+          }),
+        ];
+      } else if (kind === 'control-action') {
+        const snapshot = controlSnapshot ?? await client.request('agent-control.list', {}) as AgentControlSnapshot;
+        const grant = snapshot.grants.find((item) => item.id === requestedControlTarget);
+        if (grant === undefined) throw new Error('agent_control_grant_not_found');
+        const expired = grant.expiresAt !== null && Date.parse(grant.expiresAt) <= Date.now();
+        available = [
+          { id: 'copy-config', label: t('复制 MCP 配置', 'Copy MCP config'), description: t('只包含 CLI、项目路径和授权 ID，不包含密钥。', 'Contains the CLI, project path, and grant ID; no credentials.') },
+          ...(grant.revokedAt === null && !expired ? [{ id: 'revoke', label: t('撤销此授权', 'Revoke this grant'), description: t('取消正在运行的任务并拒绝该授权的后续调用。', 'Cancel active work and reject later calls using this grant.') }] : []),
+          { id: 'back', label: t('返回授权列表', 'Back to grants') },
+        ];
+      } else if (kind === 'control-revoke-confirm') {
+        available = [
+          { id: 'confirm', label: t('确认撤销授权', 'Confirm revocation'), description: t('MCP Host 会检查撤销并取消运行中的任务。', 'The MCP Host checks revocation and cancels active work.') },
+          { id: 'cancel', label: t('取消', 'Cancel') },
+        ];
+      } else if (kind === 'model') {
         const config = await client.request('config.get', { projectRoot: info.boundary });
         available = config.services.flatMap(service => service.models.map(model => ({
           id: `${service.id}:${model}`, label: `${service.name} / ${model}`, selection: { provider: service.id, model },
@@ -861,12 +1012,57 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         available = (await modes.read()).map(mode => ({ id: mode.name, label: mode.name,
           description: t(`来源：${MODE_LAYERS[mode.layer] ?? mode.layer}。只改变模型可用工具和提示，不授予权限。`, `Source: ${mode.layer}. Selects tools and prompts without granting permissions.`),
         }));
-      } else {
+      } else if (kind === 'policy') {
         available = [
           { id: 'ask', label: t('逐次审批', 'Ask for each tool'), description: t('工具执行前询问；已有拒绝规则和访问边界继续生效。', 'Ask before tools execute; denial rules and access boundaries still apply.') },
           { id: 'auto', label: t('自动判定', 'Automatic decisions'), description: t('由现有规则判定；仍可能请求审批，访问边界不变。', 'Use the existing rules; approvals may still be requested and access boundaries stay unchanged.') },
           { id: 'reset', label: t('使用配置默认', 'Use configured default'), description: t('撤销当前会话的审批方式覆盖。', 'Clear this session’s approval-mode override.') },
         ];
+      } else {
+        const current = await client.request('status.get', { sessionId: own });
+        if (activeSession.current !== own || pickerRequest.current !== token) return;
+        setStatus(current);
+        const permission = current.permission;
+        if (permission === undefined) throw new Error('permission_status_unavailable');
+        if (!permission.changeAllowed) {
+          available = [];
+          if (permission.changeReason !== undefined) {
+            push({ kind: 'meta', text: t(
+              `权限暂不可更改：${permission.changeReason}`,
+              `Permissions cannot be changed now: ${permission.changeReason}`,
+            ) });
+          }
+        } else if (kind === 'permission') {
+          const capabilities = permission.capabilities;
+          const enforcement = [
+            `${t('读取', 'read')} ${capabilities.filesystemRead}`,
+            `${t('写入', 'write')} ${capabilities.filesystemWrite}`,
+            `${t('网络', 'network')} ${capabilities.network}`,
+            `${t('进程', 'process')} ${capabilities.process}`,
+          ].join(' · ');
+          available = [
+            { id: 'read-only', label: t('只读 · read-only', 'Read only · read-only'), description: t(`当前：${permission.profile} · 网络 ${permission.network} · 隔离能力：${enforcement} · Shell ${permission.execution.available ? '可用' : `不可用（${permission.execution.code ?? '能力不足'}）`}`, `Current: ${permission.profile} · network ${permission.network} · isolation: ${enforcement} · Shell ${permission.execution.available ? 'available' : `unavailable (${permission.execution.code ?? 'capability limits'})`}`) },
+            { id: 'workspace-write', label: t('工作区可写 · workspace-write', 'Workspace write · workspace-write'), description: t('文件工具限制在工作区；Shell 仅在报告完整隔离时开放。', 'File tools stay within the workspace; Shell runs only when full isolation is available.') },
+            { id: 'full-access', label: t('完整访问 · full-access', 'Full access · full-access'), description: t('需要再次确认。范围仍受当前 OS 用户权限和 Policy 硬拒绝约束。', 'Requires a second confirmation. OS user permissions and hard Policy denials still apply.') },
+            { id: 'network', label: t(`网络：${permission.network}`, `Network: ${permission.network}`), description: t('单独设置网络访问；这不会改变文件权限档位。', 'Configure network access separately; this does not change the filesystem profile.') },
+          ];
+        } else if (kind === 'permission-network') {
+          available = [
+            { id: 'policy', label: t('按 Policy 控制 · policy', 'Controlled by Policy · policy'), description: t('网络工具继续经过 Policy；Shell 只能在后端能阻止其联网时执行。', 'Network tools stay subject to Policy; Shell runs only when the backend can block its network access.') },
+            { id: 'disabled', label: t('禁用网络 · disabled', 'Disable network · disabled'), description: t('拒绝网络工具和 Shell 的网络访问。', 'Deny network tools and Shell network access.') },
+            { id: 'unrestricted', label: t('不受限网络 · unrestricted', 'Unrestricted network · unrestricted'), description: t('需要再次确认；Shell、MCP 和扩展可访问当前 OS 用户可用的网络。', 'Requires a second confirmation; Shell, MCP, and extensions can use the network available to this OS user.') },
+          ];
+        } else if (kind === 'permission-confirm-full') {
+          available = [
+            { id: 'confirm', label: t('我确认启用 full-access', 'Confirm full-access'), description: t(`允许当前 OS 用户可访问的文件和进程。Policy 与硬拒绝适用于 Host 工具调用；已加载的扩展是可信代码，可绕过这些检查直接使用 OS 能力。当前 Shell：${permission.execution.available ? '可用' : `不可用（${permission.execution.code ?? permission.execution.reason ?? '隔离能力不足'}）`}`, `Allow files and processes available to the current OS user. Policy and hard denials apply to Host tool calls; loaded extensions are trusted code and can use OS capabilities directly. Shell: ${permission.execution.available ? 'available' : `unavailable (${permission.execution.code ?? permission.execution.reason ?? 'sandbox limits'})`}`) },
+            { id: 'cancel', label: t('取消', 'Cancel') },
+          ];
+        } else {
+          available = [
+            { id: 'confirm', label: t('我确认启用不受限网络', 'Confirm unrestricted network'), description: t('命令、MCP 服务器和扩展可能向外发送数据；普通工具审批和危险操作硬拒绝仍按原规则执行。', 'Commands, MCP servers, and extensions may send data externally; ordinary tool approvals and hard dangerous-operation denials remain active.') },
+            { id: 'cancel', label: t('取消', 'Cancel') },
+          ];
+        }
       }
       if (activeSession.current !== own || pickerRequest.current !== token) return;
       if (kind === 'model' && available.length === 0) {
@@ -881,7 +1077,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       setPanel(null);
       push({ kind: 'error', text: t(`无法读取选项：${errorCode(error) ?? errorMessage(error) ?? 'picker_failed'}`, `Could not load choices: ${errorCode(error) ?? errorMessage(error) ?? 'picker_failed'}`) });
     });
-  }, [client, info.boundary, modes, push, sessionId, t]);
+  }, [client, controlSnapshot, controlTarget, info.boundary, modes, push, sessionId, t]);
 
   const runCommand = useCallback((name: string, argument = '') => {
     if (name === 'trust') {
@@ -894,6 +1090,71 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       } else {
         void trust.revoke().then(() => exitTui(''), (error: unknown) => push({ kind: 'error', text: t(`无法撤销信任：${errorCode(error) ?? 'tui_trust_failed'}`, `Could not revoke trust: ${errorCode(error) ?? 'tui_trust_failed'}`) }));
       }
+      return;
+    }
+    if (name === 'control') {
+      const [action = '', wanted = ''] = argument.trim().split(/\s+/, 2);
+      if (action === '') {
+        openPicker('control');
+        return;
+      }
+      if (action === 'create' && wanted === '') {
+        if (info.boundary === undefined || info.boundary === '') {
+          push({ kind: 'error', text: t('当前没有已选择的项目目录。', 'No project directory is selected.') });
+          return;
+        }
+        setControlWizard({ step: 0, values: {} });
+        setPanel(null);
+        push({ kind: 'meta', text: t('开始创建授权；每一步按 Enter 确认，输入 cancel 可取消。', 'Grant setup started. Press Enter after each answer; type cancel to stop.') });
+        return;
+      }
+      if (action !== 'list' && action !== 'copy' && action !== 'revoke') {
+        push({ kind: 'error', text: t('用法：/control [list|create|copy <id>|revoke <id>]', 'Usage: /control [list|create|copy <id>|revoke <id>]') });
+        return;
+      }
+      void (async () => {
+        try {
+          const snapshot = await client.request('agent-control.list', {}) as AgentControlSnapshot;
+          setControlSnapshot(snapshot);
+          if (action === 'list') {
+            const lines = snapshot.grants.length === 0 ? [t('尚未创建外控授权。', 'No external Agent grants have been created.')]
+              : snapshot.grants.map((grant) => {
+                const state = grant.revokedAt !== null ? t('已撤销', 'revoked')
+                  : grant.expiresAt !== null && Date.parse(grant.expiresAt) <= Date.now() ? t('已到期', 'expired') : t('可用', 'available');
+                const expiry = grant.expiresAt === null ? t('无到期时间', 'no expiry') : `${t('到期', 'expires')} ${new Date(grant.expiresAt).toLocaleString()}`;
+                const source = grant.source === 'trusted-ui'
+                  ? t('可信界面创建', 'Trusted UI')
+                  : t('历史记录未保存来源', 'Legacy record; source not recorded');
+                return `${grant.id} · ${grant.name} · ${state} · ${t('权限', 'permission')} ${grant.defaultPermissionProfile} / ${grant.maxPermissionProfile} · ${t('网络', 'network')} ${grant.defaultNetwork} / ${grant.maxNetwork} · Policy ${grant.defaultPolicy} (${grant.allowedPolicies.join(', ')}) · ${expiry} · ${t('来源', 'source')} ${source} · ${grant.projectRoot} · ${t('在线状态未知', 'online status unknown')}`;
+              });
+            push({ kind: 'meta', text: lines.join('\n') });
+            return;
+          }
+          const matches = snapshot.grants.filter((grant) => grant.id === wanted || grant.id.startsWith(wanted));
+          if (matches.length !== 1) {
+            push({ kind: 'error', text: matches.length === 0
+              ? t(`未找到授权 ${wanted}`, `Grant ${wanted} was not found`)
+              : t(`授权编号 ${wanted} 不唯一，请输入更多字符`, `Grant ID ${wanted} is ambiguous; enter more characters`) });
+            return;
+          }
+          const grant = matches[0]!;
+          if (action === 'copy') {
+            const copied = await copyToClipboard(agentMcpConfig(grant));
+            push('program' in copied
+              ? { kind: 'meta', text: t(`已复制授权 ${grant.id} 的本地 MCP 配置`, `Copied local MCP configuration for grant ${grant.id}`) }
+              : { kind: 'error', text: t(`复制配置失败：${copied.code}`, `Could not copy configuration: ${copied.code}`) });
+            return;
+          }
+          if (grant.revokedAt !== null || (grant.expiresAt !== null && Date.parse(grant.expiresAt) <= Date.now())) {
+            push({ kind: 'error', text: t('此授权已撤销或到期，不能再次撤销。', 'This grant is revoked or expired and cannot be revoked again.') });
+            return;
+          }
+          setControlTarget(grant.id);
+          openPicker('control-revoke-confirm');
+        } catch (error) {
+          push({ kind: 'error', text: t(`外控授权操作失败：${errorCode(error) ?? 'agent_control_failed'}`, `Agent Control operation failed: ${errorCode(error) ?? 'agent_control_failed'}`) });
+        }
+      })();
       return;
     }
     if (name === 'quit') {
@@ -1226,9 +1487,13 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         const current = await client.request('status.get', { sessionId }).catch(() => null);
         setStatus(current);
         const context = contextSegment(current?.usage, locale);
+        const permission = current?.permission === undefined ? '' : t(
+          ` · 权限 ${current.permission.profile} · 网络 ${current.permission.network} · Shell ${current.permission.execution.available ? '可用' : `不可用（${current.permission.execution.code ?? '能力不足'}）`}`,
+          ` · permission ${current.permission.profile} · network ${current.permission.network} · Shell ${current.permission.execution.available ? 'available' : `unavailable (${current.permission.execution.code ?? 'capability limits'})`}`,
+        );
         push({ kind: 'meta', text: current === null ? t('无法读取状态', 'Could not read status')
           : t(`工具模式 ${current.mode ?? '-'} · 审批 ${current.policy} · 连续拒绝 ${current.denials.consecutive} / 累计 ${current.denials.total} · ${current.eventCount} 条记录`, `Mode ${current.mode ?? '-'} · approvals ${current.policy} · denials ${current.denials.consecutive} consecutive / ${current.denials.total} total · ${current.eventCount} events`)
-            + (context === '' ? '' : ` · ${context}`) });
+            + permission + (context === '' ? '' : ` · ${context}`) });
       })();
       return;
     }
@@ -1348,6 +1613,36 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       })();
       return;
     }
+    if (name === 'permission') {
+      const [target, value, ...extra] = argument.trim().split(/\s+/).filter((part) => part !== '');
+      if (target === undefined) { openPicker('permission'); return; }
+      if (extra.length > 0) {
+        push({ kind: 'error', text: t('用法：/permission [read-only|workspace-write|full-access|network [policy|disabled|unrestricted]]', 'Usage: /permission [read-only|workspace-write|full-access|network [policy|disabled|unrestricted]]') });
+        return;
+      }
+      if (target === 'network') {
+        if (value === undefined) { openPicker('permission-network'); return; }
+        if (value !== 'policy' && value !== 'disabled' && value !== 'unrestricted') {
+          push({ kind: 'error', text: t('网络选项须为 policy、disabled 或 unrestricted。', 'Network must be policy, disabled, or unrestricted.') });
+        } else if (value === 'unrestricted') {
+          openPicker('permission-confirm-network');
+        } else {
+          void changePermission({ network: value });
+        }
+        return;
+      }
+      if (target !== 'read-only' && target !== 'workspace-write' && target !== 'full-access') {
+        push({ kind: 'error', text: t('用法：/permission [read-only|workspace-write|full-access|network [policy|disabled|unrestricted]]', 'Usage: /permission [read-only|workspace-write|full-access|network [policy|disabled|unrestricted]]') });
+        return;
+      }
+      if (target === 'full-access') {
+        if (status?.permission?.profile === 'full-access') void changePermission({ profile: target });
+        else openPicker('permission-confirm-full');
+      } else {
+        void changePermission({ profile: target });
+      }
+      return;
+    }
     if (name === 'show') {
       void (async () => {
         if (argument === '') {
@@ -1425,14 +1720,77 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     push({ kind: 'error', text: t(`未知命令：/${name}（/help 查看）`, `Unknown command: /${name} (/help to browse)`) });
-  }, [app, client, info, keyOverrides, keys, locale, push, queue, queuePaused, refreshStatus, sessionId, status, stdout, t, trust, openPicker, exitTui]);
+  }, [app, changePermission, client, info, keyOverrides, keys, locale, push, queue, queuePaused, refreshStatus, sessionId, status, stdout, t, trust, openPicker, exitTui]);
 
   const chooseOption = useCallback((id: string) => {
     const choice = choices.find(item => item.id === id);
     if (choice === undefined || panel === null || panel === 'help') return;
+    const currentPanel = panel;
     closePanel();
+    if (currentPanel === 'control') {
+      if (id === 'create') {
+        if (info.boundary === undefined || info.boundary === '') {
+          push({ kind: 'error', text: t('当前没有已选择的项目目录。', 'No project directory is selected.') });
+          return;
+        }
+        setControlWizard({ step: 0, values: {} });
+        return;
+      }
+      if (id.startsWith('grant:')) {
+        const target = controlTargetFromChoice(id, controlTarget);
+        setControlTarget(target);
+        openPicker('control-action', target ?? undefined);
+      }
+      return;
+    }
+    if (currentPanel === 'control-action') {
+      if (id === 'back') { openPicker('control'); return; }
+      const grant = controlSnapshot?.grants.find((item) => item.id === controlTarget);
+      if (grant === undefined) { push({ kind: 'error', text: t('授权已不存在，请重新读取。', 'Grant is no longer available. Reload the list.') }); return; }
+      if (id === 'copy-config') {
+        void copyToClipboard(agentMcpConfig(grant)).then((copied) => push('program' in copied
+          ? { kind: 'meta', text: t(`已复制授权 ${grant.id} 的本地 MCP 配置`, `Copied local MCP configuration for grant ${grant.id}`) }
+          : { kind: 'error', text: t(`复制失败：${copied.code}`, `Copy failed: ${copied.code}`) }));
+      } else if (id === 'revoke') openPicker('control-revoke-confirm');
+      return;
+    }
+    if (currentPanel === 'control-revoke-confirm') {
+      if (id !== 'confirm') return;
+      const target = controlTarget;
+      const version = controlSnapshot?.version;
+      if (target === null || version === undefined) { push({ kind: 'error', text: t('无法确认授权版本，请重新读取。', 'Grant version is unavailable. Reload the list.') }); return; }
+      void client.request('agent-control.revoke', { grantId: target, version }).then((result) => {
+        const updated = result as AgentControlSnapshot;
+        setControlSnapshot(updated);
+        push({ kind: 'meta', text: t(`授权 ${target} 已撤销。`, `Grant ${target} revoked.`) });
+      }, async (error: unknown) => {
+        push({ kind: 'error', text: t(`撤销失败：${errorCode(error) ?? 'agent_control_revoke_failed'}`, `Could not revoke grant: ${errorCode(error) ?? 'agent_control_revoke_failed'}`) });
+        const refreshed = await client.request('agent-control.list', {}).catch(() => null) as AgentControlSnapshot | null;
+        if (refreshed !== null) setControlSnapshot(refreshed);
+      });
+      return;
+    }
+    if (currentPanel === 'permission') {
+      if (id === 'network') { openPicker('permission-network'); return; }
+      if (id === 'full-access') { openPicker('permission-confirm-full'); return; }
+      if (id === 'read-only' || id === 'workspace-write') void changePermission({ profile: id });
+      return;
+    }
+    if (currentPanel === 'permission-network') {
+      if (id === 'unrestricted') { openPicker('permission-confirm-network'); return; }
+      if (id === 'policy' || id === 'disabled') void changePermission({ network: id });
+      return;
+    }
+    if (currentPanel === 'permission-confirm-full') {
+      if (id === 'confirm') void changePermission({ profile: 'full-access', confirmFullAccess: true });
+      return;
+    }
+    if (currentPanel === 'permission-confirm-network') {
+      if (id === 'confirm') void changePermission({ network: 'unrestricted', confirmNetwork: true });
+      return;
+    }
     if (choice.selection === undefined) {
-      runCommand(panel, choice.id);
+      runCommand(currentPanel, choice.id);
       return;
     }
     const own = sessionId;
@@ -1441,7 +1799,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       await refreshStatus();
       push({ kind: 'meta', text: changed.when === 'round' ? t(`下轮使用 ${changed.model}`, `${changed.model} will apply next turn`) : t(`已切换至 ${changed.model}`, `Switched to ${changed.model}`) });
     }, (error: unknown) => push({ kind: 'error', text: t(`无法选择模型：${errorCode(error) ?? 'model_select_failed'}`, `Could not select model: ${errorCode(error) ?? 'model_select_failed'}`) }));
-  }, [choices, panel, closePanel, runCommand, client, sessionId, refreshStatus, push, t]);
+  }, [choices, panel, closePanel, openPicker, changePermission, runCommand, client, sessionId, refreshStatus, push, t, info.boundary, controlSnapshot, controlTarget]);
 
   // 每次回车提交当前问题并进入下一题；完成最后一题后统一发送全部答案。
   // 空回车表示未回答该题，由 Host 按未答记录，不由界面补造答案。
@@ -1465,7 +1823,124 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     client.reply(head.id, { answers });
   }, [client, push, query, resetDraft, t]);
 
+  const advanceControlWizard = useCallback((raw: string) => {
+    const wizard = controlWizard;
+    if (wizard === null) return false;
+    const input = raw.trim();
+    if (input.toLowerCase() === 'cancel' || input.toLowerCase() === '/cancel') {
+      setControlWizard(null);
+      resetDraft('');
+      push({ kind: 'meta', text: t('已取消外控授权创建。', 'Agent Control grant creation cancelled.') });
+      return true;
+    }
+    const values: ControlWizardValues = { ...wizard.values };
+    const fail = (message: string) => push({ kind: 'error', text: message });
+    if (wizard.step === 0) {
+      if (input === '' || input.length > 80) { fail(t('名称须为 1 到 80 个字符。', 'Name must contain 1 to 80 characters.')); return true; }
+      values.name = input;
+    } else if (wizard.step === 1 || wizard.step === 2) {
+      if (!['read-only', 'workspace-write', 'full-access'].includes(input)) {
+        fail(t('请输入 read-only、workspace-write 或 full-access。', 'Enter read-only, workspace-write, or full-access.')); return true;
+      }
+      if (wizard.step === 1) values.defaultPermissionProfile = input as AgentGrant['defaultPermissionProfile'];
+      else {
+        const max = input as AgentGrant['maxPermissionProfile'];
+        const rank = { 'read-only': 0, 'workspace-write': 1, 'full-access': 2 };
+        if (values.defaultPermissionProfile !== undefined && rank[max] < rank[values.defaultPermissionProfile]) {
+          fail(t('权限上限不能低于默认权限。', 'The permission ceiling cannot be lower than its default.')); return true;
+        }
+        values.maxPermissionProfile = max;
+      }
+    } else if (wizard.step === 3 || wizard.step === 4) {
+      if (!['disabled', 'policy', 'unrestricted'].includes(input)) {
+        fail(t('请输入 disabled、policy 或 unrestricted。', 'Enter disabled, policy, or unrestricted.')); return true;
+      }
+      if (wizard.step === 3) values.defaultNetwork = input as AgentGrant['defaultNetwork'];
+      else {
+        const max = input as AgentGrant['maxNetwork'];
+        const rank = { disabled: 0, policy: 1, unrestricted: 2 };
+        if (values.defaultNetwork !== undefined && rank[max] < rank[values.defaultNetwork]) {
+          fail(t('网络上限不能低于默认网络范围。', 'The network ceiling cannot be lower than its default.')); return true;
+        }
+        values.maxNetwork = max;
+      }
+    } else if (wizard.step === 5) {
+      if (!['ask', 'auto', 'never'].includes(input)) { fail(t('请输入 ask、auto 或 never。', 'Enter ask, auto, or never.')); return true; }
+      values.defaultPolicy = input as AgentGrant['defaultPolicy'];
+    } else if (wizard.step === 6) {
+      const allowed = input.split(',').map((part) => part.trim()).filter(Boolean);
+      if (allowed.length === 0 || allowed.some((part) => !['ask', 'auto', 'never'].includes(part))
+        || new Set(allowed).size !== allowed.length || !allowed.includes(values.defaultPolicy ?? 'ask')) {
+        fail(t('请输入不重复的 Policy 列表，例如 ask,auto，并包含默认 Policy。', 'Enter distinct Policy modes such as ask,auto, including the default.')); return true;
+      }
+      values.allowedPolicies = allowed as ('ask' | 'auto' | 'never')[];
+    } else if (wizard.step === 7) {
+      if (!['y', 'yes', 'n', 'no'].includes(input.toLowerCase())) { fail(t('请输入 yes 或 no。', 'Enter yes or no.')); return true; }
+      values.allowOperator = ['y', 'yes'].includes(input.toLowerCase());
+    } else if (wizard.step === 8) {
+      if (input === '' || input.toLowerCase() === 'none') values.expiresAt = null;
+      else {
+        const expiry = input.length === 10 ? Date.parse(`${input}T23:59:59`) : Date.parse(input);
+        if (!Number.isFinite(expiry) || expiry <= Date.now()) { fail(t('请输入未来的日期/时间或 none。', 'Enter a future date/time or none.')); return true; }
+        values.expiresAt = new Date(expiry).toISOString();
+      }
+    } else if (wizard.step === 9) {
+      if (!['y', 'yes'].includes(input.toLowerCase())) {
+        setControlWizard(null); resetDraft('');
+        fail(t('未确认 full-access，授权未创建。', 'Full-access was not confirmed; no grant was created.')); return true;
+      }
+      values.confirmFullAccess = true;
+    } else if (wizard.step === 10) {
+      if (!['y', 'yes'].includes(input.toLowerCase())) {
+        setControlWizard(null); resetDraft('');
+        fail(t('未确认不受限网络，授权未创建。', 'Unrestricted network was not confirmed; no grant was created.')); return true;
+      }
+      values.confirmUnrestrictedNetwork = true;
+    }
+    resetDraft('');
+    const next = controlWizardNext(wizard.step, values);
+    if (next >= 0) {
+      setControlWizard({ step: next, values });
+      return true;
+    }
+    void (async () => {
+      try {
+        const projectRoot = info.boundary;
+        if (projectRoot === undefined || projectRoot === '') throw new Error('workspace_required');
+        const current = await client.request('agent-control.list', {}) as AgentControlSnapshot;
+        const created = await client.request('agent-control.create', {
+          version: current.version,
+          grantName: values.name!,
+          projectRoot,
+          defaultPermissionProfile: values.defaultPermissionProfile!,
+          maxPermissionProfile: values.maxPermissionProfile!,
+          defaultNetwork: values.defaultNetwork!,
+          maxNetwork: values.maxNetwork!,
+          defaultPolicy: values.defaultPolicy!,
+          allowedPolicyAsk: values.allowedPolicies!.includes('ask'),
+          allowedPolicyAuto: values.allowedPolicies!.includes('auto'),
+          allowedPolicyNever: values.allowedPolicies!.includes('never'),
+          allowOperator: values.allowOperator!,
+          confirmFullAccess: values.confirmFullAccess === true,
+          confirmUnrestrictedNetwork: values.confirmUnrestrictedNetwork === true,
+          expiresAt: values.expiresAt ?? '',
+        }) as AgentControlSnapshot;
+        setControlSnapshot(created);
+        const grant = created.grants.at(-1);
+        setControlWizard(null);
+        push({ kind: 'meta', text: grant === undefined
+          ? t('外控授权已创建。', 'Agent Control grant created.')
+          : t(`外控授权 ${grant.name} 已创建：${grant.id} · /control copy ${grant.id.slice(0, 8)} 可复制 MCP 配置`, `Grant ${grant.name} created: ${grant.id} · use /control copy ${grant.id.slice(0, 8)} to copy the MCP config`) });
+      } catch (error) {
+        setControlWizard(null);
+        push({ kind: 'error', text: t(`外控授权创建失败：${errorCode(error) ?? errorMessage(error) ?? 'agent_control_create_failed'}`, `Could not create Agent Control grant: ${errorCode(error) ?? errorMessage(error) ?? 'agent_control_create_failed'}`) });
+      }
+    })();
+    return true;
+  }, [client, controlWizard, info.boundary, push, resetDraft, t]);
+
   const send = useCallback((text: string) => {
+    if (controlWizard !== null) { advanceControlWizard(text); return; }
     // 问题面板打开时，回车提交当前答案；斜杠命令仍可运行，例如 `/status` 和 `/queue`。
     if (query !== null && !text.trim().startsWith('/')) {
       answerQuery(text);
@@ -1497,7 +1972,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     void submit(route.text);
-  }, [answerQuery, locale, push, query, remember, runCommand, running, submit, t]);
+  }, [advanceControlWizard, answerQuery, controlWizard, locale, push, query, remember, runCommand, running, submit, t]);
 
   // 轮次结束后每次发送一条队列消息；取消后队列保持暂停，需用户明确继续。
   useEffect(() => {
@@ -1537,6 +2012,19 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     done: query.questions.slice(0, query.at).map((one, index) => `${index + 1}. ${answeredLine(query.picked[one.id]?.answer, locale)}`),
     last: query.at + 1 === query.questions.length,
   };
+  const controlPrompt = controlWizard === null ? null : [
+    t('授权名称（最多 80 字符）', 'Grant name (up to 80 characters)'),
+    t('默认权限：read-only / workspace-write / full-access', 'Default permission: read-only / workspace-write / full-access'),
+    t('最大权限：read-only / workspace-write / full-access', 'Maximum permission: read-only / workspace-write / full-access'),
+    t('默认网络：disabled / policy / unrestricted', 'Default network: disabled / policy / unrestricted'),
+    t('网络上限：disabled / policy / unrestricted', 'Maximum network: disabled / policy / unrestricted'),
+    t('默认 Policy：ask / auto / never', 'Default Policy: ask / auto / never'),
+    t('允许的 Policy，以逗号分隔，例如 ask,auto', 'Allowed Policy modes, comma-separated, e.g. ask,auto'),
+    t('允许 --operator 处理普通审批和会话设置？yes / no', 'Allow --operator for ordinary approvals and session settings? yes / no'),
+    t('到期时间，输入 ISO 时间或 none', 'Expiry time as an ISO date/time, or none'),
+    t('单独确认 full-access 授权？输入 yes 确认', 'Separately confirm the full-access ceiling? Type yes to confirm'),
+    t('单独确认 unrestricted network？输入 yes 确认', 'Separately confirm the unrestricted network ceiling? Type yes to confirm'),
+  ][controlWizard.step] ?? t('输入 yes 确认', 'Type yes to confirm');
   const caretText = useMemo(() => [...GRAPHEMES.segment(draft.slice(caret))][0]?.segment ?? ' ', [draft, caret]);
 
   useInput((input, key) => {
@@ -1902,15 +2390,37 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     h(HelpPanel, { active: panel === 'help', interactive, templates, locale, columns: geometry.columns - 4, height: Math.max(1, geometry.rows - 13), onClose: closePanel }),
     h(ChoicePanel, {
       active: panel !== null && panel !== 'help', interactive,
-      title: panel === 'model' ? t('选择模型', 'Select model') : panel === 'mode' ? t('选择工具模式', 'Select tool mode') : t('选择审批方式', 'Select approval mode'),
+      title: panel === 'model' ? t('选择模型', 'Select model')
+        : panel === 'mode' ? t('选择工具模式', 'Select tool mode')
+          : panel === 'policy' ? t('选择审批方式', 'Select approval mode')
+            : panel === 'permission' ? t('会话权限', 'Session permissions')
+              : panel === 'permission-network' ? t('设置网络权限', 'Set network access')
+                : panel === 'permission-confirm-full' ? t('确认完整访问', 'Confirm full access')
+                  : panel === 'permission-confirm-network' ? t('确认不受限网络', 'Confirm unrestricted network')
+                    : panel === 'control' ? t('外部 Agent 授权', 'External Agent grants')
+                      : panel === 'control-action' ? t('授权操作', 'Grant actions')
+                        : panel === 'control-revoke-confirm' ? t('确认撤销授权', 'Confirm grant revocation')
+                    : '',
       options: choices,
-      selected: panel === 'model' ? `${status?.serviceId}:${status?.selectedModel ?? status?.model}` : panel === 'mode' ? status?.mode ?? undefined : status?.policy,
+      selected: panel === 'model' ? `${status?.serviceId}:${status?.selectedModel ?? status?.model}`
+        : panel === 'mode' ? status?.mode ?? undefined
+          : panel === 'policy' ? status?.policy
+            : panel === 'permission' ? status?.permission?.profile
+              : panel === 'permission-network' ? status?.permission?.network
+                : panel === 'control' ? 'create'
+                : undefined,
       locale, columns: geometry.columns - 4, height: Math.max(1, Math.min(7, geometry.rows - 16)), loading: choicesLoading, onClose: closePanel, onSelect: (choice: PanelChoice) => chooseOption(choice.id),
     }),
+    controlWizard === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'yellow', paddingX: 1 },
+      h(Text, { bold: true }, t('创建外控授权', 'Create Agent Control grant')),
+      h(Text, { wrap: 'wrap' }, controlPrompt),
+      h(Text, { dimColor: true }, t('Enter 提交当前项 · 输入 cancel 取消', 'Enter submits this value · type cancel to stop'))),
     h(Box, { flexDirection: 'column', borderStyle: 'single', borderTop: true, borderBottom: true, borderLeft: false, borderRight: false, borderColor: running ? 'yellow' : 'cyan', paddingX: 1 }, h(Box, null,
       h(Text, { color: running ? 'yellow' : 'cyan' }, running ? `${SPINNER[tick % SPINNER.length]} ` : '› '),
       draft === '' && !running
-        ? h(Text, { dimColor: true }, t(`描述任务 · ${keyHint('send')} 发送 · ${keyHint('newline')} 换行 · / 命令 · @ 文件`, `Describe a task · ${keyHint('send')} send · ${keyHint('newline')} new line · / commands · @ files`))
+        ? h(Text, { dimColor: true }, controlWizard === null
+          ? t(`描述任务 · ${keyHint('send')} 发送 · ${keyHint('newline')} 换行 · / 命令 · @ 文件`, `Describe a task · ${keyHint('send')} send · ${keyHint('newline')} new line · / commands · @ files`)
+          : t('输入授权设置答案', 'Enter the grant setting'))
         : h(Text, { wrap: 'wrap' },
           draft.slice(0, caret),
           h(Text, { inverse: true }, caretText),

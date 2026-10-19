@@ -9,6 +9,7 @@ export const DEFAULT_LIMITS = Object.freeze({
   scanBytes: 2_000_000,
   scanFiles: 5_000,
   execBytes: 32_000,
+  execTimeoutMs: 120_000,
   trashDirectory: '.ligule-trash',
   // 技能搜索、正文和文件读取分别设有上限；总工具结果上限仍会进一步约束注入模型的内容。
   skillSearchBytes: 8_000,

@@ -14,6 +14,12 @@ test('explicit output budget is effective for a verified model while the default
   assert.equal(providerFromConfig({ model: { ...official, outputTokens: 1024 } }).outputTokens, 1024);
 });
 
+test('the official DeepSeek root URL keeps its verified output limit', () => {
+  const rootEndpoint = { ...official, baseURL: 'https://api.deepseek.com' };
+  assert.equal(providerFromConfig({ model: rootEndpoint }).outputTokens, 8192);
+  assert.equal(providerFromConfig({ model: { ...rootEndpoint, outputTokens: 32768 } }).outputTokens, 32768);
+});
+
 test('output budgets fail explicitly when unsupported or invalid', () => {
   assert.throws(() => providerFromConfig({ model: { ...official, baseURL: 'https://proxy.example/v1', outputTokens: 16384 } }),
     (error) => error.code === 'provider_output_budget_unsupported');

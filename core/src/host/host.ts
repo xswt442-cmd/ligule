@@ -5,23 +5,29 @@ import type { Readable, Writable } from 'node:stream';
 import { access, readFile, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { KernelError } from '../kernel/error.js';
+import {
+  assertDelegationPermission, assertDelegationPolicy, createDelegationGrant, delegationPathOf,
+  listDelegationGrants, recordDelegationEvent, requireDelegationGrant, revokeDelegationGrant,
+  type CreateDelegationGrantInput, type DelegationGrant,
+} from './agent-control.js';
+import { createPermissionContext, DEFAULT_PERMISSION_CONTEXT, permissionDenial, type PermissionContext, type PermissionNetwork, type PermissionProfile } from '../kernel/permission.js';
 import { createKernel, type Kernel } from '../kernel/kernel.js';
 import { loadAssembly, type Assembly, type Plugin } from '../kernel/assembly.js';
 import { loadExtensions, type ExtensionDiagnostic } from '../kernel/extensions.js';
-import { DEFAULT_MODE, loadMode, type ModeDirectories, type ModeFile } from '../kernel/modes.js';
-import { readRegistry, registerWorkspace, setDefaultWorkspace, workspaceIdentity } from '../kernel/workspace.js';
+import { DEFAULT_MODE, listModes, loadMode, type ModeDirectories, type ModeFile } from '../kernel/modes.js';
+import { readRegistry, registerWorkspace, setDefaultWorkspace, unregisterWorkspace, workspaceIdentity } from '../kernel/workspace.js';
 import { historyPathOf, loadHistory, rememberHistory } from '../kernel/input-history.js';
 import { parsePrefsJson, prefsPathOf, readPrefs, savePrefs } from '../kernel/desktop-prefs.js';
 import { credentialStatus, deleteCredential, storeCredential } from '../kernel/credentials.js';
-import { modelServices, modelSelection, resolveModel, type ModelSelection } from '../kernel/model-services.js';
-import { createDecisionChain, isPolicyRule, type DecisionChain, type PolicyMode, type PolicyThresholds } from '../kernel/policy.js';
+import { modelServices, modelSelection, resolveModel, type ModelSelection, type ModelService } from '../kernel/model-services.js';
+import { createDecisionChain, isPolicyRule, type DecisionChain, type PolicyMode, type PolicyState, type PolicyThresholds } from '../kernel/policy.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
 import { createSessionLog, type SessionLog } from '../session/session.js';
 import type { SessionEvent, SessionHeader } from '../session/format.js';
-import { chooseResumeMode, listSessions, sessionDirectory } from '../session/list.js';
+import { chooseResumeMode, listWorkspaceSessions, sessionDirectories, sessionDirectory } from '../session/list.js';
 import { adoptForSessionDirectory } from '../session/adopt.js';
-import { searchSessions } from '../session/search.js';
+import { searchSessionDirectories } from '../session/search.js';
 import { branchSession } from '../session/branch.js';
 import { listProjectFiles } from './paths.js';
 import { branchSessionId, exportMarkdown, writeExport, type ExportRecord } from './export.js';
@@ -44,6 +50,7 @@ import { createAskUserPlugin } from '../tools/ask-user.js';
 import { createMcpRegistry, mcpServerConfigs, type McpRegistry } from '../capability/mcp.js';
 import { discoverModels } from '../model/discovery.js';
 import { apiRoot } from '../model/http.js';
+import { thinkingCapabilityOf } from '../model/thinking.js';
 import type { ModelRequest, ProviderEvent } from '../kernel/loop.js';
 import { createConnection, type Connection, type HostRequest } from './connection.js';
 import { APPROVAL_METHOD, QUESTION_METHOD, isApproved, validateCall, type HostMethodParams } from './protocol.js';
@@ -56,7 +63,7 @@ import type { TemplateRegistry } from '../kernel/templates.js';
 import type { PolicyRule } from '../kernel/config-edit.js';
 import type { ToolDefinition } from '../kernel/kernel.js';
 import { adoptSessionMode, type SessionModeState } from './session-mode.js';
-import { providerFromConfig, hostProviderFromConfig, type HostProvider } from './provider.js';
+import { providerFromConfig, hostProviderFromConfig, type HostGenerationOptions, type HostProvider } from './provider.js';
 export { providerFromConfig, hostProviderFromConfig } from './provider.js';
 
 interface HostConfigSnapshot extends ConfigSnapshot {
@@ -107,8 +114,6 @@ interface ProjectEnvironment extends Omit<EnvironmentSeed, 'layers' | 'store' | 
   policy?: PolicyConfig;
   generation?: SessionGeneration;
   pendingModel?: Record<string, unknown>;
-  legacyAdopted?: boolean;
-  adopting?: Promise<unknown>;
 }
 
 interface HostOptions {
@@ -126,8 +131,16 @@ interface HostOptions {
   readonly configStore?: ReturnType<typeof createConfigStore>;
   readonly configLayers?: LoadedLayers;
   readonly configStoreFor?: (projectRoot: string, layers: LoadedLayers) => ReturnType<typeof createConfigStore>;
-  readonly deriveProvider?: (config: ConfigSnapshot) => HostProvider;
+  readonly deriveProvider?: (config: ConfigSnapshot, generation?: HostGenerationOptions) => HostProvider;
   readonly interactive?: boolean;
+  readonly permission?: PermissionContext;
+  readonly permissionControl?: boolean;
+  readonly agentControl?: {
+    readonly grantId: string;
+    readonly storePath: string;
+    readonly operator: boolean;
+    validate(): Promise<DelegationGrant>;
+  };
 }
 
 interface RuntimeConfig extends HostConfigSnapshot {
@@ -139,6 +152,21 @@ interface SessionGeneration {
   readonly provider: HostProvider;
   readonly model: Record<string, unknown>;
   readonly explicit?: boolean;
+  readonly options: HostGenerationOptions;
+}
+
+interface InitialSessionSettings {
+  readonly mode?: string;
+  readonly policy?: Exclude<PolicyMode, 'default'>;
+  readonly permission?: {
+    readonly context: PermissionContext;
+    readonly confirmedFullAccess: boolean;
+    readonly confirmedNetwork: boolean;
+  };
+  readonly loopIterations?: number;
+  readonly persistLoopIterations: boolean;
+  readonly generation: SessionGeneration;
+  readonly persistGeneration: boolean;
 }
 
 interface AdoptionResult {
@@ -154,11 +182,17 @@ interface HostSessionBase {
   readonly listeners: ((event: SessionEvent) => void)[];
   readonly asks: Set<() => void>;
   readonly environment: ProjectEnvironment;
+  permission: PermissionContext;
+  policyOverride: PolicyMode | null;
   readonly mode: ModeState;
+  loopIterations: number;
+  readonly loopModelCalls: number;
+  pendingLoopIterations?: number;
   generation: SessionGeneration;
   pendingGeneration?: SessionGeneration;
   pending?: ModeFile;
   running?: AbortController;
+  permissionChanging?: boolean;
   compaction?: ReturnType<typeof createCompaction> | null;
   progress?: HostRunProgress;
   progressId?: string;
@@ -239,6 +273,82 @@ function modelSelectionOf(model: Record<string, unknown>): ModelSelection | unde
   return isRecord(model.selection) && typeof model.selection.provider === 'string' && typeof model.selection.model === 'string'
     ? { provider: model.selection.provider, model: model.selection.model }
     : undefined;
+}
+
+function permissionView(permission: PermissionContext, changeAllowed: boolean, changeReason?: string): Record<string, unknown> {
+  const execDenial = permissionDenial(permission, 'exec');
+  return {
+    profile: permission.profile,
+    network: permission.network,
+    capabilities: permission.capabilities,
+    execution: execDenial === undefined
+      ? { available: true, code: null, reason: null }
+      : { available: false, code: execDenial.code, reason: execDenial.reason },
+    changeAllowed,
+    ...(changeReason === undefined ? {} : { changeReason }),
+  };
+}
+
+function sessionPermissionView(state: HostSessionState, controlAllowed: boolean): Record<string, unknown> {
+  const changeReason = !controlAllowed ? 'permission_control_unavailable'
+    : state.running !== undefined ? 'permission_session_running'
+      : state.permissionChanging === true ? 'permission_change_in_progress'
+        : state.extensions.loaded.length > 0 ? 'permission_extension_restart_required'
+          : undefined;
+  return permissionView(state.permission, changeReason === undefined, changeReason);
+}
+
+function checkedSessionModel(model: Record<string, unknown>, selection: ModelSelection): Record<string, unknown> {
+  const resolved = resolveModel(model, selection);
+  if (selection.provider === 'legacy') {
+    const inherited = { ...model };
+    delete inherited.selection;
+    const configured = resolveModel(inherited);
+    if (configured.serviceId !== 'legacy' || configured.model !== selection.model) {
+      throw new KernelError('model_not_available');
+    }
+  }
+  return resolved;
+}
+
+function generationSelectionOf(event: SessionEvent): ModelSelection | undefined {
+  if (event.selection === null) return undefined;
+  if (event.selection === undefined) {
+    if (typeof event.provider !== 'string' || typeof event.model !== 'string') return undefined;
+    return modelSelection({ provider: event.provider, model: event.model });
+  }
+  return modelSelection(event.selection);
+}
+
+function generationOptionsOf(event: SessionEvent): HostGenerationOptions {
+  const options: { outputTokens?: number; thinkingEffort?: HostGenerationOptions['thinkingEffort'] } = {};
+  const outputTokens = event.outputTokensOverride ?? event.outputTokens;
+  if (outputTokens !== undefined && outputTokens !== null) {
+    if (typeof outputTokens !== 'number' || !Number.isSafeInteger(outputTokens) || outputTokens < 1) {
+      throw new KernelError('session_generation_invalid', { detail: 'outputTokens must be a positive safe integer' });
+    }
+    options.outputTokens = outputTokens;
+  }
+  if (event.thinkingEffort !== undefined && event.thinkingEffort !== null) {
+    if (typeof event.thinkingEffort !== 'string') throw new KernelError('session_generation_invalid', { detail: 'thinkingEffort must be text' });
+    options.thinkingEffort = event.thinkingEffort as HostGenerationOptions['thinkingEffort'];
+  }
+  return options;
+}
+
+function sessionGenerationEvent(generation: SessionGeneration): Record<string, unknown> {
+  const selection = generation.explicit === true ? modelSelectionOf(generation.model) : undefined;
+  return selection === undefined
+    ? {
+        kind: 'sessionGeneration', ignorable: true, selection: null,
+        thinkingEffort: generation.options.thinkingEffort ?? null,
+        outputTokensOverride: generation.options.outputTokens ?? null,
+      }
+    : {
+        kind: 'modelSelection', ignorable: true, ...selection,
+        thinkingEffort: generation.options.thinkingEffort ?? null,
+        outputTokensOverride: generation.options.outputTokens ?? null,
+      };
 }
 
 // 会话名称需要为列表中的时间和条目数留出显示空间。
@@ -332,6 +442,13 @@ function loopLimitsOf(config: HostConfigSnapshot): LoopLimits {
   };
 }
 
+function sessionLoopLimits(state: HostSessionBase): LoopLimits {
+  return {
+    get iterations() { return state.loopIterations; },
+    get modelCalls() { return state.loopModelCalls; },
+  };
+}
+
 // 优先采用所选模型声明的上下文窗口，其次采用配置的备用值；两者都未设置时关闭压缩。
 // 立即拒绝无效上限，因为非有限窗口无法用于计算上下文压力。
 // 保留预算必须小于压力阈值，压缩后才能将请求控制在阈值以内。
@@ -373,7 +490,11 @@ function observedProvider(provider: HostProvider, onDelta: (event: ProviderEvent
     get capabilities() { return provider.capabilities; },
     get requiresCompletion() { return provider.requiresCompletion; },
     get outputTokens() { return provider.outputTokens; },
+    get contextTokens() { return provider.contextTokens; },
+    get thinkingCapability() { return provider.thinkingCapability; },
+    get thinkingEffort() { return provider.thinkingEffort; },
     withModel(model) { return observedProvider(provider.withModel(model), onDelta); },
+    withGeneration(options) { return observedProvider(provider.withGeneration(options), onDelta); },
     async *stream(request: ModelRequest, options?: { readonly signal?: AbortSignal }) {
       for await (const event of provider.stream(request, options)) {
         if (event.type !== 'finish') onDelta(event);
@@ -393,7 +514,11 @@ function currentProvider(read: () => HostProvider): HostProvider {
     get capabilities() { return read().capabilities; },
     get requiresCompletion() { return read().requiresCompletion; },
     get outputTokens() { return read().outputTokens; },
+    get contextTokens() { return read().contextTokens; },
+    get thinkingCapability() { return read().thinkingCapability; },
+    get thinkingEffort() { return read().thinkingEffort; },
     withModel(model) { return read().withModel(model); },
+    withGeneration(options) { return read().withGeneration(options); },
     stream(request, options) { return read().stream(request, options); },
   };
 }
@@ -406,7 +531,11 @@ function compactionProgressProvider(provider: HostProvider, onProgress: (event: 
     get capabilities() { return provider.capabilities; },
     get requiresCompletion() { return provider.requiresCompletion; },
     get outputTokens() { return provider.outputTokens; },
+    get contextTokens() { return provider.contextTokens; },
+    get thinkingCapability() { return provider.thinkingCapability; },
+    get thinkingEffort() { return provider.thinkingEffort; },
     withModel(model) { return compactionProgressProvider(provider.withModel(model), onProgress); },
+    withGeneration(options) { return compactionProgressProvider(provider.withGeneration(options), onProgress); },
     async *stream(request, options) {
       onProgress({ kind: 'phase', phase: 'compaction', modelCalls: 0, toolCalls: 0 });
       for await (const event of provider.stream(request, options)) {
@@ -464,7 +593,8 @@ export function shownConfigOf(config: ConfigSnapshot) {
 export function createHost({
   config, provider, plugins = [minimalPlugin, networkPlugin], policy, logger, modeName, modePaths, skillRegistry,
   templateRegistry, extensions = { paths: [], ignored: [] }, loadEnvironment, configStore, configLayers, configStoreFor,
-  deriveProvider = providerFromConfig, interactive = false,
+  deriveProvider = providerFromConfig, interactive = false, permission = DEFAULT_PERMISSION_CONTEXT, permissionControl = false,
+  agentControl,
 }: HostOptions): Host {
   // 每个项目环境持有自己的配置快照、提供方、策略、模式、记录目录和可写配置层。
   // 在加载环境时校验配置，避免等到第一次模型请求才发现错误。
@@ -508,6 +638,38 @@ export function createHost({
   });
   // 每个归一化项目根目录只缓存一个环境，供该项目的会话与列表操作复用。
   const environments = new Map<string, ProjectEnvironment>([[defaultEnvironment.projectRoot, defaultEnvironment]]);
+  const sessionConfigurationTails = new Map<string, Promise<void>>();
+  const canControlPermission = permissionControl || agentControl?.operator === true;
+  let knownGrant: DelegationGrant | undefined;
+
+  async function activeDelegation(): Promise<DelegationGrant | undefined> {
+    if (agentControl === undefined) return undefined;
+    knownGrant = await agentControl.validate();
+    return knownGrant;
+  }
+
+  async function assertDelegationProject(grant: DelegationGrant, root: string): Promise<void> {
+    let actual: string;
+    try { actual = await realpath(root); }
+    catch { throw new KernelError('agent_control_project_forbidden'); }
+    const expected = process.platform === 'win32' ? grant.projectRoot.toLowerCase() : grant.projectRoot;
+    const found = process.platform === 'win32' ? actual.toLowerCase() : actual;
+    if (found !== expected) throw new KernelError('agent_control_project_forbidden');
+  }
+
+  async function serializeSessionConfiguration<T>(sessionId: string, action: () => Promise<T>): Promise<T> {
+    const previous = sessionConfigurationTails.get(sessionId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.catch(() => {}).then(() => gate);
+    sessionConfigurationTails.set(sessionId, tail);
+    await previous.catch(() => {});
+    try { return await action(); }
+    finally {
+      release();
+      if (sessionConfigurationTails.get(sessionId) === tail) sessionConfigurationTails.delete(sessionId);
+    }
+  }
 
   // 对路径不存在、目标不是目录和目录不可读分别返回稳定错误。
   // 新项目还没有记录目录是正常状态，会话列表应返回空结果。
@@ -544,6 +706,110 @@ export function createHost({
     return loaded;
   }
 
+  async function readOnlySessionConfig(projectRoot: string): Promise<RuntimeConfig> {
+    try {
+      return (await environmentFor(projectRoot)).config;
+    } catch (error) {
+      if (loadEnvironment !== undefined || errorCode(error) !== 'host_project_root_unsupported') throw error;
+      // A Host without a project loader can still browse a known workspace's stored history without loading project config.
+      return { ...defaultEnvironment.config, boundary: projectRoot, workspaceRoot: projectRoot };
+    }
+  }
+
+  async function initialSessionSettings(env: ProjectEnvironment, params: HostMethodParams, grant?: DelegationGrant): Promise<InitialSessionSettings> {
+    const hasProvider = params.initialProvider !== undefined;
+    const hasModel = params.initialModel !== undefined;
+    if (hasProvider !== hasModel) throw new KernelError('session_model_selection_invalid', { detail: 'initialProvider and initialModel must be supplied together' });
+    let selection: ModelSelection | undefined;
+    let model = { ...(env.generation?.model ?? env.pendingModel ?? modelConfigOf(env.config)) };
+    if (hasProvider && hasModel) {
+      selection = modelSelection({ provider: params.initialProvider, model: params.initialModel });
+      const latest = env.store === undefined ? env.config : (await env.store.read()).values;
+      model = { ...modelConfigOf(env.config), ...(isRecord(latest.model) ? latest.model : {}), selection };
+      checkedSessionModel(model, selection);
+    }
+    let policy: Exclude<PolicyMode, 'default'> | undefined;
+    const requestedPolicy = params.initialPolicy ?? grant?.defaultPolicy;
+    if (requestedPolicy !== undefined) {
+      if (requestedPolicy !== 'ask' && requestedPolicy !== 'auto' && requestedPolicy !== 'never') {
+        throw new KernelError('policy_mode_unknown');
+      }
+      if (grant !== undefined) assertDelegationPolicy(grant, requestedPolicy);
+      policy = requestedPolicy;
+    }
+    const hasInitialPermission = params.initialPermissionProfile !== undefined || params.initialPermissionNetwork !== undefined;
+    let initialPermission: InitialSessionSettings['permission'];
+    if (hasInitialPermission) {
+      if (!permissionControl && agentControl?.operator !== true) {
+        throw new KernelError(agentControl === undefined ? 'permission_control_unavailable' : 'agent_control_operator_required');
+      }
+      const profile = params.initialPermissionProfile ?? permission.profile;
+      const network = params.initialPermissionNetwork ?? permission.network;
+      if (profile !== 'read-only' && profile !== 'workspace-write' && profile !== 'full-access') {
+        throw new KernelError('permission_profile_invalid');
+      }
+      if (network !== 'policy' && network !== 'unrestricted' && network !== 'disabled') {
+        throw new KernelError('permission_network_mode_invalid');
+      }
+      if (grant !== undefined) assertDelegationPermission(grant, profile, network);
+      const confirmedFullAccess = grant === undefined
+        ? profile === 'full-access' && params.confirmInitialFullAccess === true
+        : profile === 'full-access' && grant.confirmedFullAccess;
+      const confirmedNetwork = grant === undefined
+        ? network === 'unrestricted' && params.confirmInitialNetwork === true
+        : network === 'unrestricted' && grant.confirmedUnrestrictedNetwork;
+      if (grant === undefined && profile === 'full-access' && !confirmedFullAccess) {
+        throw new KernelError('permission_full_access_confirmation_required');
+      }
+      if (grant === undefined && network === 'unrestricted' && !confirmedNetwork) {
+        throw new KernelError('permission_network_confirmation_required');
+      }
+      initialPermission = {
+        context: createPermissionContext(profile, network, permission.capabilities),
+        confirmedFullAccess,
+        confirmedNetwork,
+      };
+    }
+    const options: { outputTokens?: number; thinkingEffort?: HostGenerationOptions['thinkingEffort'] } = {};
+    if (params.initialOutputTokens !== undefined) {
+      if (!Number.isSafeInteger(params.initialOutputTokens) || params.initialOutputTokens < 1) {
+        throw new KernelError('provider_output_budget_invalid');
+      }
+      options.outputTokens = params.initialOutputTokens;
+    }
+    if (params.initialThinkingEffort !== undefined && params.initialThinkingEffort !== 'default') {
+      if (!['none', 'low', 'high', 'max'].includes(params.initialThinkingEffort)) {
+        throw new KernelError('provider_thinking_effort_invalid');
+      }
+      options.thinkingEffort = params.initialThinkingEffort as HostGenerationOptions['thinkingEffort'];
+    }
+    let loopIterations: number | undefined;
+    if (params.initialLoopIterations !== undefined) {
+      if (!Number.isSafeInteger(params.initialLoopIterations) || params.initialLoopIterations < 1) {
+        throw new KernelError('host_loop_limits_invalid', { detail: 'iterations must be a positive safe integer' });
+      }
+      loopIterations = params.initialLoopIterations;
+    }
+    const persistGeneration = selection !== undefined || Object.keys(options).length > 0;
+    const provider = persistGeneration ? deriveProvider({ ...env.config, model }, options) : env.generation?.provider ?? env.provider;
+    const mode = params.initialMode === undefined
+      ? undefined
+      : params.initialMode === 'default' ? env.modeName ?? DEFAULT_MODE : requiredString(params.initialMode, 'initialMode');
+    if (mode !== undefined) {
+      if (env.modePaths === undefined) throw new KernelError('host_mode_paths_required');
+      await loadMode(mode, env.modePaths);
+    }
+    return {
+      ...(mode === undefined ? {} : { mode }),
+      ...(policy === undefined ? {} : { policy }),
+      ...(initialPermission === undefined ? {} : { permission: initialPermission }),
+      ...(loopIterations === undefined ? {} : { loopIterations }),
+      persistLoopIterations: loopIterations !== undefined,
+      generation: { provider, model, ...(selection === undefined ? {} : { explicit: true }), options },
+      persistGeneration,
+    };
+  }
+
   // 在工作区中创建或打开会话后登记该工作区。
   // 登记失败会写入日志，但不会阻止会话打开。
   async function noteWorkspace(environment: ProjectEnvironment): Promise<void> {
@@ -575,11 +841,11 @@ export function createHost({
   function adoptGeneration(env: ProjectEnvironment, key: string, effective: unknown): AdoptionResult {
     // 保留尚未完整的模型配置，让后续字段写入可以继续补齐。
     // 首次配置时即使还没有 `[model]` 表也适用。
-    const base = env.generation ?? { provider: env.provider, model: env.pendingModel ?? modelConfigOf(env.config) };
+    const base = env.generation ?? { provider: env.provider, model: env.pendingModel ?? modelConfigOf(env.config), options: {} };
     const model: Record<string, unknown> = { ...base.model, [key]: effective };
     let provider: HostProvider;
     try {
-      provider = deriveProvider({ ...env.config, model });
+      provider = deriveProvider({ ...env.config, model }, {});
     } catch (error) {
       env.pendingModel = model;
       return { applies: [], failure: { code: errorCode(error) ?? 'provider_rebuild_failed', detail: errorMessage(error) } };
@@ -588,7 +854,7 @@ export function createHost({
     // 有效提供方未变化时报告未应用，返回结果应反映实际运行状态。
     const changed = new Set<string>([...Object.keys(base.model ?? {}), ...Object.keys(model)]);
     if ([...changed].every((field) => base.model?.[field] === model[field])) return { applies: [] };
-    env.generation = { provider, model };
+    env.generation = { provider, model, options: {} };
     // 更新环境中的提供方，让新会话使用最新的有效配置。
     env.provider = provider;
     const applies: { sessionId: string; when: 'now' | 'round' }[] = [];
@@ -604,12 +870,12 @@ export function createHost({
           ? { ...ownGeneration.model, services: effective }
           : { ...ownGeneration.model, outputTokens: effective };
         let ownProvider: HostProvider;
-        try { ownProvider = deriveProvider({ ...env.config, model: ownModel }); }
+        try { ownProvider = deriveProvider({ ...env.config, model: ownModel }, ownGeneration.options); }
         catch (error) { sessionFailure = { code: errorCode(error) ?? 'provider_rebuild_failed' }; continue; }
         const previous = resolveModel(ownGeneration.model);
         const next = resolveModel(ownModel);
         if (['api', 'baseURL', 'apiKeyEnv', 'model', 'outputTokens', 'serviceOutputLimit', 'serviceContextTokens'].every((field) => previous[field] === next[field])) continue;
-        const generation: SessionGeneration = { provider: ownProvider, model: ownModel, explicit: true };
+        const generation: SessionGeneration = { provider: ownProvider, model: ownModel, explicit: true, options: ownGeneration.options };
         if (state.running === undefined) {
           state.generation = generation;
           state.pendingGeneration = undefined;
@@ -620,12 +886,14 @@ export function createHost({
         continue;
       }
       if (state.running === undefined) {
-        state.generation = { provider, model };
+        const ownProvider = deriveProvider({ ...env.config, model }, state.generation.options);
+        state.generation = { provider: ownProvider, model, options: state.generation.options };
         state.pendingGeneration = undefined;
         state.compaction = state.rebuildCompaction(model);
         applies.push({ sessionId: id, when: 'now' });
       } else {
-        state.pendingGeneration = { provider, model };
+        const ownProvider = deriveProvider({ ...env.config, model }, state.generation.options);
+        state.pendingGeneration = { provider: ownProvider, model, options: state.generation.options };
         applies.push({ sessionId: id, when: 'round' });
       }
     }
@@ -715,36 +983,6 @@ export function createHost({
     environments.delete(environment.projectRoot);
   }
 
-  // 会话列表和记录读取使用同一个解析后的目录。
-  // 列出尚未加载的项目不会创建环境，只在现有目录中应用查询条件。
-  // 首次读取前，将旧记录及其附属文件迁入数据根目录中的会话目录，并保留原件。
-  // 同一环境中的并发迁移共用一次操作；锁被占用时允许重试，读写错误交给调用方处理。
-  async function scanDirectory(projectRoot: string): Promise<string> {
-    const unloaded = projectRoot !== undefined && !environments.has(projectRoot) && loadEnvironment === undefined;
-    const environment = unloaded ? defaultEnvironment : await environmentFor(projectRoot);
-    if (environment.legacyAdopted !== true) {
-      environment.adopting ??= (async () => {
-        const report = await adoptForSessionDirectory(environment.config, environment.directory, environment.projectRoot);
-        if (report !== null && (report.copied.length > 0 || report.conflicts.length > 0 || report.unknown.length > 0 || report.busy.length > 0)) {
-          logger?.log?.('legacy session adoption', {
-            projectRoot: environment.projectRoot,
-            copied: report.copied,
-            conflicts: report.conflicts,
-            unknown: report.unknown,
-            busy: report.busy,
-          });
-        }
-        environment.legacyAdopted = report === null || report.busy.length === 0;
-      })();
-      try {
-        await environment.adopting;
-      } finally {
-        environment.adopting = undefined;
-      }
-    }
-    return environment.directory;
-  }
-
   // 从记录标签推导当前会话名称和归档状态，让 Host 与客户端使用同一事实来源。
   async function labelOf(state: HostSessionState): Promise<{ sessionId: string; name: string; archived: boolean }> {
     return { sessionId: state.id, ...foldLabel(await state.session.read()) };
@@ -827,6 +1065,7 @@ export function createHost({
     connection: HostClientConnection,
     initialPhase: LoopProgressPhase = 'preparing',
   ): Promise<T> {
+    if (state.permissionChanging) throw new KernelError('permission_change_in_progress', { detail: state.id });
     if (state.running !== undefined) throw new KernelError('run_already_running', { detail: state.id });
     const controller = new AbortController();
     const progress = beginProgress(state, connection, initialPhase);
@@ -852,6 +1091,10 @@ export function createHost({
             state.generation = state.pendingGeneration;
             state.pendingGeneration = undefined;
             state.compaction = state.rebuildCompaction(state.generation.model);
+          }
+          if (state.pendingLoopIterations !== undefined) {
+            state.loopIterations = state.pendingLoopIterations;
+            state.pendingLoopIterations = undefined;
           }
         } finally {
           if (state.progressId === progress.id) {
@@ -975,6 +1218,16 @@ export function createHost({
   // 每个会话拥有自己的 Kernel、权限状态和循环。
   // 审批请求属于发起它的会话；客户端未明确允许时一律拒绝。
   // 等待审批期间取消轮次时，结束待处理请求并记录拒绝结果。
+  async function appendPolicyState(session: SessionLog, chain: DecisionChain, override: PolicyState['override'] = chain.snapshot().override): Promise<void> {
+    const header = await session.header();
+    if ((header?.formatVersion ?? 0) < 2) {
+      throw new KernelError('session_policy_format_unsupported', {
+        detail: 'session policy changes require a session record with format version 2 or newer',
+      });
+    }
+    await session.append({ kind: 'sessionPolicy', ignorable: true, ...chain.snapshot(), override });
+  }
+
   async function build(
     id: string,
     connection: HostClientConnection,
@@ -982,6 +1235,7 @@ export function createHost({
     explicitMode?: string,
     env: ProjectEnvironment = defaultEnvironment,
     workspaceOrigin?: 'explicit' | 'default',
+    initial?: InitialSessionSettings,
   ): Promise<HostSessionState> {
     // 从会话所属的项目环境解析项目级资源。
     const { config, provider, policy, modePaths, directory, mcpConfigs, extensions, skillRegistry, templateRegistry } = env;
@@ -989,6 +1243,7 @@ export function createHost({
     const listeners: ((event: SessionEvent) => void)[] = [];
     const asks = new Set<() => void>();
     const modeState: ModeState = { file: undefined, tools: [], undo: () => {} };
+    const configuredLoopLimits = loopLimitsOf(config);
     // 新会话可能尚未选择模式，因此在创建记录时再解析模式身份。
     const session = observedSession(createSessionLog({
       directory,
@@ -1015,25 +1270,92 @@ export function createHost({
       mode: modeState,
       pending: undefined,
       environment: env,
-      generation: env.generation ?? { provider, model: modelConfigOf(config) },
+      permission: recover
+        ? createPermissionContext('read-only', 'policy', permission.capabilities)
+        : initial?.permission?.context ?? permission,
+      policyOverride: initial?.policy ?? null,
+      loopIterations: initial?.loopIterations ?? configuredLoopLimits.iterations,
+      loopModelCalls: configuredLoopLimits.modelCalls,
+      generation: initial?.generation ?? env.generation ?? { provider, model: modelConfigOf(config), options: {} },
       adopt: async () => {},
     };
     // 调用时解析生成设置，让循环、压缩和派生执行都能读取会话的最新配置。
     const live = currentProvider(() => state.generation.provider);
+    let recoveredPolicyState: PolicyState | undefined;
     await session.acquire();
     const cleanup = [];
     try {
     if (recover) {
-      const previous = (await session.read()).filter((event) => event.kind === 'modelSelection').at(-1);
-      if (previous !== undefined) {
-        const selection = modelSelection({ provider: previous.provider, model: previous.model });
-        const model = { ...(env.generation?.model ?? config.model), selection };
-        state.generation = { provider: hostProviderFromConfig({ ...config, model }), model, explicit: true };
+      const events = await session.read();
+      const savedPermission = events.filter((event) => event.kind === 'sessionPermission').at(-1);
+      if (savedPermission !== undefined) {
+        state.permission = createPermissionContext(savedPermission.profile, savedPermission.network, permission.capabilities);
       }
+      const savedPolicy = events.filter((event) => event.kind === 'sessionPolicy').at(-1);
+      if (savedPolicy !== undefined) {
+        recoveredPolicyState = {
+          override: savedPolicy.override === null ? null : savedPolicy.override as PolicyMode,
+          consecutive: savedPolicy.consecutive as number,
+          total: savedPolicy.total as number,
+          forcedToAsk: savedPolicy.forcedToAsk as boolean,
+        };
+        state.policyOverride = recoveredPolicyState.override;
+      }
+      const grant = await activeDelegation();
+      if (grant !== undefined) assertDelegationPermission(grant, state.permission.profile, state.permission.network);
+      const savedLoopIterations = events.filter((event) => event.kind === 'sessionLoopIterations').at(-1)?.iterations;
+      if (savedLoopIterations !== undefined) {
+        if (typeof savedLoopIterations !== 'number' || !Number.isSafeInteger(savedLoopIterations) || savedLoopIterations < 1) {
+          throw new KernelError('host_loop_limits_invalid', { detail: 'saved iterations must be a positive safe integer' });
+        }
+        state.loopIterations = savedLoopIterations;
+      }
+      const saved = events.filter((event) => event.kind === 'sessionGeneration' || event.kind === 'modelSelection').at(-1);
+      if (saved !== undefined) {
+        const baseModel = { ...(env.generation?.model ?? modelConfigOf(config)) };
+        const selection = generationSelectionOf(saved);
+        const model = selection === undefined ? baseModel : { ...baseModel, selection };
+        const options = generationOptionsOf(saved);
+        state.generation = { provider: deriveProvider({ ...config, model }, options), model, explicit: selection !== undefined, options };
+      } else {
+        const previous = events.filter((event) => event.kind === 'modelSelection').at(-1);
+        if (previous !== undefined) {
+          const selection = modelSelection({ provider: previous.provider, model: previous.model });
+          const model = { ...(env.generation?.model ?? modelConfigOf(config)), selection };
+          state.generation = { provider: deriveProvider({ ...config, model }, {}), model, explicit: true, options: {} };
+        }
+      }
+    } else {
+      const grant = await activeDelegation();
+      await session.append(grant !== undefined
+        ? {
+            kind: 'sessionPermission',
+            profile: state.permission.profile,
+            network: state.permission.network,
+            source: 'agent-control',
+            grantId: grant.id,
+            confirmedFullAccess: state.permission.profile === 'full-access' && grant.confirmedFullAccess,
+            confirmedNetwork: state.permission.network === 'unrestricted' && grant.confirmedUnrestrictedNetwork,
+          }
+        : initial?.permission === undefined
+          ? {
+              kind: 'sessionPermission',
+              profile: state.permission.profile,
+              network: state.permission.network,
+              source: 'host-default',
+            }
+          : {
+              kind: 'sessionPermission',
+              profile: state.permission.profile,
+              network: state.permission.network,
+              source: 'trusted-ui',
+              confirmedFullAccess: initial.permission.confirmedFullAccess,
+              confirmedNetwork: initial.permission.confirmedNetwork,
+            });
     }
     const chain = createDecisionChain({
       ...policy,
-      ask: async ({ tool, input, command, reason, shell, executable, policy, policySource, policyForced }) => {
+      ask: async ({ tool, input, command, reason, shell, executable, policy, policySource, policyForced, scriptBinding }) => {
         let settle = (): void => {};
         const cancelled = new Promise<boolean>((resolve) => {
           settle = () => resolve(false);
@@ -1045,6 +1367,7 @@ export function createHost({
           // 同时返回所属项目和策略状态，以便客户端在切换前台会话后仍能解释本次判定。
           const request = connection.request(APPROVAL_METHOD, {
             sessionId: id, projectRoot: env.projectRoot, tool, args: input, command, reason, policy, policySource, policyForced,
+            ...(scriptBinding === undefined ? {} : { scriptBinding }),
             ...(shell === undefined ? {} : { shell, executable }),
           });
           return await Promise.race([
@@ -1061,7 +1384,18 @@ export function createHost({
         }
       },
     });
-    const kernel = createKernel({ config, policy: chain, session, logger });
+    const grant = await activeDelegation();
+    if (grant !== undefined) chain.setMode(grant.defaultPolicy);
+    if (initial?.policy !== undefined) chain.setMode(initial.policy);
+    if (recoveredPolicyState !== undefined) {
+      if (grant !== undefined) assertDelegationPolicy(grant, recoveredPolicyState.override ?? grant.defaultPolicy);
+      chain.restore({ ...recoveredPolicyState, override: recoveredPolicyState.override ?? (grant?.defaultPolicy ?? null) });
+    }
+    const kernel = createKernel({ config, policy: chain, session, logger,
+      permissionForCall: () => state.permission,
+      policyOverrideForSession: () => state.policyOverride,
+    });
+    if (!recover && initial?.policy !== undefined) await appendPolicyState(session, chain, initial.policy);
     // 技能登记表反映已发现的技能，不随当前模式改变。
     // 优先复用加载器提供的登记表，否则从配置目录中发现技能。
     // 没有可用技能时不注册技能工具或提示词片段。
@@ -1127,7 +1461,7 @@ export function createHost({
       plugins: basePlugins,
       modePaths,
       modeFile: () => state.mode.file,
-      loopLimits: loopLimitsOf(config),
+      loopLimits: sessionLoopLimits(state),
     })]);
     cleanup.push(() => assembly.dispose());
     // 加载器已按字节预算处理项目指令片段，这里直接登记，避免重复截断。
@@ -1146,10 +1480,18 @@ export function createHost({
     // 按加载器解析的来源顺序加载扩展，只提供声明过的注册、事件和能力接口。
     // 每个已注册工具仍须经过 Kernel 参数校验和权限判定。
     const fragments: ExtensionPromptFragment[] = [];
-    for (const diagnostic of extensions.ignored) {
+    const extensionsEnabled = state.permission.profile === 'full-access' && state.permission.network === 'unrestricted';
+    const extensionDiagnostics = extensionsEnabled ? extensions.ignored : [
+      ...extensions.ignored,
+      ...extensions.paths.map((path) => ({
+        code: 'extension_requires_full_access', path,
+        detail: 'extensions run inside the Host process and require full-access with unrestricted network permission',
+      })),
+    ];
+    for (const diagnostic of extensionDiagnostics) {
       logger?.log?.('extension source is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
     }
-    const installedExtensions = await loadExtensions(extensions.paths, {
+    const installedExtensions = await loadExtensions(extensionsEnabled ? extensions.paths : [], {
       registerTool: (tool) => {
         return kernel.register(checkedToolDefinition(tool));
       },
@@ -1196,8 +1538,8 @@ export function createHost({
     }
     // 优先采用客户端选定的模式；否则恢复记录中的模式并校验摘要。
     // 模式定义已变化时要求用户明确选择，避免静默改变可用工具。
-    let wanted = explicitMode ?? modeName;
-    if (explicitMode === undefined && recover && modePaths !== undefined) {
+    let wanted = initial?.mode ?? explicitMode ?? modeName;
+    if (initial?.mode === undefined && explicitMode === undefined && recover && modePaths !== undefined) {
       const last = (await session.read()).filter((event) => event.kind === 'mode').at(-1);
       if (last !== undefined) {
         wanted = chooseResumeMode({
@@ -1210,6 +1552,12 @@ export function createHost({
     if (wanted !== undefined) {
       if (modePaths === undefined) throw new KernelError('host_mode_paths_required');
       await state.adopt(await loadMode(wanted, modePaths));
+    }
+    if (initial?.persistGeneration === true) {
+      await session.append(sessionGenerationEvent(state.generation));
+    }
+    if (initial?.persistLoopIterations === true && initial.loopIterations !== undefined) {
+      await session.append({ kind: 'sessionLoopIterations', ignorable: true, iterations: initial.loopIterations });
     }
     // 压缩属于会话。摘要请求使用底层提供方，不向客户端转发流式内容。
     // 未配置模型上下文窗口时关闭压缩。
@@ -1246,7 +1594,7 @@ export function createHost({
       provider: observedProvider(live, (event) => connection.notify({ notify: 'delta', sessionId: id, event })),
       prompt,
       session,
-      limits: loopLimitsOf(config),
+      limits: sessionLoopLimits(state),
       compaction: loopCompaction,
       onProgress: (event) => {
         if (state.progressId !== undefined) observeLoopProgress(state as HostSessionState, connection, state.progressId, event);
@@ -1256,6 +1604,8 @@ export function createHost({
         const model = resolveModel(state.generation.model ?? {});
         return {
           model: state.generation.provider.model ?? null,
+          outputTokens: state.generation.provider.outputTokens ?? null,
+          thinkingEffort: state.generation.options.thinkingEffort ?? 'default',
           ...(typeof model.baseURL === 'string' ? { baseURL: model.baseURL } : {}),
           serviceId: model.serviceId,
           api: model.api ?? null,
@@ -1285,14 +1635,311 @@ export function createHost({
     mode?: string,
     env: ProjectEnvironment = defaultEnvironment,
     workspaceOrigin?: 'explicit' | 'default',
+    initial?: InitialSessionSettings,
   ): Promise<{ sessionId: string }> {
     if (closing !== undefined) throw new KernelError('host_closed');
-    const pending = build(id, connection, recover, mode, env, workspaceOrigin).then((state) => {
+    const pending = build(id, connection, recover, mode, env, workspaceOrigin, initial).then((state) => {
       sessions.set(id, state);
       return { sessionId: id };
     });
     building.add(pending);
     return pending.finally(() => building.delete(pending));
+  }
+
+  async function sessionConfiguration(state: HostSessionState): Promise<Record<string, unknown>> {
+    const generationView = (generation: SessionGeneration) => ({
+      model: {
+        provider: typeof resolveModel(generation.model).serviceId === 'string' ? resolveModel(generation.model).serviceId : 'legacy',
+        model: generation.provider.model,
+      },
+      thinking: {
+        supported: generation.provider.thinkingCapability !== undefined,
+        efforts: generation.provider.thinkingCapability?.efforts ?? [],
+        defaultEffort: generation.provider.thinkingCapability?.defaultEffort ?? null,
+        effort: generation.options.thinkingEffort ?? 'default',
+      },
+      outputTokens: generation.provider.outputTokens ?? null,
+      contextTokens: generation.provider.contextTokens ?? null,
+      maxOutputTokens: generation.provider.maxOutputTokens ?? null,
+    });
+    const latest = state.environment.store === undefined
+      ? state.environment.config
+      : (await state.environment.store.read()).values;
+    const modelConfig = isRecord(latest.model) ? latest.model : modelConfigOf(state.environment.config);
+    const services: Record<string, unknown>[] = modelServices(modelConfig.services).map((service) => ({
+      id: service.id,
+      name: service.name,
+      api: service.api,
+      models: service.models.map((model) => {
+        const settings = service.modelSettings?.find((one) => one.id === model);
+        const thinking = thinkingCapabilityOf(service.api, service.baseURL, model);
+        return {
+          id: model,
+          ...(settings?.name === undefined ? {} : { name: settings.name }),
+          ...(settings?.contextTokens === undefined ? {} : { contextTokens: settings.contextTokens }),
+          ...(settings?.outputTokens === undefined ? {} : { outputTokens: settings.outputTokens }),
+          thinking: thinking === undefined
+            ? { supported: false, efforts: [], defaultEffort: null }
+            : { supported: true, efforts: thinking.efforts, defaultEffort: thinking.defaultEffort },
+        };
+      }),
+    }));
+    if (typeof modelConfig.model === 'string' && typeof modelConfig.api === 'string' && typeof modelConfig.baseURL === 'string') {
+      const thinking = thinkingCapabilityOf(modelConfig.api, modelConfig.baseURL, modelConfig.model);
+      services.push({
+        id: 'legacy', name: 'Legacy model', api: modelConfig.api,
+        models: [{
+          id: modelConfig.model,
+          ...(typeof modelConfig.serviceContextTokens === 'number' ? { contextTokens: modelConfig.serviceContextTokens } : {}),
+          ...(typeof modelConfig.outputTokens === 'number' ? { outputTokens: modelConfig.outputTokens } : {}),
+          thinking: thinking === undefined
+            ? { supported: false, efforts: [], defaultEffort: null }
+            : { supported: true, efforts: thinking.efforts, defaultEffort: thinking.defaultEffort },
+        }],
+      });
+    }
+    const modes = state.environment.modePaths === undefined
+      ? { modes: [], invalid: [], truncated: false }
+      : await listModes(state.environment.modePaths);
+    const pending = state.pendingGeneration === undefined && state.pending === undefined && state.pendingLoopIterations === undefined
+      ? null
+      : {
+          mode: state.pending?.name ?? null,
+          loopIterations: state.pendingLoopIterations ?? null,
+          generation: state.pendingGeneration === undefined ? null : generationView(state.pendingGeneration),
+        };
+    return {
+      sessionId: state.id,
+      applies: 'unchanged',
+      effective: {
+        mode: state.mode.file?.name ?? null,
+        loopIterations: state.loopIterations,
+        policy: { mode: state.chain.mode, source: state.chain.modeSource, default: state.chain.configuredMode() },
+        permission: sessionPermissionView(state, canControlPermission),
+        generation: generationView(state.generation),
+      },
+      pending,
+      available: {
+        modes,
+        policies: ['ask', 'auto', 'never', 'default'],
+        permissionProfiles: ['read-only', 'workspace-write', 'full-access'],
+        permissionNetworks: ['policy', 'unrestricted', 'disabled'],
+        services,
+      },
+      denials: state.chain.denials(),
+      delegation: knownGrant === undefined ? null : {
+        grantId: knownGrant.id,
+        maxPermissionProfile: knownGrant.maxPermissionProfile,
+        maxNetwork: knownGrant.maxNetwork,
+        allowedPolicies: knownGrant.allowedPolicies,
+      },
+    };
+  }
+
+  async function configureSession(state: HostSessionState, params: HostMethodParams, connection: HostClientConnection): Promise<Record<string, unknown>> {
+    const modeChanged = params.mode !== undefined;
+    const policyChanged = params.policy !== undefined;
+    const permissionChanged = params.permissionProfile !== undefined || params.permissionNetwork !== undefined;
+    const loopChanged = params.loopIterations !== undefined;
+    const generationChanged = params.provider !== undefined || params.model !== undefined
+      || params.thinkingEffort !== undefined || params.outputTokens !== undefined
+      || params.resetModel === true || params.resetThinking === true || params.resetOutputTokens === true;
+    const categories = Number(modeChanged) + Number(policyChanged) + Number(permissionChanged) + Number(loopChanged) + Number(generationChanged);
+    if (categories > 1) throw new KernelError('session_configure_one_category');
+    if (categories === 0) return await sessionConfiguration(state);
+    if (agentControl !== undefined && !agentControl.operator) throw new KernelError('agent_control_operator_required');
+
+    if (permissionChanged) {
+      return await setPermission(state, params.permissionProfile ?? state.permission.profile,
+        params.permissionNetwork, undefined, undefined);
+    }
+
+    if (modeChanged) {
+      const requestedName = params.mode === 'default' ? state.environment.modeName ?? DEFAULT_MODE : requiredString(params.mode, 'mode');
+      if (state.environment.modePaths === undefined) throw new KernelError('host_mode_paths_required');
+      const requested = await loadMode(requestedName, state.environment.modePaths);
+      const current = state.mode.file;
+      let applies: 'now' | 'next_round' | 'unchanged' = 'unchanged';
+      if (current?.name === requested.name && current.layer === requested.layer) {
+        if (state.pending !== undefined) {
+          state.pending = undefined;
+          applies = state.running === undefined ? 'now' : 'next_round';
+        }
+      } else if (state.running === undefined) {
+        await state.adopt(requested);
+        applies = 'now';
+      } else {
+        state.pending = requested;
+        applies = 'next_round';
+      }
+      return { ...(await sessionConfiguration(state)), applies };
+    }
+
+    if (policyChanged) {
+      let nextOverride: PolicyMode | null;
+      if (params.policy === 'default') {
+        const grant = await activeDelegation();
+        if (grant !== undefined) assertDelegationPolicy(grant, state.chain.configuredMode());
+        nextOverride = null;
+      } else if (params.policy === 'ask' || params.policy === 'auto' || params.policy === 'never') {
+        const grant = await activeDelegation();
+        if (grant !== undefined) assertDelegationPolicy(grant, params.policy);
+        nextOverride = params.policy;
+      }
+      else throw new KernelError('policy_mode_unknown');
+      await appendPolicyState(state.session, state.chain, nextOverride);
+      state.policyOverride = nextOverride;
+      if (nextOverride === null) state.chain.resetMode();
+      else state.chain.setMode(nextOverride);
+      if (agentControl !== undefined && params.policy !== 'default') {
+        await recordDelegationEvent(agentControl.storePath, {
+          kind: 'grant.used', grantId: agentControl.grantId, policy: params.policy as 'ask' | 'auto' | 'never',
+        });
+      }
+      return { ...(await sessionConfiguration(state)), applies: 'next_decision' };
+    }
+
+    if (loopChanged) {
+      const iterations = params.loopIterations;
+      if (typeof iterations !== 'number' || !Number.isSafeInteger(iterations) || iterations < 1) {
+        throw new KernelError('host_loop_limits_invalid', { detail: 'iterations must be a positive safe integer' });
+      }
+      if (iterations === (state.pendingLoopIterations ?? state.loopIterations)) {
+        return { ...(await sessionConfiguration(state)), applies: 'unchanged' };
+      }
+      await state.session.append({ kind: 'sessionLoopIterations', ignorable: true, iterations });
+      if (state.running === undefined) {
+        state.loopIterations = iterations;
+        state.pendingLoopIterations = undefined;
+      } else state.pendingLoopIterations = iterations;
+      return { ...(await sessionConfiguration(state)), applies: state.running === undefined ? 'now' : 'next_round' };
+    }
+
+    const hasProvider = params.provider !== undefined;
+    const hasModel = params.model !== undefined;
+    if (hasProvider !== hasModel) throw new KernelError('session_model_selection_invalid');
+    if (params.resetModel === true && (hasProvider || hasModel)) throw new KernelError('session_configure_conflict');
+    if (params.resetThinking === true && params.thinkingEffort !== undefined) throw new KernelError('session_configure_conflict');
+    if (params.resetOutputTokens === true && params.outputTokens !== undefined) throw new KernelError('session_configure_conflict');
+
+    const previous = state.pendingGeneration ?? state.generation;
+    let model = previous.model;
+    let explicit = previous.explicit === true;
+    if (params.resetModel === true) {
+      const latest = state.environment.store === undefined ? state.environment.config : (await state.environment.store.read()).values;
+      model = { ...modelConfigOf(state.environment.config), ...(isRecord(latest.model) ? latest.model : {}) };
+      explicit = false;
+    } else if (hasProvider && hasModel) {
+      const selection = modelSelection({ provider: params.provider, model: params.model });
+      const latest = state.environment.store === undefined ? state.environment.config : (await state.environment.store.read()).values;
+      model = { ...modelConfigOf(state.environment.config), ...(isRecord(latest.model) ? latest.model : {}), selection };
+      checkedSessionModel(model, selection);
+      explicit = true;
+    }
+
+    const options: { outputTokens?: number; thinkingEffort?: HostGenerationOptions['thinkingEffort'] } = { ...previous.options };
+    if (params.resetOutputTokens === true) delete options.outputTokens;
+    else if (params.outputTokens !== undefined) {
+      if (!Number.isSafeInteger(params.outputTokens) || params.outputTokens < 1) throw new KernelError('provider_output_budget_invalid');
+      options.outputTokens = params.outputTokens;
+    }
+    if (params.resetThinking === true || params.thinkingEffort === 'default') delete options.thinkingEffort;
+    else if (params.thinkingEffort !== undefined) {
+      if (!['none', 'low', 'high', 'max'].includes(params.thinkingEffort)) throw new KernelError('provider_thinking_effort_invalid');
+      options.thinkingEffort = params.thinkingEffort as HostGenerationOptions['thinkingEffort'];
+    }
+    const provider = deriveProvider({ ...state.environment.config, model }, options);
+    const generation: SessionGeneration = { provider, model, ...(explicit ? { explicit: true } : {}), options };
+    const before = JSON.stringify({ model: previous.model, explicit: previous.explicit === true, options: previous.options });
+    const after = JSON.stringify({ model, explicit, options });
+    if (before === after) return { ...(await sessionConfiguration(state)), applies: 'unchanged' };
+    const compaction = state.running === undefined ? state.rebuildCompaction(model) : undefined;
+    await state.session.append(sessionGenerationEvent(generation));
+    if (state.running === undefined) {
+      state.generation = generation;
+      state.pendingGeneration = undefined;
+      state.compaction = compaction ?? null;
+    } else state.pendingGeneration = generation;
+    return { ...(await sessionConfiguration(state)), applies: state.running === undefined ? 'now' : 'next_round' };
+  }
+
+  async function setPermission(
+    state: HostSessionState,
+    profileValue: unknown,
+    networkValue: unknown,
+    confirmFullAccess: unknown,
+    confirmNetwork: unknown,
+  ): Promise<Record<string, unknown>> {
+    const grant = await activeDelegation();
+    if (!permissionControl && agentControl === undefined) throw new KernelError('permission_control_unavailable');
+    if (agentControl !== undefined && !agentControl.operator) throw new KernelError('agent_control_operator_required');
+    if (state.permissionChanging) throw new KernelError('permission_change_in_progress', { detail: state.id });
+    if (state.running !== undefined) throw new KernelError('permission_session_running', { detail: state.id });
+    if (profileValue !== 'read-only' && profileValue !== 'workspace-write' && profileValue !== 'full-access') {
+      throw new KernelError('permission_profile_invalid');
+    }
+    const network = networkValue === undefined ? state.permission.network : networkValue;
+    if (network !== 'policy' && network !== 'unrestricted' && network !== 'disabled') {
+      throw new KernelError('permission_network_mode_invalid');
+    }
+    if (grant !== undefined) {
+      try { assertDelegationPermission(grant, profileValue, network); }
+      catch (error) {
+        await recordDelegationEvent(agentControl!.storePath, {
+          kind: 'permission.denied', grantId: grant.id,
+          ...(typeof profileValue === 'string' ? { permissionProfile: profileValue as PermissionProfile } : {}),
+          ...(typeof network === 'string' ? { network: network as PermissionNetwork } : {}),
+          code: error instanceof KernelError ? error.code : 'agent_control_permission_exceeds_grant',
+        });
+        throw error;
+      }
+    }
+    if (grant === undefined && profileValue === 'full-access' && state.permission.profile !== 'full-access' && confirmFullAccess !== true) {
+      throw new KernelError('permission_full_access_confirmation_required');
+    }
+    if (grant === undefined && network === 'unrestricted' && state.permission.network !== 'unrestricted' && confirmNetwork !== true) {
+      throw new KernelError('permission_network_confirmation_required');
+    }
+    const next = createPermissionContext(profileValue, network, state.permission.capabilities);
+    if (next.profile === state.permission.profile && next.network === state.permission.network) {
+      return { sessionId: state.id, permission: sessionPermissionView(state, canControlPermission), applies: 'unchanged' };
+    }
+    if (state.extensions.loaded.length > 0 && (next.profile !== 'full-access' || next.network !== 'unrestricted')) {
+      throw new KernelError('permission_extension_restart_required', {
+        detail: 'a loaded extension runs as trusted code in this Host process; close it before lowering this session permission',
+      });
+    }
+    const header = await state.session.header();
+    if ((header?.formatVersion ?? 0) < 2) {
+      throw new KernelError('session_permission_format_unsupported', {
+        detail: 'permission changes require a session record with format version 2 or newer',
+      });
+    }
+    state.permissionChanging = true;
+    try {
+      if (grant !== undefined) {
+        await recordDelegationEvent(agentControl!.storePath, {
+          kind: 'permission.selected', grantId: grant.id, permissionProfile: next.profile, network: next.network,
+        });
+      }
+      await state.session.append({
+        kind: 'sessionPermission',
+        profile: next.profile,
+        network: next.network,
+        source: grant === undefined ? 'trusted-ui' : 'agent-control',
+        ...(grant === undefined ? {} : { grantId: grant.id }),
+        confirmedFullAccess: grant === undefined
+          ? next.profile === 'full-access' && state.permission.profile !== 'full-access' && confirmFullAccess === true
+          : next.profile === 'full-access' && grant.confirmedFullAccess,
+        confirmedNetwork: grant === undefined
+          ? next.network === 'unrestricted' && state.permission.network !== 'unrestricted' && confirmNetwork === true
+          : next.network === 'unrestricted' && grant.confirmedUnrestrictedNetwork,
+      });
+      state.permission = next;
+      return { sessionId: state.id, permission: sessionPermissionView(state, canControlPermission), applies: 'now' };
+    } finally {
+      if (sessions.get(state.id) === state) state.permissionChanging = false;
+    }
   }
 
   const host: Host = {
@@ -1302,6 +1949,12 @@ export function createHost({
       validateCall(rawMessage.method, rawParams);
       const message: HostRequestWithParams = { ...rawMessage, params: rawParams };
       const { sessionId = '', input = '' } = message.params;
+      const grant = await activeDelegation();
+      if (grant !== undefined) {
+        await assertDelegationProject(grant, message.params.projectRoot ?? defaultEnvironment.projectRoot);
+        const ownedState = sessions.get(sessionId);
+        if (ownedState !== undefined) await assertDelegationProject(grant, ownedState.environment.projectRoot);
+      }
 
       switch (message.method) {
         case 'session.create': {
@@ -1312,10 +1965,17 @@ export function createHost({
             throw new KernelError('workspace_origin_unknown', { detail: `${origin}; the call takes 'explicit' or 'default', or nothing at all` });
           }
           const env = await environmentFor(message.params.projectRoot);
+          const initial = await initialSessionSettings(env, message.params, grant);
           const created = await buildSession(id, connection, false, undefined, env,
-            origin ?? (message.params.projectRoot === undefined ? 'default' : 'explicit'));
+            origin ?? (message.params.projectRoot === undefined ? 'default' : 'explicit'), initial);
+          if (grant !== undefined) await recordDelegationEvent(agentControl!.storePath, { kind: 'grant.used', grantId: grant.id });
           await noteWorkspace(env);
-          return created;
+          const hasInitialSettings = message.params.initialMode !== undefined || message.params.initialPolicy !== undefined
+            || message.params.initialPermissionProfile !== undefined || message.params.initialPermissionNetwork !== undefined
+            || message.params.initialProvider !== undefined || message.params.initialModel !== undefined
+            || message.params.initialThinkingEffort !== undefined || message.params.initialOutputTokens !== undefined
+            || message.params.initialLoopIterations !== undefined;
+          return hasInitialSettings ? { ...created, settingsApplied: true } : created;
         }
         case 'session.open': {
           // 按会话所属项目定位已打开的会话，与 `session.read` 使用相同规则。
@@ -1324,6 +1984,7 @@ export function createHost({
             // 重新打开当前 Host 已拥有的会话只读状态，不得打断正在运行的轮次。
             // 会话空闲时立即应用新模式；轮次运行期间则等到边界再应用。
             const state = open(sessionId);
+            if (grant !== undefined) await recordDelegationEvent(agentControl!.storePath, { kind: 'grant.used', grantId: grant.id });
             if (message.params.mode !== undefined) {
               if (state.environment.modePaths === undefined) throw new KernelError('host_mode_paths_required');
               const requested = await loadMode(message.params.mode, state.environment.modePaths);
@@ -1344,17 +2005,43 @@ export function createHost({
           const path = recordPathOf(sessionId, env);
           try {
             await access(path);
-          } catch {
-            throw new KernelError('session_not_found', { detail: sessionId });
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+            const filename = `${sessionId}.jsonl`;
+            const legacy = sessionDirectories(env.config).slice(1);
+            let legacyRecord = false;
+            for (const directory of legacy) {
+              try {
+                await access(join(directory, filename));
+                legacyRecord = true;
+                break;
+              } catch (legacyError) {
+                if ((legacyError as NodeJS.ErrnoException).code !== 'ENOENT') throw legacyError;
+              }
+            }
+            if (!legacyRecord) throw new KernelError('session_not_found', { detail: sessionId });
+            const adopted = await adoptForSessionDirectory(env.config, env.directory, env.projectRoot, sessionId);
+            if (adopted?.busy.includes(filename)) throw new KernelError('session_locked', { detail: sessionId });
+            if (adopted?.conflicts.includes(filename)) {
+              throw new KernelError('session_adoption_write_failed', { detail: `${sessionId}: existing legacy records conflict` });
+            }
+            try {
+              await access(path);
+            } catch (adoptionError) {
+              if ((adoptionError as NodeJS.ErrnoException).code !== 'ENOENT') throw adoptionError;
+              throw new KernelError('session_not_found', { detail: sessionId });
+            }
           }
           // 新打开的会话也在轮次边界应用模式变更。
           const opened = await buildSession(sessionId, connection, true, message.params.mode, env);
+          if (grant !== undefined) await recordDelegationEvent(agentControl!.storePath, { kind: 'grant.used', grantId: grant.id });
           await noteWorkspace(env);
           return opened;
         }
         case 'session.close': {
           const state = open(sessionId);
           // 关闭前必须由客户端明确取消运行中的轮次，确保结果已记录。
+          if (state.permissionChanging) throw new KernelError('permission_change_in_progress', { detail: sessionId });
           if (state.running !== undefined) throw new KernelError('run_already_running', { detail: sessionId });
           await retire(state);
           evictEnvironment(state.environment);
@@ -1387,10 +2074,11 @@ export function createHost({
           return await branchSession(env.directory, sessionId, { at: message.params.at, projectRoot: env.projectRoot });
         }
         case 'sessions.list': {
-          // 与 CLI 共用会话扫描器，并从记录元数据解析项目归属。
+          // 当前与旧目录都只读扫描；迁移只在用户明确打开旧会话时发生。
           const { projectRoot, limit } = message.params;
           const scope = projectRoot ?? defaultEnvironment.projectRoot;
-          return { sessions: await listSessions(await scanDirectory(scope), { projectRoot: scope, limit }) };
+          const config = await readOnlySessionConfig(scope);
+          return { sessions: await listWorkspaceSessions(config, { projectRoot: scope, limit }) };
         }
         case 'sessions.search': {
           // 搜索会话列表使用的同一目录，并在扫描记录前拒绝空查询。
@@ -1401,9 +2089,16 @@ export function createHost({
           // 解析记录路径前先校验会话编号。
           if (scoped !== undefined) assertSessionId(scoped);
           const open = scoped === undefined ? undefined : sessions.get(scoped);
-          const root = open !== undefined ? undefined : projectRoot ?? defaultEnvironment.projectRoot;
-          const directory = open?.environment.directory ?? await scanDirectory(projectRoot ?? defaultEnvironment.projectRoot);
-          return { hits: await searchSessions(directory, { query: needle, sessionId: scoped, projectRoot: root, limit }) };
+          const scope = projectRoot ?? defaultEnvironment.projectRoot;
+          const config = open?.environment.config ?? await readOnlySessionConfig(scope);
+          return {
+            hits: await searchSessionDirectories(sessionDirectories(config), {
+              query: needle,
+              sessionId: scoped,
+              projectRoot: open === undefined ? scope : undefined,
+              limit,
+            }),
+          };
         }
         case 'paths.list': {
           // 由 Host 查找 `@` 文件候选，前端不直接扫描项目文件。
@@ -1489,34 +2184,34 @@ export function createHost({
         }
         case 'policy.set': {
           // 只修改会话级策略覆盖，不改写配置中的默认值。
-          const state = open(sessionId);
           const mode = requiredString(message.params.mode, 'mode');
-          if (mode === 'default') state.chain.resetMode();
-          else if (mode === 'ask' || mode === 'auto' || mode === 'never') state.chain.setMode(mode);
-          else throw new KernelError('policy_mode_unknown', { detail: 'mode must be ask, auto, never, or default' });
-          return { policy: state.chain.mode, policySource: state.chain.modeSource, policyDefault: state.chain.configuredMode() };
+          return await serializeSessionConfiguration(sessionId, async () => {
+            const state = open(sessionId);
+            await configureSession(state, { policy: mode }, connection);
+            return { policy: state.chain.mode, policySource: state.chain.modeSource, policyDefault: state.chain.configuredMode() };
+          });
+        }
+        case 'permission.set': {
+          return await serializeSessionConfiguration(sessionId, () => setPermission(
+            open(sessionId),
+            message.params.permissionProfile,
+            message.params.permissionNetwork,
+            message.params.confirmFullAccess,
+            message.params.confirmNetwork,
+          ));
         }
         case 'mode.set': {
-          const state = open(sessionId);
-          // 返回模式清单前先解析并校验清单内容。
-          const modePaths = state.environment.modePaths;
-          if (modePaths === undefined) throw new KernelError('host_mode_paths_required');
-          const requested = await loadMode(requiredString(message.params.name, 'name'), modePaths);
-          const current = state.mode.file;
-          if (current !== undefined && current.name === requested.name && current.layer === requested.layer) {
-            // 再次选择当前模式会撤销待生效变更，不写入事件。
-            state.pending = undefined;
-          } else if (state.running === undefined) {
-            await state.adopt(requested);
-          } else {
-            state.pending = requested;
-          }
-          return {
-            mode: state.mode.file?.name ?? null,
-            layer: state.mode.file?.layer ?? null,
-            pending: state.pending?.name ?? null,
-            tools: state.kernel.manifest().map((entry) => entry.name),
-          };
+          const name = requiredString(message.params.name, 'name');
+          return await serializeSessionConfiguration(sessionId, async () => {
+            const state = open(sessionId);
+            await configureSession(state, { mode: name }, connection);
+            return {
+              mode: state.mode.file?.name ?? null,
+              layer: state.mode.file?.layer ?? null,
+              pending: state.pending?.name ?? null,
+              tools: state.kernel.manifest().map((entry) => entry.name),
+            };
+          });
         }
         case 'status.get': {
           const state = open(sessionId);
@@ -1536,11 +2231,25 @@ export function createHost({
             serviceId: modelSelectionOf(state.generation.model)?.provider ?? resolveModel(state.generation.model).serviceId ?? 'legacy',
             pendingServiceId: state.pendingGeneration === undefined ? null : modelSelectionOf(state.pendingGeneration.model)?.provider ?? null,
             pendingModel: state.pendingGeneration?.provider.model ?? null,
+            contextTokens: state.generation.provider.contextTokens ?? null,
+            thinking: {
+              available: state.generation.provider.thinkingCapability?.efforts ?? [],
+              defaultEffort: state.generation.provider.thinkingCapability?.defaultEffort ?? null,
+              effective: state.generation.options.thinkingEffort ?? 'default',
+              pending: state.pendingGeneration?.options.thinkingEffort ?? null,
+            },
             // 分别返回当前模式和策略，并说明策略来自配置默认值还是会话覆盖。
             policy: state.chain.mode,
             policySource: state.chain.modeSource,
             policyDefault: state.chain.configuredMode(),
+            permission: sessionPermissionView(state, canControlPermission),
             denials: state.chain.denials(),
+            delegation: knownGrant === undefined ? null : {
+              grantId: knownGrant.id,
+              maxPermissionProfile: knownGrant.maxPermissionProfile,
+              maxNetwork: knownGrant.maxNetwork,
+              allowedPolicies: knownGrant.allowedPolicies,
+            },
             // 这里只返回条数；记录内容由 `session.read` 提供。
             eventCount: (await state.session.read()).length,
             // 返回工具名称、说明和参数模式，供客户端选择工具。
@@ -1549,6 +2258,9 @@ export function createHost({
             // 模型窗口未知时返回 null，因为此时无法估算上下文压力。
             usage: state.compaction === null ? null : await state.compaction.context(),
           };
+        }
+        case 'session.configure': {
+          return await serializeSessionConfiguration(sessionId, () => configureSession(open(sessionId), message.params, connection));
         }
         case 'workspaces.list':
           // 返回持久工作区登记表及默认工作区身份，供客户端显示。
@@ -1560,6 +2272,15 @@ export function createHost({
           await classifyProjectRoot(resolve(directory));
           return await setDefaultWorkspace(directory, { name: message.params.name });
         }
+        case 'workspace.remove': {
+          const directory = message.params.directory;
+          if (typeof directory !== 'string' || directory.trim() === '') throw new KernelError('workspace_directory_required');
+          const identity = workspaceIdentity(directory);
+          // 运行中的会话继续使用原工作区；先等该轮结束，再从登记表移除。
+          const running = [...sessions.values()].find((state) => workspaceIdentity(state.environment.projectRoot) === identity && state.running !== undefined);
+          if (running !== undefined) throw new KernelError('workspace_in_use', { detail: directory });
+          return await unregisterWorkspace(directory);
+        }
         case 'history.read':
           // 偏好文件路径由 Host 管理，客户端不能指定数据根目录下的任意文件。
           return { entries: await loadHistory() };
@@ -1569,19 +2290,13 @@ export function createHost({
           return { entries: await rememberHistory(historyPathOf(), [String(message.params.text)]) };
         }
         case 'model.select': {
-          const state = open(sessionId);
-          const fresh = state.environment.store === undefined ? { model: state.environment.config.model ?? {} } : (await state.environment.store.read()).values;
           const selection = modelSelection({ provider: message.params.provider, model: message.params.model });
-          const model = { ...(state.environment.config.model ?? {}), ...fresh.model, selection };
-          const provider = deriveProvider({ ...state.environment.config, model });
-          const generation = { model, provider, explicit: true };
-          await state.session.append({ kind: 'modelSelection', ignorable: true, provider: selection.provider, model: selection.model });
-          if (state.running === undefined) {
-            state.generation = generation;
-            state.compaction = state.rebuildCompaction(model);
-          }
-          else state.pendingGeneration = generation;
-          return { model: provider.model, serviceId: selection.provider, when: state.running === undefined ? 'now' : 'round' };
+          return await serializeSessionConfiguration(sessionId, async () => {
+            const state = open(sessionId);
+            await configureSession(state, { provider: selection.provider, model: selection.model }, connection);
+            const generation = state.pendingGeneration ?? state.generation;
+            return { model: generation.provider.model, serviceId: selection.provider, when: state.running === undefined ? 'now' : 'round' };
+          });
         }
         case 'models.discover': {
           // 已保存密钥只能用于绑定的服务；未保存的服务必须明确提供临时密钥。
@@ -1619,6 +2334,38 @@ export function createHost({
         case 'prefs.write': {
           const value = parsePrefsJson(String(message.params.json));
           return await savePrefs(prefsPathOf(), value, { version: requiredString(message.params.version, 'version') });
+        }
+        case 'agent-control.list': {
+          if (!permissionControl) throw new KernelError('agent_control_trusted_ui_required');
+          return await listDelegationGrants(delegationPathOf());
+        }
+        case 'agent-control.create': {
+          if (!permissionControl) throw new KernelError('agent_control_trusted_ui_required');
+          const input: CreateDelegationGrantInput = {
+            name: requiredString(message.params.grantName, 'grantName'),
+            projectRoot: requiredString(message.params.projectRoot, 'projectRoot'),
+            defaultPermissionProfile: message.params.defaultPermissionProfile as PermissionProfile,
+            maxPermissionProfile: message.params.maxPermissionProfile as PermissionProfile,
+            defaultNetwork: message.params.defaultNetwork as PermissionNetwork,
+            maxNetwork: message.params.maxNetwork as PermissionNetwork,
+            defaultPolicy: message.params.defaultPolicy as CreateDelegationGrantInput['defaultPolicy'],
+            allowedPolicies: [
+              ...(message.params.allowedPolicyAsk === true ? ['ask' as const] : []),
+              ...(message.params.allowedPolicyAuto === true ? ['auto' as const] : []),
+              ...(message.params.allowedPolicyNever === true ? ['never' as const] : []),
+            ],
+            allowOperator: message.params.allowOperator as boolean,
+            confirmFullAccess: message.params.confirmFullAccess as boolean,
+            confirmUnrestrictedNetwork: message.params.confirmUnrestrictedNetwork as boolean,
+            expiresAt: message.params.expiresAt === '' ? null : requiredString(message.params.expiresAt, 'expiresAt'),
+          };
+          return await createDelegationGrant(delegationPathOf(), input, requiredString(message.params.version, 'version'));
+        }
+        case 'agent-control.revoke': {
+          if (!permissionControl) throw new KernelError('agent_control_trusted_ui_required');
+          return await revokeDelegationGrant(
+            delegationPathOf(), requiredString(message.params.grantId, 'grantId'), requiredString(message.params.version, 'version'),
+          );
         }
         case 'config.get': {
           // 使用明确的允许字段构造响应；参数模式本身允许出现未声明的属性。
@@ -1686,7 +2433,7 @@ export function createHost({
                 if (field === 'model.services' && modelSelectionOf(generation.model)?.provider === 'legacy') continue;
                 const key = field === 'model.outputTokens' ? 'outputTokens' : 'services';
                 const effective = isRecord(config.model) ? config.model[key] : undefined;
-                deriveProvider({ ...config, model: { ...generation.model, [key]: effective } });
+                deriveProvider({ ...config, model: { ...generation.model, [key]: effective } }, generation.options);
               }
             }
           });

@@ -15,6 +15,7 @@ export type Usage = {
 export type Status = {
   sessionId: string;
   running: boolean;
+  permission?: SessionPermission;
   tools: string[];
   // 当前模式名称与权限策略是不同字段，分别维护。
   mode: string | null;
@@ -36,6 +37,35 @@ export type Status = {
   // 上下文窗口未知时 Host 返回 null；此时不启用压缩或显示压力条。
   usage: Usage | null;
   progress: RunProgress | null;
+};
+
+export type PermissionProfile = 'read-only' | 'workspace-write' | 'full-access';
+export type PermissionNetwork = 'policy' | 'unrestricted' | 'disabled';
+export type PermissionEnforcement = 'full' | 'partial' | 'unavailable';
+
+export type SessionPermission = {
+  profile: PermissionProfile;
+  network: PermissionNetwork;
+  capabilities: {
+    filesystemRead: PermissionEnforcement;
+    filesystemWrite: PermissionEnforcement;
+    network: PermissionEnforcement;
+    process: PermissionEnforcement;
+  };
+  execution: { available: boolean; code: string | null; reason: string | null };
+  changeAllowed: boolean;
+  changeReason?: string;
+};
+
+export type ProviderDiagnosticCategory = 'authentication' | 'rate_limit' | 'client' | 'server' | 'http' | 'transport' | 'stream' | 'invalid_response' | 'cancelled';
+
+export type ProviderDiagnostic = {
+  category: ProviderDiagnosticCategory;
+  status?: number;
+  attempts: number;
+  responseReceived: boolean;
+  streamReceived: boolean;
+  recoverable: boolean;
 };
 
 export type RunProgress = {

@@ -19,8 +19,8 @@ The repository [Agent guide](../../../AGENTS.md) applies here. This directory ow
 
 ## Listing and storage
 
-- The default record directory is under `dataRoot()`; explicit `host.sessionDirectory` overrides it. Project-root filters use normalized workspace identity. Headerless records in a shared data directory have no inferred project attribution.
-- Legacy adoption copies records and their sidecars under the source and destination locks and preserves the originals. Do not treat a read/list operation as a migration write.
+- The default record directory is `dataRoot()/workspaces/<readable workspace path plus stable hash>/sessions`; explicit `host.sessionDirectory` overrides it. Project-root filters use normalized workspace identity. Headerless records in the old shared directory have no inferred project attribution.
+- Read-only listing and search include the workspace's current directory and known legacy directories without copying files. Explicitly opening a legacy session copies its record and referenced sidecars under source and destination locks, retains the original, and refuses conflicting or locked records.
 - Listing and search are derived from the record files. Keep their errors visible; do not turn unreadable records into empty sessions.
 
 ## Verification

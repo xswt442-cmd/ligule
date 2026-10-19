@@ -1,20 +1,22 @@
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Icon, type IconName } from './Icon';
 import { HoldSheet } from './HoldSheet';
 import { ModelPanel } from './ModelPanel';
+import { AgentControlPanel } from './AgentControlPanel';
 import { NotificationPanel } from './NotificationPanel';
 import { PolicyRules } from './PolicyRules';
-import { Group, Modal, Row } from './ui';
+import { Modal } from './ui';
 import { holdReasons, report, type EditGate } from '../edit-gate';
-import { CURRENT, KEYMAP, conflictsIn, formatKeys, parseSpec, setCapturing, specOf, type KeyAction, type KeyView } from '../hotkeys';
-import { PALETTES, type Palette, type Settings } from '../settings';
-import { code, type Client } from '../protocol';
-import type { WorkspaceRoster } from '../rail';
+import type { Settings } from '../settings';
+import type { Client } from '../protocol';
 import type { Status } from '../status';
 import { useText } from '../locale';
 import type { NotificationBridge } from '../notifications';
+import { GeneralSettings } from './settings/GeneralSettings';
+import { AppearanceSettings } from './settings/AppearanceSettings';
+import { KeyboardSettings } from './settings/KeyboardSettings';
 
-const SECTIONS = ['general', 'appearance', 'model', 'rules', 'notifications', 'keys'] as const;
+const SECTIONS = ['general', 'appearance', 'model', 'rules', 'control', 'notifications', 'keys'] as const;
 
 type SectionId = (typeof SECTIONS)[number];
 
@@ -54,6 +56,7 @@ export function SettingsDialog(props: SettingsProps) {
   const reports = useMemo(() => ({
     model: (reason: string) => setGate((now) => report(now, 'model', reason)),
     rules: (reason: string) => setGate((now) => report(now, 'rules', reason)),
+    control: (reason: string) => setGate((now) => report(now, 'control', reason)),
   }), []);
 
   const leave = (go: () => void) => {
@@ -80,12 +83,13 @@ export function SettingsDialog(props: SettingsProps) {
       </nav>
       <div className="sheet-body" role="tabpanel" tabIndex={0}>
         {props.notificationPending && <p className="session-note">{t('关闭设置后将打开通知对应的会话。', 'Close settings to open the conversation from your notification.')}</p>}
-        {section === 'general' && <General client={props.client} language={settings.language} patch={patch} />}
-        {section === 'appearance' && <Appearance settings={settings} patch={patch} />}
+        {section === 'general' && <GeneralSettings client={props.client} language={settings.language} patch={patch} />}
+        {section === 'appearance' && <AppearanceSettings settings={settings} patch={patch} />}
         {section === 'model' && <Model client={props.client} sessionId={props.sessionId} projectRoot={props.projectRoot} onEdit={reports.model} />}
         {section === 'rules' && <PolicyRules client={props.client} projectRoot={props.projectRoot} onEdit={reports.rules} />}
+        {section === 'control' && <AgentControlPanel client={props.client} projectRoot={props.projectRoot} onEdit={reports.control} />}
         {section === 'notifications' && <NotificationPanel preferences={settings.notifications} bridge={props.notifications} problem={props.notificationProblem} onChange={notifications => patch({ notifications })} />}
-        {section === 'keys' && <Keys settings={settings} patch={patch} notice={props.keyNotice} />}
+        {section === 'keys' && <KeyboardSettings settings={settings} patch={patch} notice={props.keyNotice} />}
       </div>
     </Modal>
     {holding === null ? null : <HoldSheet
@@ -102,6 +106,7 @@ function sectionTitle(id: SectionId, t: (chinese: string, english: string) => st
     appearance: ['外观', 'Appearance'],
     model: ['模型服务', 'Model services'],
     rules: ['审批规则', 'Approval rules'],
+    control: ['外部控制', 'Agent Control'],
     notifications: ['通知', 'Notifications'],
     keys: ['快捷键', 'Keyboard shortcuts'],
   };
@@ -110,246 +115,8 @@ function sectionTitle(id: SectionId, t: (chinese: string, english: string) => st
 }
 
 function sectionIcon(id: SectionId): IconName {
-  const icons: Record<SectionId, IconName> = { general: 'gear', appearance: 'spark', model: 'folder', rules: 'check', notifications: 'bell', keys: 'copy' };
+  const icons: Record<SectionId, IconName> = { general: 'gear', appearance: 'spark', model: 'folder', rules: 'check', control: 'shield', notifications: 'bell', keys: 'copy' };
   return icons[id];
-}
-
-function General({ client, language, patch }: {
-  client: Client;
-  language: Settings['language'];
-  patch: SettingsProps['patch'];
-}) {
-  const t = useText();
-  const [roster, setRoster] = useState<WorkspaceRoster | null>(null);
-  const [failure, setFailure] = useState<{ operation: 'read' | 'save'; code: string } | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [reload, setReload] = useState(0);
-
-  useEffect(() => {
-    let active = true;
-    void client.call('workspaces.list', {}, 15_000)
-      .then((value) => { if (active) setRoster(value as WorkspaceRoster); })
-      .catch((error: unknown) => { if (active) setFailure({ operation: 'read', code: code(error) }); })
-      .finally(() => { if (active) setLoading(false); });
-    return () => { active = false; };
-  }, [client, reload]);
-
-  const changeDefault = async (directory: string) => {
-    setSaving(true);
-    setFailure(null);
-    try {
-      setRoster(await client.call('workspace.default.set', { directory }, 15_000) as WorkspaceRoster);
-    } catch (error) {
-      setFailure({ operation: 'save', code: code(error) });
-    } finally {
-      setSaving(false);
-    }
-  };
-  const defaultDirectory = roster?.workspaces.find((workspace) => workspace.identity === roster.default)?.directory ?? '';
-
-  return <>
-    <Group title={t('语言', 'Language')}>
-      <Row label={t('界面语言', 'Interface language')}>
-        <select value={language} onChange={(event) => patch({ language: event.target.value as Settings['language'] })}>
-          <option value="auto">{t('跟随系统', 'Follow system')}</option>
-          <option value="zh">简体中文</option>
-          <option value="en">English</option>
-        </select>
-      </Row>
-    </Group>
-    <Group title={t('工作区', 'Workspace')}>
-      <Row label={t('默认工作区', 'Default workspace')} note={t('新建会话时使用。只能选择侧栏中已登记的工作区。', 'Used for new sessions. Choose a workspace already listed in the sidebar.')}>
-        <select
-          value={defaultDirectory}
-          disabled={loading || saving || roster === null}
-          onChange={(event) => void changeDefault(event.target.value)}
-        >
-          <option value="">{t('不设置默认工作区', 'No default workspace')}</option>
-          {roster?.workspaces.map((workspace) => <option key={workspace.identity} value={workspace.directory}>{workspace.name || workspace.directory}</option>)}
-        </select>
-      </Row>
-      {loading && <p className="stub">{t('正在读取工作区…', 'Loading workspaces…')}</p>}
-      {!loading && roster?.workspaces.length === 0 && <p className="stub">{t('侧栏还没有登记工作区。', 'No workspaces are listed in the sidebar yet.')}</p>}
-      {failure !== null && <div className="session-note" data-tone="bad">
-        <p>{failure.operation === 'read'
-          ? t('无法读取工作区列表。', 'Could not load the workspace list.')
-          : t('默认工作区没有保存。', 'The default workspace was not saved.')}</p>
-        <details><summary>{t('错误代码', 'Error code')}</summary><code>{failure.code}</code></details>
-        {failure.operation === 'read' && <button type="button" onClick={() => { setLoading(true); setFailure(null); setReload((value) => value + 1); }}>{t('重新读取', 'Reload')}</button>}
-      </div>}
-    </Group>
-  </>;
-}
-
-// 配色名称和说明；实际颜色定义在 `styles.css` 的 `data-palette` 变量中。
-const PALETTE_NAMES: Record<Palette, [string, string]> = {
-  ink: ['墨青', 'Ink'],
-  parchment: ['羊皮纸', 'Parchment'],
-  sky: ['蓝天', 'Sky'],
-  graphite: ['石墨', 'Graphite'],
-  forest: ['森林', 'Forest'],
-  dusk: ['黄昏', 'Dusk'],
-};
-
-function Appearance({ settings, patch }: { settings: Settings; patch: SettingsProps['patch'] }) {
-  const t = useText();
-  return <>
-    <Group title={t('配色方案', 'Color palette')}>
-      <div className="swatch-list">
-        {PALETTES.map((id) => <button
-          key={id}
-          type="button"
-          className="swatch"
-          aria-pressed={settings.palette === id}
-          title={t(`换成${PALETTE_NAMES[id][0]}`, `Switch to ${PALETTE_NAMES[id][1]}`)}
-          onClick={() => patch({ palette: id })}
-        >
-          <span className="swatch-chips" data-palette={id}>
-            <span style={{ background: 'var(--bg)' }} />
-            <span style={{ background: 'var(--accent)' }} />
-            <span style={{ background: 'var(--fg)' }} />
-          </span>
-          <span className="swatch-name">{t(...PALETTE_NAMES[id])}</span>
-        </button>)}
-      </div>
-    </Group>
-    <Group title={t('文字与栏宽', 'Text and layout')}>
-      <Row label={t('界面字号', 'Interface font size')} note={`${settings.fontUi} px`}>
-        <input aria-label={t('界面字号（像素）', 'Interface font size (pixels)')} type="range" min={10} max={24} step={1} value={settings.fontUi} onChange={(event) => patch({ fontUi: Number(event.target.value) })} />
-        <input aria-label={t('界面字号数值', 'Interface font size value')} type="number" min={10} max={24} step={1} value={settings.fontUi} onChange={(event) => patch({ fontUi: Math.max(10, Math.min(24, Number(event.target.value) || 10)) })} />
-      </Row>
-      <Row label={t('用户消息字号', 'User message font size')} note={`${settings.fontUser} px`}>
-        <input aria-label={t('用户消息字号（像素）', 'User message font size (pixels)')} type="range" min={12} max={32} step={1} value={settings.fontUser} onChange={(event) => patch({ fontUser: Number(event.target.value) })} />
-        <input aria-label={t('用户消息字号数值', 'User message font size value')} type="number" min={12} max={32} step={1} value={settings.fontUser} onChange={(event) => patch({ fontUser: Math.max(12, Math.min(32, Number(event.target.value) || 12)) })} />
-      </Row>
-      <Row label={t('模型回复字号', 'Assistant reply font size')} note={`${settings.fontAssistant} px`}>
-        <input aria-label={t('模型回复字号（像素）', 'Assistant reply font size (pixels)')} type="range" min={12} max={32} step={1} value={settings.fontAssistant} onChange={(event) => patch({ fontAssistant: Number(event.target.value) })} />
-        <input aria-label={t('模型回复字号数值', 'Assistant font size value')} type="number" min={12} max={32} step={1} value={settings.fontAssistant} onChange={(event) => patch({ fontAssistant: Math.max(12, Math.min(32, Number(event.target.value) || 12)) })} />
-      </Row>
-      <Row label={t('会话正文行距', 'Conversation line spacing')} note={`${settings.transcriptLineHeight.toFixed(1)}× · ${Math.round(settings.fontAssistant * settings.transcriptLineHeight)} px`}>
-        <input aria-label={t('会话正文行距', 'Conversation line spacing')} type="range" min={1.2} max={2.4} step={0.1} value={settings.transcriptLineHeight} onChange={(event) => patch({ transcriptLineHeight: Number(event.target.value) })} />
-        <output>{settings.transcriptLineHeight.toFixed(1)}×</output>
-      </Row>
-      <Row label={t('侧栏宽度', 'Sidebar width')} note={t(`${settings.sidebar} 像素；也可以拖动侧栏分隔线。`, `${settings.sidebar} px. You can also drag the sidebar divider.`)}>
-        <input type="range" min={264} max={420} step={4} value={settings.sidebar} onChange={(event) => patch({ sidebar: Number(event.target.value) })} />
-      </Row>
-      <Row label={t('面板停靠', 'Panel position')}>
-        <select value={settings.dock} onChange={(event) => patch({ dock: event.target.value as Settings['dock'] })}>
-          <option value="right">{t('右侧', 'Right')}</option>
-          <option value="left">{t('左侧', 'Left')}</option>
-        </select>
-      </Row>
-      <Row label={t('左侧栏', 'Sidebar')}>
-        <button type="button" onClick={() => patch({ collapsed: !settings.collapsed })}>{settings.collapsed ? t('展开左侧栏', 'Show sidebar') : t('收起左侧栏', 'Hide sidebar')}</button>
-      </Row>
-    </Group>
-    <Group title={t('工作步骤展示', 'Work details')}>
-      <Row label={t('展示详细程度', 'Detail level')} note={t('控制屏幕显示的步骤；模型收到的内容保持完整。', 'Controls which steps appear on screen. The model still receives the full content.')}>
-        <select value={settings.verbosity} onChange={(event) => patch({ verbosity: event.target.value as Settings['verbosity'] })}>
-          <option value="brief">{t('简洁', 'Brief')}</option>
-          <option value="standard">{t('标准', 'Standard')}</option>
-          <option value="detailed">{t('详细', 'Detailed')}</option>
-          <option value="full">{t('完全展开', 'Full')}</option>
-        </select>
-      </Row>
-    </Group>
-  </>;
-}
-
-const KEY_LABELS: Record<KeyAction, [string, string]> = {
-  palette: ['打开命令面板', 'Open command palette'],
-  sidebar: ['收起或展开侧栏', 'Show or hide the sidebar'],
-  'copy-answer': ['复制最后一条回答', 'Copy the latest answer'],
-  interrupt: ['关闭浮层或停止本轮', 'Close overlay or stop turn'],
-  send: ['发送或加入队列', 'Send or queue a message'],
-  'send-alt': ['发送', 'Send'],
-  newline: ['换行', 'Insert a new line'],
-  'history-older': ['向上翻输入历史', 'Move back in input history'],
-  'history-newer': ['向下翻输入历史', 'Move forward in input history'],
-  'pick-candidate': ['选择文件候选', 'Select a file suggestion'],
-  'complete-candidate': ['选择文件候选', 'Select a file suggestion'],
-  'candidate-older': ['选择上一条候选', 'Select the previous suggestion'],
-  'candidate-newer': ['选择下一条候选', 'Select the next suggestion'],
-  'hide-candidate': ['收起文件候选', 'Hide file suggestions'],
-};
-
-const KEY_VIEWS: Record<KeyView, [string, string]> = {
-  '窗口': ['窗口', 'Window'],
-  '输入坞': ['输入框', 'Composer'],
-  '候选清单': ['文件候选', 'File suggestions'],
-};
-
-function Keys({ settings, patch, notice }: { settings: Settings; patch: SettingsProps['patch']; notice: string }) {
-  const t = useText();
-  const [listening, setListening] = useState<KeyAction | null>(null);
-  const [refused, setRefused] = useState('');
-  useEffect(() => {
-    if (listening === null) return;
-    setCapturing(true);
-    const stop = () => {
-      setCapturing(false);
-      setListening(null);
-    };
-    const onKey = (event: KeyboardEvent) => {
-      event.preventDefault();
-      // 快捷键录制期间消费按键，避免同时触发全局动作。
-      event.stopImmediatePropagation();
-      if (event.key === 'Escape') {
-        stop();
-        return;
-      }
-      const spec = specOf(event);
-      if (spec === null) return;
-      const binding = KEYMAP[listening];
-      // 同一作用范围内已有动作绑定该按键时拒绝保存。
-      const clash = conflictsIn(binding.view, { ...CURRENT, [listening]: spec });
-      if (clash.length > 0) {
-        const [first, second] = clash[0];
-        setRefused(t(
-          `${formatKeys(spec)} 在${KEY_VIEWS[binding.view][0]}里已经用于“${t(...KEY_LABELS[first])}”和“${t(...KEY_LABELS[second])}”。一个范围内不能重复使用同一按键。`,
-          `${formatKeys(spec)} is already used for “${t(...KEY_LABELS[first])}” and “${t(...KEY_LABELS[second])}” in the ${KEY_VIEWS[binding.view][1]}. A key can have only one action in each area.`,
-        ));
-        stop();
-        return;
-      }
-      setRefused('');
-      patch({ keys: { ...settings.keys, [listening]: spec } });
-      stop();
-    };
-    document.addEventListener('keydown', onKey, true);
-    return () => {
-      document.removeEventListener('keydown', onKey, true);
-      setCapturing(false);
-    };
-  }, [listening, patch, settings.keys]);
-
-  const restore = (action: string) => {
-    const next = { ...settings.keys };
-    delete next[action];
-    patch({ keys: next });
-  };
-  const views = [...new Set(Object.values(KEYMAP).map((binding) => binding.view))] as KeyView[];
-  return <div className="shortcut-settings">
-    {notice === '' ? null : <p className="stub">{notice}</p>}
-    {refused === '' ? null : <p className="session-note" data-tone="bad">{refused}</p>}
-    {views.map((view) => <Fragment key={view}>
-      <Group title={t(...KEY_VIEWS[view])}>
-        {(Object.entries(KEYMAP) as [KeyAction, (typeof KEYMAP)[KeyAction]][])
-          .filter(([, binding]) => binding.view === view)
-          .map(([action]) => <Row key={action} label={t(...KEY_LABELS[action])}>
-            <code>{formatKeys(parseSpec(settings.keys[action] ?? '') ?? KEYMAP[action].spec)}</code>
-            <button type="button" aria-label={t(`更改快捷键：${KEY_LABELS[action][0]}`, `Change shortcut: ${KEY_LABELS[action][1]}`)} onClick={() => { setRefused(''); setListening(listening === action ? null : action); }}>
-              {listening === action ? t('按下新键（Esc 取消）', 'Press a new key (Esc to cancel)') : t('更改', 'Change')}
-            </button>
-            {settings.keys[action] === undefined ? null : <button type="button" onClick={() => restore(action)}>{t('恢复默认', 'Reset')}</button>}
-          </Row>)}
-      </Group>
-    </Fragment>)}
-    <Row label={t('恢复所有默认键位', 'Reset all keyboard shortcuts')} note={t('清除这台设备上的个人键位。', 'Clear custom shortcuts on this device.')}>
-      <button type="button" onClick={() => { setRefused(''); patch({ keys: {} }); }}>{t('恢复默认', 'Reset')}</button>
-    </Row>
-  </div>;
 }
 
 // 模型服务经 Host 保存到用户默认或项目本地配置，会话的模型选择由输入区管理。

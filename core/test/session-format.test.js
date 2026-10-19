@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createSessionLog } from '../dist/index.js';
+import { parseSessionEvents } from '../dist/session/format.js';
 
 async function withDirectory(run) {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'format-'));
@@ -30,7 +31,7 @@ test('a new record starts with a line that names the format, the project and the
     const lines = (await readFile(session.path, 'utf8')).split('\n').filter((line) => line !== '').map(JSON.parse);
     assert.deepEqual(lines[0], {
       kind: 'session',
-      formatVersion: 1,
+      formatVersion: 2,
       sessionId: 'run-1',
       projectRoot: '/repo',
       createdAt: lines[0].createdAt,
@@ -39,6 +40,18 @@ test('a new record starts with a line that names the format, the project and the
     assert.deepEqual(await session.read(), [first], '首行不是一条事件，读回来的仍然只有那一条');
     assert.deepEqual(await session.header(), lines[0]);
   });
+});
+
+test('session policy events must be ignorable and contain a valid restore snapshot', () => {
+  const header = { kind: 'session', formatVersion: 2, sessionId: 'policy', projectRoot: '' };
+  assert.throws(() => parseSessionEvents([
+    header,
+    { seq: 0, kind: 'sessionPolicy', override: null, consecutive: 0, total: 0, forcedToAsk: false },
+  ]), { code: 'session_policy_ignorable_required' });
+  assert.throws(() => parseSessionEvents([
+    header,
+    { seq: 0, kind: 'sessionPolicy', ignorable: true, override: 'never', consecutive: 3, total: 2, forcedToAsk: true },
+  ]), { code: 'session_policy_event_invalid' });
 });
 
 // 开局还没选过模式时那一格就是不写，而不是写一个空名字或写一份假的默认。
@@ -82,10 +95,10 @@ test('a record written before the first line existed still reads and continues',
 test('a record from a newer format is refused instead of half read', async () => {
   await withDirectory(async (directory) => {
     const path = join(directory, 'future.jsonl');
-    await writeFile(path, `${JSON.stringify({ kind: 'session', formatVersion: 2, sessionId: 'future', projectRoot: '/repo', createdAt: 'x' })}\n${tool(0, 'one')}\n`);
+    await writeFile(path, `${JSON.stringify({ kind: 'session', formatVersion: 3, sessionId: 'future', projectRoot: '/repo', createdAt: 'x' })}\n${tool(0, 'one')}\n`);
     await assert.rejects(() => createSessionLog({ directory, id: 'future' }).read(), (error) => {
       assert.equal(error.code, 'session_version_unsupported');
-      assert.match(error.detail, /record is version 2/);
+      assert.match(error.detail, /record is version 3/);
       return true;
     });
   });
@@ -107,6 +120,22 @@ test('an event kind this build does not know is refused unless the record says i
     assert.equal((await reopened.modelView()).length, 2);
     const after = await reopened.append({ kind: 'user', text: 'next' });
     assert.equal(after.seq, 3, '略过一条不认识的事件不影响继续编号');
+  });
+});
+
+test('session Permission events require format 2 and remain in the canonical record', async () => {
+  await withDirectory(async (directory) => {
+    const path = join(directory, 'permission.jsonl');
+    await writeFile(path, `${JSON.stringify({ kind: 'session', formatVersion: 2, sessionId: 'permission', projectRoot: '/repo', createdAt: 'x' })}\n${JSON.stringify({ seq: 0, kind: 'sessionPermission', profile: 'workspace-write', network: 'policy' })}\n`);
+    const record = await createSessionLog({ directory, id: 'permission' }).read();
+    assert.equal(record[0].kind, 'sessionPermission');
+
+    await writeFile(path, `${JSON.stringify({ kind: 'session', formatVersion: 1, sessionId: 'permission', projectRoot: '/repo', createdAt: 'x' })}\n${JSON.stringify({ seq: 0, kind: 'sessionPermission', profile: 'full-access', network: 'unrestricted' })}\n`);
+    await assert.rejects(() => createSessionLog({ directory, id: 'permission' }).read(), (error) => {
+      assert.equal(error.code, 'session_event_version_unsupported');
+      assert.match(error.detail, /format version 2/);
+      return true;
+    });
   });
 });
 

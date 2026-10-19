@@ -6,7 +6,7 @@ import { appendFile, cp, mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { waitFor, withTuiHost } from './helpers/tui-host.ts';
+import { measuredPermissionContext, waitFor, withTuiHost } from './helpers/tui-host.ts';
 import { completeFrame } from './helpers/frames.js';
 import { HISTORY_LIMIT, historyPathOf, loadHistory, pushHistory, rememberHistory } from '../../core/dist/kernel/input-history.js';
 import { SEARCH_ROWS, searchHistory } from '../dist/tui/history.js';
@@ -248,7 +248,10 @@ test('/sub reads the branch reference out of the delegation result', options, ()
 });
 
 // 审批提示应显示命令语法和实际执行的程序，因为不同后端可能对同一命令给出不同结论。
-test('the approval box names the shell backend and its executable', options, async () => withTuiHost(async ({ client, sessionId }) => {
+test('the approval box names the shell backend and its executable', options, async (t) => {
+  const permission = await measuredPermissionContext('full-access', 'unrestricted');
+  if (permission.capabilities.process !== 'full') return t.skip('the platform process ownership backend is unavailable');
+  await withTuiHost(async ({ client, sessionId }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
   const { PassThrough } = await import('node:stream');
@@ -263,7 +266,7 @@ test('the approval box names the shell backend and its executable', options, asy
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
   const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   try {
-    const run = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command: 'node --version | node --version' } }) });
+    const run = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command: 'git status --short' } }) });
     // 等待确认提示渲染后再输入拒绝答案，避免按键进入草稿。
     await waitFor(() => /执行环境 (powershell|bash) · /.test(painted), { read: () => painted });
     stdin.write('n');
@@ -273,9 +276,10 @@ test('the approval box names the shell backend and its executable', options, asy
   }
 
   assert.match(painted, /允许执行 exec？/);
-  assert.match(painted, /node --version \| node --version/);
+  assert.match(painted, /git status --short/);
   assert.match(painted, /执行环境 (powershell|bash) · /);
-}));
+  }, { permission });
+});
 
 // 命令补全先列出界面命令，再列出 Host 提供的模板，并按输入前缀筛选。
 test('the candidate list narrows on what is typed and appends host templates', options, () => {
@@ -1245,3 +1249,75 @@ test('/policy changes the session setting and updates the bottom configuration l
     instance.unmount();
   }
 }));
+
+test('/control creates a project-bound grant through the interactive wizard', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { App } = await import('../dist/tui/app.js');
+  const stdout = new PassThrough();
+  stdout.columns = 120;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const instance = render(createElement(App, {
+    client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const lastFrame = () => completeFrame(painted);
+  const strip = (text) => plainOutput(text).replace(/[\r\n]+/g, '');
+  const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  const answer = async (value, nextPrompt) => {
+    stdin.write(value);
+    await waitFor(() => lastFrame().includes(`› ${value}`), { within: 10_000, read: lastFrame });
+    stdin.write('\r');
+    if (nextPrompt !== undefined) await waitFor(() => strip(lastFrame()).includes(nextPrompt), { read: () => strip(lastFrame()) });
+  };
+  try {
+    await waitFor(() => lastFrame().includes('描述任务'), { read: lastFrame });
+    await answer('/control create', '授权名称');
+    await answer('Codex test grant', '默认权限');
+    await answer('full-access', '最大权限');
+    await answer('full-access', '默认网络');
+    await answer('unrestricted', '网络上限');
+    await answer('unrestricted', '默认 Policy');
+    await answer('auto', '允许的 Policy');
+    await answer('ask,auto', '允许 --operator');
+    await answer('yes', '到期时间');
+    await answer(expiresAt, '单独确认 full-access');
+    await answer('yes', '单独确认 unrestricted network');
+    await answer('yes');
+    await waitFor(() => requests.some((request) => request.method === 'agent-control.create'), { within: 10_000, read: () => strip(painted).slice(-1_000) });
+    await waitFor(() => {
+      const output = strip(painted);
+      return output.includes('外控授权 Codex test grant 已创建') || output.includes('Grant Codex test grant created');
+    }, { within: 10_000, read: () => strip(painted).slice(-1_000) });
+    const saved = await client.request('agent-control.list', {});
+    assert.equal(saved.grants.length, 1);
+    assert.equal(saved.grants[0].name, 'Codex test grant');
+    assert.equal(saved.grants[0].projectRoot, projectDirectory);
+    assert.equal(saved.grants[0].defaultPermissionProfile, 'full-access');
+    assert.equal(saved.grants[0].maxPermissionProfile, 'full-access');
+    assert.equal(saved.grants[0].defaultNetwork, 'unrestricted');
+    assert.equal(saved.grants[0].maxNetwork, 'unrestricted');
+    assert.equal(saved.grants[0].defaultPolicy, 'auto');
+    assert.equal(saved.grants[0].allowedPolicies.includes('auto'), true);
+    assert.equal(saved.grants[0].allowOperator, true);
+    assert.equal(saved.grants[0].confirmedFullAccess, true);
+    assert.equal(saved.grants[0].confirmedUnrestrictedNetwork, true);
+    assert.equal(saved.grants[0].expiresAt, expiresAt);
+    assert.match(strip(painted), new RegExp(saved.grants[0].id));
+
+    await answer('/control list');
+    await waitFor(() => {
+      const output = strip(painted);
+      return output.includes('权限 full-access / full-access')
+        && output.includes('网络 unrestricted / unrestricted')
+        && output.includes('到期')
+        && (output.includes('来源 可信界面创建') || output.includes('source Trusted UI'))
+        && output.includes(projectDirectory);
+    }, { within: 10_000, read: () => strip(painted).slice(-1_200) });
+  } finally {
+    instance.unmount();
+  }
+}, { permissionControl: true }));

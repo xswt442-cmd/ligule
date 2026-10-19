@@ -4,6 +4,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Readable, Writable } from 'node:stream';
 import { KernelError } from '../kernel/error.js';
+import type { ProviderDiagnostic } from '../kernel/error.js';
 
 export interface HostRequest extends Record<string, unknown> {
   readonly id: string;
@@ -81,7 +82,15 @@ export function createConnection({ input, output, onFault, onClose }: Connection
       const error = isRecord(message.error) ? message.error : {};
       const code = messageText(error.code) ?? 'protocol_error';
       const detail = messageText(error.message);
-      settleWith.reject(new KernelError(code, { detail }));
+      const diagnostics = error.diagnostics;
+      try {
+        settleWith.reject(new KernelError(code, {
+          detail,
+          ...(diagnostics === undefined ? {} : { diagnostics: diagnostics as ProviderDiagnostic }),
+        }));
+      } catch (cause) {
+        settleWith.reject(new KernelError('protocol_provider_diagnostics_invalid', { cause }));
+      }
     }
     else settleWith.resolve(message.result);
   }
@@ -128,11 +137,13 @@ export function createConnection({ input, output, onFault, onClose }: Connection
           (error: unknown) => {
             const fields = isRecord(error) ? error : {};
             const cause = isRecord(fields.cause) ? fields.cause : {};
+            const diagnostics = error instanceof KernelError ? error.diagnostics : undefined;
             write({
               id: request.id,
               error: {
                 code: messageText(fields.code) ?? 'connection_handler_failed',
                 message: messageText(fields.detail) ?? messageText(cause.message) ?? messageText(fields.message),
+                ...(diagnostics === undefined ? {} : { diagnostics }),
               },
             });
           },

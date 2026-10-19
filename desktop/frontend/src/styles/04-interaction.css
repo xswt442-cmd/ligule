@@ -1,0 +1,183 @@
+/* 审批和输入 */
+
+.approval {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  /* 窗口高度不足时允许审批区缩小并滚动；答复按钮保持可见。 */
+  min-height: 0;
+  inline-size: min(100%, var(--stream));
+  margin-inline: auto;
+  margin-block: 0 var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--warn) 8%, var(--bg-raised));
+}
+
+/* 显式处理 hidden 属性，因为 display:flex 会覆盖浏览器默认的隐藏样式。 */
+.approval[hidden] {
+  display: none;
+}
+
+/* 审批详情区域可滚动，避免窗口较矮时遮住答复按钮。 */
+.approval-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 0;
+  /* 限制审批详情的最大高度并滚动其内容；答复按钮位于此区域之外，保持可见。 */
+  max-height: min(24rem, 32vh);
+  overflow: auto;
+}
+
+/* 窗口较矮时进一步缩小审批详情，让转录保持可见。 */
+@media (max-height: 700px) {
+  .approval-body {
+    max-height: min(16rem, 24vh);
+  }
+}
+
+.approval-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.approval-kind {
+  color: var(--warn);
+  font-size: var(--text-xs);
+  letter-spacing: 0.06em;
+}
+
+.approval-head code {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+}
+
+/* 审批卡继承字号，保持 `ch` 计算的宽度与转录列一致。 */
+.approval-reason {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+.approval-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* 模型提问卡片 */
+
+.question {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 0;
+  inline-size: min(100%, var(--stream));
+  margin-inline: auto;
+  margin-block: 0 var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-raised));
+}
+
+.question-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 0;
+  max-height: min(24rem, 32vh);
+  overflow: auto;
+}
+
+@media (max-height: 700px) {
+  .question-body {
+    max-height: min(16rem, 24vh);
+  }
+}
+
+.question-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.question-kind {
+  color: var(--accent-strong);
+  font-size: var(--text-xs);
+  letter-spacing: 0.06em;
+}
+
+/* 每个问题及其选项和文本输入组成一项答复。 */
+.question-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.question-item legend {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  padding-inline: var(--space-1);
+  font-size: var(--text-md);
+}
+
+.question-option {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  /* 整行都可点击，方便在窄窗口中选择选项。 */
+  min-block-size: var(--hit);
+  padding-inline: var(--space-1);
+}
+
+.question-option-note,
+.question-note {
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+.question-tag {
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding-inline: var(--space-1);
+}
+
+.question-free {
+  inline-size: 100%;
+}
+
+.question-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.composer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  inline-size: min(calc(100% - 48px), var(--stream));
+  margin-inline: auto;
+  margin-block: var(--space-3) 0;
+  padding: var(--space-2) var(--space-3) var(--space-1);
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 3px 18px rgb(0 0 0 / 4%);
+}

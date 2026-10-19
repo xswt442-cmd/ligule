@@ -1,0 +1,170 @@
+/* 侧栏 */
+
+.sidebar {
+  flex: 0 0 var(--sidebar);
+  /* 允许弹性项缩小，避免长路径撑宽整个侧栏。 */
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.75rem 0.625rem 0.5rem;
+  background: var(--bg-sunk);
+  border-inline-end: 0;
+  min-height: 0;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  padding: 0 0.5rem 0.5rem;
+}
+
+.brand > .icon-button { margin-inline-start: auto; }
+
+.new-run,
+.entry {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.25rem 0.6rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.new-run {
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  font-weight: 550;
+  margin-bottom: 0.25rem;
+}
+
+.section-label {
+  margin-top: 0.4rem;
+  padding-inline: 0.35rem;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  letter-spacing: 0.06em;
+}
+
+.sessions {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.session-item {
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: var(--text-md);
+  text-align: start;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  white-space: nowrap;
+  gap: 8px;
+  padding: 0.4rem 0.65rem 0.4rem 1.7rem;
+}
+
+.session-item:hover {
+  border-color: var(--line);
+}
+
+.session-item.active {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  color: var(--fg);
+}
+
+/* 左侧栏会话列表 */
+
+/* 槽位容器参与布局，并允许内容填满可用高度后滚动。 */
+.rail-slot {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.sessions section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.rail-refresh {
+  align-self: start;
+  margin-bottom: 0.35rem;
+  padding: 0.15rem 0.6rem;
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+  background: var(--bg-sunk);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.rail-refresh:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
+/* 额外工作区列表：长路径截断显示，完整路径放入提示文本。 */
+.rail-projects {
+  display: grid;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.rail-projects .row-note {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rail-projects > input {
+  min-width: 0;
+}
+
+.rail-projects > button {
+  justify-self: start;
+}
+
+/* 空状态、预览和成功状态使用中性色；读取或保存失败时使用错误样式。 */
+.session-note {
+  padding: 0.4rem 0.5rem;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  align-items: start;
+}
+
+.session-note[data-tone="bad"] {
+  border-color: color-mix(in srgb, var(--bad) 45%, var(--line));
+  color: var(--bad);
+}
+
+.sidebar-foot {
+  border-block-start: 0;
+  padding-top: 0.6rem;
+}

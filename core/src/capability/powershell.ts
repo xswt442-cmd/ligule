@@ -2,6 +2,7 @@
 // 仅接受简单命令和 ASCII 字面参数，并将每个命令分段交给权限规则检查。
 // 管道、子表达式、脚本块、重定向、动态表达式、未知节点和解析失败都会返回无法识别的原因，不猜测其含义。
 // grammar 是 ESM 模块，需使用动态 import 加载。
+import type { CommandInspection, ParsedCommand, ParsedCommandArgument, ParsedCommandInvocation } from './command.js';
 
 // 只接受命令名称、参数分隔符、字面参数、引号字符串和语句分隔符等已支持的节点。
 // 新增语法节点前必须确认它不会改变命令执行路径。
@@ -35,11 +36,6 @@ interface SyntaxNode {
   startIndex: number;
   endIndex: number;
 }
-
-export type ParsedCommand =
-  | { kind: 'segments'; segments: string[] }
-  | { kind: 'unsupported'; construct: string }
-  | { kind: 'unavailable'; detail: string };
 
 interface GrammarParser {
   parse(text: string): { rootNode: SyntaxNode };
@@ -102,16 +98,141 @@ function analyse(root: SyntaxNode, text: string): ParsedCommand {
   };
 }
 
-// 返回可供逐段判定的 `segments`、带构造名称的 `unsupported`，或说明解析器不可用的 `unavailable`。
-// 解析器异常属于解析器故障，不能误报为命令语法不受支持。
-export async function parsePowerShell(text: string): Promise<ParsedCommand> {
+function childrenOf(node: SyntaxNode): SyntaxNode[] {
+  const children: SyntaxNode[] = [];
+  for (let index = 0; index < node.childCount; index += 1) {
+    const child = node.child(index);
+    if (child.isNamed) children.push(child);
+  }
+  return children;
+}
+
+interface PowerShellArgumentValue {
+  value: string | undefined;
+  dynamic: boolean;
+}
+
+function argumentValue(node: SyntaxNode): PowerShellArgumentValue {
+  const source = node.text;
+  if (source.startsWith("'") && source.endsWith("'")) {
+    return { value: source.slice(1, -1).replaceAll("''", "'"), dynamic: false };
+  }
+  if (node.type === 'command_parameter') {
+    return { value: node.text, dynamic: node.text.includes('$') || node.text.includes('`') };
+  }
+  if (node.type === 'generic_token' || node.type === 'integer_literal' || node.type === 'decimal_integer_literal') {
+    return { value: source, dynamic: false };
+  }
+  if (node.type === 'variable') return { value: node.text, dynamic: true };
+  if (node.type === 'verbatim_string_characters') return { value: node.text, dynamic: false };
+  if (node.type === 'expandable_string_literal') {
+    const content = node.text.slice(1, -1);
+    if (content.includes('`') || childrenOf(node).some((child) => child.type === 'sub_expression')) {
+      return { value: undefined, dynamic: true };
+    }
+    return { value: content, dynamic: content.includes('$') };
+  }
+  if (node.type === 'string_literal' || node.type === 'unary_expression' || node.type === 'expandable_bareword') {
+    const children = childrenOf(node);
+    if (children.length === 0) return { value: undefined, dynamic: true };
+    let value = '';
+    let dynamic = false;
+    let complete = true;
+    for (const child of children) {
+      if (child.type === 'sub_expression') {
+        complete = false;
+        dynamic = true;
+        continue;
+      }
+      const nested = argumentValue(child);
+      if (nested.value === undefined) complete = false;
+      else value += nested.value;
+      dynamic ||= nested.dynamic;
+    }
+    return { value: complete ? value : undefined, dynamic };
+  }
+  if (node.type === 'sub_expression') return { value: undefined, dynamic: true };
+  return { value: undefined, dynamic: true };
+}
+
+function nestedPowerShellCommands(node: SyntaxNode, text: string): ParsedCommandInvocation[] {
+  const found: ParsedCommandInvocation[] = [];
+  const visit = (candidate: SyntaxNode, pipeline = false) => {
+    if (candidate.type === 'command') {
+      found.push(powerShellInvocation(candidate, text, true, pipeline));
+      return;
+    }
+    const inPipeline = pipeline || (candidate.type === 'pipeline' && commandCount(candidate) > 1);
+    for (const child of childrenOf(candidate)) visit(child, inPipeline);
+  };
+  for (const child of childrenOf(node)) visit(child);
+  return found;
+}
+
+function powerShellArgument(node: SyntaxNode, text: string): ParsedCommandArgument {
+  const inspected = argumentValue(node);
+  return {
+    source: text.slice(node.startIndex, node.endIndex),
+    value: inspected.value,
+    dynamic: inspected.dynamic,
+    tildeExpansion: false,
+    nested: nestedPowerShellCommands(node, text),
+  };
+}
+
+function powerShellInvocation(node: SyntaxNode, text: string, nested: boolean, pipeline: boolean): ParsedCommandInvocation {
+  const children = childrenOf(node);
+  const commandName = children.find((child) => child.type === 'command_name');
+  const elements = children.find((child) => child.type === 'command_elements');
+  const args = elements === undefined
+    ? []
+    : childrenOf(elements)
+      .filter((child) => child.type !== 'command_argument_sep')
+      .map((child) => powerShellArgument(child, text));
+  return { executable: commandName?.text ?? '', executableSource: commandName?.text ?? '', arguments: args, nested, pipeline };
+}
+
+function commandCount(node: SyntaxNode): number {
+  if (node.type === 'command') return 1;
+  return childrenOf(node).reduce((count, child) => count + commandCount(child), 0);
+}
+
+function powerShellInvocations(root: SyntaxNode, text: string): ParsedCommandInvocation[] {
+  const found: ParsedCommandInvocation[] = [];
+  const visit = (node: SyntaxNode, nested: boolean, pipeline: boolean) => {
+    if (node.type === 'command') {
+      if (!node.hasError) found.push(powerShellInvocation(node, text, nested, pipeline));
+      return;
+    }
+    const nestedCommand = nested || node.type === 'sub_expression';
+    const inPipeline = pipeline || (node.type === 'pipeline' && commandCount(node) > 1);
+    for (const child of childrenOf(node)) visit(child, nestedCommand, inPipeline);
+  };
+  visit(root, false, false);
+  return found;
+}
+
+// 返回解析状态和从同一 PowerShell AST 提取的调用参数。
+export async function inspectPowerShellCommand(text: string): Promise<CommandInspection> {
   const parser = await loadParser();
   if (parser === undefined) {
-    return { kind: 'unavailable', detail: 'the PowerShell grammar (tree-sitter-pwsh) could not be loaded' };
+    return {
+      parsed: { kind: 'unavailable', detail: 'the PowerShell grammar (tree-sitter-pwsh) could not be loaded' },
+      invocations: [],
+    };
   }
   try {
-    return analyse(parser.parse(text).rootNode, text);
+    const root = parser.parse(text).rootNode;
+    return { parsed: analyse(root, text), invocations: powerShellInvocations(root, text) };
   } catch (error) {
-    return { kind: 'unavailable', detail: error instanceof Error ? error.message : String(error) };
+    return {
+      parsed: { kind: 'unavailable', detail: error instanceof Error ? error.message : String(error) },
+      invocations: [],
+    };
   }
+}
+
+// 解析失败时保留解析状态，策略层不会自动批准。
+export async function parsePowerShell(text: string): Promise<ParsedCommand> {
+  return (await inspectPowerShellCommand(text)).parsed;
 }

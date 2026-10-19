@@ -26,6 +26,7 @@ if (process.isMainFrame) {
     onHostLog: handler => subscribe('ligule:host-log', handler),
     onHostFault: handler => subscribe('ligule:host-fault', handler),
     defaultWorkspace: () => ipcRenderer.invoke('ligule:default-workspace'),
+    selectWorkspaceDirectory: (directory: string) => ipcRenderer.invoke('ligule:workspace-directory', directory),
     saveExportPath: (name: string) => ipcRenderer.invoke('ligule:export-path', name),
     requestQuit: () => ipcRenderer.invoke('ligule:quit'),
     onQuitRequested: handler => subscribe('ligule:quit-requested', handler),

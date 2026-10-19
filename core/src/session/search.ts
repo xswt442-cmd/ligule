@@ -98,10 +98,38 @@ export interface SearchQuery {
 }
 
 export async function searchSessions(directory: string, options: SearchQuery): Promise<SearchHit[]> {
+  return await searchSessionDirectories([directory], options);
+}
+
+export async function searchSessionDirectories(directories: readonly string[], options: SearchQuery): Promise<SearchHit[]> {
   const needle = options.query.trim().toLocaleLowerCase();
   const limit = options.limit ?? SEARCH_LIMIT;
-  if (options.sessionId !== undefined) return searchOne(directory, options.sessionId, needle, limit);
-  const listed = await listSessions(directory, { projectRoot: options.projectRoot });
+  if (options.sessionId !== undefined) {
+    for (const directory of directories) {
+      try {
+        return await searchOne(directory, options.sessionId, needle, limit);
+      } catch (error) {
+        if ((error as { code?: string }).code !== 'session_not_found') throw error;
+      }
+    }
+    throw new KernelError('session_not_found', { detail: options.sessionId });
+  }
+  const groups = await Promise.all(directories.map(async (directory) => ({
+    directory,
+    sessions: await listSessions(directory, { projectRoot: options.projectRoot }),
+  })));
+  const sessions = new Map<string, { directory: string; updatedAt: string; id: string; name: string }>();
+  for (const group of groups) {
+    for (const session of group.sessions) {
+      if (!sessions.has(session.id)) sessions.set(session.id, {
+        directory: group.directory,
+        updatedAt: session.updatedAt,
+        id: session.id,
+        name: session.name,
+      });
+    }
+  }
+  const listed = [...sessions.values()].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   const hits: SearchHit[] = [];
   // 结果按会话列表顺序排列；同一会话中的命中按事件序号递增。
   for (const item of listed) {
@@ -110,7 +138,7 @@ export async function searchSessions(directory: string, options: SearchQuery): P
     let events: SessionEvent[];
     try {
       // 列表已读取过记录文件；为搜索正文再次读取同一记录。
-      events = parseSessionBytes(await readFile(join(directory, `${item.id}.jsonl`))).events;
+      events = parseSessionBytes(await readFile(join(item.directory, `${item.id}.jsonl`))).events;
     } catch {
       // 无法读取的记录错误已由会话列表返回；搜索时跳过该记录，不猜测其内容。
       continue;

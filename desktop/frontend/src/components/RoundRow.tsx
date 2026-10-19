@@ -6,12 +6,13 @@ import { turnFailure } from '../turn-failure';
 export function RoundRow({ row, branch, onModels }: RowProps) {
   const t = useText();
   const at = branch === undefined || row.status !== 'completed' ? undefined : row.seq;
-  const failure = row.status === 'failed' ? turnFailure(row.code ?? '') : undefined;
+  const failure = row.status === 'failed' ? turnFailure(row.code ?? '', row.diagnostics) : undefined;
   const names: Record<string, [string, string]> = { completed: ['本轮已完成', 'Turn completed'], cancelled: ['本轮已取消', 'Turn cancelled'], failed: ['本轮失败', 'Turn failed'], interrupted: ['本轮意外中断', 'Turn interrupted'] };
   return <article className="row round" data-kind="round">
     <div className="row-body">
       <span>{names[row.status ?? ''] === undefined ? row.text : t(...names[row.status!])}</span>
       {failure !== undefined && <p className="turn-explanation">{t(...failure.explanation)}</p>}
+      {failure?.diagnostic !== undefined && <p className="turn-explanation">{t(...failure.diagnostic)}</p>}
       {failure?.action === 'models' && onModels !== undefined && <button type="button" className="turn-recovery" onClick={onModels}>{t('模型设置', 'Model settings')}</button>}
       {row.code && <details><summary>{t('详情', 'Details')}</summary><code>{row.code}</code></details>}
     </div>

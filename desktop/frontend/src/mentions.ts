@@ -1,6 +1,7 @@
 // `@` 路径引用的识别和替换规则。TUI 使用相同规则的独立实现。
 // 这些纯函数不依赖渲染，可单独验证。
 export type MentionToken = { start: number; text: string };
+export type MentionState = MentionToken & { paths: string[]; chosen: number; stopped: string; root: string; failed?: string };
 
 const MENTION = /(?:^|\s)@([^\s]*)$/;
 

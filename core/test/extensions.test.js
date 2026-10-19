@@ -7,10 +7,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  createConfig, createKernel, extensionSources, loadAssembly, loadExtensions, minimalPlugin,
+  createConfig, createKernel, createPermissionContext, extensionSources, loadAssembly, loadExtensions, minimalPlugin,
 } from '../dist/index.js';
 
 const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
+const fullAccess = createPermissionContext('full-access', 'unrestricted', {
+  filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
+});
 
 // 每一条测试都要一份真的临时目录（扩展文件是被真动态 import 的），跑完一起收掉。
 const created = [];
@@ -45,7 +48,7 @@ test('sources come from the install directory, the user layer and the command li
 test('the narrow interface is the four things the contract names, and registrations reach the kernel', async () => {
   const root = await directoryWith({
     'one.js': `export default function one(host) {
-  host.registerTool({ name: 'extra', description: 'from the extension', parameters: { type: 'object', properties: {} }, run: async () => ({ text: 'ran' }) });
+  host.registerTool({ name: 'extra', description: 'from the extension', access: 'read', parameters: { type: 'object', properties: {} }, run: async () => ({ text: 'ran' }) });
   host.registerPrompt({ name: 'notes', text: 'what the extension wants said' });
   globalThis.__seen = Object.keys(host).sort().join(',');
 }`,
@@ -73,9 +76,9 @@ test('the narrow interface is the four things the contract names, and registrati
 
 test('a broken extension takes back its own registrations and leaves the others alone', async () => {
   const root = await directoryWith({
-    'good.js': 'export default function good(host) { host.registerTool({ name: "keep", description: "stays", parameters: { type: "object", properties: {} }, run: async () => ({ text: "ok" }) }); }',
+    'good.js': 'export default function good(host) { host.registerTool({ name: "keep", description: "stays", access: "read", parameters: { type: "object", properties: {} }, run: async () => ({ text: "ok" }) }); }',
     'no-default.js': 'export const notAFactory = 1;',
-    'throws.js': 'export default function throws(host) { host.registerTool({ name: "half", description: "must not stay", parameters: { type: "object", properties: {} }, run: async () => ({ text: "ok" }) }); throw new Error("boom in setup"); }',
+    'throws.js': 'export default function throws(host) { host.registerTool({ name: "half", description: "must not stay", access: "read", parameters: { type: "object", properties: {} }, run: async () => ({ text: "ok" }) }); throw new Error("boom in setup"); }',
   });
   const kernel = createKernel({ config: createConfig({ user: { boundary: root } }) });
   const loaded = await loadExtensions(
@@ -122,7 +125,7 @@ const { createConnection, createMemoryConnectionPair, MESSAGES_CAPABILITIES, mod
 
 async function withSession(modePrompt, run) {
   const root = await directoryWith({
-    'one.js': 'export default function one(host) { host.registerTool({ name: "extra", description: "from the extension", parameters: { type: "object", properties: {} }, run: async () => ({ text: "ran" }) }); host.registerPrompt({ name: "notes", text: "what the extension wants said" }); }',
+    'one.js': 'export default function one(host) { host.registerTool({ name: "extra", description: "from the extension", access: "read", parameters: { type: "object", properties: {} }, run: async () => ({ text: "ran" }) }); host.registerPrompt({ name: "notes", text: "what the extension wants said" }); }',
   });
   const userHome = join(root, 'home');
   const directories = modeDirectories(root, shippedModes, userHome);
@@ -145,6 +148,7 @@ async function withSession(modePrompt, run) {
     config,
     provider,
     policy: config.policy,
+    permission: fullAccess,
     modeName: 'picked',
     modePaths: directories,
     extensions: { paths: [join(root, 'one.js')], ignored: [] },

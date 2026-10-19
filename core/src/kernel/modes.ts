@@ -3,7 +3,7 @@
 // 每个 TOML 文件定义一个模式，文件名就是模式名。查找顺序为随包、用户、项目；同名时采用优先级最高的整份文件，不跨层合并。
 // 这里负责解析并校验提示词片段名称；实际名称会在扩展注册完成后由 Host 验证。
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'smol-toml';
@@ -130,6 +130,42 @@ export async function loadMode(name: string, directories: ModeDirectories): Prom
   // 摘要根据规范化后的工具和提示词名称顺序计算，用于检测同名模式内容是否改变。
   const digest = createHash('sha256').update(JSON.stringify({ tools, prompt })).digest('hex').slice(0, 12);
   return { name, layer: file.layer, path: file.path, tools, prompt, digest };
+}
+
+/** 返回客户端可选择的模式名称和无路径诊断。 */
+export async function listModes(directories: ModeDirectories): Promise<{
+  readonly modes: { readonly name: string; readonly layer: ModeLayer }[];
+  readonly invalid: { readonly name: string; readonly code: string }[];
+  readonly truncated: boolean;
+}> {
+  const names = new Set<string>();
+  const ordered = [directories.project, directories.user, directories.shipped];
+  for (const directory of ordered) {
+    let entries;
+    try { entries = await readdir(directory, { withFileTypes: true }); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw new KernelError('mode_directory_read_failed', { cause: error, detail: 'a mode directory could not be read' });
+    }
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.toml')) continue;
+      const name = entry.name.slice(0, -'.toml'.length);
+      if (/^[a-z0-9][a-z0-9._-]{0,63}$/u.test(name)) names.add(name);
+    }
+  }
+  const modes: { name: string; layer: ModeLayer }[] = [];
+  const invalid: { name: string; code: string }[] = [];
+  for (const name of [...names].sort()) {
+    try {
+      const mode = await loadMode(name, directories);
+      modes.push({ name: mode.name, layer: mode.layer });
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string'
+        ? error.code : 'mode_invalid';
+      invalid.push({ name, code });
+    }
+  }
+  return { modes: modes.slice(0, 128), invalid: invalid.slice(0, 128), truncated: modes.length > 128 || invalid.length > 128 };
 }
 
 // 模式引用未登记的工具时返回错误，不静默删去该项，以免实际工具清单与配置不符。

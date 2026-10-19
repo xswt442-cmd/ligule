@@ -45,6 +45,20 @@ interface ConnectedServer {
   tools: Map<string, ToolDefinition>;
 }
 
+const MCP_RUNTIME_ENVIRONMENT = new Set([
+  'appdata', 'ci', 'comspec', 'force_color', 'home', 'homedrive', 'homepath', 'lang', 'lc_all',
+  'localappdata', 'no_color', 'path', 'pathext', 'systemdrive', 'systemroot', 'term', 'tmp',
+  'temp', 'tmpdir', 'userprofile', 'windir',
+]);
+
+function mcpEnvironment(referenced: Readonly<Record<string, string>>): Record<string, string> {
+  const environment: Record<string, string> = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (value !== undefined && MCP_RUNTIME_ENVIRONMENT.has(name.toLowerCase())) environment[name] = value;
+  }
+  return { ...environment, ...referenced };
+}
+
 async function refreshTools(opened: ConnectedServer, signal?: AbortSignal): Promise<Map<string, ToolDefinition>> {
   const listed = await opened.client.listTools(undefined, signal === undefined ? undefined : { signal });
   opened.tools = new Map<string, ToolDefinition>();
@@ -158,7 +172,7 @@ export async function connectServer(settings: NormalizedMcpServerConfig, signal?
     command: settings.command,
     args: settings.args,
     cwd: settings.cwd,
-    env: { ...process.env, ...settings.env } as Record<string, string>,
+    env: mcpEnvironment(settings.env),
     stderr: 'pipe',
   });
   // 这是 MCP 客户端协议身份，不代表 Core 有独立版本。

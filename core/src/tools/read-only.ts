@@ -18,6 +18,7 @@ type FileToolContext = Pick<ToolContext, 'config' | 'observations' | 'signal' | 
 
 export const readTool = {
   name: 'read',
+  access: 'read',
   readOnly: true,
   description: 'Read a text file relative to the working directory, within the workspace boundary, up to a byte limit.',
   parameters: {
@@ -46,6 +47,7 @@ export const readTool = {
 
 export const findTool = {
   name: 'find',
+  access: 'read',
   readOnly: true,
   description: 'Find files by name pattern from the working directory, within the workspace boundary.',
   parameters: {
@@ -84,6 +86,7 @@ export const findTool = {
 // Node 回退实现逐行匹配，并受扫描文件数和扫描字节数限制；ripgrep 使用结果数上限。
 export const searchTool = {
   name: 'search',
+  access: 'read',
   readOnly: true,
   description: 'Search file contents from the working directory, within the workspace boundary.',
   parameters: {

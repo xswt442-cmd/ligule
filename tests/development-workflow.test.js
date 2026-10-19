@@ -5,7 +5,7 @@ import { copyFile, mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { withTuiHost } from '../test/helpers/tui-host.ts';
+import { measuredPermissionContext, withTuiHost } from '../test/helpers/tui-host.ts';
 
 const repositoryFile = (relativePath) => fileURLToPath(new URL(relativePath, import.meta.url));
 
@@ -21,19 +21,26 @@ async function stageReferences({ projectDirectory }) {
 
 async function callTool(context, tool, args) {
   const { client, sessionId } = context;
-  const before = (await client.request('session.read', { sessionId })).events;
+  const before = (await client.request('session.read', { sessionId, fullResults: true })).events;
   const lastSeq = before.at(-1)?.seq ?? -1;
   await client.request('run.start', { sessionId, input: JSON.stringify({ tool, args }) });
-  const { events } = await client.request('session.read', { sessionId });
+  const { events } = await client.request('session.read', { sessionId, fullResults: true });
   const result = events.findLast((event) => event.kind === 'tool' && event.tool === tool && event.seq > lastSeq);
   assert.ok(result, `the real Host did not record the ${tool} tool result`);
   assert.equal(result.result.failed, false, `${tool} failed: ${JSON.stringify(result.result)}`);
   return result.result.content;
 }
 
-test('G01–G04: isolated Node project, defect repair, repository README, design note, and session recovery', async () => {
+test('G01–G04: isolated Node project, defect repair, repository README, design note, and session recovery', async (t) => {
+  const permission = await measuredPermissionContext('full-access', 'unrestricted');
+  if (permission.capabilities.process !== 'full') return t.skip('the platform process ownership backend is unavailable');
   await withTuiHost(async (context) => {
     const { client, projectDirectory, sessionDirectory, sessionId, providerRequests } = context;
+    // 只回应 Host 实际提出的命令审批；Permission 仍由本测试使用平台实测能力显式设置。
+    client.onRequest(async (message) => {
+      assert.equal(message.method, 'approval.request');
+      return { decision: 'allow' };
+    });
 
     // G01: create a small runnable project and test it through the Host's exec tool.
     await callTool(context, 'create', {
@@ -61,10 +68,10 @@ test('G01–G04: isolated Node project, defect repair, repository README, design
       path: 'app.mjs',
       content: "import { appendFile } from 'node:fs/promises';\nawait appendFile(new URL('./run-count.txt', import.meta.url), 'ran\\n');\nconsole.log('project-ran');\n",
     });
-    const projectTest = await callTool(context, 'exec', { command: 'npm test' });
+    const projectTest = await callTool(context, 'exec', { command: 'node run-tests.mjs' });
     assert.equal(projectTest.exitCode, 0, `G01 test command failed: ${projectTest.text}`);
     assert.match(projectTest.text, /pass 1/);
-    const projectRun = await callTool(context, 'exec', { command: 'npm start' });
+    const projectRun = await callTool(context, 'exec', { command: 'node app.mjs' });
     assert.equal(projectRun.exitCode, 0, `G01 app command failed: ${projectRun.text}`);
     assert.match(projectRun.text, /project-ran/);
 
@@ -77,7 +84,7 @@ test('G01–G04: isolated Node project, defect repair, repository README, design
       path: 'test/normalize.test.mjs',
       content: "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { normalizeName } from '../src/normalize.mjs';\n\ntest('normalizes a project name', () => assert.equal(normalizeName(' New Project '), 'new-project'));\n",
     });
-    const failingRun = await callTool(context, 'exec', { command: 'npm test' });
+    const failingRun = await callTool(context, 'exec', { command: 'node run-tests.mjs' });
     assert.notEqual(failingRun.exitCode, 0, 'G02 fixture must fail before the repair');
     assert.match(failingRun.text, /new project/);
     assert.match(failingRun.text, /new-project/);
@@ -88,7 +95,7 @@ test('G01–G04: isolated Node project, defect repair, repository README, design
       anchor: 'value.trim().toLowerCase()',
       replacement: "value.trim().toLowerCase().replace(/\\s+/g, '-')",
     });
-    const repairedRun = await callTool(context, 'exec', { command: 'npm test' });
+    const repairedRun = await callTool(context, 'exec', { command: 'node run-tests.mjs' });
     assert.equal(repairedRun.exitCode, 0, `G02 repaired test command failed: ${repairedRun.text}`);
     assert.match(repairedRun.text, /pass 2/);
 
@@ -148,5 +155,7 @@ test('G01–G04: isolated Node project, defect repair, repository README, design
   }, {
     setup: stageReferences,
     config: { policy: { mode: 'auto' } },
+    interactive: true,
+    permission,
   });
 });

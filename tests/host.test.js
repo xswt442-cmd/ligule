@@ -9,8 +9,10 @@ import { mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from
 import { join, dirname } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { createConnection, createConfig, createMemoryConnectionPair, MESSAGES_CAPABILITIES, METHODS, NOTIFICATIONS, providerFromConfig, hostProviderFromConfig, resolveShell, serveHost } from '../core/dist/index.js';
-import { shownConfigOf } from '../core/dist/host/host.js';
+import { createConnection, createConfig, createMemoryConnectionPair, MESSAGES_CAPABILITIES, METHODS, NOTIFICATIONS, providerFromConfig, hostProviderFromConfig, resolveShell, serveHost, sessionDirectory } from '../core/dist/index.js';
+import { detectPermissionCapabilities } from '../core/dist/capability/permission-capabilities.js';
+import { createPermissionContext } from '../core/dist/kernel/permission.js';
+import { createHost, shownConfigOf } from '../core/dist/host/host.js';
 import { createConfigStore } from '../core/dist/kernel/config-store.js';
 import { configVersion } from '../core/dist/kernel/config-edit.js';
 import { historyPathOf, rememberHistory } from '../core/dist/kernel/input-history.js';
@@ -160,19 +162,20 @@ test('a client over stdio drives one round, answers one approval and watches the
     const events = notifications.filter((message) => message.notify === 'event').map((message) => message.event);
     // 模式事件先记录本轮使用的工具清单。
     // 轮次完成事件跟在最后一条助手事件之后，且不会进入模型投影。
-    assert.deepEqual(events.map((event) => event.kind), ['mode', 'user', 'turnContext', 'assistant', 'tool', 'assistant', 'turn']);
+    assert.deepEqual(events.map((event) => event.kind), ['sessionPermission', 'mode', 'user', 'turnContext', 'assistant', 'sessionPolicy', 'tool', 'assistant', 'turn']);
     assert.equal(events.find((event) => event.kind === 'tool').result.content.text, 'the body', 'the tool result the client saw is the file content');
 
     // 客户端收到的事件与会话记录中的事件一致，通知也包含相同的序号。
     // 子进程的 HOME 指向临时目录，因此会话记录保存在该目录的数据根中。
-    const lines = (await readFile(join(directory, '.ligule', 'sessions', `${sessionId}.jsonl`), 'utf8'))
+    const recordDirectory = sessionDirectory({ boundary: directory, workspaceRoot: directory, userHome: directory });
+    const lines = (await readFile(join(recordDirectory, `${sessionId}.jsonl`), 'utf8'))
       .trim().split('\n').map((line) => JSON.parse(line));
     // 首行保存会话元信息而非事件；Host 读取后仍应将其写入文件。
     assert.equal(lines[0].kind, 'session');
     assert.equal(lines[0].sessionId, sessionId);
     const recorded = lines.slice(1);
     assert.deepEqual(recorded.map((event) => event.seq), events.map((event) => event.seq));
-    assert.match(recorded[0].digest, /^[0-9a-f]{12}$/, '模式事件带着那一份清单的摘要，恢复时比的就是它（D78）');
+    assert.match(recorded.find((event) => event.kind === 'mode').digest, /^[0-9a-f]{12}$/, '模式事件带着那一份清单的摘要，恢复时比的就是它（D78）');
 
     const status = await host.client.request('status.get', { sessionId });
     assert.equal(status.running, false);
@@ -234,7 +237,7 @@ test('a second Host process opens the same record, so the session lives in the H
     host.client.onRequest(async () => ({ decision: 'allow' }));
     const { sessionId } = await host.client.request('session.create', {});
     await host.client.request('run.start', { sessionId, input: 'read the note' });
-    const path = join(directory, '.ligule', 'sessions', `${sessionId}.jsonl`);
+    const path = join(sessionDirectory({ boundary: directory, workspaceRoot: directory, userHome: directory }), `${sessionId}.jsonl`);
     const before = await readFile(path, 'utf8');
 
     // 客户端关闭管道后，Host 应取消当前轮次、释放插件并自行退出。
@@ -253,7 +256,7 @@ test('a second Host process opens the same record, so the session lives in the H
       const reopened = await second.client.request('session.read', { sessionId });
       assert.equal(reopened.sessionId, sessionId);
       // 第二个进程加载同一清单并读取记录，不应改变会话文件。
-      assert.deepEqual(reopened.events.map((event) => event.kind), ['mode', 'user', 'turnContext', 'assistant', 'tool', 'assistant', 'turn']);
+      assert.deepEqual(reopened.events.map((event) => event.kind), ['sessionPermission', 'mode', 'user', 'turnContext', 'assistant', 'sessionPolicy', 'tool', 'assistant', 'turn']);
       assert.equal(reopened.events.find((event) => event.kind === 'tool').result.content.text, 'the body');
       const status = await second.client.request('status.get', { sessionId });
       assert.equal(status.running, false);
@@ -663,7 +666,10 @@ test('the same protocol runs over an in-memory carrier inside one process', asyn
 
 // 审批那一次问的不只是「要不要跑」：同一条文本在两种语法下能自动放行的面积不一样，
 // 审批请求应显示所用的命令语法和目标可执行文件；拒绝后不启动进程。
-test('an approval for a command names the shell backend the host chose', async () => {
+test('an approval for a command names the shell backend the host chose', async (t) => {
+  const measured = await detectPermissionCapabilities();
+  if (measured.capabilities.process !== 'full') return t.skip('the platform process ownership backend is unavailable');
+  const permission = createPermissionContext('full-access', 'unrestricted', measured.capabilities);
   const directory = await mkdtemp(join(tmpdir(), 'ligule-host-shell-'));
   const config = createConfig({
     user: {
@@ -687,7 +693,7 @@ test('an approval for a command names the shell backend the host chose', async (
     },
   };
   const pair = createMemoryConnectionPair();
-  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy });
+  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy, permission });
   const approvals = [];
   const connection = createConnection(pair.client);
   connection.onRequest(async (message) => {
@@ -740,7 +746,7 @@ test('a branch of an open session reads back through the same action', async () 
     assert.ok(events.some((event) => event.kind === 'user' && event.text === '一句话'), 'the open session reads back');
     assert.ok(events.every((event) => typeof event.seq === 'number'), 'sequence numbers come from the record');
 
-    await writeFile(join(homedir(), '.ligule', 'sessions', `${branchId}.jsonl`), [
+    await writeFile(join(sessionDirectory({ boundary: directory, workspaceRoot: directory }), `${branchId}.jsonl`), [
       JSON.stringify({ kind: 'session', formatVersion: 1, sessionId: branchId, projectRoot: directory, createdAt: '2026-10-05T00:00:00.000Z' }),
       JSON.stringify({ seq: 0, kind: 'user', text: 'the delegated task' }),
     ].join('\n') + '\n');
@@ -1315,6 +1321,88 @@ test('a saved generation choice lands now on an idle session and at the round ed
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('model selection checks the live session after waiting in its configuration queue', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-model-select-queue-'));
+  const home = join(root, 'home');
+  const project = join(root, 'project');
+  await Promise.all([mkdir(join(home, '.ligule'), { recursive: true }), mkdir(project)]);
+  const endpoint = 'http://127.0.0.1:1/v1';
+  await writeFile(join(home, '.ligule', 'config.toml'), [
+    '[model]',
+    'api = "chat-completions"',
+    `baseURL = "${endpoint}"`,
+    'model = "local-a"',
+    'apiKeyEnv = "HOST_SELECT_TEST_KEY"',
+    `services = [{ id = "local", name = "Local", api = "chat-completions", baseURL = "${endpoint}", apiKeyEnv = "HOST_SELECT_TEST_KEY", models = ["local-a", "local-b"] }]`,
+    'selection = { provider = "local", model = "local-a" }',
+    '',
+    '[policy]',
+    'mode = "auto"',
+  ].join('\n'));
+  const baseStore = createConfigStore({ projectRoot: project, userHome: home });
+  const readEntered = Promise.withResolvers();
+  const readGate = Promise.withResolvers();
+  let holdNextRead = false;
+  const configStore = {
+    ...baseStore,
+    async read() {
+      if (holdNextRead) {
+        holdNextRead = false;
+        readEntered.resolve();
+        await readGate.promise;
+      }
+      return baseStore.read();
+    },
+  };
+  const service = {
+    id: 'local', name: 'Local', api: 'chat-completions', baseURL: endpoint,
+    apiKeyEnv: 'HOST_SELECT_TEST_KEY', models: ['local-a', 'local-b'],
+  };
+  const config = createConfig({ user: {
+    boundary: project,
+    model: {
+      api: service.api, baseURL: endpoint, model: 'local-a', apiKeyEnv: service.apiKeyEnv,
+      services: [service], selection: { provider: 'local', model: 'local-a' },
+    },
+    policy: { mode: 'auto' },
+  } });
+  const provider = {
+    model: 'local-a', capabilities: MESSAGES_CAPABILITIES,
+    async *stream() { yield { type: 'text', text: 'unused' }; },
+  };
+  const host = createHost({
+    config,
+    provider,
+    policy: config.policy,
+    configStore,
+    deriveProvider: (next) => ({ ...provider, model: next.model.model }),
+  });
+  const connection = {
+    notify() {},
+    async request() { throw new Error('model selection does not request user approval'); },
+  };
+  try {
+    const { sessionId } = await host.handle({ method: 'session.create', params: {} }, connection);
+    holdNextRead = true;
+    const firstSelection = host.handle({ method: 'model.select', params: { sessionId, provider: 'local', model: 'local-a' } }, connection)
+      .catch((error) => error);
+    await Promise.race([
+      readEntered.promise,
+      delay(3_000).then(() => { throw new Error('the first model selection did not reach its configuration read'); }),
+    ]);
+    const queuedSelection = host.handle({ method: 'model.select', params: { sessionId, provider: 'local', model: 'local-b' } }, connection);
+    await host.handle({ method: 'session.close', params: { sessionId } }, connection);
+    readGate.resolve();
+    await firstSelection;
+    await assert.rejects(queuedSelection, (error) => error.code === 'session_not_open');
+  } finally {
+    readGate.resolve();
+    await host.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 // 会话列表只包含指定项目记录目录中的会话；未加载的项目环境会返回不支持错误。
 // 无效项目根分别返回稳定错误码；有效项目没有记录目录时返回空列表。
 test('one host keeps two projects apart, and a host without a loader says so', async () => {
@@ -1348,7 +1436,9 @@ test('one host keeps two projects apart, and a host without a loader says so', a
     const inSecond = await client.request('session.create', { projectRoot: second });
     // 会话元信息在首次写入时生成；先运行一轮再读取记录所属项目。
     await client.request('run.start', { sessionId: inSecond.sessionId, input: '另一轮' });
-    const header = JSON.parse((await readFile(join(homedir(), '.ligule', 'sessions', `${inSecond.sessionId}.jsonl`), 'utf8')).split('\n')[0]);
+    const secondSessions = sessionDirectory({ boundary: second, workspaceRoot: second, userHome: homedir() });
+    const firstSessions = sessionDirectory({ boundary: first, workspaceRoot: first, userHome: homedir() });
+    const header = JSON.parse((await readFile(join(secondSessions, `${inSecond.sessionId}.jsonl`), 'utf8')).split('\n')[0]);
     assert.equal(header.projectRoot, second, '首行说得出这一份记录属于哪个项目');
 
     const listedHere = await client.request('sessions.list', {});
@@ -1362,8 +1452,8 @@ test('one host keeps two projects apart, and a host without a loader says so', a
     // 两个项目交错运行时，会话记录仍位于数据根，并按首行中的项目身份区分。
     const inFirst = await client.request('session.create', {});
     await client.request('run.start', { sessionId: inFirst.sessionId, input: '第一轮' });
-    assert.ok((await readFile(join(homedir(), '.ligule', 'sessions', `${inFirst.sessionId}.jsonl`), 'utf8')).includes('第一轮'));
-    assert.ok((await readFile(join(homedir(), '.ligule', 'sessions', `${inSecond.sessionId}.jsonl`), 'utf8')).includes('另一轮'));
+    assert.ok((await readFile(join(firstSessions, `${inFirst.sessionId}.jsonl`), 'utf8')).includes('第一轮'));
+    assert.ok((await readFile(join(secondSessions, `${inSecond.sessionId}.jsonl`), 'utf8')).includes('另一轮'));
 
     // 项目最后一个会话关闭后会释放其环境；下次打开时重新读取配置。
     await client.request('session.close', { sessionId: inSecond.sessionId });
@@ -1571,7 +1661,7 @@ test('a search over the records names the session and the event each hit is in',
     const { sessionId } = await connection.request('session.create', {});
     await connection.request('run.start', { sessionId, input: '读数那一段跑一遍' });
     const hits = (await connection.request('sessions.search', { query: '读数' })).hits;
-    assert.deepEqual([hits[0].sessionId, hits[0].kind, hits[0].seq], [sessionId, 'user', 0], '命中的是记录里那一条用户输入');
+    assert.deepEqual([hits[0].sessionId, hits[0].kind, hits[0].seq], [sessionId, 'user', 1], '会话 Permission 事实先占一条记录，命中仍指向用户输入');
     assert.ok(hits[0].text.includes('读数'), '摘录带着命中那一段');
     assert.ok(hits.every((hit) => hit.sessionId === sessionId), '这个项目根下只跑过这一份会话');
     assert.deepEqual((await connection.request('sessions.search', { query: '没有这段文字' })).hits, [], '查不到不是错误');

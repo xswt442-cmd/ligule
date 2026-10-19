@@ -1,6 +1,6 @@
 // 左侧栏只将创建时明确指定工作区的会话分组；其他会话直接列出。
 // 分组依据是记录首行保存的工作区身份和来源，不随默认目录变化而移动旧会话。
-import type { SessionSummary } from './components/SessionRail';
+import type { SessionSummary } from './components/rail/types';
 import { code, type Client } from './protocol.ts';
 
 /** 返回路径末尾的目录名，兼容 Windows 和 POSIX 分隔符。 */

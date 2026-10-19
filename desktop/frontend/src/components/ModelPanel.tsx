@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { code, type Client } from '../protocol';
 import { useText } from '../locale';
-import { encodeModelRows, legacyService, mergeModelRows, modelName, modelRows, newModelRow, presetService, type ModelCatalog, type ModelRow, type ModelService } from '../model-catalog';
+import { encodeModelRows, legacyService, mergeModelRows, modelName, modelRows, newModelRow, presetService, type ModelCatalog, type ModelRow, type ModelService, uniqueModelIds } from '../model-catalog';
 import { Icon } from './Icon';
+import { ModelSelectionDialog } from './ModelSelectionDialog';
 import { Modal } from './ui';
 import { HoldSheet } from './HoldSheet';
 
@@ -31,6 +32,7 @@ export function ModelPanel({ client, projectRoot, onEdit }: {
   const [leaving, setLeaving] = useState(false);
   const [failure, setFailure] = useState('');
   const [note, setNote] = useState('');
+  const [pendingModels, setPendingModels] = useState<string[] | null>(null);
   const [confirm, setConfirm] = useState<{ type: 'service' | 'key'; service: ModelService } | null>(null);
   const [selectedPreset, setSelectedPreset] = useState('custom');
   const request = useRef(0);
@@ -75,6 +77,7 @@ export function ModelPanel({ client, projectRoot, onEdit }: {
     setLayer(source === 'local' ? 'projectLocal' : 'user');
     setFailure('');
     setNote('');
+    setPendingModels(null);
   };
   const patch = (part: Partial<ModelService>) => setEditor(current => current === null ? null : { ...current, service: { ...current.service, ...part } });
   const patchRow = (key: string, part: Partial<ModelRow>) => setEditor(current => current === null ? null : { ...current, rows: current.rows.map(row => row.key === key ? { ...row, ...part } : row) });
@@ -95,13 +98,26 @@ export function ModelPanel({ client, projectRoot, onEdit }: {
     try {
       // 获取模型仅使用本次输入的密钥；只有显式保存服务才允许修改凭据库。
       const answer = await client.call('models.discover', { ...project, api: editor.service.api, baseURL: editor.service.baseURL, reference: editor.service.apiKeyEnv, ...(editor.key === '' ? {} : { temporaryKey: editor.key }) }, 20_000) as { models: string[] };
-      const rows = mergeModelRows(editor.rows, answer.models);
-      setEditor(current => current === null || current.service.id !== editor.service.id ? current : { ...current, rows });
-      setNote(answer.models.length === 0
+      const models = uniqueModelIds(answer.models);
+      const existing = new Set(editor.rows.map(row => row.id.trim()));
+      const additions = models.filter(model => !existing.has(model));
+      setNote(models.length === 0
         ? t('服务没有返回可用模型。现有模型已保留，可以手动添加。', 'The service returned no models. Existing entries are preserved; you can add models manually.')
-        : t(`已获取 ${answer.models.length} 个模型并填入目录，已有名称和参数保持不变。保存服务后生效。`, `Fetched ${answer.models.length} models into the catalog. Existing names and limits are preserved. Save the service to apply changes.`));
+        : additions.length === 0
+          ? t('获取到的模型已全部在目录中。', 'All discovered models are already in the catalog.')
+          : '');
+      if (additions.length > 0) setPendingModels(models);
     } catch (error) { setFailure(code(error)); }
     finally { setBusy(false); }
+  };
+  const addDiscoveredModels = (selected: string[]) => {
+    if (editor === null || selected.length === 0) return;
+    try {
+      const rows = mergeModelRows(editor.rows, selected);
+      setEditor(current => current === null || current.service.id !== editor.service.id ? current : { ...current, rows });
+      setPendingModels(null);
+      setNote(t(`已添加 ${selected.length} 个模型。保存服务后生效。`, `Added ${selected.length} models. Save the service to apply changes.`));
+    } catch (error) { setFailure(code(error)); }
   };
   const write = async (field: string, value: unknown, snapshot: ModelCatalog) => {
     const version = snapshot.layers.find(item => item.layer === layer)?.version;
@@ -231,6 +247,7 @@ export function ModelPanel({ client, projectRoot, onEdit }: {
       <div className="form-actions"><button type="button" disabled={busy} onClick={() => { if (changed) setLeaving(true); else setEditor(null); }}>{t('返回列表', 'Back to services')}</button><button type="submit" className="primary-button" disabled={busy || !validReference}>{busy ? t('保存中…', 'Saving…') : t('保存服务', 'Save service')}</button></div>
     </fieldset></form>}
     {confirm !== null && <Modal title={confirm.type === 'key' ? t('删除密钥？', 'Delete API key?') : t('删除服务？', 'Delete service?')} className="confirm" onClose={() => { if (!busy) setConfirm(null); }}><h2 className="confirm-lead">{confirm.type === 'key' ? t('删除已存密钥？', 'Delete the stored API key?') : t(`删除服务“${confirm.service.name}”？`, `Delete “${confirm.service.name}”?`)}</h2><p className="confirm-note">{confirm.type === 'key' ? t('使用相同凭据引用的服务都将受到影响。', 'All services using this credential reference will be affected.') : t('会话记录和已存密钥将保留。在用会话保留当前连接，直到重新选择。', 'Conversation history and stored keys are kept. Sessions using this service retain their connection until another selection is made.')}</p><div className="confirm-actions"><button type="button" disabled={busy} onClick={() => setConfirm(null)}>{t('取消', 'Cancel')}</button><button type="button" disabled={busy} onClick={() => void remove()}>{t('删除', 'Delete')}</button></div></Modal>}
+    {pendingModels !== null && editor !== null && <ModelSelectionDialog models={pendingModels} existingModels={editor.rows.map(row => row.id)} onCancel={() => { setPendingModels(null); setNote(t('未添加模型，目录未更改。', 'No models were added; the catalog is unchanged.')); }} onAdd={addDiscoveredModels} />}
     {leaving && <HoldSheet lead={t('放弃未保存的修改？', 'Discard unsaved changes?')} reasons={[t('模型服务有未保存的修改', 'Model service has unsaved changes')]} onStay={() => setLeaving(false)} onLeave={() => { setLeaving(false); setEditor(null); }} />}
   </div>;
 }

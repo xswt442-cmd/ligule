@@ -201,3 +201,16 @@ export function setDefaultWorkspace(directory: string | null, { path = registryP
     registry.default = canonical.identity;
   });
 }
+
+/** 移除一条工作区登记；项目目录、项目文件与会话记录保持不变。 */
+export function unregisterWorkspace(directory: string, { path = registryPathOf() } = {}): Promise<WorkspaceRegistry> {
+  const canonical = canonicalOf(directory);
+  return mutateRegistry(path, (registry) => {
+    if (registry.default === canonical.identity) {
+      throw new KernelError('workspace_default_cannot_remove', { detail: canonical.directory });
+    }
+    const index = registry.workspaces.findIndex((entry) => entry.identity === canonical.identity);
+    if (index < 0) throw new KernelError('workspace_not_registered', { detail: canonical.directory });
+    registry.workspaces.splice(index, 1);
+  });
+}

@@ -7,13 +7,15 @@ import type { PassThrough } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createConfig } from '../../core/dist/kernel/config.js';
 import type { ConfigSnapshot } from '../../core/dist/kernel/config.js';
+import { createPermissionContext, type PermissionContext } from '../../core/dist/kernel/permission.js';
+import { detectPermissionCapabilities } from '../../core/dist/capability/permission-capabilities.js';
 import { createConnection } from '../../core/dist/host/connection.js';
 import type { Connection } from '../../core/dist/host/connection.js';
 import { createMemoryConnectionPair } from '../../core/dist/host/memory.js';
 import type { MemoryConnectionPair } from '../../core/dist/host/memory.js';
 import { serveHost } from '../../core/dist/host/host.js';
 import type { Host } from '../../core/dist/host/host.js';
-import { createChatCompletionsProvider } from '../../core/dist/model/chat-completions.js';
+import { providerFromConfig } from '../../core/dist/host/provider.js';
 import { modeDirectories } from '../../core/dist/kernel/modes.js';
 import { fileURLToPath } from 'node:url';
 import { listenFetchable } from './port.ts';
@@ -55,7 +57,16 @@ type TuiHostOptions = {
   setup?: (paths: TuiHostSetupPaths) => void | Promise<void>;
   config?: Record<string, unknown>;
   interactive?: boolean;
+  permission?: PermissionContext;
 };
+
+export async function measuredPermissionContext(
+  profile: PermissionContext['profile'],
+  network: PermissionContext['network'],
+): Promise<PermissionContext> {
+  const snapshot = await detectPermissionCapabilities();
+  return createPermissionContext(profile, network, snapshot.capabilities);
+}
 
 function observeFrames(stream: PassThrough, visit: (message: Record<string, unknown>) => void): void {
   let buffer = '';
@@ -92,6 +103,7 @@ export async function withTuiHost<TResult>(run: (context: TuiHostContext) => TRe
   setup,
   config: extra = {},
   interactive = false,
+  permission,
 }: TuiHostOptions = {}): Promise<TResult> {
   const testplace = resolve('testplace');
   await mkdir(testplace, { recursive: true });
@@ -158,12 +170,11 @@ export async function withTuiHost<TResult>(run: (context: TuiHostContext) => TRe
       policy: { mode: 'ask' },
       ...extra,
     } }) as TestConfig;
-    const provider = createChatCompletionsProvider({ baseUrl, model: 'local-test-model', apiKeyEnv: 'LIGULE_TUI_TEST_API_KEY' });
+    const provider = providerFromConfig(config);
     const modesDirectory = fileURLToPath(new URL('../../core/modes/', import.meta.url));
     // 为第二个项目目录加载独立配置和会话目录；模型设置沿用同一端点与凭据。
     // 配置字段使用 `baseURL`，提供方工厂参数使用 `baseUrl`。
     const modelShape = { api: 'chat-completions', baseURL: baseUrl, model: 'local-test-model', apiKeyEnv: 'LIGULE_TUI_TEST_API_KEY' };
-    const providerShape = { baseUrl, model: 'local-test-model', apiKeyEnv: 'LIGULE_TUI_TEST_API_KEY' };
     const loadEnvironment = async (projectRoot: string) => {
       const sessions = join(projectRoot, 'sessions');
       await mkdir(sessions, { recursive: true });
@@ -177,7 +188,7 @@ export async function withTuiHost<TResult>(run: (context: TuiHostContext) => TRe
       } }) as TestConfig;
       return {
         config: other,
-        provider: createChatCompletionsProvider(providerShape),
+        provider: providerFromConfig(other),
         policy: other.policy,
         modeName: 'minimal',
         modePaths: modeDirectories(projectRoot, modesDirectory, homeDirectory),
@@ -195,6 +206,7 @@ export async function withTuiHost<TResult>(run: (context: TuiHostContext) => TRe
     host = serveHost({ ...pair.host, config, provider, policy: config.policy, loadEnvironment,
       // 允许交互式客户端处理模型提出的问题，与 TUI 和 Desktop 使用相同的 Host 能力。
       interactive,
+      ...(permission === undefined ? {} : { permission }),
       modeName: 'minimal', modePaths: modeDirectories(projectDirectory, modesDirectory, homeDirectory),
     });
     const client = createConnection(pair.client);
