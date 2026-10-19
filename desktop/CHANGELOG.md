@@ -96,7 +96,7 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 #### 发行平台
 
-- 提供 **Windows x64 NSIS 安装程序**、**Linux x64 AppImage 和 deb**。macOS arm64/x64 尚未纳入正式发行，没有 DMG 下载。
+- 提供 **Windows x64 NSIS 安装程序**、**Linux x64 AppImage 和 deb**。
 
 ### English
 
@@ -114,4 +114,4 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 #### Release platforms
 
-- Ships a **Windows x64 NSIS installer**, **Linux x64 AppImage and deb** packages. macOS arm64/x64 is not a supported release target yet; no DMG is provided.
+- Ships a **Windows x64 NSIS installer** and **Linux x64 AppImage and deb** packages.

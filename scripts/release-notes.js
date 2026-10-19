@@ -33,9 +33,9 @@ export function parseReleaseTag(tag) {
 
 const RELEASE_ROOT = 'https://github.com/xswt442-cmd/ligule/releases';
 const DESKTOP_PACKAGES = [
-  { target: 'windows-x64', extension: '.exe', os: 'Windows x64', format: 'NSIS (.exe)', purpose: '安装向导 / Installer wizard' },
-  { target: 'linux-x64', extension: '.AppImage', os: 'Linux x64', format: 'AppImage', purpose: '免安装运行 / Portable app' },
-  { target: 'linux-x64', extension: '.deb', os: 'Linux x64', format: 'deb (.deb)', purpose: 'Debian/Ubuntu 系发行版 / Debian/Ubuntu-based' },
+  { target: 'windows-x64', extension: '.exe', os: 'Windows x64', format: 'NSIS (.exe)', purposeZh: '安装向导', purposeEn: 'Installer wizard' },
+  { target: 'linux-x64', extension: '.AppImage', os: 'Linux x64', format: 'AppImage', purposeZh: '免安装运行', purposeEn: 'Portable app' },
+  { target: 'linux-x64', extension: '.deb', os: 'Linux x64', format: 'deb (.deb)', purposeZh: 'Debian/Ubuntu 系发行版', purposeEn: 'Debian/Ubuntu-based distributions' },
 ];
 
 function verifiedDownloadAssets(tag, manifest) {
@@ -63,31 +63,49 @@ function verifiedDownloadAssets(tag, manifest) {
   return selected;
 }
 
-export function desktopDownloadTable(tag, manifest) {
+export function desktopDownloadTable(tag, manifest, language = 'zh-CN') {
   if (parseReleaseTag(tag).product !== 'desktop') throw new Error('download table requires a Desktop tag');
+  if (language !== 'zh-CN' && language !== 'en') throw new Error('download table language must be zh-CN or en');
   const assets = verifiedDownloadAssets(tag, manifest);
+  const columns = language === 'zh-CN'
+    ? ['操作系统', '格式', '用途', '下载']
+    : ['OS', 'Package', 'Use', 'Download'];
   const table = [
-    '| 操作系统 / OS | 格式 / Package | 使用场景 / Use | 下载 / Download |',
+    `| ${columns.join(' | ')} |`,
     '| --- | --- | --- | --- |',
   ];
   for (const [index, item] of DESKTOP_PACKAGES.entries()) {
     const url = assets === undefined
       ? `${RELEASE_ROOT}/tag/${tag}#assets`
       : `${RELEASE_ROOT}/download/${tag}/${encodeURIComponent(assets[index].name.replace(/\s/g, '.'))}`;
-    table.push(`| ${item.os} | ${item.format} | ${item.purpose} | [下载 / Download](${url}) |`);
+    const purpose = language === 'zh-CN' ? item.purposeZh : item.purposeEn;
+    const download = language === 'zh-CN' ? '下载' : 'Download';
+    table.push(`| ${item.os} | ${item.format} | ${purpose} | [${download}](${url}) |`);
   }
-  table.push('| macOS | — | 尚未提供正式安装包 / Not released yet | — |');
   return table.join('\n');
+}
+
+function splitChangelogLanguages(section) {
+  const lines = section.split(/\r?\n/);
+  const chineseSections = lines.flatMap((line, index) => line === '### 简体中文' ? [index] : []);
+  const englishSections = lines.flatMap((line, index) => line === '### English' ? [index] : []);
+  if (chineseSections.length !== 1 || englishSections.length !== 1 || chineseSections[0] >= englishSections[0]) {
+    throw new Error('release notes require one Simplified Chinese section followed by one English section');
+  }
+  const chinese = lines.slice(chineseSections[0] + 1, englishSections[0]).join('\n').trim();
+  const english = lines.slice(englishSections[0] + 1).join('\n').trim();
+  if (!chinese || !english) throw new Error('release notes require content in both language sections');
+  return { chinese, english };
 }
 
 function releaseNotesFromChangelog(changelog, tag, manifest) {
   const { product, version } = parseReleaseTag(tag);
-  const section = changelogSection(changelog, version);
+  const { chinese, english } = splitChangelogLanguages(changelogSection(changelog, version));
   if (product === 'cli') {
     if (manifest !== undefined) throw new Error('CLI notes do not accept a Desktop manifest');
-    return `## CLI / TUI v${version} — 更新说明 / Release highlights\n\n${section}\n\n---\n\n## 安装与启动 / Install and run\n\n需要 Node.js 24 或更新版本。CLI 与 TUI 使用同一个 npm 包；在交互式终端运行 \`ligule\`，单轮命令使用 \`ligule run "任务内容"\`。\n\nRequires Node.js 24 or newer. The same npm package includes CLI and TUI: run \`ligule\` in an interactive terminal, or use \`ligule run "task"\` for a one-shot command.\n\n\`npm install -g ligule@${version}\`\n\n[在 npm 查看此版本 / View this version on npm](https://www.npmjs.com/package/ligule/v/${version})\n\nCLI/TUI 通过 npm 分发；此 GitHub Release 仅提供双语更新说明，不附带安装包。\n\nCLI/TUI is distributed through npm; this GitHub Release contains bilingual notes, not installable artifacts.\n`;
+    return `## CLI / TUI v${version}\n\n### 简体中文\n\n${chinese}\n\n#### 安装与启动\n\n需要 Node.js 24 或更新版本。运行 \`npm install -g ligule@${version}\` 安装；在交互式终端运行 \`ligule\` 打开 TUI，或运行 \`ligule run "任务内容"\` 执行单轮任务。\n\n[在 npm 查看此版本](https://www.npmjs.com/package/ligule/v/${version})\n\n### English\n\n${english}\n\n#### Install and run\n\nRequires Node.js 24 or newer. Install with \`npm install -g ligule@${version}\`. Run \`ligule\` in an interactive terminal to open the TUI, or run \`ligule run "task"\` for a one-shot request.\n\n[View this version on npm](https://www.npmjs.com/package/ligule/v/${version})\n`;
   }
-  return `## Desktop v${version} — 更新说明 / Release highlights\n\n${section}\n\n---\n\n## 下载 / Downloads\n\n按操作系统选择对应的安装包。Linux AppImage 适合直接运行；deb 适合 Debian/Ubuntu 系发行版安装。桌面包包含自己的 Node Host，无需额外安装 Node.js。\n\nChoose the installer for your OS. AppImage is the portable Linux option; deb is for Debian/Ubuntu-based distributions. Desktop bundles its Node Host and does not require a separate Node.js installation.\n\n${desktopDownloadTable(tag, manifest)}\n\n### 校验 / Verify downloads\n\n- [SHA256SUMS](${RELEASE_ROOT}/download/${tag}/SHA256SUMS) — 安装包 SHA-256 校验值 / Installer SHA-256 checksums\n- [desktop-release-manifest.json](${RELEASE_ROOT}/download/${tag}/desktop-release-manifest.json) — 版本、来源提交和资产清单 / Version, source commit and asset manifest\n\nmacOS 不在本版正式发行范围内；以上文件只适用于对应的 x64 平台。\n\nmacOS is not included in this release. The downloads above are for the stated x64 targets only.\n`;
+  return `## Desktop v${version}\n\n### 简体中文\n\n${chinese}\n\n#### 下载\n\nLinux AppImage 适合直接运行；deb 适合 Debian/Ubuntu 系发行版安装。桌面包包含自己的 Node Host，无需额外安装 Node.js。\n\n${desktopDownloadTable(tag, manifest, 'zh-CN')}\n\n#### 校验下载\n\n- [SHA256SUMS](${RELEASE_ROOT}/download/${tag}/SHA256SUMS) — 安装包 SHA-256 校验值\n- [desktop-release-manifest.json](${RELEASE_ROOT}/download/${tag}/desktop-release-manifest.json) — 版本、来源提交和资产清单\n\n本版本未提供发布者数字签名；SHA-256 校验值用于检查文件完整性。\n\n### English\n\n${english}\n\n#### Downloads\n\nThe Linux AppImage runs as a portable app; the deb package is for Debian/Ubuntu-based distributions. The desktop package includes its Node Host and does not require a separate Node.js installation.\n\n${desktopDownloadTable(tag, manifest, 'en')}\n\n#### Verify downloads\n\n- [SHA256SUMS](${RELEASE_ROOT}/download/${tag}/SHA256SUMS) — SHA-256 checksums for the installers\n- [desktop-release-manifest.json](${RELEASE_ROOT}/download/${tag}/desktop-release-manifest.json) — Version, source commit, and asset manifest\n\nThis release does not include publisher signatures; SHA-256 checksums verify file integrity.\n`;
 }
 
 export function releaseNotesForTag(repositoryRoot, tag, { manifest } = {}) {

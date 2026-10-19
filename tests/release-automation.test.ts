@@ -133,19 +133,34 @@ test('release notes select each product changelog and matching bilingual version
   const directory = await fixture();
   try {
     const cliNotes = releaseNotesForTag(directory, 'cli-v0.0.1');
+    assert.match(cliNotes, /^## CLI \/ TUI v0\.0\.1$/m);
+    assert.doesNotMatch(cliNotes, /更新说明|Release highlights|CLI\/TUI 通过 npm|This GitHub Release contains bilingual notes/);
     assert.match(cliNotes, /初始公开版本/);
     assert.match(cliNotes, /Initial public release/);
     assert.doesNotMatch(cliNotes, /下载|Downloads/);
     assert.match(cliNotes, /npm install -g ligule@0\.0\.1/);
     assert.match(cliNotes, /npmjs\.com\/package\/ligule\/v\/0\.0\.1/);
-    assert.match(cliNotes, /this GitHub Release contains bilingual notes/);
+    const cliChinese = cliNotes.indexOf('### 简体中文');
+    const cliEnglish = cliNotes.indexOf('### English');
+    assert.ok(cliChinese < cliNotes.indexOf('#### 安装与启动') && cliNotes.indexOf('#### 安装与启动') < cliEnglish);
+    assert.ok(cliEnglish < cliNotes.indexOf('#### Install and run'));
     const desktopPreview = releaseNotesForTag(directory, 'desktop-v2.4.1');
+    assert.match(desktopPreview, /^## Desktop v2\.4\.1$/m);
+    assert.doesNotMatch(desktopPreview, /更新说明|Release highlights|macOS|## 下载 \/ Downloads/);
     assert.match(desktopPreview, /SHA-256/);
     assert.match(desktopPreview, /\| Windows x64 \| NSIS/);
     assert.match(desktopPreview, /\| Linux x64 \| AppImage/);
     assert.match(desktopPreview, /\| Linux x64 \| deb/);
     assert.match(desktopPreview, /releases\/tag\/desktop-v2\.4\.1#assets/);
+    const desktopChinese = desktopPreview.indexOf('### 简体中文');
+    const desktopEnglish = desktopPreview.indexOf('### English');
+    assert.ok(desktopChinese < desktopPreview.indexOf('#### 下载') && desktopPreview.indexOf('#### 下载') < desktopEnglish);
+    assert.ok(desktopEnglish < desktopPreview.indexOf('#### Downloads'));
+    assert.match(desktopPreview, /\| 操作系统 \| 格式 \| 用途 \| 下载 \|/);
+    assert.match(desktopPreview, /\| OS \| Package \| Use \| Download \|/);
     assert.doesNotMatch(desktopPreview, /draft Release after platform validation|草稿 Release/);
+    const historicalDesktopNotes = releaseNotesForTag(process.cwd(), 'desktop-v0.0.4');
+    assert.doesNotMatch(historicalDesktopNotes, /macOS|更新说明|Release highlights/);
     const commit = 'a'.repeat(40);
     const manifest = {
       schemaVersion: 1,
@@ -165,6 +180,7 @@ test('release notes select each product changelog and matching bilingual version
     assert.match(downloadableNotes, /releases\/download\/desktop-v2\.4\.1\/.*\.deb/);
     assert.match(downloadableNotes, /desktop-release-manifest\.json/);
     assert.doesNotMatch(downloadableNotes, /%20|草稿 Release/);
+    assert.doesNotMatch(downloadableNotes, /macOS|更新说明|Release highlights|## 下载 \/ Downloads/);
     assert.throws(() => desktopDownloadTable('cli-v2.4.1'), /Desktop tag/);
     assert.throws(() => releaseNotesForTag(directory, 'cli-v0.0.1', { manifest }), /do not accept/);
     assert.throws(() => releaseNotesForTag(directory, 'desktop-v2.4.1', { manifest: { ...manifest, tag: 'desktop-v2.4.2' } }), /verified manifest/);
