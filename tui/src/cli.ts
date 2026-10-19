@@ -16,8 +16,7 @@ import { extensionSources } from '@ligule/core/kernel/extensions.js';
 import { readRegistry, registryPathOf } from '@ligule/core/kernel/workspace.js';
 import { discoverSkills, skillDirectories } from '@ligule/core/kernel/skills.js';
 import { createSessionLog } from '@ligule/core/session/session.js';
-import { listSessions, sessionDirectory } from '@ligule/core/session/list.js';
-import { adoptForSessionDirectory } from '@ligule/core/session/adopt.js';
+import { listWorkspaceSessions, sessionDirectories } from '@ligule/core/session/list.js';
 import { summarizeVerdicts } from '@ligule/core/session/verdicts.js';
 import { minimalPlugin } from '@ligule/core/tools/minimal.js';
 import { networkPlugin } from '@ligule/core/tools/network.js';
@@ -125,8 +124,10 @@ let missingConfigValue = false;
 let missingLangValue = false;
 let missingModeValue = false;
 let missingProjectValue = false;
+let missingGrantValue = false;
 let modeFlag: string | undefined;
 let projectFlag: string | undefined;
+let grantFlag: string | undefined;
 let langFlag: string | undefined;
 let jsonFlag = false;
 let operatorFlag = false;
@@ -158,6 +159,16 @@ for (let index = 0; index < argv.length; index += 1) {
       break;
     }
     projectFlag = value;
+    index += 1;
+    continue;
+  }
+  if (arg === '--grant') {
+    const value = argv[index + 1];
+    if (value === undefined) {
+      missingGrantValue = true;
+      break;
+    }
+    grantFlag = value;
     index += 1;
     continue;
   }
@@ -418,6 +429,10 @@ if (invalidLanguage) {
   printFailure('cli_mode_needs_a_value', t('--mode 需要模式名称，例如 --mode full', '--mode needs a mode name, for example --mode full'));
 } else if (missingProjectValue) {
   printFailure('cli_project_needs_a_value', t('--project 需要项目根目录，用于筛选列表', '--project needs a project root to filter the listing'));
+} else if (missingGrantValue) {
+  printFailure('agent_control_grant_required', t('--grant 需要已创建的 Agent Control 授权 ID', '--grant needs an existing Agent Control grant ID'));
+} else if (grantFlag !== undefined && command !== 'mcp-server') {
+  printFailure('cli_grant_requires_mcp_server', t('--grant 只能与 mcp-server 一起使用', '--grant is only valid with mcp-server'));
 } else if (operatorFlag && command !== 'mcp-server') {
   printFailure('cli_operator_requires_mcp_server', t('--operator 只能与 mcp-server 一起使用', '--operator is only valid with mcp-server'));
 } else if (command === '--version' || command === '-v') {
@@ -516,29 +531,21 @@ if (invalidLanguage) {
     }
   }
 } else if (command === 'sessions') {
-  // 只读扫描会话记录目录，不创建索引或打开会话，并报告扫描耗时。
+  // 只读扫描当前和旧工作区目录，不创建索引或迁移记录。
   try {
-    // `--project <根>` 指定项目后，读取该项目配置的记录目录；只在当前目录中过滤无法读取其他项目记录。
     const { config } = await configSnapshot(projectFlag);
-    const directory = sessionDirectory(config);
-    // 数据根目录中没有该项目的新记录时，先从旧位置迁移记录和附属文件并保留原件。
-    // 迁移失败时明确报告错误，不把读取失败误报为空列表。
-    const adopted = await adoptForSessionDirectory(config, directory);
-    if (adopted !== null && (adopted.copied.length > 0 || adopted.conflicts.length > 0)) {
-      console.error(t(`已整理旧会话：复制 ${adopted.copied.length} 项，冲突 ${adopted.conflicts.length}${adopted.conflicts.length === 0 ? '' : `（${adopted.conflicts.join(', ')}）`}`, `Legacy sessions adopted: copied ${adopted.copied.length}, conflicts ${adopted.conflicts.length}${adopted.conflicts.length === 0 ? '' : ` (${adopted.conflicts.join(', ')})`}`));
-    }
     const started = Date.now();
-    const listed = await listSessions(directory, { projectRoot: projectFlag });
+    const listed = await listWorkspaceSessions(config, { projectRoot: projectFlag });
     if (jsonFlag) console.log(JSON.stringify(listed));
     else if (listed.length === 0) {
       console.log(t('没有会话记录', 'No sessions'));
-      console.log(t(`  已检查 ${directory}`, `  Looked in ${directory}`));
+      console.log(t(`  已检查 ${sessionDirectories(config).join('、')}`, `  Looked in ${sessionDirectories(config).join(', ')}`));
     } else {
       for (const item of listed) {
         const open = item.unanswered > 0 ? t(`  ${item.unanswered} 个调用尚无结果`, `  ${item.unanswered} calls without a result`) : '';
         console.log(`${item.updatedAt}  ${item.id}  ${t(`${item.events} 个事件`, `${item.events} events`)}  ${t('模式', 'mode')}:${item.mode?.name ?? '-'}${item.name === '' ? '' : `  "${item.name}"`}${item.archived ? t('  已归档', '  archived') : ''}${open}`);
       }
-      console.error(t(`${listed.length} 个会话，目录 ${directory}，扫描耗时 ${Date.now() - started} 毫秒`, `${listed.length} sessions in ${directory}, scanned in ${Date.now() - started} ms`));
+      console.error(t(`${listed.length} 个会话，扫描耗时 ${Date.now() - started} 毫秒`, `${listed.length} sessions, scanned in ${Date.now() - started} ms`));
     }
   } catch (error) {
     const fields = errorFields(error);
@@ -572,15 +579,18 @@ if (invalidLanguage) {
   } else {
     try {
       const { config } = await configSnapshot();
-      const directory = sessionDirectory(config);
-      await adoptForSessionDirectory(config, directory);
-      if (!existsSync(join(directory, `${sessionId}.jsonl`))) {
-        printFailure('session_not_found', t(`找不到会话 ${sessionId} 的记录：${directory}`, `no record for session ${sessionId} in ${directory}`));
+      if (sessionId.includes('/') || sessionId.includes('\\') || sessionId.includes(':') || sessionId === '.' || sessionId === '..') {
+        printFailure('session_id_invalid', t('会话编号格式无效', 'invalid session ID'));
       } else {
-        const counts = summarizeVerdicts(await createSessionLog({ directory, id: sessionId }).read());
-        if (jsonFlag) console.log(JSON.stringify(counts));
-        else if (counts.length === 0) console.log(t(`会话 ${sessionId} 没有判定记录`, `No decision records in session ${sessionId}`));
-        else for (const line of formatPolicyCounts(counts)) console.log(line);
+        const directory = sessionDirectories(config).find((candidate) => existsSync(join(candidate, `${sessionId}.jsonl`)));
+        if (directory === undefined) {
+          printFailure('session_not_found', t(`找不到会话 ${sessionId} 的记录`, `no record for session ${sessionId}`));
+        } else {
+          const counts = summarizeVerdicts(await createSessionLog({ directory, id: sessionId }).read());
+          if (jsonFlag) console.log(JSON.stringify(counts));
+          else if (counts.length === 0) console.log(t(`会话 ${sessionId} 没有判定记录`, `No decision records in session ${sessionId}`));
+          else for (const line of formatPolicyCounts(counts)) console.log(line);
+        }
       }
     } catch (error) {
       const fields = errorFields(error);
@@ -591,7 +601,7 @@ if (invalidLanguage) {
   try {
     if (projectFlag === undefined || rest.length > 0 || jsonFlag) throw new KernelError('control_project_required');
     const { serveMcp } = await import('@ligule/core/host/mcp-server.js');
-    await serveMcp({ projectRoot: projectFlag, version: pkg.version, flags, modeName: modeFlag, operator: operatorFlag });
+    await serveMcp({ projectRoot: projectFlag, version: pkg.version, flags, modeName: modeFlag, operator: operatorFlag, grantId: grantFlag });
   } catch (error) {
     const { controlErrorCode } = await import('@ligule/core/host/control.js');
     process.stderr.write(`${controlErrorCode(error)}\n`);
@@ -653,9 +663,9 @@ if (invalidLanguage) {
   console.log(t(`ligule ${pkg.version} - 开发版本，请勿用于正式环境。`, `ligule ${pkg.version} - development build; do not use in production.`));
   console.log(t('命令：tools、skills、extensions、sessions、workspaces、policy <session-id>、run <text>、resume <id> <text>、call <tool> [json-args]、tui、host、--version', 'Commands: tools, skills, extensions, sessions, workspaces, policy <session-id>, run <text>, resume <id> <text>, call <tool> [json-args], tui, host, --version'));
   console.log(t('直接运行 ligule 打开终端界面；tui 子命令仍可使用。', 'Run ligule without a command to open the terminal UI; the tui subcommand remains available.'));
-  console.log(t('mcp-server --project <绝对目录>：启动本地 stdio MCP 控制器；默认拒绝审批并禁用会话设置修改。', 'mcp-server --project <absolute-directory>: start a local stdio MCP controller; by default it denies approvals and disables session setting changes.'));
+  console.log(t('mcp-server --project <绝对目录>：启动本地 stdio MCP 控制器；默认只读。使用 --grant <ID> 引用可信界面预先创建的外控授权。', 'mcp-server --project <absolute-directory>: start a local stdio MCP controller; read-only by default. Use --grant <ID> to reference a grant created in a trusted interface.'));
   console.log(t('mcp-server --operator：明确授权该本地 MCP 客户端读取并回应真实待决的审批/提问，以及修改会话级设置；Policy 的拒绝规则仍生效。', 'mcp-server --operator: authorize this local MCP client to review and answer real pending approvals/questions and change session settings; Policy denials remain in force.'));
-  console.log(t('选项：--config <key.path=value>（可重复）、--mode <name>、--project <绝对目录>、--operator、--lang <zh|en|auto>', 'Options: --config <key.path=value> (repeatable), --mode <name>, --project <absolute-directory>, --operator, --lang <zh|en|auto>'));
+  console.log(t('选项：--config <key.path=value>（可重复）、--mode <name>、--project <绝对目录>、--grant <ID>、--operator、--lang <zh|en|auto>', 'Options: --config <key.path=value> (repeatable), --mode <name>, --project <absolute-directory>, --grant <ID>, --operator, --lang <zh|en|auto>'));
   console.log(t('run、tui 和 host 从配置读取 model.api、model.baseURL 与 model.model；密钥由 model.apiKeyEnv 指定，未设置时读取 LIGULE_API_KEY。', 'run, tui and host read model.api, model.baseURL and model.model from config; the key uses model.apiKeyEnv, or LIGULE_API_KEY when unset.'));
   console.log(t('run、tui 和 host 默认使用 minimal 模式；--mode 可覆盖 mode 配置。tools 和 call 不读取模式。', 'run, tui and host use the minimal mode by default; --mode overrides the mode config. tools and call do not read a mode.'));
   console.log(t('skills 列出已加载的技能与未加载原因；它不读取模型配置。', 'skills lists loaded skills and why others were skipped; it does not read model config.'));

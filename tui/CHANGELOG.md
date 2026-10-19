@@ -22,6 +22,7 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 **改进**
 
+- `/control list` 显示授权来源；旧记录没有来源时明确标注未记录，不推断创建渠道。
 - 权限变更记录只会在本次操作实际启用完全访问或不受限网络时标记对应确认。
 - 共享模型服务配置支持逐模型上下文窗口和输出额度，按当前选择应用于请求与压缩，兼容原有模型标识列表。
 - 完整校验模型终止原因，区分空回复、输出耗尽、协议不完整及断流；非法工具批次不执行副作用，诊断不包含原始参数或网关错误正文。
@@ -39,6 +40,7 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 **Improved**
 
+- `/control list` shows grant origin; legacy grants with no recorded origin are labeled as unknown instead of inferred.
 - Permission records mark a confirmation only when that change grants full access or unrestricted networking.
 - Shared service configuration supports per-model context windows and output budgets for requests and compaction, while preserving existing model ID lists.
 - Validate model finish reasons and distinguish empty replies, exhausted output, incomplete protocols, and interrupted bodies. Invalid tool batches have no side effects, and diagnostics omit raw arguments and gateway error bodies.

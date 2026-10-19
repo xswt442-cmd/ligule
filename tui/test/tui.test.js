@@ -1249,3 +1249,75 @@ test('/policy changes the session setting and updates the bottom configuration l
     instance.unmount();
   }
 }));
+
+test('/control creates a project-bound grant through the interactive wizard', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { App } = await import('../dist/tui/app.js');
+  const stdout = new PassThrough();
+  stdout.columns = 120;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const instance = render(createElement(App, {
+    client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const lastFrame = () => completeFrame(painted);
+  const strip = (text) => plainOutput(text).replace(/[\r\n]+/g, '');
+  const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  const answer = async (value, nextPrompt) => {
+    stdin.write(value);
+    await waitFor(() => lastFrame().includes(`› ${value}`), { within: 10_000, read: lastFrame });
+    stdin.write('\r');
+    if (nextPrompt !== undefined) await waitFor(() => strip(lastFrame()).includes(nextPrompt), { read: () => strip(lastFrame()) });
+  };
+  try {
+    await waitFor(() => lastFrame().includes('描述任务'), { read: lastFrame });
+    await answer('/control create', '授权名称');
+    await answer('Codex test grant', '默认权限');
+    await answer('full-access', '最大权限');
+    await answer('full-access', '默认网络');
+    await answer('unrestricted', '网络上限');
+    await answer('unrestricted', '默认 Policy');
+    await answer('auto', '允许的 Policy');
+    await answer('ask,auto', '允许 --operator');
+    await answer('yes', '到期时间');
+    await answer(expiresAt, '单独确认 full-access');
+    await answer('yes', '单独确认 unrestricted network');
+    await answer('yes');
+    await waitFor(() => requests.some((request) => request.method === 'agent-control.create'), { within: 10_000, read: () => strip(painted).slice(-1_000) });
+    await waitFor(() => {
+      const output = strip(painted);
+      return output.includes('外控授权 Codex test grant 已创建') || output.includes('Grant Codex test grant created');
+    }, { within: 10_000, read: () => strip(painted).slice(-1_000) });
+    const saved = await client.request('agent-control.list', {});
+    assert.equal(saved.grants.length, 1);
+    assert.equal(saved.grants[0].name, 'Codex test grant');
+    assert.equal(saved.grants[0].projectRoot, projectDirectory);
+    assert.equal(saved.grants[0].defaultPermissionProfile, 'full-access');
+    assert.equal(saved.grants[0].maxPermissionProfile, 'full-access');
+    assert.equal(saved.grants[0].defaultNetwork, 'unrestricted');
+    assert.equal(saved.grants[0].maxNetwork, 'unrestricted');
+    assert.equal(saved.grants[0].defaultPolicy, 'auto');
+    assert.equal(saved.grants[0].allowedPolicies.includes('auto'), true);
+    assert.equal(saved.grants[0].allowOperator, true);
+    assert.equal(saved.grants[0].confirmedFullAccess, true);
+    assert.equal(saved.grants[0].confirmedUnrestrictedNetwork, true);
+    assert.equal(saved.grants[0].expiresAt, expiresAt);
+    assert.match(strip(painted), new RegExp(saved.grants[0].id));
+
+    await answer('/control list');
+    await waitFor(() => {
+      const output = strip(painted);
+      return output.includes('权限 full-access / full-access')
+        && output.includes('网络 unrestricted / unrestricted')
+        && output.includes('到期')
+        && (output.includes('来源 可信界面创建') || output.includes('source Trusted UI'))
+        && output.includes(projectDirectory);
+    }, { within: 10_000, read: () => strip(painted).slice(-1_200) });
+  } finally {
+    instance.unmount();
+  }
+}, { permissionControl: true }));

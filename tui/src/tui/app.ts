@@ -140,7 +140,52 @@ interface SearchState {
   readonly at: number;
 }
 
-type PickerKind = 'model' | 'mode' | 'policy' | 'permission' | 'permission-network' | 'permission-confirm-full' | 'permission-confirm-network';
+type PickerKind = 'model' | 'mode' | 'policy' | 'permission' | 'permission-network' | 'permission-confirm-full' | 'permission-confirm-network'
+  | 'control' | 'control-action' | 'control-revoke-confirm';
+type AgentGrant = {
+  readonly id: string;
+  readonly name: string;
+  readonly projectRoot: string;
+  readonly source: 'trusted-ui' | 'legacy';
+  readonly defaultPermissionProfile: 'read-only' | 'workspace-write' | 'full-access';
+  readonly maxPermissionProfile: 'read-only' | 'workspace-write' | 'full-access';
+  readonly defaultNetwork: 'disabled' | 'policy' | 'unrestricted';
+  readonly maxNetwork: 'disabled' | 'policy' | 'unrestricted';
+  readonly defaultPolicy: 'ask' | 'auto' | 'never';
+  readonly allowedPolicies: readonly ('ask' | 'auto' | 'never')[];
+  readonly allowOperator: boolean;
+  readonly createdAt: string;
+  readonly expiresAt: string | null;
+  readonly revokedAt: string | null;
+};
+type AgentControlSnapshot = { readonly version: string; readonly grants: readonly AgentGrant[] };
+type ControlWizardValues = {
+  name?: string;
+  defaultPermissionProfile?: AgentGrant['defaultPermissionProfile'];
+  maxPermissionProfile?: AgentGrant['maxPermissionProfile'];
+  defaultNetwork?: AgentGrant['defaultNetwork'];
+  maxNetwork?: AgentGrant['maxNetwork'];
+  defaultPolicy?: AgentGrant['defaultPolicy'];
+  allowedPolicies?: ('ask' | 'auto' | 'never')[];
+  allowOperator?: boolean;
+  expiresAt?: string | null;
+  confirmFullAccess?: boolean;
+  confirmUnrestrictedNetwork?: boolean;
+};
+type ControlWizard = { readonly step: number; readonly values: ControlWizardValues };
+
+function agentMcpConfig(grant: AgentGrant): string {
+  const args = ['mcp-server', '--project', grant.projectRoot, '--grant', grant.id];
+  if (grant.allowOperator) args.push('--operator');
+  return JSON.stringify({ mcpServers: { ligule: { command: 'ligule', args } } }, null, 2);
+}
+
+function controlWizardNext(step: number, values: ControlWizardValues): number {
+  if (step === 8) return values.maxPermissionProfile === 'full-access' ? 9 : values.maxNetwork === 'unrestricted' ? 10 : -1;
+  if (step === 9) return values.maxNetwork === 'unrestricted' ? 10 : -1;
+  if (step === 10) return -1;
+  return step + 1;
+}
 interface RuntimeChoice extends PanelChoice {
   readonly selection?: ModelSelection;
 }
@@ -246,6 +291,9 @@ interface TuiRequestResults {
   readonly 'credentials.status': CredentialStatus;
   readonly 'mode.set': { readonly mode: string | null; readonly layer: string | null; readonly pending: string | null; readonly tools: string[] };
   readonly 'policy.set': { readonly policy: string; readonly policySource: string; readonly policyDefault: string };
+  readonly 'agent-control.list': AgentControlSnapshot;
+  readonly 'agent-control.create': AgentControlSnapshot;
+  readonly 'agent-control.revoke': AgentControlSnapshot;
   readonly 'session.compact': { readonly sessionId: string; readonly [key: string]: unknown };
 }
 
@@ -543,6 +591,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [panel, setPanel] = useState<PickerKind | 'help' | null>(null);
   const [choices, setChoices] = useState<RuntimeChoice[]>([]);
   const [choicesLoading, setChoicesLoading] = useState(false);
+  const [controlSnapshot, setControlSnapshot] = useState<AgentControlSnapshot | null>(null);
+  const [controlTarget, setControlTarget] = useState<string | null>(null);
+  const [controlWizard, setControlWizard] = useState<ControlWizard | null>(null);
   const pickerRequest = useRef(0);
   const [draft, setDraft] = useState('');
   const [caret, setCaret] = useState(0);
@@ -912,7 +963,37 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     setChoicesLoading(true);
     void (async () => {
       let available: RuntimeChoice[];
-      if (kind === 'model') {
+      if (kind === 'control') {
+        const snapshot = await client.request('agent-control.list', {}) as AgentControlSnapshot;
+        setControlSnapshot(snapshot);
+        available = [
+          { id: 'create', label: t('新建外控授权', 'Create a grant'), description: t('开始逐项填写授权上限和到期时间。', 'Enter the grant limits and expiry one step at a time.') },
+          ...snapshot.grants.map((grant) => {
+            const state = grant.revokedAt !== null ? t('已撤销', 'revoked')
+              : grant.expiresAt !== null && Date.parse(grant.expiresAt) <= Date.now() ? t('已到期', 'expired') : t('可用', 'available');
+            return {
+              id: `grant:${grant.id}`,
+              label: `${grant.name} · ${state}`,
+              description: `${grant.maxPermissionProfile} · ${grant.maxNetwork} · ${grant.projectRoot} · ${t('进程在线状态未知', 'process status unknown')}`,
+            };
+          }),
+        ];
+      } else if (kind === 'control-action') {
+        const snapshot = controlSnapshot ?? await client.request('agent-control.list', {}) as AgentControlSnapshot;
+        const grant = snapshot.grants.find((item) => item.id === controlTarget);
+        if (grant === undefined) throw new Error('agent_control_grant_not_found');
+        const expired = grant.expiresAt !== null && Date.parse(grant.expiresAt) <= Date.now();
+        available = [
+          { id: 'copy-config', label: t('复制 MCP 配置', 'Copy MCP config'), description: t('只包含 CLI、项目路径和授权 ID，不包含密钥。', 'Contains the CLI, project path, and grant ID; no credentials.') },
+          ...(grant.revokedAt === null && !expired ? [{ id: 'revoke', label: t('撤销此授权', 'Revoke this grant'), description: t('取消正在运行的任务并拒绝该授权的后续调用。', 'Cancel active work and reject later calls using this grant.') }] : []),
+          { id: 'back', label: t('返回授权列表', 'Back to grants') },
+        ];
+      } else if (kind === 'control-revoke-confirm') {
+        available = [
+          { id: 'confirm', label: t('确认撤销授权', 'Confirm revocation'), description: t('MCP Host 会检查撤销并取消运行中的任务。', 'The MCP Host checks revocation and cancels active work.') },
+          { id: 'cancel', label: t('取消', 'Cancel') },
+        ];
+      } else if (kind === 'model') {
         const config = await client.request('config.get', { projectRoot: info.boundary });
         available = config.services.flatMap(service => service.models.map(model => ({
           id: `${service.id}:${model}`, label: `${service.name} / ${model}`, selection: { provider: service.id, model },
@@ -990,7 +1071,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       setPanel(null);
       push({ kind: 'error', text: t(`无法读取选项：${errorCode(error) ?? errorMessage(error) ?? 'picker_failed'}`, `Could not load choices: ${errorCode(error) ?? errorMessage(error) ?? 'picker_failed'}`) });
     });
-  }, [client, info.boundary, modes, push, sessionId, t]);
+  }, [client, controlSnapshot, controlTarget, info.boundary, modes, push, sessionId, t]);
 
   const runCommand = useCallback((name: string, argument = '') => {
     if (name === 'trust') {
@@ -1003,6 +1084,71 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       } else {
         void trust.revoke().then(() => exitTui(''), (error: unknown) => push({ kind: 'error', text: t(`无法撤销信任：${errorCode(error) ?? 'tui_trust_failed'}`, `Could not revoke trust: ${errorCode(error) ?? 'tui_trust_failed'}`) }));
       }
+      return;
+    }
+    if (name === 'control') {
+      const [action = '', wanted = ''] = argument.trim().split(/\s+/, 2);
+      if (action === '') {
+        openPicker('control');
+        return;
+      }
+      if (action === 'create' && wanted === '') {
+        if (info.boundary === undefined || info.boundary === '') {
+          push({ kind: 'error', text: t('当前没有已选择的项目目录。', 'No project directory is selected.') });
+          return;
+        }
+        setControlWizard({ step: 0, values: {} });
+        setPanel(null);
+        push({ kind: 'meta', text: t('开始创建授权；每一步按 Enter 确认，输入 cancel 可取消。', 'Grant setup started. Press Enter after each answer; type cancel to stop.') });
+        return;
+      }
+      if (action !== 'list' && action !== 'copy' && action !== 'revoke') {
+        push({ kind: 'error', text: t('用法：/control [list|create|copy <id>|revoke <id>]', 'Usage: /control [list|create|copy <id>|revoke <id>]') });
+        return;
+      }
+      void (async () => {
+        try {
+          const snapshot = await client.request('agent-control.list', {}) as AgentControlSnapshot;
+          setControlSnapshot(snapshot);
+          if (action === 'list') {
+            const lines = snapshot.grants.length === 0 ? [t('尚未创建外控授权。', 'No external Agent grants have been created.')]
+              : snapshot.grants.map((grant) => {
+                const state = grant.revokedAt !== null ? t('已撤销', 'revoked')
+                  : grant.expiresAt !== null && Date.parse(grant.expiresAt) <= Date.now() ? t('已到期', 'expired') : t('可用', 'available');
+                const expiry = grant.expiresAt === null ? t('无到期时间', 'no expiry') : `${t('到期', 'expires')} ${new Date(grant.expiresAt).toLocaleString()}`;
+                const source = grant.source === 'trusted-ui'
+                  ? t('可信界面创建', 'Trusted UI')
+                  : t('历史记录未保存来源', 'Legacy record; source not recorded');
+                return `${grant.id} · ${grant.name} · ${state} · ${t('权限', 'permission')} ${grant.defaultPermissionProfile} / ${grant.maxPermissionProfile} · ${t('网络', 'network')} ${grant.defaultNetwork} / ${grant.maxNetwork} · Policy ${grant.defaultPolicy} (${grant.allowedPolicies.join(', ')}) · ${expiry} · ${t('来源', 'source')} ${source} · ${grant.projectRoot} · ${t('在线状态未知', 'online status unknown')}`;
+              });
+            push({ kind: 'meta', text: lines.join('\n') });
+            return;
+          }
+          const matches = snapshot.grants.filter((grant) => grant.id === wanted || grant.id.startsWith(wanted));
+          if (matches.length !== 1) {
+            push({ kind: 'error', text: matches.length === 0
+              ? t(`未找到授权 ${wanted}`, `Grant ${wanted} was not found`)
+              : t(`授权编号 ${wanted} 不唯一，请输入更多字符`, `Grant ID ${wanted} is ambiguous; enter more characters`) });
+            return;
+          }
+          const grant = matches[0]!;
+          if (action === 'copy') {
+            const copied = await copyToClipboard(agentMcpConfig(grant));
+            push('program' in copied
+              ? { kind: 'meta', text: t(`已复制授权 ${grant.id} 的本地 MCP 配置`, `Copied local MCP configuration for grant ${grant.id}`) }
+              : { kind: 'error', text: t(`复制配置失败：${copied.code}`, `Could not copy configuration: ${copied.code}`) });
+            return;
+          }
+          if (grant.revokedAt !== null || (grant.expiresAt !== null && Date.parse(grant.expiresAt) <= Date.now())) {
+            push({ kind: 'error', text: t('此授权已撤销或到期，不能再次撤销。', 'This grant is revoked or expired and cannot be revoked again.') });
+            return;
+          }
+          setControlTarget(grant.id);
+          openPicker('control-revoke-confirm');
+        } catch (error) {
+          push({ kind: 'error', text: t(`外控授权操作失败：${errorCode(error) ?? 'agent_control_failed'}`, `Agent Control operation failed: ${errorCode(error) ?? 'agent_control_failed'}`) });
+        }
+      })();
       return;
     }
     if (name === 'quit') {
@@ -1575,6 +1721,48 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     if (choice === undefined || panel === null || panel === 'help') return;
     const currentPanel = panel;
     closePanel();
+    if (currentPanel === 'control') {
+      if (id === 'create') {
+        if (info.boundary === undefined || info.boundary === '') {
+          push({ kind: 'error', text: t('当前没有已选择的项目目录。', 'No project directory is selected.') });
+          return;
+        }
+        setControlWizard({ step: 0, values: {} });
+        return;
+      }
+      if (id.startsWith('grant:')) {
+        setControlTarget(id.slice('grant:'.length));
+        openPicker('control-action');
+      }
+      return;
+    }
+    if (currentPanel === 'control-action') {
+      if (id === 'back') { openPicker('control'); return; }
+      const grant = controlSnapshot?.grants.find((item) => item.id === controlTarget);
+      if (grant === undefined) { push({ kind: 'error', text: t('授权已不存在，请重新读取。', 'Grant is no longer available. Reload the list.') }); return; }
+      if (id === 'copy-config') {
+        void copyToClipboard(agentMcpConfig(grant)).then((copied) => push('program' in copied
+          ? { kind: 'meta', text: t(`已复制授权 ${grant.id} 的本地 MCP 配置`, `Copied local MCP configuration for grant ${grant.id}`) }
+          : { kind: 'error', text: t(`复制失败：${copied.code}`, `Copy failed: ${copied.code}`) }));
+      } else if (id === 'revoke') openPicker('control-revoke-confirm');
+      return;
+    }
+    if (currentPanel === 'control-revoke-confirm') {
+      if (id !== 'confirm') return;
+      const target = controlTarget;
+      const version = controlSnapshot?.version;
+      if (target === null || version === undefined) { push({ kind: 'error', text: t('无法确认授权版本，请重新读取。', 'Grant version is unavailable. Reload the list.') }); return; }
+      void client.request('agent-control.revoke', { grantId: target, version }).then((result) => {
+        const updated = result as AgentControlSnapshot;
+        setControlSnapshot(updated);
+        push({ kind: 'meta', text: t(`授权 ${target} 已撤销。`, `Grant ${target} revoked.`) });
+      }, async (error: unknown) => {
+        push({ kind: 'error', text: t(`撤销失败：${errorCode(error) ?? 'agent_control_revoke_failed'}`, `Could not revoke grant: ${errorCode(error) ?? 'agent_control_revoke_failed'}`) });
+        const refreshed = await client.request('agent-control.list', {}).catch(() => null) as AgentControlSnapshot | null;
+        if (refreshed !== null) setControlSnapshot(refreshed);
+      });
+      return;
+    }
     if (currentPanel === 'permission') {
       if (id === 'network') { openPicker('permission-network'); return; }
       if (id === 'full-access') { openPicker('permission-confirm-full'); return; }
@@ -1604,7 +1792,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       await refreshStatus();
       push({ kind: 'meta', text: changed.when === 'round' ? t(`下轮使用 ${changed.model}`, `${changed.model} will apply next turn`) : t(`已切换至 ${changed.model}`, `Switched to ${changed.model}`) });
     }, (error: unknown) => push({ kind: 'error', text: t(`无法选择模型：${errorCode(error) ?? 'model_select_failed'}`, `Could not select model: ${errorCode(error) ?? 'model_select_failed'}`) }));
-  }, [choices, panel, closePanel, openPicker, changePermission, runCommand, client, sessionId, refreshStatus, push, t]);
+  }, [choices, panel, closePanel, openPicker, changePermission, runCommand, client, sessionId, refreshStatus, push, t, info.boundary, controlSnapshot, controlTarget]);
 
   // 每次回车提交当前问题并进入下一题；完成最后一题后统一发送全部答案。
   // 空回车表示未回答该题，由 Host 按未答记录，不由界面补造答案。
@@ -1628,7 +1816,124 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     client.reply(head.id, { answers });
   }, [client, push, query, resetDraft, t]);
 
+  const advanceControlWizard = useCallback((raw: string) => {
+    const wizard = controlWizard;
+    if (wizard === null) return false;
+    const input = raw.trim();
+    if (input.toLowerCase() === 'cancel' || input.toLowerCase() === '/cancel') {
+      setControlWizard(null);
+      resetDraft('');
+      push({ kind: 'meta', text: t('已取消外控授权创建。', 'Agent Control grant creation cancelled.') });
+      return true;
+    }
+    const values: ControlWizardValues = { ...wizard.values };
+    const fail = (message: string) => push({ kind: 'error', text: message });
+    if (wizard.step === 0) {
+      if (input === '' || input.length > 80) { fail(t('名称须为 1 到 80 个字符。', 'Name must contain 1 to 80 characters.')); return true; }
+      values.name = input;
+    } else if (wizard.step === 1 || wizard.step === 2) {
+      if (!['read-only', 'workspace-write', 'full-access'].includes(input)) {
+        fail(t('请输入 read-only、workspace-write 或 full-access。', 'Enter read-only, workspace-write, or full-access.')); return true;
+      }
+      if (wizard.step === 1) values.defaultPermissionProfile = input as AgentGrant['defaultPermissionProfile'];
+      else {
+        const max = input as AgentGrant['maxPermissionProfile'];
+        const rank = { 'read-only': 0, 'workspace-write': 1, 'full-access': 2 };
+        if (values.defaultPermissionProfile !== undefined && rank[max] < rank[values.defaultPermissionProfile]) {
+          fail(t('权限上限不能低于默认权限。', 'The permission ceiling cannot be lower than its default.')); return true;
+        }
+        values.maxPermissionProfile = max;
+      }
+    } else if (wizard.step === 3 || wizard.step === 4) {
+      if (!['disabled', 'policy', 'unrestricted'].includes(input)) {
+        fail(t('请输入 disabled、policy 或 unrestricted。', 'Enter disabled, policy, or unrestricted.')); return true;
+      }
+      if (wizard.step === 3) values.defaultNetwork = input as AgentGrant['defaultNetwork'];
+      else {
+        const max = input as AgentGrant['maxNetwork'];
+        const rank = { disabled: 0, policy: 1, unrestricted: 2 };
+        if (values.defaultNetwork !== undefined && rank[max] < rank[values.defaultNetwork]) {
+          fail(t('网络上限不能低于默认网络范围。', 'The network ceiling cannot be lower than its default.')); return true;
+        }
+        values.maxNetwork = max;
+      }
+    } else if (wizard.step === 5) {
+      if (!['ask', 'auto', 'never'].includes(input)) { fail(t('请输入 ask、auto 或 never。', 'Enter ask, auto, or never.')); return true; }
+      values.defaultPolicy = input as AgentGrant['defaultPolicy'];
+    } else if (wizard.step === 6) {
+      const allowed = input.split(',').map((part) => part.trim()).filter(Boolean);
+      if (allowed.length === 0 || allowed.some((part) => !['ask', 'auto', 'never'].includes(part))
+        || new Set(allowed).size !== allowed.length || !allowed.includes(values.defaultPolicy ?? 'ask')) {
+        fail(t('请输入不重复的 Policy 列表，例如 ask,auto，并包含默认 Policy。', 'Enter distinct Policy modes such as ask,auto, including the default.')); return true;
+      }
+      values.allowedPolicies = allowed as ('ask' | 'auto' | 'never')[];
+    } else if (wizard.step === 7) {
+      if (!['y', 'yes', 'n', 'no'].includes(input.toLowerCase())) { fail(t('请输入 yes 或 no。', 'Enter yes or no.')); return true; }
+      values.allowOperator = ['y', 'yes'].includes(input.toLowerCase());
+    } else if (wizard.step === 8) {
+      if (input === '' || input.toLowerCase() === 'none') values.expiresAt = null;
+      else {
+        const expiry = input.length === 10 ? Date.parse(`${input}T23:59:59`) : Date.parse(input);
+        if (!Number.isFinite(expiry) || expiry <= Date.now()) { fail(t('请输入未来的日期/时间或 none。', 'Enter a future date/time or none.')); return true; }
+        values.expiresAt = new Date(expiry).toISOString();
+      }
+    } else if (wizard.step === 9) {
+      if (!['y', 'yes'].includes(input.toLowerCase())) {
+        setControlWizard(null); resetDraft('');
+        fail(t('未确认 full-access，授权未创建。', 'Full-access was not confirmed; no grant was created.')); return true;
+      }
+      values.confirmFullAccess = true;
+    } else if (wizard.step === 10) {
+      if (!['y', 'yes'].includes(input.toLowerCase())) {
+        setControlWizard(null); resetDraft('');
+        fail(t('未确认不受限网络，授权未创建。', 'Unrestricted network was not confirmed; no grant was created.')); return true;
+      }
+      values.confirmUnrestrictedNetwork = true;
+    }
+    resetDraft('');
+    const next = controlWizardNext(wizard.step, values);
+    if (next >= 0) {
+      setControlWizard({ step: next, values });
+      return true;
+    }
+    void (async () => {
+      try {
+        const projectRoot = info.boundary;
+        if (projectRoot === undefined || projectRoot === '') throw new Error('workspace_required');
+        const current = await client.request('agent-control.list', {}) as AgentControlSnapshot;
+        const created = await client.request('agent-control.create', {
+          version: current.version,
+          grantName: values.name!,
+          projectRoot,
+          defaultPermissionProfile: values.defaultPermissionProfile!,
+          maxPermissionProfile: values.maxPermissionProfile!,
+          defaultNetwork: values.defaultNetwork!,
+          maxNetwork: values.maxNetwork!,
+          defaultPolicy: values.defaultPolicy!,
+          allowedPolicyAsk: values.allowedPolicies!.includes('ask'),
+          allowedPolicyAuto: values.allowedPolicies!.includes('auto'),
+          allowedPolicyNever: values.allowedPolicies!.includes('never'),
+          allowOperator: values.allowOperator!,
+          confirmFullAccess: values.confirmFullAccess === true,
+          confirmUnrestrictedNetwork: values.confirmUnrestrictedNetwork === true,
+          expiresAt: values.expiresAt ?? '',
+        }) as AgentControlSnapshot;
+        setControlSnapshot(created);
+        const grant = created.grants.at(-1);
+        setControlWizard(null);
+        push({ kind: 'meta', text: grant === undefined
+          ? t('外控授权已创建。', 'Agent Control grant created.')
+          : t(`外控授权 ${grant.name} 已创建：${grant.id} · /control copy ${grant.id.slice(0, 8)} 可复制 MCP 配置`, `Grant ${grant.name} created: ${grant.id} · use /control copy ${grant.id.slice(0, 8)} to copy the MCP config`) });
+      } catch (error) {
+        setControlWizard(null);
+        push({ kind: 'error', text: t(`外控授权创建失败：${errorCode(error) ?? errorMessage(error) ?? 'agent_control_create_failed'}`, `Could not create Agent Control grant: ${errorCode(error) ?? errorMessage(error) ?? 'agent_control_create_failed'}`) });
+      }
+    })();
+    return true;
+  }, [client, controlWizard, info.boundary, push, resetDraft, t]);
+
   const send = useCallback((text: string) => {
+    if (controlWizard !== null) { advanceControlWizard(text); return; }
     // 问题面板打开时，回车提交当前答案；斜杠命令仍可运行，例如 `/status` 和 `/queue`。
     if (query !== null && !text.trim().startsWith('/')) {
       answerQuery(text);
@@ -1660,7 +1965,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     void submit(route.text);
-  }, [answerQuery, locale, push, query, remember, runCommand, running, submit, t]);
+  }, [advanceControlWizard, answerQuery, controlWizard, locale, push, query, remember, runCommand, running, submit, t]);
 
   // 轮次结束后每次发送一条队列消息；取消后队列保持暂停，需用户明确继续。
   useEffect(() => {
@@ -1700,6 +2005,19 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     done: query.questions.slice(0, query.at).map((one, index) => `${index + 1}. ${answeredLine(query.picked[one.id]?.answer, locale)}`),
     last: query.at + 1 === query.questions.length,
   };
+  const controlPrompt = controlWizard === null ? null : [
+    t('授权名称（最多 80 字符）', 'Grant name (up to 80 characters)'),
+    t('默认权限：read-only / workspace-write / full-access', 'Default permission: read-only / workspace-write / full-access'),
+    t('最大权限：read-only / workspace-write / full-access', 'Maximum permission: read-only / workspace-write / full-access'),
+    t('默认网络：disabled / policy / unrestricted', 'Default network: disabled / policy / unrestricted'),
+    t('网络上限：disabled / policy / unrestricted', 'Maximum network: disabled / policy / unrestricted'),
+    t('默认 Policy：ask / auto / never', 'Default Policy: ask / auto / never'),
+    t('允许的 Policy，以逗号分隔，例如 ask,auto', 'Allowed Policy modes, comma-separated, e.g. ask,auto'),
+    t('允许 --operator 处理普通审批和会话设置？yes / no', 'Allow --operator for ordinary approvals and session settings? yes / no'),
+    t('到期时间，输入 ISO 时间或 none', 'Expiry time as an ISO date/time, or none'),
+    t('单独确认 full-access 授权？输入 yes 确认', 'Separately confirm the full-access ceiling? Type yes to confirm'),
+    t('单独确认 unrestricted network？输入 yes 确认', 'Separately confirm the unrestricted network ceiling? Type yes to confirm'),
+  ][controlWizard.step] ?? t('输入 yes 确认', 'Type yes to confirm');
   const caretText = useMemo(() => [...GRAPHEMES.segment(draft.slice(caret))][0]?.segment ?? ' ', [draft, caret]);
 
   useInput((input, key) => {
@@ -2072,6 +2390,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
               : panel === 'permission-network' ? t('设置网络权限', 'Set network access')
                 : panel === 'permission-confirm-full' ? t('确认完整访问', 'Confirm full access')
                   : panel === 'permission-confirm-network' ? t('确认不受限网络', 'Confirm unrestricted network')
+                    : panel === 'control' ? t('外部 Agent 授权', 'External Agent grants')
+                      : panel === 'control-action' ? t('授权操作', 'Grant actions')
+                        : panel === 'control-revoke-confirm' ? t('确认撤销授权', 'Confirm grant revocation')
                     : '',
       options: choices,
       selected: panel === 'model' ? `${status?.serviceId}:${status?.selectedModel ?? status?.model}`
@@ -2079,13 +2400,20 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           : panel === 'policy' ? status?.policy
             : panel === 'permission' ? status?.permission?.profile
               : panel === 'permission-network' ? status?.permission?.network
+                : panel === 'control' ? 'create'
                 : undefined,
       locale, columns: geometry.columns - 4, height: Math.max(1, Math.min(7, geometry.rows - 16)), loading: choicesLoading, onClose: closePanel, onSelect: (choice: PanelChoice) => chooseOption(choice.id),
     }),
+    controlWizard === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'yellow', paddingX: 1 },
+      h(Text, { bold: true }, t('创建外控授权', 'Create Agent Control grant')),
+      h(Text, { wrap: 'wrap' }, controlPrompt),
+      h(Text, { dimColor: true }, t('Enter 提交当前项 · 输入 cancel 取消', 'Enter submits this value · type cancel to stop'))),
     h(Box, { flexDirection: 'column', borderStyle: 'single', borderTop: true, borderBottom: true, borderLeft: false, borderRight: false, borderColor: running ? 'yellow' : 'cyan', paddingX: 1 }, h(Box, null,
       h(Text, { color: running ? 'yellow' : 'cyan' }, running ? `${SPINNER[tick % SPINNER.length]} ` : '› '),
       draft === '' && !running
-        ? h(Text, { dimColor: true }, t(`描述任务 · ${keyHint('send')} 发送 · ${keyHint('newline')} 换行 · / 命令 · @ 文件`, `Describe a task · ${keyHint('send')} send · ${keyHint('newline')} new line · / commands · @ files`))
+        ? h(Text, { dimColor: true }, controlWizard === null
+          ? t(`描述任务 · ${keyHint('send')} 发送 · ${keyHint('newline')} 换行 · / 命令 · @ 文件`, `Describe a task · ${keyHint('send')} send · ${keyHint('newline')} new line · / commands · @ files`)
+          : t('输入授权设置答案', 'Enter the grant setting'))
         : h(Text, { wrap: 'wrap' },
           draft.slice(0, caret),
           h(Text, { inverse: true }, caretText),

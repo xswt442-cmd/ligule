@@ -102,6 +102,19 @@ test('--operator is accepted only with the MCP server command', () => {
   assert.match(result.stderr, /cli_operator_requires_mcp_server/);
 });
 
+test('--grant is limited to mcp-server, requires an ID and appears in help', () => {
+  const missing = capture('mcp-server', '--project', '. ', '--grant');
+  assert.equal(missing.ok, false);
+  assert.match(missing.stderr, /agent_control_grant_required/);
+
+  const misplaced = capture('tools', '--grant', '12345678');
+  assert.equal(misplaced.ok, false);
+  assert.match(misplaced.stderr, /cli_grant_requires_mcp_server/);
+
+  const help = capture('--help');
+  assert.match(help.stdout, /--grant <ID>/);
+});
+
 test('--lang selects help text without requiring a model configuration', () => {
   const english = capture('--help', '--lang', 'en');
   assert.equal(english.ok, true, english.stderr);

@@ -57,6 +57,7 @@ type TuiHostOptions = {
   setup?: (paths: TuiHostSetupPaths) => void | Promise<void>;
   config?: Record<string, unknown>;
   interactive?: boolean;
+  permissionControl?: boolean;
   permission?: PermissionContext;
 };
 
@@ -101,6 +102,7 @@ export async function withTuiHost<TResult>(run: (context: TuiHostContext) => TRe
   setup,
   config: extra = {},
   interactive = false,
+  permissionControl = true,
   permission,
 }: TuiHostOptions = {}): Promise<TResult> {
   const testplace = resolve('testplace');
@@ -204,7 +206,7 @@ export async function withTuiHost<TResult>(run: (context: TuiHostContext) => TRe
       // 测试客户端可以响应模型发起的问题。
       interactive,
       ...(permission === undefined ? {} : { permission }),
-      permissionControl: true,
+      permissionControl,
       modeName: 'minimal', modePaths: modeDirectories(projectDirectory, modesDirectory, homeDirectory),
     });
     const client = createConnection(pair.client);
