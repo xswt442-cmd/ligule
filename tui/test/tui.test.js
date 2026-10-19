@@ -266,7 +266,7 @@ test('the approval box names the shell backend and its executable', options, asy
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
   const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   try {
-    const run = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command: 'node --version | node --version' } }) });
+    const run = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command: 'git status --short' } }) });
     // 等待确认提示渲染后再输入拒绝答案，避免按键进入草稿。
     await waitFor(() => /执行环境 (powershell|bash) · /.test(painted), { read: () => painted });
     stdin.write('n');
@@ -276,7 +276,7 @@ test('the approval box names the shell backend and its executable', options, asy
   }
 
   assert.match(painted, /允许执行 exec？/);
-  assert.match(painted, /node --version \| node --version/);
+  assert.match(painted, /git status --short/);
   assert.match(painted, /执行环境 (powershell|bash) · /);
   }, { permission });
 });
