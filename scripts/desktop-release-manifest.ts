@@ -139,7 +139,8 @@ export function verifyDesktopReleaseManifests({ directory, version, commit, runI
       if (!asset.name.includes(`desktop-v${version}-${manifest.target}-${commit.slice(0, 12)}-`)) {
         throw new Error(`installer filename does not encode its version, architecture target, and source SHA: ${asset.name}`);
       }
-      checksums.push(`${asset.sha256}  ${asset.name}`);
+      // GitHub 上传 Release 资产时会把空白替换成点号；校验文件也使用下载后的文件名。
+      checksums.push(`${asset.sha256}  ${asset.name.replace(/\s/g, '.')}`);
       consolidatedAssets.push({ ...asset, target: manifest.target, architecture: manifest.architecture });
     }
     const allowedFiles = new Set([

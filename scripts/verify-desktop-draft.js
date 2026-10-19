@@ -66,7 +66,7 @@ export function verifyDesktopDraft(directory, tag, commit) {
     expectedFiles.add(uploadedName);
     const content = readFileSync(join(directory, uploadedName));
     if (sha256(content) !== asset.sha256) throw new Error(`draft asset SHA-256 mismatch: ${uploadedName}`);
-    checksums.push(`${asset.sha256}  ${asset.name}`);
+    checksums.push(`${asset.sha256}  ${uploadedName}`);
   }
 
   const actualFiles = readdirSync(directory).sort();
