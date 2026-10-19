@@ -68,10 +68,10 @@ test('G01–G04: isolated Node project, defect repair, repository README, design
       path: 'app.mjs',
       content: "import { appendFile } from 'node:fs/promises';\nawait appendFile(new URL('./run-count.txt', import.meta.url), 'ran\\n');\nconsole.log('project-ran');\n",
     });
-    const projectTest = await callTool(context, 'exec', { command: 'npm test' });
+    const projectTest = await callTool(context, 'exec', { command: 'node run-tests.mjs' });
     assert.equal(projectTest.exitCode, 0, `G01 test command failed: ${projectTest.text}`);
     assert.match(projectTest.text, /pass 1/);
-    const projectRun = await callTool(context, 'exec', { command: 'npm start' });
+    const projectRun = await callTool(context, 'exec', { command: 'node app.mjs' });
     assert.equal(projectRun.exitCode, 0, `G01 app command failed: ${projectRun.text}`);
     assert.match(projectRun.text, /project-ran/);
 
@@ -84,7 +84,7 @@ test('G01–G04: isolated Node project, defect repair, repository README, design
       path: 'test/normalize.test.mjs',
       content: "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { normalizeName } from '../src/normalize.mjs';\n\ntest('normalizes a project name', () => assert.equal(normalizeName(' New Project '), 'new-project'));\n",
     });
-    const failingRun = await callTool(context, 'exec', { command: 'npm test' });
+    const failingRun = await callTool(context, 'exec', { command: 'node run-tests.mjs' });
     assert.notEqual(failingRun.exitCode, 0, 'G02 fixture must fail before the repair');
     assert.match(failingRun.text, /new project/);
     assert.match(failingRun.text, /new-project/);
@@ -95,7 +95,7 @@ test('G01–G04: isolated Node project, defect repair, repository README, design
       anchor: 'value.trim().toLowerCase()',
       replacement: "value.trim().toLowerCase().replace(/\\s+/g, '-')",
     });
-    const repairedRun = await callTool(context, 'exec', { command: 'npm test' });
+    const repairedRun = await callTool(context, 'exec', { command: 'node run-tests.mjs' });
     assert.equal(repairedRun.exitCode, 0, `G02 repaired test command failed: ${repairedRun.text}`);
     assert.match(repairedRun.text, /pass 2/);
 

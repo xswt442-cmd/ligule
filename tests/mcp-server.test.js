@@ -555,7 +555,8 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     } else if (userText.includes('MCP_OPERATOR_QUESTION')) {
       tool = 'ask_user_question'; args = { questions: JSON.stringify([{ question: 'Which option should be used?', options: [{ label: 'Option A' }, { label: 'Option B' }] }]) };
     } else if (userText.includes('MCP_OPERATOR_SENSITIVE_APPROVAL')) {
-      tool = 'exec'; args = { command: `node -e "require('node:fs').writeFileSync('operator-secret-executed.txt','unexpected')" 'Bearer synthetic-secret-token'` };
+      // 让 Operator 的敏感内容检查处理这次审批；原生命令避免先被脚本绑定检查拒绝。
+      tool = 'exec'; args = { command: "echo 'Bearer synthetic-secret-token' > operator-secret-executed.txt" };
     } else if (userText.includes('MCP_OPERATOR_SENSITIVE_HEADER')) {
       tool = 'create'; args = { path: 'operator-secret-executed.txt', content: 'X-API-Key: synthetic-header-secret' };
     }
