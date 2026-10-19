@@ -4,8 +4,9 @@
   <p>共享 Agent Core 的 CLI、TUI 与桌面 AI 助手</p>
   <p>
     <a href="README.en.md">English</a> ·
-    <a href="https://github.com/xswt442-cmd/ligule/releases/latest">桌面版下载</a> ·
-    <a href="tui/CHANGELOG.md">CLI/TUI 更新记录</a>
+    <a href="desktop/README.md">Desktop</a> ·
+    <a href="tui/README.md">CLI / TUI</a> ·
+    <a href="core/README.md">Core</a>
   </p>
   <p>
     <a href="https://github.com/xswt442-cmd/ligule/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/xswt442-cmd/ligule/actions/workflows/ci.yml/badge.svg?branch=main"></a>
@@ -29,12 +30,14 @@ npm install -g ligule
 ## 功能
 
 - **共享项目上下文**：会话归属工作区，可从已完成轮次创建分支并导出 Markdown。
-- **受控的工具操作**：使用文件、命令、Skills 与 MCP，并由 Policy 和审批规则约束。
+- **受控的工具操作**：文件、命令、Skills 与 MCP 经 Permission 访问边界、Policy 风险判定和审批机制约束。
 - **三种使用入口**：CLI 适合单次任务与脚本，TUI 和桌面版适合持续工作。
+- **统一 Agent Core**：Host 组织模型与工具，Kernel 执行校验和 Policy，Session JSONL 记录可恢复的执行过程。
+- **Agent Control（外部控制）**：为本地 MCP 控制者预先授予项目专属的权限上限；控制者通过 Grant 管理会话，不能越权或绕过危险操作拒绝。
 
 ## Agent 框架
 
-Ligule 的 CLI/TUI 与桌面版共用 Agent Core。Node.js Host 管理模型请求、项目配置、Policy 和会话记录；模型发起的工具调用经过参数校验、目标解析和权限判定后执行。Electron 桌面版通过独立 Host 进程运行，使用相同的会话和工具语义。
+Ligule 的 CLI/TUI 与桌面版共用 [Agent Core](core/README.md)。Node.js Host 组织模型、配置和 Session，Kernel 对工具参数、目标及 Policy 执行校验；会话记录支持恢复，未确定结果的工具调用不会自动重放。Electron 桌面版以独立 Host 进程复用相同的执行语义。
 
 ## 快速开始
 

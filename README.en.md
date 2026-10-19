@@ -4,8 +4,9 @@
   <p>A CLI, TUI, and desktop AI assistant built on a shared Agent Core</p>
   <p>
     <a href="README.md">简体中文</a> ·
-    <a href="https://github.com/xswt442-cmd/ligule/releases/latest">Download Desktop</a> ·
-    <a href="tui/CHANGELOG.md">CLI/TUI changelog</a>
+    <a href="desktop/README.en.md">Desktop</a> ·
+    <a href="tui/README.en.md">CLI / TUI</a> ·
+    <a href="core/README.en.md">Core</a>
   </p>
   <p>
     <a href="https://github.com/xswt442-cmd/ligule/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/xswt442-cmd/ligule/actions/workflows/ci.yml/badge.svg?branch=main"></a>
@@ -29,12 +30,14 @@ npm install -g ligule
 ## Features
 
 - **Shared project context:** sessions belong to workspaces, with branching from completed turns and Markdown export.
-- **Controlled tool use:** use files, commands, Skills, and MCP under Policy and approval rules.
+- **Controlled tool use:** files, commands, Skills, and MCP follow Permission boundaries, Policy risk checks, and approvals.
 - **Three interfaces:** use the CLI for scripts and one-off tasks, or the TUI and desktop app for ongoing work.
+- **Shared Agent Core:** the Host coordinates models and tools; the Kernel validates and enforces Policy; recoverable Session JSONL records execution.
+- **Agent Control:** pre-authorize project-bound permission ceilings for local MCP controllers, which can manage sessions without exceeding the grant or bypassing hard denials.
 
 ## Agent framework
 
-The CLI/TUI and desktop app share the Agent Core. The Node.js Host manages model requests, project configuration, Policy, and session records. Model-requested tool calls pass argument validation, target resolution, and permission checks before execution. The Electron app runs a separate Host process with the same session and tool semantics.
+The CLI/TUI and desktop app share the [Agent Core](core/README.en.md). The Node.js Host coordinates models, configuration, and sessions; the Kernel validates tool arguments, resolved targets, and Policy decisions. Session records support recovery without automatically replaying unresolved tool calls. Electron uses a separate Host process with the same execution semantics.
 
 ## Quick start
 
