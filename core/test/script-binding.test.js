@@ -36,11 +36,12 @@ test('script approvals bind the canonical path, content digest, interpreter, wor
   const kernel = kernelFor(root, (question) => { approval = question; return true; });
   await kernel.call('exec', { command });
   const binding = approval?.scriptBinding;
+  const canonicalRoot = await realpath(root);
   assert.ok(binding);
-  assert.equal(binding.path, script);
+  assert.equal(binding.path, await realpath(script));
   assert.match(binding.sha256, /^[a-f0-9]{64}$/u);
   assert.match(binding.interpreter, /node(?:\.exe)?$/iu);
-  assert.equal(binding.workspaceRoot, root);
+  assert.equal(binding.workspaceRoot, canonicalRoot);
   assert.deepEqual(binding.permission, { profile: 'full-access', network: 'unrestricted', capabilities: permission.capabilities });
 
   assert.equal(binding.interpreterSource, 'node');
