@@ -73,7 +73,7 @@ Use `/credentials` in the terminal UI to check the current model's credential re
 
 #### Model output budget
 
-Each service under Desktop “Settings → Model services” has a model configuration table. Add or remove models and edit their display names, context windows, and maximum output tokens. Blank limits inherit existing configuration; enter full positive integers such as `128000`. Display names do not change the model ID sent to the service. Services supporting discovery can fetch and add models in one action; existing names and limits are preserved. Discovery does not infer token limits. Apply catalog edits with “Save service”.
+Each service under Desktop “Settings → Model services” has a model configuration table. Add or remove models and edit their display names, context windows, and maximum output tokens. Blank limits inherit existing configuration; enter full positive integers such as `128000`. Display names do not change the model ID sent to the service. Services supporting discovery can fetch an available-model list and let you choose which entries to add; existing names and limits are preserved. Discovery does not infer token limits. Apply catalog edits with “Save service”.
 
 Per-model settings use the optional `modelSettings` list within the service. Each `id` references an ID in `models`, for example `modelSettings = [{ id = "custom-model", name = "My model", contextTokens = 128000, outputTokens = 16384 }]`. The selected model's context window controls compaction and its output budget controls actual requests. Identically named models in different services keep independent settings. Existing ID-only catalogs remain compatible.
 
