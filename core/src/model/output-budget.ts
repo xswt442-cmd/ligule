@@ -24,7 +24,7 @@ interface OutputTokenCeiling {
 function verifiedLimit(baseUrl: string, model: string): number | undefined {
   const url = new URL(baseUrl);
   if (url.origin !== 'https://api.deepseek.com'
-    || !['', '/v1', '/anthropic', '/anthropic/v1'].includes(url.pathname)
+    || !['', '/', '/v1', '/anthropic', '/anthropic/v1'].includes(url.pathname)
     || !['deepseek-flash', 'deepseek-v4-pro'].includes(model)) return undefined;
   return 393216;
 }

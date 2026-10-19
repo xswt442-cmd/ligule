@@ -16,7 +16,7 @@ export function thinkingCapabilityOf(api: unknown, baseUrl: unknown, model: unkn
   let url: URL;
   try { url = new URL(baseUrl); } catch { return undefined; }
   if (url.origin !== 'https://api.deepseek.com' || url.username !== '' || url.password !== ''
-    || url.search !== '' || url.hash !== '' || !['', '/v1'].includes(url.pathname)) return undefined;
+    || url.search !== '' || url.hash !== '' || !['', '/', '/v1'].includes(url.pathname)) return undefined;
   if (!['deepseek-flash', 'deepseek-v4-pro'].includes(model)) return undefined;
   return Object.freeze({
     protocol: 'deepseek-chat-completions',

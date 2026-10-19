@@ -9,6 +9,7 @@ const official = { api: 'chat-completions', baseURL: 'https://api.deepseek.com/v
 
 test('thinking controls are advertised only for verified DeepSeek endpoint and models', () => {
   assert.deepEqual(thinkingCapabilityOf(official.api, official.baseURL, official.model).efforts, ['none', 'low', 'high', 'max']);
+  assert.deepEqual(thinkingCapabilityOf(official.api, 'https://api.deepseek.com', official.model)?.efforts, ['none', 'low', 'high', 'max']);
   assert.equal(thinkingCapabilityOf(official.api, 'https://gateway.example/v1', official.model), undefined);
   assert.equal(thinkingCapabilityOf(official.api, 'http://api.deepseek.com/v1', official.model), undefined);
   assert.equal(thinkingCapabilityOf(official.api, 'https://api.deepseek.com/v1?token=hidden', official.model), undefined);
