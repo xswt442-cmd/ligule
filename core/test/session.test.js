@@ -57,6 +57,20 @@ test('what the model sees is rebuildable from the log, byte for byte', async () 
   });
 });
 
+test('session policy snapshots are retained in the log but excluded from the model view', async () => {
+  await withDirectory(async (directory) => {
+    const session = createSessionLog({ directory, id: 'policy-state' });
+    await session.append({ kind: 'user', text: 'keep this input' });
+    const before = await session.modelView();
+    await session.append({
+      kind: 'sessionPolicy', ignorable: true, override: 'ask', consecutive: 1, total: 1, forcedToAsk: true,
+    });
+    assert.deepEqual(await session.modelView(), before);
+    assert.equal((await session.read()).at(-1).kind, 'sessionPolicy');
+    await session.close();
+  });
+});
+
 // 并发工具调用共享同一份会话记录，写入操作必须按顺序完成。
 test('appends that arrive at the same time still take turns on the sequence', async () => {
   await withDirectory(async (directory) => {
@@ -156,7 +170,7 @@ test('a refusal and a failure each carry their own code into the log', async () 
     await assert.rejects(() => kernel.call('exec', { command: '   ' }), (error) => error.code === 'exec_command_required');
 
     const events = await session.read();
-    assert.deepEqual(events.map((event) => [event.tool, event.result.kind, event.result.code]), [
+    assert.deepEqual(events.filter((event) => event.kind === 'tool').map((event) => [event.tool, event.result.kind, event.result.code]), [
       ['exec', 'refusal', 'policy_denied'],
       ['exec', 'failure', 'exec_command_required'],
     ]);

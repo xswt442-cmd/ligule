@@ -183,6 +183,37 @@ test('a delegated Host enforces the project, permission, policy and operator lim
   });
 });
 
+test('session policy overrides survive reopening and remain inside the active grant ceiling', async () => {
+  let grant;
+  await withTuiHost(async ({ client, sessionId, sessionDirectory }) => {
+    await client.request('policy.set', { sessionId, mode: 'ask' });
+    await client.request('session.close', { sessionId });
+    await client.request('session.open', { sessionId });
+    assert.equal((await client.request('status.get', { sessionId })).policy, 'ask');
+
+    await client.request('session.close', { sessionId });
+    const path = join(sessionDirectory, `${sessionId}.jsonl`);
+    const lines = (await readFile(path, 'utf8')).trimEnd().split('\n').map((line) => JSON.parse(line));
+    const state = lines.filter((event) => event.kind === 'sessionPolicy').at(-1);
+    assert.ok(state);
+    state.override = 'never';
+    const forged = `${lines.map((event) => JSON.stringify(event)).join('\n')}\n`;
+    await writeFile(path, forged);
+    await assert.rejects(client.request('session.open', { sessionId }), { code: 'agent_control_policy_exceeds_grant' });
+    assert.equal(await readFile(path, 'utf8'), forged);
+  }, {
+    agentControl: async ({ directory, projectDirectory }) => {
+      const storePath = join(directory, 'agent-control.json');
+      const created = await createDelegationGrant(storePath, input(projectDirectory, { allowedPolicies: ['ask'] }), (await listDelegationGrants(storePath)).version);
+      grant = { storePath, id: created.grants[0].id };
+      return {
+        grantId: grant.id, storePath, operator: true,
+        validate: () => requireDelegationGrant(storePath, grant.id, projectDirectory),
+      };
+    },
+  });
+});
+
 test('a grant without operator permission cannot change session settings', async () => {
   await withTuiHost(async ({ client, sessionId }) => {
     await assert.rejects(

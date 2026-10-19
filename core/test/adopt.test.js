@@ -397,6 +397,49 @@ test('a headerless record in a shared directory stays unknown to adoption', asyn
   }
 });
 
+test('a headerless record in the user data sessions directory is not assigned to a home workspace', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-adopt-user-data-'));
+  const previous = process.env.LIGULE_HOME;
+  try {
+    const home = join(root, 'home');
+    const data = join(root, 'data');
+    const shared = join(data, 'sessions');
+    const target = join(root, 'target');
+    process.env.LIGULE_HOME = data;
+    await mkdir(shared, { recursive: true });
+    await writeFile(join(shared, 'unknown.jsonl'), '{"seq":0,"kind":"user","text":"unknown"}\n');
+    const report = await adoptLegacySessions(shared, target, { projectRoot: home, userHome: home });
+    assert.deepEqual(report.unknown, ['unknown.jsonl']);
+    await assert.rejects(readFile(join(target, 'unknown.jsonl')), { code: 'ENOENT' });
+  } finally {
+    if (previous === undefined) delete process.env.LIGULE_HOME;
+    else process.env.LIGULE_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Windows path casing cannot make the shared user data sessions directory look project-owned', async (t) => {
+  if (process.platform !== 'win32') return t.skip('Windows path casing applies only on Windows');
+  const root = await mkdtemp(join(tmpdir(), 'ligule-adopt-user-data-case-'));
+  const previous = process.env.LIGULE_HOME;
+  try {
+    const home = join(root, 'home');
+    const data = join(root, 'Data');
+    const shared = join(data, 'sessions');
+    const target = join(root, 'target');
+    process.env.LIGULE_HOME = data.toUpperCase();
+    await mkdir(shared, { recursive: true });
+    await writeFile(join(shared, 'unknown.jsonl'), '{"seq":0,"kind":"user","text":"unknown"}\n');
+    const report = await adoptLegacySessions(shared, target, { projectRoot: home, userHome: home });
+    assert.deepEqual(report.unknown, ['unknown.jsonl']);
+    await assert.rejects(readFile(join(target, 'unknown.jsonl')), { code: 'ENOENT' });
+  } finally {
+    if (previous === undefined) delete process.env.LIGULE_HOME;
+    else process.env.LIGULE_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('the workspace root wins over an explicit project root and boundary', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ligule-adopt-root-order-'));
   try {

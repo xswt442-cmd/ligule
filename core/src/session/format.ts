@@ -53,7 +53,7 @@ export interface SessionRecord {
 // 当前程序会写入的事件类型。未知事件仅在标记为 `ignorable` 时允许跳过，其他情况拒绝读取。
 // `usage` 虽不进入模型投影，但其序号仍用于校验检查点范围，因此必须保留。
 // `label` 保存会话名称和归档状态；这些信息供界面使用，不进入模型上下文。
-const WRITTEN_KINDS = ['session', 'user', 'reasoning', 'assistant', 'tool', 'mode', 'usage', 'turn', 'label', 'turnContext', 'modelSelection', 'sessionGeneration', 'sessionLoopIterations', 'sessionPermission'];
+const WRITTEN_KINDS = ['session', 'user', 'reasoning', 'assistant', 'tool', 'mode', 'usage', 'turn', 'label', 'turnContext', 'modelSelection', 'sessionGeneration', 'sessionLoopIterations', 'sessionPermission', 'sessionPolicy'];
 
 export function createSessionHeader({
   id,
@@ -114,8 +114,18 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
       }
       continue;
     }
-    if (kind === 'sessionPermission' && formatVersion < 2) {
-      throw new KernelRuntimeError('session_event_version_unsupported', { detail: 'sessionPermission requires format version 2' });
+    if ((kind === 'sessionPermission' || kind === 'sessionPolicy') && formatVersion < 2) {
+      throw new KernelRuntimeError('session_event_version_unsupported', { detail: `${kind} requires format version 2` });
+    }
+    if (kind === 'sessionPolicy') {
+      if (event.ignorable !== true) throw new KernelRuntimeError('session_policy_ignorable_required');
+      const override = event.override;
+      if ((override !== null && override !== 'ask' && override !== 'auto' && override !== 'never')
+        || !Number.isSafeInteger(event.consecutive) || (event.consecutive as number) < 0
+        || !Number.isSafeInteger(event.total) || (event.total as number) < (event.consecutive as number)
+        || typeof event.forcedToAsk !== 'boolean') {
+        throw new KernelRuntimeError('session_policy_event_invalid');
+      }
     }
     events.push(event);
   }

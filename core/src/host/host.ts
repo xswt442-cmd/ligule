@@ -20,7 +20,7 @@ import { historyPathOf, loadHistory, rememberHistory } from '../kernel/input-his
 import { parsePrefsJson, prefsPathOf, readPrefs, savePrefs } from '../kernel/desktop-prefs.js';
 import { credentialStatus, deleteCredential, storeCredential } from '../kernel/credentials.js';
 import { modelServices, modelSelection, resolveModel, type ModelSelection, type ModelService } from '../kernel/model-services.js';
-import { createDecisionChain, isPolicyRule, type DecisionChain, type PolicyMode, type PolicyThresholds } from '../kernel/policy.js';
+import { createDecisionChain, isPolicyRule, type DecisionChain, type PolicyMode, type PolicyState, type PolicyThresholds } from '../kernel/policy.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
 import { createSessionLog, type SessionLog } from '../session/session.js';
@@ -183,6 +183,7 @@ interface HostSessionBase {
   readonly asks: Set<() => void>;
   readonly environment: ProjectEnvironment;
   permission: PermissionContext;
+  policyOverride: PolicyMode | null;
   readonly mode: ModeState;
   loopIterations: number;
   readonly loopModelCalls: number;
@@ -1217,6 +1218,16 @@ export function createHost({
   // 每个会话拥有自己的 Kernel、权限状态和循环。
   // 审批请求属于发起它的会话；客户端未明确允许时一律拒绝。
   // 等待审批期间取消轮次时，结束待处理请求并记录拒绝结果。
+  async function appendPolicyState(session: SessionLog, chain: DecisionChain, override: PolicyState['override'] = chain.snapshot().override): Promise<void> {
+    const header = await session.header();
+    if ((header?.formatVersion ?? 0) < 2) {
+      throw new KernelError('session_policy_format_unsupported', {
+        detail: 'session policy changes require a session record with format version 2 or newer',
+      });
+    }
+    await session.append({ kind: 'sessionPolicy', ignorable: true, ...chain.snapshot(), override });
+  }
+
   async function build(
     id: string,
     connection: HostClientConnection,
@@ -1262,6 +1273,7 @@ export function createHost({
       permission: recover
         ? createPermissionContext('read-only', 'policy', permission.capabilities)
         : initial?.permission?.context ?? permission,
+      policyOverride: initial?.policy ?? null,
       loopIterations: initial?.loopIterations ?? configuredLoopLimits.iterations,
       loopModelCalls: configuredLoopLimits.modelCalls,
       generation: initial?.generation ?? env.generation ?? { provider, model: modelConfigOf(config), options: {} },
@@ -1269,6 +1281,7 @@ export function createHost({
     };
     // 调用时解析生成设置，让循环、压缩和派生执行都能读取会话的最新配置。
     const live = currentProvider(() => state.generation.provider);
+    let recoveredPolicyState: PolicyState | undefined;
     await session.acquire();
     const cleanup = [];
     try {
@@ -1277,6 +1290,16 @@ export function createHost({
       const savedPermission = events.filter((event) => event.kind === 'sessionPermission').at(-1);
       if (savedPermission !== undefined) {
         state.permission = createPermissionContext(savedPermission.profile, savedPermission.network, permission.capabilities);
+      }
+      const savedPolicy = events.filter((event) => event.kind === 'sessionPolicy').at(-1);
+      if (savedPolicy !== undefined) {
+        recoveredPolicyState = {
+          override: savedPolicy.override === null ? null : savedPolicy.override as PolicyMode,
+          consecutive: savedPolicy.consecutive as number,
+          total: savedPolicy.total as number,
+          forcedToAsk: savedPolicy.forcedToAsk as boolean,
+        };
+        state.policyOverride = recoveredPolicyState.override;
       }
       const grant = await activeDelegation();
       if (grant !== undefined) assertDelegationPermission(grant, state.permission.profile, state.permission.network);
@@ -1332,7 +1355,7 @@ export function createHost({
     }
     const chain = createDecisionChain({
       ...policy,
-      ask: async ({ tool, input, command, reason, shell, executable, policy, policySource, policyForced }) => {
+      ask: async ({ tool, input, command, reason, shell, executable, policy, policySource, policyForced, scriptBinding }) => {
         let settle = (): void => {};
         const cancelled = new Promise<boolean>((resolve) => {
           settle = () => resolve(false);
@@ -1344,6 +1367,7 @@ export function createHost({
           // 同时返回所属项目和策略状态，以便客户端在切换前台会话后仍能解释本次判定。
           const request = connection.request(APPROVAL_METHOD, {
             sessionId: id, projectRoot: env.projectRoot, tool, args: input, command, reason, policy, policySource, policyForced,
+            ...(scriptBinding === undefined ? {} : { scriptBinding }),
             ...(shell === undefined ? {} : { shell, executable }),
           });
           return await Promise.race([
@@ -1363,7 +1387,15 @@ export function createHost({
     const grant = await activeDelegation();
     if (grant !== undefined) chain.setMode(grant.defaultPolicy);
     if (initial?.policy !== undefined) chain.setMode(initial.policy);
-    const kernel = createKernel({ config, policy: chain, session, logger, permissionForCall: () => state.permission });
+    if (recoveredPolicyState !== undefined) {
+      if (grant !== undefined) assertDelegationPolicy(grant, recoveredPolicyState.override ?? grant.defaultPolicy);
+      chain.restore({ ...recoveredPolicyState, override: recoveredPolicyState.override ?? (grant?.defaultPolicy ?? null) });
+    }
+    const kernel = createKernel({ config, policy: chain, session, logger,
+      permissionForCall: () => state.permission,
+      policyOverrideForSession: () => state.policyOverride,
+    });
+    if (!recover && initial?.policy !== undefined) await appendPolicyState(session, chain, initial.policy);
     // 技能登记表反映已发现的技能，不随当前模式改变。
     // 优先复用加载器提供的登记表，否则从配置目录中发现技能。
     // 没有可用技能时不注册技能工具或提示词片段。
@@ -1718,7 +1750,7 @@ export function createHost({
     if (agentControl !== undefined && !agentControl.operator) throw new KernelError('agent_control_operator_required');
 
     if (permissionChanged) {
-      return await setPermission(state, connection, params.permissionProfile ?? state.permission.profile,
+      return await setPermission(state, params.permissionProfile ?? state.permission.profile,
         params.permissionNetwork, undefined, undefined);
     }
 
@@ -1744,16 +1776,21 @@ export function createHost({
     }
 
     if (policyChanged) {
+      let nextOverride: PolicyMode | null;
       if (params.policy === 'default') {
         const grant = await activeDelegation();
         if (grant !== undefined) assertDelegationPolicy(grant, state.chain.configuredMode());
-        state.chain.resetMode();
+        nextOverride = null;
       } else if (params.policy === 'ask' || params.policy === 'auto' || params.policy === 'never') {
         const grant = await activeDelegation();
         if (grant !== undefined) assertDelegationPolicy(grant, params.policy);
-        state.chain.setMode(params.policy);
+        nextOverride = params.policy;
       }
       else throw new KernelError('policy_mode_unknown');
+      await appendPolicyState(state.session, state.chain, nextOverride);
+      state.policyOverride = nextOverride;
+      if (nextOverride === null) state.chain.resetMode();
+      else state.chain.setMode(nextOverride);
       if (agentControl !== undefined && params.policy !== 'default') {
         await recordDelegationEvent(agentControl.storePath, {
           kind: 'grant.used', grantId: agentControl.grantId, policy: params.policy as 'ask' | 'auto' | 'never',
@@ -1828,7 +1865,6 @@ export function createHost({
 
   async function setPermission(
     state: HostSessionState,
-    connection: HostClientConnection,
     profileValue: unknown,
     networkValue: unknown,
     confirmFullAccess: unknown,
@@ -1873,6 +1909,12 @@ export function createHost({
         detail: 'a loaded extension runs as trusted code in this Host process; close it before lowering this session permission',
       });
     }
+    const header = await state.session.header();
+    if ((header?.formatVersion ?? 0) < 2) {
+      throw new KernelError('session_permission_format_unsupported', {
+        detail: 'permission changes require a session record with format version 2 or newer',
+      });
+    }
     state.permissionChanging = true;
     try {
       if (grant !== undefined) {
@@ -1893,10 +1935,8 @@ export function createHost({
           ? next.network === 'unrestricted' && state.permission.network !== 'unrestricted' && confirmNetwork === true
           : next.network === 'unrestricted' && grant.confirmedUnrestrictedNetwork,
       });
-      await retire(state);
-      await buildSession(state.id, connection, true, undefined, state.environment);
-      const reopened = open(state.id);
-      return { sessionId: reopened.id, permission: sessionPermissionView(reopened, canControlPermission), applies: 'now' };
+      state.permission = next;
+      return { sessionId: state.id, permission: sessionPermissionView(state, canControlPermission), applies: 'now' };
     } finally {
       if (sessions.get(state.id) === state) state.permissionChanging = false;
     }
@@ -2154,7 +2194,6 @@ export function createHost({
         case 'permission.set': {
           return await serializeSessionConfiguration(sessionId, () => setPermission(
             open(sessionId),
-            connection,
             message.params.permissionProfile,
             message.params.permissionNetwork,
             message.params.confirmFullAccess,

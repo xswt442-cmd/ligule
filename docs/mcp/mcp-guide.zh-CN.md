@@ -75,7 +75,9 @@ Windows 路径示例：
 
 MCP 会校验项目路径与 Grant 绑定一致，并将其默认 Permission、网络和 Policy 应用于新会话。`--operator` 只能在 Grant 已允许普通 Operator 操作时使用；这时 MCP 可在 Grant 上限内改会话设置并答复真实待决的审批或提问。未提供 Grant 时，单独的 `--operator` 不会授予或提升 Permission；提供 Grant 但不启用 `--operator` 时，只能使用 Grant 默认值，不能通过 MCP 修改这些设置。Host 会持续核验撤销、到期和项目绑定；失效后拒绝后续控制并释放会话锁。
 
-新会话可在 `ligule_session_create` 的 `initial` 中一次性设置 `mode`、`policy`、`model`、`thinking`、`outputTokens` 和 `loopIterations`。已打开会话使用 `ligule_session_configure` 的 `changes`。单次更新只能改一个类别：Mode、Policy、生成设置或循环上限；生成设置类别内部可同时改模型、思考档位和输出上限。`loopIterations` 是每轮用户任务允许的模型/工具循环次数，必须是正安全整数；默认值来自项目 `[loop].iterations`，未设置时为 64。会话覆盖不改项目配置，保存在 Session JSONL 中，并在重新接回时恢复。`loop.modelCalls` 仍使用项目配置，不会随 `loopIterations` 一起变化。混合类别的请求会被 schema 拒绝，避免部分生效。Mode 与模型/生成设置也保存在 Session JSONL 中；Policy 覆盖沿用 Host 的运行期行为，重新接回后采用项目配置默认值。运行期间的生成设置和循环上限在下一轮开始时生效，Policy 在之后的工具判定生效，不能改变已经等待中的审批。响应中的 `applies` 明确给出时机。
+新会话可在 `ligule_session_create` 的 `initial` 中一次性设置 `mode`、`policy`、`model`、`thinking`、`outputTokens` 和 `loopIterations`。已打开会话使用 `ligule_session_configure` 的 `changes`。单次更新只能改一个类别：Mode、Policy、生成设置或循环上限；生成设置类别内部可同时改模型、思考档位和输出上限。`loopIterations` 是每轮用户任务允许的模型/工具循环次数，必须是正安全整数；默认值来自项目 `[loop].iterations`，未设置时为 64。会话覆盖不改项目配置，保存在 Session JSONL 中，并在重新接回时恢复。`loop.modelCalls` 仍使用项目配置，不会随 `loopIterations` 一起变化。混合类别的请求会被 schema 拒绝，避免部分生效。当前格式的记录会保存并恢复 Mode、Policy 覆盖、Policy 拒绝计数与强制逐次审批状态，以及模型/生成设置。运行期间的生成设置和循环上限在下一轮开始时生效，Policy 在之后的工具判定生效，不能改变已经等待中的审批。旧格式会话仍可读取，但不能修改 Permission 或 Policy。响应中的 `applies` 明确给出时机。
+
+Node/Python 脚本调用需要逐次审批；`approval.request` 会包含规范脚本路径、SHA-256、解释器、工作区和 Permission，Operator 应向操作者展示这些信息。审批等待期间源文件或执行身份变化时，Host 拒绝执行并返回 `exec_script_binding_changed`。无法安全绑定的脚本、包装器、复合解释器调用和动态命令会 fail closed；它们不会因为 Operator 可以答复普通审批而获得绕过权限。
 
 模型和服务选项来自当前 Host 配置。`thinking` 只列出已核实的模型能力；当前仅官方 DeepSeek Chat Completions 端点上列出的模型支持 `none/low/high/max`。兼容网关不会自动继承此能力。`effective.generation.outputTokens` 是当前请求预算；`maxOutputTokens` 是解析后的模型/服务输出上限，`contextTokens` 单独报告。例如，已核实的 DeepSeek Flash 输出上限是 393,216 Token；未知兼容端点继续使用保守默认上限。输出预算必须同时不超过服务上限和上下文窗口，否则 Host 返回稳定错误码。使用 `null` 清除模型、思考或输出上限的会话覆盖。
 

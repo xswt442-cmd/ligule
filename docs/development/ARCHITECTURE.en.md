@@ -125,7 +125,7 @@ The loop appends the user input and effective turn settings, builds the model vi
 
 ### Session records and recovery
 
-The append-only [session JSONL record](../../core/src/session/session.ts) is the source of truth for a conversation. Its first line identifies the record and project; later lines hold user and assistant messages, tool calls and results, turn state, model selection, and other events. Session locks prevent two processes from writing the same record at once.
+The append-only [session JSONL record](../../core/src/session/session.ts) is the source of truth for a conversation. Its first line identifies the record and project; later lines hold user and assistant messages, tool calls and results, turn state, model selection, Permission, Policy overrides, denial counters, and other events. Policy snapshots are ignorable to older readers and stay out of model messages and checkpoints. Session locks prevent two processes from writing the same record at once.
 
 By default, records and sidecars live at `dataRoot()/workspaces/<readable-path>--<stable-hash>/sessions/`. Read-only listing and search include the former shared and project-local locations without migrating files; opening a legacy session copies it into the workspace folder and preserves the source.
 

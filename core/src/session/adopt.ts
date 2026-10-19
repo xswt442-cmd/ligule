@@ -1,6 +1,6 @@
 // 迁移旧记录时保留有效记录、附属文件和原件；重复执行只比较，不重复写入。
 import { constants, createReadStream } from 'node:fs';
-import { copyFile, link, lstat, mkdir, open, readdir, readFile, rm, stat, utimes } from 'node:fs/promises';
+import { copyFile, link, lstat, mkdir, open, readdir, readFile, realpath, rm, stat, utimes } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { dataRoot } from '../kernel/config-file.js';
@@ -25,6 +25,17 @@ export interface AdoptionReport {
 type PublishResult = 'copied' | 'already' | 'conflict' | 'missing' | 'busy';
 
 const isMissing = (error: unknown): boolean => (error as NodeJS.ErrnoException)?.code === 'ENOENT';
+
+async function pathIdentity(path: string): Promise<string> {
+  let normalized = resolve(path);
+  try {
+    normalized = await realpath(normalized);
+  } catch (cause) {
+    const code = (cause as NodeJS.ErrnoException)?.code;
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') throw failure('session_adoption_read_failed', path, cause);
+  }
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
 
 function failure(code: 'session_adoption_read_failed' | 'session_adoption_write_failed', path: string, cause: unknown): KernelRuntimeError {
   return new KernelRuntimeError(code, { cause, detail: path });
@@ -309,7 +320,7 @@ async function copyRecord(
 export async function adoptLegacySessions(
   legacy: string,
   target: string,
-  { projectRoot = undefined as string | undefined, sessionId = undefined as string | undefined } = {},
+  { projectRoot = undefined as string | undefined, sessionId = undefined as string | undefined, userHome = undefined as string | undefined } = {},
 ): Promise<AdoptionReport> {
   const report: AdoptionReport = { copied: [], already: [], conflicts: [], unknown: [], busy: [] };
   let entries: string[];
@@ -320,7 +331,10 @@ export async function adoptLegacySessions(
     throw failure('session_adoption_read_failed', legacy, cause);
   }
   const names = new Set(entries);
-  const legacyProjectRoot = projectRootOfLegacyDirectory(legacy);
+  const userSessions = join(dataRoot(userHome), 'sessions');
+  const legacyProjectRoot = await pathIdentity(legacy) === await pathIdentity(userSessions)
+    ? undefined
+    : projectRootOfLegacyDirectory(legacy);
   const records = entries.filter((name) => RECORD.test(name)
     && (sessionId === undefined || name === `${sessionId}.jsonl`)).sort();
   if (records.length === 0) return report;
@@ -354,7 +368,7 @@ export async function adoptForSessionDirectory(
     && all.findIndex((candidate) => resolve(candidate) === resolve(source)) === index);
   const combined: AdoptionReport = { copied: [], already: [], conflicts: [], unknown: [], busy: [] };
   for (const source of sources) {
-    const report = await adoptLegacySessions(source, directory, { projectRoot: legacyProjectRoot, sessionId });
+    const report = await adoptLegacySessions(source, directory, { projectRoot: legacyProjectRoot, sessionId, userHome: config.userHome });
     combined.copied.push(...report.copied);
     combined.already.push(...report.already);
     combined.conflicts.push(...report.conflicts);
