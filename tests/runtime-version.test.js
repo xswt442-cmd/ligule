@@ -42,8 +42,12 @@ test('Core workspace metadata is private, documented, and licensed without a pro
   assert.equal(Object.hasOwn(core, 'version'), false);
   assert.ok(core.files.includes('README.md'));
   assert.ok(core.files.includes('LICENSE'));
-  assert.match(read('../core/README.md'), /no independent version, changelog, npm publication, or release tag/);
-  assert.match(read('../core/README.md'), /tui → core ← desktop/);
+  const coreReadme = read('../core/README.md');
+  const coreReadmeEnglish = read('../core/README.en.md');
+  assert.match(coreReadme, /不单独发布 npm、版本号、Changelog 或 Tag/);
+  assert.match(coreReadmeEnglish, /no standalone npm publication, version, changelog, or release tag/);
+  assert.match(coreReadme, /tui → core ← desktop/);
+  assert.match(coreReadmeEnglish, /tui → core ← desktop/);
   assert.match(read('../core/LICENSE'), /MIT License/);
 });
 

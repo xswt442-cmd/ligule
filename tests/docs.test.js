@@ -15,6 +15,7 @@ const zhPath = join(repoRoot, 'docs', 'guide.zh-CN.md');
 const enPath = join(repoRoot, 'docs', 'guide.en.md');
 const bilingualPairs = [
   [join(repoRoot, 'README.md'), join(repoRoot, 'README.en.md')],
+  [join(repoRoot, 'core', 'README.md'), join(repoRoot, 'core', 'README.en.md')],
   [join(repoRoot, 'tui', 'README.md'), join(repoRoot, 'tui', 'README.en.md')],
   [join(repoRoot, 'desktop', 'README.md'), join(repoRoot, 'desktop', 'README.en.md')],
   [zhPath, enPath],
