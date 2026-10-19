@@ -310,6 +310,12 @@ test('published Desktop draft verification accepts GitHub-normalized names but r
     const manifest = JSON.parse(await readFile(join(artifacts, 'desktop-release-manifest.json'), 'utf8')) as {
       assets: { target: string; name: string }[];
     };
+    const checksums = await readFile(join(artifacts, 'SHA256SUMS'), 'utf8');
+    const windowsAsset = manifest.assets.find((asset) => asset.target === 'windows-x64');
+    assert.ok(windowsAsset);
+    assert.match(checksums, new RegExp(`${windowsAsset.name.replaceAll(' ', '\\.')}\\n`));
+    assert.doesNotMatch(checksums, /Ligule Setup 2\.4\.2\.exe/,
+      'SHA256SUMS must name the Windows file as GitHub downloads it');
     for (const asset of manifest.assets) {
       await copyFile(join(artifacts, asset.target, asset.name), join(draft, githubAssetName(asset.name)));
     }
@@ -448,7 +454,10 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
   assert.match(JSON.stringify(release.jobs['publish-preflight']), /desktop-publish must have at least one required reviewer/);
   const publishDesktop = release.jobs.publish.steps.map((step) => step.run ?? '').join('\n');
   assert.match(publishDesktop, /verify-desktop-draft\.js/);
-  assert.match(publishDesktop, /gh release download/);
+  assert.match(publishDesktop, /releases\/\$\{release_id\}\/assets\?per_page=100/);
+  assert.match(publishDesktop, /application\/octet-stream/);
+  assert.doesNotMatch(publishDesktop, /gh release download/,
+    'draft assets must be fetched by release and asset IDs because the tag endpoint hides drafts');
   assert.equal(release.jobs.build.if, '${{ !inputs.publish }}');
   assert.equal(release.jobs.draft.if, '${{ !inputs.publish }}');
   assert.deepEqual(release.jobs.publish.needs, ['preflight', 'publish-preflight']);

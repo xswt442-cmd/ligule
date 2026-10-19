@@ -354,11 +354,20 @@ jobs:
             echo "::error::no successful Desktop draft workflow for ${COMMIT}"; exit 1
           fi
           mkdir -p dist-release/published
-          gh release download "$TAG" --dir dist-release/published
-          node scripts/verify-desktop-draft.js dist-release/published "$TAG" "$COMMIT"
-          # GitHub's releases/tags endpoint returns 404 for drafts.
+          # Draft releases are not returned by releases/tags; resolve the unique draft and fetch its assets by ID.
           release_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --paginate \
             | jq -sr --arg tag "$TAG" '[.[][] | select(.tag_name == $tag and .draft == true) | .id] | if length == 1 then .[0] else empty end')
-          if [ -z "$release_id" ]; then echo "::error::draft Release disappeared before publication"; exit 1; fi
+          if [ -z "$release_id" ]; then echo "::error::draft Release not found or duplicated: ${TAG}"; exit 1; fi
+          assets=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100")
+          asset_count=$(jq 'length' <<< "$assets")
+          if [ "$asset_count" -ne 5 ]; then echo "::error::expected five verified Desktop draft assets, found ${asset_count}"; exit 1; fi
+          while IFS=$'\t' read -r asset_id name; do
+            if ! [[ "$asset_id" =~ ^[0-9]+$ && "$name" =~ ^[A-Za-z0-9._-]+$ ]]; then
+              echo "::error::invalid draft asset identity"; exit 1
+            fi
+            gh api -H "Accept: application/octet-stream" \
+              "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" > "dist-release/published/${name}"
+          done < <(jq -r '.[] | [.id, .name] | @tsv' <<< "$assets")
+          node scripts/verify-desktop-draft.js dist-release/published "$TAG" "$COMMIT"
           gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" -F draft=false --jq 'select(.draft == false) | .html_url'
           echo "Published verified Desktop Release ${TAG}." >> "$GITHUB_STEP_SUMMARY"
