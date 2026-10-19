@@ -3,6 +3,7 @@ import { Popover } from 'radix-ui';
 import { useText } from '../locale';
 import { code, type Client } from '../protocol';
 import type { WorkspaceRoster } from '../rail';
+import { selectWorkspaceDirectory } from '../bridge';
 import { Icon } from './Icon';
 import { keepEscape } from './ui';
 
@@ -19,6 +20,7 @@ export function WorkspacePicker({ client, directory, disabled, revision, onSelec
   const [path, setPath] = useState('');
   const [loading, setLoading] = useState(false);
   const [choosing, setChoosing] = useState(false);
+  const [browsing, setBrowsing] = useState(false);
   const [failure, setFailure] = useState('');
   const load = useCallback(async () => {
     setLoading(true);
@@ -42,6 +44,17 @@ export function WorkspacePicker({ client, directory, disabled, revision, onSelec
     } catch (error) { setFailure(code(error)); }
     finally { setChoosing(false); }
   };
+  const browse = async () => {
+    if (choosing || browsing || disabled) return;
+    setBrowsing(true);
+    setFailure('');
+    try {
+      const selected = await selectWorkspaceDirectory(directory);
+      if (selected !== null) await choose(selected);
+    } catch (error) { setFailure(code(error)); }
+    finally { setBrowsing(false); }
+  };
+  const busy = choosing || browsing;
   const name = roster?.workspaces.find(item => item.directory === directory)?.name
     || directory.split(/[\\/]+/).filter(Boolean).at(-1) || t('选择工作区', 'Choose workspace');
   return <div className="new-workspace">
@@ -54,11 +67,11 @@ export function WorkspacePicker({ client, directory, disabled, revision, onSelec
           ? t('目录不存在，请检查路径。', 'The directory does not exist. Check the path.')
           : t('无法打开工作区，请检查目录或重新读取。', 'Could not open the workspace. Check the directory or reload.')}</span><details><summary>{t('详情', 'Details')}</summary><code>{failure}</code></details><button type="button" disabled={loading || choosing} onClick={() => void load()}>{t('重新读取', 'Reload')}</button></div>}
         <div className="workspace-options" role="listbox" aria-label={t('已登记工作区', 'Registered workspaces')}>
-          {roster?.workspaces.map(item => <button key={item.identity} type="button" role="option" aria-selected={item.directory === directory} disabled={choosing || loading} onClick={() => void choose(item.directory)} title={item.directory}><Icon name="folder" size={14} /><span><strong>{item.name}</strong><small>{item.directory}</small></span>{item.directory === directory && <Icon name="check" size={14} />}</button>)}
+          {roster?.workspaces.map(item => <button key={item.identity} type="button" role="option" aria-selected={item.directory === directory} disabled={busy || loading} onClick={() => void choose(item.directory)} title={item.directory}><Icon name="folder" size={14} /><span><strong>{item.name}</strong><small>{item.directory}</small></span>{item.directory === directory && <Icon name="check" size={14} />}</button>)}
         </div>
         <form onSubmit={event => { event.preventDefault(); void choose(path.trim()); }}>
           <label htmlFor="new-workspace-path">{t('打开其他目录', 'Open another directory')}</label>
-          <div className="inline-field"><input id="new-workspace-path" value={path} onChange={event => setPath(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && (event.nativeEvent.isComposing || event.keyCode === 229)) event.preventDefault(); }} disabled={choosing} placeholder={t('输入目录路径', 'Enter a directory path')} /><button type="submit" disabled={choosing || path.trim() === ''}>{choosing ? t('打开中…', 'Opening…') : t('打开', 'Open')}</button></div>
+          <div className="inline-field workspace-directory-field"><input id="new-workspace-path" value={path} onChange={event => setPath(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && (event.nativeEvent.isComposing || event.keyCode === 229)) event.preventDefault(); }} disabled={busy} placeholder={t('输入目录路径', 'Enter a directory path')} /><button type="button" disabled={busy || loading} onClick={() => void browse()}>{browsing ? t('选择中…', 'Selecting…') : t('浏览…', 'Browse…')}</button><button type="submit" disabled={busy || path.trim() === ''}>{choosing ? t('打开中…', 'Opening…') : t('打开', 'Open')}</button></div>
         </form>
       </Popover.Content></Popover.Portal>
     </Popover.Root>

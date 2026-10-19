@@ -23,6 +23,8 @@ const report = {
   notificationClick: { status: 'unverified', reason: '系统通知点击没有可靠的真人等效自动化方式。' },
   savePathRequests: [],
   savePathCompletions: [],
+  workspaceDirectoryRequests: [],
+  workspaceDirectoryCompletions: [],
 };
 
 if (process.platform !== 'win32') throw new Error('native feature dialog automation currently requires Windows');
@@ -37,6 +39,8 @@ const userDataDirectory = join(runDirectory, 'user-data');
 const documentsDirectory = join(runDirectory, 'documents');
 const homeDirectory = join(runDirectory, 'ligule-home');
 const workspaceDirectory = join(runDirectory, 'workspace');
+const pickerTargetDirectory = join(documentsDirectory, 'ligule', 'default-workspace', 'picker-target');
+const pickerTargetChildDirectory = join(pickerTargetDirectory, 'picker-child');
 const powershellScript = join(runDirectory, 'dialog-control.ps1');
 const copiedHarness = join(appDirectory, 'native-features.cjs');
 let electronProcess;
@@ -57,6 +61,8 @@ await Promise.all([
   mkdir(documentsDirectory, { recursive: true }),
   mkdir(homeDirectory, { recursive: true }),
   mkdir(workspaceDirectory, { recursive: true }),
+  mkdir(pickerTargetDirectory, { recursive: true }),
+  mkdir(pickerTargetChildDirectory, { recursive: true }),
 ]);
 await copyFile(harnessSource, copiedHarness);
 await writeFile(join(appDirectory, 'package.json'), JSON.stringify({
@@ -98,6 +104,87 @@ try {
   report.electronPid = mainInfo.pid;
   report.window = 'real BrowserWindow loaded app://ligule/index.html with production Preload';
 
+  const agentControlWorkspace = join(documentsDirectory, 'ligule', 'default-workspace');
+  const agentControlDefaults = await sendCommand('inspect-agent-control-defaults');
+  assert.deepEqual(agentControlDefaults.permission, ['read-only', 'read-only']);
+  assert.deepEqual(agentControlDefaults.network, ['disabled', 'disabled']);
+  assert.equal(agentControlDefaults.policy, 'ask');
+  assert.deepEqual(agentControlDefaults.allowedPolicies, ['ask']);
+  assert.equal(agentControlDefaults.allowOperator, false);
+  const defaultExpiry = Date.parse(agentControlDefaults.expiresAt);
+  assert.ok(defaultExpiry > Date.now() + 23 * 60 * 60 * 1000 && defaultExpiry < Date.now() + 25 * 60 * 60 * 1000);
+  report.cases.agentControlDefaults = agentControlDefaults;
+
+  const agentControlUi = await sendCommand('create-agent-control-grant');
+  assert.equal(agentControlUi.revoked, true, `the real Desktop settings page must create and revoke a bounded grant: ${JSON.stringify(agentControlUi)}`);
+  assert.equal(agentControlUi.separateConfirmations, true);
+  assert.equal(agentControlUi.sourceDisplayed, true, 'the real Desktop authorization details must display the grant source');
+  const agentControlStore = await sendCommand('list-agent-control-grants');
+  assert.equal(agentControlStore.error, undefined);
+  assert.equal(agentControlStore.result.grants.length, 1);
+  assert.equal(agentControlStore.result.grants[0].name, 'Native Agent Control test');
+  assert.equal(agentControlStore.result.grants[0].projectRoot, agentControlWorkspace);
+  assert.equal(agentControlStore.result.grants[0].source, 'trusted-ui');
+  assert.equal(agentControlStore.result.grants[0].defaultPermissionProfile, 'read-only');
+  assert.equal(agentControlStore.result.grants[0].maxPermissionProfile, 'full-access');
+  assert.equal(agentControlStore.result.grants[0].defaultNetwork, 'disabled');
+  assert.equal(agentControlStore.result.grants[0].maxNetwork, 'unrestricted');
+  assert.equal(agentControlStore.result.grants[0].confirmedFullAccess, true);
+  assert.equal(agentControlStore.result.grants[0].confirmedUnrestrictedNetwork, true);
+  assert.equal(agentControlStore.result.grants[0].allowOperator, false);
+  assert.ok(agentControlStore.result.grants[0].expiresAt);
+  assert.ok(agentControlStore.result.grants[0].revokedAt);
+  report.cases.agentControlUi = { ui: agentControlUi, storedGrant: agentControlStore.result.grants[0] };
+
+  const beforeInitialWorkspace = report.workspaceDirectoryCompletions.length;
+  assert.equal(await sendCommand('open-workspace-picker'), true);
+  assert.equal(await sendCommand('click-workspace-browse'), true);
+  const initialWorkspaceDialog = await runDialogControl('workspace-select', electronProcess.pid, pickerTargetDirectory);
+  const initialWorkspaceResult = await waitForWorkspaceDirectoryResult(beforeInitialWorkspace);
+  const initialWorkspacePath = await waitForWorkspaceChoicePath(pickerTargetDirectory);
+  report.cases.workspaceDirectoryInitialSelection = {
+    automation: initialWorkspaceDialog,
+    selectedPath: initialWorkspaceResult.selectedPath,
+    workspacePath: initialWorkspacePath,
+  };
+  assert.equal(initialWorkspaceResult.selectedPath, pickerTargetDirectory);
+  assert.equal(initialWorkspacePath, pickerTargetDirectory);
+
+  const workspacePathBefore = await sendCommand('workspace-choice-path');
+  const beforeWorkspaceDialog = report.workspaceDirectoryCompletions.length;
+  assert.equal(await sendCommand('open-workspace-picker'), true, 'workspace picker must become available');
+  assert.equal(await sendCommand('click-workspace-browse'), true, 'workspace browse button must be available in the picker');
+  const cancelledWorkspaceDialog = await runDialogControl('workspace-cancel', electronProcess.pid, '');
+  const workspaceDialogResult = await waitForWorkspaceDirectoryResult(beforeWorkspaceDialog);
+  const workspacePathAfter = await sendCommand('workspace-choice-path');
+  report.cases.workspaceDirectoryDialog = {
+    automation: cancelledWorkspaceDialog,
+    selectedPath: workspaceDialogResult.selectedPath,
+    workspacePathBefore,
+    workspacePathAfter,
+  };
+  assert.match(cancelledWorkspaceDialog.dialogTitle, /folder|directory|文件夹|目录/iu);
+  assert.ok(cancelledWorkspaceDialog.controls.some(control => /folder|directory|文件夹|目录/iu.test(control)), 'native dialog must be a folder chooser');
+  assert.ok(cancelledWorkspaceDialog.controls.some(control => /cancel|取消/iu.test(control)), 'native dialog must offer cancel');
+  assert.equal(cancelledWorkspaceDialog.closed, true);
+  assert.equal(workspaceDialogResult.selectedPath, null);
+  assert.equal(workspacePathAfter, workspacePathBefore, 'cancelling the directory picker must preserve the current workspace');
+
+  const beforeWorkspaceSelection = report.workspaceDirectoryCompletions.length;
+  await sendCommand('open-workspace-picker');
+  assert.equal(await sendCommand('click-workspace-browse'), true);
+  const selectedWorkspaceDialog = await runDialogControl('workspace-select', electronProcess.pid, pickerTargetChildDirectory);
+  const selectedWorkspaceResult = await waitForWorkspaceDirectoryResult(beforeWorkspaceSelection);
+  const workspacePathAfterSelect = await waitForWorkspaceChoicePath(pickerTargetChildDirectory);
+  report.cases.workspaceDirectorySelection = {
+    automation: selectedWorkspaceDialog,
+    selectedPath: selectedWorkspaceResult.selectedPath,
+    workspacePathAfterSelect,
+  };
+  assert.equal(selectedWorkspaceDialog.closed, true);
+  assert.equal(selectedWorkspaceResult.selectedPath, pickerTargetChildDirectory, 'the native picker must return the chosen folder path');
+  assert.equal(workspacePathAfterSelect, pickerTargetChildDirectory, 'the chosen path must become the active workspace');
+
   report.cases.saveDialogCancel = { status: 'pending' };
   const cancelRequest = sendCommand('save-export-path', 'cancel-export.md', 50_000);
   const cancelControl = runDialogControl('cancel', electronProcess.pid, 'cancel-export.md');
@@ -120,7 +207,8 @@ try {
   assert.equal(selectReadout.action, 'select');
   assert.equal(await fileExists(selectedPath), false, 'choosing an export location must not write the export file');
 
-  const exportSessions = await sendCommand('prepare-export-sessions');
+  // The native workspace picker is exercised after the export workflow below.
+  const exportSessions = await sendCommand('prepare-export-sessions', workspaceDirectory);
   assert.ok(typeof exportSessions.sessionA === 'string' && typeof exportSessions.sessionB === 'string');
   const invalidExport = await sendCommand('invalid-export-path', exportSessions.sessionA);
   report.cases.invalidExportPath = invalidExport;
@@ -131,7 +219,7 @@ try {
   const notificationFor = sessionId => ({
     title: 'ligule',
     body: 'Turn completed',
-    target: JSON.stringify({ sessionId, projectRoot: workspaceDirectory }),
+    target: JSON.stringify({ sessionId, projectRoot: exportSessions.projectRoot }),
     openLabel: 'Open conversation',
   });
   report.cases.notificationA = await sendCommand('show-notification', notificationFor(exportSessions.sessionA), 15_000);
@@ -272,6 +360,14 @@ function handleMessage(message) {
     report.savePathCompletions.push({ defaultName: message.defaultName, selectedPath: message.selectedPath, at: new Date().toISOString() });
     return;
   }
+  if (message.type === 'workspace-directory-requested') {
+    report.workspaceDirectoryRequests.push({ at: new Date().toISOString() });
+    return;
+  }
+  if (message.type === 'workspace-directory-completed') {
+    report.workspaceDirectoryCompletions.push({ selectedPath: message.selectedPath, at: new Date().toISOString() });
+    return;
+  }
   if (message.type === 'result') {
     const waiter = pending.get(message.id);
     if (waiter === undefined) return;
@@ -338,6 +434,27 @@ async function waitForSavePathResult(defaultName, afterIndex = 0) {
     await delay(50);
   }
   throw new Error(`native_save_path_result_missing:${defaultName}:${JSON.stringify(report.savePathCompletions)}`);
+}
+
+async function waitForWorkspaceDirectoryResult(afterIndex = 0) {
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    const result = report.workspaceDirectoryCompletions[afterIndex];
+    if (result !== undefined) return result;
+    await delay(50);
+  }
+  throw new Error('native_workspace_directory_result_missing');
+}
+
+async function waitForWorkspaceChoicePath(expected) {
+  const deadline = Date.now() + 20_000;
+  let actual = '';
+  while (Date.now() < deadline) {
+    actual = await sendCommand('workspace-choice-path');
+    if (actual === expected) return actual;
+    await delay(100);
+  }
+  throw new Error(`native_workspace_selection_not_applied:${actual}`);
 }
 
 function runPowerShell(scriptPath, args, timeoutMs) {
@@ -440,45 +557,46 @@ while ((Get-Date) -lt $deadline -and $null -eq $dialog) {
       $controls = @($elements | ForEach-Object { if ($_.Current.Name -ne '') { $_.Current.ControlType.ProgrammaticName + ':' + $_.Current.Name + '#' + $_.Current.AutomationId } })
       $lastWindows += ('  Controls: ' + (($controls | Select-Object -First 80) -join ' | '))
       $ids = @($elements | ForEach-Object { [string]$_.Current.AutomationId })
-      if ($ids -contains '1' -and $ids -contains '2' -and $ids -contains '1001') { $dialog = $window; $dialogHandle = $handle; break }
+      $isWorkspaceDialog = $Mode -like 'workspace-*' -and ($window.Current.Name -match 'folder|directory|文件夹|目录' -or ($ids -contains '1' -and $ids -contains '2' -and $window.Current.Name -notmatch '^ligule$'))
+      $isSaveDialog = $Mode -notlike 'workspace-*' -and $ids -contains '1' -and $ids -contains '2' -and $ids -contains '1001'
+      if ($isWorkspaceDialog -or $isSaveDialog) { $dialog = $window; $dialogHandle = $handle; break }
     } catch { $lastWindows += ('UIAutomation unavailable: ' + $_.Exception.Message) }
   }
   if ($null -eq $dialog) { Start-Sleep -Milliseconds 250 }
 }
 if ($null -eq $dialog) { throw ('Owned Save dialog was not found. Owned windows: ' + ($lastWindows -join ' | ')) }
 $dialogTitle = [NativeTestWindowEnumeration]::Title($dialogHandle)
-$fileNameCondition = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::AutomationIdProperty, '1001')
-$expectedFileName = [System.IO.Path]::GetFileName($TargetPath)
-$expectedDisplayStem = [System.IO.Path]::GetFileNameWithoutExtension($TargetPath)
-$fileNameField = $null
-$fileNameValue = $null
-$fileNameSource = $null
-$stableFileNameReads = 0
-$fileNameDeadline = (Get-Date).AddSeconds(5)
-while ((Get-Date) -lt $fileNameDeadline -and $stableFileNameReads -lt 2) {
-  $fileNameField = $dialog.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $fileNameCondition)
-  if ($null -ne $fileNameField) {
-    try {
-      $valuePattern = $fileNameField.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
-      $observedFileName = $valuePattern.Current.Value
-      if ($observedFileName -ne '') { $fileNameSource = 'ValuePattern' }
-      else { $observedFileName = $fileNameField.Current.Name; $fileNameSource = 'NameFallbackForEmptyValuePattern' }
-    } catch {
-      $observedFileName = $fileNameField.Current.Name
-      $fileNameSource = 'NameFallbackForUnsupportedValuePattern'
+if ($Mode -like 'workspace-*') {
+  $elements = $dialog.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+  $elementNames = @($elements | ForEach-Object { $_.Current.Name } | Where-Object { $_ -ne '' })
+  if ($Mode -eq 'workspace-cancel') {
+    [NativeTestWindowEnumeration]::InvokeDialogCommand($dialogHandle, 2)
+  } else {
+    $targetName = [System.IO.Path]::GetFileName($TargetPath)
+    $targetDeadline = (Get-Date).AddSeconds(5)
+    $targetItem = $null
+    while ((Get-Date) -lt $targetDeadline -and $null -eq $targetItem) {
+      $elements = $dialog.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+      $targetItem = $elements | Where-Object { $_.Current.Name -eq $targetName } | Select-Object -First 1
+      if ($null -eq $targetItem) { Start-Sleep -Milliseconds 100 }
     }
-    # Windows can hide a known extension in the filename control; the returned full path is checked by the caller.
-    if ($observedFileName -eq $expectedFileName -or $observedFileName -eq $expectedDisplayStem) { $stableFileNameReads += 1 }
-    else { $stableFileNameReads = 0 }
-    $fileNameValue = $observedFileName
+    if ($null -ne $targetItem) {
+      $targetItem.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
+    } else { throw ('Workspace target folder was not visible in the native picker: ' + $targetName) }
+    [NativeTestWindowEnumeration]::InvokeDialogCommand($dialogHandle, 1)
   }
-  if ($stableFileNameReads -lt 2) { Start-Sleep -Milliseconds 100 }
+  $closeDeadline = (Get-Date).AddSeconds(15)
+  while ((Get-Date) -lt $closeDeadline -and [NativeTestWindowEnumeration]::Exists($dialogHandle)) { Start-Sleep -Milliseconds 200 }
+  if ([NativeTestWindowEnumeration]::Exists($dialogHandle)) {
+    [NativeTestWindowEnumeration]::InvokeDialogCommand($dialogHandle, 2)
+    $closeDeadline = (Get-Date).AddSeconds(5)
+    while ((Get-Date) -lt $closeDeadline -and [NativeTestWindowEnumeration]::Exists($dialogHandle)) { Start-Sleep -Milliseconds 200 }
+  }
+  if ([NativeTestWindowEnumeration]::Exists($dialogHandle)) { throw ('The workspace directory dialog remained open after ' + $Mode) }
+  [pscustomobject]@{ action = $Mode; ownerPid = $OwnerProcessId; dialogTitle = $dialogTitle; dialogHandle = $dialogHandle.ToInt64(); controls = $elementNames; selectedPath = $(if ($Mode -eq 'workspace-select') { $TargetPath } else { $null }); closed = $true } | ConvertTo-Json -Compress
+  exit 0
 }
-if ($stableFileNameReads -lt 2) {
-  $fieldName = if ($null -eq $fileNameField) { '<missing>' } else { $fileNameField.Current.Name }
-  $fieldAutomationId = if ($null -eq $fileNameField) { '<missing>' } else { $fileNameField.Current.AutomationId }
-  throw ('Save dialog filename mismatch: expected=' + $expectedFileName + ' observed=' + $fileNameValue + ' source=' + $fileNameSource + ' name=' + $fieldName + ' automationId=' + $fieldAutomationId)
-}
+# The caller verifies the path Electron returns; the harness never types into a dialog.
 $leaveOpen = $false
 if ($Mode -eq 'cancel') {
   [NativeTestWindowEnumeration]::InvokeDialogCommand($dialogHandle, 2)

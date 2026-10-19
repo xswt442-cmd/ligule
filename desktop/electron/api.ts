@@ -12,6 +12,7 @@ export interface DesktopApi {
   onHostLog(handler: (line: string) => void): () => void;
   onHostFault(handler: (code: string) => void): () => void;
   defaultWorkspace(): Promise<string>;
+  selectWorkspaceDirectory(defaultPath: string): Promise<string | null>;
   saveExportPath(defaultName: string): Promise<string | null>;
   requestQuit(): Promise<void>;
   onQuitRequested(handler: () => void): () => void;

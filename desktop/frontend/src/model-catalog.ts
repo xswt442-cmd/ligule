@@ -44,6 +44,18 @@ export function mergeModelRows(rows: ModelRow[], discovered: string[]): ModelRow
   return next;
 }
 
+export function uniqueModelIds(discovered: string[]): string[] {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const value of discovered) {
+    const id = value.trim();
+    if (id === '' || seen.has(id)) continue;
+    seen.add(id);
+    unique.push(id);
+  }
+  return unique;
+}
+
 export function encodeModelRows(rows: ModelRow[]): Pick<ModelService, 'models' | 'modelSettings'> {
   const fail = (code: string): never => { throw Object.assign(new Error(code), { code }); };
   if (rows.length === 0) return fail('model_catalog_empty');

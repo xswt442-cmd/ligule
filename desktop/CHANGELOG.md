@@ -33,6 +33,7 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 **修复**
 
 - 修复没有选中会话时重连后断连横幅残留；Linux deb 增加 GBM 和 ALSA 运行依赖声明。
+- 授权详情显示可信界面来源；旧授权未记录来源时明确标记，不追认为可信界面创建。
 
 ### English
 
@@ -55,6 +56,7 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 **Fixed**
 
 - Fixed the disconnected banner remaining after reconnecting without a selected session; the Linux deb now declares GBM and ALSA runtime dependencies.
+- Grant details identify grants created through the trusted UI and label legacy grants whose origin was never recorded.
 
 ## [0.0.5] - 2026-10-15
 

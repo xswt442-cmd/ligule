@@ -343,6 +343,17 @@ async function runScenarios() {
 
   phase = 'settings_and_manual_model';
   await openModelSettings();
+  const emptyCatalog = await configSnapshot();
+  const emptyCatalogUi = await evaluate(`({
+    legacyRows: document.querySelectorAll('.service-row').length,
+    defaultModelSelect: Boolean(document.querySelector('.service-default-select')),
+    emptyMessage: document.querySelector('.model-empty')?.textContent?.trim() ?? '',
+  })`);
+  assert.deepEqual(emptyCatalog.services ?? [], []);
+  assert.equal(emptyCatalogUi.legacyRows, 0, 'a clean isolated data root must not render a machine-specific legacy service');
+  assert.equal(emptyCatalogUi.defaultModelSelect, false);
+  assert.match(emptyCatalogUi.emptyMessage, /添加第一个服务|Add your first service/u);
+  sendResult('native_clean_data_root_has_no_machine_model_service', '通过', '真实 Host 的新隔离 LIGULE_HOME 没有内嵌模型服务、旧模型默认项或凭据；Renderer 显示空目录提示');
   await openNewService();
   await addRow('model-a', 'Alpha display', '128000', '16384', 0);
   await screenshot('model-catalog-normal-window.png');
@@ -367,12 +378,40 @@ async function runScenarios() {
   const beforeBoundDiscovery = (await fixtureControl('state')).discoveryRequests.length;
   await clickButtonText('Fetch and add models|获取可用模型并填入');
   await waitFixtureDiscovery(beforeBoundDiscovery, 200);
-  await waitFor(`document.querySelectorAll('.model-config-table tbody tr input[aria-label]').length >= 8`, 'model_discovery_did_not_add_ids');
+  await waitFor(`Boolean(document.querySelector('.model-selection'))`, 'model_discovery_selection_dialog_missing');
+  const selectionState = await evaluate(`([...document.querySelectorAll('.model-selection-item')].map(item => ({
+    id: item.querySelector('span')?.textContent ?? '',
+    checked: item.querySelector('input')?.checked ?? false,
+    disabled: item.querySelector('input')?.disabled ?? false,
+  })))`);
+  assert.deepEqual(selectionState, [
+    { id: 'model-a', checked: true, disabled: true },
+    { id: 'model-b', checked: false, disabled: false },
+    { id: 'model-c', checked: false, disabled: false },
+  ]);
+  await screenshot('model-catalog-model-selection.png');
+  const selectedOnlyB = await evaluate(`(() => {
+    const item = [...document.querySelectorAll('.model-selection-item')].find(row => row.querySelector('span')?.textContent === 'model-b');
+    const checkbox = item?.querySelector('input');
+    if (!checkbox || checkbox.disabled) return false;
+    checkbox.click();
+    return checkbox.checked;
+  })()`);
+  assert.equal(selectedOnlyB, true);
+  await clickButtonText('Add selected|添加所选');
+  await waitFor(`!document.querySelector('.model-selection') && document.querySelectorAll('.model-config-table tbody tr input[aria-label]').length >= 8`, 'model_discovery_selection_did_not_apply');
   catalogRows = await rows();
   assert.deepEqual(catalogRows.map(item => item.id), ['model-a', 'model-b']);
   assert.equal(catalogRows[0].name, 'Alpha display');
   assert.equal(catalogRows[0].context, '128000');
   assert.equal(catalogRows[0].output, '16384');
+  const beforeCancel = (await fixtureControl('state')).discoveryRequests.length;
+  await clickButtonText('Fetch and add models|获取可用模型并填入');
+  await waitFixtureDiscovery(beforeCancel, 200);
+  await waitFor(`Boolean(document.querySelector('.model-selection'))`, 'model_discovery_cancel_dialog_missing');
+  await clickButtonText('Cancel|取消');
+  await waitFor(`!document.querySelector('.model-selection')`, 'model_discovery_cancel_did_not_close');
+  assert.deepEqual((await rows()).map(item => item.id), ['model-a', 'model-b'], 'cancelled discovery must not add the unselected model');
   await fixtureControl('discovery', { failure: true });
   const beforeDiscoveryFailure = (await fixtureControl('state')).discoveryRequests.length;
   await clickButtonText('Fetch and add models|获取可用模型并填入');
@@ -387,9 +426,11 @@ async function runScenarios() {
   const beforeDiscoveryRetry = (await fixtureControl('state')).discoveryRequests.length;
   await clickButtonText('Fetch and add models|获取可用模型并填入');
   await waitFixtureDiscovery(beforeDiscoveryRetry, 200);
-  await waitFor(`Boolean(document.querySelector('.inline-notice[role="status"]'))`, 'discovery_retry_status_missing');
+  await waitFor(`Boolean(document.querySelector('.model-selection'))`, 'discovery_retry_selection_missing');
+  await clickButtonText('Cancel|取消');
+  await waitFor(`Boolean(document.querySelector('.model-settings .inline-notice[role="status"]'))`, 'discovery_retry_status_missing');
   await saveService();
-  sendResult('native_model_discovery_merge_and_failure_retention', '通过', '真实 Host 的 loopback GET /models 返回 model-a/model-b；获取成功保留 A 的手动参数；503 后 A/B 数据仍在，重试后通过界面保存');
+  sendResult('native_model_discovery_selection_merge_and_failure_retention', '通过', '真实 Host 的 loopback GET /models 返回 model-a/model-b/model-c；A 保持手动参数且不可重复添加，只选择 B 后 C 未进入目录；取消和 503 均未更改目录，重试后再次出现选择弹窗');
 
   phase = 'edit_delete_and_native_persistence';
   let catalog = await configSnapshot();

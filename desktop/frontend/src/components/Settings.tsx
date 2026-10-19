@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Icon, type IconName } from './Icon';
 import { HoldSheet } from './HoldSheet';
 import { ModelPanel } from './ModelPanel';
+import { AgentControlPanel } from './AgentControlPanel';
 import { NotificationPanel } from './NotificationPanel';
 import { PolicyRules } from './PolicyRules';
 import { Modal } from './ui';
@@ -15,7 +16,7 @@ import { GeneralSettings } from './settings/GeneralSettings';
 import { AppearanceSettings } from './settings/AppearanceSettings';
 import { KeyboardSettings } from './settings/KeyboardSettings';
 
-const SECTIONS = ['general', 'appearance', 'model', 'rules', 'notifications', 'keys'] as const;
+const SECTIONS = ['general', 'appearance', 'model', 'rules', 'control', 'notifications', 'keys'] as const;
 
 type SectionId = (typeof SECTIONS)[number];
 
@@ -55,6 +56,7 @@ export function SettingsDialog(props: SettingsProps) {
   const reports = useMemo(() => ({
     model: (reason: string) => setGate((now) => report(now, 'model', reason)),
     rules: (reason: string) => setGate((now) => report(now, 'rules', reason)),
+    control: (reason: string) => setGate((now) => report(now, 'control', reason)),
   }), []);
 
   const leave = (go: () => void) => {
@@ -85,6 +87,7 @@ export function SettingsDialog(props: SettingsProps) {
         {section === 'appearance' && <AppearanceSettings settings={settings} patch={patch} />}
         {section === 'model' && <Model client={props.client} sessionId={props.sessionId} projectRoot={props.projectRoot} onEdit={reports.model} />}
         {section === 'rules' && <PolicyRules client={props.client} projectRoot={props.projectRoot} onEdit={reports.rules} />}
+        {section === 'control' && <AgentControlPanel client={props.client} projectRoot={props.projectRoot} onEdit={reports.control} />}
         {section === 'notifications' && <NotificationPanel preferences={settings.notifications} bridge={props.notifications} problem={props.notificationProblem} onChange={notifications => patch({ notifications })} />}
         {section === 'keys' && <KeyboardSettings settings={settings} patch={patch} notice={props.keyNotice} />}
       </div>
@@ -103,6 +106,7 @@ function sectionTitle(id: SectionId, t: (chinese: string, english: string) => st
     appearance: ['外观', 'Appearance'],
     model: ['模型服务', 'Model services'],
     rules: ['审批规则', 'Approval rules'],
+    control: ['外部控制', 'Agent Control'],
     notifications: ['通知', 'Notifications'],
     keys: ['快捷键', 'Keyboard shortcuts'],
   };
@@ -111,7 +115,7 @@ function sectionTitle(id: SectionId, t: (chinese: string, english: string) => st
 }
 
 function sectionIcon(id: SectionId): IconName {
-  const icons: Record<SectionId, IconName> = { general: 'gear', appearance: 'spark', model: 'folder', rules: 'check', notifications: 'bell', keys: 'copy' };
+  const icons: Record<SectionId, IconName> = { general: 'gear', appearance: 'spark', model: 'folder', rules: 'check', control: 'shield', notifications: 'bell', keys: 'copy' };
   return icons[id];
 }
 

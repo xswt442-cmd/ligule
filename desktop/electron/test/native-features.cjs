@@ -105,10 +105,188 @@ async function inspectExportUi() {
   }))()`);
 }
 
+async function openAgentControlPanel() {
+  assertReady();
+  return await window.webContents.executeJavaScript(`(async () => {
+    const deadline = Date.now() + 15_000;
+    const wait = async predicate => {
+      while (Date.now() < deadline) {
+        const value = predicate();
+        if (value) return value;
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      return null;
+    };
+    const settings = await wait(() => [...document.querySelectorAll('button.entry')]
+      .find(button => /^(设置|Settings)$/u.test(button.textContent?.trim() ?? '')));
+    if (settings === null) throw new Error('native_feature_settings_button_missing');
+    settings.click();
+    const controlTab = await wait(() => [...document.querySelectorAll('.sheet-nav [role="tab"]')]
+      .find(button => /外部控制|Agent Control/u.test(button.textContent ?? '')));
+    if (controlTab === null) throw new Error('native_feature_agent_control_tab_missing');
+    controlTab.click();
+    if (await wait(() => document.querySelector('.agent-control-panel')) === null) {
+      throw new Error('native_feature_agent_control_panel_missing');
+    }
+    return true;
+  })()`);
+}
+
+async function inspectAgentControlDefaults() {
+  await openAgentControlPanel();
+  return await window.webContents.executeJavaScript(`(() => {
+    const panel = document.querySelector('.agent-control-panel');
+    const selects = [...panel.querySelectorAll('.grant-config-grid select')];
+    const expiry = panel.querySelector('input[type="datetime-local"]');
+    return {
+      permission: selects.slice(0, 2).map(input => input.value),
+      network: selects.slice(2, 4).map(input => input.value),
+      policy: selects[4]?.value ?? null,
+      allowedPolicies: [...panel.querySelectorAll('.grant-policies input[type="checkbox"]')]
+        .filter(input => input.checked).map(input => input.parentElement.textContent.trim()),
+      allowOperator: [...panel.querySelectorAll('.grant-confirmation input[type="checkbox"]')]
+        .some(input => input.checked),
+      expiresAt: expiry?.value ?? '',
+    };
+  })()`);
+}
+
+async function createAndRevokeAgentControlGrant() {
+  await openAgentControlPanel();
+  return await window.webContents.executeJavaScript(`(async () => {
+    const deadline = Date.now() + 20_000;
+    const wait = async predicate => {
+      while (Date.now() < deadline) {
+        const value = predicate();
+        if (value) return value;
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      return null;
+    };
+    const panel = document.querySelector('.agent-control-panel');
+    const name = panel.querySelector('.grant-basic-grid label:nth-child(2) input');
+    if (name === null) throw new Error('native_feature_agent_control_name_input_missing');
+    const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    valueSetter.call(name, 'Native Agent Control test');
+    name.dispatchEvent(new Event('input', { bubbles: true }));
+    name.dispatchEvent(new Event('change', { bubbles: true }));
+    const selects = [...panel.querySelectorAll('.grant-config-grid select')];
+    const selectValue = (select, value) => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
+      setter.call(select, value);
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    selectValue(selects[1], 'full-access');
+    selectValue(selects[3], 'unrestricted');
+    const createButton = () => [...panel.querySelectorAll('.grant-actions button')]
+      .find(button => /创建授权|Create grant/u.test(button.textContent ?? ''));
+    if (createButton()?.disabled !== true) throw new Error('native_feature_agent_control_high_limits_were_not_confirmed');
+    const riskChecks = await wait(() => {
+      const items = [...panel.querySelectorAll('.grant-risk input[type="checkbox"]')];
+      return items.length === 2 ? items : null;
+    });
+    if (riskChecks === null) throw new Error('native_feature_agent_control_separate_confirmations_missing');
+    riskChecks[0].click();
+    await wait(() => riskChecks[0].checked && !riskChecks[1].checked);
+    if (createButton()?.disabled !== true) throw new Error('native_feature_agent_control_full_access_only_was_enough');
+    riskChecks[1].click();
+    if (await wait(() => createButton() && !createButton().disabled) === null) {
+      throw new Error('native_feature_agent_control_network_confirmation_was_not_applied');
+    }
+    const create = await wait(() => createButton()?.disabled === false ? createButton() : null);
+    if (create === null) throw new Error('native_feature_agent_control_create_disabled');
+    create.click();
+    const row = await wait(() => [...panel.querySelectorAll('.grant-row')]
+      .find(item => item.querySelector('strong')?.textContent.trim() === 'Native Agent Control test'));
+    if (row === null) throw new Error('native_feature_agent_control_grant_missing');
+    const details = row.querySelector('details');
+    if (details === null) throw new Error('native_feature_agent_control_grant_details_missing');
+    details.open = true;
+    const detailText = details.innerText ?? details.textContent ?? '';
+    const sourceDisplayed = /(?:来源: 可信界面创建|Source: Trusted UI)/u.test(detailText);
+    if (!sourceDisplayed) throw new Error('native_feature_agent_control_source_not_displayed:' + detailText);
+    const revoke = [...row.querySelectorAll('button.danger')]
+      .find(button => /撤销授权|Revoke grant/u.test(button.textContent ?? ''));
+    if (revoke === undefined) throw new Error('native_feature_agent_control_revoke_button_missing');
+    revoke.click();
+    const confirm = await wait(() => document.querySelector('.confirm-actions button.danger'));
+    if (confirm === null) throw new Error('native_feature_agent_control_revoke_confirmation_missing');
+    confirm.click();
+    if (await wait(() => row.querySelector('[data-state="revoked"]')) === null) {
+      throw new Error('native_feature_agent_control_grant_not_revoked');
+    }
+    const closeSettings = [...document.querySelectorAll('.sheet-head button.icon-button')]
+      .find(button => /关闭设置|Close settings/u.test(button.getAttribute('aria-label') ?? ''));
+    if (closeSettings === undefined) throw new Error('native_feature_agent_control_settings_close_missing');
+    closeSettings.click();
+    if (await wait(() => document.querySelector('.agent-control-panel') === null) === null) {
+      throw new Error('native_feature_agent_control_settings_still_open');
+    }
+    return { created: true, revoked: true, separateConfirmations: true, sourceDisplayed };
+  })()`);
+}
+
 async function dispatch(command) {
   switch (command.action) {
     case 'save-export-path':
       return await invokePreload('saveExportPath', command.defaultName);
+    case 'open-workspace-picker':
+      assertReady();
+      return await window.webContents.executeJavaScript(`(async () => {
+        const deadline = Date.now() + 15_000;
+        const waitForChoice = async () => {
+          while (Date.now() < deadline) {
+            const choice = document.querySelector('button.workspace-choice');
+            if (choice && !choice.disabled) return choice;
+            await new Promise(resolve => setTimeout(resolve, 25));
+          }
+          return null;
+        };
+        let button = await waitForChoice();
+        if (button === null) {
+          const newConversation = document.querySelector('button.new-run');
+          if (newConversation === null) throw new Error('native_feature_new_conversation_button_missing');
+          newConversation.click();
+          button = await waitForChoice();
+        }
+        if (button === null) throw new Error('native_feature_workspace_choice_unavailable:' + JSON.stringify({
+          title: document.querySelector('#session-title')?.textContent?.trim() ?? '',
+          newConversation: document.querySelector('button.new-run')?.outerHTML ?? null,
+          settingsReady: document.querySelector('button.workspace-choice')?.outerHTML ?? null,
+        }));
+        if (!document.querySelector('.workspace-picker')) button.click();
+        while (Date.now() < deadline) {
+          if (document.querySelector('.workspace-picker')) return true;
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        throw new Error('native_feature_workspace_picker_missing:' + document.body.innerText.slice(-1200));
+      })()`);
+    case 'click-workspace-browse':
+      assertReady();
+      return await window.webContents.executeJavaScript(`(async () => {
+        const deadline = Date.now() + 5_000;
+        while (Date.now() < deadline) {
+          const button = [...document.querySelectorAll('.workspace-picker form button[type="button"]')]
+            .find(item => /浏览|Browse/u.test(item.textContent ?? ''));
+          if (button && !button.disabled) { button.click(); return true; }
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        const picker = document.querySelector('.workspace-picker');
+        throw new Error('native_feature_workspace_browse_unavailable:' + JSON.stringify({
+          pickerOpen: picker !== null,
+          text: picker?.innerText ?? document.body.innerText.slice(-1200),
+          buttons: [...(picker?.querySelectorAll('button') ?? [])].map(button => ({ text: button.textContent.trim(), disabled: button.disabled, type: button.type })),
+        }));
+      })()`);
+    case 'inspect-agent-control-defaults':
+      return await inspectAgentControlDefaults();
+    case 'create-agent-control-grant':
+      return await createAndRevokeAgentControlGrant();
+    case 'list-agent-control-grants':
+      return await requestHost('agent-control.list', {});
+    case 'workspace-choice-path':
+      assertReady();
+      return await window.webContents.executeJavaScript(`document.querySelector('button.workspace-choice')?.title ?? ''`);
     case 'show-notification':
       return await invokePreload('showNotification', command.notification);
     case 'click-latest-notification': {
@@ -217,6 +395,14 @@ app.whenReady().then(async () => {
     send({ type: 'save-path-requested', defaultName });
     return saveExportPath(defaultName).then(selectedPath => {
       send({ type: 'save-path-completed', defaultName, selectedPath });
+      return selectedPath;
+    });
+  };
+  const selectWorkspaceDirectory = native.selectWorkspaceDirectory.bind(native);
+  native.selectWorkspaceDirectory = defaultPath => {
+    send({ type: 'workspace-directory-requested' });
+    return selectWorkspaceDirectory(defaultPath).then(selectedPath => {
+      send({ type: 'workspace-directory-completed', selectedPath });
       return selectedPath;
     });
   };

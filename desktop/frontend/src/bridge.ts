@@ -30,3 +30,9 @@ export async function saveExportPath(defaultName: string): Promise<string | null
   if (api === undefined) throw new Error('desktop_bridge_unavailable');
   return await api.saveExportPath(defaultName);
 }
+
+export async function selectWorkspaceDirectory(defaultPath: string): Promise<string | null> {
+  const api = window.liguleDesktop;
+  if (api === undefined) throw new Error('desktop_bridge_unavailable');
+  return await api.selectWorkspaceDirectory(defaultPath);
+}

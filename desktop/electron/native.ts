@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, Menu, Notification, Tray } from 'electron';
 import { execFile } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { basename, isAbsolute, join } from 'node:path';
 import type { DesktopNotification } from './api.js';
 
 const STATUS_NOTIFIER_SERVICE = 'org.kde.StatusNotifierWatcher';
@@ -68,6 +68,25 @@ export class NativeServices {
     } catch {
       this.reportFault('workspace-default-failed');
       throw new Error('The default workspace could not be prepared');
+    }
+  }
+
+  async selectWorkspaceDirectory(defaultPath: string): Promise<string | null> {
+    if (this.disposed || this.options.window.isDestroyed()) {
+      this.reportFault('workspace-dialog-unavailable');
+      throw new Error('The workspace dialog is unavailable');
+    }
+    if (!isAbsolute(defaultPath)) {
+      this.reportFault('workspace-dialog-invalid-path');
+      throw new Error('The workspace directory is invalid');
+    }
+    try {
+      const result = await dialog.showOpenDialog(this.options.window, { defaultPath, properties: ['openDirectory'] });
+      if (this.disposed || this.options.window.isDestroyed()) return null;
+      return result.canceled ? null : result.filePaths[0] ?? null;
+    } catch {
+      this.reportFault('workspace-dialog-failed');
+      throw new Error('The workspace directory could not be selected');
     }
   }
 
