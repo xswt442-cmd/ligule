@@ -50,7 +50,7 @@ flowchart LR
 
 [项目环境装载模块](../../core/src/host/environment.ts) 为 CLI 与 Desktop Host 入口提供同一次读取的配置层与扩展来源。[Provider 构造模块](../../core/src/host/provider.ts) 校验模型协议、能力声明与重试设置；未配置模型的 Host 可以接收设置请求，模型运行明确失败。[会话模式事务](../../core/src/host/session-mode.ts) 负责安装工具限制、提示片段、失败回收和模式事实记录；Host 继续持有会话锁、活跃轮次、协议路由与资源清理。TUI 的记录投影位于 [transcript.ts](../../tui/src/tui/transcript.ts)，Desktop 的[流式缓冲](../../desktop/frontend/src/session-stream.ts) 按会话隔离未落盘输出。
 
-`ligule mcp-server --project <绝对项目根>` 通过 [MCP 适配器](../../core/src/host/mcp-server.ts) 暴露十个本地控制工具。[控制门面](../../core/src/host/control.ts) 调用同一 Host，维护进程内 operation 状态，并将会话操作限制在启动时授权的项目内。默认模式拒绝需要审批的操作；明确启用 `--operator` 后，客户端可以答复真实待决的审批与提问，并修改受支持的会话设置，但不能覆盖硬拒绝。连接关闭时会取消运行并释放会话锁；Session JSONL 持久保存会话记录，operation ID 和消息队列只在当前进程内有效。使用方法见 [MCP 用户指南](../mcp/mcp-guide.zh-CN.md)。
+`ligule mcp-server --project <绝对项目根>` 通过 [MCP 适配器](../../core/src/host/mcp-server.ts) 暴露本地控制工具。[控制门面](../../core/src/host/control.ts) 调用同一 Host，维护进程内 operation 状态，并将会话操作限制在启动时授权的项目内。默认模式拒绝需要审批的操作；明确启用 `--operator` 后，客户端可答复真实待决的审批与提问，并修改受支持的会话设置，但不能覆盖硬拒绝。可信 TUI/Desktop 可创建项目绑定的 [Agent Control Grant](../../core/src/host/agent-control.ts)；`--grant <id>` 将会话 Permission、网络和 Policy 限制在 Grant 的默认值与上限内，Host 会在请求时核验撤销、到期和项目绑定。连接关闭时会取消运行并释放会话锁；Session JSONL 持久保存会话记录，operation ID 和消息队列只在当前进程内有效。使用方法见 [MCP 用户指南](../mcp/mcp-guide.zh-CN.md)。
 
 ### Kernel、插件、工具与能力
 
@@ -122,6 +122,8 @@ Host 的运行进度仅在当前活跃会话与任务期间存在，由 Loop、�
 ### 会话记录与恢复
 
 追加式 [JSONL 会话记录](../../core/src/session/session.ts)是对话事实来源。首行记录会话标识和项目信息；之后的事件记录用户与助手消息、工具调用和结果、轮次状态、模型选择及其他状态。会话锁阻止多个进程同时写入同一记录。
+
+默认路径为 `dataRoot()/workspaces/<可读路径>--<稳定哈希>/sessions/`，同目录保存记录和附属文件。只读列表与搜索会扫描旧全局目录和项目目录但不迁移；用户打开旧会话时才会复制到工作区目录，并保留原件。
 
 模型请求使用从记录计算出的投影。界面可以读取推理、标签、轮次信息和用量；按投影规则，这些内容不会全部进入模型消息。创建分支会复制整份记录，或复制到一轮完整结束处为止；父会话保持不变。
 

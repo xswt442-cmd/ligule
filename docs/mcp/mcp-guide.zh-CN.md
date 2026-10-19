@@ -63,6 +63,18 @@ Windows 路径示例：
 
 `--operator` 代表本机操控者明确授权这个 stdio 客户端。它允许回答 Policy 判为 `ask` 的审批、回答真实提问，以及修改单个会话的 Mode、Policy、模型、生成参数和每轮循环上限；它不更改文件边界、工作区信任或硬拒绝规则。Policy 为 `never`、工具校验失败、工作区越界等固定拒绝不能被审批答复覆盖。审批内容展示真实工具和操作参数；如果 Host 无法完整、安全地展示请求，就会拒绝该请求。
 
+## Agent Control 项目授权
+
+需要让 MCP 会话使用受控 Permission 时，先在受信任的 TUI 输入 `/control create`，或在 Desktop「设置 → 外部控制」创建绑定项目的 Grant。Grant 保存默认权限、权限上限、网络默认值与上限、允许的 Policy、是否允许普通 Operator 操作及到期时间。`full-access` 和不受限网络必须在创建界面分别确认。授权只适用于 Grant 绑定的项目；它不是远程客户端身份认证，也不解除操作系统 Sandbox 限制或 Policy 硬拒绝。
+
+使用 Grant 启动 MCP Server：
+
+```json
+{"command":"ligule","args":["mcp-server","--project","/absolute/path/to/project","--grant","GRANT_ID","--operator"]}
+```
+
+MCP 会校验项目路径与 Grant 绑定一致，并将其默认 Permission、网络和 Policy 应用于新会话。`--operator` 只能在 Grant 已允许普通 Operator 操作时使用；这时 MCP 可在 Grant 上限内改会话设置并答复真实待决的审批或提问。未提供 Grant 时，单独的 `--operator` 不会授予或提升 Permission；提供 Grant 但不启用 `--operator` 时，只能使用 Grant 默认值，不能通过 MCP 修改这些设置。Host 会持续核验撤销、到期和项目绑定；失效后拒绝后续控制并释放会话锁。
+
 新会话可在 `ligule_session_create` 的 `initial` 中一次性设置 `mode`、`policy`、`model`、`thinking`、`outputTokens` 和 `loopIterations`。已打开会话使用 `ligule_session_configure` 的 `changes`。单次更新只能改一个类别：Mode、Policy、生成设置或循环上限；生成设置类别内部可同时改模型、思考档位和输出上限。`loopIterations` 是每轮用户任务允许的模型/工具循环次数，必须是正安全整数；默认值来自项目 `[loop].iterations`，未设置时为 64。会话覆盖不改项目配置，保存在 Session JSONL 中，并在重新接回时恢复。`loop.modelCalls` 仍使用项目配置，不会随 `loopIterations` 一起变化。混合类别的请求会被 schema 拒绝，避免部分生效。Mode 与模型/生成设置也保存在 Session JSONL 中；Policy 覆盖沿用 Host 的运行期行为，重新接回后采用项目配置默认值。运行期间的生成设置和循环上限在下一轮开始时生效，Policy 在之后的工具判定生效，不能改变已经等待中的审批。响应中的 `applies` 明确给出时机。
 
 模型和服务选项来自当前 Host 配置。`thinking` 只列出已核实的模型能力；当前仅官方 DeepSeek Chat Completions 端点上列出的模型支持 `none/low/high/max`。兼容网关不会自动继承此能力。`effective.generation.outputTokens` 是当前请求预算；`maxOutputTokens` 是解析后的模型/服务输出上限，`contextTokens` 单独报告。例如，已核实的 DeepSeek Flash 输出上限是 393,216 Token；未知兼容端点继续使用保守默认上限。输出预算必须同时不超过服务上限和上下文窗口，否则 Host 返回稳定错误码。使用 `null` 清除模型、思考或输出上限的会话覆盖。
@@ -95,7 +107,7 @@ Windows 路径示例：
 
 MCP Server 使用 Ligule 已有的配置、模型服务、工具和 Policy。未启动 `--operator` 时，需要人工审批的操作会被拒绝；启动该选项后，只能答复真实待决请求。Server 不提供任意 Host RPC 或任意配置文件写入工具。它只使用本地 stdio，不开启网络监听。stdio 客户端与 Server 使用同一操作系统用户权限，请只配置可信的本地 MCP 客户端。
 
-`--operator` 不会授予或提升会话 Permission，也不能更改 OS 资源边界。Permission 默认由可信交互式 TUI 或 Desktop Host 管理；MCP Server 不能通过 `ligule_session_configure` 修改它。MCP 工具调用仍经过会话的 Permission 与 Policy 判定。受限 Shell 只在平台 Sandbox 满足所需能力时运行；当前 Linux bubblewrap 的文件系统隔离报告为 `partial`，Windows 没有 OS Sandbox 后端，因此这两个平台上的 `read-only` 和 `workspace-write` 会话均不能运行 Shell。`full-access` 需要在交互式界面单独确认；这不会让 Policy 的硬拒绝可被覆盖。
+没有 Grant 时，`--operator` 不会授予或提升会话 Permission，也不能更改 OS 资源边界。MCP 工具调用始终经过会话的 Permission 与 Policy 判定。受限 Shell 只在平台 Sandbox 满足所需能力时运行；当前 Linux bubblewrap 的文件系统隔离报告为 `partial`，Windows 没有 OS Sandbox 后端，因此这两个平台上的 `read-only` 和 `workspace-write` 会话均不能运行 Shell。`full-access` 需要在可信交互界面单独确认；这不会让 Policy 的硬拒绝可被覆盖。
 
 任务状态和 `operationId` 只保存在当前 Server 进程中；每个进程保留最多 256 个操作记录。达到上限后，新任务会从已结束的操作中淘汰创建时间最早的一条；被淘汰的 `operationId` 不可再查询。如果所有保留的操作都仍在运行，新任务会以容量错误拒绝。Server 退出或重启后，旧 `operationId` 不可恢复。会话记录仍由 Host 持久保存，可重新启动 Server、接回会话并读取历史，但这不会恢复旧进程中的运行状态。
 
