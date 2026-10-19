@@ -10,6 +10,7 @@ import {
   execTool, resolveShell, withNativeExitCode,
 } from '../dist/index.js';
 import { decode } from '../dist/capability/exec.js';
+import { bindScript } from '../dist/capability/script-binding.js';
 
 // Host 选择命令后端并传入这里；测试使用当前机器实际支持的后端。
 // 被测的是 exec 自己的那几件事（头尾分页、标准输入、取消、退出码），所以脚本片段落到一个临时文件里再跑：
@@ -30,10 +31,13 @@ function nodeCommand(code) {
   return `node "${script}"`;
 }
 
-function run(command, limits, signal, permission = fullAccess) {
+async function run(command, limits, signal, permission = fullAccess) {
+  const boundary = process.cwd();
+  const scriptBinding = await bindScript({ command, shell, boundary, workspaceRoot: boundary, cwd: boundary, permission });
   return execTool.run({ command }, {
-    config: { boundary: process.cwd(), limits }, permission, signal,
+    config: { boundary, limits }, permission, signal,
     shell: withNativeExitCode(shell, command),
+    ...(scriptBinding === undefined ? {} : { scriptBinding }),
   });
 }
 
@@ -158,7 +162,7 @@ test('the execution layer fails closed when permission or an enforcing backend i
     filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
   });
   await assert.rejects(
-    () => run(nodeCommand('console.log("unused")'), undefined, undefined, workspaceWrite),
+    () => run('node --version', undefined, undefined, workspaceWrite),
     (error) => error.code === 'permission_sandbox_unavailable',
   );
 });
@@ -202,13 +206,18 @@ test('cancellation terminates a detached descendant without leaving it alive', a
   ].join('');
   const controller = new AbortController();
   const execution = run(nodeCommand(script), undefined, controller.signal);
-  const deadline = Date.now() + 2_000;
-  while (Date.now() < deadline && !existsSync(childPidFile)) await delay(10);
-  assert.ok(existsSync(childPidFile), 'the command should record its owned child PID before cancellation');
-  const pid = Number(readFileSync(childPidFile, 'utf8'));
-  controller.abort();
-  await assert.rejects(() => execution, (error) => error.code === 'exec_cancelled');
-  await assertStopped(pid);
+  try {
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline && !existsSync(childPidFile)) await delay(10);
+    assert.ok(existsSync(childPidFile), 'the command should record its owned child PID before cancellation');
+    const pid = Number(readFileSync(childPidFile, 'utf8'));
+    controller.abort();
+    await assert.rejects(() => execution, (error) => error.code === 'exec_cancelled');
+    await assertStopped(pid);
+  } finally {
+    controller.abort();
+    await execution.catch(() => undefined);
+  }
 });
 
 test('an empty command line and a working directory outside the boundary are rejected', async () => {
@@ -221,6 +230,7 @@ test('an empty command line and a working directory outside the boundary are rej
 
 test('the decision chain sees the command text before anything is spawned', async () => {
   const kernel = createKernel({
+    config: createConfig({ user: { boundary: process.cwd() } }),
     permission: fullAccess,
     policy: createDecisionChain({ rules: [{ tool: 'exec', decision: 'deny', match: 'rm *' }] }),
   });

@@ -189,7 +189,7 @@ function powerShellInvocation(node: SyntaxNode, text: string, nested: boolean, p
     : childrenOf(elements)
       .filter((child) => child.type !== 'command_argument_sep')
       .map((child) => powerShellArgument(child, text));
-  return { executable: commandName?.text ?? '', arguments: args, nested, pipeline };
+  return { executable: commandName?.text ?? '', executableSource: commandName?.text ?? '', arguments: args, nested, pipeline };
 }
 
 function commandCount(node: SyntaxNode): number {

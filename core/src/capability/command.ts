@@ -21,6 +21,7 @@ export interface ParsedCommandArgument {
 
 export interface ParsedCommandInvocation {
   readonly executable: string;
+  readonly executableSource?: string;
   readonly executableDynamic?: boolean;
   readonly executableNested?: readonly ParsedCommandInvocation[];
   readonly arguments: readonly ParsedCommandArgument[];
@@ -295,6 +296,7 @@ function bashInvocation(node: TreeSitterParser.SyntaxNode, text: string, nested:
     .map((child) => bashArgument(child, text));
   return {
     executable,
+    executableSource: commandName?.text ?? '',
     executableDynamic: decoded === undefined || decoded.value === undefined || decoded.dynamic || decoded.tildeExpansion,
     executableNested: commandName === undefined ? [] : nestedBashCommands(commandName, text),
     arguments: args,

@@ -1,21 +1,24 @@
 // `exec` 负责命令执行和进程生命周期。Host 选择解释器并传入此处。
 // Windows 进程由 Job Object 管理，Linux 命令由子收养者守护进程管理；受限 Profile 使用可用的 OS Sandbox。
 // 调用方通过 signal 取消执行，配置上限同时限制命令运行时间。
+import { randomUUID, createHash } from 'node:crypto';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { chmod, mkdtemp, rm } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { chmod, mkdtemp, open, realpath, rm, stat, type FileHandle } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, extname, join, relative } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { KernelError } from '../kernel/error.js';
-import { resolveWithin } from './paths.js';
+import { isWithin, resolveWithin } from './paths.js';
 import { boundaryOf, limitsOf, workingDirectoryOf, type CapabilityConfig } from './limits.js';
 import { spawnWindowsCommand, type OwnedWindowsCommand } from './windows-command.js';
 import { buildLinuxSandbox, type PermissionCapabilities } from './sandbox-linux.js';
 import type { PermissionContext } from '../kernel/permission.js';
 import type { ShellSelection } from './shell.js';
+import { assertInterpreterIdentity, assertScriptBinding, bindScript, readBoundScript, type ScriptBinding } from './script-binding.js';
 
 type ExecArguments = { command?: unknown; cwd?: string };
-type ExecContext = { config: CapabilityConfig; permission: PermissionContext; signal?: AbortSignal; shell?: ShellSelection };
+type ExecContext = { config: CapabilityConfig; permission: PermissionContext; signal?: AbortSignal; shell?: ShellSelection; scriptBinding?: ScriptBinding };
 type ExecResult = { text: string; exitCode: number | null };
 
 const MAX_EXEC_TIMEOUT_MS = 600_000;
@@ -136,6 +139,66 @@ function errorCode(error: unknown): unknown {
   return typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
 }
 
+function quoteScriptPath(path: string, kind: ShellSelection['kind']): string {
+  return kind === 'powershell' ? `'${path.replaceAll("'", "''")}'` : `'${path.replaceAll("'", "'\\''")}'`;
+}
+
+function quoteExecutablePath(path: string, kind: ShellSelection['kind']): string {
+  const quoted = quoteScriptPath(path, kind);
+  return kind === 'powershell' ? `& ${quoted}` : quoted;
+}
+
+async function createScriptSnapshot(boundary: string, approvedPath: string, source: Buffer, allowOutsideBoundary: boolean): Promise<string> {
+  const snapshot = join(dirname(approvedPath), `.ligule-approved-${randomUUID()}${extname(approvedPath)}`);
+  const flags = constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY
+    | (typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0);
+  let handle: FileHandle | undefined;
+  let identity: { dev: bigint; ino: bigint } | undefined;
+  let safeToRemove = false;
+  try {
+    const realBoundary = await realpath(boundary);
+    const parent = await realpath(dirname(approvedPath));
+    if (!allowOutsideBoundary && !isWithin(realBoundary, parent)) {
+      throw new KernelError('exec_script_snapshot_failed', { detail: 'the script snapshot directory is outside the workspace boundary' });
+    }
+    handle = await open(snapshot, flags, 0o400);
+    const opened = await handle.stat({ bigint: true });
+    identity = { dev: opened.dev, ino: opened.ino };
+    const actualPath = await realpath(snapshot);
+    const pathInfo = await stat(snapshot, { bigint: true });
+    if (actualPath !== snapshot || (!allowOutsideBoundary && !isWithin(realBoundary, actualPath))
+      || opened.dev !== pathInfo.dev || opened.ino !== pathInfo.ino) {
+      throw new KernelError('exec_script_snapshot_failed', { detail: 'the script snapshot path changed while it was opened' });
+    }
+    safeToRemove = true;
+    await handle.writeFile(source);
+    await handle.chmod(0o400);
+    if ((await handle.stat({ bigint: true })).size !== BigInt(source.length)) {
+      throw new KernelError('exec_script_snapshot_failed', { detail: 'the script snapshot size does not match the approved content' });
+    }
+    if (!source.equals(await readBoundScript(boundary, snapshot, allowOutsideBoundary))) {
+      throw new KernelError('exec_script_snapshot_failed', { detail: 'the script snapshot content does not match the approved content' });
+    }
+    await handle.close();
+    handle = undefined;
+    return snapshot;
+  } catch (error) {
+    if (safeToRemove && identity !== undefined) {
+      const current = await stat(snapshot, { bigint: true }).catch(() => undefined);
+      const path = await realpath(snapshot).catch(() => undefined);
+      if (current?.dev === identity.dev && current.ino === identity.ino && path === snapshot) {
+        await rm(snapshot, { force: true }).catch((cleanupError) => {
+          throw new KernelError('exec_script_snapshot_cleanup_failed', { cause: cleanupError, detail: 'the failed script snapshot could not be removed' });
+        });
+      }
+    }
+    if (error instanceof KernelError) throw error;
+    throw new KernelError('exec_script_snapshot_failed', { cause: error, detail: 'the private script snapshot could not be created beside the approved script' });
+  } finally {
+    await handle?.close();
+  }
+}
+
 function killTree(child: ChildProcess): void {
   if (child.pid === undefined) return;
   try {
@@ -186,10 +249,11 @@ export const execTool = {
     },
     required: ['command'],
   },
-  async run(args: ExecArguments, { config, permission, signal, shell }: ExecContext): Promise<ExecResult> {
+  async run(args: ExecArguments, { config, permission, signal, shell, scriptBinding }: ExecContext): Promise<ExecResult> {
     if (typeof args.command !== 'string' || args.command.trim() === '') {
       throw new KernelError('exec_command_required', { detail: 'the command to run is missing' });
     }
+    const commandText = args.command;
     if (shell === undefined) throw new KernelError('exec_shell_unavailable', { detail: 'the host did not select a shell backend for exec' });
     const mode = permissionMode(permission);
     const timeoutMs = executionTimeout(config);
@@ -199,15 +263,56 @@ export const execTool = {
     const cwd = args.cwd === undefined
       ? await resolveWithin(boundary, '.', { cwd: workspaceRoot })
       : await resolveWithin(boundary, args.cwd, { cwd: workspaceRoot });
-    const commandArgs = [...shell.prefix, `${args.command}${shell.tail}`];
+    let currentBinding: ScriptBinding | undefined;
+    try { currentBinding = await bindScript({ command: commandText, shell, boundary, workspaceRoot, cwd, permission }); }
+    catch (error) {
+      if (scriptBinding !== undefined) {
+        throw new KernelError('exec_script_binding_changed', { cause: error, detail: 'the approved script could not be rebound to its path, workspace, interpreter, and permission' });
+      }
+      throw error;
+    }
+    if (scriptBinding !== undefined || currentBinding !== undefined) assertScriptBinding(scriptBinding, currentBinding);
+    let scriptSnapshot: string | undefined;
+    let command = commandText;
+    if (scriptBinding !== undefined) {
+      if (scriptBinding.sourceKind === 'file' && permission.profile === 'read-only') {
+        throw new KernelError('exec_script_binding_unavailable', { detail: 'read-only execution cannot create a source-directory snapshot without writing to the workspace' });
+      }
+      const source = scriptBinding.sourceKind === 'inline'
+        ? Buffer.from(scriptBinding.inlineSource ?? '', 'utf8')
+        : await readBoundScript(boundary, scriptBinding.path, permission.profile === 'full-access').catch((error) => {
+          throw new KernelError('exec_script_binding_changed', { cause: error, detail: 'the approved script could not be reread for an execution snapshot' });
+        });
+      if (createHash('sha256').update(source).digest('hex') !== scriptBinding.sha256) {
+        throw new KernelError('exec_script_binding_changed', { detail: 'the approved script content changed before its execution snapshot was created' });
+      }
+      const sourceTokens = [scriptBinding.interpreterSource, ...(scriptBinding.sourceKind === 'file' ? [scriptBinding.argumentSource] : [])];
+      if (sourceTokens.some((token) => token === '' || commandText.indexOf(token) !== commandText.lastIndexOf(token))) {
+        throw new KernelError('exec_script_binding_unavailable', { detail: 'the parsed interpreter and script path do not have unambiguous source tokens to replace' });
+      }
+      if (scriptBinding.sourceKind === 'file') {
+        scriptSnapshot = await createScriptSnapshot(boundary, scriptBinding.path, source, permission.profile === 'full-access');
+        const scriptPath = mode === 'sandboxed' ? relative(cwd, scriptSnapshot) : scriptSnapshot;
+        command = command.replace(scriptBinding.argumentSource, quoteScriptPath(scriptPath, shell.kind));
+      }
+      command = command.replace(scriptBinding.interpreterSource, quoteExecutablePath(scriptBinding.interpreter, shell.kind));
+    }
+    const commandArgs = [...shell.prefix, `${command}${shell.tail}`];
     const environment = executionEnvironment();
     let executable = shell.executable;
     let argv = commandArgs;
     let privateTempDir: string | undefined;
     if (mode === 'sandboxed') {
       if (permission === undefined || permission.profile === 'full-access') throw new KernelError('exec_permission_required');
-      if (signal?.aborted) throw new KernelError('exec_cancelled', { detail: 'the run was cancelled before the command started' });
-      privateTempDir = await createPrivateTempDir();
+      if (signal?.aborted) {
+        if (scriptSnapshot !== undefined) await rm(scriptSnapshot, { force: true });
+        throw new KernelError('exec_cancelled', { detail: 'the run was cancelled before the command started' });
+      }
+      try { privateTempDir = await createPrivateTempDir(); }
+      catch (error) {
+        if (scriptSnapshot !== undefined) await rm(scriptSnapshot, { force: true });
+        throw error;
+      }
       try {
         const result = await buildLinuxSandbox({
           profile: permission.profile,
@@ -235,13 +340,24 @@ export const execTool = {
       } catch (error) {
         await rm(privateTempDir, { recursive: true, force: true });
         privateTempDir = undefined;
+        if (scriptSnapshot !== undefined) await rm(scriptSnapshot, { force: true });
         if (error instanceof KernelError) throw error;
         throw new KernelError('exec_sandbox_setup_failed', { cause: error });
       }
     }
 
+    if (mode === 'direct') argv = commandArgs;
+    if (scriptBinding !== undefined) {
+      try { await assertInterpreterIdentity(scriptBinding.interpreter, scriptBinding.interpreterIdentity); }
+      catch (error) {
+        if (privateTempDir !== undefined) await rm(privateTempDir, { recursive: true, force: true });
+        if (scriptSnapshot !== undefined) await rm(scriptSnapshot, { force: true });
+        throw error;
+      }
+    }
     if (signal?.aborted) {
       if (privateTempDir !== undefined) await rm(privateTempDir, { recursive: true, force: true });
+      if (scriptSnapshot !== undefined) await rm(scriptSnapshot, { force: true });
       throw new KernelError('exec_cancelled', { detail: 'the run was cancelled before the command started' });
     }
 
@@ -260,6 +376,7 @@ export const execTool = {
       });
     } catch (error) {
       if (privateTempDir !== undefined) await rm(privateTempDir, { recursive: true, force: true });
+      if (scriptSnapshot !== undefined) await rm(scriptSnapshot, { force: true });
       if (error instanceof KernelError) throw error;
       throw new KernelError('exec_spawn_failed', { cause: error, detail: error instanceof Error ? error.message : undefined });
     }
@@ -269,6 +386,7 @@ export const execTool = {
       if (owned === null) killTree(child);
       else owned.cancel();
       if (privateTempDir !== undefined) await rm(privateTempDir, { recursive: true, force: true });
+      if (scriptSnapshot !== undefined) await rm(scriptSnapshot, { force: true });
       throw new KernelError('exec_spawn_failed', { detail: 'the command process did not provide output pipes' });
     }
     const half = Math.floor(execBytes / 2);
@@ -346,6 +464,13 @@ export const execTool = {
           await rm(privateTempDir, { recursive: true, force: true });
         } catch (error) {
           throw new KernelError('exec_sandbox_cleanup_failed', { cause: error, detail: 'the private temporary directory could not be removed' });
+        }
+      }
+      if (scriptSnapshot !== undefined) {
+        try {
+          await rm(scriptSnapshot, { force: true });
+        } catch (error) {
+          throw new KernelError('exec_script_snapshot_cleanup_failed', { cause: error, detail: 'the private script snapshot could not be removed' });
         }
       }
     }

@@ -617,7 +617,7 @@ export function App({ transport }: { transport: Transport }) {
       }
       // Host 发出的交互请求分为审批和用户提问。
       if (message.method !== 'approval.request') return;
-      const params = message.params as { sessionId?: string; projectRoot?: string; tool?: string; command?: string; args?: Record<string, unknown>; reason?: string; shell?: string; executable?: string; policy?: string; policySource?: string; policyForced?: boolean };
+      const params = message.params as { sessionId?: string; projectRoot?: string; tool?: string; command?: string; args?: Record<string, unknown>; reason?: string; shell?: string; executable?: string; policy?: string; policySource?: string; policyForced?: boolean; scriptBinding?: { path?: string; sha256?: string; interpreter?: string; workspaceRoot?: string; permission?: { profile?: string; network?: string; capabilities?: Record<string, string> } } };
       // 请求属于发起它的会话；即使会话在后台等待，也必须显示并允许答复。
       const asked = params?.sessionId;
       if (typeof asked !== 'string' || asked === '') return;
@@ -644,8 +644,8 @@ export function App({ transport }: { transport: Transport }) {
         policy: params.policy ?? '',
         policySource: params.policySource ?? '',
         policyForced: params.policyForced === true,
-        content,
-        english: { change: englishChange.summary, content: changeBody(englishChange, args, 'en') },
+        content: params.scriptBinding === undefined ? content : `${content}\n\n${t('脚本审批绑定', 'Script approval binding')}:\n${t('路径', 'Path')}: ${params.scriptBinding.path ?? ''}\nSHA-256: ${params.scriptBinding.sha256 ?? ''}\n${t('解释器', 'Interpreter')}: ${params.scriptBinding.interpreter ?? ''}\n${t('工作区', 'Workspace')}: ${params.scriptBinding.workspaceRoot ?? ''}\n${t('权限', 'Permission')}: ${params.scriptBinding.permission?.profile ?? ''} / ${params.scriptBinding.permission?.network ?? ''}\n${JSON.stringify(params.scriptBinding.permission?.capabilities ?? {})}`,
+        english: { change: englishChange.summary, content: params.scriptBinding === undefined ? changeBody(englishChange, args, 'en') : `${changeBody(englishChange, args, 'en')}\n\nScript approval binding:\nPath: ${params.scriptBinding.path ?? ''}\nSHA-256: ${params.scriptBinding.sha256 ?? ''}\nInterpreter: ${params.scriptBinding.interpreter ?? ''}\nWorkspace: ${params.scriptBinding.workspaceRoot ?? ''}\nPermission: ${params.scriptBinding.permission?.profile ?? ''} / ${params.scriptBinding.permission?.network ?? ''}\n${JSON.stringify(params.scriptBinding.permission?.capabilities ?? {})}` },
       }]);
     });
 

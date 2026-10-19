@@ -10,6 +10,7 @@ import type { NetworkTarget } from '../capability/network.js';
 import type { ShellSelection } from '../capability/shell.js';
 import type { PolicyRule } from './config-edit.js';
 import type { PermissionAccess } from './permission.js';
+import type { ScriptBinding } from '../capability/script-binding.js';
 
 export type PolicyMode = 'ask' | 'auto' | 'never';
 export type PolicyModeSource = 'config' | 'session';
@@ -37,6 +38,7 @@ export interface PolicyQuestion {
   readonly policyForced: boolean;
   readonly shell?: string;
   readonly executable?: string;
+  readonly scriptBinding?: ScriptBinding;
 }
 
 export type PolicyAsk = (question: PolicyQuestion) => boolean | Promise<boolean>;
@@ -60,6 +62,7 @@ export interface PolicyVerdict {
   rule?: string;
   answer?: string;
   segments?: string[];
+  scriptBinding?: ScriptBinding;
 }
 
 export interface DecisionChain {
@@ -72,8 +75,17 @@ export interface DecisionChain {
   setRules(rules: PolicyRule[]): void;
   readonly rules: PolicyRule[];
   denials(): { consecutive: number; total: number };
+  snapshot(): PolicyState;
+  restore(snapshot: PolicyState): void;
   guard(check: PolicyGuard): () => boolean;
   evaluate(input: PolicyCall): Promise<PolicyVerdict>;
+}
+
+export interface PolicyState {
+  readonly override: PolicyMode | null;
+  readonly consecutive: number;
+  readonly total: number;
+  readonly forcedToAsk: boolean;
 }
 
 export interface PolicyCall {
@@ -83,6 +95,8 @@ export interface PolicyCall {
   readonly shell?: ShellSelection;
   readonly capability?: string;
   readonly access?: PermissionAccess;
+  readonly scriptBinding?: ScriptBinding;
+  readonly scriptBindingError?: { readonly code: string; readonly detail: string };
 }
 
 // 拒绝阈值和默认策略由配置层提供。
@@ -100,7 +114,7 @@ const INTERPRETERS: readonly string[] = [
   'python', 'python3', 'node', 'deno', 'bun', 'perl', 'ruby', 'php',
 ];
 const COMMAND_WRAPPERS: readonly string[] = [
-  'sudo', 'su', 'doas', 'env', 'command', 'exec', 'busybox', 'timeout', 'nohup', 'setsid', 'xargs',
+  'sudo', 'su', 'doas', 'env', 'command', 'exec', 'source', '.', 'import-module', 'busybox', 'timeout', 'nohup', 'setsid', 'xargs',
   'start-process', 'invoke-expression', 'iex', 'eval', 'npm', 'npx', 'pnpm', 'yarn', 'make',
   'awk', 'gawk', 'mawk', 'nawk',
 ];
@@ -223,7 +237,31 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       return { consecutive, total };
     },
 
-    async evaluate({ tool, input, target, shell, capability, access }: PolicyCall): Promise<PolicyVerdict> {
+    snapshot() {
+      return { override: source === 'session' ? current : null, consecutive, total, forcedToAsk };
+    },
+
+    restore(snapshot: PolicyState) {
+      if (snapshot === null || typeof snapshot !== 'object'
+        || (snapshot.override !== null && snapshot.override !== 'ask' && snapshot.override !== 'auto' && snapshot.override !== 'never')
+        || !Number.isSafeInteger(snapshot.consecutive) || snapshot.consecutive < 0
+        || !Number.isSafeInteger(snapshot.total) || snapshot.total < snapshot.consecutive
+        || typeof snapshot.forcedToAsk !== 'boolean') {
+        throw new KernelError('policy_state_invalid');
+      }
+      if (snapshot.override === null) {
+        current = configured;
+        source = 'config';
+      } else {
+        current = snapshot.override;
+        source = 'session';
+      }
+      consecutive = snapshot.consecutive;
+      total = snapshot.total;
+      forcedToAsk = snapshot.forcedToAsk;
+    },
+
+    async evaluate({ tool, input, target, shell, capability, access, scriptBinding, scriptBindingError }: PolicyCall): Promise<PolicyVerdict> {
       if (typeof tool !== 'string' || tool === '') throw new KernelError('policy_call_tool_required');
       // 使用工具声明的实际能力名称进行判定。MCP 调用使用 `mcp:<服务器>/<工具>`，而不是通用工具名 `mcp.call`。
       const named = capability ?? tool;
@@ -317,6 +355,10 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         if (typeof reason === 'string') return refuse('guard_denied', 'guard', reason);
       }
 
+      if (scriptBindingError !== undefined) {
+        return refuse(scriptBindingError.code, 'script-binding', scriptBindingError.detail);
+      }
+
       const allowed = candidates.filter((item) => item.decision === 'allow');
       // 记录实际匹配的放行规则名称，便于解释判定结果。
       const covering = () => (parts === undefined ? undefined : allowed.find((item) => parts.every((segment) => matches(segment, item.match))));
@@ -367,11 +409,12 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         policy: effective,
         policySource: source,
         policyForced: forcedToAsk,
+        ...(scriptBinding === undefined ? {} : { scriptBinding }),
         ...(shell === undefined ? {} : { shell: shell.kind, executable: shell.executable }),
       };
       if (await ask(question) !== true) return refuse('ask_declined', 'ask', 'the user declined', undefined, 'deny');
       record(false);
-      return judged('allow', 'ask', { ...(segments === undefined ? {} : { segments }), answer: 'allow' });
+      return { ...judged('allow', 'ask', { ...(segments === undefined ? {} : { segments }), answer: 'allow' }), ...(scriptBinding === undefined ? {} : { scriptBinding }) };
     },
   };
 }

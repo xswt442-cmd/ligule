@@ -110,6 +110,9 @@ selection = { provider = "deepseek", model = "deepseek-flash" }
 | `provider_finish_reason_invalid` | 提供方返回了不支持的结束原因 |
 | `provider_tool_call_invalid` | 工具调用缺少有效标识、名称或出现重复标识 |
 | `provider_tool_args_invalid` | 工具参数不是合法 JSON，未执行该批调用 |
+| `exec_script_binding_unavailable` | 脚本或解释器无法安全绑定到审批，本次执行被拒绝 |
+| `exec_script_binding_changed` | 审批后脚本、解释器、工作区或 Permission 发生变化，本次执行被拒绝 |
+| `session_permission_format_unsupported` / `session_policy_format_unsupported` | 旧格式会话无法保存此类设置；会话记录未被修改 |
 
 HTTP 错误只显示状态码及必要的固定错误分类，不显示网关原始正文或非法工具参数。开始读取成功响应正文前的可重试故障（传输失败及按配置可重试的 429/5xx）遵守已配置次数和退避；响应正文读取开始后的断流不自动重发整个请求。用户主动取消仍记录为 `cancelled`。
 
@@ -120,6 +123,8 @@ HTTP 错误只显示状态码及必要的固定错误分类，不显示网关原
 终端界面使用 `/policy ask` 改为逐次询问，使用 `/policy auto` 选择自动判定，使用 `/policy reset` 恢复配置默认值。自动档仍受拒绝规则、守卫、命令语法识别和目标地址检查约束；无法确认安全的命令会转为逐次询问。桌面版输入区旁的工具与审批菜单可以修改当前会话；新会话发送第一条消息前，也可以先选择工具模式和审批方式。选择「完全不需审批」前会显示确认框；启用后不再弹出逐项审批，但工作区边界、拒绝规则和安全守卫仍生效。无法安全解析的命令、私网目标以及需要额外审批的操作会被拒绝。设置中的「审批规则」可以将审批默认值保存到用户配置或项目本地配置。审批方式和规则在保存后立即用于后续判定。
 
 Permission 单独控制会话可访问的操作系统资源，Policy 决定允许的操作是否需要审批或必须拒绝。在 TUI 输入 `/permission`，或在桌面版输入区打开权限菜单，可以查看和更改当前会话的 Permission；新会话也可在发送第一条消息前选择文件/命令档位与网络模式。`read-only` 禁止文件工具写入；`workspace-write` 允许文件工具在配置的路径边界内写入；`full-access` 放宽命令的操作系统隔离，启用时需要再次确认。内置文件工具仍受路径边界约束。网络也单独设置为 `policy`、`disabled` 或 `unrestricted`；不受限网络需要再次确认。新会话创建时由 Host 应用所选档位；需要确认的升档由 Host 校验并记录可信界面的确认来源。Permission 状态显示平台的文件读写、网络与进程隔离能力，以及当前 Shell 是否可用。
+
+Node/Python 脚本不能由自动策略直接放行。逐次审批会显示脚本路径、SHA-256、解释器、工作区和 Permission；审批等待期间相关内容发生变化时，Host 会拒绝执行。无法安全绑定的 Shell 脚本、包装器、复合命令或动态命令也会被拒绝。旧格式会话仍可读取，但不能修改 Permission 或 Policy；新建会话即可调整这些设置。
 
 使用 TUI 的 `/control create` 或桌面版「设置 → 外部控制」可以创建只绑定一个项目的 Agent Control Grant。Grant 设置默认值与权限上限、网络范围、允许的 Policy、有效期和是否允许普通 Operator 操作；`full-access` 与不受限网络需分别确认。MCP Server 使用 `--grant <id>` 接入 Grant；`--operator` 只有在该 Grant 允许时才能回答常规审批或在授权上限内调整会话。撤销或到期会阻止后续控制；Grant 不解除 OS Sandbox 限制或 Policy 硬拒绝。
 

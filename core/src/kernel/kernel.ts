@@ -5,12 +5,15 @@ import { KernelError } from './error.js';
 import { createConfig, type ConfigSnapshot } from './config.js';
 import { createLogger, type Logger, type LoggerBackend } from './log.js';
 import { failureOf, refusalOf, resultLimit, resultOf, spillContent } from './result.js';
-import { VERDICT_FIELDS, type DecisionChain } from './policy.js';
+import { VERDICT_FIELDS, type DecisionChain, type PolicyMode } from './policy.js';
 import { createObservationLog, type ObservationLog } from '../session/observe.js';
 import { resolveTarget, type NetworkTarget } from '../capability/network.js';
 import { resolveShell, withNativeExitCode, type ShellKind, type ShellSelection } from '../capability/shell.js';
 import { assertSupportedSchema, validateArgs } from './schema.js';
 import { DEFAULT_PERMISSION_CONTEXT, isPermissionAccess, permissionDenial, type PermissionAccess, type PermissionContext } from './permission.js';
+import { bindScript, type ScriptBinding } from '../capability/script-binding.js';
+import { boundaryOf, workingDirectoryOf } from '../capability/limits.js';
+import { resolveWithin } from '../capability/paths.js';
 
 export interface ToolContext {
   readonly config: ConfigSnapshot;
@@ -20,6 +23,7 @@ export interface ToolContext {
   readonly signal?: AbortSignal;
   readonly target?: NetworkTarget;
   readonly shell?: ShellSelection;
+  readonly scriptBinding?: ScriptBinding;
 }
 
 type BivariantToolCallback<TArgs, TResult> = {
@@ -61,6 +65,7 @@ export interface ToolManifestEntry {
 export interface KernelSession {
   readonly directory: string;
   append(event: Record<string, unknown>): Promise<unknown>;
+  header?(): Promise<{ readonly formatVersion?: number } | undefined>;
 }
 
 export interface KernelOptions {
@@ -71,6 +76,7 @@ export interface KernelOptions {
   // Omitted low-level callers receive a read-only context with execution unavailable.
   readonly permission?: PermissionContext;
   readonly permissionForCall?: () => PermissionContext;
+  readonly policyOverrideForSession?: () => PolicyMode | null;
 }
 
 export interface Kernel {
@@ -105,6 +111,14 @@ function errorMessage(error: unknown): string | undefined {
   return typeof error.message === 'string' ? error.message : undefined;
 }
 
+function samePermission(left: PermissionContext, right: PermissionContext): boolean {
+  return left.profile === right.profile && left.network === right.network
+    && left.capabilities.filesystemRead === right.capabilities.filesystemRead
+    && left.capabilities.filesystemWrite === right.capabilities.filesystemWrite
+    && left.capabilities.network === right.capabilities.network
+    && left.capabilities.process === right.capabilities.process;
+}
+
 // `options.config` 是加载器生成的配置快照，`options.logger` 是 Host 提供的日志接口。
 // `options.policy` 决定调用如何判定，`options.session` 负责记录本次运行。
 // 未提供策略时只检查工具登记和拒绝规则；未提供会话时不写入记录。
@@ -125,6 +139,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
   }
 
   const tools = new Map<string, RegisteredTool>();
+  const policyOverrideForSession = options.policyOverrideForSession;
   // 按工具名维护 Host 添加的拒绝规则；多次 `restrict()` 可以为同一工具添加多条规则。
   const restrictions: Set<string>[] = [];
 
@@ -341,10 +356,54 @@ export function createKernel(options: KernelOptions = {}): Kernel {
         }
         entry.shell = { kind: shell.kind, executable: shell.executable };
       }
+      let approvedScriptBinding: ScriptBinding | undefined;
+      let scriptBindingError: KernelError | undefined;
       if (policy) {
         // 有能力元数据的工具按其声明的实际能力名称进行判定，例如 `mcp:<服务器>/<工具>`。
         const capability = tool.capability?.(args);
-        const verdict = await policy.evaluate({ tool: name, input: args, target: network, shell, capability, access: tool.access });
+        let scriptBinding: ScriptBinding | undefined;
+        if (tool.access === 'exec' && shell !== undefined && typeof args.command === 'string') {
+          let workspaceRoot: string;
+          let boundary: string;
+          let workingDirectory: string;
+          try {
+            workspaceRoot = workingDirectoryOf(config);
+            boundary = boundaryOf(config);
+            workingDirectory = args.cwd === undefined
+              ? await resolveWithin(boundary, '.', { cwd: workspaceRoot })
+              : await resolveWithin(boundary, args.cwd as string, { cwd: workspaceRoot });
+          } catch (error) {
+            await fail(entry, error instanceof KernelError ? error : new KernelError('tool_failed', { cause: error, detail: errorMessage(error) }));
+            return undefined;
+          }
+          try {
+            scriptBinding = await bindScript({ command: args.command, shell, boundary, workspaceRoot, cwd: workingDirectory, permission: activePermission });
+          } catch (error) {
+            scriptBindingError = error instanceof KernelError ? error : new KernelError('exec_script_binding_unavailable', { cause: error });
+          }
+        }
+        const verdict = await policy.evaluate({ tool: name, input: args, target: network, shell, capability, access: tool.access, scriptBinding,
+          ...(scriptBindingError === undefined ? {} : { scriptBindingError: { code: scriptBindingError.code, detail: scriptBindingError.detail ?? scriptBindingError.code } }),
+        });
+        if (session?.header !== undefined && policy.snapshot !== undefined) {
+          const header = await session.header();
+          if ((header?.formatVersion ?? 0) >= 2) {
+            const snapshot = policy.snapshot();
+            const sessionOverride = policyOverrideForSession?.();
+            try { await session.append({ kind: 'sessionPolicy', ignorable: true, ...snapshot,
+              override: sessionOverride === undefined ? snapshot.override : sessionOverride,
+            }); }
+            catch (error) {
+              await fail(entry, error instanceof KernelError ? error : new KernelError('session_write_failed', { cause: error }));
+              return undefined;
+            }
+          }
+        }
+        approvedScriptBinding = verdict.scriptBinding;
+        if (approvedScriptBinding !== undefined && !samePermission(activePermission, currentPermission())) {
+          await fail(entry, new KernelError('exec_script_binding_changed', { detail: 'the effective permission changed while script approval was pending' }));
+          return undefined;
+        }
         // 会话记录保存权限判定结果，包括策略档位、匹配规则和审批答复。
         // 该结果仅供客户端查看，不加入模型上下文或检查点摘要。
         const recordedVerdict: Record<string, unknown> = {};
@@ -369,6 +428,10 @@ export function createKernel(options: KernelOptions = {}): Kernel {
           if (shell.tail !== '') entry.shell.tail = shell.tail;
         }
       }
+      if (scriptBindingError !== undefined) {
+        await fail(entry, scriptBindingError);
+        return undefined;
+      }
       let value;
       // 将执行耗时写入事件；计时从权限判定通过后开始，不包含等待审批的时间。
       // 使用单调时钟，避免系统时间调整影响耗时结果。
@@ -377,7 +440,8 @@ export function createKernel(options: KernelOptions = {}): Kernel {
         entry.durationMs = Number((process.hrtime.bigint() - startedAt) / 1_000_000n);
       };
       try {
-        value = await tool.run(args, { ...context, permission: activePermission, signal: options.signal, target: network, shell });
+          value = await tool.run(args, { ...context, permission: activePermission, signal: options.signal, target: network, shell,
+            ...(approvedScriptBinding === undefined ? {} : { scriptBinding: approvedScriptBinding }), });
       } catch (error) {
         // 工具抛出未包装的错误时，转换为稳定错误码并将原始错误保存在 cause 中。
         // 错误说明会写入会话记录并提供给模型，避免单个工具异常中断整个循环。
