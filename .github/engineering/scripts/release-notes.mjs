@@ -4,6 +4,9 @@ import { fileURLToPath } from 'node:url';
 
 const RELEASE_TAG = /^(?:[a-z][a-z0-9-]*-)?v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$/;
 const VERSION_HEADING = /^## \[([^\]]+)\](?: - .+)?$/;
+const CHANGELOG_VERSION_REFERENCE = /^\[(Unreleased|(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))\]:\s+(\S+)$/;
+const MARKDOWN_CATEGORY = /^\*\*[^*\n]+\*\*$/;
+const CHANGE_ITEM = /^\s*-\s+\S/;
 
 export function versionFromTag(tag) {
   const match = RELEASE_TAG.exec(tag);
@@ -31,6 +34,34 @@ function requireLanguage(body, label) {
   return positions[0];
 }
 
+function isChangelogVersionReference(line) {
+  const reference = CHANGELOG_VERSION_REFERENCE.exec(line);
+  return Boolean(reference && /\/compare\//.test(reference[2]));
+}
+
+function validateChangeItems(section, language) {
+  const lines = section.split(/\r?\n/);
+  let hasChangeItem = false;
+  let categoryHasItem = true;
+  for (const line of lines) {
+    if (MARKDOWN_CATEGORY.test(line.trim())) {
+      if (!categoryHasItem) {
+        throw new Error(language + ' release section contains an empty category');
+      }
+      categoryHasItem = false;
+    } else if (CHANGE_ITEM.test(line)) {
+      hasChangeItem = true;
+      categoryHasItem = true;
+    }
+  }
+  if (!hasChangeItem) {
+    throw new Error(language + ' release section must contain a concrete change item');
+  }
+  if (!categoryHasItem) {
+    throw new Error(language + ' release section contains an empty category');
+  }
+}
+
 export function extractReleaseNotes(changelog, tag) {
   const version = versionFromTag(tag);
   const lines = changelog.split(/\r?\n/);
@@ -47,8 +78,8 @@ export function extractReleaseNotes(changelog, tag) {
   let end = lines.findIndex((line, index) => index > start && line.startsWith('## '));
   if (end < 0) end = lines.length;
   const body = lines.slice(start + 1, end);
-  // Keep a Changelog commonly appends link reference definitions after its final version.
-  while (body.length && (!body.at(-1).trim() || /^\[[^\]]+\]:\s+\S+/.test(body.at(-1)))) {
+  // Keep a Changelog appends version-comparison references after its version sections.
+  while (body.length && (!body.at(-1).trim() || isChangelogVersionReference(body.at(-1)))) {
     body.pop();
   }
   const zh = requireLanguage(body, '### 简体中文');
@@ -64,6 +95,7 @@ export function extractReleaseNotes(changelog, tag) {
     if (section.includes('TODO') || section.includes('TBD')) {
       throw new Error(language + ' release section contains an unfinished placeholder');
     }
+    validateChangeItems(section, language);
   }
   return '# ' + tag + '\n\n' + body.join('\n').trim() + '\n';
 }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -45,6 +45,30 @@ test('check is read-only, apply updates four files, and dirty edits block overwr
     assert.equal(refused.status, 2);
     assert.match(refused.stderr, /Refusing to overwrite locally modified/);
     assert.equal(readFileSync(join(root, '.agents/skills/pr/SKILL.md'), 'utf8'), 'User change\n');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('ignored untracked destination blocks apply before any destination is written', () => {
+  const root = mkdtempSync(join(tmpdir(), 'engineering-cmd-pr-ignored-test-'));
+  try {
+    assert.equal(run('git', ['init', '--quiet', root], root).status, 0);
+    writeFileSync(join(root, '.gitignore'), '.agents/\n');
+    writeFileSync(join(root, 'README.md'), 'Fixture\n');
+    assert.equal(run('git', ['add', '.gitignore', 'README.md'], root).status, 0);
+    assert.equal(run('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com',
+      'commit', '--quiet', '-m', 'init'], root).status, 0);
+
+    const ignoredTarget = join(root, '.agents/skills/pr/SKILL.md');
+    mkdirSync(join(root, '.agents/skills/pr'), { recursive: true });
+    writeFileSync(ignoredTarget, 'User data\n');
+
+    const refused = run(process.execPath, [script, '--apply', root], root);
+    assert.equal(refused.status, 2);
+    assert.match(refused.stderr, /Refusing to overwrite locally modified or untracked file: \.agents\/skills\/pr\/SKILL\.md/);
+    assert.equal(readFileSync(ignoredTarget, 'utf8'), 'User data\n');
+    assert.equal(existsSync(join(root, '.github/PULL_REQUEST_TEMPLATE.md')), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -71,6 +71,17 @@ test('rejects empty language and template placeholders', () => {
   assert.throws(() => extractReleaseNotes(changelog.replace('- 修复列表筛选。', '- TODO item'), 'v1.2.4'), /placeholder/);
 });
 
+test('requires concrete change items and rejects empty categories', () => {
+  const headingsOnly = changelog.replace('- 修复列表筛选。', '仅有分类标题');
+  assert.throws(() => extractReleaseNotes(headingsOnly, 'v1.2.4'), /concrete change item/);
+
+  const emptyCategory = changelog.replace(
+    '- 修复列表筛选。',
+    '**新增**\n\n**修复**\n- 修复列表筛选。',
+  );
+  assert.throws(() => extractReleaseNotes(emptyCategory, 'v1.2.4'), /empty category/);
+});
+
 test('enforces optional product manifest version', () => {
   checkManifestVersion('{"version":"1.2.4"}', 'v1.2.4');
   assert.throws(() => checkManifestVersion('{"version":"1.2.3"}', 'v1.2.4'), /does not match/);
@@ -81,6 +92,17 @@ test('does not include trailing changelog compare reference definitions', () => 
   const release = extractReleaseNotes(withLinks, 'v1.2.3');
   assert.match(release, /Added pagination/);
   assert.doesNotMatch(release, /https:\/\/example.com/);
+});
+
+test('preserves release body link references while excluding version comparison references', () => {
+  const withLinks = changelog.replace(
+    '- Added pagination.',
+    '- Added pagination, see [installer].\n\n[installer]: https://example.com/install',
+  ) + '[Unreleased]: https://example.com/compare/v1.2.4...main\n[1.2.3]: https://example.com/compare/v1.2.2...v1.2.3\n';
+  const release = extractReleaseNotes(withLinks, 'v1.2.3');
+  assert.match(release, /\[installer\]/);
+  assert.match(release, /\[installer\]: https:\/\/example\.com\/install/);
+  assert.doesNotMatch(release, /\/compare\//);
 });
 
 test('preserves classified bilingual Added, Changed, and Fixed entries without forcing empty categories', () => {

@@ -50,6 +50,13 @@ function sync(repo, apply) {
   // Validate every affected path before writing anything. Do not partially overwrite user edits.
   if (apply) {
     for (const item of changed) {
+      if (existsSync(item.target)) {
+        const tracked = spawnSync('git', ['-C', repo, 'ls-files', '--error-unmatch', '--', item.path], { encoding: 'utf8' });
+        if (tracked.error) throw tracked.error;
+        if (tracked.status !== 0) {
+          throw new Error(`Refusing to overwrite locally modified or untracked file: ${item.path} (untracked)`);
+        }
+      }
       const status = git(repo, ['status', '--porcelain', '--', item.path]);
       if (status) {
         throw new Error(`Refusing to overwrite locally modified or untracked file: ${item.path} (${status})`);
