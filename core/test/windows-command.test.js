@@ -95,7 +95,9 @@ test('guardian IPC disconnect reclaims its Linux descendants', {
     await assertLinuxStopped(leaf.parentId);
   } finally {
     if (owned.child.connected) owned.child.disconnect();
-    await outcome;
+    owned.cancel();
+    await outcome.catch(() => undefined);
+    await owned.completion.catch(() => undefined);
     await rm(directory, { recursive: true, force: true });
   }
 });

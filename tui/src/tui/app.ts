@@ -507,6 +507,10 @@ export function changeSummary(tool: string, args: Record<string, unknown>, local
   return describeChange(tool, args, locale).summary;
 }
 
+export function controlTargetFromChoice(id: string, current: string | null): string | null {
+  return id.startsWith('grant:') ? id.slice('grant:'.length) : current;
+}
+
 // 展开写入类审批时显示目标路径、原内容和新内容，并分别加上减号与加号。
 // 未读取过的内容不展示；删除操作只说明文件会移入回收站。
 function approvalBody(tool: string, args: Record<string, unknown>, locale: Locale = 'zh'): string {
@@ -821,13 +825,15 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       // 审批摘要显示操作对象，例如命令、路径、网络地址或 MCP 工具。
       // 写入内容不在摘要行中重复显示；此处显示行数，完整内容可通过 `/show` 查看。
       const shown = typeof params.command === 'string' ? params.command : typeof args.path === 'string' ? args.path : typeof args.url === 'string' ? args.url : typeof args.server === 'string' ? `mcp:${args.server}/${typeof args.tool === 'string' ? args.tool : ''}` : '';
+      const binding = isRecord(params.scriptBinding) ? params.scriptBinding : undefined;
+      const bindingText = binding === undefined ? '' : `\n\n${chooseText(locale, '脚本审批绑定', 'Script approval binding')}\n${chooseText(locale, '路径', 'Path')}: ${String(binding.path ?? '')}\nSHA-256: ${String(binding.sha256 ?? '')}\n${chooseText(locale, '解释器', 'Interpreter')}: ${String(binding.interpreter ?? '')}\n${chooseText(locale, '工作区', 'Workspace')}: ${String(binding.workspaceRoot ?? '')}\n${chooseText(locale, '权限', 'Permission')}: ${isRecord(binding.permission) ? `${String(binding.permission.profile ?? '')} / ${String(binding.permission.network ?? '')} / ${JSON.stringify(binding.permission.capabilities ?? {})}` : ''}`;
       setAsk({
         id: message.id,
         tool: params.tool,
         detail: shown === '' ? JSON.stringify(args) : String(shown),
         change: changeSummary(params.tool, args, locale),
         reason: typeof params.reason === 'string' ? params.reason : '',
-        content: approvalBody(params.tool, args, locale),
+        content: `${approvalBody(params.tool, args, locale)}${bindingText}`,
         // 显示本次判定和执行使用的命令语法及可执行文件。
         backend: typeof params.shell === 'string' ? `${params.shell} · ${typeof params.executable === 'string' ? params.executable : ''}` : '',
       });
@@ -951,7 +957,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     );
   }, [app, inputs, info.boundary, sessionId, push, t]);
 
-  const openPicker = useCallback((kind: PickerKind) => {
+  const openPicker = useCallback((kind: PickerKind, requestedControlTarget = controlTarget) => {
     const token = ++pickerRequest.current;
     const own = sessionId;
     setDetail(null);
@@ -980,7 +986,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         ];
       } else if (kind === 'control-action') {
         const snapshot = controlSnapshot ?? await client.request('agent-control.list', {}) as AgentControlSnapshot;
-        const grant = snapshot.grants.find((item) => item.id === controlTarget);
+        const grant = snapshot.grants.find((item) => item.id === requestedControlTarget);
         if (grant === undefined) throw new Error('agent_control_grant_not_found');
         const expired = grant.expiresAt !== null && Date.parse(grant.expiresAt) <= Date.now();
         available = [
@@ -1731,8 +1737,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         return;
       }
       if (id.startsWith('grant:')) {
-        setControlTarget(id.slice('grant:'.length));
-        openPicker('control-action');
+        const target = controlTargetFromChoice(id, controlTarget);
+        setControlTarget(target);
+        openPicker('control-action', target ?? undefined);
       }
       return;
     }

@@ -57,7 +57,6 @@ const userDataDirectory = join(temporaryRoot, 'user-data');
 const liguleHome = join(temporaryRoot, 'ligule-home');
 const workspace = join(temporaryRoot, 'workspaces', 'project');
 process.env.LIGULE_HOME = liguleHome;
-const sessionRecordDirectory = sessionDirectory({ boundary: workspace, workspaceRoot: workspace });
 const exportDirectory = join(temporaryRoot, 'exports');
 const exportPath = join(exportDirectory, 'session.md');
 const providerGate = interruptionMode === undefined
@@ -70,6 +69,7 @@ await Promise.all([
   mkdir(exportDirectory, { recursive: true }),
   mkdir(evidenceRoot, { recursive: true }),
 ]);
+const sessionRecordDirectory = sessionDirectory({ boundary: workspace, workspaceRoot: workspace });
 
 if (interruptionMode !== undefined) {
   const config = [
