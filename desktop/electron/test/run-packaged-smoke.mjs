@@ -5,6 +5,7 @@ import { finished } from 'node:stream/promises';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sessionDirectory } from '../../../core/dist/session/list.js';
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const desktopDirectory = dirname(dirname(scriptDirectory));
@@ -55,6 +56,8 @@ const evidenceRoot = await mkdtemp(join(evidenceParent, `packaged-smoke-${runId}
 const userDataDirectory = join(temporaryRoot, 'user-data');
 const liguleHome = join(temporaryRoot, 'ligule-home');
 const workspace = join(temporaryRoot, 'workspaces', 'project');
+process.env.LIGULE_HOME = liguleHome;
+const sessionRecordDirectory = sessionDirectory({ boundary: workspace, workspaceRoot: workspace });
 const exportDirectory = join(temporaryRoot, 'exports');
 const exportPath = join(exportDirectory, 'session.md');
 const providerGate = interruptionMode === undefined
@@ -622,7 +625,7 @@ async function enumerateFiles(root) {
 }
 
 async function sessionJsonl(sessionId) {
-  const files = (await enumerateFiles(join(liguleHome, 'sessions'))).filter(path => path.endsWith('.jsonl'));
+  const files = (await enumerateFiles(sessionRecordDirectory)).filter(path => path.endsWith('.jsonl'));
   for (const path of files) {
     const content = await readFile(path, 'utf8');
     const records = content.split(/\r?\n/u).filter(Boolean).flatMap(line => {
@@ -656,7 +659,7 @@ async function startUiSession(input) {
   await devTools.evaluate(`document.querySelector('button.send').click(); true`);
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
-    const files = (await enumerateFiles(join(liguleHome, 'sessions'))).filter(path => path.endsWith('.jsonl'));
+    const files = (await enumerateFiles(sessionRecordDirectory)).filter(path => path.endsWith('.jsonl'));
     for (const path of files) {
       const records = (await readFile(path, 'utf8')).split(/\r?\n/u).filter(Boolean).flatMap(line => {
         try { return [JSON.parse(line)]; } catch { return []; }
@@ -672,8 +675,37 @@ async function startUiSession(input) {
   throw new Error('ui_session_start_timeout');
 }
 
+async function setInitialPermission(profile, network) {
+  await devTools.evaluate(`document.querySelector('button.permission-trigger')?.click(); true`);
+  await waitUntil(async () => await devTools.evaluate(`document.querySelector('.permission-panel select') instanceof HTMLSelectElement`), 10_000, 'initial_permission_picker_open');
+  const changed = await devTools.evaluate(`(() => {
+    const selects = [...document.querySelectorAll('.permission-panel select')];
+    if (selects.length !== 2 || selects.some(select => !(select instanceof HTMLSelectElement))) return false;
+    const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
+    if (setter === undefined) return false;
+    setter.call(selects[0], ${JSON.stringify(profile)});
+    selects[0].dispatchEvent(new Event('change', { bubbles: true }));
+    setter.call(selects[1], ${JSON.stringify(network)});
+    selects[1].dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  })()`);
+  if (changed !== true) throw new Error('initial_permission_controls_missing');
+  await waitUntil(async () => await devTools.evaluate(`(() => {
+    const apply = document.querySelector('.permission-actions .primary-button');
+    return apply instanceof HTMLButtonElement && !apply.disabled;
+  })()`), 10_000, 'initial_permission_change_ready');
+  await devTools.evaluate(`document.querySelector('.permission-actions .primary-button')?.click(); true`);
+  await waitUntil(async () => await devTools.evaluate(`!document.querySelector('.permission-panel')`), 10_000, 'initial_permission_applied');
+  await devTools.evaluate(`document.querySelector('button.permission-trigger')?.click(); true`);
+  await waitUntil(async () => await devTools.evaluate(`(() => {
+    const selects = [...document.querySelectorAll('.permission-panel select')];
+    return selects.length === 2 && selects[0].value === ${JSON.stringify(profile)} && selects[1].value === ${JSON.stringify(network)};
+  })()`), 10_000, 'initial_permission_applied_value');
+  await devTools.evaluate(`document.querySelector('.permission-panel button[aria-label="收起权限"], .permission-panel button[aria-label="Close permissions"]')?.click(); true`);
+}
+
 async function remainingSessionLocks() {
-  const files = await enumerateFiles(join(liguleHome, 'sessions'));
+  const files = await enumerateFiles(sessionRecordDirectory);
   return files.filter(path => /\.jsonl\.lock(?:[\\/]|$)/iu.test(path));
 }
 
@@ -1015,10 +1047,11 @@ async function runChecks() {
     if (interruptionMode === 'local') {
       await check('local model tool approval denial and allowance', async () => {
         if (sessionId === undefined) throw new Error('session_not_created');
+        await setInitialPermission('workspace-write', 'policy');
         sessionId = await startUiSession('[LOCAL_APPROVAL_DENY] 通过 create 工具写入审批验收文件。');
         const denied = await runLocalApproval(sessionId, 'deny', true);
         const allowed = await runLocalApproval(sessionId, 'allow');
-        return `${denied}；${allowed}`;
+        return `以工作区可写、网络按 Policy 限制创建会话；${denied}；${allowed}`;
       });
     } else if (interruptionMode === 'real') {
       await check('start the official model request from the selected UI session', async () => {
