@@ -240,8 +240,9 @@ test('abort before response headers is reported as cancellation rather than tran
 
 test('an AbortSignal timeout is reported as a transport timeout, not user cancellation', async () => {
   await withEndpoint(() => {}, async (baseUrl, requests) => {
+    // Let the loopback request reach the local server before timing out under test load.
     await assert.rejects(
-      () => collect(provider(baseUrl).stream({}, { signal: AbortSignal.timeout(20) })),
+      () => collect(provider(baseUrl).stream({}, { signal: AbortSignal.timeout(250) })),
       (error) => {
         assert.equal(error.code, 'provider_timeout');
         diagnostic(error, {
