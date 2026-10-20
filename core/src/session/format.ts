@@ -7,6 +7,11 @@ export const SESSION_FORMAT_VERSION = 2;
 export interface SessionModeIdentity {
   name: string;
   layer: string;
+  source?: 'named' | 'inline';
+  digest?: string;
+  fileDigest?: string;
+  tools?: string[];
+  prompt?: string[];
 }
 
 export interface SessionHeader {

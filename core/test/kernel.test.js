@@ -199,6 +199,23 @@ test('nested schemas reject unsupported constructs and nesting beyond the suppor
   })), (error) => error.code === 'tool_parameters_unsupported_construct' && error.detail.includes('maximum schema depth'));
 });
 
+test('string length bounds are checked as Unicode characters and invalid bounds fail registration', async () => {
+  const kernel = createKernel();
+  kernel.register(makeTool('label', {
+    parameters: { type: 'object', properties: { value: { type: 'string', minLength: 2, maxLength: 3 } }, required: ['value'] },
+  }));
+  assert.equal(await kernel.call('label', { value: '猫a' }), 'ok');
+  await assert.rejects(kernel.call('label', { value: 'a' }), { code: 'tool_args_invalid' });
+  await assert.rejects(kernel.call('label', { value: '猫猫猫猫' }), { code: 'tool_args_invalid' });
+
+  assert.throws(() => createKernel().register(makeTool('label', {
+    parameters: { type: 'object', properties: { value: { type: 'integer', maxLength: 3 } } },
+  })), (error) => error.code === 'tool_parameters_unsupported_construct' && error.detail.includes('maxLength needs type string'));
+  assert.throws(() => createKernel().register(makeTool('label', {
+    parameters: { type: 'object', properties: { value: { type: 'string', minLength: 4, maxLength: 3 } } },
+  })), (error) => error.code === 'tool_parameters_unsupported_construct' && error.detail.includes('minLength above maxLength'));
+});
+
 test('a numeric bound on a numeric parameter registers and is enforced per call', async () => {
   const kernel = createKernel();
   kernel.register(makeTool('read', { parameters: { type: 'object', properties: { n: { type: 'integer', minimum: 1, maximum: 3 } }, required: ['n'] } }));

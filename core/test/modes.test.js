@@ -12,6 +12,7 @@ import {
   applyMode, createConfig, createConnection, createKernel, createMemoryConnectionPair, createSkillPlugin, DEFAULT_MODE,
   loadAssembly, loadMode, MESSAGES_CAPABILITIES, minimalPlugin, modeDirectories, serveHost,
 } from '../dist/index.js';
+import { resolveModeSelection } from '../dist/kernel/modes.js';
 
 const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
 const MINIMAL = ['create', 'delete', 'edit', 'exec', 'find', 'read', 'search', 'write'];
@@ -108,6 +109,33 @@ test('the project layer wins whole, and its file still cannot name what the load
     assert.equal(mode.layer, 'project');
     // 整份覆盖：全局那份写了两个工具，项目那份写一个，生效的就只有一个，不做按键合并。
     assert.deepEqual(mode.tools, ['read']);
+  });
+});
+
+test('delegation mode selections normalize legacy names, inherited names, and inline definitions', async () => {
+  await withLayout(async ({ directories }) => {
+    const path = await writeMode(directories, 'project', 'review', complete('["read"]'));
+    const named = await loadMode('review', directories);
+    const inherited = await resolveModeSelection(undefined, directories, named);
+    assert.equal(inherited.source, 'named');
+    assert.equal(inherited.name, 'review');
+    assert.equal(inherited.application, named);
+
+    const legacy = await resolveModeSelection('review', directories);
+    const explicit = await resolveModeSelection({ type: 'named', name: 'review' }, directories);
+    assert.equal(legacy.fileDigest, named.digest);
+    assert.deepEqual(explicit, legacy);
+    assert.equal(explicit.application.path, path);
+
+    const inline = await resolveModeSelection({ type: 'inline', tools: ['read'], prompt: [] }, directories);
+    assert.deepEqual(inline, {
+      application: { name: 'inline', tools: ['read'], prompt: [] },
+      source: 'inline', name: 'inline', layer: 'inline',
+    });
+    await assert.rejects(
+      resolveModeSelection({ type: 'inline', tools: ['read', 'read'], prompt: [] }, directories),
+      { code: 'mode_field_duplicate' },
+    );
   });
 });
 

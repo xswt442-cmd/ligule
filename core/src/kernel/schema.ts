@@ -4,7 +4,7 @@ import { KernelError } from './error.js';
 
 const MAX_SCHEMA_DEPTH = 8;
 const SCHEMA_KEYS = [
-  'type', 'properties', 'required', 'description', 'minimum', 'maximum', 'enum', 'items', 'anyOf', 'additionalProperties',
+  'type', 'properties', 'required', 'description', 'minimum', 'maximum', 'minLength', 'maxLength', 'enum', 'items', 'anyOf', 'additionalProperties',
 ];
 const VALUE_TYPES = ['string', 'integer', 'number', 'boolean'];
 const NUMBER_TYPES = ['integer', 'number'];
@@ -60,6 +60,19 @@ function validateSchemaNode(
     } else if (type === undefined || !NUMBER_TYPES.includes(type)) {
       violations.push(`${path}.${bound} needs type integer or number`);
     }
+  }
+  for (const bound of ['minLength', 'maxLength']) {
+    if (schema[bound] === undefined) continue;
+    if (!Number.isSafeInteger(schema[bound]) || (schema[bound] as number) < 0) {
+      violations.push(`${path}.${bound} must be a non-negative safe integer`);
+    } else if (type !== 'string') {
+      violations.push(`${path}.${bound} needs type string`);
+    }
+  }
+  if (typeof schema.minLength === 'number' && typeof schema.maxLength === 'number'
+    && Number.isSafeInteger(schema.minLength) && Number.isSafeInteger(schema.maxLength)
+    && schema.minLength > schema.maxLength) {
+    violations.push(`${path} has minLength above maxLength`);
   }
   if (type !== undefined && NUMBER_TYPES.includes(type)
     && typeof schema.minimum === 'number' && typeof schema.maximum === 'number'
@@ -164,6 +177,16 @@ function validateValue(schema: Record<string, unknown>, value: unknown, path: st
   else if (type === 'boolean' && typeof value !== 'boolean') violations.push(`"${path}" must be a boolean`);
   else if (type === 'object' && !isPlainObject(value)) violations.push(`"${path}" must be an object`);
   else if (type === 'array' && !Array.isArray(value)) violations.push(`"${path}" must be an array`);
+
+  if (type === 'string' && typeof value === 'string') {
+    const length = Array.from(value).length;
+    if (typeof schema.minLength === 'number' && length < schema.minLength) {
+      violations.push(`"${path}" must contain at least ${schema.minLength} characters`);
+    }
+    if (typeof schema.maxLength === 'number' && length > schema.maxLength) {
+      violations.push(`"${path}" must contain at most ${schema.maxLength} characters`);
+    }
+  }
 
   if (schema.enum !== undefined && Array.isArray(schema.enum) && !schema.enum.some((option) => Object.is(option, value))) {
     violations.push(`"${path}" must be one of the allowed values`);

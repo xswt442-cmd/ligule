@@ -19,14 +19,34 @@ const MODE_FIELDS = ['tools', 'prompt'];
 export type ModeLayer = 'shipped' | 'user' | 'project';
 
 export interface ModeFile {
-  name: string;
+  readonly name: string;
   layer: ModeLayer;
   path: string;
-  tools: string[] | '*';
-  prompt: string[] | '*';
+  readonly tools: string[] | '*';
+  readonly prompt: string[] | '*';
   // 恢复会话时用摘要确认同名模式文件是否仍与打开会话时相同。
   // 摘要覆盖完整文件内容，包括注释和空白。
-  digest: string;
+  readonly digest: string;
+}
+
+export interface ModeApplicationSpec {
+  readonly name: string;
+  readonly tools: readonly string[] | '*';
+  readonly prompt: readonly string[] | '*';
+}
+
+export type DelegationModeSelection =
+  | { readonly type: 'named'; readonly name: string }
+  | { readonly type: 'inline'; readonly tools: readonly string[] | '*'; readonly prompt: readonly string[] | '*' };
+
+export type RequestedModeSelection = string | DelegationModeSelection;
+
+export interface ResolvedModeSelection {
+  readonly application: ModeApplicationSpec;
+  readonly source: 'named' | 'inline';
+  readonly name: string;
+  readonly layer: ModeLayer | 'inline';
+  readonly fileDigest?: string;
 }
 
 export interface ModeDirectories {
@@ -138,6 +158,60 @@ export async function loadMode(name: string, directories: ModeDirectories): Prom
   return { name, layer: file.layer, path: file.path, tools, prompt, digest };
 }
 
+function inlineNames(value: readonly string[] | '*', field: string): readonly string[] | '*' {
+  if (value === '*') return value;
+  if (!Array.isArray(value) || value.length > 128) throw new KernelError('mode_field_invalid', { detail: `${field} must have at most 128 names` });
+  const names: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string' || item.length === 0 || item.length > 128) {
+      throw new KernelError('mode_field_invalid', { detail: `${field} takes non-empty names up to 128 characters` });
+    }
+    if (names.includes(item)) throw new KernelError('mode_field_duplicate', { detail: `${field} names ${item} twice` });
+    names.push(item);
+  }
+  return names;
+}
+
+// 将旧版字符串、新版具名模式、临时模式统一成后续可共同应用的选择。
+export async function resolveModeSelection(
+  selection: RequestedModeSelection | undefined,
+  directories: ModeDirectories | undefined,
+  inherited?: ModeFile,
+): Promise<ResolvedModeSelection | undefined> {
+  if (selection === undefined) {
+    if (inherited === undefined) return undefined;
+    return {
+      application: inherited,
+      source: 'named',
+      name: inherited.name,
+      layer: inherited.layer,
+      fileDigest: inherited.digest,
+    };
+  }
+  if (typeof selection === 'object' && selection.type === 'inline') {
+    return {
+      application: {
+        name: 'inline',
+        tools: inlineNames(selection.tools, 'tools'),
+        prompt: inlineNames(selection.prompt, 'prompt'),
+      },
+      source: 'inline',
+      name: 'inline',
+      layer: 'inline',
+    };
+  }
+  const name = typeof selection === 'string' ? selection : selection.name;
+  if (directories === undefined) throw new KernelError('host_mode_paths_required');
+  const file = await loadMode(name, directories);
+  return {
+    application: file,
+    source: 'named',
+    name: file.name,
+    layer: file.layer,
+    fileDigest: file.digest,
+  };
+}
+
 /** 返回客户端可选择的模式名称和无路径诊断。 */
 export async function listModes(directories: ModeDirectories): Promise<{
   readonly modes: { readonly name: string; readonly layer: ModeLayer }[];
@@ -176,10 +250,10 @@ export async function listModes(directories: ModeDirectories): Promise<{
 
 // 模式引用未登记的工具时返回错误，不静默删去该项，以免实际工具清单与配置不符。
 // 返回的撤销函数用于切换模式时移除本次限制，不会撤销其他调用添加的拒绝规则。
-export function applyMode(kernel: ModeTarget, mode: ModeFile): { tools: string[]; undo: () => void } {
+export function applyMode(kernel: ModeTarget, mode: ModeApplicationSpec): { tools: string[]; undo: () => void } {
   const registered = kernel.list();
   const selectable = kernel.selectable();
-  const selected = mode.tools;
+  const selected = mode.tools === '*' ? '*' : [...mode.tools];
   if (selected === '*') return { tools: registered, undo: () => {} };
   for (const name of selected) {
     if (!registered.includes(name)) {
@@ -197,12 +271,12 @@ export function applyMode(kernel: ModeTarget, mode: ModeFile): { tools: string[]
 
 // 工具限制和提示片段一起应用，保证同一模式在父会话与派生会话中含义一致。
 export function applyModeToPrompt({ file, kernel, prompt, fragments, maxBytes }: {
-  readonly file: ModeFile;
+  readonly file: ModeApplicationSpec;
   readonly kernel: ModeTarget & { manifest(): readonly { readonly name: string }[] };
   readonly prompt: PromptAssembly;
   readonly fragments: readonly ModePromptFragment[];
   readonly maxBytes: number;
-}): { readonly tools: string[]; undo(): void } {
+}): { readonly tools: string[]; readonly prompt: string[]; readonly digest: string; undo(): void } {
   const selected = file.prompt === '*'
     ? [...fragments]
     : file.prompt.map((name) => {
@@ -214,7 +288,11 @@ export function applyModeToPrompt({ file, kernel, prompt, fragments, maxBytes }:
         }
         return found;
       });
-  const applied = applyMode(kernel, file);
+  const applied = applyMode(kernel, {
+    name: file.name,
+    tools: file.tools === '*' ? kernel.selectable() : file.tools,
+    prompt: file.prompt,
+  });
   const fragmentUndo: (() => void)[] = [];
   try {
     selected.forEach((fragment, index) => {
@@ -230,8 +308,19 @@ export function applyModeToPrompt({ file, kernel, prompt, fragments, maxBytes }:
     applied.undo();
     throw error;
   }
+  const tools = kernel.manifest().map((entry) => entry.name);
+  const selectedPrompt = selected.map((fragment) => fragment.name);
+  const digest = createHash('sha256').update(JSON.stringify({
+    tools,
+    prompt: selected.map(({ name, text }) => ({
+      name,
+      digest: createHash('sha256').update(text).digest('hex'),
+    })),
+  })).digest('hex').slice(0, 12);
   return {
-    tools: kernel.manifest().map((entry) => entry.name),
+    tools,
+    prompt: selectedPrompt,
+    digest,
     undo() {
       for (const remove of fragmentUndo.slice().reverse()) remove();
       applied.undo();

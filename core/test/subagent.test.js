@@ -157,3 +157,52 @@ test("the derived agent runs under the mode the parent session picked", async ()
   assert.deepEqual(provider.requests[1].tools.map((entry) => entry.name), ['read']);
   assert.match(provider.requests[1].system, /Check each claim against the files before reporting/u);
 });
+
+test('an inline mode freezes the registered tools and prompt fragments in the child record', async () => {
+  const boundary = await workspace();
+  const config = createConfig({ user: { boundary } });
+  const chain = createDecisionChain({ mode: 'auto' });
+  const provider = scripted([text('the scoped child result')]);
+  const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'inline-parent' });
+  const kernel = createKernel({ config, policy: chain, session });
+  createSubagentPlugin({
+    config,
+    provider,
+    chain,
+    prompt: { staticPrefix: 'shared static prefix' },
+    directory: session.directory,
+    sessionId: 'inline-parent',
+    plugins: [minimalPlugin, networkPlugin],
+    promptFragments: () => [
+      { name: 'review-guidance', text: 'Check each claim against the files before reporting.' },
+      { name: 'unused-guidance', text: 'This fragment should not appear in the child request.' },
+    ],
+  }).setup(kernel);
+
+  const result = await kernel.call('subagent', {
+    task: 'read only',
+    mode: { type: 'inline', tools: ['read'], prompt: ['review-guidance'] },
+  });
+  assert.equal(result.text, 'the scoped child result');
+  assert.equal(result.mode, 'inline');
+  assert.equal(typeof result.modeDigest, 'string');
+  assert.deepEqual(provider.requests[0].tools.map((entry) => entry.name), ['read']);
+  assert.match(provider.requests[0].system, /Check each claim against the files before reporting/u);
+  assert.doesNotMatch(provider.requests[0].system, /This fragment should not appear/u);
+
+  const side = (await readFile(join(session.directory, 'inline-parent.sub-1.jsonl'), 'utf8')).split('\n').filter(Boolean).map(JSON.parse);
+  assert.equal(side[0].mode.source, 'inline');
+  assert.deepEqual(side[0].mode.tools, ['read']);
+  assert.deepEqual(side[0].mode.prompt, ['review-guidance']);
+  assert.equal(typeof side[0].mode.digest, 'string');
+  assert.equal(side[0].mode.path, undefined, 'the inline snapshot does not persist a private source path');
+  assert.equal(side[0].mode.digest, result.modeDigest);
+  await assert.rejects(kernel.call('subagent', {
+    task: 'try to add a tool',
+    mode: { type: 'inline', tools: ['subagent'], prompt: [] },
+  }), { code: 'mode_tool_unregistered' });
+  await assert.rejects(kernel.call('subagent', {
+    task: 'use an unknown fragment',
+    mode: { type: 'inline', tools: ['read'], prompt: ['missing-guidance'] },
+  }), { code: 'mode_prompt_unavailable' });
+});
