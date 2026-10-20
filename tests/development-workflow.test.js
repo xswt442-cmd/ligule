@@ -36,6 +36,10 @@ test('G01–G04: isolated Node project, defect repair, repository README, design
   if (permission.capabilities.process !== 'full') return t.skip('the platform process ownership backend is unavailable');
   await withTuiHost(async (context) => {
     const { client, projectDirectory, sessionDirectory, sessionId, providerRequests } = context;
+    await client.request('workspace.trust', {
+      projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true,
+    });
+    assert.equal((await client.request('status.get', { sessionId })).permission.workspaceTrusted, true);
     // 只回应 Host 实际提出的命令审批；Permission 仍由本测试使用平台实测能力显式设置。
     client.onRequest(async (message) => {
       assert.equal(message.method, 'approval.request');
@@ -156,6 +160,7 @@ test('G01–G04: isolated Node project, defect repair, repository README, design
     setup: stageReferences,
     config: { policy: { mode: 'auto' } },
     interactive: true,
+    permissionControl: true,
     permission,
   });
 });

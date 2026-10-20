@@ -698,7 +698,7 @@ test('an approval for a command names the shell backend the host chose', async (
     async *stream() {
       turns += 1;
       if (turns === 1) {
-        yield { type: 'tool-call', id: 'call_1', name: 'exec', args: { command: 'git status' } };
+        yield { type: 'tool-call', id: 'call_1', name: 'exec', args: { command: 'git --version' } };
         return;
       }
       yield { type: 'text', text: 'done' };
@@ -717,7 +717,7 @@ test('an approval for a command names the shell backend the host chose', async (
     await connection.request('run.start', { sessionId, input: 'run it' });
     assert.equal(approvals.length, 1);
     assert.equal(approvals[0].tool, 'exec');
-    assert.equal(approvals[0].command, 'git status');
+    assert.equal(approvals[0].command, 'git --version');
     const selection = resolveShell({});
     assert.equal(approvals[0].shell, selection.kind);
     assert.equal(approvals[0].executable, selection.executable);
@@ -1204,6 +1204,7 @@ test('the settings panel reads and writes the project it names, and a shared def
   const a = join(root, 'a');
   const b = join(root, 'b');
   const home = join(root, 'home');
+  await mkdir(a, { recursive: true });
   await mkdir(join(b, '.ligule'), { recursive: true });
   await mkdir(home, { recursive: true });
   await writeFile(join(b, '.ligule', 'config.local.toml'), '[model]\nmodel = "B 那一份"\n', 'utf8');
