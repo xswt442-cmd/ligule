@@ -236,7 +236,7 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
           </label>}
           {draft.maxPermissionProfile !== 'read-only' && <label className="grant-confirmation grant-risk">
             <input type="checkbox" checked={draft.confirmPartialWorkspaceWrite} onChange={(event) => update('confirmPartialWorkspaceWrite', event.target.checked)} />
-            <span>{t('确认接受可能适用的部分隔离限制。Windows 工作区写入无法限制读取和网络，硬链接或可写父目录删除权限也可能越过工作区范围；正常清理会撤销临时 ACE，但自动继承元数据标记可能保留。', 'Accept the partial-isolation limits that may apply. Windows workspace-write cannot restrict reads or network, and hard links or delete-child rights on writable parent folders may escape the workspace boundary. Normal cleanup revokes temporary ACEs, but auto-inheritance metadata may remain.')}</span>
+            <span>{t('确认接受可能适用的部分隔离限制。Windows 工作区写入无法限制读取和网络，硬链接或可写父目录删除权限也可能越过工作区范围；正常清理会撤销临时 ACE，但自动继承元数据标记可能保留。Shell 每次运行使用临时用户配置目录，用户级缓存不会沿用。', 'Accept the partial-isolation limits that may apply. Windows workspace-write cannot restrict reads or network, and hard links or delete-child rights on writable parent folders may escape the workspace boundary. Normal cleanup revokes temporary ACEs, but auto-inheritance metadata may remain. Each Shell command uses a temporary user profile, so user-level caches are not reused.')}</span>
           </label>}
         </section>
 

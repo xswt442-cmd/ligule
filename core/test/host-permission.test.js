@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile, realpath, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -395,6 +396,94 @@ test('confirmed Windows workspace-write executes through the Host and restricted
     assert.match(await runExec('git ls-files --error-unmatch powershell-result.txt'), /powershell-result\.txt/u);
     assert.equal(approvals.length, 5);
   }, { permission, interactive: true, permissionControl: true });
+});
+
+test('trusted Windows project commands can install without scripts, build, and run a cancellable dev server', {
+  skip: process.platform !== 'win32',
+  timeout: 120_000,
+}, async () => {
+  const permission = createPermissionContext('workspace-write', 'unrestricted', {
+    filesystemRead: 'partial', filesystemWrite: 'partial', network: 'partial', process: 'full',
+  }, {
+    profiles: { readOnly: 'partial', workspaceWrite: 'partial' },
+    limitations: ['Windows workspace-write has partial isolation.'],
+    partialWorkspaceWriteConfirmationRequired: true,
+    partialWorkspaceWriteConfirmed: true,
+  });
+  await withTuiHost(async ({ client, sessionId, projectDirectory }) => {
+    const packageManifest = {
+      name: 'ligule-windows-project-tools',
+      version: '1.0.0',
+      packageManager: 'pnpm@12.9.1',
+      scripts: {
+        preinstall: `node -e "require('node:fs').writeFileSync('install-script-ran','yes')"`,
+        build: 'node build.cjs',
+        dev: 'node server.cjs',
+      },
+    };
+    await writeFile(join(projectDirectory, 'package.json'), JSON.stringify(packageManifest));
+    await writeFile(join(projectDirectory, 'build.cjs'), "require('node:fs').writeFileSync('build-output.txt', 'build-ok');\n");
+    await writeFile(join(projectDirectory, 'server.cjs'), [
+      "const fs=require('node:fs');",
+      "const http=require('node:http');",
+      "const server=http.createServer((_request,response)=>response.end('ligule-dev-server-ok'));",
+      "server.listen(0,'127.0.0.1',()=>fs.writeFileSync('server-state.json',JSON.stringify({pid:process.pid,port:server.address().port})));",
+    ].join('\n'));
+    const aclBefore = execFileSync('icacls.exe', [projectDirectory], { encoding: 'utf8' });
+    await client.request('workspace.trust', {
+      projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true,
+    });
+    const approvals = [];
+    client.onRequest((message) => {
+      if (message.method !== 'approval.request') return undefined;
+      approvals.push(message.params);
+      return { decision: 'allow' };
+    });
+    const runExec = async (command) => {
+      await client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command } }) });
+      const toolResult = (await client.request('session.read', { sessionId })).events
+        .filter((event) => event.kind === 'tool' && event.tool === 'exec').at(-1).result;
+      assert.notEqual(toolResult.failed, true, JSON.stringify({ command, toolResult, approvals }));
+      assert.equal(toolResult.content.exitCode, 0, JSON.stringify({ command, toolResult, approvals }));
+      return toolResult.content.text;
+    };
+
+    const executionPaths = JSON.parse((await runExec('node -p "JSON.stringify({cwd:process.cwd(),temp:process.env.TEMP,home:process.env.HOME,profile:process.env.USERPROFILE,corepack:process.env.COREPACK_HOME,local:process.env.LOCALAPPDATA,roaming:process.env.APPDATA})"')).trim());
+    assert.equal(await realpath(executionPaths.cwd), await realpath(projectDirectory));
+    assert.equal(executionPaths.home, join(executionPaths.temp, 'profile'));
+    assert.equal(executionPaths.profile, join(executionPaths.temp, 'profile'));
+    assert.equal(executionPaths.corepack, join(executionPaths.temp, 'corepack'));
+    assert.equal(executionPaths.local, join(executionPaths.profile, 'AppData', 'Local'));
+    assert.equal(executionPaths.roaming, join(executionPaths.profile, 'AppData', 'Roaming'));
+    await runExec('pnpm install --ignore-scripts');
+    assert.equal(existsSync(join(projectDirectory, 'install-script-ran')), false, 'the package preinstall hook must not run when scripts are disabled');
+    await runExec('pnpm run build');
+    assert.equal(await readFile(join(projectDirectory, 'build-output.txt'), 'utf8'), 'build-ok');
+
+    const devRun = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command: 'pnpm run dev' } }) });
+    const devOutcome = devRun.then(() => undefined, (error) => error);
+    const serverStatePath = join(projectDirectory, 'server-state.json');
+    await waitFor(() => existsSync(serverStatePath), { within: 10_000, every: 25 });
+    const serverState = JSON.parse(await readFile(serverStatePath, 'utf8'));
+    const response = await fetch(`http://127.0.0.1:${serverState.port}`);
+    assert.equal(await response.text(), 'ligule-dev-server-ok');
+    assert.deepEqual(await client.request('run.cancel', { sessionId }), { cancelled: true });
+    assert.equal((await devOutcome)?.code, 'loop_cancelled');
+    assert.ok(Number.isSafeInteger(serverState.pid) && serverState.pid > 0);
+    const deadline = Date.now() + 3_000;
+    let serverRunning = true;
+    while (Date.now() < deadline) {
+      try { process.kill(serverState.pid, 0); }
+      catch (error) {
+        if (error.code === 'ESRCH') { serverRunning = false; break; }
+        throw error;
+      }
+      await delay(25);
+    }
+    assert.equal(serverRunning, false, `dev server process ${serverState.pid} remained alive after cancellation`);
+    assert.equal(execFileSync('icacls.exe', [projectDirectory], { encoding: 'utf8' }), aclBefore);
+    assert.ok(approvals.length >= 4, 'each trusted project command still requires per-call approval');
+  }, { permission, interactive: true, permissionControl: true, testDirectory: tmpdir() });
 });
 
 test('cancelling a Windows workspace-write Host command kills descendants and restores its workspace ACL', {

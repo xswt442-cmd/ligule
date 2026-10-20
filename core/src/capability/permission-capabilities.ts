@@ -124,6 +124,7 @@ export async function detectPermissionCapabilities(
             'Existing hard links, a writable ancestor FILE_DELETE_CHILD ACE, or a concurrent same-user ACL change can escape the workspace boundary. The backend does not claim protection from hostile native code. / 既有硬链接、可写祖先目录的 FILE_DELETE_CHILD ACE 或并发 ACL 修改可能越过工作区边界；此后端不承诺隔离恶意原生代码。',
             'The runner does not lower Integrity Level. A forced Guardian termination can leave a unique SID-only ACE; ordinary same-user and Low-integrity access must remain at baseline. / Runner 不降低完整性级别。强制终止 Guardian 后可能残留独立 SID ACE；同一用户普通进程和 Low 完整性进程的访问权限应保持原状。',
             'Windows may mark affected workspace DACLs as auto-inherited while propagating temporary ACEs. Normal cleanup revokes the ACE, but the inheritance metadata may remain; this does not retain the run’s ACE permission, though exact DACL metadata restoration is not guaranteed. / Windows 传播临时 ACE 时可能把受影响的工作区 DACL 标记为自动继承。正常清理会撤销 ACE，但继承元数据标记可能保留；该标记不会保留本次 ACE 权限，因此不保证 DACL 元数据完全恢复。',
+            'Windows workspace-write gives each Shell command a private temporary user profile and cache roots. User-home settings are not carried into the command, and tool caches are removed when it ends. / Windows 工作区写入会为每条 Shell 命令提供私有临时用户配置目录和缓存目录；用户目录里的设置不会带入命令，工具缓存会在命令结束后清理。',
           ] : []),
         ]),
       });

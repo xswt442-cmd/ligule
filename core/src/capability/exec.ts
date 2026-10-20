@@ -4,9 +4,9 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { constants } from 'node:fs';
-import { chmod, mkdtemp, open, realpath, rm, stat, type FileHandle } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, open, realpath, rm, stat, type FileHandle } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, extname, join, relative } from 'node:path';
+import { dirname, extname, join, parse, relative } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { KernelError } from '../kernel/error.js';
 import { isWithin, resolveWithin } from './paths.js';
@@ -376,6 +376,23 @@ export const execTool = {
             }
             if (privateTempDir === undefined) throw new KernelError('exec_sandbox_setup_failed', { detail: 'Windows workspace-write requires a private temporary directory' });
             windowsLaunch = { kind: 'restricted-token', workspaceRoot: boundary, tempDirectory: privateTempDir };
+            const privateProfile = join(privateTempDir, 'profile');
+            const privateLocalAppData = join(privateProfile, 'AppData', 'Local');
+            const privateRoamingAppData = join(privateProfile, 'AppData', 'Roaming');
+            const privateCorepackHome = join(privateTempDir, 'corepack');
+            const privateProfileRoot = parse(privateProfile).root;
+            if (privateProfileRoot === '') throw new KernelError('exec_temp_path_invalid');
+            await mkdir(privateLocalAppData, { recursive: true });
+            await mkdir(privateRoamingAppData, { recursive: true });
+            await mkdir(privateCorepackHome, { recursive: true });
+            // Corepack and pnpm resolve Windows locks and caches through the user profile; keep those writes in this run's private temp tree.
+            environment.HOME = privateProfile;
+            environment.USERPROFILE = privateProfile;
+            environment.HOMEDRIVE = privateProfileRoot.replace(/[\\/]+$/u, '');
+            environment.HOMEPATH = privateProfile.slice(privateProfileRoot.length - 1);
+            environment.APPDATA = privateRoamingAppData;
+            environment.LOCALAPPDATA = privateLocalAppData;
+            environment.COREPACK_HOME = privateCorepackHome;
             environment.TEMP = privateTempDir;
             environment.TMP = privateTempDir;
           }

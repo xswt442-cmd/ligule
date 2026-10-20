@@ -41,8 +41,8 @@ export async function waitFor(condition, { within = 150_000, every = 30, read = 
   }
 }
 
-export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {}, interactive = false, permissionControl = false, permission, extensions, agentControl } = {}) {
-  const testplace = resolve('testplace');
+export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {}, interactive = false, permissionControl = false, permission, extensions, agentControl, testDirectory: requestedTestDirectory } = {}) {
+  const testplace = resolve(requestedTestDirectory ?? 'testplace');
   await mkdir(testplace, { recursive: true });
   const directory = await mkdtemp(join(testplace, 'tui-host-'));
   const absoluteDirectory = resolve(directory);
