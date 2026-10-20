@@ -1416,6 +1416,7 @@ export function createHost({
     // 根据扩展片段和当前模式选中的名称组装提示词。
     // 所有配置层都未设置基础提示词时，使用随包提供的版本。
     const prompt = createPromptAssembly({ static: config.prompt?.static ?? BASE_SYSTEM_PROMPT });
+    const fragments: ExtensionPromptFragment[] = [];
     // 派生执行继承父会话的策略和静态提示词前缀，但不能再注册子 Agent。
     // 直接使用底层提供方；派生事件记录在其独立会话中。
     const basePlugins = [...loaded, createMcpPlugin(mcp)];
@@ -1461,6 +1462,8 @@ export function createHost({
       plugins: basePlugins,
       modePaths,
       modeFile: () => state.mode.file,
+      promptFragments: () => fragments,
+      promptFragmentBytes: limitsOf(config).promptFragmentBytes,
       loopLimits: sessionLoopLimits(state),
     })]);
     cleanup.push(() => assembly.dispose());
@@ -1479,7 +1482,6 @@ export function createHost({
     }
     // 按加载器解析的来源顺序加载扩展，只提供声明过的注册、事件和能力接口。
     // 每个已注册工具仍须经过 Kernel 参数校验和权限判定。
-    const fragments: ExtensionPromptFragment[] = [];
     const extensionsEnabled = state.permission.profile === 'full-access' && state.permission.network === 'unrestricted';
     const extensionDiagnostics = extensionsEnabled ? extensions.ignored : [
       ...extensions.ignored,

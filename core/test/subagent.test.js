@@ -148,9 +148,12 @@ test("the derived agent runs under the mode the parent session picked", async ()
     directory: session.directory,
     sessionId: 'p3',
     plugins: [minimalPlugin, networkPlugin],
-    modeFile: () => ({ name: 'readonly', layer: 'user', path: 'readonly.toml', tools: ['read'], prompt: [] }),
+    promptFragments: () => [{ name: 'review-guidance', text: 'Check each claim against the files before reporting.' }],
+    promptFragmentBytes: 4096,
+    modeFile: () => ({ name: 'readonly', layer: 'user', path: 'readonly.toml', tools: ['read'], prompt: ['review-guidance'], digest: 'mode-digest' }),
   }).setup(kernel);
   const result = await kernel.call('subagent', { task: 'read only' });
   assert.equal(result.mode, 'readonly');
   assert.deepEqual(provider.requests[1].tools.map((entry) => entry.name), ['read']);
+  assert.match(provider.requests[1].system, /Check each claim against the files before reporting/u);
 });

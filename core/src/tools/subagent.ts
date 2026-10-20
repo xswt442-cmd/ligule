@@ -8,7 +8,7 @@ import { createKernel } from '../kernel/kernel.js';
 import { createLoop, DEFAULT_LOOP_LIMITS } from '../kernel/loop.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { createSessionLog } from '../session/session.js';
-import { applyMode, loadMode } from '../kernel/modes.js';
+import { applyModeToPrompt, loadMode, type ModeFile, type ModePromptFragment } from '../kernel/modes.js';
 import { createConfig } from '../kernel/config.js';
 import { createDecisionChain } from '../kernel/policy.js';
 import { createLogger } from '../kernel/log.js';
@@ -28,7 +28,9 @@ export interface SubagentDeps {
   logger?: Parameters<typeof createLogger>[0];
   plugins: Parameters<typeof loadAssembly>[1];
   modePaths?: NonNullable<Parameters<typeof loadMode>[1]>;
-  modeFile?: () => Parameters<typeof applyMode>[1] | undefined;
+  modeFile?: () => ModeFile | undefined;
+  promptFragments?: () => readonly ModePromptFragment[];
+  promptFragmentBytes?: number;
   loopLimits?: LoopOptions['limits'];
 }
 
@@ -82,13 +84,21 @@ export function createSubagentPlugin(deps: SubagentDeps) {
           // 派生执行继承父会话的插件工具，但不注册 `subagent`，从而禁止递归派生。
           const assembly = loadAssembly(child, deps.plugins);
           const prompt = createPromptAssembly({ static: deps.prompt.staticPrefix });
+          let undoMode = () => {};
           try {
             const file = args.mode === undefined
               ? deps.modeFile?.()
               : await loadMode(args.mode, deps.modePaths as NonNullable<Parameters<typeof loadMode>[1]>);
             if (file !== undefined) {
               modeIdentity = { name: file.name, layer: file.layer };
-              applyMode(child, file);
+              const applied = applyModeToPrompt({
+                file,
+                kernel: child,
+                prompt,
+                fragments: deps.promptFragments?.() ?? [],
+                maxBytes: deps.promptFragmentBytes ?? 8192,
+              });
+              undoMode = applied.undo;
             }
             const loop = createLoop({
               kernel: child,
@@ -107,6 +117,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
               mode: file === undefined ? null : file.name,
             };
           } finally {
+            undoMode();
             assembly.dispose();
             await session.close();
           }

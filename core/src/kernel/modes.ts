@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { parse } from 'smol-toml';
 import { CONFIG_DIRECTORY, dataRoot } from './config-file.js';
 import { KernelError } from './error.js';
+import type { PromptAssembly } from './prompt.js';
 
 export const MODE_DIRECTORY = 'modes';
 // 未指定模式时使用随包提供的默认模式。
@@ -40,6 +41,11 @@ export interface ModeTarget {
   list(): string[];
   selectable(): string[];
   restrict(names: string[]): () => void;
+}
+
+export interface ModePromptFragment {
+  readonly name: string;
+  readonly text: string;
 }
 
 export function modeDirectories(projectRoot: string, shippedDirectory: string, userHome = homedir()): ModeDirectories {
@@ -187,4 +193,48 @@ export function applyMode(kernel: ModeTarget, mode: ModeFile): { tools: string[]
   const hidden = selectable.filter((name) => !selected.includes(name));
   const undo = hidden.length > 0 ? kernel.restrict(hidden) : () => {};
   return { tools: selected, undo };
+}
+
+// 工具限制和提示片段一起应用，保证同一模式在父会话与派生会话中含义一致。
+export function applyModeToPrompt({ file, kernel, prompt, fragments, maxBytes }: {
+  readonly file: ModeFile;
+  readonly kernel: ModeTarget & { manifest(): readonly { readonly name: string }[] };
+  readonly prompt: PromptAssembly;
+  readonly fragments: readonly ModePromptFragment[];
+  readonly maxBytes: number;
+}): { readonly tools: string[]; undo(): void } {
+  const selected = file.prompt === '*'
+    ? [...fragments]
+    : file.prompt.map((name) => {
+        const found = fragments.find((entry) => entry.name === name);
+        if (found === undefined) {
+          throw new KernelError('mode_prompt_unavailable', {
+            detail: `${name} (mode ${file.name}; registered: ${fragments.map((entry) => entry.name).join(', ') || 'none'})`,
+          });
+        }
+        return found;
+      });
+  const applied = applyMode(kernel, file);
+  const fragmentUndo: (() => void)[] = [];
+  try {
+    selected.forEach((fragment, index) => {
+      fragmentUndo.push(prompt.fragment({
+        name: `extension:${fragment.name}`,
+        anchor: 2 + index,
+        text: fragment.text,
+        maxBytes,
+      }));
+    });
+  } catch (error) {
+    for (const remove of fragmentUndo.reverse()) remove();
+    applied.undo();
+    throw error;
+  }
+  return {
+    tools: kernel.manifest().map((entry) => entry.name),
+    undo() {
+      for (const remove of fragmentUndo.slice().reverse()) remove();
+      applied.undo();
+    },
+  };
 }
