@@ -101,6 +101,11 @@ jobs:
           cache-dependency-path: pnpm-lock.yaml
       - name: install
         run: pnpm install --frozen-lockfile
+      - name: install bubblewrap for Linux sandbox tests
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
       - name: syntax check JavaScript source and tests
         run: pnpm check:syntax
       - name: test
