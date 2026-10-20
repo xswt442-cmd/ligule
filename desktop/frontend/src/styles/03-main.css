@@ -144,6 +144,18 @@ button:disabled {
   border-color: var(--line);
 }
 
+.row.question.controller {
+  align-self: flex-start;
+  background: var(--bg-raised);
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--line));
+}
+
+.question-source {
+  margin-block-end: var(--space-1);
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
+
 .row.answer {
   white-space: normal;
   overflow-wrap: anywhere;

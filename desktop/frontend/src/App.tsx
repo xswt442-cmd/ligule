@@ -33,6 +33,7 @@ import { LocaleProvider, localeOf } from './locale';
 import { notificationOf, notificationTarget, type NotificationKind, type NotificationTarget } from './notifications';
 import { SessionStreamBuffer } from './session-stream';
 import { Composer } from './components/Composer';
+import { ExternalSessionControlPanel } from './components/ExternalSessionControlPanel';
 import type { MentionState } from './mentions';
 import type { PermissionConfirmations, PermissionTarget } from './permission-control';
 
@@ -160,6 +161,15 @@ export function App({ transport }: { transport: Transport }) {
   const liveStreamRef = useRef<SessionStreamBuffer | null>(null);
   if (liveStreamRef.current === null) liveStreamRef.current = new SessionStreamBuffer();
   const liveBySession = liveStreamRef.current;
+  const acceptExternalDelta = useCallback((kind: 'text' | 'reasoning', text: string) => {
+    const held = liveBySession.append(sessionId ?? '', kind, text);
+    if (held !== null && sessionId !== null) setLive(held);
+  }, [liveBySession, sessionId]);
+  const settleExternalEvent = useCallback((kind: string) => {
+    if (sessionId === null) return;
+    const held = liveBySession.settle(sessionId, kind);
+    setLive(held);
+  }, [liveBySession, sessionId]);
   const terminalBySession = useRef(new Map<string, number>());
   // 同一会话的待答问题按顺序排队，一次显示一个。
   const [asks, setAsks] = useState<Ask[]>([]);
@@ -345,7 +355,7 @@ export function App({ transport }: { transport: Transport }) {
 
   // 窗口打开和 Host 重启时读取共享输入历史。读取失败时按空列表显示；写入由 Host 在锁内合并，避免覆盖其他客户端的更新。
   useEffect(() => {
-    client.call('history.read', {}, 15_000).then(
+    client.call('history.read', {}, 60_000).then(
       (read) => setHistory((read as { entries: string[] }).entries),
       () => setHistory([]),
     );
@@ -739,14 +749,14 @@ export function App({ transport }: { transport: Transport }) {
       // 为记录读取设置超时，避免客户端一直停留在加载状态。
       // 指定项目时同时传递项目根目录，由 Host 选择对应环境并验证记录归属。
       try {
-        await client.call('session.open', requestedRoot === '' ? { sessionId: id } : { sessionId: id, projectRoot: requestedRoot }, 15_000);
+        await client.call('session.open', requestedRoot === '' ? { sessionId: id } : { sessionId: id, projectRoot: requestedRoot }, 60_000);
         // 请求完整工具结果以读取溢出文件内容；只读取最近一页，更早记录由分页操作加载。
-        newest = await client.call('session.read', { sessionId: id, limit: RENDER_WINDOW, fullResults: true }, 15_000) as typeof newest;
+        newest = await client.call('session.read', { sessionId: id, limit: RENDER_WINDOW, fullResults: true }, 60_000) as typeof newest;
       } catch (error) {
         if (code(error) !== 'session_locked') throw error;
         newest = await client.call('session.observe', {
           projectRoot: requestedRoot, sessionId: id, limit: RENDER_WINDOW, fullResults: true,
-        }, 15_000) as typeof newest;
+        }, 60_000) as typeof newest;
         observing = true;
       }
       if (openRequest.current !== request) return;
@@ -992,7 +1002,7 @@ export function App({ transport }: { transport: Transport }) {
         const deadline = Date.now() + 12_000;
         for (;;) {
           try {
-            await client.call('session.open', projectRoot === '' ? { sessionId } : { sessionId, projectRoot }, 15_000);
+            await client.call('session.open', projectRoot === '' ? { sessionId } : { sessionId, projectRoot }, 60_000);
             break;
           } catch (error) {
             if (code(error) !== 'session_locked' || Date.now() >= deadline) break;
@@ -1002,7 +1012,7 @@ export function App({ transport }: { transport: Transport }) {
         await openSession(sessionId, undefined, true);
       } else {
         try {
-          await client.call('workspaces.list', {}, 15_000);
+          await client.call('workspaces.list', {}, 60_000);
           connectionLost.current = false;
           setLink(null);
           setSessionsRevision((current) => current + 1);
@@ -1637,7 +1647,7 @@ export function App({ transport }: { transport: Transport }) {
       {observingExternalSession && <div className="banner" role="status">
         <Icon name="warn" size={15} />
         <span>{externalWriterActive
-          ? t('另一进程持有此会话的写入锁。当前只读观察新增记录；审批和输入仍需在控制端处理。', 'Another process holds this session’s writer lock. This view observes appended records only; approvals and input remain with the controller.')
+          ? t('外控 Agent 正在运行。下方可以查看进度、补充消息、处理待决问题或接管会话。', 'An external agent is controlling this session. Use the panel below to follow progress, send guidance, answer requests, or take over.')
           : t('此会话当前没有活动写入者。刷新会话可重新打开并取得控制权。', 'This session has no active writer. Refresh to reopen it and take control.')}</span>
         <button type="button" onClick={() => { if (sessionId !== null) void openSession(sessionId, undefined, false, projectRoot); }}>
           {externalWriterActive ? t('刷新观察', 'Refresh view') : t('重新打开', 'Reopen session')}
@@ -1684,6 +1694,17 @@ export function App({ transport }: { transport: Transport }) {
         active={sessionId}
         onOpen={(id: string) => void openSession(id)}
         onAnswer={answer}
+      />}
+
+      {observingExternalSession && externalWriterActive && sessionId !== null && <ExternalSessionControlPanel
+        key={sessionId}
+        client={client}
+        sessionId={sessionId}
+        projectRoot={projectRoot}
+        verbosity={verbosity}
+        onDelta={acceptExternalDelta}
+        onSessionEvent={settleExternalEvent}
+        onTakeover={() => { void openSession(sessionId, undefined, false, projectRoot); }}
       />}
 
       {link !== null && <div className="banner" role="alert">

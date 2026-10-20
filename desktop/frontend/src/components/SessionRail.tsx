@@ -106,7 +106,7 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
     setFailures([]);
     setHits(null);
     let registryFailure: RailFailure | undefined;
-    const read = await client.call('workspaces.list', {}, 15_000)
+    const read = await client.call('workspaces.list', {}, 60_000)
       .then((answer) => answer as WorkspaceRoster)
       .catch((error) => {
         registryFailure = { root: '', label: t('工作区登记', 'Workspace registry'), code: code(error) };

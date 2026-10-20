@@ -1,5 +1,5 @@
 // 本地 stub 模型的 Desktop 回归：用同一套真实窗口驱动 harness（run-real-model.cjs），
-// 但把 Host 指向本进程内的固定 SSE 服务，验证审批拒绝与流式取消的界面联动。
+// Host 连接本进程内的固定 SSE 服务，验证外控会话的人类观察、答复、补充、审批、取消与接管。
 // 它替代不了真实模型验收：证据目录 `stub-model-*`、报告名 `stub-model.json`、
 // 场景名前缀与 provider 字段都写明这是本地 stub。真实模型验收仍走 run-real-model.mjs。
 import { spawn } from 'node:child_process';
@@ -95,6 +95,8 @@ const server = createServer(async (request, response) => {
   const lastUser = [...messages].reverse().find(message => message.role === 'user');
   const prompt = typeof lastUser?.content === 'string' ? lastUser.content : '';
   const followup = messages.at(-1)?.role === 'tool';
+  const externalQuestionTurn = messages.some(message => message.role === 'user' && typeof message.content === 'string' && message.content.includes('desktop-external-control-question'));
+  const externalApprovalTurn = messages.some(message => message.role === 'user' && typeof message.content === 'string' && message.content.includes('desktop-external-control-approval'));
   const workflowMarker = 'desktop-skill-mcp-load-proof';
   const workflowStart = messages.findLastIndex(message => message.role === 'user' && typeof message.content === 'string' && message.content.includes(workflowMarker));
   const workflowStep = workflowStart < 0 ? -1 : messages.slice(workflowStart + 1).filter(message => message.role === 'tool').length;
@@ -118,6 +120,16 @@ const server = createServer(async (request, response) => {
     response.end();
   };
   if (followup) {
+    if (externalApprovalTurn) {
+      streamChunk(response, { choices: [{ index: 0, delta: { content: '外控审批已通过。' } }] });
+      finish('stop');
+      return;
+    }
+    if (externalQuestionTurn) {
+      streamChunk(response, { choices: [{ index: 0, delta: { content: '外控问题已收到人类答复。' } }] });
+      finish('stop');
+      return;
+    }
     if (workflowStep === 1) {
       const skill = body.tools?.find(item => item.function?.name === 'skill');
       const inspect = body.tools?.find(item => item.function?.name === mcpInspectWireName);
@@ -138,6 +150,24 @@ const server = createServer(async (request, response) => {
   }
   if (workflowStep === 0) {
     respondWithTool(response, 'skill', { action: 'activate', name: 'desktop-smoke' }, 'stub-skill-mcp-activate');
+    return;
+  }
+  if (prompt.includes('desktop-external-control-question')) {
+    respondWithTool(response, 'ask_user_question', {
+      questions: JSON.stringify([{ question: 'Choose a route', options: [{ label: 'north' }, { label: 'south' }], multiSelect: false }]),
+    }, 'stub-external-human-question');
+    return;
+  }
+  if (prompt.includes('desktop-external-control-approval')) {
+    respondWithTool(response, 'create', {
+      path: 'desktop-external-control-proof.txt',
+      content: 'HUMAN_APPROVED',
+    }, 'stub-external-human-approval');
+    return;
+  }
+  if (prompt.includes('desktop-human-control-followup')) {
+    streamChunk(response, { choices: [{ index: 0, delta: { content: '已收到人类补充消息。' } }] });
+    finish('stop');
     return;
   }
   if (target !== undefined) {
@@ -220,6 +250,7 @@ for (const name of Object.keys(environment)) {
 }
 for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'ELECTRON_RUN_AS_NODE', 'LIGULE_API_KEY']) delete environment[name];
 environment.LIGULE_HOME = isolatedHome;
+environment.LIGULE_RUNTIME_NODE = node;
 environment.LIGULE_API_KEY = 'stub-model-key';
 environment.LIGULE_REAL_MODEL_WORKSPACE = workspace;
 environment.LIGULE_REAL_MODEL_EVIDENCE = evidenceRoot;
@@ -227,7 +258,7 @@ environment.LIGULE_REAL_MODEL_USER_DATA = userData;
 environment.LIGULE_MODEL_PROVIDER_LABEL = providerLabel;
 environment.LIGULE_MODEL_EVIDENCE_NAME = 'stub-model';
 environment.LIGULE_STUB_CONTROL = `http://127.0.0.1:${server.address().port}/stub`;
-environment.LIGULE_OBSERVER_TEST = '1';
+environment.LIGULE_EXTERNAL_CONTROL_TEST = '1';
 
 async function registerIsolatedWorkspace() {
   const preflight = spawn(node, [hostEntry, cli], {
@@ -237,14 +268,16 @@ async function registerIsolatedWorkspace() {
     detached: process.platform !== 'win32',
     windowsHide: true,
   });
-  preflight.stderr.on('data', () => {});
+  let preflightStderr = '';
+  preflight.stderr.setEncoding('utf8');
+  preflight.stderr.on('data', chunk => { preflightStderr = `${preflightStderr}${chunk}`.slice(-12_000); });
   let output = '';
   let responseTimer;
   const response = new Promise((resolvePromise, reject) => {
     responseTimer = setTimeout(() => {
       preflight.kill();
-      reject(new Error('stub_model_workspace_registration_timeout'));
-    }, 20_000);
+      reject(new Error(`stub_model_workspace_registration_timeout:stderr=${preflightStderr.slice(-2_000)};stdout=${output.slice(-2_000)}`));
+    }, 60_000);
     preflight.once('error', error => { clearTimeout(responseTimer); reject(error); });
     preflight.stdout.setEncoding('utf8');
     preflight.stdout.on('data', chunk => {

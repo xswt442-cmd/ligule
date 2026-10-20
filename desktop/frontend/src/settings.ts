@@ -6,6 +6,8 @@ import type { Language } from './locale';
 import type { ModelSelection } from './model-catalog';
 import { defaultNotifications, notificationsFrom, type NotificationPreferences } from './notifications.ts';
 
+const SETTINGS_RPC_TIMEOUT_MS = 60_000;
+
 // 支持六种具名配色，具体颜色定义在 `styles/01-foundation.css` 的 `data-palette` 变量中。
 export const PALETTES = ['ink', 'parchment', 'sky', 'graphite', 'forest', 'dusk'] as const;
 export type Palette = (typeof PALETTES)[number];
@@ -208,7 +210,7 @@ function writeSettings(client: Client, state: ClientSettingsState, settings: Set
     const result = await client.call('prefs.write', {
       json: JSON.stringify(settings),
       version: version ?? state.version,
-    }, 15_000);
+    }, SETTINGS_RPC_TIMEOUT_MS);
     const updated = objectValue(result);
     if (typeof updated?.version !== 'string') {
       throw Object.assign(new Error('prefs_write_version_invalid'), { code: 'prefs_write_version_invalid' });
@@ -238,7 +240,7 @@ export function loadSettings(client: Client): Promise<Settings> {
   const loading = (async () => {
     await state.tail;
     try {
-      const result = objectValue(await client.call('prefs.read', {}, 15_000));
+      const result = objectValue(await client.call('prefs.read', {}, SETTINGS_RPC_TIMEOUT_MS));
       if (result === undefined || typeof result.version !== 'string') {
         throw Object.assign(new Error('prefs_read_version_invalid'), { code: 'prefs_read_version_invalid' });
       }

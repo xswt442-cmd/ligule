@@ -24,7 +24,7 @@ export async function loadWorkspacePages(roots: string[], client: Pick<Client, '
       const index = next++;
       const root = roots[index];
       try {
-        const result = await client.call('sessions.list', root === '' ? {} : { projectRoot: root }, 15_000) as { sessions: SessionSummary[] };
+        const result = await client.call('sessions.list', root === '' ? {} : { projectRoot: root }, 60_000) as { sessions: SessionSummary[] };
         pages[index] = { root, sessions: result.sessions, failed: '' };
       } catch (error) {
         pages[index] = { root, sessions: [], failed: code(error) };

@@ -1,6 +1,10 @@
 import type { RowProps } from './types';
+import { useText } from '../locale';
 
-// 用户输入的消息显示在内容列右侧，以区分发言方。
 export function QuestionRow({ row }: RowProps) {
-  return <article className="row question" data-kind="question"><div className="row-body">{row.text}</div></article>;
+  const t = useText();
+  return <article className={row.source === 'controller' ? 'row question controller' : 'row question'} data-kind="question" data-source={row.source ?? 'human'}>
+    {row.source === 'controller' && <div className="question-source">{t('外部 Agent', 'External agent')}</div>}
+    <div className="row-body">{row.text}</div>
+  </article>;
 }
