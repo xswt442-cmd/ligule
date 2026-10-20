@@ -314,3 +314,76 @@ test('rebuilding the parent continues child session numbering without reusing ol
     await session.close();
   }
 });
+
+test('a child submits a structured result only after it matches the declared schema', async () => {
+  const boundary = await workspace();
+  const config = createConfig({ user: { boundary } });
+  const chain = createDecisionChain({ mode: 'auto' });
+  const provider = scripted([
+    call('subagent_result', { result: { answer: 3, count: 2 } }),
+    call('subagent_result', { result: { answer: 'checked', count: 2 } }),
+  ]);
+  const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'structured-parent' });
+  const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
+  createSubagentPlugin({
+    config,
+    provider,
+    chain,
+    prompt: { staticPrefix: '' },
+    directory: session.directory,
+    sessionId: 'structured-parent',
+    plugins: [minimalPlugin],
+  }).setup(kernel);
+
+  const result = await kernel.call('subagent', {
+    task: 'return a checked summary',
+    outputSchema: {
+      type: 'object',
+      properties: { answer: { type: 'string' }, count: { type: 'integer', minimum: 1 } },
+      required: ['answer', 'count'],
+      additionalProperties: false,
+    },
+  });
+  assert.match(provider.requests[0].system, /Schema JSON data:.*"answer"/u);
+  assert.ok(provider.requests[0].tools.some((tool) => tool.name === 'subagent_result'));
+  assert.equal(result.result.state, 'completed');
+  assert.equal(result.result.stopReason, 'tool_completed');
+  assert.deepEqual(result.result.output.structured, { answer: 'checked', count: 2 });
+  assert.equal(result.result.validation.status, 'valid');
+  assert.equal(typeof result.result.validation.schemaDigest, 'string');
+  const childEvents = (await readFile(join(session.directory, 'structured-parent.sub-1.jsonl'), 'utf8'))
+    .split('\n').filter(Boolean).map(JSON.parse);
+  assert.ok(childEvents.some((event) => event.kind === 'tool' && event.tool === 'subagent_result'
+    && event.result.code === 'delegation_result_invalid'));
+  assert.equal(childEvents.find((event) => event.kind === 'turnContext').delegationSchemaDigest, result.result.validation.schemaDigest);
+  await assert.rejects(kernel.call('subagent', {
+    task: 'use an unsupported schema',
+    outputSchema: { type: 'object', properties: { answer: { type: 'string', pattern: '^ok$' } } },
+  }), { code: 'delegation_schema_invalid' });
+});
+
+test('a child that never submits its requested structure reports validation failure', async () => {
+  const boundary = await workspace();
+  const config = createConfig({ user: { boundary } });
+  const chain = createDecisionChain({ mode: 'auto' });
+  const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'missing-result-parent' });
+  const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
+  createSubagentPlugin({
+    config,
+    provider: scripted([text('I finished, but did not submit the schema result.')]),
+    chain,
+    prompt: { staticPrefix: '' },
+    directory: session.directory,
+    sessionId: 'missing-result-parent',
+    plugins: [minimalPlugin],
+  }).setup(kernel);
+
+  const result = await kernel.call('subagent', {
+    task: 'return a checked summary',
+    outputSchema: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] },
+  });
+  assert.equal(result.result.state, 'completed');
+  assert.equal(result.result.validation.status, 'invalid');
+  assert.equal(result.result.output.structured, undefined);
+  assert.match(result.result.validation.errors[0], /without submitting/u);
+});

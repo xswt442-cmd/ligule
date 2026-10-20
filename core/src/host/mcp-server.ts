@@ -34,6 +34,7 @@ const runResultOutput = object({
   output: object({ text: { type: ['string', 'null'] }, structured: {} }, ['text']),
   validation: object({
     status: { type: 'string', enum: ['not_requested', 'valid', 'invalid'] },
+    schemaDigest: { type: 'string', minLength: 12, maxLength: 64 },
     errors: { type: 'array', maxItems: 32, items: { type: 'string', maxLength: 512 } },
   }, ['status']),
   artifacts: { type: 'array', maxItems: 32, items: object({
