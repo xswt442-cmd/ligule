@@ -25,6 +25,7 @@ export interface DelegationGrant {
   readonly allowOperator: boolean;
   readonly confirmedFullAccess: boolean;
   readonly confirmedUnrestrictedNetwork: boolean;
+  readonly confirmedPartialWorkspaceWrite: boolean;
   readonly createdAt: string;
   readonly expiresAt: string | null;
   readonly revokedAt: string | null;
@@ -60,6 +61,7 @@ export interface CreateDelegationGrantInput {
   readonly allowOperator: boolean;
   readonly confirmFullAccess: boolean;
   readonly confirmUnrestrictedNetwork: boolean;
+  readonly confirmPartialWorkspaceWrite?: boolean;
   readonly expiresAt: string | null;
 }
 
@@ -120,9 +122,13 @@ function isPolicy(value: unknown): value is DelegationPolicy {
 
 function validateGrant(value: unknown): DelegationGrant {
   const keys = ['id', 'name', 'projectRoot', 'defaultPermissionProfile', 'maxPermissionProfile', 'defaultNetwork', 'maxNetwork',
-    'source', 'defaultPolicy', 'allowedPolicies', 'allowOperator', 'confirmedFullAccess', 'confirmedUnrestrictedNetwork', 'createdAt', 'expiresAt', 'revokedAt'];
+    'source', 'defaultPolicy', 'allowedPolicies', 'allowOperator', 'confirmedFullAccess', 'confirmedUnrestrictedNetwork',
+    'confirmedPartialWorkspaceWrite', 'createdAt', 'expiresAt', 'revokedAt'];
   const legacyKeys = keys.filter((key) => key !== 'source');
-  if (!isRecord(value) || (!onlyKeys(value, keys) && !onlyKeys(value, legacyKeys))
+  const previousKeys = keys.filter((key) => key !== 'confirmedPartialWorkspaceWrite');
+  const legacyPreviousKeys = previousKeys.filter((key) => key !== 'source');
+  if (!isRecord(value) || (!onlyKeys(value, keys) && !onlyKeys(value, legacyKeys)
+    && !onlyKeys(value, previousKeys) && !onlyKeys(value, legacyPreviousKeys))
     || typeof value.id !== 'string' || !/^[0-9a-f-]{36}$/i.test(value.id)
     || typeof value.name !== 'string' || value.name.trim() === '' || value.name.length > 80
     || typeof value.projectRoot !== 'string' || !isAbsolute(value.projectRoot)
@@ -139,6 +145,7 @@ function validateGrant(value: unknown): DelegationGrant {
     || typeof value.allowOperator !== 'boolean'
     || typeof value.confirmedFullAccess !== 'boolean'
     || typeof value.confirmedUnrestrictedNetwork !== 'boolean'
+    || (value.confirmedPartialWorkspaceWrite !== undefined && typeof value.confirmedPartialWorkspaceWrite !== 'boolean')
     || (value.maxPermissionProfile === 'full-access' && value.confirmedFullAccess !== true)
     || (value.maxNetwork === 'unrestricted' && value.confirmedUnrestrictedNetwork !== true)
     || typeof value.createdAt !== 'string' || Number.isNaN(Date.parse(value.createdAt))
@@ -160,6 +167,7 @@ function validateGrant(value: unknown): DelegationGrant {
     allowOperator: value.allowOperator,
     confirmedFullAccess: value.confirmedFullAccess,
     confirmedUnrestrictedNetwork: value.confirmedUnrestrictedNetwork,
+    confirmedPartialWorkspaceWrite: value.confirmedPartialWorkspaceWrite === true,
     createdAt: value.createdAt,
     expiresAt: value.expiresAt,
     revokedAt: value.revokedAt,
@@ -292,7 +300,10 @@ function checkedInput(input: CreateDelegationGrantInput): Omit<DelegationGrant, 
     || input.allowedPolicies.some((one) => !isPolicy(one)) || new Set(input.allowedPolicies).size !== input.allowedPolicies.length
     || !input.allowedPolicies.includes(input.defaultPolicy)) throw new KernelError('agent_control_policy_limit_invalid');
   if (typeof input.allowOperator !== 'boolean' || typeof input.confirmFullAccess !== 'boolean'
-    || typeof input.confirmUnrestrictedNetwork !== 'boolean') throw new KernelError('agent_control_grant_invalid');
+    || typeof input.confirmUnrestrictedNetwork !== 'boolean'
+    || (input.confirmPartialWorkspaceWrite !== undefined && typeof input.confirmPartialWorkspaceWrite !== 'boolean')) {
+    throw new KernelError('agent_control_grant_invalid');
+  }
   if (input.maxPermissionProfile === 'full-access' && !input.confirmFullAccess) throw new KernelError('agent_control_full_access_confirmation_required');
   if (input.maxNetwork === 'unrestricted' && !input.confirmUnrestrictedNetwork) throw new KernelError('agent_control_unrestricted_network_confirmation_required');
   if (input.expiresAt !== null && (typeof input.expiresAt !== 'string' || !Number.isFinite(Date.parse(input.expiresAt))
@@ -310,6 +321,7 @@ function checkedInput(input: CreateDelegationGrantInput): Omit<DelegationGrant, 
     allowOperator: input.allowOperator,
     confirmedFullAccess: input.confirmFullAccess,
     confirmedUnrestrictedNetwork: input.confirmUnrestrictedNetwork,
+    confirmedPartialWorkspaceWrite: input.confirmPartialWorkspaceWrite === true,
     expiresAt: input.expiresAt,
   };
 }

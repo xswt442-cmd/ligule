@@ -10,7 +10,7 @@ export interface OwnedWindowsCommand {
 }
 
 export type WindowsCommandLaunch =
-  | { readonly kind: 'appcontainer'; readonly workspaceRoot: string; readonly tempDirectory: string }
+  | { readonly kind: 'appcontainer'; readonly workspaceRoot: string }
   | { readonly kind: 'restricted-token'; readonly workspaceRoot: string; readonly tempDirectory: string };
 
 const GUARDIAN_LAUNCH_ARGUMENT = '--ligule-guardian-launch-v1';
@@ -24,8 +24,8 @@ export function spawnWindowsCommand(
 ): OwnedWindowsCommand {
   if (launch !== undefined) {
     if (launch.kind === 'appcontainer'
-      && ([launch.workspaceRoot, launch.tempDirectory].some((path) => path.trim() === '' || path.includes('\0')))) {
-      throw new TypeError('the AppContainer launch description requires workspace and temp directories');
+      && (launch.workspaceRoot.trim() === '' || launch.workspaceRoot.includes('\0'))) {
+      throw new TypeError('the AppContainer launch description requires a workspace directory');
     }
     if (launch.kind === 'restricted-token'
       && ([launch.workspaceRoot, launch.tempDirectory].some((path) => path.trim() === '' || path.includes('\0')))) {

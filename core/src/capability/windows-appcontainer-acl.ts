@@ -18,6 +18,7 @@ const TRUSTEE_IS_SID = 0;
 const TRUSTEE_IS_UNKNOWN = 0;
 const OBJECT_AND_CONTAINER_INHERIT = 0x00000003;
 const FILE_GENERIC_READ = 0x00120089;
+const FILE_TRAVERSE = 0x00000020;
 const FILE_GENERIC_WRITE = 0x00120116;
 const FILE_GENERIC_EXECUTE = 0x001200a0;
 const DELETE_ACCESS = 0x00010000;
@@ -312,12 +313,31 @@ async function updateDirectoryAce(
   }
 }
 
-export async function grantAppContainerDirectoryRead(path: string, sid: AppContainerHandle): Promise<void> {
-  await updateDirectoryAce(path, sid, 'grant', FILE_GENERIC_READ, 'read');
+export interface AppContainerDirectoryReadGrant {
+  readonly workspaceRoot: string;
 }
 
-export async function revokeAppContainerDirectoryRead(path: string, sid: AppContainerHandle): Promise<void> {
-  await updateDirectoryAce(path, sid, 'revoke', FILE_GENERIC_READ, 'read');
+export async function createAppContainerDirectoryReadGrant(path: string): Promise<AppContainerDirectoryReadGrant> {
+  const workspaceRoot = await realpath(resolve(path));
+  return Object.freeze({ workspaceRoot });
+}
+
+export async function grantAppContainerDirectoryRead(
+  pathOrGrant: string | AppContainerDirectoryReadGrant,
+  sid: AppContainerHandle,
+): Promise<AppContainerDirectoryReadGrant> {
+  const grant = typeof pathOrGrant === 'string'
+    ? await createAppContainerDirectoryReadGrant(pathOrGrant)
+    : pathOrGrant;
+  await updateDirectoryAce(grant.workspaceRoot, sid, 'grant', FILE_GENERIC_READ | FILE_TRAVERSE, 'read');
+  return grant;
+}
+
+export async function revokeAppContainerDirectoryRead(
+  grant: AppContainerDirectoryReadGrant,
+  sid: AppContainerHandle,
+): Promise<void> {
+  await updateDirectoryAce(grant.workspaceRoot, sid, 'revoke', FILE_GENERIC_READ | FILE_TRAVERSE, 'read');
 }
 
 export async function grantRestrictedDirectoryWrite(path: string, sid: AppContainerHandle | string): Promise<void> {

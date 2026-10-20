@@ -9,9 +9,10 @@ import {
 } from './windows-appcontainer-process.js';
 import { createOwnedProcessJob, type OwnedProcessJob } from './win32-job.js';
 import {
-  grantAppContainerDirectoryRead, grantRestrictedDirectoryWrite, grantAppContainerTempDirectoryWrite,
-  revokeAppContainerDirectoryRead, revokeRestrictedDirectoryWrite, revokeAppContainerTempDirectoryWrite,
+  createAppContainerDirectoryReadGrant, grantAppContainerDirectoryRead, grantRestrictedDirectoryWrite,
+  revokeAppContainerDirectoryRead, revokeRestrictedDirectoryWrite,
 } from './windows-appcontainer-acl.js';
+import type { AppContainerDirectoryReadGrant } from './windows-appcontainer-acl.js';
 import { randomWorkspaceRestrictedSid, runRestrictedWindowsCommand } from './windows-restricted-process.js';
 import type { WindowsCommandLaunch } from './windows-command.js';
 
@@ -50,10 +51,8 @@ function parseGuardianStartup(argv: readonly string[]): GuardianStartup {
     }
     if (launchValue.kind === 'appcontainer'
       && 'workspaceRoot' in launchValue && typeof launchValue.workspaceRoot === 'string'
-      && launchValue.workspaceRoot.trim() !== '' && !launchValue.workspaceRoot.includes('\0')
-      && 'tempDirectory' in launchValue && typeof launchValue.tempDirectory === 'string'
-      && launchValue.tempDirectory.trim() !== '' && !launchValue.tempDirectory.includes('\0')) {
-      launch = { kind: 'appcontainer', workspaceRoot: launchValue.workspaceRoot, tempDirectory: launchValue.tempDirectory };
+      && launchValue.workspaceRoot.trim() !== '' && !launchValue.workspaceRoot.includes('\0')) {
+      launch = { kind: 'appcontainer', workspaceRoot: launchValue.workspaceRoot };
     } else if (launchValue.kind === 'restricted-token'
       && 'workspaceRoot' in launchValue && typeof launchValue.workspaceRoot === 'string'
       && launchValue.workspaceRoot.trim() !== '' && !launchValue.workspaceRoot.includes('\0')
@@ -99,16 +98,13 @@ async function runAppContainer(startup: GuardianStartup): Promise<void> {
   const launch = startup.launch;
   if (launch === undefined || launch.kind !== 'appcontainer') throw new Error('AppContainer launch description is required');
   let profile: AppContainerProfile | undefined;
-  let workspaceReadGranted = false;
-  let tempWriteGranted = false;
+  let workspaceReadGrant: AppContainerDirectoryReadGrant | undefined;
   let outcome: object;
   let primaryError: unknown;
   try {
     profile = await createAppContainerProfile();
-    workspaceReadGranted = true;
-    await grantAppContainerDirectoryRead(launch.workspaceRoot, profile.sid);
-    tempWriteGranted = true;
-    await grantAppContainerTempDirectoryWrite(launch.tempDirectory, profile.sid);
+    workspaceReadGrant = await createAppContainerDirectoryReadGrant(launch.workspaceRoot);
+    await grantAppContainerDirectoryRead(workspaceReadGrant, profile.sid);
     if (disconnected || !process.connected) throw new KernelError('exec_cancelled', { detail: 'the owned command tree was terminated' });
     process.send?.({ kind: 'ready', processId: process.pid });
     const exitCode = await runAppContainerCommand({
@@ -134,12 +130,8 @@ async function runAppContainer(startup: GuardianStartup): Promise<void> {
     };
   } finally {
     const cleanupErrors: string[] = [];
-    if (profile !== undefined && tempWriteGranted) {
-      try { await revokeAppContainerTempDirectoryWrite(launch.tempDirectory, profile.sid); }
-      catch (error) { cleanupErrors.push(`temp ACL: ${(error as Error).message}`); }
-    }
-    if (profile !== undefined && workspaceReadGranted) {
-      try { await revokeAppContainerDirectoryRead(launch.workspaceRoot, profile.sid); }
+    if (profile !== undefined && workspaceReadGrant !== undefined) {
+      try { await revokeAppContainerDirectoryRead(workspaceReadGrant, profile.sid); }
       catch (error) { cleanupErrors.push(`workspace ACL: ${(error as Error).message}`); }
     }
     if (profile !== undefined) {

@@ -13,7 +13,8 @@ import { isWithin, resolveWithin } from './paths.js';
 import { boundaryOf, limitsOf, workingDirectoryOf, type CapabilityConfig } from './limits.js';
 import { spawnWindowsCommand, type OwnedWindowsCommand } from './windows-command.js';
 import { buildLinuxSandbox, type PermissionCapabilities } from './sandbox-linux.js';
-import type { PermissionContext } from '../kernel/permission.js';
+import type { WindowsCommandLaunch } from './windows-command.js';
+import { permissionDenial, type PermissionContext } from '../kernel/permission.js';
 import type { ShellSelection } from './shell.js';
 import { assertInterpreterIdentity, assertScriptBinding, bindScript, readBoundScript, type ScriptBinding } from './script-binding.js';
 
@@ -23,7 +24,7 @@ type ExecResult = { text: string; exitCode: number | null };
 
 const MAX_EXEC_TIMEOUT_MS = 600_000;
 const EXEC_ENVIRONMENT = new Set([
-  'appdata', 'ci', 'comspec', 'force_color', 'home', 'homedrive', 'homepath', 'lang', 'lc_all',
+  'appdata', 'ci', 'comspec', 'force_color', 'home', 'homedrive', 'homepath', 'lang', 'lc_all', 'ligule_home',
   'localappdata', 'no_color', 'path', 'pathext', 'systemdrive', 'systemroot', 'term', 'tmp',
   'temp', 'tmpdir', 'userprofile', 'windir',
 ]);
@@ -64,6 +65,8 @@ function permissionMode(permission: PermissionContext | undefined): 'direct' | '
   if (!['policy', 'unrestricted', 'disabled'].includes(permission.network)) {
     throw new KernelError('permission_network_mode_invalid');
   }
+  const denial = permissionDenial(permission, 'exec');
+  if (denial !== undefined) throw new KernelError(denial.code, { detail: denial.reason });
   if (permission.profile === 'full-access') {
     if (permission.network !== 'unrestricted') {
       throw new KernelError('permission_network_isolation_unavailable', {
@@ -77,7 +80,7 @@ function permissionMode(permission: PermissionContext | undefined): 'direct' | '
     }
     return 'direct';
   }
-  if (process.platform !== 'linux') {
+  if (process.platform !== 'linux' && process.platform !== 'win32') {
     throw new KernelError('permission_sandbox_unavailable', {
       detail: `the ${process.platform} exec backend cannot enforce the ${permission.profile} profile`,
     });
@@ -91,7 +94,7 @@ function requireFullCapability(
   code: string,
 ): void {
   if (capabilities[name] !== 'full') {
-    throw new KernelError(code, { detail: `the Linux exec backend reported ${name}=${capabilities[name]}` });
+    throw new KernelError(code, { detail: `the ${process.platform} exec backend reported ${name}=${capabilities[name]}` });
   }
 }
 
@@ -101,7 +104,7 @@ function requireAvailableCapability(
   code: string,
 ): void {
   if (capabilities[name] === 'unavailable') {
-    throw new KernelError(code, { detail: `the Linux exec backend reported ${name}=unavailable` });
+    throw new KernelError(code, { detail: `the ${process.platform} exec backend reported ${name}=unavailable` });
   }
 }
 
@@ -283,6 +286,7 @@ export const execTool = {
     }
     if (scriptBinding !== undefined || currentBinding !== undefined) assertScriptBinding(scriptBinding, currentBinding);
     let scriptSnapshot: string | undefined;
+    let windowsLaunch: WindowsCommandLaunch | undefined;
     let command = commandText;
     if (scriptBinding !== undefined) {
       if (scriptBinding.sourceKind === 'file' && permission.profile === 'read-only') {
@@ -318,37 +322,68 @@ export const execTool = {
         if (scriptSnapshot !== undefined) await rm(scriptSnapshot, { force: true });
         throw new KernelError('exec_cancelled', { detail: 'the run was cancelled before the command started' });
       }
-      try { privateTempDir = await createPrivateTempDir(); }
-      catch (error) {
-        if (scriptSnapshot !== undefined) await rm(scriptSnapshot, { force: true });
-        throw error;
+      const needsHostTempDir = process.platform === 'linux'
+        || (process.platform === 'win32' && permission.profile === 'workspace-write');
+      if (needsHostTempDir) {
+        try { privateTempDir = await createPrivateTempDir(); }
+        catch (error) {
+          if (scriptSnapshot !== undefined) await rm(scriptSnapshot, { force: true });
+          throw error;
+        }
       }
       try {
-        const result = await buildLinuxSandbox({
-          profile: permission.profile,
-          network: permission.network === 'unrestricted' ? 'unrestricted' : 'disabled',
-          workspaceRoot: boundary,
-          cwd,
-          privateTempDir,
-          executable: shell.executable,
-          argv: commandArgs,
-          environment: sandboxEnvironment(environment),
-        });
-        if (!result.available) {
-          throw new KernelError('permission_sandbox_unavailable', { detail: result.reason });
-        }
-        requireAvailableCapability(result.capabilities, 'filesystemRead', 'permission_sandbox_unavailable');
-        if (permission.profile === 'read-only') {
-          requireFullCapability(result.capabilities, 'filesystemWrite', 'permission_sandbox_unavailable');
+        if (process.platform === 'linux') {
+          if (privateTempDir === undefined) throw new KernelError('exec_sandbox_setup_failed', { detail: 'the Linux sandbox requires a private temporary directory' });
+          const result = await buildLinuxSandbox({
+            profile: permission.profile,
+            network: permission.network === 'unrestricted' ? 'unrestricted' : 'disabled',
+            workspaceRoot: boundary,
+            cwd,
+            privateTempDir,
+            executable: shell.executable,
+            argv: commandArgs,
+            environment: sandboxEnvironment(environment),
+          });
+          if (!result.available) {
+            throw new KernelError('permission_sandbox_unavailable', { detail: result.reason });
+          }
+          requireAvailableCapability(result.capabilities, 'filesystemRead', 'permission_sandbox_unavailable');
+          if (permission.profile === 'read-only') {
+            requireFullCapability(result.capabilities, 'filesystemWrite', 'permission_sandbox_unavailable');
+          } else {
+            requireAvailableCapability(result.capabilities, 'filesystemWrite', 'permission_sandbox_unavailable');
+          }
+          requireFullCapability(result.capabilities, 'process', 'permission_process_isolation_unavailable');
+          requireFullCapability(result.capabilities, 'network', 'permission_network_isolation_unavailable');
+          executable = result.executable;
+          argv = result.argv;
+        } else if (process.platform === 'win32') {
+          requireAvailableCapability(permission.capabilities, 'filesystemRead', 'permission_sandbox_unavailable');
+          requireAvailableCapability(permission.capabilities, 'filesystemWrite', 'permission_sandbox_unavailable');
+          requireFullCapability(permission.capabilities, 'process', 'permission_process_isolation_unavailable');
+          if (permission.profile === 'read-only') {
+            if (permission.network === 'unrestricted') {
+              throw new KernelError('permission_network_isolation_unavailable', {
+                detail: 'the Windows read-only AppContainer disables network access and cannot provide unrestricted networking',
+              });
+            }
+            windowsLaunch = { kind: 'appcontainer', workspaceRoot: boundary };
+          } else {
+            if (permission.network !== 'unrestricted') {
+              throw new KernelError('permission_network_isolation_unavailable', {
+                detail: 'the Windows write-restricted token cannot enforce disabled or destination-limited network access; choose unrestricted network explicitly or do not run Shell',
+              });
+            }
+            if (privateTempDir === undefined) throw new KernelError('exec_sandbox_setup_failed', { detail: 'Windows workspace-write requires a private temporary directory' });
+            windowsLaunch = { kind: 'restricted-token', workspaceRoot: boundary, tempDirectory: privateTempDir };
+            environment.TEMP = privateTempDir;
+            environment.TMP = privateTempDir;
+          }
         } else {
-          requireAvailableCapability(result.capabilities, 'filesystemWrite', 'permission_sandbox_unavailable');
+          throw new KernelError('permission_sandbox_unavailable', { detail: `the ${process.platform} exec backend is unavailable` });
         }
-        requireFullCapability(result.capabilities, 'process', 'permission_process_isolation_unavailable');
-        requireFullCapability(result.capabilities, 'network', 'permission_network_isolation_unavailable');
-        executable = result.executable;
-        argv = result.argv;
       } catch (error) {
-        await rm(privateTempDir, { recursive: true, force: true });
+        if (privateTempDir !== undefined) await rm(privateTempDir, { recursive: true, force: true });
         privateTempDir = undefined;
         if (scriptSnapshot !== undefined) await rm(scriptSnapshot, { force: true });
         if (error instanceof KernelError) throw error;
@@ -375,7 +410,7 @@ export const execTool = {
     let child: ChildProcess;
     try {
       owned = process.platform === 'win32' || process.platform === 'linux'
-        ? spawnWindowsCommand(executable, argv, cwd, environment)
+        ? spawnWindowsCommand(executable, argv, cwd, environment, windowsLaunch)
         : null;
       child = owned?.child ?? spawn(executable, argv, {
         cwd,

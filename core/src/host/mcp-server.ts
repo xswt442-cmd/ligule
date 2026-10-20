@@ -129,9 +129,18 @@ const permissionOutput = object({
     network: { type: 'string', enum: ['full', 'partial', 'unavailable'] },
     process: { type: 'string', enum: ['full', 'partial', 'unavailable'] },
   }, ['filesystemRead', 'filesystemWrite', 'network', 'process']),
+  profiles: object({
+    readOnly: { type: 'string', enum: ['full', 'partial', 'unavailable'] },
+    workspaceWrite: { type: 'string', enum: ['full', 'partial', 'unavailable'] },
+  }, ['readOnly', 'workspaceWrite']),
+  limitations: { type: 'array', items: { type: 'string' } },
+  partialWorkspaceWriteConfirmationRequired: { type: 'boolean' },
+  partialWorkspaceWriteConfirmed: { type: 'boolean' },
+  workspaceTrusted: { type: 'boolean' },
   execution: object({ available: { type: 'boolean' }, code: { type: ['string', 'null'] }, reason: { type: ['string', 'null'] } }, ['available', 'code', 'reason']),
   changeAllowed: { type: 'boolean' }, changeReason: { type: 'string' },
-}, ['profile', 'network', 'capabilities', 'execution', 'changeAllowed']);
+}, ['profile', 'network', 'capabilities', 'profiles', 'limitations', 'partialWorkspaceWriteConfirmationRequired',
+  'partialWorkspaceWriteConfirmed', 'workspaceTrusted', 'execution', 'changeAllowed']);
 const delegationOutput = { type: ['object', 'null'], additionalProperties: false, properties: {
   grantId: id,
   maxPermissionProfile: { type: 'string', enum: ['read-only', 'workspace-write', 'full-access'] },
@@ -288,9 +297,14 @@ export async function serveMcp({ projectRoot, version, flags = [], modeName, ope
   const operatorEnabled = operator && (grant === undefined || grant.allowOperator);
   const shippedModes = fileURLToPath(new URL('../../modes/', import.meta.url));
   const { layers, ...environment } = await loadHostEnvironment(authorizedRoot, shippedModes, flags);
-  const capabilities = await createInteractivePermissionContext();
+  const capabilities = await createInteractivePermissionContext({ shellConfig: environment.config, workspaceRoot: authorizedRoot });
   const permission = grant === undefined ? capabilities
-    : createPermissionContext(grant.defaultPermissionProfile, grant.defaultNetwork, capabilities.capabilities);
+    : createPermissionContext(grant.defaultPermissionProfile, grant.defaultNetwork, capabilities.capabilities, {
+        profiles: capabilities.profiles,
+        limitations: capabilities.limitations,
+        partialWorkspaceWriteConfirmationRequired: capabilities.partialWorkspaceWriteConfirmationRequired,
+        partialWorkspaceWriteConfirmed: grant.confirmedPartialWorkspaceWrite,
+      });
   const agentControl = grant === undefined ? undefined : {
     grantId: grant.id,
     storePath: grantStorePath,

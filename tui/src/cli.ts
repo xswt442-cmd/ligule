@@ -10,6 +10,7 @@ import { languageOf, textOf, type Locale } from '@ligule/core/kernel/locale.js';
 import { loadConfigLayers } from '@ligule/core/kernel/config-file.js';
 import { createConfigStore } from '@ligule/core/kernel/config-store.js';
 import { createKernel } from '@ligule/core/kernel/kernel.js';
+import { createInteractivePermissionContext } from '@ligule/core/capability/permission-capabilities.js';
 import { loadAssembly } from '@ligule/core/kernel/assembly.js';
 import { DEFAULT_MODE, modeDirectories } from '@ligule/core/kernel/modes.js';
 import { extensionSources } from '@ligule/core/kernel/extensions.js';
@@ -39,6 +40,7 @@ interface CliPolicy extends Record<string, unknown> {
 interface CliConfig extends ConfigSnapshot {
   readonly boundary: string;
   readonly workspaceRoot: string;
+  readonly exec?: { readonly shell?: unknown };
   readonly model?: Record<string, unknown>;
   readonly loop?: Record<string, unknown>;
   readonly limits?: Record<string, unknown>;
@@ -619,6 +621,7 @@ if (invalidLanguage) {
       // 模型尚未配置时仍启动 Host，以便客户端先写入设置；提交任务时再报告缺少的字段。
       provider: hostProviderFromConfig(config),
       policy: config.policy,
+      permission: await createInteractivePermissionContext({ shellConfig: config, workspaceRoot: config.workspaceRoot }),
       extensions,
       loadEnvironment: projectEnvironment,
       // 由 Desktop 或脚本启动时，客户端可以回答模型提问和审批请求。

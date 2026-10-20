@@ -56,11 +56,17 @@ test('Windows reports Job Object ownership only when its runtime probe succeeds'
       probes += 1;
       return true;
     },
+    probeWindowsSandbox: async () => ({
+      readOnlyAvailable: false,
+      workspaceWriteAvailable: false,
+      readOnlyReason: 'the AppContainer probe failed',
+      workspaceWriteReason: 'restricted-token launch failed',
+    }),
   });
 
   assert.equal(probes, 1);
   assert.equal(snapshot.backend, 'unavailable');
-  assert.match(snapshot.reason, /no OS sandbox backend is available for win32/u);
+  assert.match(snapshot.reason, /restricted-token launch failed/u);
   assert.deepEqual(snapshot.capabilities, {
     filesystemRead: 'unavailable', filesystemWrite: 'unavailable', network: 'unavailable', process: 'full',
   });
@@ -79,6 +85,42 @@ test('failed or throwing process ownership probes fail closed', async () => {
 
   assert.equal(linux.capabilities.process, 'unavailable');
   assert.equal(windows.capabilities.process, 'unavailable');
+});
+
+test('Windows reports read-only and workspace-write profile availability independently', async () => {
+  const snapshot = await detectPermissionCapabilities({
+    platform: 'win32',
+    probeWindowsProcessOwnership: async () => true,
+    probeWindowsSandbox: async () => ({
+      readOnlyAvailable: false,
+      workspaceWriteAvailable: true,
+      readOnlyReason: 'the AppContainer probe failed',
+    }),
+  });
+
+  assert.equal(snapshot.backend, 'windows-restricted-token');
+  assert.deepEqual(snapshot.profiles, { readOnly: 'unavailable', workspaceWrite: 'partial' });
+  assert.equal(snapshot.partialWorkspaceWriteConfirmationRequired, true);
+  assert.equal(snapshot.capabilities.process, 'full');
+  assert.ok(snapshot.limitations.some((limitation) => limitation.startsWith('read-only:')));
+  assert.ok(snapshot.limitations.some((limitation) => limitation.includes('hard links')));
+});
+
+test('Windows exposes AppContainer read-only only after its real filesystem and network probe succeeds', async () => {
+  const snapshot = await detectPermissionCapabilities({
+    platform: 'win32',
+    probeWindowsProcessOwnership: async () => true,
+    probeWindowsSandbox: async () => ({
+      readOnlyAvailable: true,
+      workspaceWriteAvailable: false,
+      workspaceWriteReason: 'the restricted-token probe failed',
+    }),
+  });
+
+  assert.equal(snapshot.backend, 'windows-appcontainer');
+  assert.deepEqual(snapshot.profiles, { readOnly: 'partial', workspaceWrite: 'unavailable' });
+  assert.equal(snapshot.partialWorkspaceWriteConfirmationRequired, false);
+  assert.ok(snapshot.limitations.some((limitation) => limitation.includes('AppContainer')));
 });
 
 test('Linux detects process ownership through the real subreaper probe', {
@@ -120,4 +162,24 @@ test('interactive permission remains read-only and denies exec when platform iso
   assert.equal(permission.profile, 'read-only');
   assert.equal(permission.capabilities.process, 'unavailable');
   assert.equal(permissionDenial(permission, 'exec')?.code, 'permission_sandbox_unavailable');
+});
+
+test('interactive Windows permission carries profile availability, limitations, and partial-write confirmation state', async () => {
+  const permission = await createInteractivePermissionContext({
+    platform: 'win32',
+    probeWindowsProcessOwnership: async () => true,
+    probeWindowsSandbox: async () => ({
+      readOnlyAvailable: false,
+      workspaceWriteAvailable: true,
+      readOnlyReason: 'the AppContainer probe failed',
+    }),
+  });
+
+  assert.deepEqual(permission.profiles, { readOnly: 'unavailable', workspaceWrite: 'partial' });
+  assert.equal(permission.partialWorkspaceWriteConfirmationRequired, true);
+  assert.equal(permission.partialWorkspaceWriteConfirmed, false);
+  assert.match(permission.limitations.join('\n'), /hard links/u);
+  assert.equal(permissionDenial(permission, 'exec')?.code, 'permission_sandbox_unavailable');
+  assert.equal(permissionDenial({ ...permission, profile: 'workspace-write', network: 'unrestricted' }, 'write')?.code,
+    'permission_partial_sandbox_confirmation_required');
 });

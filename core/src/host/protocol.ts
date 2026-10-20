@@ -20,6 +20,8 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly permissionNetwork?: string;
   readonly confirmFullAccess?: boolean;
   readonly confirmNetwork?: boolean;
+  readonly confirmPartialWorkspaceWrite?: boolean;
+  readonly confirmWorkspaceTrust?: boolean;
   readonly name?: string;
   readonly archived?: boolean;
   readonly at?: number;
@@ -40,6 +42,9 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly initialPermissionNetwork?: string;
   readonly confirmInitialFullAccess?: boolean;
   readonly confirmInitialNetwork?: boolean;
+  readonly confirmInitialPartialWorkspaceWrite?: boolean;
+  readonly confirmInitialWorkspaceTrust?: boolean;
+  readonly trusted?: boolean;
   readonly initialProvider?: string;
   readonly initialModel?: string;
   readonly initialThinkingEffort?: string;
@@ -81,6 +86,18 @@ export interface HostMethodParams extends Record<string, unknown> {
 const SESSION_ID: Record<string, unknown> = { type: 'string', description: 'the session this call refers to' };
 
 export const METHODS = Object.freeze({
+  'workspace.trust': {
+    description: 'Trust or untrust a project for local project-code execution; only the trusted local UI can change this state',
+    parameters: {
+      type: 'object',
+      properties: {
+        projectRoot: { type: 'string', description: 'the project selected in the local UI' },
+        trusted: { type: 'boolean', description: 'whether this project is trusted for project scripts, Git commands, and hooks' },
+        confirmWorkspaceTrust: { type: 'boolean', description: 'true only after the UI has shown the project and the user confirmed trust' },
+      },
+      required: ['projectRoot', 'trusted'],
+    },
+  },
   'session.create': {
     description: 'Start a session the Host keeps; returns the id every later call needs',
     parameters: {
@@ -96,6 +113,8 @@ export const METHODS = Object.freeze({
         initialPermissionNetwork: { type: 'string', description: 'optional initial network permission; interactive clients only' },
         confirmInitialFullAccess: { type: 'boolean', description: 'confirmation for granting full-access permission to a new session' },
         confirmInitialNetwork: { type: 'boolean', description: 'confirmation for granting unrestricted network access to a new session' },
+        confirmInitialPartialWorkspaceWrite: { type: 'boolean', description: 'confirmation that the user trusts the project and accepts the limits of a partial workspace-write sandbox' },
+        confirmInitialWorkspaceTrust: { type: 'boolean', description: 'confirmation that the user trusts this project for project-code execution' },
         initialProvider: { type: 'string', description: 'provider ID for an initial model selection; must be paired with initialModel' },
         initialModel: { type: 'string', description: 'model ID for an initial model selection; must be paired with initialProvider' },
         initialThinkingEffort: { type: 'string', description: 'provider-supported effort to apply before the first run' },
@@ -361,7 +380,7 @@ export const METHODS = Object.freeze({
     parameters: { type: 'object', properties: {} },
   },
   'agent-control.create': {
-    description: 'Create a project-bound Agent Control grant after the trusted UI has separately confirmed any full-access and unrestricted-network ceiling',
+    description: 'Create a project-bound Agent Control grant after the trusted UI has confirmed project trust and separately confirmed any elevated permission ceilings',
     parameters: { type: 'object', properties: {
       version: { type: 'string' },
       grantName: { type: 'string' },
@@ -377,8 +396,10 @@ export const METHODS = Object.freeze({
       allowOperator: { type: 'boolean' },
       confirmFullAccess: { type: 'boolean' },
       confirmUnrestrictedNetwork: { type: 'boolean' },
+      confirmPartialWorkspaceWrite: { type: 'boolean', description: 'confirm trust in the project and accept partial workspace-write sandbox limits when this platform requires it' },
+      confirmWorkspaceTrust: { type: 'boolean', description: 'true only after the trusted UI has shown the project and received the user trust confirmation' },
       expiresAt: { type: 'string' },
-    }, required: ['version', 'grantName', 'projectRoot', 'defaultPermissionProfile', 'maxPermissionProfile', 'defaultNetwork', 'maxNetwork', 'defaultPolicy', 'allowOperator', 'confirmFullAccess', 'confirmUnrestrictedNetwork', 'expiresAt'] },
+    }, required: ['version', 'grantName', 'projectRoot', 'defaultPermissionProfile', 'maxPermissionProfile', 'defaultNetwork', 'maxNetwork', 'defaultPolicy', 'allowOperator', 'confirmFullAccess', 'confirmUnrestrictedNetwork', 'confirmWorkspaceTrust', 'expiresAt'] },
   },
   'agent-control.revoke': {
     description: 'Revoke a persisted Agent Control grant using the version returned by agent-control.list',
@@ -439,6 +460,8 @@ export const METHODS = Object.freeze({
         permissionNetwork: { type: 'string', description: 'policy, unrestricted, or disabled' },
         confirmFullAccess: { type: 'boolean', description: 'true only after the UI has shown and received confirmation for full-access' },
         confirmNetwork: { type: 'boolean', description: 'true only after the UI has shown and received confirmation for unrestricted network access' },
+        confirmPartialWorkspaceWrite: { type: 'boolean', description: 'true only after the UI has shown the partial sandbox limits and the user confirmed trust in this project' },
+        confirmWorkspaceTrust: { type: 'boolean', description: 'true only after the UI has shown the project and the user confirmed trust for project-code execution' },
       },
       required: ['sessionId', 'permissionProfile'],
     },

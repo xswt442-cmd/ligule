@@ -10,10 +10,11 @@ import { createObservationLog, type ObservationLog } from '../session/observe.js
 import { resolveTarget, type NetworkTarget } from '../capability/network.js';
 import { resolveShell, withNativeExitCode, type ShellKind, type ShellSelection } from '../capability/shell.js';
 import { assertSupportedSchema, validateArgs } from './schema.js';
-import { DEFAULT_PERMISSION_CONTEXT, isPermissionAccess, permissionDenial, type PermissionAccess, type PermissionContext } from './permission.js';
-import { bindScript, type ScriptBinding } from '../capability/script-binding.js';
+import { createPermissionContext, DEFAULT_PERMISSION_CONTEXT, isPermissionAccess, permissionDenial, type PermissionAccess, type PermissionContext } from './permission.js';
+import { bindScript, requiresManualApprovalForProjectCommand, requiresTrustedWorkspaceCommand, type ScriptBinding } from '../capability/script-binding.js';
 import { boundaryOf, workingDirectoryOf } from '../capability/limits.js';
 import { resolveWithin } from '../capability/paths.js';
+import { isTrusted } from './workspace-trust.js';
 
 export interface ToolContext {
   readonly config: ConfigSnapshot;
@@ -116,7 +117,23 @@ function samePermission(left: PermissionContext, right: PermissionContext): bool
     && left.capabilities.filesystemRead === right.capabilities.filesystemRead
     && left.capabilities.filesystemWrite === right.capabilities.filesystemWrite
     && left.capabilities.network === right.capabilities.network
-    && left.capabilities.process === right.capabilities.process;
+    && left.capabilities.process === right.capabilities.process
+    && left.profiles.readOnly === right.profiles.readOnly
+    && left.profiles.workspaceWrite === right.profiles.workspaceWrite
+    && left.partialWorkspaceWriteConfirmationRequired === right.partialWorkspaceWriteConfirmationRequired
+    && left.partialWorkspaceWriteConfirmed === right.partialWorkspaceWriteConfirmed
+    && left.workspaceTrusted === right.workspaceTrusted;
+}
+
+function permissionWithWorkspaceTrust(permission: PermissionContext, workspaceTrusted: boolean): PermissionContext {
+  if (permission.workspaceTrusted === workspaceTrusted) return permission;
+  return createPermissionContext(permission.profile, permission.network, permission.capabilities, {
+    profiles: permission.profiles,
+    limitations: permission.limitations,
+    partialWorkspaceWriteConfirmationRequired: permission.partialWorkspaceWriteConfirmationRequired,
+    partialWorkspaceWriteConfirmed: permission.partialWorkspaceWriteConfirmed,
+    workspaceTrusted,
+  });
 }
 
 // `options.config` 是加载器生成的配置快照，`options.logger` 是 Host 提供的日志接口。
@@ -325,6 +342,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
         return undefined;
       }
       const activePermission = currentPermission();
+      let callPermission = activePermission;
       const denied = permissionDenial(activePermission, tool.access);
       if (denied !== undefined) {
         entry.permission = {
@@ -358,6 +376,9 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       }
       let approvedScriptBinding: ScriptBinding | undefined;
       let scriptBindingError: KernelError | undefined;
+      let requiresManualApproval = false;
+      let requiresWorkspaceTrust = false;
+      let scriptWorkspaceRoot: string | undefined;
       if (policy) {
         // 有能力元数据的工具按其声明的实际能力名称进行判定，例如 `mcp:<服务器>/<工具>`。
         const capability = tool.capability?.(args);
@@ -368,6 +389,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
           let workingDirectory: string;
           try {
             workspaceRoot = workingDirectoryOf(config);
+            scriptWorkspaceRoot = workspaceRoot;
             boundary = boundaryOf(config);
             workingDirectory = args.cwd === undefined
               ? await resolveWithin(boundary, '.', { cwd: workspaceRoot })
@@ -377,12 +399,17 @@ export function createKernel(options: KernelOptions = {}): Kernel {
             return undefined;
           }
           try {
-            scriptBinding = await bindScript({ command: args.command, shell, boundary, workspaceRoot, cwd: workingDirectory, permission: activePermission });
+            requiresWorkspaceTrust = await requiresTrustedWorkspaceCommand(args.command, shell);
+            const trusted = requiresWorkspaceTrust ? await isTrusted(workspaceRoot) : activePermission.workspaceTrusted;
+            callPermission = permissionWithWorkspaceTrust(activePermission, trusted);
+            scriptBinding = await bindScript({ command: args.command, shell, boundary, workspaceRoot, cwd: workingDirectory, permission: callPermission });
+            requiresManualApproval = await requiresManualApprovalForProjectCommand(args.command, shell);
           } catch (error) {
             scriptBindingError = error instanceof KernelError ? error : new KernelError('exec_script_binding_unavailable', { cause: error });
           }
         }
         const verdict = await policy.evaluate({ tool: name, input: args, target: network, shell, capability, access: tool.access, scriptBinding,
+          ...(requiresManualApproval ? { requiresManualApproval: true } : {}),
           ...(scriptBindingError === undefined ? {} : { scriptBindingError: { code: scriptBindingError.code, detail: scriptBindingError.detail ?? scriptBindingError.code } }),
         });
         if (session?.header !== undefined && policy.snapshot !== undefined) {
@@ -432,6 +459,18 @@ export function createKernel(options: KernelOptions = {}): Kernel {
         await fail(entry, scriptBindingError);
         return undefined;
       }
+      if (requiresWorkspaceTrust && scriptWorkspaceRoot !== undefined) {
+        try {
+          if (!(await isTrusted(scriptWorkspaceRoot))) throw new KernelError('exec_workspace_untrusted', { detail: 'the project trust was revoked before the command started' });
+        } catch (error) {
+          await fail(entry, error instanceof KernelError ? error : new KernelError('workspace_trust_unavailable', { cause: error }));
+          return undefined;
+        }
+        if (!samePermission(callPermission, currentPermission())) {
+          await fail(entry, new KernelError('exec_workspace_untrusted', { detail: 'workspace trust changed while the command waited for approval' }));
+          return undefined;
+        }
+      }
       let value;
       // 将执行耗时写入事件；计时从权限判定通过后开始，不包含等待审批的时间。
       // 使用单调时钟，避免系统时间调整影响耗时结果。
@@ -440,7 +479,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
         entry.durationMs = Number((process.hrtime.bigint() - startedAt) / 1_000_000n);
       };
       try {
-          value = await tool.run(args, { ...context, permission: activePermission, signal: options.signal, target: network, shell,
+          value = await tool.run(args, { ...context, permission: callPermission, signal: options.signal, target: network, shell,
             ...(approvedScriptBinding === undefined ? {} : { scriptBinding: approvedScriptBinding }), });
       } catch (error) {
         // 工具抛出未包装的错误时，转换为稳定错误码并将原始错误保存在 cause 中。

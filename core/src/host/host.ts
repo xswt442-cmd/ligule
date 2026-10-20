@@ -14,7 +14,7 @@ import {
   listDelegationGrants, recordDelegationEvent, requireDelegationGrant, revokeDelegationGrant,
   type CreateDelegationGrantInput, type DelegationGrant,
 } from './agent-control.js';
-import { createPermissionContext, DEFAULT_PERMISSION_CONTEXT, permissionDenial, type PermissionContext, type PermissionNetwork, type PermissionProfile } from '../kernel/permission.js';
+import { createPermissionContext, DEFAULT_PERMISSION_CONTEXT, permissionDenial, type PermissionContext, type PermissionContextOptions, type PermissionNetwork, type PermissionProfile } from '../kernel/permission.js';
 import { createKernel, type Kernel } from '../kernel/kernel.js';
 import { loadAssembly, type Assembly, type Plugin } from '../kernel/assembly.js';
 import { loadExtensions, type ExtensionDiagnostic } from '../kernel/extensions.js';
@@ -23,6 +23,7 @@ import {
   type ModeDirectories, type ModeFile,
 } from '../kernel/modes.js';
 import { readRegistry, registerWorkspace, setDefaultWorkspace, unregisterWorkspace, workspaceIdentity } from '../kernel/workspace.js';
+import { isTrusted, setTrusted } from '../kernel/workspace-trust.js';
 import { historyPathOf, loadHistory, rememberHistory } from '../kernel/input-history.js';
 import { parsePrefsJson, prefsPathOf, readPrefs, savePrefs } from '../kernel/desktop-prefs.js';
 import { credentialStatus, deleteCredential, storeCredential } from '../kernel/credentials.js';
@@ -77,6 +78,7 @@ export { providerFromConfig, hostProviderFromConfig } from './provider.js';
 interface HostConfigSnapshot extends ConfigSnapshot {
   readonly boundary?: string;
   readonly workspaceRoot?: string;
+  readonly exec?: { readonly shell?: unknown };
   readonly model?: Record<string, unknown>;
   readonly loop?: Record<string, unknown>;
   readonly limits?: Record<string, unknown>;
@@ -170,6 +172,7 @@ interface InitialSessionSettings {
     readonly context: PermissionContext;
     readonly confirmedFullAccess: boolean;
     readonly confirmedNetwork: boolean;
+    readonly confirmedPartialWorkspaceWrite: boolean;
   };
   readonly loopIterations?: number;
   readonly persistLoopIterations: boolean;
@@ -302,11 +305,30 @@ function permissionView(permission: PermissionContext, changeAllowed: boolean, c
     profile: permission.profile,
     network: permission.network,
     capabilities: permission.capabilities,
+    profiles: permission.profiles,
+    limitations: permission.limitations,
+    partialWorkspaceWriteConfirmationRequired: permission.partialWorkspaceWriteConfirmationRequired,
+    partialWorkspaceWriteConfirmed: permission.partialWorkspaceWriteConfirmed,
+    workspaceTrusted: permission.workspaceTrusted,
     execution: execDenial === undefined
       ? { available: true, code: null, reason: null }
       : { available: false, code: execDenial.code, reason: execDenial.reason },
     changeAllowed,
     ...(changeReason === undefined ? {} : { changeReason }),
+  };
+}
+
+function permissionOptionsOf(
+  permission: PermissionContext,
+  partialWorkspaceWriteConfirmed = permission.partialWorkspaceWriteConfirmed,
+  workspaceTrusted = permission.workspaceTrusted,
+): PermissionContextOptions {
+  return {
+    profiles: permission.profiles,
+    limitations: permission.limitations,
+    partialWorkspaceWriteConfirmationRequired: permission.partialWorkspaceWriteConfirmationRequired,
+    partialWorkspaceWriteConfirmed,
+    workspaceTrusted,
   };
 }
 
@@ -738,6 +760,9 @@ export function createHost({
   }
 
   async function initialSessionSettings(env: ProjectEnvironment, params: HostMethodParams, grant?: DelegationGrant): Promise<InitialSessionSettings> {
+    if (params.confirmInitialWorkspaceTrust === true && !permissionControl) {
+      throw new KernelError('workspace_trust_control_unavailable');
+    }
     const hasProvider = params.initialProvider !== undefined;
     const hasModel = params.initialModel !== undefined;
     if (hasProvider !== hasModel) throw new KernelError('session_model_selection_invalid', { detail: 'initialProvider and initialModel must be supplied together' });
@@ -779,16 +804,25 @@ export function createHost({
       const confirmedNetwork = grant === undefined
         ? network === 'unrestricted' && params.confirmInitialNetwork === true
         : network === 'unrestricted' && grant.confirmedUnrestrictedNetwork;
+      const confirmedPartialWorkspaceWrite = grant === undefined
+        ? profile === 'workspace-write' && params.confirmInitialPartialWorkspaceWrite === true
+        : profile === 'workspace-write' && grant.confirmedPartialWorkspaceWrite;
       if (grant === undefined && profile === 'full-access' && !confirmedFullAccess) {
         throw new KernelError('permission_full_access_confirmation_required');
       }
       if (grant === undefined && network === 'unrestricted' && !confirmedNetwork) {
         throw new KernelError('permission_network_confirmation_required');
       }
+      if (profile === 'workspace-write' && permission.partialWorkspaceWriteConfirmationRequired && !confirmedPartialWorkspaceWrite) {
+        throw new KernelError('permission_partial_sandbox_confirmation_required');
+      }
       initialPermission = {
-        context: createPermissionContext(profile, network, permission.capabilities),
+        context: createPermissionContext(profile, network, permission.capabilities, permissionOptionsOf(
+          permission, confirmedPartialWorkspaceWrite,
+        )),
         confirmedFullAccess,
         confirmedNetwork,
+        confirmedPartialWorkspaceWrite,
       };
     }
     const options: { outputTokens?: number; thinkingEffort?: HostGenerationOptions['thinkingEffort'] } = {};
@@ -820,6 +854,7 @@ export function createHost({
       if (env.modePaths === undefined) throw new KernelError('host_mode_paths_required');
       await loadMode(mode, env.modePaths);
     }
+    if (params.confirmInitialWorkspaceTrust === true) await setTrusted(env.projectRoot, true);
     return {
       ...(mode === undefined ? {} : { mode }),
       ...(policy === undefined ? {} : { policy }),
@@ -1282,6 +1317,14 @@ export function createHost({
       for (const listener of listeners) listener(event);
     });
     // 新会话继承项目当前有效的生成设置。配置写入后，初始快照可能已过期，优先读取环境的最新设置。
+    const workspaceTrusted = await isTrusted(env.projectRoot);
+    const basePermission = recover ? permission : initial?.permission?.context ?? permission;
+    const sessionPermission = createPermissionContext(
+      recover ? 'read-only' : basePermission.profile,
+      recover ? 'policy' : basePermission.network,
+      basePermission.capabilities,
+      permissionOptionsOf(basePermission, recover ? false : basePermission.partialWorkspaceWriteConfirmed, workspaceTrusted),
+    );
     const state: HostSessionBase = {
       id,
       session,
@@ -1291,9 +1334,7 @@ export function createHost({
       mode: modeState,
       pending: undefined,
       environment: env,
-      permission: recover
-        ? createPermissionContext('read-only', 'policy', permission.capabilities)
-        : initial?.permission?.context ?? permission,
+      permission: sessionPermission,
       policyOverride: initial?.policy ?? null,
       loopIterations: initial?.loopIterations ?? configuredLoopLimits.iterations,
       loopModelCalls: configuredLoopLimits.modelCalls,
@@ -1310,7 +1351,8 @@ export function createHost({
       const events = await session.read();
       const savedPermission = events.filter((event) => event.kind === 'sessionPermission').at(-1);
       if (savedPermission !== undefined) {
-        state.permission = createPermissionContext(savedPermission.profile, savedPermission.network, permission.capabilities);
+        state.permission = createPermissionContext(savedPermission.profile, savedPermission.network, permission.capabilities,
+          permissionOptionsOf(permission, savedPermission.confirmedPartialWorkspaceWrite === true, workspaceTrusted));
       }
       const savedPolicy = events.filter((event) => event.kind === 'sessionPolicy').at(-1);
       if (savedPolicy !== undefined) {
@@ -1357,6 +1399,7 @@ export function createHost({
             grantId: grant.id,
             confirmedFullAccess: state.permission.profile === 'full-access' && grant.confirmedFullAccess,
             confirmedNetwork: state.permission.network === 'unrestricted' && grant.confirmedUnrestrictedNetwork,
+            confirmedPartialWorkspaceWrite: state.permission.profile === 'workspace-write' && grant.confirmedPartialWorkspaceWrite,
           }
         : initial?.permission === undefined
           ? {
@@ -1364,6 +1407,8 @@ export function createHost({
               profile: state.permission.profile,
               network: state.permission.network,
               source: 'host-default',
+              confirmedPartialWorkspaceWrite: state.permission.profile === 'workspace-write'
+                && state.permission.partialWorkspaceWriteConfirmed,
             }
           : {
               kind: 'sessionPermission',
@@ -1372,6 +1417,7 @@ export function createHost({
               source: 'trusted-ui',
               confirmedFullAccess: initial.permission.confirmedFullAccess,
               confirmedNetwork: initial.permission.confirmedNetwork,
+              confirmedPartialWorkspaceWrite: initial.permission.confirmedPartialWorkspaceWrite,
             });
     }
     const chain = createDecisionChain({
@@ -1850,7 +1896,7 @@ export function createHost({
 
     if (permissionChanged) {
       return await setPermission(state, params.permissionProfile ?? state.permission.profile,
-        params.permissionNetwork, undefined, undefined);
+        params.permissionNetwork, undefined, undefined, undefined, undefined);
     }
 
     if (modeChanged) {
@@ -1968,6 +2014,8 @@ export function createHost({
     networkValue: unknown,
     confirmFullAccess: unknown,
     confirmNetwork: unknown,
+    confirmPartialWorkspaceWrite: unknown,
+    confirmWorkspaceTrust: unknown,
   ): Promise<Record<string, unknown>> {
     const grant = await activeDelegation();
     if (!permissionControl && agentControl === undefined) throw new KernelError('permission_control_unavailable');
@@ -1999,8 +2047,25 @@ export function createHost({
     if (grant === undefined && network === 'unrestricted' && state.permission.network !== 'unrestricted' && confirmNetwork !== true) {
       throw new KernelError('permission_network_confirmation_required');
     }
-    const next = createPermissionContext(profileValue, network, state.permission.capabilities);
+    const confirmedPartialWorkspaceWrite = profileValue === 'workspace-write' && (grant === undefined
+      ? confirmPartialWorkspaceWrite === true
+        || state.permission.profile === 'workspace-write' && state.permission.partialWorkspaceWriteConfirmed
+      : grant.confirmedPartialWorkspaceWrite);
+    if (profileValue === 'workspace-write' && state.permission.partialWorkspaceWriteConfirmationRequired
+      && !confirmedPartialWorkspaceWrite) {
+      throw new KernelError('permission_partial_sandbox_confirmation_required');
+    }
+    if (confirmWorkspaceTrust === true && !permissionControl) {
+      throw new KernelError('workspace_trust_control_unavailable');
+    }
+    if (confirmWorkspaceTrust === true && !state.permission.workspaceTrusted) {
+      await setTrusted(state.environment.projectRoot, true);
+    }
+    const next = createPermissionContext(profileValue, network, state.permission.capabilities,
+      permissionOptionsOf(state.permission, confirmedPartialWorkspaceWrite,
+        state.permission.workspaceTrusted || confirmWorkspaceTrust === true));
     if (next.profile === state.permission.profile && next.network === state.permission.network) {
+      state.permission = next;
       return { sessionId: state.id, permission: sessionPermissionView(state, canControlPermission), applies: 'unchanged' };
     }
     if (state.extensions.loaded.length > 0 && (next.profile !== 'full-access' || next.network !== 'unrestricted')) {
@@ -2033,6 +2098,7 @@ export function createHost({
         confirmedNetwork: grant === undefined
           ? next.network === 'unrestricted' && state.permission.network !== 'unrestricted' && confirmNetwork === true
           : next.network === 'unrestricted' && grant.confirmedUnrestrictedNetwork,
+        confirmedPartialWorkspaceWrite,
       });
       state.permission = next;
       return { sessionId: state.id, permission: sessionPermissionView(state, canControlPermission), applies: 'now' };
@@ -2056,6 +2122,22 @@ export function createHost({
       }
 
       switch (message.method) {
+        case 'workspace.trust': {
+          if (!permissionControl) throw new KernelError('workspace_trust_control_unavailable');
+          if (typeof message.params.trusted !== 'boolean') throw new KernelError('protocol_args_invalid', { detail: 'trusted must be a boolean' });
+          if (message.params.trusted && message.params.confirmWorkspaceTrust !== true) {
+            throw new KernelError('workspace_trust_confirmation_required');
+          }
+          const environment = await environmentFor(message.params.projectRoot);
+          await setTrusted(environment.projectRoot, message.params.trusted);
+          const identity = workspaceIdentity(environment.projectRoot);
+          for (const state of sessions.values()) {
+            if (workspaceIdentity(state.environment.projectRoot) !== identity) continue;
+            state.permission = createPermissionContext(state.permission.profile, state.permission.network, state.permission.capabilities,
+              permissionOptionsOf(state.permission, state.permission.partialWorkspaceWriteConfirmed, message.params.trusted));
+          }
+          return { projectRoot: environment.projectRoot, trusted: message.params.trusted };
+        }
         case 'session.create': {
           const id = randomUUID();
           const origin = message.params.workspaceOrigin;
@@ -2071,6 +2153,7 @@ export function createHost({
           await noteWorkspace(env);
           const hasInitialSettings = message.params.initialMode !== undefined || message.params.initialPolicy !== undefined
             || message.params.initialPermissionProfile !== undefined || message.params.initialPermissionNetwork !== undefined
+            || message.params.confirmInitialWorkspaceTrust !== undefined
             || message.params.initialProvider !== undefined || message.params.initialModel !== undefined
             || message.params.initialThinkingEffort !== undefined || message.params.initialOutputTokens !== undefined
             || message.params.initialLoopIterations !== undefined;
@@ -2316,6 +2399,8 @@ export function createHost({
             message.params.permissionNetwork,
             message.params.confirmFullAccess,
             message.params.confirmNetwork,
+            message.params.confirmPartialWorkspaceWrite,
+            message.params.confirmWorkspaceTrust,
           ));
         }
         case 'mode.set': {
@@ -2459,9 +2544,24 @@ export function createHost({
         }
         case 'agent-control.create': {
           if (!permissionControl) throw new KernelError('agent_control_trusted_ui_required');
+          if (message.params.confirmWorkspaceTrust !== true) throw new KernelError('workspace_trust_confirmation_required');
+          if (permission.partialWorkspaceWriteConfirmationRequired
+            && (message.params.maxPermissionProfile === 'workspace-write' || message.params.maxPermissionProfile === 'full-access')
+            && message.params.confirmPartialWorkspaceWrite !== true) {
+            throw new KernelError('permission_partial_sandbox_confirmation_required');
+          }
+          const projectRoot = requiredString(message.params.projectRoot, 'projectRoot');
+          const project = await environmentFor(projectRoot);
+          await setTrusted(project.projectRoot, true);
+          const projectIdentity = workspaceIdentity(project.projectRoot);
+          for (const state of sessions.values()) {
+            if (workspaceIdentity(state.environment.projectRoot) !== projectIdentity) continue;
+            state.permission = createPermissionContext(state.permission.profile, state.permission.network, state.permission.capabilities,
+              permissionOptionsOf(state.permission, state.permission.partialWorkspaceWriteConfirmed, true));
+          }
           const input: CreateDelegationGrantInput = {
             name: requiredString(message.params.grantName, 'grantName'),
-            projectRoot: requiredString(message.params.projectRoot, 'projectRoot'),
+            projectRoot: project.projectRoot,
             defaultPermissionProfile: message.params.defaultPermissionProfile as PermissionProfile,
             maxPermissionProfile: message.params.maxPermissionProfile as PermissionProfile,
             defaultNetwork: message.params.defaultNetwork as PermissionNetwork,
@@ -2475,6 +2575,7 @@ export function createHost({
             allowOperator: message.params.allowOperator as boolean,
             confirmFullAccess: message.params.confirmFullAccess as boolean,
             confirmUnrestrictedNetwork: message.params.confirmUnrestrictedNetwork as boolean,
+            confirmPartialWorkspaceWrite: message.params.confirmPartialWorkspaceWrite === true,
             expiresAt: message.params.expiresAt === '' ? null : requiredString(message.params.expiresAt, 'expiresAt'),
           };
           return await createDelegationGrant(delegationPathOf(), input, requiredString(message.params.version, 'version'));

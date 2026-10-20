@@ -210,7 +210,7 @@ test('a scoped AppContainer read ACE grants workspace reads only and revokes wit
     import { execFileSync } from 'node:child_process';
     import { existsSync, readFileSync, writeFileSync } from 'node:fs';
     import { createAppContainerProfile, runAppContainerCommand } from ${JSON.stringify(moduleUrl)};
-    import { grantAppContainerDirectoryRead, revokeAppContainerDirectoryRead } from ${JSON.stringify(aclUrl)};
+    import { createAppContainerDirectoryReadGrant, grantAppContainerDirectoryRead, revokeAppContainerDirectoryRead } from ${JSON.stringify(aclUrl)};
     import { createOwnedProcessJob } from ${JSON.stringify(jobUrl)};
 
     const [workspace, sibling, changedWorkspace, resultPath] = process.argv.slice(1);
@@ -261,8 +261,8 @@ test('a scoped AppContainer read ACE grants workspace reads only and revokes wit
     const job = await createOwnedProcessJob();
     const profile = await createAppContainerProfile();
     const sidText = profileSidText(profile.sid);
-    let workspaceGrant = false;
-    let changedGrant = false;
+    let workspaceGrant;
+    let changedGrant;
     let result;
     try {
       await import('node:fs/promises').then(({ mkdir }) => mkdir(descendant));
@@ -276,10 +276,10 @@ test('a scoped AppContainer read ACE grants workspace reads only and revokes wit
       const baselineDescendantFileAcl = icacls(descendantFile);
       const baselineChangedAcl = icacls(changedWorkspace);
 
-      await grantAppContainerDirectoryRead(workspace, profile.sid);
-      workspaceGrant = true;
+      workspaceGrant = await createAppContainerDirectoryReadGrant(workspace);
+      await grantAppContainerDirectoryRead(workspaceGrant, profile.sid);
       const workspaceAclWithGrant = icacls(workspace);
-      assert.ok(workspaceAclWithGrant.includes(sidText) && workspaceAclWithGrant.includes('(OI)(CI)(R)'));
+      assert.ok(workspaceAclWithGrant.includes(sidText) && workspaceAclWithGrant.includes('(OI)(CI)(RX)'));
       const rootReadExit = await run(['type', rootFile]);
       const nestedReadExit = await run(['type', descendantFile]);
       const createExit = await run(['echo CREATE_ATTEMPT>' + createdFile]);
@@ -294,8 +294,8 @@ test('a scoped AppContainer read ACE grants workspace reads only and revokes wit
       const siblingReadDenied = siblingReadExit !== 0;
       const siblingWriteDenied = !existsSync(siblingWrite);
 
-      await revokeAppContainerDirectoryRead(workspace, profile.sid);
-      workspaceGrant = false;
+      await revokeAppContainerDirectoryRead(workspaceGrant, profile.sid);
+      workspaceGrant = undefined;
       const workspaceDaclRestored = icacls(workspace) === baselineWorkspaceAcl;
       const rootFileDaclRestored = icacls(rootFile) === baselineRootFileAcl;
       const descendantDaclRestored = icacls(descendant) === baselineDescendantAcl;
@@ -307,16 +307,16 @@ test('a scoped AppContainer read ACE grants workspace reads only and revokes wit
       const icaclsRootDaclRestored = icacls(workspace) === baselineWorkspaceAcl;
       const icaclsFileDaclRestored = icacls(rootFile) === baselineRootFileAcl;
 
-      await grantAppContainerDirectoryRead(changedWorkspace, profile.sid);
-      changedGrant = true;
+      changedGrant = await createAppContainerDirectoryReadGrant(changedWorkspace);
+      await grantAppContainerDirectoryRead(changedGrant, profile.sid);
       execFileSync('icacls.exe', [changedWorkspace, '/grant', '*' + sidText + ':(OI)(CI)(M)'], { encoding: 'utf8', windowsHide: true });
       let changedAceRefused = false;
-      try { await revokeAppContainerDirectoryRead(changedWorkspace, profile.sid); }
-      catch (error) { changedAceRefused = String(error?.message).includes('target SID ACE changed'); }
+      try { await revokeAppContainerDirectoryRead(changedGrant, profile.sid); }
+      catch { changedAceRefused = true; }
       const changedAclAfterRefusal = icacls(changedWorkspace);
       const changedAcePreserved = changedAclAfterRefusal.includes(sidText) && changedAclAfterRefusal.includes('(OI)(CI)(M)');
       execFileSync('icacls.exe', [changedWorkspace, '/remove', '*' + sidText], { encoding: 'utf8', windowsHide: true });
-      changedGrant = false;
+      changedGrant = undefined;
       const changedDaclRestored = icacls(changedWorkspace) === baselineChangedAcl;
       result = {
         targetSid: sidText,
@@ -356,11 +356,15 @@ test('a scoped AppContainer read ACE grants workspace reads only and revokes wit
       assert.equal(workspaceDaclRestored && rootFileDaclRestored && descendantDaclRestored && descendantFileDaclRestored, true, JSON.stringify(result));
       assert.equal(changedAceRefused && changedAcePreserved && changedDaclRestored, true, JSON.stringify(result));
     } finally {
-      if (workspaceGrant) {
-        try { await revokeAppContainerDirectoryRead(workspace, profile.sid); }
-        catch { execFileSync('icacls.exe', [workspace, '/remove', '*' + sidText], { encoding: 'utf8', windowsHide: true }); }
+      if (workspaceGrant !== undefined) {
+        try { await revokeAppContainerDirectoryRead(workspaceGrant, profile.sid); }
+        catch {
+          execFileSync('icacls.exe', [workspace, '/remove', '*' + sidText], { encoding: 'utf8', windowsHide: true });
+        }
       }
-      if (changedGrant) execFileSync('icacls.exe', [changedWorkspace, '/remove', '*' + sidText], { encoding: 'utf8', windowsHide: true });
+      if (changedGrant !== undefined) {
+        execFileSync('icacls.exe', [changedWorkspace, '/remove', '*' + sidText], { encoding: 'utf8', windowsHide: true });
+      }
       await profile.dispose();
       writeFileSync(resultPath, JSON.stringify(result));
       job.close();

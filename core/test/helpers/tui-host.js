@@ -57,6 +57,9 @@ export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {},
   const agentControlOptions = typeof agentControl === 'function'
     ? await agentControl({ directory, projectDirectory, homeDirectory, sessionDirectory })
     : agentControl;
+  const permissionContext = typeof permission === 'function'
+    ? await permission({ directory, projectDirectory, homeDirectory, sessionDirectory })
+    : permission;
 
   const envKeys = ['HOME', 'USERPROFILE', 'LIGULE_TUI_TEST_API_KEY'];
   const previousEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
@@ -145,7 +148,7 @@ export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {},
     host = serveHost({ ...pair.host, config, provider, policy: config.policy, loadEnvironment,
       // 客户端声明支持回答模型提问，与终端和桌面客户端使用相同的协议字段。
       interactive,
-      ...(permission === undefined ? {} : { permission }),
+      ...(permissionContext === undefined ? {} : { permission: permissionContext }),
       ...(extensions === undefined ? {} : { extensions }),
       ...(agentControlOptions === undefined ? {} : { agentControl: agentControlOptions }),
       permissionControl,

@@ -27,12 +27,15 @@ export interface ScriptBinding {
   readonly permission: {
     readonly profile: string;
     readonly network: string;
+    readonly workspaceTrusted: boolean;
     readonly capabilities: PermissionContext['capabilities'];
   };
 }
 
 const INTERPRETERS = new Set(['bash', 'sh', 'zsh', 'dash', 'fish', 'pwsh', 'powershell', 'cmd', 'python', 'python3', 'node', 'deno', 'bun', 'perl', 'ruby', 'php']);
 const WRAPPERS = new Set(['sudo', 'su', 'doas', 'env', 'command', 'exec', 'source', '.', 'import-module', 'busybox', 'timeout', 'nohup', 'setsid', 'xargs', 'start-process', 'invoke-expression', 'iex', 'eval', 'npm', 'npx', 'pnpm', 'yarn', 'make', 'awk', 'gawk', 'mawk', 'nawk']);
+const PACKAGE_MANAGERS = new Set(['npm', 'npx', 'pnpm', 'yarn']);
+const INSTALL_ACTIONS = new Set(['install', 'i', 'ci', 'add']);
 const EXTENSIONS = new Set(['.sh', '.bash', '.zsh', '.ps1', '.py', '.pyw', '.js', '.mjs', '.cjs', '.ts', '.mts', '.cts', '.rb', '.pl', '.php']);
 
 function executableName(value: string): string {
@@ -128,13 +131,63 @@ export async function readBoundScript(boundary: string, path: string, allowOutsi
   }
 }
 
-function scriptArgument(invocation: Awaited<ReturnType<typeof inspectCommand>>['invocations'][number]): { path: string; sourceKind: 'file' | 'inline'; inlineSource?: string; interpreter: string; interpreterSource: string; argumentSource: string } | undefined {
+type InspectedInvocation = Awaited<ReturnType<typeof inspectCommand>>['invocations'][number];
+
+function gitProjectExecution(invocation: InspectedInvocation): boolean {
+  if (executableName(invocation.executable) !== 'git') return false;
+  const values = invocation.arguments.map((argument) => argument.value?.toLowerCase() ?? '');
+  return !(values.length === 1 && ['--version', '-v'].includes(values[0] ?? ''));
+}
+
+export async function requiresTrustedWorkspaceCommand(command: string, shell: ShellSelection): Promise<boolean> {
+  const inspected = await inspectCommand(command, shell.kind);
+  if (inspected.parsed.kind !== 'segments') {
+    return /(?:^|[;&|\s])(?:npm|npx|pnpm|yarn|make|git|bash|sh|zsh|dash|fish|pwsh|powershell|cmd|python3?|node|deno|bun|perl|ruby|php)\b/iu.test(command)
+      || /\.(?:sh|bash|zsh|ps1|psm1|py|pyw|js|mjs|cjs|ts|mts|cts|rb|pl|php)(?:\s|$)/iu.test(command);
+  }
+  return inspected.invocations.some((invocation) => {
+    const name = executableName(invocation.executable);
+    const values = invocation.arguments.map((argument) => argument.value ?? '');
+    if (PACKAGE_MANAGERS.has(name)) return !packageManagerQuery(values) && !scriptsDisabledInstall(name, values);
+    if (name === 'make' || gitProjectExecution(invocation)) return true;
+    if (INTERPRETERS.has(name)) {
+      return !(values.length === 1 && ['--version', '-V', '-v', '--help', '-h'].includes(values[0] ?? ''));
+    }
+    return EXTENSIONS.has(extname(invocation.executable).toLowerCase());
+  });
+}
+
+function scriptsDisabledInstall(name: string, values: readonly string[]): boolean {
+  if (values.some((value) => value.toLowerCase() === '--ignore-scripts=false')) return false;
+  if (!PACKAGE_MANAGERS.has(name) || !values.some((value) => value === '--ignore-scripts' || value === '--ignore-scripts=true')) return false;
+  const action = values.find((value) => INSTALL_ACTIONS.has(value.toLowerCase()))?.toLowerCase();
+  if (name === 'npm') return action === 'install' || action === 'ci' || action === 'i';
+  if (name === 'pnpm') return action === 'install' || action === 'i';
+  return action === 'install' || action === undefined;
+}
+
+function packageManagerQuery(values: readonly string[]): boolean {
+  return values.length === 1 && ['--version', '-v', '--help', '-h'].includes(values[0]?.toLowerCase() ?? '');
+}
+
+function scriptArgument(invocation: InspectedInvocation, trustedWorkspace: boolean): { path: string; sourceKind: 'file' | 'inline'; inlineSource?: string; interpreter: string; interpreterSource: string; argumentSource: string } | undefined {
   const name = executableName(invocation.executable);
   if (invocation.executable.includes('/') || invocation.executable.includes('\\')) {
     throw new KernelError('exec_script_binding_unavailable', { detail: 'interpreter paths must resolve through the current command search path' });
   }
   if (EXTENSIONS.has(extname(invocation.executable).toLowerCase())) {
     throw new KernelError('exec_script_binding_unavailable', { detail: 'direct script execution cannot preserve the approved bytes through this shell backend' });
+  }
+  const values = invocation.arguments.map((argument) => argument.value ?? '');
+  if (PACKAGE_MANAGERS.has(name) && packageManagerQuery(values)) return undefined;
+  if (scriptsDisabledInstall(name, values)) return undefined;
+  if (PACKAGE_MANAGERS.has(name) || name === 'make') {
+    if (!trustedWorkspace) throw new KernelError('exec_workspace_untrusted', { detail: 'project scripts require a trusted workspace and approval for each run' });
+    return undefined;
+  }
+  if (gitProjectExecution(invocation)) {
+    if (!trustedWorkspace) throw new KernelError('exec_workspace_untrusted', { detail: 'Git can run project hooks, helpers, or configured aliases; a trusted workspace and approval for each operation are required' });
+    return undefined;
   }
   if (WRAPPERS.has(name)) {
     throw new KernelError('exec_script_binding_unavailable', { detail: 'wrapper commands cannot bind the exact script interpreter and file for approval' });
@@ -146,7 +199,6 @@ function scriptArgument(invocation: Awaited<ReturnType<typeof inspectCommand>>['
   if (invocation.nested || invocation.pipeline || invocation.arguments.some((arg) => arg.dynamic || arg.value === undefined)) {
     throw new KernelError('exec_script_binding_unavailable', { detail: 'nested or dynamic interpreter calls cannot be bound to one approved script' });
   }
-  const values = invocation.arguments.map((argument) => argument.value as string);
   if (values.length === 1 && ['--version', '-V', '-v', '--help', '-h'].includes(values[0])) return undefined;
   if (['bash', 'sh', 'zsh', 'dash', 'fish', 'pwsh', 'powershell', 'cmd'].includes(name)) {
     throw new KernelError('exec_script_binding_unavailable', { detail: 'shell interpreters may stream script bytes while executing and cannot be bound to an immutable source snapshot' });
@@ -199,7 +251,7 @@ export async function bindScript({ command, shell, boundary, workspaceRoot, cwd,
     }
     return undefined;
   }
-  const selectedInvocations = inspected.invocations.map((invocation) => scriptArgument(invocation));
+  const selectedInvocations = inspected.invocations.map((invocation) => scriptArgument(invocation, permission.workspaceTrusted));
   const bound = selectedInvocations.filter((value) => value !== undefined);
   if (inspected.parsed.segments.length !== 1 || inspected.invocations.length !== 1) {
     if (bound.length > 0) throw new KernelError('exec_script_binding_unavailable', { detail: 'compound commands with interpreter or script invocations cannot be bound as one approval' });
@@ -207,6 +259,9 @@ export async function bindScript({ command, shell, boundary, workspaceRoot, cwd,
   }
   const selected = selectedInvocations[0];
   if (selected === undefined) return undefined;
+  if (!permission.workspaceTrusted) {
+    throw new KernelError('exec_workspace_untrusted', { detail: 'project scripts require a trusted workspace and approval for each run' });
+  }
   if (selected.sourceKind === 'file' && permission.profile === 'read-only') {
     throw new KernelError('exec_script_binding_unavailable', { detail: 'read-only execution cannot create a source-directory snapshot without writing to the workspace' });
   }
@@ -242,8 +297,14 @@ export async function bindScript({ command, shell, boundary, workspaceRoot, cwd,
     interpreterSource: selected.interpreterSource,
     argumentSource: selected.argumentSource,
     workspaceRoot: canonicalWorkspace,
-    permission: Object.freeze({ profile: permission.profile, network: permission.network, capabilities: permission.capabilities }),
+    permission: Object.freeze({ profile: permission.profile, network: permission.network, workspaceTrusted: permission.workspaceTrusted, capabilities: permission.capabilities }),
   });
+}
+
+export async function requiresManualApprovalForProjectCommand(command: string, shell: ShellSelection): Promise<boolean> {
+  const inspected = await inspectCommand(command, shell.kind);
+  if (inspected.parsed.kind !== 'segments') return false;
+  return inspected.invocations.some(gitProjectExecution);
 }
 
 export function assertScriptBinding(expected: ScriptBinding | undefined, actual: ScriptBinding | undefined): void {
@@ -262,6 +323,7 @@ export function assertScriptBinding(expected: ScriptBinding | undefined, actual:
     || expected.workspaceRoot !== actual.workspaceRoot
     || expected.permission.profile !== actual.permission.profile
     || expected.permission.network !== actual.permission.network
+    || expected.permission.workspaceTrusted !== actual.permission.workspaceTrusted
     || expected.permission.capabilities.filesystemRead !== actual.permission.capabilities.filesystemRead
     || expected.permission.capabilities.filesystemWrite !== actual.permission.capabilities.filesystemWrite
     || expected.permission.capabilities.network !== actual.permission.capabilities.network

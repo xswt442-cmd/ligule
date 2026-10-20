@@ -12,6 +12,7 @@ import {
 import { decode } from '../dist/capability/exec.js';
 import { bindScript } from '../dist/capability/script-binding.js';
 import { probeLinuxSandboxIsolation } from '../dist/capability/sandbox-linux.js';
+import { setTrusted } from '../dist/kernel/workspace-trust.js';
 
 // Host 选择命令后端并传入这里；测试使用当前机器实际支持的后端。
 // 被测的是 exec 自己的那几件事（头尾分页、标准输入、取消、退出码），所以脚本片段落到一个临时文件里再跑：
@@ -21,7 +22,7 @@ import { probeLinuxSandboxIsolation } from '../dist/capability/sandbox-linux.js'
 const shell = resolveShell({});
 const fullAccess = createPermissionContext('full-access', 'unrestricted', {
   filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
-});
+}, { workspaceTrusted: true });
 const directory = mkdtempSync(join(tmpdir(), 'ligule-exec-'));
 // 这一份跑完就收掉：留在系统临时目录里的话，每跑一次 `npm test` 就多一份，几十次之后没人会再去清。
 after(() => rmSync(directory, { recursive: true, force: true }));
@@ -154,7 +155,7 @@ test('the execution layer requires permission and explicit network access for fu
   );
   const networkLimitedFullAccess = createPermissionContext('full-access', 'policy', {
     filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
-  });
+  }, { workspaceTrusted: true });
   await assert.rejects(
     () => run(nodeCommand('console.log("unused")'), undefined, undefined, networkLimitedFullAccess),
     (error) => error.code === 'permission_network_isolation_unavailable',
@@ -343,10 +344,11 @@ test('the decision chain sees the command text before anything is spawned', asyn
 // 记录应说明使用的语法、启动的可执行文件，以及命令解析出的各段参数。
 test('the record names the backend a command was judged and run under', async () => {
   const session = createSessionLog({ directory: mkdtempSync(join(directory, 'record-')), id: 'backend' });
+  await setTrusted(process.cwd(), true);
   const kernel = createKernel({
     config: createConfig({ user: { boundary: process.cwd() } }),
     permission: fullAccess,
-    policy: createDecisionChain({ mode: 'auto' }),
+    policy: createDecisionChain({ mode: 'auto', ask: () => true }),
     session,
   });
   kernel.register(execTool);

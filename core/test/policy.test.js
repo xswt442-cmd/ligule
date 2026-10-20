@@ -396,6 +396,17 @@ test('script runners and direct script paths cannot pass automatic approval', as
   assert.equal(calls.length, commands.length);
 });
 
+test('Git commands that may run hooks require approval even under automatic policy', async () => {
+  const { calls, ask } = asked(true);
+  const chain = createDecisionChain({ mode: 'auto', ask, rules: [{ tool: 'exec', decision: 'allow', match: '*' }] });
+  const result = await chain.evaluate({
+    tool: 'exec', input: { command: 'git add -- file.txt' }, shell: POWERSHELL, requiresManualApproval: true,
+  });
+  assert.equal(result.decision, 'allow');
+  assert.equal(result.via, 'ask');
+  assert.equal(calls.length, 1);
+});
+
 test('automatic approval uses the decoded Bash executable name', async () => {
   const { calls, ask } = asked(true);
   const chain = createDecisionChain({ mode: 'auto', ask });

@@ -97,6 +97,7 @@ export interface PolicyCall {
   readonly access?: PermissionAccess;
   readonly scriptBinding?: ScriptBinding;
   readonly scriptBindingError?: { readonly code: string; readonly detail: string };
+  readonly requiresManualApproval?: boolean;
 }
 
 // 拒绝阈值和默认策略由配置层提供。
@@ -261,7 +262,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       forcedToAsk = snapshot.forcedToAsk;
     },
 
-    async evaluate({ tool, input, target, shell, capability, access, scriptBinding, scriptBindingError }: PolicyCall): Promise<PolicyVerdict> {
+    async evaluate({ tool, input, target, shell, capability, access, scriptBinding, scriptBindingError, requiresManualApproval: manualApprovalRequired }: PolicyCall): Promise<PolicyVerdict> {
       if (typeof tool !== 'string' || tool === '') throw new KernelError('policy_call_tool_required');
       // 使用工具声明的实际能力名称进行判定。MCP 调用使用 `mcp:<服务器>/<工具>`，而不是通用工具名 `mcp.call`。
       const named = capability ?? tool;
@@ -312,8 +313,10 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         return judged('deny', 'hard-deny', { code: 'policy_hard_denied', reason }, true);
       };
 
-      let requiresManualApproval = access === 'external' || access === 'unknown';
-      let manualApprovalReason = access === 'external'
+      let requiresManualApproval = manualApprovalRequired === true || access === 'external' || access === 'unknown';
+      let manualApprovalReason = manualApprovalRequired === true
+        ? 'Git may execute project hooks, helpers, or configured aliases; the user must approve each call.'
+        : access === 'external'
         ? 'this operation runs in an external process that the built-in sandbox cannot confine'
         : access === 'unknown'
           ? 'this tool has no permission classification and requires per-call approval'
