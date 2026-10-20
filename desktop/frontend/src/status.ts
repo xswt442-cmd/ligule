@@ -56,7 +56,7 @@ export type SessionPermission = {
     readOnly: PermissionEnforcement;
     workspaceWrite: PermissionEnforcement;
   };
-  limitations: string[];
+  limitations: readonly string[];
   partialWorkspaceWriteConfirmationRequired: boolean;
   partialWorkspaceWriteConfirmed: boolean;
   workspaceTrusted: boolean;
