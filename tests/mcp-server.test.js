@@ -295,7 +295,7 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     const listed = await first.client.listTools();
     const toolNames = listed.tools.map((tool) => tool.name).sort();
     assert.deepEqual(toolNames, [
-      'ligule_interaction_reply', 'ligule_run_await', 'ligule_run_cancel', 'ligule_run_start', 'ligule_run_status', 'ligule_session_configure', 'ligule_session_create',
+      'ligule_interaction_reply', 'ligule_run', 'ligule_run_await', 'ligule_run_cancel', 'ligule_run_start', 'ligule_run_status', 'ligule_session_configure', 'ligule_session_create',
       'ligule_session_list', 'ligule_session_open', 'ligule_session_read', 'ligule_session_send',
     ]);
     const readSchema = listed.tools.find((tool) => tool.name === 'ligule_session_read').inputSchema;
@@ -378,6 +378,16 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     assert.equal(delayedDone.result.state, 'completed');
     assert.equal(delayedDone.result.output.text, 'delayed task finished');
     recordTrace(trace, 'run_await_done', { operationId: delayed.operationId, state: delayedDone.state, result: delayedDone.result.state });
+
+    const singleCallRun = toolData(await first.client.callTool({ name: 'ligule_run', arguments: {
+      sessionId, input: 'MCP_E2E_SINGLE_CALL', timeoutMs: 5_000,
+    } }), 'run_delegate_and_await');
+    assert.equal(singleCallRun.state, 'done');
+    assert.equal(singleCallRun.timedOut, false);
+    assert.equal(singleCallRun.result.output.text, 'MCP task finished');
+    recordTrace(trace, 'run_delegate_and_await', {
+      operationId: singleCallRun.operationId, state: singleCallRun.state, result: singleCallRun.result.state,
+    });
 
     const largeInput = `MCP_E2E_LARGE_${'x'.repeat(13_000)}`;
     const largeRun = toolData(await first.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: largeInput } }), 'run_start_large');
@@ -610,7 +620,7 @@ test('operator tools configure real sessions, answer Host interactions, and run 
   context.client.setNotificationHandler(LoggingMessageNotificationSchema, (notification) => { notifications.push(notification); });
   try {
     const names = (await context.client.listTools()).tools.map((tool) => tool.name).sort();
-    assert.equal(names.length, 11);
+    assert.equal(names.length, 12);
     const project = await realpath(projectRoot);
     const invalidInitialModel = await context.client.callTool({ name: 'ligule_session_create', arguments: {
       projectRoot: project, initial: { model: { provider: 'legacy', model: 'not-in-this-config' } },

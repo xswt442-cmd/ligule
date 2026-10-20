@@ -236,6 +236,8 @@ const tools: Tool[] = [
     }, ['sessionId']), outputSchema: queueOutput },
   { name: 'ligule_run_start', description: 'Submit text and return immediately while the real Host runs in the background. One active run per session. Poll status and read records. IDs are process-local; the server keeps 256 recent operations and evicts the oldest completed one when full.',
     inputSchema: object({ sessionId: id, input: { type: 'string', minLength: 1, maxLength: 65536 } }, ['sessionId', 'input']), outputSchema: operationOutput },
+  { name: 'ligule_run', description: 'Start one real Host run and wait server-side for its terminal result, up to timeoutMs (default 60 seconds, maximum 5 minutes). A timeout returns the current state without cancelling the run; continue with ligule_run_await or ligule_run_status.',
+    inputSchema: object({ sessionId: id, input: { type: 'string', minLength: 1, maxLength: 65536 }, timeoutMs: { type: 'integer', minimum: 0, maximum: 300_000, default: 60_000 } }, ['sessionId', 'input']), outputSchema: awaitOutput },
   { name: 'ligule_run_status', description: 'Read the actual Host state, progress, pending interactions, queued messages, and bounded events after a cursor. Operation IDs are process-local; reopen the session after restart and read durable records.',
     inputSchema: object({ operationId: id, after: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 50, default: 20 } }, ['operationId']), outputSchema: operationOutput },
   { name: 'ligule_run_await', description: 'Wait in the server for one known run, up to timeoutMs (default 60 seconds, maximum 5 minutes). A timeout returns the current resumable state without cancelling the run. A terminal run includes its result. Resolve pending approvals or questions with the interaction tool while the run waits.',
@@ -306,9 +308,9 @@ export async function serveMcp({ projectRoot, version, flags = [], modeName, ope
     capabilities: { tools: {}, logging: {} },
     instructions: grant === undefined
       ? operatorEnabled
-        ? 'One local stdio operator for the explicitly authorized project. This server was launched with --operator, so session-only settings and replies to real pending approvals/questions are available. Policy decisions still run in Host; hard denials cannot be overridden. Poll status for progress and pending interactions; notifications are best-effort. Disconnect cancels active runs and releases locks. Operation IDs and queued messages are process-local; Session JSONL persists.'
-        : 'One local stdio controller for the explicitly authorized project. Session creation/open/list, run start/status/cancel, session configuration reads, message sending and record paging are available. Settings changes and replies to approvals/questions require restarting with the explicit --operator flag. Policy approval requests are denied in this mode. Disconnect cancels active runs and releases locks. Operation IDs and queued messages are process-local; Session JSONL persists.'
-      : `One local stdio controller for project ${grant.projectRoot}, bounded by grant ${grant.id} (${grant.maxPermissionProfile}, network up to ${grant.maxNetwork}, policies: ${grant.allowedPolicies.join(', ')}). The grant is not remote identity authentication and does not override OS sandbox limits or hard Policy denials.${operatorEnabled ? ' --operator also allows ordinary approved interactions.' : ' Settings changes and replies to ordinary approvals/questions are disabled.'} Disconnect cancels active runs and releases locks.`,
+        ? 'One local stdio operator for the explicitly authorized project. This server was launched with --operator, so session-only settings and replies to real pending approvals/questions are available. Policy decisions still run in Host; hard denials cannot be overridden. Use ligule_run to delegate and wait in one call, or run_start/await/status/cancel for separate control. Notifications are best-effort. Disconnect cancels active runs and releases locks. Operation IDs and queued messages are process-local; Session JSONL persists.'
+        : 'One local stdio controller for the explicitly authorized project. Session creation/open/list, run, run_start/await/status/cancel, session configuration reads, message sending and record paging are available. Settings changes and replies to approvals/questions require restarting with the explicit --operator flag. Policy approval requests are denied in this mode. Disconnect cancels active runs and releases locks. Operation IDs and queued messages are process-local; Session JSONL persists.'
+      : `One local stdio controller for project ${grant.projectRoot}, bounded by grant ${grant.id} (${grant.maxPermissionProfile}, network up to ${grant.maxNetwork}, policies: ${grant.allowedPolicies.join(', ')}). The grant is not remote identity authentication and does not override OS sandbox limits or hard Policy denials.${operatorEnabled ? ' --operator also allows ordinary approved interactions.' : ' Settings changes and replies to ordinary approvals/questions are disabled.'} Use ligule_run to delegate and wait in one call. Disconnect cancels active runs and releases locks.`,
   });
   const control = createControl(host, authorizedRoot, {
     operator: operatorEnabled,
@@ -362,6 +364,11 @@ export async function serveMcp({ projectRoot, version, flags = [], modeName, ope
         }); break;
         case 'ligule_session_send': result = control.send(input.sessionId!, input.action ?? 'send', input.input, input.queueItemId); break;
         case 'ligule_run_start': result = control.start(input.sessionId!, input.input!); break;
+        case 'ligule_run': {
+          const started = control.start(input.sessionId!, input.input!);
+          result = await control.await(started.operationId, input.timeoutMs ?? 60_000);
+          break;
+        }
         case 'ligule_run_status': result = control.status(input.operationId!, input.after ?? 0, input.limit ?? 20); break;
         case 'ligule_run_await': result = await control.await(input.operationId!, input.timeoutMs ?? 60_000); break;
         case 'ligule_run_cancel': result = await control.cancel(input.operationId!); break;
