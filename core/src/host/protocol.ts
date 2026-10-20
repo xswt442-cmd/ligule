@@ -208,6 +208,17 @@ export const METHODS = Object.freeze({
       at: { type: 'integer', minimum: 1, description: 'read exactly the event with this sequence number; it has to exist in this record and cannot be combined with before' },
     }, required: ['sessionId'] },
   },
+  'session.observe': {
+    description: 'Read a workspace session snapshot without acquiring its writer lock. Suitable for a read-only viewer when another Host controls the session; poll for new appended events.',
+    parameters: { type: 'object', properties: {
+      projectRoot: { type: 'string', description: 'the exact workspace root that owns the session' },
+      sessionId: SESSION_ID,
+      fullResults: { type: 'boolean', description: 'read complete spilled tool results for display' },
+      limit: { type: 'integer', minimum: 1, maximum: 1000 },
+      before: { type: 'integer', minimum: 1 },
+      at: { type: 'integer', minimum: 1 },
+    }, required: ['projectRoot', 'sessionId'] },
+  },
   // Host 读取完整记录、补回溢出内容、生成 Markdown 并写入用户选择的位置。
   // 导出路径由用户通过保存对话框选择，不受模型工具的项目边界限制；返回路径不代表写入成功。
   'session.export': {
@@ -218,7 +229,7 @@ export const METHODS = Object.freeze({
     }, required: ['sessionId', 'path'] },
   },
   'run.start': {
-    description: 'Send one user input through the loop; an optional delegation output schema requires a validated structured result. Events arrive as notifications while it runs.',
+    description: 'Send one user input through the loop. A delegated mode can only narrow the active session mode; an output schema requires a validated structured result. Events arrive as notifications while it runs.',
     parameters: {
       type: 'object',
       properties: {

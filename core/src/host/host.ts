@@ -39,6 +39,7 @@ import { branchSession } from '../session/branch.js';
 import { listProjectFiles } from './paths.js';
 import { branchSessionId, exportMarkdown, writeExport, type ExportRecord } from './export.js';
 import { createCompaction } from '../session/compaction.js';
+import { sessionWriterActive } from '../session/lock.js';
 import { usageEvent } from '../session/usage.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
 import { foldLabel } from '../session/format.js';
@@ -2209,6 +2210,23 @@ export function createHost({
           // 返回已持久化记录，让客户端重连后可以恢复会话内容。
           // `limit` 和 `before` 用于分页，`at` 指定一条事件；派生会话也走同一读取流程。
           return await readRecord(sessionId, message.params);
+        }
+        case 'session.observe': {
+          const env = await environmentFor(requiredString(message.params.projectRoot, 'projectRoot'));
+          const path = recordPathOf(sessionId, env);
+          try { await access(path); }
+          catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new KernelError('session_not_found', { detail: sessionId });
+            throw error;
+          }
+          const opened = sessions.get(sessionId);
+          const snapshot = await readForClient(opened?.session ?? createSessionLog({ directory: env.directory, id: sessionId }), sessionId, {
+            fullResults: message.params.fullResults,
+            ...(message.params.limit === undefined ? {} : { limit: message.params.limit as number }),
+            ...(message.params.before === undefined ? {} : { before: message.params.before as number }),
+            ...(message.params.at === undefined ? {} : { at: message.params.at as number }),
+          }, env);
+          return { ...snapshot, writerActive: opened?.running !== undefined || await sessionWriterActive(path) };
         }
         case 'session.export': {
           // Host 负责读取和排版完整记录并写出文件，客户端只选择目标路径。

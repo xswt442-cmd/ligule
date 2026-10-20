@@ -67,7 +67,7 @@ export function Composer({ client, sessionId, projectRoot, status, settings, set
   onSend: () => void;
 }) {
   const t = useText();
-  const disabled = closing || reading || starting || !settingsReady;
+  const disabled = closing || reading || starting || !settingsReady || (sessionId !== null && inputOwner !== sessionId);
   const selection = status?.selectedModel
     ? { provider: status.pendingServiceId ?? status.serviceId, model: status.pendingModel ?? status.selectedModel }
     : settings.newSelections[projectRoot] ?? null;

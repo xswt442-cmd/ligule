@@ -6,6 +6,20 @@ import { KernelError, KernelRuntimeError } from '../kernel/error.js';
 
 export const SESSION_LOCK_STALE_MS = 10_000;
 
+export async function sessionWriterActive(file: string): Promise<boolean> {
+  const path = resolve(file);
+  try {
+    return await lockfile.check(path, {
+      realpath: false,
+      lockfilePath: path.replace(/\.jsonl$/, '.lock'),
+      stale: SESSION_LOCK_STALE_MS,
+    });
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw new KernelRuntimeError('session_lock_check_failed', { cause, detail: path });
+  }
+}
+
 export interface SessionLock {
   assertOwned(): void;
   release(): Promise<void>;

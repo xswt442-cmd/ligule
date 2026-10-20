@@ -5,11 +5,12 @@ import { code, type Client } from '../protocol';
 import { Icon } from './Icon';
 import { Modal, keepEscape } from './ui';
 
-export function SessionActions({ client, sessionId, name, archived, onLabel, onBranch, onExport, onTasks, onRefresh, onCompact }: {
+export function SessionActions({ client, sessionId, name, archived, readOnly = false, onLabel, onBranch, onExport, onTasks, onRefresh, onCompact }: {
   client: Client;
   sessionId: string;
   name: string;
   archived: boolean;
+  readOnly?: boolean;
   onLabel: (label: { name: string; archived: boolean }) => void;
   onBranch: () => void;
   onExport: () => void;
@@ -38,14 +39,16 @@ export function SessionActions({ client, sessionId, name, archived, onLabel, onB
       <DropdownMenu.Trigger asChild><button type="button" className="icon-button" aria-label={t('会话菜单', 'Conversation menu')}><Icon name="more" size={19} /></button></DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <DropdownMenu.Content className="menu" align="end" sideOffset={8} onEscapeKeyDown={keepEscape}>
+          {!readOnly && <>
           <DropdownMenu.Item onSelect={() => { setDraft(name); setFailure(''); setEditing(true); }}>{t('重命名', 'Rename')}</DropdownMenu.Item>
           <DropdownMenu.Item disabled={saving} onSelect={() => void label({ archived: !archived })}>{archived ? t('取消归档', 'Restore conversation') : t('归档会话', 'Archive conversation')}</DropdownMenu.Item>
           <DropdownMenu.Item onSelect={onBranch}>{t('分支会话', 'Branch conversation')}</DropdownMenu.Item>
           <DropdownMenu.Item onSelect={onExport}>{t('导出 Markdown', 'Export Markdown')}</DropdownMenu.Item>
           <DropdownMenu.Separator className="menu-separator" />
           <DropdownMenu.Item onSelect={onTasks}>{t('查看子任务', 'View subtasks')}</DropdownMenu.Item>
-          <DropdownMenu.Item onSelect={onRefresh}>{t('刷新记录', 'Refresh conversation')}</DropdownMenu.Item>
           <DropdownMenu.Item onSelect={onCompact}>{t('压缩上下文', 'Compact context')}</DropdownMenu.Item>
+          </>}
+          <DropdownMenu.Item onSelect={onRefresh}>{readOnly ? t('刷新观察', 'Refresh observation') : t('刷新记录', 'Refresh conversation')}</DropdownMenu.Item>
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>

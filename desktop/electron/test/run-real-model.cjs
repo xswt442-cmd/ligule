@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const { mkdirSync, writeFileSync } = require('node:fs');
 const { join, resolve } = require('node:path');
+const { pathToFileURL } = require('node:url');
 const { app, session } = require('electron');
 
 const repositoryRoot = resolve(__dirname, '../../..');
@@ -271,6 +272,91 @@ async function selectNewSessionPermission(profile) {
   })()`, 5_000, 'new_session_permission_not_applied');
 }
 
+async function verifyExternalSessionObservation() {
+  const core = await import(pathToFileURL(join(repositoryRoot, 'core', 'dist', 'index.js')).href);
+  const previousSessionId = sessionId;
+  const observerSessionId = require('node:crypto').randomUUID();
+  const directory = core.sessionDirectory({ boundary: workspaceRoot, workspaceRoot, userHome: isolatedHome });
+  const externalSession = core.createSessionLog({ directory, id: observerSessionId, meta: { projectRoot: workspaceRoot } });
+  await externalSession.append({ kind: 'user', text: '请检查当前任务，并继续完成。' });
+  await externalSession.append({ kind: 'assistant', text: '外控任务已启动，正在检查工作区。', toolCalls: [] });
+  await externalSession.acquire();
+  try {
+    await evaluate(`(() => {
+      const button = document.querySelector('button[aria-label="展开侧栏"], button[aria-label="Show sidebar"]');
+      button?.click();
+    })()`);
+    await waitFor(`document.querySelector('button[aria-label="刷新会话列表"]') || document.querySelector('button[aria-label="Refresh conversations"]')`, 10_000, 'session_rail_refresh_missing');
+    await evaluate(`(() => {
+      const button = document.querySelector('button[aria-label="刷新会话列表"], button[aria-label="Refresh conversations"]');
+      button?.click();
+      return button !== null;
+    })()`);
+    await waitFor(`(() => {
+      const button = [...document.querySelectorAll('.group-fold')].find(item => item.title === ${JSON.stringify(workspaceRoot)});
+      if (button === undefined) return false;
+      if (button.getAttribute('aria-expanded') !== 'true') button.click();
+      return true;
+    })()`, 10_000, 'observer_workspace_group_missing');
+    await waitFor(`[...document.querySelectorAll('.session-item')].some(item => item.title.endsWith(${JSON.stringify(` · ${observerSessionId}`)}))`, 10_000, 'observer_session_not_listed');
+    await evaluate(`(() => {
+      const item = [...document.querySelectorAll('.session-item')].find(button => button.title.endsWith(${JSON.stringify(` · ${observerSessionId}`)}));
+      item?.click();
+      return item !== undefined;
+    })()`);
+    await waitFor(`(() => {
+      const banner = document.querySelector('.center .banner[role="status"]');
+      const input = document.querySelector('textarea.composer-input');
+      const text = banner?.textContent ?? '';
+      return (text.includes('只读观察') || text.includes('read-only')) && input?.readOnly === true;
+    })()`, 15_000, 'external_session_observer_not_read_only');
+    const sendDisabled = await evaluate(`document.querySelector('button.send')?.disabled === true`);
+    assert.equal(sendDisabled, true, 'observer_send_control_not_disabled');
+    await waitFor(`document.querySelector('.center')?.innerText.includes('外控任务已启动，正在检查工作区。') === true`, 5_000, 'external_session_initial_event_missing');
+
+    await externalSession.append({ kind: 'assistant', text: '外控任务的新进度：已读取项目文件。', toolCalls: [] });
+    await waitFor(`document.querySelector('.center')?.innerText.includes('外控任务的新进度：已读取项目文件。') === true`, 10_000, 'external_session_new_event_not_observed');
+
+    await externalSession.close();
+    await waitFor(`(() => {
+      const text = document.querySelector('.center .banner[role="status"]')?.textContent ?? '';
+      return text.includes('没有活动写入者') || text.includes('no active writer');
+    })()`, 10_000, 'external_session_lock_release_not_observed');
+    await evaluate(`(() => {
+      const button = document.querySelector('.center .banner[role="status"] button');
+      button?.click();
+      return button !== null;
+    })()`);
+    await waitFor(`(() => {
+      const banner = document.querySelector('.center .banner[role="status"]');
+      const input = document.querySelector('textarea.composer-input');
+      return banner === null && input !== null && input.readOnly === false;
+    })()`, 15_000, 'observer_session_reopen_failed');
+
+    if (typeof previousSessionId === 'string') {
+      await evaluate(`(() => {
+        const item = [...document.querySelectorAll('.session-item')].find(button => button.title.endsWith(${JSON.stringify(` · ${previousSessionId}`)}));
+        item?.click();
+        return item !== undefined;
+      })()`);
+      await waitFor(`(() => {
+        const active = document.querySelector('.session-item.active');
+        const input = document.querySelector('textarea.composer-input');
+        return active?.title.endsWith(${JSON.stringify(` · ${previousSessionId}`)}) === true && input?.readOnly === false;
+      })()`, 10_000, 'observer_previous_session_restore_failed');
+    }
+    return '真实 Electron 窗口在测试进程持有记录锁期间只读打开会话，轮询展示新追加事件并禁用输入；释放锁后重新打开并恢复本 Host 的写入控制。此 UI 用例不冒充 MCP Agent；两个独立 Host 的读锁/拒绝写入由 Host 集成测试覆盖';
+  } finally {
+    await externalSession.close();
+    if (typeof previousSessionId === 'string') {
+      await evaluate(`(() => {
+        const item = [...document.querySelectorAll('.session-item')].find(button => button.title.endsWith(${JSON.stringify(` · ${previousSessionId}`)}));
+        if (!item?.classList.contains('active')) item?.click();
+      })()`).catch(() => {});
+    }
+  }
+}
+
 async function enterAndSend(text) {
   await waitFor(`document.querySelector('textarea.composer-input') && !document.querySelector('textarea.composer-input').readOnly`, 20_000, 'composer_locked');
   const escaped = JSON.stringify(text);
@@ -323,6 +409,7 @@ async function runChecks() {
 
   const workspaceRegistration = await requestHost('workspaces.list');
   assert.ok(workspaceRegistration.workspaces.some(item => resolve(item.directory) === resolve(workspaceRoot)), 'isolated_workspace_not_registered');
+
   // 新会话默认只读；审批用例先通过真实设置控件授予工作区文件工具写入权限。
   await selectNewSessionPermission('workspace-write');
 
@@ -417,6 +504,10 @@ async function runChecks() {
     return `收到真实 text 增量 ${summary.deltaCount ?? 1} 次后按界面停止；Host 写入 cancelled 终态`;
   });
 
+  if (process.env.LIGULE_OBSERVER_TEST === '1') {
+    await check('外部写入会话的 Desktop 只读观察', verifyExternalSessionObservation);
+  }
+
   // 仅本地 stub 可稳定模拟请求发出后一直没有响应的情况。
   if (typeof stubControl === 'string' && stubControl !== '') {
     await check(`${providerLabel}宿主崩溃后的界面重连`, async () => {
@@ -482,6 +573,7 @@ async function runChecks() {
       return `硬杀 Host（PID ${killedPid}）后界面出现断连横幅并重连成功；未决那一轮终态 ${last.status ?? '无'}${last.code === undefined ? '' : `/${last.code}`}，重连没有重发模型请求`;
     });
   }
+
 }
 
 async function cleanup() {

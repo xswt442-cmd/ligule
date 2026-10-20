@@ -208,6 +208,8 @@ export function App({ transport }: { transport: Transport }) {
   const [projectRoot, setProjectRoot] = useState('');
   // 当前草稿所属的会话。打开会话时，需等恢复请求完成后再保存草稿，避免把旧草稿写入新会话。
   const [inputOwner, setInputOwner] = useState<string | null>(null);
+  const [readOnlySessionId, setReadOnlySessionId] = useState<string | null>(null);
+  const [externalWriterActive, setExternalWriterActive] = useState(false);
   const saveWarned = useRef(false);
   // Host 重连期间暂停发送队列，也不触发轮次结束后的自动发送。
   const reconnecting = useRef(false);
@@ -226,6 +228,7 @@ export function App({ transport }: { transport: Transport }) {
   const language = localeOf(settings.language);
   const t = useCallback((chinese: string, english: string) => language === 'zh' ? chinese : english, [language]);
   const progress = status?.progress ?? null;
+  const observingExternalSession = sessionId !== null && readOnlySessionId === sessionId;
   const progressPhase = progress === null ? '' : {
     preparing: t('准备上下文', 'Preparing context'),
     model_request: t('请求模型', 'Requesting model'),
@@ -300,7 +303,8 @@ export function App({ transport }: { transport: Transport }) {
   const [walk, setWalk] = useState(-1);
   // 运行期间的新输入按会话保存在前端队列中；取消后暂停，等待用户明确继续。
   const [queues, setQueues] = useState<Record<string, { items: string[]; paused: boolean }>>({});
-  const queue = queues[sessionId ?? ''] ?? { items: [] as string[], paused: false };
+  const queue = readOnlySessionId === sessionId ? { items: [] as string[], paused: false }
+    : queues[sessionId ?? ''] ?? { items: [] as string[], paused: false };
   const patchQueue = useCallback((own: string, next: (current: { items: string[]; paused: boolean }) => { items: string[]; paused: boolean }) => {
     setQueues((current) => ({ ...current, [own]: next(current[own] ?? { items: [], paused: false }) }));
   }, []);
@@ -395,6 +399,7 @@ export function App({ transport }: { transport: Transport }) {
   // Host 进程的启动和重启由 Electron 壳负责。
   const beat = useCallback(async (timeoutMs = 5_000) => {
     if (sessionId === null) return;
+    if (readOnlySessionId === sessionId) { setLink(null); return; }
     try {
       await client.call('status.get', { sessionId }, timeoutMs);
       connectionLost.current = false;
@@ -404,7 +409,7 @@ export function App({ transport }: { transport: Transport }) {
       connectionLost.current = true;
       setLink(code(error));
     }
-  }, [client, notify, sessionId]);
+  }, [client, notify, readOnlySessionId, sessionId]);
 
   useEffect(() => {
     const removeFault = transport.onFault?.((reason) => {
@@ -431,8 +436,11 @@ export function App({ transport }: { transport: Transport }) {
     setPinned(false);
     setOlderLoading(true);
     try {
-      const older = await client.call('session.read',
-        { sessionId, before: page.before, limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean };
+      const observing = readOnlySessionId === sessionId;
+      const older = await client.call(observing ? 'session.observe' : 'session.read', {
+        ...(observing ? { projectRoot } : {}),
+        sessionId, before: page.before, limit: RENDER_WINDOW, fullResults: true,
+      }, 15_000) as { events: Record_[]; hasMore: boolean };
       // 用户已切换会话时忽略过期响应，不更改新会话的列表和游标。
       if (opening.current !== sessionId || openRequest.current !== request) return;
       const added = older.events.flatMap((record) => projectRecord(record));
@@ -450,7 +458,7 @@ export function App({ transport }: { transport: Transport }) {
     } finally {
       if (!restoring && openRequest.current === request) setOlderLoading(false);
     }
-  }, [client, olderLoading, page, sessionId]);
+  }, [client, olderLoading, page, projectRoot, readOnlySessionId, sessionId]);
 
   // 草稿和队列按项目与会话保存到 Host 管理的偏好文档；WebView 存储只用于首屏缓存。
   // 切换会话、打开设置、查看历史或断连时保留输入。保存失败时明确提示用户。
@@ -713,14 +721,34 @@ export function App({ transport }: { transport: Transport }) {
     setLive(liveBySession.read(id));
     setWanted(null);
     setInputOwner(null);
+    setReadOnlySessionId(null);
+    setExternalWriterActive(false);
+    setStatus(null);
     dispatchAt.current.clear();
     setReading(true);
+    let observing = false;
+    let newest: {
+      events: Record_[];
+      hasMore: boolean;
+      header: { projectRoot?: string } | null;
+      label: { name: string; archived: boolean };
+      writerActive?: boolean;
+    };
+    const requestedRoot = askedRoot === undefined || askedRoot === '' ? projectRoot : askedRoot;
     try {
       // 为记录读取设置超时，避免客户端一直停留在加载状态。
       // 指定项目时同时传递项目根目录，由 Host 选择对应环境并验证记录归属。
-      await client.call('session.open', askedRoot === undefined || askedRoot === '' ? { sessionId: id } : { sessionId: id, projectRoot: askedRoot }, 15_000);
-      // 请求完整工具结果以读取溢出文件内容；只读取最近一页，更早记录由分页操作加载。
-      const newest = await client.call('session.read', { sessionId: id, limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean; header: { projectRoot?: string } | null; label: { name: string; archived: boolean } };
+      try {
+        await client.call('session.open', requestedRoot === '' ? { sessionId: id } : { sessionId: id, projectRoot: requestedRoot }, 15_000);
+        // 请求完整工具结果以读取溢出文件内容；只读取最近一页，更早记录由分页操作加载。
+        newest = await client.call('session.read', { sessionId: id, limit: RENDER_WINDOW, fullResults: true }, 15_000) as typeof newest;
+      } catch (error) {
+        if (code(error) !== 'session_locked') throw error;
+        newest = await client.call('session.observe', {
+          projectRoot: requestedRoot, sessionId: id, limit: RENDER_WINDOW, fullResults: true,
+        }, 15_000) as typeof newest;
+        observing = true;
+      }
       if (openRequest.current !== request) return;
       // 打开会话时恢复其草稿和暂停队列。
       const root = newest.header?.projectRoot ?? '';
@@ -734,7 +762,9 @@ export function App({ transport }: { transport: Transport }) {
       const unsaved = unsavedInputs.current.get(JSON.stringify([root, id]));
       const storedDraft = unsaved?.draft ?? stored.drafts[root]?.[id] ?? '';
       const restored = unsaved?.items ?? stored.queued[root]?.[id] ?? [];
-      if (reclaimQueue && restored.length > 0) {
+      if (observing) {
+        setDraft('');
+      } else if (reclaimQueue && restored.length > 0) {
         // 重连后将队列按顺序移回草稿并清空队列，不自动发送任何内容。
         setDraft(mergeQueueIntoDraft(storedDraft, restored));
         patchQueue(id, () => ({ items: [], paused: false }));
@@ -742,13 +772,17 @@ export function App({ transport }: { transport: Transport }) {
         setDraft(storedDraft);
         patchQueue(id, () => ({ items: restored, paused: restored.length > 0 }));
       }
-      setInputOwner(id);
+      setReadOnlySessionId(observing ? id : null);
+      setExternalWriterActive(observing && newest.writerActive === true);
+      setInputOwner(observing ? null : id);
       setSettings((current) => ({ ...current, lastSession: { id, projectRoot: root } }));
       let events = newest.events;
       let hasMore = newest.hasMore;
       while (hit !== undefined && hit.seq < Number(events[0]?.seq ?? 0) && hasMore) {
-        const older = await client.call('session.read',
-          { sessionId: id, before: Number(events[0]?.seq), limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean };
+        const older = await client.call(observing ? 'session.observe' : 'session.read', {
+          ...(observing ? { projectRoot: root } : {}),
+          sessionId: id, before: Number(events[0]?.seq), limit: RENDER_WINDOW, fullResults: true,
+        }, 15_000) as { events: Record_[]; hasMore: boolean };
         // 用户已切换会话时忽略过期响应，不更新当前页面。
         if (openRequest.current !== request) return;
         if (older.events.length === 0) { hasMore = false; break; }
@@ -774,9 +808,45 @@ export function App({ transport }: { transport: Transport }) {
       if (openRequest.current === request) setReading(false);
     }
     if (openRequest.current !== request) return;
-    void refreshStatus(id);
+    if (!observing) void refreshStatus(id);
     return true;
-  }, [client, refreshStatus]);
+  }, [client, projectRoot, refreshStatus]);
+
+  useEffect(() => {
+    if (sessionId === null || readOnlySessionId !== sessionId) return;
+    let disposed = false;
+    let inFlight = false;
+    const request = openRequest.current;
+    const refresh = async () => {
+      if (disposed || inFlight) return;
+      inFlight = true;
+      try {
+        const snapshot = await client.call('session.observe', {
+          projectRoot, sessionId, limit: RENDER_WINDOW, fullResults: true,
+        }, 10_000) as { events: Record_[]; hasMore: boolean; writerActive: boolean };
+        if (disposed || openRequest.current !== request || active.current !== sessionId) return;
+        setExternalWriterActive(snapshot.writerActive);
+        const projected = snapshot.events.flatMap((record) => projectRecord(record));
+        if (pinned) {
+          setRows(projected);
+          setPage({ before: Number(snapshot.events[0]?.seq ?? 1), hasMore: snapshot.hasMore });
+        } else {
+          setRows((current) => {
+            const last = current.reduce((max, row) => Math.max(max, row.seq ?? 0), 0);
+            const appended = projected.filter((row) => row.seq !== undefined && row.seq > last);
+            return appended.length === 0 ? current : [...current, ...appended];
+          });
+        }
+      } catch {
+        // 观察器只读；一次快照读取失败不改变会话控制权或本地草稿。
+      } finally {
+        inFlight = false;
+      }
+    };
+    void refresh();
+    const timer = setInterval(() => void refresh(), 1_000);
+    return () => { disposed = true; clearInterval(timer); };
+  }, [client, pinned, projectRoot, readOnlySessionId, sessionId]);
 
   useEffect(() => {
     const bridge = transport.notifications;
@@ -954,7 +1024,7 @@ export function App({ transport }: { transport: Transport }) {
 
   // 按输入所属会话处理输入和轮次结束状态；后台结果不改变当前会话的队列。
   const submit = useCallback(async (text: string, own = sessionId) => {
-    if (quitting.current || text === '' || own === null) return;
+    if (quitting.current || text === '' || own === null || readOnlySessionId === own) return;
     const inView = () => active.current === own;
     // 会话运行期间的输入加入前端队列，轮次结束后按顺序发送，不写入会话记录。
     if (runningIds.includes(own)) {
@@ -1005,7 +1075,7 @@ export function App({ transport }: { transport: Transport }) {
       if (!inView()) setUnread((current) => [...new Set([...current, own])]);
       void refreshStatus(own);
     }
-  }, [client, dropAsksOf, dropQueriesOf, notify, patchQueue, refreshStatus, runningIds, sessionId, t]);
+  }, [client, dropAsksOf, dropQueriesOf, notify, patchQueue, readOnlySessionId, refreshStatus, runningIds, sessionId, t]);
 
   // 轮次结束后每次只发送队首一条。队列暂停时不发送，等待用户明确继续。
   // 连接断开或正在重连时不发送，避免将输入交给已退出的 Host。
@@ -1248,26 +1318,36 @@ export function App({ transport }: { transport: Transport }) {
   }, [rows]);
 
   // 命令面板只触发界面已有操作，不实现另一套操作逻辑。
-  const commands = useMemo<Command[]>(() => [
-    { id: 'session.new', title: t('新建会话', 'New conversation'), run: () => void newSession() },
-    { id: 'session.read', title: t('刷新记录', 'Refresh conversation'), run: () => void readBack() },
-    { id: 'session.branch', title: t('分支会话', 'Branch conversation'), run: () => void branchFrom() },
-    { id: 'run.cancel', title: t('停止本轮', 'Stop this turn'), run: () => void cancel() },
-    { id: 'session.compact', title: t('压缩上下文', 'Compact context'), run: () => void compact() },
-    { id: 'settings.open', title: t('打开设置', 'Open settings'), run: () => { setSettingsSection('general'); setSettingsOpen(true); } },
-    { id: 'rail.toggle', title: collapsed ? t('展开侧栏', 'Show sidebar') : t('收起侧栏', 'Hide sidebar'), note: formatKeys(CURRENT['sidebar']), run: () => patch({ collapsed: !collapsed }) },
-    { id: 'answer.copy', title: t('复制最新回答', 'Copy latest answer'), note: formatKeys(CURRENT['copy-answer']), run: copyLastAnswer },
-    ...(status?.templates ?? []).map((item) => ({
-      id: `prompt:${item.command}`,
-      title: t(`使用 /${item.command}`, `Use /${item.command}`),
-      note: item.hint === null || item.hint === undefined ? item.description : `${item.description} ${item.hint}`,
-      run: () => {
-        setDraft(`/${item.command} `);
-        setWalk(-1);
-        composerRef.current?.focus();
-      },
-    })),
-  ], [branchFrom, cancel, collapsed, copyLastAnswer, compact, newSession, patch, readBack, status, t]);
+  const commands = useMemo<Command[]>(() => {
+    const sessionCommands: Command[] = observingExternalSession
+      ? [{
+        id: 'session.read', title: t('刷新观察', 'Refresh observation'),
+        run: () => { if (sessionId !== null) void openSession(sessionId, undefined, false, projectRoot); },
+      }]
+      : [
+        { id: 'session.read', title: t('刷新记录', 'Refresh conversation'), run: () => void readBack() },
+        { id: 'session.branch', title: t('分支会话', 'Branch conversation'), run: () => void branchFrom() },
+        { id: 'run.cancel', title: t('停止本轮', 'Stop this turn'), run: () => void cancel() },
+        { id: 'session.compact', title: t('压缩上下文', 'Compact context'), run: () => void compact() },
+      ];
+    return [
+      { id: 'session.new', title: t('新建会话', 'New conversation'), run: () => void newSession() },
+      ...sessionCommands,
+      { id: 'settings.open', title: t('打开设置', 'Open settings'), run: () => { setSettingsSection('general'); setSettingsOpen(true); } },
+      { id: 'rail.toggle', title: collapsed ? t('展开侧栏', 'Show sidebar') : t('收起侧栏', 'Hide sidebar'), note: formatKeys(CURRENT['sidebar']), run: () => patch({ collapsed: !collapsed }) },
+      { id: 'answer.copy', title: t('复制最新回答', 'Copy latest answer'), note: formatKeys(CURRENT['copy-answer']), run: copyLastAnswer },
+      ...(status?.templates ?? []).map((item) => ({
+        id: `prompt:${item.command}`,
+        title: t(`使用 /${item.command}`, `Use /${item.command}`),
+        note: item.hint === null || item.hint === undefined ? item.description : `${item.description} ${item.hint}`,
+        run: () => {
+          setDraft(`/${item.command} `);
+          setWalk(-1);
+          composerRef.current?.focus();
+        },
+      })),
+    ];
+  }, [branchFrom, cancel, collapsed, copyLastAnswer, compact, newSession, openSession, observingExternalSession, patch, projectRoot, readBack, sessionId, status, t]);
 
   const answer = useCallback((decision: 'allow' | 'deny') => {
     const head = asks.find((ask) => ask.sessionId === sessionId);
@@ -1543,10 +1623,24 @@ export function App({ transport }: { transport: Transport }) {
         {status?.usage && <UsageMeter usage={status.usage} running={running} seconds={seconds} />}
         <button className="icon-button" type="button" title={`${t('命令面板', 'Command palette')} (${formatKeys(CURRENT['palette'])})`} aria-label={t('命令面板', 'Command palette')} onClick={() => setPaletteOpen(true)}><Icon name="search" size={17} /></button>
         {sessionId !== null && <SessionActions key={sessionId} client={client} sessionId={sessionId} name={sessionLabel.name} archived={sessionLabel.archived}
+          readOnly={observingExternalSession}
           onLabel={(label) => { setSessionLabel(label); setSessionsRevision((value) => value + 1); }}
           onBranch={() => void branchFrom()} onExport={() => setPanel(menuPanels.find((item) => item.id === 'panel.export') ?? null)}
-          onTasks={() => setPanel(menuPanels.find((item) => item.id === 'panel.branch') ?? null)} onRefresh={() => void readBack()} onCompact={() => void compact()} />}
+          onTasks={() => setPanel(menuPanels.find((item) => item.id === 'panel.branch') ?? null)} onRefresh={() => {
+            if (observingExternalSession) void openSession(sessionId, undefined, false, projectRoot);
+            else void readBack();
+          }} onCompact={() => void compact()} />}
       </header>
+
+      {observingExternalSession && <div className="banner" role="status">
+        <Icon name="warn" size={15} />
+        <span>{externalWriterActive
+          ? t('另一进程持有此会话的写入锁。当前只读观察新增记录；审批和输入仍需在控制端处理。', 'Another process holds this session’s writer lock. This view observes appended records only; approvals and input remain with the controller.')
+          : t('此会话当前没有活动写入者。刷新会话可重新打开并取得控制权。', 'This session has no active writer. Refresh to reopen it and take control.')}</span>
+        <button type="button" onClick={() => { if (sessionId !== null) void openSession(sessionId, undefined, false, projectRoot); }}>
+          {externalWriterActive ? t('刷新观察', 'Refresh view') : t('重新打开', 'Reopen session')}
+        </button>
+      </div>}
 
       <TranscriptViewport
         rows={visible}
@@ -1554,7 +1648,7 @@ export function App({ transport }: { transport: Transport }) {
         reading={reading}
         verbosity={verbosity}
         flash={flash}
-        onBranch={(at) => void branchFrom(at)}
+        onBranch={observingExternalSession ? undefined : (at) => void branchFrom(at)}
         onModels={openModelSettings}
         pinned={pinned}
         setPinned={setPinned}

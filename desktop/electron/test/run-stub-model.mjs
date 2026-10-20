@@ -227,6 +227,7 @@ environment.LIGULE_REAL_MODEL_USER_DATA = userData;
 environment.LIGULE_MODEL_PROVIDER_LABEL = providerLabel;
 environment.LIGULE_MODEL_EVIDENCE_NAME = 'stub-model';
 environment.LIGULE_STUB_CONTROL = `http://127.0.0.1:${server.address().port}/stub`;
+environment.LIGULE_OBSERVER_TEST = '1';
 
 async function registerIsolatedWorkspace() {
   const preflight = spawn(node, [hostEntry, cli], {

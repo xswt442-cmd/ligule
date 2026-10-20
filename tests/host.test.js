@@ -240,6 +240,18 @@ test('a second Host process opens the same record, so the session lives in the H
     const path = join(sessionDirectory({ boundary: directory, workspaceRoot: directory, userHome: directory }), `${sessionId}.jsonl`);
     const before = await readFile(path, 'utf8');
 
+    const observer = startAnother();
+    try {
+      const snapshot = await observer.client.request('session.observe', {
+        projectRoot: directory, sessionId, limit: 50, fullResults: true,
+      });
+      assert.equal(snapshot.writerActive, true);
+      assert.ok(snapshot.events.some((event) => event.kind === 'assistant'));
+      await assert.rejects(observer.client.request('session.open', { projectRoot: directory, sessionId }), { code: 'session_locked' });
+    } finally {
+      await stop(observer);
+    }
+
     // 客户端关闭管道后，Host 应取消当前轮次、释放插件并自行退出。
     host.child.stdin.end();
     const exited = await Promise.race([
