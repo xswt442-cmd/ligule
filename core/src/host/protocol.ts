@@ -31,6 +31,8 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly fullResults?: boolean;
   readonly before?: number;
   readonly input?: string;
+  readonly request?: unknown;
+  readonly origin?: 'human' | 'controller';
   readonly delegation?: DelegationSpec;
   readonly directory?: string;
   readonly text?: string;
@@ -238,6 +240,24 @@ export const METHODS = Object.freeze({
       at: { type: 'integer', minimum: 1 },
     }, required: ['projectRoot', 'sessionId'] },
   },
+  'session.control': {
+    description: 'Send a human action to the local Host that currently owns this externally controlled Session. The same Host remains its only writer; the local action can observe, message, answer, cancel, or take over.',
+    parameters: { type: 'object', properties: {
+      projectRoot: { type: 'string', description: 'the exact workspace root that owns the session' },
+      sessionId: SESSION_ID,
+      request: { type: 'object', additionalProperties: false, properties: {
+        action: { type: 'string', enum: ['status', 'send', 'reply', 'cancel', 'takeover'] },
+        after: { type: 'integer', minimum: 0 },
+        limit: { type: 'integer', minimum: 1, maximum: 50 },
+        waitMs: { type: 'integer', minimum: 0, maximum: 30000 },
+        input: { type: 'string', minLength: 1, maxLength: 65536 },
+        requestId: SESSION_ID,
+        type: { type: 'string', enum: ['approval', 'question'] },
+        decision: { type: 'string', enum: ['allow', 'deny'] },
+        answers: {},
+      }, required: ['action'] },
+    }, required: ['projectRoot', 'sessionId', 'request'] },
+  },
   // Host 读取完整记录、补回溢出内容、生成 Markdown 并写入用户选择的位置。
   // 导出路径由用户通过保存对话框选择，不受模型工具的项目边界限制；返回路径不代表写入成功。
   'session.export': {
@@ -254,6 +274,7 @@ export const METHODS = Object.freeze({
       properties: {
         sessionId: SESSION_ID,
         input: { type: 'string', description: 'the user message for this round' },
+        origin: { type: 'string', enum: ['human', 'controller'], description: 'who submitted the input; local clients default to human' },
         delegation: DELEGATION_SPEC_SCHEMA,
       },
       required: ['sessionId', 'input'],

@@ -49,6 +49,7 @@ const runResultOutput = object({
 }, ['runId', 'sessionId', 'state', 'stopReason', 'output', 'validation', 'artifacts', 'usage']);
 const operationProperties = {
   operationId: id, sessionId: id, state: { type: 'string', enum: ['running', 'done', 'failed', 'cancelled'] },
+  source: { type: 'string', enum: ['human', 'controller'] },
   code: { type: 'string' }, summary: { type: 'string', maxLength: 2048 },
   diagnostics: providerDiagnostic, result: { anyOf: [{ type: 'null' }, runResultOutput] },
   phase: { type: ['string', 'null'] },
@@ -67,12 +68,18 @@ const operationProperties = {
     phase: { type: ['string', 'null'] }, progress: { type: 'object' }, code: { type: 'string' },
     requestId: id, interactionType: { type: 'string', enum: ['approval', 'question'] }, decision: { type: 'string', enum: ['allow', 'deny'] },
     answered: { type: 'integer' }, diagnostics: providerDiagnostic,
+    source: { type: 'string', enum: ['human', 'controller'] },
+    type: { type: 'string', enum: ['text', 'reasoning'] }, text: { type: 'string', maxLength: 8192 },
+    from: { type: 'string', enum: ['external', 'human'] }, to: { type: 'string', enum: ['external', 'human'] },
     eventSeq: { type: ['integer', 'null'] }, eventKind: { type: 'string' },
     queueItemId: id, newOperationId: id, inputCharacters: { type: 'integer' }, cleared: { type: 'integer' },
   }, ['cursor', 'kind', 'at', 'sessionId', 'operationId']) },
   nextCursor: { type: 'integer', minimum: 0 }, hasMoreEvents: { type: 'boolean' }, eventGap: { type: 'boolean' },
   firstAvailableCursor: { type: 'integer', minimum: 1 }, currentOperationId: { type: ['string', 'null'] },
-  queue: { type: 'array', maxItems: 16, items: object({ queueItemId: id, acceptedAt: { type: 'number' }, inputCharacters: { type: 'integer' } }, ['queueItemId', 'acceptedAt', 'inputCharacters']) },
+  queue: { type: 'array', maxItems: 16, items: object({
+    queueItemId: id, acceptedAt: { type: 'number' }, inputCharacters: { type: 'integer' },
+    source: { type: 'string', enum: ['human', 'controller'] },
+  }, ['queueItemId', 'acceptedAt', 'inputCharacters', 'source']) },
   queuePaused: { type: 'boolean' },
 };
 function object(properties: Record<string, object>, required: string[]) {
@@ -222,7 +229,8 @@ const approvalAnswers = { type: 'array', minItems: 1, maxItems: 4, items: object
   custom: { type: 'string', maxLength: 4000 },
 }, ['id', 'selected']) };
 const replyOutput = object({ requestId: id, sessionId: id, operationId: id, type: { type: 'string', enum: ['approval', 'question'] },
-  decision: { type: 'string', enum: ['allow', 'deny'] }, answered: { type: 'integer' }, resolved: { type: 'boolean' } },
+  decision: { type: 'string', enum: ['allow', 'deny'] }, answered: { type: 'integer' }, resolved: { type: 'boolean' },
+  source: { type: 'string', enum: ['human', 'controller'] } },
 ['requestId', 'sessionId', 'operationId', 'type', 'resolved']);
 const tools: Tool[] = [
   { name: 'ligule_session_create', description: 'Create a writable session in the authorized project. Returns its sessionId. At most 64 open sessions per server. Optional initial settings, including the per-turn loop limit, require --operator and are applied before the session is returned.',
@@ -316,7 +324,7 @@ export async function serveMcp({ projectRoot, version, flags = [], modeName, ope
     configLayers: layers,
     permission,
     ...(modeName === undefined ? {} : { modeName }),
-    interactive: operatorEnabled,
+    interactive: true,
     ...(agentControl === undefined ? {} : { agentControl }),
   });
   if (grant !== undefined) await recordDelegationEvent(grantStorePath, { kind: 'grant.used', grantId: grant.id });
@@ -325,8 +333,8 @@ export async function serveMcp({ projectRoot, version, flags = [], modeName, ope
     instructions: grant === undefined
       ? operatorEnabled
         ? 'One local stdio operator for the explicitly authorized project. This server was launched with --operator, so session-only settings and replies to real pending approvals/questions are available. Policy decisions still run in Host; hard denials cannot be overridden. Use ligule_run to delegate and wait in one call, or run_start/await/status/cancel for separate control. Notifications are best-effort. Disconnect cancels active runs and releases locks. Operation IDs and queued messages are process-local; Session JSONL persists.'
-        : 'One local stdio controller for the explicitly authorized project. Session creation/open/list, run, run_start/await/status/cancel, session configuration reads, message sending and record paging are available. Settings changes and replies to approvals/questions require restarting with the explicit --operator flag. Policy approval requests are denied in this mode. Disconnect cancels active runs and releases locks. Operation IDs and queued messages are process-local; Session JSONL persists.'
-      : `One local stdio controller for project ${grant.projectRoot}, bounded by grant ${grant.id} (${grant.maxPermissionProfile}, network up to ${grant.maxNetwork}, policies: ${grant.allowedPolicies.join(', ')}). The grant is not remote identity authentication and does not override OS sandbox limits or hard Policy denials.${operatorEnabled ? ' --operator also allows ordinary approved interactions.' : ' Settings changes and replies to ordinary approvals/questions are disabled.'} Use ligule_run to delegate and wait in one call. Disconnect cancels active runs and releases locks.`,
+        : 'One local stdio controller for the explicitly authorized project. Session creation/open/list, run, run_start/await/status/cancel, session configuration reads, message sending and record paging are available. Ordinary approvals and questions wait for the local Desktop/TUI user; MCP replies and settings changes require the explicit --operator flag. Disconnect cancels active runs and releases locks. Operation IDs and queued messages are process-local; Session JSONL persists.'
+      : `One local stdio controller for project ${grant.projectRoot}, bounded by grant ${grant.id} (${grant.maxPermissionProfile}, network up to ${grant.maxNetwork}, policies: ${grant.allowedPolicies.join(', ')}). The grant is not remote identity authentication and does not override OS sandbox limits or hard Policy denials.${operatorEnabled ? ' --operator also allows ordinary approved interactions.' : ' Ordinary approvals and questions wait for the local Desktop/TUI user; MCP replies and settings changes are disabled.'} Use ligule_run to delegate and wait in one call. Disconnect cancels active runs and releases locks.`,
   });
   const control = createControl(host, authorizedRoot, {
     operator: operatorEnabled,

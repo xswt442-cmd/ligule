@@ -376,7 +376,7 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     const running = toolData(await first.client.callTool({ name: 'ligule_run_status', arguments: { operationId: delayed.operationId } }), 'run_status_running');
     assert.equal(running.state, 'running');
     const firstProviderRequest = await waitFor(() => httpRequests.find((entry) => entry.inputTags.includes('MCP_E2E_DELAYED')), 'delayed HTTP request');
-    assert.ok(!firstProviderRequest.toolNames.includes('ask_user_question'), 'question tool is not registered without operator authorization');
+    assert.ok(firstProviderRequest.toolNames.includes('ask_user_question'), 'the local UI can answer questions while an MCP-owned session is active');
     recordTrace(trace, 'run_start_returns_before_provider', { operationId: delayed.operationId, startMs, state: running.state });
     const delayedDone = toolData(await first.client.callTool({ name: 'ligule_run_await', arguments: {
       operationId: delayed.operationId, timeoutMs: 5_000,

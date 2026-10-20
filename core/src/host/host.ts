@@ -41,6 +41,7 @@ import { listProjectFiles } from './paths.js';
 import { branchSessionId, exportMarkdown, writeExport, type ExportRecord } from './export.js';
 import { createCompaction } from '../session/compaction.js';
 import { sessionWriterActive } from '../session/lock.js';
+import { requestAgentControl, type AgentControlRequest } from './agent-control-runtime.js';
 import { usageEvent } from '../session/usage.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
 import { foldLabel } from '../session/format.js';
@@ -2311,6 +2312,10 @@ export function createHost({
           }, env);
           return { ...snapshot, writerActive: opened?.running !== undefined || await sessionWriterActive(path) };
         }
+        case 'session.control': {
+          const env = await environmentFor(requiredString(message.params.projectRoot, 'projectRoot'));
+          return await requestAgentControl(env.projectRoot, sessionId, message.params.request as AgentControlRequest);
+        }
         case 'session.export': {
           // Host 负责读取和排版完整记录并写出文件，客户端只选择目标路径。
           // 用户通过保存对话框选择的导出路径不属于模型工具写入，不受项目边界限制。
@@ -2365,11 +2370,13 @@ export function createHost({
           // 未知模板命令应返回错误，不能把未展开的文本发送给模型。
           const invocation = parseInvocation(input);
           let text = input;
-          let user;
+          const origin = message.params.origin;
+          if (origin !== undefined && origin !== 'human' && origin !== 'controller') throw new KernelError('protocol_args_invalid', { detail: 'origin must be human or controller' });
+          let user: Record<string, unknown> = { origin: origin ?? 'human' };
           if (invocation !== undefined) {
             const expanded = await expandTemplate(findTemplate(state.templates, invocation.command), invocation.arguments);
             text = expanded.text;
-            user = { raw: input, arguments: expanded.arguments, source: expanded.source, digest: expanded.digest };
+            user = { ...user, raw: input, arguments: expanded.arguments, source: expanded.source, digest: expanded.digest };
           }
           return await state.runDelegated(text, {
             signal, user, onProgress: report, delegation: message.params.delegation,

@@ -8,6 +8,7 @@ import { checkedAnswers, type AskQuestion } from '../tools/ask-user.js';
 import { APPROVAL_METHOD, QUESTION_METHOD } from './protocol.js';
 import type { Host } from './host.js';
 import type { LoopResult } from '../kernel/loop.js';
+import { createAgentControlRuntime, type AgentControlRequest } from './agent-control-runtime.js';
 
 export type OperationState = 'running' | 'done' | 'failed' | 'cancelled';
 export type InteractionType = 'approval' | 'question';
@@ -23,6 +24,7 @@ interface ControlEvent extends Record<string, unknown> {
 interface Operation {
   readonly operationId: string;
   readonly sessionId: string;
+  readonly source: 'human' | 'controller';
   state: OperationState;
   code?: string;
   diagnostics?: ProviderDiagnostic;
@@ -33,6 +35,7 @@ interface Operation {
   updatedAt: number;
   nextCursor: number;
   readonly events: ControlEvent[];
+  readonly waiters: Set<() => void>;
   settled: Promise<void>;
 }
 
@@ -53,6 +56,7 @@ interface QueueItem {
   readonly input: string;
   readonly acceptedAt: number;
   readonly sourceOperationId: string;
+  readonly source: 'human' | 'controller';
 }
 
 interface SessionQueue {
@@ -129,11 +133,14 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
   const active = new Map<string, Operation>();
   const interactions = new Map<string, PendingInteraction>();
   const queues = new Map<string, SessionQueue>();
+  const takenOver = new Set<string>();
+  const takingOver = new Set<string>();
   const operator = options.operator === true;
   let closing: Promise<void> | undefined;
   let closingCode = 'control_closed';
   let opening = 0;
   const pending = new Set<Promise<unknown>>();
+  const localRuntime = createAgentControlRuntime(projectRoot, (sessionId, request) => handleHumanControl(sessionId, request));
 
   function publish(found: Operation, kind: string, fields: Record<string, unknown> = {}): ControlEvent {
     const event: ControlEvent = {
@@ -142,6 +149,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     found.updatedAt = event.at;
     found.events.push(event);
     if (found.events.length > 128) found.events.shift();
+    for (const wake of [...found.waiters]) wake();
     try { options.onEvent?.(event); } catch { /* Notification failure does not alter the Host operation. */ }
     return event;
   }
@@ -164,8 +172,6 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     if (method !== APPROVAL_METHOD && method !== QUESTION_METHOD) {
       return Promise.reject(new KernelError('control_interaction_unknown'));
     }
-    if (method === APPROVAL_METHOD && !operator) return Promise.resolve({ decision: 'deny' });
-    if (method === QUESTION_METHOD && !operator) return Promise.reject(new KernelError('control_operator_required'));
     const sessionId = typeof input.sessionId === 'string' ? input.sessionId : '';
     const found = active.get(sessionId);
     if (found === undefined || found.state !== 'running' || closing !== undefined) {
@@ -241,6 +247,13 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
           eventSeq: typeof message.event.seq === 'number' ? message.event.seq : null,
           eventKind: typeof message.event.kind === 'string' ? message.event.kind : 'unknown',
         });
+      } else if (message.notify === 'delta' && isPlainRecord(message.event)
+        && (message.event.type === 'text' || message.event.type === 'reasoning')
+        && typeof message.event.text === 'string') {
+        const text = message.event.text;
+        for (let offset = 0; offset < text.length; offset += 8192) {
+          publish(found, 'model.delta', { type: message.event.type, text: text.slice(offset, offset + 8192) });
+        }
       } else if (message.notify === 'fault') {
         publish(found, 'run.fault', { code: typeof message.code === 'string' ? message.code : 'host_fault' });
       }
@@ -263,6 +276,11 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     if (!sessions.has(sessionId)) throw new KernelError('session_not_open');
   }
 
+  function writable(sessionId: string): void {
+    owned(sessionId);
+    if (takenOver.has(sessionId) || takingOver.has(sessionId)) throw new KernelError('control_session_taken_over');
+  }
+
   async function authorized(root: string): Promise<void> {
     if (!isAbsolute(root)) throw new KernelError('control_project_forbidden');
     let actual: string;
@@ -274,6 +292,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
   async function session(method: 'session.create' | 'session.open', root: string, sessionId?: string, initial?: McpInitialSettings) {
     ready();
     if (initial !== undefined && Object.keys(initial).length > 0 && !operator) throw new KernelError('control_operator_required');
+    if (sessionId !== undefined && (takenOver.has(sessionId) || takingOver.has(sessionId))) throw new KernelError('control_session_taken_over');
     if ((sessionId === undefined || !sessions.has(sessionId)) && sessions.size + opening >= 64) throw new KernelError('control_session_limit');
     opening += 1;
     const work = (async () => {
@@ -300,7 +319,13 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
         }),
       } }, connection));
       if (typeof result.sessionId !== 'string') throw new KernelError('host_response_invalid');
-      sessions.add(result.sessionId);
+      try {
+        await localRuntime.register(result.sessionId);
+        sessions.add(result.sessionId);
+      } catch (error) {
+        await host.handle({ method: 'session.close', params: { sessionId: result.sessionId } }, connection).catch(() => undefined);
+        throw error;
+      }
       return { sessionId: result.sessionId, ...(result.settingsApplied === true ? { settingsApplied: true } : {}) };
     })();
     pending.add(work);
@@ -318,7 +343,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
   function queueSummary(sessionId: string) {
     const queue = currentQueue(sessionId);
     return {
-      queue: queue.items.map(({ queueItemId, acceptedAt, input }) => ({ queueItemId, acceptedAt, inputCharacters: input.length })),
+    queue: queue.items.map(({ queueItemId, acceptedAt, input, source }) => ({ queueItemId, acceptedAt, inputCharacters: input.length, source })),
       queuePaused: queue.paused,
       currentOperationId: active.get(sessionId)?.operationId ?? null,
     };
@@ -331,6 +356,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     const events = availableEvents.slice(0, limit);
     return {
       operationId: found.operationId, sessionId: found.sessionId, state: found.state,
+      source: found.source,
       ...(found.code === undefined ? {} : { code: found.code }),
       ...(found.diagnostics === undefined ? {} : { diagnostics: found.diagnostics }),
       ...(found.summary === undefined ? {} : { summary: found.summary }),
@@ -356,6 +382,51 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     };
   }
 
+  function latestSessionOperation(sessionId: string): Operation | undefined {
+    return active.get(sessionId) ?? [...operations.values()].reverse().find((operation) => operation.sessionId === sessionId);
+  }
+
+  async function waitForUpdate(found: Operation, after: number, waitMs: number): Promise<void> {
+    if (found.state !== 'running' || found.nextCursor - 1 > after || waitMs === 0) return;
+    await new Promise<void>((resolveWait) => {
+      let done = false;
+      let timer: NodeJS.Timeout | undefined;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        if (timer !== undefined) clearTimeout(timer);
+        found.waiters.delete(wake);
+        resolveWait();
+      };
+      const wake = () => {
+        if (found.state !== 'running' || found.nextCursor - 1 > after) finish();
+      };
+      found.waiters.add(wake);
+      timer = setTimeout(finish, waitMs);
+      wake();
+    });
+  }
+
+  async function observeSession(sessionId: string, after = 0, limit = 50, waitMs = 0) {
+    owned(sessionId);
+    if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 50
+      || !Number.isSafeInteger(waitMs) || waitMs < 0 || waitMs > 30_000) {
+      throw new KernelError('control_cursor_invalid');
+    }
+    const found = latestSessionOperation(sessionId);
+    if (found === undefined) {
+      return {
+        sessionId,
+        state: 'idle',
+        ownership: takenOver.has(sessionId) ? 'human' : 'external',
+        events: [], nextCursor: after, hasMoreEvents: false, eventGap: false, firstAvailableCursor: 1,
+        pendingInteractions: [], ...queueSummary(sessionId),
+      };
+    }
+    await waitForUpdate(found, after, waitMs);
+    return { ...status(found, after, limit), ownership: takenOver.has(sessionId) ? 'human' : 'external' };
+  }
+
   function settleInteractions(found: Operation, errorCode = 'control_interaction_stale'): void {
     for (const interaction of pendingFor(found)) {
       interactions.delete(interaction.requestId);
@@ -372,8 +443,8 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     });
   }
 
-  function startOne(sessionId: string, input: string, queueItemId?: string, delegation?: DelegationSpec) {
-    owned(sessionId);
+  function startOne(sessionId: string, input: string, queueItemId?: string, delegation?: DelegationSpec, source: 'human' | 'controller' = 'controller') {
+    writable(sessionId);
     if (active.has(sessionId)) throw new KernelError('run_already_running');
     if (operations.size >= 256) {
       const oldest = [...operations.values()].find((entry) => entry.state !== 'running');
@@ -381,13 +452,13 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
       operations.delete(oldest.operationId);
     }
     const found: Operation = {
-      operationId: randomUUID(), sessionId, state: 'running', updatedAt: Date.now(), nextCursor: 1, events: [], settled: Promise.resolve(),
+      operationId: randomUUID(), sessionId, source, state: 'running', updatedAt: Date.now(), nextCursor: 1, events: [], waiters: new Set(), settled: Promise.resolve(),
     };
     operations.set(found.operationId, found);
     active.set(sessionId, found);
-    publish(found, 'run.started', { ...(queueItemId === undefined ? {} : { queueItemId }) });
+    publish(found, 'run.started', { source, ...(queueItemId === undefined ? {} : { queueItemId }) });
     const work = Promise.resolve().then(() => host.handle({
-      method: 'run.start', params: { sessionId, input, ...(delegation === undefined ? {} : { delegation }) },
+      method: 'run.start', params: { sessionId, input, origin: source, ...(delegation === undefined ? {} : { delegation }) },
     }, connection));
     found.settled = work.then(
       (result) => {
@@ -453,9 +524,9 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     if (queue === undefined || queue.paused || queue.items.length === 0 || active.has(sessionId) || closing !== undefined) return;
     const item = queue.items.shift()!;
     try {
-      const next = startOne(sessionId, item.input, item.queueItemId);
+      const next = startOne(sessionId, item.input, item.queueItemId, undefined, item.source);
       const source = operations.get(item.sourceOperationId);
-      if (source !== undefined) publish(source, 'queue.started', { queueItemId: item.queueItemId, newOperationId: next.operationId });
+      if (source !== undefined) publish(source, 'queue.started', { queueItemId: item.queueItemId, newOperationId: next.operationId, source: item.source });
     }
     catch (error) {
       queue.items.unshift(item);
@@ -467,10 +538,10 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
 
   function replyInteraction({ sessionId, requestId, type, decision, answers }: {
     sessionId: string; requestId: string; type: InteractionType; decision?: 'allow' | 'deny'; answers?: unknown;
-  }) {
+  }, source: 'human' | 'controller' = 'controller') {
     ready();
-    if (!operator) throw new KernelError('control_operator_required');
-    owned(sessionId);
+    if (source === 'controller' && !operator) throw new KernelError('control_operator_required');
+    writable(sessionId);
     const interaction = interactions.get(requestId);
     if (interaction === undefined) throw new KernelError('control_interaction_stale');
     if (interaction.sessionId !== sessionId) throw new KernelError('control_interaction_session_mismatch');
@@ -482,23 +553,24 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     if (type === 'approval') {
       if (decision !== 'allow' && decision !== 'deny') throw new KernelError('control_interaction_decision_invalid');
       interactions.delete(requestId);
-      publish(found, 'interaction.resolved', { requestId, interactionType: type, decision });
-      interaction.resolve({ decision });
-      return { requestId, sessionId, operationId: found.operationId, type, decision, resolved: true };
+      publish(found, 'interaction.resolved', { requestId, interactionType: type, decision, source });
+      interaction.resolve({ decision, source });
+      return { requestId, sessionId, operationId: found.operationId, type, decision, source, resolved: true };
     }
     const questions = interaction.questions;
     if (questions === undefined) throw new KernelError('control_question_invalid');
     const checked = checkedAnswers(questions, { answers });
     interactions.delete(requestId);
-    publish(found, 'interaction.resolved', { requestId, interactionType: type, answered: checked.length });
-    interaction.resolve({ answers: checked });
-    return { requestId, sessionId, operationId: found.operationId, type, answered: checked.length, resolved: true };
+    publish(found, 'interaction.resolved', { requestId, interactionType: type, answered: checked.length, source });
+    interaction.resolve({ answers: checked, source });
+    return { requestId, sessionId, operationId: found.operationId, type, answered: checked.length, source, resolved: true };
   }
 
   async function configure(sessionId: string, changes?: McpSessionChanges) {
     ready();
     owned(sessionId);
     const hasChanges = changes !== undefined && Object.keys(changes).length > 0;
+    if (hasChanges) writable(sessionId);
     if (hasChanges && !operator) throw new KernelError('control_operator_required');
     const params: Record<string, unknown> = { sessionId };
     if (changes?.mode !== undefined) params.mode = changes.mode;
@@ -518,8 +590,8 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     return { ...effective, requested: changes };
   }
 
-  function send(sessionId: string, action: 'send' | 'continue' | 'cancel_queued' | 'clear_queue', input?: string, queueItemId?: string) {
-    owned(sessionId);
+  function send(sessionId: string, action: 'send' | 'continue' | 'cancel_queued' | 'clear_queue', input?: string, queueItemId?: string, source: 'human' | 'controller' = 'controller') {
+    writable(sessionId);
     const queue = currentQueue(sessionId);
     if (action === 'continue') {
       if (input !== undefined || queueItemId !== undefined) throw new KernelError('session_send_arguments_invalid');
@@ -536,7 +608,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
       queue.items.splice(index, 1);
       if (queue.items.length === 0) queue.paused = false;
       const latest = active.get(sessionId) ?? [...operations.values()].reverse().find((operation) => operation.sessionId === sessionId);
-      if (latest !== undefined) publish(latest, 'queue.item_cancelled', { queueItemId });
+      if (latest !== undefined) publish(latest, 'queue.item_cancelled', { queueItemId, source });
       return { sessionId, action, queueItemId, ...queueSummary(sessionId) };
     }
     if (action === 'clear_queue') {
@@ -545,13 +617,13 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
       queue.items.length = 0;
       queue.paused = false;
       const latest = active.get(sessionId) ?? [...operations.values()].reverse().find((operation) => operation.sessionId === sessionId);
-      if (latest !== undefined && cleared > 0) publish(latest, 'queue.cleared', { cleared });
+      if (latest !== undefined && cleared > 0) publish(latest, 'queue.cleared', { cleared, source });
       return { sessionId, action, cleared, ...queueSummary(sessionId) };
     }
     if (queueItemId !== undefined) throw new KernelError('session_send_arguments_invalid');
     if (typeof input !== 'string' || input.trim() === '' || input.length > 65_536) throw new KernelError('session_input_invalid');
     if (!active.has(sessionId) && queue.items.length === 0 && !queue.paused) {
-      const found = startOne(sessionId, input);
+      const found = startOne(sessionId, input, undefined, undefined, source);
       return {
         sessionId, accepted: true, queued: false, operationId: found.operationId, state: found.state,
         ...queueSummary(sessionId),
@@ -560,11 +632,65 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     if (queue.items.length >= 16) throw new KernelError('session_queue_full');
     const sourceOperation = active.get(sessionId) ?? [...operations.values()].reverse().find((operation) => operation.sessionId === sessionId);
     if (sourceOperation === undefined) throw new KernelError('session_queue_source_missing');
-    const item: QueueItem = { queueItemId: randomUUID(), input, acceptedAt: Date.now(), sourceOperationId: sourceOperation.operationId };
+    const item: QueueItem = { queueItemId: randomUUID(), input, acceptedAt: Date.now(), sourceOperationId: sourceOperation.operationId, source };
     queue.items.push(item);
     const activeOperation = active.get(sessionId) ?? [...operations.values()].reverse().find((operation) => operation.sessionId === sessionId);
-    if (activeOperation !== undefined) publish(activeOperation, 'message.queued', { queueItemId: item.queueItemId, inputCharacters: input.length });
+    if (activeOperation !== undefined) publish(activeOperation, 'message.queued', { queueItemId: item.queueItemId, inputCharacters: input.length, source });
     return { sessionId, accepted: true, queued: true, queueItemId: item.queueItemId, ...queueSummary(sessionId) };
+  }
+
+  async function cancelOperation(operationId: string, source: 'human' | 'controller' = 'controller') {
+    const found = operation(operationId);
+    if (source === 'controller') writable(found.sessionId);
+    else owned(found.sessionId);
+    if (found.state === 'running') {
+      try { await host.handle({ method: 'run.cancel', params: { sessionId: found.sessionId } }, connection); }
+      catch (error) { if (controlErrorCode(error) !== 'run_not_running') throw error; }
+      await found.settled;
+    }
+    return { ...status(found), terminated: found.state !== 'running' };
+  }
+
+  async function takeOverSession(sessionId: string) {
+    writable(sessionId);
+    takingOver.add(sessionId);
+    try {
+      const found = active.get(sessionId);
+      if (found !== undefined) await cancelOperation(found.operationId, 'human');
+      const queue = currentQueue(sessionId);
+      queue.items.length = 0;
+      queue.paused = false;
+      const closed = record(await tracked(host.handle({ method: 'session.close', params: { sessionId } }, connection)));
+      if (closed.sessionId !== sessionId) throw new KernelError('host_response_invalid');
+      takenOver.add(sessionId);
+      const latest = latestSessionOperation(sessionId);
+      if (latest !== undefined) publish(latest, 'ownership.transferred', { from: 'external', to: 'human' });
+      await localRuntime.unregister(sessionId);
+      return { sessionId, ownership: 'human', released: true, operationId: latest?.operationId ?? null };
+    } finally {
+      takingOver.delete(sessionId);
+    }
+  }
+
+  async function handleHumanControl(sessionId: string, request: AgentControlRequest): Promise<unknown> {
+    owned(sessionId);
+    switch (request.action) {
+      case 'status': return await observeSession(sessionId, request.after, request.limit, request.waitMs);
+      case 'send': return send(sessionId, 'send', request.input, undefined, 'human');
+      case 'reply': return replyInteraction({
+        sessionId,
+        requestId: request.requestId,
+        type: request.type,
+        ...(request.type === 'approval' ? { decision: request.decision } : { answers: request.answers }),
+      }, 'human');
+      case 'cancel': {
+        const found = active.get(sessionId);
+        return found === undefined
+          ? { sessionId, state: 'idle', terminated: true }
+          : await cancelOperation(found.operationId, 'human');
+      }
+      case 'takeover': return await takeOverSession(sessionId);
+    }
   }
 
   return {
@@ -589,7 +715,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
       }) };
     },
     start(sessionId: string, input: string, delegation?: DelegationSpec) {
-      owned(sessionId);
+      writable(sessionId);
       const queue = currentQueue(sessionId);
       if (queue.items.length > 0) throw new KernelError('session_queue_pending');
       queue.paused = false;
@@ -618,15 +744,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
       }
       return { ...status(found), timedOut: found.state === 'running' };
     },
-    async cancel(operationId: string) {
-      const found = operation(operationId);
-      if (found.state === 'running') {
-        try { await host.handle({ method: 'run.cancel', params: { sessionId: found.sessionId } }, connection); }
-        catch (error) { if (controlErrorCode(error) !== 'run_not_running') throw error; }
-        await found.settled;
-      }
-      return { ...status(found), terminated: found.state !== 'running' };
-    },
+    cancel: (operationId: string) => cancelOperation(operationId),
     invalidate(code: string): Promise<void> {
       if (closing !== undefined) return closing;
       if (!/^[a-z][a-z0-9_]{0,79}$/.test(code)) throw new KernelError('control_error_code_invalid');
@@ -670,6 +788,8 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
         // 在 Host 取消活动任务前先处理已完成任务的错误。
         const settled = Promise.allSettled([...operations.values()].map((found) => found.settled));
         try { await host.release(); }
+        catch (error) { failures.push(error); }
+        try { await localRuntime.close(); }
         catch (error) { failures.push(error); }
         try {
           await Promise.allSettled([...pending]);
