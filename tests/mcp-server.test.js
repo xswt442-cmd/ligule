@@ -570,6 +570,9 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     const userText = body.messages.filter((message) => message.role === 'user').at(-1)?.content ?? '';
     if (userText.includes('MCP_OPERATOR_STRUCTURED')) {
       assert.ok((body.tools ?? []).some((tool) => tool.function?.name === 'ligule_delegation_result'));
+      assert.ok((body.tools ?? []).some((tool) => tool.function?.name === 'read'));
+      assert.equal((body.tools ?? []).some((tool) => tool.function?.name === 'create'), false,
+        'the per-run inline mode narrows the persistent full mode');
       callId += 1;
       sse(response, { tool_calls: [{ index: 0, id: `operator-call-${callId}`, type: 'function', function: {
         name: 'ligule_delegation_result', arguments: JSON.stringify({ result: { answer: 'validated by Host' } }),
@@ -691,9 +694,10 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     const structuredRun = toolData(await context.client.callTool({ name: 'ligule_run', arguments: {
       sessionId: structuredSession.sessionId,
       input: 'MCP_OPERATOR_STRUCTURED',
-      delegation: { outputSchema: {
-        type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false,
-      } },
+      delegation: {
+        mode: { type: 'inline', tools: ['read'], prompt: [] },
+        outputSchema: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false },
+      },
       timeoutMs: 5_000,
     } }), 'operator_structured_run');
     assert.equal(structuredRun.state, 'done');
@@ -704,6 +708,14 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     const structuredContext = await findHistoryRecord(context.client, structuredSession.sessionId,
       (record) => record.kind === 'turnContext' && record.json.includes(structuredDigest));
     assert.ok(structuredContext, 'the schema digest is recorded in the persistent turn context');
+    const modeSnapshot = JSON.parse(structuredContext.record.json).delegationMode;
+    assert.equal(modeSnapshot.source, 'inline');
+    assert.ok(modeSnapshot.tools.includes('read'));
+    assert.equal(modeSnapshot.tools.includes('create'), false);
+    const restoredMode = toolData(await context.client.callTool({ name: 'ligule_session_configure', arguments: {
+      sessionId: structuredSession.sessionId,
+    } }), 'operator_structured_mode_restored');
+    assert.equal(restoredMode.effective.mode, 'full');
     const invalidConfiguredModel = await context.client.callTool({ name: 'ligule_session_configure', arguments: {
       sessionId, changes: { model: { provider: 'legacy', model: 'not-in-this-config' } },
     } });

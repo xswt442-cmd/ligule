@@ -270,12 +270,13 @@ export function applyMode(kernel: ModeTarget, mode: ModeApplicationSpec): { tool
 }
 
 // 工具限制和提示片段一起应用，保证同一模式在父会话与派生会话中含义一致。
-export function applyModeToPrompt({ file, kernel, prompt, fragments, maxBytes }: {
+export function applyModeToPrompt({ file, kernel, prompt, fragments, maxBytes, alreadyAppliedPromptFragments = [] }: {
   readonly file: ModeApplicationSpec;
   readonly kernel: ModeTarget & { manifest(): readonly { readonly name: string }[] };
   readonly prompt: PromptAssembly;
   readonly fragments: readonly ModePromptFragment[];
   readonly maxBytes: number;
+  readonly alreadyAppliedPromptFragments?: readonly string[];
 }): { readonly tools: string[]; readonly prompt: string[]; readonly digest: string; undo(): void } {
   const selected = file.prompt === '*'
     ? [...fragments]
@@ -294,8 +295,10 @@ export function applyModeToPrompt({ file, kernel, prompt, fragments, maxBytes }:
     prompt: file.prompt,
   });
   const fragmentUndo: (() => void)[] = [];
+  const alreadyApplied = new Set(alreadyAppliedPromptFragments);
   try {
     selected.forEach((fragment, index) => {
+      if (alreadyApplied.has(fragment.name)) return;
       fragmentUndo.push(prompt.fragment({
         name: `extension:${fragment.name}`,
         anchor: 2 + index,

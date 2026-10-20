@@ -12,7 +12,7 @@ import { createPromptAssembly } from '../kernel/prompt.js';
 import { createSessionLog } from '../session/session.js';
 import {
   completedRunResult, createOutputSchemaContract, DELEGATION_RESULT_TOOL, MAX_DELEGATION_SCHEMA_BYTES,
-  outputSchemaInstructions, registerDelegationResultTool,
+  MODE_SELECTION_SCHEMA, outputSchemaInstructions, registerDelegationResultTool,
 } from '../delegation.js';
 import {
   applyModeToPrompt, resolveModeSelection,
@@ -77,27 +77,8 @@ export function createSubagentPlugin(deps: SubagentDeps) {
           type: 'object',
           properties: {
             task: { type: 'string', description: 'What the derived agent should do, as one instruction.' },
-            mode: {
-              anyOf: [
-                { type: 'string', minLength: 1, maxLength: 64 },
-                { type: 'object', properties: {
-                  type: { type: 'string', enum: ['named'] }, name: { type: 'string', minLength: 1, maxLength: 64 },
-                }, required: ['type', 'name'], additionalProperties: false },
-                { type: 'object', properties: {
-                  type: { type: 'string', enum: ['inline'] },
-                  tools: { anyOf: [
-                    { type: 'string', enum: ['*'] },
-                    { type: 'array', items: { type: 'string', minLength: 1, maxLength: 128 } },
-                  ] },
-                  prompt: { anyOf: [
-                    { type: 'string', enum: ['*'] },
-                    { type: 'array', items: { type: 'string', minLength: 1, maxLength: 128 } },
-                  ] },
-                }, required: ['type', 'tools', 'prompt'], additionalProperties: false },
-              ],
-              description: 'Optional named or inline mode for the derived agent; the current mode is inherited by default.',
-            },
-            outputSchema: { type: 'object', description: 'Optional supported JSON Schema for the child result. A valid value must be submitted with the child-only subagent_result tool.' },
+            mode: MODE_SELECTION_SCHEMA,
+            outputSchema: { type: 'object', description: 'Optional supported JSON Schema for the child result. A valid value must be submitted with the child-only ligule_delegation_result tool.' },
           },
           additionalProperties: false,
           required: ['task'],

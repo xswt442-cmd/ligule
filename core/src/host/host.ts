@@ -18,7 +18,10 @@ import { createPermissionContext, DEFAULT_PERMISSION_CONTEXT, permissionDenial, 
 import { createKernel, type Kernel } from '../kernel/kernel.js';
 import { loadAssembly, type Assembly, type Plugin } from '../kernel/assembly.js';
 import { loadExtensions, type ExtensionDiagnostic } from '../kernel/extensions.js';
-import { DEFAULT_MODE, listModes, loadMode, type ModeDirectories, type ModeFile } from '../kernel/modes.js';
+import {
+  applyModeToPrompt, DEFAULT_MODE, listModes, loadMode, resolveModeSelection,
+  type ModeDirectories, type ModeFile,
+} from '../kernel/modes.js';
 import { readRegistry, registerWorkspace, setDefaultWorkspace, unregisterWorkspace, workspaceIdentity } from '../kernel/workspace.js';
 import { historyPathOf, loadHistory, rememberHistory } from '../kernel/input-history.js';
 import { parsePrefsJson, prefsPathOf, readPrefs, savePrefs } from '../kernel/desktop-prefs.js';
@@ -1642,7 +1645,33 @@ export function createHost({
       let structured: unknown;
       let disposeResultTool: (() => void) | undefined;
       let undoOutputContract = () => {};
+      let undoDelegationMode = () => {};
+      let delegatedMode: { source: string; name: string; layer: string; digest: string; tools: string[]; prompt: string[] } | undefined;
       try {
+        if (options.delegation?.mode !== undefined) {
+          const resolvedMode = await resolveModeSelection(options.delegation.mode, state.environment.modePaths);
+          if (resolvedMode !== undefined) {
+            const applied = applyModeToPrompt({
+              file: resolvedMode.application,
+              kernel,
+              prompt,
+              fragments,
+              maxBytes: limitsOf(state.environment.config).promptFragmentBytes,
+              alreadyAppliedPromptFragments: state.mode.file === undefined
+                ? []
+                : state.mode.file.prompt === '*' ? fragments.map((fragment) => fragment.name) : state.mode.file.prompt,
+            });
+            undoDelegationMode = applied.undo;
+            delegatedMode = {
+              source: resolvedMode.source,
+              name: resolvedMode.name,
+              layer: resolvedMode.layer,
+              digest: applied.digest,
+              tools: applied.tools,
+              prompt: applied.prompt,
+            };
+          }
+        }
         if (contract !== undefined) {
           disposeResultTool = registerDelegationResultTool(kernel, contract, (value) => {
             structured = value;
@@ -1660,7 +1689,12 @@ export function createHost({
           user: options.user,
           onProgress: options.onProgress,
           completesRun: contract === undefined ? [] : [DELEGATION_RESULT_TOOL],
-          ...(contract === undefined ? {} : { turnContext: { delegationSchemaDigest: contract.digest } }),
+          ...(contract === undefined && delegatedMode === undefined ? {} : {
+            turnContext: {
+              ...(delegatedMode === undefined ? {} : { delegationMode: delegatedMode }),
+              ...(contract === undefined ? {} : { delegationSchemaDigest: contract.digest }),
+            },
+          }),
         });
         const validation = contract === undefined
           ? undefined
@@ -1673,8 +1707,11 @@ export function createHost({
           ...(validation === undefined ? {} : { validation }),
         };
       } finally {
-        try { undoOutputContract(); }
-        finally { disposeResultTool?.(); }
+        try { undoDelegationMode(); }
+        finally {
+          try { undoOutputContract(); }
+          finally { disposeResultTool?.(); }
+        }
       }
     };
     // 当前轮次和待处理审批都限定在所属会话内。

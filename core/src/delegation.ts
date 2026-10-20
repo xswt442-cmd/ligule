@@ -3,6 +3,7 @@ import type { ProviderDiagnostic } from './kernel/error.js';
 import { KernelError } from './kernel/error.js';
 import type { Kernel } from './kernel/kernel.js';
 import type { LoopResult } from './kernel/loop.js';
+import type { RequestedModeSelection } from './kernel/modes.js';
 import { assertSupportedSchema, validateArgs } from './kernel/schema.js';
 
 export const MAX_DELEGATION_SCHEMA_BYTES = 32 * 1024;
@@ -10,12 +11,37 @@ export const MAX_DELEGATION_RESULT_BYTES = 64 * 1024;
 export const DELEGATION_RESULT_TOOL = 'ligule_delegation_result';
 
 export interface DelegationSpec {
+  readonly mode?: RequestedModeSelection;
   readonly outputSchema?: Record<string, unknown>;
 }
 
+export const MODE_SELECTION_SCHEMA = {
+  anyOf: [
+    { type: 'string', minLength: 1, maxLength: 64 },
+    { type: 'object', properties: {
+      type: { type: 'string', enum: ['named'] }, name: { type: 'string', minLength: 1, maxLength: 64 },
+    }, required: ['type', 'name'], additionalProperties: false },
+    { type: 'object', properties: {
+      type: { type: 'string', enum: ['inline'] },
+      tools: { anyOf: [
+        { type: 'string', enum: ['*'] },
+        { type: 'array', items: { type: 'string', minLength: 1, maxLength: 128 } },
+      ] },
+      prompt: { anyOf: [
+        { type: 'string', enum: ['*'] },
+        { type: 'array', items: { type: 'string', minLength: 1, maxLength: 128 } },
+      ] },
+    }, required: ['type', 'tools', 'prompt'], additionalProperties: false },
+  ],
+  description: 'Optional named or inline mode; the current session mode remains in force as an upper bound.',
+};
+
 export const DELEGATION_SPEC_SCHEMA = {
   type: 'object',
-  properties: { outputSchema: { type: 'object', description: 'Optional supported JSON Schema for the delegated result.' } },
+  properties: {
+    mode: MODE_SELECTION_SCHEMA,
+    outputSchema: { type: 'object', description: 'Optional supported JSON Schema for the delegated result.' },
+  },
   additionalProperties: false,
 };
 
