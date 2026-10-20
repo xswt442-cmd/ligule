@@ -1,10 +1,18 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
+import {
+  grantAppContainerTempDirectoryWrite,
+  grantRestrictedDirectoryWrite,
+  revokeAppContainerTempDirectoryWrite,
+  revokeRestrictedDirectoryWrite,
+} from '../dist/capability/windows-appcontainer-acl.js';
+import { createAppContainerProfile } from '../dist/capability/windows-appcontainer-process.js';
 
 test('read-only AppContainer denies workspace writes and direct network access', {
   skip: process.platform !== 'win32',
@@ -114,6 +122,70 @@ test('read-only AppContainer denies workspace writes and direct network access',
       workspaceAclUnchanged: true,
     });
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a temporary restricted-token write ACE covers existing and new workspace files, then revokes cleanly', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const testDirectory = process.env.LIGULE_APPCONTAINER_TEST_ROOT === undefined
+    ? resolve('testplace') : resolve(process.env.LIGULE_APPCONTAINER_TEST_ROOT);
+  if (process.env.LIGULE_APPCONTAINER_TEST_ROOT === undefined) await mkdir(testDirectory, { recursive: true });
+  const root = await mkdtemp(join(testDirectory, 'restricted-write-acl-'));
+  const workspace = join(root, 'workspace');
+  const nested = join(workspace, 'nested');
+  await mkdir(nested, { recursive: true });
+  const existingFile = join(nested, 'existing.txt');
+  const createdFile = join(nested, 'created.txt');
+  await writeFile(existingFile, 'existing');
+  const sidPart = () => (randomBytes(4).readUInt32LE(0) % (2 ** 30 - 1)) + 1;
+  const sid = `S-1-4-${sidPart()}-${sidPart()}`;
+  const acl = (path) => execFileSync('icacls.exe', [path], { encoding: 'utf8', windowsHide: true });
+  const before = new Map([workspace, nested, existingFile].map((path) => [path, acl(path)]));
+  let grantAttempted = false;
+  try {
+    grantAttempted = true;
+    await grantRestrictedDirectoryWrite(workspace, sid);
+    for (const path of [workspace, nested, existingFile]) assert.equal(acl(path).includes(sid), true, `grant ACE is missing from ${path}`);
+    await writeFile(createdFile, 'created');
+    assert.equal(acl(createdFile).includes(sid), true, 'new files inherit the grant ACE');
+    await revokeRestrictedDirectoryWrite(workspace, sid);
+    grantAttempted = false;
+    for (const [path, original] of before) assert.equal(acl(path), original, `ACL changed after revoking ${sid} from ${path}`);
+    assert.equal(acl(createdFile).includes(sid), false, 'new file inherited grant was removed with the root grant');
+  } finally {
+    if (grantAttempted) await revokeRestrictedDirectoryWrite(workspace, sid).catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('an unavailable AppContainer temp grant leaves the directory ACL unchanged', {
+  skip: process.platform !== 'win32',
+  timeout: 45_000,
+}, async () => {
+  const testDirectory = process.env.LIGULE_APPCONTAINER_TEST_ROOT === undefined
+    ? resolve('testplace') : resolve(process.env.LIGULE_APPCONTAINER_TEST_ROOT);
+  if (process.env.LIGULE_APPCONTAINER_TEST_ROOT === undefined) await mkdir(testDirectory, { recursive: true });
+  const root = await mkdtemp(join(testDirectory, 'appcontainer-temp-restore-'));
+  const temp = join(root, 'temp');
+  await mkdir(temp);
+  const before = execFileSync('icacls.exe', [temp], { encoding: 'utf8' });
+  const profile = await createAppContainerProfile();
+  let granted = false;
+  let grantError;
+  try {
+    try {
+      await grantAppContainerTempDirectoryWrite(temp, profile.sid);
+      granted = true;
+    } catch (error) {
+      grantError = error;
+    }
+    if (granted) await revokeAppContainerTempDirectoryWrite(temp, profile.sid);
+    assert.equal(execFileSync('icacls.exe', [temp], { encoding: 'utf8' }), before,
+      grantError instanceof Error ? grantError.message : 'temporary ACL state changed');
+  } finally {
+    await profile.dispose();
     await rm(root, { recursive: true, force: true });
   }
 });

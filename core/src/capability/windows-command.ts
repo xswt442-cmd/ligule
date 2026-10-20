@@ -9,10 +9,9 @@ export interface OwnedWindowsCommand {
   cancel(): void;
 }
 
-export interface WindowsCommandLaunch {
-  readonly kind: 'appcontainer';
-  readonly profileName: string;
-}
+export type WindowsCommandLaunch =
+  | { readonly kind: 'appcontainer'; readonly workspaceRoot: string; readonly tempDirectory: string }
+  | { readonly kind: 'restricted-token'; readonly workspaceRoot: string; readonly tempDirectory: string };
 
 const GUARDIAN_LAUNCH_ARGUMENT = '--ligule-guardian-launch-v1';
 
@@ -23,8 +22,15 @@ export function spawnWindowsCommand(
   environment?: NodeJS.ProcessEnv,
   launch?: WindowsCommandLaunch,
 ): OwnedWindowsCommand {
-  if (launch !== undefined && (launch.kind !== 'appcontainer' || launch.profileName.trim() === '' || launch.profileName.includes('\0'))) {
-    throw new TypeError('the AppContainer launch description requires a non-empty profile name without NUL characters');
+  if (launch !== undefined) {
+    if (launch.kind === 'appcontainer'
+      && ([launch.workspaceRoot, launch.tempDirectory].some((path) => path.trim() === '' || path.includes('\0')))) {
+      throw new TypeError('the AppContainer launch description requires workspace and temp directories');
+    }
+    if (launch.kind === 'restricted-token'
+      && ([launch.workspaceRoot, launch.tempDirectory].some((path) => path.trim() === '' || path.includes('\0')))) {
+      throw new TypeError('the restricted-token launch description requires workspace and temp directories');
+    }
   }
   const guardianArguments = [GUARDIAN_LAUNCH_ARGUMENT, JSON.stringify(launch ?? null), '--', executable, ...args];
   const child = fork(fileURLToPath(new URL('./exec-guardian.js', import.meta.url)), guardianArguments, {
@@ -119,6 +125,21 @@ export function spawnWindowsCommand(
               }
             }
           });
+        }
+        return;
+      }
+      if (launch !== undefined && child.connected) {
+        const fallback = setTimeout(() => {
+          if (child.exitCode === null && child.signalCode === null) child.kill();
+        }, 15_000);
+        fallback.unref();
+        child.once('close', () => clearTimeout(fallback));
+        try {
+          child.send({ kind: 'cancel' }, (cause) => {
+            if (cause !== null && child.exitCode === null && child.signalCode === null) child.kill();
+          });
+        } catch {
+          child.kill();
         }
         return;
       }

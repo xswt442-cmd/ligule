@@ -1,16 +1,35 @@
 type Koffi = typeof import('koffi')['default'];
 import type { NativeHandle } from './windows-appcontainer-process.js';
+import { createHash } from 'node:crypto';
+import { mkdir, open, realpath } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import lockfile from 'proper-lockfile';
+import { dataRoot } from '../kernel/config-file.js';
+import { KernelError } from '../kernel/error.js';
 
 export type AppContainerHandle = NativeHandle;
 
 const SE_FILE_OBJECT = 1;
 const DACL_SECURITY_INFORMATION = 0x00000004;
+const LABEL_SECURITY_INFORMATION = 0x00000010;
 const GRANT_ACCESS = 1;
 const REVOKE_ACCESS = 4;
 const TRUSTEE_IS_SID = 0;
 const TRUSTEE_IS_UNKNOWN = 0;
 const OBJECT_AND_CONTAINER_INHERIT = 0x00000003;
 const FILE_GENERIC_READ = 0x00120089;
+const FILE_GENERIC_WRITE = 0x00120116;
+const FILE_GENERIC_EXECUTE = 0x001200a0;
+const DELETE_ACCESS = 0x00010000;
+const FILE_WORKSPACE_MODIFY = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE_ACCESS;
+const SECURITY_MAX_SID_SIZE = 68;
+const ACL_HEADER_SIZE = 8;
+const MANDATORY_ACE_OVERHEAD = 8;
+const ACL_REVISION = 2;
+const SYSTEM_MANDATORY_LABEL_ACE_TYPE = 0x11;
+const SYSTEM_MANDATORY_LABEL_NO_WRITE_UP = 0x00000001;
+const WIN_LOW_LABEL_SID = 66;
+const LOCAL_ALLOC_ZEROED = 0x0040;
 const ACCESS_ALLOWED_ACE_TYPE = 0;
 const ACE_OBJECT_TYPE_PRESENT = 0x00000001;
 const ACE_INHERITED_OBJECT_TYPE_PRESENT = 0x00000002;
@@ -64,10 +83,16 @@ function bindings(koffi: Koffi) {
     getNamedSecurityInfo: bind(advapi, 'GetNamedSecurityInfoW', 'uint32_t', [
       'str16', 'int32_t', 'uint32_t', koffi.pointer(PVOID), koffi.pointer(PVOID), koffi.pointer(PVOID), koffi.pointer(PVOID), koffi.pointer(PVOID),
     ]),
+    convertStringSid: bind(advapi, 'ConvertStringSidToSidW', 'int32_t', ['str16', koffi.pointer(PVOID)]),
+    createWellKnownSid: bind(advapi, 'CreateWellKnownSid', 'int32_t', ['uint32_t', PVOID, PVOID, koffi.pointer('uint32_t')]),
     setEntriesInAcl: bind(advapi, 'SetEntriesInAclW', 'uint32_t', ['uint32_t', koffi.pointer(EXPLICIT_ACCESS_W), PVOID, koffi.pointer(PVOID)]),
     setNamedSecurityInfo: bind(advapi, 'SetNamedSecurityInfoW', 'uint32_t', ['str16', 'int32_t', 'uint32_t', PVOID, PVOID, PVOID, PVOID]),
+    initializeAcl: bind(advapi, 'InitializeAcl', 'int32_t', [PVOID, 'uint32_t', 'uint32_t']),
+    addMandatoryAce: bind(advapi, 'AddMandatoryAce', 'int32_t', [PVOID, 'uint32_t', 'uint32_t', 'uint32_t', PVOID]),
+    localAlloc: bind(kernel, 'LocalAlloc', PVOID, ['uint32_t', 'size_t']),
     equalSid: bind(advapi, 'EqualSid', 'int32_t', [PVOID, PVOID]),
     isValidSid: bind(advapi, 'IsValidSid', 'int32_t', [PVOID]),
+    getLengthSid: bind(advapi, 'GetLengthSid', 'uint32_t', [PVOID]),
     getAclInformation: bind(advapi, 'GetAclInformation', 'int32_t', [PVOID, PVOID, 'uint32_t', 'int32_t']),
     getAce: bind(advapi, 'GetAce', 'int32_t', [PVOID, 'uint32_t', koffi.pointer(PVOID)]),
     localFree: bind(kernel, 'LocalFree', PVOID, [PVOID]),
@@ -109,7 +134,7 @@ function readTargetAces(koffi: Koffi, api: ReturnType<typeof bindings>, dacl: Ap
       const sid = pointerOffset(ace, sidOffset);
       if (api.isValidSid(sid) === 0) throw new Error(`ACE ${index} contains an invalid SID`);
       if (api.equalSid(sid, targetSid) !== 0) {
-        const mask = type === ACCESS_ALLOWED_ACE_TYPE || type === 1 || type === 2 || type === 3
+        const mask = type === ACCESS_ALLOWED_ACE_TYPE || type === 1 || type === 2 || type === 3 || type === SYSTEM_MANDATORY_LABEL_ACE_TYPE
           ? Number(koffi.decode(ace, 4, 'uint32_t'))
           : undefined;
         matches.push({ type, flags, mask, sid });
@@ -150,24 +175,84 @@ function freeNative(api: ReturnType<typeof bindings>, pointer: AppContainerHandl
   if (!isNull(result)) throw new Error(`LocalFree(${operation}) failed`);
 }
 
-async function updateDirectoryReadAce(path: string, sid: AppContainerHandle, action: 'grant' | 'revoke'): Promise<void> {
-  if (process.platform !== 'win32') throw new Error('AppContainer directory ACLs are available only on Windows');
+async function withDirectoryAclLock<T>(path: string, action: () => Promise<T>): Promise<T> {
+  let canonical: string;
+  try { canonical = await realpath(resolve(path)); }
+  catch (cause) { throw new KernelError('exec_acl_path_unavailable', { cause }); }
+  const identity = process.platform === 'win32' ? canonical.toLowerCase() : canonical;
+  const directory = join(dataRoot(), 'locks', 'windows-acl');
+  try { await mkdir(directory, { recursive: true }); }
+  catch (cause) { throw new KernelError('exec_acl_lock_failed', { cause }); }
+  const target = join(directory, `${createHash('sha256').update(identity).digest('hex')}.target`);
+  let handle;
+  try {
+    handle = await open(target, 'a');
+    await handle.close();
+  } catch (cause) {
+    try { await handle?.close(); } catch { /* Keep the original lock-file error. */ }
+    throw new KernelError('exec_acl_lock_failed', { cause });
+  }
+  let release: (() => Promise<void>);
+  try {
+    release = await lockfile.lock(target, {
+      realpath: false,
+      lockfilePath: `${target}.lock`,
+      stale: 10_000,
+      update: 2_000,
+      retries: { retries: 60, factor: 1.2, minTimeout: 10, maxTimeout: 50 },
+    });
+  } catch (cause) {
+    throw new KernelError('exec_acl_lock_failed', { cause });
+  }
+  try { return await action(); }
+  finally {
+    try { await release(); }
+    catch (cause) { throw new KernelError('exec_acl_unlock_failed', { cause }); }
+  }
+}
+
+async function updateDirectoryAce(
+  path: string,
+  sid: AppContainerHandle | string,
+  action: 'grant' | 'revoke',
+  accessMask: number,
+  kind: 'read' | 'workspace-write',
+): Promise<void> {
+  if (process.platform !== 'win32') throw new Error('Windows directory ACLs are available only on Windows');
   if (typeof path !== 'string' || path.trim() === '' || path.includes('\0')) throw new TypeError('directory path must be a non-empty Windows path');
-  if (isNull(sid)) throw new TypeError('AppContainer SID is required');
+  if ((typeof sid !== 'string' && isNull(sid)) || (typeof sid === 'string' && (sid.trim() === '' || sid.includes('\0')))) {
+    throw new TypeError('directory access SID is required');
+  }
   const koffi = (await import('koffi')).default;
   const api = bindings(koffi);
-  const current = readDacl(koffi, api, path);
+  let targetSid: AppContainerHandle;
+  let ownedSid = false;
+  if (typeof sid === 'string') {
+    const sidOut = koffi.alloc(api.PVOID, 1) as Buffer;
+    try {
+      if (api.convertStringSid(sid, sidOut) === 0) throw new Error(`ConvertStringSidToSidW failed with Win32 error ${api.lastError() as number}`);
+      targetSid = koffi.decode(sidOut, api.PVOID) as AppContainerHandle;
+      if (isNull(targetSid)) throw new Error('ConvertStringSidToSidW returned a null SID');
+      ownedSid = true;
+    } finally { koffi.free(sidOut); }
+  } else {
+    targetSid = sid;
+  }
+  const canonical = await realpath(resolve(path));
+  try { return await withDirectoryAclLock(canonical, async () => {
+  const current = readDacl(koffi, api, canonical);
   let newDacl: AppContainerHandle | undefined;
   let primaryError: unknown;
   try {
-    const matches = readTargetAces(koffi, api, current.dacl, sid);
+    const matches = readTargetAces(koffi, api, current.dacl, targetSid);
     if (action === 'grant' && matches.length !== 0) {
-      throw new Error('target SID already has an ACE; refusing to alter pre-existing permissions');
+      throw new Error(`target SID already has an ACE; refusing to alter pre-existing ${kind} permissions`);
     }
     if (action === 'revoke') {
+      if (matches.length === 0) return;
       if (matches.length !== 1) throw new Error(`expected exactly one target SID ACE before revoke, found ${matches.length}`);
       const [match] = matches;
-      if (match?.type !== ACCESS_ALLOWED_ACE_TYPE || match.mask !== FILE_GENERIC_READ || match.flags !== OBJECT_AND_CONTAINER_INHERIT) {
+      if (match?.type !== ACCESS_ALLOWED_ACE_TYPE || match.mask !== accessMask || match.flags !== OBJECT_AND_CONTAINER_INHERIT) {
         throw new Error('target SID ACE changed; refusing to revoke a modified permission');
       }
     }
@@ -176,16 +261,16 @@ async function updateDirectoryReadAce(path: string, sid: AppContainerHandle, act
     let daclOut = koffi.alloc(api.PVOID, 1) as Buffer;
     try {
       koffi.encode(entry, api.EXPLICIT_ACCESS_W, {
-        grfAccessPermissions: action === 'grant' ? FILE_GENERIC_READ : 0,
+        grfAccessPermissions: action === 'grant' ? accessMask : 0,
         grfAccessMode: action === 'grant' ? GRANT_ACCESS : REVOKE_ACCESS,
         grfInheritance: OBJECT_AND_CONTAINER_INHERIT,
-        Trustee: { pMultipleTrustee: 0n, MultipleTrusteeOperation: 0, TrusteeForm: TRUSTEE_IS_SID, TrusteeType: TRUSTEE_IS_UNKNOWN, ptstrName: sid },
+        Trustee: { pMultipleTrustee: 0n, MultipleTrusteeOperation: 0, TrusteeForm: TRUSTEE_IS_SID, TrusteeType: TRUSTEE_IS_UNKNOWN, ptstrName: targetSid },
       });
       const mergeResult = api.setEntriesInAcl(1, entry, current.dacl, daclOut);
       if (mergeResult !== 0) throw new Error(`SetEntriesInAclW(${action}) failed with Win32 error ${mergeResult}`);
       newDacl = koffi.decode(daclOut, api.PVOID) as AppContainerHandle;
       if (isNull(newDacl)) throw new Error('SetEntriesInAclW returned a null DACL');
-      const applyResult = api.setNamedSecurityInfo(path, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, 0n, 0n, newDacl, 0n);
+      const applyResult = api.setNamedSecurityInfo(canonical, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, 0n, 0n, newDacl, 0n);
       if (applyResult !== 0) throw new Error(`SetNamedSecurityInfoW(${action}) failed with Win32 error ${applyResult}`);
     } finally {
       freeNative(api, newDacl, 'merged DACL');
@@ -194,13 +279,13 @@ async function updateDirectoryReadAce(path: string, sid: AppContainerHandle, act
       koffi.free(entry);
     }
 
-    const updated = readDacl(koffi, api, path);
+      const updated = readDacl(koffi, api, canonical);
     try {
-      const updatedMatches = readTargetAces(koffi, api, updated.dacl, sid);
+      const updatedMatches = readTargetAces(koffi, api, updated.dacl, targetSid);
       if (action === 'grant') {
         if (updatedMatches.length !== 1 || updatedMatches[0]?.type !== ACCESS_ALLOWED_ACE_TYPE
-          || updatedMatches[0].mask !== FILE_GENERIC_READ || updatedMatches[0].flags !== OBJECT_AND_CONTAINER_INHERIT) {
-          throw new Error('target SID read ACE did not match the requested permission after grant');
+          || updatedMatches[0].mask !== accessMask || updatedMatches[0].flags !== OBJECT_AND_CONTAINER_INHERIT) {
+          throw new Error(`target SID ${kind} ACE did not match the requested permission after grant`);
         }
       } else if (updatedMatches.length !== 0) {
         throw new Error('target SID ACE remained after revoke');
@@ -221,12 +306,170 @@ async function updateDirectoryReadAce(path: string, sid: AppContainerHandle, act
       throw new AggregateError(primaryError === undefined ? cleanupErrors : [primaryError, ...cleanupErrors], 'AppContainer directory ACL cleanup failed');
     }
   }
+  }); }
+  finally {
+    if (ownedSid) freeNative(api, targetSid!, 'converted SID');
+  }
 }
 
 export async function grantAppContainerDirectoryRead(path: string, sid: AppContainerHandle): Promise<void> {
-  await updateDirectoryReadAce(path, sid, 'grant');
+  await updateDirectoryAce(path, sid, 'grant', FILE_GENERIC_READ, 'read');
 }
 
 export async function revokeAppContainerDirectoryRead(path: string, sid: AppContainerHandle): Promise<void> {
-  await updateDirectoryReadAce(path, sid, 'revoke');
+  await updateDirectoryAce(path, sid, 'revoke', FILE_GENERIC_READ, 'read');
+}
+
+export async function grantRestrictedDirectoryWrite(path: string, sid: AppContainerHandle | string): Promise<void> {
+  await updateDirectoryAce(path, sid, 'grant', FILE_WORKSPACE_MODIFY, 'workspace-write');
+}
+
+export async function revokeRestrictedDirectoryWrite(path: string, sid: AppContainerHandle | string): Promise<void> {
+  await updateDirectoryAce(path, sid, 'revoke', FILE_WORKSPACE_MODIFY, 'workspace-write');
+}
+
+function lowIntegritySid(koffi: Koffi, api: ReturnType<typeof bindings>): Buffer {
+  const sid = koffi.alloc('uint8_t', SECURITY_MAX_SID_SIZE) as Buffer;
+  const size = koffi.alloc('uint32_t', 1) as Buffer;
+  try {
+    koffi.encode(size, 'uint32_t', SECURITY_MAX_SID_SIZE);
+    if (api.createWellKnownSid(WIN_LOW_LABEL_SID, 0n, sid, size) === 0) {
+      throw new Error(`CreateWellKnownSid(Low Integrity) failed with Win32 error ${api.lastError() as number}`);
+    }
+    if (api.isValidSid(sid) === 0) throw new Error('CreateWellKnownSid(Low Integrity) returned an invalid SID');
+    return sid;
+  } catch (error) {
+    koffi.free(sid);
+    throw error;
+  } finally {
+    koffi.free(size);
+  }
+}
+
+function readLabelAcl(koffi: Koffi, api: ReturnType<typeof bindings>, path: string): { acl: AppContainerHandle | null; descriptor: AppContainerHandle } {
+  const outputs = Array.from({ length: 5 }, () => koffi.alloc(api.PVOID, 1) as Buffer);
+  const [owner, group, dacl, sacl, descriptorOut] = outputs;
+  try {
+    const result = api.getNamedSecurityInfo(path, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, owner, group, dacl, sacl, descriptorOut);
+    if (result !== 0) throw new Error(`GetNamedSecurityInfoW(label) failed with Win32 error ${result}`);
+    const acl = koffi.decode(sacl, api.PVOID) as AppContainerHandle;
+    const descriptor = koffi.decode(descriptorOut, api.PVOID) as AppContainerHandle;
+    if (isNull(descriptor)) throw new Error('GetNamedSecurityInfoW(label) returned a null security descriptor');
+    return { acl: isNull(acl) ? null : acl, descriptor };
+  } finally {
+    for (const output of outputs) koffi.free(output);
+  }
+}
+
+function aceCount(koffi: Koffi, api: ReturnType<typeof bindings>, acl: AppContainerHandle): number {
+  const infoType = api.ACL_SIZE_INFORMATION;
+  const info = koffi.alloc(infoType, 1) as Buffer;
+  try {
+    if (api.getAclInformation(acl, info, koffi.sizeof(infoType), 2) === 0) {
+      throw new Error(`GetAclInformation(label) failed with Win32 error ${api.lastError() as number}`);
+    }
+    return Number(koffi.decode(info, 'uint32_t'));
+  } finally { koffi.free(info); }
+}
+
+async function addLowIntegrityLabel(path: string): Promise<void> {
+  const koffi = (await import('koffi')).default;
+  const api = bindings(koffi);
+  const lowSid = lowIntegritySid(koffi, api);
+  const lowSidPointer = koffi.address(lowSid) as AppContainerHandle;
+  let current: ReturnType<typeof readLabelAcl> | undefined;
+  let labelAcl: AppContainerHandle | undefined;
+  let primaryError: unknown;
+  try {
+    current = await withDirectoryAclLock(path, async () => readLabelAcl(koffi, api, path));
+    if (current.acl !== null && aceCount(koffi, api, current.acl) > 0) {
+      throw new Error('the private temp directory already has a mandatory label; refusing to replace it');
+    }
+    const sidLength = Number(api.getLengthSid(lowSidPointer));
+    if (sidLength <= 0) throw new Error('GetLengthSid(Low Integrity) returned an invalid size');
+    const aclLength = ACL_HEADER_SIZE + MANDATORY_ACE_OVERHEAD + sidLength;
+    labelAcl = api.localAlloc(LOCAL_ALLOC_ZEROED, aclLength) as AppContainerHandle;
+    if (isNull(labelAcl)) throw new Error(`LocalAlloc(label ACL) failed with Win32 error ${api.lastError() as number}`);
+    if (api.initializeAcl(labelAcl, aclLength, ACL_REVISION) === 0) {
+      throw new Error(`InitializeAcl(label) failed with Win32 error ${api.lastError() as number}`);
+    }
+    if (api.addMandatoryAce(labelAcl, ACL_REVISION, OBJECT_AND_CONTAINER_INHERIT, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, lowSidPointer) === 0) {
+      throw new Error(`AddMandatoryAce(Low Integrity) failed with Win32 error ${api.lastError() as number}`);
+    }
+    await withDirectoryAclLock(path, async () => {
+      const latest = readLabelAcl(koffi, api, path);
+      try {
+        if (latest.acl !== null && aceCount(koffi, api, latest.acl) > 0) {
+          throw new Error('the private temp directory label changed before grant');
+        }
+      } finally { freeNative(api, latest.descriptor, 'temp label descriptor'); }
+      const result = api.setNamedSecurityInfo(path, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, 0n, 0n, 0n, labelAcl);
+      if (result !== 0) throw new Error(`SetNamedSecurityInfoW(label grant) failed with Win32 error ${result}`);
+    });
+    const updated = await withDirectoryAclLock(path, async () => readLabelAcl(koffi, api, path));
+    try {
+      if (updated.acl === null) throw new Error('the Low Integrity label is missing after grant');
+      const matches = readTargetAces(koffi, api, updated.acl, lowSidPointer);
+      if (matches.length !== 1 || matches[0]?.type !== SYSTEM_MANDATORY_LABEL_ACE_TYPE
+        || matches[0].mask !== SYSTEM_MANDATORY_LABEL_NO_WRITE_UP || matches[0].flags !== OBJECT_AND_CONTAINER_INHERIT) {
+        throw new Error('the Low Integrity label does not match the temporary write permission');
+      }
+    } finally { freeNative(api, updated.descriptor, 'updated temp label descriptor'); }
+  } catch (error) {
+    primaryError = error;
+    throw error;
+  } finally {
+    const failures: unknown[] = [];
+    try { freeNative(api, labelAcl, 'temporary Low Integrity ACL'); }
+    catch (error) { failures.push(error); }
+    if (current !== undefined) {
+      try { freeNative(api, current.descriptor, 'original temp label descriptor'); }
+      catch (error) { failures.push(error); }
+    }
+    try { koffi.free(lowSid); }
+    catch (error) { failures.push(error); }
+    if (failures.length > 0) throw new AggregateError(primaryError === undefined ? failures : [primaryError, ...failures], 'temporary Low Integrity label cleanup failed');
+  }
+}
+
+async function removeLowIntegrityLabel(path: string): Promise<void> {
+  const koffi = (await import('koffi')).default;
+  const api = bindings(koffi);
+  const lowSid = lowIntegritySid(koffi, api);
+  const lowSidPointer = koffi.address(lowSid) as AppContainerHandle;
+  try {
+    await withDirectoryAclLock(path, async () => {
+      const current = readLabelAcl(koffi, api, path);
+      try {
+        if (current.acl === null) return;
+        const matches = readTargetAces(koffi, api, current.acl, lowSidPointer);
+        if (aceCount(koffi, api, current.acl) !== 1 || matches.length !== 1
+          || matches[0]?.type !== SYSTEM_MANDATORY_LABEL_ACE_TYPE
+          || matches[0].mask !== SYSTEM_MANDATORY_LABEL_NO_WRITE_UP
+          || matches[0].flags !== OBJECT_AND_CONTAINER_INHERIT) {
+          throw new Error('the temp mandatory label changed; refusing to remove it');
+        }
+        const result = api.setNamedSecurityInfo(path, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, 0n, 0n, 0n, 0n);
+        if (result !== 0) throw new Error(`SetNamedSecurityInfoW(label revoke) failed with Win32 error ${result}`);
+      } finally { freeNative(api, current.descriptor, 'temp label descriptor'); }
+    });
+  } finally { koffi.free(lowSid); }
+}
+
+export async function grantAppContainerTempDirectoryWrite(path: string, sid: AppContainerHandle): Promise<void> {
+  await grantRestrictedDirectoryWrite(path, sid);
+  try { await addLowIntegrityLabel(path); }
+  catch (error) {
+    await revokeRestrictedDirectoryWrite(path, sid).catch(() => {});
+    throw error;
+  }
+}
+
+export async function revokeAppContainerTempDirectoryWrite(path: string, sid: AppContainerHandle): Promise<void> {
+  const failures: unknown[] = [];
+  try { await removeLowIntegrityLabel(path); }
+  catch (error) { failures.push(error); }
+  try { await revokeRestrictedDirectoryWrite(path, sid); }
+  catch (error) { failures.push(error); }
+  if (failures.length > 0) throw new AggregateError(failures, 'AppContainer temp directory ACL cleanup failed');
 }

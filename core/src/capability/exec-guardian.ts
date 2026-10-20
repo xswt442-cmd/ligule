@@ -3,23 +3,22 @@ import { spawn } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { KernelError } from '../kernel/error.js';
 import {
-  deriveAppContainerSid,
-  freeAppContainerSid,
+  createAppContainerProfile,
   runAppContainerCommand,
   type AppContainerProfile,
-  type NativeHandle,
 } from './windows-appcontainer-process.js';
 import { createOwnedProcessJob, type OwnedProcessJob } from './win32-job.js';
-
-interface AppContainerLaunch {
-  readonly kind: 'appcontainer';
-  readonly profileName: string;
-}
+import {
+  grantAppContainerDirectoryRead, grantRestrictedDirectoryWrite, grantAppContainerTempDirectoryWrite,
+  revokeAppContainerDirectoryRead, revokeRestrictedDirectoryWrite, revokeAppContainerTempDirectoryWrite,
+} from './windows-appcontainer-acl.js';
+import { randomWorkspaceRestrictedSid, runRestrictedWindowsCommand } from './windows-restricted-process.js';
+import type { WindowsCommandLaunch } from './windows-command.js';
 
 interface GuardianStartup {
   readonly executable: string;
   readonly args: readonly string[];
-  readonly launch: AppContainerLaunch | undefined;
+  readonly launch: WindowsCommandLaunch | undefined;
 }
 
 const GUARDIAN_LAUNCH_ARGUMENT = '--ligule-guardian-launch-v1';
@@ -44,15 +43,26 @@ function parseGuardianStartup(argv: readonly string[]): GuardianStartup {
   } catch (cause) {
     throw new Error('exec_guardian_startup_protocol', { cause });
   }
-  let launch: AppContainerLaunch | undefined;
+  let launch: WindowsCommandLaunch | undefined;
   if (launchValue !== null) {
-    if (typeof launchValue !== 'object' || launchValue === null
-      || !('kind' in launchValue) || launchValue.kind !== 'appcontainer'
-      || !('profileName' in launchValue) || typeof launchValue.profileName !== 'string'
-      || launchValue.profileName.trim() === '' || launchValue.profileName.includes('\0')) {
+    if (typeof launchValue !== 'object' || launchValue === null || !('kind' in launchValue)) {
       throw new Error('exec_guardian_startup_protocol');
     }
-    launch = { kind: 'appcontainer', profileName: launchValue.profileName };
+    if (launchValue.kind === 'appcontainer'
+      && 'workspaceRoot' in launchValue && typeof launchValue.workspaceRoot === 'string'
+      && launchValue.workspaceRoot.trim() !== '' && !launchValue.workspaceRoot.includes('\0')
+      && 'tempDirectory' in launchValue && typeof launchValue.tempDirectory === 'string'
+      && launchValue.tempDirectory.trim() !== '' && !launchValue.tempDirectory.includes('\0')) {
+      launch = { kind: 'appcontainer', workspaceRoot: launchValue.workspaceRoot, tempDirectory: launchValue.tempDirectory };
+    } else if (launchValue.kind === 'restricted-token'
+      && 'workspaceRoot' in launchValue && typeof launchValue.workspaceRoot === 'string'
+      && launchValue.workspaceRoot.trim() !== '' && !launchValue.workspaceRoot.includes('\0')
+      && 'tempDirectory' in launchValue && typeof launchValue.tempDirectory === 'string'
+      && launchValue.tempDirectory.trim() !== '' && !launchValue.tempDirectory.includes('\0')) {
+      launch = { kind: 'restricted-token', workspaceRoot: launchValue.workspaceRoot, tempDirectory: launchValue.tempDirectory };
+    } else {
+      throw new Error('exec_guardian_startup_protocol');
+    }
   }
   const executable = argv[3];
   if (executable === undefined || executable === '' || executable.includes('\0')) throw new Error('exec_guardian_executable_required');
@@ -87,12 +97,18 @@ process.on('message', (message: unknown) => {
 
 async function runAppContainer(startup: GuardianStartup): Promise<void> {
   const launch = startup.launch;
-  if (launch === undefined) throw new Error('AppContainer launch description is required');
-  let sid: NativeHandle | undefined;
+  if (launch === undefined || launch.kind !== 'appcontainer') throw new Error('AppContainer launch description is required');
+  let profile: AppContainerProfile | undefined;
+  let workspaceReadGranted = false;
+  let tempWriteGranted = false;
   let outcome: object;
   let primaryError: unknown;
   try {
-    sid = await deriveAppContainerSid(launch.profileName);
+    profile = await createAppContainerProfile();
+    workspaceReadGranted = true;
+    await grantAppContainerDirectoryRead(launch.workspaceRoot, profile.sid);
+    tempWriteGranted = true;
+    await grantAppContainerTempDirectoryWrite(launch.tempDirectory, profile.sid);
     if (disconnected || !process.connected) throw new KernelError('exec_cancelled', { detail: 'the owned command tree was terminated' });
     process.send?.({ kind: 'ready', processId: process.pid });
     const exitCode = await runAppContainerCommand({
@@ -100,7 +116,8 @@ async function runAppContainer(startup: GuardianStartup): Promise<void> {
       argv: startup.args,
       cwd: process.cwd(),
       environment: process.env,
-      identity: { name: launch.profileName, sid } as AppContainerProfile,
+      identity: profile,
+      assignToJob: job === undefined ? undefined : (processHandle) => job!.assign(processHandle),
     });
     if (cancelled || disconnected) {
       outcome = { kind: 'error', code: 'exec_cancelled', detail: 'the owned command tree was terminated' };
@@ -116,21 +133,79 @@ async function runAppContainer(startup: GuardianStartup): Promise<void> {
       detail: failure.detail ?? failure.message,
     };
   } finally {
-    if (sid !== undefined) {
-      try {
-        await freeAppContainerSid(sid);
-      } catch (error) {
-        const cleanupDetail = `AppContainer SID cleanup failed: ${(error as Error).message}`;
-        if (primaryError !== undefined) {
-          outcome = {
-            kind: 'error',
-            code: 'exec_guardian_failed',
-            detail: `${(primaryError as Error).message}; ${cleanupDetail}`,
-          };
-        } else {
-          outcome = { kind: 'error', code: 'exec_guardian_failed', detail: cleanupDetail };
-        }
-      }
+    const cleanupErrors: string[] = [];
+    if (profile !== undefined && tempWriteGranted) {
+      try { await revokeAppContainerTempDirectoryWrite(launch.tempDirectory, profile.sid); }
+      catch (error) { cleanupErrors.push(`temp ACL: ${(error as Error).message}`); }
+    }
+    if (profile !== undefined && workspaceReadGranted) {
+      try { await revokeAppContainerDirectoryRead(launch.workspaceRoot, profile.sid); }
+      catch (error) { cleanupErrors.push(`workspace ACL: ${(error as Error).message}`); }
+    }
+    if (profile !== undefined) {
+      try { await profile.dispose(); }
+      catch (error) { cleanupErrors.push(`profile: ${(error as Error).message}`); }
+    }
+    if (cleanupErrors.length > 0) {
+      outcome = {
+        kind: 'error',
+        code: 'exec_sandbox_cleanup_failed',
+        detail: [primaryError instanceof Error ? primaryError.message : undefined, ...cleanupErrors].filter(Boolean).join('; '),
+      };
+    }
+  }
+  finish(outcome);
+}
+
+async function runRestrictedToken(startup: GuardianStartup): Promise<void> {
+  const launch = startup.launch;
+  if (launch === undefined || launch.kind !== 'restricted-token') throw new Error('restricted-token launch description is required');
+  const writeSid = randomWorkspaceRestrictedSid();
+  let workspaceGrant = false;
+  let tempGrant = false;
+  let outcome: object;
+  let primaryError: unknown;
+  try {
+    workspaceGrant = true;
+    await grantRestrictedDirectoryWrite(launch.workspaceRoot, writeSid);
+    tempGrant = true;
+    await grantRestrictedDirectoryWrite(launch.tempDirectory, writeSid);
+    if (disconnected || !process.connected) throw new KernelError('exec_cancelled', { detail: 'the owned command tree was terminated' });
+    process.send?.({ kind: 'ready', processId: process.pid });
+    const exitCode = await runRestrictedWindowsCommand({
+      executable: startup.executable,
+      argv: startup.args,
+      cwd: process.cwd(),
+      writeSid,
+      job: job!,
+    });
+    outcome = cancelled || disconnected
+      ? { kind: 'error', code: 'exec_cancelled', detail: 'the owned command tree was terminated' }
+      : { kind: 'exit', exitCode };
+  } catch (error) {
+    primaryError = error;
+    const failure = error as Error & { code?: string; detail?: string };
+    outcome = {
+      kind: 'error',
+      code: failure.code === 'exec_cancelled' ? 'exec_cancelled' : 'exec_guardian_failed',
+      detail: failure.detail ?? failure.message,
+    };
+  } finally {
+    const cleanupErrors: string[] = [];
+    if (tempGrant) {
+      try { await revokeRestrictedDirectoryWrite(launch.tempDirectory, writeSid); }
+      catch (error) { cleanupErrors.push(`temp ACL: ${(error as Error).message}`); }
+    }
+    if (workspaceGrant) {
+      try { await revokeRestrictedDirectoryWrite(launch.workspaceRoot, writeSid); }
+      catch (error) { cleanupErrors.push(`workspace ACL: ${(error as Error).message}`); }
+    }
+    if (cleanupErrors.length > 0) {
+      outcome = {
+        kind: 'error',
+        code: 'exec_sandbox_cleanup_failed',
+        detail: [primaryError instanceof Error ? primaryError.message : undefined, ...cleanupErrors].filter(Boolean).join('; '),
+      };
     }
   }
   finish(outcome);
@@ -221,7 +296,7 @@ function finish(message: object): void {
 try {
   if (process.send === undefined) throw new Error('exec_guardian_ipc_required');
   const startup = parseGuardianStartup(process.argv.slice(2));
-  if (process.platform === 'win32') job = await createOwnedProcessJob();
+  if (process.platform === 'win32') job = await createOwnedProcessJob({ assignCurrentProcess: startup.launch === undefined });
   else if (process.platform === 'linux') await enableLinuxSubreaper();
   else throw new Error('exec_process_ownership_unavailable');
   if (disconnected || !process.connected) {
@@ -232,7 +307,8 @@ try {
   }
   if (startup.launch !== undefined) {
     if (process.platform !== 'win32') throw new Error('exec_process_ownership_unavailable');
-    await runAppContainer(startup);
+    if (startup.launch.kind === 'appcontainer') await runAppContainer(startup);
+    else await runRestrictedToken(startup);
   } else {
     process.send({ kind: 'ready', processId: process.pid });
     const child = spawn(startup.executable, startup.args, {

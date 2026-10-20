@@ -185,6 +185,7 @@ export interface AppContainerCommand {
   readonly cwd: string;
   readonly identity: AppContainerProfile;
   readonly environment: NodeJS.ProcessEnv;
+  readonly assignToJob?: (processHandle: NativeHandle) => void;
 }
 
 /** Launch in the Guardian's inherited Job and wait without blocking its IPC event loop. */
@@ -251,6 +252,7 @@ export async function runAppContainerCommand(command: AppContainerCommand): Prom
     processHandle = nativeHandle(koffi, processValues.hProcess);
     threadHandle = nativeHandle(koffi, processValues.hThread);
     if (isNull(processHandle) || isNull(threadHandle)) throw new Error('CreateProcessW returned a null process or thread handle');
+    command.assignToJob?.(processHandle);
     const inJob = allocate('int32_t', 1) as Buffer;
     if ((api.isProcessInJob(processHandle, NULL, inJob) as number) === 0) throw new Error(`IsProcessInJob failed with Win32 error ${api.lastError() as number}`);
     if (koffi.decode(inJob, 'int32_t') !== 1) throw new Error('the AppContainer process is outside the Guardian Job');

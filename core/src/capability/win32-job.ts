@@ -7,10 +7,11 @@ const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9;
 const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
 
 export interface OwnedProcessJob {
+  assign(processHandle: NativeHandle): void;
   close(): void;
 }
 
-export async function createOwnedProcessJob(): Promise<OwnedProcessJob> {
+export async function createOwnedProcessJob(options: { assignCurrentProcess?: boolean } = {}): Promise<OwnedProcessJob> {
   if (process.platform !== 'win32') throw new KernelError('exec_job_platform');
   const koffi = (await import('koffi')).default;
   const kernel = koffi.load('kernel32.dll');
@@ -50,7 +51,8 @@ export async function createOwnedProcessJob(): Promise<OwnedProcessJob> {
   const failed = (operation: string, code: number) => new KernelError('exec_job_failed', { detail: `${operation} failed with Win32 error ${code}` });
   const handle = createJob(null, null);
   if (handle === 0 || handle === 0n) throw failed('CreateJobObjectW', lastError());
-  let joined = false;
+  let ready = false;
+  let closed = false;
   try {
     const configured = setInformation(handle, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, {
       BasicLimitInformation: {
@@ -78,14 +80,22 @@ export async function createOwnedProcessJob(): Promise<OwnedProcessJob> {
       PeakJobMemoryUsed: 0,
     }, koffi.sizeof(extended));
     if (configured === 0) throw failed('SetInformationJobObject', lastError());
-    if (assignProcess(handle, currentProcess()) === 0) throw failed('AssignProcessToJobObject', lastError());
-    joined = true;
+    if (options.assignCurrentProcess !== false && assignProcess(handle, currentProcess()) === 0) {
+      throw failed('AssignProcessToJobObject', lastError());
+    }
+    ready = true;
   } finally {
-    if (!joined && closeHandle(handle) === 0) throw failed('CloseHandle', lastError());
+    if (!ready && closeHandle(handle) === 0) throw failed('CloseHandle', lastError());
   }
   return {
+    assign(processHandle) {
+      if (closed) throw failed('AssignProcessToJobObject', 6);
+      if (assignProcess(handle, processHandle) === 0) throw failed('AssignProcessToJobObject', lastError());
+    },
     close() {
       // 关闭最后一个句柄会终止整个 Job，包括当前守护进程。
+      if (closed) return;
+      closed = true;
       if (closeHandle(handle) === 0) throw failed('CloseHandle', lastError());
     },
   };
