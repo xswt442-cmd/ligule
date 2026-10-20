@@ -9,13 +9,25 @@ export interface OwnedWindowsCommand {
   cancel(): void;
 }
 
+export interface WindowsCommandLaunch {
+  readonly kind: 'appcontainer';
+  readonly profileName: string;
+}
+
+const GUARDIAN_LAUNCH_ARGUMENT = '--ligule-guardian-launch-v1';
+
 export function spawnWindowsCommand(
   executable: string,
   args: readonly string[],
   cwd: string,
   environment?: NodeJS.ProcessEnv,
+  launch?: WindowsCommandLaunch,
 ): OwnedWindowsCommand {
-  const child = fork(fileURLToPath(new URL('./exec-guardian.js', import.meta.url)), [executable, ...args], {
+  if (launch !== undefined && (launch.kind !== 'appcontainer' || launch.profileName.trim() === '' || launch.profileName.includes('\0'))) {
+    throw new TypeError('the AppContainer launch description requires a non-empty profile name without NUL characters');
+  }
+  const guardianArguments = [GUARDIAN_LAUNCH_ARGUMENT, JSON.stringify(launch ?? null), '--', executable, ...args];
+  const child = fork(fileURLToPath(new URL('./exec-guardian.js', import.meta.url)), guardianArguments, {
     cwd,
     windowsHide: true,
     execArgv: [],

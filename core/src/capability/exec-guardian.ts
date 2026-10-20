@@ -2,12 +2,62 @@
 import { spawn } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { KernelError } from '../kernel/error.js';
+import {
+  deriveAppContainerSid,
+  freeAppContainerSid,
+  runAppContainerCommand,
+  type AppContainerProfile,
+  type NativeHandle,
+} from './windows-appcontainer-process.js';
 import { createOwnedProcessJob, type OwnedProcessJob } from './win32-job.js';
+
+interface AppContainerLaunch {
+  readonly kind: 'appcontainer';
+  readonly profileName: string;
+}
+
+interface GuardianStartup {
+  readonly executable: string;
+  readonly args: readonly string[];
+  readonly launch: AppContainerLaunch | undefined;
+}
+
+const GUARDIAN_LAUNCH_ARGUMENT = '--ligule-guardian-launch-v1';
 
 let job: OwnedProcessJob | undefined;
 let disconnected = !process.connected;
+let cancelled = false;
 let finishing = false;
 let linuxCleanup: Promise<void> | undefined;
+
+function parseGuardianStartup(argv: readonly string[]): GuardianStartup {
+  if (argv[0] !== GUARDIAN_LAUNCH_ARGUMENT) {
+    const [executable, ...args] = argv;
+    if (executable === undefined || executable === '') throw new Error('exec_guardian_executable_required');
+    return { executable, args, launch: undefined };
+  }
+  const serializedLaunch = argv[1];
+  if (serializedLaunch === undefined || argv[2] !== '--') throw new Error('exec_guardian_startup_protocol');
+  let launchValue: unknown;
+  try {
+    launchValue = JSON.parse(serializedLaunch) as unknown;
+  } catch (cause) {
+    throw new Error('exec_guardian_startup_protocol', { cause });
+  }
+  let launch: AppContainerLaunch | undefined;
+  if (launchValue !== null) {
+    if (typeof launchValue !== 'object' || launchValue === null
+      || !('kind' in launchValue) || launchValue.kind !== 'appcontainer'
+      || !('profileName' in launchValue) || typeof launchValue.profileName !== 'string'
+      || launchValue.profileName.trim() === '' || launchValue.profileName.includes('\0')) {
+      throw new Error('exec_guardian_startup_protocol');
+    }
+    launch = { kind: 'appcontainer', profileName: launchValue.profileName };
+  }
+  const executable = argv[3];
+  if (executable === undefined || executable === '' || executable.includes('\0')) throw new Error('exec_guardian_executable_required');
+  return { executable, args: argv.slice(4), launch };
+}
 
 function cleanupOwnedDescendants(): Promise<void> {
   if (process.platform !== 'linux') return Promise.resolve();
@@ -29,8 +79,62 @@ function stop(): void {
 process.once('disconnect', stop);
 if (process.platform === 'linux') process.once('SIGTERM', stop);
 process.on('message', (message: unknown) => {
-  if (typeof message === 'object' && message !== null && 'kind' in message && message.kind === 'cancel') stop();
+  if (typeof message === 'object' && message !== null && 'kind' in message && message.kind === 'cancel') {
+    cancelled = true;
+    stop();
+  }
 });
+
+async function runAppContainer(startup: GuardianStartup): Promise<void> {
+  const launch = startup.launch;
+  if (launch === undefined) throw new Error('AppContainer launch description is required');
+  let sid: NativeHandle | undefined;
+  let outcome: object;
+  let primaryError: unknown;
+  try {
+    sid = await deriveAppContainerSid(launch.profileName);
+    if (disconnected || !process.connected) throw new KernelError('exec_cancelled', { detail: 'the owned command tree was terminated' });
+    process.send?.({ kind: 'ready', processId: process.pid });
+    const exitCode = await runAppContainerCommand({
+      executable: startup.executable,
+      argv: startup.args,
+      cwd: process.cwd(),
+      environment: process.env,
+      identity: { name: launch.profileName, sid } as AppContainerProfile,
+    });
+    if (cancelled || disconnected) {
+      outcome = { kind: 'error', code: 'exec_cancelled', detail: 'the owned command tree was terminated' };
+    } else {
+      outcome = { kind: 'exit', exitCode };
+    }
+  } catch (error) {
+    primaryError = error;
+    const failure = error as Error & { code?: string; detail?: string };
+    outcome = {
+      kind: 'error',
+      code: failure.code === 'exec_cancelled' ? 'exec_cancelled' : 'exec_guardian_failed',
+      detail: failure.detail ?? failure.message,
+    };
+  } finally {
+    if (sid !== undefined) {
+      try {
+        await freeAppContainerSid(sid);
+      } catch (error) {
+        const cleanupDetail = `AppContainer SID cleanup failed: ${(error as Error).message}`;
+        if (primaryError !== undefined) {
+          outcome = {
+            kind: 'error',
+            code: 'exec_guardian_failed',
+            detail: `${(primaryError as Error).message}; ${cleanupDetail}`,
+          };
+        } else {
+          outcome = { kind: 'error', code: 'exec_guardian_failed', detail: cleanupDetail };
+        }
+      }
+    }
+  }
+  finish(outcome);
+}
 
 function linuxDescendants(): Array<{ pid: number; state: string }> {
   const parents = new Map<number, Array<{ pid: number; state: string }>>();
@@ -116,8 +220,7 @@ function finish(message: object): void {
 
 try {
   if (process.send === undefined) throw new Error('exec_guardian_ipc_required');
-  const [executable, ...args] = process.argv.slice(2);
-  if (executable === undefined || executable === '') throw new Error('exec_guardian_executable_required');
+  const startup = parseGuardianStartup(process.argv.slice(2));
   if (process.platform === 'win32') job = await createOwnedProcessJob();
   else if (process.platform === 'linux') await enableLinuxSubreaper();
   else throw new Error('exec_process_ownership_unavailable');
@@ -127,20 +230,25 @@ try {
     await cleanupOwnedDescendants();
     process.exit(1);
   }
-  process.send({ kind: 'ready', processId: process.pid });
-  const child = spawn(executable, args, {
-    cwd: process.cwd(),
-    env: process.env,
-    windowsHide: true,
-    stdio: ['ignore', 'inherit', 'inherit'],
-  });
-  child.once('error', (error) => finish({ kind: 'error', code: 'exec_spawn_failed', detail: error.message }));
-  child.once('close', (exitCode, signal) => {
-    void cleanupOwnedDescendants().then(() => {
-      if (exitCode === null) finish({ kind: 'error', code: 'exec_process_interrupted', detail: `the command ended with signal ${signal}` });
-      else finish({ kind: 'exit', exitCode });
-    }).catch((error) => finish({ kind: 'error', code: 'exec_terminate_failed', detail: (error as Error).message }));
-  });
+  if (startup.launch !== undefined) {
+    if (process.platform !== 'win32') throw new Error('exec_process_ownership_unavailable');
+    await runAppContainer(startup);
+  } else {
+    process.send({ kind: 'ready', processId: process.pid });
+    const child = spawn(startup.executable, startup.args, {
+      cwd: process.cwd(),
+      env: process.env,
+      windowsHide: true,
+      stdio: ['ignore', 'inherit', 'inherit'],
+    });
+    child.once('error', (error) => finish({ kind: 'error', code: 'exec_spawn_failed', detail: error.message }));
+    child.once('close', (exitCode, signal) => {
+      void cleanupOwnedDescendants().then(() => {
+        if (exitCode === null) finish({ kind: 'error', code: 'exec_process_interrupted', detail: `the command ended with signal ${signal}` });
+        else finish({ kind: 'exit', exitCode });
+      }).catch((error) => finish({ kind: 'error', code: 'exec_terminate_failed', detail: (error as Error).message }));
+    });
+  }
 } catch (error) {
   const failure = error as Error & { code?: string; detail?: string };
   finish({ kind: 'error', code: failure.code ?? 'exec_job_failed', detail: failure.detail ?? failure.message });
