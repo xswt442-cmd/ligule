@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import { chmod, lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
 import { homedir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { dataRoot } from '../kernel/config-file.js';
 import { KernelError } from '../kernel/error.js';
 
@@ -146,7 +146,7 @@ export function createAgentControlRuntime(
   const token = randomBytes(32).toString('base64url');
   const endpoint = process.platform === 'win32'
     ? `\\\\.\\pipe\\ligule-agent-control-${randomUUID()}`
-    : join(directory, `agent-control-${randomUUID()}.sock`);
+    : join(directory, `ac-${randomUUID().replaceAll('-', '')}.sock`);
   const sessions = new Set<string>();
   let server: Server | undefined;
   let serverClosed: Promise<void> | undefined;
@@ -250,7 +250,9 @@ function readDescriptor(input: unknown): RuntimeDescriptor {
   const value = input as Record<string, unknown>;
   const validEndpoint = process.platform === 'win32'
     ? typeof value.endpoint === 'string' && /^\\\\\.\\pipe\\ligule-agent-control-[0-9a-f-]{36}$/iu.test(value.endpoint)
-    : typeof value.endpoint === 'string' && resolve(value.endpoint).startsWith(`${resolve(runtimeDirectory())}/`);
+    : typeof value.endpoint === 'string'
+      && dirname(resolve(value.endpoint)) === resolve(runtimeDirectory())
+      && /^ac-[a-f0-9]{32}\.sock$/u.test(basename(value.endpoint));
   if (value.version !== 1 || typeof value.sessionId !== 'string' || !SESSION_ID.test(value.sessionId)
     || typeof value.projectRoot !== 'string' || !isAbsolute(value.projectRoot) || !validEndpoint
     || typeof value.token !== 'string' || !/^[A-Za-z0-9_-]{40,48}$/u.test(value.token)

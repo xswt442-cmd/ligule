@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { dataRoot } from '../dist/kernel/config-file.js';
 import { createAgentControlRuntime, requestAgentControl } from '../dist/host/agent-control-runtime.js';
 
 const testplace = resolve('testplace');
@@ -26,6 +29,11 @@ test('a registered local controller accepts scoped status and human actions', as
     });
     try {
       await runtime.register(sessionId);
+      if (process.platform !== 'win32') {
+        const descriptorPath = join(dataRoot(homedir()), 'agent-control-runtime', `${createHash('sha256').update(sessionId).digest('hex')}.json`);
+        const descriptor = JSON.parse(await readFile(descriptorPath, 'utf8'));
+        assert.ok(Buffer.byteLength(descriptor.endpoint, 'utf8') <= 107, 'Unix socket paths must fit sun_path');
+      }
       const response = await requestAgentControl(projectRoot, sessionId, {
         action: 'status', after: 0, limit: 10, waitMs: 0,
       });
