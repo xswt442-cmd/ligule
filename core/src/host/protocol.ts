@@ -3,6 +3,7 @@
 // 参数模式使用 Kernel 支持的子集，客户端和 Host 共用同一份定义。
 import { KernelError } from '../kernel/error.js';
 import { assertSupportedSchema, validateArgs } from '../kernel/schema.js';
+import { DELEGATION_SPEC_SCHEMA, type DelegationSpec } from '../delegation.js';
 
 interface MethodSpec {
   readonly description: string;
@@ -28,6 +29,7 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly fullResults?: boolean;
   readonly before?: number;
   readonly input?: string;
+  readonly delegation?: DelegationSpec;
   readonly directory?: string;
   readonly text?: string;
   readonly provider?: string;
@@ -216,10 +218,14 @@ export const METHODS = Object.freeze({
     }, required: ['sessionId', 'path'] },
   },
   'run.start': {
-    description: 'Send one user input through the loop; events arrive as notifications while it runs',
+    description: 'Send one user input through the loop; an optional delegation output schema requires a validated structured result. Events arrive as notifications while it runs.',
     parameters: {
       type: 'object',
-      properties: { sessionId: SESSION_ID, input: { type: 'string', description: 'the user message for this round' } },
+      properties: {
+        sessionId: SESSION_ID,
+        input: { type: 'string', description: 'the user message for this round' },
+        delegation: DELEGATION_SPEC_SCHEMA,
+      },
       required: ['sessionId', 'input'],
     },
   },

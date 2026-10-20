@@ -202,7 +202,7 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       assert.equal(request.headers.authorization, `Bearer ${apiKey}`);
       const lastUser = body.messages.filter((message) => message.role === 'user').at(-1)?.content ?? '';
-      const inputTags = ['MCP_E2E_DELAYED', 'MCP_E2E_LARGE_', 'MCP_E2E_CANCEL_GATE', 'MCP_E2E_EXEC_BLOCKED', 'MCP_E2E_DISCONNECT_GATE', 'MCP_E2E_APPROVAL_DENIED']
+      const inputTags = ['MCP_E2E_DELAYED', 'MCP_E2E_LARGE_', 'MCP_E2E_CANCEL_GATE', 'MCP_E2E_EXEC_BLOCKED', 'MCP_E2E_DISCONNECT_GATE', 'MCP_E2E_APPROVAL_DENIED', 'MCP_E2E_STRUCTURED']
         .filter((tag) => lastUser.includes(tag));
       httpRequests.push({ url: request.url, model: body.model, inputTags, lastRole: body.messages.at(-1)?.role,
         toolNames: (body.tools ?? []).map((tool) => tool.function?.name) });
@@ -213,6 +213,14 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
       if (lastUser.includes('MCP_E2E_DELAYED')) {
         await delay(750);
         if (!response.destroyed) sse(response, { content: 'delayed task finished' });
+        return;
+      }
+      if (lastUser.includes('MCP_E2E_STRUCTURED')) {
+        assert.ok((body.tools ?? []).some((tool) => tool.function?.name === 'ligule_delegation_result'));
+        callId += 1;
+        sse(response, { tool_calls: [{ index: 0, id: `mcp-e2e-call-${callId}`, type: 'function', function: {
+          name: 'ligule_delegation_result', arguments: JSON.stringify({ result: { answer: 'validated by Host' } }),
+        } }] });
         return;
       }
       const waitingGate = [...providerGates].find(([tag]) => lastUser.includes(tag))?.[1];
@@ -560,6 +568,14 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     requests.push(body);
     const last = body.messages.at(-1);
     const userText = body.messages.filter((message) => message.role === 'user').at(-1)?.content ?? '';
+    if (userText.includes('MCP_OPERATOR_STRUCTURED')) {
+      assert.ok((body.tools ?? []).some((tool) => tool.function?.name === 'ligule_delegation_result'));
+      callId += 1;
+      sse(response, { tool_calls: [{ index: 0, id: `operator-call-${callId}`, type: 'function', function: {
+        name: 'ligule_delegation_result', arguments: JSON.stringify({ result: { answer: 'validated by Host' } }),
+      } }] });
+      return;
+    }
     if (userText.includes('MCP_OPERATOR_LOOP_LIMIT')) {
       callId += 1;
       sse(response, { tool_calls: [{ index: 0, id: `operator-call-${callId}`, type: 'function', function: { name: 'find', arguments: JSON.stringify({ pattern: '*' }) } }] });
@@ -668,6 +684,26 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     const loopTurn = JSON.parse(loopTerminal.record.json);
     assert.equal(loopTurn.iterations, 2);
     assert.equal(loopTurn.modelCalls, 2);
+
+    const structuredSession = toolData(await context.client.callTool({ name: 'ligule_session_create', arguments: {
+      projectRoot: project, initial: { mode: 'full', policy: 'auto', loopIterations: 5 },
+    } }), 'operator_structured_session');
+    const structuredRun = toolData(await context.client.callTool({ name: 'ligule_run', arguments: {
+      sessionId: structuredSession.sessionId,
+      input: 'MCP_OPERATOR_STRUCTURED',
+      delegation: { outputSchema: {
+        type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false,
+      } },
+      timeoutMs: 5_000,
+    } }), 'operator_structured_run');
+    assert.equal(structuredRun.state, 'done');
+    assert.equal(structuredRun.result.validation.status, 'valid');
+    assert.deepEqual(structuredRun.result.output.structured, { answer: 'validated by Host' });
+    const structuredDigest = structuredRun.result.validation.schemaDigest;
+    assert.equal(typeof structuredDigest, 'string');
+    const structuredContext = await findHistoryRecord(context.client, structuredSession.sessionId,
+      (record) => record.kind === 'turnContext' && record.json.includes(structuredDigest));
+    assert.ok(structuredContext, 'the schema digest is recorded in the persistent turn context');
     const invalidConfiguredModel = await context.client.callTool({ name: 'ligule_session_configure', arguments: {
       sessionId, changes: { model: { provider: 'legacy', model: 'not-in-this-config' } },
     } });

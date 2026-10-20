@@ -320,8 +320,8 @@ test('a child submits a structured result only after it matches the declared sch
   const config = createConfig({ user: { boundary } });
   const chain = createDecisionChain({ mode: 'auto' });
   const provider = scripted([
-    call('subagent_result', { result: { answer: 3, count: 2 } }),
-    call('subagent_result', { result: { answer: 'checked', count: 2 } }),
+    call('ligule_delegation_result', { result: { answer: 3, count: 2 } }),
+    call('ligule_delegation_result', { result: { answer: 'checked', count: 2 } }),
   ]);
   const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'structured-parent' });
   const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
@@ -345,7 +345,7 @@ test('a child submits a structured result only after it matches the declared sch
     },
   });
   assert.match(provider.requests[0].system, /Schema JSON data:.*"answer"/u);
-  assert.ok(provider.requests[0].tools.some((tool) => tool.name === 'subagent_result'));
+  assert.ok(provider.requests[0].tools.some((tool) => tool.name === 'ligule_delegation_result'));
   assert.equal(result.result.state, 'completed');
   assert.equal(result.result.stopReason, 'tool_completed');
   assert.deepEqual(result.result.output.structured, { answer: 'checked', count: 2 });
@@ -353,7 +353,7 @@ test('a child submits a structured result only after it matches the declared sch
   assert.equal(typeof result.result.validation.schemaDigest, 'string');
   const childEvents = (await readFile(join(session.directory, 'structured-parent.sub-1.jsonl'), 'utf8'))
     .split('\n').filter(Boolean).map(JSON.parse);
-  assert.ok(childEvents.some((event) => event.kind === 'tool' && event.tool === 'subagent_result'
+  assert.ok(childEvents.some((event) => event.kind === 'tool' && event.tool === 'ligule_delegation_result'
     && event.result.code === 'delegation_result_invalid'));
   assert.equal(childEvents.find((event) => event.kind === 'turnContext').delegationSchemaDigest, result.result.validation.schemaDigest);
   await assert.rejects(kernel.call('subagent', {

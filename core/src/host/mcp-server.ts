@@ -7,6 +7,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema, McpError, ErrorCode, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import { createConfig } from '../kernel/config.js';
 import { KernelError } from '../kernel/error.js';
+import { DELEGATION_SPEC_SCHEMA, type DelegationSpec } from '../delegation.js';
 import { createPermissionContext } from '../kernel/permission.js';
 import { isTrusted } from '../kernel/workspace-trust.js';
 import { createHost } from './host.js';
@@ -234,10 +235,10 @@ const tools: Tool[] = [
       sessionId: id, action: { type: 'string', enum: ['send', 'continue', 'cancel_queued', 'clear_queue'], default: 'send' },
       input: { type: 'string', minLength: 1, maxLength: 65536 }, queueItemId: id,
     }, ['sessionId']), outputSchema: queueOutput },
-  { name: 'ligule_run_start', description: 'Submit text and return immediately while the real Host runs in the background. One active run per session. Poll status and read records. IDs are process-local; the server keeps 256 recent operations and evicts the oldest completed one when full.',
-    inputSchema: object({ sessionId: id, input: { type: 'string', minLength: 1, maxLength: 65536 } }, ['sessionId', 'input']), outputSchema: operationOutput },
-  { name: 'ligule_run', description: 'Start one real Host run and wait server-side for its terminal result, up to timeoutMs (default 60 seconds, maximum 5 minutes). A timeout returns the current state without cancelling the run; continue with ligule_run_await or ligule_run_status.',
-    inputSchema: object({ sessionId: id, input: { type: 'string', minLength: 1, maxLength: 65536 }, timeoutMs: { type: 'integer', minimum: 0, maximum: 300_000, default: 60_000 } }, ['sessionId', 'input']), outputSchema: awaitOutput },
+  { name: 'ligule_run_start', description: 'Submit text and return immediately while the real Host runs in the background. Optional delegation.outputSchema requires a valid result submission; Policy still applies. One active run per session. Poll status and read records. IDs are process-local; the server keeps 256 recent operations and evicts the oldest completed one when full.',
+    inputSchema: object({ sessionId: id, input: { type: 'string', minLength: 1, maxLength: 65536 }, delegation: DELEGATION_SPEC_SCHEMA }, ['sessionId', 'input']), outputSchema: operationOutput },
+  { name: 'ligule_run', description: 'Start one real Host run and wait server-side for its terminal result, up to timeoutMs (default 60 seconds, maximum 5 minutes). Optional delegation.outputSchema requires a valid result submission; Policy still applies. A timeout returns the current state without cancelling the run; continue with ligule_run_await or ligule_run_status.',
+    inputSchema: object({ sessionId: id, input: { type: 'string', minLength: 1, maxLength: 65536 }, timeoutMs: { type: 'integer', minimum: 0, maximum: 300_000, default: 60_000 }, delegation: DELEGATION_SPEC_SCHEMA }, ['sessionId', 'input']), outputSchema: awaitOutput },
   { name: 'ligule_run_status', description: 'Read the actual Host state, progress, pending interactions, queued messages, and bounded events after a cursor. Operation IDs are process-local; reopen the session after restart and read durable records.',
     inputSchema: object({ operationId: id, after: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 50, default: 20 } }, ['operationId']), outputSchema: operationOutput },
   { name: 'ligule_run_await', description: 'Wait in the server for one known run, up to timeoutMs (default 60 seconds, maximum 5 minutes). A timeout returns the current resumable state without cancelling the run. A terminal run includes its result. Resolve pending approvals or questions with the interaction tool while the run waits.',
@@ -254,6 +255,7 @@ interface Arguments {
   sessionId?: string;
   operationId?: string;
   timeoutMs?: number;
+  delegation?: DelegationSpec;
   input?: string;
   initial?: McpInitialSettings;
   changes?: McpSessionChanges;
@@ -363,9 +365,9 @@ export async function serveMcp({ projectRoot, version, flags = [], modeName, ope
           ...(input.answers === undefined ? {} : { answers: input.answers }),
         }); break;
         case 'ligule_session_send': result = control.send(input.sessionId!, input.action ?? 'send', input.input, input.queueItemId); break;
-        case 'ligule_run_start': result = control.start(input.sessionId!, input.input!); break;
+        case 'ligule_run_start': result = control.start(input.sessionId!, input.input!, input.delegation); break;
         case 'ligule_run': {
-          const started = control.start(input.sessionId!, input.input!);
+          const started = control.start(input.sessionId!, input.input!, input.delegation);
           result = await control.await(started.operationId, input.timeoutMs ?? 60_000);
           break;
         }

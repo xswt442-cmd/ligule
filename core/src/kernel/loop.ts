@@ -93,6 +93,8 @@ export interface LoopRunOptions {
   readonly signal?: AbortSignal;
   readonly user?: Record<string, unknown>;
   readonly onProgress?: (event: LoopProgressEvent) => void;
+  readonly completesRun?: readonly string[];
+  readonly turnContext?: Record<string, unknown>;
 }
 
 type TurnStatus = 'completed' | 'cancelled' | 'failed';
@@ -168,8 +170,10 @@ export function createLoop({
   return {
     // 为本轮创建独立取消信号，并将取消传递给工具和模型提供方。
     // `options.user` 中的元数据只写入记录；模型仍接收 `input` 中的文本。
-    async run(input: string, { signal, user, onProgress: runProgress }: LoopRunOptions = {}): Promise<LoopResult> {
+    async run(input: string, runOptions: LoopRunOptions = {}): Promise<LoopResult> {
+      const { signal, user, onProgress: runProgress, completesRun: runCompletes, turnContext: runTurnContext } = runOptions;
       const progress = runProgress ?? onProgress;
+      const completingThisRun = new Set([...completing, ...(runCompletes ?? [])]);
       const controller = new AbortController();
       const forward = () => controller.abort(signal?.reason);
       if (signal?.aborted) forward();
@@ -217,7 +221,9 @@ export function createLoop({
       try {
         if (session) userSeq = sequenceOf(await session.append({ kind: 'user', text: input, ...user }));
         // 用户事件写入后若快照失败，记录本轮失败终态。Host 在接受输入前失败时没有事件序号，不写终态事件。
-        if (session && turnContext !== null) await session.append({ kind: 'turnContext', ignorable: true, userSeq, ...turnContext() });
+        if (session && (turnContext !== null || runTurnContext !== undefined)) {
+          await session.append({ kind: 'turnContext', ignorable: true, userSeq, ...(turnContext?.() ?? {}), ...(runTurnContext ?? {}) });
+        }
         for (let iteration = 1; iteration <= limits.iterations; iteration += 1) {
           reportPhase('preparing');
           if (calls >= limits.modelCalls) throw new KernelError('loop_model_budget_exhausted');
@@ -323,7 +329,7 @@ export function createLoop({
               if (outcome.status === 'rejected' && (!(outcome.reason instanceof KernelError) || outcome.reason instanceof KernelRuntimeError)) {
                 throw outcome.reason;
               }
-              if (outcome.status === 'fulfilled' && completing.has(group.calls[index].name)) {
+              if (outcome.status === 'fulfilled' && completingThisRun.has(group.calls[index].name)) {
                 // 结束本轮后，同一条助手消息中剩余的调用不会执行；为每个调用写入未执行结果。
                 const name = group.calls[index].name;
                 await answerRemaining(restOf(groups, groupIndex, index), `${name} ended this round before this call ran`);

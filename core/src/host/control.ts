@@ -3,7 +3,7 @@ import { realpath } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import type { ProviderDiagnostic } from '../kernel/error.js';
-import { completedRunResult, failedRunResult, type RunResult } from '../delegation.js';
+import { completedRunResult, failedRunResult, type DelegationSpec, type RunResult, type RunValidation } from '../delegation.js';
 import { checkedAnswers, type AskQuestion } from '../tools/ask-user.js';
 import { APPROVAL_METHOD, QUESTION_METHOD } from './protocol.js';
 import type { Host } from './host.js';
@@ -372,7 +372,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     });
   }
 
-  function startOne(sessionId: string, input: string, queueItemId?: string) {
+  function startOne(sessionId: string, input: string, queueItemId?: string, delegation?: DelegationSpec) {
     owned(sessionId);
     if (active.has(sessionId)) throw new KernelError('run_already_running');
     if (operations.size >= 256) {
@@ -386,7 +386,9 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     operations.set(found.operationId, found);
     active.set(sessionId, found);
     publish(found, 'run.started', { ...(queueItemId === undefined ? {} : { queueItemId }) });
-    const work = Promise.resolve().then(() => host.handle({ method: 'run.start', params: { sessionId, input } }, connection));
+    const work = Promise.resolve().then(() => host.handle({
+      method: 'run.start', params: { sessionId, input, ...(delegation === undefined ? {} : { delegation }) },
+    }, connection));
     found.settled = work.then(
       (result) => {
         const completed = record(result);
@@ -395,12 +397,33 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
           || (completed.completedBy !== undefined && typeof completed.completedBy !== 'string')) {
           throw new KernelError('host_response_invalid');
         }
+        let validation: RunValidation | undefined;
+        if (completed.validation !== undefined) {
+          const value = record(completed.validation);
+          if (value.status !== 'not_requested' && value.status !== 'valid' && value.status !== 'invalid') {
+            throw new KernelError('host_response_invalid');
+          }
+          const schemaDigest = value.schemaDigest;
+          const errors = value.errors;
+          if ((schemaDigest !== undefined && typeof schemaDigest !== 'string')
+            || (errors !== undefined && (!Array.isArray(errors) || errors.some((entry) => typeof entry !== 'string')))) {
+            throw new KernelError('host_response_invalid');
+          }
+          validation = {
+            status: value.status,
+            ...(schemaDigest === undefined ? {} : { schemaDigest }),
+            ...(errors === undefined ? {} : { errors }),
+          };
+        }
         found.result = completedRunResult(found.operationId, sessionId, {
           text: completed.text,
           iterations: completed.iterations as number,
           modelCalls: completed.modelCalls as number,
           ...(typeof completed.completedBy === 'string' ? { completedBy: completed.completedBy } : {}),
-        } satisfies LoopResult);
+        } satisfies LoopResult, {
+          ...(Object.hasOwn(completed, 'structured') ? { structured: completed.structured } : {}),
+          ...(validation === undefined ? {} : { validation }),
+        });
         found.state = 'done';
         found.summary = 'Run completed.';
       },
@@ -560,12 +583,12 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
           createdAt: entry.createdAt === null ? null : entry.createdAt.slice(0, 128) };
       }) };
     },
-    start(sessionId: string, input: string) {
+    start(sessionId: string, input: string, delegation?: DelegationSpec) {
       owned(sessionId);
       const queue = currentQueue(sessionId);
       if (queue.items.length > 0) throw new KernelError('session_queue_pending');
       queue.paused = false;
-      return status(startOne(sessionId, input));
+      return status(startOne(sessionId, input, undefined, delegation));
     },
     status(operationId: string, after = 0, limit = 20) {
       if (!Number.isSafeInteger(after) || after < 0) throw new KernelError('control_cursor_invalid');

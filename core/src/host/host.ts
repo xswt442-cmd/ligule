@@ -6,6 +6,10 @@ import { access, readFile, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import {
+  createOutputSchemaContract, DELEGATION_RESULT_TOOL, MAX_DELEGATION_SCHEMA_BYTES, outputSchemaInstructions,
+  registerDelegationResultTool, type DelegationSpec, type RunValidation,
+} from '../delegation.js';
+import {
   assertDelegationPermission, assertDelegationPolicy, createDelegationGrant, delegationPathOf,
   listDelegationGrants, recordDelegationEvent, requireDelegationGrant, revokeDelegationGrant,
   type CreateDelegationGrantInput, type DelegationGrant,
@@ -221,8 +225,21 @@ interface HostSessionState extends HostSessionBase {
   readonly extensions: Awaited<ReturnType<typeof loadExtensions>>;
   readonly templates: TemplateRegistry;
   readonly loop: ReturnType<typeof createLoop>;
+  readonly runDelegated: (input: string, options: DelegatedRunOptions) => Promise<DelegatedRunResult>;
   compaction: ReturnType<typeof createCompaction> | null;
   readonly rebuildCompaction: (model: Record<string, unknown>) => ReturnType<typeof createCompaction> | null;
+}
+
+interface DelegatedRunOptions {
+  readonly signal?: AbortSignal;
+  readonly user?: Record<string, unknown>;
+  readonly onProgress?: (event: LoopProgressEvent) => void;
+  readonly delegation?: DelegationSpec;
+}
+
+interface DelegatedRunResult extends LoopResult {
+  readonly structured?: unknown;
+  readonly validation?: RunValidation;
 }
 
 export interface Host {
@@ -1618,8 +1635,50 @@ export function createHost({
         };
       },
     });
+    const runDelegated: HostSessionState['runDelegated'] = async (input, options) => {
+      const contract = options.delegation?.outputSchema === undefined
+        ? undefined : createOutputSchemaContract(options.delegation.outputSchema);
+      let structuredSubmitted = false;
+      let structured: unknown;
+      let disposeResultTool: (() => void) | undefined;
+      let undoOutputContract = () => {};
+      try {
+        if (contract !== undefined) {
+          disposeResultTool = registerDelegationResultTool(kernel, contract, (value) => {
+            structured = value;
+            structuredSubmitted = true;
+          });
+          undoOutputContract = prompt.fragment({
+            name: 'delegated-output-contract',
+            anchor: 1,
+            text: outputSchemaInstructions(contract),
+            maxBytes: MAX_DELEGATION_SCHEMA_BYTES + 1024,
+          });
+        }
+        const result = await loop.run(input, {
+          signal: options.signal,
+          user: options.user,
+          onProgress: options.onProgress,
+          completesRun: contract === undefined ? [] : [DELEGATION_RESULT_TOOL],
+          ...(contract === undefined ? {} : { turnContext: { delegationSchemaDigest: contract.digest } }),
+        });
+        const validation = contract === undefined
+          ? undefined
+          : structuredSubmitted
+            ? { status: 'valid' as const, schemaDigest: contract.digest }
+            : { status: 'invalid' as const, schemaDigest: contract.digest, errors: ['The run ended without submitting a structured result.'] };
+        return {
+          ...result,
+          ...(structuredSubmitted ? { structured } : {}),
+          ...(validation === undefined ? {} : { validation }),
+        };
+      } finally {
+        try { undoOutputContract(); }
+        finally { disposeResultTool?.(); }
+      }
+    };
     // 当前轮次和待处理审批都限定在所属会话内。
-    return Object.assign(state, { chain, kernel, assembly, extensions: installedExtensions, mcp, loop, templates, compaction, rebuildCompaction });
+    return Object.assign(state, { chain, kernel, assembly, extensions: installedExtensions, mcp, loop, runDelegated, templates, compaction, rebuildCompaction });
     } catch (error) {
       try {
         for (const dispose of cleanup.reverse()) await dispose();
@@ -2174,7 +2233,9 @@ export function createHost({
             text = expanded.text;
             user = { raw: input, arguments: expanded.arguments, source: expanded.source, digest: expanded.digest };
           }
-          return await state.loop.run(text, { signal, user, onProgress: report });
+          return await state.runDelegated(text, {
+            signal, user, onProgress: report, delegation: message.params.delegation,
+          });
           }, connection);
         }
         case 'run.cancel': {
