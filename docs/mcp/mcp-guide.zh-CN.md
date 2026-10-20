@@ -109,7 +109,7 @@ Node/Python 脚本调用需要逐次审批；`approval.request` 会包含规范�
 
 MCP Server 使用 Ligule 已有的配置、模型服务、工具和 Policy。未启动 `--operator` 时，需要人工审批的操作会被拒绝；启动该选项后，只能答复真实待决请求。Server 不提供任意 Host RPC 或任意配置文件写入工具。它只使用本地 stdio，不开启网络监听。stdio 客户端与 Server 使用同一操作系统用户权限，请只配置可信的本地 MCP 客户端。
 
-没有 Grant 时，`--operator` 不会授予或提升会话 Permission，也不能更改 OS 资源边界。MCP 工具调用始终经过会话的 Permission 与 Policy 判定。受限 Shell 只在平台 Sandbox 满足所需能力时运行；当前 Linux bubblewrap 的文件系统隔离报告为 `partial`，Windows 没有 OS Sandbox 后端，因此这两个平台上的 `read-only` 和 `workspace-write` 会话均不能运行 Shell。`full-access` 需要在可信交互界面单独确认；这不会让 Policy 的硬拒绝可被覆盖。
+没有 Grant 时，`--operator` 不会授予或提升会话 Permission，也不能更改 OS 资源边界。MCP 工具调用始终经过会话的 Permission 与 Policy 判定。受限 Shell 只在平台 Sandbox 满足所需能力时运行；Linux bubblewrap 按实测报告文件系统能力。Windows `workspace-write` 标为 `partial`，必须先明确授权项目并确认限制，同时将网络设为 `unrestricted`；它不能限制文件读取和网络，既有硬链接、可写祖先目录的 `FILE_DELETE_CHILD` 权限或并发 ACL 修改也可能越界，不适合运行恶意原生代码。Windows `read-only` 仅在实时探测确认所选 Shell 能进入实际工作区时使用 AppContainer，否则该档位下 Shell 不可用；可用时会阻止工作区写入和 Shell 联网，但系统公开可读文件仍可能被读取。`full-access` 需要在可信交互界面单独确认；这不会让 Policy 的硬拒绝可被覆盖。
 
 任务状态和 `operationId` 只保存在当前 Server 进程中；每个进程保留最多 256 个操作记录。达到上限后，新任务会从已结束的操作中淘汰创建时间最早的一条；被淘汰的 `operationId` 不可再查询。如果所有保留的操作都仍在运行，新任务会以容量错误拒绝。Server 退出或重启后，旧 `operationId` 不可恢复。会话记录仍由 Host 持久保存，可重新启动 Server、接回会话并读取历史，但这不会恢复旧进程中的运行状态。
 
