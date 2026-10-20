@@ -213,6 +213,66 @@ test('an inline mode freezes the registered tools and prompt fragments in the ch
   }), { code: 'mode_prompt_unavailable' });
 });
 
+test('child generation and loop budgets can be lowered but never raised', async () => {
+  const boundary = await workspace();
+  const config = createConfig({ user: { boundary } });
+  const chain = createDecisionChain({ mode: 'auto' });
+  const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'bounded-child-parent' });
+  const base = scripted([text('child finished within the requested limits')]);
+  const thinkingCapability = { efforts: ['none', 'low', 'high', 'max'], defaultEffort: 'high' };
+  let selectedGeneration;
+  const provider = {
+    ...base,
+    outputTokens: 4096,
+    thinkingEffort: 'high',
+    thinkingCapability,
+    withGeneration(options) {
+      selectedGeneration = options;
+      return { ...base, ...options, thinkingCapability };
+    },
+  };
+  const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
+  createSubagentPlugin({
+    config,
+    provider,
+    chain,
+    prompt: { staticPrefix: '' },
+    directory: session.directory,
+    sessionId: 'bounded-child-parent',
+    plugins: [minimalPlugin],
+    loopLimits: { iterations: 8, modelCalls: 6 },
+  }).setup(kernel);
+
+  const result = await kernel.call('subagent', {
+    task: 'finish with smaller budgets',
+    outputTokens: 2048,
+    thinkingEffort: 'low',
+    loopIterations: 3,
+    modelCalls: 2,
+  });
+  assert.deepEqual(selectedGeneration, { outputTokens: 2048, thinkingEffort: 'low' });
+  assert.deepEqual(result.generation, { outputTokens: 2048, thinkingEffort: 'low' });
+  assert.deepEqual(result.limits, { iterations: 3, modelCalls: 2 });
+  const childEvents = (await readFile(join(session.directory, `${result.sessionId}.jsonl`), 'utf8'))
+    .split('\n').filter(Boolean).map(JSON.parse);
+  const context = childEvents.find((event) => event.kind === 'turnContext');
+  assert.deepEqual(context.childGeneration, { outputTokens: 2048, thinkingEffort: 'low' });
+  assert.deepEqual(context.childLimits, { iterations: 3, modelCalls: 2 });
+
+  await assert.rejects(kernel.call('subagent', {
+    task: 'exceed output budget', outputTokens: 4097,
+  }), { code: 'subagent_output_budget_escalation' });
+  await assert.rejects(kernel.call('subagent', {
+    task: 'increase thinking', thinkingEffort: 'max',
+  }), { code: 'subagent_thinking_escalation' });
+  await assert.rejects(kernel.call('subagent', {
+    task: 'exceed loop budget', loopIterations: 9,
+  }), { code: 'subagent_budget_escalation' });
+  await assert.rejects(kernel.call('subagent', {
+    task: 'exceed model-call budget', modelCalls: 7,
+  }), { code: 'subagent_budget_escalation' });
+});
+
 test('one parent turn can run three independent subagents concurrently', { timeout: 10_000 }, async () => {
   const boundary = await workspace();
   const config = createConfig({ user: { boundary } });

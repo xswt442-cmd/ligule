@@ -7,7 +7,7 @@
 import { randomUUID } from 'node:crypto';
 import { readdir } from 'node:fs/promises';
 import { createKernel } from '../kernel/kernel.js';
-import { createLoop, DEFAULT_LOOP_LIMITS } from '../kernel/loop.js';
+import { createLoop, DEFAULT_LOOP_LIMITS, type LoopLimits } from '../kernel/loop.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { createSessionLog } from '../session/session.js';
 import {
@@ -26,6 +26,14 @@ import { KernelError, KernelRuntimeError } from '../kernel/error.js';
 import type { PermissionContext } from '../kernel/permission.js';
 
 type LoopOptions = Parameters<typeof createLoop>[0];
+type ThinkingEffort = 'none' | 'low' | 'high' | 'max';
+type ChildGenerationOptions = { readonly outputTokens?: number; readonly thinkingEffort?: ThinkingEffort };
+type SubagentProvider = LoopOptions['provider'] & {
+  readonly outputTokens?: number;
+  readonly thinkingEffort?: ThinkingEffort;
+  readonly thinkingCapability?: { readonly efforts: readonly string[]; readonly defaultEffort: string };
+  withGeneration?: (options: ChildGenerationOptions) => SubagentProvider;
+};
 const MAX_CONCURRENT_SUBAGENTS = 3;
 
 function stableErrorCode(error: unknown): string {
@@ -35,7 +43,7 @@ function stableErrorCode(error: unknown): string {
 
 export interface SubagentDeps {
   config: ReturnType<typeof createConfig>;
-  provider: LoopOptions['provider'];
+  provider: SubagentProvider;
   chain: ReturnType<typeof createDecisionChain>;
   prompt: { staticPrefix: string };
   directory: string;
@@ -46,7 +54,46 @@ export interface SubagentDeps {
   modeFile?: () => ModeFile | undefined;
   promptFragments?: () => readonly ModePromptFragment[];
   promptFragmentBytes?: number;
-  loopLimits?: LoopOptions['limits'];
+  loopLimits?: LoopLimits;
+}
+
+function childLimits(args: { loopIterations?: number; modelCalls?: number }, parent: LoopLimits) {
+  const limits = {
+    iterations: args.loopIterations ?? parent.iterations,
+    modelCalls: args.modelCalls ?? parent.modelCalls,
+  };
+  if (limits.iterations > parent.iterations || limits.modelCalls > parent.modelCalls) {
+    throw new KernelError('subagent_budget_escalation', { detail: 'a child run may only use budgets within its parent session limits' });
+  }
+  return limits;
+}
+
+function childProvider(args: { outputTokens?: number; thinkingEffort?: ThinkingEffort }, provider: SubagentProvider): SubagentProvider {
+  if (args.outputTokens === undefined && args.thinkingEffort === undefined) return provider;
+  if (provider.withGeneration === undefined) {
+    throw new KernelError('subagent_generation_unavailable', { detail: 'this provider cannot create a bounded child generation' });
+  }
+  if (args.outputTokens !== undefined
+    && (provider.outputTokens === undefined || args.outputTokens > provider.outputTokens)) {
+    throw new KernelError('subagent_output_budget_escalation', { detail: 'a child output-token limit cannot exceed the parent session limit' });
+  }
+  if (args.thinkingEffort !== undefined) {
+    const capability = provider.thinkingCapability;
+    if (capability === undefined || !capability.efforts.includes(args.thinkingEffort)) {
+      throw new KernelError('provider_thinking_effort_invalid', { detail: 'the selected provider does not support this thinking effort' });
+    }
+    const ceiling = provider.thinkingEffort ?? capability.defaultEffort;
+    const ranks: Record<ThinkingEffort, number> = { none: 0, low: 1, high: 2, max: 3 };
+    if (ranks[args.thinkingEffort] > (ranks[ceiling as ThinkingEffort] ?? 0)) {
+      throw new KernelError('subagent_thinking_escalation', { detail: 'a child thinking effort cannot exceed the parent session setting' });
+    }
+  }
+  const options: { outputTokens?: number; thinkingEffort?: ThinkingEffort } = {};
+  const outputTokens = args.outputTokens ?? provider.outputTokens;
+  if (outputTokens !== undefined) options.outputTokens = outputTokens;
+  const thinkingEffort = args.thinkingEffort ?? provider.thinkingEffort;
+  if (thinkingEffort !== undefined) options.thinkingEffort = thinkingEffort;
+  return provider.withGeneration(options);
 }
 
 export function createSubagentPlugin(deps: SubagentDeps) {
@@ -77,18 +124,30 @@ export function createSubagentPlugin(deps: SubagentDeps) {
         name: 'subagent',
         access: 'inherit',
         execution: 'parallel',
-        description: 'Delegate independent work to child runs with the parent policy and separate session records. Up to three children can run at once; children cannot create more children. Check result.state because a failed or cancelled child still returns its saved Session reference. When outputSchema is provided, the child must submit its final value with subagent_result.',
+        description: 'Delegate independent work to child runs with the parent policy and separate session records. Up to three children can run at once; children cannot create more children. Optional output, thinking, and loop budgets can only lower the parent session limits. Check result.state because a failed or cancelled child still returns its saved Session reference. When outputSchema is provided, the child must submit its final value with ligule_delegation_result.',
         parameters: {
           type: 'object',
           properties: {
             task: { type: 'string', description: 'What the derived agent should do, as one instruction.' },
             mode: MODE_SELECTION_SCHEMA,
+            outputTokens: { type: 'integer', minimum: 1, description: 'optional child output-token limit; it cannot exceed the parent session limit' },
+            thinkingEffort: { type: 'string', enum: ['none', 'low', 'high', 'max'], description: 'optional child thinking effort; it cannot exceed the parent session setting' },
+            loopIterations: { type: 'integer', minimum: 1, description: 'optional child iteration limit; it cannot exceed the parent session limit' },
+            modelCalls: { type: 'integer', minimum: 1, description: 'optional child model-call limit; it cannot exceed the parent session limit' },
             outputSchema: { type: 'object', description: 'Optional supported JSON Schema for the child result. A valid value must be submitted with the child-only ligule_delegation_result tool.' },
           },
           additionalProperties: false,
           required: ['task'],
         },
-        async run(args: { task?: string; mode?: RequestedModeSelection; outputSchema?: Record<string, unknown> }, { signal, permission }: { signal?: AbortSignal; permission: PermissionContext }) {
+        async run(args: {
+          task?: string;
+          mode?: RequestedModeSelection;
+          outputTokens?: number;
+          thinkingEffort?: ThinkingEffort;
+          loopIterations?: number;
+          modelCalls?: number;
+          outputSchema?: Record<string, unknown>;
+        }, { signal, permission }: { signal?: AbortSignal; permission: PermissionContext }) {
           if (typeof args.task !== 'string' || args.task.trim() === '') {
             throw new KernelError('subagent_task_required', { detail: 'the derived agent needs a task to work on' });
           }
@@ -97,6 +156,8 @@ export function createSubagentPlugin(deps: SubagentDeps) {
             throw new KernelError('subagent_mode_paths_required', { detail: 'this run has no mode directories to look a name up in' });
           }
           const outputContract = args.outputSchema === undefined ? undefined : createOutputSchemaContract(args.outputSchema);
+          const limits = childLimits(args, deps.loopLimits ?? DEFAULT_LOOP_LIMITS);
+          const provider = childProvider(args, deps.provider);
           if (active >= MAX_CONCURRENT_SUBAGENTS) {
             throw new KernelError('subagent_concurrency_limit', { detail: `at most ${MAX_CONCURRENT_SUBAGENTS} derived runs can be active for this parent` });
           }
@@ -178,14 +239,19 @@ export function createSubagentPlugin(deps: SubagentDeps) {
               }
               const loop = createLoop({
                 kernel: child,
-                provider: deps.provider,
+                provider,
                 prompt,
                 session,
-                limits: deps.loopLimits ?? DEFAULT_LOOP_LIMITS,
+                limits,
                 completesRun: outputContract === undefined ? [] : [DELEGATION_RESULT_TOOL],
-                turnContext: outputContract === undefined
-                  ? null
-                  : () => ({ delegationSchemaDigest: outputContract.digest }),
+                turnContext: () => ({
+                  childGeneration: {
+                    outputTokens: provider.outputTokens ?? null,
+                    thinkingEffort: provider.thinkingEffort ?? provider.thinkingCapability?.defaultEffort ?? null,
+                  },
+                  childLimits: limits,
+                  ...(outputContract === undefined ? {} : { delegationSchemaDigest: outputContract.digest }),
+                }),
               });
               let result: Awaited<ReturnType<typeof loop.run>>;
               try {
@@ -206,6 +272,11 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                   path: session.path,
                   iterations: null,
                   modelCalls: null,
+                  generation: {
+                    outputTokens: provider.outputTokens ?? null,
+                    thinkingEffort: provider.thinkingEffort ?? provider.thinkingCapability?.defaultEffort ?? null,
+                  },
+                  limits,
                   mode: resolvedMode?.name ?? null,
                   modeDigest: modeIdentity?.digest ?? null,
                   result: failedRunResult(
@@ -228,6 +299,11 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                 path: session.path,
                 iterations: result.iterations,
                 modelCalls: result.modelCalls,
+                generation: {
+                  outputTokens: provider.outputTokens ?? null,
+                  thinkingEffort: provider.thinkingEffort ?? provider.thinkingCapability?.defaultEffort ?? null,
+                },
+                limits,
                 mode: resolvedMode?.name ?? null,
                 modeDigest: modeIdentity?.digest ?? null,
                 result: completedRunResult(randomUUID(), id, result, {
