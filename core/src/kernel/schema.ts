@@ -2,95 +2,204 @@
 // 注册时拒绝 Kernel 无法执行的校验构造。外部 JSON Schema 如需使用，必须先转换为该子集。
 import { KernelError } from './error.js';
 
-const ROOT_KEYS = ['type', 'properties', 'required', 'description'];
-const LEAF_KEYS = ['type', 'description', 'minimum', 'maximum'];
-const LEAF_TYPES = ['string', 'integer', 'number', 'boolean'];
+const MAX_SCHEMA_DEPTH = 8;
+const SCHEMA_KEYS = [
+  'type', 'properties', 'required', 'description', 'minimum', 'maximum', 'enum', 'items', 'anyOf', 'additionalProperties',
+];
+const VALUE_TYPES = ['string', 'integer', 'number', 'boolean'];
 const NUMBER_TYPES = ['integer', 'number'];
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-// 注册时列出所有不支持构造及其路径，便于一次修正完整模式。
-export function assertSupportedSchema(schema: Record<string, unknown>): void {
-  const violations = [];
+function schemaType(schema: Record<string, unknown>): string | undefined {
+  return typeof schema.type === 'string' ? schema.type : undefined;
+}
+
+function jsonScalar(value: unknown): boolean {
+  return value === null || typeof value === 'string' || typeof value === 'boolean'
+    || (typeof value === 'number' && Number.isFinite(value));
+}
+
+function validateSchemaNode(
+  schema: Record<string, unknown>,
+  path: string,
+  depth: number,
+  violations: string[],
+): void {
+  if (depth > MAX_SCHEMA_DEPTH) {
+    violations.push(`${path} exceeds maximum schema depth ${MAX_SCHEMA_DEPTH}`);
+    return;
+  }
+
   for (const key of Object.keys(schema)) {
-    if (!ROOT_KEYS.includes(key)) violations.push(`${key} is not supported at the root (subset: ${ROOT_KEYS.join('/')})`);
+    if (!SCHEMA_KEYS.includes(key)) violations.push(`${path}.${key} is not supported (subset: ${SCHEMA_KEYS.join('/')})`);
   }
   if (schema.description !== undefined && typeof schema.description !== 'string') {
-    violations.push('description must be a string');
+    violations.push(`${path}.description must be a string`);
   }
-  const properties = schema.properties ?? {};
-  if (!isPlainObject(properties)) {
-    violations.push('properties must be an object of schemas');
-  } else {
-    for (const [name, leaf] of Object.entries(properties)) {
-      if (!isPlainObject(leaf)) {
-        violations.push(`${name} must be a schema object`);
-        continue;
+
+  const type = schemaType(schema);
+  if (schema.type !== undefined && (type === undefined || ![...VALUE_TYPES, 'object', 'array'].includes(type))) {
+    violations.push(`${path}.type "${String(schema.type)}" is not supported (subset: ${[...VALUE_TYPES, 'object', 'array'].join('/')})`);
+  }
+
+  if (schema.enum !== undefined) {
+    if (!Array.isArray(schema.enum) || schema.enum.length === 0 || schema.enum.some((value) => !jsonScalar(value))) {
+      violations.push(`${path}.enum must be a non-empty array of JSON scalar values`);
+    } else if (type !== undefined && schema.enum.some((value) => !matchesType(type, value))) {
+      violations.push(`${path}.enum values must match type ${type}`);
+    }
+  }
+
+  for (const bound of ['minimum', 'maximum']) {
+    if (schema[bound] === undefined) continue;
+    if (typeof schema[bound] !== 'number' || !Number.isFinite(schema[bound])) {
+      violations.push(`${path}.${bound} must be a finite number`);
+    } else if (type === undefined || !NUMBER_TYPES.includes(type)) {
+      violations.push(`${path}.${bound} needs type integer or number`);
+    }
+  }
+  if (type !== undefined && NUMBER_TYPES.includes(type)
+    && typeof schema.minimum === 'number' && typeof schema.maximum === 'number'
+    && Number.isFinite(schema.minimum) && Number.isFinite(schema.maximum) && schema.minimum > schema.maximum) {
+    violations.push(`${path} has minimum above maximum`);
+  }
+
+  if (schema.anyOf !== undefined) {
+    if (!Array.isArray(schema.anyOf) || schema.anyOf.length === 0) {
+      violations.push(`${path}.anyOf must be a non-empty array of schemas`);
+    } else {
+      if (Object.keys(schema).some((key) => key !== 'anyOf' && key !== 'description')) {
+        violations.push(`${path}.anyOf cannot be combined with other validation keywords`);
       }
-      for (const key of Object.keys(leaf)) {
-        if (!LEAF_KEYS.includes(key)) violations.push(`${name}.${key} is not supported (subset: ${LEAF_KEYS.join('/')})`);
+      schema.anyOf.forEach((branch, index) => {
+        const branchPath = `${path}.anyOf[${index}]`;
+        if (!isPlainObject(branch)) violations.push(`${branchPath} must be a schema object`);
+        else validateSchemaNode(branch, branchPath, depth + 1, violations);
+      });
+    }
+  }
+
+  if (type === 'object') {
+    const properties = schema.properties ?? {};
+    if (!isPlainObject(properties)) {
+      violations.push(`${path}.properties must be an object of schemas`);
+    } else {
+      for (const [name, child] of Object.entries(properties)) {
+        const childPath = path === '' ? name : `${path}.${name}`;
+        if (!isPlainObject(child)) violations.push(`${childPath} must be a schema object`);
+        else validateSchemaNode(child, childPath, depth + 1, violations);
       }
-      if (leaf.type !== undefined && (typeof leaf.type !== 'string' || !LEAF_TYPES.includes(leaf.type))) {
-        violations.push(`${name}.type "${String(leaf.type)}" is not supported (subset: ${LEAF_TYPES.join('/')})`);
-      }
-      if (leaf.description !== undefined && typeof leaf.description !== 'string') {
-        violations.push(`${name}.description must be a string`);
-      }
-      // 数值边界只适用于 integer 和 number 字段，且必须是有限数值。
-      for (const bound of ['minimum', 'maximum']) {
-        if (leaf[bound] === undefined) continue;
-        if (typeof leaf[bound] !== 'number' || !Number.isFinite(leaf[bound])) {
-          violations.push(`${name}.${bound} must be a finite number`);
-        } else if (typeof leaf.type !== 'string' || !NUMBER_TYPES.includes(leaf.type)) {
-          violations.push(`${name}.${bound} needs type integer or number`);
+    }
+    const required = schema.required ?? [];
+    if (!Array.isArray(required) || required.some((key) => typeof key !== 'string')) {
+      violations.push(`${path === '' ? 'required' : `${path}.required`} must be an array of strings`);
+    } else {
+      for (const key of required) {
+        if (!isPlainObject(properties) || !Object.hasOwn(properties, key)) {
+          violations.push(`${path === '' ? '' : `${path}.`}required names "${key}" which is not in properties`);
         }
       }
-      if (typeof leaf.type === 'string' && NUMBER_TYPES.includes(leaf.type)
-        && typeof leaf.minimum === 'number' && typeof leaf.maximum === 'number'
-        && Number.isFinite(leaf.minimum) && Number.isFinite(leaf.maximum) && leaf.minimum > leaf.maximum) {
-        // 下限大于上限时没有合法值，应在注册时报告无效模式。
-        violations.push(`${name} has minimum above maximum`);
-      }
     }
-  }
-  const required = schema.required ?? [];
-  if (!Array.isArray(required) || required.some((key) => typeof key !== 'string')) {
-    violations.push('required must be an array of strings');
-  } else {
-    for (const key of required) {
-      if (!Object.hasOwn(properties, key)) violations.push(`required names "${key}" which is not in properties`);
+    if (schema.additionalProperties !== undefined && schema.additionalProperties !== false) {
+      violations.push(`${path === '' ? 'additionalProperties' : `${path}.additionalProperties`} must be false`);
     }
+    return;
   }
+
+  if (schema.properties !== undefined || schema.required !== undefined || schema.additionalProperties !== undefined) {
+    const keyword = schema.properties !== undefined ? 'properties' : schema.required !== undefined ? 'required' : 'additionalProperties';
+    violations.push(`${path}.${keyword} requires type object`);
+  }
+
+  if (type === 'array') {
+    if (!isPlainObject(schema.items)) {
+      violations.push(`${path}.items must be a string schema`);
+    } else {
+      validateSchemaNode(schema.items, `${path}.items`, depth + 1, violations);
+      if (schemaType(schema.items) !== 'string') violations.push(`${path}.items.type must be string`);
+    }
+  } else if (schema.items !== undefined) {
+    violations.push(`${path}.items requires type array`);
+  }
+}
+
+function matchesType(type: string, value: unknown): boolean {
+  if (type === 'string') return typeof value === 'string';
+  if (type === 'integer') return Number.isInteger(value);
+  if (type === 'number') return typeof value === 'number' && Number.isFinite(value);
+  if (type === 'boolean') return typeof value === 'boolean';
+  if (type === 'object') return isPlainObject(value);
+  if (type === 'array') return Array.isArray(value);
+  return true;
+}
+
+// 注册时列出所有不支持构造及其路径，便于一次修正完整模式。
+export function assertSupportedSchema(schema: Record<string, unknown>): void {
+  const violations: string[] = [];
+  validateSchemaNode(schema, '', 0, violations);
   if (violations.length > 0) {
     throw new KernelError('tool_parameters_unsupported_construct', { detail: violations.join('; ') });
   }
 }
 
+function validateValue(schema: Record<string, unknown>, value: unknown, path: string, violations: string[]): void {
+  if (Array.isArray(schema.anyOf)) {
+    const valid = schema.anyOf.some((branch) => {
+      if (!isPlainObject(branch)) return false;
+      const branchViolations: string[] = [];
+      validateValue(branch, value, path, branchViolations);
+      return branchViolations.length === 0;
+    });
+    if (!valid) violations.push(`"${path}" must match one of the allowed schemas`);
+    return;
+  }
+
+  const type = schemaType(schema);
+  if (type === 'string' && typeof value !== 'string') violations.push(`"${path}" must be a string`);
+  else if (type === 'integer' && !Number.isInteger(value)) violations.push(`"${path}" must be an integer`);
+  else if (type === 'number' && (typeof value !== 'number' || !Number.isFinite(value))) violations.push(`"${path}" must be a number`);
+  else if (type === 'boolean' && typeof value !== 'boolean') violations.push(`"${path}" must be a boolean`);
+  else if (type === 'object' && !isPlainObject(value)) violations.push(`"${path}" must be an object`);
+  else if (type === 'array' && !Array.isArray(value)) violations.push(`"${path}" must be an array`);
+
+  if (schema.enum !== undefined && Array.isArray(schema.enum) && !schema.enum.some((option) => Object.is(option, value))) {
+    violations.push(`"${path}" must be one of the allowed values`);
+  }
+  if (type !== undefined && NUMBER_TYPES.includes(type) && typeof value === 'number') {
+    if (typeof schema.minimum === 'number' && value < schema.minimum) violations.push(`"${path}" must be at least ${schema.minimum}`);
+    if (typeof schema.maximum === 'number' && value > schema.maximum) violations.push(`"${path}" must be at most ${schema.maximum}`);
+  }
+
+  if (type === 'object' && isPlainObject(value)) {
+    const properties = isPlainObject(schema.properties) ? schema.properties : {};
+    const required = Array.isArray(schema.required) ? schema.required : [];
+    for (const key of required) {
+      if (typeof key === 'string' && value[key] === undefined) {
+        violations.push(`missing required property "${path === '' ? key : `${path}.${key}`}"`);
+      }
+    }
+    for (const [key, childValue] of Object.entries(value)) {
+      const childPath = path === '' ? key : `${path}.${key}`;
+      const childSchema = properties[key];
+      if (childSchema === undefined) {
+        if (schema.additionalProperties === false) violations.push(`"${childPath}" is not allowed`);
+      } else if (isPlainObject(childSchema)) {
+        validateValue(childSchema, childValue, childPath, violations);
+      }
+    }
+  } else if (type === 'array' && Array.isArray(value) && isPlainObject(schema.items)) {
+    value.forEach((item, index) => validateValue(schema.items as Record<string, unknown>, item, `${path}[${index}]`, violations));
+  }
+}
+
 // 调用时使用受控子集校验参数，返回所有违规项；空列表表示合法。
-// 未声明字段按 JSON Schema 默认规则允许。
+// 未声明字段按 JSON Schema 默认规则允许，除非对象显式关闭 additionalProperties。
 export function validateArgs(schema: Record<string, unknown>, args: unknown): string[] {
   if (!isPlainObject(args)) return ['arguments must be an object'];
-  const violations = [];
-  const properties = isPlainObject(schema.properties) ? schema.properties : {};
-  const required = Array.isArray(schema.required) ? schema.required : [];
-  for (const key of required) {
-    if (typeof key !== 'string') continue;
-    if (args[key] === undefined) violations.push(`missing required property "${key}"`);
-  }
-  for (const [key, value] of Object.entries(args)) {
-    const leaf = properties[key];
-    if (!isPlainObject(leaf) || value === undefined) continue;
-    const type = leaf.type;
-    if (type === 'string' && typeof value !== 'string') violations.push(`"${key}" must be a string`);
-    else if (type === 'integer' && !Number.isInteger(value)) violations.push(`"${key}" must be an integer`);
-    else if (type === 'number' && (typeof value !== 'number' || !Number.isFinite(value))) violations.push(`"${key}" must be a number`);
-    else if (type === 'boolean' && typeof value !== 'boolean') violations.push(`"${key}" must be a boolean`);
-    if (typeof type === 'string' && NUMBER_TYPES.includes(type) && typeof value === 'number') {
-      if (typeof leaf.minimum === 'number' && value < leaf.minimum) violations.push(`"${key}" must be at least ${leaf.minimum}`);
-      if (typeof leaf.maximum === 'number' && value > leaf.maximum) violations.push(`"${key}" must be at most ${leaf.maximum}`);
-    }
-  }
+  const violations: string[] = [];
+  validateValue(schema, args, '', violations);
   return violations;
 }
