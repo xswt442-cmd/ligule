@@ -6,7 +6,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
-  createConfig, createDecisionChain, createKernel, createSessionLog, createSubagentPlugin,
+  createConfig, createDecisionChain, createKernel, createLoop, createSessionLog, createSubagentPlugin,
   createPermissionContext, minimalPlugin, networkPlugin,
 } from '../dist/index.js';
 
@@ -211,4 +211,106 @@ test('an inline mode freezes the registered tools and prompt fragments in the ch
     task: 'use an unknown fragment',
     mode: { type: 'inline', tools: ['read'], prompt: ['missing-guidance'] },
   }), { code: 'mode_prompt_unavailable' });
+});
+
+test('one parent turn can run three independent subagents concurrently', { timeout: 10_000 }, async () => {
+  const boundary = await workspace();
+  const config = createConfig({ user: { boundary } });
+  const chain = createDecisionChain({ mode: 'auto' });
+  const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'parallel-parent' });
+  const childTasks = ['child one', 'child two', 'child three'];
+  const requestedTasks = [...childTasks, 'child four'];
+  let childStarts = 0;
+  let activeChildren = 0;
+  let maximumActiveChildren = 0;
+  let releaseChildren;
+  const allChildrenStarted = new Promise((resolve) => { releaseChildren = resolve; });
+  const provider = {
+    name: 'parallel-check',
+    model: 'parallel-check',
+    capabilities: {},
+    async *stream(request) {
+      const last = request.messages.at(-1);
+      if (last?.role === 'user' && last.text === 'delegate three') {
+        for (const [index, task] of requestedTasks.entries()) {
+          yield { type: 'tool-call', id: `parallel-${index}`, name: 'subagent', args: { task } };
+        }
+        return;
+      }
+      if (last?.role === 'user' && childTasks.includes(last.text)) {
+        childStarts += 1;
+        activeChildren += 1;
+        maximumActiveChildren = Math.max(maximumActiveChildren, activeChildren);
+        if (childStarts === childTasks.length) releaseChildren();
+        let timer;
+        try {
+          await Promise.race([
+            allChildrenStarted,
+            new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('subagents did not overlap')), 1_000); }),
+          ]);
+          yield { type: 'text', text: `finished ${last.text}` };
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+          activeChildren -= 1;
+        }
+        return;
+      }
+      yield { type: 'text', text: 'all three children finished' };
+    },
+  };
+  const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
+  createSubagentPlugin({
+    config,
+    provider,
+    chain,
+    prompt: { staticPrefix: 'parallel parent' },
+    directory: session.directory,
+    sessionId: 'parallel-parent',
+    plugins: [minimalPlugin, networkPlugin],
+  }).setup(kernel);
+
+  const result = await createLoop({ kernel, provider, session, limits: { iterations: 3, modelCalls: 3 } }).run('delegate three');
+  assert.equal(result.text, 'all three children finished');
+  assert.equal(childStarts, 3);
+  assert.equal(maximumActiveChildren, 3);
+  const parentEvents = (await readFile(join(session.directory, 'parallel-parent.jsonl'), 'utf8'))
+    .split('\n').filter(Boolean).map(JSON.parse);
+  const outcomes = parentEvents.filter((event) => event.kind === 'tool' && event.tool === 'subagent');
+  assert.equal(outcomes.length, 4);
+  assert.equal(outcomes.filter((event) => event.result.content?.result?.state === 'completed').length, 3);
+  assert.equal(outcomes.filter((event) => event.result.code === 'subagent_concurrency_limit').length, 1);
+});
+
+test('rebuilding the parent continues child session numbering without reusing old records', async () => {
+  const boundary = await workspace();
+  const config = createConfig({ user: { boundary } });
+  const chain = createDecisionChain({ mode: 'auto' });
+  const provider = scripted([text('first child'), text('second child')]);
+  const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'restarted-parent' });
+  const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
+  const deps = {
+    config,
+    provider,
+    chain,
+    prompt: { staticPrefix: '' },
+    directory: session.directory,
+    sessionId: 'restarted-parent',
+    plugins: [minimalPlugin],
+  };
+  let unregister = createSubagentPlugin(deps).setup(kernel);
+  try {
+    const first = await kernel.call('subagent', { task: 'first task' });
+    assert.equal(first.sessionId, 'restarted-parent.sub-1');
+    unregister();
+
+    unregister = createSubagentPlugin(deps).setup(kernel);
+    const second = await kernel.call('subagent', { task: 'second task' });
+    assert.equal(second.sessionId, 'restarted-parent.sub-2');
+    const files = (await readdir(session.directory)).sort();
+    assert.ok(files.includes('restarted-parent.sub-1.jsonl'));
+    assert.ok(files.includes('restarted-parent.sub-2.jsonl'));
+  } finally {
+    unregister();
+    await session.close();
+  }
 });
