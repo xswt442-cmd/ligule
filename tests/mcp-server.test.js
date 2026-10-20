@@ -437,8 +437,15 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     assert.ok(blockedExecResult, 'the restricted command attempt is recorded');
     const blockedExecRecord = JSON.parse(blockedExecResult.record.json);
     assert.equal(blockedExecRecord.result.kind, 'refusal');
-    assert.equal(blockedExecRecord.result.code, 'permission_sandbox_unavailable');
-    recordTrace(trace, 'default_mcp_permission_refuses_shell', { code: blockedExecRecord.result.code, sideEffectStarted: false });
+    const sandbox = await detectPermissionCapabilities();
+    const sandboxAvailable = sandbox.capabilities.filesystemRead !== 'unavailable'
+      && sandbox.capabilities.filesystemWrite !== 'unavailable'
+      && sandbox.capabilities.network === 'full'
+      && sandbox.capabilities.process === 'full';
+    assert.equal(blockedExecRecord.result.code, sandboxAvailable ? 'ask_declined' : 'permission_sandbox_unavailable');
+    recordTrace(trace, 'default_mcp_shell_attempt_refused_before_spawn', {
+      code: blockedExecRecord.result.code, sandboxAvailable, sideEffectStarted: false,
+    });
 
     const approvalRun = toolData(await first.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_E2E_APPROVAL_DENIED' } }), 'run_start_approval');
     const approvalDone = await waitForOutcome(first.client, approvalRun.operationId);
