@@ -47,10 +47,16 @@ test('workspace-write refuses command execution when the backend cannot enforce 
   assert.equal(permissionDenial(state, 'exec')?.code, 'permission_sandbox_unavailable');
 });
 
-test('read-only command execution needs complete read, write, process, and network enforcement', () => {
+test('read-only command execution needs usable filesystem, process, and network enforcement', () => {
   assert.equal(permissionDenial(permission('read-only'), 'exec'), undefined);
   assert.equal(permissionDenial(permission('read-only', 'policy', {
-    filesystemRead: 'partial', filesystemWrite: 'full', network: 'full', process: 'full',
+    filesystemRead: 'partial', filesystemWrite: 'partial', network: 'full', process: 'full',
+  }), 'exec'), undefined);
+  assert.equal(permissionDenial(permission('read-only', 'policy', {
+    filesystemRead: 'unavailable', filesystemWrite: 'full', network: 'full', process: 'full',
+  }), 'exec')?.code, 'permission_sandbox_unavailable');
+  assert.equal(permissionDenial(permission('read-only', 'policy', {
+    filesystemRead: 'partial', filesystemWrite: 'unavailable', network: 'full', process: 'full',
   }), 'exec')?.code, 'permission_sandbox_unavailable');
   assert.equal(permissionDenial(permission('read-only', 'policy', {
     filesystemRead: 'full', filesystemWrite: 'full', network: 'partial', process: 'full',

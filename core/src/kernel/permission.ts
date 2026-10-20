@@ -110,7 +110,7 @@ export function permissionDenial(permission: PermissionContext, access: Permissi
   if (access !== 'exec') return undefined;
 
   const filesystemReady = permission.profile === 'read-only'
-    ? permission.capabilities.filesystemRead === 'full' && permission.capabilities.filesystemWrite === 'full'
+    ? permission.capabilities.filesystemRead !== 'unavailable' && permission.capabilities.filesystemWrite !== 'unavailable'
     : permission.capabilities.filesystemWrite === 'full';
   if (!filesystemReady) {
     return {

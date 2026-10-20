@@ -167,6 +167,25 @@ test('the execution layer fails closed when permission or an enforcing backend i
   );
 });
 
+test('Linux read-only Shell runs under bubblewrap and cannot write to its workspace', {
+  skip: process.platform === 'linux' ? false : 'requires the Linux bubblewrap backend',
+}, async (t) => {
+  const workspace = mkdtempSync(join(directory, 'read-only-sandbox-'));
+  t.after(() => rmSync(workspace, { recursive: true, force: true }));
+  const command = 'printf restricted-ok; if touch denied; then exit 18; fi';
+  const permission = createPermissionContext('read-only', 'disabled', {
+    filesystemRead: 'partial', filesystemWrite: 'full', network: 'full', process: 'full',
+  });
+  const result = await execTool.run({ command }, {
+    config: { boundary: workspace }, permission,
+    shell: withNativeExitCode(shell, command),
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.match(result.text, /restricted-ok/u);
+  assert.equal(existsSync(join(workspace, 'denied')), false);
+});
+
 test('the child receives approved environment variables without provider secrets', async () => {
   const secretName = 'LIGULE_EXEC_TEST_PROVIDER_SECRET';
   process.env[secretName] = 'exec-test-secret-sentinel';

@@ -328,7 +328,11 @@ export const execTool = {
           throw new KernelError('permission_sandbox_unavailable', { detail: result.reason });
         }
         if (permission.profile === 'read-only') {
-          requireFullCapability(result.capabilities, 'filesystemRead', 'permission_sandbox_unavailable');
+          if (result.capabilities.filesystemRead === 'unavailable') {
+            throw new KernelError('permission_sandbox_unavailable', {
+              detail: 'the Linux exec backend reported filesystemRead=unavailable',
+            });
+          }
           requireFullCapability(result.capabilities, 'filesystemWrite', 'permission_sandbox_unavailable');
         } else {
           requireFullCapability(result.capabilities, 'filesystemWrite', 'permission_sandbox_unavailable');
