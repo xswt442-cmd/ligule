@@ -211,6 +211,61 @@ test('Linux workspace-write Shell writes inside its workspace and cannot escape 
   assert.equal(readFileSync(outside, 'utf8'), 'outside content stays unchanged');
 });
 
+test('Linux sandbox timeout stops descendants before they can change the workspace', {
+  skip: process.platform === 'linux' ? false : 'requires the Linux bubblewrap backend',
+}, async (t) => {
+  const probe = await probeLinuxSandboxIsolation();
+  if (!probe.available) return t.skip(probe.reason);
+
+  const workspace = mkdtempSync(join(directory, 'sandbox-timeout-'));
+  t.after(() => rmSync(workspace, { recursive: true, force: true }));
+  const command = '(touch started; sleep 1; touch leaked-after-timeout) & wait';
+  const permission = createPermissionContext('workspace-write', 'disabled', {
+    filesystemRead: 'partial', filesystemWrite: 'partial', network: 'full', process: 'full',
+  });
+  await assert.rejects(
+    () => execTool.run({ command }, {
+      config: { boundary: workspace, limits: { execTimeoutMs: 250 } }, permission,
+      shell: withNativeExitCode(shell, command),
+    }),
+    (error) => error.code === 'exec_timeout',
+  );
+  await delay(1_100);
+  assert.equal(existsSync(join(workspace, 'started')), true, 'the child process must have started inside the sandbox');
+  assert.equal(existsSync(join(workspace, 'leaked-after-timeout')), false, 'a killed descendant must not write after timeout');
+});
+
+test('Linux sandbox cancellation stops descendants before they can change the workspace', {
+  skip: process.platform === 'linux' ? false : 'requires the Linux bubblewrap backend',
+}, async (t) => {
+  const probe = await probeLinuxSandboxIsolation();
+  if (!probe.available) return t.skip(probe.reason);
+
+  const workspace = mkdtempSync(join(directory, 'sandbox-cancel-'));
+  t.after(() => rmSync(workspace, { recursive: true, force: true }));
+  const command = '(touch started; sleep 1; touch leaked-after-cancel) & wait';
+  const permission = createPermissionContext('workspace-write', 'disabled', {
+    filesystemRead: 'partial', filesystemWrite: 'partial', network: 'full', process: 'full',
+  });
+  const controller = new AbortController();
+  const execution = execTool.run({ command }, {
+    config: { boundary: workspace }, permission, signal: controller.signal,
+    shell: withNativeExitCode(shell, command),
+  });
+  try {
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline && !existsSync(join(workspace, 'started'))) await delay(10);
+    assert.equal(existsSync(join(workspace, 'started')), true, 'the child process must have started inside the sandbox');
+    controller.abort();
+    await assert.rejects(() => execution, (error) => error.code === 'exec_cancelled');
+    await delay(1_100);
+    assert.equal(existsSync(join(workspace, 'leaked-after-cancel')), false, 'a cancelled descendant must not write afterward');
+  } finally {
+    controller.abort();
+    await execution.catch(() => undefined);
+  }
+});
+
 test('the child receives approved environment variables without provider secrets', async () => {
   const secretName = 'LIGULE_EXEC_TEST_PROVIDER_SECRET';
   process.env[secretName] = 'exec-test-secret-sentinel';
