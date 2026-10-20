@@ -162,6 +162,41 @@ test('network stays isolated by default and is shared only when explicitly reque
   assert.match(sharedRun.stdout, /connected/);
 });
 
+test('network isolation also applies to subprocesses started inside the sandbox', { skip: !linux }, async (t) => {
+  const paths = fixture(t);
+  const server = createServer((socket) => socket.end('connected'));
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => server.close());
+  const address = server.address();
+  assert.notEqual(address, null);
+  const childScript = [
+    'import socket,sys',
+    'sock=socket.socket()',
+    'sock.settimeout(0.7)',
+    'try:',
+    ' sock.connect(("127.0.0.1",int(sys.argv[1])))',
+    ' print("connected")',
+    'except OSError:',
+    ' print("blocked")',
+  ].join('\n');
+  const parentScript = [
+    'import subprocess,sys',
+    `child=${JSON.stringify(childScript)}`,
+    'result=subprocess.run([sys.executable,"-c",child,sys.argv[1]],capture_output=True,text=True,timeout=3)',
+    'print(result.stdout.strip())',
+  ].join('\n');
+  const result = await buildLinuxSandbox(request(paths, {
+    executable: '/usr/bin/python3',
+    argv: ['-c', parentScript, String(address.port)],
+  }));
+  if (!result.available) return t.skip(result.reason);
+
+  const child = run(result);
+  assert.equal(child.status, 0, child.stderr);
+  assert.match(child.stdout, /blocked/u, 'the child process must inherit the restricted network namespace');
+});
+
 test('invalid workspace boundaries and unapproved environment variables are rejected', { skip: !linux }, async (t) => {
   const paths = fixture(t);
   await assert.rejects(
