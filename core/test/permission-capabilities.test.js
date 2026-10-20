@@ -104,6 +104,7 @@ test('Windows reports read-only and workspace-write profile availability indepen
   assert.equal(snapshot.capabilities.process, 'full');
   assert.ok(snapshot.limitations.some((limitation) => limitation.startsWith('read-only:')));
   assert.ok(snapshot.limitations.some((limitation) => limitation.includes('hard links')));
+  assert.ok(snapshot.limitations.some((limitation) => limitation.includes('auto-inherited')));
 });
 
 test('Windows exposes AppContainer read-only only after its real filesystem and network probe succeeds', async () => {

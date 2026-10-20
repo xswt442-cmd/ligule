@@ -123,6 +123,7 @@ export async function detectPermissionCapabilities(
             'Windows workspace-write uses a per-run WRITE_RESTRICTED token and temporary workspace ACL grants. Reads remain unrestricted, network is allowed only when the session explicitly selects unrestricted, and the result is partial. / Windows 工作区写入使用每次运行独立的 WRITE_RESTRICTED Token 和临时 ACL；文件读取不受限制，只有会话明确选择不受限网络时才允许运行，整体隔离为部分隔离。',
             'Existing hard links, a writable ancestor FILE_DELETE_CHILD ACE, or a concurrent same-user ACL change can escape the workspace boundary. The backend does not claim protection from hostile native code. / 既有硬链接、可写祖先目录的 FILE_DELETE_CHILD ACE 或并发 ACL 修改可能越过工作区边界；此后端不承诺隔离恶意原生代码。',
             'The runner does not lower Integrity Level. A forced Guardian termination can leave a unique SID-only ACE; ordinary same-user and Low-integrity access must remain at baseline. / Runner 不降低完整性级别。强制终止 Guardian 后可能残留独立 SID ACE；同一用户普通进程和 Low 完整性进程的访问权限应保持原状。',
+            'Windows may mark affected workspace DACLs as auto-inherited while propagating temporary ACEs. Normal cleanup revokes the ACE, but the inheritance metadata may remain; this does not retain the run’s ACE permission, though exact DACL metadata restoration is not guaranteed. / Windows 传播临时 ACE 时可能把受影响的工作区 DACL 标记为自动继承。正常清理会撤销 ACE，但继承元数据标记可能保留；该标记不会保留本次 ACE 权限，因此不保证 DACL 元数据完全恢复。',
           ] : []),
         ]),
       });
