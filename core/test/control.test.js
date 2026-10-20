@@ -68,3 +68,32 @@ test('await rejects unknown operations and invalid wait bounds', async () => {
     }
   });
 });
+
+test('a failed delegated run reports a requested structured result as invalid', async () => {
+  await mkdir(testplace, { recursive: true });
+  const directory = await mkdtemp(join(testplace, 'control-await-'));
+  await (async () => {
+    const host = {
+      async handle({ method }) {
+        if (method === 'session.create') return { sessionId: 'schema-failure-session' };
+        if (method === 'run.start') throw Object.assign(new Error('provider_transport_error'), { code: 'provider_transport_error' });
+        throw new Error(`unexpected host method: ${method}`);
+      },
+      async release() {},
+    };
+    const control = createControl(host, directory);
+    try {
+      const { sessionId } = await control.create(directory);
+      const started = control.start(sessionId, 'return a structured result', {
+        outputSchema: { type: 'object', properties: { summary: { type: 'string' } }, required: ['summary'] },
+      });
+      const failed = await control.await(started.operationId, 5_000);
+      assert.equal(failed.state, 'failed');
+      assert.equal(failed.result.validation.status, 'invalid');
+      assert.match(failed.result.validation.errors[0], /provider_transport_error/u);
+    } finally {
+      await control.release();
+      await rm(directory, { recursive: true, force: true });
+    }
+  })();
+});

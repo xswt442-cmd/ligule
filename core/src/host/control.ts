@@ -428,10 +428,15 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
         found.summary = 'Run completed.';
       },
     ).catch((error: unknown) => {
-      found.code = controlErrorCode(error);
+      const code = controlErrorCode(error);
+      found.code = code;
       if (error instanceof KernelError && error.diagnostics !== undefined) found.diagnostics = error.diagnostics;
       found.state = ['provider_cancelled', 'loop_cancelled', 'ask_user_cancelled'].includes(found.code) ? 'cancelled' : 'failed';
-      found.result = failedRunResult(found.operationId, sessionId, found.code, found.diagnostics);
+      const validation = delegation?.outputSchema === undefined ? undefined : {
+        status: 'invalid' as const,
+        errors: [`Run ended with ${code} before a valid structured result was submitted.`],
+      };
+      found.result = failedRunResult(found.operationId, sessionId, code, found.diagnostics, validation);
     }).then(() => {
       settleInteractions(found);
       if (active.get(sessionId) === found) active.delete(sessionId);

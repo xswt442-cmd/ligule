@@ -194,6 +194,11 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                 // Record-lock and Session I/O failures mean the child record may be unreliable; do not turn them into a normal child result.
                 if (error instanceof KernelRuntimeError) throw error;
                 const code = stableErrorCode(error);
+                const validation = outputContract === undefined ? undefined : {
+                  status: 'invalid' as const,
+                  schemaDigest: outputContract.digest,
+                  errors: [`Run ended with ${code} before a valid structured result was submitted.`],
+                };
                 return {
                   text: null,
                   summary: `Child run ${code}; its saved Session is available for inspection.`,
@@ -208,6 +213,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                     id,
                     code,
                     error instanceof KernelError ? error.diagnostics : undefined,
+                    validation,
                   ),
                 };
               }

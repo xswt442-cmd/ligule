@@ -410,11 +410,18 @@ test('a failed child returns its persisted Session link and a failed RunResult',
     plugins: [minimalPlugin],
   }).setup(kernel);
 
-  const result = await kernel.call('subagent', { task: 'inspect the workspace' });
+  const result = await kernel.call('subagent', {
+    task: 'inspect the workspace',
+    outputSchema: { type: 'object', properties: { summary: { type: 'string' } }, required: ['summary'] },
+  });
   assert.equal(result.sessionId, 'failed-child-parent.sub-1');
   assert.equal(result.result.state, 'failed');
   assert.equal(result.result.stopReason, 'provider_error');
   assert.equal(result.result.diagnostic.code, 'provider_transport_error');
+  assert.equal(result.result.validation.status, 'invalid');
+  assert.deepEqual(result.result.validation.errors, [
+    'Run ended with provider_transport_error before a valid structured result was submitted.',
+  ]);
   assert.deepEqual(result.result.artifacts, [{ kind: 'session', sessionId: result.sessionId }]);
   const childEvents = (await readFile(join(session.directory, `${result.sessionId}.jsonl`), 'utf8'))
     .split('\n').filter(Boolean).map(JSON.parse);

@@ -182,6 +182,7 @@ export function failedRunResult(
   sessionId: string,
   code: string,
   provider?: ProviderDiagnostic,
+  validation: RunValidation = { status: 'not_requested' },
 ): RunResult {
   const stopReason = stopReasonForCode(code);
   return {
@@ -190,7 +191,7 @@ export function failedRunResult(
     state: stopReason === 'cancelled' ? 'cancelled' : 'failed',
     stopReason,
     output: { text: null },
-    validation: { status: 'not_requested' },
+    validation,
     artifacts: artifacts(sessionId),
     usage: { iterations: null, modelCalls: null },
     diagnostic: { code, ...(provider === undefined ? {} : { provider }) },
