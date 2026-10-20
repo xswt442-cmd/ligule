@@ -4,10 +4,12 @@
 // 它沿用父会话的权限判定、不能递归启动其他子 Agent，且拥有独立记录以便恢复。
 //
 // 该工具通过插件注册，不属于 Kernel 内置能力。当前每个父会话一次只运行一个派生任务。
+import { randomUUID } from 'node:crypto';
 import { createKernel } from '../kernel/kernel.js';
 import { createLoop, DEFAULT_LOOP_LIMITS } from '../kernel/loop.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { createSessionLog } from '../session/session.js';
+import { completedRunResult } from '../delegation.js';
 import {
   applyModeToPrompt, resolveModeSelection,
   type ModeDirectories, type ModeFile, type ModePromptFragment, type RequestedModeSelection,
@@ -153,6 +155,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
               modelCalls: result.modelCalls,
               mode: resolvedMode?.name ?? null,
               modeDigest: modeIdentity?.digest ?? null,
+              result: completedRunResult(randomUUID(), id, result),
             };
           } finally {
             undoMode();

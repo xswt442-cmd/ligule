@@ -3,9 +3,9 @@ import { realpath } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import type { ProviderDiagnostic } from '../kernel/error.js';
+import { completedRunResult, failedRunResult, type RunResult } from '../delegation.js';
 import { checkedAnswers, type AskQuestion } from '../tools/ask-user.js';
 import { APPROVAL_METHOD, QUESTION_METHOD } from './protocol.js';
-import { completedRunResult, failedRunResult, type RunResult } from './delegation.js';
 import type { Host } from './host.js';
 import type { LoopResult } from '../kernel/loop.js';
 

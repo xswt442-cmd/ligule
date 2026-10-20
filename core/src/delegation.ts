@@ -1,5 +1,5 @@
-import type { ProviderDiagnostic } from '../kernel/error.js';
-import type { LoopResult } from '../kernel/loop.js';
+import type { ProviderDiagnostic } from './kernel/error.js';
+import type { LoopResult } from './kernel/loop.js';
 
 export type RunState = 'completed' | 'failed' | 'cancelled';
 export type RunStopReason =

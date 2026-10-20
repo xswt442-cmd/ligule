@@ -80,6 +80,12 @@ test('the derived agent runs on the parent decision chain and cannot delegate ag
   const result = await kernel.call('subagent', { task: 'delete the thing' });
   assert.equal(result.text, 'I could not delete it');
   assert.equal(result.sessionId, 'parent.sub-1');
+  assert.equal(result.result.runId.length > 0, true);
+  assert.equal(result.result.sessionId, result.sessionId);
+  assert.equal(result.result.state, 'completed');
+  assert.equal(result.result.stopReason, 'assistant_completed');
+  assert.equal(result.result.output.text, result.text);
+  assert.deepEqual(result.result.artifacts, [{ kind: 'session', sessionId: result.sessionId }]);
   assert.equal(result.iterations >= 2, true);
   // 子会话使用父会话的审批档位，拒绝次数也计入父会话。
   assert.equal(chain.denials().total >= 1, true);
