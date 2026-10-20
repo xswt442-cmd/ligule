@@ -11,7 +11,7 @@ import { createLoop, DEFAULT_LOOP_LIMITS } from '../kernel/loop.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { createSessionLog } from '../session/session.js';
 import {
-  completedRunResult, createOutputSchemaContract, DELEGATION_RESULT_TOOL, MAX_DELEGATION_SCHEMA_BYTES,
+  completedRunResult, createOutputSchemaContract, DELEGATION_RESULT_TOOL, failedRunResult, MAX_DELEGATION_SCHEMA_BYTES,
   MODE_SELECTION_SCHEMA, outputSchemaInstructions, registerDelegationResultTool,
 } from '../delegation.js';
 import {
@@ -22,11 +22,16 @@ import { createConfig } from '../kernel/config.js';
 import { createDecisionChain } from '../kernel/policy.js';
 import { createLogger } from '../kernel/log.js';
 import { loadAssembly } from '../kernel/assembly.js';
-import { KernelError } from '../kernel/error.js';
+import { KernelError, KernelRuntimeError } from '../kernel/error.js';
 import type { PermissionContext } from '../kernel/permission.js';
 
 type LoopOptions = Parameters<typeof createLoop>[0];
 const MAX_CONCURRENT_SUBAGENTS = 3;
+
+function stableErrorCode(error: unknown): string {
+  const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
+  return typeof code === 'string' && /^[a-z][a-z0-9_]{0,79}$/u.test(code) ? code : 'subagent_failed';
+}
 
 export interface SubagentDeps {
   config: ReturnType<typeof createConfig>;
@@ -72,7 +77,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
         name: 'subagent',
         access: 'inherit',
         execution: 'parallel',
-        description: 'Delegate independent work to child runs with the parent policy and separate session records. Up to three children can run at once; children cannot create more children. When outputSchema is provided, the child must submit its final value with subagent_result.',
+        description: 'Delegate independent work to child runs with the parent policy and separate session records. Up to three children can run at once; children cannot create more children. Check result.state because a failed or cancelled child still returns its saved Session reference. When outputSchema is provided, the child must submit its final value with subagent_result.',
         parameters: {
           type: 'object',
           properties: {
@@ -182,7 +187,30 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                   ? null
                   : () => ({ delegationSchemaDigest: outputContract.digest }),
               });
-              const result = await loop.run(args.task, { signal });
+              let result: Awaited<ReturnType<typeof loop.run>>;
+              try {
+                result = await loop.run(args.task, { signal });
+              } catch (error) {
+                // Record-lock and Session I/O failures mean the child record may be unreliable; do not turn them into a normal child result.
+                if (error instanceof KernelRuntimeError) throw error;
+                const code = stableErrorCode(error);
+                return {
+                  text: null,
+                  summary: `Child run ${code}; its saved Session is available for inspection.`,
+                  sessionId: id,
+                  path: session.path,
+                  iterations: null,
+                  modelCalls: null,
+                  mode: resolvedMode?.name ?? null,
+                  modeDigest: modeIdentity?.digest ?? null,
+                  result: failedRunResult(
+                    randomUUID(),
+                    id,
+                    code,
+                    error instanceof KernelError ? error.diagnostics : undefined,
+                  ),
+                };
+              }
               const validation = outputContract === undefined
                 ? { status: 'not_requested' as const }
                 : structuredSubmitted

@@ -6,7 +6,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
-  createConfig, createDecisionChain, createKernel, createLoop, createSessionLog, createSubagentPlugin,
+  KernelError, createConfig, createDecisionChain, createKernel, createLoop, createSessionLog, createSubagentPlugin,
   createPermissionContext, minimalPlugin, networkPlugin,
 } from '../dist/index.js';
 
@@ -386,4 +386,88 @@ test('a child that never submits its requested structure reports validation fail
   assert.equal(result.result.validation.status, 'invalid');
   assert.equal(result.result.output.structured, undefined);
   assert.match(result.result.validation.errors[0], /without submitting/u);
+});
+
+test('a failed child returns its persisted Session link and a failed RunResult', async () => {
+  const boundary = await workspace();
+  const config = createConfig({ user: { boundary } });
+  const chain = createDecisionChain({ mode: 'auto' });
+  const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'failed-child-parent' });
+  const provider = {
+    name: 'failing-provider',
+    model: 'failing-provider',
+    capabilities: {},
+    async *stream() { throw new KernelError('provider_transport_error'); },
+  };
+  const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
+  createSubagentPlugin({
+    config,
+    provider,
+    chain,
+    prompt: { staticPrefix: '' },
+    directory: session.directory,
+    sessionId: 'failed-child-parent',
+    plugins: [minimalPlugin],
+  }).setup(kernel);
+
+  const result = await kernel.call('subagent', { task: 'inspect the workspace' });
+  assert.equal(result.sessionId, 'failed-child-parent.sub-1');
+  assert.equal(result.result.state, 'failed');
+  assert.equal(result.result.stopReason, 'provider_error');
+  assert.equal(result.result.diagnostic.code, 'provider_transport_error');
+  assert.deepEqual(result.result.artifacts, [{ kind: 'session', sessionId: result.sessionId }]);
+  const childEvents = (await readFile(join(session.directory, `${result.sessionId}.jsonl`), 'utf8'))
+    .split('\n').filter(Boolean).map(JSON.parse);
+  assert.ok(childEvents.some((event) => event.kind === 'turn' && event.status === 'failed'
+    && event.code === 'provider_transport_error'));
+  const parentEvents = (await session.read());
+  const childReference = parentEvents.find((event) => event.kind === 'tool' && event.tool === 'subagent');
+  assert.equal(childReference.result.content.sessionId, result.sessionId);
+  assert.equal(childReference.result.content.result.state, 'failed');
+});
+
+test('cancelling a parent run returns the cancelled child Session reference', async () => {
+  const boundary = await workspace();
+  const config = createConfig({ user: { boundary } });
+  const chain = createDecisionChain({ mode: 'auto' });
+  const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'cancelled-child-parent' });
+  let announceStarted;
+  const started = new Promise((resolve) => { announceStarted = resolve; });
+  const provider = {
+    name: 'cancellable-provider',
+    model: 'cancellable-provider',
+    capabilities: {},
+    async *stream(_request, { signal }) {
+      announceStarted();
+      if (signal.aborted) throw new KernelError('provider_cancelled');
+      await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+      throw new KernelError('provider_cancelled');
+    },
+  };
+  const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
+  createSubagentPlugin({
+    config,
+    provider,
+    chain,
+    prompt: { staticPrefix: '' },
+    directory: session.directory,
+    sessionId: 'cancelled-child-parent',
+    plugins: [minimalPlugin],
+  }).setup(kernel);
+
+  const controller = new AbortController();
+  const pending = kernel.call('subagent', { task: 'inspect until cancelled' }, { signal: controller.signal });
+  await started;
+  controller.abort();
+  const result = await pending;
+  assert.equal(result.sessionId, 'cancelled-child-parent.sub-1');
+  assert.equal(result.result.state, 'cancelled');
+  assert.equal(result.result.stopReason, 'cancelled');
+  const childEvents = (await readFile(join(session.directory, `${result.sessionId}.jsonl`), 'utf8'))
+    .split('\n').filter(Boolean).map(JSON.parse);
+  assert.ok(childEvents.some((event) => event.kind === 'turn' && event.status === 'cancelled'));
+  const parentEvents = await session.read();
+  const childReference = parentEvents.find((event) => event.kind === 'tool' && event.tool === 'subagent');
+  assert.equal(childReference.result.content.sessionId, result.sessionId);
+  assert.equal(childReference.result.content.result.state, 'cancelled');
 });
