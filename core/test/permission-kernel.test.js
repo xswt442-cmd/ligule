@@ -41,8 +41,9 @@ test('permission denial runs before Policy approval and records the separate dec
   assert.equal(events[0].result.code, 'permission_read_only');
 });
 
-test('a workspace profile cannot execute when the platform only provides partial write confinement', async () => {
+test('a workspace profile can execute when the platform reports partial filesystem confinement', async () => {
   let asked = false;
+  let executed = false;
   const events = [];
   const kernel = createKernel({
     config: createConfig({ user: { boundary: process.cwd() } }),
@@ -52,11 +53,29 @@ test('a workspace profile cannot execute when the platform only provides partial
     policy: createDecisionChain({ mode: 'auto', ask: async () => { asked = true; return true; } }),
     session: { directory: process.cwd(), append: async (event) => { events.push(event); } },
   });
-  kernel.register(tool('exec', async () => { assert.fail('the executable must not run'); }));
+  kernel.register(tool('exec', async () => { executed = true; return { text: 'bounded' }; }));
+
+  const result = await kernel.call('operation', {});
+  assert.equal(asked, false);
+  assert.equal(executed, true);
+  assert.equal(result.text, 'bounded');
+  assert.equal(events.some((event) => event.permission?.decision === 'deny'), false);
+});
+
+test('a workspace profile refuses execution when filesystem confinement is unavailable', async () => {
+  let executed = false;
+  const kernel = createKernel({
+    config: createConfig({ user: { boundary: process.cwd() } }),
+    permission: createPermissionContext('workspace-write', 'policy', {
+      filesystemRead: 'partial', filesystemWrite: 'unavailable', network: 'full', process: 'full',
+    }),
+    policy: createDecisionChain({ mode: 'auto' }),
+    session: { directory: process.cwd(), append: async () => {} },
+  });
+  kernel.register(tool('exec', async () => { executed = true; }));
 
   await assert.rejects(kernel.call('operation', {}), { code: 'permission_sandbox_unavailable' });
-  assert.equal(asked, false);
-  assert.equal(events[0].permission.code, 'permission_sandbox_unavailable');
+  assert.equal(executed, false);
 });
 
 test('unknown tool access labels are rejected during registration', () => {

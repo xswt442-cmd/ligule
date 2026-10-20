@@ -95,6 +95,16 @@ function requireFullCapability(
   }
 }
 
+function requireAvailableCapability(
+  capabilities: PermissionCapabilities,
+  name: keyof PermissionCapabilities,
+  code: string,
+): void {
+  if (capabilities[name] === 'unavailable') {
+    throw new KernelError(code, { detail: `the Linux exec backend reported ${name}=unavailable` });
+  }
+}
+
 // Windows 命令输出可能使用控制台 OEM 编码，不能始终按 UTF-8 解码。
 // 先尝试严格 UTF-8；失败时读取当前代码页并按该编码解码，代码页信息在进程内缓存。
 let oemPage: string | undefined;
@@ -327,15 +337,11 @@ export const execTool = {
         if (!result.available) {
           throw new KernelError('permission_sandbox_unavailable', { detail: result.reason });
         }
+        requireAvailableCapability(result.capabilities, 'filesystemRead', 'permission_sandbox_unavailable');
         if (permission.profile === 'read-only') {
-          if (result.capabilities.filesystemRead === 'unavailable') {
-            throw new KernelError('permission_sandbox_unavailable', {
-              detail: 'the Linux exec backend reported filesystemRead=unavailable',
-            });
-          }
           requireFullCapability(result.capabilities, 'filesystemWrite', 'permission_sandbox_unavailable');
         } else {
-          requireFullCapability(result.capabilities, 'filesystemWrite', 'permission_sandbox_unavailable');
+          requireAvailableCapability(result.capabilities, 'filesystemWrite', 'permission_sandbox_unavailable');
         }
         requireFullCapability(result.capabilities, 'process', 'permission_process_isolation_unavailable');
         requireFullCapability(result.capabilities, 'network', 'permission_network_isolation_unavailable');

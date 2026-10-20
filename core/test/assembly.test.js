@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createKernel, createPermissionContext, KernelError, loadAssembly, minimalPlugin } from '../dist/index.js';
 
 const manifestPermission = createPermissionContext('workspace-write', 'policy', {
-  filesystemRead: 'unavailable', filesystemWrite: 'full', network: 'full', process: 'full',
+  filesystemRead: 'partial', filesystemWrite: 'partial', network: 'full', process: 'full',
 });
 
 function tool(name) {

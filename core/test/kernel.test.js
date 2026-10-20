@@ -8,7 +8,7 @@ import {
 } from '../dist/index.js';
 
 const toolFailurePermission = createPermissionContext('workspace-write', 'policy', {
-  filesystemRead: 'unavailable', filesystemWrite: 'full', network: 'full', process: 'full',
+  filesystemRead: 'partial', filesystemWrite: 'partial', network: 'full', process: 'full',
 });
 
 function makeTool(name, overrides = {}) {

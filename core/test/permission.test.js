@@ -31,20 +31,24 @@ test('read-only permits bounded reads and refuses file writes before Policy can 
   });
 });
 
-test('workspace-write permits bounded file writes when command writes are isolated to the workspace', () => {
+test('workspace-write permits commands when the backend reports partial confinement', () => {
   const state = permission('workspace-write', 'policy', {
-    filesystemRead: 'partial', filesystemWrite: 'full', network: 'full', process: 'full',
+    filesystemRead: 'partial', filesystemWrite: 'partial', network: 'full', process: 'full',
   });
   assert.equal(permissionDenial(state, 'read'), undefined);
   assert.equal(permissionDenial(state, 'write'), undefined);
   assert.equal(permissionDenial(state, 'exec'), undefined);
 });
 
-test('workspace-write refuses command execution when the backend cannot enforce workspace writes', () => {
+test('workspace-write refuses command execution when filesystem confinement is unavailable', () => {
   const state = permission('workspace-write', 'policy', {
-    filesystemRead: 'partial', filesystemWrite: 'partial', network: 'full', process: 'full',
+    filesystemRead: 'partial', filesystemWrite: 'unavailable', network: 'full', process: 'full',
   });
   assert.equal(permissionDenial(state, 'exec')?.code, 'permission_sandbox_unavailable');
+  const unreadable = permission('workspace-write', 'policy', {
+    filesystemRead: 'unavailable', filesystemWrite: 'partial', network: 'full', process: 'full',
+  });
+  assert.equal(permissionDenial(unreadable, 'exec')?.code, 'permission_sandbox_unavailable');
 });
 
 test('read-only command execution needs usable filesystem, process, and network enforcement', () => {

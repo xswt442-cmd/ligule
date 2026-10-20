@@ -109,9 +109,8 @@ export function permissionDenial(permission: PermissionContext, access: Permissi
   }
   if (access !== 'exec') return undefined;
 
-  const filesystemReady = permission.profile === 'read-only'
-    ? permission.capabilities.filesystemRead !== 'unavailable' && permission.capabilities.filesystemWrite !== 'unavailable'
-    : permission.capabilities.filesystemWrite === 'full';
+  const filesystemReady = permission.capabilities.filesystemRead !== 'unavailable'
+    && permission.capabilities.filesystemWrite !== 'unavailable';
   if (!filesystemReady) {
     return {
       code: 'permission_sandbox_unavailable',

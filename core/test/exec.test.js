@@ -1,7 +1,7 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -145,7 +145,7 @@ test('execution timeout configuration stays within its fixed bound', async () =>
   );
 });
 
-test('the execution layer fails closed when permission or an enforcing backend is unavailable', async () => {
+test('the execution layer requires permission and explicit network access for full-access commands', async () => {
   await assert.rejects(
     () => execTool.run({ command: 'node -e "process.exit(0)"' }, {
       config: { boundary: process.cwd() }, shell,
@@ -158,13 +158,6 @@ test('the execution layer fails closed when permission or an enforcing backend i
   await assert.rejects(
     () => run(nodeCommand('console.log("unused")'), undefined, undefined, networkLimitedFullAccess),
     (error) => error.code === 'permission_network_isolation_unavailable',
-  );
-  const workspaceWrite = createPermissionContext('workspace-write', 'disabled', {
-    filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
-  });
-  await assert.rejects(
-    () => run('node --version', undefined, undefined, workspaceWrite),
-    (error) => error.code === 'permission_sandbox_unavailable',
   );
 });
 
@@ -188,6 +181,34 @@ test('Linux read-only Shell runs under bubblewrap and cannot write to its worksp
   assert.equal(result.exitCode, 0);
   assert.match(result.text, /restricted-ok/u);
   assert.equal(existsSync(join(workspace, 'denied')), false);
+});
+
+test('Linux workspace-write Shell writes inside its workspace and cannot escape it', {
+  skip: process.platform === 'linux' ? false : 'requires the Linux bubblewrap backend',
+}, async (t) => {
+  const probe = await probeLinuxSandboxIsolation();
+  if (!probe.available) return t.skip(probe.reason);
+
+  const root = mkdtempSync(join(directory, 'workspace-write-sandbox-'));
+  const workspace = join(root, 'workspace');
+  const outside = join(root, 'outside.txt');
+  mkdirSync(workspace);
+  writeFileSync(outside, 'outside content stays unchanged');
+  symlinkSync(outside, join(workspace, 'outside-link'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  const command = 'printf workspace-write-ok > allowed.txt; if touch ../outside.txt 2>/dev/null; then exit 31; fi; if touch outside-link 2>/dev/null; then exit 32; fi; printf complete';
+  const permission = createPermissionContext('workspace-write', 'disabled', {
+    filesystemRead: 'partial', filesystemWrite: 'partial', network: 'full', process: 'full',
+  });
+  const result = await execTool.run({ command }, {
+    config: { boundary: workspace }, permission,
+    shell: withNativeExitCode(shell, command),
+  });
+
+  assert.equal(result.exitCode, 0, result.text);
+  assert.equal(readFileSync(join(workspace, 'allowed.txt'), 'utf8'), 'workspace-write-ok');
+  assert.equal(readFileSync(outside, 'utf8'), 'outside content stays unchanged');
 });
 
 test('the child receives approved environment variables without provider secrets', async () => {
