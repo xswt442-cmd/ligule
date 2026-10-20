@@ -11,6 +11,7 @@ import {
 } from '../dist/index.js';
 import { decode } from '../dist/capability/exec.js';
 import { bindScript } from '../dist/capability/script-binding.js';
+import { probeLinuxSandboxIsolation } from '../dist/capability/sandbox-linux.js';
 
 // Host 选择命令后端并传入这里；测试使用当前机器实际支持的后端。
 // 被测的是 exec 自己的那几件事（头尾分页、标准输入、取消、退出码），所以脚本片段落到一个临时文件里再跑：
@@ -170,6 +171,9 @@ test('the execution layer fails closed when permission or an enforcing backend i
 test('Linux read-only Shell runs under bubblewrap and cannot write to its workspace', {
   skip: process.platform === 'linux' ? false : 'requires the Linux bubblewrap backend',
 }, async (t) => {
+  const probe = await probeLinuxSandboxIsolation();
+  if (!probe.available) return t.skip(probe.reason);
+
   const workspace = mkdtempSync(join(directory, 'read-only-sandbox-'));
   t.after(() => rmSync(workspace, { recursive: true, force: true }));
   const command = 'printf restricted-ok; if touch denied; then exit 18; fi';
