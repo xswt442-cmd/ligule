@@ -53,6 +53,7 @@ test('a real stdio MCP process uses its grant ceiling and detects revocation', a
       defaultPermissionProfile: 'read-only', maxPermissionProfile: 'workspace-write',
       defaultNetwork: 'policy', maxNetwork: 'policy',
       defaultPolicy: 'ask', allowedPolicies: ['ask', 'auto'], allowOperator: true,
+      confirmPartialWorkspaceWrite: true,
       confirmFullAccess: false, confirmUnrestrictedNetwork: false, expiresAt: null,
     };
     const created = await createDelegationGrant(storePath, input, (await listDelegationGrants(storePath)).version);
