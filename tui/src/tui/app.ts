@@ -222,6 +222,7 @@ interface AskState {
   readonly content: string;
   readonly backend: string;
   readonly reason: string;
+  readonly external?: boolean;
 }
 
 interface TuiInfo {
@@ -278,6 +279,26 @@ interface SessionPage {
   readonly header: SessionHeader | null;
   readonly endSeq: number | null;
   readonly hasMore: boolean;
+  readonly writerActive?: boolean;
+}
+
+interface ExternalControlSnapshot extends Record<string, unknown> {
+  readonly sessionId: string;
+  readonly operationId?: string;
+  readonly state: 'idle' | 'running' | 'done' | 'failed' | 'cancelled';
+  readonly phase?: string | null;
+  readonly progress?: TuiProgress | null;
+  readonly pendingInteractions: readonly {
+    readonly requestId: string;
+    readonly sessionId: string;
+    readonly type: 'approval' | 'question';
+    readonly details: Record<string, unknown>;
+  }[];
+  readonly events: readonly Record<string, unknown>[];
+  readonly nextCursor: number;
+  readonly eventGap?: boolean;
+  readonly firstAvailableCursor?: number;
+  readonly queue?: readonly { readonly queueItemId: string; readonly inputCharacters: number; readonly source: 'human' | 'controller' }[];
 }
 
 interface TuiConfigResult extends Record<string, unknown> {
@@ -291,6 +312,8 @@ interface TuiRequestResults {
   readonly 'session.open': { readonly sessionId: string };
   readonly 'session.close': { readonly sessionId: string };
   readonly 'session.read': SessionPage;
+  readonly 'session.observe': SessionPage & { readonly writerActive: boolean };
+  readonly 'session.control': ExternalControlSnapshot;
   readonly 'session.export': Exported;
   readonly 'session.branch': BranchResult;
   readonly 'session.label': { readonly sessionId: string; readonly name: string; readonly archived: boolean };
@@ -331,6 +354,7 @@ interface QuestionState {
   readonly picked: Readonly<Record<string, { readonly raw: string; readonly answer: AskAnswer | null }>>;
   readonly answers?: readonly (AskAnswer | null | undefined)[];
   readonly custom?: string;
+  readonly external?: boolean;
 }
 
 // 将命令表和纯函数导出，供测试及其他界面逻辑使用。
@@ -541,7 +565,9 @@ function approvalBody(tool: string, args: Record<string, unknown>, locale: Local
 
 function Row({ row, expanded, columns, locale = 'zh' }: { readonly row: TranscriptItem; readonly expanded: boolean; readonly columns: number; readonly locale?: Locale }) {
   const t = (zh: string, en: string) => chooseText(locale, zh, en);
-  if (row.kind === 'question') return h(Text, { color: 'cyan' }, `› ${row.text}`);
+  if (row.kind === 'question') return h(Text, { color: 'cyan' }, row.source === 'controller'
+    ? `← ${chooseText(locale, '外部 Agent', 'External agent')}: ${row.text}`
+    : `› ${row.text}`);
   if (row.kind === 'reasoning') {
     const folded = foldText(row.text, expanded, 1);
     return h(Fragment, null,
@@ -613,6 +639,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [controlSnapshot, setControlSnapshot] = useState<AgentControlSnapshot | null>(null);
   const [controlTarget, setControlTarget] = useState<string | null>(null);
   const [controlWizard, setControlWizard] = useState<ControlWizard | null>(null);
+  const [externalControl, setExternalControl] = useState(false);
+  const [externalSnapshot, setExternalSnapshot] = useState<ExternalControlSnapshot | null>(null);
+  const resolvedExternalInteractions = useRef(new Set<string>());
+  useEffect(() => { resolvedExternalInteractions.current.clear(); }, [sessionId]);
   const pickerRequest = useRef(0);
   const [draft, setDraft] = useState('');
   const [caret, setCaret] = useState(0);
@@ -767,7 +797,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
 
   const refreshStatus = useCallback(async () => {
     // Ink 已退出时不再向已关闭的连接发送状态更新。
-    if (!alive.current) return;
+    if (!alive.current || externalControl) return;
     try {
       const current = await client.request('status.get', { sessionId });
       if (activeSession.current === sessionId) setStatus(current);
@@ -776,7 +806,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       setStatus(null);
       push({ kind: 'error', text: t(`无法读取状态：${errorCode(error) ?? errorMessage(error) ?? String(error)}`, `Could not read status: ${errorCode(error) ?? errorMessage(error) ?? String(error)}`) });
     }
-  }, [client, push, sessionId, t]);
+  }, [client, externalControl, push, sessionId, t]);
 
   useEffect(() => {
     const resize = () => setGeometry({ columns: stdout?.columns ?? 80, rows: stdout?.rows ?? 24 });
@@ -858,6 +888,106 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     void refreshStatus();
   }, [client, locale, push, refreshStatus, sessionId]);
 
+  useEffect(() => {
+    if (!externalControl) return undefined;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let cursor = 0;
+    let operationId: string | null = null;
+    let inFlight = false;
+    let lastFailure = '';
+    const projectRoot = info.boundary ?? '';
+    const schedule = (delayMs: number) => {
+      if (timer !== undefined) clearTimeout(timer);
+      timer = setTimeout(() => { timer = undefined; void poll(); }, delayMs);
+    };
+    const refreshTranscript = async () => {
+      const read = await client.request('session.observe', { projectRoot, sessionId, limit: 400, fullResults: true });
+      if (disposed || activeSession.current !== sessionId) return;
+      setRows(read.events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq }))));
+    };
+    const poll = async () => {
+      if (disposed || inFlight) return;
+      inFlight = true;
+      let nextDelay = 1_000;
+      try {
+        const snapshot = await client.request('session.control', {
+          projectRoot,
+          sessionId,
+          request: { action: 'status', after: cursor, limit: 50, waitMs: 10_000 },
+        }) as ExternalControlSnapshot;
+        if (disposed || activeSession.current !== sessionId) return;
+        const currentOperationId = snapshot.operationId ?? null;
+        if (currentOperationId !== operationId) {
+          operationId = currentOperationId;
+          cursor = 0;
+          setExternalSnapshot(snapshot);
+          nextDelay = 0;
+          return;
+        }
+        setExternalSnapshot(snapshot);
+        setRunning(snapshot.state === 'running');
+        for (const event of snapshot.events) {
+          if (event.kind === 'model.delta' && (event.type === 'text' || event.type === 'reasoning') && typeof event.text === 'string') {
+            setLive((current) => ({ ...current, [event.type as 'text' | 'reasoning']: current[event.type as 'text' | 'reasoning'] + event.text }));
+          }
+          if (event.kind === 'session.event' && typeof event.eventKind === 'string') {
+            if (event.eventKind === 'assistant') setLive((current) => ({ ...current, text: '' }));
+            if (event.eventKind === 'reasoning') setLive((current) => ({ ...current, reasoning: '' }));
+            void refreshTranscript().catch((error: unknown) => push({ kind: 'error', text: t(`外控会话转录读取失败：${errorCode(error) ?? 'session_observe_failed'}`, `Could not refresh external transcript: ${errorCode(error) ?? 'session_observe_failed'}`) }));
+          }
+        }
+        if (snapshot.eventGap) {
+          cursor = Math.max(0, (snapshot.firstAvailableCursor ?? cursor + 1) - 1);
+          void refreshTranscript().catch((error: unknown) => push({ kind: 'error', text: t(`外控会话转录读取失败：${errorCode(error) ?? 'session_observe_failed'}`, `Could not refresh external transcript: ${errorCode(error) ?? 'session_observe_failed'}`) }));
+        }
+        cursor = Math.max(cursor, snapshot.nextCursor);
+        const question = snapshot.pendingInteractions.find((item) => item.type === 'question'
+          && !resolvedExternalInteractions.current.has(item.requestId));
+        if (question !== undefined && Array.isArray(question.details.questions) && question.details.questions.every(isAskQuestion)) {
+          setQuery((current) => current?.external === true && current.id === question.requestId
+            ? current
+            : { id: question.requestId, questions: question.details.questions as AskQuestion[], at: 0, picked: {}, external: true });
+        } else setQuery((current) => current?.external === true ? null : current);
+        const approval = snapshot.pendingInteractions.find((item) => item.type === 'approval'
+          && !resolvedExternalInteractions.current.has(item.requestId));
+        if (approval !== undefined) {
+          const args = isRecord(approval.details.args) ? approval.details.args : {};
+          const shown = typeof approval.details.command === 'string' ? approval.details.command
+            : typeof args.path === 'string' ? args.path
+              : typeof args.url === 'string' ? args.url
+                : typeof args.server === 'string' ? `mcp:${args.server}/${typeof args.tool === 'string' ? args.tool : ''}`
+                  : '';
+          setAsk((current) => current?.external === true && current.id === approval.requestId
+            ? current
+            : {
+                id: approval.requestId,
+                tool: typeof approval.details.tool === 'string' ? approval.details.tool : 'unknown',
+                detail: shown === '' ? JSON.stringify(args) : shown,
+                change: changeSummary(typeof approval.details.tool === 'string' ? approval.details.tool : '', args, locale),
+                content: approvalBody(typeof approval.details.tool === 'string' ? approval.details.tool : '', args, locale),
+                backend: typeof approval.details.shell === 'string' ? `${approval.details.shell} · ${typeof approval.details.executable === 'string' ? approval.details.executable : ''}` : '',
+                reason: typeof approval.details.reason === 'string' ? approval.details.reason : '',
+                external: true,
+              });
+        } else setAsk((current) => current?.external === true ? null : current);
+        lastFailure = '';
+        nextDelay = snapshot.state === 'running' ? 0 : 1_000;
+      } catch (error) {
+        const code = errorCode(error) ?? 'external_control_failed';
+        setRunning(false);
+        if (lastFailure !== code) push({ kind: 'error', text: t(`外控会话不可用：${code}`, `External session unavailable: ${code}`) });
+        lastFailure = code;
+        nextDelay = 1_000;
+      } finally {
+        inFlight = false;
+        if (!disposed && timer === undefined) schedule(nextDelay);
+      }
+    };
+    void poll();
+    return () => { disposed = true; if (timer !== undefined) clearTimeout(timer); };
+  }, [client, externalControl, info.boundary, locale, push, sessionId, t]);
+
   // 终端标题显示模型、项目根和当前会话，切换会话时同步更新。
   // 非交互终端不写标题控制序列，避免污染管道输出。
   useEffect(() => {
@@ -892,6 +1022,22 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     remember(text);
     terminalReceived.current = false;
     setLive({ text: '', reasoning: '' });
+    if (externalControl) {
+      try {
+        const accepted = await client.request('session.control', {
+          projectRoot: info.boundary ?? '',
+          sessionId,
+          request: { action: 'send', input: text },
+        }) as { readonly accepted?: boolean; readonly queued?: boolean };
+        setRunning(true);
+        push({ kind: 'meta', text: accepted.queued === true
+          ? t('消息已加入外控会话队列', 'Message queued for the external session')
+          : t('消息已发送到外控会话', 'Message sent to the external session') });
+      } catch (error) {
+        push({ kind: 'error', text: t(`外控消息发送失败：${errorCode(error) ?? 'external_control_failed'}`, `Could not send external message: ${errorCode(error) ?? 'external_control_failed'}`) });
+      }
+      return;
+    }
     setRunning(true);
     try {
       await client.request('run.start', { sessionId, input: text });
@@ -912,7 +1058,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       setRunning(false);
       void refreshStatus();
     }
-  }, [client, push, refreshStatus, remember, sessionId, t]);
+  }, [client, externalControl, info.boundary, push, refreshStatus, remember, sessionId, t]);
 
   // 按第一个词解析命令，完整保留其余文本作为参数。
   const closePanel = useCallback(() => {
@@ -1193,13 +1339,21 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       void (async () => {
         try {
           const created = await client.request('session.create', {});
-          try {
-            await client.request('session.close', { sessionId });
-          } catch (error) {
-            await client.request('session.close', { sessionId: created.sessionId });
-            throw error;
+          if (!externalControl) {
+            try {
+              await client.request('session.close', { sessionId });
+            } catch (error) {
+              await client.request('session.close', { sessionId: created.sessionId });
+              throw error;
+            }
           }
           setSessionId(created.sessionId);
+          setExternalControl(false);
+          setExternalSnapshot(null);
+          setRunning(false);
+          setAsk(null);
+          setQuery(null);
+          setStatus(null);
           setDetail(null);
           setSessionPicker(null);
           setRows([]);
@@ -1327,25 +1481,41 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           push({ kind: 'meta', text: t('已打开此会话', 'This session is already open') });
           return;
         }
-        // Host 打开记录时会恢复未完成调用，并使用记录中最后生效的模式。
-        const opened = await client.request('session.open', { sessionId: picked.id, ...(chosenMode === undefined ? {} : { mode: chosenMode }) })
+        // 外控 Host 持有写锁时读取其持久化记录，不抢锁创建第二个写入者。
+        const opened = await client.request('session.open', {
+          sessionId: picked.id,
+          projectRoot: info.boundary ?? '',
+          ...(chosenMode === undefined ? {} : { mode: chosenMode }),
+        })
           .catch((error: unknown) => requestFailure(error, 'session_open_failed'));
-        if ('code' in opened) {
-          push({ kind: 'error', text: t(`无法恢复会话：${opened.code}`, `Could not resume session: ${opened.code}`)
-            + (opened.code === 'resume_mode_changed' ? t(`；请指定工具模式：/resume ${wanted} <模式名>`, `; specify a tool mode: /resume ${wanted} <mode>`) : '')
-            + (opened.code === 'session_is_branch' ? t('；请用 /sub <序号> 查看子任务', '; use /sub <seq> to view the subtask') : '') });
-          return;
-        }
-        const read = await client.request('session.read', { sessionId: picked.id }).catch((error: unknown) => requestFailure(error, 'session_read_failed'));
+        let observingExternal = false;
+        let read: SessionPage & { readonly writerActive?: boolean } | { readonly code: string };
+        if ('code' in opened && opened.code === 'session_locked' && chosenMode === undefined) {
+          read = await client.request('session.observe', { projectRoot: info.boundary ?? '', sessionId: picked.id })
+            .catch((error: unknown) => requestFailure(error, 'session_observe_failed'));
+          observingExternal = !('code' in read) && read.writerActive === true;
+          if (!observingExternal) read = { code: 'session_writer_unavailable' };
+        } else if ('code' in opened) read = opened;
+        else read = await client.request('session.read', { sessionId: picked.id }).catch((error: unknown) => requestFailure(error, 'session_read_failed'));
         if ('code' in read) {
-          push({ kind: 'error', text: t(`会话已打开，但无法读取记录：${read.code}`, `Session opened, but conversation could not be read: ${read.code}`) });
+          push({ kind: 'error', text: t(`无法恢复会话：${read.code}`, `Could not resume session: ${read.code}`)
+            + (read.code === 'resume_mode_changed' ? t(`；请指定工具模式：/resume ${wanted} <模式名>`, `; specify a tool mode: /resume ${wanted} <mode>`) : '')
+            + (read.code === 'session_is_branch' ? t('；请用 /sub <序号> 查看子任务', '; use /sub <seq> to view the subtask') : '') });
           return;
         }
         // TUI 一次只持有一个会话，切换时释放前一会话的运行状态和记录锁。
         // 在同一次渲染中更新会话 ID 和记录内容，确保 Ink 的 Static 列表能按索引正确补画。
         // 释放失败不会阻止打开新会话，但会显示诊断信息。
-        const retiring = client.request('session.close', { sessionId }).catch((error: unknown) => requestFailure(error, 'session_close_failed'));
+        const retiring = externalControl
+          ? Promise.resolve({ sessionId })
+          : client.request('session.close', { sessionId }).catch((error: unknown) => requestFailure(error, 'session_close_failed'));
         setSessionId(picked.id);
+        setExternalControl(observingExternal);
+        setExternalSnapshot(null);
+        setRunning(false);
+        setStatus(null);
+        setAsk(null);
+        setQuery(null);
         setSessionPicker(null);
         // 根据记录重建转录，不沿用前一会话的画面状态。
         setRows(read.events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq }))));
@@ -1359,6 +1529,41 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
             + ('code' in retired ? t(`；无法关闭上一会话：${retired.code}`, `; previous session could not close: ${retired.code}`) : '')
             + (row === undefined || row.unanswered === 0 ? '' : t(`；已修复 ${row.unanswered} 条未完成调用`, `; repaired ${row.unanswered} unresolved calls`)),
         });
+      })();
+      return;
+    }
+    if (name === 'takeover') {
+      if (!externalControl) {
+        push({ kind: 'meta', text: t('当前会话不由外部 Agent 控制', 'The current session is not externally controlled') });
+        return;
+      }
+      void (async () => {
+        const transferred = await client.request('session.control', {
+          projectRoot: info.boundary ?? '', sessionId, request: { action: 'takeover' },
+        }).catch((error: unknown) => requestFailure(error, 'external_control_takeover_failed'));
+        if ('code' in transferred) {
+          push({ kind: 'error', text: t(`无法接管外控会话：${transferred.code}`, `Could not take over external session: ${transferred.code}`) });
+          return;
+        }
+        const opened = await client.request('session.open', { sessionId, projectRoot: info.boundary ?? '' })
+          .catch((error: unknown) => requestFailure(error, 'session_open_failed'));
+        if ('code' in opened) {
+          push({ kind: 'error', text: t(`外控已停止，但本地会话无法打开：${opened.code}`, `External control stopped, but the local session could not open: ${opened.code}`) });
+          return;
+        }
+        const read = await client.request('session.read', { sessionId }).catch((error: unknown) => requestFailure(error, 'session_read_failed'));
+        if ('code' in read) {
+          push({ kind: 'error', text: t(`已接管会话，但转录读取失败：${read.code}`, `Session taken over, but its transcript could not be read: ${read.code}`) });
+          return;
+        }
+        setExternalControl(false);
+        setExternalSnapshot(null);
+        setRunning(false);
+        setAsk(null);
+        setQuery(null);
+        setRows(read.events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq }))));
+        await refreshStatus();
+        push({ kind: 'meta', text: t('已接管外控会话，后续输入由 TUI 直接提交。', 'External session taken over; new input now runs through this TUI.') });
       })();
       return;
     }
@@ -1752,7 +1957,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     push({ kind: 'error', text: t(`未知命令：/${name}（/help 查看）`, `Unknown command: /${name} (/help to browse)`) });
-  }, [app, changePermission, client, info, keyOverrides, keys, locale, push, queue, queuePaused, refreshStatus, sessionId, status, stdout, t, trust, openPicker, exitTui]);
+  }, [app, changePermission, client, externalControl, info, keyOverrides, keys, locale, push, queue, queuePaused, refreshStatus, sessionId, status, stdout, t, trust, openPicker, exitTui]);
 
   const chooseOption = useCallback((id: string) => {
     const choice = choices.find(item => item.id === id);
@@ -1858,9 +2063,21 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     }
     const answers = head.questions.map((one) => picked[one.id]?.answer).filter((one) => one !== undefined && one !== null);
     setQuery(null);
-    push({ kind: 'meta', text: t(`已提交 ${answers.length}/${head.questions.length} 个回答`, `Submitted ${answers.length}/${head.questions.length} answers`) });
-    client.reply(head.id, { answers });
-  }, [client, push, query, resetDraft, t]);
+    push({ kind: 'meta', text: head.external
+      ? t(`已提交 ${answers.length}/${head.questions.length} 个回答（外控会话）`, `Submitted ${answers.length}/${head.questions.length} answers to the external session`)
+      : t(`已提交 ${answers.length}/${head.questions.length} 个回答`, `Submitted ${answers.length}/${head.questions.length} answers`) });
+    if (head.external) {
+      resolvedExternalInteractions.current.add(head.id);
+      void client.request('session.control', {
+        projectRoot: info.boundary ?? '',
+        sessionId,
+        request: { action: 'reply', requestId: head.id, type: 'question', answers },
+      }).catch((error: unknown) => {
+        resolvedExternalInteractions.current.delete(head.id);
+        push({ kind: 'error', text: t(`外控答复失败：${errorCode(error) ?? 'external_control_reply_failed'}`, `Could not submit external answer: ${errorCode(error) ?? 'external_control_reply_failed'}`) });
+      });
+    } else client.reply(head.id, { answers });
+  }, [client, externalControl, info.boundary, push, query, resetDraft, sessionId, t]);
 
   const advanceControlWizard = useCallback((raw: string) => {
     const wizard = controlWizard;
@@ -2041,8 +2258,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       setQueuePaused(true);
       push({ kind: 'meta', text: t(`队列已暂停：${queue.length} 条待发送，/queue continue 继续`, `Queue paused: ${queue.length} pending; /queue continue to resume`) });
     }
-    void client.request('run.cancel', { sessionId }).catch((error) => push({ kind: 'error', text: error.code ?? 'run_cancel_failed' }));
-  }, [client, push, queue.length, sessionId, t]);
+    const request = externalControl
+      ? client.request('session.control', { projectRoot: info.boundary ?? '', sessionId, request: { action: 'cancel' } })
+      : client.request('run.cancel', { sessionId });
+    void request.catch((error) => push({ kind: 'error', text: errorCode(error) ?? 'run_cancel_failed' }));
+  }, [client, externalControl, info.boundary, push, queue.length, sessionId, t]);
 
   // 候选由当前草稿计算，输入变化后自动更新。
   const templates = status?.templates ?? [];
@@ -2080,6 +2300,12 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     t('单独确认 full-access 授权？输入 yes 确认', 'Separately confirm the full-access ceiling? Type yes to confirm'),
     t('单独确认 unrestricted network？输入 yes 确认', 'Separately confirm the unrestricted network ceiling? Type yes to confirm'),
   ][controlWizard.step] ?? t('输入 yes 确认', 'Type yes to confirm');
+  const externalControlLabel = externalSnapshot?.pendingInteractions.some((item) => item.type === 'approval') === true
+    ? t('外控会话等待审批', 'External session is waiting for approval')
+    : externalSnapshot?.pendingInteractions.some((item) => item.type === 'question') === true
+      ? t('外控会话等待回答', 'External session is waiting for an answer')
+      : externalSnapshot?.state === 'running' ? t('外控 Agent 正在运行', 'External agent is running')
+        : t('外控会话已连接 · /takeover 接管', 'External session connected · /takeover to take over');
   const caretText = useMemo(() => [...GRAPHEMES.segment(draft.slice(caret))][0]?.segment ?? ' ', [draft, caret]);
 
   useInput((input, key) => {
@@ -2125,12 +2351,32 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         const asked = ask;
         setAsk(null);
         push({ kind: 'meta', text: t(`已允许 ${asked.tool}`, `Allowed ${asked.tool}`) });
-        client.reply(asked.id, { decision: 'allow' });
+        if (asked.external) {
+          resolvedExternalInteractions.current.add(asked.id);
+          void client.request('session.control', {
+            projectRoot: info.boundary ?? '', sessionId,
+            request: { action: 'reply', requestId: asked.id, type: 'approval', decision: 'allow' },
+          }).catch((error: unknown) => {
+            resolvedExternalInteractions.current.delete(asked.id);
+            push({ kind: 'error', text: t(`外控审批答复失败：${errorCode(error) ?? 'external_control_reply_failed'}`, `Could not approve external action: ${errorCode(error) ?? 'external_control_reply_failed'}`) });
+          });
+        }
+        else client.reply(asked.id, { decision: 'allow' });
       } else if (hit('deny', input, key)) {
         const asked = ask;
         setAsk(null);
         push({ kind: 'meta', text: t(`已拒绝 ${asked.tool}`, `Denied ${asked.tool}`) });
-        client.reply(asked.id, { decision: 'deny' });
+        if (asked.external) {
+          resolvedExternalInteractions.current.add(asked.id);
+          void client.request('session.control', {
+            projectRoot: info.boundary ?? '', sessionId,
+            request: { action: 'reply', requestId: asked.id, type: 'approval', decision: 'deny' },
+          }).catch((error: unknown) => {
+            resolvedExternalInteractions.current.delete(asked.id);
+            push({ kind: 'error', text: t(`外控审批答复失败：${errorCode(error) ?? 'external_control_reply_failed'}`, `Could not deny external action: ${errorCode(error) ?? 'external_control_reply_failed'}`) });
+          });
+        }
+        else client.reply(asked.id, { decision: 'deny' });
       }
       return;
     }
@@ -2471,11 +2717,13 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       h(Text, { bold: true }, t('创建外控授权', 'Create Agent Control grant')),
       h(Text, { wrap: 'wrap' }, controlPrompt),
       h(Text, { dimColor: true }, t('Enter 提交当前项 · 输入 cancel 取消', 'Enter submits this value · type cancel to stop'))),
+    externalControl ? h(Text, { color: running ? 'yellow' : 'cyan', wrap: 'truncate-end' }, externalControlLabel) : null,
     h(Box, { flexDirection: 'column', borderStyle: 'single', borderTop: true, borderBottom: true, borderLeft: false, borderRight: false, borderColor: running ? 'yellow' : 'cyan', paddingX: 1 }, h(Box, null,
       h(Text, { color: running ? 'yellow' : 'cyan' }, running ? `${SPINNER[tick % SPINNER.length]} ` : '› '),
       draft === '' && !running
         ? h(Text, { dimColor: true }, controlWizard === null
-          ? t(`描述任务 · ${keyHint('send')} 发送 · ${keyHint('newline')} 换行 · / 命令 · @ 文件`, `Describe a task · ${keyHint('send')} send · ${keyHint('newline')} new line · / commands · @ files`)
+          ? externalControl ? t(`给外控 Agent 发消息 · ${keyHint('send')} 发送 · /takeover 接管`, `Message the external agent · ${keyHint('send')} send · /takeover to take over`)
+            : t(`描述任务 · ${keyHint('send')} 发送 · ${keyHint('newline')} 换行 · / 命令 · @ 文件`, `Describe a task · ${keyHint('send')} send · ${keyHint('newline')} new line · / commands · @ files`)
           : t('输入授权设置答案', 'Enter the grant setting'))
         : h(Text, { wrap: 'wrap' },
           draft.slice(0, caret),

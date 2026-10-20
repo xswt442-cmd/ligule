@@ -41,6 +41,7 @@ function assertInTestplace(path) {
 
 test('a record becomes the rows the terminal shows, one line each', options, () => {
   assert.deepEqual(projectRecord({ kind: 'user', text: '读一下' }), [{ kind: 'question', text: '读一下' }]);
+  assert.deepEqual(projectRecord({ kind: 'user', text: '检查这个项目', origin: 'controller' }), [{ kind: 'question', text: '检查这个项目', source: 'controller' }]);
   assert.deepEqual(projectRecord({ kind: 'reasoning', text: '先看' }), [{ kind: 'reasoning', text: '先看' }]);
   assert.deepEqual(
     projectRecord({ kind: 'assistant', text: '我来读', toolCalls: [{ id: 'c1', name: 'read', args: { path: 'note.txt' } }] }),
