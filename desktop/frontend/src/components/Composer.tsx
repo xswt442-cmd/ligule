@@ -147,7 +147,7 @@ export function Composer({ client, sessionId, projectRoot, status, settings, set
           <SessionMenu key={`${sessionId ?? '$new'}:${newSessionSettingsRevision}`} status={status} selectedMode={initialMode} onSetMode={onSetMode} />
         </Popover.Root>
         <PolicyPicker key={`${sessionId ?? '$new'}:${newSessionSettingsRevision}`} status={status} initialPolicy={initialPolicy} disabled={disabled || closing || reading || starting} onSelect={onSetPolicy} />
-        <PermissionPicker key={`permission:${sessionId ?? '$new'}:${newSessionSettingsRevision}`} client={client} sessionId={sessionId} status={status}
+        <PermissionPicker key={`permission:${sessionId ?? '$new'}:${newSessionSettingsRevision}`} client={client} sessionId={sessionId} status={status} projectRoot={projectRoot}
           initialPermission={initialPermission} initialConfirmations={initialPermissionConfirmations}
           disabled={disabled || closing || reading || starting} running={running}
           onInitialChange={onInitialPermissionChange} onStatus={onPermissionStatus} />

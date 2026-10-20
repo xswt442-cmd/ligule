@@ -52,6 +52,14 @@ export type SessionPermission = {
     network: PermissionEnforcement;
     process: PermissionEnforcement;
   };
+  profiles: {
+    readOnly: PermissionEnforcement;
+    workspaceWrite: PermissionEnforcement;
+  };
+  limitations: string[];
+  partialWorkspaceWriteConfirmationRequired: boolean;
+  partialWorkspaceWriteConfirmed: boolean;
+  workspaceTrusted: boolean;
   execution: { available: boolean; code: string | null; reason: string | null };
   changeAllowed: boolean;
   changeReason?: string;

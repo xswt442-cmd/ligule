@@ -266,7 +266,7 @@ test('the approval box names the shell backend and its executable', options, asy
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
   const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   try {
-    const run = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command: 'git status --short' } }) });
+    const run = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command: 'git --version' } }) });
     // 等待确认提示渲染后再输入拒绝答案，避免按键进入草稿。
     await waitFor(() => /执行环境 (powershell|bash) · /.test(painted), { read: () => painted });
     stdin.write('n');
@@ -276,7 +276,7 @@ test('the approval box names the shell backend and its executable', options, asy
   }
 
   assert.match(painted, /允许执行 exec？/);
-  assert.match(painted, /git status --short/);
+  assert.match(painted, /git --version/);
   assert.match(painted, /执行环境 (powershell|bash) · /);
   }, { permission });
 });
@@ -1284,7 +1284,9 @@ test('/control creates a project-bound grant through the interactive wizard', op
     await answer('auto', '允许的 Policy');
     await answer('ask,auto', '允许 --operator');
     await answer('yes', '到期时间');
-    await answer(expiresAt, '单独确认 full-access');
+    await answer(expiresAt, '确认信任此项目');
+    await answer('yes', '接受 workspace-write 可能存在的部分隔离限制');
+    await answer('yes', '单独确认 full-access');
     await answer('yes', '单独确认 unrestricted network');
     await answer('yes');
     await waitFor(() => requests.some((request) => request.method === 'agent-control.create'), { within: 10_000, read: () => strip(painted).slice(-1_000) });
@@ -1303,6 +1305,7 @@ test('/control creates a project-bound grant through the interactive wizard', op
     assert.equal(saved.grants[0].defaultPolicy, 'auto');
     assert.equal(saved.grants[0].allowedPolicies.includes('auto'), true);
     assert.equal(saved.grants[0].allowOperator, true);
+    assert.equal(saved.grants[0].confirmedPartialWorkspaceWrite, true);
     assert.equal(saved.grants[0].confirmedFullAccess, true);
     assert.equal(saved.grants[0].confirmedUnrestrictedNetwork, true);
     assert.equal(saved.grants[0].expiresAt, expiresAt);

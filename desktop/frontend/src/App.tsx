@@ -79,7 +79,7 @@ type PanelProps = {
 // 表示当前没有文本组合输入；有效光标位置不会是 -1。
 const NO_TOKEN = { start: -1, text: '' };
 const DEFAULT_NEW_SESSION_PERMISSION: PermissionTarget = { profile: 'read-only', network: 'policy' };
-const NO_PERMISSION_CONFIRMATIONS: PermissionConfirmations = { fullAccess: false, network: false };
+const NO_PERMISSION_CONFIRMATIONS: PermissionConfirmations = { fullAccess: false, network: false, partialWorkspaceWrite: false, workspaceTrust: false };
 // 已打开的会话。右侧面板显示当前会话状态，不重复提供会话浮层已有的控制项。
 /**
  * 返回持久工作区登记中的默认目录。未设置默认目录或读取失败时返回 undefined。
@@ -1131,6 +1131,8 @@ export function App({ transport }: { transport: Transport }) {
           initialPermissionNetwork: newSessionPermission.network,
           confirmInitialFullAccess: newSessionPermissionConfirmations.fullAccess,
           confirmInitialNetwork: newSessionPermissionConfirmations.network,
+          confirmInitialPartialWorkspaceWrite: newSessionPermissionConfirmations.partialWorkspaceWrite,
+          confirmInitialWorkspaceTrust: newSessionPermissionConfirmations.workspaceTrust,
         } : {}),
       };
       const created = await client.call('session.create', createParameters, 15_000) as { sessionId: string };

@@ -96,6 +96,14 @@ interface TuiStatus {
       readonly network: 'full' | 'partial' | 'unavailable';
       readonly process: 'full' | 'partial' | 'unavailable';
     };
+    readonly profiles: {
+      readonly readOnly: 'full' | 'partial' | 'unavailable';
+      readonly workspaceWrite: 'full' | 'partial' | 'unavailable';
+    };
+    readonly limitations: readonly string[];
+    readonly partialWorkspaceWriteConfirmationRequired: boolean;
+    readonly partialWorkspaceWriteConfirmed: boolean;
+    readonly workspaceTrusted: boolean;
     readonly execution: { readonly available: boolean; readonly code: string | null; readonly reason: string | null };
     readonly changeAllowed: boolean;
     readonly changeReason?: string;
@@ -140,7 +148,7 @@ interface SearchState {
   readonly at: number;
 }
 
-type PickerKind = 'model' | 'mode' | 'policy' | 'permission' | 'permission-network' | 'permission-confirm-full' | 'permission-confirm-network'
+type PickerKind = 'model' | 'mode' | 'policy' | 'permission' | 'permission-network' | 'permission-confirm-full' | 'permission-confirm-network' | 'permission-confirm-partial'
   | 'control' | 'control-action' | 'control-revoke-confirm';
 type AgentGrant = {
   readonly id: string;
@@ -154,6 +162,7 @@ type AgentGrant = {
   readonly defaultPolicy: 'ask' | 'auto' | 'never';
   readonly allowedPolicies: readonly ('ask' | 'auto' | 'never')[];
   readonly allowOperator: boolean;
+  readonly confirmedPartialWorkspaceWrite: boolean;
   readonly createdAt: string;
   readonly expiresAt: string | null;
   readonly revokedAt: string | null;
@@ -171,6 +180,8 @@ type ControlWizardValues = {
   expiresAt?: string | null;
   confirmFullAccess?: boolean;
   confirmUnrestrictedNetwork?: boolean;
+  confirmPartialWorkspaceWrite?: boolean;
+  confirmWorkspaceTrust?: boolean;
 };
 type ControlWizard = { readonly step: number; readonly values: ControlWizardValues };
 
@@ -181,9 +192,13 @@ function agentMcpConfig(grant: AgentGrant): string {
 }
 
 function controlWizardNext(step: number, values: ControlWizardValues): number {
-  if (step === 8) return values.maxPermissionProfile === 'full-access' ? 9 : values.maxNetwork === 'unrestricted' ? 10 : -1;
-  if (step === 9) return values.maxNetwork === 'unrestricted' ? 10 : -1;
-  if (step === 10) return -1;
+  if (step === 8) return 9;
+  if (step === 9) return values.maxPermissionProfile !== 'read-only' ? 10
+    : values.maxNetwork === 'unrestricted' ? 12 : -1;
+  if (step === 10) return values.maxPermissionProfile === 'full-access' ? 11
+    : values.maxNetwork === 'unrestricted' ? 12 : -1;
+  if (step === 11) return values.maxNetwork === 'unrestricted' ? 12 : -1;
+  if (step === 12) return -1;
   return step + 1;
 }
 interface RuntimeChoice extends PanelChoice {
@@ -910,11 +925,15 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     network,
     confirmFullAccess = false,
     confirmNetwork = false,
+    confirmPartialWorkspaceWrite = false,
+    confirmWorkspaceTrust = false,
   }: {
     readonly profile?: 'read-only' | 'workspace-write' | 'full-access';
     readonly network?: 'policy' | 'unrestricted' | 'disabled';
     readonly confirmFullAccess?: boolean;
     readonly confirmNetwork?: boolean;
+    readonly confirmPartialWorkspaceWrite?: boolean;
+    readonly confirmWorkspaceTrust?: boolean;
   }) => {
     const own = sessionId;
     const current = await client.request('status.get', { sessionId: own }).catch((error: unknown) => requestFailure(error, 'status_read_failed'));
@@ -933,6 +952,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       ...(network === undefined ? {} : { permissionNetwork: network }),
       ...(confirmFullAccess ? { confirmFullAccess: true } : {}),
       ...(confirmNetwork ? { confirmNetwork: true } : {}),
+      ...(confirmPartialWorkspaceWrite ? { confirmPartialWorkspaceWrite: true } : {}),
+      ...(confirmWorkspaceTrust ? { confirmWorkspaceTrust: true } : {}),
     }).catch((error: unknown) => requestFailure(error, 'permission_change_failed'));
     if ('code' in changed) {
       push({ kind: 'error', text: t(`无法修改会话权限：${changed.code}`, `Could not change session permissions: ${changed.code}`) });
@@ -1039,10 +1060,12 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
             `${t('写入', 'write')} ${capabilities.filesystemWrite}`,
             `${t('网络', 'network')} ${capabilities.network}`,
             `${t('进程', 'process')} ${capabilities.process}`,
+            `${t('只读 Shell', 'read-only Shell')} ${permission.profiles.readOnly}`,
+            `${t('工作区写入 Shell', 'workspace-write Shell')} ${permission.profiles.workspaceWrite}`,
           ].join(' · ');
           available = [
             { id: 'read-only', label: t('只读 · read-only', 'Read only · read-only'), description: t(`当前：${permission.profile} · 网络 ${permission.network} · 隔离能力：${enforcement} · Shell ${permission.execution.available ? '可用' : `不可用（${permission.execution.code ?? '能力不足'}）`}`, `Current: ${permission.profile} · network ${permission.network} · isolation: ${enforcement} · Shell ${permission.execution.available ? 'available' : `unavailable (${permission.execution.code ?? 'capability limits'})`}`) },
-            { id: 'workspace-write', label: t('工作区可写 · workspace-write', 'Workspace write · workspace-write'), description: t('文件工具限制在工作区；Shell 仅在报告完整隔离时开放。', 'File tools stay within the workspace; Shell runs only when full isolation is available.') },
+            { id: 'workspace-write', label: t('工作区可写 · workspace-write', 'Workspace write · workspace-write'), description: t(`Shell ${permission.profiles.workspaceWrite} · 项目 ${permission.workspaceTrusted ? '已信任' : '未信任'}；Windows 部分隔离可能无法限制读取、网络及硬链接或父目录删除权限越界。${permission.limitations[0] ?? ''}`, `Shell ${permission.profiles.workspaceWrite} · project ${permission.workspaceTrusted ? 'trusted' : 'untrusted'}; Windows partial isolation may not restrict reads, network, hard links, or delete-child access on parent folders. ${permission.limitations[0] ?? ''}`) },
             { id: 'full-access', label: t('完整访问 · full-access', 'Full access · full-access'), description: t('需要再次确认。范围仍受当前 OS 用户权限和 Policy 硬拒绝约束。', 'Requires a second confirmation. OS user permissions and hard Policy denials still apply.') },
             { id: 'network', label: t(`网络：${permission.network}`, `Network: ${permission.network}`), description: t('单独设置网络访问；这不会改变文件权限档位。', 'Configure network access separately; this does not change the filesystem profile.') },
           ];
@@ -1055,6 +1078,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         } else if (kind === 'permission-confirm-full') {
           available = [
             { id: 'confirm', label: t('我确认启用 full-access', 'Confirm full-access'), description: t(`允许当前 OS 用户可访问的文件和进程。Policy 与硬拒绝适用于 Host 工具调用；已加载的扩展是可信代码，可绕过这些检查直接使用 OS 能力。当前 Shell：${permission.execution.available ? '可用' : `不可用（${permission.execution.code ?? permission.execution.reason ?? '隔离能力不足'}）`}`, `Allow files and processes available to the current OS user. Policy and hard denials apply to Host tool calls; loaded extensions are trusted code and can use OS capabilities directly. Shell: ${permission.execution.available ? 'available' : `unavailable (${permission.execution.code ?? permission.execution.reason ?? 'sandbox limits'})`}`) },
+            { id: 'cancel', label: t('取消', 'Cancel') },
+          ];
+        } else if (kind === 'permission-confirm-partial') {
+          available = [
+            { id: 'confirm', label: t('我信任此项目并接受适用的部分隔离限制', 'Trust this project and accept applicable partial-isolation limits'), description: t('Host 会在执行时检查平台。若使用 Windows 部分隔离，Shell 无法限制文件读取或网络；硬链接、重解析点或可写父目录删除权限可能越界，也不适合运行恶意代码。', 'The Host checks the backend at execution time. If it uses Windows partial isolation, Shell cannot restrict file reads or network; hard links, reparse points, or delete-child rights on writable parent folders may escape the boundary, so it is not a container for hostile code.') },
             { id: 'cancel', label: t('取消', 'Cancel') },
           ];
         } else {
@@ -1638,6 +1666,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       if (target === 'full-access') {
         if (status?.permission?.profile === 'full-access') void changePermission({ profile: target });
         else openPicker('permission-confirm-full');
+      } else if (target === 'workspace-write' && status?.permission !== undefined
+        && (!status.permission.workspaceTrusted || status.permission.partialWorkspaceWriteConfirmationRequired
+          && !status.permission.partialWorkspaceWriteConfirmed)) {
+        openPicker('permission-confirm-partial');
       } else {
         void changePermission({ profile: target });
       }
@@ -1773,6 +1805,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     if (currentPanel === 'permission') {
       if (id === 'network') { openPicker('permission-network'); return; }
       if (id === 'full-access') { openPicker('permission-confirm-full'); return; }
+      if (id === 'workspace-write' && status?.permission !== undefined
+        && (!status.permission.workspaceTrusted || status.permission.partialWorkspaceWriteConfirmationRequired
+          && !status.permission.partialWorkspaceWriteConfirmed)) { openPicker('permission-confirm-partial'); return; }
       if (id === 'read-only' || id === 'workspace-write') void changePermission({ profile: id });
       return;
     }
@@ -1783,6 +1818,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     }
     if (currentPanel === 'permission-confirm-full') {
       if (id === 'confirm') void changePermission({ profile: 'full-access', confirmFullAccess: true });
+      return;
+    }
+    if (currentPanel === 'permission-confirm-partial') {
+      if (id === 'confirm') void changePermission({ profile: 'workspace-write', confirmPartialWorkspaceWrite: true, confirmWorkspaceTrust: true });
       return;
     }
     if (currentPanel === 'permission-confirm-network') {
@@ -1887,10 +1926,22 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     } else if (wizard.step === 9) {
       if (!['y', 'yes'].includes(input.toLowerCase())) {
         setControlWizard(null); resetDraft('');
+        fail(t('未确认信任此项目，授权未创建。', 'Project trust was not confirmed; no grant was created.')); return true;
+      }
+      values.confirmWorkspaceTrust = true;
+    } else if (wizard.step === 10) {
+      if (!['y', 'yes'].includes(input.toLowerCase())) {
+        setControlWizard(null); resetDraft('');
+        fail(t('未确认工作区部分隔离限制，授权未创建。', 'Partial workspace-write limits were not confirmed; no grant was created.')); return true;
+      }
+      values.confirmPartialWorkspaceWrite = true;
+    } else if (wizard.step === 11) {
+      if (!['y', 'yes'].includes(input.toLowerCase())) {
+        setControlWizard(null); resetDraft('');
         fail(t('未确认 full-access，授权未创建。', 'Full-access was not confirmed; no grant was created.')); return true;
       }
       values.confirmFullAccess = true;
-    } else if (wizard.step === 10) {
+    } else if (wizard.step === 12) {
       if (!['y', 'yes'].includes(input.toLowerCase())) {
         setControlWizard(null); resetDraft('');
         fail(t('未确认不受限网络，授权未创建。', 'Unrestricted network was not confirmed; no grant was created.')); return true;
@@ -1923,6 +1974,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           allowOperator: values.allowOperator!,
           confirmFullAccess: values.confirmFullAccess === true,
           confirmUnrestrictedNetwork: values.confirmUnrestrictedNetwork === true,
+          confirmPartialWorkspaceWrite: values.confirmPartialWorkspaceWrite === true,
+          confirmWorkspaceTrust: values.confirmWorkspaceTrust === true,
           expiresAt: values.expiresAt ?? '',
         }) as AgentControlSnapshot;
         setControlSnapshot(created);
@@ -2022,6 +2075,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     t('允许的 Policy，以逗号分隔，例如 ask,auto', 'Allowed Policy modes, comma-separated, e.g. ask,auto'),
     t('允许 --operator 处理普通审批和会话设置？yes / no', 'Allow --operator for ordinary approvals and session settings? yes / no'),
     t('到期时间，输入 ISO 时间或 none', 'Expiry time as an ISO date/time, or none'),
+    t('确认信任此项目以供项目代码、Git 命令与 Hook 使用？yes / no', 'Trust this project for project code, Git commands, and hooks? yes / no'),
+    t('接受 workspace-write 可能存在的部分隔离限制？yes / no', 'Accept possible partial workspace-write isolation limits? yes / no'),
     t('单独确认 full-access 授权？输入 yes 确认', 'Separately confirm the full-access ceiling? Type yes to confirm'),
     t('单独确认 unrestricted network？输入 yes 确认', 'Separately confirm the unrestricted network ceiling? Type yes to confirm'),
   ][controlWizard.step] ?? t('输入 yes 确认', 'Type yes to confirm');
@@ -2396,6 +2451,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
             : panel === 'permission' ? t('会话权限', 'Session permissions')
               : panel === 'permission-network' ? t('设置网络权限', 'Set network access')
                 : panel === 'permission-confirm-full' ? t('确认完整访问', 'Confirm full access')
+                  : panel === 'permission-confirm-partial' ? t('确认工作区部分隔离', 'Confirm partial workspace isolation')
                   : panel === 'permission-confirm-network' ? t('确认不受限网络', 'Confirm unrestricted network')
                     : panel === 'control' ? t('外部 Agent 授权', 'External Agent grants')
                       : panel === 'control-action' ? t('授权操作', 'Grant actions')

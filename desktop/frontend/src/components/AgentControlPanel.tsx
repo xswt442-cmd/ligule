@@ -21,6 +21,7 @@ type Grant = {
   allowOperator: boolean;
   confirmedFullAccess: boolean;
   confirmedUnrestrictedNetwork: boolean;
+  confirmedPartialWorkspaceWrite: boolean;
   createdAt: string;
   expiresAt: string | null;
   revokedAt: string | null;
@@ -37,6 +38,8 @@ type Draft = {
   allowOperator: boolean;
   confirmFullAccess: boolean;
   confirmUnrestrictedNetwork: boolean;
+  confirmPartialWorkspaceWrite: boolean;
+  confirmWorkspaceTrust: boolean;
   expiresAt: string;
 };
 
@@ -54,6 +57,8 @@ function emptyDraft(): Draft {
     allowOperator: false,
     confirmFullAccess: false,
     confirmUnrestrictedNetwork: false,
+    confirmPartialWorkspaceWrite: false,
+    confirmWorkspaceTrust: false,
     expiresAt: localExpiry.toISOString().slice(0, 16),
   };
 }
@@ -82,6 +87,8 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
   const canSave = !busy && snapshot !== null && project !== '' && draft.name.trim() !== ''
     && !profileExceeds && !networkExceeds && !policyMissing && !invalidExpiry
     && (draft.maxPermissionProfile !== 'full-access' || draft.confirmFullAccess)
+    && (draft.maxPermissionProfile === 'read-only' || draft.confirmPartialWorkspaceWrite)
+    && draft.confirmWorkspaceTrust
     && (draft.maxNetwork !== 'unrestricted' || draft.confirmUnrestrictedNetwork);
   const held = busy && dirty
     ? t('外部控制授权正在保存。', 'The Agent Control grant is being saved.')
@@ -134,6 +141,8 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
         allowOperator: draft.allowOperator,
         confirmFullAccess: draft.confirmFullAccess,
         confirmUnrestrictedNetwork: draft.confirmUnrestrictedNetwork,
+        confirmPartialWorkspaceWrite: draft.confirmPartialWorkspaceWrite,
+        confirmWorkspaceTrust: draft.confirmWorkspaceTrust,
         expiresAt: expiration,
       }, 30_000) as Snapshot;
       setSnapshot(result);
@@ -225,6 +234,10 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
             <input type="checkbox" checked={draft.confirmFullAccess} onChange={(event) => update('confirmFullAccess', event.target.checked)} />
             <span>{t('确认允许访问当前 OS 账户可访问的全部资源。', 'Allow access to everything available to this OS account.')}</span>
           </label>}
+          {draft.maxPermissionProfile !== 'read-only' && <label className="grant-confirmation grant-risk">
+            <input type="checkbox" checked={draft.confirmPartialWorkspaceWrite} onChange={(event) => update('confirmPartialWorkspaceWrite', event.target.checked)} />
+            <span>{t('确认接受可能适用的部分隔离限制。Windows 工作区写入无法限制读取和网络，硬链接或可写父目录删除权限也可能越过工作区范围。', 'Accept the partial-isolation limits that may apply. Windows workspace-write cannot restrict reads or network, and hard links or delete-child rights on writable parent folders may escape the workspace boundary.')}</span>
+          </label>}
         </section>
 
         <section className="grant-config-card">
@@ -278,6 +291,10 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
 
         <section className="grant-config-card grant-lifetime-card">
           <h4>{t('授权期限', 'Grant lifetime')}</h4>
+          <label className="grant-confirmation grant-risk">
+            <input type="checkbox" checked={draft.confirmWorkspaceTrust} onChange={(event) => update('confirmWorkspaceTrust', event.target.checked)} />
+            <span>{t('我信任上方项目目录中的项目代码；项目脚本和 Git 命令仍会逐次请求审批。', 'I trust project code in the directory above; project scripts and Git commands still require approval for each call.')}</span>
+          </label>
           <label className="grant-field">
             <span>{t('到期时间（可留空）', 'Expires (optional)')}</span>
             <input type="datetime-local" value={draft.expiresAt} onChange={(event) => update('expiresAt', event.target.value)} />

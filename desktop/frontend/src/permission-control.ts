@@ -2,8 +2,8 @@ import type { Client } from './protocol';
 import type { PermissionEnforcement, PermissionNetwork, PermissionProfile, SessionPermission, Status } from './status';
 
 export type PermissionTarget = { profile: PermissionProfile; network: PermissionNetwork };
-export type PermissionConfirmation = 'full-access' | 'unrestricted-network';
-export type PermissionConfirmations = { fullAccess: boolean; network: boolean };
+export type PermissionConfirmation = 'full-access' | 'unrestricted-network' | 'partial-workspace-write' | 'workspace-trust';
+export type PermissionConfirmations = { fullAccess: boolean; network: boolean; partialWorkspaceWrite: boolean; workspaceTrust: boolean };
 
 const SAFE_PERMISSION: SessionPermission = Object.freeze({
   profile: 'read-only',
@@ -14,6 +14,11 @@ const SAFE_PERMISSION: SessionPermission = Object.freeze({
     network: 'unavailable',
     process: 'unavailable',
   }),
+  profiles: Object.freeze({ readOnly: 'unavailable', workspaceWrite: 'unavailable' }),
+  limitations: Object.freeze(['Permission capability status is unavailable.']),
+  partialWorkspaceWriteConfirmationRequired: true,
+  partialWorkspaceWriteConfirmed: false,
+  workspaceTrusted: false,
   execution: Object.freeze({
     available: false,
     code: 'permission_status_unavailable',
@@ -39,6 +44,9 @@ export function permissionConfirmations(current: SessionPermission, target: Perm
   const required: PermissionConfirmation[] = [];
   if (target.profile === 'full-access' && current.profile !== 'full-access') required.push('full-access');
   if (target.network === 'unrestricted' && current.network !== 'unrestricted') required.push('unrestricted-network');
+  if (target.profile === 'workspace-write' && !current.workspaceTrusted) required.push('workspace-trust');
+  if (target.profile === 'workspace-write' && current.partialWorkspaceWriteConfirmationRequired
+    && !current.partialWorkspaceWriteConfirmed) required.push('partial-workspace-write');
   return required;
 }
 
@@ -57,6 +65,12 @@ function permissionRequest(
   if (required.includes('unrestricted-network') && !confirmed.network) {
     throw new Error('permission_network_confirmation_required');
   }
+  if (required.includes('partial-workspace-write') && !confirmed.partialWorkspaceWrite) {
+    throw new Error('permission_partial_sandbox_confirmation_required');
+  }
+  if (required.includes('workspace-trust') && !confirmed.workspaceTrust) {
+    throw new Error('workspace_trust_confirmation_required');
+  }
   if (target.profile === current.profile && target.network === current.network) return null;
   return {
     sessionId: status?.sessionId,
@@ -64,6 +78,8 @@ function permissionRequest(
     permissionNetwork: target.network,
     confirmFullAccess: confirmed.fullAccess,
     confirmNetwork: confirmed.network,
+    ...(confirmed.partialWorkspaceWrite ? { confirmPartialWorkspaceWrite: true } : {}),
+    ...(confirmed.workspaceTrust ? { confirmWorkspaceTrust: true } : {}),
   };
 }
 
@@ -113,6 +129,8 @@ function isSessionPermission(value: unknown): value is SessionPermission {
   if (typeof value !== 'object' || value === null) return false;
   const permission = value as Record<string, unknown>;
   const capabilities = permission.capabilities;
+  const profiles = permission.profiles;
+  const limitations = permission.limitations;
   const execution = permission.execution;
   if (!PROFILES.includes(permission.profile as PermissionProfile)
     || !NETWORKS.includes(permission.network as PermissionNetwork)
@@ -125,6 +143,13 @@ function isSessionPermission(value: unknown): value is SessionPermission {
     && ENFORCEMENT.includes(limits.filesystemWrite as PermissionEnforcement)
     && ENFORCEMENT.includes(limits.network as PermissionEnforcement)
     && ENFORCEMENT.includes(limits.process as PermissionEnforcement)
+    && typeof profiles === 'object' && profiles !== null
+    && ENFORCEMENT.includes((profiles as Record<string, unknown>).readOnly as PermissionEnforcement)
+    && ENFORCEMENT.includes((profiles as Record<string, unknown>).workspaceWrite as PermissionEnforcement)
+    && Array.isArray(limitations) && limitations.every((limitation) => typeof limitation === 'string')
+    && typeof permission.partialWorkspaceWriteConfirmationRequired === 'boolean'
+    && typeof permission.partialWorkspaceWriteConfirmed === 'boolean'
+    && typeof permission.workspaceTrusted === 'boolean'
     && typeof run.available === 'boolean'
     && (run.code === null || typeof run.code === 'string')
     && (run.reason === null || typeof run.reason === 'string');

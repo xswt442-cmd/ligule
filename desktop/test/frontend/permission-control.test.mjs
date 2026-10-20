@@ -22,6 +22,12 @@ function status(permission = {}, extra = {}) {
       profile: 'workspace-write',
       network: 'policy',
       capabilities,
+      profiles: { readOnly: 'full', workspaceWrite: 'partial' },
+      limitations: [],
+      partialWorkspaceWriteConfirmationRequired: false,
+      partialWorkspaceWriteConfirmed: false,
+      workspaceTrusted: true,
+      workspaceTrusted: true,
       execution: { available: true, code: null, reason: null },
       changeAllowed: true,
       ...permission,
@@ -41,6 +47,9 @@ test('missing status uses read-only and unavailable capability defaults', () => 
     process: 'unavailable',
   });
   assert.equal(permission.execution.available, false);
+  assert.equal(permission.partialWorkspaceWriteConfirmationRequired, true);
+  assert.equal(permission.workspaceTrusted, false);
+  assert.equal(permission.workspaceTrusted, false);
   assert.equal(permission.changeAllowed, false);
   assert.equal(canChangePermission(null, false), false);
   assert.equal(canChangePermission({ sessionId: 'session-1', running: false }, false), false);
@@ -52,6 +61,38 @@ test('each elevated permission has its own confirmation requirement', () => {
   assert.deepEqual(permissionConfirmations(current, { profile: 'full-access', network: 'policy' }), ['full-access']);
   assert.deepEqual(permissionConfirmations(current, { profile: 'workspace-write', network: 'unrestricted' }), ['unrestricted-network']);
   assert.deepEqual(permissionConfirmations(current, { profile: 'full-access', network: 'unrestricted' }), ['full-access', 'unrestricted-network']);
+});
+
+test('partial workspace-write requires a separate project-trust confirmation', () => {
+  const current = permissionOf(status({
+    profile: 'read-only',
+    partialWorkspaceWriteConfirmationRequired: true,
+    partialWorkspaceWriteConfirmed: false,
+  }));
+  assert.deepEqual(permissionConfirmations(current, { profile: 'workspace-write', network: 'policy' }), ['partial-workspace-write']);
+  assert.deepEqual(permissionConfirmations({ ...current, partialWorkspaceWriteConfirmed: true }, {
+    profile: 'workspace-write', network: 'policy',
+  }), []);
+});
+
+test('an untrusted workspace needs confirmation before project scripts can run', () => {
+  const current = permissionOf(status({ profile: 'read-only', workspaceTrusted: false }));
+  assert.deepEqual(permissionConfirmations(current, { profile: 'workspace-write', network: 'policy' }), ['workspace-trust']);
+});
+
+test('permission.set carries explicit workspace trust after the user confirms it', async () => {
+  const calls = [];
+  const updated = status({ profile: 'workspace-write', workspaceTrusted: true });
+  const client = { call: async (method, params) => {
+    calls.push({ method, params });
+    return method === 'status.get' ? updated : { applies: 'now' };
+  } };
+  await changePermissionAndRefresh(client,
+    status({ profile: 'read-only', workspaceTrusted: false }),
+    { profile: 'workspace-write', network: 'policy' },
+    { fullAccess: false, network: false, partialWorkspaceWrite: false, workspaceTrust: true },
+    false);
+  assert.equal(calls[0].params.confirmWorkspaceTrust, true);
 });
 
 test('permission.set is never called before each required confirmation', async () => {
