@@ -295,7 +295,7 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     const listed = await first.client.listTools();
     const toolNames = listed.tools.map((tool) => tool.name).sort();
     assert.deepEqual(toolNames, [
-      'ligule_interaction_reply', 'ligule_run_cancel', 'ligule_run_start', 'ligule_run_status', 'ligule_session_configure', 'ligule_session_create',
+      'ligule_interaction_reply', 'ligule_run_await', 'ligule_run_cancel', 'ligule_run_start', 'ligule_run_status', 'ligule_session_configure', 'ligule_session_create',
       'ligule_session_list', 'ligule_session_open', 'ligule_session_read', 'ligule_session_send',
     ]);
     const readSchema = listed.tools.find((tool) => tool.name === 'ligule_session_read').inputSchema;
@@ -370,9 +370,14 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     const firstProviderRequest = await waitFor(() => httpRequests.find((entry) => entry.inputTags.includes('MCP_E2E_DELAYED')), 'delayed HTTP request');
     assert.ok(!firstProviderRequest.toolNames.includes('ask_user_question'), 'question tool is not registered without operator authorization');
     recordTrace(trace, 'run_start_returns_before_provider', { operationId: delayed.operationId, startMs, state: running.state });
-    const delayedDone = await waitForOutcome(first.client, delayed.operationId);
+    const delayedDone = toolData(await first.client.callTool({ name: 'ligule_run_await', arguments: {
+      operationId: delayed.operationId, timeoutMs: 5_000,
+    } }), 'run_await_delayed');
     assert.equal(delayedDone.state, 'done');
-    recordTrace(trace, 'run_status_done', { operationId: delayed.operationId, state: delayedDone.state });
+    assert.equal(delayedDone.timedOut, false);
+    assert.equal(delayedDone.result.state, 'completed');
+    assert.equal(delayedDone.result.output.text, 'delayed task finished');
+    recordTrace(trace, 'run_await_done', { operationId: delayed.operationId, state: delayedDone.state, result: delayedDone.result.state });
 
     const largeInput = `MCP_E2E_LARGE_${'x'.repeat(13_000)}`;
     const largeRun = toolData(await first.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: largeInput } }), 'run_start_large');
@@ -409,14 +414,22 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     const operationA = toolData(await first.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_E2E_GATE_A' } }), 'run_start_gate_a');
     const operationB = toolData(await first.client.callTool({ name: 'ligule_run_start', arguments: { sessionId: sessionB.sessionId, input: 'MCP_E2E_GATE_B' } }), 'run_start_gate_b');
     await Promise.all([providerGates.get('MCP_E2E_GATE_A').entered, providerGates.get('MCP_E2E_GATE_B').entered]);
+    const waitExpired = toolData(await first.client.callTool({ name: 'ligule_run_await', arguments: {
+      operationId: operationB.operationId, timeoutMs: 1,
+    } }), 'run_await_timeout');
+    assert.equal(waitExpired.state, 'running');
+    assert.equal(waitExpired.timedOut, true, 'a server wait timeout leaves the active run intact');
     const cancelledA = toolData(await first.client.callTool({ name: 'ligule_run_cancel', arguments: { operationId: operationA.operationId } }), 'run_cancel_a');
     assert.equal(cancelledA.state, 'cancelled');
     const stillRunningB = toolData(await first.client.callTool({ name: 'ligule_run_status', arguments: { operationId: operationB.operationId } }), 'run_status_b_after_cancel_a');
     assert.equal(stillRunningB.state, 'running', 'cancelling A leaves B blocked on its independent Provider response');
     providerGates.get('MCP_E2E_GATE_A').release();
     providerGates.get('MCP_E2E_GATE_B').release();
-    const completedB = await waitForOutcome(first.client, operationB.operationId);
+    const completedB = toolData(await first.client.callTool({ name: 'ligule_run_await', arguments: {
+      operationId: operationB.operationId, timeoutMs: 5_000,
+    } }), 'run_await_after_timeout');
     assert.equal(completedB.state, 'done');
+    assert.equal(completedB.result.state, 'completed');
     recordTrace(trace, 'cancel_is_scoped_to_originating_session', {
       operationA: operationA.operationId, operationB: operationB.operationId,
       aState: cancelledA.state, bStateAfterCancelA: stillRunningB.state, bFinalState: completedB.state,
@@ -597,7 +610,7 @@ test('operator tools configure real sessions, answer Host interactions, and run 
   context.client.setNotificationHandler(LoggingMessageNotificationSchema, (notification) => { notifications.push(notification); });
   try {
     const names = (await context.client.listTools()).tools.map((tool) => tool.name).sort();
-    assert.equal(names.length, 10);
+    assert.equal(names.length, 11);
     const project = await realpath(projectRoot);
     const invalidInitialModel = await context.client.callTool({ name: 'ligule_session_create', arguments: {
       projectRoot: project, initial: { model: { provider: 'legacy', model: 'not-in-this-config' } },

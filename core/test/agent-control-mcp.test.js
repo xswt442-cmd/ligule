@@ -61,6 +61,7 @@ test('a real stdio MCP process uses its grant ceiling and detects revocation', a
     try {
       const listed = await client.listTools();
       assert.ok(listed.tools.some((tool) => tool.name === 'ligule_session_create'));
+      assert.ok(listed.tools.some((tool) => tool.name === 'ligule_run_await'));
       assert.equal(listed.tools.some((tool) => tool.name.includes('agent-control.create')), false);
 
       const made = await client.callTool({
@@ -78,6 +79,10 @@ test('a real stdio MCP process uses its grant ceiling and detects revocation', a
       assert.equal(config.structuredContent.delegation.maxPermissionProfile, 'workspace-write');
       assert.equal(config.structuredContent.delegation.maxNetwork, 'policy');
       assert.equal(config.structuredContent.effective.policy.mode, 'auto');
+
+      const missingRun = await client.callTool({ name: 'ligule_run_await', arguments: { operationId: 'missing', timeoutMs: 0 } });
+      assert.equal(missingRun.isError, true);
+      assert.equal(codeOf(missingRun), 'operation_not_found');
 
       const tooHigh = await client.callTool({
         name: 'ligule_session_configure',

@@ -5,7 +5,9 @@ import { KernelError } from '../kernel/error.js';
 import type { ProviderDiagnostic } from '../kernel/error.js';
 import { checkedAnswers, type AskQuestion } from '../tools/ask-user.js';
 import { APPROVAL_METHOD, QUESTION_METHOD } from './protocol.js';
+import { completedRunResult, failedRunResult, type RunResult } from './delegation.js';
 import type { Host } from './host.js';
+import type { LoopResult } from '../kernel/loop.js';
 
 export type OperationState = 'running' | 'done' | 'failed' | 'cancelled';
 export type InteractionType = 'approval' | 'question';
@@ -27,6 +29,7 @@ interface Operation {
   summary?: string;
   phase?: string;
   progress?: Record<string, unknown> | null;
+  result?: RunResult;
   updatedAt: number;
   nextCursor: number;
   readonly events: ControlEvent[];
@@ -331,6 +334,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
       ...(found.code === undefined ? {} : { code: found.code }),
       ...(found.diagnostics === undefined ? {} : { diagnostics: found.diagnostics }),
       ...(found.summary === undefined ? {} : { summary: found.summary }),
+      result: found.result ?? null,
       phase: found.phase ?? null,
       waitingFor: found.phase === 'awaiting_approval' ? 'approval' : found.phase === 'awaiting_input' ? 'input' : null,
       progress: found.progress ?? null,
@@ -385,14 +389,26 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     const work = Promise.resolve().then(() => host.handle({ method: 'run.start', params: { sessionId, input } }, connection));
     found.settled = work.then(
       (result) => {
-        record(result);
+        const completed = record(result);
+        if (typeof completed.text !== 'string' || !Number.isSafeInteger(completed.iterations)
+          || !Number.isSafeInteger(completed.modelCalls)
+          || (completed.completedBy !== undefined && typeof completed.completedBy !== 'string')) {
+          throw new KernelError('host_response_invalid');
+        }
+        found.result = completedRunResult(found.operationId, sessionId, {
+          text: completed.text,
+          iterations: completed.iterations as number,
+          modelCalls: completed.modelCalls as number,
+          ...(typeof completed.completedBy === 'string' ? { completedBy: completed.completedBy } : {}),
+        } satisfies LoopResult);
         found.state = 'done';
-        found.summary = 'Run completed. Read session records for the result.';
+        found.summary = 'Run completed.';
       },
     ).catch((error: unknown) => {
       found.code = controlErrorCode(error);
       if (error instanceof KernelError && error.diagnostics !== undefined) found.diagnostics = error.diagnostics;
       found.state = ['provider_cancelled', 'loop_cancelled', 'ask_user_cancelled'].includes(found.code) ? 'cancelled' : 'failed';
+      found.result = failedRunResult(found.operationId, sessionId, found.code, found.diagnostics);
     }).then(() => {
       settleInteractions(found);
       if (active.get(sessionId) === found) active.delete(sessionId);
@@ -555,6 +571,24 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
       if (!Number.isSafeInteger(after) || after < 0) throw new KernelError('control_cursor_invalid');
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) throw new KernelError('control_event_limit_invalid');
       return status(operation(operationId), after, limit);
+    },
+    async await(operationId: string, timeoutMs = 60_000) {
+      if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 300_000) {
+        throw new KernelError('control_wait_timeout_invalid');
+      }
+      const found = operation(operationId);
+      if (found.state === 'running' && timeoutMs > 0) {
+        let timer: NodeJS.Timeout | undefined;
+        try {
+          await Promise.race([
+            found.settled,
+            new Promise<void>((resolve) => { timer = setTimeout(resolve, timeoutMs); }),
+          ]);
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+        }
+      }
+      return { ...status(found), timedOut: found.state === 'running' };
     },
     async cancel(operationId: string) {
       const found = operation(operationId);

@@ -23,10 +23,32 @@ const providerDiagnostic = { type: 'object', additionalProperties: false, proper
   attempts: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
   responseReceived: { type: 'boolean' }, streamReceived: { type: 'boolean' }, recoverable: { type: 'boolean' },
 }, required: ['category', 'attempts', 'responseReceived', 'streamReceived', 'recoverable'] };
+const runResultOutput = object({
+  runId: id,
+  sessionId: id,
+  state: { type: 'string', enum: ['completed', 'failed', 'cancelled'] },
+  stopReason: { type: 'string', enum: [
+    'assistant_completed', 'tool_completed', 'cancelled', 'budget_exhausted', 'refused',
+    'provider_error', 'tool_error', 'host_error',
+  ] },
+  output: object({ text: { type: ['string', 'null'] }, structured: {} }, ['text']),
+  validation: object({
+    status: { type: 'string', enum: ['not_requested', 'valid', 'invalid'] },
+    errors: { type: 'array', maxItems: 32, items: { type: 'string', maxLength: 512 } },
+  }, ['status']),
+  artifacts: { type: 'array', maxItems: 32, items: object({
+    kind: { type: 'string', enum: ['session'] }, sessionId: id,
+  }, ['kind', 'sessionId']) },
+  usage: object({
+    iterations: { type: ['integer', 'null'], minimum: 0 },
+    modelCalls: { type: ['integer', 'null'], minimum: 0 },
+  }, ['iterations', 'modelCalls']),
+  diagnostic: object({ code: { type: 'string' }, provider: providerDiagnostic }, ['code']),
+}, ['runId', 'sessionId', 'state', 'stopReason', 'output', 'validation', 'artifacts', 'usage']);
 const operationProperties = {
   operationId: id, sessionId: id, state: { type: 'string', enum: ['running', 'done', 'failed', 'cancelled'] },
   code: { type: 'string' }, summary: { type: 'string', maxLength: 2048 },
-  diagnostics: providerDiagnostic,
+  diagnostics: providerDiagnostic, result: { anyOf: [{ type: 'null' }, runResultOutput] },
   phase: { type: ['string', 'null'] },
   waitingFor: { type: ['string', 'null'], enum: ['approval', 'input', null] },
   progress: { type: ['object', 'null'], properties: {
@@ -55,6 +77,7 @@ function object(properties: Record<string, object>, required: string[]) {
   return { type: 'object' as const, properties, required, additionalProperties: false };
 }
 const operationOutput = object(operationProperties, ['operationId', 'sessionId', 'state']);
+const awaitOutput = object({ ...operationProperties, timedOut: { type: 'boolean' } }, ['operationId', 'sessionId', 'state', 'timedOut']);
 const sessionOutput = object({ sessionId: id, settingsApplied: { type: 'boolean' } }, ['sessionId']);
 const sessionChanges = {
   type: 'object', additionalProperties: false, properties: {
@@ -214,6 +237,8 @@ const tools: Tool[] = [
     inputSchema: object({ sessionId: id, input: { type: 'string', minLength: 1, maxLength: 65536 } }, ['sessionId', 'input']), outputSchema: operationOutput },
   { name: 'ligule_run_status', description: 'Read the actual Host state, progress, pending interactions, queued messages, and bounded events after a cursor. Operation IDs are process-local; reopen the session after restart and read durable records.',
     inputSchema: object({ operationId: id, after: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 50, default: 20 } }, ['operationId']), outputSchema: operationOutput },
+  { name: 'ligule_run_await', description: 'Wait in the server for one known run, up to timeoutMs (default 60 seconds, maximum 5 minutes). A timeout returns the current resumable state without cancelling the run. A terminal run includes its result. Resolve pending approvals or questions with the interaction tool while the run waits.',
+    inputSchema: object({ operationId: id, timeoutMs: { type: 'integer', minimum: 0, maximum: 300_000, default: 60_000 } }, ['operationId']), outputSchema: awaitOutput },
   { name: 'ligule_run_cancel', description: 'Cancel this known operation and wait for Host cleanup. Reports terminated only after it settles. Completed operations keep their outcome; other sessions are unaffected.',
     inputSchema: object({ operationId: id }, ['operationId']), outputSchema: object({ ...operationProperties, terminated: { type: 'boolean' } }, ['operationId', 'sessionId', 'state', 'terminated']) },
   { name: 'ligule_session_read', description: 'Read real persistent records, newest page first (records inside a page are chronological). Use nextBefore as before for older pages. Each json field is a record JSON fragment, at most 8192 UTF-16 characters. If nextOffset is non-null, call with at=that seq and offset=nextOffset until null, concatenating fragments before JSON.parse. at and before are exclusive. This preserves complete large records without unbounded responses.',
@@ -225,6 +250,7 @@ interface Arguments {
   projectRoot?: string;
   sessionId?: string;
   operationId?: string;
+  timeoutMs?: number;
   input?: string;
   initial?: McpInitialSettings;
   changes?: McpSessionChanges;
@@ -336,6 +362,7 @@ export async function serveMcp({ projectRoot, version, flags = [], modeName, ope
         case 'ligule_session_send': result = control.send(input.sessionId!, input.action ?? 'send', input.input, input.queueItemId); break;
         case 'ligule_run_start': result = control.start(input.sessionId!, input.input!); break;
         case 'ligule_run_status': result = control.status(input.operationId!, input.after ?? 0, input.limit ?? 20); break;
+        case 'ligule_run_await': result = await control.await(input.operationId!, input.timeoutMs ?? 60_000); break;
         case 'ligule_run_cancel': result = await control.cancel(input.operationId!); break;
         case 'ligule_session_read': result = await control.read(input.sessionId!, input.before, input.limit ?? 20, input.at, input.offset); break;
         default: throw new KernelError('tool_unknown');
