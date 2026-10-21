@@ -1814,8 +1814,8 @@ test('a session overrides the approval tier without touching the settings file',
   });
 });
 
-// 规则表按整体替换处理；修改时必须指定当前生效的配置层，避免意外覆盖整张表。
-test('a rule table written by another layer refuses a write aimed at a lower one', async () => {
+// 用户规则可以补充项目共享规则，单独覆盖同一工具和匹配条件时才替换对应项。
+test('a lower layer adds a rule without replacing unrelated shared rules', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ligule-rules-layer-'));
   const home = join(root, 'home');
   await mkdir(home, { recursive: true });
@@ -1830,13 +1830,17 @@ test('a rule table written by another layer refuses a write aimed at a lower one
       assert.deepEqual(shown.rules, [{ tool: 'read', decision: 'allow' }]);
       assert.equal(shown.rulesSource, 'project', '生效那一份是项目共享那一层写着的');
       const [user] = shown.layers.filter((layer) => layer.layer === 'user');
-      await assert.rejects(
-        () => connection.request('config.set', {
-          field: 'policy.rules', op: 'add', layer: 'user', version: user.version, ruleTool: 'exec', ruleDecision: 'deny',
-        }),
-        (error) => error.code === 'config_rules_elsewhere' && error.detail.includes('project'),
-      );
-      assert.equal(await readFile(join(home, '.ligule', 'config.toml'), 'utf8').catch(() => ''), '', '被拒的那一次没有写出那一份文件');
+      await connection.request('config.set', {
+        field: 'policy.rules', op: 'add', layer: 'user', version: user.version, ruleTool: 'exec', ruleDecision: 'deny',
+      });
+      const updated = await connection.request('config.get', {});
+      assert.deepEqual(updated.rules, [
+        { tool: 'read', decision: 'allow' },
+        { tool: 'exec', decision: 'deny' },
+      ]);
+      assert.deepEqual(updated.ruleSources, ['project', 'user']);
+      assert.equal(updated.rulesSource, 'merged');
+      assert.equal((await readFile(join(home, '.ligule', 'config.toml'), 'utf8')).includes('tool = "exec"'), true);
     }, undefined, { configStore: store });
   } finally {
     await rm(root, { recursive: true, force: true });

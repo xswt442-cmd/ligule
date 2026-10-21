@@ -18,7 +18,7 @@ export type PolicyModeSource = 'config' | 'session';
 export function isPolicyRule(value: unknown): value is PolicyRule {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   return 'tool' in value && typeof value.tool === 'string'
-    && 'decision' in value && (value.decision === 'allow' || value.decision === 'deny')
+    && 'decision' in value && (value.decision === 'allow' || value.decision === 'ask' || value.decision === 'deny')
     && (!('match' in value) || value.match === undefined || typeof value.match === 'string')
     && (!('reason' in value) || value.reason === undefined || typeof value.reason === 'string');
 }
@@ -273,7 +273,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       }
 
       const command = commandOf(input);
-      const effective = forcedToAsk && current !== 'never' ? 'ask' : current;
+      let effective = forcedToAsk && current !== 'never' ? 'ask' : current;
       // 记录此次判定时的有效策略；拒绝阈值触发的收紧状态另行记录。
       const judged = (decision: PolicyVerdict['decision'], via: string, extra: Omit<PolicyVerdict, 'decision' | 'via' | 'capability' | 'level' | 'forced'>, hardDenied = false): PolicyVerdict => ({
         decision,
@@ -291,6 +291,9 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       const segments = parsed?.kind === 'segments' ? parsed.segments : undefined;
       // 没有命令文本的调用仍作为一个分段应用规则检查。
       const parts = command === undefined ? [undefined] : segments;
+      const askedRule = candidates.find((item) => item.decision === 'ask'
+        && (matches(command, item.match) || (segments ?? []).some((segment) => matches(segment, item.match))));
+      if (askedRule !== undefined) effective = 'ask';
       // 在结果中包含解析分段，便于从记录中还原命令如何被解释。
       // 无命令文本或无法解析时不返回分段字段。
       const answer = (via: string, rule?: PolicyRule) => judged('allow', via, {
@@ -321,6 +324,10 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         : access === 'unknown'
           ? 'this tool has no permission classification and requires per-call approval'
           : undefined;
+      if (askedRule !== undefined) {
+        requiresManualApproval = true;
+        manualApprovalReason = askedRule.reason ?? `${named} requires approval by its policy rule`;
+      }
       if (command !== undefined) {
         if (segments !== undefined && !canAutoApprove(inspection)) {
           requiresManualApproval = true;

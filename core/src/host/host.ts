@@ -2605,7 +2605,7 @@ export function createHost({
             selection: env.config.model?.selection === undefined ? null : modelSelection(env.config.model.selection),
             layers: [], sources: {},
           };
-          const { layers, sources, values, rules, rulesSource } = await env.store.read();
+          const { layers, sources, values, rules, ruleSources, ruleLayers, rulesSource } = await env.store.read();
           return {
             ...shownConfigOf(values),
             services: modelServices(values.model?.services),
@@ -2615,6 +2615,8 @@ export function createHost({
             layers,
             sources,
             rules,
+            ruleSources,
+            ruleLayers,
             rulesSource,
           };
         }

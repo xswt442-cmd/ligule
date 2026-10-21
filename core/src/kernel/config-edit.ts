@@ -11,7 +11,7 @@ import { KernelError, KernelRuntimeError } from './error.js';
 import { modelSelection, modelServices, selectionLiteral, servicesLiteral } from './model-services.js';
 
 /** `[[policy.rules]]` 中的一条工具规则。 */
-export type PolicyRule = { tool: string; match?: string; decision: 'allow' | 'deny'; reason?: string };
+export type PolicyRule = { tool: string; match?: string; decision: 'allow' | 'ask' | 'deny'; reason?: string };
 
 /** 配置写入请求：标量字段使用 `value`，规则表使用 `op` 和 `rule`；更新或删除还需提供 `index`。 */
 export type WriteRequest = {
@@ -453,8 +453,8 @@ export function checkedRule(input: unknown): PolicyRule {
   const tool = text('tool');
   const decision = text('decision');
   if (tool === undefined) throw new KernelError('config_rule_invalid', { detail: 'tool is required' });
-  if (decision !== 'allow' && decision !== 'deny') {
-    throw new KernelError('config_rule_invalid', { detail: 'decision takes allow or deny' });
+  if (decision !== 'allow' && decision !== 'ask' && decision !== 'deny') {
+    throw new KernelError('config_rule_invalid', { detail: 'decision takes allow, ask, or deny' });
   }
   const match = text('match');
   const reason = text('reason');

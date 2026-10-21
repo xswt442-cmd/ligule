@@ -12,12 +12,12 @@ import {
   type WriteRequest,
 } from './config-edit.js';
 import { KernelError } from './error.js';
-import { createConfig, type ConfigSnapshot } from './config.js';
+import { createConfig, mergePolicyRules, type ConfigSnapshot } from './config.js';
 
 const LAYERS = ['user', 'projectLocal'];
 // 按优先级从高到低查找配置值：命令行、本地项目、共享项目、用户配置。
 const PRECEDENCE = ['flag', 'local', 'project', 'user'] as const;
-type Source = typeof PRECEDENCE[number] | 'none';
+type Source = typeof PRECEDENCE[number] | 'merged' | 'none';
 
 /** 加载时读取的四层配置。`read()` 会刷新两个可写层的当前文件内容。 */
 export type LoadedLayers = Partial<Record<(typeof PRECEDENCE)[number], Record<string, unknown>>>;
@@ -35,9 +35,6 @@ const inLayer = (layer: Record<string, unknown> | undefined, path: readonly stri
 const valueIn = (layer: Record<string, unknown> | undefined, path: readonly string[]): unknown =>
   path.reduce<unknown>((node, part) => (node as Record<string, unknown>)[part], layer);
 
-// 规则编号对应数组顺序，因此界面中的第 N 条对应文件中的第 N 个 `[[policy.rules]]`。
-const RULES_FIELD = 'policy.rules';
-
 export function createConfigStore({ projectRoot, userHome, layers = {} }: { projectRoot: string; userHome?: string; layers?: LoadedLayers }) {
   const files = configPaths(projectRoot, userHome);
   const pathOf = (layer: string): string => {
@@ -54,13 +51,16 @@ export function createConfigStore({ projectRoot, userHome, layers = {} }: { proj
     const layer = holderOf(field);
     return layer === undefined ? undefined : valueIn(layers[layer], editableField(field).path);
   };
-  // 配置层中的规则数组整体替换低优先级数组，不会逐条合并。
-  const effectiveRules = (): PolicyRule[] => {
-    for (const layer of PRECEDENCE) {
-      const rules = (layers[layer]?.policy as Record<string, unknown> | undefined)?.rules;
-      if (Array.isArray(rules)) return rules as PolicyRule[];
-    }
-    return [];
+  const resolvedRules = () => mergePolicyRules(PRECEDENCE.flatMap((source) => {
+    const rules = (layers[source]?.policy as Record<string, unknown> | undefined)?.rules;
+    return Array.isArray(rules) ? [{ source, rules }] : [];
+  }));
+  const effectiveRules = (): PolicyRule[] => resolvedRules().rules as PolicyRule[];
+  const rulesSource = (): Source => {
+    const sources = new Set(resolvedRules().sources);
+    if (sources.size > 1) return 'merged';
+    if (sources.size === 1) return [...sources][0] as Source;
+    return PRECEDENCE.find((source) => Array.isArray((layers[source]?.policy as Record<string, unknown> | undefined)?.rules)) ?? 'none';
   };
   // 白名单中的标量字段；规则表作为整体单独处理。
   const scalarFields = Object.keys(EDITABLE).filter((field) => editableField(field).kind !== 'rules');
@@ -91,9 +91,11 @@ export function createConfigStore({ projectRoot, userHome, layers = {} }: { proj
       // 返回每个白名单字段当前由哪一层提供。`flag` 表示只读的命令行 `--config` 层。
       sources: Object.fromEntries(Object.keys(EDITABLE).map((field) => [field, sourceOf(field)])),
       values: foldValues(),
-      // 返回当前生效的规则表及其来源，供界面展示和编辑。
+      // 返回按规则身份合并后的有效表，以及每条规则的真实来源。
       rules: effectiveRules(),
-      rulesSource: sourceOf(RULES_FIELD),
+      ruleSources: resolvedRules().sources,
+      ruleLayers: Object.fromEntries(PRECEDENCE.map((source) => [source, rulesOfLayer(layers[source] ?? {})])),
+      rulesSource: rulesSource(),
     };
   };
   const preview = async (layer: string, table: Record<string, unknown>): Promise<ConfigSnapshot> => {
@@ -107,15 +109,6 @@ export function createConfigStore({ projectRoot, userHome, layers = {} }: { proj
     write(request: WriteRequest & { layer: string }, validate?: (candidate: ConfigSnapshot, editedLayer: Record<string, unknown>) => void | Promise<void>) {
       const definition = editableField(request.field);
       const file = pathOf(request.layer);
-      // 规则表整体替换，因此只能写入当前提供生效规则表的配置层。
-      // 在其他层写入部分规则会遮蔽现有规则，导致界面无法按当前列表顺序修改它们。
-      if (definition.kind === 'rules') {
-        const source = sourceOf(RULES_FIELD);
-        const holder = keyOfLayer(request.layer);
-        if (source !== 'none' && source !== holder) {
-          throw new KernelError('config_rules_elsewhere', { detail: `the rule table in effect is written by the ${source} layer, not ${request.layer}` });
-        }
-      }
       // 写入前记录当前有效值，以便判断本次写入是否改变了运行配置。
       // 如果更高优先级层覆盖该字段，写入前后有效值相同，运行中的配置不会变化。
       const before = definition.kind === 'rules' ? JSON.stringify(effectiveRules()) : JSON.stringify(valueOf(request.field));
@@ -128,13 +121,16 @@ export function createConfigStore({ projectRoot, userHome, layers = {} }: { proj
         const source = definition.kind === 'rules' ? fresh.rulesSource : fresh.sources[request.field];
         const holder = keyOfLayer(request.layer);
         const effective = definition.kind === 'rules' ? fresh.rules : fresh.values[definition.path[0]]?.[definition.path[1]];
+        const shadowed = definition.kind === 'rules'
+          ? !fresh.ruleSources.includes(holder)
+          : source !== holder;
         return {
           ...written,
           // 返回受影响的模型字段，供 Host 更新提供方，而无需重复维护字段白名单。
           key: definition.path[1],
           table: definition.path[0],
-          shadowed: source !== holder,
-          shadowedBy: source !== holder ? source : undefined,
+          shadowed,
+          shadowedBy: shadowed ? source : undefined,
           changed: JSON.stringify(effective) !== before,
           effective,
           layers: fresh.layers,

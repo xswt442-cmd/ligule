@@ -154,6 +154,27 @@ test('a deny rule wins over an allow rule written earlier in the table', async (
   assert.equal(calls.length, 0);
 });
 
+test('a matching ask rule requires approval even when the session would otherwise auto-allow', async () => {
+  const { calls, ask } = asked(true);
+  const chain = createDecisionChain({
+    mode: 'never',
+    rules: [
+      { tool: 'mcp:playwright/browser_navigate', decision: 'allow' },
+      { tool: 'mcp:playwright/browser_navigate', decision: 'ask', reason: 'review browser navigation' },
+    ],
+    ask,
+  });
+
+  const result = await chain.evaluate({
+    tool: 'mcp.call', capability: 'mcp:playwright/browser_navigate', input: { url: 'https://example.com' },
+  });
+
+  assert.equal(result.decision, 'allow');
+  assert.equal(result.via, 'ask');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].reason, 'review browser navigation');
+});
+
 test('every segment of a pipeline has to be covered before an asked call is allowed', async () => {
   const { calls, ask } = asked(true);
   const chain = createDecisionChain({ rules: [{ tool: 'exec', decision: 'allow', match: 'git *' }], ask });

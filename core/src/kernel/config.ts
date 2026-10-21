@@ -33,6 +33,40 @@ function deepFreeze(value: unknown): unknown {
   return value;
 }
 
+function ruleIdentity(value: unknown): string | undefined {
+  if (!isPlainObject(value) || typeof value.tool !== 'string'
+    || (value.match !== undefined && typeof value.match !== 'string')) return undefined;
+  return JSON.stringify([value.tool, value.match ?? '']);
+}
+
+function decisionRank(value: unknown): number {
+  if (!isPlainObject(value)) return 0;
+  return value.decision === 'deny' ? 2 : value.decision === 'ask' ? 1 : 0;
+}
+
+/** 按优先级从高到低合并规则，同一工具和匹配条件只保留一项判定。 */
+export function mergePolicyRules(layers: readonly { readonly source: string; readonly rules: readonly unknown[] }[]): {
+  readonly rules: unknown[];
+  readonly sources: string[];
+} {
+  const selected = new Map<string, { rule: unknown; source: string; rank: number }>();
+  for (const layer of layers) {
+    const withinLayer = new Map<string, { rule: unknown; rank: number }>();
+    layer.rules.forEach((rule, index) => {
+      const identity = ruleIdentity(rule) ?? `invalid:${layer.source}:${index}`;
+      const rank = decisionRank(rule);
+      const existing = withinLayer.get(identity);
+      if (existing === undefined) withinLayer.set(identity, { rule, rank });
+      else if (rank > existing.rank) withinLayer.set(identity, { rule, rank });
+    });
+    for (const [identity, entry] of withinLayer) {
+      if (!selected.has(identity)) selected.set(identity, { ...entry, source: layer.source });
+    }
+  }
+  const entries = [...selected.values()];
+  return { rules: entries.map((entry) => entry.rule), sources: entries.map((entry) => entry.source) };
+}
+
 export function createConfig(layers: unknown): ConfigSnapshot {
   if (!isPlainObject(layers)) throw new KernelError('config_layers_must_be_object');
   for (const name of Object.keys(layers)) {
@@ -47,6 +81,14 @@ export function createConfig(layers: unknown): ConfigSnapshot {
       if (!isPlainObject(layer)) throw new KernelError('config_layer_must_be_object');
       mergeInto(snapshot, layer);
     }
+  }
+  if (isPlainObject(snapshot.policy)) {
+    const rules = [...LAYER_ORDER].reverse().flatMap((source) => {
+      const layer = layers[source];
+      if (!isPlainObject(layer) || !isPlainObject(layer.policy) || !Array.isArray(layer.policy.rules)) return [];
+      return [{ source, rules: layer.policy.rules }];
+    });
+    if (rules.length > 0) snapshot.policy.rules = mergePolicyRules(rules).rules;
   }
   deepFreeze(snapshot);
   return snapshot;

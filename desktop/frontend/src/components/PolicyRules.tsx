@@ -5,10 +5,12 @@ import { Icon } from './Icon';
 import { Modal, Row } from './ui';
 import { useText } from '../locale';
 
-type Rule = { tool: string; match?: string; decision: 'allow' | 'deny'; reason?: string };
+type Rule = { tool: string; match?: string; decision: 'allow' | 'ask' | 'deny'; reason?: string };
 type Shown = {
   rules?: Rule[];
   rulesSource?: string;
+  ruleSources?: string[];
+  ruleLayers?: Record<string, Rule[]>;
   // 配置中的默认策略；未配置时由 Host 返回空值，界面不自行推断。
   policyMode?: string;
   sources?: Record<string, string>;
@@ -27,6 +29,7 @@ const sourceText = (source: string | undefined, t: (chinese: string, english: st
   if (source === 'local') return t('当前项目的本机覆盖', 'This project’s local override');
   if (source === 'project') return t('项目共享配置（只读）', 'Shared project configuration (read-only)');
   if (source === 'user') return t('使用者默认', 'User defaults');
+  if (source === 'merged') return t('多层规则合并', 'Rules merged from multiple layers');
   return t('四层配置均未设置', 'Not set in any configuration layer');
 };
 
@@ -35,7 +38,7 @@ const matchKind = (pattern: string, t: (chinese: string, english: string) => str
   : t('命令开头匹配', 'matches the start of the command');
 const matchText = (pattern: string, t: (chinese: string, english: string) => string) => `${matchKind(pattern, t)} ${pattern}`;
 const decisionText = (decision: Rule['decision'], t: (chinese: string, english: string) => string) =>
-  decision === 'allow' ? t('放行', 'Allow') : t('不允许', 'Deny');
+  decision === 'allow' ? t('放行', 'Allow') : decision === 'ask' ? t('询问', 'Ask') : t('不允许', 'Deny');
 
 const blankRule = (): Rule => ({ tool: '', match: '', decision: 'allow', reason: '' });
 
@@ -158,7 +161,9 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
     }
   };
 
-  const rules = shown?.rules ?? [];
+  const effectiveRules = shown?.rules ?? [];
+  const layerKey = layer === 'projectLocal' ? 'local' : layer;
+  const editableRules = shown?.ruleLayers?.[layerKey] ?? [];
 
   return <>
     <button type="button" className="rail-refresh" disabled={saving} onClick={() => void load()}><Icon name="refresh" size={13} />{t('重新读取', 'Reload')}</button>
@@ -167,7 +172,7 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
       {note.code !== undefined && <details><summary>{t('错误代码', 'Error code')}</summary><code>{note.code}</code></details>}
     </div>}
     {shown === null ? <p className="stub">{t('正在读取规则表…', 'Loading approval rules…')}</p> : <>
-      <p className="sheet-note">{t('显示合并后的规则表。规则与默认档按当前会话所属项目读取；选择另一项目后随之切换。没有打开的会话时使用 Host 启动项目。', 'This is the merged rules table. Rules and the default tier use the project of the current session and follow the selected project. With no session open, the Host’s startup project is used.')} {rulesFrom()}</p>
+      <p className="sheet-note">{t('规则按工具能力名和完全相同的匹配条件逐条覆盖；未被高层覆盖的规则继续生效。下面的编辑列表只操作选中的配置文件。规则与默认档按当前会话所属项目读取；选择另一项目后随之切换。没有打开的会话时使用 Host 启动项目。', 'Rules override one another only when the tool capability and match condition are identical; unmatched lower-layer rules remain active. The editor below changes only the selected configuration file. Rules and the default tier use the current session’s project. With no open session, the Host startup project is used.')} {rulesFrom()}</p>
       <Row label={t('写入位置', 'Save to')}>
         <select value={layer} disabled={saving} onChange={(event) => setLayer(event.target.value)}>
           {WRITABLE_LAYERS.map(([id]) => <option key={id} value={id}>{layerText(id, t)}</option>)}
@@ -187,12 +192,22 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
       </Row>
       {shown.policyMode === 'never' && <p className="session-note" data-tone="bad">{t('完全不需审批已设为配置默认。工具仍受工作区边界、拒绝规则和安全守卫约束。', 'No approval is the configured default. Workspace boundaries, deny rules, and safety guards still apply.')}</p>}
 
-      <h3 className="group-label">{t(`规则（${rules.length} 条）`, `Rules (${rules.length})`)}</h3>
+      <h3 className="group-label">{t(`生效规则（${effectiveRules.length} 条）`, `Effective rules (${effectiveRules.length})`)}</h3>
       <p className="sheet-note">{t('在逐次询问模式下，复合命令的每一段都要被同一条放行规则覆盖，才会跳过询问。禁止规则作用于整条命令及各段，放行规则不能覆盖它。', 'In ask mode, one allow rule must cover every part of a compound command to skip approval. A deny rule applies to the full command and each part; an allow rule cannot override it.')}</p>
-      {rules.length === 0 && <p className="stub">{shown.rules === undefined
+      {effectiveRules.length === 0 && <p className="stub">{shown.rules === undefined
         ? t('此 Host 不提供配置读写，无法读取规则表。', 'This Host does not provide configuration access, so the rules table is unavailable.')
         : t('当前没有审批规则。添加一条规则即可开始。', 'There are no approval rules. Add a rule to get started.')}</p>}
-      {rules.map((rule, index) => <div className="rule-row" key={`${index}:${rule.tool}`}>
+      {effectiveRules.map((rule, index) => <div className="rule-row" key={`${index}:${rule.tool}`}>
+        <span className="rule-kind" data-decision={rule.decision}>{decisionText(rule.decision, t)}</span>
+        <code className="rule-tool">{rule.tool}</code>
+        <span className="rule-detail">{rule.match === undefined || rule.match === '' ? t('每次调用', 'Every call') : matchText(rule.match, t)}</span>
+        {rule.reason !== undefined && rule.reason !== '' && <span className="rule-detail">{rule.reason}</span>}
+        <span className="rule-detail">{sourceText(shown.ruleSources?.[index], t)}</span>
+      </div>)}
+
+      <h3 className="group-label">{t(`${layerText(layer, t)}：${editableRules.length} 条`, `${layerText(layer, t)}: ${editableRules.length} rules`)}</h3>
+      {editableRules.length === 0 && <p className="stub">{t('此配置文件没有规则。新增规则会与其他层的规则一起参与判定。', 'This configuration file has no rules. New rules are evaluated alongside rules from other layers.')}</p>}
+      {editableRules.map((rule, index) => <div className="rule-row" key={`${index}:${rule.tool}`}>
         <span className="rule-kind" data-decision={rule.decision}>{decisionText(rule.decision, t)}</span>
         <code className="rule-tool">{rule.tool}</code>
         <span className="rule-detail">{rule.match === undefined || rule.match === '' ? t('每次调用', 'Every call') : matchText(rule.match, t)}</span>
@@ -214,6 +229,7 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
           <Row label={t('判定', 'Decision')}>
             <select value={editing.rule.decision} onChange={(event) => setEditing({ ...editing, rule: { ...editing.rule, decision: event.target.value as Rule['decision'] } })}>
               <option value="allow">{t('放行', 'Allow')}</option>
+              <option value="ask">{t('询问', 'Ask')}</option>
               <option value="deny">{t('不允许', 'Deny')}</option>
             </select>
           </Row>

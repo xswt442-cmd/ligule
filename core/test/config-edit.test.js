@@ -297,6 +297,9 @@ test('a rule index this file does not have is said plainly, and an empty file ge
 
 test('the rule shape is owned by the host: unknown keys, empty values and a wrong decision are refused', () => {
   assert.deepEqual(checkedRule({ tool: 'read', decision: 'allow', match: 'a*' }), { tool: 'read', decision: 'allow', match: 'a*' });
+  assert.deepEqual(checkedRule({ tool: 'mcp:playwright/browser_navigate', decision: 'ask' }), {
+    tool: 'mcp:playwright/browser_navigate', decision: 'ask',
+  });
   for (const bad of [
     { tool: 'read' },
     { tool: 'read', decision: 'maybe' },
