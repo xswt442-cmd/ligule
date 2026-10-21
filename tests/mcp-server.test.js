@@ -15,6 +15,7 @@ import { modeDirectories } from '../core/dist/kernel/modes.js';
 import { createPermissionContext } from '../core/dist/kernel/permission.js';
 import { listenFetchable } from '../test/helpers/port.ts';
 import { connectMcp } from '../test/helpers/mcp-control.mjs';
+import { requestAgentControl } from '../core/dist/host/agent-control-runtime.js';
 import { setTrusted } from '../core/dist/kernel/workspace-trust.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -68,6 +69,30 @@ async function waitForOutcome(client, operationId) {
     const result = toolData(await client.callTool({ name: 'ligule_run_status', arguments: { operationId } }), 'run_status');
     return result.state === 'running' ? undefined : result;
   }, `operation ${operationId} to settle`);
+}
+
+async function localControl(dataRoot, projectRoot, sessionId, request) {
+  const previousHome = process.env.LIGULE_HOME;
+  process.env.LIGULE_HOME = dataRoot;
+  try { return await requestAgentControl(projectRoot, sessionId, request); }
+  finally {
+    if (previousHome === undefined) delete process.env.LIGULE_HOME;
+    else process.env.LIGULE_HOME = previousHome;
+  }
+}
+
+async function waitForLocalInteraction(client, dataRoot, projectRoot, sessionId, operationId, label) {
+  let cursor = 0;
+  return await waitFor(async () => {
+    const run = toolData(await client.callTool({ name: 'ligule_run_status', arguments: { operationId } }), `${label}_status`);
+    if (run.state !== 'running') return { run };
+    const snapshot = await localControl(dataRoot, projectRoot, sessionId, {
+      action: 'status', after: cursor, limit: 50, waitMs: 0,
+    });
+    cursor = Math.max(cursor, snapshot.nextCursor);
+    const interaction = snapshot.pendingInteractions?.[0];
+    return interaction === undefined ? undefined : { run, interaction };
+  }, label);
 }
 
 async function findHistoryRecord(client, sessionId, predicate) {
@@ -462,20 +487,29 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     providerGates.get('MCP_E2E_CANCEL_GATE').release();
     recordTrace(trace, 'run_cancel_is_scoped_to_active_operation', { operationId: cancelRun.operationId, state: cancelled.state, concurrentCode: toolFailureCode(concurrent) });
 
-    const blockedExec = toolData(await first.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_E2E_EXEC_BLOCKED' } }), 'run_start_restricted_exec');
-    assert.equal((await waitForOutcome(first.client, blockedExec.operationId)).state, 'done');
-    const blockedExecResult = await findHistoryRecord(first.client, sessionId, (record) => record.kind === 'tool' && record.json.includes('node --version'));
-    assert.ok(blockedExecResult, 'the restricted command attempt is recorded');
-    const blockedExecRecord = JSON.parse(blockedExecResult.record.json);
-    assert.equal(blockedExecRecord.result.kind, 'refusal');
     const sandbox = await detectPermissionCapabilities();
     const sandboxAvailable = sandbox.capabilities.filesystemRead !== 'unavailable'
       && sandbox.capabilities.filesystemWrite !== 'unavailable'
       && sandbox.capabilities.network === 'full'
       && sandbox.capabilities.process === 'full';
-    assert.equal(blockedExecRecord.result.code, sandboxAvailable ? 'ask_declined' : 'permission_sandbox_unavailable');
+    const blockedExec = toolData(await first.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_E2E_EXEC_BLOCKED' } }), 'run_start_restricted_exec');
+    const blockedState = await waitForLocalInteraction(first.client, dataRoot, project, sessionId, blockedExec.operationId, 'restricted Shell decision');
+    const blockedApproval = blockedState.interaction;
+    if (sandboxAvailable) {
+      assert.equal(blockedApproval?.type, 'approval', 'the local user must receive a policy approval for the restricted Shell call');
+      const denied = await localControl(dataRoot, project, sessionId, {
+        action: 'reply', requestId: blockedApproval.requestId, type: 'approval', decision: 'deny',
+      });
+      assert.equal(denied.source, 'human');
+    } else assert.equal(blockedApproval, undefined, 'unavailable sandbox capability must refuse before approval');
+    assert.equal((await waitForOutcome(first.client, blockedExec.operationId)).state, 'done');
+    const blockedExecResult = await findHistoryRecord(first.client, sessionId, (record) => record.kind === 'tool' && record.json.includes('node --version'));
+    assert.ok(blockedExecResult, 'the restricted command attempt is recorded');
+    const blockedExecRecord = JSON.parse(blockedExecResult.record.json);
+    assert.equal(blockedExecRecord.result.kind, 'refusal');
+    assert.equal(blockedExecRecord.result.code, blockedApproval === undefined ? 'permission_sandbox_unavailable' : 'ask_declined');
     recordTrace(trace, 'default_mcp_shell_attempt_refused_before_spawn', {
-      code: blockedExecRecord.result.code, sandboxAvailable, sideEffectStarted: false,
+      code: blockedExecRecord.result.code, sandboxAvailable, approvalSource: blockedApproval === undefined ? null : 'human', sideEffectStarted: false,
     });
 
     const approvalRun = toolData(await first.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_E2E_APPROVAL_DENIED' } }), 'run_start_approval');
