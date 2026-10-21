@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { chmod, lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { dataRoot } from '../kernel/config-file.js';
 import { KernelError } from '../kernel/error.js';
@@ -40,6 +40,15 @@ interface RequestEnvelope {
 
 function runtimeDirectory(): string {
   return join(dataRoot(homedir()), 'agent-control-runtime');
+}
+
+function socketEndpoint(directory: string): string {
+  const name = `ac-${randomUUID().replaceAll('-', '')}.sock`;
+  const local = join(directory, name);
+  if (Buffer.byteLength(local, 'utf8') <= 107) return local;
+  const temporary = join(tmpdir(), name);
+  if (Buffer.byteLength(temporary, 'utf8') > 107) throw new KernelError('agent_control_runtime_path_too_long');
+  return temporary;
 }
 
 function descriptorPath(directory: string, sessionId: string): string {
@@ -146,7 +155,7 @@ export function createAgentControlRuntime(
   const token = randomBytes(32).toString('base64url');
   const endpoint = process.platform === 'win32'
     ? `\\\\.\\pipe\\ligule-agent-control-${randomUUID()}`
-    : join(directory, `ac-${randomUUID().replaceAll('-', '')}.sock`);
+    : socketEndpoint(directory);
   const sessions = new Set<string>();
   let server: Server | undefined;
   let serverClosed: Promise<void> | undefined;
@@ -251,7 +260,7 @@ function readDescriptor(input: unknown): RuntimeDescriptor {
   const validEndpoint = process.platform === 'win32'
     ? typeof value.endpoint === 'string' && /^\\\\\.\\pipe\\ligule-agent-control-[0-9a-f-]{36}$/iu.test(value.endpoint)
     : typeof value.endpoint === 'string'
-      && dirname(resolve(value.endpoint)) === resolve(runtimeDirectory())
+      && [resolve(runtimeDirectory()), resolve(tmpdir())].includes(dirname(resolve(value.endpoint)))
       && /^ac-[a-f0-9]{32}\.sock$/u.test(basename(value.endpoint));
   if (value.version !== 1 || typeof value.sessionId !== 'string' || !SESSION_ID.test(value.sessionId)
     || typeof value.projectRoot !== 'string' || !isAbsolute(value.projectRoot) || !validEndpoint

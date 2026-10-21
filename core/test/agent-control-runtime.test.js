@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dataRoot } from '../dist/kernel/config-file.js';
 import { createAgentControlRuntime, requestAgentControl } from '../dist/host/agent-control-runtime.js';
 
@@ -60,6 +60,27 @@ test('a registered local controller accepts scoped status and human actions', as
       requestAgentControl(projectRoot, sessionId, { action: 'status', after: 0, limit: 10, waitMs: 0 }),
       { code: 'agent_control_runtime_unavailable' },
     );
+  });
+});
+
+test('long data roots use a Unix socket path that fits the platform address limit', { skip: process.platform === 'win32' }, async () => {
+  await fixture(async ({ directory, projectRoot }) => {
+    const previousHome = process.env.LIGULE_HOME;
+    process.env.LIGULE_HOME = join(directory, 'long-data-root-'.repeat(8));
+    const sessionId = 'session-with-long-data-root';
+    const runtime = createAgentControlRuntime(projectRoot, async (requestedSessionId) => ({ sessionId: requestedSessionId }));
+    try {
+      await runtime.register(sessionId);
+      const descriptorPath = join(dataRoot(homedir()), 'agent-control-runtime', `${createHash('sha256').update(sessionId).digest('hex')}.json`);
+      const descriptor = JSON.parse(await readFile(descriptorPath, 'utf8'));
+      assert.equal(resolve(descriptor.endpoint).startsWith(resolve(tmpdir()) + '/'), true);
+      assert.ok(Buffer.byteLength(descriptor.endpoint, 'utf8') <= 107, 'Unix socket paths must fit sun_path');
+      assert.deepEqual(await requestAgentControl(projectRoot, sessionId, { action: 'cancel' }), { sessionId });
+    } finally {
+      await runtime.close();
+      if (previousHome === undefined) delete process.env.LIGULE_HOME;
+      else process.env.LIGULE_HOME = previousHome;
+    }
   });
 });
 
