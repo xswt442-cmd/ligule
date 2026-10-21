@@ -10,8 +10,19 @@ import { sessionDirectory } from '../../../core/dist/session/list.js';
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const desktopDirectory = dirname(dirname(scriptDirectory));
 const repositoryRoot = dirname(desktopDirectory);
+const optionValue = (name) => {
+  const index = process.argv.indexOf(name);
+  if (index < 0) return undefined;
+  const value = process.argv[index + 1];
+  if (value === undefined || value.startsWith('--')) throw new Error(`${name}_requires_a_value`);
+  return value;
+};
 const appDirectoryArgument = process.argv.indexOf('--app-dir');
 const suppliedAppDirectory = appDirectoryArgument >= 0 ? process.argv[appDirectoryArgument + 1] : undefined;
+const suppliedWorkspace = optionValue('--workspace');
+const suppliedLiguleHome = optionValue('--ligule-home');
+const createAgentControlGrant = process.argv.includes('--create-agent-control-grant');
+const suppliedGrantName = optionValue('--grant-name');
 const localInterruption = process.argv.includes('--local-request-interruption');
 const realInterruption = process.argv.includes('--real-request-interruption');
 const interruptionMode = localInterruption ? 'local' : realInterruption ? 'real' : undefined;
@@ -25,6 +36,11 @@ if (realInterruption && (typeof modelApiKey !== 'string' || modelApiKey.length <
 if (!realInterruption) modelApiKey = undefined;
 if (appDirectoryArgument >= 0 && (suppliedAppDirectory === undefined || !isAbsolute(suppliedAppDirectory))) {
   throw new Error('--app-dir_requires_an_absolute_directory');
+}
+if (suppliedWorkspace !== undefined && !isAbsolute(suppliedWorkspace)) throw new Error('--workspace_requires_an_absolute_directory');
+if (suppliedLiguleHome !== undefined && !isAbsolute(suppliedLiguleHome)) throw new Error('--ligule-home_requires_an_absolute_directory');
+if (createAgentControlGrant && (suppliedWorkspace === undefined || suppliedLiguleHome === undefined || suppliedGrantName === undefined)) {
+  throw new Error('--create-agent-control-grant_requires_workspace_home_and_grant_name');
 }
 const packagedDirectory = suppliedAppDirectory === undefined
   ? defaultPackagedDirectory()
@@ -54,8 +70,8 @@ const runId = new Date().toISOString().replace(/[:.]/gu, '-');
 const temporaryRoot = await mkdtemp(join(temporaryParent, `packaged-smoke-${runId}-`));
 const evidenceRoot = await mkdtemp(join(evidenceParent, `packaged-smoke-${runId}-${process.pid}-`));
 const userDataDirectory = join(temporaryRoot, 'user-data');
-const liguleHome = join(temporaryRoot, 'ligule-home');
-const workspace = join(temporaryRoot, 'workspaces', 'project');
+const liguleHome = suppliedLiguleHome === undefined ? join(temporaryRoot, 'ligule-home') : resolve(suppliedLiguleHome);
+const workspace = suppliedWorkspace === undefined ? join(temporaryRoot, 'workspaces', 'project') : resolve(suppliedWorkspace);
 process.env.LIGULE_HOME = liguleHome;
 const exportDirectory = join(temporaryRoot, 'exports');
 const exportPath = join(exportDirectory, 'session.md');
@@ -1059,6 +1075,101 @@ async function runChecks() {
     await waitUntil(async () => await devTools.evaluate(`document.querySelector('.agent-control-panel .agent-control-notice') !== null`), 10_000, 'packaged_agent_control_panel');
     const notice = await devTools.evaluate(`document.querySelector('.agent-control-panel .agent-control-notice')?.textContent ?? ''`);
     if (!/本机 stdio MCP|local stdio MCP/u.test(notice)) throw new Error('packaged_mcp_location_notice_missing');
+    if (createAgentControlGrant) {
+      await check('create a workspace-scoped Agent Control grant through the installed UI', async () => {
+        const draft = await devTools.evaluate(`(() => {
+          const panel = document.querySelector('.agent-control-panel');
+          if (panel === null) return { error: 'panel_missing' };
+          const project = panel.querySelector('.grant-basic-grid input[readonly]');
+          const name = panel.querySelector('.grant-basic-grid input:not([readonly])');
+          const cards = [...panel.querySelectorAll('.grant-config-card')];
+          const files = cards.find(card => /文件与命令|Files and commands/u.test(card.querySelector('h4')?.textContent ?? ''));
+          const network = cards.find(card => /网络访问|Network access/u.test(card.querySelector('h4')?.textContent ?? ''));
+          const policy = cards.find(card => /审批方式|Approval behavior/u.test(card.querySelector('h4')?.textContent ?? ''));
+          const setSelect = (select, value) => {
+            if (!(select instanceof HTMLSelectElement)) return false;
+            Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(select, value);
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+            return select.value === value;
+          };
+          if (!(name instanceof HTMLInputElement) || files === undefined || network === undefined || policy === undefined) {
+            return { error: 'grant_form_field_missing' };
+          }
+          Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(name, ${JSON.stringify(suppliedGrantName)});
+          name.dispatchEvent(new Event('input', { bubbles: true }));
+          name.dispatchEvent(new Event('change', { bubbles: true }));
+          const fileSelects = [...files.querySelectorAll('select')];
+          const networkSelects = [...network.querySelectorAll('select')];
+          const selections = [
+            setSelect(fileSelects[0], 'workspace-write'),
+            setSelect(fileSelects[1], 'workspace-write'),
+            setSelect(networkSelects[0], 'unrestricted'),
+            setSelect(networkSelects[1], 'unrestricted'),
+          ];
+          const checkLabel = (container, pattern) => {
+            const label = [...container.querySelectorAll('label')]
+              .find(item => pattern.test(item.textContent ?? ''));
+            const checkbox = label?.querySelector('input[type="checkbox"]');
+            if (!(checkbox instanceof HTMLInputElement)) return false;
+            if (!checkbox.checked) checkbox.click();
+            return checkbox.checked;
+          };
+          const confirmations = [
+            checkLabel(files, /部分隔离|partial-isolation/u),
+            checkLabel(network, /不受限网络|unrestricted network/u),
+            checkLabel(policy, /--operator|ordinary approvals/u),
+            checkLabel(panel.querySelector('.grant-lifetime-card') ?? panel, /我信任上方项目目录|I trust project code/u),
+          ];
+          return {
+            project: project?.value ?? '', name: name.value,
+            selections, confirmations,
+          };
+        })()`);
+        if (draft.error !== undefined) throw new Error(`grant_form_${draft.error}`);
+        if (draft.project.toLowerCase() !== workspace.toLowerCase()) throw new Error('grant_project_does_not_match_requested_workspace');
+        if (draft.name !== suppliedGrantName || !draft.selections.every(Boolean) || !draft.confirmations.every(Boolean)) {
+          throw new Error(`grant_form_not_ready:${JSON.stringify(draft)}`);
+        }
+        await waitUntil(async () => await devTools.evaluate(`(() => {
+          const panel = document.querySelector('.agent-control-panel');
+          const button = [...panel.querySelectorAll('.grant-actions button')]
+            .find(item => /创建授权|Create grant/u.test(item.textContent ?? ''));
+          return button !== undefined && !button.disabled;
+        })()`), 5_000, 'packaged_agent_control_grant_enabled');
+        const submitted = await devTools.evaluate(`(() => {
+          const panel = document.querySelector('.agent-control-panel');
+          const button = [...panel.querySelectorAll('.grant-actions button')]
+            .find(item => /创建授权|Create grant/u.test(item.textContent ?? ''));
+          button?.click();
+          return button !== undefined && !button.disabled;
+        })()`);
+        if (submitted !== true) throw new Error('grant_create_button_unavailable');
+        await waitUntil(async () => await devTools.evaluate(`(() => {
+          const panel = document.querySelector('.agent-control-panel');
+          return [...panel.querySelectorAll('.grant-row')]
+            .some(item => item.querySelector('.grant-row-head strong')?.textContent?.trim() === ${JSON.stringify(suppliedGrantName)});
+        })()`), 20_000, 'packaged_agent_control_grant_saved');
+        const grant = await devTools.evaluate(`(() => {
+          const row = [...document.querySelectorAll('.agent-control-panel .grant-row')]
+            .find(item => item.querySelector('.grant-row-head strong')?.textContent?.trim() === ${JSON.stringify(suppliedGrantName)});
+          const summary = row?.querySelector('details summary');
+          summary?.click();
+          return {
+            id: row?.querySelector('details code')?.textContent?.trim() ?? '',
+            project: row?.querySelector(':scope > code')?.textContent?.trim() ?? '',
+            details: [...(row?.querySelectorAll('details p') ?? [])].map(item => item.textContent ?? '').join(' '),
+            summary: row?.textContent ?? '',
+          };
+        })()`);
+        if (grant.id === '' || grant.project.toLowerCase() !== workspace.toLowerCase()) throw new Error('saved_grant_identity_mismatch');
+        if (!grant.details.includes('可信界面创建') && !grant.details.includes('Trusted UI')) throw new Error('saved_grant_source_not_trusted_ui');
+        if (!grant.summary.includes('workspace-write / workspace-write') || !grant.summary.includes('unrestricted / unrestricted')
+          || !grant.summary.includes('ask') || (!grant.summary.includes('allowed') && !grant.summary.includes('允许'))) {
+          throw new Error('saved_grant_limits_invalid');
+        }
+        return `可信 Desktop UI 为准确工作区创建 ${grant.id}；workspace-write / workspace-write，unrestricted / unrestricted，Policy ask，允许 --operator`;
+      });
+    }
     await devTools.evaluate(`document.querySelector('button[aria-label="关闭设置"], button[aria-label="Close settings"]')?.click(); true`);
     await waitUntil(async () => await devTools.evaluate(`document.querySelector('.sheet') === null`), 5_000, 'packaged_control_settings_close');
     return 'Agent Control 页面报告使用本机 stdio MCP；CLI 的已安装路径由独立 npm 消费者检查确认';
