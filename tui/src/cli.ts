@@ -648,9 +648,19 @@ if (invalidLanguage) {
       const { confirmWorkspaceTrust } = await import('./tui/trust.js');
       // 在读取项目配置和资源前确认目录信任；用户拒绝时不创建 Host 或会话。
       if (await confirmWorkspaceTrust(process.cwd(), { locale: locale ?? languageOf('auto') })) {
-        const { config, extensions } = await configSnapshot();
+        const { config, extensions, layers } = await configSnapshot();
         const { runTui } = await import('./tui/start.js');
-        await runTui({ config, provider: hostProviderFromConfig(config), policy: config.policy, extensions, locale, ...resolveMode(config) });
+        await runTui({
+          config,
+          provider: hostProviderFromConfig(config),
+          policy: config.policy,
+          extensions,
+          locale,
+          ...resolveMode(config),
+          configLayers: layers,
+          configStoreFor: (projectRoot, ownLayers) => createConfigStore({ projectRoot, layers: ownLayers }),
+          loadEnvironment: projectEnvironment,
+        });
       }
     } catch (error) {
       const fields = errorFields(error);

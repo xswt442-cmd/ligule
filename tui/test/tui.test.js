@@ -2,7 +2,7 @@
 // 显式启用交互渲染，避免 CI 环境变量让 Ink 停止更新画面。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFile, cp, mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
+import { access, appendFile, cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -27,6 +27,7 @@ try {
 
 const options = { skip: missing === '' ? false : missing };
 const editorFixture = fileURLToPath(new URL('./fixtures/editor.mjs', import.meta.url));
+const mcpServerFixture = fileURLToPath(new URL('../../tests/fixtures/mcp-minimal.mjs', import.meta.url));
 const { foldText, editDraft, projectRecord, buildStatusLine, contextSegment, findRecord, branchOf, detailTitle, routeInput, candidatesOf, describeChange, displayWidth, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, findLines, mentionToken, insertMention, resolveSessionId, SESSION_ROWS, isTypingRun } = rows;
 const quoted = (value) => `"${value.replaceAll('"', '\\"')}"`;
 const plainOutput = (value) => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
@@ -280,6 +281,107 @@ test('the approval box names the shell backend and its executable', options, asy
   assert.match(painted, /git --version/);
   assert.match(painted, /执行环境 (powershell|bash) · /);
   }, { permission });
+});
+
+test('the TUI remembers a session-scoped approval and applies it after the next user request', options, async () => {
+  await withTuiHost(async ({ client, sessionId, projectDirectory }) => {
+    const { createElement } = await import('react');
+    const { render } = await import('ink');
+    const { PassThrough } = await import('node:stream');
+    const { App } = await import('../dist/tui/app.js');
+    await writeFile(join(projectDirectory, 'note.txt'), 'TUI approval memory');
+    const stdout = new PassThrough();
+    stdout.columns = 110;
+    stdout.isTTY = true;
+    let painted = '';
+    stdout.on('data', (chunk) => { painted += chunk; });
+    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+    let approvalCount = 0;
+    const onRequest = client.onRequest.bind(client);
+    client.onRequest = (handler) => onRequest((message) => {
+      if (message.method === 'approval.request') approvalCount += 1;
+      return handler(message);
+    });
+    const instance = render(createElement(App, { client, sessionId, info: { boundary: projectDirectory }, interactive: true }), {
+      stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true,
+    });
+    try {
+      const first = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'read', args: { path: 'note.txt' } }) });
+      await waitFor(() => painted.includes('2 记住本会话'), { read: () => painted });
+      stdin.write('2');
+      await first;
+      assert.equal(approvalCount, 1);
+      const records = await client.request('session.read', { sessionId });
+      assert.ok(records.events.some((event) => event.kind === 'sessionPolicyRule' && event.rule.tool === 'read'));
+
+      await client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'read', args: { path: 'note.txt' } }) });
+      assert.equal(approvalCount, 1);
+    } finally {
+      instance.unmount();
+    }
+  });
+});
+
+test('the TUI shows the MCP program before trusting it and starts it only after confirmation', options, async () => {
+  await withTuiHost(async ({ client, sessionId, projectDirectory }) => {
+    const { createElement } = await import('react');
+    const { render } = await import('ink');
+    const { PassThrough } = await import('node:stream');
+    const { App } = await import('../dist/tui/app.js');
+    const markerPath = join(projectDirectory, 'mcp-started.pid');
+    const stdout = new PassThrough();
+    stdout.columns = 110;
+    stdout.isTTY = true;
+    let painted = '';
+    stdout.on('data', (chunk) => { painted += chunk; });
+    const shown = () => plainOutput(painted);
+    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+    const instance = render(createElement(App, {
+      client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+    }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+    const sendCommand = async (text) => {
+      stdin.write(text);
+      await waitFor(() => shown().includes(`› ${text}`), { within: 5_000, read: shown });
+      stdin.write('\r');
+    };
+    try {
+      const trustServer = await client.request('mcp.trust.list', { projectRoot: projectDirectory });
+      const server = trustServer.servers[0];
+      assert.equal(server.name, 'probe');
+      assert.equal(server.trust, null);
+      await sendCommand('/mcp trust probe project');
+      await waitFor(() => shown().includes('待确认：probe') && shown().includes(mcpServerFixture), { within: 5_000, read: shown });
+      await assert.rejects(() => access(markerPath), (error) => error.code === 'ENOENT');
+
+      await sendCommand('/mcp confirm');
+      await waitFor(() => shown().includes('已在project范围信任 probe'), { within: 5_000, read: shown });
+      await sendCommand('/mcp tools probe');
+      await waitFor(() => shown().includes('echo one value'), { within: 5_000, read: shown });
+      const pid = Number(await readFile(markerPath, 'utf8'));
+      assert.ok(pid > 0);
+      const trusted = await client.request('mcp.trust.list', { projectRoot: projectDirectory });
+      assert.equal(trusted.servers[0].trust?.trusted, true);
+
+      await sendCommand('/mcp revoke probe project');
+      await waitFor(() => shown().includes('已撤销 probe 的 project 信任。'), { within: 5_000, read: shown });
+      const revoked = await client.request('mcp.trust.list', { projectRoot: projectDirectory });
+      assert.equal(revoked.servers[0].trust?.trusted, false);
+    } finally {
+      instance.unmount();
+    }
+  }, {
+    config: { mcp: { servers: { probe: { command: process.execPath, args: [mcpServerFixture, 'mcp-schema.json', 'mcp-started.pid'] } } } },
+    setup: async ({ projectDirectory }) => {
+      await writeFile(join(projectDirectory, 'mcp-schema.json'), JSON.stringify({ type: 'object', properties: { value: { type: 'string' } } }));
+      await mkdir(join(projectDirectory, '.ligule'), { recursive: true });
+      await writeFile(join(projectDirectory, '.ligule', 'config.toml'), [
+        '[mcp.servers.probe]',
+        'command = ' + JSON.stringify(process.execPath),
+        'args = [' + [mcpServerFixture, 'mcp-schema.json', 'mcp-started.pid'].map((value) => JSON.stringify(value)).join(', ') + ']',
+        '',
+      ].join('\n'));
+    },
+  });
 });
 
 // 命令补全先列出界面命令，再列出 Host 提供的模板，并按输入前缀筛选。
@@ -1284,7 +1386,9 @@ test('/control creates a project-bound grant through the interactive wizard', op
     await answer('unrestricted', '默认 Policy');
     await answer('auto', '允许的 Policy');
     await answer('ask,auto', '允许 --operator');
-    await answer('yes', '到期时间');
+    await answer('yes', '允许外控启动哪些已信任的 MCP Server');
+    await answer('none', '允许外控调用哪些工具');
+    await answer('none', '到期时间');
     await answer(expiresAt, '确认信任此项目');
     await answer('yes', '接受 workspace-write 可能存在的部分隔离限制');
     await answer('yes', '单独确认 full-access');
@@ -1306,6 +1410,8 @@ test('/control creates a project-bound grant through the interactive wizard', op
     assert.equal(saved.grants[0].defaultPolicy, 'auto');
     assert.equal(saved.grants[0].allowedPolicies.includes('auto'), true);
     assert.equal(saved.grants[0].allowOperator, true);
+    assert.deepEqual(saved.grants[0].allowedMcpServers, []);
+    assert.deepEqual(saved.grants[0].allowedMcpTools, []);
     assert.equal(saved.grants[0].confirmedPartialWorkspaceWrite, true);
     assert.equal(saved.grants[0].confirmedFullAccess, true);
     assert.equal(saved.grants[0].confirmedUnrestrictedNetwork, true);

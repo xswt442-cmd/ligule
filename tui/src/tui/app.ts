@@ -162,6 +162,8 @@ type AgentGrant = {
   readonly defaultPolicy: 'ask' | 'auto' | 'never';
   readonly allowedPolicies: readonly ('ask' | 'auto' | 'never')[];
   readonly allowOperator: boolean;
+  readonly allowedMcpServers: readonly string[];
+  readonly allowedMcpTools: readonly string[];
   readonly confirmedPartialWorkspaceWrite: boolean;
   readonly createdAt: string;
   readonly expiresAt: string | null;
@@ -177,13 +179,39 @@ type ControlWizardValues = {
   defaultPolicy?: AgentGrant['defaultPolicy'];
   allowedPolicies?: ('ask' | 'auto' | 'never')[];
   allowOperator?: boolean;
+  allowedMcpServers?: string[];
+  allowedMcpTools?: string[];
   expiresAt?: string | null;
   confirmFullAccess?: boolean;
   confirmUnrestrictedNetwork?: boolean;
   confirmPartialWorkspaceWrite?: boolean;
   confirmWorkspaceTrust?: boolean;
 };
-type ControlWizard = { readonly step: number; readonly values: ControlWizardValues };
+type McpTrustScope = 'session' | 'project' | 'user';
+type McpServerSummary = {
+  readonly name: string;
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly cwd: string;
+  readonly environmentNames: readonly string[];
+  readonly identityDigest: string;
+  readonly trust: { readonly scope: McpTrustScope; readonly source: 'trusted-ui'; readonly trusted: boolean } | null;
+  readonly trustScopes: Readonly<Record<McpTrustScope, { readonly source: 'trusted-ui'; readonly trusted: boolean } | null>>;
+};
+type McpTrustSnapshot = { readonly version: string; readonly servers: readonly McpServerSummary[] };
+type McpToolsSnapshot = { readonly server: string; readonly identityDigest: string; readonly tools: readonly { readonly name: string; readonly description: string; readonly digest: string }[] };
+type McpTrustPending = {
+  readonly server: string;
+  readonly scope: McpTrustScope;
+  readonly version: string;
+  readonly identityDigest: string;
+};
+type ControlWizard = {
+  readonly step: number;
+  readonly values: ControlWizardValues;
+  readonly mcpServers: readonly string[];
+  readonly mcpTools: readonly string[];
+};
 
 function agentMcpConfig(grant: AgentGrant): string {
   const args = ['mcp-server', '--project', grant.projectRoot, '--grant', grant.id];
@@ -192,13 +220,13 @@ function agentMcpConfig(grant: AgentGrant): string {
 }
 
 function controlWizardNext(step: number, values: ControlWizardValues): number {
-  if (step === 8) return 9;
-  if (step === 9) return values.maxPermissionProfile !== 'read-only' ? 10
-    : values.maxNetwork === 'unrestricted' ? 12 : -1;
-  if (step === 10) return values.maxPermissionProfile === 'full-access' ? 11
-    : values.maxNetwork === 'unrestricted' ? 12 : -1;
-  if (step === 11) return values.maxNetwork === 'unrestricted' ? 12 : -1;
-  if (step === 12) return -1;
+  if (step === 10) return 11;
+  if (step === 11) return values.maxPermissionProfile !== 'read-only' ? 12
+    : values.maxNetwork === 'unrestricted' ? 14 : -1;
+  if (step === 12) return values.maxPermissionProfile === 'full-access' ? 13
+    : values.maxNetwork === 'unrestricted' ? 14 : -1;
+  if (step === 13) return values.maxNetwork === 'unrestricted' ? 14 : -1;
+  if (step === 14) return -1;
   return step + 1;
 }
 interface RuntimeChoice extends PanelChoice {
@@ -222,6 +250,9 @@ interface AskState {
   readonly content: string;
   readonly backend: string;
   readonly reason: string;
+  readonly rememberable: boolean;
+  readonly rememberScopes: readonly McpTrustScope[];
+  readonly rememberHintKey: 'tool' | 'command' | '';
   readonly external?: boolean;
 }
 
@@ -332,6 +363,9 @@ interface TuiRequestResults {
   readonly 'agent-control.list': AgentControlSnapshot;
   readonly 'agent-control.create': AgentControlSnapshot;
   readonly 'agent-control.revoke': AgentControlSnapshot;
+  readonly 'mcp.trust.list': McpTrustSnapshot;
+  readonly 'mcp.trust.set': { readonly server: string; readonly scope: McpTrustScope; readonly trusted: boolean; readonly version?: string };
+  readonly 'mcp.trust.tools': McpToolsSnapshot;
   readonly 'session.compact': { readonly sessionId: string; readonly [key: string]: unknown };
 }
 
@@ -639,10 +673,12 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [controlSnapshot, setControlSnapshot] = useState<AgentControlSnapshot | null>(null);
   const [controlTarget, setControlTarget] = useState<string | null>(null);
   const [controlWizard, setControlWizard] = useState<ControlWizard | null>(null);
+  const [mcpTrustPending, setMcpTrustPending] = useState<McpTrustPending | null>(null);
   const [externalControl, setExternalControl] = useState(false);
   const [externalSnapshot, setExternalSnapshot] = useState<ExternalControlSnapshot | null>(null);
   const resolvedExternalInteractions = useRef(new Set<string>());
   useEffect(() => { resolvedExternalInteractions.current.clear(); }, [sessionId]);
+  useEffect(() => { setMcpTrustPending(null); }, [sessionId]);
   const pickerRequest = useRef(0);
   const [draft, setDraft] = useState('');
   const [caret, setCaret] = useState(0);
@@ -881,6 +917,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         content: `${approvalBody(params.tool, args, locale)}${bindingText}`,
         // 显示本次判定和执行使用的命令语法及可执行文件。
         backend: typeof params.shell === 'string' ? `${params.shell} · ${typeof params.executable === 'string' ? params.executable : ''}` : '',
+        rememberable: params.rememberable === true,
+        rememberScopes: Array.isArray(params.rememberScopes)
+          ? params.rememberScopes.filter((scope): scope is McpTrustScope => scope === 'session' || scope === 'project' || scope === 'user')
+          : [],
+        rememberHintKey: params.rememberHintKey === 'command' ? 'command' : params.rememberHintKey === 'tool' ? 'tool' : '',
       });
     };
     client.onNotification(onNotification);
@@ -968,6 +1009,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
                 content: approvalBody(typeof approval.details.tool === 'string' ? approval.details.tool : '', args, locale),
                 backend: typeof approval.details.shell === 'string' ? `${approval.details.shell} · ${typeof approval.details.executable === 'string' ? approval.details.executable : ''}` : '',
                 reason: typeof approval.details.reason === 'string' ? approval.details.reason : '',
+                rememberable: false,
+                rememberScopes: [],
+                rememberHintKey: '',
                 external: true,
               });
         } else setAsk((current) => current?.external === true ? null : current);
@@ -1254,6 +1298,101 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   }, [client, controlSnapshot, controlTarget, info.boundary, modes, push, sessionId, t]);
 
   const runCommand = useCallback((name: string, argument = '') => {
+    if (name === 'mcp') {
+      const [action = 'list', serverName = '', scopeText = ''] = argument.trim().split(/\s+/, 3);
+      const scopes: readonly McpTrustScope[] = ['session', 'project', 'user'];
+      const scope = scopes.includes(scopeText as McpTrustScope) ? scopeText as McpTrustScope : undefined;
+      if (action === 'confirm') {
+        const pending = mcpTrustPending;
+        if (pending === null) {
+          push({ kind: 'error', text: t('没有待确认的 MCP Server 信任请求。', 'No MCP server trust request is pending.') });
+          return;
+        }
+        void (async () => {
+          try {
+            const snapshot = await client.request('mcp.trust.list', { projectRoot: info.boundary, sessionId });
+            const current = snapshot.servers.find((server) => server.name === pending.server);
+            if (current === undefined || current.identityDigest !== pending.identityDigest) {
+              setMcpTrustPending(null);
+              throw new Error('mcp_server_config_changed');
+            }
+            await client.request('mcp.trust.set', {
+              projectRoot: info.boundary, sessionId, server: pending.server, identityDigest: pending.identityDigest, scope: pending.scope, trusted: true,
+              confirmTrust: true, confirmExternalAccess: true,
+              ...(pending.scope === 'session' ? {} : { version: snapshot.version }),
+            });
+            setMcpTrustPending(null);
+            push({ kind: 'meta', text: t(`已在${pending.scope}范围信任 ${pending.server}。`, `${pending.server} is trusted at ${pending.scope} scope.`) });
+          } catch (error) {
+            push({ kind: 'error', text: t(`MCP Server 未获信任：${errorCode(error) ?? errorMessage(error) ?? 'mcp_trust_failed'}`, `MCP server was not trusted: ${errorCode(error) ?? errorMessage(error) ?? 'mcp_trust_failed'}`) });
+          }
+        })();
+        return;
+      }
+      if (action === 'list' || action === '') {
+        void client.request('mcp.trust.list', { projectRoot: info.boundary, sessionId }).then((snapshot) => {
+          const lines = snapshot.servers.length === 0 ? [t('当前项目没有配置 MCP Server。', 'No MCP servers are configured for this project.')]
+            : snapshot.servers.map((server) => `${server.name} · ${server.trust === null ? t('未信任', 'untrusted') : server.trust.trusted ? t(`已信任 ${server.trust.scope}（可信本机界面）`, `trusted ${server.trust.scope} (trusted local UI)`) : t(`已阻止 ${server.trust.scope}`, `blocked ${server.trust.scope}`)} · ${server.command} ${server.args.join(' ')} · cwd ${server.cwd}`);
+          push({ kind: 'meta', text: lines.join('\n') });
+        }, (error: unknown) => push({ kind: 'error', text: t(`无法读取 MCP Server：${errorCode(error) ?? 'mcp_trust_list_failed'}`, `Could not read MCP servers: ${errorCode(error) ?? 'mcp_trust_list_failed'}`) }));
+        return;
+      }
+      if (action === 'trust') {
+        if (serverName === '' || scope === undefined) {
+          push({ kind: 'error', text: t('用法：/mcp trust <Server> <session|project|user>', 'Usage: /mcp trust <server> <session|project|user>') });
+          return;
+        }
+        if (scope === 'session' && sessionId === '') {
+          push({ kind: 'error', text: t('当前没有会话，不能保存会话范围的信任。', 'There is no active session for session-scoped trust.') });
+          return;
+        }
+        void client.request('mcp.trust.list', { projectRoot: info.boundary, sessionId }).then((snapshot) => {
+          const server = snapshot.servers.find((item) => item.name === serverName);
+          if (server === undefined) throw new Error('mcp_server_unknown');
+          setMcpTrustPending({ server: server.name, scope, version: snapshot.version, identityDigest: server.identityDigest });
+          push({ kind: 'meta', text: t(
+            `待确认：${server.name}\n程序：${server.command}\n参数：${server.args.join(' ') || '无'}\n工作目录：${server.cwd}\n环境变量名：${server.environmentNames.join(', ') || '无'}\n它在 Shell 沙箱外运行，可访问当前 OS 用户可访问的文件和网络。输入 /mcp confirm 确认信任范围 ${scope}。`,
+            `Pending trust: ${server.name}\nProgram: ${server.command}\nArguments: ${server.args.join(' ') || 'none'}\nWorking directory: ${server.cwd}\nEnvironment variable names: ${server.environmentNames.join(', ') || 'none'}\nIt runs outside the Shell sandbox and may access files and networks available to this OS user. Type /mcp confirm to trust at ${scope} scope.`,
+          ) });
+        }, (error: unknown) => push({ kind: 'error', text: t(`无法读取 MCP Server：${errorCode(error) ?? 'mcp_trust_list_failed'}`, `Could not read MCP server: ${errorCode(error) ?? 'mcp_trust_list_failed'}`) }));
+        return;
+      }
+      if (action === 'revoke') {
+        if (serverName === '' || scope === undefined) {
+          push({ kind: 'error', text: t('用法：/mcp revoke <Server> <session|project|user>', 'Usage: /mcp revoke <server> <session|project|user>') });
+          return;
+        }
+        void (async () => {
+          try {
+            const snapshot = await client.request('mcp.trust.list', { projectRoot: info.boundary, sessionId });
+            const server = snapshot.servers.find((item) => item.name === serverName);
+            if (server === undefined) throw new Error('mcp_server_unknown');
+            await client.request('mcp.trust.set', {
+              projectRoot: info.boundary, sessionId, server: serverName, identityDigest: server.identityDigest, scope, trusted: false,
+              ...(scope === 'session' ? {} : { version: snapshot.version }),
+            });
+            setMcpTrustPending(null);
+            push({ kind: 'meta', text: t(`已撤销 ${serverName} 的 ${scope} 信任。`, `Revoked ${scope} trust for ${serverName}.`) });
+          } catch (error) {
+            push({ kind: 'error', text: t(`撤销 MCP Server 信任失败：${errorCode(error) ?? errorMessage(error) ?? 'mcp_trust_failed'}`, `Could not revoke MCP server trust: ${errorCode(error) ?? errorMessage(error) ?? 'mcp_trust_failed'}`) });
+          }
+        })();
+        return;
+      }
+      if (action === 'tools') {
+        if (serverName === '') {
+          push({ kind: 'error', text: t('用法：/mcp tools <Server>', 'Usage: /mcp tools <server>') });
+          return;
+        }
+        push({ kind: 'meta', text: t(`正在启动已信任的 ${serverName} 并读取工具清单；不会调用工具。`, `Starting trusted server ${serverName} to list tools; no tools will be called.`) });
+        void client.request('mcp.trust.tools', { projectRoot: info.boundary, sessionId, server: serverName }).then((listed) => {
+          push({ kind: 'meta', text: listed.tools.map((tool) => `${tool.name}${tool.description === '' ? '' : ` · ${tool.description}`}`).join('\n') || t('此 Server 没有工具。', 'This server has no tools.') });
+        }, (error: unknown) => push({ kind: 'error', text: t(`无法读取 MCP 工具：${errorCode(error) ?? 'mcp_tool_list_failed'}`, `Could not read MCP tools: ${errorCode(error) ?? 'mcp_tool_list_failed'}`) }));
+        return;
+      }
+      push({ kind: 'error', text: t('用法：/mcp [list|trust <Server> <scope>|confirm|revoke <Server> <scope>|tools <Server>]', 'Usage: /mcp [list|trust <server> <scope>|confirm|revoke <server> <scope>|tools <server>]') });
+      return;
+    }
     if (name === 'trust') {
       if (argument === '') {
         push({ kind: 'meta', text: t(`工作区：${info.boundary ?? ''}\n使用 /trust revoke 撤销信任并退出；工具审批仍按当前设置执行。`, `Workspace: ${info.boundary ?? ''}\nUse /trust revoke to revoke trust and exit. Tool approvals still use the current policy.`) });
@@ -1277,9 +1416,22 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           push({ kind: 'error', text: t('当前没有已选择的项目目录。', 'No project directory is selected.') });
           return;
         }
-        setControlWizard({ step: 0, values: {} });
-        setPanel(null);
-        push({ kind: 'meta', text: t('开始创建授权；每一步按 Enter 确认，输入 cancel 可取消。', 'Grant setup started. Press Enter after each answer; type cancel to stop.') });
+        void (async () => {
+          try {
+            const trust = await client.request('mcp.trust.list', { projectRoot: info.boundary });
+            const mcpServers = trust.servers.filter((server) =>
+              server.trustScopes.project?.trusted === true || server.trustScopes.user?.trusted === true,
+            ).map((server) => server.name);
+            setControlWizard({ step: 0, values: {}, mcpServers, mcpTools: [] });
+            setPanel(null);
+            push({ kind: 'meta', text: t(
+              `开始创建授权；每一步按 Enter 确认，输入 cancel 可取消。已信任的 MCP Server：${mcpServers.join(', ') || '无'}`,
+              `Grant setup started. Press Enter after each answer; type cancel to stop. Trusted MCP servers: ${mcpServers.join(', ') || 'none'}`,
+            ) });
+          } catch (error) {
+            push({ kind: 'error', text: t(`无法读取 MCP Server 信任状态：${errorCode(error) ?? 'mcp_trust_list_failed'}`, `Could not read MCP server trust: ${errorCode(error) ?? 'mcp_trust_list_failed'}`) });
+          }
+        })();
         return;
       }
       if (action !== 'list' && action !== 'copy' && action !== 'revoke') {
@@ -1299,7 +1451,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
                 const source = grant.source === 'trusted-ui'
                   ? t('可信界面创建', 'Trusted UI')
                   : t('历史记录未保存来源', 'Legacy record; source not recorded');
-                return `${grant.id} · ${grant.name} · ${state} · ${t('权限', 'permission')} ${grant.defaultPermissionProfile} / ${grant.maxPermissionProfile} · ${t('网络', 'network')} ${grant.defaultNetwork} / ${grant.maxNetwork} · Policy ${grant.defaultPolicy} (${grant.allowedPolicies.join(', ')}) · ${expiry} · ${t('来源', 'source')} ${source} · ${grant.projectRoot} · ${t('在线状态未知', 'online status unknown')}`;
+                return `${grant.id} · ${grant.name} · ${state} · ${t('权限', 'permission')} ${grant.defaultPermissionProfile} / ${grant.maxPermissionProfile} · ${t('网络', 'network')} ${grant.defaultNetwork} / ${grant.maxNetwork} · Policy ${grant.defaultPolicy} (${grant.allowedPolicies.join(', ')}) · MCP ${grant.allowedMcpServers.join(', ') || t('无', 'none')} · ${t('工具', 'tools')} ${grant.allowedMcpTools.join(', ') || t('无', 'none')} · ${expiry} · ${t('来源', 'source')} ${source} · ${grant.projectRoot} · ${t('在线状态未知', 'online status unknown')}`;
               });
             push({ kind: 'meta', text: lines.join('\n') });
             return;
@@ -1957,7 +2109,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     push({ kind: 'error', text: t(`未知命令：/${name}（/help 查看）`, `Unknown command: /${name} (/help to browse)`) });
-  }, [app, changePermission, client, externalControl, info, keyOverrides, keys, locale, push, queue, queuePaused, refreshStatus, sessionId, status, stdout, t, trust, openPicker, exitTui]);
+  }, [app, changePermission, client, externalControl, info, keyOverrides, keys, locale, mcpTrustPending, push, queue, queuePaused, refreshStatus, sessionId, status, stdout, t, trust, openPicker, exitTui]);
 
   const chooseOption = useCallback((id: string) => {
     const choice = choices.find(item => item.id === id);
@@ -1966,11 +2118,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     closePanel();
     if (currentPanel === 'control') {
       if (id === 'create') {
-        if (info.boundary === undefined || info.boundary === '') {
-          push({ kind: 'error', text: t('当前没有已选择的项目目录。', 'No project directory is selected.') });
-          return;
-        }
-        setControlWizard({ step: 0, values: {} });
+        runCommand('control', 'create');
         return;
       }
       if (id.startsWith('grant:')) {
@@ -2079,7 +2227,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     } else client.reply(head.id, { answers });
   }, [client, externalControl, info.boundary, push, query, resetDraft, sessionId, t]);
 
-  const advanceControlWizard = useCallback((raw: string) => {
+  const advanceControlWizard = useCallback(async (raw: string) => {
     const wizard = controlWizard;
     if (wizard === null) return false;
     const input = raw.trim();
@@ -2134,31 +2282,62 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       if (!['y', 'yes', 'n', 'no'].includes(input.toLowerCase())) { fail(t('请输入 yes 或 no。', 'Enter yes or no.')); return true; }
       values.allowOperator = ['y', 'yes'].includes(input.toLowerCase());
     } else if (wizard.step === 8) {
+      const allowed = input === '' || input.toLowerCase() === 'none' ? [] : input.split(',').map((part) => part.trim()).filter(Boolean);
+      if (new Set(allowed).size !== allowed.length || allowed.some((server) => !wizard.mcpServers.includes(server))) {
+        fail(t(`请输入已信任的 Server 名称列表：${wizard.mcpServers.join(', ') || 'none'}。`, `Enter a list of trusted server names: ${wizard.mcpServers.join(', ') || 'none'}.`)); return true;
+      }
+      values.allowedMcpServers = allowed;
+      let tools: string[] = [];
+      if (allowed.length > 0) {
+        try {
+          const listed = await Promise.all(allowed.map((server) => client.request('mcp.trust.tools', {
+            projectRoot: info.boundary ?? '', server,
+          })));
+          tools = listed.flatMap((entry) => entry.tools.map((tool) => `mcp:${entry.server}/${tool.name}`));
+        } catch (error) {
+          fail(t(`读取 MCP 工具失败：${errorCode(error) ?? 'mcp_tool_list_failed'}`, `Could not list MCP tools: ${errorCode(error) ?? 'mcp_tool_list_failed'}`)); return true;
+        }
+      }
+      values.allowedMcpTools = [];
+      resetDraft('');
+      setControlWizard({ step: 9, values, mcpServers: wizard.mcpServers, mcpTools: tools });
+      push({ kind: 'meta', text: t(
+        `可授权的 MCP 工具：${tools.join(', ') || '无'}。输入完整能力名列表，或 none。`,
+        `MCP tools available to grant: ${tools.join(', ') || 'none'}. Enter exact capability names or none.`,
+      ) });
+      return true;
+    } else if (wizard.step === 9) {
+      const allowed = input === '' || input.toLowerCase() === 'none' ? [] : input.split(',').map((part) => part.trim()).filter(Boolean);
+      if (new Set(allowed).size !== allowed.length || allowed.some((tool) => !wizard.mcpTools.includes(tool))) {
+        fail(t(`请输入可授权清单中的完整能力名：${wizard.mcpTools.join(', ') || 'none'}。`, `Enter exact capability names from the available list: ${wizard.mcpTools.join(', ') || 'none'}.`)); return true;
+      }
+      values.allowedMcpTools = allowed;
+    } else if (wizard.step === 10) {
       if (input === '' || input.toLowerCase() === 'none') values.expiresAt = null;
       else {
         const expiry = input.length === 10 ? Date.parse(`${input}T23:59:59`) : Date.parse(input);
         if (!Number.isFinite(expiry) || expiry <= Date.now()) { fail(t('请输入未来的日期/时间或 none。', 'Enter a future date/time or none.')); return true; }
         values.expiresAt = new Date(expiry).toISOString();
       }
-    } else if (wizard.step === 9) {
+    } else if (wizard.step === 11) {
       if (!['y', 'yes'].includes(input.toLowerCase())) {
         setControlWizard(null); resetDraft('');
         fail(t('未确认信任此项目，授权未创建。', 'Project trust was not confirmed; no grant was created.')); return true;
       }
       values.confirmWorkspaceTrust = true;
-    } else if (wizard.step === 10) {
+    } else if (wizard.step === 12) {
       if (!['y', 'yes'].includes(input.toLowerCase())) {
         setControlWizard(null); resetDraft('');
         fail(t('未确认工作区部分隔离限制，授权未创建。', 'Partial workspace-write limits were not confirmed; no grant was created.')); return true;
       }
       values.confirmPartialWorkspaceWrite = true;
-    } else if (wizard.step === 11) {
+    } else if (wizard.step === 13) {
       if (!['y', 'yes'].includes(input.toLowerCase())) {
         setControlWizard(null); resetDraft('');
         fail(t('未确认 full-access，授权未创建。', 'Full-access was not confirmed; no grant was created.')); return true;
       }
       values.confirmFullAccess = true;
-    } else if (wizard.step === 12) {
+    } else if (wizard.step === 14) {
       if (!['y', 'yes'].includes(input.toLowerCase())) {
         setControlWizard(null); resetDraft('');
         fail(t('未确认不受限网络，授权未创建。', 'Unrestricted network was not confirmed; no grant was created.')); return true;
@@ -2168,7 +2347,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     resetDraft('');
     const next = controlWizardNext(wizard.step, values);
     if (next >= 0) {
-      setControlWizard({ step: next, values });
+      setControlWizard({ step: next, values, mcpServers: wizard.mcpServers, mcpTools: wizard.mcpTools });
       return true;
     }
     void (async () => {
@@ -2189,6 +2368,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           allowedPolicyAuto: values.allowedPolicies!.includes('auto'),
           allowedPolicyNever: values.allowedPolicies!.includes('never'),
           allowOperator: values.allowOperator!,
+          allowedMcpServers: values.allowedMcpServers ?? [],
+          allowedMcpTools: values.allowedMcpTools ?? [],
           confirmFullAccess: values.confirmFullAccess === true,
           confirmUnrestrictedNetwork: values.confirmUnrestrictedNetwork === true,
           confirmPartialWorkspaceWrite: values.confirmPartialWorkspaceWrite === true,
@@ -2276,6 +2457,12 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const approvalLines = useMemo(() => ask === null ? [] : wrapLine(ask.content, Math.max(1, geometry.columns - 6)), [ask?.content, geometry.columns]);
   const approvalHeight = Math.max(1, geometry.rows - 12);
   const approvalView = viewportPosition(approvalCursor, approvalLines.length, approvalHeight);
+  const rememberChoices = ask?.rememberScopes.map((scope, index) => {
+    const label = scope === 'session' ? t('记住本会话', 'remember this session')
+      : scope === 'project' ? t('记住本项目', 'remember this project')
+        : t('记住所有项目', 'remember all projects');
+    return `${index + 2} ${label}`;
+  }).join(' · ') ?? '';
   // 问题面板显示题目、已提交答案和当前题是否为最后一题。
   const asking = query === null ? null : {
     count: query.questions.length,
@@ -2285,21 +2472,27 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     done: query.questions.slice(0, query.at).map((one, index) => `${index + 1}. ${answeredLine(query.picked[one.id]?.answer, locale)}`),
     last: query.at + 1 === query.questions.length,
   };
-  const controlPrompt = controlWizard === null ? null : [
-    t('授权名称（最多 80 字符）', 'Grant name (up to 80 characters)'),
-    t('默认权限：read-only / workspace-write / full-access', 'Default permission: read-only / workspace-write / full-access'),
-    t('最大权限：read-only / workspace-write / full-access', 'Maximum permission: read-only / workspace-write / full-access'),
-    t('默认网络：disabled / policy / unrestricted', 'Default network: disabled / policy / unrestricted'),
-    t('网络上限：disabled / policy / unrestricted', 'Maximum network: disabled / policy / unrestricted'),
-    t('默认 Policy：ask / auto / never', 'Default Policy: ask / auto / never'),
-    t('允许的 Policy，以逗号分隔，例如 ask,auto', 'Allowed Policy modes, comma-separated, e.g. ask,auto'),
-    t('允许 --operator 处理普通审批和会话设置？yes / no', 'Allow --operator for ordinary approvals and session settings? yes / no'),
-    t('到期时间，输入 ISO 时间或 none', 'Expiry time as an ISO date/time, or none'),
-    t('确认信任此项目以供项目代码、Git 命令与 Hook 使用？yes / no', 'Trust this project for project code, Git commands, and hooks? yes / no'),
-    t('接受 workspace-write 可能存在的部分隔离限制？yes / no', 'Accept possible partial workspace-write isolation limits? yes / no'),
-    t('单独确认 full-access 授权？输入 yes 确认', 'Separately confirm the full-access ceiling? Type yes to confirm'),
-    t('单独确认 unrestricted network？输入 yes 确认', 'Separately confirm the unrestricted network ceiling? Type yes to confirm'),
-  ][controlWizard.step] ?? t('输入 yes 确认', 'Type yes to confirm');
+  const controlPrompt = controlWizard === null ? null
+    : controlWizard.step === 8
+      ? t(`允许外控启动哪些已信任的 MCP Server？逗号分隔：${controlWizard.mcpServers.join(', ') || '无'}；输入 none 表示不允许。`, `Which trusted MCP servers may the controller start? Comma-separated: ${controlWizard.mcpServers.join(', ') || 'none'}; type none for no servers.`)
+      : controlWizard.step === 9
+        ? t(`允许外控调用哪些工具？逗号分隔完整能力名：${controlWizard.mcpTools.join(', ') || '无'}；输入 none 表示不允许。`, `Which tools may the controller call? Comma-separated exact capabilities: ${controlWizard.mcpTools.join(', ') || 'none'}; type none for no tools.`)
+        : [
+          t('授权名称（最多 80 字符）', 'Grant name (up to 80 characters)'),
+          t('默认权限：read-only / workspace-write / full-access', 'Default permission: read-only / workspace-write / full-access'),
+          t('最大权限：read-only / workspace-write / full-access', 'Maximum permission: read-only / workspace-write / full-access'),
+          t('默认网络：disabled / policy / unrestricted', 'Default network: disabled / policy / unrestricted'),
+          t('网络上限：disabled / policy / unrestricted', 'Maximum network: disabled / policy / unrestricted'),
+          t('默认 Policy：ask / auto / never', 'Default Policy: ask / auto / never'),
+          t('允许的 Policy，以逗号分隔，例如 ask,auto', 'Allowed Policy modes, comma-separated, e.g. ask,auto'),
+          t('允许 --operator 处理普通审批和会话设置？yes / no', 'Allow --operator for ordinary approvals and session settings? yes / no'),
+          '', '',
+          t('到期时间，输入 ISO 时间或 none', 'Expiry time as an ISO date/time, or none'),
+          t('确认信任此项目以供项目代码、Git 命令与 Hook 使用？yes / no', 'Trust this project for project code, Git commands, and hooks? yes / no'),
+          t('接受 workspace-write 可能存在的部分隔离限制？yes / no', 'Accept possible partial workspace-write isolation limits? yes / no'),
+          t('单独确认 full-access 授权？输入 yes 确认', 'Separately confirm the full-access ceiling? Type yes to confirm'),
+          t('单独确认 unrestricted network？输入 yes 确认', 'Separately confirm the unrestricted network ceiling? Type yes to confirm'),
+        ][controlWizard.step] ?? t('输入 yes 确认', 'Type yes to confirm');
   const externalControlLabel = externalSnapshot?.pendingInteractions.some((item) => item.type === 'approval') === true
     ? t('外控会话等待审批', 'External session is waiting for approval')
     : externalSnapshot?.pendingInteractions.some((item) => item.type === 'question') === true
@@ -2347,10 +2540,16 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       if (target !== null) { setApprovalCursor(target); return; }
     }
     if (ask !== null) {
-      if (hit('approve', input, key)) {
+      const option = /^\d$/u.test(input) ? Number(input) - 2 : -1;
+      const rememberScope = ask.rememberable && option >= 0 ? ask.rememberScopes[option] : undefined;
+      if (hit('approve', input, key) || ask.rememberable && input === '1' || rememberScope !== undefined) {
         const asked = ask;
         setAsk(null);
-        push({ kind: 'meta', text: t(`已允许 ${asked.tool}`, `Allowed ${asked.tool}`) });
+        const scopeLabel = rememberScope === 'session' ? t('并记住到本会话', 'and remembered for this session')
+          : rememberScope === 'project' ? t('并记住到本项目', 'and remembered for this project')
+            : rememberScope === 'user' ? t('并记住到所有项目', 'and remembered for all projects')
+              : '';
+        push({ kind: 'meta', text: t(`已允许 ${asked.tool} ${scopeLabel}`, `Allowed ${asked.tool} ${scopeLabel}`) });
         if (asked.external) {
           resolvedExternalInteractions.current.add(asked.id);
           void client.request('session.control', {
@@ -2361,7 +2560,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
             push({ kind: 'error', text: t(`外控审批答复失败：${errorCode(error) ?? 'external_control_reply_failed'}`, `Could not approve external action: ${errorCode(error) ?? 'external_control_reply_failed'}`) });
           });
         }
-        else client.reply(asked.id, { decision: 'allow' });
+        else client.reply(asked.id, { decision: 'allow', ...(rememberScope === undefined ? {} : { rememberScope }) });
       } else if (hit('deny', input, key)) {
         const asked = ask;
         setAsk(null);
@@ -2637,7 +2836,12 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       approvalExpanded ? h(Fragment, null,
         ...approvalLines.slice(approvalView.offset, approvalView.offset + approvalHeight).map((line, index) => h(Text, { key: index, wrap: 'truncate-end' }, line)),
         h(Text, { dimColor: true }, t(`改动 ${approvalView.cursor + 1}/${approvalLines.length} 行 · ${keyHint('approval-page-up', 'approval-page-down')} 分页 · ${keyHint('approval-top', 'approval-bottom')} 到两端`, `Changes ${approvalView.cursor + 1}/${approvalLines.length} · ${keyHint('approval-page-up', 'approval-page-down')} pages · ${keyHint('approval-top', 'approval-bottom')} start/end`))) : null,
-      h(Text, { wrap: 'truncate-end' }, t(`${keyHint('approve')} 允许一次 · ${keyHint('deny')} 拒绝 · ${keyHint('expand-or-history')} 查看改动 · ${keyHint('approval-cancel')} 取消`, `${keyHint('approve')} allow once · ${keyHint('deny')} deny · ${keyHint('expand-or-history')} details · ${keyHint('approval-cancel')} cancel`))),
+      ask.rememberable && ask.rememberHintKey !== '' ? h(Text, { dimColor: true, wrap: 'truncate-end' }, ask.rememberHintKey === 'command'
+        ? t('命令规则会匹配这条命令的前缀及参数边界。', 'The command rule matches this command prefix at an argument boundary.')
+        : t('规则会应用于此工具能力的所有调用参数。', 'The rule applies to this tool capability for all arguments.')) : null,
+      h(Text, { wrap: 'truncate-end' }, ask.rememberable
+        ? t(`1 允许一次 · ${rememberChoices} · ${keyHint('deny')} 拒绝 · ${keyHint('expand-or-history')} 查看改动 · ${keyHint('approval-cancel')} 取消`, `1 allow once · ${rememberChoices} · ${keyHint('deny')} deny · ${keyHint('expand-or-history')} details · ${keyHint('approval-cancel')} cancel`)
+        : t(`${keyHint('approve')} 允许一次 · ${keyHint('deny')} 拒绝 · ${keyHint('expand-or-history')} 查看改动 · ${keyHint('approval-cancel')} 取消`, `${keyHint('approve')} allow once · ${keyHint('deny')} deny · ${keyHint('expand-or-history')} details · ${keyHint('approval-cancel')} cancel`))),
     asking === null || query === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'blue', paddingX: 1 },
       h(Text, { bold: true }, t(`等待回答 ${query.at + 1}/${asking.count}`, `Waiting for your answer ${query.at + 1}/${asking.count}`)),
       h(Text, { wrap: 'truncate-end' }, asking.title),
