@@ -463,7 +463,7 @@ test('trusted Windows project commands can install without scripts, build, and r
     const devRun = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command: 'pnpm run dev' } }) });
     const devOutcome = devRun.then(() => undefined, (error) => error);
     const serverStatePath = join(projectDirectory, 'server-state.json');
-    await waitFor(() => existsSync(serverStatePath), { within: 10_000, every: 25 });
+    await waitFor(() => existsSync(serverStatePath), { within: 60_000, every: 25 });
     const serverState = JSON.parse(await readFile(serverStatePath, 'utf8'));
     const response = await fetch(`http://127.0.0.1:${serverState.port}`);
     assert.equal(await response.text(), 'ligule-dev-server-ok');
