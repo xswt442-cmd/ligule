@@ -19,6 +19,8 @@ type Grant = {
   defaultPolicy: PolicyMode;
   allowedPolicies: PolicyMode[];
   allowOperator: boolean;
+  allowedMcpServers: string[];
+  allowedMcpTools: string[];
   confirmedFullAccess: boolean;
   confirmedUnrestrictedNetwork: boolean;
   confirmedPartialWorkspaceWrite: boolean;
@@ -27,6 +29,9 @@ type Grant = {
   revokedAt: string | null;
 };
 type Snapshot = { version: string; grants: Grant[] };
+type McpTool = { name: string; description: string; digest: string };
+type McpServer = { name: string; identityDigest: string; trust: { scope: string; trusted: boolean } | null };
+type McpTools = { identityDigest: string; tools: McpTool[] };
 type Draft = {
   name: string;
   defaultPermissionProfile: PermissionProfile;
@@ -36,6 +41,8 @@ type Draft = {
   defaultPolicy: PolicyMode;
   allowedPolicies: PolicyMode[];
   allowOperator: boolean;
+  allowedMcpServers: string[];
+  allowedMcpTools: string[];
   confirmFullAccess: boolean;
   confirmUnrestrictedNetwork: boolean;
   confirmPartialWorkspaceWrite: boolean;
@@ -55,6 +62,8 @@ function emptyDraft(): Draft {
     defaultPolicy: 'ask',
     allowedPolicies: ['ask'],
     allowOperator: false,
+    allowedMcpServers: [],
+    allowedMcpTools: [],
     confirmFullAccess: false,
     confirmUnrestrictedNetwork: false,
     confirmPartialWorkspaceWrite: false,
@@ -73,6 +82,9 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
 }) {
   const t = useText();
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
+  const [mcpTools, setMcpTools] = useState<Record<string, McpTools>>({});
+  const [mcpLoading, setMcpLoading] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft>(emptyDraft);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -83,9 +95,13 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
   const profileExceeds = PROFILE_RANK[draft.defaultPermissionProfile] > PROFILE_RANK[draft.maxPermissionProfile];
   const networkExceeds = NETWORK_RANK[draft.defaultNetwork] > NETWORK_RANK[draft.maxNetwork];
   const policyMissing = !draft.allowedPolicies.includes(draft.defaultPolicy);
+  const mcpLimitInvalid = draft.allowedMcpTools.some((capability) => {
+    const server = capability.startsWith('mcp:') ? capability.slice(4).split('/')[0] : '';
+    return !draft.allowedMcpServers.includes(server);
+  });
   const invalidExpiry = draft.expiresAt !== '' && !Number.isFinite(Date.parse(draft.expiresAt));
   const canSave = !busy && snapshot !== null && project !== '' && draft.name.trim() !== ''
-    && !profileExceeds && !networkExceeds && !policyMissing && !invalidExpiry
+    && !profileExceeds && !networkExceeds && !policyMissing && !mcpLimitInvalid && !invalidExpiry
     && (draft.maxPermissionProfile !== 'full-access' || draft.confirmFullAccess)
     && (draft.maxPermissionProfile === 'read-only' || draft.confirmPartialWorkspaceWrite)
     && draft.confirmWorkspaceTrust
@@ -106,11 +122,20 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
     try {
       const result = await client.call('agent-control.list', {}, 15_000) as Snapshot;
       setSnapshot(result);
+      setMcpTools({});
+      try {
+        const mcp = await client.call('mcp.trust.list', project === '' ? {} : { projectRoot: project }, 15_000) as { servers: McpServer[] };
+        setMcpServers(mcp.servers);
+      } catch (error) {
+        setMcpServers([]);
+        setNote({ text: t('外控授权已读取；MCP 信任清单暂不可用。', 'Agent Control grants loaded; the MCP trust list is unavailable.'), code: code(error), bad: true });
+        return;
+      }
       if (!keepNote) setNote(null);
     } catch (error) {
       setNote({ text: t('无法读取本机外控授权。', 'Could not read local Agent Control grants.'), code: code(error), bad: true });
     }
-  }, [client, t]);
+  }, [client, project, t]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -118,6 +143,38 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
     setDirty(true);
     setDraft(current => ({ ...current, [key]: value }));
     setNote(null);
+  };
+
+  const loadMcpTools = async (server: McpServer) => {
+    setMcpLoading(server.name);
+    setNote(null);
+    try {
+      const result = await client.call('mcp.trust.tools', project === ''
+        ? { server: server.name }
+        : { projectRoot: project, server: server.name }, 30_000) as McpTools;
+      setMcpTools(current => ({ ...current, [server.name]: result }));
+    } catch (error) {
+      setNote({ text: t(`无法读取 ${server.name} 的工具清单。`, `Could not read tools from ${server.name}.`), code: code(error), bad: true });
+    } finally {
+      setMcpLoading(null);
+    }
+  };
+
+  const toggleMcpServer = (server: string, allowed: boolean) => {
+    const allowedMcpServers = allowed
+      ? [...draft.allowedMcpServers, server]
+      : draft.allowedMcpServers.filter((item) => item !== server);
+    const allowedMcpTools = allowed
+      ? draft.allowedMcpTools
+      : draft.allowedMcpTools.filter((capability) => !capability.startsWith(`mcp:${server}/`));
+    update('allowedMcpServers', allowedMcpServers);
+    update('allowedMcpTools', allowedMcpTools);
+  };
+
+  const toggleMcpTool = (capability: string, allowed: boolean) => {
+    update('allowedMcpTools', allowed
+      ? [...draft.allowedMcpTools, capability]
+      : draft.allowedMcpTools.filter((item) => item !== capability));
   };
 
   const save = async () => {
@@ -139,6 +196,8 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
         allowedPolicyAuto: draft.allowedPolicies.includes('auto'),
         allowedPolicyNever: draft.allowedPolicies.includes('never'),
         allowOperator: draft.allowOperator,
+        allowedMcpServers: draft.allowedMcpServers,
+        allowedMcpTools: draft.allowedMcpTools,
         confirmFullAccess: draft.confirmFullAccess,
         confirmUnrestrictedNetwork: draft.confirmUnrestrictedNetwork,
         confirmPartialWorkspaceWrite: draft.confirmPartialWorkspaceWrite,
@@ -289,6 +348,40 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
           </label>
         </section>
 
+        <section className="grant-config-card grant-mcp-limits">
+          <h4>{t('MCP Server 与工具', 'MCP servers and tools')}</h4>
+          <p className="session-note">{t('此授权只能使用已在 MCP 信任设置中批准的 Server。先选允许启动的 Server，再加载工具清单并逐项选择。未选工具时，外部 Agent 不能调用该 Server 的工具。', 'This grant can use only servers approved in MCP trust settings. Select servers it may start, load their tool lists, then choose tools individually. Tools not selected here cannot be called by the external agent.')}</p>
+          {mcpServers.length === 0 ? <p className="stub">{t('当前项目没有配置 MCP Server。', 'No MCP servers are configured for this project.')}</p>
+            : mcpServers.map((server) => {
+              const serverAllowed = draft.allowedMcpServers.includes(server.name);
+              const loaded = mcpTools[server.name];
+              const currentTools = loaded?.identityDigest === server.identityDigest ? loaded.tools : [];
+              return <div className="grant-mcp-server" key={`${server.name}:${server.identityDigest}`}>
+                <label className="grant-confirmation">
+                  <input type="checkbox" checked={serverAllowed} disabled={!server.trust?.trusted && !serverAllowed}
+                    onChange={(event) => toggleMcpServer(server.name, event.target.checked)} />
+                  <span><strong>{server.name}</strong> · {server.trust?.trusted
+                    ? t(`已信任：${server.trust.scope}`, `trusted: ${server.trust.scope}`)
+                    : t('尚未在项目或用户范围信任', 'not trusted at project or user scope')}</span>
+                </label>
+                <button type="button" className="mini chip" disabled={!server.trust?.trusted || mcpLoading !== null}
+                  onClick={() => void loadMcpTools(server)}>
+                  {mcpLoading === server.name ? t('正在读取工具…', 'Loading tools…') : currentTools.length > 0 ? t('重新读取工具', 'Reload tools') : t('读取工具清单', 'Load tool list')}
+                </button>
+                {currentTools.map((tool) => {
+                  const capability = `mcp:${server.name}/${tool.name}`;
+                  return <label className="grant-mcp-tool" key={capability} title={tool.description}>
+                    <input type="checkbox" checked={draft.allowedMcpTools.includes(capability)} disabled={!serverAllowed}
+                      onChange={(event) => toggleMcpTool(capability, event.target.checked)} />
+                    <code>{tool.name}</code>
+                    {tool.description !== '' && <span>{tool.description}</span>}
+                  </label>;
+                })}
+              </div>;
+            })}
+          {mcpLimitInvalid && <p className="grant-validation">{t('每个 MCP 工具都必须属于本授权允许启动的 Server。', 'Each MCP tool must belong to a server this grant can start.')}</p>}
+        </section>
+
         <section className="grant-config-card grant-lifetime-card">
           <h4>{t('授权期限', 'Grant lifetime')}</h4>
           <label className="grant-confirmation grant-risk">
@@ -323,6 +416,7 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
             <div className="grant-row-head"><strong>{grant.name}</strong><span data-state={revoked ? 'revoked' : expired ? 'expired' : 'active'}>{revoked ? t('已撤销', 'Revoked') : expired ? t('已到期', 'Expired') : t('可用', 'Available')}</span></div>
             <code>{grant.projectRoot}</code>
             <p>{t('权限', 'Permission')}: {grant.defaultPermissionProfile} / {grant.maxPermissionProfile} · {t('网络', 'network')}: {grant.defaultNetwork} / {grant.maxNetwork} · Policy: {grant.allowedPolicies.join(', ')}</p>
+            <p>{t('MCP Server', 'MCP servers')}: {grant.allowedMcpServers.length === 0 ? t('无', 'none') : grant.allowedMcpServers.join(', ')} · {t('MCP 工具', 'MCP tools')}: {grant.allowedMcpTools.length === 0 ? t('无', 'none') : grant.allowedMcpTools.join(', ')}</p>
             <p>{t('有效期', 'Expires')}: {grant.expiresAt === null ? t('无期限', 'No expiry') : new Date(grant.expiresAt).toLocaleString()} · {t('普通审批代答', 'Operator replies')}: {grant.allowOperator ? t('允许', 'allowed') : t('关闭', 'disabled')}</p>
             <details><summary>{t('授权详情与 MCP 配置', 'Grant details and MCP configuration')}</summary>
               <code>{grant.id}</code>

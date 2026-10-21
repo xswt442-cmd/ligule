@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { Fold } from './Fold';
 import type { Verbosity } from './types';
 import { useText } from '../locale';
@@ -14,6 +15,9 @@ export type Ask = {
   policy: string;
   policySource: string;
   policyForced: boolean;
+  rememberable?: boolean;
+  rememberScopes?: readonly ('session' | 'project' | 'user')[];
+  rememberHintKey?: 'tool' | 'command';
   content: string;
   english?: { change: string; content: string };
 };
@@ -29,17 +33,25 @@ const tierSource = (ask: Ask, t: (chinese: string, english: string) => string): 
     : ask.policySource === 'config' ? t('配置默认值', 'Configuration default')
       : t('来源未提供', 'Source not provided');
 
+type RememberScope = 'session' | 'project' | 'user';
+
 export function ApprovalCard({ ask, queued, verbosity, active, onAnswer, onOpen }: {
   ask: Ask;
   queued: number;
   verbosity: Verbosity;
   active: string | null;
-  onAnswer: (decision: 'allow' | 'deny') => void;
+  onAnswer: (decision: 'allow' | 'deny', rememberScope?: RememberScope) => void;
   onOpen: (sessionId: string) => void;
 }) {
   const t = useText();
   const background = ask.sessionId !== active;
   const tier = TIER[ask.policy];
+  const [rememberScope, setRememberScope] = useState<'once' | RememberScope>('once');
+  const selectedMemoryScope = rememberScope !== 'once' && ask.rememberScopes?.includes(rememberScope) === true ? rememberScope : 'once';
+  const rememberHint = ask.rememberHintKey === 'command'
+    ? t('命令规则会匹配这条命令的前缀及参数边界。', 'The command rule matches this command prefix at an argument boundary.')
+    : t('规则会应用于此工具能力的所有调用参数。', 'The rule applies to this tool capability for all arguments.');
+  useEffect(() => setRememberScope('once'), [ask.id]);
   return <section className="approval" aria-label={t('等待审批的操作', 'Action awaiting approval')}>
     <div className="approval-body">
       <div className="approval-head">
@@ -56,7 +68,19 @@ export function ApprovalCard({ ask, queued, verbosity, active, onAnswer, onOpen 
       <Fold text={t(ask.content, ask.english?.content ?? ask.content)} verbosity={verbosity} always label={t('查看完整内容', 'View full content')} />
     </div>
     <div className="approval-actions">
-      <button type="button" data-tone="allow" onClick={() => onAnswer('allow')}>{t('允许一次', 'Allow once')}</button>
+      {ask.rememberable === true && ask.rememberScopes !== undefined && ask.rememberScopes.length > 0 && <label className="approval-memory">
+        <span>{t('记住到', 'Remember in')}</span>
+        <select value={rememberScope} onChange={(event) => setRememberScope(event.target.value as 'once' | RememberScope)}>
+          <option value="once">{t('仅这一次', 'This time only')}</option>
+          {ask.rememberScopes.map((scope) => <option key={scope} value={scope}>
+            {scope === 'session' ? t('当前会话', 'This session') : scope === 'project' ? t('当前项目', 'This project') : t('所有项目', 'All projects')}
+          </option>)}
+        </select>
+      </label>}
+      {ask.rememberable === true && ask.rememberScopes !== undefined && ask.rememberScopes.length > 0 && <span className="approval-memory-hint">{rememberHint}</span>}
+      <button type="button" data-tone="allow" onClick={() => onAnswer('allow', selectedMemoryScope === 'once' ? undefined : selectedMemoryScope)}>
+        {selectedMemoryScope === 'once' ? t('允许一次', 'Allow once') : t('允许并记住', 'Allow and remember')}
+      </button>
       <button type="button" data-tone="deny" onClick={() => onAnswer('deny')}>{t('拒绝', 'Deny')}</button>
       <details className="approval-tier">
         <summary>{t('审批依据', 'Approval details')} · {ask.policy === '' ? t('未知档位', 'Unknown tier') : ask.policy} · {tierSource(ask, t)}</summary>

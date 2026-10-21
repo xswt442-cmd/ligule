@@ -273,6 +273,26 @@ button.mini.chip b {
   border-color: var(--line);
 }
 
+.approval-memory {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
+
+.approval-memory select {
+  min-width: 130px;
+  min-height: 30px;
+  padding: 3px var(--space-2);
+}
+
+.approval-memory-hint {
+  flex-basis: 100%;
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
+
 /* 策略说明根据 `status.get` 的状态显示；界面不据此执行权限判定。 */
 .approval-tier {
   margin-inline-start: auto;

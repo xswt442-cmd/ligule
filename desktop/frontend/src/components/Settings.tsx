@@ -5,6 +5,7 @@ import { ModelPanel } from './ModelPanel';
 import { AgentControlPanel } from './AgentControlPanel';
 import { NotificationPanel } from './NotificationPanel';
 import { PolicyRules } from './PolicyRules';
+import { McpTrustPanel } from './McpTrustPanel';
 import { Modal } from './ui';
 import { holdReasons, report, type EditGate } from '../edit-gate';
 import type { Settings } from '../settings';
@@ -16,7 +17,7 @@ import { GeneralSettings } from './settings/GeneralSettings';
 import { AppearanceSettings } from './settings/AppearanceSettings';
 import { KeyboardSettings } from './settings/KeyboardSettings';
 
-const SECTIONS = ['general', 'appearance', 'model', 'rules', 'control', 'notifications', 'keys'] as const;
+const SECTIONS = ['general', 'appearance', 'model', 'mcp', 'rules', 'control', 'notifications', 'keys'] as const;
 
 type SectionId = (typeof SECTIONS)[number];
 
@@ -86,6 +87,7 @@ export function SettingsDialog(props: SettingsProps) {
         {section === 'general' && <GeneralSettings client={props.client} language={settings.language} patch={patch} />}
         {section === 'appearance' && <AppearanceSettings settings={settings} patch={patch} />}
         {section === 'model' && <Model client={props.client} sessionId={props.sessionId} projectRoot={props.projectRoot} onEdit={reports.model} />}
+        {section === 'mcp' && <McpTrustPanel client={props.client} projectRoot={props.projectRoot} sessionId={props.sessionId} />}
         {section === 'rules' && <PolicyRules client={props.client} projectRoot={props.projectRoot} onEdit={reports.rules} />}
         {section === 'control' && <AgentControlPanel client={props.client} projectRoot={props.projectRoot} onEdit={reports.control} />}
         {section === 'notifications' && <NotificationPanel preferences={settings.notifications} bridge={props.notifications} problem={props.notificationProblem} onChange={notifications => patch({ notifications })} />}
@@ -105,6 +107,7 @@ function sectionTitle(id: SectionId, t: (chinese: string, english: string) => st
     general: ['常规', 'General'],
     appearance: ['外观', 'Appearance'],
     model: ['模型服务', 'Model services'],
+    mcp: ['MCP Server', 'MCP servers'],
     rules: ['审批规则', 'Approval rules'],
     control: ['外部控制', 'Agent Control'],
     notifications: ['通知', 'Notifications'],
@@ -115,7 +118,7 @@ function sectionTitle(id: SectionId, t: (chinese: string, english: string) => st
 }
 
 function sectionIcon(id: SectionId): IconName {
-  const icons: Record<SectionId, IconName> = { general: 'gear', appearance: 'spark', model: 'folder', rules: 'check', control: 'shield', notifications: 'bell', keys: 'copy' };
+  const icons: Record<SectionId, IconName> = { general: 'gear', appearance: 'spark', model: 'folder', mcp: 'grid', rules: 'check', control: 'shield', notifications: 'bell', keys: 'copy' };
   return icons[id];
 }
 

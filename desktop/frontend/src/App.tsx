@@ -635,7 +635,7 @@ export function App({ transport }: { transport: Transport }) {
       }
       // Host 发出的交互请求分为审批和用户提问。
       if (message.method !== 'approval.request') return;
-      const params = message.params as { sessionId?: string; projectRoot?: string; tool?: string; command?: string; args?: Record<string, unknown>; reason?: string; shell?: string; executable?: string; policy?: string; policySource?: string; policyForced?: boolean; scriptBinding?: { path?: string; sha256?: string; interpreter?: string; workspaceRoot?: string; permission?: { profile?: string; network?: string; capabilities?: Record<string, string> } } };
+      const params = message.params as { sessionId?: string; projectRoot?: string; tool?: string; command?: string; args?: Record<string, unknown>; reason?: string; shell?: string; executable?: string; policy?: string; policySource?: string; policyForced?: boolean; rememberable?: boolean; rememberScopes?: ('session' | 'project' | 'user')[]; rememberHintKey?: 'tool' | 'command'; scriptBinding?: { path?: string; sha256?: string; interpreter?: string; workspaceRoot?: string; permission?: { profile?: string; network?: string; capabilities?: Record<string, string> } } };
       // 请求属于发起它的会话；即使会话在后台等待，也必须显示并允许答复。
       const asked = params?.sessionId;
       if (typeof asked !== 'string' || asked === '') return;
@@ -662,6 +662,9 @@ export function App({ transport }: { transport: Transport }) {
         policy: params.policy ?? '',
         policySource: params.policySource ?? '',
         policyForced: params.policyForced === true,
+        rememberable: params.rememberable === true,
+        rememberScopes: params.rememberScopes ?? [],
+        ...(params.rememberHintKey === undefined ? {} : { rememberHintKey: params.rememberHintKey }),
         content: params.scriptBinding === undefined ? content : `${content}\n\n${t('脚本审批绑定', 'Script approval binding')}:\n${t('路径', 'Path')}: ${params.scriptBinding.path ?? ''}\nSHA-256: ${params.scriptBinding.sha256 ?? ''}\n${t('解释器', 'Interpreter')}: ${params.scriptBinding.interpreter ?? ''}\n${t('工作区', 'Workspace')}: ${params.scriptBinding.workspaceRoot ?? ''}\n${t('权限', 'Permission')}: ${params.scriptBinding.permission?.profile ?? ''} / ${params.scriptBinding.permission?.network ?? ''}\n${JSON.stringify(params.scriptBinding.permission?.capabilities ?? {})}`,
         english: { change: englishChange.summary, content: params.scriptBinding === undefined ? changeBody(englishChange, args, 'en') : `${changeBody(englishChange, args, 'en')}\n\nScript approval binding:\nPath: ${params.scriptBinding.path ?? ''}\nSHA-256: ${params.scriptBinding.sha256 ?? ''}\nInterpreter: ${params.scriptBinding.interpreter ?? ''}\nWorkspace: ${params.scriptBinding.workspaceRoot ?? ''}\nPermission: ${params.scriptBinding.permission?.profile ?? ''} / ${params.scriptBinding.permission?.network ?? ''}\n${JSON.stringify(params.scriptBinding.permission?.capabilities ?? {})}` },
       }]);
@@ -1361,7 +1364,7 @@ export function App({ transport }: { transport: Transport }) {
     ];
   }, [branchFrom, cancel, collapsed, copyLastAnswer, compact, newSession, openSession, observingExternalSession, patch, projectRoot, readBack, sessionId, status, t]);
 
-  const answer = useCallback((decision: 'allow' | 'deny') => {
+  const answer = useCallback((decision: 'allow' | 'deny', rememberScope?: 'session' | 'project' | 'user') => {
     const head = asks.find((ask) => ask.sessionId === sessionId);
     if (head === undefined) return;
     setAsks((current) => current.filter((ask) => ask.id !== head.id));
@@ -1371,7 +1374,7 @@ export function App({ transport }: { transport: Transport }) {
       // 先更新本地转录再发送答复，因为 Host 收到答复后可能立即返回工具结果。
       setRows((current) => [...current, metaRow('meta', `${decision === 'allow' ? '已允许' : '已拒绝'} ${head.tool}${head.detail === '' ? '' : `：${head.detail.slice(0, 60)}`}`, `${decision === 'allow' ? 'Allowed' : 'Refused'} ${head.tool}${head.detail === '' ? '' : `: ${head.detail.slice(0, 60)}`}`)]);
     }
-    client.reply(head.id, { decision });
+    client.reply(head.id, { decision, ...(rememberScope === undefined ? {} : { rememberScope }) });
     // 答复后移走按钮焦点，避免下一次 Enter 重复提交。
     // 将焦点移至输入框，让键盘用户可以继续输入。
     (document.activeElement as HTMLElement | null)?.blur();
