@@ -149,9 +149,8 @@ export function mcpServerConfigs(
     if (typeof entry?.command !== 'string' || entry.command === '') throw new KernelError('mcp_command_required', { detail: `${name} needs a command` });
     if (entry.cwd !== undefined && typeof entry.cwd !== 'string') throw new KernelError('mcp_cwd_invalid', { detail: name });
     const cwd = entry.cwd === undefined ? resolve(projectRoot) : resolve(projectRoot, entry.cwd);
-    const command = entry.command.includes('/') || entry.command.includes('\\') || isAbsolute(entry.command)
-      ? resolve(cwd, entry.command)
-      : entry.command;
+    const commandUsesPath = !entry.command.includes('/') && !entry.command.includes('\\') && !isAbsolute(entry.command);
+    const command = commandUsesPath ? entry.command : resolve(cwd, entry.command);
     // `command` 必须是可执行文件路径，不能包含参数或 shell 管道。
     if (/\s/.test(entry.command) && !existsSync(command)) throw new KernelError('mcp_command_invalid', { detail: `${name}.command is a single executable; put its arguments in args` });
     const args = entry.args === undefined ? [] : entry.args;
@@ -166,7 +165,7 @@ export function mcpServerConfigs(
       args,
       cwd: entry.cwd === undefined ? '<project-root>' : cwd,
       env: environmentNames.map((key) => [key, references[key]]),
-      ...(command === entry.command ? { path: environment.PATH ?? '' } : {}),
+      ...(commandUsesPath ? { path: environment.PATH ?? '' } : {}),
     })).digest('hex');
     return {
       name,

@@ -67,6 +67,23 @@ test('a relative server command is resolved from its workspace and its launch se
   assert.notEqual(mcpServerConfigs(changedCredentialReference, {}, projectRoot)[0].identityDigest, first.identityDigest);
 });
 
+test('the server identity depends on PATH only when a bare command needs PATH lookup', () => {
+  const projectRoot = join(tmpdir(), 'mcp-path-identity-project');
+  const configFor = (command) => ({ mcp: { servers: { probe: { command, args: [], cwd: projectRoot } } } });
+
+  const absolute = configFor(process.execPath);
+  const absoluteFromFirstPath = mcpServerConfigs(absolute, { PATH: 'C:\\tools\\first' }, projectRoot)[0];
+  const absoluteFromSecondPath = mcpServerConfigs(absolute, { PATH: 'C:\\tools\\second' }, projectRoot)[0];
+  assert.equal(absoluteFromFirstPath.identityDigest, absoluteFromSecondPath.identityDigest,
+    'an absolute executable is unaffected by the caller’s PATH');
+
+  const bare = configFor('ligule-mcp-probe');
+  const bareFromFirstPath = mcpServerConfigs(bare, { PATH: 'C:\\tools\\first' }, projectRoot)[0];
+  const bareFromSecondPath = mcpServerConfigs(bare, { PATH: 'C:\\tools\\second' }, projectRoot)[0];
+  assert.notEqual(bareFromFirstPath.identityDigest, bareFromSecondPath.identityDigest,
+    'a bare executable can resolve to a different server when PATH changes');
+});
+
 test('an MCP child inherits runtime variables and only explicitly referenced secrets', async () => {
   const ambientName = 'LIGULE_MCP_AMBIENT_SECRET';
   const explicitName = 'LIGULE_MCP_EXPLICIT_SECRET';
