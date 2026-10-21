@@ -186,7 +186,9 @@ test('starts the actual Node 24 Ligule Host and accepts an opaque protocol frame
   try {
     await controller.start();
     await controller.send('{"id":"opaque-1","method":"unsupported.desktop.probe","params":{}}');
-    const response = await waitFor(frames, (frame) => frame.includes('opaque-1'));
+    // Windows Host startup runs measured sandbox probes before it accepts protocol frames.
+    const startupTimeoutMs = process.platform === 'win32' ? 30_000 : 10_000;
+    const response = await waitFor(frames, (frame) => frame.includes('opaque-1'), startupTimeoutMs);
     assert.equal(JSON.parse(response).id, 'opaque-1');
     assert.deepEqual(faults, []);
   } finally {
