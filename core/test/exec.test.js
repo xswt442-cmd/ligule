@@ -220,18 +220,18 @@ test('Linux sandbox timeout stops descendants before they can change the workspa
 
   const workspace = mkdtempSync(join(directory, 'sandbox-timeout-'));
   t.after(() => rmSync(workspace, { recursive: true, force: true }));
-  const command = '(touch started; sleep 1; touch leaked-after-timeout) & wait';
+  const command = '(touch started; sleep 2; touch leaked-after-timeout) & wait';
   const permission = createPermissionContext('workspace-write', 'disabled', {
     filesystemRead: 'partial', filesystemWrite: 'partial', network: 'full', process: 'full',
   });
   await assert.rejects(
     () => execTool.run({ command }, {
-      config: { boundary: workspace, limits: { execTimeoutMs: 250 } }, permission,
+      config: { boundary: workspace, limits: { execTimeoutMs: 1_000 } }, permission,
       shell: withNativeExitCode(shell, command),
     }),
     (error) => error.code === 'exec_timeout',
   );
-  await delay(1_100);
+  await delay(2_100);
   assert.equal(existsSync(join(workspace, 'started')), true, 'the child process must have started inside the sandbox');
   assert.equal(existsSync(join(workspace, 'leaked-after-timeout')), false, 'a killed descendant must not write after timeout');
 });
