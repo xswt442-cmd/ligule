@@ -8,6 +8,7 @@ import {
   createConfig, createConnection, createMemoryConnectionPair, createMcpRegistry, MESSAGES_CAPABILITIES,
   modeDirectories, mcpServerConfigs, serveHost, createPermissionContext,
 } from '../dist/index.js';
+import { listMcpTrust, mcpTrustPathOf, setMcpServerTrust } from '../dist/host/mcp-trust.js';
 
 const fixturePath = fileURLToPath(new URL('./fixtures/mcp-cancellable.mjs', import.meta.url));
 const externalPermission = createPermissionContext('full-access', 'unrestricted', {
@@ -176,7 +177,7 @@ test('cancellation stops MCP initialization and tools/list requests', async () =
   });
 });
 
-test('Host shutdown cancels an MCP operation and ends its stdio server', { timeout: 15000 }, async () => {
+test('revoking MCP trust ends its stdio server while an operation is running', { timeout: 15000 }, async () => {
   await withDirectory(async (directory) => {
     const project = join(directory, 'project');
     const home = join(directory, 'home');
@@ -185,17 +186,24 @@ test('Host shutdown cancels an MCP operation and ends its stdio server', { timeo
     const pidPath = join(directory, 'mcp.pid');
     const listStartedPath = join(directory, 'list.started');
     const callStartedPath = join(directory, 'call.started');
+    const serverSettings = {
+      command: process.execPath,
+      args: [fixturePath, pidPath, listStartedPath, callStartedPath, '0', '0'],
+    };
+    const priorHome = process.env.LIGULE_HOME;
+    process.env.LIGULE_HOME = home;
     const config = createConfig({ user: {
       boundary: project,
       host: { sessionDirectory },
       model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'host-cancel-test' },
       loop: { iterations: 4, modelCalls: 4 },
-      mcp: { servers: { slow: {
-        command: process.execPath,
-        args: [fixturePath, pidPath, listStartedPath, callStartedPath, '0', '0'],
-      } } },
+      mcp: { servers: { slow: serverSettings } },
       policy: { mode: 'auto' },
     } });
+    const trustPath = mcpTrustPathOf();
+    const trustVersion = (await listMcpTrust(trustPath)).version;
+    const identity = mcpServerConfigs({ mcp: { servers: { slow: serverSettings } } }, process.env, project)[0].identityDigest;
+    await setMcpServerTrust(trustPath, { scope: 'project', projectRoot: project, server: 'slow', identityDigest: identity, trusted: true }, trustVersion);
     let phase = 0;
     const provider = {
       name: 'local-operation-provider',
@@ -223,6 +231,7 @@ test('Host shutdown cancels an MCP operation and ends its stdio server', { timeo
       policy: config.policy,
       permission: externalPermission,
       interactive: true,
+      permissionControl: true,
       modeName: 'minimal',
       modePaths: modeDirectories(project, fileURLToPath(new URL('../modes/', import.meta.url)), home),
     });
@@ -256,14 +265,22 @@ test('Host shutdown cancels an MCP operation and ends its stdio server', { timeo
       );
       await waitForFile(callStartedPath);
       const processId = Number(await readFile(pidPath, 'utf8'));
+      const trust = await client.request('mcp.trust.list', { projectRoot: project });
+      assert.equal(trust.servers[0].trust.trusted, true);
+      await client.request('mcp.trust.set', {
+        projectRoot: project, server: 'slow', identityDigest: trust.servers[0].identityDigest,
+        scope: 'project', trusted: false, version: trust.version,
+      });
+      await waitForProcessExit(processId);
       await host.release();
       const result = await settled;
       assert.equal(result.status, 'rejected');
-      assert.ok(Date.now() - startedAt < 5000, 'Host shutdown finishes the delayed operation promptly');
-      await waitForProcessExit(processId);
+      assert.ok(Date.now() - startedAt < 5000, 'revoking trust and stopping the Host finish the delayed operation promptly');
     } finally {
       pair.client.output.end();
       await host.release();
+      if (priorHome === undefined) delete process.env.LIGULE_HOME;
+      else process.env.LIGULE_HOME = priorHome;
     }
   });
 });

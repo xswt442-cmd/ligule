@@ -10,10 +10,11 @@ import {
   registerDelegationResultTool, type DelegationSpec, type RunValidation,
 } from '../delegation.js';
 import {
-  assertDelegationPermission, assertDelegationPolicy, createDelegationGrant, delegationPathOf,
+  assertDelegationMcpServer, assertDelegationMcpTool, assertDelegationPermission, assertDelegationPolicy, createDelegationGrant, delegationPathOf,
   listDelegationGrants, recordDelegationEvent, requireDelegationGrant, revokeDelegationGrant,
   type CreateDelegationGrantInput, type DelegationGrant,
 } from './agent-control.js';
+import { listMcpTrust, mcpServerTrust, mcpTrustPathOf, setMcpServerTrust, type McpTrustScope } from './mcp-trust.js';
 import { createPermissionContext, DEFAULT_PERMISSION_CONTEXT, permissionDenial, type PermissionContext, type PermissionContextOptions, type PermissionNetwork, type PermissionProfile } from '../kernel/permission.js';
 import { createKernel, type Kernel } from '../kernel/kernel.js';
 import { loadAssembly, type Assembly, type Plugin } from '../kernel/assembly.js';
@@ -54,7 +55,7 @@ import { createLoop, DEFAULT_LOOP_LIMITS, type LoopCompaction, type LoopProgress
 import { minimalPlugin } from '../tools/minimal.js';
 import { networkPlugin } from '../tools/network.js';
 import { createSkillPlugin } from '../tools/skill.js';
-import { createMcpPlugin } from '../tools/mcp.js';
+import { createMcpPlugin, type McpAuthorization } from '../tools/mcp.js';
 import { createSubagentPlugin } from '../tools/subagent.js';
 import { createAskUserPlugin } from '../tools/ask-user.js';
 import { createMcpRegistry, mcpServerConfigs, type McpRegistry } from '../capability/mcp.js';
@@ -64,7 +65,8 @@ import { thinkingCapabilityOf } from '../model/thinking.js';
 import type { ModelRequest, ProviderEvent } from '../kernel/loop.js';
 import { createConnection, type Connection, type HostRequest } from './connection.js';
 import { APPROVAL_METHOD, QUESTION_METHOD, isApproved, validateCall, type HostMethodParams } from './protocol.js';
-import { createConfig, type ConfigSnapshot } from '../kernel/config.js';
+import { createConfig, mergePolicyRules, type ConfigSnapshot } from '../kernel/config.js';
+import { loadConfigLayers } from '../kernel/config-file.js';
 import type { LoggerBackend } from '../kernel/log.js';
 import type { LoopLimits } from '../kernel/loop.js';
 import type { LoadedLayers, createConfigStore } from '../kernel/config-store.js';
@@ -187,12 +189,23 @@ interface AdoptionResult {
 }
 
 type ModeState = SessionModeState;
+type PolicyRememberScope = 'session' | 'project' | 'user';
+
+function mcpTrustKey(server: string, identityDigest: string): string {
+  return `${server}\u0000${identityDigest}`;
+}
+
+function policyRuleKey(rule: Pick<PolicyRule, 'tool' | 'match'>): string {
+  return JSON.stringify([rule.tool, rule.match ?? '']);
+}
 
 interface HostSessionBase {
   readonly id: string;
   readonly session: SessionLog;
   readonly listeners: ((event: SessionEvent) => void)[];
   readonly asks: Set<() => void>;
+  readonly mcpTrust: Map<string, { readonly source: 'trusted-ui'; readonly trusted: boolean; readonly updatedAt: string }>;
+  sessionPolicyRules: PolicyRule[];
   readonly environment: ProjectEnvironment;
   permission: PermissionContext;
   policyOverride: PolicyMode | null;
@@ -668,7 +681,7 @@ export function createHost({
       skillRegistry: own.skillRegistry,
       templateRegistry: own.templateRegistry,
       extensions: own.extensions ?? { paths: [], ignored: [] },
-      mcpConfigs: mcpServerConfigs(mcpConfig),
+      mcpConfigs: mcpServerConfigs(mcpConfig, process.env, root),
       directory: sessionDirectory(runtimeConfig),
     };
   }
@@ -748,6 +761,27 @@ export function createHost({
     }
     environments.set(loaded.projectRoot, loaded);
     return loaded;
+  }
+
+  async function currentMcpConfigs(env: ProjectEnvironment): Promise<ReturnType<typeof mcpServerConfigs>> {
+    if (loadEnvironment === undefined) return env.mcpConfigs;
+    const latest = await loadConfigLayers({ projectRoot: env.projectRoot });
+    const config = createConfig({
+      ...latest,
+      ...(env.layers.flag === undefined ? {} : { flag: env.layers.flag }),
+    });
+    const mcpConfig = isRecord(config.mcp) ? { mcp: { servers: config.mcp.servers } } : {};
+    return mcpServerConfigs(mcpConfig, process.env, env.projectRoot);
+  }
+
+  async function stopMcpServersWithChangedConfig(env: ProjectEnvironment, current: ReturnType<typeof mcpServerConfigs>): Promise<void> {
+    for (const state of sessions.values()) {
+      if (state.environment !== env) continue;
+      for (const previous of env.mcpConfigs) {
+        const next = current.find((server) => server.name === previous.name);
+        if (next === undefined || next.identityDigest !== previous.identityDigest) await state.mcp.revoke(previous.name);
+      }
+    }
   }
 
   async function readOnlySessionConfig(projectRoot: string): Promise<RuntimeConfig> {
@@ -966,7 +1000,10 @@ export function createHost({
       const applies: { sessionId: string; when: 'now' }[] = [];
       for (const [id, state] of sessions) {
         if (state.environment !== env) continue;
-        state.chain.setRules(effective);
+        state.chain.setRules(mergePolicyRules([
+          { source: 'session', rules: state.sessionPolicyRules },
+          { source: 'config', rules: effective },
+        ]).rules as PolicyRule[]);
         applies.push({ sessionId: id, when: 'now' });
       }
       env.policy = { ...env.policy, rules: effective };
@@ -1014,6 +1051,52 @@ export function createHost({
       if (answer.failure !== undefined) failure = answer.failure;
     }
     return { applies, ...(failure === undefined ? {} : { failure }) };
+  }
+
+  async function rememberPolicyRule(
+    state: HostSessionState,
+    tool: string,
+    command: string | undefined,
+    scope: PolicyRememberScope,
+  ): Promise<void> {
+    const rule: PolicyRule = { tool, decision: 'allow', ...(command === undefined ? {} : { match: command }) };
+    const identity = policyRuleKey(rule);
+    if (scope === 'session') {
+      const existing = state.sessionPolicyRules.findIndex((item) => policyRuleKey(item) === identity);
+      const rules = state.sessionPolicyRules.map((item, index) => index === existing ? rule : item);
+      if (existing < 0) rules.push(rule);
+      const updatedAt = new Date().toISOString();
+      await state.session.append({ kind: 'sessionPolicyRule', ignorable: true, rule, updatedAt });
+      state.sessionPolicyRules = rules;
+      state.chain.setRules(mergePolicyRules([
+        { source: 'session', rules },
+        { source: 'config', rules: state.environment.policy?.rules ?? [] },
+      ]).rules as PolicyRule[]);
+      return;
+    }
+
+    const env = state.environment;
+    if (env.store === undefined) throw new KernelError('config_write_unsupported');
+    const layer = scope === 'project' ? 'projectLocal' : 'user';
+    const targetLayer = scope === 'project' ? 'local' : 'user';
+    const snapshot = await env.store.read();
+    const higherLayers = scope === 'user' ? ['flag', 'local', 'project'] : ['flag'];
+    const shadowing = higherLayers.find((source) => snapshot.ruleLayers[source]?.some((item) => policyRuleKey(item) === identity));
+    if (shadowing !== undefined) throw new KernelError('policy_memory_shadowed', { detail: shadowing });
+    const current = snapshot.ruleLayers[targetLayer] ?? [];
+    const matches = current.flatMap((item, index) => policyRuleKey(item) === identity ? [index] : []);
+    if (matches.length > 1) throw new KernelError('policy_rule_duplicate_ambiguous', { detail: tool });
+    const layerVersion = snapshot.layers.find((item) => item.layer === layer)?.version ?? '';
+    const written = await env.store.write({
+      field: 'policy.rules',
+      layer,
+      version: layerVersion,
+      op: matches.length === 0 ? 'add' : 'update',
+      ...(matches.length === 0 ? {} : { index: matches[0] }),
+      rule,
+    });
+    const adoption = await adoptWritten(env, layer, 'policy', 'rules', written.effective, written.changed);
+    if (adoption.failure !== undefined) throw new KernelError(adoption.failure.code, { detail: adoption.failure.detail });
   }
 
   // 释放会话的 MCP 子进程、扩展监听器、模板登记表和记录锁。
@@ -1331,6 +1414,8 @@ export function createHost({
       session,
       listeners,
       asks,
+      mcpTrust: new Map(),
+      sessionPolicyRules: [],
       running: undefined,
       mode: modeState,
       pending: undefined,
@@ -1350,6 +1435,14 @@ export function createHost({
     try {
     if (recover) {
       const events = await session.read();
+      state.sessionPolicyRules = events.filter((item) => item.kind === 'sessionPolicyRule').map((item) => item.rule as PolicyRule);
+      for (const event of events.filter((item) => item.kind === 'sessionMcpTrust')) {
+        state.mcpTrust.set(mcpTrustKey(event.server as string, event.identityDigest as string), {
+          source: 'trusted-ui',
+          trusted: event.trusted as boolean,
+          updatedAt: event.updatedAt as string,
+        });
+      }
       const savedPermission = events.filter((event) => event.kind === 'sessionPermission').at(-1);
       if (savedPermission !== undefined) {
         state.permission = createPermissionContext(savedPermission.profile, savedPermission.network, permission.capabilities,
@@ -1423,7 +1516,14 @@ export function createHost({
     }
     const chain = createDecisionChain({
       ...policy,
-      ask: async ({ tool, input, command, reason, shell, executable, policy, policySource, policyForced, scriptBinding }) => {
+      rules: mergePolicyRules([
+        { source: 'session', rules: state.sessionPolicyRules },
+        { source: 'config', rules: policy?.rules ?? [] },
+      ]).rules as PolicyRule[],
+      ask: async ({ tool, input, command, reason, shell, executable, policy, policySource, policyForced, rememberable, scriptBinding }) => {
+        const rememberScopes: PolicyRememberScope[] = permissionControl && rememberable
+          ? ['session', ...(state.environment.store === undefined ? [] : ['project' as const, 'user' as const])]
+          : [];
         let settle = (): void => {};
         const cancelled = new Promise<boolean>((resolve) => {
           settle = () => resolve(false);
@@ -1435,11 +1535,32 @@ export function createHost({
           // 同时返回所属项目和策略状态，以便客户端在切换前台会话后仍能解释本次判定。
           const request = connection.request(APPROVAL_METHOD, {
             sessionId: id, projectRoot: env.projectRoot, tool, args: input, command, reason, policy, policySource, policyForced,
+            rememberable: rememberScopes.length > 0,
+            rememberScopes,
+            rememberHintKey: command === undefined ? 'tool' : 'command',
             ...(scriptBinding === undefined ? {} : { scriptBinding }),
             ...(shell === undefined ? {} : { shell, executable }),
           });
           return await Promise.race([
-            request.then(isApproved, (error) => {
+            request.then(async (answer) => {
+              if (!isApproved(answer)) return false;
+              const rememberScope = isRecord(answer) ? answer.rememberScope : undefined;
+              if (rememberScope === undefined) return true;
+              if (rememberScope !== 'session' && rememberScope !== 'project' && rememberScope !== 'user') {
+                return { decision: 'deny' as const, code: 'policy_memory_unavailable', reason: 'this approval cannot store a remembered rule from this client' };
+              }
+              if (!rememberScopes.includes(rememberScope)) {
+                return { decision: 'deny' as const, code: 'policy_memory_unavailable', reason: 'this approval cannot store a remembered rule from this client' };
+              }
+              try {
+                await rememberPolicyRule(state as HostSessionState, tool, command, rememberScope);
+                return true;
+              } catch (error) {
+                const failure = error instanceof KernelError ? error : new KernelError('policy_memory_write_failed', { cause: error });
+                logger?.log?.('approval memory was not saved', { tool, code: failure.code });
+                return { decision: 'deny' as const, code: failure.code, reason: failure.detail ?? 'the remembered rule was not saved' };
+              }
+            }, (error) => {
               // 记录客户端审批答复失败并拒绝调用，确保每个请求都有对应结果。
               logger?.log?.(`approval failed for ${tool}`, { tool, code: errorCode(error), reason: errorMessage(error) });
               return false;
@@ -1475,6 +1596,33 @@ export function createHost({
     // 只有配置了 MCP Server 时才注册 MCP 工具。
     const mcp = createMcpRegistry(mcpConfigs);
     cleanup.push(() => mcp.close());
+    const authorizeMcpServer = async (server: string): Promise<void> => {
+      const configured = mcpConfigs.find((entry) => entry.name === server);
+      if (configured === undefined) throw new KernelError('mcp_server_unknown', { detail: server });
+      const currentServers = await currentMcpConfigs(env);
+      await stopMcpServersWithChangedConfig(env, currentServers);
+      const current = currentServers.find((entry) => entry.name === server);
+      if (current === undefined || current.identityDigest !== configured.identityDigest) {
+        throw new KernelError('mcp_server_config_changed', { detail: server });
+      }
+      const sessionTrust = state.mcpTrust.get(mcpTrustKey(server, configured.identityDigest));
+      const trust = sessionTrust ?? await mcpServerTrust(mcpTrustPathOf(), env.projectRoot, server, configured.identityDigest);
+      if (trust?.trusted !== true) throw new KernelError('mcp_server_untrusted', { detail: server });
+      const grant = await activeDelegation();
+      if (grant !== undefined) {
+        await assertDelegationProject(grant, env.projectRoot);
+        assertDelegationMcpServer(grant, server);
+      }
+    };
+    const authorizeMcpTool = async (server: string, tool: string): Promise<void> => {
+      await authorizeMcpServer(server);
+      const grant = await activeDelegation();
+      if (grant !== undefined) {
+        await assertDelegationProject(grant, env.projectRoot);
+        assertDelegationMcpTool(grant, `mcp:${server}/${tool}`);
+      }
+    };
+    const mcpAuthorization: McpAuthorization = { authorizeServer: authorizeMcpServer, authorizeTool: authorizeMcpTool };
     const loaded = skills.skills.length === 0 ? plugins : [...plugins, createSkillPlugin(skills, () => mcp.servers())];
     // 加载器负责发现提示模板并处理项目优先级；模板由 Host 展开，确保所有客户端使用相同规则。
     const templates = templateRegistry ?? await discoverTemplates(templateDirectories(env.projectRoot));
@@ -1487,7 +1635,7 @@ export function createHost({
     const fragments: ExtensionPromptFragment[] = [];
     // 派生执行继承父会话的策略和静态提示词前缀，但不能再注册子 Agent。
     // 直接使用底层提供方；派生事件记录在其独立会话中。
-    const basePlugins = [...loaded, createMcpPlugin(mcp)];
+    const basePlugins = [...loaded, createMcpPlugin(mcp, mcpAuthorization)];
     // 提问属于父会话，因为派生执行没有客户端可以回答。
     // 提问和审批走不同流程；只有支持交互回答的客户端才注册提问工具。
     const asked = interactive === false ? [] : [createAskUserPlugin({
@@ -1878,6 +2026,8 @@ export function createHost({
         maxPermissionProfile: knownGrant.maxPermissionProfile,
         maxNetwork: knownGrant.maxNetwork,
         allowedPolicies: knownGrant.allowedPolicies,
+        allowedMcpServers: knownGrant.allowedMcpServers,
+        allowedMcpTools: knownGrant.allowedMcpTools,
       },
     };
   }
@@ -2459,6 +2609,8 @@ export function createHost({
               maxPermissionProfile: knownGrant.maxPermissionProfile,
               maxNetwork: knownGrant.maxNetwork,
               allowedPolicies: knownGrant.allowedPolicies,
+              allowedMcpServers: knownGrant.allowedMcpServers,
+              allowedMcpTools: knownGrant.allowedMcpTools,
             },
             // 这里只返回条数；记录内容由 `session.read` 提供。
             eventCount: (await state.session.read()).length,
@@ -2580,6 +2732,8 @@ export function createHost({
               ...(message.params.allowedPolicyNever === true ? ['never' as const] : []),
             ],
             allowOperator: message.params.allowOperator as boolean,
+            allowedMcpServers: message.params.allowedMcpServers as string[] | undefined,
+            allowedMcpTools: message.params.allowedMcpTools as string[] | undefined,
             confirmFullAccess: message.params.confirmFullAccess as boolean,
             confirmUnrestrictedNetwork: message.params.confirmUnrestrictedNetwork as boolean,
             confirmPartialWorkspaceWrite: message.params.confirmPartialWorkspaceWrite === true,
@@ -2592,6 +2746,120 @@ export function createHost({
           return await revokeDelegationGrant(
             delegationPathOf(), requiredString(message.params.grantId, 'grantId'), requiredString(message.params.version, 'version'),
           );
+        }
+        case 'mcp.trust.list': {
+          if (!permissionControl) throw new KernelError('mcp_trust_trusted_ui_required');
+          const env = await environmentFor(message.params.projectRoot);
+          const session = message.params.sessionId === undefined ? undefined : open(requiredString(message.params.sessionId, 'sessionId'));
+          if (session !== undefined && session.environment !== env) throw new KernelError('session_project_forbidden');
+          const configuredServers = await currentMcpConfigs(env);
+          await stopMcpServersWithChangedConfig(env, configuredServers);
+          const store = await listMcpTrust(mcpTrustPathOf());
+          const servers = await Promise.all(configuredServers.map(async (server) => {
+            const sessionTrust = session?.mcpTrust.get(mcpTrustKey(server.name, server.identityDigest));
+            const projectIdentity = workspaceIdentity(await realpath(env.projectRoot));
+            const projectTrust = store.entries.find((entry) => entry.scope === 'project' && entry.projectIdentity === projectIdentity
+              && entry.server === server.name && entry.identityDigest === server.identityDigest);
+            const userTrust = store.entries.find((entry) => entry.scope === 'user'
+              && entry.server === server.name && entry.identityDigest === server.identityDigest);
+            const scopes = {
+              session: sessionTrust === undefined ? null : { source: sessionTrust.source, trusted: sessionTrust.trusted, updatedAt: sessionTrust.updatedAt },
+              project: projectTrust === undefined ? null : { source: projectTrust.source, trusted: projectTrust.trusted, updatedAt: projectTrust.updatedAt },
+              user: userTrust === undefined ? null : { source: userTrust.source, trusted: userTrust.trusted, updatedAt: userTrust.updatedAt },
+            };
+            const trust = scopes.session !== null ? { scope: 'session' as const, ...scopes.session }
+              : scopes.project !== null ? { scope: 'project' as const, ...scopes.project }
+                : scopes.user !== null ? { scope: 'user' as const, ...scopes.user }
+                  : undefined;
+            return {
+              name: server.name,
+              command: server.command,
+              args: server.args,
+              cwd: server.cwd,
+              environmentNames: server.environmentNames,
+              identityDigest: server.identityDigest,
+              trustScopes: scopes,
+              trust: trust === undefined ? null : { scope: trust.scope, source: trust.source, trusted: trust.trusted, updatedAt: trust.updatedAt },
+            };
+          }));
+          return { version: store.version, servers };
+        }
+        case 'mcp.trust.set': {
+          if (!permissionControl) throw new KernelError('mcp_trust_trusted_ui_required');
+          const env = await environmentFor(message.params.projectRoot);
+          const serverName = requiredString(message.params.server, 'server');
+          const expectedIdentity = requiredString(message.params.identityDigest, 'identityDigest');
+          const configuredServers = await currentMcpConfigs(env);
+          await stopMcpServersWithChangedConfig(env, configuredServers);
+          const server = configuredServers.find((item) => item.name === serverName);
+          if (server === undefined) throw new KernelError('mcp_server_unknown', { detail: serverName });
+          if (server.identityDigest !== expectedIdentity) throw new KernelError('mcp_server_config_changed', { detail: serverName });
+          const scope = requiredString(message.params.scope, 'scope');
+          if (scope !== 'session' && scope !== 'project' && scope !== 'user') throw new KernelError('mcp_trust_scope_invalid');
+          if (typeof message.params.trusted !== 'boolean') throw new KernelError('protocol_args_invalid', { detail: 'trusted must be a boolean' });
+          if (message.params.trusted && (message.params.confirmTrust !== true || message.params.confirmExternalAccess !== true)) {
+            throw new KernelError('mcp_trust_confirmation_required');
+          }
+          if (scope === 'session') {
+            const sessionId = requiredString(message.params.sessionId, 'sessionId');
+            const state = open(sessionId);
+            if (state.environment !== env) throw new KernelError('session_project_forbidden');
+            const sessionServer = state.environment.mcpConfigs.find((item) => item.name === serverName);
+            if (sessionServer?.identityDigest !== server.identityDigest) throw new KernelError('mcp_session_config_stale');
+            const updatedAt = new Date().toISOString();
+            await state.session.append({
+              kind: 'sessionMcpTrust', ignorable: true, server: serverName, identityDigest: server.identityDigest,
+              source: 'trusted-ui', trusted: message.params.trusted, updatedAt,
+            });
+            state.mcpTrust.set(mcpTrustKey(serverName, server.identityDigest), { source: 'trusted-ui', trusted: message.params.trusted, updatedAt });
+            if (!message.params.trusted) await state.mcp.revoke(serverName);
+            return { scope, server: serverName, trusted: message.params.trusted, updatedAt };
+          }
+
+          const store = await setMcpServerTrust(mcpTrustPathOf(), {
+            scope: scope as McpTrustScope,
+            projectRoot: env.projectRoot,
+            server: serverName,
+            identityDigest: server.identityDigest,
+            trusted: message.params.trusted,
+          }, requiredString(message.params.version, 'version'));
+          if (!message.params.trusted) {
+            for (const state of sessions.values()) {
+              const current = state.environment.mcpConfigs.find((item) => item.name === serverName);
+              if (current === undefined) continue;
+              if (scope === 'project' && state.environment !== env) continue;
+              if (scope === 'user' && current.identityDigest !== server.identityDigest) continue;
+              const sessionTrust = state.mcpTrust.get(mcpTrustKey(serverName, current.identityDigest));
+              const effective = sessionTrust ?? await mcpServerTrust(mcpTrustPathOf(), state.environment.projectRoot, serverName, current.identityDigest);
+              if (effective?.trusted !== true) await state.mcp.revoke(serverName);
+            }
+          }
+          return { version: store.version, scope, server: serverName, trusted: message.params.trusted };
+        }
+        case 'mcp.trust.tools': {
+          if (!permissionControl) throw new KernelError('mcp_trust_trusted_ui_required');
+          const env = await environmentFor(message.params.projectRoot);
+          const serverName = requiredString(message.params.server, 'server');
+          const configuredServers = await currentMcpConfigs(env);
+          await stopMcpServersWithChangedConfig(env, configuredServers);
+          const server = configuredServers.find((item) => item.name === serverName);
+          if (server === undefined) throw new KernelError('mcp_server_unknown', { detail: serverName });
+          const session = message.params.sessionId === undefined ? undefined : open(requiredString(message.params.sessionId, 'sessionId'));
+          if (session !== undefined && session.environment !== env) throw new KernelError('session_project_forbidden');
+          if (session !== undefined) {
+            const sessionServer = session.environment.mcpConfigs.find((item) => item.name === serverName);
+            if (sessionServer?.identityDigest !== server.identityDigest) throw new KernelError('mcp_session_config_stale');
+          }
+          const sessionTrust = session?.mcpTrust.get(mcpTrustKey(serverName, server.identityDigest));
+          const trust = sessionTrust ?? await mcpServerTrust(mcpTrustPathOf(), env.projectRoot, serverName, server.identityDigest);
+          if (trust?.trusted !== true) throw new KernelError('mcp_server_untrusted', { detail: serverName });
+          const registry = createMcpRegistry([server]);
+          try {
+            const tools = await registry.toolsOf(serverName);
+            return { server: serverName, identityDigest: server.identityDigest, tools: tools.map(({ name, description, digest }) => ({ name, description, digest })) };
+          } finally {
+            await registry.close();
+          }
         }
         case 'config.get': {
           // 使用明确的允许字段构造响应；参数模式本身允许出现未声明的属性。

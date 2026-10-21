@@ -15,16 +15,25 @@ export interface McpDisclosed {
   seen: Set<string>;
 }
 
+export interface McpAuthorization {
+  authorizeServer?(server: string): void | Promise<void>;
+  authorizeTool?(server: string, tool: string): void | Promise<void>;
+}
+
 function key(server: string, tool: string, digest: string) {
   return `${server}/${tool}@${digest}`;
 }
 
-export function createMcpTools(registry: Pick<McpRegistry, 'servers' | 'toolsOf' | 'definition' | 'call'>, disclosed: McpDisclosed) {
+export function createMcpTools(
+  registry: Pick<McpRegistry, 'servers' | 'toolsOf' | 'definition' | 'call'>,
+  disclosed: McpDisclosed,
+  authorization: McpAuthorization = {},
+) {
   return {
     inspectTool: {
       name: 'mcp.inspect',
-      access: 'external',
-      readOnly: true,
+      access: 'inherit',
+      readOnly: false,
       disclosure: true,
       description: `Look up what an MCP server offers, one level at a time. ${LEVELS}`,
       parameters: {
@@ -35,8 +44,12 @@ export function createMcpTools(registry: Pick<McpRegistry, 'servers' | 'toolsOf'
         },
         required: [],
       },
+      async preflight(args: { server?: string }) {
+        if (args.server !== undefined) await authorization.authorizeServer?.(args.server);
+      },
       async run(args: { server?: string; tool?: string }, { signal }: { signal?: AbortSignal } = {}) {
         if (args.server === undefined) return { text: registry.servers().join('\n') || 'no MCP servers are configured' };
+        await authorization.authorizeServer?.(args.server);
         const tools = await registry.toolsOf(args.server, signal);
         if (args.tool === undefined) {
           return {
@@ -58,7 +71,7 @@ export function createMcpTools(registry: Pick<McpRegistry, 'servers' | 'toolsOf'
     },
     callTool: {
       name: 'mcp.call',
-      access: 'external',
+      access: 'inherit',
       disclosure: true,
       description: 'Call one MCP tool whose definition you have inspected. Pass its arguments as a JSON object text.',
       parameters: {
@@ -73,7 +86,11 @@ export function createMcpTools(registry: Pick<McpRegistry, 'servers' | 'toolsOf'
       },
       // 按 `mcp:<server>/<tool>` 实际能力名称进行权限判定，而不是使用通用名称 `mcp.call`。
       capability: (args: { server?: string; tool?: string }) => `mcp:${args.server}/${args.tool}`,
+      async preflight(args: { server: string; tool: string }) {
+        await authorization.authorizeTool?.(args.server, args.tool);
+      },
       async run(args: { server: string; tool: string; arguments: string; schemaDigest: string }, { signal }: { signal?: AbortSignal } = {}) {
+        await authorization.authorizeTool?.(args.server, args.tool);
         const found = await registry.definition(args.server, args.tool, signal);
         // 先确认该工具已披露，再校验调用是否仍与服务器当前定义一致。
         if (!disclosed.seen.has(key(args.server, args.tool, args.schemaDigest))) {
@@ -102,9 +119,12 @@ export function createMcpTools(registry: Pick<McpRegistry, 'servers' | 'toolsOf'
   };
 }
 
-export function createMcpPlugin(registry: Pick<McpRegistry, 'servers' | 'toolsOf' | 'definition' | 'call'>) {
+export function createMcpPlugin(
+  registry: Pick<McpRegistry, 'servers' | 'toolsOf' | 'definition' | 'call'>,
+  authorization: McpAuthorization = {},
+) {
   const disclosed = { seen: new Set<string>() };
-  const { inspectTool, callTool } = createMcpTools(registry, disclosed);
+  const { inspectTool, callTool } = createMcpTools(registry, disclosed, authorization);
   return {
     name: 'ligule-mcp',
     setup(kernel: { register(tool: unknown): () => void }) {

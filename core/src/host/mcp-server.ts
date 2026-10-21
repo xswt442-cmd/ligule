@@ -153,7 +153,9 @@ const delegationOutput = { type: ['object', 'null'], additionalProperties: false
   maxPermissionProfile: { type: 'string', enum: ['read-only', 'workspace-write', 'full-access'] },
   maxNetwork: { type: 'string', enum: ['policy', 'unrestricted', 'disabled'] },
   allowedPolicies: { type: 'array', items: { type: 'string', enum: ['ask', 'auto', 'never'] } },
-}, required: ['grantId', 'maxPermissionProfile', 'maxNetwork', 'allowedPolicies'] };
+  allowedMcpServers: { type: 'array', items: { type: 'string' } },
+  allowedMcpTools: { type: 'array', items: { type: 'string' } },
+}, required: ['grantId', 'maxPermissionProfile', 'maxNetwork', 'allowedPolicies', 'allowedMcpServers', 'allowedMcpTools'] };
 const requestedChanges = { type: ['object', 'null'], additionalProperties: false, properties: {
   mode: { type: 'string' }, policy: { type: 'string' }, model: { type: ['object', 'null'] },
   thinking: { type: ['object', 'null'] }, outputTokens: { type: ['integer', 'null'] }, loopIterations: { type: 'integer' },
@@ -322,6 +324,10 @@ export async function serveMcp({ projectRoot, version, flags = [], modeName, ope
   const host = createHost({ ...environment,
     config: createConfig({ user: { ...environment.config, workspaceRoot: authorizedRoot } }),
     configLayers: layers,
+    loadEnvironment: async (project) => {
+      const { layers: freshLayers, ...fresh } = await loadHostEnvironment(project, shippedModes, flags);
+      return { ...fresh, layers: freshLayers };
+    },
     permission,
     ...(modeName === undefined ? {} : { modeName }),
     interactive: true,

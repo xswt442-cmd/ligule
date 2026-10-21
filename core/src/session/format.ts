@@ -58,7 +58,7 @@ export interface SessionRecord {
 // 当前程序会写入的事件类型。未知事件仅在标记为 `ignorable` 时允许跳过，其他情况拒绝读取。
 // `usage` 虽不进入模型投影，但其序号仍用于校验检查点范围，因此必须保留。
 // `label` 保存会话名称和归档状态；这些信息供界面使用，不进入模型上下文。
-const WRITTEN_KINDS = ['session', 'user', 'reasoning', 'assistant', 'tool', 'mode', 'usage', 'turn', 'label', 'turnContext', 'modelSelection', 'sessionGeneration', 'sessionLoopIterations', 'sessionPermission', 'sessionPolicy'];
+const WRITTEN_KINDS = ['session', 'user', 'reasoning', 'assistant', 'tool', 'mode', 'usage', 'turn', 'label', 'turnContext', 'modelSelection', 'sessionGeneration', 'sessionLoopIterations', 'sessionPermission', 'sessionPolicy', 'sessionMcpTrust', 'sessionPolicyRule'];
 
 export function createSessionHeader({
   id,
@@ -130,6 +130,27 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
         || !Number.isSafeInteger(event.total) || (event.total as number) < (event.consecutive as number)
         || typeof event.forcedToAsk !== 'boolean') {
         throw new KernelRuntimeError('session_policy_event_invalid');
+      }
+    }
+    if (kind === 'sessionMcpTrust') {
+      if (event.ignorable !== true || event.source !== 'trusted-ui' || typeof event.server !== 'string' || event.server === '' || event.server.length > 128
+        || typeof event.identityDigest !== 'string' || !/^[0-9a-f]{64}$/u.test(event.identityDigest)
+        || typeof event.trusted !== 'boolean'
+        || typeof event.updatedAt !== 'string' || !Number.isFinite(Date.parse(event.updatedAt))) {
+        throw new KernelRuntimeError('session_mcp_trust_event_invalid');
+      }
+    }
+    if (kind === 'sessionPolicyRule') {
+      const rule = typeof event.rule === 'object' && event.rule !== null && !Array.isArray(event.rule)
+        ? event.rule as Record<string, unknown>
+        : undefined;
+      if (event.ignorable !== true || rule === undefined
+        || typeof event.updatedAt !== 'string' || !Number.isFinite(Date.parse(event.updatedAt))
+        || typeof rule.tool !== 'string' || rule.tool.trim() === ''
+        || (rule.decision !== 'allow' && rule.decision !== 'ask' && rule.decision !== 'deny')
+        || (rule.match !== undefined && typeof rule.match !== 'string')
+        || (rule.reason !== undefined && typeof rule.reason !== 'string')) {
+        throw new KernelRuntimeError('session_policy_rule_event_invalid');
       }
     }
     events.push(event);

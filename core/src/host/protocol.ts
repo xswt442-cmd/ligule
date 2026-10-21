@@ -415,6 +415,8 @@ export const METHODS = Object.freeze({
       allowedPolicyAuto: { type: 'boolean' },
       allowedPolicyNever: { type: 'boolean' },
       allowOperator: { type: 'boolean' },
+      allowedMcpServers: { type: 'array', items: { type: 'string' } },
+      allowedMcpTools: { type: 'array', items: { type: 'string' } },
       confirmFullAccess: { type: 'boolean' },
       confirmUnrestrictedNetwork: { type: 'boolean' },
       confirmPartialWorkspaceWrite: { type: 'boolean', description: 'confirm trust in the project and accept partial workspace-write sandbox limits when this platform requires it' },
@@ -428,6 +430,28 @@ export const METHODS = Object.freeze({
       grantId: { type: 'string' },
       version: { type: 'string' },
     }, required: ['grantId', 'version'] },
+  },
+  'mcp.trust.list': {
+    description: 'List configured local MCP servers, their launch details without secret values, and the current trusted-user authorization for this project',
+    parameters: { type: 'object', properties: { projectRoot: { type: 'string' }, sessionId: SESSION_ID } },
+  },
+  'mcp.trust.set': {
+    description: 'Trust or block one configured MCP server through a trusted local interface; session trust is stored with that session, while project and user trust use the private local trust store',
+    parameters: { type: 'object', properties: {
+      projectRoot: { type: 'string' },
+      sessionId: SESSION_ID,
+      server: { type: 'string' },
+      identityDigest: { type: 'string', minLength: 64, maxLength: 64 },
+      scope: { type: 'string', enum: ['session', 'project', 'user'] },
+      trusted: { type: 'boolean' },
+      confirmTrust: { type: 'boolean', description: 'true only after the trusted UI showed this exact server configuration and the user chose to trust it' },
+      confirmExternalAccess: { type: 'boolean', description: 'true only after the trusted UI explained that the server runs outside the Shell sandbox and may access files and network' },
+      version: { type: 'string' },
+    }, required: ['server', 'identityDigest', 'scope', 'trusted'] },
+  },
+  'mcp.trust.tools': {
+    description: 'Start one already trusted local MCP server from a trusted interface and list its current tools without calling them',
+    parameters: { type: 'object', properties: { projectRoot: { type: 'string' }, sessionId: SESSION_ID, server: { type: 'string' } }, required: ['server'] },
   },
   // 客户端只能读取配置白名单中的字段，不能请求文件路径或其他配置内容。
   'config.get': {

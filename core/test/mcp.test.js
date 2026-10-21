@@ -11,6 +11,7 @@ import {
   mcpServerConfigs, validateToolArguments,
 } from '../dist/index.js';
 import { createPermissionContext } from '../dist/kernel/permission.js';
+import { KernelError } from '../dist/kernel/error.js';
 
 const serverEntry = fileURLToPath(new URL('../node_modules/@modelcontextprotocol/server-filesystem/dist/index.js', import.meta.url));
 const externalPermission = createPermissionContext('full-access', 'unrestricted', {
@@ -18,14 +19,25 @@ const externalPermission = createPermissionContext('full-access', 'unrestricted'
 });
 
 test('the server config takes a plain command and only ${NAME} credential references', () => {
-  const configs = mcpServerConfigs({
+  const projectRoot = process.cwd();
+  const config = {
     mcp: {
       servers: {
         fs: { command: process.execPath, args: [serverEntry, '/tmp'], env: { TOKEN: '${MCP_TEST_TOKEN}' } },
       },
     },
-  }, { MCP_TEST_TOKEN: 'a-secret' });
-  assert.deepEqual(configs, [{ name: 'fs', command: process.execPath, args: [serverEntry, '/tmp'], env: { TOKEN: 'a-secret' }, cwd: undefined }]);
+  };
+  const configs = mcpServerConfigs({
+    ...config,
+  }, { MCP_TEST_TOKEN: 'a-secret' }, projectRoot);
+  assert.deepEqual(configs.map(({ env, ...settings }) => settings), [{
+    name: 'fs', command: process.execPath, args: [serverEntry, '/tmp'], cwd: projectRoot,
+    environmentNames: ['TOKEN'], identityDigest: configs[0].identityDigest,
+  }]);
+  assert.deepEqual(configs[0].env, { TOKEN: 'a-secret' });
+  assert.match(configs[0].identityDigest, /^[0-9a-f]{64}$/u);
+  assert.equal(mcpServerConfigs(config, { MCP_TEST_TOKEN: 'rotated-secret' }, projectRoot)[0].identityDigest, configs[0].identityDigest,
+    'the trusted identity contains the environment reference name, never its secret value');
   // 变量没设时不把字面量 `${NAME}` 传下去：那看着像一个凭据，其实是配置没填。
   assert.deepEqual(mcpServerConfigs(configsToConfig({ TOKEN: '${MCP_TEST_TOKEN}' }), {}).map((entry) => entry.env), [{}]);
   assert.throws(
@@ -34,9 +46,25 @@ test('the server config takes a plain command and only ${NAME} credential refere
   );
   assert.throws(() => mcpServerConfigs(configsToConfig(undefined, { command: 'node /x.js' })), (error) => error.code === 'mcp_command_invalid');
   // 判据看的是空白：合法的可执行文件名里常带字母 s，按字母判会把整份配置拒掉。
-  assert.deepEqual(mcpServerConfigs(configsToConfig(undefined, { command: 'mcp-server-stdio' })), [
-    { name: 'fs', command: 'mcp-server-stdio', args: [], env: {}, cwd: undefined },
-  ]);
+  const plain = mcpServerConfigs(configsToConfig(undefined, { command: 'mcp-server-stdio' }))[0];
+  assert.equal(plain.command, 'mcp-server-stdio');
+  assert.deepEqual(plain.environmentNames, []);
+  assert.equal(plain.cwd, process.cwd());
+  assert.match(plain.identityDigest, /^[0-9a-f]{64}$/u);
+});
+
+test('a relative server command is resolved from its workspace and its launch settings change its identity', () => {
+  const projectRoot = join(tmpdir(), 'mcp-trust-project');
+  const settings = { command: './bin/server', args: ['--stdio'], cwd: 'runtime', env: { API_KEY: '${MCP_API_KEY}' } };
+  const config = { mcp: { servers: { browser: settings } } };
+  const first = mcpServerConfigs(config, { MCP_API_KEY: 'secret' }, projectRoot)[0];
+
+  assert.equal(first.cwd, join(projectRoot, 'runtime'));
+  assert.equal(first.command, join(projectRoot, 'runtime', 'bin', 'server'));
+  const changedArguments = { mcp: { servers: { browser: { ...settings, args: ['--json'] } } } };
+  const changedCredentialReference = { mcp: { servers: { browser: { ...settings, env: { API_KEY: '${OTHER_API_KEY}' } } } } };
+  assert.notEqual(mcpServerConfigs(changedArguments, {}, projectRoot)[0].identityDigest, first.identityDigest);
+  assert.notEqual(mcpServerConfigs(changedCredentialReference, {}, projectRoot)[0].identityDigest, first.identityDigest);
 });
 
 test('an MCP child inherits runtime variables and only explicitly referenced secrets', async () => {
@@ -214,7 +242,7 @@ test('the decision chain judges the effective capability, not mcp.call', async (
   const { callTool } = createMcpTools(registry, disclosed);
   const asked = [];
   const chain = createDecisionChain({
-    mode: 'auto',
+    mode: 'ask',
     rules: [{ tool: 'mcp:fs/edit_file', decision: 'deny', reason: 'editing through MCP is not allowed' }],
     ask: async (call) => {
       asked.push(call);
@@ -238,7 +266,65 @@ test('the decision chain judges the effective capability, not mcp.call', async (
   });
   await kernel.call('mcp.call', { server: 'fs', tool: 'read_file', arguments: '{"path":"a.txt"}', schemaDigest: 'aaaa' });
   assert.deepEqual(seenByGuard, ['mcp:fs/read_file'], '守卫与规则表看见的都是那一条能力名');
-  assert.deepEqual(asked.map((call) => call.tool), ['mcp:fs/read_file'], 'auto policy still asks before an external MCP operation');
+  assert.deepEqual(asked.map((call) => call.tool), ['mcp:fs/read_file'], 'the configured ask policy uses the actual MCP capability');
+});
+
+test('MCP server and tool authorization runs before registry operations', async () => {
+  const registry = fakeRegistry();
+  let serverChecks = 0;
+  let toolChecks = 0;
+  const { inspectTool, callTool } = createMcpTools(registry, { seen: new Set(['fs/read_file@aaaa']) }, {
+    authorizeServer: async () => { serverChecks += 1; throw new Error('mcp_server_untrusted'); },
+    authorizeTool: async () => { toolChecks += 1; throw new Error('agent_control_mcp_tool_denied'); },
+  });
+
+  await assert.rejects(() => inspectTool.run({ server: 'fs' }), /mcp_server_untrusted/u);
+  await assert.rejects(() => callTool.run({ server: 'fs', tool: 'read_file', arguments: '{}', schemaDigest: 'aaaa' }), /agent_control_mcp_tool_denied/u);
+  assert.equal(serverChecks, 1);
+  assert.equal(toolChecks, 1);
+  assert.deepEqual(registry.calls, []);
+});
+
+test('an Agent Control MCP ceiling denies before Policy asks or any MCP operation starts', async () => {
+  const registry = fakeRegistry();
+  let asked = 0;
+  const { callTool } = createMcpTools(registry, { seen: new Set(['fs/read_file@aaaa']) }, {
+    authorizeTool: () => { throw new KernelError('agent_control_mcp_tool_denied'); },
+  });
+  const kernel = createKernel({
+    config: createConfig({ user: { boundary: process.cwd() } }),
+    permission: externalPermission,
+    policy: createDecisionChain({ mode: 'ask', ask: async () => { asked += 1; return true; } }),
+  });
+  kernel.register(callTool);
+
+  await assert.rejects(
+    () => kernel.call('mcp.call', { server: 'fs', tool: 'read_file', arguments: '{}', schemaDigest: 'aaaa' }),
+    (error) => error.code === 'agent_control_mcp_tool_denied',
+  );
+  assert.equal(asked, 0);
+  assert.deepEqual(registry.calls, []);
+});
+
+test('trusted MCP tools are visible and callable in workspace-write without full-access', async () => {
+  const registry = fakeRegistry();
+  const permission = createPermissionContext('workspace-write', 'policy', {
+    filesystemRead: 'full', filesystemWrite: 'partial', network: 'partial', process: 'full',
+  }, { profiles: { readOnly: 'full', workspaceWrite: 'partial' }, workspaceTrusted: true });
+  const kernel = createKernel({
+    config: createConfig({ user: { boundary: process.cwd() } }),
+    permission,
+    policy: createDecisionChain({ mode: 'ask', ask: async () => true }),
+  });
+  loadAssembly(kernel, [createMcpPlugin(registry)]);
+  assert.deepEqual(kernel.manifest().map((tool) => tool.name), ['mcp.call', 'mcp.inspect']);
+
+  await kernel.call('mcp.inspect', { server: 'fs', tool: 'read_file' });
+  const result = await kernel.call('mcp.call', {
+    server: 'fs', tool: 'read_file', arguments: '{"path":"note.txt"}', schemaDigest: 'aaaa',
+  });
+  assert.equal(result.text, 'the body');
+  assert.equal(registry.calls.length, 1);
 });
 
 test('nothing is registered when no server is configured', () => {

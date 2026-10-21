@@ -40,11 +40,23 @@ test('a denied call never reaches the user', async () => {
 test('an asked call follows the answer, and a missing channel denies', async () => {
   const yes = asked(true);
   assert.deepEqual(await judged(createDecisionChain({ ask: yes.ask }), { tool: 'read', input: {} }), { decision: 'allow' });
-  assert.deepEqual(yes.calls, [{ tool: 'read', input: {}, command: undefined, reason: undefined, policy: 'ask', policySource: 'config', policyForced: false }]);
+  assert.deepEqual(yes.calls, [{ tool: 'read', input: {}, command: undefined, reason: undefined, policy: 'ask', policySource: 'config', policyForced: false, rememberable: true }]);
 
   const no = asked(false);
   assert.equal((await createDecisionChain({ ask: no.ask }).evaluate({ tool: 'read', input: {} })).code, 'ask_declined');
   assert.equal((await createDecisionChain({}).evaluate({ tool: 'read', input: {} })).code, 'ask_unavailable');
+});
+
+test('a failed remembered approval returns its stable persistence failure instead of allowing once', async () => {
+  const chain = createDecisionChain({ ask: async () => ({
+    decision: 'deny',
+    code: 'config_version_stale',
+    reason: 'the remembered rule was not saved',
+  }) });
+  const result = await chain.evaluate({ tool: 'read', input: {} });
+  assert.equal(result.decision, 'deny');
+  assert.equal(result.code, 'config_version_stale');
+  assert.equal(result.reason, 'the remembered rule was not saved');
 });
 
 // 审批请求携带发起会话自身的档位和来源，避免界面查看其他会话时显示错误的审批依据，

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { createDelegationGrant, listDelegationGrants, requireDelegationGrant, revokeDelegationGrant, assertDelegationPermission, assertDelegationPolicy } from '../dist/host/agent-control.js';
+import { createDelegationGrant, listDelegationGrants, requireDelegationGrant, revokeDelegationGrant, assertDelegationMcpServer, assertDelegationMcpTool, assertDelegationPermission, assertDelegationPolicy } from '../dist/host/agent-control.js';
 import { createPermissionContext } from '../dist/kernel/permission.js';
 import { withTuiHost } from './helpers/tui-host.js';
 
@@ -61,6 +61,8 @@ test('existing grants without a recorded origin remain usable without inventing 
 
     const loaded = await listDelegationGrants(storePath);
     assert.equal(loaded.grants[0].source, 'legacy');
+    assert.deepEqual(loaded.grants[0].allowedMcpServers, []);
+    assert.deepEqual(loaded.grants[0].allowedMcpTools, []);
     assert.equal((await requireDelegationGrant(storePath, created.grants[0].id, projectRoot)).source, 'legacy');
 
     await revokeDelegationGrant(storePath, created.grants[0].id, loaded.version);
@@ -96,6 +98,28 @@ test('delegation ceilings reject permission and policy escalation', async () => 
     assert.throws(() => assertDelegationPermission(grant, 'read-only', 'unrestricted'), { code: 'agent_control_permission_exceeds_grant' });
     assertDelegationPolicy(grant, 'auto');
     assert.throws(() => assertDelegationPolicy(grant, 'never'), { code: 'agent_control_policy_exceeds_grant' });
+  });
+});
+
+test('Agent Control MCP limits require an allowed server and an exact tool capability', async () => {
+  await fixture(async ({ projectRoot, storePath }) => {
+    const allowed = {
+      ...input(projectRoot),
+      allowedMcpServers: ['playwright'],
+      allowedMcpTools: ['mcp:playwright/browser_click'],
+    };
+    const snapshot = await createDelegationGrant(storePath, allowed, (await listDelegationGrants(storePath)).version);
+    const grant = snapshot.grants[0];
+    assertDelegationMcpServer(grant, 'playwright');
+    assertDelegationMcpTool(grant, 'mcp:playwright/browser_click');
+    assert.throws(() => assertDelegationMcpServer(grant, 'filesystem'), { code: 'agent_control_mcp_server_denied' });
+    assert.throws(() => assertDelegationMcpTool(grant, 'mcp:playwright/browser_navigate'), { code: 'agent_control_mcp_tool_denied' });
+    const currentVersion = (await listDelegationGrants(storePath)).version;
+    await assert.rejects(
+      () => createDelegationGrant(storePath, { ...input(projectRoot), allowedMcpServers: ['playwright'], allowedMcpTools: ['mcp:filesystem/read_file'] },
+        currentVersion),
+      { code: 'agent_control_mcp_limit_invalid' },
+    );
   });
 });
 

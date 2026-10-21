@@ -46,6 +46,7 @@ export interface ToolDefinition<TArgs = unknown> {
   readonly targetArgument?: string;
   readonly commandArgument?: string;
   capability?: BivariantCapability<TArgs>;
+  readonly preflight?: (args: TArgs) => void | Promise<void>;
   run: BivariantToolCallback<TArgs, unknown | Promise<unknown>>;
 }
 
@@ -268,6 +269,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
         commandArgument: typeof tool.commandArgument === 'string' ? tool.commandArgument : undefined,
         // 工具可提供实际能力名称；MCP 工具用它传递 `mcp:<服务器>/<工具>` 身份。
         capability: typeof tool.capability === 'function' ? tool.capability : undefined,
+        preflight: tool.preflight,
         run: tool.run,
       };
       tools.set(tool.name, entry);
@@ -356,6 +358,16 @@ export function createKernel(options: KernelOptions = {}): Kernel {
         logger.log(`tool ${name} is not permitted`, { tool: name, code: denied.code, reason: denied.reason });
         await record(entry, refusalOf(denied.code, denied.reason));
         throw new KernelError(denied.code, { detail: denied.reason });
+      }
+      if (tool.preflight !== undefined) {
+        try { await tool.preflight(args); }
+        catch (error) {
+          const failure = error instanceof KernelError
+            ? error
+            : new KernelError('tool_preflight_failed', { cause: error, detail: errorMessage(error) });
+          await fail(entry, failure);
+          return undefined;
+        }
       }
       // 只解析一次网络目标，并将同一结果传给权限判定和执行。
       // 避免 DNS 在审批和连接之间变化，导致实际连接地址与批准地址不同。

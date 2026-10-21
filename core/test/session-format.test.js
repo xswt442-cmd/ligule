@@ -54,6 +54,23 @@ test('session policy events must be ignorable and contain a valid restore snapsh
   ]), { code: 'session_policy_event_invalid' });
 });
 
+test('session MCP trust events are ignorable and validate the server identity', () => {
+  const header = { kind: 'session', formatVersion: 2, sessionId: 'mcp-trust', projectRoot: '' };
+  const trust = {
+    seq: 0, kind: 'sessionMcpTrust', ignorable: true, source: 'trusted-ui', server: 'playwright', identityDigest: 'a'.repeat(64), trusted: true,
+    updatedAt: new Date().toISOString(),
+  };
+  assert.equal(parseSessionEvents([header, trust]).events[0].kind, 'sessionMcpTrust');
+  assert.throws(() => parseSessionEvents([header, { ...trust, identityDigest: 'invalid' }]), { code: 'session_mcp_trust_event_invalid' });
+});
+
+test('session approval memory events are ignorable and validate the saved rule', () => {
+  const header = { kind: 'session', formatVersion: 2, sessionId: 'policy-rule', projectRoot: '' };
+  const saved = { seq: 0, kind: 'sessionPolicyRule', ignorable: true, updatedAt: new Date().toISOString(), rule: { tool: 'mcp:playwright/browser_click', decision: 'allow' } };
+  assert.equal(parseSessionEvents([header, saved]).events[0].kind, 'sessionPolicyRule');
+  assert.throws(() => parseSessionEvents([header, { ...saved, rule: { tool: '', decision: 'allow' } }]), { code: 'session_policy_rule_event_invalid' });
+});
+
 // 开局还没选过模式时那一格就是不写，而不是写一个空名字或写一份假的默认。
 test('a record that never picked a mode says so by leaving the field out', async () => {
   await withDirectory(async (directory) => {

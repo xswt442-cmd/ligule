@@ -36,12 +36,19 @@ export interface PolicyQuestion {
   readonly policy: PolicyMode;
   readonly policySource: PolicyModeSource;
   readonly policyForced: boolean;
+  readonly rememberable: boolean;
   readonly shell?: string;
   readonly executable?: string;
   readonly scriptBinding?: ScriptBinding;
 }
 
-export type PolicyAsk = (question: PolicyQuestion) => boolean | Promise<boolean>;
+export interface PolicyAskResult {
+  readonly decision: 'allow' | 'deny';
+  readonly code?: string;
+  readonly reason?: string;
+}
+
+export type PolicyAsk = (question: PolicyQuestion) => boolean | PolicyAskResult | Promise<boolean | PolicyAskResult>;
 export type PolicyGuard = (call: { readonly tool: string; readonly input: unknown; readonly command: string | undefined }) => string | undefined;
 
 export interface DecisionChainOptions {
@@ -317,6 +324,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       };
 
       let requiresManualApproval = manualApprovalRequired === true || access === 'external' || access === 'unknown';
+      let rememberable = manualApprovalRequired !== true && access !== 'external' && access !== 'unknown';
       let manualApprovalReason = manualApprovalRequired === true
         ? 'Git may execute project hooks, helpers, or configured aliases; the user must approve each call.'
         : access === 'external'
@@ -331,12 +339,14 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       if (command !== undefined) {
         if (segments !== undefined && !canAutoApprove(inspection)) {
           requiresManualApproval = true;
+          rememberable = false;
           manualApprovalReason ??= '命令使用脚本解释器或包装器，需要逐次审批';
         }
         const classified = await classifyDangerousCommand(command, kind, inspection, commandCwd(input));
         if (classified?.kind === 'hard-deny') return hardDeny(classified.reason);
         if (classified?.kind === 'approval') {
           requiresManualApproval = true;
+          rememberable = false;
           manualApprovalReason ??= parsed?.kind === 'segments'
             ? classified.reason
             : askReason(parsed, target, shell) ?? classified.reason;
@@ -351,6 +361,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         return refuse('policy_denied', 'target', `${target.class} 这一类地址（链路本地、元数据端点、组播与保留段）不在这一趟运行里取回`);
       }
       const loopOrPrivate = target?.class === 'loopback' || target?.class === 'private';
+      if (loopOrPrivate) rememberable = false;
 
       // 任一匹配规则拒绝时就拒绝调用，后续放行规则不能覆盖拒绝。
       // 命令规则同时检查整条命令和每个分段，以拦截管道中的危险命令。
@@ -419,10 +430,16 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         policy: effective,
         policySource: source,
         policyForced: forcedToAsk,
+        rememberable,
         ...(scriptBinding === undefined ? {} : { scriptBinding }),
         ...(shell === undefined ? {} : { shell: shell.kind, executable: shell.executable }),
       };
-      if (await ask(question) !== true) return refuse('ask_declined', 'ask', 'the user declined', undefined, 'deny');
+      const response = await ask(question);
+      const answered = response === true || typeof response === 'object' && response !== null && response.decision === 'allow';
+      if (!answered) {
+        const rejected = typeof response === 'object' && response !== null ? response : undefined;
+        return refuse(rejected?.code ?? 'ask_declined', 'ask', rejected?.reason ?? 'the user declined', undefined, 'deny');
+      }
       record(false);
       return { ...judged('allow', 'ask', { ...(segments === undefined ? {} : { segments }), answer: 'allow' }), ...(scriptBinding === undefined ? {} : { scriptBinding }) };
     },
