@@ -3008,7 +3008,13 @@ export function createHost({
         const opened = [...sessions.values()];
         for (const state of opened) state.running?.abort();
         const retired = await Promise.allSettled(opened.map((state) => retire(state)));
-        for (const result of retired) if (result.status === 'rejected') failures.push(result.reason);
+        for (const result of retired) {
+          if (result.status !== 'rejected') continue;
+          const failure = result.reason;
+          if (failure instanceof AggregateError && failure.message === 'host_session_retire_failed') {
+            failures.push(...failure.errors);
+          } else failures.push(failure);
+        }
         sessions.clear();
         if (failures.length > 0) throw new AggregateError(failures, 'host_release_failed');
       })();
