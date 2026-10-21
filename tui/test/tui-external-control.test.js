@@ -42,7 +42,8 @@ test('TUI observes an externally locked session, answers a question, sends guida
       id: sessionId,
       meta: { projectRoot: context.projectDirectory },
     });
-    await session.append({ kind: 'user', text: 'External task started.', origin: 'controller' });
+    const externalUser = await session.append({ kind: 'user', text: 'External task started.', origin: 'controller' });
+    await session.append({ kind: 'turnContext', userSeq: externalUser.seq, model: 'deepseek-flash' });
     await session.append({ kind: 'assistant', text: 'The external agent is checking the workspace.', toolCalls: [] });
     await session.acquire();
 
@@ -108,6 +109,7 @@ test('TUI observes an externally locked session, answers a question, sends guida
       assert.ok(listed.sessions.some((item) => item.id === sessionId), JSON.stringify(listed));
       await type(`/resume ${sessionId}`);
       await wait(() => output().includes('External session connected') || output().includes('外控会话已连接'));
+      await wait(() => frame().includes('External model deepseek-flash') || frame().includes('外控模型 deepseek-flash'));
       await wait(() => output().includes('Waiting for your answer') || output().includes('等待回答'));
       await wait(() => frame().includes('Choose a route'));
       await wait(() => output().includes('外部 Agent: External task started.'));

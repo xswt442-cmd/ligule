@@ -66,6 +66,14 @@ function isSessionEvent(value: unknown): value is SessionEvent {
     && (value.kind === undefined || typeof value.kind === 'string');
 }
 
+function externalModelFrom(events: readonly SessionEvent[]): string | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event.kind === 'turnContext' && typeof event.model === 'string' && event.model.trim() !== '') return event.model;
+  }
+  return null;
+}
+
 function isAskQuestion(value: unknown): value is AskQuestion {
   return isRecord(value)
     && typeof value.id === 'string'
@@ -676,6 +684,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [mcpTrustPending, setMcpTrustPending] = useState<McpTrustPending | null>(null);
   const [externalControl, setExternalControl] = useState(false);
   const [externalSnapshot, setExternalSnapshot] = useState<ExternalControlSnapshot | null>(null);
+  const [externalModel, setExternalModel] = useState<string | null>(null);
   const resolvedExternalInteractions = useRef(new Set<string>());
   useEffect(() => { resolvedExternalInteractions.current.clear(); }, [sessionId]);
   useEffect(() => { setMcpTrustPending(null); }, [sessionId]);
@@ -946,6 +955,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       const read = await client.request('session.observe', { projectRoot, sessionId, limit: 400, fullResults: true });
       if (disposed || activeSession.current !== sessionId) return;
       setRows(read.events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq }))));
+      setExternalModel(externalModelFrom(read.events));
     };
     const poll = async () => {
       if (disposed || inFlight) return;
@@ -1502,6 +1512,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           setSessionId(created.sessionId);
           setExternalControl(false);
           setExternalSnapshot(null);
+          setExternalModel(null);
           setRunning(false);
           setAsk(null);
           setQuery(null);
@@ -1664,6 +1675,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         setSessionId(picked.id);
         setExternalControl(observingExternal);
         setExternalSnapshot(null);
+        setExternalModel(observingExternal ? externalModelFrom(read.events) : null);
         setRunning(false);
         setStatus(null);
         setAsk(null);
@@ -1710,6 +1722,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         }
         setExternalControl(false);
         setExternalSnapshot(null);
+        setExternalModel(null);
         setRunning(false);
         setAsk(null);
         setQuery(null);
@@ -2813,7 +2826,12 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     setCaret(inserted.caret);
   }, { isActive: interactive });
 
-  const shownModel = status?.model ?? info.model;
+  const shownModel = externalControl ? externalModel : status?.model ?? info.model;
+  const modelStatus = externalControl
+    ? t(`外控模型 ${shownModel ?? '未知'}`, `External model ${shownModel ?? 'unknown'}`)
+    : t(`模型 ${shownModel ?? '未配置'}${status?.pendingModel ? `→${status.pendingModel}` : ''} ${keyHint('model-picker')}`, `Model ${shownModel ?? 'not configured'}${status?.pendingModel ? `→${status.pendingModel}` : ''} ${keyHint('model-picker')}`);
+  const footerStatus = externalControl ? modelStatus
+    : `${modelStatus}  ·  ${t(`工具模式 ${status?.mode ?? '—'}${status?.pendingMode ? `→${status.pendingMode}` : ''} ${keyHint('mode-picker')}  ·  审批 ${status?.policy === 'never' ? '完全不需审批' : status?.policy === 'auto' ? '自动判定' : '逐次审批'} ${keyHint('policy-picker')}`, `Tools ${status?.mode ?? '—'}${status?.pendingMode ? `→${status.pendingMode}` : ''} ${keyHint('mode-picker')}  ·  Approval ${status?.policy === 'never' ? 'none' : status?.policy === 'auto' ? 'auto' : 'ask'} ${keyHint('policy-picker')}`)}`;
   const foldedLive = foldText(live.reasoning, expanded, 1);
 
   return h(Fragment, null,
@@ -2933,8 +2951,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           draft.slice(0, caret),
           h(Text, { inverse: true }, caretText),
           draft.slice(caret + (caret === draft.length ? 0 : caretText.length))))),
-    h(Text, { wrap: 'wrap' },
-      t(`模型 ${shownModel ?? '未配置'}${status?.pendingModel ? `→${status.pendingModel}` : ''} ${keyHint('model-picker')}  ·  工具模式 ${status?.mode ?? '—'}${status?.pendingMode ? `→${status.pendingMode}` : ''} ${keyHint('mode-picker')}  ·  审批 ${status?.policy === 'never' ? '完全不需审批' : status?.policy === 'auto' ? '自动判定' : '逐次审批'} ${keyHint('policy-picker')}`, `Model ${shownModel ?? 'not configured'}${status?.pendingModel ? `→${status.pendingModel}` : ''} ${keyHint('model-picker')}  ·  Tools ${status?.mode ?? '—'}${status?.pendingMode ? `→${status.pendingMode}` : ''} ${keyHint('mode-picker')}  ·  Approval ${status?.policy === 'never' ? 'none' : status?.policy === 'auto' ? 'auto' : 'ask'} ${keyHint('policy-picker')}`)),
+    h(Text, { wrap: 'wrap' }, footerStatus),
     h(Text, { dimColor: true, wrap: 'truncate-end' }, buildStatusLine({
       sessionId, boundary: info.boundary, status, running, seconds, expanded, columns: stdout?.columns, locale,
     })),
