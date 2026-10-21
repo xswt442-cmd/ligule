@@ -121,8 +121,8 @@ test('managed process start returns after loopback readiness and stop releases i
   await writeFile(latePath, [
     "import { writeFileSync } from 'node:fs';",
     "import { createServer } from 'node:http';",
-    `writeFileSync(${JSON.stringify(startedMarker)}, 'started');`,
-    `setTimeout(() => { writeFileSync(${JSON.stringify(lateMarker)}, 'late'); createServer((_request, response) => response.end('late')).listen(${latePort}, '127.0.0.1'); }, 800);`,
+    `writeFileSync(new URL('./late-server-started.txt', import.meta.url), 'started');`,
+    `setTimeout(() => { writeFileSync(new URL('./late-server-ran.txt', import.meta.url), 'late'); createServer((_request, response) => response.end('late')).listen(${latePort}, '127.0.0.1'); }, 800);`,
   ].join('\n'));
   const controller = new AbortController();
   const pendingStart = kernel.call('managed_process', {
