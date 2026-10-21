@@ -19,7 +19,18 @@ import type { ShellSelection } from './shell.js';
 import { assertInterpreterIdentity, assertScriptBinding, bindScript, readBoundScript, type ScriptBinding } from './script-binding.js';
 
 type ExecArguments = { command?: unknown; cwd?: string };
-type ExecContext = { config: CapabilityConfig; permission: PermissionContext; signal?: AbortSignal; shell?: ShellSelection; scriptBinding?: ScriptBinding };
+export interface ManagedExecLease {
+  readonly completion: Promise<number>;
+  readonly logs: () => string;
+  stop(): Promise<void>;
+}
+export interface ExecRunContext {
+  config: CapabilityConfig;
+  permission: PermissionContext;
+  signal?: AbortSignal;
+  shell?: ShellSelection;
+  scriptBinding?: ScriptBinding;
+}
 type ExecResult = { text: string; exitCode: number | null };
 
 const MAX_EXEC_TIMEOUT_MS = 600_000;
@@ -262,7 +273,22 @@ export const execTool = {
     },
     required: ['command'],
   },
-  async run(args: ExecArguments, { config, permission, signal, shell, scriptBinding }: ExecContext): Promise<ExecResult> {
+  run(args: ExecArguments, context: ExecRunContext): Promise<ExecResult> {
+    return runExec(args, context);
+  },
+};
+
+function runExec(args: ExecArguments, context: ExecRunContext): Promise<ExecResult>;
+function runExec<TResult>(
+  args: ExecArguments,
+  context: ExecRunContext,
+  onManagedProcess: (lease: ManagedExecLease) => Promise<TResult>,
+): Promise<TResult>;
+async function runExec<TResult>(
+  args: ExecArguments,
+  { config, permission, signal, shell, scriptBinding }: ExecRunContext,
+  onManagedProcess?: (lease: ManagedExecLease) => Promise<TResult>,
+): Promise<ExecResult | TResult> {
     if (typeof args.command !== 'string' || args.command.trim() === '') {
       throw new KernelError('exec_command_required', { detail: 'the command to run is missing' });
     }
@@ -474,6 +500,63 @@ export const execTool = {
     stdout.on('data', collect);
     stderr.on('data', collect);
 
+    const completion: Promise<number | null> = owned?.completion ?? new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', resolve);
+    });
+    if (onManagedProcess !== undefined) {
+      let cleanup: Promise<void> | undefined;
+      const releaseResources = (): Promise<void> => {
+        cleanup ??= (async () => {
+          if (privateTempDir !== undefined) {
+            await rm(privateTempDir, { recursive: true, force: true });
+            privateTempDir = undefined;
+          }
+          if (scriptSnapshot !== undefined) {
+            await rm(scriptSnapshot, { force: true });
+            scriptSnapshot = undefined;
+          }
+        })();
+        return cleanup;
+      };
+      const managedCompletion = completion.then(async (exitCode) => {
+        if (exitCode === null) throw new KernelError('exec_process_interrupted');
+        await releaseResources();
+        return exitCode;
+      }, async (error: unknown) => {
+        await releaseResources();
+        throw error;
+      });
+      const lease: ManagedExecLease = {
+        completion: managedCompletion,
+        logs: () => {
+          const bytes = Buffer.concat(tail).subarray(-16_384);
+          return decode(bytes);
+        },
+        async stop() {
+          if (child.exitCode === null && child.signalCode === null) {
+            if (owned === null) killTree(child);
+            else owned.cancel();
+          }
+          try { await managedCompletion; }
+          catch (error) {
+            if (!(error instanceof KernelError) || error.code !== 'exec_cancelled') throw error;
+          }
+          await releaseResources();
+        },
+      };
+      if (signal?.aborted) {
+        await lease.stop();
+        throw new KernelError('exec_cancelled', { detail: 'the run was cancelled while the managed command was starting' });
+      }
+      try {
+        return await onManagedProcess(lease);
+      } catch (error) {
+        await lease.stop().catch(() => undefined);
+        throw error;
+      }
+    }
+
     let termination: 'cancelled' | 'timeout' | undefined;
     let terminationFailure: unknown;
     const terminate = (reason: 'cancelled' | 'timeout'): void => {
@@ -490,10 +573,6 @@ export const execTool = {
       }
     };
     const abort = (): void => terminate('cancelled');
-    const completion: Promise<number | null> = owned?.completion ?? new Promise((resolve, reject) => {
-      child.once('error', reject);
-      child.once('close', resolve);
-    });
     const timer = setTimeout(() => terminate('timeout'), timeoutMs);
     if (signal?.aborted) abort();
     else signal?.addEventListener('abort', abort, { once: true });
@@ -552,6 +631,13 @@ export const execTool = {
         detail: completionFailure instanceof Error ? completionFailure.message : undefined,
       });
     }
-    return { text: pageOutput(total, head, tail, execBytes), exitCode };
-  },
-};
+  return { text: pageOutput(total, head, tail, execBytes), exitCode };
+}
+
+export function runManagedExec<TResult>(
+  args: ExecArguments,
+  context: ExecRunContext,
+  onManagedProcess: (lease: ManagedExecLease) => Promise<TResult>,
+): Promise<TResult> {
+  return runExec(args, context, onManagedProcess);
+}

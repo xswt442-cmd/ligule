@@ -31,6 +31,7 @@ export { createObservationLog, versionOf } from './session/observe.js';
 export { resolveRecycler, windowsRecycleBin, freedesktopTrash } from './capability/recycle.js';
 export { resolveRipgrep, searchWithRipgrep } from './capability/ripgrep.js';
 export { execTool } from './capability/exec.js';
+export { createManagedProcessRegistry, managedProcessPlugin, managedProcessTool } from './capability/managed-process.js';
 export { createPromptAssembly, PROMPT_BOUNDARY } from './kernel/prompt.js';
 export { BASE_SYSTEM_PROMPT } from './kernel/base-prompt.js';
 export { createSessionLog } from './session/session.js';

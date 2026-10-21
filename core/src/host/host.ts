@@ -48,6 +48,7 @@ import { repairUnresolvedCalls } from '../session/repair.js';
 import { foldLabel } from '../session/format.js';
 import { SPILL_NAME, resultLimit } from '../kernel/result.js';
 import { limitsOf } from '../capability/limits.js';
+import { createManagedProcessRegistry, managedProcessPlugin, type ManagedProcessRegistry } from '../capability/managed-process.js';
 import { loadInstructions, DEFAULT_INSTRUCTION_BYTES } from '../capability/instructions.js';
 import { SKILL_METADATA_BUDGET_BYTES, discoverSkills, formatSkillCatalog, skillDirectories } from '../kernel/skills.js';
 import { discoverTemplates, expandTemplate, findTemplate, parseInvocation, templateDirectories } from '../kernel/templates.js';
@@ -207,6 +208,8 @@ interface HostSessionBase {
   readonly mcpTrust: Map<string, { readonly source: 'trusted-ui'; readonly trusted: boolean; readonly updatedAt: string }>;
   sessionPolicyRules: PolicyRule[];
   readonly environment: ProjectEnvironment;
+  readonly managedProcesses: ManagedProcessRegistry;
+  readonly managedGrantId?: string;
   permission: PermissionContext;
   policyOverride: PolicyMode | null;
   readonly mode: ModeState;
@@ -1104,15 +1107,21 @@ export function createHost({
   async function retire(state: HostSessionState): Promise<void> {
     // 失败或取消结果已经写入记录；收尾只等待轮次结束，不覆盖其结果。
     await state.operation?.catch(() => undefined);
-    try {
-      await state.mcp.close();
-      state.extensions.dispose();
-      state.assembly.dispose();
-    } finally {
-      // 即使释放资源失败，也要移除会话并释放记录锁，避免客户端无法关闭会话。
-      sessions.delete(state.id);
-      await state.session.close();
+    const failures: unknown[] = [];
+    for (const release of [
+      () => state.managedProcesses.close(),
+      () => state.mcp.close(),
+      () => state.extensions.dispose(),
+      () => state.assembly.dispose(),
+    ]) {
+      try { await release(); }
+      catch (error) { failures.push(error); }
     }
+    // 即使其中一个资源未能释放，也要移除会话并释放记录锁，避免客户端无法关闭会话。
+    sessions.delete(state.id);
+    try { await state.session.close(); }
+    catch (error) { failures.push(error); }
+    if (failures.length > 0) throw new AggregateError(failures, 'host_session_retire_failed');
   }
 
   // 项目最后一个会话关闭后移除其环境，让下次打开时重新加载配置。
@@ -1409,6 +1418,12 @@ export function createHost({
       basePermission.capabilities,
       permissionOptionsOf(basePermission, recover ? false : basePermission.partialWorkspaceWriteConfirmed, workspaceTrusted),
     );
+    const managedProcesses = createManagedProcessRegistry(agentControl === undefined ? {} : {
+      validateOwner: async () => {
+        const active = await activeDelegation();
+        if (active?.id !== agentControl.grantId) throw new KernelError('agent_control_grant_revoked');
+      },
+    });
     const state: HostSessionBase = {
       id,
       session,
@@ -1420,6 +1435,8 @@ export function createHost({
       mode: modeState,
       pending: undefined,
       environment: env,
+      managedProcesses,
+      ...(agentControl === undefined ? {} : { managedGrantId: agentControl.grantId }),
       permission: sessionPermission,
       policyOverride: initial?.policy ?? null,
       loopIterations: initial?.loopIterations ?? configuredLoopLimits.iterations,
@@ -1584,6 +1601,7 @@ export function createHost({
       permissionForCall: () => state.permission,
       policyOverrideForSession: () => state.policyOverride,
     });
+    cleanup.push(() => managedProcesses.close());
     if (!recover && initial?.policy !== undefined) await appendPolicyState(session, chain, initial.policy);
     // 技能登记表反映已发现的技能，不随当前模式改变。
     // 优先复用加载器提供的登记表，否则从配置目录中发现技能。
@@ -1667,7 +1685,7 @@ export function createHost({
         }
       },
     })];
-    const assembly = loadAssembly(kernel, [...basePlugins, ...asked, createSubagentPlugin({
+    const assembly = loadAssembly(kernel, [...basePlugins, managedProcessPlugin(managedProcesses), ...asked, createSubagentPlugin({
       config,
       provider: live,
       chain,
@@ -2252,6 +2270,7 @@ export function createHost({
         confirmedPartialWorkspaceWrite,
       });
       state.permission = next;
+      await state.managedProcesses.stopAll();
       return { sessionId: state.id, permission: sessionPermissionView(state, canControlPermission), applies: 'now' };
     } finally {
       if (sessions.get(state.id) === state) state.permissionChanging = false;
@@ -2538,6 +2557,7 @@ export function createHost({
           if (state.running === undefined) throw new KernelError('run_not_running', { detail: sessionId });
           // 通过当前循环处理取消，让工具和模型请求收到同一个取消信号。
           state.running.abort();
+          await state.managedProcesses.stopAll();
           return { cancelled: true };
         }
         case 'policy.set': {
@@ -2743,9 +2763,14 @@ export function createHost({
         }
         case 'agent-control.revoke': {
           if (!permissionControl) throw new KernelError('agent_control_trusted_ui_required');
-          return await revokeDelegationGrant(
-            delegationPathOf(), requiredString(message.params.grantId, 'grantId'), requiredString(message.params.version, 'version'),
+          const grantId = requiredString(message.params.grantId, 'grantId');
+          const result = await revokeDelegationGrant(
+            delegationPathOf(), grantId, requiredString(message.params.version, 'version'),
           );
+          await Promise.all([...sessions.values()]
+            .filter((state) => state.managedGrantId === grantId)
+            .map((state) => state.managedProcesses.stopAll()));
+          return result;
         }
         case 'mcp.trust.list': {
           if (!permissionControl) throw new KernelError('mcp_trust_trusted_ui_required');
