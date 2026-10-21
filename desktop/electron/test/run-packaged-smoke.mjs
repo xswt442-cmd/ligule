@@ -954,6 +954,116 @@ async function runChecks() {
     return `来源 ${appInfo.origin}，Host PID ${host.pid} 使用 ${reportVersion(hostNode)}`;
   });
 
+  await check('open Model services in the installed application', async () => {
+    const opened = await devTools.evaluate(`(() => {
+      const button = [...document.querySelectorAll('aside.sidebar button.entry')]
+        .find(item => /设置|Settings/u.test(item.textContent ?? ''));
+      button?.click();
+      return button !== undefined;
+    })()`);
+    if (opened !== true) throw new Error('packaged_settings_entry_missing');
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('.sheet .sheet-nav button[role="tab"]') !== null`), 10_000, 'packaged_settings_open');
+    const selected = await devTools.evaluate(`(() => {
+      const tab = [...document.querySelectorAll('.sheet-nav button[role="tab"]')]
+        .find(item => /模型服务|Model services/u.test(item.textContent ?? ''));
+      tab?.click();
+      return tab !== undefined;
+    })()`);
+    if (selected !== true) throw new Error('packaged_model_services_tab_missing');
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('.model-settings .settings-intro h2') !== null`), 10_000, 'packaged_model_settings_panel');
+    const details = await devTools.evaluate(`(() => ({
+      title: document.querySelector('.model-settings .settings-intro h2')?.textContent?.trim() ?? '',
+      error: document.querySelector('.model-settings [role="alert"]')?.textContent ?? '',
+    }))()`);
+    if (!/模型服务|Model services/u.test(details.title)) throw new Error('packaged_model_settings_title_missing');
+    if (details.error !== '') throw new Error('packaged_model_settings_load_failed');
+    await devTools.evaluate(`document.querySelector('button[aria-label="关闭设置"], button[aria-label="Close settings"]')?.click(); true`);
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('.sheet') === null`), 5_000, 'packaged_settings_close');
+    return `真实 BrowserWindow 已打开模型服务设置：${details.title}；没有读取或显示凭据`;
+  });
+
+  await check('trust the exact isolated workspace through the packaged UI', async () => {
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('button.permission-trigger') !== null`), 10_000, 'packaged_permission_trigger');
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('button.permission-trigger')?.disabled === false`), 60_000, 'packaged_permission_trigger_enabled');
+    const trigger = await devTools.evaluate(`(() => {
+      const button = document.querySelector('button.permission-trigger');
+      if (button === null) return { exists: false };
+      const state = { exists: true, disabled: button.disabled, expanded: button.getAttribute('aria-expanded'), text: button.textContent?.trim() ?? '' };
+      button.click();
+      return state;
+    })()`);
+    if (!trigger.exists || trigger.disabled) throw new Error(`packaged_permission_trigger_unavailable:${JSON.stringify(trigger)}`);
+    try {
+      await waitUntil(async () => await devTools.evaluate(`document.querySelector('.permission-panel') !== null`), 5_000, 'packaged_permission_panel');
+    } catch {
+      const state = await devTools.evaluate(`({
+        expanded: document.querySelector('button.permission-trigger')?.getAttribute('aria-expanded') ?? null,
+        popovers: [...document.querySelectorAll('[data-radix-popper-content-wrapper]')].map(item => item.textContent?.slice(0, 120) ?? ''),
+        bodyTail: document.body.innerText.slice(-500),
+      })`);
+      throw new Error(`packaged_permission_panel_unavailable:${JSON.stringify(state)}`);
+    }
+    const untrusted = await devTools.evaluate(`(() => {
+      const row = [...document.querySelectorAll('.permission-change-state')]
+        .find(item => /项目代码信任|Project code trust/u.test(item.textContent ?? ''));
+      return row?.querySelector('strong')?.textContent?.trim() ?? '';
+    })()`);
+    if (!/未信任|Untrusted/u.test(untrusted)) throw new Error('isolated_workspace_was_not_initially_untrusted');
+    const trustButton = await devTools.evaluate(`(() => {
+      const button = document.querySelector('.permission-trust-button');
+      button?.click();
+      return button !== null && button !== undefined;
+    })()`);
+    if (trustButton !== true) throw new Error('packaged_workspace_trust_action_missing');
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('.confirm .confirm-lead') !== null`), 5_000, 'packaged_workspace_trust_confirmation');
+    const confirmation = await devTools.evaluate(`document.querySelector('.confirm .confirm-lead')?.textContent ?? ''`);
+    if (!/信任此目录中的项目代码|Trust project code/u.test(confirmation)) throw new Error('packaged_workspace_trust_confirmation_mismatch');
+    const trustConfirmed = await devTools.evaluate(`(() => {
+      const button = [...document.querySelectorAll('.confirm-actions button')]
+        .find(item => /信任此工作区|Trust this workspace|Trust workspace/u.test(item.textContent ?? ''));
+      button?.click();
+      return button !== undefined;
+    })()`);
+    if (trustConfirmed !== true) throw new Error('packaged_workspace_trust_confirm_button_missing');
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('.confirm') === null`), 5_000, 'packaged_workspace_trust_confirmation_close');
+    const permissionPanelOpen = await devTools.evaluate(`document.querySelector('.permission-panel') !== null`);
+    if (!permissionPanelOpen) {
+      await devTools.evaluate(`document.querySelector('button.permission-trigger')?.click(); true`);
+      await waitUntil(async () => await devTools.evaluate(`document.querySelector('.permission-panel') !== null`), 5_000, 'packaged_permission_panel_reopen');
+    }
+    await waitUntil(async () => await devTools.evaluate(`(() => {
+      const row = [...document.querySelectorAll('.permission-change-state')]
+        .find(item => /项目代码信任|Project code trust/u.test(item.textContent ?? ''));
+      return /已信任|Trusted/u.test(row?.querySelector('strong')?.textContent ?? '');
+    })()`), 10_000, 'packaged_workspace_trust_saved');
+    await devTools.evaluate(`document.querySelector('button.permission-trigger')?.click(); true`);
+    return '可信界面显示初始未信任状态，确认后仅将隔离测试工作区标记为可信';
+  });
+
+  await check('open local Agent Control and MCP settings in the installed application', async () => {
+    const opened = await devTools.evaluate(`(() => {
+      const button = [...document.querySelectorAll('aside.sidebar button.entry')]
+        .find(item => /设置|Settings/u.test(item.textContent ?? ''));
+      button?.click();
+      return button !== undefined;
+    })()`);
+    if (opened !== true) throw new Error('packaged_settings_entry_missing');
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('.sheet .sheet-nav button[role="tab"]') !== null`), 5_000, 'packaged_control_settings_open');
+    const selected = await devTools.evaluate(`(() => {
+      const tab = [...document.querySelectorAll('.sheet-nav button[role="tab"]')]
+        .find(item => /外部控制|Agent Control/u.test(item.textContent ?? ''));
+      tab?.click();
+      return tab !== undefined;
+    })()`);
+    if (selected !== true) throw new Error('packaged_agent_control_tab_missing');
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('.agent-control-panel .agent-control-notice') !== null`), 10_000, 'packaged_agent_control_panel');
+    const notice = await devTools.evaluate(`document.querySelector('.agent-control-panel .agent-control-notice')?.textContent ?? ''`);
+    if (!/本机 stdio MCP|local stdio MCP/u.test(notice)) throw new Error('packaged_mcp_location_notice_missing');
+    await devTools.evaluate(`document.querySelector('button[aria-label="关闭设置"], button[aria-label="Close settings"]')?.click(); true`);
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('.sheet') === null`), 5_000, 'packaged_control_settings_close');
+    return 'Agent Control 页面报告使用本机 stdio MCP；CLI 的已安装路径由独立 npm 消费者检查确认';
+  });
+
   let sessionId;
   await check('reconnect the packaged Host with no selected session', async () => {
     return await runNoSessionReconnect();
