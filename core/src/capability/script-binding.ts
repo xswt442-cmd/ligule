@@ -34,7 +34,7 @@ export interface ScriptBinding {
 
 const INTERPRETERS = new Set(['bash', 'sh', 'zsh', 'dash', 'fish', 'pwsh', 'powershell', 'cmd', 'python', 'python3', 'node', 'deno', 'bun', 'perl', 'ruby', 'php']);
 const WRAPPERS = new Set(['sudo', 'su', 'doas', 'env', 'command', 'exec', 'source', '.', 'import-module', 'busybox', 'timeout', 'nohup', 'setsid', 'xargs', 'start-process', 'invoke-expression', 'iex', 'eval', 'npm', 'npx', 'pnpm', 'yarn', 'make', 'awk', 'gawk', 'mawk', 'nawk']);
-const PACKAGE_MANAGERS = new Set(['npm', 'npx', 'pnpm', 'yarn']);
+const PACKAGE_MANAGERS = new Set(['npm', 'npx', 'pnpm', 'yarn', 'corepack']);
 const INSTALL_ACTIONS = new Set(['install', 'i', 'ci', 'add']);
 const EXTENSIONS = new Set(['.sh', '.bash', '.zsh', '.ps1', '.py', '.pyw', '.js', '.mjs', '.cjs', '.ts', '.mts', '.cts', '.rb', '.pl', '.php']);
 
@@ -84,6 +84,16 @@ async function executableIdentity(path: string): Promise<ScriptBinding['interpre
   } finally {
     await handle.close();
   }
+}
+
+export async function resolveNodeRuntime(): Promise<{ path: string; identity: ScriptBinding['interpreterIdentity'] }> {
+  return interpreterPath('node');
+}
+
+export async function commandUsesNodeRuntime(command: string, shell: ShellSelection): Promise<boolean> {
+  const inspected = await inspectCommand(command, shell.kind);
+  if (inspected.parsed.kind !== 'segments') return false;
+  return inspected.invocations.some((invocation) => ['node', 'npm', 'npx', 'corepack'].includes(executableName(invocation.executable)));
 }
 
 export async function assertInterpreterIdentity(

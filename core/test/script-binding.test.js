@@ -6,13 +6,22 @@ import { delimiter, join } from 'node:path';
 import { createConfig, createDecisionChain, createKernel, createPermissionContext, createSessionLog } from '../dist/index.js';
 import { execTool } from '../dist/capability/exec.js';
 import { resolveShell } from '../dist/capability/shell.js';
-import { bindScript, readBoundScript, requiresManualApprovalForProjectCommand, requiresTrustedWorkspaceCommand } from '../dist/capability/script-binding.js';
+import { bindScript, commandUsesNodeRuntime, readBoundScript, requiresManualApprovalForProjectCommand, requiresTrustedWorkspaceCommand } from '../dist/capability/script-binding.js';
 import { boundaryOf, workingDirectoryOf } from '../dist/capability/limits.js';
 import { setTrusted } from '../dist/kernel/workspace-trust.js';
 
 const permission = createPermissionContext('full-access', 'unrestricted', {
   filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
 }, { workspaceTrusted: true });
+
+test('Node and package-manager commands select the pinned sandbox runtime', async () => {
+  const shell = resolveShell({});
+  assert.equal(await commandUsesNodeRuntime('node --version', shell), true);
+  assert.equal(await commandUsesNodeRuntime('npm run dev', shell), true);
+  assert.equal(await commandUsesNodeRuntime('corepack pnpm run dev', shell), true);
+  assert.equal(await requiresTrustedWorkspaceCommand('corepack pnpm run dev', shell), true);
+  assert.equal(await commandUsesNodeRuntime('git status --short', shell), false);
+});
 
 function kernelFor(root, ask, permissionForCall = () => permission, workspaceRoot = root, log = { debug() {}, log() {} }, mode = 'ask') {
   const kernel = createKernel({
@@ -278,6 +287,9 @@ test('project scripts and package hooks require a trusted workspace while ignore
   await assert.rejects(bindScript({
     command: 'npm run build', shell, boundary: root, workspaceRoot: root, cwd: root, permission: untrusted,
   }), { code: 'exec_workspace_untrusted' });
+  await assert.rejects(bindScript({
+    command: 'corepack pnpm run build', shell, boundary: root, workspaceRoot: root, cwd: root, permission: untrusted,
+  }), { code: 'exec_workspace_untrusted' });
   assert.equal(await bindScript({
     command: 'npm install --ignore-scripts', shell, boundary: root, workspaceRoot: root, cwd: root, permission: untrusted,
   }), undefined);
@@ -287,6 +299,9 @@ test('project scripts and package hooks require a trusted workspace while ignore
   }, { workspaceTrusted: true });
   assert.equal(await bindScript({
     command: 'npm run build', shell, boundary: root, workspaceRoot: root, cwd: root, permission: trusted,
+  }), undefined);
+  assert.equal(await bindScript({
+    command: 'corepack pnpm run build', shell, boundary: root, workspaceRoot: root, cwd: root, permission: trusted,
   }), undefined);
   assert.equal(await requiresManualApprovalForProjectCommand('git add result.txt', shell), true);
   assert.equal(await requiresManualApprovalForProjectCommand('git status --short', shell), true);

@@ -1,11 +1,11 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, lstatSync, linkSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { once } from 'node:events';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildLinuxSandbox } from '../dist/capability/sandbox-linux.js';
 
@@ -93,6 +93,56 @@ test('read-only profile blocks workspace writes but keeps its private temporary 
   assert.equal(child.status, 0, child.stderr);
   assert.equal(lstatSync(join(paths.workspace, 'denied'), { throwIfNoEntry: false }), undefined);
   assert.equal(lstatSync(join(paths.privateTempDir, 'allowed')).isFile(), true);
+});
+
+test('the selected Node runtime stays usable through a read-only mount while Home remains hidden', { skip: !linux }, async (t) => {
+  const paths = fixture(t);
+  assert.match(process.version, /^v24\./u, 'the Linux sandbox acceptance requires the supported Node 24 runtime');
+  const nodeExecutable = realpathSync(process.execPath);
+  const binDirectory = dirname(nodeExecutable);
+  const sourceRoot = dirname(binDirectory);
+  if (basename(binDirectory) !== 'bin') return t.skip('the active Node runtime is not installed in a Node distribution bin directory');
+  const hiddenSource = ['/home', '/root', '/mnt', '/media', '/tmp', '/var/tmp', '/var/lib', '/var/log', '/sys', '/dev/shm']
+    .some((directory) => sourceRoot === directory || sourceRoot.startsWith(`${directory}/`));
+  const identity = statSync(nodeExecutable, { bigint: true });
+  const nodeRuntime = {
+    executable: nodeExecutable,
+    identity: {
+      dev: identity.dev.toString(), ino: identity.ino.toString(), size: identity.size.toString(),
+      mtimeNs: identity.mtimeNs.toString(), ctimeNs: identity.ctimeNs.toString(),
+    },
+  };
+  writeFileSync(join(paths.workspace, 'node-probe.mjs'), "import { writeFileSync } from 'node:fs'; writeFileSync(new URL('./node-version', import.meta.url), process.version); console.log(process.version);\n");
+  const command = [
+    `'${nodeExecutable}' /run/ligule/workspace/node-probe.mjs`,
+    'node -v',
+    'npm --version',
+    'if test -x /run/ligule/node-runtime/bin/corepack; then corepack --version; fi',
+    'echo ordinary-shell-ready',
+    ...(hiddenSource ? [`test ! -e '${sourceRoot}'`] : []),
+    'test -z "$(ls -A /home)"',
+    "test \"$PATH\" = '/run/ligule/node-runtime/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'",
+    "awk '$5 == \"/run/ligule/node-runtime/bin/node\" && $6 ~ /(^|,)ro(,|$)/ { found=1 } END { exit !found }' /proc/self/mountinfo",
+    "awk '$5 == \"/run/ligule/node-runtime/lib/node_modules/npm\" && $6 ~ /(^|,)ro(,|$)/ { found=1 } END { exit !found }' /proc/self/mountinfo",
+    'test ! -e /run/ligule/node-runtime/lib/node_modules/pnpm',
+    'if touch /run/ligule/node-runtime/bin/node 2>/dev/null; then exit 49; fi',
+    'echo runtime-isolated',
+  ].join('; ');
+  const result = await buildLinuxSandbox(request(paths, {
+    nodeRuntime: { ...nodeRuntime, rewriteExecutable: true },
+    argv: ['-c', command],
+  }));
+  if (!result.available) return t.skip(result.reason);
+  assert.ok(result.argv.includes('/run/ligule/node-runtime/bin/node'), 'the bound absolute interpreter is rewritten to the fixed mount');
+  const launchArguments = result.argv.slice(result.argv.indexOf('--') + 1);
+  assert.ok(!launchArguments.some((argument) => argument.includes(nodeExecutable)), 'the hidden host path is absent from the command');
+  const child = run(result);
+  assert.equal(child.status, 0, child.stderr);
+  assert.match(child.stdout, new RegExp(process.version.replaceAll('.', '\\.'), 'u'));
+  assert.match(child.stdout, /ordinary-shell-ready/u);
+  assert.match(child.stdout, /runtime-isolated/u);
+  assert.equal(lstatSync(join(paths.workspace, 'node-version')).isFile(), true);
+  assert.equal(readFileSync(join(paths.workspace, 'node-version'), 'utf8'), process.version);
 });
 
 test('workspace links cannot use hidden host paths and existing hard links fail closed', { skip: !linux }, async (t) => {

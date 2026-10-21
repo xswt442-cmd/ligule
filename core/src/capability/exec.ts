@@ -6,7 +6,7 @@ import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { constants } from 'node:fs';
 import { chmod, mkdir, mkdtemp, open, realpath, rm, stat, type FileHandle } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, extname, join, parse, relative } from 'node:path';
+import { basename, dirname, extname, join, parse, relative } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { KernelError } from '../kernel/error.js';
 import { isWithin, resolveWithin } from './paths.js';
@@ -16,7 +16,7 @@ import { buildLinuxSandbox, type PermissionCapabilities } from './sandbox-linux.
 import type { WindowsCommandLaunch } from './windows-command.js';
 import { permissionDenial, type PermissionContext } from '../kernel/permission.js';
 import type { ShellSelection } from './shell.js';
-import { assertInterpreterIdentity, assertScriptBinding, bindScript, readBoundScript, type ScriptBinding } from './script-binding.js';
+import { assertInterpreterIdentity, assertScriptBinding, bindScript, commandUsesNodeRuntime, readBoundScript, resolveNodeRuntime, type ScriptBinding } from './script-binding.js';
 
 type ExecArguments = { command?: unknown; cwd?: string };
 export interface ManagedExecLease {
@@ -338,6 +338,15 @@ async function runExec<TResult>(
       command = command.replace(scriptBinding.interpreterSource, quoteExecutablePath(scriptBinding.interpreter, shell.kind));
     }
     const commandArgs = [...shell.prefix, `${command}${shell.tail}`];
+    let linuxNodeRuntime: { executable: string; identity: ScriptBinding['interpreterIdentity']; rewriteExecutable: boolean } | undefined;
+    if (mode === 'sandboxed' && process.platform === 'linux') {
+      if (scriptBinding !== undefined && basename(scriptBinding.interpreter) === 'node') {
+        linuxNodeRuntime = { executable: scriptBinding.interpreter, identity: scriptBinding.interpreterIdentity, rewriteExecutable: true };
+      } else if (await commandUsesNodeRuntime(commandText, shell)) {
+        const runtime = await resolveNodeRuntime();
+        linuxNodeRuntime = { executable: runtime.path, identity: runtime.identity, rewriteExecutable: false };
+      }
+    }
     const environment = executionEnvironment();
     let executable = shell.executable;
     let argv = commandArgs;
@@ -369,6 +378,7 @@ async function runExec<TResult>(
             executable: shell.executable,
             argv: commandArgs,
             environment: sandboxEnvironment(environment),
+            ...(linuxNodeRuntime === undefined ? {} : { nodeRuntime: linuxNodeRuntime }),
           });
           if (!result.available) {
             throw new KernelError('permission_sandbox_unavailable', { detail: result.reason });
@@ -437,6 +447,14 @@ async function runExec<TResult>(
     if (mode === 'direct') argv = commandArgs;
     if (scriptBinding !== undefined) {
       try { await assertInterpreterIdentity(scriptBinding.interpreter, scriptBinding.interpreterIdentity); }
+      catch (error) {
+        if (privateTempDir !== undefined) await rm(privateTempDir, { recursive: true, force: true });
+        if (scriptSnapshot !== undefined) await rm(scriptSnapshot, { force: true });
+        throw error;
+      }
+    }
+    if (linuxNodeRuntime !== undefined) {
+      try { await assertInterpreterIdentity(linuxNodeRuntime.executable, linuxNodeRuntime.identity); }
       catch (error) {
         if (privateTempDir !== undefined) await rm(privateTempDir, { recursive: true, force: true });
         if (scriptSnapshot !== undefined) await rm(scriptSnapshot, { force: true });
