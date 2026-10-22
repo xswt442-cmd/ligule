@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { parse as parseYaml } from '../core/node_modules/yaml/dist/index.js';
 import { changelogSection, desktopDownloadTable, releaseNotesForTag } from '../scripts/release-notes.js';
 import { createDesktopReleaseManifest, verifyDesktopReleaseManifests } from '../scripts/desktop-release-manifest.ts';
@@ -84,11 +84,14 @@ test('CLI preparation changes only CLI files and leaves Desktop files byte-for-b
   try {
     const desktopFiles = ['desktop/package.json', 'desktop/frontend/package.json', 'desktop/CHANGELOG.md'];
     const before = await Promise.all(desktopFiles.map(async (path): Promise<[string, Buffer]> => [path, await readFile(join(directory, path))]));
-    const result = prepareRelease(directory, 'cli', 'patch');
+    const manifestBefore = await readFile(join(directory, 'tui', 'package.json'), 'utf8');
+    const expectedManifest = manifestBefore.replace(/^  ("version"\s*:\s*)"0\.0\.1"/m, '$1"0.0.2"');
+    const result = prepareRelease(`${directory}${sep}`, 'cli', 'patch');
     assert.equal(result.version, '0.0.2');
     assert.equal(result.tag, 'cli-v0.0.2');
     assert.deepEqual(result.files.map((path) => path.replaceAll('\\', '/')), ['tui/CHANGELOG.md', 'tui/package.json', 'tui/src/version.ts']);
     for (const [path, contents] of before) assert.deepEqual(await readFile(join(directory, path)), contents, path);
+    assert.equal(await readFile(join(directory, 'tui', 'package.json'), 'utf8'), expectedManifest);
     assert.equal(JSON.parse(await readFile(join(directory, 'tui', 'package.json'), 'utf8')).version, '0.0.2');
     assert.equal(await readFile(join(directory, 'pnpm-lock.yaml'), 'utf8'), "lockfileVersion: '9.0'\n\nimporters:\n  .: {}\n  tui: {}\n  desktop: {}\n  desktop/frontend: {}\n");
     assert.match(await readFile(join(directory, 'tui', 'src', 'version.ts'), 'utf8'), /Keep this comment/);
