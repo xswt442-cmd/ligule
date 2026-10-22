@@ -125,7 +125,7 @@ async function openAgentControlPanel() {
       if (await waitForProject() === null) throw new Error('native_feature_agent_control_project_not_loaded');
       return true;
     }
-    const settings = await wait(() => [...document.querySelectorAll('button.entry')]
+    const settings = await wait(() => [...document.querySelectorAll('button[aria-haspopup="dialog"]')]
       .find(button => /^(设置|Settings)$/u.test(button.textContent?.trim() ?? '')));
     if (settings === null) {
       const root = document.querySelector('#root');
@@ -134,7 +134,11 @@ async function openAgentControlPanel() {
         rootMounted: root !== null && root.childElementCount > 0,
         rootChildren: root?.childElementCount ?? 0,
         bodyText: document.body.innerText.slice(0, 500),
-        buttons: [...document.querySelectorAll('button')].slice(0, 20).map(button => button.textContent?.trim() ?? ''),
+        buttons: [...document.querySelectorAll('button')].slice(0, 20).map(button => ({
+          text: button.textContent?.trim() ?? '',
+          className: button.className,
+          hasPopup: button.getAttribute('aria-haspopup'),
+        })),
       }));
     }
     settings.click();
