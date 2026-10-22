@@ -233,15 +233,23 @@ async function createAndRevokeAgentControlGrant() {
       ['partial_workspace_write', /(?:部分隔离限制|partial-isolation limits)/iu],
       ['unrestricted_network', /(?:不受限网络访问|unrestricted network access)/iu],
     ];
-    for (const [name, pattern] of confirmations) {
+    const setRiskConfirmation = async (name, pattern, checked) => {
       const checkbox = confirmationBy(pattern);
       if (checkbox === undefined) throw new Error('native_feature_agent_control_confirmation_missing:' + name);
       checkbox.click();
-      if (await wait(() => confirmationBy(pattern)?.checked === true) === null) {
-        throw new Error('native_feature_agent_control_confirmation_not_applied:' + name);
+      if (await wait(() => confirmationBy(pattern)?.checked === checked) === null) {
+        throw new Error('native_feature_agent_control_confirmation_not_applied:' + name + ':' + checked);
       }
-      const isLast = name === 'unrestricted_network';
-      if (!isLast && continueLimits()?.disabled !== true) {
+    };
+    for (const [name, pattern] of confirmations) {
+      await setRiskConfirmation(name, pattern, true);
+      if (continueLimits()?.disabled !== true) throw new Error('native_feature_agent_control_single_confirmation_was_enough:' + name);
+      await setRiskConfirmation(name, pattern, false);
+    }
+    for (let index = 0; index < confirmations.length; index += 1) {
+      const [name, pattern] = confirmations[index];
+      await setRiskConfirmation(name, pattern, true);
+      if (index < confirmations.length - 1 && continueLimits()?.disabled !== true) {
         throw new Error('native_feature_agent_control_confirmation_was_enough_early:' + name);
       }
     }
