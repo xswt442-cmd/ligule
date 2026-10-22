@@ -1,5 +1,6 @@
 // 守护进程先取得平台进程树归属，再创建命令；命令退出时一并清理仍存活的后代。
 import { fork, type ChildProcess } from 'node:child_process';
+import { isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { KernelError } from '../kernel/error.js';
 
@@ -9,13 +10,32 @@ export interface OwnedWindowsCommand {
   cancel(): void;
 }
 
+export type WindowsCommandLaunch =
+  | { readonly kind: 'appcontainer'; readonly workspaceRoot: string }
+  | { readonly kind: 'restricted-token'; readonly workspaceRoot: string; readonly tempDirectory: string; readonly aclLockRoot: string };
+
+const GUARDIAN_LAUNCH_ARGUMENT = '--ligule-guardian-launch-v1';
+
 export function spawnWindowsCommand(
   executable: string,
   args: readonly string[],
   cwd: string,
   environment?: NodeJS.ProcessEnv,
+  launch?: WindowsCommandLaunch,
 ): OwnedWindowsCommand {
-  const child = fork(fileURLToPath(new URL('./exec-guardian.js', import.meta.url)), [executable, ...args], {
+  if (launch !== undefined) {
+    if (launch.kind === 'appcontainer'
+      && (launch.workspaceRoot.trim() === '' || launch.workspaceRoot.includes('\0'))) {
+      throw new TypeError('the AppContainer launch description requires a workspace directory');
+    }
+    if (launch.kind === 'restricted-token'
+      && ([launch.workspaceRoot, launch.tempDirectory, launch.aclLockRoot].some((path) => path.trim() === '' || path.includes('\0')
+        || !isAbsolute(path)))) {
+      throw new TypeError('the restricted-token launch description requires absolute workspace, temp, and ACL lock directories');
+    }
+  }
+  const guardianArguments = [GUARDIAN_LAUNCH_ARGUMENT, JSON.stringify(launch ?? null), '--', executable, ...args];
+  const child = fork(fileURLToPath(new URL('./exec-guardian.js', import.meta.url)), guardianArguments, {
     cwd,
     windowsHide: true,
     execArgv: [],
@@ -107,6 +127,21 @@ export function spawnWindowsCommand(
               }
             }
           });
+        }
+        return;
+      }
+      if (launch !== undefined && child.connected) {
+        const fallback = setTimeout(() => {
+          if (child.exitCode === null && child.signalCode === null) child.kill();
+        }, 15_000);
+        fallback.unref();
+        child.once('close', () => clearTimeout(fallback));
+        try {
+          child.send({ kind: 'cancel' }, (cause) => {
+            if (cause !== null && child.exitCode === null && child.signalCode === null) child.kill();
+          });
+        } catch {
+          child.kill();
         }
         return;
       }

@@ -20,6 +20,7 @@ if (process.isMainFrame) {
     for (const unsubscribe of subscriptions) unsubscribe();
   }, { once: true });
   const bridge: DesktopApi = {
+    appInfo: () => ipcRenderer.invoke('ligule:app-info'),
     sendHostFrame: (frame: string) => ipcRenderer.invoke('ligule:host-send', frame),
     restartHost: () => ipcRenderer.invoke('ligule:host-restart'),
     onHostFrame: handler => subscribe('ligule:host-frame', handler),

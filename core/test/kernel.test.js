@@ -8,7 +8,7 @@ import {
 } from '../dist/index.js';
 
 const toolFailurePermission = createPermissionContext('workspace-write', 'policy', {
-  filesystemRead: 'unavailable', filesystemWrite: 'full', network: 'full', process: 'full',
+  filesystemRead: 'partial', filesystemWrite: 'partial', network: 'full', process: 'full',
 });
 
 function makeTool(name, overrides = {}) {
@@ -41,6 +41,22 @@ test('register shows up in list and returns a dispose action', () => {
   dispose();
   assert.deepEqual(kernel.list(), []);
   assert.deepEqual(kernel.manifest(), []);
+});
+
+test('the local tool catalog reports registered metadata without applying mode or permission filters', () => {
+  const kernel = createKernel();
+  kernel.register(makeTool('read'));
+  kernel.register(makeTool('write', { access: 'write' }));
+
+  assert.deepEqual(kernel.catalog(), [
+    { name: 'read', description: 'the read tool', access: 'read', disclosure: false },
+    { name: 'write', description: 'the write tool', access: 'write', disclosure: false },
+  ]);
+  assert.deepEqual(kernel.manifest().map(({ name }) => name), ['read'], 'the model manifest still filters writes under the default read-only context');
+  const undo = kernel.restrict(['read']);
+  assert.deepEqual(kernel.catalog().map(({ name }) => name), ['read', 'write'], 'the inspected registry stays intact while a mode restricts the model manifest');
+  assert.deepEqual(kernel.manifest(), []);
+  undo();
 });
 
 test('a duplicate name throws instead of dropping the second one silently', () => {
@@ -93,12 +109,9 @@ test('a parameter schema that cannot round-trip as JSON fails at registration', 
 
 test('a parameter schema outside the supported subset fails at registration and lists every violation', () => {
   const kernel = createKernel();
-  assert.throws(
-    () => kernel.register(makeTool('read', {
-      parameters: { type: 'object', properties: { path: { type: 'string', enum: ['a', 'b'] } } },
-    })),
-    (error) => error.code === 'tool_parameters_unsupported_construct' && error.detail.includes('path.enum'),
-  );
+  assert.throws(() => kernel.register(makeTool('read', {
+    parameters: { type: 'object', properties: { path: { type: 'string', pattern: '^a' } } },
+  })), (error) => error.code === 'tool_parameters_unsupported_construct' && error.detail.includes('path.pattern'));
   assert.throws(
     () => kernel.register(makeTool('read', {
       parameters: { type: 'object', properties: { path: { type: 'string' } }, required: 'path' },
@@ -129,6 +142,94 @@ test('a parameter schema outside the supported subset fails at registration and 
     (error) => error.detail.includes('n has minimum above maximum'),
   );
   assert.deepEqual(kernel.list(), []);
+});
+
+test('nested parameter schemas validate objects, string arrays, enums, anyOf, and closed objects', async () => {
+  const kernel = createKernel();
+  kernel.register(makeTool('delegate', {
+    parameters: {
+      type: 'object',
+      properties: {
+        task: { type: 'string' },
+        mode: {
+          type: 'object',
+          properties: {
+            strategy: { type: 'string', enum: ['fast', 'safe'] },
+            tools: { type: 'array', items: { type: 'string' } },
+            limits: {
+              type: 'object',
+              properties: { depth: { type: 'integer', minimum: 0, maximum: 4 } },
+              required: ['depth'],
+              additionalProperties: false,
+            },
+          },
+          required: ['strategy', 'tools', 'limits'],
+          additionalProperties: false,
+        },
+        result: {
+          anyOf: [
+            { type: 'string' },
+            { type: 'integer', minimum: 1, maximum: 5 },
+          ],
+        },
+      },
+      required: ['task', 'mode', 'result'],
+    },
+  }));
+
+  const valid = {
+    task: 'inspect',
+    mode: { strategy: 'safe', tools: ['read', 'search'], limits: { depth: 2 } },
+    result: 3,
+  };
+  assert.equal(await kernel.call('delegate', valid), 'ok');
+  await assert.rejects(kernel.call('delegate', { ...valid, mode: { ...valid.mode, strategy: 'unsafe' } }), { code: 'tool_args_invalid' });
+  await assert.rejects(kernel.call('delegate', { ...valid, mode: { ...valid.mode, tools: ['read', 3] } }), { code: 'tool_args_invalid' });
+  await assert.rejects(kernel.call('delegate', { ...valid, mode: { ...valid.mode, unexpected: true } }), { code: 'tool_args_invalid' });
+  await assert.rejects(kernel.call('delegate', { ...valid, mode: { ...valid.mode, limits: {} } }), { code: 'tool_args_invalid' });
+  await assert.rejects(kernel.call('delegate', { ...valid, mode: { ...valid.mode, limits: { depth: 5 } } }), { code: 'tool_args_invalid' });
+  await assert.rejects(kernel.call('delegate', { ...valid, result: false }), { code: 'tool_args_invalid' });
+});
+
+test('nested schemas reject unsupported constructs and nesting beyond the supported depth', () => {
+  const kernel = createKernel();
+  assert.throws(() => kernel.register(makeTool('delegate', {
+    parameters: { type: 'object', properties: { tags: { type: 'array', items: { type: 'integer' } } } },
+  })), (error) => error.code === 'tool_parameters_unsupported_construct' && error.detail.includes('tags.items.type'));
+  assert.throws(() => kernel.register(makeTool('delegate', {
+    parameters: { type: 'object', properties: { value: { anyOf: [] } } },
+  })), (error) => error.code === 'tool_parameters_unsupported_construct' && error.detail.includes('value.anyOf'));
+  assert.throws(() => kernel.register(makeTool('delegate', {
+    parameters: { type: 'object', properties: { value: { type: 'string', anyOf: [{ type: 'string' }] } } },
+  })), (error) => error.code === 'tool_parameters_unsupported_construct' && error.detail.includes('value.anyOf cannot be combined'));
+  assert.throws(() => kernel.register(makeTool('delegate', {
+    parameters: { type: 'object', properties: { value: { type: 'object', additionalProperties: true } } },
+  })), (error) => error.code === 'tool_parameters_unsupported_construct' && error.detail.includes('value.additionalProperties'));
+
+  let schema = { type: 'string' };
+  for (let depth = 0; depth < 9; depth += 1) {
+    schema = { type: 'object', properties: { nested: schema } };
+  }
+  assert.throws(() => kernel.register(makeTool('delegate', {
+    parameters: { type: 'object', properties: { value: schema } },
+  })), (error) => error.code === 'tool_parameters_unsupported_construct' && error.detail.includes('maximum schema depth'));
+});
+
+test('string length bounds are checked as Unicode characters and invalid bounds fail registration', async () => {
+  const kernel = createKernel();
+  kernel.register(makeTool('label', {
+    parameters: { type: 'object', properties: { value: { type: 'string', minLength: 2, maxLength: 3 } }, required: ['value'] },
+  }));
+  assert.equal(await kernel.call('label', { value: '猫a' }), 'ok');
+  await assert.rejects(kernel.call('label', { value: 'a' }), { code: 'tool_args_invalid' });
+  await assert.rejects(kernel.call('label', { value: '猫猫猫猫' }), { code: 'tool_args_invalid' });
+
+  assert.throws(() => createKernel().register(makeTool('label', {
+    parameters: { type: 'object', properties: { value: { type: 'integer', maxLength: 3 } } },
+  })), (error) => error.code === 'tool_parameters_unsupported_construct' && error.detail.includes('maxLength needs type string'));
+  assert.throws(() => createKernel().register(makeTool('label', {
+    parameters: { type: 'object', properties: { value: { type: 'string', minLength: 4, maxLength: 3 } } },
+  })), (error) => error.code === 'tool_parameters_unsupported_construct' && error.detail.includes('minLength above maxLength'));
 });
 
 test('a numeric bound on a numeric parameter registers and is enforced per call', async () => {

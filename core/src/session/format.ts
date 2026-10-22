@@ -7,6 +7,11 @@ export const SESSION_FORMAT_VERSION = 2;
 export interface SessionModeIdentity {
   name: string;
   layer: string;
+  source?: 'named' | 'inline';
+  digest?: string;
+  fileDigest?: string;
+  tools?: string[];
+  prompt?: string[];
 }
 
 export interface SessionHeader {
@@ -53,7 +58,7 @@ export interface SessionRecord {
 // 当前程序会写入的事件类型。未知事件仅在标记为 `ignorable` 时允许跳过，其他情况拒绝读取。
 // `usage` 虽不进入模型投影，但其序号仍用于校验检查点范围，因此必须保留。
 // `label` 保存会话名称和归档状态；这些信息供界面使用，不进入模型上下文。
-const WRITTEN_KINDS = ['session', 'user', 'reasoning', 'assistant', 'tool', 'mode', 'usage', 'turn', 'label', 'turnContext', 'modelSelection', 'sessionGeneration', 'sessionLoopIterations', 'sessionPermission', 'sessionPolicy'];
+const WRITTEN_KINDS = ['session', 'user', 'reasoning', 'assistant', 'tool', 'mode', 'usage', 'turn', 'label', 'turnContext', 'modelSelection', 'sessionGeneration', 'sessionLoopIterations', 'sessionPermission', 'sessionPolicy', 'sessionMcpTrust', 'sessionPolicyRule'];
 
 export function createSessionHeader({
   id,
@@ -120,11 +125,38 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
     if (kind === 'sessionPolicy') {
       if (event.ignorable !== true) throw new KernelRuntimeError('session_policy_ignorable_required');
       const override = event.override;
-      if ((override !== null && override !== 'ask' && override !== 'auto' && override !== 'never')
+      if ((override !== null && override !== 'ask' && override !== 'auto' && override !== 'none' && override !== 'never')
         || !Number.isSafeInteger(event.consecutive) || (event.consecutive as number) < 0
         || !Number.isSafeInteger(event.total) || (event.total as number) < (event.consecutive as number)
         || typeof event.forcedToAsk !== 'boolean') {
         throw new KernelRuntimeError('session_policy_event_invalid');
+      }
+    }
+    if (kind === 'sessionMcpTrust') {
+      if (event.ignorable !== true || event.source !== 'trusted-ui' || typeof event.server !== 'string' || event.server === '' || event.server.length > 128
+        || typeof event.identityDigest !== 'string' || !/^[0-9a-f]{64}$/u.test(event.identityDigest)
+        || typeof event.trusted !== 'boolean'
+        || typeof event.updatedAt !== 'string' || !Number.isFinite(Date.parse(event.updatedAt))) {
+        throw new KernelRuntimeError('session_mcp_trust_event_invalid');
+      }
+    }
+    if (kind === 'sessionPolicyRule') {
+      const rule = typeof event.rule === 'object' && event.rule !== null && !Array.isArray(event.rule)
+        ? event.rule as Record<string, unknown>
+        : undefined;
+      if (event.ignorable !== true || rule === undefined
+        || typeof event.updatedAt !== 'string' || !Number.isFinite(Date.parse(event.updatedAt))
+        || typeof rule.tool !== 'string' || rule.tool.trim() === ''
+        || (rule.decision !== 'allow' && rule.decision !== 'ask' && rule.decision !== 'deny')
+        || (rule.match !== undefined && typeof rule.match !== 'string')
+        || (rule.reason !== undefined && typeof rule.reason !== 'string')
+        || (rule.target !== undefined && rule.target !== 'file' && rule.target !== 'workspace')
+        || (rule.path !== undefined && typeof rule.path !== 'string')
+        || (rule.argsHash !== undefined && (typeof rule.argsHash !== 'string' || !/^[a-f0-9]{64}$/u.test(rule.argsHash)))
+        || ((rule.target === undefined) !== (rule.path === undefined))
+        || (rule.target !== undefined && (rule.match !== undefined || rule.argsHash !== undefined))
+        || (typeof rule.path === 'string' && !(/^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/])/u.test(rule.path) || rule.path.startsWith('/')))) {
+        throw new KernelRuntimeError('session_policy_rule_event_invalid');
       }
     }
     events.push(event);

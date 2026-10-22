@@ -38,7 +38,7 @@ Windows 路径示例：
 }
 ```
 
-每个 MCP Server 进程只授权启动时指定的一个项目。客户端通过 MCP `tools/list` 发现十个工具及其参数 schema：
+每个 MCP Server 进程只授权启动时指定的一个项目。客户端通过 MCP `tools/list` 发现十二个工具及其参数 schema：
 
 - `ligule_session_create`：在授权项目中创建会话。
 - `ligule_session_open`：接回已有会话。列表中的会话需要先接回，之后才能提交任务或读取记录。
@@ -47,21 +47,29 @@ Windows 路径示例：
 - `ligule_interaction_reply`：对真实待决的审批或提问作一次性答复；只接受原会话和请求编号。
 - `ligule_session_send`：空闲时开始新一轮，运行中按顺序排入下一轮消息，也可继续或清理队列。
 - `ligule_run_start`：提交一条任务，返回当前进程内的 `operationId` 和会话编号。
+- `ligule_run`：启动任务并等待终态；等待超时会返回当前状态，不会取消运行。
 - `ligule_run_status`：查询任务是否仍在运行、已完成、失败或取消。
+- `ligule_run_await`：等待已知 `operationId`；超时同样不会取消运行。
 - `ligule_session_read`：分页读取会话记录。
 - `ligule_run_cancel`：按 `operationId` 取消相应任务。
 
-推荐顺序是先创建或接回会话，再读取 `ligule_session_configure`。提交任务后轮询 `ligule_run_status`；根据 `phase`、`waitingFor` 和 `pendingInteractions` 继续等待或审阅后答复。完成后用 `ligule_session_read` 查看新增记录。状态通知通过 MCP logging 尽力发送；通知不可用时轮询仍可读取同一状态。需要停止时调用 `ligule_run_cancel`。工具参数以运行中的 `tools/list` schema 为准。
+推荐顺序是先创建或接回会话，再读取 `ligule_session_configure`。若希望服务端等待，可用 `ligule_run`；若要立即取回控制权，则用 `ligule_run_start`，之后通过 `ligule_run_await` 等待或用 `ligule_run_status` 轮询。两种等待超时都不会取消任务；根据 `phase`、`waitingFor` 和 `pendingInteractions` 继续等待或审阅后答复。完成后用 `ligule_session_read` 查看新增记录。状态通知通过 MCP logging 尽力发送；通知不可用时轮询仍可读取同一状态。需要停止时调用 `ligule_run_cancel`。工具参数以运行中的 `tools/list` schema 为准。
 
 ## 操控者授权与会话设置
 
-默认启动参数不包含操控者授权。此时审批请求按既有行为拒绝，Host 不注册 `ask_user_question`，配置查询仍可用，设置修改与交互答复返回 `control_operator_required`。只有本地 MCP 客户端配置明确加入 `--operator`，才能启用回复和会话设置：
+默认启动参数不包含操控者授权。此时普通审批请求和用户提问等待本地 Desktop/TUI 用户处理；Host 注册 `ask_user_question` 供本地界面使用，MCP 客户端不能直接回复。配置查询仍可用，设置修改与 MCP 交互答复返回 `control_operator_required`。只有本地 MCP 客户端配置明确加入 `--operator`，才能启用 MCP 回复和会话设置：
 
 ```json
 {"command":"ligule","args":["mcp-server","--project","/absolute/path/to/project","--operator"]}
 ```
 
-`--operator` 代表本机操控者明确授权这个 stdio 客户端。它允许回答 Policy 判为 `ask` 的审批、回答真实提问，以及修改单个会话的 Mode、Policy、模型、生成参数和每轮循环上限；它不更改文件边界、工作区信任或硬拒绝规则。Policy 为 `never`、工具校验失败、工作区越界等固定拒绝不能被审批答复覆盖。审批内容展示真实工具和操作参数；如果 Host 无法完整、安全地展示请求，就会拒绝该请求。
+`--operator` 代表本机操控者明确授权这个 stdio 客户端。它允许回答真实待处理的 Policy 审批和用户提问，以及修改单个会话的 Mode、Policy、模型、生成参数和每轮循环上限；它不更改文件边界、工作区信任或硬拒绝规则。可选 Policy 只有 `ask`、`auto` 和 `none`；已保存的旧版 `never` 保持原有拒绝语义。审批不能覆盖非法工具参数或工作区边界。`ligule_run_status` 的待处理交互只含有界摘要，不会重复传输完整工具参数。可信本地 TUI 或 Desktop 可以在请求仍待处理时展开详情。Host 无法安全审阅请求时会返回明确的 unavailable/error 错误码，不会记作用户拒绝。
+
+每条待决答复都绑定原始会话和 `requestId`。状态与事件中的 `source` 区分本机 TUI/Desktop 用户（`human`）和 MCP 操控者（`controller`）；只有 `human` 答复可以保存审批记忆。操作结束、断连或请求失效后，迟到的答复会返回 `control_interaction_stale`，不会记作用户拒绝。
+
+## 委派运行与结构化结果
+
+`ligule_run` 与 `ligule_run_start` 接受可选 `delegation`。其中 `mode` 可选择具名或内联模式，但只能缩小当前会话的工具和提示片段范围，不能扩大会话、Permission、Policy 或 Grant 上限。`outputSchema` 可要求该轮提交符合受支持 JSON Schema 的结构化结果；模型必须调用 `ligule_delegation_result` 提交，通过校验后运行才会以有效结构化结果完成。模式和结果契约只作用于本次运行，不会创建新会话或修改项目配置。内部 `subagent` 是模型可调用的工具，和 MCP 外控的一轮委派不是同一个会话。
 
 ## Agent Control 项目授权
 
@@ -74,6 +82,8 @@ Windows 路径示例：
 ```
 
 MCP 会校验项目路径与 Grant 绑定一致，并将其默认 Permission、网络和 Policy 应用于新会话。`--operator` 只能在 Grant 已允许普通 Operator 操作时使用；这时 MCP 可在 Grant 上限内改会话设置并答复真实待决的审批或提问。未提供 Grant 时，单独的 `--operator` 不会授予或提升 Permission；提供 Grant 但不启用 `--operator` 时，只能使用 Grant 默认值，不能通过 MCP 修改这些设置。Host 会持续核验撤销、到期和项目绑定；失效后拒绝后续控制并释放会话锁。
+
+可信 TUI/Desktop 接管外控会话时，会先取消正在运行的操作、清空尚未发送的队列并释放 Host 会话锁，再把会话交回本地用户。已完成的工具副作用不会被重放或撤销；旧进程的 `operationId` 在 Server 重启后不可恢复。
 
 新会话可在 `ligule_session_create` 的 `initial` 中一次性设置 `mode`、`policy`、`model`、`thinking`、`outputTokens` 和 `loopIterations`。已打开会话使用 `ligule_session_configure` 的 `changes`。单次更新只能改一个类别：Mode、Policy、生成设置或循环上限；生成设置类别内部可同时改模型、思考档位和输出上限。`loopIterations` 是每轮用户任务允许的模型/工具循环次数，必须是正安全整数；默认值来自项目 `[loop].iterations`，未设置时为 64。会话覆盖不改项目配置，保存在 Session JSONL 中，并在重新接回时恢复。`loop.modelCalls` 仍使用项目配置，不会随 `loopIterations` 一起变化。混合类别的请求会被 schema 拒绝，避免部分生效。当前格式的记录会保存并恢复 Mode、Policy 覆盖、Policy 拒绝计数与强制逐次审批状态，以及模型/生成设置。运行期间的生成设置和循环上限在下一轮开始时生效，Policy 在之后的工具判定生效，不能改变已经等待中的审批。旧格式会话仍可读取，但不能修改 Permission 或 Policy。响应中的 `applies` 明确给出时机。
 
@@ -107,9 +117,11 @@ Node/Python 脚本调用需要逐次审批；`approval.request` 会包含规范�
 
 `--project` 必须是绝对路径。会话、运行和读取都限制在启动时授权的项目内；`ligule_session_list` 返回的会话需通过 `ligule_session_open` 接回后才能操作。项目目录标识会话归属，`boundary` 仍独立限制文件工具可访问的路径。
 
-MCP Server 使用 Ligule 已有的配置、模型服务、工具和 Policy。未启动 `--operator` 时，需要人工审批的操作会被拒绝；启动该选项后，只能答复真实待决请求。Server 不提供任意 Host RPC 或任意配置文件写入工具。它只使用本地 stdio，不开启网络监听。stdio 客户端与 Server 使用同一操作系统用户权限，请只配置可信的本地 MCP 客户端。
+MCP Server 使用 Ligule 已有的配置、模型服务、工具和 Policy。未启动 `--operator` 时，普通人工审批等待本地 Desktop/TUI 用户处理，MCP 客户端不能直接答复；启动该选项后，只能答复真实待决请求。Server 不提供任意 Host RPC 或任意配置文件写入工具。它只使用本地 stdio，不开启网络监听。stdio 客户端与 Server 使用同一操作系统用户权限，请只配置可信的本地 MCP 客户端。
 
-没有 Grant 时，`--operator` 不会授予或提升会话 Permission，也不能更改 OS 资源边界。MCP 工具调用始终经过会话的 Permission 与 Policy 判定。受限 Shell 只在平台 Sandbox 满足所需能力时运行；当前 Linux bubblewrap 的文件系统隔离报告为 `partial`，Windows 没有 OS Sandbox 后端，因此这两个平台上的 `read-only` 和 `workspace-write` 会话均不能运行 Shell。`full-access` 需要在可信交互界面单独确认；这不会让 Policy 的硬拒绝可被覆盖。
+撤销工作区信任会立即停止当前 Host 中基于该信任启动的受管进程。其他 MCP Host 会每秒复核共享信任记录，并在检测到撤销后停止这些进程；新的项目代码命令在执行前也会重新检查信任。
+
+没有 Grant 时，`--operator` 不会授予或提升会话 Permission，也不能更改 OS 资源边界。MCP 工具调用始终经过会话的 Permission 与 Policy 判定。受限 Shell 只在平台 Sandbox 满足所需能力时运行；Linux bubblewrap 按实测报告文件系统能力。Windows `workspace-write` 标为 `partial`，必须先明确授权项目并确认限制，同时将网络设为 `unrestricted`；它不能限制文件读取和网络，既有硬链接、可写祖先目录的 `FILE_DELETE_CHILD` 权限或并发 ACL 修改也可能越界，不适合运行恶意原生代码。Windows `read-only` 仅在实时探测确认所选 Shell 能进入实际工作区时使用 AppContainer，否则该档位下 Shell 不可用；可用时会阻止工作区写入和 Shell 联网，但系统公开可读文件仍可能被读取。`full-access` 需要在可信交互界面单独确认；这不会让 Policy 的硬拒绝可被覆盖。
 
 任务状态和 `operationId` 只保存在当前 Server 进程中；每个进程保留最多 256 个操作记录。达到上限后，新任务会从已结束的操作中淘汰创建时间最早的一条；被淘汰的 `operationId` 不可再查询。如果所有保留的操作都仍在运行，新任务会以容量错误拒绝。Server 退出或重启后，旧 `operationId` 不可恢复。会话记录仍由 Host 持久保存，可重新启动 Server、接回会话并读取历史，但这不会恢复旧进程中的运行状态。
 

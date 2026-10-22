@@ -5,7 +5,18 @@ export interface DesktopNotification {
   openLabel: string;
 }
 
+export interface DesktopAppInfo {
+  readonly name: string;
+  readonly version: string;
+  readonly packaged: boolean;
+  readonly platform: string;
+  readonly architecture: string;
+  readonly electronVersion: string;
+  readonly build: { readonly id?: string; readonly date?: string } | null;
+}
+
 export interface DesktopApi {
+  appInfo(): Promise<DesktopAppInfo>;
   sendHostFrame(frame: string): Promise<void>;
   restartHost(): Promise<void>;
   onHostFrame(handler: (frame: string) => void): () => void;

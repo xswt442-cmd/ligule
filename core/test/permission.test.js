@@ -7,8 +7,8 @@ import { createDecisionChain } from '../dist/kernel/policy.js';
 
 const linux = Object.freeze({ filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full' });
 
-function permission(profile, network = 'policy', capabilities = linux) {
-  return createPermissionContext(profile, network, capabilities);
+function permission(profile, network = 'policy', capabilities = linux, options = {}) {
+  return createPermissionContext(profile, network, capabilities, options);
 }
 
 test('permission snapshots are validated, copied, and immutable', () => {
@@ -31,30 +31,69 @@ test('read-only permits bounded reads and refuses file writes before Policy can 
   });
 });
 
-test('workspace-write permits bounded file writes when command writes are isolated to the workspace', () => {
+test('workspace-write permits commands when the backend reports partial confinement', () => {
   const state = permission('workspace-write', 'policy', {
-    filesystemRead: 'partial', filesystemWrite: 'full', network: 'full', process: 'full',
+    filesystemRead: 'partial', filesystemWrite: 'partial', network: 'full', process: 'full',
   });
   assert.equal(permissionDenial(state, 'read'), undefined);
   assert.equal(permissionDenial(state, 'write'), undefined);
   assert.equal(permissionDenial(state, 'exec'), undefined);
 });
 
-test('workspace-write refuses command execution when the backend cannot enforce workspace writes', () => {
-  const state = permission('workspace-write', 'policy', {
-    filesystemRead: 'partial', filesystemWrite: 'partial', network: 'full', process: 'full',
+test('Windows partial workspace-write requires explicit trusted confirmation for writes and commands', () => {
+  const state = createPermissionContext('workspace-write', 'unrestricted', linux, {
+    profiles: { readOnly: 'unavailable', workspaceWrite: 'partial' },
+    limitations: ['Windows workspace writes are partial.'],
+    partialWorkspaceWriteConfirmationRequired: true,
+  });
+  assert.equal(permissionDenial(state, 'write')?.code, 'permission_partial_sandbox_confirmation_required');
+  assert.equal(permissionDenial(state, 'exec')?.code, 'permission_partial_sandbox_confirmation_required');
+
+  const confirmed = createPermissionContext('workspace-write', 'unrestricted', linux, {
+    profiles: { readOnly: 'unavailable', workspaceWrite: 'partial' },
+    partialWorkspaceWriteConfirmationRequired: true,
+    partialWorkspaceWriteConfirmed: true,
+  });
+  assert.equal(permissionDenial(confirmed, 'write'), undefined);
+  assert.equal(permissionDenial(confirmed, 'exec'), undefined);
+});
+
+test('a profile marked unavailable refuses command execution even when aggregate capabilities are available', () => {
+  const state = createPermissionContext('read-only', 'policy', linux, {
+    profiles: { readOnly: 'unavailable', workspaceWrite: 'partial' },
   });
   assert.equal(permissionDenial(state, 'exec')?.code, 'permission_sandbox_unavailable');
 });
 
-test('read-only command execution needs complete read, write, process, and network enforcement', () => {
+test('workspace-write refuses command execution when filesystem confinement is unavailable', () => {
+  const state = permission('workspace-write', 'policy', {
+    filesystemRead: 'partial', filesystemWrite: 'unavailable', network: 'full', process: 'full',
+  });
+  assert.equal(permissionDenial(state, 'exec')?.code, 'permission_sandbox_unavailable');
+  const unreadable = permission('workspace-write', 'policy', {
+    filesystemRead: 'unavailable', filesystemWrite: 'partial', network: 'full', process: 'full',
+  });
+  assert.equal(permissionDenial(unreadable, 'exec')?.code, 'permission_sandbox_unavailable');
+});
+
+test('read-only command execution needs usable filesystem, process, and network enforcement', () => {
   assert.equal(permissionDenial(permission('read-only'), 'exec'), undefined);
   assert.equal(permissionDenial(permission('read-only', 'policy', {
-    filesystemRead: 'partial', filesystemWrite: 'full', network: 'full', process: 'full',
+    filesystemRead: 'partial', filesystemWrite: 'partial', network: 'full', process: 'full',
+  }), 'exec'), undefined);
+  assert.equal(permissionDenial(permission('read-only', 'policy', {
+    filesystemRead: 'unavailable', filesystemWrite: 'full', network: 'full', process: 'full',
+  }), 'exec')?.code, 'permission_sandbox_unavailable');
+  assert.equal(permissionDenial(permission('read-only', 'policy', {
+    filesystemRead: 'partial', filesystemWrite: 'unavailable', network: 'full', process: 'full',
   }), 'exec')?.code, 'permission_sandbox_unavailable');
   assert.equal(permissionDenial(permission('read-only', 'policy', {
     filesystemRead: 'full', filesystemWrite: 'full', network: 'partial', process: 'full',
-  }), 'exec')?.code, 'permission_network_isolation_unavailable');
+  }), 'exec')?.code, 'permission_sandbox_unavailable');
+  assert.equal(permissionDenial(permission('read-only', 'unrestricted', {
+    filesystemRead: 'full', filesystemWrite: 'full', network: 'partial', process: 'full',
+  }, { profiles: { readOnly: 'partial', workspaceWrite: 'partial' } }), 'exec')?.code,
+  'permission_network_isolation_unavailable');
   assert.equal(permissionDenial(permission('read-only', 'policy', {
     filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'partial',
   }), 'exec')?.code, 'permission_process_isolation_unavailable');

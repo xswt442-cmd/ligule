@@ -29,9 +29,10 @@ export function WorkspaceGroup({ group, sessions, folded, onToggle, onCreate, on
       >
         <Icon name={folded ? 'unfold' : 'fold'} size={13} />
         <Icon name={folded ? 'folder' : 'folderOpen'} size={14} />
-        <span className="group-root">{group.label}{group.isDefault ? ` · ${t('默认', 'Default')}` : ''}</span>
+        <span className="group-root">{group.isDefault ? group.root : group.label}</span>
       </button>
       <span className="group-count">{sessions.length}</span>
+      {group.isDefault && <span className="group-default">{t('默认', 'Default')}</span>}
       <button type="button" className="group-new" title={t(`在 ${group.label} 中新建会话`, `New conversation in ${group.label}`)} aria-label={t(`在 ${group.label} 中新建会话`, `New conversation in ${group.label}`)} onClick={() => onCreate(group.root)}>
         <Icon name="plus" size={15} />
       </button>

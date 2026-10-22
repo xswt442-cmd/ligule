@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -52,12 +52,17 @@ export function requestedVersionAtRoot(repositoryRoot, product, requestedVersion
 }
 
 function updateJsonFile(path, expectedVersion, nextVersion) {
-  const document = JSON.parse(readFileSync(path, 'utf8'));
+  const source = readFileSync(path, 'utf8');
+  const document = JSON.parse(source);
   if (document.version !== expectedVersion) {
     throw new Error(`${path} version is ${document.version}, expected ${expectedVersion}`);
   }
-  document.version = nextVersion;
-  return `${JSON.stringify(document, null, 2)}\n`;
+  const versionEntry = /^  ("version"\s*:\s*)"([^"]+)"(,?)$/m;
+  const match = versionEntry.exec(source);
+  if (match === null || match[2] !== expectedVersion) {
+    throw new Error(`${path} top-level version entry is missing or does not match ${expectedVersion}`);
+  }
+  return source.replace(versionEntry, (_line, key, _version, comma) => `${key}${JSON.stringify(nextVersion)}${comma}`);
 }
 
 function updateSourceVersion(path, expectedVersion, nextVersion) {
@@ -113,7 +118,7 @@ export function versionFileUpdates(repositoryRoot, product, requestedVersion) {
 export function prepareRelease(repositoryRoot, product, requestedVersion) {
   const { version, updates } = versionFileUpdates(repositoryRoot, product, requestedVersion);
   for (const [path, contents] of updates) writeFileSync(path, contents, 'utf8');
-  return { version, product, tag: `${productFiles(product).tagPrefix}${version}`, files: [...updates.keys()].map((path) => path.slice(repositoryRoot.length + 1)).sort() };
+  return { version, product, tag: `${productFiles(product).tagPrefix}${version}`, files: [...updates.keys()].map((path) => relative(repositoryRoot, path)).sort() };
 }
 
 const [command, product, request] = process.argv.slice(2);

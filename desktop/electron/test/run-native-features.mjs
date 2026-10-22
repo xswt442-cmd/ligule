@@ -105,17 +105,17 @@ try {
   report.window = 'real BrowserWindow loaded app://ligule/index.html with production Preload';
 
   const agentControlWorkspace = join(documentsDirectory, 'ligule', 'default-workspace');
-  const agentControlDefaults = await sendCommand('inspect-agent-control-defaults');
-  assert.deepEqual(agentControlDefaults.permission, ['read-only', 'read-only']);
-  assert.deepEqual(agentControlDefaults.network, ['disabled', 'disabled']);
-  assert.equal(agentControlDefaults.policy, 'ask');
-  assert.deepEqual(agentControlDefaults.allowedPolicies, ['ask']);
-  assert.equal(agentControlDefaults.allowOperator, false);
+  const agentControlDefaults = await sendCommand('inspect-agent-control-defaults', undefined, 60_000);
+  assert.deepEqual(agentControlDefaults.permission, ['read-only', 'read-only'], `the real Desktop must keep the bounded file defaults: ${JSON.stringify(agentControlDefaults)}`);
+  assert.deepEqual(agentControlDefaults.network, ['disabled', 'disabled'], `the real Desktop must keep the bounded network defaults: ${JSON.stringify(agentControlDefaults)}`);
+  assert.equal(agentControlDefaults.policy, 'ask', `the real Desktop must default the grant to ask: ${JSON.stringify(agentControlDefaults)}`);
+  assert.deepEqual(agentControlDefaults.allowedPolicies, ['ask'], `the real Desktop must keep only ask enabled by default: ${JSON.stringify(agentControlDefaults)}`);
+  assert.equal(agentControlDefaults.allowOperator, false, `the real Desktop must keep operator replies disabled by default: ${JSON.stringify(agentControlDefaults)}`);
   const defaultExpiry = Date.parse(agentControlDefaults.expiresAt);
   assert.ok(defaultExpiry > Date.now() + 23 * 60 * 60 * 1000 && defaultExpiry < Date.now() + 25 * 60 * 60 * 1000);
   report.cases.agentControlDefaults = agentControlDefaults;
 
-  const agentControlUi = await sendCommand('create-agent-control-grant');
+  const agentControlUi = await sendCommand('create-agent-control-grant', undefined, 45_000);
   assert.equal(agentControlUi.revoked, true, `the real Desktop settings page must create and revoke a bounded grant: ${JSON.stringify(agentControlUi)}`);
   assert.equal(agentControlUi.separateConfirmations, true);
   assert.equal(agentControlUi.sourceDisplayed, true, 'the real Desktop authorization details must display the grant source');

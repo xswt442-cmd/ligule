@@ -34,11 +34,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-export async function runTui({ config, provider, policy, logger, modeName, modePaths, extensions, locale = 'zh', stdout = process.stdout, stdin = process.stdin, stderr = process.stderr, editor = process.env.VISUAL || process.env.EDITOR, historyFile = historyPathOf(), inputFile = inputPathOf(), keyFile = keyPathOf() }: RunTuiOptions): Promise<void> {
+export async function runTui({ config, provider, policy, logger, modeName, modePaths, extensions, locale = 'zh', stdout = process.stdout, stdin = process.stdin, stderr = process.stderr, editor = process.env.VISUAL || process.env.EDITOR, historyFile = historyPathOf(), inputFile = inputPathOf(), keyFile = keyPathOf(), ...hostOptions }: RunTuiOptions): Promise<void> {
   const pair = createMemoryConnectionPair();
-  const permission = await createInteractivePermissionContext();
+  const permission = await createInteractivePermissionContext({
+    shellConfig: config,
+    workspaceRoot: typeof config.workspaceRoot === 'string' ? config.workspaceRoot : typeof config.boundary === 'string' ? config.boundary : process.cwd(),
+  });
   // 启动 TUI 前已确认 stdin 和 stdout 连接交互式终端，因此可以处理用户提问。
-  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy, logger, modeName, modePaths, extensions, interactive: true, permission, permissionControl: true });
+  const host = serveHost({
+    ...hostOptions,
+    input: pair.host.input, output: pair.host.output, config, provider, policy, logger, modeName, modePaths, extensions,
+    interactive: true, permission, permissionControl: true,
+  });
   // 内存连接与此处创建的 Host 配对；`TuiClient` 定义协议方法在本进程中的响应结构。
   const client = createConnection(pair.client) as TuiClient;
   try {

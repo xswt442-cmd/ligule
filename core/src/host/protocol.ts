@@ -3,6 +3,7 @@
 // 参数模式使用 Kernel 支持的子集，客户端和 Host 共用同一份定义。
 import { KernelError } from '../kernel/error.js';
 import { assertSupportedSchema, validateArgs } from '../kernel/schema.js';
+import { DELEGATION_SPEC_SCHEMA, type DelegationSpec } from '../delegation.js';
 
 interface MethodSpec {
   readonly description: string;
@@ -19,6 +20,8 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly permissionNetwork?: string;
   readonly confirmFullAccess?: boolean;
   readonly confirmNetwork?: boolean;
+  readonly confirmPartialWorkspaceWrite?: boolean;
+  readonly confirmWorkspaceTrust?: boolean;
   readonly name?: string;
   readonly archived?: boolean;
   readonly at?: number;
@@ -28,6 +31,9 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly fullResults?: boolean;
   readonly before?: number;
   readonly input?: string;
+  readonly request?: unknown;
+  readonly origin?: 'human' | 'controller';
+  readonly delegation?: DelegationSpec;
   readonly directory?: string;
   readonly text?: string;
   readonly provider?: string;
@@ -38,6 +44,9 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly initialPermissionNetwork?: string;
   readonly confirmInitialFullAccess?: boolean;
   readonly confirmInitialNetwork?: boolean;
+  readonly confirmInitialPartialWorkspaceWrite?: boolean;
+  readonly confirmInitialWorkspaceTrust?: boolean;
+  readonly trusted?: boolean;
   readonly initialProvider?: string;
   readonly initialModel?: string;
   readonly initialThinkingEffort?: string;
@@ -62,6 +71,7 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly defaultPolicy?: string;
   readonly allowedPolicyAsk?: boolean;
   readonly allowedPolicyAuto?: boolean;
+  readonly allowedPolicyNone?: boolean;
   readonly allowedPolicyNever?: boolean;
   readonly allowOperator?: boolean;
   readonly confirmUnrestrictedNetwork?: boolean;
@@ -74,11 +84,26 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly ruleDecision?: string;
   readonly ruleMatch?: string;
   readonly ruleReason?: string;
+  readonly ruleTarget?: string;
+  readonly rulePath?: string;
+  readonly ruleArgsHash?: string;
 }
 
 const SESSION_ID: Record<string, unknown> = { type: 'string', description: 'the session this call refers to' };
 
 export const METHODS = Object.freeze({
+  'workspace.trust': {
+    description: 'Trust or untrust a project for local project-code execution; only the trusted local UI can change this state',
+    parameters: {
+      type: 'object',
+      properties: {
+        projectRoot: { type: 'string', description: 'the project selected in the local UI' },
+        trusted: { type: 'boolean', description: 'whether this project is trusted for project scripts, Git commands, and hooks' },
+        confirmWorkspaceTrust: { type: 'boolean', description: 'true only after the UI has shown the project and the user confirmed trust' },
+      },
+      required: ['projectRoot', 'trusted'],
+    },
+  },
   'session.create': {
     description: 'Start a session the Host keeps; returns the id every later call needs',
     parameters: {
@@ -89,11 +114,13 @@ export const METHODS = Object.freeze({
         // 未提供来源时，Host 根据是否提供工作区路径区分显式选择与默认工作区。
         workspaceOrigin: { type: 'string', description: "how this session landed on that workspace: 'explicit' when the client chose it, 'default' when it is the one the client falls back to" },
         initialMode: { type: 'string', description: 'optional mode to apply before returning the new session' },
-        initialPolicy: { type: 'string', description: 'optional session policy override: ask, auto, or never' },
+        initialPolicy: { type: 'string', description: 'optional session policy override: ask, auto, none, or legacy never' },
         initialPermissionProfile: { type: 'string', description: 'optional initial file and command permission; interactive clients only' },
         initialPermissionNetwork: { type: 'string', description: 'optional initial network permission; interactive clients only' },
         confirmInitialFullAccess: { type: 'boolean', description: 'confirmation for granting full-access permission to a new session' },
         confirmInitialNetwork: { type: 'boolean', description: 'confirmation for granting unrestricted network access to a new session' },
+        confirmInitialPartialWorkspaceWrite: { type: 'boolean', description: 'confirmation that the user trusts the project and accepts the limits of a partial workspace-write sandbox' },
+        confirmInitialWorkspaceTrust: { type: 'boolean', description: 'confirmation that the user trusts this project for project-code execution' },
         initialProvider: { type: 'string', description: 'provider ID for an initial model selection; must be paired with initialModel' },
         initialModel: { type: 'string', description: 'model ID for an initial model selection; must be paired with initialProvider' },
         initialThinkingEffort: { type: 'string', description: 'provider-supported effort to apply before the first run' },
@@ -206,6 +233,41 @@ export const METHODS = Object.freeze({
       at: { type: 'integer', minimum: 1, description: 'read exactly the event with this sequence number; it has to exist in this record and cannot be combined with before' },
     }, required: ['sessionId'] },
   },
+  'session.observe': {
+    description: 'Read a workspace session snapshot without acquiring its writer lock. Suitable for a read-only viewer when another Host controls the session; poll for new appended events.',
+    parameters: { type: 'object', properties: {
+      projectRoot: { type: 'string', description: 'the exact workspace root that owns the session' },
+      sessionId: SESSION_ID,
+      fullResults: { type: 'boolean', description: 'read complete spilled tool results for display' },
+      limit: { type: 'integer', minimum: 1, maximum: 1000 },
+      before: { type: 'integer', minimum: 1 },
+      at: { type: 'integer', minimum: 1 },
+    }, required: ['projectRoot', 'sessionId'] },
+  },
+  'session.control': {
+    description: 'Send a human action to the local Host that currently owns this externally controlled Session. The same Host remains its only writer; the local action can read its configuration, observe, message, answer, cancel, or take over.',
+    parameters: { type: 'object', properties: {
+      projectRoot: { type: 'string', description: 'the exact workspace root that owns the session' },
+      sessionId: SESSION_ID,
+      request: { type: 'object', additionalProperties: false, properties: {
+        action: { type: 'string', enum: ['status', 'configuration', 'details', 'send', 'reply', 'cancel', 'takeover'] },
+        after: { type: 'integer', minimum: 0 },
+        limit: { type: 'integer', minimum: 1, maximum: 50 },
+        waitMs: { type: 'integer', minimum: 0, maximum: 30000 },
+        input: { type: 'string', minLength: 1, maxLength: 65536 },
+        requestId: SESSION_ID,
+        type: { type: 'string', enum: ['approval', 'question'] },
+        decision: { type: 'string', enum: ['allow', 'deny'] },
+        rememberScope: { type: 'string', enum: ['session', 'project', 'user'] },
+        rememberTarget: { type: 'string', enum: ['file', 'workspace', 'tool', 'command'] },
+        answers: {},
+      }, required: ['action'] },
+    }, required: ['projectRoot', 'sessionId', 'request'] },
+  },
+  'approval.details': {
+    description: 'Read the full parameters for a pending approval in the same open Session. Only trusted local UI clients should request this after the human expands the details.',
+    parameters: { type: 'object', properties: { sessionId: SESSION_ID, requestId: SESSION_ID }, required: ['sessionId', 'requestId'] },
+  },
   // Host 读取完整记录、补回溢出内容、生成 Markdown 并写入用户选择的位置。
   // 导出路径由用户通过保存对话框选择，不受模型工具的项目边界限制；返回路径不代表写入成功。
   'session.export': {
@@ -216,10 +278,15 @@ export const METHODS = Object.freeze({
     }, required: ['sessionId', 'path'] },
   },
   'run.start': {
-    description: 'Send one user input through the loop; events arrive as notifications while it runs',
+    description: 'Send one user input through the loop. A delegated mode can only narrow the active session mode; an output schema requires a validated structured result. Events arrive as notifications while it runs.',
     parameters: {
       type: 'object',
-      properties: { sessionId: SESSION_ID, input: { type: 'string', description: 'the user message for this round' } },
+      properties: {
+        sessionId: SESSION_ID,
+        input: { type: 'string', description: 'the user message for this round' },
+        origin: { type: 'string', enum: ['human', 'controller'], description: 'who submitted the input; local clients default to human' },
+        delegation: DELEGATION_SPEC_SCHEMA,
+      },
       required: ['sessionId', 'input'],
     },
   },
@@ -236,7 +303,7 @@ export const METHODS = Object.freeze({
     parameters: { type: 'object', properties: {
       sessionId: SESSION_ID,
       mode: { type: 'string', description: 'select a mode; default restores the mode configured for this project' },
-      policy: { type: 'string', description: 'ask, auto, never, or default to restore the project policy' },
+      policy: { type: 'string', description: 'ask, auto, none, legacy never, or default to restore the project policy' },
       provider: { type: 'string', description: 'provider ID for a model selection; must be paired with model' },
       model: { type: 'string', description: 'model ID for a model selection; must be paired with provider' },
       thinkingEffort: { type: 'string', description: 'a value advertised by the selected provider, or default to inherit the provider default' },
@@ -344,7 +411,7 @@ export const METHODS = Object.freeze({
     parameters: { type: 'object', properties: {} },
   },
   'agent-control.create': {
-    description: 'Create a project-bound Agent Control grant after the trusted UI has separately confirmed any full-access and unrestricted-network ceiling',
+    description: 'Create a project-bound Agent Control grant after the trusted UI has confirmed project trust and separately confirmed any elevated permission ceilings',
     parameters: { type: 'object', properties: {
       version: { type: 'string' },
       grantName: { type: 'string' },
@@ -356,12 +423,17 @@ export const METHODS = Object.freeze({
       defaultPolicy: { type: 'string' },
       allowedPolicyAsk: { type: 'boolean' },
       allowedPolicyAuto: { type: 'boolean' },
+      allowedPolicyNone: { type: 'boolean' },
       allowedPolicyNever: { type: 'boolean' },
       allowOperator: { type: 'boolean' },
+      allowedMcpServers: { type: 'array', items: { type: 'string' } },
+      allowedMcpTools: { type: 'array', items: { type: 'string' } },
       confirmFullAccess: { type: 'boolean' },
       confirmUnrestrictedNetwork: { type: 'boolean' },
+      confirmPartialWorkspaceWrite: { type: 'boolean', description: 'confirm trust in the project and accept partial workspace-write sandbox limits when this platform requires it' },
+      confirmWorkspaceTrust: { type: 'boolean', description: 'true only after the trusted UI has shown the project and received the user trust confirmation' },
       expiresAt: { type: 'string' },
-    }, required: ['version', 'grantName', 'projectRoot', 'defaultPermissionProfile', 'maxPermissionProfile', 'defaultNetwork', 'maxNetwork', 'defaultPolicy', 'allowOperator', 'confirmFullAccess', 'confirmUnrestrictedNetwork', 'expiresAt'] },
+    }, required: ['version', 'grantName', 'projectRoot', 'defaultPermissionProfile', 'maxPermissionProfile', 'defaultNetwork', 'maxNetwork', 'defaultPolicy', 'allowOperator', 'confirmFullAccess', 'confirmUnrestrictedNetwork', 'confirmWorkspaceTrust', 'expiresAt'] },
   },
   'agent-control.revoke': {
     description: 'Revoke a persisted Agent Control grant using the version returned by agent-control.list',
@@ -369,6 +441,35 @@ export const METHODS = Object.freeze({
       grantId: { type: 'string' },
       version: { type: 'string' },
     }, required: ['grantId', 'version'] },
+  },
+  'mcp.trust.list': {
+    description: 'List configured local MCP servers, their launch details without secret values, and the current trusted-user authorization for this project',
+    parameters: { type: 'object', properties: { projectRoot: { type: 'string' }, sessionId: SESSION_ID } },
+  },
+  'settings.catalog': {
+    description: 'Read the selected project’s workspace trust, available mode definitions, registered tool metadata, skill metadata, and extension status for a trusted local settings UI; mode is a view selection and never changes a session',
+    parameters: { type: 'object', properties: {
+      projectRoot: { type: 'string' }, sessionId: SESSION_ID,
+      mode: { type: 'string', description: 'the mode to inspect without applying it to a session' },
+    } },
+  },
+  'mcp.trust.set': {
+    description: 'Trust or block one configured MCP server through a trusted local interface; session trust is stored with that session, while project and user trust use the private local trust store',
+    parameters: { type: 'object', properties: {
+      projectRoot: { type: 'string' },
+      sessionId: SESSION_ID,
+      server: { type: 'string' },
+      identityDigest: { type: 'string', minLength: 64, maxLength: 64 },
+      scope: { type: 'string', enum: ['session', 'project', 'user'] },
+      trusted: { type: 'boolean' },
+      confirmTrust: { type: 'boolean', description: 'true only after the trusted UI showed this exact server configuration and the user chose to trust it' },
+      confirmExternalAccess: { type: 'boolean', description: 'true only after the trusted UI explained that the server runs outside the Shell sandbox and may access files and network' },
+      version: { type: 'string' },
+    }, required: ['server', 'identityDigest', 'scope', 'trusted'] },
+  },
+  'mcp.trust.tools': {
+    description: 'Start one already trusted local MCP server from a trusted interface and list its current tools without calling them',
+    parameters: { type: 'object', properties: { projectRoot: { type: 'string' }, sessionId: SESSION_ID, server: { type: 'string' } }, required: ['server'] },
   },
   // 客户端只能读取配置白名单中的字段，不能请求文件路径或其他配置内容。
   'config.get': {
@@ -397,6 +498,9 @@ export const METHODS = Object.freeze({
         ruleDecision: { type: 'string', description: "for add and change: 'allow' or 'deny'" },
         ruleMatch: { type: 'string', description: 'for add and change: the command prefix pattern; absent means the whole capability' },
         ruleReason: { type: 'string', description: 'for add and change: the sentence shown when this rule decides' },
+        ruleTarget: { type: 'string', description: 'for remembered file rules: file or workspace' },
+        rulePath: { type: 'string', description: 'for remembered file rules: the exact absolute file path or workspace boundary' },
+        ruleArgsHash: { type: 'string', description: 'for remembered MCP rules: the approved argument and server identity digest' },
       },
       required: ['field', 'layer', 'version'],
     },
@@ -407,7 +511,7 @@ export const METHODS = Object.freeze({
     description: 'Override the approval tier for this session only, or go back to the tier the settings file writes; the new tier applies to the tool decisions that follow',
     parameters: {
       type: 'object',
-      properties: { sessionId: SESSION_ID, mode: { type: 'string', description: "'ask', 'auto', 'never', or 'default' to drop this session's override" } },
+      properties: { sessionId: SESSION_ID, mode: { type: 'string', description: "'ask', 'auto', 'none', legacy 'never', or 'default' to drop this session's override" } },
       required: ['sessionId', 'mode'],
     },
   },
@@ -422,6 +526,8 @@ export const METHODS = Object.freeze({
         permissionNetwork: { type: 'string', description: 'policy, unrestricted, or disabled' },
         confirmFullAccess: { type: 'boolean', description: 'true only after the UI has shown and received confirmation for full-access' },
         confirmNetwork: { type: 'boolean', description: 'true only after the UI has shown and received confirmation for unrestricted network access' },
+        confirmPartialWorkspaceWrite: { type: 'boolean', description: 'true only after the UI has shown the partial sandbox limits and the user confirmed trust in this project' },
+        confirmWorkspaceTrust: { type: 'boolean', description: 'true only after the UI has shown the project and the user confirmed trust for project-code execution' },
       },
       required: ['sessionId', 'permissionProfile'],
     },

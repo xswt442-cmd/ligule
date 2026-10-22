@@ -1,7 +1,7 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -11,6 +11,8 @@ import {
 } from '../dist/index.js';
 import { decode } from '../dist/capability/exec.js';
 import { bindScript } from '../dist/capability/script-binding.js';
+import { probeLinuxSandboxIsolation } from '../dist/capability/sandbox-linux.js';
+import { setTrusted } from '../dist/kernel/workspace-trust.js';
 
 // Host 选择命令后端并传入这里；测试使用当前机器实际支持的后端。
 // 被测的是 exec 自己的那几件事（头尾分页、标准输入、取消、退出码），所以脚本片段落到一个临时文件里再跑：
@@ -20,7 +22,7 @@ import { bindScript } from '../dist/capability/script-binding.js';
 const shell = resolveShell({});
 const fullAccess = createPermissionContext('full-access', 'unrestricted', {
   filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
-});
+}, { workspaceTrusted: true });
 const directory = mkdtempSync(join(tmpdir(), 'ligule-exec-'));
 // 这一份跑完就收掉：留在系统临时目录里的话，每跑一次 `npm test` 就多一份，几十次之后没人会再去清。
 after(() => rmSync(directory, { recursive: true, force: true }));
@@ -144,7 +146,7 @@ test('execution timeout configuration stays within its fixed bound', async () =>
   );
 });
 
-test('the execution layer fails closed when permission or an enforcing backend is unavailable', async () => {
+test('the execution layer requires permission and explicit network access for full-access commands', async () => {
   await assert.rejects(
     () => execTool.run({ command: 'node -e "process.exit(0)"' }, {
       config: { boundary: process.cwd() }, shell,
@@ -153,18 +155,116 @@ test('the execution layer fails closed when permission or an enforcing backend i
   );
   const networkLimitedFullAccess = createPermissionContext('full-access', 'policy', {
     filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
-  });
+  }, { workspaceTrusted: true });
   await assert.rejects(
     () => run(nodeCommand('console.log("unused")'), undefined, undefined, networkLimitedFullAccess),
     (error) => error.code === 'permission_network_isolation_unavailable',
   );
-  const workspaceWrite = createPermissionContext('workspace-write', 'disabled', {
-    filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
+});
+
+test('Linux read-only Shell runs under bubblewrap and cannot write to its workspace', {
+  skip: process.platform === 'linux' ? false : 'requires the Linux bubblewrap backend',
+}, async (t) => {
+  const probe = await probeLinuxSandboxIsolation();
+  if (!probe.available) return t.skip(probe.reason);
+
+  const workspace = mkdtempSync(join(directory, 'read-only-sandbox-'));
+  t.after(() => rmSync(workspace, { recursive: true, force: true }));
+  const command = 'printf restricted-ok; if touch denied; then exit 18; fi';
+  const permission = createPermissionContext('read-only', 'disabled', {
+    filesystemRead: 'partial', filesystemWrite: 'full', network: 'full', process: 'full',
+  });
+  const result = await execTool.run({ command }, {
+    config: { boundary: workspace }, permission,
+    shell: withNativeExitCode(shell, command),
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.match(result.text, /restricted-ok/u);
+  assert.equal(existsSync(join(workspace, 'denied')), false);
+});
+
+test('Linux workspace-write Shell writes inside its workspace and cannot escape it', {
+  skip: process.platform === 'linux' ? false : 'requires the Linux bubblewrap backend',
+}, async (t) => {
+  const probe = await probeLinuxSandboxIsolation();
+  if (!probe.available) return t.skip(probe.reason);
+
+  const root = mkdtempSync(join(directory, 'workspace-write-sandbox-'));
+  const workspace = join(root, 'workspace');
+  const outside = join(root, 'outside.txt');
+  mkdirSync(workspace);
+  writeFileSync(outside, 'outside content stays unchanged');
+  symlinkSync(outside, join(workspace, 'outside-link'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  const command = 'printf workspace-write-ok > allowed.txt; if touch ../outside.txt 2>/dev/null; then exit 31; fi; if touch outside-link 2>/dev/null; then exit 32; fi; printf complete';
+  const permission = createPermissionContext('workspace-write', 'disabled', {
+    filesystemRead: 'partial', filesystemWrite: 'partial', network: 'full', process: 'full',
+  });
+  const result = await execTool.run({ command }, {
+    config: { boundary: workspace }, permission,
+    shell: withNativeExitCode(shell, command),
+  });
+
+  assert.equal(result.exitCode, 0, result.text);
+  assert.equal(readFileSync(join(workspace, 'allowed.txt'), 'utf8'), 'workspace-write-ok');
+  assert.equal(readFileSync(outside, 'utf8'), 'outside content stays unchanged');
+});
+
+test('Linux sandbox timeout stops descendants before they can change the workspace', {
+  skip: process.platform === 'linux' ? false : 'requires the Linux bubblewrap backend',
+}, async (t) => {
+  const probe = await probeLinuxSandboxIsolation();
+  if (!probe.available) return t.skip(probe.reason);
+
+  const workspace = mkdtempSync(join(directory, 'sandbox-timeout-'));
+  t.after(() => rmSync(workspace, { recursive: true, force: true }));
+  const command = '(touch started; sleep 2; touch leaked-after-timeout) & wait';
+  const permission = createPermissionContext('workspace-write', 'disabled', {
+    filesystemRead: 'partial', filesystemWrite: 'partial', network: 'full', process: 'full',
   });
   await assert.rejects(
-    () => run('node --version', undefined, undefined, workspaceWrite),
-    (error) => error.code === 'permission_sandbox_unavailable',
+    () => execTool.run({ command }, {
+      config: { boundary: workspace, limits: { execTimeoutMs: 1_000 } }, permission,
+      shell: withNativeExitCode(shell, command),
+    }),
+    (error) => error.code === 'exec_timeout',
   );
+  await delay(2_100);
+  assert.equal(existsSync(join(workspace, 'started')), true, 'the child process must have started inside the sandbox');
+  assert.equal(existsSync(join(workspace, 'leaked-after-timeout')), false, 'a killed descendant must not write after timeout');
+});
+
+test('Linux sandbox cancellation stops descendants before they can change the workspace', {
+  skip: process.platform === 'linux' ? false : 'requires the Linux bubblewrap backend',
+}, async (t) => {
+  const probe = await probeLinuxSandboxIsolation();
+  if (!probe.available) return t.skip(probe.reason);
+
+  const workspace = mkdtempSync(join(directory, 'sandbox-cancel-'));
+  t.after(() => rmSync(workspace, { recursive: true, force: true }));
+  const command = '(touch started; sleep 1; touch leaked-after-cancel) & wait';
+  const permission = createPermissionContext('workspace-write', 'disabled', {
+    filesystemRead: 'partial', filesystemWrite: 'partial', network: 'full', process: 'full',
+  });
+  const controller = new AbortController();
+  const execution = execTool.run({ command }, {
+    config: { boundary: workspace }, permission, signal: controller.signal,
+    shell: withNativeExitCode(shell, command),
+  });
+  try {
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline && !existsSync(join(workspace, 'started'))) await delay(10);
+    assert.equal(existsSync(join(workspace, 'started')), true, 'the child process must have started inside the sandbox');
+    controller.abort();
+    await assert.rejects(() => execution, (error) => error.code === 'exec_cancelled');
+    await delay(1_100);
+    assert.equal(existsSync(join(workspace, 'leaked-after-cancel')), false, 'a cancelled descendant must not write afterward');
+  } finally {
+    controller.abort();
+    await execution.catch(() => undefined);
+  }
 });
 
 test('the child receives approved environment variables without provider secrets', async () => {
@@ -244,10 +344,11 @@ test('the decision chain sees the command text before anything is spawned', asyn
 // 记录应说明使用的语法、启动的可执行文件，以及命令解析出的各段参数。
 test('the record names the backend a command was judged and run under', async () => {
   const session = createSessionLog({ directory: mkdtempSync(join(directory, 'record-')), id: 'backend' });
+  await setTrusted(process.cwd(), true);
   const kernel = createKernel({
     config: createConfig({ user: { boundary: process.cwd() } }),
     permission: fullAccess,
-    policy: createDecisionChain({ mode: 'auto' }),
+    policy: createDecisionChain({ mode: 'auto', ask: () => true }),
     session,
   });
   kernel.register(execTool);

@@ -4,26 +4,39 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { constants } from 'node:fs';
-import { chmod, mkdtemp, open, realpath, rm, stat, type FileHandle } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, open, realpath, rm, stat, type FileHandle } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, extname, join, relative } from 'node:path';
+import { basename, dirname, extname, join, parse, relative } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { KernelError } from '../kernel/error.js';
+import { dataRoot } from '../kernel/config-file.js';
 import { isWithin, resolveWithin } from './paths.js';
 import { boundaryOf, limitsOf, workingDirectoryOf, type CapabilityConfig } from './limits.js';
 import { spawnWindowsCommand, type OwnedWindowsCommand } from './windows-command.js';
 import { buildLinuxSandbox, type PermissionCapabilities } from './sandbox-linux.js';
-import type { PermissionContext } from '../kernel/permission.js';
+import type { WindowsCommandLaunch } from './windows-command.js';
+import { permissionDenial, type PermissionContext } from '../kernel/permission.js';
 import type { ShellSelection } from './shell.js';
-import { assertInterpreterIdentity, assertScriptBinding, bindScript, readBoundScript, type ScriptBinding } from './script-binding.js';
+import { assertInterpreterIdentity, assertScriptBinding, bindScript, commandUsesNodeRuntime, readBoundScript, resolveNodeRuntime, type ScriptBinding } from './script-binding.js';
 
 type ExecArguments = { command?: unknown; cwd?: string };
-type ExecContext = { config: CapabilityConfig; permission: PermissionContext; signal?: AbortSignal; shell?: ShellSelection; scriptBinding?: ScriptBinding };
+export interface ManagedExecLease {
+  readonly completion: Promise<number>;
+  readonly logs: () => string;
+  stop(): Promise<void>;
+}
+export interface ExecRunContext {
+  config: CapabilityConfig;
+  permission: PermissionContext;
+  signal?: AbortSignal;
+  shell?: ShellSelection;
+  scriptBinding?: ScriptBinding;
+}
 type ExecResult = { text: string; exitCode: number | null };
 
 const MAX_EXEC_TIMEOUT_MS = 600_000;
 const EXEC_ENVIRONMENT = new Set([
-  'appdata', 'ci', 'comspec', 'force_color', 'home', 'homedrive', 'homepath', 'lang', 'lc_all',
+  'appdata', 'ci', 'comspec', 'force_color', 'home', 'homedrive', 'homepath', 'lang', 'lc_all', 'ligule_home',
   'localappdata', 'no_color', 'path', 'pathext', 'systemdrive', 'systemroot', 'term', 'tmp',
   'temp', 'tmpdir', 'userprofile', 'windir',
 ]);
@@ -64,6 +77,8 @@ function permissionMode(permission: PermissionContext | undefined): 'direct' | '
   if (!['policy', 'unrestricted', 'disabled'].includes(permission.network)) {
     throw new KernelError('permission_network_mode_invalid');
   }
+  const denial = permissionDenial(permission, 'exec');
+  if (denial !== undefined) throw new KernelError(denial.code, { detail: denial.reason });
   if (permission.profile === 'full-access') {
     if (permission.network !== 'unrestricted') {
       throw new KernelError('permission_network_isolation_unavailable', {
@@ -77,7 +92,7 @@ function permissionMode(permission: PermissionContext | undefined): 'direct' | '
     }
     return 'direct';
   }
-  if (process.platform !== 'linux') {
+  if (process.platform !== 'linux' && process.platform !== 'win32') {
     throw new KernelError('permission_sandbox_unavailable', {
       detail: `the ${process.platform} exec backend cannot enforce the ${permission.profile} profile`,
     });
@@ -91,7 +106,17 @@ function requireFullCapability(
   code: string,
 ): void {
   if (capabilities[name] !== 'full') {
-    throw new KernelError(code, { detail: `the Linux exec backend reported ${name}=${capabilities[name]}` });
+    throw new KernelError(code, { detail: `the ${process.platform} exec backend reported ${name}=${capabilities[name]}` });
+  }
+}
+
+function requireAvailableCapability(
+  capabilities: PermissionCapabilities,
+  name: keyof PermissionCapabilities,
+  code: string,
+): void {
+  if (capabilities[name] === 'unavailable') {
+    throw new KernelError(code, { detail: `the ${process.platform} exec backend reported ${name}=unavailable` });
   }
 }
 
@@ -249,7 +274,22 @@ export const execTool = {
     },
     required: ['command'],
   },
-  async run(args: ExecArguments, { config, permission, signal, shell, scriptBinding }: ExecContext): Promise<ExecResult> {
+  run(args: ExecArguments, context: ExecRunContext): Promise<ExecResult> {
+    return runExec(args, context);
+  },
+};
+
+function runExec(args: ExecArguments, context: ExecRunContext): Promise<ExecResult>;
+function runExec<TResult>(
+  args: ExecArguments,
+  context: ExecRunContext,
+  onManagedProcess: (lease: ManagedExecLease) => Promise<TResult>,
+): Promise<TResult>;
+async function runExec<TResult>(
+  args: ExecArguments,
+  { config, permission, signal, shell, scriptBinding }: ExecRunContext,
+  onManagedProcess?: (lease: ManagedExecLease) => Promise<TResult>,
+): Promise<ExecResult | TResult> {
     if (typeof args.command !== 'string' || args.command.trim() === '') {
       throw new KernelError('exec_command_required', { detail: 'the command to run is missing' });
     }
@@ -273,6 +313,7 @@ export const execTool = {
     }
     if (scriptBinding !== undefined || currentBinding !== undefined) assertScriptBinding(scriptBinding, currentBinding);
     let scriptSnapshot: string | undefined;
+    let windowsLaunch: WindowsCommandLaunch | undefined;
     let command = commandText;
     if (scriptBinding !== undefined) {
       if (scriptBinding.sourceKind === 'file' && permission.profile === 'read-only') {
@@ -298,6 +339,15 @@ export const execTool = {
       command = command.replace(scriptBinding.interpreterSource, quoteExecutablePath(scriptBinding.interpreter, shell.kind));
     }
     const commandArgs = [...shell.prefix, `${command}${shell.tail}`];
+    let linuxNodeRuntime: { executable: string; identity: ScriptBinding['interpreterIdentity']; rewriteExecutable: boolean } | undefined;
+    if (mode === 'sandboxed' && process.platform === 'linux') {
+      if (scriptBinding !== undefined && basename(scriptBinding.interpreter) === 'node') {
+        linuxNodeRuntime = { executable: scriptBinding.interpreter, identity: scriptBinding.interpreterIdentity, rewriteExecutable: true };
+      } else if (await commandUsesNodeRuntime(commandText, shell)) {
+        const runtime = await resolveNodeRuntime();
+        linuxNodeRuntime = { executable: runtime.path, identity: runtime.identity, rewriteExecutable: false };
+      }
+    }
     const environment = executionEnvironment();
     let executable = shell.executable;
     let argv = commandArgs;
@@ -308,37 +358,86 @@ export const execTool = {
         if (scriptSnapshot !== undefined) await rm(scriptSnapshot, { force: true });
         throw new KernelError('exec_cancelled', { detail: 'the run was cancelled before the command started' });
       }
-      try { privateTempDir = await createPrivateTempDir(); }
-      catch (error) {
-        if (scriptSnapshot !== undefined) await rm(scriptSnapshot, { force: true });
-        throw error;
+      const needsHostTempDir = process.platform === 'linux'
+        || (process.platform === 'win32' && permission.profile === 'workspace-write');
+      if (needsHostTempDir) {
+        try { privateTempDir = await createPrivateTempDir(); }
+        catch (error) {
+          if (scriptSnapshot !== undefined) await rm(scriptSnapshot, { force: true });
+          throw error;
+        }
       }
       try {
-        const result = await buildLinuxSandbox({
-          profile: permission.profile,
-          network: permission.network === 'unrestricted' ? 'unrestricted' : 'disabled',
-          workspaceRoot: boundary,
-          cwd,
-          privateTempDir,
-          executable: shell.executable,
-          argv: commandArgs,
-          environment: sandboxEnvironment(environment),
-        });
-        if (!result.available) {
-          throw new KernelError('permission_sandbox_unavailable', { detail: result.reason });
-        }
-        if (permission.profile === 'read-only') {
-          requireFullCapability(result.capabilities, 'filesystemRead', 'permission_sandbox_unavailable');
-          requireFullCapability(result.capabilities, 'filesystemWrite', 'permission_sandbox_unavailable');
+        if (process.platform === 'linux') {
+          if (privateTempDir === undefined) throw new KernelError('exec_sandbox_setup_failed', { detail: 'the Linux sandbox requires a private temporary directory' });
+          const result = await buildLinuxSandbox({
+            profile: permission.profile,
+            network: permission.network === 'unrestricted' ? 'unrestricted' : 'disabled',
+            workspaceRoot: boundary,
+            cwd,
+            privateTempDir,
+            executable: shell.executable,
+            argv: commandArgs,
+            environment: sandboxEnvironment(environment),
+            ...(linuxNodeRuntime === undefined ? {} : { nodeRuntime: linuxNodeRuntime }),
+          });
+          if (!result.available) {
+            throw new KernelError('permission_sandbox_unavailable', { detail: result.reason });
+          }
+          requireAvailableCapability(result.capabilities, 'filesystemRead', 'permission_sandbox_unavailable');
+          if (permission.profile === 'read-only') {
+            requireFullCapability(result.capabilities, 'filesystemWrite', 'permission_sandbox_unavailable');
+          } else {
+            requireAvailableCapability(result.capabilities, 'filesystemWrite', 'permission_sandbox_unavailable');
+          }
+          requireFullCapability(result.capabilities, 'process', 'permission_process_isolation_unavailable');
+          requireFullCapability(result.capabilities, 'network', 'permission_network_isolation_unavailable');
+          executable = result.executable;
+          argv = result.argv;
+        } else if (process.platform === 'win32') {
+          requireAvailableCapability(permission.capabilities, 'filesystemRead', 'permission_sandbox_unavailable');
+          requireAvailableCapability(permission.capabilities, 'filesystemWrite', 'permission_sandbox_unavailable');
+          requireFullCapability(permission.capabilities, 'process', 'permission_process_isolation_unavailable');
+          if (permission.profile === 'read-only') {
+            if (permission.network === 'unrestricted') {
+              throw new KernelError('permission_network_isolation_unavailable', {
+                detail: 'the Windows read-only AppContainer disables network access and cannot provide unrestricted networking',
+              });
+            }
+            windowsLaunch = { kind: 'appcontainer', workspaceRoot: boundary };
+          } else {
+            if (permission.network !== 'unrestricted') {
+              throw new KernelError('permission_network_isolation_unavailable', {
+                detail: 'the Windows write-restricted token cannot enforce disabled or destination-limited network access; choose unrestricted network explicitly or do not run Shell',
+              });
+            }
+            if (privateTempDir === undefined) throw new KernelError('exec_sandbox_setup_failed', { detail: 'Windows workspace-write requires a private temporary directory' });
+            windowsLaunch = { kind: 'restricted-token', workspaceRoot: boundary, tempDirectory: privateTempDir, aclLockRoot: dataRoot() };
+            const privateProfile = join(privateTempDir, 'profile');
+            const privateLocalAppData = join(privateProfile, 'AppData', 'Local');
+            const privateRoamingAppData = join(privateProfile, 'AppData', 'Roaming');
+            const privateCorepackHome = join(privateTempDir, 'corepack');
+            const privateProfileRoot = parse(privateProfile).root;
+            if (privateProfileRoot === '') throw new KernelError('exec_temp_path_invalid');
+            await mkdir(privateLocalAppData, { recursive: true });
+            await mkdir(privateRoamingAppData, { recursive: true });
+            await mkdir(privateCorepackHome, { recursive: true });
+            // Corepack and pnpm resolve Windows locks and caches through the user profile; keep those writes in this run's private temp tree.
+            environment.HOME = privateProfile;
+            environment.USERPROFILE = privateProfile;
+            environment.HOMEDRIVE = privateProfileRoot.replace(/[\\/]+$/u, '');
+            environment.HOMEPATH = privateProfile.slice(privateProfileRoot.length - 1);
+            environment.APPDATA = privateRoamingAppData;
+            environment.LOCALAPPDATA = privateLocalAppData;
+            environment.COREPACK_HOME = privateCorepackHome;
+            environment.TEMP = privateTempDir;
+            environment.TMP = privateTempDir;
+          }
         } else {
-          requireFullCapability(result.capabilities, 'filesystemWrite', 'permission_sandbox_unavailable');
+          throw new KernelError('permission_sandbox_unavailable', { detail: `the ${process.platform} exec backend is unavailable` });
         }
-        requireFullCapability(result.capabilities, 'process', 'permission_process_isolation_unavailable');
-        requireFullCapability(result.capabilities, 'network', 'permission_network_isolation_unavailable');
-        executable = result.executable;
-        argv = result.argv;
       } catch (error) {
-        await rm(privateTempDir, { recursive: true, force: true });
+        if (privateTempDir !== undefined) await rm(privateTempDir, { recursive: true, force: true });
         privateTempDir = undefined;
         if (scriptSnapshot !== undefined) await rm(scriptSnapshot, { force: true });
         if (error instanceof KernelError) throw error;
@@ -355,6 +454,14 @@ export const execTool = {
         throw error;
       }
     }
+    if (linuxNodeRuntime !== undefined) {
+      try { await assertInterpreterIdentity(linuxNodeRuntime.executable, linuxNodeRuntime.identity); }
+      catch (error) {
+        if (privateTempDir !== undefined) await rm(privateTempDir, { recursive: true, force: true });
+        if (scriptSnapshot !== undefined) await rm(scriptSnapshot, { force: true });
+        throw error;
+      }
+    }
     if (signal?.aborted) {
       if (privateTempDir !== undefined) await rm(privateTempDir, { recursive: true, force: true });
       if (scriptSnapshot !== undefined) await rm(scriptSnapshot, { force: true });
@@ -365,7 +472,7 @@ export const execTool = {
     let child: ChildProcess;
     try {
       owned = process.platform === 'win32' || process.platform === 'linux'
-        ? spawnWindowsCommand(executable, argv, cwd, environment)
+        ? spawnWindowsCommand(executable, argv, cwd, environment, windowsLaunch)
         : null;
       child = owned?.child ?? spawn(executable, argv, {
         cwd,
@@ -412,6 +519,63 @@ export const execTool = {
     stdout.on('data', collect);
     stderr.on('data', collect);
 
+    const completion: Promise<number | null> = owned?.completion ?? new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', resolve);
+    });
+    if (onManagedProcess !== undefined) {
+      let cleanup: Promise<void> | undefined;
+      const releaseResources = (): Promise<void> => {
+        cleanup ??= (async () => {
+          if (privateTempDir !== undefined) {
+            await rm(privateTempDir, { recursive: true, force: true });
+            privateTempDir = undefined;
+          }
+          if (scriptSnapshot !== undefined) {
+            await rm(scriptSnapshot, { force: true });
+            scriptSnapshot = undefined;
+          }
+        })();
+        return cleanup;
+      };
+      const managedCompletion = completion.then(async (exitCode) => {
+        if (exitCode === null) throw new KernelError('exec_process_interrupted');
+        await releaseResources();
+        return exitCode;
+      }, async (error: unknown) => {
+        await releaseResources();
+        throw error;
+      });
+      const lease: ManagedExecLease = {
+        completion: managedCompletion,
+        logs: () => {
+          const bytes = Buffer.concat(tail).subarray(-16_384);
+          return decode(bytes);
+        },
+        async stop() {
+          if (child.exitCode === null && child.signalCode === null) {
+            if (owned === null) killTree(child);
+            else owned.cancel();
+          }
+          try { await managedCompletion; }
+          catch (error) {
+            if (!(error instanceof KernelError) || error.code !== 'exec_cancelled') throw error;
+          }
+          await releaseResources();
+        },
+      };
+      if (signal?.aborted) {
+        await lease.stop();
+        throw new KernelError('exec_cancelled', { detail: 'the run was cancelled while the managed command was starting' });
+      }
+      try {
+        return await onManagedProcess(lease);
+      } catch (error) {
+        await lease.stop().catch(() => undefined);
+        throw error;
+      }
+    }
+
     let termination: 'cancelled' | 'timeout' | undefined;
     let terminationFailure: unknown;
     const terminate = (reason: 'cancelled' | 'timeout'): void => {
@@ -428,10 +592,6 @@ export const execTool = {
       }
     };
     const abort = (): void => terminate('cancelled');
-    const completion: Promise<number | null> = owned?.completion ?? new Promise((resolve, reject) => {
-      child.once('error', reject);
-      child.once('close', resolve);
-    });
     const timer = setTimeout(() => terminate('timeout'), timeoutMs);
     if (signal?.aborted) abort();
     else signal?.addEventListener('abort', abort, { once: true });
@@ -490,6 +650,13 @@ export const execTool = {
         detail: completionFailure instanceof Error ? completionFailure.message : undefined,
       });
     }
-    return { text: pageOutput(total, head, tail, execBytes), exitCode };
-  },
-};
+  return { text: pageOutput(total, head, tail, execBytes), exitCode };
+}
+
+export function runManagedExec<TResult>(
+  args: ExecArguments,
+  context: ExecRunContext,
+  onManagedProcess: (lease: ManagedExecLease) => Promise<TResult>,
+): Promise<TResult> {
+  return runExec(args, context, onManagedProcess);
+}

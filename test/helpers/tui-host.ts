@@ -57,6 +57,7 @@ type TuiHostOptions = {
   setup?: (paths: TuiHostSetupPaths) => void | Promise<void>;
   config?: Record<string, unknown>;
   interactive?: boolean;
+  permissionControl?: boolean;
   permission?: PermissionContext;
 };
 
@@ -65,7 +66,11 @@ export async function measuredPermissionContext(
   network: PermissionContext['network'],
 ): Promise<PermissionContext> {
   const snapshot = await detectPermissionCapabilities();
-  return createPermissionContext(profile, network, snapshot.capabilities);
+  return createPermissionContext(profile, network, snapshot.capabilities, {
+    profiles: snapshot.profiles,
+    limitations: snapshot.limitations,
+    partialWorkspaceWriteConfirmationRequired: snapshot.partialWorkspaceWriteConfirmationRequired,
+  });
 }
 
 function observeFrames(stream: PassThrough, visit: (message: Record<string, unknown>) => void): void {
@@ -103,6 +108,7 @@ export async function withTuiHost<TResult>(run: (context: TuiHostContext) => TRe
   setup,
   config: extra = {},
   interactive = false,
+  permissionControl = false,
   permission,
 }: TuiHostOptions = {}): Promise<TResult> {
   const testplace = resolve('testplace');
@@ -206,6 +212,7 @@ export async function withTuiHost<TResult>(run: (context: TuiHostContext) => TRe
     host = serveHost({ ...pair.host, config, provider, policy: config.policy, loadEnvironment,
       // 允许交互式客户端处理模型提出的问题，与 TUI 和 Desktop 使用相同的 Host 能力。
       interactive,
+      permissionControl,
       ...(permission === undefined ? {} : { permission }),
       modeName: 'minimal', modePaths: modeDirectories(projectDirectory, modesDirectory, homeDirectory),
     });

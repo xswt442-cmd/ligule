@@ -8,6 +8,7 @@ export type TuiRecord = SessionEvent;
 export interface TranscriptItem {
   kind: string;
   text: string;
+  source?: 'controller';
   tool?: string;
   code?: string;
   exitCode?: number;
@@ -55,7 +56,10 @@ export function projectRecord(record: TuiRecord, locale: Locale = 'zh'): Transcr
     const diagnostics = providerDiagnosticText(record.diagnostics, locale);
     return label === undefined ? [] : [{ kind: record.status === 'failed' ? 'error' : 'meta', text: `${chooseText(locale, label[0], label[1])}${typeof record.code === 'string' ? ` (${record.code})` : ''}${guidance === undefined ? '' : `\n${guidance}`}${diagnostics === undefined ? '' : `\n${diagnostics}`}` }];
   }
-  if (record.kind === 'user') return [{ kind: 'question', text: typeof record.raw === 'string' ? record.raw : typeof record.text === 'string' ? record.text : '' }];
+  if (record.kind === 'user') return [{
+    kind: 'question', text: typeof record.raw === 'string' ? record.raw : typeof record.text === 'string' ? record.text : '',
+    ...(record.origin === 'controller' ? { source: 'controller' } : {}),
+  }];
   if (record.kind === 'reasoning') return [{ kind: 'reasoning', text: typeof record.text === 'string' ? record.text : '' }];
   if (record.kind === 'assistant') {
     const rows: TranscriptItem[] = typeof record.text !== 'string' || record.text === '' ? [] : [{ kind: 'answer', text: record.text }];

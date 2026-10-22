@@ -10,6 +10,9 @@ import type { MentionState } from '../mentions';
 import { CURRENT, formatKeys } from '../hotkeys';
 import type { ModelSelection } from '../model-catalog';
 import { useText } from '../locale';
+
+type PolicySelection = 'ask' | 'auto' | 'none';
+type PolicyValue = PolicySelection | 'never';
 import type { Client } from '../protocol';
 import type { Status } from '../status';
 import type { Settings } from '../settings';
@@ -21,7 +24,7 @@ export function Composer({ client, sessionId, projectRoot, status, settings, set
   draft, composerRef, queue, mention, sessionMenuOpen, initialMode, initialPolicy, initialPermission, initialPermissionConfirmations,
   newSessionSettingsRevision, modelCatalogRevision, workspaceRevision, othersRunning,
   onDraftChange, onCaretChange, onWalkChange, onDraftKeyDown, onSelectWorkspace, onToggleQueue, onRecoverQueueItem,
-  onPickMention, onSelectModel, onManageModel, onSessionMenuChange, onSetMode, onSetPolicy,
+  onPickMention, onSelectModel, onManageModel, onOpenSecurity, onSessionMenuChange, onSetMode, onSetPolicy,
   onInitialPermissionChange, onPermissionStatus, onStop, onSend,
 }: {
   client: Client;
@@ -41,7 +44,7 @@ export function Composer({ client, sessionId, projectRoot, status, settings, set
   mention: MentionState | null;
   sessionMenuOpen: boolean;
   initialMode: string | null;
-  initialPolicy: 'ask' | 'auto' | 'never' | null;
+  initialPolicy: PolicyValue | null;
   initialPermission: PermissionTarget;
   initialPermissionConfirmations: PermissionConfirmations;
   newSessionSettingsRevision: number;
@@ -58,16 +61,17 @@ export function Composer({ client, sessionId, projectRoot, status, settings, set
   onPickMention: (path: string) => void;
   onSelectModel: (selection: ModelSelection) => Promise<void>;
   onManageModel: () => void;
+  onOpenSecurity: () => void;
   onSessionMenuChange: (open: boolean) => void;
   onSetMode: (name: string | null) => void;
-  onSetPolicy: (mode: 'ask' | 'auto' | 'never' | null) => Promise<void>;
+  onSetPolicy: (mode: PolicySelection | null) => Promise<void>;
   onInitialPermissionChange: (target: PermissionTarget, confirmations: PermissionConfirmations) => void;
   onPermissionStatus: (status: Status) => void;
   onStop: () => void;
   onSend: () => void;
 }) {
   const t = useText();
-  const disabled = closing || reading || starting || !settingsReady;
+  const disabled = closing || reading || starting || !settingsReady || (sessionId !== null && inputOwner !== sessionId);
   const selection = status?.selectedModel
     ? { provider: status.pendingServiceId ?? status.serviceId, model: status.pendingModel ?? status.selectedModel }
     : settings.newSelections[projectRoot] ?? null;
@@ -147,10 +151,10 @@ export function Composer({ client, sessionId, projectRoot, status, settings, set
           <SessionMenu key={`${sessionId ?? '$new'}:${newSessionSettingsRevision}`} status={status} selectedMode={initialMode} onSetMode={onSetMode} />
         </Popover.Root>
         <PolicyPicker key={`${sessionId ?? '$new'}:${newSessionSettingsRevision}`} status={status} initialPolicy={initialPolicy} disabled={disabled || closing || reading || starting} onSelect={onSetPolicy} />
-        <PermissionPicker key={`permission:${sessionId ?? '$new'}:${newSessionSettingsRevision}`} client={client} sessionId={sessionId} status={status}
+        <PermissionPicker key={`permission:${sessionId ?? '$new'}:${newSessionSettingsRevision}`} client={client} sessionId={sessionId} status={status} projectRoot={projectRoot}
           initialPermission={initialPermission} initialConfirmations={initialPermissionConfirmations}
           disabled={disabled || closing || reading || starting} running={running}
-          onInitialChange={onInitialPermissionChange} onStatus={onPermissionStatus} />
+          onInitialChange={onInitialPermissionChange} onStatus={onPermissionStatus} onOpenSecurity={onOpenSecurity} />
         <span className="bar-spacer" />
         {running && <button className="icon-button stop-button" type="button" title={t('停止本轮', 'Stop this turn')} aria-label={t('停止本轮', 'Stop this turn')} onClick={onStop}><Icon name="stop" size={15} /></button>}
         <button className="send" type="button" title={running ? t('加入队列', 'Add to queue') : t('发送', 'Send')} aria-label={t('发送', 'Send')} disabled={disabled || draft.trim() === ''} onClick={onSend}><Icon name="send" size={19} /></button>

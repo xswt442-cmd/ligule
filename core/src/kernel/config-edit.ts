@@ -2,7 +2,7 @@
 // 写入前校验文件版本和完整配置，同时保留其他注释、键顺序和原始字节。
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { dirname, isAbsolute, resolve } from 'node:path';
 import { parse } from 'smol-toml';
 import { getStaticTOMLValue, parseTOML, traverseNodes, VisitorKeys, type AST } from 'toml-eslint-parser';
 import lockfile from 'proper-lockfile';
@@ -11,7 +11,15 @@ import { KernelError, KernelRuntimeError } from './error.js';
 import { modelSelection, modelServices, selectionLiteral, servicesLiteral } from './model-services.js';
 
 /** `[[policy.rules]]` 中的一条工具规则。 */
-export type PolicyRule = { tool: string; match?: string; decision: 'allow' | 'deny'; reason?: string };
+export type PolicyRule = {
+  tool: string;
+  match?: string;
+  decision: 'allow' | 'ask' | 'deny';
+  reason?: string;
+  target?: 'file' | 'workspace';
+  path?: string;
+  argsHash?: string;
+};
 
 /** 配置写入请求：标量字段使用 `value`，规则表使用 `op` 和 `rule`；更新或删除还需提供 `index`。 */
 export type WriteRequest = {
@@ -39,7 +47,7 @@ export const EDITABLE: Readonly<Record<string, EditableField>> = {
   'model.services': { path: ['model', 'services'], kind: 'services' },
   'model.selection': { path: ['model', 'selection'], kind: 'selection' },
   'model.outputTokens': { path: ['model', 'outputTokens'], kind: 'positiveInteger' },
-  'policy.mode': { path: ['policy', 'mode'], kind: 'enum', oneOf: ['ask', 'auto', 'never'] },
+  'policy.mode': { path: ['policy', 'mode'], kind: 'enum', oneOf: ['ask', 'auto', 'none', 'never'] },
   'policy.rules': { path: ['policy', 'rules'], kind: 'rules' },
 };
 
@@ -412,9 +420,13 @@ export async function writeConfigField(
 
 // `[[policy.rules]]` 规则表的增删改。
 
-const RULE_FIELDS = ['tool', 'match', 'decision', 'reason'] as const;
+const RULE_FIELDS = ['tool', 'match', 'decision', 'reason', 'target', 'path', 'argsHash'] as const;
 const RULE_OPS = ['add', 'update', 'remove'] as const;
 type RuleOp = (typeof RULE_OPS)[number];
+
+function isPortableAbsolutePath(value: string): boolean {
+  return isAbsolute(value) || /^[A-Za-z]:[\\/]/u.test(value) || /^\\\\[^\\/]+[\\/]/u.test(value);
+}
 
 function checkedOp(op: unknown): RuleOp {
   if (typeof op !== 'string' || !(RULE_OPS as readonly string[]).includes(op)) {
@@ -453,16 +465,39 @@ export function checkedRule(input: unknown): PolicyRule {
   const tool = text('tool');
   const decision = text('decision');
   if (tool === undefined) throw new KernelError('config_rule_invalid', { detail: 'tool is required' });
-  if (decision !== 'allow' && decision !== 'deny') {
-    throw new KernelError('config_rule_invalid', { detail: 'decision takes allow or deny' });
+  if (decision !== 'allow' && decision !== 'ask' && decision !== 'deny') {
+    throw new KernelError('config_rule_invalid', { detail: 'decision takes allow, ask, or deny' });
   }
   const match = text('match');
   const reason = text('reason');
+  const target = text('target');
+  const path = text('path');
+  const argsHash = text('argsHash');
+  if (target !== undefined && target !== 'file' && target !== 'workspace') {
+    throw new KernelError('config_rule_invalid', { detail: 'target takes file or workspace' });
+  }
+  if ((target === undefined) !== (path === undefined)) {
+    throw new KernelError('config_rule_invalid', { detail: 'target and path must be set together' });
+  }
+  if (target !== undefined && match !== undefined) {
+    throw new KernelError('config_rule_invalid', { detail: 'a path-scoped rule cannot also use command match' });
+  }
+  if (target !== undefined && argsHash !== undefined) {
+    throw new KernelError('config_rule_invalid', { detail: 'a path-scoped rule cannot also use argsHash' });
+  }
+  if (target !== undefined && path !== undefined && !isPortableAbsolutePath(path)) {
+    throw new KernelError('config_rule_invalid', { detail: 'path-scoped rules require an absolute path' });
+  }
+  if (argsHash !== undefined && !/^[a-f0-9]{64}$/u.test(argsHash)) {
+    throw new KernelError('config_rule_invalid', { detail: 'argsHash must be a SHA-256 digest' });
+  }
   return {
     tool,
     decision,
     ...(match === undefined ? {} : { match }),
     ...(reason === undefined ? {} : { reason }),
+    ...(target === undefined ? {} : { target: target as 'file' | 'workspace', path }),
+    ...(argsHash === undefined ? {} : { argsHash }),
   };
 }
 
@@ -592,11 +627,10 @@ export function rulesOfLayer(parsed: Record<string, unknown>): PolicyRule[] {
       throw new KernelError('config_edit_shape_unsupported', { detail: 'a rule is not a table' });
     }
     const given = item as Record<string, unknown>;
-    const only = (key: (typeof RULE_FIELDS)[number]): Record<string, string> => {
+    return Object.fromEntries(RULE_FIELDS.flatMap((key) => {
       const value = given[key];
-      return typeof value === 'string' && value !== '' ? { [key]: value } : {};
-    };
-    return { ...only('tool'), ...only('match'), ...only('decision'), ...only('reason') } as PolicyRule;
+      return typeof value === 'string' && value !== '' ? [[key, value]] : [];
+    })) as unknown as PolicyRule;
   });
 }
 

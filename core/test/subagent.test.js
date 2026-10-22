@@ -6,7 +6,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
-  createConfig, createDecisionChain, createKernel, createSessionLog, createSubagentPlugin,
+  KernelError, createConfig, createDecisionChain, createKernel, createLoop, createSessionLog, createSubagentPlugin,
   createPermissionContext, minimalPlugin, networkPlugin,
 } from '../dist/index.js';
 
@@ -67,6 +67,8 @@ test('the derived agent runs on the parent decision chain and cannot delegate ag
   ]);
   const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'parent' });
   const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
+  minimalPlugin.setup(kernel);
+  networkPlugin.setup(kernel);
   createSubagentPlugin({
     config,
     provider,
@@ -80,6 +82,12 @@ test('the derived agent runs on the parent decision chain and cannot delegate ag
   const result = await kernel.call('subagent', { task: 'delete the thing' });
   assert.equal(result.text, 'I could not delete it');
   assert.equal(result.sessionId, 'parent.sub-1');
+  assert.equal(result.result.runId.length > 0, true);
+  assert.equal(result.result.sessionId, result.sessionId);
+  assert.equal(result.result.state, 'completed');
+  assert.equal(result.result.stopReason, 'assistant_completed');
+  assert.equal(result.result.output.text, result.text);
+  assert.deepEqual(result.result.artifacts, [{ kind: 'session', sessionId: result.sessionId }]);
   assert.equal(result.iterations >= 2, true);
   // 子会话使用父会话的审批档位，拒绝次数也计入父会话。
   assert.equal(chain.denials().total >= 1, true);
@@ -140,6 +148,8 @@ test("the derived agent runs under the mode the parent session picked", async ()
   ]);
   const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'p3' });
   const kernel = createKernel({ config, policy: chain, session });
+  minimalPlugin.setup(kernel);
+  networkPlugin.setup(kernel);
   createSubagentPlugin({
     config,
     provider,
@@ -148,9 +158,426 @@ test("the derived agent runs under the mode the parent session picked", async ()
     directory: session.directory,
     sessionId: 'p3',
     plugins: [minimalPlugin, networkPlugin],
-    modeFile: () => ({ name: 'readonly', layer: 'user', path: 'readonly.toml', tools: ['read'], prompt: [] }),
+    promptFragments: () => [{ name: 'review-guidance', text: 'Check each claim against the files before reporting.' }],
+    promptFragmentBytes: 4096,
+    modeFile: () => ({ name: 'readonly', layer: 'user', path: 'readonly.toml', tools: ['read'], prompt: ['review-guidance'], digest: 'mode-digest' }),
   }).setup(kernel);
   const result = await kernel.call('subagent', { task: 'read only' });
   assert.equal(result.mode, 'readonly');
   assert.deepEqual(provider.requests[1].tools.map((entry) => entry.name), ['read']);
+  assert.match(provider.requests[1].system, /Check each claim against the files before reporting/u);
+});
+
+test('an explicit child mode cannot restore tools hidden from the parent', async () => {
+  const boundary = await workspace();
+  const config = createConfig({ user: { boundary } });
+  const chain = createDecisionChain({ mode: 'auto' });
+  const provider = scripted([
+    call('create', { path: 'escalated.txt', content: 'must stay blocked' }),
+    text('the parent tool limit held'),
+  ]);
+  const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'restricted-parent' });
+  const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
+  minimalPlugin.setup(kernel);
+  networkPlugin.setup(kernel);
+  createSubagentPlugin({
+    config,
+    provider,
+    chain,
+    prompt: { staticPrefix: '' },
+    directory: session.directory,
+    sessionId: 'restricted-parent',
+    plugins: [minimalPlugin, networkPlugin],
+  }).setup(kernel);
+  kernel.restrict(['create', 'write', 'edit', 'delete']);
+
+  const result = await kernel.call('subagent', {
+    task: 'try to create a file',
+    mode: { type: 'inline', tools: ['create', 'read'], prompt: [] },
+  });
+
+  assert.equal(result.text, 'the parent tool limit held');
+  assert.deepEqual(provider.requests[0].tools.map((entry) => entry.name), ['read']);
+  await assert.rejects(readFile(join(boundary, 'escalated.txt')), { code: 'ENOENT' });
+  const side = (await readFile(join(session.directory, 'restricted-parent.sub-1.jsonl'), 'utf8'))
+    .split('\n').filter(Boolean).map(JSON.parse);
+  const denied = side.find((event) => event.kind === 'tool' && event.tool === 'create');
+  assert.equal(denied.result.code, 'tool_denied');
+});
+
+test('an inline mode freezes the registered tools and prompt fragments in the child record', async () => {
+  const boundary = await workspace();
+  const config = createConfig({ user: { boundary } });
+  const chain = createDecisionChain({ mode: 'auto' });
+  const provider = scripted([text('the scoped child result')]);
+  const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'inline-parent' });
+  const kernel = createKernel({ config, policy: chain, session });
+  minimalPlugin.setup(kernel);
+  networkPlugin.setup(kernel);
+  createSubagentPlugin({
+    config,
+    provider,
+    chain,
+    prompt: { staticPrefix: 'shared static prefix' },
+    directory: session.directory,
+    sessionId: 'inline-parent',
+    plugins: [minimalPlugin, networkPlugin],
+    promptFragments: () => [
+      { name: 'review-guidance', text: 'Check each claim against the files before reporting.' },
+      { name: 'unused-guidance', text: 'This fragment should not appear in the child request.' },
+    ],
+  }).setup(kernel);
+
+  const result = await kernel.call('subagent', {
+    task: 'read only',
+    mode: { type: 'inline', tools: ['read'], prompt: ['review-guidance'] },
+  });
+  assert.equal(result.text, 'the scoped child result');
+  assert.equal(result.mode, 'inline');
+  assert.equal(typeof result.modeDigest, 'string');
+  assert.deepEqual(provider.requests[0].tools.map((entry) => entry.name), ['read']);
+  assert.match(provider.requests[0].system, /Check each claim against the files before reporting/u);
+  assert.doesNotMatch(provider.requests[0].system, /This fragment should not appear/u);
+
+  const side = (await readFile(join(session.directory, 'inline-parent.sub-1.jsonl'), 'utf8')).split('\n').filter(Boolean).map(JSON.parse);
+  assert.equal(side[0].mode.source, 'inline');
+  assert.deepEqual(side[0].mode.tools, ['read']);
+  assert.deepEqual(side[0].mode.prompt, ['review-guidance']);
+  assert.equal(typeof side[0].mode.digest, 'string');
+  assert.equal(side[0].mode.path, undefined, 'the inline snapshot does not persist a private source path');
+  assert.equal(side[0].mode.digest, result.modeDigest);
+  await assert.rejects(kernel.call('subagent', {
+    task: 'try to add a tool',
+    mode: { type: 'inline', tools: ['subagent'], prompt: [] },
+  }), { code: 'mode_tool_unregistered' });
+  await assert.rejects(kernel.call('subagent', {
+    task: 'use an unknown fragment',
+    mode: { type: 'inline', tools: ['read'], prompt: ['missing-guidance'] },
+  }), { code: 'mode_prompt_unavailable' });
+});
+
+test('child generation and loop budgets can be lowered but never raised', async () => {
+  const boundary = await workspace();
+  const config = createConfig({ user: { boundary } });
+  const chain = createDecisionChain({ mode: 'auto' });
+  const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'bounded-child-parent' });
+  const base = scripted([text('child finished within the requested limits')]);
+  const thinkingCapability = { efforts: ['none', 'low', 'high', 'max'], defaultEffort: 'high' };
+  let selectedGeneration;
+  const provider = {
+    ...base,
+    outputTokens: 4096,
+    thinkingEffort: 'high',
+    thinkingCapability,
+    withGeneration(options) {
+      selectedGeneration = options;
+      return { ...base, ...options, thinkingCapability };
+    },
+  };
+  const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
+  createSubagentPlugin({
+    config,
+    provider,
+    chain,
+    prompt: { staticPrefix: '' },
+    directory: session.directory,
+    sessionId: 'bounded-child-parent',
+    plugins: [minimalPlugin],
+    loopLimits: { iterations: 8, modelCalls: 6 },
+  }).setup(kernel);
+
+  const result = await kernel.call('subagent', {
+    task: 'finish with smaller budgets',
+    outputTokens: 2048,
+    thinkingEffort: 'low',
+    loopIterations: 3,
+    modelCalls: 2,
+  });
+  assert.deepEqual(selectedGeneration, { outputTokens: 2048, thinkingEffort: 'low' });
+  assert.deepEqual(result.generation, { outputTokens: 2048, thinkingEffort: 'low' });
+  assert.deepEqual(result.limits, { iterations: 3, modelCalls: 2 });
+  const childEvents = (await readFile(join(session.directory, `${result.sessionId}.jsonl`), 'utf8'))
+    .split('\n').filter(Boolean).map(JSON.parse);
+  const context = childEvents.find((event) => event.kind === 'turnContext');
+  assert.deepEqual(context.childGeneration, { outputTokens: 2048, thinkingEffort: 'low' });
+  assert.deepEqual(context.childLimits, { iterations: 3, modelCalls: 2 });
+
+  await assert.rejects(kernel.call('subagent', {
+    task: 'exceed output budget', outputTokens: 4097,
+  }), { code: 'subagent_output_budget_escalation' });
+  await assert.rejects(kernel.call('subagent', {
+    task: 'increase thinking', thinkingEffort: 'max',
+  }), { code: 'subagent_thinking_escalation' });
+  await assert.rejects(kernel.call('subagent', {
+    task: 'exceed loop budget', loopIterations: 9,
+  }), { code: 'subagent_budget_escalation' });
+  await assert.rejects(kernel.call('subagent', {
+    task: 'exceed model-call budget', modelCalls: 7,
+  }), { code: 'subagent_budget_escalation' });
+});
+
+test('one parent turn can run three independent subagents concurrently', { timeout: 10_000 }, async () => {
+  const boundary = await workspace();
+  const config = createConfig({ user: { boundary } });
+  const chain = createDecisionChain({ mode: 'auto' });
+  const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'parallel-parent' });
+  const childTasks = ['child one', 'child two', 'child three'];
+  const requestedTasks = [...childTasks, 'child four'];
+  let childStarts = 0;
+  let activeChildren = 0;
+  let maximumActiveChildren = 0;
+  let releaseChildren;
+  const allChildrenStarted = new Promise((resolve) => { releaseChildren = resolve; });
+  const provider = {
+    name: 'parallel-check',
+    model: 'parallel-check',
+    capabilities: {},
+    async *stream(request) {
+      const last = request.messages.at(-1);
+      if (last?.role === 'user' && last.text === 'delegate three') {
+        for (const [index, task] of requestedTasks.entries()) {
+          yield { type: 'tool-call', id: `parallel-${index}`, name: 'subagent', args: { task } };
+        }
+        return;
+      }
+      if (last?.role === 'user' && childTasks.includes(last.text)) {
+        childStarts += 1;
+        activeChildren += 1;
+        maximumActiveChildren = Math.max(maximumActiveChildren, activeChildren);
+        if (childStarts === childTasks.length) releaseChildren();
+        let timer;
+        try {
+          await Promise.race([
+            allChildrenStarted,
+            new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('subagents did not overlap')), 1_000); }),
+          ]);
+          yield { type: 'text', text: `finished ${last.text}` };
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+          activeChildren -= 1;
+        }
+        return;
+      }
+      yield { type: 'text', text: 'all three children finished' };
+    },
+  };
+  const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
+  createSubagentPlugin({
+    config,
+    provider,
+    chain,
+    prompt: { staticPrefix: 'parallel parent' },
+    directory: session.directory,
+    sessionId: 'parallel-parent',
+    plugins: [minimalPlugin, networkPlugin],
+  }).setup(kernel);
+
+  const result = await createLoop({ kernel, provider, session, limits: { iterations: 3, modelCalls: 3 } }).run('delegate three');
+  assert.equal(result.text, 'all three children finished');
+  assert.equal(childStarts, 3);
+  assert.equal(maximumActiveChildren, 3);
+  const parentEvents = (await readFile(join(session.directory, 'parallel-parent.jsonl'), 'utf8'))
+    .split('\n').filter(Boolean).map(JSON.parse);
+  const outcomes = parentEvents.filter((event) => event.kind === 'tool' && event.tool === 'subagent');
+  assert.equal(outcomes.length, 4);
+  assert.equal(outcomes.filter((event) => event.result.content?.result?.state === 'completed').length, 3);
+  assert.equal(outcomes.filter((event) => event.result.code === 'subagent_concurrency_limit').length, 1);
+});
+
+test('rebuilding the parent continues child session numbering without reusing old records', async () => {
+  const boundary = await workspace();
+  const config = createConfig({ user: { boundary } });
+  const chain = createDecisionChain({ mode: 'auto' });
+  const provider = scripted([text('first child'), text('second child')]);
+  const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'restarted-parent' });
+  const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
+  const deps = {
+    config,
+    provider,
+    chain,
+    prompt: { staticPrefix: '' },
+    directory: session.directory,
+    sessionId: 'restarted-parent',
+    plugins: [minimalPlugin],
+  };
+  let unregister = createSubagentPlugin(deps).setup(kernel);
+  try {
+    const first = await kernel.call('subagent', { task: 'first task' });
+    assert.equal(first.sessionId, 'restarted-parent.sub-1');
+    unregister();
+
+    unregister = createSubagentPlugin(deps).setup(kernel);
+    const second = await kernel.call('subagent', { task: 'second task' });
+    assert.equal(second.sessionId, 'restarted-parent.sub-2');
+    const files = (await readdir(session.directory)).sort();
+    assert.ok(files.includes('restarted-parent.sub-1.jsonl'));
+    assert.ok(files.includes('restarted-parent.sub-2.jsonl'));
+  } finally {
+    unregister();
+    await session.close();
+  }
+});
+
+test('a child submits a structured result only after it matches the declared schema', async () => {
+  const boundary = await workspace();
+  const config = createConfig({ user: { boundary } });
+  const chain = createDecisionChain({ mode: 'auto' });
+  const provider = scripted([
+    call('ligule_delegation_result', { result: { answer: 3, count: 2 } }),
+    call('ligule_delegation_result', { result: { answer: 'checked', count: 2 } }),
+  ]);
+  const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'structured-parent' });
+  const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
+  createSubagentPlugin({
+    config,
+    provider,
+    chain,
+    prompt: { staticPrefix: '' },
+    directory: session.directory,
+    sessionId: 'structured-parent',
+    plugins: [minimalPlugin],
+  }).setup(kernel);
+
+  const result = await kernel.call('subagent', {
+    task: 'return a checked summary',
+    outputSchema: {
+      type: 'object',
+      properties: { answer: { type: 'string' }, count: { type: 'integer', minimum: 1 } },
+      required: ['answer', 'count'],
+      additionalProperties: false,
+    },
+  });
+  assert.match(provider.requests[0].system, /Schema JSON data:.*"answer"/u);
+  assert.ok(provider.requests[0].tools.some((tool) => tool.name === 'ligule_delegation_result'));
+  assert.equal(result.result.state, 'completed');
+  assert.equal(result.result.stopReason, 'tool_completed');
+  assert.deepEqual(result.result.output.structured, { answer: 'checked', count: 2 });
+  assert.equal(result.result.validation.status, 'valid');
+  assert.equal(typeof result.result.validation.schemaDigest, 'string');
+  const childEvents = (await readFile(join(session.directory, 'structured-parent.sub-1.jsonl'), 'utf8'))
+    .split('\n').filter(Boolean).map(JSON.parse);
+  assert.ok(childEvents.some((event) => event.kind === 'tool' && event.tool === 'ligule_delegation_result'
+    && event.result.code === 'delegation_result_invalid'));
+  assert.equal(childEvents.find((event) => event.kind === 'turnContext').delegationSchemaDigest, result.result.validation.schemaDigest);
+  await assert.rejects(kernel.call('subagent', {
+    task: 'use an unsupported schema',
+    outputSchema: { type: 'object', properties: { answer: { type: 'string', pattern: '^ok$' } } },
+  }), { code: 'delegation_schema_invalid' });
+});
+
+test('a child that never submits its requested structure reports validation failure', async () => {
+  const boundary = await workspace();
+  const config = createConfig({ user: { boundary } });
+  const chain = createDecisionChain({ mode: 'auto' });
+  const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'missing-result-parent' });
+  const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
+  createSubagentPlugin({
+    config,
+    provider: scripted([text('I finished, but did not submit the schema result.')]),
+    chain,
+    prompt: { staticPrefix: '' },
+    directory: session.directory,
+    sessionId: 'missing-result-parent',
+    plugins: [minimalPlugin],
+  }).setup(kernel);
+
+  const result = await kernel.call('subagent', {
+    task: 'return a checked summary',
+    outputSchema: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] },
+  });
+  assert.equal(result.result.state, 'completed');
+  assert.equal(result.result.validation.status, 'invalid');
+  assert.equal(result.result.output.structured, undefined);
+  assert.match(result.result.validation.errors[0], /without submitting/u);
+});
+
+test('a failed child returns its persisted Session link and a failed RunResult', async () => {
+  const boundary = await workspace();
+  const config = createConfig({ user: { boundary } });
+  const chain = createDecisionChain({ mode: 'auto' });
+  const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'failed-child-parent' });
+  const provider = {
+    name: 'failing-provider',
+    model: 'failing-provider',
+    capabilities: {},
+    async *stream() { throw new KernelError('provider_transport_error'); },
+  };
+  const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
+  createSubagentPlugin({
+    config,
+    provider,
+    chain,
+    prompt: { staticPrefix: '' },
+    directory: session.directory,
+    sessionId: 'failed-child-parent',
+    plugins: [minimalPlugin],
+  }).setup(kernel);
+
+  const result = await kernel.call('subagent', {
+    task: 'inspect the workspace',
+    outputSchema: { type: 'object', properties: { summary: { type: 'string' } }, required: ['summary'] },
+  });
+  assert.equal(result.sessionId, 'failed-child-parent.sub-1');
+  assert.equal(result.result.state, 'failed');
+  assert.equal(result.result.stopReason, 'provider_error');
+  assert.equal(result.result.diagnostic.code, 'provider_transport_error');
+  assert.equal(result.result.validation.status, 'invalid');
+  assert.deepEqual(result.result.validation.errors, [
+    'Run ended with provider_transport_error before a valid structured result was submitted.',
+  ]);
+  assert.deepEqual(result.result.artifacts, [{ kind: 'session', sessionId: result.sessionId }]);
+  const childEvents = (await readFile(join(session.directory, `${result.sessionId}.jsonl`), 'utf8'))
+    .split('\n').filter(Boolean).map(JSON.parse);
+  assert.ok(childEvents.some((event) => event.kind === 'turn' && event.status === 'failed'
+    && event.code === 'provider_transport_error'));
+  const parentEvents = (await session.read());
+  const childReference = parentEvents.find((event) => event.kind === 'tool' && event.tool === 'subagent');
+  assert.equal(childReference.result.content.sessionId, result.sessionId);
+  assert.equal(childReference.result.content.result.state, 'failed');
+});
+
+test('cancelling a parent run returns the cancelled child Session reference', async () => {
+  const boundary = await workspace();
+  const config = createConfig({ user: { boundary } });
+  const chain = createDecisionChain({ mode: 'auto' });
+  const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'cancelled-child-parent' });
+  let announceStarted;
+  const started = new Promise((resolve) => { announceStarted = resolve; });
+  const provider = {
+    name: 'cancellable-provider',
+    model: 'cancellable-provider',
+    capabilities: {},
+    async *stream(_request, { signal }) {
+      announceStarted();
+      if (signal.aborted) throw new KernelError('provider_cancelled');
+      await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+      throw new KernelError('provider_cancelled');
+    },
+  };
+  const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
+  createSubagentPlugin({
+    config,
+    provider,
+    chain,
+    prompt: { staticPrefix: '' },
+    directory: session.directory,
+    sessionId: 'cancelled-child-parent',
+    plugins: [minimalPlugin],
+  }).setup(kernel);
+
+  const controller = new AbortController();
+  const pending = kernel.call('subagent', { task: 'inspect until cancelled' }, { signal: controller.signal });
+  await started;
+  controller.abort();
+  const result = await pending;
+  assert.equal(result.sessionId, 'cancelled-child-parent.sub-1');
+  assert.equal(result.result.state, 'cancelled');
+  assert.equal(result.result.stopReason, 'cancelled');
+  const childEvents = (await readFile(join(session.directory, `${result.sessionId}.jsonl`), 'utf8'))
+    .split('\n').filter(Boolean).map(JSON.parse);
+  assert.ok(childEvents.some((event) => event.kind === 'turn' && event.status === 'cancelled'));
+  const parentEvents = await session.read();
+  const childReference = parentEvents.find((event) => event.kind === 'tool' && event.tool === 'subagent');
+  assert.equal(childReference.result.content.sessionId, result.sessionId);
+  assert.equal(childReference.result.content.result.state, 'cancelled');
 });

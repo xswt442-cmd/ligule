@@ -23,6 +23,7 @@ export type Record_ = {
   // 模板展开后保留原始用户输入；界面显示原文，模型收到展开后的 `text`。
   text?: string;
   raw?: string;
+  origin?: string;
   toolCalls?: ToolCall[];
   tool?: string;
   callId?: string;
@@ -67,6 +68,7 @@ export type Row = {
   status?: string;
   // 对应的会话事件序号；界面本地生成的行没有该字段。
   seq?: number;
+  source?: 'controller';
   // 实际执行的能力名称；MCP 调用显示 `mcp:<服务器>/<工具>`。
   tool?: string;
   code?: string;
@@ -251,8 +253,19 @@ export function projectRecord(record: Record_, options: { startedAt?: number; no
   return projected(record, options).map((row) => ({ ...row, ...at }));
 }
 
+export function appendProjectedRecords(current: Row[], records: readonly Record_[]): Row[] {
+  const last = current.reduce((max, row) => Math.max(max, row.seq ?? 0), 0);
+  const appended = records
+    .filter((record) => record.seq !== undefined && record.seq > last)
+    .flatMap((record) => projectRecord(record));
+  return appended.length === 0 ? current : [...current, ...appended];
+}
+
 function projected(record: Record_, options: { startedAt?: number; now?: number }): Row[] {
-  if (record.kind === 'user') return [{ id: nextId(), kind: 'question', text: record.raw ?? record.text ?? '' }];
+  if (record.kind === 'user') return [{
+    id: nextId(), kind: 'question', text: record.raw ?? record.text ?? '',
+    ...(record.origin === 'controller' ? { source: 'controller' as const } : {}),
+  }];
   // 有轮次参数快照时添加一行摘要；记录中没有快照时不生成该行。
   if (record.kind === 'turnContext') {
     const facts = [record.model, record.mode, record.policy].filter((part): part is string => typeof part === 'string' && part !== '');

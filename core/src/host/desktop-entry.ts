@@ -11,7 +11,10 @@ async function loadProjectEnvironment(root: string) {
   return loadHostEnvironment(root, shippedModes);
 }
 const { layers, ...environment } = await loadProjectEnvironment(projectRoot);
-const permission = await createInteractivePermissionContext();
+const permission = await createInteractivePermissionContext({
+  shellConfig: environment.config,
+  workspaceRoot: environment.config.workspaceRoot ?? environment.config.boundary ?? projectRoot,
+});
 serveHost({
   ...environment,
   permission,

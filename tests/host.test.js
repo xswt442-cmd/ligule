@@ -147,7 +147,8 @@ test('a client over stdio drives one round, answers one approval and watches the
     // Host 向客户端发送审批请求，其中包含工具名称和参数。
     assert.equal(approvals.length, 1);
     assert.equal(approvals[0].tool, 'read');
-    assert.deepEqual(approvals[0].args, { path: 'note.txt' });
+    assert.equal(approvals[0].args.path, 'note.txt');
+    assert.match(approvals[0].args.argumentSha256, /^[a-f0-9]{64}$/u);
     assert.equal(approvals[0].sessionId, sessionId);
     // 审批请求携带其所属项目根目录，即使客户端当前查看的是另一个项目。
     // 不同平台可能用不同路径表示同一目录，因此比较真实路径；Host 返回的路径仍保持原样。
@@ -201,10 +202,10 @@ test('cancelling while an approval is open stops the round instead of leaving it
     assert.equal(approvals.length, 1, 'the approval reached the client before the cancel');
     assert.deepEqual(await host.client.request('run.cancel', { sessionId }), { cancelled: true });
     await assert.rejects(running, (error) => error.code === 'loop_cancelled');
-    // 取消会将未答复的审批记录为拒绝，确保工具调用有对应结果。
+    // 取消会为未答复的审批写入终态，但不能伪装成人类拒绝或累计拒绝次数。
     const status = await host.client.request('status.get', { sessionId });
     assert.equal(status.running, false);
-    assert.deepEqual(status.denials, { consecutive: 1, total: 1 });
+    assert.deepEqual(status.denials, { consecutive: 0, total: 0 });
   });
 });
 
@@ -239,6 +240,18 @@ test('a second Host process opens the same record, so the session lives in the H
     await host.client.request('run.start', { sessionId, input: 'read the note' });
     const path = join(sessionDirectory({ boundary: directory, workspaceRoot: directory, userHome: directory }), `${sessionId}.jsonl`);
     const before = await readFile(path, 'utf8');
+
+    const observer = startAnother();
+    try {
+      const snapshot = await observer.client.request('session.observe', {
+        projectRoot: directory, sessionId, limit: 50, fullResults: true,
+      });
+      assert.equal(snapshot.writerActive, true);
+      assert.ok(snapshot.events.some((event) => event.kind === 'assistant'));
+      await assert.rejects(observer.client.request('session.open', { projectRoot: directory, sessionId }), { code: 'session_locked' });
+    } finally {
+      await stop(observer);
+    }
 
     // 客户端关闭管道后，Host 应取消当前轮次、释放插件并自行退出。
     host.child.stdin.end();
@@ -287,7 +300,7 @@ async function runCli(directory, answer) {
       child[name].setEncoding('utf8');
       child[name].on('data', (chunk) => {
         written[name] += chunk;
-        if (!answered && written.stderr.includes('[y/N]')) {
+        if (!answered && written.stderr.includes('[y/N')) {
           answered = true;
           if (answer !== null) child.stdin.write(`${answer}\n`);
           child.stdin.end();
@@ -318,7 +331,7 @@ test('ligule run prints the round, asks the terminal once, and the project instr
     assert.match(outcome.stdout, /^> read the note$/m);
     assert.match(outcome.stdout, /^· read: ok$/m);
     assert.match(outcome.stdout, /the file says so/);
-    assert.match(outcome.stderr, /Allow read \{"path":"note\.txt"\}\?/);
+    assert.match(outcome.stderr, /Allow read \{"path":"note\.txt","argumentSha256":"[a-f0-9]{64}"\} · arguments 19 bytes · SHA-256 [a-f0-9]{64}\? \[y\/N; d to view full details\]/);
     assert.match(outcome.stderr, /^Session [0-9a-f-]{36}: 2 iterations, 2 model calls$/m);
     // 项目指令已进入请求体的系统消息。
     assert.match(outcome.requests[0].system, /print nothing but the answer/);
@@ -336,14 +349,14 @@ test('ligule run prints the round, asks the terminal once, and the project instr
   }
 });
 
-test('ligule run with nobody answering the prompt declines the tool and still finishes', async () => {
+test('ligule run with no terminal answer reports approval unavailable and still finishes', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'ligule-run-'));
   await writeFile(join(directory, 'note.txt'), 'the body');
   try {
     const outcome = await runCli(directory, null);
     assert.equal(outcome.code, 0, outcome.stderr);
-    // 无人答复按拒绝处理；结果写入记录后，循环会继续请求模型。
-    assert.match(outcome.stdout, /^· read: ask_declined$/m);
+    // 输入关闭不是人类拒绝；结果写入记录后，循环会继续请求模型。
+    assert.match(outcome.stdout, /^· read: ask_unavailable$/m);
     assert.match(outcome.stdout, /the file says so/);
     assert.match(outcome.stderr, /2 iterations, 2 model calls/);
   } finally {
@@ -686,7 +699,7 @@ test('an approval for a command names the shell backend the host chose', async (
     async *stream() {
       turns += 1;
       if (turns === 1) {
-        yield { type: 'tool-call', id: 'call_1', name: 'exec', args: { command: 'git status' } };
+        yield { type: 'tool-call', id: 'call_1', name: 'exec', args: { command: 'git --version' } };
         return;
       }
       yield { type: 'text', text: 'done' };
@@ -705,7 +718,7 @@ test('an approval for a command names the shell backend the host chose', async (
     await connection.request('run.start', { sessionId, input: 'run it' });
     assert.equal(approvals.length, 1);
     assert.equal(approvals[0].tool, 'exec');
-    assert.equal(approvals[0].command, 'git status');
+    assert.equal(approvals[0].command, 'git --version');
     const selection = resolveShell({});
     assert.equal(approvals[0].shell, selection.kind);
     assert.equal(approvals[0].executable, selection.executable);
@@ -905,6 +918,87 @@ test('config.get shows the endpoint block and nothing else from the snapshot', a
     // 响应由固定白名单字段构造，因此不会泄露其他配置。
     assert.deepEqual(Object.keys(await connection.request('config.get', { path: 'policy.mode' })).sort(), ['layers', 'model', 'selection', 'services', 'sources']);
   });
+});
+
+test('settings.catalog reads mode and tool metadata without changing the current session', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-settings-catalog-'));
+  const previousHome = process.env.LIGULE_HOME;
+  const previousUserProfile = process.env.USERPROFILE;
+  const previousOsHome = process.env.HOME;
+  const data = join(root, 'data');
+  const userModes = join(data, 'modes');
+  const projectModes = join(root, 'project-modes');
+  const shippedModes = fileURLToPath(new URL('../core/modes', import.meta.url));
+  await mkdir(userModes, { recursive: true });
+  await mkdir(projectModes, { recursive: true });
+  await writeFile(join(userModes, 'inspect-read.toml'), 'tools = ["read"]\nprompt = []\n');
+  process.env.LIGULE_HOME = data;
+  process.env.USERPROFILE = data;
+  process.env.HOME = data;
+  try {
+    await withInProcessHost(async (connection) => {
+      const noSessionCatalog = await connection.request('settings.catalog', { mode: 'inspect-read' });
+      assert.equal(noSessionCatalog.sessionActive, false);
+      assert.ok(noSessionCatalog.tools.some((tool) => tool.name === 'read' && tool.description !== ''));
+      assert.ok(noSessionCatalog.tools.some((tool) => tool.name === 'subagent'));
+      assert.equal(noSessionCatalog.tools.find((tool) => tool.name === 'read').currentlyAvailable, null);
+      assert.equal(noSessionCatalog.tools.find((tool) => tool.name === 'ask_user_question').disclosure, true);
+      assert.equal(noSessionCatalog.tools.find((tool) => tool.name === 'ask_user_question').includedInMode, true);
+
+      const { sessionId } = await connection.request('session.create', {});
+      const before = await connection.request('status.get', { sessionId });
+      const catalog = await connection.request('settings.catalog', { sessionId, mode: 'inspect-read' });
+      const after = await connection.request('status.get', { sessionId });
+
+      assert.deepEqual(catalog.modes.modes.find((mode) => mode.name === 'inspect-read'), { name: 'inspect-read', layer: 'user' });
+      assert.deepEqual(catalog.mode, { name: 'inspect-read', layer: 'user', digest: catalog.mode.digest, tools: ['read'], prompt: [] });
+      assert.deepEqual(catalog.modeTools, ['read']);
+      assert.ok(catalog.tools.some((tool) => tool.name === 'read' && tool.source === 'builtin'));
+      assert.equal(catalog.sessionActive, true);
+      assert.equal(catalog.projectTrusted, false);
+      assert.equal(catalog.policyDefault, 'auto');
+      assert.equal(catalog.sessionMode.name, before.mode);
+      assert.equal(after.mode, before.mode, 'inspecting another mode does not call mode.set or change the session');
+      assert.equal(JSON.stringify(catalog).includes(data), false, 'the read-only catalog does not return local config paths');
+    }, undefined, { permissionControl: true, interactive: true, modeName: 'minimal', modePaths: { shipped: shippedModes, user: userModes, project: projectModes } });
+  } finally {
+    if (previousHome === undefined) delete process.env.LIGULE_HOME;
+    else process.env.LIGULE_HOME = previousHome;
+    if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = previousUserProfile;
+    if (previousOsHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousOsHome;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('settings.catalog is unavailable to a Host without the trusted local UI capability', async () => {
+  await withInProcessHost(async (connection) => {
+    await assert.rejects(
+      connection.request('settings.catalog', {}),
+      (error) => error.code === 'settings_catalog_trusted_ui_required',
+    );
+  });
+});
+
+test('settings.catalog mirrors Host-owned custom tool plugins without opening a session', async () => {
+  const customPlugin = {
+    name: 'settings-catalog-fixture',
+    setup(kernel) {
+      return kernel.register({
+        name: 'fixture_lookup',
+        description: 'Read one fixture value.',
+        access: 'read',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+        run: async () => ({ value: 'fixture' }),
+      });
+    },
+  };
+  await withInProcessHost(async (connection) => {
+    const catalog = await connection.request('settings.catalog', {});
+    assert.ok(catalog.tools.some((tool) => tool.name === 'fixture_lookup' && tool.description === 'Read one fixture value.'));
+    assert.equal(catalog.tools.some((tool) => tool.name === 'read'), false, 'the no-session catalog does not invent default plugins absent from this Host');
+  }, undefined, { permissionControl: true, plugins: [customPlugin] });
 });
 
 // 配置写入由 Host 校验字段和配置层；文件被其他进程修改后应返回冲突，而不覆盖对方的内容。
@@ -1192,6 +1286,7 @@ test('the settings panel reads and writes the project it names, and a shared def
   const a = join(root, 'a');
   const b = join(root, 'b');
   const home = join(root, 'home');
+  await mkdir(a, { recursive: true });
   await mkdir(join(b, '.ligule'), { recursive: true });
   await mkdir(home, { recursive: true });
   await writeFile(join(b, '.ligule', 'config.local.toml'), '[model]\nmodel = "B 那一份"\n', 'utf8');
@@ -1801,8 +1896,8 @@ test('a session overrides the approval tier without touching the settings file',
   });
 });
 
-// 规则表按整体替换处理；修改时必须指定当前生效的配置层，避免意外覆盖整张表。
-test('a rule table written by another layer refuses a write aimed at a lower one', async () => {
+// 用户规则可以补充项目共享规则，单独覆盖同一工具和匹配条件时才替换对应项。
+test('a lower layer adds a rule without replacing unrelated shared rules', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ligule-rules-layer-'));
   const home = join(root, 'home');
   await mkdir(home, { recursive: true });
@@ -1817,13 +1912,17 @@ test('a rule table written by another layer refuses a write aimed at a lower one
       assert.deepEqual(shown.rules, [{ tool: 'read', decision: 'allow' }]);
       assert.equal(shown.rulesSource, 'project', '生效那一份是项目共享那一层写着的');
       const [user] = shown.layers.filter((layer) => layer.layer === 'user');
-      await assert.rejects(
-        () => connection.request('config.set', {
-          field: 'policy.rules', op: 'add', layer: 'user', version: user.version, ruleTool: 'exec', ruleDecision: 'deny',
-        }),
-        (error) => error.code === 'config_rules_elsewhere' && error.detail.includes('project'),
-      );
-      assert.equal(await readFile(join(home, '.ligule', 'config.toml'), 'utf8').catch(() => ''), '', '被拒的那一次没有写出那一份文件');
+      await connection.request('config.set', {
+        field: 'policy.rules', op: 'add', layer: 'user', version: user.version, ruleTool: 'exec', ruleDecision: 'deny',
+      });
+      const updated = await connection.request('config.get', {});
+      assert.deepEqual(updated.rules, [
+        { tool: 'read', decision: 'allow' },
+        { tool: 'exec', decision: 'deny' },
+      ]);
+      assert.deepEqual(updated.ruleSources, ['project', 'user']);
+      assert.equal(updated.rulesSource, 'merged');
+      assert.equal((await readFile(join(home, '.ligule', 'config.toml'), 'utf8')).includes('tool = "exec"'), true);
     }, undefined, { configStore: store });
   } finally {
     await rm(root, { recursive: true, force: true });

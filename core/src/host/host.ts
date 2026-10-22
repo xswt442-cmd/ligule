@@ -3,24 +3,33 @@
 import { randomUUID } from 'node:crypto';
 import type { Readable, Writable } from 'node:stream';
 import { access, readFile, realpath, stat } from 'node:fs/promises';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import {
-  assertDelegationPermission, assertDelegationPolicy, createDelegationGrant, delegationPathOf,
+  createOutputSchemaContract, DELEGATION_RESULT_TOOL, MAX_DELEGATION_SCHEMA_BYTES, outputSchemaInstructions,
+  registerDelegationResultTool, type DelegationSpec, type RunValidation,
+} from '../delegation.js';
+import {
+  assertDelegationMcpServer, assertDelegationMcpTool, assertDelegationPermission, assertDelegationPolicy, createDelegationGrant, delegationPathOf,
   listDelegationGrants, recordDelegationEvent, requireDelegationGrant, revokeDelegationGrant,
   type CreateDelegationGrantInput, type DelegationGrant,
 } from './agent-control.js';
-import { createPermissionContext, DEFAULT_PERMISSION_CONTEXT, permissionDenial, type PermissionContext, type PermissionNetwork, type PermissionProfile } from '../kernel/permission.js';
+import { listMcpTrust, mcpServerTrust, mcpTrustPathOf, setMcpServerTrust, type McpTrustScope } from './mcp-trust.js';
+import { createPermissionContext, DEFAULT_PERMISSION_CONTEXT, permissionDenial, type PermissionContext, type PermissionContextOptions, type PermissionNetwork, type PermissionProfile } from '../kernel/permission.js';
 import { createKernel, type Kernel } from '../kernel/kernel.js';
 import { loadAssembly, type Assembly, type Plugin } from '../kernel/assembly.js';
 import { loadExtensions, type ExtensionDiagnostic } from '../kernel/extensions.js';
-import { DEFAULT_MODE, listModes, loadMode, type ModeDirectories, type ModeFile } from '../kernel/modes.js';
+import {
+  applyModeToPrompt, DEFAULT_MODE, listModes, loadMode, resolveModeSelection,
+  type ModeDirectories, type ModeFile,
+} from '../kernel/modes.js';
 import { readRegistry, registerWorkspace, setDefaultWorkspace, unregisterWorkspace, workspaceIdentity } from '../kernel/workspace.js';
+import { isTrusted, setTrusted } from '../kernel/workspace-trust.js';
 import { historyPathOf, loadHistory, rememberHistory } from '../kernel/input-history.js';
 import { parsePrefsJson, prefsPathOf, readPrefs, savePrefs } from '../kernel/desktop-prefs.js';
 import { credentialStatus, deleteCredential, storeCredential } from '../kernel/credentials.js';
 import { modelServices, modelSelection, resolveModel, type ModelSelection, type ModelService } from '../kernel/model-services.js';
-import { createDecisionChain, isPolicyRule, type DecisionChain, type PolicyMode, type PolicyState, type PolicyThresholds } from '../kernel/policy.js';
+import { createDecisionChain, isPolicyRule, policyArgsHash, type DecisionChain, type PolicyAskResult, type PolicyMode, type PolicyState, type PolicyThresholds } from '../kernel/policy.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
 import { createSessionLog, type SessionLog } from '../session/session.js';
@@ -32,11 +41,15 @@ import { branchSession } from '../session/branch.js';
 import { listProjectFiles } from './paths.js';
 import { branchSessionId, exportMarkdown, writeExport, type ExportRecord } from './export.js';
 import { createCompaction } from '../session/compaction.js';
+import { sessionWriterActive } from '../session/lock.js';
+import { requestAgentControl, type AgentControlRequest } from './agent-control-runtime.js';
 import { usageEvent } from '../session/usage.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
 import { foldLabel } from '../session/format.js';
 import { SPILL_NAME, resultLimit } from '../kernel/result.js';
-import { limitsOf } from '../capability/limits.js';
+import { boundaryOf, limitsOf, workingDirectoryOf } from '../capability/limits.js';
+import { resolveWithin } from '../capability/paths.js';
+import { createManagedProcessRegistry, managedProcessPlugin, type ManagedProcessRegistry } from '../capability/managed-process.js';
 import { loadInstructions, DEFAULT_INSTRUCTION_BYTES } from '../capability/instructions.js';
 import { SKILL_METADATA_BUDGET_BYTES, discoverSkills, formatSkillCatalog, skillDirectories } from '../kernel/skills.js';
 import { discoverTemplates, expandTemplate, findTemplate, parseInvocation, templateDirectories } from '../kernel/templates.js';
@@ -44,7 +57,7 @@ import { createLoop, DEFAULT_LOOP_LIMITS, type LoopCompaction, type LoopProgress
 import { minimalPlugin } from '../tools/minimal.js';
 import { networkPlugin } from '../tools/network.js';
 import { createSkillPlugin } from '../tools/skill.js';
-import { createMcpPlugin } from '../tools/mcp.js';
+import { createMcpPlugin, type McpAuthorization } from '../tools/mcp.js';
 import { createSubagentPlugin } from '../tools/subagent.js';
 import { createAskUserPlugin } from '../tools/ask-user.js';
 import { createMcpRegistry, mcpServerConfigs, type McpRegistry } from '../capability/mcp.js';
@@ -53,8 +66,9 @@ import { apiRoot } from '../model/http.js';
 import { thinkingCapabilityOf } from '../model/thinking.js';
 import type { ModelRequest, ProviderEvent } from '../kernel/loop.js';
 import { createConnection, type Connection, type HostRequest } from './connection.js';
-import { APPROVAL_METHOD, QUESTION_METHOD, isApproved, validateCall, type HostMethodParams } from './protocol.js';
-import { createConfig, type ConfigSnapshot } from '../kernel/config.js';
+import { APPROVAL_METHOD, QUESTION_METHOD, validateCall, type HostMethodParams } from './protocol.js';
+import { createConfig, mergePolicyRules, type ConfigSnapshot } from '../kernel/config.js';
+import { loadConfigLayers } from '../kernel/config-file.js';
 import type { LoggerBackend } from '../kernel/log.js';
 import type { LoopLimits } from '../kernel/loop.js';
 import type { LoadedLayers, createConfigStore } from '../kernel/config-store.js';
@@ -64,11 +78,13 @@ import type { PolicyRule } from '../kernel/config-edit.js';
 import type { ToolDefinition } from '../kernel/kernel.js';
 import { adoptSessionMode, type SessionModeState } from './session-mode.js';
 import { providerFromConfig, hostProviderFromConfig, type HostGenerationOptions, type HostProvider } from './provider.js';
+import { approvalArgsDigest, summarizeApproval } from './approval.js';
 export { providerFromConfig, hostProviderFromConfig } from './provider.js';
 
 interface HostConfigSnapshot extends ConfigSnapshot {
   readonly boundary?: string;
   readonly workspaceRoot?: string;
+  readonly exec?: { readonly shell?: unknown };
   readonly model?: Record<string, unknown>;
   readonly loop?: Record<string, unknown>;
   readonly limits?: Record<string, unknown>;
@@ -162,6 +178,7 @@ interface InitialSessionSettings {
     readonly context: PermissionContext;
     readonly confirmedFullAccess: boolean;
     readonly confirmedNetwork: boolean;
+    readonly confirmedPartialWorkspaceWrite: boolean;
   };
   readonly loopIterations?: number;
   readonly persistLoopIterations: boolean;
@@ -175,13 +192,26 @@ interface AdoptionResult {
 }
 
 type ModeState = SessionModeState;
+type PolicyRememberScope = 'session' | 'project' | 'user';
+
+function mcpTrustKey(server: string, identityDigest: string): string {
+  return `${server}\u0000${identityDigest}`;
+}
+
+function policyRuleKey(rule: Pick<PolicyRule, 'tool' | 'match' | 'target' | 'path' | 'argsHash'>): string {
+  return JSON.stringify([rule.tool, rule.match ?? '', rule.target ?? '', rule.path ?? '', rule.argsHash ?? '']);
+}
 
 interface HostSessionBase {
   readonly id: string;
   readonly session: SessionLog;
   readonly listeners: ((event: SessionEvent) => void)[];
   readonly asks: Set<() => void>;
+  readonly mcpTrust: Map<string, { readonly source: 'trusted-ui'; readonly trusted: boolean; readonly updatedAt: string }>;
+  sessionPolicyRules: PolicyRule[];
   readonly environment: ProjectEnvironment;
+  readonly managedProcesses: ManagedProcessRegistry;
+  readonly managedGrantId?: string;
   permission: PermissionContext;
   policyOverride: PolicyMode | null;
   readonly mode: ModeState;
@@ -221,8 +251,21 @@ interface HostSessionState extends HostSessionBase {
   readonly extensions: Awaited<ReturnType<typeof loadExtensions>>;
   readonly templates: TemplateRegistry;
   readonly loop: ReturnType<typeof createLoop>;
+  readonly runDelegated: (input: string, options: DelegatedRunOptions) => Promise<DelegatedRunResult>;
   compaction: ReturnType<typeof createCompaction> | null;
   readonly rebuildCompaction: (model: Record<string, unknown>) => ReturnType<typeof createCompaction> | null;
+}
+
+interface DelegatedRunOptions {
+  readonly signal?: AbortSignal;
+  readonly user?: Record<string, unknown>;
+  readonly onProgress?: (event: LoopProgressEvent) => void;
+  readonly delegation?: DelegationSpec;
+}
+
+interface DelegatedRunResult extends LoopResult {
+  readonly structured?: unknown;
+  readonly validation?: RunValidation;
 }
 
 export interface Host {
@@ -281,11 +324,30 @@ function permissionView(permission: PermissionContext, changeAllowed: boolean, c
     profile: permission.profile,
     network: permission.network,
     capabilities: permission.capabilities,
+    profiles: permission.profiles,
+    limitations: permission.limitations,
+    partialWorkspaceWriteConfirmationRequired: permission.partialWorkspaceWriteConfirmationRequired,
+    partialWorkspaceWriteConfirmed: permission.partialWorkspaceWriteConfirmed,
+    workspaceTrusted: permission.workspaceTrusted,
     execution: execDenial === undefined
       ? { available: true, code: null, reason: null }
       : { available: false, code: execDenial.code, reason: execDenial.reason },
     changeAllowed,
     ...(changeReason === undefined ? {} : { changeReason }),
+  };
+}
+
+function permissionOptionsOf(
+  permission: PermissionContext,
+  partialWorkspaceWriteConfirmed = permission.partialWorkspaceWriteConfirmed,
+  workspaceTrusted = permission.workspaceTrusted,
+): PermissionContextOptions {
+  return {
+    profiles: permission.profiles,
+    limitations: permission.limitations,
+    partialWorkspaceWriteConfirmationRequired: permission.partialWorkspaceWriteConfirmationRequired,
+    partialWorkspaceWriteConfirmed,
+    workspaceTrusted,
   };
 }
 
@@ -624,7 +686,7 @@ export function createHost({
       skillRegistry: own.skillRegistry,
       templateRegistry: own.templateRegistry,
       extensions: own.extensions ?? { paths: [], ignored: [] },
-      mcpConfigs: mcpServerConfigs(mcpConfig),
+      mcpConfigs: mcpServerConfigs(mcpConfig, process.env, root),
       directory: sessionDirectory(runtimeConfig),
     };
   }
@@ -706,6 +768,62 @@ export function createHost({
     return loaded;
   }
 
+  async function currentMcpConfigs(env: ProjectEnvironment): Promise<ReturnType<typeof mcpServerConfigs>> {
+    if (loadEnvironment === undefined) return env.mcpConfigs;
+    const latest = await loadConfigLayers({ projectRoot: env.projectRoot });
+    const config = createConfig({
+      ...latest,
+      ...(env.layers.flag === undefined ? {} : { flag: env.layers.flag }),
+    });
+    const mcpConfig = isRecord(config.mcp) ? { mcp: { servers: config.mcp.servers } } : {};
+    return mcpServerConfigs(mcpConfig, process.env, env.projectRoot);
+  }
+
+  // Settings can inspect the Host-configured runtime registry before opening a conversation.
+  // This assembles metadata only; no tool run, extension import, or MCP connection is started.
+  async function settingsToolCatalog(env: ProjectEnvironment, skills: SkillRegistry): Promise<ReturnType<Kernel['catalog']>> {
+    const kernel = createKernel({ config: env.config });
+    const mcp = createMcpRegistry(env.mcpConfigs);
+    const managedProcesses = createManagedProcessRegistry();
+    const basePlugins: Plugin<Kernel>[] = [
+      ...plugins,
+      ...(skills.skills.length === 0 ? [] : [createSkillPlugin(skills, () => env.mcpConfigs.map((server) => server.name))]),
+      createMcpPlugin(mcp),
+    ];
+    const catalogPlugins: Plugin<Kernel>[] = [
+      ...basePlugins,
+      managedProcessPlugin(managedProcesses),
+      ...(interactive ? [createAskUserPlugin({ ask: async () => { throw new KernelError('settings_catalog_not_executable'); } })] : []),
+      createSubagentPlugin({
+        config: env.config,
+        provider: env.provider,
+        chain: createDecisionChain({ mode: env.policy?.mode ?? 'ask', rules: env.policy?.rules ?? [] }),
+        prompt: { staticPrefix: '' },
+        directory: env.directory,
+        sessionId: 'settings-catalog',
+        plugins: basePlugins,
+        modePaths: env.modePaths,
+      }),
+    ];
+    const assembly = loadAssembly(kernel, catalogPlugins);
+    try {
+      return kernel.catalog();
+    } finally {
+      assembly.dispose();
+      await Promise.all([mcp.close(), managedProcesses.close()]);
+    }
+  }
+
+  async function stopMcpServersWithChangedConfig(env: ProjectEnvironment, current: ReturnType<typeof mcpServerConfigs>): Promise<void> {
+    for (const state of sessions.values()) {
+      if (state.environment !== env) continue;
+      for (const previous of env.mcpConfigs) {
+        const next = current.find((server) => server.name === previous.name);
+        if (next === undefined || next.identityDigest !== previous.identityDigest) await state.mcp.revoke(previous.name);
+      }
+    }
+  }
+
   async function readOnlySessionConfig(projectRoot: string): Promise<RuntimeConfig> {
     try {
       return (await environmentFor(projectRoot)).config;
@@ -717,6 +835,9 @@ export function createHost({
   }
 
   async function initialSessionSettings(env: ProjectEnvironment, params: HostMethodParams, grant?: DelegationGrant): Promise<InitialSessionSettings> {
+    if (params.confirmInitialWorkspaceTrust === true && !permissionControl) {
+      throw new KernelError('workspace_trust_control_unavailable');
+    }
     const hasProvider = params.initialProvider !== undefined;
     const hasModel = params.initialModel !== undefined;
     if (hasProvider !== hasModel) throw new KernelError('session_model_selection_invalid', { detail: 'initialProvider and initialModel must be supplied together' });
@@ -731,7 +852,7 @@ export function createHost({
     let policy: Exclude<PolicyMode, 'default'> | undefined;
     const requestedPolicy = params.initialPolicy ?? grant?.defaultPolicy;
     if (requestedPolicy !== undefined) {
-      if (requestedPolicy !== 'ask' && requestedPolicy !== 'auto' && requestedPolicy !== 'never') {
+      if (requestedPolicy !== 'ask' && requestedPolicy !== 'auto' && requestedPolicy !== 'none' && requestedPolicy !== 'never') {
         throw new KernelError('policy_mode_unknown');
       }
       if (grant !== undefined) assertDelegationPolicy(grant, requestedPolicy);
@@ -758,16 +879,25 @@ export function createHost({
       const confirmedNetwork = grant === undefined
         ? network === 'unrestricted' && params.confirmInitialNetwork === true
         : network === 'unrestricted' && grant.confirmedUnrestrictedNetwork;
+      const confirmedPartialWorkspaceWrite = grant === undefined
+        ? profile === 'workspace-write' && params.confirmInitialPartialWorkspaceWrite === true
+        : profile === 'workspace-write' && grant.confirmedPartialWorkspaceWrite;
       if (grant === undefined && profile === 'full-access' && !confirmedFullAccess) {
         throw new KernelError('permission_full_access_confirmation_required');
       }
       if (grant === undefined && network === 'unrestricted' && !confirmedNetwork) {
         throw new KernelError('permission_network_confirmation_required');
       }
+      if (profile === 'workspace-write' && permission.partialWorkspaceWriteConfirmationRequired && !confirmedPartialWorkspaceWrite) {
+        throw new KernelError('permission_partial_sandbox_confirmation_required');
+      }
       initialPermission = {
-        context: createPermissionContext(profile, network, permission.capabilities),
+        context: createPermissionContext(profile, network, permission.capabilities, permissionOptionsOf(
+          permission, confirmedPartialWorkspaceWrite,
+        )),
         confirmedFullAccess,
         confirmedNetwork,
+        confirmedPartialWorkspaceWrite,
       };
     }
     const options: { outputTokens?: number; thinkingEffort?: HostGenerationOptions['thinkingEffort'] } = {};
@@ -799,6 +929,7 @@ export function createHost({
       if (env.modePaths === undefined) throw new KernelError('host_mode_paths_required');
       await loadMode(mode, env.modePaths);
     }
+    if (params.confirmInitialWorkspaceTrust === true) await setTrusted(env.projectRoot, true);
     return {
       ...(mode === undefined ? {} : { mode }),
       ...(policy === undefined ? {} : { policy }),
@@ -825,6 +956,7 @@ export function createHost({
   }
 
   const sessions = new Map<string, HostSessionState>();
+  const pendingApprovalDetails = new Map<string, { sessionId: string; args: Record<string, unknown>; argumentSha256: string }>();
   const building = new Set<Promise<unknown>>();
   let closing: Promise<void> | undefined;
 
@@ -909,14 +1041,17 @@ export function createHost({
       const applies: { sessionId: string; when: 'now' }[] = [];
       for (const [id, state] of sessions) {
         if (state.environment !== env) continue;
-        state.chain.setRules(effective);
+        state.chain.setRules(mergePolicyRules([
+          { source: 'session', rules: state.sessionPolicyRules },
+          { source: 'config', rules: effective },
+        ]).rules as PolicyRule[]);
         applies.push({ sessionId: id, when: 'now' });
       }
       env.policy = { ...env.policy, rules: effective };
       return { applies };
     }
     if (env.policy?.mode === effective) return { applies: [] };
-    if (effective !== 'ask' && effective !== 'auto' && effective !== 'never') throw new KernelError('policy_mode_unknown');
+    if (effective !== 'ask' && effective !== 'auto' && effective !== 'none' && effective !== 'never') throw new KernelError('policy_mode_unknown');
     const applies: { sessionId: string; when: 'now' }[] = [];
     for (const [id, state] of sessions) {
       if (state.environment !== env) continue;
@@ -959,20 +1094,93 @@ export function createHost({
     return { applies, ...(failure === undefined ? {} : { failure }) };
   }
 
+  async function rememberPolicyRule(
+    state: HostSessionState,
+    tool: string,
+    input: unknown,
+    command: string | undefined,
+    scope: PolicyRememberScope,
+    target: 'file' | 'workspace' | 'tool' | 'command' | undefined,
+    identityDigest: string | undefined,
+  ): Promise<void> {
+    const args = isRecord(input) ? input : {};
+    let rule: PolicyRule;
+    if (['create', 'write', 'edit', 'delete'].includes(tool)) {
+      if ((target !== 'file' && target !== 'workspace') || typeof args.path !== 'string') {
+        throw new KernelError('policy_memory_target_required', { detail: 'file approvals must be remembered for one file or one operation class in this workspace' });
+      }
+      const boundary = boundaryOf(state.environment.config);
+      const path = target === 'workspace'
+        ? await realpath(boundary)
+        : await resolveWithin(boundary, args.path, { cwd: workingDirectoryOf(state.environment.config) });
+      rule = { tool, decision: 'allow', target, path };
+    } else if (tool.startsWith('mcp:')) {
+      if (identityDigest === undefined) throw new KernelError('policy_memory_identity_unavailable');
+      rule = { tool, decision: 'allow', argsHash: policyArgsHash(input, identityDigest) };
+    } else if (command !== undefined) {
+      rule = { tool, decision: 'allow', match: command };
+    } else {
+      rule = { tool, decision: 'allow' };
+    }
+    const identity = policyRuleKey(rule);
+    if (scope === 'session') {
+      const existing = state.sessionPolicyRules.findIndex((item) => policyRuleKey(item) === identity);
+      const rules = state.sessionPolicyRules.map((item, index) => index === existing ? rule : item);
+      if (existing < 0) rules.push(rule);
+      const updatedAt = new Date().toISOString();
+      await state.session.append({ kind: 'sessionPolicyRule', ignorable: true, rule, updatedAt });
+      state.sessionPolicyRules = rules;
+      state.chain.setRules(mergePolicyRules([
+        { source: 'session', rules },
+        { source: 'config', rules: state.environment.policy?.rules ?? [] },
+      ]).rules as PolicyRule[]);
+      return;
+    }
+
+    const env = state.environment;
+    if (env.store === undefined) throw new KernelError('config_write_unsupported');
+    const layer = scope === 'project' ? 'projectLocal' : 'user';
+    const targetLayer = scope === 'project' ? 'local' : 'user';
+    const snapshot = await env.store.read();
+    const higherLayers = scope === 'user' ? ['flag', 'local', 'project'] : ['flag'];
+    const shadowing = higherLayers.find((source) => snapshot.ruleLayers[source]?.some((item) => policyRuleKey(item) === identity));
+    if (shadowing !== undefined) throw new KernelError('policy_memory_shadowed', { detail: shadowing });
+    const current = snapshot.ruleLayers[targetLayer] ?? [];
+    const matches = current.flatMap((item, index) => policyRuleKey(item) === identity ? [index] : []);
+    if (matches.length > 1) throw new KernelError('policy_rule_duplicate_ambiguous', { detail: tool });
+    const layerVersion = snapshot.layers.find((item) => item.layer === layer)?.version ?? '';
+    const written = await env.store.write({
+      field: 'policy.rules',
+      layer,
+      version: layerVersion,
+      op: matches.length === 0 ? 'add' : 'update',
+      ...(matches.length === 0 ? {} : { index: matches[0] }),
+      rule,
+    });
+    const adoption = await adoptWritten(env, layer, 'policy', 'rules', written.effective, written.changed);
+    if (adoption.failure !== undefined) throw new KernelError(adoption.failure.code, { detail: adoption.failure.detail });
+  }
+
   // 释放会话的 MCP 子进程、扩展监听器、模板登记表和记录锁。
   // 会话记录继续保存在磁盘上；这里只清理运行时状态。
   async function retire(state: HostSessionState): Promise<void> {
     // 失败或取消结果已经写入记录；收尾只等待轮次结束，不覆盖其结果。
     await state.operation?.catch(() => undefined);
-    try {
-      await state.mcp.close();
-      state.extensions.dispose();
-      state.assembly.dispose();
-    } finally {
-      // 即使释放资源失败，也要移除会话并释放记录锁，避免客户端无法关闭会话。
-      sessions.delete(state.id);
-      await state.session.close();
+    const failures: unknown[] = [];
+    for (const release of [
+      () => state.managedProcesses.close(),
+      () => state.mcp.close(),
+      () => state.extensions.dispose(),
+      () => state.assembly.dispose(),
+    ]) {
+      try { await release(); }
+      catch (error) { failures.push(error); }
     }
+    // 即使其中一个资源未能释放，也要移除会话并释放记录锁，避免客户端无法关闭会话。
+    sessions.delete(state.id);
+    try { await state.session.close(); }
+    catch (error) { failures.push(error); }
+    if (failures.length > 0) throw new AggregateError(failures, 'host_session_retire_failed');
   }
 
   // 项目最后一个会话关闭后移除其环境，让下次打开时重新加载配置。
@@ -1261,18 +1469,41 @@ export function createHost({
       for (const listener of listeners) listener(event);
     });
     // 新会话继承项目当前有效的生成设置。配置写入后，初始快照可能已过期，优先读取环境的最新设置。
+    const workspaceTrusted = await isTrusted(env.projectRoot);
+    const basePermission = recover ? permission : initial?.permission?.context ?? permission;
+    const sessionPermission = createPermissionContext(
+      recover ? 'read-only' : basePermission.profile,
+      recover ? 'policy' : basePermission.network,
+      basePermission.capabilities,
+      permissionOptionsOf(basePermission, recover ? false : basePermission.partialWorkspaceWriteConfirmed, workspaceTrusted),
+    );
+    const managedProcesses = createManagedProcessRegistry({
+      ...(agentControl === undefined ? {} : {
+        validateOwner: async () => {
+          const active = await activeDelegation();
+          if (active?.id !== agentControl.grantId) throw new KernelError('agent_control_grant_revoked');
+        },
+      }),
+      validateWorkspaceTrust: async () => {
+        if (!(await isTrusted(env.projectRoot))) {
+          throw new KernelError('exec_workspace_untrusted', { detail: 'workspace trust was revoked while a managed process was running' });
+        }
+      },
+    });
     const state: HostSessionBase = {
       id,
       session,
       listeners,
       asks,
+      mcpTrust: new Map(),
+      sessionPolicyRules: [],
       running: undefined,
       mode: modeState,
       pending: undefined,
       environment: env,
-      permission: recover
-        ? createPermissionContext('read-only', 'policy', permission.capabilities)
-        : initial?.permission?.context ?? permission,
+      managedProcesses,
+      ...(agentControl === undefined ? {} : { managedGrantId: agentControl.grantId }),
+      permission: sessionPermission,
       policyOverride: initial?.policy ?? null,
       loopIterations: initial?.loopIterations ?? configuredLoopLimits.iterations,
       loopModelCalls: configuredLoopLimits.modelCalls,
@@ -1287,9 +1518,18 @@ export function createHost({
     try {
     if (recover) {
       const events = await session.read();
+      state.sessionPolicyRules = events.filter((item) => item.kind === 'sessionPolicyRule').map((item) => item.rule as PolicyRule);
+      for (const event of events.filter((item) => item.kind === 'sessionMcpTrust')) {
+        state.mcpTrust.set(mcpTrustKey(event.server as string, event.identityDigest as string), {
+          source: 'trusted-ui',
+          trusted: event.trusted as boolean,
+          updatedAt: event.updatedAt as string,
+        });
+      }
       const savedPermission = events.filter((event) => event.kind === 'sessionPermission').at(-1);
       if (savedPermission !== undefined) {
-        state.permission = createPermissionContext(savedPermission.profile, savedPermission.network, permission.capabilities);
+        state.permission = createPermissionContext(savedPermission.profile, savedPermission.network, permission.capabilities,
+          permissionOptionsOf(permission, savedPermission.confirmedPartialWorkspaceWrite === true, workspaceTrusted));
       }
       const savedPolicy = events.filter((event) => event.kind === 'sessionPolicy').at(-1);
       if (savedPolicy !== undefined) {
@@ -1336,6 +1576,7 @@ export function createHost({
             grantId: grant.id,
             confirmedFullAccess: state.permission.profile === 'full-access' && grant.confirmedFullAccess,
             confirmedNetwork: state.permission.network === 'unrestricted' && grant.confirmedUnrestrictedNetwork,
+            confirmedPartialWorkspaceWrite: state.permission.profile === 'workspace-write' && grant.confirmedPartialWorkspaceWrite,
           }
         : initial?.permission === undefined
           ? {
@@ -1343,6 +1584,8 @@ export function createHost({
               profile: state.permission.profile,
               network: state.permission.network,
               source: 'host-default',
+              confirmedPartialWorkspaceWrite: state.permission.profile === 'workspace-write'
+                && state.permission.partialWorkspaceWriteConfirmed,
             }
           : {
               kind: 'sessionPermission',
@@ -1351,34 +1594,105 @@ export function createHost({
               source: 'trusted-ui',
               confirmedFullAccess: initial.permission.confirmedFullAccess,
               confirmedNetwork: initial.permission.confirmedNetwork,
+              confirmedPartialWorkspaceWrite: initial.permission.confirmedPartialWorkspaceWrite,
             });
     }
     const chain = createDecisionChain({
       ...policy,
-      ask: async ({ tool, input, command, reason, shell, executable, policy, policySource, policyForced, scriptBinding }) => {
+      rules: mergePolicyRules([
+        { source: 'session', rules: state.sessionPolicyRules },
+        { source: 'config', rules: policy?.rules ?? [] },
+      ]).rules as PolicyRule[],
+      ask: async ({ tool, input, command, reason, shell, executable, policy, policySource, policyForced, rememberable, scriptBinding, callId, identityDigest }): Promise<PolicyAskResult> => {
+        const rememberScopes: PolicyRememberScope[] = permissionControl && rememberable
+          ? ['session', ...(state.environment.store === undefined ? [] : ['project' as const, 'user' as const])]
+          : [];
+        const requestId = randomUUID();
+        let summary;
+        try {
+          summary = summarizeApproval({
+            requestId, sessionId: id, runId: state.progressId, callId, identityDigest, tool, args: input, command, reason,
+            policy, policySource, policyForced,
+            ...(shell === undefined ? {} : { shell, executable }),
+          });
+        } catch (error) {
+          const failure = error instanceof KernelError ? error : new KernelError('policy_approval_unreviewable', { cause: error });
+          return { decision: 'unavailable' as const, code: failure.code, reason: 'This operation could not be reviewed safely.' };
+        }
+        const approvalArgs = structuredClone(input) as Record<string, unknown>;
+        pendingApprovalDetails.set(requestId, { sessionId: id, args: approvalArgs, argumentSha256: summary.argumentSha256 });
         let settle = (): void => {};
-        const cancelled = new Promise<boolean>((resolve) => {
-          settle = () => resolve(false);
+        const cancelled = new Promise<{ decision: 'cancelled'; code: string }>((resolve) => {
+          settle = () => resolve({ decision: 'cancelled', code: 'policy_approval_cancelled' });
         });
         state.asks.add(settle);
         updateWaitingForUser(state as HostSessionState, connection, true, 'approval');
         try {
-          // 只有命令调用才返回命令后端和解析分段，保证进程内与按行协议的响应结构一致。
-          // 同时返回所属项目和策略状态，以便客户端在切换前台会话后仍能解释本次判定。
-          const request = connection.request(APPROVAL_METHOD, {
-            sessionId: id, projectRoot: env.projectRoot, tool, args: input, command, reason, policy, policySource, policyForced,
-            ...(scriptBinding === undefined ? {} : { scriptBinding }),
-            ...(shell === undefined ? {} : { shell, executable }),
-          });
-          return await Promise.race([
-            request.then(isApproved, (error) => {
-              // 记录客户端审批答复失败并拒绝调用，确保每个请求都有对应结果。
-              logger?.log?.(`approval failed for ${tool}`, { tool, code: errorCode(error), reason: errorMessage(error) });
-              return false;
+          const answer = await Promise.race([
+            connection.request(APPROVAL_METHOD, {
+              ...summary,
+              projectRoot: env.projectRoot,
+              rememberable: rememberScopes.length > 0,
+              rememberScopes,
+              ...(scriptBinding === undefined ? {} : { scriptBinding }),
+            }).then(async (value) => {
+              const response = isRecord(value) ? value : value === true ? { decision: 'allow' } : value === false ? { decision: 'deny' } : {};
+              const source = response.source === 'controller' ? 'controller' as const : 'human' as const;
+              if (response.decision === 'allow') {
+                if (approvalArgsDigest(input) !== summary.argumentSha256) {
+                  return { decision: 'error' as const, code: 'policy_approval_arguments_changed' };
+                }
+                const rememberScope = response.rememberScope;
+                if (rememberScope === undefined) return { decision: 'allow' as const, source };
+                if (source !== 'human') return { decision: 'error' as const, code: 'policy_memory_trusted_user_required' };
+                if (rememberScope !== 'session' && rememberScope !== 'project' && rememberScope !== 'user') {
+                  return { decision: 'error' as const, code: 'policy_memory_unavailable' };
+                }
+                if (!rememberScopes.includes(rememberScope)) return { decision: 'error' as const, code: 'policy_memory_unavailable' };
+                const rememberTarget = response.rememberTarget;
+                if (rememberTarget !== undefined && rememberTarget !== 'file' && rememberTarget !== 'workspace'
+                  && rememberTarget !== 'tool' && rememberTarget !== 'command') {
+                  return { decision: 'error' as const, code: 'policy_memory_target_invalid' };
+                }
+                try {
+                  await rememberPolicyRule(
+                    state as HostSessionState, tool, input, command, rememberScope, rememberTarget, identityDigest,
+                  );
+                } catch (error) {
+                  const failure = error instanceof KernelError ? error : new KernelError('policy_memory_write_failed', { cause: error });
+                  logger?.log?.('approval memory was not saved', { tool, code: failure.code });
+                  return { decision: 'error' as const, code: failure.code, reason: failure.detail ?? 'the remembered rule was not saved' };
+                }
+                return { decision: 'allow' as const, source };
+              }
+              if (response.decision === 'deny') {
+                return {
+                  decision: 'deny' as const,
+                  source,
+                  code: source === 'human' ? 'ask_declined' : 'controller_declined',
+                  reason: source === 'human' ? 'the user declined' : 'the controller declined',
+                };
+              }
+              if (response.decision === 'unavailable' || response.decision === 'error'
+                || response.decision === 'cancelled' || response.decision === 'timeout') {
+                const decision = response.decision as 'unavailable' | 'error' | 'cancelled' | 'timeout';
+                return {
+                  decision,
+                  code: typeof response.code === 'string' ? response.code : 'policy_approval_channel_error',
+                  ...(typeof response.reason === 'string' ? { reason: response.reason } : {}),
+                };
+              }
+              return { decision: 'error' as const, code: 'policy_approval_response_invalid' };
+            }, (error) => {
+              const code = errorCode(error) ?? 'policy_approval_channel_error';
+              logger?.log?.(`approval failed for ${tool}`, { tool, code });
+              return { decision: 'error' as const, code, reason: 'approval channel failed' };
             }),
             cancelled,
           ]);
+          return answer;
         } finally {
+          pendingApprovalDetails.delete(requestId);
           state.asks.delete(settle);
           updateWaitingForUser(state as HostSessionState, connection, false, 'approval');
         }
@@ -1395,6 +1709,7 @@ export function createHost({
       permissionForCall: () => state.permission,
       policyOverrideForSession: () => state.policyOverride,
     });
+    cleanup.push(() => managedProcesses.close());
     if (!recover && initial?.policy !== undefined) await appendPolicyState(session, chain, initial.policy);
     // 技能登记表反映已发现的技能，不随当前模式改变。
     // 优先复用加载器提供的登记表，否则从配置目录中发现技能。
@@ -1407,6 +1722,37 @@ export function createHost({
     // 只有配置了 MCP Server 时才注册 MCP 工具。
     const mcp = createMcpRegistry(mcpConfigs);
     cleanup.push(() => mcp.close());
+    const authorizeMcpServer = async (server: string): Promise<void> => {
+      const configured = mcpConfigs.find((entry) => entry.name === server);
+      if (configured === undefined) throw new KernelError('mcp_server_unknown', { detail: server });
+      const currentServers = await currentMcpConfigs(env);
+      await stopMcpServersWithChangedConfig(env, currentServers);
+      const current = currentServers.find((entry) => entry.name === server);
+      if (current === undefined || current.identityDigest !== configured.identityDigest) {
+        throw new KernelError('mcp_server_config_changed', { detail: server });
+      }
+      const sessionTrust = state.mcpTrust.get(mcpTrustKey(server, configured.identityDigest));
+      const trust = sessionTrust ?? await mcpServerTrust(mcpTrustPathOf(), env.projectRoot, server, configured.identityDigest);
+      if (trust?.trusted !== true) throw new KernelError('mcp_server_untrusted', { detail: server });
+      const grant = await activeDelegation();
+      if (grant !== undefined) {
+        await assertDelegationProject(grant, env.projectRoot);
+        assertDelegationMcpServer(grant, server);
+      }
+    };
+    const authorizeMcpTool = async (server: string, tool: string): Promise<void> => {
+      await authorizeMcpServer(server);
+      const grant = await activeDelegation();
+      if (grant !== undefined) {
+        await assertDelegationProject(grant, env.projectRoot);
+        assertDelegationMcpTool(grant, `mcp:${server}/${tool}`);
+      }
+    };
+    const mcpAuthorization: McpAuthorization = {
+      authorizeServer: authorizeMcpServer,
+      authorizeTool: authorizeMcpTool,
+      identityDigest: (server) => mcpConfigs.find((entry) => entry.name === server)?.identityDigest,
+    };
     const loaded = skills.skills.length === 0 ? plugins : [...plugins, createSkillPlugin(skills, () => mcp.servers())];
     // 加载器负责发现提示模板并处理项目优先级；模板由 Host 展开，确保所有客户端使用相同规则。
     const templates = templateRegistry ?? await discoverTemplates(templateDirectories(env.projectRoot));
@@ -1416,9 +1762,10 @@ export function createHost({
     // 根据扩展片段和当前模式选中的名称组装提示词。
     // 所有配置层都未设置基础提示词时，使用随包提供的版本。
     const prompt = createPromptAssembly({ static: config.prompt?.static ?? BASE_SYSTEM_PROMPT });
+    const fragments: ExtensionPromptFragment[] = [];
     // 派生执行继承父会话的策略和静态提示词前缀，但不能再注册子 Agent。
     // 直接使用底层提供方；派生事件记录在其独立会话中。
-    const basePlugins = [...loaded, createMcpPlugin(mcp)];
+    const basePlugins = [...loaded, createMcpPlugin(mcp, mcpAuthorization)];
     // 提问属于父会话，因为派生执行没有客户端可以回答。
     // 提问和审批走不同流程；只有支持交互回答的客户端才注册提问工具。
     const asked = interactive === false ? [] : [createAskUserPlugin({
@@ -1450,7 +1797,7 @@ export function createHost({
         }
       },
     })];
-    const assembly = loadAssembly(kernel, [...basePlugins, ...asked, createSubagentPlugin({
+    const assembly = loadAssembly(kernel, [...basePlugins, managedProcessPlugin(managedProcesses), ...asked, createSubagentPlugin({
       config,
       provider: live,
       chain,
@@ -1461,6 +1808,8 @@ export function createHost({
       plugins: basePlugins,
       modePaths,
       modeFile: () => state.mode.file,
+      promptFragments: () => fragments,
+      promptFragmentBytes: limitsOf(config).promptFragmentBytes,
       loopLimits: sessionLoopLimits(state),
     })]);
     cleanup.push(() => assembly.dispose());
@@ -1479,7 +1828,6 @@ export function createHost({
     }
     // 按加载器解析的来源顺序加载扩展，只提供声明过的注册、事件和能力接口。
     // 每个已注册工具仍须经过 Kernel 参数校验和权限判定。
-    const fragments: ExtensionPromptFragment[] = [];
     const extensionsEnabled = state.permission.profile === 'full-access' && state.permission.network === 'unrestricted';
     const extensionDiagnostics = extensionsEnabled ? extensions.ignored : [
       ...extensions.ignored,
@@ -1616,8 +1964,84 @@ export function createHost({
         };
       },
     });
+    const runDelegated: HostSessionState['runDelegated'] = async (input, options) => {
+      const contract = options.delegation?.outputSchema === undefined
+        ? undefined : createOutputSchemaContract(options.delegation.outputSchema);
+      let structuredSubmitted = false;
+      let structured: unknown;
+      let disposeResultTool: (() => void) | undefined;
+      let undoOutputContract = () => {};
+      let undoDelegationMode = () => {};
+      let delegatedMode: { source: string; name: string; layer: string; digest: string; tools: string[]; prompt: string[] } | undefined;
+      try {
+        if (options.delegation?.mode !== undefined) {
+          const resolvedMode = await resolveModeSelection(options.delegation.mode, state.environment.modePaths);
+          if (resolvedMode !== undefined) {
+            const applied = applyModeToPrompt({
+              file: resolvedMode.application,
+              kernel,
+              prompt,
+              fragments,
+              maxBytes: limitsOf(state.environment.config).promptFragmentBytes,
+              alreadyAppliedPromptFragments: state.mode.file === undefined
+                ? []
+                : state.mode.file.prompt === '*' ? fragments.map((fragment) => fragment.name) : state.mode.file.prompt,
+            });
+            undoDelegationMode = applied.undo;
+            delegatedMode = {
+              source: resolvedMode.source,
+              name: resolvedMode.name,
+              layer: resolvedMode.layer,
+              digest: applied.digest,
+              tools: applied.tools,
+              prompt: applied.prompt,
+            };
+          }
+        }
+        if (contract !== undefined) {
+          disposeResultTool = registerDelegationResultTool(kernel, contract, (value) => {
+            structured = value;
+            structuredSubmitted = true;
+          });
+          undoOutputContract = prompt.fragment({
+            name: 'delegated-output-contract',
+            anchor: 1,
+            text: outputSchemaInstructions(contract),
+            maxBytes: MAX_DELEGATION_SCHEMA_BYTES + 1024,
+          });
+        }
+        const result = await loop.run(input, {
+          signal: options.signal,
+          user: options.user,
+          onProgress: options.onProgress,
+          completesRun: contract === undefined ? [] : [DELEGATION_RESULT_TOOL],
+          ...(contract === undefined && delegatedMode === undefined ? {} : {
+            turnContext: {
+              ...(delegatedMode === undefined ? {} : { delegationMode: delegatedMode }),
+              ...(contract === undefined ? {} : { delegationSchemaDigest: contract.digest }),
+            },
+          }),
+        });
+        const validation = contract === undefined
+          ? undefined
+          : structuredSubmitted
+            ? { status: 'valid' as const, schemaDigest: contract.digest }
+            : { status: 'invalid' as const, schemaDigest: contract.digest, errors: ['The run ended without submitting a structured result.'] };
+        return {
+          ...result,
+          ...(structuredSubmitted ? { structured } : {}),
+          ...(validation === undefined ? {} : { validation }),
+        };
+      } finally {
+        try { undoDelegationMode(); }
+        finally {
+          try { undoOutputContract(); }
+          finally { disposeResultTool?.(); }
+        }
+      }
+    };
     // 当前轮次和待处理审批都限定在所属会话内。
-    return Object.assign(state, { chain, kernel, assembly, extensions: installedExtensions, mcp, loop, templates, compaction, rebuildCompaction });
+    return Object.assign(state, { chain, kernel, assembly, extensions: installedExtensions, mcp, loop, runDelegated, templates, compaction, rebuildCompaction });
     } catch (error) {
       try {
         for (const dispose of cleanup.reverse()) await dispose();
@@ -1721,7 +2145,7 @@ export function createHost({
       pending,
       available: {
         modes,
-        policies: ['ask', 'auto', 'never', 'default'],
+        policies: ['ask', 'auto', 'none', 'never', 'default'],
         permissionProfiles: ['read-only', 'workspace-write', 'full-access'],
         permissionNetworks: ['policy', 'unrestricted', 'disabled'],
         services,
@@ -1732,6 +2156,8 @@ export function createHost({
         maxPermissionProfile: knownGrant.maxPermissionProfile,
         maxNetwork: knownGrant.maxNetwork,
         allowedPolicies: knownGrant.allowedPolicies,
+        allowedMcpServers: knownGrant.allowedMcpServers,
+        allowedMcpTools: knownGrant.allowedMcpTools,
       },
     };
   }
@@ -1751,7 +2177,7 @@ export function createHost({
 
     if (permissionChanged) {
       return await setPermission(state, params.permissionProfile ?? state.permission.profile,
-        params.permissionNetwork, undefined, undefined);
+        params.permissionNetwork, undefined, undefined, undefined, undefined);
     }
 
     if (modeChanged) {
@@ -1781,7 +2207,7 @@ export function createHost({
         const grant = await activeDelegation();
         if (grant !== undefined) assertDelegationPolicy(grant, state.chain.configuredMode());
         nextOverride = null;
-      } else if (params.policy === 'ask' || params.policy === 'auto' || params.policy === 'never') {
+      } else if (params.policy === 'ask' || params.policy === 'auto' || params.policy === 'none' || params.policy === 'never') {
         const grant = await activeDelegation();
         if (grant !== undefined) assertDelegationPolicy(grant, params.policy);
         nextOverride = params.policy;
@@ -1793,7 +2219,7 @@ export function createHost({
       else state.chain.setMode(nextOverride);
       if (agentControl !== undefined && params.policy !== 'default') {
         await recordDelegationEvent(agentControl.storePath, {
-          kind: 'grant.used', grantId: agentControl.grantId, policy: params.policy as 'ask' | 'auto' | 'never',
+          kind: 'grant.used', grantId: agentControl.grantId, policy: params.policy as 'ask' | 'auto' | 'none' | 'never',
         });
       }
       return { ...(await sessionConfiguration(state)), applies: 'next_decision' };
@@ -1869,6 +2295,8 @@ export function createHost({
     networkValue: unknown,
     confirmFullAccess: unknown,
     confirmNetwork: unknown,
+    confirmPartialWorkspaceWrite: unknown,
+    confirmWorkspaceTrust: unknown,
   ): Promise<Record<string, unknown>> {
     const grant = await activeDelegation();
     if (!permissionControl && agentControl === undefined) throw new KernelError('permission_control_unavailable');
@@ -1900,8 +2328,25 @@ export function createHost({
     if (grant === undefined && network === 'unrestricted' && state.permission.network !== 'unrestricted' && confirmNetwork !== true) {
       throw new KernelError('permission_network_confirmation_required');
     }
-    const next = createPermissionContext(profileValue, network, state.permission.capabilities);
+    const confirmedPartialWorkspaceWrite = profileValue === 'workspace-write' && (grant === undefined
+      ? confirmPartialWorkspaceWrite === true
+        || state.permission.profile === 'workspace-write' && state.permission.partialWorkspaceWriteConfirmed
+      : grant.confirmedPartialWorkspaceWrite);
+    if (profileValue === 'workspace-write' && state.permission.partialWorkspaceWriteConfirmationRequired
+      && !confirmedPartialWorkspaceWrite) {
+      throw new KernelError('permission_partial_sandbox_confirmation_required');
+    }
+    if (confirmWorkspaceTrust === true && !permissionControl) {
+      throw new KernelError('workspace_trust_control_unavailable');
+    }
+    if (confirmWorkspaceTrust === true && !state.permission.workspaceTrusted) {
+      await setTrusted(state.environment.projectRoot, true);
+    }
+    const next = createPermissionContext(profileValue, network, state.permission.capabilities,
+      permissionOptionsOf(state.permission, confirmedPartialWorkspaceWrite,
+        state.permission.workspaceTrusted || confirmWorkspaceTrust === true));
     if (next.profile === state.permission.profile && next.network === state.permission.network) {
+      state.permission = next;
       return { sessionId: state.id, permission: sessionPermissionView(state, canControlPermission), applies: 'unchanged' };
     }
     if (state.extensions.loaded.length > 0 && (next.profile !== 'full-access' || next.network !== 'unrestricted')) {
@@ -1934,8 +2379,10 @@ export function createHost({
         confirmedNetwork: grant === undefined
           ? next.network === 'unrestricted' && state.permission.network !== 'unrestricted' && confirmNetwork === true
           : next.network === 'unrestricted' && grant.confirmedUnrestrictedNetwork,
+        confirmedPartialWorkspaceWrite,
       });
       state.permission = next;
+      await state.managedProcesses.stopAll();
       return { sessionId: state.id, permission: sessionPermissionView(state, canControlPermission), applies: 'now' };
     } finally {
       if (sessions.get(state.id) === state) state.permissionChanging = false;
@@ -1957,6 +2404,23 @@ export function createHost({
       }
 
       switch (message.method) {
+        case 'workspace.trust': {
+          if (!permissionControl) throw new KernelError('workspace_trust_control_unavailable');
+          if (typeof message.params.trusted !== 'boolean') throw new KernelError('protocol_args_invalid', { detail: 'trusted must be a boolean' });
+          if (message.params.trusted && message.params.confirmWorkspaceTrust !== true) {
+            throw new KernelError('workspace_trust_confirmation_required');
+          }
+          const environment = await environmentFor(message.params.projectRoot);
+          await setTrusted(environment.projectRoot, message.params.trusted);
+          const identity = workspaceIdentity(environment.projectRoot);
+          const affectedSessions = [...sessions.values()].filter((state) => workspaceIdentity(state.environment.projectRoot) === identity);
+          for (const state of affectedSessions) {
+            state.permission = createPermissionContext(state.permission.profile, state.permission.network, state.permission.capabilities,
+              permissionOptionsOf(state.permission, state.permission.partialWorkspaceWriteConfirmed, message.params.trusted));
+          }
+          if (!message.params.trusted) await Promise.all(affectedSessions.map((state) => state.managedProcesses.stopWorkspaceTrusted()));
+          return { projectRoot: environment.projectRoot, trusted: message.params.trusted };
+        }
         case 'session.create': {
           const id = randomUUID();
           const origin = message.params.workspaceOrigin;
@@ -1972,6 +2436,7 @@ export function createHost({
           await noteWorkspace(env);
           const hasInitialSettings = message.params.initialMode !== undefined || message.params.initialPolicy !== undefined
             || message.params.initialPermissionProfile !== undefined || message.params.initialPermissionNetwork !== undefined
+            || message.params.confirmInitialWorkspaceTrust !== undefined
             || message.params.initialProvider !== undefined || message.params.initialModel !== undefined
             || message.params.initialThinkingEffort !== undefined || message.params.initialOutputTokens !== undefined
             || message.params.initialLoopIterations !== undefined;
@@ -2112,6 +2577,40 @@ export function createHost({
           // `limit` 和 `before` 用于分页，`at` 指定一条事件；派生会话也走同一读取流程。
           return await readRecord(sessionId, message.params);
         }
+        case 'session.observe': {
+          const env = await environmentFor(requiredString(message.params.projectRoot, 'projectRoot'));
+          const path = recordPathOf(sessionId, env);
+          try { await access(path); }
+          catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new KernelError('session_not_found', { detail: sessionId });
+            throw error;
+          }
+          const opened = sessions.get(sessionId);
+          const snapshot = await readForClient(opened?.session ?? createSessionLog({ directory: env.directory, id: sessionId }), sessionId, {
+            fullResults: message.params.fullResults,
+            ...(message.params.limit === undefined ? {} : { limit: message.params.limit as number }),
+            ...(message.params.before === undefined ? {} : { before: message.params.before as number }),
+            ...(message.params.at === undefined ? {} : { at: message.params.at as number }),
+          }, env);
+          return { ...snapshot, writerActive: opened?.running !== undefined || await sessionWriterActive(path) };
+        }
+        case 'session.control': {
+          const env = await environmentFor(requiredString(message.params.projectRoot, 'projectRoot'));
+          return await requestAgentControl(env.projectRoot, sessionId, message.params.request as AgentControlRequest);
+        }
+        case 'approval.details': {
+          const state = open(sessionId);
+          const requestId = requiredString(message.params.requestId, 'requestId');
+          const pending = pendingApprovalDetails.get(requestId);
+          if (pending === undefined || pending.sessionId !== state.id) throw new KernelError('control_interaction_stale');
+          if (approvalArgsDigest(pending.args) !== pending.argumentSha256) throw new KernelError('policy_approval_arguments_changed');
+          return {
+            requestId,
+            sessionId: state.id,
+            argumentSha256: pending.argumentSha256,
+            args: structuredClone(pending.args),
+          };
+        }
         case 'session.export': {
           // Host 负责读取和排版完整记录并写出文件，客户端只选择目标路径。
           // 用户通过保存对话框选择的导出路径不属于模型工具写入，不受项目边界限制。
@@ -2166,13 +2665,17 @@ export function createHost({
           // 未知模板命令应返回错误，不能把未展开的文本发送给模型。
           const invocation = parseInvocation(input);
           let text = input;
-          let user;
+          const origin = message.params.origin;
+          if (origin !== undefined && origin !== 'human' && origin !== 'controller') throw new KernelError('protocol_args_invalid', { detail: 'origin must be human or controller' });
+          let user: Record<string, unknown> = { origin: origin ?? 'human' };
           if (invocation !== undefined) {
             const expanded = await expandTemplate(findTemplate(state.templates, invocation.command), invocation.arguments);
             text = expanded.text;
-            user = { raw: input, arguments: expanded.arguments, source: expanded.source, digest: expanded.digest };
+            user = { ...user, raw: input, arguments: expanded.arguments, source: expanded.source, digest: expanded.digest };
           }
-          return await state.loop.run(text, { signal, user, onProgress: report });
+          return await state.runDelegated(text, {
+            signal, user, onProgress: report, delegation: message.params.delegation,
+          });
           }, connection);
         }
         case 'run.cancel': {
@@ -2180,6 +2683,7 @@ export function createHost({
           if (state.running === undefined) throw new KernelError('run_not_running', { detail: sessionId });
           // 通过当前循环处理取消，让工具和模型请求收到同一个取消信号。
           state.running.abort();
+          await state.managedProcesses.stopAll();
           return { cancelled: true };
         }
         case 'policy.set': {
@@ -2198,6 +2702,8 @@ export function createHost({
             message.params.permissionNetwork,
             message.params.confirmFullAccess,
             message.params.confirmNetwork,
+            message.params.confirmPartialWorkspaceWrite,
+            message.params.confirmWorkspaceTrust,
           ));
         }
         case 'mode.set': {
@@ -2215,6 +2721,7 @@ export function createHost({
         }
         case 'status.get': {
           const state = open(sessionId);
+          const currentGrant = await activeDelegation();
           return {
             sessionId,
             running: state.running !== undefined,
@@ -2244,11 +2751,19 @@ export function createHost({
             policyDefault: state.chain.configuredMode(),
             permission: sessionPermissionView(state, canControlPermission),
             denials: state.chain.denials(),
-            delegation: knownGrant === undefined ? null : {
-              grantId: knownGrant.id,
-              maxPermissionProfile: knownGrant.maxPermissionProfile,
-              maxNetwork: knownGrant.maxNetwork,
-              allowedPolicies: knownGrant.allowedPolicies,
+            delegation: currentGrant === undefined ? null : {
+              grantId: currentGrant.id,
+              name: currentGrant.name,
+              source: currentGrant.source,
+              defaultPermissionProfile: currentGrant.defaultPermissionProfile,
+              maxPermissionProfile: currentGrant.maxPermissionProfile,
+              defaultNetwork: currentGrant.defaultNetwork,
+              maxNetwork: currentGrant.maxNetwork,
+              defaultPolicy: currentGrant.defaultPolicy,
+              allowedPolicies: currentGrant.allowedPolicies,
+              allowOperator: currentGrant.allowOperator,
+              allowedMcpServers: currentGrant.allowedMcpServers,
+              allowedMcpTools: currentGrant.allowedMcpTools,
             },
             // 这里只返回条数；记录内容由 `session.read` 提供。
             eventCount: (await state.session.read()).length,
@@ -2341,9 +2856,24 @@ export function createHost({
         }
         case 'agent-control.create': {
           if (!permissionControl) throw new KernelError('agent_control_trusted_ui_required');
+          if (message.params.confirmWorkspaceTrust !== true) throw new KernelError('workspace_trust_confirmation_required');
+          if (permission.partialWorkspaceWriteConfirmationRequired
+            && (message.params.maxPermissionProfile === 'workspace-write' || message.params.maxPermissionProfile === 'full-access')
+            && message.params.confirmPartialWorkspaceWrite !== true) {
+            throw new KernelError('permission_partial_sandbox_confirmation_required');
+          }
+          const projectRoot = requiredString(message.params.projectRoot, 'projectRoot');
+          const project = await environmentFor(projectRoot);
+          await setTrusted(project.projectRoot, true);
+          const projectIdentity = workspaceIdentity(project.projectRoot);
+          for (const state of sessions.values()) {
+            if (workspaceIdentity(state.environment.projectRoot) !== projectIdentity) continue;
+            state.permission = createPermissionContext(state.permission.profile, state.permission.network, state.permission.capabilities,
+              permissionOptionsOf(state.permission, state.permission.partialWorkspaceWriteConfirmed, true));
+          }
           const input: CreateDelegationGrantInput = {
             name: requiredString(message.params.grantName, 'grantName'),
-            projectRoot: requiredString(message.params.projectRoot, 'projectRoot'),
+            projectRoot: project.projectRoot,
             defaultPermissionProfile: message.params.defaultPermissionProfile as PermissionProfile,
             maxPermissionProfile: message.params.maxPermissionProfile as PermissionProfile,
             defaultNetwork: message.params.defaultNetwork as PermissionNetwork,
@@ -2352,20 +2882,215 @@ export function createHost({
             allowedPolicies: [
               ...(message.params.allowedPolicyAsk === true ? ['ask' as const] : []),
               ...(message.params.allowedPolicyAuto === true ? ['auto' as const] : []),
+              ...(message.params.allowedPolicyNone === true ? ['none' as const] : []),
               ...(message.params.allowedPolicyNever === true ? ['never' as const] : []),
             ],
             allowOperator: message.params.allowOperator as boolean,
+            allowedMcpServers: message.params.allowedMcpServers as string[] | undefined,
+            allowedMcpTools: message.params.allowedMcpTools as string[] | undefined,
             confirmFullAccess: message.params.confirmFullAccess as boolean,
             confirmUnrestrictedNetwork: message.params.confirmUnrestrictedNetwork as boolean,
+            confirmPartialWorkspaceWrite: message.params.confirmPartialWorkspaceWrite === true,
             expiresAt: message.params.expiresAt === '' ? null : requiredString(message.params.expiresAt, 'expiresAt'),
           };
           return await createDelegationGrant(delegationPathOf(), input, requiredString(message.params.version, 'version'));
         }
         case 'agent-control.revoke': {
           if (!permissionControl) throw new KernelError('agent_control_trusted_ui_required');
-          return await revokeDelegationGrant(
-            delegationPathOf(), requiredString(message.params.grantId, 'grantId'), requiredString(message.params.version, 'version'),
+          const grantId = requiredString(message.params.grantId, 'grantId');
+          const result = await revokeDelegationGrant(
+            delegationPathOf(), grantId, requiredString(message.params.version, 'version'),
           );
+          await Promise.all([...sessions.values()]
+            .filter((state) => state.managedGrantId === grantId)
+            .map((state) => state.managedProcesses.stopAll()));
+          return result;
+        }
+        case 'mcp.trust.list': {
+          if (!permissionControl) throw new KernelError('mcp_trust_trusted_ui_required');
+          const env = await environmentFor(message.params.projectRoot);
+          const session = message.params.sessionId === undefined ? undefined : open(requiredString(message.params.sessionId, 'sessionId'));
+          if (session !== undefined && session.environment !== env) throw new KernelError('session_project_forbidden');
+          const configuredServers = await currentMcpConfigs(env);
+          await stopMcpServersWithChangedConfig(env, configuredServers);
+          const store = await listMcpTrust(mcpTrustPathOf());
+          const servers = await Promise.all(configuredServers.map(async (server) => {
+            const sessionTrust = session?.mcpTrust.get(mcpTrustKey(server.name, server.identityDigest));
+            const projectIdentity = workspaceIdentity(await realpath(env.projectRoot));
+            const projectTrust = store.entries.find((entry) => entry.scope === 'project' && entry.projectIdentity === projectIdentity
+              && entry.server === server.name && entry.identityDigest === server.identityDigest);
+            const userTrust = store.entries.find((entry) => entry.scope === 'user'
+              && entry.server === server.name && entry.identityDigest === server.identityDigest);
+            const scopes = {
+              session: sessionTrust === undefined ? null : { source: sessionTrust.source, trusted: sessionTrust.trusted, updatedAt: sessionTrust.updatedAt },
+              project: projectTrust === undefined ? null : { source: projectTrust.source, trusted: projectTrust.trusted, updatedAt: projectTrust.updatedAt },
+              user: userTrust === undefined ? null : { source: userTrust.source, trusted: userTrust.trusted, updatedAt: userTrust.updatedAt },
+            };
+            const trust = scopes.session !== null ? { scope: 'session' as const, ...scopes.session }
+              : scopes.project !== null ? { scope: 'project' as const, ...scopes.project }
+                : scopes.user !== null ? { scope: 'user' as const, ...scopes.user }
+                  : undefined;
+            return {
+              name: server.name,
+              command: server.command,
+              args: server.args,
+              cwd: server.cwd,
+              environmentNames: server.environmentNames,
+              identityDigest: server.identityDigest,
+              trustScopes: scopes,
+              trust: trust === undefined ? null : { scope: trust.scope, source: trust.source, trusted: trust.trusted, updatedAt: trust.updatedAt },
+            };
+          }));
+          return { version: store.version, servers };
+        }
+        case 'settings.catalog': {
+          if (!permissionControl) throw new KernelError('settings_catalog_trusted_ui_required');
+          const env = await environmentFor(message.params.projectRoot);
+          const session = message.params.sessionId === undefined ? undefined : open(requiredString(message.params.sessionId, 'sessionId'));
+          if (session !== undefined && session.environment !== env) throw new KernelError('session_project_forbidden');
+          const modeName = typeof message.params.mode === 'string' ? message.params.mode
+            : session?.mode.file?.name ?? env.modeName ?? DEFAULT_MODE;
+          const modes = env.modePaths === undefined
+            ? { modes: [], invalid: [], truncated: false }
+            : await listModes(env.modePaths);
+          let mode: { name: string; layer: string; digest: string; tools: string[] | '*'; prompt: string[] | '*' } | null = null;
+          let modeError: string | null = null;
+          if (env.modePaths !== undefined) {
+            try {
+              const file = await loadMode(modeName, env.modePaths);
+              mode = { name: file.name, layer: file.layer, digest: file.digest, tools: file.tools, prompt: file.prompt };
+            } catch (error) {
+              modeError = errorCode(error) ?? 'mode_unavailable';
+            }
+          }
+          const trusted = await isTrusted(env.projectRoot);
+          const directories = skillDirectories(env.projectRoot);
+          const skills = env.skillRegistry ?? await discoverSkills(directories);
+          const sourceLabels = ['project (.ligule/skills)', 'project (.agents/skills)', 'user (.ligule/skills)', 'user (~/.agents/skills)'];
+          const skillSource = (root: string) => sourceLabels[directories.findIndex((directory) => {
+            const child = relative(resolve(directory), resolve(root));
+            return child !== '' && child !== '..' && !child.startsWith(`..${sep}`) && !isAbsolute(child);
+          })] ?? 'unknown';
+          const environmentSessions = [...sessions.values()].filter((state) => state.environment === env);
+          const extensionStates = environmentSessions.flatMap((state) => state.extensions.loaded);
+          const extensions = env.extensions.paths.map((path) => {
+            const installedDirectory = env.extensions.installedDirectory;
+            const installedPath = installedDirectory === undefined ? '..' : relative(resolve(installedDirectory), resolve(path));
+            const installed = installedPath !== '..' && !installedPath.startsWith(`..${process.platform === 'win32' ? '\\\\' : '/'}`)
+              && !isAbsolute(installedPath);
+            return {
+              name: basename(path),
+              source: installed ? 'user-installed' : 'user-configured',
+              loaded: extensionStates.some((extension) => resolve(extension.path) === resolve(path)),
+              registeredTools: extensionStates.filter((extension) => resolve(extension.path) === resolve(path)).flatMap((extension) => extension.tools),
+            };
+          });
+          const extensionTools = new Set(session?.extensions.loaded.flatMap((extension) => extension.tools) ?? []);
+          const registeredTools = session?.kernel.catalog() ?? await settingsToolCatalog(env, skills);
+          const activeTools = session === undefined ? null : new Set(session.kernel.manifest().map((tool) => tool.name));
+          const declaredTools = mode?.tools ?? [];
+          const includedTools = declaredTools === '*' ? null : new Set(declaredTools);
+          return {
+            projectTrusted: trusted,
+            policyDefault: env.policy?.mode ?? 'ask',
+            hostNodeVersion: process.version,
+            sessionActive: session !== undefined,
+            modes,
+            mode,
+            modeError,
+            sessionMode: session?.mode.file === undefined ? null : { name: session.mode.file.name, layer: session.mode.file.layer },
+            pendingMode: session?.pending?.name ?? null,
+            modeTools: declaredTools === '*' ? registeredTools.map((tool) => tool.name) : [...declaredTools],
+            tools: registeredTools.map((tool) => ({
+              ...tool,
+              source: extensionTools.has(tool.name) ? 'extension'
+                : tool.name.startsWith('mcp.') ? 'mcp'
+                  : tool.name.startsWith('skill') ? 'skill' : 'builtin',
+              includedInMode: tool.disclosure || includedTools === null || includedTools.has(tool.name),
+              currentlyAvailable: activeTools === null ? null : activeTools.has(tool.name),
+            })),
+            skills: skills.skills.map((skill) => ({ name: skill.name, description: skill.description, requires: skill.requires, source: skillSource(skill.root) })),
+            skillDiagnostics: skills.diagnostics.map((diagnostic) => ({ code: diagnostic.code })),
+            extensions,
+            extensionDiagnostics: env.extensions.ignored.map((diagnostic) => ({ code: diagnostic.code, source: diagnostic.path })),
+          };
+        }
+        case 'mcp.trust.set': {
+          if (!permissionControl) throw new KernelError('mcp_trust_trusted_ui_required');
+          const env = await environmentFor(message.params.projectRoot);
+          const serverName = requiredString(message.params.server, 'server');
+          const expectedIdentity = requiredString(message.params.identityDigest, 'identityDigest');
+          const configuredServers = await currentMcpConfigs(env);
+          await stopMcpServersWithChangedConfig(env, configuredServers);
+          const server = configuredServers.find((item) => item.name === serverName);
+          if (server === undefined) throw new KernelError('mcp_server_unknown', { detail: serverName });
+          if (server.identityDigest !== expectedIdentity) throw new KernelError('mcp_server_config_changed', { detail: serverName });
+          const scope = requiredString(message.params.scope, 'scope');
+          if (scope !== 'session' && scope !== 'project' && scope !== 'user') throw new KernelError('mcp_trust_scope_invalid');
+          if (typeof message.params.trusted !== 'boolean') throw new KernelError('protocol_args_invalid', { detail: 'trusted must be a boolean' });
+          if (message.params.trusted && (message.params.confirmTrust !== true || message.params.confirmExternalAccess !== true)) {
+            throw new KernelError('mcp_trust_confirmation_required');
+          }
+          if (scope === 'session') {
+            const sessionId = requiredString(message.params.sessionId, 'sessionId');
+            const state = open(sessionId);
+            if (state.environment !== env) throw new KernelError('session_project_forbidden');
+            const sessionServer = state.environment.mcpConfigs.find((item) => item.name === serverName);
+            if (sessionServer?.identityDigest !== server.identityDigest) throw new KernelError('mcp_session_config_stale');
+            const updatedAt = new Date().toISOString();
+            await state.session.append({
+              kind: 'sessionMcpTrust', ignorable: true, server: serverName, identityDigest: server.identityDigest,
+              source: 'trusted-ui', trusted: message.params.trusted, updatedAt,
+            });
+            state.mcpTrust.set(mcpTrustKey(serverName, server.identityDigest), { source: 'trusted-ui', trusted: message.params.trusted, updatedAt });
+            if (!message.params.trusted) await state.mcp.revoke(serverName);
+            return { scope, server: serverName, trusted: message.params.trusted, updatedAt };
+          }
+
+          const store = await setMcpServerTrust(mcpTrustPathOf(), {
+            scope: scope as McpTrustScope,
+            projectRoot: env.projectRoot,
+            server: serverName,
+            identityDigest: server.identityDigest,
+            trusted: message.params.trusted,
+          }, requiredString(message.params.version, 'version'));
+          if (!message.params.trusted) {
+            for (const state of sessions.values()) {
+              const current = state.environment.mcpConfigs.find((item) => item.name === serverName);
+              if (current === undefined) continue;
+              if (scope === 'project' && state.environment !== env) continue;
+              if (scope === 'user' && current.identityDigest !== server.identityDigest) continue;
+              const sessionTrust = state.mcpTrust.get(mcpTrustKey(serverName, current.identityDigest));
+              const effective = sessionTrust ?? await mcpServerTrust(mcpTrustPathOf(), state.environment.projectRoot, serverName, current.identityDigest);
+              if (effective?.trusted !== true) await state.mcp.revoke(serverName);
+            }
+          }
+          return { version: store.version, scope, server: serverName, trusted: message.params.trusted };
+        }
+        case 'mcp.trust.tools': {
+          if (!permissionControl) throw new KernelError('mcp_trust_trusted_ui_required');
+          const env = await environmentFor(message.params.projectRoot);
+          const serverName = requiredString(message.params.server, 'server');
+          const configuredServers = await currentMcpConfigs(env);
+          await stopMcpServersWithChangedConfig(env, configuredServers);
+          const server = configuredServers.find((item) => item.name === serverName);
+          if (server === undefined) throw new KernelError('mcp_server_unknown', { detail: serverName });
+          const session = message.params.sessionId === undefined ? undefined : open(requiredString(message.params.sessionId, 'sessionId'));
+          if (session !== undefined && session.environment !== env) throw new KernelError('session_project_forbidden');
+          if (session !== undefined) {
+            const sessionServer = session.environment.mcpConfigs.find((item) => item.name === serverName);
+            if (sessionServer?.identityDigest !== server.identityDigest) throw new KernelError('mcp_session_config_stale');
+          }
+          const sessionTrust = session?.mcpTrust.get(mcpTrustKey(serverName, server.identityDigest));
+          const trust = sessionTrust ?? await mcpServerTrust(mcpTrustPathOf(), env.projectRoot, serverName, server.identityDigest);
+          if (trust?.trusted !== true) throw new KernelError('mcp_server_untrusted', { detail: serverName });
+          const registry = createMcpRegistry([server]);
+          try {
+            const tools = await registry.toolsOf(serverName, AbortSignal.timeout(25_000));
+            return { server: serverName, identityDigest: server.identityDigest, tools: tools.map(({ name, description, digest }) => ({ name, description, digest })) };
+          } finally {
+            await registry.close();
+          }
         }
         case 'config.get': {
           // 使用明确的允许字段构造响应；参数模式本身允许出现未声明的属性。
@@ -2379,7 +3104,7 @@ export function createHost({
             selection: env.config.model?.selection === undefined ? null : modelSelection(env.config.model.selection),
             layers: [], sources: {},
           };
-          const { layers, sources, values, rules, rulesSource } = await env.store.read();
+          const { layers, sources, values, rules, ruleSources, ruleLayers, rulesSource } = await env.store.read();
           return {
             ...shownConfigOf(values),
             services: modelServices(values.model?.services),
@@ -2389,18 +3114,23 @@ export function createHost({
             layers,
             sources,
             rules,
+            ruleSources,
+            ruleLayers,
             rulesSource,
           };
         }
         case 'config.set': {
           // 配置存储负责允许字段、值校验和配置层到文件的映射；Host 只转发这些字段。
           if (defaultEnvironment.store === undefined) throw new KernelError('config_write_unsupported');
-          const { value, op, index, ruleTool, ruleDecision, ruleMatch, ruleReason } = message.params;
+          const { value, op, index, ruleTool, ruleDecision, ruleMatch, ruleReason, ruleTarget, rulePath, ruleArgsHash } = message.params;
           const field = requiredString(message.params.field, 'field');
           const layer = requiredString(message.params.layer, 'layer');
           const version = requiredString(message.params.version, 'version');
           // 协议层校验字段类型，`checkedRule` 校验规则内容。
-          const given = { tool: ruleTool, decision: ruleDecision, match: ruleMatch, reason: ruleReason };
+          const given = {
+            tool: ruleTool, decision: ruleDecision, match: ruleMatch, reason: ruleReason,
+            target: ruleTarget, path: rulePath, argsHash: ruleArgsHash,
+          };
           const rule = Object.values(given).every((item) => item === undefined) ? undefined : given;
           const env = await environmentFor(message.params.projectRoot);
           if (env.store === undefined) throw new KernelError('config_write_unsupported');
@@ -2487,8 +3217,15 @@ export function createHost({
         const opened = [...sessions.values()];
         for (const state of opened) state.running?.abort();
         const retired = await Promise.allSettled(opened.map((state) => retire(state)));
-        for (const result of retired) if (result.status === 'rejected') failures.push(result.reason);
+        for (const result of retired) {
+          if (result.status !== 'rejected') continue;
+          const failure = result.reason;
+          if (failure instanceof AggregateError && failure.message === 'host_session_retire_failed') {
+            failures.push(...failure.errors);
+          } else failures.push(failure);
+        }
         sessions.clear();
+        pendingApprovalDetails.clear();
         if (failures.length > 0) throw new AggregateError(failures, 'host_release_failed');
       })();
       return closing;

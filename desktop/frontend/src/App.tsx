@@ -5,7 +5,7 @@ import { code, createClient, type Client, type Transport } from './protocol';
 import { ApprovalCard, type Ask } from './components/ApprovalCard';
 import { QuestionCard, type QuestionAsk, type QuestionDrafts } from './components/QuestionCard';
 import { Icon } from './components/Icon';
-import { SettingsDialog } from './components/Settings';
+import { SettingsDialog, type SettingsSectionId } from './components/Settings';
 import { BranchPanel } from './components/BranchPanel';
 import { HoldSheet } from './components/HoldSheet';
 import { QuitSheet } from './components/QuitSheet';
@@ -26,19 +26,22 @@ import { CURRENT, actionOf, formatKeys, isCapturing, isComposing, loadBindings, 
 import { insertMention, mentionToken } from './mentions';
 import type { ModelSelection } from './model-catalog';
 import { createSlotRegistry, SLOTS, type Panel } from './slots';
-import { capabilityOf, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn, type Record_, type Row } from './rows';
+import { appendProjectedRecords, capabilityOf, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn, type Record_, type Row } from './rows';
 import type { Status } from './status';
 import { loadSettings, mergeQueueIntoDraft, readSettings, saveSettings, type Settings } from './settings';
 import { LocaleProvider, localeOf } from './locale';
 import { notificationOf, notificationTarget, type NotificationKind, type NotificationTarget } from './notifications';
 import { SessionStreamBuffer } from './session-stream';
+import { observeExternalSession } from './external-session-observation';
 import { Composer } from './components/Composer';
+import { ExternalSessionComposer, ExternalSessionControlPanel } from './components/ExternalSessionControlPanel';
 import type { MentionState } from './mentions';
 import type { PermissionConfirmations, PermissionTarget } from './permission-control';
 
 // 流式输出显示在已落盘记录之后，并保持固定 ID，避免每个增量都重建行并丢失展开状态。
 const LIVE_REASONING: Row = { id: -2, kind: 'reasoning', text: '' };
 const LIVE_ANSWER: Row = { id: -1, kind: 'answer', text: '' };
+type PolicySelection = 'ask' | 'auto' | 'none';
 
 // 每次向前读取一页事件；打开会话时先取最近页，再按游标读取更早记录。
 const RENDER_WINDOW = 400;
@@ -79,7 +82,7 @@ type PanelProps = {
 // 表示当前没有文本组合输入；有效光标位置不会是 -1。
 const NO_TOKEN = { start: -1, text: '' };
 const DEFAULT_NEW_SESSION_PERMISSION: PermissionTarget = { profile: 'read-only', network: 'policy' };
-const NO_PERMISSION_CONFIRMATIONS: PermissionConfirmations = { fullAccess: false, network: false };
+const NO_PERMISSION_CONFIRMATIONS: PermissionConfirmations = { fullAccess: false, network: false, partialWorkspaceWrite: false, workspaceTrust: false };
 // 已打开的会话。右侧面板显示当前会话状态，不重复提供会话浮层已有的控制项。
 /**
  * 返回持久工作区登记中的默认目录。未设置默认目录或读取失败时返回 undefined。
@@ -160,6 +163,15 @@ export function App({ transport }: { transport: Transport }) {
   const liveStreamRef = useRef<SessionStreamBuffer | null>(null);
   if (liveStreamRef.current === null) liveStreamRef.current = new SessionStreamBuffer();
   const liveBySession = liveStreamRef.current;
+  const acceptExternalDelta = useCallback((kind: 'text' | 'reasoning', text: string) => {
+    const held = liveBySession.append(sessionId ?? '', kind, text);
+    if (held !== null && sessionId !== null) setLive(held);
+  }, [liveBySession, sessionId]);
+  const settleExternalEvent = useCallback((kind: string) => {
+    if (sessionId === null) return;
+    const held = liveBySession.settle(sessionId, kind);
+    setLive(held);
+  }, [liveBySession, sessionId]);
   const terminalBySession = useRef(new Map<string, number>());
   // 同一会话的待答问题按顺序排队，一次显示一个。
   const [asks, setAsks] = useState<Ask[]>([]);
@@ -193,7 +205,7 @@ export function App({ transport }: { transport: Transport }) {
   const [status, setStatus] = useState<Status | null>(null);
   const [newSessionSettingsRevision, setNewSessionSettingsRevision] = useState(0);
   const [newSessionMode, setNewSessionMode] = useState<string | null>(null);
-  const [newSessionPolicy, setNewSessionPolicy] = useState<'ask' | 'auto' | 'never' | null>(null);
+  const [newSessionPolicy, setNewSessionPolicy] = useState<PolicySelection | null>(null);
   const [newSessionPermission, setNewSessionPermission] = useState<PermissionTarget>(DEFAULT_NEW_SESSION_PERMISSION);
   const [newSessionPermissionConfirmations, setNewSessionPermissionConfirmations] = useState<PermissionConfirmations>(NO_PERMISSION_CONFIRMATIONS);
   const [draft, setDraft] = useState('');
@@ -208,6 +220,8 @@ export function App({ transport }: { transport: Transport }) {
   const [projectRoot, setProjectRoot] = useState('');
   // 当前草稿所属的会话。打开会话时，需等恢复请求完成后再保存草稿，避免把旧草稿写入新会话。
   const [inputOwner, setInputOwner] = useState<string | null>(null);
+  const [readOnlySessionId, setReadOnlySessionId] = useState<string | null>(null);
+  const [externalWriterActive, setExternalWriterActive] = useState(false);
   const saveWarned = useRef(false);
   // Host 重连期间暂停发送队列，也不触发轮次结束后的自动发送。
   const reconnecting = useRef(false);
@@ -226,6 +240,7 @@ export function App({ transport }: { transport: Transport }) {
   const language = localeOf(settings.language);
   const t = useCallback((chinese: string, english: string) => language === 'zh' ? chinese : english, [language]);
   const progress = status?.progress ?? null;
+  const observingExternalSession = sessionId !== null && readOnlySessionId === sessionId;
   const progressPhase = progress === null ? '' : {
     preparing: t('准备上下文', 'Preparing context'),
     model_request: t('请求模型', 'Requesting model'),
@@ -255,8 +270,9 @@ export function App({ transport }: { transport: Transport }) {
   const reportSettingsEdits = useCallback((reasons: string[]) => { settingsEdits.current = reasons; }, []);
   const dockEdits = useRef<string[]>([]);
   dockEdits.current = holdReasons(dockGate);
-  const [settingsSection, setSettingsSection] = useState<'general' | 'model' | 'keys' | 'notifications'>('general');
+  const [settingsSection, setSettingsSection] = useState<SettingsSectionId>('general');
   const openModelSettings = useCallback(() => { setSettingsSection('model'); setSettingsOpen(true); }, []);
+  const openSecuritySettings = useCallback(() => { setSettingsSection('security'); setSettingsOpen(true); }, []);
   const [notificationProblem, setNotificationProblem] = useState<string | null>(null);
   const [diagnosticLogs, setDiagnosticLogs] = useState<string[]>([]);
   const [notificationDestination, setNotificationDestination] = useState<NotificationTarget | null>(null);
@@ -300,7 +316,8 @@ export function App({ transport }: { transport: Transport }) {
   const [walk, setWalk] = useState(-1);
   // 运行期间的新输入按会话保存在前端队列中；取消后暂停，等待用户明确继续。
   const [queues, setQueues] = useState<Record<string, { items: string[]; paused: boolean }>>({});
-  const queue = queues[sessionId ?? ''] ?? { items: [] as string[], paused: false };
+  const queue = readOnlySessionId === sessionId ? { items: [] as string[], paused: false }
+    : queues[sessionId ?? ''] ?? { items: [] as string[], paused: false };
   const patchQueue = useCallback((own: string, next: (current: { items: string[]; paused: boolean }) => { items: string[]; paused: boolean }) => {
     setQueues((current) => ({ ...current, [own]: next(current[own] ?? { items: [], paused: false }) }));
   }, []);
@@ -341,7 +358,7 @@ export function App({ transport }: { transport: Transport }) {
 
   // 窗口打开和 Host 重启时读取共享输入历史。读取失败时按空列表显示；写入由 Host 在锁内合并，避免覆盖其他客户端的更新。
   useEffect(() => {
-    client.call('history.read', {}, 15_000).then(
+    client.call('history.read', {}, 60_000).then(
       (read) => setHistory((read as { entries: string[] }).entries),
       () => setHistory([]),
     );
@@ -395,6 +412,7 @@ export function App({ transport }: { transport: Transport }) {
   // Host 进程的启动和重启由 Electron 壳负责。
   const beat = useCallback(async (timeoutMs = 5_000) => {
     if (sessionId === null) return;
+    if (readOnlySessionId === sessionId) { setLink(null); return; }
     try {
       await client.call('status.get', { sessionId }, timeoutMs);
       connectionLost.current = false;
@@ -404,7 +422,7 @@ export function App({ transport }: { transport: Transport }) {
       connectionLost.current = true;
       setLink(code(error));
     }
-  }, [client, notify, sessionId]);
+  }, [client, notify, readOnlySessionId, sessionId]);
 
   useEffect(() => {
     const removeFault = transport.onFault?.((reason) => {
@@ -431,8 +449,11 @@ export function App({ transport }: { transport: Transport }) {
     setPinned(false);
     setOlderLoading(true);
     try {
-      const older = await client.call('session.read',
-        { sessionId, before: page.before, limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean };
+      const observing = readOnlySessionId === sessionId;
+      const older = await client.call(observing ? 'session.observe' : 'session.read', {
+        ...(observing ? { projectRoot } : {}),
+        sessionId, before: page.before, limit: RENDER_WINDOW, fullResults: true,
+      }, 15_000) as { events: Record_[]; hasMore: boolean };
       // 用户已切换会话时忽略过期响应，不更改新会话的列表和游标。
       if (opening.current !== sessionId || openRequest.current !== request) return;
       const added = older.events.flatMap((record) => projectRecord(record));
@@ -450,7 +471,7 @@ export function App({ transport }: { transport: Transport }) {
     } finally {
       if (!restoring && openRequest.current === request) setOlderLoading(false);
     }
-  }, [client, olderLoading, page, sessionId]);
+  }, [client, olderLoading, page, projectRoot, readOnlySessionId, sessionId]);
 
   // 草稿和队列按项目与会话保存到 Host 管理的偏好文档；WebView 存储只用于首屏缓存。
   // 切换会话、打开设置、查看历史或断连时保留输入。保存失败时明确提示用户。
@@ -617,7 +638,7 @@ export function App({ transport }: { transport: Transport }) {
       }
       // Host 发出的交互请求分为审批和用户提问。
       if (message.method !== 'approval.request') return;
-      const params = message.params as { sessionId?: string; projectRoot?: string; tool?: string; command?: string; args?: Record<string, unknown>; reason?: string; shell?: string; executable?: string; policy?: string; policySource?: string; policyForced?: boolean; scriptBinding?: { path?: string; sha256?: string; interpreter?: string; workspaceRoot?: string; permission?: { profile?: string; network?: string; capabilities?: Record<string, string> } } };
+      const params = message.params as { sessionId?: string; projectRoot?: string; tool?: string; command?: string; args?: Record<string, unknown>; reason?: string; shell?: string; executable?: string; policy?: string; policySource?: string; policyForced?: boolean; detailsRef?: string; argumentBytes?: number; argumentSha256?: string; identityDigest?: string; contentBytes?: number; contentSha256?: string; rememberable?: boolean; rememberScopes?: ('session' | 'project' | 'user')[]; rememberHintKey?: 'file' | 'tool' | 'command' | 'mcp'; rememberTargetOptions?: ('file' | 'workspace' | 'tool' | 'command')[]; scriptBinding?: { path?: string; sha256?: string; interpreter?: string; workspaceRoot?: string; permission?: { profile?: string; network?: string; capabilities?: Record<string, string> } } };
       // 请求属于发起它的会话；即使会话在后台等待，也必须显示并允许答复。
       const asked = params?.sessionId;
       if (typeof asked !== 'string' || asked === '') return;
@@ -630,6 +651,15 @@ export function App({ transport }: { transport: Transport }) {
       const change = changeOf(tool, args);
       const content = changeBody(change, args);
       const englishChange = changeOf(tool, args, 'en');
+      const detailsSuffix = params.scriptBinding === undefined ? { chinese: '', english: '' } : {
+        chinese: `\n\n${t('脚本审批绑定', 'Script approval binding')}:\n${t('路径', 'Path')}: ${params.scriptBinding.path ?? ''}\nSHA-256: ${params.scriptBinding.sha256 ?? ''}\n${t('解释器', 'Interpreter')}: ${params.scriptBinding.interpreter ?? ''}\n${t('工作区', 'Workspace')}: ${params.scriptBinding.workspaceRoot ?? ''}\n${t('权限', 'Permission')}: ${params.scriptBinding.permission?.profile ?? ''} / ${params.scriptBinding.permission?.network ?? ''}\n${JSON.stringify(params.scriptBinding.permission?.capabilities ?? {})}`,
+        english: `\n\nScript approval binding:\nPath: ${params.scriptBinding.path ?? ''}\nSHA-256: ${params.scriptBinding.sha256 ?? ''}\nInterpreter: ${params.scriptBinding.interpreter ?? ''}\nWorkspace: ${params.scriptBinding.workspaceRoot ?? ''}\nPermission: ${params.scriptBinding.permission?.profile ?? ''} / ${params.scriptBinding.permission?.network ?? ''}\n${JSON.stringify(params.scriptBinding.permission?.capabilities ?? {})}`,
+      };
+      const summary = typeof params.contentBytes === 'number' && typeof params.contentSha256 === 'string'
+        ? `${t(`内容 ${params.contentBytes} 字节 · SHA-256 ${params.contentSha256}`, `Content ${params.contentBytes} bytes · SHA-256 ${params.contentSha256}`)}\n\n`
+        : typeof params.argumentSha256 === 'string'
+          ? `${t(`参数 ${params.argumentBytes ?? 0} 字节 · SHA-256 ${params.argumentSha256}`, `Arguments ${params.argumentBytes ?? 0} bytes · SHA-256 ${params.argumentSha256}`)}\n\n`
+          : '';
       setAsks((current) => [...current, {
         id: message.id ?? '',
         sessionId: asked,
@@ -644,8 +674,19 @@ export function App({ transport }: { transport: Transport }) {
         policy: params.policy ?? '',
         policySource: params.policySource ?? '',
         policyForced: params.policyForced === true,
-        content: params.scriptBinding === undefined ? content : `${content}\n\n${t('脚本审批绑定', 'Script approval binding')}:\n${t('路径', 'Path')}: ${params.scriptBinding.path ?? ''}\nSHA-256: ${params.scriptBinding.sha256 ?? ''}\n${t('解释器', 'Interpreter')}: ${params.scriptBinding.interpreter ?? ''}\n${t('工作区', 'Workspace')}: ${params.scriptBinding.workspaceRoot ?? ''}\n${t('权限', 'Permission')}: ${params.scriptBinding.permission?.profile ?? ''} / ${params.scriptBinding.permission?.network ?? ''}\n${JSON.stringify(params.scriptBinding.permission?.capabilities ?? {})}`,
-        english: { change: englishChange.summary, content: params.scriptBinding === undefined ? changeBody(englishChange, args, 'en') : `${changeBody(englishChange, args, 'en')}\n\nScript approval binding:\nPath: ${params.scriptBinding.path ?? ''}\nSHA-256: ${params.scriptBinding.sha256 ?? ''}\nInterpreter: ${params.scriptBinding.interpreter ?? ''}\nWorkspace: ${params.scriptBinding.workspaceRoot ?? ''}\nPermission: ${params.scriptBinding.permission?.profile ?? ''} / ${params.scriptBinding.permission?.network ?? ''}\n${JSON.stringify(params.scriptBinding.permission?.capabilities ?? {})}` },
+        rememberable: params.rememberable === true,
+        rememberScopes: params.rememberScopes ?? [],
+        ...(params.rememberHintKey === undefined ? {} : { rememberHintKey: params.rememberHintKey }),
+        ...(Array.isArray(params.rememberTargetOptions) ? { rememberTargetOptions: params.rememberTargetOptions } : {}),
+        ...(typeof params.detailsRef === 'string' ? { detailsRef: params.detailsRef } : {}),
+        ...(typeof params.argumentBytes === 'number' ? { argumentBytes: params.argumentBytes } : {}),
+        ...(typeof params.argumentSha256 === 'string' ? { argumentSha256: params.argumentSha256 } : {}),
+        ...(typeof params.identityDigest === 'string' ? { identityDigest: params.identityDigest } : {}),
+        detailsLoaded: false,
+        detailsLoading: false,
+        detailsSuffix,
+        content: `${summary}${content}${detailsSuffix.chinese}`,
+        english: { change: englishChange.summary, content: `${summary}${changeBody(englishChange, args, 'en')}${detailsSuffix.english}` },
       }]);
     });
 
@@ -713,14 +754,34 @@ export function App({ transport }: { transport: Transport }) {
     setLive(liveBySession.read(id));
     setWanted(null);
     setInputOwner(null);
+    setReadOnlySessionId(null);
+    setExternalWriterActive(false);
+    setStatus(null);
     dispatchAt.current.clear();
     setReading(true);
+    let observing = false;
+    let newest: {
+      events: Record_[];
+      hasMore: boolean;
+      header: { projectRoot?: string } | null;
+      label: { name: string; archived: boolean };
+      writerActive?: boolean;
+    };
+    const requestedRoot = askedRoot === undefined || askedRoot === '' ? projectRoot : askedRoot;
     try {
       // 为记录读取设置超时，避免客户端一直停留在加载状态。
       // 指定项目时同时传递项目根目录，由 Host 选择对应环境并验证记录归属。
-      await client.call('session.open', askedRoot === undefined || askedRoot === '' ? { sessionId: id } : { sessionId: id, projectRoot: askedRoot }, 15_000);
-      // 请求完整工具结果以读取溢出文件内容；只读取最近一页，更早记录由分页操作加载。
-      const newest = await client.call('session.read', { sessionId: id, limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean; header: { projectRoot?: string } | null; label: { name: string; archived: boolean } };
+      try {
+        await client.call('session.open', requestedRoot === '' ? { sessionId: id } : { sessionId: id, projectRoot: requestedRoot }, 60_000);
+        // 请求完整工具结果以读取溢出文件内容；只读取最近一页，更早记录由分页操作加载。
+        newest = await client.call('session.read', { sessionId: id, limit: RENDER_WINDOW, fullResults: true }, 60_000) as typeof newest;
+      } catch (error) {
+        if (code(error) !== 'session_locked') throw error;
+        newest = await client.call('session.observe', {
+          projectRoot: requestedRoot, sessionId: id, limit: RENDER_WINDOW, fullResults: true,
+        }, 60_000) as typeof newest;
+        observing = true;
+      }
       if (openRequest.current !== request) return;
       // 打开会话时恢复其草稿和暂停队列。
       const root = newest.header?.projectRoot ?? '';
@@ -734,7 +795,9 @@ export function App({ transport }: { transport: Transport }) {
       const unsaved = unsavedInputs.current.get(JSON.stringify([root, id]));
       const storedDraft = unsaved?.draft ?? stored.drafts[root]?.[id] ?? '';
       const restored = unsaved?.items ?? stored.queued[root]?.[id] ?? [];
-      if (reclaimQueue && restored.length > 0) {
+      if (observing) {
+        setDraft('');
+      } else if (reclaimQueue && restored.length > 0) {
         // 重连后将队列按顺序移回草稿并清空队列，不自动发送任何内容。
         setDraft(mergeQueueIntoDraft(storedDraft, restored));
         patchQueue(id, () => ({ items: [], paused: false }));
@@ -742,13 +805,17 @@ export function App({ transport }: { transport: Transport }) {
         setDraft(storedDraft);
         patchQueue(id, () => ({ items: restored, paused: restored.length > 0 }));
       }
-      setInputOwner(id);
+      setReadOnlySessionId(observing ? id : null);
+      setExternalWriterActive(observing && newest.writerActive === true);
+      setInputOwner(observing ? null : id);
       setSettings((current) => ({ ...current, lastSession: { id, projectRoot: root } }));
       let events = newest.events;
       let hasMore = newest.hasMore;
       while (hit !== undefined && hit.seq < Number(events[0]?.seq ?? 0) && hasMore) {
-        const older = await client.call('session.read',
-          { sessionId: id, before: Number(events[0]?.seq), limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean };
+        const older = await client.call(observing ? 'session.observe' : 'session.read', {
+          ...(observing ? { projectRoot: root } : {}),
+          sessionId: id, before: Number(events[0]?.seq), limit: RENDER_WINDOW, fullResults: true,
+        }, 15_000) as { events: Record_[]; hasMore: boolean };
         // 用户已切换会话时忽略过期响应，不更新当前页面。
         if (openRequest.current !== request) return;
         if (older.events.length === 0) { hasMore = false; break; }
@@ -774,9 +841,25 @@ export function App({ transport }: { transport: Transport }) {
       if (openRequest.current === request) setReading(false);
     }
     if (openRequest.current !== request) return;
-    void refreshStatus(id);
+    if (!observing) void refreshStatus(id);
     return true;
-  }, [client, refreshStatus]);
+  }, [client, projectRoot, refreshStatus]);
+
+  useEffect(() => {
+    if (sessionId === null || readOnlySessionId !== sessionId) return;
+    const request = openRequest.current;
+    return observeExternalSession({
+      client,
+      projectRoot,
+      sessionId,
+      limit: RENDER_WINDOW,
+      isCurrent: () => openRequest.current === request && active.current === sessionId,
+      onSnapshot: (snapshot) => {
+        setExternalWriterActive(snapshot.writerActive);
+        setRows((current) => appendProjectedRecords(current, snapshot.events));
+      },
+    });
+  }, [client, projectRoot, readOnlySessionId, sessionId]);
 
   useEffect(() => {
     const bridge = transport.notifications;
@@ -922,7 +1005,7 @@ export function App({ transport }: { transport: Transport }) {
         const deadline = Date.now() + 12_000;
         for (;;) {
           try {
-            await client.call('session.open', projectRoot === '' ? { sessionId } : { sessionId, projectRoot }, 15_000);
+            await client.call('session.open', projectRoot === '' ? { sessionId } : { sessionId, projectRoot }, 60_000);
             break;
           } catch (error) {
             if (code(error) !== 'session_locked' || Date.now() >= deadline) break;
@@ -932,7 +1015,7 @@ export function App({ transport }: { transport: Transport }) {
         await openSession(sessionId, undefined, true);
       } else {
         try {
-          await client.call('workspaces.list', {}, 15_000);
+          await client.call('workspaces.list', {}, 60_000);
           connectionLost.current = false;
           setLink(null);
           setSessionsRevision((current) => current + 1);
@@ -954,7 +1037,7 @@ export function App({ transport }: { transport: Transport }) {
 
   // 按输入所属会话处理输入和轮次结束状态；后台结果不改变当前会话的队列。
   const submit = useCallback(async (text: string, own = sessionId) => {
-    if (quitting.current || text === '' || own === null) return;
+    if (quitting.current || text === '' || own === null || readOnlySessionId === own) return;
     const inView = () => active.current === own;
     // 会话运行期间的输入加入前端队列，轮次结束后按顺序发送，不写入会话记录。
     if (runningIds.includes(own)) {
@@ -1005,7 +1088,7 @@ export function App({ transport }: { transport: Transport }) {
       if (!inView()) setUnread((current) => [...new Set([...current, own])]);
       void refreshStatus(own);
     }
-  }, [client, dropAsksOf, dropQueriesOf, notify, patchQueue, refreshStatus, runningIds, sessionId, t]);
+  }, [client, dropAsksOf, dropQueriesOf, notify, patchQueue, readOnlySessionId, refreshStatus, runningIds, sessionId, t]);
 
   // 轮次结束后每次只发送队首一条。队列暂停时不发送，等待用户明确继续。
   // 连接断开或正在重连时不发送，避免将输入交给已退出的 Host。
@@ -1061,6 +1144,8 @@ export function App({ transport }: { transport: Transport }) {
           initialPermissionNetwork: newSessionPermission.network,
           confirmInitialFullAccess: newSessionPermissionConfirmations.fullAccess,
           confirmInitialNetwork: newSessionPermissionConfirmations.network,
+          confirmInitialPartialWorkspaceWrite: newSessionPermissionConfirmations.partialWorkspaceWrite,
+          confirmInitialWorkspaceTrust: newSessionPermissionConfirmations.workspaceTrust,
         } : {}),
       };
       const created = await client.call('session.create', createParameters, 15_000) as { sessionId: string };
@@ -1204,7 +1289,7 @@ export function App({ transport }: { transport: Transport }) {
   }, [client, refreshStatus, sessionId]);
 
   // 通过 `policy.set` 修改当前会话的策略；传入 `null` 时恢复配置默认值。
-  const setPolicy = useCallback(async (mode: 'ask' | 'auto' | 'never' | null) => {
+  const setPolicy = useCallback(async (mode: PolicySelection | null) => {
     if (sessionId === null) {
       setNewSessionPolicy(mode);
       return;
@@ -1248,28 +1333,61 @@ export function App({ transport }: { transport: Transport }) {
   }, [rows]);
 
   // 命令面板只触发界面已有操作，不实现另一套操作逻辑。
-  const commands = useMemo<Command[]>(() => [
-    { id: 'session.new', title: t('新建会话', 'New conversation'), run: () => void newSession() },
-    { id: 'session.read', title: t('刷新记录', 'Refresh conversation'), run: () => void readBack() },
-    { id: 'session.branch', title: t('分支会话', 'Branch conversation'), run: () => void branchFrom() },
-    { id: 'run.cancel', title: t('停止本轮', 'Stop this turn'), run: () => void cancel() },
-    { id: 'session.compact', title: t('压缩上下文', 'Compact context'), run: () => void compact() },
-    { id: 'settings.open', title: t('打开设置', 'Open settings'), run: () => { setSettingsSection('general'); setSettingsOpen(true); } },
-    { id: 'rail.toggle', title: collapsed ? t('展开侧栏', 'Show sidebar') : t('收起侧栏', 'Hide sidebar'), note: formatKeys(CURRENT['sidebar']), run: () => patch({ collapsed: !collapsed }) },
-    { id: 'answer.copy', title: t('复制最新回答', 'Copy latest answer'), note: formatKeys(CURRENT['copy-answer']), run: copyLastAnswer },
-    ...(status?.templates ?? []).map((item) => ({
-      id: `prompt:${item.command}`,
-      title: t(`使用 /${item.command}`, `Use /${item.command}`),
-      note: item.hint === null || item.hint === undefined ? item.description : `${item.description} ${item.hint}`,
-      run: () => {
-        setDraft(`/${item.command} `);
-        setWalk(-1);
-        composerRef.current?.focus();
-      },
-    })),
-  ], [branchFrom, cancel, collapsed, copyLastAnswer, compact, newSession, patch, readBack, status, t]);
+  const commands = useMemo<Command[]>(() => {
+    const sessionCommands: Command[] = observingExternalSession
+      ? [{
+        id: 'session.read', title: t('刷新观察', 'Refresh observation'),
+        run: () => { if (sessionId !== null) void openSession(sessionId, undefined, false, projectRoot); },
+      }]
+      : [
+        { id: 'session.read', title: t('刷新记录', 'Refresh conversation'), run: () => void readBack() },
+        { id: 'session.branch', title: t('分支会话', 'Branch conversation'), run: () => void branchFrom() },
+        { id: 'run.cancel', title: t('停止本轮', 'Stop this turn'), run: () => void cancel() },
+        { id: 'session.compact', title: t('压缩上下文', 'Compact context'), run: () => void compact() },
+      ];
+    return [
+      { id: 'session.new', title: t('新建会话', 'New conversation'), run: () => void newSession() },
+      ...sessionCommands,
+      { id: 'settings.open', title: t('打开设置', 'Open settings'), run: () => { setSettingsSection('general'); setSettingsOpen(true); } },
+      { id: 'rail.toggle', title: collapsed ? t('展开侧栏', 'Show sidebar') : t('收起侧栏', 'Hide sidebar'), note: formatKeys(CURRENT['sidebar']), run: () => patch({ collapsed: !collapsed }) },
+      { id: 'answer.copy', title: t('复制最新回答', 'Copy latest answer'), note: formatKeys(CURRENT['copy-answer']), run: copyLastAnswer },
+      ...(status?.templates ?? []).map((item) => ({
+        id: `prompt:${item.command}`,
+        title: t(`使用 /${item.command}`, `Use /${item.command}`),
+        note: item.hint === null || item.hint === undefined ? item.description : `${item.description} ${item.hint}`,
+        run: () => {
+          setDraft(`/${item.command} `);
+          setWalk(-1);
+          composerRef.current?.focus();
+        },
+      })),
+    ];
+  }, [branchFrom, cancel, collapsed, copyLastAnswer, compact, newSession, openSession, observingExternalSession, patch, projectRoot, readBack, sessionId, status, t]);
 
-  const answer = useCallback((decision: 'allow' | 'deny') => {
+  const loadApprovalDetails = useCallback(async (ask: Ask) => {
+    if (ask.detailsRef === undefined || ask.detailsLoaded === true || ask.detailsLoading === true) return;
+    setAsks((current) => current.map((item) => item.id === ask.id ? { ...item, detailsLoading: true, detailsError: undefined } : item));
+    try {
+      const result = await client.call('approval.details', { sessionId: ask.sessionId, requestId: ask.detailsRef }, 15_000) as { args?: unknown };
+      if (typeof result.args !== 'object' || result.args === null || Array.isArray(result.args)) throw new Error('approval_details_invalid');
+      const args = result.args as Record<string, unknown>;
+      const change = changeOf(ask.tool, args);
+      const englishChange = changeOf(ask.tool, args, 'en');
+      setAsks((current) => current.map((item) => item.id === ask.id ? {
+        ...item,
+        change: change.summary,
+        content: `${changeBody(change, args)}${item.detailsSuffix?.chinese ?? ''}`,
+        english: { change: englishChange.summary, content: `${changeBody(englishChange, args, 'en')}${item.detailsSuffix?.english ?? ''}` },
+        detailsLoading: false,
+        detailsLoaded: true,
+      } : item));
+    } catch (error) {
+      const failure = code(error);
+      setAsks((current) => current.map((item) => item.id === ask.id ? { ...item, detailsLoading: false, detailsError: failure } : item));
+    }
+  }, [client]);
+
+  const answer = useCallback((decision: 'allow' | 'deny', rememberScope?: 'session' | 'project' | 'user', rememberTarget?: 'file' | 'workspace' | 'tool' | 'command') => {
     const head = asks.find((ask) => ask.sessionId === sessionId);
     if (head === undefined) return;
     setAsks((current) => current.filter((ask) => ask.id !== head.id));
@@ -1279,7 +1397,7 @@ export function App({ transport }: { transport: Transport }) {
       // 先更新本地转录再发送答复，因为 Host 收到答复后可能立即返回工具结果。
       setRows((current) => [...current, metaRow('meta', `${decision === 'allow' ? '已允许' : '已拒绝'} ${head.tool}${head.detail === '' ? '' : `：${head.detail.slice(0, 60)}`}`, `${decision === 'allow' ? 'Allowed' : 'Refused'} ${head.tool}${head.detail === '' ? '' : `: ${head.detail.slice(0, 60)}`}`)]);
     }
-    client.reply(head.id, { decision });
+    client.reply(head.id, { decision, ...(rememberScope === undefined ? {} : { rememberScope }), ...(rememberTarget === undefined ? {} : { rememberTarget }) });
     // 答复后移走按钮焦点，避免下一次 Enter 重复提交。
     // 将焦点移至输入框，让键盘用户可以继续输入。
     (document.activeElement as HTMLElement | null)?.blur();
@@ -1543,10 +1661,24 @@ export function App({ transport }: { transport: Transport }) {
         {status?.usage && <UsageMeter usage={status.usage} running={running} seconds={seconds} />}
         <button className="icon-button" type="button" title={`${t('命令面板', 'Command palette')} (${formatKeys(CURRENT['palette'])})`} aria-label={t('命令面板', 'Command palette')} onClick={() => setPaletteOpen(true)}><Icon name="search" size={17} /></button>
         {sessionId !== null && <SessionActions key={sessionId} client={client} sessionId={sessionId} name={sessionLabel.name} archived={sessionLabel.archived}
+          readOnly={observingExternalSession}
           onLabel={(label) => { setSessionLabel(label); setSessionsRevision((value) => value + 1); }}
           onBranch={() => void branchFrom()} onExport={() => setPanel(menuPanels.find((item) => item.id === 'panel.export') ?? null)}
-          onTasks={() => setPanel(menuPanels.find((item) => item.id === 'panel.branch') ?? null)} onRefresh={() => void readBack()} onCompact={() => void compact()} />}
+          onTasks={() => setPanel(menuPanels.find((item) => item.id === 'panel.branch') ?? null)} onRefresh={() => {
+            if (observingExternalSession) void openSession(sessionId, undefined, false, projectRoot);
+            else void readBack();
+          }} onCompact={() => void compact()} />}
       </header>
+
+      {observingExternalSession && <div className="banner" role="status">
+        <Icon name="warn" size={15} />
+        <span>{externalWriterActive
+          ? t('外控 Agent 正在运行。下方可以查看进度、补充消息、处理待决问题或接管会话。', 'An external agent is controlling this session. Use the panel below to follow progress, send guidance, answer requests, or take over.')
+          : t('此会话当前没有活动写入者。刷新会话可重新打开并取得控制权。', 'This session has no active writer. Refresh to reopen it and take control.')}</span>
+        <button type="button" onClick={() => { if (sessionId !== null) void openSession(sessionId, undefined, false, projectRoot); }}>
+          {externalWriterActive ? t('刷新观察', 'Refresh view') : t('重新打开', 'Reopen session')}
+        </button>
+      </div>}
 
       <TranscriptViewport
         rows={visible}
@@ -1554,7 +1686,7 @@ export function App({ transport }: { transport: Transport }) {
         reading={reading}
         verbosity={verbosity}
         flash={flash}
-        onBranch={(at) => void branchFrom(at)}
+        onBranch={observingExternalSession ? undefined : (at) => void branchFrom(at)}
         onModels={openModelSettings}
         pinned={pinned}
         setPinned={setPinned}
@@ -1588,6 +1720,18 @@ export function App({ transport }: { transport: Transport }) {
         active={sessionId}
         onOpen={(id: string) => void openSession(id)}
         onAnswer={answer}
+        onDetails={(ask) => void loadApprovalDetails(ask)}
+      />}
+
+      {observingExternalSession && externalWriterActive && sessionId !== null && <ExternalSessionControlPanel
+        key={sessionId}
+        client={client}
+        sessionId={sessionId}
+        projectRoot={projectRoot}
+        verbosity={verbosity}
+        onDelta={acceptExternalDelta}
+        onSessionEvent={settleExternalEvent}
+        onTakeover={() => { void openSession(sessionId, undefined, false, projectRoot); }}
       />}
 
       {link !== null && <div className="banner" role="alert">
@@ -1604,7 +1748,9 @@ export function App({ transport }: { transport: Transport }) {
         <button type="button" className="icon-button" aria-label={t('关闭提示', 'Dismiss')} onClick={() => setNotificationProblem(null)}><Icon name="close" size={14} /></button>
       </div>}
 
-      <Composer
+      {observingExternalSession && externalWriterActive && sessionId !== null
+        ? <ExternalSessionComposer client={client} sessionId={sessionId} projectRoot={projectRoot} />
+        : <Composer
         client={client}
         sessionId={sessionId}
         projectRoot={projectRoot}
@@ -1639,6 +1785,7 @@ export function App({ transport }: { transport: Transport }) {
         onPickMention={pickMention}
         onSelectModel={selectModel}
         onManageModel={openModelSettings}
+        onOpenSecurity={openSecuritySettings}
         onSessionMenuChange={setSessionMenuOpen}
         onSetMode={(name) => void setMode(name)}
         onSetPolicy={setPolicy}
@@ -1649,7 +1796,7 @@ export function App({ transport }: { transport: Transport }) {
         onPermissionStatus={(next) => { if (active.current === next.sessionId) setStatus(next); }}
         onStop={() => void cancel()}
         onSend={() => void send()}
-      />
+      />}
     </main>
 
     {panel !== null && <aside className="dock">
@@ -1675,6 +1822,8 @@ export function App({ transport }: { transport: Transport }) {
       patch={patch}
       keyNotice={keyNotice}
       link={link}
+      logs={diagnosticLogs}
+      onStatus={setStatus}
       counts={panelProps.counts}
       waiting={panelProps.waiting}
       onReconnect={() => void reconnect()}

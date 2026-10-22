@@ -66,6 +66,14 @@ function isSessionEvent(value: unknown): value is SessionEvent {
     && (value.kind === undefined || typeof value.kind === 'string');
 }
 
+function externalModelFrom(events: readonly SessionEvent[]): string | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event.kind === 'turnContext' && typeof event.model === 'string' && event.model.trim() !== '') return event.model;
+  }
+  return null;
+}
+
 function isAskQuestion(value: unknown): value is AskQuestion {
   return isRecord(value)
     && typeof value.id === 'string'
@@ -96,6 +104,14 @@ interface TuiStatus {
       readonly network: 'full' | 'partial' | 'unavailable';
       readonly process: 'full' | 'partial' | 'unavailable';
     };
+    readonly profiles: {
+      readonly readOnly: 'full' | 'partial' | 'unavailable';
+      readonly workspaceWrite: 'full' | 'partial' | 'unavailable';
+    };
+    readonly limitations: readonly string[];
+    readonly partialWorkspaceWriteConfirmationRequired: boolean;
+    readonly partialWorkspaceWriteConfirmed: boolean;
+    readonly workspaceTrusted: boolean;
     readonly execution: { readonly available: boolean; readonly code: string | null; readonly reason: string | null };
     readonly changeAllowed: boolean;
     readonly changeReason?: string;
@@ -140,8 +156,10 @@ interface SearchState {
   readonly at: number;
 }
 
-type PickerKind = 'model' | 'mode' | 'policy' | 'permission' | 'permission-network' | 'permission-confirm-full' | 'permission-confirm-network'
+type PickerKind = 'model' | 'mode' | 'policy' | 'permission' | 'permission-network' | 'permission-confirm-full' | 'permission-confirm-network' | 'permission-confirm-partial'
   | 'control' | 'control-action' | 'control-revoke-confirm';
+type PolicyValue = 'ask' | 'auto' | 'none' | 'never';
+type PolicySelection = 'ask' | 'auto' | 'none';
 type AgentGrant = {
   readonly id: string;
   readonly name: string;
@@ -151,9 +169,12 @@ type AgentGrant = {
   readonly maxPermissionProfile: 'read-only' | 'workspace-write' | 'full-access';
   readonly defaultNetwork: 'disabled' | 'policy' | 'unrestricted';
   readonly maxNetwork: 'disabled' | 'policy' | 'unrestricted';
-  readonly defaultPolicy: 'ask' | 'auto' | 'never';
-  readonly allowedPolicies: readonly ('ask' | 'auto' | 'never')[];
+  readonly defaultPolicy: PolicyValue;
+  readonly allowedPolicies: readonly PolicyValue[];
   readonly allowOperator: boolean;
+  readonly allowedMcpServers: readonly string[];
+  readonly allowedMcpTools: readonly string[];
+  readonly confirmedPartialWorkspaceWrite: boolean;
   readonly createdAt: string;
   readonly expiresAt: string | null;
   readonly revokedAt: string | null;
@@ -165,14 +186,42 @@ type ControlWizardValues = {
   maxPermissionProfile?: AgentGrant['maxPermissionProfile'];
   defaultNetwork?: AgentGrant['defaultNetwork'];
   maxNetwork?: AgentGrant['maxNetwork'];
-  defaultPolicy?: AgentGrant['defaultPolicy'];
-  allowedPolicies?: ('ask' | 'auto' | 'never')[];
+  defaultPolicy?: PolicySelection;
+  allowedPolicies?: PolicySelection[];
   allowOperator?: boolean;
+  allowedMcpServers?: string[];
+  allowedMcpTools?: string[];
   expiresAt?: string | null;
   confirmFullAccess?: boolean;
   confirmUnrestrictedNetwork?: boolean;
+  confirmPartialWorkspaceWrite?: boolean;
+  confirmWorkspaceTrust?: boolean;
 };
-type ControlWizard = { readonly step: number; readonly values: ControlWizardValues };
+type McpTrustScope = 'session' | 'project' | 'user';
+type McpServerSummary = {
+  readonly name: string;
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly cwd: string;
+  readonly environmentNames: readonly string[];
+  readonly identityDigest: string;
+  readonly trust: { readonly scope: McpTrustScope; readonly source: 'trusted-ui'; readonly trusted: boolean } | null;
+  readonly trustScopes: Readonly<Record<McpTrustScope, { readonly source: 'trusted-ui'; readonly trusted: boolean } | null>>;
+};
+type McpTrustSnapshot = { readonly version: string; readonly servers: readonly McpServerSummary[] };
+type McpToolsSnapshot = { readonly server: string; readonly identityDigest: string; readonly tools: readonly { readonly name: string; readonly description: string; readonly digest: string }[] };
+type McpTrustPending = {
+  readonly server: string;
+  readonly scope: McpTrustScope;
+  readonly version: string;
+  readonly identityDigest: string;
+};
+type ControlWizard = {
+  readonly step: number;
+  readonly values: ControlWizardValues;
+  readonly mcpServers: readonly string[];
+  readonly mcpTools: readonly string[];
+};
 
 function agentMcpConfig(grant: AgentGrant): string {
   const args = ['mcp-server', '--project', grant.projectRoot, '--grant', grant.id];
@@ -181,9 +230,13 @@ function agentMcpConfig(grant: AgentGrant): string {
 }
 
 function controlWizardNext(step: number, values: ControlWizardValues): number {
-  if (step === 8) return values.maxPermissionProfile === 'full-access' ? 9 : values.maxNetwork === 'unrestricted' ? 10 : -1;
-  if (step === 9) return values.maxNetwork === 'unrestricted' ? 10 : -1;
-  if (step === 10) return -1;
+  if (step === 10) return 11;
+  if (step === 11) return values.maxPermissionProfile !== 'read-only' ? 12
+    : values.maxNetwork === 'unrestricted' ? 14 : -1;
+  if (step === 12) return values.maxPermissionProfile === 'full-access' ? 13
+    : values.maxNetwork === 'unrestricted' ? 14 : -1;
+  if (step === 13) return values.maxNetwork === 'unrestricted' ? 14 : -1;
+  if (step === 14) return -1;
   return step + 1;
 }
 interface RuntimeChoice extends PanelChoice {
@@ -207,6 +260,21 @@ interface AskState {
   readonly content: string;
   readonly backend: string;
   readonly reason: string;
+  readonly rememberable: boolean;
+  readonly rememberScopes: readonly McpTrustScope[];
+  readonly rememberHintKey: 'file' | 'tool' | 'command' | 'mcp' | '';
+  readonly rememberTargetOptions: readonly ('file' | 'workspace' | 'tool' | 'command')[];
+  readonly rememberTarget?: 'file' | 'workspace' | 'tool' | 'command';
+  readonly detailsRef?: string;
+  readonly argumentBytes?: number;
+  readonly argumentSha256?: string;
+  readonly identityDigest?: string;
+  readonly detailsLoading?: boolean;
+  readonly detailsLoaded?: boolean;
+  readonly detailsError?: string;
+  readonly detailsSummary?: string;
+  readonly detailSuffix?: string;
+  readonly external?: boolean;
 }
 
 interface TuiInfo {
@@ -263,6 +331,26 @@ interface SessionPage {
   readonly header: SessionHeader | null;
   readonly endSeq: number | null;
   readonly hasMore: boolean;
+  readonly writerActive?: boolean;
+}
+
+interface ExternalControlSnapshot extends Record<string, unknown> {
+  readonly sessionId: string;
+  readonly operationId?: string;
+  readonly state: 'idle' | 'running' | 'done' | 'failed' | 'cancelled';
+  readonly phase?: string | null;
+  readonly progress?: TuiProgress | null;
+  readonly pendingInteractions: readonly {
+    readonly requestId: string;
+    readonly sessionId: string;
+    readonly type: 'approval' | 'question';
+    readonly details: Record<string, unknown>;
+  }[];
+  readonly events: readonly Record<string, unknown>[];
+  readonly nextCursor: number;
+  readonly eventGap?: boolean;
+  readonly firstAvailableCursor?: number;
+  readonly queue?: readonly { readonly queueItemId: string; readonly inputCharacters: number; readonly source: 'human' | 'controller' }[];
 }
 
 interface TuiConfigResult extends Record<string, unknown> {
@@ -276,6 +364,9 @@ interface TuiRequestResults {
   readonly 'session.open': { readonly sessionId: string };
   readonly 'session.close': { readonly sessionId: string };
   readonly 'session.read': SessionPage;
+  readonly 'session.observe': SessionPage & { readonly writerActive: boolean };
+  readonly 'session.control': ExternalControlSnapshot;
+  readonly 'approval.details': { readonly requestId: string; readonly sessionId: string; readonly argumentSha256: string; readonly args: Record<string, unknown> };
   readonly 'session.export': Exported;
   readonly 'session.branch': BranchResult;
   readonly 'session.label': { readonly sessionId: string; readonly name: string; readonly archived: boolean };
@@ -294,6 +385,9 @@ interface TuiRequestResults {
   readonly 'agent-control.list': AgentControlSnapshot;
   readonly 'agent-control.create': AgentControlSnapshot;
   readonly 'agent-control.revoke': AgentControlSnapshot;
+  readonly 'mcp.trust.list': McpTrustSnapshot;
+  readonly 'mcp.trust.set': { readonly server: string; readonly scope: McpTrustScope; readonly trusted: boolean; readonly version?: string };
+  readonly 'mcp.trust.tools': McpToolsSnapshot;
   readonly 'session.compact': { readonly sessionId: string; readonly [key: string]: unknown };
 }
 
@@ -316,6 +410,7 @@ interface QuestionState {
   readonly picked: Readonly<Record<string, { readonly raw: string; readonly answer: AskAnswer | null }>>;
   readonly answers?: readonly (AskAnswer | null | undefined)[];
   readonly custom?: string;
+  readonly external?: boolean;
 }
 
 // 将命令表和纯函数导出，供测试及其他界面逻辑使用。
@@ -526,7 +621,9 @@ function approvalBody(tool: string, args: Record<string, unknown>, locale: Local
 
 function Row({ row, expanded, columns, locale = 'zh' }: { readonly row: TranscriptItem; readonly expanded: boolean; readonly columns: number; readonly locale?: Locale }) {
   const t = (zh: string, en: string) => chooseText(locale, zh, en);
-  if (row.kind === 'question') return h(Text, { color: 'cyan' }, `› ${row.text}`);
+  if (row.kind === 'question') return h(Text, { color: 'cyan' }, row.source === 'controller'
+    ? `← ${chooseText(locale, '外部 Agent', 'External agent')}: ${row.text}`
+    : `› ${row.text}`);
   if (row.kind === 'reasoning') {
     const folded = foldText(row.text, expanded, 1);
     return h(Fragment, null,
@@ -598,6 +695,13 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [controlSnapshot, setControlSnapshot] = useState<AgentControlSnapshot | null>(null);
   const [controlTarget, setControlTarget] = useState<string | null>(null);
   const [controlWizard, setControlWizard] = useState<ControlWizard | null>(null);
+  const [mcpTrustPending, setMcpTrustPending] = useState<McpTrustPending | null>(null);
+  const [externalControl, setExternalControl] = useState(false);
+  const [externalSnapshot, setExternalSnapshot] = useState<ExternalControlSnapshot | null>(null);
+  const [externalModel, setExternalModel] = useState<string | null>(null);
+  const resolvedExternalInteractions = useRef(new Set<string>());
+  useEffect(() => { resolvedExternalInteractions.current.clear(); }, [sessionId]);
+  useEffect(() => { setMcpTrustPending(null); }, [sessionId]);
   const pickerRequest = useRef(0);
   const [draft, setDraft] = useState('');
   const [caret, setCaret] = useState(0);
@@ -752,7 +856,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
 
   const refreshStatus = useCallback(async () => {
     // Ink 已退出时不再向已关闭的连接发送状态更新。
-    if (!alive.current) return;
+    if (!alive.current || externalControl) return;
     try {
       const current = await client.request('status.get', { sessionId });
       if (activeSession.current === sessionId) setStatus(current);
@@ -761,7 +865,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       setStatus(null);
       push({ kind: 'error', text: t(`无法读取状态：${errorCode(error) ?? errorMessage(error) ?? String(error)}`, `Could not read status: ${errorCode(error) ?? errorMessage(error) ?? String(error)}`) });
     }
-  }, [client, push, sessionId, t]);
+  }, [client, externalControl, push, sessionId, t]);
 
   useEffect(() => {
     const resize = () => setGeometry({ columns: stdout?.columns ?? 80, rows: stdout?.rows ?? 24 });
@@ -827,21 +931,167 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       const shown = typeof params.command === 'string' ? params.command : typeof args.path === 'string' ? args.path : typeof args.url === 'string' ? args.url : typeof args.server === 'string' ? `mcp:${args.server}/${typeof args.tool === 'string' ? args.tool : ''}` : '';
       const binding = isRecord(params.scriptBinding) ? params.scriptBinding : undefined;
       const bindingText = binding === undefined ? '' : `\n\n${chooseText(locale, '脚本审批绑定', 'Script approval binding')}\n${chooseText(locale, '路径', 'Path')}: ${String(binding.path ?? '')}\nSHA-256: ${String(binding.sha256 ?? '')}\n${chooseText(locale, '解释器', 'Interpreter')}: ${String(binding.interpreter ?? '')}\n${chooseText(locale, '工作区', 'Workspace')}: ${String(binding.workspaceRoot ?? '')}\n${chooseText(locale, '权限', 'Permission')}: ${isRecord(binding.permission) ? `${String(binding.permission.profile ?? '')} / ${String(binding.permission.network ?? '')} / ${JSON.stringify(binding.permission.capabilities ?? {})}` : ''}`;
+      const detailsSummary = typeof params.contentBytes === 'number' && typeof params.contentSha256 === 'string'
+        ? chooseText(locale, `内容 ${params.contentBytes} 字节 · SHA-256 ${params.contentSha256}`, `Content ${params.contentBytes} bytes · SHA-256 ${params.contentSha256}`)
+        : typeof params.argumentSha256 === 'string'
+          ? chooseText(locale, `参数 ${params.argumentBytes ?? 0} 字节 · SHA-256 ${params.argumentSha256}`, `Arguments ${params.argumentBytes ?? 0} bytes · SHA-256 ${params.argumentSha256}`)
+          : '';
       setAsk({
         id: message.id,
         tool: params.tool,
         detail: shown === '' ? JSON.stringify(args) : String(shown),
         change: changeSummary(params.tool, args, locale),
         reason: typeof params.reason === 'string' ? params.reason : '',
-        content: `${approvalBody(params.tool, args, locale)}${bindingText}`,
+        content: `${detailsSummary === '' ? '' : `${detailsSummary}\n\n`}${approvalBody(params.tool, args, locale)}${bindingText}`,
         // 显示本次判定和执行使用的命令语法及可执行文件。
         backend: typeof params.shell === 'string' ? `${params.shell} · ${typeof params.executable === 'string' ? params.executable : ''}` : '',
+        rememberable: params.rememberable === true,
+        rememberScopes: Array.isArray(params.rememberScopes)
+          ? params.rememberScopes.filter((scope): scope is McpTrustScope => scope === 'session' || scope === 'project' || scope === 'user')
+          : [],
+        rememberHintKey: params.rememberHintKey === 'file' || params.rememberHintKey === 'command' || params.rememberHintKey === 'mcp' || params.rememberHintKey === 'tool' ? params.rememberHintKey : '',
+        rememberTargetOptions: Array.isArray(params.rememberTargetOptions)
+          ? params.rememberTargetOptions.filter((target): target is 'file' | 'workspace' | 'tool' | 'command' => target === 'file' || target === 'workspace' || target === 'tool' || target === 'command')
+          : [],
+        ...(typeof params.detailsRef === 'string' ? { detailsRef: params.detailsRef } : {}),
+        ...(typeof params.argumentBytes === 'number' ? { argumentBytes: params.argumentBytes } : {}),
+        ...(typeof params.argumentSha256 === 'string' ? { argumentSha256: params.argumentSha256 } : {}),
+        ...(typeof params.identityDigest === 'string' ? { identityDigest: params.identityDigest } : {}),
+        detailsSummary,
+        detailSuffix: bindingText,
+        detailsLoaded: false,
+        detailsLoading: false,
       });
     };
     client.onNotification(onNotification);
     client.onRequest(onRequest);
     void refreshStatus();
   }, [client, locale, push, refreshStatus, sessionId]);
+
+  useEffect(() => {
+    if (!externalControl) return undefined;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let cursor = 0;
+    let operationId: string | null = null;
+    let inFlight = false;
+    let lastFailure = '';
+    const projectRoot = info.boundary ?? '';
+    const schedule = (delayMs: number) => {
+      if (timer !== undefined) clearTimeout(timer);
+      timer = setTimeout(() => { timer = undefined; void poll(); }, delayMs);
+    };
+    const refreshTranscript = async () => {
+      const read = await client.request('session.observe', { projectRoot, sessionId, limit: 400, fullResults: true });
+      if (disposed || activeSession.current !== sessionId) return;
+      setRows(read.events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq }))));
+      setExternalModel(externalModelFrom(read.events));
+    };
+    const poll = async () => {
+      if (disposed || inFlight) return;
+      inFlight = true;
+      let nextDelay = 1_000;
+      try {
+        const snapshot = await client.request('session.control', {
+          projectRoot,
+          sessionId,
+          request: { action: 'status', after: cursor, limit: 50, waitMs: 10_000 },
+        }) as ExternalControlSnapshot;
+        if (disposed || activeSession.current !== sessionId) return;
+        const currentOperationId = snapshot.operationId ?? null;
+        if (currentOperationId !== operationId) {
+          operationId = currentOperationId;
+          cursor = 0;
+          setExternalSnapshot(snapshot);
+          nextDelay = 0;
+          return;
+        }
+        setExternalSnapshot(snapshot);
+        setRunning(snapshot.state === 'running');
+        for (const event of snapshot.events) {
+          if (event.kind === 'model.delta' && (event.type === 'text' || event.type === 'reasoning') && typeof event.text === 'string') {
+            setLive((current) => ({ ...current, [event.type as 'text' | 'reasoning']: current[event.type as 'text' | 'reasoning'] + event.text }));
+          }
+          if (event.kind === 'session.event' && typeof event.eventKind === 'string') {
+            if (event.eventKind === 'assistant') setLive((current) => ({ ...current, text: '' }));
+            if (event.eventKind === 'reasoning') setLive((current) => ({ ...current, reasoning: '' }));
+            void refreshTranscript().catch((error: unknown) => push({ kind: 'error', text: t(`外控会话转录读取失败：${errorCode(error) ?? 'session_observe_failed'}`, `Could not refresh external transcript: ${errorCode(error) ?? 'session_observe_failed'}`) }));
+          }
+        }
+        if (snapshot.eventGap) {
+          cursor = Math.max(0, (snapshot.firstAvailableCursor ?? cursor + 1) - 1);
+          void refreshTranscript().catch((error: unknown) => push({ kind: 'error', text: t(`外控会话转录读取失败：${errorCode(error) ?? 'session_observe_failed'}`, `Could not refresh external transcript: ${errorCode(error) ?? 'session_observe_failed'}`) }));
+        }
+        cursor = Math.max(cursor, snapshot.nextCursor);
+        const question = snapshot.pendingInteractions.find((item) => item.type === 'question'
+          && !resolvedExternalInteractions.current.has(item.requestId));
+        if (question !== undefined && Array.isArray(question.details.questions) && question.details.questions.every(isAskQuestion)) {
+          setQuery((current) => current?.external === true && current.id === question.requestId
+            ? current
+            : { id: question.requestId, questions: question.details.questions as AskQuestion[], at: 0, picked: {}, external: true });
+        } else setQuery((current) => current?.external === true ? null : current);
+        const approval = snapshot.pendingInteractions.find((item) => item.type === 'approval'
+          && !resolvedExternalInteractions.current.has(item.requestId));
+        if (approval !== undefined) {
+          const args = isRecord(approval.details.args) ? approval.details.args : {};
+          const shown = typeof approval.details.command === 'string' ? approval.details.command
+            : typeof args.path === 'string' ? args.path
+              : typeof args.url === 'string' ? args.url
+                : typeof args.server === 'string' ? `mcp:${args.server}/${typeof args.tool === 'string' ? args.tool : ''}`
+                  : '';
+          const detailsSummary = typeof approval.details.contentBytes === 'number' && typeof approval.details.contentSha256 === 'string'
+            ? chooseText(locale, `内容 ${approval.details.contentBytes} 字节 · SHA-256 ${approval.details.contentSha256}`, `Content ${approval.details.contentBytes} bytes · SHA-256 ${approval.details.contentSha256}`)
+            : typeof approval.details.argumentSha256 === 'string'
+              ? chooseText(locale, `参数 ${approval.details.argumentBytes ?? 0} 字节 · SHA-256 ${approval.details.argumentSha256}`, `Arguments ${approval.details.argumentBytes ?? 0} bytes · SHA-256 ${approval.details.argumentSha256}`)
+              : '';
+          const approvalTool = typeof approval.details.tool === 'string' ? approval.details.tool : 'unknown';
+          setAsk((current) => current?.external === true && current.id === approval.requestId
+            ? current
+            : {
+                id: approval.requestId,
+                tool: approvalTool,
+                detail: shown === '' ? JSON.stringify(args) : shown,
+                change: changeSummary(approvalTool, args, locale),
+                content: `${detailsSummary === '' ? '' : `${detailsSummary}\n\n`}${approvalBody(approvalTool, args, locale)}`,
+                backend: typeof approval.details.shell === 'string' ? `${approval.details.shell} · ${typeof approval.details.executable === 'string' ? approval.details.executable : ''}` : '',
+                reason: typeof approval.details.reason === 'string' ? approval.details.reason : '',
+                rememberable: approval.details.rememberable === true,
+                rememberScopes: Array.isArray(approval.details.rememberScopes)
+                  ? approval.details.rememberScopes.filter((scope): scope is McpTrustScope => scope === 'session' || scope === 'project' || scope === 'user')
+                  : [],
+                rememberHintKey: approval.details.rememberHintKey === 'file' || approval.details.rememberHintKey === 'command'
+                  || approval.details.rememberHintKey === 'mcp' || approval.details.rememberHintKey === 'tool'
+                  ? approval.details.rememberHintKey
+                  : '',
+                rememberTargetOptions: Array.isArray(approval.details.rememberTargetOptions)
+                  ? approval.details.rememberTargetOptions.filter((target): target is 'file' | 'workspace' | 'tool' | 'command' => target === 'file' || target === 'workspace' || target === 'tool' || target === 'command')
+                  : [],
+                ...(typeof approval.details.detailsRef === 'string' ? { detailsRef: approval.details.detailsRef } : {}),
+                ...(typeof approval.details.argumentBytes === 'number' ? { argumentBytes: approval.details.argumentBytes } : {}),
+                ...(typeof approval.details.argumentSha256 === 'string' ? { argumentSha256: approval.details.argumentSha256 } : {}),
+                ...(typeof approval.details.identityDigest === 'string' ? { identityDigest: approval.details.identityDigest } : {}),
+                detailsSummary,
+                detailsLoaded: false,
+                detailsLoading: false,
+                external: true,
+              });
+        } else setAsk((current) => current?.external === true ? null : current);
+        lastFailure = '';
+        nextDelay = snapshot.state === 'running' ? 0 : 1_000;
+      } catch (error) {
+        const code = errorCode(error) ?? 'external_control_failed';
+        setRunning(false);
+        if (lastFailure !== code) push({ kind: 'error', text: t(`外控会话不可用：${code}`, `External session unavailable: ${code}`) });
+        lastFailure = code;
+        nextDelay = 1_000;
+      } finally {
+        inFlight = false;
+        if (!disposed && timer === undefined) schedule(nextDelay);
+      }
+    };
+    void poll();
+    return () => { disposed = true; if (timer !== undefined) clearTimeout(timer); };
+  }, [client, externalControl, info.boundary, locale, push, sessionId, t]);
 
   // 终端标题显示模型、项目根和当前会话，切换会话时同步更新。
   // 非交互终端不写标题控制序列，避免污染管道输出。
@@ -877,6 +1127,22 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     remember(text);
     terminalReceived.current = false;
     setLive({ text: '', reasoning: '' });
+    if (externalControl) {
+      try {
+        const accepted = await client.request('session.control', {
+          projectRoot: info.boundary ?? '',
+          sessionId,
+          request: { action: 'send', input: text },
+        }) as { readonly accepted?: boolean; readonly queued?: boolean };
+        setRunning(true);
+        push({ kind: 'meta', text: accepted.queued === true
+          ? t('消息已加入外控会话队列', 'Message queued for the external session')
+          : t('消息已发送到外控会话', 'Message sent to the external session') });
+      } catch (error) {
+        push({ kind: 'error', text: t(`外控消息发送失败：${errorCode(error) ?? 'external_control_failed'}`, `Could not send external message: ${errorCode(error) ?? 'external_control_failed'}`) });
+      }
+      return;
+    }
     setRunning(true);
     try {
       await client.request('run.start', { sessionId, input: text });
@@ -897,7 +1163,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       setRunning(false);
       void refreshStatus();
     }
-  }, [client, push, refreshStatus, remember, sessionId, t]);
+  }, [client, externalControl, info.boundary, push, refreshStatus, remember, sessionId, t]);
 
   // 按第一个词解析命令，完整保留其余文本作为参数。
   const closePanel = useCallback(() => {
@@ -910,11 +1176,15 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     network,
     confirmFullAccess = false,
     confirmNetwork = false,
+    confirmPartialWorkspaceWrite = false,
+    confirmWorkspaceTrust = false,
   }: {
     readonly profile?: 'read-only' | 'workspace-write' | 'full-access';
     readonly network?: 'policy' | 'unrestricted' | 'disabled';
     readonly confirmFullAccess?: boolean;
     readonly confirmNetwork?: boolean;
+    readonly confirmPartialWorkspaceWrite?: boolean;
+    readonly confirmWorkspaceTrust?: boolean;
   }) => {
     const own = sessionId;
     const current = await client.request('status.get', { sessionId: own }).catch((error: unknown) => requestFailure(error, 'status_read_failed'));
@@ -933,6 +1203,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       ...(network === undefined ? {} : { permissionNetwork: network }),
       ...(confirmFullAccess ? { confirmFullAccess: true } : {}),
       ...(confirmNetwork ? { confirmNetwork: true } : {}),
+      ...(confirmPartialWorkspaceWrite ? { confirmPartialWorkspaceWrite: true } : {}),
+      ...(confirmWorkspaceTrust ? { confirmWorkspaceTrust: true } : {}),
     }).catch((error: unknown) => requestFailure(error, 'permission_change_failed'));
     if ('code' in changed) {
       push({ kind: 'error', text: t(`无法修改会话权限：${changed.code}`, `Could not change session permissions: ${changed.code}`) });
@@ -1016,6 +1288,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         available = [
           { id: 'ask', label: t('逐次审批', 'Ask for each tool'), description: t('工具执行前询问；已有拒绝规则和访问边界继续生效。', 'Ask before tools execute; denial rules and access boundaries still apply.') },
           { id: 'auto', label: t('自动判定', 'Automatic decisions'), description: t('由现有规则判定；仍可能请求审批，访问边界不变。', 'Use the existing rules; approvals may still be requested and access boundaries stay unchanged.') },
+          { id: 'none', label: t('不受审批', 'No approval'), description: t('普通权限内工具不等待逐项审批；工作区边界、拒绝规则和独立信任要求仍生效。', 'Ordinary in-bound tools do not wait for approval; workspace boundaries, deny rules, and separate trust requirements remain active.') },
           { id: 'reset', label: t('使用配置默认', 'Use configured default'), description: t('撤销当前会话的审批方式覆盖。', 'Clear this session’s approval-mode override.') },
         ];
       } else {
@@ -1039,10 +1312,12 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
             `${t('写入', 'write')} ${capabilities.filesystemWrite}`,
             `${t('网络', 'network')} ${capabilities.network}`,
             `${t('进程', 'process')} ${capabilities.process}`,
+            `${t('只读 Shell', 'read-only Shell')} ${permission.profiles.readOnly}`,
+            `${t('工作区写入 Shell', 'workspace-write Shell')} ${permission.profiles.workspaceWrite}`,
           ].join(' · ');
           available = [
             { id: 'read-only', label: t('只读 · read-only', 'Read only · read-only'), description: t(`当前：${permission.profile} · 网络 ${permission.network} · 隔离能力：${enforcement} · Shell ${permission.execution.available ? '可用' : `不可用（${permission.execution.code ?? '能力不足'}）`}`, `Current: ${permission.profile} · network ${permission.network} · isolation: ${enforcement} · Shell ${permission.execution.available ? 'available' : `unavailable (${permission.execution.code ?? 'capability limits'})`}`) },
-            { id: 'workspace-write', label: t('工作区可写 · workspace-write', 'Workspace write · workspace-write'), description: t('文件工具限制在工作区；Shell 仅在报告完整隔离时开放。', 'File tools stay within the workspace; Shell runs only when full isolation is available.') },
+            { id: 'workspace-write', label: t('工作区可写 · workspace-write', 'Workspace write · workspace-write'), description: t(`Shell ${permission.profiles.workspaceWrite} · 项目 ${permission.workspaceTrusted ? '已信任' : '未信任'}；Windows 部分隔离可能无法限制读取、网络及硬链接或父目录删除权限越界；正常清理会撤销临时 ACE，但自动继承元数据标记可能保留。Shell 每次运行使用临时用户配置目录，用户级缓存不会沿用。${permission.limitations[0] ?? ''}`, `Shell ${permission.profiles.workspaceWrite} · project ${permission.workspaceTrusted ? 'trusted' : 'untrusted'}; Windows partial isolation may not restrict reads, network, hard links, or delete-child access on parent folders. Normal cleanup revokes temporary ACEs, but auto-inheritance metadata may remain. Each Shell command uses a temporary user profile, so user-level caches are not reused. ${permission.limitations[0] ?? ''}`) },
             { id: 'full-access', label: t('完整访问 · full-access', 'Full access · full-access'), description: t('需要再次确认。范围仍受当前 OS 用户权限和 Policy 硬拒绝约束。', 'Requires a second confirmation. OS user permissions and hard Policy denials still apply.') },
             { id: 'network', label: t(`网络：${permission.network}`, `Network: ${permission.network}`), description: t('单独设置网络访问；这不会改变文件权限档位。', 'Configure network access separately; this does not change the filesystem profile.') },
           ];
@@ -1055,6 +1330,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         } else if (kind === 'permission-confirm-full') {
           available = [
             { id: 'confirm', label: t('我确认启用 full-access', 'Confirm full-access'), description: t(`允许当前 OS 用户可访问的文件和进程。Policy 与硬拒绝适用于 Host 工具调用；已加载的扩展是可信代码，可绕过这些检查直接使用 OS 能力。当前 Shell：${permission.execution.available ? '可用' : `不可用（${permission.execution.code ?? permission.execution.reason ?? '隔离能力不足'}）`}`, `Allow files and processes available to the current OS user. Policy and hard denials apply to Host tool calls; loaded extensions are trusted code and can use OS capabilities directly. Shell: ${permission.execution.available ? 'available' : `unavailable (${permission.execution.code ?? permission.execution.reason ?? 'sandbox limits'})`}`) },
+            { id: 'cancel', label: t('取消', 'Cancel') },
+          ];
+        } else if (kind === 'permission-confirm-partial') {
+          available = [
+            { id: 'confirm', label: t('我信任此项目并接受适用的部分隔离限制', 'Trust this project and accept applicable partial-isolation limits'), description: t('Host 会在执行时检查平台。若使用 Windows 部分隔离，Shell 无法限制文件读取或网络；硬链接、重解析点或可写父目录删除权限可能越界，也不适合运行恶意代码。正常清理会撤销临时 ACE，但自动继承元数据标记可能保留。Shell 每次运行使用临时用户配置目录，用户级缓存不会沿用。', 'The Host checks the backend at execution time. If it uses Windows partial isolation, Shell cannot restrict file reads or network; hard links, reparse points, or delete-child rights on writable parent folders may escape the boundary, so it is not a container for hostile code. Normal cleanup revokes temporary ACEs, but auto-inheritance metadata may remain. Each Shell command uses a temporary user profile, so user-level caches are not reused.') },
             { id: 'cancel', label: t('取消', 'Cancel') },
           ];
         } else {
@@ -1080,6 +1360,101 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   }, [client, controlSnapshot, controlTarget, info.boundary, modes, push, sessionId, t]);
 
   const runCommand = useCallback((name: string, argument = '') => {
+    if (name === 'mcp') {
+      const [action = 'list', serverName = '', scopeText = ''] = argument.trim().split(/\s+/, 3);
+      const scopes: readonly McpTrustScope[] = ['session', 'project', 'user'];
+      const scope = scopes.includes(scopeText as McpTrustScope) ? scopeText as McpTrustScope : undefined;
+      if (action === 'confirm') {
+        const pending = mcpTrustPending;
+        if (pending === null) {
+          push({ kind: 'error', text: t('没有待确认的 MCP Server 信任请求。', 'No MCP server trust request is pending.') });
+          return;
+        }
+        void (async () => {
+          try {
+            const snapshot = await client.request('mcp.trust.list', { projectRoot: info.boundary, sessionId });
+            const current = snapshot.servers.find((server) => server.name === pending.server);
+            if (current === undefined || current.identityDigest !== pending.identityDigest) {
+              setMcpTrustPending(null);
+              throw new Error('mcp_server_config_changed');
+            }
+            await client.request('mcp.trust.set', {
+              projectRoot: info.boundary, sessionId, server: pending.server, identityDigest: pending.identityDigest, scope: pending.scope, trusted: true,
+              confirmTrust: true, confirmExternalAccess: true,
+              ...(pending.scope === 'session' ? {} : { version: snapshot.version }),
+            });
+            setMcpTrustPending(null);
+            push({ kind: 'meta', text: t(`已在${pending.scope}范围信任 ${pending.server}。`, `${pending.server} is trusted at ${pending.scope} scope.`) });
+          } catch (error) {
+            push({ kind: 'error', text: t(`MCP Server 未获信任：${errorCode(error) ?? errorMessage(error) ?? 'mcp_trust_failed'}`, `MCP server was not trusted: ${errorCode(error) ?? errorMessage(error) ?? 'mcp_trust_failed'}`) });
+          }
+        })();
+        return;
+      }
+      if (action === 'list' || action === '') {
+        void client.request('mcp.trust.list', { projectRoot: info.boundary, sessionId }).then((snapshot) => {
+          const lines = snapshot.servers.length === 0 ? [t('当前项目没有配置 MCP Server。', 'No MCP servers are configured for this project.')]
+            : snapshot.servers.map((server) => `${server.name} · ${server.trust === null ? t('未信任', 'untrusted') : server.trust.trusted ? t(`已信任 ${server.trust.scope}（可信本机界面）`, `trusted ${server.trust.scope} (trusted local UI)`) : t(`已阻止 ${server.trust.scope}`, `blocked ${server.trust.scope}`)} · ${server.command} ${server.args.join(' ')} · cwd ${server.cwd}`);
+          push({ kind: 'meta', text: lines.join('\n') });
+        }, (error: unknown) => push({ kind: 'error', text: t(`无法读取 MCP Server：${errorCode(error) ?? 'mcp_trust_list_failed'}`, `Could not read MCP servers: ${errorCode(error) ?? 'mcp_trust_list_failed'}`) }));
+        return;
+      }
+      if (action === 'trust') {
+        if (serverName === '' || scope === undefined) {
+          push({ kind: 'error', text: t('用法：/mcp trust <Server> <session|project|user>', 'Usage: /mcp trust <server> <session|project|user>') });
+          return;
+        }
+        if (scope === 'session' && sessionId === '') {
+          push({ kind: 'error', text: t('当前没有会话，不能保存会话范围的信任。', 'There is no active session for session-scoped trust.') });
+          return;
+        }
+        void client.request('mcp.trust.list', { projectRoot: info.boundary, sessionId }).then((snapshot) => {
+          const server = snapshot.servers.find((item) => item.name === serverName);
+          if (server === undefined) throw new Error('mcp_server_unknown');
+          setMcpTrustPending({ server: server.name, scope, version: snapshot.version, identityDigest: server.identityDigest });
+          push({ kind: 'meta', text: t(
+            `待确认：${server.name}\n程序：${server.command}\n参数：${server.args.join(' ') || '无'}\n工作目录：${server.cwd}\n环境变量名：${server.environmentNames.join(', ') || '无'}\n它在 Shell 沙箱外运行，可访问当前 OS 用户可访问的文件和网络。输入 /mcp confirm 确认信任范围 ${scope}。`,
+            `Pending trust: ${server.name}\nProgram: ${server.command}\nArguments: ${server.args.join(' ') || 'none'}\nWorking directory: ${server.cwd}\nEnvironment variable names: ${server.environmentNames.join(', ') || 'none'}\nIt runs outside the Shell sandbox and may access files and networks available to this OS user. Type /mcp confirm to trust at ${scope} scope.`,
+          ) });
+        }, (error: unknown) => push({ kind: 'error', text: t(`无法读取 MCP Server：${errorCode(error) ?? 'mcp_trust_list_failed'}`, `Could not read MCP server: ${errorCode(error) ?? 'mcp_trust_list_failed'}`) }));
+        return;
+      }
+      if (action === 'revoke') {
+        if (serverName === '' || scope === undefined) {
+          push({ kind: 'error', text: t('用法：/mcp revoke <Server> <session|project|user>', 'Usage: /mcp revoke <server> <session|project|user>') });
+          return;
+        }
+        void (async () => {
+          try {
+            const snapshot = await client.request('mcp.trust.list', { projectRoot: info.boundary, sessionId });
+            const server = snapshot.servers.find((item) => item.name === serverName);
+            if (server === undefined) throw new Error('mcp_server_unknown');
+            await client.request('mcp.trust.set', {
+              projectRoot: info.boundary, sessionId, server: serverName, identityDigest: server.identityDigest, scope, trusted: false,
+              ...(scope === 'session' ? {} : { version: snapshot.version }),
+            });
+            setMcpTrustPending(null);
+            push({ kind: 'meta', text: t(`已撤销 ${serverName} 的 ${scope} 信任。`, `Revoked ${scope} trust for ${serverName}.`) });
+          } catch (error) {
+            push({ kind: 'error', text: t(`撤销 MCP Server 信任失败：${errorCode(error) ?? errorMessage(error) ?? 'mcp_trust_failed'}`, `Could not revoke MCP server trust: ${errorCode(error) ?? errorMessage(error) ?? 'mcp_trust_failed'}`) });
+          }
+        })();
+        return;
+      }
+      if (action === 'tools') {
+        if (serverName === '') {
+          push({ kind: 'error', text: t('用法：/mcp tools <Server>', 'Usage: /mcp tools <server>') });
+          return;
+        }
+        push({ kind: 'meta', text: t(`正在启动已信任的 ${serverName} 并读取工具清单；不会调用工具。`, `Starting trusted server ${serverName} to list tools; no tools will be called.`) });
+        void client.request('mcp.trust.tools', { projectRoot: info.boundary, sessionId, server: serverName }).then((listed) => {
+          push({ kind: 'meta', text: listed.tools.map((tool) => `${tool.name}${tool.description === '' ? '' : ` · ${tool.description}`}`).join('\n') || t('此 Server 没有工具。', 'This server has no tools.') });
+        }, (error: unknown) => push({ kind: 'error', text: t(`无法读取 MCP 工具：${errorCode(error) ?? 'mcp_tool_list_failed'}`, `Could not read MCP tools: ${errorCode(error) ?? 'mcp_tool_list_failed'}`) }));
+        return;
+      }
+      push({ kind: 'error', text: t('用法：/mcp [list|trust <Server> <scope>|confirm|revoke <Server> <scope>|tools <Server>]', 'Usage: /mcp [list|trust <server> <scope>|confirm|revoke <server> <scope>|tools <server>]') });
+      return;
+    }
     if (name === 'trust') {
       if (argument === '') {
         push({ kind: 'meta', text: t(`工作区：${info.boundary ?? ''}\n使用 /trust revoke 撤销信任并退出；工具审批仍按当前设置执行。`, `Workspace: ${info.boundary ?? ''}\nUse /trust revoke to revoke trust and exit. Tool approvals still use the current policy.`) });
@@ -1103,9 +1478,22 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           push({ kind: 'error', text: t('当前没有已选择的项目目录。', 'No project directory is selected.') });
           return;
         }
-        setControlWizard({ step: 0, values: {} });
-        setPanel(null);
-        push({ kind: 'meta', text: t('开始创建授权；每一步按 Enter 确认，输入 cancel 可取消。', 'Grant setup started. Press Enter after each answer; type cancel to stop.') });
+        void (async () => {
+          try {
+            const trust = await client.request('mcp.trust.list', { projectRoot: info.boundary });
+            const mcpServers = trust.servers.filter((server) =>
+              server.trustScopes.project?.trusted === true || server.trustScopes.user?.trusted === true,
+            ).map((server) => server.name);
+            setControlWizard({ step: 0, values: {}, mcpServers, mcpTools: [] });
+            setPanel(null);
+            push({ kind: 'meta', text: t(
+              `开始创建授权；每一步按 Enter 确认，输入 cancel 可取消。已信任的 MCP Server：${mcpServers.join(', ') || '无'}`,
+              `Grant setup started. Press Enter after each answer; type cancel to stop. Trusted MCP servers: ${mcpServers.join(', ') || 'none'}`,
+            ) });
+          } catch (error) {
+            push({ kind: 'error', text: t(`无法读取 MCP Server 信任状态：${errorCode(error) ?? 'mcp_trust_list_failed'}`, `Could not read MCP server trust: ${errorCode(error) ?? 'mcp_trust_list_failed'}`) });
+          }
+        })();
         return;
       }
       if (action !== 'list' && action !== 'copy' && action !== 'revoke') {
@@ -1125,7 +1513,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
                 const source = grant.source === 'trusted-ui'
                   ? t('可信界面创建', 'Trusted UI')
                   : t('历史记录未保存来源', 'Legacy record; source not recorded');
-                return `${grant.id} · ${grant.name} · ${state} · ${t('权限', 'permission')} ${grant.defaultPermissionProfile} / ${grant.maxPermissionProfile} · ${t('网络', 'network')} ${grant.defaultNetwork} / ${grant.maxNetwork} · Policy ${grant.defaultPolicy} (${grant.allowedPolicies.join(', ')}) · ${expiry} · ${t('来源', 'source')} ${source} · ${grant.projectRoot} · ${t('在线状态未知', 'online status unknown')}`;
+                return `${grant.id} · ${grant.name} · ${state} · ${t('权限', 'permission')} ${grant.defaultPermissionProfile} / ${grant.maxPermissionProfile} · ${t('网络', 'network')} ${grant.defaultNetwork} / ${grant.maxNetwork} · Policy ${grant.defaultPolicy} (${grant.allowedPolicies.join(', ')}) · MCP ${grant.allowedMcpServers.join(', ') || t('无', 'none')} · ${t('工具', 'tools')} ${grant.allowedMcpTools.join(', ') || t('无', 'none')} · ${expiry} · ${t('来源', 'source')} ${source} · ${grant.projectRoot} · ${t('在线状态未知', 'online status unknown')}`;
               });
             push({ kind: 'meta', text: lines.join('\n') });
             return;
@@ -1165,13 +1553,22 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       void (async () => {
         try {
           const created = await client.request('session.create', {});
-          try {
-            await client.request('session.close', { sessionId });
-          } catch (error) {
-            await client.request('session.close', { sessionId: created.sessionId });
-            throw error;
+          if (!externalControl) {
+            try {
+              await client.request('session.close', { sessionId });
+            } catch (error) {
+              await client.request('session.close', { sessionId: created.sessionId });
+              throw error;
+            }
           }
           setSessionId(created.sessionId);
+          setExternalControl(false);
+          setExternalSnapshot(null);
+          setExternalModel(null);
+          setRunning(false);
+          setAsk(null);
+          setQuery(null);
+          setStatus(null);
           setDetail(null);
           setSessionPicker(null);
           setRows([]);
@@ -1299,25 +1696,42 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           push({ kind: 'meta', text: t('已打开此会话', 'This session is already open') });
           return;
         }
-        // Host 打开记录时会恢复未完成调用，并使用记录中最后生效的模式。
-        const opened = await client.request('session.open', { sessionId: picked.id, ...(chosenMode === undefined ? {} : { mode: chosenMode }) })
+        // 外控 Host 持有写锁时读取其持久化记录，不抢锁创建第二个写入者。
+        const opened = await client.request('session.open', {
+          sessionId: picked.id,
+          projectRoot: info.boundary ?? '',
+          ...(chosenMode === undefined ? {} : { mode: chosenMode }),
+        })
           .catch((error: unknown) => requestFailure(error, 'session_open_failed'));
-        if ('code' in opened) {
-          push({ kind: 'error', text: t(`无法恢复会话：${opened.code}`, `Could not resume session: ${opened.code}`)
-            + (opened.code === 'resume_mode_changed' ? t(`；请指定工具模式：/resume ${wanted} <模式名>`, `; specify a tool mode: /resume ${wanted} <mode>`) : '')
-            + (opened.code === 'session_is_branch' ? t('；请用 /sub <序号> 查看子任务', '; use /sub <seq> to view the subtask') : '') });
-          return;
-        }
-        const read = await client.request('session.read', { sessionId: picked.id }).catch((error: unknown) => requestFailure(error, 'session_read_failed'));
+        let observingExternal = false;
+        let read: SessionPage & { readonly writerActive?: boolean } | { readonly code: string };
+        if ('code' in opened && opened.code === 'session_locked' && chosenMode === undefined) {
+          read = await client.request('session.observe', { projectRoot: info.boundary ?? '', sessionId: picked.id })
+            .catch((error: unknown) => requestFailure(error, 'session_observe_failed'));
+          observingExternal = !('code' in read) && read.writerActive === true;
+          if (!observingExternal) read = { code: 'session_writer_unavailable' };
+        } else if ('code' in opened) read = opened;
+        else read = await client.request('session.read', { sessionId: picked.id }).catch((error: unknown) => requestFailure(error, 'session_read_failed'));
         if ('code' in read) {
-          push({ kind: 'error', text: t(`会话已打开，但无法读取记录：${read.code}`, `Session opened, but conversation could not be read: ${read.code}`) });
+          push({ kind: 'error', text: t(`无法恢复会话：${read.code}`, `Could not resume session: ${read.code}`)
+            + (read.code === 'resume_mode_changed' ? t(`；请指定工具模式：/resume ${wanted} <模式名>`, `; specify a tool mode: /resume ${wanted} <mode>`) : '')
+            + (read.code === 'session_is_branch' ? t('；请用 /sub <序号> 查看子任务', '; use /sub <seq> to view the subtask') : '') });
           return;
         }
         // TUI 一次只持有一个会话，切换时释放前一会话的运行状态和记录锁。
         // 在同一次渲染中更新会话 ID 和记录内容，确保 Ink 的 Static 列表能按索引正确补画。
         // 释放失败不会阻止打开新会话，但会显示诊断信息。
-        const retiring = client.request('session.close', { sessionId }).catch((error: unknown) => requestFailure(error, 'session_close_failed'));
+        const retiring = externalControl
+          ? Promise.resolve({ sessionId })
+          : client.request('session.close', { sessionId }).catch((error: unknown) => requestFailure(error, 'session_close_failed'));
         setSessionId(picked.id);
+        setExternalControl(observingExternal);
+        setExternalSnapshot(null);
+        setExternalModel(observingExternal ? externalModelFrom(read.events) : null);
+        setRunning(false);
+        setStatus(null);
+        setAsk(null);
+        setQuery(null);
         setSessionPicker(null);
         // 根据记录重建转录，不沿用前一会话的画面状态。
         setRows(read.events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq }))));
@@ -1331,6 +1745,42 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
             + ('code' in retired ? t(`；无法关闭上一会话：${retired.code}`, `; previous session could not close: ${retired.code}`) : '')
             + (row === undefined || row.unanswered === 0 ? '' : t(`；已修复 ${row.unanswered} 条未完成调用`, `; repaired ${row.unanswered} unresolved calls`)),
         });
+      })();
+      return;
+    }
+    if (name === 'takeover') {
+      if (!externalControl) {
+        push({ kind: 'meta', text: t('当前会话不由外部 Agent 控制', 'The current session is not externally controlled') });
+        return;
+      }
+      void (async () => {
+        const transferred = await client.request('session.control', {
+          projectRoot: info.boundary ?? '', sessionId, request: { action: 'takeover' },
+        }).catch((error: unknown) => requestFailure(error, 'external_control_takeover_failed'));
+        if ('code' in transferred) {
+          push({ kind: 'error', text: t(`无法接管外控会话：${transferred.code}`, `Could not take over external session: ${transferred.code}`) });
+          return;
+        }
+        const opened = await client.request('session.open', { sessionId, projectRoot: info.boundary ?? '' })
+          .catch((error: unknown) => requestFailure(error, 'session_open_failed'));
+        if ('code' in opened) {
+          push({ kind: 'error', text: t(`外控已停止，但本地会话无法打开：${opened.code}`, `External control stopped, but the local session could not open: ${opened.code}`) });
+          return;
+        }
+        const read = await client.request('session.read', { sessionId }).catch((error: unknown) => requestFailure(error, 'session_read_failed'));
+        if ('code' in read) {
+          push({ kind: 'error', text: t(`已接管会话，但转录读取失败：${read.code}`, `Session taken over, but its transcript could not be read: ${read.code}`) });
+          return;
+        }
+        setExternalControl(false);
+        setExternalSnapshot(null);
+        setExternalModel(null);
+        setRunning(false);
+        setAsk(null);
+        setQuery(null);
+        setRows(read.events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq }))));
+        await refreshStatus();
+        push({ kind: 'meta', text: t('已接管外控会话，后续输入由 TUI 直接提交。', 'External session taken over; new input now runs through this TUI.') });
       })();
       return;
     }
@@ -1597,8 +2047,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       if (argument === '') { openPicker('policy'); return; }
       void (async () => {
         const asked = argument === 'reset' ? 'default' : argument;
-        if (asked !== 'default' && asked !== 'ask' && asked !== 'auto') {
-          push({ kind: 'error', text: t('用法：/policy ask|auto|reset', 'Usage: /policy ask|auto|reset') });
+        if (asked !== 'default' && asked !== 'ask' && asked !== 'auto' && asked !== 'none') {
+          push({ kind: 'error', text: t('用法：/policy ask|auto|none|reset', 'Usage: /policy ask|auto|none|reset') });
           return;
         }
         const changed = await client.request('policy.set', { sessionId, mode: asked }).catch((error: unknown) => requestFailure(error, 'policy_change_failed'));
@@ -1638,6 +2088,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       if (target === 'full-access') {
         if (status?.permission?.profile === 'full-access') void changePermission({ profile: target });
         else openPicker('permission-confirm-full');
+      } else if (target === 'workspace-write' && status?.permission !== undefined
+        && (!status.permission.workspaceTrusted || status.permission.partialWorkspaceWriteConfirmationRequired
+          && !status.permission.partialWorkspaceWriteConfirmed)) {
+        openPicker('permission-confirm-partial');
       } else {
         void changePermission({ profile: target });
       }
@@ -1720,7 +2174,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     push({ kind: 'error', text: t(`未知命令：/${name}（/help 查看）`, `Unknown command: /${name} (/help to browse)`) });
-  }, [app, changePermission, client, info, keyOverrides, keys, locale, push, queue, queuePaused, refreshStatus, sessionId, status, stdout, t, trust, openPicker, exitTui]);
+  }, [app, changePermission, client, externalControl, info, keyOverrides, keys, locale, mcpTrustPending, push, queue, queuePaused, refreshStatus, sessionId, status, stdout, t, trust, openPicker, exitTui]);
 
   const chooseOption = useCallback((id: string) => {
     const choice = choices.find(item => item.id === id);
@@ -1729,11 +2183,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     closePanel();
     if (currentPanel === 'control') {
       if (id === 'create') {
-        if (info.boundary === undefined || info.boundary === '') {
-          push({ kind: 'error', text: t('当前没有已选择的项目目录。', 'No project directory is selected.') });
-          return;
-        }
-        setControlWizard({ step: 0, values: {} });
+        runCommand('control', 'create');
         return;
       }
       if (id.startsWith('grant:')) {
@@ -1773,6 +2223,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     if (currentPanel === 'permission') {
       if (id === 'network') { openPicker('permission-network'); return; }
       if (id === 'full-access') { openPicker('permission-confirm-full'); return; }
+      if (id === 'workspace-write' && status?.permission !== undefined
+        && (!status.permission.workspaceTrusted || status.permission.partialWorkspaceWriteConfirmationRequired
+          && !status.permission.partialWorkspaceWriteConfirmed)) { openPicker('permission-confirm-partial'); return; }
       if (id === 'read-only' || id === 'workspace-write') void changePermission({ profile: id });
       return;
     }
@@ -1783,6 +2236,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     }
     if (currentPanel === 'permission-confirm-full') {
       if (id === 'confirm') void changePermission({ profile: 'full-access', confirmFullAccess: true });
+      return;
+    }
+    if (currentPanel === 'permission-confirm-partial') {
+      if (id === 'confirm') void changePermission({ profile: 'workspace-write', confirmPartialWorkspaceWrite: true, confirmWorkspaceTrust: true });
       return;
     }
     if (currentPanel === 'permission-confirm-network') {
@@ -1800,6 +2257,34 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       push({ kind: 'meta', text: changed.when === 'round' ? t(`下轮使用 ${changed.model}`, `${changed.model} will apply next turn`) : t(`已切换至 ${changed.model}`, `Switched to ${changed.model}`) });
     }, (error: unknown) => push({ kind: 'error', text: t(`无法选择模型：${errorCode(error) ?? 'model_select_failed'}`, `Could not select model: ${errorCode(error) ?? 'model_select_failed'}`) }));
   }, [choices, panel, closePanel, openPicker, changePermission, runCommand, client, sessionId, refreshStatus, push, t, info.boundary, controlSnapshot, controlTarget]);
+
+  const loadApprovalDetails = useCallback(async () => {
+    const current = ask;
+    const requestId = current?.detailsRef ?? current?.id;
+    if (current === null || requestId === undefined || current.detailsLoaded === true || current.detailsLoading === true) return;
+    setAsk({ ...current, detailsLoading: true, detailsError: undefined });
+    try {
+      const result = current.external
+        ? await client.request('session.control', {
+            projectRoot: info.boundary ?? '', sessionId,
+            request: { action: 'details', requestId },
+          }) as unknown as { args?: unknown }
+        : await client.request('approval.details', { sessionId, requestId });
+      if (!isRecord(result.args)) throw new Error('approval_details_invalid');
+      const args = result.args;
+      const tool = current.tool;
+      setAsk((latest) => latest?.id === current.id ? {
+        ...latest,
+        detail: typeof args.command === 'string' ? args.command : typeof args.path === 'string' ? args.path : latest.detail,
+        change: changeSummary(tool, args, locale),
+        content: `${current.detailsSummary === '' ? '' : `${current.detailsSummary}\n\n`}${approvalBody(tool, args, locale)}${current.detailSuffix ?? ''}`,
+        detailsLoading: false,
+        detailsLoaded: true,
+      } : latest);
+    } catch (error) {
+      setAsk((latest) => latest?.id === current.id ? { ...latest, detailsLoading: false, detailsError: errorCode(error) ?? 'approval_details_failed' } : latest);
+    }
+  }, [ask, client, info.boundary, locale, sessionId]);
 
   // 每次回车提交当前问题并进入下一题；完成最后一题后统一发送全部答案。
   // 空回车表示未回答该题，由 Host 按未答记录，不由界面补造答案。
@@ -1819,11 +2304,23 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     }
     const answers = head.questions.map((one) => picked[one.id]?.answer).filter((one) => one !== undefined && one !== null);
     setQuery(null);
-    push({ kind: 'meta', text: t(`已提交 ${answers.length}/${head.questions.length} 个回答`, `Submitted ${answers.length}/${head.questions.length} answers`) });
-    client.reply(head.id, { answers });
-  }, [client, push, query, resetDraft, t]);
+    push({ kind: 'meta', text: head.external
+      ? t(`已提交 ${answers.length}/${head.questions.length} 个回答（外控会话）`, `Submitted ${answers.length}/${head.questions.length} answers to the external session`)
+      : t(`已提交 ${answers.length}/${head.questions.length} 个回答`, `Submitted ${answers.length}/${head.questions.length} answers`) });
+    if (head.external) {
+      resolvedExternalInteractions.current.add(head.id);
+      void client.request('session.control', {
+        projectRoot: info.boundary ?? '',
+        sessionId,
+        request: { action: 'reply', requestId: head.id, type: 'question', answers },
+      }).catch((error: unknown) => {
+        resolvedExternalInteractions.current.delete(head.id);
+        push({ kind: 'error', text: t(`外控答复失败：${errorCode(error) ?? 'external_control_reply_failed'}`, `Could not submit external answer: ${errorCode(error) ?? 'external_control_reply_failed'}`) });
+      });
+    } else client.reply(head.id, { answers });
+  }, [client, externalControl, info.boundary, push, query, resetDraft, sessionId, t]);
 
-  const advanceControlWizard = useCallback((raw: string) => {
+  const advanceControlWizard = useCallback(async (raw: string) => {
     const wizard = controlWizard;
     if (wizard === null) return false;
     const input = raw.trim();
@@ -1865,32 +2362,75 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         values.maxNetwork = max;
       }
     } else if (wizard.step === 5) {
-      if (!['ask', 'auto', 'never'].includes(input)) { fail(t('请输入 ask、auto 或 never。', 'Enter ask, auto, or never.')); return true; }
-      values.defaultPolicy = input as AgentGrant['defaultPolicy'];
+      if (!['ask', 'auto', 'none'].includes(input)) { fail(t('请输入 ask、auto 或 none。', 'Enter ask, auto, or none.')); return true; }
+      values.defaultPolicy = input as PolicySelection;
     } else if (wizard.step === 6) {
       const allowed = input.split(',').map((part) => part.trim()).filter(Boolean);
-      if (allowed.length === 0 || allowed.some((part) => !['ask', 'auto', 'never'].includes(part))
+      if (allowed.length === 0 || allowed.some((part) => !['ask', 'auto', 'none'].includes(part))
         || new Set(allowed).size !== allowed.length || !allowed.includes(values.defaultPolicy ?? 'ask')) {
-        fail(t('请输入不重复的 Policy 列表，例如 ask,auto，并包含默认 Policy。', 'Enter distinct Policy modes such as ask,auto, including the default.')); return true;
+        fail(t('请输入不重复的 Policy 列表，例如 ask,none，并包含默认 Policy。', 'Enter distinct Policy modes such as ask,none, including the default.')); return true;
       }
-      values.allowedPolicies = allowed as ('ask' | 'auto' | 'never')[];
+      values.allowedPolicies = allowed as PolicySelection[];
     } else if (wizard.step === 7) {
       if (!['y', 'yes', 'n', 'no'].includes(input.toLowerCase())) { fail(t('请输入 yes 或 no。', 'Enter yes or no.')); return true; }
       values.allowOperator = ['y', 'yes'].includes(input.toLowerCase());
     } else if (wizard.step === 8) {
+      const allowed = input === '' || input.toLowerCase() === 'none' ? [] : input.split(',').map((part) => part.trim()).filter(Boolean);
+      if (new Set(allowed).size !== allowed.length || allowed.some((server) => !wizard.mcpServers.includes(server))) {
+        fail(t(`请输入已信任的 Server 名称列表：${wizard.mcpServers.join(', ') || 'none'}。`, `Enter a list of trusted server names: ${wizard.mcpServers.join(', ') || 'none'}.`)); return true;
+      }
+      values.allowedMcpServers = allowed;
+      let tools: string[] = [];
+      if (allowed.length > 0) {
+        try {
+          const listed = await Promise.all(allowed.map((server) => client.request('mcp.trust.tools', {
+            projectRoot: info.boundary ?? '', server,
+          })));
+          tools = listed.flatMap((entry) => entry.tools.map((tool) => `mcp:${entry.server}/${tool.name}`));
+        } catch (error) {
+          fail(t(`读取 MCP 工具失败：${errorCode(error) ?? 'mcp_tool_list_failed'}`, `Could not list MCP tools: ${errorCode(error) ?? 'mcp_tool_list_failed'}`)); return true;
+        }
+      }
+      values.allowedMcpTools = [];
+      resetDraft('');
+      setControlWizard({ step: 9, values, mcpServers: wizard.mcpServers, mcpTools: tools });
+      push({ kind: 'meta', text: t(
+        `可授权的 MCP 工具：${tools.join(', ') || '无'}。输入完整能力名列表，或 none。`,
+        `MCP tools available to grant: ${tools.join(', ') || 'none'}. Enter exact capability names or none.`,
+      ) });
+      return true;
+    } else if (wizard.step === 9) {
+      const allowed = input === '' || input.toLowerCase() === 'none' ? [] : input.split(',').map((part) => part.trim()).filter(Boolean);
+      if (new Set(allowed).size !== allowed.length || allowed.some((tool) => !wizard.mcpTools.includes(tool))) {
+        fail(t(`请输入可授权清单中的完整能力名：${wizard.mcpTools.join(', ') || 'none'}。`, `Enter exact capability names from the available list: ${wizard.mcpTools.join(', ') || 'none'}.`)); return true;
+      }
+      values.allowedMcpTools = allowed;
+    } else if (wizard.step === 10) {
       if (input === '' || input.toLowerCase() === 'none') values.expiresAt = null;
       else {
         const expiry = input.length === 10 ? Date.parse(`${input}T23:59:59`) : Date.parse(input);
         if (!Number.isFinite(expiry) || expiry <= Date.now()) { fail(t('请输入未来的日期/时间或 none。', 'Enter a future date/time or none.')); return true; }
         values.expiresAt = new Date(expiry).toISOString();
       }
-    } else if (wizard.step === 9) {
+    } else if (wizard.step === 11) {
+      if (!['y', 'yes'].includes(input.toLowerCase())) {
+        setControlWizard(null); resetDraft('');
+        fail(t('未确认信任此项目，授权未创建。', 'Project trust was not confirmed; no grant was created.')); return true;
+      }
+      values.confirmWorkspaceTrust = true;
+    } else if (wizard.step === 12) {
+      if (!['y', 'yes'].includes(input.toLowerCase())) {
+        setControlWizard(null); resetDraft('');
+        fail(t('未确认工作区部分隔离限制，授权未创建。', 'Partial workspace-write limits were not confirmed; no grant was created.')); return true;
+      }
+      values.confirmPartialWorkspaceWrite = true;
+    } else if (wizard.step === 13) {
       if (!['y', 'yes'].includes(input.toLowerCase())) {
         setControlWizard(null); resetDraft('');
         fail(t('未确认 full-access，授权未创建。', 'Full-access was not confirmed; no grant was created.')); return true;
       }
       values.confirmFullAccess = true;
-    } else if (wizard.step === 10) {
+    } else if (wizard.step === 14) {
       if (!['y', 'yes'].includes(input.toLowerCase())) {
         setControlWizard(null); resetDraft('');
         fail(t('未确认不受限网络，授权未创建。', 'Unrestricted network was not confirmed; no grant was created.')); return true;
@@ -1900,7 +2440,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     resetDraft('');
     const next = controlWizardNext(wizard.step, values);
     if (next >= 0) {
-      setControlWizard({ step: next, values });
+      setControlWizard({ step: next, values, mcpServers: wizard.mcpServers, mcpTools: wizard.mcpTools });
       return true;
     }
     void (async () => {
@@ -1919,10 +2459,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           defaultPolicy: values.defaultPolicy!,
           allowedPolicyAsk: values.allowedPolicies!.includes('ask'),
           allowedPolicyAuto: values.allowedPolicies!.includes('auto'),
-          allowedPolicyNever: values.allowedPolicies!.includes('never'),
+          allowedPolicyNone: values.allowedPolicies!.includes('none'),
           allowOperator: values.allowOperator!,
+          allowedMcpServers: values.allowedMcpServers ?? [],
+          allowedMcpTools: values.allowedMcpTools ?? [],
           confirmFullAccess: values.confirmFullAccess === true,
           confirmUnrestrictedNetwork: values.confirmUnrestrictedNetwork === true,
+          confirmPartialWorkspaceWrite: values.confirmPartialWorkspaceWrite === true,
+          confirmWorkspaceTrust: values.confirmWorkspaceTrust === true,
           expiresAt: values.expiresAt ?? '',
         }) as AgentControlSnapshot;
         setControlSnapshot(created);
@@ -1972,7 +2516,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     void submit(route.text);
-  }, [advanceControlWizard, answerQuery, controlWizard, locale, push, query, remember, runCommand, running, submit, t]);
+  }, [advanceControlWizard, answerQuery, controlWizard, loadApprovalDetails, locale, push, query, remember, runCommand, running, submit, t]);
 
   // 轮次结束后每次发送一条队列消息；取消后队列保持暂停，需用户明确继续。
   useEffect(() => {
@@ -1988,8 +2532,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       setQueuePaused(true);
       push({ kind: 'meta', text: t(`队列已暂停：${queue.length} 条待发送，/queue continue 继续`, `Queue paused: ${queue.length} pending; /queue continue to resume`) });
     }
-    void client.request('run.cancel', { sessionId }).catch((error) => push({ kind: 'error', text: error.code ?? 'run_cancel_failed' }));
-  }, [client, push, queue.length, sessionId, t]);
+    const request = externalControl
+      ? client.request('session.control', { projectRoot: info.boundary ?? '', sessionId, request: { action: 'cancel' } })
+      : client.request('run.cancel', { sessionId });
+    void request.catch((error) => push({ kind: 'error', text: errorCode(error) ?? 'run_cancel_failed' }));
+  }, [client, externalControl, info.boundary, push, queue.length, sessionId, t]);
 
   // 候选由当前草稿计算，输入变化后自动更新。
   const templates = status?.templates ?? [];
@@ -2003,6 +2550,17 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const approvalLines = useMemo(() => ask === null ? [] : wrapLine(ask.content, Math.max(1, geometry.columns - 6)), [ask?.content, geometry.columns]);
   const approvalHeight = Math.max(1, geometry.rows - 12);
   const approvalView = viewportPosition(approvalCursor, approvalLines.length, approvalHeight);
+  const rememberChoices = ask?.rememberScopes.map((scope, index) => {
+    const label = scope === 'session' ? t('记住本会话', 'remember this session')
+      : scope === 'project' ? t('记住本项目', 'remember this project')
+        : t('记住所有项目', 'remember all projects');
+    return `${index + 2} ${label}`;
+  }).join(' · ') ?? '';
+  const rememberTargetLabel = ask?.rememberHintKey === 'file'
+    ? ask.rememberTarget === 'workspace' ? t('此工作区同类操作', 'this operation type in this workspace') : t('仅此文件', 'this file only')
+    : ask?.rememberHintKey === 'command' ? t('此命令', 'this command')
+      : ask?.rememberHintKey === 'mcp' ? t('此组 MCP 参数', 'these MCP arguments')
+        : t('此工具能力', 'this tool capability');
   // 问题面板显示题目、已提交答案和当前题是否为最后一题。
   const asking = query === null ? null : {
     count: query.questions.length,
@@ -2012,19 +2570,33 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     done: query.questions.slice(0, query.at).map((one, index) => `${index + 1}. ${answeredLine(query.picked[one.id]?.answer, locale)}`),
     last: query.at + 1 === query.questions.length,
   };
-  const controlPrompt = controlWizard === null ? null : [
-    t('授权名称（最多 80 字符）', 'Grant name (up to 80 characters)'),
-    t('默认权限：read-only / workspace-write / full-access', 'Default permission: read-only / workspace-write / full-access'),
-    t('最大权限：read-only / workspace-write / full-access', 'Maximum permission: read-only / workspace-write / full-access'),
-    t('默认网络：disabled / policy / unrestricted', 'Default network: disabled / policy / unrestricted'),
-    t('网络上限：disabled / policy / unrestricted', 'Maximum network: disabled / policy / unrestricted'),
-    t('默认 Policy：ask / auto / never', 'Default Policy: ask / auto / never'),
-    t('允许的 Policy，以逗号分隔，例如 ask,auto', 'Allowed Policy modes, comma-separated, e.g. ask,auto'),
-    t('允许 --operator 处理普通审批和会话设置？yes / no', 'Allow --operator for ordinary approvals and session settings? yes / no'),
-    t('到期时间，输入 ISO 时间或 none', 'Expiry time as an ISO date/time, or none'),
-    t('单独确认 full-access 授权？输入 yes 确认', 'Separately confirm the full-access ceiling? Type yes to confirm'),
-    t('单独确认 unrestricted network？输入 yes 确认', 'Separately confirm the unrestricted network ceiling? Type yes to confirm'),
-  ][controlWizard.step] ?? t('输入 yes 确认', 'Type yes to confirm');
+  const controlPrompt = controlWizard === null ? null
+    : controlWizard.step === 8
+      ? t(`允许外控启动哪些已信任的 MCP Server？逗号分隔：${controlWizard.mcpServers.join(', ') || '无'}；输入 none 表示不允许。`, `Which trusted MCP servers may the controller start? Comma-separated: ${controlWizard.mcpServers.join(', ') || 'none'}; type none for no servers.`)
+      : controlWizard.step === 9
+        ? t(`允许外控调用哪些工具？逗号分隔完整能力名：${controlWizard.mcpTools.join(', ') || '无'}；输入 none 表示不允许。`, `Which tools may the controller call? Comma-separated exact capabilities: ${controlWizard.mcpTools.join(', ') || 'none'}; type none for no tools.`)
+        : [
+          t('授权名称（最多 80 字符）', 'Grant name (up to 80 characters)'),
+          t('默认权限：read-only / workspace-write / full-access', 'Default permission: read-only / workspace-write / full-access'),
+          t('最大权限：read-only / workspace-write / full-access', 'Maximum permission: read-only / workspace-write / full-access'),
+          t('默认网络：disabled / policy / unrestricted', 'Default network: disabled / policy / unrestricted'),
+          t('网络上限：disabled / policy / unrestricted', 'Maximum network: disabled / policy / unrestricted'),
+          t('默认 Policy：ask / auto / none', 'Default Policy: ask / auto / none'),
+          t('允许的 Policy，以逗号分隔，例如 ask,auto', 'Allowed Policy modes, comma-separated, e.g. ask,auto'),
+          t('允许 --operator 处理普通审批和会话设置？yes / no', 'Allow --operator for ordinary approvals and session settings? yes / no'),
+          '', '',
+          t('到期时间，输入 ISO 时间或 none', 'Expiry time as an ISO date/time, or none'),
+          t('确认信任此项目以供项目代码、Git 命令与 Hook 使用？yes / no', 'Trust this project for project code, Git commands, and hooks? yes / no'),
+          t('接受 workspace-write 可能存在的部分隔离限制？yes / no', 'Accept possible partial workspace-write isolation limits? yes / no'),
+          t('单独确认 full-access 授权？输入 yes 确认', 'Separately confirm the full-access ceiling? Type yes to confirm'),
+          t('单独确认 unrestricted network？输入 yes 确认', 'Separately confirm the unrestricted network ceiling? Type yes to confirm'),
+        ][controlWizard.step] ?? t('输入 yes 确认', 'Type yes to confirm');
+  const externalControlLabel = externalSnapshot?.pendingInteractions.some((item) => item.type === 'approval') === true
+    ? t('外控会话等待审批', 'External session is waiting for approval')
+    : externalSnapshot?.pendingInteractions.some((item) => item.type === 'question') === true
+      ? t('外控会话等待回答', 'External session is waiting for an answer')
+      : externalSnapshot?.state === 'running' ? t('外控 Agent 正在运行', 'External agent is running')
+        : t('外控会话已连接 · /takeover 接管', 'External session connected · /takeover to take over');
   const caretText = useMemo(() => [...GRAPHEMES.segment(draft.slice(caret))][0]?.segment ?? ' ', [draft, caret]);
 
   useInput((input, key) => {
@@ -2039,7 +2611,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       if (hit('policy-picker', input, key)) { openPicker('policy'); return; }
     }
     if (hit('expand-or-history', input, key)) {
-      if (ask !== null) setApprovalExpanded((current) => !current);
+      if (ask !== null) {
+        const expanding = !approvalExpanded;
+        setApprovalExpanded(expanding);
+        if (expanding) void loadApprovalDetails();
+      }
       else {
         setSessionPicker(null);
         setSearch(null);
@@ -2066,16 +2642,61 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       if (target !== null) { setApprovalCursor(target); return; }
     }
     if (ask !== null) {
-      if (hit('approve', input, key)) {
+      if (ask.rememberable && ask.rememberTargetOptions.includes('file') && ask.rememberTargetOptions.includes('workspace') && input.toLowerCase() === 'w') {
+        setAsk({ ...ask, rememberTarget: ask.rememberTarget === 'workspace' ? 'file' : 'workspace' });
+        return;
+      }
+      const option = /^\d$/u.test(input) ? Number(input) - 2 : -1;
+      const rememberScope = ask.rememberable && option >= 0 ? ask.rememberScopes[option] : undefined;
+      if (hit('approve', input, key) || ask.rememberable && input === '1' || rememberScope !== undefined) {
         const asked = ask;
         setAsk(null);
-        push({ kind: 'meta', text: t(`已允许 ${asked.tool}`, `Allowed ${asked.tool}`) });
-        client.reply(asked.id, { decision: 'allow' });
+        const rememberedTarget = asked.rememberTarget ?? asked.rememberTargetOptions[0];
+        const scopeLabel = rememberScope === 'session' ? t('并记住到本会话', 'and remembered for this session')
+          : rememberScope === 'project' ? t('并记住到本项目', 'and remembered for this project')
+            : rememberScope === 'user' ? t('并记住到所有项目', 'and remembered for all projects')
+              : '';
+        const chosenTargetLabel = asked.rememberHintKey === 'file'
+          ? rememberedTarget === 'workspace' ? t('此工作区同类操作', 'this operation type in this workspace') : t('仅此文件', 'this file only')
+          : asked.rememberHintKey === 'command' ? t('此命令', 'this command')
+            : asked.rememberHintKey === 'mcp' ? t('此组 MCP 参数', 'these MCP arguments')
+              : t('此工具能力', 'this tool capability');
+        const targetLabel = rememberScope === undefined ? '' : ` · ${chosenTargetLabel}`;
+        push({ kind: 'meta', text: t(`已允许 ${asked.tool} ${scopeLabel}${targetLabel}`, `Allowed ${asked.tool} ${scopeLabel}${targetLabel}`) });
+        if (asked.external) {
+          resolvedExternalInteractions.current.add(asked.id);
+          void client.request('session.control', {
+            projectRoot: info.boundary ?? '', sessionId,
+            request: {
+              action: 'reply', requestId: asked.id, type: 'approval', decision: 'allow',
+              ...(rememberScope === undefined ? {} : { rememberScope }),
+              ...(rememberScope === undefined || rememberedTarget === undefined ? {} : { rememberTarget: rememberedTarget }),
+            },
+          }).catch((error: unknown) => {
+            resolvedExternalInteractions.current.delete(asked.id);
+            push({ kind: 'error', text: t(`外控审批答复失败：${errorCode(error) ?? 'external_control_reply_failed'}`, `Could not approve external action: ${errorCode(error) ?? 'external_control_reply_failed'}`) });
+          });
+        }
+        else client.reply(asked.id, {
+          decision: 'allow',
+          ...(rememberScope === undefined ? {} : { rememberScope }),
+          ...(rememberScope === undefined || rememberedTarget === undefined ? {} : { rememberTarget: rememberedTarget }),
+        });
       } else if (hit('deny', input, key)) {
         const asked = ask;
         setAsk(null);
         push({ kind: 'meta', text: t(`已拒绝 ${asked.tool}`, `Denied ${asked.tool}`) });
-        client.reply(asked.id, { decision: 'deny' });
+        if (asked.external) {
+          resolvedExternalInteractions.current.add(asked.id);
+          void client.request('session.control', {
+            projectRoot: info.boundary ?? '', sessionId,
+            request: { action: 'reply', requestId: asked.id, type: 'approval', decision: 'deny' },
+          }).catch((error: unknown) => {
+            resolvedExternalInteractions.current.delete(asked.id);
+            push({ kind: 'error', text: t(`外控审批答复失败：${errorCode(error) ?? 'external_control_reply_failed'}`, `Could not deny external action: ${errorCode(error) ?? 'external_control_reply_failed'}`) });
+          });
+        }
+        else client.reply(asked.id, { decision: 'deny' });
       }
       return;
     }
@@ -2313,7 +2934,12 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     setCaret(inserted.caret);
   }, { isActive: interactive });
 
-  const shownModel = status?.model ?? info.model;
+  const shownModel = externalControl ? externalModel : status?.model ?? info.model;
+  const modelStatus = externalControl
+    ? t(`外控模型 ${shownModel ?? '未知'}`, `External model ${shownModel ?? 'unknown'}`)
+    : t(`模型 ${shownModel ?? '未配置'}${status?.pendingModel ? `→${status.pendingModel}` : ''} ${keyHint('model-picker')}`, `Model ${shownModel ?? 'not configured'}${status?.pendingModel ? `→${status.pendingModel}` : ''} ${keyHint('model-picker')}`);
+  const footerStatus = externalControl ? modelStatus
+    : `${modelStatus}  ·  ${t(`工具模式 ${status?.mode ?? '—'}${status?.pendingMode ? `→${status.pendingMode}` : ''} ${keyHint('mode-picker')}  ·  审批 ${status?.policy === 'none' ? '不受审批' : status?.policy === 'never' ? '旧版 never（需迁移）' : status?.policy === 'auto' ? '自动判定' : '逐次审批'} ${keyHint('policy-picker')}`, `Tools ${status?.mode ?? '—'}${status?.pendingMode ? `→${status.pendingMode}` : ''} ${keyHint('mode-picker')}  ·  Approval ${status?.policy === 'none' ? 'none' : status?.policy === 'never' ? 'legacy never (migration required)' : status?.policy === 'auto' ? 'auto' : 'ask'} ${keyHint('policy-picker')}`)}`;
   const foldedLive = foldText(live.reasoning, expanded, 1);
 
   return h(Fragment, null,
@@ -2336,7 +2962,20 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       approvalExpanded ? h(Fragment, null,
         ...approvalLines.slice(approvalView.offset, approvalView.offset + approvalHeight).map((line, index) => h(Text, { key: index, wrap: 'truncate-end' }, line)),
         h(Text, { dimColor: true }, t(`改动 ${approvalView.cursor + 1}/${approvalLines.length} 行 · ${keyHint('approval-page-up', 'approval-page-down')} 分页 · ${keyHint('approval-top', 'approval-bottom')} 到两端`, `Changes ${approvalView.cursor + 1}/${approvalLines.length} · ${keyHint('approval-page-up', 'approval-page-down')} pages · ${keyHint('approval-top', 'approval-bottom')} start/end`))) : null,
-      h(Text, { wrap: 'truncate-end' }, t(`${keyHint('approve')} 允许一次 · ${keyHint('deny')} 拒绝 · ${keyHint('expand-or-history')} 查看改动 · ${keyHint('approval-cancel')} 取消`, `${keyHint('approve')} allow once · ${keyHint('deny')} deny · ${keyHint('expand-or-history')} details · ${keyHint('approval-cancel')} cancel`))),
+      ask.rememberable && ask.rememberHintKey !== '' ? h(Text, { dimColor: true, wrap: 'truncate-end' }, ask.rememberHintKey === 'command'
+        ? t('只记住这条命令及其参数边界。', 'Remember only this command and its argument boundary.')
+        : ask.rememberHintKey === 'file'
+          ? ask.rememberTarget === 'workspace'
+            ? t(`范围：此工作区内 ${ask.tool} 这一类操作 · 按 w 改为仅此文件`, `Scope: this ${ask.tool} operation type in this workspace · press w for this file only`)
+            : t(`范围：仅此文件 · 按 w 改为此工作区内的 ${ask.tool} 操作`, `Scope: this file only · press w for this ${ask.tool} operation type in the workspace`)
+          : ask.rememberHintKey === 'mcp'
+            ? t(`只记住此 MCP 工具、这组参数和服务器配置摘要 ${ask.identityDigest?.slice(0, 12) ?? '未知'}。`, `Remember only this MCP tool, these arguments, and server configuration digest ${ask.identityDigest?.slice(0, 12) ?? 'unknown'}.`)
+            : t('规则会应用于此工具能力的所有调用参数。', 'The rule applies to this tool capability for all arguments.')) : null,
+      ask.detailsLoading ? h(Text, { dimColor: true }, t('正在读取完整待审批内容…', 'Loading the full pending content…')) : null,
+      ask.detailsError === undefined ? null : h(Text, { color: 'red' }, t(`完整内容读取失败：${ask.detailsError}`, `Could not read full details: ${ask.detailsError}`)),
+      h(Text, { wrap: 'truncate-end' }, ask.rememberable
+        ? t(`1 允许一次 · ${rememberChoices}${ask.rememberTargetOptions.includes('file') && ask.rememberTargetOptions.includes('workspace') ? ` · w 范围：${rememberTargetLabel}` : ''} · ${keyHint('deny')} 拒绝 · ${keyHint('expand-or-history')} 查看改动 · ${keyHint('approval-cancel')} 取消`, `1 allow once · ${rememberChoices}${ask.rememberTargetOptions.includes('file') && ask.rememberTargetOptions.includes('workspace') ? ` · w scope: ${rememberTargetLabel}` : ''} · ${keyHint('deny')} deny · ${keyHint('expand-or-history')} details · ${keyHint('approval-cancel')} cancel`)
+        : t(`${keyHint('approve')} 允许一次 · ${keyHint('deny')} 拒绝 · ${keyHint('expand-or-history')} 查看改动 · ${keyHint('approval-cancel')} 取消`, `${keyHint('approve')} allow once · ${keyHint('deny')} deny · ${keyHint('expand-or-history')} details · ${keyHint('approval-cancel')} cancel`))),
     asking === null || query === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'blue', paddingX: 1 },
       h(Text, { bold: true }, t(`等待回答 ${query.at + 1}/${asking.count}`, `Waiting for your answer ${query.at + 1}/${asking.count}`)),
       h(Text, { wrap: 'truncate-end' }, asking.title),
@@ -2396,6 +3035,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
             : panel === 'permission' ? t('会话权限', 'Session permissions')
               : panel === 'permission-network' ? t('设置网络权限', 'Set network access')
                 : panel === 'permission-confirm-full' ? t('确认完整访问', 'Confirm full access')
+                  : panel === 'permission-confirm-partial' ? t('确认工作区部分隔离', 'Confirm partial workspace isolation')
                   : panel === 'permission-confirm-network' ? t('确认不受限网络', 'Confirm unrestricted network')
                     : panel === 'control' ? t('外部 Agent 授权', 'External Agent grants')
                       : panel === 'control-action' ? t('授权操作', 'Grant actions')
@@ -2415,18 +3055,19 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       h(Text, { bold: true }, t('创建外控授权', 'Create Agent Control grant')),
       h(Text, { wrap: 'wrap' }, controlPrompt),
       h(Text, { dimColor: true }, t('Enter 提交当前项 · 输入 cancel 取消', 'Enter submits this value · type cancel to stop'))),
+    externalControl ? h(Text, { color: running ? 'yellow' : 'cyan', wrap: 'truncate-end' }, externalControlLabel) : null,
     h(Box, { flexDirection: 'column', borderStyle: 'single', borderTop: true, borderBottom: true, borderLeft: false, borderRight: false, borderColor: running ? 'yellow' : 'cyan', paddingX: 1 }, h(Box, null,
       h(Text, { color: running ? 'yellow' : 'cyan' }, running ? `${SPINNER[tick % SPINNER.length]} ` : '› '),
       draft === '' && !running
         ? h(Text, { dimColor: true }, controlWizard === null
-          ? t(`描述任务 · ${keyHint('send')} 发送 · ${keyHint('newline')} 换行 · / 命令 · @ 文件`, `Describe a task · ${keyHint('send')} send · ${keyHint('newline')} new line · / commands · @ files`)
+          ? externalControl ? t(`给外控 Agent 发消息 · ${keyHint('send')} 发送 · /takeover 接管`, `Message the external agent · ${keyHint('send')} send · /takeover to take over`)
+            : t(`描述任务 · ${keyHint('send')} 发送 · ${keyHint('newline')} 换行 · / 命令 · @ 文件`, `Describe a task · ${keyHint('send')} send · ${keyHint('newline')} new line · / commands · @ files`)
           : t('输入授权设置答案', 'Enter the grant setting'))
         : h(Text, { wrap: 'wrap' },
           draft.slice(0, caret),
           h(Text, { inverse: true }, caretText),
           draft.slice(caret + (caret === draft.length ? 0 : caretText.length))))),
-    h(Text, { wrap: 'wrap' },
-      t(`模型 ${shownModel ?? '未配置'}${status?.pendingModel ? `→${status.pendingModel}` : ''} ${keyHint('model-picker')}  ·  工具模式 ${status?.mode ?? '—'}${status?.pendingMode ? `→${status.pendingMode}` : ''} ${keyHint('mode-picker')}  ·  审批 ${status?.policy === 'never' ? '完全不需审批' : status?.policy === 'auto' ? '自动判定' : '逐次审批'} ${keyHint('policy-picker')}`, `Model ${shownModel ?? 'not configured'}${status?.pendingModel ? `→${status.pendingModel}` : ''} ${keyHint('model-picker')}  ·  Tools ${status?.mode ?? '—'}${status?.pendingMode ? `→${status.pendingMode}` : ''} ${keyHint('mode-picker')}  ·  Approval ${status?.policy === 'never' ? 'none' : status?.policy === 'auto' ? 'auto' : 'ask'} ${keyHint('policy-picker')}`)),
+    h(Text, { wrap: 'wrap' }, footerStatus),
     h(Text, { dimColor: true, wrap: 'truncate-end' }, buildStatusLine({
       sessionId, boundary: info.boundary, status, running, seconds, expanded, columns: stdout?.columns, locale,
     })),

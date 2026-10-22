@@ -1,0 +1,26 @@
+export type PermissionProfile = 'read-only' | 'workspace-write' | 'full-access';
+export type NetworkLimit = 'disabled' | 'policy' | 'unrestricted';
+export type PolicySelection = 'ask' | 'auto' | 'none';
+export type PolicyMode = PolicySelection | 'never';
+
+export type Grant = {
+  id: string;
+  name: string;
+  projectRoot: string;
+  source: 'trusted-ui' | 'legacy';
+  defaultPermissionProfile: PermissionProfile;
+  maxPermissionProfile: PermissionProfile;
+  defaultNetwork: NetworkLimit;
+  maxNetwork: NetworkLimit;
+  defaultPolicy: PolicyMode;
+  allowedPolicies: PolicyMode[];
+  allowOperator: boolean;
+  allowedMcpServers: string[];
+  allowedMcpTools: string[];
+  confirmedFullAccess: boolean;
+  confirmedUnrestrictedNetwork: boolean;
+  confirmedPartialWorkspaceWrite: boolean;
+  createdAt: string;
+  expiresAt: string | null;
+  revokedAt: string | null;
+};

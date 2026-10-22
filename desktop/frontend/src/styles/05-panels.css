@@ -256,6 +256,166 @@
   color: var(--fg);
 }
 
+.external-control {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  inline-size: min(100%, var(--stream));
+  max-block-size: min(42vh, 32rem);
+  margin: 0 auto var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  overflow: auto;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--line));
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+
+.external-control-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.external-control-head strong {
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.external-control-state {
+  color: var(--accent);
+  font-size: var(--text-sm);
+}
+
+.external-control-metrics,
+.external-control-note {
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
+
+.external-control-head button:last-child {
+  margin-inline-start: auto;
+}
+
+.external-control-note {
+  margin: 0;
+}
+
+.external-control-note.bad {
+  color: var(--bad);
+}
+
+.external-session-composer {
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--line));
+}
+
+.external-session-composer-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+  padding: 0 var(--space-1);
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
+
+.external-session-composer-head strong {
+  color: var(--accent);
+  font-size: var(--text-sm);
+}
+
+.external-session-config-error,
+.external-session-note.bad {
+  color: var(--bad);
+}
+
+.external-session-config {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  padding: 0 var(--space-1);
+}
+
+.external-session-config-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3rem;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0.14rem 0.42rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+.external-session-config-item b {
+  color: var(--fg);
+  font-weight: 550;
+}
+
+.external-session-config-item.pending {
+  border-color: color-mix(in srgb, var(--warn) 50%, var(--line));
+}
+
+.external-session-grant,
+.external-session-grant-unavailable {
+  margin: 0 var(--space-1);
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
+
+.external-session-grant summary {
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.external-session-grant-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+  gap: var(--space-1) var(--space-3);
+  max-block-size: 10rem;
+  margin-block-start: var(--space-1);
+  overflow: auto;
+}
+
+.external-session-grant-body span {
+  display: flex;
+  gap: var(--space-1);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.external-session-grant-body b {
+  flex: none;
+  color: var(--fg);
+  font-weight: 550;
+}
+
+.external-session-grant-body code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.external-session-route {
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
+
+.external-session-note {
+  margin: 0 var(--space-1);
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
+
+@media (max-width: 600px) {
+  .external-control {
+    inline-size: calc(100% - 24px);
+    max-block-size: 46vh;
+  }
+}
+
 /* 命令面板和快捷键 */
 
 .palette {

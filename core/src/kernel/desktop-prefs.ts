@@ -139,7 +139,7 @@ export async function savePrefs(
       temporary = `${target}.${randomUUID()}.tmp`;
       await writeFile(temporary, bytes, { flag: 'wx', mode: 0o600 });
       await chmod(temporary, before.mode ?? 0o600);
-      // Windows 文件暂时被占用时，等待期间继续持锁并重新校验版本。
+      // Windows 文件锁可能延迟释放；有限重试期间继续持锁并重新校验版本。
       for (let attempt = 0; ; attempt += 1) {
         lock.assertOwned();
         if ((await readPrefsFile(target)).version !== before.version) {
@@ -150,11 +150,11 @@ export async function savePrefs(
           break;
         } catch (cause) {
           const code = (cause as NodeJS.ErrnoException)?.code;
-          if (process.platform !== 'win32' || !['EACCES', 'EBUSY', 'EPERM'].includes(code ?? '') || attempt >= 8) {
+          if (process.platform !== 'win32' || !['EACCES', 'EBUSY', 'EPERM'].includes(code ?? '') || attempt >= 24) {
             throw new KernelRuntimeError('desktop_prefs_replace_failed', { cause, detail: cause instanceof Error ? cause.message : String(cause) });
           }
         }
-        await delay(Math.min(20 * (2 ** attempt), 200));
+        await delay(Math.min(20 * (2 ** attempt), 250));
       }
       temporary = undefined;
       return { settings, version: createHash('sha256').update(bytes).digest('hex') };

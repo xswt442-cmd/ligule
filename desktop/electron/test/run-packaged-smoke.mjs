@@ -10,8 +10,20 @@ import { sessionDirectory } from '../../../core/dist/session/list.js';
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const desktopDirectory = dirname(dirname(scriptDirectory));
 const repositoryRoot = dirname(desktopDirectory);
+const optionValue = (name) => {
+  const index = process.argv.indexOf(name);
+  if (index < 0) return undefined;
+  const value = process.argv[index + 1];
+  if (value === undefined || value.startsWith('--')) throw new Error(`${name}_requires_a_value`);
+  return value;
+};
 const appDirectoryArgument = process.argv.indexOf('--app-dir');
 const suppliedAppDirectory = appDirectoryArgument >= 0 ? process.argv[appDirectoryArgument + 1] : undefined;
+const suppliedWorkspace = optionValue('--workspace');
+const suppliedLiguleHome = optionValue('--ligule-home');
+const createAgentControlGrant = process.argv.includes('--create-agent-control-grant');
+const suppliedGrantName = optionValue('--grant-name');
+const suppliedGrantProfile = optionValue('--grant-profile') ?? 'workspace-write';
 const localInterruption = process.argv.includes('--local-request-interruption');
 const realInterruption = process.argv.includes('--real-request-interruption');
 const interruptionMode = localInterruption ? 'local' : realInterruption ? 'real' : undefined;
@@ -25,6 +37,12 @@ if (realInterruption && (typeof modelApiKey !== 'string' || modelApiKey.length <
 if (!realInterruption) modelApiKey = undefined;
 if (appDirectoryArgument >= 0 && (suppliedAppDirectory === undefined || !isAbsolute(suppliedAppDirectory))) {
   throw new Error('--app-dir_requires_an_absolute_directory');
+}
+if (suppliedWorkspace !== undefined && !isAbsolute(suppliedWorkspace)) throw new Error('--workspace_requires_an_absolute_directory');
+if (suppliedLiguleHome !== undefined && !isAbsolute(suppliedLiguleHome)) throw new Error('--ligule-home_requires_an_absolute_directory');
+if (suppliedGrantProfile !== 'workspace-write' && suppliedGrantProfile !== 'full-access') throw new Error('--grant-profile_must_be_workspace-write_or_full-access');
+if (createAgentControlGrant && (suppliedWorkspace === undefined || suppliedLiguleHome === undefined || suppliedGrantName === undefined)) {
+  throw new Error('--create-agent-control-grant_requires_workspace_home_and_grant_name');
 }
 const packagedDirectory = suppliedAppDirectory === undefined
   ? defaultPackagedDirectory()
@@ -54,8 +72,8 @@ const runId = new Date().toISOString().replace(/[:.]/gu, '-');
 const temporaryRoot = await mkdtemp(join(temporaryParent, `packaged-smoke-${runId}-`));
 const evidenceRoot = await mkdtemp(join(evidenceParent, `packaged-smoke-${runId}-${process.pid}-`));
 const userDataDirectory = join(temporaryRoot, 'user-data');
-const liguleHome = join(temporaryRoot, 'ligule-home');
-const workspace = join(temporaryRoot, 'workspaces', 'project');
+const liguleHome = suppliedLiguleHome === undefined ? join(temporaryRoot, 'ligule-home') : resolve(suppliedLiguleHome);
+const workspace = suppliedWorkspace === undefined ? join(temporaryRoot, 'workspaces', 'project') : resolve(suppliedWorkspace);
 process.env.LIGULE_HOME = liguleHome;
 const exportDirectory = join(temporaryRoot, 'exports');
 const exportPath = join(exportDirectory, 'session.md');
@@ -796,6 +814,24 @@ async function runInterruptedRequest(sessionId, alreadyStarted = false) {
   return `${interruptionMode === 'real' ? '官方模型单次请求 HTTP 200，响应由本地 gate 暂扣' : '本地 HTTP SSE 请求已收到并保持未终止'}；Host ${initialHostPid} 被终止，Session 写入唯一 interrupted/host_restarted，重连后请求数仍为 ${expectedRequests}`;
 }
 
+async function ensureIsolatedWorkspaceSelected() {
+  await waitUntil(async () => await devTools.evaluate(`(() => {
+    const button = document.querySelector('button.workspace-choice');
+    return button instanceof HTMLButtonElement && !button.disabled;
+  })()`), 30_000, 'workspace_selector_enabled');
+  const currentWorkspace = await devTools.evaluate(`document.querySelector('button.workspace-choice')?.title ?? ''`);
+  if (currentWorkspace === workspace) return;
+  await devTools.evaluate(`document.querySelector('button.workspace-choice')?.click(); true`);
+  await waitUntil(async () => await devTools.evaluate(`([...document.querySelectorAll('[role="option"]')].some(option => option.title === ${JSON.stringify(workspace)}))`), 15_000, 'isolated_workspace_option_loaded');
+  const selected = await devTools.evaluate(`(() => {
+    const option = [...document.querySelectorAll('[role="option"]')].find(item => item.title === ${JSON.stringify(workspace)});
+    option?.click();
+    return option !== undefined;
+  })()`);
+  if (selected !== true) throw new Error('isolated_workspace_option_missing');
+  await waitUntil(async () => await devTools.evaluate(`document.querySelector('button.workspace-choice')?.title === ${JSON.stringify(workspace)}`), 15_000, 'isolated_workspace_selected');
+}
+
 async function runNoSessionReconnect() {
   const initialHost = Number(processIds.initialHost);
   if (!Number.isSafeInteger(initialHost)) throw new Error('initial_host_pid_missing');
@@ -813,13 +849,7 @@ async function runNoSessionReconnect() {
       && !model.disabled
       && !prefsFailure;
   })()`), 30_000, 'initial_preferences_ready');
-  const currentWorkspace = await devTools.evaluate(`document.querySelector('button.workspace-choice')?.title ?? ''`);
-  if (currentWorkspace !== workspace) {
-    await devTools.evaluate(`document.querySelector('button.workspace-choice').click(); true`);
-    await waitUntil(async () => await devTools.evaluate(`([...document.querySelectorAll('[role="option"]')].some(option => option.title === ${JSON.stringify(workspace)}))`), 15_000, 'default_workspace_option_loaded');
-    await devTools.evaluate(`([...document.querySelectorAll('[role="option"]')].find(option => option.title === ${JSON.stringify(workspace)})?.click(), true)`);
-    await waitUntil(async () => await devTools.evaluate(`document.querySelector('button.workspace-choice')?.title === ${JSON.stringify(workspace)}`), 15_000, 'default_workspace_selected');
-  }
+  await ensureIsolatedWorkspaceSelected();
   if (interruptionMode !== undefined) {
     await waitUntil(async () => await devTools.evaluate(`(document.querySelector('button.composer-choice')?.textContent ?? '').includes('deepseek-flash')`), 15_000, 'interruption_model_loaded');
   }
@@ -938,8 +968,12 @@ async function runChecks() {
     if (appInfo.href !== 'app://ligule/index.html') throw new Error(`unexpected_application_page:${appInfo.href}`);
     if (appInfo.origin !== 'app://ligule') throw new Error(`unexpected_application_origin:${appInfo.origin}`);
     if (appInfo.secure !== true || appInfo.api !== 'object') throw new Error('packaged_preload_api_unavailable');
-    const requiredMethods = ['sendHostFrame', 'restartHost', 'onHostFrame', 'onHostFault', 'requestQuit'];
+    const requiredMethods = ['appInfo', 'sendHostFrame', 'restartHost', 'onHostFrame', 'onHostFault', 'requestQuit'];
     for (const method of requiredMethods) if (!appInfo.methods.includes(method)) throw new Error(`preload_api_missing:${method}`);
+    const installedApp = await devTools.evaluate('window.liguleDesktop.appInfo()');
+    if (typeof installedApp.version !== 'string' || installedApp.version === '' || installedApp.packaged !== true) {
+      throw new Error('packaged_application_info_invalid');
+    }
     await devTools.evaluate(`(() => {
       window.__packagedSmokeFrames = [];
       window.__packagedSmokeFaults = [];
@@ -951,7 +985,260 @@ async function runChecks() {
     processIds.initialHost = Number(host.pid);
     processIds.hostExecutable = host.executable;
     processIds.hostCommandLine = host.commandLine;
-    return `来源 ${appInfo.origin}，Host PID ${host.pid} 使用 ${reportVersion(hostNode)}`;
+    return `来源 ${appInfo.origin}，Ligule ${installedApp.version}；Host PID ${host.pid} 使用 ${reportVersion(hostNode)}`;
+  });
+
+  await check('open Model services in the installed application', async () => {
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('aside.sidebar button.entry') !== null`), 30_000, 'packaged_settings_entry_ready');
+    const opened = await devTools.evaluate(`(() => {
+      const button = [...document.querySelectorAll('aside.sidebar button.entry')]
+        .find(item => /设置|Settings/u.test(item.textContent ?? ''));
+      button?.click();
+      return button !== undefined;
+    })()`);
+    if (opened !== true) throw new Error('packaged_settings_entry_missing');
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('.sheet .sheet-nav button[role="tab"]') !== null`), 10_000, 'packaged_settings_open');
+    const selected = await devTools.evaluate(`(() => {
+      const tab = [...document.querySelectorAll('.sheet-nav button[role="tab"]')]
+        .find(item => /模型服务|Model services/u.test(item.textContent ?? ''));
+      tab?.click();
+      return tab !== undefined;
+    })()`);
+    if (selected !== true) throw new Error('packaged_model_services_tab_missing');
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('.model-settings .settings-intro h2') !== null`), 10_000, 'packaged_model_settings_panel');
+    const details = await devTools.evaluate(`(() => ({
+      title: document.querySelector('.model-settings .settings-intro h2')?.textContent?.trim() ?? '',
+      error: document.querySelector('.model-settings [role="alert"]')?.textContent ?? '',
+    }))()`);
+    if (!/模型服务|Model services/u.test(details.title)) throw new Error('packaged_model_settings_title_missing');
+    if (details.error !== '') throw new Error('packaged_model_settings_load_failed');
+    await devTools.evaluate(`document.querySelector('button[aria-label="关闭设置"], button[aria-label="Close settings"]')?.click(); true`);
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('.sheet') === null`), 5_000, 'packaged_settings_close');
+    return `真实 BrowserWindow 已打开模型服务设置：${details.title}；没有读取或显示凭据`;
+  });
+
+  await check('trust the exact isolated workspace through the packaged UI', async () => {
+    await ensureIsolatedWorkspaceSelected();
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('button.permission-trigger') !== null`), 10_000, 'packaged_permission_trigger');
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('button.permission-trigger')?.disabled === false`), 60_000, 'packaged_permission_trigger_enabled');
+    const trigger = await devTools.evaluate(`(() => {
+      const button = document.querySelector('button.permission-trigger');
+      if (button === null) return { exists: false };
+      const state = { exists: true, disabled: button.disabled, expanded: button.getAttribute('aria-expanded'), text: button.textContent?.trim() ?? '' };
+      button.click();
+      return state;
+    })()`);
+    if (!trigger.exists || trigger.disabled) throw new Error(`packaged_permission_trigger_unavailable:${JSON.stringify(trigger)}`);
+    try {
+      await waitUntil(async () => await devTools.evaluate(`document.querySelector('.permission-panel') !== null`), 5_000, 'packaged_permission_panel');
+    } catch {
+      const state = await devTools.evaluate(`({
+        expanded: document.querySelector('button.permission-trigger')?.getAttribute('aria-expanded') ?? null,
+        popovers: [...document.querySelectorAll('[data-radix-popper-content-wrapper]')].map(item => item.textContent?.slice(0, 120) ?? ''),
+        bodyTail: document.body.innerText.slice(-500),
+      })`);
+      throw new Error(`packaged_permission_panel_unavailable:${JSON.stringify(state)}`);
+    }
+    const untrusted = await devTools.evaluate(`(() => {
+      const row = [...document.querySelectorAll('.permission-change-state')]
+        .find(item => /项目代码信任|Project code trust/u.test(item.textContent ?? ''));
+      return row?.querySelector('strong')?.textContent?.trim() ?? '';
+    })()`);
+    if (/已信任|Trusted/u.test(untrusted)) {
+      await devTools.evaluate(`document.querySelector('button.permission-trigger')?.click(); true`);
+      return '可信界面确认准确测试工作区已处于信任状态';
+    }
+    if (!/未信任|Untrusted/u.test(untrusted)) throw new Error('isolated_workspace_trust_state_unknown');
+    const trustButton = await devTools.evaluate(`(() => {
+      const button = document.querySelector('.permission-trust-button');
+      button?.click();
+      return button !== null && button !== undefined;
+    })()`);
+    if (trustButton !== true) throw new Error('packaged_workspace_trust_action_missing');
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('.confirm .confirm-lead') !== null`), 5_000, 'packaged_workspace_trust_confirmation');
+    const confirmation = await devTools.evaluate(`document.querySelector('.confirm .confirm-lead')?.textContent ?? ''`);
+    if (!/信任此目录中的项目代码|Trust project code/u.test(confirmation)) throw new Error('packaged_workspace_trust_confirmation_mismatch');
+    const trustConfirmed = await devTools.evaluate(`(() => {
+      const button = [...document.querySelectorAll('.confirm-actions button')]
+        .find(item => /信任此工作区|Trust this workspace|Trust workspace/u.test(item.textContent ?? ''));
+      button?.click();
+      return button !== undefined;
+    })()`);
+    if (trustConfirmed !== true) throw new Error('packaged_workspace_trust_confirm_button_missing');
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('.confirm') === null`), 5_000, 'packaged_workspace_trust_confirmation_close');
+    const permissionPanelOpen = await devTools.evaluate(`document.querySelector('.permission-panel') !== null`);
+    if (!permissionPanelOpen) {
+      await devTools.evaluate(`document.querySelector('button.permission-trigger')?.click(); true`);
+      await waitUntil(async () => await devTools.evaluate(`document.querySelector('.permission-panel') !== null`), 5_000, 'packaged_permission_panel_reopen');
+    }
+    await waitUntil(async () => await devTools.evaluate(`(() => {
+      const row = [...document.querySelectorAll('.permission-change-state')]
+        .find(item => /项目代码信任|Project code trust/u.test(item.textContent ?? ''));
+      return /已信任|Trusted/u.test(row?.querySelector('strong')?.textContent ?? '');
+    })()`), 10_000, 'packaged_workspace_trust_saved');
+    await devTools.evaluate(`document.querySelector('button.permission-trigger')?.click(); true`);
+    return '可信界面显示初始未信任状态，确认后仅将隔离测试工作区标记为可信';
+  });
+
+  await check('open local Agent Control and MCP settings in the installed application', async () => {
+    const opened = await devTools.evaluate(`(() => {
+      const button = [...document.querySelectorAll('aside.sidebar button.entry')]
+        .find(item => /设置|Settings/u.test(item.textContent ?? ''));
+      button?.click();
+      return button !== undefined;
+    })()`);
+    if (opened !== true) throw new Error('packaged_settings_entry_missing');
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('.sheet .sheet-nav button[role="tab"]') !== null`), 5_000, 'packaged_control_settings_open');
+    const selected = await devTools.evaluate(`(() => {
+      const tab = [...document.querySelectorAll('.sheet-nav button[role="tab"]')]
+        .find(item => /外部控制|Agent Control/u.test(item.textContent ?? ''));
+      tab?.click();
+      return tab !== undefined;
+    })()`);
+    if (selected !== true) throw new Error('packaged_agent_control_tab_missing');
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('.agent-control-panel .agent-control-notice') !== null`), 10_000, 'packaged_agent_control_panel');
+    const notice = await devTools.evaluate(`document.querySelector('.agent-control-panel .agent-control-notice')?.textContent ?? ''`);
+    if (!/本机 stdio MCP|local stdio MCP/u.test(notice)) throw new Error('packaged_mcp_location_notice_missing');
+    if (createAgentControlGrant) {
+      await check('create a workspace-scoped Agent Control grant through the installed UI', async () => {
+        const draft = await devTools.evaluate(`(async () => {
+          const panel = document.querySelector('.agent-control-panel');
+          if (panel === null) return { error: 'panel_missing' };
+          const createDetails = panel.querySelector('.grant-create-fold');
+          if (createDetails === null) return { error: 'create_section_missing' };
+          createDetails.open = true;
+          const name = panel.querySelector('.grant-basic-grid input:not([readonly])');
+          const project = panel.querySelector('.grant-basic-grid input[readonly]');
+          if (!(name instanceof HTMLInputElement) || !(project instanceof HTMLInputElement)) return { error: 'basic_fields_missing' };
+          const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+          valueSetter.call(name, ${JSON.stringify(suppliedGrantName)});
+          name.dispatchEvent(new Event('input', { bubbles: true }));
+          name.dispatchEvent(new Event('change', { bubbles: true }));
+          const nextBasics = [...panel.querySelectorAll('.grant-actions button')]
+            .find(button => /继续：能力与上限|Continue: capabilities and limits/u.test(button.textContent ?? ''));
+          if (nextBasics === undefined || nextBasics.disabled) return { error: 'capabilities_step_unavailable' };
+          nextBasics.click();
+          const stepDeadline = Date.now() + 5_000;
+          while (Date.now() < stepDeadline && panel.querySelector('.grant-config-grid') === null) {
+            await new Promise(resolve => setTimeout(resolve, 20));
+          }
+          const cards = [...panel.querySelectorAll('.grant-config-card')];
+          const files = cards.find(card => /文件与命令权限|Files and commands/u.test(card.querySelector('h4')?.textContent ?? ''));
+          const network = cards.find(card => /网络访问|Network access/u.test(card.querySelector('h4')?.textContent ?? ''));
+          const policy = cards.find(card => /审批方式|Approval behavior/u.test(card.querySelector('h4')?.textContent ?? ''));
+          if (files === undefined || network === undefined || policy === undefined) return { error: 'grant_limit_fields_missing' };
+          const setSelect = (select, value) => {
+            if (!(select instanceof HTMLSelectElement)) return false;
+            Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(select, value);
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+            return select.value === value;
+          };
+          const fileSelects = [...files.querySelectorAll('select')];
+          const networkSelects = [...network.querySelectorAll('select')];
+          const policySelect = policy.querySelector('select');
+          const selections = [
+            setSelect(fileSelects[0], ${JSON.stringify(suppliedGrantProfile)}),
+            setSelect(fileSelects[1], ${JSON.stringify(suppliedGrantProfile)}),
+            setSelect(networkSelects[0], 'unrestricted'),
+            setSelect(networkSelects[1], 'unrestricted'),
+            setSelect(policySelect, 'ask'),
+          ];
+          const checkLabel = (container, pattern) => {
+            const label = [...container.querySelectorAll('label')]
+              .find(item => pattern.test(item.textContent ?? ''));
+            const checkbox = label?.querySelector('input[type="checkbox"]');
+            if (!(checkbox instanceof HTMLInputElement)) return false;
+            if (!checkbox.checked) checkbox.click();
+            return checkbox.checked;
+          };
+          const confirmations = [];
+          if (${JSON.stringify(suppliedGrantProfile)} !== 'read-only') {
+            confirmations.push(checkLabel(files, /部分隔离限制|partial-isolation limits/u));
+          }
+          if (${JSON.stringify(suppliedGrantProfile)} === 'full-access') {
+            confirmations.push(checkLabel(files, /确认允许访问当前 OS 账户|Allow access to everything/u));
+          }
+          confirmations.push(checkLabel(network, /不受限网络访问|unrestricted network access/u));
+          const operatorAllowed = checkLabel(policy, /--operator|ordinary approvals/u);
+          return {
+            project: project?.value ?? '', name: name.value,
+            selections, confirmations, operatorAllowed,
+          };
+        })()`);
+        if (draft.error !== undefined) throw new Error(`grant_form_${draft.error}`);
+        if (draft.project.toLowerCase() !== workspace.toLowerCase()) throw new Error('grant_project_does_not_match_requested_workspace');
+        if (draft.name !== suppliedGrantName || !draft.selections.every(Boolean) || !draft.confirmations.every(Boolean) || !draft.operatorAllowed) {
+          throw new Error(`grant_form_not_ready:${JSON.stringify(draft)}`);
+        }
+        const advanced = await devTools.evaluate(`(() => {
+          const panel = document.querySelector('.agent-control-panel');
+          return [...panel.querySelectorAll('.grant-actions button')]
+            .find(button => /继续：风险确认|Continue: risk review/u.test(button.textContent ?? ''))?.disabled === false;
+        })()`);
+        if (advanced !== true) throw new Error('grant_risk_review_step_unavailable');
+        await devTools.evaluate(`(() => {
+          const panel = document.querySelector('.agent-control-panel');
+          [...panel.querySelectorAll('.grant-actions button')]
+            .find(button => /继续：风险确认|Continue: risk review/u.test(button.textContent ?? ''))?.click();
+          return true;
+        })()`);
+        await waitUntil(async () => await devTools.evaluate(`document.querySelector('.agent-control-panel .grant-lifetime-card') !== null`), 5_000, 'packaged_agent_control_risk_review');
+        const workspaceConfirmation = await devTools.evaluate(`(() => {
+          const panel = document.querySelector('.agent-control-panel');
+          const label = [...panel.querySelectorAll('.grant-lifetime-card label')]
+            .find(item => /我信任上方项目目录|I trust project code/u.test(item.textContent ?? ''));
+          const checkbox = label?.querySelector('input[type="checkbox"]');
+          if (!(checkbox instanceof HTMLInputElement)) return false;
+          if (!checkbox.checked) checkbox.click();
+          return checkbox.checked;
+        })()`);
+        if (workspaceConfirmation !== true) throw new Error('grant_workspace_confirmation_missing');
+        await waitUntil(async () => await devTools.evaluate(`(() => {
+          const panel = document.querySelector('.agent-control-panel');
+          const button = [...panel.querySelectorAll('.grant-actions button')]
+            .find(item => /创建授权|Create grant/u.test(item.textContent ?? ''));
+          return button !== undefined && !button.disabled;
+        })()`), 5_000, 'packaged_agent_control_grant_enabled');
+        const submitted = await devTools.evaluate(`(() => {
+          const panel = document.querySelector('.agent-control-panel');
+          const button = [...panel.querySelectorAll('.grant-actions button')]
+            .find(item => /创建授权|Create grant/u.test(item.textContent ?? ''));
+          button?.click();
+          return button !== undefined && !button.disabled;
+        })()`);
+        if (submitted !== true) throw new Error('grant_create_button_unavailable');
+        await waitUntil(async () => await devTools.evaluate(`(() => {
+          return [...document.querySelectorAll('.agent-control-panel .grant-inspector')]
+            .some(item => item.querySelector(':scope > summary')?.textContent?.includes(${JSON.stringify(suppliedGrantName)}));
+        })()`), 20_000, 'packaged_agent_control_grant_saved');
+        const grant = await devTools.evaluate(`(() => {
+          const row = [...document.querySelectorAll('.agent-control-panel .grant-inspector')]
+            .find(item => item.querySelector(':scope > summary')?.textContent?.includes(${JSON.stringify(suppliedGrantName)}));
+          const details = row?.querySelector('details.catalog-fold');
+          if (details !== undefined && details !== null) details.open = true;
+          return {
+            id: details?.querySelector('code')?.textContent?.trim() ?? '',
+            project: row?.querySelector('.catalog-current')?.textContent?.trim() ?? '',
+            details: [...(details?.querySelectorAll('p') ?? [])].map(item => item.textContent ?? '').join(' '),
+            summary: row?.textContent ?? '',
+            operator: [...(row?.querySelectorAll('.sheet-row') ?? [])]
+              .find(item => /Operator replies|普通审批代答/u.test(item.querySelector('.sheet-label')?.textContent ?? ''))
+              ?.querySelector('.sheet-value')?.textContent ?? '',
+          };
+        })()`);
+        if (grant.id === '' || grant.project.toLowerCase() !== workspace.toLowerCase()) throw new Error('saved_grant_identity_mismatch');
+        if (!grant.details.includes('可信界面创建') && !grant.details.includes('Trusted UI')) throw new Error('saved_grant_source_not_trusted_ui');
+        const expectedPermission = `${suppliedGrantProfile} / ${suppliedGrantProfile}`;
+        if (!grant.summary.includes(expectedPermission) || !grant.summary.includes('unrestricted / unrestricted')
+          || !grant.summary.includes('ask') || (!grant.operator.includes('Allowed') && !grant.operator.includes('允许'))) {
+          throw new Error('saved_grant_limits_invalid');
+        }
+        return `可信 Desktop UI 为准确工作区创建 ${grant.id}；${expectedPermission}，unrestricted / unrestricted，Policy ask，允许 --operator`;
+      });
+    }
+    await devTools.evaluate(`document.querySelector('button[aria-label="关闭设置"], button[aria-label="Close settings"]')?.click(); true`);
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('.sheet') === null`), 5_000, 'packaged_control_settings_close');
+    return 'Agent Control 页面报告使用本机 stdio MCP；CLI 的已安装路径由独立 npm 消费者检查确认';
   });
 
   let sessionId;

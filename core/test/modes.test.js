@@ -12,9 +12,11 @@ import {
   applyMode, createConfig, createConnection, createKernel, createMemoryConnectionPair, createSkillPlugin, DEFAULT_MODE,
   loadAssembly, loadMode, MESSAGES_CAPABILITIES, minimalPlugin, modeDirectories, serveHost,
 } from '../dist/index.js';
+import { resolveModeSelection } from '../dist/kernel/modes.js';
 
 const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
 const MINIMAL = ['create', 'delete', 'edit', 'exec', 'find', 'read', 'search', 'write'];
+const HOST_MINIMAL = [...MINIMAL, 'managed_process'];
 
 // 三层目录各放在一个临时根下：userHome 与 projectRoot 指哪儿都由调用方给，不碰进程环境。
 async function withLayout(run) {
@@ -55,7 +57,7 @@ test('a name only the shipped layer has still loads, and the default is the ship
     const minimal = await loadMode(DEFAULT_MODE, shipped);
     assert.equal(minimal.layer, 'shipped');
     // 文件里写的顺序就是要交给模型的那一份顺序，装载不重排；这里比的是同一批成员。
-    assert.deepEqual([...minimal.tools].sort(), MINIMAL);
+    assert.deepEqual([...minimal.tools].sort(), [...HOST_MINIMAL].sort());
     const full = await loadMode('full', shipped);
     assert.equal(full.tools, '*');
   });
@@ -108,6 +110,33 @@ test('the project layer wins whole, and its file still cannot name what the load
     assert.equal(mode.layer, 'project');
     // 整份覆盖：全局那份写了两个工具，项目那份写一个，生效的就只有一个，不做按键合并。
     assert.deepEqual(mode.tools, ['read']);
+  });
+});
+
+test('delegation mode selections normalize legacy names, inherited names, and inline definitions', async () => {
+  await withLayout(async ({ directories }) => {
+    const path = await writeMode(directories, 'project', 'review', complete('["read"]'));
+    const named = await loadMode('review', directories);
+    const inherited = await resolveModeSelection(undefined, directories, named);
+    assert.equal(inherited.source, 'named');
+    assert.equal(inherited.name, 'review');
+    assert.equal(inherited.application, named);
+
+    const legacy = await resolveModeSelection('review', directories);
+    const explicit = await resolveModeSelection({ type: 'named', name: 'review' }, directories);
+    assert.equal(legacy.fileDigest, named.digest);
+    assert.deepEqual(explicit, legacy);
+    assert.equal(explicit.application.path, path);
+
+    const inline = await resolveModeSelection({ type: 'inline', tools: ['read'], prompt: [] }, directories);
+    assert.deepEqual(inline, {
+      application: { name: 'inline', tools: ['read'], prompt: [] },
+      source: 'inline', name: 'inline', layer: 'inline',
+    });
+    await assert.rejects(
+      resolveModeSelection({ type: 'inline', tools: ['read', 'read'], prompt: [] }, directories),
+      { code: 'mode_field_duplicate' },
+    );
   });
 });
 
@@ -216,7 +245,8 @@ test('a session built by the Host asks the provider with only the mode-selected 
     },
   };
   const pair = createMemoryConnectionPair();
-  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy, modeName: 'readonly', modePaths: directories });
+  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy, modeName: 'readonly', modePaths: directories,
+    skillRegistry: { skills: [], diagnostics: [] } });
   const connection = createConnection(pair.client);
   try {
     const { sessionId } = await connection.request('session.create', {});
@@ -261,7 +291,7 @@ test('a switch asked for during a round takes effect only once that round ends',
     const pair = createMemoryConnectionPair();
     const host = serveHost({
       input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy,
-      modeName: 'readonly', modePaths: directories,
+      modeName: 'readonly', modePaths: directories, skillRegistry: { skills: [], diagnostics: [] },
     });
     const connection = createConnection(pair.client);
     const waiting = connection.request('session.create', {});
@@ -328,7 +358,7 @@ test('a rejected mode switch preserves the current tools through the next round 
     const pair = createMemoryConnectionPair();
     const host = serveHost({
       input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy,
-      modeName: 'readonly', modePaths: directories,
+      modeName: 'readonly', modePaths: directories, skillRegistry: { skills: [], diagnostics: [] },
     });
     const connection = createConnection(pair.client);
     try {

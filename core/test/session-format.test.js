@@ -52,6 +52,30 @@ test('session policy events must be ignorable and contain a valid restore snapsh
     header,
     { seq: 0, kind: 'sessionPolicy', ignorable: true, override: 'never', consecutive: 3, total: 2, forcedToAsk: true },
   ]), { code: 'session_policy_event_invalid' });
+  const none = { seq: 0, kind: 'sessionPolicy', ignorable: true, override: 'none', consecutive: 0, total: 0, forcedToAsk: false };
+  const legacyNever = { seq: 0, kind: 'sessionPolicy', ignorable: true, override: 'never', consecutive: 3, total: 3, forcedToAsk: true };
+  assert.equal(parseSessionEvents([header, none]).events[0].override, 'none');
+  assert.equal(parseSessionEvents([header, legacyNever]).events[0].override, 'never', 'stored legacy never keeps its old identity');
+});
+
+test('session MCP trust events are ignorable and validate the server identity', () => {
+  const header = { kind: 'session', formatVersion: 2, sessionId: 'mcp-trust', projectRoot: '' };
+  const trust = {
+    seq: 0, kind: 'sessionMcpTrust', ignorable: true, source: 'trusted-ui', server: 'playwright', identityDigest: 'a'.repeat(64), trusted: true,
+    updatedAt: new Date().toISOString(),
+  };
+  assert.equal(parseSessionEvents([header, trust]).events[0].kind, 'sessionMcpTrust');
+  assert.throws(() => parseSessionEvents([header, { ...trust, identityDigest: 'invalid' }]), { code: 'session_mcp_trust_event_invalid' });
+});
+
+test('session approval memory events are ignorable and validate the saved rule', () => {
+  const header = { kind: 'session', formatVersion: 2, sessionId: 'policy-rule', projectRoot: '' };
+  const saved = { seq: 0, kind: 'sessionPolicyRule', ignorable: true, updatedAt: new Date().toISOString(), rule: { tool: 'mcp:playwright/browser_click', decision: 'allow' } };
+  assert.equal(parseSessionEvents([header, saved]).events[0].kind, 'sessionPolicyRule');
+  const fileRule = { ...saved, rule: { tool: 'create', decision: 'allow', target: 'file', path: join(process.cwd(), 'testplace', 'app.js') } };
+  assert.equal(parseSessionEvents([header, fileRule]).events[0].kind, 'sessionPolicyRule');
+  assert.throws(() => parseSessionEvents([header, { ...saved, rule: { tool: 'create', decision: 'allow', target: 'file', path: 'app.js' } }]), { code: 'session_policy_rule_event_invalid' });
+  assert.throws(() => parseSessionEvents([header, { ...saved, rule: { tool: '', decision: 'allow' } }]), { code: 'session_policy_rule_event_invalid' });
 });
 
 // 开局还没选过模式时那一格就是不写，而不是写一个空名字或写一份假的默认。

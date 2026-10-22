@@ -10,6 +10,7 @@ import { languageOf, textOf, type Locale } from '@ligule/core/kernel/locale.js';
 import { loadConfigLayers } from '@ligule/core/kernel/config-file.js';
 import { createConfigStore } from '@ligule/core/kernel/config-store.js';
 import { createKernel } from '@ligule/core/kernel/kernel.js';
+import { createInteractivePermissionContext } from '@ligule/core/capability/permission-capabilities.js';
 import { loadAssembly } from '@ligule/core/kernel/assembly.js';
 import { DEFAULT_MODE, modeDirectories } from '@ligule/core/kernel/modes.js';
 import { extensionSources } from '@ligule/core/kernel/extensions.js';
@@ -39,6 +40,7 @@ interface CliPolicy extends Record<string, unknown> {
 interface CliConfig extends ConfigSnapshot {
   readonly boundary: string;
   readonly workspaceRoot: string;
+  readonly exec?: { readonly shell?: unknown };
   readonly model?: Record<string, unknown>;
   readonly loop?: Record<string, unknown>;
   readonly limits?: Record<string, unknown>;
@@ -89,7 +91,7 @@ function responseCount(value: Record<string, unknown>, field: string): number {
 function policyOf(value: unknown): CliPolicy | undefined {
   if (value === undefined || !isRecord(value)) return undefined;
   const mode = value.mode;
-  if (mode !== undefined && mode !== 'ask' && mode !== 'auto' && mode !== 'never') throw new KernelError('policy_mode_unknown');
+  if (mode !== undefined && mode !== 'ask' && mode !== 'auto' && mode !== 'none' && mode !== 'never') throw new KernelError('policy_mode_unknown');
   let rules: PolicyRule[] | undefined;
   if (value.rules !== undefined) {
     if (!Array.isArray(value.rules) || !value.rules.every(isPolicyRule)) throw new KernelError('policy_rules_invalid');
@@ -398,8 +400,28 @@ async function runOneRound(
       // 同时展示命令使用的语法和可执行文件，帮助用户判断命令会如何运行。
       const backend = typeof fields.shell !== 'string' ? '' : ` (${fields.shell}: ${typeof fields.executable === 'string' ? fields.executable : ''})`;
       const tool = typeof fields.tool === 'string' ? fields.tool : 'tool';
-      const answer = await approvals.ask(t(`允许 ${tool} ${described}${backend}？[y/N] `, `Allow ${tool} ${described}${backend}? [y/N] `));
-      return { decision: /^y(es)?$/i.test(String(answer).trim()) ? 'allow' : 'deny' };
+      const size = typeof fields.contentBytes === 'number' && typeof fields.contentSha256 === 'string'
+        ? ` · ${fields.contentBytes} bytes · SHA-256 ${fields.contentSha256}`
+        : typeof fields.argumentBytes === 'number' && typeof fields.argumentSha256 === 'string'
+          ? ` · arguments ${fields.argumentBytes} bytes · SHA-256 ${fields.argumentSha256}`
+          : '';
+      let answer = await approvals.ask(t(`允许 ${tool} ${described}${backend}${size}？[y/N；d 查看完整内容] `, `Allow ${tool} ${described}${backend}${size}? [y/N; d to view full details] `));
+      while (String(answer).trim().toLowerCase() === 'd') {
+        const detailsRef = typeof fields.detailsRef === 'string' ? fields.detailsRef : '';
+        try {
+          const details = await host.handle({ method: 'approval.details', params: { sessionId: fields.sessionId, requestId: detailsRef } }, connection);
+          if (isRecord(details) && isRecord(details.args)) process.stderr.write(`${JSON.stringify(details.args, null, 2)}\n`);
+          else process.stderr.write(t('无法读取待审批内容。\n', 'Pending details are unavailable.\n'));
+        } catch (error) {
+          const code = error instanceof KernelError ? error.code : 'approval_details_failed';
+          process.stderr.write(`${t('无法读取待审批内容：', 'Could not read pending details: ')}${code}\n`);
+        }
+        answer = await approvals.ask(t(`允许 ${tool} ${described}${backend}${size}？[y/N] `, `Allow ${tool} ${described}${backend}${size}? [y/N] `));
+      }
+      if (answer === undefined) {
+        return { decision: 'unavailable', code: 'ask_unavailable', reason: 'terminal input closed before a decision' };
+      }
+      return { decision: /^y(es)?$/i.test(answer.trim()) ? 'allow' : 'deny' };
     },
   };
   try {
@@ -619,6 +641,7 @@ if (invalidLanguage) {
       // 模型尚未配置时仍启动 Host，以便客户端先写入设置；提交任务时再报告缺少的字段。
       provider: hostProviderFromConfig(config),
       policy: config.policy,
+      permission: await createInteractivePermissionContext({ shellConfig: config, workspaceRoot: config.workspaceRoot }),
       extensions,
       loadEnvironment: projectEnvironment,
       // 由 Desktop 或脚本启动时，客户端可以回答模型提问和审批请求。
@@ -645,9 +668,19 @@ if (invalidLanguage) {
       const { confirmWorkspaceTrust } = await import('./tui/trust.js');
       // 在读取项目配置和资源前确认目录信任；用户拒绝时不创建 Host 或会话。
       if (await confirmWorkspaceTrust(process.cwd(), { locale: locale ?? languageOf('auto') })) {
-        const { config, extensions } = await configSnapshot();
+        const { config, extensions, layers } = await configSnapshot();
         const { runTui } = await import('./tui/start.js');
-        await runTui({ config, provider: hostProviderFromConfig(config), policy: config.policy, extensions, locale, ...resolveMode(config) });
+        await runTui({
+          config,
+          provider: hostProviderFromConfig(config),
+          policy: config.policy,
+          extensions,
+          locale,
+          ...resolveMode(config),
+          configLayers: layers,
+          configStoreFor: (projectRoot, ownLayers) => createConfigStore({ projectRoot, layers: ownLayers }),
+          loadEnvironment: projectEnvironment,
+        });
       }
     } catch (error) {
       const fields = errorFields(error);

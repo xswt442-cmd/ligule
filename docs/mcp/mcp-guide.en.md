@@ -38,7 +38,7 @@ For example, on Windows:
 }
 ```
 
-Each MCP server process authorizes only the project supplied at startup. Use MCP `tools/list` to discover all ten tools and their input schemas:
+Each MCP server process authorizes only the project supplied at startup. Use MCP `tools/list` to discover all twelve tools and their input schemas:
 
 - `ligule_session_create`: create a session in the authorized project.
 - `ligule_session_open`: reopen an existing session. A session returned by the list tool must be opened before it can be used for a run or record read.
@@ -47,21 +47,29 @@ Each MCP server process authorizes only the project supplied at startup. Use MCP
 - `ligule_interaction_reply`: answer one real pending approval or question, bound to its session and request ID.
 - `ligule_session_send`: start a round when idle, queue the next message while running, or continue and manage the queue.
 - `ligule_run_start`: submit one task and return an `operationId` scoped to the current process and the session ID.
+- `ligule_run`: start a task and wait for a terminal result; a wait timeout returns the current state without cancelling the run.
 - `ligule_run_status`: check whether the run is running, done, failed, or cancelled.
+- `ligule_run_await`: wait for a known `operationId`; a timeout also leaves the run active.
 - `ligule_session_read`: read a page of session records.
 - `ligule_run_cancel`: cancel the run identified by its `operationId`.
 
-Recommended flow: create or reopen a session and read `ligule_session_configure`. After submitting work, poll `ligule_run_status`; use `phase`, `waitingFor`, and `pendingInteractions` to decide whether to wait or review and reply. Read new records with `ligule_session_read` after completion. MCP logging notifications are best-effort; polling exposes the same state when notifications are unavailable. Call `ligule_run_cancel` to stop a run. The running server's `tools/list` schemas define the arguments.
+Recommended flow: create or reopen a session and read `ligule_session_configure`. Use `ligule_run` when the caller should wait for a bounded time, or `ligule_run_start` to return immediately. Then use `ligule_run_await` to wait for a known operation or `ligule_run_status` to poll it. Neither wait timeout cancels the run. Use `phase`, `waitingFor`, and `pendingInteractions` to decide whether to keep waiting or review and reply. Read new records with `ligule_session_read` after completion. MCP logging notifications are best-effort; polling exposes the same state when notifications are unavailable. Call `ligule_run_cancel` to stop a run. The running server's `tools/list` schemas define the arguments.
 
 ## Operator authorization and session settings
 
-The default startup does not grant operator authority. In this mode, approval requests are denied as before, Host does not register `ask_user_question`, settings can be read, and settings changes or interaction replies fail with `control_operator_required`. Add `--operator` explicitly to the local MCP client configuration to enable replies and session settings:
+The default startup does not grant operator authority. In this mode, ordinary approval requests and user questions wait for the local Desktop/TUI user. Host registers `ask_user_question` for the local interface, while MCP clients cannot reply directly. Settings can be read; settings changes and MCP interaction replies fail with `control_operator_required`. Add `--operator` explicitly to the local MCP client configuration to enable MCP replies and session settings:
 
 ```json
 {"command":"ligule","args":["mcp-server","--project","/absolute/path/to/project","--operator"]}
 ```
 
-`--operator` means the local operator explicitly authorizes this stdio client. It permits answering Policy decisions that are `ask`, answering real questions, and changing one session's mode, Policy, model, generation settings, and per-turn loop limit. It does not change workspace trust, file boundaries, or hard denials. An approval cannot override `never`, invalid tool input, or workspace boundaries. If Host cannot present a request fully and safely for review, it denies that request.
+`--operator` means the local operator explicitly authorizes this stdio client. It permits answering real pending Policy decisions and user questions, and changing one session's mode, Policy, model, generation settings, and per-turn loop limit. It does not change workspace trust, file boundaries, or hard denials. The three selectable Policy modes are `ask`, `auto`, and `none`; saved legacy `never` retains its old refusal behavior. An approval cannot override invalid tool input or workspace boundaries. Pending interactions in `ligule_run_status` contain a bounded summary, not a duplicate of full tool arguments. The trusted local TUI or Desktop can expand the pending details while the request remains active. If Host cannot review a request safely, it returns an explicit unavailable/error code instead of recording a human refusal.
+
+Every pending reply is bound to its original session and `requestId`. The `source` field in status and events distinguishes a local TUI/Desktop user (`human`) from the MCP operator (`controller`); only a `human` reply can save approval memory. After the operation ends, the client disconnects, or the request becomes invalid, a late reply returns `control_interaction_stale` and is not recorded as a user refusal.
+
+## Delegated runs and structured results
+
+`ligule_run` and `ligule_run_start` accept an optional `delegation` object. Its `mode` may select a named or inline mode, but can only narrow the current session's tools and prompt fragments; it cannot expand the session, Permission, Policy, or Grant ceiling. `outputSchema` can require a structured result matching a supported JSON Schema. The model must submit it with `ligule_delegation_result`; the run is valid only after that value passes validation. This contract applies to one run and does not create a session or edit project configuration. The internal `subagent` tool is a model-callable child run and is separate from one MCP-controlled run.
 
 ## Agent Control project grants
 
@@ -74,6 +82,8 @@ Start the MCP server with the Grant:
 ```
 
 MCP verifies that the project path matches the Grant and applies its default Permission, network, and Policy to new sessions. `--operator` is accepted with a Grant only when that Grant allows ordinary Operator actions; then MCP can change session settings within the Grant's ceilings and answer real pending approvals or questions. Without a Grant, `--operator` alone does not grant or raise Permission. With a Grant but without `--operator`, MCP uses the Grant defaults and cannot change those settings. The Host keeps checking revocation, expiry, and project binding; an invalid Grant blocks further control and releases session locks.
+
+When trusted TUI/Desktop takes over an externally controlled session, it first cancels the active operation, clears queued messages that have not been sent, and releases the Host session lock before returning the session to the local user. Completed tool side effects are not replayed or undone, and an old process's `operationId` cannot be recovered after restart.
 
 Create a session with `initial` in `ligule_session_create` to set `mode`, `policy`, `model`, `thinking`, `outputTokens`, and `loopIterations` together. Use `changes` in `ligule_session_configure` for an existing session. A change call may update only one category: mode, Policy, generation settings, or the loop limit. The generation category can update model, thinking effort, and output budget together. `loopIterations` is the positive safe-integer cap on model/tool iterations for each user turn. It defaults to the project `[loop].iterations` value, or 64 when that is unset. A session override does not edit project configuration; it is stored in Session JSONL and restored when the session is reopened. `loop.modelCalls` remains controlled by project configuration and is independent of `loopIterations`. The schema rejects mixed categories so an invalid request cannot partially apply. Current-format records store and restore Mode, Policy overrides, Policy denial counters and forced-approval state, and model/generation settings. Generation and loop-limit changes made during a run take effect at the next round; Policy changes affect later tool decisions and do not resolve an approval already waiting for a reply. Legacy session records remain readable but cannot change Permission or Policy. `applies` reports the timing.
 
@@ -107,9 +117,11 @@ Concatenate the `json` fragments for the same `seq` in `offset` order. When `nex
 
 `--project` requires an absolute path. Session, run, and read operations are restricted to the project authorized at startup. Sessions returned by `ligule_session_list` must be reopened with `ligule_session_open` before use. The project directory identifies session ownership; `boundary` remains a separate limit for paths available to file tools.
 
-The MCP server uses Ligule's existing configuration, model service, tools, and Policy. Without `--operator`, operations that need human approval are denied. With it, only real pending requests can be answered. The server does not expose arbitrary Host RPC or configuration-file writes. It uses local stdio and does not open a network listener. The stdio client and server run with the same operating-system user permissions, so connect only trusted local MCP clients.
+The MCP server uses Ligule's existing configuration, model service, tools, and Policy. Without `--operator`, ordinary requests needing human approval wait for the local Desktop/TUI user, and MCP cannot answer them directly. With it, MCP can answer only real pending requests. The server does not expose arbitrary Host RPC or configuration-file writes. It uses local stdio and does not open a network listener. The stdio client and server run with the same operating-system user permissions, so connect only trusted local MCP clients.
 
-Without a Grant, `--operator` does not grant or elevate session Permission and cannot change operating-system resource boundaries. MCP tool calls always pass through the session's Permission and Policy decisions. Restricted Shell runs only when the platform sandbox meets the required capability levels. Linux bubblewrap currently reports filesystem isolation as `partial`, and Windows has no operating-system sandbox backend, so Shell cannot run in `read-only` or `workspace-write` sessions on either platform. `full-access` must be confirmed separately in a trusted interactive interface; it does not make Policy hard denials overridable.
+Revoking workspace trust immediately stops managed processes started from that trusted workspace in the local Host. Other MCP Hosts recheck the shared trust record once per second and stop those processes when revocation is detected; new project-code commands also recheck trust before execution.
+
+Without a Grant, `--operator` does not grant or elevate session Permission and cannot change operating-system resource boundaries. MCP tool calls always pass through the session's Permission and Policy decisions. Restricted Shell runs only when the platform sandbox meets the required capability levels. Linux bubblewrap reports measured filesystem capabilities. Windows `workspace-write` is `partial`, requires explicit project trust, confirmation of its limits, and `unrestricted` network access; it cannot restrict reads or network and can be crossed through existing hard links, writable ancestor `FILE_DELETE_CHILD` permissions, or concurrent ACL changes. It is not for hostile native code. Windows `read-only` uses AppContainer only when a live probe confirms the selected Shell can enter the actual workspace; otherwise that profile cannot run Shell. When available, it blocks workspace writes and Shell networking but may still read public operating-system files. `full-access` must be confirmed separately in a trusted interactive interface; it does not make Policy hard denials overridable.
 
 Run state and `operationId` values exist only in the current server process; each process retains at most 256 operation records. At capacity, a new run evicts the earliest created operation that has settled. An evicted ID can no longer be queried. If all retained operations are still running, a new run fails with a capacity error. An old `operationId` cannot be recovered after the server exits or restarts. Host persists session records, so a new server can reopen a session and read its history, but it cannot restore a run from the previous process.
 

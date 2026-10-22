@@ -8,7 +8,7 @@ import { dataRoot } from '../kernel/config-file.js';
 import { KernelError, KernelRuntimeError } from '../kernel/error.js';
 import type { PermissionNetwork, PermissionProfile } from '../kernel/permission.js';
 
-export type DelegationPolicy = 'ask' | 'auto' | 'never';
+export type DelegationPolicy = 'ask' | 'auto' | 'none' | 'never';
 export type DelegationSource = 'trusted-ui' | 'legacy';
 
 export interface DelegationGrant {
@@ -23,8 +23,11 @@ export interface DelegationGrant {
   readonly defaultPolicy: DelegationPolicy;
   readonly allowedPolicies: readonly DelegationPolicy[];
   readonly allowOperator: boolean;
+  readonly allowedMcpServers: readonly string[];
+  readonly allowedMcpTools: readonly string[];
   readonly confirmedFullAccess: boolean;
   readonly confirmedUnrestrictedNetwork: boolean;
+  readonly confirmedPartialWorkspaceWrite: boolean;
   readonly createdAt: string;
   readonly expiresAt: string | null;
   readonly revokedAt: string | null;
@@ -60,6 +63,9 @@ export interface CreateDelegationGrantInput {
   readonly allowOperator: boolean;
   readonly confirmFullAccess: boolean;
   readonly confirmUnrestrictedNetwork: boolean;
+  readonly confirmPartialWorkspaceWrite?: boolean;
+  readonly allowedMcpServers?: readonly string[];
+  readonly allowedMcpTools?: readonly string[];
   readonly expiresAt: string | null;
 }
 
@@ -86,7 +92,7 @@ const AUDIT_LIMIT = 2048;
 const LOCK_STALE_MS = 10_000;
 const PROFILES: readonly PermissionProfile[] = ['read-only', 'workspace-write', 'full-access'];
 const NETWORKS: readonly PermissionNetwork[] = ['disabled', 'policy', 'unrestricted'];
-const POLICIES: readonly DelegationPolicy[] = ['ask', 'auto', 'never'];
+const POLICIES: readonly DelegationPolicy[] = ['ask', 'auto', 'none', 'never'];
 const PROFILE_RANK: Readonly<Record<PermissionProfile, number>> = { 'read-only': 0, 'workspace-write': 1, 'full-access': 2 };
 const NETWORK_RANK: Readonly<Record<PermissionNetwork, number>> = { disabled: 0, policy: 1, unrestricted: 2 };
 
@@ -106,6 +112,14 @@ function onlyKeys(value: Record<string, unknown>, keys: readonly string[]): bool
   return Object.keys(value).length === keys.length && Object.keys(value).every((key) => keys.includes(key));
 }
 
+function isMcpServerName(value: unknown): value is string {
+  return typeof value === 'string' && value !== '' && value.length <= 128 && !/[\u0000-\u001f/\\]/u.test(value);
+}
+
+function isMcpToolCapability(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 512 && /^mcp:[^/\u0000-\u001f]+\/.+$/u.test(value);
+}
+
 function isProfile(value: unknown): value is PermissionProfile {
   return PROFILES.includes(value as PermissionProfile);
 }
@@ -120,9 +134,13 @@ function isPolicy(value: unknown): value is DelegationPolicy {
 
 function validateGrant(value: unknown): DelegationGrant {
   const keys = ['id', 'name', 'projectRoot', 'defaultPermissionProfile', 'maxPermissionProfile', 'defaultNetwork', 'maxNetwork',
-    'source', 'defaultPolicy', 'allowedPolicies', 'allowOperator', 'confirmedFullAccess', 'confirmedUnrestrictedNetwork', 'createdAt', 'expiresAt', 'revokedAt'];
-  const legacyKeys = keys.filter((key) => key !== 'source');
-  if (!isRecord(value) || (!onlyKeys(value, keys) && !onlyKeys(value, legacyKeys))
+    'source', 'defaultPolicy', 'allowedPolicies', 'allowOperator', 'confirmedFullAccess', 'confirmedUnrestrictedNetwork',
+    'confirmedPartialWorkspaceWrite', 'allowedMcpServers', 'allowedMcpTools', 'createdAt', 'expiresAt', 'revokedAt'];
+  const requiredKeys = keys.filter((key) => !['source', 'confirmedPartialWorkspaceWrite', 'allowedMcpServers', 'allowedMcpTools'].includes(key));
+  const mcpServers = isRecord(value) && Array.isArray(value.allowedMcpServers) ? value.allowedMcpServers : [];
+  const mcpTools = isRecord(value) && Array.isArray(value.allowedMcpTools) ? value.allowedMcpTools : [];
+  if (!isRecord(value) || Object.keys(value).some((key) => !keys.includes(key))
+    || requiredKeys.some((key) => !Object.hasOwn(value, key))
     || typeof value.id !== 'string' || !/^[0-9a-f-]{36}$/i.test(value.id)
     || typeof value.name !== 'string' || value.name.trim() === '' || value.name.length > 80
     || typeof value.projectRoot !== 'string' || !isAbsolute(value.projectRoot)
@@ -139,6 +157,12 @@ function validateGrant(value: unknown): DelegationGrant {
     || typeof value.allowOperator !== 'boolean'
     || typeof value.confirmedFullAccess !== 'boolean'
     || typeof value.confirmedUnrestrictedNetwork !== 'boolean'
+    || (value.confirmedPartialWorkspaceWrite !== undefined && typeof value.confirmedPartialWorkspaceWrite !== 'boolean')
+    || (value.allowedMcpServers !== undefined && (!Array.isArray(value.allowedMcpServers) || value.allowedMcpServers.some((server) => !isMcpServerName(server))))
+    || (value.allowedMcpTools !== undefined && (!Array.isArray(value.allowedMcpTools) || value.allowedMcpTools.some((tool) => !isMcpToolCapability(tool))))
+    || new Set(mcpServers).size !== mcpServers.length
+    || new Set(mcpTools).size !== mcpTools.length
+    || mcpTools.some((tool) => !mcpServers.includes(String(tool).slice(4).split('/')[0]!))
     || (value.maxPermissionProfile === 'full-access' && value.confirmedFullAccess !== true)
     || (value.maxNetwork === 'unrestricted' && value.confirmedUnrestrictedNetwork !== true)
     || typeof value.createdAt !== 'string' || Number.isNaN(Date.parse(value.createdAt))
@@ -158,8 +182,11 @@ function validateGrant(value: unknown): DelegationGrant {
     defaultPolicy: value.defaultPolicy,
     allowedPolicies: Object.freeze([...value.allowedPolicies]) as DelegationPolicy[],
     allowOperator: value.allowOperator,
+    allowedMcpServers: Object.freeze([...mcpServers]) as string[],
+    allowedMcpTools: Object.freeze([...mcpTools]) as string[],
     confirmedFullAccess: value.confirmedFullAccess,
     confirmedUnrestrictedNetwork: value.confirmedUnrestrictedNetwork,
+    confirmedPartialWorkspaceWrite: value.confirmedPartialWorkspaceWrite === true,
     createdAt: value.createdAt,
     expiresAt: value.expiresAt,
     revokedAt: value.revokedAt,
@@ -292,7 +319,19 @@ function checkedInput(input: CreateDelegationGrantInput): Omit<DelegationGrant, 
     || input.allowedPolicies.some((one) => !isPolicy(one)) || new Set(input.allowedPolicies).size !== input.allowedPolicies.length
     || !input.allowedPolicies.includes(input.defaultPolicy)) throw new KernelError('agent_control_policy_limit_invalid');
   if (typeof input.allowOperator !== 'boolean' || typeof input.confirmFullAccess !== 'boolean'
-    || typeof input.confirmUnrestrictedNetwork !== 'boolean') throw new KernelError('agent_control_grant_invalid');
+    || typeof input.confirmUnrestrictedNetwork !== 'boolean'
+    || (input.confirmPartialWorkspaceWrite !== undefined && typeof input.confirmPartialWorkspaceWrite !== 'boolean')) {
+    throw new KernelError('agent_control_grant_invalid');
+  }
+  const allowedMcpServers = input.allowedMcpServers ?? [];
+  const allowedMcpTools = input.allowedMcpTools ?? [];
+  if (!Array.isArray(allowedMcpServers) || allowedMcpServers.some((server) => !isMcpServerName(server))
+    || new Set(allowedMcpServers).size !== allowedMcpServers.length
+    || !Array.isArray(allowedMcpTools) || allowedMcpTools.some((tool) => !isMcpToolCapability(tool))
+    || new Set(allowedMcpTools).size !== allowedMcpTools.length
+    || allowedMcpTools.some((tool) => !allowedMcpServers.includes(tool.slice(4).split('/')[0]!))) {
+    throw new KernelError('agent_control_mcp_limit_invalid');
+  }
   if (input.maxPermissionProfile === 'full-access' && !input.confirmFullAccess) throw new KernelError('agent_control_full_access_confirmation_required');
   if (input.maxNetwork === 'unrestricted' && !input.confirmUnrestrictedNetwork) throw new KernelError('agent_control_unrestricted_network_confirmation_required');
   if (input.expiresAt !== null && (typeof input.expiresAt !== 'string' || !Number.isFinite(Date.parse(input.expiresAt))
@@ -308,8 +347,11 @@ function checkedInput(input: CreateDelegationGrantInput): Omit<DelegationGrant, 
     defaultPolicy: input.defaultPolicy,
     allowedPolicies: [...input.allowedPolicies],
     allowOperator: input.allowOperator,
+    allowedMcpServers: [...allowedMcpServers],
+    allowedMcpTools: [...allowedMcpTools],
     confirmedFullAccess: input.confirmFullAccess,
     confirmedUnrestrictedNetwork: input.confirmUnrestrictedNetwork,
+    confirmedPartialWorkspaceWrite: input.confirmPartialWorkspaceWrite === true,
     expiresAt: input.expiresAt,
   };
 }
@@ -393,6 +435,16 @@ export function assertDelegationPermission(grant: DelegationGrant, profile: Perm
 
 export function assertDelegationPolicy(grant: DelegationGrant, policy: string): asserts policy is DelegationPolicy {
   if (!isPolicy(policy) || !grant.allowedPolicies.includes(policy)) throw new KernelError('agent_control_policy_exceeds_grant');
+}
+
+export function assertDelegationMcpServer(grant: DelegationGrant, server: string): void {
+  if (!grant.allowedMcpServers.includes(server)) throw new KernelError('agent_control_mcp_server_denied');
+}
+
+export function assertDelegationMcpTool(grant: DelegationGrant, capability: string): void {
+  const server = capability.startsWith('mcp:') ? capability.slice(4).split('/')[0] : '';
+  assertDelegationMcpServer(grant, server);
+  if (!grant.allowedMcpTools.includes(capability)) throw new KernelError('agent_control_mcp_tool_denied');
 }
 
 export async function recordDelegationEvent(

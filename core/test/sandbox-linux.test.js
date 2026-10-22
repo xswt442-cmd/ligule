@@ -1,11 +1,11 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, lstatSync, linkSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { once } from 'node:events';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildLinuxSandbox } from '../dist/capability/sandbox-linux.js';
 
@@ -95,6 +95,57 @@ test('read-only profile blocks workspace writes but keeps its private temporary 
   assert.equal(lstatSync(join(paths.privateTempDir, 'allowed')).isFile(), true);
 });
 
+test('the selected Node runtime stays usable through a read-only mount while Home remains hidden', { skip: !linux }, async (t) => {
+  const paths = fixture(t);
+  const nodeMajor = Number(process.versions.node.split('.')[0]);
+  assert.ok(Number.isInteger(nodeMajor) && nodeMajor >= 24, 'the Linux sandbox acceptance requires Node 24 or newer');
+  const nodeExecutable = realpathSync(process.execPath);
+  const binDirectory = dirname(nodeExecutable);
+  const sourceRoot = dirname(binDirectory);
+  if (basename(binDirectory) !== 'bin') return t.skip('the active Node runtime is not installed in a Node distribution bin directory');
+  const hiddenSource = ['/home', '/root', '/mnt', '/media', '/tmp', '/var/tmp', '/var/lib', '/var/log', '/sys', '/dev/shm']
+    .some((directory) => sourceRoot === directory || sourceRoot.startsWith(`${directory}/`));
+  const identity = statSync(nodeExecutable, { bigint: true });
+  const nodeRuntime = {
+    executable: nodeExecutable,
+    identity: {
+      dev: identity.dev.toString(), ino: identity.ino.toString(), size: identity.size.toString(),
+      mtimeNs: identity.mtimeNs.toString(), ctimeNs: identity.ctimeNs.toString(),
+    },
+  };
+  writeFileSync(join(paths.workspace, 'node-probe.mjs'), "import { writeFileSync } from 'node:fs'; writeFileSync(new URL('./node-version', import.meta.url), process.version); console.log(process.version);\n");
+  const command = [
+    `'${nodeExecutable}' /run/ligule/workspace/node-probe.mjs`,
+    'node -v',
+    'npm --version',
+    'if test -x /run/ligule/node-runtime/bin/corepack; then corepack --version; fi',
+    'echo ordinary-shell-ready',
+    ...(hiddenSource ? [`test ! -e '${sourceRoot}'`] : []),
+    'test -z "$(ls -A /home)"',
+    "test \"$PATH\" = '/run/ligule/node-runtime/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'",
+    "awk '$5 == \"/run/ligule/node-runtime/bin/node\" && $6 ~ /(^|,)ro(,|$)/ { found=1 } END { exit !found }' /proc/self/mountinfo",
+    "awk '$5 == \"/run/ligule/node-runtime/lib/node_modules/npm\" && $6 ~ /(^|,)ro(,|$)/ { found=1 } END { exit !found }' /proc/self/mountinfo",
+    'test ! -e /run/ligule/node-runtime/lib/node_modules/pnpm',
+    'if touch /run/ligule/node-runtime/bin/node 2>/dev/null; then exit 49; fi',
+    'echo runtime-isolated',
+  ].join('; ');
+  const result = await buildLinuxSandbox(request(paths, {
+    nodeRuntime: { ...nodeRuntime, rewriteExecutable: true },
+    argv: ['-c', command],
+  }));
+  if (!result.available) return t.skip(result.reason);
+  assert.ok(result.argv.includes('/run/ligule/node-runtime/bin/node'), 'the bound absolute interpreter is rewritten to the fixed mount');
+  const launchArguments = result.argv.slice(result.argv.indexOf('--') + 1);
+  assert.ok(!launchArguments.some((argument) => argument.includes(nodeExecutable)), 'the hidden host path is absent from the command');
+  const child = run(result);
+  assert.equal(child.status, 0, child.stderr);
+  assert.match(child.stdout, new RegExp(process.version.replaceAll('.', '\\.'), 'u'));
+  assert.match(child.stdout, /ordinary-shell-ready/u);
+  assert.match(child.stdout, /runtime-isolated/u);
+  assert.equal(lstatSync(join(paths.workspace, 'node-version')).isFile(), true);
+  assert.equal(readFileSync(join(paths.workspace, 'node-version'), 'utf8'), process.version);
+});
+
 test('workspace links cannot use hidden host paths and existing hard links fail closed', { skip: !linux }, async (t) => {
   const paths = fixture(t);
   const outside = join(paths.root, 'outside-secret');
@@ -160,6 +211,41 @@ test('network stays isolated by default and is shared only when explicitly reque
   const sharedRun = run(shared);
   assert.equal(sharedRun.status, 0, sharedRun.stderr);
   assert.match(sharedRun.stdout, /connected/);
+});
+
+test('network isolation also applies to subprocesses started inside the sandbox', { skip: !linux }, async (t) => {
+  const paths = fixture(t);
+  const server = createServer((socket) => socket.end('connected'));
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => server.close());
+  const address = server.address();
+  assert.notEqual(address, null);
+  const childScript = [
+    'import socket,sys',
+    'sock=socket.socket()',
+    'sock.settimeout(0.7)',
+    'try:',
+    ' sock.connect(("127.0.0.1",int(sys.argv[1])))',
+    ' print("connected")',
+    'except OSError:',
+    ' print("blocked")',
+  ].join('\n');
+  const parentScript = [
+    'import subprocess,sys',
+    `child=${JSON.stringify(childScript)}`,
+    'result=subprocess.run([sys.executable,"-c",child,sys.argv[1]],capture_output=True,text=True,timeout=3)',
+    'print(result.stdout.strip())',
+  ].join('\n');
+  const result = await buildLinuxSandbox(request(paths, {
+    executable: '/usr/bin/python3',
+    argv: ['-c', parentScript, String(address.port)],
+  }));
+  if (!result.available) return t.skip(result.reason);
+
+  const child = run(result);
+  assert.equal(child.status, 0, child.stderr);
+  assert.match(child.stdout, /blocked/u, 'the child process must inherit the restricted network namespace');
 });
 
 test('invalid workspace boundaries and unapproved environment variables are rejected', { skip: !linux }, async (t) => {

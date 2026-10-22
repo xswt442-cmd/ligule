@@ -21,6 +21,42 @@ test('the five layers fold in the order user, project, local, flag, managed', ()
   assert.equal(config.mode, 5);
 });
 
+test('policy rules override by exact tool and match while unrelated lower-layer rules remain effective', () => {
+  const config = createConfig({
+    user: { policy: { rules: [
+      { tool: 'mcp:playwright/browser_navigate', decision: 'allow' },
+      { tool: 'exec', match: 'git status*', decision: 'deny' },
+      { tool: 'read', decision: 'allow' },
+    ] } },
+    project: { policy: { rules: [
+      { tool: 'mcp:playwright/browser_navigate', decision: 'deny' },
+      { tool: 'exec', match: 'git status*', decision: 'allow' },
+      { tool: 'exec', match: 'pnpm install*', decision: 'deny' },
+    ] } },
+    local: { policy: { rules: [
+      { tool: 'mcp:playwright/browser_navigate', decision: 'allow' },
+    ] } },
+  });
+
+  assert.deepEqual(config.policy.rules, [
+    { tool: 'mcp:playwright/browser_navigate', decision: 'allow' },
+    { tool: 'exec', match: 'git status*', decision: 'allow' },
+    { tool: 'exec', match: 'pnpm install*', decision: 'deny' },
+    { tool: 'read', decision: 'allow' },
+  ]);
+});
+
+test('a deny wins duplicate policy rules in the same layer regardless of array order', () => {
+  const config = createConfig({ user: { policy: { rules: [
+    { tool: 'mcp:playwright/browser_navigate', decision: 'allow' },
+    { tool: 'mcp:playwright/browser_navigate', decision: 'deny' },
+  ] } } });
+
+  assert.deepEqual(config.policy.rules, [
+    { tool: 'mcp:playwright/browser_navigate', decision: 'deny' },
+  ]);
+});
+
 test('nested objects merge key by key while arrays replace the whole list', () => {
   const config = createConfig({
     user: { sandbox: { network: 'on', paths: ['a', 'b'] }, allow: ['read'] },

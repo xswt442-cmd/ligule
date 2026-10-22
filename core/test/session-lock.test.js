@@ -7,7 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { createSessionLog, listSessions } from '../dist/index.js';
-import { SESSION_LOCK_STALE_MS } from '../dist/session/lock.js';
+import { SESSION_LOCK_STALE_MS, sessionWriterActive } from '../dist/session/lock.js';
 
 const writerPath = fileURLToPath(new URL('./fixtures/session-writer.mjs', import.meta.url));
 
@@ -51,6 +51,7 @@ test('session writers exclude each other while reads and listings continue, then
     const writer = createSessionLog({ directory, id: 'shared', meta: { projectRoot: directory } });
     await writer.acquire();
     await writer.append({ kind: 'user', text: 'parent owns the lease' });
+    assert.equal(await sessionWriterActive(writer.path), true);
 
     const child = startWriter('acquire', directory, 'shared', 'child contender');
     const report = await readReport(child);
@@ -62,6 +63,7 @@ test('session writers exclude each other while reads and listings continue, then
     assert.equal((await listSessions(directory)).find((session) => session.id === 'shared').events, 1);
     await writer.close();
     await writer.close();
+    assert.equal(await sessionWriterActive(writer.path), false);
     await assert.rejects(writer.append({ kind: 'user', text: 'after close' }), (error) => error.code === 'session_closed');
 
     const next = createSessionLog({ directory, id: 'shared', meta: { projectRoot: directory } });

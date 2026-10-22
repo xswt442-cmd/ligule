@@ -1,6 +1,8 @@
 const assert = require('node:assert/strict');
 const { mkdirSync, writeFileSync } = require('node:fs');
+const { createRequire } = require('node:module');
 const { join, resolve } = require('node:path');
+const { pathToFileURL } = require('node:url');
 const { app, session } = require('electron');
 
 const repositoryRoot = resolve(__dirname, '../../..');
@@ -87,18 +89,18 @@ async function evaluate(source) {
   return await mainWindow.webContents.executeJavaScript(source, true);
 }
 
-async function requestHost(method, params = {}) {
+async function requestHost(method, params = {}, timeoutMs = 60_000) {
   const id = nextId('real-model-rpc');
   const encoded = JSON.stringify({ id, method, params });
   const result = await evaluate(`(async () => {
     await window.liguleDesktop.sendHostFrame(${JSON.stringify(encoded)});
-    const deadline = Date.now() + 15000;
+    const deadline = Date.now() + ${timeoutMs};
     while (Date.now() < deadline) {
       const response = window.__realModelFrames.find(frame => frame.id === ${JSON.stringify(id)});
       if (response !== undefined) return response;
       await new Promise(resolvePromise => setTimeout(resolvePromise, 25));
     }
-    throw new Error('real_model_host_rpc_timeout');
+    throw Object.assign(new Error('real_model_host_rpc_timeout'), { code: 'real_model_host_rpc_timeout' });
   })()`);
   if (result.errorCode !== undefined) throw Object.assign(new Error('host_rpc_failed'), { code: result.errorCode });
   return result;
@@ -264,11 +266,239 @@ async function selectNewSessionPermission(profile) {
   if (selected !== profile) throw Object.assign(new Error('new_session_permission_selection_failed'), { code: 'new_session_permission_selection_failed' });
   await waitFor(`document.querySelector('.permission-panel button.primary-button')?.disabled === false`, 5_000, 'new_session_permission_apply_disabled');
   await evaluate(`document.querySelector('.permission-panel button.primary-button').click(); true`);
+  const confirmations = [];
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const lead = await evaluate(`document.querySelector('.confirm .confirm-lead')?.textContent ?? null`);
+    if (lead === null) break;
+    if (/信任此工作区|trust project code/iu.test(lead)) confirmations.push('workspace-trust');
+    else if (/部分隔离|partial-isolation/iu.test(lead)) confirmations.push('partial-workspace-write');
+    else throw Object.assign(new Error('new_session_permission_confirmation_unknown'), { code: 'new_session_permission_confirmation_unknown' });
+    await evaluate(`document.querySelector('.confirm-actions .primary-button')?.click(); true`);
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 150));
+  }
+  assert.ok(confirmations.includes('workspace-trust'), 'new_session_workspace_trust_confirmation_missing');
   await waitFor(`(() => {
     const label = document.querySelector('button.permission-trigger')?.textContent ?? '';
     return document.querySelector('.permission-panel') === null
       && (label.includes('工作区可写') || label.includes('Workspace write'));
   })()`, 5_000, 'new_session_permission_not_applied');
+}
+
+async function verifyExternalSessionControl() {
+  const coreRequire = createRequire(join(repositoryRoot, 'core', 'package.json'));
+  const { Client } = coreRequire('@modelcontextprotocol/sdk/client');
+  const { StdioClientTransport } = coreRequire('@modelcontextprotocol/sdk/client/stdio.js');
+  const runtimeNode = process.env.LIGULE_RUNTIME_NODE;
+  if (typeof runtimeNode !== 'string' || runtimeNode === '') throw Object.assign(new Error('external_control_runtime_node_missing'), { code: 'external_control_runtime_node_missing' });
+  const mcpFixture = join(repositoryRoot, 'core', 'test', 'fixtures', 'agent-control-mcp-server.mjs');
+  const trust = await import(pathToFileURL(join(repositoryRoot, 'core', 'dist', 'kernel', 'workspace-trust.js')).href);
+  const agentControl = await import(pathToFileURL(join(repositoryRoot, 'core', 'dist', 'host', 'agent-control.js')).href);
+  const previousSessionId = sessionId;
+  await trust.setTrusted(workspaceRoot, true, join(isolatedHome, 'tui-trust.json'));
+  const grantStorePath = agentControl.delegationPathOf(isolatedHome);
+  const grantBefore = await agentControl.listDelegationGrants(grantStorePath);
+  const grantSnapshot = await agentControl.createDelegationGrant(grantStorePath, {
+    name: 'Electron human interaction acceptance',
+    projectRoot: workspaceRoot,
+    defaultPermissionProfile: 'workspace-write',
+    maxPermissionProfile: 'workspace-write',
+    defaultNetwork: 'disabled',
+    maxNetwork: 'disabled',
+    defaultPolicy: 'ask',
+    allowedPolicies: ['ask'],
+    allowOperator: false,
+    confirmFullAccess: false,
+    confirmUnrestrictedNetwork: false,
+    confirmPartialWorkspaceWrite: true,
+    expiresAt: null,
+  }, grantBefore.version);
+  const grantId = grantSnapshot.grants.at(-1)?.id;
+  if (typeof grantId !== 'string') throw Object.assign(new Error('external_control_test_grant_missing'), { code: 'external_control_test_grant_missing' });
+  const transport = new StdioClientTransport({
+    command: runtimeNode,
+    args: [mcpFixture, workspaceRoot, grantId, ''],
+    cwd: workspaceRoot,
+    env: { ...process.env, LIGULE_HOME: isolatedHome },
+    stderr: 'pipe',
+  });
+  const mcpClient = new Client({ name: 'ligule-desktop-control-acceptance', version: 'test' });
+  let mcpStderr = '';
+  transport.stderr?.on('data', chunk => { mcpStderr += chunk.toString(); });
+  let observerSessionId;
+  try {
+    await mcpClient.connect(transport);
+    const created = await mcpClient.callTool({ name: 'ligule_session_create', arguments: { projectRoot: workspaceRoot } });
+    if (created.isError === true) throw Object.assign(new Error(`external_control_session_create_failed:${mcpStderr.slice(-500)}`), { code: JSON.parse(created.content?.[0]?.text ?? '{}').code ?? 'external_control_session_create_failed' });
+    observerSessionId = created.structuredContent.sessionId;
+    await evaluate(`(() => {
+      const button = document.querySelector('button[aria-label="展开侧栏"], button[aria-label="Show sidebar"]');
+      button?.click();
+    })()`);
+    await waitFor(`document.querySelector('button[aria-label="刷新会话列表"]') || document.querySelector('button[aria-label="Refresh conversations"]')`, 10_000, 'session_rail_refresh_missing');
+    await evaluate(`(() => {
+      const button = document.querySelector('button[aria-label="刷新会话列表"], button[aria-label="Refresh conversations"]');
+      button?.click();
+      return button !== null;
+    })()`);
+    await waitFor(`(() => {
+      const button = [...document.querySelectorAll('.group-fold')].find(item => item.title === ${JSON.stringify(workspaceRoot)});
+      if (button === undefined) return false;
+      if (button.getAttribute('aria-expanded') !== 'true') button.click();
+      return true;
+    })()`, 10_000, 'observer_workspace_group_missing');
+    await waitFor(`[...document.querySelectorAll('.session-item')].some(item => item.title.endsWith(${JSON.stringify(` · ${observerSessionId}`)}))`, 10_000, 'observer_session_not_listed');
+    await evaluate(`(() => {
+      const item = [...document.querySelectorAll('.session-item')].find(button => button.title.endsWith(${JSON.stringify(` · ${observerSessionId}`)}));
+      item?.click();
+      return item !== undefined;
+    })()`);
+    await waitFor(`(() => {
+      const banner = document.querySelector('.center .banner[role="status"]');
+      const composer = document.querySelector('.external-session-composer');
+      const normalComposer = document.querySelector('footer.composer:not(.external-session-composer)');
+      const input = composer?.querySelector('textarea[aria-label="发送消息到外控会话"], textarea[aria-label="Send a message to the external session"]');
+      const text = banner?.textContent ?? '';
+      const config = composer?.querySelector('.external-session-config')?.textContent ?? '';
+      const hasModel = config.includes('模型') || config.includes('Model');
+      const hasToolMode = config.includes('工具模式') || config.includes('Tool mode');
+      const hasPolicy = config.includes('Policy');
+      const hasPermission = config.includes('权限') || config.includes('Permission');
+      return (text.includes('外控 Agent 正在运行') || text.includes('external agent is controlling'))
+        && composer !== null && normalComposer === null && input?.readOnly === false
+        && composer.querySelector('details.external-session-grant') !== null
+        && hasModel && hasToolMode && hasPolicy && hasPermission;
+    })()`, 15_000, 'external_session_composer_or_config_missing');
+    const sendDisabled = await evaluate(`document.querySelector('button.send')?.disabled === true`);
+    assert.equal(sendDisabled, true, 'external_session_composer_must_start_empty');
+    await evaluate(`document.querySelector('.external-session-grant summary')?.click()`);
+    await waitFor(`(() => {
+      const details = document.querySelector('.external-session-grant');
+      const text = details?.textContent ?? '';
+      return details?.open === true && (text.includes('权限上限') || text.includes('Permission ceiling'));
+    })()`, 10_000, 'external_session_grant_details_missing');
+
+    const baseline = (await fetch(`${process.env.LIGULE_STUB_CONTROL}/state`).then(response => response.json())).requests;
+    const started = await mcpClient.callTool({ name: 'ligule_run_start', arguments: {
+      sessionId: observerSessionId,
+      input: 'desktop-external-control-question',
+    } });
+    if (started.isError === true) throw Object.assign(new Error(`external_control_run_start_failed:${mcpStderr.slice(-500)}`), { code: JSON.parse(started.content?.[0]?.text ?? '{}').code ?? 'external_control_run_start_failed' });
+
+    await waitFor(`document.querySelector('.external-control .question')?.textContent.includes('Choose a route') === true`, 15_000, 'external_control_question_not_visible');
+    await waitFor(`(() => {
+      const source = document.querySelector('.row.question[data-source="controller"] .question-source')?.textContent ?? '';
+      return source.includes('外部 Agent') || source.includes('External agent');
+    })()`, 10_000, 'external_controller_message_source_not_visible');
+    const typed = await evaluate(`(() => {
+      const input = document.querySelector('.external-session-composer textarea[aria-label="发送消息到外控会话"], .external-session-composer textarea[aria-label="Send a message to the external session"]');
+      if (input === null) return false;
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+      setter.call(input, 'desktop-human-control-followup');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()`);
+    assert.equal(typed, true, 'external_control_message_input_missing');
+    await evaluate(`document.querySelector('.external-session-composer button.send')?.click(); true`);
+    await waitFor(`document.querySelector('.external-session-note')?.textContent.includes('已加入外控会话队列') === true
+      || document.querySelector('.external-session-note')?.textContent.includes('queued for the external session') === true`, 10_000, 'external_control_message_not_queued');
+    await evaluate(`(() => {
+      const choice = document.querySelector('.external-control .question-option input');
+      choice?.click();
+      return choice !== null;
+    })()`);
+    await evaluate(`(() => {
+      const button = [...document.querySelectorAll('.external-control .question-actions button')].find(item => /提交答案|Submit answers/u.test(item.textContent ?? ''));
+      button?.click();
+      return button !== undefined;
+    })()`);
+    await waitFor(`document.querySelector('.center')?.innerText.includes('desktop-human-control-followup') === true
+      && document.querySelector('.center')?.innerText.includes('已收到人类补充消息') === true`, 25_000, 'external_control_human_message_not_recorded');
+    await waitFor(`document.querySelector('.row.question[data-source="human"]')?.textContent.includes('desktop-human-control-followup') === true`, 10_000, 'human_message_source_not_visible');
+    const afterHuman = (await fetch(`${process.env.LIGULE_STUB_CONTROL}/state`).then(response => response.json())).requests;
+    assert.equal(afterHuman >= baseline + 3, true, 'external_control_model_turns_missing');
+    const transcript = await mcpClient.callTool({ name: 'ligule_session_read', arguments: { sessionId: observerSessionId, limit: 50 } });
+    const transcriptRecords = transcript.structuredContent.records.map(item => JSON.parse(item.json));
+    const userRecords = transcriptRecords.filter(item => item.kind === 'user');
+    assert.equal(userRecords.some(item => item.origin === 'controller' && item.text === 'desktop-external-control-question'), true, 'external_controller_origin_missing');
+    assert.equal(userRecords.some(item => item.origin === 'human' && item.text === 'desktop-human-control-followup'), true, 'human_origin_missing');
+
+    const approvalStart = await mcpClient.callTool({ name: 'ligule_run_start', arguments: {
+      sessionId: observerSessionId,
+      input: 'desktop-external-control-approval',
+    } });
+    if (approvalStart.isError === true) throw Object.assign(new Error('external_control_approval_start_failed'), { code: JSON.parse(approvalStart.content?.[0]?.text ?? '{}').code ?? 'external_control_approval_start_failed' });
+    await waitFor(`document.querySelector('.external-control .approval .row-tool')?.textContent.trim() === 'create'`, 15_000, 'external_control_approval_not_visible');
+    await evaluate(`(() => {
+      const card = [...document.querySelectorAll('.external-control .approval')].find(item => item.querySelector('.row-tool')?.textContent.trim() === 'create');
+      const button = card?.querySelector('button[data-tone="allow"]');
+      button?.click();
+      return button !== null && button !== undefined;
+    })()`);
+    await waitFor(`document.querySelector('.center')?.innerText.includes('外控审批已通过') === true`, 20_000, 'external_control_approval_not_completed');
+    const approvedFile = await require('node:fs/promises').readFile(join(workspaceRoot, 'desktop-external-control-proof.txt'), 'utf8').catch(() => null);
+    assert.equal(approvedFile, 'HUMAN_APPROVED', 'human_approval_did_not_allow_the_bound_tool');
+
+    await fetch(`${process.env.LIGULE_STUB_CONTROL}/hang`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hang: true }) });
+    await evaluate(`(() => {
+      const input = document.querySelector('.external-session-composer textarea[aria-label="发送消息到外控会话"], .external-session-composer textarea[aria-label="Send a message to the external session"]');
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+      setter.call(input, 'desktop-human-control-cancel');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('.external-session-composer button.send')?.click();
+      return true;
+    })()`);
+    await waitFor(`(() => [...document.querySelectorAll('.external-control-head button')].some(item => /停止本轮|Stop turn/u.test(item.textContent ?? '')))()`, 15_000, 'external_control_cancel_button_missing');
+    await evaluate(`(() => {
+      const button = [...document.querySelectorAll('.external-control-head button')].find(item => /停止本轮|Stop turn/u.test(item.textContent ?? ''));
+      button?.click();
+      return button !== undefined;
+    })()`);
+    await waitFor(`document.querySelector('.external-control .external-control-state')?.textContent.includes('已停止') === true
+      || document.querySelector('.external-control .external-control-state')?.textContent.includes('Stopped') === true`, 20_000, 'external_control_cancel_not_confirmed');
+    await fetch(`${process.env.LIGULE_STUB_CONTROL}/hang`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hang: false }) });
+
+    await evaluate(`(() => {
+      const button = [...document.querySelectorAll('.external-control-head button')].find(item => /接管会话|Take over/u.test(item.textContent ?? ''));
+      button?.click();
+      return button !== undefined;
+    })()`);
+    await waitFor(`document.querySelector('.confirm .confirm-lead')?.textContent.includes('停止外控') === true
+      || document.querySelector('.confirm .confirm-lead')?.textContent.includes('Stop external control') === true`, 5_000, 'external_control_takeover_confirmation_missing');
+    await evaluate(`(() => {
+      const button = [...document.querySelectorAll('.confirm-actions button')].find(item => /接管|Take over/u.test(item.textContent ?? ''));
+      button?.click();
+      return button !== undefined;
+    })()`);
+    await waitFor(`document.querySelector('.external-control') === null
+      && document.querySelector('textarea.composer-input')?.readOnly === false`, 20_000, 'external_control_takeover_not_completed');
+    const refused = await mcpClient.callTool({ name: 'ligule_run_start', arguments: { sessionId: observerSessionId, input: 'after takeover' } });
+    assert.equal(refused.isError, true, 'external_controller_kept_write_access_after_takeover');
+    const refusalCode = JSON.parse(refused.content?.[0]?.text ?? '{}').code;
+    assert.equal(refusalCode, 'control_session_taken_over', 'external_controller_takeover_not_enforced');
+
+    if (typeof previousSessionId === 'string') {
+      await evaluate(`(() => {
+        const item = [...document.querySelectorAll('.session-item')].find(button => button.title.endsWith(${JSON.stringify(` · ${previousSessionId}`)}));
+        item?.click();
+        return item !== undefined;
+      })()`);
+      await waitFor(`(() => {
+        const active = document.querySelector('.session-item.active');
+        const input = document.querySelector('textarea.composer-input');
+        return active?.title.endsWith(${JSON.stringify(` · ${previousSessionId}`)}) === true && input?.readOnly === false;
+      })()`, 10_000, 'observer_previous_session_restore_failed');
+    }
+    return '真实 Electron 窗口连接到独立 stdio MCP Host：处理人类问题、一次性审批、排队消息、取消和接管；批准的 create 工具写入测试文件，接管后原 MCP Host 的写入请求被拒绝。模型由本地固定 SSE stub 驱动，不构成真实模型验收';
+  } finally {
+    await fetch(`${process.env.LIGULE_STUB_CONTROL}/hang`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hang: false }) }).catch(() => {});
+    await mcpClient.close().catch(() => {});
+    if (typeof previousSessionId === 'string') {
+      await evaluate(`(() => {
+        const item = [...document.querySelectorAll('.session-item')].find(button => button.title.endsWith(${JSON.stringify(` · ${previousSessionId}`)}));
+        if (!item?.classList.contains('active')) item?.click();
+      })()`).catch(() => {});
+    }
+  }
 }
 
 async function enterAndSend(text) {
@@ -321,8 +551,9 @@ async function runChecks() {
   assert.equal(preferences.contextIsolation, true);
   assert.equal(preferences.nodeIntegration, false);
 
-  const workspaceRegistration = await requestHost('workspaces.list');
+  const workspaceRegistration = await requestHost('workspaces.list', {}, 60_000);
   assert.ok(workspaceRegistration.workspaces.some(item => resolve(item.directory) === resolve(workspaceRoot)), 'isolated_workspace_not_registered');
+
   // 新会话默认只读；审批用例先通过真实设置控件授予工作区文件工具写入权限。
   await selectNewSessionPermission('workspace-write');
 
@@ -387,8 +618,12 @@ async function runChecks() {
       const skill = events.findLast(event => event.kind === 'tool' && event.tool === 'skill');
       if (skill?.resultKind !== 'result' || skill.resultFailed) throw Object.assign(new Error('skill_activation_result_missing'), { code: 'skill_activation_result_missing' });
       if (skill.resultHasSkillProof !== true) throw Object.assign(new Error('project_skill_body_not_loaded'), { code: 'project_skill_body_not_loaded' });
-      if (events.some(event => event.kind === 'tool' && (event.tool === 'mcp.inspect' || event.tool === 'mcp.call'))) {
-        throw Object.assign(new Error('mcp_tool_exposed_to_restricted_session'), { code: 'mcp_tool_exposed_to_restricted_session' });
+      const inspected = events.findLast(event => event.kind === 'tool' && event.tool === 'mcp.inspect');
+      if (inspected?.resultCode !== 'mcp_server_untrusted') {
+        throw Object.assign(new Error('untrusted_mcp_server_was_not_denied'), { code: 'untrusted_mcp_server_was_not_denied' });
+      }
+      if (events.some(event => event.kind === 'tool' && event.tool === 'mcp.call')) {
+        throw Object.assign(new Error('mcp_call_ran_without_trusted_server'), { code: 'mcp_call_ran_without_trusted_server' });
       }
 
       const response = await fetch(`${stubControl}/state`);
@@ -396,12 +631,13 @@ async function runChecks() {
       for (const [key, expected, code] of [
         ['skillToolAvailable', true, 'skill_mcp_skill_tool_not_available'],
         ['skillActivated', true, 'skill_mcp_skill_not_activated'],
-        ['mcpInspectAvailable', false, 'mcp_inspect_exposed_to_restricted_session'],
-        ['mcpCallAvailable', false, 'mcp_call_exposed_to_restricted_session'],
+        ['mcpInspectAvailable', true, 'mcp_inspect_not_disclosed'],
+        ['mcpCallAvailable', true, 'mcp_call_not_disclosed'],
+        ['mcpInspectRequested', true, 'untrusted_mcp_inspect_not_requested'],
       ]) {
         if (state.skillMcpProof?.[key] !== expected) throw Object.assign(new Error(code), { code });
       }
-      return '真实 Electron 窗口装载项目 Skill；workspace-write 会话没有向模型开放 MCP 工具，也没有记录 MCP 调用';
+      return '真实 Electron 窗口装载项目 Skill；MCP 披露工具可见，但未信任的 Server 在 Host 预检中被拒绝，未启动 MCP Server 或执行其工具';
     });
   }
 
@@ -416,6 +652,10 @@ async function runChecks() {
     assert.equal(summary.turns.at(-1)?.status, 'cancelled', 'cancelled_turn_terminal_status_invalid');
     return `收到真实 text 增量 ${summary.deltaCount ?? 1} 次后按界面停止；Host 写入 cancelled 终态`;
   });
+
+  if (process.env.LIGULE_EXTERNAL_CONTROL_TEST === '1') {
+    await check('MCP 外控会话的人类观察、干预与接管', verifyExternalSessionControl);
+  }
 
   // 仅本地 stub 可稳定模拟请求发出后一直没有响应的情况。
   if (typeof stubControl === 'string' && stubControl !== '') {
@@ -482,6 +722,7 @@ async function runChecks() {
       return `硬杀 Host（PID ${killedPid}）后界面出现断连横幅并重连成功；未决那一轮终态 ${last.status ?? '无'}${last.code === undefined ? '' : `/${last.code}`}，重连没有重发模型请求`;
     });
   }
+
 }
 
 async function cleanup() {

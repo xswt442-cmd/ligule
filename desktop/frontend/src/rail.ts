@@ -24,7 +24,7 @@ export async function loadWorkspacePages(roots: string[], client: Pick<Client, '
       const index = next++;
       const root = roots[index];
       try {
-        const result = await client.call('sessions.list', root === '' ? {} : { projectRoot: root }, 15_000) as { sessions: SessionSummary[] };
+        const result = await client.call('sessions.list', root === '' ? {} : { projectRoot: root }, 60_000) as { sessions: SessionSummary[] };
         pages[index] = { root, sessions: result.sessions, failed: '' };
       } catch (error) {
         pages[index] = { root, sessions: [], failed: code(error) };
@@ -89,7 +89,8 @@ export function groupByWorkspace(sessions: SessionSummary[], watched: string[] =
   const newest = (group: RailGroup): string => group.sessions.map((item) => item.updatedAt).sort().at(-1) ?? '';
   return {
     groups: [...groups.values()].map((group) => ({ ...group, sessions: withinGroup(group.sessions) }))
-      .sort((left, right) => newest(right).localeCompare(newest(left))),
+      .sort((left, right) => Number(left.isDefault) - Number(right.isDefault)
+        || newest(right).localeCompare(newest(left))),
     loose: withinGroup(loose),
   };
 }

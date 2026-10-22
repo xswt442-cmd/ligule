@@ -30,6 +30,21 @@ export type Status = {
   policy: string;
   // 当前策略来源：配置默认值或会话运行期覆盖。
   policySource: 'config' | 'session';
+  policyDefault?: string;
+  delegation?: {
+    grantId: string;
+    name: string;
+    source: 'trusted-ui' | 'legacy';
+    defaultPermissionProfile: PermissionProfile;
+    maxPermissionProfile: PermissionProfile;
+    defaultNetwork: PermissionNetwork;
+    maxNetwork: PermissionNetwork;
+    defaultPolicy: string;
+    allowedPolicies: readonly string[];
+    allowOperator: boolean;
+    allowedMcpServers: readonly string[];
+    allowedMcpTools: readonly string[];
+  } | null;
   denials: { consecutive: number; total: number };
   eventCount: number;
   // 已加载的提示模板列表，供命令面板显示。
@@ -52,6 +67,14 @@ export type SessionPermission = {
     network: PermissionEnforcement;
     process: PermissionEnforcement;
   };
+  profiles: {
+    readOnly: PermissionEnforcement;
+    workspaceWrite: PermissionEnforcement;
+  };
+  limitations: readonly string[];
+  partialWorkspaceWriteConfirmationRequired: boolean;
+  partialWorkspaceWriteConfirmed: boolean;
+  workspaceTrusted: boolean;
   execution: { available: boolean; code: string | null; reason: string | null };
   changeAllowed: boolean;
   changeReason?: string;

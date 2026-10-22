@@ -6,22 +6,25 @@ import type { Status } from '../status';
 import { Icon } from './Icon';
 import { keepEscape, Modal } from './ui';
 
+type PolicySelection = 'ask' | 'auto' | 'none';
+type PolicyValue = PolicySelection | 'never';
+
 export function PolicyPicker({ status, initialPolicy, disabled, onSelect }: {
   status: Status | null;
-  initialPolicy: 'ask' | 'auto' | 'never' | null;
+  initialPolicy: PolicyValue | null;
   disabled: boolean;
-  onSelect: (mode: 'ask' | 'auto' | 'never' | null) => Promise<void>;
+  onSelect: (mode: PolicySelection | null) => Promise<void>;
 }) {
   const t = useText();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState('');
-  const [confirmNever, setConfirmNever] = useState(false);
+  const [confirmNone, setConfirmNone] = useState(false);
   const active = status === null ? initialPolicy ?? 'default' : status.policySource === 'config' ? 'default' : status.policy;
   const title = status === null
     ? initialPolicy === null ? t('默认审批', 'Default approval') : policyLabel(initialPolicy, t)
     : policyLabel(status.policy, t);
-  const choose = async (value: 'ask' | 'auto' | 'never' | null) => {
+  const choose = async (value: PolicySelection | null) => {
     setBusy(true);
     setFailure('');
     try { await onSelect(value); setOpen(false); }
@@ -31,7 +34,7 @@ export function PolicyPicker({ status, initialPolicy, disabled, onSelect }: {
   const choices = [
     { value: 'ask', label: t('逐次审批', 'Ask each time'), mode: 'ask' as const },
     { value: 'auto', label: t('按规则审批', 'Rule-based approval'), mode: 'auto' as const },
-    { value: 'never', label: t('完全不需审批', 'No approval'), mode: 'never' as const },
+    { value: 'none', label: t('不受审批', 'No approval'), mode: 'none' as const },
     { value: 'default', label: t('使用默认', 'Use default'), mode: null },
   ];
   return <>
@@ -39,18 +42,19 @@ export function PolicyPicker({ status, initialPolicy, disabled, onSelect }: {
     <DropdownMenu.Trigger asChild><button type="button" className="composer-choice" disabled={disabled || busy} title={status === null ? t('新会话审批方式', 'Approval mode for the new conversation') : t('当前会话审批方式', 'Approval mode for this conversation')}><Icon name="check" size={14} /><span>{title}</span><Icon name="fold" size={12} /></button></DropdownMenu.Trigger>
     <DropdownMenu.Portal><DropdownMenu.Content className="menu policy-picker" side="top" align="start" sideOffset={8} onEscapeKeyDown={keepEscape}>
       <DropdownMenu.Label className="model-group-name">{status === null ? t('新会话审批方式', 'New conversation approval mode') : t('审批方式', 'Approval mode')}</DropdownMenu.Label>
-      {choices.map(choice => <DropdownMenu.Item key={choice.value} disabled={busy || active === choice.value} onSelect={event => { event.preventDefault(); if (choice.mode === 'never') { setOpen(false); setConfirmNever(true); } else void choose(choice.mode); }}><span>{choice.label}</span>{active === choice.value && <Icon name="check" size={14} />}</DropdownMenu.Item>)}
+      {choices.map(choice => <DropdownMenu.Item key={choice.value} disabled={busy || active === choice.value} onSelect={event => { event.preventDefault(); if (choice.mode === 'none') { setOpen(false); setConfirmNone(true); } else void choose(choice.mode); }}><span>{choice.label}</span>{active === choice.value && <Icon name="check" size={14} />}</DropdownMenu.Item>)}
       {busy && <p className="policy-picker-note" role="status">{t('正在更新审批方式…', 'Updating approval mode…')}</p>}
       {failure && <div className="workspace-picker-error" role="alert"><span>{t('审批方式未更新。', 'Approval mode was not updated.')}</span><code>{failure}</code></div>}
     </DropdownMenu.Content></DropdownMenu.Portal>
   </DropdownMenu.Root>
-  {confirmNever && <Modal title={t('启用完全不需审批？', 'Enable no-approval mode?')} className="confirm" onClose={() => setConfirmNever(false)}><h2 className="confirm-lead">{t('之后的工具调用不会逐项等待批准。', 'Tool calls will no longer wait for individual approval.')}</h2><p className="confirm-note">{t('工具可能修改工作区文件或运行命令。工作区边界、拒绝规则与安全守卫仍会生效；需要额外审批或无法安全判定的操作会被拒绝。', 'Tools may modify workspace files or run commands. Workspace boundaries, deny rules, and safety guards remain active; operations requiring extra approval or an unambiguous safety decision will be denied.')}</p><div className="confirm-actions"><button type="button" onClick={() => setConfirmNever(false)}>{t('取消', 'Cancel')}</button><button type="button" className="primary-button" onClick={() => { setConfirmNever(false); void choose('never'); }}>{t('确认启用', 'Enable')}</button></div></Modal>}
+  {confirmNone && <Modal title={t('切换为不受审批？', 'Use no-approval mode?')} className="confirm" onClose={() => setConfirmNone(false)}><h2 className="confirm-lead">{t('普通工具调用将按权限直接执行，不再逐项等待批准。', 'Ordinary tool calls will follow their permission boundaries without per-action approval.')}</h2><p className="confirm-note">{t('工作区边界、拒绝规则、系统硬拒绝及需要独立信任的操作仍受限制。', 'Workspace boundaries, deny rules, system hard denials, and operations requiring separate trust remain restricted.')}</p><div className="confirm-actions"><button type="button" onClick={() => setConfirmNone(false)}>{t('取消', 'Cancel')}</button><button type="button" className="primary-button" onClick={() => { setConfirmNone(false); void choose('none'); }}>{t('确认启用', 'Enable')}</button></div></Modal>}
   </>;
 }
 
 function policyLabel(mode: string, t: (chinese: string, english: string) => string): string {
   if (mode === 'ask') return t('逐次审批', 'Ask each time');
   if (mode === 'auto') return t('按规则审批', 'Rule-based approval');
-  if (mode === 'never') return t('完全不需审批', 'No approval');
+  if (mode === 'none') return t('不受审批', 'No approval');
+  if (mode === 'never') return t('旧版 never（需要明确迁移）', 'Legacy never (explicit migration required)');
   return mode;
 }

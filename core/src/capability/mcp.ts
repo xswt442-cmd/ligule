@@ -7,6 +7,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { isAbsolute, resolve } from 'node:path';
 import { Ajv } from 'ajv';
 import { Ajv2020 } from 'ajv/dist/2020.js';
 import * as formatsModule from 'ajv-formats';
@@ -28,7 +29,9 @@ export interface NormalizedMcpServerConfig {
   readonly command: string;
   readonly args: string[];
   readonly env: Record<string, string>;
-  readonly cwd: string | undefined;
+  readonly cwd: string;
+  readonly environmentNames: readonly string[];
+  readonly identityDigest: string;
 }
 
 export interface ToolDefinition {
@@ -135,19 +138,44 @@ export function validateToolArguments(args: unknown, schema: Record<string, unkn
 }
 
 // 将 MCP 配置转换为按名称排序的服务器列表，保证重复加载结果顺序稳定。
-export function mcpServerConfigs(config: { mcp?: { servers?: unknown } }, environment: NodeJS.ProcessEnv = process.env): NormalizedMcpServerConfig[] {
+export function mcpServerConfigs(
+  config: { mcp?: { servers?: unknown } },
+  environment: NodeJS.ProcessEnv = process.env,
+  projectRoot = process.cwd(),
+): NormalizedMcpServerConfig[] {
   const servers = (config.mcp?.servers ?? {}) as Record<string, McpServerConfig>;
   return Object.keys(servers).sort().map((name) => {
     const entry = servers[name];
     if (typeof entry?.command !== 'string' || entry.command === '') throw new KernelError('mcp_command_required', { detail: `${name} needs a command` });
+    if (entry.cwd !== undefined && typeof entry.cwd !== 'string') throw new KernelError('mcp_cwd_invalid', { detail: name });
+    const cwd = entry.cwd === undefined ? resolve(projectRoot) : resolve(projectRoot, entry.cwd);
+    const commandUsesPath = !entry.command.includes('/') && !entry.command.includes('\\') && !isAbsolute(entry.command);
+    const command = commandUsesPath ? entry.command : resolve(cwd, entry.command);
     // `command` 必须是可执行文件路径，不能包含参数或 shell 管道。
-    if (/\s/.test(entry.command) && !existsSync(entry.command)) throw new KernelError('mcp_command_invalid', { detail: `${name}.command is a single executable; put its arguments in args` });
+    if (/\s/.test(entry.command) && !existsSync(command)) throw new KernelError('mcp_command_invalid', { detail: `${name}.command is a single executable; put its arguments in args` });
     const args = entry.args === undefined ? [] : entry.args;
     if (!Array.isArray(args) || args.some((item) => typeof item !== 'string')) throw new KernelError('mcp_args_invalid', { detail: `${name}.args must be an array of strings` });
     const env = entry.env === undefined ? {} : entry.env;
     if (env === null || typeof env !== 'object' || Array.isArray(env)) throw new KernelError('mcp_env_invalid', { detail: `${name}.env must be a table of \${NAME} references` });
-    if (entry.cwd !== undefined && typeof entry.cwd !== 'string') throw new KernelError('mcp_cwd_invalid', { detail: name });
-    return { name, command: entry.command, args: args as string[], env: expandEnv(env as Record<string, unknown>, environment), cwd: entry.cwd as string | undefined };
+    const references = env as Record<string, unknown>;
+    const environmentNames = Object.keys(references).sort();
+    const identityDigest = createHash('sha256').update(JSON.stringify({
+      name,
+      command,
+      args,
+      cwd,
+      env: environmentNames.map((key) => [key, references[key]]),
+      ...(commandUsesPath ? { path: environment.PATH ?? '' } : {}),
+    })).digest('hex');
+    return {
+      name,
+      command,
+      args: args as string[],
+      env: expandEnv(references, environment),
+      cwd,
+      environmentNames,
+      identityDigest,
+    };
   });
 }
 
@@ -193,6 +221,7 @@ export interface McpRegistry {
   toolsOf(server: string, signal?: AbortSignal): Promise<ToolDefinition[]>;
   definition(server: string, tool: string, signal?: AbortSignal): Promise<ToolDefinition>;
   call(server: string, tool: string, args: unknown, signal?: AbortSignal): Promise<unknown>;
+  revoke(server: string): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -200,12 +229,21 @@ export interface McpRegistry {
 export function createMcpRegistry(configs: NormalizedMcpServerConfig[]): McpRegistry {
   const connected = new Map<string, ConnectedServer>();
   const pending = new Map<string, Promise<ConnectedServer>>();
+  const serverLifetimes = new Map<string, AbortController>();
+  const stopping = new Map<string, Promise<void>>();
   const lifetime = new AbortController();
   const closedClients = new WeakSet<Client>();
   let closing: Promise<void> | undefined;
 
-  function operationSignal(signal?: AbortSignal): AbortSignal {
-    return signal === undefined ? lifetime.signal : AbortSignal.any([lifetime.signal, signal]);
+  function operationSignal(name: string, signal?: AbortSignal): AbortSignal {
+    let serverLifetime = serverLifetimes.get(name);
+    if (serverLifetime === undefined) {
+      serverLifetime = new AbortController();
+      serverLifetimes.set(name, serverLifetime);
+    }
+    return signal === undefined
+      ? AbortSignal.any([lifetime.signal, serverLifetime.signal])
+      : AbortSignal.any([lifetime.signal, serverLifetime.signal, signal]);
   }
 
   async function closeServer(opened: ConnectedServer): Promise<void> {
@@ -215,7 +253,8 @@ export function createMcpRegistry(configs: NormalizedMcpServerConfig[]): McpRegi
   }
 
   async function server(name: string, signal?: AbortSignal): Promise<ConnectedServer> {
-    const activeSignal = operationSignal(signal);
+    await stopping.get(name);
+    const activeSignal = operationSignal(name, signal);
     if (activeSignal.aborted) throw activeSignal.reason;
     const existing = connected.get(name);
     if (existing !== undefined) return existing;
@@ -239,9 +278,9 @@ export function createMcpRegistry(configs: NormalizedMcpServerConfig[]): McpRegi
   return {
     servers: () => configs.map((entry) => entry.name),
     // 每次读取定义时重新获取工具列表，以检测服务器声明是否变化并更新摘要。
-    toolsOf: async (name, signal) => [...(await refreshTools(await server(name, signal), operationSignal(signal))).values()],
+    toolsOf: async (name, signal) => [...(await refreshTools(await server(name, signal), operationSignal(name, signal))).values()],
     definition: async (name, tool, signal) => {
-      const activeSignal = operationSignal(signal);
+      const activeSignal = operationSignal(name, signal);
       const opened = await server(name, activeSignal);
       await refreshTools(opened, activeSignal);
       const found = opened.tools.get(tool);
@@ -249,10 +288,29 @@ export function createMcpRegistry(configs: NormalizedMcpServerConfig[]): McpRegi
       return found;
     },
     call: async (name, tool, args, signal) => {
-      const activeSignal = operationSignal(signal);
+      const activeSignal = operationSignal(name, signal);
       const opened = await server(name, activeSignal);
       if (!opened.tools.has(tool)) throw new KernelError('mcp_tool_unknown', { detail: `${name}/${tool}` });
       return opened.client.callTool({ name: tool, arguments: args as Record<string, unknown> }, undefined, { signal: activeSignal });
+    },
+    revoke: (name) => {
+      const alreadyStopping = stopping.get(name);
+      if (alreadyStopping !== undefined) return alreadyStopping;
+      const controller = serverLifetimes.get(name);
+      controller?.abort(new KernelError('mcp_server_untrusted', { detail: name }));
+      const closing = (async () => {
+        const inflight = pending.get(name);
+        if (inflight !== undefined) await inflight.catch(() => undefined);
+        const opened = connected.get(name);
+        if (opened !== undefined) await closeServer(opened);
+        connected.delete(name);
+        pending.delete(name);
+        serverLifetimes.delete(name);
+      })();
+      stopping.set(name, closing);
+      return closing.finally(() => {
+        if (stopping.get(name) === closing) stopping.delete(name);
+      });
     },
     // 先关闭 stdin，再发送 SIGTERM，最后终止仍存活的子进程树。
     close: () => {
@@ -265,6 +323,7 @@ export function createMcpRegistry(configs: NormalizedMcpServerConfig[]): McpRegi
         await Promise.all([...opened].map(closeServer));
         connected.clear();
         pending.clear();
+        serverLifetimes.clear();
       })();
       return closing;
     },

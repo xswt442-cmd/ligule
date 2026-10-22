@@ -1,10 +1,10 @@
-import { ipcMain, type BrowserWindow } from 'electron';
+import { app, ipcMain, type BrowserWindow } from 'electron';
 import { isAbsolute } from 'node:path';
 import type { HostController } from './host.js';
 import type { NativeServices } from './native.js';
 import { assertSender, requiredText, validateDefaultName, validateFrame, validateNotification } from './security.js';
 
-export const CHANNELS = ['ligule:host-send', 'ligule:host-restart', 'ligule:default-workspace', 'ligule:workspace-directory', 'ligule:export-path', 'ligule:quit', 'ligule:notification-permission', 'ligule:notification-request', 'ligule:notification-show', 'ligule:tray-status'] as const;
+export const CHANNELS = ['ligule:app-info', 'ligule:host-send', 'ligule:host-restart', 'ligule:default-workspace', 'ligule:workspace-directory', 'ligule:export-path', 'ligule:quit', 'ligule:notification-permission', 'ligule:notification-request', 'ligule:notification-show', 'ligule:tray-status'] as const;
 
 export function registerDesktopIpc(window: BrowserWindow, page: string, host: HostController, native: NativeServices, quit: () => Promise<void>): () => void {
   let pending = 0;
@@ -17,6 +17,11 @@ export function registerDesktopIpc(window: BrowserWindow, page: string, host: Ho
       pending += 1;
       try {
         switch (channel) {
+          case 'ligule:app-info': return {
+            name: app.getName(), version: app.getVersion(), packaged: app.isPackaged,
+            platform: process.platform, architecture: process.arch,
+            electronVersion: process.versions.electron ?? 'unknown', build: null,
+          };
           case 'ligule:host-send': return await host.send(validateFrame(args[0]));
           case 'ligule:host-restart': return await host.restart();
           case 'ligule:default-workspace': return await native.defaultWorkspace();

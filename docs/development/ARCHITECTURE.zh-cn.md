@@ -52,6 +52,24 @@ flowchart LR
 
 `ligule mcp-server --project <绝对项目根>` 通过 [MCP 适配器](../../core/src/host/mcp-server.ts) 暴露本地控制工具。[控制门面](../../core/src/host/control.ts) 调用同一 Host，维护进程内 operation 状态，并将会话操作限制在启动时授权的项目内。默认模式拒绝需要审批的操作；明确启用 `--operator` 后，客户端可答复真实待决的审批与提问，并修改受支持的会话设置，但不能覆盖硬拒绝。可信 TUI/Desktop 可创建项目绑定的 [Agent Control Grant](../../core/src/host/agent-control.ts)；`--grant <id>` 将会话 Permission、网络和 Policy 限制在 Grant 的默认值与上限内，Host 会在请求时核验撤销、到期和项目绑定。连接关闭时会取消运行并释放会话锁；Session JSONL 持久保存会话记录，operation ID 和消息队列只在当前进程内有效。使用方法见 [MCP 用户指南](../mcp/mcp-guide.zh-CN.md)。
 
+### 委派执行与外控会话
+
+一次运行可带有 `DelegationSpec`，其中的 `mode` 和 `outputSchema` 由共享的[委派契约](../../core/src/delegation.ts)校验。内部 `subagent` 工具与 MCP 的 `ligule_run` / `ligule_run_start` 共用结构化输出验证和 `RunResult` 结果类型；外部 MCP 运行仍使用其原会话，不会自动创建子会话。
+
+内部子代理在同一 Host 进程中创建派生 Kernel、Loop 和独立 Session JSONL，记录 ID 为父 Session 的 `.sub-N`。子代理继承父会话的配置、Provider、插件工具、Permission 与 Policy 判定实例，但不注册 `subagent` 工具；每个父轮最多同时运行三个。子模式只能收窄父模式可用工具，模型调用次数、输出、思考和循环预算不能超过父上限。子任务的 RunResult 和 Session 引用作为父工具结果返回，因此失败或取消的子记录仍可查看。
+
+外部客户端通过本地 stdio MCP 进入 Control 门面，再由它操作授权项目中的 Host Session。可信 TUI/Desktop 通过本地 Agent Control IPC 观察状态、回答交互或接管任务；Host 仍是 Session 的写入者，锁阻止另一个 Host 并发写同一记录。答复结果和控制事件以 `source=human` 或 `source=controller` 区分本机用户与 MCP 操控者；只有本机用户答复可以保存审批记忆。接管会取消当前外控轮次、清空尚未发送的外部队列、释放 Host 会话锁并发出所有权转移事件。撤销工作区信任会使当前 Host 停止基于该信任启动的受管进程；其他 Host 通过共享信任记录定期复核并停止相关进程。Session JSONL 保存消息和工具事件；operation ID、事件缓存、待处理请求和消息队列属于 Control 进程内状态，服务重启后需要从持久 Session 重新接回，旧运行编号不可继续使用。
+
+```mermaid
+flowchart LR
+  Parent[父 Kernel 与 Session] -->|subagent 工具| Child[派生 Kernel 与子 Session JSONL]
+  Child -->|RunResult 与子 Session 引用| Parent
+  MCP[本地 stdio MCP] --> Control[Control 门面与进程内运行状态]
+  UI[TUI / Desktop] -->|Agent Control 本地 IPC| Control
+  Control --> Host[授权项目的 Host]
+  Host --> Log[(Session JSONL)]
+```
+
 ### Kernel、插件、工具与能力
 
 Kernel 从空工具注册表开始。Host 通过[装配器](../../core/src/kernel/assembly.ts)安装插件；插件可以注册工具和提示片段，并返回清理动作。工具模式从已注册工具中选择可交给模型的项目，并选择提示片段；模式不实现工具，也不作审批决定。
@@ -60,7 +78,9 @@ Kernel 从空工具注册表开始。Host 通过[装配器](../../core/src/kerne
 
 模型提出的每个工具调用都会进入 [`kernel.call`](../../core/src/kernel/kernel.ts)。Kernel 先检查工具注册和参数，再解析声明的命令或网络目标，随后调用审批判定链。判定链按既定顺序应用限制、守卫、配置规则、自动审批条件和用户审批。只有获准的调用会进入工具实现。Kernel 会记录判定结果，以及完成、拒绝或失败的工具结果；模型清单只包含工具名称、说明和参数模式。
 
-Host 为每个会话持有独立的 Permission 与 Policy 状态。Permission 在 Kernel 判定之前按工具的资源访问类别检查读、写、命令、网络和外部进程；Policy 随后决定是否审批或拒绝。交互式 TUI 与 Desktop 可更改会话 Permission，启用 `full-access` 和 `unrestricted` 网络分别需要确认。命令执行使用 [`permission-capabilities.ts`](../../core/src/capability/permission-capabilities.ts) 探测平台能力；当前只实现 Linux bubblewrap Sandbox，Windows 没有文件系统 Sandbox。Linux bubblewrap 的文件系统读写能力报告为 `partial`，因此受限档位的 Shell 会在 Kernel 预检中拒绝；`full-access` Shell 使用当前操作系统用户权限，并要求不受限网络与进程管理能力可用。MCP `--operator` 不管理 Permission，硬拒绝也不能通过审批覆盖。
+Host 为每个会话持有独立的 Permission 与 Policy 状态。Permission 在 Kernel 判定之前按工具的资源访问类别检查读、写、命令、网络和外部进程；Policy 随后决定是否审批或拒绝。交互式 TUI 与 Desktop 可更改会话 Permission，启用 `full-access` 和 `unrestricted` 网络分别需要确认。命令执行通过 [`permission-capabilities.ts`](../../core/src/capability/permission-capabilities.ts) 探测所选 Shell 和平台能力。Linux 使用 bubblewrap，并按实测报告文件系统隔离能力；受限命令使用的 Node 若位于隐藏目录中，沙箱只读映射该可执行文件及发行包自带的 npm/Corepack 文件到固定路径，用户主目录和包管理器缓存仍保持隐藏。Windows `workspace-write` 使用每次运行独立的 `WRITE_RESTRICTED` Token 和临时 ACL，标为 `partial`；需要明确授权项目、确认风险并使用不受限网络，且无法限制读取和网络。硬链接、可写祖先目录的 `FILE_DELETE_CHILD` 权限及并发 ACL 修改仍可能越界。Windows `read-only` 仅当所选 Shell 能进入实际工作区时才使用 AppContainer，否则 Kernel 预检会拒绝；可用时它会阻止工作区写入和 Shell 联网，但系统公开可读文件仍可能被读取。项目脚本与 Git 命令都需要工作区信任；每条 Git 命令还需逐次审批，因为仓库配置可能运行 Hook、辅助程序或别名。`full-access` Shell 使用当前操作系统用户权限，并要求不受限网络与进程管理能力可用。MCP `--operator` 不管理 Permission，硬拒绝也不能通过审批覆盖。
+
+默认 `minimal` 模式还提供 `managed_process`，供开发服务器等需要跨工具调用运行的命令使用。启动命令仍按 `exec` capability 应用 Permission、Script Binding、工作区信任和 Policy；现有 `exec` 拒绝规则同样适用。启动须提供 HTTP 回环就绪地址，成功后返回 Session 内句柄、端口和就绪状态；状态与日志查询、显式停止也限定在该 Session，日志最多返回 16 KiB。普通 `exec` 仍等待命令结束并由 Guardian 清理后代。受管进程继续留在 Guardian/Job Object 进程树中，随运行取消、Permission 变更、Session/Host 关闭或所属 Grant 撤销而停止；外部撤销或过期的 Grant 会每秒重新校验。就绪地址只限制 Host 的探测目标，实际监听地址和命令的网络访问仍由启动命令与当前平台 Permission 决定。
 
 ### 一次 Agent Loop
 

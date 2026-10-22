@@ -42,7 +42,7 @@ async function withWorkspace(run) {
 const silentLogger = { debug: () => {}, log: () => {} };
 const fullAccess = createPermissionContext('full-access', 'unrestricted', {
   filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
-});
+}, { workspaceTrusted: true });
 
 function context(workspace, limits, extra) {
   return { config: { boundary: workspace, limits, ...extra }, logger: silentLogger };
