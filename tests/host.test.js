@@ -147,7 +147,8 @@ test('a client over stdio drives one round, answers one approval and watches the
     // Host 向客户端发送审批请求，其中包含工具名称和参数。
     assert.equal(approvals.length, 1);
     assert.equal(approvals[0].tool, 'read');
-    assert.deepEqual(approvals[0].args, { path: 'note.txt' });
+    assert.equal(approvals[0].args.path, 'note.txt');
+    assert.match(approvals[0].args.argumentSha256, /^[a-f0-9]{64}$/u);
     assert.equal(approvals[0].sessionId, sessionId);
     // 审批请求携带其所属项目根目录，即使客户端当前查看的是另一个项目。
     // 不同平台可能用不同路径表示同一目录，因此比较真实路径；Host 返回的路径仍保持原样。
@@ -201,10 +202,10 @@ test('cancelling while an approval is open stops the round instead of leaving it
     assert.equal(approvals.length, 1, 'the approval reached the client before the cancel');
     assert.deepEqual(await host.client.request('run.cancel', { sessionId }), { cancelled: true });
     await assert.rejects(running, (error) => error.code === 'loop_cancelled');
-    // 取消会将未答复的审批记录为拒绝，确保工具调用有对应结果。
+    // 取消会为未答复的审批写入终态，但不能伪装成人类拒绝或累计拒绝次数。
     const status = await host.client.request('status.get', { sessionId });
     assert.equal(status.running, false);
-    assert.deepEqual(status.denials, { consecutive: 1, total: 1 });
+    assert.deepEqual(status.denials, { consecutive: 0, total: 0 });
   });
 });
 
@@ -299,7 +300,7 @@ async function runCli(directory, answer) {
       child[name].setEncoding('utf8');
       child[name].on('data', (chunk) => {
         written[name] += chunk;
-        if (!answered && written.stderr.includes('[y/N]')) {
+        if (!answered && written.stderr.includes('[y/N')) {
           answered = true;
           if (answer !== null) child.stdin.write(`${answer}\n`);
           child.stdin.end();
@@ -330,7 +331,7 @@ test('ligule run prints the round, asks the terminal once, and the project instr
     assert.match(outcome.stdout, /^> read the note$/m);
     assert.match(outcome.stdout, /^· read: ok$/m);
     assert.match(outcome.stdout, /the file says so/);
-    assert.match(outcome.stderr, /Allow read \{"path":"note\.txt"\}\?/);
+    assert.match(outcome.stderr, /Allow read \{"path":"note\.txt","argumentSha256":"[a-f0-9]{64}"\} · arguments 19 bytes · SHA-256 [a-f0-9]{64}\? \[y\/N; d to view full details\]/);
     assert.match(outcome.stderr, /^Session [0-9a-f-]{36}: 2 iterations, 2 model calls$/m);
     // 项目指令已进入请求体的系统消息。
     assert.match(outcome.requests[0].system, /print nothing but the answer/);
@@ -348,14 +349,14 @@ test('ligule run prints the round, asks the terminal once, and the project instr
   }
 });
 
-test('ligule run with nobody answering the prompt declines the tool and still finishes', async () => {
+test('ligule run with no terminal answer reports approval unavailable and still finishes', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'ligule-run-'));
   await writeFile(join(directory, 'note.txt'), 'the body');
   try {
     const outcome = await runCli(directory, null);
     assert.equal(outcome.code, 0, outcome.stderr);
-    // 无人答复按拒绝处理；结果写入记录后，循环会继续请求模型。
-    assert.match(outcome.stdout, /^· read: ask_declined$/m);
+    // 输入关闭不是人类拒绝；结果写入记录后，循环会继续请求模型。
+    assert.match(outcome.stdout, /^· read: ask_unavailable$/m);
     assert.match(outcome.stdout, /the file says so/);
     assert.match(outcome.stderr, /2 iterations, 2 model calls/);
   } finally {

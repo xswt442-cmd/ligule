@@ -418,7 +418,10 @@ async function runOneRound(
         }
         answer = await approvals.ask(t(`允许 ${tool} ${described}${backend}${size}？[y/N] `, `Allow ${tool} ${described}${backend}${size}? [y/N] `));
       }
-      return { decision: /^y(es)?$/i.test(String(answer).trim()) ? 'allow' : 'deny' };
+      if (answer === undefined) {
+        return { decision: 'unavailable', code: 'ask_unavailable', reason: 'terminal input closed before a decision' };
+      }
+      return { decision: /^y(es)?$/i.test(answer.trim()) ? 'allow' : 'deny' };
     },
   };
   try {
