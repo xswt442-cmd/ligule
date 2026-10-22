@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createConfig, createDecisionChain, createKernel, createManagedProcessRegistry, createPermissionContext, managedProcessPlugin } from '../dist/index.js';
-import { setTrusted } from '../dist/kernel/workspace-trust.js';
+import { isTrusted, setTrusted } from '../dist/kernel/workspace-trust.js';
 
 const permission = createPermissionContext('workspace-write', 'unrestricted', {
   filesystemRead: 'partial', filesystemWrite: 'partial', network: 'partial', process: 'full',
@@ -242,4 +242,68 @@ test('managed process refuses readiness URLs outside loopback before starting a 
     await dispose();
     await registry.close();
   }
+});
+
+test('revoking shared workspace trust stops a managed process that started from trusted project code', { timeout: 15_000 }, async (t) => {
+  const testplace = join(process.cwd(), 'testplace');
+  await mkdir(testplace, { recursive: true });
+  const directory = await mkdtemp(join(testplace, 'managed-process-trust-revocation-'));
+  const workspace = join(directory, 'workspace');
+  const home = join(directory, 'home');
+  await Promise.all([mkdir(workspace), mkdir(home)]);
+  const previousHome = process.env.LIGULE_HOME;
+  process.env.LIGULE_HOME = home;
+  const port = await availableLoopbackPort();
+  const url = `http://127.0.0.1:${port}/`;
+  const script = join(workspace, 'server.mjs');
+  await writeFile(script, "import { createServer } from 'node:http';\nconst port = Number(process.argv[2]);\ncreateServer((_request, response) => response.end('trusted-server-ready')).listen(port, '127.0.0.1');\n");
+  await setTrusted(workspace, true);
+  const registry = createManagedProcessRegistry({
+    async validateWorkspaceTrust() {
+      if (!(await isTrusted(workspace))) throw new Error('workspace trust was revoked');
+    },
+  });
+  const kernel = createKernel({
+    config: createConfig({ user: { boundary: workspace, workspaceRoot: workspace } }),
+    policy: createDecisionChain({ mode: 'auto', ask: async () => true }),
+    permission,
+  });
+  const dispose = managedProcessPlugin(registry).setup(kernel);
+  t.after(async () => {
+    try {
+      await dispose();
+      await registry.close();
+    } finally {
+      if (previousHome === undefined) delete process.env.LIGULE_HOME;
+      else process.env.LIGULE_HOME = previousHome;
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  let started;
+  try {
+    started = await kernel.call('managed_process', {
+      action: 'start', command: `node "${script.replaceAll('\\', '/')}" ${port}`, readyUrl: url,
+    });
+  } catch (error) {
+    if (process.platform === 'linux' && error?.code === 'permission_sandbox_unavailable'
+      && String(error.detail ?? '').includes('bwrap: setting up uid map: Permission denied')) {
+      t.skip('this Linux runner denies bubblewrap user-namespace mapping');
+      return;
+    }
+    throw error;
+  }
+  assert.equal(started.status, 'running');
+  assert.equal(await (await fetch(url)).text(), 'trusted-server-ready');
+
+  await setTrusted(workspace, false);
+  await waitForUnavailable(url);
+  const deadline = Date.now() + 3_000;
+  let stopped = registry.status(started.id);
+  while (stopped.status === 'stopping' && Date.now() < deadline) {
+    await delay(20);
+    stopped = registry.status(started.id);
+  }
+  assert.equal(stopped.status, 'stopped', JSON.stringify(stopped));
+  assert.match(stopped.failure, /workspace trust was revoked/u);
 });

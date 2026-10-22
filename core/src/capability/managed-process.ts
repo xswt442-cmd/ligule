@@ -24,6 +24,7 @@ interface ManagedProcessEntry {
   readonly port: number;
   readonly readyUrl: string;
   readonly lease: ManagedExecLease;
+  readonly workspaceTrustedAtStart: boolean;
   status: ProcessStatus;
   stopping?: Promise<void>;
   exitCode?: number;
@@ -111,16 +112,18 @@ function stopEntry(entry: ManagedProcessEntry): Promise<void> {
 }
 
 export interface ManagedProcessRegistry {
-  start(readyUrl: URL, lease: ManagedExecLease, signal?: AbortSignal): Promise<Record<string, unknown>>;
+  start(readyUrl: URL, lease: ManagedExecLease, signal?: AbortSignal, workspaceTrustedAtStart?: boolean): Promise<Record<string, unknown>>;
   status(id: string): Record<string, unknown>;
   logs(id: string): Record<string, unknown>;
   stop(id: string): Promise<Record<string, unknown>>;
   stopAll(): Promise<void>;
+  stopWorkspaceTrusted(): Promise<void>;
   close(): Promise<void>;
 }
 
 export interface ManagedProcessRegistryOptions {
   readonly validateOwner?: () => Promise<void>;
+  readonly validateWorkspaceTrust?: () => Promise<void>;
 }
 
 export function createManagedProcessRegistry(options: ManagedProcessRegistryOptions = {}): ManagedProcessRegistry {
@@ -141,6 +144,23 @@ export function createManagedProcessRegistry(options: ManagedProcessRegistryOpti
     if (failure?.status === 'rejected') throw failure.reason;
   }
 
+  async function stopWorkspaceTrusted(): Promise<void> {
+    const outcomes = await Promise.allSettled([...entries.values()]
+      .filter((entry) => entry.workspaceTrustedAtStart)
+      .map(async (entry) => {
+        if (entry.status === 'stopped' || entry.status === 'exited' || entry.status === 'failed') return;
+        entry.failure = 'workspace trust was revoked';
+        try { await stopEntry(entry); }
+        catch (error) {
+          entry.status = 'failed';
+          entry.failure = `workspace trust was revoked; process-tree shutdown failed: ${error instanceof Error ? error.message : String(error)}`;
+          throw error;
+        }
+      }));
+    const failure = outcomes.find((outcome) => outcome.status === 'rejected');
+    if (failure?.status === 'rejected') throw failure.reason;
+  }
+
   async function stopAfterOwnerInvalidation(): Promise<void> {
     for (const entry of entries.values()) {
       if (entry.status === 'stopped' || entry.status === 'exited' || entry.status === 'failed') continue;
@@ -154,7 +174,7 @@ export function createManagedProcessRegistry(options: ManagedProcessRegistryOpti
   }
 
   return {
-    async start(readyUrl, lease, signal) {
+    async start(readyUrl, lease, signal, workspaceTrustedAtStart = false) {
       if (closed || signal?.aborted) {
         await lease.stop();
         throw new KernelError(closed ? 'managed_process_owner_closed' : 'exec_cancelled');
@@ -164,6 +184,7 @@ export function createManagedProcessRegistry(options: ManagedProcessRegistryOpti
         port: Number(readyUrl.port),
         readyUrl: readyUrl.href,
         lease,
+        workspaceTrustedAtStart,
         status: 'starting',
       };
       entries.set(entry.id, entry);
@@ -174,11 +195,20 @@ export function createManagedProcessRegistry(options: ManagedProcessRegistryOpti
         () => signal?.removeEventListener('abort', stopOnAbort),
       );
       const validateOwner = options.validateOwner;
-      if (validateOwner !== undefined && ownerCheck === undefined) {
+      const validateWorkspaceTrust = options.validateWorkspaceTrust;
+      if ((validateOwner !== undefined || validateWorkspaceTrust !== undefined && workspaceTrustedAtStart) && ownerCheck === undefined) {
         ownerCheck = setInterval(() => {
           if (checkingOwner || closed) return;
           checkingOwner = true;
-          void validateOwner().catch(stopAfterOwnerInvalidation).finally(() => { checkingOwner = false; });
+          void (async () => {
+            await validateOwner?.();
+            if (validateWorkspaceTrust !== undefined
+              && [...entries.values()].some((item) => item.workspaceTrustedAtStart
+                && item.status !== 'stopped' && item.status !== 'exited' && item.status !== 'failed')) {
+              try { await validateWorkspaceTrust(); }
+              catch { await stopWorkspaceTrusted().catch(() => undefined); }
+            }
+          })().catch(stopAfterOwnerInvalidation).finally(() => { checkingOwner = false; });
         }, 1_000);
         ownerCheck.unref();
       }
@@ -212,6 +242,7 @@ export function createManagedProcessRegistry(options: ManagedProcessRegistryOpti
       return view(entry);
     },
     stopAll,
+    stopWorkspaceTrusted,
     async close() {
       closed = true;
       if (ownerCheck !== undefined) clearInterval(ownerCheck);
@@ -256,7 +287,7 @@ export function managedProcessTool(registry: ManagedProcessRegistry): ToolDefini
         case 'start': {
           const readyUrl = loopbackUrl(args.readyUrl);
           return runManagedExec({ command: args.command, ...(args.cwd === undefined ? {} : { cwd: args.cwd as string }) },
-            context as ExecRunContext, (lease) => registry.start(readyUrl, lease, context.signal));
+            context as ExecRunContext, (lease) => registry.start(readyUrl, lease, context.signal, context.permission.workspaceTrusted));
         }
         case 'status': return registry.status(args.id as string);
         case 'logs': return registry.logs(args.id as string);

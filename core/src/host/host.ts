@@ -1477,10 +1477,17 @@ export function createHost({
       basePermission.capabilities,
       permissionOptionsOf(basePermission, recover ? false : basePermission.partialWorkspaceWriteConfirmed, workspaceTrusted),
     );
-    const managedProcesses = createManagedProcessRegistry(agentControl === undefined ? {} : {
-      validateOwner: async () => {
-        const active = await activeDelegation();
-        if (active?.id !== agentControl.grantId) throw new KernelError('agent_control_grant_revoked');
+    const managedProcesses = createManagedProcessRegistry({
+      ...(agentControl === undefined ? {} : {
+        validateOwner: async () => {
+          const active = await activeDelegation();
+          if (active?.id !== agentControl.grantId) throw new KernelError('agent_control_grant_revoked');
+        },
+      }),
+      validateWorkspaceTrust: async () => {
+        if (!(await isTrusted(env.projectRoot))) {
+          throw new KernelError('exec_workspace_untrusted', { detail: 'workspace trust was revoked while a managed process was running' });
+        }
       },
     });
     const state: HostSessionBase = {
@@ -2406,11 +2413,12 @@ export function createHost({
           const environment = await environmentFor(message.params.projectRoot);
           await setTrusted(environment.projectRoot, message.params.trusted);
           const identity = workspaceIdentity(environment.projectRoot);
-          for (const state of sessions.values()) {
-            if (workspaceIdentity(state.environment.projectRoot) !== identity) continue;
+          const affectedSessions = [...sessions.values()].filter((state) => workspaceIdentity(state.environment.projectRoot) === identity);
+          for (const state of affectedSessions) {
             state.permission = createPermissionContext(state.permission.profile, state.permission.network, state.permission.capabilities,
               permissionOptionsOf(state.permission, state.permission.partialWorkspaceWriteConfirmed, message.params.trusted));
           }
+          if (!message.params.trusted) await Promise.all(affectedSessions.map((state) => state.managedProcesses.stopWorkspaceTrusted()));
           return { projectRoot: environment.projectRoot, trusted: message.params.trusted };
         }
         case 'session.create': {

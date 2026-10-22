@@ -146,6 +146,61 @@ test('Linux bubblewrap Host-managed server survives the tool return and Session 
   });
 });
 
+test('revoking workspace trust stops a Host-managed project server', {
+  skip: process.platform !== 'win32' && process.platform !== 'linux',
+  timeout: 45_000,
+}, async (t) => {
+  let permission = windowsWorkspaceWrite;
+  if (process.platform === 'linux') {
+    const capabilities = await detectPermissionCapabilities({ platform: 'linux' });
+    if (capabilities.profiles.workspaceWrite === 'unavailable') {
+      t.skip(capabilities.limitations.join('; '));
+      return;
+    }
+    permission = createPermissionContext('workspace-write', 'unrestricted', capabilities.capabilities, {
+      profiles: capabilities.profiles,
+      limitations: capabilities.limitations,
+      partialWorkspaceWriteConfirmed: false,
+    });
+  }
+
+  await withTuiHost(async ({ client, sessionId, projectDirectory }) => {
+    const port = await availableLoopbackPort();
+    const serverPath = join(projectDirectory, 'server.mjs');
+    const url = `http://127.0.0.1:${port}/`;
+    await writeFile(serverPath, "import { createServer } from 'node:http';\nconst port = Number(process.argv[2]);\ncreateServer((_request, response) => response.end('trusted-host-server-ready')).listen(port, '127.0.0.1');\n");
+    await client.request('workspace.trust', {
+      projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true,
+    });
+    client.onRequest((message) => message.method === 'approval.request' ? { decision: 'allow' } : undefined);
+    await client.request('run.start', {
+      sessionId,
+      input: JSON.stringify({
+        tool: 'managed_process',
+        args: {
+          action: 'start',
+          command: `node "${serverPath.replaceAll('\\', '/')}" ${port}`,
+          readyUrl: url,
+        },
+      }),
+    });
+    const events = (await client.request('session.read', { sessionId })).events;
+    const started = events.filter((event) => event.kind === 'tool' && event.tool === 'managed_process').at(-1)?.result.content;
+    assert.equal(started.status, 'running');
+    assert.equal(await (await fetch(url)).text(), 'trusted-host-server-ready');
+
+    const revoked = await client.request('workspace.trust', { projectRoot: projectDirectory, trusted: false });
+    assert.equal(revoked.trusted, false);
+    await waitForUnavailable(url);
+    const status = await client.request('status.get', { sessionId });
+    assert.equal(status.permission.workspaceTrusted, false);
+  }, {
+    permissionControl: true,
+    permission,
+    testDirectory: join(process.cwd(), 'testplace'),
+  });
+});
+
 test('run.cancel terminates the Session-managed process tree while the Agent is waiting on its next model request', {
   skip: process.platform !== 'win32' && process.platform !== 'linux',
   timeout: 45_000,
