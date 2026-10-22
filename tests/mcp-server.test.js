@@ -844,17 +844,30 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     const sensitiveDone = await waitForOutcome(context.client, sensitiveRun.operationId);
     assert.equal(sensitiveDone.state, 'done');
     assert.equal(sensitiveDone.pendingInteractions.length, 0);
-    assert.ok(sensitiveDone.events.some((event) => event.kind === 'interaction.rejected' && event.code === 'control_interaction_sensitive'));
+    const sensitiveToolRecord = await findHistoryRecord(context.client, sessionId,
+      (entry) => entry.kind === 'tool' && entry.json.includes('operator-secret-executed.txt'));
+    assert.ok(sensitiveToolRecord, 'the non-reviewable tool call is recorded in the Session');
+    const sensitiveTool = JSON.parse(sensitiveToolRecord.record.json);
+    assert.equal(sensitiveTool.result.kind, 'refusal');
+    assert.equal(sensitiveTool.result.code, 'control_interaction_sensitive');
     await assert.rejects(access(markerSensitive), (error) => error.code === 'ENOENT', 'sensitive approval data is denied before the command side effect');
 
+    const beforeSensitiveHeader = toolData(await context.client.callTool({
+      name: 'ligule_session_read', arguments: { sessionId, limit: 50 },
+    }), 'operator_sensitive_header_before');
+    const lastBeforeSensitiveHeader = beforeSensitiveHeader.records.reduce((latest, entry) => Math.max(latest, entry.seq), 0);
     const sensitiveHeaderRun = toolData(await context.client.callTool({ name: 'ligule_run_start', arguments: {
       sessionId, input: 'MCP_OPERATOR_SENSITIVE_HEADER',
     } }), 'operator_sensitive_header_run');
     const sensitiveHeaderDone = await waitForOutcome(context.client, sensitiveHeaderRun.operationId);
     assert.equal(sensitiveHeaderDone.state, 'done');
     assert.equal(sensitiveHeaderDone.pendingInteractions.length, 0, 'credential header must not become an approvable interaction');
-    assert.ok(sensitiveHeaderDone.events.some((event) =>
-      event.kind === 'interaction.rejected' && event.code === 'control_interaction_sensitive'));
+    const sensitiveHeaderToolRecord = await findHistoryRecord(context.client, sessionId,
+      (entry) => entry.kind === 'tool' && entry.seq > lastBeforeSensitiveHeader);
+    assert.ok(sensitiveHeaderToolRecord, 'the credential-bearing file operation is recorded in the Session');
+    const sensitiveHeaderTool = JSON.parse(sensitiveHeaderToolRecord.record.json);
+    assert.equal(sensitiveHeaderTool.result.kind, 'refusal');
+    assert.equal(sensitiveHeaderTool.result.code, 'control_interaction_sensitive');
     await assert.rejects(access(markerSensitive), (error) => error.code === 'ENOENT', 'credential header is rejected without writing the file');
 
     const staleRun = toolData(await context.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_OPERATOR_APPROVE' } }), 'operator_stale_approval_run');
