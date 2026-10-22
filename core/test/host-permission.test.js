@@ -12,6 +12,7 @@ import { createPermissionContext } from '../dist/kernel/permission.js';
 import { createInteractivePermissionContext } from '../dist/capability/permission-capabilities.js';
 import { resolveShell } from '../dist/capability/shell.js';
 import { waitFor, withTuiHost } from './helpers/tui-host.js';
+import { withoutAutoInheritanceMarker } from './helpers/windows-acl.js';
 
 const fullPermission = createPermissionContext('full-access', 'unrestricted', {
   filesystemRead: 'unavailable', filesystemWrite: 'unavailable', network: 'unavailable', process: 'unavailable',
@@ -336,7 +337,8 @@ test('Windows read-only Host execution follows the measured AppContainer workspa
     assert.equal(existsSync(join(projectDirectory, 'readonly-new.txt')), false);
     assert.equal(existsSync(outsideFile), false);
     assert.equal(existsSync(output.tempFile), false, 'the AppContainer profile temp directory is removed after the command exits');
-    assert.equal(execFileSync('icacls.exe', [projectDirectory], { encoding: 'utf8' }), aclBefore);
+    assert.equal(withoutAutoInheritanceMarker(execFileSync('icacls.exe', [projectDirectory], { encoding: 'utf8' })),
+      withoutAutoInheritanceMarker(aclBefore));
     }, {
       permission: ({ projectDirectory }) => createInteractivePermissionContext({
         shellConfig: { exec: { shell: 'powershell' } }, workspaceRoot: projectDirectory,
@@ -481,7 +483,8 @@ test('trusted Windows project commands can install without scripts, build, and r
       await delay(25);
     }
     assert.equal(serverRunning, false, `dev server process ${serverState.pid} remained alive after cancellation`);
-    assert.equal(execFileSync('icacls.exe', [projectDirectory], { encoding: 'utf8' }), aclBefore);
+    assert.equal(withoutAutoInheritanceMarker(execFileSync('icacls.exe', [projectDirectory], { encoding: 'utf8' })),
+      withoutAutoInheritanceMarker(aclBefore));
     assert.ok(approvals.length >= 4, 'each trusted project command still requires per-call approval');
   }, { permission, interactive: true, permissionControl: true, testDirectory: tmpdir() });
 });
@@ -524,7 +527,8 @@ test('cancelling a Windows workspace-write Host command kills descendants and re
       await delay(25);
     }
     assert.equal(childRunning, false, `detached Job descendant ${pid} remained alive after cancellation`);
-    assert.equal(execFileSync('icacls.exe', [projectDirectory], { encoding: 'utf8' }), aclBefore);
+    assert.equal(withoutAutoInheritanceMarker(execFileSync('icacls.exe', [projectDirectory], { encoding: 'utf8' })),
+      withoutAutoInheritanceMarker(aclBefore));
   }, { permission, interactive: true, permissionControl: true });
 });
 

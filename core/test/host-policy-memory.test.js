@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { parse } from 'smol-toml';
 import { createHost } from '../dist/host/host.js';
 import { createConfigStore } from '../dist/kernel/config-store.js';
 import { loadConfigLayers } from '../dist/kernel/config-file.js';
@@ -210,8 +211,10 @@ test('remembered workspace scope applies only to the selected write operation cl
     await host.handle({ method: 'run.start', params: { sessionId: first.sessionId, input: 'create a note' } }, client);
     assert.equal(requests.length, 1);
     const saved = await readFile(join(projectA, '.ligule', 'config.local.toml'), 'utf8');
-    assert.match(saved, /target = "workspace"/u);
-    assert.ok(saved.includes(`path = ${JSON.stringify(projectA)}`));
+    const savedConfig = parse(saved);
+    const workspaceRule = savedConfig.policy.rules.find((rule) => rule.target === 'workspace' && rule.tool === 'create');
+    assert.ok(workspaceRule, 'the remembered create rule should use workspace scope');
+    assert.equal(workspaceRule.path, await realpath(projectA));
 
     const next = await host.handle({ method: 'session.create', params: { projectRoot: projectA } }, client);
     await host.handle({ method: 'run.start', params: { sessionId: next.sessionId, input: 'create another note' } }, client);
