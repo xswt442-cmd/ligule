@@ -14,7 +14,7 @@
   /* 顶栏保持单行且不缩小，内容过多时横向滚动；纵向空间由转录区和审批卡调整。 */
   flex-wrap: nowrap;
   gap: var(--space-3);
-  min-block-size: 56px;
+  min-block-size: 52px;
   flex-shrink: 0;
   padding: var(--space-2) var(--space-4);
   border-block-end: 0;

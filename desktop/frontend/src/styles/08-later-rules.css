@@ -703,7 +703,7 @@ button.pill:hover {
 
 .welcome h1 { margin: 4px 0 0; font-size: 1.7rem; font-weight: 550; letter-spacing: -0.03em; }
 .welcome p { margin: 0; color: var(--fg-muted); font-size: var(--text-md); }
-.composer-hint { display: flex; justify-content: space-between; gap: 16px; width: min(calc(100% - 64px), var(--stream)); margin: 10px auto 14px; font-size: 0.69rem; color: var(--fg-muted); }
+.composer-hint { display: flex; justify-content: space-between; gap: 16px; width: min(calc(100% - 64px), var(--stream)); margin: 8px auto 10px; font-size: 0.69rem; color: var(--fg-muted); }
 .composer-choice { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 45%; padding: 2px 6px; background: transparent; border-color: transparent; font-size: var(--text-sm); }
 .composer-choice span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .policy-picker { max-width: min(290px, 90vw); }
