@@ -358,7 +358,7 @@ export function SessionRail({ client, current, onOpen, onOpenHit, revision, runn
           onRemove={(root, isDefault) => { setRemoveFailure(null); setRemoveTarget({ root, isDefault }); }}
         >{sessions.map(sessionRow)}</WorkspaceGroup>;
       })}
-      {visibleLoose.length > 0 && <section className="rail-loose">
+      {visibleLoose.length > 0 && <section className="rail-group rail-loose">
         <h3 className="group-label"><button type="button" className="group-fold" aria-expanded={!otherFolded} onClick={() => setOtherFolded(value => !value)}><Icon name={otherFolded ? 'unfold' : 'fold'} size={13} /><Icon name="folder" size={14} /><span className="group-root">{t('其他会话', 'Other conversations')}</span></button><span className="group-count">{visibleLoose.length}</span></h3>
         {!otherFolded && visibleLoose.map(sessionRow)}
       </section>}

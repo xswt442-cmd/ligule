@@ -89,7 +89,8 @@ export function groupByWorkspace(sessions: SessionSummary[], watched: string[] =
   const newest = (group: RailGroup): string => group.sessions.map((item) => item.updatedAt).sort().at(-1) ?? '';
   return {
     groups: [...groups.values()].map((group) => ({ ...group, sessions: withinGroup(group.sessions) }))
-      .sort((left, right) => newest(right).localeCompare(newest(left))),
+      .sort((left, right) => Number(left.isDefault) - Number(right.isDefault)
+        || newest(right).localeCompare(newest(left))),
     loose: withinGroup(loose),
   };
 }
