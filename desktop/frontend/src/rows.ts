@@ -253,6 +253,14 @@ export function projectRecord(record: Record_, options: { startedAt?: number; no
   return projected(record, options).map((row) => ({ ...row, ...at }));
 }
 
+export function appendProjectedRecords(current: Row[], records: readonly Record_[]): Row[] {
+  const last = current.reduce((max, row) => Math.max(max, row.seq ?? 0), 0);
+  const appended = records
+    .filter((record) => record.seq !== undefined && record.seq > last)
+    .flatMap((record) => projectRecord(record));
+  return appended.length === 0 ? current : [...current, ...appended];
+}
+
 function projected(record: Record_, options: { startedAt?: number; now?: number }): Row[] {
   if (record.kind === 'user') return [{
     id: nextId(), kind: 'question', text: record.raw ?? record.text ?? '',

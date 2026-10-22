@@ -26,7 +26,7 @@ import { CURRENT, actionOf, formatKeys, isCapturing, isComposing, loadBindings, 
 import { insertMention, mentionToken } from './mentions';
 import type { ModelSelection } from './model-catalog';
 import { createSlotRegistry, SLOTS, type Panel } from './slots';
-import { capabilityOf, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn, type Record_, type Row } from './rows';
+import { appendProjectedRecords, capabilityOf, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn, type Record_, type Row } from './rows';
 import type { Status } from './status';
 import { loadSettings, mergeQueueIntoDraft, readSettings, saveSettings, type Settings } from './settings';
 import { LocaleProvider, localeOf } from './locale';
@@ -857,17 +857,7 @@ export function App({ transport }: { transport: Transport }) {
         }, 10_000) as { events: Record_[]; hasMore: boolean; writerActive: boolean };
         if (disposed || openRequest.current !== request || active.current !== sessionId) return;
         setExternalWriterActive(snapshot.writerActive);
-        const projected = snapshot.events.flatMap((record) => projectRecord(record));
-        if (pinned) {
-          setRows(projected);
-          setPage({ before: Number(snapshot.events[0]?.seq ?? 1), hasMore: snapshot.hasMore });
-        } else {
-          setRows((current) => {
-            const last = current.reduce((max, row) => Math.max(max, row.seq ?? 0), 0);
-            const appended = projected.filter((row) => row.seq !== undefined && row.seq > last);
-            return appended.length === 0 ? current : [...current, ...appended];
-          });
-        }
+        setRows((current) => appendProjectedRecords(current, snapshot.events));
       } catch {
         // 观察器只读；一次快照读取失败不改变会话控制权或本地草稿。
       } finally {
@@ -877,7 +867,7 @@ export function App({ transport }: { transport: Transport }) {
     void refresh();
     const timer = setInterval(() => void refresh(), 1_000);
     return () => { disposed = true; clearInterval(timer); };
-  }, [client, pinned, projectRoot, readOnlySessionId, sessionId]);
+  }, [client, projectRoot, readOnlySessionId, sessionId]);
 
   useEffect(() => {
     const bridge = transport.notifications;
