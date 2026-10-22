@@ -814,6 +814,21 @@ async function runInterruptedRequest(sessionId, alreadyStarted = false) {
   return `${interruptionMode === 'real' ? '官方模型单次请求 HTTP 200，响应由本地 gate 暂扣' : '本地 HTTP SSE 请求已收到并保持未终止'}；Host ${initialHostPid} 被终止，Session 写入唯一 interrupted/host_restarted，重连后请求数仍为 ${expectedRequests}`;
 }
 
+async function ensureIsolatedWorkspaceSelected() {
+  await waitUntil(async () => await devTools.evaluate(`document.querySelector('button.workspace-choice') !== null`), 30_000, 'workspace_selector_ready');
+  const currentWorkspace = await devTools.evaluate(`document.querySelector('button.workspace-choice')?.title ?? ''`);
+  if (currentWorkspace === workspace) return;
+  await devTools.evaluate(`document.querySelector('button.workspace-choice')?.click(); true`);
+  await waitUntil(async () => await devTools.evaluate(`([...document.querySelectorAll('[role="option"]')].some(option => option.title === ${JSON.stringify(workspace)}))`), 15_000, 'isolated_workspace_option_loaded');
+  const selected = await devTools.evaluate(`(() => {
+    const option = [...document.querySelectorAll('[role="option"]')].find(item => item.title === ${JSON.stringify(workspace)});
+    option?.click();
+    return option !== undefined;
+  })()`);
+  if (selected !== true) throw new Error('isolated_workspace_option_missing');
+  await waitUntil(async () => await devTools.evaluate(`document.querySelector('button.workspace-choice')?.title === ${JSON.stringify(workspace)}`), 15_000, 'isolated_workspace_selected');
+}
+
 async function runNoSessionReconnect() {
   const initialHost = Number(processIds.initialHost);
   if (!Number.isSafeInteger(initialHost)) throw new Error('initial_host_pid_missing');
@@ -831,13 +846,7 @@ async function runNoSessionReconnect() {
       && !model.disabled
       && !prefsFailure;
   })()`), 30_000, 'initial_preferences_ready');
-  const currentWorkspace = await devTools.evaluate(`document.querySelector('button.workspace-choice')?.title ?? ''`);
-  if (currentWorkspace !== workspace) {
-    await devTools.evaluate(`document.querySelector('button.workspace-choice').click(); true`);
-    await waitUntil(async () => await devTools.evaluate(`([...document.querySelectorAll('[role="option"]')].some(option => option.title === ${JSON.stringify(workspace)}))`), 15_000, 'default_workspace_option_loaded');
-    await devTools.evaluate(`([...document.querySelectorAll('[role="option"]')].find(option => option.title === ${JSON.stringify(workspace)})?.click(), true)`);
-    await waitUntil(async () => await devTools.evaluate(`document.querySelector('button.workspace-choice')?.title === ${JSON.stringify(workspace)}`), 15_000, 'default_workspace_selected');
-  }
+  await ensureIsolatedWorkspaceSelected();
   if (interruptionMode !== undefined) {
     await waitUntil(async () => await devTools.evaluate(`(document.querySelector('button.composer-choice')?.textContent ?? '').includes('deepseek-flash')`), 15_000, 'interruption_model_loaded');
   }
@@ -1001,6 +1010,7 @@ async function runChecks() {
   });
 
   await check('trust the exact isolated workspace through the packaged UI', async () => {
+    await ensureIsolatedWorkspaceSelected();
     await waitUntil(async () => await devTools.evaluate(`document.querySelector('button.permission-trigger') !== null`), 10_000, 'packaged_permission_trigger');
     await waitUntil(async () => await devTools.evaluate(`document.querySelector('button.permission-trigger')?.disabled === false`), 60_000, 'packaged_permission_trigger_enabled');
     const trigger = await devTools.evaluate(`(() => {
