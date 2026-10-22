@@ -125,7 +125,7 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
     if (kind === 'sessionPolicy') {
       if (event.ignorable !== true) throw new KernelRuntimeError('session_policy_ignorable_required');
       const override = event.override;
-      if ((override !== null && override !== 'ask' && override !== 'auto' && override !== 'never')
+      if ((override !== null && override !== 'ask' && override !== 'auto' && override !== 'none' && override !== 'never')
         || !Number.isSafeInteger(event.consecutive) || (event.consecutive as number) < 0
         || !Number.isSafeInteger(event.total) || (event.total as number) < (event.consecutive as number)
         || typeof event.forcedToAsk !== 'boolean') {
@@ -149,7 +149,13 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
         || typeof rule.tool !== 'string' || rule.tool.trim() === ''
         || (rule.decision !== 'allow' && rule.decision !== 'ask' && rule.decision !== 'deny')
         || (rule.match !== undefined && typeof rule.match !== 'string')
-        || (rule.reason !== undefined && typeof rule.reason !== 'string')) {
+        || (rule.reason !== undefined && typeof rule.reason !== 'string')
+        || (rule.target !== undefined && rule.target !== 'file' && rule.target !== 'workspace')
+        || (rule.path !== undefined && typeof rule.path !== 'string')
+        || (rule.argsHash !== undefined && (typeof rule.argsHash !== 'string' || !/^[a-f0-9]{64}$/u.test(rule.argsHash)))
+        || ((rule.target === undefined) !== (rule.path === undefined))
+        || (rule.target !== undefined && (rule.match !== undefined || rule.argsHash !== undefined))
+        || (typeof rule.path === 'string' && !(/^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/])/u.test(rule.path) || rule.path.startsWith('/')))) {
         throw new KernelRuntimeError('session_policy_rule_event_invalid');
       }
     }

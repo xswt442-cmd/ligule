@@ -35,8 +35,11 @@ function deepFreeze(value: unknown): unknown {
 
 function ruleIdentity(value: unknown): string | undefined {
   if (!isPlainObject(value) || typeof value.tool !== 'string'
-    || (value.match !== undefined && typeof value.match !== 'string')) return undefined;
-  return JSON.stringify([value.tool, value.match ?? '']);
+    || (value.match !== undefined && typeof value.match !== 'string')
+    || (value.target !== undefined && value.target !== 'file' && value.target !== 'workspace')
+    || (value.path !== undefined && typeof value.path !== 'string')
+    || (value.argsHash !== undefined && typeof value.argsHash !== 'string')) return undefined;
+  return JSON.stringify([value.tool, value.match ?? '', value.target ?? '', value.path ?? '', value.argsHash ?? '']);
 }
 
 function decisionRank(value: unknown): number {

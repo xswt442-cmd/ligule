@@ -2,8 +2,11 @@
 // 任一步拒绝后都不能被后续步骤放行；前面的步骤拒绝时不会询问用户。
 // 命令先按 Host 选择的语法解析，再逐段检查。任一段命中拒绝规则就拒绝整条命令，无法确认安全时转交审批。
 // 自动放行不会执行脚本解释器命令，因为它们可以运行任意代码；解析时也不会剥除解释器外壳。
+import { createHash } from 'node:crypto';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { inspectCommand, type CommandInspection, type ParsedCommand } from '../capability/command.js';
 import { classifyDangerousCommand } from '../capability/dangerous-command.js';
+import { resolveWithin } from '../capability/paths.js';
 import { KernelError } from './error.js';
 import { matches } from './match.js';
 import type { NetworkTarget } from '../capability/network.js';
@@ -12,15 +15,27 @@ import type { PolicyRule } from './config-edit.js';
 import type { PermissionAccess } from './permission.js';
 import type { ScriptBinding } from '../capability/script-binding.js';
 
-export type PolicyMode = 'ask' | 'auto' | 'never';
+export type PolicyMode = 'ask' | 'auto' | 'none' | 'never';
+export type PolicySelection = 'ask' | 'auto' | 'none';
 export type PolicyModeSource = 'config' | 'session';
+
+function isPortableAbsolutePath(value: string): boolean {
+  return isAbsolute(value) || /^[A-Za-z]:[\\/]/u.test(value) || /^\\\\[^\\/]+[\\/]/u.test(value);
+}
 
 export function isPolicyRule(value: unknown): value is PolicyRule {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const rule = value as Record<string, unknown>;
   return 'tool' in value && typeof value.tool === 'string'
     && 'decision' in value && (value.decision === 'allow' || value.decision === 'ask' || value.decision === 'deny')
     && (!('match' in value) || value.match === undefined || typeof value.match === 'string')
-    && (!('reason' in value) || value.reason === undefined || typeof value.reason === 'string');
+    && (!('reason' in value) || value.reason === undefined || typeof value.reason === 'string')
+    && (!('target' in value) || value.target === undefined || value.target === 'file' || value.target === 'workspace')
+    && (!('path' in value) || value.path === undefined || typeof value.path === 'string')
+    && (!('argsHash' in value) || value.argsHash === undefined || typeof value.argsHash === 'string')
+    && ((rule.target === undefined && rule.path === undefined) || (rule.target !== undefined && typeof rule.path === 'string' && isPortableAbsolutePath(rule.path)))
+    && !(rule.target !== undefined && (rule.match !== undefined || rule.argsHash !== undefined))
+    && (rule.argsHash === undefined || /^[a-f0-9]{64}$/u.test(String(rule.argsHash)));
 }
 
 export interface PolicyThresholds {
@@ -40,13 +55,19 @@ export interface PolicyQuestion {
   readonly shell?: string;
   readonly executable?: string;
   readonly scriptBinding?: ScriptBinding;
+  readonly callId?: string;
+  readonly identityDigest?: string;
 }
 
-export interface PolicyAskResult {
-  readonly decision: 'allow' | 'deny';
-  readonly code?: string;
-  readonly reason?: string;
-}
+export type PolicyAskResult =
+  | {
+      readonly decision: 'allow';
+      readonly source?: 'human' | 'controller';
+      readonly rememberScope?: 'session' | 'project' | 'user';
+      readonly rememberTarget?: 'file' | 'workspace' | 'tool' | 'command';
+    }
+  | { readonly decision: 'deny'; readonly code?: string; readonly reason?: string; readonly source?: 'human' | 'controller' }
+  | { readonly decision: 'unavailable' | 'error' | 'cancelled' | 'timeout'; readonly code: string; readonly reason?: string };
 
 export type PolicyAsk = (question: PolicyQuestion) => boolean | PolicyAskResult | Promise<boolean | PolicyAskResult>;
 export type PolicyGuard = (call: { readonly tool: string; readonly input: unknown; readonly command: string | undefined }) => string | undefined;
@@ -105,6 +126,10 @@ export interface PolicyCall {
   readonly scriptBinding?: ScriptBinding;
   readonly scriptBindingError?: { readonly code: string; readonly detail: string };
   readonly requiresManualApproval?: boolean;
+  readonly fileBoundary?: string;
+  readonly workingDirectory?: string;
+  readonly callId?: string;
+  readonly identityDigest?: string;
 }
 
 // 拒绝阈值和默认策略由配置层提供。
@@ -127,6 +152,29 @@ const COMMAND_WRAPPERS: readonly string[] = [
   'awk', 'gawk', 'mawk', 'nawk',
 ];
 const SCRIPT_EXTENSIONS = /\.(?:sh|bash|zsh|ps1|psm1|py|pyw|js|mjs|cjs|ts|mts|cts|rb|pl|php)$/u;
+const UP = `..${sep}`;
+
+function stableValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (typeof value !== 'object' || value === null) return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableValue((value as Record<string, unknown>)[key])]));
+}
+
+export function policyArgsHash(input: unknown, identityDigest = ''): string {
+  const serialized = JSON.stringify(stableValue(input));
+  return createHash('sha256').update(identityDigest).update('\0').update(serialized).digest('hex');
+}
+
+function samePath(left: string, right: string): boolean {
+  const a = resolve(left);
+  const b = resolve(right);
+  return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+function withinPath(parent: string, child: string): boolean {
+  const part = relative(resolve(parent), resolve(child));
+  return part === '' || (part !== '..' && !part.startsWith(UP) && !isAbsolute(part));
+}
 
 function commandOf(input: unknown): string | undefined {
   if (typeof input !== 'object' || input === null || !('command' in input) || typeof input.command !== 'string') return undefined;
@@ -167,7 +215,7 @@ function askReason(parsed: ParsedCommand | undefined, target: NetworkTarget | un
 
 // `ask` 是 Host 注入的用户审批通道。未提供该通道时，所有需要审批的调用都会被拒绝。
 export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEFAULT_THRESHOLDS, ask }: DecisionChainOptions = {}): DecisionChain {
-  if (mode !== 'ask' && mode !== 'auto' && mode !== 'never') throw new KernelError('policy_mode_unknown');
+  if (mode !== 'ask' && mode !== 'auto' && mode !== 'none' && mode !== 'never') throw new KernelError('policy_mode_unknown');
   if (!(thresholds.consecutive >= 1) || !(thresholds.total >= 1)) throw new KernelError('policy_thresholds_required');
 
   let current = mode;
@@ -180,15 +228,17 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
   let total = 0;
   const guards = new Set<PolicyGuard>();
 
-  function record(denied: boolean): void {
-    if (denied) {
-      consecutive += 1;
-      total += 1;
-      // 拒绝次数达到阈值后降为逐次审批；策略只会收紧，不会因此放宽。
-      if (consecutive >= thresholds.consecutive || total >= thresholds.total) forcedToAsk = true;
-    } else {
-      consecutive = 0;
-    }
+  function recordDenial(): void {
+    consecutive += 1;
+    total += 1;
+    // 拒绝次数达到阈值后降为逐次审批；策略只会收紧，不会因此放宽。
+    if (consecutive >= thresholds.consecutive || total >= thresholds.total) forcedToAsk = true;
+  }
+
+  function recordHumanApproval(): void {
+    consecutive = 0;
+    total = 0;
+    forcedToAsk = false;
   }
 
   return {
@@ -200,7 +250,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
     },
 
     get mode() {
-      return forcedToAsk && current !== 'never' ? 'ask' : current;
+      return forcedToAsk && current !== 'never' && current !== 'none' ? 'ask' : current;
     },
 
     // 标明当前策略来自配置默认值还是会话覆盖；拒绝阈值触发的收紧状态单独记录在 `forced`。
@@ -219,14 +269,14 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
     },
 
     setMode(next: PolicyMode) {
-      if (next !== 'ask' && next !== 'auto' && next !== 'never') throw new KernelError('policy_mode_unknown');
+      if (next !== 'ask' && next !== 'auto' && next !== 'none' && next !== 'never') throw new KernelError('policy_mode_unknown');
       current = next;
       source = 'session';
     },
 
     // 配置默认值变化时，只更新未设置会话覆盖的策略。
     setConfiguredMode(next: PolicyMode) {
-      if (next !== 'ask' && next !== 'auto' && next !== 'never') throw new KernelError('policy_mode_unknown');
+      if (next !== 'ask' && next !== 'auto' && next !== 'none' && next !== 'never') throw new KernelError('policy_mode_unknown');
       configured = next;
       if (source === 'config') current = next;
     },
@@ -251,7 +301,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
 
     restore(snapshot: PolicyState) {
       if (snapshot === null || typeof snapshot !== 'object'
-        || (snapshot.override !== null && snapshot.override !== 'ask' && snapshot.override !== 'auto' && snapshot.override !== 'never')
+        || (snapshot.override !== null && snapshot.override !== 'ask' && snapshot.override !== 'auto' && snapshot.override !== 'none' && snapshot.override !== 'never')
         || !Number.isSafeInteger(snapshot.consecutive) || snapshot.consecutive < 0
         || !Number.isSafeInteger(snapshot.total) || snapshot.total < snapshot.consecutive
         || typeof snapshot.forcedToAsk !== 'boolean') {
@@ -269,7 +319,8 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       forcedToAsk = snapshot.forcedToAsk;
     },
 
-    async evaluate({ tool, input, target, shell, capability, access, scriptBinding, scriptBindingError, requiresManualApproval: manualApprovalRequired }: PolicyCall): Promise<PolicyVerdict> {
+    async evaluate({ tool, input, target, shell, capability, access, scriptBinding, scriptBindingError, requiresManualApproval: manualApprovalRequired,
+      fileBoundary, workingDirectory, callId, identityDigest }: PolicyCall): Promise<PolicyVerdict> {
       if (typeof tool !== 'string' || tool === '') throw new KernelError('policy_call_tool_required');
       // 使用工具声明的实际能力名称进行判定。MCP 调用使用 `mcp:<服务器>/<工具>`，而不是通用工具名 `mcp.call`。
       const named = capability ?? tool;
@@ -280,7 +331,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       }
 
       const command = commandOf(input);
-      let effective = forcedToAsk && current !== 'never' ? 'ask' : current;
+      let effective = forcedToAsk && current !== 'never' && current !== 'none' ? 'ask' : current;
       // 记录此次判定时的有效策略；拒绝阈值触发的收紧状态另行记录。
       const judged = (decision: PolicyVerdict['decision'], via: string, extra: Omit<PolicyVerdict, 'decision' | 'via' | 'capability' | 'level' | 'forced'>, hardDenied = false): PolicyVerdict => ({
         decision,
@@ -290,7 +341,26 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         ...(forcedToAsk || hardDenied ? { forced: true } : {}),
         ...extra,
       });
-      const candidates = currentRules.filter((item) => item.tool === named);
+      let currentFilePath: string | undefined;
+      const inputPath = typeof input === 'object' && input !== null && 'path' in input && typeof input.path === 'string'
+        ? input.path
+        : undefined;
+      if (inputPath !== undefined && fileBoundary !== undefined && workingDirectory !== undefined) {
+        try { currentFilePath = await resolveWithin(fileBoundary, inputPath, { cwd: workingDirectory }); }
+        catch { /* Invalid paths cannot match a remembered allow and remain subject to the tool's path check. */ }
+      }
+      const argsHash = policyArgsHash(input, identityDigest);
+      const candidates = currentRules.filter((item) => {
+        if (item.tool !== named) return false;
+        if (item.target !== undefined || item.path !== undefined) {
+          if (currentFilePath === undefined || item.path === undefined || !isAbsolute(item.path)) return false;
+          return item.target === 'file'
+            ? samePath(item.path, currentFilePath)
+            : item.target === 'workspace' && withinPath(item.path, currentFilePath);
+        }
+        if (item.argsHash !== undefined) return item.argsHash === argsHash;
+        return true;
+      });
       // 先按 Host 选择的语法解析命令，再逐段应用规则。解析不完整时将整条命令视为无法确认。
       const kind = shell?.kind ?? 'bash';
       const inspection = command === undefined ? undefined : await inspectCommand(command, kind);
@@ -300,7 +370,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       const parts = command === undefined ? [undefined] : segments;
       const askedRule = candidates.find((item) => item.decision === 'ask'
         && (matches(command, item.match) || (segments ?? []).some((segment) => matches(segment, item.match))));
-      if (askedRule !== undefined) effective = 'ask';
+      if (askedRule !== undefined && effective !== 'none') effective = 'ask';
       // 在结果中包含解析分段，便于从记录中还原命令如何被解释。
       // 无命令文本或无法解析时不返回分段字段。
       const answer = (via: string, rule?: PolicyRule) => judged('allow', via, {
@@ -308,8 +378,8 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         ...(rule?.match === undefined ? {} : { rule: rule.match }),
       });
 
-      const refuse = (code: string, via: string, reason: string, rule?: string, reply?: string): PolicyVerdict => {
-        record(true);
+      const refuse = (code: string, via: string, reason: string, rule?: string, reply?: string, countsAsDenial = true): PolicyVerdict => {
+        if (countsAsDenial) recordDenial();
         return judged('deny', via, {
           code,
           reason,
@@ -319,11 +389,12 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       };
 
       const hardDeny = (reason: string): PolicyVerdict => {
-        record(true);
+        recordDenial();
         return judged('deny', 'hard-deny', { code: 'policy_hard_denied', reason }, true);
       };
 
       let requiresManualApproval = manualApprovalRequired === true || access === 'external' || access === 'unknown';
+      let requiresTrustedApproval = requiresManualApproval;
       let rememberable = manualApprovalRequired !== true && access !== 'external' && access !== 'unknown';
       let manualApprovalReason = manualApprovalRequired === true
         ? 'Git may execute project hooks, helpers, or configured aliases; the user must approve each call.'
@@ -332,20 +403,22 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         : access === 'unknown'
           ? 'this tool has no permission classification and requires per-call approval'
           : undefined;
-      if (askedRule !== undefined) {
+      if (askedRule !== undefined && effective !== 'none') {
         requiresManualApproval = true;
         manualApprovalReason = askedRule.reason ?? `${named} requires approval by its policy rule`;
       }
       if (command !== undefined) {
-        if (segments !== undefined && !canAutoApprove(inspection)) {
+        if (segments === undefined || !canAutoApprove(inspection)) {
           requiresManualApproval = true;
+          requiresTrustedApproval = true;
           rememberable = false;
-          manualApprovalReason ??= '命令使用脚本解释器或包装器，需要逐次审批';
+          manualApprovalReason ??= askReason(parsed, target, shell) ?? '命令使用脚本解释器或包装器，需要逐次审批';
         }
         const classified = await classifyDangerousCommand(command, kind, inspection, commandCwd(input));
         if (classified?.kind === 'hard-deny') return hardDeny(classified.reason);
         if (classified?.kind === 'approval') {
           requiresManualApproval = true;
+          requiresTrustedApproval = true;
           rememberable = false;
           manualApprovalReason ??= parsed?.kind === 'segments'
             ? classified.reason
@@ -361,7 +434,11 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         return refuse('policy_denied', 'target', `${target.class} 这一类地址（链路本地、元数据端点、组播与保留段）不在这一趟运行里取回`);
       }
       const loopOrPrivate = target?.class === 'loopback' || target?.class === 'private';
-      if (loopOrPrivate) rememberable = false;
+      if (loopOrPrivate) {
+        rememberable = false;
+        requiresTrustedApproval = true;
+        manualApprovalReason ??= askReason(parsed, target, shell);
+      }
 
       // 任一匹配规则拒绝时就拒绝调用，后续放行规则不能覆盖拒绝。
       // 命令规则同时检查整条命令和每个分段，以拦截管道中的危险命令。
@@ -380,6 +457,14 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         return refuse(scriptBindingError.code, 'script-binding', scriptBindingError.detail);
       }
 
+      if (effective === 'none' && requiresTrustedApproval) {
+        return refuse(
+          'policy_manual_approval_disabled', 'none',
+          manualApprovalReason ?? 'this operation requires a separate trusted approval',
+          undefined, 'unavailable',
+        );
+      }
+
       const allowed = candidates.filter((item) => item.decision === 'allow');
       // 记录实际匹配的放行规则名称，便于解释判定结果。
       const covering = () => (parts === undefined ? undefined : allowed.find((item) => parts.every((segment) => matches(segment, item.match))));
@@ -389,14 +474,13 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         covered = undefined;
       } else if (command === undefined) {
         // 不含命令文本的调用不受命令语法检查影响；自动策略可放行，逐次审批仍需匹配放行规则。
-        covered = effective === 'auto' ? null : covering();
+        covered = effective === 'auto' || effective === 'none' || effective === 'never' ? null : covering();
       } else if (effective === 'auto') {
         // 自动策略只放行可完整解析且每段首词都不是脚本解释器的命令。
         // 不剥离解释器包装；例如 `bash -lc "git status"` 仍须审批。
         covered = segments !== undefined && canAutoApprove(inspection) ? null : undefined;
-      } else if (effective === 'never') {
-        // 显式关闭审批只跳过确认步骤；目标检查、拒绝规则和守卫仍然生效。
-        // 命令含糊、由解释器执行或目标属于私有网络时仍按拒绝处理。
+      } else if (effective === 'never' || effective === 'none') {
+        // 这两个档位只允许已经确认在权限边界内的普通调用；模糊命令在上方标为需要可信审批。
         covered = command === undefined || (segments !== undefined && canAutoApprove(inspection)) ? null : undefined;
       } else {
         // 逐次审批要求放行规则覆盖每个命令分段；无法解析的命令不能视为已覆盖。
@@ -406,19 +490,21 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       }
       if (requiresManualApproval) covered = undefined;
       if (covered !== undefined) {
-        record(false);
-        return covered === null ? answer(effective === 'never' ? 'never' : 'auto') : answer('rules', covered);
+        return covered === null ? answer(effective === 'never' ? 'never' : effective === 'none' ? 'none' : 'auto') : answer('rules', covered);
       }
 
       if (effective === 'never') {
         return refuse('policy_denied', 'never', 'this operation requires approval, which is disabled for this session');
+      }
+      if (effective === 'none') {
+        return refuse('policy_manual_approval_disabled', 'none', 'this operation cannot be safely decided without a trusted approval', undefined, 'unavailable');
       }
 
       // 自动策略无法识别命令时转为逐次审批，并返回无法自动放行的原因。
       const reason = requiresManualApproval
         ? manualApprovalReason
         : askReason(parsed, target, shell);
-      if (typeof ask !== 'function') return refuse('ask_unavailable', 'ask', reason ?? '这一条连接上没有问人的通道', undefined, 'unavailable');
+      if (typeof ask !== 'function') return refuse('ask_unavailable', 'ask', reason ?? '这一条连接上没有问人的通道', undefined, 'unavailable', false);
       // 审批请求包含 Host 实际使用的语法和可执行文件，避免用户批准一种解释、实际执行另一种。
       // 不含命令文本时省略这两个字段。将当前策略及来源随请求返回，确保客户端显示的是本次调用所属会话的状态。
       // `policyForced` 标记策略是否因连续拒绝而收紧。
@@ -433,15 +519,36 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         rememberable,
         ...(scriptBinding === undefined ? {} : { scriptBinding }),
         ...(shell === undefined ? {} : { shell: shell.kind, executable: shell.executable }),
+        ...(callId === undefined ? {} : { callId }),
+        ...(identityDigest === undefined ? {} : { identityDigest }),
       };
-      const response = await ask(question);
-      const answered = response === true || typeof response === 'object' && response !== null && response.decision === 'allow';
-      if (!answered) {
-        const rejected = typeof response === 'object' && response !== null ? response : undefined;
-        return refuse(rejected?.code ?? 'ask_declined', 'ask', rejected?.reason ?? 'the user declined', undefined, 'deny');
+      let response: boolean | PolicyAskResult;
+      try {
+        response = await ask(question);
+      } catch (error) {
+        const code = error instanceof KernelError ? error.code : 'policy_approval_channel_error';
+        return refuse(code, 'ask', 'approval channel failed', undefined, 'error', false);
       }
-      record(false);
-      return { ...judged('allow', 'ask', { ...(segments === undefined ? {} : { segments }), answer: 'allow' }), ...(scriptBinding === undefined ? {} : { scriptBinding }) };
+      if (response === false) return refuse('ask_declined', 'ask', 'the user declined', undefined, 'deny');
+      const allowAfterApproval = (approvalSource: 'human' | 'controller'): PolicyVerdict => {
+        if (approvalSource === 'human') recordHumanApproval();
+        return { ...judged('allow', 'ask', { ...(segments === undefined ? {} : { segments }), answer: 'allow' }), ...(scriptBinding === undefined ? {} : { scriptBinding }) };
+      };
+      if (response === true) return allowAfterApproval('human');
+      switch (response.decision) {
+        case 'allow': return allowAfterApproval(response.source ?? 'human');
+        case 'deny': {
+          const explicitHumanDenial = response.source === undefined || response.source === 'human';
+          const reason = response.reason ?? (explicitHumanDenial ? 'the user declined' : 'the controller declined');
+          return refuse(response.code ?? 'ask_declined', 'ask', reason, undefined, 'deny', explicitHumanDenial);
+        }
+        case 'unavailable':
+        case 'error':
+        case 'cancelled':
+        case 'timeout':
+          return refuse(response.code, 'ask', response.reason ?? 'approval was not completed', undefined, response.decision, false);
+      }
+      return refuse('policy_approval_result_invalid', 'ask', 'approval channel returned an unknown result', undefined, 'error', false);
     },
   };
 }

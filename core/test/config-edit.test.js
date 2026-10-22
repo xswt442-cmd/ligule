@@ -128,6 +128,7 @@ test('a key with the same name in another table is not the one being changed', (
 test('each field only takes a value of its own shape', () => {
   assert.equal(encodeValue(field('model.api'), 'chat-completions').literal, '"chat-completions"');
   assert.throws(() => encodeValue(field('model.api'), 'openai'), (error) => error.code === 'config_field_value');
+  assert.equal(encodeValue(field('policy.mode'), 'none').literal, '"none"');
   assert.equal(encodeValue(field('policy.mode'), 'never').literal, '"never"');
   assert.throws(() => encodeValue(field('policy.mode'), 'yolo'), (error) => error.code === 'config_field_value');
   // 允许端点地址包含查询参数，但不允许在地址中写入凭据。
@@ -310,6 +311,21 @@ test('the rule shape is owned by the host: unknown keys, empty values and a wron
   ]) {
     assert.throws(() => checkedRule(bad), (error) => error.code === 'config_rule_invalid', JSON.stringify(bad));
   }
+});
+
+test('remembered file and MCP scopes validate, serialize and round-trip without becoming generic rules', () => {
+  const fileRule = checkedRule({ tool: 'create', decision: 'allow', target: 'file', path: join(tmpdir(), 'app.js') });
+  assert.deepEqual(fileRule, { tool: 'create', decision: 'allow', target: 'file', path: join(tmpdir(), 'app.js') });
+  const fileText = editRuleTable('', 'add', 0, fileRule).text;
+  assert.match(fileText, /target = "file"/u);
+  assert.deepEqual(rulesOfLayer(parse(fileText)), [fileRule]);
+
+  const argsHash = 'a'.repeat(64);
+  const mcpRule = checkedRule({ tool: 'mcp:browser/click', decision: 'allow', argsHash });
+  assert.deepEqual(rulesOfLayer(parse(editRuleTable('', 'add', 0, mcpRule).text)), [mcpRule]);
+  assert.throws(() => checkedRule({ tool: 'create', decision: 'allow', target: 'file', path: 'app.js' }), { code: 'config_rule_invalid' });
+  assert.throws(() => checkedRule({ tool: 'create', decision: 'allow', target: 'workspace', path: join(tmpdir(), 'project'), match: 'x' }), { code: 'config_rule_invalid' });
+  assert.throws(() => checkedRule({ tool: 'mcp:browser/click', decision: 'allow', argsHash: 'short' }), { code: 'config_rule_invalid' });
 });
 
 test('the rule table writes through the same lock, version check and read-back', async () => {
