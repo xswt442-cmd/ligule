@@ -16,16 +16,16 @@ export function Fold({ text, verbosity, always = false, label = '看全文', onE
 }) {
   const t = useText();
   const [forced, setForced] = useState<boolean | null>(null);
-  if (text === '') return null;
-  const long = always || text.length > CHARS || text.split('\n').length > LINES;
-  const open = forced ?? verbosity === 'full';
   const detailsRequested = useRef(false);
+  const open = forced ?? verbosity === 'full';
   useEffect(() => {
-    if (open && !detailsRequested.current) {
+    if (text !== '' && open && !detailsRequested.current) {
       detailsRequested.current = true;
       onExpand?.();
     }
-  }, [onExpand, open]);
+  }, [onExpand, open, text]);
+  if (text === '') return null;
+  const long = always || text.length > CHARS || text.split('\n').length > LINES;
   return <>
     <div className="row-body" data-folded={long && !open ? (always ? 'tight' : 'true') : undefined}>{text}</div>
     {long && <button
