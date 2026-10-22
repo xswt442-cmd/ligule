@@ -1,20 +1,16 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { link, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, link, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
+import { withoutAutoInheritanceMarker } from './helpers/windows-acl.js';
 import { createAppContainerProfile, runAppContainerCommand } from '../dist/capability/windows-appcontainer-process.js';
 import { createOwnedProcessJob } from '../dist/capability/win32-job.js';
 import { spawnWindowsCommand } from '../dist/capability/windows-command.js';
-
-// Windows may mark unchanged ACEs as inherited while propagating temporary workspace grants.
-function withoutAutoInheritanceMarker(acl) {
-  return acl.replaceAll('(I)', '');
-}
 
 test('a WRITE_RESTRICTED process writes the workspace and refuses a sibling path', {
   skip: process.platform !== 'win32',
@@ -105,7 +101,7 @@ test('a WRITE_RESTRICTED process writes the workspace and refuses a sibling path
     assert.equal(report.powershellExitCode, 0, JSON.stringify(report));
     assert.equal(report.nodeExitCode, 0, JSON.stringify(report));
     assert.equal(report.gitInitExitCode, 0, JSON.stringify(report));
-    assert.equal(report.gitAddExitCode, 0, JSON.stringify(report));
+    assert.equal(report.gitAddExitCode, 0, `${JSON.stringify(report)}\nstderr=${stderr}`);
     assert.equal(report.workspaceFile, 'workspace-write');
     assert.equal(report.powershellFile, 'powershell-write');
     assert.equal(report.nodeFile, 'node-write');
@@ -139,7 +135,7 @@ test('the Guardian grants workspace and private-temp writes, then blocks a sibli
   const command = join(process.env.SystemRoot, 'System32', 'cmd.exe');
   const owned = spawnWindowsCommand(command, [
     '/d', '/q', '/c', 'echo %TEMP% & echo workspace-write> workspace.txt & echo private-temp> %TEMP%\\private.txt & echo escaped> ..\\outside\\escaped.txt',
-  ], workspace, environment, { kind: 'restricted-token', workspaceRoot: workspace, tempDirectory: temp });
+  ], workspace, environment, { kind: 'restricted-token', workspaceRoot: workspace, tempDirectory: temp, aclLockRoot: home });
   let stdout = '';
   let stderr = '';
   owned.child.stdout?.setEncoding('utf8').on('data', (chunk) => { stdout += chunk; });
@@ -155,6 +151,53 @@ test('the Guardian grants workspace and private-temp writes, then blocks a sibli
     assert.equal(withoutAutoInheritanceMarker(execFileSync('icacls.exe', [workspace], { encoding: 'utf8' })), withoutAutoInheritanceMarker(workspaceAclBefore));
     assert.equal(withoutAutoInheritanceMarker(execFileSync('icacls.exe', [temp], { encoding: 'utf8' })), withoutAutoInheritanceMarker(tempAclBefore));
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('concurrent Guardians serialize workspace ACL changes across private user profiles', {
+  skip: process.platform !== 'win32',
+  timeout: 45_000,
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-guardian-acl-lock-'));
+  const workspace = join(root, 'workspace');
+  const lockRoot = join(root, 'ligule-home');
+  const runCount = 8;
+  const tempDirectories = Array.from({ length: runCount }, (_, index) => join(root, `temp-${index}`));
+  const profiles = tempDirectories.map((directory) => join(directory, 'profile'));
+  await Promise.all([mkdir(workspace), mkdir(lockRoot), ...tempDirectories.map((directory) => mkdir(directory)), ...profiles.map((profile) => mkdir(profile))]);
+  const workspaceAclBefore = execFileSync('icacls.exe', [workspace], { encoding: 'utf8' });
+  const tempAclsBefore = tempDirectories.map((directory) => execFileSync('icacls.exe', [directory], { encoding: 'utf8' }));
+  const inherited = Object.fromEntries(Object.entries(process.env).filter(([name, value]) =>
+    value !== undefined && new Set(['COMSPEC', 'PATH', 'PATHEXT', 'SYSTEMROOT', 'WINDIR']).has(name.toUpperCase())));
+  const owned = tempDirectories.map((tempDirectory, index) => {
+    const profile = profiles[index];
+    const environment = {
+      ...inherited,
+      HOME: profile,
+      USERPROFILE: profile,
+      TEMP: tempDirectory,
+      TMP: tempDirectory,
+    };
+    return spawnWindowsCommand(process.execPath, ['-e', `require('node:fs').writeFileSync('concurrent-${index}.txt','ok')`],
+      workspace, environment, { kind: 'restricted-token', workspaceRoot: workspace, tempDirectory, aclLockRoot: lockRoot });
+  });
+  try {
+    assert.deepEqual(await Promise.all(owned.map((item) => item.completion)), Array(runCount).fill(0));
+    for (let index = 0; index < runCount; index += 1) {
+      assert.equal(await readFile(join(workspace, `concurrent-${index}.txt`), 'utf8'), 'ok');
+      assert.equal(withoutAutoInheritanceMarker(execFileSync('icacls.exe', [tempDirectories[index]], { encoding: 'utf8' })),
+        withoutAutoInheritanceMarker(tempAclsBefore[index] ?? ''));
+    }
+    assert.equal(withoutAutoInheritanceMarker(execFileSync('icacls.exe', [workspace], { encoding: 'utf8' })),
+      withoutAutoInheritanceMarker(workspaceAclBefore));
+    await access(join(lockRoot, 'locks', 'windows-acl'));
+    for (const profile of profiles) await assert.rejects(access(join(profile, '.ligule', 'locks', 'windows-acl')));
+  } finally {
+    for (const item of owned) {
+      if (item.child.exitCode === null && item.child.signalCode === null) item.cancel();
+    }
+    await Promise.all(owned.map((item) => item.completion.catch(() => undefined)));
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -184,12 +227,12 @@ test('the Guardian still permits known hard-link and FILE_DELETE_CHILD boundary 
   const command = join(process.env.SystemRoot, 'System32', 'cmd.exe');
   try {
     const write = spawnWindowsCommand(process.execPath, ['-e', "require('fs').writeFileSync('hardlink-alias.txt','outside-modified')"],
-      workspace, environment, { kind: 'restricted-token', workspaceRoot: workspace, tempDirectory: temp });
+      workspace, environment, { kind: 'restricted-token', workspaceRoot: workspace, tempDirectory: temp, aclLockRoot: home });
     assert.equal(await write.completion, 0);
     assert.equal(await readFile(hardlinkTarget, 'utf8'), 'outside-modified');
 
     const remove = spawnWindowsCommand(command, ['/d', '/q', '/c', 'del ..\\outside\\delete-target.txt'],
-      workspace, environment, { kind: 'restricted-token', workspaceRoot: workspace, tempDirectory: temp });
+      workspace, environment, { kind: 'restricted-token', workspaceRoot: workspace, tempDirectory: temp, aclLockRoot: home });
     assert.equal(await remove.completion, 0);
     await assert.rejects(readFile(deleteTarget));
   } finally {
@@ -248,7 +291,7 @@ test('a force-killed Guardian leaves a SID-only ACE that a same-user Low AppCont
 
     const source = "require('fs').writeFileSync('started.txt','yes');setTimeout(()=>require('fs').writeFileSync('late.txt','late'),2000);setTimeout(()=>{},20000);";
     guardian = spawnWindowsCommand(process.execPath, ['-e', source], workspace, environment, {
-      kind: 'restricted-token', workspaceRoot: workspace, tempDirectory: temp,
+      kind: 'restricted-token', workspaceRoot: workspace, tempDirectory: temp, aclLockRoot: home,
     });
     const ready = new Promise((resolveReady, reject) => {
       const timer = setTimeout(() => reject(new Error('restricted Guardian did not grant its ACLs')), 5_000);

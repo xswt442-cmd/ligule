@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, extname, join, parse, relative } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { KernelError } from '../kernel/error.js';
+import { dataRoot } from '../kernel/config-file.js';
 import { isWithin, resolveWithin } from './paths.js';
 import { boundaryOf, limitsOf, workingDirectoryOf, type CapabilityConfig } from './limits.js';
 import { spawnWindowsCommand, type OwnedWindowsCommand } from './windows-command.js';
@@ -411,7 +412,7 @@ async function runExec<TResult>(
               });
             }
             if (privateTempDir === undefined) throw new KernelError('exec_sandbox_setup_failed', { detail: 'Windows workspace-write requires a private temporary directory' });
-            windowsLaunch = { kind: 'restricted-token', workspaceRoot: boundary, tempDirectory: privateTempDir };
+            windowsLaunch = { kind: 'restricted-token', workspaceRoot: boundary, tempDirectory: privateTempDir, aclLockRoot: dataRoot() };
             const privateProfile = join(privateTempDir, 'profile');
             const privateLocalAppData = join(privateProfile, 'AppData', 'Local');
             const privateRoamingAppData = join(privateProfile, 'AppData', 'Roaming');

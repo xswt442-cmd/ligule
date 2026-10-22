@@ -9,6 +9,7 @@ import {
   type PermissionContextOptions,
   type PermissionProfileCapabilities,
 } from '../kernel/permission.js';
+import { dataRoot } from '../kernel/config-file.js';
 import {
   probeLinuxSandboxIsolation,
   type LinuxSandboxProbeResult,
@@ -357,13 +358,13 @@ async function probeWindowsSandbox(
         "try{fs.writeFileSync(path.resolve('..','outside','outside.txt'),'blocked')}catch{}",
       ].join('');
       const workspaceWrite = await runProbeCommand(process.execPath, ['-e', workspaceWriteSource], workspace, environment, {
-        kind: 'restricted-token', workspaceRoot: workspace, tempDirectory: temp,
+        kind: 'restricted-token', workspaceRoot: workspace, tempDirectory: temp, aclLockRoot: dataRoot(),
       });
       const workspaceWriteShellCommand = shell.kind === 'powershell'
         ? "Set-Content -LiteralPath 'shell-write.txt' -Value 'shell-write'; Write-Output 'LIGULE_SANDBOX_SHELL_OK'"
         : "printf '%s' 'shell-write' > shell-write.txt && printf '%s' 'LIGULE_SANDBOX_SHELL_OK'";
       const workspaceWriteShell = await runProbeCommand(shell.executable, [...shell.prefix, workspaceWriteShellCommand], workspace, environment, {
-        kind: 'restricted-token', workspaceRoot: workspace, tempDirectory: temp,
+        kind: 'restricted-token', workspaceRoot: workspace, tempDirectory: temp, aclLockRoot: dataRoot(),
       });
       const writeFailures = [
         ...((await readFile(join(workspace, 'write.txt'), 'utf8').then((text) => text.trim() === 'allowed', () => false)) ? [] : ['workspace_write_denied']),

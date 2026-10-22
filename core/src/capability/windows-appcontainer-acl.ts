@@ -2,7 +2,7 @@ type Koffi = typeof import('koffi')['default'];
 import type { NativeHandle } from './windows-appcontainer-process.js';
 import { createHash } from 'node:crypto';
 import { mkdir, open, realpath } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import lockfile from 'proper-lockfile';
 import { dataRoot } from '../kernel/config-file.js';
 import { KernelError } from '../kernel/error.js';
@@ -176,12 +176,15 @@ function freeNative(api: ReturnType<typeof bindings>, pointer: AppContainerHandl
   if (!isNull(result)) throw new Error(`LocalFree(${operation}) failed`);
 }
 
-async function withDirectoryAclLock<T>(path: string, action: () => Promise<T>): Promise<T> {
+async function withDirectoryAclLock<T>(path: string, action: () => Promise<T>, lockRoot = dataRoot()): Promise<T> {
+  if (lockRoot.trim() === '' || lockRoot.includes('\0') || !isAbsolute(lockRoot)) {
+    throw new KernelError('exec_acl_lock_failed', { detail: 'the ACL lock root must be an absolute directory' });
+  }
   let canonical: string;
   try { canonical = await realpath(resolve(path)); }
   catch (cause) { throw new KernelError('exec_acl_path_unavailable', { cause }); }
   const identity = process.platform === 'win32' ? canonical.toLowerCase() : canonical;
-  const directory = join(dataRoot(), 'locks', 'windows-acl');
+  const directory = join(lockRoot, 'locks', 'windows-acl');
   try { await mkdir(directory, { recursive: true }); }
   catch (cause) { throw new KernelError('exec_acl_lock_failed', { cause }); }
   const target = join(directory, `${createHash('sha256').update(identity).digest('hex')}.target`);
@@ -218,6 +221,7 @@ async function updateDirectoryAce(
   action: 'grant' | 'revoke',
   accessMask: number,
   kind: 'read' | 'workspace-write',
+  lockRoot = dataRoot(),
 ): Promise<void> {
   if (process.platform !== 'win32') throw new Error('Windows directory ACLs are available only on Windows');
   if (typeof path !== 'string' || path.trim() === '' || path.includes('\0')) throw new TypeError('directory path must be a non-empty Windows path');
@@ -307,7 +311,7 @@ async function updateDirectoryAce(
       throw new AggregateError(primaryError === undefined ? cleanupErrors : [primaryError, ...cleanupErrors], 'AppContainer directory ACL cleanup failed');
     }
   }
-  }); }
+  }, lockRoot); }
   finally {
     if (ownedSid) freeNative(api, targetSid!, 'converted SID');
   }
@@ -340,12 +344,12 @@ export async function revokeAppContainerDirectoryRead(
   await updateDirectoryAce(grant.workspaceRoot, sid, 'revoke', FILE_GENERIC_READ | FILE_TRAVERSE, 'read');
 }
 
-export async function grantRestrictedDirectoryWrite(path: string, sid: AppContainerHandle | string): Promise<void> {
-  await updateDirectoryAce(path, sid, 'grant', FILE_WORKSPACE_MODIFY, 'workspace-write');
+export async function grantRestrictedDirectoryWrite(path: string, sid: AppContainerHandle | string, lockRoot?: string): Promise<void> {
+  await updateDirectoryAce(path, sid, 'grant', FILE_WORKSPACE_MODIFY, 'workspace-write', lockRoot);
 }
 
-export async function revokeRestrictedDirectoryWrite(path: string, sid: AppContainerHandle | string): Promise<void> {
-  await updateDirectoryAce(path, sid, 'revoke', FILE_WORKSPACE_MODIFY, 'workspace-write');
+export async function revokeRestrictedDirectoryWrite(path: string, sid: AppContainerHandle | string, lockRoot?: string): Promise<void> {
+  await updateDirectoryAce(path, sid, 'revoke', FILE_WORKSPACE_MODIFY, 'workspace-write', lockRoot);
 }
 
 function lowIntegritySid(koffi: Koffi, api: ReturnType<typeof bindings>): Buffer {

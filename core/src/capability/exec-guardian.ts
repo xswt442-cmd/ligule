@@ -1,6 +1,7 @@
 // 实际命令只在守护进程加入 Job 后创建，父进程死亡由 IPC 断开通知。
 import { spawn } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
+import { isAbsolute } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import {
   createAppContainerProfile,
@@ -57,8 +58,13 @@ function parseGuardianStartup(argv: readonly string[]): GuardianStartup {
       && 'workspaceRoot' in launchValue && typeof launchValue.workspaceRoot === 'string'
       && launchValue.workspaceRoot.trim() !== '' && !launchValue.workspaceRoot.includes('\0')
       && 'tempDirectory' in launchValue && typeof launchValue.tempDirectory === 'string'
-      && launchValue.tempDirectory.trim() !== '' && !launchValue.tempDirectory.includes('\0')) {
-      launch = { kind: 'restricted-token', workspaceRoot: launchValue.workspaceRoot, tempDirectory: launchValue.tempDirectory };
+      && launchValue.tempDirectory.trim() !== '' && !launchValue.tempDirectory.includes('\0')
+      && 'aclLockRoot' in launchValue && typeof launchValue.aclLockRoot === 'string'
+      && launchValue.aclLockRoot.trim() !== '' && !launchValue.aclLockRoot.includes('\0') && isAbsolute(launchValue.aclLockRoot)) {
+      launch = {
+        kind: 'restricted-token', workspaceRoot: launchValue.workspaceRoot,
+        tempDirectory: launchValue.tempDirectory, aclLockRoot: launchValue.aclLockRoot,
+      };
     } else {
       throw new Error('exec_guardian_startup_protocol');
     }
@@ -159,9 +165,9 @@ async function runRestrictedToken(startup: GuardianStartup): Promise<void> {
   let primaryError: unknown;
   try {
     workspaceGrant = true;
-    await grantRestrictedDirectoryWrite(launch.workspaceRoot, writeSid);
+    await grantRestrictedDirectoryWrite(launch.workspaceRoot, writeSid, launch.aclLockRoot);
     tempGrant = true;
-    await grantRestrictedDirectoryWrite(launch.tempDirectory, writeSid);
+    await grantRestrictedDirectoryWrite(launch.tempDirectory, writeSid, launch.aclLockRoot);
     if (disconnected || !process.connected) throw new KernelError('exec_cancelled', { detail: 'the owned command tree was terminated' });
     process.send?.({ kind: 'ready', processId: process.pid });
     const exitCode = await runRestrictedWindowsCommand({
@@ -185,11 +191,11 @@ async function runRestrictedToken(startup: GuardianStartup): Promise<void> {
   } finally {
     const cleanupErrors: string[] = [];
     if (tempGrant) {
-      try { await revokeRestrictedDirectoryWrite(launch.tempDirectory, writeSid); }
+      try { await revokeRestrictedDirectoryWrite(launch.tempDirectory, writeSid, launch.aclLockRoot); }
       catch (error) { cleanupErrors.push(`temp ACL: ${(error as Error).message}`); }
     }
     if (workspaceGrant) {
-      try { await revokeRestrictedDirectoryWrite(launch.workspaceRoot, writeSid); }
+      try { await revokeRestrictedDirectoryWrite(launch.workspaceRoot, writeSid, launch.aclLockRoot); }
       catch (error) { cleanupErrors.push(`workspace ACL: ${(error as Error).message}`); }
     }
     if (cleanupErrors.length > 0) {

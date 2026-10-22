@@ -1,5 +1,6 @@
 // 守护进程先取得平台进程树归属，再创建命令；命令退出时一并清理仍存活的后代。
 import { fork, type ChildProcess } from 'node:child_process';
+import { isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { KernelError } from '../kernel/error.js';
 
@@ -11,7 +12,7 @@ export interface OwnedWindowsCommand {
 
 export type WindowsCommandLaunch =
   | { readonly kind: 'appcontainer'; readonly workspaceRoot: string }
-  | { readonly kind: 'restricted-token'; readonly workspaceRoot: string; readonly tempDirectory: string };
+  | { readonly kind: 'restricted-token'; readonly workspaceRoot: string; readonly tempDirectory: string; readonly aclLockRoot: string };
 
 const GUARDIAN_LAUNCH_ARGUMENT = '--ligule-guardian-launch-v1';
 
@@ -28,8 +29,9 @@ export function spawnWindowsCommand(
       throw new TypeError('the AppContainer launch description requires a workspace directory');
     }
     if (launch.kind === 'restricted-token'
-      && ([launch.workspaceRoot, launch.tempDirectory].some((path) => path.trim() === '' || path.includes('\0')))) {
-      throw new TypeError('the restricted-token launch description requires workspace and temp directories');
+      && ([launch.workspaceRoot, launch.tempDirectory, launch.aclLockRoot].some((path) => path.trim() === '' || path.includes('\0')
+        || !isAbsolute(path)))) {
+      throw new TypeError('the restricted-token launch description requires absolute workspace, temp, and ACL lock directories');
     }
   }
   const guardianArguments = [GUARDIAN_LAUNCH_ARGUMENT, JSON.stringify(launch ?? null), '--', executable, ...args];
