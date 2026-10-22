@@ -61,7 +61,7 @@ The default startup does not grant operator authority. In this mode, approval re
 {"command":"ligule","args":["mcp-server","--project","/absolute/path/to/project","--operator"]}
 ```
 
-`--operator` means the local operator explicitly authorizes this stdio client. It permits answering Policy decisions that are `ask`, answering real questions, and changing one session's mode, Policy, model, generation settings, and per-turn loop limit. It does not change workspace trust, file boundaries, or hard denials. An approval cannot override `never`, invalid tool input, or workspace boundaries. If Host cannot present a request fully and safely for review, it denies that request.
+`--operator` means the local operator explicitly authorizes this stdio client. It permits answering real pending Policy decisions and user questions, and changing one session's mode, Policy, model, generation settings, and per-turn loop limit. It does not change workspace trust, file boundaries, or hard denials. The three selectable Policy modes are `ask`, `auto`, and `none`; saved legacy `never` retains its old refusal behavior. An approval cannot override invalid tool input or workspace boundaries. Pending interactions in `ligule_run_status` contain a bounded summary, not a duplicate of full tool arguments. The trusted local TUI or Desktop can expand the pending details while the request remains active. If Host cannot review a request safely, it returns an explicit unavailable/error code instead of recording a human refusal.
 
 ## Agent Control project grants
 
