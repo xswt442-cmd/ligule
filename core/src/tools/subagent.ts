@@ -119,7 +119,10 @@ export function createSubagentPlugin(deps: SubagentDeps) {
 
   return {
     name: 'ligule-subagent',
-    setup(kernel: { register(tool: unknown): () => void }) {
+    setup(kernel: {
+      register(tool: unknown): () => void;
+      manifest(): readonly { readonly name: string }[];
+    }) {
       return kernel.register({
         name: 'subagent',
         access: 'inherit',
@@ -161,6 +164,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
           if (active >= MAX_CONCURRENT_SUBAGENTS) {
             throw new KernelError('subagent_concurrency_limit', { detail: `at most ${MAX_CONCURRENT_SUBAGENTS} derived runs can be active for this parent` });
           }
+          const parentTools = new Set(kernel.manifest().map(({ name }) => name));
           active += 1;
           try {
             const id = await nextSessionId();
@@ -187,6 +191,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
             let disposeAssembly: (() => void) | undefined;
             let disposeResultTool: (() => void) | undefined;
             let undoMode = () => {};
+            let undoParentRestrictions = () => {};
             let undoOutputContract = () => {};
             try {
               const child = createKernel({
@@ -208,6 +213,10 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                   structuredSubmitted = true;
                 });
               }
+              // Explicit child modes can narrow the parent manifest but cannot expand it.
+              undoParentRestrictions = child.restrict(
+                child.list().filter((name) => name !== DELEGATION_RESULT_TOOL && !parentTools.has(name)),
+              );
               const prompt = createPromptAssembly({ static: deps.prompt.staticPrefix });
               if (outputContract !== undefined) {
                 undoOutputContract = prompt.fragment({
@@ -314,12 +323,15 @@ export function createSubagentPlugin(deps: SubagentDeps) {
             } finally {
               try { undoMode(); }
               finally {
-                try { undoOutputContract(); }
+                try { undoParentRestrictions(); }
                 finally {
-                  try { disposeResultTool?.(); }
+                  try { undoOutputContract(); }
                   finally {
-                    try { disposeAssembly?.(); }
-                    finally { await session.close(); }
+                    try { disposeResultTool?.(); }
+                    finally {
+                      try { disposeAssembly?.(); }
+                      finally { await session.close(); }
+                    }
                   }
                 }
               }

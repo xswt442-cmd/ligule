@@ -67,6 +67,8 @@ test('the derived agent runs on the parent decision chain and cannot delegate ag
   ]);
   const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'parent' });
   const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
+  minimalPlugin.setup(kernel);
+  networkPlugin.setup(kernel);
   createSubagentPlugin({
     config,
     provider,
@@ -146,6 +148,8 @@ test("the derived agent runs under the mode the parent session picked", async ()
   ]);
   const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'p3' });
   const kernel = createKernel({ config, policy: chain, session });
+  minimalPlugin.setup(kernel);
+  networkPlugin.setup(kernel);
   createSubagentPlugin({
     config,
     provider,
@@ -164,6 +168,43 @@ test("the derived agent runs under the mode the parent session picked", async ()
   assert.match(provider.requests[1].system, /Check each claim against the files before reporting/u);
 });
 
+test('an explicit child mode cannot restore tools hidden from the parent', async () => {
+  const boundary = await workspace();
+  const config = createConfig({ user: { boundary } });
+  const chain = createDecisionChain({ mode: 'auto' });
+  const provider = scripted([
+    call('create', { path: 'escalated.txt', content: 'must stay blocked' }),
+    text('the parent tool limit held'),
+  ]);
+  const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'restricted-parent' });
+  const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
+  minimalPlugin.setup(kernel);
+  networkPlugin.setup(kernel);
+  createSubagentPlugin({
+    config,
+    provider,
+    chain,
+    prompt: { staticPrefix: '' },
+    directory: session.directory,
+    sessionId: 'restricted-parent',
+    plugins: [minimalPlugin, networkPlugin],
+  }).setup(kernel);
+  kernel.restrict(['create', 'write', 'edit', 'delete']);
+
+  const result = await kernel.call('subagent', {
+    task: 'try to create a file',
+    mode: { type: 'inline', tools: ['create', 'read'], prompt: [] },
+  });
+
+  assert.equal(result.text, 'the parent tool limit held');
+  assert.deepEqual(provider.requests[0].tools.map((entry) => entry.name), ['read']);
+  await assert.rejects(readFile(join(boundary, 'escalated.txt')), { code: 'ENOENT' });
+  const side = (await readFile(join(session.directory, 'restricted-parent.sub-1.jsonl'), 'utf8'))
+    .split('\n').filter(Boolean).map(JSON.parse);
+  const denied = side.find((event) => event.kind === 'tool' && event.tool === 'create');
+  assert.equal(denied.result.code, 'tool_denied');
+});
+
 test('an inline mode freezes the registered tools and prompt fragments in the child record', async () => {
   const boundary = await workspace();
   const config = createConfig({ user: { boundary } });
@@ -171,6 +212,8 @@ test('an inline mode freezes the registered tools and prompt fragments in the ch
   const provider = scripted([text('the scoped child result')]);
   const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'inline-parent' });
   const kernel = createKernel({ config, policy: chain, session });
+  minimalPlugin.setup(kernel);
+  networkPlugin.setup(kernel);
   createSubagentPlugin({
     config,
     provider,
