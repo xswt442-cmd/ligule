@@ -333,6 +333,23 @@ test('untrusted project code is rejected while ignored-script installs still req
   assert.deepEqual(asked, ['npm install --ignore-scripts']);
 });
 
+test('external workspace trust is checked separately from the Session permission snapshot', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-script-trust-snapshot-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await setTrusted(root, true);
+  const target = join(root, 'marker');
+  const staleSessionPermission = createPermissionContext('full-access', 'unrestricted', {
+    filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
+  }, { workspaceTrusted: false });
+  const script = join(root, 'approved.js');
+  await writeFile(script, `require('node:fs').writeFileSync(${JSON.stringify(target)}, 'ran');\n`);
+  const kernel = kernelFor(root, () => true, () => staleSessionPermission);
+
+  await kernel.call('exec', { command: `node "${script.replaceAll('\\', '/')}"` });
+
+  assert.equal(await readFile(target, 'utf8'), 'ran');
+});
+
 test('trusted Git hook operations still need a per-call approval under automatic policy', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'ligule-script-trust-git-'));
   t.after(() => rm(root, { recursive: true, force: true }));

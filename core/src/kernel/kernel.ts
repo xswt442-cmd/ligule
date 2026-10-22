@@ -127,8 +127,7 @@ function samePermission(left: PermissionContext, right: PermissionContext): bool
     && left.profiles.readOnly === right.profiles.readOnly
     && left.profiles.workspaceWrite === right.profiles.workspaceWrite
     && left.partialWorkspaceWriteConfirmationRequired === right.partialWorkspaceWriteConfirmationRequired
-    && left.partialWorkspaceWriteConfirmed === right.partialWorkspaceWriteConfirmed
-    && left.workspaceTrusted === right.workspaceTrusted;
+    && left.partialWorkspaceWriteConfirmed === right.partialWorkspaceWriteConfirmed;
 }
 
 function permissionWithWorkspaceTrust(permission: PermissionContext, workspaceTrusted: boolean): PermissionContext {
