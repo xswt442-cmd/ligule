@@ -57,7 +57,7 @@ Windows 路径示例：
 
 ## 操控者授权与会话设置
 
-默认启动参数不包含操控者授权。此时审批请求按既有行为拒绝，Host 不注册 `ask_user_question`，配置查询仍可用，设置修改与交互答复返回 `control_operator_required`。只有本地 MCP 客户端配置明确加入 `--operator`，才能启用回复和会话设置：
+默认启动参数不包含操控者授权。此时普通审批请求和用户提问等待本地 Desktop/TUI 用户处理；Host 注册 `ask_user_question` 供本地界面使用，MCP 客户端不能直接回复。配置查询仍可用，设置修改与 MCP 交互答复返回 `control_operator_required`。只有本地 MCP 客户端配置明确加入 `--operator`，才能启用 MCP 回复和会话设置：
 
 ```json
 {"command":"ligule","args":["mcp-server","--project","/absolute/path/to/project","--operator"]}
@@ -113,7 +113,7 @@ Node/Python 脚本调用需要逐次审批；`approval.request` 会包含规范�
 
 `--project` 必须是绝对路径。会话、运行和读取都限制在启动时授权的项目内；`ligule_session_list` 返回的会话需通过 `ligule_session_open` 接回后才能操作。项目目录标识会话归属，`boundary` 仍独立限制文件工具可访问的路径。
 
-MCP Server 使用 Ligule 已有的配置、模型服务、工具和 Policy。未启动 `--operator` 时，需要人工审批的操作会被拒绝；启动该选项后，只能答复真实待决请求。Server 不提供任意 Host RPC 或任意配置文件写入工具。它只使用本地 stdio，不开启网络监听。stdio 客户端与 Server 使用同一操作系统用户权限，请只配置可信的本地 MCP 客户端。
+MCP Server 使用 Ligule 已有的配置、模型服务、工具和 Policy。未启动 `--operator` 时，普通人工审批等待本地 Desktop/TUI 用户处理，MCP 客户端不能直接答复；启动该选项后，只能答复真实待决请求。Server 不提供任意 Host RPC 或任意配置文件写入工具。它只使用本地 stdio，不开启网络监听。stdio 客户端与 Server 使用同一操作系统用户权限，请只配置可信的本地 MCP 客户端。
 
 没有 Grant 时，`--operator` 不会授予或提升会话 Permission，也不能更改 OS 资源边界。MCP 工具调用始终经过会话的 Permission 与 Policy 判定。受限 Shell 只在平台 Sandbox 满足所需能力时运行；Linux bubblewrap 按实测报告文件系统能力。Windows `workspace-write` 标为 `partial`，必须先明确授权项目并确认限制，同时将网络设为 `unrestricted`；它不能限制文件读取和网络，既有硬链接、可写祖先目录的 `FILE_DELETE_CHILD` 权限或并发 ACL 修改也可能越界，不适合运行恶意原生代码。Windows `read-only` 仅在实时探测确认所选 Shell 能进入实际工作区时使用 AppContainer，否则该档位下 Shell 不可用；可用时会阻止工作区写入和 Shell 联网，但系统公开可读文件仍可能被读取。`full-access` 需要在可信交互界面单独确认；这不会让 Policy 的硬拒绝可被覆盖。
 
