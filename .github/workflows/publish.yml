@@ -127,9 +127,13 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
 
-      - name: verify bubblewrap user namespaces
+      - name: build Core for required Linux sandbox probe
         if: runner.os == 'Linux'
-        run: bwrap --unshare-user --ro-bind / / /bin/true
+        run: pnpm run build:core
+
+      - name: require the Linux sandbox isolation probe
+        if: runner.os == 'Linux'
+        run: node scripts/require-linux-sandbox.js
 
       - name: test
         run: pnpm test
