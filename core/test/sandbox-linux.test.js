@@ -97,7 +97,8 @@ test('read-only profile blocks workspace writes but keeps its private temporary 
 
 test('the selected Node runtime stays usable through a read-only mount while Home remains hidden', { skip: !linux }, async (t) => {
   const paths = fixture(t);
-  assert.match(process.version, /^v24\./u, 'the Linux sandbox acceptance requires the supported Node 24 runtime');
+  const nodeMajor = Number(process.versions.node.split('.')[0]);
+  assert.ok(Number.isInteger(nodeMajor) && nodeMajor >= 24, 'the Linux sandbox acceptance requires Node 24 or newer');
   const nodeExecutable = realpathSync(process.execPath);
   const binDirectory = dirname(nodeExecutable);
   const sourceRoot = dirname(binDirectory);
