@@ -11,6 +11,11 @@ import { createAppContainerProfile, runAppContainerCommand } from '../dist/capab
 import { createOwnedProcessJob } from '../dist/capability/win32-job.js';
 import { spawnWindowsCommand } from '../dist/capability/windows-command.js';
 
+// Windows may mark unchanged ACEs as inherited while propagating temporary workspace grants.
+function withoutAutoInheritanceMarker(acl) {
+  return acl.replaceAll('(I)', '');
+}
+
 test('a WRITE_RESTRICTED process writes the workspace and refuses a sibling path', {
   skip: process.platform !== 'win32',
   timeout: 45_000,
@@ -278,8 +283,8 @@ test('a force-killed Guardian leaves a SID-only ACE that a same-user Low AppCont
     if (guardian !== undefined) await guardian.completion.catch(() => {});
     try {
       execFileSync('icacls.exe', [root, '/reset', '/T', '/C', '/Q'], { windowsHide: true, stdio: 'ignore' });
-      assert.equal(execFileSync('icacls.exe', [workspace], { encoding: 'utf8' }), workspaceAclBefore);
-      assert.equal(execFileSync('icacls.exe', [temp], { encoding: 'utf8' }), tempAclBefore);
+      assert.equal(withoutAutoInheritanceMarker(execFileSync('icacls.exe', [workspace], { encoding: 'utf8' })), withoutAutoInheritanceMarker(workspaceAclBefore));
+      assert.equal(withoutAutoInheritanceMarker(execFileSync('icacls.exe', [temp], { encoding: 'utf8' })), withoutAutoInheritanceMarker(tempAclBefore));
     } finally {
       await rm(root, { recursive: true, force: true });
     }
