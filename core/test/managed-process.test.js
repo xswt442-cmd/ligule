@@ -98,7 +98,17 @@ test('managed process start returns after loopback readiness and stop releases i
     await registry.close();
   });
 
-  const started = await kernel.call('managed_process', { action: 'start', command, readyUrl: url });
+  let started;
+  try {
+    started = await kernel.call('managed_process', { action: 'start', command, readyUrl: url });
+  } catch (error) {
+    if (process.platform === 'linux' && error?.code === 'permission_sandbox_unavailable'
+      && String(error.detail ?? '').includes('bwrap: setting up uid map: Permission denied')) {
+      t.skip('this Linux runner denies bubblewrap user-namespace mapping');
+      return;
+    }
+    throw error;
+  }
   assert.equal(started.status, 'running');
   assert.equal(started.ready, true);
   assert.equal(started.port, port);
