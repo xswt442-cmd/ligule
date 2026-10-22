@@ -106,12 +106,13 @@ interface LoadOptions {
 
 // 每个扩展只撤销自己注册的内容；加载失败时不留下部分注册，也不影响其他扩展。
 export async function loadExtensions(paths: string[], options: LoadOptions) {
-  const loaded: { name: string; path: string }[] = [];
+  const loaded: { name: string; path: string; tools: string[] }[] = [];
   const diagnostics: ExtensionDiagnostic[] = [];
   const undo: (() => void)[] = [];
 
   for (const path of paths) {
     const owns: (() => void)[] = [];
+    const tools: string[] = [];
     try {
       const imported = await (options.importModule ?? ((url: string) => import(url)))(pathToFileURL(path).href);
       const factory = imported.default;
@@ -122,6 +123,7 @@ export async function loadExtensions(paths: string[], options: LoadOptions) {
         registerTool: (tool: unknown) => {
           const remove = options.registerTool(tool);
           owns.push(remove);
+          if (typeof tool === 'object' && tool !== null && 'name' in tool && typeof tool.name === 'string') tools.push(tool.name);
           return remove;
         },
         registerPrompt: (fragment: { name: string; text: string }) => {
@@ -156,7 +158,7 @@ export async function loadExtensions(paths: string[], options: LoadOptions) {
       undo.push(() => {
         for (const remove of owns.reverse()) remove();
       });
-      loaded.push({ name, path });
+      loaded.push({ name, path, tools });
     } catch (error) {
       for (const remove of owns.reverse()) remove();
       const failure = error instanceof KernelError ? error : new KernelError('extension_load_failed', { cause: error });

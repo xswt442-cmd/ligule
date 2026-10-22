@@ -920,6 +920,67 @@ test('config.get shows the endpoint block and nothing else from the snapshot', a
   });
 });
 
+test('settings.catalog reads mode and tool metadata without changing the current session', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-settings-catalog-'));
+  const previousHome = process.env.LIGULE_HOME;
+  const previousUserProfile = process.env.USERPROFILE;
+  const previousOsHome = process.env.HOME;
+  const data = join(root, 'data');
+  const userModes = join(data, 'modes');
+  const projectModes = join(root, 'project-modes');
+  const shippedModes = fileURLToPath(new URL('../core/modes', import.meta.url));
+  await mkdir(userModes, { recursive: true });
+  await mkdir(projectModes, { recursive: true });
+  await writeFile(join(userModes, 'inspect-read.toml'), 'tools = ["read"]\nprompt = []\n');
+  process.env.LIGULE_HOME = data;
+  process.env.USERPROFILE = data;
+  process.env.HOME = data;
+  try {
+    await withInProcessHost(async (connection) => {
+      const noSessionCatalog = await connection.request('settings.catalog', { mode: 'inspect-read' });
+      assert.equal(noSessionCatalog.sessionActive, false);
+      assert.ok(noSessionCatalog.tools.some((tool) => tool.name === 'read' && tool.description !== ''));
+      assert.ok(noSessionCatalog.tools.some((tool) => tool.name === 'subagent'));
+      assert.equal(noSessionCatalog.tools.find((tool) => tool.name === 'read').currentlyAvailable, null);
+      assert.equal(noSessionCatalog.tools.find((tool) => tool.name === 'ask_user_question').disclosure, true);
+      assert.equal(noSessionCatalog.tools.find((tool) => tool.name === 'ask_user_question').includedInMode, true);
+
+      const { sessionId } = await connection.request('session.create', {});
+      const before = await connection.request('status.get', { sessionId });
+      const catalog = await connection.request('settings.catalog', { sessionId, mode: 'inspect-read' });
+      const after = await connection.request('status.get', { sessionId });
+
+      assert.deepEqual(catalog.modes.modes.find((mode) => mode.name === 'inspect-read'), { name: 'inspect-read', layer: 'user' });
+      assert.deepEqual(catalog.mode, { name: 'inspect-read', layer: 'user', digest: catalog.mode.digest, tools: ['read'], prompt: [] });
+      assert.deepEqual(catalog.modeTools, ['read']);
+      assert.ok(catalog.tools.some((tool) => tool.name === 'read' && tool.source === 'builtin'));
+      assert.equal(catalog.sessionActive, true);
+      assert.equal(catalog.projectTrusted, false);
+      assert.equal(catalog.policyDefault, 'auto');
+      assert.equal(catalog.sessionMode.name, before.mode);
+      assert.equal(after.mode, before.mode, 'inspecting another mode does not call mode.set or change the session');
+      assert.equal(JSON.stringify(catalog).includes(data), false, 'the read-only catalog does not return local config paths');
+    }, undefined, { permissionControl: true, interactive: true, modeName: 'minimal', modePaths: { shipped: shippedModes, user: userModes, project: projectModes } });
+  } finally {
+    if (previousHome === undefined) delete process.env.LIGULE_HOME;
+    else process.env.LIGULE_HOME = previousHome;
+    if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = previousUserProfile;
+    if (previousOsHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousOsHome;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('settings.catalog is unavailable to a Host without the trusted local UI capability', async () => {
+  await withInProcessHost(async (connection) => {
+    await assert.rejects(
+      connection.request('settings.catalog', {}),
+      (error) => error.code === 'settings_catalog_trusted_ui_required',
+    );
+  });
+});
+
 // 配置写入由 Host 校验字段和配置层；文件被其他进程修改后应返回冲突，而不覆盖对方的内容。
 test('consecutive first-time writes accumulate into one provider instead of restarting from the load snapshot', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ligule-config-first-'));

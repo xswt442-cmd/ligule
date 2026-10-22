@@ -43,6 +43,22 @@ test('register shows up in list and returns a dispose action', () => {
   assert.deepEqual(kernel.manifest(), []);
 });
 
+test('the local tool catalog reports registered metadata without applying mode or permission filters', () => {
+  const kernel = createKernel();
+  kernel.register(makeTool('read'));
+  kernel.register(makeTool('write', { access: 'write' }));
+
+  assert.deepEqual(kernel.catalog(), [
+    { name: 'read', description: 'the read tool', access: 'read', disclosure: false },
+    { name: 'write', description: 'the write tool', access: 'write', disclosure: false },
+  ]);
+  assert.deepEqual(kernel.manifest().map(({ name }) => name), ['read'], 'the model manifest still filters writes under the default read-only context');
+  const undo = kernel.restrict(['read']);
+  assert.deepEqual(kernel.catalog().map(({ name }) => name), ['read', 'write'], 'the inspected registry stays intact while a mode restricts the model manifest');
+  assert.deepEqual(kernel.manifest(), []);
+  undo();
+});
+
 test('a duplicate name throws instead of dropping the second one silently', () => {
   const kernel = createKernel();
   kernel.register(makeTool('read'));

@@ -69,6 +69,13 @@ export interface ToolManifestEntry {
   readonly parameters: Record<string, unknown>;
 }
 
+export interface ToolCatalogEntry {
+  readonly name: string;
+  readonly description: string;
+  readonly access: PermissionAccess;
+  readonly disclosure: boolean;
+}
+
 export interface KernelSession {
   readonly directory: string;
   append(event: Record<string, unknown>): Promise<unknown>;
@@ -93,6 +100,7 @@ export interface Kernel {
   execution(name: string): 'parallel' | 'serial';
   register(tool: ToolDefinition): () => void;
   manifest(): ToolManifestEntry[];
+  catalog(): ToolCatalogEntry[];
   validateCall(name: string, args: unknown): { readonly code?: 'tool_not_found' | 'tool_args_invalid'; readonly detail?: string };
   restrict(names: readonly string[]): () => void;
   call(name: string, args?: unknown, options?: { readonly callId?: string; readonly signal?: AbortSignal }): Promise<unknown>;
@@ -294,6 +302,13 @@ export function createKernel(options: KernelOptions = {}): Kernel {
           description: tool.description,
           parameters: structuredClone(tool.parameters),
         }));
+    },
+
+    // Settings can inspect registered capabilities without exposing schemas or changing the model-visible manifest.
+    catalog() {
+      return [...tools.values()]
+        .sort((left, right) => left.name.localeCompare(right.name))
+        .map(({ name, description, access, disclosure }) => ({ name, description, access, disclosure }));
     },
 
     // 预检模型返回的一批调用：检查工具是否已登记，并使用与 `call()` 相同的参数模式校验。

@@ -3,7 +3,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Readable, Writable } from 'node:stream';
 import { access, readFile, realpath, stat } from 'node:fs/promises';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import {
   createOutputSchemaContract, DELEGATION_RESULT_TOOL, MAX_DELEGATION_SCHEMA_BYTES, outputSchemaInstructions,
@@ -777,6 +777,39 @@ export function createHost({
     });
     const mcpConfig = isRecord(config.mcp) ? { mcp: { servers: config.mcp.servers } } : {};
     return mcpServerConfigs(mcpConfig, process.env, env.projectRoot);
+  }
+
+  // Settings can inspect the base runtime registry before opening a conversation.
+  // This assembles metadata only; no tool run, extension import, or MCP connection is started.
+  async function settingsToolCatalog(env: ProjectEnvironment, skills: SkillRegistry): Promise<ReturnType<Kernel['catalog']>> {
+    const kernel = createKernel({ config: env.config });
+    const mcp = createMcpRegistry(env.mcpConfigs);
+    const managedProcesses = createManagedProcessRegistry();
+    const catalogPlugins: Plugin<Kernel>[] = [
+      minimalPlugin,
+      networkPlugin,
+      createMcpPlugin(mcp),
+      managedProcessPlugin(managedProcesses),
+      ...(skills.skills.length === 0 ? [] : [createSkillPlugin(skills, () => env.mcpConfigs.map((server) => server.name))]),
+      ...(interactive ? [createAskUserPlugin({ ask: async () => { throw new KernelError('settings_catalog_not_executable'); } })] : []),
+      createSubagentPlugin({
+        config: env.config,
+        provider: env.provider,
+        chain: createDecisionChain({ mode: env.policy?.mode ?? 'ask', rules: env.policy?.rules ?? [] }),
+        prompt: { staticPrefix: '' },
+        directory: env.directory,
+        sessionId: 'settings-catalog',
+        plugins: [minimalPlugin, networkPlugin],
+        modePaths: env.modePaths,
+      }),
+    ];
+    const assembly = loadAssembly(kernel, catalogPlugins);
+    try {
+      return kernel.catalog();
+    } finally {
+      assembly.dispose();
+      await Promise.all([mcp.close(), managedProcesses.close()]);
+    }
   }
 
   async function stopMcpServersWithChangedConfig(env: ProjectEnvironment, current: ReturnType<typeof mcpServerConfigs>): Promise<void> {
@@ -2899,6 +2932,78 @@ export function createHost({
             };
           }));
           return { version: store.version, servers };
+        }
+        case 'settings.catalog': {
+          if (!permissionControl) throw new KernelError('settings_catalog_trusted_ui_required');
+          const env = await environmentFor(message.params.projectRoot);
+          const session = message.params.sessionId === undefined ? undefined : open(requiredString(message.params.sessionId, 'sessionId'));
+          if (session !== undefined && session.environment !== env) throw new KernelError('session_project_forbidden');
+          const modeName = typeof message.params.mode === 'string' ? message.params.mode
+            : session?.mode.file?.name ?? env.modeName ?? DEFAULT_MODE;
+          const modes = env.modePaths === undefined
+            ? { modes: [], invalid: [], truncated: false }
+            : await listModes(env.modePaths);
+          let mode: { name: string; layer: string; digest: string; tools: string[] | '*'; prompt: string[] | '*' } | null = null;
+          let modeError: string | null = null;
+          if (env.modePaths !== undefined) {
+            try {
+              const file = await loadMode(modeName, env.modePaths);
+              mode = { name: file.name, layer: file.layer, digest: file.digest, tools: file.tools, prompt: file.prompt };
+            } catch (error) {
+              modeError = errorCode(error) ?? 'mode_unavailable';
+            }
+          }
+          const trusted = await isTrusted(env.projectRoot);
+          const directories = skillDirectories(env.projectRoot);
+          const skills = env.skillRegistry ?? await discoverSkills(directories);
+          const sourceLabels = ['project (.ligule/skills)', 'project (.agents/skills)', 'user (.ligule/skills)', 'user (~/.agents/skills)'];
+          const skillSource = (root: string) => sourceLabels[directories.findIndex((directory) => {
+            const child = relative(resolve(directory), resolve(root));
+            return child !== '' && child !== '..' && !child.startsWith(`..${sep}`) && !isAbsolute(child);
+          })] ?? 'unknown';
+          const environmentSessions = [...sessions.values()].filter((state) => state.environment === env);
+          const extensionStates = environmentSessions.flatMap((state) => state.extensions.loaded);
+          const extensions = env.extensions.paths.map((path) => {
+            const installedDirectory = env.extensions.installedDirectory;
+            const installedPath = installedDirectory === undefined ? '..' : relative(resolve(installedDirectory), resolve(path));
+            const installed = installedPath !== '..' && !installedPath.startsWith(`..${process.platform === 'win32' ? '\\\\' : '/'}`)
+              && !isAbsolute(installedPath);
+            return {
+              name: basename(path),
+              source: installed ? 'user-installed' : 'user-configured',
+              loaded: extensionStates.some((extension) => resolve(extension.path) === resolve(path)),
+              registeredTools: extensionStates.filter((extension) => resolve(extension.path) === resolve(path)).flatMap((extension) => extension.tools),
+            };
+          });
+          const extensionTools = new Set(session?.extensions.loaded.flatMap((extension) => extension.tools) ?? []);
+          const registeredTools = session?.kernel.catalog() ?? await settingsToolCatalog(env, skills);
+          const activeTools = session === undefined ? null : new Set(session.kernel.manifest().map((tool) => tool.name));
+          const declaredTools = mode?.tools ?? [];
+          const includedTools = declaredTools === '*' ? null : new Set(declaredTools);
+          return {
+            projectTrusted: trusted,
+            policyDefault: env.policy?.mode ?? 'ask',
+            hostNodeVersion: process.version,
+            sessionActive: session !== undefined,
+            modes,
+            mode,
+            modeError,
+            sessionMode: session?.mode.file === undefined ? null : { name: session.mode.file.name, layer: session.mode.file.layer },
+            pendingMode: session?.pending?.name ?? null,
+            modeTools: declaredTools === '*' ? registeredTools.map((tool) => tool.name) : [...declaredTools],
+            tools: registeredTools.map((tool) => ({
+              ...tool,
+              source: extensionTools.has(tool.name) ? 'extension'
+                : tool.name.startsWith('mcp.') ? 'mcp'
+                  : tool.name.startsWith('skill') ? 'skill' : 'builtin',
+              includedInMode: tool.disclosure || includedTools === null || includedTools.has(tool.name),
+              currentlyAvailable: activeTools === null ? null : activeTools.has(tool.name),
+            })),
+            skills: skills.skills.map((skill) => ({ name: skill.name, description: skill.description, requires: skill.requires, source: skillSource(skill.root) })),
+            skillDiagnostics: skills.diagnostics.map((diagnostic) => ({ code: diagnostic.code })),
+            extensions,
+            extensionDiagnostics: env.extensions.ignored.map((diagnostic) => ({ code: diagnostic.code, source: diagnostic.path })),
+          };
         }
         case 'mcp.trust.set': {
           if (!permissionControl) throw new KernelError('mcp_trust_trusted_ui_required');

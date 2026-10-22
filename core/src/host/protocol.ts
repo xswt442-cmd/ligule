@@ -446,6 +446,13 @@ export const METHODS = Object.freeze({
     description: 'List configured local MCP servers, their launch details without secret values, and the current trusted-user authorization for this project',
     parameters: { type: 'object', properties: { projectRoot: { type: 'string' }, sessionId: SESSION_ID } },
   },
+  'settings.catalog': {
+    description: 'Read the selected project’s workspace trust, available mode definitions, registered tool metadata, skill metadata, and extension status for a trusted local settings UI; mode is a view selection and never changes a session',
+    parameters: { type: 'object', properties: {
+      projectRoot: { type: 'string' }, sessionId: SESSION_ID,
+      mode: { type: 'string', description: 'the mode to inspect without applying it to a session' },
+    } },
+  },
   'mcp.trust.set': {
     description: 'Trust or block one configured MCP server through a trusted local interface; session trust is stored with that session, while project and user trust use the private local trust store',
     parameters: { type: 'object', properties: {
