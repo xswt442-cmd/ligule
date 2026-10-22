@@ -228,7 +228,7 @@ windowsTest('desktop preferences: a sustained Windows file handle preserves the 
   const initialValue = { owner: 'initial' };
   const initial = await savePrefs(path, initialValue);
   const initialBytes = await readFile(path);
-  const holder = startWindowsFileHolder({ path, root, holdMilliseconds: 2_500 });
+  const holder = startWindowsFileHolder({ path, root, holdMilliseconds: 6_500 });
   try {
     await waitForHolderMarker(holder, holder.readyPath);
     let saveError;
