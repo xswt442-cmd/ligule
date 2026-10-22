@@ -106,6 +106,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y bubblewrap
+      - name: verify bubblewrap user namespaces
+        if: runner.os == 'Linux'
+        run: bwrap --unshare-user --ro-bind / / /bin/true
       - name: syntax check JavaScript source and tests
         run: pnpm check:syntax
       - name: test
