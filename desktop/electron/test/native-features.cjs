@@ -117,7 +117,14 @@ async function openAgentControlPanel() {
       }
       return null;
     };
-    if (await wait(() => document.querySelector('.agent-control-panel')) !== null) return true;
+    const waitForProject = () => wait(() => {
+      const input = document.querySelector('.agent-control-panel .grant-basic-grid label:first-child input');
+      return input && input.value.trim() !== '' ? input : null;
+    });
+    if (await wait(() => document.querySelector('.agent-control-panel')) !== null) {
+      if (await waitForProject() === null) throw new Error('native_feature_agent_control_project_not_loaded');
+      return true;
+    }
     const settings = await wait(() => [...document.querySelectorAll('button.entry')]
       .find(button => /^(设置|Settings)$/u.test(button.textContent?.trim() ?? '')));
     if (settings === null) throw new Error('native_feature_settings_button_missing');
@@ -129,6 +136,7 @@ async function openAgentControlPanel() {
     if (await wait(() => document.querySelector('.agent-control-panel')) === null) {
       throw new Error('native_feature_agent_control_panel_missing');
     }
+    if (await waitForProject() === null) throw new Error('native_feature_agent_control_project_not_loaded');
     return true;
   })()`);
 }
