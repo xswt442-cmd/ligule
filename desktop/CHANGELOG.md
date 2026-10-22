@@ -8,6 +8,12 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 ### 简体中文
 
+### English
+
+## [0.0.7] - 2026-10-22
+
+### 简体中文
+
 **新增**
 
 - 默认 `minimal` 模式增加 `managed_process`，可在同一 Session 中启动受 Guardian 管理的本地开发服务器，查看就绪状态、端口与有界日志，并显式停止进程；启动命令沿用 `exec` 的 Permission、Policy、工作区信任与脚本审批。
@@ -24,6 +30,7 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 **安全**
 
 - 撤销工作区信任会停止基于该信任启动的受管进程；其他 Host 定期检查共享信任状态。
+- 子代理只能使用父会话当前可见的工具；显式子 Mode 不能恢复父 Mode 隐藏或 Permission 不可用的工具。
 
 ### English
 
@@ -43,6 +50,7 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 **Security**
 
 - Revoking workspace trust stops managed processes started from that trust; other Hosts periodically check the shared trust state.
+- Subagents are limited to tools visible to the parent session; an explicit child Mode cannot restore tools hidden by the parent Mode or unavailable under its Permission.
 
 ## [0.0.6] - 2026-10-19
 
