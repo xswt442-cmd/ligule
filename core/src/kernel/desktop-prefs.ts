@@ -150,7 +150,7 @@ export async function savePrefs(
           break;
         } catch (cause) {
           const code = (cause as NodeJS.ErrnoException)?.code;
-          if (process.platform !== 'win32' || !['EACCES', 'EBUSY', 'EPERM'].includes(code ?? '') || attempt >= 8) {
+          if (process.platform !== 'win32' || !['EACCES', 'EBUSY', 'EPERM'].includes(code ?? '') || attempt >= 12) {
             throw new KernelRuntimeError('desktop_prefs_replace_failed', { cause, detail: cause instanceof Error ? cause.message : String(cause) });
           }
         }
