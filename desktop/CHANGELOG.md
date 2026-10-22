@@ -21,6 +21,10 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 - 设置重组为八个独立入口，常规页整合外观设置；工具模式和 Grant 选择只用于查看，不会改变运行中的会话。权限、MCP Server 和 Grant 的低频细节按需展开，保留原有创建、信任、审批和撤销操作。
 - MCP 信任面板读取 Server 工具清单设有有界超时；无响应的 Server 不会无限期占用临时连接。
 
+**安全**
+
+- 撤销工作区信任会停止基于该信任启动的受管进程；其他 Host 定期检查共享信任状态。
+
 ### English
 
 **Added**
@@ -35,6 +39,10 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 - Policy now distinguishes `ask`, `auto`, and `none`, while legacy `never` retains its refusal behavior. Hard denials, unavailable approval channels, and cancellation keep distinct outcomes instead of appearing as user refusals.
 - Settings now has eight separate sections, with appearance controls in General. Mode and Grant selections only change what is inspected; they do not change a running session. Less-frequent Permission, MCP server, and Grant details expand on demand while existing create, trust, approval, and revoke actions remain available.
 - MCP server tool discovery in the trust panel has a bounded timeout, so an unresponsive server cannot hold a temporary connection indefinitely.
+
+**Security**
+
+- Revoking workspace trust stops managed processes started from that trust; other Hosts periodically check the shared trust state.
 
 ## [0.0.6] - 2026-10-19
 

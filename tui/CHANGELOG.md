@@ -20,6 +20,10 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 - 审批方式明确区分 `ask`、`auto`、`none` 与旧版 `never`；记住的许可可限定本次、会话、项目或用户，文件许可默认只记当前文件。
 - 大型审批先显示字节数、摘要和短预览，再由可信界面按需展开详情；系统拒绝、审批不可用和取消不再记作用户拒绝。
 
+**安全**
+
+- 撤销工作区信任会停止基于该信任启动的受管进程；其他 Host 会复核共享信任状态并停止相关进程。
+
 ### English
 
 **Added**
@@ -33,6 +37,10 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 - Approval modes now distinguish `ask`, `auto`, `none`, and legacy `never`. Remembered approvals can be scoped to one call, a session, a project, or the user; file approvals default to the selected file.
 - Large approvals show a byte count, digest, and short preview before trusted interfaces retrieve details on demand. System refusals, unavailable approval channels, and cancellation are no longer recorded as user refusals.
+
+**Security**
+
+- Revoking workspace trust stops managed processes started from that trust; other Hosts recheck the shared trust state and stop affected processes.
 
 ## [0.0.5] - 2026-10-19
 

@@ -137,6 +137,8 @@ Permission 单独控制会话可访问的操作系统资源，Policy 决定允�
 
 Node/Python 脚本不能由自动策略直接放行。逐次审批会显示脚本路径、SHA-256、解释器、工作区和 Permission；审批等待期间相关内容发生变化时，Host 会拒绝执行。无法安全绑定的 Shell 脚本、包装器、复合命令或动态命令也会被拒绝。Git 命令需要先信任工作区，并且每次执行都要审批，因为仓库配置可能运行 Hook、辅助程序或别名。旧格式会话仍可读取，但不能修改 Permission 或 Policy；新建会话即可调整这些设置。
 
+撤销工作区信任后，基于该信任启动的受管服务器会由当前 Host 立即停止；其他 Host 会定期检查共享信任状态并停止相关进程。之后的项目代码命令仍会在执行前重新检查信任。
+
 使用 TUI 的 `/control create` 或桌面版「设置 → 外部控制」可以创建只绑定一个项目的 Agent Control Grant。Grant 设置默认值与权限上限、网络范围、允许的 Policy、有效期和是否允许普通 Operator 操作；`full-access` 与不受限网络需分别确认。MCP Server 使用 `--grant <id>` 接入 Grant；`--operator` 只有在该 Grant 允许时才能回答常规审批或在授权上限内调整会话。撤销或到期会阻止后续控制；Grant 不解除 OS Sandbox 限制或 Policy 硬拒绝。
 
 桌面版切换到由外部 Agent 控制的会话时，底部输入区会显示为外控输入栏，并列出当前模型、工具模式、Policy、Permission 与 Grant 的默认值和权限上限。此处发送的消息会交给对应的外控会话处理。

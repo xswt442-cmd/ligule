@@ -58,7 +58,7 @@ flowchart LR
 
 内部子代理在同一 Host 进程中创建派生 Kernel、Loop 和独立 Session JSONL，记录 ID 为父 Session 的 `.sub-N`。子代理继承父会话的配置、Provider、插件工具、Permission 与 Policy 判定实例，但不注册 `subagent` 工具；每个父轮最多同时运行三个。子模式只能收窄父模式可用工具，模型调用次数、输出、思考和循环预算不能超过父上限。子任务的 RunResult 和 Session 引用作为父工具结果返回，因此失败或取消的子记录仍可查看。
 
-外部客户端通过本地 stdio MCP 进入 Control 门面，再由它操作授权项目中的 Host Session。可信 TUI/Desktop 通过本地 Agent Control IPC 观察状态、回答交互或接管任务；Host 仍是 Session 的写入者，锁阻止另一个 Host 并发写同一记录。答复结果和控制事件以 `source=human` 或 `source=controller` 区分本机用户与 MCP 操控者；只有本机用户答复可以保存审批记忆。接管会取消当前外控轮次、清空尚未发送的外部队列、释放 Host 会话锁并发出所有权转移事件。Session JSONL 保存消息和工具事件；operation ID、事件缓存、待处理请求和消息队列属于 Control 进程内状态，服务重启后需要从持久 Session 重新接回，旧运行编号不可继续使用。
+外部客户端通过本地 stdio MCP 进入 Control 门面，再由它操作授权项目中的 Host Session。可信 TUI/Desktop 通过本地 Agent Control IPC 观察状态、回答交互或接管任务；Host 仍是 Session 的写入者，锁阻止另一个 Host 并发写同一记录。答复结果和控制事件以 `source=human` 或 `source=controller` 区分本机用户与 MCP 操控者；只有本机用户答复可以保存审批记忆。接管会取消当前外控轮次、清空尚未发送的外部队列、释放 Host 会话锁并发出所有权转移事件。撤销工作区信任会使当前 Host 停止基于该信任启动的受管进程；其他 Host 通过共享信任记录定期复核并停止相关进程。Session JSONL 保存消息和工具事件；operation ID、事件缓存、待处理请求和消息队列属于 Control 进程内状态，服务重启后需要从持久 Session 重新接回，旧运行编号不可继续使用。
 
 ```mermaid
 flowchart LR
