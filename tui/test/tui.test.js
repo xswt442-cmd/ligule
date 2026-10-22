@@ -1342,7 +1342,7 @@ test('/policy changes the session setting and updates the bottom configuration l
     await waitFor(() => lastFrame().includes(`审批 ${policyLabel(other)}`), { read: lastFrame });
 
     await type('/policy sometimes');
-    await waitFor(() => spoken('用法：/policy ask|auto|reset'), { read: () => painted });
+    await waitFor(() => spoken('用法：/policy ask|auto|none|reset'), { read: () => painted });
 
     await type('/policy reset');
     await waitFor(() => spoken(`已恢复默认审批方式：${configDefault}`), { read: () => painted });

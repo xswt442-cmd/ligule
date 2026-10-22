@@ -91,7 +91,7 @@ function responseCount(value: Record<string, unknown>, field: string): number {
 function policyOf(value: unknown): CliPolicy | undefined {
   if (value === undefined || !isRecord(value)) return undefined;
   const mode = value.mode;
-  if (mode !== undefined && mode !== 'ask' && mode !== 'auto' && mode !== 'never') throw new KernelError('policy_mode_unknown');
+  if (mode !== undefined && mode !== 'ask' && mode !== 'auto' && mode !== 'none' && mode !== 'never') throw new KernelError('policy_mode_unknown');
   let rules: PolicyRule[] | undefined;
   if (value.rules !== undefined) {
     if (!Array.isArray(value.rules) || !value.rules.every(isPolicyRule)) throw new KernelError('policy_rules_invalid');
@@ -400,7 +400,24 @@ async function runOneRound(
       // 同时展示命令使用的语法和可执行文件，帮助用户判断命令会如何运行。
       const backend = typeof fields.shell !== 'string' ? '' : ` (${fields.shell}: ${typeof fields.executable === 'string' ? fields.executable : ''})`;
       const tool = typeof fields.tool === 'string' ? fields.tool : 'tool';
-      const answer = await approvals.ask(t(`允许 ${tool} ${described}${backend}？[y/N] `, `Allow ${tool} ${described}${backend}? [y/N] `));
+      const size = typeof fields.contentBytes === 'number' && typeof fields.contentSha256 === 'string'
+        ? ` · ${fields.contentBytes} bytes · SHA-256 ${fields.contentSha256}`
+        : typeof fields.argumentBytes === 'number' && typeof fields.argumentSha256 === 'string'
+          ? ` · arguments ${fields.argumentBytes} bytes · SHA-256 ${fields.argumentSha256}`
+          : '';
+      let answer = await approvals.ask(t(`允许 ${tool} ${described}${backend}${size}？[y/N；d 查看完整内容] `, `Allow ${tool} ${described}${backend}${size}? [y/N; d to view full details] `));
+      while (String(answer).trim().toLowerCase() === 'd') {
+        const detailsRef = typeof fields.detailsRef === 'string' ? fields.detailsRef : '';
+        try {
+          const details = await host.handle({ method: 'approval.details', params: { sessionId: fields.sessionId, requestId: detailsRef } }, connection);
+          if (isRecord(details) && isRecord(details.args)) process.stderr.write(`${JSON.stringify(details.args, null, 2)}\n`);
+          else process.stderr.write(t('无法读取待审批内容。\n', 'Pending details are unavailable.\n'));
+        } catch (error) {
+          const code = error instanceof KernelError ? error.code : 'approval_details_failed';
+          process.stderr.write(`${t('无法读取待审批内容：', 'Could not read pending details: ')}${code}\n`);
+        }
+        answer = await approvals.ask(t(`允许 ${tool} ${described}${backend}${size}？[y/N] `, `Allow ${tool} ${described}${backend}${size}? [y/N] `));
+      }
       return { decision: /^y(es)?$/i.test(String(answer).trim()) ? 'allow' : 'deny' };
     },
   };
