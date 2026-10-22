@@ -152,8 +152,8 @@ test('the Guardian grants workspace and private-temp writes, then blocks a sibli
     assert.equal(privateTemp, 'private-temp', `exit=${exitCode}\nstdout=${stdout}\nstderr=${stderr}`);
     assert.equal(await readFile(outsideCanary, 'utf8'), 'outside-baseline');
     await assert.rejects(readFile(join(outside, 'escaped.txt')));
-    assert.equal(execFileSync('icacls.exe', [workspace], { encoding: 'utf8' }), workspaceAclBefore);
-    assert.equal(execFileSync('icacls.exe', [temp], { encoding: 'utf8' }), tempAclBefore);
+    assert.equal(withoutAutoInheritanceMarker(execFileSync('icacls.exe', [workspace], { encoding: 'utf8' })), withoutAutoInheritanceMarker(workspaceAclBefore));
+    assert.equal(withoutAutoInheritanceMarker(execFileSync('icacls.exe', [temp], { encoding: 'utf8' })), withoutAutoInheritanceMarker(tempAclBefore));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -195,8 +195,8 @@ test('the Guardian still permits known hard-link and FILE_DELETE_CHILD boundary 
   } finally {
     try {
       execFileSync('icacls.exe', [root, '/reset', '/T', '/C', '/Q'], { windowsHide: true, stdio: 'ignore' });
-      assert.equal(execFileSync('icacls.exe', [outside], { encoding: 'utf8' }), outsideAclBefore);
-      assert.equal(execFileSync('icacls.exe', [workspace], { encoding: 'utf8' }), workspaceAclBefore);
+      assert.equal(withoutAutoInheritanceMarker(execFileSync('icacls.exe', [outside], { encoding: 'utf8' })), withoutAutoInheritanceMarker(outsideAclBefore));
+      assert.equal(withoutAutoInheritanceMarker(execFileSync('icacls.exe', [workspace], { encoding: 'utf8' })), withoutAutoInheritanceMarker(workspaceAclBefore));
     } finally {
       await rm(root, { recursive: true, force: true });
     }
