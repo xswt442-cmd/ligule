@@ -58,7 +58,12 @@ test('a WRITE_RESTRICTED process writes the workspace and refuses a sibling path
       process.env.GIT_CONFIG_GLOBAL = join(temp, 'empty-git-config');
       process.env.GIT_TERMINAL_PROMPT = '0';
       const gitInitExitCode = await run(gitExecutable, ['init']);
-      const gitAddExitCode = await run(gitExecutable, ['-c', 'user.name=Ligule Test', '-c', 'user.email=ligule-test@example.invalid', 'add', 'created.txt', 'powershell.txt', 'node.txt']);
+      const safeDirectory = workspace.replaceAll('\\\\', '/');
+      const gitAddExitCode = await run(gitExecutable, [
+        '-c', 'safe.directory=' + safeDirectory,
+        '-c', 'user.name=Ligule Test', '-c', 'user.email=ligule-test@example.invalid',
+        'add', 'created.txt', 'powershell.txt', 'node.txt',
+      ]);
       const report = {
         cmdExitCode,
         powershellExitCode,
