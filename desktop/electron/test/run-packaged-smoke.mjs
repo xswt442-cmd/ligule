@@ -23,6 +23,7 @@ const suppliedWorkspace = optionValue('--workspace');
 const suppliedLiguleHome = optionValue('--ligule-home');
 const createAgentControlGrant = process.argv.includes('--create-agent-control-grant');
 const suppliedGrantName = optionValue('--grant-name');
+const suppliedGrantProfile = optionValue('--grant-profile') ?? 'workspace-write';
 const localInterruption = process.argv.includes('--local-request-interruption');
 const realInterruption = process.argv.includes('--real-request-interruption');
 const interruptionMode = localInterruption ? 'local' : realInterruption ? 'real' : undefined;
@@ -39,6 +40,7 @@ if (appDirectoryArgument >= 0 && (suppliedAppDirectory === undefined || !isAbsol
 }
 if (suppliedWorkspace !== undefined && !isAbsolute(suppliedWorkspace)) throw new Error('--workspace_requires_an_absolute_directory');
 if (suppliedLiguleHome !== undefined && !isAbsolute(suppliedLiguleHome)) throw new Error('--ligule-home_requires_an_absolute_directory');
+if (suppliedGrantProfile !== 'workspace-write' && suppliedGrantProfile !== 'full-access') throw new Error('--grant-profile_must_be_workspace-write_or_full-access');
 if (createAgentControlGrant && (suppliedWorkspace === undefined || suppliedLiguleHome === undefined || suppliedGrantName === undefined)) {
   throw new Error('--create-agent-control-grant_requires_workspace_home_and_grant_name');
 }
@@ -1024,7 +1026,11 @@ async function runChecks() {
         .find(item => /项目代码信任|Project code trust/u.test(item.textContent ?? ''));
       return row?.querySelector('strong')?.textContent?.trim() ?? '';
     })()`);
-    if (!/未信任|Untrusted/u.test(untrusted)) throw new Error('isolated_workspace_was_not_initially_untrusted');
+    if (/已信任|Trusted/u.test(untrusted)) {
+      await devTools.evaluate(`document.querySelector('button.permission-trigger')?.click(); true`);
+      return '可信界面确认准确测试工作区已处于信任状态';
+    }
+    if (!/未信任|Untrusted/u.test(untrusted)) throw new Error('isolated_workspace_trust_state_unknown');
     const trustButton = await devTools.evaluate(`(() => {
       const button = document.querySelector('.permission-trust-button');
       button?.click();
@@ -1101,8 +1107,8 @@ async function runChecks() {
           const fileSelects = [...files.querySelectorAll('select')];
           const networkSelects = [...network.querySelectorAll('select')];
           const selections = [
-            setSelect(fileSelects[0], 'workspace-write'),
-            setSelect(fileSelects[1], 'workspace-write'),
+            setSelect(fileSelects[0], ${JSON.stringify(suppliedGrantProfile)}),
+            setSelect(fileSelects[1], ${JSON.stringify(suppliedGrantProfile)}),
             setSelect(networkSelects[0], 'unrestricted'),
             setSelect(networkSelects[1], 'unrestricted'),
           ];
@@ -1116,6 +1122,7 @@ async function runChecks() {
           };
           const confirmations = [
             checkLabel(files, /部分隔离|partial-isolation/u),
+            ${suppliedGrantProfile === 'full-access' ? "checkLabel(files, /确认允许访问当前 OS 账户|Allow access to everything/u)" : 'true'},
             checkLabel(network, /不受限网络|unrestricted network/u),
             checkLabel(policy, /--operator|ordinary approvals/u),
             checkLabel(panel.querySelector('.grant-lifetime-card') ?? panel, /我信任上方项目目录|I trust project code/u),
@@ -1163,11 +1170,12 @@ async function runChecks() {
         })()`);
         if (grant.id === '' || grant.project.toLowerCase() !== workspace.toLowerCase()) throw new Error('saved_grant_identity_mismatch');
         if (!grant.details.includes('可信界面创建') && !grant.details.includes('Trusted UI')) throw new Error('saved_grant_source_not_trusted_ui');
-        if (!grant.summary.includes('workspace-write / workspace-write') || !grant.summary.includes('unrestricted / unrestricted')
+        const expectedPermission = `${suppliedGrantProfile} / ${suppliedGrantProfile}`;
+        if (!grant.summary.includes(expectedPermission) || !grant.summary.includes('unrestricted / unrestricted')
           || !grant.summary.includes('ask') || (!grant.summary.includes('allowed') && !grant.summary.includes('允许'))) {
           throw new Error('saved_grant_limits_invalid');
         }
-        return `可信 Desktop UI 为准确工作区创建 ${grant.id}；workspace-write / workspace-write，unrestricted / unrestricted，Policy ask，允许 --operator`;
+        return `可信 Desktop UI 为准确工作区创建 ${grant.id}；${expectedPermission}，unrestricted / unrestricted，Policy ask，允许 --operator`;
       });
     }
     await devTools.evaluate(`document.querySelector('button[aria-label="关闭设置"], button[aria-label="Close settings"]')?.click(); true`);
