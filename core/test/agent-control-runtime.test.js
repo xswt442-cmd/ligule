@@ -63,6 +63,24 @@ test('a registered local controller accepts scoped status and human actions', as
   });
 });
 
+test('a local controller resolves alternate Windows path casing to its bound project', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  await fixture(async ({ projectRoot }) => {
+    const sessionId = 'session-for-canonical-project';
+    const runtime = createAgentControlRuntime(projectRoot.toUpperCase(), async (requestedSessionId, request) => ({
+      sessionId: requestedSessionId, action: request.action,
+    }));
+    try {
+      await runtime.register(sessionId);
+      const status = await requestAgentControl(projectRoot, sessionId, { action: 'status', after: 0, limit: 10, waitMs: 0 });
+      assert.deepEqual(status, { sessionId, action: 'status' });
+    } finally {
+      await runtime.close();
+    }
+  });
+});
+
 test('long data roots use a Unix socket path that fits the platform address limit', { skip: process.platform === 'win32' }, async () => {
   await fixture(async ({ directory, projectRoot }) => {
     const previousHome = process.env.LIGULE_HOME;

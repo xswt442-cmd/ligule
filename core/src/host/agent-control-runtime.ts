@@ -179,9 +179,18 @@ export function createAgentControlRuntime(
   const sessions = new Set<string>();
   let server: Server | undefined;
   let serverClosed: Promise<void> | undefined;
+  let canonicalProjectRoot: string | undefined;
+
+  async function boundProjectRoot(): Promise<string> {
+    if (canonicalProjectRoot !== undefined) return canonicalProjectRoot;
+    try { canonicalProjectRoot = await realpath(resolve(projectRoot)); }
+    catch { throw new KernelError('control_project_forbidden'); }
+    return canonicalProjectRoot;
+  }
 
   async function ensureServer(): Promise<void> {
     if (server !== undefined) return;
+    const boundRoot = await boundProjectRoot();
     await privateDirectory(directory);
     const listening = createServer((socket) => {
       socket.setTimeout(SOCKET_TIMEOUT_MS, () => socket.destroy());
@@ -206,7 +215,7 @@ export function createAgentControlRuntime(
             const envelope = readRequestEnvelope(JSON.parse(input.slice(0, newline)));
             if (!constantTimeTokenMatch(token, envelope.token)
               || !sessions.has(envelope.sessionId)
-              || envelope.projectRoot !== projectRoot) {
+              || envelope.projectRoot !== boundRoot) {
               throw new KernelError('agent_control_session_forbidden');
             }
             await respond(socket, { ok: true, result: await handle(envelope.sessionId, envelope.request) });
@@ -231,8 +240,9 @@ export function createAgentControlRuntime(
   return {
     async register(sessionId) {
       if (!SESSION_ID.test(sessionId)) throw new KernelError('agent_control_session_invalid');
+      const boundRoot = await boundProjectRoot();
       await ensureServer();
-      const descriptor: RuntimeDescriptor = { version: 1, sessionId, projectRoot, endpoint, token, ownerId };
+      const descriptor: RuntimeDescriptor = { version: 1, sessionId, projectRoot: boundRoot, endpoint, token, ownerId };
       sessions.add(sessionId);
       try { await writeDescriptor(descriptorPath(directory, sessionId), descriptor); }
       catch (error) { sessions.delete(sessionId); throw error; }
