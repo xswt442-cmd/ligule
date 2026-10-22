@@ -92,7 +92,7 @@ test('a real stdio MCP process uses its grant ceiling and detects revocation', a
       name: 'stdio acceptance', projectRoot,
       defaultPermissionProfile: 'read-only', maxPermissionProfile: 'workspace-write',
       defaultNetwork: 'policy', maxNetwork: 'policy',
-      defaultPolicy: 'ask', allowedPolicies: ['ask', 'auto'], allowOperator: true,
+      defaultPolicy: 'ask', allowedPolicies: ['ask', 'auto', 'none'], allowOperator: true,
       confirmPartialWorkspaceWrite: true,
       confirmFullAccess: false, confirmUnrestrictedNetwork: false, expiresAt: null,
     };
@@ -120,6 +120,17 @@ test('a real stdio MCP process uses its grant ceiling and detects revocation', a
       assert.equal(config.structuredContent.delegation.maxPermissionProfile, 'workspace-write');
       assert.equal(config.structuredContent.delegation.maxNetwork, 'policy');
       assert.equal(config.structuredContent.effective.policy.mode, 'auto');
+
+      const noApproval = await client.callTool({
+        name: 'ligule_session_configure', arguments: { sessionId, changes: { policy: 'none' } },
+      });
+      assert.equal(noApproval.isError, undefined, `${JSON.stringify(noApproval)}\n${stderr()}`);
+      assert.equal(noApproval.structuredContent.effective.policy.mode, 'none');
+      const legacyNever = await client.callTool({
+        name: 'ligule_session_configure', arguments: { sessionId, changes: { policy: 'never' } },
+      });
+      assert.equal(legacyNever.isError, true);
+      assert.equal(codeOf(legacyNever), 'agent_control_policy_exceeds_grant');
 
       const missingRun = await client.callTool({ name: 'ligule_run_await', arguments: { operationId: 'missing', timeoutMs: 0 } });
       assert.equal(missingRun.isError, true);
@@ -171,9 +182,18 @@ test('operator mode without a grant still cannot elevate permission', async () =
 test('a second local Host can observe and take over the active MCP-owned Session', async () => {
   await fixture(async ({ projectRoot, home }) => {
     await setTrusted(projectRoot, true, join(home, 'tui-trust.json'));
+    const storePath = join(home, 'agent-control.json');
+    const createdGrant = await createDelegationGrant(storePath, {
+      name: 'Desktop observation grant', projectRoot,
+      defaultPermissionProfile: 'read-only', maxPermissionProfile: 'workspace-write',
+      defaultNetwork: 'policy', maxNetwork: 'policy',
+      defaultPolicy: 'ask', allowedPolicies: ['ask', 'auto'], allowOperator: true,
+      confirmPartialWorkspaceWrite: true, confirmFullAccess: false, confirmUnrestrictedNetwork: false, expiresAt: null,
+    }, (await listDelegationGrants(storePath)).version);
+    const grant = createdGrant.grants[0];
     const previousHome = process.env.LIGULE_HOME;
     process.env.LIGULE_HOME = home;
-    const { client, stderr } = await connect(projectRoot, home, undefined, true);
+    const { client, stderr } = await connect(projectRoot, home, grant.id, true);
     let host;
     try {
       const made = await client.callTool({ name: 'ligule_session_create', arguments: { projectRoot } });
@@ -193,6 +213,24 @@ test('a second local Host can observe and take over the active MCP-owned Session
       assert.equal(observed.sessionId, sessionId);
       assert.equal(observed.state, 'idle');
       assert.equal(observed.ownership, 'external');
+
+      const configuration = await host.handle({ method: 'session.control', params: {
+        projectRoot, sessionId, request: { action: 'configuration' },
+      } }, localConnection);
+      assert.equal(configuration.sessionId, sessionId);
+      assert.ok(configuration.selectedModel === null || typeof configuration.selectedModel === 'string');
+      assert.equal(configuration.policy, 'ask');
+      assert.equal(configuration.permission.profile, 'read-only');
+      assert.equal(configuration.delegation.grantId, grant.id);
+      assert.equal(configuration.delegation.name, 'Desktop observation grant');
+      assert.equal(configuration.delegation.source, 'trusted-ui');
+      assert.equal(configuration.delegation.defaultPermissionProfile, 'read-only');
+      assert.equal(configuration.delegation.maxPermissionProfile, 'workspace-write');
+      assert.equal(configuration.delegation.defaultNetwork, 'policy');
+      assert.equal(configuration.delegation.maxNetwork, 'policy');
+      assert.equal(configuration.delegation.defaultPolicy, 'ask');
+      assert.deepEqual(configuration.delegation.allowedPolicies, ['ask', 'auto']);
+      assert.equal(configuration.delegation.allowOperator, true);
 
       const takeover = await host.handle({ method: 'session.control', params: {
         projectRoot, sessionId, request: { action: 'takeover' },

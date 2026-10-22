@@ -101,6 +101,23 @@ test('delegation ceilings reject permission and policy escalation', async () => 
   });
 });
 
+test('a trusted grant may explicitly allow none while persisted legacy never remains readable', async () => {
+  await fixture(async ({ projectRoot, storePath }) => {
+    const snapshot = await createDelegationGrant(storePath, input(projectRoot, {
+      defaultPolicy: 'none', allowedPolicies: ['none'],
+    }), (await listDelegationGrants(storePath)).version);
+    assert.equal(snapshot.grants[0].defaultPolicy, 'none');
+    assertDelegationPolicy(snapshot.grants[0], 'none');
+    assert.throws(() => assertDelegationPolicy(snapshot.grants[0], 'ask'), { code: 'agent_control_policy_exceeds_grant' });
+
+    const legacySnapshot = await createDelegationGrant(storePath, input(projectRoot, {
+      name: 'Legacy grant', defaultPolicy: 'never', allowedPolicies: ['never'],
+    }), snapshot.version);
+    assert.equal(legacySnapshot.grants[1].defaultPolicy, 'never');
+    assertDelegationPolicy(legacySnapshot.grants[1], 'never');
+  });
+});
+
 test('Agent Control MCP limits require an allowed server and an exact tool capability', async () => {
   await fixture(async ({ projectRoot, storePath }) => {
     const allowed = {

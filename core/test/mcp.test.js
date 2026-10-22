@@ -302,6 +302,15 @@ test('MCP server and tool authorization runs before registry operations', async 
   assert.deepEqual(registry.calls, []);
 });
 
+test('remembered MCP approval identity includes the normalized server configuration digest', () => {
+  const registry = fakeRegistry();
+  const { callTool } = createMcpTools(registry, { seen: new Set() }, {
+    identityDigest: (server) => server === 'fs' ? 'configuration-digest' : undefined,
+  });
+  assert.equal(callTool.policyIdentity({ server: 'fs' }), 'configuration-digest');
+  assert.equal(callTool.policyIdentity({ server: 'unknown' }), undefined);
+});
+
 test('an Agent Control MCP ceiling denies before Policy asks or any MCP operation starts', async () => {
   const registry = fakeRegistry();
   let asked = 0;

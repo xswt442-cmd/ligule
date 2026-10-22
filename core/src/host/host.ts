@@ -29,7 +29,7 @@ import { historyPathOf, loadHistory, rememberHistory } from '../kernel/input-his
 import { parsePrefsJson, prefsPathOf, readPrefs, savePrefs } from '../kernel/desktop-prefs.js';
 import { credentialStatus, deleteCredential, storeCredential } from '../kernel/credentials.js';
 import { modelServices, modelSelection, resolveModel, type ModelSelection, type ModelService } from '../kernel/model-services.js';
-import { createDecisionChain, isPolicyRule, type DecisionChain, type PolicyMode, type PolicyState, type PolicyThresholds } from '../kernel/policy.js';
+import { createDecisionChain, isPolicyRule, policyArgsHash, type DecisionChain, type PolicyAskResult, type PolicyMode, type PolicyState, type PolicyThresholds } from '../kernel/policy.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
 import { createSessionLog, type SessionLog } from '../session/session.js';
@@ -47,7 +47,8 @@ import { usageEvent } from '../session/usage.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
 import { foldLabel } from '../session/format.js';
 import { SPILL_NAME, resultLimit } from '../kernel/result.js';
-import { limitsOf } from '../capability/limits.js';
+import { boundaryOf, limitsOf, workingDirectoryOf } from '../capability/limits.js';
+import { resolveWithin } from '../capability/paths.js';
 import { createManagedProcessRegistry, managedProcessPlugin, type ManagedProcessRegistry } from '../capability/managed-process.js';
 import { loadInstructions, DEFAULT_INSTRUCTION_BYTES } from '../capability/instructions.js';
 import { SKILL_METADATA_BUDGET_BYTES, discoverSkills, formatSkillCatalog, skillDirectories } from '../kernel/skills.js';
@@ -65,7 +66,7 @@ import { apiRoot } from '../model/http.js';
 import { thinkingCapabilityOf } from '../model/thinking.js';
 import type { ModelRequest, ProviderEvent } from '../kernel/loop.js';
 import { createConnection, type Connection, type HostRequest } from './connection.js';
-import { APPROVAL_METHOD, QUESTION_METHOD, isApproved, validateCall, type HostMethodParams } from './protocol.js';
+import { APPROVAL_METHOD, QUESTION_METHOD, validateCall, type HostMethodParams } from './protocol.js';
 import { createConfig, mergePolicyRules, type ConfigSnapshot } from '../kernel/config.js';
 import { loadConfigLayers } from '../kernel/config-file.js';
 import type { LoggerBackend } from '../kernel/log.js';
@@ -77,6 +78,7 @@ import type { PolicyRule } from '../kernel/config-edit.js';
 import type { ToolDefinition } from '../kernel/kernel.js';
 import { adoptSessionMode, type SessionModeState } from './session-mode.js';
 import { providerFromConfig, hostProviderFromConfig, type HostGenerationOptions, type HostProvider } from './provider.js';
+import { approvalArgsDigest, summarizeApproval } from './approval.js';
 export { providerFromConfig, hostProviderFromConfig } from './provider.js';
 
 interface HostConfigSnapshot extends ConfigSnapshot {
@@ -196,8 +198,8 @@ function mcpTrustKey(server: string, identityDigest: string): string {
   return `${server}\u0000${identityDigest}`;
 }
 
-function policyRuleKey(rule: Pick<PolicyRule, 'tool' | 'match'>): string {
-  return JSON.stringify([rule.tool, rule.match ?? '']);
+function policyRuleKey(rule: Pick<PolicyRule, 'tool' | 'match' | 'target' | 'path' | 'argsHash'>): string {
+  return JSON.stringify([rule.tool, rule.match ?? '', rule.target ?? '', rule.path ?? '', rule.argsHash ?? '']);
 }
 
 interface HostSessionBase {
@@ -815,7 +817,7 @@ export function createHost({
     let policy: Exclude<PolicyMode, 'default'> | undefined;
     const requestedPolicy = params.initialPolicy ?? grant?.defaultPolicy;
     if (requestedPolicy !== undefined) {
-      if (requestedPolicy !== 'ask' && requestedPolicy !== 'auto' && requestedPolicy !== 'never') {
+      if (requestedPolicy !== 'ask' && requestedPolicy !== 'auto' && requestedPolicy !== 'none' && requestedPolicy !== 'never') {
         throw new KernelError('policy_mode_unknown');
       }
       if (grant !== undefined) assertDelegationPolicy(grant, requestedPolicy);
@@ -919,6 +921,7 @@ export function createHost({
   }
 
   const sessions = new Map<string, HostSessionState>();
+  const pendingApprovalDetails = new Map<string, { sessionId: string; args: Record<string, unknown>; argumentSha256: string }>();
   const building = new Set<Promise<unknown>>();
   let closing: Promise<void> | undefined;
 
@@ -1013,7 +1016,7 @@ export function createHost({
       return { applies };
     }
     if (env.policy?.mode === effective) return { applies: [] };
-    if (effective !== 'ask' && effective !== 'auto' && effective !== 'never') throw new KernelError('policy_mode_unknown');
+    if (effective !== 'ask' && effective !== 'auto' && effective !== 'none' && effective !== 'never') throw new KernelError('policy_mode_unknown');
     const applies: { sessionId: string; when: 'now' }[] = [];
     for (const [id, state] of sessions) {
       if (state.environment !== env) continue;
@@ -1059,10 +1062,31 @@ export function createHost({
   async function rememberPolicyRule(
     state: HostSessionState,
     tool: string,
+    input: unknown,
     command: string | undefined,
     scope: PolicyRememberScope,
+    target: 'file' | 'workspace' | 'tool' | 'command' | undefined,
+    identityDigest: string | undefined,
   ): Promise<void> {
-    const rule: PolicyRule = { tool, decision: 'allow', ...(command === undefined ? {} : { match: command }) };
+    const args = isRecord(input) ? input : {};
+    let rule: PolicyRule;
+    if (['create', 'write', 'edit', 'delete'].includes(tool)) {
+      if ((target !== 'file' && target !== 'workspace') || typeof args.path !== 'string') {
+        throw new KernelError('policy_memory_target_required', { detail: 'file approvals must be remembered for one file or one operation class in this workspace' });
+      }
+      const boundary = boundaryOf(state.environment.config);
+      const path = target === 'workspace'
+        ? await realpath(boundary)
+        : await resolveWithin(boundary, args.path, { cwd: workingDirectoryOf(state.environment.config) });
+      rule = { tool, decision: 'allow', target, path };
+    } else if (tool.startsWith('mcp:')) {
+      if (identityDigest === undefined) throw new KernelError('policy_memory_identity_unavailable');
+      rule = { tool, decision: 'allow', argsHash: policyArgsHash(input, identityDigest) };
+    } else if (command !== undefined) {
+      rule = { tool, decision: 'allow', match: command };
+    } else {
+      rule = { tool, decision: 'allow' };
+    }
     const identity = policyRuleKey(rule);
     if (scope === 'session') {
       const existing = state.sessionPolicyRules.findIndex((item) => policyRuleKey(item) === identity);
@@ -1537,54 +1561,96 @@ export function createHost({
         { source: 'session', rules: state.sessionPolicyRules },
         { source: 'config', rules: policy?.rules ?? [] },
       ]).rules as PolicyRule[],
-      ask: async ({ tool, input, command, reason, shell, executable, policy, policySource, policyForced, rememberable, scriptBinding }) => {
+      ask: async ({ tool, input, command, reason, shell, executable, policy, policySource, policyForced, rememberable, scriptBinding, callId, identityDigest }): Promise<PolicyAskResult> => {
         const rememberScopes: PolicyRememberScope[] = permissionControl && rememberable
           ? ['session', ...(state.environment.store === undefined ? [] : ['project' as const, 'user' as const])]
           : [];
+        const requestId = randomUUID();
+        let summary;
+        try {
+          summary = summarizeApproval({
+            requestId, sessionId: id, runId: state.progressId, callId, identityDigest, tool, args: input, command, reason,
+            policy, policySource, policyForced,
+            ...(shell === undefined ? {} : { shell, executable }),
+          });
+        } catch (error) {
+          const failure = error instanceof KernelError ? error : new KernelError('policy_approval_unreviewable', { cause: error });
+          return { decision: 'unavailable' as const, code: failure.code, reason: 'This operation could not be reviewed safely.' };
+        }
+        const approvalArgs = structuredClone(input) as Record<string, unknown>;
+        pendingApprovalDetails.set(requestId, { sessionId: id, args: approvalArgs, argumentSha256: summary.argumentSha256 });
         let settle = (): void => {};
-        const cancelled = new Promise<boolean>((resolve) => {
-          settle = () => resolve(false);
+        const cancelled = new Promise<{ decision: 'cancelled'; code: string }>((resolve) => {
+          settle = () => resolve({ decision: 'cancelled', code: 'policy_approval_cancelled' });
         });
         state.asks.add(settle);
         updateWaitingForUser(state as HostSessionState, connection, true, 'approval');
         try {
-          // 只有命令调用才返回命令后端和解析分段，保证进程内与按行协议的响应结构一致。
-          // 同时返回所属项目和策略状态，以便客户端在切换前台会话后仍能解释本次判定。
-          const request = connection.request(APPROVAL_METHOD, {
-            sessionId: id, projectRoot: env.projectRoot, tool, args: input, command, reason, policy, policySource, policyForced,
-            rememberable: rememberScopes.length > 0,
-            rememberScopes,
-            rememberHintKey: command === undefined ? 'tool' : 'command',
-            ...(scriptBinding === undefined ? {} : { scriptBinding }),
-            ...(shell === undefined ? {} : { shell, executable }),
-          });
-          return await Promise.race([
-            request.then(async (answer) => {
-              if (!isApproved(answer)) return false;
-              const rememberScope = isRecord(answer) ? answer.rememberScope : undefined;
-              if (rememberScope === undefined) return true;
-              if (rememberScope !== 'session' && rememberScope !== 'project' && rememberScope !== 'user') {
-                return { decision: 'deny' as const, code: 'policy_memory_unavailable', reason: 'this approval cannot store a remembered rule from this client' };
+          const answer = await Promise.race([
+            connection.request(APPROVAL_METHOD, {
+              ...summary,
+              projectRoot: env.projectRoot,
+              rememberable: rememberScopes.length > 0,
+              rememberScopes,
+              ...(scriptBinding === undefined ? {} : { scriptBinding }),
+            }).then(async (value) => {
+              const response = isRecord(value) ? value : value === true ? { decision: 'allow' } : value === false ? { decision: 'deny' } : {};
+              const source = response.source === 'controller' ? 'controller' as const : 'human' as const;
+              if (response.decision === 'allow') {
+                if (approvalArgsDigest(input) !== summary.argumentSha256) {
+                  return { decision: 'error' as const, code: 'policy_approval_arguments_changed' };
+                }
+                const rememberScope = response.rememberScope;
+                if (rememberScope === undefined) return { decision: 'allow' as const, source };
+                if (source !== 'human') return { decision: 'error' as const, code: 'policy_memory_trusted_user_required' };
+                if (rememberScope !== 'session' && rememberScope !== 'project' && rememberScope !== 'user') {
+                  return { decision: 'error' as const, code: 'policy_memory_unavailable' };
+                }
+                if (!rememberScopes.includes(rememberScope)) return { decision: 'error' as const, code: 'policy_memory_unavailable' };
+                const rememberTarget = response.rememberTarget;
+                if (rememberTarget !== undefined && rememberTarget !== 'file' && rememberTarget !== 'workspace'
+                  && rememberTarget !== 'tool' && rememberTarget !== 'command') {
+                  return { decision: 'error' as const, code: 'policy_memory_target_invalid' };
+                }
+                try {
+                  await rememberPolicyRule(
+                    state as HostSessionState, tool, input, command, rememberScope, rememberTarget, identityDigest,
+                  );
+                } catch (error) {
+                  const failure = error instanceof KernelError ? error : new KernelError('policy_memory_write_failed', { cause: error });
+                  logger?.log?.('approval memory was not saved', { tool, code: failure.code });
+                  return { decision: 'error' as const, code: failure.code, reason: failure.detail ?? 'the remembered rule was not saved' };
+                }
+                return { decision: 'allow' as const, source };
               }
-              if (!rememberScopes.includes(rememberScope)) {
-                return { decision: 'deny' as const, code: 'policy_memory_unavailable', reason: 'this approval cannot store a remembered rule from this client' };
+              if (response.decision === 'deny') {
+                return {
+                  decision: 'deny' as const,
+                  source,
+                  code: source === 'human' ? 'ask_declined' : 'controller_declined',
+                  reason: source === 'human' ? 'the user declined' : 'the controller declined',
+                };
               }
-              try {
-                await rememberPolicyRule(state as HostSessionState, tool, command, rememberScope);
-                return true;
-              } catch (error) {
-                const failure = error instanceof KernelError ? error : new KernelError('policy_memory_write_failed', { cause: error });
-                logger?.log?.('approval memory was not saved', { tool, code: failure.code });
-                return { decision: 'deny' as const, code: failure.code, reason: failure.detail ?? 'the remembered rule was not saved' };
+              if (response.decision === 'unavailable' || response.decision === 'error'
+                || response.decision === 'cancelled' || response.decision === 'timeout') {
+                const decision = response.decision as 'unavailable' | 'error' | 'cancelled' | 'timeout';
+                return {
+                  decision,
+                  code: typeof response.code === 'string' ? response.code : 'policy_approval_channel_error',
+                  ...(typeof response.reason === 'string' ? { reason: response.reason } : {}),
+                };
               }
+              return { decision: 'error' as const, code: 'policy_approval_response_invalid' };
             }, (error) => {
-              // 记录客户端审批答复失败并拒绝调用，确保每个请求都有对应结果。
-              logger?.log?.(`approval failed for ${tool}`, { tool, code: errorCode(error), reason: errorMessage(error) });
-              return false;
+              const code = errorCode(error) ?? 'policy_approval_channel_error';
+              logger?.log?.(`approval failed for ${tool}`, { tool, code });
+              return { decision: 'error' as const, code, reason: 'approval channel failed' };
             }),
             cancelled,
           ]);
+          return answer;
         } finally {
+          pendingApprovalDetails.delete(requestId);
           state.asks.delete(settle);
           updateWaitingForUser(state as HostSessionState, connection, false, 'approval');
         }
@@ -1640,7 +1706,11 @@ export function createHost({
         assertDelegationMcpTool(grant, `mcp:${server}/${tool}`);
       }
     };
-    const mcpAuthorization: McpAuthorization = { authorizeServer: authorizeMcpServer, authorizeTool: authorizeMcpTool };
+    const mcpAuthorization: McpAuthorization = {
+      authorizeServer: authorizeMcpServer,
+      authorizeTool: authorizeMcpTool,
+      identityDigest: (server) => mcpConfigs.find((entry) => entry.name === server)?.identityDigest,
+    };
     const loaded = skills.skills.length === 0 ? plugins : [...plugins, createSkillPlugin(skills, () => mcp.servers())];
     // 加载器负责发现提示模板并处理项目优先级；模板由 Host 展开，确保所有客户端使用相同规则。
     const templates = templateRegistry ?? await discoverTemplates(templateDirectories(env.projectRoot));
@@ -2033,7 +2103,7 @@ export function createHost({
       pending,
       available: {
         modes,
-        policies: ['ask', 'auto', 'never', 'default'],
+        policies: ['ask', 'auto', 'none', 'never', 'default'],
         permissionProfiles: ['read-only', 'workspace-write', 'full-access'],
         permissionNetworks: ['policy', 'unrestricted', 'disabled'],
         services,
@@ -2095,7 +2165,7 @@ export function createHost({
         const grant = await activeDelegation();
         if (grant !== undefined) assertDelegationPolicy(grant, state.chain.configuredMode());
         nextOverride = null;
-      } else if (params.policy === 'ask' || params.policy === 'auto' || params.policy === 'never') {
+      } else if (params.policy === 'ask' || params.policy === 'auto' || params.policy === 'none' || params.policy === 'never') {
         const grant = await activeDelegation();
         if (grant !== undefined) assertDelegationPolicy(grant, params.policy);
         nextOverride = params.policy;
@@ -2107,7 +2177,7 @@ export function createHost({
       else state.chain.setMode(nextOverride);
       if (agentControl !== undefined && params.policy !== 'default') {
         await recordDelegationEvent(agentControl.storePath, {
-          kind: 'grant.used', grantId: agentControl.grantId, policy: params.policy as 'ask' | 'auto' | 'never',
+          kind: 'grant.used', grantId: agentControl.grantId, policy: params.policy as 'ask' | 'auto' | 'none' | 'never',
         });
       }
       return { ...(await sessionConfiguration(state)), applies: 'next_decision' };
@@ -2485,6 +2555,19 @@ export function createHost({
           const env = await environmentFor(requiredString(message.params.projectRoot, 'projectRoot'));
           return await requestAgentControl(env.projectRoot, sessionId, message.params.request as AgentControlRequest);
         }
+        case 'approval.details': {
+          const state = open(sessionId);
+          const requestId = requiredString(message.params.requestId, 'requestId');
+          const pending = pendingApprovalDetails.get(requestId);
+          if (pending === undefined || pending.sessionId !== state.id) throw new KernelError('control_interaction_stale');
+          if (approvalArgsDigest(pending.args) !== pending.argumentSha256) throw new KernelError('policy_approval_arguments_changed');
+          return {
+            requestId,
+            sessionId: state.id,
+            argumentSha256: pending.argumentSha256,
+            args: structuredClone(pending.args),
+          };
+        }
         case 'session.export': {
           // Host 负责读取和排版完整记录并写出文件，客户端只选择目标路径。
           // 用户通过保存对话框选择的导出路径不属于模型工具写入，不受项目边界限制。
@@ -2595,6 +2678,7 @@ export function createHost({
         }
         case 'status.get': {
           const state = open(sessionId);
+          const currentGrant = await activeDelegation();
           return {
             sessionId,
             running: state.running !== undefined,
@@ -2624,13 +2708,19 @@ export function createHost({
             policyDefault: state.chain.configuredMode(),
             permission: sessionPermissionView(state, canControlPermission),
             denials: state.chain.denials(),
-            delegation: knownGrant === undefined ? null : {
-              grantId: knownGrant.id,
-              maxPermissionProfile: knownGrant.maxPermissionProfile,
-              maxNetwork: knownGrant.maxNetwork,
-              allowedPolicies: knownGrant.allowedPolicies,
-              allowedMcpServers: knownGrant.allowedMcpServers,
-              allowedMcpTools: knownGrant.allowedMcpTools,
+            delegation: currentGrant === undefined ? null : {
+              grantId: currentGrant.id,
+              name: currentGrant.name,
+              source: currentGrant.source,
+              defaultPermissionProfile: currentGrant.defaultPermissionProfile,
+              maxPermissionProfile: currentGrant.maxPermissionProfile,
+              defaultNetwork: currentGrant.defaultNetwork,
+              maxNetwork: currentGrant.maxNetwork,
+              defaultPolicy: currentGrant.defaultPolicy,
+              allowedPolicies: currentGrant.allowedPolicies,
+              allowOperator: currentGrant.allowOperator,
+              allowedMcpServers: currentGrant.allowedMcpServers,
+              allowedMcpTools: currentGrant.allowedMcpTools,
             },
             // 这里只返回条数；记录内容由 `session.read` 提供。
             eventCount: (await state.session.read()).length,
@@ -2749,6 +2839,7 @@ export function createHost({
             allowedPolicies: [
               ...(message.params.allowedPolicyAsk === true ? ['ask' as const] : []),
               ...(message.params.allowedPolicyAuto === true ? ['auto' as const] : []),
+              ...(message.params.allowedPolicyNone === true ? ['none' as const] : []),
               ...(message.params.allowedPolicyNever === true ? ['never' as const] : []),
             ],
             allowOperator: message.params.allowOperator as boolean,
@@ -2916,12 +3007,15 @@ export function createHost({
         case 'config.set': {
           // 配置存储负责允许字段、值校验和配置层到文件的映射；Host 只转发这些字段。
           if (defaultEnvironment.store === undefined) throw new KernelError('config_write_unsupported');
-          const { value, op, index, ruleTool, ruleDecision, ruleMatch, ruleReason } = message.params;
+          const { value, op, index, ruleTool, ruleDecision, ruleMatch, ruleReason, ruleTarget, rulePath, ruleArgsHash } = message.params;
           const field = requiredString(message.params.field, 'field');
           const layer = requiredString(message.params.layer, 'layer');
           const version = requiredString(message.params.version, 'version');
           // 协议层校验字段类型，`checkedRule` 校验规则内容。
-          const given = { tool: ruleTool, decision: ruleDecision, match: ruleMatch, reason: ruleReason };
+          const given = {
+            tool: ruleTool, decision: ruleDecision, match: ruleMatch, reason: ruleReason,
+            target: ruleTarget, path: rulePath, argsHash: ruleArgsHash,
+          };
           const rule = Object.values(given).every((item) => item === undefined) ? undefined : given;
           const env = await environmentFor(message.params.projectRoot);
           if (env.store === undefined) throw new KernelError('config_write_unsupported');
@@ -3016,6 +3110,7 @@ export function createHost({
           } else failures.push(failure);
         }
         sessions.clear();
+        pendingApprovalDetails.clear();
         if (failures.length > 0) throw new AggregateError(failures, 'host_release_failed');
       })();
       return closing;

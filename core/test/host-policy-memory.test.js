@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -8,8 +9,9 @@ import { createConfigStore } from '../dist/kernel/config-store.js';
 import { loadConfigLayers } from '../dist/kernel/config-file.js';
 import { createConfig } from '../dist/kernel/config.js';
 import { MESSAGES_CAPABILITIES } from '../dist/index.js';
+import { createPermissionContext } from '../dist/kernel/permission.js';
 
-async function withPolicyHost(run) {
+async function withPolicyHost(run, options = {}) {
   const root = await mkdtemp(join(tmpdir(), 'ligule-policy-memory-'));
   const home = join(root, 'home');
   const projectA = join(root, 'project-a');
@@ -28,7 +30,8 @@ async function withPolicyHost(run) {
       const hasToolResult = request.messages.slice(userAt + 1).some((message) => message.role === 'tool');
       if (!hasToolResult) {
         modelCall += 1;
-        yield { type: 'tool-call', id: `read-${modelCall}`, name: 'read', args: { path: 'note.txt' } };
+        const nextCall = options.toolCall?.(modelCall) ?? { name: 'read', args: { path: 'note.txt' } };
+        yield { type: 'tool-call', id: `tool-${modelCall}`, ...nextCall };
       } else yield { type: 'text', text: 'Read complete.' };
     },
   };
@@ -55,11 +58,26 @@ async function withPolicyHost(run) {
     };
   };
 
+  const mode = options.policyMode ?? 'ask';
+  const rules = options.policyRules ?? [];
+  const configText = [
+    '[policy]',
+    `mode = ${JSON.stringify(mode)}`,
+    ...rules.flatMap((rule) => [
+      '', '[[policy.rules]]',
+      `tool = ${JSON.stringify(rule.tool)}`,
+      `decision = ${JSON.stringify(rule.decision)}`,
+      ...(rule.match === undefined ? [] : [`match = ${JSON.stringify(rule.match)}`]),
+      ...(rule.reason === undefined ? [] : [`reason = ${JSON.stringify(rule.reason)}`]),
+    ]),
+    '',
+  ].join('\n');
+
   let host;
   try {
     for (const project of [projectA, projectB, projectC]) {
       await mkdir(join(project, '.ligule'), { recursive: true });
-      await writeFile(join(project, '.ligule', 'config.toml'), '[policy]\nmode = "ask"\n');
+      await writeFile(join(project, '.ligule', 'config.toml'), configText);
     }
     const seed = await environment(projectA);
     host = createHost({
@@ -71,6 +89,7 @@ async function withPolicyHost(run) {
       loadEnvironment: environment,
       permissionControl: true,
       interactive: true,
+      ...(options.permission === undefined ? {} : { permission: options.permission }),
     });
     await run({ host, projectA, projectB, projectC, home });
   } finally {
@@ -81,13 +100,13 @@ async function withPolicyHost(run) {
   }
 }
 
-function connection(scope, requests) {
+function connection(scope, requests, rememberTarget) {
   return {
     notify() {},
     async request(method, params) {
       assert.equal(method, 'approval.request');
       requests.push(params);
-      return { decision: 'allow', rememberScope: scope };
+      return { decision: 'allow', rememberScope: scope, ...(rememberTarget === undefined ? {} : { rememberTarget }) };
     },
   };
 }
@@ -149,5 +168,165 @@ test('user-scoped approval memory is available in other projects unless a projec
     const records = await host.handle({ method: 'session.read', params: { sessionId: third.sessionId } }, client);
     const lastTool = records.events.filter((event) => event.kind === 'tool').at(-1);
     assert.equal(lastTool.result.code, 'policy_memory_shadowed');
+  });
+});
+
+test('remembering create is file-scoped by default and does not create a tool-wide allow', async () => {
+  const permission = createPermissionContext('workspace-write', 'policy', {
+    filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
+  });
+  await withPolicyHost(async ({ host, projectA }) => {
+    const requests = [];
+    const client = connection('project', requests, 'file');
+    const first = await host.handle({ method: 'session.create', params: { projectRoot: projectA } }, client);
+    await host.handle({ method: 'run.start', params: { sessionId: first.sessionId, input: 'create a note' } }, client);
+    assert.equal(requests.length, 1);
+    const saved = await readFile(join(projectA, '.ligule', 'config.local.toml'), 'utf8');
+    assert.match(saved, /tool = "create"/u);
+    assert.match(saved, /target = "file"/u);
+    assert.match(saved, /path = .*app\.js/u);
+
+    const samePath = await host.handle({ method: 'session.create', params: { projectRoot: projectA } }, client);
+    await host.handle({ method: 'run.start', params: { sessionId: samePath.sessionId, input: 'create that file again' } }, client);
+    assert.equal(requests.length, 1, 'the same target skips the approval even if the create tool reports that it already exists');
+
+    const otherPath = await host.handle({ method: 'session.create', params: { projectRoot: projectA } }, client);
+    await host.handle({ method: 'run.start', params: { sessionId: otherPath.sessionId, input: 'create another file' } }, client);
+    assert.equal(requests.length, 2, 'a different file still requires approval');
+  }, {
+    permission,
+    toolCall: (index) => ({ name: 'create', args: { path: index === 3 ? 'other.js' : 'app.js', content: 'saved' } }),
+  });
+});
+
+test('remembered workspace scope applies only to the selected write operation class', async () => {
+  const permission = createPermissionContext('workspace-write', 'policy', {
+    filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
+  });
+  await withPolicyHost(async ({ host, projectA }) => {
+    const requests = [];
+    const client = connection('project', requests, 'workspace');
+    const first = await host.handle({ method: 'session.create', params: { projectRoot: projectA } }, client);
+    await host.handle({ method: 'run.start', params: { sessionId: first.sessionId, input: 'create a note' } }, client);
+    assert.equal(requests.length, 1);
+    const saved = await readFile(join(projectA, '.ligule', 'config.local.toml'), 'utf8');
+    assert.match(saved, /target = "workspace"/u);
+    assert.ok(saved.includes(`path = ${JSON.stringify(projectA)}`));
+
+    const next = await host.handle({ method: 'session.create', params: { projectRoot: projectA } }, client);
+    await host.handle({ method: 'run.start', params: { sessionId: next.sessionId, input: 'create another note' } }, client);
+    assert.equal(requests.length, 1);
+    assert.ok((await readFile(join(projectA, 'other.js'), 'utf8')).includes('saved'));
+  }, {
+    permission,
+    toolCall: (index) => ({ name: 'create', args: { path: index === 1 ? 'app.js' : 'other.js', content: 'saved' } }),
+  });
+});
+
+test('20 KB and 100 KB file approvals send only a bounded summary and retrieve the original pending arguments on demand', async () => {
+  const permission = createPermissionContext('workspace-write', 'policy', {
+    filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
+  });
+  for (const size of [20_000, 100_000]) {
+    const content = 'x'.repeat(size);
+    await withPolicyHost(async ({ host, projectA }) => {
+      let summary;
+      let fullDetails;
+      const client = {
+        notify() {},
+        async request(method, params) {
+          assert.equal(method, 'approval.request');
+          summary = params;
+          assert.equal(JSON.stringify(params).includes(content), false);
+          assert.ok(String(params.args.content).length <= 513);
+          fullDetails = await host.handle({ method: 'approval.details', params: { sessionId: params.sessionId, requestId: params.detailsRef } }, client);
+          return { decision: 'allow' };
+        },
+      };
+      const { sessionId } = await host.handle({ method: 'session.create', params: { projectRoot: projectA } }, client);
+      await host.handle({ method: 'run.start', params: { sessionId, input: `create ${size} bytes` } }, client);
+
+      const digest = createHash('sha256').update(content, 'utf8').digest('hex');
+      assert.equal(summary.contentBytes, size);
+      assert.equal(summary.contentSha256, digest);
+      assert.equal(summary.argumentSha256, fullDetails.argumentSha256);
+      assert.equal(fullDetails.args.content, content);
+      assert.equal((await readFile(join(projectA, 'payload.txt'), 'utf8')), content);
+      await assert.rejects(
+        host.handle({ method: 'approval.details', params: { sessionId, requestId: summary.detailsRef } }, client),
+        { code: 'control_interaction_stale' },
+      );
+    }, {
+      permission,
+      toolCall: () => ({ name: 'create', args: { path: 'payload.txt', content } }),
+    });
+  }
+});
+
+test('sensitive approval content fails closed with its own code and never appears in an approval request', async () => {
+  const permission = createPermissionContext('workspace-write', 'policy', {
+    filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
+  });
+  const content = 'api_key=do-not-display-this-value';
+  await withPolicyHost(async ({ host, projectA }) => {
+    const requests = [];
+    const client = {
+      notify() {},
+      async request(_method, params) { requests.push(params); return { decision: 'allow' }; },
+    };
+    const { sessionId } = await host.handle({ method: 'session.create', params: { projectRoot: projectA } }, client);
+    await host.handle({ method: 'run.start', params: { sessionId, input: 'create a sensitive file' } }, client);
+    assert.equal(requests.length, 0);
+    const records = await host.handle({ method: 'session.read', params: { sessionId } }, client);
+    const tool = records.events.filter((event) => event.kind === 'tool').at(-1);
+    assert.equal(tool.result.code, 'control_interaction_sensitive');
+    assert.notEqual(tool.result.code, 'ask_declined');
+    assert.equal((await readFile(join(projectA, 'payload.txt')).catch(() => '')), '');
+  }, {
+    permission,
+    toolCall: () => ({ name: 'create', args: { path: 'payload.txt', content } }),
+  });
+});
+
+test('one trusted human approval resets forced-to-ask and both denial counters through Session restore', async () => {
+  const permission = createPermissionContext('workspace-write', 'policy', {
+    filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
+  });
+  await withPolicyHost(async ({ host, projectA }) => {
+    const requests = [];
+    const client = connection(undefined, requests);
+    const { sessionId } = await host.handle({ method: 'session.create', params: { projectRoot: projectA } }, client);
+    for (let index = 0; index < 3; index += 1) {
+      await host.handle({ method: 'run.start', params: { sessionId, input: `denied read ${index}` } }, client);
+    }
+    const restricted = await host.handle({ method: 'status.get', params: { sessionId } }, client);
+    assert.deepEqual(restricted.denials, { consecutive: 3, total: 3 });
+    assert.equal(restricted.policy, 'ask', 'the automatic session is now forced to ask');
+
+    await host.handle({ method: 'run.start', params: { sessionId, input: 'create after the human decision' } }, client);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].policyForced, true);
+    assert.equal(requests[0].policy, 'ask');
+    const reset = await host.handle({ method: 'status.get', params: { sessionId } }, client);
+    assert.deepEqual(reset.denials, { consecutive: 0, total: 0 });
+    assert.equal(reset.policy, 'auto');
+
+    const records = await host.handle({ method: 'session.read', params: { sessionId } }, client);
+    const saved = records.events.filter((event) => event.kind === 'sessionPolicy').at(-1);
+    assert.equal(saved.forcedToAsk, false);
+    assert.equal(saved.consecutive, 0);
+    assert.equal(saved.total, 0);
+    await host.handle({ method: 'session.close', params: { sessionId } }, client);
+    await host.handle({ method: 'session.open', params: { sessionId, projectRoot: projectA } }, client);
+    const restored = await host.handle({ method: 'status.get', params: { sessionId } }, client);
+    assert.equal(restored.policy, 'auto');
+    assert.deepEqual(restored.denials, { consecutive: 0, total: 0 });
+  }, {
+    permission,
+    policyMode: 'auto',
+    policyRules: [{ tool: 'read', decision: 'deny', reason: 'test refusal' }],
+    toolCall: (index) => index <= 3
+      ? { name: 'read', args: { path: 'note.txt' } }
+      : { name: 'create', args: { path: 'after-approval.js', content: 'allowed' } },
   });
 });

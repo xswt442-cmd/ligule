@@ -35,6 +35,10 @@ type BivariantCapability<TArgs> = {
   callback(args: TArgs): string;
 }['callback'];
 
+type BivariantPolicyIdentity<TArgs> = {
+  callback(args: TArgs): string | undefined;
+}['callback'];
+
 export interface ToolDefinition<TArgs = unknown> {
   readonly name: string;
   readonly description: string;
@@ -46,6 +50,7 @@ export interface ToolDefinition<TArgs = unknown> {
   readonly targetArgument?: string;
   readonly commandArgument?: string;
   capability?: BivariantCapability<TArgs>;
+  policyIdentity?: BivariantPolicyIdentity<TArgs>;
   readonly preflight?: (args: TArgs) => void | Promise<void>;
   run: BivariantToolCallback<TArgs, unknown | Promise<unknown>>;
 }
@@ -394,6 +399,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       if (policy) {
         // 有能力元数据的工具按其声明的实际能力名称进行判定，例如 `mcp:<服务器>/<工具>`。
         const capability = tool.capability?.(args);
+        const identityDigest = tool.policyIdentity?.(args);
         let scriptBinding: ScriptBinding | undefined;
         if (tool.access === 'exec' && shell !== undefined && typeof args.command === 'string') {
           let workspaceRoot: string;
@@ -421,6 +427,11 @@ export function createKernel(options: KernelOptions = {}): Kernel {
           }
         }
         const verdict = await policy.evaluate({ tool: name, input: args, target: network, shell, capability, access: tool.access, scriptBinding,
+          ...(options.callId === undefined ? {} : { callId: options.callId }),
+          ...(identityDigest === undefined ? {} : { identityDigest }),
+          ...(['create', 'write', 'edit', 'delete'].includes(name)
+            ? { fileBoundary: boundaryOf(config), workingDirectory: workingDirectoryOf(config) }
+            : {}),
           ...(requiresManualApproval ? { requiresManualApproval: true } : {}),
           ...(scriptBindingError === undefined ? {} : { scriptBindingError: { code: scriptBindingError.code, detail: scriptBindingError.detail ?? scriptBindingError.code } }),
         });

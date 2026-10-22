@@ -71,7 +71,7 @@ interface ControlOptions {
 
 export interface McpInitialSettings {
   readonly mode?: string;
-  readonly policy?: 'ask' | 'auto' | 'never';
+  readonly policy?: 'ask' | 'auto' | 'none' | 'never';
   readonly model?: { readonly provider: string; readonly model: string };
   readonly thinking?: { readonly effort: 'none' | 'low' | 'high' | 'max' | 'default' } | null;
   readonly outputTokens?: number | null;
@@ -81,7 +81,7 @@ export interface McpInitialSettings {
 
 export interface McpSessionChanges {
   readonly mode?: string;
-  readonly policy?: 'ask' | 'auto' | 'never' | 'default';
+  readonly policy?: 'ask' | 'auto' | 'none' | 'never' | 'default';
   readonly model?: { readonly provider: string; readonly model: string } | null;
   readonly thinking?: { readonly effort: 'none' | 'low' | 'high' | 'max' | 'default' } | null;
   readonly outputTokens?: number | null;
@@ -176,22 +176,41 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     const found = active.get(sessionId);
     if (found === undefined || found.state !== 'running' || closing !== undefined) {
       return method === APPROVAL_METHOD
-        ? Promise.resolve({ decision: 'deny' })
+        ? Promise.resolve({ decision: 'unavailable', code: 'control_interaction_stale' })
         : Promise.reject(new KernelError('control_interaction_stale'));
     }
     if (pendingFor(found).length >= 8) {
       publish(found, 'interaction.rejected', { interactionType: method === APPROVAL_METHOD ? 'approval' : 'question', code: 'control_interaction_limit' });
       return method === APPROVAL_METHOD
-        ? Promise.resolve({ decision: 'deny' })
+        ? Promise.resolve({ decision: 'unavailable', code: 'control_interaction_limit' })
         : Promise.reject(new KernelError('control_interaction_limit'));
     }
 
-    const requestId = randomUUID();
     const type: InteractionType = method === APPROVAL_METHOD ? 'approval' : 'question';
+    const requestedId = typeof input.requestId === 'string' ? input.requestId : undefined;
+    const requestId = type === 'approval' && requestedId !== undefined && /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/u.test(requestedId)
+      ? requestedId
+      : randomUUID();
+    if (interactions.has(requestId)) return method === APPROVAL_METHOD
+      ? Promise.resolve({ decision: 'unavailable', code: 'control_interaction_duplicate' })
+      : Promise.reject(new KernelError('control_interaction_duplicate'));
     const details = type === 'approval'
       ? {
           tool: input.tool,
           args: input.args,
+          ...(input.detailsRef === undefined ? {} : { detailsRef: input.detailsRef }),
+          ...(input.runId === undefined ? {} : { runId: input.runId }),
+          ...(input.callId === undefined ? {} : { callId: input.callId }),
+          ...(input.identityDigest === undefined ? {} : { identityDigest: input.identityDigest }),
+          ...(input.argumentBytes === undefined ? {} : { argumentBytes: input.argumentBytes }),
+          ...(input.argumentSha256 === undefined ? {} : { argumentSha256: input.argumentSha256 }),
+          ...(input.contentBytes === undefined ? {} : { contentBytes: input.contentBytes }),
+          ...(input.contentSha256 === undefined ? {} : { contentSha256: input.contentSha256 }),
+          ...(input.preview === undefined ? {} : { preview: input.preview }),
+          ...(input.rememberable === undefined ? {} : { rememberable: input.rememberable }),
+          ...(input.rememberScopes === undefined ? {} : { rememberScopes: input.rememberScopes }),
+          ...(input.rememberHintKey === undefined ? {} : { rememberHintKey: input.rememberHintKey }),
+          ...(input.rememberTargetOptions === undefined ? {} : { rememberTargetOptions: input.rememberTargetOptions }),
           ...(input.command === undefined ? {} : { command: input.command }),
           ...(input.reason === undefined ? {} : { reason: input.reason }),
           ...(input.policy === undefined ? {} : { policy: input.policy }),
@@ -207,13 +226,13 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     if (serialized === '' || serialized.length > 16_384) {
       publish(found, 'interaction.rejected', { requestId, interactionType: type, code: 'control_interaction_unreviewable' });
       return method === APPROVAL_METHOD
-        ? Promise.resolve({ decision: 'deny' })
+        ? Promise.resolve({ decision: 'unavailable', code: 'control_interaction_unreviewable' })
         : Promise.reject(new KernelError('control_interaction_unreviewable'));
     }
     if (containsSensitiveMaterial(details)) {
       publish(found, 'interaction.rejected', { requestId, interactionType: type, code: 'control_interaction_sensitive' });
       return method === APPROVAL_METHOD
-        ? Promise.resolve({ decision: 'deny' })
+        ? Promise.resolve({ decision: 'unavailable', code: 'control_interaction_sensitive' })
         : Promise.reject(new KernelError('control_interaction_sensitive'));
     }
 
@@ -430,7 +449,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
   function settleInteractions(found: Operation, errorCode = 'control_interaction_stale'): void {
     for (const interaction of pendingFor(found)) {
       interactions.delete(interaction.requestId);
-      if (interaction.type === 'approval') interaction.resolve({ decision: 'deny' });
+      if (interaction.type === 'approval') interaction.resolve({ decision: 'cancelled', code: errorCode });
       else interaction.reject(new KernelError(errorCode));
     }
   }
@@ -536,8 +555,10 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     }
   }
 
-  function replyInteraction({ sessionId, requestId, type, decision, answers }: {
+  function replyInteraction({ sessionId, requestId, type, decision, answers, rememberScope, rememberTarget }: {
     sessionId: string; requestId: string; type: InteractionType; decision?: 'allow' | 'deny'; answers?: unknown;
+    rememberScope?: 'session' | 'project' | 'user';
+    rememberTarget?: 'file' | 'workspace' | 'tool' | 'command';
   }, source: 'human' | 'controller' = 'controller') {
     ready();
     if (source === 'controller' && !operator) throw new KernelError('control_operator_required');
@@ -552,10 +573,20 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     }
     if (type === 'approval') {
       if (decision !== 'allow' && decision !== 'deny') throw new KernelError('control_interaction_decision_invalid');
+      if ((rememberScope !== undefined || rememberTarget !== undefined) && source !== 'human') {
+        throw new KernelError('policy_memory_trusted_user_required');
+      }
+      if (rememberScope !== undefined && rememberScope !== 'session' && rememberScope !== 'project' && rememberScope !== 'user') {
+        throw new KernelError('policy_memory_scope_invalid');
+      }
+      if (rememberTarget !== undefined && rememberTarget !== 'file' && rememberTarget !== 'workspace'
+        && rememberTarget !== 'tool' && rememberTarget !== 'command') {
+        throw new KernelError('policy_memory_target_invalid');
+      }
       interactions.delete(requestId);
-      publish(found, 'interaction.resolved', { requestId, interactionType: type, decision, source });
-      interaction.resolve({ decision, source });
-      return { requestId, sessionId, operationId: found.operationId, type, decision, source, resolved: true };
+      publish(found, 'interaction.resolved', { requestId, interactionType: type, decision, source, ...(rememberScope === undefined ? {} : { rememberScope }) });
+      interaction.resolve({ decision, source, ...(rememberScope === undefined ? {} : { rememberScope }), ...(rememberTarget === undefined ? {} : { rememberTarget }) });
+      return { requestId, sessionId, operationId: found.operationId, type, decision, source, ...(rememberScope === undefined ? {} : { rememberScope }), ...(rememberTarget === undefined ? {} : { rememberTarget }), resolved: true };
     }
     const questions = interaction.questions;
     if (questions === undefined) throw new KernelError('control_question_invalid');
@@ -676,12 +707,20 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     owned(sessionId);
     switch (request.action) {
       case 'status': return await observeSession(sessionId, request.after, request.limit, request.waitMs);
+      case 'configuration': return await host.handle({ method: 'status.get', params: { sessionId } }, connection);
+      case 'details': return await host.handle({ method: 'approval.details', params: { sessionId, requestId: request.requestId } }, connection);
       case 'send': return send(sessionId, 'send', request.input, undefined, 'human');
       case 'reply': return replyInteraction({
         sessionId,
         requestId: request.requestId,
         type: request.type,
-        ...(request.type === 'approval' ? { decision: request.decision } : { answers: request.answers }),
+        ...(request.type === 'approval'
+          ? {
+              decision: request.decision,
+              ...(request.rememberScope === undefined ? {} : { rememberScope: request.rememberScope }),
+              ...(request.rememberTarget === undefined ? {} : { rememberTarget: request.rememberTarget }),
+            }
+          : { answers: request.answers }),
       }, 'human');
       case 'cancel': {
         const found = active.get(sessionId);

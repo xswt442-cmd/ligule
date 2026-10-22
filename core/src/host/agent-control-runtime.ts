@@ -15,8 +15,10 @@ const CODE = /^[a-z][a-z0-9_]{0,79}$/u;
 
 export type AgentControlRequest =
   | { readonly action: 'status'; readonly after: number; readonly limit: number; readonly waitMs: number }
+  | { readonly action: 'configuration' }
   | { readonly action: 'send'; readonly input: string }
-  | { readonly action: 'reply'; readonly requestId: string; readonly type: 'approval'; readonly decision: 'allow' | 'deny' }
+  | { readonly action: 'details'; readonly requestId: string }
+  | { readonly action: 'reply'; readonly requestId: string; readonly type: 'approval'; readonly decision: 'allow' | 'deny'; readonly rememberScope?: 'session' | 'project' | 'user'; readonly rememberTarget?: 'file' | 'workspace' | 'tool' | 'command' }
   | { readonly action: 'reply'; readonly requestId: string; readonly type: 'question'; readonly answers: unknown }
   | { readonly action: 'cancel' }
   | { readonly action: 'takeover' };
@@ -65,6 +67,8 @@ function validRequest(input: unknown): AgentControlRequest {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) throw new KernelError('agent_control_request_invalid');
   const value = input as Record<string, unknown>;
   switch (value.action) {
+    case 'configuration':
+      return { action: 'configuration' };
     case 'status': {
       const after = value.after ?? 0;
       const limit = value.limit ?? 50;
@@ -86,12 +90,28 @@ function validRequest(input: unknown): AgentControlRequest {
         throw new KernelError('agent_control_request_invalid');
       }
       if (value.type === 'approval' && (value.decision === 'allow' || value.decision === 'deny')) {
-        return { action: 'reply', requestId: value.requestId, type: 'approval', decision: value.decision };
+        if (value.rememberScope !== undefined && value.rememberScope !== 'session' && value.rememberScope !== 'project' && value.rememberScope !== 'user') {
+          throw new KernelError('agent_control_request_invalid');
+        }
+        if (value.rememberTarget !== undefined && value.rememberTarget !== 'file' && value.rememberTarget !== 'workspace'
+          && value.rememberTarget !== 'tool' && value.rememberTarget !== 'command') {
+          throw new KernelError('agent_control_request_invalid');
+        }
+        return {
+          action: 'reply', requestId: value.requestId, type: 'approval', decision: value.decision,
+          ...(value.rememberScope === undefined ? {} : { rememberScope: value.rememberScope }),
+          ...(value.rememberTarget === undefined ? {} : { rememberTarget: value.rememberTarget }),
+        };
       }
       if (value.type === 'question' && Object.hasOwn(value, 'answers')) {
         return { action: 'reply', requestId: value.requestId, type: 'question', answers: value.answers };
       }
       throw new KernelError('agent_control_request_invalid');
+    case 'details':
+      if (typeof value.requestId !== 'string' || value.requestId.length < 1 || value.requestId.length > 160) {
+        throw new KernelError('agent_control_request_invalid');
+      }
+      return { action: 'details', requestId: value.requestId };
     case 'cancel':
     case 'takeover':
       return { action: value.action };

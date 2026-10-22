@@ -71,6 +71,7 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly defaultPolicy?: string;
   readonly allowedPolicyAsk?: boolean;
   readonly allowedPolicyAuto?: boolean;
+  readonly allowedPolicyNone?: boolean;
   readonly allowedPolicyNever?: boolean;
   readonly allowOperator?: boolean;
   readonly confirmUnrestrictedNetwork?: boolean;
@@ -83,6 +84,9 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly ruleDecision?: string;
   readonly ruleMatch?: string;
   readonly ruleReason?: string;
+  readonly ruleTarget?: string;
+  readonly rulePath?: string;
+  readonly ruleArgsHash?: string;
 }
 
 const SESSION_ID: Record<string, unknown> = { type: 'string', description: 'the session this call refers to' };
@@ -110,7 +114,7 @@ export const METHODS = Object.freeze({
         // 未提供来源时，Host 根据是否提供工作区路径区分显式选择与默认工作区。
         workspaceOrigin: { type: 'string', description: "how this session landed on that workspace: 'explicit' when the client chose it, 'default' when it is the one the client falls back to" },
         initialMode: { type: 'string', description: 'optional mode to apply before returning the new session' },
-        initialPolicy: { type: 'string', description: 'optional session policy override: ask, auto, or never' },
+        initialPolicy: { type: 'string', description: 'optional session policy override: ask, auto, none, or legacy never' },
         initialPermissionProfile: { type: 'string', description: 'optional initial file and command permission; interactive clients only' },
         initialPermissionNetwork: { type: 'string', description: 'optional initial network permission; interactive clients only' },
         confirmInitialFullAccess: { type: 'boolean', description: 'confirmation for granting full-access permission to a new session' },
@@ -241,12 +245,12 @@ export const METHODS = Object.freeze({
     }, required: ['projectRoot', 'sessionId'] },
   },
   'session.control': {
-    description: 'Send a human action to the local Host that currently owns this externally controlled Session. The same Host remains its only writer; the local action can observe, message, answer, cancel, or take over.',
+    description: 'Send a human action to the local Host that currently owns this externally controlled Session. The same Host remains its only writer; the local action can read its configuration, observe, message, answer, cancel, or take over.',
     parameters: { type: 'object', properties: {
       projectRoot: { type: 'string', description: 'the exact workspace root that owns the session' },
       sessionId: SESSION_ID,
       request: { type: 'object', additionalProperties: false, properties: {
-        action: { type: 'string', enum: ['status', 'send', 'reply', 'cancel', 'takeover'] },
+        action: { type: 'string', enum: ['status', 'configuration', 'details', 'send', 'reply', 'cancel', 'takeover'] },
         after: { type: 'integer', minimum: 0 },
         limit: { type: 'integer', minimum: 1, maximum: 50 },
         waitMs: { type: 'integer', minimum: 0, maximum: 30000 },
@@ -254,9 +258,15 @@ export const METHODS = Object.freeze({
         requestId: SESSION_ID,
         type: { type: 'string', enum: ['approval', 'question'] },
         decision: { type: 'string', enum: ['allow', 'deny'] },
+        rememberScope: { type: 'string', enum: ['session', 'project', 'user'] },
+        rememberTarget: { type: 'string', enum: ['file', 'workspace', 'tool', 'command'] },
         answers: {},
       }, required: ['action'] },
     }, required: ['projectRoot', 'sessionId', 'request'] },
+  },
+  'approval.details': {
+    description: 'Read the full parameters for a pending approval in the same open Session. Only trusted local UI clients should request this after the human expands the details.',
+    parameters: { type: 'object', properties: { sessionId: SESSION_ID, requestId: SESSION_ID }, required: ['sessionId', 'requestId'] },
   },
   // Host 读取完整记录、补回溢出内容、生成 Markdown 并写入用户选择的位置。
   // 导出路径由用户通过保存对话框选择，不受模型工具的项目边界限制；返回路径不代表写入成功。
@@ -293,7 +303,7 @@ export const METHODS = Object.freeze({
     parameters: { type: 'object', properties: {
       sessionId: SESSION_ID,
       mode: { type: 'string', description: 'select a mode; default restores the mode configured for this project' },
-      policy: { type: 'string', description: 'ask, auto, never, or default to restore the project policy' },
+      policy: { type: 'string', description: 'ask, auto, none, legacy never, or default to restore the project policy' },
       provider: { type: 'string', description: 'provider ID for a model selection; must be paired with model' },
       model: { type: 'string', description: 'model ID for a model selection; must be paired with provider' },
       thinkingEffort: { type: 'string', description: 'a value advertised by the selected provider, or default to inherit the provider default' },
@@ -413,6 +423,7 @@ export const METHODS = Object.freeze({
       defaultPolicy: { type: 'string' },
       allowedPolicyAsk: { type: 'boolean' },
       allowedPolicyAuto: { type: 'boolean' },
+      allowedPolicyNone: { type: 'boolean' },
       allowedPolicyNever: { type: 'boolean' },
       allowOperator: { type: 'boolean' },
       allowedMcpServers: { type: 'array', items: { type: 'string' } },
@@ -480,6 +491,9 @@ export const METHODS = Object.freeze({
         ruleDecision: { type: 'string', description: "for add and change: 'allow' or 'deny'" },
         ruleMatch: { type: 'string', description: 'for add and change: the command prefix pattern; absent means the whole capability' },
         ruleReason: { type: 'string', description: 'for add and change: the sentence shown when this rule decides' },
+        ruleTarget: { type: 'string', description: 'for remembered file rules: file or workspace' },
+        rulePath: { type: 'string', description: 'for remembered file rules: the exact absolute file path or workspace boundary' },
+        ruleArgsHash: { type: 'string', description: 'for remembered MCP rules: the approved argument and server identity digest' },
       },
       required: ['field', 'layer', 'version'],
     },
@@ -490,7 +504,7 @@ export const METHODS = Object.freeze({
     description: 'Override the approval tier for this session only, or go back to the tier the settings file writes; the new tier applies to the tool decisions that follow',
     parameters: {
       type: 'object',
-      properties: { sessionId: SESSION_ID, mode: { type: 'string', description: "'ask', 'auto', 'never', or 'default' to drop this session's override" } },
+      properties: { sessionId: SESSION_ID, mode: { type: 'string', description: "'ask', 'auto', 'none', legacy 'never', or 'default' to drop this session's override" } },
       required: ['sessionId', 'mode'],
     },
   },

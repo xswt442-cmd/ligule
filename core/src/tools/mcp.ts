@@ -18,6 +18,7 @@ export interface McpDisclosed {
 export interface McpAuthorization {
   authorizeServer?(server: string): void | Promise<void>;
   authorizeTool?(server: string, tool: string): void | Promise<void>;
+  identityDigest?(server: string): string | undefined;
 }
 
 function key(server: string, tool: string, digest: string) {
@@ -86,6 +87,7 @@ export function createMcpTools(
       },
       // 按 `mcp:<server>/<tool>` 实际能力名称进行权限判定，而不是使用通用名称 `mcp.call`。
       capability: (args: { server?: string; tool?: string }) => `mcp:${args.server}/${args.tool}`,
+      policyIdentity: (args: { server?: string }) => args.server === undefined ? undefined : authorization.identityDigest?.(args.server),
       async preflight(args: { server: string; tool: string }) {
         await authorization.authorizeTool?.(args.server, args.tool);
       },

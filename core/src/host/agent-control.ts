@@ -8,7 +8,7 @@ import { dataRoot } from '../kernel/config-file.js';
 import { KernelError, KernelRuntimeError } from '../kernel/error.js';
 import type { PermissionNetwork, PermissionProfile } from '../kernel/permission.js';
 
-export type DelegationPolicy = 'ask' | 'auto' | 'never';
+export type DelegationPolicy = 'ask' | 'auto' | 'none' | 'never';
 export type DelegationSource = 'trusted-ui' | 'legacy';
 
 export interface DelegationGrant {
@@ -92,7 +92,7 @@ const AUDIT_LIMIT = 2048;
 const LOCK_STALE_MS = 10_000;
 const PROFILES: readonly PermissionProfile[] = ['read-only', 'workspace-write', 'full-access'];
 const NETWORKS: readonly PermissionNetwork[] = ['disabled', 'policy', 'unrestricted'];
-const POLICIES: readonly DelegationPolicy[] = ['ask', 'auto', 'never'];
+const POLICIES: readonly DelegationPolicy[] = ['ask', 'auto', 'none', 'never'];
 const PROFILE_RANK: Readonly<Record<PermissionProfile, number>> = { 'read-only': 0, 'workspace-write': 1, 'full-access': 2 };
 const NETWORK_RANK: Readonly<Record<PermissionNetwork, number>> = { disabled: 0, policy: 1, unrestricted: 2 };
 
