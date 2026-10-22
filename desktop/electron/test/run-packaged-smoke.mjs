@@ -1101,34 +1101,47 @@ async function runChecks() {
     if (!/本机 stdio MCP|local stdio MCP/u.test(notice)) throw new Error('packaged_mcp_location_notice_missing');
     if (createAgentControlGrant) {
       await check('create a workspace-scoped Agent Control grant through the installed UI', async () => {
-        const draft = await devTools.evaluate(`(() => {
+        const draft = await devTools.evaluate(`(async () => {
           const panel = document.querySelector('.agent-control-panel');
           if (panel === null) return { error: 'panel_missing' };
-          const project = panel.querySelector('.grant-basic-grid input[readonly]');
+          const createDetails = panel.querySelector('.grant-create-fold');
+          if (createDetails === null) return { error: 'create_section_missing' };
+          createDetails.open = true;
           const name = panel.querySelector('.grant-basic-grid input:not([readonly])');
+          const project = panel.querySelector('.grant-basic-grid input[readonly]');
+          if (!(name instanceof HTMLInputElement) || !(project instanceof HTMLInputElement)) return { error: 'basic_fields_missing' };
+          const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+          valueSetter.call(name, ${JSON.stringify(suppliedGrantName)});
+          name.dispatchEvent(new Event('input', { bubbles: true }));
+          name.dispatchEvent(new Event('change', { bubbles: true }));
+          const nextBasics = [...panel.querySelectorAll('.grant-actions button')]
+            .find(button => /继续：能力与上限|Continue: capabilities and limits/u.test(button.textContent ?? ''));
+          if (nextBasics === undefined || nextBasics.disabled) return { error: 'capabilities_step_unavailable' };
+          nextBasics.click();
+          const stepDeadline = Date.now() + 5_000;
+          while (Date.now() < stepDeadline && panel.querySelector('.grant-config-grid') === null) {
+            await new Promise(resolve => setTimeout(resolve, 20));
+          }
           const cards = [...panel.querySelectorAll('.grant-config-card')];
-          const files = cards.find(card => /文件与命令|Files and commands/u.test(card.querySelector('h4')?.textContent ?? ''));
+          const files = cards.find(card => /文件与命令权限|Files and commands/u.test(card.querySelector('h4')?.textContent ?? ''));
           const network = cards.find(card => /网络访问|Network access/u.test(card.querySelector('h4')?.textContent ?? ''));
           const policy = cards.find(card => /审批方式|Approval behavior/u.test(card.querySelector('h4')?.textContent ?? ''));
+          if (files === undefined || network === undefined || policy === undefined) return { error: 'grant_limit_fields_missing' };
           const setSelect = (select, value) => {
             if (!(select instanceof HTMLSelectElement)) return false;
             Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(select, value);
             select.dispatchEvent(new Event('change', { bubbles: true }));
             return select.value === value;
           };
-          if (!(name instanceof HTMLInputElement) || files === undefined || network === undefined || policy === undefined) {
-            return { error: 'grant_form_field_missing' };
-          }
-          Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(name, ${JSON.stringify(suppliedGrantName)});
-          name.dispatchEvent(new Event('input', { bubbles: true }));
-          name.dispatchEvent(new Event('change', { bubbles: true }));
           const fileSelects = [...files.querySelectorAll('select')];
           const networkSelects = [...network.querySelectorAll('select')];
+          const policySelect = policy.querySelector('select');
           const selections = [
             setSelect(fileSelects[0], ${JSON.stringify(suppliedGrantProfile)}),
             setSelect(fileSelects[1], ${JSON.stringify(suppliedGrantProfile)}),
             setSelect(networkSelects[0], 'unrestricted'),
             setSelect(networkSelects[1], 'unrestricted'),
+            setSelect(policySelect, 'ask'),
           ];
           const checkLabel = (container, pattern) => {
             const label = [...container.querySelectorAll('label')]
@@ -1138,23 +1151,48 @@ async function runChecks() {
             if (!checkbox.checked) checkbox.click();
             return checkbox.checked;
           };
-          const confirmations = [
-            checkLabel(files, /部分隔离|partial-isolation/u),
-            ${suppliedGrantProfile === 'full-access' ? "checkLabel(files, /确认允许访问当前 OS 账户|Allow access to everything/u)" : 'true'},
-            checkLabel(network, /不受限网络|unrestricted network/u),
-            checkLabel(policy, /--operator|ordinary approvals/u),
-            checkLabel(panel.querySelector('.grant-lifetime-card') ?? panel, /我信任上方项目目录|I trust project code/u),
-          ];
+          const confirmations = [];
+          if (${JSON.stringify(suppliedGrantProfile)} !== 'read-only') {
+            confirmations.push(checkLabel(files, /部分隔离限制|partial-isolation limits/u));
+          }
+          if (${JSON.stringify(suppliedGrantProfile)} === 'full-access') {
+            confirmations.push(checkLabel(files, /确认允许访问当前 OS 账户|Allow access to everything/u));
+          }
+          confirmations.push(checkLabel(network, /不受限网络访问|unrestricted network access/u));
+          const operatorAllowed = checkLabel(policy, /--operator|ordinary approvals/u);
           return {
             project: project?.value ?? '', name: name.value,
-            selections, confirmations,
+            selections, confirmations, operatorAllowed,
           };
         })()`);
         if (draft.error !== undefined) throw new Error(`grant_form_${draft.error}`);
         if (draft.project.toLowerCase() !== workspace.toLowerCase()) throw new Error('grant_project_does_not_match_requested_workspace');
-        if (draft.name !== suppliedGrantName || !draft.selections.every(Boolean) || !draft.confirmations.every(Boolean)) {
+        if (draft.name !== suppliedGrantName || !draft.selections.every(Boolean) || !draft.confirmations.every(Boolean) || !draft.operatorAllowed) {
           throw new Error(`grant_form_not_ready:${JSON.stringify(draft)}`);
         }
+        const advanced = await devTools.evaluate(`(() => {
+          const panel = document.querySelector('.agent-control-panel');
+          return [...panel.querySelectorAll('.grant-actions button')]
+            .find(button => /继续：风险确认|Continue: risk review/u.test(button.textContent ?? ''))?.disabled === false;
+        })()`);
+        if (advanced !== true) throw new Error('grant_risk_review_step_unavailable');
+        await devTools.evaluate(`(() => {
+          const panel = document.querySelector('.agent-control-panel');
+          [...panel.querySelectorAll('.grant-actions button')]
+            .find(button => /继续：风险确认|Continue: risk review/u.test(button.textContent ?? ''))?.click();
+          return true;
+        })()`);
+        await waitUntil(async () => await devTools.evaluate(`document.querySelector('.agent-control-panel .grant-lifetime-card') !== null`), 5_000, 'packaged_agent_control_risk_review');
+        const workspaceConfirmation = await devTools.evaluate(`(() => {
+          const panel = document.querySelector('.agent-control-panel');
+          const label = [...panel.querySelectorAll('.grant-lifetime-card label')]
+            .find(item => /我信任上方项目目录|I trust project code/u.test(item.textContent ?? ''));
+          const checkbox = label?.querySelector('input[type="checkbox"]');
+          if (!(checkbox instanceof HTMLInputElement)) return false;
+          if (!checkbox.checked) checkbox.click();
+          return checkbox.checked;
+        })()`);
+        if (workspaceConfirmation !== true) throw new Error('grant_workspace_confirmation_missing');
         await waitUntil(async () => await devTools.evaluate(`(() => {
           const panel = document.querySelector('.agent-control-panel');
           const button = [...panel.querySelectorAll('.grant-actions button')]
@@ -1170,19 +1208,18 @@ async function runChecks() {
         })()`);
         if (submitted !== true) throw new Error('grant_create_button_unavailable');
         await waitUntil(async () => await devTools.evaluate(`(() => {
-          const panel = document.querySelector('.agent-control-panel');
-          return [...panel.querySelectorAll('.grant-row')]
-            .some(item => item.querySelector('.grant-row-head strong')?.textContent?.trim() === ${JSON.stringify(suppliedGrantName)});
+          return [...document.querySelectorAll('.agent-control-panel .grant-inspector')]
+            .some(item => item.querySelector(':scope > summary')?.textContent?.includes(${JSON.stringify(suppliedGrantName)}));
         })()`), 20_000, 'packaged_agent_control_grant_saved');
         const grant = await devTools.evaluate(`(() => {
-          const row = [...document.querySelectorAll('.agent-control-panel .grant-row')]
-            .find(item => item.querySelector('.grant-row-head strong')?.textContent?.trim() === ${JSON.stringify(suppliedGrantName)});
-          const summary = row?.querySelector('details summary');
-          summary?.click();
+          const row = [...document.querySelectorAll('.agent-control-panel .grant-inspector')]
+            .find(item => item.querySelector(':scope > summary')?.textContent?.includes(${JSON.stringify(suppliedGrantName)}));
+          const details = row?.querySelector('details.catalog-fold');
+          if (details !== undefined && details !== null) details.open = true;
           return {
-            id: row?.querySelector('details code')?.textContent?.trim() ?? '',
-            project: row?.querySelector(':scope > code')?.textContent?.trim() ?? '',
-            details: [...(row?.querySelectorAll('details p') ?? [])].map(item => item.textContent ?? '').join(' '),
+            id: details?.querySelector('code')?.textContent?.trim() ?? '',
+            project: row?.querySelector('.catalog-current')?.textContent?.trim() ?? '',
+            details: [...(details?.querySelectorAll('p') ?? [])].map(item => item.textContent ?? '').join(' '),
             summary: row?.textContent ?? '',
           };
         })()`);
