@@ -11,12 +11,26 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 **新增**
 
 - 默认 `minimal` 模式增加 `managed_process`，可在同一 Session 中启动受 Guardian 管理的本地开发服务器，查看就绪状态、端口与有界日志，并显式停止进程；启动命令沿用 `exec` 的 Permission、Policy、工作区信任与脚本审批。
+- 增加外控会话输入栏，可查看当前会话的模型、工具模式、Policy、Permission 与 Grant 上限，并向同一 Host Session 发送消息；会话菜单可查看内部子代理记录。
+- 增加 MCP 信任设置面板，可查看本机 Server 启动详情、按会话/项目/用户范围信任或撤销；信任仅允许启动进程，工具调用仍逐次经过 Policy。
+
+**改进**
+
+- 审批卡对大型参数先显示字节数、摘要和短预览，可信界面可在待决期间按需展开详情。审批记忆支持本次、会话、项目和用户范围；文件许可默认限定在当前文件。
+- Policy 使用 `ask`、`auto`、`none` 三档，旧版 `never` 保持拒绝语义。硬拒绝、审批不可用与取消保持各自结果，不显示为用户拒绝。
 
 ### English
 
 **Added**
 
 - Added `managed_process` to the default `minimal` mode. It starts local development servers under Guardian ownership, reports readiness and port, provides bounded logs, and supports explicit stop within the same Session. Start commands keep `exec` Permission, Policy, workspace trust, and script approval checks.
+- Added an external-session composer that shows the active session's model, tool mode, Policy, Permission, and Grant ceilings, and routes messages to the same Host Session. The conversation menu also exposes internal subagent records.
+- Added MCP trust settings to inspect local server launch details and trust or revoke servers at session, project, or user scope. Trust permits process startup only; every tool call still passes through Policy.
+
+**Improved**
+
+- Approval cards show a byte count, digest, and short preview for large parameters; trusted interfaces can retrieve full details while the request is pending. Remembered approvals support one-call, session, project, and user scopes; file approvals default to the selected file.
+- Policy now distinguishes `ask`, `auto`, and `none`, while legacy `never` retains its refusal behavior. Hard denials, unavailable approval channels, and cancellation keep distinct outcomes instead of appearing as user refusals.
 
 ## [0.0.6] - 2026-10-19
 

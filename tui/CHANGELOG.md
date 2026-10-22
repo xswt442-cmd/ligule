@@ -11,12 +11,28 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 **新增**
 
 - 默认 `minimal` 模式增加 `managed_process`，可在同一 Session 中启动受 Guardian 管理的本地开发服务器，查看就绪状态、端口与有界日志，并显式停止进程；启动命令沿用 `exec` 的 Permission、Policy、工作区信任与脚本审批。
+- `full` 工具模式包含内部 `subagent`，可并行委派最多三个独立子任务；子任务保留独立会话记录，可用 `/sub <序号>` 检查。MCP `ligule_run` 与 `ligule_run_start` 也支持单轮模式收窄和经 schema 验证的结构化结果。
+- 本地 MCP 控制新增 `ligule_run` 的有界等待和 `ligule_run_await`，超时不会取消仍在运行的任务。
+- 增加 `/mcp list|trust|confirm|revoke|tools` 管理本地 MCP Server 信任；信任可按会话、项目或用户范围设置，服务器配置变化后需要重新确认。
+
+**改进**
+
+- 审批方式明确区分 `ask`、`auto`、`none` 与旧版 `never`；记住的许可可限定本次、会话、项目或用户，文件许可默认只记当前文件。
+- 大型审批先显示字节数、摘要和短预览，再由可信界面按需展开详情；系统拒绝、审批不可用和取消不再记作用户拒绝。
 
 ### English
 
 **Added**
 
 - Added `managed_process` to the default `minimal` mode. It starts local development servers under Guardian ownership, reports readiness and port, provides bounded logs, and supports explicit stop within the same Session. Start commands keep `exec` Permission, Policy, workspace trust, and script approval checks.
+- The `full` tool mode includes the internal `subagent` tool for up to three concurrent independent child runs; each child keeps a separate Session record that can be inspected with `/sub <seq>`. MCP `ligule_run` and `ligule_run_start` also accept per-run mode narrowing and schema-validated structured results.
+- Added bounded waiting with `ligule_run` and `ligule_run_await` to the local MCP control tools. A wait timeout does not cancel the active run.
+- Added `/mcp list|trust|confirm|revoke|tools` to manage local MCP server trust by session, project, or user scope. Server configuration changes require trust again.
+
+**Improved**
+
+- Approval modes now distinguish `ask`, `auto`, `none`, and legacy `never`. Remembered approvals can be scoped to one call, a session, a project, or the user; file approvals default to the selected file.
+- Large approvals show a byte count, digest, and short preview before trusted interfaces retrieve details on demand. System refusals, unavailable approval channels, and cancellation are no longer recorded as user refusals.
 
 ## [0.0.5] - 2026-10-19
 
