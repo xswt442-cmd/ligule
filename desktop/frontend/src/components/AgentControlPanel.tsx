@@ -3,32 +3,8 @@ import { code, type Client } from '../protocol';
 import { useText } from '../locale';
 import { Icon } from './Icon';
 import { Group, Modal, Row } from './ui';
-
-type PermissionProfile = 'read-only' | 'workspace-write' | 'full-access';
-type NetworkLimit = 'disabled' | 'policy' | 'unrestricted';
-type PolicySelection = 'ask' | 'auto' | 'none';
-type PolicyMode = PolicySelection | 'never';
-type Grant = {
-  id: string;
-  name: string;
-  projectRoot: string;
-  source: 'trusted-ui' | 'legacy';
-  defaultPermissionProfile: PermissionProfile;
-  maxPermissionProfile: PermissionProfile;
-  defaultNetwork: NetworkLimit;
-  maxNetwork: NetworkLimit;
-  defaultPolicy: PolicyMode;
-  allowedPolicies: PolicyMode[];
-  allowOperator: boolean;
-  allowedMcpServers: string[];
-  allowedMcpTools: string[];
-  confirmedFullAccess: boolean;
-  confirmedUnrestrictedNetwork: boolean;
-  confirmedPartialWorkspaceWrite: boolean;
-  createdAt: string;
-  expiresAt: string | null;
-  revokedAt: string | null;
-};
+import { GrantOverview } from './GrantOverview';
+import type { Grant, NetworkLimit, PermissionProfile, PolicySelection } from './agent-control-types';
 type Snapshot = { version: string; grants: Grant[] };
 type WorkspaceRoster = { default: string | null; workspaces: { identity: string; directory: string; name: string }[] };
 type McpTool = { name: string; description: string; digest: string };
@@ -341,28 +317,14 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
         </select>
       </Row>
     </Group>
-    {selectedGrant !== null && <details className="catalog-fold grant-inspector" open>
-      <summary>{selectedGrant.name} · {grantState(selectedGrant, t)}</summary>
-      <p className="catalog-current">{selectedGrant.projectRoot}</p>
-      <div className="grant-summary-grid">
-        <Row label={t('文件与命令', 'Files and commands')}><span>{selectedGrant.defaultPermissionProfile} / {selectedGrant.maxPermissionProfile}</span></Row>
-        <Row label={t('网络', 'Network')}><span>{selectedGrant.defaultNetwork} / {selectedGrant.maxNetwork}</span></Row>
-        <Row label="Policy"><span>{selectedGrant.defaultPolicy} · {selectedGrant.allowedPolicies.join(', ')}</span></Row>
-        <Row label={t('MCP 范围', 'MCP scope')}><span>{selectedGrant.allowedMcpServers.length} {t('Server', 'servers')} · {selectedGrant.allowedMcpTools.length} {t('工具', 'tools')}</span></Row>
-        <Row label={t('有效期', 'Expires')}><span>{selectedGrant.expiresAt === null ? t('无期限', 'No expiry') : new Date(selectedGrant.expiresAt).toLocaleString()}</span></Row>
-        <Row label={t('普通审批代答', 'Operator replies')}><span>{selectedGrant.allowOperator ? t('允许', 'Allowed') : t('关闭', 'Disabled')}</span></Row>
-      </div>
-      <details className="catalog-fold">
-        <summary>{t('授权详情与连接配置', 'Grant details and connection')}</summary>
-        <code>{selectedGrant.id}</code>
-        <p>{t('创建', 'Created')}: {new Date(selectedGrant.createdAt).toLocaleString()} · {t('来源', 'Source')}: {selectedGrant.source === 'trusted-ui' ? t('可信界面创建', 'Trusted UI') : t('历史来源未记录', 'Legacy source not recorded')}</p>
-        <p>{t('允许的 MCP Server', 'Allowed MCP servers')}: {selectedGrant.allowedMcpServers.join(', ') || t('无', 'none')}</p>
-        <p>{t('允许的 MCP 工具', 'Allowed MCP tools')}: {selectedGrant.allowedMcpTools.join(', ') || t('无', 'none')}</p>
-        <p>{t('运行会话能力仍受操作系统 Sandbox、Policy、Server 信任及本授权上限共同约束。', 'Runtime capability remains subject to OS sandboxing, Policy, server trust, and this grant’s ceilings.')}</p>
-        <button type="button" className="mini chip" onClick={() => void copyConfig(selectedGrant)}>{copied === selectedGrant.id ? t('已复制配置', 'Configuration copied') : t('复制 MCP 配置', 'Copy MCP config')}</button>
-      </details>
-      {selectedGrant.revokedAt === null && <button type="button" className="mini chip danger" disabled={busy} onClick={() => setConfirmingRevoke(selectedGrant)}>{t('撤销授权', 'Revoke grant')}</button>}
-    </details>}
+    {selectedGrant !== null && <GrantOverview
+      grant={selectedGrant}
+      state={grantState(selectedGrant, t)}
+      copied={copied === selectedGrant.id}
+      disabled={busy}
+      onCopy={() => void copyConfig(selectedGrant)}
+      onRevoke={() => setConfirmingRevoke(selectedGrant)}
+    />}
     <details className="catalog-fold grant-all">
       <summary>{t(`此工作区全部授权（${projectGrants.length}）`, `All grants for this workspace (${projectGrants.length})`)}</summary>
       {projectGrants.length === 0 ? <p className="stub">{t('尚未创建授权。', 'No grants have been created.')}</p>
