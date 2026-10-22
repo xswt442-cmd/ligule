@@ -65,6 +65,8 @@ Windows 路径示例：
 
 `--operator` 代表本机操控者明确授权这个 stdio 客户端。它允许回答真实待处理的 Policy 审批和用户提问，以及修改单个会话的 Mode、Policy、模型、生成参数和每轮循环上限；它不更改文件边界、工作区信任或硬拒绝规则。可选 Policy 只有 `ask`、`auto` 和 `none`；已保存的旧版 `never` 保持原有拒绝语义。审批不能覆盖非法工具参数或工作区边界。`ligule_run_status` 的待处理交互只含有界摘要，不会重复传输完整工具参数。可信本地 TUI 或 Desktop 可以在请求仍待处理时展开详情。Host 无法安全审阅请求时会返回明确的 unavailable/error 错误码，不会记作用户拒绝。
 
+每条待决答复都绑定原始会话和 `requestId`。状态与事件中的 `source` 区分本机 TUI/Desktop 用户（`human`）和 MCP 操控者（`controller`）；只有 `human` 答复可以保存审批记忆。操作结束、断连或请求失效后，迟到的答复会返回 `control_interaction_stale`，不会记作用户拒绝。
+
 ## 委派运行与结构化结果
 
 `ligule_run` 与 `ligule_run_start` 接受可选 `delegation`。其中 `mode` 可选择具名或内联模式，但只能缩小当前会话的工具和提示片段范围，不能扩大会话、Permission、Policy 或 Grant 上限。`outputSchema` 可要求该轮提交符合受支持 JSON Schema 的结构化结果；模型必须调用 `ligule_delegation_result` 提交，通过校验后运行才会以有效结构化结果完成。模式和结果契约只作用于本次运行，不会创建新会话或修改项目配置。内部 `subagent` 是模型可调用的工具，和 MCP 外控的一轮委派不是同一个会话。
@@ -80,6 +82,8 @@ Windows 路径示例：
 ```
 
 MCP 会校验项目路径与 Grant 绑定一致，并将其默认 Permission、网络和 Policy 应用于新会话。`--operator` 只能在 Grant 已允许普通 Operator 操作时使用；这时 MCP 可在 Grant 上限内改会话设置并答复真实待决的审批或提问。未提供 Grant 时，单独的 `--operator` 不会授予或提升 Permission；提供 Grant 但不启用 `--operator` 时，只能使用 Grant 默认值，不能通过 MCP 修改这些设置。Host 会持续核验撤销、到期和项目绑定；失效后拒绝后续控制并释放会话锁。
+
+可信 TUI/Desktop 接管外控会话时，会先取消正在运行的操作、清空尚未发送的队列并释放 Host 会话锁，再把会话交回本地用户。已完成的工具副作用不会被重放或撤销；旧进程的 `operationId` 在 Server 重启后不可恢复。
 
 新会话可在 `ligule_session_create` 的 `initial` 中一次性设置 `mode`、`policy`、`model`、`thinking`、`outputTokens` 和 `loopIterations`。已打开会话使用 `ligule_session_configure` 的 `changes`。单次更新只能改一个类别：Mode、Policy、生成设置或循环上限；生成设置类别内部可同时改模型、思考档位和输出上限。`loopIterations` 是每轮用户任务允许的模型/工具循环次数，必须是正安全整数；默认值来自项目 `[loop].iterations`，未设置时为 64。会话覆盖不改项目配置，保存在 Session JSONL 中，并在重新接回时恢复。`loop.modelCalls` 仍使用项目配置，不会随 `loopIterations` 一起变化。混合类别的请求会被 schema 拒绝，避免部分生效。当前格式的记录会保存并恢复 Mode、Policy 覆盖、Policy 拒绝计数与强制逐次审批状态，以及模型/生成设置。运行期间的生成设置和循环上限在下一轮开始时生效，Policy 在之后的工具判定生效，不能改变已经等待中的审批。旧格式会话仍可读取，但不能修改 Permission 或 Policy。响应中的 `applies` 明确给出时机。
 

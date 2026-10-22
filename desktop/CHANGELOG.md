@@ -18,6 +18,8 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 - 审批卡对大型参数先显示字节数、摘要和短预览，可信界面可在待决期间按需展开详情。审批记忆支持本次、会话、项目和用户范围；文件许可默认限定在当前文件。
 - Policy 使用 `ask`、`auto`、`none` 三档，旧版 `never` 保持拒绝语义。硬拒绝、审批不可用与取消保持各自结果，不显示为用户拒绝。
+- 设置重组为八个独立入口，常规页整合外观设置；工具模式和 Grant 选择只用于查看，不会改变运行中的会话。权限、MCP Server 和 Grant 的低频细节按需展开，保留原有创建、信任、审批和撤销操作。
+- MCP 信任面板读取 Server 工具清单设有有界超时；无响应的 Server 不会无限期占用临时连接。
 
 ### English
 
@@ -31,6 +33,8 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 - Approval cards show a byte count, digest, and short preview for large parameters; trusted interfaces can retrieve full details while the request is pending. Remembered approvals support one-call, session, project, and user scopes; file approvals default to the selected file.
 - Policy now distinguishes `ask`, `auto`, and `none`, while legacy `never` retains its refusal behavior. Hard denials, unavailable approval channels, and cancellation keep distinct outcomes instead of appearing as user refusals.
+- Settings now has eight separate sections, with appearance controls in General. Mode and Grant selections only change what is inspected; they do not change a running session. Less-frequent Permission, MCP server, and Grant details expand on demand while existing create, trust, approval, and revoke actions remain available.
+- MCP server tool discovery in the trust panel has a bounded timeout, so an unresponsive server cannot hold a temporary connection indefinitely.
 
 ## [0.0.6] - 2026-10-19
 
