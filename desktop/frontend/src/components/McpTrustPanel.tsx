@@ -94,7 +94,7 @@ export function McpTrustPanel({ client, projectRoot, sessionId }: {
     {note !== null && <div className="session-note" data-tone={note.bad ? 'bad' : undefined}>
       <span>{note.text}</span>{note.code !== undefined && <code>{note.code}</code>}
     </div>}
-    <p className="agent-control-notice">{t('信任 Server 只允许 Ligule 启动该本地程序。MCP Server 在 Shell 沙箱之外运行，可能访问当前 OS 用户可访问的文件和网络。每次工具调用仍由 Policy 判定；Agent Control Grant 还会独立限制 Server 和工具。', 'Trusting a server only allows Ligule to start that local program. MCP servers run outside the Shell sandbox and may access files and networks available to the current OS user. Policy still judges tool calls, and Agent Control grants add separate server and tool limits.')}</p>
+    <p className="agent-control-notice">{t('信任只允许 Ligule 启动本地程序。Server 在 Shell 沙箱外以当前账户运行，可访问该账户的文件和网络；工具仍受 Policy 与外控 Grant 限制。', 'Trust only lets Ligule start the local program. The server runs as this OS user outside the Shell sandbox, with access to that user’s files and network; tool calls remain subject to Policy and Agent Control grants.')}</p>
     <Row label={t('管理范围', 'Trust scope')}>
       <select value={scope} disabled={busy} onChange={(event) => setScope(event.target.value as TrustScope)}>
         <option value="session" disabled={sessionId === null}>{scopeText('session', t)}</option>
@@ -118,18 +118,21 @@ export function McpTrustPanel({ client, projectRoot, sessionId }: {
                     : t(`已在${scopeText(server.trust.scope, t)}阻止`, `Blocked for ${scopeText(server.trust.scope, t)}`)}
               </span>
             </div>
-            <dl className="mcp-trust-details">
-              <dt>{t('程序', 'Program')}</dt><dd><code>{server.command}</code></dd>
-              <dt>{t('参数', 'Arguments')}</dt><dd>{server.args.length === 0 ? t('无', 'None') : <code>{server.args.join('\n')}</code>}</dd>
-              <dt>{t('工作目录', 'Working directory')}</dt><dd><code>{server.cwd}</code></dd>
-              <dt>{t('环境变量名', 'Environment variable names')}</dt><dd>{server.environmentNames.length === 0 ? t('无', 'None') : <code>{server.environmentNames.join(', ')}</code>}</dd>
-            </dl>
-            <div className="mcp-trust-scopes">
-              {(['session', 'project', 'user'] as const).map((item) => <span key={item} data-state={server.trustScopes[item]?.trusted === true ? 'trusted' : server.trustScopes[item]?.trusted === false ? 'blocked' : 'unset'}>
-                {scopeText(item, t)}: {server.trustScopes[item] === null ? t('未设置', 'unset') : server.trustScopes[item]!.trusted ? t('信任', 'trusted') : t('阻止', 'blocked')}
-                {server.trustScopes[item] === null ? null : <> · {t('可信本机界面', 'trusted local UI')}</>}
-              </span>)}
-            </div>
+            <details className="catalog-fold mcp-trust-config">
+              <summary>{t('程序配置与各层信任', 'Program configuration and trust scopes')}</summary>
+              <dl className="mcp-trust-details">
+                <dt>{t('程序', 'Program')}</dt><dd><code>{server.command}</code></dd>
+                <dt>{t('参数', 'Arguments')}</dt><dd>{server.args.length === 0 ? t('无', 'None') : <code>{server.args.join('\n')}</code>}</dd>
+                <dt>{t('工作目录', 'Working directory')}</dt><dd><code>{server.cwd}</code></dd>
+                <dt>{t('环境变量名', 'Environment variable names')}</dt><dd>{server.environmentNames.length === 0 ? t('无', 'None') : <code>{server.environmentNames.join(', ')}</code>}</dd>
+              </dl>
+              <div className="mcp-trust-scopes">
+                {(['session', 'project', 'user'] as const).map((item) => <span key={item} data-state={server.trustScopes[item]?.trusted === true ? 'trusted' : server.trustScopes[item]?.trusted === false ? 'blocked' : 'unset'}>
+                  {scopeText(item, t)}: {server.trustScopes[item] === null ? t('未设置', 'unset') : server.trustScopes[item]!.trusted ? t('信任', 'trusted') : t('阻止', 'blocked')}
+                  {server.trustScopes[item] === null ? null : <> · {t('可信本机界面', 'trusted local UI')}</>}
+                </span>)}
+              </div>
+            </details>
             <div className="inline-field mcp-trust-actions">
               {selected?.trusted === true
                 ? <button type="button" className="mini chip danger" disabled={busy} onClick={() => void save(server, false)}>{t(`撤销${scopeText(scope, t)}信任`, `Revoke ${scopeText(scope, t).toLowerCase()} trust`)}</button>

@@ -291,15 +291,15 @@ button.pill:hover {
 .mcp-trust-panel {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-2);
 }
 
 .mcp-trust-server {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: var(--space-2);
-  padding-block: var(--space-3);
+  gap: var(--space-1);
+  padding-block: var(--space-2);
   border-block-end: 1px solid var(--line);
 }
 
@@ -344,6 +344,30 @@ button.pill:hover {
 
 .mcp-trust-details code {
   white-space: pre-wrap;
+}
+
+.mcp-trust-config {
+  border-block-start: 1px solid var(--line);
+}
+
+.mcp-trust-config > summary {
+  min-block-size: 40px;
+}
+
+.mcp-trust-config .mcp-trust-details {
+  margin-block: 4px;
+}
+
+.mcp-trust-config .mcp-trust-scopes {
+  padding-block: 4px;
+}
+
+.security-capability-details {
+  margin-block-start: 4px;
+}
+
+.security-capability-details > summary {
+  min-block-size: 40px;
 }
 
 .mcp-trust-scopes {

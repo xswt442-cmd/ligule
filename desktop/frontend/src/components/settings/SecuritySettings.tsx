@@ -77,23 +77,25 @@ export function SecuritySettings({ client, projectRoot, sessionId, status, onSta
           ? <button type="button" disabled={busy} onClick={() => void updateTrust(false)}>{t('撤销信任', 'Revoke trust')}</button>
           : <button type="button" disabled={busy || projectRoot === ''} onClick={() => setConfirmTrust(true)}>{t('信任此工作区', 'Trust this workspace')}</button>}
       </Row>
-      <p className="sheet-note">{t('信任允许此项目中的脚本、Git 命令和钩子在当前 OS 账户权限下运行。会话仍受 Policy 与平台 Sandbox 限制。', 'Trust allows scripts, Git commands, and hooks from this project to run with the current OS account’s permissions. Sessions remain subject to Policy and platform sandbox limits.')}</p>
+      <p className="sheet-note">{t('项目脚本和钩子会以当前 OS 账户运行；Policy 与平台 Sandbox 仍生效。', 'Project scripts and hooks run as this OS user; Policy and platform sandbox limits still apply.')}</p>
     </Group>
     <Group title={t('当前会话隔离能力', 'Current session isolation')}>
       {permission === undefined
         ? <p className="stub">{t('打开会话后显示权限档、网络和平台隔离状态。', 'Open a conversation to see its permission profile, network access, and platform enforcement.')}</p>
         : <>
           <Row label={t('权限 / 网络', 'Permission / network')}><span>{permission.profile} · {permission.network}</span></Row>
-          <Row label={t('文件读取 / 写入', 'File read / write')}><span>{permission.capabilities.filesystemRead} / {permission.capabilities.filesystemWrite}</span></Row>
-          <Row label={t('网络 / 进程', 'Network / process')}><span>{permission.capabilities.network} / {permission.capabilities.process}</span></Row>
-          <Row label={t('只读 / 工作区写入 Shell', 'Read-only / workspace-write Shell')}><span>{permission.profiles.readOnly} / {permission.profiles.workspaceWrite}</span></Row>
-          <Row label={t('命令执行', 'Command execution')}>
-            <span>{permission.execution.available ? t('可用', 'Available') : t('不可用', 'Unavailable')}{permission.execution.code === null ? '' : ` · ${permission.execution.code}`}</span>
+          <Row label={t('平台执行', 'Platform enforcement')}>
+            <span>{t(`只读 ${permission.profiles.readOnly} · 工作区写入 ${permission.profiles.workspaceWrite} · 命令 ${permission.execution.available ? '可用' : '不可用'}`, `Read-only ${permission.profiles.readOnly} · workspace-write ${permission.profiles.workspaceWrite} · commands ${permission.execution.available ? 'available' : 'unavailable'}`)}</span>
           </Row>
-          {permission.limitations.length > 0 && <details className="catalog-fold">
-            <summary>{t(`平台限制（${permission.limitations.length}）`, `Platform limitations (${permission.limitations.length})`)}</summary>
-            <ul>{permission.limitations.map((item) => <li key={item}>{item}</li>)}</ul>
-          </details>}
+          <details className="catalog-fold security-capability-details">
+            <summary>{t(`查看平台能力详情${permission.limitations.length === 0 ? '' : `（限制 ${permission.limitations.length} 项）`}`, `View platform details${permission.limitations.length === 0 ? '' : ` (${permission.limitations.length} limitations)`}`)}</summary>
+            <Row label={t('文件读取 / 写入', 'File read / write')}><span>{permission.capabilities.filesystemRead} / {permission.capabilities.filesystemWrite}</span></Row>
+            <Row label={t('网络 / 进程', 'Network / process')}><span>{permission.capabilities.network} / {permission.capabilities.process}</span></Row>
+            <Row label={t('命令执行', 'Command execution')}>
+              <span>{permission.execution.available ? t('可用', 'Available') : t('不可用', 'Unavailable')}{permission.execution.code === null ? '' : ` · ${permission.execution.code}`}</span>
+            </Row>
+            {permission.limitations.length > 0 && <ul>{permission.limitations.map((item) => <li key={item}>{item}</li>)}</ul>}
+          </details>
         </>}
     </Group>
     {confirmTrust && <Modal title={t('确认信任工作区', 'Confirm workspace trust')} className="confirm" onClose={() => setConfirmTrust(false)}>
