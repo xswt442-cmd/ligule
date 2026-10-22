@@ -67,6 +67,18 @@ test('a relative server command is resolved from its workspace and its launch se
   assert.notEqual(mcpServerConfigs(changedCredentialReference, {}, projectRoot)[0].identityDigest, first.identityDigest);
 });
 
+test('a server without an explicit working directory is bound to its project root', () => {
+  const config = { mcp: { servers: { local: { command: 'node', args: ['server.js'] } } } };
+  const firstRoot = join(tmpdir(), 'mcp-default-cwd-first');
+  const secondRoot = join(tmpdir(), 'mcp-default-cwd-second');
+  const first = mcpServerConfigs(config, {}, firstRoot)[0];
+  const second = mcpServerConfigs(config, {}, secondRoot)[0];
+
+  assert.equal(first.cwd, firstRoot);
+  assert.equal(second.cwd, secondRoot);
+  assert.notEqual(first.identityDigest, second.identityDigest);
+});
+
 test('the server identity depends on PATH only when a bare command needs PATH lookup', () => {
   const projectRoot = join(tmpdir(), 'mcp-path-identity-project');
   const configFor = (command) => ({ mcp: { servers: { probe: { command, args: [], cwd: projectRoot } } } });

@@ -163,7 +163,7 @@ export function mcpServerConfigs(
       name,
       command,
       args,
-      cwd: entry.cwd === undefined ? '<project-root>' : cwd,
+      cwd,
       env: environmentNames.map((key) => [key, references[key]]),
       ...(commandUsesPath ? { path: environment.PATH ?? '' } : {}),
     })).digest('hex');
