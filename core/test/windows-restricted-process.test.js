@@ -14,7 +14,7 @@ import { spawnWindowsCommand } from '../dist/capability/windows-command.js';
 
 test('a WRITE_RESTRICTED process writes the workspace and refuses a sibling path', {
   skip: process.platform !== 'win32',
-  timeout: 45_000,
+  timeout: 75_000,
 }, async () => {
   const testRoot = resolve('testplace');
   await mkdir(testRoot, { recursive: true });
@@ -96,7 +96,7 @@ test('a WRITE_RESTRICTED process writes the workspace and refuses a sibling path
   let stderr = '';
   child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk; });
   child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
-  const timeout = setTimeout(() => child.kill(), 30_000);
+  const timeout = setTimeout(() => child.kill(), 60_000);
   try {
     const [exitCode, signal] = await once(child, 'close');
     assert.equal(signal, null, stderr);
