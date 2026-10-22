@@ -10,6 +10,7 @@ import { createConfig } from '../dist/kernel/config.js';
 import { MESSAGES_CAPABILITIES } from '../dist/index.js';
 
 const minimalServer = fileURLToPath(new URL('../../tests/fixtures/mcp-minimal.mjs', import.meta.url));
+const cancellableServer = fileURLToPath(new URL('./fixtures/mcp-cancellable.mjs', import.meta.url));
 
 async function waitForProcessExit(pid) {
   const deadline = Date.now() + 5_000;
@@ -19,6 +20,16 @@ async function waitForProcessExit(pid) {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error('mcp_fixture_process_still_running');
+}
+
+async function waitForFile(path) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try { await access(path); return; }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`mcp_fixture_marker_missing: ${path}`);
 }
 
 test('user trust applies across projects, project denial masks it, and a changed server identity is untrusted', async () => {
@@ -182,6 +193,72 @@ test('the Host trusts only the current server identity and starts it only after 
       await restartedHost.release();
     }
   } finally {
+    if (previousHome === undefined) delete process.env.LIGULE_HOME;
+    else process.env.LIGULE_HOME = previousHome;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('mcp.trust.tools times out a stalled tools/list request and closes its temporary server', { timeout: 40_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-mcp-trust-timeout-'));
+  const projectRoot = join(root, 'project');
+  const home = join(root, 'home');
+  const projectConfig = join(projectRoot, '.ligule', 'config.toml');
+  const pidPath = join(root, 'mcp.pid');
+  const listStartedPath = join(root, 'list.started');
+  const callStartedPath = join(root, 'call.started');
+  await mkdir(join(projectRoot, '.ligule'), { recursive: true });
+  await mkdir(home, { recursive: true });
+  const serverSettings = {
+    command: process.execPath,
+    args: [cancellableServer, pidPath, listStartedPath, callStartedPath, '0', '30000', 'false'],
+  };
+  await writeFile(projectConfig, [
+    '[mcp.servers.probe]',
+    `command = ${JSON.stringify(serverSettings.command)}`,
+    `args = ${JSON.stringify(serverSettings.args)}`,
+    '',
+  ].join('\n'));
+  const previousHome = process.env.LIGULE_HOME;
+  process.env.LIGULE_HOME = home;
+  const provider = {
+    capabilities: MESSAGES_CAPABILITIES,
+    model: 'trust-timeout-test',
+    async *stream() { yield { type: 'text', text: 'ready' }; },
+  };
+  const config = createConfig({ user: {
+    boundary: projectRoot,
+    workspaceRoot: projectRoot,
+    mcp: { servers: { probe: serverSettings } },
+  } });
+  const host = createHost({
+    config,
+    provider,
+    permissionControl: true,
+    loadEnvironment: async () => ({ config, provider }),
+  });
+  const connection = { notify() {}, async request() { return { decision: 'deny' }; } };
+  try {
+    const listed = await host.handle({ method: 'mcp.trust.list', params: {} }, connection);
+    await host.handle({ method: 'mcp.trust.set', params: {
+      server: 'probe',
+      identityDigest: listed.servers[0].identityDigest,
+      scope: 'project',
+      trusted: true,
+      confirmTrust: true,
+      confirmExternalAccess: true,
+      version: listed.version,
+    } }, connection);
+
+    const startedAt = Date.now();
+    const pending = host.handle({ method: 'mcp.trust.tools', params: { server: 'probe' } }, connection);
+    await waitForFile(listStartedPath);
+    await assert.rejects(() => pending);
+    const elapsed = Date.now() - startedAt;
+    assert.ok(elapsed >= 24_000 && elapsed < 32_000, `expected the bounded lookup to end near 25 seconds, got ${elapsed} ms`);
+    await waitForProcessExit(Number(await readFile(pidPath, 'utf8')));
+  } finally {
+    await host.release();
     if (previousHome === undefined) delete process.env.LIGULE_HOME;
     else process.env.LIGULE_HOME = previousHome;
     await rm(root, { recursive: true, force: true });

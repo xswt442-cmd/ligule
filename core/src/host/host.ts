@@ -3078,7 +3078,7 @@ export function createHost({
           if (trust?.trusted !== true) throw new KernelError('mcp_server_untrusted', { detail: serverName });
           const registry = createMcpRegistry([server]);
           try {
-            const tools = await registry.toolsOf(serverName);
+            const tools = await registry.toolsOf(serverName, AbortSignal.timeout(25_000));
             return { server: serverName, identityDigest: server.identityDigest, tools: tools.map(({ name, description, digest }) => ({ name, description, digest })) };
           } finally {
             await registry.close();
