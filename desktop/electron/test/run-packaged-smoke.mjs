@@ -968,8 +968,12 @@ async function runChecks() {
     if (appInfo.href !== 'app://ligule/index.html') throw new Error(`unexpected_application_page:${appInfo.href}`);
     if (appInfo.origin !== 'app://ligule') throw new Error(`unexpected_application_origin:${appInfo.origin}`);
     if (appInfo.secure !== true || appInfo.api !== 'object') throw new Error('packaged_preload_api_unavailable');
-    const requiredMethods = ['sendHostFrame', 'restartHost', 'onHostFrame', 'onHostFault', 'requestQuit'];
+    const requiredMethods = ['appInfo', 'sendHostFrame', 'restartHost', 'onHostFrame', 'onHostFault', 'requestQuit'];
     for (const method of requiredMethods) if (!appInfo.methods.includes(method)) throw new Error(`preload_api_missing:${method}`);
+    const installedApp = await devTools.evaluate('window.liguleDesktop.appInfo()');
+    if (typeof installedApp.version !== 'string' || installedApp.version === '' || installedApp.packaged !== true) {
+      throw new Error('packaged_application_info_invalid');
+    }
     await devTools.evaluate(`(() => {
       window.__packagedSmokeFrames = [];
       window.__packagedSmokeFaults = [];
@@ -981,7 +985,7 @@ async function runChecks() {
     processIds.initialHost = Number(host.pid);
     processIds.hostExecutable = host.executable;
     processIds.hostCommandLine = host.commandLine;
-    return `来源 ${appInfo.origin}，Host PID ${host.pid} 使用 ${reportVersion(hostNode)}`;
+    return `来源 ${appInfo.origin}，Ligule ${installedApp.version}；Host PID ${host.pid} 使用 ${reportVersion(hostNode)}`;
   });
 
   await check('open Model services in the installed application', async () => {

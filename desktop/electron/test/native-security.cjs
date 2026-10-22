@@ -182,7 +182,7 @@ async function runChecks() {
     assert.equal(result.electron, false);
     assert.equal(result.fs, false);
     assert.deepEqual(result.keys, [
-      'defaultWorkspace', 'notificationPermission', 'onHostFault', 'onHostFrame', 'onHostLog',
+      'appInfo', 'defaultWorkspace', 'notificationPermission', 'onHostFault', 'onHostFrame', 'onHostLog',
       'onNotificationOpen', 'onQuitRequested', 'requestNotificationPermission', 'requestQuit',
       'restartHost', 'saveExportPath', 'selectWorkspaceDirectory', 'sendHostFrame', 'showNotification', 'updateTray',
     ]);
@@ -211,6 +211,7 @@ async function runChecks() {
     const secondaryResult = await secondWindow.webContents.executeJavaScript(`(async () => {
       const api = window.liguleDesktop;
       const operations = [
+        () => api.appInfo(),
         () => api.sendHostFrame(${JSON.stringify(JSON.stringify({ id: nextId('secondary'), method: 'desktop.security.probe', params: {} }))}),
         () => api.restartHost(),
         () => api.defaultWorkspace(),
@@ -238,7 +239,7 @@ async function runChecks() {
     assert.equal(clipboard, 'NotAllowedError');
     secondWindow.destroy();
     secondWindow = undefined;
-    return '第二个真实窗口的恶意导航被阻止；相同 Preload 的全部十个 IPC 动作均被 sender 校验拒绝';
+    return '第二个真实窗口的恶意导航被阻止；相同 Preload 的全部受保护 IPC 动作均被 sender 校验拒绝';
   });
 
   await check('SEC-02 iframe bridge and CSP', async () => {

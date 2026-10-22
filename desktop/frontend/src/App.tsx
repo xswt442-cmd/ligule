@@ -5,7 +5,7 @@ import { code, createClient, type Client, type Transport } from './protocol';
 import { ApprovalCard, type Ask } from './components/ApprovalCard';
 import { QuestionCard, type QuestionAsk, type QuestionDrafts } from './components/QuestionCard';
 import { Icon } from './components/Icon';
-import { SettingsDialog } from './components/Settings';
+import { SettingsDialog, type SettingsSectionId } from './components/Settings';
 import { BranchPanel } from './components/BranchPanel';
 import { HoldSheet } from './components/HoldSheet';
 import { QuitSheet } from './components/QuitSheet';
@@ -269,7 +269,7 @@ export function App({ transport }: { transport: Transport }) {
   const reportSettingsEdits = useCallback((reasons: string[]) => { settingsEdits.current = reasons; }, []);
   const dockEdits = useRef<string[]>([]);
   dockEdits.current = holdReasons(dockGate);
-  const [settingsSection, setSettingsSection] = useState<'general' | 'model' | 'keys' | 'notifications'>('general');
+  const [settingsSection, setSettingsSection] = useState<SettingsSectionId>('general');
   const openModelSettings = useCallback(() => { setSettingsSection('model'); setSettingsOpen(true); }, []);
   const [notificationProblem, setNotificationProblem] = useState<string | null>(null);
   const [diagnosticLogs, setDiagnosticLogs] = useState<string[]>([]);
@@ -1829,6 +1829,8 @@ export function App({ transport }: { transport: Transport }) {
       patch={patch}
       keyNotice={keyNotice}
       link={link}
+      logs={diagnosticLogs}
+      onStatus={setStatus}
       counts={panelProps.counts}
       waiting={panelProps.waiting}
       onReconnect={() => void reconnect()}

@@ -33,7 +33,9 @@ export function AppearanceSettings({ settings, patch }: { settings: Settings; pa
         </button>)}
       </div>
     </Group>
-    <Group title={t('文字与栏宽', 'Text and layout')}>
+    <details className="settings-advanced">
+      <summary>{t('高级显示选项', 'Advanced display options')}</summary>
+      <Group title={t('文字与栏宽', 'Text and layout')}>
       <Row label={t('界面字号', 'Interface font size')} note={`${settings.fontUi} px`}>
         <input aria-label={t('界面字号（像素）', 'Interface font size (pixels)')} type="range" min={10} max={24} step={1} value={settings.fontUi} onChange={(event) => patch({ fontUi: Number(event.target.value) })} />
         <input aria-label={t('界面字号数值', 'Interface font size value')} type="number" min={10} max={24} step={1} value={settings.fontUi} onChange={(event) => patch({ fontUi: Math.max(10, Math.min(24, Number(event.target.value) || 10)) })} />
@@ -62,8 +64,8 @@ export function AppearanceSettings({ settings, patch }: { settings: Settings; pa
       <Row label={t('左侧栏', 'Sidebar')}>
         <button type="button" onClick={() => patch({ collapsed: !settings.collapsed })}>{settings.collapsed ? t('展开左侧栏', 'Show sidebar') : t('收起左侧栏', 'Hide sidebar')}</button>
       </Row>
-    </Group>
-    <Group title={t('工作步骤展示', 'Work details')}>
+      </Group>
+      <Group title={t('工作步骤展示', 'Work details')}>
       <Row label={t('展示详细程度', 'Detail level')} note={t('控制屏幕显示的步骤；模型收到的内容保持完整。', 'Controls which steps appear on screen. The model still receives the full content.')}>
         <select value={settings.verbosity} onChange={(event) => patch({ verbosity: event.target.value as Settings['verbosity'] })}>
           <option value="brief">{t('简洁', 'Brief')}</option>
@@ -72,6 +74,7 @@ export function AppearanceSettings({ settings, patch }: { settings: Settings; pa
           <option value="full">{t('完全展开', 'Full')}</option>
         </select>
       </Row>
-    </Group>
+      </Group>
+    </details>
   </>;
 }

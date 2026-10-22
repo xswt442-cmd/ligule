@@ -108,8 +108,8 @@
 .sheet-nav {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
-  padding: 12px 8px;
+  gap: 4px;
+  padding: 10px 8px;
   background: var(--bg-sunk);
   border-inline-end: 1px solid var(--line);
 }
@@ -148,7 +148,7 @@
   max-height: 100%;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 16px 24px 24px;
+  padding: 14px 18px 20px;
 }
 
 .sheet-body:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
@@ -157,8 +157,8 @@
 .sheet-row {
   display: flex;
   align-items: flex-start;
-  gap: var(--space-5);
-  padding: 10px 0;
+  gap: 12px;
+  padding: 8px 0;
   border-block-end: 1px solid var(--line);
 }
 
@@ -184,6 +184,57 @@
   color: var(--fg-muted);
   font-size: var(--text-xs);
 }
+
+.settings-advanced,
+.about-fold {
+  margin-block-start: 12px;
+  border-block-start: 1px solid var(--line);
+}
+
+.settings-advanced > summary,
+.about-fold > summary {
+  display: flex;
+  align-items: center;
+  min-block-size: 44px;
+  color: var(--fg-muted);
+  cursor: pointer;
+  font-size: var(--text-sm);
+}
+
+.settings-advanced[open] > summary,
+.about-fold[open] > summary { color: var(--fg); }
+
+.about-settings { display: grid; gap: 10px; }
+.about-settings a { color: var(--accent); }
+.about-settings .about-fold > .sheet-note { margin-block: 8px; }
+
+.security-settings,
+.tools-settings { display: grid; gap: 12px; }
+.security-settings .sheet-note,
+.tools-settings .sheet-note { margin: 8px 0; }
+.catalog-section,
+.catalog-fold { min-width: 0; border-block-start: 1px solid var(--line); }
+.catalog-section h3 { margin: 10px 0 4px; font-size: var(--text-md); font-weight: 600; }
+.catalog-fold > summary { display: flex; align-items: center; min-block-size: 44px; color: var(--fg); cursor: pointer; font-size: var(--text-sm); }
+.catalog-fold[open] > summary { color: var(--accent); }
+.catalog-fold ul { margin: 6px 0 10px; padding-inline-start: 20px; }
+.catalog-fold li { margin-block: 4px; }
+.catalog-select { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-block: 10px; }
+.catalog-select select { min-block-size: 40px; min-inline-size: min(18rem, 100%); }
+.catalog-current { margin: 6px 0; color: var(--fg-muted); font-size: var(--text-sm); }
+.catalog-path { overflow-wrap: anywhere; }
+.catalog-tag { display: inline-flex; align-items: center; gap: 4px; width: fit-content; padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--fg-muted); font-size: var(--text-xs); }
+.catalog-tag[data-tone="ok"] { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); }
+.catalog-tag[data-tone="muted"] { color: var(--fg-muted); }
+.catalog-list { display: grid; gap: 6px; padding: 0 !important; list-style: none; }
+.catalog-list > li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; align-items: center; padding: 8px 0; border-block-end: 1px solid var(--line); }
+.catalog-list > li > strong { min-width: 0; overflow-wrap: anywhere; font-weight: 550; }
+.catalog-list > li > span { color: var(--fg-muted); font-size: var(--text-xs); text-align: end; }
+.catalog-list > li > small { grid-column: 1 / -1; color: var(--fg-muted); font-size: var(--text-sm); overflow-wrap: anywhere; }
+.catalog-tools > li { grid-template-columns: minmax(0, 1fr) auto; }
+.catalog-tools > li > strong { font-weight: 500; }
+.catalog-tags { display: flex; grid-column: 1 / -1; flex-wrap: wrap; gap: 6px; }
+.all-tools { margin-block-start: 10px; }
 
 .shortcut-settings .sheet-row { align-items: center; gap: 16px; }
 .shortcut-settings .sheet-label { flex-basis: 46%; }

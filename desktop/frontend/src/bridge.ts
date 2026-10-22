@@ -1,3 +1,4 @@
+import type { DesktopAppInfo } from '../../electron/api';
 import type { Transport } from './protocol';
 
 // Preload 只交回固定用途的接口；React 不接触 Electron IPC 或 Node 对象。
@@ -35,4 +36,9 @@ export async function selectWorkspaceDirectory(defaultPath: string): Promise<str
   const api = window.liguleDesktop;
   if (api === undefined) throw new Error('desktop_bridge_unavailable');
   return await api.selectWorkspaceDirectory(defaultPath);
+}
+
+export async function readDesktopAppInfo(): Promise<DesktopAppInfo | null> {
+  const api = window.liguleDesktop;
+  return api === undefined ? null : await api.appInfo();
 }
