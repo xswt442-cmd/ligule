@@ -815,7 +815,10 @@ async function runInterruptedRequest(sessionId, alreadyStarted = false) {
 }
 
 async function ensureIsolatedWorkspaceSelected() {
-  await waitUntil(async () => await devTools.evaluate(`document.querySelector('button.workspace-choice') !== null`), 30_000, 'workspace_selector_ready');
+  await waitUntil(async () => await devTools.evaluate(`(() => {
+    const button = document.querySelector('button.workspace-choice');
+    return button instanceof HTMLButtonElement && !button.disabled;
+  })()`), 30_000, 'workspace_selector_enabled');
   const currentWorkspace = await devTools.evaluate(`document.querySelector('button.workspace-choice')?.title ?? ''`);
   if (currentWorkspace === workspace) return;
   await devTools.evaluate(`document.querySelector('button.workspace-choice')?.click(); true`);
@@ -982,6 +985,7 @@ async function runChecks() {
   });
 
   await check('open Model services in the installed application', async () => {
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('aside.sidebar button.entry') !== null`), 30_000, 'packaged_settings_entry_ready');
     const opened = await devTools.evaluate(`(() => {
       const button = [...document.querySelectorAll('aside.sidebar button.entry')]
         .find(item => /设置|Settings/u.test(item.textContent ?? ''));
