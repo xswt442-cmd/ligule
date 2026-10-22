@@ -12,6 +12,8 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../.
 test('polls a real Host observation, ignores stale snapshots, and stops after disposal', async () => {
   const testRoot = join(repositoryRoot, 'desktop', 'testplace', 'tmp');
   const projectRoot = join(testRoot, `session-observation-${process.pid}-${Date.now()}`);
+  const dataHome = `${projectRoot}-home`;
+  const previousDataHome = process.env.LIGULE_HOME;
   await mkdir(projectRoot, { recursive: true });
   const config = createConfig({
     user: {
@@ -26,7 +28,7 @@ test('polls a real Host observation, ignores stale snapshots, and stops after di
     async *stream() { yield { type: 'text', text: 'unused' }; },
   };
   const pair = createMemoryConnectionPair();
-  const host = serveHost({ ...pair.host, config, provider, policy: config.policy });
+  let host;
   const connection = createConnection(pair.client);
   const client = { call: (method, params, timeoutMs) => connection.request(method, params, timeoutMs) };
   let stop;
@@ -35,6 +37,8 @@ test('polls a real Host observation, ignores stale snapshots, and stops after di
   let responseTimeout;
   let observedCount = 0;
   try {
+    process.env.LIGULE_HOME = dataHome;
+    host = serveHost({ ...pair.host, config, provider, policy: config.policy });
     const { sessionId } = await client.call('session.create', {});
     const directSnapshot = await client.call('session.observe', { projectRoot, sessionId, limit: 400, fullResults: true });
     assert.ok(Array.isArray(directSnapshot.events));
@@ -97,7 +101,16 @@ test('polls a real Host observation, ignores stale snapshots, and stops after di
     stop?.();
     stopStale?.();
     pair.client.output.end();
-    await host.release();
-    await rm(projectRoot, { recursive: true, force: true });
+    try { await host?.release(); }
+    finally {
+      try { await rm(projectRoot, { recursive: true, force: true }); }
+      finally {
+        try { await rm(dataHome, { recursive: true, force: true }); }
+        finally {
+          if (previousDataHome === undefined) delete process.env.LIGULE_HOME;
+          else process.env.LIGULE_HOME = previousDataHome;
+        }
+      }
+    }
   }
 });
