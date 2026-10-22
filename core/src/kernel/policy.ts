@@ -474,7 +474,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         covered = undefined;
       } else if (command === undefined) {
         // 不含命令文本的调用不受命令语法检查影响；自动策略可放行，逐次审批仍需匹配放行规则。
-        covered = effective === 'auto' || effective === 'none' || effective === 'never' ? null : covering();
+        covered = effective === 'auto' || effective === 'none' ? null : covering();
       } else if (effective === 'auto') {
         // 自动策略只放行可完整解析且每段首词都不是脚本解释器的命令。
         // 不剥离解释器包装；例如 `bash -lc "git status"` 仍须审批。

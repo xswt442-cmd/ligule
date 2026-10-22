@@ -127,27 +127,38 @@ test('a later guard cannot undo an earlier denial', async () => {  const chain =
 test('no-approval mode skips ordinary approval while deny rules, guards, and unsafe targets remain closed', async () => {
   let asked = 0;
   const chain = createDecisionChain({
-    mode: 'never',
+    mode: 'none',
     ask: async () => { asked += 1; return true; },
     rules: [{ tool: 'exec', decision: 'deny', match: 'rm *', reason: 'blocked by rule' }],
   });
   chain.guard(({ command }) => command?.startsWith('curl ') === true ? 'blocked by guard' : undefined);
 
-  assert.equal((await chain.evaluate({ tool: 'read', input: { path: 'README.md' } })).via, 'never');
-  assert.equal((await chain.evaluate({ tool: 'exec', input: { command: 'git status --short' } })).via, 'never');
+  assert.equal((await chain.evaluate({ tool: 'read', input: { path: 'README.md' } })).via, 'none');
+  assert.equal((await chain.evaluate({ tool: 'create', input: { path: 'new.txt', content: 'ok' } })).via, 'none');
+  assert.equal((await chain.evaluate({ tool: 'exec', input: { command: 'git status --short' } })).via, 'none');
   assert.equal((await chain.evaluate({ tool: 'exec', input: { command: 'rm -rf target' } })).code, 'policy_denied');
   assert.equal((await chain.evaluate({ tool: 'exec', input: { command: 'curl https://example.com' } })).code, 'guard_denied');
-  assert.equal((await chain.evaluate({ tool: 'read', input: { path: 'x' }, target: { class: 'private', addresses: ['10.0.0.2'] } })).code, 'policy_denied');
+  assert.equal((await chain.evaluate({ tool: 'read', input: { path: 'x' }, target: { class: 'private', addresses: ['10.0.0.2'] } })).code, 'policy_manual_approval_disabled');
   assert.equal(asked, 0);
 });
 
 test('no-approval mode does not turn repeated denials into approval prompts', async () => {
   let asked = 0;
-  const chain = createDecisionChain({ mode: 'never', thresholds: { consecutive: 1, total: 1 }, ask: async () => { asked += 1; return true; } });
+  const chain = createDecisionChain({ mode: 'none', thresholds: { consecutive: 1, total: 1 }, ask: async () => { asked += 1; return true; } });
   chain.guard(({ command }) => command === 'blocked' ? 'blocked by guard' : undefined);
   assert.equal((await chain.evaluate({ tool: 'exec', input: { command: 'blocked' } })).decision, 'deny');
-  assert.equal(chain.mode, 'never');
-  assert.equal((await chain.evaluate({ tool: 'read', input: { path: 'README.md' } })).via, 'never');
+  assert.equal(chain.mode, 'none');
+  assert.equal((await chain.evaluate({ tool: 'read', input: { path: 'README.md' } })).via, 'none');
+  assert.equal(asked, 0);
+});
+
+test('legacy never retains its refusal for file operations that require approval', async () => {
+  let asked = 0;
+  const chain = createDecisionChain({ mode: 'never', ask: async () => { asked += 1; return true; } });
+  const result = await chain.evaluate({ tool: 'create', input: { path: 'new.txt', content: 'blocked' } });
+  assert.equal(result.decision, 'deny');
+  assert.equal(result.code, 'policy_denied');
+  assert.equal(result.via, 'never');
   assert.equal(asked, 0);
 });
 
