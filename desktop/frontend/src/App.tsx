@@ -32,6 +32,7 @@ import { loadSettings, mergeQueueIntoDraft, readSettings, saveSettings, type Set
 import { LocaleProvider, localeOf } from './locale';
 import { notificationOf, notificationTarget, type NotificationKind, type NotificationTarget } from './notifications';
 import { SessionStreamBuffer } from './session-stream';
+import { observeExternalSession } from './external-session-observation';
 import { Composer } from './components/Composer';
 import { ExternalSessionComposer, ExternalSessionControlPanel } from './components/ExternalSessionControlPanel';
 import type { MentionState } from './mentions';
@@ -846,28 +847,18 @@ export function App({ transport }: { transport: Transport }) {
 
   useEffect(() => {
     if (sessionId === null || readOnlySessionId !== sessionId) return;
-    let disposed = false;
-    let inFlight = false;
     const request = openRequest.current;
-    const refresh = async () => {
-      if (disposed || inFlight) return;
-      inFlight = true;
-      try {
-        const snapshot = await client.call('session.observe', {
-          projectRoot, sessionId, limit: RENDER_WINDOW, fullResults: true,
-        }, 10_000) as { events: Record_[]; hasMore: boolean; writerActive: boolean };
-        if (disposed || openRequest.current !== request || active.current !== sessionId) return;
+    return observeExternalSession({
+      client,
+      projectRoot,
+      sessionId,
+      limit: RENDER_WINDOW,
+      isCurrent: () => openRequest.current === request && active.current === sessionId,
+      onSnapshot: (snapshot) => {
         setExternalWriterActive(snapshot.writerActive);
         setRows((current) => appendProjectedRecords(current, snapshot.events));
-      } catch {
-        // 观察器只读；一次快照读取失败不改变会话控制权或本地草稿。
-      } finally {
-        inFlight = false;
-      }
-    };
-    void refresh();
-    const timer = setInterval(() => void refresh(), 1_000);
-    return () => { disposed = true; clearInterval(timer); };
+      },
+    });
   }, [client, projectRoot, readOnlySessionId, sessionId]);
 
   useEffect(() => {
