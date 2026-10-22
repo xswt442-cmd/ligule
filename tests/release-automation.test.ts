@@ -419,6 +419,21 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
   assert.ok(JSON.stringify(publish).includes('pnpm install --frozen-lockfile'));
   assert.ok(JSON.stringify(publish.jobs.npm).includes('npm publish --provenance --access public'));
   assert.ok(publish.jobs.checks.steps.some((step) => step.run?.includes('pnpm --filter ligule run pack-release dist-tarball')));
+  const sandboxProbe = readFileSync(new URL('../scripts/require-linux-sandbox.js', import.meta.url), 'utf8');
+  assert.match(sandboxProbe, /probeLinuxSandboxIsolation/);
+  assert.match(sandboxProbe, /if \(!result\.available\)/);
+  for (const [label, steps] of [['CLI release', publish.jobs.checks.steps], ['shared CI', ci.jobs.test.steps]] as const) {
+    const installBubblewrap = steps.findIndex((step) => step.name === 'install bubblewrap for Linux sandbox tests');
+    const allowUserNamespaces = steps.findIndex((step) => step.name === 'allow bubblewrap user namespaces');
+    const coreBuild = steps.findIndex((step) => step.name === 'build Core for required Linux sandbox probe');
+    const requiredProbe = steps.findIndex((step) => step.name === 'require the Linux sandbox isolation probe');
+    const fullTest = steps.findIndex((step) => step.name === 'test');
+    assert.ok(installBubblewrap >= 0 && allowUserNamespaces > installBubblewrap && coreBuild > allowUserNamespaces
+      && requiredProbe > coreBuild && fullTest > requiredProbe,
+    `${label} must require the full sandbox probe before its test suite`);
+    assert.match(steps[installBubblewrap].run ?? '', /sudo apt-get install -y bubblewrap/);
+    assert.match(steps[requiredProbe].run ?? '', /scripts\/require-linux-sandbox\.js/);
+  }
   assert.ok(publish.jobs.verify.steps.some((step) => step.run?.startsWith('pnpm --filter ligule run verify-install ')));
   assert.doesNotMatch(JSON.stringify(publish.jobs.npm), /pnpm|registry-version/,
     'the OIDC publication job consumes the already checked registry result and does not depend on an uninstalled helper');
