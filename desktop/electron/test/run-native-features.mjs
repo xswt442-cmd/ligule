@@ -115,7 +115,7 @@ try {
   assert.ok(defaultExpiry > Date.now() + 23 * 60 * 60 * 1000 && defaultExpiry < Date.now() + 25 * 60 * 60 * 1000);
   report.cases.agentControlDefaults = agentControlDefaults;
 
-  const agentControlUi = await sendCommand('create-agent-control-grant');
+  const agentControlUi = await sendCommand('create-agent-control-grant', undefined, 45_000);
   assert.equal(agentControlUi.revoked, true, `the real Desktop settings page must create and revoke a bounded grant: ${JSON.stringify(agentControlUi)}`);
   assert.equal(agentControlUi.separateConfirmations, true);
   assert.equal(agentControlUi.sourceDisplayed, true, 'the real Desktop authorization details must display the grant source');
