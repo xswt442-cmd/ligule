@@ -52,6 +52,24 @@ flowchart LR
 
 `ligule mcp-server --project <绝对项目根>` 通过 [MCP 适配器](../../core/src/host/mcp-server.ts) 暴露本地控制工具。[控制门面](../../core/src/host/control.ts) 调用同一 Host，维护进程内 operation 状态，并将会话操作限制在启动时授权的项目内。默认模式拒绝需要审批的操作；明确启用 `--operator` 后，客户端可答复真实待决的审批与提问，并修改受支持的会话设置，但不能覆盖硬拒绝。可信 TUI/Desktop 可创建项目绑定的 [Agent Control Grant](../../core/src/host/agent-control.ts)；`--grant <id>` 将会话 Permission、网络和 Policy 限制在 Grant 的默认值与上限内，Host 会在请求时核验撤销、到期和项目绑定。连接关闭时会取消运行并释放会话锁；Session JSONL 持久保存会话记录，operation ID 和消息队列只在当前进程内有效。使用方法见 [MCP 用户指南](../mcp/mcp-guide.zh-CN.md)。
 
+### 委派执行与外控会话
+
+一次运行可带有 `DelegationSpec`，其中的 `mode` 和 `outputSchema` 由共享的[委派契约](../../core/src/delegation.ts)校验。内部 `subagent` 工具与 MCP 的 `ligule_run` / `ligule_run_start` 共用结构化输出验证和 `RunResult` 结果类型；外部 MCP 运行仍使用其原会话，不会自动创建子会话。
+
+内部子代理在同一 Host 进程中创建派生 Kernel、Loop 和独立 Session JSONL，记录 ID 为父 Session 的 `.sub-N`。子代理继承父会话的配置、Provider、插件工具、Permission 与 Policy 判定实例，但不注册 `subagent` 工具；每个父轮最多同时运行三个。子模式只能收窄父模式可用工具，模型调用次数、输出、思考和循环预算不能超过父上限。子任务的 RunResult 和 Session 引用作为父工具结果返回，因此失败或取消的子记录仍可查看。
+
+外部客户端通过本地 stdio MCP 进入 Control 门面，再由它操作授权项目中的 Host Session。可信 TUI/Desktop 通过本地 Agent Control IPC 观察状态、回答交互或接管任务；Host 仍是 Session 的写入者，锁阻止另一个 Host 并发写同一记录。Session JSONL 保存消息和工具事件；operation ID、事件缓存、待处理请求和消息队列属于 Control 进程内状态，服务重启后需要从持久 Session 重新接回，旧运行编号不可继续使用。
+
+```mermaid
+flowchart LR
+  Parent[父 Kernel 与 Session] -->|subagent 工具| Child[派生 Kernel 与子 Session JSONL]
+  Child -->|RunResult 与子 Session 引用| Parent
+  MCP[本地 stdio MCP] --> Control[Control 门面与进程内运行状态]
+  UI[TUI / Desktop] -->|Agent Control 本地 IPC| Control
+  Control --> Host[授权项目的 Host]
+  Host --> Log[(Session JSONL)]
+```
+
 ### Kernel、插件、工具与能力
 
 Kernel 从空工具注册表开始。Host 通过[装配器](../../core/src/kernel/assembly.ts)安装插件；插件可以注册工具和提示片段，并返回清理动作。工具模式从已注册工具中选择可交给模型的项目，并选择提示片段；模式不实现工具，也不作审批决定。

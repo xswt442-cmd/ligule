@@ -52,6 +52,24 @@ The [project environment loader](../../core/src/host/environment.ts) supplies co
 
 `ligule mcp-server --project <absolute-root>` exposes local control tools through the [MCP adapter](../../core/src/host/mcp-server.ts). The [control facade](../../core/src/host/control.ts) calls the same Host, tracks process-local operations, and limits session operations to the project authorized at startup. By default, it denies operations that require approval. With `--operator`, clients can reply to real pending approvals and questions and change supported session settings; hard denials cannot be overridden. Trusted TUI/Desktop clients can create project-bound [Agent Control Grants](../../core/src/host/agent-control.ts); `--grant <id>` bounds session Permission, network access, and Policy to the Grant's defaults and ceilings, which the Host revalidates on requests. Disconnect cancels runs and releases session locks. Session JSONL persists session records, while operation IDs and the message queue exist only in the current process. See the [MCP user guide](../mcp/mcp-guide.en.md).
 
+### Delegated runs and external sessions
+
+A run can carry a `DelegationSpec` with an optional `mode` and `outputSchema`, validated by the shared [delegation contract](../../core/src/delegation.ts). The internal `subagent` tool and MCP `ligule_run` / `ligule_run_start` share structured-output validation and the `RunResult` result type. An external MCP run continues in its original session; it does not automatically create a child session.
+
+An internal subagent creates a derived Kernel and Loop in the same Host process, with its own Session JSONL record named from the parent Session ID plus `.sub-N`. It inherits the parent configuration, Provider, plugin tools, Permission, and Policy decision chain, but does not register the `subagent` tool. A parent turn can run at most three children concurrently. A child mode can only narrow the parent's available tools, and model-call, output, thinking, and loop budgets cannot exceed the parent limits. Its RunResult and Session reference return as the parent tool result, so failed or cancelled child records remain inspectable.
+
+An external client reaches the authorized Host Session through local stdio MCP and the Control facade. Trusted TUI/Desktop clients use local Agent Control IPC to observe status, answer interactions, or take over a task. The Host remains the Session writer; session locks prevent two Hosts from writing the same record at once. Session JSONL stores messages and tool events. Operation IDs, the event cache, pending requests, and the message queue belong to the Control process; after a restart, clients must reopen the persistent Session and cannot reuse old operation IDs.
+
+```mermaid
+flowchart LR
+  Parent[Parent Kernel and Session] -->|subagent tool| Child[Derived Kernel and child Session JSONL]
+  Child -->|RunResult and child Session reference| Parent
+  MCP[Local stdio MCP] --> Control[Control facade and process-local run state]
+  UI[TUI / Desktop] -->|Local Agent Control IPC| Control
+  Control --> Host[Host for the authorized project]
+  Host --> Log[(Session JSONL)]
+```
+
 ### Kernel, plugins, tools, and capabilities
 
 The kernel starts with an empty tool registry. The Host installs plugins through the [assembly loader](../../core/src/kernel/assembly.ts); a plugin registers tools and returns cleanup actions. The selected [tool mode](../../core/src/kernel/modes.ts) restricts which registered tools enter the model manifest and selects named prompt fragments. It does not implement tools or provide an approval decision.

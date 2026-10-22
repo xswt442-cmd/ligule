@@ -38,7 +38,7 @@ Windows 路径示例：
 }
 ```
 
-每个 MCP Server 进程只授权启动时指定的一个项目。客户端通过 MCP `tools/list` 发现十个工具及其参数 schema：
+每个 MCP Server 进程只授权启动时指定的一个项目。客户端通过 MCP `tools/list` 发现十二个工具及其参数 schema：
 
 - `ligule_session_create`：在授权项目中创建会话。
 - `ligule_session_open`：接回已有会话。列表中的会话需要先接回，之后才能提交任务或读取记录。
@@ -47,11 +47,13 @@ Windows 路径示例：
 - `ligule_interaction_reply`：对真实待决的审批或提问作一次性答复；只接受原会话和请求编号。
 - `ligule_session_send`：空闲时开始新一轮，运行中按顺序排入下一轮消息，也可继续或清理队列。
 - `ligule_run_start`：提交一条任务，返回当前进程内的 `operationId` 和会话编号。
+- `ligule_run`：启动任务并等待终态；等待超时会返回当前状态，不会取消运行。
 - `ligule_run_status`：查询任务是否仍在运行、已完成、失败或取消。
+- `ligule_run_await`：等待已知 `operationId`；超时同样不会取消运行。
 - `ligule_session_read`：分页读取会话记录。
 - `ligule_run_cancel`：按 `operationId` 取消相应任务。
 
-推荐顺序是先创建或接回会话，再读取 `ligule_session_configure`。提交任务后轮询 `ligule_run_status`；根据 `phase`、`waitingFor` 和 `pendingInteractions` 继续等待或审阅后答复。完成后用 `ligule_session_read` 查看新增记录。状态通知通过 MCP logging 尽力发送；通知不可用时轮询仍可读取同一状态。需要停止时调用 `ligule_run_cancel`。工具参数以运行中的 `tools/list` schema 为准。
+推荐顺序是先创建或接回会话，再读取 `ligule_session_configure`。若希望服务端等待，可用 `ligule_run`；若要立即取回控制权，则用 `ligule_run_start`，之后通过 `ligule_run_await` 等待或用 `ligule_run_status` 轮询。两种等待超时都不会取消任务；根据 `phase`、`waitingFor` 和 `pendingInteractions` 继续等待或审阅后答复。完成后用 `ligule_session_read` 查看新增记录。状态通知通过 MCP logging 尽力发送；通知不可用时轮询仍可读取同一状态。需要停止时调用 `ligule_run_cancel`。工具参数以运行中的 `tools/list` schema 为准。
 
 ## 操控者授权与会话设置
 
@@ -62,6 +64,10 @@ Windows 路径示例：
 ```
 
 `--operator` 代表本机操控者明确授权这个 stdio 客户端。它允许回答真实待处理的 Policy 审批和用户提问，以及修改单个会话的 Mode、Policy、模型、生成参数和每轮循环上限；它不更改文件边界、工作区信任或硬拒绝规则。可选 Policy 只有 `ask`、`auto` 和 `none`；已保存的旧版 `never` 保持原有拒绝语义。审批不能覆盖非法工具参数或工作区边界。`ligule_run_status` 的待处理交互只含有界摘要，不会重复传输完整工具参数。可信本地 TUI 或 Desktop 可以在请求仍待处理时展开详情。Host 无法安全审阅请求时会返回明确的 unavailable/error 错误码，不会记作用户拒绝。
+
+## 委派运行与结构化结果
+
+`ligule_run` 与 `ligule_run_start` 接受可选 `delegation`。其中 `mode` 可选择具名或内联模式，但只能缩小当前会话的工具和提示片段范围，不能扩大会话、Permission、Policy 或 Grant 上限。`outputSchema` 可要求该轮提交符合受支持 JSON Schema 的结构化结果；模型必须调用 `ligule_delegation_result` 提交，通过校验后运行才会以有效结构化结果完成。模式和结果契约只作用于本次运行，不会创建新会话或修改项目配置。内部 `subagent` 是模型可调用的工具，和 MCP 外控的一轮委派不是同一个会话。
 
 ## Agent Control 项目授权
 

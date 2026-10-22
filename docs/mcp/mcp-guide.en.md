@@ -38,7 +38,7 @@ For example, on Windows:
 }
 ```
 
-Each MCP server process authorizes only the project supplied at startup. Use MCP `tools/list` to discover all ten tools and their input schemas:
+Each MCP server process authorizes only the project supplied at startup. Use MCP `tools/list` to discover all twelve tools and their input schemas:
 
 - `ligule_session_create`: create a session in the authorized project.
 - `ligule_session_open`: reopen an existing session. A session returned by the list tool must be opened before it can be used for a run or record read.
@@ -47,11 +47,13 @@ Each MCP server process authorizes only the project supplied at startup. Use MCP
 - `ligule_interaction_reply`: answer one real pending approval or question, bound to its session and request ID.
 - `ligule_session_send`: start a round when idle, queue the next message while running, or continue and manage the queue.
 - `ligule_run_start`: submit one task and return an `operationId` scoped to the current process and the session ID.
+- `ligule_run`: start a task and wait for a terminal result; a wait timeout returns the current state without cancelling the run.
 - `ligule_run_status`: check whether the run is running, done, failed, or cancelled.
+- `ligule_run_await`: wait for a known `operationId`; a timeout also leaves the run active.
 - `ligule_session_read`: read a page of session records.
 - `ligule_run_cancel`: cancel the run identified by its `operationId`.
 
-Recommended flow: create or reopen a session and read `ligule_session_configure`. After submitting work, poll `ligule_run_status`; use `phase`, `waitingFor`, and `pendingInteractions` to decide whether to wait or review and reply. Read new records with `ligule_session_read` after completion. MCP logging notifications are best-effort; polling exposes the same state when notifications are unavailable. Call `ligule_run_cancel` to stop a run. The running server's `tools/list` schemas define the arguments.
+Recommended flow: create or reopen a session and read `ligule_session_configure`. Use `ligule_run` when the caller should wait for a bounded time, or `ligule_run_start` to return immediately. Then use `ligule_run_await` to wait for a known operation or `ligule_run_status` to poll it. Neither wait timeout cancels the run. Use `phase`, `waitingFor`, and `pendingInteractions` to decide whether to keep waiting or review and reply. Read new records with `ligule_session_read` after completion. MCP logging notifications are best-effort; polling exposes the same state when notifications are unavailable. Call `ligule_run_cancel` to stop a run. The running server's `tools/list` schemas define the arguments.
 
 ## Operator authorization and session settings
 
@@ -62,6 +64,10 @@ The default startup does not grant operator authority. In this mode, approval re
 ```
 
 `--operator` means the local operator explicitly authorizes this stdio client. It permits answering real pending Policy decisions and user questions, and changing one session's mode, Policy, model, generation settings, and per-turn loop limit. It does not change workspace trust, file boundaries, or hard denials. The three selectable Policy modes are `ask`, `auto`, and `none`; saved legacy `never` retains its old refusal behavior. An approval cannot override invalid tool input or workspace boundaries. Pending interactions in `ligule_run_status` contain a bounded summary, not a duplicate of full tool arguments. The trusted local TUI or Desktop can expand the pending details while the request remains active. If Host cannot review a request safely, it returns an explicit unavailable/error code instead of recording a human refusal.
+
+## Delegated runs and structured results
+
+`ligule_run` and `ligule_run_start` accept an optional `delegation` object. Its `mode` may select a named or inline mode, but can only narrow the current session's tools and prompt fragments; it cannot expand the session, Permission, Policy, or Grant ceiling. `outputSchema` can require a structured result matching a supported JSON Schema. The model must submit it with `ligule_delegation_result`; the run is valid only after that value passes validation. This contract applies to one run and does not create a session or edit project configuration. The internal `subagent` tool is a model-callable child run and is separate from one MCP-controlled run.
 
 ## Agent Control project grants
 
