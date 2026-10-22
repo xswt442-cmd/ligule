@@ -441,6 +441,7 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
   const registryCommand = registrySteps.find((step) => step.name === 'compare the package tarball with the registry')?.run;
   assert.ok(registryCommand);
   assert.match(registryCommand, /pnpm --filter ligule run --silent registry-version "ligule@/);
+  assert.match(registryCommand, /"\$GITHUB_WORKSPACE\/dist-tarball\/ligule-\$\{version\}\.tgz"/);
   assert.doesNotMatch(registryCommand, /registry-version --/);
   assert.ok(registrySteps.some((step) => step.run === 'pnpm install --frozen-lockfile'));
   assert.ok(registrySteps.findIndex((step) => step.uses === 'pnpm/action-setup@v4')
