@@ -981,6 +981,26 @@ test('settings.catalog is unavailable to a Host without the trusted local UI cap
   });
 });
 
+test('settings.catalog mirrors Host-owned custom tool plugins without opening a session', async () => {
+  const customPlugin = {
+    name: 'settings-catalog-fixture',
+    setup(kernel) {
+      return kernel.register({
+        name: 'fixture_lookup',
+        description: 'Read one fixture value.',
+        access: 'read',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+        run: async () => ({ value: 'fixture' }),
+      });
+    },
+  };
+  await withInProcessHost(async (connection) => {
+    const catalog = await connection.request('settings.catalog', {});
+    assert.ok(catalog.tools.some((tool) => tool.name === 'fixture_lookup' && tool.description === 'Read one fixture value.'));
+    assert.equal(catalog.tools.some((tool) => tool.name === 'read'), false, 'the no-session catalog does not invent default plugins absent from this Host');
+  }, undefined, { permissionControl: true, plugins: [customPlugin] });
+});
+
 // 配置写入由 Host 校验字段和配置层；文件被其他进程修改后应返回冲突，而不覆盖对方的内容。
 test('consecutive first-time writes accumulate into one provider instead of restarting from the load snapshot', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ligule-config-first-'));

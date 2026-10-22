@@ -779,18 +779,20 @@ export function createHost({
     return mcpServerConfigs(mcpConfig, process.env, env.projectRoot);
   }
 
-  // Settings can inspect the base runtime registry before opening a conversation.
+  // Settings can inspect the Host-configured runtime registry before opening a conversation.
   // This assembles metadata only; no tool run, extension import, or MCP connection is started.
   async function settingsToolCatalog(env: ProjectEnvironment, skills: SkillRegistry): Promise<ReturnType<Kernel['catalog']>> {
     const kernel = createKernel({ config: env.config });
     const mcp = createMcpRegistry(env.mcpConfigs);
     const managedProcesses = createManagedProcessRegistry();
-    const catalogPlugins: Plugin<Kernel>[] = [
-      minimalPlugin,
-      networkPlugin,
-      createMcpPlugin(mcp),
-      managedProcessPlugin(managedProcesses),
+    const basePlugins: Plugin<Kernel>[] = [
+      ...plugins,
       ...(skills.skills.length === 0 ? [] : [createSkillPlugin(skills, () => env.mcpConfigs.map((server) => server.name))]),
+      createMcpPlugin(mcp),
+    ];
+    const catalogPlugins: Plugin<Kernel>[] = [
+      ...basePlugins,
+      managedProcessPlugin(managedProcesses),
       ...(interactive ? [createAskUserPlugin({ ask: async () => { throw new KernelError('settings_catalog_not_executable'); } })] : []),
       createSubagentPlugin({
         config: env.config,
@@ -799,7 +801,7 @@ export function createHost({
         prompt: { staticPrefix: '' },
         directory: env.directory,
         sessionId: 'settings-catalog',
-        plugins: [minimalPlugin, networkPlugin],
+        plugins: basePlugins,
         modePaths: env.modePaths,
       }),
     ];
