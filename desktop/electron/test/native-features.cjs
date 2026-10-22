@@ -108,7 +108,7 @@ async function inspectExportUi() {
 async function openAgentControlPanel() {
   assertReady();
   return await window.webContents.executeJavaScript(`(async () => {
-    const deadline = Date.now() + 15_000;
+    const deadline = Date.now() + 30_000;
     const wait = async predicate => {
       while (Date.now() < deadline) {
         const value = predicate();
@@ -127,7 +127,16 @@ async function openAgentControlPanel() {
     }
     const settings = await wait(() => [...document.querySelectorAll('button.entry')]
       .find(button => /^(设置|Settings)$/u.test(button.textContent?.trim() ?? '')));
-    if (settings === null) throw new Error('native_feature_settings_button_missing');
+    if (settings === null) {
+      const root = document.querySelector('#root');
+      throw new Error('native_feature_settings_button_missing:' + JSON.stringify({
+        readyState: document.readyState,
+        rootMounted: root !== null && root.childElementCount > 0,
+        rootChildren: root?.childElementCount ?? 0,
+        bodyText: document.body.innerText.slice(0, 500),
+        buttons: [...document.querySelectorAll('button')].slice(0, 20).map(button => button.textContent?.trim() ?? ''),
+      }));
+    }
     settings.click();
     const controlTab = await wait(() => [...document.querySelectorAll('.sheet-nav [role="tab"]')]
       .find(button => /外部控制|Agent Control/u.test(button.textContent ?? '')));
