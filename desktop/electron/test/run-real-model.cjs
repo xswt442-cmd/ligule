@@ -354,13 +354,28 @@ async function verifyExternalSessionControl() {
     })()`);
     await waitFor(`(() => {
       const banner = document.querySelector('.center .banner[role="status"]');
-      const input = document.querySelector('textarea.composer-input');
+      const composer = document.querySelector('.external-session-composer');
+      const normalComposer = document.querySelector('footer.composer:not(.external-session-composer)');
+      const input = composer?.querySelector('textarea[aria-label="发送消息到外控会话"], textarea[aria-label="Send a message to the external session"]');
       const text = banner?.textContent ?? '';
-      return (text.includes('外控 Agent 正在运行') || text.includes('external agent is controlling')) && input?.readOnly === true;
-    })()`, 15_000, 'external_session_observer_not_read_only');
+      const config = composer?.querySelector('.external-session-config')?.textContent ?? '';
+      const hasModel = config.includes('模型') || config.includes('Model');
+      const hasToolMode = config.includes('工具模式') || config.includes('Tool mode');
+      const hasPolicy = config.includes('Policy');
+      const hasPermission = config.includes('权限') || config.includes('Permission');
+      return (text.includes('外控 Agent 正在运行') || text.includes('external agent is controlling'))
+        && composer !== null && normalComposer === null && input?.readOnly === false
+        && composer.querySelector('details.external-session-grant') !== null
+        && hasModel && hasToolMode && hasPolicy && hasPermission;
+    })()`, 15_000, 'external_session_composer_or_config_missing');
     const sendDisabled = await evaluate(`document.querySelector('button.send')?.disabled === true`);
-    assert.equal(sendDisabled, true, 'observer_main_composer_remains_read_only');
-    await waitFor(`document.querySelector('.external-control textarea[aria-label="发送消息到外控会话"], .external-control textarea[aria-label="Send a message to the external session"]') !== null`, 10_000, 'external_control_composer_missing');
+    assert.equal(sendDisabled, true, 'external_session_composer_must_start_empty');
+    await evaluate(`document.querySelector('.external-session-grant summary')?.click()`);
+    await waitFor(`(() => {
+      const details = document.querySelector('.external-session-grant');
+      const text = details?.textContent ?? '';
+      return details?.open === true && (text.includes('权限上限') || text.includes('Permission ceiling'));
+    })()`, 10_000, 'external_session_grant_details_missing');
 
     const baseline = (await fetch(`${process.env.LIGULE_STUB_CONTROL}/state`).then(response => response.json())).requests;
     const started = await mcpClient.callTool({ name: 'ligule_run_start', arguments: {
@@ -375,7 +390,7 @@ async function verifyExternalSessionControl() {
       return source.includes('外部 Agent') || source.includes('External agent');
     })()`, 10_000, 'external_controller_message_source_not_visible');
     const typed = await evaluate(`(() => {
-      const input = document.querySelector('.external-control-compose textarea');
+      const input = document.querySelector('.external-session-composer textarea[aria-label="发送消息到外控会话"], .external-session-composer textarea[aria-label="Send a message to the external session"]');
       if (input === null) return false;
       const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
       setter.call(input, 'desktop-human-control-followup');
@@ -383,9 +398,9 @@ async function verifyExternalSessionControl() {
       return true;
     })()`);
     assert.equal(typed, true, 'external_control_message_input_missing');
-    await evaluate(`document.querySelector('.external-control-compose button')?.click(); true`);
-    await waitFor(`document.querySelector('.external-control .external-control-note')?.textContent.includes('已加入外控会话队列') === true
-      || document.querySelector('.external-control .external-control-note')?.textContent.includes('queued for the external session') === true`, 10_000, 'external_control_message_not_queued');
+    await evaluate(`document.querySelector('.external-session-composer button.send')?.click(); true`);
+    await waitFor(`document.querySelector('.external-session-note')?.textContent.includes('已加入外控会话队列') === true
+      || document.querySelector('.external-session-note')?.textContent.includes('queued for the external session') === true`, 10_000, 'external_control_message_not_queued');
     await evaluate(`(() => {
       const choice = document.querySelector('.external-control .question-option input');
       choice?.click();
@@ -425,11 +440,11 @@ async function verifyExternalSessionControl() {
 
     await fetch(`${process.env.LIGULE_STUB_CONTROL}/hang`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hang: true }) });
     await evaluate(`(() => {
-      const input = document.querySelector('.external-control-compose textarea');
+      const input = document.querySelector('.external-session-composer textarea[aria-label="发送消息到外控会话"], .external-session-composer textarea[aria-label="Send a message to the external session"]');
       const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
       setter.call(input, 'desktop-human-control-cancel');
       input.dispatchEvent(new Event('input', { bubbles: true }));
-      document.querySelector('.external-control-compose button')?.click();
+      document.querySelector('.external-session-composer button.send')?.click();
       return true;
     })()`);
     await waitFor(`(() => [...document.querySelectorAll('.external-control-head button')].some(item => /停止本轮|Stop turn/u.test(item.textContent ?? '')))()`, 15_000, 'external_control_cancel_button_missing');
@@ -603,8 +618,12 @@ async function runChecks() {
       const skill = events.findLast(event => event.kind === 'tool' && event.tool === 'skill');
       if (skill?.resultKind !== 'result' || skill.resultFailed) throw Object.assign(new Error('skill_activation_result_missing'), { code: 'skill_activation_result_missing' });
       if (skill.resultHasSkillProof !== true) throw Object.assign(new Error('project_skill_body_not_loaded'), { code: 'project_skill_body_not_loaded' });
-      if (events.some(event => event.kind === 'tool' && (event.tool === 'mcp.inspect' || event.tool === 'mcp.call'))) {
-        throw Object.assign(new Error('mcp_tool_exposed_to_restricted_session'), { code: 'mcp_tool_exposed_to_restricted_session' });
+      const inspected = events.findLast(event => event.kind === 'tool' && event.tool === 'mcp.inspect');
+      if (inspected?.resultCode !== 'mcp_server_untrusted') {
+        throw Object.assign(new Error('untrusted_mcp_server_was_not_denied'), { code: 'untrusted_mcp_server_was_not_denied' });
+      }
+      if (events.some(event => event.kind === 'tool' && event.tool === 'mcp.call')) {
+        throw Object.assign(new Error('mcp_call_ran_without_trusted_server'), { code: 'mcp_call_ran_without_trusted_server' });
       }
 
       const response = await fetch(`${stubControl}/state`);
@@ -612,12 +631,13 @@ async function runChecks() {
       for (const [key, expected, code] of [
         ['skillToolAvailable', true, 'skill_mcp_skill_tool_not_available'],
         ['skillActivated', true, 'skill_mcp_skill_not_activated'],
-        ['mcpInspectAvailable', false, 'mcp_inspect_exposed_to_restricted_session'],
-        ['mcpCallAvailable', false, 'mcp_call_exposed_to_restricted_session'],
+        ['mcpInspectAvailable', true, 'mcp_inspect_not_disclosed'],
+        ['mcpCallAvailable', true, 'mcp_call_not_disclosed'],
+        ['mcpInspectRequested', true, 'untrusted_mcp_inspect_not_requested'],
       ]) {
         if (state.skillMcpProof?.[key] !== expected) throw Object.assign(new Error(code), { code });
       }
-      return '真实 Electron 窗口装载项目 Skill；workspace-write 会话没有向模型开放 MCP 工具，也没有记录 MCP 调用';
+      return '真实 Electron 窗口装载项目 Skill；MCP 披露工具可见，但未信任的 Server 在 Host 预检中被拒绝，未启动 MCP Server 或执行其工具';
     });
   }
 

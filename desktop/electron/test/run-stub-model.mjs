@@ -40,7 +40,7 @@ const providerLabel = '本地 stub 模型';
 const providerRequests = [];
 // 启用后只记录新请求而不返回响应，用于验证界面在请求等待期间的行为。
 let hangRequests = false;
-const skillMcpProof = { skillToolAvailable: false, skillActivated: false, mcpInspectAvailable: false, mcpCallAvailable: false };
+const skillMcpProof = { skillToolAvailable: false, skillActivated: false, mcpInspectAvailable: false, mcpCallAvailable: false, mcpInspectRequested: false };
 const mcpInspectWireName = wireToolName('mcp.inspect');
 const mcpCallWireName = wireToolName('mcp.call');
 
@@ -138,9 +138,17 @@ const server = createServer(async (request, response) => {
       skillMcpProof.skillActivated = String(messages.at(-1)?.content ?? '').includes('SKILL_LOAD_PROOF');
       skillMcpProof.mcpInspectAvailable = inspect !== undefined;
       skillMcpProof.mcpCallAvailable = call !== undefined;
-      streamChunk(response, { choices: [{ index: 0, delta: { content: inspect === undefined || call === undefined
-        ? 'Skill 已激活；当前会话权限没有开放 MCP 工具。'
-        : 'Skill 已激活；检测到 MCP 工具。' } }] });
+      if (inspect !== undefined && call !== undefined) {
+        skillMcpProof.mcpInspectRequested = true;
+        respondWithTool(response, mcpInspectWireName, { server: 'fixture', tool: 'echo' }, 'stub-untrusted-mcp-inspect');
+      } else {
+        streamChunk(response, { choices: [{ index: 0, delta: { content: 'Skill 已激活；当前会话未披露预期的 MCP 工具。' } }] });
+        finish('stop');
+      }
+      return;
+    }
+    if (workflowStep === 2) {
+      streamChunk(response, { choices: [{ index: 0, delta: { content: 'MCP inspect 请求已返回；Host 记录中的结果用于检查 Server 信任拒绝。' } }] });
       finish('stop');
       return;
     }
