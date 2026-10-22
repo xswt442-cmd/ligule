@@ -51,7 +51,7 @@ test('await waits on the active run, returns the result once complete, and can t
       await control.release();
       await rm(directory, { recursive: true, force: true });
     }
-  });
+  })();
 });
 
 test('await rejects unknown operations and invalid wait bounds', async () => {
@@ -66,7 +66,29 @@ test('await rejects unknown operations and invalid wait bounds', async () => {
       await control.release();
       await rm(directory, { recursive: true, force: true });
     }
-  });
+  })();
+});
+
+test('control accepts a Windows path spelling that resolves to its bound project root', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  await mkdir(testplace, { recursive: true });
+  const directory = await mkdtemp(join(testplace, 'control-project-path-'));
+  const host = {
+    async handle({ method }) {
+      if (method === 'session.create') return { sessionId: 'path-session' };
+      throw new Error(`unexpected host method: ${method}`);
+    },
+    async release() {},
+  };
+  const control = createControl(host, directory.toUpperCase());
+  try {
+    const opened = await control.create(directory);
+    assert.equal(opened.sessionId, 'path-session');
+  } finally {
+    await control.release();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('a failed delegated run reports a requested structured result as invalid', async () => {

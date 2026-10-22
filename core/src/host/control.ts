@@ -303,9 +303,13 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
   async function authorized(root: string): Promise<void> {
     if (!isAbsolute(root)) throw new KernelError('control_project_forbidden');
     let actual: string;
-    try { actual = await realpath(resolve(root)); }
+    let expected: string;
+    try {
+      [actual, expected] = await Promise.all([realpath(resolve(root)), realpath(resolve(projectRoot))]);
+    }
     catch { throw new KernelError('control_project_forbidden'); }
-    if (actual !== projectRoot) throw new KernelError('control_project_forbidden');
+    const identity = (path: string) => process.platform === 'win32' ? path.toLowerCase() : path;
+    if (identity(actual) !== identity(expected)) throw new KernelError('control_project_forbidden');
   }
 
   async function session(method: 'session.create' | 'session.open', root: string, sessionId?: string, initial?: McpInitialSettings) {
