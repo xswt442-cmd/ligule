@@ -271,6 +271,7 @@ export function App({ transport }: { transport: Transport }) {
   dockEdits.current = holdReasons(dockGate);
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId>('general');
   const openModelSettings = useCallback(() => { setSettingsSection('model'); setSettingsOpen(true); }, []);
+  const openSecuritySettings = useCallback(() => { setSettingsSection('security'); setSettingsOpen(true); }, []);
   const [notificationProblem, setNotificationProblem] = useState<string | null>(null);
   const [diagnosticLogs, setDiagnosticLogs] = useState<string[]>([]);
   const [notificationDestination, setNotificationDestination] = useState<NotificationTarget | null>(null);
@@ -1793,6 +1794,7 @@ export function App({ transport }: { transport: Transport }) {
         onPickMention={pickMention}
         onSelectModel={selectModel}
         onManageModel={openModelSettings}
+        onOpenSecurity={openSecuritySettings}
         onSessionMenuChange={setSessionMenuOpen}
         onSetMode={(name) => void setMode(name)}
         onSetPolicy={setPolicy}

@@ -4,11 +4,11 @@ import { code, type Client } from '../protocol';
 import { useText } from '../locale';
 import type { PermissionConfirmation, PermissionConfirmations, PermissionTarget } from '../permission-control';
 import { canChangePermission, changePermissionAndRefresh, permissionConfirmations, permissionOf, PermissionRefreshError, readPermissionStatus } from '../permission-control';
-import type { PermissionEnforcement, PermissionNetwork, PermissionProfile, SessionPermission, Status } from '../status';
+import type { PermissionEnforcement, PermissionNetwork, PermissionProfile, Status } from '../status';
 import { Icon } from './Icon';
 import { keepEscape, Modal } from './ui';
 
-export function PermissionPicker({ client, sessionId, status, projectRoot, initialPermission, initialConfirmations, disabled, running, onInitialChange, onStatus }: {
+export function PermissionPicker({ client, sessionId, status, projectRoot, initialPermission, initialConfirmations, disabled, running, onInitialChange, onStatus, onOpenSecurity }: {
   client: Client;
   sessionId: string | null;
   status: Status | null;
@@ -19,6 +19,7 @@ export function PermissionPicker({ client, sessionId, status, projectRoot, initi
   running: boolean;
   onInitialChange: (target: PermissionTarget, confirmations: PermissionConfirmations) => void;
   onStatus: (status: Status) => void;
+  onOpenSecurity: () => void;
 }) {
   const t = useText();
   const permission = permissionOf(status);
@@ -237,26 +238,17 @@ export function PermissionPicker({ client, sessionId, status, projectRoot, initi
 
           {sessionId === null
             ? <p className="permission-note" role="status">{t('平台能力会在创建会话时由 Host 检查；不支持的操作仍会被拒绝。', 'The Host checks platform capabilities when it creates the conversation; unsupported operations remain denied.')}</p>
-            : <>
-              <div className="permission-capabilities" aria-label={t('平台隔离能力', 'Platform sandbox capabilities')}>
-                <strong>{t('平台隔离能力', 'Platform sandbox capabilities')}</strong>
-                <Capability label={t('读取文件', 'File reads')} value={permission.capabilities.filesystemRead} />
-                <Capability label={t('写入文件', 'File writes')} value={permission.capabilities.filesystemWrite} />
-                <Capability label={t('网络隔离', 'Network isolation')} value={permission.capabilities.network} />
-                <Capability label={t('进程隔离', 'Process isolation')} value={permission.capabilities.process} />
-                <Capability label={t('只读 Shell', 'Read-only Shell')} value={permission.profiles.readOnly} />
-                <Capability label={t('工作区写入 Shell', 'Workspace-write Shell')} value={permission.profiles.workspaceWrite} />
-              </div>
-
-              {permission.limitations.length > 0 && <ul className="permission-limitations" aria-label={t('平台限制', 'Platform limitations')}>
-                {permission.limitations.map((limitation, index) => <li key={`${index}:${limitation}`}>{limitation}</li>)}
-              </ul>}
-
-              <div className="permission-execution" role="status">
-                <strong>{t('命令执行', 'Command execution')}: {permission.execution.available ? t('可用', 'Available') : t('不可用', 'Unavailable')}</strong>
-                {!permission.execution.available && <p>{executionReason(permission, t)}</p>}
-              </div>
-            </>}
+            : !unavailableStatus && <>
+                <div className="permission-summary" role="status">
+                  <strong>{t('当前隔离', 'Current isolation')}</strong>
+                  <span>{t(`读 ${enforcementLabel(permission.capabilities.filesystemRead, t)} · 写 ${enforcementLabel(permission.capabilities.filesystemWrite, t)} · 网络 ${enforcementLabel(permission.capabilities.network, t)} · 进程 ${enforcementLabel(permission.capabilities.process, t)}`,
+                    `Read ${enforcementLabel(permission.capabilities.filesystemRead, t)} · write ${enforcementLabel(permission.capabilities.filesystemWrite, t)} · network ${enforcementLabel(permission.capabilities.network, t)} · process ${enforcementLabel(permission.capabilities.process, t)}`)}</span>
+                  <span data-tone={permission.execution.available ? 'ok' : 'bad'}>{t(`命令执行 ${permission.execution.available ? '可用' : '不可用'}`, `Command execution ${permission.execution.available ? 'available' : 'unavailable'}`)}</span>
+                </div>
+                <button type="button" className="permission-details-link" onClick={() => { setOpen(false); onOpenSecurity(); }}>
+                  {t('查看平台隔离详情', 'View platform isolation details')}
+                </button>
+              </>}
 
           {unavailableStatus && <p className="permission-note" role="status">{t(
             '无法读取 Host 的权限状态。界面按只读处理，并禁用更改。',
@@ -330,11 +322,6 @@ export function PermissionPicker({ client, sessionId, status, projectRoot, initi
   </>;
 }
 
-function Capability({ label, value }: { label: string; value: PermissionEnforcement }) {
-  const t = useText();
-  return <div><span>{label}</span><span data-level={value}>{enforcementLabel(value, t)}</span></div>;
-}
-
 function profileLabel(profile: PermissionProfile, t: (chinese: string, english: string) => string): string {
   if (profile === 'read-only') return t('只读', 'Read only');
   if (profile === 'workspace-write') return t('工作区可写', 'Workspace write');
@@ -351,14 +338,4 @@ function enforcementLabel(value: PermissionEnforcement, t: (chinese: string, eng
   if (value === 'full') return t('完整', 'Full');
   if (value === 'partial') return t('部分', 'Partial');
   return t('不可用', 'Unavailable');
-}
-
-function executionReason(permission: SessionPermission, t: (chinese: string, english: string) => string): string {
-  switch (permission.execution.code) {
-    case 'permission_sandbox_unavailable': return t('此平台无法将写入限制在会话工作区内。', 'This platform cannot confine writes to the session workspace.');
-    case 'permission_process_isolation_unavailable': return t('此平台无法隔离并管理命令的进程树。', 'This platform cannot isolate and manage the command process tree.');
-    case 'permission_network_isolation_unavailable': return t('此平台无法执行当前会话的网络限制。', 'This platform cannot enforce the current session network restriction.');
-    case 'permission_status_unavailable': return t('无法读取 Host 提供的执行能力状态。', 'The Host execution capability status is unavailable.');
-    default: return permission.execution.reason ?? permission.execution.code ?? t('Host 未提供原因。', 'The Host did not provide a reason.');
-  }
 }

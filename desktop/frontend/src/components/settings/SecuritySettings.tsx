@@ -86,6 +86,10 @@ export function SecuritySettings({ client, projectRoot, sessionId, status, onSta
           <Row label={t('权限 / 网络', 'Permission / network')}><span>{permission.profile} · {permission.network}</span></Row>
           <Row label={t('文件读取 / 写入', 'File read / write')}><span>{permission.capabilities.filesystemRead} / {permission.capabilities.filesystemWrite}</span></Row>
           <Row label={t('网络 / 进程', 'Network / process')}><span>{permission.capabilities.network} / {permission.capabilities.process}</span></Row>
+          <Row label={t('只读 / 工作区写入 Shell', 'Read-only / workspace-write Shell')}><span>{permission.profiles.readOnly} / {permission.profiles.workspaceWrite}</span></Row>
+          <Row label={t('命令执行', 'Command execution')}>
+            <span>{permission.execution.available ? t('可用', 'Available') : t('不可用', 'Unavailable')}{permission.execution.code === null ? '' : ` · ${permission.execution.code}`}</span>
+          </Row>
           {permission.limitations.length > 0 && <details className="catalog-fold">
             <summary>{t(`平台限制（${permission.limitations.length}）`, `Platform limitations (${permission.limitations.length})`)}</summary>
             <ul>{permission.limitations.map((item) => <li key={item}>{item}</li>)}</ul>
