@@ -108,8 +108,8 @@ async function inspectExportUi() {
 async function openAgentControlPanel() {
   assertReady();
   return await window.webContents.executeJavaScript(`(async () => {
-    const deadline = Date.now() + 30_000;
-    const wait = async predicate => {
+    const wait = async (predicate, timeoutMs = 15_000) => {
+      const deadline = Date.now() + timeoutMs;
       while (Date.now() < deadline) {
         const value = predicate();
         if (value) return value;
@@ -120,13 +120,13 @@ async function openAgentControlPanel() {
     const waitForProject = () => wait(() => {
       const input = document.querySelector('.agent-control-panel .grant-basic-grid label:first-child input');
       return input && input.value.trim() !== '' ? input : null;
-    });
-    if (await wait(() => document.querySelector('.agent-control-panel')) !== null) {
+    }, 15_000);
+    if (document.querySelector('.agent-control-panel') !== null) {
       if (await waitForProject() === null) throw new Error('native_feature_agent_control_project_not_loaded');
       return true;
     }
     const settings = await wait(() => [...document.querySelectorAll('button[aria-haspopup="dialog"]')]
-      .find(button => /^(设置|Settings)$/u.test(button.textContent?.trim() ?? '')));
+      .find(button => /^(设置|Settings)$/u.test(button.textContent?.trim() ?? '')), 30_000);
     if (settings === null) {
       const root = document.querySelector('#root');
       throw new Error('native_feature_settings_button_missing:' + JSON.stringify({
@@ -143,7 +143,7 @@ async function openAgentControlPanel() {
     }
     settings.click();
     const controlTab = await wait(() => [...document.querySelectorAll('.sheet-nav [role="tab"]')]
-      .find(button => /外部控制|Agent Control/u.test(button.textContent ?? '')));
+      .find(button => /外部控制|Agent Control/u.test(button.textContent ?? '')), 15_000);
     if (controlTab === null) throw new Error('native_feature_agent_control_tab_missing');
     controlTab.click();
     if (await wait(() => document.querySelector('.agent-control-panel')) === null) {

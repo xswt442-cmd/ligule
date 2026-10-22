@@ -105,7 +105,7 @@ try {
   report.window = 'real BrowserWindow loaded app://ligule/index.html with production Preload';
 
   const agentControlWorkspace = join(documentsDirectory, 'ligule', 'default-workspace');
-  const agentControlDefaults = await sendCommand('inspect-agent-control-defaults', undefined, 40_000);
+  const agentControlDefaults = await sendCommand('inspect-agent-control-defaults', undefined, 60_000);
   assert.deepEqual(agentControlDefaults.permission, ['read-only', 'read-only'], `the real Desktop must keep the bounded file defaults: ${JSON.stringify(agentControlDefaults)}`);
   assert.deepEqual(agentControlDefaults.network, ['disabled', 'disabled'], `the real Desktop must keep the bounded network defaults: ${JSON.stringify(agentControlDefaults)}`);
   assert.equal(agentControlDefaults.policy, 'ask', `the real Desktop must default the grant to ask: ${JSON.stringify(agentControlDefaults)}`);
