@@ -419,6 +419,15 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
   assert.ok(JSON.stringify(publish).includes('pnpm install --frozen-lockfile'));
   assert.ok(JSON.stringify(publish.jobs.npm).includes('npm publish --provenance --access public'));
   assert.ok(publish.jobs.checks.steps.some((step) => step.run?.includes('pnpm --filter ligule run pack-release dist-tarball')));
+  const releaseCheckSteps = publish.jobs.checks.steps;
+  const installBubblewrap = releaseCheckSteps.findIndex((step) => step.name === 'install bubblewrap for Linux sandbox tests');
+  const allowUserNamespaces = releaseCheckSteps.findIndex((step) => step.name === 'allow bubblewrap user namespaces');
+  const verifyUserNamespaces = releaseCheckSteps.findIndex((step) => step.name === 'verify bubblewrap user namespaces');
+  const fullTest = releaseCheckSteps.findIndex((step) => step.name === 'test');
+  assert.ok(installBubblewrap >= 0 && allowUserNamespaces > installBubblewrap && verifyUserNamespaces > allowUserNamespaces);
+  assert.ok(fullTest > verifyUserNamespaces, 'release tests must require the Linux sandbox before running the full suite');
+  assert.match(releaseCheckSteps[installBubblewrap].run ?? '', /sudo apt-get install -y bubblewrap/);
+  assert.match(releaseCheckSteps[verifyUserNamespaces].run ?? '', /bwrap --unshare-user --ro-bind \/ \/ \/bin\/true/);
   assert.ok(publish.jobs.verify.steps.some((step) => step.run?.startsWith('pnpm --filter ligule run verify-install ')));
   assert.doesNotMatch(JSON.stringify(publish.jobs.npm), /pnpm|registry-version/,
     'the OIDC publication job consumes the already checked registry result and does not depend on an uninstalled helper');
