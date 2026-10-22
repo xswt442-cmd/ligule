@@ -1221,13 +1221,16 @@ async function runChecks() {
             project: row?.querySelector('.catalog-current')?.textContent?.trim() ?? '',
             details: [...(details?.querySelectorAll('p') ?? [])].map(item => item.textContent ?? '').join(' '),
             summary: row?.textContent ?? '',
+            operator: [...(row?.querySelectorAll('.sheet-row') ?? [])]
+              .find(item => /Operator replies|普通审批代答/u.test(item.querySelector('.sheet-label')?.textContent ?? ''))
+              ?.querySelector('.sheet-value')?.textContent ?? '',
           };
         })()`);
         if (grant.id === '' || grant.project.toLowerCase() !== workspace.toLowerCase()) throw new Error('saved_grant_identity_mismatch');
         if (!grant.details.includes('可信界面创建') && !grant.details.includes('Trusted UI')) throw new Error('saved_grant_source_not_trusted_ui');
         const expectedPermission = `${suppliedGrantProfile} / ${suppliedGrantProfile}`;
         if (!grant.summary.includes(expectedPermission) || !grant.summary.includes('unrestricted / unrestricted')
-          || !grant.summary.includes('ask') || (!grant.summary.includes('allowed') && !grant.summary.includes('允许'))) {
+          || !grant.summary.includes('ask') || (!grant.operator.includes('Allowed') && !grant.operator.includes('允许'))) {
           throw new Error('saved_grant_limits_invalid');
         }
         return `可信 Desktop UI 为准确工作区创建 ${grant.id}；${expectedPermission}，unrestricted / unrestricted，Policy ask，允许 --operator`;
