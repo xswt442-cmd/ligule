@@ -117,6 +117,7 @@ async function openAgentControlPanel() {
       }
       return null;
     };
+    if (await wait(() => document.querySelector('.agent-control-panel')) !== null) return true;
     const settings = await wait(() => [...document.querySelectorAll('button.entry')]
       .find(button => /^(设置|Settings)$/u.test(button.textContent?.trim() ?? '')));
     if (settings === null) throw new Error('native_feature_settings_button_missing');
@@ -134,11 +135,24 @@ async function openAgentControlPanel() {
 
 async function inspectAgentControlDefaults() {
   await openAgentControlPanel();
-  return await window.webContents.executeJavaScript(`(() => {
+  return await window.webContents.executeJavaScript(`(async () => {
     const panel = document.querySelector('.agent-control-panel');
+    const createDetails = panel.querySelector('.grant-create-fold');
+    if (createDetails === null) throw new Error('native_feature_agent_control_create_step_missing');
+    createDetails.open = true;
+    const name = panel.querySelector('.grant-basic-grid label:nth-child(2) input');
+    if (name === null) throw new Error('native_feature_agent_control_name_input_missing');
+    const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    valueSetter.call(name, 'Native defaults inspection');
+    name.dispatchEvent(new Event('input', { bubbles: true }));
+    name.dispatchEvent(new Event('change', { bubbles: true }));
+    const next = [...panel.querySelectorAll('.grant-actions button')].find(button => /继续.*能力|Continue: capabilities/u.test(button.textContent ?? ''));
+    if (next === undefined || next.disabled) throw new Error('native_feature_agent_control_capabilities_step_unavailable');
+    next.click();
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && panel.querySelector('.grant-config-grid') === null) await new Promise(resolve => setTimeout(resolve, 20));
     const selects = [...panel.querySelectorAll('.grant-config-grid select')];
-    const expiry = panel.querySelector('input[type="datetime-local"]');
-    return {
+    const result = {
       permission: selects.slice(0, 2).map(input => input.value),
       network: selects.slice(2, 4).map(input => input.value),
       policy: selects[4]?.value ?? null,
@@ -146,8 +160,19 @@ async function inspectAgentControlDefaults() {
         .filter(input => input.checked).map(input => input.parentElement.textContent.trim()),
       allowOperator: [...panel.querySelectorAll('.grant-confirmation input[type="checkbox"]')]
         .some(input => input.checked),
-      expiresAt: expiry?.value ?? '',
+      expiresAt: '',
     };
+    const continueLimits = [...panel.querySelectorAll('.grant-actions button')].find(button => /继续.*风险|Continue: risk review/u.test(button.textContent ?? ''));
+    if (continueLimits === undefined || continueLimits.disabled) throw new Error('native_feature_agent_control_default_limits_step_unavailable');
+    continueLimits.click();
+    while (Date.now() < deadline && panel.querySelector('.grant-lifetime-card input[type="datetime-local"]') === null) await new Promise(resolve => setTimeout(resolve, 20));
+    result.expiresAt = panel.querySelector('input[type="datetime-local"]')?.value ?? '';
+    const back = [...panel.querySelectorAll('.grant-actions button')].find(button => /返回.*能力|Back: capabilities/u.test(button.textContent ?? ''));
+    back?.click();
+    while (Date.now() < deadline && panel.querySelector('.grant-config-grid') === null) await new Promise(resolve => setTimeout(resolve, 20));
+    const clear = [...panel.querySelectorAll('.grant-actions button')].find(button => /清除草稿|Clear draft/u.test(button.textContent ?? ''));
+    clear?.click();
+    return result;
   })()`);
 }
 
@@ -164,12 +189,21 @@ async function createAndRevokeAgentControlGrant() {
       return null;
     };
     const panel = document.querySelector('.agent-control-panel');
+    const createDetails = panel.querySelector('.grant-create-fold');
+    if (createDetails === null) throw new Error('native_feature_agent_control_create_step_missing');
+    createDetails.open = true;
     const name = panel.querySelector('.grant-basic-grid label:nth-child(2) input');
     if (name === null) throw new Error('native_feature_agent_control_name_input_missing');
     const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
     valueSetter.call(name, 'Native Agent Control test');
     name.dispatchEvent(new Event('input', { bubbles: true }));
     name.dispatchEvent(new Event('change', { bubbles: true }));
+    const nextBasics = () => [...panel.querySelectorAll('.grant-actions button')]
+      .find(button => /继续.*能力|Continue: capabilities/u.test(button.textContent ?? ''));
+    if (nextBasics()?.disabled !== false) throw new Error('native_feature_agent_control_capabilities_step_unavailable');
+    nextBasics().click();
+    const stepDeadline = Date.now() + 2_000;
+    while (Date.now() < stepDeadline && panel.querySelector('.grant-config-grid') === null) await new Promise(resolve => setTimeout(resolve, 20));
     const selects = [...panel.querySelectorAll('.grant-config-grid select')];
     const selectValue = (select, value) => {
       const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
@@ -180,26 +214,50 @@ async function createAndRevokeAgentControlGrant() {
     selectValue(selects[3], 'unrestricted');
     const createButton = () => [...panel.querySelectorAll('.grant-actions button')]
       .find(button => /创建授权|Create grant/u.test(button.textContent ?? ''));
-    if (createButton()?.disabled !== true) throw new Error('native_feature_agent_control_high_limits_were_not_confirmed');
+    const continueLimits = () => [...panel.querySelectorAll('.grant-actions button')]
+      .find(button => /继续.*风险|Continue: risk review/u.test(button.textContent ?? ''));
+    if (continueLimits()?.disabled !== true) throw new Error('native_feature_agent_control_high_limits_were_not_confirmed');
     const riskChecks = await wait(() => {
       const items = [...panel.querySelectorAll('.grant-risk input[type="checkbox"]')];
-      return items.length === 2 ? items : null;
+      return items.length === 3 ? items : null;
     });
-    if (riskChecks === null) throw new Error('native_feature_agent_control_separate_confirmations_missing');
-    riskChecks[0].click();
-    await wait(() => riskChecks[0].checked && !riskChecks[1].checked);
-    if (createButton()?.disabled !== true) throw new Error('native_feature_agent_control_full_access_only_was_enough');
-    riskChecks[1].click();
-    if (await wait(() => createButton() && !createButton().disabled) === null) {
-      throw new Error('native_feature_agent_control_network_confirmation_was_not_applied');
+    if (riskChecks === null) {
+      const currentRiskChecks = [...panel.querySelectorAll('.grant-risk input[type="checkbox"]')];
+      const descriptions = currentRiskChecks.map(input => input.closest('label')?.textContent.trim() ?? '');
+      throw new Error('native_feature_agent_control_separate_confirmations_missing:' + JSON.stringify(descriptions));
     }
-    const create = await wait(() => createButton()?.disabled === false ? createButton() : null);
-    if (create === null) throw new Error('native_feature_agent_control_create_disabled');
+    const confirmationBy = (pattern) => [...panel.querySelectorAll('.grant-risk input[type="checkbox"]')]
+      .find(input => pattern.test(input.closest('label')?.textContent ?? ''));
+    const confirmations = [
+      ['full_access', /(?:全部资源|everything available to this OS account)/iu],
+      ['partial_workspace_write', /(?:部分隔离限制|partial-isolation limits)/iu],
+      ['unrestricted_network', /(?:不受限网络访问|unrestricted network access)/iu],
+    ];
+    for (const [name, pattern] of confirmations) {
+      const checkbox = confirmationBy(pattern);
+      if (checkbox === undefined) throw new Error('native_feature_agent_control_confirmation_missing:' + name);
+      checkbox.click();
+      if (await wait(() => confirmationBy(pattern)?.checked === true) === null) {
+        throw new Error('native_feature_agent_control_confirmation_not_applied:' + name);
+      }
+      const isLast = name === 'unrestricted_network';
+      if (!isLast && continueLimits()?.disabled !== true) {
+        throw new Error('native_feature_agent_control_confirmation_was_enough_early:' + name);
+      }
+    }
+    if (await wait(() => continueLimits() && !continueLimits().disabled) === null) throw new Error('native_feature_agent_control_all_limit_confirmations_not_applied');
+    continueLimits().click();
+    const trustCheck = await wait(() => panel.querySelector('.grant-lifetime-card .grant-risk input[type="checkbox"]'));
+    if (trustCheck === null) throw new Error('native_feature_agent_control_workspace_confirmation_missing');
+    trustCheck.click();
+    if (await wait(() => trustCheck.checked && createButton()?.disabled === false) === null) throw new Error('native_feature_agent_control_workspace_confirmation_not_applied');
+    const create = createButton();
+    if (create === undefined || create.disabled) throw new Error('native_feature_agent_control_create_disabled');
     create.click();
-    const row = await wait(() => [...panel.querySelectorAll('.grant-row')]
-      .find(item => item.querySelector('strong')?.textContent.trim() === 'Native Agent Control test'));
+    const row = await wait(() => [...panel.querySelectorAll('.grant-inspector')]
+      .find(item => item.textContent.includes('Native Agent Control test')));
     if (row === null) throw new Error('native_feature_agent_control_grant_missing');
-    const details = row.querySelector('details');
+    const details = row.querySelector('details.catalog-fold');
     if (details === null) throw new Error('native_feature_agent_control_grant_details_missing');
     details.open = true;
     const detailText = details.innerText ?? details.textContent ?? '';
@@ -212,7 +270,7 @@ async function createAndRevokeAgentControlGrant() {
     const confirm = await wait(() => document.querySelector('.confirm-actions button.danger'));
     if (confirm === null) throw new Error('native_feature_agent_control_revoke_confirmation_missing');
     confirm.click();
-    if (await wait(() => row.querySelector('[data-state="revoked"]')) === null) {
+    if (await wait(() => /已撤销|Revoked/u.test(row.textContent ?? '')) === null) {
       throw new Error('native_feature_agent_control_grant_not_revoked');
     }
     const closeSettings = [...document.querySelectorAll('.sheet-head button.icon-button')]
