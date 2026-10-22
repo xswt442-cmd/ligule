@@ -33,13 +33,14 @@ import { LocaleProvider, localeOf } from './locale';
 import { notificationOf, notificationTarget, type NotificationKind, type NotificationTarget } from './notifications';
 import { SessionStreamBuffer } from './session-stream';
 import { Composer } from './components/Composer';
-import { ExternalSessionControlPanel } from './components/ExternalSessionControlPanel';
+import { ExternalSessionComposer, ExternalSessionControlPanel } from './components/ExternalSessionControlPanel';
 import type { MentionState } from './mentions';
 import type { PermissionConfirmations, PermissionTarget } from './permission-control';
 
 // 流式输出显示在已落盘记录之后，并保持固定 ID，避免每个增量都重建行并丢失展开状态。
 const LIVE_REASONING: Row = { id: -2, kind: 'reasoning', text: '' };
 const LIVE_ANSWER: Row = { id: -1, kind: 'answer', text: '' };
+type PolicySelection = 'ask' | 'auto' | 'none';
 
 // 每次向前读取一页事件；打开会话时先取最近页，再按游标读取更早记录。
 const RENDER_WINDOW = 400;
@@ -203,7 +204,7 @@ export function App({ transport }: { transport: Transport }) {
   const [status, setStatus] = useState<Status | null>(null);
   const [newSessionSettingsRevision, setNewSessionSettingsRevision] = useState(0);
   const [newSessionMode, setNewSessionMode] = useState<string | null>(null);
-  const [newSessionPolicy, setNewSessionPolicy] = useState<'ask' | 'auto' | 'never' | null>(null);
+  const [newSessionPolicy, setNewSessionPolicy] = useState<PolicySelection | null>(null);
   const [newSessionPermission, setNewSessionPermission] = useState<PermissionTarget>(DEFAULT_NEW_SESSION_PERMISSION);
   const [newSessionPermissionConfirmations, setNewSessionPermissionConfirmations] = useState<PermissionConfirmations>(NO_PERMISSION_CONFIRMATIONS);
   const [draft, setDraft] = useState('');
@@ -635,7 +636,7 @@ export function App({ transport }: { transport: Transport }) {
       }
       // Host 发出的交互请求分为审批和用户提问。
       if (message.method !== 'approval.request') return;
-      const params = message.params as { sessionId?: string; projectRoot?: string; tool?: string; command?: string; args?: Record<string, unknown>; reason?: string; shell?: string; executable?: string; policy?: string; policySource?: string; policyForced?: boolean; rememberable?: boolean; rememberScopes?: ('session' | 'project' | 'user')[]; rememberHintKey?: 'tool' | 'command'; scriptBinding?: { path?: string; sha256?: string; interpreter?: string; workspaceRoot?: string; permission?: { profile?: string; network?: string; capabilities?: Record<string, string> } } };
+      const params = message.params as { sessionId?: string; projectRoot?: string; tool?: string; command?: string; args?: Record<string, unknown>; reason?: string; shell?: string; executable?: string; policy?: string; policySource?: string; policyForced?: boolean; detailsRef?: string; argumentBytes?: number; argumentSha256?: string; identityDigest?: string; contentBytes?: number; contentSha256?: string; rememberable?: boolean; rememberScopes?: ('session' | 'project' | 'user')[]; rememberHintKey?: 'file' | 'tool' | 'command' | 'mcp'; rememberTargetOptions?: ('file' | 'workspace' | 'tool' | 'command')[]; scriptBinding?: { path?: string; sha256?: string; interpreter?: string; workspaceRoot?: string; permission?: { profile?: string; network?: string; capabilities?: Record<string, string> } } };
       // 请求属于发起它的会话；即使会话在后台等待，也必须显示并允许答复。
       const asked = params?.sessionId;
       if (typeof asked !== 'string' || asked === '') return;
@@ -648,6 +649,15 @@ export function App({ transport }: { transport: Transport }) {
       const change = changeOf(tool, args);
       const content = changeBody(change, args);
       const englishChange = changeOf(tool, args, 'en');
+      const detailsSuffix = params.scriptBinding === undefined ? { chinese: '', english: '' } : {
+        chinese: `\n\n${t('脚本审批绑定', 'Script approval binding')}:\n${t('路径', 'Path')}: ${params.scriptBinding.path ?? ''}\nSHA-256: ${params.scriptBinding.sha256 ?? ''}\n${t('解释器', 'Interpreter')}: ${params.scriptBinding.interpreter ?? ''}\n${t('工作区', 'Workspace')}: ${params.scriptBinding.workspaceRoot ?? ''}\n${t('权限', 'Permission')}: ${params.scriptBinding.permission?.profile ?? ''} / ${params.scriptBinding.permission?.network ?? ''}\n${JSON.stringify(params.scriptBinding.permission?.capabilities ?? {})}`,
+        english: `\n\nScript approval binding:\nPath: ${params.scriptBinding.path ?? ''}\nSHA-256: ${params.scriptBinding.sha256 ?? ''}\nInterpreter: ${params.scriptBinding.interpreter ?? ''}\nWorkspace: ${params.scriptBinding.workspaceRoot ?? ''}\nPermission: ${params.scriptBinding.permission?.profile ?? ''} / ${params.scriptBinding.permission?.network ?? ''}\n${JSON.stringify(params.scriptBinding.permission?.capabilities ?? {})}`,
+      };
+      const summary = typeof params.contentBytes === 'number' && typeof params.contentSha256 === 'string'
+        ? `${t(`内容 ${params.contentBytes} 字节 · SHA-256 ${params.contentSha256}`, `Content ${params.contentBytes} bytes · SHA-256 ${params.contentSha256}`)}\n\n`
+        : typeof params.argumentSha256 === 'string'
+          ? `${t(`参数 ${params.argumentBytes ?? 0} 字节 · SHA-256 ${params.argumentSha256}`, `Arguments ${params.argumentBytes ?? 0} bytes · SHA-256 ${params.argumentSha256}`)}\n\n`
+          : '';
       setAsks((current) => [...current, {
         id: message.id ?? '',
         sessionId: asked,
@@ -665,8 +675,16 @@ export function App({ transport }: { transport: Transport }) {
         rememberable: params.rememberable === true,
         rememberScopes: params.rememberScopes ?? [],
         ...(params.rememberHintKey === undefined ? {} : { rememberHintKey: params.rememberHintKey }),
-        content: params.scriptBinding === undefined ? content : `${content}\n\n${t('脚本审批绑定', 'Script approval binding')}:\n${t('路径', 'Path')}: ${params.scriptBinding.path ?? ''}\nSHA-256: ${params.scriptBinding.sha256 ?? ''}\n${t('解释器', 'Interpreter')}: ${params.scriptBinding.interpreter ?? ''}\n${t('工作区', 'Workspace')}: ${params.scriptBinding.workspaceRoot ?? ''}\n${t('权限', 'Permission')}: ${params.scriptBinding.permission?.profile ?? ''} / ${params.scriptBinding.permission?.network ?? ''}\n${JSON.stringify(params.scriptBinding.permission?.capabilities ?? {})}`,
-        english: { change: englishChange.summary, content: params.scriptBinding === undefined ? changeBody(englishChange, args, 'en') : `${changeBody(englishChange, args, 'en')}\n\nScript approval binding:\nPath: ${params.scriptBinding.path ?? ''}\nSHA-256: ${params.scriptBinding.sha256 ?? ''}\nInterpreter: ${params.scriptBinding.interpreter ?? ''}\nWorkspace: ${params.scriptBinding.workspaceRoot ?? ''}\nPermission: ${params.scriptBinding.permission?.profile ?? ''} / ${params.scriptBinding.permission?.network ?? ''}\n${JSON.stringify(params.scriptBinding.permission?.capabilities ?? {})}` },
+        ...(Array.isArray(params.rememberTargetOptions) ? { rememberTargetOptions: params.rememberTargetOptions } : {}),
+        ...(typeof params.detailsRef === 'string' ? { detailsRef: params.detailsRef } : {}),
+        ...(typeof params.argumentBytes === 'number' ? { argumentBytes: params.argumentBytes } : {}),
+        ...(typeof params.argumentSha256 === 'string' ? { argumentSha256: params.argumentSha256 } : {}),
+        ...(typeof params.identityDigest === 'string' ? { identityDigest: params.identityDigest } : {}),
+        detailsLoaded: false,
+        detailsLoading: false,
+        detailsSuffix,
+        content: `${summary}${content}${detailsSuffix.chinese}`,
+        english: { change: englishChange.summary, content: `${summary}${changeBody(englishChange, args, 'en')}${detailsSuffix.english}` },
       }]);
     });
 
@@ -1289,7 +1307,7 @@ export function App({ transport }: { transport: Transport }) {
   }, [client, refreshStatus, sessionId]);
 
   // 通过 `policy.set` 修改当前会话的策略；传入 `null` 时恢复配置默认值。
-  const setPolicy = useCallback(async (mode: 'ask' | 'auto' | 'never' | null) => {
+  const setPolicy = useCallback(async (mode: PolicySelection | null) => {
     if (sessionId === null) {
       setNewSessionPolicy(mode);
       return;
@@ -1364,7 +1382,30 @@ export function App({ transport }: { transport: Transport }) {
     ];
   }, [branchFrom, cancel, collapsed, copyLastAnswer, compact, newSession, openSession, observingExternalSession, patch, projectRoot, readBack, sessionId, status, t]);
 
-  const answer = useCallback((decision: 'allow' | 'deny', rememberScope?: 'session' | 'project' | 'user') => {
+  const loadApprovalDetails = useCallback(async (ask: Ask) => {
+    if (ask.detailsRef === undefined || ask.detailsLoaded === true || ask.detailsLoading === true) return;
+    setAsks((current) => current.map((item) => item.id === ask.id ? { ...item, detailsLoading: true, detailsError: undefined } : item));
+    try {
+      const result = await client.call('approval.details', { sessionId: ask.sessionId, requestId: ask.detailsRef }, 15_000) as { args?: unknown };
+      if (typeof result.args !== 'object' || result.args === null || Array.isArray(result.args)) throw new Error('approval_details_invalid');
+      const args = result.args as Record<string, unknown>;
+      const change = changeOf(ask.tool, args);
+      const englishChange = changeOf(ask.tool, args, 'en');
+      setAsks((current) => current.map((item) => item.id === ask.id ? {
+        ...item,
+        change: change.summary,
+        content: `${changeBody(change, args)}${item.detailsSuffix?.chinese ?? ''}`,
+        english: { change: englishChange.summary, content: `${changeBody(englishChange, args, 'en')}${item.detailsSuffix?.english ?? ''}` },
+        detailsLoading: false,
+        detailsLoaded: true,
+      } : item));
+    } catch (error) {
+      const failure = code(error);
+      setAsks((current) => current.map((item) => item.id === ask.id ? { ...item, detailsLoading: false, detailsError: failure } : item));
+    }
+  }, [client]);
+
+  const answer = useCallback((decision: 'allow' | 'deny', rememberScope?: 'session' | 'project' | 'user', rememberTarget?: 'file' | 'workspace' | 'tool' | 'command') => {
     const head = asks.find((ask) => ask.sessionId === sessionId);
     if (head === undefined) return;
     setAsks((current) => current.filter((ask) => ask.id !== head.id));
@@ -1374,7 +1415,7 @@ export function App({ transport }: { transport: Transport }) {
       // 先更新本地转录再发送答复，因为 Host 收到答复后可能立即返回工具结果。
       setRows((current) => [...current, metaRow('meta', `${decision === 'allow' ? '已允许' : '已拒绝'} ${head.tool}${head.detail === '' ? '' : `：${head.detail.slice(0, 60)}`}`, `${decision === 'allow' ? 'Allowed' : 'Refused'} ${head.tool}${head.detail === '' ? '' : `: ${head.detail.slice(0, 60)}`}`)]);
     }
-    client.reply(head.id, { decision, ...(rememberScope === undefined ? {} : { rememberScope }) });
+    client.reply(head.id, { decision, ...(rememberScope === undefined ? {} : { rememberScope }), ...(rememberTarget === undefined ? {} : { rememberTarget }) });
     // 答复后移走按钮焦点，避免下一次 Enter 重复提交。
     // 将焦点移至输入框，让键盘用户可以继续输入。
     (document.activeElement as HTMLElement | null)?.blur();
@@ -1697,6 +1738,7 @@ export function App({ transport }: { transport: Transport }) {
         active={sessionId}
         onOpen={(id: string) => void openSession(id)}
         onAnswer={answer}
+        onDetails={(ask) => void loadApprovalDetails(ask)}
       />}
 
       {observingExternalSession && externalWriterActive && sessionId !== null && <ExternalSessionControlPanel
@@ -1724,7 +1766,9 @@ export function App({ transport }: { transport: Transport }) {
         <button type="button" className="icon-button" aria-label={t('关闭提示', 'Dismiss')} onClick={() => setNotificationProblem(null)}><Icon name="close" size={14} /></button>
       </div>}
 
-      <Composer
+      {observingExternalSession && externalWriterActive && sessionId !== null
+        ? <ExternalSessionComposer client={client} sessionId={sessionId} projectRoot={projectRoot} />
+        : <Composer
         client={client}
         sessionId={sessionId}
         projectRoot={projectRoot}
@@ -1769,7 +1813,7 @@ export function App({ transport }: { transport: Transport }) {
         onPermissionStatus={(next) => { if (active.current === next.sessionId) setStatus(next); }}
         onStop={() => void cancel()}
         onSend={() => void send()}
-      />
+      />}
     </main>
 
     {panel !== null && <aside className="dock">

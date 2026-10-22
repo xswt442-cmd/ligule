@@ -6,7 +6,8 @@ import { Modal } from './ui';
 
 type PermissionProfile = 'read-only' | 'workspace-write' | 'full-access';
 type NetworkLimit = 'disabled' | 'policy' | 'unrestricted';
-type PolicyMode = 'ask' | 'auto' | 'never';
+type PolicySelection = 'ask' | 'auto' | 'none';
+type PolicyMode = PolicySelection | 'never';
 type Grant = {
   id: string;
   name: string;
@@ -38,8 +39,8 @@ type Draft = {
   maxPermissionProfile: PermissionProfile;
   defaultNetwork: NetworkLimit;
   maxNetwork: NetworkLimit;
-  defaultPolicy: PolicyMode;
-  allowedPolicies: PolicyMode[];
+  defaultPolicy: PolicySelection;
+  allowedPolicies: PolicySelection[];
   allowOperator: boolean;
   allowedMcpServers: string[];
   allowedMcpTools: string[];
@@ -194,7 +195,7 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
         defaultPolicy: draft.defaultPolicy,
         allowedPolicyAsk: draft.allowedPolicies.includes('ask'),
         allowedPolicyAuto: draft.allowedPolicies.includes('auto'),
-        allowedPolicyNever: draft.allowedPolicies.includes('never'),
+        allowedPolicyNone: draft.allowedPolicies.includes('none'),
         allowOperator: draft.allowOperator,
         allowedMcpServers: draft.allowedMcpServers,
         allowedMcpTools: draft.allowedMcpTools,
@@ -326,13 +327,13 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
           <h4>{t('审批方式', 'Approval behavior')}</h4>
           <label className="grant-field">
             <span>{t('默认 Policy', 'Default Policy')}</span>
-            <select value={draft.defaultPolicy} onChange={(event) => update('defaultPolicy', event.target.value as PolicyMode)}>
-              <option value="ask">ask</option><option value="auto">auto</option><option value="never">never</option>
+            <select value={draft.defaultPolicy} onChange={(event) => update('defaultPolicy', event.target.value as PolicySelection)}>
+              <option value="ask">ask</option><option value="auto">auto</option><option value="none">none</option>
             </select>
           </label>
           <fieldset className="grant-policies">
             <legend>{t('允许的模式', 'Allowed modes')}</legend>
-            {(['ask', 'auto', 'never'] as const).map((policy) => <label key={policy}>
+            {(['ask', 'auto', 'none'] as const).map((policy) => <label key={policy}>
               <input type="checkbox" checked={draft.allowedPolicies.includes(policy)} onChange={(event) => {
                 const selected = event.target.checked
                   ? [...draft.allowedPolicies, policy]

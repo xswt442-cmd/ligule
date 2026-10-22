@@ -277,6 +277,8 @@ button.mini.chip b {
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
+  min-width: 0;
+  max-width: 100%;
   color: var(--fg-muted);
   font-size: var(--text-xs);
 }

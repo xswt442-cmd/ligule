@@ -10,6 +10,9 @@ import type { MentionState } from '../mentions';
 import { CURRENT, formatKeys } from '../hotkeys';
 import type { ModelSelection } from '../model-catalog';
 import { useText } from '../locale';
+
+type PolicySelection = 'ask' | 'auto' | 'none';
+type PolicyValue = PolicySelection | 'never';
 import type { Client } from '../protocol';
 import type { Status } from '../status';
 import type { Settings } from '../settings';
@@ -41,7 +44,7 @@ export function Composer({ client, sessionId, projectRoot, status, settings, set
   mention: MentionState | null;
   sessionMenuOpen: boolean;
   initialMode: string | null;
-  initialPolicy: 'ask' | 'auto' | 'never' | null;
+  initialPolicy: PolicyValue | null;
   initialPermission: PermissionTarget;
   initialPermissionConfirmations: PermissionConfirmations;
   newSessionSettingsRevision: number;
@@ -60,7 +63,7 @@ export function Composer({ client, sessionId, projectRoot, status, settings, set
   onManageModel: () => void;
   onSessionMenuChange: (open: boolean) => void;
   onSetMode: (name: string | null) => void;
-  onSetPolicy: (mode: 'ask' | 'auto' | 'never' | null) => Promise<void>;
+  onSetPolicy: (mode: PolicySelection | null) => Promise<void>;
   onInitialPermissionChange: (target: PermissionTarget, confirmations: PermissionConfirmations) => void;
   onPermissionStatus: (status: Status) => void;
   onStop: () => void;

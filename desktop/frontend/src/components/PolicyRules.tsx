@@ -5,7 +5,16 @@ import { Icon } from './Icon';
 import { Modal, Row } from './ui';
 import { useText } from '../locale';
 
-type Rule = { tool: string; match?: string; decision: 'allow' | 'ask' | 'deny'; reason?: string };
+type Rule = {
+  tool: string;
+  match?: string;
+  decision: 'allow' | 'ask' | 'deny';
+  reason?: string;
+  target?: 'file' | 'workspace';
+  path?: string;
+  argsHash?: string;
+};
+type PolicySelection = 'ask' | 'auto' | 'none';
 type Shown = {
   rules?: Rule[];
   rulesSource?: string;
@@ -37,6 +46,15 @@ const matchKind = (pattern: string, t: (chinese: string, english: string) => str
   ? t('整段命令匹配', 'matches the whole command')
   : t('命令开头匹配', 'matches the start of the command');
 const matchText = (pattern: string, t: (chinese: string, english: string) => string) => `${matchKind(pattern, t)} ${pattern}`;
+const scopeText = (rule: Rule, t: (chinese: string, english: string) => string) => rule.target === 'file'
+  ? t(`仅此文件 · ${rule.path ?? ''}`, `This file only · ${rule.path ?? ''}`)
+  : rule.target === 'workspace'
+    ? t(`此工作区中的此类操作 · ${rule.path ?? ''}`, `This operation type in this workspace · ${rule.path ?? ''}`)
+    : rule.argsHash !== undefined
+      ? t(`此 MCP 参数与服务器配置摘要 · ${rule.argsHash.slice(0, 12)}`, `This MCP argument and server configuration digest · ${rule.argsHash.slice(0, 12)}`)
+      : rule.match === undefined || rule.match === ''
+        ? t('每次调用', 'Every call')
+        : matchText(rule.match, t);
 const decisionText = (decision: Rule['decision'], t: (chinese: string, english: string) => string) =>
   decision === 'allow' ? t('放行', 'Allow') : decision === 'ask' ? t('询问', 'Ask') : t('不允许', 'Deny');
 
@@ -54,7 +72,7 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
   const [layer, setLayer] = useState('user');
   const [saving, setSaving] = useState(false);
   const [editing, setEditing] = useState<{ index: number; rule: Rule } | null>(null);
-  const [confirmNever, setConfirmNever] = useState(false);
+  const [confirmNone, setConfirmNone] = useState(false);
   const held = saving
     ? t('“审批规则”正在保存；尚未收到结果。', 'Approval rules are saving; the result has not arrived yet.')
     : editing === null
@@ -105,7 +123,7 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
     if (fresh !== null) setNote({ text: `${saved} ${describe(fresh.rules?.length ?? 0)}`, bad: false });
   };
 
-  const setMode = async (mode: 'ask' | 'auto' | 'never') => {
+  const setMode = async (mode: PolicySelection) => {
     setSaving(true);
     try {
       await client.call('config.set', { field: 'policy.mode', value: mode, layer, version: versionOf(), ...target }, 30_000);
@@ -124,12 +142,18 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
       ...(editing.rule.match === '' ? {} : { match: editing.rule.match }),
       decision: editing.rule.decision,
       ...(editing.rule.reason === undefined || editing.rule.reason === '' ? {} : { reason: editing.rule.reason }),
+      ...(editing.rule.target === undefined ? {} : { target: editing.rule.target }),
+      ...(editing.rule.path === undefined ? {} : { path: editing.rule.path }),
+      ...(editing.rule.argsHash === undefined ? {} : { argsHash: editing.rule.argsHash }),
     };
     const flat = {
       ruleTool: rule.tool,
       ruleDecision: rule.decision,
       ...(rule.match === undefined ? {} : { ruleMatch: rule.match }),
       ...(rule.reason === undefined ? {} : { ruleReason: rule.reason }),
+      ...(rule.target === undefined ? {} : { ruleTarget: rule.target }),
+      ...(rule.path === undefined ? {} : { rulePath: rule.path }),
+      ...(rule.argsHash === undefined ? {} : { ruleArgsHash: rule.argsHash }),
     };
     const params = editing.index < 0
       ? { field: 'policy.rules', layer, version: versionOf(), op: 'add', ...target, ...flat }
@@ -182,15 +206,17 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
         <select
           value={shown.policyMode ?? ''}
           disabled={saving}
-          onChange={(event) => { if (event.target.value === 'never') setConfirmNever(true); else if (event.target.value !== '') void setMode(event.target.value as 'ask' | 'auto'); }}
+          onChange={(event) => { if (event.target.value === 'none') setConfirmNone(true); else if (event.target.value === 'ask' || event.target.value === 'auto') void setMode(event.target.value); }}
         >
           <option value="">{t('未设置', 'Not set')}</option>
           <option value="ask">ask — {t('未被放行规则覆盖的调用需要批准', 'Calls not covered by an allow rule require approval')}</option>
           <option value="auto">auto — {t('由守卫与命令语法判定，放行规则不参与', 'Guards and command parsing decide; allow rules do not apply')}</option>
-          <option value="never">never — {t('跳过逐项批准；越界、拒绝规则和模糊操作仍会被拒绝', 'Skip per-action approval; boundaries, deny rules, and ambiguous operations still block')}</option>
+          <option value="none">none — {t('普通权限内操作不逐项审批；安全边界继续生效', 'No per-action approval for ordinary in-bound operations; safety boundaries remain active')}</option>
+          {shown.policyMode === 'never' && <option value="never" disabled>{t('旧版 never（只保留原有拒绝语义；请明确选择新档位迁移）', 'Legacy never (retains its old refusal semantics; choose a new tier to migrate)')}</option>}
         </select>
       </Row>
-      {shown.policyMode === 'never' && <p className="session-note" data-tone="bad">{t('完全不需审批已设为配置默认。工具仍受工作区边界、拒绝规则和安全守卫约束。', 'No approval is the configured default. Workspace boundaries, deny rules, and safety guards still apply.')}</p>}
+      {shown.policyMode === 'never' && <p className="session-note" data-tone="bad">{t('此配置保留旧版 never 语义：需要审批的调用会被拒绝，不会自动迁移为 none。选择新的档位才会写入明确迁移。', 'This configuration retains legacy never semantics: calls that require approval are refused. It is not migrated to none until you explicitly choose a new tier.')}</p>}
+      {shown.policyMode === 'none' && <p className="session-note">{t('普通权限内工具调用不等待逐项批准；工作区边界、拒绝规则、系统硬拒绝和独立信任要求仍生效。', 'Ordinary in-bound tool calls do not wait for per-action approval. Workspace boundaries, deny rules, system hard denials, and separate trust requirements remain active.')}</p>}
 
       <h3 className="group-label">{t(`生效规则（${effectiveRules.length} 条）`, `Effective rules (${effectiveRules.length})`)}</h3>
       <p className="sheet-note">{t('在逐次询问模式下，复合命令的每一段都要被同一条放行规则覆盖，才会跳过询问。禁止规则作用于整条命令及各段，放行规则不能覆盖它。', 'In ask mode, one allow rule must cover every part of a compound command to skip approval. A deny rule applies to the full command and each part; an allow rule cannot override it.')}</p>
@@ -200,7 +226,7 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
       {effectiveRules.map((rule, index) => <div className="rule-row" key={`${index}:${rule.tool}`}>
         <span className="rule-kind" data-decision={rule.decision}>{decisionText(rule.decision, t)}</span>
         <code className="rule-tool">{rule.tool}</code>
-        <span className="rule-detail">{rule.match === undefined || rule.match === '' ? t('每次调用', 'Every call') : matchText(rule.match, t)}</span>
+        <span className="rule-detail">{scopeText(rule, t)}</span>
         {rule.reason !== undefined && rule.reason !== '' && <span className="rule-detail">{rule.reason}</span>}
         <span className="rule-detail">{sourceText(shown.ruleSources?.[index], t)}</span>
       </div>)}
@@ -210,7 +236,7 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
       {editableRules.map((rule, index) => <div className="rule-row" key={`${index}:${rule.tool}`}>
         <span className="rule-kind" data-decision={rule.decision}>{decisionText(rule.decision, t)}</span>
         <code className="rule-tool">{rule.tool}</code>
-        <span className="rule-detail">{rule.match === undefined || rule.match === '' ? t('每次调用', 'Every call') : matchText(rule.match, t)}</span>
+        <span className="rule-detail">{scopeText(rule, t)}</span>
         {rule.reason !== undefined && rule.reason !== '' && <span className="rule-detail">{rule.reason}</span>}
         <span className="bar-spacer" />
         <button type="button" className="mini chip" disabled={saving} onClick={() => setEditing({ index, rule: { ...blankRule(), ...rule, match: rule.match ?? '', reason: rule.reason ?? '' } })}>{t('编辑', 'Edit')}</button>
@@ -220,11 +246,13 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
       {editing === null ? <button type="button" disabled={saving} onClick={() => { setNote(null); setEditing({ index: -1, rule: blankRule() }); }}>{t('添加规则', 'Add rule')}</button>
         : <div className="region-group">
           <h3>{editing.index < 0 ? t('新规则', 'New rule') : t(`编辑规则 ${editing.index + 1}`, `Edit rule ${editing.index + 1}`)}</h3>
+          {editing.rule.target !== undefined && <p className="session-note">{scopeText(editing.rule, t)}. {t('此记忆范围由批准时的明确选择建立；可修改判定或理由，不能在此编辑中把范围扩大。', 'This scope was created by an explicit choice during approval. You can change its decision or reason here without widening its target.')}</p>}
+          {editing.rule.argsHash !== undefined && <p className="session-note">{scopeText(editing.rule, t)}. {t('参数和服务器配置身份保持绑定；要扩大范围请移除此规则，再通过可信审批明确记忆新范围。', 'The arguments remain bound to the server configuration identity. Remove this rule and approve a new scope explicitly to broaden it.')}</p>}
           <Row label={t('工具能力名', 'Tool capability')} note={t('普通工具填写工具名。MCP 工具使用 mcp:<server>/<tool>，不使用 mcp.call。', 'Use the tool name for built-in tools. For MCP tools, use mcp:<server>/<tool>, not mcp.call.')}>
-            <input value={editing.rule.tool} placeholder={t('例如 read、exec、write', 'e.g. read, exec, write')} onChange={(event) => setEditing({ ...editing, rule: { ...editing.rule, tool: event.target.value } })} />
+            <input disabled={editing.rule.target !== undefined || editing.rule.argsHash !== undefined} value={editing.rule.tool} placeholder={t('例如 read、exec、write', 'e.g. read, exec, write')} onChange={(event) => setEditing({ ...editing, rule: { ...editing.rule, tool: event.target.value } })} />
           </Row>
           <Row label={t('命令匹配', 'Command match')} note={t('只匹配命令文本。模式从命令开头匹配，并在参数边界结束；* 匹配其后的任意文本。留空表示匹配该工具的所有调用，包括没有命令文本的文件操作。', 'Matches command text only. The pattern starts at the command beginning and ends at an argument boundary; * matches any text after it. Leave blank to match every call for this tool, including file operations without command text.')}>
-            <input value={editing.rule.match} onChange={(event) => setEditing({ ...editing, rule: { ...editing.rule, match: event.target.value } })} />
+            <input disabled={editing.rule.target !== undefined || editing.rule.argsHash !== undefined} value={editing.rule.match} onChange={(event) => setEditing({ ...editing, rule: { ...editing.rule, match: event.target.value } })} />
           </Row>
           <Row label={t('判定', 'Decision')}>
             <select value={editing.rule.decision} onChange={(event) => setEditing({ ...editing, rule: { ...editing.rule, decision: event.target.value as Rule['decision'] } })}>
@@ -238,7 +266,9 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
           </Row>
           <p className="session-note">
             {t('预览：写入', 'Preview: write to')} {layerText(layer, t)} — {decisionText(editing.rule.decision, t)} <code>{editing.rule.tool === '' ? t('请填写工具名', 'Enter a tool name') : editing.rule.tool}</code>
-            {editing.rule.match ? <>; {matchKind(editing.rule.match, t)} <code>{editing.rule.match}</code></> : `; ${t('匹配每次调用', 'matches every call')}`}
+            {editing.rule.target !== undefined || editing.rule.argsHash !== undefined
+              ? <>; {scopeText(editing.rule, t)}</>
+              : editing.rule.match ? <>; {matchKind(editing.rule.match, t)} <code>{editing.rule.match}</code></> : `; ${t('匹配每次调用', 'matches every call')}`}
             {editing.rule.reason === '' ? '' : <>; {t('理由', 'Reason')}: {editing.rule.reason}</>}.
           </p>
           <div className="inline-field">
@@ -247,7 +277,7 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
           </div>
         </div>}
     </>}
-    {confirmNever && <Modal title={t('启用完全不需审批？', 'Enable no-approval mode?')} className="confirm" onClose={() => setConfirmNever(false)}><h2 className="confirm-lead">{t('此配置会应用于使用该默认值的会话。', 'This default applies to sessions that inherit it.')}</h2><p className="confirm-note">{t('工具调用不会逐项等待批准，可能修改工作区文件或运行命令。工作区边界、拒绝规则与安全守卫仍生效；需要额外审批或无法安全判定的操作会被拒绝。', 'Tool calls will not wait for individual approval and may modify workspace files or run commands. Workspace boundaries, deny rules, and safety guards remain active; operations requiring extra approval or a safe determination will be denied.')}</p><div className="confirm-actions"><button type="button" onClick={() => setConfirmNever(false)}>{t('取消', 'Cancel')}</button><button type="button" className="primary-button" onClick={() => { setConfirmNever(false); void setMode('never'); }}>{t('确认启用', 'Enable')}</button></div></Modal>}
+    {confirmNone && <Modal title={t('将默认档改为不受审批？', 'Set the default to no approval?')} className="confirm" onClose={() => setConfirmNone(false)}><h2 className="confirm-lead">{t('使用此默认值的会话将不再等待普通工具调用的逐项批准。', 'Sessions using this default will stop waiting for per-action approval of ordinary tool calls.')}</h2><p className="confirm-note">{t('工作区边界、拒绝规则、系统硬拒绝和需要独立信任的操作仍会被限制。', 'Workspace boundaries, deny rules, system hard denials, and operations requiring separate trust remain restricted.')}</p><div className="confirm-actions"><button type="button" onClick={() => setConfirmNone(false)}>{t('取消', 'Cancel')}</button><button type="button" className="primary-button" onClick={() => { setConfirmNone(false); void setMode('none'); }}>{t('确认启用', 'Enable')}</button></div></Modal>}
   </>;
 }
 
