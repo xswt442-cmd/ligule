@@ -117,7 +117,10 @@ jobs:
         run: pnpm run build:core
       - name: require the Linux sandbox isolation probe
         if: runner.os == 'Linux'
-        run: node scripts/require-linux-sandbox.js
+        run: >-
+          node --input-type=module -e "import { probeLinuxSandboxIsolation } from './core/dist/capability/sandbox-linux.js';
+          const result = await probeLinuxSandboxIsolation();
+          if (!result.available) { throw new Error(result.reason ?? 'Linux isolation probe failed'); }"
       - name: syntax check JavaScript source and tests
         run: pnpm check:syntax
       - name: test
