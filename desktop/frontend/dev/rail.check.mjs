@@ -67,8 +67,8 @@ assert.deepEqual(visibleRoots(roster, ['E:\\work\\alpha', 'E:\\work\\alpha\\', '
 assert.deepEqual(visibleRoots({ default: null, workspaces: [] }, ['/work/Alpha', '/work/alpha', '/']), ['', '/work/Alpha', '/work/alpha', '/'], '大小写不同的 POSIX 目录和根目录分别保留');
 assert.deepEqual(
   groupByWorkspace([session('f', { projectRoot: 'E:\\work\\beta', workspace: 'e:\\work\\beta', workspaceOrigin: 'explicit' })], visibleRoots(roster, []), roster).groups.map((one) => one.identity),
-  ['e:\\work\\beta', 'e:\\work\\alpha'],
-  '登记里每一具工作区都有自己的组，窗口没指着它也一样：还没有会话的那一组排后面，人能在那里面新建',
+  ['e:\\work\\alpha', 'e:\\work\\beta'],
+  '登记里每一具工作区都有自己的组，默认工作区即使最近没有会话也排最后，方便从那里新建',
 );
 
 let pendingCalls = 0;
