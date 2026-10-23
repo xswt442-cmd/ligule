@@ -24,6 +24,7 @@ import { networkPlugin } from '@ligule/core/tools/network.js';
 import { createHost, providerFromConfig, hostProviderFromConfig, serveHost } from '@ligule/core/host/host.js';
 import { KernelError } from '@ligule/core/kernel/error.js';
 import { providerDiagnosticText, runtimeFailureText } from './tui/errors.js';
+import { configureTerminalColors } from './tui/output.js';
 import type { ConfigSnapshot } from '@ligule/core/kernel/config.js';
 import { isPolicyRule, type PolicyMode, type PolicyThresholds } from '@ligule/core/kernel/policy.js';
 import type { PolicyRule } from '@ligule/core/kernel/config-edit.js';
@@ -665,6 +666,7 @@ if (invalidLanguage) {
     try {
       // React 和 Ink 会在首次导入时根据 NODE_ENV 选择构建版本，因此必须先设置环境再动态导入。
       process.env.NODE_ENV = 'production';
+      configureTerminalColors(process.env);
       const { confirmWorkspaceTrust } = await import('./tui/trust.js');
       // 在读取项目配置和资源前确认目录信任；用户拒绝时不创建 Host 或会话。
       if (await confirmWorkspaceTrust(process.cwd(), { locale: locale ?? languageOf('auto') })) {

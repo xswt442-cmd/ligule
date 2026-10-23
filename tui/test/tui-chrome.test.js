@@ -1,0 +1,50 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { PassThrough } from 'node:stream';
+import { createElement } from 'react';
+import { render } from 'ink';
+import { configurationText, ProgressLine, Welcome } from '../dist/tui/chrome.js';
+import { displayWidth } from '../dist/tui/commands.js';
+import { completeFrame } from './helpers/frames.js';
+
+async function paint(component, columns) {
+  const stdout = Object.assign(new PassThrough(), { columns, rows: 24, isTTY: true });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref() {}, unref() {} });
+  let output = '';
+  stdout.on('data', chunk => { output += chunk; });
+  const instance = render(component, { stdout, stdin, patchConsole: false, exitOnCtrlC: false, interactive: true });
+  await new Promise(resolve => setTimeout(resolve, 30));
+  const frame = completeFrame(output);
+  instance.unmount();
+  return frame;
+}
+
+test('configuration keeps approval visible and stays within narrow display widths', () => {
+  for (const columns of [32, 50, 80, 120]) {
+    for (const locale of ['zh', 'en']) {
+      for (const mode of ['minimal', 'very-long-mode-中文😀'.repeat(5)]) {
+        const text = configurationText({ model: 'very-long-model-中文😀'.repeat(5), mode, policy: 'none', columns, locale });
+        assert.ok(displayWidth(text) <= columns, text);
+        assert.ok(text.includes(locale === 'zh' ? '不受审批' : 'none'), text);
+      }
+    }
+  }
+});
+
+test('welcome uses a left-aligned compact block with useful commands', async () => {
+  const frame = await paint(createElement(Welcome, { version: '0.0.7', boundary: 'C:/workspace/project', columns: 80, locale: 'zh' }), 80);
+  assert.match(frame, /^ ❧ ligule/m);
+  assert.match(frame, /\/help/);
+  assert.match(frame, /\/resume/);
+  assert.ok(frame.trimEnd().split('\n').length <= 4);
+});
+
+test('run progress keeps interruption visible and uses only the supplied Host phase', async () => {
+  const frame = await paint(createElement(ProgressLine, {
+    progress: { phase: 'tool_execution', lastProgressAt: 1000 }, seconds: 12, marker: '⠋', columns: 32, locale: 'zh', now: 6000,
+  }), 32);
+  assert.match(frame, /执行工具/);
+  assert.match(frame, /12s/);
+  assert.match(frame, /Esc.*取消/);
+  assert.doesNotMatch(frame, /无新活动/);
+});

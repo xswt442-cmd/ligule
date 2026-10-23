@@ -2,25 +2,31 @@
 // 协议帧由 `core/src/host/connection.ts` 处理；此处不直接读写帧。
 // 纯函数和命令表从此模块导出，供自动检查和界面复用。
 import { resolve } from 'node:path';
-import { createElement as h, Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createElement as h, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Box, Static, Text, useApp, useInput, usePaste } from 'ink';
 import { SESSION_ROWS, answerOf, candidatesOf, describeChange, findLines, findUiCommand, insertMention, localizedCommand, mentionToken, resolveSessionId, routeInput, sessionLines } from './commands.js';
 import { pushHistory } from '@ligule/core/kernel/input-history.js';
 import { searchHistory } from './history.js';
+import { editDraft, isTypingRun, moveDraftCaret, type DraftState } from './draft.js';
 import { editInExternalEditor } from './editor.js';
 import { copyToClipboard, lastAnswer } from './clipboard.js';
 import { titleEscape, titleText } from './output.js';
 import { providerDiagnosticText, runtimeFailureText } from './errors.js';
 import { capabilityOf, projectRecord, resultParts, type TranscriptItem, type TuiRecord } from './transcript.js';
 import { VERSION } from '../version.js';
-import { ChoicePanel, HelpPanel, type PanelChoice } from './panels.js';
-import { markdownLines } from './markdown.js';
+import { ChoicePanel, HelpPanel, PanelFrame, type PanelChoice } from './panels.js';
+import { SessionPicker } from './session-picker.js';
+import { MessageRow as Row, MarkdownRows } from './message-view.js';
+import { foldText } from './message-format.js';
+import { ConfigurationLine, ProgressLine, Welcome } from './chrome.js';
+import { DraftInput } from './input-view.js';
+import { ApprovalPanel, buildApprovalLayout } from './approval-view.js';
+import { TUI_COLORS } from './ui-style.js';
 import { selectedText, transcriptLines, viewportPosition, wrapLine } from './viewport.js';
 import { CURRENT, ENGLISH_LABELS, ENGLISH_VIEWS, KEYMAP, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec } from './keymap.js';
 import { displayWidth } from './commands.js';
 import { textOf as chooseText, type Locale } from '@ligule/core/kernel/locale.js';
 import type { InkKey, TerminalAction } from './keymap.js';
-import type { MarkdownLine } from './markdown.js';
 import type { SessionEvent, SessionHeader } from '@ligule/core/session/format.js';
 import type { SessionSummary } from '@ligule/core/session/list.js';
 import type { AskAnswer, AskQuestion } from '@ligule/core/tools/ask-user.js';
@@ -36,8 +42,7 @@ import type { ModelSelection, ModelService } from '@ligule/core/kernel/model-ser
 import type { LoopResult } from '@ligule/core/kernel/loop.js';
 import type { CredentialStatus } from '@ligule/core/kernel/credentials.js';
 
-const SPINNER = ['⠋', '⠙', '', '⠸', '⠼', '⠴', '⠦', '', '⠇', '⠏'];
-const FOLD_LINES = 3;
+const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 // 显示模式来源的中文名称；记录值与 Host 返回的来源标识保持一致。
 const MODE_LAYERS: Readonly<Record<string, string>> = { shipped: '随包', user: '全局', project: '项目' };
 // 限制列表高度，避免内容挤出输入区域。
@@ -46,7 +51,6 @@ const CANDIDATE_ROWS = 6;
 const MENTION_ROWS = 8;
 // 表示当前没有文本组合输入；有效光标位置不会是 -1。
 const NO_TOKEN = { start: -1, text: '' } as const;
-const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -81,11 +85,6 @@ function isAskQuestion(value: unknown): value is AskQuestion {
     && typeof value.multiSelect === 'boolean'
     && Array.isArray(value.options)
     && value.options.every((option) => isRecord(option) && typeof option.label === 'string');
-}
-
-interface DraftState {
-  readonly draft: string;
-  readonly caret: number;
 }
 
 interface TuiStatus {
@@ -148,7 +147,11 @@ interface DetailState {
 
 interface SessionPickerState {
   readonly items: readonly SessionSummary[];
-  readonly at: number;
+}
+
+interface SessionNavigationLease {
+  readonly token: number;
+  readonly owner: string;
 }
 
 interface SearchState {
@@ -315,6 +318,10 @@ interface UndoState {
   before: DraftState;
 }
 
+function freshUndo(draft = ''): UndoState {
+  return { stack: [], future: [], kind: null, before: { draft, caret: draft.length } };
+}
+
 function isEditorText(outcome: EditorOutcome): outcome is { readonly text: string } {
   return 'text' in outcome && typeof outcome.text === 'string';
 }
@@ -418,50 +425,9 @@ export { SESSION_ROWS, UI_COMMANDS, answerOf, candidatesOf, describeChange, disp
 export { KEYMAP, CURRENT, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec, specOf } from './keymap.js';
 export { markdownLines } from './markdown.js';
 
-// 草稿编辑支持移动光标、跳到行首尾、删除前一词、清空草稿和插入可打印字符。
-export function editDraft(draft: string, caret: number, input: string, key: InkKey): DraftState {
-  const boundaries = [...GRAPHEMES.segment(draft)].map((part) => part.index);
-  const previous = boundaries.filter((index) => index < caret).at(-1) ?? 0;
-  const next = boundaries.find((index) => index > caret) ?? draft.length;
-  if (key.leftArrow) return { draft, caret: previous };
-  if (key.rightArrow) return { draft, caret: next };
-  if (key.home || (key.ctrl && input === 'a')) return { draft, caret: 0 };
-  if (key.end || (key.ctrl && input === 'e')) return { draft, caret: draft.length };
-  if (key.ctrl && input === 'u') return { draft: '', caret: 0 };
-  if (key.ctrl && input === 'w') {
-    // 删除前先跳过光标前的空白，避免连同前一个词一起误删。
-    const head = draft.slice(0, caret).replace(/\s+$/, '').replace(/[\p{L}\p{N}_.\-/]+$/u, '');
-    return { draft: head + draft.slice(caret), caret: head.length };
-  }
-  if (key.backspace || key.delete) {
-    if (caret === 0) return { draft, caret };
-    return { draft: draft.slice(0, previous) + draft.slice(caret), caret: previous };
-  }
-  if (input === '' || key.ctrl || key.meta) return { draft, caret };
-  return { draft: draft.slice(0, caret) + input + draft.slice(caret), caret: caret + input.length };
-}
+export { editDraft, isTypingRun } from './draft.js';
 
-// 连续追加的文本合并为一个撤销单位；退格、删词、粘贴和换行各自形成独立单位。
-// 合并要求新草稿以旧草稿开头，新增部分恰好一个字素、位于末尾且不是空白。
-// 空白单独作为撤销单位，便于只撤销误输入的空格。
-export function isTypingRun(before: DraftState, after: DraftState): boolean {
-  if (before.caret !== before.draft.length || after.caret !== after.draft.length) return false;
-  if (!after.draft.startsWith(before.draft)) return false;
-  const parts = [...GRAPHEMES.segment(after.draft.slice(before.draft.length))];
-  return parts.length === 1 && !/\s/u.test(parts[0].segment);
-}
-
-const textOf = (value: unknown): string => (typeof value === 'string' ? value : JSON.stringify(value ?? '', null, 2));
-
-// 长内容按行数和字数双重限制折叠，并显示剩余字数；Ctrl+O 展开查看。
-export function foldText(text: unknown, expanded: boolean, limit = FOLD_LINES, maxChars = 400): { shown: string; hidden: number } {
-  const full = textOf(text);
-  if (expanded === true) return { shown: full, hidden: 0 };
-  const lines = full.split('\n');
-  const shown = lines.length > limit ? lines.slice(0, limit).join('\n') : full;
-  const cut = shown.length > maxChars ? shown.slice(0, maxChars) : shown;
-  return { shown: cut, hidden: full.length - cut.length };
-}
+export { foldText } from './message-format.js';
 
 export { capabilityOf, projectRecord, resultParts };
 
@@ -573,30 +539,6 @@ export function detailTitle(detail: DetailTitleOptions, locale: Locale = 'zh'): 
   return chooseText(locale, `支线 ${detail.branch}，父记录第 ${detail.seq} 那一次派生 · 这里的序号是支线自己的 · /sub 收起`, `Subtask ${detail.branch}, from event ${detail.seq} · sequence numbers belong to this subtask · /sub to close`);
 }
 
-// 按终端宽度排版助手的 Markdown，并按语言高亮代码，保留原文内容。
-// 加粗、斜体、删除线和行内代码的样式映射统一在此处维护。
-const MARK_STYLES: Readonly<Record<string, Record<string, unknown>>> = {
-  'md-strong': { bold: true },
-  'md-em': { italic: true },
-  'md-del': { strikethrough: true },
-  'md-codespan': { color: 'cyan' },
-};
-function MarkdownRows({ text, columns = 80 }: { readonly text: string; readonly columns?: number }) {
-  const lines = useMemo(() => markdownLines(text, columns), [text, columns]);
-  const marked = (line: MarkdownLine) => line.spans?.map((span, part) => h(Text, { key: part, ...(span.scope === undefined ? {} : MARK_STYLES[span.scope] ?? {}) }, span.text)) ?? [];
-  return h(Fragment, null, lines.map((line, index) => {
-    if (line.kind === 'code') return h(Text, { key: index, wrap: 'wrap' }, '  ', line.spans === undefined ? line.text : line.spans.map((span, part) => {
-      const scope = span.scope?.split('.')[0];
-      const codeColors: Readonly<Record<string, string>> = { keyword: 'magenta', string: 'green', number: 'yellow', comment: 'gray', title: 'cyan', literal: 'yellow', built_in: 'cyan' };
-      const color = scope === undefined ? undefined : codeColors[scope];
-      return h(Text, { key: part, color }, span.text);
-    }));
-    if (line.kind === 'heading') return h(Text, { key: index, bold: true, wrap: 'wrap' }, line.spans === undefined ? line.text : marked(line));
-    if (line.spans !== undefined) return h(Text, { key: index, wrap: 'wrap' }, marked(line));
-    return h(Text, { key: index, wrap: 'wrap' }, line.text);
-  }));
-}
-
 // 审批卡显示写入操作的目标和变更摘要，便于用户检查后再决定是否允许。
 export function changeSummary(tool: string, args: Record<string, unknown>, locale: Locale = 'zh'): string {
   return describeChange(tool, args, locale).summary;
@@ -617,34 +559,6 @@ function approvalBody(tool: string, args: Record<string, unknown>, locale: Local
     ...(change.before === '' ? [] : [t('原内容:', 'Before:'), ...marked(change.before, '-')]),
     ...(change.after === '' ? [] : [t('新内容:', 'After:'), ...marked(change.after, '+')]),
   ].join('\n');
-}
-
-function Row({ row, expanded, columns, locale = 'zh' }: { readonly row: TranscriptItem; readonly expanded: boolean; readonly columns: number; readonly locale?: Locale }) {
-  const t = (zh: string, en: string) => chooseText(locale, zh, en);
-  if (row.kind === 'question') return h(Text, { color: 'cyan' }, row.source === 'controller'
-    ? `← ${chooseText(locale, '外部 Agent', 'External agent')}: ${row.text}`
-    : `› ${row.text}`);
-  if (row.kind === 'reasoning') {
-    const folded = foldText(row.text, expanded, 1);
-    return h(Fragment, null,
-      h(Text, { dimColor: true, wrap: 'truncate-end' }, t(`· 推理 ${folded.shown}`, `· Reasoning ${folded.shown}`)),
-      folded.hidden > 0 ? h(Text, { dimColor: true }, t(`  …还有 ${folded.hidden} 字，${keyHint('expand-or-history')} 展开`, `  …${folded.hidden} more characters; ${keyHint('expand-or-history')} to expand`)) : null);
-  }
-  if (row.kind === 'answer') return h(MarkdownRows, { text: row.text, columns });
-  if (row.kind === 'call') return h(Text, { color: 'yellow' }, `→ ${row.tool} ${foldText(row.text, expanded, 1).shown}`);
-  if (row.kind === 'result') {
-    const folded = foldText(row.text, expanded);
-    // 标题行显示操作结果；命令显示退出码，溢出内容显示存储文件名。
-    const note = [row.exitCode === undefined ? '' : t(`退出码 ${row.exitCode}`, `exit ${row.exitCode}`), row.spilled === undefined ? '' : t(`整段在 ${row.spilled}`, `full result: ${row.spilled}`)].filter((part) => part !== '').join(' · ');
-    return h(Fragment, null,
-      h(Text, { color: 'green' }, `✓ ${row.tool}${note === '' ? '' : `（${note}）`}`),
-      folded.shown === '' ? null : h(Text, { dimColor: true, wrap: 'truncate-end' }, folded.shown),
-      folded.hidden > 0 ? h(Text, { dimColor: true }, t(`  …还有 ${folded.hidden} 字，${keyHint('expand-or-history')} 展开`, `  …${folded.hidden} more characters; ${keyHint('expand-or-history')} to expand`)) : null);
-  }
-  if (row.kind === 'refusal') return h(Text, { color: 'magenta' }, t(`✗ ${row.tool} 已拒绝（${row.code}）`, `✗ ${row.tool} denied (${row.code})`));
-  if (row.kind === 'failure') return h(Text, { color: 'red' }, `✗ ${row.tool} ${row.code ?? ''} ${row.text}`);
-  if (row.kind === 'meta') return h(Text, { dimColor: true }, `· ${row.text}`);
-  return h(Text, { color: 'red' }, `! ${row.text}`);
 }
 
 // 队列预览截短为单行，避免长消息撑开输入区。
@@ -685,6 +599,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [ask, setAsk] = useState<AskState | null>(null);
   // 一个提问请求包含一至四道题；逐题填写，最后一题提交后统一发送答复。
   const [query, setQuery] = useState<QuestionState | null>(null);
+  const activeQuestion = useRef(query?.id);
+  activeQuestion.current = query?.id;
   const [running, setRunning] = useState(false);
   const [tick, setTick] = useState(0);
   const [seconds, setSeconds] = useState(0);
@@ -703,12 +619,29 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   useEffect(() => { resolvedExternalInteractions.current.clear(); }, [sessionId]);
   useEffect(() => { setMcpTrustPending(null); }, [sessionId]);
   const pickerRequest = useRef(0);
-  const [draft, setDraft] = useState('');
-  const [caret, setCaret] = useState(0);
+  const sessionNavigation = useRef({ generation: 0, activeToken: 0 });
+  const sessionNavigationMounted = useRef(false);
+  const [ordinaryDraft, setOrdinaryDraft] = useState('');
+  const [ordinaryCaret, setOrdinaryCaret] = useState(0);
+  const [answerDraft, setAnswerDraft] = useState('');
+  const [answerCaret, setAnswerCaret] = useState(0);
+  const [answerOwner, setAnswerOwner] = useState<string | null>(null);
+  const draft = query === null ? ordinaryDraft : answerOwner === query.id ? answerDraft : '';
+  const caret = query === null ? ordinaryCaret : answerOwner === query.id ? answerCaret : 0;
+  const setDraft = query === null ? setOrdinaryDraft : setAnswerDraft;
+  const setCaret = query === null ? setOrdinaryCaret : setAnswerCaret;
+  useLayoutEffect(() => {
+    if (query === null) return;
+    setAnswerOwner(query.id);
+    setAnswerDraft('');
+    setAnswerCaret(0);
+  }, [query?.id, sessionId]);
   // 撤销栈保存每次编辑前的草稿和光标位置；Ctrl+Z 撤销，Ctrl+Y 重做。
   // 撤销记录只保存在当前进程；草稿本身通过持久化输入状态跨退出保存。
   // 撤销和重做各保留最近 100 个状态。
-  const undo = useRef<UndoState>({ stack: [], future: [], kind: null, before: { draft: '', caret: 0 } });
+  const ordinaryUndo = useRef<UndoState>(freshUndo());
+  const answerUndo = useMemo(() => ({ current: freshUndo() }), [query?.id, sessionId]);
+  const undo = query === null ? ordinaryUndo : answerUndo;
   useEffect(() => {
     const cell = undo.current;
     const current = { draft, caret };
@@ -720,17 +653,21 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     if (run && cell.kind === 'insert') return;
     cell.stack = [...cell.stack.slice(-99), previous];
     cell.kind = run ? 'insert' : 'text';
-  }, [draft, caret]);
+  }, [draft, caret, undo]);
   // 用于替换整份草稿并清空撤销栈，避免撤销到其他会话的输入。
-  const resetDraft = useCallback((text: string) => {
-    const cell = undo.current;
-    cell.stack = [];
-    cell.future = [];
-    cell.kind = null;
-    cell.before = { draft: text, caret: text.length };
-    setDraft(text);
-    setCaret(text.length);
+  const resetOrdinaryDraft = useCallback((text: string) => {
+    const normalized = text.replace(/\r\n?/g, '\n');
+    ordinaryUndo.current = freshUndo(normalized);
+    setOrdinaryDraft(normalized);
+    setOrdinaryCaret(normalized.length);
   }, []);
+  const resetDraft = useCallback((text: string) => {
+    if (query === null) { resetOrdinaryDraft(text); return; }
+    const normalized = text.replace(/\r\n?/g, '\n');
+    answerUndo.current = freshUndo(normalized);
+    setAnswerDraft(normalized);
+    setAnswerCaret(normalized.length);
+  }, [query?.id, answerUndo, resetOrdinaryDraft]);
   // 输入历史跨会话保存，不写入会话记录。最新输入位于列表前端，方向键向下浏览更早内容。
   const [entries, setEntries] = useState(history.entries);
   const [historyAt, setHistoryAt] = useState(-1);
@@ -742,6 +679,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [detail, setDetail] = useState<DetailState | null>(null);
   // 斜杠命令候选的当前选择索引；候选内容始终从草稿重新计算。
   const [pick, setPick] = useState(0);
+  useEffect(() => { setPick(0); }, [draft]);
   // 记住按 Esc 关闭候选时的草稿；输入变化后重新显示候选。
   const [dismissedAt, setDismissedAt] = useState<string | null>(null);
   // 运行期间通过 Enter 提交的消息先排在界面队列中，不立即写入会话记录。
@@ -756,7 +694,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const mentionAsked = useRef<ReturnType<typeof mentionToken> | typeof NO_TOKEN>(NO_TOKEN);
   // Ink 结束后禁止继续写入，避免迟到的答复或状态更新触发 `write after end`。
   const alive = useRef(true);
-  useEffect(() => () => { alive.current = false; }, []);
+  useEffect(() => () => {
+    alive.current = false;
+    sessionNavigation.current.generation += 1;
+  }, []);
   const push = useCallback((...added: TranscriptItem[]) => {
     if (!alive.current) return;
     setRows((current) => [...current, ...added]);
@@ -782,47 +723,49 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const viewedSession = useRef(sessionId);
   useEffect(() => {
     if (viewedSession.current === sessionId) return;
-    inputState.current.set(viewedSession.current, { queue, queuePaused, draft });
+    inputState.current.set(viewedSession.current, { queue, queuePaused, draft: ordinaryDraft });
     const saved = inputState.current.get(sessionId);
     setQueue(saved?.queue ?? []);
     setQueuePaused(saved?.queuePaused ?? false);
-    resetDraft(saved?.draft ?? '');
+    resetOrdinaryDraft(saved?.draft ?? '');
     viewedSession.current = sessionId;
-  }, [draft, queue, queuePaused, sessionId]);
+  }, [ordinaryDraft, queue, queuePaused, resetOrdinaryDraft, sessionId]);
 
   // 退出前将未发送草稿和队列持久化到本地输入状态文件，并按会话恢复。
   // 每份会话只在首次恢复时读取；响应返回前若已切换会话则丢弃，避免覆盖其他会话草稿。
   const inputNow = useRef({ draft: '', queue: [] as string[] });
-  inputNow.current = { draft, queue };
+  inputNow.current = { draft: ordinaryDraft, queue };
+  const [loadedInputSession, setLoadedInputSession] = useState<string | null>(null);
   useEffect(() => {
     if (inputs === undefined) return;
     const own = sessionId;
     const root = info.boundary ?? '';
-    if (inputState.current.has(own)) return;
+    if (inputState.current.has(own)) { setLoadedInputSession(own); return; }
     void (async () => {
       const saved = await inputs.read(root, own);
       if (viewedSession.current !== own) return;
       inputState.current.set(own, { queue: saved.queued, queuePaused: saved.queued.length > 0, draft: saved.draft });
+      setLoadedInputSession(own);
       // 恢复期间若用户已输入新内容，保留新输入，不用旧草稿覆盖。
-      if (saved.draft !== '' && inputNow.current.draft === '') resetDraft(saved.draft);
+      if (saved.draft !== '' && inputNow.current.draft === '') resetOrdinaryDraft(saved.draft);
       // 恢复后的队列保持暂停，避免重启后自动发送用户尚未确认的消息。
       if (saved.queued.length > 0 && inputNow.current.queue.length === 0) {
         setQueue(saved.queued);
         setQueuePaused(true);
       }
     })().catch(() => inputState.current.delete(own));
-  }, [info.boundary, inputs, sessionId]);
+  }, [info.boundary, inputs, resetOrdinaryDraft, sessionId]);
 
   // 输入停止 400 毫秒后保存，减少连续输入期间的磁盘写入，同时保留退出前的最新草稿。
   useEffect(() => {
-    if (inputs === undefined || !inputState.current.has(sessionId)) return;
+    if (inputs === undefined || loadedInputSession !== sessionId) return;
     const own = sessionId;
     const root = info.boundary ?? '';
     const timer = setTimeout(() => {
-      void inputs.write(root, own, draft, queue).catch(() => push({ kind: 'error', text: t('无法保存草稿和队列，请复制后再退出', 'Could not save draft and queue; copy your input before exiting') }));
+      void inputs.write(root, own, ordinaryDraft, queue).catch(() => push({ kind: 'error', text: t('无法保存草稿和队列，请复制后再退出', 'Could not save draft and queue; copy your input before exiting') }));
     }, 400);
     return () => clearTimeout(timer);
-  }, [draft, info.boundary, inputs, push, queue, sessionId, t]);
+  }, [ordinaryDraft, info.boundary, inputs, loadedInputSession, push, queue, sessionId, t]);
 
   // `@` 候选查询在输入停止 160 毫秒后发送；查询期间文本变化时忽略旧响应。
   // 传输层不支持中途取消，因此通过丢弃过期结果避免更新界面。
@@ -851,8 +794,16 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     return () => clearTimeout(timer);
   }, [caret, client, draft, hiddenMention, info.boundary]);
   const [sessionPicker, setSessionPicker] = useState<SessionPickerState | null>(null);
+  useEffect(() => {
+    pickerRequest.current += 1;
+    if (sessionNavigationMounted.current) sessionNavigation.current.generation += 1;
+    else sessionNavigationMounted.current = true;
+    if (ask !== null || query !== null) setSessionPicker(null);
+  }, [ask, query, sessionId]);
   const [approvalExpanded, setApprovalExpanded] = useState(false);
   const [approvalCursor, setApprovalCursor] = useState(0);
+  const [questionOffset, setQuestionOffset] = useState(0);
+  useEffect(() => setQuestionOffset(0), [query?.id, query?.at]);
 
   const refreshStatus = useCallback(async () => {
     // Ink 已退出时不再向已关闭的连接发送状态更新。
@@ -891,7 +842,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       if (message.notify === 'event') {
         if (!isSessionEvent(message.event)) return;
         const event = message.event;
-        if (event.kind === 'turn') terminalReceived.current = true;
+        if (event.kind === 'turn') {
+          terminalReceived.current = true;
+          setAsk(null);
+          setQuery(null);
+        }
         // 持久化事件到达后，以记录事件替换流式占位内容。
         if (event.kind === 'assistant') setLive((current) => ({ ...current, text: '' }));
         if (event.kind === 'reasoning') setLive((current) => ({ ...current, reasoning: '' }));
@@ -908,6 +863,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         const asked = params;
         if (asked.sessionId !== sessionId || !Array.isArray(asked.questions) || asked.questions.length === 0 || !asked.questions.every(isAskQuestion)) return;
         pickerRequest.current += 1;
+        sessionNavigation.current.generation += 1;
         setPanel(null);
         setDetail(null);
         setSessionPicker(null);
@@ -918,6 +874,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       }
       if (message.method !== 'approval.request' || params.sessionId !== sessionId || typeof params.tool !== 'string') return;
       pickerRequest.current += 1;
+      sessionNavigation.current.generation += 1;
       setPanel(null);
       const args = isRecord(params.args) ? params.args : {};
       setApprovalExpanded(false);
@@ -1223,11 +1180,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
 
   const exitTui = useCallback((savedDraft = inputNow.current.draft) => {
     if (inputs === undefined) { app.exit(); return; }
-    void inputs.write(info.boundary ?? '', sessionId, savedDraft, inputNow.current.queue).then(
+    void inputs.write(info.boundary ?? '', sessionId, query === null ? savedDraft : inputNow.current.draft, inputNow.current.queue).then(
       () => app.exit(),
       () => push({ kind: 'error', text: t('无法保存草稿和队列，请复制后重试退出', 'Could not save draft and queue; copy your input and retry exiting') }),
     );
-  }, [app, inputs, info.boundary, sessionId, push, t]);
+  }, [app, inputs, info.boundary, sessionId, query?.id, push, t]);
 
   const openPicker = useCallback((kind: PickerKind, requestedControlTarget = controlTarget) => {
     const token = ++pickerRequest.current;
@@ -1359,7 +1316,38 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     });
   }, [client, controlSnapshot, controlTarget, info.boundary, modes, push, sessionId, t]);
 
+  const beginSessionNavigation = useCallback((owner: string): SessionNavigationLease | undefined => {
+    const navigation = sessionNavigation.current;
+    if (navigation.activeToken !== 0) {
+      push({ kind: 'meta', text: t('会话切换正在进行，请稍后重试。', 'A session switch is in progress; try again shortly.') });
+      return undefined;
+    }
+    const token = ++navigation.generation;
+    navigation.activeToken = token;
+    return { token, owner };
+  }, [push, t]);
+
+  const sessionNavigationIsCurrent = useCallback((lease: SessionNavigationLease): boolean => {
+    const navigation = sessionNavigation.current;
+    return alive.current
+      && navigation.activeToken === lease.token
+      && navigation.generation === lease.token
+      && activeSession.current === lease.owner;
+  }, []);
+
+  const finishSessionNavigation = useCallback((lease: SessionNavigationLease): void => {
+    if (sessionNavigation.current.activeToken === lease.token) sessionNavigation.current.activeToken = 0;
+  }, []);
+
+  const closeUnadoptedSession = useCallback(async (targetId: string, owner: string, force = false): Promise<string | undefined> => {
+    if (!force && targetId === owner) return undefined;
+    const closed = await client.request('session.close', { sessionId: targetId })
+      .catch((error: unknown) => requestFailure(error, 'session_close_failed'));
+    return 'code' in closed ? closed.code : undefined;
+  }, [client]);
+
   const runCommand = useCallback((name: string, argument = '') => {
+    pickerRequest.current += 1;
     if (name === 'mcp') {
       const [action = 'list', serverName = '', scopeText = ''] = argument.trim().split(/\s+/, 3);
       const scopes: readonly McpTrustScope[] = ['session', 'project', 'user'];
@@ -1550,17 +1538,29 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     if (name === 'new') {
+      const lease = beginSessionNavigation(sessionId);
+      if (lease === undefined) return;
+      const owner = lease.owner;
+      const wasExternal = externalControl;
       void (async () => {
+        let createdId: string | undefined;
+        let adopted = false;
         try {
           const created = await client.request('session.create', {});
-          if (!externalControl) {
-            try {
-              await client.request('session.close', { sessionId });
-            } catch (error) {
-              await client.request('session.close', { sessionId: created.sessionId });
-              throw error;
+          createdId = created.sessionId;
+          if (!sessionNavigationIsCurrent(lease)) return;
+          if (!wasExternal && owner !== created.sessionId) {
+            const retired = await client.request('session.close', { sessionId: owner })
+              .catch((error: unknown) => requestFailure(error, 'session_close_failed'));
+            if ('code' in retired) {
+              push({ kind: 'error', text: t(`无法关闭当前会话：${retired.code}`, `Could not close the current session: ${retired.code}`) });
+              return;
             }
           }
+          // Closing the old session is the commit point. No transition can overlap this operation.
+          // If the TUI was unmounted after that point, Host release will retire the created session.
+          if (!alive.current || activeSession.current !== owner) return;
+          adopted = true;
           setSessionId(created.sessionId);
           setExternalControl(false);
           setExternalSnapshot(null);
@@ -1575,7 +1575,17 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           setLive({ text: '', reasoning: '' });
           push({ kind: 'meta', text: t(`新会话 ${created.sessionId.slice(0, 8)}`, `New session ${created.sessionId.slice(0, 8)}`) });
         } catch (error) {
-          push({ kind: 'error', text: t(`无法创建会话：${errorCode(error) ?? errorMessage(error) ?? 'unknown'}`, `Could not create session: ${errorCode(error) ?? errorMessage(error) ?? 'unknown'}`) });
+          if (sessionNavigationIsCurrent(lease)) {
+            push({ kind: 'error', text: t(`无法创建会话：${errorCode(error) ?? errorMessage(error) ?? 'unknown'}`, `Could not create session: ${errorCode(error) ?? errorMessage(error) ?? 'unknown'}`) });
+          }
+        } finally {
+          if (createdId !== undefined && !adopted) {
+            const cleanup = await closeUnadoptedSession(createdId, owner);
+            if (cleanup !== undefined && alive.current) {
+              push({ kind: 'error', text: t(`无法释放未采用的新会话：${cleanup}`, `Could not release the unused new session: ${cleanup}`) });
+            }
+          }
+          finishSessionNavigation(lease);
         }
       })();
       return;
@@ -1626,9 +1636,12 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     if (name === 'sessions') {
+      const token = pickerRequest.current;
+      const own = sessionId;
       void (async () => {
         // 会话列表由 Host 扫描，TUI 不直接访问记录目录。
         const listed = await client.request('sessions.list', { projectRoot: info.boundary }).catch((error: unknown) => requestFailure(error, 'session_list_failed'));
+        if (!alive.current || activeSession.current !== own || pickerRequest.current !== token) return;
         if ('code' in listed) {
           push({ kind: 'error', text: t(`无法读取会话列表：${listed.code}`, `Could not list sessions: ${listed.code}`) });
           return;
@@ -1638,7 +1651,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           setDetail(null);
           setExpanded(false);
           setSearch(null);
-          setSessionPicker({ items: listed.sessions, at: 0 });
+          setSessionPicker({ items: listed.sessions });
         }
       })();
       return;
@@ -1676,75 +1689,110 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         runCommand('sessions');
         return;
       }
+      const lease = beginSessionNavigation(sessionId);
+      if (lease === undefined) return;
+      const owner = lease.owner;
+      const wasExternal = externalControl;
       // 第二个词指定恢复会话时使用的模式；模式摘要变化时，用户必须明确选择模式才能继续。
       const [wanted, chosenMode] = argument.split(/\s+/);
       void (async () => {
-        const listed = await client.request('sessions.list', { projectRoot: info.boundary }).catch((error: unknown) => requestFailure(error, 'session_list_failed'));
-        if ('code' in listed) {
-          push({ kind: 'error', text: t(`无法读取会话列表：${listed.code}`, `Could not list sessions: ${listed.code}`) });
-          return;
-        }
-        const picked = resolveSessionId(wanted, listed.sessions);
-        if (!('id' in picked)) {
-          push({ kind: 'error', text: picked.code === 'tui_session_ambiguous'
-            ? t(`多个会话以 ${wanted} 开头，请输入更长的编号（/sessions 查看）`, `Multiple sessions start with ${wanted}; enter a longer ID (/sessions to browse)`)
-            : t(`此工作区没有会话 ${wanted}（/sessions 查看）`, `Session ${wanted} was not found in this workspace (/sessions to browse)`) });
-          return;
-        }
-        if (picked.id === sessionId && chosenMode === undefined) {
+        let targetId: string | undefined;
+        let targetOpenedHere = false;
+        let targetAdopted = false;
+        try {
+          const listed = await client.request('sessions.list', { projectRoot: info.boundary })
+            .catch((error: unknown) => requestFailure(error, 'session_list_failed'));
+          if (!sessionNavigationIsCurrent(lease)) return;
+          if ('code' in listed) {
+            push({ kind: 'error', text: t(`无法读取会话列表：${listed.code}`, `Could not list sessions: ${listed.code}`) });
+            return;
+          }
+          const picked = resolveSessionId(wanted, listed.sessions);
+          if (!('id' in picked)) {
+            push({ kind: 'error', text: picked.code === 'tui_session_ambiguous'
+              ? t(`多个会话以 ${wanted} 开头，请输入更长的编号（/sessions 查看）`, `Multiple sessions start with ${wanted}; enter a longer ID (/sessions to browse)`)
+              : t(`此工作区没有会话 ${wanted}（/sessions 查看）`, `Session ${wanted} was not found in this workspace (/sessions to browse)`) });
+            return;
+          }
+          targetId = picked.id;
+          if (picked.id === owner && chosenMode === undefined) {
+            setSessionPicker(null);
+            push({ kind: 'meta', text: t('已打开此会话', 'This session is already open') });
+            return;
+          }
+          // 外控 Host 持有写锁时读取其持久化记录，不抢锁创建第二个写入者。
+          const opened = await client.request('session.open', {
+            sessionId: picked.id,
+            projectRoot: info.boundary ?? '',
+            ...(chosenMode === undefined ? {} : { mode: chosenMode }),
+          }).catch((error: unknown) => requestFailure(error, 'session_open_failed'));
+          targetOpenedHere = !('code' in opened);
+          if (!sessionNavigationIsCurrent(lease)) return;
+
+          let observingExternal = false;
+          let read: SessionPage & { readonly writerActive?: boolean } | { readonly code: string };
+          if ('code' in opened && opened.code === 'session_locked' && chosenMode === undefined) {
+            read = await client.request('session.observe', { projectRoot: info.boundary ?? '', sessionId: picked.id })
+              .catch((error: unknown) => requestFailure(error, 'session_observe_failed'));
+            if (!sessionNavigationIsCurrent(lease)) return;
+            observingExternal = !('code' in read) && read.writerActive === true;
+            if (!observingExternal) read = { code: 'session_writer_unavailable' };
+          } else if ('code' in opened) {
+            read = opened;
+          } else {
+            read = await client.request('session.read', { sessionId: picked.id })
+              .catch((error: unknown) => requestFailure(error, 'session_read_failed'));
+          }
+          if (!sessionNavigationIsCurrent(lease)) return;
+          if ('code' in read) {
+            push({ kind: 'error', text: t(`无法恢复会话：${read.code}`, `Could not resume session: ${read.code}`)
+              + (read.code === 'resume_mode_changed' ? t(`；请指定工具模式：/resume ${wanted} <模式名>`, `; specify a tool mode: /resume ${wanted} <mode>`) : '')
+              + (read.code === 'session_is_branch' ? t('；请用 /sub <序号> 查看子任务', '; use /sub <seq> to view the subtask') : '') });
+            return;
+          }
+          if (!wasExternal && picked.id !== owner) {
+            const retired = await client.request('session.close', { sessionId: owner })
+              .catch((error: unknown) => requestFailure(error, 'session_close_failed'));
+            if ('code' in retired) {
+              push({ kind: 'error', text: t(`无法关闭上一会话，已保留当前会话：${retired.code}`, `Could not close the previous session; keeping it active: ${retired.code}`) });
+              return;
+            }
+          }
+          // Closing the previous session is the commit point. Apply the new session state without another await.
+          if (!alive.current || activeSession.current !== owner) return;
+          targetAdopted = true;
+          setSessionId(picked.id);
+          setExternalControl(observingExternal);
+          setExternalSnapshot(null);
+          setExternalModel(observingExternal ? externalModelFrom(read.events) : null);
+          setRunning(false);
+          setStatus(picked.id === owner ? status : null);
+          setAsk(null);
+          setQuery(null);
           setSessionPicker(null);
-          push({ kind: 'meta', text: t('已打开此会话', 'This session is already open') });
-          return;
+          setRows(read.events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq }))));
+          setLive({ text: '', reasoning: '' });
+          setDetail(null);
+          const row = listed.sessions.find((item) => item.id === picked.id);
+          if (picked.id === owner) void refreshStatus();
+          push({
+            kind: 'meta',
+            text: t(`已恢复会话 ${picked.id.slice(0, 8)}`, `Resumed session ${picked.id.slice(0, 8)}`)
+              + (row === undefined || row.unanswered === 0 ? '' : t(`；已修复 ${row.unanswered} 条未完成调用`, `; repaired ${row.unanswered} unresolved calls`)),
+          });
+        } catch (error) {
+          if (sessionNavigationIsCurrent(lease)) {
+            push({ kind: 'error', text: t(`无法恢复会话：${errorCode(error) ?? errorMessage(error) ?? 'session_resume_failed'}`, `Could not resume session: ${errorCode(error) ?? errorMessage(error) ?? 'session_resume_failed'}`) });
+          }
+        } finally {
+          if (targetOpenedHere && !targetAdopted && targetId !== undefined) {
+            const cleanup = await closeUnadoptedSession(targetId, owner);
+            if (cleanup !== undefined && alive.current) {
+              push({ kind: 'error', text: t(`无法释放未采用的会话 ${targetId.slice(0, 8)}：${cleanup}`, `Could not release unused session ${targetId.slice(0, 8)}: ${cleanup}`) });
+            }
+          }
+          finishSessionNavigation(lease);
         }
-        // 外控 Host 持有写锁时读取其持久化记录，不抢锁创建第二个写入者。
-        const opened = await client.request('session.open', {
-          sessionId: picked.id,
-          projectRoot: info.boundary ?? '',
-          ...(chosenMode === undefined ? {} : { mode: chosenMode }),
-        })
-          .catch((error: unknown) => requestFailure(error, 'session_open_failed'));
-        let observingExternal = false;
-        let read: SessionPage & { readonly writerActive?: boolean } | { readonly code: string };
-        if ('code' in opened && opened.code === 'session_locked' && chosenMode === undefined) {
-          read = await client.request('session.observe', { projectRoot: info.boundary ?? '', sessionId: picked.id })
-            .catch((error: unknown) => requestFailure(error, 'session_observe_failed'));
-          observingExternal = !('code' in read) && read.writerActive === true;
-          if (!observingExternal) read = { code: 'session_writer_unavailable' };
-        } else if ('code' in opened) read = opened;
-        else read = await client.request('session.read', { sessionId: picked.id }).catch((error: unknown) => requestFailure(error, 'session_read_failed'));
-        if ('code' in read) {
-          push({ kind: 'error', text: t(`无法恢复会话：${read.code}`, `Could not resume session: ${read.code}`)
-            + (read.code === 'resume_mode_changed' ? t(`；请指定工具模式：/resume ${wanted} <模式名>`, `; specify a tool mode: /resume ${wanted} <mode>`) : '')
-            + (read.code === 'session_is_branch' ? t('；请用 /sub <序号> 查看子任务', '; use /sub <seq> to view the subtask') : '') });
-          return;
-        }
-        // TUI 一次只持有一个会话，切换时释放前一会话的运行状态和记录锁。
-        // 在同一次渲染中更新会话 ID 和记录内容，确保 Ink 的 Static 列表能按索引正确补画。
-        // 释放失败不会阻止打开新会话，但会显示诊断信息。
-        const retiring = externalControl
-          ? Promise.resolve({ sessionId })
-          : client.request('session.close', { sessionId }).catch((error: unknown) => requestFailure(error, 'session_close_failed'));
-        setSessionId(picked.id);
-        setExternalControl(observingExternal);
-        setExternalSnapshot(null);
-        setExternalModel(observingExternal ? externalModelFrom(read.events) : null);
-        setRunning(false);
-        setStatus(null);
-        setAsk(null);
-        setQuery(null);
-        setSessionPicker(null);
-        // 根据记录重建转录，不沿用前一会话的画面状态。
-        setRows(read.events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq }))));
-        setLive({ text: '', reasoning: '' });
-        setDetail(null);
-        const retired = await retiring;
-        const row = listed.sessions.find((item) => item.id === picked.id);
-        push({
-          kind: 'meta',
-          text: t(`已恢复会话 ${picked.id.slice(0, 8)}`, `Resumed session ${picked.id.slice(0, 8)}`)
-            + ('code' in retired ? t(`；无法关闭上一会话：${retired.code}`, `; previous session could not close: ${retired.code}`) : '')
-            + (row === undefined || row.unanswered === 0 ? '' : t(`；已修复 ${row.unanswered} 条未完成调用`, `; repaired ${row.unanswered} unresolved calls`)),
-        });
       })();
       return;
     }
@@ -1753,34 +1801,87 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         push({ kind: 'meta', text: t('当前会话不由外部 Agent 控制', 'The current session is not externally controlled') });
         return;
       }
+      const lease = beginSessionNavigation(sessionId);
+      if (lease === undefined) return;
+      const owner = lease.owner;
       void (async () => {
-        const transferred = await client.request('session.control', {
-          projectRoot: info.boundary ?? '', sessionId, request: { action: 'takeover' },
-        }).catch((error: unknown) => requestFailure(error, 'external_control_takeover_failed'));
-        if ('code' in transferred) {
-          push({ kind: 'error', text: t(`无法接管外控会话：${transferred.code}`, `Could not take over external session: ${transferred.code}`) });
-          return;
+        let localSessionOpened = false;
+        let adopted = false;
+        let transferred = false;
+        try {
+          if (!sessionNavigationIsCurrent(lease)) return;
+          const result = await client.request('session.control', {
+            projectRoot: info.boundary ?? '', sessionId: owner, request: { action: 'takeover' },
+          }).catch((error: unknown) => requestFailure(error, 'external_control_takeover_failed'));
+          if ('code' in result) {
+            if (sessionNavigationIsCurrent(lease)) {
+              push({ kind: 'error', text: t(`无法接管外控会话：${result.code}`, `Could not take over external session: ${result.code}`) });
+            }
+            return;
+          }
+          // The control request has transferred ownership. Complete the local reopen even if
+          // a pending external interaction invalidated the ordinary navigation generation.
+          transferred = true;
+          const opened = await client.request('session.open', { sessionId: owner, projectRoot: info.boundary ?? '' })
+            .catch((error: unknown) => requestFailure(error, 'session_open_failed'));
+          if ('code' in opened) {
+            if (alive.current && activeSession.current === owner) {
+              setExternalControl(false);
+              setExternalSnapshot(null);
+              setExternalModel(null);
+              setRunning(false);
+              setStatus(null);
+              setAsk(null);
+              setQuery(null);
+              push({ kind: 'error', text: t(`外控已停止，但本地会话无法打开：${opened.code}；可用 /resume ${owner.slice(0, 8)} 重试`, `External control stopped, but the local session could not open: ${opened.code}; retry with /resume ${owner.slice(0, 8)}`) });
+            }
+            return;
+          }
+          localSessionOpened = true;
+          if (!alive.current || activeSession.current !== owner) return;
+          const read = await client.request('session.read', { sessionId: owner }).catch((error: unknown) => requestFailure(error, 'session_read_failed'));
+          if (!alive.current || activeSession.current !== owner) return;
+          setExternalControl(false);
+          setExternalSnapshot(null);
+          setExternalModel(null);
+          setRunning(false);
+          setStatus(null);
+          setAsk(null);
+          setQuery(null);
+          setDetail(null);
+          setSearch(null);
+          setSessionPicker(null);
+          if ('code' in read) {
+            // This is still the active session and the local Host lock is now intentionally adopted.
+            adopted = true;
+            push({ kind: 'error', text: t(`已接管会话，但转录读取失败：${read.code}`, `Session taken over, but its transcript could not be read: ${read.code}`) });
+            return;
+          }
+          adopted = true;
+          setRows(read.events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq }))));
+          setLive({ text: '', reasoning: '' });
+          push({ kind: 'meta', text: t('已接管外控会话，后续输入由 TUI 直接提交。', 'External session taken over; new input now runs through this TUI.') });
+        } catch (error) {
+          if (transferred && alive.current && activeSession.current === owner) {
+            setExternalControl(false);
+            setExternalSnapshot(null);
+            setExternalModel(null);
+            setRunning(false);
+            setAsk(null);
+            setQuery(null);
+          }
+          if (alive.current) {
+            push({ kind: 'error', text: t(`接管外控会话失败：${errorCode(error) ?? errorMessage(error) ?? 'external_control_takeover_failed'}`, `Could not complete takeover: ${errorCode(error) ?? errorMessage(error) ?? 'external_control_takeover_failed'}`) });
+          }
+        } finally {
+          if (localSessionOpened && !adopted) {
+            const cleanup = await closeUnadoptedSession(owner, owner, true);
+            if (cleanup !== undefined && alive.current) {
+              push({ kind: 'error', text: t(`无法释放未采用的本地会话锁：${cleanup}`, `Could not release the unused local session lock: ${cleanup}`) });
+            }
+          }
+          finishSessionNavigation(lease);
         }
-        const opened = await client.request('session.open', { sessionId, projectRoot: info.boundary ?? '' })
-          .catch((error: unknown) => requestFailure(error, 'session_open_failed'));
-        if ('code' in opened) {
-          push({ kind: 'error', text: t(`外控已停止，但本地会话无法打开：${opened.code}`, `External control stopped, but the local session could not open: ${opened.code}`) });
-          return;
-        }
-        const read = await client.request('session.read', { sessionId }).catch((error: unknown) => requestFailure(error, 'session_read_failed'));
-        if ('code' in read) {
-          push({ kind: 'error', text: t(`已接管会话，但转录读取失败：${read.code}`, `Session taken over, but its transcript could not be read: ${read.code}`) });
-          return;
-        }
-        setExternalControl(false);
-        setExternalSnapshot(null);
-        setExternalModel(null);
-        setRunning(false);
-        setAsk(null);
-        setQuery(null);
-        setRows(read.events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq }))));
-        await refreshStatus();
-        push({ kind: 'meta', text: t('已接管外控会话，后续输入由 TUI 直接提交。', 'External session taken over; new input now runs through this TUI.') });
       })();
       return;
     }
@@ -1793,16 +1894,25 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         push({ kind: 'error', text: t('分支点须为完整轮次的记录序号：/branch [序号]', 'Branch point must be a completed turn’s sequence: /branch [seq]') });
         return;
       }
+      const lease = beginSessionNavigation(sessionId);
+      if (lease === undefined) return;
+      const owner = lease.owner;
       void (async () => {
-        const branched = await client.request('session.branch', { sessionId, ...(at === undefined ? {} : { at }) }).catch((error: unknown) => requestFailure(error, 'session_branch_failed'));
-        if ('code' in branched) {
-          push({ kind: 'error', text: t(`无法创建分支：${branched.code}`, `Could not create branch: ${branched.code}`) });
-          return;
+        try {
+          const branched = await client.request('session.branch', { sessionId: owner, ...(at === undefined ? {} : { at }) }).catch((error: unknown) => requestFailure(error, 'session_branch_failed'));
+          if (!sessionNavigationIsCurrent(lease)) return;
+          if ('code' in branched) {
+            push({ kind: 'error', text: t(`无法创建分支：${branched.code}`, `Could not create branch: ${branched.code}`) });
+            return;
+          }
+          push({ kind: 'meta', text: t(`已创建分支会话 ${branched.sessionId.slice(0, 8)}（截至记录 ${branched.at}）`, `Created branch ${branched.sessionId.slice(0, 8)} through event ${branched.at}`) });
+          // Branch records do not hold a session lock. Release this lease and immediately
+          // start the serialized resume transaction for the new branch.
+          finishSessionNavigation(lease);
+          runCommand('resume', branched.sessionId);
+        } finally {
+          finishSessionNavigation(lease);
         }
-        push({ kind: 'meta', text: t(`已创建分支会话 ${branched.sessionId.slice(0, 8)}（截至记录 ${branched.at}）`, `Created branch ${branched.sessionId.slice(0, 8)} through event ${branched.at}`) });
-        // 通过 `/resume` 打开新分支，读取记录并替换当前会话。
-        // 未完成调用在新分支首次打开时恢复为结果未知。
-        runCommand('resume', branched.sessionId);
       })();
       return;
     }
@@ -1901,10 +2011,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           push({ kind: 'error', text: t(`队列编号无效，当前有 ${queue.length} 条消息`, `Invalid queue index; ${queue.length} messages queued`) });
           return;
         }
-        const recovered = queue[at];
+        const recovered = [activeQuestion.current === undefined ? '' : inputNow.current.draft, queue[at]].filter(Boolean).join('\n\n');
         setQueue((current) => current.filter((_, index) => index !== at));
-        setDraft(recovered);
-        setCaret(recovered.length);
+        resetOrdinaryDraft(recovered);
         push({ kind: 'meta', text: t(`消息 ${at + 1} 已移回草稿`, `Message ${at + 1} moved back to draft`) });
         return;
       }
@@ -1913,11 +2022,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           push({ kind: 'meta', text: t('队列为空', 'Queue is empty') });
           return;
         }
-        const recovered = queue.join('\n\n');
+        const recovered = [activeQuestion.current === undefined ? '' : inputNow.current.draft, ...queue].filter(Boolean).join('\n\n');
         setQueue([]);
         setQueuePaused(false);
-        setDraft(recovered);
-        setCaret(recovered.length);
+        resetOrdinaryDraft(recovered);
         push({ kind: 'meta', text: t(`已将 ${queue.length} 条消息移回草稿`, `Moved ${queue.length} messages back to draft`) });
         return;
       }
@@ -2174,7 +2282,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     push({ kind: 'error', text: t(`未知命令：/${name}（/help 查看）`, `Unknown command: /${name} (/help to browse)`) });
-  }, [app, changePermission, client, externalControl, info, keyOverrides, keys, locale, mcpTrustPending, push, queue, queuePaused, refreshStatus, sessionId, status, stdout, t, trust, openPicker, exitTui]);
+  }, [app, beginSessionNavigation, changePermission, client, closeUnadoptedSession, externalControl, finishSessionNavigation, info, keyOverrides, keys, locale, mcpTrustPending, push, queue, queuePaused, refreshStatus, resetOrdinaryDraft, sessionId, sessionNavigationIsCurrent, status, stdout, t, trust, openPicker, exitTui]);
 
   const chooseOption = useCallback((id: string) => {
     const choice = choices.find(item => item.id === id);
@@ -2484,13 +2592,18 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   }, [client, controlWizard, info.boundary, push, resetDraft, t]);
 
   const send = useCallback((text: string) => {
-    if (controlWizard !== null) { advanceControlWizard(text); return; }
+    const route = routeInput(text, running);
+    const answering = query !== null && !text.trim().startsWith('/');
+    if (sessionNavigation.current.activeToken !== 0 && !answering && !(route.kind === 'command' && route.name === 'quit')) {
+      push({ kind: 'meta', text: t('会话切换完成前不会提交输入，草稿已保留。', 'Input is held until the session switch completes; the draft is preserved.') });
+      return;
+    }
+    if (controlWizard !== null && query === null) { advanceControlWizard(text); return; }
     // 问题面板打开时，回车提交当前答案；斜杠命令仍可运行，例如 `/status` 和 `/queue`。
-    if (query !== null && !text.trim().startsWith('/')) {
+    if (answering) {
       answerQuery(text);
       return;
     }
-    const route = routeInput(text, running);
     if (route.kind === 'blocked') {
       push({ kind: 'meta', text: t(`请先按 ${keyHint('interrupt')} 停止当前轮次，再执行此命令`, `Stop this turn with ${keyHint('interrupt')} before using this command`) });
       return;
@@ -2516,7 +2629,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     void submit(route.text);
-  }, [advanceControlWizard, answerQuery, controlWizard, loadApprovalDetails, locale, push, query, remember, runCommand, running, submit, t]);
+  }, [advanceControlWizard, answerQuery, controlWizard, loadApprovalDetails, locale, push, query, remember, resetDraft, runCommand, running, submit, t]);
 
   // 轮次结束后每次发送一条队列消息；取消后队列保持暂停，需用户明确继续。
   useEffect(() => {
@@ -2542,25 +2655,18 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const templates = status?.templates ?? [];
   const picks = panel !== null || dismissedAt === draft || search !== null || detail !== null || sessionPicker !== null || ask !== null || query !== null ? [] : candidatesOf(draft, templates, undefined, locale);
   const chosen = picks.length === 0 ? 0 : Math.min(pick, picks.length - 1);
+  const candidateHeight = Math.max(1, Math.min(CANDIDATE_ROWS, geometry.rows - 12));
+  const pathHeight = Math.max(1, Math.min(MENTION_ROWS, geometry.rows - 10));
   const searched = search === null ? [] : searchHistory(entries, search.query);
   const viewLines = useMemo(() => detail === null ? [] : transcriptLines(detail.rows, Math.max(1, geometry.columns - 6), locale), [detail?.rows, geometry.columns, locale]);
-  const viewHeight = Math.max(1, geometry.rows - 12 - (ask === null ? 0 : 7));
+  const viewHeight = Math.max(1, geometry.rows - 6 - (ask === null ? 0 : 7));
   const view = viewportPosition(detail?.cursor ?? 0, viewLines.length, viewHeight, detail?.offset ?? 0);
   const selection = detail?.anchor === undefined || detail.anchor === null ? [view.cursor, view.cursor] : [Math.min(detail.anchor, view.cursor), Math.max(detail.anchor, view.cursor)];
-  const approvalLines = useMemo(() => ask === null ? [] : wrapLine(ask.content, Math.max(1, geometry.columns - 6)), [ask?.content, geometry.columns]);
-  const approvalHeight = Math.max(1, geometry.rows - 12);
+  const approvalLayout = useMemo(() => ask === null ? null : buildApprovalLayout(ask, approvalExpanded,
+    geometry.columns, Math.max(1, geometry.rows - 1), locale), [ask, approvalExpanded, geometry.columns, geometry.rows, locale]);
+  const approvalLines = approvalLayout?.bodyLines ?? [];
+  const approvalHeight = approvalLayout?.bodyHeight ?? 0;
   const approvalView = viewportPosition(approvalCursor, approvalLines.length, approvalHeight);
-  const rememberChoices = ask?.rememberScopes.map((scope, index) => {
-    const label = scope === 'session' ? t('记住本会话', 'remember this session')
-      : scope === 'project' ? t('记住本项目', 'remember this project')
-        : t('记住所有项目', 'remember all projects');
-    return `${index + 2} ${label}`;
-  }).join(' · ') ?? '';
-  const rememberTargetLabel = ask?.rememberHintKey === 'file'
-    ? ask.rememberTarget === 'workspace' ? t('此工作区同类操作', 'this operation type in this workspace') : t('仅此文件', 'this file only')
-    : ask?.rememberHintKey === 'command' ? t('此命令', 'this command')
-      : ask?.rememberHintKey === 'mcp' ? t('此组 MCP 参数', 'these MCP arguments')
-        : t('此工具能力', 'this tool capability');
   // 问题面板显示题目、已提交答案和当前题是否为最后一题。
   const asking = query === null ? null : {
     count: query.questions.length,
@@ -2570,6 +2676,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     done: query.questions.slice(0, query.at).map((one, index) => `${index + 1}. ${answeredLine(query.picked[one.id]?.answer, locale)}`),
     last: query.at + 1 === query.questions.length,
   };
+  const questionLines = asking === null ? [] : wrapLine([
+    asking.title,
+    ...asking.current.options.map((option, position) => `${position + 1}. ${option.label}${option.description === undefined ? '' : ` —— ${option.description}`}`),
+    ...asking.done,
+  ].join('\n'), Math.max(1, geometry.columns - 3));
+  const composerHeight = Math.max(1, Math.min(query === null ? 5 : 3, geometry.rows - 10));
+  const questionHeight = Math.max(1, geometry.rows - composerHeight - 6);
+  const questionStart = Math.max(0, Math.min(questionOffset, Math.max(0, questionLines.length - questionHeight)));
   const controlPrompt = controlWizard === null ? null
     : controlWizard.step === 8
       ? t(`允许外控启动哪些已信任的 MCP Server？逗号分隔：${controlWizard.mcpServers.join(', ') || '无'}；输入 none 表示不允许。`, `Which trusted MCP servers may the controller start? Comma-separated: ${controlWizard.mcpServers.join(', ') || 'none'}; type none for no servers.`)
@@ -2597,14 +2711,13 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       ? t('外控会话等待回答', 'External session is waiting for an answer')
       : externalSnapshot?.state === 'running' ? t('外控 Agent 正在运行', 'External agent is running')
         : t('外控会话已连接 · /takeover 接管', 'External session connected · /takeover to take over');
-  const caretText = useMemo(() => [...GRAPHEMES.segment(draft.slice(caret))][0]?.segment ?? ' ', [draft, caret]);
 
   useInput((input, key) => {
     if (hit('quit', input, key)) {
       exitTui();
       return;
     }
-    if (panel !== null) return;
+    if (panel !== null || sessionPicker !== null && ask === null && query === null) return;
     if (ask === null && query === null) {
       if (hit('model-picker', input, key)) { openPicker('model'); return; }
       if (hit('mode-picker', input, key)) { openPicker('mode'); return; }
@@ -2635,7 +2748,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       cancelRound();
       return;
     }
-    if (ask !== null && approvalExpanded) {
+    if (ask !== null) {
       const target = hit('approval-top', input, key) ? 0 : hit('approval-bottom', input, key) ? approvalLines.length - 1
         : hit('approval-page-up', input, key) ? approvalView.cursor - approvalHeight : hit('approval-page-down', input, key) ? approvalView.cursor + approvalHeight
           : hit('approval-up', input, key) ? approvalView.cursor - 1 : hit('approval-down', input, key) ? approvalView.cursor + 1 : null;
@@ -2649,6 +2762,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       const option = /^\d$/u.test(input) ? Number(input) - 2 : -1;
       const rememberScope = ask.rememberable && option >= 0 ? ask.rememberScopes[option] : undefined;
       if (hit('approve', input, key) || ask.rememberable && input === '1' || rememberScope !== undefined) {
+        if (approvalLayout?.canApprove !== true) return;
         const asked = ask;
         setAsk(null);
         const rememberedTarget = asked.rememberTarget ?? asked.rememberTargetOptions[0];
@@ -2700,6 +2814,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       }
       return;
     }
+    if (query !== null && detail === null && search === null
+      && (hit('question-page-up', input, key) || hit('question-page-down', input, key))) {
+      setQuestionOffset(Math.max(0, Math.min(
+        questionStart + (hit('question-page-up', input, key) ? -questionHeight : questionHeight),
+        Math.max(0, questionLines.length - questionHeight),
+      )));
+      return;
+    }
     // 草稿为空时，左方向键返回上一题并恢复原答案供修改。
     // 草稿非空时保留普通光标移动行为。
     if (query !== null && draft === '' && hit('question-back', input, key)) {
@@ -2730,20 +2852,6 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       }
       return;
     }
-    if (sessionPicker !== null && ask === null) {
-      if (hit('list-close', input, key)) { setSessionPicker(null); return; }
-      const step = hit('list-page-up', input, key) ? -viewHeight : hit('list-page-down', input, key) ? viewHeight
-        : hit('list-up', input, key) ? -1 : hit('list-down', input, key) ? 1 : null;
-      const at = hit('list-first', input, key) ? 0 : hit('list-last', input, key) ? sessionPicker.items.length - 1
-        : step === null ? null : Math.max(0, Math.min(sessionPicker.at + step, sessionPicker.items.length - 1));
-      if (at !== null) { setSessionPicker({ ...sessionPicker, at }); return; }
-      if (hit('list-open', input, key) && draft === '') {
-        if (running) push({ kind: 'meta', text: t('当前轮次结束后才能切换会话', 'Wait for this turn to finish before switching sessions') });
-        else runCommand('resume', sessionPicker.items[sessionPicker.at].id);
-        return;
-      }
-      if (input !== '' && !key.ctrl && !key.meta) setSessionPicker(null);
-    }
     // Ctrl+G 使用外部编辑器修改草稿，并通过临时文件传递文本。
     // 由 Ink 暂停 raw mode 并恢复终端，避免编辑器与界面争用输入。
     if (hit('editor', input, key)) {
@@ -2752,6 +2860,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         return;
       }
       const editor = info.editor;
+      const editorSession = sessionId;
+      const editorQuestion = query?.id;
       void (async () => {
         let outcome: EditorOutcome = { code: 'tui_editor_failed', detail: 'external editor failed' };
         await app.suspendTerminal(async () => {
@@ -2761,8 +2871,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           push({ kind: 'error', text: t(`外部编辑失败：${outcome.code}`, `External editor failed: ${outcome.code}`) });
           return;
         }
-        setDraft(outcome.text);
-        setCaret(outcome.text.length);
+        if (!alive.current || activeSession.current !== editorSession || editorQuestion !== undefined && activeQuestion.current !== editorQuestion) return;
+        const normalized = outcome.text.replace(/\r\n?/g, '\n');
+        setDraft(normalized);
+        setCaret(normalized.length);
       })();
       return;
     }
@@ -2858,18 +2970,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     const down = hit('history-down', input, key) || hit('history-down-shift', input, key);
     if (up || down) {
       if (draft.includes('\n')) {
-        const start = draft.lastIndexOf('\n', Math.max(0, caret - 1)) + 1;
-        const column = caret - start;
-        if (up && start > 0) {
-          const previous = draft.lastIndexOf('\n', start - 2) + 1;
-          setCaret(Math.min(previous + column, start - 1));
-        } else if (down) {
-          const next = draft.indexOf('\n', caret);
-          if (next >= 0) {
-            const end = draft.indexOf('\n', next + 1);
-            setCaret(Math.min(next + 1 + column, end < 0 ? draft.length : end));
-          }
-        }
+        setCaret(moveDraftCaret(draft, caret, up ? 'up' : 'down'));
         return;
       }
       if (entries.length === 0) return;
@@ -2901,7 +3002,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       setCaret(target.caret);
       return;
     }
-    if ((hit('queue-recall', input, key) || hit('queue-recall-alt', input, key)) && draft === '' && queue.length > 0) {
+    if (query === null && (hit('queue-recall', input, key) || hit('queue-recall-alt', input, key)) && draft === '' && queue.length > 0) {
       // 草稿为空时按退格，将队列最后一条收回草稿供修改。
       setQueue((current) => current.slice(0, -1));
       const last = queue[queue.length - 1];
@@ -2928,89 +3029,63 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
 
   // 通过 Ink 的 bracketed paste 通道一次接收整段粘贴内容，不将换行解释为发送或审批按键。
   usePaste((text) => {
-    if (panel !== null) return;
+    if (panel !== null || sessionPicker !== null || ask !== null || detail !== null) return;
+    if (search !== null) {
+      setSearch({ query: search.query + text.replace(/[\r\n\t]+/gu, ' '), at: 0 });
+      return;
+    }
     const inserted = editDraft(draft, caret, text.replace(/\r\n?/g, '\n'), {});
     setDraft(inserted.draft);
     setCaret(inserted.caret);
   }, { isActive: interactive });
 
   const shownModel = externalControl ? externalModel : status?.model ?? info.model;
-  const modelStatus = externalControl
-    ? t(`外控模型 ${shownModel ?? '未知'}`, `External model ${shownModel ?? 'unknown'}`)
-    : t(`模型 ${shownModel ?? '未配置'}${status?.pendingModel ? `→${status.pendingModel}` : ''} ${keyHint('model-picker')}`, `Model ${shownModel ?? 'not configured'}${status?.pendingModel ? `→${status.pendingModel}` : ''} ${keyHint('model-picker')}`);
-  const footerStatus = externalControl ? modelStatus
-    : `${modelStatus}  ·  ${t(`工具模式 ${status?.mode ?? '—'}${status?.pendingMode ? `→${status.pendingMode}` : ''} ${keyHint('mode-picker')}  ·  审批 ${status?.policy === 'none' ? '不受审批' : status?.policy === 'never' ? '旧版 never（需迁移）' : status?.policy === 'auto' ? '自动判定' : '逐次审批'} ${keyHint('policy-picker')}`, `Tools ${status?.mode ?? '—'}${status?.pendingMode ? `→${status.pendingMode}` : ''} ${keyHint('mode-picker')}  ·  Approval ${status?.policy === 'none' ? 'none' : status?.policy === 'never' ? 'legacy never (migration required)' : status?.policy === 'auto' ? 'auto' : 'ask'} ${keyHint('policy-picker')}`)}`;
   const foldedLive = foldText(live.reasoning, expanded, 1);
+  const showComposer = ask === null && detail === null && panel === null && sessionPicker === null && search === null;
+  const showSettings = showComposer && query === null && controlWizard === null && picks.length === 0 && mention === null;
 
   return h(Fragment, null,
     // 会话切换时用会话 ID 重建静态转录，避免新记录短于旧记录时沿用旧行索引。
     h(Static<TranscriptItem>, { key: sessionId, items: sessionId === firstSessionId ? [{ kind: 'welcome', text: '' }, ...rows] : rows, children: (row, index) => row.kind === 'welcome'
-      ? h(Box, { key: index, flexDirection: 'column', alignItems: 'center', marginY: 1 },
-          h(Text, { bold: true, color: 'green' }, `❧  ligule  v${VERSION}`),
-          h(Text, null, t('欢迎使用 Ligule', 'Welcome to Ligule')),
-          h(Text, { wrap: 'truncate-middle' }, titleText({ boundary: info.boundary, sessionId: '' })),
-          h(Text, { dimColor: true }, t('输入 /help 查看命令与快捷键', 'Type /help for commands and shortcuts')))
+      ? h(Welcome, { key: index, version: VERSION, boundary: titleText({ boundary: info.boundary, sessionId: '' }), columns: geometry.columns, locale })
       : h(Box, { key: index, flexDirection: 'column' }, h(Row, { row, expanded: false, columns: geometry.columns, locale })) }),
-    foldedLive.shown === '' ? null : h(Text, { dimColor: true, wrap: 'truncate-end' }, t(`· 推理 ${foldedLive.shown}${foldedLive.hidden > 0 ? ` …还有 ${foldedLive.hidden} 字` : ''}`, `· Reasoning ${foldedLive.shown}${foldedLive.hidden > 0 ? ` …${foldedLive.hidden} more characters` : ''}`)),
-    live.text === '' || detail !== null ? null : h(MarkdownRows, { text: live.text, columns: geometry.columns }),
-    ask === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'yellow', paddingX: 1 },
-      h(Text, { bold: true }, t(`允许执行 ${ask.tool}？`, `Allow ${ask.tool}?`)),
-      h(Text, { wrap: 'truncate-end' }, ask.detail),
-      ask.change === '' ? null : h(Text, { dimColor: true }, ask.change),
-      ask.backend === '' ? null : h(Text, { dimColor: true, wrap: 'truncate-end' }, t(`执行环境 ${ask.backend}`, `Shell ${ask.backend}`)),
-      ask.reason === '' ? null : h(Text, { dimColor: true, wrap: 'truncate-end' }, ask.reason),
-      approvalExpanded ? h(Fragment, null,
-        ...approvalLines.slice(approvalView.offset, approvalView.offset + approvalHeight).map((line, index) => h(Text, { key: index, wrap: 'truncate-end' }, line)),
-        h(Text, { dimColor: true }, t(`改动 ${approvalView.cursor + 1}/${approvalLines.length} 行 · ${keyHint('approval-page-up', 'approval-page-down')} 分页 · ${keyHint('approval-top', 'approval-bottom')} 到两端`, `Changes ${approvalView.cursor + 1}/${approvalLines.length} · ${keyHint('approval-page-up', 'approval-page-down')} pages · ${keyHint('approval-top', 'approval-bottom')} start/end`))) : null,
-      ask.rememberable && ask.rememberHintKey !== '' ? h(Text, { dimColor: true, wrap: 'truncate-end' }, ask.rememberHintKey === 'command'
-        ? t('只记住这条命令及其参数边界。', 'Remember only this command and its argument boundary.')
-        : ask.rememberHintKey === 'file'
-          ? ask.rememberTarget === 'workspace'
-            ? t(`范围：此工作区内 ${ask.tool} 这一类操作 · 按 w 改为仅此文件`, `Scope: this ${ask.tool} operation type in this workspace · press w for this file only`)
-            : t(`范围：仅此文件 · 按 w 改为此工作区内的 ${ask.tool} 操作`, `Scope: this file only · press w for this ${ask.tool} operation type in the workspace`)
-          : ask.rememberHintKey === 'mcp'
-            ? t(`只记住此 MCP 工具、这组参数和服务器配置摘要 ${ask.identityDigest?.slice(0, 12) ?? '未知'}。`, `Remember only this MCP tool, these arguments, and server configuration digest ${ask.identityDigest?.slice(0, 12) ?? 'unknown'}.`)
-            : t('规则会应用于此工具能力的所有调用参数。', 'The rule applies to this tool capability for all arguments.')) : null,
-      ask.detailsLoading ? h(Text, { dimColor: true }, t('正在读取完整待审批内容…', 'Loading the full pending content…')) : null,
-      ask.detailsError === undefined ? null : h(Text, { color: 'red' }, t(`完整内容读取失败：${ask.detailsError}`, `Could not read full details: ${ask.detailsError}`)),
-      h(Text, { wrap: 'truncate-end' }, ask.rememberable
-        ? t(`1 允许一次 · ${rememberChoices}${ask.rememberTargetOptions.includes('file') && ask.rememberTargetOptions.includes('workspace') ? ` · w 范围：${rememberTargetLabel}` : ''} · ${keyHint('deny')} 拒绝 · ${keyHint('expand-or-history')} 查看改动 · ${keyHint('approval-cancel')} 取消`, `1 allow once · ${rememberChoices}${ask.rememberTargetOptions.includes('file') && ask.rememberTargetOptions.includes('workspace') ? ` · w scope: ${rememberTargetLabel}` : ''} · ${keyHint('deny')} deny · ${keyHint('expand-or-history')} details · ${keyHint('approval-cancel')} cancel`)
-        : t(`${keyHint('approve')} 允许一次 · ${keyHint('deny')} 拒绝 · ${keyHint('expand-or-history')} 查看改动 · ${keyHint('approval-cancel')} 取消`, `${keyHint('approve')} allow once · ${keyHint('deny')} deny · ${keyHint('expand-or-history')} details · ${keyHint('approval-cancel')} cancel`))),
-    asking === null || query === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'blue', paddingX: 1 },
+    !showComposer || foldedLive.shown === '' ? null : h(Text, { color: TUI_COLORS.muted, wrap: 'truncate-end' }, t(`· 推理 ${foldedLive.shown}${foldedLive.hidden > 0 ? ` …还有 ${foldedLive.hidden} 字` : ''}`, `· Reasoning ${foldedLive.shown}${foldedLive.hidden > 0 ? ` …${foldedLive.hidden} more characters` : ''}`)),
+    live.text === '' || !showSettings ? null : h(MarkdownRows, { text: live.text, columns: geometry.columns }),
+    approvalLayout === null ? null : h(ApprovalPanel, { layout: approvalLayout, cursor: approvalCursor }),
+    asking === null || query === null || ask !== null || panel !== null || detail !== null || sessionPicker !== null || search !== null ? null : h(PanelFrame, { tone: 'info', width: geometry.columns },
       h(Text, { bold: true }, t(`等待回答 ${query.at + 1}/${asking.count}`, `Waiting for your answer ${query.at + 1}/${asking.count}`)),
-      h(Text, { wrap: 'truncate-end' }, asking.title),
-      ...asking.current.options.map((option, position) => h(Text, { key: `option:${position}`, dimColor: true, wrap: 'truncate-end' }, `  ${position + 1}. ${option.label}${option.description === undefined ? '' : ` —— ${option.description}`}`)),
-      ...asking.done.map((line, index) => h(Text, { key: `done:${index}`, dimColor: true, wrap: 'truncate-end' }, `  ${line}`)),
+      ...questionLines.slice(questionStart, questionStart + questionHeight).map((line, index) => h(Text, { key: questionStart + index, wrap: 'truncate-end' }, line)),
+      questionLines.length <= questionHeight ? null : h(Text, { color: TUI_COLORS.muted, wrap: 'truncate-end' }, `${questionStart + 1}/${questionLines.length} · ${keyHint('question-page-up', 'question-page-down')}`),
       h(Text, { wrap: 'truncate-end' }, `${optionHint(asking.current, locale)} · ${asking.last ? t('Enter 提交', 'Enter to submit') : t('Enter 下一题', 'Enter for next question')}`),
       h(Text, { dimColor: true, wrap: 'truncate-end' }, t(`  ${asking.done.length > 0 ? `${keyHint('question-back')} 上一题 · ` : ''}${keyHint('interrupt')} 取消本轮 · 没有回答时限`, `  ${asking.done.length > 0 ? `${keyHint('question-back')} previous · ` : ''}${keyHint('interrupt')} cancel turn · no answer timeout`))),
-    detail === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'cyan', paddingX: 1 },
+    detail === null || ask !== null || panel !== null ? null : h(PanelFrame, { width: geometry.columns },
       h(Text, { dimColor: true, wrap: 'truncate-end' }, detail.kind === 'transcript' ? t('完整历史', 'Transcript') : detailTitle(detail, locale)),
       viewLines.length === 0
         ? h(Text, { dimColor: true }, detail.loading ? t('正在读取记录…', 'Loading transcript…') : t('没有可显示的内容', 'No content to display'))
         : viewLines.slice(view.offset, view.offset + viewHeight).map((line, index) => h(Text, { key: view.offset + index, inverse: view.offset + index >= selection[0] && view.offset + index <= selection[1], wrap: 'truncate-end' }, line)),
       h(Text, { dimColor: true, wrap: 'truncate-end' }, t(`${view.cursor + 1}/${viewLines.length} 行 · ${keyHint('view-page-up', 'view-page-down')} 分页 · ${keyHint('view-top', 'view-bottom')} 到两端 · ${keyHint('mark-up', 'mark-down')} 选择 · ${keyHint('copy-selection')} 复制 · ${keyHint('view-close')} 收起`, `Line ${view.cursor + 1}/${viewLines.length} · ${keyHint('view-page-up', 'view-page-down')} pages · ${keyHint('view-top', 'view-bottom')} start/end · ${keyHint('mark-up', 'mark-down')} select · ${keyHint('copy-selection')} copy · ${keyHint('view-close')} close`))),
-    sessionPicker === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', paddingX: 1 },
-      h(Text, { wrap: 'truncate-end' }, t(`历史会话 ${sessionPicker.items.length} 份 · ${keyHint('list-up', 'list-down')} 选择 · ${keyHint('list-open')} 打开 · ${keyHint('list-close')} 收起`, `${sessionPicker.items.length} sessions · ${keyHint('list-up', 'list-down')} select · ${keyHint('list-open')} open · ${keyHint('list-close')} close`)),
-      sessionPicker.items.slice(Math.max(0, sessionPicker.at - viewHeight + 1), Math.max(0, sessionPicker.at - viewHeight + 1) + viewHeight).map((item) => h(Text, { key: item.id, inverse: item === sessionPicker.items[sessionPicker.at], wrap: 'truncate-end' }, sessionLines([item], sessionId, locale)[0]))),
-    queue.length === 0 ? null : h(Box, { flexDirection: 'column' },
-      queue.map((item, index) => h(Text, { key: `${index}:${item}`, dimColor: true }, t(`排队 ${index + 1} · ${queuedLine(item)}`, `Queued ${index + 1} · ${queuedLine(item)}`))),
-      h(Text, { dimColor: true }, queuePaused
-        ? t('  队列已暂停 · /queue continue 继续 · /queue drop <序号> 收回', '  Queue paused · /queue continue to resume · /queue drop <n> to recover')
-        : t('  本轮结束后按顺序发送；空草稿时按退格收回最后一条', '  Sends in order after this turn; Backspace on an empty draft recovers the last message'))),
-    search === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'magenta', paddingX: 1 },
-      h(Text, null, t(`历史搜索 ${search.query}`, `History search ${search.query}`)),
+    h(SessionPicker, {
+      active: sessionPicker !== null && ask === null && query === null,
+      items: sessionPicker?.items ?? [], current: sessionId, locale, height: viewHeight, columns: geometry.columns,
+      running, interactive, onClose: () => setSessionPicker(null), onSelect: (id) => runCommand('resume', id),
+    }),
+    queue.length === 0 || !showSettings ? null : h(Text, { color: TUI_COLORS.muted, wrap: 'truncate-end' }, queuePaused
+      ? t(`队列已暂停：${queue.length} 条 · /queue continue 继续 · /queue list 查看`, `Queue paused: ${queue.length} · /queue continue to resume · /queue list to view`)
+      : t(`排队 ${queue.length} 条 · 空草稿按退格收回最后一条 · /queue list 查看`, `${queue.length} queued · Backspace on empty draft recalls last · /queue list to view`)),
+    search === null || ask !== null || panel !== null ? null : h(PanelFrame, { width: geometry.columns },
+      h(Text, { wrap: 'truncate-end' }, t(`历史搜索 ${search.query}`, `History search ${search.query}`)),
       searched.length === 0
         ? h(Text, { dimColor: true }, entries.length === 0 ? t('暂无输入历史', 'No input history') : t(`没有匹配“${search.query}”的输入`, `No input matches “${search.query}”`))
         : searched.map((entry, index) => h(Box, { key: `${index}:${entry}` },
-            h(Text, { inverse: index === search.at }, ` ${queuedLine(entry, 60)}`))),
-      h(Text, { dimColor: true }, t(`  继续输入以筛选 · ${keyHint('search-cycle', 'search-up', 'search-down')} 选择 · ${keyHint('search-pick')} 恢复草稿 · ${keyHint('search-close')} 退出`, `  Type to filter · ${keyHint('search-cycle', 'search-up', 'search-down')} select · ${keyHint('search-pick')} restore draft · ${keyHint('search-close')} close`))),
-    picks.length === 0 ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'gray', paddingX: 1 },
-      picks.slice(Math.max(0, chosen - CANDIDATE_ROWS + 1), Math.max(0, chosen - CANDIDATE_ROWS + 1) + CANDIDATE_ROWS).map((candidate) => h(Box, { key: `${candidate.source}:${candidate.name}` },
+            h(Text, { inverse: index === search.at, wrap: 'truncate-end' }, ` ${queuedLine(entry, 60)}`))),
+      h(Text, { color: TUI_COLORS.muted, wrap: 'truncate-end' }, t(`继续输入筛选 · ${keyHint('search-up', 'search-down')} 选择 · ${keyHint('search-pick')} 恢复 · ${keyHint('search-close')} 退出`, `Type to filter · ${keyHint('search-up', 'search-down')} select · ${keyHint('search-pick')} restore · ${keyHint('search-close')} close`))),
+    picks.length === 0 ? null : h(PanelFrame, { width: geometry.columns },
+      picks.slice(Math.max(0, chosen - candidateHeight + 1), Math.max(0, chosen - candidateHeight + 1) + candidateHeight).map((candidate) => h(Text, { key: `${candidate.source}:${candidate.name}`, wrap: 'truncate-end' },
         h(Text, { inverse: candidate === picks[chosen] }, ` /${candidate.name}${candidate.hint === '' ? '' : ` ${candidate.hint}`}`),
         h(Text, { dimColor: true }, ` ${candidate.text}`))),
-      picks.length > CANDIDATE_ROWS ? h(Text, { dimColor: true }, t(`  还有 ${picks.length - CANDIDATE_ROWS} 条，继续输入以筛选`, `  ${picks.length - CANDIDATE_ROWS} more; type to filter`)) : null,
+      h(Text, { dimColor: true }, t(`  ${chosen + 1}/${picks.length} · 继续输入名称或说明以筛选`, `  ${chosen + 1}/${picks.length} · type a name or description to filter`)),
       h(Text, { dimColor: true }, t(` ${keyHint('complete')} 补全 · ${keyHint('complete-up', 'complete-down')} 选择 · ${keyHint('complete-close')} 收起`, ` ${keyHint('complete')} complete · ${keyHint('complete-up', 'complete-down')} select · ${keyHint('complete-close')} close`))),
-    mention === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'gray', paddingX: 1 },
+    mention === null ? null : h(PanelFrame, { width: geometry.columns },
       h(Text, { dimColor: true, wrap: 'truncate-end' }, t(` 工作区 ${info.boundary}`, ` Workspace ${info.boundary}`)),
       mention.paths.length === 0
         ? h(Text, { dimColor: true }, mention.stopped === 'error'
@@ -3020,13 +3095,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
             : mention.stopped === 'budget'
               ? t('搜索已到遍历上限，请输入更具体的路径', 'Search limit reached; enter a more specific path')
               : t(`没有匹配“${mention.text}”的文件`, `No files match “${mention.text}”`))
-        : mention.paths.map((path, index) => h(Text, { key: path, inverse: index === mention.chosen, wrap: 'truncate-end' }, ` ${path}`)),
+        : mention.paths.slice(Math.max(0, mention.chosen - pathHeight + 1), Math.max(0, mention.chosen - pathHeight + 1) + pathHeight)
+          .map((path) => h(Text, { key: path, inverse: path === mention.paths[mention.chosen], wrap: 'truncate-end' }, ` ${path}`)),
       mention.paths.length > 0 && mention.stopped === 'budget'
         ? h(Text, { dimColor: true }, t('  列表不完整，请输入更具体的路径', '  List is incomplete; enter a more specific path')) : null,
       mention.paths.length > 0 && mention.stopped === 'unreadable'
         ? h(Text, { dimColor: true }, t('  有目录无法读取，列表不完整', '  Some directories are unreadable; list is incomplete')) : null,
       mention.paths.length === 0 ? null : h(Text, { dimColor: true }, t(` ${keyHint('pick-path', 'pick-path-alt')} 选中 · ${keyHint('path-up', 'path-down')} 选择 · ${keyHint('path-close')} 收起`, ` ${keyHint('pick-path', 'pick-path-alt')} insert · ${keyHint('path-up', 'path-down')} select · ${keyHint('path-close')} close`))),
-    h(HelpPanel, { active: panel === 'help', interactive, templates, locale, columns: geometry.columns - 4, height: Math.max(1, geometry.rows - 13), onClose: closePanel }),
+    h(HelpPanel, { active: panel === 'help', interactive, templates, locale, columns: geometry.columns, height: Math.max(1, geometry.rows - 8), onClose: closePanel }),
     h(ChoicePanel, {
       active: panel !== null && panel !== 'help', interactive,
       title: panel === 'model' ? t('选择模型', 'Select model')
@@ -3049,27 +3125,29 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
               : panel === 'permission-network' ? status?.permission?.network
                 : panel === 'control' ? 'create'
                 : undefined,
-      locale, columns: geometry.columns - 4, height: Math.max(1, Math.min(7, geometry.rows - 16)), loading: choicesLoading, onClose: closePanel, onSelect: (choice: PanelChoice) => chooseOption(choice.id),
+      locale, columns: geometry.columns, height: Math.max(1, geometry.rows - 8), loading: choicesLoading, onClose: closePanel, onSelect: (choice: PanelChoice) => chooseOption(choice.id),
     }),
-    controlWizard === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'yellow', paddingX: 1 },
+    controlWizard === null || !showComposer || query !== null ? null : h(PanelFrame, { tone: 'warning', width: geometry.columns },
       h(Text, { bold: true }, t('创建外控授权', 'Create Agent Control grant')),
       h(Text, { wrap: 'wrap' }, controlPrompt),
       h(Text, { dimColor: true }, t('Enter 提交当前项 · 输入 cancel 取消', 'Enter submits this value · type cancel to stop'))),
     externalControl ? h(Text, { color: running ? 'yellow' : 'cyan', wrap: 'truncate-end' }, externalControlLabel) : null,
-    h(Box, { flexDirection: 'column', borderStyle: 'single', borderTop: true, borderBottom: true, borderLeft: false, borderRight: false, borderColor: running ? 'yellow' : 'cyan', paddingX: 1 }, h(Box, null,
-      h(Text, { color: running ? 'yellow' : 'cyan' }, running ? `${SPINNER[tick % SPINNER.length]} ` : '› '),
-      draft === '' && !running
-        ? h(Text, { dimColor: true }, controlWizard === null
-          ? externalControl ? t(`给外控 Agent 发消息 · ${keyHint('send')} 发送 · /takeover 接管`, `Message the external agent · ${keyHint('send')} send · /takeover to take over`)
-            : t(`描述任务 · ${keyHint('send')} 发送 · ${keyHint('newline')} 换行 · / 命令 · @ 文件`, `Describe a task · ${keyHint('send')} send · ${keyHint('newline')} new line · / commands · @ files`)
-          : t('输入授权设置答案', 'Enter the grant setting'))
-        : h(Text, { wrap: 'wrap' },
-          draft.slice(0, caret),
-          h(Text, { inverse: true }, caretText),
-          draft.slice(caret + (caret === draft.length ? 0 : caretText.length))))),
-    h(Text, { wrap: 'wrap' }, footerStatus),
-    h(Text, { dimColor: true, wrap: 'truncate-end' }, buildStatusLine({
-      sessionId, boundary: info.boundary, status, running, seconds, expanded, columns: stdout?.columns, locale,
-    })),
+    running && showSettings ? h(ProgressLine, { progress: status?.progress, seconds, marker: SPINNER[tick % SPINNER.length], columns: geometry.columns, locale }) : null,
+    showComposer ? h(DraftInput, {
+      draft, caret, columns: geometry.columns, height: composerHeight,
+      placeholder: query !== null ? t('输入回答', 'Type your answer')
+        : controlWizard !== null ? t('输入授权设置答案', 'Enter the grant setting')
+          : externalControl ? t('给外控 Agent 发消息 · /takeover 接管', 'Message the external agent · /takeover to take over')
+            : t('描述任务 · / 命令 · @ 文件', 'Describe a task · / commands · @ files')
+              + (geometry.columns >= 72 ? t(` · ${keyHint('newline')} 换行`, ` · ${keyHint('newline')} new line`) : ''),
+    }) : null,
+    showSettings ? h(ConfigurationLine, {
+      model: `${shownModel ?? t('未配置', 'not configured')}${status?.pendingModel ? `→${status.pendingModel}` : ''}`,
+      mode: `${status?.mode ?? '—'}${status?.pendingMode ? `→${status.pendingMode}` : ''}`,
+      policy: status?.policy ?? 'ask', external: externalControl, columns: geometry.columns, locale,
+    }) : null,
+    showSettings && !running && geometry.rows >= 20 ? h(Text, { color: TUI_COLORS.muted, wrap: 'truncate-end' }, buildStatusLine({
+      sessionId, boundary: info.boundary, status, running: false, seconds, expanded, columns: geometry.columns, locale,
+    })) : null,
   );
 }

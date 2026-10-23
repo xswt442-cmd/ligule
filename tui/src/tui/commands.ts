@@ -46,7 +46,7 @@ export const UI_COMMANDS = Object.freeze([
   { name: 'show', usage: '/show [序号]', text: '查看完整记录；不带序号收起', hint: '[序号]', whenRunning: true },
   { name: 'sub', usage: '/sub [序号]', text: '查看子任务记录；不带序号收起', hint: '[序号]', whenRunning: true },
   { name: 'new', usage: '/new', text: '创建新会话', hint: '', whenRunning: false },
-  { name: 'queue', usage: '/queue [pause|continue|drop <序号>|clear]', text: '暂停、继续或收回待发送消息', hint: '[动作]', whenRunning: true },
+  { name: 'queue', usage: '/queue [list|pause|continue|drop <序号>|clear]', text: '查看、暂停、继续或收回待发送消息', hint: '[动作]', whenRunning: true },
   { name: 'bind', usage: '/bind [<动作> <键的写法>|reset <动作>|default]', text: '查看或修改快捷键', hint: '[动作 键|reset <动作>|default]', whenRunning: true },
   { name: 'copy', usage: '/copy', text: '复制最近的回答', hint: '', whenRunning: true },
   { name: 'export', usage: '/export <路径>', text: '将会话与子任务导出为 Markdown', hint: '<路径>', whenRunning: true },
@@ -78,7 +78,7 @@ const ENGLISH_COMMANDS: Record<CommandName, readonly [string, string, string]> =
   show: ['/show [seq]', 'View an event; omit seq to close', '[seq]'],
   sub: ['/sub [seq]', 'View a subtask; omit seq to close', '[seq]'],
   new: ['/new', 'Start a new session', ''],
-  queue: ['/queue [pause|continue|drop <n>|clear]', 'Pause, resume, or recover queued messages', '[action]'],
+  queue: ['/queue [list|pause|continue|drop <n>|clear]', 'List, pause, resume, or recover queued messages', '[action]'],
   bind: ['/bind [<action> <key>|reset <action>|default]', 'View or change keyboard shortcuts', '[action key|reset <action>|default]'],
   copy: ['/copy', 'Copy the latest answer', ''],
   export: ['/export <path>', 'Export conversation and subtasks as Markdown', '<path>'],
@@ -158,34 +158,57 @@ export function routeInput(text: string, running: boolean): InputRoute {
   return { kind: 'command', name: command.name, argument: matched[2] ?? '' };
 }
 
-const CANDIDATE_LIMIT = 8;
+const ARGUMENTS: Readonly<Record<string, readonly string[]>> = {
+  policy: ['ask', 'auto', 'none', 'reset'],
+  permission: ['read-only', 'workspace-write', 'full-access', 'network'],
+  'permission network': ['policy', 'disabled', 'unrestricted'],
+  queue: ['list', 'pause', 'continue', 'drop', 'clear'],
+  mcp: ['list', 'trust', 'confirm', 'revoke', 'tools'],
+  trust: ['revoke'],
+  control: ['list', 'create', 'revoke', 'copy'],
+  bind: ['reset', 'default'],
+};
 
-// 仅在用户输入命令名称时显示候选；出现空格后按参数输入处理。
+// 候选只插入草稿；执行和危险选项的确认仍经过原来的命令处理。
 export function candidatesOf(
   draft: string,
   templates: readonly TemplateCommand[] = [],
-  limit = CANDIDATE_LIMIT,
+  limit = Infinity,
   locale: Locale = 'zh',
 ): Candidate[] {
   if (!draft.startsWith('/')) return [];
   const typed = draft.slice(1);
-  if (typed === '' || /\s/.test(typed)) return [];
+  if (/\s/.test(typed)) {
+    const words = typed.toLowerCase().split(/\s+/);
+    const argument = words.pop() ?? '';
+    const head = words.join(' ');
+    const command = findUiCommand(words[0] ?? '');
+    if (command !== undefined) {
+      return (ARGUMENTS[head] ?? []).filter(value => value.startsWith(argument)).map(value => ({
+        name: `${head} ${value}`, text: localizedCommand(command, locale).text, hint: '', source: 'ui' as const,
+      })).slice(0, limit);
+    }
+  }
   const prefix = typed.toLowerCase();
-  const fromUi = UI_COMMANDS.filter((command) => command.name.startsWith(prefix)).map(command => localizedCommand(command, locale)).map((command) => ({
+  const fromUi = UI_COMMANDS.map(command => localizedCommand(command, locale)).map((command) => ({
     name: command.name,
     text: command.text,
     hint: command.hint,
     source: 'ui' as const,
   }));
   const fromTemplates = templates
-    .filter((template) => template.command.toLowerCase().startsWith(prefix))
+    .filter(template => findUiCommand(template.command) === undefined)
     .map((template) => ({
       name: template.command,
       text: template.description ?? '',
       hint: template.hint ?? '',
       source: 'template' as const,
     }));
-  return [...fromUi, ...fromTemplates].slice(0, limit);
+  const rank = (candidate: Candidate) => candidate.name.toLowerCase().startsWith(prefix) ? 0 : 1;
+  return [...fromUi, ...fromTemplates]
+    .filter(candidate => candidate.name.toLowerCase().includes(prefix) || candidate.text.toLowerCase().includes(prefix))
+    .sort((left, right) => rank(left) - rank(right))
+    .slice(0, limit);
 }
 
 // 按终端显示列宽对齐表格，正确处理全角和中日韩字符的双列宽度。

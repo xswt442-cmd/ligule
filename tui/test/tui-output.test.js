@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { titleEscape, titleText } from '../dist/tui/output.js';
+import { configureTerminalColors, titleEscape, titleText } from '../dist/tui/output.js';
 import { clipboardPayload, copyToClipboard, lastAnswer } from '../dist/tui/clipboard.js';
 import { routeInput } from '../dist/tui/commands.js';
 import { waitFor, withTuiHost } from './helpers/tui-host.ts';
@@ -17,6 +17,19 @@ try {
 }
 
 const options = { skip: missing === '' ? false : missing };
+
+test('terminal startup honors nonempty NO_COLOR and preserves explicit color overrides', () => {
+  for (const value of ['1', 'true', '0']) {
+    const environment = { NO_COLOR: value };
+    configureTerminalColors(environment);
+    assert.equal(environment.FORCE_COLOR, '0');
+  }
+  for (const environment of [{}, { NO_COLOR: '' }, { NO_COLOR: '1', FORCE_COLOR: '3' }, { NO_COLOR: '1', FORCE_COLOR: '0' }]) {
+    const before = { ...environment };
+    configureTerminalColors(environment);
+    assert.deepEqual(environment, before);
+  }
+});
 
 test('the terminal title drops the characters that could end its own escape', () => {
   assert.equal(titleText({ model: 'test-model', boundary: '/work', sessionId: '0123456789' }), 'test-model · /work · 01234567');

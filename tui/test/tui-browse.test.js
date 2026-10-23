@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { access } from 'node:fs/promises';
+import { access, writeFile } from 'node:fs/promises';
 import { PassThrough } from 'node:stream';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -8,16 +8,18 @@ import { createElement } from 'react';
 import { render } from 'ink';
 import { completeFrame } from './helpers/frames.js';
 import { App } from '../dist/tui/app.js';
+import { UI_COMMANDS } from '../dist/tui/commands.js';
+import { readInput, rememberInput } from '../dist/tui/input-store.js';
 import { measuredPermissionContext, waitFor, withTuiHost } from './helpers/tui-host.ts';
 
-async function withApp(context, run) {
-  const stdout = Object.assign(new PassThrough(), { columns: 80, rows: 24, isTTY: true });
+async function withApp(context, run, { columns = 80, rows = 24, inputs } = {}) {
+  const stdout = Object.assign(new PassThrough(), { columns, rows, isTTY: true });
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref() {}, unref() {} });
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
   const frame = () => completeFrame(painted);
   const output = () => painted.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
-  const instance = render(createElement(App, { client: context.client, sessionId: context.sessionId, stdout, info: { boundary: context.config.boundary } }), { stdout, stdin, patchConsole: false, exitOnCtrlC: false, interactive: true });
+  const instance = render(createElement(App, { client: context.client, sessionId: context.sessionId, stdout, inputs, info: { boundary: context.config.boundary } }), { stdout, stdin, patchConsole: false, exitOnCtrlC: false, interactive: true });
   const wait = (condition) => waitFor(condition, { read: frame });
   const type = async (text) => { stdin.write(text); await delay(50); stdin.write('\r'); };
   try {
@@ -27,6 +29,291 @@ async function withApp(context, run) {
     instance.unmount();
   }
 }
+
+test('slash discovery scrolls the whole command list and completes without sending', async () => {
+  await withTuiHost(async (context) => withApp(context, async ({ frame, stdin, wait }) => {
+    stdin.write('/');
+    await wait(() => frame().includes(`1/${UI_COMMANDS.length}`));
+    stdin.write('\x1b[A');
+    await wait(() => frame().includes(`${UI_COMMANDS.length}/${UI_COMMANDS.length}`) && frame().includes('/quit'));
+    stdin.write('\t');
+    await wait(() => frame().includes('› /quit'));
+    assert.equal(context.providerRequests.length, 0);
+    assert.ok(frame().split('\n').length <= 24);
+  }));
+});
+
+test('modal paste preserves the draft and history-search paste edits its own query', async () => {
+  await withTuiHost(async (context) => withApp(context, async ({ frame, stdin, wait }) => {
+    stdin.write('保留草稿');
+    await wait(() => frame().includes('› 保留草稿'));
+    stdin.write('\x0f');
+    await wait(() => frame().includes('完整历史'));
+    stdin.write('\x1b[200~隐藏粘贴\x1b[201~');
+    await delay(80);
+    stdin.write('\x1b');
+    await wait(() => frame().includes('› 保留草稿'));
+    assert.ok(!frame().includes('隐藏粘贴'));
+    stdin.write('\x12');
+    await wait(() => frame().includes('历史搜索'));
+    stdin.write('\x1b[200~查询\n文字\x1b[201~');
+    await wait(() => frame().includes('历史搜索 查询 文字'));
+    stdin.write('\x1b');
+    await wait(() => frame().includes('› 保留草稿'));
+    assert.ok(!frame().includes('查询 文字'));
+    assert.equal(context.providerRequests.length, 0);
+  }));
+});
+
+test('long questions page their complete options while keeping an answer editor at 50x14', async () => {
+  await withTuiHost(async (context) => withApp(context, async ({ frame, stdin, type, wait }) => {
+    await type(JSON.stringify({ tool: 'ask_user_question', args: { questions: JSON.stringify([{
+      question: '请阅读完整问题。'.repeat(30),
+      options: Array.from({ length: 4 }, (_, index) => ({ label: `选项 ${index + 1}`, description: `说明 ${index + 1}：${'完整说明内容。'.repeat(20)} 结束-${index}` })),
+    }]) } }));
+    await wait(() => frame().includes('等待回答 1/1'));
+    assert.ok(frame().includes('输入回答'));
+    assert.ok(!frame().includes('工具模式'));
+    const seen = new Set();
+    for (let page = 0; page < 80; page += 1) {
+      const current = frame();
+      assert.ok(current.trimEnd().split('\n').length <= 14, current);
+      for (let index = 0; index < 4; index += 1) if (current.includes(`结束-${index}`)) seen.add(index);
+      if (seen.size === 4) break;
+      stdin.write('\x1b[6~');
+      await delay(35);
+    }
+    assert.deepEqual([...seen], [0, 1, 2, 3]);
+    stdin.write('\x1b');
+    await wait(() => !frame().includes('等待回答'));
+  }, { columns: 50, rows: 14 }), { interactive: true });
+});
+
+test('an approval with insufficient room ignores allow keys and paste while deny stays available', async () => {
+  await withTuiHost(async (context) => {
+    await writeFile(join(context.config.boundary, 'small-window.md'), 'read me');
+    await withApp(context, async ({ frame, output, stdin, type, wait }) => {
+      await type(JSON.stringify({ tool: 'read', args: { path: 'small-window.md' } }));
+      await wait(() => frame().includes('请放大窗口后再审批'));
+      stdin.write('y');
+      await delay(50);
+      stdin.write('1');
+      await delay(50);
+      stdin.write('\x1b[200~2\x1b[201~');
+      await delay(80);
+      assert.ok(frame().includes('请放大窗口后再审批'));
+      const pending = await context.client.request('session.read', { sessionId: context.sessionId });
+      assert.ok(!pending.events.some(event => event.kind === 'sessionPolicyRule'));
+      stdin.write('n');
+      await wait(() => !frame().includes('请放大窗口后再审批'));
+      await wait(() => output().includes('本轮已完成'));
+      const denied = await context.client.request('session.read', { sessionId: context.sessionId });
+      assert.ok(denied.events.some(event => event.kind === 'tool' && event.result?.code === 'ask_declined'));
+    }, { columns: 50, rows: 4 });
+  });
+});
+
+test('question PageDown advances the first whole page and PageUp restores it without editing the answer', async () => {
+  await withTuiHost(async context => withApp(context, async ({ frame, stdin, type, wait }) => {
+    await type(JSON.stringify({ tool: 'ask_user_question', args: { questions: JSON.stringify([{
+      question: Array.from({ length: 12 }, (_, index) => `问题行${index}`).join('\n'),
+    }]) } }));
+    await wait(() => frame().includes('等待回答 1/1') && frame().includes('问题行4'));
+    stdin.write('答案草稿');
+    await wait(() => frame().includes('› 答案草稿'));
+    stdin.write('\x1b[6~');
+    await wait(() => frame().includes('6/12'));
+    assert.ok(frame().includes('问题行9'), frame());
+    assert.ok(!frame().includes('问题行4'), frame());
+    assert.ok(frame().includes('› 答案草稿'));
+    stdin.write('\x1b[5~');
+    await wait(() => frame().includes('1/12'));
+    assert.ok(frame().includes('问题行0') && frame().includes('问题行4'), frame());
+    assert.ok(!frame().includes('问题行5'), frame());
+    assert.ok(frame().includes('› 答案草稿'));
+    stdin.write('\x1b');
+    await wait(() => !frame().includes('等待回答'));
+  }, { columns: 50, rows: 14 }), { interactive: true });
+});
+
+for (const source of ['grant wizard', 'ordinary composer']) {
+  for (const finish of ['answer', 'cancel', 'exit']) {
+    test(`a Host question isolates a partial ${source} draft and preserves it through ${finish}`, async () => {
+      await withTuiHost(async context => {
+        const inputFile = join(context.directory, 'question-input.jsonl');
+        const writes = [];
+        const inputs = {
+          read: (root, id) => readInput(inputFile, root, id),
+          write: async (root, id, text, queued) => {
+            await rememberInput(inputFile, { projectRoot: root, sessionId: id, draft: text, queued });
+            writes.push(text);
+          },
+        };
+        await withApp(context, async ({ frame, stdin, type }) => {
+          const wait = condition => waitFor(condition, { within: 5000, read: frame });
+          if (source === 'grant wizard') {
+            await type('/control create');
+            await wait(() => frame().includes('授权名称'));
+          }
+          stdin.write('keepAB');
+          await wait(() => frame().includes('› keepAB'));
+          stdin.write('\x1b[D');
+          await delay(40);
+          const execution = context.client.request('run.start', { sessionId: context.sessionId, input: JSON.stringify({
+            tool: 'ask_user_question', args: { questions: JSON.stringify([{ question: '请回答当前问题' }]) },
+          }) });
+          execution.catch(() => undefined);
+          try {
+            await wait(() => frame().includes('等待回答 1/1'));
+            assert.ok(!frame().includes('创建外控授权'), frame());
+            assert.ok(frame().includes('输入回答'), frame());
+            assert.ok(!frame().includes('keepAB'), frame());
+            stdin.write('真实问答答案');
+            await wait(() => frame().includes('› 真实问答答案'));
+            await wait(() => writes.includes('keepAB'));
+            assert.equal((await readInput(inputFile, context.projectDirectory, context.sessionId)).draft, 'keepAB');
+            if (finish === 'exit') {
+              const saved = writes.length;
+              stdin.write('\x03');
+              await wait(() => writes.length > saved);
+              assert.equal((await readInput(inputFile, context.projectDirectory, context.sessionId)).draft, 'keepAB');
+              return;
+            }
+            if (finish === 'answer') stdin.write('\r');
+            else await context.client.request('run.cancel', { sessionId: context.sessionId });
+            if (finish === 'answer') await execution;
+            else await assert.rejects(execution, error => error.code === 'loop_cancelled');
+            const read = await context.client.request('session.read', { sessionId: context.sessionId });
+            if (finish === 'answer') assert.ok(JSON.stringify(read.events).includes('真实问答答案'));
+            else assert.ok(read.events.some(event => event.result?.code === 'ask_user_cancelled'));
+            assert.ok(!JSON.stringify(read.events).includes('keepAB'));
+            assert.ok(!context.requests.some(request => request.method === 'agent-control.create'));
+            await wait(() => frame().includes('› keepAB'));
+            stdin.write('X');
+            await wait(() => frame().includes('› keepAXB'));
+          } finally {
+            await context.client.request('run.cancel', { sessionId: context.sessionId }).catch(error => {
+              if (error.code !== 'run_not_running') throw error;
+            });
+            await execution.catch(() => undefined);
+          }
+        }, { inputs });
+      }, { interactive: true });
+    });
+  }
+}
+
+test('queue recovery during a question preserves the ordinary draft and leaves the answer separate', async () => {
+  await withTuiHost(async context => {
+    const inputFile = join(context.directory, 'queue-question.jsonl');
+    await rememberInput(inputFile, { projectRoot: context.projectDirectory, sessionId: context.sessionId, draft: 'kept-task', queued: ['queued-task'] });
+    const inputs = {
+      read: (root, id) => readInput(inputFile, root, id),
+      write: (root, id, text, queued) => rememberInput(inputFile, { projectRoot: root, sessionId: id, draft: text, queued }),
+    };
+    await withApp(context, async ({ frame, output, stdin, type }) => {
+      const wait = condition => waitFor(condition, { within: 5000, read: frame });
+      await wait(() => frame().includes('› kept-task') && frame().includes('队列已暂停：1 条'));
+      const execution = context.client.request('run.start', { sessionId: context.sessionId, input: JSON.stringify({
+        tool: 'ask_user_question', args: { questions: JSON.stringify([{ question: '确认继续？' }]) },
+      }) });
+      execution.catch(() => undefined);
+      try {
+        await wait(() => frame().includes('等待回答 1/1'));
+        stdin.write('\x7f');
+        await delay(60);
+        assert.ok(!frame().includes('queued-task'), frame());
+        await type('/queue drop 1');
+        await wait(() => output().includes('消息 1 已移回草稿'));
+        assert.ok(!frame().includes('queued-task'), frame());
+        await type('yes');
+        await execution;
+        await wait(() => frame().includes('kept-task') && frame().includes('queued-task'));
+        const read = await context.client.request('session.read', { sessionId: context.sessionId });
+        assert.ok(!JSON.stringify(read.events).includes('queued-task'));
+      } finally {
+        await context.client.request('run.cancel', { sessionId: context.sessionId }).catch(error => {
+          if (error.code !== 'run_not_running') throw error;
+        });
+        await execution.catch(() => undefined);
+      }
+    }, { inputs });
+  }, { interactive: true });
+});
+
+test('permission completion leaves the existing explicit confirmation intact', async () => {
+  await withTuiHost(async (context) => withApp(context, async ({ frame, stdin, wait }) => {
+    stdin.write('/permission network u');
+    await wait(() => frame().includes('/permission network unrestricted'));
+    stdin.write('\t');
+    await wait(() => frame().includes('› /permission network unrestricted'));
+    assert.ok(!context.requests.some(request => request.method === 'permission.set'));
+    stdin.write('\r');
+    await wait(() => frame().includes('确认不受限网络'));
+    stdin.write('\x1b');
+    await wait(() => !frame().includes('确认不受限网络'));
+    assert.ok(!context.requests.some(request => request.method === 'permission.set'));
+    assert.equal(context.providerRequests.length, 0);
+  }), { permissionControl: true });
+});
+
+test('terminal Delete and Backspace edit opposite sides of a whole emoji', async () => {
+  await withTuiHost(async (context) => withApp(context, async ({ frame, stdin, wait }) => {
+    stdin.write('A👩‍💻B');
+    await wait(() => frame().includes('A👩‍💻B'));
+    stdin.write('\x1b[H');
+    await delay(40);
+    stdin.write('\x1b[C');
+    await delay(40);
+    stdin.write('\x1b[3~');
+    await wait(() => frame().includes('AB') && !frame().includes('👩‍💻'));
+    stdin.write('\x7f');
+    await wait(() => frame().includes('› B'));
+    stdin.write('\r');
+    await wait(() => context.providerRequests.some(request => request.messages.some(message => message.role === 'user' && message.content === 'B')));
+  }));
+});
+
+test('pasting a regional indicator moves beyond the merged flag before Backspace', async () => {
+  await withTuiHost(async (context) => withApp(context, async ({ frame, stdin, wait }) => {
+    stdin.write('🇸');
+    await wait(() => frame().includes('🇸'));
+    stdin.write('\x1b[H');
+    await delay(40);
+    stdin.write('\x1b[200~🇺\x1b[201~');
+    await wait(() => frame().includes('🇺🇸'));
+    stdin.write('\x7f');
+    await wait(() => frame().includes('› 描述任务') && !frame().includes('🇸') && !frame().includes('🇺'));
+    assert.equal(context.providerRequests.length, 0);
+  }));
+});
+
+test('session filtering stays out of the draft and resumes the selected Host session', async () => {
+  await withTuiHost(async (context) => {
+    const other = await context.client.request('session.create', {});
+    await context.client.request('session.label', { sessionId: other.sessionId, name: '西藏行程' });
+    await withApp(context, async ({ frame, stdin, type, wait }) => {
+      await type('/sessions');
+      await wait(() => frame().includes('西藏行程'));
+      stdin.write('找不到');
+      await wait(() => frame().includes('没有匹配的会话'));
+      stdin.write('\r');
+      await delay(40);
+      assert.ok(!context.requests.some(request => request.method === 'session.open'));
+      stdin.write('\x1b');
+      await wait(() => frame().includes('› 描述任务') && !frame().includes('找不到'));
+      await type('/resume');
+      await wait(() => frame().includes('西藏行程'));
+      stdin.write('西藏');
+      await wait(() => frame().includes('西藏 · 1/2'));
+      stdin.write('\r');
+      await wait(() => context.requests.some(request => request.method === 'session.open' && request.params.sessionId === other.sessionId)
+        && frame().includes(`会话 ${other.sessionId.slice(0, 8)}`));
+      assert.ok(context.requests.some(request => request.method === 'session.close' && request.params.sessionId === context.sessionId));
+      assert.equal(context.providerRequests.length, 0);
+    });
+  });
+});
 
 test('complete history opens in a bounded viewport and keyboard navigation reaches both ends', async () => {
   await withTuiHost(async (context) => withApp(context, async ({ frame, output, stdin, type, wait }) => {
