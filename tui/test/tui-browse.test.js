@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { access } from 'node:fs/promises';
+import { access, writeFile } from 'node:fs/promises';
 import { PassThrough } from 'node:stream';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -11,8 +11,8 @@ import { App } from '../dist/tui/app.js';
 import { UI_COMMANDS } from '../dist/tui/commands.js';
 import { measuredPermissionContext, waitFor, withTuiHost } from './helpers/tui-host.ts';
 
-async function withApp(context, run) {
-  const stdout = Object.assign(new PassThrough(), { columns: 80, rows: 24, isTTY: true });
+async function withApp(context, run, { columns = 80, rows = 24 } = {}) {
+  const stdout = Object.assign(new PassThrough(), { columns, rows, isTTY: true });
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref() {}, unref() {} });
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
@@ -40,6 +40,75 @@ test('slash discovery scrolls the whole command list and completes without sendi
     assert.equal(context.providerRequests.length, 0);
     assert.ok(frame().split('\n').length <= 24);
   }));
+});
+
+test('modal paste preserves the draft and history-search paste edits its own query', async () => {
+  await withTuiHost(async (context) => withApp(context, async ({ frame, stdin, wait }) => {
+    stdin.write('保留草稿');
+    await wait(() => frame().includes('› 保留草稿'));
+    stdin.write('\x0f');
+    await wait(() => frame().includes('完整历史'));
+    stdin.write('\x1b[200~隐藏粘贴\x1b[201~');
+    await delay(80);
+    stdin.write('\x1b');
+    await wait(() => frame().includes('› 保留草稿'));
+    assert.ok(!frame().includes('隐藏粘贴'));
+    stdin.write('\x12');
+    await wait(() => frame().includes('历史搜索'));
+    stdin.write('\x1b[200~查询\n文字\x1b[201~');
+    await wait(() => frame().includes('历史搜索 查询 文字'));
+    stdin.write('\x1b');
+    await wait(() => frame().includes('› 保留草稿'));
+    assert.ok(!frame().includes('查询 文字'));
+    assert.equal(context.providerRequests.length, 0);
+  }));
+});
+
+test('long questions page their complete options while keeping an answer editor at 50x14', async () => {
+  await withTuiHost(async (context) => withApp(context, async ({ frame, stdin, type, wait }) => {
+    await type(JSON.stringify({ tool: 'ask_user_question', args: { questions: JSON.stringify([{
+      question: '请阅读完整问题。'.repeat(30),
+      options: Array.from({ length: 4 }, (_, index) => ({ label: `选项 ${index + 1}`, description: `说明 ${index + 1}：${'完整说明内容。'.repeat(20)} 结束-${index}` })),
+    }]) } }));
+    await wait(() => frame().includes('等待回答 1/1'));
+    assert.ok(frame().includes('输入回答'));
+    assert.ok(!frame().includes('工具模式'));
+    const seen = new Set();
+    for (let page = 0; page < 80; page += 1) {
+      const current = frame();
+      assert.ok(current.trimEnd().split('\n').length <= 14, current);
+      for (let index = 0; index < 4; index += 1) if (current.includes(`结束-${index}`)) seen.add(index);
+      if (seen.size === 4) break;
+      stdin.write('\x1b[6~');
+      await delay(35);
+    }
+    assert.deepEqual([...seen], [0, 1, 2, 3]);
+    stdin.write('\x1b');
+    await wait(() => !frame().includes('等待回答'));
+  }, { columns: 50, rows: 14 }), { interactive: true });
+});
+
+test('an approval with insufficient room ignores allow keys and paste while deny stays available', async () => {
+  await withTuiHost(async (context) => {
+    await writeFile(join(context.config.boundary, 'small-window.md'), 'read me');
+    await withApp(context, async ({ frame, stdin, type, wait }) => {
+      await type(JSON.stringify({ tool: 'read', args: { path: 'small-window.md' } }));
+      await wait(() => frame().includes('请放大窗口后再审批'));
+      stdin.write('y');
+      await delay(50);
+      stdin.write('1');
+      await delay(50);
+      stdin.write('\x1b[200~2\x1b[201~');
+      await delay(80);
+      assert.ok(frame().includes('请放大窗口后再审批'));
+      const pending = await context.client.request('session.read', { sessionId: context.sessionId });
+      assert.ok(!pending.events.some(event => event.kind === 'sessionPolicyRule'));
+      stdin.write('n');
+      await wait(() => !frame().includes('请放大窗口后再审批'));
+      const denied = await context.client.request('session.read', { sessionId: context.sessionId });
+      assert.ok(denied.events.some(event => event.kind === 'tool' && event.result?.code === 'ask_declined'));
+    }, { columns: 50, rows: 4 });
+  });
 });
 
 test('permission completion leaves the existing explicit confirmation intact', async () => {

@@ -14,15 +14,19 @@ import { titleEscape, titleText } from './output.js';
 import { providerDiagnosticText, runtimeFailureText } from './errors.js';
 import { capabilityOf, projectRecord, resultParts, type TranscriptItem, type TuiRecord } from './transcript.js';
 import { VERSION } from '../version.js';
-import { ChoicePanel, HelpPanel, type PanelChoice } from './panels.js';
+import { ChoicePanel, HelpPanel, PanelFrame, type PanelChoice } from './panels.js';
 import { SessionPicker } from './session-picker.js';
-import { markdownLines } from './markdown.js';
+import { MessageRow as Row, MarkdownRows } from './message-view.js';
+import { foldText } from './message-format.js';
+import { ConfigurationLine, ProgressLine, Welcome } from './chrome.js';
+import { DraftInput } from './input-view.js';
+import { ApprovalPanel, buildApprovalLayout } from './approval-view.js';
+import { TUI_COLORS } from './ui-style.js';
 import { selectedText, transcriptLines, viewportPosition, wrapLine } from './viewport.js';
 import { CURRENT, ENGLISH_LABELS, ENGLISH_VIEWS, KEYMAP, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec } from './keymap.js';
 import { displayWidth } from './commands.js';
 import { textOf as chooseText, type Locale } from '@ligule/core/kernel/locale.js';
 import type { InkKey, TerminalAction } from './keymap.js';
-import type { MarkdownLine } from './markdown.js';
 import type { SessionEvent, SessionHeader } from '@ligule/core/session/format.js';
 import type { SessionSummary } from '@ligule/core/session/list.js';
 import type { AskAnswer, AskQuestion } from '@ligule/core/tools/ask-user.js';
@@ -38,8 +42,7 @@ import type { ModelSelection, ModelService } from '@ligule/core/kernel/model-ser
 import type { LoopResult } from '@ligule/core/kernel/loop.js';
 import type { CredentialStatus } from '@ligule/core/kernel/credentials.js';
 
-const SPINNER = ['⠋', '⠙', '', '⠸', '⠼', '⠴', '⠦', '', '⠇', '⠏'];
-const FOLD_LINES = 3;
+const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 // 显示模式来源的中文名称；记录值与 Host 返回的来源标识保持一致。
 const MODE_LAYERS: Readonly<Record<string, string>> = { shipped: '随包', user: '全局', project: '项目' };
 // 限制列表高度，避免内容挤出输入区域。
@@ -48,7 +51,6 @@ const CANDIDATE_ROWS = 6;
 const MENTION_ROWS = 8;
 // 表示当前没有文本组合输入；有效光标位置不会是 -1。
 const NO_TOKEN = { start: -1, text: '' } as const;
-const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -421,17 +423,7 @@ export { markdownLines } from './markdown.js';
 
 export { editDraft, isTypingRun } from './draft.js';
 
-const textOf = (value: unknown): string => (typeof value === 'string' ? value : JSON.stringify(value ?? '', null, 2));
-
-// 长内容按行数和字数双重限制折叠，并显示剩余字数；Ctrl+O 展开查看。
-export function foldText(text: unknown, expanded: boolean, limit = FOLD_LINES, maxChars = 400): { shown: string; hidden: number } {
-  const full = textOf(text);
-  if (expanded === true) return { shown: full, hidden: 0 };
-  const lines = full.split('\n');
-  const shown = lines.length > limit ? lines.slice(0, limit).join('\n') : full;
-  const cut = shown.length > maxChars ? shown.slice(0, maxChars) : shown;
-  return { shown: cut, hidden: full.length - cut.length };
-}
+export { foldText } from './message-format.js';
 
 export { capabilityOf, projectRecord, resultParts };
 
@@ -543,30 +535,6 @@ export function detailTitle(detail: DetailTitleOptions, locale: Locale = 'zh'): 
   return chooseText(locale, `支线 ${detail.branch}，父记录第 ${detail.seq} 那一次派生 · 这里的序号是支线自己的 · /sub 收起`, `Subtask ${detail.branch}, from event ${detail.seq} · sequence numbers belong to this subtask · /sub to close`);
 }
 
-// 按终端宽度排版助手的 Markdown，并按语言高亮代码，保留原文内容。
-// 加粗、斜体、删除线和行内代码的样式映射统一在此处维护。
-const MARK_STYLES: Readonly<Record<string, Record<string, unknown>>> = {
-  'md-strong': { bold: true },
-  'md-em': { italic: true },
-  'md-del': { strikethrough: true },
-  'md-codespan': { color: 'cyan' },
-};
-function MarkdownRows({ text, columns = 80 }: { readonly text: string; readonly columns?: number }) {
-  const lines = useMemo(() => markdownLines(text, columns), [text, columns]);
-  const marked = (line: MarkdownLine) => line.spans?.map((span, part) => h(Text, { key: part, ...(span.scope === undefined ? {} : MARK_STYLES[span.scope] ?? {}) }, span.text)) ?? [];
-  return h(Fragment, null, lines.map((line, index) => {
-    if (line.kind === 'code') return h(Text, { key: index, wrap: 'wrap' }, '  ', line.spans === undefined ? line.text : line.spans.map((span, part) => {
-      const scope = span.scope?.split('.')[0];
-      const codeColors: Readonly<Record<string, string>> = { keyword: 'magenta', string: 'green', number: 'yellow', comment: 'gray', title: 'cyan', literal: 'yellow', built_in: 'cyan' };
-      const color = scope === undefined ? undefined : codeColors[scope];
-      return h(Text, { key: part, color }, span.text);
-    }));
-    if (line.kind === 'heading') return h(Text, { key: index, bold: true, wrap: 'wrap' }, line.spans === undefined ? line.text : marked(line));
-    if (line.spans !== undefined) return h(Text, { key: index, wrap: 'wrap' }, marked(line));
-    return h(Text, { key: index, wrap: 'wrap' }, line.text);
-  }));
-}
-
 // 审批卡显示写入操作的目标和变更摘要，便于用户检查后再决定是否允许。
 export function changeSummary(tool: string, args: Record<string, unknown>, locale: Locale = 'zh'): string {
   return describeChange(tool, args, locale).summary;
@@ -587,34 +555,6 @@ function approvalBody(tool: string, args: Record<string, unknown>, locale: Local
     ...(change.before === '' ? [] : [t('原内容:', 'Before:'), ...marked(change.before, '-')]),
     ...(change.after === '' ? [] : [t('新内容:', 'After:'), ...marked(change.after, '+')]),
   ].join('\n');
-}
-
-function Row({ row, expanded, columns, locale = 'zh' }: { readonly row: TranscriptItem; readonly expanded: boolean; readonly columns: number; readonly locale?: Locale }) {
-  const t = (zh: string, en: string) => chooseText(locale, zh, en);
-  if (row.kind === 'question') return h(Text, { color: 'cyan' }, row.source === 'controller'
-    ? `← ${chooseText(locale, '外部 Agent', 'External agent')}: ${row.text}`
-    : `› ${row.text}`);
-  if (row.kind === 'reasoning') {
-    const folded = foldText(row.text, expanded, 1);
-    return h(Fragment, null,
-      h(Text, { dimColor: true, wrap: 'truncate-end' }, t(`· 推理 ${folded.shown}`, `· Reasoning ${folded.shown}`)),
-      folded.hidden > 0 ? h(Text, { dimColor: true }, t(`  …还有 ${folded.hidden} 字，${keyHint('expand-or-history')} 展开`, `  …${folded.hidden} more characters; ${keyHint('expand-or-history')} to expand`)) : null);
-  }
-  if (row.kind === 'answer') return h(MarkdownRows, { text: row.text, columns });
-  if (row.kind === 'call') return h(Text, { color: 'yellow' }, `→ ${row.tool} ${foldText(row.text, expanded, 1).shown}`);
-  if (row.kind === 'result') {
-    const folded = foldText(row.text, expanded);
-    // 标题行显示操作结果；命令显示退出码，溢出内容显示存储文件名。
-    const note = [row.exitCode === undefined ? '' : t(`退出码 ${row.exitCode}`, `exit ${row.exitCode}`), row.spilled === undefined ? '' : t(`整段在 ${row.spilled}`, `full result: ${row.spilled}`)].filter((part) => part !== '').join(' · ');
-    return h(Fragment, null,
-      h(Text, { color: 'green' }, `✓ ${row.tool}${note === '' ? '' : `（${note}）`}`),
-      folded.shown === '' ? null : h(Text, { dimColor: true, wrap: 'truncate-end' }, folded.shown),
-      folded.hidden > 0 ? h(Text, { dimColor: true }, t(`  …还有 ${folded.hidden} 字，${keyHint('expand-or-history')} 展开`, `  …${folded.hidden} more characters; ${keyHint('expand-or-history')} to expand`)) : null);
-  }
-  if (row.kind === 'refusal') return h(Text, { color: 'magenta' }, t(`✗ ${row.tool} 已拒绝（${row.code}）`, `✗ ${row.tool} denied (${row.code})`));
-  if (row.kind === 'failure') return h(Text, { color: 'red' }, `✗ ${row.tool} ${row.code ?? ''} ${row.text}`);
-  if (row.kind === 'meta') return h(Text, { dimColor: true }, `· ${row.text}`);
-  return h(Text, { color: 'red' }, `! ${row.text}`);
 }
 
 // 队列预览截短为单行，避免长消息撑开输入区。
@@ -836,6 +776,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   }, [ask, query, sessionId]);
   const [approvalExpanded, setApprovalExpanded] = useState(false);
   const [approvalCursor, setApprovalCursor] = useState(0);
+  const [questionCursor, setQuestionCursor] = useState(0);
+  useEffect(() => setQuestionCursor(0), [query?.id, query?.at]);
 
   const refreshStatus = useCallback(async () => {
     // Ink 已退出时不再向已关闭的连接发送状态更新。
@@ -2686,25 +2628,17 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const picks = panel !== null || dismissedAt === draft || search !== null || detail !== null || sessionPicker !== null || ask !== null || query !== null ? [] : candidatesOf(draft, templates, undefined, locale);
   const chosen = picks.length === 0 ? 0 : Math.min(pick, picks.length - 1);
   const candidateHeight = Math.max(1, Math.min(CANDIDATE_ROWS, geometry.rows - 12));
+  const pathHeight = Math.max(1, Math.min(MENTION_ROWS, geometry.rows - 10));
   const searched = search === null ? [] : searchHistory(entries, search.query);
   const viewLines = useMemo(() => detail === null ? [] : transcriptLines(detail.rows, Math.max(1, geometry.columns - 6), locale), [detail?.rows, geometry.columns, locale]);
-  const viewHeight = Math.max(1, geometry.rows - 12 - (ask === null ? 0 : 7));
+  const viewHeight = Math.max(1, geometry.rows - 6 - (ask === null ? 0 : 7));
   const view = viewportPosition(detail?.cursor ?? 0, viewLines.length, viewHeight, detail?.offset ?? 0);
   const selection = detail?.anchor === undefined || detail.anchor === null ? [view.cursor, view.cursor] : [Math.min(detail.anchor, view.cursor), Math.max(detail.anchor, view.cursor)];
-  const approvalLines = useMemo(() => ask === null ? [] : wrapLine(ask.content, Math.max(1, geometry.columns - 6)), [ask?.content, geometry.columns]);
-  const approvalHeight = Math.max(1, geometry.rows - 12);
+  const approvalLayout = useMemo(() => ask === null ? null : buildApprovalLayout(ask, approvalExpanded,
+    geometry.columns, Math.max(1, geometry.rows - 1), locale), [ask, approvalExpanded, geometry.columns, geometry.rows, locale]);
+  const approvalLines = approvalLayout?.bodyLines ?? [];
+  const approvalHeight = approvalLayout?.bodyHeight ?? 0;
   const approvalView = viewportPosition(approvalCursor, approvalLines.length, approvalHeight);
-  const rememberChoices = ask?.rememberScopes.map((scope, index) => {
-    const label = scope === 'session' ? t('记住本会话', 'remember this session')
-      : scope === 'project' ? t('记住本项目', 'remember this project')
-        : t('记住所有项目', 'remember all projects');
-    return `${index + 2} ${label}`;
-  }).join(' · ') ?? '';
-  const rememberTargetLabel = ask?.rememberHintKey === 'file'
-    ? ask.rememberTarget === 'workspace' ? t('此工作区同类操作', 'this operation type in this workspace') : t('仅此文件', 'this file only')
-    : ask?.rememberHintKey === 'command' ? t('此命令', 'this command')
-      : ask?.rememberHintKey === 'mcp' ? t('此组 MCP 参数', 'these MCP arguments')
-        : t('此工具能力', 'this tool capability');
   // 问题面板显示题目、已提交答案和当前题是否为最后一题。
   const asking = query === null ? null : {
     count: query.questions.length,
@@ -2714,6 +2648,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     done: query.questions.slice(0, query.at).map((one, index) => `${index + 1}. ${answeredLine(query.picked[one.id]?.answer, locale)}`),
     last: query.at + 1 === query.questions.length,
   };
+  const questionLines = asking === null ? [] : wrapLine([
+    asking.title,
+    ...asking.current.options.map((option, position) => `${position + 1}. ${option.label}${option.description === undefined ? '' : ` —— ${option.description}`}`),
+    ...asking.done,
+  ].join('\n'), Math.max(1, geometry.columns - 3));
+  const composerHeight = Math.max(1, Math.min(query === null ? 5 : 3, geometry.rows - 10));
+  const questionHeight = Math.max(1, geometry.rows - composerHeight - 6);
+  const questionView = viewportPosition(questionCursor, questionLines.length, questionHeight);
   const controlPrompt = controlWizard === null ? null
     : controlWizard.step === 8
       ? t(`允许外控启动哪些已信任的 MCP Server？逗号分隔：${controlWizard.mcpServers.join(', ') || '无'}；输入 none 表示不允许。`, `Which trusted MCP servers may the controller start? Comma-separated: ${controlWizard.mcpServers.join(', ') || 'none'}; type none for no servers.`)
@@ -2741,7 +2683,6 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       ? t('外控会话等待回答', 'External session is waiting for an answer')
       : externalSnapshot?.state === 'running' ? t('外控 Agent 正在运行', 'External agent is running')
         : t('外控会话已连接 · /takeover 接管', 'External session connected · /takeover to take over');
-  const caretText = useMemo(() => [...GRAPHEMES.segment(draft.slice(caret))][0]?.segment ?? ' ', [draft, caret]);
 
   useInput((input, key) => {
     if (hit('quit', input, key)) {
@@ -2779,7 +2720,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       cancelRound();
       return;
     }
-    if (ask !== null && approvalExpanded) {
+    if (ask !== null) {
       const target = hit('approval-top', input, key) ? 0 : hit('approval-bottom', input, key) ? approvalLines.length - 1
         : hit('approval-page-up', input, key) ? approvalView.cursor - approvalHeight : hit('approval-page-down', input, key) ? approvalView.cursor + approvalHeight
           : hit('approval-up', input, key) ? approvalView.cursor - 1 : hit('approval-down', input, key) ? approvalView.cursor + 1 : null;
@@ -2793,6 +2734,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       const option = /^\d$/u.test(input) ? Number(input) - 2 : -1;
       const rememberScope = ask.rememberable && option >= 0 ? ask.rememberScopes[option] : undefined;
       if (hit('approve', input, key) || ask.rememberable && input === '1' || rememberScope !== undefined) {
+        if (approvalLayout?.canApprove !== true) return;
         const asked = ask;
         setAsk(null);
         const rememberedTarget = asked.rememberTarget ?? asked.rememberTargetOptions[0];
@@ -2842,6 +2784,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         }
         else client.reply(asked.id, { decision: 'deny' });
       }
+      return;
+    }
+    if (query !== null && detail === null && search === null
+      && (hit('question-page-up', input, key) || hit('question-page-down', input, key))) {
+      setQuestionCursor(questionView.cursor + (hit('question-page-up', input, key) ? -questionHeight : questionHeight));
       return;
     }
     // 草稿为空时，左方向键返回上一题并恢复原答案供修改。
@@ -3048,62 +2995,36 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
 
   // 通过 Ink 的 bracketed paste 通道一次接收整段粘贴内容，不将换行解释为发送或审批按键。
   usePaste((text) => {
-    if (panel !== null || sessionPicker !== null) return;
+    if (panel !== null || sessionPicker !== null || ask !== null || detail !== null) return;
+    if (search !== null) {
+      setSearch({ query: search.query + text.replace(/[\r\n\t]+/gu, ' '), at: 0 });
+      return;
+    }
     const inserted = editDraft(draft, caret, text.replace(/\r\n?/g, '\n'), {});
     setDraft(inserted.draft);
     setCaret(inserted.caret);
   }, { isActive: interactive });
 
   const shownModel = externalControl ? externalModel : status?.model ?? info.model;
-  const modelStatus = externalControl
-    ? t(`外控模型 ${shownModel ?? '未知'}`, `External model ${shownModel ?? 'unknown'}`)
-    : t(`模型 ${shownModel ?? '未配置'}${status?.pendingModel ? `→${status.pendingModel}` : ''} ${keyHint('model-picker')}`, `Model ${shownModel ?? 'not configured'}${status?.pendingModel ? `→${status.pendingModel}` : ''} ${keyHint('model-picker')}`);
-  const footerStatus = externalControl ? modelStatus
-    : `${modelStatus}  ·  ${t(`工具模式 ${status?.mode ?? '—'}${status?.pendingMode ? `→${status.pendingMode}` : ''} ${keyHint('mode-picker')}  ·  审批 ${status?.policy === 'none' ? '不受审批' : status?.policy === 'never' ? '旧版 never（需迁移）' : status?.policy === 'auto' ? '自动判定' : '逐次审批'} ${keyHint('policy-picker')}`, `Tools ${status?.mode ?? '—'}${status?.pendingMode ? `→${status.pendingMode}` : ''} ${keyHint('mode-picker')}  ·  Approval ${status?.policy === 'none' ? 'none' : status?.policy === 'never' ? 'legacy never (migration required)' : status?.policy === 'auto' ? 'auto' : 'ask'} ${keyHint('policy-picker')}`)}`;
   const foldedLive = foldText(live.reasoning, expanded, 1);
+  const showComposer = ask === null && detail === null && panel === null && sessionPicker === null && search === null;
+  const showSettings = showComposer && query === null && controlWizard === null && picks.length === 0 && mention === null;
 
   return h(Fragment, null,
     // 会话切换时用会话 ID 重建静态转录，避免新记录短于旧记录时沿用旧行索引。
     h(Static<TranscriptItem>, { key: sessionId, items: sessionId === firstSessionId ? [{ kind: 'welcome', text: '' }, ...rows] : rows, children: (row, index) => row.kind === 'welcome'
-      ? h(Box, { key: index, flexDirection: 'column', alignItems: 'center', marginY: 1 },
-          h(Text, { bold: true, color: 'green' }, `❧  ligule  v${VERSION}`),
-          h(Text, null, t('欢迎使用 Ligule', 'Welcome to Ligule')),
-          h(Text, { wrap: 'truncate-middle' }, titleText({ boundary: info.boundary, sessionId: '' })),
-          h(Text, { dimColor: true }, t('输入 /help 查看命令与快捷键', 'Type /help for commands and shortcuts')))
+      ? h(Welcome, { key: index, version: VERSION, boundary: titleText({ boundary: info.boundary, sessionId: '' }), columns: geometry.columns, locale })
       : h(Box, { key: index, flexDirection: 'column' }, h(Row, { row, expanded: false, columns: geometry.columns, locale })) }),
-    foldedLive.shown === '' ? null : h(Text, { dimColor: true, wrap: 'truncate-end' }, t(`· 推理 ${foldedLive.shown}${foldedLive.hidden > 0 ? ` …还有 ${foldedLive.hidden} 字` : ''}`, `· Reasoning ${foldedLive.shown}${foldedLive.hidden > 0 ? ` …${foldedLive.hidden} more characters` : ''}`)),
-    live.text === '' || detail !== null ? null : h(MarkdownRows, { text: live.text, columns: geometry.columns }),
-    ask === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'yellow', paddingX: 1 },
-      h(Text, { bold: true }, t(`允许执行 ${ask.tool}？`, `Allow ${ask.tool}?`)),
-      h(Text, { wrap: 'truncate-end' }, ask.detail),
-      ask.change === '' ? null : h(Text, { dimColor: true }, ask.change),
-      ask.backend === '' ? null : h(Text, { dimColor: true, wrap: 'truncate-end' }, t(`执行环境 ${ask.backend}`, `Shell ${ask.backend}`)),
-      ask.reason === '' ? null : h(Text, { dimColor: true, wrap: 'truncate-end' }, ask.reason),
-      approvalExpanded ? h(Fragment, null,
-        ...approvalLines.slice(approvalView.offset, approvalView.offset + approvalHeight).map((line, index) => h(Text, { key: index, wrap: 'truncate-end' }, line)),
-        h(Text, { dimColor: true }, t(`改动 ${approvalView.cursor + 1}/${approvalLines.length} 行 · ${keyHint('approval-page-up', 'approval-page-down')} 分页 · ${keyHint('approval-top', 'approval-bottom')} 到两端`, `Changes ${approvalView.cursor + 1}/${approvalLines.length} · ${keyHint('approval-page-up', 'approval-page-down')} pages · ${keyHint('approval-top', 'approval-bottom')} start/end`))) : null,
-      ask.rememberable && ask.rememberHintKey !== '' ? h(Text, { dimColor: true, wrap: 'truncate-end' }, ask.rememberHintKey === 'command'
-        ? t('只记住这条命令及其参数边界。', 'Remember only this command and its argument boundary.')
-        : ask.rememberHintKey === 'file'
-          ? ask.rememberTarget === 'workspace'
-            ? t(`范围：此工作区内 ${ask.tool} 这一类操作 · 按 w 改为仅此文件`, `Scope: this ${ask.tool} operation type in this workspace · press w for this file only`)
-            : t(`范围：仅此文件 · 按 w 改为此工作区内的 ${ask.tool} 操作`, `Scope: this file only · press w for this ${ask.tool} operation type in the workspace`)
-          : ask.rememberHintKey === 'mcp'
-            ? t(`只记住此 MCP 工具、这组参数和服务器配置摘要 ${ask.identityDigest?.slice(0, 12) ?? '未知'}。`, `Remember only this MCP tool, these arguments, and server configuration digest ${ask.identityDigest?.slice(0, 12) ?? 'unknown'}.`)
-            : t('规则会应用于此工具能力的所有调用参数。', 'The rule applies to this tool capability for all arguments.')) : null,
-      ask.detailsLoading ? h(Text, { dimColor: true }, t('正在读取完整待审批内容…', 'Loading the full pending content…')) : null,
-      ask.detailsError === undefined ? null : h(Text, { color: 'red' }, t(`完整内容读取失败：${ask.detailsError}`, `Could not read full details: ${ask.detailsError}`)),
-      h(Text, { wrap: 'truncate-end' }, ask.rememberable
-        ? t(`1 允许一次 · ${rememberChoices}${ask.rememberTargetOptions.includes('file') && ask.rememberTargetOptions.includes('workspace') ? ` · w 范围：${rememberTargetLabel}` : ''} · ${keyHint('deny')} 拒绝 · ${keyHint('expand-or-history')} 查看改动 · ${keyHint('approval-cancel')} 取消`, `1 allow once · ${rememberChoices}${ask.rememberTargetOptions.includes('file') && ask.rememberTargetOptions.includes('workspace') ? ` · w scope: ${rememberTargetLabel}` : ''} · ${keyHint('deny')} deny · ${keyHint('expand-or-history')} details · ${keyHint('approval-cancel')} cancel`)
-        : t(`${keyHint('approve')} 允许一次 · ${keyHint('deny')} 拒绝 · ${keyHint('expand-or-history')} 查看改动 · ${keyHint('approval-cancel')} 取消`, `${keyHint('approve')} allow once · ${keyHint('deny')} deny · ${keyHint('expand-or-history')} details · ${keyHint('approval-cancel')} cancel`))),
-    asking === null || query === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'blue', paddingX: 1 },
+    !showComposer || foldedLive.shown === '' ? null : h(Text, { color: TUI_COLORS.muted, wrap: 'truncate-end' }, t(`· 推理 ${foldedLive.shown}${foldedLive.hidden > 0 ? ` …还有 ${foldedLive.hidden} 字` : ''}`, `· Reasoning ${foldedLive.shown}${foldedLive.hidden > 0 ? ` …${foldedLive.hidden} more characters` : ''}`)),
+    live.text === '' || !showSettings ? null : h(MarkdownRows, { text: live.text, columns: geometry.columns }),
+    approvalLayout === null ? null : h(ApprovalPanel, { layout: approvalLayout, cursor: approvalCursor }),
+    asking === null || query === null || ask !== null || panel !== null || detail !== null || sessionPicker !== null || search !== null ? null : h(PanelFrame, { tone: 'info', width: geometry.columns },
       h(Text, { bold: true }, t(`等待回答 ${query.at + 1}/${asking.count}`, `Waiting for your answer ${query.at + 1}/${asking.count}`)),
-      h(Text, { wrap: 'truncate-end' }, asking.title),
-      ...asking.current.options.map((option, position) => h(Text, { key: `option:${position}`, dimColor: true, wrap: 'truncate-end' }, `  ${position + 1}. ${option.label}${option.description === undefined ? '' : ` —— ${option.description}`}`)),
-      ...asking.done.map((line, index) => h(Text, { key: `done:${index}`, dimColor: true, wrap: 'truncate-end' }, `  ${line}`)),
+      ...questionLines.slice(questionView.offset, questionView.offset + questionHeight).map((line, index) => h(Text, { key: questionView.offset + index, wrap: 'truncate-end' }, line)),
+      questionLines.length <= questionHeight ? null : h(Text, { color: TUI_COLORS.muted, wrap: 'truncate-end' }, `${questionView.cursor + 1}/${questionLines.length} · ${keyHint('question-page-up', 'question-page-down')}`),
       h(Text, { wrap: 'truncate-end' }, `${optionHint(asking.current, locale)} · ${asking.last ? t('Enter 提交', 'Enter to submit') : t('Enter 下一题', 'Enter for next question')}`),
       h(Text, { dimColor: true, wrap: 'truncate-end' }, t(`  ${asking.done.length > 0 ? `${keyHint('question-back')} 上一题 · ` : ''}${keyHint('interrupt')} 取消本轮 · 没有回答时限`, `  ${asking.done.length > 0 ? `${keyHint('question-back')} previous · ` : ''}${keyHint('interrupt')} cancel turn · no answer timeout`))),
-    detail === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'cyan', paddingX: 1 },
+    detail === null || ask !== null || panel !== null ? null : h(PanelFrame, { width: geometry.columns },
       h(Text, { dimColor: true, wrap: 'truncate-end' }, detail.kind === 'transcript' ? t('完整历史', 'Transcript') : detailTitle(detail, locale)),
       viewLines.length === 0
         ? h(Text, { dimColor: true }, detail.loading ? t('正在读取记录…', 'Loading transcript…') : t('没有可显示的内容', 'No content to display'))
@@ -3114,25 +3035,23 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       items: sessionPicker?.items ?? [], current: sessionId, locale, height: viewHeight, columns: geometry.columns,
       running, interactive, onClose: () => setSessionPicker(null), onSelect: (id) => runCommand('resume', id),
     }),
-    queue.length === 0 ? null : h(Box, { flexDirection: 'column' },
-      queue.map((item, index) => h(Text, { key: `${index}:${item}`, dimColor: true }, t(`排队 ${index + 1} · ${queuedLine(item)}`, `Queued ${index + 1} · ${queuedLine(item)}`))),
-      h(Text, { dimColor: true }, queuePaused
-        ? t('  队列已暂停 · /queue continue 继续 · /queue drop <序号> 收回', '  Queue paused · /queue continue to resume · /queue drop <n> to recover')
-        : t('  本轮结束后按顺序发送；空草稿时按退格收回最后一条', '  Sends in order after this turn; Backspace on an empty draft recovers the last message'))),
-    search === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'magenta', paddingX: 1 },
+    queue.length === 0 || !showSettings ? null : h(Text, { color: TUI_COLORS.muted, wrap: 'truncate-end' }, queuePaused
+      ? t(`队列已暂停：${queue.length} 条 · /queue continue 继续 · /queue list 查看`, `Queue paused: ${queue.length} · /queue continue to resume · /queue list to view`)
+      : t(`排队 ${queue.length} 条 · 空草稿按退格收回最后一条 · /queue list 查看`, `${queue.length} queued · Backspace on empty draft recalls last · /queue list to view`)),
+    search === null || ask !== null || panel !== null ? null : h(PanelFrame, { width: geometry.columns },
       h(Text, null, t(`历史搜索 ${search.query}`, `History search ${search.query}`)),
       searched.length === 0
         ? h(Text, { dimColor: true }, entries.length === 0 ? t('暂无输入历史', 'No input history') : t(`没有匹配“${search.query}”的输入`, `No input matches “${search.query}”`))
         : searched.map((entry, index) => h(Box, { key: `${index}:${entry}` },
             h(Text, { inverse: index === search.at }, ` ${queuedLine(entry, 60)}`))),
       h(Text, { dimColor: true }, t(`  继续输入以筛选 · ${keyHint('search-cycle', 'search-up', 'search-down')} 选择 · ${keyHint('search-pick')} 恢复草稿 · ${keyHint('search-close')} 退出`, `  Type to filter · ${keyHint('search-cycle', 'search-up', 'search-down')} select · ${keyHint('search-pick')} restore draft · ${keyHint('search-close')} close`))),
-    picks.length === 0 ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'gray', paddingX: 1 },
+    picks.length === 0 ? null : h(PanelFrame, { width: geometry.columns },
       picks.slice(Math.max(0, chosen - candidateHeight + 1), Math.max(0, chosen - candidateHeight + 1) + candidateHeight).map((candidate) => h(Text, { key: `${candidate.source}:${candidate.name}`, wrap: 'truncate-end' },
         h(Text, { inverse: candidate === picks[chosen] }, ` /${candidate.name}${candidate.hint === '' ? '' : ` ${candidate.hint}`}`),
         h(Text, { dimColor: true }, ` ${candidate.text}`))),
       h(Text, { dimColor: true }, t(`  ${chosen + 1}/${picks.length} · 继续输入名称或说明以筛选`, `  ${chosen + 1}/${picks.length} · type a name or description to filter`)),
       h(Text, { dimColor: true }, t(` ${keyHint('complete')} 补全 · ${keyHint('complete-up', 'complete-down')} 选择 · ${keyHint('complete-close')} 收起`, ` ${keyHint('complete')} complete · ${keyHint('complete-up', 'complete-down')} select · ${keyHint('complete-close')} close`))),
-    mention === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'gray', paddingX: 1 },
+    mention === null ? null : h(PanelFrame, { width: geometry.columns },
       h(Text, { dimColor: true, wrap: 'truncate-end' }, t(` 工作区 ${info.boundary}`, ` Workspace ${info.boundary}`)),
       mention.paths.length === 0
         ? h(Text, { dimColor: true }, mention.stopped === 'error'
@@ -3142,13 +3061,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
             : mention.stopped === 'budget'
               ? t('搜索已到遍历上限，请输入更具体的路径', 'Search limit reached; enter a more specific path')
               : t(`没有匹配“${mention.text}”的文件`, `No files match “${mention.text}”`))
-        : mention.paths.map((path, index) => h(Text, { key: path, inverse: index === mention.chosen, wrap: 'truncate-end' }, ` ${path}`)),
+        : mention.paths.slice(Math.max(0, mention.chosen - pathHeight + 1), Math.max(0, mention.chosen - pathHeight + 1) + pathHeight)
+          .map((path) => h(Text, { key: path, inverse: path === mention.paths[mention.chosen], wrap: 'truncate-end' }, ` ${path}`)),
       mention.paths.length > 0 && mention.stopped === 'budget'
         ? h(Text, { dimColor: true }, t('  列表不完整，请输入更具体的路径', '  List is incomplete; enter a more specific path')) : null,
       mention.paths.length > 0 && mention.stopped === 'unreadable'
         ? h(Text, { dimColor: true }, t('  有目录无法读取，列表不完整', '  Some directories are unreadable; list is incomplete')) : null,
       mention.paths.length === 0 ? null : h(Text, { dimColor: true }, t(` ${keyHint('pick-path', 'pick-path-alt')} 选中 · ${keyHint('path-up', 'path-down')} 选择 · ${keyHint('path-close')} 收起`, ` ${keyHint('pick-path', 'pick-path-alt')} insert · ${keyHint('path-up', 'path-down')} select · ${keyHint('path-close')} close`))),
-    h(HelpPanel, { active: panel === 'help', interactive, templates, locale, columns: geometry.columns - 4, height: Math.max(1, geometry.rows - 13), onClose: closePanel }),
+    h(HelpPanel, { active: panel === 'help', interactive, templates, locale, columns: geometry.columns, height: Math.max(1, geometry.rows - 8), onClose: closePanel }),
     h(ChoicePanel, {
       active: panel !== null && panel !== 'help', interactive,
       title: panel === 'model' ? t('选择模型', 'Select model')
@@ -3171,27 +3091,29 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
               : panel === 'permission-network' ? status?.permission?.network
                 : panel === 'control' ? 'create'
                 : undefined,
-      locale, columns: geometry.columns - 4, height: Math.max(1, Math.min(7, geometry.rows - 16)), loading: choicesLoading, onClose: closePanel, onSelect: (choice: PanelChoice) => chooseOption(choice.id),
+      locale, columns: geometry.columns, height: Math.max(1, geometry.rows - 8), loading: choicesLoading, onClose: closePanel, onSelect: (choice: PanelChoice) => chooseOption(choice.id),
     }),
-    controlWizard === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'yellow', paddingX: 1 },
+    controlWizard === null ? null : h(PanelFrame, { tone: 'warning', width: geometry.columns },
       h(Text, { bold: true }, t('创建外控授权', 'Create Agent Control grant')),
       h(Text, { wrap: 'wrap' }, controlPrompt),
       h(Text, { dimColor: true }, t('Enter 提交当前项 · 输入 cancel 取消', 'Enter submits this value · type cancel to stop'))),
     externalControl ? h(Text, { color: running ? 'yellow' : 'cyan', wrap: 'truncate-end' }, externalControlLabel) : null,
-    h(Box, { flexDirection: 'column', borderStyle: 'single', borderTop: true, borderBottom: true, borderLeft: false, borderRight: false, borderColor: running ? 'yellow' : 'cyan', paddingX: 1 }, h(Box, null,
-      h(Text, { color: running ? 'yellow' : 'cyan' }, running ? `${SPINNER[tick % SPINNER.length]} ` : '› '),
-      draft === '' && !running
-        ? h(Text, { dimColor: true }, controlWizard === null
-          ? externalControl ? t(`给外控 Agent 发消息 · ${keyHint('send')} 发送 · /takeover 接管`, `Message the external agent · ${keyHint('send')} send · /takeover to take over`)
-            : t(`描述任务 · ${keyHint('send')} 发送 · ${keyHint('newline')} 换行 · / 命令 · @ 文件`, `Describe a task · ${keyHint('send')} send · ${keyHint('newline')} new line · / commands · @ files`)
-          : t('输入授权设置答案', 'Enter the grant setting'))
-        : h(Text, { wrap: 'wrap' },
-          draft.slice(0, caret),
-          h(Text, { inverse: true }, caretText),
-          draft.slice(caret + (caret === draft.length ? 0 : caretText.length))))),
-    h(Text, { wrap: 'wrap' }, footerStatus),
-    h(Text, { dimColor: true, wrap: 'truncate-end' }, buildStatusLine({
-      sessionId, boundary: info.boundary, status, running, seconds, expanded, columns: stdout?.columns, locale,
-    })),
+    running && showSettings ? h(ProgressLine, { progress: status?.progress, seconds, marker: SPINNER[tick % SPINNER.length], columns: geometry.columns, locale }) : null,
+    showComposer ? h(DraftInput, {
+      draft, caret, columns: geometry.columns, height: composerHeight,
+      placeholder: controlWizard !== null ? t('输入授权设置答案', 'Enter the grant setting')
+        : query !== null ? t('输入回答', 'Type your answer')
+          : externalControl ? t('给外控 Agent 发消息 · /takeover 接管', 'Message the external agent · /takeover to take over')
+            : t('描述任务 · / 命令 · @ 文件', 'Describe a task · / commands · @ files')
+              + (geometry.columns >= 72 ? t(` · ${keyHint('newline')} 换行`, ` · ${keyHint('newline')} new line`) : ''),
+    }) : null,
+    showSettings ? h(ConfigurationLine, {
+      model: `${shownModel ?? t('未配置', 'not configured')}${status?.pendingModel ? `→${status.pendingModel}` : ''}`,
+      mode: `${status?.mode ?? '—'}${status?.pendingMode ? `→${status.pendingMode}` : ''}`,
+      policy: status?.policy ?? 'ask', external: externalControl, columns: geometry.columns, locale,
+    }) : null,
+    showSettings && !running && geometry.rows >= 20 ? h(Text, { color: TUI_COLORS.muted, wrap: 'truncate-end' }, buildStatusLine({
+      sessionId, boundary: info.boundary, status, running: false, seconds, expanded, columns: geometry.columns, locale,
+    })) : null,
   );
 }

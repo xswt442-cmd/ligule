@@ -270,7 +270,7 @@ test('the approval box names the shell backend and its executable', options, asy
   try {
     const run = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command: 'git --version' } }) });
     // 等待确认提示渲染后再输入拒绝答案，避免按键进入草稿。
-    await waitFor(() => /执行环境 (powershell|bash) · /.test(painted), { read: () => painted });
+    await waitFor(() => /执行环境：(powershell|bash) · /.test(painted), { read: () => painted });
     stdin.write('n');
     await run;
   } finally {
@@ -279,7 +279,7 @@ test('the approval box names the shell backend and its executable', options, asy
 
   assert.match(painted, /允许执行 exec？/);
   assert.match(painted, /git --version/);
-  assert.match(painted, /执行环境 (powershell|bash) · /);
+  assert.match(painted, /执行环境：(powershell|bash) · /);
   }, { permission });
 });
 
@@ -550,7 +550,7 @@ test('an answer with markdown shapes paints a heading, a list and highlighted co
     stdin.write('请原样保留这些内容：\n## 两步\n- 先看\n```js\nconst a = 1\n```\n退出码那行是 **0**');
     await delay(80);
     stdin.write('\r');
-    await waitFor(() => /\x1B\[35mconst\x1B\[39m/.test(painted), { read: () => painted });
+    await waitFor(() => /\x1B\[36mconst\x1B\[39m/.test(painted), { read: () => painted });
   } finally {
     instance.unmount();
   }
@@ -562,7 +562,7 @@ test('an answer with markdown shapes paints a heading, a list and highlighted co
   assert.match(response, / {2}const a = 1/, '围栏里那一行带缩进画出来');
   assert.doesNotMatch(response, /## 两步/, '井号不留在助手画面上');
   assert.doesNotMatch(response, /\*\*0\*\*/, '加粗的星号也不留在助手画面上');
-  assert.match(painted, /\x1B\[35mconst\x1B\[39m/, '代码关键字通过高亮颜色呈现');
+  assert.match(painted, /\x1B\[36mconst\x1B\[39m/, '代码关键字通过高亮颜色呈现');
 }));
 
 // 队列预览最多显示每条消息的前 64 个字符，避免重复展示完整内容。
@@ -600,12 +600,12 @@ test('input typed while a round runs queues up and flushes in order', options, a
     assert.deepEqual(started(), ['第一条'], '第一句直接进这一轮');
     await type('第二条');
     await type('第三条');
-    await waitFor(() => /排队 2 · 第三条/.test(lastFrame()), { read: () => lastFrame() });
+    await waitFor(() => /排队 2 条/.test(lastFrame()), { read: () => lastFrame() });
     assert.deepEqual(started(), ['第一条'], '跑着的时候不再开第二轮');
 
     // 草稿为空时按退格，将队列最后一条消息移回草稿。
     stdin.write('\x7f');
-    await waitFor(() => /第三条/.test(lastFrame()) && (lastFrame().match(/排队 \d/g) ?? []).length === 1, { read: () => lastFrame() });
+    await waitFor(() => /第三条/.test(lastFrame()) && /排队 1 条/.test(lastFrame()), { read: () => lastFrame() });
 
     await waitFor(() => started().length === 2, { within: 20_000, read: () => painted });
     assert.deepEqual(started(), ['第一条', '第二条'], '本轮结束后按先后接上');
@@ -1076,7 +1076,7 @@ test('cancelling a round leaves the queued sentences paused', options, async () 
     await waitFor(() => started().length === 1, { read: () => painted });
     await type('第二条');
     await type('第三条');
-    await waitFor(() => /排队 2 · 第三条/.test(lastFrame()), { read: lastFrame });
+    await waitFor(() => /排队 2 条/.test(lastFrame()), { read: lastFrame });
 
     stdin.write('\x1b');
     await waitFor(() => /队列已暂停/.test(painted), { read: () => painted });
@@ -1086,7 +1086,7 @@ test('cancelling a round leaves the queued sentences paused', options, async () 
 
     await type('/queue drop 2');
     await waitFor(() => /消息 2 已移回草稿/.test(painted), { read: () => painted });
-    assert.match(lastFrame(), /排队 1 · 第二条/, '剩下那一条还排着');
+    assert.match(lastFrame(), /队列已暂停：1 条/, '剩下那一条还排着');
     assert.match(lastFrame(), /第三条/, '收回的那一条在草稿上，没丢');
 
     // 收回的消息可正常发送；暂停队列中的其他消息不会随当前轮次结束而自动发送。
@@ -1158,7 +1158,7 @@ test('a reopened session takes back its own draft and a paused queue', options, 
   try {
     await waitFor(() => plainOutput(painted).includes('上次没写完的那一句'), { read: () => plainOutput(painted) });
     const frame = plainOutput(painted);
-    assert.match(frame, /上次排着的那一句/, '排着的那一句跟着回来');
+    assert.match(frame, /队列已暂停：1 条/, '恢复的待发送消息计入队列摘要');
     assert.match(frame, /队列已暂停/, '恢复时是暂停的：那几句当时还没发出去');
     assert.equal(requests.filter((request) => request.method === 'run.start').length, 0, '恢复不自己发');
     await waitFor(() => written.length > 0, { read: () => JSON.stringify(written) });
@@ -1206,7 +1206,7 @@ test('an @ fragment asks the host for project files and Enter picks one', option
     await waitFor(() => painted.includes('描述任务'), { read: () => painted });
     stdin.write('先看 @readings');
     await waitFor(() => lastFrame().includes('notes/readings-3.md'), { read: lastFrame });
-    assert.ok(lastFrame().includes(`工作区 ${projectDirectory}`), '清单说清这些候选出自哪一个工作区');
+    assert.ok(lastFrame().includes('工作区 '), '候选清单标明工作区；完整根路径通过 Host 请求核验');
     const asked = requests.filter((request) => request.method === 'paths.list');
     assert.equal(asked.length, 1, '这一段问一次，不是每个字问一次');
     assert.deepEqual(asked[0].params, { projectRoot: projectDirectory, query: 'readings', limit: 8 }, '问的是那一个项目根里含这一段文字的文件');

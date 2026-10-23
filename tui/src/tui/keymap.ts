@@ -35,7 +35,7 @@ export type TerminalAction =
   | 'mark-up' | 'mark-down' | 'copy-selection' | 'view-close'
   | 'approval-cancel' | 'approve' | 'deny'
   | 'approval-up' | 'approval-down' | 'approval-page-up' | 'approval-page-down' | 'approval-top' | 'approval-bottom'
-  | 'question-back'
+  | 'question-back' | 'question-page-up' | 'question-page-down'
   | 'panel-up' | 'panel-down' | 'panel-page-up' | 'panel-page-down' | 'panel-left' | 'panel-right' | 'panel-select' | 'panel-close';
 
 export type Binding = { readonly spec: string; readonly view: KeyView; readonly label: string };
@@ -69,6 +69,7 @@ export const ENGLISH_LABELS: Record<TerminalAction, string> = {
   'approval-cancel': 'Cancel this turn', approve: 'Allow this call', deny: 'Deny this call',
   'approval-up': 'Scroll up a line', 'approval-down': 'Scroll down a line', 'approval-page-up': 'Previous page', 'approval-page-down': 'Next page',
   'approval-top': 'Go to start', 'approval-bottom': 'Go to end', 'question-back': 'Edit the previous answer when the draft is empty',
+  'question-page-up': 'Read the previous question page', 'question-page-down': 'Read the next question page',
 };
 
 export const KEYMAP: Readonly<Record<TerminalAction, Binding>> = {
@@ -155,6 +156,8 @@ export const KEYMAP: Readonly<Record<TerminalAction, Binding>> = {
 
   // 问题面板中 Enter 提交答案；草稿非空时保留左方向键的光标移动行为。
   'question-back': { spec: 'arrowleft', view: '提问', label: '草稿空着时回到上一题，把刚才写的答话放回草稿里改' },
+  'question-page-up': { spec: 'pageup', view: '提问', label: '向上翻阅问题与选项' },
+  'question-page-down': { spec: 'pagedown', view: '提问', label: '向下翻阅问题与选项' },
 };
 
 // 单独按下 `Control` 或 `Meta` 不构成有效快捷键。
