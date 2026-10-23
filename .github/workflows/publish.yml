@@ -218,10 +218,14 @@ jobs:
       - run: echo "npm publication is approved to proceed"
 
   verify:
-    name: verify the packed tarball by installing it
+    name: verify the packed tarball on ${{ matrix.os }}
     needs: [preflight, checks, registry-check, approval]
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v5
         with:
@@ -242,16 +246,23 @@ jobs:
       - name: install frozen workspace dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: build the host entry points for verification
-        run: pnpm run build
-
       - uses: actions/download-artifact@v4
         with:
           name: npm-tarball
           path: dist-tarball
 
-      - name: install the tarball into an empty consumer
-        run: pnpm --filter ligule run verify-install "$PWD/dist-tarball/ligule-${{ needs.preflight.outputs.version }}.tgz"
+      - name: install the shared tarball into an empty consumer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tarball = Join-Path $PWD 'dist-tarball/ligule-${{ needs.preflight.outputs.version }}.tgz'
+          $tarball = (Resolve-Path $tarball).Path
+          pnpm --filter ligule run verify-install "$tarball"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: install the shared tarball into an empty consumer
+        if: runner.os == 'Linux'
+        run: pnpm --filter ligule run verify-install "$(realpath dist-tarball/ligule-${{ needs.preflight.outputs.version }}.tgz)"
 
   npm:
     name: publish to npm
