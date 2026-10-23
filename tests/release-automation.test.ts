@@ -36,7 +36,7 @@ const CHANGELOG = `# 更新记录 / Changelog
 Initial public release.
 `;
 
-type WorkflowStep = { name?: string; run?: string; uses?: string; with?: Record<string, any> };
+type WorkflowStep = { name?: string; run?: string; uses?: string; shell?: string; with?: Record<string, any> };
 type WorkflowJob = {
   steps: WorkflowStep[];
   strategy: any;
