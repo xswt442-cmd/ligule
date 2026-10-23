@@ -818,8 +818,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   }, [caret, client, draft, hiddenMention, info.boundary]);
   const [sessionPicker, setSessionPicker] = useState<SessionPickerState | null>(null);
   useEffect(() => {
+    pickerRequest.current += 1;
     if (ask !== null || query !== null) setSessionPicker(null);
-  }, [ask, query]);
+  }, [ask, query, sessionId]);
   const [approvalExpanded, setApprovalExpanded] = useState(false);
   const [approvalCursor, setApprovalCursor] = useState(0);
 
@@ -1329,6 +1330,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   }, [client, controlSnapshot, controlTarget, info.boundary, modes, push, sessionId, t]);
 
   const runCommand = useCallback((name: string, argument = '') => {
+    pickerRequest.current += 1;
     if (name === 'mcp') {
       const [action = 'list', serverName = '', scopeText = ''] = argument.trim().split(/\s+/, 3);
       const scopes: readonly McpTrustScope[] = ['session', 'project', 'user'];
@@ -1595,9 +1597,12 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     if (name === 'sessions') {
+      const token = pickerRequest.current;
+      const own = sessionId;
       void (async () => {
         // 会话列表由 Host 扫描，TUI 不直接访问记录目录。
         const listed = await client.request('sessions.list', { projectRoot: info.boundary }).catch((error: unknown) => requestFailure(error, 'session_list_failed'));
+        if (!alive.current || activeSession.current !== own || pickerRequest.current !== token) return;
         if ('code' in listed) {
           push({ kind: 'error', text: t(`无法读取会话列表：${listed.code}`, `Could not list sessions: ${listed.code}`) });
           return;
