@@ -1,40 +1,46 @@
-# 终端客户端
+# Terminal client
 
-本目录使用 React 与 Ink，通过内存载体连接同进程中的 Host。仓库根 [AGENTS.md](../AGENTS.md) 同时适用。
+This directory contains the React and Ink terminal client. It connects to the Host in the same process over an in-memory transport. The repository root [Agent guide](../AGENTS.md) also applies here.
 
-## 职责与入口
+## Responsibilities and entry points
 
-- `start.ts` 启动 Host 和 Ink，接入输入历史、草稿、队列、快捷键、编辑器与终端标题；退出等待文件写入并释放 Host。
-- `app.ts` 维护前台会话和交互视图。会话、模型、工具、审批、提问和导出通过 Host 协议操作，界面不能直接执行工具或读取会话文件。
-- 一个终端只有一个前台会话；新建、恢复和分支切换时释放上一会话的记录锁。多个终端可并行，不能同时写同一会话。
-- Ink 与 React 为可选依赖，缺失报告 `tui_dependency_missing`；非交互终端报告 `tui_terminal_required`，其他命令仍可使用。
-- CLI 在装载项目配置和资源前调用 `trust.ts` 确认当前目录；`trust-store.ts` 只记住经过归一的准确目录，拒绝确认时不创建 Host 或会话。`/trust revoke` 撤销信任并退出，信任不改变 Policy 或路径边界。
+- `start.ts` starts the Host and Ink, and connects input history, drafts, queues, shortcuts, the editor, and the terminal title. On exit, it waits for file writes and releases the Host.
+- `app.ts` manages the foreground session and interactive view. Session, model, tool, approval, question, and export operations go through the Host protocol; the UI does not execute tools or read session files directly.
+- A terminal has one foreground session. Creating, resuming, or branching a session releases the previous session's record lock. Multiple terminals may run concurrently, but they cannot write to the same session at the same time.
+- Ink and React are optional dependencies. If they are missing, report `tui_dependency_missing`; if the terminal is non-interactive, report `tui_terminal_required`. Other commands remain available.
+- Before loading project configuration and resources, the CLI uses `trust.ts` to ask whether to trust the current directory. `trust-store.ts` remembers only that exact normalized directory. Declining trust must not create a Host or session. `/trust revoke` revokes trust and exits; trust does not change Policy or path boundaries.
 
-## 转录与输入
+## Transcript and input
 
-- 已提交内容使用 `Static`，以会话编号作为 key。切换编号与替换记录行必须在同一次渲染完成，避免按索引漏画。主屏保留终端回滚；Ctrl+O 打开完整历史浏览器，分页、选行、复制由 `viewport.ts` 管理。
-- 会话记录是事实来源。流式片段在对应记录到达时替换；轮次终态只显示一次。取消或失败后清理未提交的流式内容。
-- Markdown 使用 `marked`，代码使用 `highlight.js`，显示宽度使用 `string-width`。模型正文、工具输出和路径原样展示，系统标签按 `locale` 选择中英文。
-- `commands.ts` 保存界面命令及补全元数据。未知斜杠命令原样交给 `run.start`，由 Host 处理提示模板。`/model` 读取公开服务清单并通过 `model.select` 修改会话选择，运行中轮后采用。
-- `keymap.ts` 是动作、按键和帮助提示的共同来源。个人覆盖必须经过格式与同视图冲突校验；界面提示使用实际生效绑定。
-- 欢迎区与转录共用一个 `Static`。`help.ts` 提供分类帮助数据，`panels.ts` 在输入区上方显示可分页的帮助和选择列表；面板打开时草稿不接收普通输入，关闭后保留草稿。面板输入监听保持挂接，避免显示后首个按键丢失。
-- 输入区下方显示模型、工具模式和审批入口。Ctrl+P、Ctrl+T、Ctrl+A 为默认绑定；`mode-options.ts` 由启动侧枚举模式文件，选择仍通过 `mode.set` 校验。`/credentials` 只读取当前服务的引用及凭据来源，不显示密钥。
-- 整段粘贴通过 Ink 的 paste 通道进入草稿，换行不能发送消息，粘贴的 `y` 不能批准工具。Ctrl+Z/Ctrl+Y 管理本次草稿的撤销与重做；替换整个草稿时清理撤销状态。
-- `@` 只列项目文件并插入路径引用，不调用工具或写会话记录。请求延迟 160 毫秒；迟到结果不能覆盖新片段。候选未返回时 Enter/Tab 不发送。
+- Render committed content with `Static`, keyed by session ID. Update the session ID and transcript rows in the same render so rows are not skipped by index. Keep the main screen in terminal scrollback; Ctrl+O opens the full history browser, whose paging, row selection, and copying are managed by `viewport.ts`.
+- Session records are the source of truth. Replace streamed fragments when their corresponding records arrive, and show each terminal turn state once. Clear uncommitted streamed content after cancellation or failure.
+- Use `marked` for Markdown, `highlight.js` for code, and `string-width` for display width. Show model text, tool output, and paths unchanged; select system labels in Chinese or English through `locale`.
+- `commands.ts` holds UI commands and completion metadata. Pass unknown slash commands unchanged to `run.start`; the Host handles prompt templates. `/model` reads the public service list and changes the session selection through `model.select`; a change during a run takes effect after the turn.
+- `keymap.ts` is the shared source for actions, keys, and help. Validate personal overrides for format and conflicts within the same view; show the effective key binding in the UI.
+- The welcome area and transcript share one `Static`. `help.ts` provides categorized help data, and `panels.ts` shows pageable help and selection lists above the input. While a panel is open, ordinary input does not enter the draft; closing it preserves the draft. Keep the panel input listener attached so it does not lose the first key after appearing.
+- Show the model, tool mode, and approval controls below the input. Ctrl+P, Ctrl+T, and Ctrl+A are the defaults. The startup code enumerates mode files through `mode-options.ts`, and `mode.set` still validates the selection. `/credentials` reads only the current service's credential reference and source; it never displays a secret.
+- Route whole-buffer pastes through Ink's paste channel into the draft. Newlines in a paste must not send a message, and a pasted `y` must not approve a tool. Ctrl+Z/Ctrl+Y undo and redo the current draft; replacing the entire draft clears its undo history.
+- `@` lists project files and inserts path references without calling tools or writing session records. Debounce file-list requests by 160 milliseconds; late results must not replace a newer query. Enter and Tab must not send while candidates have not returned.
 
-## 等待、队列与保存
+## Waiting, queues, and saving
 
-- 审批只显示当前会话的操作和实际修改内容，不编造未读过的原文件；允许一次、拒绝和取消分别处理。完整修改可分页查看。
-- 提问按题目逐项输入，数字只对应明确的选项，其他文字为自由回答；空回车表示未回答，最后提交整组答案。没有回答超时；取消终结当前等待。
-- 运行中的新消息按会话排队。取消暂停队列，`/queue continue` 才继续；收回或清空队列将文本移回草稿，不丢弃输入。
-- 输入历史由两端共享；草稿和队列由本端独立保存，恢复的队列保持暂停。存储位置由启动侧的数据根设施确定，界面不写死用户目录。
-- 正常退出先保存当前草稿与队列，再释放 Host；`/quit` 本身不作为未发送草稿恢复。保存失败时保留界面并说明原因。
-- Ctrl+G 使用 `$VISUAL`，其次 `$EDITOR`，并通过 Ink 让出终端；`/copy` 使用平台剪贴板设施。本版完整验收范围为本机 Windows。
-- `/export` 将用户指定的绝对目标交给 Host；相对路径按启动目录解析。逐份显示写入、跳过或失败结果，不能把部分成功说成全部失败。
-- 终端标题使用实际模型、工作区与会话编号，并过滤控制字符。退出清空标题，不能因输出失败阻碍 Host 释放。
+- Approval views show only the current session's operation and actual changes; do not invent details from an unread file. Handle allow-once, refusal, and cancellation separately. Page through complete change details when needed.
+- Collect answers one question at a time. Numbers select only explicit options; other text is a free-form answer. An empty Enter means no answer. Submit the complete answer set at the end. Questions do not time out; cancellation ends the wait.
+- Queue new messages by session while a run is active. Cancellation pauses the queue; `/queue continue` resumes it. Recalling or clearing queued messages returns their text to the draft without losing input.
+- Input history is shared by both clients; drafts and queues are saved separately by each client, and restored queues remain paused. The startup data-root facilities determine storage locations; the UI must not hard-code a user directory.
+- On normal exit, save the current draft and queue before releasing the Host. Do not restore `/quit` as an unsent draft. If saving fails, keep the UI open and explain the error.
+- Ctrl+G uses `$VISUAL`, then `$EDITOR`, and yields the terminal through Ink. `/copy` uses the platform clipboard facility. Full acceptance for this release covers local Windows only.
+- `/export` passes the user's absolute target path to the Host; relative paths are resolved from the startup directory. Show the write, skip, or failure result for each file, and do not report partial success as total failure.
+- Set the terminal title from the actual model, workspace, and session ID, filtering control characters. Clear the title on exit; a title-output failure must not prevent Host cleanup.
 
-## 验证
+## Verification
 
-运行 `npm run build`，再运行 `node --test --import ./test/hooks/isolated-data-root.mjs test/tui.test.js test/tui-browse.test.js test/tui-keys.test.js test/tui-output.test.js`。依赖渲染的检查等待完成帧与实际状态；修改界面文案时同步检查判据，不能靠延长等待掩盖错误。
+From `tui/`, run `npm run build`, then run:
 
-真实终端另验模型请求、取消与暂停队列、历史浏览、输入法、粘贴、编辑器和剪贴板。合成输入通过不能代替真人键盘、屏幕阅读器或其他平台的验收。
+```sh
+node --test --import ../test/hooks/isolated-data-root.mjs test/tui.test.js test/tui-browse.test.js test/tui-keys.test.js test/tui-output.test.js
+```
+
+Rendering checks must wait for a completed frame and the expected state. When changing UI wording, update the corresponding assertions; do not hide an incorrect result by extending the wait.
+
+Also verify model requests, cancellation and paused queues, history browsing, input methods, pasting, the editor, and clipboard behavior in a real terminal. Synthetic input does not replace checks with a real keyboard, screen reader, or other platforms.

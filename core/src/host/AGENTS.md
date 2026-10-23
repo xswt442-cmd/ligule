@@ -26,4 +26,4 @@ The repository [Agent guide](../../../AGENTS.md) applies here. The Host owns cli
 
 ## Verification
 
-Run `npm test`. Host changes should also cover the real Host dispatch path in `test/host.test.js` and `test/host-bootstrap.test.js`; do not validate protocol behavior only with a mock dispatcher.
+From `core/`, run `npm test` for the Core module suite. From the repository root, run `pnpm test` to include the Host dispatch integration tests in `tests/host.test.js` and `tests/host-bootstrap.test.js`. Verify protocol behavior through the real Host dispatch path, not only with a mock dispatcher.
