@@ -1,0 +1,90 @@
+import { createElement as h } from 'react';
+import type { ReactElement } from 'react';
+import { Box, Text } from 'ink';
+import { textOf, type Locale } from '@ligule/core/kernel/locale.js';
+import { displayWidth } from './commands.js';
+import { keyHint } from './keymap.js';
+import { TUI_COLORS } from './ui-style.js';
+
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+function fit(text: string, columns: number): string {
+  if (displayWidth(text) <= columns) return text;
+  let shown = '';
+  for (const { segment } of graphemes.segment(text)) {
+    if (displayWidth(shown + segment + '…') > columns) break;
+    shown += segment;
+  }
+  return columns <= 0 ? '' : `${shown}…`;
+}
+
+export function Welcome({ version, boundary, columns, locale }: {
+  readonly version: string; readonly boundary?: string; readonly columns: number; readonly locale: Locale;
+}): ReactElement {
+  return h(Box, { flexDirection: 'column', paddingX: 1, marginBottom: 1, width: columns },
+    h(Text, null, h(Text, { color: TUI_COLORS.accent }, '❧ '), h(Text, { bold: true }, 'ligule'), h(Text, { color: TUI_COLORS.muted }, `  v${version}`)),
+    h(Text, { color: TUI_COLORS.muted, wrap: 'truncate-middle' }, boundary ?? ''),
+    h(Text, { wrap: 'truncate-end' }, textOf(locale,
+      columns >= 64 ? '欢迎使用 Ligule  /help 命令与快捷键  /resume 恢复会话' : '欢迎使用 Ligule  /help 查看命令',
+      columns >= 64 ? 'Welcome to Ligule  /help commands and keys  /resume sessions' : 'Welcome to Ligule  /help commands')));
+}
+
+export interface ConfigurationProps {
+  readonly model: string;
+  readonly mode: string;
+  readonly policy: string;
+  readonly external?: boolean;
+  readonly columns: number;
+  readonly locale: Locale;
+}
+
+export function configurationText({ model, mode, policy, external = false, columns, locale }: ConfigurationProps): string {
+  if (external) return fit(textOf(locale, `外控模型 ${model}`, `External model ${model}`), columns);
+  const approval = policy === 'never' ? textOf(locale, '旧 never，需迁移', 'legacy never; migrate')
+    : policy === 'none' ? textOf(locale, '不受审批', 'none')
+      : policy === 'auto' ? textOf(locale, '自动判定', 'auto') : textOf(locale, '逐次审批', 'ask');
+  const policyText = textOf(locale, `审批 ${approval}`, `Approval ${approval}`);
+  const modeText = textOf(locale, `工具模式 ${mode}`, `Tools ${mode}`);
+  const modelText = columns >= 60 ? textOf(locale, `模型 ${model}`, `Model ${model}`) : model;
+  const modelKey = columns >= 72 ? ` ${keyHint('model-picker')}` : '';
+  let parts = [modelText + modelKey, modeText, policyText];
+  if (displayWidth(parts.join('  ·  ')) > columns) {
+    const remaining = Math.max(0, columns - displayWidth(policyText) - 10);
+    const compactMode = fit(mode, Math.min(24, Math.floor(remaining / 2)));
+    const compactModel = fit(modelText, Math.max(0, remaining - displayWidth(compactMode)));
+    parts = [compactModel, compactMode, policyText].filter(Boolean);
+  }
+  return fit(parts.join('  ·  '), columns);
+}
+
+export function ConfigurationLine(props: ConfigurationProps): ReactElement {
+  return h(Text, { color: TUI_COLORS.muted, wrap: 'truncate-end' }, configurationText(props));
+}
+
+export interface ProgressSnapshot {
+  readonly phase: 'preparing' | 'model_request' | 'tool_execution' | 'compaction' | 'awaiting_approval' | 'awaiting_input' | 'settling';
+  readonly lastProgressAt: number;
+}
+
+export function ProgressLine({ progress, seconds, marker, columns, locale, now = Date.now() }: {
+  readonly progress?: ProgressSnapshot | null; readonly seconds: number; readonly marker: string;
+  readonly columns: number; readonly locale: Locale; readonly now?: number;
+}): ReactElement {
+  const phase = progress === undefined || progress === null ? textOf(locale, '正在运行', 'Working') : {
+    preparing: textOf(locale, '准备上下文', 'Preparing context'),
+    model_request: textOf(locale, '请求模型', 'Requesting model'),
+    tool_execution: textOf(locale, '执行工具', 'Running tools'),
+    compaction: textOf(locale, '压缩上下文', 'Compacting context'),
+    awaiting_approval: textOf(locale, '等待审批', 'Waiting for approval'),
+    awaiting_input: textOf(locale, '等待回答', 'Waiting for an answer'),
+    settling: textOf(locale, '正在收尾', 'Finishing'),
+  }[progress.phase];
+  const elapsed = `${Math.max(0, Math.floor(seconds))}s`;
+  const interrupt = textOf(locale, `${keyHint('interrupt')} 取消`, `${keyHint('interrupt')} stop`);
+  const idle = progress === undefined || progress === null ? 0 : Math.max(0, Math.floor((now - progress.lastProgressAt) / 1000));
+  const detail = idle >= 15 && columns >= 80 ? textOf(locale, `  ·  ${idle}s 无新活动`, `  ·  ${idle}s since activity`) : '';
+  const label = `${marker} ${phase}  ${elapsed}  ·  ${interrupt}${detail}`;
+  const compact = `${marker} ${elapsed}  ${interrupt}`;
+  return h(Text, { wrap: 'truncate-end' },
+    h(Text, { color: TUI_COLORS.accent }, displayWidth(label) <= columns ? label : compact));
+}
