@@ -281,6 +281,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
         commandArgument: typeof tool.commandArgument === 'string' ? tool.commandArgument : undefined,
         // 工具可提供实际能力名称；MCP 工具用它传递 `mcp:<服务器>/<工具>` 身份。
         capability: typeof tool.capability === 'function' ? tool.capability : undefined,
+        policyIdentity: tool.policyIdentity,
         preflight: tool.preflight,
         run: tool.run,
       };
