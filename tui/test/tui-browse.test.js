@@ -9,16 +9,17 @@ import { render } from 'ink';
 import { completeFrame } from './helpers/frames.js';
 import { App } from '../dist/tui/app.js';
 import { UI_COMMANDS } from '../dist/tui/commands.js';
+import { readInput, rememberInput } from '../dist/tui/input-store.js';
 import { measuredPermissionContext, waitFor, withTuiHost } from './helpers/tui-host.ts';
 
-async function withApp(context, run, { columns = 80, rows = 24 } = {}) {
+async function withApp(context, run, { columns = 80, rows = 24, inputs } = {}) {
   const stdout = Object.assign(new PassThrough(), { columns, rows, isTTY: true });
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref() {}, unref() {} });
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
   const frame = () => completeFrame(painted);
   const output = () => painted.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
-  const instance = render(createElement(App, { client: context.client, sessionId: context.sessionId, stdout, info: { boundary: context.config.boundary } }), { stdout, stdin, patchConsole: false, exitOnCtrlC: false, interactive: true });
+  const instance = render(createElement(App, { client: context.client, sessionId: context.sessionId, stdout, inputs, info: { boundary: context.config.boundary } }), { stdout, stdin, patchConsole: false, exitOnCtrlC: false, interactive: true });
   const wait = (condition) => waitFor(condition, { read: frame });
   const type = async (text) => { stdin.write(text); await delay(50); stdin.write('\r'); };
   try {
@@ -135,33 +136,109 @@ test('question PageDown advances the first whole page and PageUp restores it wit
   }, { columns: 50, rows: 14 }), { interactive: true });
 });
 
-test('a Host question suspends the grant wizard and receives its own answer', async () => {
-  await withTuiHost(async context => withApp(context, async ({ frame, stdin, type, wait }) => {
-    await type('/control create');
-    await wait(() => frame().includes('授权名称'));
-    const execution = context.client.request('run.start', { sessionId: context.sessionId, input: JSON.stringify({
-      tool: 'ask_user_question', args: { questions: JSON.stringify([{ question: '请回答当前问题' }]) },
-    }) });
-    execution.catch(() => undefined);
-    try {
-      await wait(() => frame().includes('等待回答 1/1'));
-      assert.ok(!frame().includes('创建外控授权'), frame());
-      assert.ok(frame().includes('输入回答'), frame());
-      await type('真实问答答案');
-      await execution;
-      const read = await context.client.request('session.read', { sessionId: context.sessionId });
-      assert.ok(JSON.stringify(read.events).includes('真实问答答案'));
-      assert.ok(!context.requests.some(request => request.method === 'agent-control.create'));
-      await wait(() => frame().includes('授权名称'));
-      await type('cancel');
-      await wait(() => !frame().includes('创建外控授权'));
-    } finally {
-      await context.client.request('run.cancel', { sessionId: context.sessionId }).catch(error => {
-        if (error.code !== 'run_not_running') throw error;
-      });
-      await execution.catch(() => undefined);
-    }
-  }), { interactive: true });
+for (const source of ['grant wizard', 'ordinary composer']) {
+  for (const finish of ['answer', 'cancel', 'exit']) {
+    test(`a Host question isolates a partial ${source} draft and preserves it through ${finish}`, async () => {
+      await withTuiHost(async context => {
+        const inputFile = join(context.directory, 'question-input.jsonl');
+        const writes = [];
+        const inputs = {
+          read: (root, id) => readInput(inputFile, root, id),
+          write: async (root, id, text, queued) => {
+            await rememberInput(inputFile, { projectRoot: root, sessionId: id, draft: text, queued });
+            writes.push(text);
+          },
+        };
+        await withApp(context, async ({ frame, stdin, type }) => {
+          const wait = condition => waitFor(condition, { within: 5000, read: frame });
+          if (source === 'grant wizard') {
+            await type('/control create');
+            await wait(() => frame().includes('授权名称'));
+          }
+          stdin.write('keepAB');
+          await wait(() => frame().includes('› keepAB'));
+          stdin.write('\x1b[D');
+          await delay(40);
+          const execution = context.client.request('run.start', { sessionId: context.sessionId, input: JSON.stringify({
+            tool: 'ask_user_question', args: { questions: JSON.stringify([{ question: '请回答当前问题' }]) },
+          }) });
+          execution.catch(() => undefined);
+          try {
+            await wait(() => frame().includes('等待回答 1/1'));
+            assert.ok(!frame().includes('创建外控授权'), frame());
+            assert.ok(frame().includes('输入回答'), frame());
+            assert.ok(!frame().includes('keepAB'), frame());
+            stdin.write('真实问答答案');
+            await wait(() => frame().includes('› 真实问答答案'));
+            await wait(() => writes.includes('keepAB'));
+            assert.equal((await readInput(inputFile, context.projectDirectory, context.sessionId)).draft, 'keepAB');
+            if (finish === 'exit') {
+              const saved = writes.length;
+              stdin.write('\x03');
+              await wait(() => writes.length > saved);
+              assert.equal((await readInput(inputFile, context.projectDirectory, context.sessionId)).draft, 'keepAB');
+              return;
+            }
+            if (finish === 'answer') stdin.write('\r');
+            else await context.client.request('run.cancel', { sessionId: context.sessionId });
+            if (finish === 'answer') await execution;
+            else await assert.rejects(execution, error => error.code === 'loop_cancelled');
+            const read = await context.client.request('session.read', { sessionId: context.sessionId });
+            if (finish === 'answer') assert.ok(JSON.stringify(read.events).includes('真实问答答案'));
+            else assert.ok(read.events.some(event => event.result?.code === 'ask_user_cancelled'));
+            assert.ok(!JSON.stringify(read.events).includes('keepAB'));
+            assert.ok(!context.requests.some(request => request.method === 'agent-control.create'));
+            await wait(() => frame().includes('› keepAB'));
+            stdin.write('X');
+            await wait(() => frame().includes('› keepAXB'));
+          } finally {
+            await context.client.request('run.cancel', { sessionId: context.sessionId }).catch(error => {
+              if (error.code !== 'run_not_running') throw error;
+            });
+            await execution.catch(() => undefined);
+          }
+        }, { inputs });
+      }, { interactive: true });
+    });
+  }
+}
+
+test('queue recovery during a question preserves the ordinary draft and leaves the answer separate', async () => {
+  await withTuiHost(async context => {
+    const inputFile = join(context.directory, 'queue-question.jsonl');
+    await rememberInput(inputFile, { projectRoot: context.projectDirectory, sessionId: context.sessionId, draft: 'kept-task', queued: ['queued-task'] });
+    const inputs = {
+      read: (root, id) => readInput(inputFile, root, id),
+      write: (root, id, text, queued) => rememberInput(inputFile, { projectRoot: root, sessionId: id, draft: text, queued }),
+    };
+    await withApp(context, async ({ frame, output, stdin, type }) => {
+      const wait = condition => waitFor(condition, { within: 5000, read: frame });
+      await wait(() => frame().includes('› kept-task') && frame().includes('队列已暂停：1 条'));
+      const execution = context.client.request('run.start', { sessionId: context.sessionId, input: JSON.stringify({
+        tool: 'ask_user_question', args: { questions: JSON.stringify([{ question: '确认继续？' }]) },
+      }) });
+      execution.catch(() => undefined);
+      try {
+        await wait(() => frame().includes('等待回答 1/1'));
+        stdin.write('\x7f');
+        await delay(60);
+        assert.ok(!frame().includes('queued-task'), frame());
+        await type('/queue drop 1');
+        await wait(() => output().includes('消息 1 已移回草稿'));
+        assert.ok(!frame().includes('queued-task'), frame());
+        await type('yes');
+        await execution;
+        await wait(() => frame().includes('kept-task') && frame().includes('queued-task'));
+        const read = await context.client.request('session.read', { sessionId: context.sessionId });
+        assert.ok(!JSON.stringify(read.events).includes('queued-task'));
+      } finally {
+        await context.client.request('run.cancel', { sessionId: context.sessionId }).catch(error => {
+          if (error.code !== 'run_not_running') throw error;
+        });
+        await execution.catch(() => undefined);
+      }
+    }, { inputs });
+  }, { interactive: true });
 });
 
 test('permission completion leaves the existing explicit confirmation intact', async () => {

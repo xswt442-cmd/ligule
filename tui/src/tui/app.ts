@@ -2,7 +2,7 @@
 // 协议帧由 `core/src/host/connection.ts` 处理；此处不直接读写帧。
 // 纯函数和命令表从此模块导出，供自动检查和界面复用。
 import { resolve } from 'node:path';
-import { createElement as h, Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createElement as h, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Box, Static, Text, useApp, useInput, usePaste } from 'ink';
 import { SESSION_ROWS, answerOf, candidatesOf, describeChange, findLines, findUiCommand, insertMention, localizedCommand, mentionToken, resolveSessionId, routeInput, sessionLines } from './commands.js';
 import { pushHistory } from '@ligule/core/kernel/input-history.js';
@@ -318,6 +318,10 @@ interface UndoState {
   before: DraftState;
 }
 
+function freshUndo(draft = ''): UndoState {
+  return { stack: [], future: [], kind: null, before: { draft, caret: draft.length } };
+}
+
 function isEditorText(outcome: EditorOutcome): outcome is { readonly text: string } {
   return 'text' in outcome && typeof outcome.text === 'string';
 }
@@ -595,6 +599,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [ask, setAsk] = useState<AskState | null>(null);
   // 一个提问请求包含一至四道题；逐题填写，最后一题提交后统一发送答复。
   const [query, setQuery] = useState<QuestionState | null>(null);
+  const activeQuestion = useRef(query?.id);
+  activeQuestion.current = query?.id;
   const [running, setRunning] = useState(false);
   const [tick, setTick] = useState(0);
   const [seconds, setSeconds] = useState(0);
@@ -615,12 +621,27 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const pickerRequest = useRef(0);
   const sessionNavigation = useRef({ generation: 0, activeToken: 0 });
   const sessionNavigationMounted = useRef(false);
-  const [draft, setDraft] = useState('');
-  const [caret, setCaret] = useState(0);
+  const [ordinaryDraft, setOrdinaryDraft] = useState('');
+  const [ordinaryCaret, setOrdinaryCaret] = useState(0);
+  const [answerDraft, setAnswerDraft] = useState('');
+  const [answerCaret, setAnswerCaret] = useState(0);
+  const [answerOwner, setAnswerOwner] = useState<string | null>(null);
+  const draft = query === null ? ordinaryDraft : answerOwner === query.id ? answerDraft : '';
+  const caret = query === null ? ordinaryCaret : answerOwner === query.id ? answerCaret : 0;
+  const setDraft = query === null ? setOrdinaryDraft : setAnswerDraft;
+  const setCaret = query === null ? setOrdinaryCaret : setAnswerCaret;
+  useLayoutEffect(() => {
+    if (query === null) return;
+    setAnswerOwner(query.id);
+    setAnswerDraft('');
+    setAnswerCaret(0);
+  }, [query?.id, sessionId]);
   // 撤销栈保存每次编辑前的草稿和光标位置；Ctrl+Z 撤销，Ctrl+Y 重做。
   // 撤销记录只保存在当前进程；草稿本身通过持久化输入状态跨退出保存。
   // 撤销和重做各保留最近 100 个状态。
-  const undo = useRef<UndoState>({ stack: [], future: [], kind: null, before: { draft: '', caret: 0 } });
+  const ordinaryUndo = useRef<UndoState>(freshUndo());
+  const answerUndo = useMemo(() => ({ current: freshUndo() }), [query?.id, sessionId]);
+  const undo = query === null ? ordinaryUndo : answerUndo;
   useEffect(() => {
     const cell = undo.current;
     const current = { draft, caret };
@@ -632,18 +653,21 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     if (run && cell.kind === 'insert') return;
     cell.stack = [...cell.stack.slice(-99), previous];
     cell.kind = run ? 'insert' : 'text';
-  }, [draft, caret]);
+  }, [draft, caret, undo]);
   // 用于替换整份草稿并清空撤销栈，避免撤销到其他会话的输入。
-  const resetDraft = useCallback((text: string) => {
+  const resetOrdinaryDraft = useCallback((text: string) => {
     const normalized = text.replace(/\r\n?/g, '\n');
-    const cell = undo.current;
-    cell.stack = [];
-    cell.future = [];
-    cell.kind = null;
-    cell.before = { draft: normalized, caret: normalized.length };
-    setDraft(normalized);
-    setCaret(normalized.length);
+    ordinaryUndo.current = freshUndo(normalized);
+    setOrdinaryDraft(normalized);
+    setOrdinaryCaret(normalized.length);
   }, []);
+  const resetDraft = useCallback((text: string) => {
+    if (query === null) { resetOrdinaryDraft(text); return; }
+    const normalized = text.replace(/\r\n?/g, '\n');
+    answerUndo.current = freshUndo(normalized);
+    setAnswerDraft(normalized);
+    setAnswerCaret(normalized.length);
+  }, [query?.id, answerUndo, resetOrdinaryDraft]);
   // 输入历史跨会话保存，不写入会话记录。最新输入位于列表前端，方向键向下浏览更早内容。
   const [entries, setEntries] = useState(history.entries);
   const [historyAt, setHistoryAt] = useState(-1);
@@ -699,47 +723,49 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const viewedSession = useRef(sessionId);
   useEffect(() => {
     if (viewedSession.current === sessionId) return;
-    inputState.current.set(viewedSession.current, { queue, queuePaused, draft });
+    inputState.current.set(viewedSession.current, { queue, queuePaused, draft: ordinaryDraft });
     const saved = inputState.current.get(sessionId);
     setQueue(saved?.queue ?? []);
     setQueuePaused(saved?.queuePaused ?? false);
-    resetDraft(saved?.draft ?? '');
+    resetOrdinaryDraft(saved?.draft ?? '');
     viewedSession.current = sessionId;
-  }, [draft, queue, queuePaused, sessionId]);
+  }, [ordinaryDraft, queue, queuePaused, resetOrdinaryDraft, sessionId]);
 
   // 退出前将未发送草稿和队列持久化到本地输入状态文件，并按会话恢复。
   // 每份会话只在首次恢复时读取；响应返回前若已切换会话则丢弃，避免覆盖其他会话草稿。
   const inputNow = useRef({ draft: '', queue: [] as string[] });
-  inputNow.current = { draft, queue };
+  inputNow.current = { draft: ordinaryDraft, queue };
+  const [loadedInputSession, setLoadedInputSession] = useState<string | null>(null);
   useEffect(() => {
     if (inputs === undefined) return;
     const own = sessionId;
     const root = info.boundary ?? '';
-    if (inputState.current.has(own)) return;
+    if (inputState.current.has(own)) { setLoadedInputSession(own); return; }
     void (async () => {
       const saved = await inputs.read(root, own);
       if (viewedSession.current !== own) return;
       inputState.current.set(own, { queue: saved.queued, queuePaused: saved.queued.length > 0, draft: saved.draft });
+      setLoadedInputSession(own);
       // 恢复期间若用户已输入新内容，保留新输入，不用旧草稿覆盖。
-      if (saved.draft !== '' && inputNow.current.draft === '') resetDraft(saved.draft);
+      if (saved.draft !== '' && inputNow.current.draft === '') resetOrdinaryDraft(saved.draft);
       // 恢复后的队列保持暂停，避免重启后自动发送用户尚未确认的消息。
       if (saved.queued.length > 0 && inputNow.current.queue.length === 0) {
         setQueue(saved.queued);
         setQueuePaused(true);
       }
     })().catch(() => inputState.current.delete(own));
-  }, [info.boundary, inputs, sessionId]);
+  }, [info.boundary, inputs, resetOrdinaryDraft, sessionId]);
 
   // 输入停止 400 毫秒后保存，减少连续输入期间的磁盘写入，同时保留退出前的最新草稿。
   useEffect(() => {
-    if (inputs === undefined || !inputState.current.has(sessionId)) return;
+    if (inputs === undefined || loadedInputSession !== sessionId) return;
     const own = sessionId;
     const root = info.boundary ?? '';
     const timer = setTimeout(() => {
-      void inputs.write(root, own, draft, queue).catch(() => push({ kind: 'error', text: t('无法保存草稿和队列，请复制后再退出', 'Could not save draft and queue; copy your input before exiting') }));
+      void inputs.write(root, own, ordinaryDraft, queue).catch(() => push({ kind: 'error', text: t('无法保存草稿和队列，请复制后再退出', 'Could not save draft and queue; copy your input before exiting') }));
     }, 400);
     return () => clearTimeout(timer);
-  }, [draft, info.boundary, inputs, push, queue, sessionId, t]);
+  }, [ordinaryDraft, info.boundary, inputs, loadedInputSession, push, queue, sessionId, t]);
 
   // `@` 候选查询在输入停止 160 毫秒后发送；查询期间文本变化时忽略旧响应。
   // 传输层不支持中途取消，因此通过丢弃过期结果避免更新界面。
@@ -816,7 +842,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       if (message.notify === 'event') {
         if (!isSessionEvent(message.event)) return;
         const event = message.event;
-        if (event.kind === 'turn') terminalReceived.current = true;
+        if (event.kind === 'turn') {
+          terminalReceived.current = true;
+          setAsk(null);
+          setQuery(null);
+        }
         // 持久化事件到达后，以记录事件替换流式占位内容。
         if (event.kind === 'assistant') setLive((current) => ({ ...current, text: '' }));
         if (event.kind === 'reasoning') setLive((current) => ({ ...current, reasoning: '' }));
@@ -1150,11 +1180,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
 
   const exitTui = useCallback((savedDraft = inputNow.current.draft) => {
     if (inputs === undefined) { app.exit(); return; }
-    void inputs.write(info.boundary ?? '', sessionId, savedDraft, inputNow.current.queue).then(
+    void inputs.write(info.boundary ?? '', sessionId, query === null ? savedDraft : inputNow.current.draft, inputNow.current.queue).then(
       () => app.exit(),
       () => push({ kind: 'error', text: t('无法保存草稿和队列，请复制后重试退出', 'Could not save draft and queue; copy your input and retry exiting') }),
     );
-  }, [app, inputs, info.boundary, sessionId, push, t]);
+  }, [app, inputs, info.boundary, sessionId, query?.id, push, t]);
 
   const openPicker = useCallback((kind: PickerKind, requestedControlTarget = controlTarget) => {
     const token = ++pickerRequest.current;
@@ -1981,10 +2011,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           push({ kind: 'error', text: t(`队列编号无效，当前有 ${queue.length} 条消息`, `Invalid queue index; ${queue.length} messages queued`) });
           return;
         }
-        const recovered = queue[at];
+        const recovered = [activeQuestion.current === undefined ? '' : inputNow.current.draft, queue[at]].filter(Boolean).join('\n\n');
         setQueue((current) => current.filter((_, index) => index !== at));
-        setDraft(recovered);
-        setCaret(recovered.length);
+        resetOrdinaryDraft(recovered);
         push({ kind: 'meta', text: t(`消息 ${at + 1} 已移回草稿`, `Message ${at + 1} moved back to draft`) });
         return;
       }
@@ -1993,11 +2022,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           push({ kind: 'meta', text: t('队列为空', 'Queue is empty') });
           return;
         }
-        const recovered = queue.join('\n\n');
+        const recovered = [activeQuestion.current === undefined ? '' : inputNow.current.draft, ...queue].filter(Boolean).join('\n\n');
         setQueue([]);
         setQueuePaused(false);
-        setDraft(recovered);
-        setCaret(recovered.length);
+        resetOrdinaryDraft(recovered);
         push({ kind: 'meta', text: t(`已将 ${queue.length} 条消息移回草稿`, `Moved ${queue.length} messages back to draft`) });
         return;
       }
@@ -2254,7 +2282,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     push({ kind: 'error', text: t(`未知命令：/${name}（/help 查看）`, `Unknown command: /${name} (/help to browse)`) });
-  }, [app, beginSessionNavigation, changePermission, client, closeUnadoptedSession, externalControl, finishSessionNavigation, info, keyOverrides, keys, locale, mcpTrustPending, push, queue, queuePaused, refreshStatus, sessionId, sessionNavigationIsCurrent, status, stdout, t, trust, openPicker, exitTui]);
+  }, [app, beginSessionNavigation, changePermission, client, closeUnadoptedSession, externalControl, finishSessionNavigation, info, keyOverrides, keys, locale, mcpTrustPending, push, queue, queuePaused, refreshStatus, resetOrdinaryDraft, sessionId, sessionNavigationIsCurrent, status, stdout, t, trust, openPicker, exitTui]);
 
   const chooseOption = useCallback((id: string) => {
     const choice = choices.find(item => item.id === id);
@@ -2601,7 +2629,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     void submit(route.text);
-  }, [advanceControlWizard, answerQuery, controlWizard, loadApprovalDetails, locale, push, query, remember, runCommand, running, submit, t]);
+  }, [advanceControlWizard, answerQuery, controlWizard, loadApprovalDetails, locale, push, query, remember, resetDraft, runCommand, running, submit, t]);
 
   // 轮次结束后每次发送一条队列消息；取消后队列保持暂停，需用户明确继续。
   useEffect(() => {
@@ -2832,6 +2860,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         return;
       }
       const editor = info.editor;
+      const editorSession = sessionId;
+      const editorQuestion = query?.id;
       void (async () => {
         let outcome: EditorOutcome = { code: 'tui_editor_failed', detail: 'external editor failed' };
         await app.suspendTerminal(async () => {
@@ -2841,6 +2871,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           push({ kind: 'error', text: t(`外部编辑失败：${outcome.code}`, `External editor failed: ${outcome.code}`) });
           return;
         }
+        if (!alive.current || activeSession.current !== editorSession || editorQuestion !== undefined && activeQuestion.current !== editorQuestion) return;
         const normalized = outcome.text.replace(/\r\n?/g, '\n');
         setDraft(normalized);
         setCaret(normalized.length);
@@ -2971,7 +3002,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       setCaret(target.caret);
       return;
     }
-    if ((hit('queue-recall', input, key) || hit('queue-recall-alt', input, key)) && draft === '' && queue.length > 0) {
+    if (query === null && (hit('queue-recall', input, key) || hit('queue-recall-alt', input, key)) && draft === '' && queue.length > 0) {
       // 草稿为空时按退格，将队列最后一条收回草稿供修改。
       setQueue((current) => current.slice(0, -1));
       const last = queue[queue.length - 1];
