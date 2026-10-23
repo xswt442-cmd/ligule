@@ -742,6 +742,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [detail, setDetail] = useState<DetailState | null>(null);
   // 斜杠命令候选的当前选择索引；候选内容始终从草稿重新计算。
   const [pick, setPick] = useState(0);
+  useEffect(() => { setPick(0); }, [draft]);
   // 记住按 Esc 关闭候选时的草稿；输入变化后重新显示候选。
   const [dismissedAt, setDismissedAt] = useState<string | null>(null);
   // 运行期间通过 Enter 提交的消息先排在界面队列中，不立即写入会话记录。
@@ -2542,6 +2543,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const templates = status?.templates ?? [];
   const picks = panel !== null || dismissedAt === draft || search !== null || detail !== null || sessionPicker !== null || ask !== null || query !== null ? [] : candidatesOf(draft, templates, undefined, locale);
   const chosen = picks.length === 0 ? 0 : Math.min(pick, picks.length - 1);
+  const candidateHeight = Math.max(1, Math.min(CANDIDATE_ROWS, geometry.rows - 12));
   const searched = search === null ? [] : searchHistory(entries, search.query);
   const viewLines = useMemo(() => detail === null ? [] : transcriptLines(detail.rows, Math.max(1, geometry.columns - 6), locale), [detail?.rows, geometry.columns, locale]);
   const viewHeight = Math.max(1, geometry.rows - 12 - (ask === null ? 0 : 7));
@@ -3005,10 +3007,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
             h(Text, { inverse: index === search.at }, ` ${queuedLine(entry, 60)}`))),
       h(Text, { dimColor: true }, t(`  继续输入以筛选 · ${keyHint('search-cycle', 'search-up', 'search-down')} 选择 · ${keyHint('search-pick')} 恢复草稿 · ${keyHint('search-close')} 退出`, `  Type to filter · ${keyHint('search-cycle', 'search-up', 'search-down')} select · ${keyHint('search-pick')} restore draft · ${keyHint('search-close')} close`))),
     picks.length === 0 ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'gray', paddingX: 1 },
-      picks.slice(Math.max(0, chosen - CANDIDATE_ROWS + 1), Math.max(0, chosen - CANDIDATE_ROWS + 1) + CANDIDATE_ROWS).map((candidate) => h(Box, { key: `${candidate.source}:${candidate.name}` },
+      picks.slice(Math.max(0, chosen - candidateHeight + 1), Math.max(0, chosen - candidateHeight + 1) + candidateHeight).map((candidate) => h(Text, { key: `${candidate.source}:${candidate.name}`, wrap: 'truncate-end' },
         h(Text, { inverse: candidate === picks[chosen] }, ` /${candidate.name}${candidate.hint === '' ? '' : ` ${candidate.hint}`}`),
         h(Text, { dimColor: true }, ` ${candidate.text}`))),
-      picks.length > CANDIDATE_ROWS ? h(Text, { dimColor: true }, t(`  还有 ${picks.length - CANDIDATE_ROWS} 条，继续输入以筛选`, `  ${picks.length - CANDIDATE_ROWS} more; type to filter`)) : null,
+      h(Text, { dimColor: true }, t(`  ${chosen + 1}/${picks.length} · 继续输入名称或说明以筛选`, `  ${chosen + 1}/${picks.length} · type a name or description to filter`)),
       h(Text, { dimColor: true }, t(` ${keyHint('complete')} 补全 · ${keyHint('complete-up', 'complete-down')} 选择 · ${keyHint('complete-close')} 收起`, ` ${keyHint('complete')} complete · ${keyHint('complete-up', 'complete-down')} select · ${keyHint('complete-close')} close`))),
     mention === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', borderColor: 'gray', paddingX: 1 },
       h(Text, { dimColor: true, wrap: 'truncate-end' }, t(` 工作区 ${info.boundary}`, ` Workspace ${info.boundary}`)),

@@ -8,6 +8,7 @@ import { createElement } from 'react';
 import { render } from 'ink';
 import { completeFrame } from './helpers/frames.js';
 import { App } from '../dist/tui/app.js';
+import { UI_COMMANDS } from '../dist/tui/commands.js';
 import { measuredPermissionContext, waitFor, withTuiHost } from './helpers/tui-host.ts';
 
 async function withApp(context, run) {
@@ -27,6 +28,35 @@ async function withApp(context, run) {
     instance.unmount();
   }
 }
+
+test('slash discovery scrolls the whole command list and completes without sending', async () => {
+  await withTuiHost(async (context) => withApp(context, async ({ frame, stdin, wait }) => {
+    stdin.write('/');
+    await wait(() => frame().includes(`1/${UI_COMMANDS.length}`));
+    stdin.write('\x1b[A');
+    await wait(() => frame().includes(`${UI_COMMANDS.length}/${UI_COMMANDS.length}`) && frame().includes('/quit'));
+    stdin.write('\t');
+    await wait(() => frame().includes('› /quit'));
+    assert.equal(context.providerRequests.length, 0);
+    assert.ok(frame().split('\n').length <= 24);
+  }));
+});
+
+test('permission completion leaves the existing explicit confirmation intact', async () => {
+  await withTuiHost(async (context) => withApp(context, async ({ frame, stdin, wait }) => {
+    stdin.write('/permission network u');
+    await wait(() => frame().includes('/permission network unrestricted'));
+    stdin.write('\t');
+    await wait(() => frame().includes('› /permission network unrestricted'));
+    assert.ok(!context.requests.some(request => request.method === 'permission.set'));
+    stdin.write('\r');
+    await wait(() => frame().includes('确认不受限网络'));
+    stdin.write('\x1b');
+    await wait(() => !frame().includes('确认不受限网络'));
+    assert.ok(!context.requests.some(request => request.method === 'permission.set'));
+    assert.equal(context.providerRequests.length, 0);
+  }), { permissionControl: true });
+});
 
 test('complete history opens in a bounded viewport and keyboard navigation reaches both ends', async () => {
   await withTuiHost(async (context) => withApp(context, async ({ frame, output, stdin, type, wait }) => {

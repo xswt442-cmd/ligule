@@ -384,13 +384,12 @@ test('the TUI shows the MCP program before trusting it and starts it only after 
   });
 });
 
-// 命令补全先列出界面命令，再列出 Host 提供的模板，并按输入前缀筛选。
+// 命令补全按名称和说明筛选，名称前缀优先，参数候选只插入草稿。
 test('the candidate list narrows on what is typed and appends host templates', options, () => {
   const templates = [{ command: 'git:release:prepare', description: '准备一次发布', hint: '<序号>' }];
   assert.deepEqual(candidatesOf('读一下', templates), []);
-  // 只输入斜杠时不显示候选，避免列出整张命令表。
-  assert.deepEqual(candidatesOf('/', templates), []);
-  // 开始输入参数后关闭候选列表。
+  assert.equal(candidatesOf('/', templates).length, UI_COMMANDS.length + 1);
+  // 动态模式名仍由模式选择面板提供。
   assert.deepEqual(candidatesOf('/mode ', templates), []);
   const [only] = candidatesOf('/mo', templates);
   assert.deepEqual([only.name, only.hint, only.source], ['mode', '[名字]', 'ui']);
@@ -398,8 +397,14 @@ test('the candidate list narrows on what is typed and appends host templates', o
     candidatesOf('/git', templates).map((c) => [c.name, c.source, c.text]),
     [['git:release:prepare', 'template', '准备一次发布']],
   );
-  // 限制候选行数，避免短前缀显示过多结果。
-  assert.ok(candidatesOf('/', [{ command: 'a' }, { command: 'b' }]).length <= 8);
+  assert.equal(candidatesOf('/', templates, 8).length, 8);
+  assert.ok(candidatesOf('/恢复').some(command => command.name === 'resume'));
+  assert.ok(candidatesOf('/credentials', [], undefined, 'en').some(command => command.name === 'credentials'));
+  assert.deepEqual(candidatesOf('/policy a').map(command => command.name), ['policy ask', 'policy auto']);
+  assert.deepEqual(candidatesOf('/permission network d').map(command => command.name), ['permission network disabled']);
+  assert.deepEqual(candidatesOf('/queue drop 2'), []);
+  assert.deepEqual(candidatesOf('/git:release:prepare ', templates), []);
+  assert.equal(candidatesOf('/', [{ command: 'help', description: 'shadowed' }]).filter(command => command.name === 'help').length, 1);
 });
 
 // 帮助条目按终端宽度排版，空间不足时整体换行，不截断文本。

@@ -158,34 +158,56 @@ export function routeInput(text: string, running: boolean): InputRoute {
   return { kind: 'command', name: command.name, argument: matched[2] ?? '' };
 }
 
-const CANDIDATE_LIMIT = 8;
+const ARGUMENTS: Readonly<Record<string, readonly string[]>> = {
+  policy: ['ask', 'auto', 'none', 'reset'],
+  permission: ['read-only', 'workspace-write', 'full-access', 'network'],
+  'permission network': ['policy', 'disabled', 'unrestricted'],
+  queue: ['pause', 'continue', 'drop', 'clear'],
+  mcp: ['list', 'trust', 'confirm', 'revoke', 'tools'],
+  trust: ['revoke'],
+  control: ['list', 'create', 'revoke', 'copy'],
+  bind: ['reset', 'default'],
+};
 
-// 仅在用户输入命令名称时显示候选；出现空格后按参数输入处理。
+// 候选只插入草稿；执行和危险选项的确认仍经过原来的命令处理。
 export function candidatesOf(
   draft: string,
   templates: readonly TemplateCommand[] = [],
-  limit = CANDIDATE_LIMIT,
+  limit = Infinity,
   locale: Locale = 'zh',
 ): Candidate[] {
   if (!draft.startsWith('/')) return [];
   const typed = draft.slice(1);
-  if (typed === '' || /\s/.test(typed)) return [];
+  if (/\s/.test(typed)) {
+    const split = typed.lastIndexOf(' ');
+    const head = typed.slice(0, split).toLowerCase();
+    const argument = typed.slice(split + 1).toLowerCase();
+    const command = findUiCommand(head.split(' ')[0]);
+    if (command === undefined) return [];
+    return (ARGUMENTS[head] ?? []).filter(value => value.startsWith(argument)).map(value => ({
+      name: `${head} ${value}`, text: localizedCommand(command, locale).text, hint: '', source: 'ui' as const,
+    })).slice(0, limit);
+  }
   const prefix = typed.toLowerCase();
-  const fromUi = UI_COMMANDS.filter((command) => command.name.startsWith(prefix)).map(command => localizedCommand(command, locale)).map((command) => ({
+  const fromUi = UI_COMMANDS.map(command => localizedCommand(command, locale)).map((command) => ({
     name: command.name,
     text: command.text,
     hint: command.hint,
     source: 'ui' as const,
   }));
   const fromTemplates = templates
-    .filter((template) => template.command.toLowerCase().startsWith(prefix))
+    .filter(template => findUiCommand(template.command) === undefined)
     .map((template) => ({
       name: template.command,
       text: template.description ?? '',
       hint: template.hint ?? '',
       source: 'template' as const,
     }));
-  return [...fromUi, ...fromTemplates].slice(0, limit);
+  const rank = (candidate: Candidate) => candidate.name.toLowerCase().startsWith(prefix) ? 0 : 1;
+  return [...fromUi, ...fromTemplates]
+    .filter(candidate => candidate.name.toLowerCase().includes(prefix) || candidate.text.toLowerCase().includes(prefix))
+    .sort((left, right) => rank(left) - rank(right))
+    .slice(0, limit);
 }
 
 // 按终端显示列宽对齐表格，正确处理全角和中日韩字符的双列宽度。

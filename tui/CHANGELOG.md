@@ -8,7 +8,15 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ### 简体中文
 
+**改进**
+
+- 终端界面输入 `/` 即可浏览全部命令，按名称或说明筛选并滚动选择；固定命令参数支持 Tab 补全，补全仅修改草稿，权限升级仍需确认。
+
 ### English
+
+**Improved**
+
+- Typing `/` in the terminal UI browses all commands with name or description filtering and scrollable selection. Fixed command arguments support Tab completion, which only edits the draft; permission upgrades still require confirmation.
 
 ## [0.0.6] - 2026-10-22
 
