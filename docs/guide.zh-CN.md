@@ -54,6 +54,8 @@ npm install -g ligule
 
 用户数据根默认为 `~/.ligule`。设置绝对路径环境变量 `LIGULE_HOME` 可以更换数据根；相对路径会报 `data_root_invalid`。用户配置在 `~/.ligule/config.toml`，项目共享配置在 `.ligule/config.toml`，项目本地配置在 `.ligule/config.local.toml`。工作区会话记录、工作区登记、终端输入历史、桌面偏好和密钥引用也由用户数据根管理。旧会话仍可从原全局 `sessions/` 和项目 `.ligule/sessions/` 中只读浏览；打开旧会话时才会将记录及附属文件复制到新的工作区目录，原件保留。桌面偏好、草稿和待发送队列保存在数据根的 `desktop.json`；WebView 的 `ligule.ui` 只作首屏缓存。终端界面与桌面界面的草稿和队列分别保存。
 
+搜索默认使用随包提供的 ripgrep。自定义 `ripgrepPath` 会选择可执行程序，只能在用户配置或命令行 `--config` 中设置；项目共享配置和项目本地配置声明该字段时会报 `search_backend_source_untrusted`。将自定义路径移至用户配置，或删除该字段以使用随包后端。
+
 ### 配置模型服务
 
 桌面版打开「设置」中的「模型服务」即可新增多套服务与模型，并选择默认项。终端界面和命令行读取同一份配置。手动配置多套服务时，在配置文件中填写：

@@ -116,6 +116,12 @@ test('所有中英文配对文档包含相同的代码标识符', () => {
   }
 });
 
+test('the npm package guide copies match the maintained user guides', () => {
+  for (const name of ['guide.en.md', 'guide.zh-CN.md']) {
+    assert.equal(readFileSync(join(repoRoot, 'tui', 'docs', name), 'utf8'), readFileSync(join(repoRoot, 'docs', name), 'utf8'), name);
+  }
+});
+
 test('双语手册的多服务 TOML 示例相同且符合实际配置格式', () => {
   const zh = tomlExample(readFileSync(zhPath, 'utf8'));
   const en = tomlExample(readFileSync(enPath, 'utf8'));

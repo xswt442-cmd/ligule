@@ -54,6 +54,8 @@ Each session belongs to one workspace. The terminal UI prepares a new session wh
 
 The default data root is `~/.ligule`. Set `LIGULE_HOME` to an absolute path to move it; a relative path returns `data_root_invalid`. User configuration is in `~/.ligule/config.toml`, shared project configuration is in `.ligule/config.toml`, and local project configuration is in `.ligule/config.local.toml`. The data root also holds workspace-scoped session records, the workspace registry, terminal input history, desktop preferences, and credential references. Older sessions remain discoverable in the former shared `sessions/` directory and project `.ligule/sessions/`; listing them is read-only, and opening one copies its record and sidecars into the new workspace folder while preserving the originals. Desktop preferences, drafts, and queued messages are stored in `desktop.json` under the data root. WebView's `ligule.ui` value is a first-screen cache. Drafts and queues are separate between the terminal UI and desktop app.
 
+Search uses the bundled ripgrep by default. A custom `ripgrepPath` selects executable code and can only be set in user configuration or command-line `--config` flags. Declaring it in shared or local project configuration fails with `search_backend_source_untrusted`. Move the custom path to user configuration, or remove the field to use the bundled backend.
+
 ### Configure a model service
 
 In the desktop app, open “Model services” under “Settings” to add multiple services and models, then choose a default. The terminal UI and command line read the same configuration. To configure multiple services manually, add this block to a configuration file:
