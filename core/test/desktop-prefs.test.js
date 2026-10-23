@@ -40,13 +40,14 @@ async function assertNoWriteArtifacts(directory) {
   assert.equal(entries.some((name) => name.endsWith('.lock')), false, '保存结束后不留锁目录');
 }
 
-function startWindowsFileHolder({ path, root, holdMilliseconds }) {
+function startWindowsFileHolder({ path, root, holdMilliseconds, releasePath }) {
   const fixture = join(process.cwd(), 'test', 'fixtures', 'prefs-holder.ps1');
   const readyPath = join(root, 'holder-ready');
   const args = [
     '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', fixture,
     '-Path', path, '-ReadyPath', readyPath, '-HoldMilliseconds', String(holdMilliseconds),
   ];
+  if (releasePath !== undefined) args.push('-ReleasePath', releasePath);
 
   const child = spawn('powershell.exe', args, { cwd: process.cwd(), stdio: ['ignore', 'ignore', 'pipe'] });
   const holder = { child, exit: null, stderr: '' };
@@ -64,6 +65,21 @@ function startWindowsFileHolder({ path, root, holdMilliseconds }) {
   holder.exited = exited;
   holder.readyPath = readyPath;
   return holder;
+}
+
+async function releaseWindowsFileHolder(holder, releasePath) {
+  if (holder.exit !== null) return holder.exit;
+  const killTimer = setTimeout(() => holder.child.kill(), 5_000);
+  try {
+    try {
+      await writeFile(releasePath, 'release', 'utf8');
+    } catch {
+      holder.child.kill();
+    }
+    return await holder.exited;
+  } finally {
+    clearTimeout(killTimer);
+  }
 }
 
 async function waitForHolderMarker(holder, markerPath) {
@@ -225,10 +241,11 @@ windowsTest('desktop preferences: a brief Windows file handle allows the save to
 windowsTest('desktop preferences: a sustained Windows file handle preserves the original and permits retry', async () => {
   const root = await makeDirectory();
   const path = join(root, 'desktop.json');
+  const releasePath = join(root, 'holder-release');
   const initialValue = { owner: 'initial' };
   const initial = await savePrefs(path, initialValue);
   const initialBytes = await readFile(path);
-  const holder = startWindowsFileHolder({ path, root, holdMilliseconds: 6_500 });
+  const holder = startWindowsFileHolder({ path, root, holdMilliseconds: 0, releasePath });
   try {
     await waitForHolderMarker(holder, holder.readyPath);
     let saveError;
@@ -245,7 +262,7 @@ windowsTest('desktop preferences: a sustained Windows file handle preserves the 
     assert.deepEqual(await readPrefs(path), initial);
     await assertNoWriteArtifacts(root);
 
-    const exit = await holder.exited;
+    const exit = await releaseWindowsFileHolder(holder, releasePath);
     assert.deepEqual(exit, { code: 0, signal: null }, holder.stderr);
     const current = await readPrefs(path);
     const retry = await savePrefs(path, { owner: 'saved after releasing holder' }, { version: current.version });
@@ -253,10 +270,7 @@ windowsTest('desktop preferences: a sustained Windows file handle preserves the 
     assert.deepEqual(await readPrefs(path), retry);
     await assertNoWriteArtifacts(root);
   } finally {
-    if (holder.exit === null) {
-      holder.child.kill();
-      await holder.exited;
-    }
+    await releaseWindowsFileHolder(holder, releasePath);
     await rm(root, { recursive: true, force: true });
   }
 });
