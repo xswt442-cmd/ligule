@@ -10,6 +10,20 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ### English
 
+## [0.0.8] - 2026-10-23
+
+### 简体中文
+
+**修复**
+
+- CLI 安装包仅内置私有 Core 的代码与资源，外部运行依赖由 npm 为当前系统安装，确保同一发行包在 Windows 和 Linux 加载对应的搜索与原生绑定。
+
+### English
+
+**Fixed**
+
+- The CLI tarball bundles the private Core code and resources, while npm installs external runtime dependencies for the consumer's system. The same release artifact loads the matching search backend and native bindings on Windows and Linux.
+
 ## [0.0.7] - 2026-10-23
 
 ### 简体中文

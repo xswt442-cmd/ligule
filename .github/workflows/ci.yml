@@ -127,7 +127,7 @@ jobs:
         run: pnpm test
 
   cli-package:
-    name: CLI package and clean consumer
+    name: build CLI package artifact
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -148,8 +148,51 @@ jobs:
           pnpm run build
       - name: check the packed artifact
         run: pnpm --filter ligule run check-pack
-      - name: install the packed artifact into an empty consumer
-        run: pnpm --filter ligule run verify-install
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ligule-cli-tarball-${{ github.run_id }}
+          path: testplace/pack/*.tgz
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
+
+  cli-consumer:
+    name: CLI clean consumer on ${{ matrix.os }}
+    needs: cli-package
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - name: install verifier dependencies
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: ligule-cli-tarball-${{ github.run_id }}
+          path: dist-tarball
+      - name: install the shared tarball into an empty consumer
+        shell: pwsh
+        if: runner.os == 'Windows'
+        run: |
+          $tarball = (Resolve-Path (Join-Path $PWD 'dist-tarball/*.tgz')).Path
+          pnpm --filter ligule run verify-install "$tarball"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: install the shared tarball into an empty consumer
+        if: runner.os == 'Linux'
+        run: pnpm --filter ligule run verify-install "$(realpath dist-tarball/*.tgz)"
 
   desktop:
     name: Electron desktop on ${{ matrix.id }}

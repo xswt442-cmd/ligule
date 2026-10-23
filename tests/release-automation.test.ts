@@ -36,7 +36,7 @@ const CHANGELOG = `# 更新记录 / Changelog
 Initial public release.
 `;
 
-type WorkflowStep = { name?: string; run?: string; uses?: string; with?: Record<string, any> };
+type WorkflowStep = { name?: string; run?: string; uses?: string; shell?: string; with?: Record<string, any> };
 type WorkflowJob = {
   steps: WorkflowStep[];
   strategy: any;
@@ -419,6 +419,16 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
   assert.ok(JSON.stringify(publish).includes('pnpm install --frozen-lockfile'));
   assert.ok(JSON.stringify(publish.jobs.npm).includes('npm publish --provenance --access public'));
   assert.ok(publish.jobs.checks.steps.some((step) => step.run?.includes('pnpm --filter ligule run pack-release dist-tarball')));
+  const releaseVerify = publish.jobs.verify;
+  assert.deepEqual(releaseVerify.strategy.matrix.os, ['ubuntu-latest', 'windows-latest']);
+  assert.equal(releaseVerify.needs.includes('checks'), true);
+  assert.ok(publish.jobs.checks.steps.some((step) => step.uses === 'actions/upload-artifact@v4'
+    && step.with?.name === 'npm-tarball'));
+  assert.equal(releaseVerify.steps.filter((step) => step.uses === 'actions/download-artifact@v4')[0]?.with?.name, 'npm-tarball');
+  assert.ok(releaseVerify.steps.some((step) => step.run?.includes('verify-install') && step.run.includes('realpath')),
+    'Linux release verification must pass an absolute tarball path');
+  assert.ok(releaseVerify.steps.some((step) => step.shell === 'pwsh' && step.run?.includes('verify-install') && step.run.includes('Resolve-Path')),
+    'Windows release verification must pass a resolved absolute tarball path');
   for (const [label, steps] of [['CLI release', publish.jobs.checks.steps], ['shared CI', ci.jobs.test.steps]] as const) {
     const installBubblewrap = steps.findIndex((step) => step.name === 'install bubblewrap for Linux sandbox tests');
     const allowUserNamespaces = steps.findIndex((step) => step.name === 'allow bubblewrap user namespaces');
@@ -433,7 +443,19 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
     assert.match(probeCommand, /probeLinuxSandboxIsolation/);
     assert.match(probeCommand, /if \(!result\.available\)/);
   }
-  assert.ok(publish.jobs.verify.steps.some((step) => step.run?.startsWith('pnpm --filter ligule run verify-install ')));
+  assert.ok(ci.jobs['cli-package'].steps.some((step) => step.uses === 'actions/upload-artifact@v4'
+    && step.with?.name === 'ligule-cli-tarball-${{ github.run_id }}'
+    && step.with?.path === 'testplace/pack/*.tgz'
+    && step.with?.overwrite === true));
+  const ciConsumer = ci.jobs['cli-consumer'];
+  assert.deepEqual(ciConsumer.needs, 'cli-package');
+  assert.deepEqual(ciConsumer.strategy.matrix.os, ['ubuntu-latest', 'windows-latest']);
+  assert.equal(ciConsumer.steps.filter((step) => step.uses === 'actions/download-artifact@v4')[0]?.with?.name,
+    'ligule-cli-tarball-${{ github.run_id }}');
+  assert.ok(ciConsumer.steps.some((step) => step.run?.includes('verify-install') && step.run.includes('realpath')),
+    'Linux CI verification must pass an absolute tarball path');
+  assert.ok(ciConsumer.steps.some((step) => step.shell === 'pwsh' && step.run?.includes('verify-install') && step.run.includes('Resolve-Path')),
+    'Windows CI verification must pass a resolved absolute tarball path');
   assert.doesNotMatch(JSON.stringify(publish.jobs.npm), /pnpm|registry-version/,
     'the OIDC publication job consumes the already checked registry result and does not depend on an uninstalled helper');
   assert.equal(publish.jobs.npm.needs.includes('registry-check'), true);

@@ -9,7 +9,7 @@
     "build:tui": "pnpm --filter ligule run build",
     "test:core": "pnpm --filter @ligule/core run test",
     "test:tui": "pnpm --filter ligule run test",
-    "test:integration": "node --experimental-strip-types --test --import ./test/hooks/isolated-data-root.mjs tests/*.test.js tests/*.test.ts",
+    "test:integration": "node --experimental-strip-types --test --test-concurrency=1 --import ./test/hooks/isolated-data-root.mjs tests/*.test.js tests/*.test.ts",
     "test": "pnpm run build && pnpm run test:core && pnpm run test:tui && pnpm run test:integration",
     "check-pack": "pnpm --filter ligule run check-pack",
     "verify-install": "pnpm --filter ligule run verify-install",

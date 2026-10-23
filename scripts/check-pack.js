@@ -47,6 +47,15 @@ try {
   if (!existsSync(join(bundledCore, 'dist', 'host', 'control.js'))) {
     throw new Error(`${tarball} is missing the Host control module required by the MCP server`);
   }
+  const coreManifest = JSON.parse(readFileSync(join(bundledCore, 'package.json'), 'utf8'));
+  if (coreManifest.dependencies !== undefined || coreManifest.optionalDependencies !== undefined) {
+    throw new Error(`${tarball} must declare external Core dependencies in the public package manifest`);
+  }
+  for (const name of Object.keys({ ...pkg.dependencies, ...pkg.optionalDependencies })) {
+    if (name !== '@ligule/core' && existsSync(join(shipped, 'node_modules', name))) {
+      throw new Error(`${tarball} must install ${name} on the consumer instead of bundling its build-platform tree`);
+    }
+  }
   for (const testPath of ['test', 'tests', 'core/test', 'tui/test']) {
     if (existsSync(join(shipped, testPath))) throw new Error(`${tarball} must not contain test files: ${testPath}`);
   }
