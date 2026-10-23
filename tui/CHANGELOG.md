@@ -8,6 +8,12 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ### 简体中文
 
+### English
+
+## [0.0.7] - 2026-10-23
+
+### 简体中文
+
 **改进**
 
 - 终端界面输入 `/` 即可浏览全部命令，按名称或说明筛选并滚动选择；固定命令参数支持 Tab 补全，补全仅修改草稿，权限升级仍需确认。
