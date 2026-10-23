@@ -91,7 +91,7 @@ test('long questions page their complete options while keeping an answer editor 
 test('an approval with insufficient room ignores allow keys and paste while deny stays available', async () => {
   await withTuiHost(async (context) => {
     await writeFile(join(context.config.boundary, 'small-window.md'), 'read me');
-    await withApp(context, async ({ frame, stdin, type, wait }) => {
+    await withApp(context, async ({ frame, output, stdin, type, wait }) => {
       await type(JSON.stringify({ tool: 'read', args: { path: 'small-window.md' } }));
       await wait(() => frame().includes('请放大窗口后再审批'));
       stdin.write('y');
@@ -105,6 +105,7 @@ test('an approval with insufficient room ignores allow keys and paste while deny
       assert.ok(!pending.events.some(event => event.kind === 'sessionPolicyRule'));
       stdin.write('n');
       await wait(() => !frame().includes('请放大窗口后再审批'));
+      await wait(() => output().includes('本轮已完成'));
       const denied = await context.client.request('session.read', { sessionId: context.sessionId });
       assert.ok(denied.events.some(event => event.kind === 'tool' && event.result?.code === 'ask_declined'));
     }, { columns: 50, rows: 4 });
