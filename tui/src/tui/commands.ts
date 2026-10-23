@@ -183,10 +183,11 @@ export function candidatesOf(
     const head = typed.slice(0, split).toLowerCase();
     const argument = typed.slice(split + 1).toLowerCase();
     const command = findUiCommand(head.split(' ')[0]);
-    if (command === undefined) return [];
-    return (ARGUMENTS[head] ?? []).filter(value => value.startsWith(argument)).map(value => ({
-      name: `${head} ${value}`, text: localizedCommand(command, locale).text, hint: '', source: 'ui' as const,
-    })).slice(0, limit);
+    if (command !== undefined) {
+      return (ARGUMENTS[head] ?? []).filter(value => value.startsWith(argument)).map(value => ({
+        name: `${head} ${value}`, text: localizedCommand(command, locale).text, hint: '', source: 'ui' as const,
+      })).slice(0, limit);
+    }
   }
   const prefix = typed.toLowerCase();
   const fromUi = UI_COMMANDS.map(command => localizedCommand(command, locale)).map((command) => ({

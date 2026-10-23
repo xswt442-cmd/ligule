@@ -399,6 +399,8 @@ test('the candidate list narrows on what is typed and appends host templates', o
   );
   assert.equal(candidatesOf('/', templates, 8).length, 8);
   assert.ok(candidatesOf('/恢复').some(command => command.name === 'resume'));
+  assert.ok(candidatesOf('/approval mode', [], undefined, 'en').some(command => command.name === 'policy'));
+  assert.ok(candidatesOf('/tool mode', [], undefined, 'en').some(command => command.name === 'mode'));
   assert.ok(candidatesOf('/credentials', [], undefined, 'en').some(command => command.name === 'credentials'));
   assert.deepEqual(candidatesOf('/policy a').map(command => command.name), ['policy ask', 'policy auto']);
   assert.deepEqual(candidatesOf('/permission network d').map(command => command.name), ['permission network disabled']);
