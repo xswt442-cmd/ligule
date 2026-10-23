@@ -776,8 +776,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   }, [ask, query, sessionId]);
   const [approvalExpanded, setApprovalExpanded] = useState(false);
   const [approvalCursor, setApprovalCursor] = useState(0);
-  const [questionCursor, setQuestionCursor] = useState(0);
-  useEffect(() => setQuestionCursor(0), [query?.id, query?.at]);
+  const [questionOffset, setQuestionOffset] = useState(0);
+  useEffect(() => setQuestionOffset(0), [query?.id, query?.at]);
 
   const refreshStatus = useCallback(async () => {
     // Ink 已退出时不再向已关闭的连接发送状态更新。
@@ -2655,7 +2655,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   ].join('\n'), Math.max(1, geometry.columns - 3));
   const composerHeight = Math.max(1, Math.min(query === null ? 5 : 3, geometry.rows - 10));
   const questionHeight = Math.max(1, geometry.rows - composerHeight - 6);
-  const questionView = viewportPosition(questionCursor, questionLines.length, questionHeight);
+  const questionStart = Math.max(0, Math.min(questionOffset, Math.max(0, questionLines.length - questionHeight)));
   const controlPrompt = controlWizard === null ? null
     : controlWizard.step === 8
       ? t(`允许外控启动哪些已信任的 MCP Server？逗号分隔：${controlWizard.mcpServers.join(', ') || '无'}；输入 none 表示不允许。`, `Which trusted MCP servers may the controller start? Comma-separated: ${controlWizard.mcpServers.join(', ') || 'none'}; type none for no servers.`)
@@ -2788,7 +2788,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     }
     if (query !== null && detail === null && search === null
       && (hit('question-page-up', input, key) || hit('question-page-down', input, key))) {
-      setQuestionCursor(questionView.cursor + (hit('question-page-up', input, key) ? -questionHeight : questionHeight));
+      setQuestionOffset(Math.max(0, Math.min(
+        questionStart + (hit('question-page-up', input, key) ? -questionHeight : questionHeight),
+        Math.max(0, questionLines.length - questionHeight),
+      )));
       return;
     }
     // 草稿为空时，左方向键返回上一题并恢复原答案供修改。
@@ -3020,8 +3023,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     approvalLayout === null ? null : h(ApprovalPanel, { layout: approvalLayout, cursor: approvalCursor }),
     asking === null || query === null || ask !== null || panel !== null || detail !== null || sessionPicker !== null || search !== null ? null : h(PanelFrame, { tone: 'info', width: geometry.columns },
       h(Text, { bold: true }, t(`等待回答 ${query.at + 1}/${asking.count}`, `Waiting for your answer ${query.at + 1}/${asking.count}`)),
-      ...questionLines.slice(questionView.offset, questionView.offset + questionHeight).map((line, index) => h(Text, { key: questionView.offset + index, wrap: 'truncate-end' }, line)),
-      questionLines.length <= questionHeight ? null : h(Text, { color: TUI_COLORS.muted, wrap: 'truncate-end' }, `${questionView.cursor + 1}/${questionLines.length} · ${keyHint('question-page-up', 'question-page-down')}`),
+      ...questionLines.slice(questionStart, questionStart + questionHeight).map((line, index) => h(Text, { key: questionStart + index, wrap: 'truncate-end' }, line)),
+      questionLines.length <= questionHeight ? null : h(Text, { color: TUI_COLORS.muted, wrap: 'truncate-end' }, `${questionStart + 1}/${questionLines.length} · ${keyHint('question-page-up', 'question-page-down')}`),
       h(Text, { wrap: 'truncate-end' }, `${optionHint(asking.current, locale)} · ${asking.last ? t('Enter 提交', 'Enter to submit') : t('Enter 下一题', 'Enter for next question')}`),
       h(Text, { dimColor: true, wrap: 'truncate-end' }, t(`  ${asking.done.length > 0 ? `${keyHint('question-back')} 上一题 · ` : ''}${keyHint('interrupt')} 取消本轮 · 没有回答时限`, `  ${asking.done.length > 0 ? `${keyHint('question-back')} previous · ` : ''}${keyHint('interrupt')} cancel turn · no answer timeout`))),
     detail === null || ask !== null || panel !== null ? null : h(PanelFrame, { width: geometry.columns },

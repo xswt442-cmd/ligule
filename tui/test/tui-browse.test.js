@@ -112,6 +112,29 @@ test('an approval with insufficient room ignores allow keys and paste while deny
   });
 });
 
+test('question PageDown advances the first whole page and PageUp restores it without editing the answer', async () => {
+  await withTuiHost(async context => withApp(context, async ({ frame, stdin, type, wait }) => {
+    await type(JSON.stringify({ tool: 'ask_user_question', args: { questions: JSON.stringify([{
+      question: Array.from({ length: 12 }, (_, index) => `问题行${index}`).join('\n'),
+    }]) } }));
+    await wait(() => frame().includes('等待回答 1/1') && frame().includes('问题行4'));
+    stdin.write('答案草稿');
+    await wait(() => frame().includes('› 答案草稿'));
+    stdin.write('\x1b[6~');
+    await wait(() => frame().includes('6/12'));
+    assert.ok(frame().includes('问题行9'), frame());
+    assert.ok(!frame().includes('问题行4'), frame());
+    assert.ok(frame().includes('› 答案草稿'));
+    stdin.write('\x1b[5~');
+    await wait(() => frame().includes('1/12'));
+    assert.ok(frame().includes('问题行0') && frame().includes('问题行4'), frame());
+    assert.ok(!frame().includes('问题行5'), frame());
+    assert.ok(frame().includes('› 答案草稿'));
+    stdin.write('\x1b');
+    await wait(() => !frame().includes('等待回答'));
+  }, { columns: 50, rows: 14 }), { interactive: true });
+});
+
 test('permission completion leaves the existing explicit confirmation intact', async () => {
   await withTuiHost(async (context) => withApp(context, async ({ frame, stdin, wait }) => {
     stdin.write('/permission network u');
