@@ -66,9 +66,10 @@ export function SessionPicker({
   const selectedIndex = Math.max(0, filtered.findIndex((item) => item.id === selectedId));
   const selected = filtered[selectedIndex];
   const maxRows = Math.max(0, Math.floor(height));
-  const contentHeight = Math.max(0, maxRows - 2);
+  const contentHeight = maxRows === 0 ? 0 : maxRows <= 2 ? 1 : maxRows - 2;
   const start = Math.max(0, Math.min(selectedIndex, filtered.length - contentHeight));
   const visible = filtered.slice(start, start + contentHeight);
+  const selectedVisible = selected !== undefined && visible.some((item) => item.id === selected.id);
   const t = (zh: string, en: string) => textOf(locale, zh, en);
 
   useInput((input, key) => {
@@ -78,7 +79,7 @@ export function SessionPicker({
       return;
     }
     if (hit('list-open', input, key)) {
-      if (!running && selected !== undefined && selected.error === undefined) onSelect(selected.id);
+      if (!running && selectedVisible && selected.error === undefined) onSelect(selected.id);
       return;
     }
 
@@ -126,16 +127,18 @@ export function SessionPicker({
       : sessionDetail(selected, locale);
 
   const footer = [status, hint].filter((part): part is string => part !== undefined).join(' · ');
-  const heading = maxRows === 1 ? `${summary} · ${footer}` : summary;
 
   if (!active) return null;
   return createElement(Box, { flexDirection: 'column', width: Math.max(1, columns) },
-    ...(maxRows === 0 ? [] : [createElement(Text, { key: 'heading', wrap: 'truncate-end' }, heading)]),
+    ...(maxRows < 2 ? [] : [createElement(Text, { key: 'heading', wrap: 'truncate-end' }, summary)]),
     ...visible.map((item) => createElement(Text, {
       key: item.id,
       inverse: item.id === selected?.id,
       wrap: 'truncate-end',
     }, sessionLabel(item, locale, current))),
-    ...(maxRows > 1 ? [createElement(Text, { key: 'footer', dimColor: true, wrap: 'truncate-end' }, footer)] : []),
+    ...(maxRows > 0 && maxRows <= 2 && selected === undefined
+      ? [createElement(Text, { key: 'empty', dimColor: true, wrap: 'truncate-end' }, status ?? t('没有匹配的会话', 'No matching sessions'))]
+      : []),
+    ...(maxRows > 2 ? [createElement(Text, { key: 'footer', dimColor: true, wrap: 'truncate-end' }, footer)] : []),
   );
 }

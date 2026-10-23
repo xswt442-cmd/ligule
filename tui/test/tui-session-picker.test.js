@@ -188,7 +188,32 @@ test('SessionPicker respects narrow width and total panel height', async () => {
     const rows = tty.painted().split('\n').filter((line) => line !== '');
     assert.ok(rows.length <= 4, `expected at most four rendered rows, got ${rows.length}`);
     assert.ok(rows.every((line) => displayWidth(line) <= 24), rows.join('\n'));
+    assert.match(tty.painted(), /Release checklist 会话/, 'the selected session remains visible');
   } finally {
     instance.unmount();
+  }
+});
+
+test('SessionPicker only resumes a visible selection at heights zero, one, and two', async () => {
+  for (const height of [0, 1, 2]) {
+    const tty = terminal();
+    const selected = [];
+    const instance = tty.render(props({ height, onSelect: (id) => selected.push(id) }));
+    try {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 40));
+      const frame = tty.painted();
+      if (height === 0) {
+        assert.doesNotMatch(frame, /Release checklist/);
+      } else {
+        assert.match(frame, /Release checklist 会话 · 01abcdef/);
+        assert.equal(frame.includes('Search ·'), height === 2, 'height two spends one line on the heading');
+      }
+
+      tty.stdin.write('\r');
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 40));
+      assert.deepEqual(selected, height === 0 ? [] : [sessions[0].id], `height ${height}`);
+    } finally {
+      instance.unmount();
+    }
   }
 });
