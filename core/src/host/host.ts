@@ -11,7 +11,7 @@ import {
 } from '../delegation.js';
 import {
   assertDelegationMcpServer, assertDelegationMcpTool, assertDelegationPermission, assertDelegationPolicy, createDelegationGrant, delegationPathOf,
-  listDelegationGrants, recordDelegationEvent, requireDelegationGrant, revokeDelegationGrant,
+  listDelegationGrants, recordDelegationEvent, revokeDelegationGrant,
   type CreateDelegationGrantInput, type DelegationGrant,
 } from './agent-control.js';
 import { listMcpTrust, mcpServerTrust, mcpTrustPathOf, setMcpServerTrust, type McpTrustScope } from './mcp-trust.js';
@@ -28,7 +28,7 @@ import { isTrusted, setTrusted } from '../kernel/workspace-trust.js';
 import { historyPathOf, loadHistory, rememberHistory } from '../kernel/input-history.js';
 import { parsePrefsJson, prefsPathOf, readPrefs, savePrefs } from '../kernel/desktop-prefs.js';
 import { credentialStatus, deleteCredential, storeCredential } from '../kernel/credentials.js';
-import { modelServices, modelSelection, resolveModel, type ModelSelection, type ModelService } from '../kernel/model-services.js';
+import { modelServices, modelSelection, resolveModel, type ModelSelection } from '../kernel/model-services.js';
 import { createDecisionChain, isPolicyRule, policyArgsHash, type DecisionChain, type PolicyAskResult, type PolicyMode, type PolicyState, type PolicyThresholds } from '../kernel/policy.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
@@ -288,23 +288,6 @@ interface ExtensionPromptFragment {
 
 function requiredString(value: unknown, field: string): string {
   if (typeof value !== 'string') throw new KernelError('protocol_args_invalid', { detail: `${field} must be a string` });
-  return value;
-}
-
-function optionalString(value: unknown, field: string): string | undefined {
-  if (value === undefined) return undefined;
-  return requiredString(value, field);
-}
-
-function optionalNumber(value: unknown, field: string): number | undefined {
-  if (value === undefined) return undefined;
-  if (typeof value !== 'number') throw new KernelError('protocol_args_invalid', { detail: `${field} must be a number` });
-  return value;
-}
-
-function optionalBoolean(value: unknown, field: string): boolean | undefined {
-  if (value === undefined) return undefined;
-  if (typeof value !== 'boolean') throw new KernelError('protocol_args_invalid', { detail: `${field} must be a boolean` });
   return value;
 }
 
@@ -2162,7 +2145,7 @@ export function createHost({
     };
   }
 
-  async function configureSession(state: HostSessionState, params: HostMethodParams, connection: HostClientConnection): Promise<Record<string, unknown>> {
+  async function configureSession(state: HostSessionState, params: HostMethodParams): Promise<Record<string, unknown>> {
     const modeChanged = params.mode !== undefined;
     const policyChanged = params.policy !== undefined;
     const permissionChanged = params.permissionProfile !== undefined || params.permissionNetwork !== undefined;
@@ -2691,7 +2674,7 @@ export function createHost({
           const mode = requiredString(message.params.mode, 'mode');
           return await serializeSessionConfiguration(sessionId, async () => {
             const state = open(sessionId);
-            await configureSession(state, { policy: mode }, connection);
+            await configureSession(state, { policy: mode });
             return { policy: state.chain.mode, policySource: state.chain.modeSource, policyDefault: state.chain.configuredMode() };
           });
         }
@@ -2710,7 +2693,7 @@ export function createHost({
           const name = requiredString(message.params.name, 'name');
           return await serializeSessionConfiguration(sessionId, async () => {
             const state = open(sessionId);
-            await configureSession(state, { mode: name }, connection);
+            await configureSession(state, { mode: name });
             return {
               mode: state.mode.file?.name ?? null,
               layer: state.mode.file?.layer ?? null,
@@ -2775,7 +2758,7 @@ export function createHost({
           };
         }
         case 'session.configure': {
-          return await serializeSessionConfiguration(sessionId, () => configureSession(open(sessionId), message.params, connection));
+          return await serializeSessionConfiguration(sessionId, () => configureSession(open(sessionId), message.params));
         }
         case 'workspaces.list':
           // 返回持久工作区登记表及默认工作区身份，供客户端显示。
@@ -2808,7 +2791,7 @@ export function createHost({
           const selection = modelSelection({ provider: message.params.provider, model: message.params.model });
           return await serializeSessionConfiguration(sessionId, async () => {
             const state = open(sessionId);
-            await configureSession(state, { provider: selection.provider, model: selection.model }, connection);
+            await configureSession(state, { provider: selection.provider, model: selection.model });
             const generation = state.pendingGeneration ?? state.generation;
             return { model: generation.provider.model, serviceId: selection.provider, when: state.running === undefined ? 'now' : 'round' };
           });

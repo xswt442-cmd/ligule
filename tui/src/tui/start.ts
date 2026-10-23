@@ -10,7 +10,7 @@ import { createInteractivePermissionContext } from '@ligule/core/capability/perm
 import { App } from './app.js';
 import type { TuiClient } from './app.js';
 import type { Locale } from '@ligule/core/kernel/locale.js';
-import { flushHistory, historyPathOf, loadHistory, pushHistory, rememberHistory } from '@ligule/core/kernel/input-history.js';
+import { flushHistory, historyPathOf, loadHistory, rememberHistory } from '@ligule/core/kernel/input-history.js';
 import { flushInput, inputPathOf, readInput, rememberInput } from './input-store.js';
 import { flushKeys, keyPathOf, readKeys, writeKeys } from './key-store.js';
 import { titleEscape } from './output.js';

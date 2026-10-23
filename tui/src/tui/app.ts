@@ -4,7 +4,7 @@
 import { resolve } from 'node:path';
 import { createElement as h, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Box, Static, Text, useApp, useInput, usePaste } from 'ink';
-import { SESSION_ROWS, answerOf, candidatesOf, describeChange, findLines, findUiCommand, insertMention, localizedCommand, mentionToken, resolveSessionId, routeInput, sessionLines } from './commands.js';
+import { answerOf, candidatesOf, describeChange, findLines, findUiCommand, insertMention, localizedCommand, mentionToken, resolveSessionId, routeInput } from './commands.js';
 import { pushHistory } from '@ligule/core/kernel/input-history.js';
 import { searchHistory } from './history.js';
 import { editDraft, isTypingRun, moveDraftCaret, type DraftState } from './draft.js';
@@ -26,7 +26,7 @@ import { selectedText, transcriptLines, viewportPosition, wrapLine } from './vie
 import { CURRENT, ENGLISH_LABELS, ENGLISH_VIEWS, KEYMAP, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec } from './keymap.js';
 import { displayWidth } from './commands.js';
 import { textOf as chooseText, type Locale } from '@ligule/core/kernel/locale.js';
-import type { InkKey, TerminalAction } from './keymap.js';
+import type { TerminalAction } from './keymap.js';
 import type { SessionEvent, SessionHeader } from '@ligule/core/session/format.js';
 import type { SessionSummary } from '@ligule/core/session/list.js';
 import type { AskAnswer, AskQuestion } from '@ligule/core/tools/ask-user.js';

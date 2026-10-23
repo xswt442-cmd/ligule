@@ -30,8 +30,6 @@ import { isPolicyRule, type PolicyMode, type PolicyThresholds } from '@ligule/co
 import type { PolicyRule } from '@ligule/core/kernel/config-edit.js';
 import type { Connection } from '@ligule/core/host/connection.js';
 import type { ModeDirectories } from '@ligule/core/kernel/modes.js';
-type HostProvider = ReturnType<typeof providerFromConfig>;
-
 interface CliPolicy extends Record<string, unknown> {
   readonly mode?: PolicyMode;
   readonly rules?: PolicyRule[];

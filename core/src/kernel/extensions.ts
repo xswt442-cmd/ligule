@@ -10,13 +10,6 @@ import { pathToFileURL } from 'node:url';
 import { KernelError } from './error.js';
 import { dataRoot } from './config-file.js';
 
-interface ExtensionConfig {
-  registerTool?: (tool: unknown) => () => void;
-  registerPrompt?: (fragment: { name: string; text: string }) => () => void;
-  onEvent?: (handler: (event: unknown) => void) => () => void;
-  request?: (tool: string, args?: unknown) => Promise<unknown>;
-}
-
 export interface ExtensionDiagnostic {
   code: string;
   path: string;
