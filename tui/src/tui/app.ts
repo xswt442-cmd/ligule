@@ -3039,12 +3039,12 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       ? t(`队列已暂停：${queue.length} 条 · /queue continue 继续 · /queue list 查看`, `Queue paused: ${queue.length} · /queue continue to resume · /queue list to view`)
       : t(`排队 ${queue.length} 条 · 空草稿按退格收回最后一条 · /queue list 查看`, `${queue.length} queued · Backspace on empty draft recalls last · /queue list to view`)),
     search === null || ask !== null || panel !== null ? null : h(PanelFrame, { width: geometry.columns },
-      h(Text, null, t(`历史搜索 ${search.query}`, `History search ${search.query}`)),
+      h(Text, { wrap: 'truncate-end' }, t(`历史搜索 ${search.query}`, `History search ${search.query}`)),
       searched.length === 0
         ? h(Text, { dimColor: true }, entries.length === 0 ? t('暂无输入历史', 'No input history') : t(`没有匹配“${search.query}”的输入`, `No input matches “${search.query}”`))
         : searched.map((entry, index) => h(Box, { key: `${index}:${entry}` },
-            h(Text, { inverse: index === search.at }, ` ${queuedLine(entry, 60)}`))),
-      h(Text, { dimColor: true }, t(`  继续输入以筛选 · ${keyHint('search-cycle', 'search-up', 'search-down')} 选择 · ${keyHint('search-pick')} 恢复草稿 · ${keyHint('search-close')} 退出`, `  Type to filter · ${keyHint('search-cycle', 'search-up', 'search-down')} select · ${keyHint('search-pick')} restore draft · ${keyHint('search-close')} close`))),
+            h(Text, { inverse: index === search.at, wrap: 'truncate-end' }, ` ${queuedLine(entry, 60)}`))),
+      h(Text, { color: TUI_COLORS.muted, wrap: 'truncate-end' }, t(`继续输入筛选 · ${keyHint('search-up', 'search-down')} 选择 · ${keyHint('search-pick')} 恢复 · ${keyHint('search-close')} 退出`, `Type to filter · ${keyHint('search-up', 'search-down')} select · ${keyHint('search-pick')} restore · ${keyHint('search-close')} close`))),
     picks.length === 0 ? null : h(PanelFrame, { width: geometry.columns },
       picks.slice(Math.max(0, chosen - candidateHeight + 1), Math.max(0, chosen - candidateHeight + 1) + candidateHeight).map((candidate) => h(Text, { key: `${candidate.source}:${candidate.name}`, wrap: 'truncate-end' },
         h(Text, { inverse: candidate === picks[chosen] }, ` /${candidate.name}${candidate.hint === '' ? '' : ` ${candidate.hint}`}`),
