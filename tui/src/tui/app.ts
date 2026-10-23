@@ -147,6 +147,11 @@ interface SessionPickerState {
   readonly items: readonly SessionSummary[];
 }
 
+interface SessionNavigationLease {
+  readonly token: number;
+  readonly owner: string;
+}
+
 interface SearchState {
   readonly query: string;
   readonly at: number;
@@ -668,6 +673,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   useEffect(() => { resolvedExternalInteractions.current.clear(); }, [sessionId]);
   useEffect(() => { setMcpTrustPending(null); }, [sessionId]);
   const pickerRequest = useRef(0);
+  const sessionNavigation = useRef({ generation: 0, activeToken: 0 });
+  const sessionNavigationMounted = useRef(false);
   const [draft, setDraft] = useState('');
   const [caret, setCaret] = useState(0);
   // 撤销栈保存每次编辑前的草稿和光标位置；Ctrl+Z 撤销，Ctrl+Y 重做。
@@ -722,7 +729,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const mentionAsked = useRef<ReturnType<typeof mentionToken> | typeof NO_TOKEN>(NO_TOKEN);
   // Ink 结束后禁止继续写入，避免迟到的答复或状态更新触发 `write after end`。
   const alive = useRef(true);
-  useEffect(() => () => { alive.current = false; }, []);
+  useEffect(() => () => {
+    alive.current = false;
+    sessionNavigation.current.generation += 1;
+  }, []);
   const push = useCallback((...added: TranscriptItem[]) => {
     if (!alive.current) return;
     setRows((current) => [...current, ...added]);
@@ -819,6 +829,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [sessionPicker, setSessionPicker] = useState<SessionPickerState | null>(null);
   useEffect(() => {
     pickerRequest.current += 1;
+    if (sessionNavigationMounted.current) sessionNavigation.current.generation += 1;
+    else sessionNavigationMounted.current = true;
     if (ask !== null || query !== null) setSessionPicker(null);
   }, [ask, query, sessionId]);
   const [approvalExpanded, setApprovalExpanded] = useState(false);
@@ -878,6 +890,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         const asked = params;
         if (asked.sessionId !== sessionId || !Array.isArray(asked.questions) || asked.questions.length === 0 || !asked.questions.every(isAskQuestion)) return;
         pickerRequest.current += 1;
+        sessionNavigation.current.generation += 1;
         setPanel(null);
         setDetail(null);
         setSessionPicker(null);
@@ -888,6 +901,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       }
       if (message.method !== 'approval.request' || params.sessionId !== sessionId || typeof params.tool !== 'string') return;
       pickerRequest.current += 1;
+      sessionNavigation.current.generation += 1;
       setPanel(null);
       const args = isRecord(params.args) ? params.args : {};
       setApprovalExpanded(false);
@@ -1329,6 +1343,36 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     });
   }, [client, controlSnapshot, controlTarget, info.boundary, modes, push, sessionId, t]);
 
+  const beginSessionNavigation = useCallback((owner: string): SessionNavigationLease | undefined => {
+    const navigation = sessionNavigation.current;
+    if (navigation.activeToken !== 0) {
+      push({ kind: 'meta', text: t('会话切换正在进行，请稍后重试。', 'A session switch is in progress; try again shortly.') });
+      return undefined;
+    }
+    const token = ++navigation.generation;
+    navigation.activeToken = token;
+    return { token, owner };
+  }, [push, t]);
+
+  const sessionNavigationIsCurrent = useCallback((lease: SessionNavigationLease): boolean => {
+    const navigation = sessionNavigation.current;
+    return alive.current
+      && navigation.activeToken === lease.token
+      && navigation.generation === lease.token
+      && activeSession.current === lease.owner;
+  }, []);
+
+  const finishSessionNavigation = useCallback((lease: SessionNavigationLease): void => {
+    if (sessionNavigation.current.activeToken === lease.token) sessionNavigation.current.activeToken = 0;
+  }, []);
+
+  const closeUnadoptedSession = useCallback(async (targetId: string, owner: string, force = false): Promise<string | undefined> => {
+    if (!force && targetId === owner) return undefined;
+    const closed = await client.request('session.close', { sessionId: targetId })
+      .catch((error: unknown) => requestFailure(error, 'session_close_failed'));
+    return 'code' in closed ? closed.code : undefined;
+  }, [client]);
+
   const runCommand = useCallback((name: string, argument = '') => {
     pickerRequest.current += 1;
     if (name === 'mcp') {
@@ -1521,17 +1565,29 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     if (name === 'new') {
+      const lease = beginSessionNavigation(sessionId);
+      if (lease === undefined) return;
+      const owner = lease.owner;
+      const wasExternal = externalControl;
       void (async () => {
+        let createdId: string | undefined;
+        let adopted = false;
         try {
           const created = await client.request('session.create', {});
-          if (!externalControl) {
-            try {
-              await client.request('session.close', { sessionId });
-            } catch (error) {
-              await client.request('session.close', { sessionId: created.sessionId });
-              throw error;
+          createdId = created.sessionId;
+          if (!sessionNavigationIsCurrent(lease)) return;
+          if (!wasExternal && owner !== created.sessionId) {
+            const retired = await client.request('session.close', { sessionId: owner })
+              .catch((error: unknown) => requestFailure(error, 'session_close_failed'));
+            if ('code' in retired) {
+              push({ kind: 'error', text: t(`无法关闭当前会话：${retired.code}`, `Could not close the current session: ${retired.code}`) });
+              return;
             }
           }
+          // Closing the old session is the commit point. No transition can overlap this operation.
+          // If the TUI was unmounted after that point, Host release will retire the created session.
+          if (!alive.current || activeSession.current !== owner) return;
+          adopted = true;
           setSessionId(created.sessionId);
           setExternalControl(false);
           setExternalSnapshot(null);
@@ -1546,7 +1602,17 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           setLive({ text: '', reasoning: '' });
           push({ kind: 'meta', text: t(`新会话 ${created.sessionId.slice(0, 8)}`, `New session ${created.sessionId.slice(0, 8)}`) });
         } catch (error) {
-          push({ kind: 'error', text: t(`无法创建会话：${errorCode(error) ?? errorMessage(error) ?? 'unknown'}`, `Could not create session: ${errorCode(error) ?? errorMessage(error) ?? 'unknown'}`) });
+          if (sessionNavigationIsCurrent(lease)) {
+            push({ kind: 'error', text: t(`无法创建会话：${errorCode(error) ?? errorMessage(error) ?? 'unknown'}`, `Could not create session: ${errorCode(error) ?? errorMessage(error) ?? 'unknown'}`) });
+          }
+        } finally {
+          if (createdId !== undefined && !adopted) {
+            const cleanup = await closeUnadoptedSession(createdId, owner);
+            if (cleanup !== undefined && alive.current) {
+              push({ kind: 'error', text: t(`无法释放未采用的新会话：${cleanup}`, `Could not release the unused new session: ${cleanup}`) });
+            }
+          }
+          finishSessionNavigation(lease);
         }
       })();
       return;
@@ -1650,75 +1716,110 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         runCommand('sessions');
         return;
       }
+      const lease = beginSessionNavigation(sessionId);
+      if (lease === undefined) return;
+      const owner = lease.owner;
+      const wasExternal = externalControl;
       // 第二个词指定恢复会话时使用的模式；模式摘要变化时，用户必须明确选择模式才能继续。
       const [wanted, chosenMode] = argument.split(/\s+/);
       void (async () => {
-        const listed = await client.request('sessions.list', { projectRoot: info.boundary }).catch((error: unknown) => requestFailure(error, 'session_list_failed'));
-        if ('code' in listed) {
-          push({ kind: 'error', text: t(`无法读取会话列表：${listed.code}`, `Could not list sessions: ${listed.code}`) });
-          return;
-        }
-        const picked = resolveSessionId(wanted, listed.sessions);
-        if (!('id' in picked)) {
-          push({ kind: 'error', text: picked.code === 'tui_session_ambiguous'
-            ? t(`多个会话以 ${wanted} 开头，请输入更长的编号（/sessions 查看）`, `Multiple sessions start with ${wanted}; enter a longer ID (/sessions to browse)`)
-            : t(`此工作区没有会话 ${wanted}（/sessions 查看）`, `Session ${wanted} was not found in this workspace (/sessions to browse)`) });
-          return;
-        }
-        if (picked.id === sessionId && chosenMode === undefined) {
+        let targetId: string | undefined;
+        let targetOpenedHere = false;
+        let targetAdopted = false;
+        try {
+          const listed = await client.request('sessions.list', { projectRoot: info.boundary })
+            .catch((error: unknown) => requestFailure(error, 'session_list_failed'));
+          if (!sessionNavigationIsCurrent(lease)) return;
+          if ('code' in listed) {
+            push({ kind: 'error', text: t(`无法读取会话列表：${listed.code}`, `Could not list sessions: ${listed.code}`) });
+            return;
+          }
+          const picked = resolveSessionId(wanted, listed.sessions);
+          if (!('id' in picked)) {
+            push({ kind: 'error', text: picked.code === 'tui_session_ambiguous'
+              ? t(`多个会话以 ${wanted} 开头，请输入更长的编号（/sessions 查看）`, `Multiple sessions start with ${wanted}; enter a longer ID (/sessions to browse)`)
+              : t(`此工作区没有会话 ${wanted}（/sessions 查看）`, `Session ${wanted} was not found in this workspace (/sessions to browse)`) });
+            return;
+          }
+          targetId = picked.id;
+          if (picked.id === owner && chosenMode === undefined) {
+            setSessionPicker(null);
+            push({ kind: 'meta', text: t('已打开此会话', 'This session is already open') });
+            return;
+          }
+          // 外控 Host 持有写锁时读取其持久化记录，不抢锁创建第二个写入者。
+          const opened = await client.request('session.open', {
+            sessionId: picked.id,
+            projectRoot: info.boundary ?? '',
+            ...(chosenMode === undefined ? {} : { mode: chosenMode }),
+          }).catch((error: unknown) => requestFailure(error, 'session_open_failed'));
+          targetOpenedHere = !('code' in opened);
+          if (!sessionNavigationIsCurrent(lease)) return;
+
+          let observingExternal = false;
+          let read: SessionPage & { readonly writerActive?: boolean } | { readonly code: string };
+          if ('code' in opened && opened.code === 'session_locked' && chosenMode === undefined) {
+            read = await client.request('session.observe', { projectRoot: info.boundary ?? '', sessionId: picked.id })
+              .catch((error: unknown) => requestFailure(error, 'session_observe_failed'));
+            if (!sessionNavigationIsCurrent(lease)) return;
+            observingExternal = !('code' in read) && read.writerActive === true;
+            if (!observingExternal) read = { code: 'session_writer_unavailable' };
+          } else if ('code' in opened) {
+            read = opened;
+          } else {
+            read = await client.request('session.read', { sessionId: picked.id })
+              .catch((error: unknown) => requestFailure(error, 'session_read_failed'));
+          }
+          if (!sessionNavigationIsCurrent(lease)) return;
+          if ('code' in read) {
+            push({ kind: 'error', text: t(`无法恢复会话：${read.code}`, `Could not resume session: ${read.code}`)
+              + (read.code === 'resume_mode_changed' ? t(`；请指定工具模式：/resume ${wanted} <模式名>`, `; specify a tool mode: /resume ${wanted} <mode>`) : '')
+              + (read.code === 'session_is_branch' ? t('；请用 /sub <序号> 查看子任务', '; use /sub <seq> to view the subtask') : '') });
+            return;
+          }
+          if (!wasExternal && picked.id !== owner) {
+            const retired = await client.request('session.close', { sessionId: owner })
+              .catch((error: unknown) => requestFailure(error, 'session_close_failed'));
+            if ('code' in retired) {
+              push({ kind: 'error', text: t(`无法关闭上一会话，已保留当前会话：${retired.code}`, `Could not close the previous session; keeping it active: ${retired.code}`) });
+              return;
+            }
+          }
+          // Closing the previous session is the commit point. Apply the new session state without another await.
+          if (!alive.current || activeSession.current !== owner) return;
+          targetAdopted = true;
+          setSessionId(picked.id);
+          setExternalControl(observingExternal);
+          setExternalSnapshot(null);
+          setExternalModel(observingExternal ? externalModelFrom(read.events) : null);
+          setRunning(false);
+          setStatus(picked.id === owner ? status : null);
+          setAsk(null);
+          setQuery(null);
           setSessionPicker(null);
-          push({ kind: 'meta', text: t('已打开此会话', 'This session is already open') });
-          return;
+          setRows(read.events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq }))));
+          setLive({ text: '', reasoning: '' });
+          setDetail(null);
+          const row = listed.sessions.find((item) => item.id === picked.id);
+          if (picked.id === owner) void refreshStatus();
+          push({
+            kind: 'meta',
+            text: t(`已恢复会话 ${picked.id.slice(0, 8)}`, `Resumed session ${picked.id.slice(0, 8)}`)
+              + (row === undefined || row.unanswered === 0 ? '' : t(`；已修复 ${row.unanswered} 条未完成调用`, `; repaired ${row.unanswered} unresolved calls`)),
+          });
+        } catch (error) {
+          if (sessionNavigationIsCurrent(lease)) {
+            push({ kind: 'error', text: t(`无法恢复会话：${errorCode(error) ?? errorMessage(error) ?? 'session_resume_failed'}`, `Could not resume session: ${errorCode(error) ?? errorMessage(error) ?? 'session_resume_failed'}`) });
+          }
+        } finally {
+          if (targetOpenedHere && !targetAdopted && targetId !== undefined) {
+            const cleanup = await closeUnadoptedSession(targetId, owner);
+            if (cleanup !== undefined && alive.current) {
+              push({ kind: 'error', text: t(`无法释放未采用的会话 ${targetId.slice(0, 8)}：${cleanup}`, `Could not release unused session ${targetId.slice(0, 8)}: ${cleanup}`) });
+            }
+          }
+          finishSessionNavigation(lease);
         }
-        // 外控 Host 持有写锁时读取其持久化记录，不抢锁创建第二个写入者。
-        const opened = await client.request('session.open', {
-          sessionId: picked.id,
-          projectRoot: info.boundary ?? '',
-          ...(chosenMode === undefined ? {} : { mode: chosenMode }),
-        })
-          .catch((error: unknown) => requestFailure(error, 'session_open_failed'));
-        let observingExternal = false;
-        let read: SessionPage & { readonly writerActive?: boolean } | { readonly code: string };
-        if ('code' in opened && opened.code === 'session_locked' && chosenMode === undefined) {
-          read = await client.request('session.observe', { projectRoot: info.boundary ?? '', sessionId: picked.id })
-            .catch((error: unknown) => requestFailure(error, 'session_observe_failed'));
-          observingExternal = !('code' in read) && read.writerActive === true;
-          if (!observingExternal) read = { code: 'session_writer_unavailable' };
-        } else if ('code' in opened) read = opened;
-        else read = await client.request('session.read', { sessionId: picked.id }).catch((error: unknown) => requestFailure(error, 'session_read_failed'));
-        if ('code' in read) {
-          push({ kind: 'error', text: t(`无法恢复会话：${read.code}`, `Could not resume session: ${read.code}`)
-            + (read.code === 'resume_mode_changed' ? t(`；请指定工具模式：/resume ${wanted} <模式名>`, `; specify a tool mode: /resume ${wanted} <mode>`) : '')
-            + (read.code === 'session_is_branch' ? t('；请用 /sub <序号> 查看子任务', '; use /sub <seq> to view the subtask') : '') });
-          return;
-        }
-        // TUI 一次只持有一个会话，切换时释放前一会话的运行状态和记录锁。
-        // 在同一次渲染中更新会话 ID 和记录内容，确保 Ink 的 Static 列表能按索引正确补画。
-        // 释放失败不会阻止打开新会话，但会显示诊断信息。
-        const retiring = externalControl
-          ? Promise.resolve({ sessionId })
-          : client.request('session.close', { sessionId }).catch((error: unknown) => requestFailure(error, 'session_close_failed'));
-        setSessionId(picked.id);
-        setExternalControl(observingExternal);
-        setExternalSnapshot(null);
-        setExternalModel(observingExternal ? externalModelFrom(read.events) : null);
-        setRunning(false);
-        setStatus(null);
-        setAsk(null);
-        setQuery(null);
-        setSessionPicker(null);
-        // 根据记录重建转录，不沿用前一会话的画面状态。
-        setRows(read.events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq }))));
-        setLive({ text: '', reasoning: '' });
-        setDetail(null);
-        const retired = await retiring;
-        const row = listed.sessions.find((item) => item.id === picked.id);
-        push({
-          kind: 'meta',
-          text: t(`已恢复会话 ${picked.id.slice(0, 8)}`, `Resumed session ${picked.id.slice(0, 8)}`)
-            + ('code' in retired ? t(`；无法关闭上一会话：${retired.code}`, `; previous session could not close: ${retired.code}`) : '')
-            + (row === undefined || row.unanswered === 0 ? '' : t(`；已修复 ${row.unanswered} 条未完成调用`, `; repaired ${row.unanswered} unresolved calls`)),
-        });
       })();
       return;
     }
@@ -1727,34 +1828,87 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         push({ kind: 'meta', text: t('当前会话不由外部 Agent 控制', 'The current session is not externally controlled') });
         return;
       }
+      const lease = beginSessionNavigation(sessionId);
+      if (lease === undefined) return;
+      const owner = lease.owner;
       void (async () => {
-        const transferred = await client.request('session.control', {
-          projectRoot: info.boundary ?? '', sessionId, request: { action: 'takeover' },
-        }).catch((error: unknown) => requestFailure(error, 'external_control_takeover_failed'));
-        if ('code' in transferred) {
-          push({ kind: 'error', text: t(`无法接管外控会话：${transferred.code}`, `Could not take over external session: ${transferred.code}`) });
-          return;
+        let localSessionOpened = false;
+        let adopted = false;
+        let transferred = false;
+        try {
+          if (!sessionNavigationIsCurrent(lease)) return;
+          const result = await client.request('session.control', {
+            projectRoot: info.boundary ?? '', sessionId: owner, request: { action: 'takeover' },
+          }).catch((error: unknown) => requestFailure(error, 'external_control_takeover_failed'));
+          if ('code' in result) {
+            if (sessionNavigationIsCurrent(lease)) {
+              push({ kind: 'error', text: t(`无法接管外控会话：${result.code}`, `Could not take over external session: ${result.code}`) });
+            }
+            return;
+          }
+          // The control request has transferred ownership. Complete the local reopen even if
+          // a pending external interaction invalidated the ordinary navigation generation.
+          transferred = true;
+          const opened = await client.request('session.open', { sessionId: owner, projectRoot: info.boundary ?? '' })
+            .catch((error: unknown) => requestFailure(error, 'session_open_failed'));
+          if ('code' in opened) {
+            if (alive.current && activeSession.current === owner) {
+              setExternalControl(false);
+              setExternalSnapshot(null);
+              setExternalModel(null);
+              setRunning(false);
+              setStatus(null);
+              setAsk(null);
+              setQuery(null);
+              push({ kind: 'error', text: t(`外控已停止，但本地会话无法打开：${opened.code}；可用 /resume ${owner.slice(0, 8)} 重试`, `External control stopped, but the local session could not open: ${opened.code}; retry with /resume ${owner.slice(0, 8)}`) });
+            }
+            return;
+          }
+          localSessionOpened = true;
+          if (!alive.current || activeSession.current !== owner) return;
+          const read = await client.request('session.read', { sessionId: owner }).catch((error: unknown) => requestFailure(error, 'session_read_failed'));
+          if (!alive.current || activeSession.current !== owner) return;
+          setExternalControl(false);
+          setExternalSnapshot(null);
+          setExternalModel(null);
+          setRunning(false);
+          setStatus(null);
+          setAsk(null);
+          setQuery(null);
+          setDetail(null);
+          setSearch(null);
+          setSessionPicker(null);
+          if ('code' in read) {
+            // This is still the active session and the local Host lock is now intentionally adopted.
+            adopted = true;
+            push({ kind: 'error', text: t(`已接管会话，但转录读取失败：${read.code}`, `Session taken over, but its transcript could not be read: ${read.code}`) });
+            return;
+          }
+          adopted = true;
+          setRows(read.events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq }))));
+          setLive({ text: '', reasoning: '' });
+          push({ kind: 'meta', text: t('已接管外控会话，后续输入由 TUI 直接提交。', 'External session taken over; new input now runs through this TUI.') });
+        } catch (error) {
+          if (transferred && alive.current && activeSession.current === owner) {
+            setExternalControl(false);
+            setExternalSnapshot(null);
+            setExternalModel(null);
+            setRunning(false);
+            setAsk(null);
+            setQuery(null);
+          }
+          if (alive.current) {
+            push({ kind: 'error', text: t(`接管外控会话失败：${errorCode(error) ?? errorMessage(error) ?? 'external_control_takeover_failed'}`, `Could not complete takeover: ${errorCode(error) ?? errorMessage(error) ?? 'external_control_takeover_failed'}`) });
+          }
+        } finally {
+          if (localSessionOpened && !adopted) {
+            const cleanup = await closeUnadoptedSession(owner, owner, true);
+            if (cleanup !== undefined && alive.current) {
+              push({ kind: 'error', text: t(`无法释放未采用的本地会话锁：${cleanup}`, `Could not release the unused local session lock: ${cleanup}`) });
+            }
+          }
+          finishSessionNavigation(lease);
         }
-        const opened = await client.request('session.open', { sessionId, projectRoot: info.boundary ?? '' })
-          .catch((error: unknown) => requestFailure(error, 'session_open_failed'));
-        if ('code' in opened) {
-          push({ kind: 'error', text: t(`外控已停止，但本地会话无法打开：${opened.code}`, `External control stopped, but the local session could not open: ${opened.code}`) });
-          return;
-        }
-        const read = await client.request('session.read', { sessionId }).catch((error: unknown) => requestFailure(error, 'session_read_failed'));
-        if ('code' in read) {
-          push({ kind: 'error', text: t(`已接管会话，但转录读取失败：${read.code}`, `Session taken over, but its transcript could not be read: ${read.code}`) });
-          return;
-        }
-        setExternalControl(false);
-        setExternalSnapshot(null);
-        setExternalModel(null);
-        setRunning(false);
-        setAsk(null);
-        setQuery(null);
-        setRows(read.events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq }))));
-        await refreshStatus();
-        push({ kind: 'meta', text: t('已接管外控会话，后续输入由 TUI 直接提交。', 'External session taken over; new input now runs through this TUI.') });
       })();
       return;
     }
@@ -1767,16 +1921,25 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         push({ kind: 'error', text: t('分支点须为完整轮次的记录序号：/branch [序号]', 'Branch point must be a completed turn’s sequence: /branch [seq]') });
         return;
       }
+      const lease = beginSessionNavigation(sessionId);
+      if (lease === undefined) return;
+      const owner = lease.owner;
       void (async () => {
-        const branched = await client.request('session.branch', { sessionId, ...(at === undefined ? {} : { at }) }).catch((error: unknown) => requestFailure(error, 'session_branch_failed'));
-        if ('code' in branched) {
-          push({ kind: 'error', text: t(`无法创建分支：${branched.code}`, `Could not create branch: ${branched.code}`) });
-          return;
+        try {
+          const branched = await client.request('session.branch', { sessionId: owner, ...(at === undefined ? {} : { at }) }).catch((error: unknown) => requestFailure(error, 'session_branch_failed'));
+          if (!sessionNavigationIsCurrent(lease)) return;
+          if ('code' in branched) {
+            push({ kind: 'error', text: t(`无法创建分支：${branched.code}`, `Could not create branch: ${branched.code}`) });
+            return;
+          }
+          push({ kind: 'meta', text: t(`已创建分支会话 ${branched.sessionId.slice(0, 8)}（截至记录 ${branched.at}）`, `Created branch ${branched.sessionId.slice(0, 8)} through event ${branched.at}`) });
+          // Branch records do not hold a session lock. Release this lease and immediately
+          // start the serialized resume transaction for the new branch.
+          finishSessionNavigation(lease);
+          runCommand('resume', branched.sessionId);
+        } finally {
+          finishSessionNavigation(lease);
         }
-        push({ kind: 'meta', text: t(`已创建分支会话 ${branched.sessionId.slice(0, 8)}（截至记录 ${branched.at}）`, `Created branch ${branched.sessionId.slice(0, 8)} through event ${branched.at}`) });
-        // 通过 `/resume` 打开新分支，读取记录并替换当前会话。
-        // 未完成调用在新分支首次打开时恢复为结果未知。
-        runCommand('resume', branched.sessionId);
       })();
       return;
     }
@@ -2148,7 +2311,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     push({ kind: 'error', text: t(`未知命令：/${name}（/help 查看）`, `Unknown command: /${name} (/help to browse)`) });
-  }, [app, changePermission, client, externalControl, info, keyOverrides, keys, locale, mcpTrustPending, push, queue, queuePaused, refreshStatus, sessionId, status, stdout, t, trust, openPicker, exitTui]);
+  }, [app, beginSessionNavigation, changePermission, client, closeUnadoptedSession, externalControl, finishSessionNavigation, info, keyOverrides, keys, locale, mcpTrustPending, push, queue, queuePaused, refreshStatus, sessionId, sessionNavigationIsCurrent, status, stdout, t, trust, openPicker, exitTui]);
 
   const chooseOption = useCallback((id: string) => {
     const choice = choices.find(item => item.id === id);
@@ -2458,13 +2621,18 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   }, [client, controlWizard, info.boundary, push, resetDraft, t]);
 
   const send = useCallback((text: string) => {
+    const route = routeInput(text, running);
+    const answering = query !== null && !text.trim().startsWith('/');
+    if (sessionNavigation.current.activeToken !== 0 && !answering && !(route.kind === 'command' && route.name === 'quit')) {
+      push({ kind: 'meta', text: t('会话切换完成前不会提交输入，草稿已保留。', 'Input is held until the session switch completes; the draft is preserved.') });
+      return;
+    }
     if (controlWizard !== null) { advanceControlWizard(text); return; }
     // 问题面板打开时，回车提交当前答案；斜杠命令仍可运行，例如 `/status` 和 `/queue`。
-    if (query !== null && !text.trim().startsWith('/')) {
+    if (answering) {
       answerQuery(text);
       return;
     }
-    const route = routeInput(text, running);
     if (route.kind === 'blocked') {
       push({ kind: 'meta', text: t(`请先按 ${keyHint('interrupt')} 停止当前轮次，再执行此命令`, `Stop this turn with ${keyHint('interrupt')} before using this command`) });
       return;
