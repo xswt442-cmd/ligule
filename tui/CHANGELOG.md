@@ -29,6 +29,7 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 - 草稿和外部编辑器内容中的 CRLF 在编辑前统一为 LF，避免光标移动或删除时留下孤立的回车符。
 - 未设置 `FORCE_COLOR` 时，终端启动遵守非空的 `NO_COLOR`；窄窗口保留当前会话状态提示。
 - 工具审批和提问会临时收起授权设置向导；问题回答只发送给当前问题，不会被用作授权参数。
+- 问题回答独立于普通草稿，回答或取消后恢复原文字和光标；退出时保存普通草稿与队列，问题期间收回队列也保留原输入。
 
 ### English
 
@@ -47,6 +48,7 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 - CRLF in saved drafts and external-editor content is normalized to LF before editing, so movement and deletion do not leave a stray carriage return.
 - Terminal startup honors a nonempty `NO_COLOR` when `FORCE_COLOR` is unset, and narrow windows retain the active-session status hint.
 - Tool approvals and questions temporarily hide grant setup; question answers go only to the active question and cannot become grant parameters.
+- Answers use a separate draft. Answering or cancelling restores the original text and caret; exit saves the ordinary draft and queue, and queue recovery during a question preserves existing input.
 
 ## [0.0.6] - 2026-10-22
 
