@@ -114,10 +114,15 @@ readings.push('tui: refuses with tui_terminal_required on a non-interactive term
 writeFileSync(join(consumer, 'probe.mjs'), `
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createRequire } from 'node:module';
 import { createKernel, createMcpPlugin, createMcpRegistry, execTool, flagLayer, KernelError, mcpServerConfigs, parseCommand, resolveRipgrep, resolveShell, searchWithRipgrep, withNativeExitCode, VERSION } from 'ligule';
 import { pathToFileURL } from 'node:url';
 
 const coreRoot = ${JSON.stringify(bundledCoreDirectory)};
+const requireCore = createRequire(pathToFileURL(join(coreRoot, 'package.json')));
+requireCore('@napi-rs/keyring');
+requireCore('koffi');
+console.log('native bindings: keyring and koffi loaded for the consumer platform');
 const { detectPermissionCapabilities } = await import(pathToFileURL(join(coreRoot, 'dist', 'capability', 'permission-capabilities.js')).href);
 const { createPermissionContext } = await import(pathToFileURL(join(coreRoot, 'dist', 'kernel', 'permission.js')).href);
 
@@ -183,7 +188,7 @@ const found = typeof backend?.executable === 'string' && existsSync(backend.exec
 if (!found) {
   throw new Error(\`search backend is missing for the supported target: \${JSON.stringify(backend)}\`);
 }
-console.log(\`search backend: @vscode/ripgrep@${coreManifest.dependencies['@vscode/ripgrep']}; \${backend.executable}\`);
+console.log(\`search backend: @vscode/ripgrep@${pkg.dependencies['@vscode/ripgrep']}; \${backend.executable}\`);
 mkdirSync('fixture', { recursive: true });
 writeFileSync('fixture/needle.txt', 'LIGULE-INSTALL-NEEDLE\\n');
 const hits = await searchWithRipgrep({ executable: backend.executable, boundary: process.cwd(), target: 'fixture', pattern: 'LIGULE-INSTALL-NEEDLE', limit: 5 });

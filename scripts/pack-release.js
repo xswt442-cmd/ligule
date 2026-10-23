@@ -19,6 +19,14 @@ export function releaseManifest() {
   if (declaredSearchPackages.length > 0) {
     throw new Error(`package.json must not declare local search platform packages: ${declaredSearchPackages.join(', ')}`);
   }
+  for (const field of ['dependencies', 'optionalDependencies']) {
+    for (const [name, version] of Object.entries(core[field] ?? {})) {
+      if (manifest[field]?.[name] !== undefined && manifest[field][name] !== version) {
+        throw new Error(`TUI and Core declare different ${field} versions for ${name}`);
+      }
+    }
+    manifest[field] = { ...core[field], ...manifest[field] };
+  }
   manifest.dependencies['@ligule/core'] = '*';
   return manifest;
 }
@@ -59,6 +67,13 @@ export async function packRelease(destination) {
     deployTui(stagedPackage);
     await assertSymlinksInside(stagedPackage);
     await assertCoreRuntimeMatches(join(root, 'core'), join(stagedPackage, 'node_modules', '@ligule', 'core'));
+    // The public manifest installs external dependencies for the consumer's platform.
+    // Bundle only the private Core payload, without the build machine's native dependency tree.
+    const coreManifestPath = join(stagedPackage, 'node_modules', '@ligule', 'core', 'package.json');
+    const coreManifest = JSON.parse(readFileSync(coreManifestPath, 'utf8'));
+    delete coreManifest.dependencies;
+    delete coreManifest.optionalDependencies;
+    await writeFile(coreManifestPath, `${JSON.stringify(coreManifest, null, 2)}\n`, 'utf8');
     await writeFile(join(stagedPackage, 'package.json'), `${JSON.stringify(finalManifest, null, 2)}\n`, 'utf8');
     const dryRun = execPnpm(['--dir', stagedPackage, 'pack', '--dry-run', '--json', '--ignore-workspace'], { cwd: root, encoding: 'utf8' });
     const sourceInfo = packInfo(dryRun, 'deployed dry run');

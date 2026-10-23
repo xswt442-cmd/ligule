@@ -80,6 +80,16 @@ test('the ripgrep runtime uses the upstream platform-selecting dependency', () =
   assert.equal(Object.keys(release.optionalDependencies).some((name) => name.startsWith('ligule-rg-')), false);
 });
 
+test('the public CLI declares all external runtime dependencies of its private Core', () => {
+  const core = JSON.parse(read('../core/package.json'));
+  const release = releaseManifest();
+  for (const field of ['dependencies', 'optionalDependencies']) {
+    for (const [name, version] of Object.entries(core[field] ?? {})) {
+      assert.equal(release[field]?.[name], version, `${name} must be installed by the consumer for its own platform`);
+    }
+  }
+});
+
 test('workflows take the Node version from their own env instead of repeating it', () => {
   for (const file of workflows) {
     assert.doesNotMatch(read(`../.github/workflows/${file}`), /node-version:\s*['"]?\d/, `${file} hardcodes a Node version`);
