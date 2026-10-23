@@ -22,7 +22,7 @@ export function editDraft(draft: string, caret: number, input: string, key: InkK
   if (key.end || (key.ctrl && input === 'e')) return { draft, caret: draft.length };
   if (key.ctrl && input === 'u') return { draft: '', caret: 0 };
   if (key.ctrl && input === 'w') {
-    const head = draft.slice(0, caret).replace(/\s+$/, '').replace(/[\p{L}\p{N}_.\-/]+$/u, '');
+    const head = draft.slice(0, caret).replace(/\s+$/, '').replace(/[\p{L}\p{M}\p{N}_.\-/]+$/u, '');
     return { draft: head + draft.slice(caret), caret: head.length };
   }
   if (key.backspace) {
@@ -34,7 +34,10 @@ export function editDraft(draft: string, caret: number, input: string, key: InkK
     return { draft: draft.slice(0, caret) + draft.slice(next), caret };
   }
   if (input === '' || key.ctrl || key.meta) return { draft, caret };
-  return { draft: draft.slice(0, caret) + input + draft.slice(caret), caret: caret + input.length };
+  const inserted = draft.slice(0, caret) + input + draft.slice(caret);
+  const insertedEnd = caret + input.length;
+  const insertedCaret = graphemeBoundaries(inserted).find((index) => index >= insertedEnd) ?? inserted.length;
+  return { draft: inserted, caret: insertedCaret };
 }
 
 export function isTypingRun(before: DraftState, after: DraftState): boolean {

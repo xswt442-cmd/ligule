@@ -75,6 +75,20 @@ test('terminal Delete and Backspace edit opposite sides of a whole emoji', async
   }));
 });
 
+test('pasting a regional indicator moves beyond the merged flag before Backspace', async () => {
+  await withTuiHost(async (context) => withApp(context, async ({ frame, stdin, wait }) => {
+    stdin.write('🇸');
+    await wait(() => frame().includes('🇸'));
+    stdin.write('\x1b[H');
+    await delay(40);
+    stdin.write('\x1b[200~🇺\x1b[201~');
+    await wait(() => frame().includes('🇺🇸'));
+    stdin.write('\x7f');
+    await wait(() => frame().includes('› 描述任务') && !frame().includes('🇸') && !frame().includes('🇺'));
+    assert.equal(context.providerRequests.length, 0);
+  }));
+});
+
 test('session filtering stays out of the draft and resumes the selected Host session', async () => {
   await withTuiHost(async (context) => {
     const other = await context.client.request('session.create', {});

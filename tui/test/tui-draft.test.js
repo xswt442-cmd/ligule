@@ -13,7 +13,11 @@ test('draft navigation and deletion operate on whole graphemes', () => {
 
 test('draft insertion at a middle caret and editing shortcuts preserve their contract', () => {
   assert.deepEqual(editDraft('甲乙', 1, '👩‍💻', {}), { draft: '甲👩‍💻乙', caret: 6 });
+  const completedFlag = editDraft('🇸', 0, '🇺', {});
+  assert.deepEqual(completedFlag, { draft: '🇺🇸', caret: 4 });
+  assert.deepEqual(editDraft(completedFlag.draft, completedFlag.caret, '', { backspace: true }), { draft: '', caret: 0 });
   assert.deepEqual(editDraft('rm -rf  ', 8, 'w', { ctrl: true }), { draft: 'rm ', caret: 3 });
+  assert.deepEqual(editDraft('e\u0301', 2, 'w', { ctrl: true }), { draft: '', caret: 0 });
   assert.deepEqual(editDraft('oops', 4, 'u', { ctrl: true }), { draft: '', caret: 0 });
   assert.deepEqual(editDraft('abc', 1, '', { home: true }), { draft: 'abc', caret: 0 });
   assert.deepEqual(editDraft('abc', 0, '', { end: true }), { draft: 'abc', caret: 3 });
