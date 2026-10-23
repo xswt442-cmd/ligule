@@ -4,6 +4,11 @@
 // 写入终端标题前移除控制字符和双向格式字符，防止模型名或路径注入终端控制序列。
 const CONTROL = /[\u0000-\u001F\u007F-\u009F\u200E-\u200F\u202A-\u202E\u2066-\u2069]/g;
 
+// Configure the Ink backend before importing it; an explicit FORCE_COLOR takes priority.
+export function configureTerminalColors(environment: NodeJS.ProcessEnv): void {
+  if (environment.NO_COLOR && environment.FORCE_COLOR === undefined) environment.FORCE_COLOR = '0';
+}
+
 export function titleText({ model, boundary, sessionId }: { model?: string; boundary?: string; sessionId: string }): string {
   const parts = [model, boundary, sessionId.slice(0, 8)].filter((part) => typeof part === 'string' && part !== '');
   return parts.join(' · ').replace(CONTROL, '').slice(0, 120);
