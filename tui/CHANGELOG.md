@@ -18,10 +18,15 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 - 终端界面输入 `/` 即可浏览全部命令，按名称或说明筛选并滚动选择；固定命令参数支持 Tab 补全，补全仅修改草稿，权限升级仍需确认。
 - `/sessions` 和不带参数的 `/resume` 支持按名称、编号或工具模式筛选；列表优先显示会话名称，筛选文字与聊天草稿分别管理。
+- 欢迎区改为左对齐；运行阶段使用 Host 确认的状态，输入区限制显示高度。选择菜单、会话列表、历史和审批面板打开时让普通编辑区让位；工具调用先显示目标摘要，完整内容可从 Ctrl+O 查看。颜色使用继承终端调色板的 ANSI 角色，空间不足时禁用审批操作。
+- `/queue list` 可查看待发送消息及队列状态。
+- 长问题与选项可分页阅读，回答输入区保持可见；审批和历史详情中的粘贴不会修改隐藏草稿。
 
 **修复**
 
 - Delete 向前删除完整字符，Backspace 向后删除；多行输入的上下移动按显示列定位，避免拆开中文、组合字符和表情。
+- 会话切换在目标会话成功打开后才释放原会话锁；切换失败时继续保留当前会话。
+- 草稿和外部编辑器内容中的 CRLF 在编辑前统一为 LF，避免光标移动或删除时留下孤立的回车符。
 
 ### English
 
@@ -29,10 +34,15 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 - Typing `/` in the terminal UI browses all commands with name or description filtering and scrollable selection. Fixed command arguments support Tab completion, which only edits the draft; permission upgrades still require confirmation.
 - `/sessions` and `/resume` without arguments filter by session name, ID, or tool mode. Names appear first, and search text stays separate from the chat draft.
+- The welcome area is left-aligned; run phases use Host-confirmed status, and the composer has a bounded display height. Selection menus, session lists, history, and approvals take the place of ordinary editing while open. Tool calls lead with a target summary, with full details available through Ctrl+O. ANSI color roles follow the terminal palette, and approvals are disabled when the window cannot show the required information.
+- `/queue list` shows pending messages and queue status.
+- Long questions and options can be paged while the answer editor stays visible; pasting in approvals or transcript details preserves the hidden draft.
 
 **Fixed**
 
 - Delete removes the next whole character and Backspace the previous one. Vertical movement in multiline drafts follows display columns without splitting Chinese text, combining characters, or emoji.
+- Session navigation releases the previous session lock only after the target opens successfully; a failed switch keeps the current session active.
+- CRLF in saved drafts and external-editor content is normalized to LF before editing, so movement and deletion do not leave a stray carriage return.
 
 ## [0.0.6] - 2026-10-22
 
