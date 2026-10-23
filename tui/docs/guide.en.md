@@ -173,9 +173,11 @@ When the desktop app shows a connection banner, select “Reconnect” to restar
 
 In Desktop Settings under General, choose Follow system, 简体中文, or English, and adjust the palette, font size, sidebar width, and panel position. The six palettes are Ink, Parchment, Sky, Graphite, Forest, and Dusk. Set the CLI and terminal UI language with `--lang zh`, `--lang zh-CN`, `--lang en`, or `--lang auto`; `zh-CN` and `zh` both select Simplified Chinese.
 
-Common terminal UI shortcuts: Enter sends; Shift+Enter or Ctrl+N inserts a new line; Esc cancels the turn; Ctrl+C exits; Ctrl+O browses history; Ctrl+R searches input history; Ctrl+G opens the draft in an external editor; Ctrl+Z and Ctrl+Y undo or redo draft edits. Ctrl+P selects a model, Ctrl+T selects a tool mode, and Ctrl+A selects an approval mode. The row below the composer shows the active bindings. Use `/bind` to view or change shortcuts. Normal exit saves drafts and queues; restored queues remain paused, and `/quit` is not restored as a draft.
+Common terminal UI shortcuts: Enter sends; Shift+Enter or Ctrl+N inserts a new line; Esc cancels the turn; Ctrl+C exits; Ctrl+O browses history; Ctrl+R searches input history; Ctrl+G opens the draft in an external editor; Ctrl+Z and Ctrl+Y undo or redo draft edits. Ctrl+P selects a model, Ctrl+T selects a tool mode, and Ctrl+A selects an approval mode. Panel hints show the active bindings. Use `/bind` to view or change shortcuts. Normal exit saves drafts and queues; restored queues remain paused, and `/quit` is not restored as a draft.
 
-`/help` opens a categorized panel above the composer without writing help into the session transcript. Left and Right switch between commands, keys, and prompt templates. Up, Down, PageUp, and PageDown browse the content; Esc closes the panel and returns to the draft. Choice lists also use Up, Down, Enter, and Esc. All these bindings can be changed with `/bind`.
+`/help` opens a categorized panel in place of the ordinary composer without writing help into the session transcript. Left and Right switch between commands, keys, and prompt templates. Up, Down, PageUp, and PageDown browse the content; Esc closes the panel and returns to the draft. Choice lists also use Up, Down, Enter, and Esc. All these bindings can be changed with `/bind`.
+
+Terminal colors follow the current palette. Set a nonempty `NO_COLOR` to disable colors; an explicit `FORCE_COLOR` takes priority.
 
 Common desktop shortcuts: Ctrl+K opens the command palette; Ctrl+B hides or shows the sidebar; Ctrl+Shift+C copies the latest answer; Enter or Ctrl+Enter sends; Shift+Enter inserts a new line. Esc closes an open panel first, then cancels a running turn. View or change shortcuts under “Keyboard shortcuts” in Settings.
 
