@@ -603,6 +603,51 @@ async function runChecks() {
 
   const stubControl = process.env.LIGULE_STUB_CONTROL;
   if (typeof stubControl === 'string' && stubControl !== '') {
+    await check(`${providerLabel}代码复制与界面语言`, async () => {
+      await enterAndSend('desktop-code-copy-proof');
+      await waitForSessionIdle(30_000, 'code_copy_turn_did_not_finish');
+      await waitFor(`document.querySelector('.code-copy')`, 10_000, 'code_copy_button_missing');
+      const originalLanguage = await evaluate('document.documentElement.lang');
+      try {
+        for (const language of ['en', 'zh']) {
+          await evaluate(`document.querySelector('button.entry').click(); true`);
+          await waitFor(`document.querySelector('.sheet-body select option[value="en"]')`, 10_000, 'language_setting_missing');
+          await evaluate(`(() => {
+            const select = [...document.querySelectorAll('.sheet-body select')].find(item => item.querySelector('option[value="en"]'));
+            Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(select, ${JSON.stringify(language)});
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+            return true;
+          })()`);
+          await waitFor(`document.documentElement.lang === ${JSON.stringify(language === 'zh' ? 'zh-CN' : 'en')}`, 5_000, 'language_setting_not_adopted');
+          await evaluate(`document.querySelector('.sheet-head button').click(); true`);
+          await waitFor(`!document.querySelector('.sheet')`, 5_000, 'settings_did_not_close');
+          assert.equal(await evaluate(`document.querySelector('.code-copy').textContent`), language === 'en' ? 'Copy code' : '复制代码');
+          if (language === 'zh') {
+            assert.equal(await evaluate(`document.querySelector('.code-copy-row .row-note')?.textContent.startsWith('已复制代码（')`), true, 'existing_copy_feedback_not_translated');
+          }
+          await evaluate(`document.querySelector('.code-copy').click(); true`);
+          const prefix = language === 'en' ? 'Copied code (' : '已复制代码（';
+          await waitFor(`document.querySelector('.code-copy-row .row-note')?.textContent.startsWith(${JSON.stringify(prefix)})`, 5_000, 'code_copy_success_not_localized');
+          const clipboardText = await require('electron').clipboard.readText();
+          const expectedCode = 'console.log("原始代码🙂");';
+          assert.equal(clipboardText === expectedCode, true, 'code_copy_changed_original_text');
+        }
+        const image = await mainWindow.webContents.capturePage();
+        writeFileSync(join(evidenceRoot, 'code-copy-localized.png'), image.toPNG());
+      } finally {
+        await evaluate(`document.querySelector('button.entry').click(); true`);
+        await waitFor(`document.querySelector('.sheet-body select option[value="en"]')`, 10_000, 'language_setting_missing');
+        await evaluate(`(() => {
+          const select = [...document.querySelectorAll('.sheet-body select')].find(item => item.querySelector('option[value="en"]'));
+          Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(select, ${JSON.stringify(originalLanguage.startsWith('zh') ? 'zh' : 'en')});
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        })()`);
+        await evaluate(`document.querySelector('.sheet-head button').click(); true`);
+        await waitFor(`!document.querySelector('.sheet')`, 5_000, 'settings_did_not_close');
+      }
+      return '真实 Electron 页面切换中英文，复制按钮与成功反馈跟随语言，系统剪贴板保留原始代码';
+    });
     await check(`${providerLabel}Skill 与 MCP 权限边界`, async () => {
       if (typeof sessionId !== 'string') throw Object.assign(new Error('skill_mcp_session_unavailable'), { code: 'skill_mcp_session_unavailable' });
       const approvalCount = await evaluate(`window.__realModelFrames.filter(frame => frame.method === 'approval.request').length`);
