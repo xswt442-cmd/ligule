@@ -75,6 +75,33 @@ test('terminal Delete and Backspace edit opposite sides of a whole emoji', async
   }));
 });
 
+test('session filtering stays out of the draft and resumes the selected Host session', async () => {
+  await withTuiHost(async (context) => {
+    const other = await context.client.request('session.create', {});
+    await context.client.request('session.label', { sessionId: other.sessionId, name: '西藏行程' });
+    await withApp(context, async ({ frame, stdin, type, wait }) => {
+      await type('/sessions');
+      await wait(() => frame().includes('西藏行程'));
+      stdin.write('找不到');
+      await wait(() => frame().includes('没有匹配的会话'));
+      stdin.write('\r');
+      await delay(40);
+      assert.ok(!context.requests.some(request => request.method === 'session.open'));
+      stdin.write('\x1b');
+      await wait(() => frame().includes('› 描述任务') && !frame().includes('找不到'));
+      await type('/resume');
+      await wait(() => frame().includes('西藏行程'));
+      stdin.write('西藏');
+      await wait(() => frame().includes('西藏 · 1/2'));
+      stdin.write('\r');
+      await wait(() => context.requests.some(request => request.method === 'session.open' && request.params.sessionId === other.sessionId)
+        && frame().includes(`会话 ${other.sessionId.slice(0, 8)}`));
+      assert.ok(context.requests.some(request => request.method === 'session.close' && request.params.sessionId === context.sessionId));
+      assert.equal(context.providerRequests.length, 0);
+    });
+  });
+});
+
 test('complete history opens in a bounded viewport and keyboard navigation reaches both ends', async () => {
   await withTuiHost(async (context) => withApp(context, async ({ frame, output, stdin, type, wait }) => {
     const text = Array.from({ length: 60 }, (_, index) => `历史行 ${index}`).join('\n');

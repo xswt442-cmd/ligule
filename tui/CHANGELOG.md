@@ -11,6 +11,7 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 **改进**
 
 - 终端界面输入 `/` 即可浏览全部命令，按名称或说明筛选并滚动选择；固定命令参数支持 Tab 补全，补全仅修改草稿，权限升级仍需确认。
+- `/sessions` 和不带参数的 `/resume` 支持按名称、编号或工具模式筛选；列表优先显示会话名称，筛选文字与聊天草稿分别管理。
 
 **修复**
 
@@ -21,6 +22,7 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 **Improved**
 
 - Typing `/` in the terminal UI browses all commands with name or description filtering and scrollable selection. Fixed command arguments support Tab completion, which only edits the draft; permission upgrades still require confirmation.
+- `/sessions` and `/resume` without arguments filter by session name, ID, or tool mode. Names appear first, and search text stays separate from the chat draft.
 
 **Fixed**
 

@@ -15,6 +15,7 @@ import { providerDiagnosticText, runtimeFailureText } from './errors.js';
 import { capabilityOf, projectRecord, resultParts, type TranscriptItem, type TuiRecord } from './transcript.js';
 import { VERSION } from '../version.js';
 import { ChoicePanel, HelpPanel, type PanelChoice } from './panels.js';
+import { SessionPicker } from './session-picker.js';
 import { markdownLines } from './markdown.js';
 import { selectedText, transcriptLines, viewportPosition, wrapLine } from './viewport.js';
 import { CURRENT, ENGLISH_LABELS, ENGLISH_VIEWS, KEYMAP, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec } from './keymap.js';
@@ -144,7 +145,6 @@ interface DetailState {
 
 interface SessionPickerState {
   readonly items: readonly SessionSummary[];
-  readonly at: number;
 }
 
 interface SearchState {
@@ -817,6 +817,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     return () => clearTimeout(timer);
   }, [caret, client, draft, hiddenMention, info.boundary]);
   const [sessionPicker, setSessionPicker] = useState<SessionPickerState | null>(null);
+  useEffect(() => {
+    if (ask !== null || query !== null) setSessionPicker(null);
+  }, [ask, query]);
   const [approvalExpanded, setApprovalExpanded] = useState(false);
   const [approvalCursor, setApprovalCursor] = useState(0);
 
@@ -1604,7 +1607,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           setDetail(null);
           setExpanded(false);
           setSearch(null);
-          setSessionPicker({ items: listed.sessions, at: 0 });
+          setSessionPicker({ items: listed.sessions });
         }
       })();
       return;
@@ -2571,7 +2574,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       exitTui();
       return;
     }
-    if (panel !== null) return;
+    if (panel !== null || sessionPicker !== null && ask === null && query === null) return;
     if (ask === null && query === null) {
       if (hit('model-picker', input, key)) { openPicker('model'); return; }
       if (hit('mode-picker', input, key)) { openPicker('mode'); return; }
@@ -2696,20 +2699,6 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         return;
       }
       return;
-    }
-    if (sessionPicker !== null && ask === null) {
-      if (hit('list-close', input, key)) { setSessionPicker(null); return; }
-      const step = hit('list-page-up', input, key) ? -viewHeight : hit('list-page-down', input, key) ? viewHeight
-        : hit('list-up', input, key) ? -1 : hit('list-down', input, key) ? 1 : null;
-      const at = hit('list-first', input, key) ? 0 : hit('list-last', input, key) ? sessionPicker.items.length - 1
-        : step === null ? null : Math.max(0, Math.min(sessionPicker.at + step, sessionPicker.items.length - 1));
-      if (at !== null) { setSessionPicker({ ...sessionPicker, at }); return; }
-      if (hit('list-open', input, key) && draft === '') {
-        if (running) push({ kind: 'meta', text: t('当前轮次结束后才能切换会话', 'Wait for this turn to finish before switching sessions') });
-        else runCommand('resume', sessionPicker.items[sessionPicker.at].id);
-        return;
-      }
-      if (input !== '' && !key.ctrl && !key.meta) setSessionPicker(null);
     }
     // Ctrl+G 使用外部编辑器修改草稿，并通过临时文件传递文本。
     // 由 Ink 暂停 raw mode 并恢复终端，避免编辑器与界面争用输入。
@@ -2884,7 +2873,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
 
   // 通过 Ink 的 bracketed paste 通道一次接收整段粘贴内容，不将换行解释为发送或审批按键。
   usePaste((text) => {
-    if (panel !== null) return;
+    if (panel !== null || sessionPicker !== null) return;
     const inserted = editDraft(draft, caret, text.replace(/\r\n?/g, '\n'), {});
     setDraft(inserted.draft);
     setCaret(inserted.caret);
@@ -2945,9 +2934,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         ? h(Text, { dimColor: true }, detail.loading ? t('正在读取记录…', 'Loading transcript…') : t('没有可显示的内容', 'No content to display'))
         : viewLines.slice(view.offset, view.offset + viewHeight).map((line, index) => h(Text, { key: view.offset + index, inverse: view.offset + index >= selection[0] && view.offset + index <= selection[1], wrap: 'truncate-end' }, line)),
       h(Text, { dimColor: true, wrap: 'truncate-end' }, t(`${view.cursor + 1}/${viewLines.length} 行 · ${keyHint('view-page-up', 'view-page-down')} 分页 · ${keyHint('view-top', 'view-bottom')} 到两端 · ${keyHint('mark-up', 'mark-down')} 选择 · ${keyHint('copy-selection')} 复制 · ${keyHint('view-close')} 收起`, `Line ${view.cursor + 1}/${viewLines.length} · ${keyHint('view-page-up', 'view-page-down')} pages · ${keyHint('view-top', 'view-bottom')} start/end · ${keyHint('mark-up', 'mark-down')} select · ${keyHint('copy-selection')} copy · ${keyHint('view-close')} close`))),
-    sessionPicker === null ? null : h(Box, { flexDirection: 'column', borderStyle: 'round', paddingX: 1 },
-      h(Text, { wrap: 'truncate-end' }, t(`历史会话 ${sessionPicker.items.length} 份 · ${keyHint('list-up', 'list-down')} 选择 · ${keyHint('list-open')} 打开 · ${keyHint('list-close')} 收起`, `${sessionPicker.items.length} sessions · ${keyHint('list-up', 'list-down')} select · ${keyHint('list-open')} open · ${keyHint('list-close')} close`)),
-      sessionPicker.items.slice(Math.max(0, sessionPicker.at - viewHeight + 1), Math.max(0, sessionPicker.at - viewHeight + 1) + viewHeight).map((item) => h(Text, { key: item.id, inverse: item === sessionPicker.items[sessionPicker.at], wrap: 'truncate-end' }, sessionLines([item], sessionId, locale)[0]))),
+    h(SessionPicker, {
+      active: sessionPicker !== null && ask === null && query === null,
+      items: sessionPicker?.items ?? [], current: sessionId, locale, height: viewHeight, columns: geometry.columns,
+      running, interactive, onClose: () => setSessionPicker(null), onSelect: (id) => runCommand('resume', id),
+    }),
     queue.length === 0 ? null : h(Box, { flexDirection: 'column' },
       queue.map((item, index) => h(Text, { key: `${index}:${item}`, dimColor: true }, t(`排队 ${index + 1} · ${queuedLine(item)}`, `Queued ${index + 1} · ${queuedLine(item)}`))),
       h(Text, { dimColor: true }, queuePaused

@@ -730,12 +730,12 @@ test('resuming a session repaints that record as the transcript', options, async
     stdin.write('/sessions');
     await delay(100);
     stdin.write('\r');
-    await waitFor(() => painted.includes(resumed), { read: () => painted });
+    await waitFor(() => completeFrame(painted).includes('搜索 ·') && completeFrame(painted).includes(resumed.slice(0, 8)), { within: 5000, read: () => completeFrame(painted) });
     assert.doesNotMatch(painted, /项目根下还没有跑过的会话/);
 
     const beforeResume = painted.length;
-    stdin.write(`/resume ${resumed.slice(0, 8)}`);
-    await delay(100);
+    stdin.write(resumed.slice(0, 8));
+    await waitFor(() => completeFrame(painted).includes(`${resumed.slice(0, 8)} · 1/2`), { within: 5000, read: () => completeFrame(painted) });
     stdin.write('\r');
     const shown = () => plainOutput(painted.slice(beforeResume));
     await waitFor(() => shown().includes('Local response: 那一份里问过的事'), { read: shown });
