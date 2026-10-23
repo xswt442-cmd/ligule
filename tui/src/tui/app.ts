@@ -2570,7 +2570,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       push({ kind: 'meta', text: t('会话切换完成前不会提交输入，草稿已保留。', 'Input is held until the session switch completes; the draft is preserved.') });
       return;
     }
-    if (controlWizard !== null) { advanceControlWizard(text); return; }
+    if (controlWizard !== null && query === null) { advanceControlWizard(text); return; }
     // 问题面板打开时，回车提交当前答案；斜杠命令仍可运行，例如 `/status` 和 `/queue`。
     if (answering) {
       answerQuery(text);
@@ -3096,7 +3096,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
                 : undefined,
       locale, columns: geometry.columns, height: Math.max(1, geometry.rows - 8), loading: choicesLoading, onClose: closePanel, onSelect: (choice: PanelChoice) => chooseOption(choice.id),
     }),
-    controlWizard === null ? null : h(PanelFrame, { tone: 'warning', width: geometry.columns },
+    controlWizard === null || !showComposer || query !== null ? null : h(PanelFrame, { tone: 'warning', width: geometry.columns },
       h(Text, { bold: true }, t('创建外控授权', 'Create Agent Control grant')),
       h(Text, { wrap: 'wrap' }, controlPrompt),
       h(Text, { dimColor: true }, t('Enter 提交当前项 · 输入 cancel 取消', 'Enter submits this value · type cancel to stop'))),
@@ -3104,8 +3104,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     running && showSettings ? h(ProgressLine, { progress: status?.progress, seconds, marker: SPINNER[tick % SPINNER.length], columns: geometry.columns, locale }) : null,
     showComposer ? h(DraftInput, {
       draft, caret, columns: geometry.columns, height: composerHeight,
-      placeholder: controlWizard !== null ? t('输入授权设置答案', 'Enter the grant setting')
-        : query !== null ? t('输入回答', 'Type your answer')
+      placeholder: query !== null ? t('输入回答', 'Type your answer')
+        : controlWizard !== null ? t('输入授权设置答案', 'Enter the grant setting')
           : externalControl ? t('给外控 Agent 发消息 · /takeover 接管', 'Message the external agent · /takeover to take over')
             : t('描述任务 · / 命令 · @ 文件', 'Describe a task · / commands · @ files')
               + (geometry.columns >= 72 ? t(` · ${keyHint('newline')} 换行`, ` · ${keyHint('newline')} new line`) : ''),

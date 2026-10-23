@@ -135,6 +135,35 @@ test('question PageDown advances the first whole page and PageUp restores it wit
   }, { columns: 50, rows: 14 }), { interactive: true });
 });
 
+test('a Host question suspends the grant wizard and receives its own answer', async () => {
+  await withTuiHost(async context => withApp(context, async ({ frame, stdin, type, wait }) => {
+    await type('/control create');
+    await wait(() => frame().includes('授权名称'));
+    const execution = context.client.request('run.start', { sessionId: context.sessionId, input: JSON.stringify({
+      tool: 'ask_user_question', args: { questions: JSON.stringify([{ question: '请回答当前问题' }]) },
+    }) });
+    execution.catch(() => undefined);
+    try {
+      await wait(() => frame().includes('等待回答 1/1'));
+      assert.ok(!frame().includes('创建外控授权'), frame());
+      assert.ok(frame().includes('输入回答'), frame());
+      await type('真实问答答案');
+      await execution;
+      const read = await context.client.request('session.read', { sessionId: context.sessionId });
+      assert.ok(JSON.stringify(read.events).includes('真实问答答案'));
+      assert.ok(!context.requests.some(request => request.method === 'agent-control.create'));
+      await wait(() => frame().includes('授权名称'));
+      await type('cancel');
+      await wait(() => !frame().includes('创建外控授权'));
+    } finally {
+      await context.client.request('run.cancel', { sessionId: context.sessionId }).catch(error => {
+        if (error.code !== 'run_not_running') throw error;
+      });
+      await execution.catch(() => undefined);
+    }
+  }), { interactive: true });
+});
+
 test('permission completion leaves the existing explicit confirmation intact', async () => {
   await withTuiHost(async (context) => withApp(context, async ({ frame, stdin, wait }) => {
     stdin.write('/permission network u');
