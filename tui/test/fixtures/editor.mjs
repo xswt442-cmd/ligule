@@ -7,6 +7,8 @@ if (markerPath !== '-') await writeFile(markerPath, markerText, 'utf8');
 if (operation === 'append-crlf') {
   const draft = await readFile(draftPath, 'utf8');
   await writeFile(draftPath, `${draft} edited\r\n`, 'utf8');
+} else if (operation === 'replace-crlf') {
+  await writeFile(draftPath, 'a\r\nb\r\n', 'utf8');
 } else if (operation === 'remove') {
   await rm(draftPath);
 } else if (operation === 'exit') {

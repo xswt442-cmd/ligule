@@ -695,13 +695,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   }, [draft, caret]);
   // 用于替换整份草稿并清空撤销栈，避免撤销到其他会话的输入。
   const resetDraft = useCallback((text: string) => {
+    const normalized = text.replace(/\r\n?/g, '\n');
     const cell = undo.current;
     cell.stack = [];
     cell.future = [];
     cell.kind = null;
-    cell.before = { draft: text, caret: text.length };
-    setDraft(text);
-    setCaret(text.length);
+    cell.before = { draft: normalized, caret: normalized.length };
+    setDraft(normalized);
+    setCaret(normalized.length);
   }, []);
   // 输入历史跨会话保存，不写入会话记录。最新输入位于列表前端，方向键向下浏览更早内容。
   const [entries, setEntries] = useState(history.entries);
@@ -2890,8 +2891,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           push({ kind: 'error', text: t(`外部编辑失败：${outcome.code}`, `External editor failed: ${outcome.code}`) });
           return;
         }
-        setDraft(outcome.text);
-        setCaret(outcome.text.length);
+        const normalized = outcome.text.replace(/\r\n?/g, '\n');
+        setDraft(normalized);
+        setCaret(normalized.length);
       })();
       return;
     }
