@@ -179,10 +179,10 @@ export function candidatesOf(
   if (!draft.startsWith('/')) return [];
   const typed = draft.slice(1);
   if (/\s/.test(typed)) {
-    const split = typed.lastIndexOf(' ');
-    const head = typed.slice(0, split).toLowerCase();
-    const argument = typed.slice(split + 1).toLowerCase();
-    const command = findUiCommand(head.split(' ')[0]);
+    const words = typed.toLowerCase().split(/\s+/);
+    const argument = words.pop() ?? '';
+    const head = words.join(' ');
+    const command = findUiCommand(words[0] ?? '');
     if (command !== undefined) {
       return (ARGUMENTS[head] ?? []).filter(value => value.startsWith(argument)).map(value => ({
         name: `${head} ${value}`, text: localizedCommand(command, locale).text, hint: '', source: 'ui' as const,

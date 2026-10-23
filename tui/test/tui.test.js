@@ -404,6 +404,9 @@ test('the candidate list narrows on what is typed and appends host templates', o
   assert.ok(candidatesOf('/credentials', [], undefined, 'en').some(command => command.name === 'credentials'));
   assert.deepEqual(candidatesOf('/policy a').map(command => command.name), ['policy ask', 'policy auto']);
   assert.deepEqual(candidatesOf('/permission network d').map(command => command.name), ['permission network disabled']);
+  assert.deepEqual(candidatesOf('/permission  n').map(command => command.name), ['permission network']);
+  assert.deepEqual(candidatesOf('/permission \t network\t d').map(command => command.name), ['permission network disabled']);
+  assert.deepEqual(candidatesOf('/policy\ta').map(command => command.name), ['policy ask', 'policy auto']);
   assert.deepEqual(candidatesOf('/queue drop 2'), []);
   assert.deepEqual(candidatesOf('/git:release:prepare ', templates), []);
   assert.equal(candidatesOf('/', [{ command: 'help', description: 'shadowed' }]).filter(command => command.name === 'help').length, 1);
