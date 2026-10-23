@@ -5,6 +5,7 @@ import { createElement } from 'react';
 import { render } from 'ink';
 import { applyOverrides, CURRENT } from '../dist/tui/keymap.js';
 import { HelpPanel, ChoicePanel } from '../dist/tui/panels.js';
+import { completeFrame } from './helpers/frames.js';
 
 function terminal() {
   const stdout = new PassThrough();
@@ -28,13 +29,13 @@ function terminal() {
 }
 
 function visible(tty) {
-  return tty.painted().replace(/\x1B\[[0-?]*[ -/]*[@-~]/gu, '');
+  return completeFrame(tty.painted()).replace(/\x1B\[[0-?]*[ -/]*[@-~]/gu, '');
 }
 
 async function waitFor(tty, predicate) {
   const deadline = Date.now() + 2_000;
   while (!predicate(visible(tty))) {
-    if (Date.now() > deadline) throw new Error('panel output did not reach the expected state');
+    if (Date.now() > deadline) throw new Error(`panel output did not reach the expected state: ${visible(tty)}`);
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
   }
 }
@@ -52,11 +53,11 @@ test('HelpPanel changes category, pages wrapped entries, and closes on Escape', 
   try {
     await waitFor(tty, (output) => output.includes('命令'));
     tty.stdin.write('\u001b[C');
-    await waitFor(tty, (output) => output.includes('按键'));
+    await waitFor(tty, (output) => output.includes('› 按键'));
     tty.stdin.write('\u001b[C');
-    await waitFor(tty, (output) => output.includes('提示模板'));
+    await waitFor(tty, (output) => output.includes('› 提示模板'));
     tty.stdin.write('\u001b[6~');
-    await waitFor(tty, (output) => output.includes('/item-02'));
+    await waitFor(tty, (output) => output.includes('/item-01'));
     tty.stdin.write('\u001b');
     await waitFor(tty, () => closed);
   } finally {

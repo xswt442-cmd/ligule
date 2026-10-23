@@ -1,11 +1,13 @@
 import { createElement, useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
-import { Box, Text, useInput, usePaste } from 'ink';
+import { Text, useInput, usePaste } from 'ink';
 import type { Locale } from '@ligule/core/kernel/locale.js';
 import type { SessionSummary } from '@ligule/core/session/list.js';
 import { textOf } from '@ligule/core/kernel/locale.js';
 import { editDraft } from './draft.js';
 import { hit, keyHint } from './keymap.js';
+import { PanelFrame } from './panels.js';
+import { TUI_COLORS } from './ui-style.js';
 
 export interface SessionPickerProps {
   readonly items: readonly SessionSummary[];
@@ -129,16 +131,21 @@ export function SessionPicker({
   const footer = [status, hint].filter((part): part is string => part !== undefined).join(' · ');
 
   if (!active) return null;
-  return createElement(Box, { flexDirection: 'column', width: Math.max(1, columns) },
-    ...(maxRows < 2 ? [] : [createElement(Text, { key: 'heading', wrap: 'truncate-end' }, summary)]),
-    ...visible.map((item) => createElement(Text, {
-      key: item.id,
-      inverse: item.id === selected?.id,
-      wrap: 'truncate-end',
-    }, sessionLabel(item, locale, current))),
+  return createElement(PanelFrame, { width: Math.max(1, columns) },
+    ...(maxRows < 2 ? [] : [createElement(Text, { key: 'heading', bold: true, color: TUI_COLORS.accent, wrap: 'truncate-end' }, summary)]),
+    ...visible.map((item) => {
+      const isSelected = item.id === selected?.id;
+      const label = sessionLabel(item, locale, current);
+      return createElement(Text, {
+        key: item.id,
+        bold: isSelected,
+        color: isSelected ? TUI_COLORS.accent : undefined,
+        wrap: 'truncate-end',
+      }, `${isSelected ? '›' : ' '} ${label}`);
+    }),
     ...(maxRows > 0 && maxRows <= 2 && selected === undefined
-      ? [createElement(Text, { key: 'empty', dimColor: true, wrap: 'truncate-end' }, status ?? t('没有匹配的会话', 'No matching sessions'))]
+      ? [createElement(Text, { key: 'empty', color: TUI_COLORS.muted, wrap: 'truncate-end' }, status ?? t('没有匹配的会话', 'No matching sessions'))]
       : []),
-    ...(maxRows > 2 ? [createElement(Text, { key: 'footer', dimColor: true, wrap: 'truncate-end' }, footer)] : []),
+    ...(maxRows > 2 ? [createElement(Text, { key: 'footer', color: TUI_COLORS.muted, wrap: 'truncate-end' }, footer)] : []),
   );
 }
