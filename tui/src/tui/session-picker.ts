@@ -126,7 +126,7 @@ export function SessionPicker({
     ? t('当前轮次结束后才能恢复会话', 'Finish the current turn before resuming a session')
     : selected === undefined
       ? t('没有匹配的会话', 'No matching sessions')
-      : sessionDetail(selected, locale);
+      : [selected.id === current ? t('当前会话', 'Current session') : '', sessionDetail(selected, locale)].filter(Boolean).join(' · ');
 
   const footer = [status, hint].filter((part): part is string => part !== undefined).join(' · ');
 

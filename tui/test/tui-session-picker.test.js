@@ -189,6 +189,7 @@ test('SessionPicker respects narrow width and total panel height', async () => {
     assert.ok(rows.length <= 4, `expected at most four rendered rows, got ${rows.length}`);
     assert.ok(rows.every((line) => displayWidth(line) <= 24), rows.join('\n'));
     assert.match(tty.painted(), /› Release checklist/, 'the selected session title remains visible when metadata is truncated');
+    assert.match(tty.painted(), /Current session/, 'the active-session status remains visible when row metadata is truncated');
   } finally {
     instance.unmount();
   }
