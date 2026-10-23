@@ -9,7 +9,7 @@ import { boundaryOf, limitsOf, workingDirectoryOf } from '../capability/limits.j
 import { resolveWithin } from '../capability/paths.js';
 import { resolveRecycler } from '../capability/recycle.js';
 import { versionOf } from '../session/observe.js';
-import { errorCode, errorMessage, existsOrFails, kindOfTarget, toPosix } from './common.js';
+import { errorCode, errorMessage, existsOrFails, toPosix } from './common.js';
 
 interface CreateArguments { path: string; content: string }
 interface WriteArguments { path: string; content: string }
@@ -32,12 +32,15 @@ export const createTool = {
   async run(args: CreateArguments, { config, observations }: WriteToolContext) {
     const boundary = boundaryOf(config);
     const target = await resolveWithin(boundary, args.path, { forWrite: true, cwd: workingDirectoryOf(config) });
-    // 目标已存在时拒绝创建，不覆盖任何内容；覆盖操作由 `write` 处理。
-    if (await existsOrFails(target)) {
-      throw new KernelError('create_target_exists', { detail: `${args.path} already exists; use write to replace its whole content or edit to change one part of it` });
-    }
     await mkdir(dirname(target), { recursive: true });
-    await writeFile(target, args.content, 'utf8');
+    try {
+      await writeFile(target, args.content, { encoding: 'utf8', flag: 'wx' });
+    } catch (error) {
+      if (errorCode(error) === 'EEXIST') {
+        throw new KernelError('create_target_exists', { detail: `${args.path} already exists; use write to replace its whole content or edit to change one part of it` });
+      }
+      throw error;
+    }
     observations?.observe(target, versionOf(Buffer.from(args.content, 'utf8')));
     return { text: `created ${toPosix(relative(boundary, target))} (${Buffer.byteLength(args.content, 'utf8')} bytes)` };
   },
@@ -167,9 +170,11 @@ export const deleteTool = {
         logger.debug(`no system recycle bin on this platform, using ${trashDirectory}`, { tool: 'delete', code: resolution.code });
       }
     }
-    await mkdir(join(boundary, trashDirectory), { recursive: true });
+    const trash = await resolveWithin(boundary, trashDirectory, { forWrite: true, cwd: boundary });
+    await mkdir(trash, { recursive: true });
+    const destination = await resolveWithin(boundary, trashDirectory, { forWrite: true, cwd: boundary });
     // 使用时间戳和随机后缀生成回收文件名，避免同名目标同时删除时冲突。
-    await rename(target, join(boundary, trashDirectory, `${Date.now()}-${randomUUID().slice(0, 8)}--${name.split('/').join('__')}`));
+    await rename(target, join(destination, `${Date.now()}-${randomUUID().slice(0, 8)}--${name.split('/').join('__')}`));
     observations?.forget(target);
     return { text: `moved ${name} into ${trashDirectory}` };
   },
