@@ -28,6 +28,7 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 - 会话切换在目标会话成功打开后才释放原会话锁；切换失败时继续保留当前会话。
 - 草稿和外部编辑器内容中的 CRLF 在编辑前统一为 LF，避免光标移动或删除时留下孤立的回车符。
 - 未设置 `FORCE_COLOR` 时，终端启动遵守非空的 `NO_COLOR`；窄窗口保留当前会话状态提示。
+- 工具审批和提问会临时收起授权设置向导；问题回答只发送给当前问题，不会被用作授权参数。
 
 ### English
 
@@ -45,6 +46,7 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 - Session navigation releases the previous session lock only after the target opens successfully; a failed switch keeps the current session active.
 - CRLF in saved drafts and external-editor content is normalized to LF before editing, so movement and deletion do not leave a stray carriage return.
 - Terminal startup honors a nonempty `NO_COLOR` when `FORCE_COLOR` is unset, and narrow windows retain the active-session status hint.
+- Tool approvals and questions temporarily hide grant setup; question answers go only to the active question and cannot become grant parameters.
 
 ## [0.0.6] - 2026-10-22
 
