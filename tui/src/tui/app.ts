@@ -7,6 +7,7 @@ import { Box, Static, Text, useApp, useInput, usePaste } from 'ink';
 import { SESSION_ROWS, answerOf, candidatesOf, describeChange, findLines, findUiCommand, insertMention, localizedCommand, mentionToken, resolveSessionId, routeInput, sessionLines } from './commands.js';
 import { pushHistory } from '@ligule/core/kernel/input-history.js';
 import { searchHistory } from './history.js';
+import { editDraft, isTypingRun, moveDraftCaret, type DraftState } from './draft.js';
 import { editInExternalEditor } from './editor.js';
 import { copyToClipboard, lastAnswer } from './clipboard.js';
 import { titleEscape, titleText } from './output.js';
@@ -81,11 +82,6 @@ function isAskQuestion(value: unknown): value is AskQuestion {
     && typeof value.multiSelect === 'boolean'
     && Array.isArray(value.options)
     && value.options.every((option) => isRecord(option) && typeof option.label === 'string');
-}
-
-interface DraftState {
-  readonly draft: string;
-  readonly caret: number;
 }
 
 interface TuiStatus {
@@ -418,38 +414,7 @@ export { SESSION_ROWS, UI_COMMANDS, answerOf, candidatesOf, describeChange, disp
 export { KEYMAP, CURRENT, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec, specOf } from './keymap.js';
 export { markdownLines } from './markdown.js';
 
-// 草稿编辑支持移动光标、跳到行首尾、删除前一词、清空草稿和插入可打印字符。
-export function editDraft(draft: string, caret: number, input: string, key: InkKey): DraftState {
-  const boundaries = [...GRAPHEMES.segment(draft)].map((part) => part.index);
-  const previous = boundaries.filter((index) => index < caret).at(-1) ?? 0;
-  const next = boundaries.find((index) => index > caret) ?? draft.length;
-  if (key.leftArrow) return { draft, caret: previous };
-  if (key.rightArrow) return { draft, caret: next };
-  if (key.home || (key.ctrl && input === 'a')) return { draft, caret: 0 };
-  if (key.end || (key.ctrl && input === 'e')) return { draft, caret: draft.length };
-  if (key.ctrl && input === 'u') return { draft: '', caret: 0 };
-  if (key.ctrl && input === 'w') {
-    // 删除前先跳过光标前的空白，避免连同前一个词一起误删。
-    const head = draft.slice(0, caret).replace(/\s+$/, '').replace(/[\p{L}\p{N}_.\-/]+$/u, '');
-    return { draft: head + draft.slice(caret), caret: head.length };
-  }
-  if (key.backspace || key.delete) {
-    if (caret === 0) return { draft, caret };
-    return { draft: draft.slice(0, previous) + draft.slice(caret), caret: previous };
-  }
-  if (input === '' || key.ctrl || key.meta) return { draft, caret };
-  return { draft: draft.slice(0, caret) + input + draft.slice(caret), caret: caret + input.length };
-}
-
-// 连续追加的文本合并为一个撤销单位；退格、删词、粘贴和换行各自形成独立单位。
-// 合并要求新草稿以旧草稿开头，新增部分恰好一个字素、位于末尾且不是空白。
-// 空白单独作为撤销单位，便于只撤销误输入的空格。
-export function isTypingRun(before: DraftState, after: DraftState): boolean {
-  if (before.caret !== before.draft.length || after.caret !== after.draft.length) return false;
-  if (!after.draft.startsWith(before.draft)) return false;
-  const parts = [...GRAPHEMES.segment(after.draft.slice(before.draft.length))];
-  return parts.length === 1 && !/\s/u.test(parts[0].segment);
-}
+export { editDraft, isTypingRun } from './draft.js';
 
 const textOf = (value: unknown): string => (typeof value === 'string' ? value : JSON.stringify(value ?? '', null, 2));
 
@@ -2860,18 +2825,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     const down = hit('history-down', input, key) || hit('history-down-shift', input, key);
     if (up || down) {
       if (draft.includes('\n')) {
-        const start = draft.lastIndexOf('\n', Math.max(0, caret - 1)) + 1;
-        const column = caret - start;
-        if (up && start > 0) {
-          const previous = draft.lastIndexOf('\n', start - 2) + 1;
-          setCaret(Math.min(previous + column, start - 1));
-        } else if (down) {
-          const next = draft.indexOf('\n', caret);
-          if (next >= 0) {
-            const end = draft.indexOf('\n', next + 1);
-            setCaret(Math.min(next + 1 + column, end < 0 ? draft.length : end));
-          }
-        }
+        setCaret(moveDraftCaret(draft, caret, up ? 'up' : 'down'));
         return;
       }
       if (entries.length === 0) return;

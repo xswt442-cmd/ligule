@@ -12,11 +12,19 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 - 终端界面输入 `/` 即可浏览全部命令，按名称或说明筛选并滚动选择；固定命令参数支持 Tab 补全，补全仅修改草稿，权限升级仍需确认。
 
+**修复**
+
+- Delete 向前删除完整字符，Backspace 向后删除；多行输入的上下移动按显示列定位，避免拆开中文、组合字符和表情。
+
 ### English
 
 **Improved**
 
 - Typing `/` in the terminal UI browses all commands with name or description filtering and scrollable selection. Fixed command arguments support Tab completion, which only edits the draft; permission upgrades still require confirmation.
+
+**Fixed**
+
+- Delete removes the next whole character and Backspace the previous one. Vertical movement in multiline drafts follows display columns without splitting Chinese text, combining characters, or emoji.
 
 ## [0.0.6] - 2026-10-22
 

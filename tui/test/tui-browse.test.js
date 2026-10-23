@@ -58,6 +58,23 @@ test('permission completion leaves the existing explicit confirmation intact', a
   }), { permissionControl: true });
 });
 
+test('terminal Delete and Backspace edit opposite sides of a whole emoji', async () => {
+  await withTuiHost(async (context) => withApp(context, async ({ frame, stdin, wait }) => {
+    stdin.write('A👩‍💻B');
+    await wait(() => frame().includes('A👩‍💻B'));
+    stdin.write('\x1b[H');
+    await delay(40);
+    stdin.write('\x1b[C');
+    await delay(40);
+    stdin.write('\x1b[3~');
+    await wait(() => frame().includes('AB') && !frame().includes('👩‍💻'));
+    stdin.write('\x7f');
+    await wait(() => frame().includes('› B'));
+    stdin.write('\r');
+    await wait(() => context.providerRequests.some(request => request.messages.some(message => message.role === 'user' && message.content === 'B')));
+  }));
+});
+
 test('complete history opens in a bounded viewport and keyboard navigation reaches both ends', async () => {
   await withTuiHost(async (context) => withApp(context, async ({ frame, output, stdin, type, wait }) => {
     const text = Array.from({ length: 60 }, (_, index) => `历史行 ${index}`).join('\n');
