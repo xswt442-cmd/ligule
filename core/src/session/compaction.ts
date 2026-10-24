@@ -73,7 +73,7 @@ export function createCompaction({ provider, session, directory, id, limits, log
   };
   directory: string;
   id: string;
-  limits: { contextTokens: number; compactThresholdRatio: number; compactRetainRatio: number; resultBytes: number };
+  limits: { contextTokens: number; compactThresholdRatio: number; compactRetainRatio: number; outputTokens?: number; resultBytes: number };
   logger?: { log?: (message: string, fields?: Record<string, unknown>) => void };
   requestPrefix?: () => { system: string; tools: readonly ModelTool[] };
 }) {
@@ -81,8 +81,16 @@ export function createCompaction({ provider, session, directory, id, limits, log
     throw new Error('compaction_retain_must_be_below_threshold');
   }
   // 压力阈值和保留预算以同一个上下文窗口计算。
-  const threshold = Math.floor(limits.contextTokens * limits.compactThresholdRatio);
+  // 请求的输出与输入共用窗口：模型或会话声明了输出预算时，预留其中一部分给输出，
+  // 预留上限为窗口的四分之一，避免过大的输出声明把阈值压到保留预算之下。
+  // 预留后阈值不高于保留预算时退回比例阈值，不因预留而停用压缩。
   const retained = Math.floor(limits.contextTokens * limits.compactRetainRatio);
+  const reserved = limits.outputTokens === undefined ? 0
+    : Math.min(limits.outputTokens, Math.floor(limits.contextTokens / 4));
+  const reservedThreshold = limits.contextTokens - reserved;
+  const threshold = reservedThreshold > retained
+    ? Math.min(Math.floor(limits.contextTokens * limits.compactThresholdRatio), reservedThreshold)
+    : Math.floor(limits.contextTokens * limits.compactThresholdRatio);
   // 本地估算与服务端用量的校准系数；尚无服务端用量时使用 1。
   let factor = 1;
   let overflowTried = false;
@@ -140,7 +148,7 @@ export function createCompaction({ provider, session, directory, id, limits, log
 
   // 计算切点、请求摘要并追加压缩块。无法压缩时返回具体原因和 null 结果。
   // 每次压缩覆盖尚未进入任何块的区间；块文件整体原子替换，已有块保持不变。
-  async function compact(signal?: AbortSignal): Promise<{ blockId: number; fromSeq: number; toSeq: number; tokensBefore: number; tokensAfter: number } | null> {
+  async function compact(reason: 'manual' | 'auto' | 'overflow', signal?: AbortSignal): Promise<{ blockId: number; fromSeq: number; toSeq: number; tokensBefore: number; tokensAfter: number } | null> {
     await seedFromRecord();
     const events = await session.read();
     const { blocks } = await loadCheckpointFile({ directory, id, events });
@@ -195,9 +203,16 @@ export function createCompaction({ provider, session, directory, id, limits, log
       blockId: (last?.blockId ?? 0) + 1,
     });
     await writeCheckpointFile(directory, id, createCheckpointFile({ id, blocks: [...blocks, block] }));
+    // 压缩事实写入记录：界面与导出据此说明第几块覆盖哪段、为什么压。
+    if (typeof session.append === 'function') {
+      await session.append({
+        kind: 'compaction', ignorable: true, reason, blockId: block.blockId, fromSeq, toSeq: block.toSeq, tokensBefore, tokensAfter,
+      });
+    }
     // 保存本地估算和校准系数，使读取记录的一方可以还原触发压缩时的计算依据。
     logger?.log?.('session compacted', {
       sessionId: id,
+      reason,
       blockId: block.blockId,
       fromSeq,
       toSeq: block.toSeq,
@@ -216,13 +231,14 @@ export function createCompaction({ provider, session, directory, id, limits, log
   }
 
   return {
-    tokens: () => ({ threshold, retained, factor }),
+    tokens: () => ({ threshold, retained, reserved, factor }),
 
     // 为状态和命令行提供上下文窗口、压力阈值、当前估算和最近一次服务端用量。
     async context(): Promise<{
       window: number;
       threshold: number;
       retained: number;
+      reserved: number;
       estimated: number;
       factor: number;
       // 返回本地估算使用的算法标识，供界面显示。
@@ -238,6 +254,7 @@ export function createCompaction({ provider, session, directory, id, limits, log
         window: limits.contextTokens,
         threshold,
         retained,
+        reserved,
         estimated: Math.round(estimateRequest({ ...requestPrefix(), messages: view }) * factor),
         factor: Math.round(factor * 100) / 100,
         measurement: 'request-v1',
@@ -248,13 +265,13 @@ export function createCompaction({ provider, session, directory, id, limits, log
     },
 
     // 手动压缩只能在没有活动轮次时执行；无法缩短时返回明确结果。
-    compactNow: (signal?: AbortSignal) => compact(signal),
+    compactNow: (signal?: AbortSignal) => compact('manual', signal),
 
     // 在构造请求后检查上下文压力；超出阈值时先压缩，再使用新投影发送请求。
     async prepare(request: LoopCompactionRequest, signal?: AbortSignal): Promise<unknown[]> {
       await seedFromRecord();
       if (estimateRequest(request) * factor <= threshold) return request.messages;
-      const done = await compact(signal);
+      const done = await compact('auto', signal);
       if (done === null) return request.messages;
       return await session.modelView();
     },
@@ -268,7 +285,7 @@ export function createCompaction({ provider, session, directory, id, limits, log
         detail: (error as { detail?: string }).detail?.slice(0, 200),
         estimated: Math.round(estimateRequest(request) * factor),
       });
-      const done = await compact(signal);
+      const done = await compact('overflow', signal);
       if (done === null) {
         logger?.log?.('the one allowed compaction did not happen, the round is abandoned', { sessionId: id });
         return null;

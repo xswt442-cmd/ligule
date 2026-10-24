@@ -498,7 +498,8 @@ function sessionLoopLimits(state: HostSessionBase): LoopLimits {
 // 优先采用所选模型声明的上下文窗口，其次采用配置的备用值；两者都未设置时关闭压缩。
 // 立即拒绝无效上限，因为非有限窗口无法用于计算上下文压力。
 // 保留预算必须小于压力阈值，压缩后才能将请求控制在阈值以内。
-export function compactionLimitsOf(config: HostConfigSnapshot, selectedContextTokens?: unknown) {
+// 输出预算参与阈值计算：请求的输出与输入共用同一窗口，不为它预留会让长输出请求贴线被拒。
+export function compactionLimitsOf(config: HostConfigSnapshot, selectedContextTokens?: unknown, selectedOutputTokens?: unknown) {
   const limits = limitsOf(config);
   const contextTokens = selectedContextTokens ?? limits.contextTokens;
   if (contextTokens === undefined) return undefined;
@@ -518,10 +519,12 @@ export function compactionLimitsOf(config: HostConfigSnapshot, selectedContextTo
       detail: `compactRetainRatio (${compactRetainRatio}) must be below compactThresholdRatio (${compactThresholdRatio}), and the threshold must be at most 1`,
     });
   }
+  const outputTokens = selectedOutputTokens;
   return {
     contextTokens,
     compactThresholdRatio,
     compactRetainRatio,
+    ...(typeof outputTokens === 'number' && Number.isSafeInteger(outputTokens) && outputTokens > 0 ? { outputTokens } : {}),
     resultBytes: resultLimit(config),
   };
 }
@@ -1929,7 +1932,9 @@ export function createHost({
     // 未配置模型上下文窗口时关闭压缩。
     const rebuildCompaction = (model: Record<string, unknown>) => {
       const selectedModel = resolveModel(model);
-      const limits = compactionLimitsOf(config, selectedModel.serviceContextTokens);
+      // 会话显式设置的输出预算优先于模型声明；两者都缺省时不预留。
+      const override = state.generation.options.outputTokens;
+      const limits = compactionLimitsOf(config, selectedModel.serviceContextTokens, override ?? selectedModel.outputTokens);
       return limits === undefined ? null : createCompaction({
         provider: compactionProgressProvider(live, (event) => {
           if (state.progressId !== undefined) observeLoopProgress(state as HostSessionState, connection, state.progressId, event);

@@ -112,7 +112,7 @@ test('pressure over the line compacts once and the next request carries the summ
     assert.equal(sent.messages.at(-1).text, '再问一句', 'the input of this round is still there');
 
     const after = await readFile(join(directory, `${id}.jsonl`), 'utf8');
-    assert.equal(after.trim().split('\n').length, lines + 3, '这一轮加用户、助手与轮次完成那三条，检查点一条都不加');
+    assert.equal(after.trim().split('\n').length, lines + 4, '这一轮加用户、助手、轮次完成与压缩事实那四条，块文件本身一条都不进日志');
     const numbers = logged.find((entry) => entry.message === 'session compacted');
     assert.ok(numbers.tokensBefore > numbers.tokensAfter, 'a summary removes more than it adds');
   });
@@ -282,6 +282,44 @@ test('service model context changes the compaction window with the selected mode
   const large = resolveModel(config.model, { provider: 'local', model: 'large' });
   assert.equal(compactionLimitsOf(config, small.serviceContextTokens).contextTokens, 24000);
   assert.equal(compactionLimitsOf(config, large.serviceContextTokens).contextTokens, 96000);
+});
+
+// 输出与输入共用窗口：声明输出预算时提前触发，预留封顶为窗口的四分之一；
+// 预留会把阈值压到保留预算之下时退回比例阈值，不因预留而停用压缩。
+test('a declared output budget lowers the pressure threshold within a quarter of the window', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    const contextOf = async (outputTokens) => (await createCompaction({
+      provider: fakeProvider([]), session, directory, id, limits: { ...limits, ...(outputTokens === undefined ? {} : { outputTokens }) },
+    })).context();
+    const bare = await contextOf(undefined);
+    assert.deepEqual([bare.window, bare.threshold, bare.retained, bare.reserved], [4000, 3200, 640, 0], '没有声明就不预留');
+    assert.equal((await contextOf(1000)).threshold, 3000, '0.8 本来是 3200，给输出留 1000 后是 3000');
+    assert.equal((await contextOf(4000)).reserved, 1000, '声明超过窗口四分之一时，预留停在四分之一');
+    const narrow = { contextTokens: 1000, compactThresholdRatio: 0.8, compactRetainRatio: 0.76, resultBytes: 16_000, outputTokens: 1000 };
+    const corner = await createCompaction({ provider: fakeProvider([]), session, directory, id: `${id}-corner`, limits: narrow });
+    assert.equal((await corner.context()).threshold, 800, '预留后低于保留预算，退回比例阈值');
+  });
+});
+
+// 每次压缩都把块身份、范围与原因写进记录：界面与导出据此说明何时为什么压过。
+test('each compaction appends its reason to the session record', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    const provider = fakeProvider([[{ type: 'text', text: 'one' }]]);
+    const compaction = createCompaction({ provider, session, directory, id, limits });
+    const loop = createLoop({ kernel, provider, prompt, session, compaction });
+
+    await fill(session, 4);
+    await loop.run('A', {});
+    let written = (await session.read()).filter((event) => event.kind === 'compaction');
+    assert.deepEqual(written.map((event) => [event.reason, event.blockId, event.ignorable]), [['auto', 1, true]]);
+    assert.ok(written[0].tokensBefore > written[0].tokensAfter);
+
+    await fill(session, 4);
+    const done = await compaction.compactNow();
+    assert.ok(done !== null);
+    written = (await session.read()).filter((event) => event.kind === 'compaction');
+    assert.deepEqual(written.map((event) => [event.reason, event.blockId]), [['auto', 1], ['manual', 2]]);
+  });
 });
 
 // 端点报告的用量写入会话记录，界面和恢复流程都从记录中读取。
