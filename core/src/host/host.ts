@@ -11,7 +11,7 @@ import {
 } from '../delegation.js';
 import {
   assertDelegationMcpServer, assertDelegationMcpTool, assertDelegationPermission, assertDelegationPolicy, createDelegationGrant, delegationPathOf,
-  listDelegationGrants, recordDelegationEvent, requireDelegationGrant, revokeDelegationGrant,
+  listDelegationGrants, recordDelegationEvent, revokeDelegationGrant,
   type CreateDelegationGrantInput, type DelegationGrant,
 } from './agent-control.js';
 import { listMcpTrust, mcpServerTrust, mcpTrustPathOf, setMcpServerTrust, type McpTrustScope } from './mcp-trust.js';
@@ -19,6 +19,7 @@ import { createPermissionContext, DEFAULT_PERMISSION_CONTEXT, permissionDenial, 
 import { createKernel, type Kernel } from '../kernel/kernel.js';
 import { loadAssembly, type Assembly, type Plugin } from '../kernel/assembly.js';
 import { loadExtensions, type ExtensionDiagnostic } from '../kernel/extensions.js';
+import { readExtensionState, writeExtensionState } from '../kernel/extension-state.js';
 import {
   applyModeToPrompt, DEFAULT_MODE, listModes, loadMode, resolveModeSelection,
   type ModeDirectories, type ModeFile,
@@ -28,7 +29,7 @@ import { isTrusted, setTrusted } from '../kernel/workspace-trust.js';
 import { historyPathOf, loadHistory, rememberHistory } from '../kernel/input-history.js';
 import { parsePrefsJson, prefsPathOf, readPrefs, savePrefs } from '../kernel/desktop-prefs.js';
 import { credentialStatus, deleteCredential, storeCredential } from '../kernel/credentials.js';
-import { modelServices, modelSelection, resolveModel, type ModelSelection, type ModelService } from '../kernel/model-services.js';
+import { modelServices, modelSelection, resolveModel, type ModelSelection } from '../kernel/model-services.js';
 import { createDecisionChain, isPolicyRule, policyArgsHash, type DecisionChain, type PolicyAskResult, type PolicyMode, type PolicyState, type PolicyThresholds } from '../kernel/policy.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
@@ -59,6 +60,8 @@ import { networkPlugin } from '../tools/network.js';
 import { createSkillPlugin } from '../tools/skill.js';
 import { createMcpPlugin, type McpAuthorization } from '../tools/mcp.js';
 import { createSubagentPlugin } from '../tools/subagent.js';
+import { createCompactPlugin } from '../tools/compact.js';
+import { createCustomToolsPlugin, discoverCustomTools } from '../tools/custom.js';
 import { createAskUserPlugin } from '../tools/ask-user.js';
 import { createMcpRegistry, mcpServerConfigs, type McpRegistry } from '../capability/mcp.js';
 import { discoverModels } from '../model/discovery.js';
@@ -68,7 +71,7 @@ import type { ModelRequest, ProviderEvent } from '../kernel/loop.js';
 import { createConnection, type Connection, type HostRequest } from './connection.js';
 import { APPROVAL_METHOD, QUESTION_METHOD, validateCall, type HostMethodParams } from './protocol.js';
 import { createConfig, mergePolicyRules, type ConfigSnapshot } from '../kernel/config.js';
-import { loadConfigLayers } from '../kernel/config-file.js';
+import { dataRoot, loadConfigLayers } from '../kernel/config-file.js';
 import type { LoggerBackend } from '../kernel/log.js';
 import type { LoopLimits } from '../kernel/loop.js';
 import type { LoadedLayers, createConfigStore } from '../kernel/config-store.js';
@@ -103,6 +106,10 @@ interface HostExtensions {
   readonly paths: string[];
   readonly ignored: ExtensionDiagnostic[];
   readonly installedDirectory?: string;
+  // 安装路径（归一后）到安装名的映射；目录包用目录名，单文件用文件主名。
+  readonly installNames?: Record<string, string>;
+  // 安装目录中已被启停登记停用的扩展；配置层显式声明的路径不在此列。
+  readonly disabled?: { name: string; path: string }[];
 }
 
 export interface EnvironmentSeed {
@@ -219,6 +226,7 @@ interface HostSessionBase {
   readonly loopModelCalls: number;
   pendingLoopIterations?: number;
   generation: SessionGeneration;
+  modelCredentialBindings?: Record<string, unknown>;
   pendingGeneration?: SessionGeneration;
   pending?: ModeFile;
   running?: AbortController;
@@ -288,23 +296,6 @@ interface ExtensionPromptFragment {
 
 function requiredString(value: unknown, field: string): string {
   if (typeof value !== 'string') throw new KernelError('protocol_args_invalid', { detail: `${field} must be a string` });
-  return value;
-}
-
-function optionalString(value: unknown, field: string): string | undefined {
-  if (value === undefined) return undefined;
-  return requiredString(value, field);
-}
-
-function optionalNumber(value: unknown, field: string): number | undefined {
-  if (value === undefined) return undefined;
-  if (typeof value !== 'number') throw new KernelError('protocol_args_invalid', { detail: `${field} must be a number` });
-  return value;
-}
-
-function optionalBoolean(value: unknown, field: string): boolean | undefined {
-  if (value === undefined) return undefined;
-  if (typeof value !== 'boolean') throw new KernelError('protocol_args_invalid', { detail: `${field} must be a boolean` });
   return value;
 }
 
@@ -514,7 +505,8 @@ function sessionLoopLimits(state: HostSessionBase): LoopLimits {
 // 优先采用所选模型声明的上下文窗口，其次采用配置的备用值；两者都未设置时关闭压缩。
 // 立即拒绝无效上限，因为非有限窗口无法用于计算上下文压力。
 // 保留预算必须小于压力阈值，压缩后才能将请求控制在阈值以内。
-export function compactionLimitsOf(config: HostConfigSnapshot, selectedContextTokens?: unknown) {
+// 输出预算参与阈值计算：请求的输出与输入共用同一窗口，不为它预留会让长输出请求贴线被拒。
+export function compactionLimitsOf(config: HostConfigSnapshot, selectedContextTokens?: unknown, selectedOutputTokens?: unknown) {
   const limits = limitsOf(config);
   const contextTokens = selectedContextTokens ?? limits.contextTokens;
   if (contextTokens === undefined) return undefined;
@@ -534,10 +526,12 @@ export function compactionLimitsOf(config: HostConfigSnapshot, selectedContextTo
       detail: `compactRetainRatio (${compactRetainRatio}) must be below compactThresholdRatio (${compactThresholdRatio}), and the threshold must be at most 1`,
     });
   }
+  const outputTokens = selectedOutputTokens;
   return {
     contextTokens,
     compactThresholdRatio,
     compactRetainRatio,
+    ...(typeof outputTokens === 'number' && Number.isSafeInteger(outputTokens) && outputTokens > 0 ? { outputTokens } : {}),
     resultBytes: resultLimit(config),
   };
 }
@@ -568,7 +562,7 @@ function observedProvider(provider: HostProvider, onDelta: (event: ProviderEvent
 
 // 主循环、压缩和派生执行都通过此包装器调用模型。
 // 调用时再解析提供方，确保同一轮使用同一配置，后续轮次可采用新配置。
-function currentProvider(read: () => HostProvider): HostProvider {
+function currentProvider(read: () => HostProvider, authorize: () => void): HostProvider {
   return {
     get name() { return read().name; },
     get model() { return read().model; },
@@ -579,10 +573,29 @@ function currentProvider(read: () => HostProvider): HostProvider {
     get contextTokens() { return read().contextTokens; },
     get thinkingCapability() { return read().thinkingCapability; },
     get thinkingEffort() { return read().thinkingEffort; },
-    withModel(model) { return read().withModel(model); },
-    withGeneration(options) { return read().withGeneration(options); },
-    stream(request, options) { return read().stream(request, options); },
+    withModel(model) {
+      const provider = read().withModel(model);
+      return currentProvider(() => provider, authorize);
+    },
+    withGeneration(options) {
+      const provider = read().withGeneration(options);
+      return currentProvider(() => provider, authorize);
+    },
+    async *stream(request, options) {
+      const provider = read();
+      if (provider.pending !== true) authorize();
+      yield* provider.stream(request, options);
+    },
   };
+}
+
+function hasModelCredentialBinding(model: Record<string, unknown>, api: unknown, baseURL: unknown, reference: unknown): boolean {
+  if (typeof baseURL !== 'string') return false;
+  const address = new URL(apiRoot(baseURL)).href;
+  const matches = (candidateApi: unknown, candidateURL: unknown, candidateReference: unknown) =>
+    candidateApi === api && candidateReference === reference && typeof candidateURL === 'string' && new URL(apiRoot(candidateURL)).href === address;
+  return modelServices(model.services).some((service) => matches(service.api, service.baseURL, service.apiKeyEnv))
+    || (typeof model.model === 'string' && matches(model.api, model.baseURL, model.apiKeyEnv ?? 'LIGULE_API_KEY'));
 }
 
 function compactionProgressProvider(provider: HostProvider, onProgress: (event: LoopProgressEvent) => void): HostProvider {
@@ -1275,6 +1288,11 @@ export function createHost({
   ): Promise<T> {
     if (state.permissionChanging) throw new KernelError('permission_change_in_progress', { detail: state.id });
     if (state.running !== undefined) throw new KernelError('run_already_running', { detail: state.id });
+    const layers = state.environment.layers;
+    // 凭据目标随轮次冻结；项目配置只能引用用户或命令行明确选择的服务绑定。
+    // 不携带配置层的进程内调用由调用方显式提供完整配置。
+    state.modelCredentialBindings = Object.keys(layers).length === 0 ? undefined
+      : modelConfigOf(createConfig({ user: layers.user ?? {}, flag: layers.flag ?? {} }));
     const controller = new AbortController();
     const progress = beginProgress(state, connection, initialPhase);
     const settleAsks = (): void => { for (const settle of state.asks) settle(); };
@@ -1511,7 +1529,17 @@ export function createHost({
       adopt: async () => {},
     };
     // 调用时解析生成设置，让循环、压缩和派生执行都能读取会话的最新配置。
-    const live = currentProvider(() => state.generation.provider);
+    const live = currentProvider(() => state.generation.provider, () => {
+      const bindings = state.modelCredentialBindings;
+      if (bindings === undefined) return;
+      const configuredModel = state.generation.model ?? {};
+      // 没有模型配置时，提供方由进程内调用者注入，不使用配置中的 HTTP 凭据。
+      if (Object.keys(configuredModel).length === 0) return;
+      const model = resolveModel(configuredModel);
+      if (!hasModelCredentialBinding(bindings, model.api, model.baseURL, model.apiKeyEnv ?? 'LIGULE_API_KEY')) {
+        throw new KernelError('provider_credential_unbound', { detail: 'the selected model endpoint and credential reference must be bound in user configuration or command-line flags' });
+      }
+    });
     let recoveredPolicyState: PolicyState | undefined;
     await session.acquire();
     const cleanup = [];
@@ -1753,7 +1781,17 @@ export function createHost({
       authorizeTool: authorizeMcpTool,
       identityDigest: (server) => mcpConfigs.find((entry) => entry.name === server)?.identityDigest,
     };
-    const loaded = skills.skills.length === 0 ? plugins : [...plugins, createSkillPlugin(skills, () => mcp.servers())];
+    // 用户在数据根 tools/ 声明的命令工具与技能同源：发现于用户目录，加载不授予额外权限，
+    // 执行仍按 exec 能力走 Permission 与 Policy 判定链。
+    const customTools = await discoverCustomTools(join(dataRoot(), 'tools'));
+    for (const diagnostic of customTools.diagnostics) {
+      logger?.log?.('custom tool is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
+    }
+    const loaded = [
+      ...plugins,
+      ...(customTools.tools.length === 0 ? [] : [createCustomToolsPlugin(customTools.tools)]),
+      ...(skills.skills.length === 0 ? [] : [createSkillPlugin(skills, () => mcp.servers())]),
+    ];
     // 加载器负责发现提示模板并处理项目优先级；模板由 Host 展开，确保所有客户端使用相同规则。
     const templates = templateRegistry ?? await discoverTemplates(templateDirectories(env.projectRoot));
     for (const diagnostic of templates.diagnostics) {
@@ -1797,7 +1835,14 @@ export function createHost({
         }
       },
     })];
-    const assembly = loadAssembly(kernel, [...basePlugins, managedProcessPlugin(managedProcesses), ...asked, createSubagentPlugin({
+    const assembly = loadAssembly(kernel, [...basePlugins, managedProcessPlugin(managedProcesses), ...asked, createCompactPlugin({
+      // 压缩实例随所选模型重建；工具经取值函数读取当前实例。派生子会话不注册此工具，
+      // 子会话仍由自身构建的自动压缩管理预算。
+      compaction: () => state.compaction ?? null,
+      session,
+      directory,
+      id,
+    }), createSubagentPlugin({
       config,
       provider: live,
       chain,
@@ -1911,7 +1956,9 @@ export function createHost({
     // 未配置模型上下文窗口时关闭压缩。
     const rebuildCompaction = (model: Record<string, unknown>) => {
       const selectedModel = resolveModel(model);
-      const limits = compactionLimitsOf(config, selectedModel.serviceContextTokens);
+      // 会话显式设置的输出预算优先于模型声明；两者都缺省时不预留。
+      const override = state.generation.options.outputTokens;
+      const limits = compactionLimitsOf(config, selectedModel.serviceContextTokens, override ?? selectedModel.outputTokens);
       return limits === undefined ? null : createCompaction({
         provider: compactionProgressProvider(live, (event) => {
           if (state.progressId !== undefined) observeLoopProgress(state as HostSessionState, connection, state.progressId, event);
@@ -2162,7 +2209,7 @@ export function createHost({
     };
   }
 
-  async function configureSession(state: HostSessionState, params: HostMethodParams, connection: HostClientConnection): Promise<Record<string, unknown>> {
+  async function configureSession(state: HostSessionState, params: HostMethodParams): Promise<Record<string, unknown>> {
     const modeChanged = params.mode !== undefined;
     const policyChanged = params.policy !== undefined;
     const permissionChanged = params.permissionProfile !== undefined || params.permissionNetwork !== undefined;
@@ -2691,7 +2738,7 @@ export function createHost({
           const mode = requiredString(message.params.mode, 'mode');
           return await serializeSessionConfiguration(sessionId, async () => {
             const state = open(sessionId);
-            await configureSession(state, { policy: mode }, connection);
+            await configureSession(state, { policy: mode });
             return { policy: state.chain.mode, policySource: state.chain.modeSource, policyDefault: state.chain.configuredMode() };
           });
         }
@@ -2710,7 +2757,7 @@ export function createHost({
           const name = requiredString(message.params.name, 'name');
           return await serializeSessionConfiguration(sessionId, async () => {
             const state = open(sessionId);
-            await configureSession(state, { mode: name }, connection);
+            await configureSession(state, { mode: name });
             return {
               mode: state.mode.file?.name ?? null,
               layer: state.mode.file?.layer ?? null,
@@ -2775,7 +2822,7 @@ export function createHost({
           };
         }
         case 'session.configure': {
-          return await serializeSessionConfiguration(sessionId, () => configureSession(open(sessionId), message.params, connection));
+          return await serializeSessionConfiguration(sessionId, () => configureSession(open(sessionId), message.params));
         }
         case 'workspaces.list':
           // 返回持久工作区登记表及默认工作区身份，供客户端显示。
@@ -2808,7 +2855,7 @@ export function createHost({
           const selection = modelSelection({ provider: message.params.provider, model: message.params.model });
           return await serializeSessionConfiguration(sessionId, async () => {
             const state = open(sessionId);
-            await configureSession(state, { provider: selection.provider, model: selection.model }, connection);
+            await configureSession(state, { provider: selection.provider, model: selection.model });
             const generation = state.pendingGeneration ?? state.generation;
             return { model: generation.provider.model, serviceId: selection.provider, when: state.running === undefined ? 'now' : 'round' };
           });
@@ -2822,14 +2869,9 @@ export function createHost({
             if (env.store !== undefined) await env.store.read(); // 刷新用户配置层（不使用合并后的 values）。
             const trusted = env.layers.user?.model;
             const model = isRecord(trusted) ? trusted : {};
-            const requestedURL = new URL(apiRoot(message.params.baseURL)).href;
-            const matches = (api: unknown, baseURL: unknown, reference: unknown) =>
-              api === message.params.api && reference === message.params.reference &&
-              typeof baseURL === 'string' && new URL(apiRoot(baseURL)).href === requestedURL;
-            const saved = modelServices(model.services).some((service) => matches(service.api, service.baseURL, service.apiKeyEnv));
-            const legacy = typeof model.model === 'string' &&
-              matches(model.api, model.baseURL, model.apiKeyEnv ?? 'LIGULE_API_KEY');
-            if (!saved && !legacy) throw new KernelError('model_discovery_credential_unbound');
+            if (!hasModelCredentialBinding(model, message.params.api, message.params.baseURL, message.params.reference)) {
+              throw new KernelError('model_discovery_credential_unbound');
+            }
           }
           return { models: await discoverModels({
             api: message.params.api, baseURL: message.params.baseURL,
@@ -2973,18 +3015,29 @@ export function createHost({
           })] ?? 'unknown';
           const environmentSessions = [...sessions.values()].filter((state) => state.environment === env);
           const extensionStates = environmentSessions.flatMap((state) => state.extensions.loaded);
+          const installName = (path: string) => env.extensions.installNames?.[resolve(path)] ?? basename(path, '.js');
           const extensions = env.extensions.paths.map((path) => {
             const installedDirectory = env.extensions.installedDirectory;
             const installedPath = installedDirectory === undefined ? '..' : relative(resolve(installedDirectory), resolve(path));
             const installed = installedPath !== '..' && !installedPath.startsWith(`..${process.platform === 'win32' ? '\\\\' : '/'}`)
               && !isAbsolute(installedPath);
             return {
-              name: basename(path),
+              name: installName(path),
               source: installed ? 'user-installed' : 'user-configured',
+              enabled: true,
               loaded: extensionStates.some((extension) => resolve(extension.path) === resolve(path)),
               registeredTools: extensionStates.filter((extension) => resolve(extension.path) === resolve(path)).flatMap((extension) => extension.tools),
             };
           });
+          for (const off of env.extensions.disabled ?? []) {
+            extensions.push({
+              name: off.name,
+              source: 'user-installed',
+              enabled: false,
+              loaded: false,
+              registeredTools: [],
+            });
+          }
           const extensionTools = new Set(session?.extensions.loaded.flatMap((extension) => extension.tools) ?? []);
           const registeredTools = session?.kernel.catalog() ?? await settingsToolCatalog(env, skills);
           const activeTools = session === undefined ? null : new Set(session.kernel.manifest().map((tool) => tool.name));
@@ -3067,6 +3120,30 @@ export function createHost({
           }
           return { version: store.version, scope, server: serverName, trusted: message.params.trusted };
         }
+        case 'extensions.set': {
+          // 启停登记是用户范围的持久状态；只有可信界面可以修改。
+          if (!permissionControl) throw new KernelError('extensions_set_trusted_ui_required');
+          const env = await environmentFor(message.params.projectRoot);
+          const name = requiredString(message.params.name, 'name');
+          if (typeof message.params.enabled !== 'boolean') {
+            throw new KernelError('protocol_args_invalid', { detail: 'enabled must be a boolean' });
+          }
+          // 名称必须对应安装目录中的扩展；配置层显式声明的路径不受登记管理。
+          const known = new Set([
+            ...Object.values(env.extensions.installNames ?? {}),
+            ...(env.extensions.disabled ?? []).map((entry) => entry.name),
+          ]);
+          if (!known.has(name)) {
+            throw new KernelError('extensions_set_unknown', { detail: `${name} is not an extension installed in the user extensions directory` });
+          }
+          const state = await readExtensionState();
+          const disabled = new Set(state.disabled);
+          if (message.params.enabled) disabled.delete(name);
+          else disabled.add(name);
+          await writeExtensionState(undefined, [...disabled]);
+          // 登记在下一次 Host 启动时生效；当前已加载的会话不受影响。
+          return { name, enabled: message.params.enabled, applies: 'next-start' };
+        }
         case 'mcp.trust.tools': {
           if (!permissionControl) throw new KernelError('mcp_trust_trusted_ui_required');
           const env = await environmentFor(message.params.projectRoot);
@@ -3122,7 +3199,8 @@ export function createHost({
         case 'config.set': {
           // 配置存储负责允许字段、值校验和配置层到文件的映射；Host 只转发这些字段。
           if (defaultEnvironment.store === undefined) throw new KernelError('config_write_unsupported');
-          const { value, op, index, ruleTool, ruleDecision, ruleMatch, ruleReason, ruleTarget, rulePath, ruleArgsHash } = message.params;
+          const { value, op, index, ruleTool, ruleDecision, ruleMatch, ruleReason, ruleTarget, rulePath, ruleArgsHash,
+            serverName, serverCommand, serverArgs, serverEnv, serverCwd } = message.params;
           const field = requiredString(message.params.field, 'field');
           const layer = requiredString(message.params.layer, 'layer');
           const version = requiredString(message.params.version, 'version');
@@ -3132,9 +3210,11 @@ export function createHost({
             target: ruleTarget, path: rulePath, argsHash: ruleArgsHash,
           };
           const rule = Object.values(given).every((item) => item === undefined) ? undefined : given;
+          const serverGiven = { name: serverName, command: serverCommand, args: serverArgs, env: serverEnv, cwd: serverCwd };
+          const server = Object.values(serverGiven).every((item) => item === undefined) ? undefined : serverGiven;
           const env = await environmentFor(message.params.projectRoot);
           if (env.store === undefined) throw new KernelError('config_write_unsupported');
-          const { key, table, shadowed, shadowedBy, changed, effective, layers, ...saved } = await env.store.write({ layer, field, value, version, op, index, rule }, async (candidate, editedLayer) => {
+          const { key, table, shadowed, shadowedBy, changed, effective, layers, ...saved } = await env.store.write({ layer, field, value, version, op, index, rule, server }, async (candidate, editedLayer) => {
             if (!field.startsWith('model.')) return;
             if (layer === 'user') hostProviderFromConfig(createConfig({ user: editedLayer }));
             for (const target of layer === 'user' ? [...environments.values()] : [env]) {

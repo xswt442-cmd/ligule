@@ -10,6 +10,64 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ### English
 
+## [0.1.0] - 2026-10-24
+
+### 简体中文
+
+**新增**
+
+- 长对话中模型获得 `compact` 工具：可查看上下文压力与压缩块、读回被压缩的原文和溢出文件，并自行选择范围撰写摘要完成压缩。达到软阈值时注入一次临时提醒引导，硬阈值仍由自动压缩兜底。
+- `/mcp add <名称> <程序> [参数…]` 与 `/mcp remove <名称>` 把 MCP Server 写入使用者默认配置（环境变量引用与工作目录在配置文件中补充，配置变更后需重新信任）。
+- `/extensions [on|off <名称>]` 列出用户扩展并支持停用与启用，登记在下次启动 Host 时生效。
+- 在用户数据根 `tools/` 目录放置 TOML 文件即可声明命令工具：占位符整位替换模型参数、不进入 shell 语法，执行沿用 Shell 的权限与审批链路；工具需在模式中列出才会提供给模型。
+
+**改进**
+
+- 压缩结果保存为逐块校验的块序列，多次压缩各自成块、互不覆盖；分支会携带已压缩块，摘要不再丢失。
+- 压缩压力阈值预留输出预算（上限为窗口的四分之一），长输出请求更早压缩；每次压缩的原因（手动、自动、超限恢复、模型主动）写入会话记录。
+- 会话列表使用可重建的目录索引缓存，未变化的记录不再每次完整解析，长会话目录下列表与恢复浏览明显变快。
+- 扩展安装目录支持一目录一包（含 `index.js` 入口）；已安装扩展可停用并登记在数据根，下次启动生效，配置层显式声明的路径不受影响。
+
+**兼容性**
+
+- 工作区信任记录改存数据根的 `trust.json`：旧版 `tui-trust.json` 仍自动读取并在下次写入时合并进新文件，旧文件保留不删除。
+
+**修复**
+
+- 模型请求的凭据绑定用户或命令行声明的服务地址与接口，项目覆盖地址或密钥引用时拒绝发送；对话、压缩和内部子代理沿用同一轮次的绑定快照。
+- 自定义搜索后端仅由用户配置或命令行选择，项目配置不能借只读搜索启动指定程序；受管理回收目录拒绝越界路径与指向文件边界外的链接。
+- MCP 工具保留服务器配置身份，身份限定的参数规则和审批记忆按实际登记路径生效。
+- 并发创建同名文件时仅一个请求成功，其他请求保留已有内容并返回冲突；搜索流式输出完整保留中文与多字节字符。
+- 会话恢复与模型请求校验按记录顺序配对工具调用和结果，复用调用 ID 的新轮次仍会识别未完成调用并记录未知结果。
+
+### English
+
+**Added**
+
+- In long conversations the model gains the `compact` tool: it can inspect context pressure and compaction blocks, read back the summarized originals and overflow files, and compact a chosen range with a summary it writes itself. A one-time reminder appears at the soft threshold; the hard threshold still compacts automatically.
+- `/mcp add <name> <executable> [args…]` and `/mcp remove <name>` write MCP servers into the user defaults (add environment references and a working directory in the config file; a changed configuration needs trust again).
+- `/extensions [on|off <name>]` lists user extensions and disables or enables them; the registry takes effect the next time the Host starts.
+- Declaring a command tool takes a TOML file in the data root's `tools/` directory: placeholders replace whole argument entries so model input never enters shell syntax, and execution follows the Shell permission and approval chain; a tool reaches the model only when a mode lists it.
+
+**Improved**
+
+- Compaction is stored as individually validated blocks, so successive passes form separate blocks instead of overwriting one summary, and branches carry their blocks instead of losing the summaries.
+- The compaction threshold reserves the output budget (capped at a quarter of the window), so long-output requests compact earlier; every compaction records its reason (manual, automatic, overflow recovery, or model-initiated) in the session record.
+- Session listing uses a rebuildable directory index, so unchanged records are no longer fully re-parsed on every list, making listing and resume browsing faster for long session directories.
+- The extension install directory supports one-directory packages with an `index.js` entry; installed extensions can be disabled through a registry in the data root that takes effect on the next start, while paths declared by configuration layers stay unaffected.
+
+**Compatibility**
+
+- The workspace trust record now lives in `trust.json` under the data root. The earlier `tui-trust.json` is still read and merged into the new file on the next write; the old file is kept untouched.
+
+**Fixed**
+
+- Model requests bind credentials to the service URL and API declared by the user or command-line flags. Project overrides of the URL or key reference cannot send existing credentials; conversation, compaction, and internal subagents share the turn's binding snapshot.
+- Custom search backends can only be selected through user configuration or command-line flags; project configuration cannot launch its own program through read-only search. Managed trash rejects paths and links outside the workspace boundary.
+- Registered MCP tools retain their server configuration identity so identity-bound argument rules and approval memory apply correctly.
+- Concurrent file creation has one winner and reports conflicts without overwriting content. Streaming search output preserves Chinese and other multibyte characters.
+- Recovery and model-request validation pair tool calls with results in record order. A later turn reusing a call ID still detects its pending call and records an unknown outcome.
+
 ## [0.0.8] - 2026-10-23
 
 ### 简体中文

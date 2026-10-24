@@ -23,15 +23,17 @@ const TEXT_MAY_CHANGE = 'This call was dispatched, but no result was recorded be
 
 // 工具结果通过 `callId` 关联其调用；助手事件中没有结果的调用属于未完成尾部。
 export function findUnresolvedCalls(events: SessionEvent[]): UnresolvedCall[] {
-  const answered = new Set(
-    events.filter((event) => event.kind === 'tool').map((event) => String(event.callId)),
-  );
   const unresolved: UnresolvedCall[] = [];
   for (const event of events) {
+    if (event.kind === 'tool') {
+      const index = unresolved.findIndex((call) => call.callId === event.callId);
+      if (index >= 0) unresolved.splice(index, 1);
+      continue;
+    }
     if (event.kind !== 'assistant') continue;
     const calls = Array.isArray(event.toolCalls) ? event.toolCalls as { id?: unknown; name?: unknown; args?: unknown }[] : [];
     for (const call of calls) {
-      if (typeof call.id !== 'string' || answered.has(call.id)) continue;
+      if (typeof call.id !== 'string') continue;
       unresolved.push({
         tool: typeof call.name === 'string' ? call.name : '',
         callId: call.id,

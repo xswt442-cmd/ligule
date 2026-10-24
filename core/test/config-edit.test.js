@@ -556,3 +556,82 @@ test('atomic config writes preserve permissions and do not touch another tempora
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+// MCP 服务器表：set 落成独立表、remove 只删目标、非法条目拒绝，写出的配置能被读取侧解析。
+const MCP_SAMPLE = `# 使用者默认
+[model]
+model = "gpt-4o"
+
+[mcp.servers.runner]
+command = "npx" # 启动命令
+args = ["-y", "old-server"]
+`;
+
+test('mcp.servers set appends a per-server table and keeps the rest byte for byte', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'ligule-mcp-edit-'));
+  try {
+    const file = join(directory, 'config.toml');
+    await writeFile(file, MCP_SAMPLE, 'utf8');
+    const version = configVersion(await readFile(file, 'utf8'));
+    const done = await writeConfigField(file, {
+      field: 'mcp.servers', version, op: 'set',
+      server: { name: 'weather', command: 'npx', args: ['-y', 'weather-mcp'], env: { KEY: '${WEATHER_KEY}' } },
+    });
+    assert.equal(done.created, true);
+    const text = await readFile(file, 'utf8');
+    assert.ok(text.includes('[mcp.servers.runner]'), '已有服务器不动');
+    assert.ok(text.includes('command = "npx" # 启动命令'), '已有服务器的注释留着');
+    const parsed = parse(text);
+    assert.deepEqual(JSON.parse(JSON.stringify(parsed.mcp.servers.weather)), { command: 'npx', args: ['-y', 'weather-mcp'], env: { KEY: '${WEATHER_KEY}' } });
+    assert.deepEqual((await import('../dist/capability/mcp.js')).mcpServerConfigs(parsed).map((entry) => entry.name), ['runner', 'weather'], '读取侧认得写出的配置');
+
+    // 同名 set 整表替换；其他服务器保持原字节。
+    const second = await writeConfigField(file, {
+      field: 'mcp.servers', version: done.version, op: 'set',
+      server: { name: 'runner', command: 'node', args: ['server.js'], cwd: 'tools' },
+    });
+    assert.equal(second.created, false);
+    const after = parse(await readFile(file, 'utf8'));
+    assert.deepEqual(JSON.parse(JSON.stringify(after.mcp.servers.runner)), { command: 'node', args: ['server.js'], cwd: 'tools' });
+    assert.deepEqual(after.mcp.servers.weather.command, 'npx', '其他服务器不受影响');
+
+    // remove 只需要名字。
+    const third = await writeConfigField(file, { field: 'mcp.servers', version: second.version, op: 'remove', server: { name: 'weather' } });
+    assert.equal(third.created, false);
+    const final = parse(await readFile(file, 'utf8'));
+    assert.deepEqual(Object.keys(JSON.parse(JSON.stringify(final.mcp.servers))), ['runner']);
+    assert.ok((await readFile(file, 'utf8')).includes('# 使用者默认'), '文件其余部分不动');
+
+    await assert.rejects(
+      writeConfigField(file, { field: 'mcp.servers', version: third.version, op: 'remove', server: { name: 'weather' } }),
+      (error) => error.code === 'config_mcp_unknown', '删除不存在的服务器要说清',
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('invalid mcp server entries are refused before anything is written', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'ligule-mcp-edit-'));
+  try {
+    const file = join(directory, 'config.toml');
+    await writeFile(file, MCP_SAMPLE, 'utf8');
+    const version = configVersion(await readFile(file, 'utf8'));
+    for (const server of [
+      { name: 'bad name', command: 'npx' },
+      { name: 'x', command: '' },
+      { name: 'x', command: 'npx', args: ['-y', 3] },
+      { name: 'x', command: 'npx', env: { KEY: 'literal-secret' } },
+      { name: 'x', command: 'npx', extra: true },
+      { command: 'npx' },
+    ]) {
+      await assert.rejects(
+        writeConfigField(file, { field: 'mcp.servers', version, op: 'set', server }),
+        (error) => error.code === 'config_mcp_invalid', JSON.stringify(server),
+      );
+    }
+    assert.equal(await readFile(file, 'utf8'), MCP_SAMPLE, '拒绝的写入不落盘');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

@@ -119,6 +119,11 @@ const server = createServer(async (request, response) => {
     response.write('data: [DONE]\n\n');
     response.end();
   };
+  if (prompt.includes('desktop-code-copy-proof')) {
+    streamChunk(response, { choices: [{ index: 0, delta: { content: '```js\nconsole.log("原始代码🙂");\n```' } }] });
+    finish('stop');
+    return;
+  }
   if (followup) {
     if (externalApprovalTurn) {
       streamChunk(response, { choices: [{ index: 0, delta: { content: '外控审批已通过。' } }] });

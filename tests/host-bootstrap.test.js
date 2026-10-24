@@ -5,10 +5,40 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createConnection } from '../core/dist/host/connection.js';
+import { loadHostEnvironment } from '../core/dist/host/environment.js';
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
 const cli = join(repository, 'tui', 'dist', 'cli.js');
 const desktopEntry = join(repository, 'core', 'dist', 'host', 'desktop-entry.js');
+
+test('project config cannot choose executable search backends while user and flag choices remain available', async () => {
+  const scratch = join(repository, 'testplace', 'tmp');
+  await mkdir(scratch, { recursive: true });
+  const root = await mkdtemp(join(scratch, 'search-source-'));
+  const project = join(root, 'project');
+  const data = join(root, 'data');
+  await mkdir(join(project, '.ligule'), { recursive: true });
+  await mkdir(data);
+  const previousHome = process.env.LIGULE_HOME;
+  process.env.LIGULE_HOME = data;
+  const modes = join(repository, 'core', 'modes');
+  try {
+    for (const name of ['config.toml', 'config.local.toml']) {
+      const path = join(project, '.ligule', name);
+      await writeFile(path, `ripgrepPath = ${JSON.stringify(process.execPath)}\n`);
+      await assert.rejects(loadHostEnvironment(project, modes), { code: 'search_backend_source_untrusted' });
+      await rm(path);
+    }
+    await writeFile(join(data, 'config.toml'), `ripgrepPath = ${JSON.stringify(process.execPath)}\n`);
+    assert.equal((await loadHostEnvironment(project, modes)).config.ripgrepPath, process.execPath);
+    const flags = ['ripgrepPath="explicit-backend"'];
+    assert.equal((await loadHostEnvironment(project, modes, flags)).config.ripgrepPath, 'explicit-backend');
+  } finally {
+    if (previousHome === undefined) delete process.env.LIGULE_HOME;
+    else process.env.LIGULE_HOME = previousHome;
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 function deadline(pending, label) {
   let timer;

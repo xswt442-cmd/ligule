@@ -6,7 +6,7 @@
 import { mkdir, open, truncate, type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 import { KernelError, KernelRuntimeError } from '../kernel/error.js';
-import { loadCheckpoint } from './checkpoint.js';
+import { loadCheckpointFile } from './checkpoint.js';
 import { createSessionHeader } from './format.js';
 import { readSessionRecord } from './record.js';
 import { acquireSessionLock } from './lock.js';
@@ -195,20 +195,18 @@ export function createSessionLog({ directory, id, meta }: CreateSessionLogOption
 
     // 从记录重建模型上次看到的上下文。投影必须包含助手调用和对应工具结果，才能生成合法请求。
     // 推理事件保留在记录中供界面查看，不发送给模型。
-    // 检查点通过校验时，用摘要替换其覆盖范围，后续事件保持原样；原始日志不会被修改。
+    // 压缩块通过校验时，各块用摘要替换其覆盖范围，其余事件保持原样；原始日志不会被修改。
     async modelView(): Promise<unknown[]> {
       const events = await this.read();
-      const { checkpoint } = await loadCheckpoint({ directory, id, events });
+      const { blocks } = await loadCheckpointFile({ directory, id, events });
       const view = [];
-      let summarized = false;
+      let blockIndex = 0;
       let reasoning = '';
       for (const event of events) {
-        const covered = checkpoint !== null && event.seq >= checkpoint.fromSeq && event.seq <= checkpoint.toSeq;
-        if (covered) {
-          if (!summarized) {
-            view.push({ role: 'user', text: checkpoint.text });
-            summarized = true;
-          }
+        while (blockIndex < blocks.length && event.seq > blocks[blockIndex].toSeq) blockIndex += 1;
+        const block = blocks[blockIndex];
+        if (block !== undefined && event.seq >= block.fromSeq) {
+          if (event.seq === block.fromSeq) view.push({ role: 'user', text: block.text });
           continue;
         }
         if (event.kind === 'user') {

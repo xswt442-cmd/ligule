@@ -5,12 +5,13 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
-  createCheckpoint,
+  createBlock,
+  createCheckpointFile,
   createSessionLog,
   formatVerdicts,
   prefixDigest,
   summarizeVerdicts,
-  usableCheckpoint,
+  usableCheckpointFile,
 } from '../dist/index.js';
 
 const tool = (seq, name, verdict, result = { kind: 'result', failed: false, content: 'ok' }) => ({ seq, kind: 'tool', tool: name, callId: `c${seq}`, args: {}, verdict, result });
@@ -63,8 +64,9 @@ test('the verdict stays out of the model view and out of the checkpoint hash', a
     assert.deepEqual(await withVerdicts.modelView(), await plain.modelView(), 'the projection does not read the verdict field');
 
     const recorded = await withVerdicts.read();
-    const checkpoint = createCheckpoint({ id, events: recorded.slice(0, 3), text: '一段摘要', fromSeq: 0, toSeq: 2 });
-    assert.deepEqual(usableCheckpoint(checkpoint, id, await plain.read()), { checkpoint, reason: '' });
+    const block = createBlock({ events: recorded.slice(0, 3), text: '一段摘要', fromSeq: 0, toSeq: 2, blockId: 1 });
+    const file = createCheckpointFile({ id, blocks: [block] });
+    assert.deepEqual(usableCheckpointFile(file, id, await plain.read()), { blocks: [block], reason: '' });
     assert.equal(prefixDigest(recorded.slice(0, 3)), prefixDigest((await plain.read()).slice(0, 3)));
   } finally {
     await rm(directory, { recursive: true, force: true });

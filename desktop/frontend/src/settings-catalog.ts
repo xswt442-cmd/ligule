@@ -18,7 +18,7 @@ export type SettingsCatalog = {
   tools: { name: string; description: string; access: string; source: string; disclosure: boolean; includedInMode: boolean; currentlyAvailable: boolean | null }[];
   skills: { name: string; description: string; requires: string[]; source: string }[];
   skillDiagnostics: { code: string }[];
-  extensions: { name: string; source: string; loaded: boolean; registeredTools: string[] }[];
+  extensions: { name: string; source: string; enabled: boolean; loaded: boolean; registeredTools: string[] }[];
   extensionDiagnostics: { code: string; source: string }[];
 };
 

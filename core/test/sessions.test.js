@@ -6,8 +6,9 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { withTuiHost } from './helpers/tui-host.js';
 import {
-  branchSession, chooseResumeMode, createConfig, createConnection, createMemoryConnectionPair, createSessionLog, findUnresolvedCalls, listSessions,
-  loadMode, MESSAGES_CAPABILITIES, modeDirectories, parseSessionBytes, searchSessions, serveHost, sessionDirectory,
+  branchSession, chooseResumeMode, createBlock, createCheckpointFile, createConfig, createConnection, createMemoryConnectionPair, createSessionLog,
+  findUnresolvedCalls, listSessions, listWorkspaceSessions, loadCheckpointFile, loadMode, MESSAGES_CAPABILITIES, modeDirectories, parseSessionBytes,
+  searchSessions, serveHost, sessionDirectory, writeCheckpointFile,
 } from '../dist/index.js';
 import { workspaceIdentity } from '../dist/kernel/workspace.js';
 
@@ -225,6 +226,37 @@ test('a branch copies a prefix of the record and leaves the parent alone', async
   });
 });
 
+// 分支携带完全落在复制前缀内的压缩块；跨越分支点的块不携带，父侧的块文件保持不变。
+test('a branch carries the compaction blocks that fit inside the copied prefix', async () => {
+  await withSessions(async (root, directory) => {
+    const parent = createSessionLog({ directory, id: 'parent', meta: () => ({ projectRoot: root }) });
+    await parent.append({ kind: 'user', text: '第一轮' });
+    await parent.append({ kind: 'assistant', text: '答了', toolCalls: [] });
+    await parent.append({ kind: 'turn', ignorable: true, status: 'completed', userSeq: 0, iterations: 1, modelCalls: 1 });
+    await parent.append({ kind: 'user', text: '第二轮' });
+    const events = await parent.read();
+    const block = createBlock({ events: events.filter((event) => event.seq <= 1), text: '第一块的摘要', fromSeq: 0, toSeq: 1, blockId: 1 });
+    await writeCheckpointFile(directory, 'parent', createCheckpointFile({ id: 'parent', blocks: [block] }));
+
+    const whole = await branchSession(directory, 'parent', { projectRoot: root });
+    const branchLog = createSessionLog({ directory, id: whole.sessionId });
+    const carried = await loadCheckpointFile({ directory, id: whole.sessionId, events: await branchLog.read() });
+    assert.equal(carried.reason, '', '父侧的块按分支事件校验通过');
+    assert.deepEqual(carried.blocks, [block]);
+    assert.equal((await branchLog.modelView())[0].text, '第一块的摘要', '分支投影里摘要仍然代表被压过的那一段');
+    assert.equal((await loadCheckpointFile({ directory, id: 'parent', events })).blocks.length, 1, '父侧的块文件没有动');
+
+    // 块覆盖到分支点之后：整块不携带，分支从全量事件投影。
+    const wide = createBlock({ events: events.filter((event) => event.seq <= 3), text: '跨过分支点的摘要', fromSeq: 0, toSeq: 3, blockId: 1 });
+    await writeCheckpointFile(directory, 'parent', createCheckpointFile({ id: 'parent', blocks: [wide] }));
+    const early = await branchSession(directory, 'parent', { at: 2, projectRoot: root });
+    const earlyLog = createSessionLog({ directory, id: early.sessionId });
+    const dropped = await loadCheckpointFile({ directory, id: early.sessionId, events: await earlyLog.read() });
+    assert.equal(dropped.reason, 'checkpoint_absent', '没有携带任何块');
+    assert.deepEqual((await earlyLog.modelView()).map((row) => row.text), ['第一轮', '答了'], 'turn 标记不进投影，被跨过的块也不代表任何事件');
+  });
+});
+
 test('a resume takes the mode the session last ran under, and a changed list is a refusal', async () => {
   const full = { name: 'full', layer: 'shipped', path: 'modes/full.toml', tools: '*', prompt: '*', digest: await digestOf('full') };
 
@@ -346,5 +378,52 @@ test('one Host preserves A, B, then A session state', async () => {
     await client.request('run.start', { sessionId: sessionA, input: 'A again' });
     const { events } = await client.request('session.read', { sessionId: sessionA });
     assert.deepEqual(events.filter((event) => event.kind === 'user').map((event) => event.text), ['A first', 'A again']);
+  });
+});
+
+// 列表索引是可重建缓存：命中时复用解析结果，文件变化或索引损坏时逐条重建，旧目录不写索引。
+test('the listing index caches parsed summaries and rebuilds on change', async () => {
+  await withSessions(async (root, directory) => {
+    const first = createSessionLog({ directory, id: 'indexed-a', meta: () => ({ projectRoot: root }) });
+    await first.append({ kind: 'user', text: '第一句' });
+    await first.append({ kind: 'assistant', text: '答', toolCalls: [] });
+
+    const plain = await listSessions(directory);
+    const indexed = await listSessions(directory, { index: true });
+    assert.deepEqual(indexed, plain, '带索引的列表与直读结果一致');
+    assert.ok(await readFile(join(directory, 'index.json'), 'utf8'), '索引文件落在记录目录里');
+
+    // 再次列表命中缓存；记录追加后按大小失效并重建。
+    await first.append({ kind: 'user', text: '第二句' });
+    const refreshed = await listSessions(directory, { index: true });
+    assert.equal(refreshed.find((item) => item.id === 'indexed-a').events, 3, '追加后的事件数如实反映');
+
+    // 索引损坏不挡列表：整体丢弃重建。
+    await writeFile(join(directory, 'index.json'), '{', 'utf8');
+    const rebuilt = await listSessions(directory, { index: true });
+    assert.equal(rebuilt.find((item) => item.id === 'indexed-a').events, 3);
+
+    // 记录删除后条目随之消失。
+    await rm(join(directory, 'indexed-a.jsonl'));
+    const afterDelete = await listSessions(directory, { index: true });
+    assert.equal(afterDelete.length, plain.length - 1, '删除的记录不再出现');
+  });
+});
+
+// 跨目录列表只在当前工作区目录写索引；旧目录保持只读发现。
+test('workspace listing writes the index only into the primary directory', async () => {
+  await withSessions(async (root, directory) => {
+    // withSessions 的记录目录本身就是旧式布局；主目录按当前规则另建。
+    const primary = sessionDirectory({ boundary: root });
+    await mkdir(primary, { recursive: true });
+    const session = createSessionLog({ directory, id: 'legacy-one', meta: () => ({ projectRoot: root }) });
+    await session.append({ kind: 'user', text: '旧记录' });
+    const current = createSessionLog({ directory: primary, id: 'current-one', meta: () => ({ projectRoot: root }) });
+    await current.append({ kind: 'user', text: '新记录' });
+
+    const listed = await listWorkspaceSessions({ boundary: root }, { projectRoot: root });
+    assert.deepEqual(listed.map((item) => item.id).sort(), ['current-one', 'legacy-one']);
+    assert.ok(await readFile(join(primary, 'index.json'), 'utf8'), '当前目录有索引');
+    await assert.rejects(readFile(join(directory, 'index.json')), /ENOENT/, '旧目录不写索引');
   });
 });

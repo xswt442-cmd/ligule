@@ -138,11 +138,6 @@ function quoteWindowsArgument(argument: string): string {
   return `${result}${'\\'.repeat(slashes * 2)}"`;
 }
 
-function restrictingWriteSid(): string {
-  const readPart = (offset: number) => (randomBytes(4).readUInt32LE(offset) % (2 ** 30 - 1)) + 1;
-  return `S-1-4-${readPart(0)}-${readPart(0)}`;
-}
-
 function throwTokenError(api: ReturnType<typeof bindings>, operation: string): never {
   throw win32Failure(api, operation);
 }

@@ -9,7 +9,7 @@ import { boundaryOf, limitsOf, skippedDirectories, workingDirectoryOf } from '..
 import { resolveWithin } from '../capability/paths.js';
 import { resolveRipgrep, searchWithRipgrep } from '../capability/ripgrep.js';
 import { versionOf } from '../session/observe.js';
-import { existsOrFails, kindOfTarget, marker, readExisting, toPosix, walkFiles } from './common.js';
+import { kindOfTarget, marker, readExisting, toPosix, walkFiles } from './common.js';
 
 interface ReadArguments { path: string; offsetBytes?: number }
 interface FindArguments { pattern: string; path?: string }

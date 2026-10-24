@@ -9,6 +9,7 @@ import { APPROVAL_METHOD, QUESTION_METHOD } from './protocol.js';
 import type { Host } from './host.js';
 import type { LoopResult } from '../kernel/loop.js';
 import { createAgentControlRuntime, type AgentControlRequest } from './agent-control-runtime.js';
+import { containsSensitiveMaterial } from './approval.js';
 
 export type OperationState = 'running' | 'done' | 'failed' | 'cancelled';
 export type InteractionType = 'approval' | 'question';
@@ -99,25 +100,6 @@ function record(value: unknown): Record<string, unknown> {
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function containsSensitiveMaterial(value: unknown): boolean {
-  if (typeof value === 'string') {
-    return /\bBearer\s+\S+/iu.test(value)
-      || /\b(?:Authorization|Proxy-Authorization)\s*:\s*(?:Basic|Digest|Token)\s+\S+/iu.test(value)
-      || /(?:^|[^A-Za-z0-9_-])(?:x[-_]api[-_]key|api[-_]?key|access[-_]?token|refresh[-_]?token|client[-_]?secret|password|passwd|secret)\s*[:=]\s*["']?[^\s"'\x00-\x1f]+/iu.test(value)
-      || /\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{20,})\b/u.test(value)
-      || /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/u.test(value)
-      || /https?:\/\/[^\s/@:]+:[^\s/@]+@/iu.test(value);
-  }
-  if (Array.isArray(value)) return value.some(containsSensitiveMaterial);
-  if (!isPlainRecord(value)) return false;
-  for (const [key, nested] of Object.entries(value)) {
-    if (/(?:^|[-_])(?:api[-_]?key|authorization|proxy[-_]?authorization|cookie|set-cookie|password|passwd|secret|credential|credentials|access[-_]?token|refresh[-_]?token|bearer)(?:$|[-_])/iu.test(key)
-      && nested !== undefined && nested !== null && nested !== '') return true;
-    if (containsSensitiveMaterial(nested)) return true;
-  }
-  return false;
 }
 
 /** 对外错误不包含 Host 内部信息、路径、凭据或原始错误原因。 */

@@ -257,7 +257,7 @@ test('Desktop human input and question answers reach the single MCP-owned real H
     const model = await startModelServer();
     const projectSettings = join(projectRoot, '.ligule');
     await mkdir(projectSettings);
-    await writeFile(join(projectSettings, 'config.toml'), [
+    await writeFile(join(home, 'config.toml'), [
       '[model]',
       'api = "chat-completions"',
       `baseURL = "${model.baseURL}"`,

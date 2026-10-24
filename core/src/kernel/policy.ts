@@ -123,6 +123,8 @@ export interface PolicyCall {
   readonly shell?: ShellSelection;
   readonly capability?: string;
   readonly access?: PermissionAccess;
+  // 参数中不含命令字符串的工具由 Kernel 合成的最终命令行；按命令前缀匹配的规则以此判定。
+  readonly command?: string;
   readonly scriptBinding?: ScriptBinding;
   readonly scriptBindingError?: { readonly code: string; readonly detail: string };
   readonly requiresManualApproval?: boolean;
@@ -319,7 +321,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       forcedToAsk = snapshot.forcedToAsk;
     },
 
-    async evaluate({ tool, input, target, shell, capability, access, scriptBinding, scriptBindingError, requiresManualApproval: manualApprovalRequired,
+    async evaluate({ tool, input, target, shell, capability, access, command: composedCommand, scriptBinding, scriptBindingError, requiresManualApproval: manualApprovalRequired,
       fileBoundary, workingDirectory, callId, identityDigest }: PolicyCall): Promise<PolicyVerdict> {
       if (typeof tool !== 'string' || tool === '') throw new KernelError('policy_call_tool_required');
       // 使用工具声明的实际能力名称进行判定。MCP 调用使用 `mcp:<服务器>/<工具>`，而不是通用工具名 `mcp.call`。
@@ -330,7 +332,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         return { decision: 'allow', via: 'unasked', capability: named, level: current, ...(forcedToAsk ? { forced: true } : {}) };
       }
 
-      const command = commandOf(input);
+      const command = composedCommand ?? commandOf(input);
       let effective = forcedToAsk && current !== 'never' && current !== 'none' ? 'ask' : current;
       // 记录此次判定时的有效策略；拒绝阈值触发的收紧状态另行记录。
       const judged = (decision: PolicyVerdict['decision'], via: string, extra: Omit<PolicyVerdict, 'decision' | 'via' | 'capability' | 'level' | 'forced'>, hardDenied = false): PolicyVerdict => ({

@@ -57,8 +57,9 @@ export interface SessionRecord {
 
 // 当前程序会写入的事件类型。未知事件仅在标记为 `ignorable` 时允许跳过，其他情况拒绝读取。
 // `usage` 虽不进入模型投影，但其序号仍用于校验检查点范围，因此必须保留。
+// `compaction` 记录每次压缩的块与原因，供界面与导出说明；同样不进入模型投影。
 // `label` 保存会话名称和归档状态；这些信息供界面使用，不进入模型上下文。
-const WRITTEN_KINDS = ['session', 'user', 'reasoning', 'assistant', 'tool', 'mode', 'usage', 'turn', 'label', 'turnContext', 'modelSelection', 'sessionGeneration', 'sessionLoopIterations', 'sessionPermission', 'sessionPolicy', 'sessionMcpTrust', 'sessionPolicyRule'];
+const WRITTEN_KINDS = ['session', 'user', 'reasoning', 'assistant', 'tool', 'mode', 'usage', 'turn', 'label', 'turnContext', 'modelSelection', 'sessionGeneration', 'sessionLoopIterations', 'sessionPermission', 'sessionPolicy', 'sessionMcpTrust', 'sessionPolicyRule', 'compaction'];
 
 export function createSessionHeader({
   id,
@@ -138,6 +139,17 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
         || typeof event.trusted !== 'boolean'
         || typeof event.updatedAt !== 'string' || !Number.isFinite(Date.parse(event.updatedAt))) {
         throw new KernelRuntimeError('session_mcp_trust_event_invalid');
+      }
+    }
+    if (kind === 'compaction') {
+      if (event.ignorable !== true
+        || (event.reason !== 'manual' && event.reason !== 'auto' && event.reason !== 'overflow' && event.reason !== 'model')
+        || !Number.isSafeInteger(event.blockId) || (event.blockId as number) < 1
+        || !Number.isSafeInteger(event.fromSeq) || (event.fromSeq as number) < 0
+        || !Number.isSafeInteger(event.toSeq) || (event.toSeq as number) < (event.fromSeq as number)
+        || typeof event.tokensBefore !== 'number' || !Number.isFinite(event.tokensBefore)
+        || typeof event.tokensAfter !== 'number' || !Number.isFinite(event.tokensAfter)) {
+        throw new KernelRuntimeError('session_compaction_event_invalid');
       }
     }
     if (kind === 'sessionPolicyRule') {

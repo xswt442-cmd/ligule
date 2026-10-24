@@ -12,6 +12,7 @@ import {
 } from '../dist/index.js';
 import { createPermissionContext } from '../dist/kernel/permission.js';
 import { KernelError } from '../dist/kernel/error.js';
+import { policyArgsHash } from '../dist/kernel/policy.js';
 
 const serverEntry = fileURLToPath(new URL('../node_modules/@modelcontextprotocol/server-filesystem/dist/index.js', import.meta.url));
 const externalPermission = createPermissionContext('full-access', 'unrestricted', {
@@ -409,6 +410,47 @@ test('a real stdio server answers inspect and call through the registry', async 
     await registry.close();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('registered real MCP calls retain configuration identity for deny and remembered allow rules', async () => {
+  const scratch = join(process.cwd(), 'testplace');
+  await mkdir(scratch, { recursive: true });
+  const root = await mkdtemp(join(scratch, 'mcp-identity-'));
+  const otherCwd = join(root, 'other');
+  await mkdir(otherCwd);
+  await writeFile(join(root, 'note.txt'), 'identity-bound content');
+  const questions = [];
+  const chain = createDecisionChain({ mode: 'ask', ask: (question) => { questions.push(question); return false; } });
+  let firstIdentity;
+  try {
+    for (const cwd of [root, otherCwd]) {
+      const configs = mcpServerConfigs({ mcp: { servers: { fs: { command: process.execPath, args: [serverEntry, root], cwd } } } });
+      const identity = configs[0].identityDigest;
+      const registry = createMcpRegistry(configs);
+      try {
+        const { inspectTool, callTool } = createMcpTools(registry, { seen: new Set() }, { identityDigest: () => identity });
+        const definition = await inspectTool.run({ server: 'fs', tool: 'read_text_file' });
+        const args = { server: 'fs', tool: 'read_text_file', arguments: JSON.stringify({ path: join(root, 'note.txt') }), schemaDigest: definition.schemaDigest };
+        const kernel = createKernel({ config: createConfig({ user: { boundary: root } }), permission: externalPermission, policy: chain });
+        kernel.register(callTool);
+        if (firstIdentity === undefined) {
+          firstIdentity = identity;
+          const argsHash = policyArgsHash(args, identity);
+          chain.setRules([{ tool: 'mcp:fs/read_text_file', decision: 'deny', argsHash }]);
+          await assert.rejects(kernel.call('mcp.call', args), { code: 'policy_denied' });
+          assert.equal(questions.length, 0, 'a matching denial must not ask');
+          chain.setRules([{ tool: 'mcp:fs/read_text_file', decision: 'allow', argsHash }]);
+          assert.equal((await kernel.call('mcp.call', args)).text, 'identity-bound content');
+          assert.equal(questions.length, 0, 'a remembered allow must match after registration');
+        } else {
+          assert.notEqual(identity, firstIdentity);
+          await assert.rejects(kernel.call('mcp.call', args), { code: 'ask_declined' });
+          assert.equal(questions.length, 1, 'the former allow must not cover changed launch settings');
+          assert.equal(questions[0].identityDigest, identity);
+        }
+      } finally { await registry.close(); }
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('Host Policy denies a real MCP write under the server root', async () => {

@@ -2,6 +2,7 @@ import { resolve } from 'node:path';
 import { createConfig } from '../kernel/config.js';
 import { loadConfigLayers } from '../kernel/config-file.js';
 import { extensionSources } from '../kernel/extensions.js';
+import { readExtensionState } from '../kernel/extension-state.js';
 import { DEFAULT_MODE, modeDirectories } from '../kernel/modes.js';
 import { hostProviderFromConfig } from './provider.js';
 import type { createHost, EnvironmentSeed } from './host.js';
@@ -11,7 +12,12 @@ export async function loadProjectConfig(projectRoot: string, flags: string[] = [
   const layers = await loadConfigLayers({ projectRoot, flags });
   const user = { boundary: projectRoot, ...layers.user };
   const config = createConfig({ ...layers, user });
-  const extensions = await extensionSources({ ...layers, user }, { projectRoot });
+  // 启停登记属于用户范围；读取失败按空登记继续，原因进入诊断。
+  const state = await readExtensionState();
+  const extensions = await extensionSources({ ...layers, user }, { projectRoot, disabled: state.disabled });
+  if (state.invalid !== undefined) {
+    extensions.ignored.push({ code: 'extension_state_invalid', path: 'extensions-state.json', detail: state.invalid });
+  }
   return { config, extensions, layers };
 }
 

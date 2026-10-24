@@ -90,10 +90,18 @@ export function flagLayer(flags: readonly string[]): Record<string, unknown> {
 
 export async function loadConfigLayers({ projectRoot, userHome, flags = [] }: ConfigLoadOptions): Promise<LoadedConfigLayers> {
   const paths = configPaths(projectRoot, userHome);
-  return {
+  const layers = {
     user: await readLayer(paths.user, 'user'),
     project: await readLayer(paths.project, 'project'),
     local: await readLayer(paths.local, 'local'),
     flag: flagLayer(flags),
   };
+  for (const layer of ['project', 'local'] as const) {
+    if (Object.hasOwn(layers[layer], 'ripgrepPath')) {
+      throw new KernelError('search_backend_source_untrusted', {
+        detail: `${layer}: ripgrepPath selects executable code and must be set in user configuration or command-line flags`,
+      });
+    }
+  }
+  return layers;
 }

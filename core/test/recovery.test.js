@@ -5,15 +5,52 @@ import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
-  buildRepairEvents, createConnection, createConfig, createMemoryConnectionPair, createSessionLog,
+  buildRepairEvents, createConnection, createConfig, createKernel, createMemoryConnectionPair, createPermissionContext, createSessionLog, createTool,
   findUnresolvedCalls, providerFromConfig, repairUnresolvedCalls, serveHost, sessionDirectory,
 } from '../dist/index.js';
 import { prefixDigest } from '../dist/session/checkpoint.js';
 import { branchSession } from '../dist/session/branch.js';
+import { assertAllAnswered } from '../dist/model/http.js';
 await mkdir(join(process.cwd(), 'testplace', 'tmp'), { recursive: true });
 
 const READ_ONLY = new Set(['read']);
 const dispatched = (seq, id, name, args) => ({ seq, kind: 'assistant', text: '', toolCalls: [{ id, name, args }] });
+
+test('a reused call ID cannot use an earlier turn result to hide a pending call', async () => {
+  const root = await mkdtemp(join(process.cwd(), 'testplace', 'tmp', 'reused-call-'));
+  const session = createSessionLog({ directory: join(root, 'sessions'), id: 'reused' });
+  try {
+    await session.acquire();
+    const first = await session.append({ kind: 'user', text: 'first' });
+    const firstArgs = { path: 'first.txt', content: 'first' };
+    await session.append(dispatched(1, 'call_1', 'create', firstArgs));
+    const permission = createPermissionContext('workspace-write', 'disabled', {
+      filesystemRead: 'unavailable', filesystemWrite: 'unavailable', network: 'unavailable', process: 'unavailable',
+    });
+    const kernel = createKernel({ config: createConfig({ user: { boundary: root } }), permission, session });
+    kernel.register(createTool);
+    await kernel.call('create', firstArgs, { callId: 'call_1' });
+    await session.append({ kind: 'turn', ignorable: true, status: 'completed', userSeq: first.seq });
+    await session.append({ kind: 'user', text: 'second' });
+    const secondArgs = { path: 'second.txt', content: 'second' };
+    const pending = await session.append(dispatched(5, 'call_1', 'create', secondArgs));
+    const awaitedView = await session.modelView();
+    assert.throws(() => assertAllAnswered(awaitedView), { code: 'provider_unanswered_call' });
+    assert.deepEqual(findUnresolvedCalls(await session.read()), [{ tool: 'create', callId: 'call_1', args: secondArgs, assistantSeq: pending.seq }]);
+    const repaired = await repairUnresolvedCalls(session, { readOnly: new Set() });
+    assert.equal(repaired.length, 1);
+    assert.equal(repaired[0].result.code, 'tool_outcome_unknown');
+    assert.equal(repaired[0].recovery.assistantSeq, pending.seq);
+    const repairedView = await session.modelView();
+    assert.doesNotThrow(() => assertAllAnswered(repairedView));
+    assert.deepEqual(await repairUnresolvedCalls(session, { readOnly: new Set() }), []);
+    assert.equal(await readFile(join(root, 'first.txt'), 'utf8'), 'first');
+    await assert.rejects(readFile(join(root, 'second.txt')), { code: 'ENOENT' });
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test('an assistant turn whose call never got a result is the only thing left open', () => {
   const events = [

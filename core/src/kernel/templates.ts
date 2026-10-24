@@ -210,7 +210,7 @@ export async function expandTemplate(template: TemplateEntry, argumentText: stri
   }
   const body = splitFrontmatter(bytes.toString('utf8')).body;
   // 同时替换两类占位符，避免参数中的 `$1` 被第二次替换。
-  const text = body.replace(PLACEHOLDER, (match, digit: string | undefined) =>
+  const text = body.replace(PLACEHOLDER, (_match, digit: string | undefined) =>
     (digit === undefined ? args.join(' ') : args[Number(digit) - 1] ?? ''));
   // 模板没有占位符但用户提供了参数时，将参数原文追加到模板正文之后。
   const appended = argumentText !== '' && !HAS_PLACEHOLDER.test(body);
