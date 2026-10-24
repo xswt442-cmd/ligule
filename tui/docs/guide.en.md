@@ -92,6 +92,8 @@ Model settings are validated against the complete effective configuration before
 
 Both APIs support `model.capabilities.streaming = false`. Requests then use ordinary JSON responses, with the same completion, output-budget, tool validation, and cancellation rules as streaming responses. This setting changes response delivery, not tool permissions or automatic retry scope.
 
+Conversation, compaction, and internal subagent requests send credentials only to an API type, service root URL, and credential reference explicitly bound in user configuration or command-line flags. Project configuration may select models from a bound service; overriding its URL or key reference cannot borrow existing credentials. An unbound target returns `provider_credential_unbound`. Save the service in user configuration or explicitly select its target through command-line flags. Bindings and generation settings are adopted together at turn boundaries.
+
 ### Sessions and input
 
 In the terminal UI, type `/` to browse commands and filter by name or description. Use the arrow keys to select, Tab to complete the draft, and Enter to execute. Commands such as `/policy `, `/queue `, and `/permission ` offer fixed argument suggestions; permission upgrades still require separate confirmation. Press Escape to dismiss suggestions, or use `/help` for categorized help and your current shortcuts.

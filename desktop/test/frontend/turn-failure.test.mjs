@@ -8,6 +8,7 @@ test('response completion and budget errors have actionable bilingual Desktop ex
     'provider_output_exhausted', 'provider_empty_response', 'provider_stream_incomplete',
     'provider_stream_interrupted', 'provider_finish_reason_invalid', 'provider_tool_call_invalid',
     'provider_output_budget_invalid', 'provider_output_budget_unsupported',
+    'provider_credential_unbound',
   ]) {
     const explanation = turnFailure(code).explanation;
     assert.notDeepEqual(explanation, fallback, `${code} requires specific guidance`);

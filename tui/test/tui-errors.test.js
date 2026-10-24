@@ -4,6 +4,7 @@ import { providerDiagnosticText, runtimeFailureText } from '../dist/tui/errors.j
 
 const actionableCodes = [
   'provider_credential_missing',
+  'provider_credential_unbound',
   'credential_store_unavailable',
   'host_model_config_missing',
   'provider_api_form_required',

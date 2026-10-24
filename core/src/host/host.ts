@@ -219,6 +219,7 @@ interface HostSessionBase {
   readonly loopModelCalls: number;
   pendingLoopIterations?: number;
   generation: SessionGeneration;
+  modelCredentialBindings?: Record<string, unknown>;
   pendingGeneration?: SessionGeneration;
   pending?: ModeFile;
   running?: AbortController;
@@ -551,7 +552,7 @@ function observedProvider(provider: HostProvider, onDelta: (event: ProviderEvent
 
 // 主循环、压缩和派生执行都通过此包装器调用模型。
 // 调用时再解析提供方，确保同一轮使用同一配置，后续轮次可采用新配置。
-function currentProvider(read: () => HostProvider): HostProvider {
+function currentProvider(read: () => HostProvider, authorize: () => void): HostProvider {
   return {
     get name() { return read().name; },
     get model() { return read().model; },
@@ -562,10 +563,29 @@ function currentProvider(read: () => HostProvider): HostProvider {
     get contextTokens() { return read().contextTokens; },
     get thinkingCapability() { return read().thinkingCapability; },
     get thinkingEffort() { return read().thinkingEffort; },
-    withModel(model) { return read().withModel(model); },
-    withGeneration(options) { return read().withGeneration(options); },
-    stream(request, options) { return read().stream(request, options); },
+    withModel(model) {
+      const provider = read().withModel(model);
+      return currentProvider(() => provider, authorize);
+    },
+    withGeneration(options) {
+      const provider = read().withGeneration(options);
+      return currentProvider(() => provider, authorize);
+    },
+    async *stream(request, options) {
+      const provider = read();
+      if (provider.pending !== true) authorize();
+      yield* provider.stream(request, options);
+    },
   };
+}
+
+function hasModelCredentialBinding(model: Record<string, unknown>, api: unknown, baseURL: unknown, reference: unknown): boolean {
+  if (typeof baseURL !== 'string') return false;
+  const address = new URL(apiRoot(baseURL)).href;
+  const matches = (candidateApi: unknown, candidateURL: unknown, candidateReference: unknown) =>
+    candidateApi === api && candidateReference === reference && typeof candidateURL === 'string' && new URL(apiRoot(candidateURL)).href === address;
+  return modelServices(model.services).some((service) => matches(service.api, service.baseURL, service.apiKeyEnv))
+    || (typeof model.model === 'string' && matches(model.api, model.baseURL, model.apiKeyEnv ?? 'LIGULE_API_KEY'));
 }
 
 function compactionProgressProvider(provider: HostProvider, onProgress: (event: LoopProgressEvent) => void): HostProvider {
@@ -1258,6 +1278,11 @@ export function createHost({
   ): Promise<T> {
     if (state.permissionChanging) throw new KernelError('permission_change_in_progress', { detail: state.id });
     if (state.running !== undefined) throw new KernelError('run_already_running', { detail: state.id });
+    const layers = state.environment.layers;
+    // 凭据目标随轮次冻结；项目配置只能引用用户或命令行明确选择的服务绑定。
+    // 不携带配置层的进程内调用由调用方显式提供完整配置。
+    state.modelCredentialBindings = Object.keys(layers).length === 0 ? undefined
+      : modelConfigOf(createConfig({ user: layers.user ?? {}, flag: layers.flag ?? {} }));
     const controller = new AbortController();
     const progress = beginProgress(state, connection, initialPhase);
     const settleAsks = (): void => { for (const settle of state.asks) settle(); };
@@ -1494,7 +1519,17 @@ export function createHost({
       adopt: async () => {},
     };
     // 调用时解析生成设置，让循环、压缩和派生执行都能读取会话的最新配置。
-    const live = currentProvider(() => state.generation.provider);
+    const live = currentProvider(() => state.generation.provider, () => {
+      const bindings = state.modelCredentialBindings;
+      if (bindings === undefined) return;
+      const configuredModel = state.generation.model ?? {};
+      // 没有模型配置时，提供方由进程内调用者注入，不使用配置中的 HTTP 凭据。
+      if (Object.keys(configuredModel).length === 0) return;
+      const model = resolveModel(configuredModel);
+      if (!hasModelCredentialBinding(bindings, model.api, model.baseURL, model.apiKeyEnv ?? 'LIGULE_API_KEY')) {
+        throw new KernelError('provider_credential_unbound', { detail: 'the selected model endpoint and credential reference must be bound in user configuration or command-line flags' });
+      }
+    });
     let recoveredPolicyState: PolicyState | undefined;
     await session.acquire();
     const cleanup = [];
@@ -2805,14 +2840,9 @@ export function createHost({
             if (env.store !== undefined) await env.store.read(); // 刷新用户配置层（不使用合并后的 values）。
             const trusted = env.layers.user?.model;
             const model = isRecord(trusted) ? trusted : {};
-            const requestedURL = new URL(apiRoot(message.params.baseURL)).href;
-            const matches = (api: unknown, baseURL: unknown, reference: unknown) =>
-              api === message.params.api && reference === message.params.reference &&
-              typeof baseURL === 'string' && new URL(apiRoot(baseURL)).href === requestedURL;
-            const saved = modelServices(model.services).some((service) => matches(service.api, service.baseURL, service.apiKeyEnv));
-            const legacy = typeof model.model === 'string' &&
-              matches(model.api, model.baseURL, model.apiKeyEnv ?? 'LIGULE_API_KEY');
-            if (!saved && !legacy) throw new KernelError('model_discovery_credential_unbound');
+            if (!hasModelCredentialBinding(model, message.params.api, message.params.baseURL, message.params.reference)) {
+              throw new KernelError('model_discovery_credential_unbound');
+            }
           }
           return { models: await discoverModels({
             api: message.params.api, baseURL: message.params.baseURL,
