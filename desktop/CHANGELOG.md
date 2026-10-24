@@ -8,6 +8,16 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 ### 简体中文
 
+**新增**
+
+- 长对话中模型获得 `compact` 工具：可查看上下文压力与压缩块、读回被压缩的原文和溢出文件，并自行选择范围撰写摘要完成压缩。达到软阈值时注入一次临时提醒引导，硬阈值仍由自动压缩兜底。
+
+**改进**
+
+- 压缩结果保存为逐块校验的块序列，多次压缩各自成块、互不覆盖；分支会携带已压缩块，摘要不再丢失。
+- 压缩压力阈值预留输出预算（上限为窗口的四分之一），长输出请求更早压缩；每次压缩的原因（手动、自动、超限恢复、模型主动）写入会话记录。
+- 会话列表使用可重建的目录索引缓存，未变化的记录不再每次完整解析，长会话目录下列表与恢复浏览明显变快。
+
 **修复**
 
 - 模型请求的凭据绑定用户或命令行声明的服务地址与接口，项目覆盖地址或密钥引用时拒绝发送；对话、压缩和内部子代理沿用同一轮次的绑定快照。
@@ -18,6 +28,16 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 - Markdown 代码块的复制按钮及成功、失败反馈跟随桌面界面语言显示；复制的代码内容保持原文。
 
 ### English
+
+**Added**
+
+- In long conversations the model gains the `compact` tool: it can inspect context pressure and compaction blocks, read back the summarized originals and overflow files, and compact a chosen range with a summary it writes itself. A one-time reminder appears at the soft threshold; the hard threshold still compacts automatically.
+
+**Improved**
+
+- Compaction is stored as individually validated blocks, so successive passes form separate blocks instead of overwriting one summary, and branches carry their blocks instead of losing the summaries.
+- The compaction threshold reserves the output budget (capped at a quarter of the window), so long-output requests compact earlier; every compaction records its reason (manual, automatic, overflow recovery, or model-initiated) in the session record.
+- Session listing uses a rebuildable directory index, so unchanged records are no longer fully re-parsed on every list, making listing and resume browsing faster for long session directories.
 
 **Fixed**
 
