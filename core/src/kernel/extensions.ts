@@ -1,11 +1,14 @@
 // 扩展只从用户明确安装的目录、用户配置或命令行指定的路径加载。
 // 项目配置不能控制 Host 加载可执行代码；其中的扩展路径会作为诊断报告，而不会静默忽略。
 //
+// 安装目录支持两种形态：单个 `.js` 文件，或一个包含 `index.js` 的子目录（一目录一包）。
+// 用户可以在启停登记中停用已安装的扩展；登记只过滤安装目录，不影响配置层显式声明的路径。
+//
 // 扩展接口提供工具注册、提示片段注册、事件通知和能力请求。
 // 扩展代码与 Host 运行在同一进程，接口不是操作系统沙箱；每次工具调用仍需经过权限判定、路径边界和参数校验。
 import { readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { KernelError } from './error.js';
 import { dataRoot } from './config-file.js';
@@ -28,6 +31,8 @@ interface SourceOptions {
   projectRoot: string;
   userHome?: string;
   readDirectory?: (path: string) => Promise<string[]>;
+  // 启停登记中已停用的安装名；缺省表示没有停用任何扩展。
+  disabled?: readonly string[];
 }
 
 // 配置来源必须是字符串数组；其他类型返回明确错误，不尝试猜测其含义。
@@ -38,21 +43,55 @@ function entriesOf(layer: Record<string, unknown> | undefined): string[] | { inv
   return value as string[];
 }
 
-async function installedIn(directory: string, readDirectory: (path: string) => Promise<string[]>): Promise<string[]> {
+// 安装名是文件主名或目录名；启停登记与界面展示都用它，避免暴露绝对路径。
+export function installNameOf(path: string): string {
+  const base = basename(path);
+  return base === 'index.js' ? basename(dirname(path)) : base.replace(/\.js$/u, '');
+}
+
+async function installedIn(directory: string, readDirectory: (path: string) => Promise<string[]>): Promise<{ paths: string[]; diagnostics: ExtensionDiagnostic[] }> {
   let names;
   try {
     names = await readDirectory(directory);
   } catch (error) {
     // 安装目录不存在时视为空列表；其他读取错误需报告诊断。
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { paths: [], diagnostics: [] };
     throw new KernelError('extension_directory_read_failed', { cause: error, detail: `${directory}: ${(error as Error).message}` });
   }
-  return names.filter((name) => name.endsWith('.js')).sort().map((name) => join(directory, name));
+  const paths: string[] = [];
+  const diagnostics: ExtensionDiagnostic[] = [];
+  for (const name of names.sort()) {
+    if (name.endsWith('.js')) {
+      paths.push(join(directory, name));
+      continue;
+    }
+    if (name.endsWith('.json') || name.endsWith('.lock') || name.startsWith('.')) continue;
+    const child = join(directory, name);
+    let inner: string[];
+    try {
+      inner = await readDirectory(child);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      // 不是目录（普通文件）或已消失的条目按无法识别跳过；其他读取错误如实报告。
+      if (code === 'ENOTDIR' || code === 'ENOENT') continue;
+      throw new KernelError('extension_directory_read_failed', { cause: error, detail: `${child}: ${(error as Error).message}` });
+    }
+    if (inner.includes('index.js')) {
+      paths.push(join(child, 'index.js'));
+      continue;
+    }
+    diagnostics.push({
+      code: 'extension_package_index_missing',
+      path: child,
+      detail: 'an extension directory package needs an index.js entry',
+    });
+  }
+  return { paths, diagnostics };
 }
 
 // 返回 Host 应加载的扩展文件：安装目录内容及用户层、命令行显式指定的路径。
-// 项目层和本地层中的路径列入 `ignored`，不会加载。
-export async function extensionSources(layers: SourceLayers = {}, { projectRoot, userHome = homedir(), readDirectory = readdir }: SourceOptions) {
+// 项目层和本地层中的路径列入 `ignored`，不会加载。安装目录中被停用的扩展列入 `disabled`。
+export async function extensionSources(layers: SourceLayers = {}, { projectRoot, userHome = homedir(), readDirectory = readdir, disabled = [] }: SourceOptions) {
   const relativeTo = (entry: string) => (isAbsolute(entry) ? entry : resolve(projectRoot, entry));
   const ignored: ExtensionDiagnostic[] = [];
   const declared: string[] = [];
@@ -77,16 +116,35 @@ export async function extensionSources(layers: SourceLayers = {}, { projectRoot,
     }
   }
   const installed = await installedIn(join(dataRoot(userHome), 'extensions'), readDirectory);
+  const off = new Set(disabled);
+  const active: string[] = [];
+  const disabledEntries: { name: string; path: string }[] = [];
+  const installNames: Record<string, string> = {};
+  for (const path of installed.paths) {
+    const installName = installNameOf(path);
+    installNames[resolve(path)] = installName;
+    if (off.has(installName)) {
+      disabledEntries.push({ name: installName, path });
+      continue;
+    }
+    active.push(path);
+  }
   // 对路径归一后去重，避免同一扩展通过多个来源重复加载。
   const seen = new Set<string>();
   const paths: string[] = [];
-  for (const path of [...installed, ...declared]) {
+  for (const path of [...active, ...declared]) {
     const key = resolve(path);
     if (seen.has(key)) continue;
     seen.add(key);
     paths.push(key);
   }
-  return { paths, ignored, installedDirectory: join(dataRoot(userHome), 'extensions') };
+  return {
+    paths,
+    ignored: [...ignored, ...installed.diagnostics],
+    installedDirectory: join(dataRoot(userHome), 'extensions'),
+    installNames,
+    disabled: disabledEntries,
+  };
 }
 
 interface LoadOptions {

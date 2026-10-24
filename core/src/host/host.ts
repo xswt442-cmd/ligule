@@ -19,6 +19,7 @@ import { createPermissionContext, DEFAULT_PERMISSION_CONTEXT, permissionDenial, 
 import { createKernel, type Kernel } from '../kernel/kernel.js';
 import { loadAssembly, type Assembly, type Plugin } from '../kernel/assembly.js';
 import { loadExtensions, type ExtensionDiagnostic } from '../kernel/extensions.js';
+import { readExtensionState, writeExtensionState } from '../kernel/extension-state.js';
 import {
   applyModeToPrompt, DEFAULT_MODE, listModes, loadMode, resolveModeSelection,
   type ModeDirectories, type ModeFile,
@@ -105,6 +106,10 @@ interface HostExtensions {
   readonly paths: string[];
   readonly ignored: ExtensionDiagnostic[];
   readonly installedDirectory?: string;
+  // 安装路径（归一后）到安装名的映射；目录包用目录名，单文件用文件主名。
+  readonly installNames?: Record<string, string>;
+  // 安装目录中已被启停登记停用的扩展；配置层显式声明的路径不在此列。
+  readonly disabled?: { name: string; path: string }[];
 }
 
 export interface EnvironmentSeed {
@@ -3010,18 +3015,29 @@ export function createHost({
           })] ?? 'unknown';
           const environmentSessions = [...sessions.values()].filter((state) => state.environment === env);
           const extensionStates = environmentSessions.flatMap((state) => state.extensions.loaded);
+          const installName = (path: string) => env.extensions.installNames?.[resolve(path)] ?? basename(path, '.js');
           const extensions = env.extensions.paths.map((path) => {
             const installedDirectory = env.extensions.installedDirectory;
             const installedPath = installedDirectory === undefined ? '..' : relative(resolve(installedDirectory), resolve(path));
             const installed = installedPath !== '..' && !installedPath.startsWith(`..${process.platform === 'win32' ? '\\\\' : '/'}`)
               && !isAbsolute(installedPath);
             return {
-              name: basename(path),
+              name: installName(path),
               source: installed ? 'user-installed' : 'user-configured',
+              enabled: true,
               loaded: extensionStates.some((extension) => resolve(extension.path) === resolve(path)),
               registeredTools: extensionStates.filter((extension) => resolve(extension.path) === resolve(path)).flatMap((extension) => extension.tools),
             };
           });
+          for (const off of env.extensions.disabled ?? []) {
+            extensions.push({
+              name: off.name,
+              source: 'user-installed',
+              enabled: false,
+              loaded: false,
+              registeredTools: [],
+            });
+          }
           const extensionTools = new Set(session?.extensions.loaded.flatMap((extension) => extension.tools) ?? []);
           const registeredTools = session?.kernel.catalog() ?? await settingsToolCatalog(env, skills);
           const activeTools = session === undefined ? null : new Set(session.kernel.manifest().map((tool) => tool.name));
@@ -3103,6 +3119,30 @@ export function createHost({
             }
           }
           return { version: store.version, scope, server: serverName, trusted: message.params.trusted };
+        }
+        case 'extensions.set': {
+          // 启停登记是用户范围的持久状态；只有可信界面可以修改。
+          if (!permissionControl) throw new KernelError('extensions_set_trusted_ui_required');
+          const env = await environmentFor(message.params.projectRoot);
+          const name = requiredString(message.params.name, 'name');
+          if (typeof message.params.enabled !== 'boolean') {
+            throw new KernelError('protocol_args_invalid', { detail: 'enabled must be a boolean' });
+          }
+          // 名称必须对应安装目录中的扩展；配置层显式声明的路径不受登记管理。
+          const known = new Set([
+            ...Object.values(env.extensions.installNames ?? {}),
+            ...(env.extensions.disabled ?? []).map((entry) => entry.name),
+          ]);
+          if (!known.has(name)) {
+            throw new KernelError('extensions_set_unknown', { detail: `${name} is not an extension installed in the user extensions directory` });
+          }
+          const state = await readExtensionState();
+          const disabled = new Set(state.disabled);
+          if (message.params.enabled) disabled.delete(name);
+          else disabled.add(name);
+          await writeExtensionState(undefined, [...disabled]);
+          // 登记在下一次 Host 启动时生效；当前已加载的会话不受影响。
+          return { name, enabled: message.params.enabled, applies: 'next-start' };
         }
         case 'mcp.trust.tools': {
           if (!permissionControl) throw new KernelError('mcp_trust_trusted_ui_required');

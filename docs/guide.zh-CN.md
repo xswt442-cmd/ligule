@@ -52,7 +52,7 @@ npm install -g ligule
 
 每个新会话只属于一个工作区。终端界面启动时准备新会话；桌面版启动时恢复上次打开的会话，没有上次会话时准备一个新会话。会话记录保存在用户数据根的 `workspaces/<可读工作区路径>--<短哈希>/sessions/` 下。路径名保留工作区特征，哈希用于避免不同路径重名。桌面版新会话的工作区菜单提供「浏览」按钮，可用系统文件夹选择器选目录，也可直接输入路径。
 
-用户数据根默认为 `~/.ligule`。设置绝对路径环境变量 `LIGULE_HOME` 可以更换数据根；相对路径会报 `data_root_invalid`。用户配置在 `~/.ligule/config.toml`，项目共享配置在 `.ligule/config.toml`，项目本地配置在 `.ligule/config.local.toml`。用户数据根还保存：工作区登记 `workspaces.json`、工作区信任记录 `trust.json`（旧版本的 `tui-trust.json` 仍可读取）、MCP 服务器信任 `mcp-trust.json`、外部 Agent 授权 `agent-control.json`、终端输入历史、桌面偏好 `desktop.json` 和密钥引用（密钥本身存放在系统凭据库，不在数据根）。会话目录中除记录 `.jsonl` 外，还包含可重建的派生文件：压缩块文件 `<编号>.checkpoint.json`、超限内容溢出文件 `result-*.json` 与 `summary-*.txt`、会话列表索引 `index.json`；这些文件损坏或缺失时自动从记录重建，可安全删除。旧会话仍可从原全局 `sessions/` 和项目 `.ligule/sessions/` 中只读浏览；打开旧会话时才会将记录及附属文件复制到新的工作区目录，原件保留。WebView 的 `ligule.ui` 只作首屏缓存。终端界面与桌面界面的草稿和队列分别保存。
+用户数据根默认为 `~/.ligule`。设置绝对路径环境变量 `LIGULE_HOME` 可以更换数据根；相对路径会报 `data_root_invalid`。用户配置在 `~/.ligule/config.toml`，项目共享配置在 `.ligule/config.toml`，项目本地配置在 `.ligule/config.local.toml`。用户数据根还保存：工作区登记 `workspaces.json`、工作区信任记录 `trust.json`（旧版本的 `tui-trust.json` 仍可读取）、MCP 服务器信任 `mcp-trust.json`、外部 Agent 授权 `agent-control.json`、扩展启停登记 `extensions-state.json`、终端输入历史、桌面偏好 `desktop.json` 和密钥引用（密钥本身存放在系统凭据库，不在数据根）。会话目录中除记录 `.jsonl` 外，还包含可重建的派生文件：压缩块文件 `<编号>.checkpoint.json`、超限内容溢出文件 `result-*.json` 与 `summary-*.txt`、会话列表索引 `index.json`；这些文件损坏或缺失时自动从记录重建，可安全删除。旧会话仍可从原全局 `sessions/` 和项目 `.ligule/sessions/` 中只读浏览；打开旧会话时才会将记录及附属文件复制到新的工作区目录，原件保留。WebView 的 `ligule.ui` 只作首屏缓存。终端界面与桌面界面的草稿和队列分别保存。
 
 搜索默认使用随包提供的 ripgrep。自定义 `ripgrepPath` 会选择可执行程序，只能在用户配置或命令行 `--config` 中设置；项目共享配置和项目本地配置声明该字段时会报 `search_backend_source_untrusted`。将自定义路径移至用户配置，或删除该字段以使用随包后端。
 
@@ -134,6 +134,8 @@ HTTP 错误只显示状态码及必要的固定错误分类，不显示网关原
 工具模式选择交给模型的工具清单和提示片段，不会更改 Permission、Policy 或 Agent Control Grant。随包提供的 `minimal` 是默认模式；`full` 会包含当前 Host 注册的全部工具。模式文件按项目、用户、随包的顺序查找；高优先级文件完整替代低优先级同名文件。
 
 在用户数据根的 `tools/` 目录放置一个 TOML 文件即可声明自己的命令工具：`description` 说明用途，`command` 是不带参数的可执行文件，`args` 数组用 `{参数名}` 占位符（独占一项）在调用时替换为模型提供的参数，`parameters` 描述参数模式（受支持子集与内置工具相同）。占位符只替换整个参数位，模型输入不进入 shell 语法；执行按 Shell 命令走同一权限与审批链路，声明一个工具不授予任何额外权限。声明的工具默认不进入模式清单：需要在模式文件中列出其名称（或使用 `tools = "*"`）才会提供给模型。无效文件以诊断报告并跳过，不阻塞其他工具。
+
+代码型扩展安装在用户数据根的 `extensions/` 目录：单个 `.js` 文件，或一个包含 `index.js` 的目录（一目录一包）。扩展以 Host 进程内代码运行，只有 full-access 且不受限网络的会话才会加载；`ligule extensions` 列出当前会加载的路径与诊断。已安装扩展可以停用：登记保存在数据根的 `extensions-state.json`，下次启动生效；配置层显式声明的扩展路径不受登记影响。
 
 在包含 `subagent` 工具的模式中，模型可以把互相独立的工作委派给内部子代理。每个子代理在同一 Host 进程中运行，但拥有独立的子会话记录；同一父轮最多并行三个，子代理不能继续创建子代理。子任务沿用父会话的 Provider、Permission 和 Policy 判定，模式只能进一步缩小工具范围，模型调用次数、输出、思考和循环预算不能高于父会话。通过输出 schema 要求结构化结果时，子代理必须提交并通过验证。TUI 可用 `/sub <序号>` 查看子记录；桌面会话菜单提供子任务列表，Markdown 导出会包含子会话记录。失败或取消的子任务仍会保留可查看的会话引用。
 

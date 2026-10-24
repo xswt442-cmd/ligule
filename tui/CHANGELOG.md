@@ -18,6 +18,7 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 - 压缩结果保存为逐块校验的块序列，多次压缩各自成块、互不覆盖；分支会携带已压缩块，摘要不再丢失。
 - 压缩压力阈值预留输出预算（上限为窗口的四分之一），长输出请求更早压缩；每次压缩的原因（手动、自动、超限恢复、模型主动）写入会话记录。
 - 会话列表使用可重建的目录索引缓存，未变化的记录不再每次完整解析，长会话目录下列表与恢复浏览明显变快。
+- 扩展安装目录支持一目录一包（含 `index.js` 入口）；已安装扩展可停用并登记在数据根，下次启动生效，配置层显式声明的路径不受影响。
 
 **兼容性**
 
@@ -43,6 +44,7 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 - Compaction is stored as individually validated blocks, so successive passes form separate blocks instead of overwriting one summary, and branches carry their blocks instead of losing the summaries.
 - The compaction threshold reserves the output budget (capped at a quarter of the window), so long-output requests compact earlier; every compaction records its reason (manual, automatic, overflow recovery, or model-initiated) in the session record.
 - Session listing uses a rebuildable directory index, so unchanged records are no longer fully re-parsed on every list, making listing and resume browsing faster for long session directories.
+- The extension install directory supports one-directory packages with an `index.js` entry; installed extensions can be disabled through a registry in the data root that takes effect on the next start, while paths declared by configuration layers stay unaffected.
 
 **Compatibility**
 
