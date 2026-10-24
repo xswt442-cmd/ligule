@@ -83,6 +83,22 @@ test('the extension state registry round-trips and treats unreadable documents a
   const broken = await readExtensionState(root);
   assert.deepEqual(broken.disabled, [], '损坏按空登记处理');
   assert.ok(broken.invalid, '损坏原因可见');
+  // 停用名单不可信：unavailable 让环境装载把全部已安装扩展退出活动路径，
+  // extensions.set 中止写入而不是以空名单覆盖。
+  assert.ok(broken.unavailable, '损坏时名单不可信');
+  const installedDirectory = join(root, '.ligule', 'extensions');
+  const readDirectory = (path) => (path === installedDirectory
+    ? Promise.resolve(['pack.js'])
+    : Promise.reject(Object.assign(new Error('not a directory'), { code: 'ENOTDIR' })));
+  const blocked = await extensionSources({}, { projectRoot: root, userHome: root, readDirectory, disabled: null });
+  assert.deepEqual(blocked.paths, [], '登记不可读时安装扩展不进活动路径');
+  assert.deepEqual(blocked.disabled, [{ name: 'pack', path: join(installedDirectory, 'pack.js') }], '全部按停用展示');
+  // 配置层显式声明的路径不受登记影响。
+  const declared = await extensionSources(
+    { user: { extensions: [join(installedDirectory, 'pack.js')] } },
+    { projectRoot: root, userHome: root, readDirectory, disabled: null },
+  );
+  assert.deepEqual(declared.paths, [join(installedDirectory, 'pack.js')]);
 });
 
 test('the narrow interface is the four things the contract names, and registrations reach the kernel', async () => {

@@ -17,8 +17,11 @@ export function extensionStatePath(home = homedir()): string {
 
 export interface ExtensionStateRead {
   disabled: string[];
-  // 登记文件存在但读不懂时给出原因；不影响按空登记继续。
+  // 登记存在但读不懂时给出原因；不影响按空登记继续。
   invalid?: string;
+  // 登记存在但读不出来：停用名单不可信，已安装扩展全部排除在活动路径之外，
+  // extensions.set 也必须中止写入，避免以空名单覆盖真实停用记录。
+  unavailable?: string;
 }
 
 export async function readExtensionState(home = homedir()): Promise<ExtensionStateRead> {
@@ -26,21 +29,23 @@ export async function readExtensionState(home = homedir()): Promise<ExtensionSta
   try {
     text = await readFile(extensionStatePath(home), 'utf8');
   } catch (error) {
-    // 登记不可读（缺失、无权限或路径被占用）都按空登记继续：停用名单是可选状态，
-    // 不能让一条扩展登记挡住 Host 启动；原因经 invalid 交给诊断渠道展示。
+    // 缺失是正常状态（从未停用过）。存在但读不出来（无权限、损坏、版本不符）时
+    // 不能按空登记放行全部扩展：停用名单可能包含用户刻意挡下的代码。
+    // 返回 `unavailable`，由环境装载把已安装扩展全部排除在活动路径之外，并在诊断中说明。
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { disabled: [] };
-    return { disabled: [], invalid: `${(error as NodeJS.ErrnoException).code ?? 'read_failed'}: ${(error as Error).message}` };
+    return { disabled: [], unavailable: `${(error as NodeJS.ErrnoException).code ?? 'read_failed'}: ${(error as Error).message}` };
   }
   try {
     const parsed = JSON.parse(text) as { version?: unknown; disabled?: unknown };
     if (parsed.version !== STATE_VERSION
       || !Array.isArray(parsed.disabled)
       || parsed.disabled.some((item) => typeof item !== 'string' || item === '')) {
-      return { disabled: [], invalid: 'the extension state document is invalid' };
+      // 停用名单不可信：与读取失败同样处理，全部已安装扩展退出活动路径。
+      return { disabled: [], invalid: 'the extension state document is invalid', unavailable: 'invalid document' };
     }
     return { disabled: [...new Set(parsed.disabled as string[])].sort() };
   } catch (cause) {
-    return { disabled: [], invalid: (cause as Error).message };
+    return { disabled: [], invalid: (cause as Error).message, unavailable: (cause as Error).message };
   }
 }
 

@@ -32,7 +32,9 @@ interface SourceOptions {
   userHome?: string;
   readDirectory?: (path: string) => Promise<string[]>;
   // 启停登记中已停用的安装名；缺省表示没有停用任何扩展。
-  disabled?: readonly string[];
+  // 传入 `null` 表示登记不可读：停用名单不可信，全部已安装扩展退出活动路径
+  // （fail-safe 偏向停用），配置层显式声明的路径不受影响。
+  disabled?: readonly string[] | null;
 }
 
 // 配置来源必须是字符串数组；其他类型返回明确错误，不尝试猜测其含义。
@@ -116,14 +118,15 @@ export async function extensionSources(layers: SourceLayers = {}, { projectRoot,
     }
   }
   const installed = await installedIn(join(dataRoot(userHome), 'extensions'), readDirectory);
-  const off = new Set(disabled);
+  // `null` 表示登记不可读：全部已安装扩展视为停用，名单按实际安装名生成供界面展示。
+  const off = disabled === null ? null : new Set(disabled);
   const active: string[] = [];
   const disabledEntries: { name: string; path: string }[] = [];
   const installNames: Record<string, string> = {};
   for (const path of installed.paths) {
     const installName = installNameOf(path);
     installNames[resolve(path)] = installName;
-    if (off.has(installName)) {
+    if (off === null || off.has(installName)) {
       disabledEntries.push({ name: installName, path });
       continue;
     }

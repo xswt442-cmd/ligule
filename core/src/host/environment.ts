@@ -12,11 +12,22 @@ export async function loadProjectConfig(projectRoot: string, flags: string[] = [
   const layers = await loadConfigLayers({ projectRoot, flags });
   const user = { boundary: projectRoot, ...layers.user };
   const config = createConfig({ ...layers, user });
-  // 启停登记属于用户范围；读取失败按空登记继续，原因进入诊断。
+  // 启停登记属于用户范围。登记存在但读不出来时停用名单不可信：
+  // 已安装扩展全部退出活动路径（fail-safe 偏向停用），原因进入诊断；
+  // 登记损坏与读取失败都不让 Host 启动失败。
   const state = await readExtensionState();
-  const extensions = await extensionSources({ ...layers, user }, { projectRoot, disabled: state.disabled });
+  const extensions = await extensionSources({
+    ...layers,
+    user,
+  }, {
+    projectRoot,
+    disabled: state.unavailable === undefined ? state.disabled : undefined,
+  });
   if (state.invalid !== undefined) {
     extensions.ignored.push({ code: 'extension_state_invalid', path: 'extensions-state.json', detail: state.invalid });
+  }
+  if (state.unavailable !== undefined) {
+    extensions.ignored.push({ code: 'extension_state_unavailable', path: 'extensions-state.json', detail: state.unavailable });
   }
   return { config, extensions, layers };
 }

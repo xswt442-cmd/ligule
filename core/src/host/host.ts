@@ -3137,6 +3137,10 @@ export function createHost({
             throw new KernelError('extensions_set_unknown', { detail: `${name} is not an extension installed in the user extensions directory` });
           }
           const state = await readExtensionState();
+          // 登记存在但读不出来时停用名单不可信：中止写入，避免以空名单覆盖真实停用记录。
+          if (state.unavailable !== undefined) {
+            throw new KernelError('extensions_set_state_unavailable', { detail: state.unavailable });
+          }
           const disabled = new Set(state.disabled);
           if (message.params.enabled) disabled.delete(name);
           else disabled.add(name);
