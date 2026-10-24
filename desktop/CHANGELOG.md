@@ -8,7 +8,25 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 ### 简体中文
 
+**修复**
+
+- 模型请求的凭据绑定用户或命令行声明的服务地址与接口，项目覆盖地址或密钥引用时拒绝发送；对话、压缩和内部子代理沿用同一轮次的绑定快照。
+- 自定义搜索后端仅由用户配置或命令行选择，项目配置不能借只读搜索启动指定程序；受管理回收目录拒绝越界路径与指向文件边界外的链接。
+- MCP 工具保留服务器配置身份，身份限定的参数规则和审批记忆按实际登记路径生效。
+- 并发创建同名文件时仅一个请求成功，其他请求保留已有内容并返回冲突；搜索流式输出完整保留中文与多字节字符。
+- 会话恢复与模型请求校验按记录顺序配对工具调用和结果，复用调用 ID 的新轮次仍会识别未完成调用并记录未知结果。
+- Markdown 代码块的复制按钮及成功、失败反馈跟随桌面界面语言显示；复制的代码内容保持原文。
+
 ### English
+
+**Fixed**
+
+- Model requests bind credentials to the service URL and API declared by the user or command-line flags. Project overrides of the URL or key reference cannot send existing credentials; conversation, compaction, and internal subagents share the turn's binding snapshot.
+- Custom search backends can only be selected through user configuration or command-line flags; project configuration cannot launch its own program through read-only search. Managed trash rejects paths and links outside the workspace boundary.
+- Registered MCP tools retain their server configuration identity so identity-bound argument rules and approval memory apply correctly.
+- Concurrent file creation has one winner and reports conflicts without overwriting content. Streaming search output preserves Chinese and other multibyte characters.
+- Recovery and model-request validation pair tool calls with results in record order. A later turn reusing a call ID still detects its pending call and records an unknown outcome.
+- The Markdown code block copy button and its success or failure feedback follow the Desktop interface language; copied code remains unchanged.
 
 ## [0.0.7] - 2026-10-22
 
