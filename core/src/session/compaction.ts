@@ -32,8 +32,64 @@ export function cutPoint(events: SessionEvent[], budgetTokens: number, measure: 
   return null;
 }
 
+export interface CompactResult {
+  blockId: number;
+  fromSeq: number;
+  toSeq: number;
+  tokensBefore: number;
+  tokensAfter: number;
+}
+
+// 当前轮次从最后一条轮次标记之后的第一条用户消息开始；它之前的历史才允许被模型压缩。
+// 没有任何轮次标记时，整个记录都属于第一轮，没有可压缩的完整历史。
+export function compressibleToSeq(events: SessionEvent[]): number {
+  let lastTurnSeq = -1;
+  for (const event of events) {
+    if (event.kind === 'turn') lastTurnSeq = Number(event.seq);
+  }
+  for (const event of events) {
+    if (event.kind === 'user' && Number(event.seq) > lastTurnSeq) return Number(event.seq) - 1;
+  }
+  return Number(events.at(-1)?.seq ?? -1);
+}
+
+// 范围内的调用与结果必须成对：任何一侧落在范围外都会让投影出现悬空的工具消息。
+function pairingBreaks(events: SessionEvent[], fromSeq: number, toSeq: number): boolean {
+  const calls = new Set<string>();
+  const results = new Set<string>();
+  for (const event of events) {
+    const seq = Number(event.seq);
+    if (seq < fromSeq || seq > toSeq) continue;
+    if (event.kind === 'assistant') {
+      for (const call of (event.toolCalls as { id?: unknown }[] | undefined) ?? []) {
+        if (typeof call?.id === 'string' && call.id !== '') calls.add(call.id);
+      }
+    } else if (event.kind === 'tool') {
+      if (typeof event.callId === 'string' && event.callId !== '') results.add(event.callId);
+    }
+  }
+  for (const id of calls) if (!results.has(id)) return true;
+  for (const id of results) if (!calls.has(id)) return true;
+  return false;
+}
+
+// 尚未被块覆盖、又不在当前轮次内的最大可压缩范围。
+// 结束边界必须落在 user 或 assistant 消息上，且不悬空调用/结果对。
+export function compressibleRange(events: SessionEvent[], blocks: CompactionBlock[]): { fromSeq: number; toSeq: number } | null {
+  const fromSeq = blocks.length === 0 ? 0 : Number(blocks[blocks.length - 1].toSeq) + 1;
+  for (let end = compressibleToSeq(events); end >= fromSeq; end -= 1) {
+    const event = events.find((item) => Number(item.seq) === end);
+    if (event === undefined) continue;
+    if (event.kind !== 'user' && event.kind !== 'assistant') continue;
+    if (pairingBreaks(events, fromSeq, end)) continue;
+    return { fromSeq, toSeq: end };
+  }
+  return null;
+}
+
 // 摘要请求使用扁平消息记录：普通消息包含角色和文本，工具消息保留名称与结果。
-function flatten(events: SessionEvent[]): string {
+// 压缩工具读回块内原文时使用同一格式，保证模型看到的内容形状一致。
+export function flatten(events: SessionEvent[]): string {
   const lines: string[] = [];
   for (const event of events) {
     if (event.kind === 'user') lines.push(`user: ${String(event.text ?? '')}`);
@@ -52,6 +108,12 @@ function flatten(events: SessionEvent[]): string {
 const INSTRUCTION = 'Write a summary of the transcript excerpt below so a later agent can continue the work. '
   + 'Keep every decision, still-open question, tool outcome, path, command, code fragment and identifier that matters; write each of them exactly as it appeared. '
   + 'Write the prose in the language the conversation is written in, or the language it asks for. Plain prose, no preamble.\n\n';
+
+// 压缩摘要溢出文件的命名；读取方以此校验文件名，防止借工具读取会话目录外的文件。
+export const SUMMARY_SPILL_NAME = /^summary-\d+-\d+\.txt$/;
+
+// 每次压缩的触发来源：用户命令、自动压力、服务端超限恢复、模型主动调用压缩工具。
+export type CompactionReason = 'manual' | 'auto' | 'overflow' | 'model';
 
 // 摘要输入也可能超过模型窗口；超限时保留较新的内容，并说明已省略更早部分。
 // 保留先前生成的摘要，避免后续压缩丢失它总结的早期上下文。
@@ -91,6 +153,10 @@ export function createCompaction({ provider, session, directory, id, limits, log
   const threshold = reservedThreshold > retained
     ? Math.min(Math.floor(limits.contextTokens * limits.compactThresholdRatio), reservedThreshold)
     : Math.floor(limits.contextTokens * limits.compactThresholdRatio);
+  // 软阈值：达到后先提醒模型自行压缩，硬阈值仍由自动压缩兜底。
+  const soft = Math.floor(threshold * 0.9);
+  // 提醒只在不重复打扰的前提下注入：同一压力进程内提醒一次，压力回落后重新允许。
+  let nudged = false;
   // 本地估算与服务端用量的校准系数；尚无服务端用量时使用 1。
   let factor = 1;
   let overflowTried = false;
@@ -148,7 +214,7 @@ export function createCompaction({ provider, session, directory, id, limits, log
 
   // 计算切点、请求摘要并追加压缩块。无法压缩时返回具体原因和 null 结果。
   // 每次压缩覆盖尚未进入任何块的区间；块文件整体原子替换，已有块保持不变。
-  async function compact(reason: 'manual' | 'auto' | 'overflow', signal?: AbortSignal): Promise<{ blockId: number; fromSeq: number; toSeq: number; tokensBefore: number; tokensAfter: number } | null> {
+  async function compact(reason: CompactionReason, signal?: AbortSignal): Promise<CompactResult | null> {
     await seedFromRecord();
     const events = await session.read();
     const { blocks } = await loadCheckpointFile({ directory, id, events });
@@ -177,15 +243,28 @@ export function createCompaction({ provider, session, directory, id, limits, log
       logger?.log?.('compaction summary came back empty', { sessionId: id });
       return null;
     }
+    return await writeBlock({ blocks, covered, text, reason, tokensBefore, projected });
+  }
+
+  // 校验块级不变量后写入块文件与压缩事件。压缩结果必须小于原投影，否则块只增加
+  // 文件和验证成本，却让原有历史无法再进入模型上下文；此时不写并返回 null。
+  async function writeBlock({ blocks, covered, text, reason, tokensBefore, projected }: {
+    blocks: CompactionBlock[];
+    covered: SessionEvent[];
+    text: string;
+    reason: CompactionReason;
+    tokensBefore: number;
+    projected: SessionEvent[];
+  }): Promise<CompactResult | null> {
+    const fromSeq = Number(covered[0].seq);
+    const toSeq = Number(covered[covered.length - 1].seq);
     // 摘要受工具结果字节上限约束；超限时保存到溢出文件，并在块中记录读取引用。
     const kept = await spillContent(text, {
       limit: limits.resultBytes,
       directory,
-      name: `summary-${fromSeq}-${cut}.txt`,
+      name: `summary-${fromSeq}-${toSeq + 1}.txt`,
     });
-    // 压缩结果必须小于原投影，否则块只增加文件和验证成本，却让原有历史无法再进入模型上下文。
-    // 手动压缩时返回明确的“无法缩短”结果。
-    const remaining = projected.filter((event) => event.seq >= cut);
+    const remaining = projected.filter((event) => Number(event.seq) > toSeq);
     const blockTextTokens = (sum: number, block: CompactionBlock) => sum + estimateTokens(block.text);
     const tokensAfter = blocks.reduce(blockTextTokens, 0) + estimateTokens(kept)
       + remaining.reduce((sum, event) => sum + estimateTokens(event), 0);
@@ -199,14 +278,14 @@ export function createCompaction({ provider, session, directory, id, limits, log
       events: covered,
       text: kept,
       fromSeq,
-      toSeq: Number(covered[covered.length - 1].seq),
-      blockId: (last?.blockId ?? 0) + 1,
+      toSeq,
+      blockId: (blocks.at(-1)?.blockId ?? 0) + 1,
     });
     await writeCheckpointFile(directory, id, createCheckpointFile({ id, blocks: [...blocks, block] }));
     // 压缩事实写入记录：界面与导出据此说明第几块覆盖哪段、为什么压。
     if (typeof session.append === 'function') {
       await session.append({
-        kind: 'compaction', ignorable: true, reason, blockId: block.blockId, fromSeq, toSeq: block.toSeq, tokensBefore, tokensAfter,
+        kind: 'compaction', ignorable: true, reason, blockId: block.blockId, fromSeq, toSeq, tokensBefore, tokensAfter,
       });
     }
     // 保存本地估算和校准系数，使读取记录的一方可以还原触发压缩时的计算依据。
@@ -215,12 +294,64 @@ export function createCompaction({ provider, session, directory, id, limits, log
       reason,
       blockId: block.blockId,
       fromSeq,
-      toSeq: block.toSeq,
+      toSeq,
       tokensBefore,
       tokensAfter,
       factor: Math.round(factor * 100) / 100,
     });
-    return { blockId: block.blockId, fromSeq, toSeq: block.toSeq, tokensBefore, tokensAfter };
+    return { blockId: block.blockId, fromSeq, toSeq, tokensBefore, tokensAfter };
+  }
+
+  // 模型主动压缩：模型自己选择范围并撰写摘要，不再发起独立的摘要请求。
+  // 范围只能覆盖当前轮次之前的完整历史，且不得悬空任何调用/结果对。
+  async function compactRange({ fromSeq, toSeq, summary }: {
+    fromSeq?: number;
+    toSeq?: number;
+    summary: string;
+  }): Promise<CompactResult | null> {
+    if (typeof summary !== 'string' || summary.trim() === '') {
+      throw new KernelError('compact_summary_required', { detail: 'compress takes the summary text you wrote for the covered range' });
+    }
+    const events = await session.read();
+    const { blocks } = await loadCheckpointFile({ directory, id, events });
+    const last = blocks.at(-1);
+    const start = fromSeq ?? (last === undefined ? 0 : last.toSeq + 1);
+    const limit = compressibleToSeq(events);
+    const end = toSeq ?? compressibleRange(events, blocks)?.toSeq;
+    if (end === undefined) {
+      throw new KernelError('compact_range_unavailable', { detail: 'no completed history outside the current turn can be summarized yet' });
+    }
+    if (end > limit) {
+      throw new KernelError('compact_range_invalid', {
+        detail: `the current turn starts inside the range; compress up to event ${limit} at most`,
+      });
+    }
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || start > end) {
+      throw new KernelError('compact_range_invalid', { detail: 'fromSeq and toSeq must be event sequence numbers with fromSeq <= toSeq' });
+    }
+    if (start <= (last?.toSeq ?? -1)) {
+      throw new KernelError('compact_range_invalid', {
+        detail: `events up to ${last?.toSeq} are already covered by block ${last?.blockId}; start after that`,
+      });
+    }
+    const covered = events.filter((event) => Number(event.seq) >= start && Number(event.seq) <= end);
+    if (covered.length !== end - start + 1) {
+      throw new KernelError('compact_range_invalid', { detail: `events ${start}..${end} are not all present in the record` });
+    }
+    const boundary = covered[covered.length - 1];
+    if (boundary.kind !== 'user' && boundary.kind !== 'assistant') {
+      throw new KernelError('compact_range_invalid', {
+        detail: `the range must end at a user or assistant message; event ${end} is ${String(boundary.kind)}`,
+      });
+    }
+    if (pairingBreaks(events, start, end)) {
+      throw new KernelError('compact_range_invalid', {
+        detail: 'the range would separate an assistant tool call from its result; end it at a message boundary that keeps each pair together',
+      });
+    }
+    const projected = events.filter((event) => PROJECTED_KINDS.includes(String(event.kind)));
+    const tokensBefore = estimateTokens(await session.modelView());
+    return await writeBlock({ blocks, covered, text: summary, reason: 'model', tokensBefore, projected });
   }
 
   // 识别服务端明确报告的上下文超限错误，通常是 HTTP 400 响应。
@@ -230,13 +361,29 @@ export function createCompaction({ provider, session, directory, id, limits, log
     return /context|token|too long|too many|maximum|length/i.test(value.detail);
   }
 
+  // 软阈值提醒以请求尾部的临时用户消息注入：不写入记录，不改动 system 前缀，
+  // 因此不破坏持久历史，也不让缓存前缀失效。无可压缩范围时不提醒。
+  async function reminder(estimated: number): Promise<string | null> {
+    const events = await session.read();
+    const { blocks } = await loadCheckpointFile({ directory, id, events });
+    const range = compressibleRange(events, blocks);
+    if (range === null) return null;
+    return 'Context usage reminder: the request is estimated at '
+      + `${Math.round(estimated)} of ${limits.contextTokens} context tokens and approaches the compaction threshold of ${threshold}. `
+      + `Completed history from event ${range.fromSeq} to ${range.toSeq} can be summarized. `
+      + 'When those turns are no longer needed word for word, call the compact tool with action "compress" '
+      + '(fromSeq and toSeq default to this range) and write the summary yourself, keeping every path, command, identifier, '
+      + 'decision, exact value and open question. If the context is still in use, continue normally and ignore this reminder.';
+  }
+
   return {
-    tokens: () => ({ threshold, retained, reserved, factor }),
+    tokens: () => ({ threshold, soft, retained, reserved, factor }),
 
     // 为状态和命令行提供上下文窗口、压力阈值、当前估算和最近一次服务端用量。
     async context(): Promise<{
       window: number;
       threshold: number;
+      soft: number;
       retained: number;
       reserved: number;
       estimated: number;
@@ -253,6 +400,7 @@ export function createCompaction({ provider, session, directory, id, limits, log
       return {
         window: limits.contextTokens,
         threshold,
+        soft,
         retained,
         reserved,
         estimated: Math.round(estimateRequest({ ...requestPrefix(), messages: view }) * factor),
@@ -264,16 +412,31 @@ export function createCompaction({ provider, session, directory, id, limits, log
       };
     },
 
+    // 模型主动压缩入口：范围与摘要都由模型提供，校验失败抛出带指引的错误。
+    compactRange,
+
     // 手动压缩只能在没有活动轮次时执行；无法缩短时返回明确结果。
     compactNow: (signal?: AbortSignal) => compact('manual', signal),
 
     // 在构造请求后检查上下文压力；超出阈值时先压缩，再使用新投影发送请求。
+    // 软阈值区间内先提醒模型自行压缩；提醒是临时的，不进入持久历史。
     async prepare(request: LoopCompactionRequest, signal?: AbortSignal): Promise<unknown[]> {
       await seedFromRecord();
-      if (estimateRequest(request) * factor <= threshold) return request.messages;
-      const done = await compact('auto', signal);
-      if (done === null) return request.messages;
-      return await session.modelView();
+      const estimated = estimateRequest(request) * factor;
+      if (estimated > threshold) {
+        const done = await compact('auto', signal);
+        if (done === null) return request.messages;
+        return await session.modelView();
+      }
+      if (estimated >= soft && !nudged) {
+        const text = await reminder(estimated);
+        if (text !== null) {
+          nudged = true;
+          return [...request.messages, { role: 'user', text }];
+        }
+      }
+      if (estimated < soft) nudged = false;
+      return request.messages;
     },
 
     // 超长错误每次运行最多处理一次。其他错误、已重试过或无法压缩时返回 null，让原错误继续传递。

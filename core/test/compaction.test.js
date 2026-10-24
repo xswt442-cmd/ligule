@@ -322,6 +322,36 @@ test('each compaction appends its reason to the session record', async () => {
   });
 });
 
+// 软阈值区间内先以请求尾部临时消息提醒模型自行压缩：不写记录、不重复打扰、压力回落后重新允许。
+test('the soft band appends one ephemeral reminder instead of compacting', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    await fill(session, 2);
+    await session.append({ kind: 'turn', ignorable: true, status: 'completed', userSeq: 0, iterations: 1, modelCalls: 1 });
+    const compaction = createCompaction({ provider: fakeProvider([]), session, directory, id, limits });
+    const context = await compaction.context();
+    const soft = context.soft;
+    // 构造估算恰好落在软档内的请求：估算 ≈ JSON 字节 / 4。
+    const inBand = [{ role: 'user', text: 'x'.repeat(Math.floor(soft * 4) - 40) }];
+    const before = (await session.read()).length;
+
+    const reminded = await compaction.prepare({ system: '', tools: [], messages: inBand });
+    assert.equal(reminded.length, inBand.length + 1, '软档内追加一条提醒');
+    const note = reminded.at(-1);
+    assert.equal(note.role, 'user');
+    assert.match(note.text, /Context usage reminder/);
+    assert.match(note.text, /compact tool/);
+    assert.equal((await session.read()).length, before, '提醒不写入记录');
+
+    const quiet = await compaction.prepare({ system: '', tools: [], messages: inBand });
+    assert.equal(quiet.length, inBand.length, '同一压力进程内不重复提醒');
+
+    const below = await compaction.prepare({ system: '', tools: [], messages: [{ role: 'user', text: 'hi' }] });
+    assert.equal(below.length, 1, '压力回落后不带提醒');
+    const again = await compaction.prepare({ system: '', tools: [], messages: inBand });
+    assert.equal(again.length, inBand.length + 1, '回落之后重新允许提醒一次');
+  });
+});
+
 // 端点报告的用量写入会话记录，界面和恢复流程都从记录中读取。
 test('the usage an endpoint reports lands in the record and never in the projection', async () => {
   await withSession(async ({ directory, id, session }) => {

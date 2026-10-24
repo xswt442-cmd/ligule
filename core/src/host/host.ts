@@ -59,6 +59,7 @@ import { networkPlugin } from '../tools/network.js';
 import { createSkillPlugin } from '../tools/skill.js';
 import { createMcpPlugin, type McpAuthorization } from '../tools/mcp.js';
 import { createSubagentPlugin } from '../tools/subagent.js';
+import { createCompactPlugin } from '../tools/compact.js';
 import { createAskUserPlugin } from '../tools/ask-user.js';
 import { createMcpRegistry, mcpServerConfigs, type McpRegistry } from '../capability/mcp.js';
 import { discoverModels } from '../model/discovery.js';
@@ -1818,7 +1819,14 @@ export function createHost({
         }
       },
     })];
-    const assembly = loadAssembly(kernel, [...basePlugins, managedProcessPlugin(managedProcesses), ...asked, createSubagentPlugin({
+    const assembly = loadAssembly(kernel, [...basePlugins, managedProcessPlugin(managedProcesses), ...asked, createCompactPlugin({
+      // 压缩实例随所选模型重建；工具经取值函数读取当前实例。派生子会话不注册此工具，
+      // 子会话仍由自身构建的自动压缩管理预算。
+      compaction: () => state.compaction ?? null,
+      session,
+      directory,
+      id,
+    }), createSubagentPlugin({
       config,
       provider: live,
       chain,

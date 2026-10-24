@@ -252,7 +252,7 @@ test('a session built by the Host asks the provider with only the mode-selected 
     const { sessionId } = await connection.request('session.create', {});
     await connection.request('run.start', { sessionId, input: 'say ok' });
     assert.equal(requests.length, 1);
-    assert.deepEqual(requests[0].tools.map((entry) => entry.name), ['read']);
+    assert.deepEqual(requests[0].tools.map((entry) => entry.name), ['compact', 'read']);
   } finally {
     pair.client.output.end();
     host.release();
@@ -306,7 +306,7 @@ test('a switch asked for during a round takes effect only once that round ends',
 
       const asked = await connection.request('mode.set', { sessionId, name: 'wide' });
       assert.equal(asked.pending, 'wide');
-      assert.deepEqual(asked.tools, ['read'], '本轮交给模型的那一栏没在半路变');
+      assert.deepEqual(asked.tools, ['compact', 'read'], '本轮交给模型的那一栏没在半路变');
 
       // 再选一次当前那一份：这是撤回，不是第二次切换。
       const withdrawn = await connection.request('mode.set', { sessionId, name: 'readonly' });
@@ -320,10 +320,10 @@ test('a switch asked for during a round takes effect only once that round ends',
       const after = await connection.request('status.get', { sessionId });
       assert.equal(after.mode, 'wide');
       assert.equal(after.pendingMode, null);
-      assert.deepEqual(after.tools, ['find', 'read']);
+      assert.deepEqual(after.tools, ['compact', 'find', 'read']);
       // 下一轮真的用上新清单（收紧撤掉后 find 又回来了）。
       await connection.request('run.start', { sessionId, input: 'second' });
-      assert.deepEqual(requests[1].tools.map((entry) => entry.name), ['find', 'read']);
+      assert.deepEqual(requests[1].tools.map((entry) => entry.name), ['compact', 'find', 'read']);
       const { events } = await connection.request('session.read', { sessionId });
       assert.deepEqual(events.filter((event) => event.kind === 'mode').map((event) => event.name), ['readonly', 'wide']);
     } finally {
@@ -363,7 +363,7 @@ test('a rejected mode switch preserves the current tools through the next round 
     const connection = createConnection(pair.client);
     try {
       const { sessionId } = await connection.request('session.create', {});
-      assert.deepEqual((await connection.request('status.get', { sessionId })).tools, ['read']);
+      assert.deepEqual((await connection.request('status.get', { sessionId })).tools, ['compact', 'read']);
 
       await assert.rejects(
         connection.request('mode.set', { sessionId, name: 'invalid' }),
@@ -375,16 +375,16 @@ test('a rejected mode switch preserves the current tools through the next round 
       );
       const afterFailures = await connection.request('status.get', { sessionId });
       assert.equal(afterFailures.mode, 'readonly');
-      assert.deepEqual(afterFailures.tools, ['read']);
+      assert.deepEqual(afterFailures.tools, ['compact', 'read']);
 
       await connection.request('session.close', { sessionId });
       await connection.request('session.open', { sessionId });
       const recovered = await connection.request('status.get', { sessionId });
       assert.equal(recovered.mode, 'readonly');
-      assert.deepEqual(recovered.tools, ['read']);
+      assert.deepEqual(recovered.tools, ['compact', 'read']);
 
       await connection.request('run.start', { sessionId, input: 'continue under the current mode' });
-      assert.deepEqual(requests[0].tools.map((tool) => tool.name), ['read']);
+      assert.deepEqual(requests[0].tools.map((tool) => tool.name), ['compact', 'read']);
     } finally {
       pair.client.output.end();
       await host.release();

@@ -143,7 +143,7 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
     }
     if (kind === 'compaction') {
       if (event.ignorable !== true
-        || (event.reason !== 'manual' && event.reason !== 'auto' && event.reason !== 'overflow')
+        || (event.reason !== 'manual' && event.reason !== 'auto' && event.reason !== 'overflow' && event.reason !== 'model')
         || !Number.isSafeInteger(event.blockId) || (event.blockId as number) < 1
         || !Number.isSafeInteger(event.fromSeq) || (event.fromSeq as number) < 0
         || !Number.isSafeInteger(event.toSeq) || (event.toSeq as number) < (event.fromSeq as number)
