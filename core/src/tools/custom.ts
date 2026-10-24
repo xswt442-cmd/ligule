@@ -33,11 +33,13 @@ const SPEC_FIELDS = ['name', 'description', 'command', 'args', 'cwd', 'parameter
 // 按 Kernel 选定的 Shell 种类为每个词加引号；命令行再交回 exec 解析与判定。
 // PowerShell 会把带引号的首个词当作字符串而不是命令，因此只有含特殊字符的词才加引号。
 // 参数位使用单引号：PowerShell 双引号内 `$()` 与 `$name` 会在执行前展开，
-// 模型提供的参数必须按字面值传递。
-const SAFE_TOKEN = /^[A-Za-z0-9_@%+=:,./-]+$/u;
+// 模型提供的参数必须按字面值传递。`$`、`@` 开头的词在 PowerShell 中有展开语义
+// （变量、splatting），任何位置都不裸传，`@` 因此不在安全字符表内。
+const SAFE_TOKEN = /^[A-Za-z0-9_%+=:,./-]+$/u;
+const POWERSHELL_SPECIAL = /^[$@]/u;
 
 function quote(kind: ShellKind, token: string, role: 'command' | 'argument'): string {
-  if (SAFE_TOKEN.test(token)) return token;
+  if (!POWERSHELL_SPECIAL.test(token) && SAFE_TOKEN.test(token)) return token;
   if (kind === 'powershell') {
     if (role === 'argument') return `'${token.replace(/'/gu, "''")}'`;
     return `"${token.replace(/"/gu, '""')}"`;
