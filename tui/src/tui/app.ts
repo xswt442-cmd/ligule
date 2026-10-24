@@ -1492,7 +1492,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     if (name === 'extensions') {
-      const [action = 'list', target = ''] = argument.trim().split(/\s+/, 2);
+      // 空参数 split 得到 ['']，默认值只对 undefined 生效；显式归一为 list。
+      const [rawAction = '', target = ''] = argument.trim().split(/\s+/, 2);
+      const action = rawAction === '' ? 'list' : rawAction;
       if (action !== 'list' && (action !== 'on' && action !== 'off' || target === '')) {
         push({ kind: 'error', text: t('用法：/extensions [on|off <名称>]', 'Usage: /extensions [on|off <name>]') });
         return;

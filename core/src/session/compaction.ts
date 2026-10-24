@@ -1,6 +1,7 @@
 // 压缩时将较早的模型上下文交给模型总结，并在检查点中记录摘要和被替换的事件范围。
 // 压力触发在请求发送前根据本地估算判断，估算值会用服务端报告的用量校准。
 // 超长触发只在服务端报告上下文超限后执行；一次运行最多压缩并重试一次。原始事件日志保持不变。
+import { createHash } from 'node:crypto';
 import { createBlock, createCheckpointFile, loadCheckpointFile, PROJECTED_KINDS, writeCheckpointFile, type CompactionBlock } from './checkpoint.js';
 import { spillContent } from '../kernel/result.js';
 import { KernelError } from '../kernel/error.js';
@@ -110,7 +111,8 @@ const INSTRUCTION = 'Write a summary of the transcript excerpt below so a later 
   + 'Write the prose in the language the conversation is written in, or the language it asks for. Plain prose, no preamble.\n\n';
 
 // 压缩摘要溢出文件的命名；读取方以此校验文件名，防止借工具读取会话目录外的文件。
-export const SUMMARY_SPILL_NAME = /^summary-\d+-\d+\.txt$/;
+// 末尾的短哈希区分同范围不同内容的摘要；旧格式不带哈希，读取时仍接受。
+export const SUMMARY_SPILL_NAME = /^summary-\d+-\d+(?:-[a-f0-9]{8})?\.txt$/;
 
 // 每次压缩的触发来源：用户命令、自动压力、服务端超限恢复、模型主动调用压缩工具。
 export type CompactionReason = 'manual' | 'auto' | 'overflow' | 'model';
@@ -259,12 +261,19 @@ export function createCompaction({ provider, session, directory, id, limits, log
     const fromSeq = Number(covered[0].seq);
     const toSeq = Number(covered[covered.length - 1].seq);
     // 摘要受工具结果字节上限约束；超限时保存到溢出文件，并在块中记录读取引用。
+    // 文件名带内容哈希：同一目录存放工作区的全部会话，仅有序号范围的名称会跨会话互相覆盖。
     const kept = await spillContent(text, {
       limit: limits.resultBytes,
       directory,
-      name: `summary-${fromSeq}-${toSeq + 1}.txt`,
+      name: `summary-${fromSeq}-${toSeq + 1}-${createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 8)}.txt`,
     });
-    const remaining = projected.filter((event) => Number(event.seq) > toSeq);
+    // 压缩后的投影仍包含：未被任何已有块覆盖、也不在新块范围内的全部事件。
+    // 模型自选范围可以从旧块之后任意位置开始，中间未覆盖的事件必须计入。
+    const coveredBy = (seq: number, block: { fromSeq: number; toSeq: number }) => seq >= block.fromSeq && seq <= block.toSeq;
+    const remaining = projected.filter((event) => {
+      const seq = Number(event.seq);
+      return !coveredBy(seq, { fromSeq, toSeq }) && !blocks.some((block) => coveredBy(seq, block));
+    });
     const blockTextTokens = (sum: number, block: CompactionBlock) => sum + estimateTokens(block.text);
     const tokensAfter = blocks.reduce(blockTextTokens, 0) + estimateTokens(kept)
       + remaining.reduce((sum, event) => sum + estimateTokens(event), 0);

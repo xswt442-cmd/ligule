@@ -26,14 +26,33 @@ export interface ListIndex {
   entries: Map<string, ListIndexEntry>;
 }
 
-function entryShape(value: unknown): value is ListIndexEntry {
+// 缓存条目必须携带完整的列表字段：残缺条目按未命中处理，从记录重建。
+// 会话规则要求列表始终由记录文件派生，索引只是缓存，不提供第二份事实。
+function entryShape(value: unknown, id: string): value is ListIndexEntry {
   if (typeof value !== 'object' || value === null) return false;
   const entry = value as Partial<ListIndexEntry>;
+  const summary = entry.summary as Partial<SessionSummary> | undefined;
   return typeof entry.bytes === 'number' && Number.isFinite(entry.bytes)
     && typeof entry.mtimeMs === 'number' && Number.isFinite(entry.mtimeMs)
     && (entry.headerRoot === null || typeof entry.headerRoot === 'string')
-    && typeof entry.summary === 'object' && entry.summary !== null
-    && typeof (entry.summary as SessionSummary).id === 'string';
+    && typeof summary === 'object' && summary !== null
+    && summary.id === id
+    && typeof summary.formatVersion === 'number'
+    && typeof summary.projectRoot === 'string'
+    && typeof summary.workspace === 'string'
+    && typeof summary.workspaceOrigin === 'string'
+    && (summary.createdAt === null || typeof summary.createdAt === 'string')
+    && typeof summary.updatedAt === 'string'
+    && typeof summary.events === 'number'
+    && typeof summary.lastSeq === 'number'
+    && typeof summary.name === 'string'
+    && typeof summary.archived === 'boolean'
+    && typeof summary.unanswered === 'number'
+    && typeof summary.truncatedBytes === 'number'
+    && (summary.mode === null || (typeof summary.mode === 'object' && summary.mode !== null
+      && typeof summary.mode.name === 'string' && typeof summary.mode.layer === 'string' && typeof summary.mode.digest === 'string'))
+    && (summary.error === undefined || (typeof summary.error === 'object' && summary.error !== null
+      && typeof summary.error.code === 'string' && typeof summary.error.detail === 'string'));
 }
 
 // 读取失败、JSON 损坏或版本不符都返回空索引：调用方按未命中逐条重建。
@@ -51,7 +70,7 @@ export async function readListIndex(directory: string): Promise<ListIndex> {
     }
     const entries = new Map<string, ListIndexEntry>();
     for (const [id, value] of Object.entries(parsed.entries)) {
-      if (entryShape(value)) entries.set(id, value);
+      if (entryShape(value, id)) entries.set(id, value);
     }
     return { entries };
   } catch {

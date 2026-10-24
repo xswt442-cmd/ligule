@@ -6,8 +6,7 @@ import { Modal, Row } from './ui';
 
 type ServerEntry = { command?: string; args?: string[]; env?: Record<string, string>; cwd?: string };
 type ConfigShown = {
-  values?: { mcp?: { servers?: Record<string, ServerEntry> } };
-  layers?: { layer: string; version: string; exists: boolean }[];
+  layers?: { layer: string; version: string; exists: boolean; mcpServers?: Record<string, ServerEntry> }[];
 };
 type Draft = { name: string; command: string; args: string; env: string; cwd: string };
 type Note = { text: string; bad: boolean; code?: string };
@@ -28,7 +27,8 @@ export function McpServersPanel({ client, projectRoot }: { client: Client; proje
   const load = useCallback(async (keepNote = false) => {
     try {
       const answer = await client.call('config.get', target, 15_000) as ConfigShown;
-      setServers(answer.values?.mcp?.servers ?? {});
+      // 服务器表来自使用者默认层的那一次读取，与写入用的版本同源。
+      setServers(answer.layers?.find((item) => item.layer === 'user')?.mcpServers ?? {});
       setVersion(answer.layers?.find((item) => item.layer === 'user')?.version ?? '');
       if (!keepNote) setNote(null);
     } catch (error) {

@@ -99,8 +99,9 @@ export async function branchSession(
   if (carried.length > 0) {
     try {
       await writeCheckpointFile(directory, id, createCheckpointFile({ id, blocks: carried }));
-    } catch (cause) {
-      throw new KernelError('session_branch_failed', { cause, detail: `${parentSessionId} at ${boundary}: the compaction blocks could not be carried over` });
+    } catch {
+      // 记录已写入并可见；块文件是可重建的派生数据，携带失败不使分支失败，
+      // 否则调用方重试会不断产生没有块文件的孤立分支。
     }
   }
   return { sessionId: id, parentSessionId, at: boundary, events: kept.length };

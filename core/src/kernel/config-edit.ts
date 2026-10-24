@@ -740,6 +740,10 @@ export function checkedMcpServer(input: unknown): McpServerWrite {
       throw new KernelError('config_mcp_invalid', { detail: 'env takes a table of ${NAME} references' });
     }
     for (const [key, value] of Object.entries(env as Record<string, unknown>)) {
+      // 键进入 TOML 与子进程环境；限制为环境变量名，避免生成无法回读的内联表。
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key)) {
+        throw new KernelError('config_mcp_invalid', { detail: `env.${JSON.stringify(key)} is not an environment variable name` });
+      }
       if (typeof value !== 'string' || !MCP_ENV_REF.test(value)) {
         throw new KernelError('config_mcp_invalid', { detail: `env.${key} takes a \${NAME} environment variable reference, not its value` });
       }
@@ -790,20 +794,12 @@ export function expectedMcpServers(current: Record<string, unknown>, op: McpOp, 
   return next;
 }
 
-function mcpServerTables(document: ParsedDocument): AST.TOMLTable[] {
-  return document.tables.filter((table) =>
-    table.kind === 'standard'
-      && table.resolvedKey.length === 3
-      && sameTomlPath(table.resolvedKey.slice(0, 2), MCP_TABLE_PATH),
-  );
-}
-
 function mcpServerBlock(server: McpServerWrite, eol: string): string {
   const rows = [`[mcp.servers.${JSON.stringify(server.name)}]`, `command = ${JSON.stringify(server.command)}`];
   if (server.args !== undefined) rows.push(`args = [${server.args.map((item) => JSON.stringify(item)).join(', ')}]`);
   if (server.env !== undefined) {
     const entries = Object.entries(server.env);
-    if (entries.length > 0) rows.push(`env = { ${entries.map(([name, ref]) => `${name} = ${JSON.stringify(ref)}`).join(', ')} }`);
+    if (entries.length > 0) rows.push(`env = { ${entries.map(([name, ref]) => `${JSON.stringify(name)} = ${JSON.stringify(ref)}`).join(', ')} }`);
   }
   if (server.cwd !== undefined) rows.push(`cwd = ${JSON.stringify(server.cwd)}`);
   return `${rows.join(eol)}${eol}`;
@@ -815,7 +811,10 @@ export function editMcpServerTable(text: string, op: McpOp, server: McpServerRef
   if (document.pairs.some((pair) => sameTomlPath(pair.path, [...MCP_TABLE_PATH]))) {
     throw new KernelError('config_edit_shape_unsupported', { detail: 'mcp.servers must use one table per server for server editing' });
   }
-  const own = mcpServerTables(document).filter((table) => table.resolvedKey[2] === server.name);
+  // 手写配置可能把 env 等字段拆成子表；替换与删除都要覆盖主表及其全部子表。
+  const own = document.tables.filter((table) =>
+    table.kind === 'standard' && startsWithTomlPath(table.resolvedKey, [...MCP_TABLE_PATH, server.name]),
+  );
   if (op === 'remove') {
     if (own.length === 0) {
       throw new KernelError('config_mcp_unknown', { detail: `${server.name} is not configured in that file` });
@@ -828,7 +827,7 @@ export function editMcpServerTable(text: string, op: McpOp, server: McpServerRef
     // 整表替换：删除旧表（含前导注释）后在原位置插入新表。
     const edits = own.map((table) => ruleTableEdit(text, document, table));
     const removed = applyTextEdits(text, edits);
-    const at = edits[0].start;
+    const at = Math.min(...edits.map((edit) => edit.start));
     const eol = lineEndingAt(text, Math.min(Math.max(0, at - 1), Math.max(0, text.length - 1)));
     return { text: applyTextEdits(removed, [{ start: at, end: at, text: mcpServerBlock(wanted, eol) }]), created: false };
   }

@@ -136,19 +136,22 @@ export function checkedCustomToolSpec(parsed: unknown, file: string): CustomTool
 }
 
 function buildCustomTool(spec: CustomToolSpec): ToolDefinition {
+  // 命令行在选定 Shell 后端后合成；Kernel 用同一段文本做脚本绑定、信任检查与策略判定。
+  const compose = (args: Record<string, unknown>, kind: 'bash' | 'powershell'): string =>
+    [spec.command, ...resolveArgv(spec.args, args)].map((token) => quote(kind, token)).join(' ');
   return {
     name: spec.name,
     // 执行、权限与审批都按 exec 能力判定；声明一个工具不授予任何额外权限。
     access: 'exec',
     capability: () => 'exec',
+    commandOf: (args: Record<string, unknown>, shell: { kind: 'bash' | 'powershell' }) => compose(args, shell.kind),
     description: spec.description,
     parameters: spec.parameters,
     async run(args: Record<string, unknown>, context: ExecRunContext) {
       if (context.shell === undefined) {
         throw new KernelError('exec_shell_unavailable', { detail: 'the host did not select a shell backend for exec' });
       }
-      const argv = resolveArgv(spec.args, args);
-      const command = [spec.command, ...argv].map((token) => quote(context.shell!.kind, token)).join(' ');
+      const command = compose(args, context.shell.kind);
       return execTool.run({ command, ...(spec.cwd === undefined ? {} : { cwd: spec.cwd }) }, context);
     },
   } as ToolDefinition;
@@ -198,7 +201,21 @@ export function createCustomToolsPlugin(tools: readonly ToolDefinition[]) {
   return {
     name: 'ligule-custom-tools',
     setup(kernel: { register(tool: ToolDefinition): () => void }) {
-      const disposers = tools.map((tool) => kernel.register(tool));
+      const disposers: (() => void)[] = [];
+      try {
+        for (const tool of tools) {
+          try {
+            disposers.push(kernel.register(tool));
+          } catch (error) {
+            // 与已登记工具（例如内置 read）重名时跳过该声明，不影响其他工具与会话构建；
+            // 其他登记错误仍向外抛出。
+            if (!(error instanceof KernelError) || error.code !== 'tool_already_registered') throw error;
+          }
+        }
+      } catch (error) {
+        for (const dispose of disposers.reverse()) dispose();
+        throw error;
+      }
       return () => {
         for (const dispose of disposers.reverse()) dispose();
       };

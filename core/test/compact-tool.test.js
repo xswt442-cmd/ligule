@@ -2,7 +2,7 @@
 // 压缩只改投影：原始事件、块文件与压缩事件全部留在记录里。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -147,10 +147,21 @@ test('a summary over the byte cap spills to a file the spill action can return',
     const local = createCompactTool({ compaction: () => compaction, session, directory, id });
     const done = await local.run({ action: 'compress', summary }, { config: { limits: { resultBytes: 2_000 } } });
     assert.match(done.text, /block 1 now covers/);
-    const blocks = (await local.run({ action: 'blocks' }, { config: {} })).text;
-    const reference = /kept in (summary-\d+-\d+\.txt)\]/.exec(blocks);
-    assert.ok(reference, `块摘要引用溢出文件: ${blocks.slice(-120)}`);
-    const spilled = (await local.run({ action: 'spill', name: reference[1] }, { config: { limits: { resultBytes: 2_000 } } })).text;
-    assert.match(spilled, /超长摘要正文/);
+    // 摘要溢出文件名带内容短哈希；跨会话共用目录时同范围的不同摘要不再互相覆盖。
+    // 哈希段是内容摘要，伪造的哈希名指向不存在的文件并被点名拒绝。
+    await assert.rejects(
+      local.run({ action: 'spill', name: 'summary-0-6-abcdef01.txt' }, { config: { limits: { resultBytes: 2_000 } } }),
+      (error) => error.code === 'compact_spill_missing', '不存在的哈希名被拒绝',
+    );
+    await assert.rejects(
+      local.run({ action: 'spill', name: 'summary-0-6-zzz.txt' }, { config: { limits: { resultBytes: 2_000 } } }),
+      (error) => error.code === 'compact_spill_name_invalid', '非哈希段的名字不通过白名单',
+    );
+    // 从块文件直接取引用，验证完整链路：块 -> 引用 -> 溢出内容。
+    const raw = JSON.parse(await readFile(join(directory, `${id}.checkpoint.json`), 'utf8'));
+    const reference = /kept in (summary-\d+-\d+-[a-f0-9]{8}\.txt)\]/u.exec(raw.blocks[0].text);
+    assert.ok(reference, `块摘要引用溢出文件: ${raw.blocks[0].text.slice(-120)}`);
+    const back = (await local.run({ action: 'spill', name: reference[1] }, { config: { limits: { resultBytes: 2_000 } } })).text;
+    assert.match(back, /超长摘要正文/);
   });
 });

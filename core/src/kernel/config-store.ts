@@ -5,6 +5,7 @@ import { configPaths } from './config-file.js';
 import {
   EDITABLE,
   editableField,
+  mcpServersOfLayer,
   readConfigLayer,
   rulesOfLayer,
   writeConfigField,
@@ -30,6 +31,38 @@ const inLayer = (layer: Record<string, unknown> | undefined, path: readonly stri
   }
   return true;
 };
+
+const ENV_REFERENCE = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/u;
+
+// 按层展示的 MCP 服务器表；只保留界面编辑所需字段，环境值仅接受引用形式。
+// 该层没有定义或结构读不懂时返回 undefined，不伪装成空表。
+function serversShownOfLayer(table: Record<string, unknown>): Record<string, { command?: string; args?: string[]; cwd?: string; env?: Record<string, string> }> | undefined {
+  try {
+    const servers = mcpServersOfLayer(table);
+    if (Object.keys(servers).length === 0 && !inLayer(table, ['mcp', 'servers'])) return undefined;
+    const shown: Record<string, { command?: string; args?: string[]; cwd?: string; env?: Record<string, string> }> = {};
+    for (const [name, entry] of Object.entries(servers)) {
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue;
+      const given = entry as Record<string, unknown>;
+      const env = given.env;
+      const envShown: Record<string, string> = {};
+      if (env !== null && typeof env === 'object' && !Array.isArray(env)) {
+        for (const [key, value] of Object.entries(env as Record<string, unknown>)) {
+          if (typeof value === 'string' && ENV_REFERENCE.test(value)) envShown[key] = value;
+        }
+      }
+      shown[name] = {
+        ...(typeof given.command === 'string' ? { command: given.command } : {}),
+        ...(Array.isArray(given.args) && given.args.every((item) => typeof item === 'string') ? { args: given.args as string[] } : {}),
+        ...(typeof given.cwd === 'string' ? { cwd: given.cwd } : {}),
+        ...(Object.keys(envShown).length === 0 ? {} : { env: envShown }),
+      };
+    }
+    return shown;
+  } catch {
+    return undefined;
+  }
+}
 
 /** 指定配置层中的字段值；字段不存在时返回 undefined。 */
 const valueIn = (layer: Record<string, unknown> | undefined, path: readonly string[]): unknown =>
@@ -83,7 +116,16 @@ export function createConfigStore({ projectRoot, userHome, layers = {} }: { proj
         layers[keyOfLayer(layer)] = table;
         // 只有实际定义规则表的配置层才返回来源；未定义时不伪装成空数组。
         const written = inLayer(table, ['policy', 'rules']);
-        return { layer, version, exists: version !== '', ...(written ? { rules: rulesOfLayer(table) } : {}) };
+        // 该层实际定义的 MCP 服务器表随版本一同返回；环境值只保留 ${NAME} 引用，
+        // 手写明文凭据不进入界面。结构无法解析的层不返回服务器表。
+        const mcpServers = serversShownOfLayer(table);
+        return {
+          layer,
+          version,
+          exists: version !== '',
+          ...(written ? { rules: rulesOfLayer(table) } : {}),
+          ...(mcpServers === undefined ? {} : { mcpServers }),
+        };
       }),
     );
     return {

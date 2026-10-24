@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createPermissionContext, discoverCustomTools, resolveShell } from '../dist/index.js';
+import { createConfig, createCustomToolsPlugin, createDecisionChain, createKernel, createPermissionContext, discoverCustomTools, resolveShell } from '../dist/index.js';
 import { discoverCustomTools as directDiscover } from '../dist/tools/custom.js';
 
 const shell = resolveShell({});
@@ -112,4 +112,77 @@ test('a missing directory yields no tools and no diagnostics', async () => {
 
 test('discoverCustomTools is re-exported from the package root', async () => {
   assert.equal(typeof discoverCustomTools, 'function');
+});
+
+// 经 Kernel 的真实调用路径：commandOf 合成的命令让 Shell 得以选择、
+// 按命令前缀匹配的规则以完整命令文本判定，而不是只看到模型参数。
+test('kernel.call resolves the shell and judges the composed command for declared tools', async () => {
+  await withTools({
+    'shout.toml': `description = "Print a word back"
+command = "echo"
+args = ["{word}"]
+
+[parameters.properties.word]
+type = "string"
+
+[parameters]
+required = ["word"]
+`,
+  }, async (directory, { tools }) => {
+    // 规则按工具声明的 exec 能力名匹配；通配规则只命合成后的完整命令（引号风格随 Shell），
+    // 而不是模型参数对象。auto 档放行未匹配规则的调用。
+    const policy = createDecisionChain({
+      mode: 'auto',
+      rules: [{ tool: 'exec', decision: 'deny', match: 'echo *forbidden*' }],
+      ask: async () => ({ decision: 'deny' }),
+    });
+    const kernel = createKernel({
+      config: createConfig({ flag: { boundary: process.cwd() } }),
+      permission: fullAccess,
+      policy,
+    });
+    kernel.register(tools[0]);
+    // 合成命令携带模型参数：echo 'hello' 按规则前缀不匹配，放行执行。
+    const allowed = await kernel.call('shout', { word: 'hello' });
+    assert.equal(allowed.text.trim(), 'hello', '放行的调用真实执行');
+
+    // 禁用规则匹配合成后的完整命令，而不是模型参数对象；拒绝以 policy_denied 抛出。
+    await assert.rejects(
+      kernel.call('shout', { word: 'forbidden' }),
+      (error) => error.code === 'policy_denied',
+      '规则按合成命令文本命中',
+    );
+  });
+});
+
+// 与内置工具重名的声明默认跳过：kernel.register 抛 tool_already_registered，
+// 插件转为跳过，其他工具与会话构建不受影响。
+test('a declared tool with a registered name is skipped without breaking the session', async () => {
+  await withTools({
+    // 声明名与内置工具相同：登记时撞 tool_already_registered，插件跳过该声明。
+    'shadow.toml': `name = "read"
+description = "Shadow the built-in read tool"
+command = "echo"
+args = ["{word}"]
+
+[parameters.properties.word]
+type = "string"
+`,
+    'own.toml': `description = "A distinct tool"
+command = "echo"
+args = ["{word}"]
+
+[parameters.properties.word]
+type = "string"
+`,
+  }, async (directory, { tools }) => {
+    // 清单按权限过滤：read 声明 access 为 exec，需要 full-access 才出现在清单中。
+    const kernel = createKernel({ permission: fullAccess });
+    kernel.register({ name: 'read', description: 'Built-in read', parameters: { type: 'object' }, run: () => ({}) });
+    const plugin = createCustomToolsPlugin(tools);
+    plugin.setup(kernel);
+    const names = kernel.manifest().map((tool) => tool.name);
+    assert.equal(names.filter((name) => name === 'read').length, 1, '内置 read 未被顶掉');
+    assert.ok(names.includes('own'), '其余声明照常登记');
+  });
 });
