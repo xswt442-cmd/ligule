@@ -21,7 +21,7 @@ export type PolicyRule = {
   argsHash?: string;
 };
 
-/** 配置写入请求：标量字段使用 `value`，规则表使用 `op` 和 `rule`；更新或删除还需提供 `index`。 */
+/** 配置写入请求：标量字段使用 `value`，规则表使用 `op` 和 `rule`，MCP 服务器表使用 `op` 和 `server`；更新或删除还需提供 `index`。 */
 export type WriteRequest = {
   field: string;
   version: string;
@@ -29,12 +29,13 @@ export type WriteRequest = {
   op?: unknown;
   index?: unknown;
   rule?: unknown;
+  server?: unknown;
 };
 
 /** 可写配置字段及其文件路径和允许的值类型。 */
 export type EditableField = {
   readonly path: readonly [string, string];
-  readonly kind: 'string' | 'enum' | 'url' | 'envName' | 'rules' | 'services' | 'selection' | 'positiveInteger';
+  readonly kind: 'string' | 'enum' | 'url' | 'envName' | 'rules' | 'services' | 'selection' | 'positiveInteger' | 'mcpServer';
   readonly oneOf?: readonly string[];
 };
 
@@ -49,6 +50,7 @@ export const EDITABLE: Readonly<Record<string, EditableField>> = {
   'model.outputTokens': { path: ['model', 'outputTokens'], kind: 'positiveInteger' },
   'policy.mode': { path: ['policy', 'mode'], kind: 'enum', oneOf: ['ask', 'auto', 'none', 'never'] },
   'policy.rules': { path: ['policy', 'rules'], kind: 'rules' },
+  'mcp.servers': { path: ['mcp', 'servers'], kind: 'mcpServer' },
 };
 
 export function editableField(field: unknown): EditableField {
@@ -330,10 +332,13 @@ export async function writeConfigField(
 ): Promise<{ version: string; created: boolean; rules?: PolicyRule[] }> {
   const definition = editableField(request.field);
   if (typeof request.version !== 'string') throw new KernelError('config_field_value', { detail: 'the version read from that file is required' });
-  const scalar = definition.kind === 'rules' ? undefined : encodeValue(definition, request.value);
-  const op = definition.kind === 'rules' ? checkedOp(request.op) : undefined;
+  const scalar = definition.kind === 'rules' || definition.kind === 'mcpServer' ? undefined : encodeValue(definition, request.value);
+  const op = definition.kind === 'rules' ? checkedOp(request.op)
+    : definition.kind === 'mcpServer' ? checkedMcpOp(request.op) : undefined;
   const index = definition.kind === 'rules' ? checkedIndex(request.index) : 0;
   const rule = definition.kind === 'rules' && op !== 'remove' ? checkedRule(request.rule) : undefined;
+  const server = definition.kind === 'mcpServer' && op !== 'remove' ? checkedMcpServer(request.server)
+    : definition.kind === 'mcpServer' ? checkedMcpServerName(request.server) : undefined;
   const target = resolve(file);
   let release: () => Promise<void>;
   try {
@@ -372,16 +377,26 @@ export async function writeConfigField(
       }
     };
     const before = definition.kind === 'rules' ? rulesOfLayer(read(current, 'config_file_invalid')) : [];
+    const beforeServers = definition.kind === 'mcpServer' ? mcpServersOfLayer(read(current, 'config_file_invalid')) : {};
     const edited = scalar === undefined
-      ? editRuleTable(current, op as RuleOp, index, rule)
+      ? definition.kind === 'mcpServer'
+        ? editMcpServerTable(current, op as McpOp, server as McpServerWrite)
+        : editRuleTable(current, op as RuleOp, index, rule)
       : editTomlValue(current, definition.path, scalar.literal, definition.kind === 'services' || definition.kind === 'selection');
     const parsed = read(edited.text, 'config_edit_verify_failed');
-    if (scalar === undefined) {
+    if (scalar === undefined && definition.kind === 'rules') {
       // 比较整个规则表，检测写入期间其他规则是否发生变化。
       const landed = digestRules(rulesOfLayer(parsed));
       const wanted = digestRules(expectedRules(before, op as RuleOp, index, rule));
       if (landed !== wanted) {
         throw new KernelError('config_edit_verify_failed', { detail: `policy.rules reads back as ${landed}` });
+      }
+    } else if (scalar === undefined) {
+      // 比较整个服务器表，检测写入期间其他服务器是否发生变化。
+      const landedServers = mcpServersOfLayer(parsed);
+      const wantedServers = expectedMcpServers(beforeServers, op as McpOp, server as McpServerWrite);
+      if (!isDeepStrictEqual(structuredClone(landedServers), structuredClone(wantedServers))) {
+        throw new KernelError('config_edit_verify_failed', { detail: `mcp.servers reads back as ${JSON.stringify(Object.keys(landedServers).sort())}` });
       }
     } else {
       const landed = definition.path.reduce<unknown>((node, part) => (node as Record<string, unknown>)?.[part], parsed);
@@ -403,7 +418,7 @@ export async function writeConfigField(
     return {
       version: configVersion(edited.text),
       created: edited.created,
-      ...(scalar === undefined ? { rules: expectedRules(before, op as RuleOp, index, rule) } : {}),
+      ...(definition.kind === 'rules' ? { rules: expectedRules(before, op as RuleOp, index, rule) } : {}),
     };
   } finally {
     try {
@@ -656,4 +671,189 @@ export function digestRules(list: PolicyRule[]): string {
   return list
     .map((rule) => RULE_FIELDS.map((key) => `${key}=${JSON.stringify(rule[key] ?? '')}`).join(' '))
     .join('\n');
+}
+
+// `[mcp.servers.<name>]` 服务器表的设置与删除。
+
+const MCP_FIELDS = ['command', 'args', 'env', 'cwd'] as const;
+const MCP_OPS = ['set', 'remove'] as const;
+type McpOp = (typeof MCP_OPS)[number];
+const MCP_TABLE_PATH = ['mcp', 'servers'] as const;
+
+// 名称进入表头、工具身份 `mcp:<server>/<tool>` 与界面展示；限定为常用标识符字符。
+const MCP_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u;
+// `env` 只接受 `${NAME}` 环境变量引用，明文凭据不写入配置文件。
+const MCP_ENV_REF = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/u;
+
+export type McpServerWrite = {
+  name: string;
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+};
+
+/** 删除操作只需要服务器名；名称约束与完整条目一致。 */
+type McpServerRef = Pick<McpServerWrite, 'name'> & Partial<Omit<McpServerWrite, 'name'>>;
+
+export function checkedMcpServerName(input: unknown): McpServerRef {
+  const name = (input === null || typeof input !== 'object' || Array.isArray(input) ? undefined : (input as Record<string, unknown>).name);
+  if (typeof name !== 'string' || !MCP_NAME.test(name) || name.length > 64) {
+    throw new KernelError('config_mcp_invalid', { detail: 'name takes letters, digits, dots, underscores and hyphens, starting with a letter or digit' });
+  }
+  return { name };
+}
+
+export function checkedMcpOp(op: unknown): McpOp {
+  if (typeof op !== 'string' || !(MCP_OPS as readonly string[]).includes(op)) {
+    throw new KernelError('config_mcp_invalid', { detail: `op takes one of: ${MCP_OPS.join(', ')}` });
+  }
+  return op as McpOp;
+}
+
+/** 校验服务器条目；与读取侧 mcpServerConfigs 的约束一致，无效条目不写入文件。 */
+export function checkedMcpServer(input: unknown): McpServerWrite {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    throw new KernelError('config_mcp_invalid', { detail: `a server is an object of name, ${MCP_FIELDS.join(', ')}` });
+  }
+  const given = input as Record<string, unknown>;
+  for (const key of Object.keys(given)) {
+    if (key !== 'name' && !(MCP_FIELDS as readonly string[]).includes(key)) {
+      throw new KernelError('config_mcp_invalid', { detail: `${key} is not one of: name, ${MCP_FIELDS.join(', ')}` });
+    }
+  }
+  const name = given.name;
+  if (typeof name !== 'string' || !MCP_NAME.test(name) || name.length > 64) {
+    throw new KernelError('config_mcp_invalid', { detail: 'name takes letters, digits, dots, underscores and hyphens, starting with a letter or digit' });
+  }
+  const command = given.command;
+  if (typeof command !== 'string' || command.trim() === '' || /[\r\n\u0000]/u.test(command)) {
+    throw new KernelError('config_mcp_invalid', { detail: 'command takes the executable path without arguments; put its arguments in args' });
+  }
+  const args = given.args;
+  if (args !== undefined && (!Array.isArray(args) || args.some((item) => typeof item !== 'string'))) {
+    throw new KernelError('config_mcp_invalid', { detail: 'args takes an array of strings' });
+  }
+  const env = given.env;
+  if (env !== undefined) {
+    if (env === null || typeof env !== 'object' || Array.isArray(env)) {
+      throw new KernelError('config_mcp_invalid', { detail: 'env takes a table of ${NAME} references' });
+    }
+    for (const [key, value] of Object.entries(env as Record<string, unknown>)) {
+      if (typeof value !== 'string' || !MCP_ENV_REF.test(value)) {
+        throw new KernelError('config_mcp_invalid', { detail: `env.${key} takes a \${NAME} environment variable reference, not its value` });
+      }
+    }
+  }
+  const cwd = given.cwd;
+  if (cwd !== undefined && (typeof cwd !== 'string' || cwd.trim() === '')) {
+    throw new KernelError('config_mcp_invalid', { detail: 'cwd takes a non-empty path' });
+  }
+  return {
+    name,
+    command,
+    ...(args === undefined ? {} : { args }),
+    ...(env === undefined ? {} : { env: env as Record<string, string> }),
+    ...(cwd === undefined ? {} : { cwd }),
+  };
+}
+
+/** 解析一层配置中的服务器表；结构不符合时返回错误，不静默丢弃。 */
+export function mcpServersOfLayer(parsed: Record<string, unknown>): Record<string, unknown> {
+  const mcp = parsed.mcp;
+  if (mcp === undefined) return {};
+  if (mcp === null || typeof mcp !== 'object' || Array.isArray(mcp)) {
+    throw new KernelError('config_edit_shape_unsupported', { detail: '[mcp] is not a table' });
+  }
+  const servers = (mcp as Record<string, unknown>).servers;
+  if (servers === undefined) return {};
+  if (servers === null || typeof servers !== 'object' || Array.isArray(servers)) {
+    throw new KernelError('config_edit_shape_unsupported', { detail: 'mcp.servers is not a table' });
+  }
+  return { ...(servers as Record<string, unknown>) };
+}
+
+/** 根据本次修改计算预期的回读结果。 */
+export function expectedMcpServers(current: Record<string, unknown>, op: McpOp, server?: McpServerRef): Record<string, unknown> {
+  const next = { ...current };
+  if (op === 'remove') {
+    delete next[server === undefined ? '' : server.name];
+    return next;
+  }
+  const wanted = server as McpServerWrite;
+  next[wanted.name] = {
+    command: wanted.command,
+    ...(wanted.args === undefined ? {} : { args: [...wanted.args] }),
+    ...(wanted.env === undefined ? {} : { env: { ...wanted.env } }),
+    ...(wanted.cwd === undefined ? {} : { cwd: wanted.cwd }),
+  };
+  return next;
+}
+
+function mcpServerTables(document: ParsedDocument): AST.TOMLTable[] {
+  return document.tables.filter((table) =>
+    table.kind === 'standard'
+      && table.resolvedKey.length === 3
+      && sameTomlPath(table.resolvedKey.slice(0, 2), MCP_TABLE_PATH),
+  );
+}
+
+function mcpServerBlock(server: McpServerWrite, eol: string): string {
+  const rows = [`[mcp.servers.${JSON.stringify(server.name)}]`, `command = ${JSON.stringify(server.command)}`];
+  if (server.args !== undefined) rows.push(`args = [${server.args.map((item) => JSON.stringify(item)).join(', ')}]`);
+  if (server.env !== undefined) {
+    const entries = Object.entries(server.env);
+    if (entries.length > 0) rows.push(`env = { ${entries.map(([name, ref]) => `${name} = ${JSON.stringify(ref)}`).join(', ')} }`);
+  }
+  if (server.cwd !== undefined) rows.push(`cwd = ${JSON.stringify(server.cwd)}`);
+  return `${rows.join(eol)}${eol}`;
+}
+
+/** 在原文中设置或删除一个服务器表，并保留其他服务器的字节和注释。 */
+export function editMcpServerTable(text: string, op: McpOp, server: McpServerRef): { text: string; created: boolean } {
+  const document = parseDocument(text);
+  if (document.pairs.some((pair) => sameTomlPath(pair.path, [...MCP_TABLE_PATH]))) {
+    throw new KernelError('config_edit_shape_unsupported', { detail: 'mcp.servers must use one table per server for server editing' });
+  }
+  const own = mcpServerTables(document).filter((table) => table.resolvedKey[2] === server.name);
+  if (op === 'remove') {
+    if (own.length === 0) {
+      throw new KernelError('config_mcp_unknown', { detail: `${server.name} is not configured in that file` });
+    }
+    const edits = own.map((table) => ruleTableEdit(text, document, table));
+    return { text: applyTextEdits(text, edits), created: false };
+  }
+  const wanted = server as McpServerWrite;
+  if (own.length > 0) {
+    // 整表替换：删除旧表（含前导注释）后在原位置插入新表。
+    const edits = own.map((table) => ruleTableEdit(text, document, table));
+    const removed = applyTextEdits(text, edits);
+    const at = edits[0].start;
+    const eol = lineEndingAt(text, Math.min(Math.max(0, at - 1), Math.max(0, text.length - 1)));
+    return { text: applyTextEdits(removed, [{ start: at, end: at, text: mcpServerBlock(wanted, eol) }]), created: false };
+  }
+  // 新服务器追加在最后一个 mcp 表之后；没有 mcp 表时追加到文件末尾。
+  const mcpTables = document.tables.filter((table) => startsWithTomlPath(table.resolvedKey, ['mcp']));
+  const last = mcpTables.at(-1);
+  if (last === undefined) {
+    const eol = lineEndingAt(text, text.length);
+    const prefix = text === ''
+      ? ''
+      : text.endsWith(`${eol}${eol}`) ? '' : text.endsWith(eol) ? eol : `${eol}${eol}`;
+    return { text: `${text}${prefix}${mcpServerBlock(wanted, eol)}`, created: true };
+  }
+  const descendants = document.tables.filter((table) => startsWithTomlPath(table.resolvedKey, last.resolvedKey) && table !== last);
+  const tail = descendants.at(-1) ?? last;
+  const next = document.tables.find((table) =>
+    table.range[0] >= tail.range[1] && !startsWithTomlPath(table.resolvedKey, last.resolvedKey),
+  );
+  const at = next === undefined
+    ? trailingCommentStart(text, document.root) ?? text.length
+    : leadingCommentStart(text, document.root, next);
+  const eol = lineEndingAt(text, Math.max(0, at - 1));
+  const prefix = at === text.length && !text.slice(0, at).endsWith('\n') ? eol : '';
+  return {
+    text: applyTextEdits(text, [{ start: at, end: at, text: `${prefix}${mcpServerBlock(wanted, eol)}` }]),
+    created: true,
+  };
 }

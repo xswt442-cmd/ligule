@@ -3148,7 +3148,8 @@ export function createHost({
         case 'config.set': {
           // 配置存储负责允许字段、值校验和配置层到文件的映射；Host 只转发这些字段。
           if (defaultEnvironment.store === undefined) throw new KernelError('config_write_unsupported');
-          const { value, op, index, ruleTool, ruleDecision, ruleMatch, ruleReason, ruleTarget, rulePath, ruleArgsHash } = message.params;
+          const { value, op, index, ruleTool, ruleDecision, ruleMatch, ruleReason, ruleTarget, rulePath, ruleArgsHash,
+            serverName, serverCommand, serverArgs, serverEnv, serverCwd } = message.params;
           const field = requiredString(message.params.field, 'field');
           const layer = requiredString(message.params.layer, 'layer');
           const version = requiredString(message.params.version, 'version');
@@ -3158,9 +3159,11 @@ export function createHost({
             target: ruleTarget, path: rulePath, argsHash: ruleArgsHash,
           };
           const rule = Object.values(given).every((item) => item === undefined) ? undefined : given;
+          const serverGiven = { name: serverName, command: serverCommand, args: serverArgs, env: serverEnv, cwd: serverCwd };
+          const server = Object.values(serverGiven).every((item) => item === undefined) ? undefined : serverGiven;
           const env = await environmentFor(message.params.projectRoot);
           if (env.store === undefined) throw new KernelError('config_write_unsupported');
-          const { key, table, shadowed, shadowedBy, changed, effective, layers, ...saved } = await env.store.write({ layer, field, value, version, op, index, rule }, async (candidate, editedLayer) => {
+          const { key, table, shadowed, shadowedBy, changed, effective, layers, ...saved } = await env.store.write({ layer, field, value, version, op, index, rule, server }, async (candidate, editedLayer) => {
             if (!field.startsWith('model.')) return;
             if (layer === 'user') hostProviderFromConfig(createConfig({ user: editedLayer }));
             for (const target of layer === 'user' ? [...environments.values()] : [env]) {
