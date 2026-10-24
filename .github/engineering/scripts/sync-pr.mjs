@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -36,7 +36,10 @@ function assertNotSymlink(repo, path) {
 function sync(repo, apply) {
   if (!existsSync(join(repo, '.git'))) throw new Error('Target is not a Git working tree');
   const top = resolve(git(repo, ['rev-parse', '--show-toplevel']));
-  if (top.toLowerCase() !== repo.toLowerCase()) throw new Error('Target must be the repository root');
+  // Directory aliases and Windows short paths can name the same repository root.
+  const targetIdentity = statSync(repo, { bigint: true });
+  const topIdentity = statSync(top, { bigint: true });
+  if (topIdentity.dev !== targetIdentity.dev || topIdentity.ino !== targetIdentity.ino) throw new Error('Target must be the repository root');
 
   const changed = [];
   for (const [sourcePath, destinationPath] of files) {
