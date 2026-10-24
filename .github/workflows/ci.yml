@@ -230,6 +230,8 @@ jobs:
         run: |
           pnpm --filter ligule-desktop-frontend run check
           pnpm --filter ligule-desktop-frontend run build
+      - name: compile the Electron main process
+        run: pnpm exec tsc -p desktop/electron/tsconfig.json
       - name: prepare the target Node runtime and Host resources
         run: pnpm run prepare-runtime
       - name: run the packaged runtime tree checks

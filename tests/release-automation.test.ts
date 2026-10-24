@@ -553,11 +553,12 @@ test('release workflows split CI, tagging, and product publication and keep proc
     [['id', 'node', 'os'], ['id', 'node', 'os'], ['id', 'node', 'os'], ['id', 'node', 'os']],
     [['id', 'node', 'os'], ['id', 'node', 'os']],
   ]);
+  const electronCompiled = desktopSteps.findIndex((step) => step.name === 'compile the Electron main process');
   const runtimePrepared = desktopSteps.findIndex((step) => step.name === 'prepare the target Node runtime and Host resources');
   const windowsTree = desktopSteps.findIndex((step) => step.name === 'test Windows Host Job Object process-tree cleanup');
   const posixTree = desktopSteps.findIndex((step) => step.name === 'test POSIX Host process-group cleanup and orphan watchdog');
-  assert.ok(runtimePrepared >= 0 && windowsTree > runtimePrepared && posixTree > runtimePrepared,
-    'process-tree tests require the vendored Node runtime prepared from the Host build');
+  assert.ok(electronCompiled >= 0 && runtimePrepared > electronCompiled && windowsTree > runtimePrepared && posixTree > runtimePrepared,
+    'process-tree tests require the compiled Electron main process and the vendored Node runtime');
   for (const steps of [desktopSteps, desktopPublish.jobs.build.steps]) {
     const hostBuild = steps.findIndex((step) => step.name === 'build the Host runtime tree');
     const hostTests = steps.findIndex((step) => step.name === 'test Electron Host and security contracts');
