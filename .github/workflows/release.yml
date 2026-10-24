@@ -26,7 +26,7 @@ permissions:
 jobs:
   preflight:
     name: validate the Desktop tag and main CI
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       actions: read
       contents: read
@@ -105,7 +105,7 @@ jobs:
           ref: ${{ needs.preflight.outputs.commit }}
           persist-credentials: false
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 12.9.1
           run_install: false
@@ -177,7 +177,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
         run: node --experimental-strip-types scripts/desktop-release-manifest.ts create --directory desktop/release --output "$RUNNER_TEMP/desktop-release/${TARGET}" --version "$VERSION" --target "$TARGET" --commit "$COMMIT" --run-id "$RUN_ID"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: desktop-release-${{ needs.preflight.outputs.tag }}-${{ matrix.target }}-${{ needs.preflight.outputs.commit }}
           path: ${{ runner.temp }}/desktop-release/${{ matrix.target }}/*
@@ -188,7 +188,7 @@ jobs:
     name: verify required Windows and Linux installers and create or complete a draft
     if: ${{ !inputs.publish }}
     needs: [preflight, build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: write
@@ -204,12 +204,12 @@ jobs:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
           package-manager-cache: false
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: desktop-release-${{ needs.preflight.outputs.tag }}-windows-x64-${{ needs.preflight.outputs.commit }}
           path: dist-release/windows-x64
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: desktop-release-${{ needs.preflight.outputs.tag }}-linux-x64-${{ needs.preflight.outputs.commit }}
           path: dist-release/linux-x64
@@ -297,7 +297,7 @@ jobs:
     name: require configured Desktop release reviewers
     if: inputs.publish
     needs: preflight
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       actions: read
       contents: read
@@ -319,7 +319,7 @@ jobs:
     name: publish the verified Desktop Release
     if: inputs.publish
     needs: [preflight, publish-preflight]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment: desktop-publish
     permissions:
