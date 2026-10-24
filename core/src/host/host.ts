@@ -60,6 +60,7 @@ import { createSkillPlugin } from '../tools/skill.js';
 import { createMcpPlugin, type McpAuthorization } from '../tools/mcp.js';
 import { createSubagentPlugin } from '../tools/subagent.js';
 import { createCompactPlugin } from '../tools/compact.js';
+import { createCustomToolsPlugin, discoverCustomTools } from '../tools/custom.js';
 import { createAskUserPlugin } from '../tools/ask-user.js';
 import { createMcpRegistry, mcpServerConfigs, type McpRegistry } from '../capability/mcp.js';
 import { discoverModels } from '../model/discovery.js';
@@ -69,7 +70,7 @@ import type { ModelRequest, ProviderEvent } from '../kernel/loop.js';
 import { createConnection, type Connection, type HostRequest } from './connection.js';
 import { APPROVAL_METHOD, QUESTION_METHOD, validateCall, type HostMethodParams } from './protocol.js';
 import { createConfig, mergePolicyRules, type ConfigSnapshot } from '../kernel/config.js';
-import { loadConfigLayers } from '../kernel/config-file.js';
+import { dataRoot, loadConfigLayers } from '../kernel/config-file.js';
 import type { LoggerBackend } from '../kernel/log.js';
 import type { LoopLimits } from '../kernel/loop.js';
 import type { LoadedLayers, createConfigStore } from '../kernel/config-store.js';
@@ -1775,7 +1776,17 @@ export function createHost({
       authorizeTool: authorizeMcpTool,
       identityDigest: (server) => mcpConfigs.find((entry) => entry.name === server)?.identityDigest,
     };
-    const loaded = skills.skills.length === 0 ? plugins : [...plugins, createSkillPlugin(skills, () => mcp.servers())];
+    // 用户在数据根 tools/ 声明的命令工具与技能同源：发现于用户目录，加载不授予额外权限，
+    // 执行仍按 exec 能力走 Permission 与 Policy 判定链。
+    const customTools = await discoverCustomTools(join(dataRoot(), 'tools'));
+    for (const diagnostic of customTools.diagnostics) {
+      logger?.log?.('custom tool is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
+    }
+    const loaded = [
+      ...plugins,
+      ...(customTools.tools.length === 0 ? [] : [createCustomToolsPlugin(customTools.tools)]),
+      ...(skills.skills.length === 0 ? [] : [createSkillPlugin(skills, () => mcp.servers())]),
+    ];
     // 加载器负责发现提示模板并处理项目优先级；模板由 Host 展开，确保所有客户端使用相同规则。
     const templates = templateRegistry ?? await discoverTemplates(templateDirectories(env.projectRoot));
     for (const diagnostic of templates.diagnostics) {

@@ -11,6 +11,7 @@ export { extensionSources, loadExtensions } from './kernel/extensions.js';
 export { discoverSkills, skillDirectories, formatSkillCatalog, searchSkills, readSkillBody, listSkillFiles, SKILL_FILE, SKILLS_DIRECTORY, SKILL_METADATA_BUDGET_BYTES } from './kernel/skills.js';
 export { createSkillTool, createSkillPlugin } from './tools/skill.js';
 export { createCompactTool, createCompactPlugin } from './tools/compact.js';
+export { discoverCustomTools, createCustomToolsPlugin } from './tools/custom.js';
 export { fetchTool, networkPlugin } from './tools/network.js';
 export { createMcpPlugin, createMcpTools } from './tools/mcp.js';
 export { createSubagentPlugin } from './tools/subagent.js';
