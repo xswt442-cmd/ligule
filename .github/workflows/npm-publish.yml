@@ -1,12 +1,10 @@
 name: npm-publish
 
 on:
-  push:
-    tags: ['cli-v*']
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing CLI tag to publish or re-check (for example cli-v0.1.0)
+        description: Existing reviewed CLI tag on main (for example cli-v0.1.0)
         type: string
         required: true
 
@@ -14,7 +12,7 @@ env:
   PRIMARY_NODE_VERSION: '24'
 
 concurrency:
-  group: npm-publish-${{ inputs.tag || github.ref_name }}
+  group: npm-publish-${{ inputs.tag }}
   cancel-in-progress: false
 
 permissions:
@@ -38,30 +36,36 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: validate tag identity and branch CI
+      - name: validate tag identity and main ancestry
         id: identity
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag || github.ref_name }}
+          TAG: ${{ inputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
           if ! [[ "$TAG" =~ ^cli-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
             echo "::error::npm publication accepts only cli-vX.Y.Z tags"
             exit 1
           fi
-          git fetch --no-tags --force origin "+refs/tags/${TAG}:refs/tags/${TAG}"
+          git fetch --no-tags --force origin +refs/heads/main:refs/remotes/origin/main
+          git fetch --no-tags --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
           commit=$(git rev-parse "${TAG}^{commit}")
-          # Publication follows the tag; the tag may be cut from main or dev.
-          # The gate is a green full CI run on the exact tagged commit.
-          run_json=$(gh run list --workflow ci.yml --event push --commit "$commit" --limit 100 --json databaseId,headSha,status,conclusion,createdAt \
+          # The tag must be part of the main history; main itself may have moved on
+          # since the tag was cut.
+          if ! git merge-base --is-ancestor "$commit" refs/remotes/origin/main; then
+            echo "::error::${TAG} does not point to a commit on main"
+            exit 1
+          fi
+          run_json=$(gh run list --workflow ci.yml --branch main --event push --commit "$commit" --limit 100 --json databaseId,headSha,status,conclusion,createdAt \
             | jq -c --arg commit "$commit" '[.[] | select(.headSha == $commit)] | sort_by(.createdAt) | reverse | .[0] // empty')
-          if [ -z "$run_json" ]; then echo "::error::no push CI run exists for $commit"; exit 1; fi
+          if [ -z "$run_json" ]; then echo "::error::no main CI run exists for $commit"; exit 1; fi
           run_id=$(jq -r .databaseId <<< "$run_json")
           gh run watch "$run_id" --exit-status
           ci_result=$(gh run view "$run_id" --json headSha,conclusion)
           if [ "$(jq -r .headSha <<< "$ci_result")" != "$commit" ] || [ "$(jq -r .conclusion <<< "$ci_result")" != success ]; then
-            echo "::error::CI did not pass for the exact CLI tag SHA"; exit 1
+            echo "::error::main CI did not pass for the exact CLI tag SHA"; exit 1
           fi
           version=${TAG#cli-v}
           package_version=$(git show "${TAG}:tui/package.json" | node -e "let input='';process.stdin.on('data',chunk=>input+=chunk).on('end',()=>process.stdout.write(JSON.parse(input).version))")
@@ -228,20 +232,13 @@ jobs:
         if: runner.os == 'Linux'
         run: pnpm --filter ligule run verify-install "$(realpath dist-tarball/ligule-${{ needs.preflight.outputs.version }}.tgz)"
 
-  approval:
-    name: release approval
-    needs: [preflight, registry-check, verify]
-    runs-on: ubuntu-24.04
-    environment: npm-publish
-    permissions:
-      contents: read
-    steps:
-      - run: echo "npm publication is approved to proceed"
-
   npm:
     name: publish to npm
-    needs: [preflight, checks, registry-check, verify, approval]
+    needs: [preflight, checks, registry-check, verify]
     runs-on: ubuntu-24.04
+    # Approval is bound to the publishing job itself: the gate holds the job until
+    # a required reviewer approves, and only then does it receive the OIDC token.
+    environment: npm-publish
     permissions:
       contents: read
       id-token: write

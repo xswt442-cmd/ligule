@@ -372,7 +372,6 @@ test('release workflows split CI, tagging, and product publication and keep proc
 
   assert.equal(tag.on.workflow_dispatch.inputs.action, undefined,
     'version preparation must be handled in normal development, not by a release-specific PR');
-  assert.deepEqual(Object.keys(tag.jobs), ['create-tag']);
   assert.equal(tag.permissions.contents, 'read');
   assert.deepEqual(tag.jobs['create-tag'].permissions, { actions: 'read', contents: 'write' });
   assert.deepEqual(tag.on.workflow_dispatch.inputs.product.options, ['cli', 'desktop']);
@@ -386,19 +385,26 @@ test('release workflows split CI, tagging, and product publication and keep proc
   assert.doesNotMatch(JSON.stringify(tag), /gh pr create|release\/\$\{tag\}|release\/\$\{TAG\}|pull-requests: write|git push origin "\$BRANCH"/i,
     'Tag workflow must not create product-specific PRs or version branches');
   assert.equal(tag.jobs['create-tag'].steps[0].with?.ref, '${{ github.sha }}');
-  // Tags are cut from the release branch head (main or dev); merging back to main is asynchronous.
-  assert.match(createTag, /main\|dev\)/);
-  assert.doesNotMatch(createTag, /merge-base --is-ancestor/);
+  // Tags are cut from the main head only; dev merges back through normal review.
+  assert.match(createTag, /test "\$GITHUB_REF" = refs\/heads\/main/);
   assert.match(createTag, /package\.json; else manifest=desktop\/package\.json/);
   assert.match(createTag, /node scripts\/release-notes\.js "\$TAG"/);
+  assert.match(createTag, /\$commit" != "\$main_head/);
   assert.match(createTag, /\$\{PRODUCT\}-v\$\{VERSION\}/);
-  assert.match(createTag, /gh run list --workflow ci\.yml --event push --commit/);
-  assert.doesNotMatch(createTag, /--branch main/);
+  assert.match(createTag, /gh run list --workflow ci\.yml --branch main --event push --commit/);
   assert.match(createTag, /git ls-remote --exit-code --tags/);
+  // A GITHUB_TOKEN tag push does not trigger push workflows; the workflow_dispatch
+  // API call does, so the tag workflow hands publication over explicitly.
+  assert.deepEqual(Object.keys(tag.jobs), ['create-tag', 'dispatch']);
+  assert.equal(tag.jobs.dispatch.permissions.actions, 'write');
+  const dispatchScript = tag.jobs.dispatch.steps.map((step) => step.run ?? '').join('\n');
+  assert.match(dispatchScript, /gh workflow run npm-publish\.yml --ref main -f tag="\$TAG"/);
+  assert.match(dispatchScript, /gh workflow run desktop-publish\.yml --ref main -f tag="\$TAG" -f publish=false/);
+  assert.match(JSON.stringify(tag.jobs['create-tag']), /"outputs"/);
+  assert.doesNotMatch(JSON.stringify(tag), /pull-requests: write/);
 
   assert.ok(npmPublish.on.workflow_dispatch);
-  assert.match(JSON.stringify(npmPublish.on.push), /cli-v\*/);
-  assert.equal(npmPublish.on.workflow_dispatch.inputs.publish, undefined);
+  assert.equal(npmPublish.on.push, undefined);
   const cliNotesJob = npmPublish.jobs['github-notes'];
   assert.deepEqual(cliNotesJob.needs, ['preflight', 'npm']);
   assert.equal(cliNotesJob.permissions.contents, 'write');
@@ -413,11 +419,14 @@ test('release workflows split CI, tagging, and product publication and keep proc
   assert.doesNotMatch(cliNotesScript, /npm publish/);
   assert.match(JSON.stringify(npmPublish.jobs.preflight), /npm-publish must have at least one required reviewer/);
   assert.match(JSON.stringify(npmPublish.jobs.preflight), /required_reviewers/);
-  assert.equal(npmPublish.jobs.approval.environment, 'npm-publish');
-  // Approval is the last read gate: the read-only verify runs before it, so an
-  // approval is followed directly by the publication steps.
+  assert.match(JSON.stringify(npmPublish.jobs.preflight), /merge-base --is-ancestor/,
+    'publication accepts only tags that are part of the main history');
+  // Approval is bound to the publishing job itself: the environment gate holds the
+  // job until a required reviewer approves, then the job receives the OIDC token.
+  assert.equal(Object.keys(npmPublish.jobs).includes('approval'), false);
+  assert.equal(npmPublish.jobs.npm.environment, 'npm-publish');
+  assert.deepEqual(npmPublish.jobs.npm.needs, ['preflight', 'checks', 'registry-check', 'verify']);
   assert.deepEqual(npmPublish.jobs.verify.needs, ['preflight', 'checks']);
-  assert.deepEqual(npmPublish.jobs.approval.needs, ['preflight', 'registry-check', 'verify']);
   assert.equal(npmPublish.jobs.npm.permissions['id-token'], 'write');
   assert.doesNotMatch(JSON.stringify(npmPublish.jobs.npm), /NPM_TOKEN|NODE_AUTH_TOKEN/);
   assert.match(JSON.stringify(npmPublish.jobs.preflight), /cli-v/);
@@ -478,11 +487,11 @@ test('release workflows split CI, tagging, and product publication and keep proc
   'pnpm must exist before setup-node configures pnpm caching');
 
   assert.ok(desktopPublish.on.workflow_dispatch);
-  assert.match(JSON.stringify(desktopPublish.on.push), /desktop-v\*/);
+  assert.equal(desktopPublish.on.push, undefined);
   assert.equal(desktopPublish.on.workflow_call, undefined);
   assert.equal(desktopPublish.on.workflow_dispatch.inputs.publish.default, false);
   assert.match(JSON.stringify(desktopPublish.jobs.preflight), /desktop-v/);
-  assert.doesNotMatch(JSON.stringify(desktopPublish.jobs.preflight), /merge-base --is-ancestor/);
+  assert.match(JSON.stringify(desktopPublish.jobs.preflight), /git merge-base --is-ancestor/);
   assert.equal(desktopPublish.jobs.build.steps[0].with?.ref, '${{ needs.preflight.outputs.commit }}');
   assert.deepEqual(desktopPublish.jobs.build.strategy.matrix.include.map(({ target }: { target: string }) => target), [
     'windows-x64', 'linux-x64',
@@ -521,15 +530,20 @@ test('release workflows split CI, tagging, and product publication and keep proc
   assert.match(publishDesktop, /application\/octet-stream/);
   assert.doesNotMatch(publishDesktop, /gh release download/,
     'draft assets must be fetched by release and asset IDs because the tag endpoint hides drafts');
-  assert.match(publishDesktop, /--workflow desktop-publish\.yml --commit/);
-  assert.doesNotMatch(publishDesktop, /--branch main/,
-    'draft runs are triggered by tag pushes and manual dispatch; the check must follow the commit');
+  assert.match(publishDesktop, /--workflow desktop-publish\.yml --event workflow_dispatch --commit/);
   assert.equal(desktopPublish.jobs.build.if, '${{ !inputs.publish }}');
   assert.equal(desktopPublish.jobs.draft.if, '${{ !inputs.publish }}');
   assert.deepEqual(desktopPublish.jobs.publish.needs, ['preflight', 'publish-preflight']);
   assert.equal(desktopPublish.jobs.publish.steps[0].with?.ref, '${{ github.sha }}');
   assert.doesNotMatch(JSON.stringify(desktopPublish.jobs.publish), /actions\/download-artifact/);
   assert.match(publishDesktop, /PATCH .*releases\/\$\{release_id\}.*draft=false/);
+
+  for (const [label, config] of [['npm-publish', npmPublish], ['desktop-publish', desktopPublish]] as const) {
+    // Publication workflows never modify sources, commit versions, or create PRs:
+    // version files are prepared in normal development PRs; tags are pushed by tag.yml.
+    assert.doesNotMatch(JSON.stringify(config.jobs), /git commit|git push origin "\$\{?TAG|gh pr create|pull-requests: write/,
+      `${label} must not modify sources, commit versions, or create pull requests`);
+  }
 
   const desktopSteps = ci.jobs.desktop.steps;
   // The CI desktop job verifies behavior only; installer building and installer
