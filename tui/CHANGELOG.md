@@ -8,6 +8,12 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ### 简体中文
 
+### English
+
+## [0.1.0] - 2026-10-24
+
+### 简体中文
+
 **新增**
 
 - 长对话中模型获得 `compact` 工具：可查看上下文压力与压缩块、读回被压缩的原文和溢出文件，并自行选择范围撰写摘要完成压缩。达到软阈值时注入一次临时提醒引导，硬阈值仍由自动压缩兜底。
