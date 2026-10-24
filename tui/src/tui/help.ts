@@ -13,7 +13,7 @@ export interface HelpEntry {
 const COMMAND_CATEGORIES = [
   { title: ['会话', 'Sessions'], commands: ['new', 'sessions', 'find', 'resume', 'takeover', 'branch', 'name', 'archive', 'unarchive', 'show', 'sub'] },
   { title: ['运行与工具', 'Runtime and tools'], commands: ['mode', 'model', 'policy', 'status', 'compact', 'tools', 'queue'] },
-  { title: ['输入与设置', 'Input and settings'], commands: ['help', 'bind', 'credentials', 'mcp', 'permission', 'control', 'trust', 'copy', 'export', 'quit'] },
+  { title: ['输入与设置', 'Input and settings'], commands: ['help', 'bind', 'credentials', 'mcp', 'extensions', 'permission', 'control', 'trust', 'copy', 'export', 'quit'] },
 ] as const;
 
 const EMPTY_TEMPLATES: readonly HelpEntry[] = [

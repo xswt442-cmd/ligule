@@ -364,6 +364,7 @@ interface TuiConfigResult extends Record<string, unknown> {
   readonly services: ModelService[];
   readonly selection: ModelSelection | null;
   readonly model?: { readonly model?: string; readonly apiKeyEnv?: string };
+  readonly layers?: readonly { readonly layer: string; readonly version: string }[];
 }
 
 interface TuiRequestResults {
@@ -395,6 +396,9 @@ interface TuiRequestResults {
   readonly 'mcp.trust.list': McpTrustSnapshot;
   readonly 'mcp.trust.set': { readonly server: string; readonly scope: McpTrustScope; readonly trusted: boolean; readonly version?: string };
   readonly 'mcp.trust.tools': McpToolsSnapshot;
+  readonly 'config.set': { readonly version: string; readonly created: boolean; readonly [key: string]: unknown };
+  readonly 'extensions.set': { readonly name: string; readonly enabled: boolean; readonly applies: string };
+  readonly 'settings.catalog': { readonly extensions: { readonly name: string; readonly source: string; readonly enabled: boolean; readonly loaded: boolean; readonly registeredTools: readonly string[] }[]; readonly extensionDiagnostics: readonly { readonly code: string; readonly source: string }[] };
   readonly 'session.compact': { readonly sessionId: string; readonly [key: string]: unknown };
 }
 
@@ -1352,6 +1356,50 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       const [action = 'list', serverName = '', scopeText = ''] = argument.trim().split(/\s+/, 3);
       const scopes: readonly McpTrustScope[] = ['session', 'project', 'user'];
       const scope = scopes.includes(scopeText as McpTrustScope) ? scopeText as McpTrustScope : undefined;
+      if (action === 'add') {
+        const parts = argument.trim().split(/\s+/);
+        if (parts.length < 3) {
+          push({ kind: 'error', text: t('用法：/mcp add <名称> <程序> [参数…]', 'Usage: /mcp add <name> <executable> [args…]') });
+          return;
+        }
+        void (async () => {
+          try {
+            const config = await client.request('config.get', { projectRoot: info.boundary });
+            const version = (config.layers ?? []).find((layer) => layer.layer === 'user')?.version ?? '';
+            await client.request('config.set', {
+              projectRoot: info.boundary, field: 'mcp.servers', layer: 'user', version, op: 'set',
+              serverName: parts[1], serverCommand: parts[2],
+              ...(parts.length > 3 ? { serverArgs: parts.slice(3) } : {}),
+            });
+            push({ kind: 'meta', text: t(
+              `${parts[1]} 已保存到使用者默认配置。环境变量与工作目录请在配置文件中补充；新配置需重新信任（/mcp trust）。`,
+              `${parts[1]} was saved to the user defaults. Add environment references and a working directory in the config file; the new configuration needs trust again (/mcp trust).`,
+            ) });
+          } catch (error) {
+            push({ kind: 'error', text: t(`MCP Server 未保存：${errorCode(error) ?? errorMessage(error) ?? 'config_set_failed'}`, `MCP server was not saved: ${errorCode(error) ?? errorMessage(error) ?? 'config_set_failed'}`) });
+          }
+        })();
+        return;
+      }
+      if (action === 'remove') {
+        if (serverName === '') {
+          push({ kind: 'error', text: t('用法：/mcp remove <名称>', 'Usage: /mcp remove <name>') });
+          return;
+        }
+        void (async () => {
+          try {
+            const config = await client.request('config.get', { projectRoot: info.boundary });
+            const version = (config.layers ?? []).find((layer) => layer.layer === 'user')?.version ?? '';
+            await client.request('config.set', {
+              projectRoot: info.boundary, field: 'mcp.servers', layer: 'user', version, op: 'remove', serverName,
+            });
+            push({ kind: 'meta', text: t(`已从使用者默认配置移除 ${serverName}；信任记录与其他配置层不受影响。`, `${serverName} was removed from the user defaults; trust records and other layers are untouched.`) });
+          } catch (error) {
+            push({ kind: 'error', text: t(`MCP Server 未移除：${errorCode(error) ?? errorMessage(error) ?? 'config_set_failed'}`, `MCP server was not removed: ${errorCode(error) ?? errorMessage(error) ?? 'config_set_failed'}`) });
+          }
+        })();
+        return;
+      }
       if (action === 'confirm') {
         const pending = mcpTrustPending;
         if (pending === null) {
@@ -1440,7 +1488,37 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         }, (error: unknown) => push({ kind: 'error', text: t(`无法读取 MCP 工具：${errorCode(error) ?? 'mcp_tool_list_failed'}`, `Could not read MCP tools: ${errorCode(error) ?? 'mcp_tool_list_failed'}`) }));
         return;
       }
-      push({ kind: 'error', text: t('用法：/mcp [list|trust <Server> <scope>|confirm|revoke <Server> <scope>|tools <Server>]', 'Usage: /mcp [list|trust <server> <scope>|confirm|revoke <server> <scope>|tools <server>]') });
+      push({ kind: 'error', text: t('用法：/mcp [list|add <名称> <程序> [参数…]|remove <名称>|trust <Server> <scope>|confirm|revoke <Server> <scope>|tools <Server>]', 'Usage: /mcp [list|add <name> <executable> [args…]|remove <name>|trust <server> <scope>|confirm|revoke <server> <scope>|tools <server>]') });
+      return;
+    }
+    if (name === 'extensions') {
+      const [action = 'list', target = ''] = argument.trim().split(/\s+/, 2);
+      if (action !== 'list' && (action !== 'on' && action !== 'off' || target === '')) {
+        push({ kind: 'error', text: t('用法：/extensions [on|off <名称>]', 'Usage: /extensions [on|off <name>]') });
+        return;
+      }
+      void (async () => {
+        try {
+          if (action === 'on' || action === 'off') {
+            await client.request('extensions.set', { projectRoot: info.boundary, name: target, enabled: action === 'on' });
+            push({ kind: 'meta', text: t(
+              `已${action === 'on' ? '启用' : '停用'} ${target}：下一次启动 Host 时生效。`,
+              `${target} was ${action === 'on' ? 'enabled' : 'disabled'}: it takes effect the next time the Host starts.`,
+            ) });
+            return;
+          }
+          const catalog = await client.request('settings.catalog', { projectRoot: info.boundary });
+          const lines = catalog.extensions.length === 0
+            ? [t('没有已发现的用户扩展。', 'No user extensions were discovered.')]
+            : catalog.extensions.map((extension) => `${extension.name} · ${extension.source === 'user-installed' ? t('用户安装', 'user installed') : t('用户配置', 'user configured')} · ${extension.enabled ? t('已启用', 'enabled') : t('已停用（下次启动不加载）', 'disabled (will not load next start)')} · ${extension.loaded ? t('已加载', 'loaded') : t('未加载', 'not loaded')}${extension.registeredTools.length === 0 ? '' : ` · ${extension.registeredTools.join(', ')}`}`);
+          if (catalog.extensionDiagnostics.length > 0) {
+            lines.push(t(`诊断：${catalog.extensionDiagnostics.map((item) => `${item.code}(${item.source})`).join('、')}`, `Diagnostics: ${catalog.extensionDiagnostics.map((item) => `${item.code}(${item.source})`).join(', ')}`));
+          }
+          push({ kind: 'meta', text: lines.join('\n') });
+        } catch (error) {
+          push({ kind: 'error', text: t(`扩展信息读取失败：${errorCode(error) ?? 'extensions_catalog_failed'}`, `Could not read extensions: ${errorCode(error) ?? 'extensions_catalog_failed'}`) });
+        }
+      })();
       return;
     }
     if (name === 'trust') {

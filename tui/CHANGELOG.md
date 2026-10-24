@@ -11,6 +11,8 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 **新增**
 
 - 长对话中模型获得 `compact` 工具：可查看上下文压力与压缩块、读回被压缩的原文和溢出文件，并自行选择范围撰写摘要完成压缩。达到软阈值时注入一次临时提醒引导，硬阈值仍由自动压缩兜底。
+- `/mcp add <名称> <程序> [参数…]` 与 `/mcp remove <名称>` 把 MCP Server 写入使用者默认配置（环境变量引用与工作目录在配置文件中补充，配置变更后需重新信任）。
+- `/extensions [on|off <名称>]` 列出用户扩展并支持停用与启用，登记在下次启动 Host 时生效。
 - 在用户数据根 `tools/` 目录放置 TOML 文件即可声明命令工具：占位符整位替换模型参数、不进入 shell 语法，执行沿用 Shell 的权限与审批链路；工具需在模式中列出才会提供给模型。
 
 **改进**
@@ -37,6 +39,8 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 **Added**
 
 - In long conversations the model gains the `compact` tool: it can inspect context pressure and compaction blocks, read back the summarized originals and overflow files, and compact a chosen range with a summary it writes itself. A one-time reminder appears at the soft threshold; the hard threshold still compacts automatically.
+- `/mcp add <name> <executable> [args…]` and `/mcp remove <name>` write MCP servers into the user defaults (add environment references and a working directory in the config file; a changed configuration needs trust again).
+- `/extensions [on|off <name>]` lists user extensions and disables or enables them; the registry takes effect the next time the Host starts.
 - Declaring a command tool takes a TOML file in the data root's `tools/` directory: placeholders replace whole argument entries so model input never enters shell syntax, and execution follows the Shell permission and approval chain; a tool reaches the model only when a mode lists it.
 
 **Improved**

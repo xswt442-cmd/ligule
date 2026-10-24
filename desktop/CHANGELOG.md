@@ -11,6 +11,8 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 **新增**
 
 - 长对话中模型获得 `compact` 工具：可查看上下文压力与压缩块、读回被压缩的原文和溢出文件，并自行选择范围撰写摘要完成压缩。达到软阈值时注入一次临时提醒引导，硬阈值仍由自动压缩兜底。
+- 设置工具页新增 MCP Server 配置表单：增删改使用者默认层的服务器（环境变量仅接受 `${NAME}` 引用），配置变更后需在信任面板重新确认。
+- 设置工具页的扩展条目新增停用/启用开关，登记在下次启动 Host 时生效。
 - 在用户数据根 `tools/` 目录放置 TOML 文件即可声明命令工具：占位符整位替换模型参数、不进入 shell 语法，执行沿用 Shell 的权限与审批链路；工具需在模式中列出才会提供给模型。
 
 **改进**
@@ -38,6 +40,8 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 **Added**
 
 - In long conversations the model gains the `compact` tool: it can inspect context pressure and compaction blocks, read back the summarized originals and overflow files, and compact a chosen range with a summary it writes itself. A one-time reminder appears at the soft threshold; the hard threshold still compacts automatically.
+- The settings tools page gains an MCP server configuration form: add, edit, and remove servers in the user defaults layer (environment entries only accept `${NAME}` references); a changed configuration needs trust again in the trust panel.
+- Extension entries on the settings tools page gain disable/enable toggles; the registry takes effect the next time the Host starts.
 - Declaring a command tool takes a TOML file in the data root's `tools/` directory: placeholders replace whole argument entries so model input never enters shell syntax, and execution follows the Shell permission and approval chain; a tool reaches the model only when a mode lists it.
 
 **Improved**
