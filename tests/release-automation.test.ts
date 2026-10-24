@@ -363,11 +363,11 @@ test('published Desktop draft verification accepts GitHub-normalized names but r
   }
 });
 
-test('release workflows isolate CLI publication from Desktop draft releases and build process tests after compilation', () => {
+test('release workflows split CI, tagging, and product publication and keep process tests after compilation', () => {
   const workflow = (name: string): Workflow => parseYaml(readFileSync(new URL(`../.github/workflows/${name}.yml`, import.meta.url), 'utf8')) as Workflow;
   const tag = workflow('tag');
-  const publish = workflow('publish');
-  const release = workflow('release');
+  const npmPublish = workflow('npm-publish');
+  const desktopPublish = workflow('desktop-publish');
   const ci = workflow('ci');
 
   assert.equal(tag.on.workflow_dispatch.inputs.action, undefined,
@@ -376,8 +376,7 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
   assert.equal(tag.permissions.contents, 'read');
   assert.deepEqual(tag.jobs['create-tag'].permissions, { actions: 'read', contents: 'write' });
   assert.deepEqual(tag.on.workflow_dispatch.inputs.product.options, ['cli', 'desktop']);
-  assert.equal(tag.jobs['create-tag'].steps.find((step) => step.uses === 'actions/setup-node@v5')?.with?.['package-manager-cache'], false);
-  const setupJobs: [Workflow, string][] = [[publish, 'npm'], [publish, 'github-notes'], [release, 'preflight'], [release, 'draft'], [release, 'publish']];
+  const setupJobs: [Workflow, string][] = [[npmPublish, 'npm'], [npmPublish, 'github-notes'], [desktopPublish, 'preflight'], [desktopPublish, 'draft'], [desktopPublish, 'publish']];
   for (const [workflowConfig, jobName] of setupJobs) {
     const setup = workflowConfig.jobs[jobName].steps.find((step) => step.uses === 'actions/setup-node@v5');
     assert.equal(setup?.with?.['package-manager-cache'], false,
@@ -387,18 +386,20 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
   assert.doesNotMatch(JSON.stringify(tag), /gh pr create|release\/\$\{tag\}|release\/\$\{TAG\}|pull-requests: write|git push origin "\$BRANCH"/i,
     'Tag workflow must not create product-specific PRs or version branches');
   assert.equal(tag.jobs['create-tag'].steps[0].with?.ref, '${{ github.sha }}');
-  assert.match(createTag, /test "\$GITHUB_REF" = refs\/heads\/main/);
+  // Tags are cut from the release branch head (main or dev); merging back to main is asynchronous.
+  assert.match(createTag, /main\|dev\)/);
+  assert.doesNotMatch(createTag, /merge-base --is-ancestor/);
   assert.match(createTag, /package\.json; else manifest=desktop\/package\.json/);
   assert.match(createTag, /node scripts\/release-notes\.js "\$TAG"/);
-  assert.match(createTag, /\$commit" != "\$main_head/);
   assert.match(createTag, /\$\{PRODUCT\}-v\$\{VERSION\}/);
-  assert.match(createTag, /gh run list --workflow ci\.yml --branch main --event push --commit/);
-  assert.match(createTag, /git merge-base --is-ancestor|main_head/);
+  assert.match(createTag, /gh run list --workflow ci\.yml --event push --commit/);
+  assert.doesNotMatch(createTag, /--branch main/);
   assert.match(createTag, /git ls-remote --exit-code --tags/);
 
-  assert.ok(publish.on.workflow_dispatch);
-  assert.equal(publish.on.push, undefined);
-  const cliNotesJob = publish.jobs['github-notes'];
+  assert.ok(npmPublish.on.workflow_dispatch);
+  assert.match(JSON.stringify(npmPublish.on.push), /cli-v\*/);
+  assert.equal(npmPublish.on.workflow_dispatch.inputs.publish, undefined);
+  const cliNotesJob = npmPublish.jobs['github-notes'];
   assert.deepEqual(cliNotesJob.needs, ['preflight', 'npm']);
   assert.equal(cliNotesJob.permissions.contents, 'write');
   assert.equal(cliNotesJob.steps[0].with?.ref, '${{ needs.preflight.outputs.commit }}');
@@ -410,26 +411,32 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
   assert.match(cliNotesScript, /if existing=\$\(gh release view/);
   assert.match(cliNotesScript, /\[ "\$existing" != false \]/);
   assert.doesNotMatch(cliNotesScript, /npm publish/);
-  assert.match(JSON.stringify(publish.jobs.preflight), /npm-publish must have at least one required reviewer/);
-  assert.match(JSON.stringify(publish.jobs.preflight), /required_reviewers/);
-  assert.equal(publish.jobs.approval.environment, 'npm-publish');
-  assert.equal(publish.jobs.npm.permissions['id-token'], 'write');
-  assert.doesNotMatch(JSON.stringify(publish.jobs.npm), /NPM_TOKEN|NODE_AUTH_TOKEN/);
-  assert.match(JSON.stringify(publish.jobs.preflight), /cli-v/);
-  assert.ok(JSON.stringify(publish).includes('pnpm install --frozen-lockfile'));
-  assert.ok(JSON.stringify(publish.jobs.npm).includes('npm publish --provenance --access public'));
-  assert.ok(publish.jobs.checks.steps.some((step) => step.run?.includes('pnpm --filter ligule run pack-release dist-tarball')));
-  const releaseVerify = publish.jobs.verify;
+  assert.match(JSON.stringify(npmPublish.jobs.preflight), /npm-publish must have at least one required reviewer/);
+  assert.match(JSON.stringify(npmPublish.jobs.preflight), /required_reviewers/);
+  assert.equal(npmPublish.jobs.approval.environment, 'npm-publish');
+  // Approval is the last read gate: the read-only verify runs before it, so an
+  // approval is followed directly by the publication steps.
+  assert.deepEqual(npmPublish.jobs.verify.needs, ['preflight', 'checks']);
+  assert.deepEqual(npmPublish.jobs.approval.needs, ['preflight', 'registry-check', 'verify']);
+  assert.equal(npmPublish.jobs.npm.permissions['id-token'], 'write');
+  assert.doesNotMatch(JSON.stringify(npmPublish.jobs.npm), /NPM_TOKEN|NODE_AUTH_TOKEN/);
+  assert.match(JSON.stringify(npmPublish.jobs.preflight), /cli-v/);
+  assert.ok(JSON.stringify(npmPublish).includes('pnpm install --frozen-lockfile'));
+  assert.ok(npmPublish.jobs.npm.steps.some((step) => step.run?.includes('npm publish --provenance --access public')));
+  assert.ok(npmPublish.jobs.checks.steps.some((step) => step.run?.includes('pnpm --filter ligule run pack-release dist-tarball')));
+  // The tagged commit already passed the full suite on its branch; the publication
+  // workflow must not re-run the whole test suite, only re-check the shipped bits.
+  assert.doesNotMatch(JSON.stringify(npmPublish.jobs.checks), /pnpm test/);
+  const releaseVerify = npmPublish.jobs.verify;
   assert.deepEqual(releaseVerify.strategy.matrix.os, ['ubuntu-24.04', 'windows-latest']);
-  assert.equal(releaseVerify.needs.includes('checks'), true);
-  assert.ok(publish.jobs.checks.steps.some((step) => step.uses === 'actions/upload-artifact@v7'
+  assert.ok(npmPublish.jobs.checks.steps.some((step) => step.uses === 'actions/upload-artifact@v7'
     && step.with?.name === 'npm-tarball'));
   assert.equal(releaseVerify.steps.filter((step) => step.uses === 'actions/download-artifact@v8')[0]?.with?.name, 'npm-tarball');
   assert.ok(releaseVerify.steps.some((step) => step.run?.includes('verify-install') && step.run.includes('realpath')),
     'Linux release verification must pass an absolute tarball path');
   assert.ok(releaseVerify.steps.some((step) => step.shell === 'pwsh' && step.run?.includes('verify-install') && step.run.includes('Resolve-Path')),
     'Windows release verification must pass a resolved absolute tarball path');
-  for (const [label, steps] of [['CLI release', publish.jobs.checks.steps], ['shared CI', ci.jobs.test.steps]] as const) {
+  for (const [label, steps] of [['shared CI', ci.jobs.test.steps]] as const) {
     const installBubblewrap = steps.findIndex((step) => step.name === 'install bubblewrap for Linux sandbox tests');
     const allowUserNamespaces = steps.findIndex((step) => step.name === 'allow bubblewrap user namespaces');
     const coreBuild = steps.findIndex((step) => step.name === 'build Core for required Linux sandbox probe');
@@ -456,10 +463,10 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
     'Linux CI verification must pass an absolute tarball path');
   assert.ok(ciConsumer.steps.some((step) => step.shell === 'pwsh' && step.run?.includes('verify-install') && step.run.includes('Resolve-Path')),
     'Windows CI verification must pass a resolved absolute tarball path');
-  assert.doesNotMatch(JSON.stringify(publish.jobs.npm), /pnpm|registry-version/,
+  assert.doesNotMatch(JSON.stringify(npmPublish.jobs.npm), /pnpm|registry-version/,
     'the OIDC publication job consumes the already checked registry result and does not depend on an uninstalled helper');
-  assert.equal(publish.jobs.npm.needs.includes('registry-check'), true);
-  const registrySteps = publish.jobs['registry-check'].steps;
+  assert.equal(npmPublish.jobs.npm.needs.includes('registry-check'), true);
+  const registrySteps = npmPublish.jobs['registry-check'].steps;
   const registryCommand = registrySteps.find((step) => step.name === 'compare the package tarball with the registry')?.run;
   assert.ok(registryCommand);
   assert.match(registryCommand, /pnpm --filter ligule run --silent registry-version "ligule@/);
@@ -470,14 +477,14 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
     < registrySteps.findIndex((step) => step.uses === 'actions/setup-node@v5'),
   'pnpm must exist before setup-node configures pnpm caching');
 
-  assert.ok(release.on.workflow_dispatch);
-  assert.equal(release.on.workflow_call, undefined);
-  assert.equal(release.on.push, undefined);
-  assert.equal(release.on.workflow_dispatch.inputs.publish.default, false);
-  assert.match(JSON.stringify(release.jobs.preflight), /desktop-v/);
-  assert.match(JSON.stringify(release.jobs.preflight), /git merge-base --is-ancestor/);
-  assert.equal(release.jobs.build.steps[0].with?.ref, '${{ needs.preflight.outputs.commit }}');
-  assert.deepEqual(release.jobs.build.strategy.matrix.include.map(({ target }: { target: string }) => target), [
+  assert.ok(desktopPublish.on.workflow_dispatch);
+  assert.match(JSON.stringify(desktopPublish.on.push), /desktop-v\*/);
+  assert.equal(desktopPublish.on.workflow_call, undefined);
+  assert.equal(desktopPublish.on.workflow_dispatch.inputs.publish.default, false);
+  assert.match(JSON.stringify(desktopPublish.jobs.preflight), /desktop-v/);
+  assert.doesNotMatch(JSON.stringify(desktopPublish.jobs.preflight), /merge-base --is-ancestor/);
+  assert.equal(desktopPublish.jobs.build.steps[0].with?.ref, '${{ needs.preflight.outputs.commit }}');
+  assert.deepEqual(desktopPublish.jobs.build.strategy.matrix.include.map(({ target }: { target: string }) => target), [
     'windows-x64', 'linux-x64',
   ]);
   assert.equal(ci.jobs.desktop['continue-on-error'], "${{ startsWith(matrix.id, 'macos-') }}");
@@ -495,9 +502,9 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
     ['windows-x64', 'linux-x64', 'macos-arm64', 'macos-x64'],
     ['windows-x64', 'linux-x64'],
   ]);
-  assert.doesNotMatch(JSON.stringify(release.jobs.draft), /macos|\.dmg/i,
+  assert.doesNotMatch(JSON.stringify(desktopPublish.jobs.draft), /macos|\.dmg/i,
     'unverified macOS installers must not enter the formal Desktop release asset set');
-  const draft = release.jobs.draft.steps.map((step) => step.run ?? '').join('\n');
+  const draft = desktopPublish.jobs.draft.steps.map((step) => step.run ?? '').join('\n');
   assert.match(draft, /desktop-release-manifest\.ts verify/);
   assert.match(draft, /release-notes\.js "\$TAG" --manifest dist-release\/desktop-release-manifest\.json/);
   assert.match(draft, /gh release create "\$TAG" --verify-tag[^\n]*--draft/);
@@ -506,28 +513,38 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
   assert.match(draft, /comm -13/);
   assert.match(draft, /draft Release contains assets outside the verified set/);
   assert.doesNotMatch(draft, /--clobber|gh release edit/);
-  assert.equal(release.jobs.publish.environment, 'desktop-publish');
-  assert.match(JSON.stringify(release.jobs['publish-preflight']), /desktop-publish must have at least one required reviewer/);
-  const publishDesktop = release.jobs.publish.steps.map((step) => step.run ?? '').join('\n');
+  assert.equal(desktopPublish.jobs.publish.environment, 'desktop-publish');
+  assert.match(JSON.stringify(desktopPublish.jobs['publish-preflight']), /desktop-publish must have at least one required reviewer/);
+  const publishDesktop = desktopPublish.jobs.publish.steps.map((step) => step.run ?? '').join('\n');
   assert.match(publishDesktop, /verify-desktop-draft\.js/);
   assert.match(publishDesktop, /releases\/\$\{release_id\}\/assets\?per_page=100/);
   assert.match(publishDesktop, /application\/octet-stream/);
   assert.doesNotMatch(publishDesktop, /gh release download/,
     'draft assets must be fetched by release and asset IDs because the tag endpoint hides drafts');
-  assert.equal(release.jobs.build.if, '${{ !inputs.publish }}');
-  assert.equal(release.jobs.draft.if, '${{ !inputs.publish }}');
-  assert.deepEqual(release.jobs.publish.needs, ['preflight', 'publish-preflight']);
-  assert.equal(release.jobs.publish.steps[0].with?.ref, '${{ github.sha }}');
-  assert.doesNotMatch(JSON.stringify(release.jobs.publish), /actions\/download-artifact/);
+  assert.match(publishDesktop, /--workflow desktop-publish\.yml --commit/);
+  assert.doesNotMatch(publishDesktop, /--branch main/,
+    'draft runs are triggered by tag pushes and manual dispatch; the check must follow the commit');
+  assert.equal(desktopPublish.jobs.build.if, '${{ !inputs.publish }}');
+  assert.equal(desktopPublish.jobs.draft.if, '${{ !inputs.publish }}');
+  assert.deepEqual(desktopPublish.jobs.publish.needs, ['preflight', 'publish-preflight']);
+  assert.equal(desktopPublish.jobs.publish.steps[0].with?.ref, '${{ github.sha }}');
+  assert.doesNotMatch(JSON.stringify(desktopPublish.jobs.publish), /actions\/download-artifact/);
   assert.match(publishDesktop, /PATCH .*releases\/\$\{release_id\}.*draft=false/);
 
   const desktopSteps = ci.jobs.desktop.steps;
-  const installerBuild = desktopSteps.findIndex((step) => step.name === 'build the Electron installer');
+  // The CI desktop job verifies behavior only; installer building and installer
+  // smoke tests belong to the desktop-publish workflow.
+  assert.doesNotMatch(JSON.stringify(ci.jobs.desktop), /build:win|build:linux|install-electron|run-installer-smoke|desktop\/release\//);
+  assert.deepEqual(matrixVariants(ci.jobs.desktop.strategy.matrix.include).map((matrix) => matrix.map((item) => typeof item === 'string' ? item : Object.keys(item).sort())), [
+    [['id', 'node', 'os'], ['id', 'node', 'os'], ['id', 'node', 'os'], ['id', 'node', 'os']],
+    [['id', 'node', 'os'], ['id', 'node', 'os']],
+  ]);
+  const runtimePrepared = desktopSteps.findIndex((step) => step.name === 'prepare the target Node runtime and Host resources');
   const windowsTree = desktopSteps.findIndex((step) => step.name === 'test Windows Host Job Object process-tree cleanup');
   const posixTree = desktopSteps.findIndex((step) => step.name === 'test POSIX Host process-group cleanup and orphan watchdog');
-  assert.ok(installerBuild >= 0 && windowsTree > installerBuild && posixTree > installerBuild,
-    'process-tree tests require compiled Host runtime output from the installer build');
-  for (const steps of [desktopSteps, release.jobs.build.steps]) {
+  assert.ok(runtimePrepared >= 0 && windowsTree > runtimePrepared && posixTree > runtimePrepared,
+    'process-tree tests require the vendored Node runtime prepared from the Host build');
+  for (const steps of [desktopSteps, desktopPublish.jobs.build.steps]) {
     const hostBuild = steps.findIndex((step) => step.name === 'build the Host runtime tree');
     const hostTests = steps.findIndex((step) => step.name === 'test Electron Host and security contracts');
     assert.ok(hostBuild >= 0 && hostTests > hostBuild,

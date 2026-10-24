@@ -12,7 +12,7 @@ function firstGroup(text, pattern, label) {
   return match[1];
 }
 
-const workflows = ['ci.yml', 'tag.yml', 'publish.yml', 'release.yml'];
+const workflows = ['ci.yml', 'tag.yml', 'npm-publish.yml', 'desktop-publish.yml'];
 
 test('the runtime floor is one value across package metadata, README and workflows', () => {
   const pkg = JSON.parse(read('../tui/package.json'));

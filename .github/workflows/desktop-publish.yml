@@ -1,10 +1,12 @@
-name: desktop-release-draft
+name: desktop-publish
 
 on:
+  push:
+    tags: ['desktop-v*']
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing reviewed Desktop tag on main (for example desktop-v0.0.4)
+        description: Existing Desktop tag (for example desktop-v0.1.0)
         type: string
         required: true
       publish:
@@ -17,7 +19,7 @@ env:
   PRIMARY_NODE_VERSION: '24'
 
 concurrency:
-  group: desktop-release-${{ inputs.tag }}
+  group: desktop-release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 permissions:
@@ -25,7 +27,7 @@ permissions:
 
 jobs:
   preflight:
-    name: validate the Desktop tag and main CI
+    name: validate the Desktop tag and CI
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -46,36 +48,35 @@ jobs:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
           package-manager-cache: false
 
-      - name: validate Desktop tag identity and main ancestry
+      - name: validate Desktop tag identity and CI
         id: identity
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         shell: bash
         run: |
           set -euo pipefail
-          test "$GITHUB_REF" = refs/heads/main
           if ! [[ "$TAG" =~ ^desktop-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
             echo "::error::Desktop workflow accepts only desktop-vX.Y.Z tags"; exit 1
           fi
-          git fetch --no-tags --force origin +refs/heads/main:refs/remotes/origin/main
           git fetch --no-tags --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
           commit=$(git rev-parse "${TAG}^{commit}")
-          git merge-base --is-ancestor "$commit" refs/remotes/origin/main
           git checkout --detach "$commit"
           version=${TAG#desktop-v}
           package_version=$(git show "${TAG}:desktop/package.json" | node -e "let input='';process.stdin.on('data',chunk=>input+=chunk).on('end',()=>process.stdout.write(JSON.parse(input).version))")
           if [ "$package_version" != "$version" ]; then echo "::error::tag does not match desktop/package.json"; exit 1; fi
           git show "${TAG}:desktop/CHANGELOG.md" | grep -F "## [${version}]" >/dev/null
           node scripts/release-notes.js "$TAG" >/dev/null
-          run_json=$(gh run list --workflow ci.yml --branch main --event push --commit "$commit" --limit 100 --json databaseId,headSha,status,conclusion,createdAt \
+          # Publication follows the tag; the tag may be cut from main or dev.
+          # The gate is a green full CI run on the exact tagged commit.
+          run_json=$(gh run list --workflow ci.yml --event push --commit "$commit" --limit 100 --json databaseId,headSha,status,conclusion,createdAt \
             | jq -c --arg commit "$commit" '[.[] | select(.headSha == $commit)] | sort_by(.createdAt) | reverse | .[0] // empty')
-          if [ -z "$run_json" ]; then echo "::error::no main CI run exists for $commit"; exit 1; fi
+          if [ -z "$run_json" ]; then echo "::error::no push CI run exists for $commit"; exit 1; fi
           run_id=$(jq -r .databaseId <<< "$run_json")
           gh run watch "$run_id" --exit-status
           result=$(gh run view "$run_id" --json headSha,conclusion)
           if [ "$(jq -r .headSha <<< "$result")" != "$commit" ] || [ "$(jq -r .conclusion <<< "$result")" != success ]; then
-            echo "::error::main CI did not pass for the exact Desktop tag SHA"; exit 1
+            echo "::error::CI did not pass for the exact Desktop tag SHA"; exit 1
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -214,16 +215,15 @@ jobs:
           name: desktop-release-${{ needs.preflight.outputs.tag }}-linux-x64-${{ needs.preflight.outputs.commit }}
           path: dist-release/linux-x64
 
-      - name: recheck the tag and current main ancestry
+      - name: recheck the tag
         env:
           TAG: ${{ needs.preflight.outputs.tag }}
           COMMIT: ${{ needs.preflight.outputs.commit }}
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --no-tags --force origin +refs/heads/main:refs/remotes/origin/main "refs/tags/${TAG}:refs/tags/${TAG}"
+          git fetch --no-tags --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
           test "$(git rev-parse "${TAG}^{commit}")" = "$COMMIT"
-          git merge-base --is-ancestor "$COMMIT" refs/remotes/origin/main
 
       - name: verify required installer hashes, platform targets, and provenance
         env:
@@ -347,8 +347,9 @@ jobs:
           if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" != true ]; then
             echo "::error::expected an unpublished draft Release for ${TAG}"; exit 1
           fi
-          # A prior successful workflow must have built and verified this source commit.
-          successful_runs=$(gh run list --workflow release.yml --branch main --event workflow_dispatch --commit "$COMMIT" --limit 100 --json conclusion,headSha \
+          # A prior successful workflow (tag push or manual draft run) must have
+          # built and verified this source commit.
+          successful_runs=$(gh run list --workflow desktop-publish.yml --commit "$COMMIT" --limit 100 --json conclusion,headSha \
             | jq -r --arg sha "$COMMIT" '[.[] | select(.headSha == $sha and .conclusion == "success")] | length')
           if [ "$successful_runs" -lt 1 ]; then
             echo "::error::no successful Desktop draft workflow for ${COMMIT}"; exit 1

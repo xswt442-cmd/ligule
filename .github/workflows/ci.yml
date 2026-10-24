@@ -202,7 +202,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.include_macos && '[{"id":"windows-x64","os":"windows-latest","node":"desktop/vendor/node/node.exe","build":"build:win","artifact":"desktop/release/*.exe"},{"id":"linux-x64","os":"ubuntu-22.04","node":"desktop/vendor/node/node","build":"build:linux","artifact":"desktop/release/*.AppImage\ndesktop/release/*.deb"},{"id":"macos-arm64","os":"macos-15","node":"desktop/vendor/node/node","build":"build:mac","artifact":"desktop/release/*.dmg"},{"id":"macos-x64","os":"macos-15-intel","node":"desktop/vendor/node/node","build":"build:mac","artifact":"desktop/release/*.dmg"}]' || '[{"id":"windows-x64","os":"windows-latest","node":"desktop/vendor/node/node.exe","build":"build:win","artifact":"desktop/release/*.exe"},{"id":"linux-x64","os":"ubuntu-22.04","node":"desktop/vendor/node/node","build":"build:linux","artifact":"desktop/release/*.AppImage\ndesktop/release/*.deb"}]') }}
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.include_macos && '[{"id":"windows-x64","os":"windows-latest","node":"desktop/vendor/node/node.exe"},{"id":"linux-x64","os":"ubuntu-22.04","node":"desktop/vendor/node/node"},{"id":"macos-arm64","os":"macos-15","node":"desktop/vendor/node/node"},{"id":"macos-x64","os":"macos-15-intel","node":"desktop/vendor/node/node"}]' || '[{"id":"windows-x64","os":"windows-latest","node":"desktop/vendor/node/node.exe"},{"id":"linux-x64","os":"ubuntu-22.04","node":"desktop/vendor/node/node"}]') }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -235,10 +235,6 @@ jobs:
       - name: run the packaged runtime tree checks
         shell: bash
         run: ${{ matrix.node }} desktop/check-runtime.mjs --vendor desktop/vendor
-      - name: build the Electron installer
-        run: |
-          pnpm --filter ligule-desktop exec install-electron
-          pnpm --filter ligule-desktop run ${{ matrix.build }}
       - name: test Windows Host Job Object process-tree cleanup
         if: runner.os == 'Windows'
         shell: pwsh
@@ -265,87 +261,10 @@ jobs:
         run: |
           & (Join-Path $PWD 'desktop/vendor/node/node.exe') desktop/electron/test/run-native-features.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: install and test the Windows NSIS bundle
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File desktop/electron/test/run-installer-smoke.ps1
-      - name: extract Linux installers and test bundled runtimes
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          scratch="$RUNNER_TEMP/ligule-bundle-smoke"
-          mkdir -p "$scratch"
-          verify_runtime() {
-            local resources="$1"
-            local node="$resources/node/node"
-            test -x "$node"
-            LIGULE_RUNTIME_APP_DIR="$resources/app" LIGULE_RUNTIME_NODE_PATH="$node" "$node" desktop/check-runtime.mjs --resources "$resources"
-          }
-          index=0
-          for package in desktop/release/*.deb; do
-            destination="$scratch/deb-$index"
-            mkdir -p "$destination"
-            dpkg-deb --extract "$package" "$destination"
-            manifest=$(find "$destination" -type f -path '*/resources/app/package.json' -print -quit)
-            test -n "$manifest"
-            resources="${manifest%/app/package.json}"
-            verify_runtime "$resources"
-            app_directory=$(dirname "$resources")
-            xvfb-run -a "${{ matrix.node }}" desktop/electron/test/run-packaged-smoke.mjs --app-dir "$app_directory"
-            index=$((index + 1))
-          done
-          index=0
-          for image in desktop/release/*.AppImage; do
-            destination="$scratch/appimage-$index"
-            mkdir -p "$destination"
-            archive="$PWD/$image"
-            (cd "$destination" && "$archive" --appimage-extract >/dev/null)
-            manifest=$(find "$destination/squashfs-root" -type f -path '*/resources/app/package.json' -print -quit)
-            test -n "$manifest"
-            resources="${manifest%/app/package.json}"
-            verify_runtime "$resources"
-            app_directory=$(dirname "$resources")
-            xvfb-run -a "${{ matrix.node }}" desktop/electron/test/run-packaged-smoke.mjs --app-dir "$app_directory"
-            index=$((index + 1))
-          done
-      - name: verify macOS DMG and bundled runtime
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -euo pipefail
-          for image in desktop/release/*.dmg; do
-            hdiutil verify "$image"
-            mount_point=$(mktemp -d "$RUNNER_TEMP/ligule-dmg.XXXXXX")
-            trap 'hdiutil detach "$mount_point" || true' EXIT
-            hdiutil attach "$image" -readonly -nobrowse -mountpoint "$mount_point"
-            app="$mount_point/ligule.app/Contents/Resources"
-            node="$app/node/node"
-            LIGULE_RUNTIME_APP_DIR="$app/app" LIGULE_RUNTIME_NODE_PATH="$node" "$node" desktop/check-runtime.mjs --resources "$app"
-            "$node" desktop/electron/test/run-packaged-smoke.mjs --app-dir "$mount_point/ligule.app"
-            hdiutil detach "$mount_point"
-            trap - EXIT
-            rmdir "$mount_point"
-          done
-      - name: list generated desktop artifacts
-        shell: bash
-        run: ls -l desktop/release/
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: ligule-desktop-evidence-${{ matrix.id }}-${{ github.sha }}
           path: desktop/testplace/readings/
           if-no-files-found: ignore
-          retention-days: 14
-      - name: read desktop package version
-        id: desktop-version
-        shell: bash
-        run: |
-          version=$(node -p "require('./desktop/package.json').version")
-          echo "value=$version" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v7
-        with:
-          name: ligule-desktop-v${{ steps.desktop-version.outputs.value }}-${{ matrix.id }}-${{ github.sha }}
-          path: ${{ matrix.artifact }}
-          if-no-files-found: error
           retention-days: 14

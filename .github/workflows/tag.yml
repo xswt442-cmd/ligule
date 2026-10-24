@@ -9,7 +9,7 @@ on:
         required: true
         options: [cli, desktop]
       version:
-        description: Version X.Y.Z already reviewed on the current main commit
+        description: Version X.Y.Z already reviewed on the current branch head
         type: string
         required: true
 
@@ -36,15 +36,19 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
 
-      - name: require the default branch
-        run: test "$GITHUB_REF" = refs/heads/main
+      - name: require a release branch
+        run: |
+          case "$GITHUB_REF_NAME" in
+            main|dev) ;;
+            *) echo "::error::tags are cut from the main or dev branch head, got $GITHUB_REF_NAME"; exit 1 ;;
+          esac
 
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
           package-manager-cache: false
 
-      - name: validate product version, changelog, main ancestry, and CI
+      - name: validate product version, changelog, branch head, and CI
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -63,14 +67,15 @@ jobs:
           if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
             echo "::error::tag ${TAG} already exists"; exit 1
           fi
+          # Tags are cut from the release branch head; main merges back from dev asynchronously
+          # and is not a publication prerequisite.
           commit=$(git rev-parse HEAD)
           test "$commit" = "$GITHUB_SHA"
-          git fetch --no-tags --force origin +refs/heads/main:refs/remotes/origin/main
-          main_head=$(git rev-parse refs/remotes/origin/main)
-          if [ "$commit" != "$main_head" ]; then echo "::error::main moved before tagging"; exit 1; fi
-          run_json=$(gh run list --workflow ci.yml --branch main --event push --commit "$commit" --limit 100 --json databaseId,headSha,status,conclusion,createdAt \
+          git fetch --no-tags --force origin "+refs/heads/${GITHUB_REF_NAME}:refs/remotes/origin/${GITHUB_REF_NAME}"
+          test "$(git rev-parse "refs/remotes/origin/${GITHUB_REF_NAME}")" = "$commit"
+          run_json=$(gh run list --workflow ci.yml --event push --commit "$commit" --limit 100 --json databaseId,headSha,status,conclusion,createdAt \
             | jq -c --arg commit "$commit" '[.[] | select(.headSha == $commit)] | sort_by(.createdAt) | reverse | .[0] // empty')
-          if [ -z "$run_json" ]; then echo "::error::no main push CI run exists for $commit"; exit 1; fi
+          if [ -z "$run_json" ]; then echo "::error::no push CI run exists for $commit on ${GITHUB_REF_NAME}"; exit 1; fi
           run_id=$(jq -r .databaseId <<< "$run_json")
           gh run watch "$run_id" --exit-status
           result=$(gh run view "$run_id" --json headSha,conclusion)
@@ -89,10 +94,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --no-tags --force origin +refs/heads/main:refs/remotes/origin/main
-          test "$(git rev-parse refs/remotes/origin/main)" = "$COMMIT"
+          git fetch --no-tags --force origin "+refs/heads/${GITHUB_REF_NAME}:refs/remotes/origin/${GITHUB_REF_NAME}"
+          test "$(git rev-parse "refs/remotes/origin/${GITHUB_REF_NAME}")" = "$COMMIT"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$TAG" -m "$TAG"
           git push origin "$TAG"
-          echo "Created ${TAG} from ${COMMIT}. CI: ${CI_URL}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Created ${TAG} from ${COMMIT} (${GITHUB_REF_NAME}). CI: ${CI_URL}" >> "$GITHUB_STEP_SUMMARY"

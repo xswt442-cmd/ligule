@@ -1,10 +1,12 @@
-name: publish
+name: npm-publish
 
 on:
+  push:
+    tags: ['cli-v*']
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing reviewed CLI tag on main (for example cli-v0.0.4)
+        description: Existing CLI tag to publish or re-check (for example cli-v0.1.0)
         type: string
         required: true
 
@@ -12,7 +14,7 @@ env:
   PRIMARY_NODE_VERSION: '24'
 
 concurrency:
-  group: publish
+  group: npm-publish-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 permissions:
@@ -36,34 +38,30 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: validate tag identity and main ancestry
+      - name: validate tag identity and branch CI
         id: identity
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         shell: bash
         run: |
           set -euo pipefail
-          test "$GITHUB_REF" = refs/heads/main
           if ! [[ "$TAG" =~ ^cli-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
             echo "::error::npm publication accepts only cli-vX.Y.Z tags"
             exit 1
           fi
-          git fetch --no-tags --force origin +refs/heads/main:refs/remotes/origin/main
-          git fetch --no-tags --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          git fetch --no-tags --force origin "+refs/tags/${TAG}:refs/tags/${TAG}"
           commit=$(git rev-parse "${TAG}^{commit}")
-          if ! git merge-base --is-ancestor "$commit" refs/remotes/origin/main; then
-            echo "::error::${TAG} does not point to a commit on main"
-            exit 1
-          fi
-          run_json=$(gh run list --workflow ci.yml --branch main --event push --commit "$commit" --limit 100 --json databaseId,headSha,status,conclusion,createdAt \
+          # Publication follows the tag; the tag may be cut from main or dev.
+          # The gate is a green full CI run on the exact tagged commit.
+          run_json=$(gh run list --workflow ci.yml --event push --commit "$commit" --limit 100 --json databaseId,headSha,status,conclusion,createdAt \
             | jq -c --arg commit "$commit" '[.[] | select(.headSha == $commit)] | sort_by(.createdAt) | reverse | .[0] // empty')
-          if [ -z "$run_json" ]; then echo "::error::no main CI run exists for $commit"; exit 1; fi
+          if [ -z "$run_json" ]; then echo "::error::no push CI run exists for $commit"; exit 1; fi
           run_id=$(jq -r .databaseId <<< "$run_json")
           gh run watch "$run_id" --exit-status
           ci_result=$(gh run view "$run_id" --json headSha,conclusion)
           if [ "$(jq -r .headSha <<< "$ci_result")" != "$commit" ] || [ "$(jq -r .conclusion <<< "$ci_result")" != success ]; then
-            echo "::error::main CI did not pass for the exact CLI tag SHA"; exit 1
+            echo "::error::CI did not pass for the exact CLI tag SHA"; exit 1
           fi
           version=${TAG#cli-v}
           package_version=$(git show "${TAG}:tui/package.json" | node -e "let input='';process.stdin.on('data',chunk=>input+=chunk).on('end',()=>process.stdout.write(JSON.parse(input).version))")
@@ -90,7 +88,7 @@ jobs:
           echo "npm-publish required reviewers are configured." >> "$GITHUB_STEP_SUMMARY"
 
   checks:
-    name: release checks
+    name: pack and check the release artifact
     needs: preflight
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -114,37 +112,13 @@ jobs:
       - name: install frozen workspace dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: install bubblewrap for Linux sandbox tests
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y bubblewrap
-
-      - name: allow bubblewrap user namespaces
-        if: runner.os == 'Linux'
-        run: |
-          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
-
-      - name: build Core for required Linux sandbox probe
-        if: runner.os == 'Linux'
-        run: pnpm run build:core
-
-      - name: require the Linux sandbox isolation probe
-        if: runner.os == 'Linux'
-        run: >-
-          node --input-type=module -e "import { probeLinuxSandboxIsolation } from './core/dist/capability/sandbox-linux.js';
-          const result = await probeLinuxSandboxIsolation();
-          if (!result.available) { throw new Error(result.reason ?? 'Linux isolation probe failed'); }"
-
-      - name: test
-        run: pnpm test
-
+      # The tagged commit already passed the full suite on its branch; this job
+      # compiles the exact release bits and checks what is about to ship.
       - name: syntax check compiled modules and checks
         shell: bash
         run: |
           set -euo pipefail
+          pnpm run build
           pnpm check:syntax
           find core/dist tui/dist -type f -name '*.js' -print0 | xargs -0 -r -n 1 node --check
 
@@ -207,19 +181,9 @@ jobs:
           state=$(pnpm --filter ligule run --silent registry-version "ligule@${version}" "$GITHUB_WORKSPACE/dist-tarball/ligule-${version}.tgz")
           echo "state=$state" >> "$GITHUB_OUTPUT"
 
-  approval:
-    name: release approval
-    needs: [preflight, registry-check]
-    runs-on: ubuntu-24.04
-    environment: npm-publish
-    permissions:
-      contents: read
-    steps:
-      - run: echo "npm publication is approved to proceed"
-
   verify:
     name: verify the packed tarball on ${{ matrix.os }}
-    needs: [preflight, checks, registry-check, approval]
+    needs: [preflight, checks]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
@@ -264,9 +228,19 @@ jobs:
         if: runner.os == 'Linux'
         run: pnpm --filter ligule run verify-install "$(realpath dist-tarball/ligule-${{ needs.preflight.outputs.version }}.tgz)"
 
+  approval:
+    name: release approval
+    needs: [preflight, registry-check, verify]
+    runs-on: ubuntu-24.04
+    environment: npm-publish
+    permissions:
+      contents: read
+    steps:
+      - run: echo "npm publication is approved to proceed"
+
   npm:
     name: publish to npm
-    needs: [preflight, checks, registry-check, approval, verify]
+    needs: [preflight, checks, registry-check, verify, approval]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
