@@ -59,6 +59,12 @@ required = ["word"]
     const hostile = "a;b|c'd";
     const injection = await runTool(tool, { word: hostile });
     assert.equal(injection.text.trim(), hostile, `参数值原样到达: ${injection.text.slice(0, 120)}`);
+
+    // PowerShell 参数位单引号传递：`$()` 与 `$name` 不在执行前展开。
+    if (shell.kind === 'powershell') {
+      const expanded = await runTool(tool, { word: '$(6*7)' });
+      assert.equal(expanded.text.trim(), '$(6*7)', 'PowerShell 下参数按字面值到达，不展开子表达式');
+    }
   });
 });
 

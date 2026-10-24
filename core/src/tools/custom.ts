@@ -30,13 +30,18 @@ const CUSTOM_NAME = /^[a-z][a-z0-9-]*$/u;
 const PLACEHOLDER = /^\{([a-zA-Z][a-zA-Z0-9_]*)\}$/u;
 const SPEC_FIELDS = ['name', 'description', 'command', 'args', 'cwd', 'parameters'] as const;
 
-// 按 Kernel 选定的 Shell 种类为每个参数位加引号；命令行再交回 exec 解析与判定。
+// 按 Kernel 选定的 Shell 种类为每个词加引号；命令行再交回 exec 解析与判定。
 // PowerShell 会把带引号的首个词当作字符串而不是命令，因此只有含特殊字符的词才加引号。
+// 参数位使用单引号：PowerShell 双引号内 `$()` 与 `$name` 会在执行前展开，
+// 模型提供的参数必须按字面值传递。
 const SAFE_TOKEN = /^[A-Za-z0-9_@%+=:,./-]+$/u;
 
-function quote(kind: ShellKind, token: string): string {
+function quote(kind: ShellKind, token: string, role: 'command' | 'argument'): string {
   if (SAFE_TOKEN.test(token)) return token;
-  if (kind === 'powershell') return `"${token.replace(/"/gu, '""')}"`;
+  if (kind === 'powershell') {
+    if (role === 'argument') return `'${token.replace(/'/gu, "''")}'`;
+    return `"${token.replace(/"/gu, '""')}"`;
+  }
   return `'${token.replace(/'/gu, `'\\''`)}'`;
 }
 
@@ -138,7 +143,10 @@ export function checkedCustomToolSpec(parsed: unknown, file: string): CustomTool
 function buildCustomTool(spec: CustomToolSpec): ToolDefinition {
   // 命令行在选定 Shell 后端后合成；Kernel 用同一段文本做脚本绑定、信任检查与策略判定。
   const compose = (args: Record<string, unknown>, kind: 'bash' | 'powershell'): string =>
-    [spec.command, ...resolveArgv(spec.args, args)].map((token) => quote(kind, token)).join(' ');
+    [
+      quote(kind, spec.command, 'command'),
+      ...resolveArgv(spec.args, args).map((token) => quote(kind, token, 'argument')),
+    ].join(' ');
   return {
     name: spec.name,
     // 执行、权限与审批都按 exec 能力判定；声明一个工具不授予任何额外权限。
