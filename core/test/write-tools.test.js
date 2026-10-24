@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   createConfig, createKernel, createObservationLog, createPermissionContext, createTool, deleteTool, editTool, freedesktopTrash, readTool,
@@ -45,6 +45,56 @@ test('create refuses an existing target and leaves its content alone', async () 
       (error) => error.code === 'create_target_exists',
     );
     assert.equal(await readFile(join(workspace, 'note.txt'), 'utf8'), 'original');
+  });
+});
+
+test('two kernels creating one file preserve exactly one complete winner', async () => {
+  await withWorkspace(async (workspace) => {
+    const kernels = [0, 1].map(() => {
+      const kernel = createKernel({ config: createConfig({ user: { boundary: workspace } }), permission: workspaceWrite });
+      kernel.register(createTool);
+      return kernel;
+    });
+    const contents = ['first complete content', 'second complete content'];
+    for (let index = 0; index < 10; index += 1) {
+      const path = `race-${index}.txt`;
+      const outcomes = await Promise.allSettled(kernels.map((kernel, writer) => kernel.call('create', { path, content: contents[writer] })));
+      assert.equal(outcomes.filter((item) => item.status === 'fulfilled').length, 1);
+      const failed = outcomes.find((item) => item.status === 'rejected');
+      assert.equal(failed.reason.code, 'create_target_exists');
+      const winner = outcomes.findIndex((item) => item.status === 'fulfilled');
+      assert.equal(await readFile(join(workspace, path), 'utf8'), contents[winner]);
+    }
+  });
+});
+
+test('managed deletion refuses a trash directory outside the boundary and preserves the source', async () => {
+  await withWorkspace(async (workspace) => {
+    const outside = join(workspace, '..', 'outside');
+    await mkdir(outside);
+    await writeFile(join(workspace, 'keep.txt'), 'must remain');
+    const kernel = createKernel({
+      config: createConfig({ user: { boundary: workspace, trashBackend: 'managed', limits: { trashDirectory: '../outside' } } }),
+      permission: workspaceWrite,
+    });
+    kernel.register(deleteTool);
+    await assert.rejects(kernel.call('delete', { path: 'keep.txt' }), { code: 'path_escapes_boundary' });
+    assert.equal(await readFile(join(workspace, 'keep.txt'), 'utf8'), 'must remain');
+    assert.deepEqual(await readdir(outside), []);
+  });
+});
+
+test('managed deletion refuses a trash junction or symlink leading outside the boundary', async () => {
+  await withWorkspace(async (workspace) => {
+    const outside = join(workspace, '..', 'outside');
+    await mkdir(outside);
+    await symlink(outside, join(workspace, '.ligule-trash'), process.platform === 'win32' ? 'junction' : 'dir');
+    await writeFile(join(workspace, 'keep.txt'), 'must remain');
+    const kernel = createKernel({ config: createConfig({ user: { boundary: workspace, trashBackend: 'managed' } }), permission: workspaceWrite });
+    kernel.register(deleteTool);
+    await assert.rejects(kernel.call('delete', { path: 'keep.txt' }), { code: 'path_escapes_through_link' });
+    assert.equal(await readFile(join(workspace, 'keep.txt'), 'utf8'), 'must remain');
+    assert.deepEqual(await readdir(outside), []);
   });
 });
 

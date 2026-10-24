@@ -7,9 +7,12 @@ export { loadConfigLayers, flagLayer, configPaths } from './kernel/config-file.j
 export { createLogger } from './kernel/log.js';
 export { loadAssembly } from './kernel/assembly.js';
 export { loadMode, applyMode, modeDirectories, MODE_DIRECTORY, DEFAULT_MODE } from './kernel/modes.js';
-export { extensionSources, loadExtensions } from './kernel/extensions.js';
+export { extensionSources, loadExtensions, installNameOf } from './kernel/extensions.js';
+export { readExtensionState, writeExtensionState, extensionStatePath } from './kernel/extension-state.js';
 export { discoverSkills, skillDirectories, formatSkillCatalog, searchSkills, readSkillBody, listSkillFiles, SKILL_FILE, SKILLS_DIRECTORY, SKILL_METADATA_BUDGET_BYTES } from './kernel/skills.js';
 export { createSkillTool, createSkillPlugin } from './tools/skill.js';
+export { createCompactTool, createCompactPlugin } from './tools/compact.js';
+export { discoverCustomTools, createCustomToolsPlugin } from './tools/custom.js';
 export { fetchTool, networkPlugin } from './tools/network.js';
 export { createMcpPlugin, createMcpTools } from './tools/mcp.js';
 export { createSubagentPlugin } from './tools/subagent.js';
@@ -42,8 +45,8 @@ export { chooseResumeMode, listSessions, listWorkspaceSessions, sessionDirectori
 export { adoptForSessionDirectory, adoptLegacySessions } from './session/adopt.js';
 export { searchSessionDirectories, searchSessions } from './session/search.js';
 export { branchSession } from './session/branch.js';
-export { CHECKPOINT_FORMAT_VERSION, CHECKPOINT_INPUT_VERSION, checkpointPath, createCheckpoint, loadCheckpoint, prefixDigest, usableCheckpoint } from './session/checkpoint.js';
-export { createCompaction, cutPoint, estimateTokens } from './session/compaction.js';
+export { CHECKPOINT_FORMAT_VERSION, CHECKPOINT_INPUT_VERSION, checkpointPath, createBlock, createCheckpointFile, loadCheckpointFile, prefixDigest, usableCheckpointFile, writeCheckpointFile } from './session/checkpoint.js';
+export { createCompaction, cutPoint, estimateTokens, compressibleRange, SUMMARY_SPILL_NAME } from './session/compaction.js';
 export { summarizeVerdicts, formatVerdicts } from './session/verdicts.js';
 export { createLoop, DEFAULT_LOOP_LIMITS } from './kernel/loop.js';
 export { METHODS, APPROVAL_METHOD, QUESTION_METHOD, NOTIFICATIONS, validateCall, isApproved } from './host/protocol.js';

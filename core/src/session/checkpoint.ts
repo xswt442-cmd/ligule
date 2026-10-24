@@ -1,27 +1,35 @@
-// 检查点将压缩摘要及其覆盖范围保存在独立文件中，不修改事件日志。
-// 读取前根据事件日志重新计算规范化输入和哈希；校验失败时忽略检查点并从日志重建。
+// 检查点将压缩块及其覆盖范围保存在独立文件中，不修改事件日志。
+// 一个会话的全部压缩块放在同一个文件里，每次写入整体原子替换。
+// 读取前根据事件日志重新计算规范化输入和哈希；任一块校验失败时忽略全部块并从日志重建。
 // 事件日志是事实来源，检查点损坏不会中断会话恢复。
-import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { open, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { SessionEvent } from './format.js';
 
-export const CHECKPOINT_FORMAT_VERSION = 1;
+// 版本 1 是单个摘要的旧布局，读取时折算为一个块；版本 2 起保存块列表。
+export const CHECKPOINT_FORMAT_VERSION = 2;
 // 哈希输入包含独立版本号，避免无关记录字段变化使所有检查点失效。
 export const CHECKPOINT_INPUT_VERSION = 2;
 
-export interface Checkpoint {
-  formatVersion: number;
-  inputVersion: number;
-  sessionId: string;
+export interface CompactionBlock {
+  // 会话内单调递增，永不复用；用于界面展示与后续按块操作。
+  blockId: number;
   fromSeq: number;
   toSeq: number;
   digest: string;
   text: string;
 }
 
+export interface CheckpointFile {
+  formatVersion: number;
+  inputVersion: number;
+  sessionId: string;
+  blocks: CompactionBlock[];
+}
+
 export interface CheckpointRead {
-  checkpoint: Checkpoint | null;
+  blocks: CompactionBlock[];
   reason: string;
 }
 
@@ -55,55 +63,118 @@ export function checkpointPath(directory: string, id: string): string {
   return join(directory, `${id}.checkpoint.json`);
 }
 
-// 检查点覆盖范围的哈希由该范围内事件重新计算。
-export function createCheckpoint({
-  id,
+// 块的覆盖范围哈希由该范围内事件重新计算。
+export function createBlock({
   events,
   text,
   fromSeq,
   toSeq,
+  blockId,
 }: {
-  id: string;
   events: SessionEvent[];
   text: string;
   fromSeq: number;
   toSeq: number;
-}): Checkpoint {
+  blockId: number;
+}): CompactionBlock {
+  return { blockId, fromSeq, toSeq, digest: prefixDigest(events), text };
+}
+
+export function createCheckpointFile({ id, blocks }: { id: string; blocks: CompactionBlock[] }): CheckpointFile {
   return {
     formatVersion: CHECKPOINT_FORMAT_VERSION,
     inputVersion: CHECKPOINT_INPUT_VERSION,
     sessionId: id,
-    fromSeq,
-    toSeq,
-    digest: prefixDigest(events),
-    text,
+    blocks,
   };
 }
 
-// 只有范围、哈希和版本全部匹配时才使用检查点；否则返回失败原因并从原始日志生成投影。
-export function usableCheckpoint(checkpoint: unknown, id: string, events: SessionEvent[]): CheckpointRead {
-  const value = checkpoint as Partial<Checkpoint> | null | undefined;
-  if (typeof value !== 'object' || value === null) return { checkpoint: null, reason: 'checkpoint_shape' };
-  if (value.formatVersion !== CHECKPOINT_FORMAT_VERSION) return { checkpoint: null, reason: 'checkpoint_format_version' };
-  if (value.inputVersion !== CHECKPOINT_INPUT_VERSION) return { checkpoint: null, reason: 'checkpoint_input_version' };
-  if (value.sessionId !== id) return { checkpoint: null, reason: 'checkpoint_session_mismatch' };
-  const { text, digest } = value;
-  const fromSeq = value.fromSeq;
-  const toSeq = value.toSeq;
-  if (typeof text !== 'string' || text === '') return { checkpoint: null, reason: 'checkpoint_text_missing' };
-  if (typeof fromSeq !== 'number' || typeof toSeq !== 'number'
-    || !Number.isInteger(fromSeq) || !Number.isInteger(toSeq)
-    || fromSeq < 0 || fromSeq > toSeq) {
-    return { checkpoint: null, reason: 'checkpoint_range_shape' };
+// 块文件是派生数据，写入使用临时文件加原子替换；未完成的写入不会进入读取路径。
+export async function writeCheckpointFile(directory: string, id: string, file: CheckpointFile): Promise<void> {
+  const target = checkpointPath(directory, id);
+  const temporary = `${target}.${randomUUID()}.tmp`;
+  let created = false;
+  try {
+    const handle = await open(temporary, 'wx', 0o600);
+    created = true;
+    try {
+      await handle.writeFile(JSON.stringify(file), 'utf8');
+    } finally {
+      await handle.close();
+    }
+    await rename(temporary, target);
+    created = false;
+  } finally {
+    if (created) await rm(temporary, { force: true });
   }
-  const covered = events.filter((event) => event.seq >= fromSeq && event.seq <= toSeq);
-  // 覆盖范围必须对应连续事件；缺少事件时拒绝使用检查点，即使计算出的哈希偶然匹配。
-  if (covered.length !== toSeq - fromSeq + 1) return { checkpoint: null, reason: 'checkpoint_range_missing' };
-  if (digest !== prefixDigest(covered)) return { checkpoint: null, reason: 'checkpoint_digest_mismatch' };
-  return { checkpoint: value as Checkpoint, reason: '' };
 }
 
-export async function loadCheckpoint({ directory, id, events }: {
+interface LegacyCheckpoint {
+  formatVersion: number;
+  inputVersion: number;
+  sessionId: string;
+  fromSeq: number;
+  toSeq: number;
+  digest: string;
+  text: string;
+}
+
+function blockShape(block: unknown): { block: CompactionBlock } | { reason: string } {
+  const value = block as Partial<CompactionBlock> | null;
+  if (typeof value !== 'object' || value === null) return { reason: 'checkpoint_range_shape' };
+  const { blockId, fromSeq, toSeq, digest, text } = value;
+  if (typeof blockId !== 'number' || !Number.isInteger(blockId) || blockId < 1) return { reason: 'checkpoint_block_ids' };
+  if (typeof fromSeq !== 'number' || typeof toSeq !== 'number'
+    || !Number.isInteger(fromSeq) || !Number.isInteger(toSeq)
+    || fromSeq < 0 || fromSeq > toSeq) return { reason: 'checkpoint_range_shape' };
+  if (typeof digest !== 'string') return { reason: 'checkpoint_digest_mismatch' };
+  if (typeof text !== 'string' || text === '') return { reason: 'checkpoint_text_missing' };
+  return { block: { blockId, fromSeq, toSeq, digest, text } };
+}
+
+// 只有范围、哈希和版本全部匹配时才使用块；否则返回失败原因并从原始日志生成投影。
+// 块必须按范围升序排列且互不重叠，保证投影中每段历史最多由一个摘要代表。
+export function usableCheckpointFile(value: unknown, id: string, events: SessionEvent[]): CheckpointRead {
+  if (typeof value !== 'object' || value === null) return { blocks: [], reason: 'checkpoint_shape' };
+  const file = value as Partial<CheckpointFile> & Partial<LegacyCheckpoint>;
+  if (file.sessionId !== id) return { blocks: [], reason: 'checkpoint_session_mismatch' };
+  if (file.inputVersion !== CHECKPOINT_INPUT_VERSION) return { blocks: [], reason: 'checkpoint_input_version' };
+  // 版本 1 的旧文件只保存一个摘要；折算为块后按同一规则校验。
+  if (file.formatVersion === 1) {
+    const legacy = blockShape({ blockId: 1, fromSeq: file.fromSeq, toSeq: file.toSeq, digest: file.digest, text: file.text });
+    if ('reason' in legacy) return { blocks: [], reason: legacy.reason };
+    return usableBlocks([legacy.block], events);
+  }
+  if (file.formatVersion !== CHECKPOINT_FORMAT_VERSION) return { blocks: [], reason: 'checkpoint_format_version' };
+  if (!Array.isArray(file.blocks) || file.blocks.length === 0) return { blocks: [], reason: 'checkpoint_blocks_empty' };
+  const shaped: CompactionBlock[] = [];
+  for (const block of file.blocks) {
+    const parsed = blockShape(block);
+    if ('reason' in parsed) return { blocks: [], reason: parsed.reason };
+    shaped.push(parsed.block);
+  }
+  return usableBlocks(shaped, events);
+}
+
+function usableBlocks(blocks: CompactionBlock[], events: SessionEvent[]): CheckpointRead {
+  let previous: CompactionBlock | undefined;
+  for (const block of blocks) {
+    if (previous !== undefined && block.fromSeq <= previous.toSeq) {
+      return { blocks: [], reason: 'checkpoint_block_overlap' };
+    }
+    if (block.blockId <= (previous?.blockId ?? 0)) {
+      return { blocks: [], reason: 'checkpoint_block_ids' };
+    }
+    const covered = events.filter((event) => event.seq >= block.fromSeq && event.seq <= block.toSeq);
+    // 覆盖范围必须对应连续事件；缺少事件时拒绝使用块，即使计算出的哈希偶然匹配。
+    if (covered.length !== block.toSeq - block.fromSeq + 1) return { blocks: [], reason: 'checkpoint_range_missing' };
+    if (block.digest !== prefixDigest(covered)) return { blocks: [], reason: 'checkpoint_digest_mismatch' };
+    previous = block;
+  }
+  return { blocks, reason: '' };
+}
+
+export async function loadCheckpointFile({ directory, id, events }: {
   directory: string;
   id: string;
   events: SessionEvent[];
@@ -112,13 +183,13 @@ export async function loadCheckpoint({ directory, id, events }: {
   try {
     bytes = await readFile(checkpointPath(directory, id), 'utf8');
   } catch {
-    return { checkpoint: null, reason: 'checkpoint_absent' };
+    return { blocks: [], reason: 'checkpoint_absent' };
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(bytes);
   } catch {
-    return { checkpoint: null, reason: 'checkpoint_invalid_json' };
+    return { blocks: [], reason: 'checkpoint_invalid_json' };
   }
-  return usableCheckpoint(parsed, id, events);
+  return usableCheckpointFile(parsed, id, events);
 }

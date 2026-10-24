@@ -471,6 +471,19 @@ export const METHODS = Object.freeze({
     description: 'Start one already trusted local MCP server from a trusted interface and list its current tools without calling them',
     parameters: { type: 'object', properties: { projectRoot: { type: 'string' }, sessionId: SESSION_ID, server: { type: 'string' } }, required: ['server'] },
   },
+  // 扩展启停登记只由可信界面写入；登记影响下一次 Host 启动时的扩展发现。
+  'extensions.set': {
+    description: 'Enable or disable one extension installed in the user extensions directory from a trusted interface; the registry takes effect the next time the Host starts and never touches paths declared by configuration layers',
+    parameters: {
+      type: 'object',
+      properties: {
+        projectRoot: { type: 'string', description: 'the project whose environment names the installed extensions; absent means the one the Host was launched on' },
+        name: { type: 'string', description: 'the installed extension name shown by settings.catalog' },
+        enabled: { type: 'boolean', description: 'false records the extension in the disable registry; true removes it again' },
+      },
+      required: ['name', 'enabled'],
+    },
+  },
   // 客户端只能读取配置白名单中的字段，不能请求文件路径或其他配置内容。
   'config.get': {
     description: 'Read the configuration this interface may show: the host builds the answer from the whitelisted fields it owns, and those values, the layer writing each one and the version of every writable settings file come from one read, so no path can be asked for and no credential ever comes from configuration (D13, D60)',
@@ -501,6 +514,11 @@ export const METHODS = Object.freeze({
         ruleTarget: { type: 'string', description: 'for remembered file rules: file or workspace' },
         rulePath: { type: 'string', description: 'for remembered file rules: the exact absolute file path or workspace boundary' },
         ruleArgsHash: { type: 'string', description: 'for remembered MCP rules: the approved argument and server identity digest' },
+        serverName: { type: 'string', description: 'for the MCP server table: the server to set or remove' },
+        serverCommand: { type: 'string', description: 'for setting an MCP server: the executable path; arguments belong in serverArgs' },
+        serverArgs: { type: 'array', items: { type: 'string' }, description: 'for setting an MCP server: the command arguments' },
+        serverEnv: { type: 'object', description: 'for setting an MCP server: a table of ${NAME} environment variable references' },
+        serverCwd: { type: 'string', description: 'for setting an MCP server: the working directory for the server' },
       },
       required: ['field', 'layer', 'version'],
     },

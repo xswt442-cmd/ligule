@@ -294,6 +294,15 @@ test('the external backend gives the same text twice over', async () => {
   });
 });
 
+test('the real external backend preserves UTF-8 across pipe chunks', async () => {
+  await withWorkspace(async (workspace) => {
+    const line = `needle ${'汉字🙂'.repeat(250)}`;
+    await writeFile(join(workspace, 'unicode.txt'), Array.from({ length: 500 }, () => line).join('\n'));
+    const result = await searchTool.run({ pattern: 'needle', path: 'unicode.txt' }, context(workspace, { resultCount: 1000 }, { ripgrepPath: builtRipgrep }));
+    assert.deepEqual(result.text.split('\n'), Array.from({ length: 500 }, (_, index) => `unicode.txt:${index + 1}:${line}`));
+  });
+});
+
 // 搜索子进程必须在项目边界内运行；相对配置路径按项目根解析，不受子进程工作目录影响。
 test('a relative ripgrepPath is read against the process directory, not the boundary', async () => {
   await withWorkspace(async (workspace) => {

@@ -68,6 +68,21 @@ test('session MCP trust events are ignorable and validate the server identity', 
   assert.throws(() => parseSessionEvents([header, { ...trust, identityDigest: 'invalid' }]), { code: 'session_mcp_trust_event_invalid' });
 });
 
+test('compaction events are ignorable and carry the block identity, range and reason', () => {
+  const header = { kind: 'session', formatVersion: 2, sessionId: 'compaction', projectRoot: '' };
+  const written = { seq: 0, kind: 'compaction', ignorable: true, reason: 'auto', blockId: 1, fromSeq: 0, toSeq: 8, tokensBefore: 3000, tokensAfter: 900 };
+  assert.equal(parseSessionEvents([header, written]).events[0].kind, 'compaction');
+  for (const broken of [
+    { ...written, ignorable: false },
+    { ...written, reason: 'spontaneous' },
+    { ...written, blockId: 0 },
+    { ...written, toSeq: -1 },
+    { ...written, tokensBefore: 'many' },
+  ]) {
+    assert.throws(() => parseSessionEvents([header, broken]), { code: 'session_compaction_event_invalid' }, JSON.stringify(broken));
+  }
+});
+
 test('session approval memory events are ignorable and validate the saved rule', () => {
   const header = { kind: 'session', formatVersion: 2, sessionId: 'policy-rule', projectRoot: '' };
   const saved = { seq: 0, kind: 'sessionPolicyRule', ignorable: true, updatedAt: new Date().toISOString(), rule: { tool: 'mcp:playwright/browser_click', decision: 'allow' } };

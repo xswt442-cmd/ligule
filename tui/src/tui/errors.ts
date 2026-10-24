@@ -74,6 +74,10 @@ const FAILURE_TEXT: Readonly<Record<string, Readonly<Record<Locale, string>>>> =
     zh: '模型凭据尚未设置。用 /credentials 查看凭据引用，并通过环境变量或桌面模型服务保存凭据。',
     en: 'The model credential is not set. Use /credentials to view its reference, then set it in the environment or save it through Desktop model services.',
   },
+  provider_credential_unbound: {
+    zh: '模型服务地址与凭据引用未在用户配置中绑定。将该服务保存到用户配置，或通过命令行明确配置服务目标后重试。',
+    en: 'The model endpoint and credential reference are not bound in user configuration. Save the service in user configuration or explicitly configure its target through command-line flags.',
+  },
   credential_store_unavailable: {
     zh: '系统凭据存储当前不可用。检查系统凭据服务，或改用环境变量提供凭据。',
     en: 'The system credential store is unavailable. Check the OS credential service or provide the credential through an environment variable.',

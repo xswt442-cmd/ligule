@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import { workspaceIdentity } from '../kernel/workspace.js';
 import { createSessionHeader, type SessionModeIdentity } from './format.js';
+import { createCheckpointFile, loadCheckpointFile, writeCheckpointFile } from './checkpoint.js';
 import { parseSessionBytes } from './record.js';
 
 export interface BranchResult {
@@ -90,6 +91,18 @@ export async function branchSession(
     await rename(temporary, path);
   } catch (cause) {
     throw new KernelError('session_branch_failed', { cause, detail: `${parentSessionId} at ${boundary}: ${(cause as Error).message}` });
+  }
+  // 分支携带完全落在复制前缀内的压缩块；块的摘要按父记录事件校验，通过后改写为分支身份。
+  // 校验失败或块跨越分支点时不携带，分支从全量事件投影，下一次压缩会重建摘要。
+  const { blocks } = await loadCheckpointFile({ directory, id: parentSessionId, events: record.events });
+  const carried = blocks.filter((block) => block.toSeq <= boundary);
+  if (carried.length > 0) {
+    try {
+      await writeCheckpointFile(directory, id, createCheckpointFile({ id, blocks: carried }));
+    } catch {
+      // 记录已写入并可见；块文件是可重建的派生数据，携带失败不使分支失败，
+      // 否则调用方重试会不断产生没有块文件的孤立分支。
+    }
   }
   return { sessionId: id, parentSessionId, at: boundary, events: kept.length };
 }

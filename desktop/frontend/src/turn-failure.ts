@@ -62,6 +62,8 @@ export function turnFailure(code: string, diagnostics?: unknown): TurnFailure {
       return { explanation: ['输出预算无效或超过当前模型及配置允许的上限。检查 model.outputTokens 和能力限制。', 'The output budget is invalid or exceeds this model and configuration limit. Check model.outputTokens and capability limits.'], action: 'models' };
     case 'provider_credential_missing':
       return { explanation: ['当前模型未配置 API Key。请在模型服务中设置密钥或检查环境变量。', 'No API key is configured for this model. Set a key in Model services or check its environment variable.'], action: 'models' };
+    case 'provider_credential_unbound':
+      return { explanation: ['模型服务地址与凭据引用未在用户配置中绑定。请将该服务保存到用户层，或通过命令行明确配置服务目标。', 'The model endpoint and credential reference are not bound in user configuration. Save the service in the user layer or explicitly configure its target through command-line flags.'], action: 'models' };
     case 'provider_model_required':
     case 'provider_base_url_required':
     case 'provider_base_url_invalid':

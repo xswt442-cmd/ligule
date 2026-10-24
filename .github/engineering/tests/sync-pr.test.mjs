@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -14,6 +14,27 @@ function run(command, args, cwd) {
   if (result.error) throw result.error;
   return result;
 }
+
+test('a repository root reached through a directory link is accepted while a nested directory is refused', () => {
+  const root = mkdtempSync(join(tmpdir(), 'engineering-root-link-test-'));
+  try {
+    const repository = join(root, 'repository');
+    const alias = join(root, 'alias');
+    const nested = join(repository, 'nested');
+    mkdirSync(repository);
+    mkdirSync(nested);
+    assert.equal(run('git', ['init', '--quiet', repository], root).status, 0);
+    symlinkSync(repository, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const check = run(process.execPath, [script, '--check', alias], root);
+    assert.equal(check.status, 1, check.stderr);
+    assert.match(check.stdout, /Out of sync: \.github\/PULL_REQUEST_TEMPLATE\.md/);
+    const refused = run(process.execPath, [script, '--check', nested], root);
+    assert.equal(refused.status, 2);
+    assert.match(refused.stderr, /Target is not a Git working tree|Target must be the repository root/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('check is read-only, apply updates four files, and dirty edits block overwrites', () => {
   const root = mkdtempSync(join(tmpdir(), 'engineering-cmd-pr-test-'));

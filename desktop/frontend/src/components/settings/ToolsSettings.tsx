@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { code, type Client } from '../../protocol';
 import { readSettingsCatalog, type SettingsCatalog } from '../../settings-catalog';
 import { useText } from '../../locale';
+import { McpServersPanel } from '../McpServersPanel';
 import { McpTrustPanel } from '../McpTrustPanel';
 
 export function ToolsSettings({ client, projectRoot, sessionId }: { client: Client; projectRoot: string; sessionId: string | null }) {
@@ -25,6 +26,27 @@ export function ToolsSettings({ client, projectRoot, sessionId }: { client: Clie
   const chosen = catalog?.mode;
   const tools = catalog?.tools ?? [];
   const included = tools.filter((tool) => tool.includedInMode);
+  const [busyExtension, setBusyExtension] = useState<string | null>(null);
+  const [extensionNote, setExtensionNote] = useState('');
+
+  const setExtension = async (name: string, enabled: boolean) => {
+    setBusyExtension(name);
+    setExtensionNote('');
+    try {
+      await client.call('extensions.set', {
+        ...(projectRoot === '' ? {} : { projectRoot }),
+        name,
+        enabled,
+      }, 30_000);
+      await load(chosen?.name ?? selectedMode);
+      setExtensionNote(t(`已${enabled ? '启用' : '停用'} ${name}：下一次启动 Host 时生效。`, `${name} was ${enabled ? 'enabled' : 'disabled'}: it takes effect the next time the Host starts.`));
+    } catch (error) {
+      setExtensionNote(code(error));
+    } finally {
+      setBusyExtension(null);
+    }
+  };
+
   const sourceText = (source: string) => source === 'extension' ? t('扩展', 'Extension')
     : source === 'skill' ? t('技能', 'Skill')
       : source === 'mcp' ? 'MCP' : t('内置', 'Built in');
@@ -77,11 +99,18 @@ export function ToolsSettings({ client, projectRoot, sessionId }: { client: Clie
     </details>
     <details className="catalog-fold">
       <summary>{t(`扩展（${catalog?.extensions.length ?? 0}）`, `Extensions (${catalog?.extensions.length ?? 0})`)}</summary>
-      <p className="sheet-note">{t('扩展代码运行在 Host 进程中；设置页只读取状态，不提供热启停。新加载需按对应 Host 权限与重启状态处理。', 'Extensions run inside the Host process. This page only reads status and does not hot-toggle them; loading follows Host permission and restart requirements.')}</p>
+      <p className="sheet-note">{t('扩展代码运行在 Host 进程中，只有 full-access 且不受限网络的会话才会加载。用户安装的扩展可以停用或启用：登记在下一次启动 Host 时生效；配置层显式声明的路径不受登记影响。', 'Extensions run inside the Host process and load only in full-access sessions with unrestricted network. User-installed extensions can be disabled or enabled: the registry takes effect the next time the Host starts, while paths declared by configuration layers are unaffected.')}</p>
+      {extensionNote !== '' && <p className="session-note">{extensionNote}</p>}
       {catalog?.extensions.length ? <ul className="catalog-list">{catalog.extensions.map((extension) => <li key={`${extension.source}:${extension.name}`}>
         <strong>{extension.name}</strong><span>{extension.source === 'user-installed' ? t('用户安装', 'User installed') : t('用户配置', 'User configured')}</span>
-        <span>{extension.loaded ? t('已加载', 'Loaded') : t('当前未加载', 'Not loaded in open sessions')}</span>
+        <span>{!extension.enabled ? t('已停用（下次启动不加载）', 'Disabled (will not load next start)') : extension.loaded ? t('已加载', 'Loaded') : t('当前未加载', 'Not loaded in open sessions')}</span>
         {extension.registeredTools.length > 0 && <small>{t('工具', 'Tools')}: {extension.registeredTools.join(', ')}</small>}
+        {extension.source === 'user-installed' && <div className="inline-field mcp-trust-actions">
+          <button type="button" className="mini chip" disabled={busyExtension !== null}
+            onClick={() => void setExtension(extension.name, !extension.enabled)}>
+            {extension.enabled ? t('停用（下次启动生效）', 'Disable (next start)') : t('启用（下次启动生效）', 'Enable (next start)')}
+          </button>
+        </div>}
       </li>)}</ul> : <p className="stub">{t('没有已发现的用户扩展。', 'No user extensions were discovered.')}</p>}
       {(catalog?.extensionDiagnostics.length ?? 0) > 0 && <ul className="catalog-list">{catalog?.extensionDiagnostics.map((item, index) => <li key={`${item.code}:${item.source}:${index}`}><code>{item.code}</code><span>{item.source}</span></li>)}</ul>}
     </details>
@@ -95,6 +124,7 @@ export function ToolsSettings({ client, projectRoot, sessionId }: { client: Clie
     </details>
     <details className="catalog-fold">
       <summary>{t('MCP Server', 'MCP servers')}</summary>
+      <McpServersPanel client={client} projectRoot={projectRoot} />
       <McpTrustPanel client={client} projectRoot={projectRoot} sessionId={sessionId} />
     </details>
   </div>;

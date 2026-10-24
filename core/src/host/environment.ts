@@ -2,6 +2,7 @@ import { resolve } from 'node:path';
 import { createConfig } from '../kernel/config.js';
 import { loadConfigLayers } from '../kernel/config-file.js';
 import { extensionSources } from '../kernel/extensions.js';
+import { readExtensionState } from '../kernel/extension-state.js';
 import { DEFAULT_MODE, modeDirectories } from '../kernel/modes.js';
 import { hostProviderFromConfig } from './provider.js';
 import type { createHost, EnvironmentSeed } from './host.js';
@@ -11,7 +12,23 @@ export async function loadProjectConfig(projectRoot: string, flags: string[] = [
   const layers = await loadConfigLayers({ projectRoot, flags });
   const user = { boundary: projectRoot, ...layers.user };
   const config = createConfig({ ...layers, user });
-  const extensions = await extensionSources({ ...layers, user }, { projectRoot });
+  // 启停登记属于用户范围。登记存在但读不出来时停用名单不可信：
+  // 已安装扩展全部退出活动路径（fail-safe 偏向停用），原因进入诊断；
+  // 登记损坏与读取失败都不让 Host 启动失败。
+  const state = await readExtensionState();
+  const extensions = await extensionSources({
+    ...layers,
+    user,
+  }, {
+    projectRoot,
+    disabled: state.unavailable === undefined ? state.disabled : undefined,
+  });
+  if (state.invalid !== undefined) {
+    extensions.ignored.push({ code: 'extension_state_invalid', path: 'extensions-state.json', detail: state.invalid });
+  }
+  if (state.unavailable !== undefined) {
+    extensions.ignored.push({ code: 'extension_state_unavailable', path: 'extensions-state.json', detail: state.unavailable });
+  }
   return { config, extensions, layers };
 }
 

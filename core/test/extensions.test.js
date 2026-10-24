@@ -27,6 +27,10 @@ after(() => Promise.all(created.map((root) => rm(root, { recursive: true, force:
 
 test('sources come from the install directory, the user layer and the command line, not from the repository', async () => {
   const root = await directoryWith({ 'b.js': '', 'a.js': '', 'notes.txt': '' });
+  const installedDirectory = join(root, '.ligule', 'extensions');
+  const readDirectory = (path) => (path === installedDirectory
+    ? Promise.resolve(['b.js', 'a.js', 'notes.txt'])
+    : Promise.reject(Object.assign(new Error('not a directory'), { code: 'ENOTDIR' })));
   const listed = await extensionSources(
     {
       user: { extensions: ['tools/deep.js'] },
@@ -34,15 +38,67 @@ test('sources come from the install directory, the user layer and the command li
       project: { extensions: ['evil.js'] },
       local: { extensions: ['also-evil.js'] },
     },
-    { projectRoot: root, userHome: root, readDirectory: () => Promise.resolve(['b.js', 'a.js', 'notes.txt']) },
+    { projectRoot: root, userHome: root, readDirectory },
   );
-  const installedDirectory = join(root, '.ligule', 'extensions');
   assert.deepEqual(listed.paths, [join(installedDirectory, 'a.js'), join(installedDirectory, 'b.js'), join(root, 'tools', 'deep.js')].sort());
   assert.equal(listed.installedDirectory, installedDirectory);
   assert.deepEqual(listed.ignored.map((entry) => [entry.code, entry.path]), [['extension_source_ignored', 'project'], ['extension_source_ignored', 'local']]);
+  assert.deepEqual(Object.values(listed.installNames).sort(), ['a', 'b']);
+  assert.deepEqual(listed.disabled, []);
   // 安装目录不存在不是错误：一行都没装过是正常状态。
   const missing = await extensionSources({}, { projectRoot: root, userHome: join(root, 'nope'), readDirectory: () => Promise.reject(Object.assign(new Error('nope'), { code: 'ENOENT' })) });
   assert.deepEqual(missing.paths, []);
+});
+
+test('directory packages load through index.js and the disable registry filters installed entries only', async () => {
+  const root = await directoryWith({});
+  const installedDirectory = join(root, '.ligule', 'extensions');
+  const readDirectory = (path) => {
+    if (path === installedDirectory) return Promise.resolve(['solo.js', 'pack', 'half-pack', 'state.json']);
+    if (path === join(installedDirectory, 'pack')) return Promise.resolve(['index.js', 'notes.md']);
+    if (path === join(installedDirectory, 'half-pack')) return Promise.resolve([' readme.md ']);
+    return Promise.reject(Object.assign(new Error('not a directory'), { code: 'ENOTDIR' }));
+  };
+  const listed = await extensionSources({}, { projectRoot: root, userHome: root, readDirectory, disabled: ['pack'] });
+  assert.deepEqual(listed.paths, [join(installedDirectory, 'solo.js')], '停用的目录包不加载，缺 index.js 的目录也不加载');
+  assert.deepEqual(listed.disabled, [{ name: 'pack', path: join(installedDirectory, 'pack', 'index.js') }]);
+  assert.deepEqual(listed.installNames[join(installedDirectory, 'pack', 'index.js')], 'pack');
+  assert.ok(listed.ignored.some((entry) => entry.code === 'extension_package_index_missing' && entry.path.endsWith('half-pack')), '缺入口的目录包给出诊断');
+  // 配置层显式声明的路径不受启停登记约束。
+  const declared = await extensionSources(
+    { user: { extensions: [join(installedDirectory, 'pack', 'index.js')] } },
+    { projectRoot: root, userHome: root, readDirectory, disabled: ['pack'] },
+  );
+  assert.deepEqual(declared.paths, [join(installedDirectory, 'solo.js'), join(installedDirectory, 'pack', 'index.js')]);
+});
+
+test('the extension state registry round-trips and treats unreadable documents as empty', async () => {
+  const root = await directoryWith({});
+  const { extensionStatePath, readExtensionState, writeExtensionState } = await import('../dist/kernel/extension-state.js');
+  const statePath = extensionStatePath(root);
+  assert.deepEqual(await readExtensionState(root), { disabled: [] }, '没有登记文件时为空');
+  await writeExtensionState(root, ['pack', 'pack', 'solo']);
+  assert.deepEqual(await readExtensionState(root), { disabled: ['pack', 'solo'] }, '写入去重并排序');
+  await writeFile(statePath, '{', 'utf8');
+  const broken = await readExtensionState(root);
+  assert.deepEqual(broken.disabled, [], '损坏按空登记处理');
+  assert.ok(broken.invalid, '损坏原因可见');
+  // 停用名单不可信：unavailable 让环境装载把全部已安装扩展退出活动路径，
+  // extensions.set 中止写入而不是以空名单覆盖。
+  assert.ok(broken.unavailable, '损坏时名单不可信');
+  const installedDirectory = join(root, '.ligule', 'extensions');
+  const readDirectory = (path) => (path === installedDirectory
+    ? Promise.resolve(['pack.js'])
+    : Promise.reject(Object.assign(new Error('not a directory'), { code: 'ENOTDIR' })));
+  const blocked = await extensionSources({}, { projectRoot: root, userHome: root, readDirectory, disabled: null });
+  assert.deepEqual(blocked.paths, [], '登记不可读时安装扩展不进活动路径');
+  assert.deepEqual(blocked.disabled, [{ name: 'pack', path: join(installedDirectory, 'pack.js') }], '全部按停用展示');
+  // 配置层显式声明的路径不受登记影响。
+  const declared = await extensionSources(
+    { user: { extensions: [join(installedDirectory, 'pack.js')] } },
+    { projectRoot: root, userHome: root, readDirectory, disabled: null },
+  );
+  assert.deepEqual(declared.paths, [join(installedDirectory, 'pack.js')]);
 });
 
 test('the narrow interface is the four things the contract names, and registrations reach the kernel', async () => {

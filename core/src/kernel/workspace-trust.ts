@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join, resolve, isAbsolute } from 'node:path';
+import { basename, dirname, join, resolve, isAbsolute } from 'node:path';
 import lockfile from 'proper-lockfile';
 import { dataRoot } from './config-file.js';
 import { KernelError, KernelRuntimeError } from './error.js';
@@ -15,7 +15,13 @@ const pendingWrites = new Map<string, Promise<void>>();
 type TrustLock = { assertOwned(): void; release(): Promise<void> };
 
 export function trustPathOf(home = homedir()): string {
-  return join(dataRoot(home), 'tui-trust.json');
+  return join(dataRoot(home), 'trust.json');
+}
+
+// 早期版本的文件名。读取作为后备，写入一律使用新名；旧文件保留不迁移、不删除，
+// 新文件一旦写入即优先生效，旧文件自然失效。
+function legacyPathOf(path: string): string | undefined {
+  return basename(path) === 'trust.json' ? join(dirname(path), 'tui-trust.json') : undefined;
 }
 
 function invalidDocument(cause?: unknown): KernelError {
@@ -44,13 +50,19 @@ function parseDocument(text: string): TrustDocument {
   return { version: 1, directories };
 }
 
-async function readDocument(path: string): Promise<TrustDocument> {
+async function readDocument(path: string, legacyPath?: string): Promise<TrustDocument> {
   let text: string;
   try {
     text = await readFile(path, 'utf8');
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, directories: [] };
-    throw error;
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    if (legacyPath === undefined) return { version: 1, directories: [] };
+    try {
+      text = await readFile(legacyPath, 'utf8');
+    } catch (legacyError) {
+      if ((legacyError as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, directories: [] };
+      throw legacyError;
+    }
   }
   return parseDocument(text);
 }
@@ -70,7 +82,7 @@ async function verifiedIdentity(directory: string): Promise<string> {
 
 export async function isTrusted(directory: string, path = trustPathOf()): Promise<boolean> {
   const identity = await verifiedIdentity(directory);
-  const document = await readDocument(resolve(path));
+  const document = await readDocument(resolve(path), legacyPathOf(path));
   return document.directories.includes(identity);
 }
 
@@ -113,7 +125,8 @@ async function writeTrust(path: string, identity: string, trusted: boolean): Pro
   const lock = await acquireLock(path);
   let temporary: string | undefined;
   try {
-    const document = await readDocument(path);
+    // 读取旧名后备，写入新名：首次写入即把旧文件的内容合并进新文件。
+    const document = await readDocument(path, legacyPathOf(path));
     const directories = new Set(document.directories);
     if (trusted) directories.add(identity);
     else directories.delete(identity);

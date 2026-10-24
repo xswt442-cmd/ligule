@@ -4,7 +4,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { KernelError } from '../kernel/error.js';
 import type { ProviderDiagnostic, ProviderDiagnosticCategory } from '../kernel/error.js';
 import { resolveCredential } from '../kernel/credentials.js';
-import type { ModelMessage } from '../kernel/loop.js';
+import type { ModelMessage, ToolCall } from '../kernel/loop.js';
 
 export interface RetryPolicy {
   readonly maxAttempts: number;
@@ -376,14 +376,17 @@ if (buffer.trim() !== '') {
 
 // 每个 assistant 工具调用都必须有对应结果；缺少结果会使后续请求被服务端拒绝。
 export function assertAllAnswered(view: readonly ModelMessage[]): void {
-  const answered = new Set(view.filter((entry) => entry.role === 'tool').map((entry) => entry.id));
+  const pending: ToolCall[] = [];
   for (const entry of view) {
-    if (entry.role !== 'assistant') continue;
-    for (const call of entry.toolCalls ?? []) {
-      if (!answered.has(call.id)) {
-        throw new KernelError('provider_unanswered_call', { detail: `${call.name} (${call.id})` });
-      }
+    if (entry.role === 'assistant') pending.push(...(entry.toolCalls ?? []));
+    else if (entry.role === 'tool') {
+      const index = pending.findIndex((call) => call.id === entry.id);
+      if (index >= 0) pending.splice(index, 1);
     }
+  }
+  const unanswered = pending[0];
+  if (unanswered !== undefined) {
+    throw new KernelError('provider_unanswered_call', { detail: `${unanswered.name} (${unanswered.id})` });
   }
 }
 

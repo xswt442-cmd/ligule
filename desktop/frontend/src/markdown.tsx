@@ -5,6 +5,7 @@ import type { ReactNode } from 'react';
 import { useState } from 'react';
 import { Lexer, type Token, type Tokens } from 'marked';
 import hljs from 'highlight.js/lib/common';
+import { useText } from './locale';
 import 'highlight.js/styles/github-dark.min.css';
 
 const inlineLexer = new Lexer({ gfm: true, breaks: false });
@@ -58,17 +59,20 @@ function safeHref(href: string): string {
 // 复制代码围栏中的原始文本，不复制高亮后的展示内容。
 // 使用 Chromium 提供的 `navigator.clipboard`；复制成功或失败时都显示明确结果。
 function CodeBlock({ code }: { code: Tokens.Code }) {
-  const [said, setSaid] = useState('');
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const t = useText();
   return <div className="md-code-wrap">
     <pre className="md-code" data-lang={code.lang ?? ''}><code className="hljs" dangerouslySetInnerHTML={{ __html: highlight(code.text, code.lang) }} /></pre>
     <p className="code-copy-row">
       <button type="button" className="code-copy" onClick={() => {
         void navigator.clipboard.writeText(code.text).then(
-          () => setSaid(`已复制这段代码（${code.text.length} 字）`),
-          () => setSaid('复制没成：这一具界面拿不到剪贴板'),
+          () => setCopyState('copied'),
+          () => setCopyState('failed'),
         );
-      }}>复制代码</button>
-      {said !== '' && <span className="row-note">{said}</span>}
+      }}>{t('复制代码', 'Copy code')}</button>
+      {copyState !== 'idle' && <span className="row-note">{copyState === 'copied'
+        ? t(`已复制代码（${code.text.length} 个字符）`, `Copied code (${code.text.length} characters)`)
+        : t('复制失败：当前界面无法访问剪贴板。', 'Copy failed: this interface cannot access the clipboard.')}</span>}
     </p>
   </div>;
 }

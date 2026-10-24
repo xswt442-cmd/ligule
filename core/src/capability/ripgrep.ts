@@ -129,10 +129,12 @@ export function searchWithRipgrep({
     // 子进程启动与注册监听之间也可能收到取消信号；此时立即终止，不等待搜索完成。
     if (signal?.aborted) cancel();
 
-    const consume = (chunk: Buffer): void => {
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    const consume = (chunk: string): void => {
       // 达到命中上限并终止子进程后，忽略迟到的输出。
       if (truncated) return;
-      pending += chunk.toString('utf8');
+      pending += chunk;
       let end;
       while ((end = pending.indexOf('\n')) >= 0) {
         const line = pending.slice(0, end);
@@ -148,7 +150,7 @@ export function searchWithRipgrep({
     };
 
     child.stdout.on('data', consume);
-    child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8'); });
+    child.stderr.on('data', (chunk: string) => { stderr += chunk; });
     child.on('error', (error) => settle(() => reject(new KernelError('search_backend_failed', { cause: error, detail: `the search backend could not run: ${errorCode(error) ?? errorMessage(error)}` }))));
     child.on('close', (code: number | null) => {
     // ripgrep 以 1 表示没有匹配，属于正常结果；退出码 2 表示执行错误。

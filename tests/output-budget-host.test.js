@@ -21,8 +21,8 @@ async function within(work, label) {
   } finally { clearTimeout(timer); }
 }
 
-function startHost(project, home) {
-  const child = spawn(process.execPath, [join(repository, 'tui', 'dist', 'cli.js'), 'host'], {
+function startHost(project, home, flags = []) {
+  const child = spawn(process.execPath, [join(repository, 'tui', 'dist', 'cli.js'), 'host', ...flags.flatMap((value) => ['--config', value])], {
     cwd: project, env: { ...process.env, LIGULE_HOME: home, OUTPUT_BUDGET_TEST_KEY: 'synthetic-budget-host-key' },
     stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
   });
@@ -373,7 +373,7 @@ test('a user budget write validates every loaded project before changing shared 
     await assert.rejects(call('config.set', { projectRoot: project, layer: 'user', field: 'model.outputTokens', value: 16384, version: settings.layers[0].version }), { code: 'provider_output_budget_unsupported' });
     assert.deepEqual(await readFile(userFile), before, 'the default model supports 16384 but another loaded project does not');
     await host.stop();
-    host = startHost(other, home);
+    host = startHost(other, home, [`model.baseURL="http://127.0.0.1:${port}/v1"`]);
     await call('session.open', { projectRoot: other, sessionId });
     await call('run.start', { sessionId, input: 'read the unchanged shared config in a new Host' });
     assert.equal(requests.at(-1).max_tokens, 1024);

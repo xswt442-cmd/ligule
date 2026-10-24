@@ -49,6 +49,9 @@ export interface ToolDefinition<TArgs = unknown> {
   readonly access?: PermissionAccess;
   readonly targetArgument?: string;
   readonly commandArgument?: string;
+  // 参数中不含命令字符串的工具（例如用户声明的命令工具）由该函数合成最终命令行，
+  // 供 Shell 选择、脚本绑定与策略按命令判定使用；引号跟随 Kernel 选定的后端。
+  readonly commandOf?: (args: TArgs, shell: ShellSelection) => string | undefined;
   capability?: BivariantCapability<TArgs>;
   policyIdentity?: BivariantPolicyIdentity<TArgs>;
   readonly preflight?: (args: TArgs) => void | Promise<void>;
@@ -279,10 +282,12 @@ export function createKernel(options: KernelOptions = {}): Kernel {
         access,
         targetArgument: typeof tool.targetArgument === 'string' ? tool.targetArgument : undefined,
         commandArgument: typeof tool.commandArgument === 'string' ? tool.commandArgument : undefined,
-        // 工具可提供实际能力名称；MCP 工具用它传递 `mcp:<服务器>/<工具>` 身份。
-        capability: typeof tool.capability === 'function' ? tool.capability : undefined,
-        preflight: tool.preflight,
-        run: tool.run,
+                // 工具可提供实际能力名称；MCP 工具用它传递 `mcp:<服务器>/<工具>` 身份。
+                capability: typeof tool.capability === 'function' ? tool.capability : undefined,
+                policyIdentity: tool.policyIdentity,
+                commandOf: typeof tool.commandOf === 'function' ? tool.commandOf : undefined,
+                preflight: tool.preflight,
+                run: tool.run,
       };
       tools.set(tool.name, entry);
       return () => {
@@ -394,8 +399,14 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       const network = typeof targetAddress === 'string' ? await resolveTarget(targetAddress) : undefined;
       // 只选择一次命令解释器，并将同一后端用于语法解析、权限判定和执行。
       // 配置指定的解释器不可用时返回错误，不自动切换到另一种语法或程序。
+      // 参数中声明命令的工具直接取参数；参数不含命令的工具（用户声明的命令工具）
+      // 通过 `commandOf` 在选定后端后合成最终命令行，判定与执行用同一段文本。
       let shell;
-      if (tool.commandArgument !== undefined && typeof args?.[tool.commandArgument] === 'string') {
+      let commandText: string | undefined;
+      const declaredCommand = tool.commandArgument !== undefined && typeof args?.[tool.commandArgument] === 'string'
+        ? args[tool.commandArgument] as string
+        : undefined;
+      if (declaredCommand !== undefined || tool.commandOf !== undefined) {
         try {
           shell = resolveShell(config);
         } catch (error) {
@@ -404,6 +415,10 @@ export function createKernel(options: KernelOptions = {}): Kernel {
           return undefined;
         }
         entry.shell = { kind: shell.kind, executable: shell.executable };
+        // 空白命令视同未提供：与策略层「不含命令文本」的口径一致，
+        // 由工具自身的参数校验给出具体错误。
+        const composed = declaredCommand ?? tool.commandOf!(args, shell);
+        commandText = composed === undefined || composed.trim() === '' ? undefined : composed;
       }
       let approvedScriptBinding: ScriptBinding | undefined;
       let scriptBindingError: KernelError | undefined;
@@ -415,7 +430,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
         const capability = tool.capability?.(args);
         const identityDigest = tool.policyIdentity?.(args);
         let scriptBinding: ScriptBinding | undefined;
-        if (tool.access === 'exec' && shell !== undefined && typeof args.command === 'string') {
+        if (tool.access === 'exec' && shell !== undefined && commandText !== undefined) {
           let workspaceRoot: string;
           let boundary: string;
           let workingDirectory: string;
@@ -431,16 +446,17 @@ export function createKernel(options: KernelOptions = {}): Kernel {
             return undefined;
           }
           try {
-            requiresWorkspaceTrust = await requiresTrustedWorkspaceCommand(args.command, shell);
+            requiresWorkspaceTrust = await requiresTrustedWorkspaceCommand(commandText, shell);
             const trusted = requiresWorkspaceTrust ? await isTrusted(workspaceRoot) : activePermission.workspaceTrusted;
             callPermission = permissionWithWorkspaceTrust(activePermission, trusted);
-            scriptBinding = await bindScript({ command: args.command, shell, boundary, workspaceRoot, cwd: workingDirectory, permission: callPermission });
-            requiresManualApproval = await requiresManualApprovalForProjectCommand(args.command, shell);
+            scriptBinding = await bindScript({ command: commandText, shell, boundary, workspaceRoot, cwd: workingDirectory, permission: callPermission });
+            requiresManualApproval = await requiresManualApprovalForProjectCommand(commandText, shell);
           } catch (error) {
             scriptBindingError = error instanceof KernelError ? error : new KernelError('exec_script_binding_unavailable', { cause: error });
           }
         }
         const verdict = await policy.evaluate({ tool: name, input: args, target: network, shell, capability, access: tool.access, scriptBinding,
+          ...(commandText === undefined ? {} : { command: commandText }),
           ...(options.callId === undefined ? {} : { callId: options.callId }),
           ...(identityDigest === undefined ? {} : { identityDigest }),
           ...(['create', 'write', 'edit', 'delete'].includes(name)
