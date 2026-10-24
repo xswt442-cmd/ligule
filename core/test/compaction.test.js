@@ -17,7 +17,7 @@ import {
   createSessionLog,
   cutPoint,
   estimateTokens,
-  loadCheckpoint,
+  loadCheckpointFile,
 } from '../dist/index.js';
 import { resolveModel } from '../dist/kernel/model-services.js';
 
@@ -99,11 +99,13 @@ test('pressure over the line compacts once and the next request carries the summ
     const result = await createLoop({ kernel, provider, prompt, session, compaction }).run('再问一句', {});
     assert.equal(result.text, 'continued');
 
-    const read = await loadCheckpoint({ directory, id, events: await session.read() });
-    assert.equal(read.reason, '', 'the checkpoint the compaction wrote matches the log');
-    assert.equal(read.checkpoint.text, SUMMARY);
+    const read = await loadCheckpointFile({ directory, id, events: await session.read() });
+    assert.equal(read.reason, '', 'the blocks the compaction wrote match the log');
+    assert.equal(read.blocks.length, 1);
+    assert.equal(read.blocks[0].text, SUMMARY);
+    assert.equal(read.blocks[0].blockId, 1);
     const last = (await session.read()).at(-1);
-    assert.ok(read.checkpoint.fromSeq >= 0 && read.checkpoint.toSeq < last.seq);
+    assert.ok(read.blocks[0].fromSeq >= 0 && read.blocks[0].toSeq < last.seq);
 
     const sent = provider.seen.at(-1);
     assert.equal(sent.messages[0].text, SUMMARY, 'the covered range is replaced by the summary');
@@ -127,7 +129,7 @@ test('an endpoint overflow answer gets one compaction and one retry', async () =
     const result = await createLoop({ kernel, provider, prompt, session, compaction }).run('继续', {});
     assert.equal(result.text, 'after the retry');
     assert.equal(provider.summaries(), 1, 'exactly one summary call');
-    assert.equal((await loadCheckpoint({ directory, id, events: await session.read() })).reason, '');
+    assert.equal((await loadCheckpointFile({ directory, id, events: await session.read() })).reason, '');
     // 那一次报超长之前没压过：压力那一条量的是本地估算，这一段还没越线。
     assert.equal(provider.seen.filter((request) => String(request.messages?.[0]?.text ?? '') === SUMMARY).length, 1);
   });
@@ -157,7 +159,7 @@ test('a provider failure that is not about length leaves the record alone', asyn
       (error) => error.code === 'provider_http_error' && error.detail.includes('invalid api key'),
     );
     assert.equal(provider.summaries(), 0, 'no summary was asked for');
-    assert.equal((await loadCheckpoint({ directory, id, events: await session.read() })).reason, 'checkpoint_absent');
+    assert.equal((await loadCheckpointFile({ directory, id, events: await session.read() })).reason, 'checkpoint_absent');
   });
 });
 
@@ -186,8 +188,8 @@ test('the local estimate is corrected by the usage the endpoint reports back', a
   });
 });
 
-// 检查点只保存摘要和事件范围；被压缩的事件仍保留在会话日志中。
-test('the checkpoint carries no disclosure state and the log keeps every event', async () => {
+// 压缩块只保存摘要和事件范围；被压缩的事件仍保留在会话日志中。
+test('the block file carries no disclosure state and the log keeps every event', async () => {
   await withSession(async ({ directory, id, session }) => {
     await fill(session, 4);
     await session.append({ kind: 'mode', name: 'full', layer: 'shipped', tools: ['read'], digest: 'aaaaaaaaaaaa', path: '/x/full.toml' });
@@ -196,32 +198,37 @@ test('the checkpoint carries no disclosure state and the log keeps every event',
     await createLoop({ kernel, provider, prompt, session, compaction }).run('一句', {});
 
     const raw = JSON.parse(await readFile(join(directory, `${id}.checkpoint.json`), 'utf8'));
-    assert.deepEqual(Object.keys(raw).sort(), ['digest', 'formatVersion', 'fromSeq', 'inputVersion', 'sessionId', 'text', 'toSeq']);
+    assert.deepEqual(Object.keys(raw).sort(), ['blocks', 'formatVersion', 'inputVersion', 'sessionId']);
+    assert.deepEqual(Object.keys(raw.blocks[0]).sort(), ['blockId', 'digest', 'fromSeq', 'text', 'toSeq']);
     const events = await session.read();
     assert.equal(events.filter((event) => event.kind === 'mode').length, 1, 'a mode event is not anything the summary swallows');
-    assert.ok(events.length > (await loadCheckpoint({ directory, id, events })).checkpoint.toSeq, 'no event left the log');
+    assert.ok(events.length > (await loadCheckpointFile({ directory, id, events })).blocks[0].toSeq, 'no event left the log');
   });
 });
 
-// 连续压缩从上次保留的边界继续，并将已有摘要作为输入。
-test('the next compaction starts at the kept boundary and feeds the previous summary in', async () => {
+// 连续压缩追加新块；已有块保持不变，新块请求把上一块摘要作为输入。
+test('the next compaction appends a block after the kept boundary and feeds the previous summary in', async () => {
   await withSession(async ({ directory, id, session }) => {
     const provider = fakeProvider([[{ type: 'text', text: 'one' }], [{ type: 'text', text: 'two' }], [{ type: 'text', text: 'three' }]]);
     const compaction = createCompaction({ provider, session, directory, id, limits });
     const loop = createLoop({ kernel, provider, prompt, session, compaction });
-    assert.equal((await loadCheckpoint({ directory, id, events: await session.read() })).reason, 'checkpoint_absent');
+    assert.equal((await loadCheckpointFile({ directory, id, events: await session.read() })).reason, 'checkpoint_absent');
 
     await fill(session, 4);
     await loop.run('A', {});
-    const first = await loadCheckpoint({ directory, id, events: await session.read() });
+    const first = await loadCheckpointFile({ directory, id, events: await session.read() });
     assert.equal(first.reason, '');
+    assert.equal(first.blocks.length, 1);
 
     await fill(session, 4);
     await loop.run('B', {});
-    const second = await loadCheckpoint({ directory, id, events: await session.read() });
+    const second = await loadCheckpointFile({ directory, id, events: await session.read() });
     assert.equal(second.reason, '');
-    assert.equal(second.checkpoint.fromSeq, first.checkpoint.fromSeq, 'the merged range still starts at the old boundary');
-    assert.ok(second.checkpoint.toSeq > first.checkpoint.toSeq, 'the second compaction covers further into the log');
+    assert.equal(second.blocks.length, 2);
+    assert.deepEqual(second.blocks[0], first.blocks[0], 'the first block is untouched');
+    assert.equal(second.blocks[1].fromSeq, first.blocks[0].toSeq + 1, 'the new block starts after the kept boundary');
+    assert.equal(second.blocks[1].blockId, 2);
+    assert.ok(second.blocks[1].toSeq > first.blocks[0].toSeq, 'the second compaction covers further into the log');
     const excerpt = provider.seen.filter((request) => String(request.messages?.[0]?.text ?? '').startsWith('Write a summary')).at(-1);
     const instruction = String(excerpt.messages[0].text);
     assert.match(instruction, /Earlier summary:\nSUMMARY/, 'the previous summary is part of the input');
@@ -237,7 +244,7 @@ test('an oversized summary spills to a file with a retrievable reference', async
     const provider = fakeProvider([[{ type: 'text', text: 'ok' }]], 'y'.repeat(40_000));
     const compaction = createCompaction({ provider, session, directory, id, limits: { ...limits, resultBytes: 2_000 } });
     await createLoop({ kernel, provider, prompt, session, compaction }).run('一句', {});
-    const text = (await loadCheckpoint({ directory, id, events: await session.read() })).checkpoint.text;
+    const text = (await loadCheckpointFile({ directory, id, events: await session.read() })).blocks[0].text;
     const reference = /full output is 40000 bytes, kept in (\S+)\]/.exec(text);
     assert.ok(reference, `the checkpoint keeps a reference: ${text.slice(-80)}`);
     assert.ok((await readFile(join(directory, reference[1]), 'utf8')).startsWith('yyyy'));
@@ -322,9 +329,9 @@ test('a manual compaction writes the same checkpoint and says when there is noth
     await fill(session, 3);
     const done = await compaction.compactNow();
     assert.ok(done !== null && done.toSeq >= done.fromSeq && done.tokensAfter < done.tokensBefore);
-    const read = await loadCheckpoint({ directory, id, events: await session.read() });
+    const read = await loadCheckpointFile({ directory, id, events: await session.read() });
     assert.equal(read.reason, '', '手动写出去的那一份与日志对得上');
-    assert.equal(read.checkpoint.text, 'MANUAL SUMMARY');
+    assert.equal(read.blocks[0].text, 'MANUAL SUMMARY');
     assert.equal((await session.modelView())[0].text, 'MANUAL SUMMARY', '压完的投影第一段就是那份摘要');
   });
 });

@@ -1,8 +1,7 @@
 // 压缩时将较早的模型上下文交给模型总结，并在检查点中记录摘要和被替换的事件范围。
 // 压力触发在请求发送前根据本地估算判断，估算值会用服务端报告的用量校准。
 // 超长触发只在服务端报告上下文超限后执行；一次运行最多压缩并重试一次。原始事件日志保持不变。
-import { writeFile } from 'node:fs/promises';
-import { checkpointPath, createCheckpoint, loadCheckpoint, PROJECTED_KINDS } from './checkpoint.js';
+import { createBlock, createCheckpointFile, loadCheckpointFile, PROJECTED_KINDS, writeCheckpointFile, type CompactionBlock } from './checkpoint.js';
 import { spillContent } from '../kernel/result.js';
 import { KernelError } from '../kernel/error.js';
 import type { SessionEvent } from './format.js';
@@ -139,25 +138,28 @@ export function createCompaction({ provider, session, directory, id, limits, log
     return text;
   }
 
-  // 计算切点、请求摘要并写入检查点。无法压缩时返回具体原因和 null 结果。
-  async function compact(signal?: AbortSignal): Promise<{ fromSeq: number; toSeq: number; tokensBefore: number; tokensAfter: number } | null> {
+  // 计算切点、请求摘要并追加压缩块。无法压缩时返回具体原因和 null 结果。
+  // 每次压缩覆盖尚未进入任何块的区间；块文件整体原子替换，已有块保持不变。
+  async function compact(signal?: AbortSignal): Promise<{ blockId: number; fromSeq: number; toSeq: number; tokensBefore: number; tokensAfter: number } | null> {
     await seedFromRecord();
     const events = await session.read();
-    const { checkpoint } = await loadCheckpoint({ directory, id, events });
-    const fromSeq = checkpoint?.fromSeq ?? 0;
+    const { blocks } = await loadCheckpointFile({ directory, id, events });
+    const last = blocks.at(-1);
+    const fromSeq = last === undefined ? 0 : last.toSeq + 1;
     const tail = events.filter((event) => event.seq >= fromSeq);
     // 被排除在模型投影之外的事件不占用保留预算，也不计入压缩后的 Token 数。
     const projected = tail.filter((event) => PROJECTED_KINDS.includes(String(event.kind)));
     // 使用校准后的估算计算切点，确保压缩后按同一口径检查压力阈值。
     const cut = cutPoint(tail, retained, (event) => estimateTokens(event) * factor);
     if (cut === null) return null;
-    // 检查点保存连续的事件序号范围；范围不依赖事件是否进入模型投影。
+    // 压缩块保存连续的事件序号范围；范围不依赖事件是否进入模型投影。
     const covered = tail.filter((event) => event.seq < cut);
     if (covered.length === 0) return null;
     const tokensBefore = estimateTokens(await session.modelView());
     let text: string;
     try {
-      text = await summarise(covered, checkpoint?.text, signal);
+      // 新块请求携带上一块的摘要，摘要链因此覆盖更早的全部历史。
+      text = await summarise(covered, last?.text, signal);
     } catch (error) {
       logger?.log?.('compaction summary call failed', { sessionId: id, code: (error as { code?: string }).code });
       if (signal?.aborted) throw new KernelError('loop_cancelled', { cause: error });
@@ -167,35 +169,43 @@ export function createCompaction({ provider, session, directory, id, limits, log
       logger?.log?.('compaction summary came back empty', { sessionId: id });
       return null;
     }
-    // 摘要受工具结果字节上限约束；超限时保存到溢出文件，并在检查点中记录读取引用。
+    // 摘要受工具结果字节上限约束；超限时保存到溢出文件，并在块中记录读取引用。
     const kept = await spillContent(text, {
       limit: limits.resultBytes,
       directory,
       name: `summary-${fromSeq}-${cut}.txt`,
     });
-    // 压缩结果必须小于原投影，否则检查点只增加文件和验证成本，却让原有历史无法再进入模型上下文。
+    // 压缩结果必须小于原投影，否则块只增加文件和验证成本，却让原有历史无法再进入模型上下文。
     // 手动压缩时返回明确的“无法缩短”结果。
     const remaining = projected.filter((event) => event.seq >= cut);
-    const tokensAfter = estimateTokens(kept) + remaining.reduce((sum, event) => sum + estimateTokens(event), 0);
+    const blockTextTokens = (sum: number, block: CompactionBlock) => sum + estimateTokens(block.text);
+    const tokensAfter = blocks.reduce(blockTextTokens, 0) + estimateTokens(kept)
+      + remaining.reduce((sum, event) => sum + estimateTokens(event), 0);
     if (tokensAfter >= tokensBefore) {
       logger?.log?.('compaction would not shrink the projection, skipping', {
         sessionId: id, tokensBefore, tokensAfter, covered: covered.length,
       });
       return null;
     }
-    await writeFile(checkpointPath(directory, id), JSON.stringify(
-      createCheckpoint({ id, events: covered, text: kept, fromSeq, toSeq: Number(covered[covered.length - 1].seq) }),
-    ), 'utf8');
+    const block = createBlock({
+      events: covered,
+      text: kept,
+      fromSeq,
+      toSeq: Number(covered[covered.length - 1].seq),
+      blockId: (last?.blockId ?? 0) + 1,
+    });
+    await writeCheckpointFile(directory, id, createCheckpointFile({ id, blocks: [...blocks, block] }));
     // 保存本地估算和校准系数，使读取记录的一方可以还原触发压缩时的计算依据。
     logger?.log?.('session compacted', {
       sessionId: id,
+      blockId: block.blockId,
       fromSeq,
-      toSeq: Number(covered[covered.length - 1].seq),
+      toSeq: block.toSeq,
       tokensBefore,
       tokensAfter,
       factor: Math.round(factor * 100) / 100,
     });
-    return { fromSeq, toSeq: Number(covered[covered.length - 1].seq), tokensBefore, tokensAfter };
+    return { blockId: block.blockId, fromSeq, toSeq: block.toSeq, tokensBefore, tokensAfter };
   }
 
   // 识别服务端明确报告的上下文超限错误，通常是 HTTP 400 响应。

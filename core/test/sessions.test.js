@@ -6,8 +6,9 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { withTuiHost } from './helpers/tui-host.js';
 import {
-  branchSession, chooseResumeMode, createConfig, createConnection, createMemoryConnectionPair, createSessionLog, findUnresolvedCalls, listSessions,
-  loadMode, MESSAGES_CAPABILITIES, modeDirectories, parseSessionBytes, searchSessions, serveHost, sessionDirectory,
+  branchSession, chooseResumeMode, createBlock, createCheckpointFile, createConfig, createConnection, createMemoryConnectionPair, createSessionLog,
+  findUnresolvedCalls, listSessions, loadCheckpointFile, loadMode, MESSAGES_CAPABILITIES, modeDirectories, parseSessionBytes, searchSessions,
+  serveHost, sessionDirectory, writeCheckpointFile,
 } from '../dist/index.js';
 import { workspaceIdentity } from '../dist/kernel/workspace.js';
 
@@ -222,6 +223,37 @@ test('a branch copies a prefix of the record and leaves the parent alone', async
     const legacy = await branchSession(directory, 'legacy', { projectRoot: root });
     assert.equal(parseSessionBytes(await readFile(join(directory, `${legacy.sessionId}.jsonl`))).events.length, 1);
     await assert.rejects(branchSession(directory, 'nobody', { projectRoot: root }), (error) => error.code === 'session_not_found');
+  });
+});
+
+// 分支携带完全落在复制前缀内的压缩块；跨越分支点的块不携带，父侧的块文件保持不变。
+test('a branch carries the compaction blocks that fit inside the copied prefix', async () => {
+  await withSessions(async (root, directory) => {
+    const parent = createSessionLog({ directory, id: 'parent', meta: () => ({ projectRoot: root }) });
+    await parent.append({ kind: 'user', text: '第一轮' });
+    await parent.append({ kind: 'assistant', text: '答了', toolCalls: [] });
+    await parent.append({ kind: 'turn', ignorable: true, status: 'completed', userSeq: 0, iterations: 1, modelCalls: 1 });
+    await parent.append({ kind: 'user', text: '第二轮' });
+    const events = await parent.read();
+    const block = createBlock({ events: events.filter((event) => event.seq <= 1), text: '第一块的摘要', fromSeq: 0, toSeq: 1, blockId: 1 });
+    await writeCheckpointFile(directory, 'parent', createCheckpointFile({ id: 'parent', blocks: [block] }));
+
+    const whole = await branchSession(directory, 'parent', { projectRoot: root });
+    const branchLog = createSessionLog({ directory, id: whole.sessionId });
+    const carried = await loadCheckpointFile({ directory, id: whole.sessionId, events: await branchLog.read() });
+    assert.equal(carried.reason, '', '父侧的块按分支事件校验通过');
+    assert.deepEqual(carried.blocks, [block]);
+    assert.equal((await branchLog.modelView())[0].text, '第一块的摘要', '分支投影里摘要仍然代表被压过的那一段');
+    assert.equal((await loadCheckpointFile({ directory, id: 'parent', events })).blocks.length, 1, '父侧的块文件没有动');
+
+    // 块覆盖到分支点之后：整块不携带，分支从全量事件投影。
+    const wide = createBlock({ events: events.filter((event) => event.seq <= 3), text: '跨过分支点的摘要', fromSeq: 0, toSeq: 3, blockId: 1 });
+    await writeCheckpointFile(directory, 'parent', createCheckpointFile({ id: 'parent', blocks: [wide] }));
+    const early = await branchSession(directory, 'parent', { at: 2, projectRoot: root });
+    const earlyLog = createSessionLog({ directory, id: early.sessionId });
+    const dropped = await loadCheckpointFile({ directory, id: early.sessionId, events: await earlyLog.read() });
+    assert.equal(dropped.reason, 'checkpoint_absent', '没有携带任何块');
+    assert.deepEqual((await earlyLog.modelView()).map((row) => row.text), ['第一轮', '答了'], 'turn 标记不进投影，被跨过的块也不代表任何事件');
   });
 });
 

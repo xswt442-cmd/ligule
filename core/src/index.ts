@@ -42,7 +42,7 @@ export { chooseResumeMode, listSessions, listWorkspaceSessions, sessionDirectori
 export { adoptForSessionDirectory, adoptLegacySessions } from './session/adopt.js';
 export { searchSessionDirectories, searchSessions } from './session/search.js';
 export { branchSession } from './session/branch.js';
-export { CHECKPOINT_FORMAT_VERSION, CHECKPOINT_INPUT_VERSION, checkpointPath, createCheckpoint, loadCheckpoint, prefixDigest, usableCheckpoint } from './session/checkpoint.js';
+export { CHECKPOINT_FORMAT_VERSION, CHECKPOINT_INPUT_VERSION, checkpointPath, createBlock, createCheckpointFile, loadCheckpointFile, prefixDigest, usableCheckpointFile, writeCheckpointFile } from './session/checkpoint.js';
 export { createCompaction, cutPoint, estimateTokens } from './session/compaction.js';
 export { summarizeVerdicts, formatVerdicts } from './session/verdicts.js';
 export { createLoop, DEFAULT_LOOP_LIMITS } from './kernel/loop.js';
