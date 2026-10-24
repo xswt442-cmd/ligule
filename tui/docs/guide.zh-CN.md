@@ -52,7 +52,7 @@ npm install -g ligule
 
 每个新会话只属于一个工作区。终端界面启动时准备新会话；桌面版启动时恢复上次打开的会话，没有上次会话时准备一个新会话。会话记录保存在用户数据根的 `workspaces/<可读工作区路径>--<短哈希>/sessions/` 下。路径名保留工作区特征，哈希用于避免不同路径重名。桌面版新会话的工作区菜单提供「浏览」按钮，可用系统文件夹选择器选目录，也可直接输入路径。
 
-用户数据根默认为 `~/.ligule`。设置绝对路径环境变量 `LIGULE_HOME` 可以更换数据根；相对路径会报 `data_root_invalid`。用户配置在 `~/.ligule/config.toml`，项目共享配置在 `.ligule/config.toml`，项目本地配置在 `.ligule/config.local.toml`。工作区会话记录、工作区登记、终端输入历史、桌面偏好和密钥引用也由用户数据根管理。旧会话仍可从原全局 `sessions/` 和项目 `.ligule/sessions/` 中只读浏览；打开旧会话时才会将记录及附属文件复制到新的工作区目录，原件保留。桌面偏好、草稿和待发送队列保存在数据根的 `desktop.json`；WebView 的 `ligule.ui` 只作首屏缓存。终端界面与桌面界面的草稿和队列分别保存。
+用户数据根默认为 `~/.ligule`。设置绝对路径环境变量 `LIGULE_HOME` 可以更换数据根；相对路径会报 `data_root_invalid`。用户配置在 `~/.ligule/config.toml`，项目共享配置在 `.ligule/config.toml`，项目本地配置在 `.ligule/config.local.toml`。用户数据根还保存：工作区登记 `workspaces.json`、工作区信任记录 `trust.json`（旧版本的 `tui-trust.json` 仍可读取）、MCP 服务器信任 `mcp-trust.json`、外部 Agent 授权 `agent-control.json`、终端输入历史、桌面偏好 `desktop.json` 和密钥引用（密钥本身存放在系统凭据库，不在数据根）。会话目录中除记录 `.jsonl` 外，还包含可重建的派生文件：压缩块文件 `<编号>.checkpoint.json`、超限内容溢出文件 `result-*.json` 与 `summary-*.txt`、会话列表索引 `index.json`；这些文件损坏或缺失时自动从记录重建，可安全删除。旧会话仍可从原全局 `sessions/` 和项目 `.ligule/sessions/` 中只读浏览；打开旧会话时才会将记录及附属文件复制到新的工作区目录，原件保留。WebView 的 `ligule.ui` 只作首屏缓存。终端界面与桌面界面的草稿和队列分别保存。
 
 搜索默认使用随包提供的 ripgrep。自定义 `ripgrepPath` 会选择可执行程序，只能在用户配置或命令行 `--config` 中设置；项目共享配置和项目本地配置声明该字段时会报 `search_backend_source_untrusted`。将自定义路径移至用户配置，或删除该字段以使用随包后端。
 

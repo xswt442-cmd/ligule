@@ -21,7 +21,7 @@ test('missing trust file starts empty and trust can be granted and revoked', asy
     const directory = join(root, 'project');
     const path = join(root, 'tui-trust.json');
     await mkdir(directory);
-    assert.equal(trustPathOf(root), join(root, '.ligule', 'tui-trust.json'));
+    assert.equal(trustPathOf(root), join(root, '.ligule', 'trust.json'));
     assert.equal(await isTrusted(directory, path), false);
     await setTrusted(directory, true, path);
     assert.equal(await isTrusted(directory, path), true);
@@ -100,5 +100,27 @@ test('missing directories and files are rejected', async () => {
     await writeFile(file, 'file');
     await assert.rejects(isTrusted(missing, join(root, 'trust.json')), (error) => error.code === 'tui_trust_directory_invalid');
     await assert.rejects(setTrusted(file, true, join(root, 'trust.json')), (error) => error.code === 'tui_trust_directory_invalid');
+  });
+});
+
+// 旧文件名 tui-trust.json 仍可读取；写入一律落在新名，旧文件保留不动。
+test('the legacy file name is read as a fallback and writes land on the new name', async () => {
+  await withSandbox(async (root) => {
+    const directory = join(root, 'project');
+    const other = join(root, 'other');
+    await mkdir(directory);
+    await mkdir(other);
+    const legacy = join(root, 'tui-trust.json');
+    const path = join(root, 'trust.json');
+
+    await setTrusted(directory, true, legacy);
+    assert.equal(await isTrusted(directory, path), true, '旧文件里的信任在新名下可见');
+
+    await setTrusted(other, true, path);
+    assert.equal(await isTrusted(directory, path), true);
+    assert.equal(await isTrusted(other, path), true);
+    const written = JSON.parse(await readFile(path, 'utf8'));
+    assert.equal(written.directories.length, 2, '旧条目合并进新文件');
+    assert.ok((await readFile(legacy, 'utf8')).length > 0, '旧文件保持不动');
   });
 });

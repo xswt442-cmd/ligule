@@ -18,6 +18,10 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 - 压缩压力阈值预留输出预算（上限为窗口的四分之一），长输出请求更早压缩；每次压缩的原因（手动、自动、超限恢复、模型主动）写入会话记录。
 - 会话列表使用可重建的目录索引缓存，未变化的记录不再每次完整解析，长会话目录下列表与恢复浏览明显变快。
 
+**兼容性**
+
+- 工作区信任记录改存数据根的 `trust.json`：旧版 `tui-trust.json` 仍自动读取并在下次写入时合并进新文件，旧文件保留不删除。
+
 **修复**
 
 - 模型请求的凭据绑定用户或命令行声明的服务地址与接口，项目覆盖地址或密钥引用时拒绝发送；对话、压缩和内部子代理沿用同一轮次的绑定快照。
@@ -38,6 +42,10 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 - Compaction is stored as individually validated blocks, so successive passes form separate blocks instead of overwriting one summary, and branches carry their blocks instead of losing the summaries.
 - The compaction threshold reserves the output budget (capped at a quarter of the window), so long-output requests compact earlier; every compaction records its reason (manual, automatic, overflow recovery, or model-initiated) in the session record.
 - Session listing uses a rebuildable directory index, so unchanged records are no longer fully re-parsed on every list, making listing and resume browsing faster for long session directories.
+
+**Compatibility**
+
+- The workspace trust record now lives in `trust.json` under the data root. The earlier `tui-trust.json` is still read and merged into the new file on the next write; the old file is kept untouched.
 
 **Fixed**
 
