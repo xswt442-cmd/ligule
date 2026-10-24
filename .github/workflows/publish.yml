@@ -21,7 +21,7 @@ permissions:
 jobs:
   preflight:
     name: validate the requested tag
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       actions: read
       contents: read
@@ -92,7 +92,7 @@ jobs:
   checks:
     name: release checks
     needs: preflight
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
@@ -100,7 +100,7 @@ jobs:
           ref: ${{ needs.preflight.outputs.commit }}
           persist-credentials: false
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 12.9.1
           run_install: false
@@ -162,7 +162,7 @@ jobs:
           test -f "$tarball"
           sha256sum "$tarball" > dist-tarball/SHA256SUMS
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: npm-tarball
           path: dist-tarball/
@@ -171,7 +171,7 @@ jobs:
   registry-check:
     name: check the main package version before publishing
     needs: [preflight, checks]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       state: ${{ steps.registry.outputs.state }}
     steps:
@@ -180,7 +180,7 @@ jobs:
           ref: ${{ needs.preflight.outputs.commit }}
           persist-credentials: false
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 12.9.1
           run_install: false
@@ -192,7 +192,7 @@ jobs:
       - name: install frozen workspace dependencies for registry helper
         run: pnpm install --frozen-lockfile
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: npm-tarball
           path: dist-tarball
@@ -210,7 +210,7 @@ jobs:
   approval:
     name: release approval
     needs: [preflight, registry-check]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: npm-publish
     permissions:
       contents: read
@@ -225,14 +225,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-24.04, windows-latest]
     steps:
       - uses: actions/checkout@v5
         with:
           ref: ${{ needs.preflight.outputs.commit }}
           persist-credentials: false
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 12.9.1
           run_install: false
@@ -246,7 +246,7 @@ jobs:
       - name: install frozen workspace dependencies
         run: pnpm install --frozen-lockfile
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: npm-tarball
           path: dist-tarball
@@ -267,7 +267,7 @@ jobs:
   npm:
     name: publish to npm
     needs: [preflight, checks, registry-check, approval, verify]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       id-token: write
@@ -286,7 +286,7 @@ jobs:
       - name: install npm CLI with trusted publishing support
         run: npm install --global npm@11.5.1
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: npm-tarball
           path: dist-tarball
@@ -308,7 +308,7 @@ jobs:
   github-notes:
     name: publish CLI release notes to GitHub
     needs: [preflight, npm]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: write

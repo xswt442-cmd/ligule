@@ -36,7 +36,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           run_install: false
       - uses: actions/setup-node@v5
@@ -86,12 +86,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-24.04, windows-latest]
     steps:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           run_install: false
       - uses: actions/setup-node@v5
@@ -128,13 +128,13 @@ jobs:
 
   cli-package:
     name: build CLI package artifact
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           run_install: false
       - uses: actions/setup-node@v5
@@ -148,7 +148,7 @@ jobs:
           pnpm run build
       - name: check the packed artifact
         run: pnpm --filter ligule run check-pack
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ligule-cli-tarball-${{ github.run_id }}
           path: testplace/pack/*.tgz
@@ -164,12 +164,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-24.04, windows-latest]
     steps:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           run_install: false
       - uses: actions/setup-node@v5
@@ -179,7 +179,7 @@ jobs:
           cache-dependency-path: pnpm-lock.yaml
       - name: install verifier dependencies
         run: pnpm install --frozen-lockfile
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: ligule-cli-tarball-${{ github.run_id }}
           path: dist-tarball
@@ -207,7 +207,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           run_install: false
       - uses: actions/setup-node@v5
@@ -330,7 +330,7 @@ jobs:
       - name: list generated desktop artifacts
         shell: bash
         run: ls -l desktop/release/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: ligule-desktop-evidence-${{ matrix.id }}-${{ github.sha }}
@@ -343,7 +343,7 @@ jobs:
         run: |
           version=$(node -p "require('./desktop/package.json').version")
           echo "value=$version" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ligule-desktop-v${{ steps.desktop-version.outputs.value }}-${{ matrix.id }}-${{ github.sha }}
           path: ${{ matrix.artifact }}

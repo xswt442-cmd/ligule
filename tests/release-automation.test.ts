@@ -420,11 +420,11 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
   assert.ok(JSON.stringify(publish.jobs.npm).includes('npm publish --provenance --access public'));
   assert.ok(publish.jobs.checks.steps.some((step) => step.run?.includes('pnpm --filter ligule run pack-release dist-tarball')));
   const releaseVerify = publish.jobs.verify;
-  assert.deepEqual(releaseVerify.strategy.matrix.os, ['ubuntu-latest', 'windows-latest']);
+  assert.deepEqual(releaseVerify.strategy.matrix.os, ['ubuntu-24.04', 'windows-latest']);
   assert.equal(releaseVerify.needs.includes('checks'), true);
-  assert.ok(publish.jobs.checks.steps.some((step) => step.uses === 'actions/upload-artifact@v4'
+  assert.ok(publish.jobs.checks.steps.some((step) => step.uses === 'actions/upload-artifact@v7'
     && step.with?.name === 'npm-tarball'));
-  assert.equal(releaseVerify.steps.filter((step) => step.uses === 'actions/download-artifact@v4')[0]?.with?.name, 'npm-tarball');
+  assert.equal(releaseVerify.steps.filter((step) => step.uses === 'actions/download-artifact@v8')[0]?.with?.name, 'npm-tarball');
   assert.ok(releaseVerify.steps.some((step) => step.run?.includes('verify-install') && step.run.includes('realpath')),
     'Linux release verification must pass an absolute tarball path');
   assert.ok(releaseVerify.steps.some((step) => step.shell === 'pwsh' && step.run?.includes('verify-install') && step.run.includes('Resolve-Path')),
@@ -443,14 +443,14 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
     assert.match(probeCommand, /probeLinuxSandboxIsolation/);
     assert.match(probeCommand, /if \(!result\.available\)/);
   }
-  assert.ok(ci.jobs['cli-package'].steps.some((step) => step.uses === 'actions/upload-artifact@v4'
+  assert.ok(ci.jobs['cli-package'].steps.some((step) => step.uses === 'actions/upload-artifact@v7'
     && step.with?.name === 'ligule-cli-tarball-${{ github.run_id }}'
     && step.with?.path === 'testplace/pack/*.tgz'
     && step.with?.overwrite === true));
   const ciConsumer = ci.jobs['cli-consumer'];
   assert.deepEqual(ciConsumer.needs, 'cli-package');
-  assert.deepEqual(ciConsumer.strategy.matrix.os, ['ubuntu-latest', 'windows-latest']);
-  assert.equal(ciConsumer.steps.filter((step) => step.uses === 'actions/download-artifact@v4')[0]?.with?.name,
+  assert.deepEqual(ciConsumer.strategy.matrix.os, ['ubuntu-24.04', 'windows-latest']);
+  assert.equal(ciConsumer.steps.filter((step) => step.uses === 'actions/download-artifact@v8')[0]?.with?.name,
     'ligule-cli-tarball-${{ github.run_id }}');
   assert.ok(ciConsumer.steps.some((step) => step.run?.includes('verify-install') && step.run.includes('realpath')),
     'Linux CI verification must pass an absolute tarball path');
@@ -466,7 +466,7 @@ test('release workflows isolate CLI publication from Desktop draft releases and 
   assert.match(registryCommand, /"\$GITHUB_WORKSPACE\/dist-tarball\/ligule-\$\{version\}\.tgz"/);
   assert.doesNotMatch(registryCommand, /registry-version --/);
   assert.ok(registrySteps.some((step) => step.run === 'pnpm install --frozen-lockfile'));
-  assert.ok(registrySteps.findIndex((step) => step.uses === 'pnpm/action-setup@v4')
+  assert.ok(registrySteps.findIndex((step) => step.uses === 'pnpm/action-setup@v6')
     < registrySteps.findIndex((step) => step.uses === 'actions/setup-node@v5'),
   'pnpm must exist before setup-node configures pnpm caching');
 
