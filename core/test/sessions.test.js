@@ -7,8 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { withTuiHost } from './helpers/tui-host.js';
 import {
   branchSession, chooseResumeMode, createBlock, createCheckpointFile, createConfig, createConnection, createMemoryConnectionPair, createSessionLog,
-  findUnresolvedCalls, listSessions, loadCheckpointFile, loadMode, MESSAGES_CAPABILITIES, modeDirectories, parseSessionBytes, searchSessions,
-  serveHost, sessionDirectory, writeCheckpointFile,
+  findUnresolvedCalls, listSessions, listWorkspaceSessions, loadCheckpointFile, loadMode, MESSAGES_CAPABILITIES, modeDirectories, parseSessionBytes,
+  searchSessions, serveHost, sessionDirectory, writeCheckpointFile,
 } from '../dist/index.js';
 import { workspaceIdentity } from '../dist/kernel/workspace.js';
 
@@ -378,5 +378,52 @@ test('one Host preserves A, B, then A session state', async () => {
     await client.request('run.start', { sessionId: sessionA, input: 'A again' });
     const { events } = await client.request('session.read', { sessionId: sessionA });
     assert.deepEqual(events.filter((event) => event.kind === 'user').map((event) => event.text), ['A first', 'A again']);
+  });
+});
+
+// 列表索引是可重建缓存：命中时复用解析结果，文件变化或索引损坏时逐条重建，旧目录不写索引。
+test('the listing index caches parsed summaries and rebuilds on change', async () => {
+  await withSessions(async (root, directory) => {
+    const first = createSessionLog({ directory, id: 'indexed-a', meta: () => ({ projectRoot: root }) });
+    await first.append({ kind: 'user', text: '第一句' });
+    await first.append({ kind: 'assistant', text: '答', toolCalls: [] });
+
+    const plain = await listSessions(directory);
+    const indexed = await listSessions(directory, { index: true });
+    assert.deepEqual(indexed, plain, '带索引的列表与直读结果一致');
+    assert.ok(await readFile(join(directory, 'index.json'), 'utf8'), '索引文件落在记录目录里');
+
+    // 再次列表命中缓存；记录追加后按大小失效并重建。
+    await first.append({ kind: 'user', text: '第二句' });
+    const refreshed = await listSessions(directory, { index: true });
+    assert.equal(refreshed.find((item) => item.id === 'indexed-a').events, 3, '追加后的事件数如实反映');
+
+    // 索引损坏不挡列表：整体丢弃重建。
+    await writeFile(join(directory, 'index.json'), '{', 'utf8');
+    const rebuilt = await listSessions(directory, { index: true });
+    assert.equal(rebuilt.find((item) => item.id === 'indexed-a').events, 3);
+
+    // 记录删除后条目随之消失。
+    await rm(join(directory, 'indexed-a.jsonl'));
+    const afterDelete = await listSessions(directory, { index: true });
+    assert.equal(afterDelete.length, plain.length - 1, '删除的记录不再出现');
+  });
+});
+
+// 跨目录列表只在当前工作区目录写索引；旧目录保持只读发现。
+test('workspace listing writes the index only into the primary directory', async () => {
+  await withSessions(async (root, directory) => {
+    // withSessions 的记录目录本身就是旧式布局；主目录按当前规则另建。
+    const primary = sessionDirectory({ boundary: root });
+    await mkdir(primary, { recursive: true });
+    const session = createSessionLog({ directory, id: 'legacy-one', meta: () => ({ projectRoot: root }) });
+    await session.append({ kind: 'user', text: '旧记录' });
+    const current = createSessionLog({ directory: primary, id: 'current-one', meta: () => ({ projectRoot: root }) });
+    await current.append({ kind: 'user', text: '新记录' });
+
+    const listed = await listWorkspaceSessions({ boundary: root }, { projectRoot: root });
+    assert.deepEqual(listed.map((item) => item.id).sort(), ['current-one', 'legacy-one']);
+    assert.ok(await readFile(join(primary, 'index.json'), 'utf8'), '当前目录有索引');
+    await assert.rejects(readFile(join(directory, 'index.json')), /ENOENT/, '旧目录不写索引');
   });
 });
