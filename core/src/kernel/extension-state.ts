@@ -26,8 +26,10 @@ export async function readExtensionState(home = homedir()): Promise<ExtensionSta
   try {
     text = await readFile(extensionStatePath(home), 'utf8');
   } catch (error) {
+    // 登记不可读（缺失、无权限或路径被占用）都按空登记继续：停用名单是可选状态，
+    // 不能让一条扩展登记挡住 Host 启动；原因经 invalid 交给诊断渠道展示。
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { disabled: [] };
-    throw new KernelError('extension_state_read_failed', { cause: error, detail: extensionStatePath(home) });
+    return { disabled: [], invalid: `${(error as NodeJS.ErrnoException).code ?? 'read_failed'}: ${(error as Error).message}` };
   }
   try {
     const parsed = JSON.parse(text) as { version?: unknown; disabled?: unknown };
