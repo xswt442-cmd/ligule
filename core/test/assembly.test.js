@@ -121,3 +121,31 @@ test('the manifest rejects a duplicate plugin name and a malformed entry', () =>
   assert.throws(() => loadAssembly(instance, 'files'), (error) => error.code === 'assembly_manifest_must_be_array');
   assert.deepEqual(instance.list(), []);
 });
+
+test('assembly disposal attempts every cleanup in reverse order and can be repeated', () => {
+  const instance = createKernel();
+  const calls = [];
+  const failure = new Error('second cleanup failed');
+  const assembly = loadAssembly(instance, [
+    { name: 'first', setup: (kernel) => { const remove = kernel.register(tool('first-tool')); return () => { calls.push('first'); remove(); }; } },
+    { name: 'second', setup: (kernel) => { const remove = kernel.register(tool('second-tool')); return () => { calls.push('second'); remove(); throw failure; }; } },
+    { name: 'third', setup: (kernel) => { const remove = kernel.register(tool('third-tool')); return () => { calls.push('third'); remove(); }; } },
+  ]);
+  assert.throws(() => assembly.dispose(), (error) => error instanceof AggregateError && error.errors.includes(failure));
+  assert.deepEqual(calls, ['third', 'second', 'first']);
+  assert.deepEqual(instance.list(), []);
+  assert.deepEqual(assembly.list(), []);
+  assembly.dispose();
+  assert.deepEqual(calls, ['third', 'second', 'first']);
+});
+
+test('a setup failure remains reported alongside cleanup failures', () => {
+  const instance = createKernel();
+  const setupFailure = new Error('setup failed');
+  const cleanupFailure = new Error('cleanup failed');
+  assert.throws(() => loadAssembly(instance, [
+    { name: 'first', setup: (kernel) => { const remove = kernel.register(tool('first-tool')); return () => { remove(); throw cleanupFailure; }; } },
+    { name: 'broken', setup: () => { throw setupFailure; } },
+  ]), (error) => error instanceof AggregateError && error.errors[0] === setupFailure && error.errors[1] === cleanupFailure);
+  assert.deepEqual(instance.list(), []);
+});
