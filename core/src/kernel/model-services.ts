@@ -9,11 +9,11 @@ export type ModelService = {
   models: string[];
   modelSettings?: ModelServiceModelSettings[];
 };
-export type ModelServiceModelSettings = { id: string; name?: string; contextTokens?: number; outputTokens?: number };
+export type ModelServiceModelSettings = { id: string; name?: string; contextTokens?: number; outputTokens?: number; imageInput?: boolean };
 export type ModelSelection = { provider: string; model: string };
 
 const SERVICE_FIELDS = ['id', 'name', 'api', 'baseURL', 'apiKeyEnv', 'models', 'modelSettings'];
-const MODEL_SETTINGS_FIELDS = ['id', 'name', 'contextTokens', 'outputTokens'];
+const MODEL_SETTINGS_FIELDS = ['id', 'name', 'contextTokens', 'outputTokens', 'imageInput'];
 const serviceError = (detail: string): never => { throw new KernelError('model_service_invalid', { detail }); };
 
 function objectOf(value: unknown): Record<string, unknown> {
@@ -66,6 +66,10 @@ export function modelServices(value: unknown): ModelService[] {
           if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) return serviceError(`modelSettings.${key} must be a positive safe integer`);
           modelSetting[key] = value;
         }
+        if (setting.imageInput !== undefined) {
+          if (typeof setting.imageInput !== 'boolean') return serviceError('modelSettings.imageInput must be a boolean');
+          modelSetting.imageInput = setting.imageInput;
+        }
         if (modelSetting.contextTokens !== undefined && modelSetting.outputTokens !== undefined && modelSetting.outputTokens > modelSetting.contextTokens) {
           return serviceError('modelSettings.outputTokens must not exceed contextTokens');
         }
@@ -86,6 +90,7 @@ export function resolveModel(model: Record<string, unknown>, selection?: ModelSe
   const baseModel = { ...model };
   delete baseModel.serviceOutputLimit;
   delete baseModel.serviceContextTokens;
+  delete baseModel.serviceImageInput;
   const services = modelServices(model.services);
   const chosen = selection ?? (model.selection === undefined ? undefined : modelSelection(model.selection));
   const legacyReady = typeof model.api === 'string' && typeof model.baseURL === 'string' && typeof model.model === 'string';
@@ -99,6 +104,7 @@ export function resolveModel(model: Record<string, unknown>, selection?: ModelSe
     ...baseModel, api: service.api, baseURL: service.baseURL, apiKeyEnv: service.apiKeyEnv, model: selected.model, serviceId: service.id,
     ...(modelSetting?.outputTokens === undefined ? {} : { outputTokens: modelSetting.outputTokens, serviceOutputLimit: true }),
     ...(modelSetting?.contextTokens === undefined ? {} : { serviceContextTokens: modelSetting.contextTokens }),
+    ...(modelSetting?.imageInput === undefined ? {} : { serviceImageInput: modelSetting.imageInput }),
   };
 }
 
@@ -111,6 +117,7 @@ export function servicesLiteral(services: ModelService[]): string {
       if (setting.name !== undefined) fields.push(`name = ${quote(setting.name)}`);
       if (setting.contextTokens !== undefined) fields.push(`contextTokens = ${setting.contextTokens}`);
       if (setting.outputTokens !== undefined) fields.push(`outputTokens = ${setting.outputTokens}`);
+      if (setting.imageInput !== undefined) fields.push(`imageInput = ${setting.imageInput}`);
       return `{ ${fields.join(', ')} }`;
     });
     return `\n  { id = ${quote(service.id)}, name = ${quote(service.name)}, api = ${quote(service.api)}, baseURL = ${quote(service.baseURL)}, apiKeyEnv = ${quote(service.apiKeyEnv)}, models = [${service.models.map(quote).join(', ')}]${modelSettings === undefined ? '' : `, modelSettings = [${modelSettings.join(', ')}]`} }`;
