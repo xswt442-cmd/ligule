@@ -65,6 +65,12 @@ interface SessionQueue {
   paused: boolean;
 }
 
+interface CloseProgress {
+  readonly kind: 'controller' | 'takeover';
+  hostClosed: boolean;
+  runtimeUnregistered: boolean;
+}
+
 interface ControlOptions {
   readonly operator?: boolean;
   readonly onEvent?: (event: ControlEvent) => void;
@@ -117,6 +123,10 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
   const queues = new Map<string, SessionQueue>();
   const takenOver = new Set<string>();
   const takingOver = new Set<string>();
+  const openingSessions = new Set<string>();
+  const closingSessions = new Set<string>();
+  const closeProgress = new Map<string, CloseProgress>();
+  const closingOperations = new Map<string, Promise<{ sessionId: string }>>();
   const operator = options.operator === true;
   let closing: Promise<void> | undefined;
   let closingCode = 'control_closed';
@@ -279,6 +289,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
 
   function writable(sessionId: string): void {
     owned(sessionId);
+    if (closingSessions.has(sessionId)) throw new KernelError('control_session_closing');
     if (takenOver.has(sessionId) || takingOver.has(sessionId)) throw new KernelError('control_session_taken_over');
   }
 
@@ -297,8 +308,11 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
   async function session(method: 'session.create' | 'session.open', root: string, sessionId?: string, initial?: McpInitialSettings) {
     ready();
     if (initial !== undefined && Object.keys(initial).length > 0 && !operator) throw new KernelError('control_operator_required');
+    if (sessionId !== undefined && closingSessions.has(sessionId)) throw new KernelError('control_session_closing');
     if (sessionId !== undefined && (takenOver.has(sessionId) || takingOver.has(sessionId))) throw new KernelError('control_session_taken_over');
+    if (sessionId !== undefined && openingSessions.has(sessionId)) throw new KernelError('control_session_opening');
     if ((sessionId === undefined || !sessions.has(sessionId)) && sessions.size + opening >= 64) throw new KernelError('control_session_limit');
+    if (sessionId !== undefined) openingSessions.add(sessionId);
     opening += 1;
     const work = (async () => {
       await authorized(root);
@@ -335,7 +349,62 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     })();
     pending.add(work);
     try { return await work; }
-    finally { opening -= 1; pending.delete(work); }
+    finally {
+      opening -= 1;
+      pending.delete(work);
+      if (sessionId !== undefined) openingSessions.delete(sessionId);
+    }
+  }
+
+  function sessionHasPendingWork(sessionId: string): boolean {
+    const queue = queues.get(sessionId);
+    return active.has(sessionId)
+      || (queue !== undefined && (queue.items.length > 0 || queue.paused))
+      || [...interactions.values()].some((interaction) => interaction.sessionId === sessionId);
+  }
+
+  async function releaseSession(sessionId: string, progress: CloseProgress): Promise<void> {
+    if (!progress.hostClosed) {
+      const result = record(await tracked(host.handle({ method: 'session.close', params: { sessionId } }, connection)));
+      if (result.sessionId !== sessionId) throw new KernelError('host_response_invalid');
+      progress.hostClosed = true;
+    }
+    if (!progress.runtimeUnregistered) {
+      await localRuntime.unregister(sessionId);
+      progress.runtimeUnregistered = true;
+    }
+    sessions.delete(sessionId);
+    queues.delete(sessionId);
+  }
+
+  async function closeSession(sessionId: string): Promise<{ sessionId: string }> {
+    ready();
+    if (!sessions.has(sessionId)) throw new KernelError('session_not_open');
+    if (takenOver.has(sessionId) || takingOver.has(sessionId)) throw new KernelError('control_session_taken_over');
+    if (openingSessions.has(sessionId)) throw new KernelError('control_session_busy');
+    const inFlight = closingOperations.get(sessionId);
+    if (inFlight !== undefined) return await inFlight;
+    let progress = closeProgress.get(sessionId);
+    if (progress?.kind === 'takeover') throw new KernelError('control_session_taken_over');
+    if (progress === undefined) {
+      if (sessionHasPendingWork(sessionId)) throw new KernelError('control_session_busy');
+      progress = { kind: 'controller', hostClosed: false, runtimeUnregistered: false };
+      closeProgress.set(sessionId, progress);
+    }
+    closingSessions.add(sessionId);
+    const work = (async (): Promise<{ sessionId: string }> => {
+      await releaseSession(sessionId, progress!);
+      closeProgress.delete(sessionId);
+      closingSessions.delete(sessionId);
+      return { sessionId };
+    })();
+    closingOperations.set(sessionId, work);
+    pending.add(work);
+    try { return await work; }
+    finally {
+      pending.delete(work);
+      if (closingOperations.get(sessionId) === work) closingOperations.delete(sessionId);
+    }
   }
 
   function operation(operationId: string): Operation {
@@ -669,20 +738,33 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
   }
 
   async function takeOverSession(sessionId: string) {
-    writable(sessionId);
+    ready();
+    if (takenOver.has(sessionId)) throw new KernelError('control_session_taken_over');
+    if (takingOver.has(sessionId)) throw new KernelError('control_session_closing');
+    if (!sessions.has(sessionId)) throw new KernelError('session_not_open');
+    if (openingSessions.has(sessionId)) throw new KernelError('control_session_busy');
+    let progress = closeProgress.get(sessionId);
+    if (progress?.kind === 'controller') throw new KernelError('control_session_closing');
+    if (progress === undefined) {
+      progress = { kind: 'takeover', hostClosed: false, runtimeUnregistered: false };
+      closeProgress.set(sessionId, progress);
+    }
+    closingSessions.add(sessionId);
     takingOver.add(sessionId);
     try {
       const found = active.get(sessionId);
       if (found !== undefined) await cancelOperation(found.operationId, 'human');
-      const queue = currentQueue(sessionId);
-      queue.items.length = 0;
-      queue.paused = false;
-      const closed = record(await tracked(host.handle({ method: 'session.close', params: { sessionId } }, connection)));
-      if (closed.sessionId !== sessionId) throw new KernelError('host_response_invalid');
-      takenOver.add(sessionId);
+      const queue = queues.get(sessionId);
+      if (queue !== undefined) {
+        queue.items.length = 0;
+        queue.paused = false;
+      }
+      await releaseSession(sessionId, progress);
       const latest = latestSessionOperation(sessionId);
+      takenOver.add(sessionId);
       if (latest !== undefined) publish(latest, 'ownership.transferred', { from: 'external', to: 'human' });
-      await localRuntime.unregister(sessionId);
+      closeProgress.delete(sessionId);
+      closingSessions.delete(sessionId);
       return { sessionId, ownership: 'human', released: true, operationId: latest?.operationId ?? null };
     } finally {
       takingOver.delete(sessionId);
@@ -721,6 +803,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
   return {
     create: (root: string, initial?: McpInitialSettings) => session('session.create', root, undefined, initial),
     open: (root: string, sessionId: string) => session('session.open', root, sessionId),
+    close: (sessionId: string) => closeSession(sessionId),
     configure,
     replyInteraction,
     send,

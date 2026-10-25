@@ -265,6 +265,14 @@ interface HostSessionState extends HostSessionBase {
   readonly rebuildCompaction: (model: Record<string, unknown>) => ReturnType<typeof createCompaction> | null;
 }
 
+interface HostSessionRetirement {
+  managedProcessesClosed: boolean;
+  mcpClosed: boolean;
+  extensionsDisposed: boolean;
+  assemblyDisposed: boolean;
+  sessionClosed: boolean;
+}
+
 interface DelegatedRunOptions {
   readonly signal?: AbortSignal;
   readonly user?: Record<string, unknown>;
@@ -972,6 +980,9 @@ export function createHost({
   }
 
   const sessions = new Map<string, HostSessionState>();
+  const retiringSessions = new Set<string>();
+  const retirementProgress = new Map<string, HostSessionRetirement>();
+  const retirementTasks = new Map<string, Promise<void>>();
   const pendingApprovalDetails = new Map<string, { sessionId: string; args: Record<string, unknown>; argumentSha256: string }>();
   const building = new Set<Promise<unknown>>();
   let closing: Promise<void> | undefined;
@@ -979,6 +990,7 @@ export function createHost({
   function open(id: string): HostSessionState {
     const state = sessions.get(id);
     if (state === undefined) throw new KernelError('session_not_open', { detail: id });
+    if (retiringSessions.has(id)) throw new KernelError('session_closing', { detail: id });
     return state;
   }
 
@@ -1179,24 +1191,64 @@ export function createHost({
 
   // 释放会话的 MCP 子进程、扩展监听器、模板登记表和记录锁。
   // 会话记录继续保存在磁盘上；这里只清理运行时状态。
-  async function retire(state: HostSessionState): Promise<void> {
-    // 失败或取消结果已经写入记录；收尾只等待轮次结束，不覆盖其结果。
-    await state.operation?.catch(() => undefined);
-    const failures: unknown[] = [];
-    for (const release of [
-      () => state.managedProcesses.close(),
-      () => state.mcp.close(),
-      () => state.extensions.dispose(),
-      () => state.assembly.dispose(),
-    ]) {
-      try { await release(); }
-      catch (error) { failures.push(error); }
+  async function retire(state: HostSessionState, shutdown = false): Promise<void> {
+    const inFlight = retirementTasks.get(state.id);
+    if (inFlight !== undefined) {
+      if (!shutdown) return await inFlight;
+      try { await inFlight; } catch { /* Shutdown still releases the record lock after a failed close. */ }
+      if (!sessions.has(state.id)) return;
     }
-    // 即使其中一个资源未能释放，也要移除会话并释放记录锁，避免客户端无法关闭会话。
-    sessions.delete(state.id);
-    try { await state.session.close(); }
-    catch (error) { failures.push(error); }
-    if (failures.length > 0) throw new AggregateError(failures, 'host_session_retire_failed');
+    let progress = retirementProgress.get(state.id);
+    if (progress === undefined) {
+      progress = {
+        managedProcessesClosed: false,
+        mcpClosed: false,
+        extensionsDisposed: false,
+        assemblyDisposed: false,
+        sessionClosed: false,
+      };
+      retirementProgress.set(state.id, progress);
+    }
+    retiringSessions.add(state.id);
+    const work = (async () => {
+      // 失败或取消结果已经写入记录；收尾只等待轮次结束，不覆盖其结果。
+      await state.operation?.catch(() => undefined);
+      const failures: unknown[] = [];
+      const resources = [
+        ['managedProcessesClosed', () => state.managedProcesses.close()],
+        ['mcpClosed', () => state.mcp.close()],
+        ['extensionsDisposed', () => state.extensions.dispose()],
+        ['assemblyDisposed', () => state.assembly.dispose()],
+      ] as const;
+      for (const [field, release] of resources) {
+        if (progress![field]) continue;
+        try {
+          await release();
+          progress![field] = true;
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      if (failures.length > 0 && !shutdown) throw new AggregateError(failures, 'host_session_retire_failed');
+      if (!progress!.sessionClosed) {
+        try {
+          await state.session.close();
+          progress!.sessionClosed = true;
+        } catch (error) {
+          failures.push(error);
+          if (!shutdown) throw new AggregateError(failures, 'host_session_retire_failed');
+        }
+      }
+      sessions.delete(state.id);
+      retirementProgress.delete(state.id);
+      retiringSessions.delete(state.id);
+      if (failures.length > 0) throw new AggregateError(failures, 'host_session_retire_failed');
+    })();
+    retirementTasks.set(state.id, work);
+    try { await work; }
+    finally {
+      if (retirementTasks.get(state.id) === work) retirementTasks.delete(state.id);
+    }
   }
 
   // 项目最后一个会话关闭后移除其环境，让下次打开时重新加载配置。
@@ -2563,7 +2615,8 @@ export function createHost({
           return opened;
         }
         case 'session.close': {
-          const state = open(sessionId);
+          const state = sessions.get(sessionId);
+          if (state === undefined) throw new KernelError('session_not_open', { detail: sessionId });
           // 关闭前必须由客户端明确取消运行中的轮次，确保结果已记录。
           if (state.permissionChanging) throw new KernelError('permission_change_in_progress', { detail: sessionId });
           if (state.running !== undefined) throw new KernelError('run_already_running', { detail: sessionId });
@@ -3312,7 +3365,7 @@ export function createHost({
         await Promise.allSettled([...building]);
         const opened = [...sessions.values()];
         for (const state of opened) state.running?.abort();
-        const retired = await Promise.allSettled(opened.map((state) => retire(state)));
+        const retired = await Promise.allSettled(opened.map((state) => retire(state, true)));
         for (const result of retired) {
           if (result.status !== 'rejected') continue;
           const failure = result.reason;

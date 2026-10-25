@@ -38,10 +38,11 @@ Windows 路径示例：
 }
 ```
 
-每个 MCP Server 进程只授权启动时指定的一个项目。客户端通过 MCP `tools/list` 发现十二个工具及其参数 schema：
+每个 MCP Server 进程只授权启动时指定的一个项目。客户端通过 MCP `tools/list` 发现十三个工具及其参数 schema：
 
 - `ligule_session_create`：在授权项目中创建会话。
 - `ligule_session_open`：接回已有会话。列表中的会话需要先接回，之后才能提交任务或读取记录。
+- `ligule_session_close`：释放空闲、队列为空且没有待决交互的会话。忙碌时返回 `control_session_busy`；先取消运行、等待停止，并显式清空队列后重试。关闭释放控制者的会话名额和记录锁，保留历史与已结束操作的查询（限当前进程最近 256 个操作）。关闭失败后会话暂停接受新工作，需重试清理。人工接管同样释放名额，原控制者不能重新抢回该会话。
 - `ligule_session_list`：有界列出授权项目中的会话。
 - `ligule_session_configure`：读取会话当前/待生效的设置和实际可用选项；操控者模式可修改会话设置。
 - `ligule_interaction_reply`：对真实待决的审批或提问作一次性答复；只接受原会话和请求编号。

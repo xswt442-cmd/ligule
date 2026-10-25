@@ -38,10 +38,11 @@ For example, on Windows:
 }
 ```
 
-Each MCP server process authorizes only the project supplied at startup. Use MCP `tools/list` to discover all twelve tools and their input schemas:
+Each MCP server process authorizes only the project supplied at startup. Use MCP `tools/list` to discover all thirteen tools and their input schemas:
 
 - `ligule_session_create`: create a session in the authorized project.
 - `ligule_session_open`: reopen an existing session. A session returned by the list tool must be opened before it can be used for a run or record read.
+- `ligule_session_close`: release an idle session with an empty queue and no pending interactions. Busy sessions return `control_session_busy`; cancel the run, wait for it to stop, and explicitly clear its queue before retrying. Closing releases the controller's session slot and record lock while preserving history and completed operation queries (bounded to the current process's latest 256 operations). A failed close keeps the session unavailable for new work until cleanup is retried. Human takeover also releases the slot; the previous controller cannot reclaim that session.
 - `ligule_session_list`: list a bounded number of sessions in the authorized project.
 - `ligule_session_configure`: read effective/pending session settings and available choices; operator mode can change session-owned settings.
 - `ligule_interaction_reply`: answer one real pending approval or question, bound to its session and request ID.
