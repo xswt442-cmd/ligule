@@ -57,6 +57,7 @@ import { discoverTemplates, expandTemplate, findTemplate, parseInvocation, templ
 import { createLoop, DEFAULT_LOOP_LIMITS, type LoopCompaction, type LoopProgressEvent, type LoopProgressPhase, type LoopResult } from '../kernel/loop.js';
 import { minimalPlugin } from '../tools/minimal.js';
 import { networkPlugin } from '../tools/network.js';
+import { createTodoWritePlugin } from '../tools/todo-write.js';
 import { createSkillPlugin } from '../tools/skill.js';
 import { createMcpPlugin, type McpAuthorization } from '../tools/mcp.js';
 import { createSubagentPlugin } from '../tools/subagent.js';
@@ -816,6 +817,7 @@ export function createHost({
     ];
     const catalogPlugins: Plugin<Kernel>[] = [
       ...basePlugins,
+      createTodoWritePlugin(),
       managedProcessPlugin(managedProcesses),
       ...(interactive ? [createAskUserPlugin({ ask: async () => { throw new KernelError('settings_catalog_not_executable'); } })] : []),
       createSubagentPlugin({
@@ -1900,7 +1902,7 @@ export function createHost({
         }
       },
     })];
-    const assembly = loadAssembly(kernel, [...basePlugins, managedProcessPlugin(managedProcesses), ...asked, createCompactPlugin({
+    const assembly = loadAssembly(kernel, [...basePlugins, createTodoWritePlugin({ session }), managedProcessPlugin(managedProcesses), ...asked, createCompactPlugin({
       // 压缩实例随所选模型重建；工具经取值函数读取当前实例。派生子会话不注册此工具，
       // 子会话仍由自身构建的自动压缩管理预算。
       compaction: () => state.compaction ?? null,

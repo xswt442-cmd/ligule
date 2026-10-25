@@ -1,6 +1,7 @@
 // 会话记录首行保存格式版本、项目归属和创建时的模式信息。
 // 未知格式版本必须拒绝读取，避免静默跳过记录并生成错误的模型上下文。
 import { KernelRuntimeError } from '../kernel/error.js';
+import { isCanonicalTodoItems } from './todo.js';
 
 export const SESSION_FORMAT_VERSION = 2;
 
@@ -59,7 +60,11 @@ export interface SessionRecord {
 // `usage` 虽不进入模型投影，但其序号仍用于校验检查点范围，因此必须保留。
 // `compaction` 记录每次压缩的块与原因，供界面与导出说明；同样不进入模型投影。
 // `label` 保存会话名称和归档状态；这些信息供界面使用，不进入模型上下文。
-const WRITTEN_KINDS = ['session', 'user', 'reasoning', 'assistant', 'tool', 'mode', 'usage', 'turn', 'label', 'turnContext', 'modelSelection', 'sessionGeneration', 'sessionLoopIterations', 'sessionPermission', 'sessionPolicy', 'sessionMcpTrust', 'sessionPolicyRule', 'compaction'];
+const WRITTEN_KINDS = [
+  'session', 'user', 'reasoning', 'assistant', 'tool', 'mode', 'usage', 'turn', 'label', 'turnContext', 'modelSelection',
+  'sessionGeneration', 'sessionLoopIterations', 'sessionPermission', 'sessionPolicy', 'sessionMcpTrust', 'sessionPolicyRule',
+  'compaction', 'todoWrite',
+];
 
 export function createSessionHeader({
   id,
@@ -94,6 +99,8 @@ export function createSessionHeader({
 export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
   let formatVersion = 0;
   let header: SessionHeader | undefined;
+  let currentUserSeq: number | null = null;
+  let currentTurnFinished = false;
   const events: SessionEvent[] = [];
   for (const [index, event] of objects.entries()) {
     const kind = typeof event.kind === 'string' ? event.kind : '';
@@ -141,6 +148,12 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
         throw new KernelRuntimeError('session_mcp_trust_event_invalid');
       }
     }
+    if (kind === 'todoWrite') {
+      if (event.ignorable !== true || currentTurnFinished || !Number.isSafeInteger(event.userSeq) || event.userSeq !== currentUserSeq
+        || !isCanonicalTodoItems(event.items)) {
+        throw new KernelRuntimeError('session_todo_event_invalid');
+      }
+    }
     if (kind === 'compaction') {
       if (event.ignorable !== true
         || (event.reason !== 'manual' && event.reason !== 'auto' && event.reason !== 'overflow' && event.reason !== 'model')
@@ -172,6 +185,13 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
       }
     }
     events.push(event);
+    if (kind === 'user') {
+      currentUserSeq = event.seq;
+      currentTurnFinished = false;
+    } else if (kind === 'turn' && event.userSeq === currentUserSeq
+      && (event.status === 'completed' || event.status === 'failed' || event.status === 'cancelled')) {
+      currentTurnFinished = true;
+    }
   }
   return { events, formatVersion, header };
 }

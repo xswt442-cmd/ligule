@@ -23,6 +23,7 @@ import { createDecisionChain } from '../kernel/policy.js';
 import { createLogger } from '../kernel/log.js';
 import { loadAssembly } from '../kernel/assembly.js';
 import { KernelError, KernelRuntimeError } from '../kernel/error.js';
+import { createTodoWritePlugin } from './todo-write.js';
 import type { PermissionContext } from '../kernel/permission.js';
 
 type LoopOptions = Parameters<typeof createLoop>[0];
@@ -204,7 +205,10 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                 permission,
               });
               // 派生执行继承父会话的插件工具，但不注册 `subagent`，从而禁止递归派生。
-              const assembly = loadAssembly(child, deps.plugins);
+              const assembly = loadAssembly(child, [
+                ...deps.plugins,
+                ...(parentTools.has('todo_write') ? [createTodoWritePlugin({ session })] : []),
+              ]);
               disposeAssembly = () => assembly.dispose();
               let structuredSubmitted = false;
               let structuredResult: unknown;
