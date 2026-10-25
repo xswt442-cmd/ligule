@@ -13,7 +13,7 @@ export function discoveredModelIds(value: unknown): string[] {
     const id = item.id.trim();
     return id !== '' && id.length <= 256 && !/[\u0000-\u001f\u007f]/u.test(id) ? [id] : [];
   });
-  return [...new Set(ids)].slice(0, 128);
+  return [...new Set(ids)];
 }
 
 export async function discoverModels(input: { api: unknown; baseURL: unknown; reference: unknown; temporaryKey?: unknown }): Promise<string[]> {

@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import { discoverModels, discoveredModelIds } from '../dist/model/discovery.js';
+import { listenFetchable } from './helpers/port.ts';
 
 test('model discovery keeps unique valid IDs from an OpenAI-compatible catalog', () => {
   assert.deepEqual(discoveredModelIds({ data: [
@@ -80,8 +82,27 @@ test('model discovery forbids credential transmission over remote HTTP but permi
   }
 });
 
-test('model discovery rejects malformed catalogs and limits the result size', () => {
+test('model discovery rejects malformed catalogs without truncating valid IDs', () => {
   assert.throws(() => discoveredModelIds({ models: [] }), { code: 'model_discovery_response_invalid' });
   const models = Array.from({ length: 140 }, (_, index) => ({ id: `model-${index}` }));
-  assert.equal(discoveredModelIds({ data: models }).length, 128);
+  assert.deepEqual(discoveredModelIds({ data: models }), models.map(({ id }) => id));
+});
+
+test('HTTP model discovery preserves all candidates before the user selects a saved catalog', async () => {
+  const models = Array.from({ length: 140 }, (_, index) => ({ id: `candidate-${index}` }));
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ data: models }));
+  });
+  await listenFetchable(server);
+  try {
+    const found = await discoverModels({
+      api: 'chat-completions', baseURL: `http://127.0.0.1:${server.address().port}/v1`,
+      reference: 'LIGULE_DISCOVERY_CANDIDATES', temporaryKey: 'local-discovery-nonsecret',
+    });
+    assert.deepEqual(found, models.map(({ id }) => id));
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
 });
