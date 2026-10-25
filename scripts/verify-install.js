@@ -123,6 +123,23 @@ const requireCore = createRequire(pathToFileURL(join(coreRoot, 'package.json')))
 requireCore('@napi-rs/keyring');
 requireCore('koffi');
 console.log('native bindings: keyring and koffi loaded for the consumer platform');
+const sharp = requireCore('sharp');
+const { createMediaStore } = await import(pathToFileURL(join(coreRoot, 'dist', 'capability', 'media.js')).href);
+const previousMediaHome = process.env.LIGULE_HOME;
+try {
+  process.env.LIGULE_HOME = join(process.cwd(), 'media-home');
+  const store = createMediaStore({ boundary: process.cwd() }, 'install-probe');
+  const image = await sharp({ create: { width: 6, height: 4, channels: 3, background: 'red' } }).png().toBuffer();
+  const reference = await store.put(image, 'file');
+  const reread = await store.read(reference);
+  if (reference.width !== 6 || reference.height !== 4 || (await sharp(reread).metadata()).format !== 'png') {
+    throw new Error('the installed image backend did not preserve the decoded image');
+  }
+  console.log('image backend: decoded, archived and reread through the installed Core');
+} finally {
+  if (previousMediaHome === undefined) delete process.env.LIGULE_HOME;
+  else process.env.LIGULE_HOME = previousMediaHome;
+}
 const { detectPermissionCapabilities } = await import(pathToFileURL(join(coreRoot, 'dist', 'capability', 'permission-capabilities.js')).href);
 const { createPermissionContext } = await import(pathToFileURL(join(coreRoot, 'dist', 'kernel', 'permission.js')).href);
 
