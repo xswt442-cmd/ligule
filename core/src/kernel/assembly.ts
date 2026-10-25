@@ -61,6 +61,7 @@ export function loadAssembly<TKernel>(kernel: TKernel, manifest: readonly Plugin
     },
     dispose() {
       const errors = unwind();
+      if (errors.length === 1) throw errors[0];
       if (errors.length > 0) throw new AggregateError(errors, 'assembly cleanup failed');
     },
   };

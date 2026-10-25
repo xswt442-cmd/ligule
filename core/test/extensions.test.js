@@ -171,7 +171,7 @@ test('extension disposal attempts all owned cleanups in reverse order and only o
     addEventListener: (handler) => { listeners.add(handler); return () => listeners.delete(handler); },
     request: (name, args) => kernel.call(name, args),
   });
-  assert.throws(() => loaded.dispose(), (error) => error instanceof AggregateError && error.errors.some((item) => /extension disposer failed/.test(item.message)));
+  assert.throws(() => loaded.dispose(), (error) => error instanceof Error && error.message === 'extension disposer failed');
   assert.deepEqual(kernel.list(), []);
   assert.equal(fragments.size, 0);
   assert.equal(listeners.size, 0);

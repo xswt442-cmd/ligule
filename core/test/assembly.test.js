@@ -126,12 +126,13 @@ test('assembly disposal attempts every cleanup in reverse order and can be repea
   const instance = createKernel();
   const calls = [];
   const failure = new Error('second cleanup failed');
+  const thirdFailure = new Error('third cleanup failed');
   const assembly = loadAssembly(instance, [
     { name: 'first', setup: (kernel) => { const remove = kernel.register(tool('first-tool')); return () => { calls.push('first'); remove(); }; } },
     { name: 'second', setup: (kernel) => { const remove = kernel.register(tool('second-tool')); return () => { calls.push('second'); remove(); throw failure; }; } },
-    { name: 'third', setup: (kernel) => { const remove = kernel.register(tool('third-tool')); return () => { calls.push('third'); remove(); }; } },
+    { name: 'third', setup: (kernel) => { const remove = kernel.register(tool('third-tool')); return () => { calls.push('third'); remove(); throw thirdFailure; }; } },
   ]);
-  assert.throws(() => assembly.dispose(), (error) => error instanceof AggregateError && error.errors.includes(failure));
+  assert.throws(() => assembly.dispose(), (error) => error instanceof AggregateError && error.errors[0] === thirdFailure && error.errors[1] === failure);
   assert.deepEqual(calls, ['third', 'second', 'first']);
   assert.deepEqual(instance.list(), []);
   assert.deepEqual(assembly.list(), []);

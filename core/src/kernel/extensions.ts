@@ -242,6 +242,7 @@ export async function loadExtensions(paths: string[], options: LoadOptions) {
     dispose() {
       const errors: unknown[] = [];
       while (undo.length > 0) errors.push(...clean(undo.pop()!));
+      if (errors.length === 1) throw errors[0];
       if (errors.length > 0) throw new AggregateError(errors, 'extension cleanup failed');
     },
   };
