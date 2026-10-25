@@ -220,6 +220,7 @@ export function createLoop({
       let phase: LoopProgressPhase = 'preparing';
       let userSeq: number | undefined;
       let terminalAttempted = false;
+      let overflowRecoveryTried = false;
 
       // 每个已返回给模型的工具调用都必须有对应结果，否则后续模型请求会因调用未完成而被拒绝。
       // 未执行的调用也要写入错误结果，保持记录结构完整。
@@ -283,9 +284,11 @@ export function createLoop({
               break;
             } catch (error) {
               // 服务端报告上下文超限后最多压缩并重试一次；无法压缩、已经重试或其他错误都返回原错误。
-              const retried = attempt === 0 && compaction !== null
-                ? await compaction.recover(error, { system, tools, messages }, controller.signal)
-                : null;
+              let retried: unknown[] | null = null;
+              if (attempt === 0 && compaction !== null && !overflowRecoveryTried) {
+                overflowRecoveryTried = true;
+                retried = await compaction.recover(error, { system, tools, messages }, controller.signal);
+              }
               if (retried === null) {
                 const partialText = events.flatMap((event) => event.type === 'text' ? [event.text] : []).join('');
                 const partialReasoning = events.flatMap((event) => event.type === 'reasoning' ? [event.text] : []).join('');

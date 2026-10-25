@@ -161,7 +161,6 @@ export function createCompaction({ provider, session, directory, id, limits, log
   let nudged = false;
   // 本地估算与服务端用量的校准系数；尚无服务端用量时使用 1。
   let factor = 1;
-  let overflowTried = false;
 
   // 从最近的 `usage` 事件恢复校准系数，让会话重开后继续使用先前的校准结果。
   // 事件同时保存本地估算和服务端用量，因此无需依赖上一个进程的内存状态。
@@ -448,10 +447,9 @@ export function createCompaction({ provider, session, directory, id, limits, log
       return request.messages;
     },
 
-    // 超长错误每次运行最多处理一次。其他错误、已重试过或无法压缩时返回 null，让原错误继续传递。
+    // Loop 按轮次限制超长恢复次数；此处只处理超长错误并返回重新构造的投影。
     async recover(error: unknown, request: LoopCompactionRequest, signal?: AbortSignal): Promise<unknown[] | null> {
-      if (overflowTried || !isOverflow(error)) return null;
-      overflowTried = true;
+      if (!isOverflow(error)) return null;
       logger?.log?.('context reported overflow, compacting once', {
         sessionId: id,
         detail: (error as { detail?: string }).detail?.slice(0, 200),

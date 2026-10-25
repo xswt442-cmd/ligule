@@ -148,6 +148,19 @@ test('a second overflow answer does not buy a second compaction', async () => {
   });
 });
 
+test('successive turns each have their own overflow recovery budget on one compaction instance', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    await fill(session, 2);
+    const provider = fakeProvider([overflow, [{ type: 'text', text: 'first recovered' }], overflow, [{ type: 'text', text: 'second recovered' }]]);
+    const compaction = createCompaction({ provider, session, directory, id, limits });
+    const loop = createLoop({ kernel, provider, prompt, session, compaction });
+    assert.equal((await loop.run('first')).text, 'first recovered');
+    await fill(session, 2);
+    assert.equal((await loop.run('second')).text, 'second recovered');
+    assert.equal(provider.summaries(), 2);
+  });
+});
+
 // 不是超长的失败不压：那一格错误说的不是窗口不够。
 test('a provider failure that is not about length leaves the record alone', async () => {
   await withSession(async ({ directory, id, session }) => {
