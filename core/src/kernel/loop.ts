@@ -50,6 +50,7 @@ export interface LoopSession {
 export interface LoopLimits {
   readonly iterations: number;
   readonly modelCalls: number;
+  readonly maxParallelTools?: number;
 }
 
 export interface LoopCompaction {
@@ -130,7 +131,7 @@ function modelMessagesOf(values: readonly unknown[]): ModelMessage[] {
   });
 }
 
-export const DEFAULT_LOOP_LIMITS: LoopLimits = Object.freeze({ iterations: 64, modelCalls: 64 });
+export const DEFAULT_LOOP_LIMITS = Object.freeze({ iterations: 64, modelCalls: 64, maxParallelTools: 4 }) satisfies LoopLimits;
 
 const TURN_CANCEL_CODES = new Set(['provider_cancelled', 'loop_cancelled', 'ask_user_cancelled']);
 
@@ -147,15 +148,45 @@ interface CallGroup {
   readonly calls: ToolCall[];
 }
 
-function groupCalls(calls: readonly ToolCall[], executionOf: (name: string) => 'parallel' | 'serial'): CallGroup[] {
+function groupCalls(calls: readonly ToolCall[], executionOf: (name: string) => 'parallel' | 'serial', completing: ReadonlySet<string>): CallGroup[] {
   const groups: CallGroup[] = [];
   for (const call of calls) {
-    const parallel = executionOf(call.name) === 'parallel';
+    const parallel = !completing.has(call.name) && executionOf(call.name) === 'parallel';
     const last = groups[groups.length - 1];
     if (parallel && last?.parallel) last.calls.push(call);
     else groups.push({ parallel, calls: [call] });
   }
   return groups;
+}
+
+async function executeGroup(kernel: Kernel, group: CallGroup, signal: AbortSignal, maximum: number) {
+  const settled: PromiseSettledResult<unknown>[] = [];
+  const pending = new Map<number, Promise<number>>();
+  let started = 0;
+  let fatal = false;
+  let exclusive = false;
+  while (started < group.calls.length || pending.size > 0) {
+    while (!signal.aborted && !fatal && !exclusive && started < group.calls.length && pending.size < maximum) {
+      const call = group.calls[started];
+      const parallel = group.parallel && kernel.execution(call.name) === 'parallel';
+      if (!parallel && pending.size > 0) break;
+      const index = started++;
+      exclusive = !parallel;
+      pending.set(index, kernel.call(call.name, call.args, { signal, callId: call.id }).then(
+        value => { settled[index] = { status: 'fulfilled', value }; return index; },
+        reason => {
+          settled[index] = { status: 'rejected', reason };
+          if (!(reason instanceof KernelError) || reason instanceof KernelRuntimeError) fatal = true;
+          return index;
+        },
+      ));
+    }
+    if (pending.size === 0) break;
+    const index = await Promise.race(pending.values());
+    pending.delete(index);
+    exclusive = false;
+  }
+  return { settled, started };
 }
 
 // 返回指定组中从 `index` 开始尚未执行的调用。
@@ -167,6 +198,8 @@ export function createLoop({
   kernel, provider, prompt, session, limits = DEFAULT_LOOP_LIMITS, completesRun = [], compaction = null, turnContext = null, onProgress,
 }: LoopOptions) {
   if (typeof provider?.stream !== 'function') throw new KernelError('loop_provider_required');
+  const maxParallelTools = limits.maxParallelTools ?? DEFAULT_LOOP_LIMITS.maxParallelTools;
+  if (!Number.isSafeInteger(maxParallelTools) || maxParallelTools < 1) throw new KernelError('loop_parallel_limit_invalid');
   const completing = new Set(completesRun);
 
   return {
@@ -319,17 +352,16 @@ export function createLoop({
           }
 
           reportPhase('tool_execution');
-          const groups = groupCalls(toolCalls, (name) => kernel.execution(name));
+          const groups = groupCalls(toolCalls, (name) => kernel.execution(name), completingThisRun);
           for (const [groupIndex, group] of groups.entries()) {
             reportActivity('tool');
-            const settled = await Promise.allSettled(
-              group.calls.map((call) => kernel.call(call.name, call.args, { signal: controller.signal, callId: call.id })),
-            );
+            const { settled, started } = await executeGroup(kernel, group, controller.signal, maxParallelTools);
             for (const [index, outcome] of settled.entries()) {
               reportActivity('tool');
               // Kernel 已将工具失败转换为稳定错误码并写入记录，因此循环可以将失败结果交给模型继续处理。
               // Kernel 内部故障和意外异常会中止本轮并向上抛出。
               if (outcome.status === 'rejected' && (!(outcome.reason instanceof KernelError) || outcome.reason instanceof KernelRuntimeError)) {
+                await answerRemaining([...group.calls.slice(started), ...restOf(groups, groupIndex + 1)], 'the run failed before this call started');
                 throw outcome.reason;
               }
               if (outcome.status === 'fulfilled' && completingThisRun.has(group.calls[index].name)) {
@@ -344,7 +376,7 @@ export function createLoop({
             if (controller.signal.aborted) {
               // 两组工具调用之间收到取消时，后续调用虽已由模型提出，但不能再执行。
               // 为其写入未执行结果和原因，避免会话中留下未完成调用。
-              await answerRemaining(restOf(groups, groupIndex + 1), 'the run was cancelled before this call ran');
+              await answerRemaining([...group.calls.slice(started), ...restOf(groups, groupIndex + 1)], 'the run was cancelled before this call ran');
               throw new KernelError('loop_cancelled');
             }
           }

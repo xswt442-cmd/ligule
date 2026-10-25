@@ -61,6 +61,7 @@ function childLimits(args: { loopIterations?: number; modelCalls?: number }, par
   const limits = {
     iterations: args.loopIterations ?? parent.iterations,
     modelCalls: args.modelCalls ?? parent.modelCalls,
+    ...(parent.maxParallelTools === undefined ? {} : { maxParallelTools: parent.maxParallelTools }),
   };
   if (limits.iterations > parent.iterations || limits.modelCalls > parent.modelCalls) {
     throw new KernelError('subagent_budget_escalation', { detail: 'a child run may only use budgets within its parent session limits' });

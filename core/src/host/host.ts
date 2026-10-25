@@ -224,6 +224,7 @@ interface HostSessionBase {
   readonly mode: ModeState;
   loopIterations: number;
   readonly loopModelCalls: number;
+  readonly loopMaxParallelTools: number;
   pendingLoopIterations?: number;
   generation: SessionGeneration;
   modelCredentialBindings?: Record<string, unknown>;
@@ -481,10 +482,10 @@ function exportRecordOf(event: SessionEvent): ExportRecord | undefined {
 
 // 通过 Session 模块解析记录目录，确保 Host 与会话列表使用同一位置。
 // 缺少循环上限时补入默认值，避免未定义的上限让循环无法执行。
-function loopLimitsOf(config: HostConfigSnapshot): LoopLimits {
+function loopLimitsOf(config: HostConfigSnapshot): LoopLimits & { readonly maxParallelTools: number } {
   const limits = { ...DEFAULT_LOOP_LIMITS, ...(isRecord(config.loop) ? config.loop : {}) };
-  const positiveInteger = (value: unknown, key: 'iterations' | 'modelCalls'): number => {
-    if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+  const positiveInteger = (value: unknown, key: 'iterations' | 'modelCalls' | 'maxParallelTools'): number => {
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
       throw new KernelError('host_loop_limits_invalid', { detail: `${key} must be an integer of at least 1` });
     }
     return value;
@@ -492,6 +493,7 @@ function loopLimitsOf(config: HostConfigSnapshot): LoopLimits {
   return {
     iterations: positiveInteger(limits.iterations, 'iterations'),
     modelCalls: positiveInteger(limits.modelCalls, 'modelCalls'),
+    maxParallelTools: positiveInteger(limits.maxParallelTools, 'maxParallelTools'),
   };
 }
 
@@ -499,6 +501,7 @@ function sessionLoopLimits(state: HostSessionBase): LoopLimits {
   return {
     get iterations() { return state.loopIterations; },
     get modelCalls() { return state.loopModelCalls; },
+    get maxParallelTools() { return state.loopMaxParallelTools; },
   };
 }
 
@@ -1525,6 +1528,7 @@ export function createHost({
       policyOverride: initial?.policy ?? null,
       loopIterations: initial?.loopIterations ?? configuredLoopLimits.iterations,
       loopModelCalls: configuredLoopLimits.modelCalls,
+      loopMaxParallelTools: configuredLoopLimits.maxParallelTools,
       generation: initial?.generation ?? env.generation ?? { provider, model: modelConfigOf(config), options: {} },
       adopt: async () => {},
     };

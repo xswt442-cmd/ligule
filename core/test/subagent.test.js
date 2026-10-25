@@ -283,7 +283,7 @@ test('child generation and loop budgets can be lowered but never raised', async 
     directory: session.directory,
     sessionId: 'bounded-child-parent',
     plugins: [minimalPlugin],
-    loopLimits: { iterations: 8, modelCalls: 6 },
+    loopLimits: { iterations: 8, modelCalls: 6, maxParallelTools: 2 },
   }).setup(kernel);
 
   const result = await kernel.call('subagent', {
@@ -295,12 +295,12 @@ test('child generation and loop budgets can be lowered but never raised', async 
   });
   assert.deepEqual(selectedGeneration, { outputTokens: 2048, thinkingEffort: 'low' });
   assert.deepEqual(result.generation, { outputTokens: 2048, thinkingEffort: 'low' });
-  assert.deepEqual(result.limits, { iterations: 3, modelCalls: 2 });
+  assert.deepEqual(result.limits, { iterations: 3, modelCalls: 2, maxParallelTools: 2 });
   const childEvents = (await readFile(join(session.directory, `${result.sessionId}.jsonl`), 'utf8'))
     .split('\n').filter(Boolean).map(JSON.parse);
   const context = childEvents.find((event) => event.kind === 'turnContext');
   assert.deepEqual(context.childGeneration, { outputTokens: 2048, thinkingEffort: 'low' });
-  assert.deepEqual(context.childLimits, { iterations: 3, modelCalls: 2 });
+  assert.deepEqual(context.childLimits, { iterations: 3, modelCalls: 2, maxParallelTools: 2 });
 
   await assert.rejects(kernel.call('subagent', {
     task: 'exceed output budget', outputTokens: 4097,
