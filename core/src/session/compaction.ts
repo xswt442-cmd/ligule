@@ -8,6 +8,7 @@ import { KernelError } from '../kernel/error.js';
 import type { SessionEvent } from './format.js';
 import { estimateRequest, estimateTokens, usageEvent } from './usage.js';
 import type { LoopCompactionRequest, ModelProvider, ModelRequest, ModelTool, ProviderEvent } from '../kernel/loop.js';
+import { projectModelView } from './session.js';
 export { estimateRequest, estimateTokens } from './usage.js';
 
 // 从记录末尾向前累计 Token；超过保留预算后，选择最近的 user 或 assistant 事件作为切点。
@@ -223,9 +224,8 @@ export function createCompaction({ provider, session, directory, id, limits, log
     const fromSeq = last === undefined ? 0 : last.toSeq + 1;
     const tail = events.filter((event) => event.seq >= fromSeq);
     // 被排除在模型投影之外的事件不占用保留预算，也不计入压缩后的 Token 数。
-    const projected = tail.filter((event) => PROJECTED_KINDS.includes(String(event.kind)));
     // 使用校准后的估算计算切点，确保压缩后按同一口径检查压力阈值。
-    const cut = cutPoint(tail, retained, (event) => estimateTokens(event) * factor);
+    const cut = cutPoint(tail, retained, (event) => estimateTokens(projectModelView([event])) * factor);
     if (cut === null) return null;
     // 压缩块保存连续的事件序号范围；范围不依赖事件是否进入模型投影。
     const covered = tail.filter((event) => event.seq < cut);
@@ -244,18 +244,17 @@ export function createCompaction({ provider, session, directory, id, limits, log
       logger?.log?.('compaction summary came back empty', { sessionId: id });
       return null;
     }
-    return await writeBlock({ blocks, covered, text, reason, tokensBefore, projected });
+    return await writeBlock({ blocks, covered, text, reason, tokensBefore });
   }
 
   // 校验块级不变量后写入块文件与压缩事件。压缩结果必须小于原投影，否则块只增加
   // 文件和验证成本，却让原有历史无法再进入模型上下文；此时不写并返回 null。
-  async function writeBlock({ blocks, covered, text, reason, tokensBefore, projected }: {
+  async function writeBlock({ blocks, covered, text, reason, tokensBefore }: {
     blocks: CompactionBlock[];
     covered: SessionEvent[];
     text: string;
     reason: CompactionReason;
     tokensBefore: number;
-    projected: SessionEvent[];
   }): Promise<CompactResult | null> {
     const fromSeq = Number(covered[0].seq);
     const toSeq = Number(covered[covered.length - 1].seq);
@@ -266,29 +265,15 @@ export function createCompaction({ provider, session, directory, id, limits, log
       directory,
       name: `summary-${fromSeq}-${toSeq + 1}-${createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 8)}.txt`,
     });
-    // 压缩后的投影仍包含：未被任何已有块覆盖、也不在新块范围内的全部事件。
-    // 模型自选范围可以从旧块之后任意位置开始，中间未覆盖的事件必须计入。
-    const coveredBy = (seq: number, block: { fromSeq: number; toSeq: number }) => seq >= block.fromSeq && seq <= block.toSeq;
-    const remaining = projected.filter((event) => {
-      const seq = Number(event.seq);
-      return !coveredBy(seq, { fromSeq, toSeq }) && !blocks.some((block) => coveredBy(seq, block));
-    });
-    const blockTextTokens = (sum: number, block: CompactionBlock) => sum + estimateTokens(block.text);
-    const tokensAfter = blocks.reduce(blockTextTokens, 0) + estimateTokens(kept)
-      + remaining.reduce((sum, event) => sum + estimateTokens(event), 0);
+    const block = createBlock({ events: covered, text: kept, fromSeq, toSeq, blockId: (blocks.at(-1)?.blockId ?? 0) + 1 });
+    // 与真实请求使用同一投影，忽略 responseId 等非模型元数据。
+    const tokensAfter = estimateTokens(projectModelView(await session.read(), [...blocks, block]));
     if (tokensAfter >= tokensBefore) {
       logger?.log?.('compaction would not shrink the projection, skipping', {
         sessionId: id, tokensBefore, tokensAfter, covered: covered.length,
       });
       return null;
     }
-    const block = createBlock({
-      events: covered,
-      text: kept,
-      fromSeq,
-      toSeq,
-      blockId: (blocks.at(-1)?.blockId ?? 0) + 1,
-    });
     await writeCheckpointFile(directory, id, createCheckpointFile({ id, blocks: [...blocks, block] }));
     // 压缩事实写入记录：界面与导出据此说明第几块覆盖哪段、为什么压。
     if (typeof session.append === 'function') {
@@ -357,9 +342,8 @@ export function createCompaction({ provider, session, directory, id, limits, log
         detail: 'the range would separate an assistant tool call from its result; end it at a message boundary that keeps each pair together',
       });
     }
-    const projected = events.filter((event) => PROJECTED_KINDS.includes(String(event.kind)));
     const tokensBefore = estimateTokens(await session.modelView());
-    return await writeBlock({ blocks, covered, text: summary, reason: 'model', tokensBefore, projected });
+    return await writeBlock({ blocks, covered, text: summary, reason: 'model', tokensBefore });
   }
 
   // 识别服务端明确报告的上下文超限错误，通常是 HTTP 400 响应。

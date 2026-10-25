@@ -161,6 +161,18 @@ test('successive turns each have their own overflow recovery budget on one compa
   });
 });
 
+test('reported compaction size uses the exact shared model projection', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    await fill(session, 4);
+    const provider = fakeProvider([]);
+    const compaction = createCompaction({ provider, session, directory, id, limits });
+    const result = await compaction.compactNow();
+    assert.ok(result);
+    assert.equal(result.tokensAfter, estimateTokens(await session.modelView()));
+    assert.ok(result.tokensAfter < result.tokensBefore);
+  });
+});
+
 // 不是超长的失败不压：那一格错误说的不是窗口不够。
 test('a provider failure that is not about length leaves the record alone', async () => {
   await withSession(async ({ directory, id, session }) => {
