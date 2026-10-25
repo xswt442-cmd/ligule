@@ -486,7 +486,7 @@ export const METHODS = Object.freeze({
   },
   // 客户端只能读取配置白名单中的字段，不能请求文件路径或其他配置内容。
   'config.get': {
-    description: 'Read the configuration this interface may show: the host builds the answer from the whitelisted fields it owns, and those values, the layer writing each one and the version of every writable settings file come from one read, so no path can be asked for and no credential ever comes from configuration (D13, D60)',
+    description: 'Read allowlisted configuration values, their source layers, and writable-layer versions from one snapshot. Arbitrary paths and secret values are not exposed.',
     parameters: {
       type: 'object',
       properties: {

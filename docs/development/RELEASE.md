@@ -17,6 +17,14 @@ Ligule 分为两条独立发行线，版本可分别推进：
 4. **Desktop 草稿：** Tag 创建后 [`desktop-publish.yml`](../../.github/workflows/desktop-publish.yml) 被自动分发（`publish=false`）。工作流从标签提交构建 Windows 与 Linux 三种安装包、校验发行资产并创建或补齐 GitHub Release 草稿。
 5. **公开 Desktop：** 检查草稿说明、三种安装包和 SHA-256 后，再手动 dispatch 同一工作流并设置 `publish=true`。工作流重新核对标签、历史草稿运行与全部资产，检查 `desktop-publish` Environment 已配置必需审核者，然后等待该 Environment 审批；获批后才公开 Release。
 
+## 发行故障处理与回退
+
+- **发行前工作流失败：** 先查看对应 GitHub Actions 运行记录和失败步骤。CLI 可在 `main` 上重新手动启动 [`npm-publish.yml`](../../.github/workflows/npm-publish.yml)，输入原有 `cli-vX.Y.Z` Tag；工作流会重新打包、验证并比较 Registry 内容，已存在且内容相同的 npm 版本不会重复发布。Desktop 可在 `main` 上重新手动启动 [`desktop-publish.yml`](../../.github/workflows/desktop-publish.yml)，输入原有 `desktop-vX.Y.Z` Tag 并设 `publish=false`；工作流只会补齐经过校验的草稿资产，遇到已公开 Release、意外资产或同名不同内容时会失败并要求人工检查。修正源码后应走新版本和新 Tag。
+- **CLI 已发布但 Release Notes 步骤失败：** 确认 npm 上对应版本与待发布 tarball 内容一致，再用原 `cli-vX.Y.Z` 手动重跑 `npm-publish.yml`；工作流会跳过已发布的相同版本，并在 Registry 可查后补发缺少的 GitHub Release Notes。若内容有误，发布一个修正版本；npm 已发布版本不替换。
+- **公开版本需要临时回退：** 先完成下方的数据备份和记录兼容检查，再安装旧版。CLI 可通过 `npm install -g ligule@<已验证的旧版本>` 安装先前已发布版本；Desktop 从 GitHub Releases 下载并安装先前已验证版本。若旧版本无法读取当前记录，应停止旧版本并恢复备份，或升级到包含修复的新版本。公开 Tag 不移动、不重写；公开 Release 的安装包和校验资产不删除、不替换。需要修正内容时发布新版本。
+- **回退前备份：** 正常退出 TUI 和 Desktop，确认相关 Host 已退出、会话锁已释放。复制完整数据根（默认 `~/.ligule`，或 `LIGULE_HOME` 指向的绝对目录）；另行备份项目中的 `.ligule/` 配置，以及显式配置的 `host.sessionDirectory`。检查备份包含会话 `.jsonl` 和其引用的溢出文件；检查点与列表索引可由记录重建。密钥保存在操作系统凭据库，数据根仅保存密钥引用，切换运行环境前确认仍可访问所需凭据。保留备份直到回退版本能正常读取会话并完成基本操作。
+- **记录格式兼容前提：** 发行版本回退前，先确认旧版支持备份中会话记录的格式版本和事件种类。当前记录格式版本定义于 `core/src/session/format.ts`；读取器会拒绝高于自身支持版本的记录，并要求版本 2 的 `sessionPermission`、`sessionPolicy` 事件由支持格式 2 的读取器处理。不要让较旧 Host 直接打开较新版本产生的唯一数据副本；先备份，且只在确认格式兼容后对副本验证。恢复或回切后，保留原备份，不手工改写 JSONL 记录。
+
 ## Release Notes 内容与下载表规范
 
 - **两条产品线各自维护 Changelog：** `tui/CHANGELOG.md` 对应 CLI/TUI，`desktop/CHANGELOG.md` 对应 Desktop。每个正式版本要有简体中文与英文的**具体变化说明**，优先按功能、交互、安全与兼容性分组；不允许只写“优化体验、修复问题”等没有场景的空泛句子。小型修复可只写实际变动，不必凑条数。

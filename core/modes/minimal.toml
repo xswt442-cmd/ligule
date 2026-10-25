@@ -1,4 +1,4 @@
 # 随包的最小模式：只提供常用的文件操作与受控命令能力。
-# prompt 写空数组表示这一格不选额外的提示词片段（阶段一的行为）。
+# prompt 写空数组表示不选择额外的提示词片段。
 tools = ['exec', 'managed_process', 'find', 'search', 'read', 'create', 'write', 'edit', 'delete']
 prompt = []
