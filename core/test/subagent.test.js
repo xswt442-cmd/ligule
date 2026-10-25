@@ -485,10 +485,11 @@ test('a child that never submits its requested structure reports validation fail
     task: 'return a checked summary',
     outputSchema: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] },
   });
-  assert.equal(result.result.state, 'completed');
+  assert.equal(result.result.state, 'failed');
+  assert.equal(result.result.stopReason, 'validation_failed');
   assert.equal(result.result.validation.status, 'invalid');
   assert.equal(result.result.output.structured, undefined);
-  assert.match(result.result.validation.errors[0], /without submitting/u);
+  assert.match(result.result.validation.errors[0], /delegation_result_missing/u);
 });
 
 test('a failed child returns its persisted Session link and a failed RunResult', async () => {

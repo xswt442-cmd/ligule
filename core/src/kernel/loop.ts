@@ -95,6 +95,8 @@ export interface LoopRunOptions {
   readonly onProgress?: (event: LoopProgressEvent) => void;
   readonly completesRun?: readonly string[];
   readonly turnContext?: Record<string, unknown>;
+  // 校验通过后才记录成功终态；抛出的领域错误由本轮统一写入失败终态。
+  readonly validateCompletion?: () => void;
 }
 
 type TurnStatus = 'completed' | 'cancelled' | 'failed';
@@ -311,6 +313,7 @@ export function createLoop({
             continue;
           }
           if (toolCalls.length === 0) {
+            runOptions.validateCompletion?.();
             await markTurn('completed');
             return { text, iterations: iteration, modelCalls: calls };
           }
@@ -333,6 +336,7 @@ export function createLoop({
                 // 结束本轮后，同一条助手消息中剩余的调用不会执行；为每个调用写入未执行结果。
                 const name = group.calls[index].name;
                 await answerRemaining(restOf(groups, groupIndex, index), `${name} ended this round before this call ran`);
+                runOptions.validateCompletion?.();
                 await markTurn('completed', { completedBy: name });
                 return { text, completedBy: name, iterations: iteration, modelCalls: calls };
               }

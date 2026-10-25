@@ -6,7 +6,7 @@ import { access, readFile, realpath, stat } from 'node:fs/promises';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import {
-  createOutputSchemaContract, DELEGATION_RESULT_TOOL, MAX_DELEGATION_SCHEMA_BYTES, outputSchemaInstructions,
+  assertDelegationCompletion, createOutputSchemaContract, DELEGATION_RESULT_TOOL, MAX_DELEGATION_SCHEMA_BYTES, outputSchemaInstructions,
   registerDelegationResultTool, type DelegationSpec, type RunValidation,
 } from '../delegation.js';
 import {
@@ -2062,6 +2062,7 @@ export function createHost({
           user: options.user,
           onProgress: options.onProgress,
           completesRun: contract === undefined ? [] : [DELEGATION_RESULT_TOOL],
+          validateCompletion: () => assertDelegationCompletion(contract, structuredSubmitted),
           ...(contract === undefined && delegatedMode === undefined ? {} : {
             turnContext: {
               ...(delegatedMode === undefined ? {} : { delegationMode: delegatedMode }),
@@ -2071,9 +2072,7 @@ export function createHost({
         });
         const validation = contract === undefined
           ? undefined
-          : structuredSubmitted
-            ? { status: 'valid' as const, schemaDigest: contract.digest }
-            : { status: 'invalid' as const, schemaDigest: contract.digest, errors: ['The run ended without submitting a structured result.'] };
+          : { status: 'valid' as const, schemaDigest: contract.digest };
         return {
           ...result,
           ...(structuredSubmitted ? { structured } : {}),

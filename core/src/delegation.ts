@@ -90,6 +90,12 @@ export function outputSchemaInstructions(contract: OutputSchemaContract): string
   ].join('\n');
 }
 
+export function assertDelegationCompletion(contract: OutputSchemaContract | undefined, submitted: boolean): void {
+  if (contract !== undefined && !submitted) {
+    throw new KernelError('delegation_result_missing', { detail: 'The run ended without submitting a valid structured result.' });
+  }
+}
+
 export function registerDelegationResultTool(
   kernel: Kernel,
   contract: OutputSchemaContract,
@@ -118,6 +124,7 @@ export type RunStopReason =
   | 'tool_completed'
   | 'cancelled'
   | 'budget_exhausted'
+  | 'validation_failed'
   | 'refused'
   | 'provider_error'
   | 'tool_error'
@@ -145,6 +152,7 @@ const CANCELLED_CODES = new Set(['ask_user_cancelled', 'exec_cancelled', 'loop_c
 
 function stopReasonForCode(code: string): RunStopReason {
   if (CANCELLED_CODES.has(code)) return 'cancelled';
+  if (code === 'delegation_result_missing' || code === 'delegation_result_invalid' || code === 'delegation_result_too_large') return 'validation_failed';
   if (code.includes('budget_exhausted') || code.includes('iteration_limit')) return 'budget_exhausted';
   if (code.startsWith('permission_') || code.startsWith('policy_')) return 'refused';
   if (code.startsWith('provider_')) return 'provider_error';
@@ -162,6 +170,7 @@ export function completedRunResult(
   result: LoopResult,
   options: { readonly structured?: unknown; readonly validation?: RunValidation } = {},
 ): RunResult {
+  if (options.validation?.status === 'invalid') throw new KernelError('delegation_result_invalid', { detail: 'A completed run cannot have invalid output validation.' });
   return {
     runId,
     sessionId,

@@ -30,7 +30,7 @@ const runResultOutput = object({
   state: { type: 'string', enum: ['completed', 'failed', 'cancelled'] },
   stopReason: { type: 'string', enum: [
     'assistant_completed', 'tool_completed', 'cancelled', 'budget_exhausted', 'refused',
-    'provider_error', 'tool_error', 'host_error',
+    'provider_error', 'tool_error', 'validation_failed', 'host_error',
   ] },
   output: object({ text: { type: ['string', 'null'] }, structured: {} }, ['text']),
   validation: object({

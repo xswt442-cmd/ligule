@@ -11,7 +11,7 @@ import { createLoop, DEFAULT_LOOP_LIMITS, type LoopLimits } from '../kernel/loop
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { createSessionLog } from '../session/session.js';
 import {
-  completedRunResult, createOutputSchemaContract, DELEGATION_RESULT_TOOL, failedRunResult, MAX_DELEGATION_SCHEMA_BYTES,
+  assertDelegationCompletion, completedRunResult, createOutputSchemaContract, DELEGATION_RESULT_TOOL, failedRunResult, MAX_DELEGATION_SCHEMA_BYTES,
   MODE_SELECTION_SCHEMA, outputSchemaInstructions, registerDelegationResultTool,
 } from '../delegation.js';
 import {
@@ -264,7 +264,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
               });
               let result: Awaited<ReturnType<typeof loop.run>>;
               try {
-                result = await loop.run(args.task, { signal });
+                result = await loop.run(args.task, { signal, validateCompletion: () => assertDelegationCompletion(outputContract, structuredSubmitted) });
               } catch (error) {
                 // Record-lock and Session I/O failures mean the child record may be unreliable; do not turn them into a normal child result.
                 if (error instanceof KernelRuntimeError) throw error;
@@ -299,9 +299,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
               }
               const validation = outputContract === undefined
                 ? { status: 'not_requested' as const }
-                : structuredSubmitted
-                  ? { status: 'valid' as const, schemaDigest: outputContract.digest }
-                  : { status: 'invalid' as const, schemaDigest: outputContract.digest, errors: ['The child ended without submitting a structured result.'] };
+                : { status: 'valid' as const, schemaDigest: outputContract.digest };
               return {
                 text: result.text,
                 sessionId: id,
