@@ -230,6 +230,13 @@ const approvalAnswers = { type: 'array', minItems: 1, maxItems: 4, items: object
   selected: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 80 } },
   custom: { type: 'string', maxLength: 4000 },
 }, ['id', 'selected']) };
+const provisionalOutput = { type: ['object', 'null'], additionalProperties: false, properties: {
+  provisional: { type: 'boolean', enum: [true] }, responseId: id,
+  userSeq: { type: ['integer', 'null'], minimum: 0 }, updatedAt: { type: 'string', maxLength: 64 },
+  text: { type: 'string', maxLength: 8192 }, reasoning: { type: 'string', maxLength: 8192 },
+  textCharacters: { type: 'integer', minimum: 0 }, reasoningCharacters: { type: 'integer', minimum: 0 },
+  truncated: { type: 'boolean' },
+}, required: ['provisional', 'responseId', 'userSeq', 'updatedAt', 'text', 'reasoning', 'textCharacters', 'reasoningCharacters', 'truncated'] };
 const replyOutput = object({ requestId: id, sessionId: id, operationId: id, type: { type: 'string', enum: ['approval', 'question'] },
   decision: { type: 'string', enum: ['allow', 'deny'] }, answered: { type: 'integer' }, resolved: { type: 'boolean' },
   source: { type: 'string', enum: ['human', 'controller'] } },
@@ -266,7 +273,7 @@ const tools: Tool[] = [
     inputSchema: object({ operationId: id }, ['operationId']), outputSchema: object({ ...operationProperties, terminated: { type: 'boolean' } }, ['operationId', 'sessionId', 'state', 'terminated']) },
   { name: 'ligule_session_read', description: 'Read real persistent records, newest page first (records inside a page are chronological). Use nextBefore as before for older pages. Each json field is a record JSON fragment, at most 8192 UTF-16 characters. If nextOffset is non-null, call with at=that seq and offset=nextOffset until null, concatenating fragments before JSON.parse. at and before are exclusive. This preserves complete large records without unbounded responses.',
     inputSchema: object({ sessionId: id, limit: { type: 'integer', minimum: 1, maximum: 50, default: 20 }, before: { type: 'integer', minimum: 1 }, at: { type: 'integer', minimum: 1 }, offset: { type: 'integer', minimum: 0, default: 0 } }, ['sessionId']),
-    outputSchema: object({ sessionId: id, nextBefore: { type: ['integer', 'null'] }, hasMore: { type: 'boolean' }, records: { type: 'array', maxItems: 50, items: object({ seq: { type: 'integer' }, kind: { type: 'string' }, json: { type: 'string', maxLength: 8192 }, offset: { type: 'integer' }, nextOffset: { type: ['integer', 'null'] }, totalCharacters: { type: 'integer' } }, ['seq', 'kind', 'json', 'offset', 'nextOffset', 'totalCharacters']) } }, ['sessionId', 'records', 'nextBefore', 'hasMore']) },
+    outputSchema: object({ sessionId: id, nextBefore: { type: ['integer', 'null'] }, hasMore: { type: 'boolean' }, provisionalOutput, provisionalOutputError: { type: ['string', 'null'] }, records: { type: 'array', maxItems: 50, items: object({ seq: { type: 'integer' }, kind: { type: 'string' }, json: { type: 'string', maxLength: 8192 }, offset: { type: 'integer' }, nextOffset: { type: ['integer', 'null'] }, totalCharacters: { type: 'integer' } }, ['seq', 'kind', 'json', 'offset', 'nextOffset', 'totalCharacters']) } }, ['sessionId', 'records', 'nextBefore', 'hasMore']) },
 ];
 
 interface Arguments {

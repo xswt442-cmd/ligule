@@ -13,6 +13,7 @@ import { acquireSessionLock } from './lock.js';
 import type { SessionEvent, PendingSessionEvent, SessionHeader } from './format.js';
 import type { ReadSessionRecord } from './record.js';
 import type { SessionLock } from './lock.js';
+import { createStreamDraft, readStreamDraft, type StreamDraftWriter, type ProvisionalOutput } from './stream-draft.js';
 
 export interface SessionMetadata {
   readonly projectRoot?: string;
@@ -36,6 +37,8 @@ export interface SessionLog {
   read(): Promise<SessionEvent[]>;
   header(): Promise<SessionHeader | undefined>;
   modelView(): Promise<unknown[]>;
+  beginOutput(userSeq: number | undefined, onFailure: (error: KernelRuntimeError) => void): StreamDraftWriter;
+  readProvisionalOutput(events: readonly SessionEvent[]): Promise<ProvisionalOutput | null>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -178,6 +181,8 @@ export function createSessionLog({ directory, id, meta }: CreateSessionLogOption
     directory,
     path,
     append,
+    beginOutput: (userSeq, onFailure) => createStreamDraft(directory, id, userSeq, onFailure),
+    readProvisionalOutput: events => readStreamDraft(directory, id, events),
     acquire: () => serialize(async () => {
       await takeOwnership();
       retained = true;

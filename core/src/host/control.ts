@@ -802,6 +802,8 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
       return {
         sessionId, records: entries, nextBefore: entries[0]?.seq ?? null,
         hasMore: result.hasMore === true || entries.length < result.events.length,
+        provisionalOutput: result.provisionalOutput ?? null,
+        provisionalOutputError: result.provisionalOutputError ?? null,
       };
     },
     release(): Promise<void> {

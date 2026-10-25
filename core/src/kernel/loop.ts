@@ -6,6 +6,7 @@ import { usageEvent } from '../session/usage.js';
 import { failureOf } from './result.js';
 import type { Kernel } from './kernel.js';
 import type { PromptAssembly } from './prompt.js';
+import type { StreamDraftWriter } from '../session/stream-draft.js';
 
 export interface ToolCall {
   readonly id: string;
@@ -45,6 +46,7 @@ export interface ModelProvider {
 export interface LoopSession {
   append(event: Record<string, unknown>): Promise<unknown>;
   modelView(): Promise<unknown[]>;
+  beginOutput?(userSeq: number | undefined, onFailure: (error: KernelRuntimeError) => void): StreamDraftWriter;
 }
 
 export interface LoopLimits {
@@ -221,6 +223,7 @@ export function createLoop({
       let userSeq: number | undefined;
       let terminalAttempted = false;
       let overflowRecoveryTried = false;
+      let draft: StreamDraftWriter | undefined;
 
       // 每个已返回给模型的工具调用都必须有对应结果，否则后续模型请求会因调用未完成而被拒绝。
       // 未执行的调用也要写入错误结果，保持记录结构完整。
@@ -275,14 +278,18 @@ export function createLoop({
           // 在流式接收期间逐步组装模型发起的工具调用。
           for (let attempt = 0; ; attempt += 1) {
             try {
+              draft = session?.beginOutput?.(userSeq, error => controller.abort(error));
               reportPhase('model_request');
               for await (const event of provider.stream({ system, tools, messages: modelMessagesOf(messages) }, { signal: controller.signal })) {
                 if (event.type === 'tool-call') toolCallCount += 1;
                 if (event.type === 'text' || event.type === 'reasoning' || event.type === 'tool-call') reportActivity('model_output');
                 events.push(event);
+                if (event.type === 'text' || event.type === 'reasoning') await draft?.append(event);
               }
+              await draft?.flush();
               break;
             } catch (error) {
+              if (draft?.failure !== undefined) error = draft.failure;
               // 服务端报告上下文超限后最多压缩并重试一次；无法压缩、已经重试或其他错误都返回原错误。
               let retried: unknown[] | null = null;
               if (attempt === 0 && compaction !== null && !overflowRecoveryTried) {
@@ -298,11 +305,16 @@ export function createLoop({
                 if (session && (partialText !== '' || partialReasoning !== '' || partialCalls.length > 0)) {
                   if (partialReasoning !== '') await session.append({ kind: 'reasoning', text: partialReasoning });
                   await session.append({ kind: 'assistant', text: partialText, toolCalls: partialCalls,
+                    ...(draft === undefined ? {} : { responseId: draft.responseId }),
                     ...(partialReasoning === '' ? {} : { reasoning: partialReasoning }) });
                 }
+                const cleanup = await draft?.discard();
+                if (cleanup !== undefined && session !== undefined) await session.append({ kind: 'streamDiagnostic', ignorable: true, code: cleanup.code });
                 await answerRemaining(partialCalls, 'the provider response did not finish');
                 throw error;
               }
+              const cleanup = await draft?.discard();
+              if (cleanup !== undefined && session !== undefined) await session.append({ kind: 'streamDiagnostic', ignorable: true, code: cleanup.code });
               events.length = 0;
               messages = retried;
             }
@@ -321,7 +333,10 @@ export function createLoop({
             : []);
           // 推理事件写入记录供界面和恢复查看，但不进入模型投影，以免后续请求重复占用上下文。
           if (session && reasoning !== '') await session.append({ kind: 'reasoning', text: reasoning });
-          if (session) await session.append({ kind: 'assistant', text, toolCalls, ...(reasoning === '' ? {} : { reasoning }) });
+          if (session) await session.append({ kind: 'assistant', text, toolCalls,
+            ...(draft === undefined ? {} : { responseId: draft.responseId }), ...(reasoning === '' ? {} : { reasoning }) });
+          const cleanup = await draft?.discard();
+          if (cleanup !== undefined && session !== undefined) await session.append({ kind: 'streamDiagnostic', ignorable: true, code: cleanup.code });
           const finish = events.findLast((event) => event.type === 'finish');
           if (provider.requiresCompletion === true && finish === undefined) {
             await answerRemaining(toolCalls, 'the provider response ended without a completion signal');
@@ -386,6 +401,8 @@ export function createLoop({
         }
         throw new KernelError('loop_iteration_limit');
       } catch (error) {
+        try { await draft?.flush(); }
+        catch (writeError) { error = writeError; }
         const code = failureCode(error);
         const diagnostics = error instanceof KernelError ? error.diagnostics : undefined;
         await markTurn(TURN_CANCEL_CODES.has(code) ? 'cancelled' : 'failed', {

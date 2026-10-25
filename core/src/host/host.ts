@@ -1404,6 +1404,13 @@ export function createHost({
   ) {
     const events = await session.read();
     const header = await session.header();
+    let provisionalOutput = null;
+    let provisionalOutputError: string | null = null;
+    try { provisionalOutput = await session.readProvisionalOutput(events); }
+    catch (error) {
+      if (!(error instanceof KernelError) || error.code !== 'session_stream_invalid') throw error;
+      provisionalOutputError = error.code;
+    }
     if (at !== undefined && before !== undefined) {
       throw new KernelError('protocol_args_invalid', { detail: 'session.read at and before are mutually exclusive' });
     }
@@ -1419,6 +1426,8 @@ export function createHost({
       sessionId,
       events: fullResults ? await fillSpills(page, env) : page,
       header: header ?? null,
+      provisionalOutput,
+      provisionalOutputError,
       label: foldLabel(events),
       endSeq: page.at(-1)?.seq ?? null,
       hasMore: page.length > 0 && page[0].seq > 1,
