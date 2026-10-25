@@ -8,7 +8,13 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ### 简体中文
 
+- 外控新增 `ligule_session_close` 关闭空闲会话并释放名额，人工接管同样释放名额；会话历史继续保留。
+- `full` 模式新增 `todo_write`，支持每轮独立、持久保存历史的完整任务清单，内部子代理各自隔离。
+
 ### English
+
+- External controllers can close idle sessions with `ligule_session_close`; closing and human takeover release session slots while preserving history.
+- The `full` mode includes `todo_write` for per-turn task lists with durable history and isolated internal subagent state.
 
 ## [0.1.0] - 2026-10-24
 

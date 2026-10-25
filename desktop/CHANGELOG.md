@@ -8,7 +8,11 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 ### 简体中文
 
+- `full` 模式新增 `todo_write`，每轮任务清单随会话保存历史，内部子代理使用独立清单。
+
 ### English
+
+- The `full` mode includes `todo_write` with persistent task-list history and separate lists for internal subagents.
 
 ## [0.1.0] - 2026-10-24
 
