@@ -9,6 +9,17 @@ import { App } from '../dist/tui/app.js';
 import { completeFrame } from './helpers/frames.js';
 import { waitFor, withTuiHost } from './helpers/tui-host.ts';
 
+async function waitUntilSessionClosed(context, sessionId) {
+  await waitFor(async () => {
+    try { await context.client.request('status.get', { sessionId }); return false; }
+    catch (error) {
+      if (error.code === 'session_not_open') return true;
+      if (error.code === 'session_closing') return false;
+      throw error;
+    }
+  }, { within: 15_000 });
+}
+
 async function withApp(context, run) {
   const stdout = Object.assign(new PassThrough(), { columns: 80, rows: 24, isTTY: true });
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref() {}, unref() {} });
@@ -75,7 +86,7 @@ test('a read failure after session.open closes the unused target and preserves t
       assert.ok(context.requests.some((request) => request.method === 'session.open' && request.params.sessionId === target.sessionId));
       assert.ok(context.requests.some((request) => request.method === 'session.close' && request.params.sessionId === target.sessionId),
         'the successfully opened but unreadable target is closed');
-      await assert.rejects(context.client.request('status.get', { sessionId: target.sessionId }), (error) => error.code === 'session_not_open');
+      await waitUntilSessionClosed(context, target.sessionId);
       await context.client.request('status.get', { sessionId: context.sessionId });
     });
   });
@@ -110,7 +121,7 @@ test('new releases its created lock when the previous session cannot be retired'
       assert.equal(created.length, createsBefore + 1);
       const release = context.requests.filter((request) => request.method === 'session.close').at(-1);
       assert.notEqual(release.params.sessionId, context.sessionId, 'the newly created session is released after retirement fails');
-      await assert.rejects(context.client.request('status.get', { sessionId: release.params.sessionId }), (error) => error.code === 'session_not_open');
+      await waitUntilSessionClosed(context, release.params.sessionId);
     });
   });
 });

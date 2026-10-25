@@ -84,14 +84,14 @@ function observeFrames(stream: PassThrough, visit: (message: Record<string, unkn
 }
 
 // 轮询条件直到成立或超时；超时时附上最近的终端输出，便于定位失败原因。
-export async function waitFor(condition: () => boolean, { within = 150_000, every = 30, read = () => '' }: {
+export async function waitFor(condition: () => boolean | Promise<boolean>, { within = 150_000, every = 30, read = () => '' }: {
   within?: number;
   every?: number;
   read?: () => string;
 } = {}): Promise<void> {
   const deadline = Date.now() + within;
   for (;;) {
-    if (condition()) return;
+    if (await condition()) return;
     if (Date.now() >= deadline) throw new Error(`等的条件没有成立\n${read().slice(-1_500)}`);
     await delay(every);
   }
