@@ -54,17 +54,6 @@ export async function readExisting(path: string): Promise<Buffer> {
   }
 }
 
-export async function existsOrFails(path: string): Promise<boolean> {
-  try {
-    await stat(path);
-    return true;
-  } catch (error) {
-    const code = errorCode(error);
-    if (code === 'ENOENT') return false;
-    throw new KernelError('path_resolve_failed', { cause: error, detail: `checking ${path} failed: ${code ?? errorMessage(error)}` });
-  }
-}
-
 // 统一检查目标是文件还是目录；路径不存在时返回稳定错误码，不传递原始 `readdir` 或 `readFile` 错误。
 export async function kindOfTarget(path: string): Promise<'directory' | 'file'> {
   try {

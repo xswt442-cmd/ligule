@@ -1,15 +1,15 @@
 // 写操作包括 `create`、`write`、`edit` 和 `delete`。
 // 每种操作在工具内部执行语义校验并返回稳定错误码；删除目标由能力提供方选择去处。
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import type { ToolContext, ToolDefinition } from '../kernel/kernel.js';
 import { boundaryOf, limitsOf, workingDirectoryOf } from '../capability/limits.js';
 import { resolveWithin } from '../capability/paths.js';
 import { resolveRecycler } from '../capability/recycle.js';
 import { versionOf } from '../session/observe.js';
-import { errorCode, errorMessage, existsOrFails, toPosix } from './common.js';
+import { errorCode, errorMessage, toPosix } from './common.js';
 
 interface CreateArguments { path: string; content: string }
 interface WriteArguments { path: string; content: string }
@@ -119,7 +119,7 @@ export const editTool = {
     if (hits > 1) {
       throw new KernelError('edit_anchor_ambiguous', { detail: `the anchor appears ${hits} times in ${args.path}; widen it until one occurrence is left` });
     }
-    const updated = text.replace(args.anchor, args.replacement);
+    const updated = text.replace(args.anchor, () => args.replacement);
     await writeFile(target, updated, 'utf8');
     observations?.observe(target, versionOf(Buffer.from(updated, 'utf8')));
     return { text: `edited ${toPosix(relative(boundary, target))}` };
@@ -129,7 +129,7 @@ export const editTool = {
 export const deleteTool = {
   name: 'delete',
   access: 'write',
-  description: 'Move a file or directory relative to the working directory, within the workspace boundary, into the trash: the system recycle bin where there is one, otherwise a trash directory inside the boundary. Nothing is deleted in place.',
+  description: 'Move a file or directory relative to the working directory, within the workspace boundary, into the trash: the system recycle bin where there is one, otherwise a trash directory inside the boundary. Final symbolic links and junctions are refused; name the actual target explicitly to delete it. Nothing is deleted in place.',
   parameters: {
     type: 'object',
     properties: {
@@ -140,10 +140,21 @@ export const deleteTool = {
   async run(args: DeleteArguments, { config, logger, observations }: WriteToolContext) {
     const { trashDirectory } = limitsOf(config);
     const boundary = boundaryOf(config);
-    const target = await resolveWithin(boundary, args.path, { forWrite: true, cwd: workingDirectoryOf(config) });
+    const cwd = workingDirectoryOf(config);
+    const target = await resolveWithin(boundary, args.path, { forWrite: true, cwd });
     const name = toPosix(relative(boundary, target));
     if (name === '') throw new KernelError('delete_target_is_boundary', { detail: 'the workspace boundary itself cannot be moved into the trash; name a file or directory inside it' });
-    if (!(await existsOrFails(target))) throw new KernelError('delete_target_missing', { detail: `there is nothing at ${args.path} to move into the trash` });
+    try {
+      // 边界解析跟随链接；删除前单独检查用户命名的最后一项，避免把链接目标送入回收站。
+      if ((await lstat(resolve(cwd, args.path))).isSymbolicLink()) {
+        throw new KernelError('delete_target_is_link', { detail: `${args.path} is a symbolic link or junction; name the actual target explicitly if that is what should be moved into the trash` });
+      }
+    } catch (error) {
+      if (error instanceof KernelError) throw error;
+      const code = errorCode(error);
+      if (code === 'ENOENT') throw new KernelError('delete_target_missing', { detail: `there is nothing at ${args.path} to move into the trash` });
+      throw new KernelError('path_resolve_failed', { cause: error, detail: `checking ${args.path} failed: ${code ?? errorMessage(error)}` });
+    }
 
     // 删除去处由 `trashBackend` 配置决定。`auto` 优先使用系统回收站，否则使用项目回收目录。
     // `system` 和 `managed` 固定使用指定后端；后端不可用时返回错误，不自动切换。
