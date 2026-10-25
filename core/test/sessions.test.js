@@ -226,6 +226,29 @@ test('a branch copies a prefix of the record and leaves the parent alone', async
   });
 });
 
+test('branching copies only complete lines when the parent has an incomplete crash tail', async () => {
+  await withSessions(async (root, directory) => {
+    const parent = createSessionLog({ directory, id: 'parent', meta: () => ({ projectRoot: root }) });
+    await parent.append({ kind: 'user', text: 'request' });
+    await parent.append({ kind: 'assistant', text: 'response', toolCalls: [] });
+    await parent.append({ kind: 'turn', ignorable: true, status: 'completed', userSeq: 0 });
+    await parent.close();
+    const path = join(directory, 'parent.jsonl');
+    await appendFile(path, '{"kind":"user","text":"unfinished');
+    const original = await readFile(path);
+    const complete = parseSessionBytes(original);
+    assert.ok(complete.truncatedBytes > 0);
+    for (const at of [undefined, 2]) {
+      const branch = await branchSession(directory, 'parent', { at, projectRoot: root });
+      const copied = parseSessionBytes(await readFile(join(directory, `${branch.sessionId}.jsonl`)));
+      assert.equal(branch.at, 2);
+      assert.deepEqual(copied.events, complete.events);
+      assert.equal(copied.truncatedBytes, 0);
+      assert.deepEqual(await readFile(path), original);
+    }
+  });
+});
+
 // 分支携带完全落在复制前缀内的压缩块；跨越分支点的块不携带，父侧的块文件保持不变。
 test('a branch carries the compaction blocks that fit inside the copied prefix', async () => {
   await withSessions(async (root, directory) => {
