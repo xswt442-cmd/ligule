@@ -288,9 +288,10 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
   }
 
   function writable(sessionId: string): void {
+    ready();
+    if (takenOver.has(sessionId) || takingOver.has(sessionId)) throw new KernelError('control_session_taken_over');
     owned(sessionId);
     if (closingSessions.has(sessionId)) throw new KernelError('control_session_closing');
-    if (takenOver.has(sessionId) || takingOver.has(sessionId)) throw new KernelError('control_session_taken_over');
   }
 
   async function authorized(root: string): Promise<void> {
