@@ -191,10 +191,41 @@ test('nested parameter schemas validate objects, string arrays, enums, anyOf, an
   await assert.rejects(kernel.call('delegate', { ...valid, result: false }), { code: 'tool_args_invalid' });
 });
 
+test('bounded object arrays validate every item before tool execution', async () => {
+  const kernel = createKernel();
+  let calls = 0;
+  kernel.register(makeTool('array-input', {
+    parameters: { type: 'object', properties: {
+      items: { type: 'array', minItems: 1, maxItems: 2, items: {
+        type: 'object', additionalProperties: false, required: ['content', 'status'], properties: {
+          content: { type: 'string', minLength: 1, maxLength: 10 },
+          status: { type: 'string', enum: ['pending', 'completed'] },
+        },
+      } },
+    }, required: ['items'] },
+    run: async () => { calls += 1; return 'accepted'; },
+  }));
+  assert.equal(await kernel.call('array-input', { items: [{ content: 'task', status: 'pending' }] }), 'accepted');
+  for (const items of [[], Array(3).fill({ content: 'task', status: 'pending' }), [null],
+    [{ content: 'task' }], [{ content: 'task', status: 'invalid' }],
+    [{ content: 'task', status: 'pending', extra: true }]]) {
+    await assert.rejects(kernel.call('array-input', { items }), { code: 'tool_args_invalid' });
+  }
+  assert.equal(calls, 1);
+  for (const array of [
+    { type: 'string', maxItems: 1 }, { type: 'array', maxItems: -1, items: { type: 'object' } },
+    { type: 'array', minItems: 3, maxItems: 2, items: { type: 'string' } },
+  ]) {
+    assert.throws(() => kernel.register(makeTool('invalid-array', {
+      parameters: { type: 'object', properties: { items: array } },
+    })), { code: 'tool_parameters_unsupported_construct' });
+  }
+});
+
 test('nested schemas reject unsupported constructs and nesting beyond the supported depth', () => {
   const kernel = createKernel();
   assert.throws(() => kernel.register(makeTool('delegate', {
-    parameters: { type: 'object', properties: { tags: { type: 'array', items: { type: 'integer' } } } },
+    parameters: { type: 'object', properties: { tags: { type: 'array', items: { type: 'null' } } } },
   })), (error) => error.code === 'tool_parameters_unsupported_construct' && error.detail.includes('tags.items.type'));
   assert.throws(() => kernel.register(makeTool('delegate', {
     parameters: { type: 'object', properties: { value: { anyOf: [] } } },
