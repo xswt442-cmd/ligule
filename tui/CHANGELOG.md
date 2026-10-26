@@ -8,6 +8,8 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ### 简体中文
 
+- `full` 新增 `read_document`，受限读取 PDF、DOCX、XLSX、PPTX，支持定位续读、公式缓存与 PDF 页面图像；独立进程限制资源并响应取消。
+
 - Windows `full` 新增单帧 `screenshot`，沿用持久图像通路；新增独立截图同意、撤销及明确的外控 Grant 上限，捕获不切换焦点。
 
 - `full` 模式新增 `read_image`，支持持久图像引用、两种模型协议、会话恢复与分支；Markdown 可携带图片副本导出。
@@ -17,6 +19,8 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 - `full` 模式新增 `todo_write`，支持每轮独立、持久保存历史的完整任务清单，内部子代理各自隔离。
 
 ### English
+
+- `full` includes `read_document` for bounded PDF, DOCX, XLSX and PPTX extraction, located continuation, cached formulas and PDF page images, with isolated resource limits and cancellation.
 
 - Windows `full` includes single-frame `screenshot` with persistent images, separate consent and revocation, explicit Agent Control grant limits, and no focus changes.
 

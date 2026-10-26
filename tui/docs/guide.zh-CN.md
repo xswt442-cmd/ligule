@@ -137,6 +137,10 @@ Windows 的 `full` 模式提供 `screenshot`，每次捕获一帧主显示器 `s
 
 `full` 模式还包含 `read_image`：使用 `{path: "diagram.png"}` 读取文件边界内图片，或用 `{shotId: "…"}` 重读本会话持有的已保存图片。PNG、JPEG、WebP、GIF 会经解码并统一为 PNG，动画只读首帧；输入最多 20 MiB、4,000 万像素，输出最长边 2048 像素、最多 8 MiB。Session JSONL 只保存引用，模型请求发送前才读取并校验图片字节。图片位于数据根下本工作区的 `screenshots/`，配额 256 MiB、保留 30 天。分支只继承复制历史中已有的图片；内部子代理持有独立图片。缺失、过期或被修改的图片明确报错。Markdown 导出将可用图片复制到同级 `.assets` 目录并使用相对链接，单独报告不可用文件；导出副本由使用者管理。
 
+`full` 模式提供 `read_document`，在文件边界内读取 PDF 页、DOCX 段落和表格块、XLSX 工作表单元格、PPTX 幻灯片文字及表格。普通文本仍使用 `read`。`{path, start, count}` 默认读取前 20 个单元；`start` 从 1 开始，`count` 最多 20，XLSX 默认读取行和前十列。指定表格区域可用 `{path, sheet, range: {startRow, endRow, startColumn, endColumn}}`，最多 200 行、10,000 个单元格。返回来源位置、工作表名、警告和 `truncated`；截断时照 `continuation` 继续读取，包括块内文本 `offset`。公式返回原式和已有缓存，不重新计算。
+
+PDF 的 `{path, renderPage: 2}` 单独渲染一页，要求当前模型支持图片，输出持久 `document` 图片引用；没有文字层的页会提示渲染，不当成空白。页面最长边 2048 像素，源栅格图片最多 4,000 万像素。该工具不做 OCR，不渲染 Office 图片或图表，不执行宏、脚本、外链或嵌入对象。输入最多 20 MiB，提取文本最多 24,000 UTF-8 字节；PDF/PPTX 最多 200 页/张。Office ZIP 最多 2,000 条、实际解压量 64 MiB。独立解析进程默认限时 15 秒、V8 堆上限 192 MiB，Windows 另有 512 MiB 进程内存上限；取消会等待解析进程退出。可用 `limits.documentBytes`、`limits.documentOutputBytes`、`limits.documentTimeoutMs` 调低上限，文本预算至少 256 字节。密码 PDF 报 `document_password_required`；加密或旧版 Office 容器报 `document_encrypted_or_legacy`，不接受密码参数。损坏文件和资源超限明确失败。
+
 桌面版成功工具结果中的“预览图片”按钮读取会话已有图片，生成最长边 512 像素、最多 256 KiB 的临时 WebP 缩略图。外控会话和已关闭会话也可只读预览，无须接管或重新授权截图；预览不会捕获当前屏幕。图片缺失、过期或完整性校验失败会显示错误。缩略图不写入会话记录，切换会话或卸载组件时释放显示资源。
 
 自动图像输入仅启用已验证的 DeepSeek 官方 `deepseek-flash` 路由及其文档声明的旧视觉别名，未知路由默认拒绝。可通过 `modelSettings = [{id = "custom-model", imageInput = true}]` 明确声明模型支持图像；`false` 禁用，省略则自动识别。桌面版可为每个模型选择“自动／支持／不支持”。切换至不支持图像的模型时，会拒绝发送仍包含图片的上下文；可改用支持图像的模型或新建 Session。每个请求最多八张图片、16 MiB 规范化图片字节。含图片的记录需要能识别不可忽略图像事件的程序读取；旧程序会拒绝重新打开。
