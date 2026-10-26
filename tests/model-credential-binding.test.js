@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -15,6 +16,44 @@ import { createConfigStore } from '../core/dist/kernel/config-store.js';
 
 const repository = fileURLToPath(new URL('..', import.meta.url));
 const { stringify } = createRequire(join(repository, 'core', 'package.json'))('smol-toml');
+
+test('CLI run keeps credential binding when a project replaces the user endpoint', { timeout: 20_000 }, async () => {
+  const scratch = join(repository, 'testplace', 'tmp');
+  await mkdir(scratch, { recursive: true });
+  const root = await mkdtemp(join(scratch, 'cli-model-binding-'));
+  const projectRoot = join(root, 'project');
+  const dataRoot = join(root, 'data');
+  await Promise.all([mkdir(join(projectRoot, '.ligule'), { recursive: true }), mkdir(dataRoot)]);
+  const seen = [0, 0];
+  const endpoints = seen.map((_, index) => createServer((request, response) => {
+    seen[index] += 1;
+    request.resume();
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ choices: [{ message: { content: 'endpoint reply' }, finish_reason: 'stop' }] }));
+  }));
+  try {
+    for (const endpoint of endpoints) await new Promise(resolve => endpoint.listen(0, '127.0.0.1', resolve));
+    const urls = endpoints.map(endpoint => `http://127.0.0.1:${endpoint.address().port}/v1`);
+    const reference = `LIGULE_CLI_BINDING_${randomUUID().replaceAll('-', '')}`;
+    await writeFile(join(dataRoot, 'config.toml'), stringify({ model: { api: 'chat-completions', baseURL: urls[0], model: 'fixture', apiKeyEnv: reference,
+      capabilities: { streaming: false } }, policy: { mode: 'auto' } }));
+    await writeFile(join(projectRoot, '.ligule', 'config.toml'), stringify({ model: { baseURL: urls[1] } }));
+    const child = spawn(process.execPath, [join(repository, 'tui', 'dist', 'cli.js'), 'run', '--mode', 'full', '--lang', 'en', 'Only reply briefly.'], {
+      cwd: projectRoot, env: { ...process.env, LIGULE_HOME: dataRoot, [reference]: randomUUID() }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stderr = '';
+    child.stdout.resume();
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-4096); });
+    const exit = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
+    assert.notEqual(exit, 0);
+    assert.match(stderr, /provider_credential_unbound/u);
+    assert.deepEqual(seen, [0, 0], 'neither endpoint receives the borrowed credential or conversation');
+  } finally {
+    for (const endpoint of endpoints) { endpoint.closeAllConnections(); await new Promise(resolve => endpoint.close(resolve)); }
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test('real model requests bind credentials to user or flag endpoints across project configuration layers', async () => {
   const scratch = join(repository, 'testplace', 'tmp');

@@ -384,10 +384,11 @@ async function runOneRound(
   config: CliConfig,
   selection: ReturnType<typeof resolveMode>,
   extensions: Awaited<ReturnType<typeof extensionSources>>,
+  layers: Awaited<ReturnType<typeof configSnapshot>>['layers'],
   text: string,
   sessionId?: string,
 ): Promise<void> {
-  const host = createHost({ config, provider: providerFromConfig(config), policy: config.policy, extensions, ...selection });
+  const host = createHost({ config, provider: providerFromConfig(config), policy: config.policy, extensions, configLayers: layers, ...selection });
   const approvals = terminalApprovals();
   const connection: Pick<Connection, 'notify' | 'request'> = {
     notify: printNotification,
@@ -527,8 +528,8 @@ if (invalidLanguage) {
     printFailure('cli_run_needs_the_user_text', t('run 需要用户消息，例如 ligule run "read the note"', 'run needs a user message, for example ligule run "read the note"'));
   } else {
     try {
-      const { config, extensions } = await configSnapshot();
-      await runOneRound(config, resolveMode(config), extensions, text);
+      const { config, extensions, layers } = await configSnapshot();
+      await runOneRound(config, resolveMode(config), extensions, layers, text);
     } catch (error) {
       const fields = errorFields(error);
       printFailure(fields.code ?? 'cli_run_failed', fields.detail, fields.diagnostics);
@@ -544,8 +545,8 @@ if (invalidLanguage) {
     printFailure('cli_run_needs_the_user_text', t('resume 还需要用户消息，例如 ligule resume 5f3c "keep going"', 'resume also needs a user message, for example ligule resume 5f3c "keep going"'));
   } else {
     try {
-      const { config, extensions } = await configSnapshot();
-      await runOneRound(config, resolveMode(config), extensions, text, sessionId);
+      const { config, extensions, layers } = await configSnapshot();
+      await runOneRound(config, resolveMode(config), extensions, layers, text, sessionId);
     } catch (error) {
       const fields = errorFields(error);
       printFailure(fields.code ?? 'cli_resume_failed', fields.detail, fields.diagnostics);
