@@ -115,7 +115,7 @@ writeFileSync(join(consumer, 'probe.mjs'), `
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
-import { createKernel, createMcpPlugin, createMcpRegistry, execTool, flagLayer, KernelError, mcpServerConfigs, parseCommand, resolveRipgrep, resolveShell, searchWithRipgrep, withNativeExitCode, VERSION } from 'ligule';
+import { createKernel, createMcpPlugin, createMcpRegistry, createReadImagePlugin, createSessionLog, execTool, flagLayer, KernelError, mcpServerConfigs, parseCommand, resolveRipgrep, resolveShell, searchWithRipgrep, withNativeExitCode, VERSION } from 'ligule';
 import { pathToFileURL } from 'node:url';
 
 const coreRoot = ${JSON.stringify(bundledCoreDirectory)};
@@ -136,6 +136,20 @@ try {
     throw new Error('the installed image backend did not preserve the decoded image');
   }
   console.log('image backend: decoded, archived and reread through the installed Core');
+  const imageSession = createSessionLog({ directory: join(process.cwd(), 'image-sessions'), id: 'install-probe' });
+  const imageKernel = createKernel({ session: imageSession });
+  const unregisterImage = createReadImagePlugin({ media: store, supportsImages: () => true }).setup(imageKernel);
+  try {
+    const result = await imageKernel.call('read_image', { shotId: reference.id });
+    const events = await imageSession.read();
+    if (result.images?.[0]?.id !== reference.id || !events.some(event => event.kind === 'tool' && event.result.images?.[0]?.id === reference.id)) {
+      throw new Error('the installed read_image tool did not preserve its persistent image reference');
+    }
+    console.log('read_image: real Kernel result and durable Session reference');
+  } finally {
+    unregisterImage();
+    await imageSession.close();
+  }
 } finally {
   if (previousMediaHome === undefined) delete process.env.LIGULE_HOME;
   else process.env.LIGULE_HOME = previousMediaHome;
