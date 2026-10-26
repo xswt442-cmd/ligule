@@ -115,7 +115,7 @@ writeFileSync(join(consumer, 'probe.mjs'), `
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
-import { createKernel, createMcpPlugin, createMcpRegistry, createReadImagePlugin, createSessionLog, execTool, flagLayer, KernelError, mcpServerConfigs, parseCommand, resolveRipgrep, resolveShell, searchWithRipgrep, withNativeExitCode, VERSION } from 'ligule';
+import { createKernel, createMcpPlugin, createMcpRegistry, createReadImagePlugin, createScreenshotPlugin, createSessionLog, execTool, flagLayer, KernelError, mcpServerConfigs, parseCommand, resolveRipgrep, resolveShell, searchWithRipgrep, withNativeExitCode, VERSION } from 'ligule';
 import { pathToFileURL } from 'node:url';
 
 const coreRoot = ${JSON.stringify(bundledCoreDirectory)};
@@ -146,6 +146,15 @@ try {
       throw new Error('the installed read_image tool did not preserve its persistent image reference');
     }
     console.log('read_image: real Kernel result and durable Session reference');
+    const unregisterCapture = createScreenshotPlugin({ supportsImages: () => true }).setup(imageKernel);
+    try {
+      let rejected = false;
+      try { await imageKernel.call('screenshot', {}); }
+      catch (error) { if (error.code !== 'screen_capture_not_authorized') throw error; rejected = true; }
+      if (!rejected) throw new Error('the installed screenshot tool accepted missing consent');
+      if (process.platform === 'win32' && typeof requireCore('node-screenshots').Monitor.all !== 'function') throw new Error('the installed capture backend is unavailable');
+      console.log('screenshot: consent required; native Windows module checked without a capture');
+    } finally { unregisterCapture(); }
   } finally {
     unregisterImage();
     await imageSession.close();
