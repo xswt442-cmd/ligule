@@ -4,6 +4,7 @@ import { Icon } from './Icon';
 import { ModelPicker } from './ModelPicker';
 import { PolicyPicker } from './PolicyPicker';
 import { PermissionPicker } from './PermissionPicker';
+import { ScreenCaptureControl } from './ScreenCaptureControl';
 import { SessionMenu } from './SessionMenu';
 import { WorkspacePicker } from './WorkspacePicker';
 import type { MentionState } from '../mentions';
@@ -155,6 +156,8 @@ export function Composer({ client, sessionId, projectRoot, status, settings, set
           initialPermission={initialPermission} initialConfirmations={initialPermissionConfirmations}
           disabled={disabled || closing || reading || starting} running={running}
           onInitialChange={onInitialPermissionChange} onStatus={onPermissionStatus} onOpenSecurity={onOpenSecurity} />
+        <ScreenCaptureControl key={`screen:${sessionId ?? '$new'}`} client={client} sessionId={sessionId} status={status}
+          disabled={disabled} running={running} onStatus={onPermissionStatus} />
         <span className="bar-spacer" />
         {running && <button className="icon-button stop-button" type="button" title={t('停止本轮', 'Stop this turn')} aria-label={t('停止本轮', 'Stop this turn')} onClick={onStop}><Icon name="stop" size={15} /></button>}
         <button className="send" type="button" title={running ? t('加入队列', 'Add to queue') : t('发送', 'Send')} aria-label={t('发送', 'Send')} disabled={disabled || draft.trim() === ''} onClick={onSend}><Icon name="send" size={19} /></button>

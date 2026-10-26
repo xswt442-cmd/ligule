@@ -23,6 +23,14 @@ function capture(...args) {
   }
 }
 
+test('screen capture startup permission cannot be enabled on an MCP controller or unrelated command', () => {
+  for (const args of [['mcp-server', '--project', repo, '--operator'], ['tools']]) {
+    const result = capture(...args, '--allow-screen-capture');
+    assert.equal(result.ok, false);
+    assert.match(result.stderr, /cli_screen_capture_flag_not_allowed/u);
+  }
+});
+
 test('tools prints the members of the minimal manifest plus the first-party optional tools', () => {
   assert.deepEqual(capture('tools').stdout.trim().split('\n'), ['create', 'delete', 'edit', 'exec', 'fetch', 'find', 'read', 'search', 'write']);
 });

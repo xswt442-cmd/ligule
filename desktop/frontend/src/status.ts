@@ -16,6 +16,7 @@ export type Status = {
   sessionId: string;
   running: boolean;
   permission?: SessionPermission;
+  screenCapture?: { enabled: boolean; source: 'none' | 'startup' | 'trusted-ui' | 'grant'; changeAllowed?: boolean };
   tools: string[];
   // 当前模式名称与权限策略是不同字段，分别维护。
   mode: string | null;

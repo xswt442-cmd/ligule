@@ -19,6 +19,8 @@ type Draft = {
   defaultPolicy: PolicySelection;
   allowedPolicies: PolicySelection[];
   allowOperator: boolean;
+  allowScreenCapture: boolean;
+  confirmScreenCapture: boolean;
   allowedMcpServers: string[];
   allowedMcpTools: string[];
   confirmFullAccess: boolean;
@@ -40,6 +42,8 @@ function emptyDraft(): Draft {
     defaultPolicy: 'ask',
     allowedPolicies: ['ask'],
     allowOperator: false,
+    allowScreenCapture: false,
+    confirmScreenCapture: false,
     allowedMcpServers: [],
     allowedMcpTools: [],
     confirmFullAccess: false,
@@ -99,11 +103,13 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
   const invalidExpiry = draft.expiresAt !== '' && !Number.isFinite(Date.parse(draft.expiresAt));
   const canSave = !busy && snapshot !== null && project !== '' && draft.name.trim() !== ''
     && !profileExceeds && !networkExceeds && !policyMissing && !mcpLimitInvalid && !invalidExpiry
+    && (!draft.allowScreenCapture || draft.confirmScreenCapture)
     && (draft.maxPermissionProfile !== 'full-access' || draft.confirmFullAccess)
     && (draft.maxPermissionProfile === 'read-only' || draft.confirmPartialWorkspaceWrite)
     && draft.confirmWorkspaceTrust
     && (draft.maxNetwork !== 'unrestricted' || draft.confirmUnrestrictedNetwork);
   const canContinueLimits = !busy && !profileExceeds && !networkExceeds && !policyMissing && !mcpLimitInvalid
+    && (!draft.allowScreenCapture || draft.confirmScreenCapture)
     && (draft.maxPermissionProfile !== 'full-access' || draft.confirmFullAccess)
     && (draft.maxPermissionProfile === 'read-only' || draft.confirmPartialWorkspaceWrite)
     && (draft.maxNetwork !== 'unrestricted' || draft.confirmUnrestrictedNetwork);
@@ -213,6 +219,8 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
         allowedPolicyAuto: draft.allowedPolicies.includes('auto'),
         allowedPolicyNone: draft.allowedPolicies.includes('none'),
         allowOperator: draft.allowOperator,
+        allowScreenCapture: draft.allowScreenCapture,
+        confirmScreenCapture: draft.confirmScreenCapture,
         allowedMcpServers: draft.allowedMcpServers,
         allowedMcpTools: draft.allowedMcpTools,
         confirmFullAccess: draft.confirmFullAccess,
@@ -441,6 +449,21 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
             <input type="checkbox" checked={draft.allowOperator} onChange={(event) => update('allowOperator', event.target.checked)} />
             <span>{t('允许 MCP 使用者通过 --operator 处理普通审批。', 'Allow the MCP client to handle ordinary approvals with --operator.')}</span>
           </label>
+        </section>
+
+        <section className="grant-config-card">
+          <h4>{t('屏幕观察（Windows）', 'Screen capture (Windows)')}</h4>
+          <label className="grant-confirmation">
+            <input type="checkbox" checked={draft.allowScreenCapture} onChange={event => {
+              update('allowScreenCapture', event.target.checked);
+              update('confirmScreenCapture', false);
+            }} />
+            <span>{t('允许此授权下的会话及其内部子代理调用截图工具。', 'Allow Sessions and internal children using this grant to call the screenshot tool.')}</span>
+          </label>
+          {draft.allowScreenCapture && <label className="grant-confirmation grant-risk">
+            <input type="checkbox" checked={draft.confirmScreenCapture} onChange={event => update('confirmScreenCapture', event.target.checked)} />
+            <span>{t('确认屏幕可能含其他应用或项目的信息，截图将发送给当前图像模型。此授权不允许移动窗口、抢焦点、鼠标或键盘控制。', 'Confirm that the screen may include other applications or projects and captures will be sent to the selected image model. This permission does not allow moving windows, changing focus, or mouse and keyboard control.')}</span>
+          </label>}
         </section>
 
         <section className="grant-config-card grant-mcp-limits">

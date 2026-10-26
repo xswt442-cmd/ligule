@@ -88,6 +88,7 @@ function isAskQuestion(value: unknown): value is AskQuestion {
 }
 
 interface TuiStatus {
+  readonly screenCapture?: { readonly enabled: boolean; readonly source: string; readonly changeAllowed?: boolean };
   readonly model?: string | null;
   readonly pendingModel?: string | null;
   readonly mode?: string | null;
@@ -368,6 +369,7 @@ interface TuiConfigResult extends Record<string, unknown> {
 }
 
 interface TuiRequestResults {
+  readonly 'screen-capture.set': { readonly sessionId: string; readonly enabled: boolean; readonly source: string };
   readonly 'session.create': { readonly sessionId: string };
   readonly 'session.open': { readonly sessionId: string };
   readonly 'session.close': { readonly sessionId: string };
@@ -2248,6 +2250,45 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         push({ kind: 'meta', text: changed.policySource === 'session'
           ? t(`当前会话审批方式：${changed.policy}（已生效）`, `Session approval mode: ${changed.policy} (active now)`)
           : t(`已恢复默认审批方式：${changed.policy}`, `Default approval mode restored: ${changed.policy}`) });
+      })();
+      return;
+    }
+    if (name === 'screen') {
+      if (externalControl) {
+        push({ kind: 'meta', text: t('外控会话的截图能力由独立 Grant 控制，请在外控授权中管理。', 'Screen capture for an externally controlled Session is managed by its separate grant.') });
+        return;
+      }
+      const parts = argument.trim().split(/\s+/u).filter(Boolean);
+      if (parts.length === 0) {
+        const owner = sessionId;
+        void client.request('status.get', { sessionId: owner }).then(current => {
+          if (activeSession.current !== owner) return;
+          setStatus(current);
+          push({ kind: 'meta', text: current.screenCapture?.enabled === true
+            ? t('本会话截图已授权；/screen off 可立即撤销。', 'Screen capture is allowed for this Session; /screen off revokes it.')
+            : t('本会话截图关闭。/screen on 查看授权说明。', 'Screen capture is disabled; /screen on shows the consent details.') });
+        }, error => push({ kind: 'error', text: errorCode(error) ?? 'screen_capture_status_failed' }));
+        return;
+      }
+      if (parts.length === 1 && parts[0] === 'on') {
+        push({ kind: 'meta', text: t('截图会读取现有画面，可能包含其他应用或私人信息，并发送给当前图像模型。允许本会话及内部子任务截图，请输入 /screen on confirm；可用 /screen off 撤销。截图不会切换焦点或提供鼠标键盘控制。', 'Captures read the existing screen, may include other applications or private information, and are sent to the selected image model. Enter /screen on confirm to permit this Session and its children; /screen off revokes consent. Capture does not change focus or provide mouse and keyboard control.') });
+        return;
+      }
+      const enabling = parts.length === 2 && parts[0] === 'on' && parts[1] === 'confirm';
+      if (!enabling && !(parts.length === 1 && parts[0] === 'off')) {
+        push({ kind: 'error', text: t('用法：/screen [on [confirm]|off]', 'Usage: /screen [on [confirm]|off]') });
+        return;
+      }
+      const owner = sessionId;
+      void (async () => {
+        try {
+          await client.request('screen-capture.set', { sessionId: owner, enabled: enabling, ...(enabling ? { confirmScreenCapture: true } : {}) });
+          if (activeSession.current !== owner) return;
+          await refreshStatus();
+          push({ kind: 'meta', text: enabling ? t('本会话截图已授权', 'Screen capture allowed for this Session') : t('本会话截图授权已撤销', 'Screen capture consent revoked') });
+        } catch (error) {
+          if (activeSession.current === owner) push({ kind: 'error', text: errorCode(error) ?? 'screen_capture_update_failed' });
+        }
       })();
       return;
     }

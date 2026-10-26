@@ -21,6 +21,7 @@ export function GrantOverview({ grant, state, copied, disabled, onCopy, onRevoke
       <Row label={t('MCP 范围', 'MCP scope')}><span>{grant.allowedMcpServers.length} {t('Server', 'servers')} · {grant.allowedMcpTools.length} {t('工具', 'tools')}</span></Row>
       <Row label={t('有效期', 'Expires')}><span>{grant.expiresAt === null ? t('无期限', 'No expiry') : new Date(grant.expiresAt).toLocaleString()}</span></Row>
       <Row label={t('普通审批代答', 'Operator replies')}><span>{grant.allowOperator ? t('允许', 'Allowed') : t('关闭', 'Disabled')}</span></Row>
+      <Row label={t('屏幕截图', 'Screen capture')}><span>{grant.allowScreenCapture === true ? t('单独授权', 'Explicitly allowed') : t('关闭', 'Disabled')}</span></Row>
     </div>
     <details className="catalog-fold">
       <summary>{t('授权详情与连接配置', 'Grant details and connection')}</summary>

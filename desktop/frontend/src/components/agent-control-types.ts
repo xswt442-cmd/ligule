@@ -15,6 +15,8 @@ export type Grant = {
   defaultPolicy: PolicyMode;
   allowedPolicies: PolicyMode[];
   allowOperator: boolean;
+  allowScreenCapture?: boolean;
+  confirmedScreenCapture?: boolean;
   allowedMcpServers: string[];
   allowedMcpTools: string[];
   confirmedFullAccess: boolean;
