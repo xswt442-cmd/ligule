@@ -60,6 +60,7 @@ import { networkPlugin } from '../tools/network.js';
 import { createTodoWritePlugin } from '../tools/todo-write.js';
 import { createReadImagePlugin } from '../tools/read-image.js';
 import { createReadDocumentPlugin } from '../tools/read-document.js';
+import { createSearchSupport, type SearchStatus } from './search.js';
 import { createScreenshotPlugin } from '../tools/screenshot.js';
 import { createMediaStore, imagePreview } from '../capability/media.js';
 import { checkedImageReferences, IMAGE_LIMITS, type ImageReference } from '../session/media.js';
@@ -218,6 +219,7 @@ function policyRuleKey(rule: Pick<PolicyRule, 'tool' | 'match' | 'target' | 'pat
 
 interface HostSessionBase {
   readonly id: string;
+  readonly search: SearchStatus;
   readonly session: SessionLog;
   readonly listeners: ((event: SessionEvent) => void)[];
   readonly asks: Set<() => void>;
@@ -816,13 +818,15 @@ export function createHost({
   }
 
   // Settings can inspect the Host-configured runtime registry before opening a conversation.
-  // This assembles metadata only; no tool run, extension import, or MCP connection is started.
+  // Assemble metadata and check configured credential availability without running tools or connecting MCP.
   async function settingsToolCatalog(env: ProjectEnvironment, skills: SkillRegistry): Promise<ReturnType<Kernel['catalog']>> {
+    const search = await createSearchSupport(env.config, env.layers);
     const kernel = createKernel({ config: env.config });
     const mcp = createMcpRegistry(env.mcpConfigs);
     const managedProcesses = createManagedProcessRegistry();
     const basePlugins: Plugin<Kernel>[] = [
       ...plugins,
+      ...(search.plugin === undefined ? [] : [search.plugin]),
       ...(skills.skills.length === 0 ? [] : [createSkillPlugin(skills, () => env.mcpConfigs.map((server) => server.name))]),
       createMcpPlugin(mcp),
     ];
@@ -1552,6 +1556,7 @@ export function createHost({
     const asks = new Set<() => void>();
     const modeState: ModeState = { file: undefined, tools: [], undo: () => {} };
     const configuredLoopLimits = loopLimitsOf(config);
+    const search = await createSearchSupport(config, env.layers);
     // 新会话可能尚未选择模式，因此在创建记录时再解析模式身份。
     const session = observedSession(createSessionLog({
       directory,
@@ -1596,6 +1601,7 @@ export function createHost({
     });
     const state: HostSessionBase = {
       id,
+      search: search.status,
       session,
       listeners,
       asks,
@@ -1906,7 +1912,7 @@ export function createHost({
     const fragments: ExtensionPromptFragment[] = [];
     // 派生执行继承父会话的策略和静态提示词前缀，但不能再注册子 Agent。
     // 直接使用底层提供方；派生事件记录在其独立会话中。
-    const basePlugins = [...loaded, createMcpPlugin(mcp, mcpAuthorization)];
+    const basePlugins = [...loaded, createMcpPlugin(mcp, mcpAuthorization), ...(search.plugin === undefined ? [] : [search.plugin])];
     // 提问属于父会话，因为派生执行没有客户端可以回答。
     // 提问和审批走不同流程；只有支持交互回答的客户端才注册提问工具。
     const asked = interactive === false ? [] : [createAskUserPlugin({
@@ -2296,6 +2302,7 @@ export function createHost({
         policy: { mode: state.chain.mode, source: state.chain.modeSource, default: state.chain.configuredMode() },
         permission: sessionPermissionView(state, canControlPermission),
         screenCapture: { enabled: state.screenCapture.enabled, source: state.screenCapture.source, changeAllowed: permissionControl },
+        search: state.search,
         generation: generationView(state.generation),
       },
       pending,
@@ -3002,6 +3009,7 @@ export function createHost({
             policyDefault: state.chain.configuredMode(),
             permission: sessionPermissionView(state, canControlPermission),
             screenCapture: { enabled: state.screenCapture.enabled, source: state.screenCapture.source, changeAllowed: permissionControl },
+            search: state.search,
             denials: state.chain.denials(),
             delegation: currentGrant === undefined ? null : {
               grantId: currentGrant.id,

@@ -120,6 +120,7 @@ test('a real stdio MCP process uses its grant ceiling and detects revocation', a
       assert.equal(config.structuredContent.delegation.maxPermissionProfile, 'workspace-write');
       assert.equal(config.structuredContent.delegation.maxNetwork, 'policy');
       assert.equal(config.structuredContent.effective.policy.mode, 'auto');
+      assert.deepEqual(config.structuredContent.effective.search, { configured: false, available: false, code: 'search_not_configured' });
 
       const noApproval = await client.callTool({
         name: 'ligule_session_configure', arguments: { sessionId, changes: { policy: 'none' } },

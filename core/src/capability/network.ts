@@ -289,6 +289,10 @@ const POST_BODY_LIMIT = 64 * 1024;
 const POST_RESPONSE_LIMIT = 2 * 1024 * 1024;
 const POST_TIMEOUT_LIMIT = 30_000;
 
+export function isBearerCredential(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 8192 && /^[A-Za-z0-9._~+\/-]+=*$/u.test(value);
+}
+
 /** Send one bounded JSON POST to the exact address covered by an existing approval. */
 export async function postJsonTarget(approved: NetworkTarget, { body, bearer, maxBytes, timeoutMs, signal }: {
   body: Record<string, unknown>;
@@ -305,7 +309,7 @@ export async function postJsonTarget(approved: NetworkTarget, { body, bearer, ma
     || strictest(approved.addresses.map(classifyAddress)) !== approved.class) {
     throw new KernelError('post_target_denied');
   }
-  if (typeof bearer !== 'string' || bearer.length > 8192 || !/^[A-Za-z0-9._~+\/-]+=*$/u.test(bearer)) {
+  if (!isBearerCredential(bearer)) {
     throw new KernelError('post_bearer_invalid');
   }
   if (approved.scheme !== 'https:' && approved.class !== 'loopback') {

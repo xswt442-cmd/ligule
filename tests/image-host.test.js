@@ -117,7 +117,7 @@ async function record(directory, sessionId) {
   return text.trimEnd().split(/\r?\n/u).map((line) => JSON.parse(line));
 }
 
-async function withImageHost(run, { permissionControl = false, screenCaptureConsent = false } = {}) {
+async function withImageHost(run, { permissionControl = false, screenCaptureConsent = false, searchLayer, searchReference = API_KEY_ENV, searchCredentialValue } = {}) {
   const scratch = join(process.cwd(), 'testplace', 'tmp');
   await mkdir(scratch, { recursive: true });
   const root = await mkdtemp(join(scratch, 'image-host-'));
@@ -126,18 +126,21 @@ async function withImageHost(run, { permissionControl = false, screenCaptureCons
   const dataRoot = join(root, 'data');
   await Promise.all([projectRoot, homeDirectory, dataRoot, join(projectRoot, '.ligule')].map((path) => mkdir(path, { recursive: true })));
 
-  const envKeys = ['HOME', 'USERPROFILE', 'LIGULE_HOME', API_KEY_ENV];
+  const envKeys = ['HOME', 'USERPROFILE', 'LIGULE_HOME', API_KEY_ENV, ...(searchCredentialValue === undefined ? [] : [searchReference])];
   const previousEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
   process.env.HOME = homeDirectory;
   process.env.USERPROFILE = homeDirectory;
   process.env.LIGULE_HOME = dataRoot;
   process.env[API_KEY_ENV] = 'isolated-local-test-key';
+  if (searchCredentialValue !== undefined) process.env[searchReference] = searchCredentialValue;
 
   const endpoint = await providerEndpoint();
   let pair;
   let host;
   try {
-    await writeFile(join(dataRoot, 'config.toml'), '[policy]\nmode = "auto"\n', 'utf8');
+    const searchConfig = '\n[search]\nprovider = "deepseek"\nserviceId = "official-search"\n';
+    await writeFile(join(dataRoot, 'config.toml'), '[policy]\nmode = "auto"\n' + (searchLayer === 'user' ? searchConfig : ''), 'utf8');
+    if (searchLayer === 'project') await writeFile(join(projectRoot, '.ligule', 'config.toml'), searchConfig, 'utf8');
     const png = await sharp({ create: { width: 12, height: 8, channels: 3, background: '#4269ed' } }).png().toBuffer();
     await writeFile(join(projectRoot, 'sample.png'), png);
 
@@ -174,6 +177,8 @@ async function withImageHost(run, { permissionControl = false, screenCaptureCons
         { id: 'image-off', imageInput: false },
       ],
     }];
+    if (searchLayer !== undefined) initialServices.push({ id: 'official-search', name: 'Official search binding',
+      api: 'chat-completions', baseURL: 'https://api.deepseek.com', apiKeyEnv: searchReference, models: ['deepseek-flash'] });
     const settings = await client.request('config.get', projectInfo);
     const userLayer = settings.layers.find((entry) => entry.layer === 'user');
     assert.ok(userLayer, 'the real Host config store exposes the user layer version');
@@ -355,6 +360,69 @@ test('internal subagent document rendering remains within its inherited tool cei
     await assert.rejects(createMediaStore(config, sessionId).read(result.result.images[0]), { code: 'image_owner_mismatch' });
     assert.ok(imageUrls(endpoint.requests[2]).length > 0);
   });
+});
+
+test('configured search uses the full manifest, rejects invalid queries, and remains subject to network permission', async () => {
+  await withImageHost(async ({ client, projectRoot, sessionDirectory, endpoint }) => {
+    const sessionId = await createSession(client, projectRoot);
+    assert.deepEqual((await client.request('status.get', { sessionId })).search,
+      { configured: true, available: true, serviceId: 'official-search' });
+    endpoint.enqueue(textPlan('minimal search check'));
+    await client.request('run.start', { sessionId, input: 'minimal manifest' });
+    assert.equal(endpoint.requests[0].tools.some(tool => tool.function.name === 'web_search'), false);
+    await setFullMode(client, sessionId);
+    endpoint.enqueue(toolPlan('web_search', { query: '   ' }), textPlan('invalid query rejected'));
+    await client.request('run.start', { sessionId, input: 'check whitespace validation only' });
+    assert.equal(endpoint.requests[1].tools.some(tool => tool.function.name === 'web_search'), true);
+    assert.equal((await record(sessionDirectory, sessionId)).find(event => event.kind === 'tool' && event.tool === 'web_search').result.code, 'search_query_invalid');
+    await client.request('permission.set', { sessionId, permissionProfile: 'read-only', permissionNetwork: 'disabled' });
+    endpoint.enqueue(toolPlan('web_search', { query: 'permission gate check' }), textPlan('network permission rejected'));
+    await client.request('run.start', { sessionId, input: 'check permission before any service request' });
+    assert.equal(endpoint.requests.at(-2).tools.some(tool => tool.function.name === 'web_search'), false);
+    const refused = (await record(sessionDirectory, sessionId)).filter(event => event.kind === 'tool' && event.tool === 'web_search').at(-1);
+    assert.equal(refused.result.failed, true);
+    assert.match(refused.result.code, /^permission_/u);
+    assert.equal(JSON.stringify(await record(sessionDirectory, sessionId)).includes('isolated-local-test-key'), false);
+  }, { searchLayer: 'user', permissionControl: true });
+});
+
+test('a project cannot enable search with a user service credential', async () => {
+  await withImageHost(async ({ client, projectRoot, endpoint }) => {
+    const sessionId = await createSession(client, projectRoot);
+    await setFullMode(client, sessionId);
+    assert.deepEqual((await client.request('status.get', { sessionId })).search,
+      { configured: false, available: false, code: 'search_not_configured' });
+    endpoint.enqueue(textPlan('project-only search is absent'));
+    await client.request('run.start', { sessionId, input: 'show available tools' });
+    assert.equal(endpoint.requests[0].tools.some(tool => tool.function.name === 'web_search'), false);
+  }, { searchLayer: 'project' });
+});
+
+test('a configured service without a credential does not register a failing search tool', async () => {
+  await withImageHost(async ({ client, projectRoot, endpoint }) => {
+    const sessionId = await createSession(client, projectRoot);
+    await setFullMode(client, sessionId);
+    const status = (await client.request('status.get', { sessionId })).search;
+    assert.equal(status.configured, true);
+    assert.equal(status.available, false);
+    assert.ok(['search_credential_missing', 'credential_store_unavailable'].includes(status.code));
+    endpoint.enqueue(textPlan('search requires a configured credential'));
+    await client.request('run.start', { sessionId, input: 'show available tools' });
+    assert.equal(endpoint.requests[0].tools.some(tool => tool.function.name === 'web_search'), false);
+  }, { searchLayer: 'user', searchReference: `LIGULE_MISSING_SEARCH_${randomUUID().replaceAll('-', '').toUpperCase()}` });
+});
+
+test('a malformed credential is diagnosed before advertising a search tool', async () => {
+  await withImageHost(async ({ client, projectRoot, endpoint }) => {
+    const sessionId = await createSession(client, projectRoot);
+    await setFullMode(client, sessionId);
+    const status = (await client.request('status.get', { sessionId })).search;
+    assert.equal(status.available, false);
+    assert.equal(status.code, 'search_credential_invalid');
+    endpoint.enqueue(textPlan('invalid search credential is unavailable'));
+    await client.request('run.start', { sessionId, input: 'show available tools' });
+    assert.equal(endpoint.requests[0].tools.some(tool => tool.function.name === 'web_search'), false);
+  }, { searchLayer: 'user', searchReference: 'LIGULE_BAD_SEARCH_HEADER', searchCredentialValue: 'invalid header key' });
 });
 
 test('screenshot remains unauthorized for an ordinary controller even with an image model and full tool mode', async () => {
