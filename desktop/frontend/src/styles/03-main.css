@@ -21,6 +21,38 @@
   background: var(--bg);
 }
 
+.browser-control {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+  min-width: 0;
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
+
+.browser-control-status {
+  max-width: 15rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-control-note {
+  max-width: 14rem;
+  white-space: normal;
+}
+
+.browser-control-actions {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.browser-control-error {
+  color: var(--bad);
+  white-space: nowrap;
+}
+
 .title {
   display: flex;
   flex-direction: column;

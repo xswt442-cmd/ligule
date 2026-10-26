@@ -81,6 +81,9 @@ test('a record kind the terminal does not draw yields no rows instead of guessin
 test('a slash line the UI table does not own goes to the host as one message', options, () => {
   assert.deepEqual(routeInput('  读一下 note.txt  ', false), { kind: 'run', text: '读一下 note.txt' });
   assert.deepEqual(routeInput('/tools', false), { kind: 'command', name: 'tools', argument: '' });
+  assert.deepEqual(routeInput('/browser', false), { kind: 'command', name: 'browser', argument: '' });
+  assert.deepEqual(routeInput('/browser stop', true), { kind: 'command', name: 'browser', argument: 'stop' });
+  assert.deepEqual(routeInput('/browser resume', true), { kind: 'command', name: 'browser', argument: 'resume' });
   assert.deepEqual(routeInput('/MODE now', false), { kind: 'command', name: 'mode', argument: 'now' });
   // 模板命令不在界面命令表中，仍应由 Host 正常处理。
   assert.deepEqual(routeInput('/git:release:prepare 3', false), { kind: 'run', text: '/git:release:prepare 3' });

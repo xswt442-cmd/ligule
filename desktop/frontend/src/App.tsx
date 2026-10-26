@@ -19,6 +19,7 @@ import { DiagnosticsPanel } from './components/DiagnosticsPanel';
 import { ExportPanel } from './components/ExportPanel';
 import { HelpPanel } from './components/HelpPanel';
 import { UsageMeter } from './components/UsageMeter';
+import { BrowserControl } from './components/BrowserControl';
 import { TranscriptViewport, FIRST_INDEX, streamAnchor } from './components/TranscriptViewport';
 import { Palette, type Command } from './components/Palette';
 import { keepEscape } from './components/ui';
@@ -1659,6 +1660,8 @@ export function App({ transport }: { transport: Transport }) {
         </div>
         {running && <span className="running-label" aria-live="polite" title={progressLabel}><span className="status-dot" /><span className="running-detail">{progressLabel}</span></span>}
         {status?.usage && <UsageMeter usage={status.usage} running={running} seconds={seconds} />}
+        {sessionId !== null && <BrowserControl key={`${sessionId}:${observingExternalSession ? 'read-only' : 'managed'}`} client={client} sessionId={sessionId} browser={status?.browser}
+          readOnly={observingExternalSession} onStatus={(next) => { if (active.current === next.sessionId) setStatus(next); }} />}
         <button className="icon-button" type="button" title={`${t('命令面板', 'Command palette')} (${formatKeys(CURRENT['palette'])})`} aria-label={t('命令面板', 'Command palette')} onClick={() => setPaletteOpen(true)}><Icon name="search" size={17} /></button>
         {sessionId !== null && <SessionActions key={sessionId} client={client} sessionId={sessionId} name={sessionLabel.name} archived={sessionLabel.archived}
           readOnly={observingExternalSession}
