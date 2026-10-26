@@ -59,6 +59,7 @@ import { minimalPlugin } from '../tools/minimal.js';
 import { networkPlugin } from '../tools/network.js';
 import { createTodoWritePlugin } from '../tools/todo-write.js';
 import { createReadImagePlugin } from '../tools/read-image.js';
+import { createScreenshotPlugin } from '../tools/screenshot.js';
 import { createMediaStore } from '../capability/media.js';
 import { checkedImageReferences, IMAGE_LIMITS, type ImageReference } from '../session/media.js';
 import { createSkillPlugin } from '../tools/skill.js';
@@ -162,6 +163,7 @@ interface HostOptions {
   readonly interactive?: boolean;
   readonly permission?: PermissionContext;
   readonly permissionControl?: boolean;
+  readonly screenCaptureConsent?: boolean;
   readonly agentControl?: {
     readonly grantId: string;
     readonly storePath: string;
@@ -224,6 +226,7 @@ interface HostSessionBase {
   readonly managedProcesses: ManagedProcessRegistry;
   readonly managedGrantId?: string;
   permission: PermissionContext;
+  readonly screenCapture: { enabled: boolean; source: 'none' | 'startup' | 'trusted-ui' | 'grant'; controller: AbortController };
   policyOverride: PolicyMode | null;
   readonly mode: ModeState;
   loopIterations: number;
@@ -687,8 +690,9 @@ export function createHost({
   config, provider, plugins = [minimalPlugin, networkPlugin], policy, logger, modeName, modePaths, skillRegistry,
   templateRegistry, extensions = { paths: [], ignored: [] }, loadEnvironment, configStore, configLayers, configStoreFor,
   deriveProvider = providerFromConfig, interactive = false, permission = DEFAULT_PERMISSION_CONTEXT, permissionControl = false,
-  agentControl,
+  agentControl, screenCaptureConsent = false,
 }: HostOptions): Host {
+  if (typeof screenCaptureConsent !== 'boolean') throw new KernelError('screen_capture_consent_invalid');
   // 每个项目环境持有自己的配置快照、提供方、策略、模式、记录目录和可写配置层。
   // 在加载环境时校验配置，避免等到第一次模型请求才发现错误。
   // 文件系统边界同时限制工具访问范围和指令文件向上查找的范围。
@@ -825,6 +829,7 @@ export function createHost({
       ...basePlugins,
       createTodoWritePlugin(),
       createReadImagePlugin(),
+      createScreenshotPlugin(),
       managedProcessPlugin(managedProcesses),
       ...(interactive ? [createAskUserPlugin({ ask: async () => { throw new KernelError('settings_catalog_not_executable'); } })] : []),
       createSubagentPlugin({
@@ -1201,6 +1206,7 @@ export function createHost({
   // 释放会话的 MCP 子进程、扩展监听器、模板登记表和记录锁。
   // 会话记录继续保存在磁盘上；这里只清理运行时状态。
   async function retire(state: HostSessionState, shutdown = false): Promise<void> {
+    state.screenCapture.controller.abort(new KernelError('screen_capture_session_closed'));
     const inFlight = retirementTasks.get(state.id);
     if (inFlight !== undefined) {
       if (!shutdown) return await inFlight;
@@ -1599,6 +1605,7 @@ export function createHost({
       managedProcesses,
       ...(agentControl === undefined ? {} : { managedGrantId: agentControl.grantId }),
       permission: sessionPermission,
+      screenCapture: { enabled: false, source: 'none', controller: new AbortController() },
       policyOverride: initial?.policy ?? null,
       loopIterations: initial?.loopIterations ?? configuredLoopLimits.iterations,
       loopModelCalls: configuredLoopLimits.modelCalls,
@@ -1622,6 +1629,21 @@ export function createHost({
     await session.acquire();
     const cleanup = [];
     try {
+    const captureGrant = await activeDelegation();
+    const initialCapture = agentControl === undefined ? screenCaptureConsent : captureGrant?.allowScreenCapture === true;
+    if (initialCapture) {
+      if (recover && ((await session.header())?.formatVersion ?? 0) < 1) throw new KernelError('session_screen_capture_format_unsupported');
+      await session.append({ kind: 'screenCapture', ignorable: true, enabled: true,
+        source: agentControl === undefined ? 'startup' : 'grant', at: new Date().toISOString() });
+      state.screenCapture.enabled = true;
+      state.screenCapture.source = agentControl === undefined ? 'startup' : 'grant';
+    }
+    const authorizeScreenCapture = async (): Promise<AbortSignal> => {
+      if (!state.screenCapture.enabled) throw new KernelError('screen_capture_not_authorized');
+      if (agentControl !== undefined && (await activeDelegation())?.allowScreenCapture !== true) throw new KernelError('screen_capture_not_authorized');
+      state.screenCapture.controller.signal.throwIfAborted();
+      return state.screenCapture.controller.signal;
+    };
     if (recover) {
       const events = await session.read();
       state.sessionPolicyRules = events.filter((item) => item.kind === 'sessionPolicyRule').map((item) => item.rule as PolicyRule);
@@ -1914,7 +1936,9 @@ export function createHost({
       },
     })];
     const assembly = loadAssembly(kernel, [...basePlugins, createTodoWritePlugin({ session }),
-      createReadImagePlugin({ media, supportsImages: () => live.imageInput === true }), managedProcessPlugin(managedProcesses), ...asked, createCompactPlugin({
+      createReadImagePlugin({ media, supportsImages: () => live.imageInput === true }),
+      createScreenshotPlugin({ media, supportsImages: () => live.imageInput === true, authorize: authorizeScreenCapture }),
+      managedProcessPlugin(managedProcesses), ...asked, createCompactPlugin({
       // 压缩实例随所选模型重建；工具经取值函数读取当前实例。派生子会话不注册此工具，
       // 子会话仍由自身构建的自动压缩管理预算。
       compaction: () => state.compaction ?? null,
@@ -1930,6 +1954,7 @@ export function createHost({
       sessionId: id,
       logger,
       plugins: basePlugins,
+      authorizeScreenCapture,
       modePaths,
       modeFile: () => state.mode.file,
       promptFragments: () => fragments,
@@ -2266,6 +2291,7 @@ export function createHost({
         loopIterations: state.loopIterations,
         policy: { mode: state.chain.mode, source: state.chain.modeSource, default: state.chain.configuredMode() },
         permission: sessionPermissionView(state, canControlPermission),
+        screenCapture: { enabled: state.screenCapture.enabled, source: state.screenCapture.source, changeAllowed: permissionControl },
         generation: generationView(state.generation),
       },
       pending,
@@ -2284,6 +2310,7 @@ export function createHost({
         allowedPolicies: knownGrant.allowedPolicies,
         allowedMcpServers: knownGrant.allowedMcpServers,
         allowedMcpTools: knownGrant.allowedMcpTools,
+        allowScreenCapture: knownGrant.allowScreenCapture,
       },
     };
   }
@@ -2639,6 +2666,37 @@ export function createHost({
           evictEnvironment(state.environment);
           return { sessionId };
         }
+        case 'screen-capture.set': {
+          if (!permissionControl) throw new KernelError('screen_capture_control_unavailable');
+          const state = open(sessionId);
+          const enabled = message.params.enabled === true;
+          if (enabled && message.params.confirmScreenCapture !== true) throw new KernelError('screen_capture_confirmation_required');
+          if (enabled && state.running !== undefined) throw new KernelError('run_already_running');
+          if (enabled && state.permissionChanging) throw new KernelError('permission_change_in_progress');
+          const decisionAt = new Date().toISOString();
+          state.screenCapture.enabled = false;
+          state.screenCapture.source = 'none';
+          state.screenCapture.controller.abort(new KernelError(enabled ? 'screen_capture_replaced' : 'screen_capture_revoked'));
+          const intent = enabled ? new AbortController() : state.screenCapture.controller;
+          if (enabled) {
+            state.screenCapture.controller = intent;
+            state.permissionChanging = true;
+          }
+          try {
+            if (enabled && agentControl !== undefined && (await activeDelegation())?.allowScreenCapture !== true) throw new KernelError('screen_capture_not_authorized');
+            if (((await state.session.header())?.formatVersion ?? 0) < 1) throw new KernelError('session_screen_capture_format_unsupported');
+            if (closing !== undefined) throw new KernelError('host_closed');
+            if (sessions.get(sessionId) !== state || retiringSessions.has(sessionId)) throw new KernelError('session_closing');
+            if (enabled) intent.signal.throwIfAborted();
+            await state.session.append({ kind: 'screenCapture', ignorable: true, enabled, source: 'trusted-ui', at: decisionAt });
+            if (enabled) {
+              intent.signal.throwIfAborted();
+              state.screenCapture.enabled = true;
+              state.screenCapture.source = 'trusted-ui';
+            }
+            return { sessionId, enabled: state.screenCapture.enabled, source: state.screenCapture.source };
+          } finally { if (enabled) state.permissionChanging = false; }
+        }
         case 'session.label': {
           const state = open(sessionId);
           const { name, archived } = message.params;
@@ -2914,6 +2972,7 @@ export function createHost({
             policySource: state.chain.modeSource,
             policyDefault: state.chain.configuredMode(),
             permission: sessionPermissionView(state, canControlPermission),
+            screenCapture: { enabled: state.screenCapture.enabled, source: state.screenCapture.source, changeAllowed: permissionControl },
             denials: state.chain.denials(),
             delegation: currentGrant === undefined ? null : {
               grantId: currentGrant.id,
@@ -2926,6 +2985,7 @@ export function createHost({
               defaultPolicy: currentGrant.defaultPolicy,
               allowedPolicies: currentGrant.allowedPolicies,
               allowOperator: currentGrant.allowOperator,
+              allowScreenCapture: currentGrant.allowScreenCapture,
               allowedMcpServers: currentGrant.allowedMcpServers,
               allowedMcpTools: currentGrant.allowedMcpTools,
             },
@@ -3045,6 +3105,8 @@ export function createHost({
               ...(message.params.allowedPolicyNever === true ? ['never' as const] : []),
             ],
             allowOperator: message.params.allowOperator as boolean,
+            allowScreenCapture: message.params.allowScreenCapture === true,
+            confirmScreenCapture: message.params.confirmScreenCapture === true,
             allowedMcpServers: message.params.allowedMcpServers as string[] | undefined,
             allowedMcpTools: message.params.allowedMcpTools as string[] | undefined,
             confirmFullAccess: message.params.confirmFullAccess as boolean,

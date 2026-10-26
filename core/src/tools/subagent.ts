@@ -25,6 +25,7 @@ import { loadAssembly } from '../kernel/assembly.js';
 import { KernelError, KernelRuntimeError } from '../kernel/error.js';
 import { createTodoWritePlugin } from './todo-write.js';
 import { createReadImagePlugin } from './read-image.js';
+import { createScreenshotPlugin } from './screenshot.js';
 import { createMediaStore } from '../capability/media.js';
 import { boundaryOf } from '../capability/limits.js';
 import type { PermissionContext } from '../kernel/permission.js';
@@ -46,6 +47,7 @@ function stableErrorCode(error: unknown): string {
 }
 
 export interface SubagentDeps {
+  readonly authorizeScreenCapture?: () => Promise<AbortSignal>;
   config: ReturnType<typeof createConfig>;
   provider: SubagentProvider;
   chain: ReturnType<typeof createDecisionChain>;
@@ -212,10 +214,23 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                 ...(typeof deps.config.workspaceRoot === 'string' ? { workspaceRoot: deps.config.workspaceRoot } : {}),
                 ...(typeof deps.config.userHome === 'string' ? { userHome: deps.config.userHome } : {}),
               }, id);
+              let recordedScreenConsent = false;
+              const authorizeScreenCapture = deps.authorizeScreenCapture === undefined ? undefined : async () => {
+                const signal = await deps.authorizeScreenCapture!();
+                if (!recordedScreenConsent) {
+                  await session.append({ kind: 'screenCapture', ignorable: true, enabled: true, source: 'parent', at: new Date().toISOString() });
+                  recordedScreenConsent = true;
+                }
+                return signal;
+              };
               const assembly = loadAssembly(child, [
                 ...deps.plugins,
                 ...(parentTools.has('todo_write') ? [createTodoWritePlugin({ session })] : []),
                 ...(parentTools.has('read_image') ? [createReadImagePlugin({ media, supportsImages: () => provider.imageInput === true })] : []),
+                ...(parentTools.has('screenshot') ? [createScreenshotPlugin({ media,
+                  supportsImages: () => provider.imageInput === true,
+                  authorize: authorizeScreenCapture,
+                })] : []),
               ]);
               disposeAssembly = () => assembly.dispose();
               let structuredSubmitted = false;

@@ -109,7 +109,7 @@ async function record(directory, sessionId) {
   return text.trimEnd().split(/\r?\n/u).map((line) => JSON.parse(line));
 }
 
-async function withImageHost(run) {
+async function withImageHost(run, { permissionControl = false, screenCaptureConsent = false } = {}) {
   const scratch = join(process.cwd(), 'testplace', 'tmp');
   await mkdir(scratch, { recursive: true });
   const root = await mkdtemp(join(scratch, 'image-host-'));
@@ -149,6 +149,8 @@ async function withImageHost(run) {
       configLayers: layers,
       configStoreFor,
       loadEnvironment,
+      permissionControl,
+      screenCaptureConsent,
     });
     const client = createConnection(pair.client);
     const projectInfo = { projectRoot };
@@ -177,6 +179,7 @@ async function withImageHost(run) {
     const sessionDirectoryPath = sessionDirectory(environment.config);
     return await run({
       client,
+      host,
       config: environment.config,
       projectRoot,
       sessionDirectory: sessionDirectoryPath,
@@ -260,6 +263,68 @@ test('real Host keeps read_image out of minimal and sends a decoded image throug
     assert.equal(endpoint.failures.length, 0);
     assert.equal(endpoint.plans.length, 0);
   });
+});
+
+test('screenshot remains unauthorized for an ordinary controller even with an image model and full tool mode', async () => {
+  await withImageHost(async ({ client, projectRoot, sessionDirectory, endpoint }) => {
+    const sessionId = await createSession(client, projectRoot);
+    await setFullMode(client, sessionId);
+    await assert.rejects(client.request('screen-capture.set', { sessionId, enabled: true, confirmScreenCapture: true }), { code: 'screen_capture_control_unavailable' });
+    endpoint.enqueue(toolPlan('screenshot', {}), textPlan('screen permission is required'));
+    await client.request('run.start', { sessionId, input: 'check screen permission only' });
+    const result = (await record(sessionDirectory, sessionId)).find(event => event.kind === 'tool' && event.tool === 'screenshot');
+    assert.equal(result.result.code, 'screen_capture_not_authorized');
+    assert.equal(result.result.images, undefined);
+    assert.deepEqual((await client.request('status.get', { sessionId })).screenCapture, { enabled: false, source: 'none', changeAllowed: false });
+  });
+});
+
+test('trusted screen consent needs confirmation, can be revoked, and is not restored from old Session events', async () => {
+  await withImageHost(async ({ client, projectRoot, sessionDirectory }) => {
+    const sessionId = await createSession(client, projectRoot);
+    await assert.rejects(client.request('screen-capture.set', { sessionId, enabled: true }), { code: 'screen_capture_confirmation_required' });
+    assert.equal((await client.request('screen-capture.set', { sessionId, enabled: true, confirmScreenCapture: true })).enabled, true);
+    assert.equal((await client.request('status.get', { sessionId })).screenCapture.enabled, true);
+    assert.equal((await client.request('screen-capture.set', { sessionId, enabled: false })).enabled, false);
+    await client.request('screen-capture.set', { sessionId, enabled: true, confirmScreenCapture: true });
+    await client.request('session.close', { sessionId });
+    await client.request('session.open', { projectRoot, sessionId });
+    assert.deepEqual((await client.request('status.get', { sessionId })).screenCapture, { enabled: false, source: 'none', changeAllowed: true });
+    const audit = (await record(sessionDirectory, sessionId)).filter(event => event.kind === 'screenCapture');
+    assert.deepEqual(audit.map(event => event.enabled), [true, false, true]);
+    assert.ok(audit.every(event => event.ignorable === true && event.source === 'trusted-ui'));
+  }, { permissionControl: true });
+});
+
+test('revocation during a pending screen consent update wins over the late enable', async () => {
+  await withImageHost(async ({ client, projectRoot }) => {
+    const sessionId = await createSession(client, projectRoot);
+    const enable = client.request('screen-capture.set', { sessionId, enabled: true, confirmScreenCapture: true });
+    const revoke = client.request('screen-capture.set', { sessionId, enabled: false });
+    const results = await Promise.allSettled([enable, revoke]);
+    assert.equal(results[1].status, 'fulfilled');
+    const status = await client.request('status.get', { sessionId });
+    assert.equal(status.screenCapture.enabled, false);
+    assert.equal(status.screenCapture.source, 'none');
+  }, { permissionControl: true });
+});
+
+test('Host shutdown drains a concurrent revocation without reopening the retired Session writer', async () => {
+  await withImageHost(async ({ client, host, projectRoot, sessionDirectory }) => {
+    const sessionId = await createSession(client, projectRoot);
+    const revoke = client.request('screen-capture.set', { sessionId, enabled: false });
+    await Promise.allSettled([revoke, host.release()]);
+    assert.equal((await readdir(sessionDirectory)).filter(name => name.endsWith('.lock')).length, 0);
+  }, { permissionControl: true });
+});
+
+test('explicit process startup consent is recorded without starting a capture', async () => {
+  await withImageHost(async ({ client, projectRoot, sessionDirectory, endpoint }) => {
+    const sessionId = await createSession(client, projectRoot);
+    assert.deepEqual((await client.request('status.get', { sessionId })).screenCapture, { enabled: true, source: 'startup', changeAllowed: false });
+    assert.equal((await record(sessionDirectory, sessionId)).some(event => event.kind === 'screenCapture' && event.enabled === true && event.source === 'startup'), true);
+    assert.equal(endpoint.requests.length, 0);
+  }, { screenCaptureConsent: true });
 });
 
 test('an undeclared model image capability rejects read_image before sending image content', async () => {

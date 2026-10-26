@@ -155,6 +155,7 @@ const delegationOutput = { type: ['object', 'null'], additionalProperties: false
   allowedPolicies: { type: 'array', items: { type: 'string', enum: ['ask', 'auto', 'none', 'never'] } },
   allowedMcpServers: { type: 'array', items: { type: 'string' } },
   allowedMcpTools: { type: 'array', items: { type: 'string' } },
+  allowScreenCapture: { type: 'boolean' },
 }, required: ['grantId', 'maxPermissionProfile', 'maxNetwork', 'allowedPolicies', 'allowedMcpServers', 'allowedMcpTools'] };
 const requestedChanges = { type: ['object', 'null'], additionalProperties: false, properties: {
   mode: { type: 'string' }, policy: { type: 'string' }, model: { type: ['object', 'null'] },
@@ -172,6 +173,7 @@ const configurationOutput = object({
     mode: { type: ['string', 'null'] },
     loopIterations: { type: 'integer', minimum: 1 },
     permission: permissionOutput,
+    screenCapture: object({ enabled: { type: 'boolean' }, source: { type: 'string', enum: ['none', 'startup', 'trusted-ui', 'grant'] }, changeAllowed: { type: 'boolean' } }, ['enabled', 'source']),
     policy: { type: 'object', additionalProperties: false, properties: {
       mode: { type: 'string', enum: ['ask', 'auto', 'none', 'never'] }, source: { type: 'string' }, default: { type: 'string' },
     }, required: ['mode', 'source', 'default'] },

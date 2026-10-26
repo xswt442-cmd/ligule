@@ -74,6 +74,9 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly allowedPolicyNone?: boolean;
   readonly allowedPolicyNever?: boolean;
   readonly allowOperator?: boolean;
+  readonly allowScreenCapture?: boolean;
+  readonly confirmScreenCapture?: boolean;
+  readonly enabled?: boolean;
   readonly confirmUnrestrictedNetwork?: boolean;
   readonly expiresAt?: string;
   readonly field?: string;
@@ -426,6 +429,8 @@ export const METHODS = Object.freeze({
       allowedPolicyNone: { type: 'boolean' },
       allowedPolicyNever: { type: 'boolean' },
       allowOperator: { type: 'boolean' },
+      allowScreenCapture: { type: 'boolean' },
+      confirmScreenCapture: { type: 'boolean' },
       allowedMcpServers: { type: 'array', items: { type: 'string' } },
       allowedMcpTools: { type: 'array', items: { type: 'string' } },
       confirmFullAccess: { type: 'boolean' },
@@ -434,6 +439,12 @@ export const METHODS = Object.freeze({
       confirmWorkspaceTrust: { type: 'boolean', description: 'true only after the trusted UI has shown the project and received the user trust confirmation' },
       expiresAt: { type: 'string' },
     }, required: ['version', 'grantName', 'projectRoot', 'defaultPermissionProfile', 'maxPermissionProfile', 'defaultNetwork', 'maxNetwork', 'defaultPolicy', 'allowOperator', 'confirmFullAccess', 'confirmUnrestrictedNetwork', 'confirmWorkspaceTrust', 'expiresAt'] },
+  },
+  'screen-capture.set': {
+    description: 'Enable or revoke screen capture for this Session and its internal children through a trusted human client',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      sessionId: { type: 'string' }, enabled: { type: 'boolean' }, confirmScreenCapture: { type: 'boolean' },
+    }, required: ['sessionId', 'enabled'] },
   },
   'agent-control.revoke': {
     description: 'Revoke a persisted Agent Control grant using the version returned by agent-control.list',
