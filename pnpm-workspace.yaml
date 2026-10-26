@@ -4,6 +4,13 @@ packages:
   - desktop
   - desktop/frontend
 
+overrides:
+  ip-address@10.7.3: 10.7.4
+  zod@4.6.5: 4.6.6
+  body-parser@2.3.0: 2.4.0
+  fast-uri@3.1.8: 3.1.9
+  exceljs>uuid: 11.1.1
+
 allowBuilds:
   tree-sitter@0.25.1: true
   tree-sitter-bash@0.25.1: true

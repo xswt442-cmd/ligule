@@ -88,6 +88,8 @@ test('XLSX returns sheet names, bounded requested cells, and formula/cache witho
     sheet.getCell('B1').value = 42;
     sheet.getCell('B2').value = { formula: 'B1*2', result: 84 };
     sheet.getCell('B3').value = { formula: '1/0' };
+    sheet.addConditionalFormatting({ ref: 'B1:B3', rules: [{ type: 'dataBar',
+      cfvo: [{ type: 'min' }, { type: 'max' }], color: { argb: 'FF63C384' } }] });
     workbook.addWorksheet('Other');
     await workbook.xlsx.writeFile(join(root, 'sample.xlsx'));
     const { result } = await readDocument(config, { path: 'sample.xlsx', sheet: 'Values',
