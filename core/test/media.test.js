@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import sharp from 'sharp';
 import { createMediaStore, imagePreview, IMAGE_LIMITS } from '../dist/capability/media.js';
 import { sessionDirectory, workspaceDataDirectory } from '../dist/session/list.js';
+import { createSessionLog } from '../dist/session/session.js';
 
 async function withStore(run) {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'media-'));
@@ -106,8 +107,8 @@ test('concurrent image publications have unique references and enforce the stora
   });
 });
 
-test('expired references fail explicitly and publication prunes only owned expired files', async () => {
-  await withStore(async ({ store }) => {
+test('cleanup preserves old referenced images and removes only unreferenced expired images', async () => {
+  await withStore(async ({ config, root, store }) => {
     const bytes = await sharp({ create: { width: 2, height: 2, channels: 3, background: 'red' } }).png().toBuffer();
     const saved = await store.put(bytes, 'desktop');
     const old = new Date(Date.now() - IMAGE_LIMITS.retentionMs - 60_000);
@@ -115,14 +116,34 @@ test('expired references fail explicitly and publication prunes only owned expir
     const metadataPath = join(store.directory, `${saved.id}.json`);
     const imagePath = join(store.directory, `${saved.id}.png`);
     await writeFile(metadataPath, JSON.stringify(reference));
-    await assert.rejects(store.read(reference), { code: 'image_expired' });
     await Promise.all([utimes(metadataPath, old, old), utimes(imagePath, old, old)]);
+    const overridden = { ...config, host: { sessionDirectory: join(root, 'custom-sessions') } };
+    const cleanupStore = createMediaStore(overridden, 'parent');
+    const session = createSessionLog({ directory: sessionDirectory(overridden), id: 'retained-image',
+      meta: { projectRoot: root, workspace: reference.workspace } });
+    await session.append({ kind: 'image', callId: 'image-call' });
+    await session.append({ kind: 'tool', callId: 'image-call', tool: 'browser', result: { content: 'image', failed: false, images: [reference] } });
+    await session.close();
+    const unused = await store.put(bytes, 'desktop');
+    const unusedMetadata = join(store.directory, `${unused.id}.json`);
+    const unusedImage = join(store.directory, `${unused.id}.png`);
+    await Promise.all([utimes(unusedMetadata, old, old), utimes(unusedImage, old, old)]);
+    const quotaFile = await open(join(store.directory, `${randomUUID()}.png`), 'wx');
+    try { await quotaFile.truncate(IMAGE_LIMITS.storageBytes); }
+    finally { await quotaFile.close(); }
+    await assert.rejects(store.put(bytes, 'desktop'), { code: 'image_storage_full' });
+    await access(imagePath);
     const unrelated = join(store.directory, 'user-note.json');
     await writeFile(unrelated, 'keep');
     await utimes(unrelated, old, old);
-    await store.put(bytes, 'browser');
-    await assert.rejects(access(imagePath), { code: 'ENOENT' });
-    await assert.rejects(access(metadataPath), { code: 'ENOENT' });
+    const preview = await cleanupStore.cleanup({ dryRun: true });
+    assert.deepEqual(preview.ids, [unused.id]);
+    await access(imagePath);
+    assert.deepEqual(await createMediaStore(config, 'retained-image', [reference]).read(reference), bytes);
+    await cleanupStore.cleanup({ dryRun: false });
+    await assert.rejects(access(unusedImage), { code: 'ENOENT' });
+    await assert.rejects(access(unusedMetadata), { code: 'ENOENT' });
+    await access(imagePath);
     assert.equal(await readFile(unrelated, 'utf8'), 'keep');
   });
 });

@@ -7,7 +7,8 @@ import sharp from 'sharp';
 import { KernelError } from '../kernel/error.js';
 import { workspaceIdentity } from '../kernel/workspace.js';
 import { dataRoot } from '../kernel/config-file.js';
-import { workspaceDataDirectory, type SessionDirectoryConfig } from '../session/list.js';
+import { sessionDirectories, workspaceDataDirectory, type SessionDirectoryConfig } from '../session/list.js';
+import { parseSessionBytes } from '../session/record.js';
 import { resolveWithin } from './paths.js';
 import { boundaryOf, workingDirectoryOf } from './limits.js';
 import { IMAGE_ID, IMAGE_LIMITS, isImageReference, type ImageReference } from '../session/media.js';
@@ -61,6 +62,118 @@ export function createMediaStore(config: SessionDirectoryConfig, sessionId: stri
     if (!isImageReference(reference) || reference.workspace !== workspace) throw new KernelError('image_owner_mismatch');
     return [reference.id, reference] as const;
   }));
+
+  async function readSessionMedia(): Promise<{ referenced: Set<string>; sessions: Set<string> }> {
+    const referenced = new Set<string>();
+    const sessions = new Set<string>();
+    const directories = sessionDirectories(config);
+    for (const [directoryIndex, sessionDirectory] of directories.entries()) {
+      let names: string[];
+      try { names = await readdir(sessionDirectory); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw error;
+      }
+      for (const name of names) {
+        if (!name.endsWith('.jsonl')) continue;
+        const path = join(sessionDirectory, name);
+        const info = await lstat(path);
+        if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) throw new KernelError('image_storage_link');
+        const headerFile = await open(path, constants.O_RDONLY | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW));
+        let firstLine: string;
+        let bytes: Buffer;
+        try {
+          const opened = await headerFile.stat();
+          if (!opened.isFile() || opened.dev !== info.dev || opened.ino !== info.ino) throw new KernelError('image_storage_invalid');
+          bytes = await headerFile.readFile();
+          const lineEnd = bytes.indexOf(0x0a);
+          firstLine = bytes.subarray(0, lineEnd < 0 ? bytes.length : lineEnd).toString('utf8');
+        } finally { await headerFile.close(); }
+        let header: { kind?: unknown; workspace?: unknown; projectRoot?: unknown } | undefined;
+        try {
+          const parsed: unknown = JSON.parse(firstLine);
+          if (typeof parsed === 'object' && parsed !== null) header = parsed as typeof header;
+        } catch { /* Canonical parser below reports corruption only for this workspace's records. */ }
+        const attributedWorkspace = header?.workspace
+          ?? (typeof header?.projectRoot === 'string' && header.projectRoot !== '' ? workspaceIdentity(header.projectRoot) : undefined);
+        if ((attributedWorkspace !== undefined && attributedWorkspace !== workspace)
+          || (directoryIndex !== 0 && attributedWorkspace !== workspace)) continue;
+        const record = parseSessionBytes(bytes);
+        const verifiedWorkspace = record.header?.workspace
+          ?? (record.header?.projectRoot ? workspaceIdentity(record.header.projectRoot) : undefined);
+        if (verifiedWorkspace !== workspace && directoryIndex !== 0) continue;
+        sessions.add(name.slice(0, -6));
+        for (const event of record.events) {
+          const result = event.kind === 'tool' && typeof event.result === 'object' && event.result !== null
+            ? event.result as { images?: unknown } : undefined;
+          if (!Array.isArray(result?.images)) continue;
+          for (const reference of result.images) {
+            if (!isImageReference(reference) || reference.workspace !== workspace) throw new KernelError('image_reference_invalid');
+            referenced.add(reference.id);
+          }
+        }
+      }
+    }
+    return { referenced, sessions };
+  }
+
+  async function cleanup({ dryRun = true, limit = 100 }: { dryRun?: boolean; limit?: number } = {})
+    : Promise<{ scanned: number; referenced: number; candidates: number; removed: number; bytesFreed: number; ids: string[]; truncated: boolean }> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new KernelError('image_cleanup_limit_invalid');
+    await checkDirectory(false);
+    const mediaState = await readSessionMedia();
+    const references = mediaState.referenced;
+    let compromised: Error | undefined;
+    const unlock = await lockfile.lock(directory, { realpath: false, lockfilePath: join(directory, '.write.lock'),
+      retries: { retries: 20, minTimeout: 20, maxTimeout: 100 }, onCompromised: error => { compromised = error; } });
+    try {
+      await checkDirectory(false);
+      const candidates: { id: string; sessionId: string; image: string; metadata: string; bytes: number }[] = [];
+      let scanned = 0;
+      const sourceSessions = mediaState.sessions;
+      const now = Date.now();
+      for (const name of await readdir(directory)) {
+        if (!name.endsWith('.json') || !IMAGE_ID.test(name.slice(0, -5))) continue;
+        const id = name.slice(0, -5);
+        scanned += 1;
+        if (references.has(id)) continue;
+        const metadata = join(directory, name);
+        const image = join(directory, `${id}.png`);
+        const [metadataInfo, imageInfo] = await Promise.all([lstat(metadata), lstat(image)]);
+        for (const info of [metadataInfo, imageInfo]) {
+          if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) throw new KernelError('image_storage_link');
+        }
+        const stored = JSON.parse((await readRegular(metadata, 8192)).toString('utf8')) as ImageReference;
+        if (!isImageReference(stored) || stored.id !== id || stored.workspace !== workspace) throw new KernelError('image_reference_invalid');
+        if (sourceSessions.has(stored.sessionId)) continue;
+        if (now - Math.max(metadataInfo.mtimeMs, imageInfo.mtimeMs) <= IMAGE_LIMITS.retentionMs) continue;
+        candidates.push({ id, sessionId: stored.sessionId, image, metadata, bytes: metadataInfo.size + imageInfo.size });
+      }
+      if (compromised !== undefined) throw compromised;
+      const ids = candidates.slice(0, limit).map(candidate => candidate.id);
+      if (!dryRun) {
+        // Re-scan canonical logs immediately under the media lock; source session existence protects append/branch races.
+        const latest = await readSessionMedia();
+        let removed = 0;
+        let bytesFreed = 0;
+        const removedIds: string[] = [];
+        for (const candidate of candidates.slice(0, limit)) {
+          if (latest.referenced.has(candidate.id) || latest.sessions.has(candidate.sessionId)) continue;
+          for (const path of [candidate.image, candidate.metadata]) {
+            try { await unlink(path); }
+            catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+          }
+          removed += 1;
+          bytesFreed += candidate.bytes;
+          removedIds.push(candidate.id);
+        }
+        return { scanned, referenced: references.size, candidates: candidates.length, ids: removedIds, removed, bytesFreed,
+          truncated: candidates.length > limit };
+      }
+      return { scanned, referenced: references.size, candidates: candidates.length, ids, removed: 0, bytesFreed: 0,
+        truncated: candidates.length > limit };
+    } finally { await unlock(); }
+  }
   function owns(reference: ImageReference): boolean {
     if (reference.workspace !== workspace) return false;
     if (reference.sessionId === sessionId) return true;
@@ -92,7 +205,6 @@ export function createMediaStore(config: SessionDirectoryConfig, sessionId: stri
     catch (cause) { throw new KernelError('image_reference_invalid', { cause }); }
     if (!isImageReference(reference) || reference.id !== id) throw new KernelError('image_reference_invalid');
     if (!owns(reference)) throw new KernelError('image_owner_mismatch');
-    if (Date.now() - Date.parse(reference.createdAt) > IMAGE_LIMITS.retentionMs) throw new KernelError('image_expired');
     return reference;
   }
 
@@ -119,6 +231,7 @@ export function createMediaStore(config: SessionDirectoryConfig, sessionId: stri
 
   return {
     directory,
+    cleanup,
     read,
     async reference(id: string): Promise<ImageReference> {
       try {
@@ -171,8 +284,7 @@ export function createMediaStore(config: SessionDirectoryConfig, sessionId: stri
           const path = join(directory, name);
           const info = await lstat(path);
           if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) throw new KernelError('image_storage_link');
-          if (Date.now() - info.mtimeMs > IMAGE_LIMITS.retentionMs) await unlink(path);
-          else stored += info.size;
+          stored += info.size;
         }
         if (stored + bytes.length + 8192 > IMAGE_LIMITS.storageBytes) throw new KernelError('image_storage_full');
         signal?.throwIfAborted();
