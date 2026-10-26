@@ -40,4 +40,4 @@ Ligule 分为两条独立发行线，版本可分别推进：
 
 打包前构建当前 Core，并在对应平台重新执行 `pnpm run prepare-runtime`。Desktop 部署、构建与运行树检查，以及 CLI npm staging，逐文件核对 Core 的编译输出、模式、README 和许可证；任何缺失、多余或内容差异均拒绝继续。该检查确认产品实际包含当前构建的 Core，不能代替安装后行为验收。
 
-CLI tarball 只内置私有 Core 的代码与资源；外部运行依赖写入公开包清单，由 npm 为安装系统选择原生依赖。CI 与正式发布均在 Windows、Linux 空消费者中安装同一份 Linux 构建的 tarball，检查搜索、原生绑定、命令语法和 MCP，不能用各平台独立打包来替代跨平台发行物验证。
+CLI tarball 内置私有 Core 的代码与资源，以及无运行依赖的 SheetJS 纯 JavaScript 解析器和许可证；该解析器不携带平台原生二进制。其余运行依赖写入公开包清单，由 npm 为安装系统选择原生依赖。CI 与正式发布均在 Windows、Linux 空消费者中安装同一份 Linux 构建的 tarball，检查搜索、原生绑定、命令语法、文档读取和 MCP，不能用各平台独立打包来替代跨平台发行物验证。

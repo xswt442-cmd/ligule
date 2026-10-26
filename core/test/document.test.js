@@ -88,16 +88,22 @@ test('XLSX returns sheet names, bounded requested cells, and formula/cache witho
     sheet.getCell('B1').value = 42;
     sheet.getCell('B2').value = { formula: 'B1*2', result: 84 };
     sheet.getCell('B3').value = { formula: '1/0' };
+    sheet.getCell('B4').value = { formula: 'B1-B1', result: 0 };
+    sheet.getCell('B5').value = { formula: '1/0', result: { error: '#DIV/0!' } };
+    sheet.getCell('B6').value = { formula: '_xlfn.XLOOKUP(1,A1:A2,B1:B2)' };
     sheet.addConditionalFormatting({ ref: 'B1:B3', rules: [{ type: 'dataBar',
       cfvo: [{ type: 'min' }, { type: 'max' }], color: { argb: 'FF63C384' } }] });
     workbook.addWorksheet('Other');
     await workbook.xlsx.writeFile(join(root, 'sample.xlsx'));
     const { result } = await readDocument(config, { path: 'sample.xlsx', sheet: 'Values',
-      range: { startRow: 1, endRow: 3, startColumn: 2, endColumn: 2 } });
+      range: { startRow: 1, endRow: 6, startColumn: 2, endColumn: 2 } });
     assert.deepEqual(result.sheets, ['Values', 'Other']);
     assert.match(result.chunks[0].text, /B1: 42/u);
     assert.match(result.chunks[1].text, /formula=B1\*2; cached=84/u);
     assert.match(result.chunks[2].text, /formula=1\/0; cached=null/u);
+    assert.match(result.chunks[3].text, /formula=B1-B1; cached=0/u);
+    assert.match(result.chunks[4].text, /cached=\{"error":"#DIV\/0!"\}/u);
+    assert.match(result.chunks[5].text, /formula=_xlfn\.XLOOKUP/u);
     assert.equal(result.chunks.some(chunk => chunk.text.includes('Label')), false);
     await assert.rejects(readDocument(config, { path: 'sample.xlsx', sheet: 'Missing' }), { code: 'document_sheet_not_found' });
   });

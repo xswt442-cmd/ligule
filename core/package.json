@@ -53,7 +53,6 @@
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
     "cross-spawn": "7.0.6",
-    "exceljs": "4.4.0",
     "officeparser": "8.2.0",
     "pdfjs-dist": "6.4.299",
     "proper-lockfile": "4.1.2",
@@ -63,6 +62,7 @@
     "tree-sitter": "^0.25.1",
     "tree-sitter-bash": "^0.25.1",
     "tree-sitter-pwsh": "0.38.1",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "yaml": "^2.9.1",
     "yauzl": "3.4.0"
   },
@@ -77,6 +77,7 @@
     "@types/proper-lockfile": "^4.1.4",
     "@types/yauzl": "3.4.0",
     "docx": "9.5.1",
+    "exceljs": "4.4.0",
     "jszip": "3.10.1",
     "pdf-lib": "1.17.1",
     "pdfkit": "0.17.2",

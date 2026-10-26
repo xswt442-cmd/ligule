@@ -97,35 +97,55 @@ async function office(request: DocumentRequest): Promise<{ result: DocumentResul
 }
 
 async function spreadsheet(request: DocumentRequest): Promise<{ result: DocumentResult }> {
-  const ExcelJS = (await import('exceljs')).default;
-  const workbook = new ExcelJS.Workbook();
-  // ExcelJS declares a legacy Buffer type; its loader accepts the real Node Buffer.
-  await workbook.xlsx.load(request.input as unknown as Parameters<typeof workbook.xlsx.load>[0]);
-  if (workbook.worksheets.length > DOCUMENT_LIMITS.units) throw new KernelError('document_sheet_limit');
-  const sheets = workbook.worksheets.map(sheet => sheet.name);
-  const sheet = request.options.sheet === undefined ? workbook.worksheets[0] : workbook.getWorksheet(request.options.sheet);
+  const XLSX = (await import('xlsx')).default;
+  const options = { type: 'buffer', cellFormula: true, cellDates: true, cellHTML: false,
+    bookVBA: false, bookFiles: false, bookDeps: false, sheetStubs: true, nodim: true, xlfn: true, WTF: true } as const;
+  const metadata = XLSX.read(request.input, { type: 'buffer', bookSheets: true, WTF: true });
+  if (metadata.SheetNames.length > DOCUMENT_LIMITS.units) throw new KernelError('document_sheet_limit');
+  const sheets = metadata.SheetNames;
+  const name = request.options.sheet ?? sheets[0];
+  if (name === undefined || !sheets.includes(name)) throw new KernelError('document_sheet_not_found');
+  const workbook = XLSX.read(request.input, { ...options, sheets: name });
+  const sheet = Object.hasOwn(workbook.Sheets, name) ? workbook.Sheets[name] : undefined;
   if (sheet === undefined) throw new KernelError('document_sheet_not_found');
+  const bounds = sheet['!ref'] === undefined ? undefined : XLSX.utils.decode_range(sheet['!ref']);
+  if (bounds !== undefined && (!Number.isSafeInteger(bounds.e.r) || bounds.e.r < 0 || bounds.e.r >= 1_048_576
+    || !Number.isSafeInteger(bounds.e.c) || bounds.e.c < 0 || bounds.e.c >= 16_384)) throw new KernelError('document_range_invalid');
+  const rows = bounds === undefined ? 0 : bounds.e.r + 1;
+  const columns = bounds === undefined ? 0 : bounds.e.c + 1;
   const start = request.options.range?.startRow ?? request.options.start ?? 1;
-  const end = request.options.range?.endRow ?? Math.min(sheet.rowCount, start + (request.options.count ?? 20) - 1);
-  if (start > Math.max(sheet.rowCount, 1)) throw new KernelError('document_range_invalid');
+  const end = request.options.range?.endRow ?? Math.min(rows, start + (request.options.count ?? 20) - 1);
+  if (start > Math.max(rows, 1)) throw new KernelError('document_range_invalid');
   const left = request.options.range?.startColumn ?? 1;
-  const right = request.options.range?.endColumn ?? Math.min(Math.max(sheet.columnCount, 1), 10);
+  const right = request.options.range?.endColumn ?? Math.min(Math.max(columns, 1), 10);
   const chunks: DocumentChunk[] = [];
+  let cachedSheet: import('xlsx').WorkSheet | undefined;
   for (let row = start; row <= end; row++) {
     const cells: string[] = [];
     for (let column = left; column <= right; column++) {
-      const cell = sheet.getCell(row, column);
-      const formula = cell.formula;
-      const value = formula === undefined ? cell.text : `formula=${formula}; cached=${JSON.stringify(cell.result ?? null)}`;
-      cells.push(`${cell.address}: ${value}`);
+      const address = XLSX.utils.encode_cell({ r: row - 1, c: column - 1 });
+      const cell = sheet[address];
+      if (cell?.t === 'n' && !Number.isFinite(cell.v)) throw new KernelError('document_cell_invalid');
+      // A value-only pass distinguishes a missing formula cache from SheetJS's formula default zero.
+      if (cell?.f !== undefined && cachedSheet === undefined) {
+        cachedSheet = XLSX.read(request.input, { ...options, sheets: name, sheetRows: end, cellFormula: false }).Sheets[name];
+        if (cachedSheet === undefined) throw new KernelError('document_sheet_not_found');
+      }
+      const cache = cachedSheet?.[address];
+      const cached = cache?.t === 'e' ? { error: cache.w ?? String(cache.v) } : cache?.v ?? null;
+      let value = cell?.f === undefined
+        ? cell?.v instanceof Date ? cell.v.toISOString() : cell?.v === undefined ? '' : String(cell.v)
+        : `formula=${cell.f}; cached=${JSON.stringify(cached)}`;
+      if (cell?.w !== undefined && cell.w !== value && cell.f === undefined) value += ` (display=${JSON.stringify(cell.w)})`;
+      cells.push(`${address}: ${value}`);
     }
-    chunks.push({ location: `${sheet.name}!row ${row}`, text: cells.join('\n') });
+    chunks.push({ location: `${name}!row ${row}`, text: cells.join('\n') });
   }
-  const total = request.options.range?.endRow ?? sheet.rowCount;
+  const total = request.options.range?.endRow ?? rows;
   return { result: boundedChunks(request, chunks, total, ['Formulas are not evaluated; embedded objects and charts are not extracted.'],
     (index, offset) => request.options.range === undefined
-      ? { ...request.options, sheet: sheet.name, start: start + index, offset }
-      : { ...request.options, sheet: sheet.name, range: { ...request.options.range, startRow: start + index }, offset }, sheets) };
+      ? { ...request.options, sheet: name, start: start + index, offset }
+      : { ...request.options, sheet: name, range: { ...request.options.range, startRow: start + index }, offset }, sheets) };
 }
 
 async function pdf(request: DocumentRequest): Promise<{ result: DocumentResult; png?: Buffer }> {
