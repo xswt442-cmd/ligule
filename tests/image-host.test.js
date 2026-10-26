@@ -16,6 +16,14 @@ import { exportImageUrl } from '../core/dist/host/export.js';
 const API_KEY_ENV = 'LIGULE_IMAGE_HOST_TEST_KEY';
 const requireCore = createRequire(new URL('../core/package.json', import.meta.url));
 const sharp = requireCore('sharp');
+const { PDFDocument, StandardFonts } = requireCore('pdf-lib');
+
+async function documentFixture(projectRoot) {
+  const pdf = await PDFDocument.create();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  pdf.addPage([300, 200]).drawText('Document host text', { font, size: 14, x: 20, y: 150 });
+  await writeFile(join(projectRoot, 'document.pdf'), await pdf.save());
+}
 
 function deferred() {
   let resolve;
@@ -288,6 +296,64 @@ test('real Host keeps read_image out of minimal and sends a decoded image throug
     assert.ok((await readFile(missingPath, 'utf8')).includes('图片文件未随导出包含'));
     assert.equal(endpoint.failures.length, 0);
     assert.equal(endpoint.plans.length, 0);
+  });
+});
+
+test('real Host exposes read_document only in full, projects text and sends rendered PDF pages as persistent images', async () => {
+  await withImageHost(async ({ client, config, projectRoot, sessionDirectory, endpoint }) => {
+    await documentFixture(projectRoot);
+    const sessionId = await createSession(client, projectRoot);
+    endpoint.enqueue(textPlan('minimal document check'));
+    await client.request('run.start', { sessionId, input: 'minimal tools' });
+    assert.equal(endpoint.requests[0].tools.some(tool => tool.function.name === 'read_document'), false);
+    await setFullMode(client, sessionId);
+    endpoint.enqueue(toolPlan('read_document', { path: 'document.pdf', count: 1 }), textPlan('text received'));
+    await client.request('run.start', { sessionId, input: 'read document text' });
+    assert.equal(endpoint.requests[1].tools.some(tool => tool.function.name === 'read_document'), true);
+    const textResult = (await record(sessionDirectory, sessionId)).find(event => event.kind === 'tool' && event.tool === 'read_document');
+    assert.match(JSON.parse(textResult.result.content).chunks[0].text, /Document host text/u);
+    assert.equal(textResult.result.images, undefined);
+    endpoint.enqueue(toolPlan('read_document', { path: 'document.pdf', renderPage: 1 }), textPlan('rendered page received'));
+    await client.request('run.start', { sessionId, input: 'render document page' });
+    const rendered = (await record(sessionDirectory, sessionId)).filter(event => event.kind === 'tool' && event.tool === 'read_document').at(-1);
+    assert.equal(rendered.result.failed, false);
+    const reference = rendered.result.images[0];
+    assert.equal(reference.source, 'document');
+    assert.equal(reference.sessionId, sessionId);
+    const image = await createMediaStore(config, sessionId).read(reference);
+    assert.deepEqual(Buffer.from(imageUrls(endpoint.requests.at(-1))[0].split(',')[1], 'base64'), image);
+    const preview = await client.request('session.image.preview', { projectRoot, sessionId, imageId: reference.id });
+    assert.equal((await sharp(Buffer.from(preview.base64, 'base64')).metadata()).format, 'webp');
+    assert.equal((await client.request('status.get', { sessionId })).screenCapture.enabled, false);
+    const noImages = await createSession(client, projectRoot, 'image-off');
+    await setFullMode(client, noImages);
+    endpoint.enqueue(toolPlan('read_document', { path: 'missing.pdf', renderPage: 1 }), textPlan('rendering refused'));
+    await client.request('run.start', { sessionId: noImages, input: 'attempt image without capability' });
+    const refused = (await record(sessionDirectory, noImages)).find(event => event.kind === 'tool' && event.tool === 'read_document');
+    assert.equal(refused.result.code, 'model_image_input_unsupported');
+    endpoint.enqueue(toolPlan('read_document', { path: 'document.pdf' }), textPlan('text without image support'));
+    await client.request('run.start', { sessionId: noImages, input: 'read text without image support' });
+    assert.equal((await record(sessionDirectory, noImages)).filter(event => event.kind === 'tool' && event.tool === 'read_document').at(-1).result.failed, false);
+  });
+});
+
+test('internal subagent document rendering remains within its inherited tool ceiling and owns its image', async () => {
+  await withImageHost(async ({ client, config, projectRoot, sessionDirectory, endpoint }) => {
+    await documentFixture(projectRoot);
+    const sessionId = await createSession(client, projectRoot);
+    await setFullMode(client, sessionId);
+    endpoint.enqueue(toolPlan('subagent', { task: 'Render document.pdf page 1' }),
+      toolPlan('read_document', { path: 'document.pdf', renderPage: 1 }), textPlan('child saw page'), textPlan('parent received result'));
+    await client.request('run.start', { sessionId, input: 'delegate page rendering' });
+    assert.equal(endpoint.requests[1].tools.some(tool => tool.function.name === 'read_document'), true);
+    const childName = (await readdir(sessionDirectory)).find(name => name.startsWith(`${sessionId}.sub-`) && name.endsWith('.jsonl'));
+    const childId = childName.slice(0, -'.jsonl'.length);
+    const result = (await record(sessionDirectory, childId)).find(event => event.kind === 'tool' && event.tool === 'read_document');
+    assert.equal(result.result.failed, false);
+    assert.equal(result.result.images[0].sessionId, childId);
+    assert.equal(result.result.images[0].source, 'document');
+    await assert.rejects(createMediaStore(config, sessionId).read(result.result.images[0]), { code: 'image_owner_mismatch' });
+    assert.ok(imageUrls(endpoint.requests[2]).length > 0);
   });
 });
 

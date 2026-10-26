@@ -25,6 +25,7 @@ import { loadAssembly } from '../kernel/assembly.js';
 import { KernelError, KernelRuntimeError } from '../kernel/error.js';
 import { createTodoWritePlugin } from './todo-write.js';
 import { createReadImagePlugin } from './read-image.js';
+import { createReadDocumentPlugin } from './read-document.js';
 import { createScreenshotPlugin } from './screenshot.js';
 import { createMediaStore } from '../capability/media.js';
 import { boundaryOf } from '../capability/limits.js';
@@ -227,6 +228,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                 ...deps.plugins,
                 ...(parentTools.has('todo_write') ? [createTodoWritePlugin({ session })] : []),
                 ...(parentTools.has('read_image') ? [createReadImagePlugin({ media, supportsImages: () => provider.imageInput === true })] : []),
+                ...(parentTools.has('read_document') ? [createReadDocumentPlugin({ media, supportsImages: () => provider.imageInput === true })] : []),
                 ...(parentTools.has('screenshot') ? [createScreenshotPlugin({ media,
                   supportsImages: () => provider.imageInput === true,
                   authorize: authorizeScreenCapture,

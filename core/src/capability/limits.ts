@@ -19,6 +19,9 @@ export const DEFAULT_LIMITS = Object.freeze({
   fetchBytes: 64_000,
   fetchTimeoutMs: 15_000,
   fetchRedirects: 5,
+  documentBytes: 20 * 1024 * 1024,
+  documentOutputBytes: 24_000,
+  documentTimeoutMs: 15_000,
   // 扩展提示词片段的字节预算；模型输入的总量上限仍然适用。
   promptFragmentBytes: 8_000,
   // 上下文压缩的压力阈值和保留预算比例。

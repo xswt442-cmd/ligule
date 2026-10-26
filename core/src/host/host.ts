@@ -59,6 +59,7 @@ import { minimalPlugin } from '../tools/minimal.js';
 import { networkPlugin } from '../tools/network.js';
 import { createTodoWritePlugin } from '../tools/todo-write.js';
 import { createReadImagePlugin } from '../tools/read-image.js';
+import { createReadDocumentPlugin } from '../tools/read-document.js';
 import { createScreenshotPlugin } from '../tools/screenshot.js';
 import { createMediaStore, imagePreview } from '../capability/media.js';
 import { checkedImageReferences, IMAGE_LIMITS, type ImageReference } from '../session/media.js';
@@ -829,6 +830,7 @@ export function createHost({
       ...basePlugins,
       createTodoWritePlugin(),
       createReadImagePlugin(),
+      createReadDocumentPlugin(),
       createScreenshotPlugin(),
       managedProcessPlugin(managedProcesses),
       ...(interactive ? [createAskUserPlugin({ ask: async () => { throw new KernelError('settings_catalog_not_executable'); } })] : []),
@@ -1938,6 +1940,7 @@ export function createHost({
     })];
     const assembly = loadAssembly(kernel, [...basePlugins, createTodoWritePlugin({ session }),
       createReadImagePlugin({ media, supportsImages: () => live.imageInput === true }),
+      createReadDocumentPlugin({ media, supportsImages: () => live.imageInput === true }),
       createScreenshotPlugin({ media, supportsImages: () => live.imageInput === true, authorize: authorizeScreenCapture }),
       managedProcessPlugin(managedProcesses), ...asked, createCompactPlugin({
       // 压缩实例随所选模型重建；工具经取值函数读取当前实例。派生子会话不注册此工具，

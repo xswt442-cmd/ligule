@@ -10,3 +10,4 @@ allowBuilds:
   tree-sitter-pwsh@0.38.1: true
   koffi@3.1.1: true
   electron-winstaller@5.4.0: false
+  tesseract.js@7.0.0: false
