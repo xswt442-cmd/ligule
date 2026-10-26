@@ -8,10 +8,16 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ### 简体中文
 
+- `full` 模式新增 `read_image`，支持持久图像引用、两种模型协议、会话恢复与分支；Markdown 可携带图片副本导出。
+- 模型服务可按模型声明 `imageInput`，未知图像能力默认拒绝，子代理图片按会话隔离。
+
 - 外控新增 `ligule_session_close` 关闭空闲会话并释放名额，人工接管同样释放名额；会话历史继续保留。
 - `full` 模式新增 `todo_write`，支持每轮独立、持久保存历史的完整任务清单，内部子代理各自隔离。
 
 ### English
+
+- The `full` mode includes `read_image` with persistent images, both provider protocols, Session recovery and branching, and portable Markdown image exports.
+- Per-model `imageInput` declarations keep unknown image capabilities disabled and isolate internal subagent images by Session.
 
 - External controllers can close idle sessions with `ligule_session_close`; closing and human takeover release session slots while preserving history.
 - The `full` mode includes `todo_write` for per-turn task lists with durable history and isolated internal subagent state.
