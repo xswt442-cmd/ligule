@@ -8,6 +8,8 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ### 简体中文
 
+- 支持可信配置的无头 Playwright MCP 浏览器，按会话隔离，截图沿用持久图像通路；`/browser` 可查看状态、停止及恢复。
+
 - `full` 模式新增 `web_search`，复用已配置的官方 DeepSeek 服务；仅在配置和凭据可用时注册，仍受网络 Permission 与 Policy 控制。
 
 - `full` 新增 `read_document`，受限读取 PDF、DOCX、XLSX、PPTX，支持定位续读、公式缓存与 PDF 页面图像；独立进程限制资源并响应取消。
@@ -21,6 +23,8 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 - `full` 模式新增 `todo_write`，支持每轮独立、持久保存历史的完整任务清单，内部子代理各自隔离。
 
 ### English
+
+- Trusted configuration can enable a headless Playwright MCP browser with Session isolation and durable screenshots; `/browser` shows status, stops, and resumes it.
 
 - The `full` mode adds `web_search`, reusing a configured official DeepSeek service. It is registered only when configuration and credentials are available and remains subject to network Permission and Policy.
 

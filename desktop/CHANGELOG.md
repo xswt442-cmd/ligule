@@ -8,6 +8,8 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 ### 简体中文
 
+- 托管无头浏览器支持按会话隔离和持久截图；顶栏可查看状态、停止及恢复，外控只读会话显示接管与关闭提示。
+
 - `full` 模式新增 `web_search`，复用已配置的官方 DeepSeek 服务；仅在配置和凭据可用时注册，仍受网络 Permission 与 Policy 控制。
 
 - 历史工具图片可按需预览，包含外控及已关闭会话；显示资源随会话切换释放。`full` 新增受限文档读取与 PDF 页面图像，沿用同一图片预览通路。
@@ -19,6 +21,8 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 - `full` 模式新增 `todo_write`，每轮任务清单随会话保存历史，内部子代理使用独立清单。
 
 ### English
+
+- Managed headless browsing provides Session isolation and durable screenshots. The top bar shows status, Stop and Resume controls, with takeover and close guidance for read-only external sessions.
 
 - The `full` mode adds `web_search`, reusing a configured official DeepSeek service. It is registered only when configuration and credentials are available and remains subject to network Permission and Policy.
 

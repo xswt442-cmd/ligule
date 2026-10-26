@@ -235,6 +235,25 @@ MCP 调用以 `mcp:<服务器>/<工具>` 进入 Host 的 Policy 判定。配置�
 
 取消当前轮次会取消正在等待的 MCP 请求；已在外部服务器产生的副作用需要核对。服务器意外断连时调用失败，不自动重新连接或重放；确认外部状态后，在桌面版重连 Host，或退出并重新启动终端界面，再重新披露工具。Skill 声明的 MCP 依赖只检查服务器是否已配置，不能证明它可连接，也不会授予调用权限。
 
+### 托管浏览器
+
+托管浏览器由 Ligule 以 MCP Server `ligule-browser` 启动 Playwright MCP。配置只接受使用者配置、命令行 flag 或 managed 配置层中的 `[browser]`；项目和目录配置不能指定浏览器程序。支持的配置形状如下，两个路径都必须是绝对路径：
+
+```toml
+[browser]
+provider = "playwright-mcp"
+entryPoint = "/absolute/path/to/node_modules/@playwright/mcp/cli.js"
+executablePath = "/absolute/path/to/chromium"
+```
+
+`entryPoint` 必须指向受支持版本 `@playwright/mcp` **0.0.83** 的 `cli.js`，`executablePath` 指向 Chromium 浏览器可执行文件。Ligule 以 headless 和 isolated 模式启动；每个 Session 及派生子任务使用独立的浏览器上下文和存储目录。浏览器进程不受 Ligule 的 OS 网络沙箱约束，因此配置浏览器会启动能访问该操作系统网络的外部进程。
+
+使用前需要当前会话的 Permission 为 `full-access`、网络为 `unrestricted`，并且平台报告完整的进程管理能力；`network = "policy"` 或 `network = "disabled"` 时会拒绝浏览器操作。MCP Server `ligule-browser` 仍需按其精确配置摘要在可信界面信任。外控 Agent 的 Grant 还必须允许该 Server 以及被调用的精确 MCP 工具；这些信任和 Grant 不会绕过 Policy。
+
+浏览器只开放 `browser_navigate`、`browser_snapshot`、`browser_click`、`browser_type`、`browser_press_key`、`browser_wait_for`、`browser_take_screenshot`、`browser_close` 和 `browser_handle_dialog`。导航只接受不含用户名或密码的 HTTP(S) URL；截图只返回当前 viewport。接口拒绝 `filename`、整页或元素截图参数，以及执行脚本、文件上传、安装扩展和调整 viewport 等能力。
+
+TUI 输入 `/browser` 可查看配置、可用性、Permission、暂停状态和 MCP 连接状态；`/browser stop` 会暂停并终止当前 Session 及派生任务的浏览器进程，`/browser resume` 只解除暂停，不会启动浏览器实例。运行中的轮次也可执行 stop。外控只读会话不能本地执行这两项操作，需先接管或关闭外控会话。桌面版的 Browser Stop 使用相同的 Session 范围。人工停止、取消轮次、关闭 Session 或撤销生效的 MCP 信任会终止对应浏览器进程；恢复后，下次需要浏览器工具时才会重新连接。
+
 ### 常见问题
 
 - `tui_terminal_required`：请在交互式终端运行 `ligule`；脚本中使用 `ligule run`。

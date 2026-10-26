@@ -235,6 +235,25 @@ MCP calls enter Host Policy as `mcp:<server>/<tool>`. A configured server runs a
 
 Cancelling a turn cancels the pending MCP request; check any side effects already produced by the server. Unexpected disconnection fails the call without automatic reconnection or replay. Check the external state, reconnect the desktop Host or restart the terminal UI, and disclose the tools again. A Skill's MCP dependency check only verifies that the server is configured; it does not establish connectivity or grant permission to call its tools.
 
+### Managed browser
+
+Ligule launches Playwright MCP as the managed MCP server `ligule-browser`. Browser settings are accepted only from the user, command-line flag, or managed configuration layer under `[browser]`; project and directory configuration cannot choose the browser executable. Both paths in this example must be absolute:
+
+```toml
+[browser]
+provider = "playwright-mcp"
+entryPoint = "/absolute/path/to/node_modules/@playwright/mcp/cli.js"
+executablePath = "/absolute/path/to/chromium"
+```
+
+`entryPoint` must point to `cli.js` from the supported `@playwright/mcp` version **0.0.83**. `executablePath` names the Chromium executable. Ligule starts it headless and isolated; each Session and derived child task uses its own browser context and storage directory. The browser process is outside Ligule's OS network sandbox, so it can reach networks available to that operating-system process.
+
+The current Session must have `full-access` Permission, `unrestricted` networking, and full process-management capability reported by the platform. Browser operations are refused when networking is `policy` or `disabled`. The `ligule-browser` MCP server must also be trusted in a trusted interface for its exact configuration digest. An external Agent's Grant must allow that server and each exact MCP tool it calls. Trust and Grants do not bypass Policy.
+
+The browser exposes only `browser_navigate`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_press_key`, `browser_wait_for`, `browser_take_screenshot`, `browser_close`, and `browser_handle_dialog`. Navigation accepts only HTTP(S) URLs without embedded usernames or passwords. Screenshots return the current viewport only. The interface rejects `filename`, full-page or element screenshot parameters, and capabilities such as script evaluation, file upload, extension installation, and viewport resizing.
+
+In the TUI, `/browser` shows configuration, availability, Permission, paused state, and MCP connection state. `/browser stop` pauses the browser and terminates its processes for the current Session and derived tasks. `/browser resume` only clears the pause; it does not launch an instance. Stop is available while a turn is running. An externally controlled read-only Session cannot use either action locally; take over or close that external Session first. Desktop's Browser Stop has the same Session scope. A human stop, turn cancellation, Session close, or revocation of effective MCP trust terminates the corresponding browser process. After resume, the next browser tool call connects it when needed.
+
 ### Common errors
 
 - `tui_terminal_required`: Run `ligule` in an interactive terminal; use `ligule run` in a script.
