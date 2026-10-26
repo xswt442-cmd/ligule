@@ -21,6 +21,7 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 - 外控新增 `ligule_session_close` 关闭空闲会话并释放名额，人工接管同样释放名额；会话历史继续保留。
 - `full` 模式新增 `todo_write`，支持每轮独立、持久保存历史的完整任务清单，内部子代理各自隔离。
+- 委派运行支持整个任务和单次模型请求的期限、父子共享模型调用次数上限；失败结果保留已确认的用量与部分正文。`full` 新增 `present`，记录工作区文件交付时的类型、大小和 SHA-256。图片按 Session 引用保留，过期且未引用的图片可有界清理。
 
 ### English
 
@@ -37,6 +38,7 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 - External controllers can close idle sessions with `ligule_session_close`; closing and human takeover release session slots while preserving history.
 - The `full` mode includes `todo_write` for per-turn task lists with durable history and isolated internal subagent state.
+- Delegated runs support whole-task and per-request time limits plus a shared parent/child model-call budget; failures retain known usage and partial text. The `full` mode adds `present` with file type, size, and SHA-256 metadata. Session references protect images from expiration; old unreferenced images support bounded cleanup.
 
 ## [0.1.0] - 2026-10-24
 

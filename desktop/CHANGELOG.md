@@ -19,6 +19,7 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 - `full` 模式新增 `read_image` 与持久图像引用，Markdown 导出包含相对图片附件；模型设置可选择图像输入能力并在应用重启后保留。
 
 - `full` 模式新增 `todo_write`，每轮任务清单随会话保存历史，内部子代理使用独立清单。
+- 运行结果提供已知的任务预算、部分输出和文件交付元数据；`full` 的 `present` 记录工作区文件类型、大小与摘要。仍被 Session 引用的图片超过 30 天也保持可用。
 
 ### English
 
@@ -33,6 +34,7 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 - The `full` mode includes `read_image`, persistent image references and relative Markdown image assets; model settings preserve image capability selections across application restarts.
 
 - The `full` mode includes `todo_write` with persistent task-list history and separate lists for internal subagents.
+- Run results retain known task budgets, partial output, and file-delivery metadata. The `full` mode adds `present` with file type, size, and digest; images still referenced by Sessions remain available beyond 30 days.
 
 ## [0.1.0] - 2026-10-24
 

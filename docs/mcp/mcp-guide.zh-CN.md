@@ -72,6 +72,14 @@ Windows 路径示例：
 
 `ligule_run` 与 `ligule_run_start` 接受可选 `delegation`。其中 `mode` 可选择具名或内联模式，但只能缩小当前会话的工具和提示片段范围，不能扩大会话、Permission、Policy 或 Grant 上限。`outputSchema` 可要求该轮提交符合受支持 JSON Schema 的结构化结果；模型必须调用 `ligule_delegation_result` 提交，通过校验后运行才会以有效结构化结果完成。无效提交可以在本轮现有迭代预算内纠正。如果运行最终只返回普通文本、没有有效提交，会以 `delegation_result_missing` 失败；结果为 `state: failed`、`stopReason: validation_failed`、`validation.status: invalid`。Loop 会在写入成功终态前把 Session 轮次记为失败。此前的工具副作用和 Session 记录都会保留，不会回滚或重放。取消和模型提供方失败仍保留各自的结果原因。未设置 `outputSchema` 时，普通运行完成行为不变。模式和结果契约只作用于本次运行，不会创建新会话或修改项目配置。内部 `subagent` 是模型可调用的工具，和 MCP 外控的一轮委派不是同一个会话。
 
+### 任务预算与文件交付
+
+`delegation.budget` 可选地收紧 `maxModelCalls`（总逻辑模型调用数）、`timeoutMs`（整个任务期限）和 `requestTimeoutMs`（单次模型请求超时）。项目 `[loop]` 的 `totalModelCalls`、`taskTimeoutMs`、`requestTimeoutMs` 决定上限；默认分别取已配置的 `modelCalls`、1,800,000 毫秒（30 分钟）和 120,000 毫秒（2 分钟）。整个任务最多 86,400,000 毫秒（24 小时），单次请求最多 3,600,000 毫秒（1 小时）且不能长于任务。父循环、内部子代理、自动压缩共享总逻辑调用数；同一 Provider 请求内部的传输重试不重复计数。
+
+预算耗尽、任务期限和单次请求超时分别报告 `task_model_budget_exhausted`、`task_deadline_exceeded`、`task_request_timeout`，对应 `stopReason` 为 `budget_exhausted`、`deadline_exceeded`、`request_timeout`。`ligule_run_await` 的等待超时不会取消任务。`ligule_session_configure` 返回 `effective.taskLimits`，`status.get` 显示运行中或最近任务的快照。运行失败时也会保留已确认的 `usage`、`task` 和 `userSeq`；中断前已有正文会标记 `output.partial: true`。
+
+`full` 工具模式提供 `present({files: [{path, description?}]})`，每次最多提交 16 个工作区内现有普通文件。工具校验工作区与文件边界，记录相对路径、媒体类型、字节数、SHA-256、说明及所属 Session。单文件最多 20 MiB，一次调用合计最多 64 MiB。运行成功时，`artifacts` 除 Session 引用外还可包含 `kind: file` 项；运行失败仍保留此前已确认的文件交付。这些元数据只描述当时磁盘上的文件，不会复制文件或保证永久可下载，之后的修改或删除也不会根据哈希重建。
+
 ## Agent Control 项目授权
 
 需要让 MCP 会话使用受控 Permission 时，先在受信任的 TUI 输入 `/control create`，或在 Desktop「设置 → 外部控制」创建绑定项目的 Grant。Grant 保存默认权限、权限上限、网络默认值与上限、允许的 Policy、是否允许普通 Operator 操作及到期时间。`full-access` 和不受限网络必须在创建界面分别确认。授权只适用于 Grant 绑定的项目；它不是远程客户端身份认证，也不解除操作系统 Sandbox 限制或 Policy 硬拒绝。
