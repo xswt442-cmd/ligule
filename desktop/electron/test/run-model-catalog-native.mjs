@@ -3,14 +3,16 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = dirname(dirname(dirname(testDirectory)));
 const desktopRoot = join(repositoryRoot, 'desktop');
 const node = join(desktopRoot, 'vendor', 'node', 'node.exe');
-const electron = join(desktopRoot, 'node_modules', 'electron', 'dist', 'electron.exe');
+const configuredElectron = process.argv.find(argument => argument.startsWith('--electron-exe='))?.slice('--electron-exe='.length);
+if (configuredElectron !== undefined && !isAbsolute(configuredElectron)) throw new Error('native_electron_path_must_be_absolute');
+const electron = configuredElectron ?? join(desktopRoot, 'node_modules', 'electron', 'dist', 'electron.exe');
 const hostEntry = join(desktopRoot, 'electron', 'dist', 'host-entry.js');
 const cli = join(repositoryRoot, 'core', 'dist', 'host', 'desktop-entry.js');
 const harness = join(testDirectory, 'model-catalog-native.cjs');
@@ -120,12 +122,15 @@ environment.LIGULE_MODEL_CATALOG_EVIDENCE = evidenceRoot;
 environment.LIGULE_MODEL_CATALOG_SHOTS = shotsRoot;
 
 async function registerWorkspace() {
-  const preflight = spawn(node, [hostEntry, cli], { cwd: repositoryRoot, env: environment, stdio: ['pipe', 'pipe', 'pipe', 'ipc'], windowsHide: true });
-  preflight.stderr.on('data', () => {});
+  const preflight = spawn(node, [hostEntry, cli], { cwd: workspace, env: environment, stdio: ['pipe', 'pipe', 'pipe', 'ipc'], windowsHide: true });
+  let stderr = '';
+  preflight.stderr.setEncoding('utf8');
+  preflight.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-4096); });
   let pending = '';
   const answer = new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('model_catalog_workspace_registration_timeout')), 20_000);
     preflight.once('error', error => { clearTimeout(timer); reject(error); });
+    preflight.once('exit', code => { clearTimeout(timer); reject(new Error(`model_catalog_workspace_registration_exit:${code}:${stderr.trim()}`)); });
     preflight.stdout.setEncoding('utf8');
     preflight.stdout.on('data', chunk => {
       pending += chunk;
