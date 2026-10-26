@@ -27,7 +27,7 @@ import { createTodoWritePlugin } from './todo-write.js';
 import { createReadImagePlugin } from './read-image.js';
 import { createReadDocumentPlugin } from './read-document.js';
 import { createScreenshotPlugin } from './screenshot.js';
-import { createMediaStore } from '../capability/media.js';
+import { createMediaStore, type MediaStore } from '../capability/media.js';
 import { boundaryOf } from '../capability/limits.js';
 import type { PermissionContext } from '../kernel/permission.js';
 
@@ -48,6 +48,7 @@ function stableErrorCode(error: unknown): string {
 }
 
 export interface SubagentDeps {
+  readonly createMcp?: (id: string, media: MediaStore) => Promise<{ plugin: Parameters<typeof loadAssembly>[1][number]; close(): Promise<void> }>;
   readonly authorizeScreenCapture?: () => Promise<AbortSignal>;
   config: ReturnType<typeof createConfig>;
   provider: SubagentProvider;
@@ -197,6 +198,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
               }),
             });
             let disposeAssembly: (() => void) | undefined;
+            let closeMcp: (() => Promise<void>) | undefined;
             let disposeResultTool: (() => void) | undefined;
             let undoMode = () => {};
             let undoParentRestrictions = () => {};
@@ -224,8 +226,11 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                 }
                 return signal;
               };
+              const mcp = deps.createMcp === undefined ? undefined : await deps.createMcp(id, media);
+              closeMcp = mcp === undefined ? undefined : () => mcp.close();
               const assembly = loadAssembly(child, [
                 ...deps.plugins,
+                ...(mcp === undefined ? [] : [mcp.plugin]),
                 ...(parentTools.has('todo_write') ? [createTodoWritePlugin({ session })] : []),
                 ...(parentTools.has('read_image') ? [createReadImagePlugin({ media, supportsImages: () => provider.imageInput === true })] : []),
                 ...(parentTools.has('read_document') ? [createReadDocumentPlugin({ media, supportsImages: () => provider.imageInput === true })] : []),
@@ -359,7 +364,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                     try { disposeResultTool?.(); }
                     finally {
                       try { disposeAssembly?.(); }
-                      finally { await session.close(); }
+                      finally { try { await closeMcp?.(); } finally { await session.close(); } }
                     }
                   }
                 }

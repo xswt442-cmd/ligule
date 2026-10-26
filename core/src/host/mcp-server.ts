@@ -176,6 +176,9 @@ const configurationOutput = object({
     screenCapture: object({ enabled: { type: 'boolean' }, source: { type: 'string', enum: ['none', 'startup', 'trusted-ui', 'grant'] }, changeAllowed: { type: 'boolean' } }, ['enabled', 'source']),
     search: object({ configured: { type: 'boolean' }, available: { type: 'boolean' },
       serviceId: { type: 'string', maxLength: 128 }, code: { type: 'string', maxLength: 128 } }, ['configured', 'available']),
+    browser: object({ configured: { type: 'boolean' }, available: { type: 'boolean' }, permitted: { type: 'boolean' },
+      paused: { type: 'boolean' }, connected: { type: 'boolean' }, changeAllowed: { type: 'boolean' },
+      code: { type: 'string', maxLength: 128 } }, ['configured', 'available', 'permitted', 'paused', 'connected', 'changeAllowed']),
     policy: { type: 'object', additionalProperties: false, properties: {
       mode: { type: 'string', enum: ['ask', 'auto', 'none', 'never'] }, source: { type: 'string' }, default: { type: 'string' },
     }, required: ['mode', 'source', 'default'] },

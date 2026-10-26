@@ -255,6 +255,14 @@ export const METHODS = Object.freeze({
       imageId: { type: 'string', minLength: 36, maxLength: 36 },
     }, required: ['projectRoot', 'sessionId', 'imageId'] },
   },
+  'browser.stop': {
+    description: 'Stop and pause this Session managed browser, including derived browsers; trusted local UI only.',
+    parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
+  },
+  'browser.resume': {
+    description: 'Allow this Session managed browser to start again after a human stopped it; does not launch it.',
+    parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
+  },
   'session.control': {
     description: 'Send a human action to the local Host that currently owns this externally controlled Session. The same Host remains its only writer; the local action can read its configuration, observe, message, answer, cancel, or take over.',
     parameters: { type: 'object', properties: {

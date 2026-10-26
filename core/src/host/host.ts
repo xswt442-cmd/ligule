@@ -61,6 +61,8 @@ import { createTodoWritePlugin } from '../tools/todo-write.js';
 import { createReadImagePlugin } from '../tools/read-image.js';
 import { createReadDocumentPlugin } from '../tools/read-document.js';
 import { createSearchSupport, type SearchStatus } from './search.js';
+import { createBrowserSupport, type BrowserSupport } from '../capability/browser.js';
+import { assertBrowserArguments, browserToolPolicy, BROWSER_SERVER } from '../capability/browser-policy.js';
 import { createScreenshotPlugin } from '../tools/screenshot.js';
 import { createMediaStore, imagePreview } from '../capability/media.js';
 import { checkedImageReferences, IMAGE_LIMITS, type ImageReference } from '../session/media.js';
@@ -144,6 +146,7 @@ interface ProjectEnvironment extends Omit<EnvironmentSeed, 'layers' | 'store' | 
   policy?: PolicyConfig;
   generation?: SessionGeneration;
   pendingModel?: Record<string, unknown>;
+  browserSupport?: Promise<BrowserSupport>;
 }
 
 interface HostOptions {
@@ -220,6 +223,9 @@ function policyRuleKey(rule: Pick<PolicyRule, 'tool' | 'match' | 'target' | 'pat
 interface HostSessionBase {
   readonly id: string;
   readonly search: SearchStatus;
+  readonly browser: BrowserSupport;
+  browserPaused: boolean;
+  readonly childMcp: Map<McpRegistry, string>;
   readonly session: SessionLog;
   readonly listeners: ((event: SessionEvent) => void)[];
   readonly asks: Set<() => void>;
@@ -712,6 +718,8 @@ export function createHost({
     const root = resolve(own.config.workspaceRoot ?? own.config.boundary);
     const runtimeConfig: RuntimeConfig = Object.freeze({ ...own.config, workspaceRoot: root, boundary: resolve(root, own.config.boundary) });
     const mcpConfig = isRecord(own.config.mcp) ? { mcp: { servers: own.config.mcp.servers } } : {};
+    const configuredMcp = mcpServerConfigs(mcpConfig, process.env, root);
+    if (configuredMcp.some(server => server.name === BROWSER_SERVER)) throw new KernelError('browser_server_name_reserved');
     return {
       projectRoot: root,
       layers: own.layers ?? {},
@@ -724,7 +732,7 @@ export function createHost({
       skillRegistry: own.skillRegistry,
       templateRegistry: own.templateRegistry,
       extensions: own.extensions ?? { paths: [], ignored: [] },
-      mcpConfigs: mcpServerConfigs(mcpConfig, process.env, root),
+      mcpConfigs: configuredMcp,
       directory: sessionDirectory(runtimeConfig),
     };
   }
@@ -806,7 +814,15 @@ export function createHost({
     return loaded;
   }
 
+  async function browserForEnvironment(env: ProjectEnvironment): Promise<BrowserSupport> {
+    env.browserSupport ??= createBrowserSupport(env.config, env.layers);
+    const browser = await env.browserSupport;
+    if (browser.server !== undefined && !env.mcpConfigs.some(server => server.name === BROWSER_SERVER)) env.mcpConfigs.push(browser.server);
+    return browser;
+  }
+
   async function currentMcpConfigs(env: ProjectEnvironment): Promise<ReturnType<typeof mcpServerConfigs>> {
+    await browserForEnvironment(env);
     if (loadEnvironment === undefined) return env.mcpConfigs;
     const latest = await loadConfigLayers({ projectRoot: env.projectRoot });
     const config = createConfig({
@@ -814,15 +830,20 @@ export function createHost({
       ...(env.layers.flag === undefined ? {} : { flag: env.layers.flag }),
     });
     const mcpConfig = isRecord(config.mcp) ? { mcp: { servers: config.mcp.servers } } : {};
-    return mcpServerConfigs(mcpConfig, process.env, env.projectRoot);
+    const servers = mcpServerConfigs(mcpConfig, process.env, env.projectRoot);
+    if (servers.some(server => server.name === BROWSER_SERVER)) throw new KernelError('browser_server_name_reserved');
+    const browser = await createBrowserSupport({ ...config, boundary: env.config.boundary, workspaceRoot: env.projectRoot },
+      { ...latest, ...(env.layers.flag === undefined ? {} : { flag: env.layers.flag }) });
+    return [...servers, ...(browser.server === undefined ? [] : [browser.server])];
   }
 
   // Settings can inspect the Host-configured runtime registry before opening a conversation.
   // Assemble metadata and check configured credential availability without running tools or connecting MCP.
   async function settingsToolCatalog(env: ProjectEnvironment, skills: SkillRegistry): Promise<ReturnType<Kernel['catalog']>> {
     const search = await createSearchSupport(env.config, env.layers);
+    await browserForEnvironment(env);
     const kernel = createKernel({ config: env.config });
-    const mcp = createMcpRegistry(env.mcpConfigs);
+    const mcp = createMcpRegistry(env.mcpConfigs, { toolPolicy: browserToolPolicy });
     const managedProcesses = createManagedProcessRegistry();
     const basePlugins: Plugin<Kernel>[] = [
       ...plugins,
@@ -863,9 +884,22 @@ export function createHost({
       if (state.environment !== env) continue;
       for (const previous of env.mcpConfigs) {
         const next = current.find((server) => server.name === previous.name);
-        if (next === undefined || next.identityDigest !== previous.identityDigest) await state.mcp.revoke(previous.name);
+        if (next === undefined || next.identityDigest !== previous.identityDigest) await revokeSessionMcp(state, previous.name);
       }
     }
+  }
+
+  async function revokeSessionMcp(state: HostSessionState, name: string): Promise<void> {
+    await Promise.all([state.mcp, ...state.childMcp.keys()].map(registry => registry.revoke(name)));
+    if (name === BROWSER_SERVER) await Promise.all([state.id, ...state.childMcp.values()].map(id => state.browser.clearSession(id)));
+  }
+
+  function browserView(state: HostSessionState) {
+    const denied = permissionDenial(state.permission, 'external');
+    return { ...state.browser.status, permitted: state.browser.status.available && denied === undefined,
+      ...(state.browser.status.code === undefined && denied !== undefined ? { code: denied.code } : {}),
+      paused: state.browserPaused, connected: [state.mcp, ...state.childMcp.keys()].some(registry => registry.activeServers().includes(BROWSER_SERVER)),
+      changeAllowed: permissionControl };
   }
 
   async function readOnlySessionConfig(projectRoot: string): Promise<RuntimeConfig> {
@@ -1238,7 +1272,7 @@ export function createHost({
       const failures: unknown[] = [];
       const resources = [
         ['managedProcessesClosed', () => state.managedProcesses.close()],
-        ['mcpClosed', () => state.mcp.close()],
+        ['mcpClosed', async () => { await state.mcp.close(); await state.browser.closeSession(state.id); }],
         ['extensionsDisposed', () => state.extensions.dispose()],
         ['assemblyDisposed', () => state.assembly.dispose()],
       ] as const;
@@ -1371,6 +1405,9 @@ export function createHost({
     state.modelCredentialBindings = Object.keys(layers).length === 0 ? undefined
       : modelConfigOf(createConfig({ user: layers.user ?? {}, flag: layers.flag ?? {} }));
     const controller = new AbortController();
+    let browserCleanup: Promise<unknown> | undefined;
+    const stopBrowser = () => { browserCleanup = revokeSessionMcp(state, BROWSER_SERVER).then(() => undefined, error => error); };
+    controller.signal.addEventListener('abort', stopBrowser, { once: true });
     const progress = beginProgress(state, connection, initialPhase);
     const settleAsks = (): void => { for (const settle of state.asks) settle(); };
     controller.signal.addEventListener('abort', settleAsks, { once: true });
@@ -1380,6 +1417,8 @@ export function createHost({
         return await action(controller.signal, progress.report);
       } finally {
         controller.signal.removeEventListener('abort', settleAsks);
+        controller.signal.removeEventListener('abort', stopBrowser);
+        const browserCleanupError = await browserCleanup;
         state.running = undefined;
         changeProgressPhase(state, connection, 'settling');
         try {
@@ -1409,6 +1448,7 @@ export function createHost({
             publishProgress(state, connection);
           }
         }
+        if (browserCleanupError !== undefined) throw browserCleanupError;
       }
     })();
     state.operation = operation;
@@ -1557,6 +1597,7 @@ export function createHost({
     const modeState: ModeState = { file: undefined, tools: [], undo: () => {} };
     const configuredLoopLimits = loopLimitsOf(config);
     const search = await createSearchSupport(config, env.layers);
+    const browser = await browserForEnvironment(env);
     // 新会话可能尚未选择模式，因此在创建记录时再解析模式身份。
     const session = observedSession(createSessionLog({
       directory,
@@ -1602,6 +1643,9 @@ export function createHost({
     const state: HostSessionBase = {
       id,
       search: search.status,
+      browser,
+      browserPaused: false,
+      childMcp: new Map(),
       session,
       listeners,
       asks,
@@ -1857,9 +1901,23 @@ export function createHost({
       logger?.log?.('skill is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
     }
     // 只有配置了 MCP Server 时才注册 MCP 工具。
-    const mcp = createMcpRegistry(mcpConfigs);
+    const assertMcpAccess = (server: string): void => {
+      if (server !== BROWSER_SERVER) return;
+      if (state.permissionChanging) throw new KernelError('permission_change_in_progress');
+      const denied = permissionDenial(state.permission, 'external');
+      if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
+      if (state.browserPaused) throw new KernelError('browser_stopped');
+    };
+    const sessionMcpConfigs = await Promise.all(mcpConfigs.map(server => server.name === BROWSER_SERVER ? browser.session(id) : server));
+    const mcp = createMcpRegistry(sessionMcpConfigs, { toolPolicy: browserToolPolicy, assertServerAccess: assertMcpAccess,
+      afterCall: name => name === BROWSER_SERVER ? browser.clearSession(id) : Promise.resolve() });
+    cleanup.push(() => browser.closeSession(id));
     cleanup.push(() => mcp.close());
     const authorizeMcpServer = async (server: string): Promise<void> => {
+      if (server === BROWSER_SERVER) {
+        assertMcpAccess(server);
+        await browser.verify();
+      }
       const configured = mcpConfigs.find((entry) => entry.name === server);
       if (configured === undefined) throw new KernelError('mcp_server_unknown', { detail: server });
       const currentServers = await currentMcpConfigs(env);
@@ -1879,6 +1937,10 @@ export function createHost({
     };
     const authorizeMcpTool = async (server: string, tool: string): Promise<void> => {
       await authorizeMcpServer(server);
+      if (server === BROWSER_SERVER) {
+        if (browserToolPolicy(server, tool, { type: 'object', properties: {} }) === undefined) throw new KernelError('browser_tool_denied');
+        if (tool === 'browser_take_screenshot' && live.imageInput !== true) throw new KernelError('model_image_input_unsupported');
+      }
       const grant = await activeDelegation();
       if (grant !== undefined) {
         await assertDelegationProject(grant, env.projectRoot);
@@ -1886,6 +1948,7 @@ export function createHost({
       }
     };
     const mcpAuthorization: McpAuthorization = {
+      authorizeArguments: (server, tool, args) => { if (server === BROWSER_SERVER) assertBrowserArguments(tool, args); },
       authorizeServer: authorizeMcpServer,
       authorizeTool: authorizeMcpTool,
       identityDigest: (server) => mcpConfigs.find((entry) => entry.name === server)?.identityDigest,
@@ -1912,7 +1975,7 @@ export function createHost({
     const fragments: ExtensionPromptFragment[] = [];
     // 派生执行继承父会话的策略和静态提示词前缀，但不能再注册子 Agent。
     // 直接使用底层提供方；派生事件记录在其独立会话中。
-    const basePlugins = [...loaded, createMcpPlugin(mcp, mcpAuthorization), ...(search.plugin === undefined ? [] : [search.plugin])];
+    const basePlugins = [...loaded, ...(search.plugin === undefined ? [] : [search.plugin])];
     // 提问属于父会话，因为派生执行没有客户端可以回答。
     // 提问和审批走不同流程；只有支持交互回答的客户端才注册提问工具。
     const asked = interactive === false ? [] : [createAskUserPlugin({
@@ -1944,7 +2007,8 @@ export function createHost({
         }
       },
     })];
-    const assembly = loadAssembly(kernel, [...basePlugins, createTodoWritePlugin({ session }),
+    const assembly = loadAssembly(kernel, [...basePlugins, createMcpPlugin(mcp, mcpAuthorization, { media,
+      sourceFor: server => server === BROWSER_SERVER ? 'browser' : undefined }), createTodoWritePlugin({ session }),
       createReadImagePlugin({ media, supportsImages: () => live.imageInput === true }),
       createReadDocumentPlugin({ media, supportsImages: () => live.imageInput === true }),
       createScreenshotPlugin({ media, supportsImages: () => live.imageInput === true, authorize: authorizeScreenCapture }),
@@ -1965,6 +2029,15 @@ export function createHost({
       logger,
       plugins: basePlugins,
       authorizeScreenCapture,
+      createMcp: async (childId, childMedia) => {
+        const servers = await Promise.all(mcpConfigs.map(server => server.name === BROWSER_SERVER ? browser.session(childId) : server));
+        const childRegistry = createMcpRegistry(servers, { toolPolicy: browserToolPolicy, assertServerAccess: assertMcpAccess,
+          afterCall: name => name === BROWSER_SERVER ? browser.clearSession(childId) : Promise.resolve() });
+        state.childMcp.set(childRegistry, childId);
+        return { plugin: createMcpPlugin(childRegistry, mcpAuthorization, { media: childMedia,
+          sourceFor: server => server === BROWSER_SERVER ? 'browser' : undefined }),
+          close: async () => { try { await childRegistry.close(); await browser.closeSession(childId); } finally { state.childMcp.delete(childRegistry); } } };
+      },
       modePaths,
       modeFile: () => state.mode.file,
       promptFragments: () => fragments,
@@ -2303,6 +2376,7 @@ export function createHost({
         permission: sessionPermissionView(state, canControlPermission),
         screenCapture: { enabled: state.screenCapture.enabled, source: state.screenCapture.source, changeAllowed: permissionControl },
         search: state.search,
+        browser: browserView(state),
         generation: generationView(state.generation),
       },
       pending,
@@ -2547,6 +2621,7 @@ export function createHost({
       });
       state.permission = next;
       await state.managedProcesses.stopAll();
+      if (permissionDenial(next, 'external') !== undefined) await revokeSessionMcp(state, BROWSER_SERVER);
       return { sessionId: state.id, permission: sessionPermissionView(state, canControlPermission), applies: 'now' };
     } finally {
       if (sessions.get(state.id) === state) state.permissionChanging = false;
@@ -2815,6 +2890,23 @@ export function createHost({
             return await imagePreview(media, reference);
           } finally { imagePreviews--; }
         }
+        case 'browser.stop':
+        case 'browser.resume': {
+          if (!permissionControl) throw new KernelError('browser_control_trusted_ui_required');
+          return await serializeSessionConfiguration(sessionId, async () => {
+            const state = open(sessionId);
+            if (message.method === 'browser.resume') {
+              const denied = permissionDenial(state.permission, 'external');
+              if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
+              await state.browser.verify();
+              state.browserPaused = false;
+            } else {
+              state.browserPaused = true;
+              await revokeSessionMcp(state, BROWSER_SERVER);
+            }
+            return { sessionId, browser: browserView(state) };
+          });
+        }
         case 'session.control': {
           const env = await environmentFor(requiredString(message.params.projectRoot, 'projectRoot'));
           return await requestAgentControl(env.projectRoot, sessionId, message.params.request as AgentControlRequest);
@@ -3010,6 +3102,7 @@ export function createHost({
             permission: sessionPermissionView(state, canControlPermission),
             screenCapture: { enabled: state.screenCapture.enabled, source: state.screenCapture.source, changeAllowed: permissionControl },
             search: state.search,
+            browser: browserView(state),
             denials: state.chain.denials(),
             delegation: currentGrant === undefined ? null : {
               grantId: currentGrant.id,
@@ -3312,7 +3405,7 @@ export function createHost({
               source: 'trusted-ui', trusted: message.params.trusted, updatedAt,
             });
             state.mcpTrust.set(mcpTrustKey(serverName, server.identityDigest), { source: 'trusted-ui', trusted: message.params.trusted, updatedAt });
-            if (!message.params.trusted) await state.mcp.revoke(serverName);
+            if (!message.params.trusted) await revokeSessionMcp(state, serverName);
             return { scope, server: serverName, trusted: message.params.trusted, updatedAt };
           }
 
@@ -3331,7 +3424,7 @@ export function createHost({
               if (scope === 'user' && current.identityDigest !== server.identityDigest) continue;
               const sessionTrust = state.mcpTrust.get(mcpTrustKey(serverName, current.identityDigest));
               const effective = sessionTrust ?? await mcpServerTrust(mcpTrustPathOf(), state.environment.projectRoot, serverName, current.identityDigest);
-              if (effective?.trusted !== true) await state.mcp.revoke(serverName);
+              if (effective?.trusted !== true) await revokeSessionMcp(state, serverName);
             }
           }
           return { version: store.version, scope, server: serverName, trusted: message.params.trusted };
@@ -3381,6 +3474,15 @@ export function createHost({
           const sessionTrust = session?.mcpTrust.get(mcpTrustKey(serverName, server.identityDigest));
           const trust = sessionTrust ?? await mcpServerTrust(mcpTrustPathOf(), env.projectRoot, serverName, server.identityDigest);
           if (trust?.trusted !== true) throw new KernelError('mcp_server_untrusted', { detail: serverName });
+          if (serverName === BROWSER_SERVER) {
+            if (session === undefined) throw new KernelError('browser_session_required');
+            const denied = permissionDenial(session.permission, 'external');
+            if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
+            if (session.browserPaused) throw new KernelError('browser_stopped');
+            await session.browser.verify();
+            const tools = await session.mcp.toolsOf(serverName, AbortSignal.timeout(25_000));
+            return { server: serverName, identityDigest: server.identityDigest, tools: tools.map(({ name, description, digest }) => ({ name, description, digest })) };
+          }
           const registry = createMcpRegistry([server]);
           try {
             const tools = await registry.toolsOf(serverName, AbortSignal.timeout(25_000));
