@@ -48,6 +48,7 @@ export interface ToolDefinition<TArgs = unknown> {
   readonly readOnly?: boolean;
   readonly access?: PermissionAccess;
   readonly targetArgument?: string;
+  readonly networkTarget?: string;
   readonly commandArgument?: string;
   // 参数中不含命令字符串的工具（例如用户声明的命令工具）由该函数合成最终命令行，
   // 供 Shell 选择、脚本绑定与策略按命令判定使用；引号跟随 Kernel 选定的后端。
@@ -262,6 +263,8 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       }
       const access = tool.access ?? 'unknown';
       if (!isPermissionAccess(access)) throw new KernelError('tool_access_unknown');
+      if (tool.networkTarget !== undefined && (access !== 'network' || typeof tool.networkTarget !== 'string'
+        || tool.networkTarget.trim() === '' || tool.targetArgument !== undefined)) throw new KernelError('tool_network_target_invalid');
       let parameters;
       try {
         // 保存独立副本，避免插件后续修改对象时改变已登记的参数模式。
@@ -286,6 +289,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
         readOnly: tool.readOnly === true,
         access,
         targetArgument: typeof tool.targetArgument === 'string' ? tool.targetArgument : undefined,
+        networkTarget: tool.networkTarget,
         commandArgument: typeof tool.commandArgument === 'string' ? tool.commandArgument : undefined,
                 // 工具可提供实际能力名称；MCP 工具用它传递 `mcp:<服务器>/<工具>` 身份。
                 capability: typeof tool.capability === 'function' ? tool.capability : undefined,
@@ -400,7 +404,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       }
       // 只解析一次网络目标，并将同一结果传给权限判定和执行。
       // 避免 DNS 在审批和连接之间变化，导致实际连接地址与批准地址不同。
-      const targetAddress = tool.targetArgument === undefined ? undefined : args[tool.targetArgument];
+      const targetAddress = tool.networkTarget ?? (tool.targetArgument === undefined ? undefined : args[tool.targetArgument]);
       const network = typeof targetAddress === 'string' ? await resolveTarget(targetAddress) : undefined;
       // 只选择一次命令解释器，并将同一后端用于语法解析、权限判定和执行。
       // 配置指定的解释器不可用时返回错误，不自动切换到另一种语法或程序。

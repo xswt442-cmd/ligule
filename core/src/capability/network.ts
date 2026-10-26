@@ -4,6 +4,7 @@ import { lookup } from 'node:dns/promises';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import type { ClientRequestArgs } from 'node:http';
+import { isIP } from 'node:net';
 import { KernelError } from '../kernel/error.js';
 
 // 公网地址按普通规则判定；环回和私有地址至少需要一次审批。
@@ -282,4 +283,129 @@ export async function fetchTarget(approved: NetworkTarget, { maxBytes, timeoutMs
       contentType: answer.contentType,
     };
   }
+}
+
+const POST_BODY_LIMIT = 64 * 1024;
+const POST_RESPONSE_LIMIT = 2 * 1024 * 1024;
+const POST_TIMEOUT_LIMIT = 30_000;
+
+/** Send one bounded JSON POST to the exact address covered by an existing approval. */
+export async function postJsonTarget(approved: NetworkTarget, { body, bearer, maxBytes, timeoutMs, signal }: {
+  body: Record<string, unknown>;
+  bearer: string;
+  maxBytes: number;
+  timeoutMs: number;
+  signal?: AbortSignal;
+}): Promise<{ status: number; text: string; bytes: number; contentType: string }> {
+  if (approved.failure !== undefined || (approved.scheme !== 'http:' && approved.scheme !== 'https:')) {
+    throw new KernelError('post_target_invalid');
+  }
+  if (DENIED.includes(approved.class) || !Array.isArray(approved.addresses) || approved.addresses.length === 0
+    || approved.addresses.some((address) => isIP(address) === 0 || DENIED.includes(classifyAddress(address)))
+    || strictest(approved.addresses.map(classifyAddress)) !== approved.class) {
+    throw new KernelError('post_target_denied');
+  }
+  if (typeof bearer !== 'string' || bearer.length > 8192 || !/^[A-Za-z0-9._~+\/-]+=*$/u.test(bearer)) {
+    throw new KernelError('post_bearer_invalid');
+  }
+  if (approved.scheme !== 'https:' && approved.class !== 'loopback') {
+    throw new KernelError('post_insecure_auth_denied');
+  }
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new KernelError('post_limits_invalid');
+  }
+  if (signal?.aborted === true) throw new KernelError('post_cancelled');
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new KernelError('post_body_invalid');
+  let encoded: string;
+  try { encoded = JSON.stringify(body); }
+  catch { throw new KernelError('post_body_invalid'); }
+  if (encoded === undefined) throw new KernelError('post_body_invalid');
+  const payload = Buffer.from(encoded, 'utf8');
+  if (payload.length > POST_BODY_LIMIT) throw new KernelError('post_body_too_large');
+
+  let url: URL;
+  try { url = new URL(approved.url); }
+  catch { throw new KernelError('post_target_invalid'); }
+  const host = approved.host.startsWith('[') && approved.host.endsWith(']')
+    ? approved.host.slice(1, -1) : approved.host;
+  const port = Number(approved.port);
+  const expectedPort = url.port !== '' ? url.port : url.protocol === 'https:' ? '443' : '80';
+  if (url.protocol !== approved.scheme || url.hostname !== approved.host || expectedPort !== approved.port
+    || url.username !== '' || url.password !== ''
+    || `${url.pathname}${url.search}` !== approved.path || !Number.isInteger(port) || port < 1 || port > 65_535
+    || approved.addresses.some((address) => isIP(address) === 0)) {
+    throw new KernelError('post_target_invalid');
+  }
+  const responseLimit = Math.min(maxBytes, POST_RESPONSE_LIMIT);
+  const requestTimeout = Math.min(timeoutMs, POST_TIMEOUT_LIMIT);
+  const cancel = AbortSignal.any([AbortSignal.timeout(requestTimeout), ...(signal === undefined ? [] : [signal])]);
+  const hostHeader = String(port) === (approved.scheme === 'https:' ? '443' : '80')
+    ? approved.host : `${approved.host}:${port}`;
+
+  return new Promise((resolve, reject) => {
+    let request: ReturnType<typeof httpRequest> | undefined;
+    let settled = false;
+    const fail = (code: string) => {
+      if (settled) return;
+      settled = true;
+      request?.destroy();
+      reject(new KernelError(cancel.aborted ? signal?.aborted === true ? 'post_cancelled' : 'post_timeout' : code));
+    };
+    request = (approved.scheme === 'https:' ? httpsRequest : httpRequest)(
+      {
+        protocol: approved.scheme,
+        hostname: approved.addresses[0],
+        port,
+        path: approved.path,
+        method: 'POST',
+        ...(approved.scheme === 'https:' ? { servername: host } : {}),
+        headers: {
+          host: hostHeader,
+          authorization: `Bearer ${bearer}`,
+          accept: 'application/json',
+          'content-type': 'application/json',
+          'content-length': payload.length,
+        },
+        lookup: pinnedLookup(approved.addresses[0]!),
+        agent: false,
+        signal: cancel,
+      },
+      (response) => {
+        const status = response.statusCode ?? 0;
+        if (status >= 300 && status < 400) {
+          response.destroy();
+          fail('post_redirect_denied');
+          return;
+        }
+        let bytes = 0;
+        const chunks: Buffer[] = [];
+        response.on('data', (chunk: Buffer) => {
+          bytes += chunk.length;
+          if (bytes > responseLimit) {
+            fail('post_response_too_large');
+            response.destroy();
+            return;
+          }
+          chunks.push(chunk);
+        });
+        response.once('aborted', () => fail('post_response_incomplete'));
+        response.once('error', () => fail('post_response_incomplete'));
+        response.once('end', () => {
+          if (settled) return;
+          settled = true;
+          resolve({
+            status,
+            text: Buffer.concat(chunks).toString('utf8').replaceAll(bearer, '[redacted]'),
+            bytes,
+            contentType: typeof response.headers['content-type'] === 'string' ? response.headers['content-type'] : '',
+          });
+        });
+      },
+    );
+    request.once('error', () => {
+      if (cancel.aborted) fail(signal?.aborted === true ? 'post_cancelled' : 'post_timeout');
+      else fail('post_transport_failed');
+    });
+    request.end(payload);
+  });
 }
