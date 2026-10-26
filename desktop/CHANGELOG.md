@@ -8,6 +8,8 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 ### 简体中文
 
+- `full` 模式新增 `web_search`，复用已配置的官方 DeepSeek 服务；仅在配置和凭据可用时注册，仍受网络 Permission 与 Policy 控制。
+
 - 历史工具图片可按需预览，包含外控及已关闭会话；显示资源随会话切换释放。`full` 新增受限文档读取与 PDF 页面图像，沿用同一图片预览通路。
 
 - Windows 截图使用独立授权；已有会话可确认或撤销，外控 Grant 可单独声明屏幕观察。捕获仅读取现有画面，不切换焦点。
@@ -17,6 +19,8 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 - `full` 模式新增 `todo_write`，每轮任务清单随会话保存历史，内部子代理使用独立清单。
 
 ### English
+
+- The `full` mode adds `web_search`, reusing a configured official DeepSeek service. It is registered only when configuration and credentials are available and remains subject to network Permission and Policy.
 
 - Recorded tool images support on-demand previews, including externally controlled and closed Sessions, with display resources released on Session changes. Bounded document reading and PDF page images use the same preview path in `full` mode.
 

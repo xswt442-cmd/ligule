@@ -147,6 +147,18 @@ PDF 的 `{path, renderPage: 2}` 单独渲染一页，要求当前模型支持图
 
 `full` 模式包含 `todo_write`，以 `items: [{content, status}]` 替换当前轮次的完整任务清单，状态为 `pending`、`in_progress` 或 `completed`；空数组清空清单。最多 40 个不重复的非空项目，每项最多 400 个字符，内容合计最多 8,000 个 UTF-8 字节。快照作为 Session 元数据保留历史；轮次结束后活动清单清空，下一轮从空清单开始。内部子代理使用独立清单。这个工具不授予工作区写权限，随包 `minimal` 模式不包含它。
 
+`full` 模式仅在搜索配置与凭据可用时提供 `web_search`；它不在随包 `minimal` 中，`minimal` 的九个工具保持不变。在用户配置中，将 `serviceId` 设为 `[model].services` 中已有服务的 ID：
+
+```toml
+[search]
+provider = "deepseek"
+serviceId = "deepseek"
+```
+
+该服务必须使用官方 `https://api.deepseek.com` 地址；`/v1` 和 Anthropic 兼容的 `/anthropic/v1` 根路径也受支持。Search 复用该服务的 `apiKeyEnv` 引用，优先读取非空环境变量，再读取操作系统凭据库；不要在聊天或配置文件中写入明文密钥。`[search]` 只能由用户配置、明确的命令行配置或受管配置启用和选择；项目共享和本地配置不能启用 Search，也不能替换服务或凭据绑定。没有配置、服务无效、凭据缺失/格式错误或系统凭据库不可用时，`web_search` 不会注册。`status.get` 的 `search` 字段显示 `configured`、`available`、可选的 `serviceId` 和错误 `code`；外控调用 `ligule_session_configure` 时也可从返回的 `effective.search` 读取该状态。`available` 只表示配置有效且凭据存在并符合格式，不代表远程账户认证成功。搜索设置和服务绑定在 Session 创建时读取；更新后重启 Host 可确保新 Session 使用新配置。每次搜索请求都会重新读取同一凭据引用。
+
+调用 `web_search` 时，`query` 必须是 1–128 个 Unicode 字符的非空文本；`count` 可选，范围为 1–10，默认 5。请求只发送到固定的官方 Search API，模型不能提供 URL 或密钥。默认不请求网页正文，也不会自动抓取结果页面。响应含标题、URL、摘要片段、总结和可用日期，并报告 `received`、`returned`、`truncated`。标题、片段、总结和 URL 分别最多 256、512、1,024 和 2,048 个 UTF-8 字节；总结果受 `limits.resultBytes` 限制（默认 16,000 字节，硬上限 24,000 字节），预算低于 1,024 字节时拒绝搜索。结果不提供游标；出现截断时缩小或改写查询。请求沿用 `fetchBytes` 与 `fetchTimeoutMs` 配置，并分别受 2 MiB 响应和 30 秒硬上限约束；不会自动跟随重定向。网络 Permission、Policy 和 Agent Control Grant 仍适用。HTTP 错误以固定错误码报告，不回显响应正文或密钥：`search_credential_rejected`、`search_payment_required`、`search_rate_limited`、`search_forbidden`、`search_timeout`、`search_service_unavailable`。
+
 工具模式选择交给模型的工具清单和提示片段，不会更改 Permission、Policy 或 Agent Control Grant。随包提供的 `minimal` 是默认模式；`full` 会包含当前 Host 注册的全部工具。模式文件按项目、用户、随包的顺序查找；高优先级文件完整替代低优先级同名文件。
 
 在用户数据根的 `tools/` 目录放置一个 TOML 文件即可声明自己的命令工具：`description` 说明用途，`command` 是不带参数的可执行文件，`args` 数组用 `{参数名}` 占位符（独占一项）在调用时替换为模型提供的参数，`parameters` 描述参数模式（受支持子集与内置工具相同）。占位符只替换整个参数位，模型输入不进入 shell 语法；执行按 Shell 命令走同一权限与审批链路，声明一个工具不授予任何额外权限。声明的工具默认不进入模式清单：需要在模式文件中列出其名称（或使用 `tools = "*"`）才会提供给模型。无效文件以诊断报告并跳过，不阻塞其他工具。
