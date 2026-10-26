@@ -4,7 +4,7 @@
 // `command` 作为可执行文件直接启动，不经过 shell。`env` 只支持 `${NAME}` 环境变量引用，不接受明文凭据。
 //
 // 模型只看到固定的 `mcp.inspect` 和 `mcp.call` 工具；服务器自身的工具定义按需披露，不会扩大基础工具清单。
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { isAbsolute, resolve } from 'node:path';
@@ -16,6 +16,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv';
 import type { JsonSchemaType } from '@modelcontextprotocol/sdk/validation';
 import { KernelError } from '../kernel/error.js';
+import { createOwnedProcessJob, type OwnedProcessJob } from './win32-job.js';
 
 export interface McpServerConfig {
   command?: unknown;
@@ -42,9 +43,21 @@ export interface ToolDefinition {
   annotations: Record<string, unknown>;
 }
 
+export type McpToolPolicy = (server: string, tool: string, inputSchema: Record<string, unknown>) => Record<string, unknown> | undefined;
+
+export interface McpRegistryOptions {
+  readonly assertServerAccess?: (server: string) => void;
+  readonly toolPolicy?: McpToolPolicy;
+  readonly afterCall?: (server: string) => Promise<void>;
+}
+
 interface ConnectedServer {
   name: string;
   client: Client;
+  child?: ChildProcess;
+  job?: OwnedProcessJob;
+  jobAssigned?: boolean;
+  toolPolicy?: McpToolPolicy;
   tools: Map<string, ToolDefinition>;
 }
 
@@ -64,11 +77,12 @@ function mcpEnvironment(referenced: Readonly<Record<string, string>>): Record<st
 
 async function refreshTools(opened: ConnectedServer, signal?: AbortSignal): Promise<Map<string, ToolDefinition>> {
   const listed = await opened.client.listTools(undefined, signal === undefined ? undefined : { signal });
-  opened.tools = new Map<string, ToolDefinition>();
+  const tools = new Map<string, ToolDefinition>();
   for (const raw of listed.tools as unknown as Record<string, unknown>[]) {
-    const definition = definitionOf(raw);
-    opened.tools.set(definition.name, definition);
+    const definition = definitionOf(raw, opened.name, opened.toolPolicy);
+    if (definition !== undefined) tools.set(definition.name, definition);
   }
+  opened.tools = tools;
   return opened.tools;
 }
 
@@ -88,9 +102,22 @@ function expandEnv(env: Record<string, unknown>, environment: NodeJS.ProcessEnv)
   return expanded;
 }
 
-function definitionOf(raw: { name?: unknown; description?: unknown; inputSchema?: unknown; annotations?: unknown }): ToolDefinition {
+function definitionOf(
+  raw: { name?: unknown; description?: unknown; inputSchema?: unknown; annotations?: unknown },
+  server: string,
+  policy?: McpToolPolicy,
+): ToolDefinition | undefined {
   if (typeof raw.name !== 'string' || raw.name === '') throw new KernelError('mcp_tool_name_missing');
-  const schema = (raw.inputSchema ?? { type: 'object' }) as Record<string, unknown>;
+  const originalSchema = (raw.inputSchema ?? { type: 'object' }) as Record<string, unknown>;
+  let schema = originalSchema;
+  if (policy !== undefined) {
+    const filtered = policy(server, raw.name, structuredClone(originalSchema));
+    if (filtered === undefined) return undefined;
+    if (typeof filtered !== 'object' || filtered === null || Array.isArray(filtered)) {
+      throw new KernelError('mcp_tool_policy_invalid');
+    }
+    schema = structuredClone(filtered);
+  }
   // 摘要覆盖模型可见的名称、说明、参数结构和标注；这些定义任一变化都会改变摘要。
   const digest = createHash('sha256').update(JSON.stringify({
     name: raw.name,
@@ -179,23 +206,85 @@ export function mcpServerConfigs(
   });
 }
 
-function killServerProcess(pid: number): void {
+function childIsAlive(child: ChildProcess | undefined): child is ChildProcess & { pid: number } {
+  return child?.pid !== undefined && child.exitCode === null && child.signalCode === null;
+}
+
+function waitForChildClose(child: ChildProcess): Promise<void> {
+  if (!childIsAlive(child)) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const finish = () => { clearTimeout(timer); resolve(); };
+    const timer = setTimeout(() => {
+      child.off('close', finish);
+      reject(new KernelError('mcp_process_cleanup_failed', { detail: `server process ${child.pid} remained alive after termination` }));
+    }, 5_000);
+    child.once('close', finish);
+  });
+}
+
+async function terminateWindowsTree(child: ChildProcess | undefined): Promise<void> {
+  if (!childIsAlive(child)) return;
+  let code: number | null;
   try {
-    if (process.platform === 'win32') spawn('taskkill.exe', ['/T', '/F', '/PID', String(pid)], { stdio: 'ignore' });
-    else process.kill(-pid, 'SIGKILL');
-  } catch {
-    // 已退出的子进程无需再次发送关闭信号。
+    const killer = spawn('taskkill.exe', ['/T', '/F', '/PID', String(child.pid)], { stdio: 'ignore', windowsHide: true });
+    code = await new Promise<number | null>((resolve, reject) => {
+      killer.once('error', reject);
+      killer.once('close', resolve);
+    });
+  } catch (cause) {
+    if (!childIsAlive(child)) return;
+    throw new KernelError('mcp_process_cleanup_failed', { cause, detail: `could not terminate server process ${child.pid}` });
+  }
+  if (childIsAlive(child)) {
+    if (code !== 0) throw new KernelError('mcp_process_cleanup_failed', { detail: `taskkill could not terminate server process ${child.pid} (exit ${code ?? 'unknown'})` });
+    await waitForChildClose(child);
   }
 }
 
-async function closeClient(client: Client): Promise<void> {
-  const pid = (client.transport as unknown as { _process?: { pid?: number } })?._process?.pid;
-  await client.close().catch(() => undefined);
-  if (pid !== undefined) killServerProcess(pid);
+function throwCleanupErrors(errors: unknown[], message: string): void {
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, message);
+}
+
+async function closeClient(opened: Pick<ConnectedServer, 'client' | 'child' | 'job' | 'jobAssigned'>): Promise<void> {
+  const errors: unknown[] = [];
+  let jobClosed = opened.job === undefined;
+  if (opened.job !== undefined) {
+    try { opened.job.close(); jobClosed = true; }
+    catch (error) { errors.push(error); }
+  }
+
+  if (process.platform === 'win32') {
+    if (opened.jobAssigned !== true || !jobClosed) {
+      try { await terminateWindowsTree(opened.child); }
+      catch (error) { errors.push(error); }
+    } else if (opened.child !== undefined) {
+      try { await waitForChildClose(opened.child); }
+      catch (error) {
+        errors.push(error);
+        try { await terminateWindowsTree(opened.child); }
+        catch (fallbackError) { errors.push(fallbackError); }
+      }
+    }
+  }
+
+  try { await opened.client.close(); }
+  catch (error) { errors.push(error); }
+
+  if (process.platform !== 'win32' && opened.child?.pid !== undefined) {
+    try {
+      process.kill(-opened.child.pid, 'SIGKILL');
+      await waitForChildClose(opened.child);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') errors.push(error);
+    }
+  }
+  throwCleanupErrors(errors, 'MCP client cleanup failed');
 }
 
 // 每台服务器最多启动一个子进程，并在 Host 生命周期内复用；不自动重连或并发启动多个进程。
-export async function connectServer(settings: NormalizedMcpServerConfig, signal?: AbortSignal): Promise<ConnectedServer> {
+export async function connectServer(settings: NormalizedMcpServerConfig, signal?: AbortSignal, toolPolicy?: McpToolPolicy): Promise<ConnectedServer> {
+  const job = process.platform === 'win32' ? await createOwnedProcessJob({ assignCurrentProcess: false }) : undefined;
   const transport = new StdioClientTransport({
     command: settings.command,
     args: settings.args,
@@ -203,21 +292,44 @@ export async function connectServer(settings: NormalizedMcpServerConfig, signal?
     env: mcpEnvironment(settings.env),
     stderr: 'pipe',
   });
+  // Drain diagnostics without retaining or logging server output that may contain credentials.
+  (transport.stderr as { resume?: () => void } | null)?.resume?.();
   // 这是 MCP 客户端协议身份，不代表 Core 有独立版本。
   const client = new Client({ name: 'ligule', version: '1.0.0' });
+  let child: ChildProcess | undefined;
+  let jobAssigned = false;
   try {
-    await client.connect(transport, signal === undefined ? undefined : { signal });
-    const opened = { name: settings.name, client, tools: new Map<string, ToolDefinition>() };
+    const connecting = client.connect(transport, signal === undefined ? undefined : { signal });
+    child = (transport as unknown as { _process?: ChildProcess })._process;
+    connecting.catch(() => undefined);
+    if (job !== undefined && child?.pid !== undefined) {
+      job.assignPid(child.pid);
+      jobAssigned = true;
+    }
+    await connecting;
+    child ??= (transport as unknown as { _process?: ChildProcess })._process;
+    if (child?.pid === undefined) throw new KernelError('mcp_process_unavailable', { detail: settings.name });
+    if (job !== undefined && !jobAssigned) {
+      job.assignPid(child.pid);
+      jobAssigned = true;
+    }
+    const opened = { name: settings.name, client, child, job, jobAssigned, toolPolicy, tools: new Map<string, ToolDefinition>() };
     await refreshTools(opened, signal);
     return opened;
   } catch (error) {
-    await closeClient(client);
-    throw new KernelError('mcp_connect_failed', { cause: error, detail: `${settings.name}: ${error instanceof Error ? error.message : String(error)}` });
+    child ??= (transport as unknown as { _process?: ChildProcess })._process;
+    const failure = new KernelError('mcp_connect_failed', { cause: error, detail: `${settings.name}: ${error instanceof Error ? error.message : String(error)}` });
+    try { await closeClient({ client, child, job, jobAssigned }); }
+    catch (cleanupError) {
+      throw new KernelError('mcp_connect_failed', { cause: new AggregateError([failure, cleanupError], 'MCP connection and cleanup failed'), detail: failure.detail });
+    }
+    throw failure;
   }
 }
 
 export interface McpRegistry {
   servers(): string[];
+  activeServers(): string[];
   toolsOf(server: string, signal?: AbortSignal): Promise<ToolDefinition[]>;
   definition(server: string, tool: string, signal?: AbortSignal): Promise<ToolDefinition>;
   call(server: string, tool: string, args: unknown, signal?: AbortSignal): Promise<unknown>;
@@ -226,7 +338,7 @@ export interface McpRegistry {
 }
 
 // 服务器按需连接；未使用的服务器不会启动子进程。
-export function createMcpRegistry(configs: NormalizedMcpServerConfig[]): McpRegistry {
+export function createMcpRegistry(configs: NormalizedMcpServerConfig[], options: McpRegistryOptions = {}): McpRegistry {
   const connected = new Map<string, ConnectedServer>();
   const pending = new Map<string, Promise<ConnectedServer>>();
   const serverLifetimes = new Map<string, AbortController>();
@@ -249,18 +361,19 @@ export function createMcpRegistry(configs: NormalizedMcpServerConfig[]): McpRegi
   async function closeServer(opened: ConnectedServer): Promise<void> {
     if (closedClients.has(opened.client)) return;
     closedClients.add(opened.client);
-    await closeClient(opened.client);
+    await closeClient(opened);
   }
 
   async function server(name: string, signal?: AbortSignal): Promise<ConnectedServer> {
     await stopping.get(name);
     const activeSignal = operationSignal(name, signal);
     if (activeSignal.aborted) throw activeSignal.reason;
+    options.assertServerAccess?.(name);
     const existing = connected.get(name);
     if (existing !== undefined) return existing;
     const settings = configs.find((entry) => entry.name === name);
     if (settings === undefined) throw new KernelError('mcp_server_unknown', { detail: `${name} (configured: ${configs.map((entry) => entry.name).join(', ') || 'none'})` });
-    const started = pending.get(name) ?? connectServer(settings, activeSignal);
+    const started = pending.get(name) ?? connectServer(settings, activeSignal, options.toolPolicy);
     pending.set(name, started);
     try {
       const opened = await started;
@@ -277,6 +390,7 @@ export function createMcpRegistry(configs: NormalizedMcpServerConfig[]): McpRegi
 
   return {
     servers: () => configs.map((entry) => entry.name),
+    activeServers: () => [...connected.keys()],
     // 每次读取定义时重新获取工具列表，以检测服务器声明是否变化并更新摘要。
     toolsOf: async (name, signal) => [...(await refreshTools(await server(name, signal), operationSignal(name, signal))).values()],
     definition: async (name, tool, signal) => {
@@ -290,8 +404,20 @@ export function createMcpRegistry(configs: NormalizedMcpServerConfig[]): McpRegi
     call: async (name, tool, args, signal) => {
       const activeSignal = operationSignal(name, signal);
       const opened = await server(name, activeSignal);
-      if (!opened.tools.has(tool)) throw new KernelError('mcp_tool_unknown', { detail: `${name}/${tool}` });
-      return opened.client.callTool({ name: tool, arguments: args as Record<string, unknown> }, undefined, { signal: activeSignal });
+      if (opened.toolPolicy === undefined) {
+        if (!opened.tools.has(tool)) throw new KernelError('mcp_tool_unknown', { detail: `${name}/${tool}` });
+      } else {
+        await refreshTools(opened, activeSignal);
+        const definition = opened.tools.get(tool);
+        if (definition === undefined) throw new KernelError('mcp_tool_unknown', { detail: `${name}/${tool}` });
+        const problems = validateToolArguments(args, definition.inputSchema);
+        if (problems.length > 0) throw new KernelError('mcp_arguments_invalid', { detail: problems.join('; ') });
+      }
+      try {
+        return await opened.client.callTool({ name: tool, arguments: args as Record<string, unknown> }, undefined, { signal: activeSignal });
+      } finally {
+        if (!activeSignal.aborted) await options.afterCall?.(name);
+      }
     },
     revoke: (name) => {
       const alreadyStopping = stopping.get(name);
@@ -320,10 +446,11 @@ export function createMcpRegistry(configs: NormalizedMcpServerConfig[]): McpRegi
         const settled = await Promise.allSettled([...pending.values()]);
         const opened = new Set(connected.values());
         for (const result of settled) if (result.status === 'fulfilled') opened.add(result.value);
-        await Promise.all([...opened].map(closeServer));
+        const cleanup = await Promise.allSettled([...opened].map(closeServer));
         connected.clear();
         pending.clear();
         serverLifetimes.clear();
+        throwCleanupErrors(cleanup.flatMap((result) => result.status === 'rejected' ? [result.reason] : []), 'MCP registry cleanup failed');
       })();
       return closing;
     },

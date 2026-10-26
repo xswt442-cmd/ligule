@@ -7,6 +7,7 @@
 // Host 根据已披露的服务器定义校验参数，保持模型可见模式稳定。
 import { KernelError } from '../kernel/error.js';
 import type { McpRegistry, ToolDefinition } from '../capability/mcp.js';
+import { IMAGE_LIMITS, type ImageReference, type MediaStore } from '../capability/media.js';
 import { validateToolArguments } from '../capability/mcp.js';
 
 const LEVELS = 'without a server it lists the configured servers; with a server it lists that server\'s tools and their digests; with both it returns the full definition.';
@@ -18,7 +19,60 @@ export interface McpDisclosed {
 export interface McpAuthorization {
   authorizeServer?(server: string): void | Promise<void>;
   authorizeTool?(server: string, tool: string): void | Promise<void>;
+  authorizeArguments?(server: string, tool: string, args: unknown): void | Promise<void>;
   identityDigest?(server: string): string | undefined;
+}
+
+export interface McpImages {
+  readonly media: MediaStore;
+  readonly sourceFor: (server: string) => ImageReference['source'] | undefined;
+}
+
+const MCP_IMAGE_COUNT_LIMIT = 4;
+const MCP_IMAGE_TOTAL_BYTES_LIMIT = 16 * 1024 * 1024;
+const MCP_ERROR_TEXT_BYTES = 4_000;
+const MCP_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+
+function boundedDiagnostic(text: string): string {
+  const bytes = Buffer.from(text, 'utf8');
+  if (bytes.length <= MCP_ERROR_TEXT_BYTES) return text;
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  for (let end = MCP_ERROR_TEXT_BYTES; end >= MCP_ERROR_TEXT_BYTES - 4; end -= 1) {
+    try { return decoder.decode(bytes.subarray(0, end)); }
+    catch { /* Drop only a partial trailing UTF-8 sequence. */ }
+  }
+  return '';
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function imageBytesOf(value: unknown, totalBytes: number): Buffer {
+  if (!isRecord(value) || typeof value.mimeType !== 'string' || !MCP_IMAGE_MIME_TYPES.has(value.mimeType)) {
+    throw new KernelError('mcp_image_unsupported', { detail: 'the MCP server returned an unsupported image type' });
+  }
+  if (typeof value.data !== 'string' || value.data.length === 0
+    || value.data.length > Math.ceil(IMAGE_LIMITS.inputBytes / 3) * 4
+    || value.data.length % 4 !== 0) {
+    throw new KernelError('mcp_image_invalid', { detail: 'the MCP server returned invalid base64 image data' });
+  }
+  const bytes = Buffer.from(value.data, 'base64');
+  if (bytes.length === 0 || bytes.toString('base64') !== value.data) {
+    throw new KernelError('mcp_image_invalid', { detail: 'the MCP server returned invalid base64 image data' });
+  }
+  if (bytes.length > IMAGE_LIMITS.inputBytes || totalBytes + bytes.length > MCP_IMAGE_TOTAL_BYTES_LIMIT) {
+    throw new KernelError('mcp_image_bytes_exceeded');
+  }
+  return bytes;
+}
+
+function textBlocksOf(content: readonly unknown[]): string {
+  const text: string[] = [];
+  for (const item of content) {
+    if (isRecord(item) && item.type === 'text' && typeof item.text === 'string') text.push(item.text);
+  }
+  return text.join('\n');
 }
 
 function key(server: string, tool: string, digest: string) {
@@ -29,6 +83,7 @@ export function createMcpTools(
   registry: Pick<McpRegistry, 'servers' | 'toolsOf' | 'definition' | 'call'>,
   disclosed: McpDisclosed,
   authorization: McpAuthorization = {},
+  images?: McpImages,
 ) {
   return {
     inspectTool: {
@@ -113,9 +168,41 @@ export function createMcpTools(
         }
         const problems = validateToolArguments(parsed, found.inputSchema);
         if (problems.length > 0) throw new KernelError('mcp_arguments_invalid', { detail: problems.join('; ') });
-        const result = await registry.call(args.server, args.tool, parsed, signal) as { content?: { type: string; text?: string }[]; isError?: boolean };
-        const text = (result.content ?? []).filter((item) => item.type === 'text').map((item) => item.text ?? '').join('\n');
-        return { text, server: args.server, tool: args.tool, effectiveCapability: `mcp:${args.server}/${args.tool}`, failed: result.isError === true };
+        await authorization.authorizeArguments?.(args.server, args.tool, parsed);
+        const result = await registry.call(args.server, args.tool, parsed, signal) as { content?: unknown[]; isError?: boolean };
+        const content = Array.isArray(result.content) ? result.content : [];
+        const text = textBlocksOf(content);
+        if (result.isError === true) {
+          throw new KernelError('mcp_tool_failed', { detail: boundedDiagnostic(text) || 'the MCP server reported a tool error' });
+        }
+
+        const imageBlocks = content.filter((item) => isRecord(item) && item.type === 'image');
+        if (imageBlocks.length === 0) {
+          return { text, server: args.server, tool: args.tool, effectiveCapability: `mcp:${args.server}/${args.tool}`, failed: false };
+        }
+        if (images === undefined) throw new KernelError('mcp_image_unsupported', { detail: 'MCP image results are not enabled for this server' });
+        const source = images.sourceFor(args.server);
+        if (source === undefined || !['file', 'desktop', 'browser', 'document'].includes(source)) {
+          throw new KernelError('mcp_image_unsupported', { detail: 'the MCP server has no image source mapping' });
+        }
+        if (imageBlocks.length > MCP_IMAGE_COUNT_LIMIT) throw new KernelError('mcp_image_count_exceeded');
+
+        let totalBytes = 0;
+        const decoded = imageBlocks.map((block) => {
+          const bytes = imageBytesOf(block, totalBytes);
+          totalBytes += bytes.length;
+          return bytes;
+        });
+        const references: ImageReference[] = [];
+        for (const bytes of decoded) {
+          signal?.throwIfAborted();
+          references.push(await images.media.put(bytes, source, signal));
+          signal?.throwIfAborted();
+        }
+        const imageNotes = references.map((reference) =>
+          `Image shotId=${reference.id}, source=${reference.source}, ${reference.width}×${reference.height}, ${reference.bytes} bytes.`,
+        );
+        return { kind: 'image_result', text: [text, ...imageNotes].filter((item) => item !== '').join('\n'), images: references };
       },
     },
   };
@@ -124,9 +211,10 @@ export function createMcpTools(
 export function createMcpPlugin(
   registry: Pick<McpRegistry, 'servers' | 'toolsOf' | 'definition' | 'call'>,
   authorization: McpAuthorization = {},
+  images?: McpImages,
 ) {
   const disclosed = { seen: new Set<string>() };
-  const { inspectTool, callTool } = createMcpTools(registry, disclosed, authorization);
+  const { inspectTool, callTool } = createMcpTools(registry, disclosed, authorization, images);
   return {
     name: 'ligule-mcp',
     setup(kernel: { register(tool: unknown): () => void }) {
