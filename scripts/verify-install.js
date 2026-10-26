@@ -4,6 +4,7 @@
 import { spawnSync, execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { releaseManifest } from './pack-release.js';
 import { execNpm } from './npm-cli.js';
@@ -28,7 +29,7 @@ const consumerManifest = {
   name: 'ligule-consumer',
   version: '0.0.0',
   private: true,
-  allowScripts: { koffi: true, 'tree-sitter': true, 'tree-sitter-bash': true, 'tree-sitter-pwsh': true },
+  allowScripts: { koffi: true, 'tree-sitter': true, 'tree-sitter-bash': true, 'tree-sitter-pwsh': true, 'tesseract.js': false },
 };
 writeFileSync(join(consumer, 'package.json'), `${JSON.stringify(consumerManifest, null, 2)}\n`, 'utf8');
 if (given === undefined) {
@@ -92,6 +93,24 @@ const env = {
 const run = (args) => spawnSync(pkg.name, args, { env, cwd: consumer, shell: true, encoding: 'utf8', timeout: 60_000 });
 const readings = [];
 
+// Generate real documents with development writers, then read them solely through the installed runtime.
+const sourceCore = createRequire(join(repo, 'core', 'package.json'));
+const { PDFDocument, StandardFonts } = sourceCore('pdf-lib');
+const { Document, Packer, Paragraph } = sourceCore('docx');
+const PptxGenJS = sourceCore('pptxgenjs');
+const ExcelJS = sourceCore('exceljs');
+const pdf = await PDFDocument.create();
+const font = await pdf.embedFont(StandardFonts.Helvetica);
+pdf.addPage([300, 200]).drawText('Installed PDF text', { font, size: 14, x: 20, y: 150 });
+writeFileSync(join(consumer, 'sample.pdf'), await pdf.save());
+writeFileSync(join(consumer, 'sample.docx'), await Packer.toBuffer(new Document({ sections: [{ children: [new Paragraph('Installed DOCX text')] }] })));
+const workbook = new ExcelJS.Workbook();
+workbook.addWorksheet('Values').getCell('A1').value = 'Installed XLSX text';
+await workbook.xlsx.writeFile(join(consumer, 'sample.xlsx'));
+const slides = new PptxGenJS();
+slides.addSlide().addText('Installed PPTX text', { x: 1, y: 1, w: 3, h: 1 });
+await slides.writeFile({ fileName: join(consumer, 'sample.pptx') });
+
 const version = run(['--version']);
 if (version.status !== 0 || version.stdout.trim() !== pkg.version) {
   throw new Error(`${pkg.name} --version inside the consumer said "${version.stdout?.trim()}" with status ${version.status}`);
@@ -115,7 +134,7 @@ writeFileSync(join(consumer, 'probe.mjs'), `
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
-import { createKernel, createMcpPlugin, createMcpRegistry, createReadImagePlugin, createScreenshotPlugin, createSessionLog, execTool, flagLayer, KernelError, mcpServerConfigs, parseCommand, resolveRipgrep, resolveShell, searchWithRipgrep, withNativeExitCode, VERSION } from 'ligule';
+import { createConfig, createKernel, createMcpPlugin, createMcpRegistry, createReadImagePlugin, createReadDocumentPlugin, createScreenshotPlugin, createSessionLog, execTool, flagLayer, KernelError, mcpServerConfigs, parseCommand, resolveRipgrep, resolveShell, searchWithRipgrep, withNativeExitCode, VERSION } from 'ligule';
 import { pathToFileURL } from 'node:url';
 
 const coreRoot = ${JSON.stringify(bundledCoreDirectory)};
@@ -159,6 +178,25 @@ try {
     unregisterImage();
     await imageSession.close();
   }
+  const documentSession = createSessionLog({ directory: join(process.cwd(), 'document-sessions'), id: 'document-install-probe' });
+  const documentMedia = createMediaStore({ boundary: process.cwd() }, 'document-install-probe');
+  const documentKernel = createKernel({ config: createConfig({ user: { boundary: process.cwd() } }), session: documentSession });
+  const unregisterDocument = createReadDocumentPlugin({ media: documentMedia, supportsImages: () => true }).setup(documentKernel);
+  try {
+    for (const format of ['pdf', 'docx', 'xlsx', 'pptx']) {
+      const response = await documentKernel.call('read_document', { path: 'sample.' + format });
+      const parsed = JSON.parse(response);
+      if (parsed.format !== format || !parsed.chunks.some(chunk => chunk.text.includes('Installed ' + format.toUpperCase() + ' text'))) {
+        throw new Error('the installed read_document parser failed for ' + format);
+      }
+    }
+    const rendered = await documentKernel.call('read_document', { path: 'sample.pdf', renderPage: 1 });
+    const image = rendered.images?.[0];
+    if (image?.source !== 'document' || (await sharp(await documentMedia.read(image)).metadata()).format !== 'png') {
+      throw new Error('the installed PDF renderer did not return a persistent page image');
+    }
+    console.log('read_document: PDF/DOCX/XLSX/PPTX parsed and PDF rendered through isolated installed workers');
+  } finally { unregisterDocument(); await documentSession.close(); }
 } finally {
   if (previousMediaHome === undefined) delete process.env.LIGULE_HOME;
   else process.env.LIGULE_HOME = previousMediaHome;
