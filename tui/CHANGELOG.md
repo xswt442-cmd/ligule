@@ -8,6 +8,8 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ### 简体中文
 
+- Windows `full` 新增单帧 `screenshot`，沿用持久图像通路；新增独立截图同意、撤销及明确的外控 Grant 上限，捕获不切换焦点。
+
 - `full` 模式新增 `read_image`，支持持久图像引用、两种模型协议、会话恢复与分支；Markdown 可携带图片副本导出。
 - 模型服务可按模型声明 `imageInput`，未知图像能力默认拒绝，子代理图片按会话隔离。
 
@@ -15,6 +17,8 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 - `full` 模式新增 `todo_write`，支持每轮独立、持久保存历史的完整任务清单，内部子代理各自隔离。
 
 ### English
+
+- Windows `full` includes single-frame `screenshot` with persistent images, separate consent and revocation, explicit Agent Control grant limits, and no focus changes.
 
 - The `full` mode includes `read_image` with persistent images, both provider protocols, Session recovery and branching, and portable Markdown image exports.
 - Per-model `imageInput` declarations keep unknown image capabilities disabled and isolate internal subagent images by Session.

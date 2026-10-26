@@ -8,11 +8,15 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 ### 简体中文
 
+- Windows 截图使用独立授权；已有会话可确认或撤销，外控 Grant 可单独声明屏幕观察。捕获仅读取现有画面，不切换焦点。
+
 - `full` 模式新增 `read_image` 与持久图像引用，Markdown 导出包含相对图片附件；模型设置可选择图像输入能力并在应用重启后保留。
 
 - `full` 模式新增 `todo_write`，每轮任务清单随会话保存历史，内部子代理使用独立清单。
 
 ### English
+
+- Windows screen capture has separate Session consent and revocation plus an explicit Agent Control grant capability; captures read the existing screen without changing focus.
 
 - The `full` mode includes `read_image`, persistent image references and relative Markdown image assets; model settings preserve image capability selections across application restarts.
 
