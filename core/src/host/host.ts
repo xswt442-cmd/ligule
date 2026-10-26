@@ -60,7 +60,7 @@ import { networkPlugin } from '../tools/network.js';
 import { createTodoWritePlugin } from '../tools/todo-write.js';
 import { createReadImagePlugin } from '../tools/read-image.js';
 import { createScreenshotPlugin } from '../tools/screenshot.js';
-import { createMediaStore } from '../capability/media.js';
+import { createMediaStore, imagePreview } from '../capability/media.js';
 import { checkedImageReferences, IMAGE_LIMITS, type ImageReference } from '../session/media.js';
 import { createSkillPlugin } from '../tools/skill.js';
 import { createMcpPlugin, type McpAuthorization } from '../tools/mcp.js';
@@ -994,6 +994,7 @@ export function createHost({
   }
 
   const sessions = new Map<string, HostSessionState>();
+  let imagePreviews = 0;
   const retiringSessions = new Set<string>();
   const retirementProgress = new Map<string, HostSessionRetirement>();
   const retirementTasks = new Map<string, Promise<void>>();
@@ -2778,6 +2779,31 @@ export function createHost({
             ...(message.params.at === undefined ? {} : { at: message.params.at as number }),
           }, env);
           return { ...snapshot, writerActive: opened?.running !== undefined || await sessionWriterActive(path) };
+        }
+        case 'session.image.preview': {
+          if (imagePreviews >= 4) throw new KernelError('image_preview_busy');
+          imagePreviews++;
+          try {
+            const env = await environmentFor(requiredString(message.params.projectRoot, 'projectRoot'));
+            const opened = sessions.get(sessionId);
+            if (opened !== undefined && workspaceIdentity(opened.environment.projectRoot) !== workspaceIdentity(env.projectRoot)) {
+              throw new KernelError('image_owner_mismatch');
+            }
+            const path = recordPathOf(sessionId, env);
+            try { await access(path); }
+            catch (error) {
+              if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new KernelError('session_not_found');
+              throw error;
+            }
+            const session = opened?.session ?? createSessionLog({ directory: env.directory, id: sessionId });
+            const references = (await session.read()).flatMap(event =>
+              event.kind === 'tool' && isRecord(event.result) && event.result.failed !== true && event.result.images !== undefined
+                ? checkedImageReferences(event.result.images) : []);
+            const reference = references.find(item => item.id === message.params.imageId);
+            if (reference === undefined) throw new KernelError('image_not_in_session');
+            const media = createMediaStore({ ...env.config, workspaceRoot: env.projectRoot }, sessionId, references);
+            return await imagePreview(media, reference);
+          } finally { imagePreviews--; }
         }
         case 'session.control': {
           const env = await environmentFor(requiredString(message.params.projectRoot, 'projectRoot'));

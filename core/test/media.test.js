@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { access, mkdir, mkdtemp, open, readFile, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import sharp from 'sharp';
-import { createMediaStore, IMAGE_LIMITS } from '../dist/capability/media.js';
+import { createMediaStore, imagePreview, IMAGE_LIMITS } from '../dist/capability/media.js';
 import { sessionDirectory, workspaceDataDirectory } from '../dist/session/list.js';
 
 async function withStore(run) {
@@ -29,6 +29,17 @@ test('real PNG, JPEG, WebP and GIF decode to durable normalized PNG references',
       assert.equal(reference.sha256, createHash('sha256').update(bytes).digest('hex'));
       assert.equal((await sharp(bytes).metadata()).format, 'png');
       assert.deepEqual(await reopened.reference(reference.id), reference);
+      const preview = await imagePreview(reopened, reference);
+      assert.equal(preview.mimeType, 'image/webp');
+      assert.equal(preview.width, 512);
+      assert.ok(preview.height <= 10);
+      const display = Buffer.from(preview.base64, 'base64');
+      assert.ok(display.length <= 256 * 1024);
+      const metadata = await sharp(display).metadata();
+      assert.equal(metadata.format, 'webp');
+      assert.equal(metadata.width, preview.width);
+      assert.equal(metadata.height, preview.height);
+      assert.deepEqual(await reopened.read(reference), bytes);
       assert.ok(!JSON.stringify(reference).includes('base64'));
       assert.equal((await readFile(join(store.directory, `${reference.id}.json`), 'utf8')).includes('data:image'), false);
     }

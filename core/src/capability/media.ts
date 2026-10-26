@@ -205,3 +205,14 @@ export function createMediaStore(config: SessionDirectoryConfig, sessionId: stri
 }
 
 export type MediaStore = ReturnType<typeof createMediaStore>;
+
+/** A transient display derivative; canonical records contain only the original reference. */
+export async function imagePreview(media: MediaStore, reference: ImageReference) {
+  const bytes = await media.read(reference);
+  const output = await sharp(bytes, { limitInputPixels: IMAGE_LIMITS.pixels, failOn: 'warning' })
+    .resize({ width: 512, height: 512, fit: 'inside', withoutEnlargement: true })
+    .webp({ quality: 70 }).toBuffer({ resolveWithObject: true });
+  if (output.data.length > 256 * 1024) throw new KernelError('image_preview_bytes_exceeded');
+  return { imageId: reference.id, mimeType: 'image/webp' as const, base64: output.data.toString('base64'),
+    width: output.info.width, height: output.info.height };
+}

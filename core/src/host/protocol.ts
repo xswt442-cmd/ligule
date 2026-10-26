@@ -247,6 +247,14 @@ export const METHODS = Object.freeze({
       at: { type: 'integer', minimum: 1 },
     }, required: ['projectRoot', 'sessionId'] },
   },
+  'session.image.preview': {
+    description: 'Read a bounded display preview of an image already referenced by a successful tool result in this workspace session. Does not capture the screen or acquire a session writer lock.',
+    parameters: { type: 'object', properties: {
+      projectRoot: { type: 'string' },
+      sessionId: SESSION_ID,
+      imageId: { type: 'string', minLength: 36, maxLength: 36 },
+    }, required: ['projectRoot', 'sessionId', 'imageId'] },
+  },
   'session.control': {
     description: 'Send a human action to the local Host that currently owns this externally controlled Session. The same Host remains its only writer; the local action can read its configuration, observe, message, answer, cancel, or take over.',
     parameters: { type: 'object', properties: {
