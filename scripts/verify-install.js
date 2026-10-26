@@ -134,7 +134,7 @@ writeFileSync(join(consumer, 'probe.mjs'), `
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
-import { createConfig, createKernel, createMcpPlugin, createMcpRegistry, createReadImagePlugin, createReadDocumentPlugin, createScreenshotPlugin, createSessionLog, execTool, flagLayer, KernelError, mcpServerConfigs, parseCommand, resolveRipgrep, resolveShell, searchWithRipgrep, withNativeExitCode, VERSION } from 'ligule';
+import { createConfig, createKernel, createMcpPlugin, createMcpRegistry, createReadImagePlugin, createReadDocumentPlugin, createWebSearchPlugin, createScreenshotPlugin, createSessionLog, execTool, flagLayer, KernelError, mcpServerConfigs, parseCommand, resolveRipgrep, resolveShell, searchWithRipgrep, withNativeExitCode, VERSION } from 'ligule';
 import { pathToFileURL } from 'node:url';
 
 const coreRoot = ${JSON.stringify(bundledCoreDirectory)};
@@ -203,6 +203,27 @@ try {
 }
 const { detectPermissionCapabilities } = await import(pathToFileURL(join(coreRoot, 'dist', 'capability', 'permission-capabilities.js')).href);
 const { createPermissionContext } = await import(pathToFileURL(join(coreRoot, 'dist', 'kernel', 'permission.js')).href);
+
+const searchPlugin = createWebSearchPlugin({ provider: 'deepseek', serviceId: 'install-probe', apiKeyEnv: 'LIGULE_INSTALL_SEARCH_DISABLED_KEY' });
+const searchCatalog = createKernel();
+const unregisterSearchCatalog = searchPlugin.setup(searchCatalog);
+try {
+  const declared = searchCatalog.manifest().find(tool => tool.name === 'web_search');
+  if (JSON.stringify(Object.keys(declared?.parameters.properties ?? {}).sort()) !== JSON.stringify(['count', 'query'])) {
+    throw new Error('the installed search declaration exposes an unexpected argument');
+  }
+} finally { unregisterSearchCatalog(); }
+const searchDenied = createKernel({ permission: createPermissionContext('read-only', 'disabled', {
+  filesystemRead: 'full', filesystemWrite: 'unavailable', network: 'unavailable', process: 'unavailable',
+}) });
+const unregisterSearchDenied = searchPlugin.setup(searchDenied);
+try {
+  let blocked = false;
+  try { await searchDenied.call('web_search', { query: 'installed permission check' }); }
+  catch (error) { if (!error.code?.startsWith('permission_')) throw error; blocked = true; }
+  if (!blocked) throw new Error('the installed search tool bypassed disabled network permission');
+  console.log('web_search: exported schema and network denial checked without credentials or a service request');
+} finally { unregisterSearchDenied(); }
 
 if (typeof KernelError !== 'function') throw new Error('KernelError is missing from the installed package');
 if (VERSION !== '${pkg.version}') throw new Error('the TUI compatibility entry did not preserve VERSION');
