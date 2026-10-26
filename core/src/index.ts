@@ -56,6 +56,10 @@ export { CHECKPOINT_FORMAT_VERSION, CHECKPOINT_INPUT_VERSION, checkpointPath, cr
 export { createCompaction, cutPoint, estimateTokens, compressibleRange, SUMMARY_SPILL_NAME } from './session/compaction.js';
 export { summarizeVerdicts, formatVerdicts } from './session/verdicts.js';
 export { createLoop, DEFAULT_LOOP_LIMITS } from './kernel/loop.js';
+export { createTaskBudget } from './kernel/task-budget.js';
+export { runSummary, checkedRunSummary } from './kernel/run-summary.js';
+export { createPresentPlugin } from './tools/present.js';
+export { isFileArtifact } from './session/artifact.js';
 export { METHODS, APPROVAL_METHOD, QUESTION_METHOD, NOTIFICATIONS, validateCall, isApproved } from './host/protocol.js';
 export { createConnection } from './host/connection.js';
 export { createMemoryConnectionPair } from './host/memory.js';

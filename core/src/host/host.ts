@@ -5,6 +5,7 @@ import type { Readable, Writable } from 'node:stream';
 import { access, readFile, realpath, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { KernelError } from '../kernel/error.js';
+import { createTaskBudget, type TaskBudget, type TaskBudgetLimits } from '../kernel/task-budget.js';
 import {
   assertDelegationCompletion, createOutputSchemaContract, DELEGATION_RESULT_TOOL, MAX_DELEGATION_SCHEMA_BYTES, outputSchemaInstructions,
   registerDelegationResultTool, type DelegationSpec, type RunValidation,
@@ -60,6 +61,7 @@ import { networkPlugin } from '../tools/network.js';
 import { createTodoWritePlugin } from '../tools/todo-write.js';
 import { createReadImagePlugin } from '../tools/read-image.js';
 import { createReadDocumentPlugin } from '../tools/read-document.js';
+import { createPresentPlugin } from '../tools/present.js';
 import { createSearchSupport, type SearchStatus } from './search.js';
 import { createBrowserSupport, type BrowserSupport } from '../capability/browser.js';
 import { assertBrowserArguments, browserToolPolicy, BROWSER_SERVER } from '../capability/browser-policy.js';
@@ -221,6 +223,8 @@ function policyRuleKey(rule: Pick<PolicyRule, 'tool' | 'match' | 'target' | 'pat
 }
 
 interface HostSessionBase {
+  taskBudget?: TaskBudget;
+  lastTask?: ReturnType<TaskBudget['snapshot']>;
   readonly id: string;
   readonly search: SearchStatus;
   readonly browser: BrowserSupport;
@@ -530,6 +534,24 @@ function sessionLoopLimits(state: HostSessionBase): LoopLimits {
   };
 }
 
+function taskLimitsOf(config: HostConfigSnapshot, modelCalls: number, requested?: Partial<TaskBudgetLimits>): TaskBudgetLimits {
+  const loop = isRecord(config.loop) ? config.loop : {};
+  const limits = { maxModelCalls: loop.totalModelCalls ?? modelCalls, timeoutMs: loop.taskTimeoutMs ?? 1_800_000,
+    requestTimeoutMs: loop.requestTimeoutMs ?? 120_000 };
+  const check = (value: unknown, maximum: number): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 1 && value <= maximum;
+  if (!check(limits.maxModelCalls, Number.MAX_SAFE_INTEGER) || !check(limits.timeoutMs, 86_400_000)
+    || !check(limits.requestTimeoutMs, Math.min(limits.timeoutMs, 3_600_000))) throw new KernelError('task_budget_invalid');
+  if (requested !== undefined && (!isRecord(requested) || Object.keys(requested).some(key => !['maxModelCalls', 'timeoutMs', 'requestTimeoutMs'].includes(key)))) {
+    throw new KernelError('task_budget_invalid');
+  }
+  const timeoutMs = requested?.timeoutMs ?? limits.timeoutMs;
+  const effective: TaskBudgetLimits = { maxModelCalls: requested?.maxModelCalls ?? limits.maxModelCalls, timeoutMs,
+    requestTimeoutMs: requested?.requestTimeoutMs ?? Math.min(limits.requestTimeoutMs, timeoutMs) };
+  if (!check(effective.maxModelCalls, limits.maxModelCalls) || !check(effective.timeoutMs, limits.timeoutMs)
+    || !check(effective.requestTimeoutMs, Math.min(limits.requestTimeoutMs, effective.timeoutMs))) throw new KernelError('task_budget_exceeds_limit');
+  return effective;
+}
+
 // 优先采用所选模型声明的上下文窗口，其次采用配置的备用值；两者都未设置时关闭压缩。
 // 立即拒绝无效上限，因为非有限窗口无法用于计算上下文压力。
 // 保留预算必须小于压力阈值，压缩后才能将请求控制在阈值以内。
@@ -591,7 +613,7 @@ function observedProvider(provider: HostProvider, onDelta: (event: ProviderEvent
 
 // 主循环、压缩和派生执行都通过此包装器调用模型。
 // 调用时再解析提供方，确保同一轮使用同一配置，后续轮次可采用新配置。
-function currentProvider(read: () => HostProvider, authorize: () => void): HostProvider {
+function currentProvider(read: () => HostProvider, authorize: () => void, task?: () => TaskBudget | undefined): HostProvider {
   return {
     get name() { return read().name; },
     get model() { return read().model; },
@@ -605,16 +627,21 @@ function currentProvider(read: () => HostProvider, authorize: () => void): HostP
     get thinkingEffort() { return read().thinkingEffort; },
     withModel(model) {
       const provider = read().withModel(model);
-      return currentProvider(() => provider, authorize);
+      return currentProvider(() => provider, authorize, task);
     },
     withGeneration(options) {
       const provider = read().withGeneration(options);
-      return currentProvider(() => provider, authorize);
+      return currentProvider(() => provider, authorize, task);
     },
     async *stream(request, options) {
       const provider = read();
       if (provider.pending !== true) authorize();
-      yield* provider.stream(request, options);
+      const budget = task?.();
+      budget?.consumeModelCall();
+      const active = budget?.request(options?.signal);
+      try { yield* provider.stream(request, active === undefined ? options : { signal: active.signal }); }
+      catch (error) { throw active?.signal.aborted === true && active.signal.reason instanceof KernelError ? active.signal.reason : error; }
+      finally { active?.dispose(); }
     },
   };
 }
@@ -856,6 +883,7 @@ export function createHost({
       createTodoWritePlugin(),
       createReadImagePlugin(),
       createReadDocumentPlugin(),
+      createPresentPlugin(),
       createScreenshotPlugin(),
       managedProcessPlugin(managedProcesses),
       ...(interactive ? [createAskUserPlugin({ ask: async () => { throw new KernelError('settings_catalog_not_executable'); } })] : []),
@@ -1677,7 +1705,7 @@ export function createHost({
       if (!hasModelCredentialBinding(bindings, model.api, model.baseURL, model.apiKeyEnv ?? 'LIGULE_API_KEY')) {
         throw new KernelError('provider_credential_unbound', { detail: 'the selected model endpoint and credential reference must be bound in user configuration or command-line flags' });
       }
-    });
+    }, () => state.taskBudget);
     let recoveredPolicyState: PolicyState | undefined;
     await session.acquire();
     const cleanup = [];
@@ -2011,6 +2039,7 @@ export function createHost({
       sourceFor: server => server === BROWSER_SERVER ? 'browser' : undefined }), createTodoWritePlugin({ session }),
       createReadImagePlugin({ media, supportsImages: () => live.imageInput === true }),
       createReadDocumentPlugin({ media, supportsImages: () => live.imageInput === true }),
+      createPresentPlugin({ sessionId: id, workspaceRoot: env.projectRoot, session }),
       createScreenshotPlugin({ media, supportsImages: () => live.imageInput === true, authorize: authorizeScreenCapture }),
       managedProcessPlugin(managedProcesses), ...asked, createCompactPlugin({
       // 压缩实例随所选模型重建；工具经取值函数读取当前实例。派生子会话不注册此工具，
@@ -2029,6 +2058,7 @@ export function createHost({
       logger,
       plugins: basePlugins,
       authorizeScreenCapture,
+      taskBudget: () => state.taskBudget,
       createMcp: async (childId, childMedia) => {
         const servers = await Promise.all(mcpConfigs.map(server => server.name === BROWSER_SERVER ? browser.session(childId) : server));
         const childRegistry = createMcpRegistry(servers, { toolPolicy: browserToolPolicy, assertServerAccess: assertMcpAccess,
@@ -2202,6 +2232,11 @@ export function createHost({
     const runDelegated: HostSessionState['runDelegated'] = async (input, options) => {
       const contract = options.delegation?.outputSchema === undefined
         ? undefined : createOutputSchemaContract(options.delegation.outputSchema);
+      const budget = createTaskBudget(taskLimitsOf(config, state.loopModelCalls, options.delegation?.budget), options.signal);
+      state.taskBudget = budget;
+      const abortTask = () => state.running?.abort(budget.signal.reason);
+      budget.signal.addEventListener('abort', abortTask, { once: true });
+      if (budget.signal.aborted) abortTask();
       let structuredSubmitted = false;
       let structured: unknown;
       let disposeResultTool: (() => void) | undefined;
@@ -2246,17 +2281,17 @@ export function createHost({
           });
         }
         const result = await loop.run(input, {
-          signal: options.signal,
+          signal: budget.signal,
+          task: budget,
           user: options.user,
           onProgress: options.onProgress,
           completesRun: contract === undefined ? [] : [DELEGATION_RESULT_TOOL],
           validateCompletion: () => assertDelegationCompletion(contract, structuredSubmitted),
-          ...(contract === undefined && delegatedMode === undefined ? {} : {
-            turnContext: {
+          turnContext: {
+              task: budget.snapshot(),
               ...(delegatedMode === undefined ? {} : { delegationMode: delegatedMode }),
               ...(contract === undefined ? {} : { delegationSchemaDigest: contract.digest }),
-            },
-          }),
+          },
         });
         const validation = contract === undefined
           ? undefined
@@ -2267,6 +2302,10 @@ export function createHost({
           ...(validation === undefined ? {} : { validation }),
         };
       } finally {
+        state.lastTask = budget.snapshot();
+        state.taskBudget = undefined;
+        budget.signal.removeEventListener('abort', abortTask);
+        budget.dispose();
         try { undoDelegationMode(); }
         finally {
           try { undoOutputContract(); }
@@ -2372,6 +2411,7 @@ export function createHost({
       effective: {
         mode: state.mode.file?.name ?? null,
         loopIterations: state.loopIterations,
+        taskLimits: taskLimitsOf(state.environment.config, state.loopModelCalls),
         policy: { mode: state.chain.mode, source: state.chain.modeSource, default: state.chain.configuredMode() },
         permission: sessionPermissionView(state, canControlPermission),
         screenCapture: { enabled: state.screenCapture.enabled, source: state.screenCapture.source, changeAllowed: permissionControl },
@@ -3103,6 +3143,8 @@ export function createHost({
             screenCapture: { enabled: state.screenCapture.enabled, source: state.screenCapture.source, changeAllowed: permissionControl },
             search: state.search,
             browser: browserView(state),
+            taskLimits: taskLimitsOf(state.environment.config, state.loopModelCalls),
+            task: state.taskBudget?.snapshot() ?? state.lastTask ?? null,
             denials: state.chain.denials(),
             delegation: currentGrant === undefined ? null : {
               grantId: currentGrant.id,

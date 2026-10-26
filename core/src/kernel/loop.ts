@@ -4,6 +4,9 @@
 import { KernelError, KernelRuntimeError } from './error.js';
 import { usageEvent } from '../session/usage.js';
 import { failureOf } from './result.js';
+import { rememberRunSummary, type RunSummary } from './run-summary.js';
+import type { TaskBudget } from './task-budget.js';
+import { isFileArtifact, type FileArtifact } from '../session/artifact.js';
 import type { Kernel } from './kernel.js';
 import type { PromptAssembly } from './prompt.js';
 import type { StreamDraftWriter } from '../session/stream-draft.js';
@@ -89,14 +92,12 @@ export type LoopProgressEvent =
   | { readonly kind: 'phase'; readonly phase: LoopProgressPhase; readonly modelCalls: number; readonly toolCalls: number }
   | { readonly kind: 'activity'; readonly phase: LoopProgressPhase; readonly activity: 'model_output' | 'tool'; readonly modelCalls: number; readonly toolCalls: number };
 
-export interface LoopResult {
-  readonly text: string;
-  readonly iterations: number;
-  readonly modelCalls: number;
+export interface LoopResult extends RunSummary {
   readonly completedBy?: string;
 }
 
 export interface LoopRunOptions {
+  readonly task?: TaskBudget;
   readonly signal?: AbortSignal;
   readonly user?: Record<string, unknown>;
   readonly onProgress?: (event: LoopProgressEvent) => void;
@@ -141,7 +142,7 @@ function modelMessagesOf(values: readonly unknown[]): ModelMessage[] {
 
 export const DEFAULT_LOOP_LIMITS = Object.freeze({ iterations: 64, modelCalls: 64, maxParallelTools: 4 }) satisfies LoopLimits;
 
-const TURN_CANCEL_CODES = new Set(['provider_cancelled', 'loop_cancelled', 'ask_user_cancelled']);
+const TURN_CANCEL_CODES = new Set(['provider_cancelled', 'loop_cancelled', 'ask_user_cancelled', 'task_cancelled']);
 
 function failureCode(error: unknown): string {
   if (typeof error !== 'object' || error === null) return 'loop_failed';
@@ -230,6 +231,14 @@ export function createLoop({
       let terminalAttempted = false;
       let overflowRecoveryTried = false;
       let draft: StreamDraftWriter | undefined;
+      const artifacts = new Map<string, FileArtifact>();
+      const summary = () => ({ text, iterations, modelCalls: calls,
+        ...(userSeq === undefined ? {} : { userSeq }),
+        ...(artifacts.size === 0 ? {} : { artifacts: [...artifacts.values()] }),
+        ...(runOptions.task === undefined ? {} : { task: runOptions.task.snapshot() }),
+      });
+      const cancelled = () => controller.signal.reason instanceof KernelError && controller.signal.reason.code.startsWith('task_')
+        ? controller.signal.reason : new KernelError('loop_cancelled');
 
       // 每个已返回给模型的工具调用都必须有对应结果，否则后续模型请求会因调用未完成而被拒绝。
       // 未执行的调用也要写入错误结果，保持记录结构完整。
@@ -250,7 +259,8 @@ export function createLoop({
         if (!session || userSeq === undefined || terminalAttempted) return;
         terminalAttempted = true;
         await session.append({
-          kind: 'turn', ignorable: true, status, userSeq, iterations, modelCalls: calls, ...fields,
+          kind: 'turn', ignorable: true, status, userSeq, iterations, modelCalls: calls,
+          ...(runOptions.task === undefined ? {} : { task: runOptions.task.snapshot() }), ...fields,
         });
       }
 
@@ -270,6 +280,7 @@ export function createLoop({
           await session.append({ kind: 'turnContext', ignorable: true, userSeq, ...(turnContext?.() ?? {}), ...(runTurnContext ?? {}) });
         }
         for (let iteration = 1; iteration <= limits.iterations; iteration += 1) {
+          if (controller.signal.aborted) throw cancelled();
           reportPhase('preparing');
           if (calls >= limits.modelCalls) throw new KernelError('loop_model_budget_exhausted');
           iterations = iteration;
@@ -305,6 +316,7 @@ export function createLoop({
               }
               if (retried === null) {
                 const partialText = events.flatMap((event) => event.type === 'text' ? [event.text] : []).join('');
+                if (partialText !== '') text = partialText;
                 const partialReasoning = events.flatMap((event) => event.type === 'reasoning' ? [event.text] : []).join('');
                 const partialCalls = events.flatMap((event) => event.type === 'tool-call'
                   ? [{ id: event.id, name: event.name, args: event.args ?? {} }]
@@ -318,7 +330,8 @@ export function createLoop({
                 const cleanup = await draft?.discard();
                 if (cleanup !== undefined && session !== undefined) await session.append({ kind: 'streamDiagnostic', ignorable: true, code: cleanup.code });
                 await answerRemaining(partialCalls, 'the provider response did not finish');
-                throw error;
+                throw controller.signal.aborted && controller.signal.reason instanceof KernelError
+                  && controller.signal.reason.code.startsWith('task_') ? controller.signal.reason : error;
               }
               const cleanup = await draft?.discard();
               if (cleanup !== undefined && session !== undefined) await session.append({ kind: 'streamDiagnostic', ignorable: true, code: cleanup.code });
@@ -373,7 +386,7 @@ export function createLoop({
           if (toolCalls.length === 0) {
             runOptions.validateCompletion?.();
             await markTurn('completed');
-            return { text, iterations: iteration, modelCalls: calls };
+            return summary();
           }
 
           reportPhase('tool_execution');
@@ -381,6 +394,22 @@ export function createLoop({
           for (const [groupIndex, group] of groups.entries()) {
             reportActivity('tool');
             const { settled, started } = await executeGroup(kernel, group, controller.signal, maxParallelTools);
+            for (const [outcomeIndex, outcome] of settled.entries()) {
+              const tool = group.calls[outcomeIndex].name;
+              if (tool !== 'present' && tool !== 'subagent') continue;
+              if (outcome.status !== 'fulfilled' || outcome.value === null || typeof outcome.value !== 'object') continue;
+              const result = outcome.value as Record<string, unknown>;
+              const child = tool === 'subagent' && result.result !== null && typeof result.result === 'object'
+                ? result.result as Record<string, unknown> : undefined;
+              const presented = tool === 'present' ? result.artifacts : child?.artifacts;
+              if (!Array.isArray(presented)) continue;
+              for (const artifact of presented) {
+                if (isFileArtifact(artifact)) {
+                  const key = `${artifact.sessionId}/${artifact.path}`;
+                  if (artifacts.has(key) || artifacts.size < 16) artifacts.set(key, artifact);
+                }
+              }
+            }
             for (const [index, outcome] of settled.entries()) {
               reportActivity('tool');
               // Kernel 已将工具失败转换为稳定错误码并写入记录，因此循环可以将失败结果交给模型继续处理。
@@ -395,14 +424,14 @@ export function createLoop({
                 await answerRemaining(restOf(groups, groupIndex, index), `${name} ended this round before this call ran`);
                 runOptions.validateCompletion?.();
                 await markTurn('completed', { completedBy: name });
-                return { text, completedBy: name, iterations: iteration, modelCalls: calls };
+                return { ...summary(), completedBy: name };
               }
             }
             if (controller.signal.aborted) {
               // 两组工具调用之间收到取消时，后续调用虽已由模型提出，但不能再执行。
               // 为其写入未执行结果和原因，避免会话中留下未完成调用。
               await answerRemaining([...group.calls.slice(started), ...restOf(groups, groupIndex + 1)], 'the run was cancelled before this call ran');
-              throw new KernelError('loop_cancelled');
+              throw cancelled();
             }
           }
         }
@@ -416,6 +445,7 @@ export function createLoop({
           code,
           ...(diagnostics === undefined ? {} : { diagnostics }),
         });
+        rememberRunSummary(error, summary());
         throw error;
       } finally {
         reportPhase('settling');

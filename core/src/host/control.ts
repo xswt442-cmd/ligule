@@ -4,6 +4,7 @@ import { isAbsolute, resolve } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import type { ProviderDiagnostic } from '../kernel/error.js';
 import { completedRunResult, failedRunResult, type DelegationSpec, type RunResult, type RunValidation } from '../delegation.js';
+import { checkedRunSummary, runSummary } from '../kernel/run-summary.js';
 import { checkedAnswers, type AskQuestion } from '../tools/ask-user.js';
 import { APPROVAL_METHOD, QUESTION_METHOD } from './protocol.js';
 import type { Host } from './host.js';
@@ -562,9 +563,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
           };
         }
         found.result = completedRunResult(found.operationId, sessionId, {
-          text: completed.text,
-          iterations: completed.iterations as number,
-          modelCalls: completed.modelCalls as number,
+          ...checkedRunSummary(completed),
           ...(typeof completed.completedBy === 'string' ? { completedBy: completed.completedBy } : {}),
         } satisfies LoopResult, {
           ...(Object.hasOwn(completed, 'structured') ? { structured: completed.structured } : {}),
@@ -577,12 +576,12 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
       const code = controlErrorCode(error);
       found.code = code;
       if (error instanceof KernelError && error.diagnostics !== undefined) found.diagnostics = error.diagnostics;
-      found.state = ['provider_cancelled', 'loop_cancelled', 'ask_user_cancelled'].includes(found.code) ? 'cancelled' : 'failed';
+      found.state = ['provider_cancelled', 'loop_cancelled', 'ask_user_cancelled', 'task_cancelled'].includes(found.code) ? 'cancelled' : 'failed';
       const validation = delegation?.outputSchema === undefined ? undefined : {
         status: 'invalid' as const,
         errors: [`Run ended with ${code} before a valid structured result was submitted.`],
       };
-      found.result = failedRunResult(found.operationId, sessionId, code, found.diagnostics, validation);
+      found.result = failedRunResult(found.operationId, sessionId, code, found.diagnostics, validation, runSummary(error));
     }).then(() => {
       settleInteractions(found);
       if (active.get(sessionId) === found) active.delete(sessionId);

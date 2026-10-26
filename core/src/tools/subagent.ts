@@ -23,9 +23,12 @@ import { createDecisionChain } from '../kernel/policy.js';
 import { createLogger } from '../kernel/log.js';
 import { loadAssembly } from '../kernel/assembly.js';
 import { KernelError, KernelRuntimeError } from '../kernel/error.js';
+import { runSummary } from '../kernel/run-summary.js';
+import type { TaskBudget } from '../kernel/task-budget.js';
 import { createTodoWritePlugin } from './todo-write.js';
 import { createReadImagePlugin } from './read-image.js';
 import { createReadDocumentPlugin } from './read-document.js';
+import { createPresentPlugin } from './present.js';
 import { createScreenshotPlugin } from './screenshot.js';
 import { createMediaStore, type MediaStore } from '../capability/media.js';
 import { boundaryOf } from '../capability/limits.js';
@@ -48,6 +51,7 @@ function stableErrorCode(error: unknown): string {
 }
 
 export interface SubagentDeps {
+  readonly taskBudget?: () => TaskBudget | undefined;
   readonly createMcp?: (id: string, media: MediaStore) => Promise<{ plugin: Parameters<typeof loadAssembly>[1][number]; close(): Promise<void> }>;
   readonly authorizeScreenCapture?: () => Promise<AbortSignal>;
   config: ReturnType<typeof createConfig>;
@@ -234,6 +238,8 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                 ...(parentTools.has('todo_write') ? [createTodoWritePlugin({ session })] : []),
                 ...(parentTools.has('read_image') ? [createReadImagePlugin({ media, supportsImages: () => provider.imageInput === true })] : []),
                 ...(parentTools.has('read_document') ? [createReadDocumentPlugin({ media, supportsImages: () => provider.imageInput === true })] : []),
+                ...(parentTools.has('present') ? [createPresentPlugin({ sessionId: id,
+                  workspaceRoot: typeof deps.config.workspaceRoot === 'string' ? deps.config.workspaceRoot : boundaryOf(deps.config), session })] : []),
                 ...(parentTools.has('screenshot') ? [createScreenshotPlugin({ media,
                   supportsImages: () => provider.imageInput === true,
                   authorize: authorizeScreenCapture,
@@ -300,23 +306,24 @@ export function createSubagentPlugin(deps: SubagentDeps) {
               });
               let result: Awaited<ReturnType<typeof loop.run>>;
               try {
-                result = await loop.run(args.task, { signal, validateCompletion: () => assertDelegationCompletion(outputContract, structuredSubmitted) });
+                result = await loop.run(args.task, { signal, task: deps.taskBudget?.(), validateCompletion: () => assertDelegationCompletion(outputContract, structuredSubmitted) });
               } catch (error) {
                 // Record-lock and Session I/O failures mean the child record may be unreliable; do not turn them into a normal child result.
                 if (error instanceof KernelRuntimeError) throw error;
                 const code = stableErrorCode(error);
+                const summary = runSummary(error);
                 const validation = outputContract === undefined ? undefined : {
                   status: 'invalid' as const,
                   schemaDigest: outputContract.digest,
                   errors: [`Run ended with ${code} before a valid structured result was submitted.`],
                 };
                 return {
-                  text: null,
+                  text: summary?.text || null,
                   summary: `Child run ${code}; its saved Session is available for inspection.`,
                   sessionId: id,
                   path: session.path,
-                  iterations: null,
-                  modelCalls: null,
+                  iterations: summary?.iterations ?? null,
+                  modelCalls: summary?.modelCalls ?? null,
                   generation: {
                     outputTokens: provider.outputTokens ?? null,
                     thinkingEffort: provider.thinkingEffort ?? provider.thinkingCapability?.defaultEffort ?? null,
@@ -330,6 +337,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                     code,
                     error instanceof KernelError ? error.diagnostics : undefined,
                     validation,
+                    summary,
                   ),
                 };
               }

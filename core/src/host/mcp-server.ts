@@ -24,23 +24,37 @@ const providerDiagnostic = { type: 'object', additionalProperties: false, proper
   attempts: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
   responseReceived: { type: 'boolean' }, streamReceived: { type: 'boolean' }, recoverable: { type: 'boolean' },
 }, required: ['category', 'attempts', 'responseReceived', 'streamReceived', 'recoverable'] };
+const taskLimitsOutput = {
+  maxModelCalls: { type: 'integer', minimum: 1 }, timeoutMs: { type: 'integer', minimum: 1, maximum: 86_400_000 },
+  requestTimeoutMs: { type: 'integer', minimum: 1, maximum: 3_600_000 },
+};
+const taskOutput = object({ ...taskLimitsOutput, modelCalls: { type: 'integer', minimum: 0 },
+  startedAt: { type: 'string' }, deadlineAt: { type: 'string' },
+}, ['maxModelCalls', 'timeoutMs', 'requestTimeoutMs', 'modelCalls', 'startedAt', 'deadlineAt']);
+const fileArtifactOutput = object({ kind: { type: 'string', enum: ['file'] }, sessionId: id,
+  path: { type: 'string', minLength: 1, maxLength: 2048 }, mimeType: { type: 'string', maxLength: 128 },
+  bytes: { type: 'integer', minimum: 0, maximum: 20 * 1024 * 1024 }, sha256: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+  description: { type: 'string', maxLength: 400 },
+}, ['kind', 'sessionId', 'path', 'mimeType', 'bytes', 'sha256']);
 const runResultOutput = object({
   runId: id,
   sessionId: id,
   state: { type: 'string', enum: ['completed', 'failed', 'cancelled'] },
   stopReason: { type: 'string', enum: [
     'assistant_completed', 'tool_completed', 'cancelled', 'budget_exhausted', 'refused',
-    'provider_error', 'tool_error', 'validation_failed', 'host_error',
+    'provider_error', 'tool_error', 'validation_failed', 'host_error', 'deadline_exceeded', 'request_timeout',
   ] },
-  output: object({ text: { type: ['string', 'null'] }, structured: {} }, ['text']),
+  output: object({ text: { type: ['string', 'null'] }, structured: {}, partial: { type: 'boolean', const: true } }, ['text']),
   validation: object({
     status: { type: 'string', enum: ['not_requested', 'valid', 'invalid'] },
     schemaDigest: { type: 'string', minLength: 12, maxLength: 64 },
     errors: { type: 'array', maxItems: 32, items: { type: 'string', maxLength: 512 } },
   }, ['status']),
-  artifacts: { type: 'array', maxItems: 32, items: object({
+  artifacts: { type: 'array', maxItems: 32, items: { anyOf: [object({
     kind: { type: 'string', enum: ['session'] }, sessionId: id,
-  }, ['kind', 'sessionId']) },
+  }, ['kind', 'sessionId']), fileArtifactOutput] } },
+  userSeq: { type: 'integer', minimum: 0 },
+  task: taskOutput,
   usage: object({
     iterations: { type: ['integer', 'null'], minimum: 0 },
     modelCalls: { type: ['integer', 'null'], minimum: 0 },
@@ -172,6 +186,7 @@ const configurationOutput = object({
   effective: { type: 'object', additionalProperties: false, properties: {
     mode: { type: ['string', 'null'] },
     loopIterations: { type: 'integer', minimum: 1 },
+    taskLimits: object(taskLimitsOutput, ['maxModelCalls', 'timeoutMs', 'requestTimeoutMs']),
     permission: permissionOutput,
     screenCapture: object({ enabled: { type: 'boolean' }, source: { type: 'string', enum: ['none', 'startup', 'trusted-ui', 'grant'] }, changeAllowed: { type: 'boolean' } }, ['enabled', 'source']),
     search: object({ configured: { type: 'boolean' }, available: { type: 'boolean' },

@@ -3,6 +3,9 @@ import type { ProviderDiagnostic } from './kernel/error.js';
 import { KernelError } from './kernel/error.js';
 import type { Kernel } from './kernel/kernel.js';
 import type { LoopResult } from './kernel/loop.js';
+import type { RunSummary } from './kernel/run-summary.js';
+import type { TaskBudgetLimits } from './kernel/task-budget.js';
+import type { FileArtifact } from './session/artifact.js';
 import type { RequestedModeSelection } from './kernel/modes.js';
 import { assertSupportedSchema, validateArgs } from './kernel/schema.js';
 
@@ -13,6 +16,7 @@ export const DELEGATION_RESULT_TOOL = 'ligule_delegation_result';
 export interface DelegationSpec {
   readonly mode?: RequestedModeSelection;
   readonly outputSchema?: Record<string, unknown>;
+  readonly budget?: Partial<TaskBudgetLimits>;
 }
 
 export const MODE_SELECTION_SCHEMA = {
@@ -41,6 +45,11 @@ export const DELEGATION_SPEC_SCHEMA = {
   properties: {
     mode: MODE_SELECTION_SCHEMA,
     outputSchema: { type: 'object', description: 'Optional supported JSON Schema for the delegated result.' },
+    budget: { type: 'object', additionalProperties: false, properties: {
+      maxModelCalls: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+      timeoutMs: { type: 'integer', minimum: 1, maximum: 86_400_000 },
+      requestTimeoutMs: { type: 'integer', minimum: 1, maximum: 3_600_000 },
+    }, description: 'Optional tighter task limits shared by the parent, derived tasks and compaction. Waiting timeout does not change these limits.' },
   },
   additionalProperties: false,
 };
@@ -124,6 +133,8 @@ export type RunStopReason =
   | 'tool_completed'
   | 'cancelled'
   | 'budget_exhausted'
+  | 'deadline_exceeded'
+  | 'request_timeout'
   | 'validation_failed'
   | 'refused'
   | 'provider_error'
@@ -141,17 +152,21 @@ export interface RunResult {
   readonly sessionId: string;
   readonly state: RunState;
   readonly stopReason: RunStopReason;
-  readonly output: { readonly text: string | null; readonly structured?: unknown };
+  readonly output: { readonly text: string | null; readonly structured?: unknown; readonly partial?: true };
   readonly validation: RunValidation;
-  readonly artifacts: readonly { readonly kind: 'session'; readonly sessionId: string }[];
+  readonly artifacts: readonly ({ readonly kind: 'session'; readonly sessionId: string } | FileArtifact)[];
   readonly usage: { readonly iterations: number | null; readonly modelCalls: number | null };
+  readonly userSeq?: number;
+  readonly task?: RunSummary['task'];
   readonly diagnostic?: { readonly code: string; readonly provider?: ProviderDiagnostic };
 }
 
-const CANCELLED_CODES = new Set(['ask_user_cancelled', 'exec_cancelled', 'loop_cancelled', 'provider_cancelled']);
+const CANCELLED_CODES = new Set(['ask_user_cancelled', 'exec_cancelled', 'loop_cancelled', 'provider_cancelled', 'task_cancelled']);
 
 function stopReasonForCode(code: string): RunStopReason {
   if (CANCELLED_CODES.has(code)) return 'cancelled';
+  if (code === 'task_deadline_exceeded') return 'deadline_exceeded';
+  if (code === 'task_request_timeout') return 'request_timeout';
   if (code === 'delegation_result_missing' || code === 'delegation_result_invalid' || code === 'delegation_result_too_large') return 'validation_failed';
   if (code.includes('budget_exhausted') || code.includes('iteration_limit')) return 'budget_exhausted';
   if (code.startsWith('permission_') || code.startsWith('policy_')) return 'refused';
@@ -181,8 +196,10 @@ export function completedRunResult(
       ...(Object.hasOwn(options, 'structured') ? { structured: options.structured } : {}),
     },
     validation: options.validation ?? { status: 'not_requested' },
-    artifacts: artifacts(sessionId),
+    artifacts: [...artifacts(sessionId), ...(result.artifacts ?? [])],
     usage: { iterations: result.iterations, modelCalls: result.modelCalls },
+    ...(result.userSeq === undefined ? {} : { userSeq: result.userSeq }),
+    ...(result.task === undefined ? {} : { task: result.task }),
   };
 }
 
@@ -192,6 +209,7 @@ export function failedRunResult(
   code: string,
   provider?: ProviderDiagnostic,
   validation: RunValidation = { status: 'not_requested' },
+  summary?: RunSummary,
 ): RunResult {
   const stopReason = stopReasonForCode(code);
   return {
@@ -199,10 +217,12 @@ export function failedRunResult(
     sessionId,
     state: stopReason === 'cancelled' ? 'cancelled' : 'failed',
     stopReason,
-    output: { text: null },
+    output: summary !== undefined && summary.text !== '' ? { text: summary.text, partial: true } : { text: null },
     validation,
-    artifacts: artifacts(sessionId),
-    usage: { iterations: null, modelCalls: null },
+    artifacts: [...artifacts(sessionId), ...(summary?.artifacts ?? [])],
+    usage: { iterations: summary?.iterations ?? null, modelCalls: summary?.modelCalls ?? null },
+    ...(summary?.userSeq === undefined ? {} : { userSeq: summary.userSeq }),
+    ...(summary?.task === undefined ? {} : { task: summary.task }),
     diagnostic: { code, ...(provider === undefined ? {} : { provider }) },
   };
 }
