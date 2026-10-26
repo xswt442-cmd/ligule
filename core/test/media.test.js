@@ -41,7 +41,9 @@ test('image ownership, inherited branch references and stored integrity are enfo
     const reference = await store.put(input, 'desktop');
     await assert.rejects(createMediaStore(config, 'other').read(reference), { code: 'image_owner_mismatch' });
     await assert.rejects(createMediaStore({ ...config, workspaceRoot: join(root, 'different') }, 'parent').read(reference), { code: 'image_owner_mismatch' });
-    assert.deepEqual(await createMediaStore(config, 'branch', ['parent']).read(reference), await store.read(reference));
+    assert.deepEqual(await createMediaStore(config, 'branch', [reference]).read(reference), await store.read(reference));
+    const later = await store.put(input, 'desktop');
+    await assert.rejects(createMediaStore(config, 'branch', [reference]).read(later), { code: 'image_owner_mismatch' });
     await assert.rejects(store.read({ ...reference, width: 1 }), { code: 'image_reference_mismatch' });
     await assert.rejects(store.reference('../escape'), { code: 'image_reference_invalid' });
     await writeFile(join(store.directory, `${reference.id}.png`), 'damaged');

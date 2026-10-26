@@ -1,4 +1,5 @@
 // 未配置上下文窗口也保存端点实际报回的用量；窗口只控制压缩策略。
+import { isImageReference } from './media.js';
 export interface ModelRequest {
   readonly system?: string;
   readonly tools?: unknown;
@@ -7,7 +8,13 @@ export interface ModelRequest {
 
 // 按字节数除以四得到粗略 Token 估算；具体偏差由服务端用量持续校准。
 export function estimateTokens(value: unknown): number {
-  return Math.ceil(Buffer.byteLength(JSON.stringify(value ?? ''), 'utf8') / 4);
+  function imageCount(item: unknown): number {
+    if (isImageReference(item)) return 1;
+    if (Array.isArray(item)) return item.reduce((sum, child) => sum + imageCount(child), 0);
+    if (typeof item === 'object' && item !== null) return Object.values(item).reduce<number>((sum, child) => sum + imageCount(child), 0);
+    return 0;
+  }
+  return Math.ceil(Buffer.byteLength(JSON.stringify(value ?? ''), 'utf8') / 4) + imageCount(value) * 4096;
 }
 
 export function estimateRequest(request: ModelRequest): number {

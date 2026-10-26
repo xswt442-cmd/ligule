@@ -75,6 +75,7 @@ export function providerFromConfig(config: ConfigSnapshot, generation: HostGener
     model: model.model,
     ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }),
     ...(capabilities === undefined ? {} : { capabilities }),
+    ...(typeof model.serviceImageInput === 'boolean' ? { imageInput: model.serviceImageInput } : {}),
     ...(generation.outputTokens === undefined
       ? (model.outputTokens === undefined ? {} : { outputTokens: model.outputTokens })
       : { outputTokens: generation.outputTokens }),

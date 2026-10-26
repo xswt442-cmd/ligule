@@ -3,7 +3,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Readable, Writable } from 'node:stream';
 import { access, readFile, realpath, stat } from 'node:fs/promises';
-import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import {
   assertDelegationCompletion, createOutputSchemaContract, DELEGATION_RESULT_TOOL, MAX_DELEGATION_SCHEMA_BYTES, outputSchemaInstructions,
@@ -40,7 +40,7 @@ import { adoptForSessionDirectory } from '../session/adopt.js';
 import { searchSessionDirectories } from '../session/search.js';
 import { branchSession } from '../session/branch.js';
 import { listProjectFiles } from './paths.js';
-import { branchSessionId, exportMarkdown, writeExport, type ExportRecord } from './export.js';
+import { branchSessionId, exportImageUrl, exportMarkdown, MAX_EXPORT_ASSETS, writeExport, type ExportAsset, type ExportRecord } from './export.js';
 import { createCompaction } from '../session/compaction.js';
 import { sessionWriterActive } from '../session/lock.js';
 import { requestAgentControl, type AgentControlRequest } from './agent-control-runtime.js';
@@ -58,6 +58,9 @@ import { createLoop, DEFAULT_LOOP_LIMITS, type LoopCompaction, type LoopProgress
 import { minimalPlugin } from '../tools/minimal.js';
 import { networkPlugin } from '../tools/network.js';
 import { createTodoWritePlugin } from '../tools/todo-write.js';
+import { createReadImagePlugin } from '../tools/read-image.js';
+import { createMediaStore } from '../capability/media.js';
+import { checkedImageReferences, IMAGE_LIMITS, type ImageReference } from '../session/media.js';
 import { createSkillPlugin } from '../tools/skill.js';
 import { createMcpPlugin, type McpAuthorization } from '../tools/mcp.js';
 import { createSubagentPlugin } from '../tools/subagent.js';
@@ -463,7 +466,7 @@ function exportRecordOf(event: SessionEvent): ExportRecord | undefined {
     text?: string;
     tool?: string;
     toolCalls?: { id: string; name: string; args?: Record<string, unknown> }[];
-    result?: { content?: unknown; failed?: boolean; code?: string; spilled?: string };
+    result?: { content?: unknown; failed?: boolean; code?: string; spilled?: string; images?: readonly ImageReference[] };
     name?: string;
     layer?: string;
   } = { kind: event.kind };
@@ -484,6 +487,7 @@ function exportRecordOf(event: SessionEvent): ExportRecord | undefined {
       ...(typeof event.result.failed === 'boolean' ? { failed: event.result.failed } : {}),
       ...(typeof event.result.code === 'string' ? { code: event.result.code } : {}),
       ...(typeof event.result.spilled === 'string' ? { spilled: event.result.spilled } : {}),
+      ...(event.result.images === undefined ? {} : { images: checkedImageReferences(event.result.images) }),
     };
   }
   return record;
@@ -557,6 +561,7 @@ function observedProvider(provider: HostProvider, onDelta: (event: ProviderEvent
     get pending() { return provider.pending; },
     get capabilities() { return provider.capabilities; },
     get requiresCompletion() { return provider.requiresCompletion; },
+    get imageInput() { return provider.imageInput; },
     get outputTokens() { return provider.outputTokens; },
     get contextTokens() { return provider.contextTokens; },
     get thinkingCapability() { return provider.thinkingCapability; },
@@ -581,6 +586,7 @@ function currentProvider(read: () => HostProvider, authorize: () => void): HostP
     get pending() { return read().pending; },
     get capabilities() { return read().capabilities; },
     get requiresCompletion() { return read().requiresCompletion; },
+    get imageInput() { return read().imageInput; },
     get outputTokens() { return read().outputTokens; },
     get contextTokens() { return read().contextTokens; },
     get thinkingCapability() { return read().thinkingCapability; },
@@ -818,6 +824,7 @@ export function createHost({
     const catalogPlugins: Plugin<Kernel>[] = [
       ...basePlugins,
       createTodoWritePlugin(),
+      createReadImagePlugin(),
       managedProcessPlugin(managedProcesses),
       ...(interactive ? [createAskUserPlugin({ ask: async () => { throw new KernelError('settings_catalog_not_executable'); } })] : []),
       createSubagentPlugin({
@@ -1036,7 +1043,7 @@ export function createHost({
         catch (error) { sessionFailure = { code: errorCode(error) ?? 'provider_rebuild_failed' }; continue; }
         const previous = resolveModel(ownGeneration.model);
         const next = resolveModel(ownModel);
-        if (['api', 'baseURL', 'apiKeyEnv', 'model', 'outputTokens', 'serviceOutputLimit', 'serviceContextTokens'].every((field) => previous[field] === next[field])) continue;
+        if (['api', 'baseURL', 'apiKeyEnv', 'model', 'outputTokens', 'serviceOutputLimit', 'serviceContextTokens', 'serviceImageInput'].every((field) => previous[field] === next[field])) continue;
         const generation: SessionGeneration = { provider: ownProvider, model: ownModel, explicit: true, options: ownGeneration.options };
         if (state.running === undefined) {
           state.generation = generation;
@@ -1552,6 +1559,10 @@ export function createHost({
       connection.notify({ notify: 'event', sessionId: id, event });
       for (const listener of listeners) listener(event);
     });
+    const inheritedImages = recover ? (await session.read()).flatMap(event =>
+      event.kind === 'tool' && isRecord(event.result) && event.result.images !== undefined
+        ? checkedImageReferences(event.result.images) : []) : [];
+    const media = createMediaStore({ ...config, workspaceRoot: env.projectRoot }, id, inheritedImages);
     // 新会话继承项目当前有效的生成设置。配置写入后，初始快照可能已过期，优先读取环境的最新设置。
     const workspaceTrusted = await isTrusted(env.projectRoot);
     const basePermission = recover ? permission : initial?.permission?.context ?? permission;
@@ -1902,7 +1913,8 @@ export function createHost({
         }
       },
     })];
-    const assembly = loadAssembly(kernel, [...basePlugins, createTodoWritePlugin({ session }), managedProcessPlugin(managedProcesses), ...asked, createCompactPlugin({
+    const assembly = loadAssembly(kernel, [...basePlugins, createTodoWritePlugin({ session }),
+      createReadImagePlugin({ media, supportsImages: () => live.imageInput === true }), managedProcessPlugin(managedProcesses), ...asked, createCompactPlugin({
       // 压缩实例随所选模型重建；工具经取值函数读取当前实例。派生子会话不注册此工具，
       // 子会话仍由自身构建的自动压缩管理预算。
       compaction: () => state.compaction ?? null,
@@ -2057,6 +2069,7 @@ export function createHost({
       prompt,
       session,
       limits: sessionLoopLimits(state),
+      resolveImage: media.read,
       compaction: loopCompaction,
       onProgress: (event) => {
         if (state.progressId !== undefined) observeLoopProgress(state as HostSessionState, connection, state.progressId, event);
@@ -2729,18 +2742,48 @@ export function createHost({
           // Host 负责读取和排版完整记录并写出文件，客户端只选择目标路径。
           // 用户通过保存对话框选择的导出路径不属于模型工具写入，不受项目边界限制。
           const record = await readRecord(sessionId, { fullResults: true });
+          const path = requiredString(message.params.path, 'path');
+          const exportEnvironment = sessions.get(sessionId)?.environment
+            ?? sessions.get(branchOwner(sessionId) ?? '')?.environment ?? defaultEnvironment;
+          const assets: ExportAsset[] = [];
+          const assetFailures: { path: string; code: string }[] = [];
+          const imageUrls = new Map<string, string>();
+          const seenImages = new Map<string, ImageReference>();
+          let assetBytes = 0;
+          const collectImages = async (id: string, records: readonly ExportRecord[]) => {
+            const references = records.flatMap(item => item.result?.images ?? []);
+            if (references.length === 0) return;
+            const media = createMediaStore({ ...exportEnvironment.config, workspaceRoot: exportEnvironment.projectRoot }, id, references);
+            for (const reference of references) {
+              const previous = seenImages.get(reference.id);
+              if (previous !== undefined && (Object.keys(previous) as (keyof ImageReference)[]).every(key => previous[key] === reference[key])) continue;
+              const failedPath = join(dirname(path), decodeURIComponent(exportImageUrl(path, reference.id)));
+              if (previous !== undefined) {
+                imageUrls.delete(reference.id);
+                assetFailures.push({ path: failedPath, code: 'export_asset_conflict' });
+                continue;
+              }
+              seenImages.set(reference.id, reference);
+              if (assets.length >= MAX_EXPORT_ASSETS || assetBytes + reference.bytes > IMAGE_LIMITS.storageBytes) {
+                assetFailures.push({ path: failedPath, code: 'export_asset_limit_exceeded' });
+                continue;
+              }
+              try {
+                const data = await media.read(reference);
+                assets.push({ reference, data });
+                assetBytes += data.length;
+                imageUrls.set(reference.id, exportImageUrl(path, reference.id));
+              } catch (error) {
+                assetFailures.push({ path: failedPath, code: errorCode(error) ?? 'image_unavailable' });
+              }
+            }
+          };
           const header: SessionHeader | undefined = record.header ?? undefined;
           const exportRecords = record.events.flatMap((event) => {
             const item = exportRecordOf(event);
             return item === undefined ? [] : [item];
           });
-          const main = exportMarkdown(exportRecords, {
-            id: sessionId,
-            projectRoot: header?.projectRoot,
-            createdAt: header?.createdAt ?? null,
-            // 先确定导出快照的末尾序号，避免读取期间追加的新事件混入本次导出。
-            unfinished: sessions.get(sessionId)?.running !== undefined,
-          });
+          await collectImages(sessionId, exportRecords);
           // 同时导出父会话记录引用的派生会话内容。
           const branches = [];
           const skipped = [];
@@ -2760,12 +2803,19 @@ export function createHost({
               const exported = exportRecordOf(event);
               return exported === undefined ? [] : [exported];
             });
-            branches.push({ id: branchId, text: exportMarkdown(branchEvents, { id: branchId, projectRoot: header?.projectRoot }) });
+            await collectImages(branchId, branchEvents);
+            branches.push({ id: branchId, events: branchEvents });
           }
           try {
             // 对每个导出文件分别返回结果，包括路径冲突和写入失败，并附上主文件路径。
-            const done = await writeExport(requiredString(message.params.path, 'path'), main, branches);
-            return { written: done.written, skipped: [...skipped, ...done.skipped], failed: done.failed };
+            const main = exportMarkdown(exportRecords, {
+              id: sessionId, projectRoot: header?.projectRoot, createdAt: header?.createdAt ?? null,
+              unfinished: sessions.get(sessionId)?.running !== undefined,
+            }, imageUrls);
+            const branchTexts = branches.map(branch => ({ id: branch.id,
+              text: exportMarkdown(branch.events, { id: branch.id, projectRoot: header?.projectRoot }, imageUrls) }));
+            const done = await writeExport(path, main, branchTexts, assets);
+            return { written: done.written, skipped: [...skipped, ...done.skipped], failed: [...assetFailures, ...done.failed] };
           } catch (cause) {
             if (cause instanceof KernelError) throw cause;
             // 无法创建目标目录时，报告整批导出尚未开始。

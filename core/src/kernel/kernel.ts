@@ -200,6 +200,11 @@ export function createKernel(options: KernelOptions = {}): Kernel {
     result: ReturnType<typeof refusalOf> | ReturnType<typeof failureOf> | ReturnType<typeof resultOf>,
   ): Promise<void> {
     if (!session) return;
+    // Older readers must reject a record requiring images rather than silently project text alone.
+    if (result.images !== undefined) {
+      entry.callId ??= randomUUID();
+      await session.append({ kind: 'image', callId: entry.callId });
+    }
     await session.append({ ...entry, result: await withinLimit(result, session.directory) });
   }
 
@@ -531,9 +536,11 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       const timed = () => {
         entry.durationMs = Number((process.hrtime.bigint() - startedAt) / 1_000_000n);
       };
+      let success: ReturnType<typeof resultOf>;
       try {
           value = await tool.run(args, { ...context, permission: callPermission, signal: options.signal, target: network, shell,
             ...(approvedScriptBinding === undefined ? {} : { scriptBinding: approvedScriptBinding }), });
+          success = resultOf(value);
       } catch (error) {
         // 工具抛出未包装的错误时，转换为稳定错误码并将原始错误保存在 cause 中。
         // 错误说明会写入会话记录并提供给模型，避免单个工具异常中断整个循环。
@@ -545,7 +552,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
         await fail(entry, failure);
       }
       timed();
-      await record(entry, resultOf(value));
+      await record(entry, success!);
       return value;
     },
   };

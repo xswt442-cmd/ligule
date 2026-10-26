@@ -2,10 +2,11 @@
 // 排版是纯计算；那一次写出走真的协议与真的临时目录，落点由调用方给。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { branchSessionId, exportMarkdown, writeExport } from '../dist/host/export.js';
+import { branchSessionId, exportImageUrl, exportMarkdown, writeExport } from '../dist/host/export.js';
 import { waitFor, withTuiHost } from './helpers/tui-host.js';
 
 const events = [
@@ -17,6 +18,19 @@ const events = [
   { seq: 4, kind: 'mode', name: 'full', layer: 'shipped', tools: ['*'] },
   { seq: 5, kind: 'usage', input: 8351, output: 39, estimated: 13 },
 ];
+
+const imageId = '12345678-1234-4234-8234-123456789abc';
+const imageBytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/hOcAAAAASUVORK5CYII=', 'base64');
+function imageAsset(id = imageId, data = imageBytes) {
+  return {
+    reference: {
+      kind: 'image', version: 1, id, workspace: 'workspace-hash', sessionId: 'session-1', source: 'browser', mimeType: 'image/png',
+      bytes: data.length, width: 1, height: 1, sha256: createHash('sha256').update(data).digest('hex'),
+      createdAt: '2026-10-25T10:00:00.000Z',
+    },
+    data,
+  };
+}
 
 test('the exported markdown gives each call and each result its own section', () => {
   const text = exportMarkdown(events, { id: 's-1', projectRoot: '/work', createdAt: '2026-10-05T00:00:00.000Z' });
@@ -146,6 +160,114 @@ test('one target that cannot be written is named while the others stay reported'
     assert.equal(done.failed.length, 1, '主文件那一份没写成，说的是它自己');
     assert.equal(done.failed[0].path, path);
     assert.ok(done.failed[0].code !== '');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('image markdown keeps the reference metadata and emits an encoded relative URL only when supplied', () => {
+  const asset = imageAsset();
+  const path = join('exports', '说明 + 图.md');
+  const url = exportImageUrl(path, imageId);
+  const record = { seq: 9, kind: 'tool', tool: 'read_image', result: { content: '图片已读取', images: [asset.reference] } };
+  const text = exportMarkdown([record], { id: 'session-1' }, new Map([[imageId, url]]));
+  assert.ok(text.includes(`![图片 ${imageId}](${url})`));
+  assert.ok(text.includes(`- 图片引用：${imageId}`));
+  assert.ok(text.includes('- 尺寸：1 × 1'));
+  assert.ok(text.includes('- 来源：browser'));
+  assert.ok(url.includes('%E8%AF%B4%E6%98%8E%20%2B%20%E5%9B%BE.assets/'), 'each relative URL path component is encoded');
+  const withoutUrl = exportMarkdown([record], { id: 'session-1' });
+  assert.ok(withoutUrl.includes('图片文件未随导出包含'));
+  assert.ok(withoutUrl.includes(`- 图片引用：${imageId}`));
+  assert.ok(withoutUrl.includes('- 来源：browser'));
+});
+
+test('image assets are written beside the main file and identical assets can be reused', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'ligule-export-images-'));
+  try {
+    const path = join(directory, '说明 + 图.md');
+    const asset = imageAsset();
+    const assetPath = join(directory, '说明 + 图.assets', `${imageId}.png`);
+    const url = exportImageUrl(path, imageId);
+    const main = exportMarkdown([{
+      seq: 9, kind: 'tool', tool: 'read_image', result: { content: '图片已读取', images: [asset.reference] },
+    }], { id: 'session-1' }, new Map([[imageId, url]]));
+    const first = await writeExport(path, main, [], [asset, asset]);
+    assert.deepEqual(first.written, [assetPath, path], 'a duplicate reference creates one movable image file');
+    assert.deepEqual(first.failed, []);
+    assert.deepEqual(first.skipped, []);
+    assert.deepEqual(await readFile(assetPath), imageBytes);
+    assert.ok((await readFile(path, 'utf8')).includes(`![图片 ${imageId}](${url})`));
+
+    const second = await writeExport(path, main, [], [asset]);
+    assert.deepEqual(second.written, [assetPath, path], 'an existing file with the matching validated hash is reusable');
+    assert.deepEqual(second.failed, []);
+    assert.deepEqual(await readFile(assetPath), imageBytes);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('an image conflict is reported without overwrite and its Markdown link is disabled', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'ligule-export-image-conflict-'));
+  try {
+    const path = join(directory, 'run.md');
+    const asset = imageAsset();
+    const assetPath = join(directory, 'run.assets', `${imageId}.png`);
+    await mkdir(join(directory, 'run.assets'));
+    await writeFile(assetPath, 'different existing image');
+    const url = exportImageUrl(path, imageId);
+    const main = exportMarkdown([{
+      seq: 9, kind: 'tool', tool: 'read_image', result: { images: [asset.reference] },
+    }], { id: 'session-1' }, new Map([[imageId, url]]));
+    const done = await writeExport(path, main, [], [asset]);
+    assert.deepEqual(done.failed, [{ path: assetPath, code: 'export_asset_conflict' }]);
+    assert.deepEqual(await readFile(assetPath, 'utf8'), 'different existing image');
+    const exported = await readFile(path, 'utf8');
+    assert.ok(!exported.includes(`](${url})`), 'the exported Markdown does not point at a conflicting image');
+    assert.ok(exported.includes('图片文件未导出'));
+    assert.ok(exported.includes(`- 图片引用：${imageId}`));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('an image buffer that does not match its reference hash is rejected', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'ligule-export-image-hash-'));
+  try {
+    const path = join(directory, 'run.md');
+    const valid = imageAsset();
+    const asset = { ...valid, reference: { ...valid.reference, sha256: '0'.repeat(64) } };
+    const assetPath = join(directory, 'run.assets', `${imageId}.png`);
+    const done = await writeExport(path, 'image record', [], [asset]);
+    assert.deepEqual(done.failed, [{ path: assetPath, code: 'export_asset_invalid' }]);
+    await assert.rejects(readFile(assetPath), (error) => error.code === 'ENOENT');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('an asset directory symlink is rejected without writing outside the export directory', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'ligule-export-image-link-'));
+  try {
+    const output = join(directory, 'output');
+    const outside = join(directory, 'outside');
+    await Promise.all([mkdir(output), mkdir(outside)]);
+    const path = join(output, 'run.md');
+    const assetsDirectory = join(output, 'run.assets');
+    await symlink(outside, assetsDirectory, process.platform === 'win32' ? 'junction' : 'dir');
+    const asset = imageAsset();
+    const url = exportImageUrl(path, imageId);
+    const main = exportMarkdown([{
+      seq: 9, kind: 'tool', tool: 'read_image', result: { images: [asset.reference] },
+    }], { id: 'session-1' }, new Map([[imageId, url]]));
+    const done = await writeExport(path, main, [], [asset]);
+    assert.deepEqual(done.failed, [{ path: join(assetsDirectory, `${imageId}.png`), code: 'export_asset_directory_invalid' }]);
+    assert.deepEqual(await (async () => {
+      try { return await readFile(join(outside, `${imageId}.png`)); }
+      catch (error) { assert.equal(error.code, 'ENOENT'); return null; }
+    })(), null, 'no asset was written through the linked directory');
+    assert.ok((await readFile(path, 'utf8')).includes('图片文件未导出'));
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

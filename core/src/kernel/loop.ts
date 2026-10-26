@@ -7,6 +7,7 @@ import { failureOf } from './result.js';
 import type { Kernel } from './kernel.js';
 import type { PromptAssembly } from './prompt.js';
 import type { StreamDraftWriter } from '../session/stream-draft.js';
+import { checkedImageReferences, type ImageReference } from '../session/media.js';
 
 export interface ToolCall {
   readonly id: string;
@@ -17,7 +18,7 @@ export interface ToolCall {
 export type ModelMessage =
   | { readonly role: 'user'; readonly text: string }
   | { readonly role: 'assistant'; readonly text: string; readonly toolCalls?: readonly ToolCall[]; readonly reasoning?: string }
-  | { readonly role: 'tool'; readonly id?: string; readonly tool?: string; readonly content: unknown; readonly failed?: boolean; readonly code?: string };
+  | { readonly role: 'tool'; readonly id?: string; readonly tool?: string; readonly content: unknown; readonly images?: readonly ImageReference[]; readonly failed?: boolean; readonly code?: string };
 
 export interface ModelTool {
   readonly name: string;
@@ -29,6 +30,7 @@ export interface ModelRequest {
   readonly system: string;
   readonly tools: readonly ModelTool[];
   readonly messages: readonly ModelMessage[];
+  readonly resolveImage?: (reference: ImageReference, signal?: AbortSignal) => Promise<Buffer>;
 }
 
 export type ProviderEvent =
@@ -38,6 +40,7 @@ export type ProviderEvent =
   | { readonly type: 'finish'; readonly reason: 'stop' | 'tool_calls' | 'length' | 'max_tokens' };
 
 export interface ModelProvider {
+  readonly imageInput?: boolean;
   readonly requiresCompletion?: true;
   readonly maxOutputTokens?: number;
   stream(request: ModelRequest, options?: { readonly signal?: AbortSignal }): AsyncIterable<ProviderEvent>;
@@ -77,6 +80,7 @@ export interface LoopOptions {
   readonly compaction?: LoopCompaction | null;
   readonly turnContext?: (() => Record<string, unknown>) | null;
   readonly onProgress?: (event: LoopProgressEvent) => void;
+  readonly resolveImage?: ModelRequest['resolveImage'];
 }
 
 export type LoopProgressPhase = 'preparing' | 'model_request' | 'tool_execution' | 'compaction' | 'awaiting_approval' | 'awaiting_input' | 'settling';
@@ -123,7 +127,9 @@ function isModelMessage(value: unknown): value is ModelMessage {
     if ('reasoning' in value && value.reasoning !== undefined && typeof value.reasoning !== 'string') return false;
     return !('toolCalls' in value) || value.toolCalls === undefined || (Array.isArray(value.toolCalls) && value.toolCalls.every(isToolCall));
   }
-  return value.role === 'tool' && (!('id' in value) || value.id === undefined || typeof value.id === 'string') && 'content' in value;
+  if (value.role !== 'tool' || ('id' in value && value.id !== undefined && typeof value.id !== 'string') || !('content' in value)) return false;
+  if ('images' in value && value.images !== undefined) checkedImageReferences(value.images);
+  return true;
 }
 
 function modelMessagesOf(values: readonly unknown[]): ModelMessage[] {
@@ -197,7 +203,7 @@ function restOf(groups: readonly CallGroup[], groupIndex: number, index = -1): T
 }
 
 export function createLoop({
-  kernel, provider, prompt, session, limits = DEFAULT_LOOP_LIMITS, completesRun = [], compaction = null, turnContext = null, onProgress,
+  kernel, provider, prompt, session, limits = DEFAULT_LOOP_LIMITS, completesRun = [], compaction = null, turnContext = null, onProgress, resolveImage,
 }: LoopOptions) {
   if (typeof provider?.stream !== 'function') throw new KernelError('loop_provider_required');
   const maxParallelTools = limits.maxParallelTools ?? DEFAULT_LOOP_LIMITS.maxParallelTools;
@@ -280,7 +286,8 @@ export function createLoop({
             try {
               draft = session?.beginOutput?.(userSeq, error => controller.abort(error));
               reportPhase('model_request');
-              for await (const event of provider.stream({ system, tools, messages: modelMessagesOf(messages) }, { signal: controller.signal })) {
+              for await (const event of provider.stream({ system, tools, messages: modelMessagesOf(messages),
+                ...(resolveImage === undefined ? {} : { resolveImage }) }, { signal: controller.signal })) {
                 if (event.type === 'tool-call') toolCallCount += 1;
                 if (event.type === 'text' || event.type === 'reasoning' || event.type === 'tool-call') reportActivity('model_output');
                 events.push(event);

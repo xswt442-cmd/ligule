@@ -24,6 +24,9 @@ import { createLogger } from '../kernel/log.js';
 import { loadAssembly } from '../kernel/assembly.js';
 import { KernelError, KernelRuntimeError } from '../kernel/error.js';
 import { createTodoWritePlugin } from './todo-write.js';
+import { createReadImagePlugin } from './read-image.js';
+import { createMediaStore } from '../capability/media.js';
+import { boundaryOf } from '../capability/limits.js';
 import type { PermissionContext } from '../kernel/permission.js';
 
 type LoopOptions = Parameters<typeof createLoop>[0];
@@ -205,9 +208,14 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                 permission,
               });
               // 派生执行继承父会话的插件工具，但不注册 `subagent`，从而禁止递归派生。
+              const media = createMediaStore({ boundary: boundaryOf(deps.config),
+                ...(typeof deps.config.workspaceRoot === 'string' ? { workspaceRoot: deps.config.workspaceRoot } : {}),
+                ...(typeof deps.config.userHome === 'string' ? { userHome: deps.config.userHome } : {}),
+              }, id);
               const assembly = loadAssembly(child, [
                 ...deps.plugins,
                 ...(parentTools.has('todo_write') ? [createTodoWritePlugin({ session })] : []),
+                ...(parentTools.has('read_image') ? [createReadImagePlugin({ media, supportsImages: () => provider.imageInput === true })] : []),
               ]);
               disposeAssembly = () => assembly.dispose();
               let structuredSubmitted = false;
@@ -257,6 +265,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                 prompt,
                 session,
                 limits,
+                resolveImage: media.read,
                 completesRun: outputContract === undefined ? [] : [DELEGATION_RESULT_TOOL],
                 turnContext: () => ({
                   childGeneration: {

@@ -7,6 +7,8 @@ import {
   type ProviderCapabilities, type RetryPolicy,
 } from './http.js';
 import type { ModelMessage, ModelRequest, ProviderEvent } from '../kernel/loop.js';
+import { imageInputOf, resolveRequestImages } from './images.js';
+import type { ImageReference } from '../session/media.js';
 
 interface MessagesCapabilities extends ProviderCapabilities {
   readonly streaming: boolean;
@@ -15,6 +17,7 @@ interface MessagesCapabilities extends ProviderCapabilities {
 }
 
 interface MessagesProviderOptions {
+  readonly imageInput?: boolean;
   readonly baseUrl?: unknown;
   readonly model?: unknown;
   readonly apiKeyEnv?: string;
@@ -26,6 +29,7 @@ interface MessagesProviderOptions {
 }
 
 interface ModelProvider {
+  readonly imageInput: boolean;
   readonly requiresCompletion: true;
   readonly name: string;
   readonly model: string;
@@ -35,10 +39,12 @@ interface ModelProvider {
   withModel(model: string): ModelProvider;
 }
 
+type ImageContentBlock = { readonly type: 'text'; readonly text: string }
+  | { readonly type: 'image'; readonly source: { readonly type: 'base64'; readonly media_type: 'image/png'; readonly data: string } };
 type MessagesBlock =
   | { readonly type: 'text'; readonly text: string }
   | { readonly type: 'tool_use'; readonly id: string; readonly name: string; readonly input: unknown }
-  | { readonly type: 'tool_result'; readonly tool_use_id: string | undefined; readonly content: string | undefined; readonly is_error: boolean };
+  | { readonly type: 'tool_result'; readonly tool_use_id: string | undefined; readonly content: string | readonly ImageContentBlock[] | undefined; readonly is_error: boolean };
 
 type MessagesWireMessage =
   | { readonly role: 'user'; content: string | MessagesBlock[] }
@@ -106,7 +112,7 @@ function messagesRoot(baseUrl: unknown): string {
 }
 
 // 将会话投影转换为 Messages 请求；连续工具结果合并到一条 user 消息中，紧跟对应的 assistant 工具调用。
-function toWireMessages(view: readonly ModelMessage[]): MessagesWireMessage[] {
+function toWireMessages(view: readonly ModelMessage[], images: ReadonlyMap<ImageReference, string>): MessagesWireMessage[] {
   const messages: MessagesWireMessage[] = [];
   assertAllAnswered(view);
   for (const entry of view) {
@@ -123,10 +129,17 @@ function toWireMessages(view: readonly ModelMessage[]): MessagesWireMessage[] {
       if (content.length > 0) messages.push({ role: 'assistant', content });
       continue;
     }
+    const text = resultText(entry.content);
+    const content: ImageContentBlock[] = text ? [{ type: 'text', text }] : [];
+    for (const reference of entry.images ?? []) {
+      const image = images.get(reference);
+      if (image === undefined) throw new KernelError('image_reference_invalid');
+      content.push({ type: 'image', source: { type: 'base64', media_type: reference.mimeType, data: image } });
+    }
     const result: MessagesBlock = {
       type: 'tool_result',
       tool_use_id: entry.id,
-      content: resultText(entry.content),
+      content: entry.images === undefined ? text : content,
       is_error: entry.failed === true,
     };
     const last = messages[messages.length - 1];
@@ -144,11 +157,13 @@ export function createMessagesProvider({
   outputTokens,
   declaredOutputLimit,
   contextTokens,
+  imageInput: declaredImageInput,
   retry = DEFAULT_RETRY,
 }: MessagesProviderOptions = {}): ModelProvider {
   const root = messagesRoot(baseUrl);
   if (typeof model !== 'string' || model === '') throw new KernelError('provider_model_required');
   const effective = capabilitiesOf(capabilities);
+  const imageInput = imageInputOf(root, model, declaredImageInput, 'messages');
   const budgetLimits = {
     defaultTokens: effective.maxOutputTokens,
     configuredLimit: capabilities?.maxOutputTokens === undefined ? undefined : effective.maxOutputTokens,
@@ -158,6 +173,8 @@ export function createMessagesProvider({
   const budget = resolveOutputTokens({ baseUrl: root, model, requested: outputTokens, ...budgetLimits, contextLimit: contextTokens });
 
   async function* stream(request: ModelRequest, { signal }: { readonly signal?: AbortSignal | null } = {}): AsyncGenerator<ProviderEvent> {
+    assertAllAnswered(request.messages ?? []);
+    const images = await resolveRequestImages(request, imageInput, signal);
     const response = await open(`${root}/messages`, {
       method: 'POST',
       redirect: 'error',
@@ -173,7 +190,7 @@ export function createMessagesProvider({
         max_tokens: budget,
         stream: effective.streaming,
         system: request.system,
-        messages: toWireMessages(request.messages ?? []),
+        messages: toWireMessages(request.messages ?? [], images),
         tools: (request.tools ?? []).map((tool) => ({
           name: tool.name,
           description: tool.description,
@@ -348,6 +365,7 @@ export function createMessagesProvider({
   }
 
   const provider = {
+    imageInput,
     name: 'messages',
     requiresCompletion: true as const,
     model,
@@ -358,7 +376,7 @@ export function createMessagesProvider({
     // 模型切换必须由调用方明确请求；失败时不自动改用其他模型。
     withModel(next: string) {
       return createMessagesProvider({ baseUrl, model: next, apiKeyEnv, capabilities, outputTokens,
-        ...(next === model ? { declaredOutputLimit, contextTokens } : {}), retry });
+        ...(next === model ? { declaredOutputLimit, contextTokens, imageInput: declaredImageInput } : {}), retry });
     },
   };
   return Object.freeze(provider);

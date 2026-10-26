@@ -99,9 +99,10 @@ export function flatten(events: SessionEvent[]): string {
       const calls = (event.toolCalls as { name?: unknown }[] | undefined) ?? [];
       lines.push(`assistant: ${String(event.text ?? '')}${calls.length === 0 ? '' : ` [called ${calls.map((call) => String(call?.name)).join(', ')}]`}`);
     } else if (event.kind === 'tool') {
-      const result = event.result as { content?: unknown; failed?: boolean; code?: string } | undefined;
+      const result = event.result as { content?: unknown; failed?: boolean; code?: string; images?: unknown } | undefined;
       const content = typeof result?.content === 'string' ? result.content : JSON.stringify(result?.content ?? null);
-      lines.push(`tool ${String(event.tool ?? '')}${result?.failed === true ? ` (${result.code})` : ''}: ${content}`);
+      lines.push(`tool ${String(event.tool ?? '')}${result?.failed === true ? ` (${result.code})` : ''}: ${content}`
+        + (result?.images === undefined ? '' : `\nPersistent images (reread by shotId): ${JSON.stringify(result.images)}`));
     }
   }
   return lines.join('\n\n');

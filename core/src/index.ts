@@ -15,6 +15,8 @@ export { createCompactTool, createCompactPlugin } from './tools/compact.js';
 export { discoverCustomTools, createCustomToolsPlugin } from './tools/custom.js';
 export { fetchTool, networkPlugin } from './tools/network.js';
 export { createTodoWritePlugin } from './tools/todo-write.js';
+export { createReadImagePlugin } from './tools/read-image.js';
+export { createMediaStore } from './capability/media.js';
 export { currentTodoSnapshot } from './session/todo.js';
 export { createMcpPlugin, createMcpTools } from './tools/mcp.js';
 export { createSubagentPlugin } from './tools/subagent.js';

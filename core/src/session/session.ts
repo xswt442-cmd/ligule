@@ -7,6 +7,7 @@ import { mkdir, open, truncate, type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 import { KernelError, KernelRuntimeError } from '../kernel/error.js';
 import { loadCheckpointFile, type CompactionBlock } from './checkpoint.js';
+import { checkedImageReferences } from './media.js';
 import { createSessionHeader } from './format.js';
 import { readSessionRecord } from './record.js';
 import { acquireSessionLock } from './lock.js';
@@ -70,7 +71,8 @@ export function projectModelView(events: readonly SessionEvent[], blocks: readon
       if (!isRecord(event.result)) throw new TypeError('a tool event has no result object');
       const result = event.result;
       const content = result.content === '' && result.failed ? `${result.code}: ${result.reason ?? 'no output'}` : result.content;
-      view.push({ role: 'tool', id: event.callId, tool: event.tool, content, failed: result.failed, code: result.code });
+      view.push({ role: 'tool', id: event.callId, tool: event.tool, content, failed: result.failed, code: result.code,
+        ...(result.images === undefined ? {} : { images: checkedImageReferences(result.images) }) });
     }
   }
   return view;

@@ -8,47 +8,21 @@ import { KernelError } from '../kernel/error.js';
 import { workspaceIdentity } from '../kernel/workspace.js';
 import { dataRoot } from '../kernel/config-file.js';
 import { workspaceDataDirectory, type SessionDirectoryConfig } from '../session/list.js';
+import { resolveWithin } from './paths.js';
+import { boundaryOf, workingDirectoryOf } from './limits.js';
+import { IMAGE_ID, IMAGE_LIMITS, isImageReference, type ImageReference } from '../session/media.js';
+export { IMAGE_LIMITS, isImageReference, type ImageReference } from '../session/media.js';
 
-export const IMAGE_LIMITS = Object.freeze({ inputBytes: 20 * 1024 * 1024, pixels: 40_000_000,
-  dimension: 2048, outputBytes: 8 * 1024 * 1024, storageBytes: 256 * 1024 * 1024, retentionMs: 30 * 86_400_000 });
-const IMAGE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const FORMATS = new Set(['png', 'jpeg', 'webp', 'gif']);
-
-export interface ImageReference {
-  readonly kind: 'image';
-  readonly version: 1;
-  readonly id: string;
-  readonly workspace: string;
-  readonly sessionId: string;
-  readonly source: 'file' | 'desktop' | 'browser' | 'document';
-  readonly mimeType: 'image/png';
-  readonly bytes: number;
-  readonly width: number;
-  readonly height: number;
-  readonly sha256: string;
-  readonly createdAt: string;
-}
 
 function digest(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-export function isImageReference(value: unknown): value is ImageReference {
-  if (typeof value !== 'object' || value === null) return false;
-  const item = value as Record<string, unknown>;
-  return Object.keys(item).length === 12 && item.kind === 'image' && item.version === 1 && typeof item.id === 'string' && IMAGE_ID.test(item.id)
-    && typeof item.workspace === 'string' && typeof item.sessionId === 'string' && item.sessionId.length > 0
-    && ['file', 'desktop', 'browser', 'document'].includes(String(item.source)) && item.mimeType === 'image/png'
-    && Number.isSafeInteger(item.bytes) && Number(item.bytes) > 0 && Number(item.bytes) <= IMAGE_LIMITS.outputBytes
-    && Number.isSafeInteger(item.width) && Number(item.width) > 0 && Number(item.width) <= IMAGE_LIMITS.dimension
-    && Number.isSafeInteger(item.height) && Number(item.height) > 0 && Number(item.height) <= IMAGE_LIMITS.dimension
-    && typeof item.sha256 === 'string' && /^[a-f0-9]{64}$/u.test(item.sha256)
-    && typeof item.createdAt === 'string' && Number.isFinite(Date.parse(item.createdAt));
-}
-
-async function readRegular(path: string, maxBytes: number): Promise<Buffer> {
+async function readRegular(path: string, maxBytes: number, { allowHardLinks = false, signal }: { allowHardLinks?: boolean; signal?: AbortSignal } = {}): Promise<Buffer> {
+  signal?.throwIfAborted();
   const before = await lstat(path);
-  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1) throw new KernelError('image_storage_link');
+  if (!before.isFile() || before.isSymbolicLink() || (!allowHardLinks && before.nlink !== 1)) throw new KernelError('image_storage_link');
   const file = await open(path, constants.O_RDONLY | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW));
   try {
     const info = await file.stat();
@@ -57,13 +31,19 @@ async function readRegular(path: string, maxBytes: number): Promise<Buffer> {
     const bytes = Buffer.alloc(maxBytes + 1);
     let length = 0;
     while (length < bytes.length) {
-      const result = await file.read(bytes, length, bytes.length - length, null);
+      signal?.throwIfAborted();
+      const result = await file.read(bytes, length, Math.min(bytes.length - length, 64 * 1024), null);
       if (result.bytesRead === 0) break;
       length += result.bytesRead;
     }
     if (length > maxBytes) throw new KernelError('image_bytes_exceeded');
     return bytes.subarray(0, length);
   } finally { await file.close(); }
+}
+
+export async function readImageFile(config: Parameters<typeof boundaryOf>[0], path: string, signal?: AbortSignal): Promise<Buffer> {
+  const target = await resolveWithin(boundaryOf(config), path, { cwd: workingDirectoryOf(config) });
+  return await readRegular(target, IMAGE_LIMITS.inputBytes, { allowHardLinks: true, signal });
 }
 
 async function exclusiveWrite(path: string, bytes: Buffer | string): Promise<void> {
@@ -73,11 +53,20 @@ async function exclusiveWrite(path: string, bytes: Buffer | string): Promise<voi
 }
 
 /** References remain local; providers resolve validated bytes only when constructing an HTTP request. */
-export function createMediaStore(config: SessionDirectoryConfig, sessionId: string, inheritedSessionIds: readonly string[] = []) {
-  if (sessionId.trim() === '') throw new KernelError('image_session_required');
+export function createMediaStore(config: SessionDirectoryConfig, sessionId: string, inheritedReferences: readonly ImageReference[] = []) {
+  if (sessionId.trim() === '' || sessionId.length > 256) throw new KernelError('image_session_required');
   const workspace = workspaceIdentity(config.workspaceRoot ?? config.boundary);
   const directory = join(workspaceDataDirectory(config), 'screenshots');
-  const ownedSessions = new Set([sessionId, ...inheritedSessionIds]);
+  const inherited = new Map(inheritedReferences.map(reference => {
+    if (!isImageReference(reference) || reference.workspace !== workspace) throw new KernelError('image_owner_mismatch');
+    return [reference.id, reference] as const;
+  }));
+  function owns(reference: ImageReference): boolean {
+    if (reference.workspace !== workspace) return false;
+    if (reference.sessionId === sessionId) return true;
+    const allowed = inherited.get(reference.id);
+    return allowed !== undefined && (Object.keys(allowed) as (keyof ImageReference)[]).every(key => allowed[key] === reference[key]);
+  }
 
   async function checkDirectory(create: boolean): Promise<void> {
     const root = dataRoot(config.userHome);
@@ -97,42 +86,54 @@ export function createMediaStore(config: SessionDirectoryConfig, sessionId: stri
 
   async function readMetadata(id: string): Promise<ImageReference> {
     if (!IMAGE_ID.test(id)) throw new KernelError('image_reference_invalid');
-    const bytes = await readRegular(join(directory, `${id}.json`), 4096);
+    const bytes = await readRegular(join(directory, `${id}.json`), 8192);
     let reference: unknown;
     try { reference = JSON.parse(bytes.toString('utf8')); }
     catch (cause) { throw new KernelError('image_reference_invalid', { cause }); }
     if (!isImageReference(reference) || reference.id !== id) throw new KernelError('image_reference_invalid');
-    if (reference.workspace !== workspace || !ownedSessions.has(reference.sessionId)) throw new KernelError('image_owner_mismatch');
+    if (!owns(reference)) throw new KernelError('image_owner_mismatch');
     if (Date.now() - Date.parse(reference.createdAt) > IMAGE_LIMITS.retentionMs) throw new KernelError('image_expired');
     return reference;
   }
 
   async function read(reference: ImageReference, signal?: AbortSignal): Promise<Buffer> {
-    signal?.throwIfAborted();
-    if (!isImageReference(reference)) throw new KernelError('image_reference_invalid');
-    if (reference.workspace !== workspace || !ownedSessions.has(reference.sessionId)) throw new KernelError('image_owner_mismatch');
-    await checkDirectory(false);
-    const saved = await readMetadata(reference.id);
-    for (const key of Object.keys(saved) as (keyof ImageReference)[]) {
-      if (saved[key] !== reference[key]) throw new KernelError('image_reference_mismatch');
+    try {
+      signal?.throwIfAborted();
+      if (!isImageReference(reference)) throw new KernelError('image_reference_invalid');
+      if (!owns(reference)) throw new KernelError('image_owner_mismatch');
+      await checkDirectory(false);
+      const saved = await readMetadata(reference.id);
+      for (const key of Object.keys(saved) as (keyof ImageReference)[]) {
+        if (saved[key] !== reference[key]) throw new KernelError('image_reference_mismatch');
+      }
+      const bytes = await readRegular(join(directory, `${reference.id}.png`), IMAGE_LIMITS.outputBytes, { signal });
+      if (bytes.length !== saved.bytes || digest(bytes) !== saved.sha256) throw new KernelError('image_digest_mismatch');
+      signal?.throwIfAborted();
+      return bytes;
+    } catch (cause) {
+      signal?.throwIfAborted();
+      if (cause instanceof KernelError) throw cause;
+      throw new KernelError((cause as NodeJS.ErrnoException).code === 'ENOENT' ? 'image_missing' : 'image_storage_read_failed', { cause });
     }
-    const bytes = await readRegular(join(directory, `${reference.id}.png`), IMAGE_LIMITS.outputBytes);
-    if (bytes.length !== saved.bytes || digest(bytes) !== saved.sha256) throw new KernelError('image_digest_mismatch');
-    signal?.throwIfAborted();
-    return bytes;
   }
 
   return {
     directory,
     read,
     async reference(id: string): Promise<ImageReference> {
-      await checkDirectory(false);
-      const result = await readMetadata(id);
-      await read(result);
-      return result;
+      try {
+        await checkDirectory(false);
+        const result = await readMetadata(id);
+        await read(result);
+        return result;
+      } catch (cause) {
+        if (cause instanceof KernelError) throw cause;
+        throw new KernelError((cause as NodeJS.ErrnoException).code === 'ENOENT' ? 'image_missing' : 'image_storage_read_failed', { cause });
+      }
     },
     async put(input: Buffer, source: ImageReference['source'], signal?: AbortSignal): Promise<ImageReference> {
       signal?.throwIfAborted();
+      if (workspace.length > 2048) throw new KernelError('image_workspace_invalid');
       if (!['file', 'desktop', 'browser', 'document'].includes(source)) throw new KernelError('image_source_invalid');
       if (input.length === 0 || input.length > IMAGE_LIMITS.inputBytes) throw new KernelError('image_bytes_exceeded');
       const decoder = sharp(input, { limitInputPixels: IMAGE_LIMITS.pixels, failOn: 'warning', page: 0, pages: 1 });
@@ -173,7 +174,7 @@ export function createMediaStore(config: SessionDirectoryConfig, sessionId: stri
           if (Date.now() - info.mtimeMs > IMAGE_LIMITS.retentionMs) await unlink(path);
           else stored += info.size;
         }
-        if (stored + bytes.length + 4096 > IMAGE_LIMITS.storageBytes) throw new KernelError('image_storage_full');
+        if (stored + bytes.length + 8192 > IMAGE_LIMITS.storageBytes) throw new KernelError('image_storage_full');
         signal?.throwIfAborted();
         if (compromised !== undefined) throw compromised;
         const id = randomUUID();

@@ -50,8 +50,10 @@ function canonicalInput(events: SessionEvent[]): string {
         const calls = (event.toolCalls as { name?: unknown; args?: unknown }[] | undefined) ?? [];
         return [event.seq, 'assistant', textOf(event.text), textOf(event.reasoning), calls.map((call) => [textOf(call?.name), call?.args ?? null])];
       }
-      const result = event.result as { failed?: boolean; code?: unknown; content?: unknown } | undefined;
-      return [event.seq, 'tool', textOf(event.tool), result?.failed === true, result?.code ?? null, textOf(result?.content)];
+      const result = event.result as { failed?: boolean; code?: unknown; content?: unknown; images?: unknown } | undefined;
+      const canonical = [event.seq, 'tool', textOf(event.tool), result?.failed === true, result?.code ?? null, textOf(result?.content)];
+      if (result?.images !== undefined) canonical.push(result.images);
+      return canonical;
     }));
 }
 

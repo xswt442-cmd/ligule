@@ -2,6 +2,7 @@
 // 未知格式版本必须拒绝读取，避免静默跳过记录并生成错误的模型上下文。
 import { KernelRuntimeError } from '../kernel/error.js';
 import { isCanonicalTodoItems } from './todo.js';
+import { checkedImageReferences } from './media.js';
 
 export const SESSION_FORMAT_VERSION = 2;
 
@@ -63,7 +64,7 @@ export interface SessionRecord {
 const WRITTEN_KINDS = [
   'session', 'user', 'reasoning', 'assistant', 'tool', 'mode', 'usage', 'turn', 'label', 'turnContext', 'modelSelection',
   'sessionGeneration', 'sessionLoopIterations', 'sessionPermission', 'sessionPolicy', 'sessionMcpTrust', 'sessionPolicyRule',
-  'compaction', 'todoWrite',
+  'compaction', 'todoWrite', 'image',
 ];
 
 export function createSessionHeader({
@@ -101,6 +102,7 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
   let header: SessionHeader | undefined;
   let currentUserSeq: number | null = null;
   let currentTurnFinished = false;
+  const imageCalls = new Set<string>();
   const events: SessionEvent[] = [];
   for (const [index, event] of objects.entries()) {
     const kind = typeof event.kind === 'string' ? event.kind : '';
@@ -153,6 +155,15 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
         || !isCanonicalTodoItems(event.items)) {
         throw new KernelRuntimeError('session_todo_event_invalid');
       }
+    }
+    if (kind === 'image') {
+      if (event.ignorable === true || typeof event.callId !== 'string' || event.callId === '') throw new KernelRuntimeError('session_image_reference_invalid');
+      imageCalls.add(event.callId);
+    }
+    if (kind === 'tool' && typeof event.result === 'object' && event.result !== null && 'images' in event.result && event.result.images !== undefined) {
+      if (typeof event.callId !== 'string' || !imageCalls.has(event.callId)) throw new KernelRuntimeError('session_image_reference_invalid');
+      try { checkedImageReferences(event.result.images); }
+      catch (cause) { throw new KernelRuntimeError('session_image_reference_invalid', { cause }); }
     }
     if (kind === 'compaction') {
       if (event.ignorable !== true
