@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   APP_PAGE,
   MAX_FRAME_BYTES,
+  PRODUCTION_CSP,
   approvedPage,
   developmentCsp,
   resourcePath,
@@ -20,6 +21,14 @@ test('development CSP requires a fixed-size nonce without allowing arbitrary scr
   assert.doesNotMatch(csp, /script-src[^;]*(?:unsafe-inline|unsafe-eval)/u);
   assert.throws(() => developmentCsp(undefined));
   assert.throws(() => developmentCsp("'; script-src *"));
+});
+
+test('image previews allow only local blob images without widening executable or network sources', () => {
+  for (const csp of [PRODUCTION_CSP, developmentCsp('a'.repeat(43) + '=')]) {
+    assert.match(csp, /(?:^|; )img-src 'self' blob:;/u);
+    assert.doesNotMatch(csp, /(?:script-src|connect-src)[^;]*blob:/u);
+    assert.doesNotMatch(csp, /(?:https?:|data:|\*)/u);
+  }
 });
 
 function notification(target = JSON.stringify({ sessionId: SESSION_ID, projectRoot: resolve('project') })): Record<string, unknown> {

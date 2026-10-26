@@ -143,6 +143,10 @@ assert.equal(metaRow('meta', '界面自己写的一行', 'A system notice').engl
 const answered = projectRecord({ kind: 'assistant', text: '一句' })[0];
 const reasoned = projectRecord({ kind: 'reasoning', text: '一段' })[0];
 const resulted = projectRecord({ kind: 'tool', tool: 'read', callId: 'c7', args: {}, result: { content: { text: 'x' } } })[0];
+const imageReference = { kind: 'image', version: 1, id: '123e4567-e89b-42d3-a456-426614174000', workspace: 'workspace', sessionId: 'session', source: 'desktop', mimeType: 'image/png', bytes: 32, width: 8, height: 4, sha256: 'a'.repeat(64), createdAt: '2026-01-01T00:00:00.000Z' };
+const imageResult = projectRecord({ kind: 'tool', tool: 'screenshot', callId: 'c8', args: {}, result: { failed: false, content: { text: 'Captured' }, images: [imageReference] } })[0];
+assert.deepEqual(imageResult.images, [imageReference], '成功工具结果的持久图片引用保留在对应结果行');
+assert.equal(projectRecord({ kind: 'tool', tool: 'screenshot', args: {}, result: { failed: true, images: [imageReference] } })[0].images, undefined, '失败结果不提供图片预览');
 assert.ok(shownIn('detailed', reasoned) && shownIn('detailed', resulted), '全量档什么都画');
 assert.ok(shownIn('standard', resulted) && !shownIn('standard', reasoned), '标准档藏推理段');
 assert.ok(shownIn('brief', answered) && !shownIn('brief', reasoned) && !shownIn('brief', resulted), '简略档只留问答');

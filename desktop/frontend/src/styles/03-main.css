@@ -256,6 +256,27 @@ button:disabled {
   border-color: color-mix(in srgb, var(--bad) 40%, var(--line));
 }
 
+.image-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.image-preview img {
+  max-width: min(100%, 32rem);
+  max-height: 32rem;
+  object-fit: contain;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.image-preview-error {
+  color: var(--bad);
+  font-size: var(--text-xs);
+}
+
 /* 长正文默认限制高度，展开状态由前端维护。 */
 .row-body[data-folded="true"] {
   max-height: 9rem;

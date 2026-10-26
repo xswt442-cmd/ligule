@@ -1681,6 +1681,9 @@ export function App({ transport }: { transport: Transport }) {
       </div>}
 
       <TranscriptViewport
+        client={client}
+        sessionId={sessionId}
+        projectRoot={projectRoot}
         rows={visible}
         hasRecords={rows.length > 0}
         reading={reading}

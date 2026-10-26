@@ -4,6 +4,7 @@ import type { Row } from '../rows';
 import type { Verbosity } from './types';
 import { RowView } from './RowView';
 import { useText } from '../locale';
+import type { Client } from '../protocol';
 
 // 前插记录页时减少首条记录的全局索引，给连续分页留出空间。
 export const FIRST_INDEX = 100_000;
@@ -41,7 +42,7 @@ export function streamAnchor(rows: Row[], firstIndex: number): { id: number; off
   return null;
 }
 
-export function TranscriptViewport({ rows, hasRecords, reading, verbosity, flash, onBranch, onModels, pinned, setPinned, follow, initialIndex, list, firstIndex, stamp, streamContext, readerScrolling, onRangeChanged, onJumpToLatest }: {
+export function TranscriptViewport({ rows, hasRecords, reading, verbosity, flash, onBranch, onModels, pinned, setPinned, follow, initialIndex, list, firstIndex, stamp, streamContext, readerScrolling, onRangeChanged, onJumpToLatest, client, sessionId, projectRoot }: {
   rows: Row[];
   hasRecords: boolean;
   reading: boolean;
@@ -60,6 +61,9 @@ export function TranscriptViewport({ rows, hasRecords, reading, verbosity, flash
   readerScrolling: MutableRefObject<boolean>;
   onRangeChanged: (range: { startIndex: number }) => void;
   onJumpToLatest: () => void;
+  client: Client;
+  sessionId: string | null;
+  projectRoot: string;
 }) {
   const t = useText();
   return <div className="conversation" aria-live="polite">
@@ -79,6 +83,9 @@ export function TranscriptViewport({ rows, hasRecords, reading, verbosity, flash
         flash={row.seq !== undefined && row.seq === flash}
         branch={row.kind === 'round' ? onBranch : undefined}
         onModels={row.kind === 'round' ? onModels : undefined}
+        client={client}
+        sessionId={sessionId}
+        projectRoot={projectRoot}
       />}
       followOutput={follow ? 'auto' : false}
       atBottomThreshold={40}
