@@ -285,6 +285,9 @@ test('real headless Browser Host persists screenshots and stops servers on cance
     await connection.request('run.start', { sessionId, input: 'open the local test page' });
     setPlan(serverCallPlan('browser_take_screenshot', { scale: 'css', type: 'png' }));
     await connection.request('run.start', { sessionId, input: 'capture the current local page' });
+    const browserEvents = (await readFile(join(root, 'sessions', `${sessionId}.jsonl`), 'utf8')).trim().split('\n').map(JSON.parse);
+    const failedBrowserCalls = browserEvents.filter(event => event.kind === 'tool' && event.result?.failed === true);
+    assert.deepEqual(failedBrowserCalls.map(event => event.result), [], 'browser workflow must not hide failed tool calls');
     assert.ok(pageHits.includes('/'));
     assert.equal((await connection.request('status.get', { sessionId })).browser.connected, true);
 
@@ -309,7 +312,8 @@ test('real headless Browser Host persists screenshots and stops servers on cance
     assert.equal((await connection.request('status.get', { sessionId })).browser.connected, false,
       'cancelling a turn revokes the Browser MCP process');
     const browserDirectory = join(workspaceDataDirectory({ boundary: root, workspaceRoot: root, userHome: dataRoot }), 'browser', 'sessions', sessionId);
-    assert.deepEqual(await readdir(browserDirectory), [], 'cancellation clears the Session browser output directory');
+    assert.deepEqual((await readdir(browserDirectory)).sort(), ['.ligule-lease.lock', '.ligule-owner.json'],
+      'cancellation clears transient output while preserving the Session owner and lease');
 
     setPlan(serverCallPlan('browser_navigate', { url: pageOrigin }));
     await connection.request('run.start', { sessionId, input: 'reopen the local test page' });
