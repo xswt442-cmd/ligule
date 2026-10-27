@@ -4,6 +4,54 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { KernelError } from '../dist/kernel/error.js';
 import { createTaskBudget } from '../dist/kernel/task-budget.js';
 
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test('fully blocked interaction pauses execution while accumulating a separate wait budget', async () => {
+  const budget = createTaskBudget({ maxModelCalls: 2, timeoutMs: 100, requestTimeoutMs: 80, interactionWaitTimeoutMs: 400 });
+  try {
+    await budget.runWork(async () => {
+      const end = budget.startInteraction();
+      await wait(160);
+      assert.equal(budget.signal.aborted, false);
+      end();
+      budget.consumeModelCall();
+    });
+  } finally { budget.dispose(); }
+});
+
+test('other active work keeps the execution deadline running during interaction', async () => {
+  const budget = createTaskBudget({ maxModelCalls: 2, timeoutMs: 80, requestTimeoutMs: 50, interactionWaitTimeoutMs: 400 });
+  const other = budget.startWork();
+  try {
+    await budget.runWork(async () => {
+      const end = budget.startInteraction();
+      await wait(120);
+      assert.equal(budget.signal.reason?.code, 'task_deadline_exceeded');
+      end();
+    });
+  } finally { other.dispose(); budget.dispose(); }
+});
+
+test('overlapping interactions share one cumulative wait budget across separate waits', async () => {
+  const budget = createTaskBudget({ maxModelCalls: 2, timeoutMs: 500, requestTimeoutMs: 100, interactionWaitTimeoutMs: 150 });
+  try {
+    await Promise.all([budget.runWork(async () => {
+      const end = budget.startInteraction();
+      await wait(90);
+      end();
+      await wait(20);
+      const endAgain = budget.startInteraction();
+      await wait(90);
+      endAgain();
+    }), budget.runWork(async () => {
+      const end = budget.startInteraction();
+      await wait(90);
+      end();
+    })]);
+    assert.equal(budget.signal.reason?.code, 'task_interaction_timeout');
+  } finally { budget.dispose(); }
+});
+
 test('validates limits and allows exactly the configured number of calls', () => {
   assert.throws(() => createTaskBudget({ maxModelCalls: 0, timeoutMs: 50, requestTimeoutMs: 10 }), TypeError);
   assert.throws(() => createTaskBudget({ maxModelCalls: 1, timeoutMs: 5, requestTimeoutMs: 10 }), TypeError);

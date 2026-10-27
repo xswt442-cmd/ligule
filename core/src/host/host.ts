@@ -553,18 +553,20 @@ function sessionLoopLimits(state: HostSessionBase): LoopLimits {
 function taskLimitsOf(config: HostConfigSnapshot, modelCalls: number, requested?: Partial<TaskBudgetLimits>): TaskBudgetLimits {
   const loop = isRecord(config.loop) ? config.loop : {};
   const limits = { maxModelCalls: loop.totalModelCalls ?? modelCalls, timeoutMs: loop.taskTimeoutMs ?? 1_800_000,
-    requestTimeoutMs: loop.requestTimeoutMs ?? 120_000 };
+    requestTimeoutMs: loop.requestTimeoutMs ?? 120_000, interactionWaitTimeoutMs: loop.interactionWaitTimeoutMs ?? 43_200_000 };
   const check = (value: unknown, maximum: number): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 1 && value <= maximum;
   if (!check(limits.maxModelCalls, Number.MAX_SAFE_INTEGER) || !check(limits.timeoutMs, 86_400_000)
-    || !check(limits.requestTimeoutMs, Math.min(limits.timeoutMs, 3_600_000))) throw new KernelError('task_budget_invalid');
-  if (requested !== undefined && (!isRecord(requested) || Object.keys(requested).some(key => !['maxModelCalls', 'timeoutMs', 'requestTimeoutMs'].includes(key)))) {
+    || !check(limits.requestTimeoutMs, Math.min(limits.timeoutMs, 3_600_000)) || !check(limits.interactionWaitTimeoutMs, 604_800_000)) throw new KernelError('task_budget_invalid');
+  if (requested !== undefined && (!isRecord(requested) || Object.keys(requested).some(key => !['maxModelCalls', 'timeoutMs', 'requestTimeoutMs', 'interactionWaitTimeoutMs'].includes(key)))) {
     throw new KernelError('task_budget_invalid');
   }
   const timeoutMs = requested?.timeoutMs ?? limits.timeoutMs;
   const effective: TaskBudgetLimits = { maxModelCalls: requested?.maxModelCalls ?? limits.maxModelCalls, timeoutMs,
-    requestTimeoutMs: requested?.requestTimeoutMs ?? Math.min(limits.requestTimeoutMs, timeoutMs) };
+    requestTimeoutMs: requested?.requestTimeoutMs ?? Math.min(limits.requestTimeoutMs, timeoutMs),
+    interactionWaitTimeoutMs: requested?.interactionWaitTimeoutMs ?? limits.interactionWaitTimeoutMs };
   if (!check(effective.maxModelCalls, limits.maxModelCalls) || !check(effective.timeoutMs, limits.timeoutMs)
-    || !check(effective.requestTimeoutMs, Math.min(limits.requestTimeoutMs, effective.timeoutMs))) throw new KernelError('task_budget_exceeds_limit');
+    || !check(effective.requestTimeoutMs, Math.min(limits.requestTimeoutMs, effective.timeoutMs))
+    || !check(effective.interactionWaitTimeoutMs, limits.interactionWaitTimeoutMs)) throw new KernelError('task_budget_exceeds_limit');
   return effective;
 }
 
@@ -1849,12 +1851,14 @@ export function createHost({
         }
         const approvalArgs = structuredClone(input) as Record<string, unknown>;
         pendingApprovalDetails.set(requestId, { sessionId: id, args: approvalArgs, argumentSha256: summary.argumentSha256 });
+        let approvalActive = true;
         let settle = (): void => {};
         const cancelled = new Promise<{ decision: 'cancelled'; code: string }>((resolve) => {
-          settle = () => resolve({ decision: 'cancelled', code: 'policy_approval_cancelled' });
+          settle = () => { approvalActive = false; resolve({ decision: 'cancelled', code: 'policy_approval_cancelled' }); };
         });
         state.asks.add(settle);
         updateWaitingForUser(state as HostSessionState, connection, true, 'approval');
+        const endInteraction = state.taskBudget?.startInteraction();
         try {
           const answer = await Promise.race([
             connection.request(APPROVAL_METHOD, {
@@ -1864,6 +1868,7 @@ export function createHost({
               rememberScopes,
               ...(scriptBinding === undefined ? {} : { scriptBinding }),
             }).then(async (value) => {
+              if (!approvalActive) return { decision: 'cancelled' as const, code: 'policy_approval_cancelled' };
               const response = isRecord(value) ? value : value === true ? { decision: 'allow' } : value === false ? { decision: 'deny' } : {};
               const source = response.source === 'controller' ? 'controller' as const : 'human' as const;
               if (response.decision === 'allow') {
@@ -1920,6 +1925,8 @@ export function createHost({
           ]);
           return answer;
         } finally {
+          approvalActive = false;
+          endInteraction?.();
           pendingApprovalDetails.delete(requestId);
           state.asks.delete(settle);
           updateWaitingForUser(state as HostSessionState, connection, false, 'approval');
@@ -2033,9 +2040,10 @@ export function createHost({
         });
         state.asks.add(settle);
         updateWaitingForUser(state as HostSessionState, connection, true, 'input');
+        const endInteraction = state.taskBudget?.startInteraction();
         try {
           const outcome = await Promise.race([
-            // 等待用户回答不设超时。取消使用当前轮次对应的 signal 和请求编号。
+            // 交互等待受整次任务累计等待预算约束。
             connection.request(QUESTION_METHOD, { sessionId: id, projectRoot: env.projectRoot, questions }),
             cancelled,
           ]);
@@ -2049,6 +2057,7 @@ export function createHost({
           logger?.log?.('ask user request failed', { sessionId: id, code: errorCode(error), reason: errorMessage(error) ?? String(error) });
           throw new KernelError('ask_user_host_gone', { detail: `${id}: ${errorMessage(error) ?? String(error)}` });
         } finally {
+          endInteraction?.();
           state.asks.delete(settle);
           updateWaitingForUser(state as HostSessionState, connection, false, 'input');
         }

@@ -305,6 +305,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                 }),
               });
               let result: Awaited<ReturnType<typeof loop.run>>;
+              const resumeParent = deps.taskBudget?.()?.suspendCurrentWork();
               try {
                 result = await loop.run(args.task, { signal, task: deps.taskBudget?.(), validateCompletion: () => assertDelegationCompletion(outputContract, structuredSubmitted) });
               } catch (error) {
@@ -340,7 +341,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                     summary,
                   ),
                 };
-              }
+              } finally { resumeParent?.(); }
               const validation = outputContract === undefined
                 ? { status: 'not_requested' as const }
                 : { status: 'valid' as const, schemaDigest: outputContract.digest };

@@ -27,8 +27,11 @@ const providerDiagnostic = { type: 'object', additionalProperties: false, proper
 const taskLimitsOutput = {
   maxModelCalls: { type: 'integer', minimum: 1 }, timeoutMs: { type: 'integer', minimum: 1, maximum: 86_400_000 },
   requestTimeoutMs: { type: 'integer', minimum: 1, maximum: 3_600_000 },
+  interactionWaitTimeoutMs: { type: 'integer', minimum: 1, maximum: 604_800_000 },
 };
 const taskOutput = object({ ...taskLimitsOutput, modelCalls: { type: 'integer', minimum: 0 },
+  interactionWaitMs: { type: 'integer', minimum: 0 }, executionElapsedMs: { type: 'integer', minimum: 0 },
+  executionPaused: { type: 'boolean' },
   startedAt: { type: 'string' }, deadlineAt: { type: 'string' },
 }, ['maxModelCalls', 'timeoutMs', 'requestTimeoutMs', 'modelCalls', 'startedAt', 'deadlineAt']);
 const fileArtifactOutput = object({ kind: { type: 'string', enum: ['file'] }, sessionId: id,
@@ -42,7 +45,7 @@ const runResultOutput = object({
   state: { type: 'string', enum: ['completed', 'failed', 'cancelled'] },
   stopReason: { type: 'string', enum: [
     'assistant_completed', 'tool_completed', 'cancelled', 'budget_exhausted', 'refused',
-    'provider_error', 'tool_error', 'validation_failed', 'host_error', 'deadline_exceeded', 'request_timeout',
+    'provider_error', 'tool_error', 'validation_failed', 'host_error', 'deadline_exceeded', 'request_timeout', 'interaction_timeout',
   ] },
   output: object({ text: { type: ['string', 'null'] }, structured: {}, partial: { type: 'boolean', const: true } }, ['text']),
   validation: object({

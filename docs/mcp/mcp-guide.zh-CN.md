@@ -75,7 +75,9 @@ Windows 路径示例：
 
 ### 任务预算与文件交付
 
-`delegation.budget` 可选地收紧 `maxModelCalls`（总逻辑模型调用数）、`timeoutMs`（整个任务期限）和 `requestTimeoutMs`（单次模型请求超时）。项目 `[loop]` 的 `totalModelCalls`、`taskTimeoutMs`、`requestTimeoutMs` 决定上限；默认分别取已配置的 `modelCalls`、1,800,000 毫秒（30 分钟）和 120,000 毫秒（2 分钟）。整个任务最多 86,400,000 毫秒（24 小时），单次请求最多 3,600,000 毫秒（1 小时）且不能长于任务。父循环、内部子代理、自动压缩共享总逻辑调用数；同一 Provider 请求内部的传输重试不重复计数。
+`delegation.budget` 可选地收紧 `maxModelCalls`（总逻辑模型调用数）、`timeoutMs`（执行期限）、`requestTimeoutMs`（单次模型请求超时）和 `interactionWaitTimeoutMs`（累计交互等待时间）。项目 `[loop]` 的 `totalModelCalls`、`taskTimeoutMs`、`requestTimeoutMs`、`interactionWaitTimeoutMs` 决定上限，默认分别为已配置的 `modelCalls`、30 分钟、2 分钟和 12 小时。只有所有工作都因审批或用户提问而阻塞时执行期限才暂停；其他工作仍在执行时，待处理交互也会消耗独立的等待预算，重叠等待只计一次。执行期限最长 24 小时，单次请求最长 1 小时，交互等待最长 7 天。父循环和内部子代理共享预算；同一 Provider 请求内部的传输重试不重复计数。
+
+任务快照提供 `executionElapsedMs`、`executionPaused`、`interactionWaitMs` 和 `interactionWaitTimeoutMs`。`deadlineAt` 是快照时根据剩余执行时间推算的期限；执行暂停期间它会向后移动，并非固定的墙钟时间。
 
 预算耗尽、任务期限和单次请求超时分别报告 `task_model_budget_exhausted`、`task_deadline_exceeded`、`task_request_timeout`，对应 `stopReason` 为 `budget_exhausted`、`deadline_exceeded`、`request_timeout`。`ligule_run_await` 的等待超时不会取消任务。`ligule_session_configure` 返回 `effective.taskLimits`，`status.get` 显示运行中或最近任务的快照。运行失败时也会保留已确认的 `usage`、`task` 和 `userSeq`；中断前已有正文会标记 `output.partial: true`。
 

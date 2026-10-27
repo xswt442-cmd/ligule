@@ -172,7 +172,7 @@ function groupCalls(calls: readonly ToolCall[], executionOf: (name: string) => '
   return groups;
 }
 
-async function executeGroup(kernel: Kernel, group: CallGroup, signal: AbortSignal, maximum: number) {
+async function executeGroup(kernel: Kernel, group: CallGroup, signal: AbortSignal, maximum: number, task?: TaskBudget) {
   const settled: PromiseSettledResult<unknown>[] = [];
   const pending = new Map<number, Promise<number>>();
   let started = 0;
@@ -185,7 +185,8 @@ async function executeGroup(kernel: Kernel, group: CallGroup, signal: AbortSigna
       if (!parallel && pending.size > 0) break;
       const index = started++;
       exclusive = !parallel;
-      pending.set(index, kernel.call(call.name, call.args, { signal, callId: call.id }).then(
+      const invoke = () => kernel.call(call.name, call.args, { signal, callId: call.id });
+      pending.set(index, (task === undefined ? invoke() : task.runWork(invoke)).then(
         value => { settled[index] = { status: 'fulfilled', value }; return index; },
         reason => {
           settled[index] = { status: 'rejected', reason };
@@ -219,6 +220,7 @@ export function createLoop({
     // 为本轮创建独立取消信号，并将取消传递给工具和模型提供方。
     // `options.user` 中的元数据只写入记录；模型仍接收 `input` 中的文本。
     async run(input: string, runOptions: LoopRunOptions = {}): Promise<LoopResult> {
+      const loopWork = runOptions.task?.startWork();
       const { signal, user, onProgress: runProgress, completesRun: runCompletes, turnContext: runTurnContext } = runOptions;
       const progress = runProgress ?? onProgress;
       const completingThisRun = new Set([...completing, ...(runCompletes ?? [])]);
@@ -413,7 +415,15 @@ export function createLoop({
           const groups = groupCalls(toolCalls, (name) => kernel.execution(name), completingThisRun);
           for (const [groupIndex, group] of groups.entries()) {
             reportActivity('tool');
-            const { settled, started } = await executeGroup(kernel, group, controller.signal, maxParallelTools);
+            loopWork?.suspend();
+            let execution: Awaited<ReturnType<typeof executeGroup>>;
+            try { execution = await executeGroup(kernel, group, controller.signal, maxParallelTools, runOptions.task); }
+            finally { loopWork?.resume(); }
+            const { settled, started } = execution;
+            if (controller.signal.aborted) {
+              await answerRemaining([...group.calls.slice(started), ...restOf(groups, groupIndex + 1)], 'the run was cancelled before this call ran');
+              throw cancelled();
+            }
             for (const [outcomeIndex, outcome] of settled.entries()) {
               const tool = group.calls[outcomeIndex].name;
               if (tool !== 'present' && tool !== 'subagent') continue;
@@ -472,6 +482,7 @@ export function createLoop({
       } finally {
         reportPhase('settling');
         signal?.removeEventListener('abort', forward);
+        loopWork?.dispose();
       }
     },
   };

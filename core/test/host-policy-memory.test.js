@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { setTimeout as delay } from 'node:timers/promises';
 import { parse } from 'smol-toml';
 import { createHost } from '../dist/host/host.js';
 import { createConfigStore } from '../dist/kernel/config-store.js';
@@ -147,6 +148,48 @@ test('project-scoped approval memory affects other sessions in that project', as
     await runRead(host, client, second.sessionId, 'read again');
     assert.equal(requests.length, 1);
   });
+});
+
+test('a late remembered approval after cancellation cannot save a session or project rule', async () => {
+  for (const scope of ['session', 'project']) {
+    await withPolicyHost(async ({ host, projectA }) => {
+      const requests = [];
+      const answers = [];
+      const client = {
+        notify() {},
+        request(method, params) {
+          assert.equal(method, 'approval.request');
+          requests.push(params);
+          return new Promise((resolve) => answers.push(resolve));
+        },
+      };
+      const { sessionId } = await host.handle({ method: 'session.create', params: { projectRoot: projectA } }, client);
+      const firstRun = runRead(host, client, sessionId, `cancel before ${scope} approval`);
+      const deadline = Date.now() + 5_000;
+      while (requests.length === 0 && Date.now() < deadline) await delay(5);
+      assert.equal(requests.length, 1, 'the Host must ask before cancellation');
+
+      await host.handle({ method: 'run.cancel', params: { sessionId } }, client);
+      await assert.rejects(firstRun, { code: 'loop_cancelled' });
+
+      answers[0]({ decision: 'allow', source: 'human', rememberScope: scope });
+      // Let the detached response continuation finish any attempted persistence.
+      await delay(50);
+      const afterLateAnswer = await host.handle({ method: 'session.read', params: { sessionId } }, client);
+      assert.equal(afterLateAnswer.events.some((event) => event.kind === 'sessionPolicyRule'), false);
+      if (scope === 'project') {
+        await assert.rejects(readFile(join(projectA, '.ligule', 'config.local.toml')), { code: 'ENOENT' });
+      }
+
+      let secondSettled = false;
+      const secondRun = runRead(host, client, sessionId, `retry after ${scope} cancellation`).finally(() => { secondSettled = true; });
+      const secondDeadline = Date.now() + 5_000;
+      while (requests.length < 2 && !secondSettled && Date.now() < secondDeadline) await delay(5);
+      assert.equal(requests.length, 2, 'the next run must still require human approval');
+      answers[1]({ decision: 'deny', source: 'human' });
+      await secondRun;
+    }, { toolCall: () => ({ name: 'read', args: { path: 'note.txt' } }) });
+  }
 });
 
 test('user-scoped approval memory is available in other projects unless a project rule overrides it', async () => {

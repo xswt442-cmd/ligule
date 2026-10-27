@@ -41,6 +41,10 @@ export function checkedRunSummary(value: unknown): RunSummary {
     if (!count(task.modelCalls) || !count(task.maxModelCalls) || task.maxModelCalls < 1 || task.modelCalls > task.maxModelCalls
       || !count(task.timeoutMs) || task.timeoutMs < 1 || task.timeoutMs > 86_400_000
       || !count(task.requestTimeoutMs) || task.requestTimeoutMs < 1 || task.requestTimeoutMs > Math.min(task.timeoutMs, 3_600_000)
+      || (task.interactionWaitTimeoutMs !== undefined && (!count(task.interactionWaitTimeoutMs) || task.interactionWaitTimeoutMs < 1 || task.interactionWaitTimeoutMs > 604_800_000))
+      || (task.interactionWaitMs !== undefined && !count(task.interactionWaitMs))
+      || (task.executionElapsedMs !== undefined && !count(task.executionElapsedMs))
+      || (task.executionPaused !== undefined && typeof task.executionPaused !== 'boolean')
       || typeof task.startedAt !== 'string' || !Number.isFinite(Date.parse(task.startedAt))
       || typeof task.deadlineAt !== 'string' || !Number.isFinite(Date.parse(task.deadlineAt))) throw new TypeError('run_summary_invalid');
   }

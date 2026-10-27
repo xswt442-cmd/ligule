@@ -49,6 +49,7 @@ export const DELEGATION_SPEC_SCHEMA = {
       maxModelCalls: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
       timeoutMs: { type: 'integer', minimum: 1, maximum: 86_400_000 },
       requestTimeoutMs: { type: 'integer', minimum: 1, maximum: 3_600_000 },
+      interactionWaitTimeoutMs: { type: 'integer', minimum: 1, maximum: 604_800_000 },
     }, description: 'Optional tighter task limits shared by the parent, derived tasks and compaction. Waiting timeout does not change these limits.' },
   },
   additionalProperties: false,
@@ -134,6 +135,7 @@ export type RunStopReason =
   | 'cancelled'
   | 'budget_exhausted'
   | 'deadline_exceeded'
+  | 'interaction_timeout'
   | 'request_timeout'
   | 'validation_failed'
   | 'refused'
@@ -167,6 +169,7 @@ const CANCELLED_CODES = new Set(['ask_user_cancelled', 'exec_cancelled', 'loop_c
 function stopReasonForCode(code: string): RunStopReason {
   if (CANCELLED_CODES.has(code)) return 'cancelled';
   if (code === 'task_deadline_exceeded') return 'deadline_exceeded';
+  if (code === 'task_interaction_timeout') return 'interaction_timeout';
   if (code === 'task_request_timeout') return 'request_timeout';
   if (code === 'delegation_result_missing' || code === 'delegation_result_invalid' || code === 'delegation_result_too_large') return 'validation_failed';
   if (code.includes('budget_exhausted') || code.includes('iteration_limit')) return 'budget_exhausted';
