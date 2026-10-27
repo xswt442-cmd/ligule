@@ -149,7 +149,7 @@ test('P3 request timeout is visible through Control and a later run can start no
   }, { permission, delayMs: 125, config: { policy: { mode: 'auto' }, loop: { iterations: 4, modelCalls: 4, requestTimeoutMs: 1000 } } });
 });
 
-test('P3 task deadline aborts a pending user interaction without starting another model request', async () => {
+test('interaction wait budget aborts a pending question without starting another model request', async () => {
   await withTuiHost(async ({ client, sessionId, sessionDirectory, providerRequests }) => {
     await client.request('mode.set', { sessionId, name: 'full' });
     let questionSeen = false;
@@ -167,16 +167,16 @@ test('P3 task deadline aborts a pending user interaction without starting anothe
       assert.equal(summary?.task?.modelCalls, 1);
       assert.equal(summary?.iterations, 1);
       assert.equal(typeof summary?.userSeq, 'number');
-      return error.code === 'task_deadline_exceeded';
+      return error.code === 'task_interaction_timeout';
     });
     assert.equal(providerRequests.length, 1);
     const record = await events(sessionDirectory, sessionId);
     const turn = record.find(item => item.kind === 'turn');
-    assert.equal(turn.code, 'task_deadline_exceeded');
+    assert.equal(turn.code, 'task_interaction_timeout');
     assert.equal(turn.task.modelCalls, 1);
     assert.equal((await client.request('status.get', { sessionId })).task.modelCalls, 1);
   }, { interactive: true, permission, config: {
     policy: { mode: 'auto' },
-    loop: { iterations: 4, modelCalls: 4, taskTimeoutMs: 400, requestTimeoutMs: 200 },
+    loop: { iterations: 4, modelCalls: 4, taskTimeoutMs: 400, requestTimeoutMs: 200, interactionWaitTimeoutMs: 400 },
   } });
 });
