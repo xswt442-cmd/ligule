@@ -33,7 +33,7 @@ type AtifStep = {
   message: string;
   tool_calls?: AtifToolCall[];
   observation?: { results: AtifObservationResult[] };
-  metrics?: { prompt_tokens?: number; completion_tokens?: number };
+  metrics?: { prompt_tokens?: number; completion_tokens?: number; cached_tokens?: number; extra?: JsonObject };
   extra?: JsonObject;
 };
 
@@ -90,8 +90,19 @@ function metricsFor(event: SessionEvent): AtifStep['metrics'] | undefined {
   const input = event.input;
   const output = event.output;
   const metrics: NonNullable<AtifStep['metrics']> = {};
-  if (Number.isSafeInteger(input) && Number(input) > 0) metrics.prompt_tokens = Number(input);
+  if (Number.isSafeInteger(input) && Number(input) >= 0) metrics.prompt_tokens = Number(input);
   if (Number.isSafeInteger(output) && Number(output) >= 0) metrics.completion_tokens = Number(output);
+  const cache = isObject(event.cache) ? event.cache : undefined;
+  if (cache !== undefined && (cache.source === 'chat-completions' || cache.source === 'anthropic-messages')) {
+    const knownCount = (value: unknown) => Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : null;
+    const hit = knownCount(cache.hitInputTokens);
+    const miss = knownCount(cache.missInputTokens);
+    const creation = knownCount(cache.creationInputTokens);
+    if (hit !== null && cache.consistent !== false) metrics.cached_tokens = hit;
+    metrics.extra = { ligule: { cache_source: cache.source, cache_hit_tokens_reported: hit, cache_miss_tokens: miss,
+      cache_creation_tokens: creation, cache_consistent: typeof cache.consistent === 'boolean' ? cache.consistent : null,
+      provider_input_includes_cache: typeof cache.providerInputIncludesCache === 'boolean' ? cache.providerInputIncludesCache : null } };
+  }
   return Object.keys(metrics).length > 0 ? metrics : undefined;
 }
 

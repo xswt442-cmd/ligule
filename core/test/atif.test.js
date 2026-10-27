@@ -126,3 +126,25 @@ test('marks spilled output as incomplete instead of presenting the preview as fu
     assert.ok(trajectory.extra.ligule.missing_features.includes('spill_content'));
   } finally { await rm(fixture.directory, { recursive: true, force: true }); }
 });
+
+test('ATIF preserves known cache usage and does not report a conflicting hit count as reliable', async () => {
+  const fixture = await makeSession();
+  try {
+    const events = await fixture.session.read();
+    const usage = events.find((event) => event.kind === 'usage');
+    usage.cache = { source: 'chat-completions', hitInputTokens: 5, missInputTokens: 7,
+      creationInputTokens: null, providerInputIncludesCache: true, consistent: true };
+    const trajectory = sessionTurnToAtif(events, source(fixture.acceptance, fixture.user));
+    if (process.env.LIGULE_ATIF_OUTPUT_PATH) {
+      await writeFile(process.env.LIGULE_ATIF_OUTPUT_PATH, `${JSON.stringify(trajectory, null, 2)}\n`, 'utf8');
+    }
+    const metrics = trajectory.steps.find((step) => step.source === 'agent' && step.tool_calls).metrics;
+    assert.equal(metrics.cached_tokens, 5);
+    assert.equal(metrics.extra.ligule.cache_miss_tokens, 7);
+    usage.cache.consistent = false;
+    const conflicting = sessionTurnToAtif(events, source(fixture.acceptance, fixture.user));
+    const conflictMetrics = conflicting.steps.find((step) => step.source === 'agent' && step.tool_calls).metrics;
+    assert.equal(conflictMetrics.cached_tokens, undefined);
+    assert.equal(conflictMetrics.extra.ligule.cache_consistent, false);
+  } finally { await rm(fixture.directory, { recursive: true, force: true }); }
+});
