@@ -79,7 +79,7 @@ Windows 路径示例：
 
 任务快照提供 `executionElapsedMs`、`executionPaused`、`interactionWaitMs` 和 `interactionWaitTimeoutMs`。`deadlineAt` 是快照时根据剩余执行时间推算的期限；执行暂停期间它会向后移动，并非固定的墙钟时间。
 
-预算耗尽、任务期限和单次请求超时分别报告 `task_model_budget_exhausted`、`task_deadline_exceeded`、`task_request_timeout`，对应 `stopReason` 为 `budget_exhausted`、`deadline_exceeded`、`request_timeout`。`ligule_run_await` 的等待超时不会取消任务。`ligule_session_configure` 返回 `effective.taskLimits`，`status.get` 显示运行中或最近任务的快照。运行失败时也会保留已确认的 `usage`、`task` 和 `userSeq`；中断前已有正文会标记 `output.partial: true`。
+预算耗尽、执行期限、单次请求超时和交互等待超时分别报告 `task_model_budget_exhausted`、`task_deadline_exceeded`、`task_request_timeout`、`task_interaction_timeout`，对应 `stopReason` 为 `budget_exhausted`、`deadline_exceeded`、`request_timeout`、`interaction_timeout`。`ligule_run_await` 的等待超时不会取消任务。`ligule_session_configure` 返回 `effective.taskLimits`，`status.get` 显示运行中或最近任务的快照。运行失败时也会保留已确认的 `usage`、`task` 和 `userSeq`；中断前已有正文会标记 `output.partial: true`。
 
 `full` 工具模式提供 `present({files: [{path, description?}]})`，每次最多提交 16 个工作区内现有普通文件。工具校验工作区与文件边界，记录相对路径、媒体类型、字节数、SHA-256、说明及所属 Session。单文件最多 20 MiB，一次调用合计最多 64 MiB。运行成功时，`artifacts` 除 Session 引用外还可包含 `kind: file` 项；运行失败仍保留此前已确认的文件交付。这些元数据只描述当时磁盘上的文件，不会复制文件或保证永久可下载，之后的修改或删除也不会根据哈希重建。
 
