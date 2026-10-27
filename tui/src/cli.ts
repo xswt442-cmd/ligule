@@ -194,6 +194,7 @@ for (let index = 0; index < argv.length; index += 1) {
   positional.push(arg);
 }
 const [command, ...rest] = positional;
+const machineRunOutput = jsonFlag && command === 'run';
 let invalidLanguage = false;
 let locale: Locale | undefined;
 try { if (langFlag !== undefined) locale = languageOf(langFlag); } catch { invalidLanguage = true; }
@@ -406,11 +407,11 @@ async function runOneRound(
   layers: Awaited<ReturnType<typeof configSnapshot>>['layers'],
   text: string,
   sessionId?: string,
-): Promise<void> {
+): Promise<Record<string, unknown>> {
   const host = createHost({ config, provider: providerFromConfig(config), policy: config.policy, extensions, configLayers: layers, screenCaptureConsent: screenCaptureFlag, ...selection });
   const approvals = terminalApprovals();
   const connection: Pick<Connection, 'notify' | 'request'> = {
-    notify: printNotification,
+    notify: machineRunOutput ? () => {} : printNotification,
     // 该终端输入通道只处理允许或拒绝审批。普通命令行没有可回答模型提问的交互界面。
     request: async (method, params) => {
       if (method !== 'approval.request') throw new KernelError('protocol_method_unknown', { detail: method });
@@ -450,10 +451,72 @@ async function runOneRound(
       ? await host.handle({ method: 'session.create', params: {} }, connection)
       : await host.handle({ method: 'session.open', params: { sessionId, ...(modeFlag === undefined ? {} : { mode: modeFlag }) } }, connection)));
     const openedId = responseString(opened, 'sessionId');
-    const result = responseRecord(await host.handle({ method: 'run.start', params: { sessionId: openedId, input: text } }, connection));
+    const eventsBefore = machineRunOutput
+      ? responseRecord(await host.handle({ method: 'session.read', params: { sessionId: openedId } }, connection)).events
+      : undefined;
+    const previousRunIds = new Set(Array.isArray(eventsBefore)
+      ? eventsBefore.filter(isRecord).filter(event => event.kind === 'user' && isRecord(event.run))
+        .map(event => (event.run as Record<string, unknown>).runId).filter((id): id is string => typeof id === 'string')
+      : []);
+    const terminalEvidence = async (requestedRunId?: string): Promise<{ runId?: string; state: string }> => {
+      const snapshot = responseRecord(await host.handle({ method: 'session.read', params: { sessionId: openedId } }, connection));
+      if (!Array.isArray(snapshot.events)) throw new KernelError('host_response_invalid');
+      const events = snapshot.events.filter(isRecord);
+      const user = events.filter(event => event.kind === 'user' && isRecord(event.run))
+        .find(event => {
+          const acceptedRunId = (event.run as Record<string, unknown>).runId;
+          return typeof acceptedRunId === 'string' && (requestedRunId === undefined
+            ? !previousRunIds.has(acceptedRunId)
+            : acceptedRunId === requestedRunId);
+        });
+      if (user === undefined) return { state: 'unknown' };
+      const acceptedRunId = (user.run as Record<string, unknown>).runId;
+      const terminal = events.find(event => event.kind === 'turn' && event.userSeq === user.seq);
+      const state = terminal !== undefined && ['completed', 'failed', 'cancelled', 'interrupted'].includes(String(terminal.status))
+        ? String(terminal.status)
+        : 'unknown';
+      return { runId: typeof acceptedRunId === 'string' ? acceptedRunId : undefined, state };
+    };
+    let result: Record<string, unknown>;
+    try {
+      result = responseRecord(await host.handle({ method: 'run.start', params: { sessionId: openedId, input: text } }, connection));
+    } catch (error) {
+      if (!machineRunOutput) throw error;
+      const fields = errorFields(error);
+      let evidence: { runId?: string; state: string } | undefined;
+      try {
+        evidence = await terminalEvidence();
+      } catch { /* 没有可验证的 Session 终态时保持状态未知。 */ }
+      return {
+        version: 1,
+        status: 'failed',
+        state: evidence?.state ?? 'unknown',
+        sessionId: openedId,
+        ...(evidence?.runId === undefined ? {} : { runId: evidence.runId }),
+        errorCode: fields.code ?? 'cli_run_failed',
+      };
+    }
     const iterations = responseCount(result, 'iterations');
     const modelCalls = responseCount(result, 'modelCalls');
-    console.error(t(`会话 ${openedId}：${iterations} 轮，调用模型 ${modelCalls} 次`, `Session ${openedId}: ${iterations} iterations, ${modelCalls} model calls`));
+    if (!machineRunOutput) {
+      console.error(t(`会话 ${openedId}：${iterations} 轮，调用模型 ${modelCalls} 次`, `Session ${openedId}: ${iterations} iterations, ${modelCalls} model calls`));
+      return { version: 1, status: 'completed', sessionId: openedId };
+    }
+    const runId = responseString(result, 'runId');
+    const evidence = await terminalEvidence(runId);
+    const state = evidence.state;
+    if (state !== 'completed') {
+      return {
+        version: 1,
+        status: 'failed',
+        state: typeof state === 'string' ? state : 'unknown',
+        sessionId: openedId,
+        runId,
+        usage: { iterations, modelCalls },
+        ...(state === 'unknown' ? { errorCode: 'run_terminal_state_unavailable' } : {}),
+      };
+    }
+    return { version: 1, status: 'completed', state, sessionId: openedId, runId, usage: { iterations, modelCalls } };
   } finally {
     approvals.close();
     await host.release();
@@ -546,14 +609,24 @@ if (invalidLanguage) {
 } else if (command === 'run') {
   const text = rest.join(' ').trim();
   if (text === '') {
-    printFailure('cli_run_needs_the_user_text', t('run 需要用户消息，例如 ligule run "read the note"', 'run needs a user message, for example ligule run "read the note"'));
+    if (machineRunOutput) {
+      console.log(JSON.stringify({ version: 1, status: 'failed', state: 'unknown', errorCode: 'cli_run_needs_the_user_text' }));
+      process.exitCode = 1;
+    } else printFailure('cli_run_needs_the_user_text', t('run 需要用户消息，例如 ligule run "read the note"', 'run needs a user message, for example ligule run "read the note"'));
   } else {
     try {
       const { config, extensions, layers } = await configSnapshot();
-      await runOneRound(config, resolveMode(config), extensions, layers, text);
+      const outcome = await runOneRound(config, resolveMode(config), extensions, layers, text);
+      if (machineRunOutput) {
+        console.log(JSON.stringify(outcome));
+        if (outcome.status !== 'completed') process.exitCode = 1;
+      }
     } catch (error) {
       const fields = errorFields(error);
-      printFailure(fields.code ?? 'cli_run_failed', fields.detail, fields.diagnostics);
+      if (machineRunOutput) {
+        console.log(JSON.stringify({ version: 1, status: 'failed', state: 'unknown', ...(fields.code === undefined ? {} : { errorCode: fields.code }) }));
+        process.exitCode = 1;
+      } else printFailure(fields.code ?? 'cli_run_failed', fields.detail, fields.diagnostics);
     }
   }
 } else if (command === 'resume') {
@@ -794,7 +867,8 @@ if (invalidLanguage) {
   console.log(t('mcp-server --project <绝对目录>：启动本地 stdio MCP 控制器；默认只读。使用 --grant <ID> 引用可信界面预先创建的外控授权。', 'mcp-server --project <absolute-directory>: start a local stdio MCP controller; read-only by default. Use --grant <ID> to reference a grant created in a trusted interface.'));
   console.log(t('mcp-server --operator：明确授权该本地 MCP 客户端读取并回应真实待决的审批/提问，以及修改会话级设置；Policy 的拒绝规则仍生效。', 'mcp-server --operator: authorize this local MCP client to review and answer real pending approvals/questions and change session settings; Policy denials remain in force.'));
   console.log(t('run/resume/tui --allow-screen-capture：明确允许本进程的会话及内部子代理截图；不改变工具模式、Shell 权限或其他授权。', 'run/resume/tui --allow-screen-capture: explicitly permit screen capture by this process’s Sessions and internal children; tool modes, shell permissions and other grants remain independent.'));
-  console.log(t('选项：--config <key.path=value>（可重复）、--mode <name>、--project <绝对目录>、--grant <ID>、--operator、--lang <zh|en|auto>', 'Options: --config <key.path=value> (repeatable), --mode <name>, --project <absolute-directory>, --grant <ID>, --operator, --lang <zh|en|auto>'));
+  console.log(t('选项：--config <key.path=value>（可重复）、--mode <name>、--project <绝对目录>、--grant <ID>、--operator、--json、--lang <zh|en|auto>', 'Options: --config <key.path=value> (repeatable), --mode <name>, --project <absolute-directory>, --grant <ID>, --operator, --json, --lang <zh|en|auto>'));
+  console.log(t('--json 与 run 一起使用时输出机器可读终态，不包含回答正文；失败以非零状态退出。', '--json with run prints a machine-readable terminal result without response text; failures exit non-zero.'));
   console.log(t('run、tui 和 host 从配置读取 model.api、model.baseURL 与 model.model；密钥由 model.apiKeyEnv 指定，未设置时读取 LIGULE_API_KEY。', 'run, tui and host read model.api, model.baseURL and model.model from config; the key uses model.apiKeyEnv, or LIGULE_API_KEY when unset.'));
   console.log(t('run、tui 和 host 默认使用 minimal 模式；--mode 可覆盖 mode 配置。tools 和 call 不读取模式。', 'run, tui and host use the minimal mode by default; --mode overrides the mode config. tools and call do not read a mode.'));
   console.log(t('skills 列出已加载的技能与未加载原因；它不读取模型配置。', 'skills lists loaded skills and why others were skipped; it does not read model config.'));

@@ -1,6 +1,7 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { createServer } from 'node:http';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -20,6 +21,56 @@ function capture(...args) {
     return { ok: true, stdout: execFileSync(process.execPath, [cli, ...args], { cwd: repo, encoding: 'utf8', env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] }) };
   } catch (error) {
     return { ok: false, stdout: error.stdout, stderr: error.stderr, status: error.status };
+  }
+}
+
+function captureAsync(env, ...args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [cli, ...args], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
+    child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+    child.once('error', reject);
+    child.once('close', (status) => resolve({ status, stdout, stderr }));
+  });
+}
+
+async function withModelServer(run) {
+  let statusCode = 200;
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* consume the request before responding */ }
+    if (statusCode !== 200) {
+      response.writeHead(statusCode, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ error: { message: 'private provider detail' } }));
+      return;
+    }
+    const frames = [
+      { choices: [{ index: 0, delta: { content: 'safe test response' } }] },
+      { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+      { choices: [], usage: { prompt_tokens: 8, completion_tokens: 4 } },
+    ];
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(`${frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join('')}data: [DONE]\n\n`);
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+    const env = { ...childEnv, LIGULE_CLI_TEST_API_KEY: 'test-only-key' };
+    const configArgs = [
+      '--config', 'model.api = "chat-completions"',
+      '--config', `model.baseURL = "http://127.0.0.1:${address.port}/v1"`,
+      '--config', 'model.model = "cli-test-model"',
+      '--config', 'model.apiKeyEnv = "LIGULE_CLI_TEST_API_KEY"',
+    ];
+    await run({ env, configArgs, failProvider: () => { statusCode = 500; } });
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
   }
 }
 
@@ -61,6 +112,34 @@ test('a failure prints its stable code on stderr and exits non-zero', () => {
   // 同时检查面向用户的错误说明和稳定错误码。
   const missingFile = capture('call', 'read', JSON.stringify({ path: 'no-such-file-anywhere.txt' }));
   assert.match(missingFile.stderr, /^path_not_found: there is nothing to read at /);
+});
+
+test('run --json emits a verified Host receipt and omits model response text', async () => {
+  await withModelServer(async ({ env, configArgs, failProvider }) => {
+    const completed = await captureAsync(env, 'run', '--json', 'say the safe response', ...configArgs);
+    assert.equal(completed.status, 0, `${completed.stderr}\n${completed.stdout}`);
+    const result = JSON.parse(completed.stdout);
+    assert.equal(result.version, 1);
+    assert.equal(result.status, 'completed');
+    assert.equal(result.state, 'completed');
+    assert.match(result.sessionId, /^[a-f0-9-]{36}$/u);
+    assert.match(result.runId, /^[a-f0-9-]{36}$/u);
+    assert.ok(result.usage.modelCalls > 0);
+    assert.doesNotMatch(completed.stdout, /safe test response|say the safe response|test-only-key/u);
+    assert.doesNotMatch(completed.stderr, /safe test response|private provider detail|test-only-key/u);
+
+    failProvider();
+    const failed = await captureAsync(env, 'run', '--json', 'cause a provider error', ...configArgs);
+    assert.equal(failed.status, 1);
+    const failure = JSON.parse(failed.stdout);
+    assert.equal(failure.status, 'failed');
+    assert.equal(failure.state, 'failed');
+    assert.equal(failure.errorCode, 'provider_http_error');
+    assert.match(failure.sessionId, /^[a-f0-9-]{36}$/u);
+    assert.match(failure.runId, /^[a-f0-9-]{36}$/u);
+    assert.doesNotMatch(failed.stdout, /private provider detail|cause a provider error|test-only-key/u);
+    assert.doesNotMatch(failed.stderr, /private provider detail|test-only-key/u);
+  });
 });
 
 // 未知命令应返回非零退出码，供终端用户和调用脚本识别错误。
@@ -169,6 +248,13 @@ test('CLI argument errors use the selected language and retain stable codes', ()
   const english = capture('run', '--lang', 'en');
   assert.equal(english.ok, false);
   assert.match(english.stderr, /cli_run_needs_the_user_text: run needs a user message/);
+
+  const machineRun = capture('run', '--json');
+  assert.equal(machineRun.ok, false);
+  assert.equal(machineRun.status, 1);
+  assert.deepEqual(JSON.parse(machineRun.stdout), {
+    version: 1, status: 'failed', state: 'unknown', errorCode: 'cli_run_needs_the_user_text',
+  });
 });
 
 test('skills lists what this directory would load and says why anything was skipped', () => {
