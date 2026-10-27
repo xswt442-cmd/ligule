@@ -3,8 +3,25 @@ import assert from 'node:assert/strict';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { KernelError } from '../dist/kernel/error.js';
 import { createTaskBudget } from '../dist/kernel/task-budget.js';
+import { createLoop } from '../dist/kernel/loop.js';
+import { createKernel } from '../dist/kernel/kernel.js';
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test('a Loop forwards its task deadline to the provider without a separate caller signal', async () => {
+  const budget = createTaskBudget({ maxModelCalls: 1, timeoutMs: 80, requestTimeoutMs: 50 });
+  const keepAlive = setTimeout(() => {}, 1_000);
+  const provider = { async *stream(_request, { signal }) {
+    await new Promise((resolve, reject) => {
+      if (signal.aborted) reject(signal.reason);
+      else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+  } };
+  try {
+    await assert.rejects(createLoop({ kernel: createKernel(), provider }).run('hello', { task: budget }),
+      { code: 'task_deadline_exceeded' });
+  } finally { clearTimeout(keepAlive); budget.dispose(); }
+});
 
 test('fully blocked interaction pauses execution while accumulating a separate wait budget', async () => {
   const budget = createTaskBudget({ maxModelCalls: 2, timeoutMs: 100, requestTimeoutMs: 80, interactionWaitTimeoutMs: 400 });

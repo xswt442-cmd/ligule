@@ -226,8 +226,12 @@ export function createLoop({
       const completingThisRun = new Set([...completing, ...(runCompletes ?? [])]);
       const controller = new AbortController();
       const forward = () => controller.abort(signal?.reason);
+      const taskSignal = runOptions.task?.signal;
+      const forwardTask = () => controller.abort(taskSignal?.reason);
       if (signal?.aborted) forward();
       else signal?.addEventListener('abort', forward, { once: true });
+      if (taskSignal?.aborted) forwardTask();
+      else taskSignal?.addEventListener('abort', forwardTask, { once: true });
       let calls = 0;
       let toolCallCount = 0;
       let iterations = 0;
@@ -482,6 +486,7 @@ export function createLoop({
       } finally {
         reportPhase('settling');
         signal?.removeEventListener('abort', forward);
+        taskSignal?.removeEventListener('abort', forwardTask);
         loopWork?.dispose();
       }
     },
