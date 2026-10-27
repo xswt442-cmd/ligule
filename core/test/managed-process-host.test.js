@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import { join } from 'node:path';
@@ -39,6 +40,15 @@ async function waitForUnavailable(url) {
     await delay(20);
   }
   assert.fail(`server at ${url} remained reachable`);
+}
+
+async function waitForRequest(url) {
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    try { return await fetch(url); }
+    catch { await delay(20); }
+  }
+  assert.fail(`server at ${url} did not accept an HTTP request`);
 }
 
 test('Host-managed server survives the tool return and Session close terminates its process tree', {
@@ -142,6 +152,122 @@ test('Linux bubblewrap Host-managed server survives the tool return and Session 
   }, {
     permission,
     permissionControl: true,
+    testDirectory: join(process.cwd(), 'testplace'),
+  });
+});
+
+test('Session close and run.cancel stop only their managed processes and preserve other Session and user processes', {
+  skip: process.platform !== 'win32' && process.platform !== 'linux',
+  timeout: 45_000,
+}, async (t) => {
+  let permission = windowsWorkspaceWrite;
+  if (process.platform === 'linux') {
+    const capabilities = await detectPermissionCapabilities({ platform: 'linux' });
+    if (capabilities.profiles.workspaceWrite === 'unavailable') {
+      t.skip(capabilities.limitations.join('; '));
+      return;
+    }
+    permission = createPermissionContext('workspace-write', 'unrestricted', capabilities.capabilities, {
+      profiles: capabilities.profiles,
+      limitations: capabilities.limitations,
+      partialWorkspaceWriteConfirmed: false,
+    });
+  }
+
+  await withTuiHost(async ({ client, sessionId: firstSessionId, projectDirectory, providerRequests }) => {
+    const { sessionId: secondSessionId } = await client.request('session.create', {});
+    const firstPort = await availableLoopbackPort();
+    const secondPort = await availableLoopbackPort();
+    const userPort = await availableLoopbackPort();
+    const serverPath = join(projectDirectory, 'session-monitor.mjs');
+    const userMonitorPath = join(projectDirectory, 'user-monitor.mjs');
+    await writeFile(serverPath, [
+      "import { createServer } from 'node:http';",
+      `createServer((_request, response) => response.end(process.argv[3])).listen(Number(process.argv[2]), '127.0.0.1');`,
+    ].join('\n'));
+    await writeFile(userMonitorPath, [
+      "import { createServer } from 'node:http';",
+      `createServer((_request, response) => response.end('user-monitor-alive')).listen(Number(process.argv[2]), '127.0.0.1');`,
+    ].join('\n'));
+    const firstUrl = `http://127.0.0.1:${firstPort}/`;
+    const secondUrl = `http://127.0.0.1:${secondPort}/`;
+    const userUrl = `http://127.0.0.1:${userPort}/`;
+    const userProcess = spawn(process.execPath, [userMonitorPath, String(userPort)], {
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    t.after(async () => {
+      if (userProcess.exitCode === null && userProcess.signalCode === null) {
+        userProcess.kill();
+        await Promise.race([
+          new Promise((resolveExit) => userProcess.once('exit', resolveExit)),
+          delay(3_000).then(() => { throw new Error('test-owned user monitor did not exit'); }),
+        ]);
+      }
+    });
+
+    await client.request('workspace.trust', {
+      projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true,
+    });
+    client.onRequest((message) => message.method === 'approval.request' ? { decision: 'allow' } : undefined);
+
+    const startManagedServer = async (id, port, marker) => {
+      await client.request('run.start', {
+        sessionId: id,
+        input: JSON.stringify({
+          tool: 'managed_process',
+          args: {
+            action: 'start',
+            command: `node "${serverPath.replaceAll('\\', '/')}" ${port} ${marker}`,
+            readyUrl: `http://127.0.0.1:${port}/`,
+          },
+        }),
+      });
+      const { events } = await client.request('session.read', { sessionId: id });
+      const result = events.filter((event) => event.kind === 'tool' && event.tool === 'managed_process').at(-1)?.result;
+      assert.notEqual(result?.failed, true, JSON.stringify(result));
+      assert.equal(result.content.status, 'running');
+    };
+
+    await startManagedServer(firstSessionId, firstPort, 'first-session-alive');
+    await startManagedServer(secondSessionId, secondPort, 'second-session-alive');
+    assert.equal(await (await waitForRequest(firstUrl)).text(), 'first-session-alive');
+    assert.equal(await (await waitForRequest(secondUrl)).text(), 'second-session-alive');
+    assert.equal(await (await waitForRequest(userUrl)).text(), 'user-monitor-alive');
+
+    await client.request('session.close', { sessionId: firstSessionId });
+    await waitForUnavailable(firstUrl);
+    assert.equal(await (await fetch(secondUrl)).text(), 'second-session-alive');
+    assert.equal(await (await fetch(userUrl)).text(), 'user-monitor-alive');
+    assert.equal(userProcess.exitCode, null, 'the independently started user monitor must remain alive');
+    assert.equal(userProcess.signalCode, null, 'the independently started user monitor must not be signalled');
+
+    const { sessionId: cancelledSessionId } = await client.request('session.create', {});
+    const cancelledPort = await availableLoopbackPort();
+    const cancelledUrl = `http://127.0.0.1:${cancelledPort}/`;
+    await startManagedServer(cancelledSessionId, cancelledPort, 'cancelled-session-alive');
+    assert.equal(await (await waitForRequest(cancelledUrl)).text(), 'cancelled-session-alive');
+
+    const requestCount = providerRequests.length;
+    const pendingRun = client.request('run.start', { sessionId: cancelledSessionId, input: 'wait for cancellation' }).then(
+      () => undefined,
+      (error) => error,
+    );
+    await waitFor(() => providerRequests.length > requestCount, { within: 10_000, every: 10 });
+    assert.equal(await (await fetch(cancelledUrl)).text(), 'cancelled-session-alive');
+    assert.deepEqual(await client.request('run.cancel', { sessionId: cancelledSessionId }), { cancelled: true });
+    await waitForUnavailable(cancelledUrl);
+    const cancellation = await pendingRun;
+    assert.ok(cancellation instanceof Error, 'the cancelled run must not report success');
+    assert.ok(['loop_cancelled', 'provider_cancelled'].includes(cancellation.code), cancellation.code);
+    assert.equal(await (await fetch(secondUrl)).text(), 'second-session-alive');
+    assert.equal(await (await fetch(userUrl)).text(), 'user-monitor-alive');
+    assert.equal(userProcess.exitCode, null, 'run.cancel must not terminate the independently started user monitor');
+    assert.equal(userProcess.signalCode, null, 'run.cancel must not signal the independently started user monitor');
+  }, {
+    delayMs: 750,
+    permissionControl: true,
+    permission,
     testDirectory: join(process.cwd(), 'testplace'),
   });
 });
