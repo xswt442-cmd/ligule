@@ -6,6 +6,7 @@ import { usageEvent } from '../session/usage.js';
 import { failureOf } from './result.js';
 import { rememberRunSummary, type RunSummary } from './run-summary.js';
 import type { TaskBudget } from './task-budget.js';
+import type { RunResultRef } from '../session/run.js';
 import { isFileArtifact, type FileArtifact } from '../session/artifact.js';
 import type { Kernel } from './kernel.js';
 import type { PromptAssembly } from './prompt.js';
@@ -98,6 +99,9 @@ export interface LoopResult extends RunSummary {
 
 export interface LoopRunOptions {
   readonly task?: TaskBudget;
+  readonly runId?: string;
+  readonly onAccepted?: (userSeq: number) => void;
+  readonly persistTerminal?: (status: 'completed' | 'failed' | 'cancelled', summary: RunSummary, fields: Record<string, unknown>) => Promise<RunResultRef>;
   readonly signal?: AbortSignal;
   readonly user?: Record<string, unknown>;
   readonly onProgress?: (event: LoopProgressEvent) => void;
@@ -232,9 +236,11 @@ export function createLoop({
       let overflowRecoveryTried = false;
       let draft: StreamDraftWriter | undefined;
       const artifacts = new Map<string, FileArtifact>();
+      let artifactsTruncated = false;
       const summary = () => ({ text, iterations, modelCalls: calls,
         ...(userSeq === undefined ? {} : { userSeq }),
         ...(artifacts.size === 0 ? {} : { artifacts: [...artifacts.values()] }),
+        ...(artifactsTruncated ? { artifactsTruncated: true as const } : {}),
         ...(runOptions.task === undefined ? {} : { task: runOptions.task.snapshot() }),
       });
       const cancelled = () => controller.signal.reason instanceof KernelError && controller.signal.reason.code.startsWith('task_')
@@ -258,8 +264,19 @@ export function createLoop({
       async function markTurn(status: TurnStatus, fields: Record<string, unknown> = {}): Promise<void> {
         if (!session || userSeq === undefined || terminalAttempted) return;
         terminalAttempted = true;
+        let resultRef: RunResultRef | undefined;
+        if (runOptions.runId !== undefined && runOptions.persistTerminal !== undefined) {
+          try { resultRef = await runOptions.persistTerminal(status, summary(), fields); }
+          catch (cause) {
+            await session.append({ kind: 'turn', ignorable: true, status: 'failed', userSeq,
+              iterations, modelCalls: calls, runId: runOptions.runId, code: 'run_result_write_failed' });
+            throw new KernelError('run_result_write_failed', { cause });
+          }
+        }
         await session.append({
           kind: 'turn', ignorable: true, status, userSeq, iterations, modelCalls: calls,
+          ...(runOptions.runId === undefined ? {} : { runId: runOptions.runId }),
+          ...(resultRef === undefined ? {} : { resultRef }),
           ...(runOptions.task === undefined ? {} : { task: runOptions.task.snapshot() }), ...fields,
         });
       }
@@ -274,7 +291,10 @@ export function createLoop({
       }
 
       try {
-        if (session) userSeq = sequenceOf(await session.append({ kind: 'user', text: input, ...user }));
+        if (session) {
+          userSeq = sequenceOf(await session.append({ kind: 'user', text: input, ...user }));
+          if (userSeq !== undefined) runOptions.onAccepted?.(userSeq);
+        }
         // 用户事件写入后若快照失败，记录本轮失败终态。Host 在接受输入前失败时没有事件序号，不写终态事件。
         if (session && (turnContext !== null || runTurnContext !== undefined)) {
           await session.append({ kind: 'turnContext', ignorable: true, userSeq, ...(turnContext?.() ?? {}), ...(runTurnContext ?? {}) });
@@ -401,12 +421,14 @@ export function createLoop({
               const result = outcome.value as Record<string, unknown>;
               const child = tool === 'subagent' && result.result !== null && typeof result.result === 'object'
                 ? result.result as Record<string, unknown> : undefined;
+              if (child?.artifactsTruncated === true) artifactsTruncated = true;
               const presented = tool === 'present' ? result.artifacts : child?.artifacts;
               if (!Array.isArray(presented)) continue;
               for (const artifact of presented) {
                 if (isFileArtifact(artifact)) {
                   const key = `${artifact.sessionId}/${artifact.path}`;
                   if (artifacts.has(key) || artifacts.size < 16) artifacts.set(key, artifact);
+                  else artifactsTruncated = true;
                 }
               }
             }

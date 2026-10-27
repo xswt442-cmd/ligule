@@ -15,6 +15,7 @@ import { loadAssembly } from '@ligule/core/kernel/assembly.js';
 import { DEFAULT_MODE, modeDirectories } from '@ligule/core/kernel/modes.js';
 import { extensionSources } from '@ligule/core/kernel/extensions.js';
 import { readRegistry, registryPathOf } from '@ligule/core/kernel/workspace.js';
+import { isTrusted } from '@ligule/core/kernel/workspace-trust.js';
 import { discoverSkills, skillDirectories } from '@ligule/core/kernel/skills.js';
 import { createSessionLog } from '@ligule/core/session/session.js';
 import { listWorkspaceSessions, sessionDirectories } from '@ligule/core/session/list.js';
@@ -337,6 +338,19 @@ function printNotification(message: Record<string, unknown>): void {
   } else if (message.notify === 'event' && event?.kind === 'tool') {
     const result = isRecord(event.result) ? event.result : {};
     console.log(`· ${String(event.tool ?? '')}: ${result.failed ? String(result.code ?? '') : t('成功', 'ok')}`);
+    if (result.failed !== true && (event.tool === 'present' || event.tool === 'subagent')) {
+      const body = isRecord(result.content) ? result.content : {};
+      const child = isRecord(body.result) ? body.result : {};
+      const listed = event.tool === 'present' ? body.artifacts : child.artifacts;
+      if (Array.isArray(listed)) {
+        for (const artifact of listed) {
+          if (isRecord(artifact) && artifact.kind === 'file' && typeof artifact.path === 'string'
+            && typeof artifact.sha256 === 'string' && typeof artifact.bytes === 'number') {
+            console.log(`  · ${t('交付文件', 'Delivered file')}: ${artifact.path} (${artifact.bytes} B, SHA-256 ${artifact.sha256}; ${t('来源会话', 'source session')} ${String(artifact.sessionId ?? '?')}; ${t('当前状态未复查', 'current state not rechecked')})`);
+          }
+        }
+      }
+    }
   } else if (message.notify === 'event' && event?.kind === 'user') {
     // 模板展开后仍显示用户输入的原文，保持终端回显与实际输入一致。
     console.log(`> ${String(event.raw ?? event.text ?? '')}`);
@@ -559,6 +573,78 @@ if (invalidLanguage) {
       printFailure(fields.code ?? 'cli_resume_failed', fields.detail, fields.diagnostics);
     }
   }
+} else if (command === 'storage') {
+  const [action, ...extra] = rest;
+  if (extra.length !== 0 || !['inspect', 'cleanup'].includes(action ?? '') || (action === 'cleanup' && (jsonFlag || !process.stdin.isTTY))) {
+    printFailure('cli_storage_action_invalid', t('用法：ligule storage inspect，或在交互式终端运行 ligule storage cleanup',
+      'Usage: ligule storage inspect, or ligule storage cleanup in an interactive terminal'));
+  } else {
+    let host: ReturnType<typeof createHost> | undefined;
+    let approvals: ReturnType<typeof terminalApprovals> | undefined;
+    try {
+      const root = resolve(projectFlag ?? process.cwd());
+      if (action === 'cleanup') {
+        if (!await isTrusted(root)) throw new KernelError('workspace_trust_required');
+      }
+      const { config } = await configSnapshot(root);
+      host = createHost({ config, provider: hostProviderFromConfig(config), permissionControl: true });
+      const connection: Pick<Connection, 'notify' | 'request'> = {
+        notify() {}, request: async () => { throw new KernelError('cli_interaction_unavailable'); },
+      };
+      const projectRoot = config.workspaceRoot;
+      const inspect = responseRecord(await host.handle({ method: 'storage.inspect', params: { projectRoot } }, connection));
+      if (action === 'inspect') {
+        if (jsonFlag) console.log(JSON.stringify(inspect));
+        else {
+          console.log(`${t('工作区数据', 'Workspace data')}: ${projectRoot}`);
+          const folders = Array.isArray(inspect.folders) ? inspect.folders : [];
+          for (const folder of folders) {
+            if (!isRecord(folder)) continue;
+            console.log(`  ${String(folder.kind)}: ${String(folder.bytes)} B, ${String(folder.entries)} ${t('项', 'entries')}${folder.complete === false ? ' (incomplete)' : ''}`);
+          }
+        }
+      } else {
+        let preview = responseRecord(await host.handle({ method: 'storage.cleanup.preview', params: { projectRoot, limit: 100 } }, connection));
+        for (let page = 0; preview.complete === false && typeof preview.nextCursor === 'string'; page += 1) {
+          if (page >= 200) throw new KernelError('image_cleanup_scan_incomplete');
+          console.log(t(`核查 Session 引用：${String(preview.scannedSessions)}/${String(preview.totalSessions)}`,
+            `Checking Session references: ${String(preview.scannedSessions)}/${String(preview.totalSessions)}`));
+          preview = responseRecord(await host.handle({ method: 'storage.cleanup.preview',
+            params: { projectRoot, limit: 100, cursor: preview.nextCursor } }, connection));
+        }
+        if (preview.complete !== true) throw new KernelError('image_cleanup_scan_incomplete');
+        console.log(t(`可清理截图 ${String(preview.candidates)} 项；本批 ${Array.isArray(preview.ids) ? preview.ids.length : 0} 项。`,
+          `Unreferenced screenshots: ${String(preview.candidates)}; this batch: ${Array.isArray(preview.ids) ? preview.ids.length : 0}.`));
+        const garbage = Array.isArray(preview.garbage) ? preview.garbage.filter(isRecord) : [];
+        for (const candidate of garbage) {
+          console.log(`  · ${t('可回收受管残留', 'Reclaimable managed residue')}: ${String(candidate.id)} (${String(candidate.bytes)} B)`);
+        }
+        if ((Array.isArray(preview.ids) && preview.ids.length > 0) || garbage.length > 0) {
+          approvals = terminalApprovals();
+          const answer = await approvals.ask(t('确认删除上列过期截图与已核验的受管残留？输入 delete 继续：',
+            'Delete the listed expired screenshots and verified managed residue? Type delete to confirm: '));
+          if (answer?.trim() !== 'delete') {
+            console.log(t('已取消清理。', 'Cleanup cancelled.'));
+          } else {
+            const applied = responseRecord(await host.handle({ method: 'storage.cleanup.apply', params: {
+              projectRoot, planId: responseString(preview, 'planId'), confirm: true,
+            } }, connection));
+            console.log(t(`已清理 ${String(applied.removed)} 项，释放 ${String(applied.bytesFreed)} 字节。`,
+              `Removed ${String(applied.removed)} items, freed ${String(applied.bytesFreed)} bytes.`));
+            if (Array.isArray(applied.skipped)) for (const skipped of applied.skipped) {
+              if (isRecord(skipped)) console.log(`  ${t('跳过', 'Skipped')} ${String(skipped.id)}: ${String(skipped.reason)}`);
+            }
+          }
+        }
+      }
+    } catch (error) {
+      const fields = errorFields(error);
+      printFailure(fields.code ?? 'cli_storage_failed', fields.detail);
+    } finally {
+      approvals?.close();
+      await host?.release();
+    }
+  }
 } else if (command === 'sessions') {
   // 只读扫描当前和旧工作区目录，不创建索引或迁移记录。
   try {
@@ -703,7 +789,7 @@ if (invalidLanguage) {
     try { setLocale((await configSnapshot()).config); } catch { setLocale(undefined); }
   }
   console.log(t(`ligule ${pkg.version} - 开发版本，请勿用于正式环境。`, `ligule ${pkg.version} - development build; do not use in production.`));
-  console.log(t('命令：tools、skills、extensions、sessions、workspaces、policy <session-id>、run <text>、resume <id> <text>、call <tool> [json-args]、tui、host、--version', 'Commands: tools, skills, extensions, sessions, workspaces, policy <session-id>, run <text>, resume <id> <text>, call <tool> [json-args], tui, host, --version'));
+  console.log(t('命令：tools、skills、extensions、sessions、workspaces、storage inspect|cleanup、policy <session-id>、run <text>、resume <id> <text>、call <tool> [json-args]、tui、host、--version', 'Commands: tools, skills, extensions, sessions, workspaces, storage inspect|cleanup, policy <session-id>, run <text>, resume <id> <text>, call <tool> [json-args], tui, host, --version'));
   console.log(t('直接运行 ligule 打开终端界面；tui 子命令仍可使用。', 'Run ligule without a command to open the terminal UI; the tui subcommand remains available.'));
   console.log(t('mcp-server --project <绝对目录>：启动本地 stdio MCP 控制器；默认只读。使用 --grant <ID> 引用可信界面预先创建的外控授权。', 'mcp-server --project <absolute-directory>: start a local stdio MCP controller; read-only by default. Use --grant <ID> to reference a grant created in a trusted interface.'));
   console.log(t('mcp-server --operator：明确授权该本地 MCP 客户端读取并回应真实待决的审批/提问，以及修改会话级设置；Policy 的拒绝规则仍生效。', 'mcp-server --operator: authorize this local MCP client to review and answer real pending approvals/questions and change session settings; Policy denials remain in force.'));

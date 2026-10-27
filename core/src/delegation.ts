@@ -157,6 +157,7 @@ export interface RunResult {
   readonly artifacts: readonly ({ readonly kind: 'session'; readonly sessionId: string } | FileArtifact)[];
   readonly usage: { readonly iterations: number | null; readonly modelCalls: number | null };
   readonly userSeq?: number;
+  readonly artifactsTruncated?: true;
   readonly task?: RunSummary['task'];
   readonly diagnostic?: { readonly code: string; readonly provider?: ProviderDiagnostic };
 }
@@ -199,6 +200,7 @@ export function completedRunResult(
     artifacts: [...artifacts(sessionId), ...(result.artifacts ?? [])],
     usage: { iterations: result.iterations, modelCalls: result.modelCalls },
     ...(result.userSeq === undefined ? {} : { userSeq: result.userSeq }),
+    ...(result.artifactsTruncated ? { artifactsTruncated: true as const } : {}),
     ...(result.task === undefined ? {} : { task: result.task }),
   };
 }
@@ -222,6 +224,7 @@ export function failedRunResult(
     artifacts: [...artifacts(sessionId), ...(summary?.artifacts ?? [])],
     usage: { iterations: summary?.iterations ?? null, modelCalls: summary?.modelCalls ?? null },
     ...(summary?.userSeq === undefined ? {} : { userSeq: summary.userSeq }),
+    ...(summary?.artifactsTruncated ? { artifactsTruncated: true as const } : {}),
     ...(summary?.task === undefined ? {} : { task: summary.task }),
     diagnostic: { code, ...(provider === undefined ? {} : { provider }) },
   };

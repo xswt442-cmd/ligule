@@ -5,6 +5,7 @@ import { KernelError } from '../kernel/error.js';
 import type { ProviderDiagnostic } from '../kernel/error.js';
 import { completedRunResult, failedRunResult, type DelegationSpec, type RunResult, type RunValidation } from '../delegation.js';
 import { checkedRunSummary, runSummary } from '../kernel/run-summary.js';
+import { runPayloadDigest } from '../session/run.js';
 import { checkedAnswers, type AskQuestion } from '../tools/ask-user.js';
 import { APPROVAL_METHOD, QUESTION_METHOD } from './protocol.js';
 import type { Host } from './host.js';
@@ -39,6 +40,8 @@ interface Operation {
   readonly events: ControlEvent[];
   readonly waiters: Set<() => void>;
   settled: Promise<void>;
+  accepted?: Promise<Record<string, unknown>>;
+  receipt?: Record<string, unknown>;
 }
 
 interface PendingInteraction {
@@ -119,6 +122,7 @@ export function controlErrorCode(error: unknown): string {
 export function createControl(host: Host, projectRoot: string, options: ControlOptions = {}) {
   const sessions = new Set<string>();
   const operations = new Map<string, Operation>();
+  const keyedOperations = new Map<string, { digest: string; operation: Operation }>();
   const active = new Map<string, Operation>();
   const interactions = new Map<string, PendingInteraction>();
   const queues = new Map<string, SessionQueue>();
@@ -519,13 +523,14 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     });
   }
 
-  function startOne(sessionId: string, input: string, queueItemId?: string, delegation?: DelegationSpec, source: 'human' | 'controller' = 'controller') {
+  function startOne(sessionId: string, input: string, queueItemId?: string, delegation?: DelegationSpec, source: 'human' | 'controller' = 'controller', requestKey?: string, durable = false) {
     writable(sessionId);
     if (active.has(sessionId)) throw new KernelError('run_already_running');
     if (operations.size >= 256) {
       const oldest = [...operations.values()].find((entry) => entry.state !== 'running');
       if (oldest === undefined) throw new KernelError('control_operation_limit');
       operations.delete(oldest.operationId);
+      for (const [key, value] of keyedOperations) if (value.operation === oldest) keyedOperations.delete(key);
     }
     const found: Operation = {
       operationId: randomUUID(), sessionId, source, state: 'running', updatedAt: Date.now(), nextCursor: 1, events: [], waiters: new Set(), settled: Promise.resolve(),
@@ -533,9 +538,26 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     operations.set(found.operationId, found);
     active.set(sessionId, found);
     publish(found, 'run.started', { source, ...(queueItemId === undefined ? {} : { queueItemId }) });
-    const work = Promise.resolve().then(() => host.handle({
-      method: 'run.start', params: { sessionId, input, origin: source, ...(delegation === undefined ? {} : { delegation }) },
-    }, connection));
+    const submit = Promise.resolve().then(async () => {
+      if (!durable) return undefined;
+      return record(await host.handle({ method: 'run.submit', params: {
+        sessionId, input, origin: source,
+        ...(delegation === undefined ? {} : { delegation }), ...(requestKey === undefined ? {} : { requestKey }),
+      } }, connection));
+    });
+    if (durable) found.accepted = submit.then(value => {
+      if (value === undefined) throw new KernelError('host_response_invalid');
+      found.receipt = value;
+      return value;
+    });
+    const work = durable
+      ? found.accepted!.then(receipt => host.handle({ method: 'run.wait', params: {
+        sessionId, runId: receipt.runId, origin: source,
+      } }, connection))
+      : Promise.resolve().then(() => host.handle({ method: 'run.start', params: {
+        sessionId, input, origin: source,
+        ...(delegation === undefined ? {} : { delegation }), ...(requestKey === undefined ? {} : { requestKey }),
+      } }, connection));
     found.settled = work.then(
       (result) => {
         const completed = record(result);
@@ -562,7 +584,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
             ...(errors === undefined ? {} : { errors }),
           };
         }
-        found.result = completedRunResult(found.operationId, sessionId, {
+        found.result = completedRunResult(typeof completed.runId === 'string' ? completed.runId : found.operationId, sessionId, {
           ...checkedRunSummary(completed),
           ...(typeof completed.completedBy === 'string' ? { completedBy: completed.completedBy } : {}),
         } satisfies LoopResult, {
@@ -581,7 +603,8 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
         status: 'invalid' as const,
         errors: [`Run ended with ${code} before a valid structured result was submitted.`],
       };
-      found.result = failedRunResult(found.operationId, sessionId, code, found.diagnostics, validation, runSummary(error));
+      found.result = failedRunResult(typeof found.receipt?.runId === 'string' ? found.receipt.runId : found.operationId,
+        sessionId, code, found.diagnostics, validation, runSummary(error));
     }).then(() => {
       settleInteractions(found);
       if (active.get(sessionId) === found) active.delete(sessionId);
@@ -822,12 +845,44 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
           createdAt: entry.createdAt === null ? null : entry.createdAt.slice(0, 128) };
       }) };
     },
-    start(sessionId: string, input: string, delegation?: DelegationSpec) {
+    start(sessionId: string, input: string, delegation?: DelegationSpec, requestKey?: string) {
       writable(sessionId);
+      const key = requestKey === undefined ? undefined : sessionId + ':' + requestKey;
+      if (key !== undefined) {
+        if (!/^[A-Za-z0-9._:-]{1,128}$/u.test(requestKey!)) throw new KernelError('run_request_key_invalid');
+        const digest = runPayloadDigest(input, delegation);
+        const previous = keyedOperations.get(key);
+        if (previous !== undefined) {
+          if (previous.digest !== digest) throw new KernelError('run_request_conflict');
+          return { ...status(previous.operation), reused: true };
+        }
+      }
       const queue = currentQueue(sessionId);
       if (queue.items.length > 0) throw new KernelError('session_queue_pending');
       queue.paused = false;
-      return status(startOne(sessionId, input, undefined, delegation));
+      const started = startOne(sessionId, input, undefined, delegation, 'controller', requestKey);
+      if (key !== undefined) keyedOperations.set(key, { digest: runPayloadDigest(input, delegation), operation: started });
+      return status(started);
+    },
+    async submit(sessionId: string, input: string, delegation?: DelegationSpec, requestKey?: string) {
+      writable(sessionId);
+      const queue = currentQueue(sessionId);
+      if (queue.items.length > 0) throw new KernelError('session_queue_pending');
+      const key = requestKey === undefined ? undefined : sessionId + ':' + requestKey;
+      if (requestKey !== undefined && !/^[A-Za-z0-9._:-]{1,128}$/u.test(requestKey)) throw new KernelError('run_request_key_invalid');
+      const digest = runPayloadDigest(input, delegation);
+      const previous = key === undefined ? undefined : keyedOperations.get(key);
+      if (previous !== undefined) {
+        if (previous.digest !== digest) throw new KernelError('run_request_conflict');
+        if (previous.operation.accepted === undefined) throw new KernelError('run_already_running');
+        const receipt = await previous.operation.accepted;
+        return { ...status(previous.operation), receipt, reused: true };
+      }
+      queue.paused = false;
+      const started = startOne(sessionId, input, undefined, delegation, 'controller', requestKey, true);
+      if (key !== undefined) keyedOperations.set(key, { digest, operation: started });
+      const receipt = await started.accepted!;
+      return { ...status(started), receipt, reused: receipt.reused === true };
     },
     status(operationId: string, after = 0, limit = 20) {
       if (!Number.isSafeInteger(after) || after < 0) throw new KernelError('control_cursor_invalid');
@@ -851,6 +906,19 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
         }
       }
       return { ...status(found), timedOut: found.state === 'running' };
+    },
+    async getRun(sessionId: string, reference: { runId?: string; requestKey?: string }, offset?: number) {
+      ready();
+      await authorized(projectRoot);
+      ready();
+      const receipt = record(await tracked(host.handle({ method: 'run.receipt', params: {
+        projectRoot, sessionId, ...reference,
+      } }, connection)));
+      if (offset === undefined) return { receipt };
+      const page = record(await tracked(host.handle({ method: 'run.result', params: {
+        projectRoot, sessionId, runId: receipt.runId, offset,
+      } }, connection)));
+      return { receipt, result: page };
     },
     cancel: (operationId: string) => cancelOperation(operationId),
     invalidate(code: string): Promise<void> {

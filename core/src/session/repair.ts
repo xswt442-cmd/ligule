@@ -2,6 +2,7 @@
 // 此时无法确认外部副作用是否发生，也无法安全重放调用。
 // 恢复时补写普通工具结果，明确说明调用结果未知，并保持请求与结果配对。
 import type { PendingSessionEvent, SessionEvent } from './format.js';
+import { isRunAcceptance } from './run.js';
 
 export interface UnresolvedCall {
   tool: string;
@@ -68,6 +69,9 @@ function findUnfinishedTurns(events: SessionEvent[]): number[] {
     && !events.some((event) => event.kind === 'assistant' && Number(event.seq) > Number(lastUser.seq))) {
     started.add(Number(lastUser.seq));
   }
+  for (const user of users) {
+    if (isRunAcceptance(user.run)) started.add(Number(user.seq));
+  }
   for (const call of findUnresolvedCalls(events)) {
     const user = users.filter((event) => Number(event.seq) < call.assistantSeq).at(-1);
     if (user !== undefined) started.add(Number(user.seq));
@@ -114,7 +118,9 @@ export async function repairUnresolvedCalls(
   const appended: SessionEvent[] = [];
   for (const event of buildRepairEvents(unresolved, { readOnly })) appended.push(await session.append(event));
   for (const userSeq of findUnfinishedTurns(events)) {
-    await session.append({ kind: 'turn', ignorable: true, status: 'interrupted', userSeq, code: 'host_restarted' });
+    const user = events.find(event => event.kind === 'user' && event.seq === userSeq);
+    await session.append({ kind: 'turn', ignorable: true, status: 'interrupted', userSeq,
+      ...(isRunAcceptance(user?.run) ? { runId: user.run.runId } : {}), code: 'host_restarted' });
   }
   return appended;
 }

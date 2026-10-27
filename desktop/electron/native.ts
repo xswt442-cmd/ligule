@@ -1,6 +1,6 @@
-import { app, BrowserWindow, dialog, Menu, Notification, Tray } from 'electron';
+import { app, BrowserWindow, dialog, Menu, Notification, Tray, shell } from 'electron';
 import { execFile } from 'node:child_process';
-import { mkdir } from 'node:fs/promises';
+import { lstat, mkdir } from 'node:fs/promises';
 import { basename, isAbsolute, join } from 'node:path';
 import type { DesktopNotification } from './api.js';
 
@@ -88,6 +88,15 @@ export class NativeServices {
       this.reportFault('workspace-dialog-failed');
       throw new Error('The workspace directory could not be selected');
     }
+  }
+
+  async revealArtifact(path: string): Promise<void> {
+    if (this.disposed || this.options.window.isDestroyed() || !isAbsolute(path)) {
+      throw new Error('artifact_reveal_unavailable');
+    }
+    const info = await lstat(path);
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) throw new Error('artifact_reveal_unavailable');
+    shell.showItemInFolder(path);
   }
 
   async saveExportPath(defaultName: string): Promise<string | null> {

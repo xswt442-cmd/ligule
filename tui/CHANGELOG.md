@@ -8,6 +8,9 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ### 简体中文
 
+- 外控委派支持持久 `runId` 回执、`requestKey` 去重与 `ligule_run_get` 查询，重启后可读取已保存的结果或中断状态，不自动重跑任务。
+- CLI/TUI 显示已确认的文件交付。`ligule storage inspect` 检查工作区数据；交互式 `storage cleanup` 分页核查历史引用、预览并确认删除过期截图及带归属/租约验证的受管残留（未知旧目录保留）。
+
 - 支持可信配置的无头 Playwright MCP 浏览器，按会话隔离，截图沿用持久图像通路；`/browser` 可查看状态、停止及恢复。
 
 - `full` 模式新增 `web_search`，复用已配置的官方 DeepSeek 服务；仅在配置和凭据可用时注册，仍受网络 Permission 与 Policy 控制。
@@ -24,6 +27,9 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 - 委派运行支持整个任务和单次模型请求的期限、父子共享模型调用次数上限；失败结果保留已确认的用量与部分正文。`full` 新增 `present`，记录工作区文件交付时的类型、大小和 SHA-256。图片按 Session 引用保留，过期且未引用的图片可有界清理。
 
 ### English
+
+- External delegation adds durable `runId` receipts, `requestKey` deduplication and `ligule_run_get` for result or interruption lookup after restart, without automatic replay.
+- CLI/TUI display confirmed file deliveries. `ligule storage inspect` reports Workspace data; interactive `storage cleanup` pages Session references and confirms old screenshots or owner/lease-verified managed residue, preserving unknown legacy folders.
 
 - Trusted configuration can enable a headless Playwright MCP browser with Session isolation and durable screenshots; `/browser` shows status, stops, and resumes it.
 

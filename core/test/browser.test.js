@@ -59,7 +59,10 @@ test('an installed backend gets immutable headless configuration, independent st
     await assert.rejects(support.session('../escape'), { code: 'browser_session_invalid' });
     await writeFile(join(output(first), 'transient.txt'), 'real cache output');
     await support.clearSession('owner');
-    assert.deepEqual(await readdir(output(first)), []);
+    const retained = await readdir(output(first));
+    assert.ok(retained.includes('.ligule-owner.json'));
+    assert.ok(retained.includes('.ligule-lease.lock'));
+    assert.equal(retained.includes('transient.txt'), false);
     await support.closeSession('owner');
     await assert.rejects(readdir(output(first)), { code: 'ENOENT' });
     await writeFile(path, '{}');

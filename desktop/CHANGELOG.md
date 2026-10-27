@@ -8,6 +8,9 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 ### 简体中文
 
+- 交付文件卡片可查看状态、核验文件摘要、预览安全文本或静态图片、复制相对路径，并由可信原生界面在文件夹中定位。
+- 共享 Host 支持持久委派回执与请求去重，外控在重启后可按 `runId` 查询确定的终态结果；工作区清理新增分批 Session 引用核查与受管浏览器目录租约保护。
+
 - 托管无头浏览器支持按会话隔离和持久截图；顶栏可查看状态、停止及恢复，外控只读会话显示接管与关闭提示。
 
 - `full` 模式新增 `web_search`，复用已配置的官方 DeepSeek 服务；仅在配置和凭据可用时注册，仍受网络 Permission 与 Policy 控制。
@@ -22,6 +25,9 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 - 运行结果提供已知的任务预算、部分输出和文件交付元数据；`full` 的 `present` 记录工作区文件类型、大小与摘要。仍被 Session 引用的图片超过 30 天也保持可用。
 
 ### English
+
+- File-delivery cards verify current file digests, show status, preview bounded text or static images, copy relative paths, and reveal files through the trusted native bridge.
+- The shared Host supports durable delegation receipts and deduplication; external controllers can query stored terminal results by `runId` after restart. Workspace cleanup now pages Session references and protects managed browser directories with owner leases.
 
 - Managed headless browsing provides Session isolation and durable screenshots. The top bar shows status, Stop and Resume controls, with takeover and close guidance for read-only external sessions.
 

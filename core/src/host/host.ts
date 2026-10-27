@@ -2,13 +2,14 @@
 // 模型提供方与策略由外部注入，会话事件通过会话记录接口持久化。
 import { randomUUID } from 'node:crypto';
 import type { Readable, Writable } from 'node:stream';
-import { access, readFile, realpath, stat } from 'node:fs/promises';
+import { access, lstat, opendir, readFile, realpath, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import { createTaskBudget, type TaskBudget, type TaskBudgetLimits } from '../kernel/task-budget.js';
+import { rememberRunSummary } from '../kernel/run-summary.js';
 import {
   assertDelegationCompletion, createOutputSchemaContract, DELEGATION_RESULT_TOOL, MAX_DELEGATION_SCHEMA_BYTES, outputSchemaInstructions,
-  registerDelegationResultTool, type DelegationSpec, type RunValidation,
+  registerDelegationResultTool, completedRunResult, failedRunResult, type DelegationSpec, type RunValidation,
 } from '../delegation.js';
 import {
   assertDelegationMcpServer, assertDelegationMcpTool, assertDelegationPermission, assertDelegationPolicy, createDelegationGrant, delegationPathOf,
@@ -35,8 +36,9 @@ import { createDecisionChain, isPolicyRule, policyArgsHash, type DecisionChain, 
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
 import { createSessionLog, type SessionLog } from '../session/session.js';
+import { createRunAcceptance, findRunReceipt, isRunAcceptance, publishRunResult, readRunResult, runPayloadDigest, runReceipts, runResultPage, type RunAcceptance } from '../session/run.js';
 import type { SessionEvent, SessionHeader } from '../session/format.js';
-import { chooseResumeMode, listWorkspaceSessions, sessionDirectories, sessionDirectory } from '../session/list.js';
+import { chooseResumeMode, listWorkspaceSessions, sessionDirectories, sessionDirectory, workspaceDataDirectory } from '../session/list.js';
 import { adoptForSessionDirectory } from '../session/adopt.js';
 import { searchSessionDirectories } from '../session/search.js';
 import { branchSession } from '../session/branch.js';
@@ -62,11 +64,14 @@ import { createTodoWritePlugin } from '../tools/todo-write.js';
 import { createReadImagePlugin } from '../tools/read-image.js';
 import { createReadDocumentPlugin } from '../tools/read-document.js';
 import { createPresentPlugin } from '../tools/present.js';
+import { confirmedFileArtifacts } from '../session/artifact.js';
+import { readFileArtifact, previewFileArtifact } from '../capability/artifact.js';
 import { createSearchSupport, type SearchStatus } from './search.js';
 import { createBrowserSupport, type BrowserSupport } from '../capability/browser.js';
 import { assertBrowserArguments, browserToolPolicy, BROWSER_SERVER } from '../capability/browser-policy.js';
 import { createScreenshotPlugin } from '../tools/screenshot.js';
-import { createMediaStore, imagePreview } from '../capability/media.js';
+import { createMediaStore, imagePreview, type SessionMediaScan } from '../capability/media.js';
+import { previewStorageGarbage, applyStorageGarbage, type StorageGcCandidate } from '../capability/storage-gc.js';
 import { checkedImageReferences, IMAGE_LIMITS, type ImageReference } from '../session/media.js';
 import { createSkillPlugin } from '../tools/skill.js';
 import { createMcpPlugin, type McpAuthorization } from '../tools/mcp.js';
@@ -225,6 +230,7 @@ function policyRuleKey(rule: Pick<PolicyRule, 'tool' | 'match' | 'target' | 'pat
 interface HostSessionBase {
   taskBudget?: TaskBudget;
   lastTask?: ReturnType<TaskBudget['snapshot']>;
+  activeRunId?: string;
   readonly id: string;
   readonly search: SearchStatus;
   readonly browser: BrowserSupport;
@@ -298,9 +304,12 @@ interface DelegatedRunOptions {
   readonly user?: Record<string, unknown>;
   readonly onProgress?: (event: LoopProgressEvent) => void;
   readonly delegation?: DelegationSpec;
+  readonly acceptance?: RunAcceptance;
+  readonly onAccepted?: (userSeq: number) => void;
 }
 
 interface DelegatedRunResult extends LoopResult {
+  readonly runId?: string;
   readonly structured?: unknown;
   readonly validation?: RunValidation;
 }
@@ -435,6 +444,13 @@ function sessionGenerationEvent(generation: SessionGeneration): Record<string, u
 
 // 会话名称需要为列表中的时间和条目数留出显示空间。
 export const SESSION_NAME_MAX = 120;
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -1062,6 +1078,9 @@ export function createHost({
   }
 
   const sessions = new Map<string, HostSessionState>();
+  const storagePlans = new Map<string, { workspace: string; createdAt: number; ids: string[];
+    fingerprints: Readonly<Record<string, string>>; sessionScan: SessionMediaScan; garbage: StorageGcCandidate[] }>();
+  const storageScans = new Map<string, { workspace: string; createdAt: number; scan: SessionMediaScan; busy: boolean }>();
   let imagePreviews = 0;
   const retiringSessions = new Set<string>();
   const retirementProgress = new Map<string, HostSessionRetirement>();
@@ -2283,12 +2302,34 @@ export function createHost({
         const result = await loop.run(input, {
           signal: budget.signal,
           task: budget,
-          user: options.user,
+          onAccepted: options.onAccepted,
+          user: { ...options.user, ...(options.acceptance === undefined ? {} : { run: options.acceptance }) },
+          ...(options.acceptance === undefined ? {} : {
+            runId: options.acceptance.runId,
+            persistTerminal: async (status, summary, fields) => {
+              const runId = options.acceptance!.runId;
+              const result = status === 'completed'
+                ? completedRunResult(runId, state.id, {
+                  ...summary,
+                  ...(typeof fields.completedBy === 'string' ? { completedBy: fields.completedBy } : {}),
+                }, {
+                  ...(structuredSubmitted ? { structured } : {}),
+                  validation: contract === undefined ? { status: 'not_requested' } : { status: 'valid', schemaDigest: contract.digest },
+                })
+                : failedRunResult(runId, state.id, typeof fields.code === 'string' ? fields.code : 'loop_failed',
+                  fields.diagnostics as KernelError['diagnostics'], contract === undefined ? { status: 'not_requested' } : {
+                    status: 'invalid', schemaDigest: contract.digest,
+                    errors: ['The run ended before a valid structured result was submitted.'],
+                  }, summary);
+              return await publishRunResult(session.directory, workspaceIdentity(state.environment.projectRoot), state.id, runId, result);
+            },
+          }),
           onProgress: options.onProgress,
           completesRun: contract === undefined ? [] : [DELEGATION_RESULT_TOOL],
           validateCompletion: () => assertDelegationCompletion(contract, structuredSubmitted),
           turnContext: {
               task: budget.snapshot(),
+              ...(options.acceptance === undefined ? {} : { runContext: runContextOf(state as HostSessionState, options.delegation) }),
               ...(delegatedMode === undefined ? {} : { delegationMode: delegatedMode }),
               ...(contract === undefined ? {} : { delegationSchemaDigest: contract.digest }),
           },
@@ -2298,6 +2339,7 @@ export function createHost({
           : { status: 'valid' as const, schemaDigest: contract.digest };
         return {
           ...result,
+          ...(options.acceptance === undefined ? {} : { runId: options.acceptance.runId }),
           ...(structuredSubmitted ? { structured } : {}),
           ...(validation === undefined ? {} : { validation }),
         };
@@ -2665,6 +2707,45 @@ export function createHost({
       return { sessionId: state.id, permission: sessionPermissionView(state, canControlPermission), applies: 'now' };
     } finally {
       if (sessions.get(state.id) === state) state.permissionChanging = false;
+    }
+  }
+
+  function runContextOf(state: HostSessionState, delegation?: DelegationSpec) {
+    if (delegation?.outputSchema !== undefined) createOutputSchemaContract(delegation.outputSchema);
+    const budget = taskLimitsOf(state.environment.config, state.loopModelCalls, delegation?.budget);
+    return {
+      workspace: workspaceIdentity(state.environment.projectRoot),
+      mode: state.mode.file?.digest ?? state.mode.file?.name ?? null,
+      permission: { profile: state.permission.profile, network: state.permission.network },
+      policy: state.chain.mode,
+      generation: { model: state.generation.model, options: state.generation.options },
+      loopIterations: state.loopIterations,
+      budget,
+    };
+  }
+
+  const pendingSubmissions = new Map<string, { scope: string; key?: string; digest: string;
+    receipt: Promise<import('../session/run.js').DurableRunReceipt> }>();
+
+  async function executeRun(state: HostSessionState, input: string, origin: 'human' | 'controller',
+    delegation: DelegationSpec | undefined, acceptance: RunAcceptance, connection: HostClientConnection,
+    onAccepted?: (userSeq: number) => void): Promise<DelegatedRunResult> {
+    if (state.running !== undefined) throw new KernelError('run_already_running');
+    state.activeRunId = acceptance.runId;
+    try {
+      return await execute(state, async (signal, report) => {
+        const invocation = parseInvocation(input);
+        let text = input;
+        let user: Record<string, unknown> = { origin };
+        if (invocation !== undefined) {
+          const expanded = await expandTemplate(findTemplate(state.templates, invocation.command), invocation.arguments);
+          text = expanded.text;
+          user = { ...user, raw: input, arguments: expanded.arguments, source: expanded.source, digest: expanded.digest };
+        }
+        return await state.runDelegated(text, { signal, user, onProgress: report, delegation, acceptance, onAccepted });
+      }, connection);
+    } finally {
+      if (state.activeRunId === acceptance.runId) state.activeRunId = undefined;
     }
   }
 
@@ -3050,23 +3131,394 @@ export function createHost({
         }
         case 'run.start': {
           const state = open(sessionId);
-          return await execute(state, async (signal, report) => {
-          // 开始轮次前展开提示模板，同时保留原始输入和模板元数据。
-          // 未知模板命令应返回错误，不能把未展开的文本发送给模型。
-          const invocation = parseInvocation(input);
-          let text = input;
           const origin = message.params.origin;
-          if (origin !== undefined && origin !== 'human' && origin !== 'controller') throw new KernelError('protocol_args_invalid', { detail: 'origin must be human or controller' });
-          let user: Record<string, unknown> = { origin: origin ?? 'human' };
-          if (invocation !== undefined) {
-            const expanded = await expandTemplate(findTemplate(state.templates, invocation.command), invocation.arguments);
-            text = expanded.text;
-            user = { ...user, raw: input, arguments: expanded.arguments, source: expanded.source, digest: expanded.digest };
+          if (origin !== undefined && origin !== 'human' && origin !== 'controller') throw new KernelError('protocol_args_invalid');
+          const scope = origin === 'controller' ? 'controller:' + (grant?.id ?? 'local') : 'human';
+          const requestKey = message.params.requestKey;
+          const digest = runPayloadDigest(input, message.params.delegation);
+          const waitForOriginal = async (receipt: import('../session/run.js').DurableRunReceipt) => {
+            if (state.activeRunId === receipt.runId && state.operation !== undefined) return await state.operation;
+            if (receipt.state === 'accepted' || receipt.state === 'interrupted') throw new KernelError('run_not_active');
+            return await host.handle({ method: 'run.wait', params: {
+              sessionId, runId: receipt.runId, origin: origin ?? 'human',
+            } }, connection);
+          };
+          const pending = pendingSubmissions.get(sessionId);
+          if (pending !== undefined) {
+            if (requestKey === undefined || pending.key !== requestKey || pending.scope !== scope) {
+              throw new KernelError('run_already_running');
+            }
+            if (pending.digest !== digest) throw new KernelError('run_request_conflict');
+            return await waitForOriginal(await pending.receipt);
           }
-          return await state.runDelegated(text, {
-            signal, user, onProgress: report, delegation: message.params.delegation,
-          });
-          }, connection);
+          const accepted = deferred<import('../session/run.js').DurableRunReceipt>();
+          void accepted.promise.catch(() => undefined);
+          const current = { scope, key: requestKey, digest, receipt: accepted.promise };
+          pendingSubmissions.set(sessionId, current);
+          try {
+            if (requestKey !== undefined) {
+              const events = await state.session.read();
+              const existing = findRunReceipt(events, sessionId, scope, { requestKey });
+              if (existing !== undefined) {
+                const user = events.find(event => event.kind === 'user' && event.seq === existing.userSeq);
+                if (!user || !isRunAcceptance(user.run) || user.run.payloadDigest !== digest) {
+                  throw new KernelError('run_request_conflict');
+                }
+                accepted.resolve(existing);
+                return await waitForOriginal(existing);
+              }
+            }
+            runContextOf(state, message.params.delegation);
+            const run = createRunAcceptance(sessionId, input, message.params.delegation, scope, requestKey);
+            const work = executeRun(state, input, origin ?? 'human', message.params.delegation, run, connection, userSeq => {
+              accepted.resolve({ runId: run.runId, sessionId, userSeq, state: 'accepted', acceptedAt: run.acceptedAt,
+                ...(requestKey === undefined ? {} : { requestKey }) });
+            });
+            void work.catch(error => accepted.reject(error));
+            return await work;
+          } catch (error) {
+            accepted.reject(error);
+            throw error;
+          } finally {
+            if (pendingSubmissions.get(sessionId) === current) pendingSubmissions.delete(sessionId);
+          }
+        }
+        case 'storage.inspect':
+        case 'storage.cleanup.preview':
+        case 'storage.cleanup.apply': {
+          if (!permissionControl) throw new KernelError('storage_control_trusted_ui_required');
+          const env = await environmentFor(requiredString(message.params.projectRoot, 'projectRoot'));
+          try {
+            const info = await stat(await realpath(env.projectRoot));
+            if (!info.isDirectory()) throw new KernelError('storage_workspace_unavailable');
+          } catch (cause) {
+            if (cause instanceof KernelError) throw cause;
+            throw new KernelError('storage_workspace_unavailable', { cause });
+          }
+          const workspace = workspaceIdentity(env.projectRoot);
+          const root = workspaceDataDirectory({ ...env.config, workspaceRoot: env.projectRoot });
+          const media = createMediaStore({ ...env.config, workspaceRoot: env.projectRoot }, 'workspace-storage');
+          if (message.method === 'storage.inspect') {
+            const folders: { kind: string; bytes: number; entries: number; complete: boolean }[] = [];
+            for (const kind of ['sessions', 'screenshots', 'browser', 'cache', 'tmp']) {
+              // Session records may use an explicit host.sessionDirectory override.
+              const path = kind === 'sessions' ? env.directory : join(root, kind);
+              let entries = 0;
+              let bytes = 0;
+              let complete = true;
+              let rootInfo;
+              try { rootInfo = await lstat(path); }
+              catch (cause) {
+                if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause;
+                folders.push({ kind, bytes, entries, complete });
+                continue;
+              }
+              if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new KernelError('storage_path_invalid');
+              const pending = [{ path, depth: 0 }];
+              while (pending.length > 0 && complete) {
+                const current = pending.pop()!;
+                let listing;
+                try { listing = await opendir(current.path); }
+                catch (cause) {
+                  if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause;
+                  complete = false;
+                  break;
+                }
+                for await (const entry of listing) {
+                  if (entries >= 1000) { complete = false; break; }
+                  entries += 1;
+                  let info;
+                  try { info = await lstat(join(current.path, entry.name)); }
+                  catch (cause) {
+                    if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause;
+                    complete = false;
+                    break;
+                  }
+                  if (info.isSymbolicLink()) throw new KernelError('storage_path_invalid');
+                  if (info.isFile()) bytes += info.size;
+                  else if (info.isDirectory()) {
+                    if (current.depth >= 16) { complete = false; break; }
+                    pending.push({ path: join(current.path, entry.name), depth: current.depth + 1 });
+                  }
+                }
+              }
+              folders.push({ kind, bytes, entries, complete });
+            }
+            return { projectRoot: env.projectRoot, workspace, folders };
+          }
+          if (message.method === 'storage.cleanup.preview') {
+            const limit = message.params.limit ?? 100;
+            const now = Date.now();
+            for (const [id, saved] of storageScans) {
+              if (now - saved.createdAt > 300_000 || storageScans.size > 8) storageScans.delete(id);
+            }
+            const providedCursor = message.params.cursor;
+            const cursor = providedCursor === undefined ? randomUUID() : requiredString(providedCursor, 'cursor');
+            let scan: SessionMediaScan;
+            let saved = storageScans.get(cursor);
+            if (providedCursor !== undefined) {
+              if (saved === undefined || saved.workspace !== workspace || now - saved.createdAt > 300_000) {
+                throw new KernelError('image_cleanup_cursor_invalid');
+              }
+              scan = saved.scan;
+            } else {
+              scan = await media.beginSessionScan();
+              saved = { workspace, createdAt: now, scan, busy: false };
+              storageScans.set(cursor, saved);
+            }
+            if (saved.busy) throw new KernelError('image_cleanup_cursor_busy');
+            saved.busy = true;
+            let progress: Awaited<ReturnType<typeof media.advanceSessionScan>>;
+            try { progress = await media.advanceSessionScan(scan); }
+            catch (cause) {
+              storageScans.delete(cursor);
+              throw cause;
+            } finally { saved.busy = false; }
+            if (!progress.complete) return { complete: false, nextCursor: cursor,
+              scannedSessions: scan.position, totalSessions: progress.totalSessions, scannedThisPage: progress.scannedSessions,
+              readBytesThisPage: progress.readBytes, ids: [], candidates: 0, removed: 0, bytesFreed: 0 };
+            storageScans.delete(cursor);
+            await media.verifySessionScan(scan);
+            let candidates: Awaited<ReturnType<typeof media.cleanup>>;
+            try { candidates = await media.cleanup({ dryRun: true, limit, withFingerprints: true, sessionScan: scan }); }
+            catch (cause) {
+              if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause;
+              candidates = { scanned: 0, referenced: 0, candidates: 0, removed: 0, bytesFreed: 0, ids: [], truncated: false };
+            }
+            for (const [id, plan] of storagePlans) {
+              if (Date.now() - plan.createdAt > 300_000 || storagePlans.size >= 64) storagePlans.delete(id);
+            }
+            const reclaim = await previewStorageGarbage(root, workspace, scan.sessions);
+            const garbage = reclaim.candidates.slice(0, Math.max(0, limit - candidates.ids.length));
+            const planId = randomUUID();
+            const { fingerprints, ...visible } = candidates;
+            storagePlans.set(planId, { workspace, createdAt: Date.now(), ids: candidates.ids,
+              fingerprints: fingerprints ?? {}, sessionScan: scan, garbage });
+            return { planId, expiresInMs: 300_000, ...visible, complete: true,
+              scannedSessions: scan.position, totalSessions: progress.totalSessions, nextCursor: null,
+              garbage: garbage.map(({ id, kind, bytes }) => ({ id, kind, bytes })),
+              garbageScanned: reclaim.scannedEntries };
+          }
+          if (message.params.confirm !== true) throw new KernelError('storage_cleanup_confirmation_required');
+          const planId = requiredString(message.params.planId, 'planId');
+          const plan = storagePlans.get(planId);
+          if (plan === undefined || plan.workspace !== workspace || Date.now() - plan.createdAt > 300_000) {
+            throw new KernelError('storage_cleanup_plan_invalid');
+          }
+          storagePlans.delete(planId);
+          // Small histories can be re-read completely at apply time, preserving per-item skipped
+          // reasons when a new Session reference appears after preview. Multi-page proofs instead
+          // fail closed on any record change and require a new cursor scan.
+          let checkedScan = plan.sessionScan;
+          if (checkedScan.entries.length <= 100) {
+            checkedScan = await media.beginSessionScan();
+            const fresh = await media.advanceSessionScan(checkedScan);
+            if (!fresh.complete) throw new KernelError('image_cleanup_scan_incomplete');
+          }
+          await media.verifySessionScan(checkedScan);
+          const cleaned = plan.ids.length === 0
+            ? { removed: 0, bytesFreed: 0, ids: [] as string[], skipped: [] as { id: string; reason: string }[] }
+            : await media.cleanup({ dryRun: false, limit: plan.ids.length,
+              allowedIds: plan.ids, expectedFingerprints: plan.fingerprints, sessionScan: checkedScan });
+          const garbage = await applyStorageGarbage(root, workspace, checkedScan.sessions, plan.garbage,
+            () => media.verifySessionScan(checkedScan));
+          return { planId, ...cleaned,
+            removed: cleaned.removed + garbage.removed, bytesFreed: cleaned.bytesFreed + garbage.bytesFreed,
+            ids: [...cleaned.ids, ...garbage.ids], skipped: [...(cleaned.skipped ?? []), ...garbage.skipped],
+            garbageRemoved: garbage.removed };
+        }
+        case 'artifact.list':
+        case 'artifact.inspect':
+        case 'artifact.preview':
+        case 'artifact.resolve': {
+          const env = await environmentFor(requiredString(message.params.projectRoot, 'projectRoot'));
+          assertSessionId(sessionId);
+          const path = recordPathOf(sessionId, env);
+          try { await access(path); }
+          catch (cause) {
+            if ((cause as NodeJS.ErrnoException).code === 'ENOENT') throw new KernelError('session_not_found');
+            throw cause;
+          }
+          const opened = sessions.get(sessionId);
+          const workspace = workspaceIdentity(env.projectRoot);
+          if (opened !== undefined && workspaceIdentity(opened.environment.projectRoot) !== workspace) throw new KernelError('artifact_owner_mismatch');
+          const log = opened?.session ?? createSessionLog({ directory: env.directory, id: sessionId });
+          const header = await log.header();
+          const owner = header?.workspace ?? (header?.projectRoot ? workspaceIdentity(header.projectRoot) : undefined);
+          if (owner !== workspace) throw new KernelError('artifact_owner_mismatch');
+          const events = await log.read();
+          let artifactEvents = events;
+          if (message.method === 'artifact.list' && message.params.runId !== undefined) {
+            const scope = permissionControl ? undefined : 'controller:' + (grant?.id ?? 'local');
+            const receipt = runReceipts(events, sessionId, scope).find(item => item.runId === message.params.runId);
+            if (receipt === undefined) throw new KernelError('run_not_found');
+            const nextUser = events.find(event => event.kind === 'user' && event.seq > receipt.userSeq);
+            artifactEvents = events.filter(event => event.seq > receipt.userSeq
+              && (nextUser === undefined || event.seq < nextUser.seq));
+          }
+          const evidence = artifactEvents.filter(event => event.kind === 'tool' && (event.tool === 'present' || event.tool === 'subagent'));
+          const artifacts = confirmedFileArtifacts(await fillSpills(evidence, env), workspace);
+          if (message.method === 'artifact.list') {
+            const offset = message.params.offset ?? 0;
+            const limit = message.params.limit ?? 20;
+            return { sessionId, items: artifacts.slice(offset, offset + limit), total: artifacts.length,
+              nextOffset: offset + limit < artifacts.length ? offset + limit : null };
+          }
+          if (message.method === 'artifact.resolve' && !permissionControl) throw new KernelError('artifact_native_control_required');
+          const chosen = artifacts.find(entry => entry.artifactKey === message.params.artifactKey);
+          if (chosen === undefined) throw new KernelError('artifact_not_in_session');
+          const boundary = boundaryOf(env.config);
+          try {
+            if (message.method === 'artifact.preview') {
+              const preview = await previewFileArtifact(chosen.artifact, env.projectRoot, boundary);
+              return { ...chosen, status: preview.type === 'unsupported_preview' ? 'unsupported_preview' : 'available', preview };
+            }
+            const current = await readFileArtifact({ path: chosen.artifact.path }, chosen.artifact.sessionId, env.projectRoot, boundary);
+            const matches = current.artifact.sha256 === chosen.artifact.sha256 && current.size === chosen.artifact.bytes;
+            if (message.method === 'artifact.resolve') {
+              if (!matches) throw new KernelError('artifact_modified');
+              return { artifactKey: chosen.artifactKey, path: resolve(env.projectRoot, current.artifact.path) };
+            }
+            return { ...chosen, status: matches ? 'available' : 'modified' };
+          } catch (cause) {
+            if (!(cause instanceof KernelError)) throw cause;
+            const reason = cause.code;
+            if (reason === 'artifact_modified' || reason === 'artifact_file_changed') return { ...chosen, status: 'modified' };
+            if (reason === 'artifact_file_unavailable' && (cause.cause as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
+              return { ...chosen, status: 'missing' };
+            }
+            if (['artifact_file_invalid', 'artifact_path_invalid', 'path_escapes_boundary', 'path_escapes_workspace'].includes(reason)) {
+              return { ...chosen, status: 'denied' };
+            }
+            throw cause;
+          }
+        }
+        case 'run.submit': {
+          const state = open(sessionId);
+          const origin = message.params.origin ?? 'controller';
+          if (origin !== 'human' && origin !== 'controller') throw new KernelError('protocol_args_invalid');
+          const scope = origin === 'controller' ? 'controller:' + (grant?.id ?? 'local') : 'human';
+          const key = message.params.requestKey;
+          const digest = runPayloadDigest(input, message.params.delegation);
+          const pending = pendingSubmissions.get(sessionId);
+          if (pending !== undefined) {
+            if (key === undefined || pending.key !== key || pending.scope !== scope) throw new KernelError('run_already_running');
+            if (pending.digest !== digest) throw new KernelError('run_request_conflict');
+            const receipt = await pending.receipt;
+            const live = state.activeRunId === receipt.runId;
+            return { ...receipt, reused: true, state: live ? 'running' : receipt.state, liveness: live ? 'alive' : 'unknown' };
+          }
+          const accepted = deferred<import('../session/run.js').DurableRunReceipt>();
+          void accepted.promise.catch(() => undefined);
+          const current = { scope, key, digest, receipt: accepted.promise };
+          pendingSubmissions.set(sessionId, current);
+          try {
+            const events = await state.session.read();
+            if (key !== undefined) {
+              const previous = findRunReceipt(events, sessionId, scope, { requestKey: key });
+              if (previous !== undefined) {
+                const user = events.find(event => event.kind === 'user' && event.seq === previous.userSeq);
+                if (!user || !isRunAcceptance(user.run) || user.run.payloadDigest !== digest) throw new KernelError('run_request_conflict');
+                accepted.resolve(previous);
+                const live = state.activeRunId === previous.runId;
+                return { ...previous, reused: true, state: live ? 'running' : previous.state, liveness: live ? 'alive' : 'unknown' };
+              }
+            }
+            runContextOf(state, message.params.delegation);
+            const run = createRunAcceptance(sessionId, input, message.params.delegation, scope, key);
+            const work = executeRun(state, input, origin, message.params.delegation, run, connection, userSeq => {
+              accepted.resolve({ runId: run.runId, sessionId, userSeq, state: 'accepted', acceptedAt: run.acceptedAt,
+                ...(run.requestKey === undefined ? {} : { requestKey: run.requestKey }) });
+            });
+            void work.catch(error => accepted.reject(error));
+            const receipt = await accepted.promise;
+            const live = state.activeRunId === receipt.runId;
+            return { ...receipt, reused: false, state: live ? 'running' : receipt.state, liveness: live ? 'alive' : 'unknown' };
+          } catch (error) {
+            accepted.reject(error);
+            throw error;
+          } finally {
+            if (pendingSubmissions.get(sessionId) === current) pendingSubmissions.delete(sessionId);
+          }
+        }
+        case 'run.wait': {
+          const state = open(sessionId);
+          const runId = requiredString(message.params.runId, 'runId');
+          if (state.activeRunId === runId && state.operation !== undefined) return await state.operation;
+          const scope = message.params.origin === 'human' ? 'human' : 'controller:' + (grant?.id ?? 'local');
+          const receipt = findRunReceipt(await state.session.read(), sessionId, scope, { runId });
+          if (receipt === undefined) throw new KernelError('run_not_found');
+          if (receipt.state === 'accepted' || receipt.state === 'interrupted') throw new KernelError('run_not_active');
+          const result = await readRunResult(state.session.directory, workspaceIdentity(state.environment.projectRoot), sessionId, receipt);
+          if (result.state === 'completed') return {
+            runId, text: result.output.text ?? '', iterations: result.usage.iterations, modelCalls: result.usage.modelCalls,
+            ...(result.stopReason === 'tool_completed' ? { completedBy: DELEGATION_RESULT_TOOL } : {}),
+            ...(result.userSeq === undefined ? {} : { userSeq: result.userSeq }),
+            ...(result.task === undefined ? {} : { task: result.task }),
+            ...(result.artifactsTruncated === true ? { artifactsTruncated: true } : {}),
+            artifacts: result.artifacts.filter(item => item.kind === 'file'),
+            ...(Object.hasOwn(result.output, 'structured') ? { structured: result.output.structured } : {}),
+            validation: result.validation,
+          };
+          const error = new KernelError(result.diagnostic?.code ?? 'run_failed', { diagnostics: result.diagnostic?.provider });
+          if (result.usage.iterations !== null && result.usage.modelCalls !== null) {
+            rememberRunSummary(error, {
+              text: result.output.text ?? '', iterations: result.usage.iterations, modelCalls: result.usage.modelCalls,
+              ...(result.userSeq === undefined ? {} : { userSeq: result.userSeq }),
+              ...(result.task === undefined ? {} : { task: result.task }),
+              ...(result.artifactsTruncated === true ? { artifactsTruncated: true as const } : {}),
+              artifacts: result.artifacts.filter(item => item.kind === 'file'),
+            });
+          }
+          throw error;
+        }
+        case 'run.receipt':
+        case 'run.receipts':
+        case 'run.result': {
+          const env = await environmentFor(requiredString(message.params.projectRoot, 'projectRoot'));
+          assertSessionId(sessionId);
+          const path = recordPathOf(sessionId, env);
+          try { await access(path); }
+          catch (cause) {
+            if ((cause as NodeJS.ErrnoException).code === 'ENOENT') throw new KernelError('session_not_found');
+            throw cause;
+          }
+          const opened = sessions.get(sessionId);
+          if (opened !== undefined && workspaceIdentity(opened.environment.projectRoot) !== workspaceIdentity(env.projectRoot)) {
+            throw new KernelError('run_owner_mismatch');
+          }
+          const log = opened?.session ?? createSessionLog({ directory: env.directory, id: sessionId });
+          const header = await log.header();
+          const workspace = workspaceIdentity(env.projectRoot);
+          const owner = header?.workspace ?? (header?.projectRoot ? workspaceIdentity(header.projectRoot) : undefined);
+          if (owner !== workspace) throw new KernelError('run_owner_mismatch');
+          const events = await log.read();
+          const scope = permissionControl ? undefined : 'controller:' + (grant?.id ?? 'local');
+          if (message.method === 'run.receipts') {
+            const limit = message.params.limit ?? 20;
+            const before = message.params.before;
+            const matching = runReceipts(events, sessionId, scope).filter(item => before === undefined || item.userSeq < before).reverse();
+            const page = matching.slice(0, limit);
+            return { sessionId, receipts: page.map(receipt => sessions.get(sessionId)?.activeRunId === receipt.runId
+              ? { ...receipt, state: 'running', liveness: 'alive' } : { ...receipt, liveness: 'unknown' }),
+              hasMore: matching.length > page.length,
+              nextBefore: matching.length > page.length ? page.at(-1)?.userSeq ?? null : null };
+          }
+          const reference = message.method === 'run.result' ? { runId: message.params.runId } : {
+            ...(message.params.runId === undefined ? {} : { runId: message.params.runId }),
+            ...(message.params.requestKey === undefined ? {} : { requestKey: message.params.requestKey }),
+          };
+          if ((reference.runId === undefined) === (reference.requestKey === undefined)) throw new KernelError('run_reference_invalid');
+          const receipt = scope === undefined
+            ? runReceipts(events, sessionId).find(item => reference.runId !== undefined ? item.runId === reference.runId : item.requestKey === reference.requestKey)
+            : findRunReceipt(events, sessionId, scope, reference);
+          if (receipt === undefined) throw new KernelError('run_not_found');
+          if (message.method === 'run.receipt') {
+            const live = sessions.get(sessionId)?.activeRunId === receipt.runId;
+            return { ...receipt, state: live ? 'running' : receipt.state, liveness: live ? 'alive' : 'unknown' };
+          }
+          const result = await readRunResult(env.directory, workspace, sessionId, receipt);
+          return { runId: receipt.runId, ...runResultPage(result, message.params.offset ?? 0) };
         }
         case 'run.cancel': {
           const state = open(sessionId);

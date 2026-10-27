@@ -38,7 +38,7 @@ For example, on Windows:
 }
 ```
 
-Each MCP server process authorizes only the project supplied at startup. Use MCP `tools/list` to discover all thirteen tools and their input schemas:
+Each MCP server process authorizes only the project supplied at startup. Use MCP `tools/list` to discover all fourteen tools and their input schemas:
 
 - `ligule_session_create`: create a session in the authorized project.
 - `ligule_session_open`: reopen an existing session. A session returned by the list tool must be opened before it can be used for a run or record read.
@@ -47,14 +47,15 @@ Each MCP server process authorizes only the project supplied at startup. Use MCP
 - `ligule_session_configure`: read effective/pending session settings and available choices; operator mode can change session-owned settings.
 - `ligule_interaction_reply`: answer one real pending approval or question, bound to its session and request ID.
 - `ligule_session_send`: start a round when idle, queue the next message while running, or continue and manage the queue.
-- `ligule_run_start`: submit one task and return an `operationId` scoped to the current process and the session ID.
+- `ligule_run_start`: durably accept a task and return its persistent `runId` receipt with a process-local `operationId`.
 - `ligule_run`: start a task and wait for a terminal result; a wait timeout returns the current state without cancelling the run.
-- `ligule_run_status`: check whether the run is running, done, failed, or cancelled.
+- `ligule_run_get`: read a persistent run receipt by `runId` or `requestKey` after a restart or Session close; optionally page through a verified terminal result.
+- `ligule_run_status`: check whether the process-local operation is running, done, failed, or cancelled.
 - `ligule_run_await`: wait for a known `operationId`; a timeout also leaves the run active.
 - `ligule_session_read`: read a page of session records.
 - `ligule_run_cancel`: cancel the run identified by its `operationId`.
 
-Recommended flow: create or reopen a session and read `ligule_session_configure`. Use `ligule_run` when the caller should wait for a bounded time, or `ligule_run_start` to return immediately. Then use `ligule_run_await` to wait for a known operation or `ligule_run_status` to poll it. Neither wait timeout cancels the run. Use `phase`, `waitingFor`, and `pendingInteractions` to decide whether to keep waiting or review and reply. Read new records with `ligule_session_read` after completion. MCP logging notifications are best-effort; polling exposes the same state when notifications are unavailable. Call `ligule_run_cancel` to stop a run. The running server's `tools/list` schemas define the arguments.
+Recommended flow: create or reopen a session and read `ligule_session_configure`. Use `ligule_run` when the caller should wait for a bounded time, or `ligule_run_start` to return immediately. Then use `ligule_run_await` to wait for a known operation or `ligule_run_status` to poll it. Neither wait timeout cancels the run. Use `phase`, `waitingFor`, and `pendingInteractions` to decide whether to keep waiting or review and reply. Read new records with `ligule_session_read` after completion. MCP logging notifications are best-effort; polling exposes the same state when notifications are unavailable. Call `ligule_run_cancel` to stop a run. The running server's `tools/list` schemas define the arguments. Use `ligule_run_get` when the process-local `operationId` is unavailable.
 
 ## Operator authorization and session settings
 
@@ -79,6 +80,14 @@ Every pending reply is bound to its original session and `requestId`. The `sourc
 Budget exhaustion, deadline expiry and request timeout use `task_model_budget_exhausted`, `task_deadline_exceeded` and `task_request_timeout` with `stopReason` values `budget_exhausted`, `deadline_exceeded` and `request_timeout`. A wait timeout from `ligule_run_await` does not cancel the task. `ligule_session_configure` shows `effective.taskLimits`, while `status.get` exposes the current or latest task snapshot. Run results report confirmed `usage`, `task` and `userSeq` when known, including failed runs; interrupted nonempty text is marked `output.partial: true`.
 
 The `full` tool mode exposes `present({files: [{path, description?}]})`, accepting up to 16 existing workspace-relative regular files. Each file is checked against workspace and filesystem boundaries and recorded with its relative path, media type, byte count, SHA-256, description and owning Session. A file is limited to 20 MiB, and one call to 64 MiB. Successful run results may include `kind: file` entries in `artifacts` alongside Session references; failed runs retain artifacts already confirmed. This is a metadata snapshot, not a copied file or permanent download. Later file edits or deletion are not reversed.
+
+### Durable receipts and request retries
+
+`ligule_run` and `ligule_run_start` accept an optional `requestKey` of 1–128 ASCII letters, digits, `.`, `_`, `:`, or `-`. Generate a fresh key per logical task and retain it when retrying after a lost response. Within the same workspace, Session and authorized caller scope, the same key and the same input/delegation parameters reuse the original `runId`; a changed payload returns `run_request_conflict`. Changes to later default settings do not change the recorded request identity. Omit the key to start a new run on each call. Keys do not grant access to another Session or caller's result, and do not expire while their acceptance record remains.
+
+The Host syncs the Session user event before it acknowledges acceptance. `runId` persists across controller restarts; `operationId` is only for status, waiting, and cancellation in the current process. `ligule_run_get` needs the `sessionId` plus exactly one of `runId` or `requestKey`; without an `offset` it returns the receipt, and with `offset` it also returns up to 8,192 UTF-16 characters of verified terminal-result JSON, with `nextOffset` for continuation. The complete result sidecar is limited to 16 MiB and follows the Session record directory, including a configured session-directory override. A missing or changed result file reports `run_result_unavailable`.
+
+A read-only receipt query never reopens a writer or executes a model. A persisted `accepted` receipt whose former owner is unavailable has unknown liveness; only writable Session recovery may mark it `interrupted`. Interrupted runs and requests with the same key are never replayed automatically. Existing sessions and callers without a key remain supported. The in-memory message queue and pending approvals do not survive a process restart.
 
 ## Agent Control project grants
 

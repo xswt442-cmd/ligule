@@ -292,7 +292,8 @@ test('a mode narrows the capability tools and cannot reach the disclosure entry'
     // 没有模式收紧时九件基础能力、可选工具、技能披露与派生工具都在。
     const everything = await capture(undefined);
     assert.ok(everything.tools.some((entry) => entry.name === 'skill'), 'the disclosure entry is offered');
-    assert.equal(everything.tools.length, 17);
+    assert.equal(everything.tools.length, 18);
+    assert.ok(everything.tools.some((entry) => entry.name === 'present'));
     assert.ok(everything.tools.some((entry) => entry.name === 'todo_write'));
     assert.ok(everything.tools.some((entry) => entry.name === 'read_image'));
     assert.ok(everything.tools.some((entry) => entry.name === 'read_document'));

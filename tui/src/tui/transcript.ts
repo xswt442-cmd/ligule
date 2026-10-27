@@ -75,7 +75,16 @@ export function projectRecord(record: TuiRecord, locale: Locale = 'zh'): Transcr
     if (typeof result.code === 'string') row.code = result.code;
     if (typeof parts.exitCode === 'number') row.exitCode = parts.exitCode;
     if (typeof result.spilled === 'string') row.spilled = result.spilled;
-    return [row];
+    const payload = isRecord(result.content) ? result.content : {};
+    const child = isRecord(payload.result) ? payload.result : {};
+    const raw = record.tool === 'present' ? payload.artifacts : record.tool === 'subagent' ? child.artifacts : undefined;
+    const deliveries = Array.isArray(raw) ? raw.filter((item): item is Record<string, unknown> =>
+      isRecord(item) && item.kind === 'file' && typeof item.path === 'string'
+        && typeof item.sha256 === 'string' && typeof item.bytes === 'number') : [];
+    return [row, ...deliveries.map(item => ({
+      kind: 'meta', text: t(`已交付文件：${item.path}（${item.bytes} 字节；SHA-256 ${String(item.sha256).slice(0, 12)}…；会话 ${item.sessionId}）`,
+        `Delivered file: ${item.path} (${item.bytes} bytes; SHA-256 ${String(item.sha256).slice(0, 12)}…; Session ${item.sessionId})`),
+    }))];
   }
   if (record.kind === 'mode') {
     const name = typeof record.name === 'string' ? record.name : '';

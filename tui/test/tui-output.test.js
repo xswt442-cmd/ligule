@@ -53,7 +53,7 @@ test('the clipboard payload is the encoding the local program reads back', async
   assert.equal(routeInput('/export 笔记/这次运行.md', true).kind, 'command');
 });
 
-test('/export writes real host and subagent records as markdown', options, async () => withTuiHost(async ({ client, sessionId, directory, config, requests }) => {
+test('/export writes real host and subagent records as markdown', options, async () => withTuiHost(async ({ client, sessionId, directory, config, requests, providerRequests }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');
   const { PassThrough } = await import('node:stream');
@@ -80,6 +80,8 @@ test('/export writes real host and subagent records as markdown', options, async
     await waitFor(() => runFinished || painted.includes('允许执行 subagent？'), { within: 20_000, read: () => painted });
     if (!runFinished) stdin.write('y');
     await run;
+    assert.equal(providerRequests.length, 3,
+      '父轮次调用、支线调用和父轮次续调共享三次模型调用预算');
     const parentRead = await client.request('session.read', { sessionId, fullResults: true });
     const branchEvent = parentRead.events.find((event) => event.kind === 'tool' && event.tool === 'subagent');
     const branchId = branchEvent?.result?.content?.sessionId;
@@ -105,4 +107,4 @@ test('/export writes real host and subagent records as markdown', options, async
   } finally {
     instance.unmount();
   }
-}));
+}, { config: { loop: { iterations: 2, modelCalls: 2, totalModelCalls: 3 } } }));

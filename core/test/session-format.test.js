@@ -165,11 +165,11 @@ test('an event kind this build does not know is refused unless the record says i
 test('session Permission events require format 2 and remain in the canonical record', async () => {
   await withDirectory(async (directory) => {
     const path = join(directory, 'permission.jsonl');
-    await writeFile(path, `${JSON.stringify({ kind: 'session', formatVersion: 2, sessionId: 'permission', projectRoot: '/repo', createdAt: 'x' })}\n${JSON.stringify({ seq: 0, kind: 'sessionPermission', profile: 'workspace-write', network: 'policy' })}\n`);
+    await writeFile(path, `${JSON.stringify({ kind: 'session', formatVersion: 2, sessionId: 'permission', projectRoot: '/repo', createdAt: '2026-01-01T00:00:00.000Z' })}\n${JSON.stringify({ seq: 0, kind: 'sessionPermission', profile: 'workspace-write', network: 'policy' })}\n`);
     const record = await createSessionLog({ directory, id: 'permission' }).read();
     assert.equal(record[0].kind, 'sessionPermission');
 
-    await writeFile(path, `${JSON.stringify({ kind: 'session', formatVersion: 1, sessionId: 'permission', projectRoot: '/repo', createdAt: 'x' })}\n${JSON.stringify({ seq: 0, kind: 'sessionPermission', profile: 'full-access', network: 'unrestricted' })}\n`);
+    await writeFile(path, `${JSON.stringify({ kind: 'session', formatVersion: 1, sessionId: 'permission', projectRoot: '/repo', createdAt: '2026-01-01T00:00:00.000Z' })}\n${JSON.stringify({ seq: 0, kind: 'sessionPermission', profile: 'full-access', network: 'unrestricted' })}\n`);
     await assert.rejects(() => createSessionLog({ directory, id: 'permission' }).read(), (error) => {
       assert.equal(error.code, 'session_event_version_unsupported');
       assert.match(error.detail, /format version 2/);
@@ -182,7 +182,7 @@ test('session Permission events require format 2 and remain in the canonical rec
 test('a second header line is a refusal, not a second session', async () => {
   await withDirectory(async (directory) => {
     const path = join(directory, 'spliced.jsonl');
-    const header = JSON.stringify({ kind: 'session', formatVersion: 1, sessionId: 'spliced', projectRoot: '/repo', createdAt: 'x' });
+    const header = JSON.stringify({ kind: 'session', formatVersion: 1, sessionId: 'spliced', projectRoot: '/repo', createdAt: '2026-01-01T00:00:00.000Z' });
     await writeFile(path, `${header}\n${tool(0, 'one')}\n${header}\n`);
     await assert.rejects(() => createSessionLog({ directory, id: 'spliced' }).read(), (error) => {
       assert.equal(error.code, 'session_header_position');

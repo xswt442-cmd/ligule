@@ -46,7 +46,7 @@ export function createPresentPlugin(dependencies?: PresentDependencies) {
           signal?.throwIfAborted();
           const configuredRoot = workingDirectoryOf(config);
           if (configuredRoot !== workspaceRoot) throw new KernelError('artifact_workspace_changed');
-          const artifacts = await readFileArtifacts(args.files, sessionId, workspaceRoot, boundaryOf(config));
+          const artifacts = await readFileArtifacts(args.files, sessionId, workspaceRoot, boundaryOf(config), signal);
           signal?.throwIfAborted();
           await session.append({ kind: 'artifact', ignorable: true, artifacts });
           return {

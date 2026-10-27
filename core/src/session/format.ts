@@ -3,6 +3,7 @@
 import { KernelRuntimeError } from '../kernel/error.js';
 import { isCanonicalTodoItems } from './todo.js';
 import { checkedImageReferences } from './media.js';
+import { isRunAcceptance, isRunResultRef } from './run.js';
 
 export const SESSION_FORMAT_VERSION = 2;
 
@@ -27,6 +28,8 @@ export interface SessionHeader {
   workspaceOrigin?: 'explicit' | 'default';
   createdAt?: string | null;
   mode?: SessionModeIdentity;
+  branchOf?: string;
+  branchAt?: number;
 }
 
 export interface SessionEvent {
@@ -55,6 +58,34 @@ export interface SessionRecord {
   events: SessionEvent[];
   formatVersion: number;
   header: SessionHeader | undefined;
+}
+
+function checkedSessionHeader(event: SessionEvent, version: number): SessionHeader {
+  const item = event as Record<string, unknown>;
+  const text = (value: unknown, max: number): value is string =>
+    typeof value === 'string' && value.length <= max && !/[\u0000-\u001f\u007f]/u.test(value);
+  const optionalText = (key: string, max: number) => item[key] === undefined || text(item[key], max);
+  const mode = item.mode;
+  if ((item.sessionId !== undefined && (!text(item.sessionId, 256) || item.sessionId === ''))
+    || (version >= 1 && (!text(item.sessionId, 256) || item.sessionId === ''))
+    || !optionalText('projectRoot', 8192) || !optionalText('workspace', 8192)
+    || ((item.branchOf === undefined) !== (item.branchAt === undefined))
+    || (item.branchOf !== undefined && (!text(item.branchOf, 256) || item.branchOf === ''
+      || /[\\/]/u.test(item.branchOf) || !Number.isSafeInteger(item.branchAt) || Number(item.branchAt) < 0))
+    || (item.workspaceOrigin !== undefined && item.workspaceOrigin !== 'explicit' && item.workspaceOrigin !== 'default')
+    || (item.createdAt !== undefined && item.createdAt !== null
+      && (!text(item.createdAt, version < 2 ? 8192 : 128) || !Number.isFinite(Date.parse(item.createdAt as string))))
+    || (mode !== undefined && (typeof mode !== 'object' || mode === null || Array.isArray(mode)
+      || !text((mode as Record<string, unknown>).name, 256)
+      || !text((mode as Record<string, unknown>).layer, 128)
+      || ((mode as Record<string, unknown>).source !== undefined && !['named', 'inline'].includes(String((mode as Record<string, unknown>).source)))
+      || ['digest', 'fileDigest'].some(key => (mode as Record<string, unknown>)[key] !== undefined
+        && !text((mode as Record<string, unknown>)[key], 128))
+      || ['tools', 'prompt'].some(key => {
+        const list = (mode as Record<string, unknown>)[key];
+        return list !== undefined && (!Array.isArray(list) || list.length > 1024 || !list.every(value => text(value, 256)));
+      })))) throw new KernelRuntimeError('session_header_invalid');
+  return event as unknown as SessionHeader;
 }
 
 // 当前程序会写入的事件类型。未知事件仅在标记为 `ignorable` 时允许跳过，其他情况拒绝读取。
@@ -101,7 +132,10 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
   let formatVersion = 0;
   let header: SessionHeader | undefined;
   let currentUserSeq: number | null = null;
+  let currentRunId: string | undefined;
   let currentTurnFinished = false;
+  const runIds = new Set<string>();
+  const requestKeys = new Set<string>();
   const imageCalls = new Set<string>();
   const events: SessionEvent[] = [];
   for (const [index, event] of objects.entries()) {
@@ -119,7 +153,7 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
         });
       }
       formatVersion = version;
-      header = event as unknown as SessionHeader;
+      header = checkedSessionHeader(event, version);
       continue;
     }
     if (!WRITTEN_KINDS.includes(kind)) {
@@ -154,6 +188,29 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
       if (event.ignorable !== true || currentTurnFinished || !Number.isSafeInteger(event.userSeq) || event.userSeq !== currentUserSeq
         || !isCanonicalTodoItems(event.items)) {
         throw new KernelRuntimeError('session_todo_event_invalid');
+      }
+    }
+    if (kind === 'user' && event.run !== undefined) {
+      const inherited = header?.branchOf !== undefined && event.seq <= header.branchAt!;
+      if (!isRunAcceptance(event.run) || (header?.sessionId !== event.run.sessionId && !inherited)
+        || runIds.has(event.run.runId)
+        || (event.run.requestKey !== undefined
+          && requestKeys.has(JSON.stringify([event.run.sessionId, event.run.callerScope, event.run.requestKey])))) {
+        throw new KernelRuntimeError('session_run_acceptance_invalid');
+      }
+      runIds.add(event.run.runId);
+      if (event.run.requestKey !== undefined) requestKeys.add(JSON.stringify([event.run.sessionId, event.run.callerScope, event.run.requestKey]));
+    }
+    if (kind === 'turn' && currentRunId !== undefined && event.userSeq === currentUserSeq
+      && event.status === 'completed' && event.resultRef === undefined) {
+      throw new KernelRuntimeError('session_run_result_reference_invalid');
+    }
+    if (kind === 'turn' && (event.runId !== undefined || event.resultRef !== undefined)) {
+      if (typeof event.runId !== 'string' || event.runId !== currentRunId
+        || event.userSeq !== currentUserSeq || currentTurnFinished
+        || !['completed', 'failed', 'cancelled', 'interrupted'].includes(String(event.status))
+        || (event.resultRef !== undefined && !isRunResultRef(event.resultRef, event.runId))) {
+        throw new KernelRuntimeError('session_run_result_reference_invalid');
       }
     }
     if (kind === 'image') {
@@ -203,9 +260,10 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
     events.push(event);
     if (kind === 'user') {
       currentUserSeq = event.seq;
+      currentRunId = isRunAcceptance(event.run) ? event.run.runId : undefined;
       currentTurnFinished = false;
     } else if (kind === 'turn' && event.userSeq === currentUserSeq
-      && (event.status === 'completed' || event.status === 'failed' || event.status === 'cancelled')) {
+      && (event.status === 'completed' || event.status === 'failed' || event.status === 'cancelled' || event.status === 'interrupted')) {
       currentTurnFinished = true;
     }
   }

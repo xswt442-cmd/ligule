@@ -7,6 +7,7 @@ export interface RunSummary {
   readonly modelCalls: number;
   readonly userSeq?: number;
   readonly artifacts?: readonly FileArtifact[];
+  readonly artifactsTruncated?: true;
   readonly task?: ReturnType<TaskBudget['snapshot']>;
 }
 
@@ -30,6 +31,7 @@ export function checkedRunSummary(value: unknown): RunSummary {
   const count = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
   if (typeof item.text !== 'string' || !count(item.iterations) || !count(item.modelCalls)
     || (item.userSeq !== undefined && !count(item.userSeq))
+    || (item.artifactsTruncated !== undefined && item.artifactsTruncated !== true)
     || (item.artifacts !== undefined && (!Array.isArray(item.artifacts) || item.artifacts.length > 16 || !item.artifacts.every(isFileArtifact)))) {
     throw new TypeError('run_summary_invalid');
   }
@@ -45,6 +47,7 @@ export function checkedRunSummary(value: unknown): RunSummary {
   return { text: item.text, iterations: item.iterations, modelCalls: item.modelCalls,
     ...(item.userSeq === undefined ? {} : { userSeq: item.userSeq as number }),
     ...(item.artifacts === undefined ? {} : { artifacts: item.artifacts as FileArtifact[] }),
+    ...(item.artifactsTruncated === true ? { artifactsTruncated: true as const } : {}),
     ...(item.task === undefined ? {} : { task: item.task as RunSummary['task'] }),
   };
 }

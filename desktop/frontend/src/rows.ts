@@ -5,6 +5,11 @@ import type { ProviderDiagnostic } from './status';
 
 export type ToolCall = { id: string; name: string; args?: Record<string, unknown> };
 
+export type FileDelivery = {
+  kind: 'file'; sessionId: string; path: string; mimeType: string;
+  bytes: number; sha256: string; description?: string;
+};
+
 export type ImageReference = {
   kind: 'image';
   version: 1;
@@ -91,6 +96,7 @@ export type Row = {
   diagnostics?: ProviderDiagnostic;
   callId?: string;
   images?: ImageReference[];
+  deliveries?: FileDelivery[];
   // 卡片标题下方显示目标对象和操作摘要。
   summary?: string;
   // 卡片右侧显示退出码、溢出文件、判定、派生会话和耗时等状态。
@@ -102,6 +108,20 @@ export type Row = {
 };
 
 // 工具结果可以是字符串或包含 `text` 字段的结构化对象。
+function fileDeliveriesOf(tool: string | undefined, content: unknown): FileDelivery[] {
+  if (tool !== 'present' && tool !== 'subagent') return [];
+  if (content === null || typeof content !== 'object' || Array.isArray(content)) return [];
+  const outer = content as Record<string, unknown>;
+  const child = tool === 'subagent' && outer.result !== null && typeof outer.result === 'object'
+    ? outer.result as Record<string, unknown> : undefined;
+  const artifacts = tool === 'present' ? outer.artifacts : child?.artifacts;
+  if (!Array.isArray(artifacts)) return [];
+  return artifacts.filter((item): item is FileDelivery => item !== null && typeof item === 'object'
+    && item.kind === 'file' && typeof item.sessionId === 'string'
+    && typeof item.path === 'string' && typeof item.mimeType === 'string'
+    && typeof item.sha256 === 'string' && typeof item.bytes === 'number');
+}
+
 export function textOf(value: unknown): string {
   if (typeof value === 'string') return value;
   if (value === undefined || value === null) return '';
@@ -338,6 +358,7 @@ function projected(record: Record_, options: { startedAt?: number; now?: number 
       code: result.code,
       callId: record.callId,
       ...(result.failed !== true && Array.isArray(result.images) ? { images: result.images } : {}),
+      ...(result.failed !== true ? { deliveries: fileDeliveriesOf(record.tool, result.content) } : {}),
       summary: change.summary,
       diff: change.diff,
       notes,

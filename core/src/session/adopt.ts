@@ -8,11 +8,11 @@ import { SPILL_NAME } from '../kernel/result.js';
 import { KernelRuntimeError } from '../kernel/error.js';
 import { workspaceIdentity } from '../kernel/workspace.js';
 import { acquireSessionLock } from './lock.js';
+import { isRunResultRef } from './run.js';
 import { parseSessionBytes, type ReadSessionRecord } from './record.js';
 import type { SessionLock } from './lock.js';
 
 const RECORD = /\.jsonl$/;
-const CHECKPOINT = /\.checkpoint\.json$/;
 
 export interface AdoptionReport {
   copied: string[];
@@ -175,6 +175,16 @@ function referencedSpills(events: ReturnType<typeof parseSessionBytes>['events']
   return names;
 }
 
+function referencedRunResults(events: ReturnType<typeof parseSessionBytes>['events']): Set<string> {
+  const names = new Set<string>();
+  for (const event of events) {
+    if (event.kind === 'turn' && typeof event.runId === 'string' && isRunResultRef(event.resultRef, event.runId)) {
+      names.add(event.resultRef.name);
+    }
+  }
+  return names;
+}
+
 function recordBytes(name: string, source: Buffer, record: ReadSessionRecord, legacyProjectRoot: string | undefined): Buffer | undefined {
   if (record.header !== undefined) return source;
   if (legacyProjectRoot === undefined) return undefined;
@@ -287,6 +297,7 @@ async function copyRecord(
     const sidecars = [
       ...(names.has(checkpointName) ? [checkpointName] : []),
       ...referencedSpills(parsed.events),
+      ...referencedRunResults(parsed.events),
     ];
     let sidecarConflict = false;
     for (const sidecar of new Set(sidecars)) {
@@ -345,8 +356,7 @@ export async function adoptLegacySessions(
   if (sessionId !== undefined) return report;
   for (const name of entries) {
     if (name.endsWith('.lock') || RECORD.test(name)) continue;
-    if (!CHECKPOINT.test(name) && !SPILL_NAME.test(name)) report.unknown.push(name);
-    else if (!report.copied.includes(name) && !report.already.includes(name) && !report.conflicts.includes(name)) report.unknown.push(name);
+    if (!report.copied.includes(name) && !report.already.includes(name) && !report.conflicts.includes(name)) report.unknown.push(name);
   }
   return report;
 }
