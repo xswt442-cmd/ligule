@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import {
   KernelError, createConfig, createDecisionChain, createKernel, createLoop, createSessionLog, createSubagentPlugin,
   createPermissionContext, minimalPlugin, networkPlugin,
+  createTaskBudget,
 } from '../dist/index.js';
 
 const fullAccess = createPermissionContext('full-access', 'unrestricted', {
@@ -51,6 +52,38 @@ async function workspace() {
   await writeFile(join(directory, 'note.txt'), 'the body');
   return directory;
 }
+
+test('a parent and its child pause their shared execution budget while the child waits for approval', async () => {
+  const boundary = await workspace();
+  const config = createConfig({ user: { boundary } });
+  const budget = createTaskBudget({ maxModelCalls: 8, timeoutMs: 700, requestTimeoutMs: 300, interactionWaitTimeoutMs: 2_000 });
+  const chain = createDecisionChain({
+    mode: 'auto',
+    rules: [{ tool: 'read', decision: 'ask' }],
+    ask: async () => {
+      const end = budget.startInteraction();
+      try { await new Promise((resolve) => setTimeout(resolve, 900)); return { decision: 'allow' }; }
+      finally { end(); }
+    },
+  });
+  const provider = scripted([
+    call('subagent', { task: 'read the note' }),
+    call('read', { path: 'note.txt' }),
+    text('the child finished'),
+    text('the parent finished'),
+  ]);
+  const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-budget-'), id: 'parent' });
+  const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
+  minimalPlugin.setup(kernel);
+  createSubagentPlugin({ config, provider, chain, taskBudget: () => budget,
+    prompt: { staticPrefix: '' }, directory: session.directory, sessionId: 'parent', plugins: [minimalPlugin] }).setup(kernel);
+  try {
+    const result = await createLoop({ kernel, provider, session }).run('delegate the task', { task: budget, signal: budget.signal });
+    assert.equal(result.text, 'the parent finished');
+    assert.equal(budget.signal.aborted, false);
+    assert.ok(budget.snapshot().interactionWaitMs >= 800);
+  } finally { budget.dispose(); }
+});
 
 test('the derived agent runs on the parent decision chain and cannot delegate again', async () => {
   const boundary = await workspace();
