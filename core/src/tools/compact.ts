@@ -38,13 +38,36 @@ export interface CompactToolDeps {
 
 function windowSlice(text: string, offsetBytes: number, maxBytes: number, what: string): string {
   const bytes = Buffer.from(text, 'utf8');
-  const slice = bytes.subarray(offsetBytes, offsetBytes + maxBytes);
-  let kept = slice.toString('utf8');
-  // 字节截断可能切开多字节字符；预算按最终文本计算。
-  while (Buffer.byteLength(kept, 'utf8') > maxBytes) kept = kept.slice(0, -1);
-  const left = bytes.length - offsetBytes - slice.length;
-  if (left <= 0) return kept;
-  return `${kept}${marker(`truncated: ${slice.length} of ${bytes.length - offsetBytes} bytes of ${what} shown, continue with offsetBytes=${offsetBytes + slice.length}`)}`;
+  if (offsetBytes >= bytes.length) return '';
+  if (offsetBytes < bytes.length && (bytes[offsetBytes] & 0xc0) === 0x80) {
+    throw new KernelError('compact_offset_invalid', { detail: 'offsetBytes must point to a UTF-8 character boundary' });
+  }
+  const remaining = bytes.length - Math.min(offsetBytes, bytes.length);
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  const page = (length: number) => {
+    let end = Math.min(offsetBytes + length, bytes.length);
+    while (end > offsetBytes && end < bytes.length && (bytes[end] & 0xc0) === 0x80) end -= 1;
+    const kept = decoder.decode(bytes.subarray(offsetBytes, end));
+    const consumed = end - offsetBytes;
+    return { consumed, text: kept + (consumed < remaining
+      ? marker(`truncated: ${consumed} of ${remaining} bytes of ${what} shown, continue with offsetBytes=${end}`)
+      : '') };
+  };
+  let low = 0;
+  let high = Math.min(remaining, maxBytes);
+  let best = page(0);
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const candidate = page(middle);
+    if (Buffer.byteLength(JSON.stringify({ text: candidate.text }), 'utf8') <= maxBytes) {
+      best = candidate;
+      low = middle + 1;
+    } else high = middle - 1;
+  }
+  if (remaining > 0 && best.consumed === 0) {
+    throw new KernelError('compact_result_limit_too_small', { detail: 'resultBytes is too small for a page and its continuation marker' });
+  }
+  return best.text;
 }
 
 export function createCompactTool({ compaction, session, directory, id }: CompactToolDeps) {
@@ -55,7 +78,7 @@ export function createCompactTool({ compaction, session, directory, id }: Compac
     disclosure: true,
     description: 'Manage this conversation\'s context. action "status" shows context usage and the range that can be summarized; '
       + '"blocks" lists compaction blocks with their summaries; "read" returns the original events a block covers; '
-      + '"spill" returns an overflow file referenced by a tool result or block summary; '
+      + '"spill" reads an overflow file named in a tool result or block summary: pass its name and use the returned offsetBytes to continue; '
       + '"compress" replaces a completed range of earlier turns with a summary you write. '
       + 'Compression only changes what later requests see; the session record keeps every event.',
     parameters: {

@@ -192,6 +192,7 @@ test('an oversized result keeps a retrievable reference instead of the whole tex
     await kernel.call('chatty', {});
     const [event] = await session.read();
     assert.match(event.result.content, /\[omitted: full output is \d+ bytes, kept in result-\d+-[0-9a-f]{8}\.json]/);
+    assert.doesNotMatch(event.result.content, /read via compact/, 'do not advertise a tool that is not registered');
     assert.ok(Buffer.byteLength(event.result.content, 'utf8') <= 200);
     const spilled = await readFile(join(directory, event.result.spilled), 'utf8');
     assert.equal(spilled, JSON.stringify({ text: 'y'.repeat(500) }));

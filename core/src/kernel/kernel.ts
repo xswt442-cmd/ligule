@@ -191,7 +191,10 @@ export function createKernel(options: KernelOptions = {}): Kernel {
     const limit = resultLimit(config);
     if (Buffer.byteLength(text, 'utf8') <= limit) return result;
     const name = `result-${Date.now()}-${randomUUID().slice(0, 8)}.json`;
-    return { ...result, content: await spillContent(text, { limit, directory, name }), spilled: name,
+    const compact = tools.get('compact');
+    const readWithCompact = compact !== undefined && !isDenied('compact')
+      && permissionDenial(currentPermission(), compact.access) === undefined;
+    return { ...result, content: await spillContent(text, { limit, directory, name, readWithCompact }), spilled: name,
       spillFormat: typeof result.content === 'string' ? 'text' : 'json',
     };
   }

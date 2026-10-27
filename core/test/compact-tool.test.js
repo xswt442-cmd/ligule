@@ -8,6 +8,8 @@ import { tmpdir } from 'node:os';
 import {
   createCompactTool,
   createCompaction,
+  createConfig,
+  createKernel,
   createSessionLog,
   loadCheckpointFile,
 } from '../dist/index.js';
@@ -129,6 +131,36 @@ test('spill returns referenced overflow files and refuses any other name', async
       (error) => error.code === 'compact_spill_name_invalid', '目录外路径一律拒绝');
     await assert.rejects(tool.run({ action: 'spill', name: 'summary-0-5.txt' }, { config: {} }),
       (error) => error.code === 'compact_spill_missing', '命名合规但不存在也说清');
+  });
+});
+
+test('a spilled tool result identifies compact and can be read in pages', async () => {
+  await seededSession(async ({ directory, session, tool }) => {
+    const kernel = createKernel({ config: createConfig({ user: { boundary: directory, limits: { resultBytes: 400 } } }), session });
+    kernel.register(tool);
+    const original = '中文 "+\\ page content '.repeat(150);
+    kernel.register({ name: 'chatty', description: 'Produces a large result', access: 'read',
+      parameters: { type: 'object', properties: {} }, run: async () => original });
+    await kernel.call('chatty', {});
+    const event = (await session.read()).findLast(item => item.kind === 'tool' && item.tool === 'chatty');
+    assert.match(event.result.content, /read via compact: action=spill/);
+    assert.match(event.result.content, new RegExp(event.result.spilled));
+    let offsetBytes = 0;
+    let recovered = '';
+    for (;;) {
+      const page = (await kernel.call('compact', { action: 'spill', name: event.result.spilled, offsetBytes })).text;
+      const recorded = (await session.read()).findLast(item => item.kind === 'tool' && item.tool === 'compact');
+      assert.equal(recorded.result.spilled, undefined, 'a page must not spill again');
+      assert.deepEqual(recorded.result.content, { text: page });
+      const marker = /\n\[truncated:.*continue with offsetBytes=(\d+)\]$/u.exec(page);
+      recovered += marker ? page.slice(0, marker.index) : page;
+      if (!marker) break;
+      offsetBytes = Number(marker[1]);
+    }
+    assert.equal(recovered, original);
+    assert.equal((await tool.run({ action: 'spill', name: event.result.spilled, offsetBytes: 100_000 }, { config: {} })).text, '');
+    await assert.rejects(tool.run({ action: 'spill', name: event.result.spilled, offsetBytes: 1 }, { config: {} }),
+      error => error.code === 'compact_offset_invalid');
   });
 });
 
