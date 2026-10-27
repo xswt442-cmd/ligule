@@ -1,6 +1,6 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -69,6 +69,33 @@ async function assertStopped(pid) {
     await delay(20);
   }
   assert.fail(`test-owned descendant process ${pid} remained alive`);
+}
+
+async function startTestMonitor(name) {
+  const marker = join(directory, `${name}-${(counter += 1)}.ready`);
+  const code = `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ready');setInterval(()=>{},1000)`;
+  const child = spawn(process.execPath, ['-e', code], { stdio: 'ignore', windowsHide: true });
+  if (child.pid === undefined) throw new Error('test-owned process did not receive a PID');
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline && !existsSync(marker)) await delay(10);
+  if (!existsSync(marker)) {
+    child.kill();
+    throw new Error(`test-owned process ${name} did not report readiness`);
+  }
+  return child;
+}
+
+function assertRunning(child, label) {
+  assert.notEqual(child.pid, undefined);
+  assert.equal(processIsRunning(child.pid), true, `${label} should still be running`);
+}
+
+async function stopTestMonitor(child) {
+  if (child.pid === undefined) return;
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise((resolve) => child.once('exit', resolve));
+  child.kill();
+  await Promise.race([exited, delay(3_000).then(() => { throw new Error('test-owned process did not exit'); })]);
 }
 
 test('exec returns the command output and its exit code', async () => {
@@ -339,6 +366,64 @@ test('the decision chain sees the command text before anything is spawned', asyn
     () => kernel.call('exec', { command: 'rm -rf /tmp/nowhere' }),
     (error) => error.code === 'policy_denied',
   );
+});
+
+test('approved explicit multi-process termination kills only its listed test processes', {
+  skip: process.platform !== 'win32' && process.platform !== 'linux',
+  timeout: 20_000,
+}, async () => {
+  const targets = [];
+  const monitors = [];
+  try {
+    targets.push(await startTestMonitor('batch-target-a'));
+    targets.push(await startTestMonitor('batch-target-b'));
+    monitors.push(await startTestMonitor('independent-monitor-a'));
+    monitors.push(await startTestMonitor('independent-monitor-b'));
+    const targetPids = targets.map((child) => String(child.pid));
+    const command = targetPids.map((pid) => process.platform === 'win32'
+      ? `Stop-Process -Id ${pid} -Force`
+      : `kill -KILL ${pid}`).join('; ');
+    const createApprovalKernel = (mode, ask) => {
+      const kernel = createKernel({
+        config: createConfig({ user: { boundary: directory, workspaceRoot: directory } }),
+        permission: fullAccess,
+        policy: createDecisionChain({ mode, ask }),
+      });
+      kernel.register(execTool);
+      return kernel;
+    };
+
+    let noneRequests = 0;
+    const noneKernel = createApprovalKernel('none', async () => { noneRequests += 1; return true; });
+    await assert.rejects(() => noneKernel.call('exec', { command }), { code: 'policy_manual_approval_disabled' });
+    assert.equal(noneRequests, 0, 'Policy none cannot bypass required trusted approval');
+    for (const child of [...targets, ...monitors]) assertRunning(child, 'process after Policy none');
+
+    const declined = [];
+    const declineKernel = createApprovalKernel('ask', async (request) => {
+      declined.push(request);
+      return false;
+    });
+    await assert.rejects(() => declineKernel.call('exec', { command }), { code: 'ask_declined' });
+    assert.equal(declined.length, 1);
+    assert.equal(declined[0].command, command, 'the approval displays the exact PID list that will execute');
+    assert.match(declined[0].reason, /process ownership is unknown/u);
+    for (const child of [...targets, ...monitors]) assertRunning(child, 'process after denied approval');
+
+    const approved = [];
+    const approveKernel = createApprovalKernel('ask', async (request) => {
+      approved.push(request);
+      return true;
+    });
+    const result = await approveKernel.call('exec', { command });
+    assert.equal(result.exitCode, 0, result.text);
+    assert.equal(approved.length, 1);
+    assert.equal(approved[0].command, command);
+    for (const child of targets) await assertStopped(child.pid);
+    for (const child of monitors) assertRunning(child, 'independent monitoring process after approval');
+  } finally {
+    for (const child of [...targets, ...monitors]) await stopTestMonitor(child);
+  }
 });
 
 // 记录应说明使用的语法、启动的可执行文件，以及命令解析出的各段参数。
