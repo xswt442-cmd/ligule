@@ -179,8 +179,10 @@ test('Session close and run.cancel stop only their managed processes and preserv
     const firstPort = await availableLoopbackPort();
     const secondPort = await availableLoopbackPort();
     const userPort = await availableLoopbackPort();
+    const secondUserPort = await availableLoopbackPort();
     const serverPath = join(projectDirectory, 'session-monitor.mjs');
     const userMonitorPath = join(projectDirectory, 'user-monitor.mjs');
+    const secondUserMonitorPath = join(projectDirectory, 'independent-monitor.mjs');
     await writeFile(serverPath, [
       "import { createServer } from 'node:http';",
       `createServer((_request, response) => response.end(process.argv[3])).listen(Number(process.argv[2]), '127.0.0.1');`,
@@ -189,18 +191,27 @@ test('Session close and run.cancel stop only their managed processes and preserv
       "import { createServer } from 'node:http';",
       `createServer((_request, response) => response.end('user-monitor-alive')).listen(Number(process.argv[2]), '127.0.0.1');`,
     ].join('\n'));
+    await writeFile(secondUserMonitorPath, [
+      "import { createServer } from 'node:http';",
+      `createServer((_request, response) => response.end('second-monitor-alive')).listen(Number(process.argv[2]), '127.0.0.1');`,
+    ].join('\n'));
     const firstUrl = `http://127.0.0.1:${firstPort}/`;
     const secondUrl = `http://127.0.0.1:${secondPort}/`;
     const userUrl = `http://127.0.0.1:${userPort}/`;
+    const secondUserUrl = `http://127.0.0.1:${secondUserPort}/`;
     const userProcess = spawn(process.execPath, [userMonitorPath, String(userPort)], {
       stdio: 'ignore',
       windowsHide: true,
     });
+    const secondUserProcess = spawn(process.execPath, [secondUserMonitorPath, String(secondUserPort)], {
+      stdio: 'ignore', windowsHide: true,
+    });
     t.after(async () => {
-      if (userProcess.exitCode === null && userProcess.signalCode === null) {
-        userProcess.kill();
+      for (const process of [userProcess, secondUserProcess]) {
+        if (process.exitCode !== null || process.signalCode !== null) continue;
+        process.kill();
         await Promise.race([
-          new Promise((resolveExit) => userProcess.once('exit', resolveExit)),
+          new Promise((resolveExit) => process.once('exit', resolveExit)),
           delay(3_000).then(() => { throw new Error('test-owned user monitor did not exit'); }),
         ]);
       }
@@ -234,11 +245,15 @@ test('Session close and run.cancel stop only their managed processes and preserv
     assert.equal(await (await waitForRequest(firstUrl)).text(), 'first-session-alive');
     assert.equal(await (await waitForRequest(secondUrl)).text(), 'second-session-alive');
     assert.equal(await (await waitForRequest(userUrl)).text(), 'user-monitor-alive');
+    assert.equal(await (await waitForRequest(secondUserUrl)).text(), 'second-monitor-alive');
 
     await client.request('session.close', { sessionId: firstSessionId });
     await waitForUnavailable(firstUrl);
     assert.equal(await (await fetch(secondUrl)).text(), 'second-session-alive');
     assert.equal(await (await fetch(userUrl)).text(), 'user-monitor-alive');
+    assert.equal(await (await fetch(secondUserUrl)).text(), 'second-monitor-alive');
+    assert.equal(secondUserProcess.exitCode, null);
+    assert.equal(secondUserProcess.signalCode, null);
     assert.equal(userProcess.exitCode, null, 'the independently started user monitor must remain alive');
     assert.equal(userProcess.signalCode, null, 'the independently started user monitor must not be signalled');
 
@@ -262,6 +277,9 @@ test('Session close and run.cancel stop only their managed processes and preserv
     assert.ok(['loop_cancelled', 'provider_cancelled'].includes(cancellation.code), cancellation.code);
     assert.equal(await (await fetch(secondUrl)).text(), 'second-session-alive');
     assert.equal(await (await fetch(userUrl)).text(), 'user-monitor-alive');
+    assert.equal(await (await fetch(secondUserUrl)).text(), 'second-monitor-alive');
+    assert.equal(secondUserProcess.exitCode, null);
+    assert.equal(secondUserProcess.signalCode, null);
     assert.equal(userProcess.exitCode, null, 'run.cancel must not terminate the independently started user monitor');
     assert.equal(userProcess.signalCode, null, 'run.cancel must not signal the independently started user monitor');
   }, {
