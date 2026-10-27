@@ -754,6 +754,24 @@ test('a real human approval clears every denial counter and the forced mode', as
   assert.equal(chain.snapshot().forcedToAsk, false);
 });
 
+test('an operator approval clears forced asking and restores the configured policy', async () => {
+  const chain = createDecisionChain({
+    mode: 'auto', thresholds: { consecutive: 2, total: 5 },
+    ask: async () => ({ decision: 'allow', source: 'controller' }),
+  });
+  const removeGuard = chain.guard(() => 'denied by a test safety guard');
+  await chain.evaluate({ tool: 'create', input: { path: 'first.txt' } });
+  await chain.evaluate({ tool: 'create', input: { path: 'second.txt' } });
+  assert.equal(chain.snapshot().forcedToAsk, true);
+  removeGuard();
+  const allowed = await chain.evaluate({ tool: 'create', input: { path: 'app.js' } });
+  assert.equal(allowed.decision, 'allow');
+  assert.equal(allowed.via, 'ask');
+  assert.deepEqual(chain.denials(), { consecutive: 0, total: 0 });
+  assert.equal(chain.snapshot().forcedToAsk, false);
+  assert.equal(chain.mode, 'auto');
+});
+
 test('automatic and remembered allows do not reset denial history', async () => {
   const chain = createDecisionChain({
     mode: 'never', thresholds: { consecutive: 3, total: 5 },

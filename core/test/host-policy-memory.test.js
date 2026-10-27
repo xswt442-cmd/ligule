@@ -333,3 +333,42 @@ test('one trusted human approval resets forced-to-ask and both denial counters t
       : { name: 'create', args: { path: 'after-approval.js', content: 'allowed' } },
   });
 });
+
+test('an external operator approval releases forced asking and remains effective after reopening', async () => {
+  const permission = createPermissionContext('workspace-write', 'policy', {
+    filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
+  });
+  await withPolicyHost(async ({ host, projectA }) => {
+    const requests = [];
+    const client = { notify() {}, async request(_method, params) {
+      requests.push(params);
+      return { decision: 'allow', source: 'controller' };
+    } };
+    const { sessionId } = await host.handle({ method: 'session.create', params: { projectRoot: projectA } }, client);
+    for (let index = 0; index < 3; index += 1) {
+      await host.handle({ method: 'run.start', params: { sessionId, input: `denied read ${index}` } }, client);
+    }
+    assert.equal((await host.handle({ method: 'status.get', params: { sessionId } }, client)).policy, 'ask');
+    await host.handle({ method: 'run.start', params: { sessionId, input: 'operator approves the create' } }, client);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].policyForced, true);
+    const after = await host.handle({ method: 'status.get', params: { sessionId } }, client);
+    assert.equal(after.policy, 'auto');
+    assert.deepEqual(after.denials, { consecutive: 0, total: 0 });
+    await host.handle({ method: 'session.close', params: { sessionId } }, client);
+    await host.handle({ method: 'session.open', params: { sessionId, projectRoot: projectA } }, client);
+    const reopened = await host.handle({ method: 'status.get', params: { sessionId } }, client);
+    assert.equal(reopened.policy, 'auto');
+    assert.deepEqual(reopened.denials, { consecutive: 0, total: 0 });
+    await host.handle({ method: 'run.start', params: { sessionId, input: 'create again after reopening' } }, client);
+    assert.equal(requests.length, 1);
+    assert.equal(await readFile(join(projectA, 'after-reopen.js'), 'utf8'), 'allowed');
+  }, {
+    permission,
+    policyMode: 'auto',
+    policyRules: [{ tool: 'read', decision: 'deny', reason: 'test refusal' }],
+    toolCall: (index) => index <= 3
+      ? { name: 'read', args: { path: 'note.txt' } }
+      : { name: 'create', args: { path: index === 4 ? 'after-approval.js' : 'after-reopen.js', content: 'allowed' } },
+  });
+});

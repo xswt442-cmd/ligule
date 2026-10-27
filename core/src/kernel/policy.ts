@@ -237,7 +237,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
     if (consecutive >= thresholds.consecutive || total >= thresholds.total) forcedToAsk = true;
   }
 
-  function recordHumanApproval(): void {
+  function recordApproval(): void {
     consecutive = 0;
     total = 0;
     forcedToAsk = false;
@@ -532,13 +532,13 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         return refuse(code, 'ask', 'approval channel failed', undefined, 'error', false);
       }
       if (response === false) return refuse('ask_declined', 'ask', 'the user declined', undefined, 'deny');
-      const allowAfterApproval = (approvalSource: 'human' | 'controller'): PolicyVerdict => {
-        if (approvalSource === 'human') recordHumanApproval();
+      const allowAfterApproval = (): PolicyVerdict => {
+        recordApproval();
         return { ...judged('allow', 'ask', { ...(segments === undefined ? {} : { segments }), answer: 'allow' }), ...(scriptBinding === undefined ? {} : { scriptBinding }) };
       };
-      if (response === true) return allowAfterApproval('human');
+      if (response === true) return allowAfterApproval();
       switch (response.decision) {
-        case 'allow': return allowAfterApproval(response.source ?? 'human');
+        case 'allow': return allowAfterApproval();
         case 'deny': {
           const explicitHumanDenial = response.source === undefined || response.source === 'human';
           const reason = response.reason ?? (explicitHumanDenial ? 'the user declined' : 'the controller declined');
