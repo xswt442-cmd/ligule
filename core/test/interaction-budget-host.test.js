@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { withTuiHost } from './helpers/tui-host.js';
 
 const input = JSON.stringify({ tool: 'ask_user_question', args: {
@@ -30,4 +32,23 @@ test('Host ends a pending question with a distinct cumulative interaction timeou
     assert.equal(turn?.status, 'failed');
     assert.equal(turn?.code, 'task_interaction_timeout');
   }, { interactive: true, config: { loop: { iterations: 2, modelCalls: 2, taskTimeoutMs: 3_000, requestTimeoutMs: 1_000, interactionWaitTimeoutMs: 150 } } });
+});
+
+test('Host pauses the execution deadline for an actual approval and resumes after the answer', async () => {
+  await withTuiHost(async ({ client, sessionId, projectDirectory }) => {
+    await writeFile(join(projectDirectory, 'note.txt'), 'approved content');
+    let approvals = 0;
+    client.onRequest(async (message) => {
+      if (message.method !== 'approval.request') return undefined;
+      approvals += 1;
+      await delay(1_200);
+      return { decision: 'allow' };
+    });
+    const result = await client.request('run.start', { sessionId,
+      input: JSON.stringify({ tool: 'read', args: { path: 'note.txt' } }) });
+    assert.ok(result.runId);
+    assert.equal(approvals, 1);
+    const { events } = await client.request('session.read', { sessionId });
+    assert.equal(events.findLast((event) => event.kind === 'turn')?.status, 'completed');
+  }, { config: { loop: { iterations: 2, modelCalls: 2, taskTimeoutMs: 1_000, requestTimeoutMs: 500, interactionWaitTimeoutMs: 3_000 } } });
 });
