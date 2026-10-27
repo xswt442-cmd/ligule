@@ -2,7 +2,7 @@
 // Host 配置哪些工具会结束本轮；该信息不暴露给模型。
 // 提供方通过统一接口接入，服务地址来自配置，凭据通过环境变量解析。
 import { KernelError, KernelRuntimeError } from './error.js';
-import { usageEvent } from '../session/usage.js';
+import { usageEvent, type ProviderUsageEvent } from '../session/usage.js';
 import { failureOf } from './result.js';
 import { rememberRunSummary, type RunSummary } from './run-summary.js';
 import type { TaskBudget } from './task-budget.js';
@@ -40,7 +40,7 @@ export interface ModelRequest {
 export type ProviderEvent =
   | { readonly type: 'text' | 'reasoning'; readonly text: string }
   | { readonly type: 'tool-call'; readonly id: string; readonly name: string; readonly args: unknown }
-  | { readonly type: 'usage'; readonly input: number; readonly output: number }
+  | ProviderUsageEvent
   | { readonly type: 'finish'; readonly reason: 'stop' | 'tool_calls' | 'length' | 'max_tokens' };
 
 export interface ModelProvider {

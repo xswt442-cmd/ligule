@@ -414,6 +414,49 @@ test('a fresh compaction over a record that carries usage starts calibrated', as
   });
 });
 
+test('cache usage without a reported input total is retained without calibrating to zero', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    await fill(session, 2);
+    const local = estimateRequest({ messages: await session.modelView() });
+    const compaction = createCompaction({ provider: fakeProvider([]), session, directory, id, limits });
+    const before = await compaction.context();
+    await compaction.observe({ messages: await session.modelView() }, [{ type: 'usage', input: null, output: 9, cache: {
+      source: 'anthropic-messages', sourceFields: [
+        { field: 'cache_read_input_tokens', tokens: 18 }, { field: 'cache_creation_input_tokens', tokens: 7 },
+      ], hitInputTokens: 18, missInputTokens: null, creationInputTokens: 7,
+      uncachedInputTokens: null, providerInputIncludesCache: false, consistent: null,
+    } }]);
+
+    const usage = (await session.read()).at(-1);
+    assert.equal(usage.kind, 'usage');
+    assert.equal(usage.input, null);
+    assert.equal(usage.output, 9);
+    assert.equal(usage.estimated, local);
+    assert.equal(usage.cache.hitInputTokens, 18);
+    const after = await compaction.context();
+    assert.equal(after.factor, before.factor, 'unknown totals must not change the estimator calibration');
+    assert.deepEqual(after.reported, { seq: usage.seq, input: null, output: 9, cache: usage.cache });
+  });
+});
+
+test('a latest unknown usage retains the most recent usable calibration after reopening', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    await fill(session, 2);
+    const local = estimateRequest({ messages: await session.modelView() });
+    await session.append({ kind: 'usage', ignorable: true, input: local * 4, output: 8, estimated: local, measurement: 'request-v1' });
+    await session.append({ kind: 'usage', ignorable: true, input: null, output: 9, estimated: local + 1, measurement: 'request-v1',
+      cache: { source: 'anthropic-messages', sourceFields: [{ field: 'input_tokens', tokens: local + 1 }],
+        hitInputTokens: null, missInputTokens: null, creationInputTokens: null, uncachedInputTokens: local + 1,
+        providerInputIncludesCache: false, consistent: null } });
+
+    const restarted = createCompaction({ provider: fakeProvider([]), session, directory, id, limits });
+    const context = await restarted.context();
+    assert.equal(context.factor, 4);
+    assert.equal(context.reported.input, null, 'the latest raw input remains unknown as a total');
+    assert.equal(context.reported.cache.uncachedInputTokens, local + 1);
+  });
+});
+
 // 手动和自动压缩使用相同的摘要流程；无法压缩时返回明确结果。
 test('a manual compaction writes the same checkpoint and says when there is nothing to cut', async () => {
   await withSession(async ({ directory, id, session }) => {

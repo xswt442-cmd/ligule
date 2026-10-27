@@ -505,7 +505,7 @@ test('one real round trip: the second request body is what the record rebuilds i
 // 这一种形状把它拆在两处，输入的在 message_start（含缓存里读回来的那一段），输出的在 message_delta。
 test('the usage the endpoint reports comes back as one event at the end', async () => {
   const turn = [
-    { type: 'message_start', message: { usage: { input_tokens: 1200, cache_read_input_tokens: 300, output_tokens: 5 } } },
+    { type: 'message_start', message: { usage: { input_tokens: 1200, cache_read_input_tokens: 300, cache_creation_input_tokens: 0, output_tokens: 5 } } },
     { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
     { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' } },
     { type: 'content_block_stop', index: 0 },
@@ -518,7 +518,95 @@ test('the usage the endpoint reports comes back as one event at the end', async 
   }, async (baseUrl) => {
     assert.deepEqual(await collect(provider(baseUrl).stream({ system: '', tools: [], messages: [] })), [
       { type: 'text', text: 'hi' },
-      { type: 'usage', input: 1500, output: 7 },
+      { type: 'usage', input: 1500, output: 7, cache: {
+        source: 'anthropic-messages', sourceFields: [
+          { field: 'input_tokens', tokens: 1200 }, { field: 'cache_read_input_tokens', tokens: 300 },
+          { field: 'cache_creation_input_tokens', tokens: 0 },
+        ], hitInputTokens: 300, missInputTokens: null, creationInputTokens: 0,
+        uncachedInputTokens: 1200, providerInputIncludesCache: false, consistent: null,
+      } },
+      { type: 'finish', reason: 'stop' },
+    ]);
+  });
+});
+
+test('streaming Chat Completions preserves cache field sources and missing totals', async () => {
+  const frames = [
+    { choices: [{ index: 0, delta: { content: 'cached' } }] },
+    { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+    { choices: [], usage: { prompt_tokens: 10, completion_tokens: 2, prompt_cache_hit_tokens: 4, prompt_cache_miss_tokens: 6 } },
+  ];
+  await withEndpoint(async (_attempt, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(chatSse(frames));
+  }, async (baseUrl) => {
+    assert.deepEqual(await collect(chatProvider(baseUrl).stream({ system: '', tools: [], messages: [] })), [
+      { type: 'text', text: 'cached' },
+      { type: 'usage', input: 10, output: 2, cache: {
+        source: 'chat-completions', sourceFields: [
+          { field: 'prompt_tokens', tokens: 10 }, { field: 'prompt_cache_hit_tokens', tokens: 4 },
+          { field: 'prompt_cache_miss_tokens', tokens: 6 },
+        ], hitInputTokens: 4, missInputTokens: 6,
+        creationInputTokens: null, uncachedInputTokens: null, providerInputIncludesCache: true, consistent: true,
+      } },
+      { type: 'finish', reason: 'stop' },
+    ]);
+  });
+
+  await withEndpoint(async (_attempt, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(chatSse([
+      { choices: [{ index: 0, delta: { content: 'unknown total' } }] },
+      { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+      { choices: [], usage: { completion_tokens: 2, prompt_cache_hit_tokens: 4 } },
+    ]));
+  }, async (baseUrl) => {
+    const events = await collect(chatProvider(baseUrl).stream({ system: '', tools: [], messages: [] }));
+    assert.deepEqual(events.find((event) => event.type === 'usage'), {
+      type: 'usage', input: null, output: 2, cache: {
+        source: 'chat-completions', sourceFields: [{ field: 'prompt_cache_hit_tokens', tokens: 4 }],
+        hitInputTokens: 4, missInputTokens: null,
+        creationInputTokens: null, uncachedInputTokens: null, providerInputIncludesCache: true, consistent: null,
+      },
+    });
+  });
+
+  await withEndpoint(async (_attempt, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(chatSse([
+      { choices: [{ index: 0, delta: { content: 'generic cached' } }] },
+      { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+      { choices: [], usage: { prompt_tokens: 10, completion_tokens: 2, prompt_tokens_details: { cached_tokens: 4 } } },
+    ]));
+  }, async (baseUrl) => {
+    const events = await collect(chatProvider(baseUrl).stream({ system: '', tools: [], messages: [] }));
+    assert.deepEqual(events.find((event) => event.type === 'usage'), {
+      type: 'usage', input: 10, output: 2, cache: {
+        source: 'chat-completions', sourceFields: [
+          { field: 'prompt_tokens', tokens: 10 }, { field: 'prompt_tokens_details.cached_tokens', tokens: 4 },
+        ], hitInputTokens: 4, missInputTokens: null, creationInputTokens: null,
+        uncachedInputTokens: null, providerInputIncludesCache: true, consistent: null,
+      },
+    });
+  });
+});
+
+test('streaming Messages keeps a missing input total unknown', async () => {
+  const turn = [
+    { type: 'message_start', message: { usage: { cache_read_input_tokens: 2 } } },
+    { type: 'message_delta', usage: { output_tokens: 3 } },
+    { type: 'message_stop' },
+  ];
+  await withEndpoint(async (_attempt, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(sseBody(turn));
+  }, async (baseUrl) => {
+    assert.deepEqual(await collect(provider(baseUrl).stream({ system: '', tools: [], messages: [] })), [
+      { type: 'usage', input: null, output: 3, cache: {
+        source: 'anthropic-messages', sourceFields: [{ field: 'cache_read_input_tokens', tokens: 2 }],
+        hitInputTokens: 2, missInputTokens: null,
+        creationInputTokens: null, uncachedInputTokens: null, providerInputIncludesCache: false, consistent: null,
+      } },
       { type: 'finish', reason: 'stop' },
     ]);
   });

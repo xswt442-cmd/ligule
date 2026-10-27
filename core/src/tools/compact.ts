@@ -7,7 +7,7 @@ import { KernelError } from '../kernel/error.js';
 import { resultLimit, SPILL_NAME } from '../kernel/result.js';
 import { loadCheckpointFile, type CompactionBlock } from '../session/checkpoint.js';
 import { compressibleRange, flatten, SUMMARY_SPILL_NAME } from '../session/compaction.js';
-import { estimateTokens } from '../session/usage.js';
+import { estimateTokens, type ProviderCacheUsage } from '../session/usage.js';
 import { marker } from './common.js';
 import type { SessionEvent } from '../session/format.js';
 
@@ -23,7 +23,7 @@ interface CompactionHandle {
     estimated: number;
     factor: number;
     measurement: string;
-    reported: { seq: number; input: number; output: number | null } | null;
+    reported: { seq: number; input: number | null; output: number | null; cache?: ProviderCacheUsage } | null;
   }>;
   compactRange(args: { fromSeq?: number; toSeq?: number; summary: string }): Promise<{ blockId: number; fromSeq: number; toSeq: number; tokensBefore: number; tokensAfter: number } | null>;
 }

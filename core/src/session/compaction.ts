@@ -6,7 +6,7 @@ import { createBlock, createCheckpointFile, loadCheckpointFile, PROJECTED_KINDS,
 import { spillContent } from '../kernel/result.js';
 import { KernelError } from '../kernel/error.js';
 import type { SessionEvent } from './format.js';
-import { estimateRequest, estimateTokens, usageEvent } from './usage.js';
+import { estimateRequest, estimateTokens, usageEvent, type ProviderCacheUsage } from './usage.js';
 import type { LoopCompactionRequest, ModelProvider, ModelRequest, ModelTool, ProviderEvent } from '../kernel/loop.js';
 import { projectModelView } from './session.js';
 export { estimateRequest, estimateTokens } from './usage.js';
@@ -164,7 +164,7 @@ export function createCompaction({ provider, session, directory, id, limits, log
   // 本地估算与服务端用量的校准系数；尚无服务端用量时使用 1。
   let factor = 1;
 
-  // 从最近的 `usage` 事件恢复校准系数，让会话重开后继续使用先前的校准结果。
+  // 从最近一条有明确总输入量的 `usage` 事件恢复校准系数，让未知总量不覆盖先前的有效读数。
   // 事件同时保存本地估算和服务端用量，因此无需依赖上一个进程的内存状态。
   let seeded = false;
   async function lastUsage(): Promise<SessionEvent | null> {
@@ -178,12 +178,16 @@ export function createCompaction({ provider, session, directory, id, limits, log
   async function seedFromRecord(): Promise<void> {
     if (seeded) return;
     seeded = true;
-    const usage = await lastUsage();
-    if (usage === null || usage.measurement !== 'request-v1') return;
-    const input = Number(usage.input);
-    const estimated = Number(usage.estimated);
-    if (Number.isFinite(input) && input > 0 && Number.isFinite(estimated) && estimated > 0) {
-      factor = input / estimated;
+    const events = await session.read();
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const usage = events[index];
+      if (usage.kind !== 'usage' || usage.measurement !== 'request-v1') continue;
+      const input = usage.input;
+      const estimated = Number(usage.estimated);
+      if (typeof input === 'number' && Number.isFinite(input) && input > 0 && Number.isFinite(estimated) && estimated > 0) {
+        factor = input / estimated;
+        return;
+      }
     }
   }
 
@@ -383,12 +387,12 @@ export function createCompaction({ provider, session, directory, id, limits, log
       factor: number;
       // 返回本地估算使用的算法标识，供界面显示。
       measurement: string;
-      reported: { seq: number; input: number; output: number | null } | null;
+      reported: { seq: number; input: number | null; output: number | null; cache?: ProviderCacheUsage } | null;
     }> {
       await seedFromRecord();
       const usage = await lastUsage();
-      const input = usage === null ? Number.NaN : Number(usage.input);
-      const output = usage === null || !Number.isFinite(Number(usage.output)) ? null : Number(usage.output);
+      const input = usage !== null && typeof usage.input === 'number' && Number.isFinite(usage.input) ? usage.input : null;
+      const output = usage !== null && typeof usage.output === 'number' && Number.isFinite(usage.output) ? usage.output : null;
       const view = await session.modelView();
       return {
         window: limits.contextTokens,
@@ -399,9 +403,10 @@ export function createCompaction({ provider, session, directory, id, limits, log
         estimated: Math.round(estimateRequest({ ...requestPrefix(), messages: view }) * factor),
         factor: Math.round(factor * 100) / 100,
         measurement: 'request-v1',
-        reported: usage === null || !Number.isFinite(input)
-          ? null
-          : { seq: Number(usage.seq), input, output },
+        reported: usage === null ? null : {
+          seq: Number(usage.seq), input, output,
+          ...(usage.cache !== undefined ? { cache: usage.cache as ProviderCacheUsage } : {}),
+        },
       };
     },
 
@@ -454,8 +459,11 @@ export function createCompaction({ provider, session, directory, id, limits, log
       const usage = usageEvent(request, events);
       if (usage === null) return;
       // 使用当前响应中的最新用量，无需再从历史记录查找。
-      seeded = true;
-      factor = usage.input / usage.estimated;
+      // 缺少总输入量时仍保存缓存分项，但不改变本地估算校准系数。
+      if (usage.input !== null && usage.input > 0) {
+        seeded = true;
+        factor = usage.input / usage.estimated;
+      }
       if (typeof session.append !== 'function') return;
       // 同时保存本地估算，以便从记录恢复校准系数；用量事件不参与检查点哈希。
       await session.append(usage);

@@ -78,16 +78,112 @@ test('Messages parses a real non-streaming JSON response and cache usage', async
     role: 'assistant',
     content: [{ type: 'text', text: 'local answer' }],
     stop_reason: 'end_turn',
-    usage: { input_tokens: 12, cache_read_input_tokens: 3, output_tokens: 4 },
+    usage: { input_tokens: 12, cache_read_input_tokens: 3, cache_creation_input_tokens: 2, output_tokens: 4 },
   }, async (provider, requests) => {
     assert.deepEqual(await collect(provider.stream({ system: '', tools: [], messages: [] })), [
       { type: 'text', text: 'local answer' },
-      { type: 'usage', input: 15, output: 4 },
+      { type: 'usage', input: 17, output: 4, cache: {
+        source: 'anthropic-messages', sourceFields: [
+          { field: 'input_tokens', tokens: 12 }, { field: 'cache_read_input_tokens', tokens: 3 },
+          { field: 'cache_creation_input_tokens', tokens: 2 },
+        ], hitInputTokens: 3, missInputTokens: null, creationInputTokens: 2,
+        uncachedInputTokens: 12, providerInputIncludesCache: false, consistent: null,
+      } },
       { type: 'finish', reason: 'stop' },
     ]);
     assert.equal(requests[0].body.stream, false);
     assert.equal(requests[0].headers.accept, 'application/json');
     assert.equal(requests[0].url, '/v1/messages');
+  });
+});
+
+test('Chat Completions preserves DeepSeek cache accounting and flags inconsistent reported totals', async () => {
+  await withJsonEndpoint('chat', {
+    choices: [{ index: 0, message: { role: 'assistant', content: 'cached answer' }, finish_reason: 'stop' }],
+    usage: {
+      prompt_tokens: 20, completion_tokens: 4,
+      prompt_cache_hit_tokens: 5, prompt_cache_miss_tokens: 10,
+      prompt_tokens_details: { cached_tokens: 6 },
+    },
+  }, async (provider) => {
+    assert.deepEqual(await collect(provider.stream({ system: '', tools: [], messages: [] })), [
+      { type: 'text', text: 'cached answer' },
+      { type: 'usage', input: 20, output: 4, cache: {
+        source: 'chat-completions', sourceFields: [
+          { field: 'prompt_tokens', tokens: 20 }, { field: 'prompt_cache_hit_tokens', tokens: 5 },
+          { field: 'prompt_cache_miss_tokens', tokens: 10 }, { field: 'prompt_tokens_details.cached_tokens', tokens: 6 },
+        ], hitInputTokens: 5, missInputTokens: 10,
+        creationInputTokens: null, uncachedInputTokens: null, providerInputIncludesCache: true, consistent: false,
+      } },
+      { type: 'finish', reason: 'stop' },
+    ]);
+  });
+});
+
+test('missing totals remain unknown while reported cache details and outputs survive', async () => {
+  await withJsonEndpoint('chat', {
+    choices: [{ index: 0, message: { role: 'assistant', content: 'partial usage' }, finish_reason: 'stop' }],
+    usage: { completion_tokens: 4, prompt_cache_hit_tokens: 3, prompt_cache_miss_tokens: 7 },
+  }, async (provider) => {
+    assert.deepEqual(await collect(provider.stream({ system: '', tools: [], messages: [] })), [
+      { type: 'text', text: 'partial usage' },
+      { type: 'usage', input: null, output: 4, cache: {
+        source: 'chat-completions', sourceFields: [
+          { field: 'prompt_cache_hit_tokens', tokens: 3 }, { field: 'prompt_cache_miss_tokens', tokens: 7 },
+        ], hitInputTokens: 3, missInputTokens: 7,
+        creationInputTokens: null, uncachedInputTokens: null, providerInputIncludesCache: true, consistent: null,
+      } },
+      { type: 'finish', reason: 'stop' },
+    ]);
+  });
+
+  await withJsonEndpoint('messages', {
+    type: 'message', role: 'assistant', content: [{ type: 'text', text: 'partial usage' }], stop_reason: 'end_turn',
+    usage: { input_tokens: 12, cache_read_input_tokens: 3, output_tokens: 4 },
+  }, async (provider) => {
+    assert.deepEqual(await collect(provider.stream({ system: '', tools: [], messages: [] })), [
+      { type: 'text', text: 'partial usage' },
+      { type: 'usage', input: null, output: 4, cache: {
+        source: 'anthropic-messages', sourceFields: [
+          { field: 'input_tokens', tokens: 12 }, { field: 'cache_read_input_tokens', tokens: 3 },
+        ], hitInputTokens: 3, missInputTokens: null, creationInputTokens: null,
+        uncachedInputTokens: 12, providerInputIncludesCache: false, consistent: null,
+      } },
+      { type: 'finish', reason: 'stop' },
+    ]);
+  });
+
+  await withJsonEndpoint('messages', {
+    type: 'message', role: 'assistant', content: [{ type: 'text', text: 'uncached only' }], stop_reason: 'end_turn',
+    usage: { input_tokens: 12, output_tokens: 4 },
+  }, async (provider) => {
+    assert.deepEqual(await collect(provider.stream({ system: '', tools: [], messages: [] })), [
+      { type: 'text', text: 'uncached only' },
+      { type: 'usage', input: null, output: 4, cache: {
+        source: 'anthropic-messages', sourceFields: [{ field: 'input_tokens', tokens: 12 }],
+        hitInputTokens: null, missInputTokens: null, creationInputTokens: null,
+        uncachedInputTokens: 12, providerInputIncludesCache: false, consistent: null,
+      } },
+      { type: 'finish', reason: 'stop' },
+    ]);
+  });
+
+  await withJsonEndpoint('messages', {
+    type: 'message', role: 'assistant', content: [{ type: 'text', text: 'zero usage' }], stop_reason: 'end_turn',
+    usage: { input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 0 },
+  }, async (provider) => {
+    const usage = (await collect(provider.stream({ system: '', tools: [], messages: [] }))).find((event) => event.type === 'usage');
+    assert.equal(usage.input, 0, 'explicit zero component values produce a measured zero total');
+    assert.equal(usage.output, 0);
+  });
+
+  await withJsonEndpoint('messages', {
+    type: 'message', role: 'assistant', content: [{ type: 'text', text: 'overflow' }], stop_reason: 'end_turn',
+    usage: { input_tokens: Number.MAX_SAFE_INTEGER, cache_read_input_tokens: 1, cache_creation_input_tokens: 0, output_tokens: 0 },
+  }, async (provider) => {
+    const usage = (await collect(provider.stream({ system: '', tools: [], messages: [] }))).find((event) => event.type === 'usage');
+    assert.equal(usage.input, null, 'an unsafe sum must not be reported as an exact token count');
+    assert.equal(usage.cache.uncachedInputTokens, Number.MAX_SAFE_INTEGER);
   });
 });
 
@@ -109,11 +205,17 @@ test('both providers emit complete tool-only turns from non-streaming JSON', asy
   await withJsonEndpoint('messages', {
     type: 'message', role: 'assistant',
     content: [{ type: 'tool_use', id: 'toolu_json', name: 'read', input: { path: 'note.txt' } }],
-    stop_reason: 'tool_use', usage: { input_tokens: 8, output_tokens: 2 },
+    stop_reason: 'tool_use', usage: { input_tokens: 8, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 2 },
   }, async (provider) => {
     assert.deepEqual(await collect(provider.stream({ system: '', tools: [tool], messages: [] })), [
       { type: 'tool-call', id: 'toolu_json', name: 'read', args: { path: 'note.txt' } },
-      { type: 'usage', input: 8, output: 2 },
+      { type: 'usage', input: 8, output: 2, cache: {
+        source: 'anthropic-messages', sourceFields: [
+          { field: 'input_tokens', tokens: 8 }, { field: 'cache_read_input_tokens', tokens: 0 },
+          { field: 'cache_creation_input_tokens', tokens: 0 },
+        ], hitInputTokens: 0, missInputTokens: null, creationInputTokens: 0,
+        uncachedInputTokens: 8, providerInputIncludesCache: false, consistent: null,
+      } },
       { type: 'finish', reason: 'tool_calls' },
     ]);
   });
@@ -137,11 +239,17 @@ test('output exhaustion preserves partial text and does not parse incomplete too
   await withJsonEndpoint('messages', {
     type: 'message', role: 'assistant',
     content: [{ type: 'text', text: 'partial' }, { type: 'tool_use', id: 'toolu_partial', name: 'read', input: {} }],
-    stop_reason: 'max_tokens', usage: { input_tokens: 2, output_tokens: 3 },
+    stop_reason: 'max_tokens', usage: { input_tokens: 2, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 3 },
   }, async (provider) => {
     assert.deepEqual(await collect(provider.stream({})), [
       { type: 'text', text: 'partial' },
-      { type: 'usage', input: 2, output: 3 },
+      { type: 'usage', input: 2, output: 3, cache: {
+        source: 'anthropic-messages', sourceFields: [
+          { field: 'input_tokens', tokens: 2 }, { field: 'cache_read_input_tokens', tokens: 0 },
+          { field: 'cache_creation_input_tokens', tokens: 0 },
+        ], hitInputTokens: 0, missInputTokens: null, creationInputTokens: 0,
+        uncachedInputTokens: 2, providerInputIncludesCache: false, consistent: null,
+      } },
       { type: 'finish', reason: 'max_tokens' },
     ]);
     await assert.rejects(createLoop({ kernel: createKernel(), provider }).run('question'), (error) => error.code === 'provider_output_exhausted');

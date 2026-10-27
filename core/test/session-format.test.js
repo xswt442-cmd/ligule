@@ -6,6 +6,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createSessionLog } from '../dist/index.js';
 import { parseSessionEvents } from '../dist/session/format.js';
+import { estimateRequest, usageEvent } from '../dist/session/usage.js';
 
 async function withDirectory(run) {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'format-'));
@@ -197,9 +198,38 @@ test('the usage event this build writes comes back out of a record', async () =>
     const session = createSessionLog({ directory, id: 'usage-kept' });
     await session.append({ kind: 'user', text: 'one' });
     await session.append({ kind: 'usage', ignorable: true, input: 400, output: 5, estimated: 120 });
+    await session.append({ kind: 'usage', ignorable: true, input: null, output: 7, estimated: 140, measurement: 'request-v1',
+      cache: { source: 'chat-completions', sourceFields: [{ field: 'prompt_cache_hit_tokens', tokens: 20 }, { field: 'prompt_cache_miss_tokens', tokens: 30 }],
+        hitInputTokens: 20, missInputTokens: 30, creationInputTokens: null, uncachedInputTokens: null,
+        providerInputIncludesCache: true, consistent: null } });
     const events = await createSessionLog({ directory, id: 'usage-kept' }).read();
-    assert.deepEqual(events.map((event) => event.seq), [0, 1]);
+    assert.deepEqual(events.map((event) => event.seq), [0, 1, 2]);
     assert.equal(events[1].kind, 'usage');
+    assert.deepEqual(events[2], {
+      seq: 2, kind: 'usage', ignorable: true, input: null, output: 7, estimated: 140, measurement: 'request-v1',
+      cache: { source: 'chat-completions', sourceFields: [{ field: 'prompt_cache_hit_tokens', tokens: 20 }, { field: 'prompt_cache_miss_tokens', tokens: 30 }],
+        hitInputTokens: 20, missInputTokens: 30, creationInputTokens: null, uncachedInputTokens: null,
+        providerInputIncludesCache: true, consistent: null },
+    }, 'nullable cache-aware records survive while old usage rows remain readable');
     assert.deepEqual((await session.modelView()).map((entry) => entry.role), ['user'], '用量那一格不进投影');
   });
+});
+
+test('a usage event keeps unknown totals null instead of coercing null or absence to zero', () => {
+  const request = { system: '', tools: [], messages: [{ role: 'user', text: 'one' }] };
+  assert.deepEqual(usageEvent(request, [{ type: 'usage', input: null, output: null, cache: {
+    source: 'anthropic-messages', sourceFields: [{ field: 'cache_read_input_tokens', tokens: 12 }],
+    hitInputTokens: 12, missInputTokens: null, creationInputTokens: null,
+    uncachedInputTokens: null, providerInputIncludesCache: false, consistent: null,
+  } }]), {
+    kind: 'usage', ignorable: true, input: null, output: null,
+    estimated: estimateRequest(request),
+    measurement: 'request-v1', cache: {
+      source: 'anthropic-messages', sourceFields: [{ field: 'cache_read_input_tokens', tokens: 12 }],
+      hitInputTokens: 12, missInputTokens: null, creationInputTokens: null,
+      uncachedInputTokens: null, providerInputIncludesCache: false, consistent: null,
+    },
+  });
+  assert.equal(usageEvent(request, [{ type: 'usage', input: null, output: null }]), null);
+  assert.equal(usageEvent(request, [{ type: 'usage', input: 0, output: 0 }]).input, 0, 'an explicitly reported zero remains distinct from missing usage');
 });
