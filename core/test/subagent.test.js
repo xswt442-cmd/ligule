@@ -417,6 +417,37 @@ test('one parent turn can run three independent subagents concurrently', { timeo
   assert.equal(outcomes.filter((event) => event.result.code === 'subagent_concurrency_limit').length, 1);
 });
 
+test('configured child concurrency limits live work and releases capacity after completion', async () => {
+  const boundary = await workspace();
+  const config = createConfig({ user: { boundary, loop: { maxConcurrentSubagents: 1 } } });
+  const chain = createDecisionChain({ mode: 'auto' });
+  const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-concurrency-'), id: 'parent' });
+  let release;
+  let started;
+  const ready = new Promise((resolve) => { started = resolve; });
+  const gate = new Promise((resolve) => { release = resolve; });
+  const provider = { name: 'bounded', model: 'bounded', capabilities: {}, async *stream() {
+    started();
+    await gate;
+    yield { type: 'text', text: 'done' };
+  } };
+  const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
+  const deps = { config, provider, chain, prompt: { staticPrefix: '' }, directory: session.directory,
+    sessionId: 'parent', plugins: [minimalPlugin] };
+  createSubagentPlugin(deps).setup(kernel);
+  const first = kernel.call('subagent', { task: 'first' });
+  await ready;
+  try {
+    await assert.rejects(kernel.call('subagent', { task: 'second' }), { code: 'subagent_concurrency_limit' });
+  } finally { release(); }
+  assert.equal((await first).text, 'done');
+  assert.equal((await kernel.call('subagent', { task: 'third' })).text, 'done');
+  for (const invalid of [0, 9, 1.5, '2']) {
+    assert.throws(() => createSubagentPlugin({ ...deps, config: createConfig({ user: { boundary, loop: { maxConcurrentSubagents: invalid } } }) }),
+      { code: 'subagent_concurrency_invalid' });
+  }
+});
+
 test('rebuilding the parent continues child session numbering without reusing old records', async () => {
   const boundary = await workspace();
   const config = createConfig({ user: { boundary } });

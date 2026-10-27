@@ -43,7 +43,8 @@ type SubagentProvider = LoopOptions['provider'] & {
   readonly thinkingCapability?: { readonly efforts: readonly string[]; readonly defaultEffort: string };
   withGeneration?: (options: ChildGenerationOptions) => SubagentProvider;
 };
-const MAX_CONCURRENT_SUBAGENTS = 3;
+const DEFAULT_CONCURRENT_SUBAGENTS = 3;
+const MAX_CONCURRENT_SUBAGENTS = 8;
 
 function stableErrorCode(error: unknown): string {
   const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
@@ -110,6 +111,12 @@ function childProvider(args: { outputTokens?: number; thinkingEffort?: ThinkingE
 }
 
 export function createSubagentPlugin(deps: SubagentDeps) {
+  const loopConfig = typeof deps.config.loop === 'object' && deps.config.loop !== null && !Array.isArray(deps.config.loop)
+    ? deps.config.loop as Record<string, unknown> : {};
+  const concurrency = loopConfig.maxConcurrentSubagents ?? DEFAULT_CONCURRENT_SUBAGENTS;
+  if (typeof concurrency !== 'number' || !Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > MAX_CONCURRENT_SUBAGENTS) {
+    throw new KernelError('subagent_concurrency_invalid', { detail: `loop.maxConcurrentSubagents must be an integer between 1 and ${MAX_CONCURRENT_SUBAGENTS}` });
+  }
   let counter = 0;
   let active = 0;
 
@@ -140,7 +147,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
         name: 'subagent',
         access: 'inherit',
         execution: 'parallel',
-        description: 'Delegate independent work to child runs with the parent policy and separate session records. Up to three children can run at once; children cannot create more children. Optional output, thinking, and loop budgets can only lower the parent session limits. Check result.state because a failed or cancelled child still returns its saved Session reference. When outputSchema is provided, the child must submit its final value with ligule_delegation_result.',
+        description: `Delegate independent work to child runs with the parent policy and separate session records. Up to ${concurrency} children can run at once; children cannot create more children. Optional output, thinking, and loop budgets can only lower the parent session limits. Check result.state because a failed or cancelled child still returns its saved Session reference. When outputSchema is provided, the child must submit its final value with ligule_delegation_result.`,
         parameters: {
           type: 'object',
           properties: {
@@ -174,8 +181,8 @@ export function createSubagentPlugin(deps: SubagentDeps) {
           const outputContract = args.outputSchema === undefined ? undefined : createOutputSchemaContract(args.outputSchema);
           const limits = childLimits(args, deps.loopLimits ?? DEFAULT_LOOP_LIMITS);
           const provider = childProvider(args, deps.provider);
-          if (active >= MAX_CONCURRENT_SUBAGENTS) {
-            throw new KernelError('subagent_concurrency_limit', { detail: `at most ${MAX_CONCURRENT_SUBAGENTS} derived runs can be active for this parent` });
+          if (active >= concurrency) {
+            throw new KernelError('subagent_concurrency_limit', { detail: `at most ${concurrency} derived runs can be active for this parent` });
           }
           const parentTools = new Set(kernel.manifest().map(({ name }) => name));
           active += 1;
