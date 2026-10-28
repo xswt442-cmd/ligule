@@ -77,6 +77,7 @@ test('Host enables loopback OTLP only from the user configuration layer', async 
   });
   const endpoint = `http://127.0.0.1:${receiver.address().port}/v1/traces`;
   const provider = { async *stream() { yield { type: 'text', text: 'done' }; yield { type: 'finish', reason: 'stop' }; } };
+  await mkdir(testRoot, { recursive: true });
   const userDataRoot = await mkdtemp(join(testRoot, 'otlp-user-data-'));
   const previousDataRoot = process.env.LIGULE_HOME;
   process.env.LIGULE_HOME = userDataRoot;
