@@ -105,7 +105,8 @@ function chatUsageEvent(usage: JsonRecord): ProviderEvent | undefined {
   const hit = primaryHit ?? aliasHit;
   const miss = tokenCount(usage.prompt_cache_miss_tokens);
   const aliasConflict = hitPresent && cachedAliasPresent && primaryHit !== null && aliasHit !== null && primaryHit !== aliasHit;
-  const consistent = aliasConflict || (input !== null && hit !== null && miss !== null && input !== hit + miss)
+  const consistent = aliasConflict || (input !== null && ((hit !== null && hit > input) || (miss !== null && miss > input)))
+    || (input !== null && hit !== null && miss !== null && input !== hit + miss)
     ? false
     : input !== null && hit !== null && miss !== null ? true : null;
   const sourceFields = [

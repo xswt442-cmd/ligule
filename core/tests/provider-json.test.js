@@ -118,6 +118,14 @@ test('Chat Completions preserves DeepSeek cache accounting and flags inconsisten
       { type: 'finish', reason: 'stop' },
     ]);
   });
+
+  await withJsonEndpoint('chat', {
+    choices: [{ index: 0, message: { role: 'assistant', content: 'partial accounting' }, finish_reason: 'stop' }],
+    usage: { prompt_tokens: 3, prompt_tokens_details: { cached_tokens: 5 } },
+  }, async (provider) => {
+    const usage = (await collect(provider.stream({ system: '', tools: [], messages: [] }))).find((event) => event.type === 'usage');
+    assert.equal(usage.cache.consistent, false, 'a cache subset cannot exceed the reported total even when misses are unknown');
+  });
 });
 
 test('missing totals remain unknown while reported cache details and outputs survive', async () => {

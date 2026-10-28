@@ -104,7 +104,9 @@ function metricsFor(event: SessionEvent): AtifStep['metrics'] | undefined {
         'cache_read_input_tokens', 'cache_creation_input_tokens'].includes(field.field)) return [];
       return [{ field: field.field, tokens: knownCount(field.tokens) }];
     }).slice(0, 8) : [];
-    if (hit !== null && cache.consistent !== false) metrics.cached_tokens = hit;
+    if (hit !== null && cache.consistent !== false && (metrics.prompt_tokens === undefined || hit <= metrics.prompt_tokens)) {
+      metrics.cached_tokens = hit;
+    }
     metrics.extra = { ligule: { cache_source: cache.source, cache_hit_tokens_reported: hit, cache_miss_tokens: miss,
       cache_creation_tokens: creation, cache_consistent: typeof cache.consistent === 'boolean' ? cache.consistent : null,
       provider_input_includes_cache: typeof cache.providerInputIncludesCache === 'boolean' ? cache.providerInputIncludesCache : null,

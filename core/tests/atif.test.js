@@ -148,5 +148,9 @@ test('ATIF preserves known cache usage and does not report a conflicting hit cou
     const conflictMetrics = conflicting.steps.find((step) => step.source === 'agent' && step.tool_calls).metrics;
     assert.equal(conflictMetrics.cached_tokens, undefined);
     assert.equal(conflictMetrics.extra.ligule.cache_consistent, false);
+    usage.cache.consistent = null;
+    usage.cache.hitInputTokens = 13;
+    const excessive = sessionTurnToAtif(events, source(fixture.acceptance, fixture.user));
+    assert.equal(excessive.steps.find((step) => step.source === 'agent' && step.tool_calls).metrics.cached_tokens, undefined);
   } finally { await rm(fixture.directory, { recursive: true, force: true }); }
 });
