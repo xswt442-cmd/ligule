@@ -230,9 +230,15 @@ test('explicit full access permits a controlled local Shell command but Policy d
   const command = process.platform === 'win32'
     ? "Set-Content -LiteralPath exec-created.txt -Value EXEC_SENTINEL"
     : "printf '%s' EXEC_SENTINEL > exec-created.txt";
-  await withToolModelServer(async ({ project, env, configArgs }) => {
+  await withToolModelServer(async ({ project, sessions, env, configArgs }) => {
     const result = await captureAsyncAt(project, env, 'run', '--allow-full-access', '--json', 'run a controlled local command', ...configArgs);
     assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+    const receipt = JSON.parse(result.stdout);
+    const events = readFileSync(join(sessions, `${receipt.sessionId}.jsonl`), 'utf8')
+      .trim().split('\n').map(JSON.parse);
+    const executed = events.filter(event => event.kind === 'tool' && event.tool === 'exec').at(-1)?.result;
+    assert.notEqual(executed?.failed, true, JSON.stringify(executed));
+    assert.equal(executed?.content?.exitCode, 0, JSON.stringify(executed));
     assert.equal(readFileSync(join(project, 'exec-created.txt'), 'utf8').trim(), 'EXEC_SENTINEL');
   }, { name: 'exec', args: { command } });
 
