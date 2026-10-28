@@ -23,7 +23,7 @@ CLI 的 npm 包内置私有 Core 的编译代码、模式与元数据；Core 的
 
 运行 `pnpm check:dependencies`，使用锁定的 `dependency-cruiser@18.7.0` 与工作区 TypeScript 版本扫描源码 import。规则拒绝 Core 反向依赖客户端、Electron Main 导入 Core、运行时依赖循环、Core/TUI 运行时导入 `npm-dev` 依赖，以及 Renderer 运行时导入 Electron API 契约。type-only 循环和 type-only `npm-dev` 依赖不属于运行时违规。扫描排除测试、生成的 `dist`、vendored 代码和 `testplace`；完整依赖图不提交到仓库。
 
-2026-10-28 核验的源码快照以 `dev` SHA `a6fbc62` 和当时正在进行的 P5 工作树修改为基础：355 个模块、1,469 条依赖边，没有触发已配置规则。统计会随 dependency-cruiser/TypeScript 版本变化，不能用作 npm 包体积或安装清单。规则配置见 [dependency-cruiser.cjs](../../dependency-cruiser.cjs)，正向与受控负向 fixture 由 [check-dependencies.mjs](../../scripts/check-dependencies.mjs) 执行。
+规则配置见 [dependency-cruiser.cjs](../../dependency-cruiser.cjs)；[check-dependencies.mjs](../../scripts/check-dependencies.mjs) 会执行源码扫描、正向 fixture 与受控负向 fixture。
 
 CLI 发布清单由 [`releaseManifest()`](../../scripts/pack-release.js) 从 `tui/package.json` 与 Core 的 `dependencies`、`optionalDependencies` 合成。tarball 内置私有 `@ligule/core` 运行时与无依赖的 `xlsx`；其余依赖由消费者按自身平台安装，原生 optional 包也只选择适用的项目。TUI 的 `devDependencies` 可能仍留在 manifest 元数据中，但 npm 消费者不会传递安装它们。Desktop 使用独立产品清单，不属于 CLI tarball。CI 发布工作流在干净 checkout 中调用 `pnpm --filter ligule run check-pack` 与 `pnpm --filter ligule run verify-install <tarball>`。在已有工作区本机验收时，应将新 `testplace/tmp` work root 传给脚本，避免替换原有 `testplace/pack` 产物：
 
