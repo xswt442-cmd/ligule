@@ -133,7 +133,8 @@ test('ATIF preserves known cache usage and does not report a conflicting hit cou
     const events = await fixture.session.read();
     const usage = events.find((event) => event.kind === 'usage');
     usage.cache = { source: 'chat-completions', hitInputTokens: 5, missInputTokens: 7,
-      creationInputTokens: null, providerInputIncludesCache: true, consistent: true };
+      creationInputTokens: null, providerInputIncludesCache: true, consistent: true,
+      sourceFields: [{ field: 'prompt_cache_hit_tokens', tokens: 5 }, { field: 'prompt_cache_miss_tokens', tokens: 7 }] };
     const trajectory = sessionTurnToAtif(events, source(fixture.acceptance, fixture.user));
     if (process.env.LIGULE_ATIF_OUTPUT_PATH) {
       await writeFile(process.env.LIGULE_ATIF_OUTPUT_PATH, `${JSON.stringify(trajectory, null, 2)}\n`, 'utf8');
@@ -141,6 +142,7 @@ test('ATIF preserves known cache usage and does not report a conflicting hit cou
     const metrics = trajectory.steps.find((step) => step.source === 'agent' && step.tool_calls).metrics;
     assert.equal(metrics.cached_tokens, 5);
     assert.equal(metrics.extra.ligule.cache_miss_tokens, 7);
+    assert.equal(metrics.extra.ligule.source_fields[0].field, 'prompt_cache_hit_tokens');
     usage.cache.consistent = false;
     const conflicting = sessionTurnToAtif(events, source(fixture.acceptance, fixture.user));
     const conflictMetrics = conflicting.steps.find((step) => step.source === 'agent' && step.tool_calls).metrics;

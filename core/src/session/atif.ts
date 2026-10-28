@@ -98,10 +98,17 @@ function metricsFor(event: SessionEvent): AtifStep['metrics'] | undefined {
     const hit = knownCount(cache.hitInputTokens);
     const miss = knownCount(cache.missInputTokens);
     const creation = knownCount(cache.creationInputTokens);
+    const sourceFields = Array.isArray(cache.sourceFields) ? cache.sourceFields.flatMap((field) => {
+      if (!isObject(field) || typeof field.field !== 'string' || !['prompt_tokens', 'prompt_cache_hit_tokens',
+        'prompt_cache_miss_tokens', 'prompt_tokens_details.cached_tokens', 'input_tokens',
+        'cache_read_input_tokens', 'cache_creation_input_tokens'].includes(field.field)) return [];
+      return [{ field: field.field, tokens: knownCount(field.tokens) }];
+    }).slice(0, 8) : [];
     if (hit !== null && cache.consistent !== false) metrics.cached_tokens = hit;
     metrics.extra = { ligule: { cache_source: cache.source, cache_hit_tokens_reported: hit, cache_miss_tokens: miss,
       cache_creation_tokens: creation, cache_consistent: typeof cache.consistent === 'boolean' ? cache.consistent : null,
-      provider_input_includes_cache: typeof cache.providerInputIncludesCache === 'boolean' ? cache.providerInputIncludesCache : null } };
+      provider_input_includes_cache: typeof cache.providerInputIncludesCache === 'boolean' ? cache.providerInputIncludesCache : null,
+      source_fields: sourceFields } };
   }
   return Object.keys(metrics).length > 0 ? metrics : undefined;
 }
