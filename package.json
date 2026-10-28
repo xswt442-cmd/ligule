@@ -15,6 +15,7 @@
     "eval:smoke": "node scripts/eval-smoke.mjs",
     "check-pack": "pnpm --filter ligule run check-pack",
     "verify-install": "pnpm --filter ligule run verify-install",
+    "check:dependencies": "node scripts/check-dependencies.mjs",
     "check:syntax": "node scripts/check-js-syntax.mjs",
     "prepare-runtime": "pnpm --filter ligule-desktop run prepare-runtime",
     "registry-version": "node scripts/registry-version.js"
@@ -22,6 +23,7 @@
   "devDependencies": {
     "@types/node": "^24.19.1",
     "cross-spawn": "7.0.6",
+    "dependency-cruiser": "18.7.0",
     "typescript": "^5.9.3"
   }
 }
