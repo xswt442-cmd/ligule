@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { constants } from 'node:fs';
-import { lstat, readFile, readdir, realpath, rename, unlink } from 'node:fs/promises';
+import fs from 'node:fs/promises';
+import { lstat, readFile, readdir, realpath, unlink } from 'node:fs/promises';
 import { open } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import lockfile from 'proper-lockfile';
@@ -281,16 +282,38 @@ export function createTelemetry(options: TelemetryOptions = {}): Telemetry {
     if (Buffer.byteLength(contents, 'utf8') > MAX_MANIFEST_BYTES) throw new Error('telemetry manifest exceeds its size limit');
     const temporaryPath = join(directory, `telemetry.manifest.${randomUUID()}.tmp`);
     const handle = await open(temporaryPath, 'wx', 0o600);
+    let temporaryIdentity: FileIdentity | undefined;
+    let handleClosed = false;
+    let renamed = false;
     try {
+      const created = await handle.stat();
+      if (!validRegularFile(created)) throw new Error('telemetry temporary manifest is not an exclusive regular file');
+      temporaryIdentity = { dev: String(created.dev), ino: String(created.ino) };
       await handle.writeFile(contents, 'utf8');
       await handle.sync();
-    } finally { await handle.close(); }
-    const current = await lstat(manifestPath);
-    if (!validRegularFile(current, previous)) throw new Error('telemetry manifest identity changed');
-    await rename(temporaryPath, manifestPath);
-    const replaced = await lstat(manifestPath);
-    if (!validRegularFile(replaced)) throw new Error('telemetry manifest replacement is invalid');
-    return { dev: String(replaced.dev), ino: String(replaced.ino) };
+      await handle.close();
+      handleClosed = true;
+      const temporary = await lstat(temporaryPath);
+      if (!validRegularFile(temporary, temporaryIdentity)) throw new Error('telemetry temporary manifest identity changed');
+      const current = await lstat(manifestPath);
+      if (!validRegularFile(current, previous)) throw new Error('telemetry manifest identity changed');
+      await fs.rename(temporaryPath, manifestPath);
+      renamed = true;
+      const replaced = await lstat(manifestPath);
+      if (!validRegularFile(replaced)) throw new Error('telemetry manifest replacement is invalid');
+      return { dev: String(replaced.dev), ino: String(replaced.ino) };
+    } catch (error) {
+      if (!handleClosed) {
+        try { await handle.close(); handleClosed = true; } catch { /* Keep the original failure and do not unlink an open path. */ }
+      }
+      if (!renamed && handleClosed && temporaryIdentity !== undefined) {
+        try {
+          const candidate = await lstat(temporaryPath);
+          if (validRegularFile(candidate, temporaryIdentity)) await unlink(temporaryPath);
+        } catch { /* Missing or changed paths are never cleaned up as this writer's temporary file. */ }
+      }
+      throw error;
+    }
   }
 
   async function readManifest(): Promise<{ readonly manifest: Manifest; readonly identity: FileIdentity }> {

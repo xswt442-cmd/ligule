@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs/promises';
 import { link, mkdir, mkdtemp, open, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createTelemetry } from '../dist/kernel/telemetry.js';
@@ -130,6 +131,29 @@ test('a corrupt manifest fails closed without replacing or deleting its contents
   assert.equal(await readFile(manifest, 'utf8'), '{ damaged marker');
   assert.equal(await readFile(join(directory, 'segment-00000000.jsonl'), 'utf8'), segmentBefore);
   assert.deepEqual(await segmentFiles(directory), ['segment-00000000.jsonl']);
+});
+
+test('failed atomic manifest replacement preserves a competing temporary-path file', async (t) => {
+  const directory = await isolated(t);
+  const telemetry = createTelemetry({ enabled: true, directory });
+  telemetry.emit({ type: 'run.finished', executionId: 'exec-before', runId: 'run-before', status: 'completed', durationMs: 1, modelCalls: 1, toolCalls: 0 });
+  await telemetry.flush();
+  const manifest = join(directory, 'telemetry.manifest.json');
+  const before = await readFile(manifest, 'utf8');
+  let competingPath;
+  t.mock.method(fs, 'rename', async (source, destination) => {
+    competingPath = source;
+    await fs.unlink(source);
+    await fs.writeFile(source, 'competing file');
+    throw new Error(`injected rename failure for ${destination}`);
+  });
+
+  telemetry.emit({ type: 'run.finished', executionId: 'exec-after', runId: 'run-after', status: 'completed', durationMs: 1, modelCalls: 1, toolCalls: 0 });
+  await assert.doesNotReject(telemetry.flush());
+  await telemetry.shutdown();
+  assert.equal(await readFile(manifest, 'utf8'), before);
+  assert.equal(await readFile(competingPath, 'utf8'), 'competing file');
+  assert.match(competingPath, /telemetry\.manifest\.[0-9a-f-]+\.tmp$/u);
 });
 
 test('fails closed instead of rotating a segment after it gains a hard link', async (t) => {
