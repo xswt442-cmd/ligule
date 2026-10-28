@@ -176,7 +176,7 @@ export function changeOf(tool: string, args: Record<string, unknown>, locale: 'z
     };
   }
   if (tool === 'delete') {
-    return { summary: t(`将 ${path} 移入回收站`, `Move ${path} to trash`), action: t(`将 ${path} 移入系统回收站或权限边界内的回收目录`, `Move ${path} to system trash or the recovery directory within the permission boundary`), before: '', after: '' };
+    return { summary: t(`将 ${path} 移入系统回收站`, `Move ${path} to the system recycle bin`), action: t(`若系统回收站不可用或拒绝目标，操作会报错并保留原文件`, `If the system recycle bin is unavailable or refuses the target, the operation reports an error and leaves the source in place`), before: '', after: '' };
   }
   return none;
 }

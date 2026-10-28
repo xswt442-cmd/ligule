@@ -21,6 +21,8 @@ export interface ToolContext {
   readonly permission: PermissionContext;
   readonly logger: Logger;
   readonly observations: ObservationLog;
+  /** Opaque value returned by this invocation's tool preflight, when present. */
+  readonly preflightResult?: unknown;
   readonly signal?: AbortSignal;
   readonly target?: NetworkTarget;
   readonly shell?: ShellSelection;
@@ -32,6 +34,10 @@ export interface ToolContext {
 
 type BivariantToolCallback<TArgs, TResult> = {
   callback(args: TArgs, context: ToolContext): TResult;
+}['callback'];
+
+type BivariantPreflight<TArgs> = {
+  callback(args: TArgs, context: ToolContext): unknown | Promise<unknown>;
 }['callback'];
 
 type BivariantCapability<TArgs> = {
@@ -58,7 +64,8 @@ export interface ToolDefinition<TArgs = unknown> {
   readonly commandOf?: (args: TArgs, shell: ShellSelection) => string | undefined;
   capability?: BivariantCapability<TArgs>;
   policyIdentity?: BivariantPolicyIdentity<TArgs>;
-  readonly preflight?: (args: TArgs) => void | Promise<void>;
+  /** Run before Policy approval; its return value is passed only to this invocation's `run`. */
+  readonly preflight?: BivariantPreflight<TArgs>;
   run: BivariantToolCallback<TArgs, unknown | Promise<unknown>>;
 }
 
@@ -398,8 +405,9 @@ export function createKernel(options: KernelOptions = {}): Kernel {
         await record(entry, refusalOf(denied.code, denied.reason));
         throw new KernelError(denied.code, { detail: denied.reason });
       }
+      let preflightResult: unknown;
       if (tool.preflight !== undefined) {
-        try { await tool.preflight(args); }
+        try { preflightResult = await tool.preflight(args, { config, permission: activePermission, logger, observations, ...options }); }
         catch (error) {
           const failure = error instanceof KernelError
             ? error
@@ -549,6 +557,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       let success: ReturnType<typeof resultOf>;
       try {
           value = await tool.run(args, { ...context, permission: callPermission, signal: options.signal, target: network, shell,
+            ...(preflightResult === undefined ? {} : { preflightResult }),
             ...(options.runId === undefined ? {} : { runId: options.runId }),
             ...(options.executionId === undefined ? {} : { executionId: options.executionId }),
             ...(options.callId === undefined ? {} : { callId: options.callId }),

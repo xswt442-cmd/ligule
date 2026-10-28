@@ -18,23 +18,27 @@ const NEEDLE = 'needle here';
 async function withWorkspace(run) {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'tools-'));
   const workspace = join(root, 'workspace');
-  await mkdir(join(workspace, 'src'), { recursive: true });
-  // node_modules 放两处：搜索根下一层与嵌套一层，两条后端都必须按任意深度跳过它。
-  await mkdir(join(workspace, 'node_modules', 'pkg'), { recursive: true });
-  await mkdir(join(workspace, 'src', 'node_modules', 'pkg'), { recursive: true });
-  // 隐藏目录要搜得到：配置写在 .github/ 这类目录里，跳过整棵子树等于看不见。
-  await mkdir(join(workspace, '.github', 'workflows'), { recursive: true });
-  // 回收站那个目录反过来：删掉的东西不能再以第二次命中出现。
-  await mkdir(join(workspace, '.ligule-trash'), { recursive: true });
-  await writeFile(join(workspace, 'note.txt'), `line one\n${NEEDLE}\nline three`);
-  await writeFile(join(workspace, 'src', 'app.js'), `const a = 'unused';\nsecond line ${NEEDLE}`);
-  await writeFile(join(workspace, 'src', 'node_modules', 'pkg', 'deep.js'), `${NEEDLE} at depth`);
-  await writeFile(join(workspace, 'node_modules', 'pkg', 'index.js'), `${NEEDLE} but skipped`);
-  await writeFile(join(workspace, '.ligule-trash', 'gone.txt'), `${NEEDLE} already deleted`);
-  await writeFile(join(workspace, '.github', 'workflows', 'ci.yml'), `name: ${NEEDLE}`);
+  const previousXdgData = process.env.XDG_DATA_HOME;
   try {
+    process.env.XDG_DATA_HOME = join(root, 'xdg-data');
+    await mkdir(join(workspace, 'src'), { recursive: true });
+    // node_modules 放两处：搜索根下一层与嵌套一层，两条后端都必须按任意深度跳过它。
+    await mkdir(join(workspace, 'node_modules', 'pkg'), { recursive: true });
+    await mkdir(join(workspace, 'src', 'node_modules', 'pkg'), { recursive: true });
+    // 隐藏目录要搜得到：配置写在 .github/ 这类目录里，跳过整棵子树等于看不见。
+    await mkdir(join(workspace, '.github', 'workflows'), { recursive: true });
+    // 旧回收目录不会被新的删除操作写入，仍由内部搜索跳过。
+    await mkdir(join(workspace, '.ligule-trash'), { recursive: true });
+    await writeFile(join(workspace, 'note.txt'), `line one\n${NEEDLE}\nline three`);
+    await writeFile(join(workspace, 'src', 'app.js'), `const a = 'unused';\nsecond line ${NEEDLE}`);
+    await writeFile(join(workspace, 'src', 'node_modules', 'pkg', 'deep.js'), `${NEEDLE} at depth`);
+    await writeFile(join(workspace, 'node_modules', 'pkg', 'index.js'), `${NEEDLE} but skipped`);
+    await writeFile(join(workspace, '.ligule-trash', 'gone.txt'), `${NEEDLE} already deleted`);
+    await writeFile(join(workspace, '.github', 'workflows', 'ci.yml'), `name: ${NEEDLE}`);
     return await run(workspace);
   } finally {
+    if (previousXdgData === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = previousXdgData;
     await rm(root, { recursive: true, force: true });
   }
 }
@@ -85,7 +89,7 @@ test('a parent working directory can address an explicit child boundary', async 
   await withWorkspace(async (workspace) => {
     const boundary = join(workspace, 'src');
     const toolContext = {
-      ...context(workspace, undefined, { workspaceRoot: workspace, trashBackend: 'managed' }),
+      ...context(workspace, undefined, { workspaceRoot: workspace }),
       config: { boundary, workspaceRoot: workspace, ripgrepPath: builtRipgrep },
       observations: createObservationLog(),
     };
@@ -122,7 +126,7 @@ test('create, edit, and delete resolve relative paths from the working directory
   await withWorkspace(async (workspace) => {
     const child = join(workspace, 'src');
     const toolContext = {
-      ...context(workspace, undefined, { workspaceRoot: child, trashBackend: 'managed' }),
+      ...context(workspace, undefined, { workspaceRoot: child }),
       observations: createObservationLog(),
     };
     await createTool.run({ path: 'new.txt', content: 'first' }, toolContext);

@@ -1,11 +1,10 @@
 // 写操作包括 `create`、`write`、`edit` 和 `delete`。
-// 每种操作在工具内部执行语义校验并返回稳定错误码；删除目标由能力提供方选择去处。
-import { lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
-import { dirname, join, relative, resolve } from 'node:path';
+// 每种操作在工具内部执行语义校验并返回稳定错误码；删除只使用操作系统回收站。
+import { lstat, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { dirname, relative, resolve } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import type { ToolContext, ToolDefinition } from '../kernel/kernel.js';
-import { boundaryOf, limitsOf, workingDirectoryOf } from '../capability/limits.js';
+import { assertNoLegacyTrashConfig, boundaryOf, workingDirectoryOf } from '../capability/limits.js';
 import { resolveWithin } from '../capability/paths.js';
 import { resolveRecycler } from '../capability/recycle.js';
 import { versionOf } from '../session/observe.js';
@@ -15,7 +14,84 @@ interface CreateArguments { path: string; content: string }
 interface WriteArguments { path: string; content: string }
 interface EditArguments { path: string; anchor: string; replacement: string }
 interface DeleteArguments { path: string }
-type WriteToolContext = Pick<ToolContext, 'config' | 'observations' | 'logger'>;
+const DELETE_TARGET_SNAPSHOT = Symbol('delete-target-snapshot');
+interface DeleteTargetSnapshot {
+  readonly [DELETE_TARGET_SNAPSHOT]: true;
+  readonly target: string;
+  readonly boundary: string;
+  readonly workingDirectory: string;
+  readonly name: string;
+  readonly dev: number;
+  readonly ino: number;
+  readonly mode: number;
+  readonly nlink: number;
+  readonly size: number;
+  readonly mtimeMs: number;
+  readonly ctimeMs: number;
+}
+type WriteToolContext = Pick<ToolContext, 'config' | 'observations' | 'signal' | 'preflightResult'>;
+
+async function deleteTargetSnapshot(args: DeleteArguments, config: ToolContext['config']): Promise<DeleteTargetSnapshot> {
+  assertNoLegacyTrashConfig(config);
+  const boundary = boundaryOf(config);
+  const workingDirectory = workingDirectoryOf(config);
+  const target = await resolveWithin(boundary, args.path, { forWrite: true, cwd: workingDirectory });
+  const name = toPosix(relative(boundary, target));
+  if (name === '') throw new KernelError('delete_target_is_boundary', { detail: 'the workspace boundary itself cannot be sent to the recycle bin; name a file or directory inside it' });
+  let named;
+  let original;
+  try {
+    named = await lstat(resolve(workingDirectory, args.path));
+    original = await lstat(target);
+  } catch (error) {
+    const code = errorCode(error);
+    if (code === 'ENOENT') throw new KernelError('delete_target_missing', { detail: `there is nothing at ${args.path} to send to the recycle bin` });
+    throw new KernelError('path_resolve_failed', { cause: error, detail: `checking ${args.path} failed: ${code ?? errorMessage(error)}` });
+  }
+  if (named.isSymbolicLink() || original.isSymbolicLink()) {
+    throw new KernelError('delete_target_is_link', { detail: `${args.path} is a symbolic link or junction; name the actual target explicitly if that is what should be sent to the recycle bin` });
+  }
+  if (!original.isFile() && !original.isDirectory()) {
+    throw new KernelError('delete_target_unsupported', { detail: `${args.path} is not a regular file or directory` });
+  }
+  return {
+    [DELETE_TARGET_SNAPSHOT]: true,
+    target,
+    boundary,
+    workingDirectory,
+    name,
+    dev: original.dev,
+    ino: original.ino,
+    mode: original.mode,
+    nlink: original.nlink,
+    size: original.size,
+    mtimeMs: original.mtimeMs,
+    ctimeMs: original.ctimeMs,
+  };
+}
+
+async function recheckDeleteTarget(args: DeleteArguments, config: ToolContext['config'], snapshot: DeleteTargetSnapshot): Promise<void> {
+  if (boundaryOf(config) !== snapshot.boundary || workingDirectoryOf(config) !== snapshot.workingDirectory) {
+    throw new KernelError('delete_target_changed', { detail: `${args.path} changed while approval was pending` });
+  }
+  const currentPath = await resolveWithin(snapshot.boundary, args.path, { forWrite: true, cwd: snapshot.workingDirectory });
+  if (currentPath !== snapshot.target) throw new KernelError('delete_target_changed', { detail: `${args.path} changed while approval was pending` });
+  let named;
+  let current;
+  try {
+    named = await lstat(resolve(snapshot.workingDirectory, args.path));
+    current = await lstat(snapshot.target);
+  } catch (error) {
+    const code = errorCode(error);
+    if (code === 'ENOENT') throw new KernelError('delete_target_changed', { detail: `${args.path} changed while approval was pending` });
+    throw new KernelError('path_resolve_failed', { cause: error, detail: `rechecking ${args.path} failed: ${code ?? errorMessage(error)}` });
+  }
+  if (named.isSymbolicLink() || current.isSymbolicLink() || current.dev !== snapshot.dev || current.ino !== snapshot.ino
+    || current.mode !== snapshot.mode || current.nlink !== snapshot.nlink || current.size !== snapshot.size
+    || current.mtimeMs !== snapshot.mtimeMs || current.ctimeMs !== snapshot.ctimeMs) {
+    throw new KernelError('delete_target_changed', { detail: `${args.path} changed while approval was pending` });
+  }
+}
 
 export const createTool = {
   name: 'create',
@@ -129,7 +205,7 @@ export const editTool = {
 export const deleteTool = {
   name: 'delete',
   access: 'write',
-  description: 'Move a file or directory relative to the working directory, within the workspace boundary, into the trash: the system recycle bin where there is one, otherwise a trash directory inside the boundary. Final symbolic links and junctions are refused; name the actual target explicitly to delete it. Nothing is deleted in place.',
+  description: 'Move a file or directory relative to the working directory, within the workspace boundary, into the operating system recycle bin. If the system recycle bin is unavailable or refuses the item, the tool returns an error and leaves the source in place. Final symbolic links and junctions are refused; name the actual target explicitly to delete it.',
   parameters: {
     type: 'object',
     properties: {
@@ -137,58 +213,28 @@ export const deleteTool = {
     },
     required: ['path'],
   },
-  async run(args: DeleteArguments, { config, logger, observations }: WriteToolContext) {
-    const { trashDirectory } = limitsOf(config);
-    const boundary = boundaryOf(config);
-    const cwd = workingDirectoryOf(config);
-    const target = await resolveWithin(boundary, args.path, { forWrite: true, cwd });
-    const name = toPosix(relative(boundary, target));
-    if (name === '') throw new KernelError('delete_target_is_boundary', { detail: 'the workspace boundary itself cannot be moved into the trash; name a file or directory inside it' });
-    try {
-      // 边界解析跟随链接；删除前单独检查用户命名的最后一项，避免把链接目标送入回收站。
-      if ((await lstat(resolve(cwd, args.path))).isSymbolicLink()) {
-        throw new KernelError('delete_target_is_link', { detail: `${args.path} is a symbolic link or junction; name the actual target explicitly if that is what should be moved into the trash` });
-      }
-    } catch (error) {
-      if (error instanceof KernelError) throw error;
-      const code = errorCode(error);
-      if (code === 'ENOENT') throw new KernelError('delete_target_missing', { detail: `there is nothing at ${args.path} to move into the trash` });
-      throw new KernelError('path_resolve_failed', { cause: error, detail: `checking ${args.path} failed: ${code ?? errorMessage(error)}` });
+  async preflight(args: DeleteArguments, { config }: ToolContext): Promise<DeleteTargetSnapshot> {
+    return deleteTargetSnapshot(args, config);
+  },
+  async run(args: DeleteArguments, { config, observations, signal, preflightResult }: WriteToolContext) {
+    const snapshot = isDeleteTargetSnapshot(preflightResult) ? preflightResult : await deleteTargetSnapshot(args, config);
+    signal?.throwIfAborted();
+    const resolution = await resolveRecycler();
+    if (resolution.recycler === undefined) {
+      throw new KernelError('recycle_backend_missing', {
+        detail: `the operating system recycle bin is unavailable (${resolution.code}); ${args.path} remains unchanged`,
+      });
     }
-
-    // 删除去处由 `trashBackend` 配置决定。`auto` 优先使用系统回收站，否则使用项目回收目录。
-    // `system` 和 `managed` 固定使用指定后端；后端不可用时返回错误，不自动切换。
-    const backend = config.trashBackend ?? 'auto';
-    if (backend !== 'auto' && backend !== 'system' && backend !== 'managed') {
-      throw new KernelError('delete_trash_backend_unknown', { detail: `"${backend}" is not a trash backend; the choices are auto, system and managed` });
-    }
-    if (backend !== 'managed') {
-      const resolution = await resolveRecycler();
-      if (resolution.recycler !== undefined) {
-        const { recycler } = resolution;
-        try {
-          await recycler.send(target);
-          observations?.forget(target);
-          return { text: `sent ${name} to the ${recycler.name}` };
-        } catch (error) {
-          // 系统回收站无法接收目标时，回退到项目回收目录并记录原因。
-          if (backend === 'system') throw error;
-          logger.log(`the ${recycler.name} refused this deletion, falling back to ${trashDirectory}`, { tool: 'delete', code: errorCode(error) });
-        }
-      } else if (backend === 'system') {
-        throw new KernelError(resolution.code, { detail: `no system recycle bin is available here (${resolution.code}), and trashBackend is pinned to system` });
-      } else {
-        logger.debug(`no system recycle bin on this platform, using ${trashDirectory}`, { tool: 'delete', code: resolution.code });
-      }
-    }
-    const trash = await resolveWithin(boundary, trashDirectory, { forWrite: true, cwd: boundary });
-    await mkdir(trash, { recursive: true });
-    const destination = await resolveWithin(boundary, trashDirectory, { forWrite: true, cwd: boundary });
-    // 使用时间戳和随机后缀生成回收文件名，避免同名目标同时删除时冲突。
-    await rename(target, join(destination, `${Date.now()}-${randomUUID().slice(0, 8)}--${name.split('/').join('__')}`));
-    observations?.forget(target);
-    return { text: `moved ${name} into ${trashDirectory}` };
+    await recheckDeleteTarget(args, config, snapshot);
+    await resolution.recycler.send(snapshot.target);
+    observations?.forget(snapshot.target);
+    return { text: `sent ${snapshot.name} to the ${resolution.recycler.name}` };
   },
 } satisfies ToolDefinition<DeleteArguments>;
+
+function isDeleteTargetSnapshot(value: unknown): value is DeleteTargetSnapshot {
+  return typeof value === 'object' && value !== null && DELETE_TARGET_SNAPSHOT in value
+    && value[DELETE_TARGET_SNAPSHOT] === true;
+}
 
 export const writeTools = Object.freeze([createTool, writeTool, editTool, deleteTool]);

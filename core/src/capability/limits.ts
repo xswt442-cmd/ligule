@@ -10,7 +10,6 @@ export const DEFAULT_LIMITS = Object.freeze({
   scanFiles: 5_000,
   execBytes: 32_000,
   execTimeoutMs: 120_000,
-  trashDirectory: '.ligule-trash',
   // 技能搜索、正文和文件读取分别设有上限；总工具结果上限仍会进一步约束注入模型的内容。
   skillSearchBytes: 8_000,
   skillBodyBytes: 24_000,
@@ -41,13 +40,22 @@ export type CapabilityConfig = {
   limits?: CapabilityLimits;
 };
 
-// 文件搜索默认跳过依赖和版本控制目录，避免扫描大量无关文件。
-const SKIPPED_DIRECTORIES: readonly string[] = ['node_modules', '.git'];
+// 文件搜索跳过依赖、版本控制目录和历史项目内回收目录；delete 不再写入 `.ligule-trash`。
+const SKIPPED_DIRECTORIES: readonly string[] = ['node_modules', '.git', '.ligule-trash'];
 
-// 搜索也会跳过配置指定的回收目录，避免再次返回已删除文件。
-// 目录名称可以配置，所有搜索后端都从此函数读取。
-export function skippedDirectories(config: CapabilityConfig): string[] {
-  return [...SKIPPED_DIRECTORIES, limitsOf(config).trashDirectory];
+export function skippedDirectories(_config: CapabilityConfig): string[] {
+  return [...SKIPPED_DIRECTORIES];
+}
+
+export function assertNoLegacyTrashConfig(config: Readonly<Record<string, unknown>>): void {
+  const limits = config.limits;
+  const hasLegacyDirectory = typeof limits === 'object' && limits !== null && !Array.isArray(limits)
+    && (limits as Record<string, unknown>).trashDirectory !== undefined;
+  if (config.trashBackend !== undefined || hasLegacyDirectory) {
+    throw new KernelError('trash_legacy_config_unsupported', {
+      detail: 'Remove trashBackend and limits.trashDirectory from the configuration. Ligule now uses only the operating system recycle bin and leaves the source in place when it is unavailable or refuses the item.',
+    });
+  }
 }
 
 export function boundaryOf(config: CapabilityConfig): string {

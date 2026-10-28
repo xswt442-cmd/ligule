@@ -70,7 +70,7 @@ assert.equal(
   changeBody(changeOf('edit', { path: 'x.md', anchor: '旧的一行', replacement: '新的一行' }), {}),
   'x.md：替换匹配内容\n原内容:\n- 旧的一行\n新内容:\n+ 新的一行',
 );
-assert.equal(changeBody(changeOf('delete', { path: 'x.md' }), {}), '将 x.md 移入系统回收站或权限边界内的回收目录');
+assert.equal(changeBody(changeOf('delete', { path: 'x.md' }), {}), '若系统回收站不可用或拒绝目标，操作会报错并保留原文件');
 assert.deepEqual(write.notes, ['自动允许 (auto)']);
 assert.equal(write.text, '写了 3 行');
 

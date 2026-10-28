@@ -6,7 +6,7 @@ The repository [Agent guide](../../../AGENTS.md) applies here. This directory co
 
 - Resolve every path against the Host-provided working directory and enforce the configured tool boundary. Do not replace path validation with a string-prefix check or follow a link outside the boundary.
 - `write` requires a complete prior read and rejects a stale observed version. `edit` requires a non-empty anchor that occurs exactly once. Preserve these checks when changing write behavior.
-- `delete` moves its target to the configured system or managed trash. Never replace it with in-place deletion or silently switch a pinned trash backend.
+- `delete` uses only the operating system recycle bin. If it is unavailable or refuses the target, return an error and leave the source in place; never permanently delete it or write into `.ligule-trash`. Shell delete commands remain governed by the existing Policy and Approval path.
 - File and result limits come from the configuration snapshot. Truncated tool results must say how to continue; incomplete search results must be identified as incomplete.
 
 ## Network and process tools

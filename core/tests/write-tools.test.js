@@ -3,17 +3,21 @@ import assert from 'node:assert/strict';
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
-  createConfig, createKernel, createObservationLog, createPermissionContext, createTool, deleteTool, editTool, freedesktopTrash, readTool,
+  createConfig, createDecisionChain, createKernel, createObservationLog, createPermissionContext, createTool, deleteTool, editTool, freedesktopTrash, readTool,
   readOnlyTools, resolveRecycler, writeTool, writeTools,
 } from '../dist/index.js';
 
 async function withWorkspace(run) {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'write-'));
   const workspace = join(root, 'workspace');
+  const previousXdgData = process.env.XDG_DATA_HOME;
   await mkdir(workspace, { recursive: true });
+  process.env.XDG_DATA_HOME = join(root, 'xdg-data');
   try {
     return await run(workspace);
   } finally {
+    if (previousXdgData === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = previousXdgData;
     await rm(root, { recursive: true, force: true });
   }
 }
@@ -68,7 +72,7 @@ test('two kernels creating one file preserve exactly one complete winner', async
   });
 });
 
-test('managed deletion refuses a trash directory outside the boundary and preserves the source', async () => {
+test('legacy project trash settings fail with an actionable error and preserve the source', async () => {
   await withWorkspace(async (workspace) => {
     const outside = join(workspace, '..', 'outside');
     await mkdir(outside);
@@ -78,23 +82,23 @@ test('managed deletion refuses a trash directory outside the boundary and preser
       permission: workspaceWrite,
     });
     kernel.register(deleteTool);
-    await assert.rejects(kernel.call('delete', { path: 'keep.txt' }), { code: 'path_escapes_boundary' });
+    await assert.rejects(kernel.call('delete', { path: 'keep.txt' }), { code: 'trash_legacy_config_unsupported' });
     assert.equal(await readFile(join(workspace, 'keep.txt'), 'utf8'), 'must remain');
     assert.deepEqual(await readdir(outside), []);
   });
 });
 
-test('managed deletion refuses a trash junction or symlink leading outside the boundary', async () => {
+test('deletion leaves an existing unknown project trash directory untouched', async () => {
   await withWorkspace(async (workspace) => {
-    const outside = join(workspace, '..', 'outside');
-    await mkdir(outside);
-    await symlink(outside, join(workspace, '.ligule-trash'), process.platform === 'win32' ? 'junction' : 'dir');
+    await mkdir(join(workspace, '.ligule-trash'));
+    await writeFile(join(workspace, '.ligule-trash', 'old-entry.txt'), 'untouched legacy data');
     await writeFile(join(workspace, 'keep.txt'), 'must remain');
-    const kernel = createKernel({ config: createConfig({ user: { boundary: workspace, trashBackend: 'managed' } }), permission: workspaceWrite });
+    const kernel = createKernel({ config: createConfig({ user: { boundary: workspace } }), permission: workspaceWrite });
     kernel.register(deleteTool);
-    await assert.rejects(kernel.call('delete', { path: 'keep.txt' }), { code: 'path_escapes_through_link' });
-    assert.equal(await readFile(join(workspace, 'keep.txt'), 'utf8'), 'must remain');
-    assert.deepEqual(await readdir(outside), []);
+    // The test process may have a working system trash. In either case the old directory is never adopted or altered.
+    await kernel.call('delete', { path: 'keep.txt' });
+    assert.equal(await readFile(join(workspace, '.ligule-trash', 'old-entry.txt'), 'utf8'), 'untouched legacy data');
+    assert.deepEqual((await readdir(join(workspace, '.ligule-trash'))).sort(), ['old-entry.txt']);
   });
 });
 
@@ -151,33 +155,17 @@ test('edit rejects a missing target, an anchor that is not there, and an anchor 
   });
 });
 
-test('delete moves the file into the trash directory instead of removing it', async () => {
-  await withWorkspace(async (workspace) => {
-    await writeFile(join(workspace, 'note.txt'), 'keep me');
-    assert.deepEqual(await deleteTool.run({ path: 'note.txt' }, context(workspace, undefined, { trashBackend: 'managed' })), {
-      text: 'moved note.txt into .ligule-trash',
-    });
-    await assert.rejects(() => readFile(join(workspace, 'note.txt'), 'utf8'), (error) => error.code === 'ENOENT');
-    const trashed = await readdir(join(workspace, '.ligule-trash'));
-    assert.equal(trashed.length, 1);
-    assert.match(trashed[0], /^\d{13}-[0-9a-f]{8}--note\.txt$/);
-    assert.equal(await readFile(join(workspace, '.ligule-trash', trashed[0]), 'utf8'), 'keep me');
-  });
-});
-
-test('delete refuses a final directory link for every backend and preserves its target', async () => {
+test('delete refuses a final directory link and preserves its target', async () => {
   await withWorkspace(async (workspace) => {
     await mkdir(join(workspace, 'source'));
     await writeFile(join(workspace, 'source', 'keep.txt'), 'keep the source');
     await symlink(join(workspace, 'source'), join(workspace, 'alias'), process.platform === 'win32' ? 'junction' : 'dir');
-    for (const trashBackend of ['auto', 'system', 'managed']) {
-      const kernel = createKernel({ config: createConfig({ user: { boundary: workspace, trashBackend } }), permission: workspaceWrite });
-      kernel.register(deleteTool);
-      for (const path of ['alias', 'alias/']) {
-        await assert.rejects(kernel.call('delete', { path }), { code: 'delete_target_is_link' });
-        assert.equal((await lstat(join(workspace, 'alias'))).isSymbolicLink(), true);
-        assert.equal(await readFile(join(workspace, 'source', 'keep.txt'), 'utf8'), 'keep the source');
-      }
+    const kernel = createKernel({ config: createConfig({ user: { boundary: workspace } }), permission: workspaceWrite });
+    kernel.register(deleteTool);
+    for (const path of ['alias', 'alias/']) {
+      await assert.rejects(kernel.call('delete', { path }), { code: 'delete_target_is_link' });
+      assert.equal((await lstat(join(workspace, 'alias'))).isSymbolicLink(), true);
+      assert.equal(await readFile(join(workspace, 'source', 'keep.txt'), 'utf8'), 'keep the source');
     }
     assert.deepEqual((await readdir(workspace)).sort(), ['alias', 'source']);
   });
@@ -189,7 +177,7 @@ test('delete refuses a dangling directory link without replacing it', async () =
     await mkdir(source);
     await symlink(source, join(workspace, 'alias'), process.platform === 'win32' ? 'junction' : 'dir');
     await rm(source, { recursive: true });
-    const kernel = createKernel({ config: createConfig({ user: { boundary: workspace, trashBackend: 'managed' } }), permission: workspaceWrite });
+    const kernel = createKernel({ config: createConfig({ user: { boundary: workspace } }), permission: workspaceWrite });
     kernel.register(deleteTool);
     await assert.rejects(kernel.call('delete', { path: 'alias' }), { code: 'delete_target_is_link' });
     assert.equal((await lstat(join(workspace, 'alias'))).isSymbolicLink(), true);
@@ -197,23 +185,100 @@ test('delete refuses a dangling directory link without replacing it', async () =
   });
 });
 
-test('delete with the default backend takes the file out of the workspace and says where it went', async () => {
+test('delete uses the operating system recycle bin and takes the source out of the workspace', async () => {
   await withWorkspace(async (workspace) => {
     await writeFile(join(workspace, 'note.txt'), 'keep me');
-    // 这一条走的是这台机器上真正生效的那一条后端：在 Windows 上它会送进系统回收站，
-    // 在 Linux 上送进 freedesktop 的 Trash。断言里不指定走的是哪一条回收路径，指定的是「文件离开了工作区」与「交回的说法」。
-    const result = await deleteTool.run({ path: 'note.txt' }, context(workspace));
-    assert.match(result.text, /^(sent note\.txt to the (system recycle bin|freedesktop trash)|moved note\.txt into \.ligule-trash)$/);
+    const approvals = [];
+    const kernel = createKernel({
+      config: createConfig({ user: { boundary: workspace } }),
+      permission: workspaceWrite,
+      policy: createDecisionChain({ mode: 'ask', ask: async (question) => {
+        approvals.push(question);
+        return { decision: 'allow', source: 'human' };
+      } }),
+    });
+    kernel.register(deleteTool);
+    const result = await kernel.call('delete', { path: 'note.txt' });
+    assert.match(result.text, /^(sent note\.txt to the (system recycle bin|freedesktop trash))$/);
+    assert.equal(approvals.length, 1);
+    assert.equal(approvals[0].tool, 'delete');
     await assert.rejects(() => readFile(join(workspace, 'note.txt'), 'utf8'), (error) => error.code === 'ENOENT');
   });
 });
 
-test('an unknown trash backend is refused with a code', async () => {
+test('Policy denial leaves the delete target in place', async () => {
+  await withWorkspace(async (workspace) => {
+    await writeFile(join(workspace, 'note.txt'), 'keep me');
+    const kernel = createKernel({
+      config: createConfig({ user: { boundary: workspace } }),
+      permission: workspaceWrite,
+      policy: createDecisionChain({ mode: 'ask', ask: async () => ({ decision: 'deny', source: 'human' }) }),
+    });
+    kernel.register(deleteTool);
+    await assert.rejects(kernel.call('delete', { path: 'note.txt' }), { code: 'ask_declined' });
+    assert.equal(await readFile(join(workspace, 'note.txt'), 'utf8'), 'keep me');
+  });
+});
+
+test('delete refuses a target changed while Policy approval is pending', async () => {
+  await withWorkspace(async (workspace) => {
+    const target = join(workspace, 'note.txt');
+    await writeFile(target, 'original content');
+    const kernel = createKernel({
+      config: createConfig({ user: { boundary: workspace } }),
+      permission: workspaceWrite,
+      policy: createDecisionChain({ mode: 'ask', ask: async () => {
+        await writeFile(target, 'changed while waiting');
+        return { decision: 'allow', source: 'human' };
+      } }),
+    });
+    kernel.register(deleteTool);
+    await assert.rejects(kernel.call('delete', { path: 'note.txt' }), { code: 'delete_target_changed' });
+    assert.equal(await readFile(target, 'utf8'), 'changed while waiting');
+  });
+});
+
+test('concurrent delete calls keep per-call snapshots when they share the same argument object', async () => {
+  await withWorkspace(async (workspace) => {
+    const target = join(workspace, 'note.txt');
+    await writeFile(target, 'original content');
+    let signalFirstApproval;
+    let approveFirst;
+    const firstApproval = new Promise((resolve) => { signalFirstApproval = resolve; });
+    const firstDecision = new Promise((resolve) => { approveFirst = resolve; });
+    const firstKernel = createKernel({
+      config: createConfig({ user: { boundary: workspace } }),
+      permission: workspaceWrite,
+      policy: createDecisionChain({ mode: 'ask', ask: async () => {
+        signalFirstApproval();
+        return firstDecision;
+      } }),
+    });
+    const secondKernel = createKernel({
+      config: createConfig({ user: { boundary: workspace } }),
+      permission: workspaceWrite,
+      policy: createDecisionChain({ mode: 'ask', ask: async () => ({ decision: 'deny', source: 'human' }) }),
+    });
+    firstKernel.register(deleteTool);
+    secondKernel.register(deleteTool);
+    const sharedArguments = { path: 'note.txt' };
+    const first = firstKernel.call('delete', sharedArguments);
+    await firstApproval;
+    await rm(target);
+    await writeFile(target, 'replacement during first approval');
+    await assert.rejects(secondKernel.call('delete', sharedArguments), { code: 'ask_declined' });
+    approveFirst({ decision: 'allow', source: 'human' });
+    await assert.rejects(first, { code: 'delete_target_changed' });
+    assert.equal(await readFile(target, 'utf8'), 'replacement during first approval');
+  });
+});
+
+test('legacy trash backend configuration is refused with an actionable code', async () => {
   await withWorkspace(async (workspace) => {
     await writeFile(join(workspace, 'note.txt'), 'keep me');
     await assert.rejects(
       () => deleteTool.run({ path: 'note.txt' }, context(workspace, undefined, { trashBackend: 'shred' })),
-      (error) => error.code === 'delete_trash_backend_unknown',
+      (error) => error.code === 'trash_legacy_config_unsupported',
     );
     assert.equal(await readFile(join(workspace, 'note.txt'), 'utf8'), 'keep me');
   });
@@ -305,8 +370,7 @@ test('delete refuses the boundary itself and a target that is not there', async 
 
 function observed(workspace, limits) {
   const observations = createObservationLog();
-  // 删除钉在项目内那个目录上：这一组测试要看的是观察记录，不该把文件送进系统回收站。
-  return { config: { boundary: workspace, limits, trashBackend: 'managed' }, logger: silentLogger, observations };
+  return { config: { boundary: workspace, limits }, logger: silentLogger, observations };
 }
 
 test('write replaces the whole content of a file observed in this run', async () => {

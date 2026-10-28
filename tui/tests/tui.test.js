@@ -520,7 +520,7 @@ test('an exec result names its exit code and a spilled one names its file', opti
 test('the approval box sums the change instead of dumping the payload', options, () => {
   assert.equal(changeSummary('write', { path: 'note.txt', content: 'a\nb\nc' }), 'note.txt：写入 3 行');
   assert.equal(changeSummary('edit', { path: 'note.txt', anchor: 'a\nb', replacement: 'x' }), 'note.txt：替换 2 行，写入 1 行');
-  assert.equal(changeSummary('delete', { path: 'note.txt' }), '将 note.txt 移入回收站');
+  assert.equal(changeSummary('delete', { path: 'note.txt' }), '将 note.txt 移入系统回收站');
   assert.equal(changeSummary('exec', { command: 'ls' }), '', '命令那一行文本由 detail 那一条说，这里不重复');
   assert.equal(changeSummary('write', { content: 'a\nb' }), '', '参数里没有路径就不编造一个对象');
   // 审批详情只展示工具参数提供的内容；未读取的正文和已删除文件的内容不显示。
