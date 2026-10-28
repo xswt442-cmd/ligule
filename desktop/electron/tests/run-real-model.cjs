@@ -290,7 +290,7 @@ async function verifyExternalSessionControl() {
   const { StdioClientTransport } = coreRequire('@modelcontextprotocol/sdk/client/stdio.js');
   const runtimeNode = process.env.LIGULE_RUNTIME_NODE;
   if (typeof runtimeNode !== 'string' || runtimeNode === '') throw Object.assign(new Error('external_control_runtime_node_missing'), { code: 'external_control_runtime_node_missing' });
-  const mcpFixture = join(repositoryRoot, 'core', 'test', 'fixtures', 'agent-control-mcp-server.mjs');
+  const mcpFixture = join(repositoryRoot, 'core', 'tests', 'fixtures', 'agent-control-mcp-server.mjs');
   const trust = await import(pathToFileURL(join(repositoryRoot, 'core', 'dist', 'kernel', 'workspace-trust.js')).href);
   const agentControl = await import(pathToFileURL(join(repositoryRoot, 'core', 'dist', 'host', 'agent-control.js')).href);
   const previousSessionId = sessionId;

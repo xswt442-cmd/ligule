@@ -167,7 +167,7 @@ test('a bare invocation and the explicit tui alias both require an interactive t
 });
 
 test('--config narrows the boundary from the command line and a valueless flag is refused', () => {
-  const scoped = capture('call', 'find', JSON.stringify({ pattern: '*.js', path: 'test' }), '--config', 'boundary = "test"');
+  const scoped = capture('call', 'find', JSON.stringify({ pattern: '*.js', path: 'tests' }), '--config', 'boundary = "tests"');
   assert.ok(scoped.ok, scoped.stderr);
   assert.match(scoped.stdout, /^cli\.test\.js$/m);
   assert.doesNotMatch(scoped.stdout, /src/);
