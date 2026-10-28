@@ -11,6 +11,7 @@ import { spillContent } from '../../core/dist/kernel/result.js';
 const repository = fileURLToPath(new URL('../../', import.meta.url));
 const corePackage = join(repository, 'core');
 const helperSource = fileURLToPath(new URL('./export_session.mjs', import.meta.url));
+const temporaryRoot = process.env.LIGULE_EVAL_TEMP_DIR ?? tmpdir();
 
 async function packagedHelper(root) {
   const packageRoot = join(root, 'node_modules', 'ligule');
@@ -50,7 +51,7 @@ async function seedSession(homeDirectory) {
 }
 
 test('reads a real trial Session, restores a spill, and exports through the Core package subpath', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'ligule-harbor-atif-'));
+  const root = await mkdtemp(join(temporaryRoot, 'ligule-harbor-atif-'));
   try {
     const helper = await packagedHelper(root);
     const homeDirectory = join(root, 'trial-home');
@@ -94,7 +95,7 @@ test('reads a real trial Session, restores a spill, and exports through the Core
 });
 
 test('rejects missing spill content and never emits a partial trajectory', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'ligule-harbor-atif-missing-'));
+  const root = await mkdtemp(join(temporaryRoot, 'ligule-harbor-atif-missing-'));
   try {
     const helper = await packagedHelper(root);
     const homeDirectory = join(root, 'trial-home');
@@ -115,7 +116,7 @@ test('rejects missing spill content and never emits a partial trajectory', async
 });
 
 test('rejects a claimed state that differs from the canonical Session terminal', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'ligule-harbor-atif-state-'));
+  const root = await mkdtemp(join(temporaryRoot, 'ligule-harbor-atif-state-'));
   try {
     const helper = await packagedHelper(root);
     const homeDirectory = join(root, 'trial-home');
@@ -134,7 +135,7 @@ test('rejects a claimed state that differs from the canonical Session terminal',
 });
 
 test('machine CLI parser filters response bodies and rejects localized output', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'ligule-harbor-cli-'));
+  const root = await mkdtemp(join(temporaryRoot, 'ligule-harbor-cli-'));
   try {
     const helper = await packagedHelper(root);
     const parsed = helper.parseCliResult(JSON.stringify({
@@ -169,6 +170,7 @@ test('machine CLI parser filters response bodies and rejects localized output', 
       requestTimeoutMs: 10_000,
     });
     assert.equal(argv.at(-1), 'solve the public task');
+    assert.ok(argv.includes('--allow-full-access'));
     assert.ok(argv.includes('loop.totalModelCalls=5'));
     assert.ok(argv.includes('policy.mode="auto"'));
     assert.throws(() => helper.buildCliArgs({
@@ -181,7 +183,7 @@ test('machine CLI parser filters response bodies and rejects localized output', 
 });
 
 test('terminates the CLI process group when its runtime budget expires', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'ligule-harbor-cancel-'));
+  const root = await mkdtemp(join(temporaryRoot, 'ligule-harbor-cancel-'));
   try {
     const helper = await packagedHelper(root);
     const child = await helper.runCli(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {

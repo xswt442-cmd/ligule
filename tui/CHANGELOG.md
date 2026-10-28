@@ -8,6 +8,9 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ### 简体中文
 
+- `ligule run --json` 输出可校验的 Host 终态与调用统计，不输出回答正文；必须在命令行显式加 `--allow-full-access` 才会使用当前操作系统用户的完整权限运行，并且没有 OS 沙箱。Policy 的审批和拒绝规则继续生效。
+- `[loop].maxConcurrentSubagents` 可在 1–8 间设置内部子代理并发数，默认 3；任务可设置默认 12 小时的累计交互等待上限，只有所有工作都被交互阻塞时才暂停执行期限。
+- Session 用量保留提供方明确上报的缓存命中、未命中与输出字段；缺失的总量和成本仍为未知，不按账户日账单推算单次 Run 费用。
 - 外控委派支持持久 `runId` 回执、`requestKey` 去重与 `ligule_run_get` 查询，重启后可读取已保存的结果或中断状态，不自动重跑任务。
 - CLI/TUI 显示已确认的文件交付。`ligule storage inspect` 检查工作区数据；交互式 `storage cleanup` 分页核查历史引用、预览并确认删除过期截图及带归属/租约验证的受管残留（未知旧目录保留）。
 
@@ -28,6 +31,9 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ### English
 
+- `ligule run --json` emits a verifiable Host terminal state and call counts without response text. Full local permissions require the explicit `--allow-full-access` flag and run as the current OS user without an OS sandbox. Policy approvals and denials still apply.
+- `[loop].maxConcurrentSubagents` sets internal subagent concurrency from 1 to 8 (default 3). Tasks also have a cumulative interaction-wait limit of 12 hours by default; the execution deadline pauses only while all work is blocked on interaction.
+- Session usage preserves provider-reported cache hit, miss, and output fields. Missing totals and costs remain unknown; account-wide daily billing is not attributed to a single run.
 - External delegation adds durable `runId` receipts, `requestKey` deduplication and `ligule_run_get` for result or interruption lookup after restart, without automatic replay.
 - CLI/TUI display confirmed file deliveries. `ligule storage inspect` reports Workspace data; interactive `storage cleanup` pages Session references and confirms old screenshots or owner/lease-verified managed residue, preserving unknown legacy folders.
 

@@ -12,6 +12,7 @@
     "test:integration": "node --experimental-strip-types --test --test-concurrency=1 --import ./tests/hooks/isolated-data-root.mjs tests/*.test.js tests/*.test.ts",
     "test:engineering": "node --test .github/engineering/tests/*.test.mjs",
     "test": "pnpm run build && pnpm run test:core && pnpm run test:tui && pnpm run test:integration && pnpm run test:engineering",
+    "eval:smoke": "node scripts/eval-smoke.mjs",
     "check-pack": "pnpm --filter ligule run check-pack",
     "verify-install": "pnpm --filter ligule run verify-install",
     "check:syntax": "node scripts/check-js-syntax.mjs",

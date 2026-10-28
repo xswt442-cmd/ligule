@@ -1,6 +1,7 @@
 import asyncio
 import json
 import io
+import os
 import tempfile
 import tarfile
 import unittest
@@ -8,6 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from ligule_agent import LiguleAgent, TARBALL_TARGET, release_manifest
+
+TEMP_ROOT = Path(os.environ.get("LIGULE_EVAL_TEMP_DIR", Path(__file__).resolve().parents[3] / "testplace" / "tmp"))
 
 
 def make_tarball(path: Path, manifest: dict[str, str]) -> None:
@@ -54,7 +57,7 @@ class FakeEnvironment:
 
 class HarborAdapterTests(unittest.TestCase):
     def test_tarball_identity_is_read_from_the_supplied_archive(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=TEMP_ROOT) as directory:
             tarball = Path(directory) / "ligule-build.tgz"
             make_tarball(tarball, {"name": "ligule", "version": "0.1.1-dev"})
             info = release_manifest(tarball)
@@ -63,7 +66,7 @@ class HarborAdapterTests(unittest.TestCase):
             self.assertEqual(len(info["sha256"]), 64)
 
     def test_adapter_uses_harbor_025_capability_and_tarball_version(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=TEMP_ROOT) as directory:
             tarball = Path(directory) / "ligule-build.tgz"
             make_tarball(tarball, {"name": "ligule", "version": "0.1.1-dev"})
             agent = LiguleAgent(
@@ -79,7 +82,7 @@ class HarborAdapterTests(unittest.TestCase):
             self.assertEqual(agent.ligule_model, "test-model")
 
     def test_run_budgets_must_be_positive_and_bounded(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=TEMP_ROOT) as directory:
             tarball = Path(directory) / "ligule-build.tgz"
             make_tarball(tarball, {"name": "ligule", "version": "0.1.1-dev"})
             with self.assertRaisesRegex(ValueError, "model_calls_out_of_range"):
@@ -93,7 +96,7 @@ class HarborAdapterTests(unittest.TestCase):
                 )
 
     def test_non_root_install_owns_only_the_empty_install_prefix(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=TEMP_ROOT) as directory:
             tarball = Path(directory) / "ligule-build.tgz"
             make_tarball(tarball, {"name": "ligule", "version": "0.1.1-dev"})
             agent = LiguleAgent(
@@ -123,7 +126,7 @@ class HarborAdapterTests(unittest.TestCase):
                 "npm install --prefix /installed-agent") for _user, command in environment.commands))
 
     def test_nonempty_install_prefix_is_refused_without_recursive_chown(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=TEMP_ROOT) as directory:
             tarball = Path(directory) / "ligule-build.tgz"
             make_tarball(tarball, {"name": "ligule", "version": "0.1.1-dev"})
             agent = LiguleAgent(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -16,7 +17,7 @@ from report import ReportInputError, write_report
 
 
 WORKSPACE = Path(__file__).resolve().parents[3]
-TEMP_ROOT = WORKSPACE / "testplace" / "tmp"
+TEMP_ROOT = Path(os.environ.get("LIGULE_EVAL_TEMP_DIR", WORKSPACE / "testplace" / "tmp"))
 
 
 def harbor_result(

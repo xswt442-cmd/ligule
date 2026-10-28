@@ -299,7 +299,7 @@ export function buildCliArgs({ instruction, sessionDirectory, api, baseUrl, mode
     ['policy.mode', 'auto'],
   ];
   return [
-    'run', '--json',
+    'run', '--json', '--allow-full-access',
     ...values.flatMap(([key, value]) => ['--config', `${key}=${typeof value === 'string' ? JSON.stringify(value) : String(value)}`]),
     instruction,
   ];

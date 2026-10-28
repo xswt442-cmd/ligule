@@ -32,7 +32,9 @@ Reports omit generation timestamps and hash the manifest and referenced evidence
 
 ```sh
 uv run --no-project --with harbor==0.25.0 python evals/report/report.py <input-folder> --output-dir <report-folder>
-uv run --no-project --with harbor==0.25.0 python -m unittest discover -s evals/report -p 'test_*.py'
+uv run --no-project --with harbor==0.25.0 python evals/report/test_report.py
 ```
 
 The offline tests create Harbor-validated result files and a real folder fixture under `testplace/tmp`; they do not call paid services.
+
+Run the full no-paid-service smoke from the repository root with `pnpm run eval:smoke`. It builds the TypeScript workspace, runs the Harbor/ATIF/CLI and report fixtures, and validates a generated trajectory with Harbor `0.25.0`; it does not download tasks, start Docker, or contact a model provider. It requires `pnpm`, `uv`, and package-index network access when the per-run temporary Harbor cache is cold.
