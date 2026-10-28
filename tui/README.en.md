@@ -31,6 +31,8 @@ ligule run --json "Review the project structure and suggest improvements"
 
 The result includes `status`, `state` from the Host's persisted Session terminal event, `sessionId`, the `runId` returned by the Host or recorded in its acceptance event, and model-call counts. Failures include a stable `errorCode` and exit non-zero. If no terminal event can be verified, `state` is `unknown`. The JSON output omits response text, prompts, and tool content.
 
+CLI one-off runs are read-only by default. Add `--allow-full-access` to `ligule run` only when you explicitly want full local file, process, and network permissions for that run. Shell commands execute as the current OS user; this flag does not provide an OS sandbox. It is valid only for `run` and cannot be enabled by project configuration or model output. Policy approvals, denial rules, and dangerous-command hard denials still apply.
+
 Run `ligule` to open the interactive TUI for ongoing conversations, session and approval review, and model or tool-mode selection.
 
 ## Terminal workflows

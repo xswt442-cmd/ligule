@@ -31,6 +31,8 @@ ligule run --json "检查项目结构并提出建议"
 
 结果包含 `status`、Host 持久 Session 终态事件中的 `state`、`sessionId`、Host 返回或接受事件记录的 `runId` 和模型调用计数；失败时输出稳定 `errorCode` 并以非零状态退出。未能验证终态事件时 `state` 为 `unknown`。回答正文、提示词和工具内容不会写入 JSON 输出。
 
+CLI 单轮任务默认只读。只有明确使用 `ligule run --allow-full-access "..."` 才会为本次运行启用本机完整文件、进程和网络权限；Shell 命令以当前操作系统用户身份执行，不提供 OS 沙箱。此标志仅适用于 `run`，不能通过项目配置或模型调用启用。它不会绕过 Policy 审批、规则拒绝或危险命令硬拒绝。
+
 运行 `ligule` 打开交互式 TUI，可进行持续对话、查看会话与审批，并选择模型及工具模式。
 
 ## 终端工作方式

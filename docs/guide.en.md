@@ -42,6 +42,8 @@ After installation, run `ligule --version` to check the CLI and TUI version. The
 
 From a project directory, run `ligule run "Review the project structure and suggest improvements"` to make one request. For daily use, run `ligule` to open the terminal UI or launch the installed ligule desktop app. `ligule tui` remains available as a compatibility command. The terminal UI requires an interactive terminal; use `ligule run` in scripts and pipelines.
 
+CLI one-off runs are read-only by default. Use `ligule run --allow-full-access "..."` only when you explicitly want full local file, process, and network permissions for that run. Shell commands execute as the current OS user without an OS sandbox. The flag is valid only for `run`; project configuration and model output cannot enable it, and it does not bypass Policy approvals, denial rules, or dangerous-command hard denials.
+
 Run `ligule --help` to list commands. `ligule sessions` lists sessions for the current project, `ligule workspaces` lists registered workspaces, and `ligule tools`, `ligule skills`, and `ligule extensions` show loaded capabilities.
 
 ### Workspaces and data

@@ -110,6 +110,7 @@ def manifest() -> dict[str, object]:
             "provider": "fixture-provider",
             "config_sha256": None,
             "tool_mode": "read-only",
+            "policy_mode": "auto",
             "permissions": {"filesystem": "read-only", "network": "disabled"},
             "limits": {"model_calls": 3, "timeout_ms": 60000},
             "node_version": None,
@@ -262,6 +263,16 @@ class ReportTests(unittest.TestCase):
             value["verifier"]["result_schema"] = "unknown"
             write_json(root / "manifest.json", value)
             with self.assertRaisesRegex(ReportInputError, "harbor_result_schema_unconfirmed"):
+                write_report(root, Path(temporary) / "output")
+
+    def test_policy_must_match_the_adapter_policy(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ligule-eval-report-policy-", dir=TEMP_ROOT) as temporary:
+            root = Path(temporary) / "input"
+            root.mkdir()
+            value = manifest()
+            value["experiment"]["policy_mode"] = "ask"
+            write_json(root / "manifest.json", value)
+            with self.assertRaisesRegex(ReportInputError, "experiment_policy_mode_invalid"):
                 write_report(root, Path(temporary) / "output")
 
     def test_missing_result_file_is_not_silently_counted_as_not_run(self) -> None:

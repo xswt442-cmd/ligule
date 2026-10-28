@@ -170,6 +170,7 @@ test('machine CLI parser filters response bodies and rejects localized output', 
     });
     assert.equal(argv.at(-1), 'solve the public task');
     assert.ok(argv.includes('loop.totalModelCalls=5'));
+    assert.ok(argv.includes('policy.mode="auto"'));
     assert.throws(() => helper.buildCliArgs({
       instruction: 'x', sessionDirectory: '/tmp/sessions', api: 'messages', baseUrl: 'https://api.example.test',
       model: 'x', apiKeyEnv: 'LIGULE_API_KEY', modelCalls: 0, timeoutMs: 1000, requestTimeoutMs: 1000,

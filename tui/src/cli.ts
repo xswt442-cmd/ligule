@@ -10,7 +10,8 @@ import { languageOf, textOf, type Locale } from '@ligule/core/kernel/locale.js';
 import { loadConfigLayers } from '@ligule/core/kernel/config-file.js';
 import { createConfigStore } from '@ligule/core/kernel/config-store.js';
 import { createKernel } from '@ligule/core/kernel/kernel.js';
-import { createInteractivePermissionContext } from '@ligule/core/capability/permission-capabilities.js';
+import { createInteractivePermissionContext, detectPermissionCapabilities } from '@ligule/core/capability/permission-capabilities.js';
+import { createPermissionContext, type PermissionContext } from '@ligule/core/kernel/permission.js';
 import { loadAssembly } from '@ligule/core/kernel/assembly.js';
 import { DEFAULT_MODE, modeDirectories } from '@ligule/core/kernel/modes.js';
 import { extensionSources } from '@ligule/core/kernel/extensions.js';
@@ -134,8 +135,13 @@ let langFlag: string | undefined;
 let jsonFlag = false;
 let operatorFlag = false;
 let screenCaptureFlag = false;
+let fullAccessFlag = false;
 for (let index = 0; index < argv.length; index += 1) {
   const arg = argv[index];
+  if (arg === '--allow-full-access') {
+    fullAccessFlag = true;
+    continue;
+  }
   if (arg === '--allow-screen-capture') {
     screenCaptureFlag = true;
     continue;
@@ -265,6 +271,17 @@ async function configSnapshot(projectRoot = process.cwd()): Promise<{ config: Cl
 // 将模式名称和搜索目录交给 Host 加载，使启动和运行时切换使用相同规则。
 function resolveMode(config: CliConfig): { modeName: string; modePaths: ModeDirectories } {
   return { modeName: modeFlag ?? config.mode ?? DEFAULT_MODE, modePaths: modeDirectories(process.cwd(), shippedModes) };
+}
+
+async function fullAccessPermission(config: CliConfig): Promise<PermissionContext> {
+  const snapshot = await detectPermissionCapabilities({ shellConfig: config, workspaceRoot: config.workspaceRoot });
+  return createPermissionContext('full-access', 'unrestricted', snapshot.capabilities, {
+    profiles: snapshot.profiles,
+    limitations: [
+      ...snapshot.limitations,
+      'CLI full-access runs execute local commands as the current OS user without an OS sandbox.',
+    ],
+  });
 }
 
 // Host 可按项目根为多个项目分别加载环境，复用 CLI 启动时相同的配置、提供方、模式和扩展解析逻辑。
@@ -407,8 +424,11 @@ async function runOneRound(
   layers: Awaited<ReturnType<typeof configSnapshot>>['layers'],
   text: string,
   sessionId?: string,
+  allowFullAccess = false,
 ): Promise<Record<string, unknown>> {
-  const host = createHost({ config, provider: providerFromConfig(config), policy: config.policy, extensions, configLayers: layers, screenCaptureConsent: screenCaptureFlag, ...selection });
+  const permission = allowFullAccess ? await fullAccessPermission(config) : undefined;
+  const host = createHost({ config, provider: providerFromConfig(config), policy: config.policy, extensions, configLayers: layers,
+    ...(permission === undefined ? {} : { permission }), screenCaptureConsent: screenCaptureFlag, ...selection });
   const approvals = terminalApprovals();
   const connection: Pick<Connection, 'notify' | 'request'> = {
     notify: machineRunOutput ? () => {} : printNotification,
@@ -539,6 +559,8 @@ if (invalidLanguage) {
   printFailure('cli_grant_requires_mcp_server', t('--grant 只能与 mcp-server 一起使用', '--grant is only valid with mcp-server'));
 } else if (screenCaptureFlag && command !== undefined && !['run', 'resume', 'tui'].includes(command)) {
   printFailure('cli_screen_capture_flag_not_allowed', t('--allow-screen-capture 仅用于 run、resume 或 tui；MCP 截图须由可信界面明确创建授权。', '--allow-screen-capture is only valid for run, resume or tui; MCP screen capture requires a grant explicitly created in a trusted interface.'));
+} else if (fullAccessFlag && command !== 'run') {
+  printFailure('cli_full_access_flag_not_allowed', t('--allow-full-access 只能与 run 一起使用', '--allow-full-access is only valid with run'));
 } else if (operatorFlag && command !== 'mcp-server') {
   printFailure('cli_operator_requires_mcp_server', t('--operator 只能与 mcp-server 一起使用', '--operator is only valid with mcp-server'));
 } else if (command === '--version' || command === '-v') {
@@ -616,7 +638,7 @@ if (invalidLanguage) {
   } else {
     try {
       const { config, extensions, layers } = await configSnapshot();
-      const outcome = await runOneRound(config, resolveMode(config), extensions, layers, text);
+      const outcome = await runOneRound(config, resolveMode(config), extensions, layers, text, undefined, fullAccessFlag);
       if (machineRunOutput) {
         console.log(JSON.stringify(outcome));
         if (outcome.status !== 'completed') process.exitCode = 1;
@@ -867,6 +889,8 @@ if (invalidLanguage) {
   console.log(t('mcp-server --project <绝对目录>：启动本地 stdio MCP 控制器；默认只读。使用 --grant <ID> 引用可信界面预先创建的外控授权。', 'mcp-server --project <absolute-directory>: start a local stdio MCP controller; read-only by default. Use --grant <ID> to reference a grant created in a trusted interface.'));
   console.log(t('mcp-server --operator：明确授权该本地 MCP 客户端读取并回应真实待决的审批/提问，以及修改会话级设置；Policy 的拒绝规则仍生效。', 'mcp-server --operator: authorize this local MCP client to review and answer real pending approvals/questions and change session settings; Policy denials remain in force.'));
   console.log(t('run/resume/tui --allow-screen-capture：明确允许本进程的会话及内部子代理截图；不改变工具模式、Shell 权限或其他授权。', 'run/resume/tui --allow-screen-capture: explicitly permit screen capture by this process’s Sessions and internal children; tool modes, shell permissions and other grants remain independent.'));
+  console.log(t('run --allow-full-access：本次 run 明确使用本机完整文件、进程和网络权限；命令以当前操作系统用户身份运行，不提供 OS 沙箱。Policy 审批和拒绝规则仍生效；此选项不受配置文件控制。',
+    'run --allow-full-access: explicitly grant this run full local file, process, and network permissions. Commands run as the current OS user without an OS sandbox. Policy approvals and denials still apply; config files cannot enable this option.'));
   console.log(t('选项：--config <key.path=value>（可重复）、--mode <name>、--project <绝对目录>、--grant <ID>、--operator、--json、--lang <zh|en|auto>', 'Options: --config <key.path=value> (repeatable), --mode <name>, --project <absolute-directory>, --grant <ID>, --operator, --json, --lang <zh|en|auto>'));
   console.log(t('--json 与 run 一起使用时输出机器可读终态，不包含回答正文；失败以非零状态退出。', '--json with run prints a machine-readable terminal result without response text; failures exit non-zero.'));
   console.log(t('run、tui 和 host 从配置读取 model.api、model.baseURL 与 model.model；密钥由 model.apiKeyEnv 指定，未设置时读取 LIGULE_API_KEY。', 'run, tui and host read model.api, model.baseURL and model.model from config; the key uses model.apiKeyEnv, or LIGULE_API_KEY when unset.'));

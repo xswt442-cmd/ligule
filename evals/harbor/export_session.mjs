@@ -296,6 +296,7 @@ export function buildCliArgs({ instruction, sessionDirectory, api, baseUrl, mode
     ['host.sessionDirectory', sessionDirectory], ['model.api', api], ['model.baseURL', baseUrl],
     ['model.model', model], ['model.apiKeyEnv', apiKeyEnv], ['loop.modelCalls', modelCalls],
     ['loop.totalModelCalls', modelCalls], ['loop.taskTimeoutMs', timeoutMs], ['loop.requestTimeoutMs', requestTimeoutMs],
+    ['policy.mode', 'auto'],
   ];
   return [
     'run', '--json',

@@ -2,7 +2,7 @@ import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -25,8 +25,12 @@ function capture(...args) {
 }
 
 function captureAsync(env, ...args) {
+  return captureAsyncAt(repo, env, ...args);
+}
+
+function captureAsyncAt(cwd, env, ...args) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [cli, ...args], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [cli, ...args], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
@@ -34,6 +38,68 @@ function captureAsync(env, ...args) {
     child.once('error', reject);
     child.once('close', (status) => resolve({ status, stdout, stderr }));
   });
+}
+
+async function withToolModelServer(run, { name, args }) {
+  let sentToolCall = false;
+  let root;
+  const server = createServer(async (request, response) => {
+    try {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      const frames = sentToolCall
+        ? [
+          { choices: [{ index: 0, delta: { content: 'Local tool run complete.' } }] },
+          { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+          { choices: [], usage: { prompt_tokens: 8, completion_tokens: 4 } },
+        ]
+        : [
+          { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'cli-local-tool-call', type: 'function', function: { name, arguments: JSON.stringify(args) } }] } }] },
+          { choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] },
+          { choices: [], usage: { prompt_tokens: 8, completion_tokens: 4 } },
+        ];
+      sentToolCall = true;
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.end(`${frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join('')}data: [DONE]\n\n`);
+    } catch (error) {
+      response.writeHead(500, { 'content-type': 'text/plain' });
+      response.end(error.message);
+    }
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+    root = mkdtempSync(join(tmpdir(), 'ligule-cli-full-access-'));
+    const project = join(root, 'project');
+    const home = join(root, 'home');
+    const sessions = join(root, 'sessions');
+    mkdirSync(project, { recursive: true });
+    mkdirSync(home, { recursive: true });
+    mkdirSync(sessions, { recursive: true });
+    const env = { ...childEnv, HOME: home, USERPROFILE: home, LIGULE_HOME: join(home, '.ligule') };
+    const configArgs = [
+      '--config', 'model.api = "chat-completions"',
+      '--config', `model.baseURL = "http://127.0.0.1:${address.port}/v1"`,
+      '--config', 'model.model = "cli-local-tool-test"',
+      '--config', 'model.apiKeyEnv = "LIGULE_CLI_TEST_API_KEY"',
+      '--config', `host.sessionDirectory = ${JSON.stringify(sessions)}`,
+      '--config', 'policy.mode = "auto"',
+    ];
+    env.LIGULE_CLI_TEST_API_KEY = 'test-only-key';
+    await run({ root, project, sessions, env, configArgs });
+  } finally {
+    try {
+      server.closeAllConnections();
+      await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    } finally {
+      if (root !== undefined) rmSync(root, { recursive: true, force: true });
+    }
+  }
 }
 
 async function withModelServer(run) {
@@ -142,6 +208,56 @@ test('run --json emits a verified Host receipt and omits model response text', a
   });
 });
 
+test('run is read-only by default and full access requires its explicit flag', async () => {
+  await withToolModelServer(async ({ project, sessions, env, configArgs }) => {
+    const result = await captureAsyncAt(project, env, 'run', '--json', 'write a file', ...configArgs);
+    assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+    const receipt = JSON.parse(result.stdout);
+    const events = readFileSync(join(sessions, `${receipt.sessionId}.jsonl`), 'utf8').trim().split('\n').map(JSON.parse);
+    const refusal = events.find(event => event.kind === 'tool' && event.tool === 'create');
+    assert.equal(refusal?.result?.code, 'permission_read_only');
+    assert.equal(existsSync(join(project, 'created-by-cli.txt')), false);
+  }, { name: 'create', args: { path: 'created-by-cli.txt', content: 'CREATE_SENTINEL' } });
+
+  await withToolModelServer(async ({ project, env, configArgs }) => {
+    const result = await captureAsyncAt(project, env, 'run', '--allow-full-access', '--json', 'write a file', ...configArgs);
+    assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+    assert.equal(readFileSync(join(project, 'created-by-cli.txt'), 'utf8'), 'CREATE_SENTINEL');
+  }, { name: 'create', args: { path: 'created-by-cli.txt', content: 'CREATE_SENTINEL' } });
+});
+
+test('explicit full access permits a controlled local Shell command but Policy denial still wins', async () => {
+  const command = process.platform === 'win32'
+    ? "Set-Content -LiteralPath exec-created.txt -Value EXEC_SENTINEL"
+    : "printf '%s' EXEC_SENTINEL > exec-created.txt";
+  await withToolModelServer(async ({ project, env, configArgs }) => {
+    const result = await captureAsyncAt(project, env, 'run', '--allow-full-access', '--json', 'run a controlled local command', ...configArgs);
+    assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+    assert.equal(readFileSync(join(project, 'exec-created.txt'), 'utf8').trim(), 'EXEC_SENTINEL');
+  }, { name: 'exec', args: { command } });
+
+  await withToolModelServer(async ({ project, sessions, env, configArgs }) => {
+    mkdirSync(join(project, '.ligule'), { recursive: true });
+    writeFileSync(join(project, '.ligule', 'config.toml'), [
+      '[policy]',
+      'mode = "auto"',
+      '',
+      '[[policy.rules]]',
+      'tool = "exec"',
+      'decision = "deny"',
+      `match = ${JSON.stringify(command)}`,
+      '',
+    ].join('\n'));
+    const result = await captureAsyncAt(project, env, 'run', '--allow-full-access', '--json', 'run a policy-denied command', ...configArgs);
+    assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+    const receipt = JSON.parse(result.stdout);
+    const events = readFileSync(join(sessions, `${receipt.sessionId}.jsonl`), 'utf8').trim().split('\n').map(JSON.parse);
+    const denied = events.find(event => event.kind === 'tool' && event.tool === 'exec');
+    assert.equal(denied?.result?.code, 'policy_denied');
+    assert.equal(existsSync(join(project, 'exec-created.txt')), false);
+  }, { name: 'exec', args: { command } });
+});
+
 // 未知命令应返回非零退出码，供终端用户和调用脚本识别错误。
 test('an unknown command fails, while explicit help remains available', () => {
   const unknown = capture('frobnicate');
@@ -241,6 +357,10 @@ test('ui.language selects CLI text and --lang overrides it', () => {
 });
 
 test('CLI argument errors use the selected language and retain stable codes', () => {
+  const invalidFullAccess = capture('tools', '--allow-full-access');
+  assert.equal(invalidFullAccess.ok, false);
+  assert.match(invalidFullAccess.stderr, /cli_full_access_flag_not_allowed/u);
+
   const chinese = capture('run', '--lang', 'zh');
   assert.equal(chinese.ok, false);
   assert.match(chinese.stderr, /cli_run_needs_the_user_text: run 需要用户消息/);

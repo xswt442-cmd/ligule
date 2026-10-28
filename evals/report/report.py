@@ -162,7 +162,7 @@ def _check_manifest(raw: Any) -> dict[str, Any]:
     experiment_fields = {
         "id", "git_sha", "working_tree_dirty", "runner_name", "runner_version",
         "dataset_id", "dataset_revision", "docker_image_digest", "model_id", "provider",
-        "config_sha256", "tool_mode", "permissions", "limits", "node_version", "os",
+        "config_sha256", "tool_mode", "policy_mode", "permissions", "limits", "node_version", "os",
         "started_at", "finished_at", "expected_evaluation",
     }
     _keys(experiment, experiment_fields, "experiment")
@@ -175,6 +175,8 @@ def _check_manifest(raw: Any) -> dict[str, Any]:
         _fail("harbor_version_unsupported")
     for field in ("dataset_id", "dataset_revision", "tool_mode", "expected_evaluation"):
         _text(experiment[field], f"experiment_{field}")
+    if experiment["policy_mode"] != "auto":
+        _fail("experiment_policy_mode_invalid")
     for field in ("docker_image_digest", "model_id", "provider", "node_version", "os"):
         _nullable_text(experiment[field], f"experiment_{field}")
     image_digest = experiment["docker_image_digest"]

@@ -42,6 +42,8 @@ npm install -g ligule
 
 在项目目录中运行 `ligule run "查看项目结构并提出建议"`，可以执行一轮对话。日常使用可以直接运行 `ligule` 打开终端界面，或启动已安装的 ligule 桌面版。`ligule tui` 仍可作为终端界面的兼容命令。终端界面需要交互式终端；脚本和管道使用 `ligule run`。
 
+CLI 单轮任务默认只读。只有明确使用 `ligule run --allow-full-access "..."` 才会为本次运行启用本机完整文件、进程和网络权限；Shell 命令以当前操作系统用户身份执行，不提供 OS 沙箱。此标志仅适用于 `run`，不能通过项目配置或模型调用启用，也不会绕过 Policy 审批、拒绝规则或危险命令硬拒绝。
+
 使用 `ligule --help` 查看命令。`ligule sessions` 列出当前项目的会话，`ligule workspaces` 列出已登记的工作区，`ligule tools`、`ligule skills` 和 `ligule extensions` 查看已加载的能力。
 
 ### 工作区和数据
