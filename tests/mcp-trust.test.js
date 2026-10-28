@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTrusted, isTrusted } from '../core/dist/kernel/workspace-trust.js';
-import { connectMcp } from '../test/helpers/mcp-control.mjs';
+import { connectMcp } from './helpers/mcp-control.mjs';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const cliPath = join(repo, 'tui/dist/cli.js');

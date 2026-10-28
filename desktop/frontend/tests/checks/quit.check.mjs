@@ -1,6 +1,6 @@
 // 检查退出提示是否列出所有会被退出操作影响的会话及原因。
 import assert from 'node:assert/strict';
-import { blockedSessions } from '../src/quit.ts';
+import { blockedSessions } from '../../src/quit.ts';
 
 // 没有运行中或待处理的内容时，不应阻止退出。
 assert.deepEqual(blockedSessions({ running: [], approvals: [], questions: [], queued: {} }), []);

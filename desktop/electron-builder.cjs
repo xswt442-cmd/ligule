@@ -53,6 +53,7 @@ module.exports = {
     'electron/dist/**/*.js',
     '!electron/dist/host-entry.js',
     '!electron/dist/test/**',
+    '!electron/dist/tests/**',
     'frontend/dist/**/*',
     'icons/**/*',
     'package.json',

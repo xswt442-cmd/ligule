@@ -1,6 +1,6 @@
 // 检查侧栏的工作区分组、顺序和工作区列表读取。
 import assert from 'node:assert/strict';
-import { createCallOf, groupByWorkspace, loadWorkspacePages, visibleRoots } from '../src/rail.ts';
+import { createCallOf, groupByWorkspace, loadWorkspacePages, visibleRoots } from '../../src/rail.ts';
 
 const base = {
   formatVersion: 1,

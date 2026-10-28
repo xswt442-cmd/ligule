@@ -196,7 +196,7 @@ if (reopenRun !== null) {
   try { reopenReport = JSON.parse(await readFile(join(evidenceRoot, 'model-catalog-reopen.json'), 'utf8')); } catch {}
 }
 const runReport = {
-  command: 'desktop/vendor/node/node.exe desktop/electron/test/run-model-catalog-native.mjs',
+  command: 'desktop/vendor/node/node.exe desktop/electron/tests/run-model-catalog-native.mjs',
   platform: process.platform,
   osRelease: (await import('node:os')).release(),
   electron: JSON.parse(await readFile(join(desktopRoot, 'node_modules', 'electron', 'package.json'), 'utf8')).version,

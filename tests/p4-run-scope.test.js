@@ -10,7 +10,7 @@ import { createMemoryConnectionPair } from '../core/dist/host/memory.js';
 import { serveHost } from '../core/dist/host/host.js';
 import { hostProviderFromConfig } from '../core/dist/host/provider.js';
 import { modeDirectories } from '../core/dist/kernel/modes.js';
-import { withTuiHost } from '../core/test/helpers/tui-host.js';
+import { withTuiHost } from '../core/tests/helpers/tui-host.js';
 
 const testDirectory = fileURLToPath(new URL('../testplace/', import.meta.url));
 const evidenceLog = fileURLToPath(new URL('../testplace/p4-run-scope.log', import.meta.url));

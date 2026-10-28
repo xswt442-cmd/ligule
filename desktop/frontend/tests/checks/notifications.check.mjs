@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { defaultNotifications, NOTIFICATION_KINDS, notificationOf, notificationsFrom, notificationTarget } from '../src/notifications.ts';
-import { settingsFrom } from '../src/settings.ts';
+import { defaultNotifications, NOTIFICATION_KINDS, notificationOf, notificationsFrom, notificationTarget } from '../../src/notifications.ts';
+import { settingsFrom } from '../../src/settings.ts';
 
 assert.deepEqual(notificationsFrom(undefined), defaultNotifications);
 for (const kind of NOTIFICATION_KINDS) {

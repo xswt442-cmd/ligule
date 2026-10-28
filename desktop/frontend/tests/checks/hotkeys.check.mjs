@@ -1,8 +1,8 @@
 // 检查快捷键映射、按键显示和输入行为。
 import assert from 'node:assert/strict';
-import { CURRENT, KEYMAP, actionOf, conflictsIn, defaultSpecs, formatKeys, isCapturing, isComposing, loadBindings, parseSpec, setCapturing, specOf } from '../src/hotkeys.ts';
-import { insertMention, mentionToken } from '../src/mentions.ts';
-import { mergeQueueIntoDraft } from '../src/settings.ts';
+import { CURRENT, KEYMAP, actionOf, conflictsIn, defaultSpecs, formatKeys, isCapturing, isComposing, loadBindings, parseSpec, setCapturing, specOf } from '../../src/hotkeys.ts';
+import { insertMention, mentionToken } from '../../src/mentions.ts';
+import { mergeQueueIntoDraft } from '../../src/settings.ts';
 
 // 按键处理与界面显示共用同一份快捷键定义。
 assert.equal(actionOf({ key: 'k', ctrlKey: true }, '窗口'), 'palette');

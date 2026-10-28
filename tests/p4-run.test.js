@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { createConnection } from '../core/dist/host/connection.js';
 import { readRunResult, runResultPage, publishRunResult } from '../core/dist/session/run.js';
 import { sessionWriterActive } from '../core/dist/session/lock.js';
-import { listenFetchable } from '../test/helpers/port.ts';
+import { listenFetchable } from './helpers/port.ts';
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
 const cli = join(repository, 'tui', 'dist', 'cli.js');

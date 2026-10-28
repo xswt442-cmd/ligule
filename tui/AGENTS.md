@@ -38,7 +38,7 @@ This directory contains the React and Ink terminal client. It connects to the Ho
 From `tui/`, run `npm run build`, then run:
 
 ```sh
-node --test --import ../test/hooks/isolated-data-root.mjs test/tui.test.js test/tui-browse.test.js test/tui-keys.test.js test/tui-output.test.js
+node --test --import ../tests/hooks/isolated-data-root.mjs tests/tui.test.js tests/tui-browse.test.js tests/tui-keys.test.js tests/tui-output.test.js
 ```
 
 Rendering checks must wait for a completed frame and the expected state. When changing UI wording, update the corresponding assertions; do not hide an incorrect result by extending the wait.

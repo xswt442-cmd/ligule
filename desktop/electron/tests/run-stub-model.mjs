@@ -379,7 +379,7 @@ for (const line of standardOutput.split(/\r?\n/u)) {
 }
 
 const report = {
-  command: `${relative(repositoryRoot, node)} desktop/electron/test/run-stub-model.mjs`,
+  command: `${relative(repositoryRoot, node)} desktop/electron/tests/run-stub-model.mjs`,
   provider: 'local-stub',
   providerNote: '本地 stub 模型：只验证 Desktop 窗口、审批与取消联动，不构成真实模型验收。',
   platform: process.platform,

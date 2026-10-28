@@ -1,6 +1,6 @@
 // 检查 Host 事件如何转换为桌面端转录行和状态提示。
 import assert from 'node:assert/strict';
-import { capabilityOf, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn } from '../src/rows.ts';
+import { capabilityOf, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn } from '../../src/rows.ts';
 
 const call = projectRecord({
   kind: 'assistant',

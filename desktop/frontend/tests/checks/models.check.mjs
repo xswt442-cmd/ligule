@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mergeModelRows, newModelRow, presetService, uniqueModelIds } from '../src/model-catalog.ts';
+import { mergeModelRows, newModelRow, presetService, uniqueModelIds } from '../../src/model-catalog.ts';
 
 const preset = { name: 'OpenAI', api: 'chat-completions', baseURL: 'https://api.openai.com/v1' };
 const existing = { id: 'service_original', name: 'Custom', api: 'chat-completions', baseURL: 'https://old.example/v1', apiKeyEnv: 'SHARED_KEY', models: ['old-model'] };

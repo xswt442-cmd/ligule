@@ -4,9 +4,9 @@ import { createServer } from 'node:http';
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { connectMcp } from '../test/helpers/mcp-control.mjs';
+import { connectMcp } from './helpers/mcp-control.mjs';
 import { setTrusted } from '../core/dist/kernel/workspace-trust.js';
-import { listenFetchable } from '../core/test/helpers/port.ts';
+import { listenFetchable } from '../core/tests/helpers/port.ts';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const temporaryBase = join(repoRoot, 'testplace', 'tmp', 'plan2-sensitive');

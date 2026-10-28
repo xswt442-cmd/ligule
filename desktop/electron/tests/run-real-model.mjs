@@ -200,7 +200,7 @@ const safeLines = standardOutput.split(/\r?\n/u).filter(line => line.startsWith(
 standardOutput = '';
 standardError = '';
 const runReport = {
-  command: 'node desktop/electron/test/run-real-model.mjs',
+  command: 'node desktop/electron/tests/run-real-model.mjs',
   platform: process.platform,
   electron: JSON.parse(await readFile(join(desktopDirectory, 'node_modules', 'electron', 'package.json'), 'utf8')).version,
   hostNode: (await import('node:child_process')).execFileSync(node, ['--version'], { encoding: 'utf8', windowsHide: true }).trim(),

@@ -1,6 +1,6 @@
 // 检查未保存的编辑是否会阻止用户离开设置页面。
 import assert from 'node:assert/strict';
-import { holdReasons, report } from '../src/edit-gate.ts';
+import { holdReasons, report } from '../../src/edit-gate.ts';
 
 // 没有未保存内容时，不应产生阻止离开的原因。
 assert.deepEqual(holdReasons({}), []);

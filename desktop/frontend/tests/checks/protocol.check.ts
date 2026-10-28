@@ -1,6 +1,6 @@
 // 检查客户端如何匹配响应、处理超时并清理重连前的等待调用。
 import assert from 'node:assert/strict';
-import { createClient, type Frame, type Transport } from '../src/protocol.ts';
+import { createClient, type Frame, type Transport } from '../../src/protocol.ts';
 
 const sent: Frame[] = [];
 const handlers: Array<(text: string) => void> = [];

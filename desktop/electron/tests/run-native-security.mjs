@@ -46,7 +46,7 @@ environment.LIGULE_SECURITY_USER_DATA = userData;
 environment.LIGULE_SECURITY_WORKSPACE = workspace;
 
 const args = [`--user-data-dir=${userData}`, harnessPath];
-await writeFile(join(evidenceRoot, 'command.txt'), `${basename(electronExecutable)} ${args.map(value => value.startsWith('--user-data-dir=') ? '--user-data-dir=<isolated desktop/testplace/tmp>' : 'desktop/electron/test/native-security.cjs').join(' ')}\n`, 'utf8');
+await writeFile(join(evidenceRoot, 'command.txt'), `${basename(electronExecutable)} ${args.map(value => value.startsWith('--user-data-dir=') ? '--user-data-dir=<isolated desktop/testplace/tmp>' : 'desktop/electron/tests/native-security.cjs').join(' ')}\n`, 'utf8');
 const stdout = createWriteStream(join(evidenceRoot, 'stdout.log'));
 const stderr = createWriteStream(join(evidenceRoot, 'stderr.log'));
 const child = spawn(electronExecutable, args, {
@@ -79,7 +79,7 @@ try {
   harnessReport = null;
 }
 const status = {
-  command: `${basename(electronExecutable)} --user-data-dir=<isolated> desktop/electron/test/native-security.cjs`,
+  command: `${basename(electronExecutable)} --user-data-dir=<isolated> desktop/electron/tests/native-security.cjs`,
   electron: JSON.parse(await readFile(electronPackagePath, 'utf8')).version,
   exitCode: code,
   signal,

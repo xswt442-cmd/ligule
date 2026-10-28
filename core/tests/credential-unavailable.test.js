@@ -107,7 +107,7 @@ if (process.env.LIGULE_CREDENTIAL_NATIVE_REQUIRED === '1') {
         await storeCredential(reference, firstValue);
         storedA = true;
         assertSecret(await resolveCredential(reference), firstValue, 'the first stored value should resolve');
-        const child = await execFile(process.execPath, ['test/fixtures/credential-read.mjs'], {
+        const child = await execFile(process.execPath, ['tests/fixtures/credential-read.mjs'], {
           cwd: repositoryRoot,
           env: { ...process.env, LIGULE_CREDENTIAL_TEST_REFERENCE: reference, LIGULE_CREDENTIAL_TEST_DIGEST: createHash('sha256').update(firstValue).digest('hex') },
           timeout: 20_000,

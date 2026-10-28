@@ -16,7 +16,7 @@ async function makeDirectory() {
 }
 
 async function childWrite(path, version, value) {
-  const fixture = join(process.cwd(), 'test', 'fixtures', 'prefs-writer.mjs');
+  const fixture = join(process.cwd(), 'tests', 'fixtures', 'prefs-writer.mjs');
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [fixture, path, version, JSON.stringify(value)], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
@@ -41,7 +41,7 @@ async function assertNoWriteArtifacts(directory) {
 }
 
 function startWindowsFileHolder({ path, root, holdMilliseconds, releasePath }) {
-  const fixture = join(process.cwd(), 'test', 'fixtures', 'prefs-holder.ps1');
+  const fixture = join(process.cwd(), 'tests', 'fixtures', 'prefs-holder.ps1');
   const readyPath = join(root, 'holder-ready');
   const args = [
     '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', fixture,

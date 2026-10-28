@@ -1008,7 +1008,7 @@ test('a failed editor run leaves no temporary directory behind', async () => {
   process.env.TEMP = sandbox;
   try {
     const leftovers = async () => (await readdir(sandbox, { recursive: true })).map(String).filter((name) => name.includes('ligule-editor-'));
-    const failed = await editInExternalEditor(`${quoted(process.execPath)} ${quoted(join(resolve('test'), 'fixtures', 'editor.mjs'))} exit - - 17`, '草稿的一半');
+    const failed = await editInExternalEditor(`${quoted(process.execPath)} ${quoted(join(resolve('tests'), 'fixtures', 'editor.mjs'))} exit - - 17`, '草稿的一半');
     assert.equal(failed.code, 'tui_editor_failed');
     assert.match(failed.detail, /17/);
     assert.deepEqual(await leftovers(), [], '退出码不是 0 那一条路径上临时目录也删掉了');

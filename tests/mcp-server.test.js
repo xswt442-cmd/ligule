@@ -13,8 +13,8 @@ import { detectPermissionCapabilities } from '../core/dist/capability/permission
 import { createConfig } from '../core/dist/kernel/config.js';
 import { modeDirectories } from '../core/dist/kernel/modes.js';
 import { createPermissionContext } from '../core/dist/kernel/permission.js';
-import { listenFetchable } from '../test/helpers/port.ts';
-import { connectMcp } from '../test/helpers/mcp-control.mjs';
+import { listenFetchable } from './helpers/port.ts';
+import { connectMcp } from './helpers/mcp-control.mjs';
 import { requestAgentControl } from '../core/dist/host/agent-control-runtime.js';
 import { setTrusted } from '../core/dist/kernel/workspace-trust.js';
 

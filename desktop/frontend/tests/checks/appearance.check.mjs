@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { defaultSettings, settingsFrom } from '../src/settings.ts';
+import { defaultSettings, settingsFrom } from '../../src/settings.ts';
 
 assert.equal(settingsFrom({ font: 'small' }).fontUi, 15, 'legacy small preference remains close to its previous scale');
 assert.equal(settingsFrom({ font: 'medium' }).fontUi, 16, 'legacy medium preference keeps the browser default scale');

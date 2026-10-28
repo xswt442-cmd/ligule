@@ -1,5 +1,5 @@
 // 覆盖终端标题、剪贴板编码，以及通过 Ink 输入 `/export` 后写出的文件。
-// `/export` 的排版和 Host 行为由 `test/host-export.test.js` 覆盖。
+// `/export` 的排版和 Host 行为由 `core/tests/host-export.test.js` 覆盖。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';

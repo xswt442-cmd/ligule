@@ -63,10 +63,12 @@ try {
     || Object.keys({ ...spreadsheetManifest.dependencies, ...spreadsheetManifest.optionalDependencies }).length !== 0) {
     throw new Error(`${tarball} must contain the dependency-free spreadsheet parser and its license`);
   }
-  for (const testPath of ['test', 'tests', 'core/test', 'tui/test']) {
+  for (const testPath of ['test', 'tests', 'core/test', 'core/tests', 'tui/test', 'tui/tests']) {
     if (existsSync(join(shipped, testPath))) throw new Error(`${tarball} must not contain test files: ${testPath}`);
   }
-  if (existsSync(join(bundledCore, 'test'))) throw new Error(`${tarball} must not bundle Core test fixtures`);
+  for (const testPath of ['test', 'tests']) {
+    if (existsSync(join(bundledCore, testPath))) throw new Error(`${tarball} must not bundle Core test fixtures: ${testPath}`);
+  }
   const declared = [...collectTargets(manifest.exports), ...collectTargets(manifest.bin)];
   if (declared.length === 0) throw new Error('package.json declares neither exports nor bin, nothing to check');
   for (const target of declared) {

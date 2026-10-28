@@ -4,8 +4,7 @@
     { "path": "./core" },
     { "path": "./tui" },
     { "path": "./scripts" },
-    { "path": "./test" },
     { "path": "./tests" },
-    { "path": "./tui/test" }
+    { "path": "./tui/tests" }
   ]
 }

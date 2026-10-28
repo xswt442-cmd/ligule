@@ -18,7 +18,7 @@ import { configVersion } from '../core/dist/kernel/config-edit.js';
 import { historyPathOf, rememberHistory } from '../core/dist/kernel/input-history.js';
 import { prefsPathOf, savePrefs } from '../core/dist/kernel/desktop-prefs.js';
 import { listProjectFiles } from '../core/dist/host/paths.js';
-import { listenFetchable } from '../test/helpers/port.ts';
+import { listenFetchable } from './helpers/port.ts';
 
 const CLI = fileURLToPath(new URL('../tui/dist/cli.js', import.meta.url));
 
