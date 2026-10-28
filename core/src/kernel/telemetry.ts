@@ -1,13 +1,19 @@
 import { randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { mkdir, lstat, realpath, unlink } from 'node:fs/promises';
-import { open, type FileHandle } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, readFile, readdir, realpath, rename, unlink } from 'node:fs/promises';
+import { open } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import lockfile from 'proper-lockfile';
 
 const MAX_RECORD_BYTES = 1024;
 const MAX_QUEUE_RECORDS = 256;
 const MAX_FILE_BYTES = 64 * 1024;
 const MAX_RETAINED_FILES = 4;
+const MAX_MANIFEST_BYTES = 4096;
+const MAX_TOTAL_BYTES = MAX_FILE_BYTES * MAX_RETAINED_FILES + MAX_MANIFEST_BYTES * 2;
+const MAX_DIRECTORY_FILES = MAX_RETAINED_FILES + 2;
+const LOCK_STALE_MS = 30_000;
 
 export type TelemetryEvent =
   | { readonly type: 'run.started'; readonly executionId: string; readonly runId?: string; readonly sessionId?: string; readonly parentExecutionId?: string; readonly parentRunId?: string; readonly parentCallId?: string }
@@ -18,7 +24,7 @@ export type TelemetryEvent =
 
 export interface TelemetryOptions {
   readonly enabled?: boolean;
-  /** Existing, caller-selected directory reserved for telemetry output. Limits are per instance; no aggregate cap spans instances or restarts. */
+  /** Existing private directory reserved for telemetry. Aggregate storage is capped across restarts and writers. */
   readonly directory?: string;
   readonly maxQueuedRecords?: number;
   readonly maxFileBytes?: number;
@@ -57,6 +63,7 @@ export function emitTelemetry(telemetry: Telemetry | undefined, event: Telemetry
   if (!telemetryEnabled(telemetry)) return;
   try { telemetry!.emit(event); } catch { /* Observability must not affect runtime behavior. */ }
 }
+
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const NAME = /^[A-Za-z][A-Za-z0-9_.:-]{0,63}$/u;
 const CODE = /^[a-z][a-z0-9_]{0,79}$/u;
@@ -64,7 +71,6 @@ const CODE = /^[a-z][a-z0-9_]{0,79}$/u;
 function validId(value: unknown): value is string { return typeof value === 'string' && ID.test(value); }
 function validName(value: unknown): value is string { return typeof value === 'string' && NAME.test(value); }
 function validCount(value: unknown): value is number { return Number.isSafeInteger(value) && (value as number) >= 0; }
-// Long waits and runs are valid; safe-integer precision, rather than a short wall-time cap, is the bound.
 function validDuration(value: unknown): value is number { return Number.isSafeInteger(value) && (value as number) >= 0; }
 
 function safeEvent(value: TelemetryEvent): Record<string, string | number> | undefined {
@@ -137,7 +143,23 @@ function safeEvent(value: TelemetryEvent): Record<string, string | number> | und
   return undefined;
 }
 
-/** Writes per-instance bounded local JSONL only; aggregate storage across instances is not capped. It does not implement OTLP. */
+interface SegmentEntry {
+  readonly name: string;
+  readonly bytes: number;
+  readonly dev: string;
+  readonly ino: string;
+}
+
+interface Manifest {
+  readonly version: 1;
+  readonly maxFileBytes: number;
+  readonly retainedFiles: number;
+  readonly segments: readonly SegmentEntry[];
+}
+
+interface FileIdentity { readonly dev: string; readonly ino: string }
+
+/** Shared, fixed-size JSONL with cross-process rotation; no OTLP exporter is implemented. */
 export function createTelemetry(options: TelemetryOptions = {}): Telemetry {
   if (options.enabled !== true || typeof options.directory !== 'string' || options.directory === '') return NOOP;
   const queueLimit = options.maxQueuedRecords ?? MAX_QUEUE_RECORDS;
@@ -145,105 +167,239 @@ export function createTelemetry(options: TelemetryOptions = {}): Telemetry {
   const retainedFiles = options.retainedFiles ?? MAX_RETAINED_FILES;
   if (!Number.isSafeInteger(queueLimit) || queueLimit < 1 || queueLimit > MAX_QUEUE_RECORDS
     || !Number.isSafeInteger(fileLimit) || fileLimit < MAX_RECORD_BYTES + 1 || fileLimit > MAX_FILE_BYTES
-    || !Number.isSafeInteger(retainedFiles) || retainedFiles < 1 || retainedFiles > MAX_RETAINED_FILES) return NOOP;
+    || !Number.isSafeInteger(retainedFiles) || retainedFiles < 1 || retainedFiles > MAX_RETAINED_FILES
+    || retainedFiles + 2 > MAX_DIRECTORY_FILES || fileLimit * retainedFiles + MAX_MANIFEST_BYTES * 2 > MAX_TOTAL_BYTES) return NOOP;
 
   const requestedDirectory = resolve(options.directory);
-  const instanceName = `telemetry-${randomUUID()}`;
-  let instanceDirectory = '';
-  let initialized: Promise<void> | undefined;
-  let directoryIdentity: { readonly dev: number; readonly ino: number } | undefined;
-  let current: { readonly name: string; readonly handle: FileHandle; readonly dev: number; readonly ino: number; size: number } | undefined;
-  const segments: string[] = [];
-  const identities = new Map<string, { readonly dev: number; readonly ino: number }>();
-  let segmentNumber = 0;
+  let directory = requestedDirectory;
+  let directoryIdentity: FileIdentity | undefined;
+  const manifestName = 'telemetry.manifest.json';
+  let manifestPath = join(directory, manifestName);
+  let lockPath = `${directory}.telemetry.lock`;
   let queue: string[] = [];
   let pendingRecords = 0;
   let draining: Promise<void> | undefined;
   let closed = false;
   let failed = false;
 
-  async function initialize(): Promise<void> {
+  async function acquireLock(): Promise<() => Promise<void>> {
     const info = await lstat(requestedDirectory);
     if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('telemetry output must be an existing real directory');
     const canonical = await realpath(requestedDirectory);
-    instanceDirectory = join(canonical, instanceName);
-    // Each process receives a new exclusive directory; existing content is never rotated or deleted.
-    await mkdir(instanceDirectory, { mode: 0o700 });
-    const created = await lstat(instanceDirectory);
-    if (!created.isDirectory() || created.isSymbolicLink()) throw new Error('telemetry instance directory is not a real directory');
-    directoryIdentity = { dev: created.dev, ino: created.ino };
-  }
-
-  async function assertOwnedDirectory(): Promise<void> {
-    const expected = directoryIdentity;
-    if (expected === undefined) throw new Error('telemetry directory ownership is unknown');
-    const actual = await lstat(instanceDirectory);
-    if (!actual.isDirectory() || actual.isSymbolicLink() || actual.dev !== expected.dev || actual.ino !== expected.ino) {
-      throw new Error('telemetry directory identity changed');
+    const canonicalInfo = await lstat(canonical);
+    if (!canonicalInfo.isDirectory() || canonicalInfo.isSymbolicLink()) throw new Error('telemetry output path changed');
+    if (process.platform !== 'win32' && (canonicalInfo.mode & 0o077) !== 0) {
+      throw new Error('telemetry output directory must be private to its owner');
+    }
+    if (directoryIdentity !== undefined && (directory !== canonical || directoryIdentity.dev !== String(canonicalInfo.dev)
+      || directoryIdentity.ino !== String(canonicalInfo.ino))) {
+      throw new Error('telemetry output directory identity changed');
+    }
+    directory = canonical;
+    manifestPath = join(directory, manifestName);
+    lockPath = `${directory}.telemetry.lock`;
+    directoryIdentity = { dev: String(canonicalInfo.dev), ino: String(canonicalInfo.ino) };
+    try {
+      const currentLock = await lstat(lockPath);
+      if (!currentLock.isDirectory() || currentLock.isSymbolicLink() || !(await lockfile.check(directory, {
+        realpath: false, lockfilePath: lockPath, stale: LOCK_STALE_MS,
+      }))) throw new Error('telemetry lock path is unknown or invalid');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    let compromised: Error | undefined;
+    const release = await lockfile.lock(directory, {
+      realpath: false,
+      lockfilePath: lockPath,
+      stale: LOCK_STALE_MS,
+      update: Math.floor(LOCK_STALE_MS / 3),
+      retries: { retries: 30, minTimeout: 10, maxTimeout: 75 },
+      onCompromised: error => { compromised = error; },
+    });
+    try {
+      const afterLock = await lstat(directory);
+      if (compromised !== undefined || !afterLock.isDirectory() || afterLock.isSymbolicLink()
+        || String(afterLock.dev) !== directoryIdentity.dev || String(afterLock.ino) !== directoryIdentity.ino) {
+        throw compromised ?? new Error('telemetry output directory identity changed under lock');
+      }
+      return async () => release();
+    } catch (error) {
+      await release();
+      throw error;
     }
   }
 
-  async function createSegment(): Promise<void> {
-    await assertOwnedDirectory();
+  function validRegularFile(info: Awaited<ReturnType<typeof lstat>>, identity?: FileIdentity): boolean {
+    return info.isFile() && !info.isSymbolicLink() && info.nlink === 1
+      && (identity === undefined || (String(info.dev) === identity.dev && String(info.ino) === identity.ino));
+  }
+
+  function parseManifest(value: unknown): Manifest | undefined {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+    const record = value as Record<string, unknown>;
+    if (Object.keys(record).sort().join(',') !== 'maxFileBytes,retainedFiles,segments,version'
+      || record.version !== 1 || record.maxFileBytes !== fileLimit || record.retainedFiles !== retainedFiles
+      || !Array.isArray(record.segments) || record.segments.length > retainedFiles) return undefined;
+    const segments: SegmentEntry[] = [];
+    const names = new Set<string>();
+    let previous = -1;
+    let total = 0;
+    for (const item of record.segments) {
+      if (typeof item !== 'object' || item === null || Array.isArray(item)) return undefined;
+      const entry = item as Record<string, unknown>;
+      if (Object.keys(entry).sort().join(',') !== 'bytes,dev,ino,name'
+        || typeof entry.name !== 'string' || !/^segment-[0-9]{8}\.jsonl$/u.test(entry.name)
+        || !Number.isSafeInteger(entry.bytes) || (entry.bytes as number) < 0 || (entry.bytes as number) > fileLimit
+        || typeof entry.dev !== 'string' || !/^\d+$/u.test(entry.dev)
+        || typeof entry.ino !== 'string' || !/^\d+$/u.test(entry.ino)) return undefined;
+      const sequence = Number(entry.name.slice('segment-'.length, -'.jsonl'.length));
+      if (sequence <= previous || names.has(entry.name)) return undefined;
+      previous = sequence;
+      names.add(entry.name);
+      total += entry.bytes as number;
+      segments.push({ name: entry.name, bytes: entry.bytes as number, dev: entry.dev, ino: entry.ino });
+    }
+    if (total > fileLimit * retainedFiles || total + MAX_MANIFEST_BYTES * 2 > MAX_TOTAL_BYTES) return undefined;
+    return { version: 1, maxFileBytes: fileLimit, retainedFiles, segments };
+  }
+
+  async function writeNewManifest(manifest: Manifest): Promise<FileIdentity> {
+    const contents = JSON.stringify(manifest);
+    if (Buffer.byteLength(contents, 'utf8') > MAX_MANIFEST_BYTES) throw new Error('telemetry manifest exceeds its size limit');
+    const handle = await open(manifestPath, 'wx', 0o600);
+    try {
+      await handle.writeFile(contents, 'utf8');
+      await handle.sync();
+      const info = await handle.stat();
+      if (!validRegularFile(info)) throw new Error('telemetry manifest is not an exclusive regular file');
+      return { dev: String(info.dev), ino: String(info.ino) };
+    } finally { await handle.close(); }
+  }
+
+  async function replaceManifest(manifest: Manifest, previous: FileIdentity): Promise<FileIdentity> {
+    const contents = JSON.stringify(manifest);
+    if (Buffer.byteLength(contents, 'utf8') > MAX_MANIFEST_BYTES) throw new Error('telemetry manifest exceeds its size limit');
+    const temporaryPath = join(directory, `telemetry.manifest.${randomUUID()}.tmp`);
+    const handle = await open(temporaryPath, 'wx', 0o600);
+    try {
+      await handle.writeFile(contents, 'utf8');
+      await handle.sync();
+    } finally { await handle.close(); }
+    const current = await lstat(manifestPath);
+    if (!validRegularFile(current, previous)) throw new Error('telemetry manifest identity changed');
+    await rename(temporaryPath, manifestPath);
+    const replaced = await lstat(manifestPath);
+    if (!validRegularFile(replaced)) throw new Error('telemetry manifest replacement is invalid');
+    return { dev: String(replaced.dev), ino: String(replaced.ino) };
+  }
+
+  async function readManifest(): Promise<{ readonly manifest: Manifest; readonly identity: FileIdentity }> {
+    const info = await lstat(directory);
+    if (!info.isDirectory() || info.isSymbolicLink() || String(info.dev) !== directoryIdentity?.dev || String(info.ino) !== directoryIdentity?.ino) {
+      throw new Error('telemetry output directory identity changed');
+    }
+    const entries = await readdir(directory);
+    if (entries.length > MAX_DIRECTORY_FILES) throw new Error('telemetry directory file-count limit exceeded');
+    let markerInfo: Awaited<ReturnType<typeof lstat>> | undefined;
+    try { markerInfo = await lstat(manifestPath); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    if (markerInfo === undefined) {
+      if (entries.length !== 0) throw new Error('telemetry directory contains unknown files');
+      const manifest: Manifest = { version: 1, maxFileBytes: fileLimit, retainedFiles, segments: [] };
+      const identity = await writeNewManifest(manifest);
+      return { manifest, identity };
+    }
+    if (!validRegularFile(markerInfo) || markerInfo.size > MAX_MANIFEST_BYTES) throw new Error('telemetry manifest is not a valid regular file');
+    const contents = await readFile(manifestPath, 'utf8');
+    const parsed = JSON.parse(contents);
+    const manifest = parseManifest(parsed);
+    if (manifest === undefined) {
+      throw new Error('telemetry manifest is corrupt or uses different limits');
+    }
+    const expectedNames = new Set([manifestName, ...manifest.segments.map(segment => segment.name)]);
+    if (entries.length !== expectedNames.size || entries.some(name => !expectedNames.has(name))) {
+      throw new Error('telemetry directory contains unknown files');
+    }
+    for (const segment of manifest.segments) {
+      const segmentInfo = await lstat(join(directory, segment.name));
+      if (!validRegularFile(segmentInfo, segment) || segmentInfo.size !== segment.bytes) {
+        throw new Error('telemetry segment identity or size changed');
+      }
+    }
+    return { manifest, identity: { dev: String(markerInfo.dev), ino: String(markerInfo.ino) } };
+  }
+
+  async function createSegment(manifest: Manifest, markerIdentity: FileIdentity): Promise<{ manifest: Manifest; markerIdentity: FileIdentity }> {
+    let segments = [...manifest.segments];
+    let currentMarker = markerIdentity;
     if (segments.length >= retainedFiles) {
       const oldest = segments[0];
-      const expected = identities.get(oldest);
-      if (expected === undefined) throw new Error('telemetry segment ownership is unknown');
-      const path = join(instanceDirectory, oldest);
+      const path = join(directory, oldest.name);
       const info = await lstat(path);
-      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.dev !== expected.dev || info.ino !== expected.ino) {
-        throw new Error('telemetry segment identity changed');
-      }
+      if (!validRegularFile(info, oldest) || info.size !== oldest.bytes) throw new Error('telemetry segment identity changed');
       await unlink(path);
       segments.shift();
-      identities.delete(oldest);
+      currentMarker = await replaceManifest({ ...manifest, segments }, currentMarker);
+      manifest = { ...manifest, segments };
     }
-    const name = `segment-${String(segmentNumber++).padStart(8, '0')}.jsonl`;
-    const path = join(instanceDirectory, name);
-    const handle = await open(path, 'wx', 0o600);
-    const info = await handle.stat();
-    if (!info.isFile() || info.nlink !== 1) {
-      await handle.close();
-      throw new Error('telemetry segment is not an exclusive regular file');
-    }
-    const identity = { dev: info.dev, ino: info.ino };
-    identities.set(name, identity);
-    segments.push(name);
-    current = { name, handle, ...identity, size: 0 };
+    const nextSequence = segments.length === 0 ? 0 : Number(segments.at(-1)!.name.slice('segment-'.length, -'.jsonl'.length)) + 1;
+    if (nextSequence > 99_999_999) throw new Error('telemetry segment sequence exhausted');
+    const name = `segment-${String(nextSequence).padStart(8, '0')}.jsonl`;
+    const handle = await open(join(directory, name), 'wx', 0o600);
+    let identity: FileIdentity;
+    try {
+      const info = await handle.stat();
+      if (!validRegularFile(info)) throw new Error('telemetry segment is not an exclusive regular file');
+      identity = { dev: String(info.dev), ino: String(info.ino) };
+      await handle.sync();
+    } finally { await handle.close(); }
+    segments = [...segments, { name, bytes: 0, ...identity }];
+    const next = { ...manifest, segments };
+    currentMarker = await replaceManifest(next, currentMarker);
+    return { manifest: next, markerIdentity: currentMarker };
   }
 
-  async function writeLine(line: string): Promise<void> {
-    if (initialized === undefined) initialized = initialize();
-    await initialized;
-    const bytes = Buffer.byteLength(line, 'utf8');
-    if (current === undefined || current.size + bytes > fileLimit) {
-      if (current !== undefined) {
-        await current.handle.close();
-        current = undefined;
+  async function appendLine(line: string): Promise<void> {
+    const release = await acquireLock();
+    try {
+      if (closed || failed) return;
+      let { manifest, identity } = await readManifest();
+      const bytes = Buffer.byteLength(line, 'utf8');
+      let segment = manifest.segments.at(-1);
+      if (segment === undefined || segment.bytes + bytes > fileLimit) {
+        const created = await createSegment(manifest, identity);
+        manifest = created.manifest;
+        identity = created.markerIdentity;
+        segment = manifest.segments.at(-1);
       }
-      await createSegment();
-    }
-    const target = current;
-    if (target === undefined) throw new Error('telemetry segment was not created');
-    await assertOwnedDirectory();
-    const pathInfo = await lstat(join(instanceDirectory, target.name));
-    if (!pathInfo.isFile() || pathInfo.isSymbolicLink() || pathInfo.nlink !== 1
-      || pathInfo.dev !== target.dev || pathInfo.ino !== target.ino) throw new Error('telemetry segment identity changed');
-    await target.handle.writeFile(line, 'utf8');
-    target.size += bytes;
+      if (segment === undefined || segment.bytes + bytes > fileLimit) throw new Error('telemetry record exceeds the file limit');
+      const path = join(directory, segment.name);
+      const before = await lstat(path);
+      if (!validRegularFile(before, segment) || before.size !== segment.bytes) throw new Error('telemetry segment identity changed');
+      const noFollow = constants.O_NOFOLLOW ?? 0;
+      const handle = await open(path, constants.O_WRONLY | constants.O_APPEND | noFollow);
+      let afterSize: number;
+      try {
+        const opened = await handle.stat();
+        if (!validRegularFile(opened, segment) || opened.size !== segment.bytes) throw new Error('telemetry segment changed while opening');
+        await handle.writeFile(line, 'utf8');
+        afterSize = (await handle.stat()).size;
+        if (afterSize !== segment.bytes + bytes) throw new Error('telemetry segment write was incomplete');
+      } finally { await handle.close(); }
+      const updatedSegments = manifest.segments.map(item => item.name === segment!.name ? { ...item, bytes: afterSize } : item);
+      await replaceManifest({ ...manifest, segments: updatedSegments }, identity);
+    } finally { await release(); }
   }
 
   async function drain(): Promise<void> {
     while (queue.length > 0 && !closed && !failed) {
       const line = queue.shift()!;
-      try { await writeLine(line); }
+      try { await appendLine(line); }
       catch {
-        // Stop writing after any path/identity or I/O failure. Nothing is retried against an untrusted path.
+        // Unknown files, lock failures, and I/O failures permanently disable this writer instance.
         failed = true;
         queue.length = 0;
         pendingRecords = 0;
-        await current?.handle.close().catch(() => {});
-        current = undefined;
       } finally {
         if (!failed) pendingRecords -= 1;
       }
@@ -260,7 +416,6 @@ export function createTelemetry(options: TelemetryOptions = {}): Telemetry {
       if (draining === undefined) startDrain();
       await draining;
     }
-    await current?.handle.sync().catch(() => { failed = true; });
   }
 
   return {
@@ -279,14 +434,12 @@ export function createTelemetry(options: TelemetryOptions = {}): Telemetry {
       let timeout: ReturnType<typeof setTimeout> | undefined;
       await Promise.race([
         flush().then(() => undefined, () => undefined),
-        new Promise<void>((resolveTimeout) => { timeout = setTimeout(resolveTimeout, 250); }),
+        new Promise<void>(resolveTimeout => { timeout = setTimeout(resolveTimeout, 250); }),
       ]);
       if (timeout !== undefined) clearTimeout(timeout);
       closed = true;
       queue.length = 0;
       pendingRecords = 0;
-      void current?.handle.close().catch(() => {});
-      current = undefined;
     },
   };
 }
