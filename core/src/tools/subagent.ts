@@ -33,6 +33,7 @@ import { createScreenshotPlugin } from './screenshot.js';
 import { createMediaStore, type MediaStore } from '../capability/media.js';
 import { boundaryOf } from '../capability/limits.js';
 import type { PermissionContext } from '../kernel/permission.js';
+import type { Telemetry } from '../kernel/telemetry.js';
 
 type LoopOptions = Parameters<typeof createLoop>[0];
 type ThinkingEffort = 'none' | 'low' | 'high' | 'max';
@@ -68,6 +69,7 @@ export interface SubagentDeps {
   promptFragments?: () => readonly ModePromptFragment[];
   promptFragmentBytes?: number;
   loopLimits?: LoopLimits;
+  telemetry?: Telemetry;
 }
 
 function childLimits(args: { loopIterations?: number; modelCalls?: number }, parent: LoopLimits) {
@@ -170,7 +172,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
           loopIterations?: number;
           modelCalls?: number;
           outputSchema?: Record<string, unknown>;
-        }, { signal, permission }: { signal?: AbortSignal; permission: PermissionContext }) {
+        }, { signal, permission, runId, executionId, callId }: { signal?: AbortSignal; permission: PermissionContext; runId?: string; executionId?: string; callId?: string }) {
           if (typeof args.task !== 'string' || args.task.trim() === '') {
             throw new KernelError('subagent_task_required', { detail: 'the derived agent needs a task to work on' });
           }
@@ -301,6 +303,11 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                 session,
                 limits,
                 resolveImage: media.read,
+                telemetry: deps.telemetry,
+                sessionId: id,
+                ...(runId === undefined ? {} : { parentRunId: runId }),
+                ...(executionId === undefined ? {} : { parentExecutionId: executionId }),
+                ...(callId === undefined ? {} : { parentCallId: callId }),
                 completesRun: outputContract === undefined ? [] : [DELEGATION_RESULT_TOOL],
                 turnContext: () => ({
                   childGeneration: {
@@ -314,7 +321,8 @@ export function createSubagentPlugin(deps: SubagentDeps) {
               let result: Awaited<ReturnType<typeof loop.run>>;
               const resumeParent = deps.taskBudget?.()?.suspendCurrentWork();
               try {
-                result = await loop.run(args.task, { signal, task: deps.taskBudget?.(), validateCompletion: () => assertDelegationCompletion(outputContract, structuredSubmitted) });
+                result = await loop.run(args.task, { signal, task: deps.taskBudget?.(),
+                  validateCompletion: () => assertDelegationCompletion(outputContract, structuredSubmitted) });
               } catch (error) {
                 // Record-lock and Session I/O failures mean the child record may be unreliable; do not turn them into a normal child result.
                 if (error instanceof KernelRuntimeError) throw error;

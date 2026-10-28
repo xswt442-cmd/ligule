@@ -25,6 +25,9 @@ export interface ToolContext {
   readonly target?: NetworkTarget;
   readonly shell?: ShellSelection;
   readonly scriptBinding?: ScriptBinding;
+  readonly runId?: string;
+  readonly executionId?: string;
+  readonly callId?: string;
 }
 
 type BivariantToolCallback<TArgs, TResult> = {
@@ -107,7 +110,7 @@ export interface Kernel {
   catalog(): ToolCatalogEntry[];
   validateCall(name: string, args: unknown): { readonly code?: 'tool_not_found' | 'tool_args_invalid'; readonly detail?: string };
   restrict(names: readonly string[]): () => void;
-  call(name: string, args?: unknown, options?: { readonly callId?: string; readonly signal?: AbortSignal }): Promise<unknown>;
+  call(name: string, args?: unknown, options?: { readonly callId?: string; readonly signal?: AbortSignal; readonly runId?: string; readonly executionId?: string }): Promise<unknown>;
 }
 
 interface ToolEvent extends Record<string, unknown> {
@@ -355,7 +358,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
     // 每种失败都返回稳定错误码，供调用方分支处理。
     // 工具从 context 读取配置快照和日志接口；取消信号由循环或适配器传入。
     // 所有调用都经过权限判定，并将拒绝、失败和成功结果写入会话记录。
-    async call(name: string, args?: unknown, options: { readonly callId?: string; readonly signal?: AbortSignal } = {}) {
+    async call(name: string, args?: unknown, options: { readonly callId?: string; readonly signal?: AbortSignal; readonly runId?: string; readonly executionId?: string } = {}) {
       // `options.callId` 用于将工具结果关联到模型发起的调用。
       const entry: ToolEvent = { kind: 'tool', tool: name, callId: options.callId, args };
       const tool = tools.get(name);
@@ -546,6 +549,9 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       let success: ReturnType<typeof resultOf>;
       try {
           value = await tool.run(args, { ...context, permission: callPermission, signal: options.signal, target: network, shell,
+            ...(options.runId === undefined ? {} : { runId: options.runId }),
+            ...(options.executionId === undefined ? {} : { executionId: options.executionId }),
+            ...(options.callId === undefined ? {} : { callId: options.callId }),
             ...(approvedScriptBinding === undefined ? {} : { scriptBinding: approvedScriptBinding }), });
           success = resultOf(value);
       } catch (error) {

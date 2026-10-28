@@ -12,6 +12,8 @@ import type { Kernel } from './kernel.js';
 import type { PromptAssembly } from './prompt.js';
 import type { StreamDraftWriter } from '../session/stream-draft.js';
 import { checkedImageReferences, type ImageReference } from '../session/media.js';
+import { randomUUID } from 'node:crypto';
+import { emitTelemetry, telemetryEnabled, withTelemetryContext, type Telemetry } from './telemetry.js';
 
 export interface ToolCall {
   readonly id: string;
@@ -85,6 +87,12 @@ export interface LoopOptions {
   readonly turnContext?: (() => Record<string, unknown>) | null;
   readonly onProgress?: (event: LoopProgressEvent) => void;
   readonly resolveImage?: ModelRequest['resolveImage'];
+  readonly telemetry?: Telemetry;
+  readonly sessionId?: string;
+  readonly parentRunId?: string;
+  readonly parentExecutionId?: string;
+  readonly parentCallId?: string;
+  readonly telemetryModel?: () => { readonly provider?: string; readonly model?: string };
 }
 
 export type LoopProgressPhase = 'preparing' | 'model_request' | 'tool_execution' | 'compaction' | 'awaiting_approval' | 'awaiting_input' | 'settling';
@@ -172,7 +180,9 @@ function groupCalls(calls: readonly ToolCall[], executionOf: (name: string) => '
   return groups;
 }
 
-async function executeGroup(kernel: Kernel, group: CallGroup, signal: AbortSignal, maximum: number, task?: TaskBudget) {
+async function executeGroup(kernel: Kernel, group: CallGroup, signal: AbortSignal, maximum: number, task: TaskBudget | undefined,
+  telemetry: Telemetry | undefined, executionId: string, runId: string | undefined, sessionId: string | undefined,
+  parentExecutionId: string | undefined, parentRunId: string | undefined, parentCallId: string | undefined) {
   const settled: PromiseSettledResult<unknown>[] = [];
   const pending = new Map<number, Promise<number>>();
   let started = 0;
@@ -185,7 +195,26 @@ async function executeGroup(kernel: Kernel, group: CallGroup, signal: AbortSigna
       if (!parallel && pending.size > 0) break;
       const index = started++;
       exclusive = !parallel;
-      const invoke = () => kernel.call(call.name, call.args, { signal, callId: call.id });
+      const invoke = telemetryEnabled(telemetry) ? async () => {
+        const startedAt = process.hrtime.bigint();
+        const context = { executionId, runId, sessionId, callId: call.id, parentExecutionId, parentRunId, parentCallId };
+        try {
+          const value = await withTelemetryContext(context, () => kernel.call(call.name, call.args,
+            { signal, callId: call.id, executionId, ...(runId === undefined ? {} : { runId }) }));
+          emitTelemetry(telemetry, { type: 'tool.finished', executionId, ...(runId === undefined ? {} : { runId }), ...(sessionId === undefined ? {} : { sessionId }),
+            callId: call.id, tool: call.name, durationMs: Number((process.hrtime.bigint() - startedAt) / 1_000_000n), outcome: 'success' });
+          return value;
+        } catch (error) {
+          const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
+          const refused = typeof code === 'string' && (code.startsWith('policy_') || code.startsWith('permission_')
+            || code === 'tool_denied' || code === 'ask_declined' || code === 'controller_declined'
+            || code === 'browser_tool_denied' || code === 'mcp_server_untrusted' || code === 'mcp_tool_denied');
+          emitTelemetry(telemetry, { type: 'tool.finished', executionId, ...(runId === undefined ? {} : { runId }), ...(sessionId === undefined ? {} : { sessionId }),
+            callId: call.id, tool: call.name, durationMs: Number((process.hrtime.bigint() - startedAt) / 1_000_000n),
+            outcome: signal.aborted ? 'cancelled' : refused ? 'refused' : 'failure' });
+          throw error;
+        }
+      } : () => kernel.call(call.name, call.args, { signal, callId: call.id });
       pending.set(index, (task === undefined ? invoke() : task.runWork(invoke)).then(
         value => { settled[index] = { status: 'fulfilled', value }; return index; },
         reason => {
@@ -210,6 +239,7 @@ function restOf(groups: readonly CallGroup[], groupIndex: number, index = -1): T
 
 export function createLoop({
   kernel, provider, prompt, session, limits = DEFAULT_LOOP_LIMITS, completesRun = [], compaction = null, turnContext = null, onProgress, resolveImage,
+  telemetry, sessionId, parentRunId, parentExecutionId, parentCallId, telemetryModel,
 }: LoopOptions) {
   if (typeof provider?.stream !== 'function') throw new KernelError('loop_provider_required');
   const maxParallelTools = limits.maxParallelTools ?? DEFAULT_LOOP_LIMITS.maxParallelTools;
@@ -220,6 +250,39 @@ export function createLoop({
     // 为本轮创建独立取消信号，并将取消传递给工具和模型提供方。
     // `options.user` 中的元数据只写入记录；模型仍接收 `input` 中的文本。
     async run(input: string, runOptions: LoopRunOptions = {}): Promise<LoopResult> {
+      const observing = telemetryEnabled(telemetry);
+      const telemetryExecutionId = observing ? randomUUID() : undefined;
+      const telemetryStartedAt = observing ? process.hrtime.bigint() : 0n;
+      let telemetryFinished = false;
+      const finishTelemetry = (status: TurnStatus, code?: string) => {
+        if (!observing || telemetryExecutionId === undefined || telemetryFinished) return;
+        telemetryFinished = true;
+        emitTelemetry(telemetry, { type: 'run.finished', executionId: telemetryExecutionId,
+          ...(runOptions.runId === undefined ? {} : { runId: runOptions.runId }),
+          ...(sessionId === undefined ? {} : { sessionId }), status,
+          durationMs: Number((process.hrtime.bigint() - telemetryStartedAt) / 1_000_000n),
+          modelCalls: calls, toolCalls: toolCallCount, ...(code === undefined ? {} : { errorCode: code }) });
+      };
+      const finishModelTelemetry = (startedAt: bigint, events: readonly ProviderEvent[], error?: unknown) => {
+        if (!observing || telemetryExecutionId === undefined) return;
+        let identity: { readonly provider?: string; readonly model?: string } = {};
+        try { identity = telemetryModel?.() ?? {}; } catch { /* Optional telemetry labels cannot affect the run. */ }
+        const usage = [...events].reverse().find((event) => event.type === 'usage');
+        const finish = events.findLast((event) => event.type === 'finish');
+        emitTelemetry(telemetry, { type: 'model.finished', executionId: telemetryExecutionId,
+          ...(runOptions.runId === undefined ? {} : { runId: runOptions.runId }),
+          ...(sessionId === undefined ? {} : { sessionId }), ...identity,
+          durationMs: Number((process.hrtime.bigint() - startedAt) / 1_000_000n),
+          ...(usage?.type === 'usage' && typeof usage.input === 'number' ? { inputTokens: usage.input } : {}),
+          ...(usage?.type === 'usage' && typeof usage.output === 'number' ? { outputTokens: usage.output } : {}),
+          ...(error === undefined ? { finishReason: finish?.type === 'finish' ? finish.reason : 'unknown' }
+            : { errorCode: failureCode(error) }) });
+      };
+      if (observing && telemetryExecutionId !== undefined) emitTelemetry(telemetry, { type: 'run.started', executionId: telemetryExecutionId,
+        ...(runOptions.runId === undefined ? {} : { runId: runOptions.runId }),
+        ...(sessionId === undefined ? {} : { sessionId }), ...(parentExecutionId === undefined ? {} : { parentExecutionId }),
+        ...(parentRunId === undefined ? {} : { parentRunId }),
+        ...(parentCallId === undefined ? {} : { parentCallId }) });
       const loopWork = runOptions.task?.startWork();
       const { signal, user, onProgress: runProgress, completesRun: runCompletes, turnContext: runTurnContext } = runOptions;
       const progress = runProgress ?? onProgress;
@@ -320,6 +383,7 @@ export function createLoop({
           if (compaction !== null) messages = await compaction.prepare({ system, tools, messages }, controller.signal);
           // 在流式接收期间逐步组装模型发起的工具调用。
           for (let attempt = 0; ; attempt += 1) {
+            const modelStartedAt = observing ? process.hrtime.bigint() : 0n;
             try {
               draft = session?.beginOutput?.(userSeq, error => controller.abort(error));
               reportPhase('model_request');
@@ -331,8 +395,10 @@ export function createLoop({
                 if (event.type === 'text' || event.type === 'reasoning') await draft?.append(event);
               }
               await draft?.flush();
+              finishModelTelemetry(modelStartedAt, events);
               break;
             } catch (error) {
+              finishModelTelemetry(modelStartedAt, events, error);
               if (draft?.failure !== undefined) error = draft.failure;
               // 服务端报告上下文超限后最多压缩并重试一次；无法压缩、已经重试或其他错误都返回原错误。
               let retried: unknown[] | null = null;
@@ -412,6 +478,7 @@ export function createLoop({
           if (toolCalls.length === 0) {
             runOptions.validateCompletion?.();
             await markTurn('completed');
+            finishTelemetry('completed');
             return summary();
           }
 
@@ -421,7 +488,8 @@ export function createLoop({
             reportActivity('tool');
             loopWork?.suspend();
             let execution: Awaited<ReturnType<typeof executeGroup>>;
-            try { execution = await executeGroup(kernel, group, controller.signal, maxParallelTools, runOptions.task); }
+            try { execution = await executeGroup(kernel, group, controller.signal, maxParallelTools, runOptions.task,
+              observing ? telemetry : undefined, telemetryExecutionId ?? '', runOptions.runId, sessionId, parentExecutionId, parentRunId, parentCallId); }
             finally { loopWork?.resume(); }
             const { settled, started } = execution;
             if (controller.signal.aborted) {
@@ -460,6 +528,7 @@ export function createLoop({
                 await answerRemaining(restOf(groups, groupIndex, index), `${name} ended this round before this call ran`);
                 runOptions.validateCompletion?.();
                 await markTurn('completed', { completedBy: name });
+                finishTelemetry('completed');
                 return { ...summary(), completedBy: name };
               }
             }
@@ -475,12 +544,19 @@ export function createLoop({
       } catch (error) {
         try { await draft?.flush(); }
         catch (writeError) { error = writeError; }
-        const code = failureCode(error);
         const diagnostics = error instanceof KernelError ? error.diagnostics : undefined;
-        await markTurn(TURN_CANCEL_CODES.has(code) ? 'cancelled' : 'failed', {
-          code,
-          ...(diagnostics === undefined ? {} : { diagnostics }),
-        });
+        const code = failureCode(error);
+        try {
+          await markTurn(TURN_CANCEL_CODES.has(code) ? 'cancelled' : 'failed', {
+            code,
+            ...(diagnostics === undefined ? {} : { diagnostics }),
+          });
+        } catch (turnError) {
+          const turnCode = failureCode(turnError);
+          finishTelemetry(TURN_CANCEL_CODES.has(turnCode) ? 'cancelled' : 'failed', turnCode);
+          throw turnError;
+        }
+        finishTelemetry(TURN_CANCEL_CODES.has(code) ? 'cancelled' : 'failed', code);
         rememberRunSummary(error, summary());
         throw error;
       } finally {

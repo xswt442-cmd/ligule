@@ -6,6 +6,8 @@ The workspace has three source modules: `core/` is the shared Agent Core, `tui/`
 
 This guide is for contributors reading or changing the repository. It explains component ownership, dependency direction, one request's execution path, and session recovery. The linked source files remain authoritative for protocol fields and module details.
 
+The Host also accepts an optional programmatic `telemetry` setting for local, content-free JSONL events. It is disabled by default and does not change Session recovery. Each writer has bounded records, queue and rotating files; the aggregate across separate writers or restarts is not yet bounded. This interface does not configure an OTLP exporter or expose a product configuration setting.
+
 The CLI npm package bundles the private Core's compiled code, modes, and metadata. Core's external runtime dependencies are merged into the public package manifest, so npm installs the native dependencies for the consumer's system. Packing excludes the build machine's external dependency tree, and the same tarball is verified on Windows and Linux.
 
 ## Runtime and execution

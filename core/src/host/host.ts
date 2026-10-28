@@ -89,6 +89,7 @@ import { APPROVAL_METHOD, QUESTION_METHOD, validateCall, type HostMethodParams }
 import { createConfig, mergePolicyRules, type ConfigSnapshot } from '../kernel/config.js';
 import { dataRoot, loadConfigLayers } from '../kernel/config-file.js';
 import type { LoggerBackend } from '../kernel/log.js';
+import { createTelemetry, currentTelemetryContext, emitTelemetry, telemetryEnabled, type TelemetryOptions } from '../kernel/telemetry.js';
 import type { LoopLimits } from '../kernel/loop.js';
 import type { LoadedLayers, createConfigStore } from '../kernel/config-store.js';
 import type { SkillRegistry } from '../kernel/skills.js';
@@ -156,12 +157,13 @@ interface ProjectEnvironment extends Omit<EnvironmentSeed, 'layers' | 'store' | 
   browserSupport?: Promise<BrowserSupport>;
 }
 
-interface HostOptions {
+export interface HostOptions {
   readonly config: HostConfigSnapshot;
   readonly provider: HostProvider;
   readonly plugins?: readonly Plugin<Kernel>[];
   readonly policy?: PolicyConfig;
   readonly logger?: LoggerBackend;
+  readonly telemetry?: TelemetryOptions;
   readonly modeName?: string;
   readonly modePaths?: ModeDirectories;
   readonly skillRegistry?: SkillRegistry;
@@ -744,9 +746,10 @@ export function createHost({
   config, provider, plugins = [minimalPlugin, networkPlugin], policy, logger, modeName, modePaths, skillRegistry,
   templateRegistry, extensions = { paths: [], ignored: [] }, loadEnvironment, configStore, configLayers, configStoreFor,
   deriveProvider = providerFromConfig, interactive = false, permission = DEFAULT_PERMISSION_CONTEXT, permissionControl = false,
-  agentControl, screenCaptureConsent = false,
+  agentControl, screenCaptureConsent = false, telemetry: telemetryOptions,
 }: HostOptions): Host {
   if (typeof screenCaptureConsent !== 'boolean') throw new KernelError('screen_capture_consent_invalid');
+  const telemetry = createTelemetry(telemetryOptions);
   // 每个项目环境持有自己的配置快照、提供方、策略、模式、记录目录和可写配置层。
   // 在加载环境时校验配置，避免等到第一次模型请求才发现错误。
   // 文件系统边界同时限制工具访问范围和指令文件向上查找的范围。
@@ -1834,6 +1837,9 @@ export function createHost({
         { source: 'config', rules: policy?.rules ?? [] },
       ]).rules as PolicyRule[],
       ask: async ({ tool, input, command, reason, shell, executable, policy, policySource, policyForced, rememberable, scriptBinding, callId, identityDigest }): Promise<PolicyAskResult> => {
+        const telemetryContext = telemetryEnabled(telemetry) ? currentTelemetryContext() : undefined;
+        const telemetryApprovalRunId = telemetryContext?.runId
+          ?? (telemetryContext?.sessionId === undefined || telemetryContext.sessionId === id ? state.activeRunId : undefined);
         const rememberScopes: PolicyRememberScope[] = permissionControl && rememberable
           ? ['session', ...(state.environment.store === undefined ? [] : ['project' as const, 'user' as const])]
           : [];
@@ -1859,6 +1865,7 @@ export function createHost({
         state.asks.add(settle);
         updateWaitingForUser(state as HostSessionState, connection, true, 'approval');
         const endInteraction = state.taskBudget?.startInteraction();
+        const approvalStartedAt = telemetryContext === undefined ? 0n : process.hrtime.bigint();
         try {
           const answer = await Promise.race([
             connection.request(APPROVAL_METHOD, {
@@ -1923,6 +1930,15 @@ export function createHost({
             }),
             cancelled,
           ]);
+          if (telemetryContext?.executionId !== undefined) emitTelemetry(telemetry, { type: 'approval.finished', executionId: telemetryContext.executionId,
+            ...(telemetryApprovalRunId === undefined ? {} : { runId: telemetryApprovalRunId }), sessionId: telemetryContext.sessionId ?? id,
+            ...(telemetryContext.parentExecutionId === undefined ? {} : { parentExecutionId: telemetryContext.parentExecutionId }),
+            ...(telemetryContext.parentRunId === undefined ? {} : { parentRunId: telemetryContext.parentRunId }),
+            ...(telemetryContext.parentCallId === undefined ? {} : { parentCallId: telemetryContext.parentCallId }),
+            ...(callId === undefined ? {} : { callId }), requestId,
+            durationMs: Number((process.hrtime.bigint() - approvalStartedAt) / 1_000_000n),
+            decision: answer.decision === 'allow' ? 'allow' : answer.decision === 'deny' ? 'deny'
+              : answer.decision === 'cancelled' ? 'cancelled' : 'error' });
           return answer;
         } finally {
           approvalActive = false;
@@ -2087,6 +2103,7 @@ export function createHost({
       plugins: basePlugins,
       authorizeScreenCapture,
       taskBudget: () => state.taskBudget,
+      telemetry,
       createMcp: async (childId, childMedia) => {
         const servers = await Promise.all(mcpConfigs.map(server => server.name === BROWSER_SERVER ? browser.session(childId) : server));
         const childRegistry = createMcpRegistry(servers, { toolPolicy: browserToolPolicy, assertServerAccess: assertMcpAccess,
@@ -2237,6 +2254,10 @@ export function createHost({
       limits: sessionLoopLimits(state),
       resolveImage: media.read,
       compaction: loopCompaction,
+      telemetry,
+      sessionId: id,
+      telemetryModel: () => ({ provider: state.generation.provider.name,
+        ...(state.generation.provider.model === null ? {} : { model: state.generation.provider.model }) }),
       onProgress: (event) => {
         if (state.progressId !== undefined) observeLoopProgress(state as HostSessionState, connection, state.progressId, event);
       },
@@ -4131,6 +4152,7 @@ export function createHost({
         }
         sessions.clear();
         pendingApprovalDetails.clear();
+        await telemetry.shutdown().catch(() => {});
         if (failures.length > 0) throw new AggregateError(failures, 'host_release_failed');
       })();
       return closing;
