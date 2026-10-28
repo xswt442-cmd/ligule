@@ -8,6 +8,9 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 ### 简体中文
 
+- 文件工具 `delete` 只使用操作系统回收站；系统后端不可用或拒绝移动时返回错误并保留源文件。历史 `.ligule-trash` 不迁移或清理，Shell 删除继续使用自己的 Policy 与审批链。
+- 用户层 `[telemetry]` 可显式开启有界本地 JSONL 事件日志和可选的本机 OTLP Trace；默认关闭，导出不含对话正文或工具内容。
+- `[loop].maxParallelTools` 限制范围为 1–32，默认 4，防止一次模型响应启动不受限的工具并发。
 - 交付文件卡片可查看状态、核验文件摘要、预览安全文本或静态图片、复制相对路径，并由可信原生界面在文件夹中定位。
 - 共享 Host 支持持久委派回执与请求去重，外控在重启后可按 `runId` 查询确定的终态结果；工作区清理新增分批 Session 引用核查与受管浏览器目录租约保护。
 
@@ -26,6 +29,9 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 ### English
 
+- The `delete` file tool uses only the operating system recycle bin. If the backend is unavailable or refuses the move, it returns an error and leaves the source in place. Legacy `.ligule-trash` folders are neither migrated nor cleaned; Shell deletion keeps its own Policy and approval path.
+- User-layer `[telemetry]` can explicitly enable bounded local JSONL events and optional loopback OTLP traces; it is disabled by default and exports no conversation or tool content.
+- `[loop].maxParallelTools` is capped at 1–32 (default 4) to prevent one model response from starting unbounded tool concurrency.
 - File-delivery cards verify current file digests, show status, preview bounded text or static images, copy relative paths, and reveal files through the trusted native bridge.
 - The shared Host supports durable delegation receipts and deduplication; external controllers can query stored terminal results by `runId` after restart. Workspace cleanup now pages Session references and protects managed browser directories with owner leases.
 

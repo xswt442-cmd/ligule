@@ -8,6 +8,9 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ### 简体中文
 
+- `delete` 只使用操作系统回收站；系统后端不可用或拒绝移动时返回错误并保留源文件。历史 `.ligule-trash` 不迁移或清理，Shell 删除继续使用自己的 Policy 与审批链。
+- 用户层 `[telemetry]` 可显式开启有界本地 JSONL 事件日志和可选的本机 OTLP Trace；默认关闭，导出不含对话正文或工具内容。
+- `[loop].maxParallelTools` 限制范围为 1–32，默认 4，防止一次模型响应启动不受限的工具并发。
 - `ligule run --json` 输出可校验的 Host 终态与调用统计，不输出回答正文；必须在命令行显式加 `--allow-full-access` 才会使用当前操作系统用户的完整权限运行，并且没有 OS 沙箱。Policy 的审批和拒绝规则继续生效。
 - `[loop].maxConcurrentSubagents` 可在 1–8 间设置内部子代理并发数，默认 3；任务可设置默认 12 小时的累计交互等待上限，只有所有工作都被交互阻塞时才暂停执行期限。
 - Session 用量保留提供方明确上报的缓存命中、未命中与输出字段；缺失的总量和成本仍为未知，不按账户日账单推算单次 Run 费用。
@@ -31,6 +34,9 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ### English
 
+- `delete` uses only the operating system recycle bin. If the backend is unavailable or refuses the move, it returns an error and leaves the source in place. Legacy `.ligule-trash` folders are neither migrated nor cleaned; Shell deletion keeps its own Policy and approval path.
+- User-layer `[telemetry]` can explicitly enable bounded local JSONL events and optional loopback OTLP traces; it is disabled by default and exports no conversation or tool content.
+- `[loop].maxParallelTools` is capped at 1–32 (default 4) to prevent one model response from starting unbounded tool concurrency.
 - `ligule run --json` emits a verifiable Host terminal state and call counts without response text. Full local permissions require the explicit `--allow-full-access` flag and run as the current OS user without an OS sandbox. Policy approvals and denials still apply.
 - `[loop].maxConcurrentSubagents` sets internal subagent concurrency from 1 to 8 (default 3). Tasks also have a cumulative interaction-wait limit of 12 hours by default; the execution deadline pauses only while all work is blocked on interaction.
 - Session usage preserves provider-reported cache hit, miss, and output fields. Missing totals and costs remain unknown; account-wide daily billing is not attributed to a single run.

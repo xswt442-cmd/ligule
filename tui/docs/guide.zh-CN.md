@@ -56,6 +56,8 @@ CLI 单轮任务默认只读。只有明确使用 `ligule run --allow-full-acces
 
 用户数据根默认为 `~/.ligule`。设置绝对路径环境变量 `LIGULE_HOME` 可以更换数据根；相对路径会报 `data_root_invalid`。用户配置在 `~/.ligule/config.toml`，项目共享配置在 `.ligule/config.toml`，项目本地配置在 `.ligule/config.local.toml`。用户数据根还保存：工作区登记 `workspaces.json`、工作区信任记录 `trust.json`（旧版本的 `tui-trust.json` 仍可读取）、MCP 服务器信任 `mcp-trust.json`、外部 Agent 授权 `agent-control.json`、扩展启停登记 `extensions-state.json`、终端输入历史、桌面偏好 `desktop.json` 和密钥引用（密钥本身存放在系统凭据库，不在数据根）。会话目录中除记录 `.jsonl` 外，还包含可重建的派生文件：压缩块文件 `<编号>.checkpoint.json`、超限内容溢出文件 `result-*.json` 与 `summary-*.txt`、会话列表索引 `index.json`；这些文件损坏或缺失时自动从记录重建，可安全删除。旧会话仍可从原全局 `sessions/` 和项目 `.ligule/sessions/` 中只读浏览；打开旧会话时才会将记录及附属文件复制到新的工作区目录，原件保留。WebView 的 `ligule.ui` 只作首屏缓存。终端界面与桌面界面的草稿和队列分别保存。
 
+文件工具 `delete` 只使用操作系统回收站。Windows 使用系统回收站，Linux 使用 FreeDesktop Trash；其他平台若没有系统后端，或回收站拒绝目标（包括跨文件系统移动），Ligule 会返回错误并保留原文件。恢复由操作系统负责；Ligule 不提供自建回收列表、恢复或永久删除管理。Shell 命令中的删除仍按普通 Shell 操作执行，受当前 Permission、Policy 与审批控制，不会自动改送回收站。旧 `.ligule-trash` 目录保留原位、不迁移也不清理；搜索继续跳过该历史目录。旧 `trashBackend` 或 `limits.trashDirectory` 配置会报 `trash_legacy_config_unsupported`，删除时应移除这些配置项。
+
 搜索默认使用随包提供的 ripgrep。自定义 `ripgrepPath` 会选择可执行程序，只能在用户配置或命令行 `--config` 中设置；项目共享配置和项目本地配置声明该字段时会报 `search_backend_source_untrusted`。将自定义路径移至用户配置，或删除该字段以使用随包后端。
 
 ### 配置模型服务
@@ -69,6 +71,16 @@ services = [
 ]
 selection = { provider = "deepseek", model = "deepseek-flash" }
 ```
+
+可在用户配置文件中显式开启无正文的结构化事件日志，并选择本机 Trace Collector：
+
+```toml
+[telemetry]
+enabled = true
+otlpEndpoint = "http://127.0.0.1:4318/v1/traces"
+```
+
+`otlpEndpoint` 仅允许 `localhost`、`127.0.0.1` 或 `::1` 的 OTLP/HTTP protobuf `/v1/traces` 地址，例如本机 Phoenix。默认关闭，项目配置不能开启；不读取继承的 `OTEL_*` Header 或凭据。日志和 Trace 不保存提示词、推理、工具参数/结果、路径或密钥。导出失败不会影响运行；本地 JSONL 是结构化事件日志，不是 OpenTelemetry Logs。
 
 每项服务的 `api` 可设为 `chat-completions` 或 `messages`，`models` 列出该服务可选的模型。把密钥放入 `apiKeyEnv` 指定的环境变量；桌面版也可以把密钥保存到操作系统凭据库。非空环境变量优先；Linux 使用 Secret Service，服务不可用时会明确报错。旧的单服务 `model.api`、`model.baseURL` 和 `model.model` 配置仍受支持；这类配置未填写 `apiKeyEnv` 时使用 `LIGULE_API_KEY`。
 
@@ -169,7 +181,7 @@ serviceId = "deepseek"
 
 代码型扩展安装在用户数据根的 `extensions/` 目录：单个 `.js` 文件，或一个包含 `index.js` 的目录（一目录一包）。扩展以 Host 进程内代码运行，只有 full-access 且不受限网络的会话才会加载；`ligule extensions` 列出当前会加载的路径与诊断。已安装扩展可以停用：终端 `/extensions [on|off <名称>]`、桌面设置工具页的开关写入数据根的 `extensions-state.json`，下次启动生效；配置层显式声明的扩展路径不受登记影响。
 
-在包含 `subagent` 工具的模式中，模型可以把互相独立的工作委派给内部子代理。每个子代理在同一 Host 进程中运行，但拥有独立的子会话记录。父会话默认最多并行三个子代理，可在创建会话时通过 `[loop].maxConcurrentSubagents` 将上限设为 1 至 8；子代理不能继续创建子代理。子任务沿用父会话的 Provider、Permission 和 Policy 判定，模式只能进一步缩小工具范围，模型调用次数、输出、思考和循环预算不能高于父会话。独立工具调用按项目 `[loop].maxParallelTools` 上限并发执行，默认值为 4，必须是正安全整数；子代理沿用此上限，工具并发上限也可能进一步限制子代理并发。通过输出 schema 要求结构化结果时，子代理必须提交并通过验证；无效提交可在本轮现有迭代预算内纠正。子代理若未提交有效结果便结束，会以失败状态保留 Session 记录和已完成的工具副作用。TUI 可用 `/sub <序号>` 查看子记录；桌面会话菜单提供子任务列表，Markdown 导出会包含子会话记录。失败或取消的子任务仍会保留可查看的会话引用。
+在包含 `subagent` 工具的模式中，模型可以把互相独立的工作委派给内部子代理。每个子代理在同一 Host 进程中运行，但拥有独立的子会话记录。父会话默认最多并行三个子代理，可在创建会话时通过 `[loop].maxConcurrentSubagents` 将上限设为 1 至 8；子代理不能继续创建子代理。子任务沿用父会话的 Provider、Permission 和 Policy 判定，模式只能进一步缩小工具范围，模型调用次数、输出、思考和循环预算不能高于父会话。独立工具调用按项目 `[loop].maxParallelTools` 上限并发执行，默认值为 4，范围为 1 至 32；子代理沿用此上限，工具并发上限也可能进一步限制子代理并发。通过输出 schema 要求结构化结果时，子代理必须提交并通过验证；无效提交可在本轮现有迭代预算内纠正。子代理若未提交有效结果便结束，会以失败状态保留 Session 记录和已完成的工具副作用。TUI 可用 `/sub <序号>` 查看子记录；桌面会话菜单提供子任务列表，Markdown 导出会包含子会话记录。失败或取消的子任务仍会保留可查看的会话引用。
 
 项目 `[loop]` 可设置 `totalModelCalls`、`taskTimeoutMs`、`requestTimeoutMs` 和 `interactionWaitTimeoutMs`，默认分别为 `modelCalls`、30 分钟、2 分钟和 12 小时。父任务、内部子代理与自动压缩共享预算。只有所有工作都因审批或用户提问而阻塞时，执行期限才暂停；存在待处理交互时，即使其他工作继续运行，也会消耗整次 Run 的独立累计等待上限，重叠等待只计一次。单次委派可通过 `delegation.budget` 收紧上限；执行期限最长 24 小时，单次模型请求最长 1 小时，交互等待最长 7 天。客户端等待超时不会取消任务。运行失败时仍尽量保留已确认的调用次数和部分正文。
 
@@ -278,4 +290,8 @@ TUI 输入 `/browser` 可查看配置、可用性、Permission、暂停状态和
 - `provider_model_required` 或 `provider_base_url_required`：检查服务地址、接口类型和模型名称。
 - `resume_mode_changed`：恢复会话时指定其原有模式，或在终端界面使用 `/resume <编号> <模式名>`。
 - `delete_target_is_link`：删除工具拒绝目标路径最后一项为符号链接或 junction，并保留链接目标；如果确实要将真实目标送入回收站，请明确指定目标本身。
+- `recycle_backend_missing`：当前平台没有可用的系统回收站；源文件保持不变。
+- `recycle_cross_device` 或 `recycle_backend_failed`：系统回收站拒绝此次移动；源文件保持不变。检查目标所在磁盘或系统回收站状态后再重试。
+- `delete_target_changed`：目标在检查期间发生变化；先检查实际文件，再重新发起删除。
+- `trash_legacy_config_unsupported`：从用户/项目配置中删除旧的 `trashBackend` 和 `limits.trashDirectory` 字段。
 - 命令不熟悉时运行 `ligule --help`；在终端界面输入 `/help` 查看界面命令和按键。
