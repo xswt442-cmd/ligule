@@ -73,6 +73,7 @@ test('file rotation keeps a bounded number of bounded files', async (t) => {
     telemetry.emit({ type: 'run.finished', executionId: `exec-${index}`, runId: `run-${index}`, sessionId: 'session', status: 'completed', durationMs: index,
       modelCalls: 1, toolCalls: 0 });
   }
+  await telemetry.flush();
   await telemetry.shutdown();
   const files = await segmentFiles(directory);
   assert.ok(files.length <= 4);
@@ -83,7 +84,7 @@ test('file rotation keeps a bounded number of bounded files', async (t) => {
     logBytes += bytes;
   }
   assert.ok(logBytes <= 4 * 1100);
-  assert.ok((await readdir(directory)).length <= 5);
+  assert.ok((await readdir(directory)).length <= 5, JSON.stringify(await readdir(directory)));
 });
 
 test('filesystem failures do not escape emit, flush, or shutdown', async (t) => {
