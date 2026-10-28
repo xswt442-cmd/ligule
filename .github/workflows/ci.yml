@@ -123,8 +123,36 @@ jobs:
           if (!result.available) { throw new Error(result.reason ?? 'Linux isolation probe failed'); }"
       - name: syntax check JavaScript source and tests
         run: pnpm check:syntax
+      - name: enforce source dependency boundaries
+        run: pnpm check:dependencies
       - name: test
         run: pnpm test
+
+  eval-smoke:
+    name: deterministic Harbor and ATIF smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: 0.13.5
+          python-version: '3.12'
+          enable-cache: false
+      - name: install
+        run: pnpm install --frozen-lockfile
+      - name: run deterministic evaluation smoke
+        run: pnpm run eval:smoke
 
   cli-package:
     name: build CLI package artifact

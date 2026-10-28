@@ -184,8 +184,8 @@ async function runChecks() {
     assert.deepEqual(result.keys, [
       'appInfo', 'defaultWorkspace', 'notificationPermission', 'onHostFault', 'onHostFrame', 'onHostLog',
       'onNotificationOpen', 'onQuitRequested', 'requestNotificationPermission', 'requestQuit',
-      'restartHost', 'saveExportPath', 'selectWorkspaceDirectory', 'sendHostFrame', 'showNotification', 'updateTray',
-    ]);
+      'restartHost', 'revealArtifact', 'saveExportPath', 'selectWorkspaceDirectory', 'sendHostFrame', 'showNotification', 'updateTray',
+    ], `preload_api_keys_mismatch:${JSON.stringify(result.keys)}`);
     return '真实 Preload 只暴露固定桌面 API，页面没有 Node 或 Electron 原语';
   });
 
@@ -214,6 +214,7 @@ async function runChecks() {
         () => api.appInfo(),
         () => api.sendHostFrame(${JSON.stringify(JSON.stringify({ id: nextId('secondary'), method: 'desktop.security.probe', params: {} }))}),
         () => api.restartHost(),
+        () => api.revealArtifact({ projectRoot: 'C:/', sessionId: 'secondary-window', artifactKey: '0'.repeat(64) }),
         () => api.defaultWorkspace(),
         () => api.selectWorkspaceDirectory('C:/'),
         () => api.saveExportPath('ligule-security.md'),
@@ -230,7 +231,7 @@ async function runChecks() {
       }
       return results;
     })()`);
-    assert.equal(secondaryResult.length, ipc.CHANNELS.length);
+    assert.equal(secondaryResult.length, ipc.CHANNELS.length, `preload_ipc_coverage_mismatch:${secondaryResult.length}/${ipc.CHANNELS.length}`);
     for (const result of secondaryResult) assert.match(result, /desktop_sender_rejected/u);
     const clipboard = await secondWindow.webContents.executeJavaScript(`(async () => {
       try { await navigator.clipboard.writeText('rejected secondary window'); return 'accepted'; }
