@@ -55,7 +55,7 @@ export { branchSession } from './session/branch.js';
 export { CHECKPOINT_FORMAT_VERSION, CHECKPOINT_INPUT_VERSION, checkpointPath, createBlock, createCheckpointFile, loadCheckpointFile, prefixDigest, usableCheckpointFile, writeCheckpointFile } from './session/checkpoint.js';
 export { createCompaction, cutPoint, estimateTokens, compressibleRange, SUMMARY_SPILL_NAME } from './session/compaction.js';
 export { summarizeVerdicts, formatVerdicts } from './session/verdicts.js';
-export { createLoop, DEFAULT_LOOP_LIMITS } from './kernel/loop.js';
+export { createLoop, DEFAULT_LOOP_LIMITS, MAX_PARALLEL_TOOLS } from './kernel/loop.js';
 export { createTaskBudget } from './kernel/task-budget.js';
 export { runSummary, checkedRunSummary } from './kernel/run-summary.js';
 export { createPresentPlugin } from './tools/present.js';

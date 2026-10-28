@@ -10,6 +10,8 @@ import { createDecisionChain } from '../dist/kernel/policy.js';
 import { createPermissionContext } from '../dist/kernel/permission.js';
 import { DEFAULT_PERMISSION_CONTEXT } from '../dist/kernel/permission.js';
 import { createTelemetry } from '../dist/kernel/telemetry.js';
+import { createServer } from 'node:http';
+import { once } from 'node:events';
 
 const testRoot = join(process.cwd(), 'testplace', 'telemetry-host');
 
@@ -21,7 +23,7 @@ async function filesUnder(directory) {
   return result;
 }
 
-async function setupHost(t, { telemetry, provider, permission, policyMode = 'ask' } = {}) {
+async function setupHost(t, { telemetry, provider, permission, policyMode = 'ask', configLayers } = {}) {
   await mkdir(testRoot, { recursive: true });
   const root = await mkdtemp(join(testRoot, 'case-'));
   t.after(async () => rm(root, { recursive: true, force: true }));
@@ -49,6 +51,7 @@ async function setupHost(t, { telemetry, provider, permission, policyMode = 'ask
   };
   const approvals = [];
   const host = createHost({ config, provider, policy: config.policy, interactive: true,
+    ...(configLayers === undefined ? {} : { configLayers }),
     ...(permission === undefined ? {} : { permission }),
     ...(telemetry === true ? { telemetry: { enabled: true, directory: telemetryDirectory } } : {}),
   });
@@ -56,6 +59,48 @@ async function setupHost(t, { telemetry, provider, permission, policyMode = 'ask
   const { sessionId } = await host.handle({ method: 'session.create', params: {} }, client);
   return { host, client, project, sessions, sessionId, telemetryDirectory, approvals };
 }
+
+test('Host enables loopback OTLP only from the user configuration layer', async (t) => {
+  const requests = [];
+  const receiver = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    requests.push({ path: request.url, body: Buffer.concat(chunks) });
+    response.writeHead(200, { connection: 'close' });
+    response.end();
+  });
+  receiver.listen(0, '127.0.0.1');
+  await once(receiver, 'listening');
+  t.after(async () => {
+    receiver.closeAllConnections();
+    if (receiver.listening) await new Promise((resolve, reject) => receiver.close(error => error ? reject(error) : resolve()));
+  });
+  const endpoint = `http://127.0.0.1:${receiver.address().port}/v1/traces`;
+  const provider = { async *stream() { yield { type: 'text', text: 'done' }; yield { type: 'finish', reason: 'stop' }; } };
+  const userDataRoot = await mkdtemp(join(testRoot, 'otlp-user-data-'));
+  const previousDataRoot = process.env.LIGULE_HOME;
+  process.env.LIGULE_HOME = userDataRoot;
+  t.after(async () => {
+    if (previousDataRoot === undefined) delete process.env.LIGULE_HOME;
+    else process.env.LIGULE_HOME = previousDataRoot;
+    await rm(userDataRoot, { recursive: true, force: true });
+  });
+
+  const userConfigured = await setupHost(t, { provider, configLayers: { user: { telemetry: { enabled: true, otlpEndpoint: endpoint } } } });
+  await userConfigured.host.handle({ method: 'run.start', params: { sessionId: userConfigured.sessionId, input: 'trace user config' } }, userConfigured.client);
+  await userConfigured.host.release();
+  assert.ok(requests.some(request => request.path === '/v1/traces' && request.body.byteLength > 0));
+  const localRecords = (await filesUnder(join(userDataRoot, 'telemetry'))).flatMap(text => text.trim().split('\n').map(JSON.parse));
+  assert.ok(localRecords.length > 0);
+  assert.ok(localRecords.every(event => typeof event.timestamp === 'string' && typeof event.component === 'string'
+    && typeof event.severity === 'string' && typeof event.type === 'string'));
+
+  requests.length = 0;
+  const projectConfigured = await setupHost(t, { provider, configLayers: { project: { telemetry: { enabled: true, otlpEndpoint: endpoint } } } });
+  await projectConfigured.host.handle({ method: 'run.start', params: { sessionId: projectConfigured.sessionId, input: 'project config remains disabled' } }, projectConfigured.client);
+  await projectConfigured.host.release();
+  assert.deepEqual(requests, []);
+});
 
 test('Host telemetry uses execution IDs plus Session and parent-call links, and excludes sensitive content', async (t) => {
   const provider = {
@@ -102,7 +147,7 @@ test('Host telemetry uses execution IDs plus Session and parent-call links, and 
   const parentStart = records.find(event => event.type === 'run.started' && event.sessionId === hostContext.sessionId);
   const childStart = records.find(event => event.type === 'run.started' && event.sessionId === childSessionId);
   assert.ok(parentStart);
-  assert.ok(childStart);
+  assert.ok(childStart, 'child run telemetry event missing');
   assert.match(parentStart.runId, /^[0-9a-f-]{36}$/u);
   assert.equal(childStart.runId, undefined);
   assert.equal(childStart.parentExecutionId, parentStart.executionId);

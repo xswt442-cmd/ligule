@@ -9,6 +9,25 @@ const input = JSON.stringify({ tool: 'ask_user_question', args: {
   questions: JSON.stringify([{ question: 'Continue?', options: [], multiSelect: false }]),
 } });
 
+test('Host rejects a configured parallel tool limit above the bounded maximum', async () => {
+  await assert.rejects(
+    withTuiHost(async () => {}, { config: { loop: { maxParallelTools: 33 } } }),
+    (error) => error.code === 'host_loop_limits_invalid',
+  );
+});
+
+test('Host rejects legacy project trash settings with an actionable configuration error', async () => {
+  for (const config of [
+    { trashBackend: 'managed' },
+    { limits: { trashDirectory: '.old-trash' } },
+  ]) {
+    await assert.rejects(
+      withTuiHost(async () => {}, { config }),
+      (error) => error.code === 'trash_legacy_config_unsupported',
+    );
+  }
+});
+
 test('Host pauses the execution deadline while a question is the only active work', async () => {
   await withTuiHost(async ({ client, sessionId }) => {
     client.onRequest(async (message) => {

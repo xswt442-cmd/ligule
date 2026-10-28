@@ -33,19 +33,26 @@ test('telemetry is disabled unless explicitly enabled with a directory', async (
 test('writes only allowlisted fields and drops malformed or sensitive values', async (t) => {
   const directory = await isolated(t);
   const telemetry = createTelemetry({ enabled: true, directory });
-  telemetry.emit({ type: 'model.finished', executionId: 'e1', runId: 'r1', sessionId: 's1', provider: 'openai', model: 'gpt_4', durationMs: 604_800_000,
+  telemetry.emit({ type: 'model.finished', executionId: 'e1', runId: 'r1', sessionId: 's1', requestId: 'request-1', logicalRequestId: 'logical-1', attempt: 1,
+    provider: 'openai', model: 'gpt_4', durationMs: 604_800_000, status: 'completed',
     inputTokens: 4, outputTokens: 2, finishReason: 'stop' });
-  telemetry.emit({ type: 'model.finished', executionId: 'e2', runId: 'r2', provider: 'openai', model: 'secret=abc', durationMs: 1 });
-  telemetry.emit({ type: 'tool.finished', executionId: 'e3', runId: 'r3', tool: 'read', durationMs: 2, outcome: 'success', args: { password: 'nope' } });
-  telemetry.emit({ type: 'model.finished', executionId: 'e4', runId: 'r4', provider: 'vendor/provider', model: 'vendor/model',
-    durationMs: 23, inputTokens: 7, outputTokens: 5, finishReason: 'stop' });
+  telemetry.emit({ type: 'model.finished', executionId: 'e2', runId: 'r2', requestId: 'request-2', logicalRequestId: 'logical-2', attempt: 1,
+    provider: 'openai', model: 'secret=abc', durationMs: 1, status: 'completed' });
+  telemetry.emit({ type: 'tool.finished', executionId: 'e3', runId: 'r3', callId: 'call-3', tool: 'read', durationMs: 2, outcome: 'success', args: { password: 'nope' } });
+  telemetry.emit({ type: 'model.finished', executionId: 'e4', runId: 'r4', requestId: 'request-4', logicalRequestId: 'logical-4', attempt: 1,
+    provider: 'vendor/provider', model: 'vendor/model',
+    durationMs: 23, status: 'completed', inputTokens: 7, outputTokens: 5, finishReason: 'stop' });
   await telemetry.shutdown();
   const text = await readFile(join(directory, 'segment-00000000.jsonl'), 'utf8');
   const records = text.trim().split('\n').map(line => JSON.parse(line));
   assert.equal(records.length, 3);
-  assert.deepEqual(Object.keys(records[0]).sort(), ['durationMs', 'executionId', 'finishReason', 'inputTokens', 'model', 'outputTokens', 'provider', 'runId', 'sessionId', 'timestamp', 'type'].sort());
+  assert.deepEqual(Object.keys(records[0]).sort(), ['attempt', 'component', 'durationMs', 'executionId', 'finishReason', 'inputTokens', 'logicalRequestId',
+    'model', 'outputTokens', 'provider', 'requestId', 'runId', 'sessionId', 'severity', 'status', 'timestamp', 'type'].sort());
+  assert.equal(records[0].component, 'model');
+  assert.equal(records[0].severity, 'info');
   assert.equal(records[0].runId, 'r1');
   assert.equal(records[0].durationMs, 604_800_000);
+  assert.equal(records[0].status, 'completed');
   assert.equal(records[1].model, undefined);
   assert.equal(records[2].provider, undefined);
   assert.equal(records[2].model, undefined);
@@ -208,7 +215,7 @@ test('multiple writers serialize through one manifest and obey aggregate file an
 test('restart writers reuse one capped directory without accumulating log sets', async (t) => {
   const directory = await isolated(t);
   for (let writer = 0; writer < 5; writer += 1) {
-    const telemetry = createTelemetry({ enabled: true, directory, maxFileBytes: 1100, retainedFiles: 2 });
+    const telemetry = createTelemetry({ enabled: true, directory, maxFileBytes: 4096, retainedFiles: 2 });
     for (let index = 0; index < 25; index += 1) {
       telemetry.emit({ type: 'run.finished', executionId: `exec-${writer}-${index}`, runId: `run-${writer}-${index}`,
         status: 'completed', durationMs: index, modelCalls: 1, toolCalls: 0 });
@@ -221,7 +228,7 @@ test('restart writers reuse one capped directory without accumulating log sets',
   assert.deepEqual(files.sort(), ['telemetry.manifest.json', ...segments].sort());
   const totalBytes = (await Promise.all(files.map(name => readFile(join(directory, name)))))
     .reduce((total, content) => total + content.byteLength, 0);
-  assert.ok(totalBytes <= 2 * 1100 + 4096);
+  assert.ok(totalBytes <= 2 * 4096 + 4096);
 });
 
 test('shutdown returns within its bound when a file flush never settles', async (t) => {

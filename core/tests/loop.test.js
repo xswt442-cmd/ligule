@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { appendFile, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createConfig, createKernel, createLoop, createSessionLog, KernelError, KernelRuntimeError } from '../dist/index.js';
+import { createConfig, createKernel, createLoop, createSessionLog, createTaskBudget, DEFAULT_LOOP_LIMITS, KernelError, KernelRuntimeError } from '../dist/index.js';
 
 // 脚本化提供方只用于驱动循环；本文件不测试具体模型端点。
 function scriptedProvider(turns, fallback = [{ type: 'text', text: 'done' }]) {
@@ -33,6 +33,15 @@ test('a turn without tool calls ends the run and the provider is asked once', as
   assert.deepEqual(result, { text: 'the answer', iterations: 1, modelCalls: 1 });
   assert.equal(provider.requests.length, 1);
   assert.deepEqual(provider.requests[0].messages, [{ role: 'user', text: 'question' }]);
+});
+
+test('parallel tool limits reject unsafe concurrency', () => {
+  for (const maxParallelTools of [0, 33]) {
+    assert.throws(
+      () => createLoop({ kernel: kernelWith([]), provider: scriptedProvider([]), limits: { ...DEFAULT_LOOP_LIMITS, maxParallelTools } }),
+      (error) => error.code === 'loop_parallel_limit_invalid',
+    );
+  }
 });
 
 test('loop progress reports real request and tool phases in execution order', async () => {
@@ -251,6 +260,39 @@ test('adjacent parallel calls overlap and a serial call forms a boundary', async
   assert.ok(log.indexOf('c-start') > log.indexOf('b-end'), 'the serial call waits for the parallel group');
   assert.equal(log.indexOf('a-start'), 0);
   assert.deepEqual(log.slice(-2), ['a-start', 'a-end'], 'the call after a serial one starts its own group');
+});
+
+test('a parallel interaction pauses only its tool while another active tool keeps the deadline running', async () => {
+  const budget = createTaskBudget({ maxModelCalls: 2, timeoutMs: 500, requestTimeoutMs: 200, interactionWaitTimeoutMs: 2_000 });
+  let markActiveStarted;
+  const activeStarted = new Promise((resolve) => { markActiveStarted = resolve; });
+  let executionPausedWhileOtherToolRan;
+  const awaitingApproval = tool('await_approval', async () => {
+    const finishInteraction = budget.startInteraction();
+    try {
+      await activeStarted;
+      executionPausedWhileOtherToolRan = budget.snapshot().executionPaused;
+      await sleep(800);
+      return { text: 'approved' };
+    } finally { finishInteraction(); }
+  }, 'parallel');
+  const backgroundWork = tool('background_work', async () => {
+    markActiveStarted();
+    await sleep(800);
+    return { text: 'finished' };
+  }, 'parallel');
+  const provider = scriptedProvider([[
+    { type: 'tool-call', id: 'await-approval', name: 'await_approval', args: {} },
+    { type: 'tool-call', id: 'background-work', name: 'background_work', args: {} },
+  ]]);
+
+  try {
+    await assert.rejects(
+      createLoop({ kernel: kernelWith([awaitingApproval, backgroundWork]), provider }).run('go', { task: budget }),
+      { code: 'task_deadline_exceeded' },
+    );
+    assert.equal(executionPausedWhileOtherToolRan, false);
+  } finally { budget.dispose(); }
 });
 
 test('a tool the host marked as completing the run stops it without another model call', async () => {

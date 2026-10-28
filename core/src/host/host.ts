@@ -2,6 +2,7 @@
 // 模型提供方与策略由外部注入，会话事件通过会话记录接口持久化。
 import { randomUUID } from 'node:crypto';
 import type { Readable, Writable } from 'node:stream';
+import { mkdirSync } from 'node:fs';
 import { access, lstat, opendir, readFile, realpath, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { KernelError } from '../kernel/error.js';
@@ -51,13 +52,13 @@ import { usageEvent } from '../session/usage.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
 import { foldLabel } from '../session/format.js';
 import { SPILL_NAME, resultLimit } from '../kernel/result.js';
-import { boundaryOf, limitsOf, workingDirectoryOf } from '../capability/limits.js';
+import { assertNoLegacyTrashConfig, boundaryOf, limitsOf, workingDirectoryOf } from '../capability/limits.js';
 import { resolveWithin } from '../capability/paths.js';
 import { createManagedProcessRegistry, managedProcessPlugin, type ManagedProcessRegistry } from '../capability/managed-process.js';
 import { loadInstructions, DEFAULT_INSTRUCTION_BYTES } from '../capability/instructions.js';
 import { SKILL_METADATA_BUDGET_BYTES, discoverSkills, formatSkillCatalog, skillDirectories } from '../kernel/skills.js';
 import { discoverTemplates, expandTemplate, findTemplate, parseInvocation, templateDirectories } from '../kernel/templates.js';
-import { createLoop, DEFAULT_LOOP_LIMITS, type LoopCompaction, type LoopProgressEvent, type LoopProgressPhase, type LoopResult } from '../kernel/loop.js';
+import { createLoop, DEFAULT_LOOP_LIMITS, MAX_PARALLEL_TOOLS, type LoopCompaction, type LoopProgressEvent, type LoopProgressPhase, type LoopResult } from '../kernel/loop.js';
 import { minimalPlugin } from '../tools/minimal.js';
 import { networkPlugin } from '../tools/network.js';
 import { createTodoWritePlugin } from '../tools/todo-write.js';
@@ -109,6 +110,7 @@ interface HostConfigSnapshot extends ConfigSnapshot {
   readonly loop?: Record<string, unknown>;
   readonly limits?: Record<string, unknown>;
   readonly policy?: Record<string, unknown>;
+  readonly telemetry?: Record<string, unknown>;
   readonly prompt?: { readonly static?: string };
   readonly instructions?: Record<string, unknown> & { readonly maxBytes?: number; readonly current?: string };
 }
@@ -473,6 +475,27 @@ function errorDetail(error: unknown): string | undefined {
   return typeof error.detail === 'string' ? error.detail : undefined;
 }
 
+function telemetryOptionsOfUserLayer(layer: Record<string, unknown> | undefined): TelemetryOptions | undefined {
+  const raw = layer?.telemetry;
+  if (raw === undefined) return undefined;
+  if (!isRecord(raw) || Object.keys(raw).some(key => !['enabled', 'otlpEndpoint'].includes(key))) {
+    throw new KernelError('telemetry_config_invalid', { detail: 'user telemetry configuration accepts only enabled and otlpEndpoint' });
+  }
+  if (raw.enabled !== undefined && typeof raw.enabled !== 'boolean') {
+    throw new KernelError('telemetry_config_invalid', { detail: 'telemetry.enabled must be a boolean' });
+  }
+  if (raw.otlpEndpoint !== undefined && typeof raw.otlpEndpoint !== 'string') {
+    throw new KernelError('telemetry_config_invalid', { detail: 'telemetry.otlpEndpoint must be a string' });
+  }
+  if (raw.enabled !== true) {
+    return { enabled: false, ...(typeof raw.otlpEndpoint === 'string' ? { otlpEndpoint: raw.otlpEndpoint } : {}) };
+  }
+  const directory = join(dataRoot(), 'telemetry');
+  try { mkdirSync(directory, { recursive: true, mode: 0o700 }); }
+  catch (cause) { throw new KernelError('telemetry_storage_unavailable', { cause }); }
+  return { enabled: true, directory, ...(typeof raw.otlpEndpoint === 'string' ? { otlpEndpoint: raw.otlpEndpoint } : {}) };
+}
+
 function isToolDefinition(value: unknown): value is ToolDefinition {
   return isRecord(value)
     && typeof value.name === 'string'
@@ -532,8 +555,9 @@ function exportRecordOf(event: SessionEvent): ExportRecord | undefined {
 function loopLimitsOf(config: HostConfigSnapshot): LoopLimits & { readonly maxParallelTools: number } {
   const limits = { ...DEFAULT_LOOP_LIMITS, ...(isRecord(config.loop) ? config.loop : {}) };
   const positiveInteger = (value: unknown, key: 'iterations' | 'modelCalls' | 'maxParallelTools'): number => {
-    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
-      throw new KernelError('host_loop_limits_invalid', { detail: `${key} must be an integer of at least 1` });
+    const maximum = key === 'maxParallelTools' ? MAX_PARALLEL_TOOLS : Number.MAX_SAFE_INTEGER;
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1 || value > maximum) {
+      throw new KernelError('host_loop_limits_invalid', { detail: `${key} must be an integer between 1 and ${maximum}` });
     }
     return value;
   };
@@ -749,7 +773,7 @@ export function createHost({
   agentControl, screenCaptureConsent = false, telemetry: telemetryOptions,
 }: HostOptions): Host {
   if (typeof screenCaptureConsent !== 'boolean') throw new KernelError('screen_capture_consent_invalid');
-  const telemetry = createTelemetry(telemetryOptions);
+  const telemetry = createTelemetry(telemetryOptions ?? telemetryOptionsOfUserLayer(configLayers?.user));
   // 每个项目环境持有自己的配置快照、提供方、策略、模式、记录目录和可写配置层。
   // 在加载环境时校验配置，避免等到第一次模型请求才发现错误。
   // 文件系统边界同时限制工具访问范围和指令文件向上查找的范围。
@@ -757,6 +781,7 @@ export function createHost({
   // 加载器负责解析配置文件路径；Host 通过层名、允许字段和版本读写配置。
   function prepareEnvironment(own: EnvironmentSeed): ProjectEnvironment {
     if (!Object.isFrozen(own.config)) throw new KernelError('host_config_must_be_frozen');
+    assertNoLegacyTrashConfig(own.config);
     if (typeof own.config.boundary !== 'string' || own.config.boundary === '') throw new KernelError('host_boundary_required');
     if (typeof own.provider?.stream !== 'function') throw new KernelError('host_provider_required');
     if (own.modeName !== undefined && own.modePaths === undefined) throw new KernelError('host_mode_paths_required');
@@ -1866,6 +1891,14 @@ export function createHost({
         updateWaitingForUser(state as HostSessionState, connection, true, 'approval');
         const endInteraction = state.taskBudget?.startInteraction();
         const approvalStartedAt = telemetryContext === undefined ? 0n : process.hrtime.bigint();
+        if (telemetryContext?.executionId !== undefined) emitTelemetry(telemetry, { type: 'approval.started',
+          executionId: telemetryContext.executionId, ...(telemetryApprovalRunId === undefined ? {} : { runId: telemetryApprovalRunId }),
+          sessionId: telemetryContext.sessionId ?? id,
+          ...(telemetryContext.userSeq === undefined ? {} : { userSeq: telemetryContext.userSeq }),
+          ...(telemetryContext.parentExecutionId === undefined ? {} : { parentExecutionId: telemetryContext.parentExecutionId }),
+          ...(telemetryContext.parentRunId === undefined ? {} : { parentRunId: telemetryContext.parentRunId }),
+          ...(telemetryContext.parentCallId === undefined ? {} : { parentCallId: telemetryContext.parentCallId }),
+          ...(callId === undefined ? {} : { callId }), requestId });
         try {
           const answer = await Promise.race([
             connection.request(APPROVAL_METHOD, {
@@ -1932,13 +1965,15 @@ export function createHost({
           ]);
           if (telemetryContext?.executionId !== undefined) emitTelemetry(telemetry, { type: 'approval.finished', executionId: telemetryContext.executionId,
             ...(telemetryApprovalRunId === undefined ? {} : { runId: telemetryApprovalRunId }), sessionId: telemetryContext.sessionId ?? id,
+            ...(telemetryContext.userSeq === undefined ? {} : { userSeq: telemetryContext.userSeq }),
             ...(telemetryContext.parentExecutionId === undefined ? {} : { parentExecutionId: telemetryContext.parentExecutionId }),
             ...(telemetryContext.parentRunId === undefined ? {} : { parentRunId: telemetryContext.parentRunId }),
             ...(telemetryContext.parentCallId === undefined ? {} : { parentCallId: telemetryContext.parentCallId }),
             ...(callId === undefined ? {} : { callId }), requestId,
             durationMs: Number((process.hrtime.bigint() - approvalStartedAt) / 1_000_000n),
             decision: answer.decision === 'allow' ? 'allow' : answer.decision === 'deny' ? 'deny'
-              : answer.decision === 'cancelled' ? 'cancelled' : 'error' });
+              : answer.decision === 'cancelled' ? 'cancelled' : 'error',
+            ...(answer.decision === 'error' || answer.decision === 'cancelled' ? { errorCode: answer.code } : {}) });
           return answer;
         } finally {
           approvalActive = false;
