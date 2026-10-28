@@ -1,24 +1,30 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
-import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const config = join(repositoryRoot, 'dependency-cruiser.cjs');
 const tempRoot = join(repositoryRoot, 'testplace', 'tmp');
+const analyzerRoot = realpathSync(join(repositoryRoot, 'node_modules', 'dependency-cruiser'));
+const analyzerManifest = JSON.parse(readFileSync(join(analyzerRoot, 'package.json'), 'utf8'));
+const expectedAnalyzerVersion = JSON.parse(readFileSync(join(repositoryRoot, 'package.json'), 'utf8'))
+  .devDependencies?.['dependency-cruiser'];
+const analyzerEntry = typeof analyzerManifest.bin === 'string' ? analyzerManifest.bin : analyzerManifest.bin?.depcruise;
+if (typeof expectedAnalyzerVersion !== 'string' || analyzerManifest.version !== expectedAnalyzerVersion
+  || typeof analyzerEntry !== 'string') {
+  throw new Error('dependency_cruiser_install_mismatch: install the locked workspace dev dependencies');
+}
+const analyzerCli = resolve(analyzerRoot, analyzerEntry);
+const relativeAnalyzerCli = relative(analyzerRoot, analyzerCli);
+if (relativeAnalyzerCli === '..' || relativeAnalyzerCli.startsWith(`..${sep}`) || isAbsolute(relativeAnalyzerCli)
+  || !existsSync(analyzerCli)) {
+  throw new Error('dependency_cruiser_cli_not_found: install the locked workspace dev dependencies');
+}
 
 function dependencyCruiser(args, cwd = repositoryRoot) {
-  const searchPath = (process.env.PATH ?? '').split(delimiter);
-  const command = process.platform === 'win32' ? 'depcruise.cmd' : 'depcruise';
-  const binary = searchPath.map((directory) => join(directory, command))
-    .find((path) => isAbsolute(path) && existsSync(path));
-  if (binary === undefined) throw new Error('dependency_cruiser_not_found: install the workspace dev dependencies');
-  const cli = process.platform === 'win32'
-    ? join(dirname(dirname(binary)), 'dependency-cruiser', 'bin', 'dependency-cruiser.mjs')
-    : binary;
-  if (!existsSync(cli)) throw new Error(`dependency_cruiser_cli_not_found: ${cli}`);
-  const result = spawnSync(process.execPath, [cli, ...args], {
+  const result = spawnSync(process.execPath, [analyzerCli, ...args], {
     cwd,
     encoding: 'utf8',
     windowsHide: true,
