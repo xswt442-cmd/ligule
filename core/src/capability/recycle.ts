@@ -85,6 +85,13 @@ export const freedesktopTrash = {
   async send(target: string): Promise<void> {
     const root = trashRoot();
     const files = join(root, 'files');
+    try {
+      await mkdir(files, { recursive: true });
+      await mkdir(join(root, 'info'), { recursive: true });
+    } catch (error) {
+      const code = errorCode(error);
+      throw new KernelError('recycle_backend_failed', { cause: error, detail: `the system trash could not be prepared: ${code ?? errorMessage(error)}` });
+    }
     const base = basename(target);
     const info = `[Trash Info]\nPath=${encodeTrashPath(target)}\nDeletionDate=${deletionDate(new Date())}\n`;
     // 先检查目标名称，再独占创建元数据文件；如果其他程序同时占用该名称，则尝试下一个名称。

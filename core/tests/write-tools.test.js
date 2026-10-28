@@ -288,6 +288,27 @@ test('a platform without a backend resolves to no recycler and a stable code', a
   assert.deepEqual(await resolveRecycler('darwin'), { recycler: undefined, code: 'recycle_backend_missing' });
 });
 
+test('the freedesktop backend prepares a newly selected trash root before sending a file', async () => {
+  const root = await mkdtemp(join(process.cwd(), 'testplace', 'trash-'));
+  const previous = process.env.XDG_DATA_HOME;
+  try {
+    process.env.XDG_DATA_HOME = join(root, 'previous-data');
+    await freedesktopTrash.probe();
+    process.env.XDG_DATA_HOME = join(root, 'data');
+    const workspace = join(root, 'workspace');
+    await mkdir(workspace, { recursive: true });
+    await writeFile(join(workspace, 'note.txt'), 'keep me');
+    await freedesktopTrash.send(join(workspace, 'note.txt'));
+
+    assert.equal(await readFile(join(root, 'data', 'Trash', 'files', 'note.txt'), 'utf8'), 'keep me');
+    assert.match(await readFile(join(root, 'data', 'Trash', 'info', 'note.txt.trashinfo'), 'utf8'), /^\[Trash Info\]\n/);
+  } finally {
+    if (previous === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('the freedesktop backend writes the info file the spec asks for and counts name collisions', async () => {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'trash-'));
   const previous = process.env.XDG_DATA_HOME;
