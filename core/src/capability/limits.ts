@@ -53,7 +53,7 @@ export function assertNoLegacyTrashConfig(config: Readonly<Record<string, unknow
     && (limits as Record<string, unknown>).trashDirectory !== undefined;
   if (config.trashBackend !== undefined || hasLegacyDirectory) {
     throw new KernelError('trash_legacy_config_unsupported', {
-      detail: 'Remove trashBackend and limits.trashDirectory from the configuration. Ligule now uses only the operating system recycle bin and leaves the source in place when it is unavailable or refuses the item.',
+      detail: 'Remove trashBackend and limits.trashDirectory from the configuration. Ligule now uses only the operating system recycle bin.',
     });
   }
 }

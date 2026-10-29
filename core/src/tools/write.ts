@@ -125,7 +125,7 @@ export const createTool = {
 export const writeTool = {
   name: 'write',
   access: 'write',
-  description: 'Replace the whole content of an existing text file relative to the working directory, within the workspace boundary. The file must have been read in this run and must not have changed since. Use create for a file that does not exist yet.',
+  description: 'Replace the whole content of an existing text file relative to the working directory, within the workspace boundary. The file must have been read in this run and must still match that version when validated; the final version check and write are not atomic against external writers. Use create for a file that does not exist yet.',
   parameters: {
     type: 'object',
     properties: {
@@ -205,7 +205,7 @@ export const editTool = {
 export const deleteTool = {
   name: 'delete',
   access: 'write',
-  description: 'Move a file or directory relative to the working directory, within the workspace boundary, into the operating system recycle bin. If the system recycle bin is unavailable or refuses the item, the tool returns an error and leaves the source in place. Final symbolic links and junctions are refused; name the actual target explicitly to delete it.',
+  description: 'Move a file or directory relative to the working directory, within the workspace boundary, into the operating system recycle bin. If the backend is unavailable, the tool returns an error and leaves the source in place. After a backend error, the tool rechecks the target; if it cannot confirm the target is unchanged, it returns delete_outcome_unknown. Final symbolic links and junctions are refused; name the actual target explicitly to delete it.',
   parameters: {
     type: 'object',
     properties: {
@@ -226,7 +226,19 @@ export const deleteTool = {
       });
     }
     await recheckDeleteTarget(args, config, snapshot);
-    await resolution.recycler.send(snapshot.target);
+    try {
+      await resolution.recycler.send(snapshot.target);
+    } catch (error) {
+      try {
+        await recheckDeleteTarget(args, config, snapshot);
+      } catch (verificationError) {
+        throw new KernelError('delete_outcome_unknown', {
+          cause: error,
+          detail: `${args.path} could not be verified unchanged after the system recycle bin reported an error (${errorCode(verificationError) ?? errorMessage(verificationError)}); check both the workspace and system trash before retrying`,
+        });
+      }
+      throw error;
+    }
     observations?.forget(snapshot.target);
     return { text: `sent ${snapshot.name} to the ${resolution.recycler.name}` };
   },

@@ -38,7 +38,7 @@ export { readOnlyTools, readTool, findTool, searchTool } from './tools/read-only
 export { writeTools, createTool, writeTool, editTool, deleteTool } from './tools/write.js';
 export { DEFAULT_LIMITS } from './capability/limits.js';
 export { createObservationLog, versionOf } from './session/observe.js';
-export { resolveRecycler, windowsRecycleBin, freedesktopTrash } from './capability/recycle.js';
+export { resolveRecycler, windowsRecycleBin, linuxSystemTrash } from './capability/recycle.js';
 export { resolveRipgrep, searchWithRipgrep } from './capability/ripgrep.js';
 export { execTool } from './capability/exec.js';
 export { createManagedProcessRegistry, managedProcessPlugin, managedProcessTool } from './capability/managed-process.js';
