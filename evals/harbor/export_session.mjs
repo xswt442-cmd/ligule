@@ -281,7 +281,7 @@ export function runCli(cli, args, { cwd, env, timeoutMs }) {
   });
 }
 
-export function buildCliArgs({ instruction, sessionDirectory, api, baseUrl, model, apiKeyEnv, modelCalls, timeoutMs, requestTimeoutMs }) {
+export function buildCliArgs({ instruction, sessionDirectory, api, baseUrl, model, apiKeyEnv, modelCalls, timeoutMs, requestTimeoutMs, outputTokens }) {
   if (api !== 'messages' && api !== 'chat-completions') throw new Error('ligule_api_unsupported');
   if (!isAbsolute(sessionDirectory) || typeof model !== 'string' || model.trim() === '' || model.length > 256
     || typeof instruction !== 'string' || instruction.trim() === '') throw new Error('ligule_run_input_invalid');
@@ -292,12 +292,16 @@ export function buildCliArgs({ instruction, sessionDirectory, api, baseUrl, mode
     || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TASK_TIMEOUT_MS
     || !Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs < 1
     || requestTimeoutMs > Math.min(timeoutMs, MAX_REQUEST_TIMEOUT_MS)) throw new Error('ligule_run_budget_invalid');
+  if (outputTokens !== undefined && (!Number.isSafeInteger(outputTokens) || outputTokens < 1)) {
+    throw new Error('ligule_run_output_tokens_invalid');
+  }
   const values = [
     ['host.sessionDirectory', sessionDirectory], ['model.api', api], ['model.baseURL', baseUrl],
     ['model.model', model], ['model.apiKeyEnv', apiKeyEnv], ['loop.modelCalls', modelCalls],
     ['loop.totalModelCalls', modelCalls], ['loop.taskTimeoutMs', timeoutMs], ['loop.requestTimeoutMs', requestTimeoutMs],
     ['policy.mode', 'auto'],
   ];
+  if (outputTokens !== undefined) values.push(['model.outputTokens', outputTokens]);
   return [
     'run', '--json', '--allow-full-access',
     ...values.flatMap(([key, value]) => ['--config', `${key}=${typeof value === 'string' ? JSON.stringify(value) : String(value)}`]),
@@ -335,6 +339,8 @@ async function runMode(args) {
   const modelCalls = Number(takeOption(args, '--model-calls'));
   const timeoutMs = Number(takeOption(args, '--timeout-ms'));
   const requestTimeoutMs = Number(takeOption(args, '--request-timeout-ms'));
+  const outputTokensValue = takeOption(args, '--output-tokens', false);
+  const outputTokens = outputTokensValue === undefined ? undefined : Number(outputTokensValue);
   if (args.length > 0) throw new Error('ligule_export_unexpected_arguments');
   if (!isAbsolute(instructionFile) || !isAbsolute(cli) || !isAbsolute(homeDirectory)
     || process.env.LIGULE_HOME !== homeDirectory) throw new Error('ligule_run_paths_invalid');
@@ -346,7 +352,7 @@ async function runMode(args) {
   if (instruction.trim() === '') throw new Error('ligule_instruction_empty');
 
   const child = await runCli(cli, buildCliArgs({
-    instruction, sessionDirectory, api, baseUrl, model, apiKeyEnv, modelCalls, timeoutMs, requestTimeoutMs,
+    instruction, sessionDirectory, api, baseUrl, model, apiKeyEnv, modelCalls, timeoutMs, requestTimeoutMs, outputTokens,
   }), {
     cwd: process.cwd(),
     env: buildCliEnvironment(process.env, homeDirectory, apiKeyEnv),

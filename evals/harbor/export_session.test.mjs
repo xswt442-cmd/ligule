@@ -134,6 +134,30 @@ test('rejects a claimed state that differs from the canonical Session terminal',
   }
 });
 
+test('forwards a per-request output-token budget to the CLI', async () => {
+  const root = await mkdtemp(join(temporaryRoot, 'ligule-harbor-output-budget-'));
+  try {
+    const helper = await packagedHelper(root);
+    const options = {
+      instruction: 'complete the task',
+      sessionDirectory: join(root, 'sessions'),
+      api: 'chat-completions',
+      baseUrl: 'https://api.example.test/v1',
+      model: 'test-model',
+      apiKeyEnv: 'LIGULE_API_KEY',
+      modelCalls: 24,
+      timeoutMs: 900_000,
+      requestTimeoutMs: 60_000,
+      outputTokens: 16_384,
+    };
+    const args = helper.buildCliArgs(options);
+    assert.ok(args.includes('model.outputTokens=16384'));
+    assert.throws(() => helper.buildCliArgs({ ...options, outputTokens: 0 }), /ligule_run_output_tokens_invalid/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('machine CLI parser filters response bodies and rejects localized output', async () => {
   const root = await mkdtemp(join(temporaryRoot, 'ligule-harbor-cli-'));
   try {

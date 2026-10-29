@@ -6,7 +6,7 @@ The Node helper is copied into the installed `ligule` package directory after np
 
 The ATIF export represents the selected Session turn, not a complete replay. Subagent trajectories and image references or payloads are not embedded; omissions appear in `extra.ligule.missing_features`, with per-call flags where applicable. The adapter restores spill files only after validating them against the same Session directory; an unresolved spill reference fails the export.
 
-The Session directory is an explicit child of a fresh per-run `LIGULE_HOME`. Each CLI run explicitly sets `policy.mode=auto` and `--allow-full-access`. The flag grants the Ligule process full local file, process, and network permission inside the Harbor task container; Ligule does not provide an additional OS sandbox for that run. This lets policy-approved direct file operations and statically safe commands run without a human terminal; commands requiring manual approval and hard-denied operations still fail closed. The adapter never synthesizes a human approval. The Ligule CLI receives only the selected API key, `LIGULE_HOME`, required runtime paths, proxy settings, and `NODE_EXTRA_CA_CERTS`; other Harbor agent environment values are not inherited. Harbor's separately configured task verifier remains the source of pass/fail scores.
+The Session directory is an explicit child of a fresh per-run `LIGULE_HOME`. Each CLI run explicitly sets `policy.mode=auto` and `--allow-full-access`. The flag grants the Ligule process full local file, process, and network permission inside the Harbor task container; Ligule does not provide an additional OS sandbox for that run. This lets policy-approved direct file operations and statically safe commands run without a human terminal; commands requiring manual approval and hard-denied operations still fail closed. The adapter never synthesizes a human approval. For the run command, the adapter passes the selected API key and `LIGULE_HOME`; session, home, log, instruction, and installed CLI paths are explicit arguments. Configure proxy variables or `NODE_EXTRA_CA_CERTS` in the task's `[environment.env]` when those are needed; Harbor `AgentConfig.env` values are not forwarded to install commands. The API key exists in the Ligule process environment while it runs, so an untrusted same-UID background process in the task container could inspect `/proc/<pid>/environ`; use this adapter only with task images and tasks you trust. Harbor's separately configured task verifier remains the source of pass/fail scores.
 
 ## Adapter inputs
 
@@ -16,6 +16,11 @@ The Session directory is an explicit child of a fresh per-run `LIGULE_HOME`. Eac
 - `ligule_model`: optional override; defaults to Harbor's selected `--model` value.
 - `ligule_api_key_env`: environment variable name, default `LIGULE_API_KEY`. Provide its value through Harbor's agent environment/secret mechanism.
 - `ligule_model_calls`, `ligule_timeout_ms`, `ligule_request_timeout_ms`: bounded request and execution limits.
+- `ligule_output_tokens`: optional per-request output-token budget forwarded as `model.outputTokens`. The default remains Ligule's configured default; the selected provider/model still validates its supported limit.
+- `ligule_node_runtime_tarball` and `ligule_node_runtime_sha256`: optional, paired inputs for Linux task images without Node.js 24+ and npm. Supply an official Node `.tar.gz` archive and the matching digest from Node's `SHASUMS256.txt`; keep both values in trusted local job configuration, not in task-controlled files. The adapter verifies the local and uploaded archive digests before extracting it into a private `/installed-agent/node-runtime` directory, uses that `bin` directory for npm and Ligule, then removes the uploaded archive. The digest check proves the bytes match the configured value; it does not prove where that value came from.
+- `ligule_install_build_tools`: optional Debian/Ubuntu setup for packages with native npm modules. When true, the adapter checks for `make`, `g++`, and `python3`; if any are missing, it uses root `apt-get` to install only the corresponding `build-essential` or `python3` package before `npm install`. The image must have root access and the task network policy must allow the configured Debian package repositories. Leave false for task images that already have the toolchain.
+- `ligule_setup_apt_mirror`: optional apt mirror selector. `tsinghua` generates a temporary, signature-verified source list for the detected Debian or Ubuntu release, uses it for the toolchain install, and removes it after the command. The task container's original apt sources are not changed.
+- `ligule_setup_proxy_url`: optional unauthenticated HTTP(S) proxy used only by the `apt-get` setup command. Embedded credentials are rejected because Harbor records scoped command environment values in local trial logs. This proxy is not added to the task container's persistent environment, npm installation, or Ligule run.
 
 ## Harbor 0.25.0 schema check
 
@@ -52,6 +57,9 @@ agents:
     skip_model_parsing: true
     kwargs:
       ligule_tarball: "<absolute path to the built tarball>"
+      # Needed only if the selected task image lacks Node.js 24+ and npm.
+      ligule_node_runtime_tarball: "<absolute path to official Node Linux x64 .tar.gz>"
+      ligule_node_runtime_sha256: "<matching digest from official Node SHASUMS256.txt>"
       ligule_api: messages
       ligule_base_url: "https://provider.example.invalid/v1"
       ligule_api_key_env: LIGULE_API_KEY
@@ -74,16 +82,16 @@ environment:
 
 ```toml
 [environment]
-docker_image = "<digest-pinned Linux image with Node.js 24+ and npm>"
+docker_image = "<digest-pinned Linux image; install Node.js 24+ and npm or configure the official Node runtime archive above>"
 network_mode = "allowlist"
-allowed_hosts = ["<model-provider-host>", "registry.npmjs.org"]
+allowed_hosts = ["<model-provider-host>", "registry.npmjs.org", "nodejs.org"]
 workdir = "/workspace"
 
 [verifier]
 environment_mode = "separate"
 ```
 
-Allow only the provider host and package registry needed by setup. `--allow-agent-host` extends the agent phase's allowlist; it does not replace task-level setup networking. Keep the task's verifier configuration in `task.toml`; leave the job-level `verifier` override unset so the independent task verifier remains authoritative. The adapter does not read or edit task files.
+Allow only the provider host and package registries needed by setup. Native npm modules may use `node-gyp` to fetch matching headers from `nodejs.org`. `--allow-agent-host` extends the agent phase's allowlist; it does not replace task-level setup networking. Keep the task's verifier configuration in `task.toml`; leave the job-level `verifier` override unset so the independent task verifier remains authoritative. The adapter does not read or edit task files.
 
 From the Ligule repository root, with a local task directory and a private env file already prepared:
 
