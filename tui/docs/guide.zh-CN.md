@@ -56,7 +56,7 @@ CLI 单轮任务默认只读。只有明确使用 `ligule run --allow-full-acces
 
 用户数据根默认为 `~/.ligule`。设置绝对路径环境变量 `LIGULE_HOME` 可以更换数据根；相对路径会报 `data_root_invalid`。用户配置在 `~/.ligule/config.toml`，项目共享配置在 `.ligule/config.toml`，项目本地配置在 `.ligule/config.local.toml`。用户数据根还保存：工作区登记 `workspaces.json`、工作区信任记录 `trust.json`（旧版本的 `tui-trust.json` 仍可读取）、MCP 服务器信任 `mcp-trust.json`、外部 Agent 授权 `agent-control.json`、扩展启停登记 `extensions-state.json`、终端输入历史、桌面偏好 `desktop.json` 和密钥引用（密钥本身存放在系统凭据库，不在数据根）。会话目录中除记录 `.jsonl` 外，还包含可重建的派生文件：压缩块文件 `<编号>.checkpoint.json`、超限内容溢出文件 `result-*.json` 与 `summary-*.txt`、会话列表索引 `index.json`；这些文件损坏或缺失时自动从记录重建，可安全删除。旧会话仍可从原全局 `sessions/` 和项目 `.ligule/sessions/` 中只读浏览；打开旧会话时才会将记录及附属文件复制到新的工作区目录，原件保留。WebView 的 `ligule.ui` 只作首屏缓存。终端界面与桌面界面的草稿和队列分别保存。
 
-文件工具 `delete` 只使用操作系统回收站。Windows 使用系统回收站，Linux 调用 GIO 的系统回收操作。回收后端报错时，Ligule 会重新检查原目标：目标未变化时返回后端错误；无法确认目标仍未变化时返回 `delete_outcome_unknown`，请先检查工作区和系统回收站再重试。恢复由操作系统负责；Ligule 不提供自建回收列表、恢复或永久删除管理。Shell 命令中的删除仍按普通 Shell 操作执行，受当前 Permission、Policy 与审批控制，不会自动改送回收站。旧 `.ligule-trash` 目录保留原位、不迁移也不清理；搜索继续跳过该历史目录。旧 `trashBackend` 或 `limits.trashDirectory` 配置会报 `trash_legacy_config_unsupported`，删除时应移除这些配置项。
+文件工具 `delete` 只使用操作系统回收站。Windows 使用系统回收站，Linux 调用 GIO 的系统回收操作。回收后端报错时，Ligule 会比较原路径上的目标对象身份和顶层元数据与操作前快照。仍匹配时返回后端错误；无法确认匹配时返回 `delete_outcome_unknown`，请先检查工作区和系统回收站再重试。这项检查不比较文件正文，也不递归核对目录内容。恢复由操作系统负责；Ligule 不提供自建回收列表、恢复或永久删除管理。Shell 命令中的删除仍按普通 Shell 操作执行，受当前 Permission、Policy 与审批控制，不会自动改送回收站。旧 `.ligule-trash` 目录保留原位、不迁移也不清理；搜索继续跳过该历史目录。旧 `trashBackend` 或 `limits.trashDirectory` 配置会报 `trash_legacy_config_unsupported`，删除时应移除这些配置项。
 
 搜索默认使用随包提供的 ripgrep。自定义 `ripgrepPath` 会选择可执行程序，只能在用户配置或命令行 `--config` 中设置；项目共享配置和项目本地配置声明该字段时会报 `search_backend_source_untrusted`。将自定义路径移至用户配置，或删除该字段以使用随包后端。
 
@@ -291,8 +291,8 @@ TUI 输入 `/browser` 可查看配置、可用性、Permission、暂停状态和
 - `resume_mode_changed`：恢复会话时指定其原有模式，或在终端界面使用 `/resume <编号> <模式名>`。
 - `delete_target_is_link`：删除工具拒绝目标路径最后一项为符号链接或 junction，并保留链接目标；如果确实要将真实目标送入回收站，请明确指定目标本身。
 - `recycle_backend_missing`：当前平台没有可用的系统回收站；源文件保持不变。
-- `recycle_backend_failed`：系统回收站操作失败，且 Ligule 已确认目标未变化。检查系统回收支持后再重试。
-- `delete_outcome_unknown`：后端报错，Ligule 无法确认目标仍未变化；重试前请检查工作区和系统回收站。
+- `recycle_backend_failed`：系统回收站操作失败，原路径上的目标对象身份和顶层元数据仍与操作前快照匹配。该检查不核对文件正文或目录内的全部内容；重试前请检查这些内容和系统回收站。
+- `delete_outcome_unknown`：后端报错后，Ligule 无法确认原路径目标对象的身份和顶层元数据与操作前快照匹配；重试前请检查工作区和系统回收站。
 - `delete_target_changed`：目标在检查期间发生变化；先检查实际文件，再重新发起删除。
 - `trash_legacy_config_unsupported`：从用户/项目配置中删除旧的 `trashBackend` 和 `limits.trashDirectory` 字段。
 - 命令不熟悉时运行 `ligule --help`；在终端界面输入 `/help` 查看界面命令和按键。
