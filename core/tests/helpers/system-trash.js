@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile, readdir, rm, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 
 async function mountPointFor(target) {
   let current = resolve(target);
@@ -40,10 +40,11 @@ export async function findSystemTrashEntry(target, { allowSuffix = false, root }
   const candidates = (await trashRootsFor(target)).filter((candidate) => root === undefined || candidate.root === root);
   for (const candidate of candidates) {
     const infoDirectory = join(candidate.root, 'info');
+    const suffixStem = basename(resolve(target), extname(name));
     let infoNames;
     try {
       infoNames = allowSuffix
-        ? (await readdir(infoDirectory)).filter((entry) => entry.startsWith(name) && entry.endsWith('.trashinfo'))
+        ? (await readdir(infoDirectory)).filter((entry) => entry.startsWith(suffixStem) && entry.endsWith('.trashinfo'))
         : [`${name}.trashinfo`];
     } catch (error) {
       if (error.code === 'ENOENT' || error.code === 'ENOTDIR') continue;

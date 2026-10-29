@@ -191,7 +191,8 @@ test('delete refuses a dangling directory link without replacing it', async () =
   });
 });
 
-test('delete uses the operating system recycle bin and takes the source out of the workspace', async () => {
+test('delete uses the operating system recycle bin and takes the source out of the workspace', async (t) => {
+  if (process.platform !== 'linux' && process.platform !== 'win32') return t.skip('no system recycle backend on this platform');
   await withWorkspace(async (workspace) => {
     const fileName = `note-${randomUUID()}.txt`;
     const target = join(workspace, fileName);
@@ -207,7 +208,8 @@ test('delete uses the operating system recycle bin and takes the source out of t
     });
     kernel.register(deleteTool);
     const result = await kernel.call('delete', { path: fileName });
-    assert.equal(result.text, `sent ${fileName} to the system recycle bin`);
+    const backend = process.platform === 'win32' ? 'system recycle bin' : 'system trash';
+    assert.equal(result.text, `sent ${fileName} to the ${backend}`);
     assert.equal(approvals.length, 1);
     assert.equal(approvals[0].tool, 'delete');
     await assert.rejects(() => readFile(target, 'utf8'), (error) => error.code === 'ENOENT');
