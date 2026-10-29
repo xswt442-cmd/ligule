@@ -1,17 +1,27 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { readFile, readdir, rm } from 'node:fs/promises';
+import { readFile, readdir, rm, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 
-function trashRootsFor(target) {
-  const absoluteTarget = resolve(target);
-  let mountPoint;
-  try {
-    mountPoint = execFileSync('findmnt', ['--noheadings', '--output', 'TARGET', '--target', absoluteTarget], { encoding: 'utf8' }).trim();
-  } catch {
-    mountPoint = execFileSync('findmnt', ['--noheadings', '--output', 'TARGET', '--target', dirname(absoluteTarget)], { encoding: 'utf8' }).trim();
+async function mountPointFor(target) {
+  let current = resolve(target);
+  let currentStat;
+  try { currentStat = await stat(current); }
+  catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    current = dirname(current);
+    currentStat = await stat(current);
   }
+  for (;;) {
+    const parent = dirname(current);
+    if (parent === current || (await stat(parent)).dev !== currentStat.dev) return current;
+    current = parent;
+  }
+}
+
+async function trashRootsFor(target) {
+  const absoluteTarget = resolve(target);
+  const mountPoint = await mountPointFor(absoluteTarget);
   const dataHome = process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share');
   const uid = String(process.getuid());
   return [
@@ -27,7 +37,7 @@ function encodeTrashPath(path) {
 
 export async function findSystemTrashEntry(target, { allowSuffix = false, root } = {}) {
   const name = basename(resolve(target));
-  const candidates = trashRootsFor(target).filter((candidate) => root === undefined || candidate.root === root);
+  const candidates = (await trashRootsFor(target)).filter((candidate) => root === undefined || candidate.root === root);
   for (const candidate of candidates) {
     const infoDirectory = join(candidate.root, 'info');
     let infoNames;
