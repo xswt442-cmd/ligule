@@ -164,7 +164,7 @@ export const writeTool = {
 export const editTool = {
   name: 'edit',
   access: 'write',
-  description: 'Replace one unique occurrence of an anchor in an existing file relative to the working directory, within the workspace boundary.',
+  description: 'Replace one unique occurrence of an anchor in an existing file relative to the working directory, within the workspace boundary. The anchor check and replacement are separate filesystem operations, so an external writer can change the file between them.',
   parameters: {
     type: 'object',
     properties: {
@@ -205,7 +205,7 @@ export const editTool = {
 export const deleteTool = {
   name: 'delete',
   access: 'write',
-  description: 'Move a file or directory relative to the working directory, within the workspace boundary, into the operating system recycle bin. If the backend is unavailable, the tool returns an error and leaves the source in place. After a backend error, the tool rechecks the target; if it cannot confirm the target is unchanged, it returns delete_outcome_unknown. Final symbolic links and junctions are refused; name the actual target explicitly to delete it.',
+  description: 'Move a file or directory relative to the working directory, within the workspace boundary, into the operating system recycle bin. If the backend is unavailable, the tool returns an error and leaves the source in place. After a backend error, it compares the target object identity and top-level metadata at the original path; it does not verify file contents or recursively inspect directory contents. If it cannot confirm a match, it returns delete_outcome_unknown. Final symbolic links and junctions are refused; name the actual target explicitly to delete it.',
   parameters: {
     type: 'object',
     properties: {

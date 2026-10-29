@@ -70,6 +70,11 @@ test('delete reports real system trash failures or verifies successful Linux tra
           assert.equal(closeHandle(handle), 1);
         }
       }
+      for (const item of cases) {
+        assert.equal(await exists(item.target), true, `${item.path} remains at its original path after recycle failure`);
+        if (item.type === 'file') assert.equal(await readFile(item.target, 'utf8'), item.content);
+        else assert.equal(await readFile(join(item.target, 'nested', 'keep.txt'), 'utf8'), item.content);
+      }
     } else {
       for (const item of cases) {
         await assert.rejects(deleteTool.run({ path: item.path }, { config }), { code: 'recycle_backend_missing' });
