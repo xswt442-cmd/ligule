@@ -628,8 +628,15 @@ async function runChecks() {
           await evaluate(`document.querySelector('.code-copy').click(); true`);
           const prefix = language === 'en' ? 'Copied code (' : '已复制代码（';
           await waitFor(`document.querySelector('.code-copy-row .row-note')?.textContent.startsWith(${JSON.stringify(prefix)})`, 5_000, 'code_copy_success_not_localized');
-          const clipboardText = await require('electron').clipboard.readText();
           const expectedCode = 'console.log("原始代码🙂");';
+          const clipboard = require('electron').clipboard;
+          let clipboardText = clipboard.readText();
+          const clipboardDeadline = Date.now() + 1_000;
+          // Renderer success and this main-process read cross a process boundary; compare after the exact payload arrives.
+          while (clipboardText !== expectedCode && Date.now() < clipboardDeadline) {
+            await new Promise(resolve => setTimeout(resolve, 25));
+            clipboardText = clipboard.readText();
+          }
           assert.equal(clipboardText === expectedCode, true, 'code_copy_changed_original_text');
         }
         const image = await mainWindow.webContents.capturePage();
