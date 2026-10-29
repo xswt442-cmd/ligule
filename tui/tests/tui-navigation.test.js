@@ -43,6 +43,7 @@ async function withApp(context, run) {
     await run({ frame, stdin, submit, wait });
   } finally {
     instance.unmount();
+    await instance.waitUntilExit();
   }
 }
 
