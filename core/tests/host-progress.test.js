@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { setTimeout as delay } from 'node:timers/promises';
 import { withTuiHost, waitFor } from './helpers/tui-host.js';
 
 test('status and notifications expose phase changes, approval waits, counts, and idle cleanup per session', async () => {
@@ -41,31 +40,62 @@ test('status and notifications expose phase changes, approval waits, counts, and
   }, { delayMs: 250, interactive: true });
 });
 
-test('progress snapshots stay attached to their own session when runs overlap and the foreground switches', async () => {
+test('progress snapshots stay attached to their own session when runs overlap', async () => {
+  let releaseSessionA;
+  let releaseSessionB;
+  const receivedUsers = [];
+  const sessionAResponse = new Promise((resolve) => { releaseSessionA = resolve; });
+  const sessionBResponse = new Promise((resolve) => { releaseSessionB = resolve; });
   await withTuiHost(async ({ client, sessionId: sessionA, notifications }) => {
-    const { sessionId: sessionB } = await client.request('session.create', {});
-    const runA = client.request('run.start', { sessionId: sessionA, input: 'session A' });
-    await waitFor(() => notifications.some((message) => message.notify === 'progress' && message.sessionId === sessionA && message.progress?.phase === 'model_request'));
-    await delay(100);
-    const runB = client.request('run.start', { sessionId: sessionB, input: 'session B' });
-    await waitFor(() => notifications.some((message) => message.notify === 'progress' && message.sessionId === sessionB && message.progress?.phase === 'model_request'));
+    let runA;
+    let runB;
+    try {
+      const { sessionId: sessionB } = await client.request('session.create', {});
+      runA = client.request('run.start', { sessionId: sessionA, input: 'session A' });
+      void runA.catch(() => undefined);
+      await waitFor(() => notifications.some((message) => message.notify === 'progress' && message.sessionId === sessionA && message.progress?.phase === 'model_request'), {
+        read: () => JSON.stringify({ receivedUsers, progress: notifications.filter((message) => message.notify === 'progress') }),
+      });
+      runB = client.request('run.start', { sessionId: sessionB, input: 'session B' });
+      void runB.catch(() => undefined);
+      await waitFor(
+        () => notifications.some((message) => message.notify === 'progress' && message.sessionId === sessionB && message.progress?.phase === 'model_request'),
+        { read: () => JSON.stringify({ receivedUsers, progress: notifications.filter((message) => message.notify === 'progress') }) },
+      );
+      await waitFor(
+        () => receivedUsers.some((content) => content.includes('session A')) && receivedUsers.some((content) => content.includes('session B')),
+        { read: () => JSON.stringify({ receivedUsers }) },
+      );
 
-    const duringA = await client.request('status.get', { sessionId: sessionA });
-    const duringB = await client.request('status.get', { sessionId: sessionB });
-    assert.equal(duringA.running, true);
-    assert.equal(duringB.running, true);
-    assert.equal(duringA.progress.modelCalls, 1);
-    assert.equal(duringB.progress.modelCalls, 1);
+      const duringA = await client.request('status.get', { sessionId: sessionA });
+      const duringB = await client.request('status.get', { sessionId: sessionB });
+      assert.equal(duringA.running, true);
+      assert.equal(duringB.running, true);
+      assert.equal(duringA.progress.modelCalls, 1);
+      assert.equal(duringB.progress.modelCalls, 1);
 
-    await runA;
-    const afterA = await client.request('status.get', { sessionId: sessionA });
-    const stillRunningB = await client.request('status.get', { sessionId: sessionB });
-    assert.equal(afterA.progress, null);
-    assert.equal(stillRunningB.running, true);
-    assert.equal(stillRunningB.progress.phase, 'model_request');
-    await runB;
-    assert.equal((await client.request('status.get', { sessionId: sessionB })).progress, null);
-  }, { delayMs: 600 });
+      releaseSessionA();
+      await runA;
+      const afterA = await client.request('status.get', { sessionId: sessionA });
+      const stillRunningB = await client.request('status.get', { sessionId: sessionB });
+      assert.equal(afterA.progress, null);
+      assert.equal(stillRunningB.running, true);
+      assert.equal(stillRunningB.progress.phase, 'model_request');
+      releaseSessionB();
+      await runB;
+      assert.equal((await client.request('status.get', { sessionId: sessionB })).progress, null);
+    } finally {
+      releaseSessionA();
+      releaseSessionB();
+    }
+  }, {
+    beforeResponse: async (body) => {
+      const lastUser = [...body.messages].reverse().find((message) => message.role === 'user');
+      receivedUsers.push(lastUser.content);
+      if (lastUser.content.includes('session A')) await sessionAResponse;
+      if (lastUser.content.includes('session B')) await sessionBResponse;
+    },
+  });
 });
 
 test('cancellation clears the active phase after the single terminal is persisted', async () => {

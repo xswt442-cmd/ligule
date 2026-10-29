@@ -41,7 +41,7 @@ export async function waitFor(condition, { within = 150_000, every = 30, read = 
   }
 }
 
-export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {}, interactive = false, permissionControl = false, permission, extensions, agentControl, testDirectory: requestedTestDirectory } = {}) {
+export async function withTuiHost(run, { delayMs = 0, beforeResponse, setup, config: extra = {}, interactive = false, permissionControl = false, permission, extensions, agentControl, testDirectory: requestedTestDirectory } = {}) {
   const testplace = resolve(requestedTestDirectory ?? 'testplace');
   await mkdir(testplace, { recursive: true });
   const directory = await mkdtemp(join(testplace, 'tui-host-'));
@@ -75,6 +75,7 @@ export async function withTuiHost(run, { delayMs = 0, setup, config: extra = {},
       const rawBody = Buffer.concat(chunks);
       const body = JSON.parse(rawBody.toString('utf8'));
       providerRequests.push(body);
+      await beforeResponse?.(body);
       const lastUser = [...body.messages].reverse().find((message) => message.role === 'user');
       if (typeof lastUser?.content !== 'string') throw new Error('tui_host_user_message_missing');
       let operation;
