@@ -53,16 +53,29 @@ async function workspace() {
   return directory;
 }
 
-test('a parent and its child pause their shared execution budget while the child waits for approval', async () => {
+test('a parent and its child pause their shared execution budget while the child waits for approval', { timeout: 15_000 }, async (t) => {
+  const originalNow = Object.getOwnPropertyDescriptor(performance, 'now');
+  t.after(() => {
+    if (originalNow === undefined) delete performance.now;
+    else Object.defineProperty(performance, 'now', originalNow);
+  });
+  // 用假单调时钟跨过执行期限，不让测试自身的启动时间耗尽预算。
+  let monotonicNow = 0;
+  Object.defineProperty(performance, 'now', { configurable: true, value: () => monotonicNow });
   const boundary = await workspace();
   const config = createConfig({ user: { boundary } });
-  const budget = createTaskBudget({ maxModelCalls: 8, timeoutMs: 700, requestTimeoutMs: 300, interactionWaitTimeoutMs: 2_000 });
+  const budget = createTaskBudget({ maxModelCalls: 8, timeoutMs: 60_000, requestTimeoutMs: 10_000, interactionWaitTimeoutMs: 120_000 });
+  let signalApproval;
+  let releaseApproval;
+  const approvalStarted = new Promise((resolve) => { signalApproval = resolve; });
+  const approval = new Promise((resolve) => { releaseApproval = resolve; });
   const chain = createDecisionChain({
     mode: 'auto',
     rules: [{ tool: 'read', decision: 'ask' }],
     ask: async () => {
       const end = budget.startInteraction();
-      try { await new Promise((resolve) => setTimeout(resolve, 900)); return { decision: 'allow' }; }
+      signalApproval();
+      try { return await approval; }
       finally { end(); }
     },
   });
@@ -77,12 +90,39 @@ test('a parent and its child pause their shared execution budget while the child
   minimalPlugin.setup(kernel);
   createSubagentPlugin({ config, provider, chain, taskBudget: () => budget,
     prompt: { staticPrefix: '' }, directory: session.directory, sessionId: 'parent', plugins: [minimalPlugin] }).setup(kernel);
+  let run;
+  let approvalTimer;
   try {
-    const result = await createLoop({ kernel, provider, session }).run('delegate the task', { task: budget, signal: budget.signal });
+    run = createLoop({ kernel, provider, session }).run('delegate the task', { task: budget, signal: budget.signal });
+    void run.catch(() => undefined);
+    const approvalStartTimedOut = new Promise((_, reject) => {
+      approvalTimer = setTimeout(() => reject(new Error('child did not reach approval')), 5_000);
+    });
+    await Promise.race([
+      approvalStarted,
+      run.then(() => { throw new Error('parent run completed before the child approval'); }, (error) => { throw error; }),
+      approvalStartTimedOut,
+    ]);
+    clearTimeout(approvalTimer);
+
+    monotonicNow = 61_000;
+    const paused = budget.snapshot();
+    assert.equal(paused.executionPaused, true);
+    assert.equal(paused.executionElapsedMs, 0);
+    assert.equal(paused.interactionWaitMs, 61_000);
+    assert.equal(budget.signal.aborted, false);
+
+    releaseApproval({ decision: 'allow' });
+    const result = await run;
     assert.equal(result.text, 'the parent finished');
     assert.equal(budget.signal.aborted, false);
-    assert.ok(budget.snapshot().interactionWaitMs >= 800);
-  } finally { budget.dispose(); }
+    assert.equal(budget.snapshot().interactionWaitMs, 61_000);
+  } finally {
+    if (approvalTimer !== undefined) clearTimeout(approvalTimer);
+    releaseApproval({ decision: 'allow' });
+    await run?.catch(() => undefined);
+    budget.dispose();
+  }
 });
 
 test('the derived agent runs on the parent decision chain and cannot delegate again', async () => {
