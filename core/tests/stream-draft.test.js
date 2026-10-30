@@ -111,7 +111,7 @@ test('a real snapshot write failure aborts the turn and reports a persistence er
   });
 });
 
-test('the next writer clears only its session stale atomic snapshot files', async () => {
+test('the next writer preserves unknown stale atomic snapshot files', async () => {
   await workspace(async directory => {
     const stale = join(directory, 'pruned.stream.json.00000000-0000-0000-0000-000000000000.tmp');
     const unrelated = join(directory, 'other.stream.json.00000000-0000-0000-0000-000000000000.tmp');
@@ -120,8 +120,9 @@ test('the next writer clears only its session stale atomic snapshot files', asyn
     const session = createSessionLog({ directory, id: 'pruned' });
     const writer = session.beginOutput(undefined, error => { throw error; });
     await writer.append({ type: 'text', text: 'A new pending response.' });
-    await assert.rejects(readFile(stale), { code: 'ENOENT' });
+    assert.equal(await readFile(stale, 'utf8'), 'interrupted write');
     assert.equal(await readFile(unrelated, 'utf8'), 'another session');
+    assert.ok(await readFile(join(directory, 'pruned.stream.json'), 'utf8'));
     await writer.discard();
   });
 });

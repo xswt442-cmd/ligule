@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { KernelError, KernelRuntimeError } from '../kernel/error.js';
 import type { SessionEvent } from './format.js';
@@ -46,7 +46,6 @@ export function createStreamDraft(directory: string, sessionId: string, userSeq:
   let bytes = 0;
   let dirty = false;
   let written = false;
-  let pruned = false;
   let failure: KernelRuntimeError | undefined;
   let timer: NodeJS.Timeout | undefined;
   let pending: Promise<void> = Promise.resolve();
@@ -71,15 +70,6 @@ export function createStreamDraft(directory: string, sessionId: string, userSeq:
       const temporary = `${path}.${randomUUID()}.tmp`;
       try {
         await mkdir(directory, { recursive: true });
-        if (!pruned) {
-          const prefix = `${sessionId}.stream.json.`;
-          for (const entry of await readdir(directory)) {
-            if (entry.startsWith(prefix) && /^[a-f0-9-]{36}\.tmp$/u.test(entry.slice(prefix.length))) {
-              await rm(join(directory, entry), { force: true });
-            }
-          }
-          pruned = true;
-        }
         await writeFile(temporary, snapshot, { encoding: 'utf8', flag: 'wx', mode: 0o600, flush: true });
         await rename(temporary, path);
         written = true;
