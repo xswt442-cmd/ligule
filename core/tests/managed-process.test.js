@@ -275,11 +275,100 @@ test('managed process waits for a successful health response after a transient H
   assert.ok(requests > 0, 'readiness URL was checked');
   await delay(250);
   assert.equal(settled, false, 'HTTP 503 is not readiness');
+  assert.ok(requests <= 6, `HTTP 503 retry was not bounded: ${requests} requests in 250ms`);
 
   healthy = true;
   const started = await pending;
   assert.equal(started.ready, true);
   assert.equal(started.status, 'running');
+});
+
+test('managed process becomes ready immediately on HTTP 200 without a retry delay', async (t) => {
+  let requests = 0;
+  const server = createHttpServer((_request, response) => {
+    requests += 1;
+    response.statusCode = 200;
+    response.end();
+  });
+  await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.notEqual(address, null);
+  const registry = createManagedProcessRegistry();
+  let finishLease;
+  const lease = {
+    completion: new Promise((resolve) => { finishLease = resolve; }),
+    logs: () => '',
+    async stop() { finishLease(0); },
+  };
+  t.after(async () => {
+    await registry.close();
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  });
+
+  const startedAt = Date.now();
+  const started = await registry.start(new URL(`http://127.0.0.1:${address.port}/health`), lease);
+  assert.equal(started.ready, true);
+  assert.equal(requests, 1);
+  assert.ok(Date.now() - startedAt < 500, 'HTTP 200 should not wait for the retry interval');
+});
+
+test('managed process retries after a timed-out health request and observes cancellation', async (t) => {
+  let requests = 0;
+  const server = createHttpServer(() => { requests += 1; });
+  await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.notEqual(address, null);
+  const registry = createManagedProcessRegistry();
+  let finishLease;
+  const lease = {
+    completion: new Promise((resolve) => { finishLease = resolve; }),
+    logs: () => '',
+    async stop() { finishLease(0); },
+  };
+  const controller = new AbortController();
+  t.after(async () => {
+    await registry.close();
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  });
+
+  const pending = registry.start(new URL(`http://127.0.0.1:${address.port}/health`), lease, controller.signal);
+  const secondRequestDeadline = Date.now() + 1_800;
+  while (requests < 2 && Date.now() < secondRequestDeadline) await delay(10);
+  assert.equal(requests, 2, 'a timed-out request should be followed by a delayed retry');
+  controller.abort();
+  await assert.rejects(pending, { code: 'exec_cancelled' });
+  assert.equal(requests, 2, 'cancellation should stop further probes');
+});
+
+test('managed process readiness exits promptly when the owned process terminates', async (t) => {
+  let requests = 0;
+  const server = createHttpServer((_request, response) => {
+    requests += 1;
+    response.statusCode = 503;
+    response.end();
+  });
+  await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.notEqual(address, null);
+  const registry = createManagedProcessRegistry();
+  let finishLease;
+  const lease = {
+    completion: new Promise((resolve) => { finishLease = resolve; }),
+    logs: () => '',
+    async stop() { finishLease(0); },
+  };
+  t.after(async () => {
+    await registry.close();
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  });
+
+  const pending = registry.start(new URL(`http://127.0.0.1:${address.port}/health`), lease);
+  const firstRequestDeadline = Date.now() + 1_000;
+  while (requests === 0 && Date.now() < firstRequestDeadline) await delay(10);
+  assert.equal(requests, 1);
+  finishLease(1);
+  await assert.rejects(pending, { code: 'managed_process_exited' });
+  assert.equal(requests, 1, 'process exit should stop further readiness probes');
 });
 
 test('managed process checks an IPv6 readiness port on IPv6 loopback', async (t) => {

@@ -8,6 +8,8 @@ import { runManagedExec, type ExecRunContext, type ManagedExecLease } from './ex
 
 const MAX_LOG_BYTES = 16_384;
 const STARTUP_TIMEOUT_MS = 20_000;
+const READY_RETRY_DELAY_MS = 100;
+const READY_REQUEST_TIMEOUT_MS = 750;
 
 type ManagedProcessAction = 'start' | 'status' | 'logs' | 'stop';
 type ManagedProcessArguments = {
@@ -69,28 +71,69 @@ async function assertPortAvailable(url: URL): Promise<void> {
 
 async function waitForReady(entry: ManagedProcessEntry, signal?: AbortSignal): Promise<void> {
   const deadline = Date.now() + STARTUP_TIMEOUT_MS;
+  const processExit = entry.lease.completion.then(() => ({ type: 'exit' as const }), () => ({ type: 'exit' as const }));
   while (Date.now() < deadline) {
     if (signal?.aborted) throw new KernelError('exec_cancelled');
     if (entry.status !== 'starting') {
       throw new KernelError('managed_process_exited', { detail: entry.failure ?? `the command exited with status ${entry.exitCode ?? 'unknown'}` });
     }
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 750);
+    const timer = setTimeout(() => controller.abort(), Math.min(READY_REQUEST_TIMEOUT_MS, deadline - Date.now()));
+    let response: Response | undefined;
+    let requestFailed = false;
+    let processExited = false;
     try {
-      const response = await fetch(entry.readyUrl, { signal: controller.signal, redirect: 'error' });
+      const outcome = await Promise.race([
+        fetch(entry.readyUrl, {
+          signal: signal === undefined ? controller.signal : AbortSignal.any([controller.signal, signal]),
+          redirect: 'error',
+        }).then(value => ({ type: 'response' as const, value })),
+        processExit,
+      ]);
+      if (outcome.type === 'exit') {
+        processExited = true;
+        controller.abort();
+      } else {
+        response = outcome.value;
+      }
+    } catch {
+      requestFailed = true;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (signal?.aborted) throw new KernelError('exec_cancelled');
+    if (processExited || entry.status !== 'starting') {
+      throw new KernelError('managed_process_exited', { detail: entry.failure ?? `the command exited with status ${entry.exitCode ?? 'unknown'}` });
+    }
+    if (response !== undefined) {
       const ready = response.status >= 200 && response.status < 300;
-      await response.body?.cancel();
+      try { await response.body?.cancel(); }
+      catch { requestFailed = true; }
+      if (signal?.aborted) throw new KernelError('exec_cancelled');
       if (entry.status !== 'starting') {
         throw new KernelError('managed_process_exited', { detail: entry.failure ?? `the command exited with status ${entry.exitCode ?? 'unknown'}` });
       }
-      if (ready) {
+      if (ready && !requestFailed && Date.now() < deadline) {
         entry.status = 'running';
         return;
       }
-    } catch {
-      await delay(100);
-    } finally {
-      clearTimeout(timer);
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    let exitedDuringDelay = false;
+    try {
+      const outcome = await Promise.race([
+        delay(Math.min(READY_RETRY_DELAY_MS, remaining), undefined,
+          signal === undefined ? undefined : { signal }).then(() => ({ type: 'retry' as const })),
+        processExit,
+      ]);
+      exitedDuringDelay = outcome.type === 'exit';
+    } catch (error) {
+      if (signal?.aborted) throw new KernelError('exec_cancelled');
+      throw error;
+    }
+    if (exitedDuringDelay || entry.status !== 'starting') {
+      throw new KernelError('managed_process_exited', { detail: entry.failure ?? `the command exited with status ${entry.exitCode ?? 'unknown'}` });
     }
   }
   await stopEntry(entry);
