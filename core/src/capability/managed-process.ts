@@ -26,6 +26,11 @@ type ManagedProcessArguments = {
 };
 type ProcessStatus = 'starting' | 'running' | 'stopping' | 'exited' | 'stopped' | 'failed';
 
+interface ProcessFailure {
+  readonly code: string | null;
+  readonly detail: string;
+}
+
 interface ManagedProcessEntry {
   readonly id: string;
   readonly port: number;
@@ -39,6 +44,8 @@ interface ManagedProcessEntry {
   stopSignal?: AbortSignal;
   exitCode?: number;
   failure?: string;
+  startupFailure?: ProcessFailure;
+  terminationFailure?: ProcessFailure;
   terminationPending?: boolean;
   cleanupPending?: boolean;
   cleanupFailureCode?: string;
@@ -47,6 +54,33 @@ interface ManagedProcessEntry {
 
 function errorCodeOf(error: unknown): unknown {
   return typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
+}
+
+function failureDetail(error: unknown): ProcessFailure {
+  const code = errorCodeOf(error);
+  return {
+    code: typeof code === 'string' ? code : null,
+    detail: error instanceof KernelError && error.detail !== undefined
+      ? error.detail : error instanceof Error ? error.message : String(error),
+  };
+}
+
+function formatFailure(error: ProcessFailure): string {
+  return error.code === null ? error.detail : `${error.code}: ${error.detail}`;
+}
+
+function combinedStartFailure(entry: ManagedProcessEntry, startupError: unknown, terminationError: unknown): KernelError {
+  const startup = failureDetail(startupError);
+  const termination = failureDetail(terminationError);
+  const stopState = failureState(terminationError);
+  const stopDescription = stopState.terminationPending === true
+    ? stopState.cleanupPending === true ? 'process-tree termination and resource cleanup' : 'process-tree termination'
+    : 'resource cleanup';
+  return new KernelError(startup.code ?? 'managed_process_start_failed', {
+    cause: new AggregateError([startupError, terminationError], 'managed process startup and termination both failed'),
+    detail: `managed process ${entry.id} startup failed (${formatFailure(startup)}); ${stopDescription} also failed (${formatFailure(termination)})`,
+    diagnostics: startupError instanceof KernelError ? startupError.diagnostics : undefined,
+  });
 }
 
 function failureState(error: unknown): Pick<ManagedProcessEntry, 'terminationPending' | 'cleanupPending' | 'cleanupFailureCode'> {
@@ -69,6 +103,11 @@ function applyFailureState(entry: ManagedProcessEntry, error: unknown): void {
   entry.cleanupPending = state.cleanupPending;
   if (state.cleanupFailureCode === undefined) delete entry.cleanupFailureCode;
   else entry.cleanupFailureCode = state.cleanupFailureCode;
+}
+
+function updateTerminationFailure(entry: ManagedProcessEntry, error: unknown): void {
+  if (failureState(error).terminationPending === true) entry.terminationFailure = failureDetail(error);
+  else delete entry.terminationFailure;
 }
 
 function terminalEntry(entry: ManagedProcessEntry): boolean {
@@ -187,7 +226,6 @@ async function waitForReady(entry: ManagedProcessEntry, signal?: AbortSignal): P
       throw new KernelError('managed_process_exited', { detail: entry.failure ?? `the command exited with status ${entry.exitCode ?? 'unknown'}` });
     }
   }
-  await stopEntry(entry);
   throw new KernelError('managed_process_not_ready', {
     detail: `no successful 2xx HTTP response was received from loopback port ${entry.port} within ${STARTUP_TIMEOUT_MS}ms`,
   });
@@ -203,6 +241,8 @@ function view(entry: ManagedProcessEntry) {
     port: entry.port,
     ...(entry.exitCode === undefined ? {} : { exitCode: entry.exitCode }),
     ...(entry.failure === undefined ? {} : { failure: entry.failure }),
+    ...(entry.startupFailure === undefined ? {} : { startupFailure: entry.startupFailure }),
+    ...(entry.terminationFailure === undefined ? {} : { terminationFailure: entry.terminationFailure }),
     logs: entry.lease.logs().slice(-MAX_LOG_BYTES),
   };
 }
@@ -234,6 +274,7 @@ function stopEntry(entry: ManagedProcessEntry, onTerminal?: () => void): Promise
           entry.terminationPending = false;
           entry.cleanupPending = false;
           delete entry.cleanupFailureCode;
+          delete entry.terminationFailure;
           if (entry.status !== 'exited') entry.status = 'stopped';
           onTerminal?.();
         }, () => {
@@ -272,6 +313,7 @@ function stopEntry(entry: ManagedProcessEntry, onTerminal?: () => void): Promise
           entry.terminationPending = false;
           entry.cleanupPending = false;
           delete entry.cleanupFailureCode;
+          delete entry.terminationFailure;
           entry.status = 'stopped';
         }
         onTerminal?.();
@@ -282,6 +324,7 @@ function stopEntry(entry: ManagedProcessEntry, onTerminal?: () => void): Promise
         if (pending.cleanupPending === true && pending.terminationPending !== true) {
           entry.status = 'failed';
           entry.failure = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+          delete entry.terminationFailure;
           applyFailureState(entry, outcome.error);
           confirmedExitCleanupPending = true;
           continue;
@@ -289,6 +332,7 @@ function stopEntry(entry: ManagedProcessEntry, onTerminal?: () => void): Promise
         entry.status = 'failed';
         entry.failure = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
         applyFailureState(entry, outcome.error);
+        updateTerminationFailure(entry, outcome.error);
         onTerminal?.();
         throw outcome.error;
       }
@@ -318,6 +362,7 @@ function stopEntry(entry: ManagedProcessEntry, onTerminal?: () => void): Promise
     } else applyFailureState(entry, lastError);
     entry.status = 'failed';
     entry.failure = lastError instanceof Error ? lastError.message : String(lastError);
+    updateTerminationFailure(entry, lastError);
     onTerminal?.();
     throw lastError;
   })().finally(() => {
@@ -373,6 +418,7 @@ export function createManagedProcessRegistry(options: ManagedProcessRegistryOpti
       entry.terminationPending = false;
       entry.cleanupPending = false;
       delete entry.cleanupFailureCode;
+      delete entry.terminationFailure;
       entry.status = 'exited';
       pruneTerminalEntries();
     }, (error: unknown) => {
@@ -381,6 +427,7 @@ export function createManagedProcessRegistry(options: ManagedProcessRegistryOpti
       entry.status = 'failed';
       entry.failure = error instanceof Error ? error.message : String(error);
       applyFailureState(entry, error);
+      updateTerminationFailure(entry, error);
       pruneTerminalEntries();
     });
   }
@@ -433,13 +480,14 @@ export function createManagedProcessRegistry(options: ManagedProcessRegistryOpti
       entries.set(entry.id, entry);
       watchCompletion(entry);
       if (closed || signal?.aborted) {
+        const startupError = new KernelError(closed ? 'managed_process_owner_closed' : 'exec_cancelled');
+        entry.startupFailure = failureDetail(startupError);
         try { await stopEntry(entry, pruneTerminalEntries); }
-        catch (error) {
-          entry.failure = `${closed ? 'the process registry is closed' : 'the start request was cancelled'}; process-tree shutdown failed: ${error instanceof Error ? error.message : String(error)}`;
-          throw error;
+        catch (terminationError) {
+          throw combinedStartFailure(entry, startupError, terminationError);
         }
         entries.delete(entry.id);
-        throw new KernelError(closed ? 'managed_process_owner_closed' : 'exec_cancelled');
+        throw startupError;
       }
       const stopOnAbort = (): void => {
         removeStopAbortListener(entry);
@@ -469,7 +517,9 @@ export function createManagedProcessRegistry(options: ManagedProcessRegistryOpti
       try {
         await waitForReady(entry, signal);
       } catch (error) {
-        await stopEntry(entry, pruneTerminalEntries).catch(() => undefined);
+        entry.startupFailure = failureDetail(error);
+        try { await stopEntry(entry, pruneTerminalEntries); }
+        catch (terminationError) { throw combinedStartFailure(entry, error, terminationError); }
         throw error;
       }
       return view(entry);

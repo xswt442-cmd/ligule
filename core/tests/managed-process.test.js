@@ -372,6 +372,81 @@ test('managed process retries after a timed-out health request and observes canc
   assert.equal(requests, 2, 'cancellation should stop further probes');
 });
 
+test('cancelled managed startup preserves both cancellation and process-stop failure', async (t) => {
+  let requests = 0;
+  const server = createHttpServer(() => { requests += 1; });
+  await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.notEqual(address, null);
+  const registry = createManagedProcessRegistry();
+  const stopFailure = Object.assign(new Error('simulated process-tree stop failure'), { code: 'exec_terminate_failed' });
+  const owned = managedLease(() => { throw stopFailure; });
+  const controller = new AbortController();
+  t.after(async () => {
+    await registry.close().catch(() => undefined);
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  });
+
+  const pending = registry.start(new URL(`http://127.0.0.1:${address.port}/health`), owned.lease, controller.signal);
+  const requestDeadline = Date.now() + 1_000;
+  while (requests === 0 && Date.now() < requestDeadline) await delay(10);
+  assert.equal(requests, 1, 'startup must be waiting for the health response before cancellation');
+  controller.abort();
+
+  let startFailure;
+  await assert.rejects(pending, (error) => {
+    startFailure = error;
+    assert.equal(error.code, 'exec_cancelled');
+    assert.match(error.detail, /startup failed.*exec_cancelled.*termination (?:also )?failed.*exec_terminate_failed/u);
+    assert.ok(error.cause instanceof AggregateError);
+    assert.equal(error.cause.errors.length, 2);
+    assert.equal(error.cause.errors[1], stopFailure);
+    assert.equal(error.cause.errors[0].code, 'exec_cancelled');
+    return true;
+  });
+  assert.equal(owned.calls, 2, 'a settled stop failure should receive the existing bounded retry');
+  const id = /managed process ([a-f0-9-]{36}) startup failed/u.exec(startFailure.detail)?.[1];
+  assert.ok(id, 'the failed process handle remains addressable for status inspection');
+  const status = registry.status(id);
+  assert.equal(status.startupFailure.code, 'exec_cancelled');
+  assert.equal(status.terminationFailure.code, 'exec_terminate_failed');
+  assert.equal(status.terminationPending, true);
+});
+
+test('cancellation racing with natural process exit keeps the start cancelled and stops only once', async (t) => {
+  let requests = 0;
+  const server = createHttpServer(() => { requests += 1; });
+  await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.notEqual(address, null);
+  const registry = createManagedProcessRegistry();
+  let finishLease;
+  let releaseStop;
+  const stopPending = new Promise((resolve) => { releaseStop = resolve; });
+  const owned = managedLease(() => stopPending);
+  finishLease = owned.finish;
+  const controller = new AbortController();
+  t.after(async () => {
+    releaseStop();
+    await registry.close().catch(() => undefined);
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  });
+
+  const pending = registry.start(new URL(`http://127.0.0.1:${address.port}/health`), owned.lease, controller.signal);
+  const requestDeadline = Date.now() + 1_000;
+  while (requests === 0 && Date.now() < requestDeadline) await delay(10);
+  assert.equal(requests, 1);
+  controller.abort();
+  const stopDeadline = Date.now() + 1_000;
+  while (owned.calls === 0 && Date.now() < stopDeadline) await delay(1);
+  assert.equal(owned.calls, 1, 'the abort listener must start one stop request');
+  finishLease(0);
+  await assert.rejects(pending, { code: 'exec_cancelled' });
+  releaseStop();
+  await registry.close();
+  assert.equal(owned.calls, 1, 'natural exit must settle the shared stop without duplicating it');
+});
+
 test('managed process readiness exits promptly when the owned process terminates', async (t) => {
   let requests = 0;
   const server = createHttpServer((_request, response) => {
@@ -416,11 +491,14 @@ test('a failed managed stop stays pending and Registry close retries it', async 
   await assert.rejects(registry.stop(started.id), /simulated termination failure 2/u);
   assert.equal(registry.status(started.id).status, 'failed');
   assert.equal(registry.status(started.id).terminationPending, true);
+  assert.equal(registry.status(started.id).terminationFailure.code, null);
+  assert.match(registry.status(started.id).terminationFailure.detail, /simulated termination failure 2/u);
 
   await registry.close();
   assert.equal(owned.calls, 3);
   assert.equal(registry.status(started.id).status, 'stopped');
   assert.equal(registry.status(started.id).terminationPending, false);
+  assert.equal(registry.status(started.id).terminationFailure, undefined);
 });
 
 test('Registry close reports repeated managed stop failures instead of treating them as complete', async (t) => {
@@ -511,6 +589,7 @@ test('Registry distinguishes confirmed termination from failed temporary cleanup
   assert.equal(pending.status, 'failed');
   assert.equal(pending.terminationPending, false);
   assert.equal(pending.cleanupPending, true);
+  assert.equal(pending.terminationFailure, undefined, 'a confirmed exit with cleanup pending is not a termination failure');
 
   await registry.close();
   const recovered = registry.status(started.id);
@@ -539,6 +618,7 @@ test('a timed-out cleanup retry preserves confirmed process termination', async 
     assert.equal(pending.status, 'failed');
     assert.equal(pending.terminationPending, false);
     assert.equal(pending.cleanupPending, true);
+    assert.equal(pending.terminationFailure, undefined, 'a cleanup timeout is not a process termination failure');
   } finally {
     releaseStop();
   }
