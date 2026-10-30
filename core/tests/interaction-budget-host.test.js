@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { PDFDocument, StandardFonts } from 'pdf-lib';
 import { withTuiHost } from './helpers/tui-host.js';
 
 const input = JSON.stringify({ tool: 'ask_user_question', args: {
@@ -70,4 +71,46 @@ test('Host pauses the execution deadline for an actual approval and resumes afte
     const { events } = await client.request('session.read', { sessionId });
     assert.equal(events.findLast((event) => event.kind === 'turn')?.status, 'completed');
   }, { config: { loop: { iterations: 2, modelCalls: 2, taskTimeoutMs: 1_000, requestTimeoutMs: 500, interactionWaitTimeoutMs: 3_000 } } });
+});
+
+test('Host pauses the execution deadline while parallel approvals are both waiting', async () => {
+  await withTuiHost(async ({ client, sessionId, projectDirectory }) => {
+    const createPdf = async (path, text) => {
+      const document = await PDFDocument.create();
+      const font = await document.embedFont(StandardFonts.Helvetica);
+      document.addPage([300, 200]).drawText(text, { font, size: 14, x: 20, y: 150 });
+      await writeFile(join(projectDirectory, path), await document.save());
+    };
+    await Promise.all([
+      createPdf('first.pdf', 'First approved document'),
+      createPdf('second.pdf', 'Second approved document'),
+    ]);
+
+    let approvals = 0;
+    let activeApprovals = 0;
+    let peakApprovals = 0;
+    client.onRequest(async (message) => {
+      if (message.method !== 'approval.request') return undefined;
+      approvals += 1;
+      activeApprovals += 1;
+      peakApprovals = Math.max(peakApprovals, activeApprovals);
+      await delay(2_000);
+      activeApprovals -= 1;
+      return { decision: 'allow' };
+    });
+
+    const result = await client.request('run.start', { sessionId, input: JSON.stringify({ toolCalls: [
+      { tool: 'read_document', args: { path: 'first.pdf' } },
+      { tool: 'read_document', args: { path: 'second.pdf' } },
+    ] }) });
+    assert.ok(result.runId);
+    assert.equal(approvals, 2);
+    assert.equal(peakApprovals, 2);
+    const { events } = await client.request('session.read', { sessionId });
+    assert.equal(events.findLast((event) => event.kind === 'turn')?.status, 'completed');
+  }, {
+    modeName: 'full',
+    config: { loop: { iterations: 2, modelCalls: 2, maxParallelTools: 2,
+      taskTimeoutMs: 1_500, requestTimeoutMs: 1_000, interactionWaitTimeoutMs: 5_000 } },
+  });
 });

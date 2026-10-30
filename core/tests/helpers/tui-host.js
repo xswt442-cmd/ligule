@@ -41,7 +41,7 @@ export async function waitFor(condition, { within = 150_000, every = 30, read = 
   }
 }
 
-export async function withTuiHost(run, { delayMs = 0, beforeResponse, setup, config: extra = {}, interactive = false, permissionControl = false, permission, extensions, agentControl, testDirectory: requestedTestDirectory } = {}) {
+export async function withTuiHost(run, { delayMs = 0, beforeResponse, setup, config: extra = {}, interactive = false, permissionControl = false, permission, extensions, agentControl, modeName = 'minimal', testDirectory: requestedTestDirectory } = {}) {
   const testplace = resolve(requestedTestDirectory ?? 'testplace');
   await mkdir(testplace, { recursive: true });
   const directory = await mkdtemp(join(testplace, 'tui-host-'));
@@ -81,14 +81,19 @@ export async function withTuiHost(run, { delayMs = 0, beforeResponse, setup, con
       let operation;
       try { operation = JSON.parse(lastUser.content); } catch { /* 普通文本走回显服务。 */ }
       const result = body.messages.at(-1);
-      const call = operation?.tool !== undefined && result.role !== 'tool'
-        && body.tools.some((tool) => tool.function.name === operation.tool);
+      const requestedCalls = Array.isArray(operation?.toolCalls)
+        ? operation.toolCalls
+        : operation?.tool === undefined ? [] : [operation];
+      const calls = result.role === 'tool' ? [] : requestedCalls.filter((call) => call && typeof call.tool === 'string'
+        && body.tools.some((tool) => tool.function.name === call.tool));
       const answer = `Local response: ${result.role === 'tool' ? result.content : lastUser.content}`;
       if (delayMs > 0) await delay(delayMs);
       if (response.destroyed) return;
       const frames = [
-        { choices: [{ index: 0, delta: call ? { tool_calls: [{ index: 0, id: randomUUID(), type: 'function', function: { name: operation.tool, arguments: JSON.stringify(operation.args) } }] } : { content: answer } }] },
-        { choices: [{ index: 0, delta: {}, finish_reason: call ? 'tool_calls' : 'stop' }] },
+        { choices: [{ index: 0, delta: calls.length > 0 ? { tool_calls: calls.map((call, index) => ({
+          index, id: randomUUID(), type: 'function', function: { name: call.tool, arguments: JSON.stringify(call.args ?? {}) },
+        })) } : { content: answer } }] },
+        { choices: [{ index: 0, delta: {}, finish_reason: calls.length > 0 ? 'tool_calls' : 'stop' }] },
         { choices: [], usage: { prompt_tokens: rawBody.byteLength, completion_tokens: Buffer.byteLength(answer) } },
       ];
       response.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -133,7 +138,7 @@ export async function withTuiHost(run, { delayMs = 0, beforeResponse, setup, con
         config: other,
         provider: createChatCompletionsProvider(providerShape),
         policy: other.policy,
-        modeName: 'minimal',
+        modeName,
         modePaths: modeDirectories(projectRoot, modesDirectory, homeDirectory),
       };
     };
@@ -153,7 +158,7 @@ export async function withTuiHost(run, { delayMs = 0, beforeResponse, setup, con
       ...(extensions === undefined ? {} : { extensions }),
       ...(agentControlOptions === undefined ? {} : { agentControl: agentControlOptions }),
       permissionControl,
-      modeName: 'minimal', modePaths: modeDirectories(projectDirectory, modesDirectory, homeDirectory),
+      modeName, modePaths: modeDirectories(projectDirectory, modesDirectory, homeDirectory),
     });
     const client = createConnection(pair.client);
     const { sessionId } = await client.request('session.create', {});

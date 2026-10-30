@@ -36,6 +36,42 @@ test('fully blocked interaction pauses execution while accumulating a separate w
   } finally { budget.dispose(); }
 });
 
+test('one work item stays suspended until all of its overlapping interactions end', async () => {
+  const budget = createTaskBudget({ maxModelCalls: 5, timeoutMs: 150, requestTimeoutMs: 100, interactionWaitTimeoutMs: 1000 });
+  try {
+    await budget.runWork(async () => {
+      const endFirst = budget.startInteraction();
+      const endSecond = budget.startInteraction();
+      endFirst();
+      await wait(240);
+      assert.equal(budget.signal.aborted, false);
+      assert.equal(budget.snapshot().executionPaused, true);
+      endSecond();
+      assert.equal(budget.snapshot().executionPaused, false);
+      budget.consumeModelCall();
+    });
+  } finally { budget.dispose(); }
+});
+
+test('interaction and manual suspension releases remain balanced after work ends', async () => {
+  const budget = createTaskBudget({ maxModelCalls: 2, timeoutMs: 80, requestTimeoutMs: 50, interactionWaitTimeoutMs: 400 });
+  let endInteraction;
+  try {
+    await budget.runWork(async () => {
+      const resumeManualSuspension = budget.suspendCurrentWork();
+      endInteraction = budget.startInteraction();
+      resumeManualSuspension();
+      await wait(120);
+      assert.equal(budget.signal.aborted, false);
+      assert.equal(budget.snapshot().executionPaused, true);
+    });
+    endInteraction();
+    endInteraction();
+    assert.equal(budget.signal.aborted, false);
+    assert.equal(budget.snapshot().executionPaused, false);
+  } finally { budget.dispose(); }
+});
+
 test('other active work keeps the execution deadline running during interaction', async () => {
   const budget = createTaskBudget({ maxModelCalls: 2, timeoutMs: 80, requestTimeoutMs: 50, interactionWaitTimeoutMs: 400 });
   const other = budget.startWork();
@@ -57,6 +93,8 @@ test('overlapping interactions share one cumulative wait budget across separate 
       await wait(90);
       end();
       await wait(20);
+      assert.equal(budget.signal.aborted, false);
+      assert.ok(budget.snapshot().interactionWaitMs < 150);
       const endAgain = budget.startInteraction();
       await wait(90);
       endAgain();
@@ -137,6 +175,31 @@ test('parent cancellation reaches task and active provider requests', () => {
   assert.throws(() => budget.consumeModelCall(), (error) => error.code === 'task_cancelled');
   request.dispose();
   budget.dispose();
+});
+
+test('parent cancellation remains terminal while overlapping interaction releases finish', async () => {
+  const parent = new AbortController();
+  const budget = createTaskBudget({ maxModelCalls: 2, timeoutMs: 500, requestTimeoutMs: 100 }, parent.signal);
+  let releaseWork;
+  const heldWork = new Promise((resolve) => { releaseWork = resolve; });
+  let endFirst;
+  let endSecond;
+  const work = budget.runWork(async () => {
+    endFirst = budget.startInteraction();
+    endSecond = budget.startInteraction();
+    await heldWork;
+  });
+  try {
+    parent.abort(new Error('parent stopped'));
+    endFirst();
+    endFirst();
+    endSecond();
+    releaseWork();
+    await work;
+    assert.equal(budget.signal.aborted, true);
+    assert.throws(() => budget.consumeModelCall(), { code: 'task_cancelled' });
+    assert.equal(budget.snapshot().executionPaused, false);
+  } finally { budget.dispose(); }
 });
 
 test('disposing clears successful task and request timers without aborting signals', async () => {

@@ -108,11 +108,28 @@ export function createTaskBudget(limits: TaskBudgetLimits, parentSignal?: AbortS
     startWork() {
       let working = true;
       let ended = false;
+      let suspensions = 0;
       change(() => { active += 1; });
       return {
-        suspend() { if (!ended && working) change(() => { working = false; active -= 1; }); },
-        resume() { if (!ended && !working) change(() => { working = true; active += 1; }); },
-        dispose() { if (!ended) change(() => { ended = true; if (working) active -= 1; }); },
+        suspend() {
+          if (!ended) change(() => {
+            suspensions += 1;
+            if (working) { working = false; active -= 1; }
+          });
+        },
+        resume() {
+          if (!ended && suspensions > 0) change(() => {
+            suspensions -= 1;
+            if (suspensions === 0) { working = true; active += 1; }
+          });
+        },
+        dispose() {
+          if (!ended) change(() => {
+            ended = true;
+            suspensions = 0;
+            if (working) { working = false; active -= 1; }
+          });
+        },
       };
     },
     async runWork(fn) {
