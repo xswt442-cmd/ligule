@@ -275,7 +275,7 @@ test('managed exec retries private temporary-directory cleanup after the process
   }, { workspaceTrusted: true });
   let lease;
   const cleanupError = await runManagedNodeScript(workspace, 'cleanup.js',
-    "const fs = require('node:fs'); fs.writeFileSync('/tmp/ligule-cleanup-canary', 'test'); fs.chmodSync('/tmp', 0o500);\n",
+    "const fs = require('node:fs'); const path = require('node:path'); const temp = process.env.TMPDIR; if (!temp) throw new Error('sandbox TMPDIR is missing'); fs.writeFileSync(path.join(temp, 'ligule-cleanup-canary'), 'test'); fs.chmodSync(temp, 0o500);\n",
     permission, async (managedLease) => {
       lease = managedLease;
       try { await managedLease.completion; }
