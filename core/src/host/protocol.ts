@@ -376,7 +376,7 @@ export const METHODS = Object.freeze({
     }, required: ['sessionId', 'runId', 'origin'] },
   },
   'run.receipt': {
-    description: 'Read a durable task receipt from this project Session without reopening its writer or replaying work.',
+    description: 'Read a durable task receipt from this project Session without reopening its writer or replaying work. A requestKey that matches multiple visible scopes returns run_request_key_ambiguous; use runId to select one receipt.',
     parameters: { type: 'object', additionalProperties: false, properties: {
       projectRoot: { type: 'string' }, sessionId: SESSION_ID,
       runId: SESSION_ID, requestKey: { type: 'string', minLength: 1, maxLength: 128 },

@@ -486,6 +486,17 @@ function readableRunScopes(permissionControl: boolean, connection: HostClientCon
   return connection[TRUSTED_AGENT_CONTROL_ORIGIN] === true ? ['human', controllerScope] : [controllerScope];
 }
 
+function runScopeForOrigin(events: readonly SessionEvent[], sessionId: string, runId: string,
+  origin: 'human' | 'controller', readableScopes: readonly string[] | undefined): string | undefined {
+  const accepted = events.find(event => event.kind === 'user' && isRunAcceptance(event.run)
+    && event.run.sessionId === sessionId && event.run.runId === runId);
+  if (accepted?.kind !== 'user' || !isRunAcceptance(accepted.run)) return undefined;
+  const scope = accepted.run.callerScope;
+  if (readableScopes !== undefined && !readableScopes.includes(scope)) return undefined;
+  if (origin === 'human' ? scope !== 'human' : !scope.startsWith('controller:')) return undefined;
+  return scope;
+}
+
 function errorDetail(error: unknown): string | undefined {
   if (!isRecord(error)) return undefined;
   return typeof error.detail === 'string' ? error.detail : undefined;
@@ -3450,10 +3461,11 @@ export function createHost({
           const runId = requiredString(message.params.runId, 'runId');
           const origin = message.params.origin;
           if (origin !== 'human' && origin !== 'controller') throw new KernelError('protocol_args_invalid');
-          const scope = origin === 'human' ? 'human' : 'controller:' + (grant?.id ?? 'local');
+          const events = await state.session.read();
           const scopes = readableRunScopes(permissionControl, connection, 'controller:' + (grant?.id ?? 'local'));
-          if (scopes !== undefined && !scopes.includes(scope)) throw new KernelError('run_not_found');
-          const receipt = findRunReceipt(await state.session.read(), sessionId, scope, { runId });
+          const scope = runScopeForOrigin(events, sessionId, runId, origin, scopes);
+          if (scope === undefined) throw new KernelError('run_not_found');
+          const receipt = findRunReceipt(events, sessionId, scope, { runId });
           if (receipt === undefined) throw new KernelError('run_not_found');
           if (state.activeRunId === runId && state.operation !== undefined) return await state.operation;
           if (receipt.state === 'accepted' || receipt.state === 'interrupted') throw new KernelError('run_not_active');
@@ -3520,8 +3532,12 @@ export function createHost({
             ...(message.params.requestKey === undefined ? {} : { requestKey: message.params.requestKey }),
           };
           if ((reference.runId === undefined) === (reference.requestKey === undefined)) throw new KernelError('run_reference_invalid');
-          const receipt = visibleReceipts.find(item => reference.runId !== undefined
+          const matches = visibleReceipts.filter(item => reference.runId !== undefined
             ? item.runId === reference.runId : item.requestKey === reference.requestKey);
+          if (reference.requestKey !== undefined && matches.length > 1) {
+            throw new KernelError('run_request_key_ambiguous', { detail: 'requestKey matches multiple visible run scopes; use runId to select one receipt' });
+          }
+          const receipt = matches[0];
           if (receipt === undefined) throw new KernelError('run_not_found');
           if (message.method === 'run.receipt') {
             const live = sessions.get(sessionId)?.activeRunId === receipt.runId;
