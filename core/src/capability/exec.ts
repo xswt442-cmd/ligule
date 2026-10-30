@@ -23,6 +23,7 @@ type ExecArguments = { command?: unknown; cwd?: string };
 export interface ManagedExecLease {
   readonly completion: Promise<number>;
   readonly logs: () => string;
+  /** Resolves only after owned-process completion and temporary-resource cleanup are confirmed. */
   stop(): Promise<void>;
 }
 export interface ExecRunContext {
