@@ -43,18 +43,28 @@ function loopbackUrl(value: unknown): URL {
   return url;
 }
 
-async function assertPortAvailable(port: number): Promise<void> {
-  const server = createServer();
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(port, '127.0.0.1', () => resolve());
-  }).catch((error: unknown) => {
-    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'EADDRINUSE') {
-      throw new KernelError('managed_process_port_in_use', { detail: `loopback port ${port} is already in use` });
-    }
-    throw new KernelError('managed_process_port_check_failed', { cause: error });
-  });
-  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+async function assertPortAvailable(url: URL): Promise<void> {
+  const port = Number(url.port);
+  const addresses = url.hostname === 'localhost' ? ['127.0.0.1', '::1']
+    : url.hostname === '[::1]' ? ['::1'] : ['127.0.0.1'];
+  for (const address of addresses) {
+    const server = createServer();
+    let listening = false;
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(port, address, () => { listening = true; resolve(); });
+    }).catch((error: unknown) => {
+      const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
+      if (code === 'EADDRINUSE') {
+        throw new KernelError('managed_process_port_in_use', { detail: `loopback port ${port} is already in use` });
+      }
+      if (url.hostname === 'localhost' && address === '::1'
+        && ['EAFNOSUPPORT', 'EADDRNOTAVAIL', 'ENOTSUP'].includes(String(code))) return;
+      throw new KernelError('managed_process_port_check_failed', { cause: error });
+    });
+    if (!listening) continue;
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
 }
 
 async function waitForReady(entry: ManagedProcessEntry, signal?: AbortSignal): Promise<void> {
@@ -68,13 +78,15 @@ async function waitForReady(entry: ManagedProcessEntry, signal?: AbortSignal): P
     const timer = setTimeout(() => controller.abort(), 750);
     try {
       const response = await fetch(entry.readyUrl, { signal: controller.signal, redirect: 'error' });
+      const ready = response.status >= 200 && response.status < 300;
+      await response.body?.cancel();
       if (entry.status !== 'starting') {
-        await response.body?.cancel();
         throw new KernelError('managed_process_exited', { detail: entry.failure ?? `the command exited with status ${entry.exitCode ?? 'unknown'}` });
       }
-      entry.status = 'running';
-      await response.body?.cancel();
-      return;
+      if (ready) {
+        entry.status = 'running';
+        return;
+      }
     } catch {
       await delay(100);
     } finally {
@@ -82,7 +94,9 @@ async function waitForReady(entry: ManagedProcessEntry, signal?: AbortSignal): P
     }
   }
   await stopEntry(entry);
-  throw new KernelError('managed_process_not_ready', { detail: `no HTTP response was received from loopback port ${entry.port} within ${STARTUP_TIMEOUT_MS}ms` });
+  throw new KernelError('managed_process_not_ready', {
+    detail: `no successful 2xx HTTP response was received from loopback port ${entry.port} within ${STARTUP_TIMEOUT_MS}ms`,
+  });
 }
 
 function view(entry: ManagedProcessEntry) {
@@ -257,7 +271,7 @@ export function managedProcessTool(registry: ManagedProcessRegistry): ToolDefini
     access: 'exec',
     commandArgument: 'command',
     capability: () => 'exec',
-    description: 'Start, inspect, read bounded logs from, or stop a long-running local process owned by this Session. Start requires an HTTP loopback readiness URL.',
+    description: 'Start, inspect, read bounded logs from, or stop a long-running local process owned by this Session. Start requires an HTTP loopback health URL that returns a 2xx response when ready.',
     parameters: {
       type: 'object',
       properties: {
@@ -265,7 +279,7 @@ export function managedProcessTool(registry: ManagedProcessRegistry): ToolDefini
         command: { type: 'string', description: 'The command to start. Required only for action=start.' },
         cwd: { type: 'string', description: 'Optional working directory inside the workspace boundary.' },
         id: { type: 'string', description: 'Managed process handle returned by action=start.' },
-        readyUrl: { type: 'string', description: 'HTTP loopback URL used to determine when the server is ready.' },
+        readyUrl: { type: 'string', description: 'HTTP loopback health URL; the server is ready only after it returns a 2xx response.' },
       },
       required: ['action'],
     },
@@ -274,7 +288,7 @@ export function managedProcessTool(registry: ManagedProcessRegistry): ToolDefini
       if (args.action === 'start') {
         if (typeof args.command !== 'string' || args.command.trim() === '') throw new KernelError('managed_process_command_required');
         const url = loopbackUrl(args.readyUrl);
-        await assertPortAvailable(Number(url.port));
+        await assertPortAvailable(url);
         if (args.cwd !== undefined && typeof args.cwd !== 'string') throw new KernelError('managed_process_cwd_invalid');
         return;
       }

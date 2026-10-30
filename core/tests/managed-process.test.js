@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { createServer as createHttpServer } from 'node:http';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createConfig, createDecisionChain, createKernel, createManagedProcessRegistry, createPermissionContext, managedProcessPlugin } from '../dist/index.js';
+import { createConfig, createDecisionChain, createKernel, createManagedProcessRegistry, createPermissionContext, managedProcessPlugin, managedProcessTool } from '../dist/index.js';
 import { isTrusted, setTrusted } from '../dist/kernel/workspace-trust.js';
 
 const permission = createPermissionContext('workspace-write', 'unrestricted', {
@@ -242,6 +243,63 @@ test('managed process refuses readiness URLs outside loopback before starting a 
     await dispose();
     await registry.close();
   }
+});
+
+test('managed process waits for a successful health response after a transient HTTP 503', async (t) => {
+  let healthy = false;
+  let requests = 0;
+  const server = createHttpServer((_request, response) => {
+    requests += 1;
+    response.statusCode = healthy ? 200 : 503;
+    response.end();
+  });
+  await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.notEqual(address, null);
+  const registry = createManagedProcessRegistry();
+  let finishLease;
+  const lease = {
+    completion: new Promise((resolve) => { finishLease = resolve; }),
+    logs: () => '',
+    async stop() { finishLease(0); },
+  };
+  t.after(async () => {
+    await registry.close();
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  });
+
+  let settled = false;
+  const pending = registry.start(new URL(`http://127.0.0.1:${address.port}/health`), lease).finally(() => { settled = true; });
+  const deadline = Date.now() + 1_000;
+  while (requests === 0 && Date.now() < deadline) await delay(10);
+  assert.ok(requests > 0, 'readiness URL was checked');
+  await delay(250);
+  assert.equal(settled, false, 'HTTP 503 is not readiness');
+
+  healthy = true;
+  const started = await pending;
+  assert.equal(started.ready, true);
+  assert.equal(started.status, 'running');
+});
+
+test('managed process checks an IPv6 readiness port on IPv6 loopback', async (t) => {
+  const server = net.createServer();
+  try {
+    await new Promise((resolve, reject) => server.once('error', reject).listen(0, '::1', resolve));
+  } catch (error) {
+    if (['EAFNOSUPPORT', 'EADDRNOTAVAIL', 'ENOTSUP'].includes(error?.code)) {
+      t.skip('IPv6 loopback is unavailable on this host');
+      return;
+    }
+    throw error;
+  }
+  t.after(() => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
+  const address = server.address();
+  assert.notEqual(address, null);
+  const tool = managedProcessTool(createManagedProcessRegistry());
+  await assert.rejects(tool.preflight({
+    action: 'start', command: 'node -e "process.exit(0)"', readyUrl: `http://[::1]:${address.port}/`,
+  }), { code: 'managed_process_port_in_use' });
 });
 
 test('revoking shared workspace trust stops a managed process that started from trusted project code', { timeout: 15_000 }, async (t) => {
