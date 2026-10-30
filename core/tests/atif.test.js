@@ -6,7 +6,7 @@ import { createSessionLog } from '../dist/index.js';
 import { sessionTurnToAtif } from '../dist/session/atif.js';
 import { createRunAcceptance } from '../dist/session/run.js';
 
-async function makeSession({ unknown = false } = {}) {
+async function makeSession({ unknown = false, overflowCompaction = false } = {}) {
   const testplace = resolve('testplace');
   await mkdir(testplace, { recursive: true });
   const directory = await mkdtemp(join(testplace, 'ligule-atif-'));
@@ -14,6 +14,8 @@ async function makeSession({ unknown = false } = {}) {
   const acceptance = createRunAcceptance('atif-session', 'inspect the private file', null, 'test');
   const user = await session.append({ kind: 'user', text: 'inspect the private file', run: acceptance });
   await session.append({ kind: 'usage', ignorable: true, input: 12, output: null, estimated: 10, measurement: 'request-v1' });
+  if (overflowCompaction) await session.append({ kind: 'compaction', ignorable: true, reason: 'overflow',
+    blockId: 1, fromSeq: 0, toSeq: 1, tokensBefore: 100, tokensAfter: 20 });
   await session.append({ kind: 'reasoning', text: 'private chain of thought' });
   await session.append({ kind: 'assistant', text: 'I will read it', toolCalls: [
     { id: 'call-1', name: 'read', args: { path: 'C:\\secret\\note.txt' } },
@@ -52,6 +54,7 @@ test('exports one real Session turn as ATIF v1.8 with private content redacted',
     assert.equal(trajectory.steps[0].message, '[redacted]');
     const agent = trajectory.steps.find((step) => step.source === 'agent' && step.tool_calls);
     assert.equal(agent.message, '[redacted]');
+    assert.equal(agent.llm_call_count, 1);
     assert.deepEqual(agent.metrics, { prompt_tokens: 12 }, 'unknown completion usage is omitted, not zero');
     assert.deepEqual(agent.tool_calls.map((call) => [call.tool_call_id, call.arguments]), [
       ['call-1', {}], ['call-2', {}],
@@ -62,6 +65,19 @@ test('exports one real Session turn as ATIF v1.8 with private content redacted',
     assert.equal(agent.observation.results[1].extra.ligule.error_code, 'permission_denied');
     assert.equal(JSON.stringify(trajectory).includes('private'), false);
     assert.equal(JSON.stringify(trajectory).includes('C:\\secret'), false);
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test('ATIF counts persisted agent responses once and keeps overflow compaction separate', async () => {
+  const fixture = await makeSession({ overflowCompaction: true });
+  try {
+    const trajectory = sessionTurnToAtif(await fixture.session.read(), source(fixture.acceptance, fixture.user));
+    const agentSteps = trajectory.steps.filter((step) => step.source === 'agent');
+    assert.deepEqual(agentSteps.map((step) => step.llm_call_count), [1, 1]);
+    assert.equal(trajectory.steps.filter((step) => step.source === 'system'
+      && step.extra?.context_management?.type === 'compaction').length, 1);
   } finally {
     await rm(fixture.directory, { recursive: true, force: true });
   }

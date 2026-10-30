@@ -33,6 +33,7 @@ type AtifStep = {
   message: string;
   tool_calls?: AtifToolCall[];
   observation?: { results: AtifObservationResult[] };
+  llm_call_count?: number;
   metrics?: { prompt_tokens?: number; completion_tokens?: number; cached_tokens?: number; extra?: JsonObject };
   extra?: JsonObject;
 };
@@ -207,6 +208,7 @@ export function sessionTurnToAtif(
         step_id: ++stepId,
         source: 'agent',
         ...(source.modelName === undefined ? {} : { model_name: source.modelName }),
+        llm_call_count: 1,
         message: includeSensitiveContent ? optionalText(event.text) ?? '' : REDACTED,
         ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
         ...(metrics === undefined ? {} : { metrics }),

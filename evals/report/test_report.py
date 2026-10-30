@@ -94,6 +94,23 @@ def trajectory() -> bytes:
     return json.dumps(value, separators=(",", ":")).encode("utf-8")
 
 
+def trajectory_with_missing_subagent() -> bytes:
+    value = json.loads(trajectory())
+    agent = value["steps"][1]
+    agent["tool_calls"].append({
+        "tool_call_id": "call-subagent",
+        "function_name": "subagent",
+        "arguments": {},
+        "extra": {"ligule": {"subagent_trajectory_missing": True}},
+    })
+    agent["observation"]["results"].append({
+        "source_call_id": "call-subagent",
+        "extra": {"ligule": {"outcome": "completed", "subagent_trajectory_missing": True}},
+    })
+    value["extra"] = {"ligule": {"missing_features": ["subagent_trajectory"]}}
+    return json.dumps(value, separators=(",", ":")).encode("utf-8")
+
+
 def manifest() -> dict[str, object]:
     task_id = {"path": "task-alpha"}
     return {
@@ -166,6 +183,52 @@ def write_json(path: Path, value: object) -> None:
 
 
 class ReportTests(unittest.TestCase):
+    def test_model_call_total_is_unknown_when_a_subagent_trajectory_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ligule-eval-report-subagent-", dir=TEMP_ROOT) as temporary:
+            root = Path(temporary) / "input"
+            root.mkdir()
+            value = manifest()
+            attempt = dict(value["attempts"][0])
+            attempt["artifact_files"] = []
+            value["attempts"] = [attempt]
+            write_json(root / "manifest.json", value)
+            write_json(root / "trials/alpha-1/result.json", json.loads(harbor_result(
+                "task-alpha", "alpha-attempt-1", reward=1.0,
+                ligule_metadata={"state": "completed"},
+            )))
+            (root / "trials/alpha-1/trajectory.json").write_bytes(trajectory_with_missing_subagent())
+
+            report_json, _ = write_report(root, Path(temporary) / "output")
+            row = json.loads(report_json.read_text(encoding="utf-8"))["attempts"][0]
+
+            self.assertEqual(row["subagent_trajectory_missing_calls"], ["call-subagent"])
+            self.assertIsNone(row["model_calls"])
+
+    def test_actual_session_atif_is_counted_by_report(self) -> None:
+        atif_path = os.environ.get("LIGULE_ATIF_OUTPUT_PATH")
+        if not atif_path or not Path(atif_path).is_file():
+            self.skipTest("eval:smoke supplies the real Session-to-ATIF fixture")
+        with tempfile.TemporaryDirectory(prefix="ligule-eval-report-session-atif-", dir=TEMP_ROOT) as temporary:
+            root = Path(temporary) / "input"
+            root.mkdir()
+            value = manifest()
+            attempt = dict(value["attempts"][0])
+            attempt["artifact_files"] = []
+            value["attempts"] = [attempt]
+            write_json(root / "manifest.json", value)
+            write_json(root / "trials/alpha-1/result.json", json.loads(harbor_result(
+                "task-alpha", "alpha-attempt-1", reward=0.0,
+                ligule_metadata={"state": "failed", "errorCode": "task_failed"},
+            )))
+            (root / "trials/alpha-1/trajectory.json").write_bytes(Path(atif_path).read_bytes())
+
+            report_json, _ = write_report(root, Path(temporary) / "output")
+            row = json.loads(report_json.read_text(encoding="utf-8"))["attempts"][0]
+
+            self.assertEqual(row["status"], "fail")
+            self.assertEqual(row["ligule_run_state"], "failed")
+            self.assertEqual(row["model_calls"], 2)
+
     def test_failed_ligule_run_cannot_pass_from_a_valid_harbor_reward(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ligule-eval-report-failed-run-", dir=TEMP_ROOT) as temporary:
             root = Path(temporary) / "input"

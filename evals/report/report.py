@@ -357,9 +357,6 @@ def _trajectory_metrics(raw: bytes | None, label: str) -> dict[str, Any]:
         trajectories.extend(current.subagent_trajectories or [])
     all_calls = [call for current in trajectories for step in current.steps for call in (step.tool_calls or [])]
     agent_steps = [step for current in trajectories for step in current.steps if step.source == "agent"]
-    model_calls = sum(step.llm_call_count for step in agent_steps) if agent_steps and all(
-        step.llm_call_count is not None for step in agent_steps
-    ) else None
     failures = 0
     failures_known = True
     for current in trajectories:
@@ -412,6 +409,16 @@ def _trajectory_metrics(raw: bytes | None, label: str) -> dict[str, Any]:
                     "trajectory_ids": [reference.trajectory_id for reference in references if reference.trajectory_id is not None],
                     "external_reference_count": sum(reference.trajectory_path is not None for reference in references),
                 })
+    missing_subagent_trajectory = bool(missing_subagents) or any(
+        isinstance(current.extra, dict)
+        and isinstance(current.extra.get("ligule"), dict)
+        and isinstance(current.extra["ligule"].get("missing_features"), list)
+        and "subagent_trajectory" in current.extra["ligule"]["missing_features"]
+        for current in trajectories
+    )
+    model_calls = sum(step.llm_call_count for step in agent_steps) if agent_steps and all(
+        step.llm_call_count is not None for step in agent_steps
+    ) and not missing_subagent_trajectory else None
     return {
         "model_calls": model_calls,
         "tool_calls": len(all_calls),
