@@ -274,21 +274,40 @@ def _contexts(result: TrialResult) -> list[Any]:
     return [step.agent_result for step in result.step_results or [] if step.agent_result is not None]
 
 
-def _ligule_run_metadata(result: TrialResult) -> dict[str, list[str]]:
+def _ligule_run_metadata(result: TrialResult) -> dict[str, list[str] | str]:
     states: list[str] = []
+    observed_states: list[str | None] = []
     error_codes: list[str] = []
     known_states = {"completed", "failed", "cancelled", "interrupted", "unknown"}
     for context in _contexts(result):
         metadata = context.metadata if isinstance(context.metadata, dict) else {}
         ligule = metadata.get("ligule") if isinstance(metadata.get("ligule"), dict) else {}
         state = ligule.get("state")
-        if isinstance(state, str) and state in known_states and state not in states:
-            states.append(state)
+        if isinstance(state, str) and state in known_states:
+            observed_states.append(state)
+            if state not in states:
+                states.append(state)
+        else:
+            observed_states.append(None)
         for key in ("errorCode", "atifErrorCode"):
             code = ligule.get(key)
             if isinstance(code, str) and SAFE_ERROR_CODE.fullmatch(code) and code not in error_codes:
                 error_codes.append(code)
-    return {"ligule_run_states": states, "ligule_error_codes": error_codes}
+    if "failed" in observed_states:
+        run_state = "failed"
+    elif "cancelled" in observed_states:
+        run_state = "cancelled"
+    elif "interrupted" in observed_states:
+        run_state = "interrupted"
+    elif observed_states and all(state == "completed" for state in observed_states):
+        run_state = "completed"
+    else:
+        run_state = "unknown"
+    return {
+        "ligule_run_states": states,
+        "ligule_run_state": run_state,
+        "ligule_error_codes": error_codes,
+    }
 
 
 def _usage(result: TrialResult) -> dict[str, int | float | None]:
@@ -407,7 +426,12 @@ def _trajectory_metrics(raw: bytes | None, label: str) -> dict[str, Any]:
     }
 
 
-def _classify(result: TrialResult, reward_key: str, threshold: float | int) -> tuple[str, str | None, float | int | None]:
+def _classify(
+    result: TrialResult,
+    reward_key: str,
+    threshold: float | int,
+    ligule_run_state: str,
+) -> tuple[str, str | None, float | int | None]:
     exception = result.exception_info
     rewards = result.verifier_result.rewards if result.verifier_result is not None else None
     reward = rewards.get(reward_key) if rewards is not None else None
@@ -420,7 +444,8 @@ def _classify(result: TrialResult, reward_key: str, threshold: float | int) -> t
                 "task_refused" if cause == FailureCause.AGENT_REFUSED_TASK else "task_failed"
             )
             if result.reward_valid and reward is not None:
-                return ("pass" if reward >= threshold else "fail", kind, reward)
+                completed = ligule_run_state == "completed"
+                return ("pass" if completed and reward >= threshold else "fail", kind, reward)
             return "fail", kind, reward
         if exception.exception_type == "NonZeroAgentExitCodeError":
             return "infra_error", "agent_crashed", reward
@@ -437,7 +462,13 @@ def _classify(result: TrialResult, reward_key: str, threshold: float | int) -> t
         return "infra_error", "unclassified", reward
     if result.verifier_result is None or rewards is None or reward_key not in rewards:
         return "infra_error", "verifier_failed", None
-    return ("pass" if reward >= threshold else "fail", None if reward >= threshold else "task_failed", reward)
+    if ligule_run_state in {"cancelled", "interrupted"}:
+        return "infra_error", ligule_run_state, reward
+    if reward < threshold or ligule_run_state == "failed":
+        return "fail", "task_failed", reward
+    if ligule_run_state != "completed":
+        return "infra_error", "ligule_run_state_unknown", reward
+    return "pass", None, reward
 
 
 def _nearest_rank(values: list[float]) -> dict[str, float | int | None]:
@@ -573,6 +604,7 @@ def build_report(input_directory: Path) -> dict[str, Any]:
             "failure_kind": None,
             "exception_type": None,
             "ligule_run_states": [],
+            "ligule_run_state": None,
             "ligule_error_codes": [],
             "verifier_reward_key": verifier["reward_key"],
             "verifier_reward": None,
@@ -609,9 +641,17 @@ def build_report(input_directory: Path) -> dict[str, Any]:
             raise ReportInputError(f"attempt_{index}_not_harbor_0_25_trial_result") from error
         if result.trial_name != entry["trial_name"]:
             _fail(f"attempt_{index}_trial_name_mismatch")
-        if result.task_id.model_dump(mode="json") != entry["harbor_task_id"]:
+        # Task IDs can contain container POSIX paths. Compare their serialized
+        # JSON value so parsing on Windows cannot rewrite them as Windows paths.
+        if json.loads(raw_result)["task_id"] != entry["harbor_task_id"]:
             _fail(f"attempt_{index}_harbor_task_id_mismatch")
-        status, failure_kind, reward = _classify(result, verifier["reward_key"], verifier["pass_threshold"])
+        ligule_metadata = _ligule_run_metadata(result)
+        status, failure_kind, reward = _classify(
+            result,
+            verifier["reward_key"],
+            verifier["pass_threshold"],
+            ligule_metadata["ligule_run_state"],
+        )
         row.update({
             "status": status,
             "failure_kind": failure_kind,
@@ -620,7 +660,7 @@ def build_report(input_directory: Path) -> dict[str, Any]:
             "verifier_reward_valid": result.reward_valid and reward is not None,
             "duration_seconds": _duration_seconds(result),
             **_usage(result),
-            **_ligule_run_metadata(result),
+            **ligule_metadata,
         })
         row["not_run_reason"] = None
         row["evidence"].append({"kind": "harbor_trial_result", "path": result_name})
@@ -715,7 +755,7 @@ def render_markdown(report: dict[str, Any]) -> str:
             lines.append(f"| {_md(kind)} | {rate['count']} | {rate['denominator']} | {rate['share']:.1%} |")
     else:
         lines.append(f"| — | 0 | {summary['attempts']} | 0.0% |")
-    lines.extend(["", "## Attempts", "", "| Task | Category | Attempt | Status | Failure kind | Run error code | Reward | Seconds | Tokens in/out | Tools | Evidence |", "| --- | --- | ---: | --- | --- | --- | ---: | ---: | --- | ---: | --- |"])
+    lines.extend(["", "## Attempts", "", "| Task | Category | Attempt | Status | Failure kind | Ligule run state | Run error code | Reward | Seconds | Tokens in/out | Tools | Evidence |", "| --- | --- | ---: | --- | --- | --- | --- | ---: | ---: | --- | ---: | --- |"])
     for row in report["attempts"]:
         if row["verifier_reward"] is None:
             reward = "unknown"
@@ -726,9 +766,10 @@ def render_markdown(report: dict[str, Any]) -> str:
         seconds = "unknown" if row["duration_seconds"] is None else f"{row['duration_seconds']:.3f}"
         token_pair = "unknown" if row["n_input_tokens"] is None or row["n_output_tokens"] is None else f"{row['n_input_tokens']} / {row['n_output_tokens']}"
         tools = "unknown" if row["tool_calls"] is None else str(row["tool_calls"])
+        run_state = row["ligule_run_state"] or "not_run"
         error_codes = ", ".join(row["ligule_error_codes"]) or "unknown"
         evidence = ", ".join(item["path"] for item in row["evidence"]) or _md(row["not_run_reason"] or "unknown")
-        lines.append(f"| {_md(row['task_id'])} | {_md(row['category'])} | {row['attempt']} | {row['status']} | {_md(row['failure_kind'] or '—')} | {_md(error_codes)} | {reward} | {seconds} | {token_pair} | {tools} | {_md(evidence)} |")
+        lines.append(f"| {_md(row['task_id'])} | {_md(row['category'])} | {row['attempt']} | {row['status']} | {_md(row['failure_kind'] or '—')} | {_md(run_state)} | {_md(error_codes)} | {reward} | {seconds} | {token_pair} | {tools} | {_md(evidence)} |")
     lines.extend(["", "## Repeated tasks", "", "| Task | Attempts | At least three | Status sequence | Reward p50/p95 | Seconds p50/p95 | Failure kinds |", "| --- | ---: | --- | --- | --- | --- | --- |"])
     if summary["repeated_tasks"]:
         for group in summary["repeated_tasks"]:

@@ -166,17 +166,134 @@ def write_json(path: Path, value: object) -> None:
 
 
 class ReportTests(unittest.TestCase):
+    def test_failed_ligule_run_cannot_pass_from_a_valid_harbor_reward(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ligule-eval-report-failed-run-", dir=TEMP_ROOT) as temporary:
+            root = Path(temporary) / "input"
+            root.mkdir()
+            value = manifest()
+            attempt = dict(value["attempts"][0])
+            attempt["trajectory_file"] = None
+            attempt["artifact_files"] = []
+            value["attempts"] = [attempt]
+            write_json(root / "manifest.json", value)
+            write_json(root / "trials/alpha-1/result.json", json.loads(harbor_result(
+                "task-alpha",
+                "alpha-attempt-1",
+                reward=1.0,
+                exception_type="AgentTimeoutError",
+                ligule_metadata={"state": "failed", "errorCode": "agent_timeout"},
+            )))
+
+            report_json, _ = write_report(root, Path(temporary) / "output")
+            report = json.loads(report_json.read_text(encoding="utf-8"))
+
+            self.assertEqual(report["attempts"][0]["status"], "fail")
+            self.assertEqual(report["attempts"][0]["failure_kind"], "timeout")
+            self.assertTrue(report["attempts"][0]["verifier_reward_valid"])
+            self.assertEqual(report["attempts"][0]["verifier_reward"], 1.0)
+            self.assertEqual(report["summary"]["pass_rate"], 0.0)
+
+    def test_failed_ligule_run_without_harbor_exception_cannot_pass(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ligule-eval-report-failed-run-", dir=TEMP_ROOT) as temporary:
+            root = Path(temporary) / "input"
+            root.mkdir()
+            value = manifest()
+            attempt = dict(value["attempts"][0])
+            attempt["trajectory_file"] = None
+            attempt["artifact_files"] = []
+            value["attempts"] = [attempt]
+            write_json(root / "manifest.json", value)
+            write_json(root / "trials/alpha-1/result.json", json.loads(harbor_result(
+                "task-alpha",
+                "alpha-attempt-1",
+                reward=1.0,
+                ligule_metadata={"state": "failed", "errorCode": "loop_model_budget_exhausted"},
+            )))
+
+            report_json, _ = write_report(root, Path(temporary) / "output")
+            report = json.loads(report_json.read_text(encoding="utf-8"))
+            row = report["attempts"][0]
+
+            self.assertEqual(row["status"], "fail")
+            self.assertEqual(row["failure_kind"], "task_failed")
+            self.assertEqual(row["ligule_run_state"], "failed")
+            self.assertEqual(row["ligule_error_codes"], ["loop_model_budget_exhausted"])
+            self.assertEqual(row["verifier_reward"], 1.0)
+            self.assertEqual(report["summary"]["pass_rate"], 0.0)
+
+    def test_missing_or_unknown_ligule_state_cannot_claim_a_clean_pass(self) -> None:
+        for suffix, ligule_metadata in (("missing", None), ("unknown", {"state": "unknown"})):
+            with self.subTest(state=suffix), tempfile.TemporaryDirectory(
+                prefix="ligule-eval-report-unknown-run-", dir=TEMP_ROOT
+            ) as temporary:
+                root = Path(temporary) / "input"
+                root.mkdir()
+                value = manifest()
+                attempt = dict(value["attempts"][0])
+                attempt["trajectory_file"] = None
+                attempt["artifact_files"] = []
+                value["attempts"] = [attempt]
+                write_json(root / "manifest.json", value)
+                write_json(root / "trials/alpha-1/result.json", json.loads(harbor_result(
+                    "task-alpha",
+                    "alpha-attempt-1",
+                    reward=1.0,
+                    ligule_metadata=ligule_metadata,
+                )))
+
+                report_json, _ = write_report(root, Path(temporary) / "output")
+                report = json.loads(report_json.read_text(encoding="utf-8"))
+                row = report["attempts"][0]
+
+                self.assertEqual(row["status"], "infra_error")
+                self.assertEqual(row["failure_kind"], "ligule_run_state_unknown")
+                self.assertEqual(row["ligule_run_state"], "unknown")
+                self.assertEqual(row["verifier_reward"], 1.0)
+                self.assertEqual(report["summary"]["pass_rate"], 0.0)
+
+    def test_harbor_posix_task_id_is_compared_without_host_path_normalization(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ligule-eval-report-posix-task-id-", dir=TEMP_ROOT) as temporary:
+            root = Path(temporary) / "input"
+            root.mkdir()
+            value = manifest()
+            attempt = dict(value["attempts"][0])
+            attempt["trajectory_file"] = None
+            attempt["artifact_files"] = []
+            harbor_task_id = {"path": "/app/task-alpha"}
+            attempt["harbor_task_id"] = harbor_task_id
+            value["attempts"] = [attempt]
+            write_json(root / "manifest.json", value)
+            result = json.loads(harbor_result(
+                "task-alpha",
+                "alpha-attempt-1",
+                reward=1.0,
+                ligule_metadata={"state": "completed"},
+            ))
+            result["task_id"] = harbor_task_id
+            write_json(root / "trials/alpha-1/result.json", result)
+
+            report_json, _ = write_report(root, Path(temporary) / "output")
+            report = json.loads(report_json.read_text(encoding="utf-8"))
+
+            self.assertEqual(report["attempts"][0]["status"], "pass")
+
     def test_real_harbor_folder_fixture_produces_deterministic_reports(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ligule-eval-report-", dir=TEMP_ROOT) as temporary:
             root = Path(temporary) / "input"
             root.mkdir()
             fixture = manifest()
             write_json(root / "manifest.json", fixture)
-            write_json(root / "trials/alpha-1/result.json", json.loads(harbor_result("task-alpha", "alpha-attempt-1", reward=1.0)))
+            write_json(root / "trials/alpha-1/result.json", json.loads(harbor_result(
+                "task-alpha", "alpha-attempt-1", reward=1.0,
+                ligule_metadata={"state": "completed"},
+            )))
             (root / "trials/alpha-1/trajectory.json").write_bytes(trajectory())
             (root / "trials/alpha-1/artifacts/diff.txt").parent.mkdir(parents=True)
             (root / "trials/alpha-1/artifacts/diff.txt").write_text("verified fixture artifact\n", encoding="utf-8")
-            write_json(root / "trials/alpha-2/result.json", json.loads(harbor_result("task-alpha", "alpha-attempt-2", reward=0.0, elapsed_seconds=120)))
+            write_json(root / "trials/alpha-2/result.json", json.loads(harbor_result(
+                "task-alpha", "alpha-attempt-2", reward=0.0, elapsed_seconds=120,
+                ligule_metadata={"state": "completed"},
+            )))
             write_json(root / "trials/alpha-3/result.json", json.loads(harbor_result(
                 "task-alpha", "alpha-attempt-3", reward=None, exception_type="AgentTimeoutError",
                 elapsed_seconds=300, usage=False,
@@ -205,6 +322,8 @@ class ReportTests(unittest.TestCase):
             self.assertEqual(markdown_one.read_bytes(), markdown_three.read_bytes())
             report = json.loads(json_one.read_text(encoding="utf-8"))
             self.assertEqual([row["status"] for row in report["attempts"]], ["pass", "fail", "fail", "infra_error", "not_run"])
+            self.assertEqual(report["attempts"][0]["ligule_run_state"], "completed")
+            self.assertEqual(report["attempts"][1]["ligule_run_state"], "completed")
             self.assertEqual(report["summary"]["attempts"], 5)
             self.assertEqual(report["summary"]["pass_rate"], 0.2)
             self.assertEqual(report["summary"]["failure_kind_rates"]["timeout"]["denominator"], 5)
@@ -213,8 +332,10 @@ class ReportTests(unittest.TestCase):
             self.assertEqual(report["summary"]["elapsed_seconds"]["distribution"]["p50"], 60.0)
             self.assertEqual(report["summary"]["elapsed_seconds"]["distribution"]["p95"], 300.0)
             self.assertEqual(report["attempts"][2]["failure_kind"], "timeout")
+            self.assertEqual(report["attempts"][2]["ligule_run_state"], "failed")
             self.assertEqual(report["attempts"][2]["ligule_error_codes"], ["agent_timeout"])
             self.assertEqual(report["attempts"][3]["failure_kind"], "environment_failed")
+            self.assertIsNone(report["attempts"][4]["ligule_run_state"])
             self.assertEqual(report["summary"]["input_tokens_including_cache"]["known_subtotal"], 200)
             self.assertIsNone(report["summary"]["input_tokens_including_cache"]["total"])
             self.assertIsNone(report["summary"]["reported_cost_usd"]["total"])
@@ -228,7 +349,11 @@ class ReportTests(unittest.TestCase):
             self.assertEqual(repeated["status_sequence"], ["pass", "fail", "fail"])
             self.assertEqual(repeated["verifier_reward_distribution"]["unknown_count"], 1)
             self.assertEqual(repeated["duration_seconds_distribution"]["p50"], 120.0)
-            self.assertIn("denominator includes fail, not_run, and infra_error", markdown_one.read_text(encoding="utf-8"))
+            markdown = markdown_one.read_text(encoding="utf-8")
+            self.assertIn("| Status | Failure kind | Ligule run state |", markdown)
+            self.assertIn("| pass | — | completed |", markdown)
+            self.assertIn("| not_run | — | not_run |", markdown)
+            self.assertIn("denominator includes fail, not_run, and infra_error", markdown)
 
             partial_output = Path(temporary) / "partial-output"
             partial_output.mkdir()
