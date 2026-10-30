@@ -20,7 +20,7 @@ from harbor.models.trajectories import Trajectory
 
 
 MANIFEST_SCHEMA = "ligule.eval-manifest.v1"
-REPORT_SCHEMA = "ligule.eval-report.v1"
+REPORT_SCHEMA = "ligule.eval-report.v2"
 HARBOR_VERSION = "0.25.0"
 HARBOR_RESULT_SCHEMA = "harbor.models.trial.result.TrialResult@0.25.0"
 MAX_JSON_EVIDENCE_BYTES = 256 * 1024 * 1024
@@ -455,7 +455,7 @@ def _classify(
                 return ("pass" if completed and reward >= threshold else "fail", kind, reward)
             return "fail", kind, reward
         if exception.exception_type == "NonZeroAgentExitCodeError":
-            return "infra_error", "agent_crashed", reward
+            return "infra_error", "agent_nonzero_exit", reward
         if cause == FailureCause.SANDBOX_FAILED:
             return "infra_error", "environment_failed", reward
         if cause == FailureCause.MODEL_PROVIDER_FAILED:
@@ -762,7 +762,7 @@ def render_markdown(report: dict[str, Any]) -> str:
             lines.append(f"| {_md(kind)} | {rate['count']} | {rate['denominator']} | {rate['share']:.1%} |")
     else:
         lines.append(f"| — | 0 | {summary['attempts']} | 0.0% |")
-    lines.extend(["", "## Attempts", "", "| Task | Category | Attempt | Status | Failure kind | Ligule run state | Run error code | Reward | Seconds | Tokens in/out | Tools | Evidence |", "| --- | --- | ---: | --- | --- | --- | --- | ---: | ---: | --- | ---: | --- |"])
+    lines.extend(["", "## Attempts", "", "| Task | Category | Attempt | Status | Failure kind | Harbor exception | Ligule run state | Run error code | Reward | Seconds | Tokens in/out | Tools | Evidence |", "| --- | --- | ---: | --- | --- | --- | --- | --- | ---: | ---: | --- | ---: | --- |"])
     for row in report["attempts"]:
         if row["verifier_reward"] is None:
             reward = "unknown"
@@ -776,7 +776,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         run_state = row["ligule_run_state"] or "not_run"
         error_codes = ", ".join(row["ligule_error_codes"]) or "unknown"
         evidence = ", ".join(item["path"] for item in row["evidence"]) or _md(row["not_run_reason"] or "unknown")
-        lines.append(f"| {_md(row['task_id'])} | {_md(row['category'])} | {row['attempt']} | {row['status']} | {_md(row['failure_kind'] or '—')} | {_md(run_state)} | {_md(error_codes)} | {reward} | {seconds} | {token_pair} | {tools} | {_md(evidence)} |")
+        lines.append(f"| {_md(row['task_id'])} | {_md(row['category'])} | {row['attempt']} | {row['status']} | {_md(row['failure_kind'] or '—')} | {_md(row['exception_type'] or '—')} | {_md(run_state)} | {_md(error_codes)} | {reward} | {seconds} | {token_pair} | {tools} | {_md(evidence)} |")
     lines.extend(["", "## Repeated tasks", "", "| Task | Attempts | At least three | Status sequence | Reward p50/p95 | Seconds p50/p95 | Failure kinds |", "| --- | ---: | --- | --- | --- | --- | --- |"])
     if summary["repeated_tasks"]:
         for group in summary["repeated_tasks"]:

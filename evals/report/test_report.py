@@ -314,6 +314,70 @@ class ReportTests(unittest.TestCase):
                 self.assertEqual(row["verifier_reward"], 1.0)
                 self.assertEqual(report["summary"]["pass_rate"], 0.0)
 
+    def test_nonzero_agent_exit_preserves_harbor_and_ligule_failure_axes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ligule-eval-report-nonzero-exit-", dir=TEMP_ROOT) as temporary:
+            root = Path(temporary) / "input"
+            root.mkdir()
+            value = manifest()
+            attempts = []
+            cases = [
+                ("loop_model_budget_exhausted", "failed"),
+                ("loop_model_budget_exhausted", "failed"),
+                ("loop_model_budget_exhausted", "failed"),
+                ("loop_model_budget_exhausted", "failed"),
+                ("provider_output_exhausted", "failed"),
+                ("provider_output_exhausted", "failed"),
+                ("task_request_timeout", "failed"),
+                (None, None),
+                (None, "unknown"),
+                (None, "unknown"),
+            ]
+            for index, (error_code, run_state) in enumerate(cases, start=1):
+                trial_name = f"alpha-attempt-{index}"
+                result_file = f"trials/alpha-{index}/result.json"
+                attempt = dict(value["attempts"][0])
+                attempt.update({
+                    "attempt": index,
+                    "trial_name": trial_name,
+                    "result_file": result_file,
+                    "trajectory_file": None,
+                    "artifact_files": [],
+                })
+                attempts.append(attempt)
+                metadata = None if run_state is None and error_code is None else {
+                    **({} if run_state is None else {"state": run_state}),
+                    **({} if error_code is None else {"errorCode": error_code}),
+                }
+                write_json(root / result_file, json.loads(harbor_result(
+                    "task-alpha",
+                    trial_name,
+                    reward=0.0,
+                    exception_type="NonZeroAgentExitCodeError",
+                    ligule_metadata=metadata,
+                )))
+            value["attempts"] = attempts
+            write_json(root / "manifest.json", value)
+
+            report_json, _ = write_report(root, Path(temporary) / "output")
+            report = json.loads(report_json.read_text(encoding="utf-8"))
+
+        self.assertEqual(report["summary"]["attempts"], 10)
+        self.assertEqual(report["schema_version"], "ligule.eval-report.v2")
+        self.assertEqual(report["summary"]["failure_kind_counts"], {"agent_nonzero_exit": 10})
+        self.assertEqual(report["summary"]["reported_ligule_error_code_counts"], {
+            "loop_model_budget_exhausted": 4,
+            "provider_output_exhausted": 2,
+            "task_request_timeout": 1,
+        })
+        for row in report["attempts"]:
+            self.assertEqual(row["status"], "infra_error")
+            self.assertEqual(row["failure_kind"], "agent_nonzero_exit")
+            self.assertEqual(row["exception_type"], "NonZeroAgentExitCodeError")
+        self.assertTrue(all(row["ligule_run_state"] == "failed" for row in report["attempts"][:7]))
+        self.assertEqual(report["attempts"][0]["ligule_error_codes"], ["loop_model_budget_exhausted"])
+        self.assertEqual([row["ligule_run_state"] for row in report["attempts"][7:]], ["unknown", "unknown", "unknown"])
+        self.assertEqual([row["ligule_error_codes"] for row in report["attempts"][7:]], [[], [], []])
+
     def test_harbor_posix_task_id_is_compared_without_host_path_normalization(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ligule-eval-report-posix-task-id-", dir=TEMP_ROOT) as temporary:
             root = Path(temporary) / "input"
@@ -413,9 +477,9 @@ class ReportTests(unittest.TestCase):
             self.assertEqual(repeated["verifier_reward_distribution"]["unknown_count"], 1)
             self.assertEqual(repeated["duration_seconds_distribution"]["p50"], 120.0)
             markdown = markdown_one.read_text(encoding="utf-8")
-            self.assertIn("| Status | Failure kind | Ligule run state |", markdown)
-            self.assertIn("| pass | — | completed |", markdown)
-            self.assertIn("| not_run | — | not_run |", markdown)
+            self.assertIn("| Status | Failure kind | Harbor exception | Ligule run state |", markdown)
+            self.assertIn("| pass | — | — | completed |", markdown)
+            self.assertIn("| not_run | — | — | not_run |", markdown)
             self.assertIn("denominator includes fail, not_run, and infra_error", markdown)
 
             partial_output = Path(temporary) / "partial-output"
