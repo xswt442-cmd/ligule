@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { chmod, mkdir, mkdtemp, open, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { createHost } from '../dist/host/host.js';
 import { createConfig } from '../dist/kernel/config.js';
 import { createKernel } from '../dist/kernel/kernel.js';
@@ -22,6 +23,17 @@ async function filesUnder(directory) {
     result.push(await readFile(join(directory, name), 'utf8'));
   }
   return result;
+}
+
+async function waitForTelemetry(directory, predicate) {
+  const deadline = Date.now() + 5000;
+  let records = [];
+  do {
+    records = (await filesUnder(directory)).flatMap(text => text.trim().split('\n').map(JSON.parse));
+    if (predicate(records)) return records;
+    await delay(10);
+  } while (Date.now() < deadline);
+  assert.fail(`expected telemetry events were not persisted: ${JSON.stringify(records.map(({ type, callId, outcome, errorCode }) => ({ type, callId, outcome, errorCode })))}`);
 }
 
 async function setupHost(t, { telemetry, provider, permission, policyMode = 'ask', configLayers, logger } = {}) {
@@ -133,7 +145,13 @@ test('Host telemetry uses execution IDs plus Session and parent-call links, and 
     filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
   });
   const hostContext = await setupHost(t, { provider, permission, telemetry: true });
-  await hostContext.host.handle({ method: 'run.start', params: { sessionId: hostContext.sessionId, input: 'PARENT_PROMPT_SECRET' } }, hostContext.client);
+  const accepted = await hostContext.host.handle({ method: 'run.start', params: {
+    sessionId: hostContext.sessionId, input: 'PARENT_PROMPT_SECRET',
+  } }, hostContext.client);
+  assert.equal(typeof accepted.runId, 'string');
+  await hostContext.host.handle({ method: 'run.wait', params: {
+    sessionId: hostContext.sessionId, runId: accepted.runId, origin: 'human',
+  } }, hostContext.client);
   assert.ok(hostContext.approvals.some(item => item.tool === 'create'));
 
   const parent = await hostContext.host.handle({ method: 'session.read', params: { sessionId: hostContext.sessionId } }, hostContext.client);
@@ -144,9 +162,11 @@ test('Host telemetry uses execution IDs plus Session and parent-call links, and 
   const childLines = (await readFile(join(hostContext.sessions, `${childSessionId}.jsonl`), 'utf8')).trim().split('\n').map(JSON.parse);
   assert.ok(childLines.some(event => event.kind === 'turn' && event.status === 'completed'));
   assert.ok(childLines.filter(event => event.kind === 'turn').every(event => event.runId === undefined));
+  const records = await waitForTelemetry(hostContext.telemetryDirectory, events =>
+    events.some(event => event.type === 'run.finished' && event.runId === accepted.runId)
+      && events.some(event => event.type === 'tool.finished' && event.callId === 'parent-call-1' && event.outcome === 'success'));
   await hostContext.host.release();
 
-  const records = (await filesUnder(hostContext.telemetryDirectory)).flatMap(text => text.trim().split('\n').map(JSON.parse));
   const parentStart = records.find(event => event.type === 'run.started' && event.sessionId === hostContext.sessionId);
   const childStart = records.find(event => event.type === 'run.started' && event.sessionId === childSessionId);
   assert.ok(parentStart);
@@ -253,6 +273,7 @@ test('Loop classifies permission and tool restrictions as refused outcomes', asy
     const loop = createLoop({ kernel, provider, telemetry, sessionId: `session-${name}` });
     await loop.run('input');
   }
+  await telemetry.flush();
   await telemetry.shutdown();
   const records = (await filesUnder(directory)).flatMap(text => text.trim().split('\n').map(JSON.parse));
   for (const callId of ['write_file-call', 'read_file-call']) {

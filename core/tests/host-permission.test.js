@@ -442,7 +442,8 @@ test('trusted Windows project commands can install without scripts, build, and r
       return { decision: 'allow' };
     });
     const runExec = async (command) => {
-      await client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command } }) });
+      const accepted = await client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command } }) });
+      await client.request('run.wait', { sessionId, runId: accepted.runId, origin: 'human' });
       const toolResult = (await client.request('session.read', { sessionId })).events
         .filter((event) => event.kind === 'tool' && event.tool === 'exec').at(-1).result;
       assert.notEqual(toolResult.failed, true, JSON.stringify({ command, toolResult, approvals }));
@@ -572,10 +573,11 @@ test('forced ask and denial counters survive a session reopen', async () => {
     await client.request('policy.set', { sessionId, mode: 'ask' });
     await writeFile(join(projectDirectory, 'notes.md'), 'contents');
     for (let index = 0; index < 3; index += 1) {
-      await client.request('run.start', {
+      const accepted = await client.request('run.start', {
         sessionId,
         input: JSON.stringify({ tool: 'read', args: { path: 'notes.md' } }),
       });
+      await client.request('run.wait', { sessionId, runId: accepted.runId, origin: 'human' });
     }
     await client.request('policy.set', { sessionId, mode: 'auto' });
     const before = await client.request('status.get', { sessionId });
