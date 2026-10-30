@@ -1,10 +1,22 @@
 # Ligule v0.1.1 P5 — 独立实现审查与结构收敛记录（2026-10-30）
 
-> 状态：**独立审查已发现可复现的缺陷；修复、拆分与重新验收尚未完成。** 本文件是审查与行动依据，不是“已修复”证明。
+> 状态：**下方是 2026-10-30 的独立审查基线；之后 R1–R4 已修复并推送，P5-H 与 Telemetry CI 回归修复已本地提交为 `190cc05`、`6e7448a`、`83dd0d8` 并通过本机门禁，待正常推送及新 SHA 跨平台 CI。** 本文件保留原复现证据，并在“后续修复进度”中记录最新状态。
 >
 > 基线：`ligule` 仓库 `dev` / `origin/dev` HEAD `258f31ca7a42a9061de07a10a12d71554dd833eb`；相对 `main` 382 个变更文件、约 110 个提交，PR [#40](https://github.com/xswt442-cmd/ligule/pull/40) 为 Draft。此次仅作只读源码审查和受控复现；**未修改源码、分支或 PR**。本机原有未跟踪 `evals/harbor/__pycache__/` 未清理。
 >
 > 审查口径：对核心 Runtime/Session、Policy/Permission、文件操作、MCP/外控、Telemetry、ATIF/Harbor/Report、Desktop IPC、依赖及 CI 做重点源码审查与部分实际测试，**并非 382 个文件逐行形式化审计**；未观察到漏洞不等于安全证明。
+
+## 后续修复进度（2026-10-30）
+
+- **R1 已修复并推送**：`e37e8c1 fix(evals): require completed runs in reports`。综合 pass 现在要求 Harbor verifier reward 有效且 Ligule Run 为 `completed`；failed/cancelled/interrupted/unknown 不会冒充 clean pass。Harbor `0.25.0` Report 回归 8/8 通过，并已重新生成下方真实 15-attempt 结构化报告。
+- **R2 已修复并推送**：`44bd2af fix(runtime): balance overlapping work pauses`。TaskWork 的 suspend/resume 改为平衡引用计数，覆盖双重交互、手动暂停组合、工作结束释放、取消和累计等待；API/Host 定向回归通过。此前 Ubuntu CI 两次失败在 `tui-external-control.test.js` 等待输入文本的 test harness 条件，后续 `0420dd7` 的 PR CI 全绿，未发现 TaskBudget 栈失败。另一次 Windows 全量本机运行的 TUI 清理出现 transient `EBUSY`，辅助器现仅对 Windows 测试目录删除做最多 5 次有界重试；TUI 180/180 通过，断言和 UI 等待条件未放宽。
+- **R3 已修复并推送**：`1a30fbf fix(capability): require healthy managed process readiness`。`readyUrl` 现在必须返回 2xx 才进入 `running`；503→200 后才就绪，非 2xx 不会通过。端口预检匹配 `127.0.0.1`/`::1`，`localhost` 检查两种回环地址。定向 managed-process 回归通过，英中文架构文档已同步。
+- **R4 已修复并推送**：`0420dd7 fix(evals): count ATIF agent response steps`。每个持久化 Agent 响应在 ATIF 中记 `llm_call_count: 1`，含 overflow compaction 的逻辑模型步计一次；隐藏传输重试和系统压缩请求不伪装成逐 HTTP 请求计数。Reporter 检出缺失的子代理轨迹后让总模型调用数保持 unknown。真实 `Session → ATIF → Report` fixture 和缺失子代理回归通过。
+- **R5 结构化产物已生成**：`ligule/testplace/evals/p5-harbor-real-20261029/{report-input,report}` 保存全部 15 个真实 Harbor attempt、8 个任务、12 条旧 ATIF 轨迹，Report 分类为 2 pass、3 fail、10 infra_error；成本 unknown。旧轨迹由 R4 修复前的代码生成，因没有 `llm_call_count`，这批 `model_calls` 全部保持 unknown；没有回填推断值。原始结果未被重写。
+- **P5-H 已本地提交且本机门禁通过**：`190cc05` 将 OTLP 完整内部 Sink 从 `telemetry.ts` 提取到 `telemetry-otlp.ts`（567/282 行）；`6e7448a` 将 Host 的循环、任务预算及压缩上限解析提取至 `host/runtime-limits.ts`（Host 4134 行、模块 93 行），保留公开 `compactionLimitsOf` 导出。新边界无通用 Host Context、Session/API schema 或权限变化。
+- **Telemetry CI 根因已定位并本地修复**：Push Run `41007714004` 的 Ubuntu shared-tests 在 `restart writers reuse one capped directory` 失败，实际多出 `telemetry.manifest.<uuid>.tmp`。shutdown 有意受 250ms 上限约束，底层原子写在返回后仍可能收尾；锁内的后续 writer 现在只回收符合严格 UUID 名称、普通文件且单链接的孤儿临时文件，其他未知文件、符号链接、硬链接仍 fail-closed 并保留。重启测试显式 flush 后再 shutdown，shutdown 有界性测试仍独立保留。新增孤儿恢复、硬链接、符号链接回归；Telemetry/OTLP/Host Telemetry 定向测试 24/24 通过。
+- **最新本机完整门禁**：`pnpm test` Core 956 项（935 pass、21 skip）、TUI 180/180、集成 193 项（190 pass、3 skip）、Engineering 19/19；`pnpm run eval:smoke` Adapter 14/14、Session/ATIF 6/6、Harbor 官方 ATIF validator、CLI mock-provider 1/1、Report 10/10；`pnpm check:dependencies` 357 modules / 1474 dependencies、`pnpm run check:syntax` 240 files、`pnpm check-pack`、`pnpm verify-install` 均通过。
+- `0420dd7` 上 PR CI Run `41007720324` 全部必要 job 成功；同 SHA Push Run `41007714004` 有上述 Telemetry temp 回归失败。本地修复现已提交，待推送新 SHA 并重新等待 CI。CodeRabbit 因 PR 文件数超限制跳过；Copilot 返回请求者剩余额度不足；当前没有实质机器人 Review。PR #40 仍 Draft，禁止合并。
 
 ## 一、总体结论与正向证据
 
