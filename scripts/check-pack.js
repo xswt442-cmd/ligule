@@ -64,6 +64,14 @@ try {
   if (JSON.stringify(manifest.optionalDependencies) !== JSON.stringify(pkg.optionalDependencies)) {
     throw new Error(`${tarball} does not carry the release manifest's optional dependencies`);
   }
+  const analyzer = 'dependency-cruiser';
+  if (Object.hasOwn(manifest.dependencies ?? {}, analyzer)
+    || Object.hasOwn(manifest.optionalDependencies ?? {}, analyzer)
+    || Object.hasOwn(manifest.devDependencies ?? {}, analyzer)
+    || manifest.bundledDependencies?.includes(analyzer) === true
+    || existsSync(join(shipped, 'node_modules', analyzer))) {
+    throw new Error(`${analyzer} must remain a workspace-only development dependency`);
+  }
   const bundledCore = join(shipped, 'node_modules', '@ligule', 'core');
   if (!existsSync(join(bundledCore, 'dist', 'index.js')) || !existsSync(join(bundledCore, 'modes', 'minimal.toml'))
     || !existsSync(join(bundledCore, 'README.md')) || !existsSync(join(bundledCore, 'LICENSE'))) {

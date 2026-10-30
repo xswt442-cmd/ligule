@@ -53,7 +53,8 @@ if (given === undefined && (!existsSync(join(repo, 'tui', 'dist', 'index.js')) |
 }
 
 const pkg = releaseManifest();
-const tarball = given === undefined ? join(packDir, `${pkg.name}-${pkg.version}.tgz`) : resolve(given);
+// Relative tarball paths follow the documented workspace-root convention even though pnpm runs this script from `tui/`.
+const tarball = given === undefined ? join(packDir, `${pkg.name}-${pkg.version}.tgz`) : resolve(repo, given);
 if (!isolatedWorkRoot) rmSync(join(packDir, 'install'), { recursive: true, force: true });
 mkdirSync(consumer, { recursive: true });
 // 为隔离的消费者创建独立清单；安装依赖只依据被测 tarball 的声明。
