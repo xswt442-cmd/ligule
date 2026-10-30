@@ -150,14 +150,14 @@ test('POSIX MCP connection failure cleans the server process group and its desce
   }
 });
 
-test('POSIX MCP cleans descendants after natural server exit and repeated close is safe', { skip: !posixProcessGroupsAvailable }, async () => {
+test('POSIX MCP cleans descendants that retain stdio after natural server exit and repeated close is safe', { skip: !posixProcessGroupsAvailable }, async () => {
   const scratch = join(process.cwd(), 'testplace');
   await mkdir(scratch, { recursive: true });
   const root = await mkdtemp(join(scratch, 'mcp-posix-natural-exit-'));
   const rootPidPath = join(root, 'root.pid');
   const childPidPath = join(root, 'child.pid');
   const registry = createMcpRegistry(mcpServerConfigs({ mcp: { servers: { natural: {
-    command: process.execPath, args: [serverEntry, rootPidPath, childPidPath, 'false', 'exit-after-list,ignore-term'], cwd: root,
+    command: process.execPath, args: [serverEntry, rootPidPath, childPidPath, 'false', 'exit-after-list,ignore-term,inherit-stdio'], cwd: root,
   } } } }, {}, root));
   let rootPid;
   let childPid;

@@ -14,7 +14,10 @@ async function startChild() {
   const source = options.has('ignore-term')
     ? "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);"
     : 'setInterval(() => {}, 1000);';
-  const child = spawn(process.execPath, ['-e', source], { stdio: 'ignore', windowsHide: true });
+  const child = spawn(process.execPath, ['-e', source], {
+    stdio: options.has('inherit-stdio') ? 'inherit' : 'ignore',
+    windowsHide: true,
+  });
   await new Promise((resolve, reject) => {
     child.once('error', reject);
     child.once('spawn', resolve);

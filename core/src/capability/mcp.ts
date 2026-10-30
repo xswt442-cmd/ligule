@@ -493,7 +493,7 @@ export function createMcpRegistry(configs: NormalizedMcpServerConfig[], options:
         if (connected.get(opened.name) === opened) connected.delete(opened.name);
       }).catch(() => undefined);
     };
-    opened.child.once('close', cleanup);
+    opened.child.once('exit', cleanup);
     if (!childIsAlive(opened.child)) cleanup();
   }
 
