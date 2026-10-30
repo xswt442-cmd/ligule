@@ -534,7 +534,7 @@ test('a timed-out cleanup retry preserves confirmed process termination', async 
 
   const stopping = registry.stop(started.id);
   try {
-    await assert.rejects(stopping, { code: 'exec_terminate_failed' });
+    await assert.rejects(stopping, { code: 'exec_temp_cleanup_failed' });
     const pending = registry.status(started.id);
     assert.equal(pending.status, 'failed');
     assert.equal(pending.terminationPending, false);

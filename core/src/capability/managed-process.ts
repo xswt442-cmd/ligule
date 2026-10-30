@@ -41,6 +41,7 @@ interface ManagedProcessEntry {
   failure?: string;
   terminationPending?: boolean;
   cleanupPending?: boolean;
+  cleanupFailureCode?: string;
   terminalOrder?: number;
 }
 
@@ -48,18 +49,26 @@ function errorCodeOf(error: unknown): unknown {
   return typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
 }
 
-function failureState(error: unknown): Pick<ManagedProcessEntry, 'terminationPending' | 'cleanupPending'> {
+function failureState(error: unknown): Pick<ManagedProcessEntry, 'terminationPending' | 'cleanupPending' | 'cleanupFailureCode'> {
   const code = errorCodeOf(error);
   if (code === 'exec_termination_cleanup_failed') {
-    return { terminationPending: true, cleanupPending: true };
+    return { terminationPending: true, cleanupPending: true, cleanupFailureCode: code };
   }
   if (code === 'exec_temp_cleanup_failed' || code === 'exec_script_snapshot_cleanup_failed' || code === 'exec_sandbox_cleanup_failed') {
-    return { terminationPending: false, cleanupPending: true };
+    return { terminationPending: false, cleanupPending: true, cleanupFailureCode: code };
   }
   if (code === 'exec_cancelled' || code === 'exec_process_interrupted' || code === 'exec_spawn_failed' || code === 'exec_sandbox_setup_failed') {
     return { terminationPending: false, cleanupPending: false };
   }
   return { terminationPending: true, cleanupPending: false };
+}
+
+function applyFailureState(entry: ManagedProcessEntry, error: unknown): void {
+  const state = failureState(error);
+  entry.terminationPending = state.terminationPending;
+  entry.cleanupPending = state.cleanupPending;
+  if (state.cleanupFailureCode === undefined) delete entry.cleanupFailureCode;
+  else entry.cleanupFailureCode = state.cleanupFailureCode;
 }
 
 function terminalEntry(entry: ManagedProcessEntry): boolean {
@@ -224,6 +233,7 @@ function stopEntry(entry: ManagedProcessEntry, onTerminal?: () => void): Promise
           removeStopAbortListener(entry);
           entry.terminationPending = false;
           entry.cleanupPending = false;
+          delete entry.cleanupFailureCode;
           if (entry.status !== 'exited') entry.status = 'stopped';
           onTerminal?.();
         }, () => {
@@ -261,6 +271,7 @@ function stopEntry(entry: ManagedProcessEntry, onTerminal?: () => void): Promise
         if (!terminalEntry(entry)) {
           entry.terminationPending = false;
           entry.cleanupPending = false;
+          delete entry.cleanupFailureCode;
           entry.status = 'stopped';
         }
         onTerminal?.();
@@ -271,13 +282,13 @@ function stopEntry(entry: ManagedProcessEntry, onTerminal?: () => void): Promise
         if (pending.cleanupPending === true && pending.terminationPending !== true) {
           entry.status = 'failed';
           entry.failure = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
-          Object.assign(entry, pending);
+          applyFailureState(entry, outcome.error);
           confirmedExitCleanupPending = true;
           continue;
         }
         entry.status = 'failed';
         entry.failure = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
-        Object.assign(entry, pending);
+        applyFailureState(entry, outcome.error);
         onTerminal?.();
         throw outcome.error;
       }
@@ -298,7 +309,13 @@ function stopEntry(entry: ManagedProcessEntry, onTerminal?: () => void): Promise
     if (confirmedExitCleanupPending) {
       entry.terminationPending = false;
       entry.cleanupPending = true;
-    } else Object.assign(entry, failureState(lastError));
+      const cleanupErrorCode = entry.cleanupFailureCode ?? 'exec_temp_cleanup_failed';
+      lastError = new KernelError(cleanupErrorCode, {
+        cause: lastError,
+        detail: 'the process exited, but resource cleanup did not finish before the stop deadline',
+      });
+      entry.cleanupFailureCode = cleanupErrorCode;
+    } else applyFailureState(entry, lastError);
     entry.status = 'failed';
     entry.failure = lastError instanceof Error ? lastError.message : String(lastError);
     onTerminal?.();
@@ -355,6 +372,7 @@ export function createManagedProcessRegistry(options: ManagedProcessRegistryOpti
       entry.exitCode = exitCode;
       entry.terminationPending = false;
       entry.cleanupPending = false;
+      delete entry.cleanupFailureCode;
       entry.status = 'exited';
       pruneTerminalEntries();
     }, (error: unknown) => {
@@ -362,7 +380,7 @@ export function createManagedProcessRegistry(options: ManagedProcessRegistryOpti
       if (entry.status === 'stopping' || entry.status === 'stopped') return;
       entry.status = 'failed';
       entry.failure = error instanceof Error ? error.message : String(error);
-      Object.assign(entry, failureState(error));
+      applyFailureState(entry, error);
       pruneTerminalEntries();
     });
   }
