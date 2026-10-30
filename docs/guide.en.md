@@ -219,6 +219,8 @@ Shell runs only when the platform backend can meet the isolation requirements of
 
 When saving model settings, choose the user or project-local configuration layer. Running sessions apply model configuration changes after the current turn. Higher-priority configuration still takes precedence. If you leave a settings page with unsaved changes, the app asks whether to discard them. The About page provides the application version, help, license information, and diagnostics.
 
+The user or project configuration key `limits.execTimeoutMs` sets the maximum duration of one Shell command. It defaults to 120,000 ms and accepts values from 1 to 600,000 ms (10 minutes). This is separate from the per-request model timeout; Shell commands continue to use the selected Permission, Policy, and process-cleanup rules.
+
 ### Branches and export
 
 In the terminal UI, use `/branch` to branch from the current record or `/branch <seq>` to branch from a completed turn. In the desktop app, choose “Branch conversation” from the conversation menu to copy the current record, or use the branch action on a completed turn in the transcript. A branch creates a new session and leaves the original unchanged.
