@@ -27,6 +27,7 @@ export interface FetchResult {
   text: string;
   bytes: number;
   shownBytes: number;
+  addresses: string[];
   truncated: boolean;
   finalUrl: string;
   hops: number;
@@ -83,6 +84,68 @@ function parseV6(address: string): number[] | undefined {
   return [...bytesOf(left), ...new Array(missing * 2).fill(0), ...bytesOf(right), ...tail];
 }
 
+interface ClassifiedPrefix {
+  readonly bytes: number[];
+  readonly length: number;
+  readonly targetClass: TargetClass;
+}
+
+function classifiedPrefix(address: string, length: number, targetClass: TargetClass): ClassifiedPrefix {
+  const bytes = address.includes(':') ? parseV6(address) : parseV4(address);
+  if (bytes === undefined) throw new Error(`invalid network prefix ${address}`);
+  return { bytes, length, targetClass };
+}
+
+function matchesPrefix(address: number[], prefix: ClassifiedPrefix): boolean {
+  if (address.length !== prefix.bytes.length) return false;
+  const wholeBytes = Math.floor(prefix.length / 8);
+  for (let index = 0; index < wholeBytes; index += 1) {
+    if (address[index] !== prefix.bytes[index]) return false;
+  }
+  const remainingBits = prefix.length % 8;
+  if (remainingBits === 0) return true;
+  const mask = (0xff << (8 - remainingBits)) & 0xff;
+  return ((address[wholeBytes] ?? 0) & mask) === ((prefix.bytes[wholeBytes] ?? 0) & mask);
+}
+
+// IANA special-purpose ranges use existing policy classes: non-global but
+// forwardable targets require private-network approval, while non-destinations
+// and non-forwardable assignments are denied as unspecified. Globally reachable
+// exceptions under aggregate registry blocks remain public.
+const SPECIAL_PREFIXES = [
+  classifiedPrefix('192.0.0.9', 32, 'public'),
+  classifiedPrefix('192.0.0.10', 32, 'public'),
+  classifiedPrefix('192.0.0.8', 32, 'unspecified'),
+  classifiedPrefix('192.0.0.170', 32, 'unspecified'),
+  classifiedPrefix('192.0.0.171', 32, 'unspecified'),
+  classifiedPrefix('192.0.0.0', 29, 'private'),
+  classifiedPrefix('192.88.99.2', 32, 'private'),
+  classifiedPrefix('192.0.0.0', 24, 'unspecified'),
+  classifiedPrefix('192.0.2.0', 24, 'unspecified'),
+  classifiedPrefix('192.88.99.0', 24, 'unspecified'),
+  classifiedPrefix('198.18.0.0', 15, 'private'),
+  classifiedPrefix('198.51.100.0', 24, 'unspecified'),
+  classifiedPrefix('203.0.113.0', 24, 'unspecified'),
+  classifiedPrefix('64:ff9b:1::', 48, 'private'),
+  classifiedPrefix('100::', 64, 'private'),
+  classifiedPrefix('100:0:0:1::', 64, 'unspecified'),
+  classifiedPrefix('2001:1::1', 128, 'public'),
+  classifiedPrefix('2001:1::2', 128, 'public'),
+  classifiedPrefix('2001:1::3', 128, 'public'),
+  classifiedPrefix('2001::', 32, 'private'),
+  classifiedPrefix('2001:2::', 48, 'private'),
+  classifiedPrefix('2001:3::', 32, 'public'),
+  classifiedPrefix('2001:4:112::', 48, 'public'),
+  classifiedPrefix('2001:10::', 28, 'unspecified'),
+  classifiedPrefix('2001:20::', 28, 'public'),
+  classifiedPrefix('2001:30::', 28, 'public'),
+  classifiedPrefix('2001::', 23, 'unspecified'),
+  classifiedPrefix('2001:db8::', 32, 'unspecified'),
+  classifiedPrefix('2002::', 16, 'private'),
+  classifiedPrefix('3fff::', 20, 'unspecified'),
+  classifiedPrefix('5f00::', 16, 'private'),
+].sort((left, right) => right.length - left.length);
+
 function classifyBytes(bytes: number[]): TargetClass {
   if (bytes.length === 4) {
     const [a, b] = bytes;
@@ -90,6 +153,8 @@ function classifyBytes(bytes: number[]): TargetClass {
     if (a === 10 || (a === 172 && (b ?? 0) >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && (b ?? 0) >= 64 && b <= 127)) return 'private';
     if (a === 169 && b === 254) return 'link-local';
     if (a === 0 || a >= 224) return 'unspecified';
+    const special = SPECIAL_PREFIXES.find((prefix) => matchesPrefix(bytes, prefix));
+    if (special !== undefined) return special.targetClass;
     return 'public';
   }
   if (bytes.slice(0, 10).every((byte) => byte === 0) && bytes[10] === 0xff && bytes[11] === 0xff) {
@@ -100,6 +165,8 @@ function classifyBytes(bytes: number[]): TargetClass {
   if ((bytes[0] & 0xfe) === 0xfc) return 'private';
   if (bytes[0] === 0xfe && (bytes[1] & 0xc0) === 0x80) return 'link-local';
   if (bytes[0] === 0xff) return 'unspecified';
+  const special = SPECIAL_PREFIXES.find((prefix) => matchesPrefix(bytes, prefix));
+  if (special !== undefined) return special.targetClass;
   return 'public';
 }
 
@@ -173,23 +240,28 @@ function connect(target: NetworkTarget, approved: NetworkTarget, { maxBytes, tim
   maxBytes: number;
   timeoutMs: number;
   signal?: AbortSignal;
-}): Promise<{ status: number; location: string; contentType: string; bytes: number; head: string; truncated: boolean; from: string }> {
+}): Promise<{ status: number; location: string; contentType: string; bytes: number; shownBytes: number; head: string; truncated: boolean; from: string; address: string }> {
   return new Promise((resolve, reject) => {
     const cancel = AbortSignal.any([AbortSignal.timeout(timeoutMs), ...(signal === undefined ? [] : [signal])]);
     const port = Number(target.port);
+    const address = target.addresses[0];
+    if (address === undefined) {
+      reject(new KernelError('fetch_url_invalid', { detail: `${target.url} has no approved connection address` }));
+      return;
+    }
     const hostHeader = port === 80 || port === 443 ? approved.host : `${approved.host}:${port}`;
     const from = `${target.scheme}//${approved.host}${port === 80 || port === 443 ? '' : `:${port}`}${target.path}`;
     const send = (target.scheme === 'https:' ? httpsRequest : httpRequest)(
       {
         protocol: target.scheme,
-        hostname: target.addresses[0],
+        hostname: address,
         host: hostHeader,
         port,
         path: target.path,
         method: 'GET',
         ...(target.scheme === 'https:' ? { servername: approved.host } : {}),
         headers: { host: hostHeader, accept: '*/*' },
-        lookup: pinnedLookup(target.addresses[0]),
+        lookup: pinnedLookup(address),
         agent: false,
         signal: cancel,
       },
@@ -214,9 +286,11 @@ function connect(target: NetworkTarget, approved: NetworkTarget, { maxBytes, tim
           location: typeof response.headers.location === 'string' ? response.headers.location : '',
           contentType: typeof response.headers['content-type'] === 'string' ? response.headers['content-type'] : '',
           bytes,
+          shownBytes: shown,
           head: Buffer.concat(chunks).toString('utf8'),
           truncated,
           from,
+          address,
         }));
         response.once('error', reject);
       },
@@ -236,7 +310,7 @@ function connect(target: NetworkTarget, approved: NetworkTarget, { maxBytes, tim
 }
 
 // 只跟随同源重定向，避免跳转到其他主机或端口。
-// 每一跳都重新解析并应用相同规则，不能将当前主机的批准扩展到重定向目标。
+// 每一跳的 DNS 结果必须属于原批准地址集，不能仅凭类别相同就替换连接身份。
 export async function fetchTarget(approved: NetworkTarget, { maxBytes, timeoutMs, redirectLimit, signal, resolve }: {
   maxBytes: number;
   timeoutMs: number;
@@ -251,8 +325,10 @@ export async function fetchTarget(approved: NetworkTarget, { maxBytes, timeoutMs
     throw new KernelError('fetch_target_denied', { detail: `${approved.url} resolves to a ${approved.class} address (${approved.addresses.join(', ')})` });
   }
   let target = approved;
+  const connectedAddresses: string[] = [];
   for (let hop = 0; ; hop += 1) {
     const answer = await connect(target, approved, { maxBytes, timeoutMs, signal });
+    if (!connectedAddresses.includes(answer.address)) connectedAddresses.push(answer.address);
     if (answer.status >= 300 && answer.status < 400 && answer.location !== '') {
       if (hop === redirectLimit) throw new KernelError('fetch_redirect_limit', { detail: `${approved.url} redirected more than ${redirectLimit} times` });
       const next = new URL(answer.location, answer.from);
@@ -267,6 +343,11 @@ export async function fetchTarget(approved: NetworkTarget, { maxBytes, timeoutMs
           detail: `${answer.from} redirects to ${next.href}, which resolves as ${reresolved.class ?? reresolved.failure}, not the ${approved.class} target that was approved`,
         });
       }
+      if (reresolved.addresses.some((address) => !approved.addresses.includes(address))) {
+        throw new KernelError('fetch_redirect_denied', {
+          detail: `${answer.from} redirects to ${next.href}, which resolves outside the approved address set (${approved.addresses.join(', ')})`,
+        });
+      }
       target = reresolved;
       continue;
     }
@@ -274,9 +355,10 @@ export async function fetchTarget(approved: NetworkTarget, { maxBytes, timeoutMs
       throw new KernelError('fetch_response_failed', { detail: `${answer.from} answered ${answer.status}` });
     }
     return {
-      text: answer.truncated ? `${answer.head}\n[truncated: ${answer.head.length} of ${answer.bytes} bytes shown]` : answer.head,
+      text: answer.truncated ? `${answer.head}\n[truncated: ${answer.shownBytes} of ${answer.bytes} bytes shown]` : answer.head,
       bytes: answer.bytes,
-      shownBytes: answer.head.length,
+      shownBytes: answer.shownBytes,
+      addresses: connectedAddresses,
       truncated: answer.truncated,
       finalUrl: answer.from,
       hops: hop,

@@ -11,6 +11,7 @@ import {
   classifyAddress, createConfig, createDecisionChain, createKernel, createSessionLog, fetchTarget,
   loadAssembly, minimalPlugin, networkPlugin, resolveTarget,
 } from '../dist/index.js';
+import { fetchTool } from '../dist/tools/network.js';
 
 const listening = (server) => new Promise((resolve) => {
   server.listen(0, '127.0.0.1', () => resolve({ origin: `http://127.0.0.1:${server.address().port}`, port: String(server.address().port) }));
@@ -49,6 +50,41 @@ test('addresses are classified by their bytes, including the forms a URL normali
   assert.equal(classifyAddress('::1:2:3:4:5'), 'public');
   assert.equal(classifyAddress('gg::1'), 'unspecified');
   assert.equal(classifyAddress('1.2.3'), 'unspecified');
+});
+
+test('special-purpose addresses follow IANA reachability instead of being treated as ordinary public IPs', () => {
+  for (const address of [
+    '192.0.0.8', '192.0.0.11', '192.0.0.170', '192.0.2.1', '192.88.99.1', '198.51.100.1', '203.0.113.1',
+    '2001:db8::1', '3fff::1', '100:0:0:1::1',
+  ]) {
+    assert.equal(classifyAddress(address), 'unspecified', address);
+  }
+  for (const address of [
+    '192.0.0.0', '198.18.0.0', '198.19.255.255', '2001:2::1', '2002::1', '5f00::1', '64:ff9b:1::1',
+  ]) {
+    assert.equal(classifyAddress(address), 'private', address);
+  }
+  for (const address of [
+    '192.0.0.9', '192.0.0.10', '192.31.196.1', '192.52.193.1', '192.175.48.1',
+    '198.20.0.0', '2001:1::1', '2001:3::1', '2001:4:112::1', '2001:20::1', '2001:30::1', '2620:4f:8000::1',
+  ]) {
+    assert.equal(classifyAddress(address), 'public', address);
+  }
+});
+
+test('IANA non-globally-reachable destinations use the existing ask or deny policy classes', async () => {
+  const asked = [];
+  const chain = createDecisionChain({ mode: 'auto', ask: async (question) => (asked.push(question), true) });
+  for (const url of ['http://192.0.2.1/', 'http://198.51.100.1/', 'http://203.0.113.1/', 'http://[2001:db8::1]/']) {
+    const target = await resolveTarget(url);
+    assert.equal(target.class, 'unspecified', url);
+    assert.equal((await chain.evaluate({ tool: 'fetch', input: {}, target })).code, 'policy_denied', url);
+  }
+  const benchmark = await resolveTarget('http://198.18.0.1/');
+  assert.equal(benchmark.class, 'private');
+  assert.equal((await chain.evaluate({ tool: 'fetch', input: {}, target: benchmark })).decision, 'allow');
+  assert.equal(asked.length, 1);
+  assert.match(asked[0].reason, /private/u);
 });
 
 test('a target is one URL, one resolution, and the strictest address decides', async () => {
@@ -215,6 +251,126 @@ test('a redirect must be the same origin and the same class, re-resolved', async
     assert.equal(failed.code, 'fetch_response_failed');
   } finally {
     server.close();
+  }
+});
+
+test('a same-origin redirect cannot connect to a new IP outside the original approval set', async (t) => {
+  let redirectedHits = 0;
+  const initial = createServer((_request, response) => {
+    response.writeHead(302, { location: '/final' });
+    response.end();
+  });
+  await new Promise((resolve, reject) => initial.once('error', reject).listen(0, '127.0.0.1', resolve));
+  const port = initial.address().port;
+  const rebound = createServer((_request, response) => {
+    redirectedHits += 1;
+    response.writeHead(200);
+    response.end('REACHED_UNAPPROVED_IP');
+  });
+  await new Promise((resolve, reject) => rebound.once('error', reject).listen(port, '127.0.0.2', resolve));
+  t.after(async () => {
+    await Promise.all([initial, rebound].map((server) => new Promise((resolve) => server.close(resolve))));
+  });
+
+  let resolutions = 0;
+  const resolve = async (host) => {
+    assert.equal(host, 'rebound.invalid');
+    resolutions += 1;
+    return resolutions === 1 ? ['127.0.0.1'] : ['127.0.0.2'];
+  };
+  const approved = await resolveTarget(`http://rebound.invalid:${port}/start`, { resolve });
+  const result = await fetchTarget(approved, { ...limits, resolve }).catch((error) => error);
+
+  assert.equal(result.code, 'fetch_redirect_denied');
+  assert.match(result.detail, /outside the approved address set/u);
+  assert.equal(redirectedHits, 0, 'the unapproved loopback server must receive no request');
+  assert.equal(resolutions, 2);
+});
+
+test('a same-origin redirect may select another IP that was already approved and reports actual connection addresses', async (t) => {
+  const seen = [];
+  const initial = createServer((request, response) => {
+    seen.push({ server: 'initial', local: request.socket.localAddress, url: request.url });
+    response.writeHead(302, { location: '/final' });
+    response.end();
+  });
+  await new Promise((resolve, reject) => initial.once('error', reject).listen(0, '127.0.0.1', resolve));
+  const port = initial.address().port;
+  const final = createServer((request, response) => {
+    seen.push({ server: 'final', local: request.socket.localAddress, url: request.url });
+    response.writeHead(200, { 'content-type': 'text/plain' });
+    response.end('approved-final');
+  });
+  await new Promise((resolve, reject) => final.once('error', reject).listen(port, '127.0.0.2', resolve));
+  t.after(async () => {
+    await Promise.all([initial, final].map((server) => new Promise((resolve) => server.close(resolve))));
+  });
+
+  let resolutions = 0;
+  const resolve = async (host) => {
+    assert.equal(host, 'approved.invalid');
+    resolutions += 1;
+    return resolutions === 1 ? ['127.0.0.1', '127.0.0.2'] : ['127.0.0.2'];
+  };
+  const approved = await resolveTarget(`http://approved.invalid:${port}/start`, { resolve });
+  const page = await fetchTarget(approved, { ...limits, resolve });
+
+  assert.equal(page.text, 'approved-final');
+  assert.deepEqual(seen, [
+    { server: 'initial', local: '127.0.0.1', url: '/start' },
+    { server: 'final', local: '127.0.0.2', url: '/final' },
+  ]);
+  assert.deepEqual(page.addresses, ['127.0.0.1', '127.0.0.2']);
+  assert.equal(resolutions, 2);
+});
+
+test('the fetch tool records the IP used by the socket, not every address in the approved DNS set', async (t) => {
+  let remoteAddress;
+  const server = createServer((request, response) => {
+    remoteAddress = request.socket.remoteAddress;
+    response.writeHead(200, { 'content-type': 'text/plain' });
+    response.end('actual-address');
+  });
+  const { port } = await listening(server);
+  t.after(() => server.close());
+
+  const target = await resolveTarget(`http://approved.invalid:${port}/`, {
+    resolve: async () => ['127.0.0.1', '127.0.0.2'],
+  });
+  const result = await fetchTool.run({ url: target.url }, {
+    config: createConfig({ user: { boundary: process.cwd() } }),
+    target,
+  });
+
+  assert.equal(remoteAddress, '127.0.0.1');
+  assert.deepEqual(result.addresses, [remoteAddress]);
+});
+
+test('shownBytes uses source UTF-8 bytes for ASCII, CJK, emoji, and a truncated partial code point', async (t) => {
+  const responses = new Map([
+    ['/ascii', 'abcd-more'],
+    ['/cjk', '文文'],
+    ['/emoji', '😀😀'],
+    ['/partial', '文文'],
+  ]);
+  const server = createServer((request, response) => {
+    response.writeHead(200, { 'content-type': 'text/plain' });
+    response.end(responses.get(request.url) ?? '');
+  });
+  const { origin } = await listening(server);
+  t.after(() => server.close());
+
+  for (const { path, maxBytes, expectedShownBytes, expectedTotalBytes, expectedText } of [
+    { path: '/ascii', maxBytes: 4, expectedShownBytes: 4, expectedTotalBytes: 9, expectedText: 'abcd' },
+    { path: '/cjk', maxBytes: 3, expectedShownBytes: 3, expectedTotalBytes: 6, expectedText: '文' },
+    { path: '/emoji', maxBytes: 4, expectedShownBytes: 4, expectedTotalBytes: 8, expectedText: '😀' },
+    { path: '/partial', maxBytes: 4, expectedShownBytes: 4, expectedTotalBytes: 6, expectedText: '文�' },
+  ]) {
+    const page = await fetchTarget(await resolveTarget(`${origin}${path}`), { ...limits, maxBytes });
+    assert.equal(page.text.split('\n[truncated:')[0], expectedText, path);
+    assert.equal(page.shownBytes, expectedShownBytes, path);
+    assert.equal(page.bytes, expectedTotalBytes, path);
+    assert.match(page.text, new RegExp(`\\[truncated: ${expectedShownBytes} of ${expectedTotalBytes} bytes shown\\]`), path);
   }
 });
 
