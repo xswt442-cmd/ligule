@@ -229,7 +229,10 @@ export async function withTuiHost<TResult>(run: (context: TuiHostContext) => TRe
         if (previousEnv[key] === undefined) delete process.env[key];
         else process.env[key] = previousEnv[key];
       }
-      await rm(absoluteDirectory, { recursive: true, force: true });
+      // Host.release 已结束并释放 Session 锁；Windows 仍可能在短暂关闭句柄期间返回 EBUSY。
+      // 仅对测试目录清理做有界文件系统重试，持续占用仍会让测试失败。
+      await rm(absoluteDirectory, { recursive: true, force: true,
+        ...(process.platform === 'win32' ? { maxRetries: 5, retryDelay: 100 } : {}) });
     }
   }
 }
