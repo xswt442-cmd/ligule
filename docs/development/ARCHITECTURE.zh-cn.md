@@ -28,8 +28,8 @@ CLI 的 npm 包内置私有 Core 的编译代码、模式与元数据；Core 的
 CLI 发布清单由 [`releaseManifest()`](../../scripts/pack-release.js) 从 `tui/package.json` 与 Core 的 `dependencies`、`optionalDependencies` 合成。tarball 内置私有 `@ligule/core` 运行时与无依赖的 `xlsx`；其余依赖由消费者按自身平台安装，原生 optional 包也只选择适用的项目。TUI 的 `devDependencies` 可能仍留在 manifest 元数据中，但 npm 消费者不会传递安装它们。Desktop 使用独立产品清单，不属于 CLI tarball。CI 发布工作流在干净 checkout 中调用 `pnpm --filter ligule run check-pack` 与 `pnpm --filter ligule run verify-install <tarball>`。在已有工作区本机验收时，应将新 `testplace/tmp` work root 传给脚本，避免替换原有 `testplace/pack` 产物：
 
 ```sh
-pnpm --filter ligule run check-pack -- --work-root testplace/tmp/p5-check-pack-run-1
-pnpm --filter ligule run verify-install -- testplace/tmp/p5-check-pack-run-1/ligule-0.1.0.tgz --work-root testplace/tmp/p5-verify-install-run-1
+pnpm --filter ligule run check-pack -- --work-root testplace/tmp/package-check-example-1
+pnpm --filter ligule run verify-install -- testplace/tmp/package-check-example-1/ligule-0.1.0.tgz --work-root testplace/tmp/install-check-example-1
 ```
 
 请将示例目录名替换为当前不存在的名称，并将 check-pack work root 中生成的 tarball 路径传给 `verify-install`。两项检查必须使用同一个实际归档；不要只凭工作区清单推断最终发布包。

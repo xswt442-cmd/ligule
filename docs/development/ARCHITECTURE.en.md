@@ -28,8 +28,8 @@ The check configuration is [dependency-cruiser.cjs](../../dependency-cruiser.cjs
 The CLI release manifest is assembled by [`releaseManifest()`](../../scripts/pack-release.js) from `tui/package.json` plus Core `dependencies` and `optionalDependencies`. The tarball bundles the private `@ligule/core` runtime and dependency-free `xlsx`; external dependencies are installed on the consumer platform, including only the applicable optional native packages. TUI `devDependencies` may remain as manifest metadata but are not installed transitively by npm consumers. Desktop is a separate product manifest and is not part of the CLI tarball. The CI release workflows call `pnpm --filter ligule run check-pack` and `pnpm --filter ligule run verify-install <tarball>` from a clean checkout. When running those checks in an existing workspace, use new `testplace/tmp` work roots so the scripts do not replace existing `testplace/pack` artifacts:
 
 ```sh
-pnpm --filter ligule run check-pack -- --work-root testplace/tmp/p5-check-pack-run-1
-pnpm --filter ligule run verify-install -- testplace/tmp/p5-check-pack-run-1/ligule-0.1.0.tgz --work-root testplace/tmp/p5-verify-install-run-1
+pnpm --filter ligule run check-pack -- --work-root testplace/tmp/package-check-example-1
+pnpm --filter ligule run verify-install -- testplace/tmp/package-check-example-1/ligule-0.1.0.tgz --work-root testplace/tmp/install-check-example-1
 ```
 
 Replace the example directory names with unused names; pass the tarball path produced in the check-pack work root to `verify-install`. Both checks must use the same actual archive; do not infer the final package from workspace manifests alone.
