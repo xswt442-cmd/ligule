@@ -123,19 +123,20 @@ export function taskSummaryOf(
   snapshotAt: number,
   now: number,
 ): TaskSummary | null {
-  if (task === null || task === undefined) return null;
-  const maxModelCalls = task.maxModelCalls ?? limits?.maxModelCalls;
-  const timeoutMs = task.timeoutMs ?? limits?.timeoutMs;
-  const interactionWaitTimeoutMs = task.interactionWaitTimeoutMs ?? limits?.interactionWaitTimeoutMs;
+  const snapshot = progress === null || progress === undefined ? task : progress.task;
+  if (snapshot === null || snapshot === undefined) return null;
+  const maxModelCalls = snapshot.maxModelCalls ?? limits?.maxModelCalls;
+  const timeoutMs = snapshot.timeoutMs ?? limits?.timeoutMs;
+  const interactionWaitTimeoutMs = snapshot.interactionWaitTimeoutMs ?? limits?.interactionWaitTimeoutMs;
   if (maxModelCalls === undefined || timeoutMs === undefined || interactionWaitTimeoutMs === undefined) return null;
   const waiting = progress?.phase === 'awaiting_approval' || progress?.phase === 'awaiting_input';
   // Only the budget snapshot can say whether all concurrent work is paused; phase alone is insufficient.
-  const executionPaused = task.executionPaused;
-  const executionElapsedMs = task.executionElapsedMs + (executionPaused ? 0 : Math.max(0, now - snapshotAt));
+  const executionPaused = snapshot.executionPaused;
+  const executionElapsedMs = snapshot.executionElapsedMs + (executionPaused ? 0 : Math.max(0, now - snapshotAt));
   const interactionStartAt = waiting ? Math.max(snapshotAt, progress!.phaseStartedAt) : snapshotAt;
-  const interactionWaitMs = task.interactionWaitMs + (waiting ? Math.max(0, now - interactionStartAt) : 0);
+  const interactionWaitMs = snapshot.interactionWaitMs + (waiting ? Math.max(0, now - interactionStartAt) : 0);
   return {
-    modelCalls: Math.max(task.modelCalls, progress?.modelCalls ?? 0),
+    modelCalls: Math.max(snapshot.modelCalls, progress?.modelCalls ?? 0),
     maxModelCalls,
     executionRemainingMs: Math.max(0, timeoutMs - executionElapsedMs),
     interactionWaitMs,
@@ -199,4 +200,5 @@ export type RunProgress = {
   modelCalls: number;
   toolCalls: number;
   outputTokens: number | null;
+  task?: TaskBudgetSnapshot;
 };

@@ -154,6 +154,7 @@ interface TuiProgress {
   readonly modelCalls: number;
   readonly toolCalls: number;
   readonly outputTokens: number | null;
+  readonly task?: TuiTaskBudget;
 }
 
 function durationLabel(milliseconds: number, locale: Locale): string {
@@ -177,7 +178,7 @@ function durationLabel(milliseconds: number, locale: Locale): string {
 
 export function activeRunBudgetSegment(status: TuiStatus | null, locale: Locale = 'zh'): string {
   if (status?.running !== true) return '';
-  const task = status.task;
+  const task = status.progress === null || status.progress === undefined ? status.task : status.progress.task;
   if (task === undefined || task === null) {
     const calls = status.progress?.modelCalls;
     const maximum = status.taskLimits?.maxModelCalls;

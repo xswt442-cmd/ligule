@@ -283,6 +283,8 @@ interface HostRunProgress {
   readonly outputTokens: number | null;
 }
 
+type HostProgressSnapshot = HostRunProgress & { readonly task?: ReturnType<TaskBudget['snapshot']> };
+
 interface HostSessionState extends HostSessionBase {
   readonly chain: DecisionChain;
   readonly kernel: Kernel;
@@ -1347,9 +1349,17 @@ export function createHost({
     return { sessionId: state.id, ...foldLabel(await state.session.read()) };
   }
 
+  function progressSnapshotOf(state: HostSessionState): HostProgressSnapshot | null {
+    const progress = state.progress;
+    return progress === undefined ? null : {
+      ...progress,
+      ...(state.taskBudget === undefined ? {} : { task: state.taskBudget.snapshot() }),
+    };
+  }
+
   function publishProgress(state: HostSessionState, connection: HostClientConnection): void {
     state.progressNotificationAt = Date.now();
-    connection.notify({ notify: 'progress', sessionId: state.id, progress: state.progress ?? null });
+    connection.notify({ notify: 'progress', sessionId: state.id, progress: progressSnapshotOf(state) });
   }
 
   function changeProgressPhase(state: HostSessionState, connection: HostClientConnection, phase: LoopProgressPhase): void {
@@ -1838,8 +1848,8 @@ export function createHost({
           settle = () => { approvalActive = false; resolve({ decision: 'cancelled', code: 'policy_approval_cancelled' }); };
         });
         state.asks.add(settle);
-        updateWaitingForUser(state as HostSessionState, connection, true, 'approval');
         const endInteraction = state.taskBudget?.startInteraction();
+        updateWaitingForUser(state as HostSessionState, connection, true, 'approval');
         const approvalStartedAt = telemetryContext === undefined ? 0n : process.hrtime.bigint();
         if (telemetryContext?.executionId !== undefined) emitTelemetry(telemetry, { type: 'approval.started',
           executionId: telemetryContext.executionId, ...(telemetryApprovalRunId === undefined ? {} : { runId: telemetryApprovalRunId }),
@@ -2040,8 +2050,8 @@ export function createHost({
           settle = () => resolve('cancelled');
         });
         state.asks.add(settle);
-        updateWaitingForUser(state as HostSessionState, connection, true, 'input');
         const endInteraction = state.taskBudget?.startInteraction();
+        updateWaitingForUser(state as HostSessionState, connection, true, 'input');
         try {
           const outcome = await Promise.race([
             // 交互等待受整次任务累计等待预算约束。
@@ -3593,7 +3603,7 @@ export function createHost({
           return {
             sessionId,
             running: state.running !== undefined,
-            progress: state.progress ?? null,
+            progress: progressSnapshotOf(state),
             // 只返回当前模式可用的工具，不返回全部已登记工具。
             tools: state.kernel.manifest().map((entry) => entry.name),
             mode: state.mode.file?.name ?? null,

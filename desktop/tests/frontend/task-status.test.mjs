@@ -17,9 +17,10 @@ const task = (overrides = {}) => ({
 });
 
 test('task summary advances the execution deadline and model usage while active', () => {
-  const summary = taskSummaryOf(task(), undefined, {
+  const snapshot = task();
+  const summary = taskSummaryOf(snapshot, undefined, {
     phase: 'model_request', startedAt: 1_000, phaseStartedAt: 1_000,
-    lastProgressAt: 9_000, modelCalls: 4, toolCalls: 0, outputTokens: null,
+    lastProgressAt: 9_000, modelCalls: 4, toolCalls: 0, outputTokens: null, task: snapshot,
   }, 1_000, 11_000);
 
   assert.deepEqual(summary, {
@@ -33,9 +34,10 @@ test('task summary advances the execution deadline and model usage while active'
 });
 
 test('an interaction phase advances wait but does not imply the whole run is paused', () => {
-  const summary = taskSummaryOf(task(), undefined, {
+  const snapshot = task();
+  const summary = taskSummaryOf(snapshot, undefined, {
     phase: 'awaiting_approval', startedAt: 1_000, phaseStartedAt: 8_000,
-    lastProgressAt: 8_000, modelCalls: 3, toolCalls: 1, outputTokens: null,
+    lastProgressAt: 8_000, modelCalls: 3, toolCalls: 1, outputTokens: null, task: snapshot,
   }, 1_000, 11_000);
 
   assert.deepEqual(summary, {
@@ -49,9 +51,10 @@ test('an interaction phase advances wait but does not imply the whole run is pau
 });
 
 test('a fresh paused snapshot does not count already observed wait twice', () => {
-  const summary = taskSummaryOf(task({ executionPaused: true, executionElapsedMs: 37_000, interactionWaitMs: 8_000 }), undefined, {
+  const snapshot = task({ executionPaused: true, executionElapsedMs: 37_000, interactionWaitMs: 8_000 });
+  const summary = taskSummaryOf(snapshot, undefined, {
     phase: 'awaiting_input', startedAt: 1_000, phaseStartedAt: 8_000,
-    lastProgressAt: 8_000, modelCalls: 3, toolCalls: 1, outputTokens: null,
+    lastProgressAt: 8_000, modelCalls: 3, toolCalls: 1, outputTokens: null, task: snapshot,
   }, 9_000, 11_000);
 
   assert.deepEqual(summary, {
@@ -65,14 +68,36 @@ test('a fresh paused snapshot does not count already observed wait twice', () =>
 });
 
 test('a refreshed active snapshot resumes deadline projection after interaction', () => {
-  const summary = taskSummaryOf(task({ executionPaused: false, executionElapsedMs: 37_000, interactionWaitMs: 8_000 }), undefined, {
+  const snapshot = task({ executionPaused: false, executionElapsedMs: 37_000, interactionWaitMs: 8_000 });
+  const summary = taskSummaryOf(snapshot, undefined, {
     phase: 'tool_execution', startedAt: 1_000, phaseStartedAt: 10_000,
-    lastProgressAt: 10_000, modelCalls: 3, toolCalls: 1, outputTokens: null,
+    lastProgressAt: 10_000, modelCalls: 3, toolCalls: 1, outputTokens: null, task: snapshot,
   }, 9_000, 11_000);
 
   assert.equal(summary?.executionPaused, false);
   assert.equal(summary?.executionRemainingMs, 21_000);
   assert.equal(summary?.interactionWaitMs, 8_000);
+});
+
+test('new progress does not reuse the previous task snapshot', () => {
+  const previous = task({ startedAt: '2026-10-30T23:00:00.000Z' });
+  const progress = {
+    phase: 'preparing', startedAt: Date.parse('2026-10-31T00:00:00.000Z'),
+    phaseStartedAt: 1, lastProgressAt: 1, modelCalls: 0, toolCalls: 0, outputTokens: null,
+  };
+  assert.equal(taskSummaryOf(previous, undefined, progress, 1, 2), null);
+});
+
+test('progress-carried budget supersedes a stale status snapshot', () => {
+  const previous = task({ startedAt: '2026-10-30T23:00:00.000Z', modelCalls: 11 });
+  const current = task({ startedAt: '2026-10-31T00:00:00.000Z', modelCalls: 2, executionElapsedMs: 20_000 });
+  const progress = {
+    phase: 'model_request', startedAt: Date.parse(current.startedAt), phaseStartedAt: 1,
+    lastProgressAt: 1, modelCalls: 2, toolCalls: 0, outputTokens: null, task: current,
+  };
+  const summary = taskSummaryOf(previous, undefined, progress, 1, 2);
+  assert.equal(summary?.modelCalls, 2);
+  assert.equal(summary?.executionRemainingMs, 39_999);
 });
 
 test('task summary labels include model use, remaining execution, interaction wait, and pause in both locales', () => {

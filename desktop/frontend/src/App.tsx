@@ -206,9 +206,6 @@ export function App({ transport }: { transport: Transport }) {
   const allowSend = useRef(new Set<string>());
   const [status, setStatus] = useState<Status | null>(null);
   const [taskSnapshotAt, setTaskSnapshotAt] = useState(Date.now());
-  const taskRefreshTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const taskStatusRefreshInFlight = useRef(false);
-  const refreshTaskStatus = useRef<((id: string) => void) | null>(null);
   const [newSessionSettingsRevision, setNewSessionSettingsRevision] = useState(0);
   const [newSessionMode, setNewSessionMode] = useState<string | null>(null);
   const [newSessionPolicy, setNewSessionPolicy] = useState<PolicySelection | null>(null);
@@ -601,17 +598,9 @@ export function App({ transport }: { transport: Transport }) {
             ...current,
             running: progress !== null,
             progress,
+            ...(progress?.task === undefined ? {} : { task: progress.task }),
           });
-          if (progress === null) {
-            if (taskRefreshTimer.current !== undefined) clearTimeout(taskRefreshTimer.current);
-            taskRefreshTimer.current = undefined;
-          } else if (taskRefreshTimer.current === undefined) {
-            // Host progress events drive a bounded status refresh; the UI tick projects durations between snapshots.
-            taskRefreshTimer.current = setTimeout(() => {
-              taskRefreshTimer.current = undefined;
-              refreshTaskStatus.current?.(owner);
-            }, 1_000);
-          }
+          if (progress?.task !== undefined) setTaskSnapshotAt(Date.now());
         }
         return;
       }
@@ -718,7 +707,7 @@ export function App({ transport }: { transport: Transport }) {
     transport.onLog((line) => setDiagnosticLogs((current) => [...current, line].slice(-50)));
   }, [client, notify, transport]);
 
-  const refreshStatus = useCallback(async (id: string, quiet = false) => {
+  const refreshStatus = useCallback(async (id: string) => {
     try {
       const next = await client.call('status.get', { sessionId: id }) as Status;
       // 用户已切换会话时，不将该请求的响应写入当前会话状态。
@@ -726,18 +715,9 @@ export function App({ transport }: { transport: Transport }) {
       setStatus(next);
       setTaskSnapshotAt(Date.now());
     } catch (error) {
-      if (!quiet && active.current === id) setRows((current) => [...current, metaRow('error', `无法读取状态：${code(error)}`, `Could not load status: ${code(error)}`)]);
+      if (active.current === id) setRows((current) => [...current, metaRow('error', `无法读取状态：${code(error)}`, `Could not load status: ${code(error)}`)]);
     }
   }, [client]);
-  refreshTaskStatus.current = (id) => {
-    if (taskStatusRefreshInFlight.current) return;
-    taskStatusRefreshInFlight.current = true;
-    void refreshStatus(id, true).finally(() => { taskStatusRefreshInFlight.current = false; });
-  };
-
-  useEffect(() => () => {
-    if (taskRefreshTimer.current !== undefined) clearTimeout(taskRefreshTimer.current);
-  }, [sessionId]);
 
   // 待答请求保留在所属会话中，切换前台会话时不清除。
   // 只有该会话轮次结束、取消或 Host 重启时才清理请求。

@@ -667,6 +667,24 @@ test('/status does not present a completed task as active and labels a missing l
   assert.match(activeRunBudgetSegment({ running: true, task: null }, 'zh'), /Run 预算准备中/);
 });
 
+test('/status ignores a previous task snapshot until the current progress carries its budget', options, () => {
+  const previous = {
+    modelCalls: 11, maxModelCalls: 64, timeoutMs: 1_800_000, interactionWaitTimeoutMs: 43_200_000,
+    interactionWaitMs: 90_000, executionElapsedMs: 31_000, executionPaused: false, startedAt: '2026-10-30T23:00:00.000Z',
+  };
+  const startedAt = Date.parse('2026-10-31T00:00:00.000Z');
+  const initializing = activeRunBudgetSegment({ running: true, task: previous, taskLimits: { maxModelCalls: 64 }, progress: {
+    phase: 'preparing', startedAt, modelCalls: 0,
+  } }, 'en');
+  assert.match(initializing, /model calls 0\/64 · run budget initializing/);
+
+  const current = { ...previous, modelCalls: 2, startedAt: '2026-10-31T00:00:00.000Z' };
+  const active = activeRunBudgetSegment({ running: true, task: previous, progress: {
+    phase: 'model_request', startedAt, modelCalls: 2, task: current,
+  } }, 'en');
+  assert.match(active, /model calls 2\/64/);
+});
+
 test('the metadata line shortens the workspace path and keeps the interrupt hint when narrow', options, () => {
   const status = {
     mode: 'minimal', pendingMode: null, policy: 'ask', policySource: 'session', tools: ['a', 'b', 'c'], eventCount: 1234,
