@@ -216,15 +216,21 @@ try {
   const documentMedia = createMediaStore({ boundary: process.cwd() }, 'document-install-probe');
   const documentKernel = createKernel({ config: createConfig({ user: { boundary: process.cwd() } }), session: documentSession });
   const unregisterDocument = createReadDocumentPlugin({ media: documentMedia, supportsImages: () => true }).setup(documentKernel);
+  const readDocumentStep = async (step, options) => {
+    console.log('read_document: ' + step + ': start');
+    const result = await documentKernel.call('read_document', options);
+    console.log('read_document: ' + step + ': complete');
+    return result;
+  };
   try {
     for (const format of ['pdf', 'docx', 'xlsx', 'pptx']) {
-      const response = await documentKernel.call('read_document', { path: 'sample.' + format });
+      const response = await readDocumentStep(format, { path: 'sample.' + format });
       const parsed = JSON.parse(response);
       if (parsed.format !== format || !parsed.chunks.some(chunk => chunk.text.includes('Installed ' + format.toUpperCase() + ' text'))) {
         throw new Error('the installed read_document parser failed for ' + format);
       }
     }
-    const rendered = await documentKernel.call('read_document', { path: 'sample.pdf', renderPage: 1 });
+    const rendered = await readDocumentStep('pdf renderPage 1', { path: 'sample.pdf', renderPage: 1 });
     const image = rendered.images?.[0];
     if (image?.source !== 'document' || (await sharp(await documentMedia.read(image)).metadata()).format !== 'png') {
       throw new Error('the installed PDF renderer did not return a persistent page image');
@@ -330,7 +336,11 @@ if (JSON.stringify(hits).includes('LIGULE-INSTALL-NEEDLE') === false) throw new 
 `, 'utf8');
 
 const probe = spawnSync(process.execPath, ['probe.mjs'], { cwd: consumer, env, encoding: 'utf8' });
-if (probe.status !== 0) throw new Error(`the installed package failed its own probe: ${(probe.stderr ?? '').slice(0, 500)}`);
+if (probe.status !== 0) {
+  const documentSteps = (probe.stdout ?? '').split(/\r?\n/u).filter(line => line.startsWith('read_document:')).slice(-8).join('\n');
+  const diagnosticTail = (probe.stderr ?? '').slice(-500);
+  throw new Error(`the installed package failed its own probe (status ${probe.status}):\n${[documentSteps, diagnosticTail].filter(Boolean).join('\n')}`);
+}
 for (const line of probe.stdout.trim().split('\n')) readings.push(line);
 
 const mcpProject = join(consumer, 'mcp-project');
