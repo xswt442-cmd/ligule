@@ -5,6 +5,12 @@ import { withTuiHost, waitFor } from './helpers/tui-host.js';
 test('status and notifications expose phase changes, approval waits, counts, and idle cleanup per session', async () => {
   await withTuiHost(async ({ client, sessionId, notifications }) => {
     const run = client.request('run.start', { sessionId, input: 'wait for the model' });
+    await waitFor(() => notifications.some((message) => message.notify === 'progress'
+      && message.progress?.phase === 'preparing' && message.progress?.task !== undefined));
+    const initializedProgress = notifications.find((message) => message.notify === 'progress'
+      && message.progress?.phase === 'preparing' && message.progress?.task !== undefined);
+    assert.equal(initializedProgress.progress.task.maxModelCalls, 2);
+    assert.equal(initializedProgress.progress.task.modelCalls, 0);
     await waitFor(() => notifications.some((message) => message.notify === 'progress' && message.progress?.phase === 'model_request'));
     const activeProgress = notifications.find((message) => message.notify === 'progress' && message.progress?.phase === 'model_request');
     const duringRequest = await client.request('status.get', { sessionId });

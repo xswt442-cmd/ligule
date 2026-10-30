@@ -181,9 +181,8 @@ export function activeRunBudgetSegment(status: TuiStatus | null, locale: Locale 
   const task = status.progress === null || status.progress === undefined ? status.task : status.progress.task;
   if (task === undefined || task === null) {
     const calls = status.progress?.modelCalls;
-    const maximum = status.taskLimits?.maxModelCalls;
-    const usage = Number.isSafeInteger(calls) && Number.isSafeInteger(maximum)
-      ? locale === 'en' ? `model calls ${calls}/${maximum}` : `模型调用 ${calls}/${maximum}`
+    const usage = Number.isSafeInteger(calls)
+      ? locale === 'en' ? `model calls ${calls}` : `模型调用 ${calls}`
       : '';
     const preparing = locale === 'en' ? 'run budget initializing' : 'Run 预算准备中';
     return ` · ${[usage, preparing].filter(Boolean).join(' · ')}`;

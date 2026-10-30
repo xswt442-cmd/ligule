@@ -257,10 +257,10 @@ export function App({ transport }: { transport: Transport }) {
   const taskSummary = taskSummaryOf(status?.task, status?.taskLimits, progress, taskSnapshotAt, tick);
   const taskLabel = taskSummary !== null
     ? ` · ${taskSummaryLabelOf(taskSummary, language)}`
-    : status?.running === true && status.taskLimits !== undefined
-      ? ` · ${t('Run 模型调用', 'Run model calls')} ${progress?.modelCalls ?? 0}/${status.taskLimits.maxModelCalls} · ${t('预算准备中', 'budget initializing')}`
+    : status?.running === true
+      ? ` · ${t('Run 预算准备中', 'run budget initializing')}`
       : '';
-  const fallbackCallsLabel = taskSummary === null && !(status?.running === true && status.taskLimits !== undefined)
+  const fallbackCallsLabel = taskSummary === null
     ? ` · ${progress?.modelCalls ?? 0} ${t('次模型调用', 'model calls')}` : '';
   const progressLabel = `${progressPhase || t('运行中', 'Running')} · ${progressIdleSeconds}${t('秒无新进展', 's without progress')}${fallbackCallsLabel} · ${progress?.toolCalls ?? 0} ${t('个工具调用', 'tool calls')}${status?.outputTokens === null || status?.outputTokens === undefined ? '' : ` · ${status.outputTokens} ${t('个输出token', 'output tokens')}`}${taskLabel}`;
   const panelTitle = useCallback((item: Panel<PanelProps>) => {

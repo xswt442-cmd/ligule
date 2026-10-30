@@ -2278,6 +2278,13 @@ export function createHost({
         ? undefined : createOutputSchemaContract(options.delegation.outputSchema);
       const budget = createTaskBudget(taskLimitsOf(config, state.loopModelCalls, options.delegation?.budget), options.signal);
       state.taskBudget = budget;
+      const progress = state.progress;
+      options.onProgress?.({
+        kind: 'phase',
+        phase: progress?.phase ?? 'preparing',
+        modelCalls: progress?.modelCalls ?? 0,
+        toolCalls: progress?.toolCalls ?? 0,
+      });
       const abortTask = () => state.running?.abort(budget.signal.reason);
       budget.signal.addEventListener('abort', abortTask, { once: true });
       if (budget.signal.aborted) abortTask();

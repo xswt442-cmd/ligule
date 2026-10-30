@@ -663,7 +663,7 @@ test('/status does not present a completed task as active and labels a missing l
     interactionWaitMs: 90_000, executionElapsedMs: 31_000, executionPaused: false,
   } }, 'zh'), '');
   assert.match(activeRunBudgetSegment({ running: true, task: null, taskLimits: { maxModelCalls: 64 }, progress: { modelCalls: 2 } }, 'en'),
-    /model calls 2\/64 · run budget initializing/);
+    /model calls 2 · run budget initializing/);
   assert.match(activeRunBudgetSegment({ running: true, task: null }, 'zh'), /Run 预算准备中/);
 });
 
@@ -676,7 +676,7 @@ test('/status ignores a previous task snapshot until the current progress carrie
   const initializing = activeRunBudgetSegment({ running: true, task: previous, taskLimits: { maxModelCalls: 64 }, progress: {
     phase: 'preparing', startedAt, modelCalls: 0,
   } }, 'en');
-  assert.match(initializing, /model calls 0\/64 · run budget initializing/);
+  assert.match(initializing, /model calls 0 · run budget initializing/);
 
   const current = { ...previous, modelCalls: 2, startedAt: '2026-10-31T00:00:00.000Z' };
   const active = activeRunBudgetSegment({ running: true, task: previous, progress: {
