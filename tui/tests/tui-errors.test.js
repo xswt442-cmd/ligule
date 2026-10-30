@@ -23,6 +23,11 @@ const actionableCodes = [
   'provider_stream_interrupted',
   'provider_finish_reason_invalid',
   'provider_tool_call_invalid',
+  'exec_temp_cleanup_failed',
+  'exec_script_snapshot_cleanup_failed',
+  'exec_sandbox_cleanup_failed',
+  'exec_sandbox_setup_failed',
+  'exec_termination_cleanup_failed',
   'provider_output_budget_invalid',
   'provider_output_budget_unsupported',
 ];

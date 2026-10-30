@@ -62,6 +62,26 @@ const FAILURE_TEXT: Readonly<Record<string, Readonly<Record<Locale, string>>>> =
     zh: '模型返回的工具调用缺少有效标识或名称，或标识重复。请检查模型服务兼容性。',
     en: 'The model returned a tool call with a missing or duplicate identity, or missing name. Check model service compatibility.',
   },
+  exec_temp_cleanup_failed: {
+    zh: '命令结束后无法清理私有临时目录。检查系统文件占用或权限，核对已完成操作后再决定是否重试。',
+    en: 'Ligule could not remove its private execution directory. Check OS file locks or permissions and inspect completed effects before retrying.',
+  },
+  exec_script_snapshot_cleanup_failed: {
+    zh: '命令结束后无法清理脚本快照。检查源文件所在目录的权限和占用，并核对已完成操作后再决定是否重试。',
+    en: 'Ligule could not remove the execution script snapshot. Check permissions and file locks in its source directory, then inspect completed effects before retrying.',
+  },
+  exec_sandbox_cleanup_failed: {
+    zh: '平台沙箱清理未能确认完成。检查操作系统权限或 ACL 状态，确认后再重试受限命令。',
+    en: 'Platform sandbox cleanup could not be confirmed. Check OS permissions or ACL state before retrying the restricted command.',
+  },
+  exec_sandbox_setup_failed: {
+    zh: '受限命令的操作系统沙箱未能初始化。检查当前平台的隔离能力与系统权限后重试。',
+    en: 'The operating-system sandbox for the restricted command could not be initialized. Check platform isolation support and OS permissions before retrying.',
+  },
+  exec_termination_cleanup_failed: {
+    zh: '进程是否已终止和临时资源清理均未确认。先检查进程状态和已完成操作，再决定是否重试。',
+    en: 'Process termination and temporary-resource cleanup are both unconfirmed. Check running processes and completed effects before retrying.',
+  },
   provider_output_budget_invalid: {
     zh: '输出预算无效。请把 model.outputTokens 设置为有效范围内的正整数。',
     en: 'The output budget is invalid. Set model.outputTokens to a positive integer within the supported range.',

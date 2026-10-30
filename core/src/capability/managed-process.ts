@@ -39,6 +39,7 @@ interface ManagedProcessEntry {
   stopSignal?: AbortSignal;
   exitCode?: number;
   failure?: string;
+  terminationPending?: boolean;
   cleanupPending?: boolean;
   terminalOrder?: number;
 }
@@ -47,14 +48,23 @@ function errorCodeOf(error: unknown): unknown {
   return typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
 }
 
-function completionMayNeedCleanup(error: unknown): boolean {
+function failureState(error: unknown): Pick<ManagedProcessEntry, 'terminationPending' | 'cleanupPending'> {
   const code = errorCodeOf(error);
-  return code !== 'exec_cancelled' && code !== 'exec_process_interrupted' && code !== 'exec_spawn_failed';
+  if (code === 'exec_termination_cleanup_failed') {
+    return { terminationPending: true, cleanupPending: true };
+  }
+  if (code === 'exec_temp_cleanup_failed' || code === 'exec_script_snapshot_cleanup_failed' || code === 'exec_sandbox_cleanup_failed') {
+    return { terminationPending: false, cleanupPending: true };
+  }
+  if (code === 'exec_cancelled' || code === 'exec_process_interrupted' || code === 'exec_spawn_failed' || code === 'exec_sandbox_setup_failed') {
+    return { terminationPending: false, cleanupPending: false };
+  }
+  return { terminationPending: true, cleanupPending: false };
 }
 
 function terminalEntry(entry: ManagedProcessEntry): boolean {
   return entry.status === 'stopped' || entry.status === 'exited'
-    || entry.status === 'failed' && entry.cleanupPending !== true;
+    || entry.status === 'failed' && entry.terminationPending !== true && entry.cleanupPending !== true;
 }
 
 function removeStopAbortListener(entry: ManagedProcessEntry): void {
@@ -178,7 +188,8 @@ function view(entry: ManagedProcessEntry) {
   return {
     id: entry.id,
     status: entry.status,
-    terminationPending: entry.cleanupPending === true,
+    terminationPending: entry.terminationPending === true,
+    cleanupPending: entry.cleanupPending === true,
     ready: entry.status === 'running',
     port: entry.port,
     ...(entry.exitCode === undefined ? {} : { exitCode: entry.exitCode }),
@@ -197,7 +208,9 @@ function stopEntry(entry: ManagedProcessEntry, onTerminal?: () => void): Promise
   let stopping: Promise<void>;
   stopping = (async () => {
     let lastError: unknown;
-    for (let attempt = 0; attempt < MAX_SETTLED_STOP_FAILURES; attempt += 1) {
+    let settledStopFailures = 0;
+    let confirmedExitCleanupPending = entry.cleanupPending === true && entry.terminationPending !== true;
+    while (settledStopFailures < MAX_SETTLED_STOP_FAILURES) {
       if (terminalEntry(entry)) {
         onTerminal?.();
         return;
@@ -209,6 +222,7 @@ function stopEntry(entry: ManagedProcessEntry, onTerminal?: () => void): Promise
         void stopRequest.then(() => {
           if (entry.stopRequest === stopRequest) entry.stopRequest = undefined;
           removeStopAbortListener(entry);
+          entry.terminationPending = false;
           entry.cleanupPending = false;
           if (entry.status !== 'exited') entry.status = 'stopped';
           onTerminal?.();
@@ -223,19 +237,21 @@ function stopEntry(entry: ManagedProcessEntry, onTerminal?: () => void): Promise
         | { readonly type: 'failed'; readonly error: unknown }
         | { readonly type: 'completion_failure'; readonly error: unknown }
         | { readonly type: 'timeout' };
+      const stopOutcome = stopRequest.then(
+        () => ({ type: 'stopped' as const }),
+        (error: unknown) => ({ type: 'failed' as const, error }),
+      );
+      const completionOutcome = confirmedExitCleanupPending ? undefined : entry.lease.completion.then(
+        () => ({ type: 'completion' as const }),
+        (error: unknown) => errorCodeOf(error) === 'exec_cancelled'
+          ? ({ type: 'completion' as const })
+          : ({ type: 'completion_failure' as const, error }),
+      );
       try {
         outcome = await Promise.race([
-          stopRequest.then(
-            () => ({ type: 'stopped' as const }),
-            (error: unknown) => ({ type: 'failed' as const, error }),
-          ),
-          entry.lease.completion.then(
-            () => ({ type: 'completion' as const }),
-            (error: unknown) => errorCodeOf(error) === 'exec_cancelled'
-              ? ({ type: 'completion' as const })
-              : ({ type: 'completion_failure' as const, error }),
-          ),
+          stopOutcome,
           timeout,
+          ...(completionOutcome === undefined ? [] : [completionOutcome]),
         ]);
       } finally {
         if (timer !== undefined) clearTimeout(timer);
@@ -243,6 +259,7 @@ function stopEntry(entry: ManagedProcessEntry, onTerminal?: () => void): Promise
       if (outcome.type === 'stopped' || outcome.type === 'completion') {
         removeStopAbortListener(entry);
         if (!terminalEntry(entry)) {
+          entry.terminationPending = false;
           entry.cleanupPending = false;
           entry.status = 'stopped';
         }
@@ -250,9 +267,17 @@ function stopEntry(entry: ManagedProcessEntry, onTerminal?: () => void): Promise
         return;
       }
       if (outcome.type === 'completion_failure') {
+        const pending = failureState(outcome.error);
+        if (pending.cleanupPending === true && pending.terminationPending !== true) {
+          entry.status = 'failed';
+          entry.failure = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+          Object.assign(entry, pending);
+          confirmedExitCleanupPending = true;
+          continue;
+        }
         entry.status = 'failed';
         entry.failure = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
-        entry.cleanupPending = completionMayNeedCleanup(outcome.error);
+        Object.assign(entry, pending);
         onTerminal?.();
         throw outcome.error;
       }
@@ -267,9 +292,13 @@ function stopEntry(entry: ManagedProcessEntry, onTerminal?: () => void): Promise
         // The existing Lease.stop remains in flight; later close/stop calls reuse it instead of starting another request.
         break;
       }
-      if (attempt + 1 < MAX_SETTLED_STOP_FAILURES) await delay(STOP_RETRY_DELAY_MS);
+      settledStopFailures += 1;
+      if (settledStopFailures < MAX_SETTLED_STOP_FAILURES) await delay(STOP_RETRY_DELAY_MS);
     }
-    entry.cleanupPending = true;
+    if (confirmedExitCleanupPending) {
+      entry.terminationPending = false;
+      entry.cleanupPending = true;
+    } else Object.assign(entry, failureState(lastError));
     entry.status = 'failed';
     entry.failure = lastError instanceof Error ? lastError.message : String(lastError);
     onTerminal?.();
@@ -324,6 +353,7 @@ export function createManagedProcessRegistry(options: ManagedProcessRegistryOpti
       removeStopAbortListener(entry);
       if (entry.status === 'stopping' || entry.status === 'stopped') return;
       entry.exitCode = exitCode;
+      entry.terminationPending = false;
       entry.cleanupPending = false;
       entry.status = 'exited';
       pruneTerminalEntries();
@@ -332,7 +362,7 @@ export function createManagedProcessRegistry(options: ManagedProcessRegistryOpti
       if (entry.status === 'stopping' || entry.status === 'stopped') return;
       entry.status = 'failed';
       entry.failure = error instanceof Error ? error.message : String(error);
-      entry.cleanupPending = completionMayNeedCleanup(error);
+      Object.assign(entry, failureState(error));
       pruneTerminalEntries();
     });
   }

@@ -13,7 +13,7 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 - `[loop].maxParallelTools` 限制范围为 1–32，默认 4，防止一次模型响应启动不受限的工具并发。
 - `managed_process` 对非 2xx 响应和请求失败使用有界退避；HTTP 2xx 立即就绪，用户取消或所属进程退出会停止探测。
 - `fetch` 的同源重定向只能连接首次策略检查覆盖的 IP；特殊用途地址按 IANA 转发与全球可达属性执行审批或拒绝，截断提示按保留字节数计算。
-- `managed_process` 无法确认进程已停止时会返回失败并标记 `terminationPending`；终态历史最多保留 128 项，活性未知的进程不会被淘汰。
+- `managed_process` 分别报告 `terminationPending` 与 `cleanupPending`，区分进程活性未知和进程结束后的平台资源清理失败；两者可同时为 true，关闭或显式停止会重试可重试的资源清理，未确认状态的条目不会被淘汰。
 - 本地 Telemetry 遇到未知 Manifest 文件时会保留原文件、停用当前写入器并报告稳定错误码；Host 日志不记录路径或正文。
 - 交付文件卡片可查看状态、核验文件摘要、预览安全文本或静态图片、复制相对路径，并由可信原生界面在文件夹中定位。
 - 共享 Host 支持持久委派回执与请求去重，外控在重启后可按 `runId` 查询确定的终态结果；工作区清理新增分批 Session 引用核查与受管浏览器目录租约保护。
@@ -38,7 +38,7 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 - `[loop].maxParallelTools` is capped at 1–32 (default 4) to prevent one model response from starting unbounded tool concurrency.
 - `managed_process` uses bounded backoff for non-2xx responses and request failures; HTTP 2xx is immediate, and cancellation or owned-process exit stops probing.
 - Same-origin `fetch` redirects can connect only to IPs covered by the initial Policy check; IANA forwardability and global reachability determine whether special-purpose addresses require approval or are denied, and truncation reports retained response bytes.
-- `managed_process` reports failure with `terminationPending` when process termination cannot be confirmed; terminal history retains at most 128 entries and never evicts entries with unknown liveness.
+- `managed_process` reports `terminationPending` and `cleanupPending` separately for unknown process liveness and failed platform-resource cleanup after exit; both can be true. Close and explicit stop retry cleanup when retryable; entries with either unresolved state are not evicted.
 - Local Telemetry preserves unknown Manifest files, disables the current writer, and reports a stable error code; Host logs omit paths and content.
 - File-delivery cards verify current file digests, show status, preview bounded text or static images, copy relative paths, and reveal files through the trusted native bridge.
 - The shared Host supports durable delegation receipts and deduplication; external controllers can query stored terminal results by `runId` after restart. Workspace cleanup now pages Session references and protects managed browser directories with owner leases.

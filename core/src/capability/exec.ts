@@ -165,6 +165,51 @@ function errorCode(error: unknown): unknown {
   return typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
 }
 
+export function settleManagedCompletion(
+  completion: Promise<number | null>,
+  releaseResources: () => Promise<void>,
+): Promise<number> {
+  const failAfterCleanup = async (error: unknown): Promise<never> => {
+    try { await releaseResources(); }
+    catch (cleanupError) {
+      if (cleanupError instanceof KernelError
+        && (cleanupError.code === 'exec_temp_cleanup_failed' || cleanupError.code === 'exec_script_snapshot_cleanup_failed')) {
+        const completionCode = errorCode(error);
+        const cause = new AggregateError([error, cleanupError], 'process completion and temporary-resource cleanup both failed');
+        if (completionCode === 'exec_sandbox_cleanup_failed') {
+          throw new KernelError(completionCode, {
+            cause,
+            detail: error instanceof KernelError ? error.detail : 'Guardian cleanup and host temporary-resource cleanup both failed',
+          });
+        }
+        if (completionCode === 'exec_termination_cleanup_failed') {
+          throw new KernelError(completionCode, {
+            cause,
+            detail: error instanceof KernelError ? error.detail : 'process termination and temporary-resource cleanup are both unconfirmed',
+          });
+        }
+        if (completionCode === 'exec_guardian_failed' || completionCode === 'exec_guardian_protocol' || completionCode === 'exec_terminate_failed') {
+          throw new KernelError('exec_termination_cleanup_failed', {
+            cause,
+            detail: 'the command may still be running and temporary-resource cleanup also failed',
+          });
+        }
+        throw new KernelError(cleanupError.code, {
+          cause,
+          detail: cleanupError.detail,
+        });
+      }
+      throw cleanupError;
+    }
+    throw error;
+  };
+  return completion.then(async (exitCode) => {
+    if (exitCode === null) return failAfterCleanup(new KernelError('exec_process_interrupted'));
+    await releaseResources();
+    return exitCode;
+  }, failAfterCleanup);
+}
+
 function quoteScriptPath(path: string, kind: ShellSelection['kind']): string {
   return kind === 'powershell' ? `'${path.replaceAll("'", "''")}'` : `'${path.replaceAll("'", "'\\''")}'`;
 }
@@ -527,26 +572,32 @@ async function runExec<TResult>(
     if (onManagedProcess !== undefined) {
       let cleanup: Promise<void> | undefined;
       const releaseResources = (): Promise<void> => {
-        cleanup ??= (async () => {
+        if (cleanup !== undefined) return cleanup;
+        const attempt = Promise.resolve().then(async () => {
           if (privateTempDir !== undefined) {
-            await rm(privateTempDir, { recursive: true, force: true });
+            try { await rm(privateTempDir, { recursive: true, force: true }); }
+            catch (cause) {
+              throw new KernelError('exec_temp_cleanup_failed', { cause, detail: 'the private temporary directory could not be removed' });
+            }
             privateTempDir = undefined;
           }
           if (scriptSnapshot !== undefined) {
-            await rm(scriptSnapshot, { force: true });
+            try { await rm(scriptSnapshot, { force: true }); }
+            catch (cause) {
+              throw new KernelError('exec_script_snapshot_cleanup_failed', { cause, detail: 'the private script snapshot could not be removed' });
+            }
             scriptSnapshot = undefined;
           }
-        })();
-        return cleanup;
+        });
+        cleanup = attempt;
+        void attempt.catch(() => {
+          if (cleanup === attempt) cleanup = undefined;
+        });
+        return attempt;
       };
-      const managedCompletion = completion.then(async (exitCode) => {
-        if (exitCode === null) throw new KernelError('exec_process_interrupted');
-        await releaseResources();
-        return exitCode;
-      }, async (error: unknown) => {
-        await releaseResources();
-        throw error;
-      });
+      const managedCompletion = settleManagedCompletion(completion, releaseResources);
+      const cleanupFailure = (error: unknown): boolean => error instanceof KernelError
+        && (error.code === 'exec_temp_cleanup_failed' || error.code === 'exec_script_snapshot_cleanup_failed');
       const lease: ManagedExecLease = {
         completion: managedCompletion,
         logs: () => {
@@ -560,7 +611,17 @@ async function runExec<TResult>(
           }
           try { await managedCompletion; }
           catch (error) {
-            if (!(error instanceof KernelError) || error.code !== 'exec_cancelled') throw error;
+            if (error instanceof KernelError && error.code === 'exec_sandbox_cleanup_failed') {
+              try { await releaseResources(); }
+              catch (cleanupError) {
+                throw new KernelError('exec_sandbox_cleanup_failed', {
+                  cause: new AggregateError([error, cleanupError], 'Guardian cleanup and temporary-resource cleanup both failed'),
+                  detail: error.detail,
+                });
+              }
+              throw error;
+            }
+            if (!(error instanceof KernelError) || (error.code !== 'exec_cancelled' && !cleanupFailure(error))) throw error;
           }
           await releaseResources();
         },
@@ -624,7 +685,7 @@ async function runExec<TResult>(
         try {
           await rm(privateTempDir, { recursive: true, force: true });
         } catch (error) {
-          throw new KernelError('exec_sandbox_cleanup_failed', { cause: error, detail: 'the private temporary directory could not be removed' });
+          throw new KernelError('exec_temp_cleanup_failed', { cause: error, detail: 'the private temporary directory could not be removed' });
         }
       }
       if (scriptSnapshot !== undefined) {

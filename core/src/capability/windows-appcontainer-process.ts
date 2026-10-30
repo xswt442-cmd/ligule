@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { KernelError } from '../kernel/error.js';
 
 type Koffi = typeof import('koffi')['default'];
 export type NativeHandle = number | bigint;
@@ -209,6 +210,7 @@ export async function runAppContainerCommand(command: AppContainerCommand): Prom
   let processHandle: NativeHandle | undefined;
   let threadHandle: NativeHandle | undefined;
   let created = false;
+  let creationAttempted = false;
   try {
     const caps = allocate(api.SECURITY_CAPABILITIES, 1) as Buffer;
     koffi.encode(caps, api.SECURITY_CAPABILITIES, { AppContainerSid: command.identity.sid, Capabilities: NULL, CapabilityCount: 0, Reserved: 0 });
@@ -246,6 +248,7 @@ export async function runAppContainerCommand(command: AppContainerCommand): Prom
     const line = [command.executable, ...command.argv].map(quoteWindowsArgument).join(' ');
     const commandLine = Buffer.from(`${line}\0`, 'utf16le');
     const env = environmentBlock(command.environment);
+    creationAttempted = true;
     if ((api.createProcess(command.executable, commandLine, NULL, NULL, 1, CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT, env, command.cwd, startup, processInfo) as number) === 0) throw new Error(`CreateProcessW failed with Win32 error ${api.lastError() as number}`);
     created = true;
     const processValues = koffi.decode(processInfo, api.PROCESS_INFORMATION) as { hProcess: NativeHandle; hThread: NativeHandle };
@@ -272,16 +275,73 @@ export async function runAppContainerCommand(command: AppContainerCommand): Prom
     return exitCode;
   } catch (error) {
     primaryFailure = error;
-    if (created && !isNull(processHandle)) {
-      if ((api.terminateProcess(processHandle, 1) as number) === 0) throw new Error(`TerminateProcess failed while cleaning up the suspended command (Win32 error ${api.lastError() as number})`, { cause: error });
+    if (created) {
+      if (isNull(processHandle)) {
+        const failure = new KernelError('exec_terminate_failed', { cause: error, detail: 'the AppContainer child was created without a usable process handle' });
+        primaryFailure = failure;
+        throw failure;
+      }
+      let current: number;
+      try { current = api.wait(processHandle, 0) as number; }
+      catch (cause) {
+        const failure = new KernelError('exec_terminate_failed', {
+          cause: new AggregateError([error, cause]), detail: 'the AppContainer child exit state could not be checked',
+        });
+        primaryFailure = failure;
+        throw failure;
+      }
+      if (current === WAIT_OBJECT_0) {
+        const interrupted = new KernelError('exec_process_interrupted', { cause: error, detail: 'the AppContainer child exited while the command result was being collected' });
+        primaryFailure = interrupted;
+        throw interrupted;
+      }
+      if (current !== WAIT_TIMEOUT) {
+        const failure = new KernelError('exec_terminate_failed', { cause: error, detail: `WaitForSingleObject failed while checking the AppContainer child (${current})` });
+        primaryFailure = failure;
+        throw failure;
+      }
+      let terminated: number;
+      try { terminated = api.terminateProcess(processHandle, 1) as number; }
+      catch (cause) {
+        const failure = new KernelError('exec_terminate_failed', {
+          cause: new AggregateError([error, cause]), detail: 'the AppContainer child could not be terminated',
+        });
+        primaryFailure = failure;
+        throw failure;
+      }
+      if (terminated === 0) {
+        const failure = new KernelError('exec_terminate_failed', { cause: error, detail: `TerminateProcess failed while cleaning up the AppContainer child (Win32 error ${api.lastError() as number})` });
+        primaryFailure = failure;
+        throw failure;
+      }
       for (;;) {
-        const state = api.wait(processHandle, 0) as number;
+        let state: number;
+        try { state = api.wait(processHandle, 0) as number; }
+        catch (cause) {
+          const failure = new KernelError('exec_terminate_failed', {
+            cause: new AggregateError([error, cause]), detail: 'the AppContainer child exit could not be confirmed',
+          });
+          primaryFailure = failure;
+          throw failure;
+        }
         if (state === WAIT_OBJECT_0) break;
-        if (state !== WAIT_TIMEOUT) throw new Error(`WaitForSingleObject failed while cleaning up the command (result ${state})`, { cause: error });
+        if (state !== WAIT_TIMEOUT) {
+          const failure = new KernelError('exec_terminate_failed', { cause: error, detail: `WaitForSingleObject failed while cleaning up the AppContainer child (${state})` });
+          primaryFailure = failure;
+          throw failure;
+        }
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
+      const interrupted = new KernelError('exec_process_interrupted', { cause: error, detail: 'the AppContainer child was terminated after a command failure' });
+      primaryFailure = interrupted;
+      throw interrupted;
     }
-    throw error;
+    const failure = new KernelError(creationAttempted ? 'exec_spawn_failed' : 'exec_sandbox_setup_failed', {
+      cause: error,
+      detail: error instanceof Error ? error.message : undefined,
+    });
+    primaryFailure = failure;
+    throw failure;
   } finally {
     if (!isNull(threadHandle) && (api.closeHandle(threadHandle as NativeHandle) as number) === 0) cleanFailures.push(new Error(`CloseHandle(thread) failed with Win32 error ${api.lastError() as number}`));
     if (!isNull(processHandle) && (api.closeHandle(processHandle as NativeHandle) as number) === 0) cleanFailures.push(new Error(`CloseHandle(process) failed with Win32 error ${api.lastError() as number}`));
@@ -296,6 +356,13 @@ export async function runAppContainerCommand(command: AppContainerCommand): Prom
         cleanFailures.push(new Error('Koffi allocation could not be released', { cause: error }));
       }
     }
-    if (cleanFailures.length > 0) throw new AggregateError(primaryFailure === undefined ? cleanFailures : [primaryFailure, ...cleanFailures], 'AppContainer launch or cleanup failed');
+    if (cleanFailures.length > 0) {
+      const code = primaryFailure instanceof KernelError && primaryFailure.code === 'exec_terminate_failed'
+        ? 'exec_termination_cleanup_failed' : 'exec_sandbox_cleanup_failed';
+      throw new KernelError(code, {
+        cause: new AggregateError(primaryFailure === undefined ? cleanFailures : [primaryFailure, ...cleanFailures], 'AppContainer launch or cleanup failed'),
+        detail: 'AppContainer process or platform resources could not be fully cleaned',
+      });
+    }
   }
 }

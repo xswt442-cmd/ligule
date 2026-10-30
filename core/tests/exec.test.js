@@ -1,7 +1,7 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -9,7 +9,8 @@ import {
   createDecisionChain, createConfig, createKernel, createPermissionContext, createSessionLog,
   execTool, resolveShell, withNativeExitCode,
 } from '../dist/index.js';
-import { decode } from '../dist/capability/exec.js';
+import { decode, runManagedExec, settleManagedCompletion } from '../dist/capability/exec.js';
+import { KernelError } from '../dist/kernel/error.js';
 import { bindScript } from '../dist/capability/script-binding.js';
 import { probeLinuxSandboxIsolation } from '../dist/capability/sandbox-linux.js';
 import { setTrusted } from '../dist/kernel/workspace-trust.js';
@@ -41,6 +42,20 @@ async function run(command, limits, signal, permission = fullAccess) {
     shell: withNativeExitCode(shell, command),
     ...(scriptBinding === undefined ? {} : { scriptBinding }),
   });
+}
+
+async function runManagedNodeScript(workspace, name, source, permission, onManagedProcess) {
+  const scriptPath = join(workspace, name);
+  writeFileSync(scriptPath, source);
+  const command = `node "${scriptPath.replaceAll('\\', '/')}"`;
+  const scriptBinding = await bindScript({ command, shell, boundary: workspace, workspaceRoot: workspace, cwd: workspace, permission });
+  const managedShell = shell.kind === 'bash'
+    ? { ...shell, tail: '; __ligule_test_exit=$?; exit "$__ligule_test_exit"' }
+    : withNativeExitCode(shell, command);
+  return runManagedExec({ command }, {
+    config: { boundary: workspace }, permission, shell: managedShell,
+    ...(scriptBinding === undefined ? {} : { scriptBinding }),
+  }, onManagedProcess);
 }
 
 function processIsRunning(pid) {
@@ -156,6 +171,127 @@ test('the configured execution timeout terminates a command with a distinct erro
     (error) => error.code === 'exec_timeout',
   );
   assert.ok(Date.now() - started < 5000, 'the timeout should settle long before the command would');
+});
+
+test('managed completion releases private resources exactly once when the exit status is null', async () => {
+  let cleanupCalls = 0;
+  await assert.rejects(
+    settleManagedCompletion(Promise.resolve(null), async () => { cleanupCalls += 1; }),
+    { code: 'exec_process_interrupted' },
+  );
+  assert.equal(cleanupCalls, 1);
+});
+
+test('a null managed completion exposes cleanup failure and retains the interruption cause', async () => {
+  let cleanupCalls = 0;
+  const cleanupFailure = new KernelError('exec_script_snapshot_cleanup_failed');
+  await assert.rejects(
+    settleManagedCompletion(Promise.resolve(null), async () => {
+      cleanupCalls += 1;
+      throw cleanupFailure;
+    }),
+    error => {
+      assert.equal(error.code, 'exec_script_snapshot_cleanup_failed');
+      assert.ok(error.cause instanceof AggregateError);
+      assert.deepEqual(error.cause.errors.map(item => item.code), [
+        'exec_process_interrupted', 'exec_script_snapshot_cleanup_failed',
+      ]);
+      return true;
+    },
+  );
+  assert.equal(cleanupCalls, 1);
+});
+
+test('managed completion cleans up rejected exit states without erasing their error code', async () => {
+  for (const code of ['exec_cancelled', 'exec_process_interrupted', 'exec_guardian_failed', 'exec_sandbox_cleanup_failed']) {
+    let cleanupCalls = 0;
+    const failure = new KernelError(code);
+    await assert.rejects(
+      settleManagedCompletion(Promise.reject(failure), async () => { cleanupCalls += 1; }),
+      { code },
+    );
+    assert.equal(cleanupCalls, 1, `${code} should still release private resources exactly once`);
+  }
+});
+
+test('managed exec reports and retries script-snapshot cleanup after an interrupted shell exit', {
+  timeout: 15_000,
+  skip: process.platform !== 'linux' || process.getuid() === 0 ? 'requires an unprivileged Linux Guardian' : false,
+}, async (t) => {
+  const workspace = mkdtempSync(join(directory, 'managed-interrupted-'));
+  t.after(() => {
+    chmodSync(workspace, 0o700);
+    rmSync(workspace, { recursive: true, force: true });
+  });
+  const scriptPath = join(workspace, 'interrupt.js');
+  let lease;
+  let completionError;
+  await runManagedNodeScript(workspace, 'interrupt.js',
+    "require('node:fs').chmodSync(__dirname, 0o500); process.kill(process.ppid, 'SIGTERM'); setInterval(() => {}, 1000);\n",
+    fullAccess, async (managedLease) => {
+      lease = managedLease;
+      const watchdog = setTimeout(() => { void managedLease.stop().catch(() => undefined); }, 3_000);
+      try {
+        await managedLease.completion;
+      } catch (error) {
+        completionError = error;
+      } finally {
+        clearTimeout(watchdog);
+      }
+    });
+
+  assert.equal(completionError.code, 'exec_script_snapshot_cleanup_failed');
+  assert.ok(completionError.cause instanceof AggregateError);
+  assert.ok(completionError.cause.errors.some((error) => error.code === 'exec_process_interrupted'));
+  chmodSync(workspace, 0o700);
+  assert.equal(readdirSync(workspace).filter((name) => name !== 'interrupt.js').length, 1, 'the failed deletion must leave the snapshot for retry');
+
+  await lease.stop();
+  assert.deepEqual(readdirSync(workspace), ['interrupt.js'], 'a later stop must retry and confirm snapshot removal');
+});
+
+test('managed exec retries private temporary-directory cleanup after the process exits', {
+  timeout: 15_000,
+  skip: process.platform !== 'linux' || process.getuid() === 0 ? 'requires an unprivileged Linux sandbox' : false,
+}, async (t) => {
+  const probe = await probeLinuxSandboxIsolation();
+  if (!probe.available) return t.skip(probe.reason);
+
+  const workspace = mkdtempSync(join(directory, 'managed-temp-cleanup-'));
+  const hostTempRoot = mkdtempSync(join(directory, 'managed-host-temp-'));
+  const previousTmpdir = process.env.TMPDIR;
+  process.env.TMPDIR = hostTempRoot;
+  t.after(() => {
+    if (previousTmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previousTmpdir;
+    if (existsSync(hostTempRoot)) {
+      for (const name of readdirSync(hostTempRoot)) chmodSync(join(hostTempRoot, name), 0o700);
+      rmSync(hostTempRoot, { recursive: true, force: true });
+    }
+    rmSync(workspace, { recursive: true, force: true });
+  });
+  const permission = createPermissionContext('workspace-write', 'disabled', {
+    filesystemRead: 'partial', filesystemWrite: 'partial', network: 'full', process: 'full',
+  }, { workspaceTrusted: true });
+  let lease;
+  const cleanupError = await runManagedNodeScript(workspace, 'cleanup.js',
+    "const fs = require('node:fs'); fs.writeFileSync('/tmp/ligule-cleanup-canary', 'test'); fs.chmodSync('/tmp', 0o500);\n",
+    permission, async (managedLease) => {
+      lease = managedLease;
+      try { await managedLease.completion; }
+      catch (error) { return error; }
+      return undefined;
+    });
+
+  assert.equal(cleanupError.code, 'exec_temp_cleanup_failed');
+  const tempEntries = readdirSync(hostTempRoot);
+  assert.equal(tempEntries.length, 1);
+  const privateTemp = join(hostTempRoot, tempEntries[0]);
+  assert.equal(statSync(privateTemp).mode & 0o777, 0o500);
+  chmodSync(privateTemp, 0o700);
+  await lease.stop();
+  assert.equal(existsSync(privateTemp), false);
+  assert.deepEqual(readdirSync(workspace), ['cleanup.js']);
 });
 
 test('execution timeout configuration stays within its fixed bound', async () => {

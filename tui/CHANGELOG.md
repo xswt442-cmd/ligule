@@ -17,7 +17,7 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 - `managed_process` 仅在健康检查 URL 返回 HTTP 2xx 后报告就绪；启动前的回环端口检查覆盖 IPv4 与 IPv6。
 - `managed_process` 对非 2xx 响应和请求失败使用有界退避；HTTP 2xx 立即就绪，用户取消或所属进程退出会停止探测。
 - `fetch` 的同源重定向只能连接首次策略检查覆盖的 IP；特殊用途地址按 IANA 转发与全球可达属性执行审批或拒绝，截断提示按保留字节数计算。
-- `managed_process` 无法确认进程已停止时会返回失败并标记 `terminationPending`；终态历史最多保留 128 项，活性未知的进程不会被淘汰。
+- `managed_process` 分别报告 `terminationPending` 与 `cleanupPending`，区分进程活性未知和进程结束后的平台资源清理失败；两者可同时为 true，关闭或显式停止会重试可重试的资源清理，未确认状态的条目不会被淘汰。
 - 本地 Telemetry 遇到未知 Manifest 文件时会保留原文件、停用当前写入器并报告稳定错误码；Host 日志不记录路径或正文。
 - Session 用量保留提供方明确上报的缓存命中、未命中与输出字段；缺失的总量和成本仍为未知，不按账户日账单推算单次 Run 费用。
 - 外控委派支持持久 `runId` 回执、`requestKey` 去重与 `ligule_run_get` 查询，重启后可读取已保存的结果或中断状态，不自动重跑任务。
@@ -49,7 +49,7 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 - `managed_process` reports ready only after its health URL returns HTTP 2xx; startup port checks cover IPv4 and IPv6 loopback.
 - `managed_process` uses bounded backoff for non-2xx responses and request failures; HTTP 2xx is immediate, and cancellation or owned-process exit stops probing.
 - Same-origin `fetch` redirects can connect only to IPs covered by the initial Policy check; IANA forwardability and global reachability determine whether special-purpose addresses require approval or are denied, and truncation reports retained response bytes.
-- `managed_process` reports failure with `terminationPending` when process termination cannot be confirmed; terminal history retains at most 128 entries and never evicts entries with unknown liveness.
+- `managed_process` reports `terminationPending` and `cleanupPending` separately for unknown process liveness and failed platform-resource cleanup after exit; both can be true. Close and explicit stop retry cleanup when retryable; entries with either unresolved state are not evicted.
 - Local Telemetry preserves unknown Manifest files, disables the current writer, and reports a stable error code; Host logs omit paths and content.
 - Session usage preserves provider-reported cache hit, miss, and output fields. Missing totals and costs remain unknown; account-wide daily billing is not attributed to a single run.
 - External delegation adds durable `runId` receipts, `requestKey` deduplication and `ligule_run_get` for result or interruption lookup after restart, without automatic replay.

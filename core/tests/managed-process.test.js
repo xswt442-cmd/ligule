@@ -443,7 +443,7 @@ test('Registry close reports repeated managed stop failures instead of treating 
 
 test('Guardian and cleanup completion errors surface without reporting a stopped process', async (t) => {
   const ready = await healthUrl(t);
-  for (const code of ['exec_guardian_failed', 'exec_sandbox_cleanup_failed']) {
+  for (const code of ['exec_guardian_failed', 'exec_sandbox_cleanup_failed', 'exec_termination_cleanup_failed']) {
     const registry = createManagedProcessRegistry();
     const failure = Object.assign(new Error(`simulated ${code}`), { code });
     const owned = managedLease(() => { throw failure; });
@@ -453,10 +453,122 @@ test('Guardian and cleanup completion errors surface without reporting a stopped
     await assert.rejects(registry.stop(started.id), { code });
     const status = registry.status(started.id);
     assert.equal(status.status, 'failed');
-    assert.equal(status.terminationPending, true);
+    assert.equal(status.terminationPending, code === 'exec_guardian_failed' || code === 'exec_termination_cleanup_failed');
+    assert.equal(status.cleanupPending, code === 'exec_sandbox_cleanup_failed' || code === 'exec_termination_cleanup_failed');
     await assert.rejects(registry.close(), { code });
     assert.notEqual(registry.status(started.id).status, 'stopped');
   }
+});
+
+test('a cleaned interrupted completion does not report unknown liveness or pending cleanup', async (t) => {
+  const ready = await healthUrl(t);
+  const registry = createManagedProcessRegistry();
+  t.after(() => registry.close());
+  const owned = managedLease();
+  const started = await registry.start(ready, owned.lease);
+  owned.fail(Object.assign(new Error('command ended with an unknown exit status'), { code: 'exec_process_interrupted' }));
+  await delay(0);
+
+  const status = registry.status(started.id);
+  assert.equal(status.status, 'failed');
+  assert.equal(status.terminationPending, false);
+  assert.equal(status.cleanupPending, false);
+  await registry.close();
+  assert.equal(owned.calls, 0, 'confirmed interruption and cleanup do not need another Lease stop');
+});
+
+test('a sandbox setup failure does not report that a command is running or needs cleanup', async (t) => {
+  const ready = await healthUrl(t);
+  const registry = createManagedProcessRegistry();
+  t.after(() => registry.close());
+  const owned = managedLease();
+  const started = await registry.start(ready, owned.lease);
+  owned.fail(Object.assign(new Error('sandbox setup failed before command creation'), { code: 'exec_sandbox_setup_failed' }));
+  await delay(0);
+
+  const status = registry.status(started.id);
+  assert.equal(status.status, 'failed');
+  assert.equal(status.terminationPending, false);
+  assert.equal(status.cleanupPending, false);
+  await registry.close();
+  assert.equal(owned.calls, 0);
+});
+
+test('Registry distinguishes confirmed termination from failed temporary cleanup and retries the cleanup', async (t) => {
+  const ready = await healthUrl(t);
+  const registry = createManagedProcessRegistry();
+  t.after(() => registry.close());
+  const cleanupFailure = Object.assign(new Error('temporary cleanup failed'), { code: 'exec_temp_cleanup_failed' });
+  const owned = managedLease((calls, finish) => {
+    if (calls === 1) throw cleanupFailure;
+    finish(0);
+  });
+  const started = await registry.start(ready, owned.lease);
+  owned.fail(cleanupFailure);
+  await delay(0);
+
+  const pending = registry.status(started.id);
+  assert.equal(pending.status, 'failed');
+  assert.equal(pending.terminationPending, false);
+  assert.equal(pending.cleanupPending, true);
+
+  await registry.close();
+  const recovered = registry.status(started.id);
+  assert.equal(owned.calls, 2);
+  assert.equal(recovered.status, 'stopped');
+  assert.equal(recovered.terminationPending, false);
+  assert.equal(recovered.cleanupPending, false);
+});
+
+test('a timed-out cleanup retry preserves confirmed process termination', async (t) => {
+  const ready = await healthUrl(t);
+  const registry = createManagedProcessRegistry();
+  t.after(() => registry.close());
+  let releaseStop;
+  const stopPending = new Promise((resolve) => { releaseStop = resolve; });
+  const cleanupFailure = Object.assign(new Error('temporary cleanup failed'), { code: 'exec_temp_cleanup_failed' });
+  const owned = managedLease(() => stopPending);
+  const started = await registry.start(ready, owned.lease);
+  owned.fail(cleanupFailure);
+  await delay(0);
+
+  const stopping = registry.stop(started.id);
+  try {
+    await assert.rejects(stopping, { code: 'exec_terminate_failed' });
+    const pending = registry.status(started.id);
+    assert.equal(pending.status, 'failed');
+    assert.equal(pending.terminationPending, false);
+    assert.equal(pending.cleanupPending, true);
+  } finally {
+    releaseStop();
+  }
+
+  await registry.close();
+  const recovered = registry.status(started.id);
+  assert.equal(recovered.status, 'stopped');
+  assert.equal(recovered.terminationPending, false);
+  assert.equal(recovered.cleanupPending, false);
+});
+
+test('Registry retains both liveness and cleanup uncertainty when both fail', async (t) => {
+  const ready = await healthUrl(t);
+  const registry = createManagedProcessRegistry();
+  t.after(async () => { await registry.close().catch(() => undefined); });
+  const failure = Object.assign(new Error('termination and temporary cleanup are unconfirmed'), {
+    code: 'exec_termination_cleanup_failed',
+  });
+  const owned = managedLease(() => { throw failure; });
+  const started = await registry.start(ready, owned.lease);
+  owned.fail(failure);
+  await delay(0);
+
+  const status = registry.status(started.id);
+  assert.equal(status.status, 'failed');
+  assert.equal(status.terminationPending, true);
+  assert.equal(status.cleanupPending, true);
+  await assert.rejects(registry.close(), { code: 'exec_termination_cleanup_failed' });
+  assert.equal(registry.status(started.id).terminationPending, true);
+  assert.equal(registry.status(started.id).cleanupPending, true);
 });
 
 test('natural Lease completion during an explicit stop confirms process termination', async (t) => {

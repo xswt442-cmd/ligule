@@ -31,6 +31,32 @@ let cancelled = false;
 let finishing = false;
 let linuxCleanup: Promise<void> | undefined;
 
+function cleanupOutcomeCode(primaryError: unknown): 'exec_sandbox_cleanup_failed' | 'exec_termination_cleanup_failed' {
+  const code = typeof primaryError === 'object' && primaryError !== null && 'code' in primaryError
+    ? primaryError.code : undefined;
+  return primaryError === undefined || code === 'exec_cancelled' || code === 'exec_spawn_failed'
+    || code === 'exec_process_interrupted' || code === 'exec_sandbox_setup_failed'
+    || code === 'exec_sandbox_cleanup_failed' || code === 'exec_temp_cleanup_failed'
+    || code === 'exec_script_snapshot_cleanup_failed'
+    ? 'exec_sandbox_cleanup_failed'
+    : 'exec_termination_cleanup_failed';
+}
+
+function commandFailure(error: unknown, commandStarted: boolean): KernelError {
+  const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
+  const known = typeof code === 'string' && [
+    'exec_cancelled', 'exec_spawn_failed', 'exec_process_interrupted', 'exec_sandbox_setup_failed',
+    'exec_sandbox_cleanup_failed', 'exec_temp_cleanup_failed', 'exec_script_snapshot_cleanup_failed',
+    'exec_terminate_failed', 'exec_termination_cleanup_failed', 'exec_guardian_failed', 'exec_guardian_protocol',
+  ].includes(code);
+  if (known && error instanceof KernelError) return error;
+  const normalizedCode = known ? code as string : commandStarted ? 'exec_guardian_failed' : 'exec_sandbox_setup_failed';
+  return new KernelError(normalizedCode, {
+    cause: error,
+    detail: error instanceof Error ? error.message : undefined,
+  });
+}
+
 function parseGuardianStartup(argv: readonly string[]): GuardianStartup {
   if (argv[0] !== GUARDIAN_LAUNCH_ARGUMENT) {
     const [executable, ...args] = argv;
@@ -107,12 +133,14 @@ async function runAppContainer(startup: GuardianStartup): Promise<void> {
   let workspaceReadGrant: AppContainerDirectoryReadGrant | undefined;
   let outcome: object;
   let primaryError: unknown;
+  let commandStarted = false;
   try {
     profile = await createAppContainerProfile();
     workspaceReadGrant = await createAppContainerDirectoryReadGrant(launch.workspaceRoot);
     await grantAppContainerDirectoryRead(workspaceReadGrant, profile.sid);
     if (disconnected || !process.connected) throw new KernelError('exec_cancelled', { detail: 'the owned command tree was terminated' });
     process.send?.({ kind: 'ready', processId: process.pid });
+    commandStarted = true;
     const exitCode = await runAppContainerCommand({
       executable: startup.executable,
       argv: startup.args,
@@ -127,11 +155,11 @@ async function runAppContainer(startup: GuardianStartup): Promise<void> {
       outcome = { kind: 'exit', exitCode };
     }
   } catch (error) {
-    primaryError = error;
-    const failure = error as Error & { code?: string; detail?: string };
+    const failure = commandFailure(error, commandStarted);
+    primaryError = failure;
     outcome = {
       kind: 'error',
-      code: failure.code === 'exec_cancelled' ? 'exec_cancelled' : 'exec_guardian_failed',
+      code: failure.code,
       detail: failure.detail ?? failure.message,
     };
   } finally {
@@ -147,7 +175,7 @@ async function runAppContainer(startup: GuardianStartup): Promise<void> {
     if (cleanupErrors.length > 0) {
       outcome = {
         kind: 'error',
-        code: 'exec_sandbox_cleanup_failed',
+        code: cleanupOutcomeCode(primaryError),
         detail: [primaryError instanceof Error ? primaryError.message : undefined, ...cleanupErrors].filter(Boolean).join('; '),
       };
     }
@@ -163,6 +191,7 @@ async function runRestrictedToken(startup: GuardianStartup): Promise<void> {
   let tempGrant = false;
   let outcome: object;
   let primaryError: unknown;
+  let commandStarted = false;
   try {
     workspaceGrant = true;
     await grantRestrictedDirectoryWrite(launch.workspaceRoot, writeSid, launch.aclLockRoot);
@@ -170,6 +199,7 @@ async function runRestrictedToken(startup: GuardianStartup): Promise<void> {
     await grantRestrictedDirectoryWrite(launch.tempDirectory, writeSid, launch.aclLockRoot);
     if (disconnected || !process.connected) throw new KernelError('exec_cancelled', { detail: 'the owned command tree was terminated' });
     process.send?.({ kind: 'ready', processId: process.pid });
+    commandStarted = true;
     const exitCode = await runRestrictedWindowsCommand({
       executable: startup.executable,
       argv: startup.args,
@@ -181,11 +211,11 @@ async function runRestrictedToken(startup: GuardianStartup): Promise<void> {
       ? { kind: 'error', code: 'exec_cancelled', detail: 'the owned command tree was terminated' }
       : { kind: 'exit', exitCode };
   } catch (error) {
-    primaryError = error;
-    const failure = error as Error & { code?: string; detail?: string };
+    const failure = commandFailure(error, commandStarted);
+    primaryError = failure;
     outcome = {
       kind: 'error',
-      code: failure.code === 'exec_cancelled' ? 'exec_cancelled' : 'exec_guardian_failed',
+      code: failure.code,
       detail: failure.detail ?? failure.message,
     };
   } finally {
@@ -201,7 +231,7 @@ async function runRestrictedToken(startup: GuardianStartup): Promise<void> {
     if (cleanupErrors.length > 0) {
       outcome = {
         kind: 'error',
-        code: 'exec_sandbox_cleanup_failed',
+        code: cleanupOutcomeCode(primaryError),
         detail: [primaryError instanceof Error ? primaryError.message : undefined, ...cleanupErrors].filter(Boolean).join('; '),
       };
     }

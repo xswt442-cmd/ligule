@@ -81,7 +81,7 @@ test('Guardian AppContainer requires LOCALAPPDATA and cleans its private temp di
     assert.equal(safe?.exitCode, 23, JSON.stringify(outcomes));
     assert.match(safe?.stdout ?? '', /GUARDIAN_APPCONTAINER_safe/u);
     const minimal = outcomes.find(({ name }) => name === 'minimal');
-    assert.equal(minimal?.errorCode, 'exec_guardian_failed', JSON.stringify(outcomes));
+    assert.equal(minimal?.errorCode, 'exec_spawn_failed', JSON.stringify(outcomes));
     assert.match(minimal?.detail ?? '', /CreateProcessW failed with Win32 error 203/u);
     const withLocalAppData = outcomes.find(({ name }) => name === 'minimal-plus-LOCALAPPDATA');
     assert.equal(withLocalAppData?.exitCode, 23, JSON.stringify(outcomes));

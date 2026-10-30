@@ -116,7 +116,7 @@ Host 为每个会话持有独立的 Permission 与 Policy 状态。Permission �
 
 `fetch` 会在 Policy 判定前解析地址，并将每个 socket 固定到获批的 IP。它只跟随同源重定向；每一跳重新解析后必须仍落在首次获批的 IP 集内。结果记录实际连接过的地址。IPv4/IPv6 特殊用途地址按 IANA `Forwardable` 与 `Globally Reachable` 属性映射到现有策略类别：可转发但不可全球到达的目标按 `private` 处理并要求审批；非目标地址或不可转发范围按 `unspecified` 拒绝；注册表明确允许全球到达的分配继续按 `public` 处理。`shownBytes` 统计 UTF-8 解码前保留的源响应字节。
 
-默认 `minimal` 模式还提供 `managed_process`，供开发服务器等需要跨工具调用运行的命令使用。启动命令仍按 `exec` capability 应用 Permission、Script Binding、工作区信任和 Policy；现有 `exec` 拒绝规则同样适用。启动须提供 HTTP 回环健康检查地址，并等待其返回 2xx 后才返回 Session 内句柄、端口和就绪状态；失败探测会有界退避，取消或进程退出会打断等待。状态、限量日志和显式停止也限定在该 Session；日志最多返回 16 KiB。停止操作无法确认进程退出时会返回失败并报告 `terminationPending: true`；后续 close/stop 会复用在途 Lease 请求，不叠加重复请求。最多保留 128 条按终态完成顺序排列的历史 Entry；活性未知的 Entry 不会被淘汰。普通 `exec` 仍等待命令结束并由 Guardian 清理后代。受管进程继续留在 Guardian/Job Object 进程树中，随运行取消、Permission 变更、Session/Host 关闭或所属 Grant 撤销而停止；外部撤销或过期的 Grant 会每秒重新校验。健康检查地址只限制 Host 的探测目标，实际监听地址和命令的网络访问仍由启动命令与当前平台 Permission 决定。
+默认 `minimal` 模式还提供 `managed_process`，供开发服务器等需要跨工具调用运行的命令使用。启动命令仍按 `exec` capability 应用 Permission、Script Binding、工作区信任和 Policy；现有 `exec` 拒绝规则同样适用。启动须提供 HTTP 回环健康检查地址，并等待其返回 2xx 后才返回 Session 内句柄、端口和就绪状态；失败探测会有界退避，取消或进程退出会打断等待。状态、限量日志和显式停止也限定在该 Session；日志最多返回 16 KiB。停止操作无法确认进程退出时会返回失败并报告 `terminationPending: true`；进程已结束但执行资源清理未确认时会报告 `cleanupPending: true`；进程活性与资源清理都未确认时两个标记同时为 true。后续 close/stop 会复用在途 Lease 请求，并对失败的资源清理进行有限重试。最多保留 128 条已确认终态 Entry；活性未知或资源清理未完成的 Entry 不会被淘汰。普通 `exec` 仍等待命令结束并由 Guardian 清理后代。受管进程继续留在 Guardian/Job Object 进程树中，随运行取消、Permission 变更、Session/Host 关闭或所属 Grant 撤销而停止；外部撤销或过期的 Grant 会每秒重新校验。健康检查地址只限制 Host 的探测目标，实际监听地址和命令的网络访问仍由启动命令与当前平台 Permission 决定。
 
 ### 一次 Agent Loop
 
