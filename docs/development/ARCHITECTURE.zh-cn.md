@@ -191,6 +191,8 @@ Provider 响应流式传输期间，[`stream-draft.ts`](../../core/src/session/s
 
 重新打开会话时，若已派发的工具调用没有结果，恢复逻辑会记下 `tool_outcome_unknown`，不会重放该调用。这样可以重建有效的模型投影，同时避免重复执行结果未知的外部操作。
 
+Harbor 评测通过 [`sessionTurnToAtif()`](../../core/src/session/atif.ts) 将选定的持久化 Session 轮次导出为 ATIF-v1.8。这是用于评测的投影，不是完整执行回放：每条已持久化的助手响应计为一次逻辑 LLM 调用，隐藏的 HTTP 重试和系统压缩不计入；子代理轨迹和图片负载不会嵌入。只有在按同一 Session 目录校验后才恢复旁路内容；仅有预览的内容会标记为 `spill_content_missing`，无法解析的引用则使导出失败。省略项会写入 `extra.ligule.missing_features` 和每个调用的标记，因此依赖缺失证据的报告指标保持未知。详见 [Harbor 适配器说明](../../evals/harbor/README.md)。
+
 ### 会话数据路径
 
 ```mermaid

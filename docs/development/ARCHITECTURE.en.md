@@ -195,6 +195,8 @@ Compaction blocks are derived files; all blocks of a session live in one file th
 
 When a session is reopened, recovery repairs dispatched tool calls that have no recorded result with an explicit unknown outcome. It does not replay them. This preserves a valid model projection without repeating an operation whose external effect may already have happened.
 
+Harbor evaluation exports a selected persisted Session turn through [`sessionTurnToAtif()`](../../core/src/session/atif.ts) as ATIF-v1.8. This is an evaluation projection, not a complete execution replay: each persisted assistant response counts as one logical LLM call; hidden HTTP retries and system compaction are not counted. Subagent trajectories and image payloads are not embedded. Spill content is restored only after validation against the same Session directory; preview-only content is marked `spill_content_missing`, and unresolved references fail export. Omissions appear in `extra.ligule.missing_features` and per-call flags, so metrics that require missing evidence remain unknown. See the [Harbor adapter notes](../../evals/harbor/README.md).
+
 ### Session data flow
 
 ```mermaid
