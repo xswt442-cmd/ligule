@@ -6,7 +6,7 @@ import { mkdirSync } from 'node:fs';
 import { access, lstat, opendir, readFile, realpath, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { KernelError } from '../kernel/error.js';
-import { createTaskBudget, type TaskBudget, type TaskBudgetLimits } from '../kernel/task-budget.js';
+import { createTaskBudget, type TaskBudget } from '../kernel/task-budget.js';
 import { rememberRunSummary } from '../kernel/run-summary.js';
 import {
   assertDelegationCompletion, createOutputSchemaContract, DELEGATION_RESULT_TOOL, MAX_DELEGATION_SCHEMA_BYTES, outputSchemaInstructions,
@@ -45,20 +45,22 @@ import { searchSessionDirectories } from '../session/search.js';
 import { branchSession } from '../session/branch.js';
 import { listProjectFiles } from './paths.js';
 import { branchSessionId, exportImageUrl, exportMarkdown, MAX_EXPORT_ASSETS, writeExport, type ExportAsset, type ExportRecord } from './export.js';
+import { compactionLimitsOf, loopLimitsOf, sessionLoopLimits, taskLimitsOf } from './runtime-limits.js';
+export { compactionLimitsOf } from './runtime-limits.js';
 import { createCompaction } from '../session/compaction.js';
 import { sessionWriterActive } from '../session/lock.js';
 import { requestAgentControl, type AgentControlRequest } from './agent-control-runtime.js';
 import { usageEvent } from '../session/usage.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
 import { foldLabel } from '../session/format.js';
-import { SPILL_NAME, resultLimit } from '../kernel/result.js';
+import { SPILL_NAME } from '../kernel/result.js';
 import { assertNoLegacyTrashConfig, boundaryOf, limitsOf, workingDirectoryOf } from '../capability/limits.js';
 import { resolveWithin } from '../capability/paths.js';
 import { createManagedProcessRegistry, managedProcessPlugin, type ManagedProcessRegistry } from '../capability/managed-process.js';
 import { loadInstructions, DEFAULT_INSTRUCTION_BYTES } from '../capability/instructions.js';
 import { SKILL_METADATA_BUDGET_BYTES, discoverSkills, formatSkillCatalog, skillDirectories } from '../kernel/skills.js';
 import { discoverTemplates, expandTemplate, findTemplate, parseInvocation, templateDirectories } from '../kernel/templates.js';
-import { createLoop, DEFAULT_LOOP_LIMITS, MAX_PARALLEL_TOOLS, type LoopCompaction, type LoopProgressEvent, type LoopProgressPhase, type LoopResult } from '../kernel/loop.js';
+import { createLoop, type LoopCompaction, type LoopProgressEvent, type LoopProgressPhase, type LoopResult } from '../kernel/loop.js';
 import { minimalPlugin } from '../tools/minimal.js';
 import { networkPlugin } from '../tools/network.js';
 import { createTodoWritePlugin } from '../tools/todo-write.js';
@@ -91,7 +93,6 @@ import { createConfig, mergePolicyRules, type ConfigSnapshot } from '../kernel/c
 import { dataRoot, loadConfigLayers } from '../kernel/config-file.js';
 import type { LoggerBackend } from '../kernel/log.js';
 import { createTelemetry, currentTelemetryContext, emitTelemetry, telemetryEnabled, type TelemetryOptions } from '../kernel/telemetry.js';
-import type { LoopLimits } from '../kernel/loop.js';
 import type { LoadedLayers, createConfigStore } from '../kernel/config-store.js';
 import type { SkillRegistry } from '../kernel/skills.js';
 import type { TemplateRegistry } from '../kernel/templates.js';
@@ -548,86 +549,6 @@ function exportRecordOf(event: SessionEvent): ExportRecord | undefined {
     };
   }
   return record;
-}
-
-// 通过 Session 模块解析记录目录，确保 Host 与会话列表使用同一位置。
-// 缺少循环上限时补入默认值，避免未定义的上限让循环无法执行。
-function loopLimitsOf(config: HostConfigSnapshot): LoopLimits & { readonly maxParallelTools: number } {
-  const limits = { ...DEFAULT_LOOP_LIMITS, ...(isRecord(config.loop) ? config.loop : {}) };
-  const positiveInteger = (value: unknown, key: 'iterations' | 'modelCalls' | 'maxParallelTools'): number => {
-    const maximum = key === 'maxParallelTools' ? MAX_PARALLEL_TOOLS : Number.MAX_SAFE_INTEGER;
-    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1 || value > maximum) {
-      throw new KernelError('host_loop_limits_invalid', { detail: `${key} must be an integer between 1 and ${maximum}` });
-    }
-    return value;
-  };
-  return {
-    iterations: positiveInteger(limits.iterations, 'iterations'),
-    modelCalls: positiveInteger(limits.modelCalls, 'modelCalls'),
-    maxParallelTools: positiveInteger(limits.maxParallelTools, 'maxParallelTools'),
-  };
-}
-
-function sessionLoopLimits(state: HostSessionBase): LoopLimits {
-  return {
-    get iterations() { return state.loopIterations; },
-    get modelCalls() { return state.loopModelCalls; },
-    get maxParallelTools() { return state.loopMaxParallelTools; },
-  };
-}
-
-function taskLimitsOf(config: HostConfigSnapshot, modelCalls: number, requested?: Partial<TaskBudgetLimits>): TaskBudgetLimits {
-  const loop = isRecord(config.loop) ? config.loop : {};
-  const limits = { maxModelCalls: loop.totalModelCalls ?? modelCalls, timeoutMs: loop.taskTimeoutMs ?? 1_800_000,
-    requestTimeoutMs: loop.requestTimeoutMs ?? 120_000, interactionWaitTimeoutMs: loop.interactionWaitTimeoutMs ?? 43_200_000 };
-  const check = (value: unknown, maximum: number): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 1 && value <= maximum;
-  if (!check(limits.maxModelCalls, Number.MAX_SAFE_INTEGER) || !check(limits.timeoutMs, 86_400_000)
-    || !check(limits.requestTimeoutMs, Math.min(limits.timeoutMs, 3_600_000)) || !check(limits.interactionWaitTimeoutMs, 604_800_000)) throw new KernelError('task_budget_invalid');
-  if (requested !== undefined && (!isRecord(requested) || Object.keys(requested).some(key => !['maxModelCalls', 'timeoutMs', 'requestTimeoutMs', 'interactionWaitTimeoutMs'].includes(key)))) {
-    throw new KernelError('task_budget_invalid');
-  }
-  const timeoutMs = requested?.timeoutMs ?? limits.timeoutMs;
-  const effective: TaskBudgetLimits = { maxModelCalls: requested?.maxModelCalls ?? limits.maxModelCalls, timeoutMs,
-    requestTimeoutMs: requested?.requestTimeoutMs ?? Math.min(limits.requestTimeoutMs, timeoutMs),
-    interactionWaitTimeoutMs: requested?.interactionWaitTimeoutMs ?? limits.interactionWaitTimeoutMs };
-  if (!check(effective.maxModelCalls, limits.maxModelCalls) || !check(effective.timeoutMs, limits.timeoutMs)
-    || !check(effective.requestTimeoutMs, Math.min(limits.requestTimeoutMs, effective.timeoutMs))
-    || !check(effective.interactionWaitTimeoutMs, limits.interactionWaitTimeoutMs)) throw new KernelError('task_budget_exceeds_limit');
-  return effective;
-}
-
-// 优先采用所选模型声明的上下文窗口，其次采用配置的备用值；两者都未设置时关闭压缩。
-// 立即拒绝无效上限，因为非有限窗口无法用于计算上下文压力。
-// 保留预算必须小于压力阈值，压缩后才能将请求控制在阈值以内。
-// 输出预算参与阈值计算：请求的输出与输入共用同一窗口，不为它预留会让长输出请求贴线被拒。
-export function compactionLimitsOf(config: HostConfigSnapshot, selectedContextTokens?: unknown, selectedOutputTokens?: unknown) {
-  const limits = limitsOf(config);
-  const contextTokens = selectedContextTokens ?? limits.contextTokens;
-  if (contextTokens === undefined) return undefined;
-  if (typeof contextTokens !== 'number' || !Number.isSafeInteger(contextTokens) || contextTokens <= 0) {
-    throw new KernelError('host_compaction_limits_invalid', { detail: `contextTokens must be a positive safe integer, got ${JSON.stringify(contextTokens)}` });
-  }
-  const compactThresholdRatio = limits.compactThresholdRatio;
-  const compactRetainRatio = limits.compactRetainRatio;
-  if (typeof compactThresholdRatio !== 'number' || !(compactThresholdRatio > 0)) {
-    throw new KernelError('host_compaction_limits_invalid', { detail: 'compactThresholdRatio must be a positive number' });
-  }
-  if (typeof compactRetainRatio !== 'number' || !(compactRetainRatio > 0)) {
-    throw new KernelError('host_compaction_limits_invalid', { detail: 'compactRetainRatio must be a positive number' });
-  }
-  if (compactThresholdRatio > 1 || compactRetainRatio >= compactThresholdRatio) {
-    throw new KernelError('host_compaction_limits_invalid', {
-      detail: `compactRetainRatio (${compactRetainRatio}) must be below compactThresholdRatio (${compactThresholdRatio}), and the threshold must be at most 1`,
-    });
-  }
-  const outputTokens = selectedOutputTokens;
-  return {
-    contextTokens,
-    compactThresholdRatio,
-    compactRetainRatio,
-    ...(typeof outputTokens === 'number' && Number.isSafeInteger(outputTokens) && outputTokens > 0 ? { outputTokens } : {}),
-    resultBytes: resultLimit(config),
-  };
 }
 
 // 将流式事件转发给客户端，同时把原事件交回循环。
