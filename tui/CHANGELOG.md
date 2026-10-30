@@ -15,6 +15,8 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 - `[loop].maxConcurrentSubagents` 可在 1–8 间设置内部子代理并发数，默认 3；任务可设置默认 12 小时的累计交互等待上限，只有所有工作都被交互阻塞时才暂停执行期限。
 - 并行审批或提问重叠时，执行期限会等最后一个阻塞交互结束后再恢复，不会因单个等待提前恢复。
 - `managed_process` 仅在健康检查 URL 返回 HTTP 2xx 后报告就绪；启动前的回环端口检查覆盖 IPv4 与 IPv6。
+- `managed_process` 对非 2xx 响应和请求失败使用有界退避；HTTP 2xx 立即就绪，用户取消或所属进程退出会停止探测。
+- 本地 Telemetry 遇到未知 Manifest 文件时会保留原文件、停用当前写入器并报告稳定错误码；Host 日志不记录路径或正文。
 - Session 用量保留提供方明确上报的缓存命中、未命中与输出字段；缺失的总量和成本仍为未知，不按账户日账单推算单次 Run 费用。
 - 外控委派支持持久 `runId` 回执、`requestKey` 去重与 `ligule_run_get` 查询，重启后可读取已保存的结果或中断状态，不自动重跑任务。
 - CLI/TUI 显示已确认的文件交付。`ligule storage inspect` 检查工作区数据；交互式 `storage cleanup` 分页核查历史引用、预览并确认删除过期截图及带归属/租约验证的受管残留（未知旧目录保留）。
@@ -43,6 +45,8 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 - `[loop].maxConcurrentSubagents` sets internal subagent concurrency from 1 to 8 (default 3). Tasks also have a cumulative interaction-wait limit of 12 hours by default; the execution deadline pauses only while all work is blocked on interaction.
 - Overlapping parallel approvals or questions keep the execution deadline paused until the last blocking interaction ends.
 - `managed_process` reports ready only after its health URL returns HTTP 2xx; startup port checks cover IPv4 and IPv6 loopback.
+- `managed_process` uses bounded backoff for non-2xx responses and request failures; HTTP 2xx is immediate, and cancellation or owned-process exit stops probing.
+- Local Telemetry preserves unknown Manifest files, disables the current writer, and reports a stable error code; Host logs omit paths and content.
 - Session usage preserves provider-reported cache hit, miss, and output fields. Missing totals and costs remain unknown; account-wide daily billing is not attributed to a single run.
 - External delegation adds durable `runId` receipts, `requestKey` deduplication and `ligule_run_get` for result or interruption lookup after restart, without automatic replay.
 - CLI/TUI display confirmed file deliveries. `ligule storage inspect` reports Workspace data; interactive `storage cleanup` pages Session references and confirms old screenshots or owner/lease-verified managed residue, preserving unknown legacy folders.
