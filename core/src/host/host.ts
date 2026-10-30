@@ -694,7 +694,10 @@ export function createHost({
   agentControl, screenCaptureConsent = false, telemetry: telemetryOptions,
 }: HostOptions): Host {
   if (typeof screenCaptureConsent !== 'boolean') throw new KernelError('screen_capture_consent_invalid');
-  const telemetry = createTelemetry(telemetryOptions ?? telemetryOptionsOfUserLayer(configLayers?.user));
+  const telemetry = createTelemetry(telemetryOptions ?? telemetryOptionsOfUserLayer(configLayers?.user), code => {
+    try { logger?.log?.('telemetry storage unavailable', { code, severity: 'error' }); }
+    catch { /* Storage diagnostics must not affect Host or Agent work. */ }
+  });
   // 每个项目环境持有自己的配置快照、提供方、策略、模式、记录目录和可写配置层。
   // 在加载环境时校验配置，避免等到第一次模型请求才发现错误。
   // 文件系统边界同时限制工具访问范围和指令文件向上查找的范围。

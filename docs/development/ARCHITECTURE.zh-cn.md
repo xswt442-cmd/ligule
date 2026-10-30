@@ -6,7 +6,7 @@
 
 本文面向阅读或修改仓库的贡献者，说明组件职责、依赖方向、一次请求的执行路径和会话恢复。协议字段与模块细节以链接到的源码为准。
 
-用户配置层的 `[telemetry].enabled = true` 可开启有界本地 JSONL 事件日志；可选的 `otlpEndpoint` 只接受本机回环 OTLP/HTTP protobuf 地址，并导出有界 OpenTelemetry Trace。默认关闭；项目配置不能启用此功能，导出失败不影响 Agent 执行。日志和 Trace 不包含提示词、推理、工具参数/结果、文件路径或凭据。Session JSONL 仍是恢复事实来源；本地 JSONL 是结构化事件日志，不是 OpenTelemetry Logs，Ligule 也没有 Trace 查看器。
+用户配置层的 `[telemetry].enabled = true` 可开启有界本地 JSONL 事件日志；可选的 `otlpEndpoint` 只接受本机回环 OTLP/HTTP protobuf 地址，并导出有界 OpenTelemetry Trace。默认关闭；项目配置不能启用此功能，存储或导出失败均不影响 Agent 执行。本地存储失败会停用当前遥测写入器，并通过 Host 日志记录脱敏后的错误码；直接调用 `flush()` 时会收到该错误。日志和 Trace 不包含提示词、推理、工具参数/结果、文件路径或凭据。Session JSONL 仍是恢复事实来源；本地 JSONL 是结构化事件日志，不是 OpenTelemetry Logs，Ligule 也没有 Trace 查看器。
 
 CLI 的 npm 包内置私有 Core 的编译代码、模式与元数据；Core 的外部运行依赖合并到公开包清单，由 npm 在消费者系统安装对应的原生依赖。打包时不内置构建机器的外部依赖树，同一 tarball 用于 Windows 与 Linux 的安装验证。
 

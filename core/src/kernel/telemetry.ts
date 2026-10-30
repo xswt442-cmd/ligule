@@ -230,7 +230,7 @@ interface Manifest {
 interface FileIdentity { readonly dev: string; readonly ino: string }
 
 /** Bounded local JSONL telemetry plus an optional, loopback-only OTLP trace sink. */
-export function createTelemetry(options: TelemetryOptions = {}): Telemetry {
+export function createTelemetry(options: TelemetryOptions = {}, onStorageFailure?: (code: string) => void): Telemetry {
   if (options.enabled !== true) return NOOP;
   const endpoint = checkedOtlpEndpoint(options.otlpEndpoint);
   const localEnabled = typeof options.directory === 'string' && options.directory !== '';
@@ -258,6 +258,7 @@ export function createTelemetry(options: TelemetryOptions = {}): Telemetry {
   let draining: Promise<void> | undefined;
   let closed = false;
   let failed = false;
+  let failureCode: string | undefined;
 
   async function acquireLock(): Promise<() => Promise<void>> {
     const info = await lstat(requestedDirectory);
@@ -401,40 +402,32 @@ export function createTelemetry(options: TelemetryOptions = {}): Telemetry {
     if (!info.isDirectory() || info.isSymbolicLink() || String(info.dev) !== directoryIdentity?.dev || String(info.ino) !== directoryIdentity?.ino) {
       throw new Error('telemetry output directory identity changed');
     }
-    let entries = await readdir(directory);
+    const entries = await readdir(directory);
     if (entries.length > MAX_DIRECTORY_FILES) throw new Error('telemetry directory file-count limit exceeded');
-    // appendLine reaches this function while holding the per-directory lock. Matching files can therefore only
-    // belong to an earlier writer that exited before publishing its atomic manifest replacement.
-    const orphaned = entries.filter(name => MANIFEST_TEMP_NAME.test(name));
-    for (const name of orphaned) {
-      const path = join(directory, name);
-      const candidate = await lstat(path);
-      if (!validRegularFile(candidate)) throw new Error('telemetry temporary manifest is not an exclusive regular file');
-      const identity = { dev: String(candidate.dev), ino: String(candidate.ino) };
-      const current = await lstat(path);
-      if (!validRegularFile(current, identity)) throw new Error('telemetry temporary manifest identity changed');
-      await unlink(path);
-    }
-    if (orphaned.length > 0) entries = entries.filter(name => !MANIFEST_TEMP_NAME.test(name));
+    // Even under the directory lock, a matching filename does not prove that this process owns the file.
+    // Preserve it and fail closed; recovery must not delete user data based on a naming convention.
+    if (entries.some(name => MANIFEST_TEMP_NAME.test(name))) throw new KernelError('telemetry_manifest_temp_unknown');
     let markerInfo: Awaited<ReturnType<typeof lstat>> | undefined;
     try { markerInfo = await lstat(manifestPath); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     if (markerInfo === undefined) {
-      if (entries.length !== 0) throw new Error('telemetry directory contains unknown files');
+      if (entries.length !== 0) throw new KernelError('telemetry_storage_unknown_file');
       const manifest: Manifest = { version: 1, maxFileBytes: fileLimit, retainedFiles, segments: [] };
       const identity = await writeNewManifest(manifest);
       return { manifest, identity };
     }
     if (!validRegularFile(markerInfo) || markerInfo.size > MAX_MANIFEST_BYTES) throw new Error('telemetry manifest is not a valid regular file');
     const contents = await readFile(manifestPath, 'utf8');
-    const parsed = JSON.parse(contents);
+    let parsed: unknown;
+    try { parsed = JSON.parse(contents); }
+    catch { throw new KernelError('telemetry_manifest_invalid'); }
     const manifest = parseManifest(parsed);
     if (manifest === undefined) {
-      throw new Error('telemetry manifest is corrupt or uses different limits');
+      throw new KernelError('telemetry_manifest_invalid');
     }
     const expectedNames = new Set([manifestName, ...manifest.segments.map(segment => segment.name)]);
     if (entries.length !== expectedNames.size || entries.some(name => !expectedNames.has(name))) {
-      throw new Error('telemetry directory contains unknown files');
+      throw new KernelError('telemetry_storage_unknown_file');
     }
     for (const segment of manifest.segments) {
       const segmentInfo = await lstat(join(directory, segment.name));
@@ -511,9 +504,11 @@ export function createTelemetry(options: TelemetryOptions = {}): Telemetry {
     while (queue.length > 0 && !closed && !failed) {
       const line = queue.shift()!;
       try { await appendLine(line); }
-      catch {
+      catch (error) {
         // Unknown files, lock failures, and I/O failures permanently disable this writer instance.
         failed = true;
+        failureCode = error instanceof KernelError ? error.code : 'telemetry_storage_failed';
+        try { onStorageFailure?.(failureCode); } catch { /* Diagnostics must not affect Agent execution. */ }
         queue.length = 0;
         pendingRecords = 0;
       } finally {
@@ -532,6 +527,7 @@ export function createTelemetry(options: TelemetryOptions = {}): Telemetry {
       if (draining === undefined) startDrain();
       await draining;
     }
+    if (failureCode !== undefined) throw new KernelError(failureCode);
   }
 
   async function flush(): Promise<void> {

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, open, readFile, readdir, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { chmod, mkdir, mkdtemp, open, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHost } from '../dist/host/host.js';
 import { createConfig } from '../dist/kernel/config.js';
@@ -23,7 +24,7 @@ async function filesUnder(directory) {
   return result;
 }
 
-async function setupHost(t, { telemetry, provider, permission, policyMode = 'ask', configLayers } = {}) {
+async function setupHost(t, { telemetry, provider, permission, policyMode = 'ask', configLayers, logger } = {}) {
   await mkdir(testRoot, { recursive: true });
   const root = await mkdtemp(join(testRoot, 'case-'));
   t.after(async () => rm(root, { recursive: true, force: true }));
@@ -53,6 +54,7 @@ async function setupHost(t, { telemetry, provider, permission, policyMode = 'ask
   const host = createHost({ config, provider, policy: config.policy, interactive: true,
     ...(configLayers === undefined ? {} : { configLayers }),
     ...(permission === undefined ? {} : { permission }),
+    ...(logger === undefined ? {} : { logger }),
     ...(telemetry === true ? { telemetry: { enabled: true, directory: telemetryDirectory } } : {}),
   });
   t.after(async () => host.release());
@@ -178,6 +180,31 @@ test('Host defaults telemetry off', async (t) => {
   const context = await setupHost(t, { provider });
   await context.host.handle({ method: 'run.start', params: { sessionId: context.sessionId, input: 'ordinary input' } }, context.client);
   assert.deepEqual(await readdir(context.telemetryDirectory), []);
+});
+
+test('Host reports an unknown telemetry temporary file without disclosing its path or contents', async (t) => {
+  const provider = { async *stream() { yield { type: 'text', text: 'done' }; yield { type: 'finish', reason: 'stop' }; } };
+  const diagnostics = [];
+  const context = await setupHost(t, {
+    provider,
+    telemetry: true,
+    logger: {
+      debug() {},
+      log(message, fields) { diagnostics.push({ message, fields }); },
+    },
+  });
+  const temporaryName = `telemetry.manifest.${randomUUID()}.tmp`;
+  const contents = 'unknown user-owned telemetry data';
+  await writeFile(join(context.telemetryDirectory, temporaryName), contents);
+
+  await context.host.handle({ method: 'run.start', params: { sessionId: context.sessionId, input: 'diagnose telemetry storage' } }, context.client);
+  await context.host.release();
+
+  assert.equal(await readFile(join(context.telemetryDirectory, temporaryName), 'utf8'), contents);
+  assert.deepEqual(diagnostics, [{
+    message: 'telemetry storage unavailable',
+    fields: { code: 'telemetry_manifest_temp_unknown', severity: 'error' },
+  }]);
 });
 
 test('Host release stays bounded when the telemetry file flush never settles', async (t) => {

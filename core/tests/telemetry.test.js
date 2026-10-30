@@ -95,14 +95,16 @@ test('file rotation keeps a bounded number of bounded files', async (t) => {
   assert.ok((await readdir(directory)).length <= 5, JSON.stringify(await readdir(directory)));
 });
 
-test('filesystem failures do not escape emit, flush, or shutdown', async (t) => {
+test('filesystem failures do not escape emit or shutdown and flush reports a stable diagnostic', async (t) => {
   const directory = await isolated(t);
   const file = join(directory, 'file');
   await writeFile(file, 'x');
-  const telemetry = createTelemetry({ enabled: true, directory: join(file, 'child') });
+  const failures = [];
+  const telemetry = createTelemetry({ enabled: true, directory: join(file, 'child') }, code => failures.push(code));
   assert.doesNotThrow(() => telemetry.emit({ type: 'run.finished', executionId: 'e1', runId: 'r1', status: 'failed', durationMs: 1, modelCalls: 1, toolCalls: 0 }));
-  await assert.doesNotReject(telemetry.flush());
+  await assert.rejects(telemetry.flush(), { code: 'telemetry_storage_failed' });
   await assert.doesNotReject(telemetry.shutdown());
+  assert.deepEqual(failures, ['telemetry_storage_failed']);
 });
 
 test('preserves pre-existing unknown files and refuses a symlink output directory', async (t) => {
@@ -117,7 +119,7 @@ test('preserves pre-existing unknown files and refuses a symlink output director
   }
   const telemetry = createTelemetry({ enabled: true, directory: linkPath });
   telemetry.emit({ type: 'run.finished', executionId: 'e1', runId: 'r1', status: 'completed', durationMs: 1, modelCalls: 1, toolCalls: 0 });
-  await assert.doesNotReject(telemetry.flush());
+  await assert.rejects(telemetry.flush(), { code: 'telemetry_storage_failed' });
   await telemetry.shutdown();
   assert.equal(await readFile(marker, 'utf8'), 'keep this user file');
   assert.deepEqual((await readdir(directory)).sort(), ['directory-link', 'telemetry.jsonl.1']);
@@ -133,7 +135,7 @@ test('a corrupt manifest fails closed without replacing or deleting its contents
   await writeFile(manifest, '{ damaged marker');
   const telemetry = createTelemetry({ enabled: true, directory });
   telemetry.emit({ type: 'run.finished', executionId: 'exec-after', runId: 'run-after', status: 'completed', durationMs: 1, modelCalls: 1, toolCalls: 0 });
-  await assert.doesNotReject(telemetry.flush());
+  await assert.rejects(telemetry.flush(), { code: 'telemetry_manifest_invalid' });
   await telemetry.shutdown();
   assert.equal(await readFile(manifest, 'utf8'), '{ damaged marker');
   assert.equal(await readFile(join(directory, 'segment-00000000.jsonl'), 'utf8'), segmentBefore);
@@ -156,7 +158,7 @@ test('failed atomic manifest replacement preserves a competing temporary-path fi
   });
 
   telemetry.emit({ type: 'run.finished', executionId: 'exec-after', runId: 'run-after', status: 'completed', durationMs: 1, modelCalls: 1, toolCalls: 0 });
-  await assert.doesNotReject(telemetry.flush());
+  await assert.rejects(telemetry.flush(), { code: 'telemetry_storage_failed' });
   await telemetry.shutdown();
   assert.equal(await readFile(manifest, 'utf8'), before);
   assert.equal(await readFile(competingPath, 'utf8'), 'competing file');
@@ -175,7 +177,7 @@ test('fails closed instead of rotating a segment after it gains a hard link', as
   for (let index = 0; index < 20; index += 1) {
     telemetry.emit({ type: 'run.finished', executionId: `e-next-${index}`, runId: `next-${index}`, status: 'completed', durationMs: 1, modelCalls: 1, toolCalls: 0 });
   }
-  await assert.doesNotReject(telemetry.flush());
+  await assert.rejects(telemetry.flush(), { code: 'telemetry_storage_failed' });
   await telemetry.shutdown();
   assert.match(await readFile(preservedLink, 'utf8'), /first/u);
   assert.ok((await readdir(directory)).includes('segment-00000000.jsonl'));
@@ -232,20 +234,21 @@ test('restart writers reuse one capped directory without accumulating log sets',
   assert.ok(totalBytes <= 2 * 4096 + 4096);
 });
 
-test('a new writer removes an orphaned atomic-manifest temporary file before resuming', async (t) => {
+test('a new writer preserves an unknown atomic-manifest temporary file and fails closed', async (t) => {
   const directory = await isolated(t);
   const orphan = `telemetry.manifest.${randomUUID()}.tmp`;
-  await writeFile(join(directory, orphan), '{"partial":');
-  const telemetry = createTelemetry({ enabled: true, directory });
+  await writeFile(join(directory, orphan), 'review-unique-not-from-telemetry');
+  const failures = [];
+  const telemetry = createTelemetry({ enabled: true, directory }, code => failures.push(code));
   telemetry.emit({ type: 'run.finished', executionId: 'recover', runId: 'recover', status: 'completed', durationMs: 1, modelCalls: 1, toolCalls: 0 });
 
-  await telemetry.flush();
+  await assert.rejects(telemetry.flush(), { code: 'telemetry_manifest_temp_unknown' });
   await telemetry.shutdown();
 
   const files = await readdir(directory);
-  assert.equal(files.includes(orphan), false);
-  assert.ok(files.includes('telemetry.manifest.json'));
-  assert.equal(JSON.parse((await readFile(join(directory, (await segmentFiles(directory))[0]), 'utf8')).trim()).runId, 'recover');
+  assert.deepEqual(files, [orphan]);
+  assert.equal(await readFile(join(directory, orphan), 'utf8'), 'review-unique-not-from-telemetry');
+  assert.deepEqual(failures, ['telemetry_manifest_temp_unknown']);
 });
 
 test('a manifest-temp name with a hard link is preserved and disables the writer', async (t) => {
@@ -254,14 +257,16 @@ test('a manifest-temp name with a hard link is preserved and disables the writer
   const linked = join(directory, 'preserve-this-file');
   await writeFile(join(directory, orphan), 'unknown user data');
   await link(join(directory, orphan), linked);
-  const telemetry = createTelemetry({ enabled: true, directory });
+  const failures = [];
+  const telemetry = createTelemetry({ enabled: true, directory }, code => failures.push(code));
   telemetry.emit({ type: 'run.finished', executionId: 'must-not-write', runId: 'must-not-write', status: 'completed', durationMs: 1, modelCalls: 1, toolCalls: 0 });
 
-  await telemetry.flush();
+  await assert.rejects(telemetry.flush(), { code: 'telemetry_manifest_temp_unknown' });
   await telemetry.shutdown();
 
   assert.deepEqual((await readdir(directory)).sort(), [orphan, 'preserve-this-file'].sort());
   assert.equal(await readFile(join(directory, orphan), 'utf8'), 'unknown user data');
+  assert.deepEqual(failures, ['telemetry_manifest_temp_unknown']);
 });
 
 test('a manifest-temp symlink is preserved and its target is never removed', async (t) => {
@@ -270,14 +275,16 @@ test('a manifest-temp symlink is preserved and its target is never removed', asy
   const orphan = `telemetry.manifest.${randomUUID()}.tmp`;
   await writeFile(target, 'unknown user data');
   await symlink(target, join(directory, orphan));
-  const telemetry = createTelemetry({ enabled: true, directory });
+  const failures = [];
+  const telemetry = createTelemetry({ enabled: true, directory }, code => failures.push(code));
   telemetry.emit({ type: 'run.finished', executionId: 'must-not-write', runId: 'must-not-write', status: 'completed', durationMs: 1, modelCalls: 1, toolCalls: 0 });
 
-  await telemetry.flush();
+  await assert.rejects(telemetry.flush(), { code: 'telemetry_manifest_temp_unknown' });
   await telemetry.shutdown();
 
   assert.deepEqual((await readdir(directory)).sort(), [orphan, 'preserve-this-file'].sort());
   assert.equal(await readFile(target, 'utf8'), 'unknown user data');
+  assert.deepEqual(failures, ['telemetry_manifest_temp_unknown']);
 });
 
 test('shutdown returns within its bound when a file flush never settles', async (t) => {
