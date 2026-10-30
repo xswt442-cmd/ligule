@@ -307,7 +307,7 @@ export const METHODS = Object.freeze({
       properties: {
         sessionId: SESSION_ID,
         input: { type: 'string', description: 'the user message for this round' },
-        origin: { type: 'string', enum: ['human', 'controller'], description: 'who submitted the input; local clients default to human' },
+        origin: { type: 'string', enum: ['human', 'controller'], description: 'requested source; only a trusted local UI or authenticated Agent Control bridge may record human, otherwise the Host binds the run to controller scope' },
         delegation: DELEGATION_SPEC_SCHEMA,
         requestKey: { type: 'string', minLength: 1, maxLength: 128 },
       },
@@ -364,16 +364,16 @@ export const METHODS = Object.freeze({
     description: 'Accept one task durably and return its runId only after the Session user event is synced; a matching requestKey reuses that event.',
     parameters: { type: 'object', additionalProperties: false, properties: {
       sessionId: SESSION_ID, input: { type: 'string', minLength: 1, maxLength: 65536 },
-      origin: { type: 'string', enum: ['human', 'controller'] },
+      origin: { type: 'string', enum: ['human', 'controller'], description: 'requested source; only a trusted local UI or authenticated Agent Control bridge may record human, otherwise the Host binds the run to controller scope' },
       requestKey: { type: 'string', minLength: 1, maxLength: 128 },
       delegation: DELEGATION_SPEC_SCHEMA,
     }, required: ['sessionId', 'input'] },
   },
   'run.wait': {
-    description: 'Wait for the current live runId; after it settles, a verified stored terminal result remains available.',
+    description: 'Wait for a run in the explicitly selected caller scope. The Host verifies access from its trusted UI, authenticated Agent Control bridge, or active Grant context; origin is not an authorization grant.',
     parameters: { type: 'object', additionalProperties: false, properties: {
       sessionId: SESSION_ID, runId: SESSION_ID, origin: { type: 'string', enum: ['human', 'controller'] },
-    }, required: ['sessionId', 'runId'] },
+    }, required: ['sessionId', 'runId', 'origin'] },
   },
   'run.receipt': {
     description: 'Read a durable task receipt from this project Session without reopening its writer or replaying work.',

@@ -13,11 +13,9 @@ import { modeDirectories } from '../core/dist/kernel/modes.js';
 import { withTuiHost } from '../core/tests/helpers/tui-host.js';
 
 const testDirectory = fileURLToPath(new URL('../testplace/', import.meta.url));
-const evidenceLog = fileURLToPath(new URL('../testplace/p4-run-scope.log', import.meta.url));
 
-async function logEvidence(message) {
-  await mkdir(join(evidenceLog, '..'), { recursive: true });
-  await appendFile(evidenceLog, `${new Date().toISOString()} ${message}\n`, 'utf8');
+async function logEvidence(directory, message) {
+  await appendFile(join(directory, 'p4-run-scope.log'), `${new Date().toISOString()} ${message}\n`, 'utf8');
 }
 
 function grantInput(projectRoot, name, expiresAt = null) {
@@ -72,11 +70,22 @@ test('run receipt and result reads stay within the active Grant scope and valida
       await peer.client.request('session.open', { sessionId });
       await assert.rejects(peer.client.request('run.receipt', { projectRoot: projectDirectory, sessionId, runId: first.runId }), { code: 'run_not_found' });
       await assert.rejects(peer.client.request('run.result', { projectRoot: projectDirectory, sessionId, runId: first.runId }), { code: 'run_not_found' });
+      await assert.rejects(peer.client.request('run.wait', { sessionId, origin: 'controller', runId: first.runId }), { code: 'run_not_found' });
       const second = await peer.client.request('run.submit', {
         sessionId, origin: 'controller', input: 'scope-bound result', requestKey: 'scope-key',
       });
       assert.notEqual(second.runId, first.runId, 'a second Grant must not reuse another Grant’s idempotency key');
       await peer.client.request('run.wait', { sessionId, origin: 'controller', runId: second.runId });
+      await assert.rejects(peer.client.request('run.wait', {
+        sessionId, origin: 'human', runId: second.runId,
+      }), { code: 'run_not_found' }, 'a Grant cannot select human scope by claiming human origin');
+      const claimedHuman = await peer.client.request('run.submit', {
+        sessionId, origin: 'human', input: 'a Grant cannot claim a human receipt',
+      });
+      await peer.client.request('run.wait', { sessionId, origin: 'controller', runId: claimedHuman.runId });
+      await assert.rejects(peer.client.request('run.wait', {
+        sessionId, origin: 'human', runId: claimedHuman.runId,
+      }), { code: 'run_not_found' }, 'a Grant cannot widen receipt access by claiming human origin');
 
       const otherProject = join(directory, 'other-project');
       await mkdir(otherProject);
@@ -95,7 +104,7 @@ test('run receipt and result reads stay within the active Grant scope and valida
       await assert.rejects(expiredPeer.client.request('run.receipt', { projectRoot: projectDirectory, sessionId, runId: first.runId }), { code: 'agent_control_grant_expired' });
       await assert.rejects(expiredPeer.client.request('run.result', { projectRoot: projectDirectory, sessionId, runId: first.runId }), { code: 'agent_control_grant_expired' });
     } finally { await expiredPeer.stop(); }
-    await logEvidence('PASS same-project Grant isolation, revoke/expiry authorization, and cross-workspace denial via real Hosts and Grant storage');
+    await logEvidence(directory, 'PASS same-project Grant isolation, revoke/expiry authorization, and cross-workspace denial via real Hosts and Grant storage');
   }, {
     testDirectory,
     agentControl: async ({ directory, projectDirectory }) => {
@@ -116,12 +125,18 @@ test('run receipt and result reads stay within the active Grant scope and valida
   });
 });
 
-test('trusted local UI can read both run scopes without changing session history', async () => {
-  await withTuiHost(async ({ client, sessionId, projectDirectory, sessionDirectory }) => {
+test('trusted local UI can read both run scopes even when a Grant is active', async () => {
+  let storePath;
+  let grantId;
+  await withTuiHost(async ({ client, sessionId, projectDirectory, sessionDirectory, directory }) => {
     const human = await client.request('run.submit', { sessionId, origin: 'human', input: 'human scope result', requestKey: 'human-key' });
+    await assert.rejects(client.request('run.wait', { sessionId, runId: human.runId }), { code: 'protocol_args_invalid' });
     await client.request('run.wait', { sessionId, origin: 'human', runId: human.runId });
     const controller = await client.request('run.submit', { sessionId, origin: 'controller', input: 'controller scope result', requestKey: 'controller-key' });
     await client.request('run.wait', { sessionId, origin: 'controller', runId: controller.runId });
+    const direct = await client.request('run.start', { sessionId, input: 'direct trusted UI run' });
+    await assert.rejects(client.request('run.wait', { sessionId, runId: direct.runId }), { code: 'protocol_args_invalid' });
+    assert.equal((await client.request('run.wait', { sessionId, origin: 'human', runId: direct.runId })).text, direct.text);
     const recordPath = join(sessionDirectory, `${sessionId}.jsonl`);
     const beforeReads = await readFile(recordPath);
 
@@ -130,6 +145,19 @@ test('trusted local UI can read both run scopes without changing session history
     assert.match((await client.request('run.result', { projectRoot: projectDirectory, sessionId, runId: human.runId })).json, /human scope result/u);
     assert.match((await client.request('run.result', { projectRoot: projectDirectory, sessionId, runId: controller.runId })).json, /controller scope result/u);
     assert.deepEqual(await readFile(recordPath), beforeReads, 'trusted reads must not append history');
-    await logEvidence('PASS trusted local UI read human/controller run results without changing Session JSONL');
-  }, { testDirectory, permissionControl: true });
+    await logEvidence(directory, 'PASS trusted local UI read human/controller run results without changing Session JSONL');
+  }, {
+    testDirectory,
+    permissionControl: true,
+    agentControl: async ({ directory, projectDirectory }) => {
+      storePath = join(directory, 'agent-control.json');
+      const empty = await listDelegationGrants(storePath);
+      const created = await createDelegationGrant(storePath, grantInput(projectDirectory, 'trusted UI read scope'), empty.version);
+      grantId = created.grants[0].id;
+      return {
+        grantId, storePath, operator: false,
+        validate: () => requireDelegationGrant(storePath, grantId, projectDirectory),
+      };
+    },
+  });
 });

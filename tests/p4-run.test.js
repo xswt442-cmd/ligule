@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { link, mkdtemp, mkdir, readFile, readdir, symlink, unlink, writeFile } from 'node:fs/promises';
+import { link, mkdtemp, mkdir, readFile, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createConnection } from '../core/dist/host/connection.js';
@@ -206,5 +206,85 @@ test('durable run submission deduplicates a live retry and rejects a payload con
     if (host.process.exitCode === null) await new Promise(resolve => host.process.once('close', resolve));
     server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('run.wait requires an explicit scope and cannot use origin to widen access', async () => {
+  const output = join(repository, 'testplace', 'p4-runs');
+  await mkdir(output, { recursive: true });
+  const root = await mkdtemp(join(output, 'p4-run-wait-default-'));
+  const data = join(root, 'data');
+  await mkdir(data);
+  let requestCount = 0;
+  const server = createServer((_request, response) => {
+    requestCount += 1;
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end([
+      { type: 'message_start', message: { usage: {} } },
+      { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'done' } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+      { type: 'message_stop' },
+    ].map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''));
+  });
+  const port = await listenFetchable(server);
+  const childProcess = spawn(process.execPath, [cli, 'host', '--config', 'model.api="messages"',
+    '--config', `model.baseURL="http://127.0.0.1:${port}"`, '--config', 'model.model="p4-test"'], {
+    cwd: root,
+    env: { ...process.env, HOME: root, USERPROFILE: root, LIGULE_HOME: data, LIGULE_API_KEY: 'local-test-key' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  const stderr = [];
+  childProcess.stderr.setEncoding('utf8');
+  childProcess.stderr.on('data', chunk => stderr.push(chunk));
+  const client = createConnection({ input: childProcess.stdout, output: childProcess.stdin });
+  try {
+    const { sessionId } = await deadline(client.request('session.create', {}), 'create session');
+    const started = await deadline(client.request('run.start', { sessionId, input: 'return a short response' }), 'finish the Host-scoped run');
+    assert.equal(started.text, 'done');
+    assert.equal(typeof started.runId, 'string');
+    await assert.rejects(client.request('run.wait', { sessionId, runId: started.runId }), { code: 'protocol_args_invalid' });
+    await assert.rejects(client.request('run.wait', { sessionId, runId: started.runId, origin: 'human' }), { code: 'run_not_found' },
+      'a Host without trusted UI control cannot claim human scope by setting origin');
+    const controllerStart = await deadline(client.request('run.wait', {
+      sessionId, runId: started.runId, origin: 'controller',
+    }), 'read the untrusted Host run in its controller scope');
+    assert.equal(controllerStart.text, 'done');
+
+    const claimedHumanStart = await deadline(client.request('run.start', {
+      sessionId, origin: 'human', input: 'return a controller response despite claimed human origin',
+    }), 'accept an untrusted Host run with a claimed human origin');
+    await assert.rejects(client.request('run.wait', {
+      sessionId, runId: claimedHumanStart.runId, origin: 'human',
+    }), { code: 'run_not_found' }, 'an untrusted Host ignores claimed human attribution');
+    const claimedHumanControllerResult = await deadline(client.request('run.wait', {
+      sessionId, runId: claimedHumanStart.runId, origin: 'controller',
+    }), 'read the claimed-human run in controller scope');
+    assert.equal(claimedHumanControllerResult.text, 'done');
+
+    const accepted = await deadline(client.request('run.submit', { sessionId, input: 'return a controller response' }), 'accept controller run');
+    const receiptDeadline = Date.now() + 5_000;
+    let receipt;
+    while (Date.now() < receiptDeadline) {
+      receipt = await client.request('run.receipt', { projectRoot: root, sessionId, runId: accepted.runId });
+      if (receipt.state === 'completed') break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(receipt.state, 'completed', `provider requests=${requestCount}`);
+    await assert.rejects(client.request('run.wait', { sessionId, runId: accepted.runId }), { code: 'protocol_args_invalid' });
+    const completed = await deadline(client.request('run.wait', { sessionId, runId: accepted.runId, origin: 'controller' }), 'wait for controller run');
+    assert.equal(completed.text, 'done');
+    assert.equal(requestCount, 3);
+  } catch (error) {
+    throw new Error(`${error.message}; host exit=${String(childProcess.exitCode)} stderr=${stderr.join('')}`, { cause: error });
+  } finally {
+    childProcess.stdin.end();
+    if (childProcess.exitCode === null) childProcess.kill();
+    if (childProcess.exitCode === null) await new Promise(resolve => childProcess.once('close', resolve));
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+    await rm(root, { recursive: true, force: true });
   }
 });

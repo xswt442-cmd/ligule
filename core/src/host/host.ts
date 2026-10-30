@@ -49,7 +49,7 @@ import { compactionLimitsOf, loopLimitsOf, sessionLoopLimits, taskLimitsOf } fro
 export { compactionLimitsOf } from './runtime-limits.js';
 import { createCompaction } from '../session/compaction.js';
 import { sessionWriterActive } from '../session/lock.js';
-import { requestAgentControl, type AgentControlRequest } from './agent-control-runtime.js';
+import { requestAgentControl, TRUSTED_AGENT_CONTROL_ORIGIN, type AgentControlRequest } from './agent-control-runtime.js';
 import { usageEvent } from '../session/usage.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
 import { foldLabel } from '../session/format.js';
@@ -324,7 +324,9 @@ export interface Host {
   release(): Promise<void>;
 }
 
-type HostClientConnection = Pick<Connection, 'notify' | 'request'>;
+type HostClientConnection = Pick<Connection, 'notify' | 'request'> & {
+  readonly [TRUSTED_AGENT_CONTROL_ORIGIN]?: true;
+};
 
 interface HostRequestWithParams {
   readonly method: string;
@@ -469,6 +471,19 @@ function errorCode(error: unknown): string | undefined {
 function errorMessage(error: unknown): string | undefined {
   if (!isRecord(error)) return undefined;
   return typeof error.message === 'string' ? error.message : undefined;
+}
+
+function runOriginOf(value: unknown, defaultOrigin: 'human' | 'controller', canRecordHuman: boolean): 'human' | 'controller' {
+  if (value !== undefined && value !== 'human' && value !== 'controller') throw new KernelError('protocol_args_invalid');
+  // Only trusted local UI or the authenticated Agent Control bridge can persist a human source.
+  // External MCP callers cannot self-assert it through request parameters.
+  if (!canRecordHuman) return 'controller';
+  return value ?? defaultOrigin;
+}
+
+function readableRunScopes(permissionControl: boolean, connection: HostClientConnection, controllerScope: string): string[] | undefined {
+  if (permissionControl) return undefined;
+  return connection[TRUSTED_AGENT_CONTROL_ORIGIN] === true ? ['human', controllerScope] : [controllerScope];
 }
 
 function errorDetail(error: unknown): string | undefined {
@@ -3120,8 +3135,8 @@ export function createHost({
         }
         case 'run.start': {
           const state = open(sessionId);
-          const origin = message.params.origin;
-          if (origin !== undefined && origin !== 'human' && origin !== 'controller') throw new KernelError('protocol_args_invalid');
+          const origin = runOriginOf(message.params.origin, 'human',
+            permissionControl || connection[TRUSTED_AGENT_CONTROL_ORIGIN] === true);
           const scope = origin === 'controller' ? 'controller:' + (grant?.id ?? 'local') : 'human';
           const requestKey = message.params.requestKey;
           const digest = runPayloadDigest(input, message.params.delegation);
@@ -3384,8 +3399,8 @@ export function createHost({
         }
         case 'run.submit': {
           const state = open(sessionId);
-          const origin = message.params.origin ?? 'controller';
-          if (origin !== 'human' && origin !== 'controller') throw new KernelError('protocol_args_invalid');
+          const origin = runOriginOf(message.params.origin, 'controller',
+            permissionControl || connection[TRUSTED_AGENT_CONTROL_ORIGIN] === true);
           const scope = origin === 'controller' ? 'controller:' + (grant?.id ?? 'local') : 'human';
           const key = message.params.requestKey;
           const digest = runPayloadDigest(input, message.params.delegation);
@@ -3433,10 +3448,14 @@ export function createHost({
         case 'run.wait': {
           const state = open(sessionId);
           const runId = requiredString(message.params.runId, 'runId');
-          if (state.activeRunId === runId && state.operation !== undefined) return await state.operation;
-          const scope = message.params.origin === 'human' ? 'human' : 'controller:' + (grant?.id ?? 'local');
+          const origin = message.params.origin;
+          if (origin !== 'human' && origin !== 'controller') throw new KernelError('protocol_args_invalid');
+          const scope = origin === 'human' ? 'human' : 'controller:' + (grant?.id ?? 'local');
+          const scopes = readableRunScopes(permissionControl, connection, 'controller:' + (grant?.id ?? 'local'));
+          if (scopes !== undefined && !scopes.includes(scope)) throw new KernelError('run_not_found');
           const receipt = findRunReceipt(await state.session.read(), sessionId, scope, { runId });
           if (receipt === undefined) throw new KernelError('run_not_found');
+          if (state.activeRunId === runId && state.operation !== undefined) return await state.operation;
           if (receipt.state === 'accepted' || receipt.state === 'interrupted') throw new KernelError('run_not_active');
           const result = await readRunResult(state.session.directory, workspaceIdentity(state.environment.projectRoot), sessionId, receipt);
           if (result.state === 'completed') return {
@@ -3482,11 +3501,14 @@ export function createHost({
           const owner = header?.workspace ?? (header?.projectRoot ? workspaceIdentity(header.projectRoot) : undefined);
           if (owner !== workspace) throw new KernelError('run_owner_mismatch');
           const events = await log.read();
-          const scope = permissionControl ? undefined : 'controller:' + (grant?.id ?? 'local');
+          const scopes = readableRunScopes(permissionControl, connection, 'controller:' + (grant?.id ?? 'local'));
+          const visibleReceipts = scopes === undefined
+            ? runReceipts(events, sessionId)
+            : scopes.flatMap(scope => runReceipts(events, sessionId, scope)).sort((left, right) => left.userSeq - right.userSeq);
           if (message.method === 'run.receipts') {
             const limit = message.params.limit ?? 20;
             const before = message.params.before;
-            const matching = runReceipts(events, sessionId, scope).filter(item => before === undefined || item.userSeq < before).reverse();
+            const matching = visibleReceipts.filter(item => before === undefined || item.userSeq < before).reverse();
             const page = matching.slice(0, limit);
             return { sessionId, receipts: page.map(receipt => sessions.get(sessionId)?.activeRunId === receipt.runId
               ? { ...receipt, state: 'running', liveness: 'alive' } : { ...receipt, liveness: 'unknown' }),
@@ -3498,9 +3520,8 @@ export function createHost({
             ...(message.params.requestKey === undefined ? {} : { requestKey: message.params.requestKey }),
           };
           if ((reference.runId === undefined) === (reference.requestKey === undefined)) throw new KernelError('run_reference_invalid');
-          const receipt = scope === undefined
-            ? runReceipts(events, sessionId).find(item => reference.runId !== undefined ? item.runId === reference.runId : item.requestKey === reference.requestKey)
-            : findRunReceipt(events, sessionId, scope, reference);
+          const receipt = visibleReceipts.find(item => reference.runId !== undefined
+            ? item.runId === reference.runId : item.requestKey === reference.requestKey);
           if (receipt === undefined) throw new KernelError('run_not_found');
           if (message.method === 'run.receipt') {
             const live = sessions.get(sessionId)?.activeRunId === receipt.runId;

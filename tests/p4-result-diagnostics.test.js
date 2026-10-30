@@ -53,5 +53,5 @@ test('reusing a structured completion preserves its original completion identity
     assert.deepEqual(reused.structured, original.structured);
     assert.deepEqual(reused.validation, original.validation);
     assert.equal(providerRequests.length, 1);
-  }, { config: { policy: { mode: 'auto' } } });
+  }, { config: { policy: { mode: 'auto' } }, permissionControl: true });
 });

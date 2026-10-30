@@ -205,6 +205,7 @@ test('a second local Host can observe and take over the active MCP-owned Session
         ...environment,
         config: createConfig({ user: { ...environment.config, workspaceRoot: projectRoot } }),
         configLayers: layers,
+        permissionControl: true,
       });
       const localConnection = { notify() {}, async request() { return { decision: 'deny' }; } };
 
@@ -285,6 +286,7 @@ test('Desktop human input and question answers reach the single MCP-owned real H
         ...environment,
         config: createConfig({ user: { ...environment.config, workspaceRoot: projectRoot } }),
         configLayers: layers,
+        permissionControl: true,
       });
       const localConnection = { notify() {}, async request() { return { decision: 'deny' }; } };
       const started = await client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'Ask the local user which route to take.' } });
@@ -339,7 +341,16 @@ test('Desktop human input and question answers reach the single MCP-owned real H
       const records = transcript.structuredContent.records.map((item) => JSON.parse(item.json));
       const users = records.filter((item) => item.kind === 'user');
       assert.ok(users.some((item) => item.origin === 'controller' && item.text === 'Ask the local user which route to take.'));
-      assert.ok(users.some((item) => item.origin === 'human' && item.text === 'Please keep the northern route.'));
+      const humanRecord = users.find((item) => item.origin === 'human' && item.text === 'Please keep the northern route.');
+      assert.ok(humanRecord);
+      const humanRunId = humanRecord.run?.runId;
+      assert.equal(typeof humanRunId, 'string');
+      const humanResult = await client.callTool({ name: 'ligule_run_get', arguments: {
+        sessionId, runId: humanRunId, offset: 0,
+      } });
+      assert.equal(humanResult.isError, undefined, `${JSON.stringify(humanResult)}\n${stderr()}`);
+      assert.equal(humanResult.structuredContent.receipt.runId, humanRunId);
+      assert.equal(JSON.parse(humanResult.structuredContent.result.json).state, 'completed');
     } finally {
       await host?.release();
       await client.close();

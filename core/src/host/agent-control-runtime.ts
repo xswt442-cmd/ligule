@@ -13,6 +13,10 @@ const SOCKET_TIMEOUT_MS = MAX_WAIT_MS + 5_000;
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/u;
 const CODE = /^[a-z][a-z0-9_]{0,79}$/u;
 
+// In-process Control uses this non-serializable capability only for actions delivered through
+// the authenticated local Agent Control socket. MCP request data cannot forge the symbol.
+export const TRUSTED_AGENT_CONTROL_ORIGIN = Symbol('trusted-agent-control-origin');
+
 export type AgentControlRequest =
   | { readonly action: 'status'; readonly after: number; readonly limit: number; readonly waitMs: number }
   | { readonly action: 'configuration' }

@@ -10,7 +10,7 @@ import { checkedAnswers, type AskQuestion } from '../tools/ask-user.js';
 import { APPROVAL_METHOD, QUESTION_METHOD } from './protocol.js';
 import type { Host } from './host.js';
 import type { LoopResult } from '../kernel/loop.js';
-import { createAgentControlRuntime, type AgentControlRequest } from './agent-control-runtime.js';
+import { createAgentControlRuntime, TRUSTED_AGENT_CONTROL_ORIGIN, type AgentControlRequest } from './agent-control-runtime.js';
 import { containsSensitiveMaterial } from './approval.js';
 
 export type OperationState = 'running' | 'done' | 'failed' | 'cancelled';
@@ -249,6 +249,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
   }
 
   const connection = {
+    [TRUSTED_AGENT_CONTROL_ORIGIN]: true as const,
     notify(message: Record<string, unknown>) {
       const sessionId = typeof message.sessionId === 'string' ? message.sessionId : undefined;
       if (sessionId === undefined) return;
