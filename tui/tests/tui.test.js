@@ -28,7 +28,7 @@ try {
 const options = { skip: missing === '' ? false : missing };
 const editorFixture = fileURLToPath(new URL('./fixtures/editor.mjs', import.meta.url));
 const mcpServerFixture = fileURLToPath(new URL('../../tests/fixtures/mcp-minimal.mjs', import.meta.url));
-const { foldText, editDraft, projectRecord, buildStatusLine, contextSegment, findRecord, branchOf, detailTitle, routeInput, candidatesOf, describeChange, displayWidth, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, findLines, mentionToken, insertMention, resolveSessionId, SESSION_ROWS, isTypingRun } = rows;
+const { foldText, editDraft, projectRecord, buildStatusLine, activeRunBudgetSegment, contextSegment, findRecord, branchOf, detailTitle, routeInput, candidatesOf, describeChange, displayWidth, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, findLines, mentionToken, insertMention, resolveSessionId, SESSION_ROWS, isTypingRun } = rows;
 const quoted = (value) => `"${value.replaceAll('"', '\\"')}"`;
 const plainOutput = (value) => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
 
@@ -634,6 +634,37 @@ test('the metadata line reports context pressure only when a window is written',
   assert.match(draw(64), /ctx:~/);
   assert.doesNotMatch(draw(200), /mode:|policy:|tools:/);
   assert.ok(UI_COMMANDS.some((command) => command.name === 'compact'), '/compact 在命令表里');
+});
+
+test('/status describes only the active run budget and formats it in both languages', options, () => {
+  const status = {
+    running: true,
+    task: {
+      modelCalls: 3, maxModelCalls: 64, timeoutMs: 1_800_000, interactionWaitTimeoutMs: 43_200_000,
+      interactionWaitMs: 90_000, executionElapsedMs: 31_000, executionPaused: true,
+    },
+  };
+  const chinese = activeRunBudgetSegment(status, 'zh');
+  assert.match(chinese, /Run 模型调用 3\/64/);
+  assert.match(chinese, /执行剩余 29分29秒/);
+  assert.match(chinese, /累计交互等待 1分30秒\/12小时/);
+  assert.match(chinese, /执行期限已暂停/);
+
+  const english = activeRunBudgetSegment(status, 'en');
+  assert.match(english, /Run model calls 3\/64/);
+  assert.match(english, /execution 29m 29s left/);
+  assert.match(english, /interaction wait 1m 30s\/12h/);
+  assert.match(english, /deadline paused/);
+});
+
+test('/status does not present a completed task as active and labels a missing live snapshot', options, () => {
+  assert.equal(activeRunBudgetSegment({ running: false, task: {
+    modelCalls: 3, maxModelCalls: 64, timeoutMs: 1_800_000, interactionWaitTimeoutMs: 43_200_000,
+    interactionWaitMs: 90_000, executionElapsedMs: 31_000, executionPaused: false,
+  } }, 'zh'), '');
+  assert.match(activeRunBudgetSegment({ running: true, task: null, taskLimits: { maxModelCalls: 64 }, progress: { modelCalls: 2 } }, 'en'),
+    /model calls 2\/64 · run budget initializing/);
+  assert.match(activeRunBudgetSegment({ running: true, task: null }, 'zh'), /Run 预算准备中/);
 });
 
 test('the metadata line shortens the workspace path and keeps the interrupt hint when narrow', options, () => {

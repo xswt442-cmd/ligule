@@ -130,8 +130,20 @@ interface TuiStatus {
   readonly denials: { readonly consecutive: number; readonly total: number };
   readonly usage?: { readonly estimated: number; readonly window: number; readonly threshold: number } | null;
   readonly progress?: TuiProgress | null;
+  readonly taskLimits?: { readonly maxModelCalls: number; readonly timeoutMs: number; readonly requestTimeoutMs: number; readonly interactionWaitTimeoutMs: number };
+  readonly task?: TuiTaskBudget | null;
   readonly templates?: readonly TemplateCommand[];
   readonly [key: string]: unknown;
+}
+
+interface TuiTaskBudget {
+  readonly modelCalls: number;
+  readonly maxModelCalls: number;
+  readonly timeoutMs: number;
+  readonly interactionWaitTimeoutMs: number;
+  readonly interactionWaitMs: number;
+  readonly executionElapsedMs: number;
+  readonly executionPaused: boolean;
 }
 
 interface TuiProgress {
@@ -142,6 +154,54 @@ interface TuiProgress {
   readonly modelCalls: number;
   readonly toolCalls: number;
   readonly outputTokens: number | null;
+}
+
+function durationLabel(milliseconds: number, locale: Locale): string {
+  const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1000));
+  const units: readonly [number, string, string][] = locale === 'en'
+    ? [[86_400, 'd', 'd'], [3_600, 'h', 'h'], [60, 'm', 'm'], [1, 's', 's']]
+    : [[86_400, '天', '天'], [3_600, '小时', '小时'], [60, '分', '分'], [1, '秒', '秒']];
+  let remaining = totalSeconds;
+  const parts: string[] = [];
+  for (const [seconds, short, long] of units) {
+    const count = Math.floor(remaining / seconds);
+    if (count === 0 && parts.length === 0 && seconds !== 1) continue;
+    if (count > 0) {
+      parts.push(locale === 'en' ? `${count}${short}` : `${count}${long}`);
+      remaining -= count * seconds;
+      if (parts.length === 2) break;
+    }
+  }
+  return parts.length === 0 ? (locale === 'en' ? '0s' : '0秒') : parts.join(locale === 'en' ? ' ' : '');
+}
+
+export function activeRunBudgetSegment(status: TuiStatus | null, locale: Locale = 'zh'): string {
+  if (status?.running !== true) return '';
+  const task = status.task;
+  if (task === undefined || task === null) {
+    const calls = status.progress?.modelCalls;
+    const maximum = status.taskLimits?.maxModelCalls;
+    const usage = Number.isSafeInteger(calls) && Number.isSafeInteger(maximum)
+      ? locale === 'en' ? `model calls ${calls}/${maximum}` : `模型调用 ${calls}/${maximum}`
+      : '';
+    const preparing = locale === 'en' ? 'run budget initializing' : 'Run 预算准备中';
+    return ` · ${[usage, preparing].filter(Boolean).join(' · ')}`;
+  }
+  const values = [task.modelCalls, task.maxModelCalls, task.timeoutMs, task.interactionWaitMs, task.interactionWaitTimeoutMs, task.executionElapsedMs];
+  if (!values.every(Number.isSafeInteger) || values.some(value => value < 0) || task.timeoutMs < 1 || task.maxModelCalls < 1
+    || task.interactionWaitTimeoutMs < 1 || typeof task.executionPaused !== 'boolean') {
+    return locale === 'en' ? ' · run budget details unavailable' : ' · Run 预算信息暂不可用';
+  }
+  const remaining = Math.max(0, task.timeoutMs - task.executionElapsedMs);
+  const calls = locale === 'en' ? `model calls ${task.modelCalls}/${task.maxModelCalls}` : `模型调用 ${task.modelCalls}/${task.maxModelCalls}`;
+  const deadline = locale === 'en'
+    ? `execution ${durationLabel(remaining, locale)} left`
+    : `执行剩余 ${durationLabel(remaining, locale)}`;
+  const interactions = locale === 'en'
+    ? `interaction wait ${durationLabel(task.interactionWaitMs, locale)}/${durationLabel(task.interactionWaitTimeoutMs, locale)}`
+    : `累计交互等待 ${durationLabel(task.interactionWaitMs, locale)}/${durationLabel(task.interactionWaitTimeoutMs, locale)}`;
+  const paused = task.executionPaused ? (locale === 'en' ? ' · deadline paused' : ' · 执行期限已暂停') : '';
+  return ` · Run ${calls} · ${deadline} · ${interactions}${paused}`;
 }
 
 interface DetailState {
@@ -2142,9 +2202,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           ` · 权限 ${current.permission.profile} · 网络 ${current.permission.network} · Shell ${current.permission.execution.available ? '可用' : `不可用（${current.permission.execution.code ?? '能力不足'}）`}`,
           ` · permission ${current.permission.profile} · network ${current.permission.network} · Shell ${current.permission.execution.available ? 'available' : `unavailable (${current.permission.execution.code ?? 'capability limits'})`}`,
         );
+        const task = activeRunBudgetSegment(current, locale);
         push({ kind: 'meta', text: current === null ? t('无法读取状态', 'Could not read status')
           : t(`工具模式 ${current.mode ?? '-'} · 审批 ${current.policy} · 连续拒绝 ${current.denials.consecutive} / 累计 ${current.denials.total} · ${current.eventCount} 条记录`, `Mode ${current.mode ?? '-'} · approvals ${current.policy} · denials ${current.denials.consecutive} consecutive / ${current.denials.total} total · ${current.eventCount} events`)
-            + permission + (context === '' ? '' : ` · ${context}`) });
+            + permission + (context === '' ? '' : ` · ${context}`) + task });
       })();
       return;
     }
