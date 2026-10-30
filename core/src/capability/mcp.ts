@@ -8,6 +8,8 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { isAbsolute, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { setTimeout as delay } from 'node:timers/promises';
 import { Ajv } from 'ajv';
 import { Ajv2020 } from 'ajv/dist/2020.js';
 import * as formatsModule from 'ajv-formats';
@@ -55,6 +57,7 @@ interface ConnectedServer {
   name: string;
   client: Client;
   child?: ChildProcess;
+  processGroupId?: number;
   job?: OwnedProcessJob;
   jobAssigned?: boolean;
   toolPolicy?: McpToolPolicy;
@@ -222,6 +225,88 @@ function waitForChildClose(child: ChildProcess): Promise<void> {
   });
 }
 
+const MCP_PROCESS_GROUP_START_TIMEOUT_MS = 2_000;
+const MCP_PROCESS_GROUP_TERM_TIMEOUT_MS = 1_000;
+const MCP_PROCESS_GROUP_KILL_TIMEOUT_MS = 1_000;
+
+function processGroupExists(processGroupId: number): boolean {
+  try {
+    process.kill(-processGroupId, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ESRCH') return false;
+    if (code === 'EPERM') return true;
+    throw error;
+  }
+}
+
+async function waitForProcessGroup(processGroupId: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (processGroupExists(processGroupId)) {
+    if (Date.now() >= deadline) return false;
+    await delay(20);
+  }
+  return true;
+}
+
+async function processGroupOf(child: ChildProcess | undefined): Promise<number | undefined> {
+  if (child?.pid === undefined) return undefined;
+  const deadline = Date.now() + MCP_PROCESS_GROUP_START_TIMEOUT_MS;
+  while (true) {
+    try {
+      process.kill(-child.pid, 0);
+      return child.pid;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ESRCH' && code !== 'EPERM') throw error;
+    }
+    if (!childIsAlive(child) || Date.now() >= deadline) return undefined;
+    await delay(10);
+  }
+}
+
+async function processGroupLauncherPath(): Promise<string | undefined> {
+  if (process.platform === 'win32') return undefined;
+  if (typeof process.execve !== 'function') {
+    throw new KernelError('mcp_process_group_unavailable', { detail: 'POSIX MCP process groups require Node.js process.execve support' });
+  }
+  try {
+    const koffiModule = await import('koffi');
+    koffiModule.default.load(null).func('int setsid(void)');
+  } catch (cause) {
+    throw new KernelError('mcp_process_group_unavailable', {
+      cause,
+      detail: 'POSIX MCP process groups require the Koffi native dependency and libc setsid support',
+    });
+  }
+  return fileURLToPath(new URL('./mcp-posix.js', import.meta.url));
+}
+
+async function terminatePosixProcessGroup(processGroupId: number): Promise<void> {
+  if (!processGroupExists(processGroupId)) return;
+  try { process.kill(-processGroupId, 'SIGTERM'); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
+    // Still attempt the bounded forced stop below; it may succeed when graceful termination did not.
+  }
+  if (await waitForProcessGroup(processGroupId, MCP_PROCESS_GROUP_TERM_TIMEOUT_MS)) return;
+
+  try { process.kill(-processGroupId, 'SIGKILL'); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
+    throw new KernelError('mcp_process_cleanup_failed', {
+      cause: error,
+      detail: `could not force-stop owned MCP process group ${processGroupId}`,
+    });
+  }
+  if (!await waitForProcessGroup(processGroupId, MCP_PROCESS_GROUP_KILL_TIMEOUT_MS)) {
+    throw new KernelError('mcp_process_cleanup_failed', {
+      detail: `owned MCP process group ${processGroupId} remained alive after SIGKILL`,
+    });
+  }
+}
+
 async function terminateWindowsTree(child: ChildProcess | undefined): Promise<void> {
   if (!childIsAlive(child)) return;
   let code: number | null;
@@ -246,7 +331,7 @@ function throwCleanupErrors(errors: unknown[], message: string): void {
   if (errors.length > 1) throw new AggregateError(errors, message);
 }
 
-async function closeClient(opened: Pick<ConnectedServer, 'client' | 'child' | 'job' | 'jobAssigned'>): Promise<void> {
+async function closeClient(opened: Pick<ConnectedServer, 'client' | 'child' | 'processGroupId' | 'job' | 'jobAssigned'>): Promise<void> {
   const errors: unknown[] = [];
   let jobClosed = opened.job === undefined;
   if (opened.job !== undefined) {
@@ -271,23 +356,29 @@ async function closeClient(opened: Pick<ConnectedServer, 'client' | 'child' | 'j
   try { await opened.client.close(); }
   catch (error) { errors.push(error); }
 
-  if (process.platform !== 'win32' && opened.child?.pid !== undefined) {
-    try {
-      process.kill(-opened.child.pid, 'SIGKILL');
-      await waitForChildClose(opened.child);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') errors.push(error);
+  if (process.platform !== 'win32' && opened.processGroupId !== undefined) {
+    try { await terminatePosixProcessGroup(opened.processGroupId); }
+    catch (error) { errors.push(error); }
+    if (opened.child !== undefined) {
+      try { await waitForChildClose(opened.child); }
+      catch (error) { errors.push(error); }
     }
   }
   throwCleanupErrors(errors, 'MCP client cleanup failed');
 }
 
 // 每台服务器最多启动一个子进程，并在 Host 生命周期内复用；不自动重连或并发启动多个进程。
-export async function connectServer(settings: NormalizedMcpServerConfig, signal?: AbortSignal, toolPolicy?: McpToolPolicy): Promise<ConnectedServer> {
+export async function connectServer(
+  settings: NormalizedMcpServerConfig,
+  signal?: AbortSignal,
+  toolPolicy?: McpToolPolicy,
+  onCleanupPending?: (opened: ConnectedServer) => void,
+): Promise<ConnectedServer> {
   const job = process.platform === 'win32' ? await createOwnedProcessJob({ assignCurrentProcess: false }) : undefined;
+  const processGroupLauncher = await processGroupLauncherPath();
   const transport = new StdioClientTransport({
-    command: settings.command,
-    args: settings.args,
+    command: processGroupLauncher === undefined ? settings.command : process.execPath,
+    args: processGroupLauncher === undefined ? settings.args : [processGroupLauncher, settings.command, ...settings.args],
     cwd: settings.cwd,
     env: mcpEnvironment(settings.env),
     stderr: 'pipe',
@@ -297,6 +388,7 @@ export async function connectServer(settings: NormalizedMcpServerConfig, signal?
   // 这是 MCP 客户端协议身份，不代表 Core 有独立版本。
   const client = new Client({ name: 'ligule', version: '1.0.0' });
   let child: ChildProcess | undefined;
+  let processGroupId: number | undefined;
   let jobAssigned = false;
   try {
     const connecting = client.connect(transport, signal === undefined ? undefined : { signal });
@@ -309,18 +401,34 @@ export async function connectServer(settings: NormalizedMcpServerConfig, signal?
     await connecting;
     child ??= (transport as unknown as { _process?: ChildProcess })._process;
     if (child?.pid === undefined) throw new KernelError('mcp_process_unavailable', { detail: settings.name });
+    if (processGroupLauncher !== undefined) {
+      processGroupId = await processGroupOf(child);
+      if (processGroupId === undefined) throw new KernelError('mcp_process_group_unavailable', { detail: settings.name });
+    }
     if (job !== undefined && !jobAssigned) {
       job.assignPid(child.pid);
       jobAssigned = true;
     }
-    const opened = { name: settings.name, client, child, job, jobAssigned, toolPolicy, tools: new Map<string, ToolDefinition>() };
+    const opened = { name: settings.name, client, child, processGroupId, job, jobAssigned, toolPolicy, tools: new Map<string, ToolDefinition>() };
     await refreshTools(opened, signal);
     return opened;
   } catch (error) {
     child ??= (transport as unknown as { _process?: ChildProcess })._process;
-    const failure = new KernelError('mcp_connect_failed', { cause: error, detail: `${settings.name}: ${error instanceof Error ? error.message : String(error)}` });
-    try { await closeClient({ client, child, job, jobAssigned }); }
+    let failureCause: unknown = error;
+    if (processGroupLauncher !== undefined && processGroupId === undefined) {
+      try { processGroupId = await processGroupOf(child); }
+      catch (groupError) {
+        failureCause = new AggregateError([error, groupError], 'MCP connection and process-group inspection failed');
+      }
+    }
+    const failure = new KernelError('mcp_connect_failed', {
+      cause: failureCause,
+      detail: `${settings.name}: ${error instanceof Error ? error.message : String(error)}`,
+    });
+    const opened = { name: settings.name, client, child, processGroupId, job, jobAssigned, toolPolicy, tools: new Map<string, ToolDefinition>() };
+    try { await closeClient(opened); }
     catch (cleanupError) {
+      onCleanupPending?.(opened);
       throw new KernelError('mcp_connect_failed', { cause: new AggregateError([failure, cleanupError], 'MCP connection and cleanup failed'), detail: failure.detail });
     }
     throw failure;
@@ -341,10 +449,12 @@ export interface McpRegistry {
 export function createMcpRegistry(configs: NormalizedMcpServerConfig[], options: McpRegistryOptions = {}): McpRegistry {
   const connected = new Map<string, ConnectedServer>();
   const pending = new Map<string, Promise<ConnectedServer>>();
+  const cleanupPending = new Set<ConnectedServer>();
   const serverLifetimes = new Map<string, AbortController>();
   const stopping = new Map<string, Promise<void>>();
   const lifetime = new AbortController();
   const closedClients = new WeakSet<Client>();
+  const closingClients = new WeakMap<Client, Promise<void>>();
   let closing: Promise<void> | undefined;
 
   function operationSignal(name: string, signal?: AbortSignal): AbortSignal {
@@ -360,8 +470,31 @@ export function createMcpRegistry(configs: NormalizedMcpServerConfig[], options:
 
   async function closeServer(opened: ConnectedServer): Promise<void> {
     if (closedClients.has(opened.client)) return;
-    closedClients.add(opened.client);
-    await closeClient(opened);
+    const existing = closingClients.get(opened.client);
+    if (existing !== undefined) return existing;
+    const attempt = closeClient(opened).then(() => {
+      closedClients.add(opened.client);
+      cleanupPending.delete(opened);
+    }, error => {
+      cleanupPending.add(opened);
+      throw error;
+    }).finally(() => {
+      if (closingClients.get(opened.client) === attempt) closingClients.delete(opened.client);
+    });
+    closingClients.set(opened.client, attempt);
+    return attempt;
+  }
+
+  function watchProcessGroupExit(opened: ConnectedServer): void {
+    if (opened.processGroupId === undefined || opened.child === undefined) return;
+    const cleanup = () => {
+      cleanupPending.add(opened);
+      void closeServer(opened).then(() => {
+        if (connected.get(opened.name) === opened) connected.delete(opened.name);
+      }).catch(() => undefined);
+    };
+    opened.child.once('close', cleanup);
+    if (!childIsAlive(opened.child)) cleanup();
   }
 
   async function server(name: string, signal?: AbortSignal): Promise<ConnectedServer> {
@@ -373,7 +506,8 @@ export function createMcpRegistry(configs: NormalizedMcpServerConfig[], options:
     if (existing !== undefined) return existing;
     const settings = configs.find((entry) => entry.name === name);
     if (settings === undefined) throw new KernelError('mcp_server_unknown', { detail: `${name} (configured: ${configs.map((entry) => entry.name).join(', ') || 'none'})` });
-    const started = pending.get(name) ?? connectServer(settings, activeSignal, options.toolPolicy);
+    const started = pending.get(name) ?? connectServer(settings, activeSignal, options.toolPolicy,
+      opened => cleanupPending.add(opened));
     pending.set(name, started);
     try {
       const opened = await started;
@@ -382,6 +516,7 @@ export function createMcpRegistry(configs: NormalizedMcpServerConfig[], options:
         throw activeSignal.reason;
       }
       connected.set(name, opened);
+      watchProcessGroupExit(opened);
       return opened;
     } finally {
       if (pending.get(name) === started) pending.delete(name);
@@ -427,9 +562,15 @@ export function createMcpRegistry(configs: NormalizedMcpServerConfig[], options:
       const closing = (async () => {
         const inflight = pending.get(name);
         if (inflight !== undefined) await inflight.catch(() => undefined);
-        const opened = connected.get(name);
-        if (opened !== undefined) await closeServer(opened);
-        connected.delete(name);
+        const opened = new Set([...cleanupPending].filter(item => item.name === name));
+        const active = connected.get(name);
+        if (active !== undefined) opened.add(active);
+        const results = await Promise.allSettled([...opened].map(async item => {
+          await closeServer(item);
+          if (connected.get(name) === item) connected.delete(name);
+        }));
+        const errors = results.flatMap(result => result.status === 'rejected' ? [result.reason] : []);
+        if (errors.length > 0) throwCleanupErrors(errors, 'MCP server cleanup failed');
         pending.delete(name);
         serverLifetimes.delete(name);
       })();
@@ -442,17 +583,23 @@ export function createMcpRegistry(configs: NormalizedMcpServerConfig[], options:
     close: () => {
       if (closing !== undefined) return closing;
       lifetime.abort(new Error('MCP registry closed'));
-      closing = (async () => {
+      const attempt = (async () => {
         const settled = await Promise.allSettled([...pending.values()]);
-        const opened = new Set(connected.values());
+        const opened = new Set([...connected.values(), ...cleanupPending]);
         for (const result of settled) if (result.status === 'fulfilled') opened.add(result.value);
-        const cleanup = await Promise.allSettled([...opened].map(closeServer));
-        connected.clear();
+        const cleanup = await Promise.allSettled([...opened].map(async item => {
+          await closeServer(item);
+          for (const [name, active] of connected) if (active === item) connected.delete(name);
+        }));
+        const errors = cleanup.flatMap(result => result.status === 'rejected' ? [result.reason] : []);
+        throwCleanupErrors(errors, 'MCP registry cleanup failed');
+        cleanupPending.clear();
         pending.clear();
         serverLifetimes.clear();
-        throwCleanupErrors(cleanup.flatMap((result) => result.status === 'rejected' ? [result.reason] : []), 'MCP registry cleanup failed');
       })();
-      return closing;
+      closing = attempt;
+      void attempt.catch(() => { if (closing === attempt) closing = undefined; });
+      return attempt;
     },
   };
 }
