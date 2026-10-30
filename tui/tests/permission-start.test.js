@@ -41,7 +41,7 @@ test('runTui reports the platform capability snapshot supplied to its Host', { t
     host: { sessionDirectory },
   } });
   const terminal = createTerminal();
-  const snapshot = await detectPermissionCapabilities();
+  const snapshot = await detectPermissionCapabilities({ shellConfig: config, workspaceRoot: projectDirectory });
   let finished = false;
   let runError;
   const running = runTui({
