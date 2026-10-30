@@ -50,7 +50,7 @@ test('TUI observes an externally locked session, answers a question, sends guida
     const questions = [{ id: 'q1', question: 'Choose a route', options: [{ label: 'north' }, { label: 'south' }], multiSelect: false }];
     let currentOperation = 'external-question-run';
     let currentState = 'running';
-    let pending = [{ requestId: 'human-question-1', sessionId, operationId: currentOperation, type: 'question', createdAt: Date.now(), details: { questions } }];
+    let pending = [];
     let events = [{ cursor: 1, kind: 'run.started', at: Date.now(), sessionId, operationId: currentOperation }];
     const actions = [];
     let runtime;
@@ -109,7 +109,9 @@ test('TUI observes an externally locked session, answers a question, sends guida
       assert.ok(listed.sessions.some((item) => item.id === sessionId), JSON.stringify(listed));
       await type(`/resume ${sessionId}`);
       await wait(() => output().includes('External session connected') || output().includes('外控会话已连接'));
+      // The question panel replaces the composer and its settings row. Verify the external model before exposing the question.
       await wait(() => frame().includes('External model deepseek-flash') || frame().includes('外控模型 deepseek-flash'));
+      pending = [{ requestId: 'human-question-1', sessionId, operationId: currentOperation, type: 'question', createdAt: Date.now(), details: { questions } }];
       await wait(() => output().includes('Waiting for your answer') || output().includes('等待回答'));
       await wait(() => frame().includes('Choose a route'));
       await wait(() => output().includes('外部 Agent: External task started.'));
