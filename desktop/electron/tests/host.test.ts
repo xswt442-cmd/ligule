@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
@@ -197,11 +198,32 @@ test('starts the actual Node 24 Ligule Host and accepts an opaque protocol frame
   }
 });
 
-test('removes Node and Electron option injection while preserving host credentials', () => {
-  const clean = sanitizedHostEnvironment({ NODE_OPTIONS: '--inspect', NODE_PATH: 'external', ELECTRON_RUN_AS_NODE: '1', LIGULE_API_KEY: 'kept', HTTPS_PROXY: 'kept' });
-  assert.equal(clean.NODE_OPTIONS, undefined);
-  assert.equal(clean.NODE_PATH, undefined);
-  assert.equal(clean.ELECTRON_RUN_AS_NODE, undefined);
+test('removes Node and Electron option injection across key casing while preserving host credentials', () => {
+  const clean = sanitizedHostEnvironment({
+    NODE_OPTIONS: '--inspect', node_options: '--no-warnings', NoDe_OpTiOnS: '--require injected.cjs',
+    NODE_PATH: 'external', node_path: 'external-lowercase',
+    ELECTRON_RUN_AS_NODE: '1', electron_run_as_node: 'true',
+    LIGULE_DESKTOP_CSP_NONCE: 'secret-nonce', ligule_desktop_csp_nonce: 'secret-nonce-lowercase',
+    LIGULE_API_KEY: 'kept', HTTPS_PROXY: 'kept', PATH: 'kept-path',
+  });
+  const restricted = new Set(['NODE_OPTIONS', 'NODE_PATH', 'ELECTRON_RUN_AS_NODE', 'LIGULE_DESKTOP_CSP_NONCE']);
+  assert.deepEqual(Object.keys(clean).filter((name) => restricted.has(name.toUpperCase())), []);
   assert.equal(clean.LIGULE_API_KEY, 'kept');
   assert.equal(clean.HTTPS_PROXY, 'kept');
+  assert.equal(clean.PATH, 'kept-path');
+});
+
+test('removes a mixed-case NODE_OPTIONS value before starting a Windows Node child', { skip: process.platform !== 'win32' }, () => {
+  const environment = { ...process.env };
+  for (const name of Object.keys(environment)) {
+    if (name.toUpperCase() === 'NODE_OPTIONS') delete environment[name];
+  }
+  environment.NoDe_OpTiOnS = '--no-warnings';
+  const result = spawnSync(process.execPath, ['-e', "process.emitWarning('LIGULE_S3_CASE_PROBE');"], {
+    env: sanitizedHostEnvironment(environment),
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /LIGULE_S3_CASE_PROBE/u);
 });

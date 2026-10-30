@@ -3,6 +3,12 @@ import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 const PINNED_NODE_VERSION = 'v24.21.0';
+const RESTRICTED_HOST_ENVIRONMENT_KEYS = new Set([
+  'NODE_OPTIONS',
+  'NODE_PATH',
+  'ELECTRON_RUN_AS_NODE',
+  'LIGULE_DESKTOP_CSP_NONCE',
+]);
 
 export interface RuntimeLocationOptions {
   resourcesPath?: string;
@@ -42,10 +48,9 @@ export function resolveHostRuntime(options: RuntimeLocationOptions): HostRuntime
 
 export function sanitizedHostEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const result: NodeJS.ProcessEnv = { ...environment };
-  delete result.NODE_OPTIONS;
-  delete result.NODE_PATH;
-  delete result.ELECTRON_RUN_AS_NODE;
-  delete result.LIGULE_DESKTOP_CSP_NONCE;
+  for (const name of Object.keys(result)) {
+    if (RESTRICTED_HOST_ENVIRONMENT_KEYS.has(name.toUpperCase())) delete result[name];
+  }
   return result;
 }
 
