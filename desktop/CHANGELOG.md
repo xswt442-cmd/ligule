@@ -8,7 +8,9 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 ### 简体中文
 
-- 文件工具 `delete` 只使用操作系统回收站；系统后端报错后会复核原目标，目标未变化时返回后端错误，无法确认目标未变化时返回 `delete_outcome_unknown`。Linux 通过 GIO 调用系统回收站。历史 `.ligule-trash` 不迁移或清理，Shell 删除继续使用自己的 Policy 与审批链。
+- 只有可信本地 UI 或经过认证的 Agent Control 桥接可记录或读取 human 来源的 Run；其他 Host 会将 `run.start`/`run.submit` 绑定到 controller scope。`run.wait` 必须明确指定 `origin`，回执可见范围由 Host 授权上下文决定，不能靠字段声明 `human` 扩权。
+- POSIX MCP Server 使用独立进程组；撤销、取消或 Host 关闭时有界地发送终止信号并清理仍存活的所属子进程，失败保留为可重试错误。主动创建独立会话的后代不在该进程组边界内。
+- 文件工具 `delete` 只使用操作系统回收站；系统后端报错后会复核原目标对象身份及顶层元数据，仍匹配时返回后端错误；不核对文件正文或递归目录内容，无法确认时返回 `delete_outcome_unknown`。Linux 通过 GIO 调用系统回收站。历史 `.ligule-trash` 不迁移或清理，Shell 删除继续使用自己的 Policy 与审批链。
 - 用户层 `[telemetry]` 可显式开启有界本地 JSONL 事件日志和可选的本机 OTLP Trace；默认关闭，导出不含对话正文或工具内容。
 - `[loop].maxParallelTools` 限制范围为 1–32，默认 4，防止一次模型响应启动不受限的工具并发。
 - `managed_process` 对非 2xx 响应和请求失败使用有界退避；HTTP 2xx 立即就绪，用户取消或所属进程退出会停止探测。
@@ -33,7 +35,9 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 ### English
 
-- The `delete` file tool uses only the operating system recycle bin. After a backend error, Ligule rechecks the original target: an unchanged target returns the backend error, while a target that cannot be confirmed unchanged returns `delete_outcome_unknown`. Linux delegates to GIO's system trash operation. Legacy `.ligule-trash` folders are neither migrated nor cleaned; Shell deletion keeps its own Policy and approval path.
+- Only a trusted local UI or authenticated Agent Control bridge can record or read a human-sourced Run; other Hosts bind `run.start` and `run.submit` to controller scope. `run.wait` requires an explicit `origin`, and the Host authorizes Receipt visibility from its context rather than trusting a `human` request field.
+- POSIX MCP servers use dedicated process groups. Revoke, cancellation, and Host shutdown send bounded termination signals and clean up surviving owned descendants; failures remain retryable. Descendants that deliberately create a separate session are outside this process-group boundary.
+- The `delete` file tool uses only the operating system recycle bin. After a backend error, Ligule rechecks the original target's identity and top-level metadata: a match returns the backend error. It does not compare file contents or recursively inspect directories; if the target cannot be confirmed, it returns `delete_outcome_unknown`. Linux delegates to GIO's system trash operation. Legacy `.ligule-trash` folders are neither migrated nor cleaned; Shell deletion keeps its own Policy and approval path.
 - User-layer `[telemetry]` can explicitly enable bounded local JSONL events and optional loopback OTLP traces; it is disabled by default and exports no conversation or tool content.
 - `[loop].maxParallelTools` is capped at 1–32 (default 4) to prevent one model response from starting unbounded tool concurrency.
 - `managed_process` uses bounded backoff for non-2xx responses and request failures; HTTP 2xx is immediate, and cancellation or owned-process exit stops probing.
