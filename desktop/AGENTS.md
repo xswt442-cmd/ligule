@@ -10,13 +10,13 @@ Run the following commands from the repository root:
 pnpm --filter ligule-desktop run dev
 pnpm --filter ligule-desktop run build
 pnpm --filter ligule-desktop-frontend run check
-node --experimental-strip-types --test desktop/electron/test/host.test.ts desktop/electron/test/security.test.ts
-desktop/vendor/node/node.exe desktop/electron/test/run-native-security.mjs
-desktop/vendor/node/node.exe desktop/electron/test/run-native-features.mjs
-desktop/vendor/node/node.exe desktop/electron/test/run-stub-model.mjs
+node --experimental-strip-types --test desktop/electron/tests/host.test.ts desktop/electron/tests/security.test.ts
+desktop/vendor/node/node.exe desktop/electron/tests/run-native-security.mjs
+desktop/vendor/node/node.exe desktop/electron/tests/run-native-features.mjs
+desktop/vendor/node/node.exe desktop/electron/tests/run-stub-model.mjs
 ```
 
-Use the executable tests under `electron/test/` for acceptance. Original logs and local acceptance records belong in the ignored `desktop/testplace/readings/` directory. Verify each platform separately; Windows results do not establish acceptance on Linux or macOS.
+Use the executable tests under `electron/tests/` for acceptance. Original logs and local acceptance records belong in the ignored `desktop/testplace/readings/` directory. Verify each platform separately; Windows results do not establish acceptance on Linux or macOS.
 
 Keep Main and Preload in strict TypeScript, using the existing TypeScript compiler; NodeNext imports use the `.js` suffix. Preload runtime code depends only on Electron APIs supported by the sandbox; `api.ts` provides types shared by both sides.
 

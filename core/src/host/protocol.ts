@@ -34,6 +34,10 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly request?: unknown;
   readonly origin?: 'human' | 'controller';
   readonly delegation?: DelegationSpec;
+  readonly requestKey?: string;
+  readonly runId?: string;
+  readonly artifactKey?: string;
+  readonly offset?: number;
   readonly directory?: string;
   readonly text?: string;
   readonly provider?: string;
@@ -305,9 +309,92 @@ export const METHODS = Object.freeze({
         input: { type: 'string', description: 'the user message for this round' },
         origin: { type: 'string', enum: ['human', 'controller'], description: 'who submitted the input; local clients default to human' },
         delegation: DELEGATION_SPEC_SCHEMA,
+        requestKey: { type: 'string', minLength: 1, maxLength: 128 },
       },
       required: ['sessionId', 'input'],
     },
+  },
+  'storage.inspect': {
+    description: 'Inspect workspace-owned media storage without deleting anything.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      projectRoot: { type: 'string' },
+    }, required: ['projectRoot'] },
+  },
+  'storage.cleanup.preview': {
+    description: 'Page through Session references before preparing a short-lived deletion plan; no deletion.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      projectRoot: { type: 'string' }, limit: { type: 'integer', minimum: 1, maximum: 100 }, cursor: SESSION_ID,
+    }, required: ['projectRoot'] },
+  },
+  'storage.cleanup.apply': {
+    description: 'Apply a still-valid local cleanup plan after explicit trusted-UI confirmation. No path arguments.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      projectRoot: { type: 'string' }, planId: SESSION_ID, confirm: { type: 'boolean' },
+    }, required: ['projectRoot', 'planId', 'confirm'] },
+  },
+  'artifact.list': {
+    description: 'List confirmed file deliveries from Session tool evidence; never enumerates arbitrary workspace paths.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      projectRoot: { type: 'string' }, sessionId: SESSION_ID, runId: SESSION_ID,
+      limit: { type: 'integer', minimum: 1, maximum: 50 }, offset: { type: 'integer', minimum: 0 },
+    }, required: ['projectRoot', 'sessionId'] },
+  },
+  'artifact.resolve': {
+    description: 'Resolve a confirmed artifact for an explicit trusted native reveal action after checking current path and digest.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      projectRoot: { type: 'string' }, sessionId: SESSION_ID,
+      artifactKey: { type: 'string', minLength: 64, maxLength: 64 },
+    }, required: ['projectRoot', 'sessionId', 'artifactKey'] },
+  },
+  'artifact.inspect': {
+    description: 'Verify a confirmed delivered file against its current workspace path and SHA-256.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      projectRoot: { type: 'string' }, sessionId: SESSION_ID,
+      artifactKey: { type: 'string', minLength: 64, maxLength: 64 },
+    }, required: ['projectRoot', 'sessionId', 'artifactKey'] },
+  },
+  'artifact.preview': {
+    description: 'Preview bounded plain text or a normalized image only after confirming the registered file digest.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      projectRoot: { type: 'string' }, sessionId: SESSION_ID,
+      artifactKey: { type: 'string', minLength: 64, maxLength: 64 },
+    }, required: ['projectRoot', 'sessionId', 'artifactKey'] },
+  },
+  'run.submit': {
+    description: 'Accept one task durably and return its runId only after the Session user event is synced; a matching requestKey reuses that event.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      sessionId: SESSION_ID, input: { type: 'string', minLength: 1, maxLength: 65536 },
+      origin: { type: 'string', enum: ['human', 'controller'] },
+      requestKey: { type: 'string', minLength: 1, maxLength: 128 },
+      delegation: DELEGATION_SPEC_SCHEMA,
+    }, required: ['sessionId', 'input'] },
+  },
+  'run.wait': {
+    description: 'Wait for the current live runId; after it settles, a verified stored terminal result remains available.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      sessionId: SESSION_ID, runId: SESSION_ID, origin: { type: 'string', enum: ['human', 'controller'] },
+    }, required: ['sessionId', 'runId'] },
+  },
+  'run.receipt': {
+    description: 'Read a durable task receipt from this project Session without reopening its writer or replaying work.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      projectRoot: { type: 'string' }, sessionId: SESSION_ID,
+      runId: SESSION_ID, requestKey: { type: 'string', minLength: 1, maxLength: 128 },
+    }, required: ['projectRoot', 'sessionId'] },
+  },
+  'run.receipts': {
+    description: 'List recent durable task receipts without opening a writable Session.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      projectRoot: { type: 'string' }, sessionId: SESSION_ID,
+      limit: { type: 'integer', minimum: 1, maximum: 50 }, before: { type: 'integer', minimum: 1 },
+    }, required: ['projectRoot', 'sessionId'] },
+  },
+  'run.result': {
+    description: 'Read a validated immutable run-result sidecar as bounded JSON fragments.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      projectRoot: { type: 'string' }, sessionId: SESSION_ID, runId: SESSION_ID,
+      offset: { type: 'integer', minimum: 0 },
+    }, required: ['projectRoot', 'sessionId', 'runId'] },
   },
   'run.cancel': {
     description: 'Stop the round this session is running; the call answering run.start reports loop_cancelled between model calls and provider_cancelled while one is in flight',

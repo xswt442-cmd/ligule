@@ -131,7 +131,7 @@ jobs:
         run: pnpm run build:core
 
       - name: test Electron Host and security contracts
-        run: node --experimental-strip-types --test desktop/electron/test/host.test.ts desktop/electron/test/security.test.ts
+        run: node --experimental-strip-types --test desktop/electron/tests/host.test.ts desktop/electron/tests/security.test.ts
 
       - name: check and build the frontend
         run: |
@@ -154,20 +154,20 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          & (Join-Path $PWD 'desktop/vendor/node/node.exe') --experimental-strip-types --test desktop/electron/test/process-tree.test.ts
+          & (Join-Path $PWD 'desktop/vendor/node/node.exe') --experimental-strip-types --test desktop/electron/tests/process-tree.test.ts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: test POSIX Host process-group cleanup and orphan watchdog
         if: runner.os != 'Windows'
         shell: bash
-        run: ${{ matrix.node }} --experimental-strip-types --test desktop/electron/test/posix-process-tree.test.ts
+        run: ${{ matrix.node }} --experimental-strip-types --test desktop/electron/tests/posix-process-tree.test.ts
 
       - name: test packaged Electron windows
         shell: pwsh
         run: |
           $node = if ($IsWindows) { Join-Path $PWD 'desktop/vendor/node/node.exe' } else { Join-Path $PWD 'desktop/vendor/node/node' }
-          if ($IsLinux) { & xvfb-run -a $node desktop/electron/test/run-native-security.mjs; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & xvfb-run -a $node desktop/electron/test/run-stub-model.mjs }
-          else { & $node desktop/electron/test/run-native-security.mjs; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & $node desktop/electron/test/run-stub-model.mjs }
+          if ($IsLinux) { & xvfb-run -a $node desktop/electron/tests/run-native-security.mjs; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & xvfb-run -a $node desktop/electron/tests/run-stub-model.mjs }
+          else { & $node desktop/electron/tests/run-native-security.mjs; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & $node desktop/electron/tests/run-stub-model.mjs }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: inspect generated installers and bind them to tag source

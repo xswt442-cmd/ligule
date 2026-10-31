@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
 
 const REPOSITORY_ROOT = fileURLToPath(new URL('..', import.meta.url));
-const SOURCE_ROOTS = ['core/src', 'tui/src', 'desktop', 'scripts', 'tests', 'test', 'core/test', 'tui/test'];
+const SOURCE_ROOTS = ['core/src', 'tui/src', 'desktop', 'scripts', 'tests', 'core/tests', 'tui/tests'];
 const SOURCE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs']);
 const SKIPPED_DIRECTORIES = new Set(['.git', 'node_modules', 'dist', 'vendor', 'release', 'testplace']);
 

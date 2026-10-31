@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { createConfig, type ConfigLayer, type ConfigSnapshot } from '../kernel/config.js';
 import type { LoadedLayers } from '../kernel/config-store.js';
 import { dataRoot } from '../kernel/config-file.js';
+import { workspaceIdentity } from '../kernel/workspace.js';
+import { claimStorageOwner, closeStorageOwner } from './storage-gc.js';
 import { KernelError } from '../kernel/error.js';
 import { workspaceDataDirectory, type SessionDirectoryConfig } from '../session/list.js';
 import { mcpServerConfigs, type NormalizedMcpServerConfig } from './mcp.js';
@@ -69,7 +71,18 @@ export async function createBrowserSupport(config: ConfigSnapshot & SessionDirec
     if (pkg.name !== '@playwright/mcp' || pkg.version !== '0.0.83' || !record(pkg.bin)
       || typeof pkg.bin['playwright-mcp'] !== 'string' || resolve(dirname(entry), pkg.bin['playwright-mcp']) !== entry) throw new KernelError('browser_backend_unsupported');
     if (!(await lstat(executable)).isFile() || !(await lstat(entry)).isFile()) throw new KernelError('browser_backend_unavailable');
-    const base = join(workspaceDataDirectory(config), 'browser');
+    const storageRoot = workspaceDataDirectory(config);
+    const base = join(storageRoot, 'browser');
+    const workspace = workspaceIdentity(config.workspaceRoot ?? config.boundary);
+    const leases = new Map<string, Promise<() => Promise<void>>>();
+    function claimSession(id: string): Promise<() => Promise<void>> {
+      const existing = leases.get(id);
+      if (existing !== undefined) return existing;
+      const claim = claimStorageOwner(storageRoot, workspace, 'browser', id);
+      leases.set(id, claim);
+      void claim.catch(() => { if (leases.get(id) === claim) leases.delete(id); });
+      return claim;
+    }
     const sessionDirectory = (id: string) => {
       if (!/^[a-zA-Z0-9._-]{1,256}$/u.test(id) || id === '.' || id === '..') throw new KernelError('browser_session_invalid');
       return join(base, 'sessions', id);
@@ -128,20 +141,30 @@ export async function createBrowserSupport(config: ConfigSnapshot & SessionDirec
       typeof config.workspaceRoot === 'string' ? config.workspaceRoot : String(config.boundary));
     return { status: { configured: true, available: true }, server, verify,
       clearSession: async id => {
+        const lease = leases.get(id);
+        if (lease === undefined) return; // Never clear unknown or pre-existing session directories.
+        await lease;
         const directory = await checkedSessionDirectory(id);
         if (directory === undefined) return;
         for (const item of await readdir(directory, { withFileTypes: true })) {
           if (item.isSymbolicLink()) throw new KernelError('browser_storage_link');
-          if (item.isFile()) await unlink(join(directory, item.name));
+          if (item.isFile() && item.name !== '.ligule-owner.json') await unlink(join(directory, item.name));
         }
       },
       closeSession: async id => {
-        const directory = await checkedSessionDirectory(id);
-        if (directory !== undefined) await rm(directory, { recursive: true, force: true });
+        const lease = leases.get(id);
+        if (lease === undefined) return; // Unknown old directories have no proven owner.
+        const release = await lease;
+        await closeStorageOwner(storageRoot, 'browser', id, release, async () => {
+          const directory = await checkedSessionDirectory(id);
+          if (directory !== undefined) await rm(directory, { recursive: true, force: true });
+        });
+        leases.delete(id);
       },
       session: async id => {
         await verify();
         const directory = sessionDirectory(id);
+        await claimSession(id);
         await ownedDirectory(root, directory);
         const args = [...server.args];
         args[args.indexOf('--output-dir') + 1] = directory;

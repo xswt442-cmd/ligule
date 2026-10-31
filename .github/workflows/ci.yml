@@ -58,7 +58,7 @@ jobs:
         run: |
           dbus-run-session -- bash -e -c '
             printf "%s" "ligule-ci-test-password" | gnome-keyring-daemon --unlock --components=secrets
-            LIGULE_CREDENTIAL_NATIVE_REQUIRED=1 node --test core/test/credentials.test.js core/test/credential-unavailable.test.js
+            LIGULE_CREDENTIAL_NATIVE_REQUIRED=1 node --test core/tests/credentials.test.js core/tests/credential-unavailable.test.js
           '
       - name: prepare an isolated macOS keychain
         id: keychain
@@ -74,7 +74,7 @@ jobs:
         if: runner.os != 'Linux'
         env:
           LIGULE_CREDENTIAL_NATIVE_REQUIRED: '1'
-        run: node --test core/test/credentials.test.js core/test/credential-unavailable.test.js
+        run: node --test core/tests/credentials.test.js core/tests/credential-unavailable.test.js
       - name: remove the test keychain
         if: always() && runner.os == 'macOS' && steps.keychain.outcome == 'success'
         run: security delete-keychain "$PWD/testplace/tmp/credentials.keychain-db"
@@ -123,8 +123,36 @@ jobs:
           if (!result.available) { throw new Error(result.reason ?? 'Linux isolation probe failed'); }"
       - name: syntax check JavaScript source and tests
         run: pnpm check:syntax
+      - name: enforce source dependency boundaries
+        run: pnpm check:dependencies
       - name: test
         run: pnpm test
+
+  eval-smoke:
+    name: deterministic Harbor and ATIF smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: 0.13.5
+          python-version: '3.12'
+          enable-cache: false
+      - name: install
+        run: pnpm install --frozen-lockfile
+      - name: run deterministic evaluation smoke
+        run: pnpm run eval:smoke
 
   cli-package:
     name: build CLI package artifact
@@ -225,7 +253,7 @@ jobs:
       - name: build the Host runtime tree
         run: pnpm run build:core
       - name: test Electron Host and security contracts
-        run: node --experimental-strip-types --test desktop/electron/test/host.test.ts desktop/electron/test/security.test.ts
+        run: node --experimental-strip-types --test desktop/electron/tests/host.test.ts desktop/electron/tests/security.test.ts
       - name: check and build the frontend
         run: |
           pnpm --filter ligule-desktop-frontend run check
@@ -241,12 +269,12 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          & (Join-Path $PWD 'desktop/vendor/node/node.exe') --experimental-strip-types --test desktop/electron/test/process-tree.test.ts
+          & (Join-Path $PWD 'desktop/vendor/node/node.exe') --experimental-strip-types --test desktop/electron/tests/process-tree.test.ts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: test POSIX Host process-group cleanup and orphan watchdog
         if: runner.os != 'Windows'
         shell: bash
-        run: ${{ matrix.node }} --experimental-strip-types --test desktop/electron/test/posix-process-tree.test.ts
+        run: ${{ matrix.node }} --experimental-strip-types --test desktop/electron/tests/posix-process-tree.test.ts
       - name: test real Electron security and stub-model windows
         shell: pwsh
         run: |
@@ -255,13 +283,13 @@ jobs:
             if ($IsLinux) { & xvfb-run -a $node $script } else { & $node $script }
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
-          Invoke-WindowTest 'desktop/electron/test/run-native-security.mjs'
-          Invoke-WindowTest 'desktop/electron/test/run-stub-model.mjs'
+          Invoke-WindowTest 'desktop/electron/tests/run-native-security.mjs'
+          Invoke-WindowTest 'desktop/electron/tests/run-stub-model.mjs'
       - name: test Windows native dialogs and tray window lifecycle
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          & (Join-Path $PWD 'desktop/vendor/node/node.exe') desktop/electron/test/run-native-features.mjs
+          & (Join-Path $PWD 'desktop/vendor/node/node.exe') desktop/electron/tests/run-native-features.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v7
         if: always()

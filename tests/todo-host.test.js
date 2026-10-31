@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { withTuiHost } from '../core/test/helpers/tui-host.js';
+import { withTuiHost } from '../core/tests/helpers/tui-host.js';
 import { currentTodoSnapshot } from '../core/dist/session/todo.js';
 
 async function records(directory, id) {
@@ -38,5 +38,6 @@ test('real internal subagent todo updates stay in its own Session record', async
     assert.deepEqual(childEvents.find(event => event.kind === 'todoWrite').items, [{ content: 'Child task', status: 'completed' }]);
     assert.equal((await records(sessionDirectory, sessionId)).some(event => event.kind === 'todoWrite'), false);
     assert.ok(providerRequests.some(request => request.tools.some(tool => tool.function.name === 'todo_write')));
-  }, { config: { policy: { mode: 'auto' } } });
+    assert.equal(providerRequests.length, 4, 'parent and child each make two model calls');
+  }, { config: { policy: { mode: 'auto' }, loop: { iterations: 2, modelCalls: 2, totalModelCalls: 4 } } });
 });

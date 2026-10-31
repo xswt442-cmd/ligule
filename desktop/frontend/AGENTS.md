@@ -13,4 +13,4 @@ The repository [Agent guide](../../AGENTS.md) and [desktop guide](../AGENTS.md) 
 - Notification preferences and session routing stay in the frontend. Notifications may contain a conversation name and state, never prompt text, tool commands, or credentials. Electron Main sends native notifications and returns click targets. Capability support is not proof of operating-system permission; display this limitation accurately.
 - Unsaved configuration edits and in-progress saves must pass through `src/edit-gate.ts` before closing Settings or changing sections.
 
-Run `pnpm --filter ligule-desktop-frontend run check` and `pnpm --filter ligule-desktop-frontend run build`. The check command runs the existing projection, protocol, keyboard, quit, edit-gate, and notification checks.
+Run `pnpm --filter ligule-desktop-frontend run check` and `pnpm --filter ligule-desktop-frontend run build`. The check command runs the checks in `tests/checks/` and the frontend test files in `desktop/tests/frontend/`; keep development support files such as `dev/fake-host.ts` under `dev/`.

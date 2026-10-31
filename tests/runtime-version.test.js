@@ -54,7 +54,7 @@ test('Core workspace metadata is private, documented, and licensed without a pro
 
 test('fixtures have one owner: Core, TUI, or shared cross-module tests', () => {
   const owners = new Map();
-  for (const directory of ['core/test/fixtures', 'tui/test/fixtures', 'tests/fixtures']) {
+  for (const directory of ['core/tests/fixtures', 'tui/tests/fixtures', 'tests/fixtures']) {
     for (const name of readdirSync(new URL(`../${directory}/`, import.meta.url))) {
       const previous = owners.get(name);
       assert.equal(previous, undefined, `${name} is duplicated in ${previous} and ${directory}`);
@@ -63,8 +63,8 @@ test('fixtures have one owner: Core, TUI, or shared cross-module tests', () => {
   }
   assert.equal(owners.get('mcp-minimal.mjs'), 'tests/fixtures');
   assert.equal(owners.get('register-workspace.mjs'), 'tests/fixtures');
-  assert.equal(owners.get('editor.mjs'), 'tui/test/fixtures');
-  assert.equal(owners.get('credential-read.mjs'), 'core/test/fixtures');
+  assert.equal(owners.get('editor.mjs'), 'tui/tests/fixtures');
+  assert.equal(owners.get('credential-read.mjs'), 'core/tests/fixtures');
 });
 
 test('the ripgrep runtime uses the upstream platform-selecting dependency', () => {

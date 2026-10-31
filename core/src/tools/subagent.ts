@@ -23,13 +23,17 @@ import { createDecisionChain } from '../kernel/policy.js';
 import { createLogger } from '../kernel/log.js';
 import { loadAssembly } from '../kernel/assembly.js';
 import { KernelError, KernelRuntimeError } from '../kernel/error.js';
+import { runSummary } from '../kernel/run-summary.js';
+import type { TaskBudget } from '../kernel/task-budget.js';
 import { createTodoWritePlugin } from './todo-write.js';
 import { createReadImagePlugin } from './read-image.js';
 import { createReadDocumentPlugin } from './read-document.js';
+import { createPresentPlugin } from './present.js';
 import { createScreenshotPlugin } from './screenshot.js';
 import { createMediaStore, type MediaStore } from '../capability/media.js';
 import { boundaryOf } from '../capability/limits.js';
 import type { PermissionContext } from '../kernel/permission.js';
+import type { Telemetry } from '../kernel/telemetry.js';
 
 type LoopOptions = Parameters<typeof createLoop>[0];
 type ThinkingEffort = 'none' | 'low' | 'high' | 'max';
@@ -40,7 +44,8 @@ type SubagentProvider = LoopOptions['provider'] & {
   readonly thinkingCapability?: { readonly efforts: readonly string[]; readonly defaultEffort: string };
   withGeneration?: (options: ChildGenerationOptions) => SubagentProvider;
 };
-const MAX_CONCURRENT_SUBAGENTS = 3;
+const DEFAULT_CONCURRENT_SUBAGENTS = 3;
+const MAX_CONCURRENT_SUBAGENTS = 8;
 
 function stableErrorCode(error: unknown): string {
   const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
@@ -48,6 +53,7 @@ function stableErrorCode(error: unknown): string {
 }
 
 export interface SubagentDeps {
+  readonly taskBudget?: () => TaskBudget | undefined;
   readonly createMcp?: (id: string, media: MediaStore) => Promise<{ plugin: Parameters<typeof loadAssembly>[1][number]; close(): Promise<void> }>;
   readonly authorizeScreenCapture?: () => Promise<AbortSignal>;
   config: ReturnType<typeof createConfig>;
@@ -63,6 +69,7 @@ export interface SubagentDeps {
   promptFragments?: () => readonly ModePromptFragment[];
   promptFragmentBytes?: number;
   loopLimits?: LoopLimits;
+  telemetry?: Telemetry;
 }
 
 function childLimits(args: { loopIterations?: number; modelCalls?: number }, parent: LoopLimits) {
@@ -106,6 +113,12 @@ function childProvider(args: { outputTokens?: number; thinkingEffort?: ThinkingE
 }
 
 export function createSubagentPlugin(deps: SubagentDeps) {
+  const loopConfig = typeof deps.config.loop === 'object' && deps.config.loop !== null && !Array.isArray(deps.config.loop)
+    ? deps.config.loop as Record<string, unknown> : {};
+  const concurrency = loopConfig.maxConcurrentSubagents ?? DEFAULT_CONCURRENT_SUBAGENTS;
+  if (typeof concurrency !== 'number' || !Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > MAX_CONCURRENT_SUBAGENTS) {
+    throw new KernelError('subagent_concurrency_invalid', { detail: `loop.maxConcurrentSubagents must be an integer between 1 and ${MAX_CONCURRENT_SUBAGENTS}` });
+  }
   let counter = 0;
   let active = 0;
 
@@ -136,7 +149,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
         name: 'subagent',
         access: 'inherit',
         execution: 'parallel',
-        description: 'Delegate independent work to child runs with the parent policy and separate session records. Up to three children can run at once; children cannot create more children. Optional output, thinking, and loop budgets can only lower the parent session limits. Check result.state because a failed or cancelled child still returns its saved Session reference. When outputSchema is provided, the child must submit its final value with ligule_delegation_result.',
+        description: `Delegate independent work to child runs with the parent policy and separate session records. Up to ${concurrency} children can run at once; children cannot create more children. Optional output, thinking, and loop budgets can only lower the parent session limits. Check result.state because a failed or cancelled child still returns its saved Session reference. When outputSchema is provided, the child must submit its final value with ligule_delegation_result.`,
         parameters: {
           type: 'object',
           properties: {
@@ -159,7 +172,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
           loopIterations?: number;
           modelCalls?: number;
           outputSchema?: Record<string, unknown>;
-        }, { signal, permission }: { signal?: AbortSignal; permission: PermissionContext }) {
+        }, { signal, permission, runId, executionId, callId }: { signal?: AbortSignal; permission: PermissionContext; runId?: string; executionId?: string; callId?: string }) {
           if (typeof args.task !== 'string' || args.task.trim() === '') {
             throw new KernelError('subagent_task_required', { detail: 'the derived agent needs a task to work on' });
           }
@@ -170,8 +183,8 @@ export function createSubagentPlugin(deps: SubagentDeps) {
           const outputContract = args.outputSchema === undefined ? undefined : createOutputSchemaContract(args.outputSchema);
           const limits = childLimits(args, deps.loopLimits ?? DEFAULT_LOOP_LIMITS);
           const provider = childProvider(args, deps.provider);
-          if (active >= MAX_CONCURRENT_SUBAGENTS) {
-            throw new KernelError('subagent_concurrency_limit', { detail: `at most ${MAX_CONCURRENT_SUBAGENTS} derived runs can be active for this parent` });
+          if (active >= concurrency) {
+            throw new KernelError('subagent_concurrency_limit', { detail: `at most ${concurrency} derived runs can be active for this parent` });
           }
           const parentTools = new Set(kernel.manifest().map(({ name }) => name));
           active += 1;
@@ -234,6 +247,8 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                 ...(parentTools.has('todo_write') ? [createTodoWritePlugin({ session })] : []),
                 ...(parentTools.has('read_image') ? [createReadImagePlugin({ media, supportsImages: () => provider.imageInput === true })] : []),
                 ...(parentTools.has('read_document') ? [createReadDocumentPlugin({ media, supportsImages: () => provider.imageInput === true })] : []),
+                ...(parentTools.has('present') ? [createPresentPlugin({ sessionId: id,
+                  workspaceRoot: typeof deps.config.workspaceRoot === 'string' ? deps.config.workspaceRoot : boundaryOf(deps.config), session })] : []),
                 ...(parentTools.has('screenshot') ? [createScreenshotPlugin({ media,
                   supportsImages: () => provider.imageInput === true,
                   authorize: authorizeScreenCapture,
@@ -288,6 +303,11 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                 session,
                 limits,
                 resolveImage: media.read,
+                telemetry: deps.telemetry,
+                sessionId: id,
+                ...(runId === undefined ? {} : { parentRunId: runId }),
+                ...(executionId === undefined ? {} : { parentExecutionId: executionId }),
+                ...(callId === undefined ? {} : { parentCallId: callId }),
                 completesRun: outputContract === undefined ? [] : [DELEGATION_RESULT_TOOL],
                 turnContext: () => ({
                   childGeneration: {
@@ -299,24 +319,27 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                 }),
               });
               let result: Awaited<ReturnType<typeof loop.run>>;
+              const resumeParent = deps.taskBudget?.()?.suspendCurrentWork();
               try {
-                result = await loop.run(args.task, { signal, validateCompletion: () => assertDelegationCompletion(outputContract, structuredSubmitted) });
+                result = await loop.run(args.task, { signal, task: deps.taskBudget?.(),
+                  validateCompletion: () => assertDelegationCompletion(outputContract, structuredSubmitted) });
               } catch (error) {
                 // Record-lock and Session I/O failures mean the child record may be unreliable; do not turn them into a normal child result.
                 if (error instanceof KernelRuntimeError) throw error;
                 const code = stableErrorCode(error);
+                const summary = runSummary(error);
                 const validation = outputContract === undefined ? undefined : {
                   status: 'invalid' as const,
                   schemaDigest: outputContract.digest,
                   errors: [`Run ended with ${code} before a valid structured result was submitted.`],
                 };
                 return {
-                  text: null,
+                  text: summary?.text || null,
                   summary: `Child run ${code}; its saved Session is available for inspection.`,
                   sessionId: id,
                   path: session.path,
-                  iterations: null,
-                  modelCalls: null,
+                  iterations: summary?.iterations ?? null,
+                  modelCalls: summary?.modelCalls ?? null,
                   generation: {
                     outputTokens: provider.outputTokens ?? null,
                     thinkingEffort: provider.thinkingEffort ?? provider.thinkingCapability?.defaultEffort ?? null,
@@ -330,9 +353,10 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                     code,
                     error instanceof KernelError ? error.diagnostics : undefined,
                     validation,
+                    summary,
                   ),
                 };
-              }
+              } finally { resumeParent?.(); }
               const validation = outputContract === undefined
                 ? { status: 'not_requested' as const }
                 : { status: 'valid' as const, schemaDigest: outputContract.digest };

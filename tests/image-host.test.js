@@ -10,7 +10,7 @@ import { createConnection, createMemoryConnectionPair, serveHost, sessionDirecto
 import { createConfigStore } from '../core/dist/kernel/config-store.js';
 import { loadHostEnvironment } from '../core/dist/host/environment.js';
 import { createMediaStore } from '../core/dist/capability/media.js';
-import { listenFetchable } from '../test/helpers/port.ts';
+import { listenFetchable } from './helpers/port.ts';
 import { exportImageUrl } from '../core/dist/host/export.js';
 
 const API_KEY_ENV = 'LIGULE_IMAGE_HOST_TEST_KEY';

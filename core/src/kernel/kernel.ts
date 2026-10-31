@@ -21,14 +21,23 @@ export interface ToolContext {
   readonly permission: PermissionContext;
   readonly logger: Logger;
   readonly observations: ObservationLog;
+  /** Opaque value returned by this invocation's tool preflight, when present. */
+  readonly preflightResult?: unknown;
   readonly signal?: AbortSignal;
   readonly target?: NetworkTarget;
   readonly shell?: ShellSelection;
   readonly scriptBinding?: ScriptBinding;
+  readonly runId?: string;
+  readonly executionId?: string;
+  readonly callId?: string;
 }
 
 type BivariantToolCallback<TArgs, TResult> = {
   callback(args: TArgs, context: ToolContext): TResult;
+}['callback'];
+
+type BivariantPreflight<TArgs> = {
+  callback(args: TArgs, context: ToolContext): unknown | Promise<unknown>;
 }['callback'];
 
 type BivariantCapability<TArgs> = {
@@ -55,7 +64,8 @@ export interface ToolDefinition<TArgs = unknown> {
   readonly commandOf?: (args: TArgs, shell: ShellSelection) => string | undefined;
   capability?: BivariantCapability<TArgs>;
   policyIdentity?: BivariantPolicyIdentity<TArgs>;
-  readonly preflight?: (args: TArgs) => void | Promise<void>;
+  /** Run before Policy approval; its return value is passed only to this invocation's `run`. */
+  readonly preflight?: BivariantPreflight<TArgs>;
   run: BivariantToolCallback<TArgs, unknown | Promise<unknown>>;
 }
 
@@ -107,7 +117,7 @@ export interface Kernel {
   catalog(): ToolCatalogEntry[];
   validateCall(name: string, args: unknown): { readonly code?: 'tool_not_found' | 'tool_args_invalid'; readonly detail?: string };
   restrict(names: readonly string[]): () => void;
-  call(name: string, args?: unknown, options?: { readonly callId?: string; readonly signal?: AbortSignal }): Promise<unknown>;
+  call(name: string, args?: unknown, options?: { readonly callId?: string; readonly signal?: AbortSignal; readonly runId?: string; readonly executionId?: string }): Promise<unknown>;
 }
 
 interface ToolEvent extends Record<string, unknown> {
@@ -191,7 +201,10 @@ export function createKernel(options: KernelOptions = {}): Kernel {
     const limit = resultLimit(config);
     if (Buffer.byteLength(text, 'utf8') <= limit) return result;
     const name = `result-${Date.now()}-${randomUUID().slice(0, 8)}.json`;
-    return { ...result, content: await spillContent(text, { limit, directory, name }), spilled: name,
+    const compact = tools.get('compact');
+    const readWithCompact = compact !== undefined && !isDenied('compact')
+      && permissionDenial(currentPermission(), compact.access) === undefined;
+    return { ...result, content: await spillContent(text, { limit, directory, name, readWithCompact }), spilled: name,
       spillFormat: typeof result.content === 'string' ? 'text' : 'json',
     };
   }
@@ -352,7 +365,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
     // 每种失败都返回稳定错误码，供调用方分支处理。
     // 工具从 context 读取配置快照和日志接口；取消信号由循环或适配器传入。
     // 所有调用都经过权限判定，并将拒绝、失败和成功结果写入会话记录。
-    async call(name: string, args?: unknown, options: { readonly callId?: string; readonly signal?: AbortSignal } = {}) {
+    async call(name: string, args?: unknown, options: { readonly callId?: string; readonly signal?: AbortSignal; readonly runId?: string; readonly executionId?: string } = {}) {
       // `options.callId` 用于将工具结果关联到模型发起的调用。
       const entry: ToolEvent = { kind: 'tool', tool: name, callId: options.callId, args };
       const tool = tools.get(name);
@@ -392,8 +405,9 @@ export function createKernel(options: KernelOptions = {}): Kernel {
         await record(entry, refusalOf(denied.code, denied.reason));
         throw new KernelError(denied.code, { detail: denied.reason });
       }
+      let preflightResult: unknown;
       if (tool.preflight !== undefined) {
-        try { await tool.preflight(args); }
+        try { preflightResult = await tool.preflight(args, { config, permission: activePermission, logger, observations, ...options }); }
         catch (error) {
           const failure = error instanceof KernelError
             ? error
@@ -543,6 +557,10 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       let success: ReturnType<typeof resultOf>;
       try {
           value = await tool.run(args, { ...context, permission: callPermission, signal: options.signal, target: network, shell,
+            ...(preflightResult === undefined ? {} : { preflightResult }),
+            ...(options.runId === undefined ? {} : { runId: options.runId }),
+            ...(options.executionId === undefined ? {} : { executionId: options.executionId }),
+            ...(options.callId === undefined ? {} : { callId: options.callId }),
             ...(approvedScriptBinding === undefined ? {} : { scriptBinding: approvedScriptBinding }), });
           success = resultOf(value);
       } catch (error) {

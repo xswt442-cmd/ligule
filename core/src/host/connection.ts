@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import type { Readable, Writable } from 'node:stream';
 import { KernelError } from '../kernel/error.js';
 import type { ProviderDiagnostic } from '../kernel/error.js';
+import { checkedRunSummary, rememberRunSummary, runSummary } from '../kernel/run-summary.js';
 
 export interface HostRequest extends Record<string, unknown> {
   readonly id: string;
@@ -84,10 +85,12 @@ export function createConnection({ input, output, onFault, onClose }: Connection
       const detail = messageText(error.message);
       const diagnostics = error.diagnostics;
       try {
-        settleWith.reject(new KernelError(code, {
+        const received = new KernelError(code, {
           detail,
           ...(diagnostics === undefined ? {} : { diagnostics: diagnostics as ProviderDiagnostic }),
-        }));
+        });
+        if (error.run !== undefined) rememberRunSummary(received, checkedRunSummary(error.run));
+        settleWith.reject(received);
       } catch (cause) {
         settleWith.reject(new KernelError('protocol_provider_diagnostics_invalid', { cause }));
       }
@@ -138,12 +141,14 @@ export function createConnection({ input, output, onFault, onClose }: Connection
             const fields = isRecord(error) ? error : {};
             const cause = isRecord(fields.cause) ? fields.cause : {};
             const diagnostics = error instanceof KernelError ? error.diagnostics : undefined;
+            const summary = runSummary(error);
             write({
               id: request.id,
               error: {
                 code: messageText(fields.code) ?? 'connection_handler_failed',
                 message: messageText(fields.detail) ?? messageText(cause.message) ?? messageText(fields.message),
                 ...(diagnostics === undefined ? {} : { diagnostics }),
+                ...(summary === undefined ? {} : { run: summary }),
               },
             });
           },

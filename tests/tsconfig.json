@@ -7,5 +7,6 @@
     "allowJs": true,
     "rootDir": ".."
   },
-  "include": ["release-automation.test.ts", "../scripts/*.js", "../scripts/desktop-release-manifest.ts"]
+  "references": [{ "path": "../core" }],
+  "include": ["helpers/port.ts", "helpers/tui-host.ts", "release-automation.test.ts", "../scripts/*.js", "../scripts/desktop-release-manifest.ts"]
 }

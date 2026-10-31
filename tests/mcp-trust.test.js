@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTrusted, isTrusted } from '../core/dist/kernel/workspace-trust.js';
-import { connectMcp } from '../test/helpers/mcp-control.mjs';
+import { connectMcp } from './helpers/mcp-control.mjs';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const cliPath = join(repo, 'tui/dist/cli.js');
@@ -60,7 +60,7 @@ test('MCP accepts the existing TUI trust document through a real stdio client', 
   await fixture(async ({ project, home }) => {
     await setTrusted(project, true, join(home, 'tui-trust.json'));
     const server = await connectMcp({ cliPath, projectRoot: project, dataRoot: home, sdkRoot, apiKeyName: 'MCP_TRUST_TEST_KEY', apiKey: 'unused' });
-    try { assert.equal((await server.client.listTools()).tools.length, 13); }
+    try { assert.equal((await server.client.listTools()).tools.length, 14); }
     finally { await server.close(); }
   });
 });

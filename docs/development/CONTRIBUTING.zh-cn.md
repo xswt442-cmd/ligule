@@ -18,7 +18,9 @@ pnpm verify-install
 
 `pnpm test` 会构建 `dist/` 并运行自动化测试；`pnpm check-pack` 检查 CLI npm 包产物；`pnpm verify-install` 会将该产物安装到干净的消费者环境并运行真实搜索。消费者安装使用 npm，以验证 CLI 的 npm 安装路径。
 
-`tests/mcp-server.test.js` 通过真实 SDK stdio 客户端、本地 HTTP 模型端点、持久 Session 记录、Policy 与子进程验证外控。可单独运行 `node --test --import ./test/hooks/isolated-data-root.mjs tests/mcp-server.test.js`。`test/helpers/mcp-control.mjs` 独立客户端接受明确的已安装 CLI 和 SDK 路径，可在检出目录之外检查相同控制调用。工具与权限语义见 [MCP 指南](../mcp/mcp-guide.zh-CN.md)。确定性模型端点测试不代表真实外部模型服务验收。
+Core 包内测试位于 `core/tests/`，TUI 测试位于 `tui/tests/`，跨模块集成测试位于仓库根目录的 `tests/`。桌面前端检查脚本位于 `desktop/frontend/tests/checks/`，开发辅助文件保留在 `desktop/frontend/dev/`。运行完整套件请使用 `pnpm test`，其中包含 Core、TUI 和跨模块测试。
+
+`tests/mcp-server.test.js` 通过真实 SDK stdio 客户端、本地 HTTP 模型端点、持久 Session 记录、Policy 与子进程验证外控。可单独运行 `node --test --import ./tests/hooks/isolated-data-root.mjs tests/mcp-server.test.js`。`tests/helpers/mcp-control.mjs` 独立客户端接受明确的已安装 CLI 和 SDK 路径，可在检出目录之外检查相同控制调用。工具与权限语义见 [MCP 指南](../mcp/mcp-guide.zh-CN.md)。确定性模型端点测试不代表真实外部模型服务验收。
 
 ## 桌面开发
 
@@ -29,7 +31,7 @@ pnpm run build:core
 pnpm run prepare-runtime
 pnpm --filter ligule-desktop exec install-electron
 pnpm exec tsc -p desktop/electron/tsconfig.json
-node --experimental-strip-types --test desktop/electron/test/host.test.ts desktop/electron/test/security.test.ts
+node --experimental-strip-types --test desktop/electron/tests/host.test.ts desktop/electron/tests/security.test.ts
 pnpm --filter ligule-desktop-frontend run check
 pnpm --filter ligule-desktop-frontend run build
 pnpm --filter ligule-desktop run dev

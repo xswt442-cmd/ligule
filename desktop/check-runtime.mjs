@@ -52,7 +52,7 @@ if (!existsSync(hostEntry) || !existsSync(shippedMode)
   || !existsSync(join(coreRoot, 'README.md')) || !existsSync(join(coreRoot, 'LICENSE'))) {
   throw new Error('the Desktop runtime is missing Core metadata, Host entry, or shipped modes');
 }
-if (existsSync(join(coreRoot, 'test'))) throw new Error('the Desktop runtime must not include Core test fixtures');
+if (['test', 'tests'].some(name => existsSync(join(coreRoot, name)))) throw new Error('the Desktop runtime must not include Core test fixtures');
 const library = await import(pathToFileURL(join(coreRoot, 'dist', 'index.js')).href);
 const requireFromApp = createRequire(join(app, 'package.json'));
 const insideAppModules = async (name, resolver = requireFromApp) => {

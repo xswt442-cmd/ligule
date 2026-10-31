@@ -1,10 +1,7 @@
-// 删除内容优先移入操作系统回收站；系统功能不可用时使用项目管理的回收目录。
-// 平台实现集中在此处：Windows 使用系统接口，Linux 遵循 FreeDesktop Trash 规范，macOS 暂无系统后端。
+// 删除只移入操作系统回收站；系统功能不可用或拒绝目标时由调用方返回错误。
+// 平台实现集中在此处：Windows 使用系统接口，Linux 调用 GIO 系统回收站，macOS 暂无系统后端。
 // 每个进程只探测一次系统回收站能力。
 import { spawn } from 'node:child_process';
-import { access, constants, mkdir, rename, rm, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 
 type RecycleBackend = {
@@ -34,7 +31,7 @@ const SEND_COMMAND = [
   '} else {',
   "  [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($target, 'OnlyErrorDialogs', 'SendToRecycleBin')",
   '}',
-].join(' ');
+].join('\n');
 
 // 探测只验证 PowerShell 和系统回收站接口可用，不执行删除操作。
 const PROBE_COMMAND = 'Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem] | Out-Null';
@@ -67,85 +64,45 @@ export const windowsRecycleBin = {
   },
 };
 
-function trashRoot(): string {
-  const data = process.env.XDG_DATA_HOME;
-  return join(typeof data === 'string' && data !== '' ? data : join(homedir(), '.local', 'share'), 'Trash');
+function runGio(args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('gio', args, {
+      env: process.env,
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', (error) => {
+      const code = errorCode(error);
+      reject(new KernelError(code === 'ENOENT' ? 'recycle_backend_missing' : 'recycle_backend_failed', {
+        cause: error,
+        detail: `gio could not send the item to the system trash: ${code ?? errorMessage(error)}`,
+      }));
+    });
+    child.on('close', (code: number | null) => {
+      if (code === 0) resolve();
+      else reject(new KernelError('recycle_backend_failed', { detail: stderr.trim() || `gio exited with ${code}` }));
+    });
+  });
 }
 
-// FreeDesktop Trash 将内容写入 `files/`，并在 `info/` 中保存对应的 `.trashinfo` 文件。
-// 元数据记录百分号编码的原路径和删除时间，供还原时使用。
-export const freedesktopTrash = {
-  name: 'freedesktop trash',
+// GIO 调用系统回收站；不支持回收的挂载点会明确返回错误。
+export const linuxSystemTrash = {
+  name: 'system trash',
   async probe(): Promise<void> {
-    const root = trashRoot();
-    await mkdir(join(root, 'files'), { recursive: true });
-    await mkdir(join(root, 'info'), { recursive: true });
-    await access(join(root, 'files'), constants.W_OK);
+    await runGio(['help', 'trash']);
   },
   async send(target: string): Promise<void> {
-    const root = trashRoot();
-    const files = join(root, 'files');
-    const base = basename(target);
-    const info = `[Trash Info]\nPath=${encodeTrashPath(target)}\nDeletionDate=${deletionDate(new Date())}\n`;
-    // 先检查目标名称，再独占创建元数据文件；如果其他程序同时占用该名称，则尝试下一个名称。
-    for (let attempt = 0; ; attempt += 1) {
-      const name = attempt === 0 ? base : `${base}.${attempt}`;
-      const infoPath = join(root, 'info', `${name}.trashinfo`);
-      if (await exists(join(files, name))) continue;
-      try {
-        // 使用独占创建处理并发删除；冲突时递增名称后缀并重试。
-        await writeFile(infoPath, info, { flag: 'wx' });
-      } catch (error) {
-        const code = errorCode(error);
-        if (code === 'EEXIST') continue;
-        throw new KernelError('recycle_backend_failed', { cause: error, detail: `the trash could not claim a name for ${target}: ${code ?? errorMessage(error)}` });
-      }
-      try {
-        await rename(target, join(files, name));
-      } catch (error) {
-        // 移动失败时清理已创建的元数据文件，避免留下无内容的回收站条目。
-        try {
-          await rm(infoPath, { force: true });
-        } catch {}
-        // 跨文件系统重命名会返回 EXDEV；此实现不处理挂载点回收站，交由调用方使用项目回收目录。
-        const code = errorCode(error);
-        if (code === 'EXDEV') {
-          throw new KernelError('recycle_cross_device', { cause: error, detail: `${target} and the trash are on different filesystems` });
-        }
-        throw new KernelError('recycle_backend_failed', { cause: error, detail: `the trash refused ${target}: ${code ?? errorMessage(error)}` });
-      }
-      return;
-    }
+    await runGio(['trash', '--', target]);
   },
 };
 
-// 按规范使用本地时间格式 `YYYY-MM-DDThh:mm:ss`，避免将 UTC 时间误显示为本地删除时间。
-function deletionDate(now: Date): string {
-  const pad = (value: number): string => String(value).padStart(2, '0');
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
-    + `T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
-}
-
-// 元数据中的 Path 使用百分号编码的绝对路径，路径分隔符保持原样。
-function encodeTrashPath(target: string): string {
-  return target.split('/').map(encodeURIComponent).join('/');
-}
-
-async function exists(path: string): Promise<boolean> {
-  try {
-    await access(path, constants.F_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const CANDIDATES: Partial<Record<NodeJS.Platform, RecycleBackend>> = { win32: windowsRecycleBin, linux: freedesktopTrash };
+const CANDIDATES: Partial<Record<NodeJS.Platform, RecycleBackend>> = { win32: windowsRecycleBin, linux: linuxSystemTrash };
 
 let resolved: RecyclerResolution | undefined;
 
-// 选择当前平台的回收站后端并探测可用性；不可用时由调用方使用项目回收目录。
-// 返回探测错误供调用方记录日志。每个进程只缓存当前平台的探测结果。
+// 选择当前平台的回收站后端并探测可用性；不可用时由调用方报告失败。
+// 返回探测错误供调用方生成可行动错误。每个进程只缓存当前平台的探测结果。
 export async function resolveRecycler(platform: NodeJS.Platform = process.platform): Promise<RecyclerResolution> {
   if (platform === process.platform && resolved !== undefined) return resolved;
   const result = await resolveOnce(platform);

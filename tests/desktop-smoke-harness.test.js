@@ -4,7 +4,7 @@ import test from 'node:test';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const testDirectory = join(dirname(fileURLToPath(import.meta.url)), '..', 'desktop', 'electron', 'test');
+const testDirectory = join(dirname(fileURLToPath(import.meta.url)), '..', 'desktop', 'electron', 'tests');
 const installerSource = await readFile(process.env.LIGULE_INSTALLER_SMOKE_SOURCE ?? join(testDirectory, 'run-installer-smoke.ps1'), 'utf8');
 const packagedSource = await readFile(process.env.LIGULE_PACKAGED_SMOKE_SOURCE ?? join(testDirectory, 'run-packaged-smoke.mjs'), 'utf8');
 

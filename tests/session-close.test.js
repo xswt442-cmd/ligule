@@ -6,13 +6,13 @@ import { access, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } fr
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
-import { connectMcp } from '../test/helpers/mcp-control.mjs';
+import { connectMcp } from './helpers/mcp-control.mjs';
 import { requestAgentControl } from '../core/dist/host/agent-control-runtime.js';
 import { setTrusted } from '../core/dist/kernel/workspace-trust.js';
 import { createHost } from '../core/dist/host/host.js';
 import { createControl } from '../core/dist/host/control.js';
 import { createChatCompletionsProvider } from '../core/dist/model/chat-completions.js';
-import { withTuiHost } from '../core/test/helpers/tui-host.js';
+import { withTuiHost } from '../core/tests/helpers/tui-host.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const workspaceRoot = resolve(process.env.LIGULE_MCP_E2E_WORKSPACE_ROOT ?? repoRoot);

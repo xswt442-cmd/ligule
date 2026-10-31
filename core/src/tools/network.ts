@@ -31,7 +31,7 @@ export const fetchTool = {
     return {
       text: page.text,
       host: approved.host,
-      addresses: approved.addresses,
+      addresses: page.addresses,
       targetClass: approved.class,
       finalUrl: page.finalUrl,
       hops: page.hops,

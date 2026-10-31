@@ -24,31 +24,61 @@ const providerDiagnostic = { type: 'object', additionalProperties: false, proper
   attempts: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
   responseReceived: { type: 'boolean' }, streamReceived: { type: 'boolean' }, recoverable: { type: 'boolean' },
 }, required: ['category', 'attempts', 'responseReceived', 'streamReceived', 'recoverable'] };
+const taskLimitsOutput = {
+  maxModelCalls: { type: 'integer', minimum: 1 }, timeoutMs: { type: 'integer', minimum: 1, maximum: 86_400_000 },
+  requestTimeoutMs: { type: 'integer', minimum: 1, maximum: 3_600_000 },
+  interactionWaitTimeoutMs: { type: 'integer', minimum: 1, maximum: 604_800_000 },
+};
+const taskOutput = object({ ...taskLimitsOutput, modelCalls: { type: 'integer', minimum: 0 },
+  interactionWaitMs: { type: 'integer', minimum: 0 }, executionElapsedMs: { type: 'integer', minimum: 0 },
+  executionPaused: { type: 'boolean' },
+  startedAt: { type: 'string' }, deadlineAt: { type: 'string' },
+}, ['maxModelCalls', 'timeoutMs', 'requestTimeoutMs', 'modelCalls', 'startedAt', 'deadlineAt']);
+const fileArtifactOutput = object({ kind: { type: 'string', enum: ['file'] }, sessionId: id,
+  path: { type: 'string', minLength: 1, maxLength: 2048 }, mimeType: { type: 'string', maxLength: 128 },
+  bytes: { type: 'integer', minimum: 0, maximum: 20 * 1024 * 1024 }, sha256: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+  description: { type: 'string', maxLength: 400 },
+}, ['kind', 'sessionId', 'path', 'mimeType', 'bytes', 'sha256']);
 const runResultOutput = object({
   runId: id,
   sessionId: id,
   state: { type: 'string', enum: ['completed', 'failed', 'cancelled'] },
   stopReason: { type: 'string', enum: [
     'assistant_completed', 'tool_completed', 'cancelled', 'budget_exhausted', 'refused',
-    'provider_error', 'tool_error', 'validation_failed', 'host_error',
+    'provider_error', 'tool_error', 'validation_failed', 'host_error', 'deadline_exceeded', 'request_timeout', 'interaction_timeout',
   ] },
-  output: object({ text: { type: ['string', 'null'] }, structured: {} }, ['text']),
+  output: object({ text: { type: ['string', 'null'] }, structured: {}, partial: { type: 'boolean', const: true } }, ['text']),
   validation: object({
     status: { type: 'string', enum: ['not_requested', 'valid', 'invalid'] },
     schemaDigest: { type: 'string', minLength: 12, maxLength: 64 },
     errors: { type: 'array', maxItems: 32, items: { type: 'string', maxLength: 512 } },
   }, ['status']),
-  artifacts: { type: 'array', maxItems: 32, items: object({
+  artifacts: { type: 'array', maxItems: 32, items: { anyOf: [object({
     kind: { type: 'string', enum: ['session'] }, sessionId: id,
-  }, ['kind', 'sessionId']) },
+  }, ['kind', 'sessionId']), fileArtifactOutput] } },
+  userSeq: { type: 'integer', minimum: 0 },
+  artifactsTruncated: { type: 'boolean', const: true },
+  task: taskOutput,
   usage: object({
     iterations: { type: ['integer', 'null'], minimum: 0 },
     modelCalls: { type: ['integer', 'null'], minimum: 0 },
   }, ['iterations', 'modelCalls']),
   diagnostic: object({ code: { type: 'string' }, provider: providerDiagnostic }, ['code']),
 }, ['runId', 'sessionId', 'state', 'stopReason', 'output', 'validation', 'artifacts', 'usage']);
+const durableReceiptOutput = object({
+  runId: id, sessionId: id, userSeq: { type: 'integer', minimum: 0 },
+  acceptedAt: { type: 'string' }, state: { type: 'string', enum: ['accepted', 'running', 'completed', 'failed', 'cancelled', 'interrupted'] },
+  liveness: { type: 'string', enum: ['alive', 'unknown'] }, reused: { type: 'boolean' }, requestKey: { type: 'string', maxLength: 128 },
+  resultRef: object({ version: { type: 'integer', const: 1 }, name: { type: 'string', maxLength: 64 },
+    bytes: { type: 'integer', minimum: 1, maximum: 16 * 1024 * 1024 }, sha256: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+  }, ['version', 'name', 'bytes', 'sha256']),
+}, ['runId', 'sessionId', 'userSeq', 'acceptedAt', 'state', 'liveness']);
+const runPageOutput = object({ runId: id, json: { type: 'string', maxLength: 8192 }, offset: { type: 'integer', minimum: 0 },
+  nextOffset: { type: ['integer', 'null'] }, totalCharacters: { type: 'integer', minimum: 0 },
+}, ['runId', 'json', 'offset', 'nextOffset', 'totalCharacters']);
 const operationProperties = {
   operationId: id, sessionId: id, state: { type: 'string', enum: ['running', 'done', 'failed', 'cancelled'] },
+  reused: { type: 'boolean' }, receipt: durableReceiptOutput,
   source: { type: 'string', enum: ['human', 'controller'] },
   code: { type: 'string' }, summary: { type: 'string', maxLength: 2048 },
   diagnostics: providerDiagnostic, result: { anyOf: [{ type: 'null' }, runResultOutput] },
@@ -172,6 +202,7 @@ const configurationOutput = object({
   effective: { type: 'object', additionalProperties: false, properties: {
     mode: { type: ['string', 'null'] },
     loopIterations: { type: 'integer', minimum: 1 },
+    taskLimits: object(taskLimitsOutput, ['maxModelCalls', 'timeoutMs', 'requestTimeoutMs']),
     permission: permissionOutput,
     screenCapture: object({ enabled: { type: 'boolean' }, source: { type: 'string', enum: ['none', 'startup', 'trusted-ui', 'grant'] }, changeAllowed: { type: 'boolean' } }, ['enabled', 'source']),
     search: object({ configured: { type: 'boolean' }, available: { type: 'boolean' },
@@ -271,9 +302,14 @@ const tools: Tool[] = [
       input: { type: 'string', minLength: 1, maxLength: 65536 }, queueItemId: id,
     }, ['sessionId']), outputSchema: queueOutput },
   { name: 'ligule_run_start', description: 'Submit text and return immediately while the real Host runs in the background. Optional delegation.mode narrows the active session mode and adds its prompt fragments; it cannot broaden the session tool ceiling. delegation.outputSchema requires a valid result submission; Policy still applies. One active run per session. Poll status and read records. IDs are process-local; the server keeps 256 recent operations and evicts the oldest completed one when full.',
-    inputSchema: object({ sessionId: id, input: { type: 'string', minLength: 1, maxLength: 65536 }, delegation: DELEGATION_SPEC_SCHEMA }, ['sessionId', 'input']), outputSchema: operationOutput },
+    inputSchema: object({ sessionId: id, input: { type: 'string', minLength: 1, maxLength: 65536 }, delegation: DELEGATION_SPEC_SCHEMA,
+      requestKey: { type: 'string', pattern: '^[A-Za-z0-9._:-]{1,128}$' } }, ['sessionId', 'input']), outputSchema: operationOutput },
   { name: 'ligule_run', description: 'Start one real Host run and wait server-side for its terminal result, up to timeoutMs (default 60 seconds, maximum 5 minutes). Optional delegation.mode narrows the active session mode and adds its prompt fragments; it cannot broaden the session tool ceiling. delegation.outputSchema requires a valid result submission; Policy still applies. A timeout returns the current state without cancelling the run; continue with ligule_run_await or ligule_run_status.',
-    inputSchema: object({ sessionId: id, input: { type: 'string', minLength: 1, maxLength: 65536 }, timeoutMs: { type: 'integer', minimum: 0, maximum: 300_000, default: 60_000 }, delegation: DELEGATION_SPEC_SCHEMA }, ['sessionId', 'input']), outputSchema: awaitOutput },
+    inputSchema: object({ sessionId: id, input: { type: 'string', minLength: 1, maxLength: 65536 }, timeoutMs: { type: 'integer', minimum: 0, maximum: 300_000, default: 60_000 }, delegation: DELEGATION_SPEC_SCHEMA,
+      requestKey: { type: 'string', pattern: '^[A-Za-z0-9._:-]{1,128}$' } }, ['sessionId', 'input']), outputSchema: awaitOutput },
+  { name: 'ligule_run_get', description: 'Read a durable task receipt by runId or requestKey without opening the Session. Set offset to retrieve a verified 8192-character JSON fragment of its completed result. Task keys are not authorization credentials.',
+    inputSchema: object({ sessionId: id, runId: id, requestKey: { type: 'string', pattern: '^[A-Za-z0-9._:-]{1,128}$' }, offset: { type: 'integer', minimum: 0 } }, ['sessionId']),
+    outputSchema: object({ receipt: durableReceiptOutput, result: runPageOutput }, ['receipt']) },
   { name: 'ligule_run_status', description: 'Read the actual Host state, progress, pending interactions, queued messages, and bounded events after a cursor. Operation IDs are process-local; reopen the session after restart and read durable records.',
     inputSchema: object({ operationId: id, after: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 50, default: 20 } }, ['operationId']), outputSchema: operationOutput },
   { name: 'ligule_run_await', description: 'Wait in the server for one known run, up to timeoutMs (default 60 seconds, maximum 5 minutes). A timeout returns the current resumable state without cancelling the run. A terminal run includes its result. Resolve pending approvals or questions with the interaction tool while the run waits.',
@@ -291,6 +327,8 @@ interface Arguments {
   operationId?: string;
   timeoutMs?: number;
   delegation?: DelegationSpec;
+  requestKey?: string;
+  runId?: string;
   input?: string;
   initial?: McpInitialSettings;
   changes?: McpSessionChanges;
@@ -410,10 +448,14 @@ export async function serveMcp({ projectRoot, version, flags = [], modeName, ope
           ...(input.answers === undefined ? {} : { answers: input.answers }),
         }); break;
         case 'ligule_session_send': result = control.send(input.sessionId!, input.action ?? 'send', input.input, input.queueItemId); break;
-        case 'ligule_run_start': result = control.start(input.sessionId!, input.input!, input.delegation); break;
+        case 'ligule_run_start': result = await control.submit(input.sessionId!, input.input!, input.delegation, input.requestKey); break;
+        case 'ligule_run_get': result = await control.getRun(input.sessionId!, {
+          ...(input.runId === undefined ? {} : { runId: input.runId }),
+          ...(input.requestKey === undefined ? {} : { requestKey: input.requestKey }),
+        }, input.offset); break;
         case 'ligule_run': {
-          const started = control.start(input.sessionId!, input.input!, input.delegation);
-          result = await control.await(started.operationId, input.timeoutMs ?? 60_000);
+          const started = await control.submit(input.sessionId!, input.input!, input.delegation, input.requestKey);
+          result = { ...await control.await(started.operationId, input.timeoutMs ?? 60_000), receipt: started.receipt, reused: started.reused };
           break;
         }
         case 'ligule_run_status': result = control.status(input.operationId!, input.after ?? 0, input.limit ?? 20); break;

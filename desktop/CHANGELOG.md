@@ -8,6 +8,16 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 ### 简体中文
 
+- 文件工具 `delete` 只使用操作系统回收站；系统后端报错后会复核原目标，目标未变化时返回后端错误，无法确认目标未变化时返回 `delete_outcome_unknown`。Linux 通过 GIO 调用系统回收站。历史 `.ligule-trash` 不迁移或清理，Shell 删除继续使用自己的 Policy 与审批链。
+- 用户层 `[telemetry]` 可显式开启有界本地 JSONL 事件日志和可选的本机 OTLP Trace；默认关闭，导出不含对话正文或工具内容。
+- `[loop].maxParallelTools` 限制范围为 1–32，默认 4，防止一次模型响应启动不受限的工具并发。
+- `managed_process` 对非 2xx 响应和请求失败使用有界退避；HTTP 2xx 立即就绪，用户取消或所属进程退出会停止探测。
+- `fetch` 的同源重定向只能连接首次策略检查覆盖的 IP；特殊用途地址按 IANA 转发与全球可达属性执行审批或拒绝，截断提示按保留字节数计算。
+- `managed_process` 分别报告 `terminationPending` 与 `cleanupPending`，区分进程活性未知和进程结束后的平台资源清理失败；两者可同时为 true，关闭或显式停止会重试可重试的资源清理，未确认状态的条目不会被淘汰。
+- 本地 Telemetry 遇到未知 Manifest 文件时会保留原文件、停用当前写入器并报告稳定错误码；Host 日志不记录路径或正文。
+- 交付文件卡片可查看状态、核验文件摘要、预览安全文本或静态图片、复制相对路径，并由可信原生界面在文件夹中定位。
+- 共享 Host 支持持久委派回执与请求去重，外控在重启后可按 `runId` 查询确定的终态结果；工作区清理新增分批 Session 引用核查与受管浏览器目录租约保护。
+
 - 托管无头浏览器支持按会话隔离和持久截图；顶栏可查看状态、停止及恢复，外控只读会话显示接管与关闭提示。
 
 - `full` 模式新增 `web_search`，复用已配置的官方 DeepSeek 服务；仅在配置和凭据可用时注册，仍受网络 Permission 与 Policy 控制。
@@ -19,8 +29,19 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 - `full` 模式新增 `read_image` 与持久图像引用，Markdown 导出包含相对图片附件；模型设置可选择图像输入能力并在应用重启后保留。
 
 - `full` 模式新增 `todo_write`，每轮任务清单随会话保存历史，内部子代理使用独立清单。
+- 运行结果提供已知的任务预算、部分输出和文件交付元数据；`full` 的 `present` 记录工作区文件类型、大小与摘要。仍被 Session 引用的图片超过 30 天也保持可用。
 
 ### English
+
+- The `delete` file tool uses only the operating system recycle bin. After a backend error, Ligule rechecks the original target: an unchanged target returns the backend error, while a target that cannot be confirmed unchanged returns `delete_outcome_unknown`. Linux delegates to GIO's system trash operation. Legacy `.ligule-trash` folders are neither migrated nor cleaned; Shell deletion keeps its own Policy and approval path.
+- User-layer `[telemetry]` can explicitly enable bounded local JSONL events and optional loopback OTLP traces; it is disabled by default and exports no conversation or tool content.
+- `[loop].maxParallelTools` is capped at 1–32 (default 4) to prevent one model response from starting unbounded tool concurrency.
+- `managed_process` uses bounded backoff for non-2xx responses and request failures; HTTP 2xx is immediate, and cancellation or owned-process exit stops probing.
+- Same-origin `fetch` redirects can connect only to IPs covered by the initial Policy check; IANA forwardability and global reachability determine whether special-purpose addresses require approval or are denied, and truncation reports retained response bytes.
+- `managed_process` reports `terminationPending` and `cleanupPending` separately for unknown process liveness and failed platform-resource cleanup after exit; both can be true. Close and explicit stop retry cleanup when retryable; entries with either unresolved state are not evicted.
+- Local Telemetry preserves unknown Manifest files, disables the current writer, and reports a stable error code; Host logs omit paths and content.
+- File-delivery cards verify current file digests, show status, preview bounded text or static images, copy relative paths, and reveal files through the trusted native bridge.
+- The shared Host supports durable delegation receipts and deduplication; external controllers can query stored terminal results by `runId` after restart. Workspace cleanup now pages Session references and protects managed browser directories with owner leases.
 
 - Managed headless browsing provides Session isolation and durable screenshots. The top bar shows status, Stop and Resume controls, with takeover and close guidance for read-only external sessions.
 
@@ -33,6 +54,7 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 - The `full` mode includes `read_image`, persistent image references and relative Markdown image assets; model settings preserve image capability selections across application restarts.
 
 - The `full` mode includes `todo_write` with persistent task-list history and separate lists for internal subagents.
+- Run results retain known task budgets, partial output, and file-delivery metadata. The `full` mode adds `present` with file type, size, and digest; images still referenced by Sessions remain available beyond 30 days.
 
 ## [0.1.0] - 2026-10-24
 

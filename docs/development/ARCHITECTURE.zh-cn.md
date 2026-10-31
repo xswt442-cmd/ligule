@@ -6,7 +6,33 @@
 
 本文面向阅读或修改仓库的贡献者，说明组件职责、依赖方向、一次请求的执行路径和会话恢复。协议字段与模块细节以链接到的源码为准。
 
+用户配置层的 `[telemetry].enabled = true` 可开启有界本地 JSONL 事件日志；可选的 `otlpEndpoint` 只接受本机回环 OTLP/HTTP protobuf 地址，并导出有界 OpenTelemetry Trace。默认关闭；项目配置不能启用此功能，存储或导出失败均不影响 Agent 执行。本地存储失败会停用当前遥测写入器，并通过 Host 日志记录脱敏后的错误码；直接调用 `flush()` 时会收到该错误。日志和 Trace 不包含提示词、推理、工具参数/结果、文件路径或凭据。Session JSONL 仍是恢复事实来源；本地 JSONL 是结构化事件日志，不是 OpenTelemetry Logs，Ligule 也没有 Trace 查看器。
+
 CLI 的 npm 包内置私有 Core 的编译代码、模式与元数据；Core 的外部运行依赖合并到公开包清单，由 npm 在消费者系统安装对应的原生依赖。打包时不内置构建机器的外部依赖树，同一 tarball 用于 Windows 与 Linux 的安装验证。
+
+## 源码与发布包依赖
+
+源码 import 图和 npm 安装图描述的是不同关系。模块级依赖方向如下：
+
+| 源码层 | 依赖方向 |
+| --- | --- |
+| Core | Host 组合 Kernel、Session、Model、Capability 与 Tools；Core 不导入 TUI/Desktop 客户端或 React、Ink、Electron 包。 |
+| CLI/TUI | 适配层依赖公开的 `@ligule/core` 接口。 |
+| Desktop 前端 | Renderer 管理自己的 UI 模块，只能将 `desktop/electron/api.ts` 作为 type-only 协议契约导入。 |
+| Electron Main | Main 管理窗口、IPC、安全与运行时启动器；它通过分帧 IPC 与独立 Node Host 通信，不导入 Core 业务代码。 |
+
+运行 `pnpm check:dependencies`，使用锁定的 `dependency-cruiser@18.7.0` 与工作区 TypeScript 版本扫描源码 import。规则拒绝 Core 反向依赖客户端、Electron Main 导入 Core、运行时依赖循环、Core/TUI 运行时导入 `npm-dev` 依赖，以及 Renderer 运行时导入 Electron API 契约。type-only 循环和 type-only `npm-dev` 依赖不属于运行时违规。扫描排除测试、生成的 `dist`、vendored 代码和 `testplace`；完整依赖图不提交到仓库。
+
+规则配置见 [dependency-cruiser.cjs](../../dependency-cruiser.cjs)；[check-dependencies.mjs](../../scripts/check-dependencies.mjs) 会执行源码扫描、正向 fixture 与受控负向 fixture。
+
+CLI 发布清单由 [`releaseManifest()`](../../scripts/pack-release.js) 从 `tui/package.json` 与 Core 的 `dependencies`、`optionalDependencies` 合成。tarball 内置私有 `@ligule/core` 运行时与无依赖的 `xlsx`；其余依赖由消费者按自身平台安装，原生 optional 包也只选择适用的项目。TUI 的 `devDependencies` 可能仍留在 manifest 元数据中，但 npm 消费者不会传递安装它们。Desktop 使用独立产品清单，不属于 CLI tarball。CI 发布工作流在干净 checkout 中调用 `pnpm --filter ligule run check-pack` 与 `pnpm --filter ligule run verify-install <tarball>`。在已有工作区本机验收时，应将新 `testplace/tmp` work root 传给脚本，避免替换原有 `testplace/pack` 产物：
+
+```sh
+pnpm --filter ligule run check-pack -- --work-root testplace/tmp/package-check-example-1
+pnpm --filter ligule run verify-install -- testplace/tmp/package-check-example-1/ligule-0.1.0.tgz --work-root testplace/tmp/install-check-example-1
+```
+
+请将示例目录名替换为当前不存在的名称，并将 check-pack work root 中生成的 tarball 路径传给 `verify-install`。两项检查必须使用同一个实际归档；不要只凭工作区清单推断最终发布包。
 
 ## 运行时与执行
 
@@ -80,9 +106,17 @@ Kernel 从空工具注册表开始。Host 通过[装配器](../../core/src/kerne
 
 模型提出的每个工具调用都会进入 [`kernel.call`](../../core/src/kernel/kernel.ts)。Kernel 先检查工具注册和参数，再解析声明的命令或网络目标，随后调用审批判定链。判定链按既定顺序应用限制、守卫、配置规则、自动审批条件和用户审批。只有获准的调用会进入工具实现。Kernel 会记录判定结果，以及完成、拒绝或失败的工具结果；模型清单只包含工具名称、说明和参数模式。
 
+内置 `delete` 工具只调用操作系统回收站，Linux 使用 GIO 系统回收操作。后端报错后，Ligule 会比较原路径上的目标对象身份和顶层元数据与操作前快照。仍匹配时返回后端错误；无法匹配时返回 `delete_outcome_unknown`，要求用户检查工作区和系统回收站再重试。这项检查不比较文件正文，也不递归核对目录内容。Ligule 不维护自建回收列表或恢复存储。Shell 删除仍沿 Shell 的 Permission、Policy 和 Approval 链执行。
+
+`write` 会在替换内容前将文件与本轮最后一次完整读取的版本进行比较。比较和写入是两个独立的文件系统操作，因此外部并发写入仍可能在检查后发生；该工具不提供原子比较并交换保证。
+
+`edit` 会读取当前文件、定位唯一锚点，再通过另一次文件操作写入替换内容。外部进程仍可能在这两步之间修改文件，因此锚点检查不能防止并发修改被覆盖。
+
 Host 为每个会话持有独立的 Permission 与 Policy 状态。Permission 在 Kernel 判定之前按工具的资源访问类别检查读、写、命令、网络和外部进程；Policy 随后决定是否审批或拒绝。交互式 TUI 与 Desktop 可更改会话 Permission，启用 `full-access` 和 `unrestricted` 网络分别需要确认。命令执行通过 [`permission-capabilities.ts`](../../core/src/capability/permission-capabilities.ts) 探测所选 Shell 和平台能力。Linux 使用 bubblewrap，并按实测报告文件系统隔离能力；受限命令使用的 Node 若位于隐藏目录中，沙箱只读映射该可执行文件及发行包自带的 npm/Corepack 文件到固定路径，用户主目录和包管理器缓存仍保持隐藏。Windows `workspace-write` 使用每次运行独立的 `WRITE_RESTRICTED` Token 和临时 ACL，标为 `partial`；需要明确授权项目、确认风险并使用不受限网络，且无法限制读取和网络。硬链接、可写祖先目录的 `FILE_DELETE_CHILD` 权限及并发 ACL 修改仍可能越界。Windows `read-only` 仅当所选 Shell 能进入实际工作区时才使用 AppContainer，否则 Kernel 预检会拒绝；可用时它会阻止工作区写入和 Shell 联网，但系统公开可读文件仍可能被读取。项目脚本与 Git 命令都需要工作区信任；每条 Git 命令还需逐次审批，因为仓库配置可能运行 Hook、辅助程序或别名。`full-access` Shell 使用当前操作系统用户权限，并要求不受限网络与进程管理能力可用。MCP `--operator` 不管理 Permission，硬拒绝也不能通过审批覆盖。
 
-默认 `minimal` 模式还提供 `managed_process`，供开发服务器等需要跨工具调用运行的命令使用。启动命令仍按 `exec` capability 应用 Permission、Script Binding、工作区信任和 Policy；现有 `exec` 拒绝规则同样适用。启动须提供 HTTP 回环就绪地址，成功后返回 Session 内句柄、端口和就绪状态；状态与日志查询、显式停止也限定在该 Session，日志最多返回 16 KiB。普通 `exec` 仍等待命令结束并由 Guardian 清理后代。受管进程继续留在 Guardian/Job Object 进程树中，随运行取消、Permission 变更、Session/Host 关闭或所属 Grant 撤销而停止；外部撤销或过期的 Grant 会每秒重新校验。就绪地址只限制 Host 的探测目标，实际监听地址和命令的网络访问仍由启动命令与当前平台 Permission 决定。
+`fetch` 会在 Policy 判定前解析地址，并将每个 socket 固定到获批的 IP。它只跟随同源重定向；每一跳重新解析后必须仍落在首次获批的 IP 集内。结果记录实际连接过的地址。IPv4/IPv6 特殊用途地址按 IANA `Forwardable` 与 `Globally Reachable` 属性映射到现有策略类别：可转发但不可全球到达的目标按 `private` 处理并要求审批；非目标地址或不可转发范围按 `unspecified` 拒绝；注册表明确允许全球到达的分配继续按 `public` 处理。`shownBytes` 统计 UTF-8 解码前保留的源响应字节。
+
+默认 `minimal` 模式还提供 `managed_process`，供开发服务器等需要跨工具调用运行的命令使用。启动命令仍按 `exec` capability 应用 Permission、Script Binding、工作区信任和 Policy；现有 `exec` 拒绝规则同样适用。启动须提供 HTTP 回环健康检查地址，并等待其返回 2xx 后才返回 Session 内句柄、端口和就绪状态；失败探测会有界退避，取消或进程退出会打断等待。状态、限量日志和显式停止也限定在该 Session；日志最多返回 16 KiB。停止操作无法确认进程退出时会返回失败并报告 `terminationPending: true`；进程已结束但执行资源清理未确认时会报告 `cleanupPending: true`；进程活性与资源清理都未确认时两个标记同时为 true。后续 close/stop 会复用在途 Lease 请求，并对失败的资源清理进行有限重试。最多保留 128 条已确认终态 Entry；活性未知或资源清理未完成的 Entry 不会被淘汰。普通 `exec` 仍等待命令结束并由 Guardian 清理后代。受管进程继续留在 Guardian/Job Object 进程树中，随运行取消、Permission 变更、Session/Host 关闭或所属 Grant 撤销而停止；外部撤销或过期的 Grant 会每秒重新校验。健康检查地址只限制 Host 的探测目标，实际监听地址和命令的网络访问仍由启动命令与当前平台 Permission 决定。
 
 ### 一次 Agent Loop
 
@@ -137,7 +171,7 @@ sequenceDiagram
 
 [模型适配器](../../core/src/model/) 实现当前支持的 HTTP 消息格式。Host 根据生效的模型服务选择 Provider，并只在发送请求时读取凭据。HTTP 适配器要求响应包含协议终止标记和受支持的结束原因，并发出 `finish` 事件；Loop 在判定完成前拒绝输出耗尽或空响应。工具调用批次会在执行前完整解析并校验参数模式。参数校验拒绝会作为工具结果交给模型处理；Provider JSON 无效或流中断会使本轮失败，且不会重放工具调用。上下文压缩摘要也经过相同的完成检查后才写入检查点。
 
-声明为串行的调用与结束本轮的工具会形成顺序屏障。连续的独立调用通过滚动并发池执行，并受项目配置 `[loop].maxParallelTools` 限制；该值必须是正安全整数，默认 4，内部子代理继承父级上限。取消或 Kernel/运行时内部错误发生后，Loop 不再启动排队调用，等待已经启动的调用完成并清理，再为每个未启动的 `callId` 恰好写入一条 `tool_skipped` 结果。已启动工具产生的副作用不会回滚。上下文溢出恢复每个 `run` 最多压缩并重试一次；预算由该次运行持有，同一 Session 的后续轮次会重新获得一次恢复机会。
+声明为串行的调用与结束本轮的工具会形成顺序屏障。连续的独立调用通过滚动并发池执行，并受项目配置 `[loop].maxParallelTools` 限制；范围为 1 至 32，默认 4，内部子代理继承父级上限。取消或 Kernel/运行时内部错误发生后，Loop 不再启动排队调用，等待已经启动的调用完成并清理，再为每个未启动的 `callId` 恰好写入一条 `tool_skipped` 结果。已启动工具产生的副作用不会回滚。上下文溢出恢复每个 `run` 最多压缩并重试一次；预算由该次运行持有，同一 Session 的后续轮次会重新获得一次恢复机会。
 
 `model.outputTokens` 表示本次请求的输出预算，与旧版能力上限调整相互独立。模型服务保留字符串形式的 `models` 列表，并可按模型 ID 配置 `modelSettings`，包括显示名称、上下文窗口和请求输出预算。模型级输出声明可以提高未知端点的保守默认值，但不能超过已核实的端点或模型上限，也不能覆盖显式能力限制。未设置该声明的旧配置仍使用保守上限。[预算解析器](../../core/src/model/output-budget.ts)会校验生效限制；同一模型的上下文窗口也控制 Host 的压缩。Provider 重建和会话生成设置变更在轮次边界生效。
 
@@ -156,6 +190,8 @@ Provider 响应流式传输期间，[`stream-draft.ts`](../../core/src/session/s
 压缩块文件是派生文件，一个会话的全部块保存在同一文件中，每次压缩整体原子替换。使用前逐块核验格式、覆盖的序号区间以及相对于会话事件的摘要值；任一块校验失败或文件不存在时，从 JSONL 记录重建模型视图。压缩只追加块，不改写会话记录，原始事件始终可回读。模型经 `compact` 工具查看压力与块、读回原文，并可自行选择范围撰写摘要形成新块；压力达到软阈值时注入一次性临时提醒，硬阈值仍由自动压缩兜底。过大的工具结果与摘要放在旁路文件中，记录和块保留读取与导出所需的引用。
 
 重新打开会话时，若已派发的工具调用没有结果，恢复逻辑会记下 `tool_outcome_unknown`，不会重放该调用。这样可以重建有效的模型投影，同时避免重复执行结果未知的外部操作。
+
+Harbor 评测通过 [`sessionTurnToAtif()`](../../core/src/session/atif.ts) 将选定的持久化 Session 轮次导出为 ATIF-v1.8。这是用于评测的投影，不是完整执行回放：每条已持久化的助手响应计为一次逻辑 LLM 调用，隐藏的 HTTP 重试和系统压缩不计入；子代理轨迹和图片负载不会嵌入。只有在按同一 Session 目录校验后才恢复旁路内容；仅有预览的内容会标记为 `spill_content_missing`，无法解析的引用则使导出失败。省略项会写入 `extra.ligule.missing_features` 和每个调用的标记，因此依赖缺失证据的报告指标保持未知。详见 [Harbor 适配器说明](../../evals/harbor/README.md)。
 
 ### 会话数据路径
 

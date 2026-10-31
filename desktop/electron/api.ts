@@ -16,6 +16,7 @@ export interface DesktopAppInfo {
 }
 
 export interface DesktopApi {
+  revealArtifact(request: { projectRoot: string; sessionId: string; artifactKey: string }): Promise<void>;
   appInfo(): Promise<DesktopAppInfo>;
   sendHostFrame(frame: string): Promise<void>;
   restartHost(): Promise<void>;

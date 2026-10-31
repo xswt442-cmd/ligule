@@ -1,12 +1,36 @@
 // npm tarball 的文件白名单与入口检查。真实消费者安装和运行由 verify-install.js 覆盖。
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { join } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { BUNDLED_SPREADSHEET, releaseManifest } from './pack-release.js';
 
 const repo = fileURLToPath(new URL('..', import.meta.url));
-const packDir = join(repo, 'testplace', 'pack');
+const args = process.argv.slice(2);
+if (args[0] === '--') args.shift();
+if (args.length !== 0 && (args.length !== 2 || args[0] !== '--work-root')) {
+  throw new Error('usage: pnpm --filter ligule run check-pack [--work-root testplace/tmp/<new-directory>]');
+}
+const temporaryParent = join(repo, 'testplace', 'tmp');
+mkdirSync(temporaryParent, { recursive: true });
+const canonicalTestplace = realpathSync(join(repo, 'testplace'));
+const resolvedTemporaryParent = realpathSync(temporaryParent);
+if (resolvedTemporaryParent !== join(canonicalTestplace, 'tmp')) throw new Error('testplace/tmp must not resolve outside the workspace testplace directory');
+let packDir = join(repo, 'testplace', 'pack');
+if (args[0] === '--work-root') {
+  packDir = resolve(repo, args[1]);
+  const relativeWorkRoot = relative(resolvedTemporaryParent, packDir);
+  const actualParent = realpathSync(dirname(packDir));
+  const parentMatches = process.platform === 'win32'
+    ? actualParent.toLowerCase() === resolvedTemporaryParent.toLowerCase()
+    : actualParent === resolvedTemporaryParent;
+  if (relativeWorkRoot === '' || relativeWorkRoot === '..' || relativeWorkRoot.startsWith(`..${sep}`) || isAbsolute(relativeWorkRoot)
+    || !parentMatches) {
+    throw new Error('check-pack work root must be a new direct child of testplace/tmp');
+  }
+  if (existsSync(packDir)) throw new Error(`check-pack work root already exists: ${packDir}`);
+  mkdirSync(packDir);
+}
 const work = join(packDir, 'check');
 
 if (!existsSync(join(repo, 'tui', 'dist', 'index.js')) || !existsSync(join(repo, 'core', 'dist', 'index.js'))) {
@@ -26,10 +50,11 @@ try {
   const pkg = releaseManifest();
   const tarball = `${pkg.name}-${pkg.version}.tgz`;
   mkdirSync(packDir, { recursive: true });
-  execFileSync(process.execPath, [join(repo, 'scripts', 'pack-release.js'), 'testplace/pack'], { cwd: repo, stdio: 'inherit' });
-  if (!existsSync(join(packDir, tarball))) throw new Error(`npm pack did not produce testplace/pack/${tarball}`);
+  execFileSync(process.execPath, [join(repo, 'scripts', 'pack-release.js'), packDir], { cwd: repo, stdio: 'inherit' });
+  const tarballPath = join(packDir, tarball);
+  if (!existsSync(tarballPath)) throw new Error(`npm pack did not produce ${tarballPath}`);
 
-  execFileSync('tar', ['-xzf', `testplace/pack/${tarball}`, '-C', 'testplace/pack/check'], { cwd: repo, stdio: 'inherit' });
+  execFileSync('tar', ['-xzf', tarballPath, '-C', work], { cwd: repo, stdio: 'inherit' });
   const shipped = join(work, 'package');
   const manifest = JSON.parse(readFileSync(join(shipped, 'package.json'), 'utf8'));
   if (manifest.bin?.ligule !== './dist/cli.js') throw new Error(`${tarball} is missing the ligule CLI entry required by the MCP server command`);
@@ -63,10 +88,12 @@ try {
     || Object.keys({ ...spreadsheetManifest.dependencies, ...spreadsheetManifest.optionalDependencies }).length !== 0) {
     throw new Error(`${tarball} must contain the dependency-free spreadsheet parser and its license`);
   }
-  for (const testPath of ['test', 'tests', 'core/test', 'tui/test']) {
+  for (const testPath of ['test', 'tests', 'core/test', 'core/tests', 'tui/test', 'tui/tests']) {
     if (existsSync(join(shipped, testPath))) throw new Error(`${tarball} must not contain test files: ${testPath}`);
   }
-  if (existsSync(join(bundledCore, 'test'))) throw new Error(`${tarball} must not bundle Core test fixtures`);
+  for (const testPath of ['test', 'tests']) {
+    if (existsSync(join(bundledCore, testPath))) throw new Error(`${tarball} must not bundle Core test fixtures: ${testPath}`);
+  }
   const declared = [...collectTargets(manifest.exports), ...collectTargets(manifest.bin)];
   if (declared.length === 0) throw new Error('package.json declares neither exports nor bin, nothing to check');
   for (const target of declared) {

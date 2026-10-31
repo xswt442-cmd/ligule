@@ -8,6 +8,21 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ### 简体中文
 
+- `delete` 只使用操作系统回收站；系统后端报错后会复核原目标，目标未变化时返回后端错误，无法确认目标未变化时返回 `delete_outcome_unknown`。Linux 通过 GIO 调用系统回收站。历史 `.ligule-trash` 不迁移或清理，Shell 删除继续使用自己的 Policy 与审批链。
+- 用户层 `[telemetry]` 可显式开启有界本地 JSONL 事件日志和可选的本机 OTLP Trace；默认关闭，导出不含对话正文或工具内容。
+- `[loop].maxParallelTools` 限制范围为 1–32，默认 4，防止一次模型响应启动不受限的工具并发。
+- `ligule run --json` 输出可校验的 Host 终态与调用统计，不输出回答正文；必须在命令行显式加 `--allow-full-access` 才会使用当前操作系统用户的完整权限运行，并且没有 OS 沙箱。Policy 的审批和拒绝规则继续生效。
+- `[loop].maxConcurrentSubagents` 可在 1–8 间设置内部子代理并发数，默认 3；任务可设置默认 12 小时的累计交互等待上限，只有所有工作都被交互阻塞时才暂停执行期限。
+- 并行审批或提问重叠时，执行期限会等最后一个阻塞交互结束后再恢复，不会因单个等待提前恢复。
+- `managed_process` 仅在健康检查 URL 返回 HTTP 2xx 后报告就绪；启动前的回环端口检查覆盖 IPv4 与 IPv6。
+- `managed_process` 对非 2xx 响应和请求失败使用有界退避；HTTP 2xx 立即就绪，用户取消或所属进程退出会停止探测。
+- `fetch` 的同源重定向只能连接首次策略检查覆盖的 IP；特殊用途地址按 IANA 转发与全球可达属性执行审批或拒绝，截断提示按保留字节数计算。
+- `managed_process` 分别报告 `terminationPending` 与 `cleanupPending`，区分进程活性未知和进程结束后的平台资源清理失败；两者可同时为 true，关闭或显式停止会重试可重试的资源清理，未确认状态的条目不会被淘汰。
+- 本地 Telemetry 遇到未知 Manifest 文件时会保留原文件、停用当前写入器并报告稳定错误码；Host 日志不记录路径或正文。
+- Session 用量保留提供方明确上报的缓存命中、未命中与输出字段；缺失的总量和成本仍为未知，不按账户日账单推算单次 Run 费用。
+- 外控委派支持持久 `runId` 回执、`requestKey` 去重与 `ligule_run_get` 查询，重启后可读取已保存的结果或中断状态，不自动重跑任务。
+- CLI/TUI 显示已确认的文件交付。`ligule storage inspect` 检查工作区数据；交互式 `storage cleanup` 分页核查历史引用、预览并确认删除过期截图及带归属/租约验证的受管残留（未知旧目录保留）。
+
 - 支持可信配置的无头 Playwright MCP 浏览器，按会话隔离，截图沿用持久图像通路；`/browser` 可查看状态、停止及恢复。
 
 - `full` 模式新增 `web_search`，复用已配置的官方 DeepSeek 服务；仅在配置和凭据可用时注册，仍受网络 Permission 与 Policy 控制。
@@ -21,8 +36,24 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 - 外控新增 `ligule_session_close` 关闭空闲会话并释放名额，人工接管同样释放名额；会话历史继续保留。
 - `full` 模式新增 `todo_write`，支持每轮独立、持久保存历史的完整任务清单，内部子代理各自隔离。
+- 委派运行支持整个任务和单次模型请求的期限、父子共享模型调用次数上限；失败结果保留已确认的用量与部分正文。`full` 新增 `present`，记录工作区文件交付时的类型、大小和 SHA-256。图片按 Session 引用保留，过期且未引用的图片可有界清理。
 
 ### English
+
+- `delete` uses only the operating system recycle bin. After a backend error, Ligule rechecks the original target: an unchanged target returns the backend error, while a target that cannot be confirmed unchanged returns `delete_outcome_unknown`. Linux delegates to GIO's system trash operation. Legacy `.ligule-trash` folders are neither migrated nor cleaned; Shell deletion keeps its own Policy and approval path.
+- User-layer `[telemetry]` can explicitly enable bounded local JSONL events and optional loopback OTLP traces; it is disabled by default and exports no conversation or tool content.
+- `[loop].maxParallelTools` is capped at 1–32 (default 4) to prevent one model response from starting unbounded tool concurrency.
+- `ligule run --json` emits a verifiable Host terminal state and call counts without response text. Full local permissions require the explicit `--allow-full-access` flag and run as the current OS user without an OS sandbox. Policy approvals and denials still apply.
+- `[loop].maxConcurrentSubagents` sets internal subagent concurrency from 1 to 8 (default 3). Tasks also have a cumulative interaction-wait limit of 12 hours by default; the execution deadline pauses only while all work is blocked on interaction.
+- Overlapping parallel approvals or questions keep the execution deadline paused until the last blocking interaction ends.
+- `managed_process` reports ready only after its health URL returns HTTP 2xx; startup port checks cover IPv4 and IPv6 loopback.
+- `managed_process` uses bounded backoff for non-2xx responses and request failures; HTTP 2xx is immediate, and cancellation or owned-process exit stops probing.
+- Same-origin `fetch` redirects can connect only to IPs covered by the initial Policy check; IANA forwardability and global reachability determine whether special-purpose addresses require approval or are denied, and truncation reports retained response bytes.
+- `managed_process` reports `terminationPending` and `cleanupPending` separately for unknown process liveness and failed platform-resource cleanup after exit; both can be true. Close and explicit stop retry cleanup when retryable; entries with either unresolved state are not evicted.
+- Local Telemetry preserves unknown Manifest files, disables the current writer, and reports a stable error code; Host logs omit paths and content.
+- Session usage preserves provider-reported cache hit, miss, and output fields. Missing totals and costs remain unknown; account-wide daily billing is not attributed to a single run.
+- External delegation adds durable `runId` receipts, `requestKey` deduplication and `ligule_run_get` for result or interruption lookup after restart, without automatic replay.
+- CLI/TUI display confirmed file deliveries. `ligule storage inspect` reports Workspace data; interactive `storage cleanup` pages Session references and confirms old screenshots or owner/lease-verified managed residue, preserving unknown legacy folders.
 
 - Trusted configuration can enable a headless Playwright MCP browser with Session isolation and durable screenshots; `/browser` shows status, stops, and resumes it.
 
@@ -37,6 +68,7 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 - External controllers can close idle sessions with `ligule_session_close`; closing and human takeover release session slots while preserving history.
 - The `full` mode includes `todo_write` for per-turn task lists with durable history and isolated internal subagent state.
+- Delegated runs support whole-task and per-request time limits plus a shared parent/child model-call budget; failures retain known usage and partial text. The `full` mode adds `present` with file type, size, and SHA-256 metadata. Session references protect images from expiration; old unreferenced images support bounded cleanup.
 
 ## [0.1.0] - 2026-10-24
 

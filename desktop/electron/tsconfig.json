@@ -14,5 +14,5 @@
     "noEmitOnError": true
   },
   "include": ["*.ts"],
-  "exclude": ["test", "dist"]
+  "exclude": ["tests", "dist"]
 }

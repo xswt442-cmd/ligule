@@ -8,6 +8,13 @@ import { runManagedExec, type ExecRunContext, type ManagedExecLease } from './ex
 
 const MAX_LOG_BYTES = 16_384;
 const STARTUP_TIMEOUT_MS = 20_000;
+const READY_RETRY_DELAY_MS = 100;
+const READY_REQUEST_TIMEOUT_MS = 750;
+const STOP_ATTEMPT_TIMEOUT_MS = 5_000;
+const STOP_RETRY_DELAY_MS = 100;
+// A stop call retries settled failures; a timed-out request remains in-flight and is reused by later calls.
+const MAX_SETTLED_STOP_FAILURES = 2;
+const MAX_RETAINED_TERMINAL_ENTRIES = 128;
 
 type ManagedProcessAction = 'start' | 'status' | 'logs' | 'stop';
 type ManagedProcessArguments = {
@@ -27,8 +34,54 @@ interface ManagedProcessEntry {
   readonly workspaceTrustedAtStart: boolean;
   status: ProcessStatus;
   stopping?: Promise<void>;
+  stopRequest?: Promise<void>;
+  stopOnAbort?: () => void;
+  stopSignal?: AbortSignal;
   exitCode?: number;
   failure?: string;
+  terminationPending?: boolean;
+  cleanupPending?: boolean;
+  cleanupFailureCode?: string;
+  terminalOrder?: number;
+}
+
+function errorCodeOf(error: unknown): unknown {
+  return typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
+}
+
+function failureState(error: unknown): Pick<ManagedProcessEntry, 'terminationPending' | 'cleanupPending' | 'cleanupFailureCode'> {
+  const code = errorCodeOf(error);
+  if (code === 'exec_termination_cleanup_failed') {
+    return { terminationPending: true, cleanupPending: true, cleanupFailureCode: code };
+  }
+  if (code === 'exec_temp_cleanup_failed' || code === 'exec_script_snapshot_cleanup_failed' || code === 'exec_sandbox_cleanup_failed') {
+    return { terminationPending: false, cleanupPending: true, cleanupFailureCode: code };
+  }
+  if (code === 'exec_cancelled' || code === 'exec_process_interrupted' || code === 'exec_spawn_failed' || code === 'exec_sandbox_setup_failed') {
+    return { terminationPending: false, cleanupPending: false };
+  }
+  return { terminationPending: true, cleanupPending: false };
+}
+
+function applyFailureState(entry: ManagedProcessEntry, error: unknown): void {
+  const state = failureState(error);
+  entry.terminationPending = state.terminationPending;
+  entry.cleanupPending = state.cleanupPending;
+  if (state.cleanupFailureCode === undefined) delete entry.cleanupFailureCode;
+  else entry.cleanupFailureCode = state.cleanupFailureCode;
+}
+
+function terminalEntry(entry: ManagedProcessEntry): boolean {
+  return entry.status === 'stopped' || entry.status === 'exited'
+    || entry.status === 'failed' && entry.terminationPending !== true && entry.cleanupPending !== true;
+}
+
+function removeStopAbortListener(entry: ManagedProcessEntry): void {
+  if (entry.stopOnAbort !== undefined && entry.stopSignal !== undefined) {
+    entry.stopSignal.removeEventListener('abort', entry.stopOnAbort);
+  }
+  entry.stopOnAbort = undefined;
+  entry.stopSignal = undefined;
 }
 
 function loopbackUrl(value: unknown): URL {
@@ -43,52 +96,109 @@ function loopbackUrl(value: unknown): URL {
   return url;
 }
 
-async function assertPortAvailable(port: number): Promise<void> {
-  const server = createServer();
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(port, '127.0.0.1', () => resolve());
-  }).catch((error: unknown) => {
-    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'EADDRINUSE') {
-      throw new KernelError('managed_process_port_in_use', { detail: `loopback port ${port} is already in use` });
-    }
-    throw new KernelError('managed_process_port_check_failed', { cause: error });
-  });
-  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+async function assertPortAvailable(url: URL): Promise<void> {
+  const port = Number(url.port);
+  const addresses = url.hostname === 'localhost' ? ['127.0.0.1', '::1']
+    : url.hostname === '[::1]' ? ['::1'] : ['127.0.0.1'];
+  for (const address of addresses) {
+    const server = createServer();
+    let listening = false;
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(port, address, () => { listening = true; resolve(); });
+    }).catch((error: unknown) => {
+      const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
+      if (code === 'EADDRINUSE') {
+        throw new KernelError('managed_process_port_in_use', { detail: `loopback port ${port} is already in use` });
+      }
+      if (url.hostname === 'localhost' && address === '::1'
+        && ['EAFNOSUPPORT', 'EADDRNOTAVAIL', 'ENOTSUP'].includes(String(code))) return;
+      throw new KernelError('managed_process_port_check_failed', { cause: error });
+    });
+    if (!listening) continue;
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
 }
 
 async function waitForReady(entry: ManagedProcessEntry, signal?: AbortSignal): Promise<void> {
   const deadline = Date.now() + STARTUP_TIMEOUT_MS;
+  const processExit = entry.lease.completion.then(() => ({ type: 'exit' as const }), () => ({ type: 'exit' as const }));
   while (Date.now() < deadline) {
     if (signal?.aborted) throw new KernelError('exec_cancelled');
     if (entry.status !== 'starting') {
       throw new KernelError('managed_process_exited', { detail: entry.failure ?? `the command exited with status ${entry.exitCode ?? 'unknown'}` });
     }
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 750);
+    const timer = setTimeout(() => controller.abort(), Math.min(READY_REQUEST_TIMEOUT_MS, deadline - Date.now()));
+    let response: Response | undefined;
+    let requestFailed = false;
+    let processExited = false;
     try {
-      const response = await fetch(entry.readyUrl, { signal: controller.signal, redirect: 'error' });
-      if (entry.status !== 'starting') {
-        await response.body?.cancel();
-        throw new KernelError('managed_process_exited', { detail: entry.failure ?? `the command exited with status ${entry.exitCode ?? 'unknown'}` });
+      const outcome = await Promise.race([
+        fetch(entry.readyUrl, {
+          signal: signal === undefined ? controller.signal : AbortSignal.any([controller.signal, signal]),
+          redirect: 'error',
+        }).then(value => ({ type: 'response' as const, value })),
+        processExit,
+      ]);
+      if (outcome.type === 'exit') {
+        processExited = true;
+        controller.abort();
+      } else {
+        response = outcome.value;
       }
-      entry.status = 'running';
-      await response.body?.cancel();
-      return;
     } catch {
-      await delay(100);
+      requestFailed = true;
     } finally {
       clearTimeout(timer);
     }
+    if (signal?.aborted) throw new KernelError('exec_cancelled');
+    if (processExited || entry.status !== 'starting') {
+      throw new KernelError('managed_process_exited', { detail: entry.failure ?? `the command exited with status ${entry.exitCode ?? 'unknown'}` });
+    }
+    if (response !== undefined) {
+      const ready = response.status >= 200 && response.status < 300;
+      try { await response.body?.cancel(); }
+      catch { requestFailed = true; }
+      if (signal?.aborted) throw new KernelError('exec_cancelled');
+      if (entry.status !== 'starting') {
+        throw new KernelError('managed_process_exited', { detail: entry.failure ?? `the command exited with status ${entry.exitCode ?? 'unknown'}` });
+      }
+      if (ready && !requestFailed && Date.now() < deadline) {
+        entry.status = 'running';
+        return;
+      }
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    let exitedDuringDelay = false;
+    try {
+      const outcome = await Promise.race([
+        delay(Math.min(READY_RETRY_DELAY_MS, remaining), undefined,
+          signal === undefined ? undefined : { signal }).then(() => ({ type: 'retry' as const })),
+        processExit,
+      ]);
+      exitedDuringDelay = outcome.type === 'exit';
+    } catch (error) {
+      if (signal?.aborted) throw new KernelError('exec_cancelled');
+      throw error;
+    }
+    if (exitedDuringDelay || entry.status !== 'starting') {
+      throw new KernelError('managed_process_exited', { detail: entry.failure ?? `the command exited with status ${entry.exitCode ?? 'unknown'}` });
+    }
   }
   await stopEntry(entry);
-  throw new KernelError('managed_process_not_ready', { detail: `no HTTP response was received from loopback port ${entry.port} within ${STARTUP_TIMEOUT_MS}ms` });
+  throw new KernelError('managed_process_not_ready', {
+    detail: `no successful 2xx HTTP response was received from loopback port ${entry.port} within ${STARTUP_TIMEOUT_MS}ms`,
+  });
 }
 
 function view(entry: ManagedProcessEntry) {
   return {
     id: entry.id,
     status: entry.status,
+    terminationPending: entry.terminationPending === true,
+    cleanupPending: entry.cleanupPending === true,
     ready: entry.status === 'running',
     port: entry.port,
     ...(entry.exitCode === undefined ? {} : { exitCode: entry.exitCode }),
@@ -97,18 +207,124 @@ function view(entry: ManagedProcessEntry) {
   };
 }
 
-function stopEntry(entry: ManagedProcessEntry): Promise<void> {
-  if (entry.status === 'stopped' || entry.status === 'exited' || entry.status === 'failed') return Promise.resolve();
+function stopEntry(entry: ManagedProcessEntry, onTerminal?: () => void): Promise<void> {
+  if (terminalEntry(entry)) {
+    onTerminal?.();
+    return Promise.resolve();
+  }
   if (entry.stopping !== undefined) return entry.stopping;
   entry.status = 'stopping';
-  entry.stopping = entry.lease.stop().then(() => {
-    entry.status = 'stopped';
-  }, (error: unknown) => {
+  let stopping: Promise<void>;
+  stopping = (async () => {
+    let lastError: unknown;
+    let settledStopFailures = 0;
+    let confirmedExitCleanupPending = entry.cleanupPending === true && entry.terminationPending !== true;
+    while (settledStopFailures < MAX_SETTLED_STOP_FAILURES) {
+      if (terminalEntry(entry)) {
+        onTerminal?.();
+        return;
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const stopRequest = entry.stopRequest ?? Promise.resolve().then(() => entry.lease.stop());
+      if (entry.stopRequest === undefined) {
+        entry.stopRequest = stopRequest;
+        void stopRequest.then(() => {
+          if (entry.stopRequest === stopRequest) entry.stopRequest = undefined;
+          removeStopAbortListener(entry);
+          entry.terminationPending = false;
+          entry.cleanupPending = false;
+          delete entry.cleanupFailureCode;
+          if (entry.status !== 'exited') entry.status = 'stopped';
+          onTerminal?.();
+        }, () => {
+          if (entry.stopRequest === stopRequest) entry.stopRequest = undefined;
+        });
+      }
+      const timeout = new Promise<{ readonly type: 'timeout' }>(resolveTimeout => {
+        timer = setTimeout(() => resolveTimeout({ type: 'timeout' }), STOP_ATTEMPT_TIMEOUT_MS);
+      });
+      let outcome: { readonly type: 'stopped' | 'completion' }
+        | { readonly type: 'failed'; readonly error: unknown }
+        | { readonly type: 'completion_failure'; readonly error: unknown }
+        | { readonly type: 'timeout' };
+      const stopOutcome = stopRequest.then(
+        () => ({ type: 'stopped' as const }),
+        (error: unknown) => ({ type: 'failed' as const, error }),
+      );
+      const completionOutcome = confirmedExitCleanupPending ? undefined : entry.lease.completion.then(
+        () => ({ type: 'completion' as const }),
+        (error: unknown) => errorCodeOf(error) === 'exec_cancelled'
+          ? ({ type: 'completion' as const })
+          : ({ type: 'completion_failure' as const, error }),
+      );
+      try {
+        outcome = await Promise.race([
+          stopOutcome,
+          timeout,
+          ...(completionOutcome === undefined ? [] : [completionOutcome]),
+        ]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+      if (outcome.type === 'stopped' || outcome.type === 'completion') {
+        removeStopAbortListener(entry);
+        if (!terminalEntry(entry)) {
+          entry.terminationPending = false;
+          entry.cleanupPending = false;
+          delete entry.cleanupFailureCode;
+          entry.status = 'stopped';
+        }
+        onTerminal?.();
+        return;
+      }
+      if (outcome.type === 'completion_failure') {
+        const pending = failureState(outcome.error);
+        if (pending.cleanupPending === true && pending.terminationPending !== true) {
+          entry.status = 'failed';
+          entry.failure = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+          applyFailureState(entry, outcome.error);
+          confirmedExitCleanupPending = true;
+          continue;
+        }
+        entry.status = 'failed';
+        entry.failure = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+        applyFailureState(entry, outcome.error);
+        onTerminal?.();
+        throw outcome.error;
+      }
+      lastError = outcome.type === 'failed' ? outcome.error : new KernelError('exec_terminate_failed', {
+        detail: 'the managed process did not confirm termination before the stop deadline',
+      });
+      if (terminalEntry(entry)) {
+        onTerminal?.();
+        return;
+      }
+      if (outcome.type === 'timeout') {
+        // The existing Lease.stop remains in flight; later close/stop calls reuse it instead of starting another request.
+        break;
+      }
+      settledStopFailures += 1;
+      if (settledStopFailures < MAX_SETTLED_STOP_FAILURES) await delay(STOP_RETRY_DELAY_MS);
+    }
+    if (confirmedExitCleanupPending) {
+      entry.terminationPending = false;
+      entry.cleanupPending = true;
+      const cleanupErrorCode = entry.cleanupFailureCode ?? 'exec_temp_cleanup_failed';
+      lastError = new KernelError(cleanupErrorCode, {
+        cause: lastError,
+        detail: 'the process exited, but resource cleanup did not finish before the stop deadline',
+      });
+      entry.cleanupFailureCode = cleanupErrorCode;
+    } else applyFailureState(entry, lastError);
     entry.status = 'failed';
-    entry.failure = error instanceof Error ? error.message : String(error);
-    throw error;
+    entry.failure = lastError instanceof Error ? lastError.message : String(lastError);
+    onTerminal?.();
+    throw lastError;
+  })().finally(() => {
+    if (entry.stopping === stopping) entry.stopping = undefined;
   });
-  return entry.stopping;
+  entry.stopping = stopping;
+  return stopping;
 }
 
 export interface ManagedProcessRegistry {
@@ -131,6 +347,17 @@ export function createManagedProcessRegistry(options: ManagedProcessRegistryOpti
   let closed = false;
   let ownerCheck: NodeJS.Timeout | undefined;
   let checkingOwner = false;
+  let nextTerminalOrder = 0;
+
+  function pruneTerminalEntries(): void {
+    const terminal = [...entries.entries()].filter(([, entry]) => terminalEntry(entry));
+    for (const [, entry] of terminal) entry.terminalOrder ??= nextTerminalOrder++;
+    terminal.sort((left, right) => (left[1].terminalOrder ?? 0) - (right[1].terminalOrder ?? 0));
+    while (terminal.length > MAX_RETAINED_TERMINAL_ENTRIES) {
+      const [id] = terminal.shift()!;
+      entries.delete(id);
+    }
+  }
 
   function get(id: string): ManagedProcessEntry {
     const entry = entries.get(id);
@@ -138,8 +365,28 @@ export function createManagedProcessRegistry(options: ManagedProcessRegistryOpti
     return entry;
   }
 
+  function watchCompletion(entry: ManagedProcessEntry): void {
+    void entry.lease.completion.then((exitCode) => {
+      removeStopAbortListener(entry);
+      if (entry.status === 'stopping' || entry.status === 'stopped') return;
+      entry.exitCode = exitCode;
+      entry.terminationPending = false;
+      entry.cleanupPending = false;
+      delete entry.cleanupFailureCode;
+      entry.status = 'exited';
+      pruneTerminalEntries();
+    }, (error: unknown) => {
+      removeStopAbortListener(entry);
+      if (entry.status === 'stopping' || entry.status === 'stopped') return;
+      entry.status = 'failed';
+      entry.failure = error instanceof Error ? error.message : String(error);
+      applyFailureState(entry, error);
+      pruneTerminalEntries();
+    });
+  }
+
   async function stopAll(): Promise<void> {
-    const outcomes = await Promise.allSettled([...entries.values()].map(stopEntry));
+    const outcomes = await Promise.allSettled([...entries.values()].map((entry) => stopEntry(entry, pruneTerminalEntries)));
     const failure = outcomes.find((outcome) => outcome.status === 'rejected');
     if (failure?.status === 'rejected') throw failure.reason;
   }
@@ -148,9 +395,9 @@ export function createManagedProcessRegistry(options: ManagedProcessRegistryOpti
     const outcomes = await Promise.allSettled([...entries.values()]
       .filter((entry) => entry.workspaceTrustedAtStart)
       .map(async (entry) => {
-        if (entry.status === 'stopped' || entry.status === 'exited' || entry.status === 'failed') return;
+        if (terminalEntry(entry)) return;
         entry.failure = 'workspace trust was revoked';
-        try { await stopEntry(entry); }
+        try { await stopEntry(entry, pruneTerminalEntries); }
         catch (error) {
           entry.status = 'failed';
           entry.failure = `workspace trust was revoked; process-tree shutdown failed: ${error instanceof Error ? error.message : String(error)}`;
@@ -163,9 +410,9 @@ export function createManagedProcessRegistry(options: ManagedProcessRegistryOpti
 
   async function stopAfterOwnerInvalidation(): Promise<void> {
     for (const entry of entries.values()) {
-      if (entry.status === 'stopped' || entry.status === 'exited' || entry.status === 'failed') continue;
+      if (terminalEntry(entry)) continue;
       entry.failure = 'the owning Session Grant is no longer valid';
-      try { await stopEntry(entry); }
+      try { await stopEntry(entry, pruneTerminalEntries); }
       catch (error) {
         entry.status = 'failed';
         entry.failure = `the owning Session Grant is no longer valid; process-tree shutdown failed: ${error instanceof Error ? error.message : String(error)}`;
@@ -175,10 +422,6 @@ export function createManagedProcessRegistry(options: ManagedProcessRegistryOpti
 
   return {
     async start(readyUrl, lease, signal, workspaceTrustedAtStart = false) {
-      if (closed || signal?.aborted) {
-        await lease.stop();
-        throw new KernelError(closed ? 'managed_process_owner_closed' : 'exec_cancelled');
-      }
       const entry: ManagedProcessEntry = {
         id: randomUUID(),
         port: Number(readyUrl.port),
@@ -188,12 +431,23 @@ export function createManagedProcessRegistry(options: ManagedProcessRegistryOpti
         status: 'starting',
       };
       entries.set(entry.id, entry);
-      const stopOnAbort = (): void => { void stopEntry(entry).catch(() => undefined); };
+      watchCompletion(entry);
+      if (closed || signal?.aborted) {
+        try { await stopEntry(entry, pruneTerminalEntries); }
+        catch (error) {
+          entry.failure = `${closed ? 'the process registry is closed' : 'the start request was cancelled'}; process-tree shutdown failed: ${error instanceof Error ? error.message : String(error)}`;
+          throw error;
+        }
+        entries.delete(entry.id);
+        throw new KernelError(closed ? 'managed_process_owner_closed' : 'exec_cancelled');
+      }
+      const stopOnAbort = (): void => {
+        removeStopAbortListener(entry);
+        void stopEntry(entry, pruneTerminalEntries).catch(() => undefined);
+      };
+      entry.stopOnAbort = stopOnAbort;
+      entry.stopSignal = signal;
       signal?.addEventListener('abort', stopOnAbort, { once: true });
-      void lease.completion.then(
-        () => signal?.removeEventListener('abort', stopOnAbort),
-        () => signal?.removeEventListener('abort', stopOnAbort),
-      );
       const validateOwner = options.validateOwner;
       const validateWorkspaceTrust = options.validateWorkspaceTrust;
       if ((validateOwner !== undefined || validateWorkspaceTrust !== undefined && workspaceTrustedAtStart) && ownerCheck === undefined) {
@@ -204,7 +458,7 @@ export function createManagedProcessRegistry(options: ManagedProcessRegistryOpti
             await validateOwner?.();
             if (validateWorkspaceTrust !== undefined
               && [...entries.values()].some((item) => item.workspaceTrustedAtStart
-                && item.status !== 'stopped' && item.status !== 'exited' && item.status !== 'failed')) {
+                && !terminalEntry(item))) {
               try { await validateWorkspaceTrust(); }
               catch { await stopWorkspaceTrusted().catch(() => undefined); }
             }
@@ -212,19 +466,10 @@ export function createManagedProcessRegistry(options: ManagedProcessRegistryOpti
         }, 1_000);
         ownerCheck.unref();
       }
-      void lease.completion.then((exitCode) => {
-        if (entry.status === 'stopping' || entry.status === 'stopped') return;
-        entry.exitCode = exitCode;
-        entry.status = 'exited';
-      }, (error: unknown) => {
-        if (entry.status === 'stopping' || entry.status === 'stopped') return;
-        entry.status = 'failed';
-        entry.failure = error instanceof Error ? error.message : String(error);
-      });
       try {
         await waitForReady(entry, signal);
       } catch (error) {
-        await stopEntry(entry).catch(() => undefined);
+        await stopEntry(entry, pruneTerminalEntries).catch(() => undefined);
         throw error;
       }
       return view(entry);
@@ -238,7 +483,7 @@ export function createManagedProcessRegistry(options: ManagedProcessRegistryOpti
     },
     async stop(id) {
       const entry = get(id);
-      await stopEntry(entry);
+      await stopEntry(entry, pruneTerminalEntries);
       return view(entry);
     },
     stopAll,
@@ -257,7 +502,7 @@ export function managedProcessTool(registry: ManagedProcessRegistry): ToolDefini
     access: 'exec',
     commandArgument: 'command',
     capability: () => 'exec',
-    description: 'Start, inspect, read bounded logs from, or stop a long-running local process owned by this Session. Start requires an HTTP loopback readiness URL.',
+    description: 'Start, inspect, read bounded logs from, or stop a long-running local process owned by this Session. Start requires an HTTP loopback health URL that returns a 2xx response when ready.',
     parameters: {
       type: 'object',
       properties: {
@@ -265,7 +510,7 @@ export function managedProcessTool(registry: ManagedProcessRegistry): ToolDefini
         command: { type: 'string', description: 'The command to start. Required only for action=start.' },
         cwd: { type: 'string', description: 'Optional working directory inside the workspace boundary.' },
         id: { type: 'string', description: 'Managed process handle returned by action=start.' },
-        readyUrl: { type: 'string', description: 'HTTP loopback URL used to determine when the server is ready.' },
+        readyUrl: { type: 'string', description: 'HTTP loopback health URL; the server is ready only after it returns a 2xx response.' },
       },
       required: ['action'],
     },
@@ -274,7 +519,7 @@ export function managedProcessTool(registry: ManagedProcessRegistry): ToolDefini
       if (args.action === 'start') {
         if (typeof args.command !== 'string' || args.command.trim() === '') throw new KernelError('managed_process_command_required');
         const url = loopbackUrl(args.readyUrl);
-        await assertPortAvailable(Number(url.port));
+        await assertPortAvailable(url);
         if (args.cwd !== undefined && typeof args.cwd !== 'string') throw new KernelError('managed_process_cwd_invalid');
         return;
       }

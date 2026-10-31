@@ -5,23 +5,56 @@ import { spawnSync, execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { releaseManifest } from './pack-release.js';
 import { execNpm } from './npm-cli.js';
 
 const repo = fileURLToPath(new URL('..', import.meta.url));
-const packDir = join(repo, 'testplace', 'pack');
-const consumer = join(packDir, 'install', 'consumer');
 const args = process.argv.slice(2);
-if (args.length > 1 || args.some((arg) => arg.startsWith('--'))) throw new Error('usage: pnpm --filter ligule run verify-install [tarball]');
-const given = args[0];
+if (args[0] === '--') args.shift();
+let given;
+let workRootArgument;
+for (let index = 0; index < args.length; index += 1) {
+  if (args[index] === '--work-root') {
+    if (workRootArgument !== undefined || typeof args[index + 1] !== 'string') {
+      throw new Error('usage: pnpm --filter ligule run verify-install [tarball] [--work-root testplace/tmp/<new-directory>]');
+    }
+    workRootArgument = args[++index];
+  } else if (args[index].startsWith('--') || given !== undefined) {
+    throw new Error('usage: pnpm --filter ligule run verify-install [tarball] [--work-root testplace/tmp/<new-directory>]');
+  } else {
+    given = args[index];
+  }
+}
+const temporaryParent = join(repo, 'testplace', 'tmp');
+mkdirSync(temporaryParent, { recursive: true });
+const canonicalTestplace = realpathSync(join(repo, 'testplace'));
+const resolvedTemporaryParent = realpathSync(temporaryParent);
+if (resolvedTemporaryParent !== join(canonicalTestplace, 'tmp')) throw new Error('testplace/tmp must not resolve outside the workspace testplace directory');
+const packDir = workRootArgument === undefined ? join(repo, 'testplace', 'pack') : resolve(repo, workRootArgument);
+let isolatedWorkRoot = false;
+if (workRootArgument !== undefined) {
+  const relativeWorkRoot = relative(resolvedTemporaryParent, packDir);
+  const actualParent = realpathSync(dirname(packDir));
+  const parentMatches = process.platform === 'win32'
+    ? actualParent.toLowerCase() === resolvedTemporaryParent.toLowerCase()
+    : actualParent === resolvedTemporaryParent;
+  if (relativeWorkRoot === '' || relativeWorkRoot === '..' || relativeWorkRoot.startsWith(`..${sep}`) || isAbsolute(relativeWorkRoot)
+    || !parentMatches) {
+    throw new Error('verify-install work root must be a new direct child of testplace/tmp');
+  }
+  if (existsSync(packDir)) throw new Error(`verify-install work root already exists: ${packDir}`);
+  mkdirSync(packDir);
+  isolatedWorkRoot = true;
+}
+const consumer = join(packDir, 'install', 'consumer');
 if (given === undefined && (!existsSync(join(repo, 'tui', 'dist', 'index.js')) || !existsSync(join(repo, 'core', 'dist', 'index.js')))) {
   throw new Error('TUI or Core build output is missing; run `pnpm run build` before verifying a fresh install');
 }
 
 const pkg = releaseManifest();
 const tarball = given === undefined ? join(packDir, `${pkg.name}-${pkg.version}.tgz`) : resolve(given);
-rmSync(join(packDir, 'install'), { recursive: true, force: true });
+if (!isolatedWorkRoot) rmSync(join(packDir, 'install'), { recursive: true, force: true });
 mkdirSync(consumer, { recursive: true });
 // 为隔离的消费者创建独立清单；安装依赖只依据被测 tarball 的声明。
 // 这四个依赖需要安装脚本来构建原生绑定。消费者清单显式允许这些脚本，避免沿用调用环境中的 npm 白名单设置。
@@ -33,7 +66,7 @@ const consumerManifest = {
 };
 writeFileSync(join(consumer, 'package.json'), `${JSON.stringify(consumerManifest, null, 2)}\n`, 'utf8');
 if (given === undefined) {
-  execFileSync(process.execPath, [join(repo, 'scripts', 'pack-release.js'), 'testplace/pack'], { cwd: repo, stdio: 'inherit' });
+  execFileSync(process.execPath, [join(repo, 'scripts', 'pack-release.js'), packDir], { cwd: repo, stdio: 'inherit' });
 }
 if (!existsSync(tarball)) throw new Error(`npm pack did not produce ${tarball}`);
 
@@ -85,12 +118,12 @@ if (JSON.stringify(installed.optionalDependencies) !== JSON.stringify(pkg.option
 }
 if (existsSync(join(consumer, 'node_modules', 'typescript'))) throw new Error('devDependencies came along into the consumer');
 
-// 通过 npm 安装生成的命令包装脚本启动 CLI；Windows 使用对应的 .cmd 文件。
-const env = {
-  ...process.env,
-  PATH: `${join(consumer, 'node_modules', '.bin')}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH ?? ''}`,
-};
-const run = (args) => spawnSync(pkg.name, args, { env, cwd: consumer, shell: true, encoding: 'utf8', timeout: 60_000 });
+// 确认 npm 生成 CLI 命令 shim，再直接用 Node 启动同一个入口，避免经 shell 拼接参数。
+const commandShim = join(consumer, 'node_modules', '.bin', process.platform === 'win32' ? `${pkg.name}.cmd` : pkg.name);
+if (!existsSync(commandShim)) throw new Error(`${pkg.name}'s installed CLI command shim is missing`);
+const cliEntry = join(installedPackageDirectory, 'dist', 'cli.js');
+const env = { ...process.env, PATH: `${join(consumer, 'node_modules', '.bin')}${delimiter}${process.env.PATH ?? ''}` };
+const run = (args) => spawnSync(process.execPath, [cliEntry, ...args], { env, cwd: consumer, encoding: 'utf8', timeout: 60_000 });
 const readings = [];
 
 // Generate real documents with development writers, then read them solely through the installed runtime.
@@ -315,7 +348,7 @@ const coreRequire = createRequire(corePackage);
 const { Client } = coreRequire('@modelcontextprotocol/sdk/client');
 const { StdioClientTransport, getDefaultEnvironment } = coreRequire('@modelcontextprotocol/sdk/client/stdio.js');
 const expected = [
-  'ligule_interaction_reply', 'ligule_run', 'ligule_run_await', 'ligule_run_cancel', 'ligule_run_start', 'ligule_run_status', 'ligule_session_close', 'ligule_session_configure',
+  'ligule_interaction_reply', 'ligule_run', 'ligule_run_await', 'ligule_run_cancel', 'ligule_run_get', 'ligule_run_start', 'ligule_run_status', 'ligule_session_close', 'ligule_session_configure',
   'ligule_session_create', 'ligule_session_list', 'ligule_session_open', 'ligule_session_read', 'ligule_session_send',
 ].sort();
 const projectRoot = ${JSON.stringify(mcpProject)};

@@ -42,6 +42,8 @@ npm install -g ligule
 
 在项目目录中运行 `ligule run "查看项目结构并提出建议"`，可以执行一轮对话。日常使用可以直接运行 `ligule` 打开终端界面，或启动已安装的 ligule 桌面版。`ligule tui` 仍可作为终端界面的兼容命令。终端界面需要交互式终端；脚本和管道使用 `ligule run`。
 
+CLI 单轮任务默认只读。只有明确使用 `ligule run --allow-full-access "..."` 才会为本次运行启用本机完整文件、进程和网络权限；Shell 命令以当前操作系统用户身份执行，不提供 OS 沙箱。此标志仅适用于 `run`，不能通过项目配置或模型调用启用，也不会绕过 Policy 审批、拒绝规则或危险命令硬拒绝。
+
 使用 `ligule --help` 查看命令。`ligule sessions` 列出当前项目的会话，`ligule workspaces` 列出已登记的工作区，`ligule tools`、`ligule skills` 和 `ligule extensions` 查看已加载的能力。
 
 ### 工作区和数据
@@ -53,6 +55,8 @@ npm install -g ligule
 每个新会话只属于一个工作区。终端界面启动时准备新会话；桌面版启动时恢复上次打开的会话，没有上次会话时准备一个新会话。会话记录保存在用户数据根的 `workspaces/<可读工作区路径>--<短哈希>/sessions/` 下。路径名保留工作区特征，哈希用于避免不同路径重名。桌面版新会话的工作区菜单提供「浏览」按钮，可用系统文件夹选择器选目录，也可直接输入路径。
 
 用户数据根默认为 `~/.ligule`。设置绝对路径环境变量 `LIGULE_HOME` 可以更换数据根；相对路径会报 `data_root_invalid`。用户配置在 `~/.ligule/config.toml`，项目共享配置在 `.ligule/config.toml`，项目本地配置在 `.ligule/config.local.toml`。用户数据根还保存：工作区登记 `workspaces.json`、工作区信任记录 `trust.json`（旧版本的 `tui-trust.json` 仍可读取）、MCP 服务器信任 `mcp-trust.json`、外部 Agent 授权 `agent-control.json`、扩展启停登记 `extensions-state.json`、终端输入历史、桌面偏好 `desktop.json` 和密钥引用（密钥本身存放在系统凭据库，不在数据根）。会话目录中除记录 `.jsonl` 外，还包含可重建的派生文件：压缩块文件 `<编号>.checkpoint.json`、超限内容溢出文件 `result-*.json` 与 `summary-*.txt`、会话列表索引 `index.json`；这些文件损坏或缺失时自动从记录重建，可安全删除。旧会话仍可从原全局 `sessions/` 和项目 `.ligule/sessions/` 中只读浏览；打开旧会话时才会将记录及附属文件复制到新的工作区目录，原件保留。WebView 的 `ligule.ui` 只作首屏缓存。终端界面与桌面界面的草稿和队列分别保存。
+
+文件工具 `delete` 只使用操作系统回收站。Windows 使用系统回收站，Linux 调用 GIO 的系统回收操作。回收后端报错时，Ligule 会比较原路径上的目标对象身份和顶层元数据与操作前快照。仍匹配时返回后端错误；无法确认匹配时返回 `delete_outcome_unknown`，请先检查工作区和系统回收站再重试。这项检查不比较文件正文，也不递归核对目录内容。恢复由操作系统负责；Ligule 不提供自建回收列表、恢复或永久删除管理。Shell 命令中的删除仍按普通 Shell 操作执行，受当前 Permission、Policy 与审批控制，不会自动改送回收站。旧 `.ligule-trash` 目录保留原位、不迁移也不清理；搜索继续跳过该历史目录。旧 `trashBackend` 或 `limits.trashDirectory` 配置会报 `trash_legacy_config_unsupported`，删除时应移除这些配置项。
 
 搜索默认使用随包提供的 ripgrep。自定义 `ripgrepPath` 会选择可执行程序，只能在用户配置或命令行 `--config` 中设置；项目共享配置和项目本地配置声明该字段时会报 `search_backend_source_untrusted`。将自定义路径移至用户配置，或删除该字段以使用随包后端。
 
@@ -67,6 +71,16 @@ services = [
 ]
 selection = { provider = "deepseek", model = "deepseek-flash" }
 ```
+
+可在用户配置文件中显式开启无正文的结构化事件日志，并选择本机 Trace Collector：
+
+```toml
+[telemetry]
+enabled = true
+otlpEndpoint = "http://127.0.0.1:4318/v1/traces"
+```
+
+`otlpEndpoint` 仅允许 `localhost`、`127.0.0.1` 或 `::1` 的 OTLP/HTTP protobuf `/v1/traces` 地址，例如本机 Phoenix。默认关闭，项目配置不能开启；不读取继承的 `OTEL_*` Header 或凭据。日志和 Trace 不保存提示词、推理、工具参数/结果、路径或密钥。导出失败不会影响运行；本地 JSONL 是结构化事件日志，不是 OpenTelemetry Logs。
 
 每项服务的 `api` 可设为 `chat-completions` 或 `messages`，`models` 列出该服务可选的模型。把密钥放入 `apiKeyEnv` 指定的环境变量；桌面版也可以把密钥保存到操作系统凭据库。非空环境变量优先；Linux 使用 Secret Service，服务不可用时会明确报错。旧的单服务 `model.api`、`model.baseURL` 和 `model.model` 配置仍受支持；这类配置未填写 `apiKeyEnv` 时使用 `LIGULE_API_KEY`。
 
@@ -106,6 +120,8 @@ selection = { provider = "deepseek", model = "deepseek-flash" }
 
 长对话在接近窗口时自动压缩：较早的历史由模型撰写的摘要替代，每次压缩形成一个可校验的块，原始事件始终完整保留。达到软阈值时模型收到一次提醒，可通过 `compact` 工具查看上下文压力、列出压缩块、读回某段原文或溢出文件，并自行选择范围撰写摘要；超过硬阈值时自动压缩兜底，界面中的"压缩上下文"命令仍可随时手动触发。声明的输出预算参与压力阈值（预留上限为窗口的四分之一）。分支会继承已压缩的块，被压缩的细节仍可在记录与导出中找到。
 
+工具结果超过输出上限时，提供 `compact` 的会话可以使用 `action: "spill"` 和结果中的 `name` 读取完整内容。返回页面被截断时，使用其中的 `offsetBytes` 继续；偏移量以 UTF-8 字节为单位，必须落在字符边界。
+
 在输入框中键入 `@` 可以查找当前工作区中的文件。选择候选文件只会把路径放进草稿，不会发送消息。按 Enter 发送；长消息按 Shift+Enter 换行。运行中的会话收到的新消息会排队，按顺序发送。取消本轮也会暂停队列；可以查看队列、继续发送，或把排队消息收回草稿。终端会话恢复后，待发送消息保留在暂停的队列中，不会自动发送。
 
 桌面版按工作区和会话分别保存草稿与队列；关闭窗口后再次打开仍可恢复。终端界面按工作区和会话保存输入草稿与队列。两种界面共用已发送消息的输入历史。
@@ -135,7 +151,7 @@ Windows 的 `full` 模式提供 `screenshot`，每次捕获一帧主显示器 `s
 
 截图需要独立同意。桌面版已有会话选择 `full` 后，点击“截图关闭”并确认即可授权；同一入口可撤销，并中止进行中的捕获。TUI `/screen on` 显示范围说明，`/screen on confirm` 授权当前会话及内部子任务，`/screen off` 撤销。CLI 的 `run`、`resume`、`tui` 支持 `--allow-screen-capture`，明确授权该进程。普通单会话授权不会在重新打开时恢复；显式启动参数或仍有效的截图 Grant 按各自范围生效。MCP 必须在可信界面另行创建并确认“屏幕观察”授权；`--operator`、Permission 档位不能自行开启，MCP 也不接受该启动参数。截图同意不扩大工具模式、Shell 权限或 Policy 规则。已保存的图片仍受会话归属和保留期控制。
 
-`full` 模式还包含 `read_image`：使用 `{path: "diagram.png"}` 读取文件边界内图片，或用 `{shotId: "…"}` 重读本会话持有的已保存图片。PNG、JPEG、WebP、GIF 会经解码并统一为 PNG，动画只读首帧；输入最多 20 MiB、4,000 万像素，输出最长边 2048 像素、最多 8 MiB。Session JSONL 只保存引用，模型请求发送前才读取并校验图片字节。图片位于数据根下本工作区的 `screenshots/`，配额 256 MiB、保留 30 天。分支只继承复制历史中已有的图片；内部子代理持有独立图片。缺失、过期或被修改的图片明确报错。Markdown 导出将可用图片复制到同级 `.assets` 目录并使用相对链接，单独报告不可用文件；导出副本由使用者管理。
+`full` 模式还包含 `read_image`：使用 `{path: "diagram.png"}` 读取文件边界内图片，或用 `{shotId: "…"}` 重读本会话持有的已保存图片。PNG、JPEG、WebP、GIF 会经解码并统一为 PNG，动画只读首帧；输入最多 20 MiB、4,000 万像素，输出最长边 2048 像素、最多 8 MiB。Session JSONL 只保存引用，模型请求发送前才读取并校验图片字节。图片位于数据根下本工作区的 `screenshots/`，配额 256 MiB。被历史记录引用或源 Session 仍存在的图片没有固定可读期限；源 Session 已不存在、图片未被引用且超过 30 天时，可以执行有界清理。分支只继承复制历史中已有的图片；内部子代理持有独立图片。缺失、过期或被修改的图片明确报错。Markdown 导出将可用图片复制到同级 `.assets` 目录并使用相对链接，单独报告不可用文件；导出副本由使用者管理。
 
 `full` 模式提供 `read_document`，在文件边界内读取 PDF 页、DOCX 段落和表格块、XLSX 工作表单元格、PPTX 幻灯片文字及表格。普通文本仍使用 `read`。`{path, start, count}` 默认读取前 20 个单元；`start` 从 1 开始，`count` 最多 20，XLSX 默认读取行和前十列。指定表格区域可用 `{path, sheet, range: {startRow, endRow, startColumn, endColumn}}`，最多 200 行、10,000 个单元格。返回来源位置、工作表名、警告和 `truncated`；截断时照 `continuation` 继续读取，包括块内文本 `offset`。公式返回原式和已有缓存，不重新计算。
 
@@ -165,7 +181,19 @@ serviceId = "deepseek"
 
 代码型扩展安装在用户数据根的 `extensions/` 目录：单个 `.js` 文件，或一个包含 `index.js` 的目录（一目录一包）。扩展以 Host 进程内代码运行，只有 full-access 且不受限网络的会话才会加载；`ligule extensions` 列出当前会加载的路径与诊断。已安装扩展可以停用：终端 `/extensions [on|off <名称>]`、桌面设置工具页的开关写入数据根的 `extensions-state.json`，下次启动生效；配置层显式声明的扩展路径不受登记影响。
 
-在包含 `subagent` 工具的模式中，模型可以把互相独立的工作委派给内部子代理。每个子代理在同一 Host 进程中运行，但拥有独立的子会话记录；同一父轮最多并行三个，子代理不能继续创建子代理。子任务沿用父会话的 Provider、Permission 和 Policy 判定，模式只能进一步缩小工具范围，模型调用次数、输出、思考和循环预算不能高于父会话。独立工具调用按项目 `[loop].maxParallelTools` 上限并发执行，默认值为 4，必须是正安全整数；子代理沿用此上限。通过输出 schema 要求结构化结果时，子代理必须提交并通过验证；无效提交可在本轮现有迭代预算内纠正。子代理若未提交有效结果便结束，会以失败状态保留 Session 记录和已完成的工具副作用。TUI 可用 `/sub <序号>` 查看子记录；桌面会话菜单提供子任务列表，Markdown 导出会包含子会话记录。失败或取消的子任务仍会保留可查看的会话引用。
+在包含 `subagent` 工具的模式中，模型可以把互相独立的工作委派给内部子代理。每个子代理在同一 Host 进程中运行，但拥有独立的子会话记录。父会话默认最多并行三个子代理，可在创建会话时通过 `[loop].maxConcurrentSubagents` 将上限设为 1 至 8；子代理不能继续创建子代理。子任务沿用父会话的 Provider、Permission 和 Policy 判定，模式只能进一步缩小工具范围，模型调用次数、输出、思考和循环预算不能高于父会话。独立工具调用按项目 `[loop].maxParallelTools` 上限并发执行，默认值为 4，范围为 1 至 32；子代理沿用此上限，工具并发上限也可能进一步限制子代理并发。通过输出 schema 要求结构化结果时，子代理必须提交并通过验证；无效提交可在本轮现有迭代预算内纠正。子代理若未提交有效结果便结束，会以失败状态保留 Session 记录和已完成的工具副作用。TUI 可用 `/sub <序号>` 查看子记录；桌面会话菜单提供子任务列表，Markdown 导出会包含子会话记录。失败或取消的子任务仍会保留可查看的会话引用。
+
+项目 `[loop]` 可设置 `totalModelCalls`、`taskTimeoutMs`、`requestTimeoutMs` 和 `interactionWaitTimeoutMs`，默认分别为 `modelCalls`、30 分钟、2 分钟和 12 小时。父任务、内部子代理与自动压缩共享预算。只有所有工作都因审批或用户提问而阻塞时，执行期限才暂停；存在待处理交互时，即使其他工作继续运行，也会消耗整次 Run 的独立累计等待上限，重叠等待只计一次。单次委派可通过 `delegation.budget` 收紧上限；执行期限最长 24 小时，单次模型请求最长 1 小时，交互等待最长 7 天。客户端等待超时不会取消任务。运行失败时仍尽量保留已确认的调用次数和部分正文。
+
+提供方上报用量时，Session 会保留可获得的输入、输出与缓存 Token 数及其原始字段名；缺失或无效的数值保持未知。Chat Completions 的缓存命中和未命中按字段记录，不根据兼容端点猜测服务商。Messages 响应只有在未缓存、缓存读取和缓存创建三项均已知时才记录总输入量。账号按日汇总的账单不能仅凭这些记录归因到某一次 Run。
+
+`full` 模式提供 `present`，可提交最多 16 个工作区内现存的普通文件。工具同时检查工作区和文件边界，记录媒体类型、字节数、SHA-256 与可选说明。单文件最多 20 MiB，一次调用合计最多 64 MiB。运行结果除 Session 引用外还可包含已经确认的文件交付；后续模型请求失败也保留这些记录。工具不复制源文件，源文件改动或删除后不能根据哈希还原。
+
+仍被 Session 历史引用的图片，或源 Session 仍存在的图片，超过 30 天也继续可读。只有源 Session 已不存在、没有其他引用并且已经过期的图片才可被显式有界清理；当前工作区图片配额仍为 256 MiB。
+
+交付文件会显示在 CLI 输出、TUI 记录和 Desktop 结果卡片中。Desktop 可重新计算当前文件的 SHA-256，预览最多 8 KiB 的安全文本或缩小后的静态图片、复制相对路径，并在用户明确点击后在文件夹中定位可用文件。不支持的格式只显示元数据；HTML、SVG、脚本、可执行文件不会作为活动页面渲染。Host 的 `artifact.list` 支持按 Session 或 `runId` 分页，`artifact.inspect`、`artifact.preview` 和只供可信原生操作使用的 `artifact.resolve` 必须引用已登记的 `artifactKey`。文件状态可区分可用、已修改、丢失、拒绝访问与不支持预览；交付后文件变化不会悄悄覆盖记录。
+
+运行 `ligule storage inspect` 可查看工作区数据分类的有界递归用量（每类最多 1,000 项、16 层目录；不完整扫描会标记）。受信任的交互式终端可运行 `ligule storage cleanup`：先分页核对 Session 引用（每页最多 100 条记录、16 MiB；游标只在当前 Host 内有效），再预览最多 100 项待清理对象并输入 `delete` 确认。候选包括已过期、未被引用的截图，以及带有 Ligule v1 owner 标记、超过 30 天、无活跃租约的浏览器残留和已登记的 cache/tmp 派生目录；当前版本没有为不存在的缓存强行创建数据。旧版未标记目录、仍有来源 Session 的浏览器目录、活跃租约、Session 记录、结果 sidecar 和交付源文件都不会自动回收。apply 在删除前复查目录身份与 Session 引用；多页历史若期间发生变化，须重新预览，无法完整验证时禁止删除。共享数据根仍通过 `LIGULE_HOME` 选择，不写死个人目录。
 
 ### 审批和设置
 
@@ -262,4 +290,9 @@ TUI 输入 `/browser` 可查看配置、可用性、Permission、暂停状态和
 - `provider_model_required` 或 `provider_base_url_required`：检查服务地址、接口类型和模型名称。
 - `resume_mode_changed`：恢复会话时指定其原有模式，或在终端界面使用 `/resume <编号> <模式名>`。
 - `delete_target_is_link`：删除工具拒绝目标路径最后一项为符号链接或 junction，并保留链接目标；如果确实要将真实目标送入回收站，请明确指定目标本身。
+- `recycle_backend_missing`：当前平台没有可用的系统回收站；源文件保持不变。
+- `recycle_backend_failed`：系统回收站操作失败，原路径上的目标对象身份和顶层元数据仍与操作前快照匹配。该检查不核对文件正文或目录内的全部内容；重试前请检查这些内容和系统回收站。
+- `delete_outcome_unknown`：后端报错后，Ligule 无法确认原路径目标对象的身份和顶层元数据与操作前快照匹配；重试前请检查工作区和系统回收站。
+- `delete_target_changed`：目标在检查期间发生变化；先检查实际文件，再重新发起删除。
+- `trash_legacy_config_unsupported`：从用户/项目配置中删除旧的 `trashBackend` 和 `limits.trashDirectory` 字段。
 - 命令不熟悉时运行 `ligule --help`；在终端界面输入 `/help` 查看界面命令和按键。

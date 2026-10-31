@@ -3,5 +3,5 @@
   "compilerOptions": {
     "noEmit": true
   },
-  "include": ["test/helpers/port.ts"]
+  "include": ["tests/helpers/port.ts"]
 }

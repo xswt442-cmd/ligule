@@ -85,6 +85,51 @@ function asRecord(value: unknown, detail: string): JsonRecord {
   return value;
 }
 
+function tokenCount(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function chatUsageEvent(usage: JsonRecord): ProviderEvent | undefined {
+  // prompt_tokens is the reported total; cache field paths identify the format without guessing the endpoint vendor.
+  const input = tokenCount(usage.prompt_tokens);
+  const output = tokenCount(usage.completion_tokens);
+  const details = isJsonRecord(usage.prompt_tokens_details) ? usage.prompt_tokens_details : undefined;
+  const hitPresent = Object.hasOwn(usage, 'prompt_cache_hit_tokens');
+  const cachedAliasPresent = details !== undefined && Object.hasOwn(details, 'cached_tokens');
+  const missPresent = Object.hasOwn(usage, 'prompt_cache_miss_tokens');
+  const cachePresent = hitPresent || cachedAliasPresent || missPresent;
+  if (!cachePresent && input === null && output === null) return undefined;
+
+  const primaryHit = tokenCount(usage.prompt_cache_hit_tokens);
+  const aliasHit = tokenCount(details?.cached_tokens);
+  const hit = primaryHit ?? aliasHit;
+  const miss = tokenCount(usage.prompt_cache_miss_tokens);
+  const aliasConflict = hitPresent && cachedAliasPresent && primaryHit !== null && aliasHit !== null && primaryHit !== aliasHit;
+  const consistent = aliasConflict || (input !== null && ((hit !== null && hit > input) || (miss !== null && miss > input)))
+    || (input !== null && hit !== null && miss !== null && input !== hit + miss)
+    ? false
+    : input !== null && hit !== null && miss !== null ? true : null;
+  const sourceFields = [
+    ...(Object.hasOwn(usage, 'prompt_tokens') ? [{ field: 'prompt_tokens', tokens: input }] : []),
+    ...(hitPresent ? [{ field: 'prompt_cache_hit_tokens', tokens: primaryHit }] : []),
+    ...(missPresent ? [{ field: 'prompt_cache_miss_tokens', tokens: miss }] : []),
+    ...(cachedAliasPresent ? [{ field: 'prompt_tokens_details.cached_tokens', tokens: aliasHit }] : []),
+  ];
+  return {
+    type: 'usage', input, output,
+    ...(cachePresent ? { cache: {
+      source: 'chat-completions' as const,
+      sourceFields,
+      hitInputTokens: hit,
+      missInputTokens: miss,
+      creationInputTokens: null,
+      uncachedInputTokens: null,
+      providerInputIncludesCache: true,
+      consistent,
+    } } : {}),
+  };
+}
+
 function booleanCapability(value: boolean | number, name: string): boolean {
   if (typeof value !== 'boolean') throw new KernelError('provider_capability_invalid', { detail: `${name} must be a boolean` });
   return value;
@@ -320,7 +365,8 @@ export function createChatCompletionsProvider({
         ? undefined
         : asRecord(completion.usage, 'completion usage is not an object');
       if (usage !== undefined) {
-        yield { type: 'usage', input: Number(usage.prompt_tokens ?? 0), output: Number(usage.completion_tokens ?? 0) };
+        const event = chatUsageEvent(usage);
+        if (event !== undefined) yield event;
       }
       yield { type: 'finish', reason };
       return;
@@ -388,7 +434,8 @@ export function createChatCompletionsProvider({
     }
     // 最终用量通常位于没有 choices 的结束分片中；缺少时不生成用量事件，压缩逻辑使用本地估算。
     if (usage !== undefined) {
-      yield { type: 'usage', input: Number(usage.prompt_tokens ?? 0), output: Number(usage.completion_tokens ?? 0) };
+      const event = chatUsageEvent(usage);
+      if (event !== undefined) yield event;
     }
     yield { type: 'finish', reason };
   }

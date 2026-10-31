@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Ligule evaluation manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "experiment", "verifier", "attempts"],
+  "properties": {
+    "schema_version": { "const": "ligule.eval-manifest.v1" },
+    "experiment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "git_sha", "working_tree_dirty", "runner_name", "runner_version",
+        "dataset_id", "dataset_revision", "docker_image_digest", "model_id", "provider",
+        "config_sha256", "tool_mode", "policy_mode", "permissions", "limits", "node_version", "os",
+        "started_at", "finished_at", "expected_evaluation"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "git_sha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+        "working_tree_dirty": { "type": "boolean" },
+        "runner_name": { "const": "harbor" },
+        "runner_version": { "const": "0.25.0" },
+        "dataset_id": { "type": "string", "minLength": 1 },
+        "dataset_revision": { "type": "string", "minLength": 1 },
+        "docker_image_digest": { "type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$" },
+        "model_id": { "type": ["string", "null"], "minLength": 1 },
+        "provider": { "type": ["string", "null"], "minLength": 1 },
+        "config_sha256": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
+        "tool_mode": { "type": "string", "minLength": 1 },
+        "policy_mode": { "const": "auto" },
+        "permissions": {
+          "type": "object",
+          "propertyNames": { "not": { "pattern": "(?:[sS][eE][cC][rR][eE][tT]|[pP][aA][sS][sS][wW][oO][rR][dD]|[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL]|[bB][eE][aA][rR][eE][rR]|[aA][uU][tT][hH][oO][rR][iI][zZ][aA][tT][iI][oO][nN]|[aA][pP][iI][_-]?[kK][eE][yY]|[aA][cC][cC][eE][sS][sS][_-]?[tT][oO][kK][eE][nN]|[rR][eE][fF][rR][eE][sS][hH][_-]?[tT][oO][kK][eE][nN])" } },
+          "additionalProperties": { "type": ["string", "boolean", "null"] }
+        },
+        "limits": { "type": "object", "additionalProperties": { "type": ["number", "null"], "minimum": 0 } },
+        "node_version": { "type": ["string", "null"], "minLength": 1 },
+        "os": { "type": ["string", "null"], "minLength": 1 },
+        "started_at": { "type": ["string", "null"], "format": "date-time" },
+        "finished_at": { "type": ["string", "null"], "format": "date-time" },
+        "expected_evaluation": { "type": "string", "minLength": 1 }
+      }
+    },
+    "verifier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result_schema", "reward_key", "pass_threshold"],
+      "properties": {
+        "result_schema": { "const": "harbor.models.trial.result.TrialResult@0.25.0" },
+        "reward_key": { "type": "string", "minLength": 1 },
+        "pass_threshold": { "type": "number" }
+      }
+    },
+    "attempts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "task_id", "category", "attempt", "trial_name", "harbor_task_id",
+          "result_file", "trajectory_file", "artifact_files", "not_run_reason"
+        ],
+        "properties": {
+          "task_id": { "type": "string", "minLength": 1 },
+          "category": { "type": "string", "minLength": 1 },
+          "attempt": { "type": "integer", "minimum": 1 },
+          "trial_name": { "type": ["string", "null"], "minLength": 1 },
+          "harbor_task_id": { "type": ["object", "null"] },
+          "result_file": { "type": ["string", "null"], "minLength": 1 },
+          "trajectory_file": { "type": ["string", "null"], "minLength": 1 },
+          "artifact_files": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "not_run_reason": { "type": ["string", "null"], "minLength": 1 }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "result_file": { "const": null } } },
+            "then": {
+              "properties": {
+                "trial_name": { "const": null },
+                "harbor_task_id": { "const": null },
+                "trajectory_file": { "const": null },
+                "artifact_files": { "maxItems": 0 },
+                "not_run_reason": { "type": "string", "minLength": 1 }
+              }
+            },
+            "else": {
+              "properties": {
+                "trial_name": { "type": "string", "minLength": 1 },
+                "harbor_task_id": { "type": "object" },
+                "not_run_reason": { "const": null }
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

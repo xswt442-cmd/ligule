@@ -73,6 +73,45 @@ function requiredString(value: unknown, detail: string): string {
   return value;
 }
 
+function tokenCount(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function messagesUsageEvent(usage: JsonRecord): ProviderEvent | undefined {
+  // Anthropic input_tokens excludes cache reads/writes; require all reported components before publishing a total.
+  const uncached = tokenCount(usage.input_tokens);
+  const output = tokenCount(usage.output_tokens);
+  const readPresent = Object.hasOwn(usage, 'cache_read_input_tokens');
+  const creationPresent = Object.hasOwn(usage, 'cache_creation_input_tokens');
+  const uncachedPresent = Object.hasOwn(usage, 'input_tokens');
+  const read = tokenCount(usage.cache_read_input_tokens);
+  const creation = tokenCount(usage.cache_creation_input_tokens);
+  const total = uncached !== null && readPresent && creationPresent && read !== null && creation !== null
+    ? uncached + read + creation
+    : null;
+  const input = total !== null && Number.isSafeInteger(total) ? total : null;
+  const cachePresent = uncachedPresent || readPresent || creationPresent;
+  if (!cachePresent && output === null) return undefined;
+  const sourceFields = [
+    ...(uncachedPresent ? [{ field: 'input_tokens', tokens: uncached }] : []),
+    ...(readPresent ? [{ field: 'cache_read_input_tokens', tokens: read }] : []),
+    ...(creationPresent ? [{ field: 'cache_creation_input_tokens', tokens: creation }] : []),
+  ];
+  return {
+    type: 'usage', input, output,
+    ...(cachePresent ? { cache: {
+      source: 'anthropic-messages' as const,
+      sourceFields,
+      hitInputTokens: read,
+      missInputTokens: null,
+      creationInputTokens: creation,
+      uncachedInputTokens: uncached,
+      providerInputIncludesCache: false,
+      consistent: null,
+    } } : {}),
+  };
+}
+
 function stringOrEmpty(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
@@ -247,10 +286,8 @@ export function createMessagesProvider({
         ? undefined
         : asRecord(message.usage, 'message usage is not an object');
       if (usage !== undefined) {
-        const input = Number(usage.input_tokens ?? 0) + Number(usage.cache_read_input_tokens ?? 0)
-          + Number(usage.cache_creation_input_tokens ?? 0);
-        const output = Number(usage.output_tokens ?? 0);
-        if (input > 0 || output > 0) yield { type: 'usage', input, output };
+        const event = messagesUsageEvent(usage);
+        if (event !== undefined) yield event;
       }
       yield { type: 'finish', reason };
       return;
@@ -258,9 +295,8 @@ export function createMessagesProvider({
 
     const blocks = new Map<number, MessageBlockState>();
     let started = false;
-    // 汇总输入和输出用量，待流结束后一起返回；输入数据来自 `message_start`，输出数据来自 `message_delta`。
-    let inputTokens = 0;
-    let outputTokens = 0;
+    // 汇总用量对象，保留 message_start 的缓存分项和 message_delta 的最终输出数。
+    let usageRecord: JsonRecord = {};
     let stopReason: unknown;
     let stopped = false;
     const toolCalls: { id: string; name: string; input: unknown; json: string }[] = [];
@@ -275,11 +311,7 @@ export function createMessagesProvider({
         const message = typeof event.message === 'object' && event.message !== null ? event.message : {};
         const usageValue = asRecord(message, 'message_start has an invalid message');
         const usage = typeof usageValue.usage === 'object' && usageValue.usage !== null ? usageValue.usage : {};
-        const usageRecord = asRecord(usage, 'message_start has invalid usage');
-        // 上下文窗口按所有内容块总量计算，包括缓存读取的内容。
-        inputTokens = Number(usageRecord.input_tokens ?? 0) + Number(usageRecord.cache_read_input_tokens ?? 0)
-          + Number(usageRecord.cache_creation_input_tokens ?? 0);
-        outputTokens = Number(usageRecord.output_tokens ?? 0);
+        usageRecord = asRecord(usage, 'message_start has invalid usage');
         continue;
       }
       if (!started) throw new KernelError('provider_stream_invalid', { detail: 'an event precedes message_start' });
@@ -339,7 +371,7 @@ export function createMessagesProvider({
         const delta = asRecord(event.delta ?? {}, 'message_delta has invalid delta');
         if (delta.stop_reason !== undefined) stopReason = delta.stop_reason;
         const usage = typeof event.usage === 'object' && event.usage !== null ? asRecord(event.usage, 'message_delta has invalid usage') : {};
-        outputTokens = Number(usage.output_tokens ?? outputTokens);
+        usageRecord = { ...usageRecord, ...usage };
       } else if (event.type === 'message_stop') {
         if (blocks.size > 0) throw new KernelError('provider_stream_incomplete');
         stopped = true;
@@ -359,8 +391,8 @@ export function createMessagesProvider({
         args: call.json === '' ? call.input : parseArgs(call.json) }));
       for (const call of parsed) yield call;
     }
-    // 缺少用量时不生成 usage 事件，避免将 0 误当作真实用量；压缩继续使用本地估算。
-    if (inputTokens > 0 || outputTokens > 0) yield { type: 'usage', input: inputTokens, output: outputTokens };
+    const usage = messagesUsageEvent(usageRecord);
+    if (usage !== undefined) yield usage;
     yield { type: 'finish', reason };
   }
 

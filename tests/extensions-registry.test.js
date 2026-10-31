@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { withTuiHost } from '../core/test/helpers/tui-host.js';
+import { withTuiHost } from '../core/tests/helpers/tui-host.js';
 
 test('extensions.set records the disable registry from a trusted interface', async () => {
   // 注入的扩展源模拟安装目录发现结果；登记文件写在当前隔离数据根下。

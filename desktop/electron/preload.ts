@@ -29,6 +29,7 @@ if (process.isMainFrame) {
     defaultWorkspace: () => ipcRenderer.invoke('ligule:default-workspace'),
     selectWorkspaceDirectory: (directory: string) => ipcRenderer.invoke('ligule:workspace-directory', directory),
     saveExportPath: (name: string) => ipcRenderer.invoke('ligule:export-path', name),
+    revealArtifact: request => ipcRenderer.invoke('ligule:artifact-reveal', request),
     requestQuit: () => ipcRenderer.invoke('ligule:quit'),
     onQuitRequested: handler => subscribe('ligule:quit-requested', handler),
     notificationPermission: () => ipcRenderer.invoke('ligule:notification-permission'),

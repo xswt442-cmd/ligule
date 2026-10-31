@@ -40,7 +40,7 @@
   "scripts": {
     "build": "tsc -b tsconfig.json",
     "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
-    "test": "pnpm run build && pnpm run typecheck:test && node --experimental-strip-types --test --test-concurrency=1 --import ../test/hooks/isolated-data-root.mjs test/*.test.js"
+    "test": "pnpm run build && pnpm run typecheck:test && node --experimental-strip-types --test --test-concurrency=1 --import ../tests/hooks/isolated-data-root.mjs tests/*.test.js"
   },
   "engines": {
     "node": ">=24"
@@ -49,6 +49,10 @@
     "@modelcontextprotocol/sdk": "^1.32.0",
     "@napi-rs/canvas": "1.0.13",
     "@napi-rs/keyring": "2.1.1",
+    "@opentelemetry/api": "1.10.0",
+    "@opentelemetry/exporter-trace-otlp-proto": "0.300.0",
+    "@opentelemetry/resources": "3.0.0",
+    "@opentelemetry/sdk-trace": "3.0.0",
     "@vscode/ripgrep": "1.18.0",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",

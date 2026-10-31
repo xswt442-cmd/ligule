@@ -10,11 +10,13 @@ import { languageOf, textOf, type Locale } from '@ligule/core/kernel/locale.js';
 import { loadConfigLayers } from '@ligule/core/kernel/config-file.js';
 import { createConfigStore } from '@ligule/core/kernel/config-store.js';
 import { createKernel } from '@ligule/core/kernel/kernel.js';
-import { createInteractivePermissionContext } from '@ligule/core/capability/permission-capabilities.js';
+import { createInteractivePermissionContext, detectPermissionCapabilities } from '@ligule/core/capability/permission-capabilities.js';
+import { createPermissionContext, type PermissionContext } from '@ligule/core/kernel/permission.js';
 import { loadAssembly } from '@ligule/core/kernel/assembly.js';
 import { DEFAULT_MODE, modeDirectories } from '@ligule/core/kernel/modes.js';
 import { extensionSources } from '@ligule/core/kernel/extensions.js';
 import { readRegistry, registryPathOf } from '@ligule/core/kernel/workspace.js';
+import { isTrusted } from '@ligule/core/kernel/workspace-trust.js';
 import { discoverSkills, skillDirectories } from '@ligule/core/kernel/skills.js';
 import { createSessionLog } from '@ligule/core/session/session.js';
 import { listWorkspaceSessions, sessionDirectories } from '@ligule/core/session/list.js';
@@ -133,8 +135,13 @@ let langFlag: string | undefined;
 let jsonFlag = false;
 let operatorFlag = false;
 let screenCaptureFlag = false;
+let fullAccessFlag = false;
 for (let index = 0; index < argv.length; index += 1) {
   const arg = argv[index];
+  if (arg === '--allow-full-access') {
+    fullAccessFlag = true;
+    continue;
+  }
   if (arg === '--allow-screen-capture') {
     screenCaptureFlag = true;
     continue;
@@ -193,6 +200,7 @@ for (let index = 0; index < argv.length; index += 1) {
   positional.push(arg);
 }
 const [command, ...rest] = positional;
+const machineRunOutput = jsonFlag && command === 'run';
 let invalidLanguage = false;
 let locale: Locale | undefined;
 try { if (langFlag !== undefined) locale = languageOf(langFlag); } catch { invalidLanguage = true; }
@@ -263,6 +271,17 @@ async function configSnapshot(projectRoot = process.cwd()): Promise<{ config: Cl
 // 将模式名称和搜索目录交给 Host 加载，使启动和运行时切换使用相同规则。
 function resolveMode(config: CliConfig): { modeName: string; modePaths: ModeDirectories } {
   return { modeName: modeFlag ?? config.mode ?? DEFAULT_MODE, modePaths: modeDirectories(process.cwd(), shippedModes) };
+}
+
+async function fullAccessPermission(config: CliConfig): Promise<PermissionContext> {
+  const snapshot = await detectPermissionCapabilities({ shellConfig: config, workspaceRoot: config.workspaceRoot });
+  return createPermissionContext('full-access', 'unrestricted', snapshot.capabilities, {
+    profiles: snapshot.profiles,
+    limitations: [
+      ...snapshot.limitations,
+      'CLI full-access runs execute local commands as the current OS user without an OS sandbox.',
+    ],
+  });
 }
 
 // Host 可按项目根为多个项目分别加载环境，复用 CLI 启动时相同的配置、提供方、模式和扩展解析逻辑。
@@ -337,6 +356,19 @@ function printNotification(message: Record<string, unknown>): void {
   } else if (message.notify === 'event' && event?.kind === 'tool') {
     const result = isRecord(event.result) ? event.result : {};
     console.log(`· ${String(event.tool ?? '')}: ${result.failed ? String(result.code ?? '') : t('成功', 'ok')}`);
+    if (result.failed !== true && (event.tool === 'present' || event.tool === 'subagent')) {
+      const body = isRecord(result.content) ? result.content : {};
+      const child = isRecord(body.result) ? body.result : {};
+      const listed = event.tool === 'present' ? body.artifacts : child.artifacts;
+      if (Array.isArray(listed)) {
+        for (const artifact of listed) {
+          if (isRecord(artifact) && artifact.kind === 'file' && typeof artifact.path === 'string'
+            && typeof artifact.sha256 === 'string' && typeof artifact.bytes === 'number') {
+            console.log(`  · ${t('交付文件', 'Delivered file')}: ${artifact.path} (${artifact.bytes} B, SHA-256 ${artifact.sha256}; ${t('来源会话', 'source session')} ${String(artifact.sessionId ?? '?')}; ${t('当前状态未复查', 'current state not rechecked')})`);
+          }
+        }
+      }
+    }
   } else if (message.notify === 'event' && event?.kind === 'user') {
     // 模板展开后仍显示用户输入的原文，保持终端回显与实际输入一致。
     console.log(`> ${String(event.raw ?? event.text ?? '')}`);
@@ -392,11 +424,14 @@ async function runOneRound(
   layers: Awaited<ReturnType<typeof configSnapshot>>['layers'],
   text: string,
   sessionId?: string,
-): Promise<void> {
-  const host = createHost({ config, provider: providerFromConfig(config), policy: config.policy, extensions, configLayers: layers, screenCaptureConsent: screenCaptureFlag, ...selection });
+  allowFullAccess = false,
+): Promise<Record<string, unknown>> {
+  const permission = allowFullAccess ? await fullAccessPermission(config) : undefined;
+  const host = createHost({ config, provider: providerFromConfig(config), policy: config.policy, extensions, configLayers: layers,
+    ...(permission === undefined ? {} : { permission }), screenCaptureConsent: screenCaptureFlag, ...selection });
   const approvals = terminalApprovals();
   const connection: Pick<Connection, 'notify' | 'request'> = {
-    notify: printNotification,
+    notify: machineRunOutput ? () => {} : printNotification,
     // 该终端输入通道只处理允许或拒绝审批。普通命令行没有可回答模型提问的交互界面。
     request: async (method, params) => {
       if (method !== 'approval.request') throw new KernelError('protocol_method_unknown', { detail: method });
@@ -436,10 +471,72 @@ async function runOneRound(
       ? await host.handle({ method: 'session.create', params: {} }, connection)
       : await host.handle({ method: 'session.open', params: { sessionId, ...(modeFlag === undefined ? {} : { mode: modeFlag }) } }, connection)));
     const openedId = responseString(opened, 'sessionId');
-    const result = responseRecord(await host.handle({ method: 'run.start', params: { sessionId: openedId, input: text } }, connection));
+    const eventsBefore = machineRunOutput
+      ? responseRecord(await host.handle({ method: 'session.read', params: { sessionId: openedId } }, connection)).events
+      : undefined;
+    const previousRunIds = new Set(Array.isArray(eventsBefore)
+      ? eventsBefore.filter(isRecord).filter(event => event.kind === 'user' && isRecord(event.run))
+        .map(event => (event.run as Record<string, unknown>).runId).filter((id): id is string => typeof id === 'string')
+      : []);
+    const terminalEvidence = async (requestedRunId?: string): Promise<{ runId?: string; state: string }> => {
+      const snapshot = responseRecord(await host.handle({ method: 'session.read', params: { sessionId: openedId } }, connection));
+      if (!Array.isArray(snapshot.events)) throw new KernelError('host_response_invalid');
+      const events = snapshot.events.filter(isRecord);
+      const user = events.filter(event => event.kind === 'user' && isRecord(event.run))
+        .find(event => {
+          const acceptedRunId = (event.run as Record<string, unknown>).runId;
+          return typeof acceptedRunId === 'string' && (requestedRunId === undefined
+            ? !previousRunIds.has(acceptedRunId)
+            : acceptedRunId === requestedRunId);
+        });
+      if (user === undefined) return { state: 'unknown' };
+      const acceptedRunId = (user.run as Record<string, unknown>).runId;
+      const terminal = events.find(event => event.kind === 'turn' && event.userSeq === user.seq);
+      const state = terminal !== undefined && ['completed', 'failed', 'cancelled', 'interrupted'].includes(String(terminal.status))
+        ? String(terminal.status)
+        : 'unknown';
+      return { runId: typeof acceptedRunId === 'string' ? acceptedRunId : undefined, state };
+    };
+    let result: Record<string, unknown>;
+    try {
+      result = responseRecord(await host.handle({ method: 'run.start', params: { sessionId: openedId, input: text } }, connection));
+    } catch (error) {
+      if (!machineRunOutput) throw error;
+      const fields = errorFields(error);
+      let evidence: { runId?: string; state: string } | undefined;
+      try {
+        evidence = await terminalEvidence();
+      } catch { /* 没有可验证的 Session 终态时保持状态未知。 */ }
+      return {
+        version: 1,
+        status: 'failed',
+        state: evidence?.state ?? 'unknown',
+        sessionId: openedId,
+        ...(evidence?.runId === undefined ? {} : { runId: evidence.runId }),
+        errorCode: fields.code ?? 'cli_run_failed',
+      };
+    }
     const iterations = responseCount(result, 'iterations');
     const modelCalls = responseCount(result, 'modelCalls');
-    console.error(t(`会话 ${openedId}：${iterations} 轮，调用模型 ${modelCalls} 次`, `Session ${openedId}: ${iterations} iterations, ${modelCalls} model calls`));
+    if (!machineRunOutput) {
+      console.error(t(`会话 ${openedId}：${iterations} 轮，调用模型 ${modelCalls} 次`, `Session ${openedId}: ${iterations} iterations, ${modelCalls} model calls`));
+      return { version: 1, status: 'completed', sessionId: openedId };
+    }
+    const runId = responseString(result, 'runId');
+    const evidence = await terminalEvidence(runId);
+    const state = evidence.state;
+    if (state !== 'completed') {
+      return {
+        version: 1,
+        status: 'failed',
+        state: typeof state === 'string' ? state : 'unknown',
+        sessionId: openedId,
+        runId,
+        usage: { iterations, modelCalls },
+        ...(state === 'unknown' ? { errorCode: 'run_terminal_state_unavailable' } : {}),
+      };
+    }
+    return { version: 1, status: 'completed', state, sessionId: openedId, runId, usage: { iterations, modelCalls } };
   } finally {
     approvals.close();
     await host.release();
@@ -462,6 +559,8 @@ if (invalidLanguage) {
   printFailure('cli_grant_requires_mcp_server', t('--grant 只能与 mcp-server 一起使用', '--grant is only valid with mcp-server'));
 } else if (screenCaptureFlag && command !== undefined && !['run', 'resume', 'tui'].includes(command)) {
   printFailure('cli_screen_capture_flag_not_allowed', t('--allow-screen-capture 仅用于 run、resume 或 tui；MCP 截图须由可信界面明确创建授权。', '--allow-screen-capture is only valid for run, resume or tui; MCP screen capture requires a grant explicitly created in a trusted interface.'));
+} else if (fullAccessFlag && command !== 'run') {
+  printFailure('cli_full_access_flag_not_allowed', t('--allow-full-access 只能与 run 一起使用', '--allow-full-access is only valid with run'));
 } else if (operatorFlag && command !== 'mcp-server') {
   printFailure('cli_operator_requires_mcp_server', t('--operator 只能与 mcp-server 一起使用', '--operator is only valid with mcp-server'));
 } else if (command === '--version' || command === '-v') {
@@ -532,14 +631,24 @@ if (invalidLanguage) {
 } else if (command === 'run') {
   const text = rest.join(' ').trim();
   if (text === '') {
-    printFailure('cli_run_needs_the_user_text', t('run 需要用户消息，例如 ligule run "read the note"', 'run needs a user message, for example ligule run "read the note"'));
+    if (machineRunOutput) {
+      console.log(JSON.stringify({ version: 1, status: 'failed', state: 'unknown', errorCode: 'cli_run_needs_the_user_text' }));
+      process.exitCode = 1;
+    } else printFailure('cli_run_needs_the_user_text', t('run 需要用户消息，例如 ligule run "read the note"', 'run needs a user message, for example ligule run "read the note"'));
   } else {
     try {
       const { config, extensions, layers } = await configSnapshot();
-      await runOneRound(config, resolveMode(config), extensions, layers, text);
+      const outcome = await runOneRound(config, resolveMode(config), extensions, layers, text, undefined, fullAccessFlag);
+      if (machineRunOutput) {
+        console.log(JSON.stringify(outcome));
+        if (outcome.status !== 'completed') process.exitCode = 1;
+      }
     } catch (error) {
       const fields = errorFields(error);
-      printFailure(fields.code ?? 'cli_run_failed', fields.detail, fields.diagnostics);
+      if (machineRunOutput) {
+        console.log(JSON.stringify({ version: 1, status: 'failed', state: 'unknown', ...(fields.code === undefined ? {} : { errorCode: fields.code }) }));
+        process.exitCode = 1;
+      } else printFailure(fields.code ?? 'cli_run_failed', fields.detail, fields.diagnostics);
     }
   }
 } else if (command === 'resume') {
@@ -557,6 +666,78 @@ if (invalidLanguage) {
     } catch (error) {
       const fields = errorFields(error);
       printFailure(fields.code ?? 'cli_resume_failed', fields.detail, fields.diagnostics);
+    }
+  }
+} else if (command === 'storage') {
+  const [action, ...extra] = rest;
+  if (extra.length !== 0 || !['inspect', 'cleanup'].includes(action ?? '') || (action === 'cleanup' && (jsonFlag || !process.stdin.isTTY))) {
+    printFailure('cli_storage_action_invalid', t('用法：ligule storage inspect，或在交互式终端运行 ligule storage cleanup',
+      'Usage: ligule storage inspect, or ligule storage cleanup in an interactive terminal'));
+  } else {
+    let host: ReturnType<typeof createHost> | undefined;
+    let approvals: ReturnType<typeof terminalApprovals> | undefined;
+    try {
+      const root = resolve(projectFlag ?? process.cwd());
+      if (action === 'cleanup') {
+        if (!await isTrusted(root)) throw new KernelError('workspace_trust_required');
+      }
+      const { config } = await configSnapshot(root);
+      host = createHost({ config, provider: hostProviderFromConfig(config), permissionControl: true });
+      const connection: Pick<Connection, 'notify' | 'request'> = {
+        notify() {}, request: async () => { throw new KernelError('cli_interaction_unavailable'); },
+      };
+      const projectRoot = config.workspaceRoot;
+      const inspect = responseRecord(await host.handle({ method: 'storage.inspect', params: { projectRoot } }, connection));
+      if (action === 'inspect') {
+        if (jsonFlag) console.log(JSON.stringify(inspect));
+        else {
+          console.log(`${t('工作区数据', 'Workspace data')}: ${projectRoot}`);
+          const folders = Array.isArray(inspect.folders) ? inspect.folders : [];
+          for (const folder of folders) {
+            if (!isRecord(folder)) continue;
+            console.log(`  ${String(folder.kind)}: ${String(folder.bytes)} B, ${String(folder.entries)} ${t('项', 'entries')}${folder.complete === false ? ' (incomplete)' : ''}`);
+          }
+        }
+      } else {
+        let preview = responseRecord(await host.handle({ method: 'storage.cleanup.preview', params: { projectRoot, limit: 100 } }, connection));
+        for (let page = 0; preview.complete === false && typeof preview.nextCursor === 'string'; page += 1) {
+          if (page >= 200) throw new KernelError('image_cleanup_scan_incomplete');
+          console.log(t(`核查 Session 引用：${String(preview.scannedSessions)}/${String(preview.totalSessions)}`,
+            `Checking Session references: ${String(preview.scannedSessions)}/${String(preview.totalSessions)}`));
+          preview = responseRecord(await host.handle({ method: 'storage.cleanup.preview',
+            params: { projectRoot, limit: 100, cursor: preview.nextCursor } }, connection));
+        }
+        if (preview.complete !== true) throw new KernelError('image_cleanup_scan_incomplete');
+        console.log(t(`可清理截图 ${String(preview.candidates)} 项；本批 ${Array.isArray(preview.ids) ? preview.ids.length : 0} 项。`,
+          `Unreferenced screenshots: ${String(preview.candidates)}; this batch: ${Array.isArray(preview.ids) ? preview.ids.length : 0}.`));
+        const garbage = Array.isArray(preview.garbage) ? preview.garbage.filter(isRecord) : [];
+        for (const candidate of garbage) {
+          console.log(`  · ${t('可回收受管残留', 'Reclaimable managed residue')}: ${String(candidate.id)} (${String(candidate.bytes)} B)`);
+        }
+        if ((Array.isArray(preview.ids) && preview.ids.length > 0) || garbage.length > 0) {
+          approvals = terminalApprovals();
+          const answer = await approvals.ask(t('确认删除上列过期截图与已核验的受管残留？输入 delete 继续：',
+            'Delete the listed expired screenshots and verified managed residue? Type delete to confirm: '));
+          if (answer?.trim() !== 'delete') {
+            console.log(t('已取消清理。', 'Cleanup cancelled.'));
+          } else {
+            const applied = responseRecord(await host.handle({ method: 'storage.cleanup.apply', params: {
+              projectRoot, planId: responseString(preview, 'planId'), confirm: true,
+            } }, connection));
+            console.log(t(`已清理 ${String(applied.removed)} 项，释放 ${String(applied.bytesFreed)} 字节。`,
+              `Removed ${String(applied.removed)} items, freed ${String(applied.bytesFreed)} bytes.`));
+            if (Array.isArray(applied.skipped)) for (const skipped of applied.skipped) {
+              if (isRecord(skipped)) console.log(`  ${t('跳过', 'Skipped')} ${String(skipped.id)}: ${String(skipped.reason)}`);
+            }
+          }
+        }
+      }
+    } catch (error) {
+      const fields = errorFields(error);
+      printFailure(fields.code ?? 'cli_storage_failed', fields.detail);
+    } finally {
+      approvals?.close();
+      await host?.release();
     }
   }
 } else if (command === 'sessions') {
@@ -703,12 +884,15 @@ if (invalidLanguage) {
     try { setLocale((await configSnapshot()).config); } catch { setLocale(undefined); }
   }
   console.log(t(`ligule ${pkg.version} - 开发版本，请勿用于正式环境。`, `ligule ${pkg.version} - development build; do not use in production.`));
-  console.log(t('命令：tools、skills、extensions、sessions、workspaces、policy <session-id>、run <text>、resume <id> <text>、call <tool> [json-args]、tui、host、--version', 'Commands: tools, skills, extensions, sessions, workspaces, policy <session-id>, run <text>, resume <id> <text>, call <tool> [json-args], tui, host, --version'));
+  console.log(t('命令：tools、skills、extensions、sessions、workspaces、storage inspect|cleanup、policy <session-id>、run <text>、resume <id> <text>、call <tool> [json-args]、tui、host、--version', 'Commands: tools, skills, extensions, sessions, workspaces, storage inspect|cleanup, policy <session-id>, run <text>, resume <id> <text>, call <tool> [json-args], tui, host, --version'));
   console.log(t('直接运行 ligule 打开终端界面；tui 子命令仍可使用。', 'Run ligule without a command to open the terminal UI; the tui subcommand remains available.'));
   console.log(t('mcp-server --project <绝对目录>：启动本地 stdio MCP 控制器；默认只读。使用 --grant <ID> 引用可信界面预先创建的外控授权。', 'mcp-server --project <absolute-directory>: start a local stdio MCP controller; read-only by default. Use --grant <ID> to reference a grant created in a trusted interface.'));
   console.log(t('mcp-server --operator：明确授权该本地 MCP 客户端读取并回应真实待决的审批/提问，以及修改会话级设置；Policy 的拒绝规则仍生效。', 'mcp-server --operator: authorize this local MCP client to review and answer real pending approvals/questions and change session settings; Policy denials remain in force.'));
   console.log(t('run/resume/tui --allow-screen-capture：明确允许本进程的会话及内部子代理截图；不改变工具模式、Shell 权限或其他授权。', 'run/resume/tui --allow-screen-capture: explicitly permit screen capture by this process’s Sessions and internal children; tool modes, shell permissions and other grants remain independent.'));
-  console.log(t('选项：--config <key.path=value>（可重复）、--mode <name>、--project <绝对目录>、--grant <ID>、--operator、--lang <zh|en|auto>', 'Options: --config <key.path=value> (repeatable), --mode <name>, --project <absolute-directory>, --grant <ID>, --operator, --lang <zh|en|auto>'));
+  console.log(t('run --allow-full-access：本次 run 明确使用本机完整文件、进程和网络权限；命令以当前操作系统用户身份运行，不提供 OS 沙箱。Policy 审批和拒绝规则仍生效；此选项不受配置文件控制。',
+    'run --allow-full-access: explicitly grant this run full local file, process, and network permissions. Commands run as the current OS user without an OS sandbox. Policy approvals and denials still apply; config files cannot enable this option.'));
+  console.log(t('选项：--config <key.path=value>（可重复）、--mode <name>、--project <绝对目录>、--grant <ID>、--operator、--json、--lang <zh|en|auto>', 'Options: --config <key.path=value> (repeatable), --mode <name>, --project <absolute-directory>, --grant <ID>, --operator, --json, --lang <zh|en|auto>'));
+  console.log(t('--json 与 run 一起使用时输出机器可读终态，不包含回答正文；失败以非零状态退出。', '--json with run prints a machine-readable terminal result without response text; failures exit non-zero.'));
   console.log(t('run、tui 和 host 从配置读取 model.api、model.baseURL 与 model.model；密钥由 model.apiKeyEnv 指定，未设置时读取 LIGULE_API_KEY。', 'run, tui and host read model.api, model.baseURL and model.model from config; the key uses model.apiKeyEnv, or LIGULE_API_KEY when unset.'));
   console.log(t('run、tui 和 host 默认使用 minimal 模式；--mode 可覆盖 mode 配置。tools 和 call 不读取模式。', 'run, tui and host use the minimal mode by default; --mode overrides the mode config. tools and call do not read a mode.'));
   console.log(t('skills 列出已加载的技能与未加载原因；它不读取模型配置。', 'skills lists loaded skills and why others were skipped; it does not read model config.'));

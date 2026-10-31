@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { KernelError } from '../kernel/error.js';
 import type { NativeHandle } from './windows-appcontainer-process.js';
 import type { OwnedProcessJob } from './win32-job.js';
 
@@ -283,9 +284,24 @@ export async function runRestrictedWindowsCommand(command: RestrictedWindowsComm
   if ([command.executable, command.cwd, command.writeSid, ...command.argv].some((value) => value.includes('\0'))) throw new TypeError('restricted command arguments cannot contain NUL characters');
   const koffi = (await import('koffi')).default;
   const api = bindings(koffi);
-  const token = createToken(koffi, api, command.writeSid);
+  let token: NativeHandle;
+  try { token = createToken(koffi, api, command.writeSid); }
+  catch (cause) { throw new KernelError('exec_sandbox_setup_failed', { cause, detail: 'the restricted command token could not be prepared' }); }
+  let primaryError: unknown;
   try { return await spawnWithToken(koffi, api, token, command); }
-  finally { if (api.closeHandle(token) === 0) throw win32Failure(api, 'CloseHandle(restricted token)'); }
+  catch (error) { primaryError = error; throw error; }
+  finally {
+    if (api.closeHandle(token) === 0) {
+      const cleanupError = win32Failure(api, 'CloseHandle(restricted token)');
+      const code = primaryError instanceof KernelError
+        && ['exec_terminate_failed', 'exec_guardian_failed', 'exec_guardian_protocol', 'exec_termination_cleanup_failed'].includes(primaryError.code)
+        ? 'exec_termination_cleanup_failed' : 'exec_sandbox_cleanup_failed';
+      throw new KernelError(code, {
+        cause: new AggregateError(primaryError === undefined ? [cleanupError] : [primaryError, cleanupError], 'restricted token command cleanup failed'),
+        detail: 'the restricted command token could not be released',
+      });
+    }
+  }
 }
 
 async function spawnWithToken(
@@ -301,6 +317,7 @@ async function spawnWithToken(
   let processHandle: NativeHandle | undefined;
   let threadHandle: NativeHandle | undefined;
   let created = false;
+  let creationAttempted = false;
   let primaryError: unknown;
   const cleanupFailures: unknown[] = [];
   try {
@@ -341,6 +358,7 @@ async function spawnWithToken(
       lpAttributeList: koffi.address(attributes),
     });
     const commandLine = Buffer.from(`${[command.executable, ...command.argv].map(quoteWindowsArgument).join(' ')}\0`, 'utf16le');
+    creationAttempted = true;
     const started = api.createProcessAsUser(
       token, command.executable, commandLine, NULL, NULL, 1,
       CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, NULL, command.cwd, startup, processInfo,
@@ -371,16 +389,73 @@ async function spawnWithToken(
     return exitCode;
   } catch (error) {
     primaryError = error;
-    if (created && !isNull(processHandle)) {
-      if (api.terminateProcess(processHandle, 1) === 0) throw new Error(`TerminateProcess(restricted child cleanup) failed with Win32 error ${api.lastError() as number}`, { cause: error });
+    if (created) {
+      if (isNull(processHandle)) {
+        const failure = new KernelError('exec_terminate_failed', { cause: error, detail: 'the restricted child was created without a usable process handle' });
+        primaryError = failure;
+        throw failure;
+      }
+      let current: number;
+      try { current = api.wait(processHandle, 0); }
+      catch (cause) {
+        const failure = new KernelError('exec_terminate_failed', {
+          cause: new AggregateError([error, cause]), detail: 'the restricted child exit state could not be checked',
+        });
+        primaryError = failure;
+        throw failure;
+      }
+      if (current === WAIT_OBJECT_0) {
+        const interrupted = new KernelError('exec_process_interrupted', { cause: error, detail: 'the restricted child exited while its result was being collected' });
+        primaryError = interrupted;
+        throw interrupted;
+      }
+      if (current !== WAIT_TIMEOUT) {
+        const failure = new KernelError('exec_terminate_failed', { cause: error, detail: `WaitForSingleObject failed while checking the restricted child (${current})` });
+        primaryError = failure;
+        throw failure;
+      }
+      let terminated: number;
+      try { terminated = api.terminateProcess(processHandle, 1); }
+      catch (cause) {
+        const failure = new KernelError('exec_terminate_failed', {
+          cause: new AggregateError([error, cause]), detail: 'the restricted child could not be terminated',
+        });
+        primaryError = failure;
+        throw failure;
+      }
+      if (terminated === 0) {
+        const failure = new KernelError('exec_terminate_failed', { cause: error, detail: `TerminateProcess failed while cleaning up the restricted child (Win32 error ${api.lastError() as number})` });
+        primaryError = failure;
+        throw failure;
+      }
       for (;;) {
-        const result = api.wait(processHandle, 0);
+        let result: number;
+        try { result = api.wait(processHandle, 0); }
+        catch (cause) {
+          const failure = new KernelError('exec_terminate_failed', {
+            cause: new AggregateError([error, cause]), detail: 'the restricted child exit could not be confirmed',
+          });
+          primaryError = failure;
+          throw failure;
+        }
         if (result === WAIT_OBJECT_0) break;
-        if (result !== WAIT_TIMEOUT) throw new Error(`WaitForSingleObject(restricted child cleanup) returned ${result}`, { cause: error });
+        if (result !== WAIT_TIMEOUT) {
+          const failure = new KernelError('exec_terminate_failed', { cause: error, detail: `WaitForSingleObject failed while cleaning up the restricted child (${result})` });
+          primaryError = failure;
+          throw failure;
+        }
         await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
       }
+      const interrupted = new KernelError('exec_process_interrupted', { cause: error, detail: 'the restricted child was terminated after a command failure' });
+      primaryError = interrupted;
+      throw interrupted;
     }
-    throw error;
+    const failure = new KernelError(creationAttempted ? 'exec_spawn_failed' : 'exec_sandbox_setup_failed', {
+      cause: error,
+      detail: error instanceof Error ? error.message : undefined,
+    });
+    primaryError = failure;
+    throw failure;
   } finally {
     if (attributesReady && attributes !== undefined) api.deleteAttributes(attributes);
     for (const { handle, flags, name } of standardHandles) {
@@ -390,6 +465,13 @@ async function spawnWithToken(
     if (!isNull(processHandle) && api.closeHandle(processHandle as NativeHandle) === 0) cleanupFailures.push(win32Failure(api, 'CloseHandle(restricted process)'));
     try { memory.free(); }
     catch (error) { cleanupFailures.push(error); }
-    if (cleanupFailures.length > 0) throw new AggregateError(primaryError === undefined ? cleanupFailures : [primaryError, ...cleanupFailures], 'restricted process cleanup failed');
+    if (cleanupFailures.length > 0) {
+      const code = primaryError instanceof KernelError && primaryError.code === 'exec_terminate_failed'
+        ? 'exec_termination_cleanup_failed' : 'exec_sandbox_cleanup_failed';
+      throw new KernelError(code, {
+        cause: new AggregateError(primaryError === undefined ? cleanupFailures : [primaryError, ...cleanupFailures], 'restricted process cleanup failed'),
+        detail: 'restricted process or platform resources could not be fully cleaned',
+      });
+    }
   }
 }

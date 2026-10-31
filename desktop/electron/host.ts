@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { TextDecoder } from 'node:util';
 
 const MAX_FRAME_BYTES = 16 * 1024 * 1024;
@@ -22,6 +23,7 @@ export class HostController {
   private generation = 0;
   private child: ChildProcessWithoutNullStreams | undefined;
   private pendingWrites = 0;
+  private readonly nativeRequests = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
   private stopped = true;
   private cleanup: Promise<void> | undefined;
   private lifecycleOperation: 'start' | 'stop' | 'restart' | undefined;
@@ -110,6 +112,33 @@ export class HostController {
     });
   }
 
+  request(method: string, params: Record<string, unknown>, timeoutMs = 15_000): Promise<unknown> {
+    if (this.nativeRequests.size >= 16) return Promise.reject(new Error('native_request_busy'));
+    const id = 'desktop-main:' + randomUUID();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.nativeRequests.delete(id);
+        reject(new Error('native_request_timeout'));
+      }, timeoutMs);
+      this.nativeRequests.set(id, { resolve, reject, timer });
+      void this.send(JSON.stringify({ id, method, params })).catch(cause => {
+        const pending = this.nativeRequests.get(id);
+        if (pending === undefined) return;
+        this.nativeRequests.delete(id);
+        clearTimeout(timer);
+        reject(cause instanceof Error ? cause : new Error('native_request_failed'));
+      });
+    });
+  }
+
+  private dropNativeRequests(reason: string): void {
+    for (const [id, pending] of this.nativeRequests) {
+      this.nativeRequests.delete(id);
+      clearTimeout(pending.timer);
+      pending.reject(new Error(reason));
+    }
+  }
+
   restart(): Promise<void> {
     return this.withLifecycle('restart', async () => {
       await this.stopInternal();
@@ -124,6 +153,7 @@ export class HostController {
   private async stopInternal(): Promise<void> {
     const child = this.child;
     this.stopped = true;
+    this.dropNativeRequests('host_stopped');
     this.generation += 1;
     if (child === undefined) {
       await this.cleanup;
@@ -185,7 +215,18 @@ export class HostController {
         pending = '';
         pendingBytes = 0;
         try {
-          this.options.onFrame(frame);
+          const message = JSON.parse(frame) as { id?: unknown; result?: unknown; error?: { code?: string; message?: string } };
+          if (typeof message.id === 'string' && message.id.startsWith('desktop-main:')) {
+            const waiting = this.nativeRequests.get(message.id);
+            if (waiting !== undefined) {
+              this.nativeRequests.delete(message.id);
+              clearTimeout(waiting.timer);
+              if (message.error !== undefined) waiting.reject(new Error(message.error.code ?? 'native_host_error'));
+              else waiting.resolve(message.result);
+            }
+          } else {
+            this.options.onFrame(frame);
+          }
         } catch {
           this.fault(generation, 'process-error');
           return;
@@ -209,6 +250,7 @@ export class HostController {
   private fault(generation: number, fault: HostFault): void {
     if (generation !== this.generation || this.stopped) return;
     this.stopped = true;
+    this.dropNativeRequests('host_closed');
     this.options.onFault(fault);
     const child = this.child;
     this.child = undefined;
