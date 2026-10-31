@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { encodeModelRows, mergeModelRows, modelName, modelRows, newModelRow } from '../../frontend/src/model-catalog.ts';
+import { encodeModelRows, mergeModelRows, modelName, modelRows, newModelRow, thinkingChoices } from '../../frontend/src/model-catalog.ts';
 
 const service = { id: 'custom', name: 'Custom', api: 'chat-completions', baseURL: 'https://example.com/v1', apiKeyEnv: 'MODEL_KEY', models: ['model-a'] };
 
@@ -69,4 +69,10 @@ test('discovery cannot silently truncate a catalog larger than the supported siz
   const rows = Array.from({ length: 128 }, (_, index) => newModelRow(`model-${index}`));
   assert.throws(() => mergeModelRows(rows, ['extra']), error => error.code === 'model_catalog_too_large');
   assert.equal(rows.length, 128);
+});
+
+test('thinking choices keep the canonical order and never drop an advertised effort', () => {
+  assert.deepEqual(thinkingChoices(['max', 'none', 'high', 'low']), ['none', 'low', 'high', 'max']);
+  assert.deepEqual(thinkingChoices(['high', 'xhigh']), ['high', 'xhigh']);
+  assert.deepEqual(thinkingChoices([]), []);
 });

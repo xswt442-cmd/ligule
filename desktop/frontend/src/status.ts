@@ -25,6 +25,8 @@ export type Status = {
   pendingMode: string | null;
   model: string | null;
   selectedModel: string | null;
+  // 思考档：available 为空表示当前模型不支持；effective='default' 表示继承模型默认。
+  thinking?: { available: readonly string[]; defaultEffort: string | null; effective: string; pending: string | null };
   outputTokens: number | null;
   pendingModel: string | null;
   serviceId: string;

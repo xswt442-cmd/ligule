@@ -25,7 +25,7 @@ export function Composer({ client, sessionId, projectRoot, status, settings, set
   draft, composerRef, queue, mention, sessionMenuOpen, initialMode, initialPolicy, initialPermission, initialPermissionConfirmations,
   newSessionSettingsRevision, modelCatalogRevision, workspaceRevision, othersRunning,
   onDraftChange, onCaretChange, onWalkChange, onDraftKeyDown, onSelectWorkspace, onToggleQueue, onRecoverQueueItem,
-  onPickMention, onSelectModel, onManageModel, onOpenSecurity, onSessionMenuChange, onSetMode, onSetPolicy,
+  onPickMention, onSelectModel, onSetThinking, onManageModel, onOpenSecurity, onSessionMenuChange, onSetMode, onSetPolicy,
   onInitialPermissionChange, onPermissionStatus, onStop, onSend,
 }: {
   client: Client;
@@ -61,6 +61,7 @@ export function Composer({ client, sessionId, projectRoot, status, settings, set
   onRecoverQueueItem: (index: number, all: boolean) => void;
   onPickMention: (path: string) => void;
   onSelectModel: (selection: ModelSelection) => Promise<void>;
+  onSetThinking: (effort: string | null) => Promise<void>;
   onManageModel: () => void;
   onOpenSecurity: () => void;
   onSessionMenuChange: (open: boolean) => void;
@@ -144,7 +145,8 @@ export function Composer({ client, sessionId, projectRoot, status, settings, set
         <ModelPicker key={`${projectRoot}:${modelCatalogRevision}`} client={client} projectRoot={projectRoot}
           disabled={disabled} pending={status?.pendingModel !== undefined && status.pendingModel !== null}
           selection={selection}
-          onSelect={onSelectModel} onManage={onManageModel} />
+          thinking={sessionId === null ? null : status?.thinking ?? null}
+          onSelect={onSelectModel} onThinking={onSetThinking} onManage={onManageModel} />
         <Popover.Root open={sessionMenuOpen} onOpenChange={onSessionMenuChange}>
           <Popover.Trigger asChild><button type="button" className="composer-choice" disabled={disabled} title={t('工具模式', 'Tool mode')}><span>{sessionId === null
             ? initialMode ?? t('默认工具', 'Default mode')

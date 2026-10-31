@@ -1634,6 +1634,12 @@ export function App({ transport }: { transport: Transport }) {
     await client.call('model.select', { sessionId, ...selection }, 15_000);
     await refreshStatus(sessionId);
   }, [client, patch, projectRoot, refreshStatus, sessionId, settings.newSelections]);
+  // 思考档是会话级设置：null 表示清除覆盖、继承模型默认（resetThinking）。
+  const selectThinking = useCallback(async (effort: string | null) => {
+    if (sessionId === null) return;
+    await client.call('generation.set', { sessionId, ...(effort === null ? { resetThinking: true } : { thinkingEffort: effort }) }, 15_000);
+    await refreshStatus(sessionId);
+  }, [client, refreshStatus, sessionId]);
   return <LocaleProvider language={settings.language}><div className="frame" data-collapsed={collapsed ? 'true' : undefined} data-mobile-sidebar={narrow && mobileSidebar ? 'true' : undefined} data-dock={settings.dock}>
     <aside className="sidebar">
       <div className="brand"><img src="/icon.png" alt="" width="23" height="23" /><span>ligule</span><button type="button" className="icon-button" aria-label={t('收起侧栏', 'Hide sidebar')} onClick={() => patch({ collapsed: true })}><Icon name="sidebar" /></button></div>
@@ -1803,6 +1809,7 @@ export function App({ transport }: { transport: Transport }) {
         onRecoverQueueItem={(index, all) => recoverQueueItem(index, all)}
         onPickMention={pickMention}
         onSelectModel={selectModel}
+        onSetThinking={selectThinking}
         onManageModel={openModelSettings}
         onOpenSecurity={openSecuritySettings}
         onSessionMenuChange={setSessionMenuOpen}
