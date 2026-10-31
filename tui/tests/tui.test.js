@@ -610,7 +610,8 @@ test('input typed while a round runs queues up and flushes in order', options, a
     stdin.write('\x7f');
     await waitFor(() => /第三条/.test(lastFrame()) && /排队 1 条/.test(lastFrame()), { read: () => lastFrame() });
 
-    await waitFor(() => started().length === 2, { within: 20_000, read: () => painted });
+    // 队列在第一轮结束后才自动接上：等 Host 真的结束这一轮，而不是赌一个固定的墙钟预算。
+    await waitFor(() => started().length === 2, { read: () => painted });
     assert.deepEqual(started(), ['第一条', '第二条'], '本轮结束后按先后接上');
   } finally {
     // 无论断言是否通过都卸载 Ink，避免输入监听和计时器阻止测试进程退出。
