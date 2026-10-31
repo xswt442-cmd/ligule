@@ -26,6 +26,7 @@ import { keepEscape } from './components/ui';
 import { CURRENT, actionOf, formatKeys, isCapturing, isComposing, loadBindings, specOf } from './hotkeys';
 import { insertMention, mentionToken } from './mentions';
 import type { ModelSelection } from './model-catalog';
+import { thinkingRequest } from './thinking-request';
 import { createSlotRegistry, SLOTS, type Panel } from './slots';
 import { appendProjectedRecords, capabilityOf, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn, type Record_, type Row } from './rows';
 import { taskSummaryLabelOf, taskSummaryOf, type Status } from './status';
@@ -1634,10 +1635,10 @@ export function App({ transport }: { transport: Transport }) {
     await client.call('model.select', { sessionId, ...selection }, 15_000);
     await refreshStatus(sessionId);
   }, [client, patch, projectRoot, refreshStatus, sessionId, settings.newSelections]);
-  // 思考档是会话级设置：null 表示清除覆盖、继承模型默认（resetThinking）。
   const selectThinking = useCallback(async (effort: string | null) => {
     if (sessionId === null) return;
-    await client.call('generation.set', { sessionId, ...(effort === null ? { resetThinking: true } : { thinkingEffort: effort }) }, 15_000);
+    const request = thinkingRequest(sessionId, effort);
+    await client.call(request.method, request.params, 15_000);
     await refreshStatus(sessionId);
   }, [client, refreshStatus, sessionId]);
   return <LocaleProvider language={settings.language}><div className="frame" data-collapsed={collapsed ? 'true' : undefined} data-mobile-sidebar={narrow && mobileSidebar ? 'true' : undefined} data-dock={settings.dock}>
