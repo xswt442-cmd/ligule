@@ -48,6 +48,25 @@ function deadline(pending, label) {
   return Promise.race([pending, expired]).finally(() => clearTimeout(timer));
 }
 
+// A host finishes sandbox and permission probing before it answers the first request. On Windows
+// that costs seconds to tens of seconds depending on the workspace size (measured here: about
+// 6.4s for a small workspace, about 25s for this repository). The readiness phase gets its own
+// allowance while every protocol request after it keeps the 10s deadline, which tells "the host
+// never started" apart from "the request is slow" without enlarging the product timeout.
+const STARTUP_READY_MS = 60_000;
+
+async function ready(client, label = 'Host') {
+  const limit = Date.now() + STARTUP_READY_MS;
+  for (;;) {
+    const answered = await Promise.race([
+      client.request('prefs.read', {}).then(() => true, () => false),
+      new Promise(resolve => setTimeout(() => resolve(false), 1_000)),
+    ]);
+    if (answered) return;
+    if (Date.now() > limit) throw new Error(`${label} did not answer within ${STARTUP_READY_MS}ms`);
+  }
+}
+
 function startDesktop(projectRoot, dataRoot) {
   const child = spawn(process.execPath, [desktopEntry], {
     cwd: projectRoot,
@@ -92,6 +111,7 @@ test('a real unconfigured host opens another workspace while settings remain ava
   const client = createConnection({ input: child.stdout, output: child.stdin });
   child.stderr.resume();
   try {
+    await ready(client);
     assert.deepEqual(await deadline(client.request('prefs.read', {}), 'read preferences'), { settings: {}, version: '' });
     const opened = await deadline(client.request('session.create', { projectRoot: second }), 'open unconfigured workspace');
     const status = await deadline(client.request('status.get', { sessionId: opened.sessionId }), 'read session status');
@@ -186,6 +206,7 @@ test('workspace history and local configuration keep their identity when the per
   };
   let host = start();
   try {
+    await ready(host.client);
     const a = await deadline(host.client.request('session.create', {}), 'create first workspace session');
     const b = await host.client.request('session.create', { projectRoot: second });
     assert.equal((await host.client.request('session.read', { sessionId: a.sessionId })).header.projectRoot, first);
@@ -198,6 +219,7 @@ test('workspace history and local configuration keep their identity when the per
     assert.doesNotMatch(await readFile(join(second, '.ligule', 'config.local.toml'), 'utf8'), /saved-for-first/);
     await host.stop();
     host = start(['--config', `boundary = ${JSON.stringify(second)}`]);
+    await ready(host.client);
     const listed = await deadline(host.client.request('sessions.list', {}), 'list after a permission change');
     assert.deepEqual(listed.sessions.map(item => item.id), [a.sessionId]);
     await host.client.request('session.open', { sessionId: a.sessionId });
@@ -221,6 +243,7 @@ test('DesktopEntry keeps workspace identity separate from a shared permission bo
   await writeFile(join(data, 'config.toml'), `boundary = ${JSON.stringify(boundary)}\n`, 'utf8');
   let host = startDesktop(first, data);
   try {
+    await ready(host.client);
     const a = await deadline(host.client.request('session.create', {}), 'create DesktopEntry first workspace session');
     const aRecord = await deadline(host.client.request('session.read', { sessionId: a.sessionId }), 'read DesktopEntry first session');
     assert.equal(aRecord.header.projectRoot, first, 'the first session header follows DesktopEntry cwd, not the permission boundary');
@@ -247,6 +270,7 @@ test('DesktopEntry keeps workspace identity separate from a shared permission bo
     await host.stop();
 
     host = startDesktop(first, data);
+    await ready(host.client);
     const listedFirst = await deadline(host.client.request('sessions.list', {}), 'list default DesktopEntry workspace after restart');
     assert.deepEqual(listedFirst.sessions.map((item) => item.id), [a.sessionId]);
     const listedSecond = await host.client.request('sessions.list', { projectRoot: second });
