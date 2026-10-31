@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { link, mkdtemp, mkdir, readFile, readdir, symlink, unlink, writeFile } from 'node:fs/promises';
+import { link, mkdtemp, mkdir, readFile, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createConnection } from '../core/dist/host/connection.js';
@@ -96,6 +96,26 @@ function deadline(pending, label) {
   })]).finally(() => clearTimeout(timer));
 }
 
+// A host finishes sandbox and permission probing before it answers the first request. On Windows
+// that costs seconds to tens of seconds depending on the workspace size (measured here: about
+// 6.4s for a small workspace, about 25s for this repository), and it has nothing to do with the
+// request handling under test. The readiness phase gets its own allowance while every protocol
+// request after it keeps the 10s deadline, so the product timeout is not enlarged and a failure
+// still points at the phase that was actually slow.
+const STARTUP_READY_MS = 60_000;
+
+async function ready(client, label = 'Host') {
+  const limit = Date.now() + STARTUP_READY_MS;
+  for (;;) {
+    const answered = await Promise.race([
+      client.request('prefs.read', {}).then(() => true, () => false),
+      new Promise(resolve => setTimeout(() => resolve(false), 1_000)),
+    ]);
+    if (answered) return;
+    if (Date.now() > limit) throw new Error(`${label} did not answer within ${STARTUP_READY_MS}ms`);
+  }
+}
+
 test('durable run submission deduplicates a live retry and rejects a payload conflict', async () => {
   const output = join(repository, 'testplace', 'p4-runs');
   await mkdir(output, { recursive: true });
@@ -137,6 +157,7 @@ test('durable run submission deduplicates a live retry and rejects a payload con
   };
   let host = startHost();
   try {
+    await ready(host.client);
     const { sessionId } = await deadline(host.client.request('session.create', {}), 'create session');
     const first = await deadline(host.client.request('run.submit', {
       sessionId, input: 'return a short response', requestKey: 'p4-live-key', origin: 'controller',
@@ -181,6 +202,7 @@ test('durable run submission deduplicates a live retry and rejects a payload con
     host.process.kill();
     await deadline(new Promise(resolve => host.process.once('close', resolve)), 'terminate unfinished Host');
     host = startHost();
+    await ready(host.client);
     const restoredReceipt = await host.client.request('run.receipt', { projectRoot: root, sessionId, runId: first.runId });
     assert.equal(restoredReceipt.state, 'completed');
     const restoredResult = await host.client.request('run.result', { projectRoot: root, sessionId, runId: first.runId, offset: 0 });
@@ -206,5 +228,75 @@ test('durable run submission deduplicates a live retry and rejects a payload con
     if (host.process.exitCode === null) await new Promise(resolve => host.process.once('close', resolve));
     server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('run.wait reads the run owned by the caller scope and ignores a claimed origin', async () => {
+  const output = join(repository, 'testplace', 'p4-runs');
+  await mkdir(output, { recursive: true });
+  const root = await mkdtemp(join(output, 'p4-run-wait-default-'));
+  const data = join(root, 'data');
+  await mkdir(data);
+  let requestCount = 0;
+  const server = createServer((_request, response) => {
+    requestCount += 1;
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end([
+      { type: 'message_start', message: { usage: {} } },
+      { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'done' } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+      { type: 'message_stop' },
+    ].map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''));
+  });
+  const port = await listenFetchable(server);
+  const childProcess = spawn(process.execPath, [cli, 'host', '--config', 'model.api="messages"',
+    '--config', `model.baseURL="http://127.0.0.1:${port}"`, '--config', 'model.model="p4-test"'], {
+    cwd: root,
+    env: { ...process.env, HOME: root, USERPROFILE: root, LIGULE_HOME: data, LIGULE_API_KEY: 'local-test-key' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  const stderr = [];
+  childProcess.stderr.setEncoding('utf8');
+  childProcess.stderr.on('data', chunk => stderr.push(chunk));
+  const client = createConnection({ input: childProcess.stdout, output: childProcess.stdin });
+  try {
+    await ready(client);
+    const { sessionId } = await deadline(client.request('session.create', {}), 'create session');
+    const started = await deadline(client.request('run.start', { sessionId, input: 'return a short response' }), 'finish the Host-scoped run');
+    assert.equal(started.text, 'done');
+    assert.equal(typeof started.runId, 'string');
+    const withoutOrigin = await deadline(client.request('run.wait', { sessionId, runId: started.runId }), 'read the run without a claimed origin');
+    assert.equal(withoutOrigin.text, 'done');
+    const claimedHuman = await deadline(client.request('run.wait', { sessionId, runId: started.runId, origin: 'human' }), 'read the run with a claimed human origin');
+    assert.equal(claimedHuman.text, 'done', 'origin is compatibility only; the persisted owner decides');
+    const claimedHumanReceipt = await client.request('run.receipt', { projectRoot: root, sessionId, runId: started.runId });
+    assert.equal(claimedHumanReceipt.via, 'mcp', 'a plain Host still persists its own channel, not the claimed human origin');
+    assert.equal(claimedHumanReceipt.resolvedBy, 'controller-local', 'run.start defaults to the controller origin, so the local controller scope owns the run');
+
+    const accepted = await deadline(client.request('run.submit', { sessionId, input: 'return a controller response' }), 'accept controller run');
+    const receiptDeadline = Date.now() + 5_000;
+    let receipt;
+    while (Date.now() < receiptDeadline) {
+      receipt = await client.request('run.receipt', { projectRoot: root, sessionId, runId: accepted.runId });
+      if (receipt.state === 'completed') break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(receipt.state, 'completed', `provider requests=${requestCount}`);
+    const completed = await deadline(client.request('run.wait', { sessionId, runId: accepted.runId }), 'wait for controller run');
+    assert.equal(completed.text, 'done');
+    // 两个 run（run.start 与 run.submit）各产生一次 provider 请求；run.wait/run.receipt 只读结果。
+    assert.equal(requestCount, 2);
+  } catch (error) {
+    throw new Error(`${error.message}; host exit=${String(childProcess.exitCode)} stderr=${stderr.join('')}`, { cause: error });
+  } finally {
+    childProcess.stdin.end();
+    if (childProcess.exitCode === null) childProcess.kill();
+    if (childProcess.exitCode === null) await new Promise(resolve => childProcess.once('close', resolve));
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+    await rm(root, { recursive: true, force: true });
   }
 });

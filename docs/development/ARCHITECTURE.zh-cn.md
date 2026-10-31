@@ -6,7 +6,7 @@
 
 本文面向阅读或修改仓库的贡献者，说明组件职责、依赖方向、一次请求的执行路径和会话恢复。协议字段与模块细节以链接到的源码为准。
 
-用户配置层的 `[telemetry].enabled = true` 可开启有界本地 JSONL 事件日志；可选的 `otlpEndpoint` 只接受本机回环 OTLP/HTTP protobuf 地址，并导出有界 OpenTelemetry Trace。默认关闭；项目配置不能启用此功能，存储或导出失败均不影响 Agent 执行。本地存储失败会停用当前遥测写入器，并通过 Host 日志记录脱敏后的错误码；直接调用 `flush()` 时会收到该错误。日志和 Trace 不包含提示词、推理、工具参数/结果、文件路径或凭据。Session JSONL 仍是恢复事实来源；本地 JSONL 是结构化事件日志，不是 OpenTelemetry Logs，Ligule 也没有 Trace 查看器。
+用户配置层的 `[telemetry].enabled = true` 可开启有界本地 JSONL 事件日志；可选的 `otlpEndpoint` 只接受本机回环 OTLP/HTTP protobuf 地址，并导出有界 OpenTelemetry Trace。默认关闭；项目配置不能启用此功能，存储或导出失败均不影响 Agent 执行。本地 JSONL 存储固定最多保留四个 64 KiB 分段和有界 Manifest；分段保留数不是用户配置项，因为调整它需要安全迁移 Manifest。本地存储失败会停用当前遥测写入器，并通过 Host 日志记录脱敏后的错误码；直接调用 `flush()` 时会收到该错误。日志和 Trace 不包含提示词、推理、工具参数/结果、文件路径或凭据。Session JSONL 仍是恢复事实来源；本地 JSONL 是结构化事件日志，不是 OpenTelemetry Logs，Ligule 也没有 Trace 查看器。
 
 CLI 的 npm 包内置私有 Core 的编译代码、模式与元数据；Core 的外部运行依赖合并到公开包清单，由 npm 在消费者系统安装对应的原生依赖。打包时不内置构建机器的外部依赖树，同一 tarball 用于 Windows 与 Linux 的安装验证。
 
@@ -21,11 +21,24 @@ CLI 的 npm 包内置私有 Core 的编译代码、模式与元数据；Core 的
 | Desktop 前端 | Renderer 管理自己的 UI 模块，只能将 `desktop/electron/api.ts` 作为 type-only 协议契约导入。 |
 | Electron Main | Main 管理窗口、IPC、安全与运行时启动器；它通过分帧 IPC 与独立 Node Host 通信，不导入 Core 业务代码。 |
 
-运行 `pnpm check:dependencies`，使用锁定的 `dependency-cruiser@18.7.0` 与工作区 TypeScript 版本扫描源码 import。规则拒绝 Core 反向依赖客户端、Electron Main 导入 Core、运行时依赖循环、Core/TUI 运行时导入 `npm-dev` 依赖，以及 Renderer 运行时导入 Electron API 契约。type-only 循环和 type-only `npm-dev` 依赖不属于运行时违规。扫描排除测试、生成的 `dist`、vendored 代码和 `testplace`；完整依赖图不提交到仓库。
+运行 `pnpm check:dependencies`，使用锁定的 `dependency-cruiser@18.7.0` 与工作区 TypeScript 版本扫描源码 import。规则拒绝 Core 反向依赖客户端、Electron Main 导入 Core、运行时依赖循环，以及 Core/TUI/Electron Main/Renderer 运行时导入 `npm-dev` 依赖；Renderer 运行时导入 Electron API 契约也会被拒绝。Electron Main 可以导入由打包后的 Electron Runtime 提供的 `electron` Host API，这是唯一允许的 npm-dev 运行时例外。type-only 循环、type-only 导入及 Renderer 的环境类型声明不属于运行时违规。扫描排除测试、生成的 `dist`、vendored 代码和 `testplace`；完整依赖图不提交到仓库。
 
 规则配置见 [dependency-cruiser.cjs](../../dependency-cruiser.cjs)；[check-dependencies.mjs](../../scripts/check-dependencies.mjs) 会执行源码扫描、正向 fixture 与受控负向 fixture。
 
 CLI 发布清单由 [`releaseManifest()`](../../scripts/pack-release.js) 从 `tui/package.json` 与 Core 的 `dependencies`、`optionalDependencies` 合成。tarball 内置私有 `@ligule/core` 运行时与无依赖的 `xlsx`；其余依赖由消费者按自身平台安装，原生 optional 包也只选择适用的项目。TUI 的 `devDependencies` 可能仍留在 manifest 元数据中，但 npm 消费者不会传递安装它们。Desktop 使用独立产品清单，不属于 CLI tarball。CI 发布工作流在干净 checkout 中调用 `pnpm --filter ligule run check-pack` 与 `pnpm --filter ligule run verify-install <tarball>`。在已有工作区本机验收时，应将新 `testplace/tmp` work root 传给脚本，避免替换原有 `testplace/pack` 产物：
+
+代表性的直接依赖类别与源码用途如下：
+
+| 用途 | 源码与依赖 | 安装方式 |
+| --- | --- | --- |
+| MCP 与参数模式 | `core/src/capability/mcp.ts`、`core/src/host/mcp-server.ts`；MCP SDK、AJV | Core 生产依赖，由 npm 安装到消费者。 |
+| Shell 解析与搜索 | `core/src/capability/command.ts`、`powershell.ts`、`ripgrep.ts`；Tree-sitter 语法包与 `@vscode/ripgrep` | 生产依赖；原生语法模块和搜索二进制按消费者平台选择。 |
+| 文档与媒体 | `core/src/capability/document-parser.ts`、`media.ts`、`artifact.ts`；Office/PDF 解析器、`yauzl`、`sharp`、Canvas | 解析器按需加载。原生图像模块由消费者安装；`xlsx` 因无运行依赖和平台二进制而内置。 |
+| 凭据与进程集成 | `core/src/kernel/credentials.ts`、`core/src/capability/mcp-posix.ts`、`win32-job.ts`、`screen-capture-worker.ts`；keyring、`koffi`、`node-screenshots` | keyring 是生产依赖；`koffi` 与 `node-screenshots` 是可选原生依赖。缺少 Koffi 时 POSIX MCP 会拒绝启动，不会在没有进程组归属时继续运行。 |
+| Telemetry | `core/src/kernel/telemetry-otlp.ts`；OpenTelemetry API、资源、Trace SDK 与 OTLP Exporter | 即使 Telemetry 关闭仍是 Core 常规依赖；仅配置后才创建 OTLP Sink。 |
+| 终端界面 | `tui/src/tui/start.ts` 及其 React/Ink、Markdown 和宽度辅助包 | npm 可选依赖，仅进入 TUI 时加载；用户省略这些包时 CLI 会明确提示缺少 TUI 依赖。 |
+
+Desktop 使用独立清单：`desktop/electron/` 使用打包的 Electron Host API，`desktop/frontend/` 的依赖由 Vite 打入 Renderer。这两组依赖都不属于 CLI npm tarball。清单和锁文件仍是版本权威；本表概述代表性的运行时用途，不重复维护所有包版本。
 
 ```sh
 pnpm --filter ligule run check-pack -- --work-root testplace/tmp/package-check-example-1
@@ -86,7 +99,7 @@ flowchart LR
 
 内部子代理在同一 Host 进程中创建派生 Kernel、Loop 和独立 Session JSONL，记录 ID 为父 Session 的 `.sub-N`。子代理继承父会话的配置、Provider、插件工具、Permission 与 Policy 判定实例，但不注册 `subagent` 工具；每个父轮最多同时运行三个。子模式只能收窄父模式可用工具，模型调用次数、输出、思考和循环预算不能超过父上限。子任务的 RunResult 和 Session 引用作为父工具结果返回，因此失败或取消的子记录仍可查看。
 
-外部客户端通过本地 stdio MCP 进入 Control 门面，再由它操作授权项目中的 Host Session。可信 TUI/Desktop 通过本地 Agent Control IPC 观察状态、回答交互或接管任务；Host 仍是 Session 的写入者，锁阻止另一个 Host 并发写同一记录。答复结果和控制事件以 `source=human` 或 `source=controller` 区分本机用户与 MCP 操控者；只有本机用户答复可以保存审批记忆。接管会取消当前外控轮次、清空尚未发送的外部队列、释放 Host 会话锁并发出所有权转移事件。撤销工作区信任会使当前 Host 停止基于该信任启动的受管进程；其他 Host 通过共享信任记录定期复核并停止相关进程。Session JSONL 保存消息和工具事件；operation ID、事件缓存、待处理请求和消息队列属于 Control 进程内状态，服务重启后需要从持久 Session 重新接回，旧运行编号不可继续使用。
+外部客户端通过本地 stdio MCP 进入 Control 门面，再由它操作授权项目中的 Host Session。可信 TUI/Desktop 通过本地 Agent Control IPC 观察状态、回答交互或接管任务；Host 仍是 Session 的写入者，锁阻止另一个 Host 并发写同一记录。答复结果和控制事件以 `source=human` 或 `source=controller` 区分本机用户与 MCP 操控者；只有本机用户答复可以保存审批记忆。接管会取消当前外控轮次、清空尚未发送的外部队列、释放 Host 会话锁并发出所有权转移事件。撤销工作区信任会使当前 Host 停止基于该信任启动的受管进程；其他 Host 通过共享信任记录定期复核并停止相关进程。Session JSONL 保存消息和工具事件；operation ID、事件缓存、待处理请求和消息队列属于 Control 进程内状态，服务重启后需要从持久 Session 重新接回，旧运行编号不可继续使用。`run.wait` 必须明确指定 origin，但该字段本身不授予权限：可信本地 UI 可读取本 Session 的 human 与 controller 回执；经过认证的 Agent Control 桥接可读取 human 回执和当前 Grant 的 controller 回执；其他 Host 只能读取自己的 controller scope。Host 根据持久化 Run 归属并结合调用方上下文判定权限。若 `requestKey` 在多个可见 scope 中都匹配，返回 `run_request_key_ambiguous`；调用方应使用唯一的 `runId` 选择回执。Host 返回结果前会检查对应回执。
 
 ```mermaid
 flowchart LR
@@ -106,6 +119,8 @@ Kernel 从空工具注册表开始。Host 通过[装配器](../../core/src/kerne
 
 模型提出的每个工具调用都会进入 [`kernel.call`](../../core/src/kernel/kernel.ts)。Kernel 先检查工具注册和参数，再解析声明的命令或网络目标，随后调用审批判定链。判定链按既定顺序应用限制、守卫、配置规则、自动审批条件和用户审批。只有获准的调用会进入工具实现。Kernel 会记录判定结果，以及完成、拒绝或失败的工具结果；模型清单只包含工具名称、说明和参数模式。
 
+配置的 stdio MCP Server 在 POSIX 系统中使用独立进程组启动，在 Windows 中使用 Job Object。撤销、取消和 Host 关闭时先关闭协议传输，再有界地尝试正常终止，并强制停止仍存活的所属进程。清理失败会保留为可见、可重试状态。POSIX 进程组只覆盖仍留在该组中的后代；主动通过 `setpgid` 移入其他进程组或通过 `setsid` 创建新会话的后代不属于此清理边界。若 Node.js 进程组启动器或 Koffi 原生 `setsid` 支持不可用，POSIX MCP 会拒绝启动。
+
 内置 `delete` 工具只调用操作系统回收站，Linux 使用 GIO 系统回收操作。后端报错后，Ligule 会比较原路径上的目标对象身份和顶层元数据与操作前快照。仍匹配时返回后端错误；无法匹配时返回 `delete_outcome_unknown`，要求用户检查工作区和系统回收站再重试。这项检查不比较文件正文，也不递归核对目录内容。Ligule 不维护自建回收列表或恢复存储。Shell 删除仍沿 Shell 的 Permission、Policy 和 Approval 链执行。
 
 `write` 会在替换内容前将文件与本轮最后一次完整读取的版本进行比较。比较和写入是两个独立的文件系统操作，因此外部并发写入仍可能在检查后发生；该工具不提供原子比较并交换保证。
@@ -116,7 +131,7 @@ Host 为每个会话持有独立的 Permission 与 Policy 状态。Permission �
 
 `fetch` 会在 Policy 判定前解析地址，并将每个 socket 固定到获批的 IP。它只跟随同源重定向；每一跳重新解析后必须仍落在首次获批的 IP 集内。结果记录实际连接过的地址。IPv4/IPv6 特殊用途地址按 IANA `Forwardable` 与 `Globally Reachable` 属性映射到现有策略类别：可转发但不可全球到达的目标按 `private` 处理并要求审批；非目标地址或不可转发范围按 `unspecified` 拒绝；注册表明确允许全球到达的分配继续按 `public` 处理。`shownBytes` 统计 UTF-8 解码前保留的源响应字节。
 
-默认 `minimal` 模式还提供 `managed_process`，供开发服务器等需要跨工具调用运行的命令使用。启动命令仍按 `exec` capability 应用 Permission、Script Binding、工作区信任和 Policy；现有 `exec` 拒绝规则同样适用。启动须提供 HTTP 回环健康检查地址，并等待其返回 2xx 后才返回 Session 内句柄、端口和就绪状态；失败探测会有界退避，取消或进程退出会打断等待。状态、限量日志和显式停止也限定在该 Session；日志最多返回 16 KiB。停止操作无法确认进程退出时会返回失败并报告 `terminationPending: true`；进程已结束但执行资源清理未确认时会报告 `cleanupPending: true`；进程活性与资源清理都未确认时两个标记同时为 true。后续 close/stop 会复用在途 Lease 请求，并对失败的资源清理进行有限重试。最多保留 128 条已确认终态 Entry；活性未知或资源清理未完成的 Entry 不会被淘汰。普通 `exec` 仍等待命令结束并由 Guardian 清理后代。受管进程继续留在 Guardian/Job Object 进程树中，随运行取消、Permission 变更、Session/Host 关闭或所属 Grant 撤销而停止；外部撤销或过期的 Grant 会每秒重新校验。健康检查地址只限制 Host 的探测目标，实际监听地址和命令的网络访问仍由启动命令与当前平台 Permission 决定。
+默认 `minimal` 模式还提供 `managed_process`，供开发服务器等需要跨工具调用运行的命令使用。启动命令仍按 `exec` capability 应用 Permission、Script Binding、工作区信任和 Policy；现有 `exec` 拒绝规则同样适用。启动须提供 HTTP 回环健康检查地址，并等待其返回 2xx 后才返回 Session 内句柄、端口和就绪状态；失败探测会有界退避，取消或进程退出会打断等待。状态、限量日志和显式停止也限定在该 Session；日志最多返回 16 KiB。停止操作无法确认进程退出时会返回失败并报告 `terminationPending: true`；进程已结束但执行资源清理未确认时会报告 `cleanupPending: true`；进程活性与资源清理都未确认时两个标记同时为 true。启动和进程树终止都失败时，启动错误保留原错误码并同时报告两类错误；状态视图通过 startupFailure 和 terminationFailure 分别暴露。后续 close/stop 会复用在途 Lease 请求，并对失败的资源清理进行有限重试。最多保留 128 条已确认终态 Entry；活性未知或资源清理未完成的 Entry 不会被淘汰。普通 `exec` 仍等待命令结束并由 Guardian 清理后代。受管进程继续留在 Guardian/Job Object 进程树中，随运行取消、Permission 变更、Session/Host 关闭或所属 Grant 撤销而停止；外部撤销或过期的 Grant 会每秒重新校验。健康检查地址只限制 Host 的探测目标，实际监听地址和命令的网络访问仍由启动命令与当前平台 Permission 决定。
 
 ### 一次 Agent Loop
 
@@ -175,13 +190,13 @@ sequenceDiagram
 
 `model.outputTokens` 表示本次请求的输出预算，与旧版能力上限调整相互独立。模型服务保留字符串形式的 `models` 列表，并可按模型 ID 配置 `modelSettings`，包括显示名称、上下文窗口和请求输出预算。模型级输出声明可以提高未知端点的保守默认值，但不能超过已核实的端点或模型上限，也不能覆盖显式能力限制。未设置该声明的旧配置仍使用保守上限。[预算解析器](../../core/src/model/output-budget.ts)会校验生效限制；同一模型的上下文窗口也控制 Host 的压缩。Provider 重建和会话生成设置变更在轮次边界生效。
 
-Host 的运行进度仅在当前活跃会话与任务期间存在，由 Loop、压缩、审批和提问事件生成。`status.get` 与 `progress` 通知提供阶段、时间和计数；TUI 与 Desktop 展示同一状态。Host 会合并短时间内重复的活动通知，但保留实际进度时间；任务结束时清除进度。进度心跳不会写入 Session JSONL，默认也不会因无活动超时而取消任务。
+Host 的运行进度仅在当前活跃会话与任务期间存在，由 Loop、压缩、审批和提问事件生成。`status.get` 与 `progress` 通知提供阶段、时间和计数；活动进度快照也携带 TaskBudget 状态，使 TUI 与 Desktop 可直接显示剩余执行时间、累计交互等待和 Host 判定的暂停状态，无需轮询完整状态视图。Host 会合并短时间内重复的活动通知，但保留实际进度时间；任务结束时清除进度。进度心跳不会写入 Session JSONL，默认也不会因无活动超时而取消任务。
 
 ### 会话记录与恢复
 
 追加式 [JSONL 会话记录](../../core/src/session/session.ts)是对话事实来源。首行记录会话标识和项目信息；之后的事件记录用户与助手消息、工具调用和结果、轮次状态、模型选择、Permission、Policy 覆盖和拒绝计数等状态。Policy 快照可由旧版本读者跳过，不进入模型消息或检查点。会话锁阻止多个进程同时写入同一记录。
 
-Provider 响应流式传输期间，[`stream-draft.ts`](../../core/src/session/stream-draft.ts) 会将临时快照单独写入 `<sessionId>.stream.json`。首个文本或推理片段立即保存；之后每隔 250 毫秒或累计新增 16 KiB 时写入。文本与推理各保留最后 8,192 个 UTF-16 字符，并记录总字符数和是否截断。JSON 快照有界，不超过 128 KiB；写入临时文件并 flush 后再原子替换。它不是 Session 事件，也不会进入 `modelView()`，助手响应正式写入后会删除。Host 的 session read/observe 和 MCP `ligule_session_read` 通过独立的 `provisionalOutput` 字段返回快照，并标记 `provisional: true`；快照无效时返回 `provisionalOutputError: session_stream_invalid`，同时仍返回正式记录。若正式记录已有相同 `responseId`，读取时会忽略残留快照。强制终止进程可能丢失尚未写入快照的最后一批内容。界面不会自动恢复或渲染该字段，目前只能通过协议读取。
+Provider 响应流式传输期间，[`stream-draft.ts`](../../core/src/session/stream-draft.ts) 会将临时快照单独写入 `<sessionId>.stream.json`。首个文本或推理片段立即保存；之后每隔 250 毫秒或累计新增 16 KiB 时写入。文本与推理各保留最后 8,192 个 UTF-16 字符，并记录总字符数和是否截断。JSON 快照有界，不超过 128 KiB；写入临时文件并 flush 后再原子替换。它不是 Session 事件，也不会进入 `modelView()`，助手响应正式写入后会删除。后续 writer 不会删除所有权无法确认的残留快照临时文件。Host 的 session read/observe 和 MCP `ligule_session_read` 通过独立的 `provisionalOutput` 字段返回快照，并标记 `provisional: true`；快照无效时返回 `provisionalOutputError: session_stream_invalid`，同时仍返回正式记录。若正式记录已有相同 `responseId`，读取时会忽略残留快照。强制终止进程可能丢失尚未写入快照的最后一批内容。界面不会自动恢复或渲染该字段，目前只能通过协议读取。
 
 默认路径为 `dataRoot()/workspaces/<可读路径>--<稳定哈希>/sessions/`，同目录保存记录和附属文件。只读列表与搜索会扫描旧全局目录和项目目录但不迁移；用户打开旧会话时才会复制到工作区目录，并保留原件。
 

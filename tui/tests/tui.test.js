@@ -28,7 +28,7 @@ try {
 const options = { skip: missing === '' ? false : missing };
 const editorFixture = fileURLToPath(new URL('./fixtures/editor.mjs', import.meta.url));
 const mcpServerFixture = fileURLToPath(new URL('../../tests/fixtures/mcp-minimal.mjs', import.meta.url));
-const { foldText, editDraft, projectRecord, buildStatusLine, contextSegment, findRecord, branchOf, detailTitle, routeInput, candidatesOf, describeChange, displayWidth, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, findLines, mentionToken, insertMention, resolveSessionId, SESSION_ROWS, isTypingRun } = rows;
+const { foldText, editDraft, projectRecord, buildStatusLine, activeRunBudgetSegment, contextSegment, findRecord, branchOf, detailTitle, routeInput, candidatesOf, describeChange, displayWidth, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, findLines, mentionToken, insertMention, resolveSessionId, SESSION_ROWS, isTypingRun } = rows;
 const quoted = (value) => `"${value.replaceAll('"', '\\"')}"`;
 const plainOutput = (value) => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
 
@@ -610,7 +610,8 @@ test('input typed while a round runs queues up and flushes in order', options, a
     stdin.write('\x7f');
     await waitFor(() => /第三条/.test(lastFrame()) && /排队 1 条/.test(lastFrame()), { read: () => lastFrame() });
 
-    await waitFor(() => started().length === 2, { within: 20_000, read: () => painted });
+    // 队列在第一轮结束后才自动接上：等 Host 真的结束这一轮，而不是赌一个固定的墙钟预算。
+    await waitFor(() => started().length === 2, { read: () => painted });
     assert.deepEqual(started(), ['第一条', '第二条'], '本轮结束后按先后接上');
   } finally {
     // 无论断言是否通过都卸载 Ink，避免输入监听和计时器阻止测试进程退出。
@@ -634,6 +635,55 @@ test('the metadata line reports context pressure only when a window is written',
   assert.match(draw(64), /ctx:~/);
   assert.doesNotMatch(draw(200), /mode:|policy:|tools:/);
   assert.ok(UI_COMMANDS.some((command) => command.name === 'compact'), '/compact 在命令表里');
+});
+
+test('/status describes only the active run budget and formats it in both languages', options, () => {
+  const status = {
+    running: true,
+    task: {
+      modelCalls: 3, maxModelCalls: 64, timeoutMs: 1_800_000, interactionWaitTimeoutMs: 43_200_000,
+      interactionWaitMs: 90_000, executionElapsedMs: 31_000, executionPaused: true,
+    },
+  };
+  const chinese = activeRunBudgetSegment(status, 'zh');
+  assert.match(chinese, /Run 模型调用 3\/64/);
+  assert.match(chinese, /执行剩余 29分29秒/);
+  assert.match(chinese, /累计交互等待 1分30秒\/12小时/);
+  assert.match(chinese, /执行期限已暂停/);
+
+  const english = activeRunBudgetSegment(status, 'en');
+  assert.match(english, /Run model calls 3\/64/);
+  assert.match(english, /execution 29m 29s left/);
+  assert.match(english, /interaction wait 1m 30s\/12h/);
+  assert.match(english, /deadline paused/);
+});
+
+test('/status does not present a completed task as active and labels a missing live snapshot', options, () => {
+  assert.equal(activeRunBudgetSegment({ running: false, task: {
+    modelCalls: 3, maxModelCalls: 64, timeoutMs: 1_800_000, interactionWaitTimeoutMs: 43_200_000,
+    interactionWaitMs: 90_000, executionElapsedMs: 31_000, executionPaused: false,
+  } }, 'zh'), '');
+  assert.match(activeRunBudgetSegment({ running: true, task: null, taskLimits: { maxModelCalls: 64 }, progress: { modelCalls: 2 } }, 'en'),
+    /model calls 2 · run budget initializing/);
+  assert.match(activeRunBudgetSegment({ running: true, task: null }, 'zh'), /Run 预算准备中/);
+});
+
+test('/status ignores a previous task snapshot until the current progress carries its budget', options, () => {
+  const previous = {
+    modelCalls: 11, maxModelCalls: 64, timeoutMs: 1_800_000, interactionWaitTimeoutMs: 43_200_000,
+    interactionWaitMs: 90_000, executionElapsedMs: 31_000, executionPaused: false, startedAt: '2026-10-30T23:00:00.000Z',
+  };
+  const startedAt = Date.parse('2026-10-31T00:00:00.000Z');
+  const initializing = activeRunBudgetSegment({ running: true, task: previous, taskLimits: { maxModelCalls: 64 }, progress: {
+    phase: 'preparing', startedAt, modelCalls: 0,
+  } }, 'en');
+  assert.match(initializing, /model calls 0 · run budget initializing/);
+
+  const current = { ...previous, modelCalls: 2, startedAt: '2026-10-31T00:00:00.000Z' };
+  const active = activeRunBudgetSegment({ running: true, task: previous, progress: {
+    phase: 'model_request', startedAt, modelCalls: 2, task: current,
+  } }, 'en');
+  assert.match(active, /model calls 2\/64/);
 });
 
 test('the metadata line shortens the workspace path and keeps the interrupt hint when narrow', options, () => {
@@ -1440,6 +1490,15 @@ test('/control creates a project-bound grant through the interactive wizard', op
         && output.includes('到期')
         && (output.includes('来源 可信界面创建') || output.includes('source Trusted UI'))
         && output.includes(projectDirectory);
+    }, { within: 10_000, read: () => strip(painted).slice(-1_200) });
+
+    const listed = await client.request('agent-control.list', {});
+    await client.request('agent-control.revoke', { grantId: saved.grants[0].id, version: listed.version });
+    await answer('/control list');
+    await waitFor(() => {
+      const output = strip(painted);
+      return (output.includes('1 张已失效') || output.includes('1 grant(s) are no longer valid'))
+        && (output.includes('重新创建授权') || output.includes('Create a new grant'));
     }, { within: 10_000, read: () => strip(painted).slice(-1_200) });
   } finally {
     instance.unmount();

@@ -93,6 +93,45 @@ try {
   ], fixtureRoot);
   assertStatus(developmentTypeOnly, 0, 'type_only_dev_dependency_positive_fixture');
 
+  await writeFixture(fixtureRoot, 'desktop/package.json', '{"name":"fixture-desktop","devDependencies":{"electron":"44.7.0","typescript":"5.9.3"}}\n');
+  await writeFixture(fixtureRoot, 'node_modules/electron/package.json', '{"name":"electron","version":"44.7.0","main":"index.js"}\n');
+  await writeFixture(fixtureRoot, 'node_modules/electron/index.js', 'export const app = { isReady: () => true };\n');
+  await writeFixture(fixtureRoot, 'desktop/electron/main.ts', "import { app } from 'electron';\nexport const ready = app.isReady();\n");
+  const electronHostApi = dependencyCruiser([
+    '--config', config,
+    '--output-type', 'err',
+    'desktop/electron/main.ts',
+  ], fixtureRoot);
+  assertStatus(electronHostApi, 0, 'electron_host_runtime_provider_positive_fixture');
+
+  await writeFixture(fixtureRoot, 'desktop/electron/dev-runtime.ts', "import * as ts from 'typescript';\nexport const version = ts.version;\n");
+  const desktopDevelopmentRuntime = dependencyCruiser([
+    '--config', config,
+    '--output-type', 'err',
+    'desktop/electron',
+  ], fixtureRoot);
+  assertStatus(desktopDevelopmentRuntime, 1, 'desktop_runtime_dev_dependency_negative_fixture', 'desktop-main-no-runtime-dev-dependencies');
+
+  await writeFixture(fixtureRoot, 'desktop/frontend/package.json', '{"name":"fixture-frontend","devDependencies":{"vite":"8.3.2"}}\n');
+  await writeFixture(fixtureRoot, 'node_modules/vite/package.json', '{"name":"vite","version":"8.3.2","main":"index.js"}\n');
+  await writeFixture(fixtureRoot, 'node_modules/vite/index.js', 'export const defineConfig = config => config;\n');
+  await writeFixture(fixtureRoot, 'node_modules/vite/client.d.ts', 'export {};\n');
+  await writeFixture(fixtureRoot, 'desktop/frontend/src/global.d.ts', '/// <reference types="vite/client" />\n');
+  const rendererTypeReference = dependencyCruiser([
+    '--config', config,
+    '--output-type', 'err',
+    'desktop/frontend/src/global.d.ts',
+  ], fixtureRoot);
+  assertStatus(rendererTypeReference, 0, 'desktop_renderer_dev_type_reference_positive_fixture');
+
+  await writeFixture(fixtureRoot, 'desktop/frontend/src/dev-runtime.ts', "import { defineConfig } from 'vite';\nexport const config = defineConfig({});\n");
+  const rendererDevelopmentRuntime = dependencyCruiser([
+    '--config', config,
+    '--output-type', 'err',
+    'desktop/frontend/src',
+  ], fixtureRoot);
+  assertStatus(rendererDevelopmentRuntime, 1, 'desktop_renderer_dev_dependency_negative_fixture', 'desktop-renderer-no-runtime-dev-dependencies');
+
   await writeFixture(fixtureRoot, 'runtime-cycle/left.ts', "import './right.js';\nexport const left = true;\n");
   await writeFixture(fixtureRoot, 'runtime-cycle/right.ts', "import './left.js';\nexport const right = true;\n");
   const runtimeCycle = dependencyCruiser([
@@ -111,7 +150,7 @@ try {
   ], fixtureRoot);
   assertStatus(typeCycle, 0, 'type_only_cycle_positive_fixture');
 
-  process.stdout.write('dependency guard fixtures passed: Core → TUI and runtime npm-dev rejected; type-only npm-dev/cycle allowed; runtime cycle rejected\n');
+  process.stdout.write('dependency guard fixtures passed: Core → TUI, Core/TUI/Desktop runtime npm-dev, and runtime cycles rejected; Electron host API, type-only npm-dev imports/references and type-only cycles allowed\n');
 } finally {
   const currentTempRoot = await realpath(tempRoot);
   const currentFixtureRoot = await realpath(fixtureRoot);

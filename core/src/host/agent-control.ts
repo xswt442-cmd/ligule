@@ -27,6 +27,9 @@ export interface DelegationGrant {
   readonly confirmedScreenCapture: boolean;
   readonly allowedMcpServers: readonly string[];
   readonly allowedMcpTools: readonly string[];
+  readonly allowedModes?: readonly string[];
+  readonly allowedModels?: readonly string[];
+  readonly maxOutputTokens?: number;
   readonly confirmedFullAccess: boolean;
   readonly confirmedUnrestrictedNetwork: boolean;
   readonly confirmedPartialWorkspaceWrite: boolean;
@@ -70,6 +73,9 @@ export interface CreateDelegationGrantInput {
   readonly confirmPartialWorkspaceWrite?: boolean;
   readonly allowedMcpServers?: readonly string[];
   readonly allowedMcpTools?: readonly string[];
+  readonly allowedModes?: readonly string[];
+  readonly allowedModels?: readonly string[];
+  readonly maxOutputTokens?: number;
   readonly expiresAt: string | null;
 }
 
@@ -136,13 +142,42 @@ function isPolicy(value: unknown): value is DelegationPolicy {
   return POLICIES.includes(value as DelegationPolicy);
 }
 
+const MODE_NAME = /^[a-z][a-z0-9-]{0,63}$/u;
+/** A grant may name either a bare model id or the canonical `service/model` reference. */
+const MODEL_REF = /^([a-z][a-z0-9.-]{0,63}\/)?[A-Za-z0-9._:+-]{1,128}$/u;
+const OUTPUT_TOKENS_MAX = 1_000_000;
+
+function isModeName(value: unknown): value is string {
+  return typeof value === 'string' && MODE_NAME.test(value);
+}
+
+function isModelRef(value: unknown): value is string {
+  return typeof value === 'string' && MODEL_REF.test(value);
+}
+
+function isOutputTokens(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1 && value <= OUTPUT_TOKENS_MAX;
+}
+
+function uniqueStrings(value: unknown, check: (one: unknown) => boolean): readonly string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0 || value.some((one) => !check(one))) return undefined;
+  const list = value as string[];
+  return new Set(list).size === list.length ? list : undefined;
+}
+
 function validateGrant(value: unknown): DelegationGrant {
   const keys = ['id', 'name', 'projectRoot', 'defaultPermissionProfile', 'maxPermissionProfile', 'defaultNetwork', 'maxNetwork',
     'source', 'defaultPolicy', 'allowedPolicies', 'allowOperator', 'confirmedFullAccess', 'confirmedUnrestrictedNetwork',
-    'confirmedPartialWorkspaceWrite', 'allowedMcpServers', 'allowedMcpTools', 'allowScreenCapture', 'confirmedScreenCapture', 'createdAt', 'expiresAt', 'revokedAt'];
-  const requiredKeys = keys.filter((key) => !['source', 'confirmedPartialWorkspaceWrite', 'allowedMcpServers', 'allowedMcpTools', 'allowScreenCapture', 'confirmedScreenCapture'].includes(key));
-  const mcpServers = isRecord(value) && Array.isArray(value.allowedMcpServers) ? value.allowedMcpServers : [];
-  const mcpTools = isRecord(value) && Array.isArray(value.allowedMcpTools) ? value.allowedMcpTools : [];
+    'confirmedPartialWorkspaceWrite', 'allowedMcpServers', 'allowedMcpTools', 'allowedModes', 'allowedModels', 'maxOutputTokens',
+    'allowScreenCapture', 'confirmedScreenCapture', 'createdAt', 'expiresAt', 'revokedAt'];
+  const requiredKeys = keys.filter((key) => !['source', 'confirmedPartialWorkspaceWrite', 'allowedMcpServers', 'allowedMcpTools',
+    'allowedModes', 'allowedModels', 'maxOutputTokens', 'allowScreenCapture', 'confirmedScreenCapture'].includes(key));
+  const valueRecord = isRecord(value) ? value : {};
+  const mcpServers = Array.isArray(valueRecord.allowedMcpServers) ? valueRecord.allowedMcpServers : [];
+  const mcpTools = Array.isArray(valueRecord.allowedMcpTools) ? valueRecord.allowedMcpTools : [];
+  const allowedModes = uniqueStrings(valueRecord.allowedModes, isModeName);
+  const allowedModels = uniqueStrings(valueRecord.allowedModels, isModelRef);
   if (!isRecord(value) || Object.keys(value).some((key) => !keys.includes(key))
     || requiredKeys.some((key) => !Object.hasOwn(value, key))
     || typeof value.id !== 'string' || !/^[0-9a-f-]{36}$/i.test(value.id)
@@ -167,6 +202,9 @@ function validateGrant(value: unknown): DelegationGrant {
     || (value.confirmedPartialWorkspaceWrite !== undefined && typeof value.confirmedPartialWorkspaceWrite !== 'boolean')
     || (value.allowedMcpServers !== undefined && (!Array.isArray(value.allowedMcpServers) || value.allowedMcpServers.some((server) => !isMcpServerName(server))))
     || (value.allowedMcpTools !== undefined && (!Array.isArray(value.allowedMcpTools) || value.allowedMcpTools.some((tool) => !isMcpToolCapability(tool))))
+    || (valueRecord.allowedModes !== undefined && allowedModes === undefined)
+    || (valueRecord.allowedModels !== undefined && allowedModels === undefined)
+    || (value.maxOutputTokens !== undefined && !isOutputTokens(value.maxOutputTokens))
     || new Set(mcpServers).size !== mcpServers.length
     || new Set(mcpTools).size !== mcpTools.length
     || mcpTools.some((tool) => !mcpServers.includes(String(tool).slice(4).split('/')[0]!))
@@ -193,6 +231,9 @@ function validateGrant(value: unknown): DelegationGrant {
     confirmedScreenCapture: value.confirmedScreenCapture === true,
     allowedMcpServers: Object.freeze([...mcpServers]) as string[],
     allowedMcpTools: Object.freeze([...mcpTools]) as string[],
+    ...(allowedModes === undefined ? {} : { allowedModes: Object.freeze([...allowedModes]) as string[] }),
+    ...(allowedModels === undefined ? {} : { allowedModels: Object.freeze([...allowedModels]) as string[] }),
+    ...(value.maxOutputTokens === undefined ? {} : { maxOutputTokens: value.maxOutputTokens as number }),
     confirmedFullAccess: value.confirmedFullAccess,
     confirmedUnrestrictedNetwork: value.confirmedUnrestrictedNetwork,
     confirmedPartialWorkspaceWrite: value.confirmedPartialWorkspaceWrite === true,
@@ -346,6 +387,11 @@ function checkedInput(input: CreateDelegationGrantInput): Omit<DelegationGrant, 
   if (input.maxPermissionProfile === 'full-access' && !input.confirmFullAccess) throw new KernelError('agent_control_full_access_confirmation_required');
   if (input.maxNetwork === 'unrestricted' && !input.confirmUnrestrictedNetwork) throw new KernelError('agent_control_unrestricted_network_confirmation_required');
   if (input.allowScreenCapture === true && input.confirmScreenCapture !== true) throw new KernelError('screen_capture_confirmation_required');
+  const allowedModes = uniqueStrings(input.allowedModes, isModeName);
+  const allowedModels = uniqueStrings(input.allowedModels, isModelRef);
+  if ((input.allowedModes !== undefined && allowedModes === undefined)
+    || (input.allowedModels !== undefined && allowedModels === undefined)) throw new KernelError('agent_control_scope_invalid');
+  if (input.maxOutputTokens !== undefined && !isOutputTokens(input.maxOutputTokens)) throw new KernelError('agent_control_scope_invalid');
   if (input.expiresAt !== null && (typeof input.expiresAt !== 'string' || !Number.isFinite(Date.parse(input.expiresAt))
     || Date.parse(input.expiresAt) <= Date.now())) throw new KernelError('agent_control_expiry_invalid');
   if (typeof input.projectRoot !== 'string' || !isAbsolute(input.projectRoot)) throw new KernelError('agent_control_project_invalid');
@@ -363,6 +409,9 @@ function checkedInput(input: CreateDelegationGrantInput): Omit<DelegationGrant, 
     confirmedScreenCapture: input.allowScreenCapture === true && input.confirmScreenCapture === true,
     allowedMcpServers: [...allowedMcpServers],
     allowedMcpTools: [...allowedMcpTools],
+    ...(allowedModes === undefined ? {} : { allowedModes: [...allowedModes] }),
+    ...(allowedModels === undefined ? {} : { allowedModels: [...allowedModels] }),
+    ...(input.maxOutputTokens === undefined ? {} : { maxOutputTokens: input.maxOutputTokens }),
     confirmedFullAccess: input.confirmFullAccess,
     confirmedUnrestrictedNetwork: input.confirmUnrestrictedNetwork,
     confirmedPartialWorkspaceWrite: input.confirmPartialWorkspaceWrite === true,
@@ -449,6 +498,25 @@ export function assertDelegationPermission(grant: DelegationGrant, profile: Perm
 
 export function assertDelegationPolicy(grant: DelegationGrant, policy: string): asserts policy is DelegationPolicy {
   if (!isPolicy(policy) || !grant.allowedPolicies.includes(policy)) throw new KernelError('agent_control_policy_exceeds_grant');
+}
+
+export function assertDelegationMode(grant: DelegationGrant, mode: string): void {
+  if (grant.allowedModes !== undefined && !grant.allowedModes.includes(mode)) throw new KernelError('agent_control_mode_denied');
+}
+
+/** `selection` is the `service/model` reference; a bare model id is accepted when the grant lists it. */
+export function assertDelegationModelSelection(grant: DelegationGrant, selection: string): void {
+  if (grant.allowedModels === undefined) return;
+  const bare = selection.includes('/') ? selection.slice(selection.indexOf('/') + 1) : selection;
+  if (!grant.allowedModels.includes(selection) && !grant.allowedModels.includes(bare)) throw new KernelError('agent_control_model_denied');
+}
+
+/** Rejects an explicit output budget above the grant ceiling; `undefined` means the grant does not bound it. */
+export function boundedOutputTokens(grant: DelegationGrant | undefined, requested: number): number {
+  const ceiling = grant?.maxOutputTokens;
+  if (ceiling === undefined) return requested;
+  if (requested > ceiling) throw new KernelError('agent_control_output_tokens_exceeds_grant');
+  return requested;
 }
 
 export function assertDelegationMcpServer(grant: DelegationGrant, server: string): void {

@@ -106,6 +106,11 @@ export async function withTuiHost(run, { delayMs = 0, beforeResponse, setup, con
 
   let host;
   let pair;
+  let client;
+  let running = false;
+  // restart() 让同一个数据目录上换一具 Host 继续跑：用于验证重启后的幂等与恢复语义。
+  let start;
+  let stop;
   try {
     const baseUrl = `http://127.0.0.1:${await listenFetchable(server)}/v1`;
     const config = createConfig({ user: {
@@ -142,32 +147,47 @@ export async function withTuiHost(run, { delayMs = 0, beforeResponse, setup, con
         modePaths: modeDirectories(projectRoot, modesDirectory, homeDirectory),
       };
     };
-    pair = createMemoryConnectionPair();
     const requests = [];
     const notifications = [];
-    observeFrames(pair.host.input, (message) => {
-      if (typeof message.method === 'string') requests.push({ method: message.method, params: message.params });
-    });
-    observeFrames(pair.client.input, (message) => {
-      if (typeof message.notify === 'string') notifications.push(message);
-    });
-    host = serveHost({ ...pair.host, config, provider, policy: config.policy, loadEnvironment,
-      // 客户端声明支持回答模型提问，与终端和桌面客户端使用相同的协议字段。
-      interactive,
-      ...(permissionContext === undefined ? {} : { permission: permissionContext }),
-      ...(extensions === undefined ? {} : { extensions }),
-      ...(agentControlOptions === undefined ? {} : { agentControl: agentControlOptions }),
-      permissionControl,
-      modeName, modePaths: modeDirectories(projectDirectory, modesDirectory, homeDirectory),
-    });
-    const client = createConnection(pair.client);
+    start = async () => {
+      pair = createMemoryConnectionPair();
+      observeFrames(pair.host.input, (message) => {
+        if (typeof message.method === 'string') requests.push({ method: message.method, params: message.params });
+      });
+      observeFrames(pair.client.input, (message) => {
+        if (typeof message.notify === 'string') notifications.push(message);
+      });
+      host = serveHost({ ...pair.host, config, provider, policy: config.policy, loadEnvironment,
+        // 客户端声明支持回答模型提问，与终端和桌面客户端使用相同的协议字段。
+        interactive,
+        ...(permissionContext === undefined ? {} : { permission: permissionContext }),
+        ...(extensions === undefined ? {} : { extensions }),
+        ...(agentControlOptions === undefined ? {} : { agentControl: agentControlOptions }),
+        permissionControl,
+        modeName, modePaths: modeDirectories(projectDirectory, modesDirectory, homeDirectory),
+      });
+      client = createConnection(pair.client);
+      running = true;
+    };
+    stop = async () => {
+      if (!running) return;
+      running = false;
+      try { pair.client.output.end(); }
+      finally { await host.release(); }
+    };
+    await start();
     const { sessionId } = await client.request('session.create', {});
-    return await run({ client, config, directory, projectDirectory, sessionDirectory, sessionId, requests, notifications, providerRequests, host, hostOutput: pair.host.output });
+    return await run({
+      get client() { return client; },
+      config, directory, projectDirectory, sessionDirectory, sessionId, requests, notifications, providerRequests,
+      get host() { return host; },
+      hostOutput: pair.host.output,
+      async restart() { await stop(); await start(); return client; },
+    });
   } finally {
     try {
       try {
-        if (pair !== undefined) pair.client.output.end();
-        if (host !== undefined) await host.release();
+        if (stop !== undefined && running) await stop();
       } finally {
         // 那台 HTTP 服务一定要关掉：它开着的时候整个测试进程退不出去，收尾失败报出来的就只剩一个挂住。
         if (server.listening) {

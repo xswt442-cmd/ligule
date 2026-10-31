@@ -301,7 +301,7 @@ test('real Host keeps read_image out of minimal and sends a decoded image throug
     assert.ok((await readFile(missingPath, 'utf8')).includes('图片文件未随导出包含'));
     assert.equal(endpoint.failures.length, 0);
     assert.equal(endpoint.plans.length, 0);
-  });
+  }, { permissionControl: true });
 });
 
 test('real Host exposes read_document only in full, projects text and sends rendered PDF pages as persistent images', async () => {

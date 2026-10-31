@@ -26,6 +26,10 @@ build/
 coverage/
 *.tsbuildinfo
 
+# Python bytecode
+__pycache__/
+*.py[cod]
+
 # Package artifacts
 *.tgz
 *.tar.gz

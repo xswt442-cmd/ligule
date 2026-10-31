@@ -2,7 +2,6 @@ import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, unlink } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { createConfig, type ConfigLayer, type ConfigSnapshot } from '../kernel/config.js';
 import type { LoadedLayers } from '../kernel/config-store.js';
 import { dataRoot } from '../kernel/config-file.js';
@@ -135,9 +134,8 @@ export async function createBrowserSupport(config: ConfigSnapshot & SessionDirec
       finally { try { await unlink(temporary); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; } }
       await verify();
     }
-    const launcher = process.platform === 'win32' ? [] : [fileURLToPath(new URL('./mcp-posix.js', import.meta.url)), process.execPath];
     const [server] = mcpServerConfigs({ mcp: { servers: { [BROWSER_SERVER]: { command: process.execPath,
-      args: [...launcher, entry, '--config', path, '--headless', '--isolated', '--caps', 'vision', '--image-responses', 'allow', '--output-dir', base] } } } }, {},
+      args: [entry, '--config', path, '--headless', '--isolated', '--caps', 'vision', '--image-responses', 'allow', '--output-dir', base] } } } }, {},
       typeof config.workspaceRoot === 'string' ? config.workspaceRoot : String(config.boundary));
     return { status: { configured: true, available: true }, server, verify,
       clearSession: async id => {

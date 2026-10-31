@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { cleanSystemTrashEntry } from './helpers/system-trash.js';
 import { deleteTool, resolveRecycler } from '../dist/index.js';
@@ -95,5 +95,87 @@ test('delete reports real system trash failures or verifies successful Linux tra
     if (previousXdgData === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = previousXdgData;
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('delete reports an unknown outcome when the target disappears, changes, or cannot be rechecked after backend failure', async (t) => {
+  if (process.platform !== 'linux' && process.platform !== 'win32') return t.skip('no system recycle backend on this platform');
+  const resolution = await resolveRecycler();
+  assert.ok(resolution.recycler, 'the system recycle backend is available before the injected failure');
+  const originalSend = resolution.recycler.send;
+  const cases = [
+    {
+      name: 'target disappears',
+      mutate: async ({ target }) => { await rm(target); },
+      verify: async ({ target }) => assert.equal(await exists(target), false),
+    },
+    {
+      name: 'target identity changes',
+      mutate: async ({ target, workspace }) => {
+        const replacement = join(workspace, 'replacement.txt');
+        await writeFile(replacement, 'original');
+        await rm(target);
+        await rename(replacement, target);
+      },
+      verify: async ({ target }) => assert.equal(await readFile(target, 'utf8'), 'original'),
+    },
+    {
+      name: 'top-level metadata changes',
+      mutate: async ({ target }) => { await writeFile(target, 'changed-content'); },
+      verify: async ({ target }) => assert.equal(await readFile(target, 'utf8'), 'changed-content'),
+    },
+    {
+      name: 'the target cannot be rechecked',
+      mutate: async ({ root, workspace }) => {
+        await rename(workspace, join(root, 'workspace-moved'));
+        await writeFile(workspace, 'blocks path traversal');
+      },
+      verify: async ({ root, workspace }) => {
+        assert.equal(await readFile(workspace, 'utf8'), 'blocks path traversal');
+        assert.equal(await readFile(join(root, 'workspace-moved', 'target.txt'), 'utf8'), 'original');
+      },
+    },
+  ];
+
+  try {
+    const failureRoot = await mkdtemp(join(process.cwd(), 'testplace', 'recycle-backend-error-'));
+    const failureWorkspace = join(failureRoot, 'workspace');
+    const failureTarget = join(failureWorkspace, 'target.txt');
+    await mkdir(failureWorkspace);
+    await writeFile(failureTarget, 'original');
+    resolution.recycler.send = async path => {
+      assert.equal(path, failureTarget);
+      throw Object.assign(new Error('injected system recycle failure'), { code: 'recycle_backend_failed' });
+    };
+    try {
+      await assert.rejects(deleteTool.run({ path: 'target.txt' }, {
+        config: { boundary: failureWorkspace, workspaceRoot: failureWorkspace },
+      }), { code: 'recycle_backend_failed' });
+      assert.equal(await readFile(failureTarget, 'utf8'), 'original');
+    } finally {
+      await rm(failureRoot, { recursive: true, force: true });
+    }
+
+    for (const scenario of cases) {
+      const root = await mkdtemp(join(process.cwd(), 'testplace', 'recycle-uncertain-'));
+      const workspace = join(root, 'workspace');
+      const target = join(workspace, 'target.txt');
+      await mkdir(workspace);
+      await writeFile(target, 'original');
+      const context = { config: { boundary: workspace, workspaceRoot: workspace } };
+      resolution.recycler.send = async path => {
+        assert.equal(path, target);
+        await scenario.mutate({ root, workspace, target });
+        throw Object.assign(new Error(`injected recycle failure after ${scenario.name}`), { code: 'recycle_backend_failed' });
+      };
+      try {
+        await assert.rejects(deleteTool.run({ path: 'target.txt' }, context), { code: 'delete_outcome_unknown' }, scenario.name);
+        await scenario.verify({ root, workspace, target });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  } finally {
+    resolution.recycler.send = originalSend;
   }
 });

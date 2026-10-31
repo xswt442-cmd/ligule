@@ -5,13 +5,23 @@ import { withTuiHost, waitFor } from './helpers/tui-host.js';
 test('status and notifications expose phase changes, approval waits, counts, and idle cleanup per session', async () => {
   await withTuiHost(async ({ client, sessionId, notifications }) => {
     const run = client.request('run.start', { sessionId, input: 'wait for the model' });
+    await waitFor(() => notifications.some((message) => message.notify === 'progress'
+      && message.progress?.phase === 'preparing' && message.progress?.task !== undefined));
+    const initializedProgress = notifications.find((message) => message.notify === 'progress'
+      && message.progress?.phase === 'preparing' && message.progress?.task !== undefined);
+    assert.equal(initializedProgress.progress.task.maxModelCalls, 2);
+    assert.equal(initializedProgress.progress.task.modelCalls, 0);
     await waitFor(() => notifications.some((message) => message.notify === 'progress' && message.progress?.phase === 'model_request'));
+    const activeProgress = notifications.find((message) => message.notify === 'progress' && message.progress?.phase === 'model_request');
     const duringRequest = await client.request('status.get', { sessionId });
+    await run;
+    assert.equal(typeof activeProgress.progress.task.startedAt, 'string');
+    assert.equal(activeProgress.progress.task.executionPaused, false);
     assert.equal(duringRequest.running, true);
     assert.equal(duringRequest.progress.phase, 'model_request');
     assert.equal(duringRequest.progress.modelCalls, 1);
+    assert.equal(duringRequest.progress.task.executionPaused, false);
     assert.equal(duringRequest.outputTokens, 8192);
-    await run;
     const settled = await client.request('status.get', { sessionId });
     assert.equal(settled.running, false);
     assert.equal(settled.progress, null);
@@ -28,12 +38,16 @@ test('status and notifications expose phase changes, approval waits, counts, and
     });
     await waitFor(() => question !== undefined
       && notifications.some((message) => message.notify === 'progress' && message.sessionId === sessionId && message.progress?.phase === 'awaiting_input'));
+    const interactionProgress = notifications.find((message) => message.notify === 'progress' && message.progress?.phase === 'awaiting_input');
     const awaiting = await client.request('status.get', { sessionId });
-    assert.equal(awaiting.progress.phase, 'awaiting_input');
-    assert.equal(awaiting.progress.modelCalls, 1);
-    assert.equal(awaiting.progress.toolCalls, 1);
     client.reply(question.id, { answers: [{ id: 'q1', custom: 'continue' }] });
     await waiting;
+    assert.equal(interactionProgress.progress.task.executionPaused, true);
+    assert.ok(interactionProgress.progress.task.interactionWaitTimeoutMs > 0);
+    assert.equal(awaiting.progress.phase, 'awaiting_input');
+    assert.equal(awaiting.progress.task.executionPaused, true);
+    assert.equal(awaiting.progress.modelCalls, 1);
+    assert.equal(awaiting.progress.toolCalls, 1);
     assert.equal((await client.request('status.get', { sessionId })).progress, null);
     assert.ok(notifications.some((message) => message.notify === 'progress' && message.progress?.phase === 'tool_execution'));
     assert.ok(notifications.some((message) => message.notify === 'progress' && message.progress?.phase === 'settling'));

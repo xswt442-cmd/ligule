@@ -36,7 +36,7 @@ async function waitForTelemetry(directory, predicate) {
   assert.fail(`expected telemetry events were not persisted: ${JSON.stringify(records.map(({ type, callId, outcome, errorCode }) => ({ type, callId, outcome, errorCode })))}`);
 }
 
-async function setupHost(t, { telemetry, provider, permission, policyMode = 'ask', configLayers, logger } = {}) {
+async function setupHost(t, { telemetry, provider, permission, permissionControl = false, policyMode = 'ask', configLayers, logger } = {}) {
   await mkdir(testRoot, { recursive: true });
   const root = await mkdtemp(join(testRoot, 'case-'));
   t.after(async () => rm(root, { recursive: true, force: true }));
@@ -64,6 +64,7 @@ async function setupHost(t, { telemetry, provider, permission, policyMode = 'ask
   };
   const approvals = [];
   const host = createHost({ config, provider, policy: config.policy, interactive: true,
+    permissionControl,
     ...(configLayers === undefined ? {} : { configLayers }),
     ...(permission === undefined ? {} : { permission }),
     ...(logger === undefined ? {} : { logger }),
@@ -144,7 +145,7 @@ test('Host telemetry uses execution IDs plus Session and parent-call links, and 
   const permission = createPermissionContext('workspace-write', 'policy', {
     filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
   });
-  const hostContext = await setupHost(t, { provider, permission, telemetry: true });
+  const hostContext = await setupHost(t, { provider, permission, permissionControl: true, telemetry: true });
   const accepted = await hostContext.host.handle({ method: 'run.start', params: {
     sessionId: hostContext.sessionId, input: 'PARENT_PROMPT_SECRET',
   } }, hostContext.client);

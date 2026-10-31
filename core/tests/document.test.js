@@ -30,24 +30,28 @@ async function pdfFile(root) {
 test('isolated PDF text preserves page locations, continues, and renders a textless page as an actual image', async () => {
   await withFiles(async ({ root, config }) => {
     await pdfFile(root);
+    const readPdf = async (stage, options) => {
+      try { return await readDocument(config, options); }
+      catch (error) { throw new Error(`PDF ${stage} failed: ${error.code ?? error.message}`, { cause: error }); }
+    };
     const before = await readFile(join(root, 'sample.pdf'));
-    const first = await readDocument(config, { path: 'sample.pdf', count: 1 });
+    const first = await readPdf('initial text extraction', { path: 'sample.pdf', count: 1 });
     assert.equal(first.result.total, 2);
     assert.equal(first.result.chunks[0].location, 'page 1');
     assert.match(first.result.chunks[0].text, /First page text/u);
     assert.equal(first.result.truncated, true);
     assert.equal(first.result.continuation.start, 2);
-    const second = await readDocument(config, first.result.continuation);
+    const second = await readPdf('continuation text extraction', first.result.continuation);
     assert.equal(second.result.truncated, false);
     assert.ok(second.result.warnings.some(warning => /no text layer.*renderPage=2/u.test(warning)));
-    const rendered = await readDocument(config, { path: 'sample.pdf', renderPage: 2 });
+    const rendered = await readPdf('textless page rendering', { path: 'sample.pdf', renderPage: 2 });
     const metadata = await sharp(rendered.png).metadata();
     assert.equal(metadata.format, 'png');
     assert.equal(metadata.width, 600);
     assert.equal(metadata.height, 400);
     const pixel = await sharp(rendered.png).extract({ left: 300, top: 200, width: 1, height: 1 }).removeAlpha().raw().toBuffer();
     assert.ok(Math.abs(pixel[0] - 51) <= 2 && Math.abs(pixel[1] - 102) <= 2 && Math.abs(pixel[2] - 179) <= 2, 'the actual rectangle, not a blank canvas, is rendered');
-    const textPage = await readDocument(config, { path: 'sample.pdf', renderPage: 1 });
+    const textPage = await readPdf('text page rendering', { path: 'sample.pdf', renderPage: 1 });
     const textPixels = await sharp(textPage.png).extract({ left: 35, top: 65, width: 250, height: 50 }).removeAlpha().raw().toBuffer();
     assert.ok(textPixels.filter(value => value < 100).length > 60, 'local font assets produce real visible text pixels');
     assert.deepEqual(await readFile(join(root, 'sample.pdf')), before);

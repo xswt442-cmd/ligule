@@ -21,7 +21,26 @@ async function within(work, label) {
   } finally { clearTimeout(timer); }
 }
 
-function startHost(project, home, flags = []) {
+// A host finishes sandbox and permission probing before it answers the first request. On
+// Windows that costs seconds to tens of seconds depending on the workspace size (measured
+// here: about 6.4s for a small workspace, about 25s for this repository). Readiness gets its
+// own allowance; every protocol request after it keeps the 10s deadline, so the product
+// timeout is not enlarged and a failure still points at the phase that was actually slow.
+const STARTUP_READY_MS = 60_000;
+
+async function ready(client, label = 'Host') {
+  const limit = Date.now() + STARTUP_READY_MS;
+  for (;;) {
+    const answered = await Promise.race([
+      client.request('prefs.read', {}).then(() => true, () => false),
+      new Promise(resolve => setTimeout(() => resolve(false), 1_000)),
+    ]);
+    if (answered) return;
+    if (Date.now() > limit) throw new Error(`${label} did not answer within ${STARTUP_READY_MS}ms`);
+  }
+}
+
+async function startHost(project, home, flags = []) {
   const child = spawn(process.execPath, [join(repository, 'tui', 'dist', 'cli.js'), 'host', ...flags.flatMap((value) => ['--config', value])], {
     cwd: project, env: { ...process.env, LIGULE_HOME: home, OUTPUT_BUDGET_TEST_KEY: 'synthetic-budget-host-key' },
     stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
@@ -31,8 +50,10 @@ function startHost(project, home, flags = []) {
     child.once('error', reject);
     child.once('close', resolve);
   });
+  const client = createConnection({ input: child.stdout, output: child.stdin });
+  await ready(client);
   return {
-    child, client: createConnection({ input: child.stdout, output: child.stdin }),
+    child, client,
     async stop() {
       child.stdin.end();
       try { assert.equal(await within(exited, 'Host EOF'), 0); }
@@ -80,7 +101,7 @@ test('Host applies budgets at turn boundaries, retains explicit model selection,
   ].join('\n'));
   let host;
   try {
-    host = startHost(project, home);
+    host = await startHost(project, home);
     const call = (method, params) => within(host.client.request(method, params), method);
     const { sessionId } = await call('session.create', { projectRoot: project });
     await call('model.select', { sessionId, provider: 'local', model: 'local-a' });
@@ -101,7 +122,7 @@ test('Host applies budgets at turn boundaries, retains explicit model selection,
     const created = await call('session.create', { projectRoot: project });
     assert.equal((await call('status.get', { sessionId: created.sessionId })).outputTokens, 1024);
     await host.stop();
-    host = startHost(project, home);
+    host = await startHost(project, home);
     await call('session.open', { projectRoot: project, sessionId });
     const restored = await call('status.get', { sessionId });
     assert.equal(restored.outputTokens, 1024);
@@ -114,7 +135,7 @@ test('Host applies budgets at turn boundaries, retains explicit model selection,
     assert.deepEqual(await readFile(join(home, 'config.toml')), before);
     assert.equal((await call('status.get', { sessionId })).outputTokens, 1024);
     await host.stop();
-    host = startHost(project, home);
+    host = await startHost(project, home);
     await call('session.open', { projectRoot: project, sessionId });
     await call('run.start', { sessionId, input: 'the refused write must not prevent restart' });
     assert.equal(requests.at(-1).max_tokens, 1024);
@@ -165,7 +186,7 @@ test('Host sends each selected service model budget and rejects an invalid servi
   ].join('\n'));
   let host;
   try {
-    host = startHost(project, home);
+    host = await startHost(project, home);
     const call = (method, params) => within(host.client.request(method, params), method);
     const { sessionId } = await call('session.create', { projectRoot: project });
     await call('model.select', { sessionId, provider: 'local', model: 'local-a' });
@@ -212,7 +233,7 @@ test('Host sends each selected service model budget and rejects an invalid servi
     }), { code: 'model_service_invalid' });
     assert.deepEqual(await readFile(join(home, 'config.toml')), before);
     await host.stop();
-    host = startHost(project, home);
+    host = await startHost(project, home);
     await call('session.open', { projectRoot: project, sessionId });
     assert.equal((await call('status.get', { sessionId })).model, 'local-b');
     await call('run.start', { sessionId, input: 'keep the configured model budget after restart' });
@@ -259,7 +280,7 @@ test('a model context added after session creation reaches the existing loop and
   ].join('\n'));
   let host;
   try {
-    host = startHost(project, home);
+    host = await startHost(project, home);
     const call = (method, params) => within(host.client.request(method, params), method);
     const { sessionId } = await call('session.create', { projectRoot: project });
     assert.equal((await call('status.get', { sessionId })).usage, null);
@@ -315,7 +336,7 @@ test('Host validates project-local budgets before saving and preserves a shadowe
   await writeFile(join(project, '.ligule', 'config.toml'), '[limits]\ncontextTokens = 1500\n');
   let host;
   try {
-    host = startHost(project, home);
+    host = await startHost(project, home);
     const call = (method, params) => within(host.client.request(method, params), method);
     const { sessionId } = await call('session.create', { projectRoot: project });
     const settings = await call('config.get', { projectRoot: project });
@@ -329,7 +350,7 @@ test('Host validates project-local budgets before saving and preserves a shadowe
     assert.equal(saved.shadowedBy, 'local');
     assert.deepEqual(saved.applies, []);
     await host.stop();
-    host = startHost(project, home);
+    host = await startHost(project, home);
     await call('session.open', { projectRoot: project, sessionId });
     await call('run.start', { sessionId, input: 'check project-local config after restart' });
     assert.equal(requests.at(-1).max_tokens, 1024);
@@ -365,7 +386,7 @@ test('a user budget write validates every loaded project before changing shared 
   await writeFile(join(other, '.ligule', 'config.local.toml'), `[model]\nbaseURL = "http://127.0.0.1:${port}/v1"\nmodel = "local"\n`);
   let host;
   try {
-    host = startHost(project, home);
+    host = await startHost(project, home);
     const call = (method, params) => within(host.client.request(method, params), method);
     const { sessionId } = await call('session.create', { projectRoot: other });
     const settings = await call('config.get', { projectRoot: project });
@@ -373,7 +394,7 @@ test('a user budget write validates every loaded project before changing shared 
     await assert.rejects(call('config.set', { projectRoot: project, layer: 'user', field: 'model.outputTokens', value: 16384, version: settings.layers[0].version }), { code: 'provider_output_budget_unsupported' });
     assert.deepEqual(await readFile(userFile), before, 'the default model supports 16384 but another loaded project does not');
     await host.stop();
-    host = startHost(other, home, [`model.baseURL="http://127.0.0.1:${port}/v1"`]);
+    host = await startHost(other, home, [`model.baseURL="http://127.0.0.1:${port}/v1"`]);
     await call('session.open', { projectRoot: other, sessionId });
     await call('run.start', { sessionId, input: 'read the unchanged shared config in a new Host' });
     assert.equal(requests.at(-1).max_tokens, 1024);
@@ -409,7 +430,7 @@ test('a project model override cannot hide an invalid shared default from a futu
   await writeFile(join(project, '.ligule', 'config.local.toml'), '[model]\nbaseURL = "https://api.deepseek.com/v1"\nmodel = "deepseek-flash"\n');
   let host;
   try {
-    host = startHost(project, home);
+    host = await startHost(project, home);
     const call = (method, params) => within(host.client.request(method, params), method);
     await call('session.create', { projectRoot: project });
     const settings = await call('config.get', { projectRoot: project });
@@ -417,7 +438,7 @@ test('a project model override cannot hide an invalid shared default from a futu
     await assert.rejects(call('config.set', { projectRoot: project, layer: 'user', field: 'model.outputTokens', value: 16384, version: settings.layers[0].version }), { code: 'provider_output_budget_unsupported' });
     assert.deepEqual(await readFile(userFile), before);
     await host.stop();
-    host = startHost(future, home);
+    host = await startHost(future, home);
     const { sessionId } = await call('session.create', { projectRoot: future });
     await call('run.start', { sessionId, input: 'load the shared defaults in a previously unloaded project' });
     assert.equal(requests.at(-1).max_tokens, 1024);

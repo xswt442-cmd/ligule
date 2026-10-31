@@ -113,6 +113,12 @@ test('a real stdio MCP process uses its grant ceiling and detects revocation', a
       const sessionId = made.structuredContent.sessionId;
       assert.equal(typeof sessionId, 'string');
 
+      const unownedRun = await client.callTool({ name: 'ligule_run_get', arguments: {
+        sessionId: 'session-not-opened-by-this-control', runId: 'run-not-owned',
+      } });
+      assert.equal(unownedRun.isError, true);
+      assert.equal(codeOf(unownedRun), 'session_not_open');
+
       const config = await client.callTool({ name: 'ligule_session_configure', arguments: { sessionId } });
       assert.equal(config.isError, undefined, `${JSON.stringify(config)}\n${stderr()}`);
       assert.equal(config.structuredContent.effective.permission.profile, 'workspace-write');
@@ -205,6 +211,7 @@ test('a second local Host can observe and take over the active MCP-owned Session
         ...environment,
         config: createConfig({ user: { ...environment.config, workspaceRoot: projectRoot } }),
         configLayers: layers,
+        permissionControl: true,
       });
       const localConnection = { notify() {}, async request() { return { decision: 'deny' }; } };
 
@@ -232,6 +239,26 @@ test('a second local Host can observe and take over the active MCP-owned Session
       assert.equal(configuration.delegation.defaultPolicy, 'ask');
       assert.deepEqual(configuration.delegation.allowedPolicies, ['ask', 'auto']);
       assert.equal(configuration.delegation.allowOperator, true);
+
+      // 本地人类可以通过桥在 Session 空闲时调整权限；普通 MCP 客户端没有这个入口。
+      const relaxed = await host.handle({ method: 'session.control', params: {
+        projectRoot, sessionId, request: { action: 'permission', permissionProfile: 'workspace-write', confirmPartialWorkspaceWrite: true },
+      } }, localConnection);
+      assert.equal(relaxed.permission.profile, 'workspace-write');
+      assert.equal(relaxed.applies, 'now');
+      const reread = await host.handle({ method: 'session.control', params: {
+        projectRoot, sessionId, request: { action: 'configuration' },
+      } }, localConnection);
+      assert.equal(reread.permission.profile, 'workspace-write', 'the change is visible on the next configuration read');
+
+      await assert.rejects(host.handle({ method: 'session.control', params: {
+        projectRoot, sessionId, request: { action: 'permission', permissionProfile: 'full-access' },
+      } }, localConnection), { code: 'agent_control_permission_exceeds_grant' },
+      'a human change is still bounded by the Grant ceiling');
+      const restored = await host.handle({ method: 'session.control', params: {
+        projectRoot, sessionId, request: { action: 'permission', permissionProfile: 'read-only' },
+      } }, localConnection);
+      assert.equal(restored.permission.profile, 'read-only');
 
       const takeover = await host.handle({ method: 'session.control', params: {
         projectRoot, sessionId, request: { action: 'takeover' },
@@ -285,6 +312,7 @@ test('Desktop human input and question answers reach the single MCP-owned real H
         ...environment,
         config: createConfig({ user: { ...environment.config, workspaceRoot: projectRoot } }),
         configLayers: layers,
+        permissionControl: true,
       });
       const localConnection = { notify() {}, async request() { return { decision: 'deny' }; } };
       const started = await client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'Ask the local user which route to take.' } });
@@ -339,7 +367,16 @@ test('Desktop human input and question answers reach the single MCP-owned real H
       const records = transcript.structuredContent.records.map((item) => JSON.parse(item.json));
       const users = records.filter((item) => item.kind === 'user');
       assert.ok(users.some((item) => item.origin === 'controller' && item.text === 'Ask the local user which route to take.'));
-      assert.ok(users.some((item) => item.origin === 'human' && item.text === 'Please keep the northern route.'));
+      const humanRecord = users.find((item) => item.origin === 'human' && item.text === 'Please keep the northern route.');
+      assert.ok(humanRecord);
+      const humanRunId = humanRecord.run?.runId;
+      assert.equal(typeof humanRunId, 'string');
+      const humanResult = await client.callTool({ name: 'ligule_run_get', arguments: {
+        sessionId, runId: humanRunId, offset: 0,
+      } });
+      assert.equal(humanResult.isError, undefined, `${JSON.stringify(humanResult)}\n${stderr()}`);
+      assert.equal(humanResult.structuredContent.receipt.runId, humanRunId);
+      assert.equal(JSON.parse(humanResult.structuredContent.result.json).state, 'completed');
     } finally {
       await host?.release();
       await client.close();

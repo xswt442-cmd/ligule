@@ -7,6 +7,7 @@ import {
   createKernel, createObservationLog, createPermissionContext, createTool, deleteTool, editTool,
   execTool, findTool, readOnlyTools, readTool, resolveShell, searchTool, withNativeExitCode, writeTool,
 } from '../dist/index.js';
+import { windowsRecycleBin } from '../dist/capability/recycle.js';
 import { bindScript } from '../dist/capability/script-binding.js';
 import { boundaryOf, workingDirectoryOf } from '../dist/capability/limits.js';
 import { resolveWithin } from '../dist/capability/paths.js';
@@ -15,11 +16,16 @@ const builtRipgrep = rgPath;
 
 const NEEDLE = 'needle here';
 
-async function withWorkspace(run) {
+async function withWorkspace(run, { realRecycleBin = false } = {}) {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'tools-'));
   const workspace = join(root, 'workspace');
   const previousXdgData = process.env.XDG_DATA_HOME;
+  const originalRecycleSend = windowsRecycleBin.send;
   try {
+    if (process.platform === 'win32' && !realRecycleBin) {
+      // General tool tests exercise path and observation semantics without depositing fixtures in the user's Recycle Bin.
+      windowsRecycleBin.send = async target => { await rm(target, { recursive: true, force: true }); };
+    }
     process.env.XDG_DATA_HOME = join(root, 'xdg-data');
     await mkdir(join(workspace, 'src'), { recursive: true });
     // node_modules 放两处：搜索根下一层与嵌套一层，两条后端都必须按任意深度跳过它。
@@ -37,6 +43,7 @@ async function withWorkspace(run) {
     await writeFile(join(workspace, '.github', 'workflows', 'ci.yml'), `name: ${NEEDLE}`);
     return await run(workspace);
   } finally {
+    windowsRecycleBin.send = originalRecycleSend;
     if (previousXdgData === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = previousXdgData;
     await rm(root, { recursive: true, force: true });

@@ -268,12 +268,12 @@ export const METHODS = Object.freeze({
     parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
   },
   'session.control': {
-    description: 'Send a human action to the local Host that currently owns this externally controlled Session. The same Host remains its only writer; the local action can read its configuration, observe, message, answer, cancel, or take over.',
+    description: 'Send a human action to the local Host that currently owns this externally controlled Session. The same Host remains its only writer; the local action can read its configuration, observe, message, answer, change permission while idle, cancel, or take over.',
     parameters: { type: 'object', properties: {
       projectRoot: { type: 'string', description: 'the exact workspace root that owns the session' },
       sessionId: SESSION_ID,
       request: { type: 'object', additionalProperties: false, properties: {
-        action: { type: 'string', enum: ['status', 'configuration', 'details', 'send', 'reply', 'cancel', 'takeover'] },
+        action: { type: 'string', enum: ['status', 'configuration', 'details', 'send', 'reply', 'permission', 'cancel', 'takeover'] },
         after: { type: 'integer', minimum: 0 },
         limit: { type: 'integer', minimum: 1, maximum: 50 },
         waitMs: { type: 'integer', minimum: 0, maximum: 30000 },
@@ -284,6 +284,12 @@ export const METHODS = Object.freeze({
         rememberScope: { type: 'string', enum: ['session', 'project', 'user'] },
         rememberTarget: { type: 'string', enum: ['file', 'workspace', 'tool', 'command'] },
         answers: {},
+        permissionProfile: { type: 'string', enum: ['read-only', 'workspace-write', 'full-access'] },
+        permissionNetwork: { type: 'string', enum: ['policy', 'unrestricted', 'disabled'] },
+        confirmFullAccess: { type: 'boolean', description: 'the human confirmed raising to full-access' },
+        confirmNetwork: { type: 'boolean', description: 'the human confirmed unrestricted network' },
+        confirmPartialWorkspaceWrite: { type: 'boolean', description: 'the human confirmed the partial sandbox for workspace-write' },
+        confirmWorkspaceTrust: { type: 'boolean', description: 'the human trusts this workspace' },
       }, required: ['action'] },
     }, required: ['projectRoot', 'sessionId', 'request'] },
   },
@@ -307,7 +313,7 @@ export const METHODS = Object.freeze({
       properties: {
         sessionId: SESSION_ID,
         input: { type: 'string', description: 'the user message for this round' },
-        origin: { type: 'string', enum: ['human', 'controller'], description: 'who submitted the input; local clients default to human' },
+        origin: { type: 'string', enum: ['human', 'controller'], description: 'requested source; only a trusted local UI or authenticated Agent Control bridge may record human, otherwise the Host binds the run to controller scope' },
         delegation: DELEGATION_SPEC_SCHEMA,
         requestKey: { type: 'string', minLength: 1, maxLength: 128 },
       },
@@ -364,19 +370,20 @@ export const METHODS = Object.freeze({
     description: 'Accept one task durably and return its runId only after the Session user event is synced; a matching requestKey reuses that event.',
     parameters: { type: 'object', additionalProperties: false, properties: {
       sessionId: SESSION_ID, input: { type: 'string', minLength: 1, maxLength: 65536 },
-      origin: { type: 'string', enum: ['human', 'controller'] },
+      origin: { type: 'string', enum: ['human', 'controller'], description: 'requested source; only a trusted local UI or authenticated Agent Control bridge may record human, otherwise the Host binds the run to controller scope' },
       requestKey: { type: 'string', minLength: 1, maxLength: 128 },
       delegation: DELEGATION_SPEC_SCHEMA,
     }, required: ['sessionId', 'input'] },
   },
   'run.wait': {
-    description: 'Wait for the current live runId; after it settles, a verified stored terminal result remains available.',
+    description: 'Wait for a run. The Host derives the run owner from the persisted acceptance and authorizes the caller against its own readable scopes; origin is accepted for compatibility but never grants or selects access.',
     parameters: { type: 'object', additionalProperties: false, properties: {
-      sessionId: SESSION_ID, runId: SESSION_ID, origin: { type: 'string', enum: ['human', 'controller'] },
+      sessionId: SESSION_ID, runId: SESSION_ID,
+      origin: { type: 'string', enum: ['human', 'controller'], description: 'compatibility only; the persisted run owner decides' },
     }, required: ['sessionId', 'runId'] },
   },
   'run.receipt': {
-    description: 'Read a durable task receipt from this project Session without reopening its writer or replaying work.',
+    description: 'Read a durable task receipt from this project Session without reopening its writer or replaying work. A requestKey that matches multiple visible scopes returns run_request_key_ambiguous; use runId to select one receipt.',
     parameters: { type: 'object', additionalProperties: false, properties: {
       projectRoot: { type: 'string' }, sessionId: SESSION_ID,
       runId: SESSION_ID, requestKey: { type: 'string', minLength: 1, maxLength: 128 },
@@ -536,6 +543,9 @@ export const METHODS = Object.freeze({
       confirmScreenCapture: { type: 'boolean' },
       allowedMcpServers: { type: 'array', items: { type: 'string' } },
       allowedMcpTools: { type: 'array', items: { type: 'string' } },
+      allowedModes: { type: 'array', items: { type: 'string' }, description: 'mode names this grant may select; omit to allow every mode' },
+      allowedModels: { type: 'array', items: { type: 'string' }, description: 'model references (service/model or bare model id) this grant may select; omit to allow every model' },
+      maxOutputTokens: { type: 'number', description: 'ceiling for a single request output budget; omit to leave the budget unbounded' },
       confirmFullAccess: { type: 'boolean' },
       confirmUnrestrictedNetwork: { type: 'boolean' },
       confirmPartialWorkspaceWrite: { type: 'boolean', description: 'confirm trust in the project and accept partial workspace-write sandbox limits when this platform requires it' },

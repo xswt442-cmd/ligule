@@ -26,6 +26,7 @@ import { selectedText, transcriptLines, viewportPosition, wrapLine } from './vie
 import { CURRENT, ENGLISH_LABELS, ENGLISH_VIEWS, KEYMAP, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec } from './keymap.js';
 import { displayWidth } from './commands.js';
 import { textOf as chooseText, type Locale } from '@ligule/core/kernel/locale.js';
+import { controlPresets } from '@ligule/core/host/control-presets.js';
 import type { TerminalAction } from './keymap.js';
 import type { SessionEvent, SessionHeader } from '@ligule/core/session/format.js';
 import type { SessionSummary } from '@ligule/core/session/list.js';
@@ -130,8 +131,20 @@ interface TuiStatus {
   readonly denials: { readonly consecutive: number; readonly total: number };
   readonly usage?: { readonly estimated: number; readonly window: number; readonly threshold: number } | null;
   readonly progress?: TuiProgress | null;
+  readonly taskLimits?: { readonly maxModelCalls: number; readonly timeoutMs: number; readonly requestTimeoutMs: number; readonly interactionWaitTimeoutMs: number };
+  readonly task?: TuiTaskBudget | null;
   readonly templates?: readonly TemplateCommand[];
   readonly [key: string]: unknown;
+}
+
+interface TuiTaskBudget {
+  readonly modelCalls: number;
+  readonly maxModelCalls: number;
+  readonly timeoutMs: number;
+  readonly interactionWaitTimeoutMs: number;
+  readonly interactionWaitMs: number;
+  readonly executionElapsedMs: number;
+  readonly executionPaused: boolean;
 }
 
 interface TuiProgress {
@@ -142,6 +155,54 @@ interface TuiProgress {
   readonly modelCalls: number;
   readonly toolCalls: number;
   readonly outputTokens: number | null;
+  readonly task?: TuiTaskBudget;
+}
+
+function durationLabel(milliseconds: number, locale: Locale): string {
+  const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1000));
+  const units: readonly [number, string, string][] = locale === 'en'
+    ? [[86_400, 'd', 'd'], [3_600, 'h', 'h'], [60, 'm', 'm'], [1, 's', 's']]
+    : [[86_400, '天', '天'], [3_600, '小时', '小时'], [60, '分', '分'], [1, '秒', '秒']];
+  let remaining = totalSeconds;
+  const parts: string[] = [];
+  for (const [seconds, short, long] of units) {
+    const count = Math.floor(remaining / seconds);
+    if (count === 0 && parts.length === 0 && seconds !== 1) continue;
+    if (count > 0) {
+      parts.push(locale === 'en' ? `${count}${short}` : `${count}${long}`);
+      remaining -= count * seconds;
+      if (parts.length === 2) break;
+    }
+  }
+  return parts.length === 0 ? (locale === 'en' ? '0s' : '0秒') : parts.join(locale === 'en' ? ' ' : '');
+}
+
+export function activeRunBudgetSegment(status: TuiStatus | null, locale: Locale = 'zh'): string {
+  if (status?.running !== true) return '';
+  const task = status.progress === null || status.progress === undefined ? status.task : status.progress.task;
+  if (task === undefined || task === null) {
+    const calls = status.progress?.modelCalls;
+    const usage = Number.isSafeInteger(calls)
+      ? locale === 'en' ? `model calls ${calls}` : `模型调用 ${calls}`
+      : '';
+    const preparing = locale === 'en' ? 'run budget initializing' : 'Run 预算准备中';
+    return ` · ${[usage, preparing].filter(Boolean).join(' · ')}`;
+  }
+  const values = [task.modelCalls, task.maxModelCalls, task.timeoutMs, task.interactionWaitMs, task.interactionWaitTimeoutMs, task.executionElapsedMs];
+  if (!values.every(Number.isSafeInteger) || values.some(value => value < 0) || task.timeoutMs < 1 || task.maxModelCalls < 1
+    || task.interactionWaitTimeoutMs < 1 || typeof task.executionPaused !== 'boolean') {
+    return locale === 'en' ? ' · run budget details unavailable' : ' · Run 预算信息暂不可用';
+  }
+  const remaining = Math.max(0, task.timeoutMs - task.executionElapsedMs);
+  const calls = locale === 'en' ? `model calls ${task.modelCalls}/${task.maxModelCalls}` : `模型调用 ${task.modelCalls}/${task.maxModelCalls}`;
+  const deadline = locale === 'en'
+    ? `execution ${durationLabel(remaining, locale)} left`
+    : `执行剩余 ${durationLabel(remaining, locale)}`;
+  const interactions = locale === 'en'
+    ? `interaction wait ${durationLabel(task.interactionWaitMs, locale)}/${durationLabel(task.interactionWaitTimeoutMs, locale)}`
+    : `累计交互等待 ${durationLabel(task.interactionWaitMs, locale)}/${durationLabel(task.interactionWaitTimeoutMs, locale)}`;
+  const paused = task.executionPaused ? (locale === 'en' ? ' · deadline paused' : ' · 执行期限已暂停') : '';
+  return ` · Run ${calls} · ${deadline} · ${interactions}${paused}`;
 }
 
 interface DetailState {
@@ -1195,6 +1256,58 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     ].join('\n') });
   }, [client, push, sessionId, t]);
 
+  const createPresetGrant = useCallback((presetId: string) => {
+    const permission = status?.permission;
+    if (permission === undefined) {
+      push({ kind: 'error', text: t('无法读取当前权限，请重试。', 'Could not read current permissions; retry.') });
+      return;
+    }
+    const preset = controlPresets({
+      partialWorkspaceWriteConfirmationRequired: permission.partialWorkspaceWriteConfirmationRequired,
+      partialWorkspaceWriteConfirmed: permission.partialWorkspaceWriteConfirmed,
+    }).find(candidate => candidate.id === presetId);
+    if (preset === undefined) {
+      push({ kind: 'error', text: t('未知的安全预设。', 'Unknown safe preset.') });
+      return;
+    }
+    const projectRoot = info.boundary;
+    if (projectRoot === undefined || projectRoot === '') {
+      push({ kind: 'error', text: t('请先选择工作区再创建授权。', 'Select a workspace before creating a grant.') });
+      return;
+    }
+    void (async () => {
+      const current = await client.request('agent-control.list', {}) as AgentControlSnapshot;
+      const created = await client.request('agent-control.create', {
+        version: current.version,
+        grantName: `${preset.id}-${new Date().toISOString().slice(0, 10)}`,
+        projectRoot,
+        defaultPermissionProfile: preset.defaultPermissionProfile,
+        maxPermissionProfile: preset.maxPermissionProfile,
+        defaultNetwork: preset.defaultNetwork,
+        maxNetwork: preset.maxNetwork,
+        defaultPolicy: preset.defaultPolicy,
+        allowedPolicyAsk: preset.allowedPolicies.includes('ask'),
+        allowedPolicyAuto: false,
+        allowedPolicyNone: preset.allowedPolicies.includes('none'),
+        allowOperator: preset.allowOperator,
+        allowedMcpServers: [],
+        allowedMcpTools: [],
+        confirmFullAccess: false,
+        confirmUnrestrictedNetwork: false,
+        confirmPartialWorkspaceWrite: preset.confirmPartialWorkspaceWrite,
+        confirmWorkspaceTrust: preset.confirmWorkspaceTrust,
+        expiresAt: '',
+      }) as AgentControlSnapshot;
+      setControlSnapshot(created);
+      const grant = created.grants.at(-1);
+      push({ kind: 'meta', text: grant === undefined
+        ? t('外控授权已创建。', 'Agent Control grant created.')
+        : t(`已用安全预设创建 ${grant.name}：${grant.id} · /control copy ${grant.id.slice(0, 8)} 可复制 MCP 配置`, `Created ${grant.name} from a safe preset: ${grant.id} · use /control copy ${grant.id.slice(0, 8)} to copy the MCP config`) });
+    })().catch((error: unknown) => {
+      push({ kind: 'error', text: t(`创建授权失败：${errorCode(error) ?? 'agent_control_create_failed'}`, `Could not create the grant: ${errorCode(error) ?? 'agent_control_create_failed'}`) });
+    });
+  }, [client, info.boundary, push, setControlSnapshot, status, t]);
+
   const exitTui = useCallback((savedDraft = inputNow.current.draft) => {
     if (inputs === undefined) { app.exit(); return; }
     void inputs.write(info.boundary ?? '', sessionId, query === null ? savedDraft : inputNow.current.draft, inputNow.current.queue).then(
@@ -1219,6 +1332,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         const snapshot = await client.request('agent-control.list', {}) as AgentControlSnapshot;
         setControlSnapshot(snapshot);
         available = [
+          { id: 'preset:reader', label: t('安全预设 · 信任此项目并以只读观察', 'Safe preset · trust this project and observe read-only'), description: t(`信任 ${info.boundary ?? ''} 并创建上限为只读的外控授权：控制器只能读取会话与运行结果，不能写文件、执行 Shell、联网或操作其他能力。`, `Trust ${info.boundary ?? ''} and create an Agent Control grant capped at read-only: the controller can read the session and run results, but cannot write files, run Shell, use the network, or operate other capabilities.`) },
+          { id: 'preset:workspace', label: t('安全预设 · 信任此项目并以工作区写入协作', 'Safe preset · trust this project with workspace-write'), description: t(`信任 ${info.boundary ?? ''} 并创建上限为工作区写入的外控授权；默认仍以只读启动。不含 full-access、不受限网络、Screen Capture 或 Operator。`, `Trust ${info.boundary ?? ''} with a workspace-write ceiling; runs still start read-only. Excludes full-access, unrestricted network, Screen Capture, and Operator.`) },
           { id: 'create', label: t('新建外控授权', 'Create a grant'), description: t('开始逐项填写授权上限和到期时间。', 'Enter the grant limits and expiry one step at a time.') },
           ...snapshot.grants.map((grant) => {
             const state = grant.revokedAt !== null ? t('已撤销', 'revoked')
@@ -1596,7 +1711,13 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
                   : t('历史记录未保存来源', 'Legacy record; source not recorded');
                 return `${grant.id} · ${grant.name} · ${state} · ${t('权限', 'permission')} ${grant.defaultPermissionProfile} / ${grant.maxPermissionProfile} · ${t('网络', 'network')} ${grant.defaultNetwork} / ${grant.maxNetwork} · Policy ${grant.defaultPolicy} (${grant.allowedPolicies.join(', ')}) · MCP ${grant.allowedMcpServers.join(', ') || t('无', 'none')} · ${t('工具', 'tools')} ${grant.allowedMcpTools.join(', ') || t('无', 'none')} · ${expiry} · ${t('来源', 'source')} ${source} · ${grant.projectRoot} · ${t('在线状态未知', 'online status unknown')}`;
               });
-            push({ kind: 'meta', text: lines.join('\n') });
+            const invalid = snapshot.grants.filter((grant) => grant.revokedAt !== null
+              || (grant.expiresAt !== null && Date.parse(grant.expiresAt) <= Date.now())).length;
+            push({ kind: 'meta', text: invalid === 0 ? lines.join('\n') : [
+              lines.join('\n'),
+              t(`其中 ${invalid} 张已失效（撤销/到期）：不能建立新的外控连接；已建立的会话按原记录继续，需要时请重新创建授权。`,
+                `${invalid} grant(s) are no longer valid (revoked/expired): they cannot open new external control connections; open sessions continue from their record. Create a new grant when needed.`),
+            ].join('\n') });
             return;
           }
           const matches = snapshot.grants.filter((grant) => grant.id === wanted || grant.id.startsWith(wanted));
@@ -2142,9 +2263,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           ` · 权限 ${current.permission.profile} · 网络 ${current.permission.network} · Shell ${current.permission.execution.available ? '可用' : `不可用（${current.permission.execution.code ?? '能力不足'}）`}`,
           ` · permission ${current.permission.profile} · network ${current.permission.network} · Shell ${current.permission.execution.available ? 'available' : `unavailable (${current.permission.execution.code ?? 'capability limits'})`}`,
         );
+        const task = activeRunBudgetSegment(current, locale);
         push({ kind: 'meta', text: current === null ? t('无法读取状态', 'Could not read status')
           : t(`工具模式 ${current.mode ?? '-'} · 审批 ${current.policy} · 连续拒绝 ${current.denials.consecutive} / 累计 ${current.denials.total} · ${current.eventCount} 条记录`, `Mode ${current.mode ?? '-'} · approvals ${current.policy} · denials ${current.denials.consecutive} consecutive / ${current.denials.total} total · ${current.eventCount} events`)
-            + permission + (context === '' ? '' : ` · ${context}`) });
+            + permission + (context === '' ? '' : ` · ${context}`) + task });
       })();
       return;
     }
@@ -2473,6 +2595,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     const currentPanel = panel;
     closePanel();
     if (currentPanel === 'control') {
+      if (id.startsWith('preset:')) {
+        createPresetGrant(id.slice('preset:'.length));
+        return;
+      }
       if (id === 'create') {
         runCommand('control', 'create');
         return;
@@ -2547,7 +2673,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       await refreshStatus();
       push({ kind: 'meta', text: changed.when === 'round' ? t(`下轮使用 ${changed.model}`, `${changed.model} will apply next turn`) : t(`已切换至 ${changed.model}`, `Switched to ${changed.model}`) });
     }, (error: unknown) => push({ kind: 'error', text: t(`无法选择模型：${errorCode(error) ?? 'model_select_failed'}`, `Could not select model: ${errorCode(error) ?? 'model_select_failed'}`) }));
-  }, [choices, panel, closePanel, openPicker, changePermission, runCommand, client, sessionId, refreshStatus, push, t, info.boundary, controlSnapshot, controlTarget]);
+  }, [choices, panel, closePanel, openPicker, changePermission, createPresetGrant, runCommand, client, sessionId, refreshStatus, push, t, info.boundary, controlSnapshot, controlTarget]);
 
   const loadApprovalDetails = useCallback(async () => {
     const current = ask;

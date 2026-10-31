@@ -8,16 +8,23 @@ import {
   createConfig, createDecisionChain, createKernel, createObservationLog, createPermissionContext, createTool, deleteTool, editTool, readTool,
   readOnlyTools, resolveRecycler, writeTool, writeTools,
 } from '../dist/index.js';
+import { windowsRecycleBin } from '../dist/capability/recycle.js';
 
-async function withWorkspace(run) {
+async function withWorkspace(run, { realRecycleBin = false } = {}) {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'write-'));
   const workspace = join(root, 'workspace');
   const previousXdgData = process.env.XDG_DATA_HOME;
+  const originalRecycleSend = windowsRecycleBin.send;
   await mkdir(workspace, { recursive: true });
   process.env.XDG_DATA_HOME = join(root, 'xdg-data');
   try {
+    if (process.platform === 'win32' && !realRecycleBin) {
+      // General tool tests exercise path and observation semantics without depositing fixtures in the user's Recycle Bin.
+      windowsRecycleBin.send = async target => { await rm(target, { recursive: true, force: true }); };
+    }
     return await run(workspace);
   } finally {
+    windowsRecycleBin.send = originalRecycleSend;
     if (previousXdgData === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = previousXdgData;
     await rm(root, { recursive: true, force: true });
@@ -193,6 +200,9 @@ test('delete refuses a dangling directory link without replacing it', async () =
 
 test('delete uses the operating system recycle bin and takes the source out of the workspace', async (t) => {
   if (process.platform !== 'linux' && process.platform !== 'win32') return t.skip('no system recycle backend on this platform');
+  if (process.platform === 'win32' && process.env.CI !== 'true' && process.env.LIGULE_TEST_REAL_RECYCLE_BIN !== '1') {
+    return t.skip('real Windows recycle-bin coverage runs on disposable CI; set LIGULE_TEST_REAL_RECYCLE_BIN=1 to opt in locally');
+  }
   await withWorkspace(async (workspace) => {
     const fileName = `note-${randomUUID()}.txt`;
     const target = join(workspace, fileName);
@@ -216,7 +226,7 @@ test('delete uses the operating system recycle bin and takes the source out of t
     if (process.platform === 'linux') {
       await cleanSystemTrashEntry(target, { type: 'file', content: 'keep me' }, { allowSuffix: true, required: true });
     }
-  });
+  }, { realRecycleBin: true });
 });
 
 test('Policy denial leaves the delete target in place', async () => {

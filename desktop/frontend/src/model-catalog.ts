@@ -1,6 +1,14 @@
 export type ModelSettings = { id: string; name?: string; contextTokens?: number; outputTokens?: number; imageInput?: boolean };
 export type ModelService = { id: string; name: string; api: 'messages' | 'chat-completions'; baseURL: string; apiKeyEnv: string; models: string[]; modelSettings?: ModelSettings[] };
 export type ModelSelection = { provider: string; model: string };
+// 会话级思考档：Host 只对声明了该能力的模型下发 available；'default' 表示继承模型默认值。
+export type ThinkingView = { available: readonly string[]; defaultEffort: string | null; effective: string; pending: string | null };
+// 规范顺序只用于展示；未知档位排在已记录档位之后，避免新档位被静默丢弃。
+const THINKING_ORDER: readonly string[] = ['none', 'low', 'high', 'max'];
+export function thinkingChoices(available: readonly string[]): string[] {
+  const known = new Set(available);
+  return [...THINKING_ORDER.filter(effort => known.has(effort)), ...[...known].filter(effort => !THINKING_ORDER.includes(effort))];
+}
 export type ModelCatalog = {
   model: { api?: string; baseURL?: string; model?: string; apiKeyEnv?: string };
   services?: ModelService[];

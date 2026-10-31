@@ -26,9 +26,10 @@ import { keepEscape } from './components/ui';
 import { CURRENT, actionOf, formatKeys, isCapturing, isComposing, loadBindings, specOf } from './hotkeys';
 import { insertMention, mentionToken } from './mentions';
 import type { ModelSelection } from './model-catalog';
+import { thinkingRequest } from './thinking-request';
 import { createSlotRegistry, SLOTS, type Panel } from './slots';
 import { appendProjectedRecords, capabilityOf, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn, type Record_, type Row } from './rows';
-import type { Status } from './status';
+import { taskSummaryLabelOf, taskSummaryOf, type Status } from './status';
 import { loadSettings, mergeQueueIntoDraft, readSettings, saveSettings, type Settings } from './settings';
 import { LocaleProvider, localeOf } from './locale';
 import { notificationOf, notificationTarget, type NotificationKind, type NotificationTarget } from './notifications';
@@ -84,6 +85,7 @@ type PanelProps = {
 const NO_TOKEN = { start: -1, text: '' };
 const DEFAULT_NEW_SESSION_PERMISSION: PermissionTarget = { profile: 'read-only', network: 'policy' };
 const NO_PERMISSION_CONFIRMATIONS: PermissionConfirmations = { fullAccess: false, network: false, partialWorkspaceWrite: false, workspaceTrust: false };
+
 // 已打开的会话。右侧面板显示当前会话状态，不重复提供会话浮层已有的控制项。
 /**
  * 返回持久工作区登记中的默认目录。未设置默认目录或读取失败时返回 undefined。
@@ -204,6 +206,7 @@ export function App({ transport }: { transport: Transport }) {
   // 使用 ref 保存该控制标记，不额外触发界面渲染。
   const allowSend = useRef(new Set<string>());
   const [status, setStatus] = useState<Status | null>(null);
+  const [taskSnapshotAt, setTaskSnapshotAt] = useState(Date.now());
   const [newSessionSettingsRevision, setNewSessionSettingsRevision] = useState(0);
   const [newSessionMode, setNewSessionMode] = useState<string | null>(null);
   const [newSessionPolicy, setNewSessionPolicy] = useState<PolicySelection | null>(null);
@@ -252,7 +255,15 @@ export function App({ transport }: { transport: Transport }) {
     settling: t('正在收尾', 'Finishing'),
   }[progress.phase];
   const progressIdleSeconds = progress === null ? 0 : Math.max(0, Math.floor((tick - progress.lastProgressAt) / 1000));
-  const progressLabel = `${progressPhase || t('运行中', 'Running')} · ${progressIdleSeconds}${t('秒无新进展', 's without progress')} · ${progress?.modelCalls ?? 0} ${t('次模型调用', 'model calls')} · ${progress?.toolCalls ?? 0} ${t('个工具调用', 'tool calls')}${status?.outputTokens === null || status?.outputTokens === undefined ? '' : ` · ${status.outputTokens} ${t('个输出token', 'output tokens')}`}`;
+  const taskSummary = taskSummaryOf(status?.task, status?.taskLimits, progress, taskSnapshotAt, tick);
+  const taskLabel = taskSummary !== null
+    ? ` · ${taskSummaryLabelOf(taskSummary, language)}`
+    : status?.running === true
+      ? ` · ${t('Run 预算准备中', 'run budget initializing')}`
+      : '';
+  const fallbackCallsLabel = taskSummary === null
+    ? ` · ${progress?.modelCalls ?? 0} ${t('次模型调用', 'model calls')}` : '';
+  const progressLabel = `${progressPhase || t('运行中', 'Running')} · ${progressIdleSeconds}${t('秒无新进展', 's without progress')}${fallbackCallsLabel} · ${progress?.toolCalls ?? 0} ${t('个工具调用', 'tool calls')}${status?.outputTokens === null || status?.outputTokens === undefined ? '' : ` · ${status.outputTokens} ${t('个输出token', 'output tokens')}`}${taskLabel}`;
   const panelTitle = useCallback((item: Panel<PanelProps>) => {
     const titles: Record<string, [string, string]> = {
       'panel.diagnostics': ['诊断', 'Diagnostics'],
@@ -588,7 +599,9 @@ export function App({ transport }: { transport: Transport }) {
             ...current,
             running: progress !== null,
             progress,
+            ...(progress?.task === undefined ? {} : { task: progress.task }),
           });
+          if (progress?.task !== undefined) setTaskSnapshotAt(Date.now());
         }
         return;
       }
@@ -701,6 +714,7 @@ export function App({ transport }: { transport: Transport }) {
       // 用户已切换会话时，不将该请求的响应写入当前会话状态。
       if (active.current !== id) return;
       setStatus(next);
+      setTaskSnapshotAt(Date.now());
     } catch (error) {
       if (active.current === id) setRows((current) => [...current, metaRow('error', `无法读取状态：${code(error)}`, `Could not load status: ${code(error)}`)]);
     }
@@ -1621,6 +1635,12 @@ export function App({ transport }: { transport: Transport }) {
     await client.call('model.select', { sessionId, ...selection }, 15_000);
     await refreshStatus(sessionId);
   }, [client, patch, projectRoot, refreshStatus, sessionId, settings.newSelections]);
+  const selectThinking = useCallback(async (effort: string | null) => {
+    if (sessionId === null) return;
+    const request = thinkingRequest(sessionId, effort);
+    await client.call(request.method, request.params, 15_000);
+    await refreshStatus(sessionId);
+  }, [client, refreshStatus, sessionId]);
   return <LocaleProvider language={settings.language}><div className="frame" data-collapsed={collapsed ? 'true' : undefined} data-mobile-sidebar={narrow && mobileSidebar ? 'true' : undefined} data-dock={settings.dock}>
     <aside className="sidebar">
       <div className="brand"><img src="/icon.png" alt="" width="23" height="23" /><span>ligule</span><button type="button" className="icon-button" aria-label={t('收起侧栏', 'Hide sidebar')} onClick={() => patch({ collapsed: true })}><Icon name="sidebar" /></button></div>
@@ -1661,7 +1681,7 @@ export function App({ transport }: { transport: Transport }) {
         {running && <span className="running-label" aria-live="polite" title={progressLabel}><span className="status-dot" /><span className="running-detail">{progressLabel}</span></span>}
         {status?.usage && <UsageMeter usage={status.usage} running={running} seconds={seconds} />}
         {sessionId !== null && <BrowserControl key={`${sessionId}:${observingExternalSession ? 'read-only' : 'managed'}`} client={client} sessionId={sessionId} browser={status?.browser}
-          readOnly={observingExternalSession} onStatus={(next) => { if (active.current === next.sessionId) setStatus(next); }} />}
+        readOnly={observingExternalSession} onStatus={(next) => { if (active.current === next.sessionId) { setStatus(next); setTaskSnapshotAt(Date.now()); } }} />}
         <button className="icon-button" type="button" title={`${t('命令面板', 'Command palette')} (${formatKeys(CURRENT['palette'])})`} aria-label={t('命令面板', 'Command palette')} onClick={() => setPaletteOpen(true)}><Icon name="search" size={17} /></button>
         {sessionId !== null && <SessionActions key={sessionId} client={client} sessionId={sessionId} name={sessionLabel.name} archived={sessionLabel.archived}
           readOnly={observingExternalSession}
@@ -1790,6 +1810,7 @@ export function App({ transport }: { transport: Transport }) {
         onRecoverQueueItem={(index, all) => recoverQueueItem(index, all)}
         onPickMention={pickMention}
         onSelectModel={selectModel}
+        onSetThinking={selectThinking}
         onManageModel={openModelSettings}
         onOpenSecurity={openSecuritySettings}
         onSessionMenuChange={setSessionMenuOpen}
@@ -1799,7 +1820,7 @@ export function App({ transport }: { transport: Transport }) {
           setNewSessionPermission(target);
           setNewSessionPermissionConfirmations(confirmations);
         }}
-        onPermissionStatus={(next) => { if (active.current === next.sessionId) setStatus(next); }}
+        onPermissionStatus={(next) => { if (active.current === next.sessionId) { setStatus(next); setTaskSnapshotAt(Date.now()); } }}
         onStop={() => void cancel()}
         onSend={() => void send()}
       />}

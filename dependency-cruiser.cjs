@@ -43,6 +43,26 @@ module.exports = {
       },
     },
     {
+      name: 'desktop-main-no-runtime-dev-dependencies',
+      severity: 'error',
+      from: { path: '^desktop/electron/' },
+      to: {
+        dependencyTypes: ['npm-dev'],
+        dependencyTypesNot: ['type-only'],
+        // Electron supplies this host API; it is a build-time npm dependency, not an app runtime package.
+        pathNot: '^node_modules/(?:[.]pnpm/[^/]+/node_modules/|)electron/',
+      },
+    },
+    {
+      name: 'desktop-renderer-no-runtime-dev-dependencies',
+      severity: 'error',
+      from: { path: '^desktop/frontend/src/' },
+      to: {
+        dependencyTypes: ['npm-dev'],
+        dependencyTypesNot: ['type-only', 'triple-slash-directive', 'triple-slash-type-reference'],
+      },
+    },
+    {
       name: 'no-runtime-cycles',
       severity: 'error',
       from: {},

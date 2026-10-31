@@ -589,6 +589,7 @@ test('forced ask and denial counters survive a session reopen', async () => {
     assert.equal(after.policy, 'ask');
     assert.deepEqual(after.denials, before.denials);
   }, {
+    permissionControl: true,
     permission: createPermissionContext('full-access', 'unrestricted', {
       filesystemRead: 'unavailable', filesystemWrite: 'unavailable', network: 'unavailable', process: 'unavailable',
     }),
@@ -659,7 +660,8 @@ test('Host approval requests expose the script binding to connected requesters',
       return { decision: 'allow' };
     });
     const command = `node "${script.replaceAll('\\', '/')}"`;
-    await client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command } }) });
+    const accepted = await client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command } }) });
+    await client.request('run.wait', { sessionId, runId: accepted.runId, origin: 'human' });
     assert.equal(await readFile(marker, 'utf8'), 'ran');
     assert.equal(approvals.length, 1);
     const binding = approvals[0].scriptBinding;
