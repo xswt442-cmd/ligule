@@ -3,6 +3,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { KernelRuntimeError } from './error.js';
+import { checkedImageReferences, isImageToolResult, type ImageReference } from '../session/media.js';
 
 type EmptyExtra = Record<never, never>;
 type ToolResultShape<Kind extends string, Failed extends boolean, Extra extends object> = {
@@ -11,6 +12,7 @@ type ToolResultShape<Kind extends string, Failed extends boolean, Extra extends 
   readonly code: string | undefined;
   readonly reason: string | undefined;
   readonly content: unknown;
+  readonly images?: readonly ImageReference[];
 } & Extra;
 
 export interface ResultLimitConfig {
@@ -27,6 +29,11 @@ export function resultOf(
   content: unknown,
   extra?: object,
 ): ToolResultShape<'result', false, EmptyExtra> {
+  if (isImageToolResult(content)) {
+    if (typeof content.text !== 'string' || Object.keys(content).length !== 3) throw new TypeError('an image tool result needs text and images only');
+    return { kind: 'result', failed: false, code: undefined, reason: undefined, content: content.text,
+      images: checkedImageReferences(content.images), ...extra };
+  }
   return { kind: 'result', failed: false, code: undefined, reason: undefined, content, ...extra };
 }
 

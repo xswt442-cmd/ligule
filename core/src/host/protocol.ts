@@ -74,6 +74,9 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly allowedPolicyNone?: boolean;
   readonly allowedPolicyNever?: boolean;
   readonly allowOperator?: boolean;
+  readonly allowScreenCapture?: boolean;
+  readonly confirmScreenCapture?: boolean;
+  readonly enabled?: boolean;
   readonly confirmUnrestrictedNetwork?: boolean;
   readonly expiresAt?: string;
   readonly field?: string;
@@ -243,6 +246,22 @@ export const METHODS = Object.freeze({
       before: { type: 'integer', minimum: 1 },
       at: { type: 'integer', minimum: 1 },
     }, required: ['projectRoot', 'sessionId'] },
+  },
+  'session.image.preview': {
+    description: 'Read a bounded display preview of an image already referenced by a successful tool result in this workspace session. Does not capture the screen or acquire a session writer lock.',
+    parameters: { type: 'object', properties: {
+      projectRoot: { type: 'string' },
+      sessionId: SESSION_ID,
+      imageId: { type: 'string', minLength: 36, maxLength: 36 },
+    }, required: ['projectRoot', 'sessionId', 'imageId'] },
+  },
+  'browser.stop': {
+    description: 'Stop and pause this Session managed browser, including derived browsers; trusted local UI only.',
+    parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
+  },
+  'browser.resume': {
+    description: 'Allow this Session managed browser to start again after a human stopped it; does not launch it.',
+    parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
   },
   'session.control': {
     description: 'Send a human action to the local Host that currently owns this externally controlled Session. The same Host remains its only writer; the local action can read its configuration, observe, message, answer, cancel, or take over.',
@@ -426,6 +445,8 @@ export const METHODS = Object.freeze({
       allowedPolicyNone: { type: 'boolean' },
       allowedPolicyNever: { type: 'boolean' },
       allowOperator: { type: 'boolean' },
+      allowScreenCapture: { type: 'boolean' },
+      confirmScreenCapture: { type: 'boolean' },
       allowedMcpServers: { type: 'array', items: { type: 'string' } },
       allowedMcpTools: { type: 'array', items: { type: 'string' } },
       confirmFullAccess: { type: 'boolean' },
@@ -434,6 +455,12 @@ export const METHODS = Object.freeze({
       confirmWorkspaceTrust: { type: 'boolean', description: 'true only after the trusted UI has shown the project and received the user trust confirmation' },
       expiresAt: { type: 'string' },
     }, required: ['version', 'grantName', 'projectRoot', 'defaultPermissionProfile', 'maxPermissionProfile', 'defaultNetwork', 'maxNetwork', 'defaultPolicy', 'allowOperator', 'confirmFullAccess', 'confirmUnrestrictedNetwork', 'confirmWorkspaceTrust', 'expiresAt'] },
+  },
+  'screen-capture.set': {
+    description: 'Enable or revoke screen capture for this Session and its internal children through a trusted human client',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      sessionId: { type: 'string' }, enabled: { type: 'boolean' }, confirmScreenCapture: { type: 'boolean' },
+    }, required: ['sessionId', 'enabled'] },
   },
   'agent-control.revoke': {
     description: 'Revoke a persisted Agent Control grant using the version returned by agent-control.list',
@@ -486,7 +513,7 @@ export const METHODS = Object.freeze({
   },
   // 客户端只能读取配置白名单中的字段，不能请求文件路径或其他配置内容。
   'config.get': {
-    description: 'Read the configuration this interface may show: the host builds the answer from the whitelisted fields it owns, and those values, the layer writing each one and the version of every writable settings file come from one read, so no path can be asked for and no credential ever comes from configuration (D13, D60)',
+    description: 'Read allowlisted configuration values, their source layers, and writable-layer versions from one snapshot. Arbitrary paths and secret values are not exposed.',
     parameters: {
       type: 'object',
       properties: {

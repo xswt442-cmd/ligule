@@ -1,4 +1,4 @@
-export type ModelSettings = { id: string; name?: string; contextTokens?: number; outputTokens?: number };
+export type ModelSettings = { id: string; name?: string; contextTokens?: number; outputTokens?: number; imageInput?: boolean };
 export type ModelService = { id: string; name: string; api: 'messages' | 'chat-completions'; baseURL: string; apiKeyEnv: string; models: string[]; modelSettings?: ModelSettings[] };
 export type ModelSelection = { provider: string; model: string };
 export type ModelCatalog = {
@@ -21,10 +21,10 @@ export function legacyService(catalog: ModelCatalog): ModelService | null {
   return { id: 'legacy', name: 'legacy', api, baseURL, apiKeyEnv: apiKeyEnv ?? 'LIGULE_API_KEY', models: [model] };
 }
 
-export type ModelRow = { key: string; id: string; name: string; contextTokens: string; outputTokens: string };
+export type ModelRow = { key: string; id: string; name: string; contextTokens: string; outputTokens: string; imageInput?: boolean };
 
 export function newModelRow(id = '', settings?: ModelSettings): ModelRow {
-  return { key: crypto.randomUUID(), id, name: settings?.name ?? '', contextTokens: settings?.contextTokens?.toString() ?? '', outputTokens: settings?.outputTokens?.toString() ?? '' };
+  return { key: crypto.randomUUID(), id, name: settings?.name ?? '', contextTokens: settings?.contextTokens?.toString() ?? '', outputTokens: settings?.outputTokens?.toString() ?? '', ...(settings?.imageInput === undefined ? {} : { imageInput: settings.imageInput }) };
 }
 
 export function modelRows(service: ModelService): ModelRow[] {
@@ -77,6 +77,7 @@ export function encodeModelRows(rows: ModelRow[]): Pick<ModelService, 'models' |
       if (!Number.isSafeInteger(value) || value < 1) return fail('model_limit_invalid');
       settings[field] = value;
     }
+    if (row.imageInput !== undefined) settings.imageInput = row.imageInput;
     if (settings.contextTokens !== undefined && settings.outputTokens !== undefined && settings.outputTokens > settings.contextTokens) return fail('model_output_exceeds_context');
     if (Object.keys(settings).length > 1) modelSettings.push(settings);
     return id;

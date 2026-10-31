@@ -4,6 +4,7 @@
 import { spawnSync, execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { releaseManifest } from './pack-release.js';
 import { execNpm } from './npm-cli.js';
@@ -28,7 +29,7 @@ const consumerManifest = {
   name: 'ligule-consumer',
   version: '0.0.0',
   private: true,
-  allowScripts: { koffi: true, 'tree-sitter': true, 'tree-sitter-bash': true, 'tree-sitter-pwsh': true },
+  allowScripts: { koffi: true, 'tree-sitter': true, 'tree-sitter-bash': true, 'tree-sitter-pwsh': true, 'tesseract.js': false },
 };
 writeFileSync(join(consumer, 'package.json'), `${JSON.stringify(consumerManifest, null, 2)}\n`, 'utf8');
 if (given === undefined) {
@@ -92,6 +93,24 @@ const env = {
 const run = (args) => spawnSync(pkg.name, args, { env, cwd: consumer, shell: true, encoding: 'utf8', timeout: 60_000 });
 const readings = [];
 
+// Generate real documents with development writers, then read them solely through the installed runtime.
+const sourceCore = createRequire(join(repo, 'core', 'package.json'));
+const { PDFDocument, StandardFonts } = sourceCore('pdf-lib');
+const { Document, Packer, Paragraph } = sourceCore('docx');
+const PptxGenJS = sourceCore('pptxgenjs');
+const ExcelJS = sourceCore('exceljs');
+const pdf = await PDFDocument.create();
+const font = await pdf.embedFont(StandardFonts.Helvetica);
+pdf.addPage([300, 200]).drawText('Installed PDF text', { font, size: 14, x: 20, y: 150 });
+writeFileSync(join(consumer, 'sample.pdf'), await pdf.save());
+writeFileSync(join(consumer, 'sample.docx'), await Packer.toBuffer(new Document({ sections: [{ children: [new Paragraph('Installed DOCX text')] }] })));
+const workbook = new ExcelJS.Workbook();
+workbook.addWorksheet('Values').getCell('A1').value = 'Installed XLSX text';
+await workbook.xlsx.writeFile(join(consumer, 'sample.xlsx'));
+const slides = new PptxGenJS();
+slides.addSlide().addText('Installed PPTX text', { x: 1, y: 1, w: 3, h: 1 });
+await slides.writeFile({ fileName: join(consumer, 'sample.pptx') });
+
 const version = run(['--version']);
 if (version.status !== 0 || version.stdout.trim() !== pkg.version) {
   throw new Error(`${pkg.name} --version inside the consumer said "${version.stdout?.trim()}" with status ${version.status}`);
@@ -115,7 +134,7 @@ writeFileSync(join(consumer, 'probe.mjs'), `
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
-import { createKernel, createMcpPlugin, createMcpRegistry, execTool, flagLayer, KernelError, mcpServerConfigs, parseCommand, resolveRipgrep, resolveShell, searchWithRipgrep, withNativeExitCode, VERSION } from 'ligule';
+import { createConfig, createKernel, createMcpPlugin, createMcpRegistry, createReadImagePlugin, createReadDocumentPlugin, createWebSearchPlugin, createScreenshotPlugin, createSessionLog, execTool, flagLayer, KernelError, mcpServerConfigs, parseCommand, resolveRipgrep, resolveShell, searchWithRipgrep, withNativeExitCode, VERSION } from 'ligule';
 import { pathToFileURL } from 'node:url';
 
 const coreRoot = ${JSON.stringify(bundledCoreDirectory)};
@@ -123,8 +142,88 @@ const requireCore = createRequire(pathToFileURL(join(coreRoot, 'package.json')))
 requireCore('@napi-rs/keyring');
 requireCore('koffi');
 console.log('native bindings: keyring and koffi loaded for the consumer platform');
+const sharp = requireCore('sharp');
+const { createMediaStore } = await import(pathToFileURL(join(coreRoot, 'dist', 'capability', 'media.js')).href);
+const previousMediaHome = process.env.LIGULE_HOME;
+try {
+  process.env.LIGULE_HOME = join(process.cwd(), 'media-home');
+  const store = createMediaStore({ boundary: process.cwd() }, 'install-probe');
+  const image = await sharp({ create: { width: 6, height: 4, channels: 3, background: 'red' } }).png().toBuffer();
+  const reference = await store.put(image, 'file');
+  const reread = await store.read(reference);
+  if (reference.width !== 6 || reference.height !== 4 || (await sharp(reread).metadata()).format !== 'png') {
+    throw new Error('the installed image backend did not preserve the decoded image');
+  }
+  console.log('image backend: decoded, archived and reread through the installed Core');
+  const imageSession = createSessionLog({ directory: join(process.cwd(), 'image-sessions'), id: 'install-probe' });
+  const imageKernel = createKernel({ session: imageSession });
+  const unregisterImage = createReadImagePlugin({ media: store, supportsImages: () => true }).setup(imageKernel);
+  try {
+    const result = await imageKernel.call('read_image', { shotId: reference.id });
+    const events = await imageSession.read();
+    if (result.images?.[0]?.id !== reference.id || !events.some(event => event.kind === 'tool' && event.result.images?.[0]?.id === reference.id)) {
+      throw new Error('the installed read_image tool did not preserve its persistent image reference');
+    }
+    console.log('read_image: real Kernel result and durable Session reference');
+    const unregisterCapture = createScreenshotPlugin({ supportsImages: () => true }).setup(imageKernel);
+    try {
+      let rejected = false;
+      try { await imageKernel.call('screenshot', {}); }
+      catch (error) { if (error.code !== 'screen_capture_not_authorized') throw error; rejected = true; }
+      if (!rejected) throw new Error('the installed screenshot tool accepted missing consent');
+      if (process.platform === 'win32' && typeof requireCore('node-screenshots').Monitor.all !== 'function') throw new Error('the installed capture backend is unavailable');
+      console.log('screenshot: consent required; native Windows module checked without a capture');
+    } finally { unregisterCapture(); }
+  } finally {
+    unregisterImage();
+    await imageSession.close();
+  }
+  const documentSession = createSessionLog({ directory: join(process.cwd(), 'document-sessions'), id: 'document-install-probe' });
+  const documentMedia = createMediaStore({ boundary: process.cwd() }, 'document-install-probe');
+  const documentKernel = createKernel({ config: createConfig({ user: { boundary: process.cwd() } }), session: documentSession });
+  const unregisterDocument = createReadDocumentPlugin({ media: documentMedia, supportsImages: () => true }).setup(documentKernel);
+  try {
+    for (const format of ['pdf', 'docx', 'xlsx', 'pptx']) {
+      const response = await documentKernel.call('read_document', { path: 'sample.' + format });
+      const parsed = JSON.parse(response);
+      if (parsed.format !== format || !parsed.chunks.some(chunk => chunk.text.includes('Installed ' + format.toUpperCase() + ' text'))) {
+        throw new Error('the installed read_document parser failed for ' + format);
+      }
+    }
+    const rendered = await documentKernel.call('read_document', { path: 'sample.pdf', renderPage: 1 });
+    const image = rendered.images?.[0];
+    if (image?.source !== 'document' || (await sharp(await documentMedia.read(image)).metadata()).format !== 'png') {
+      throw new Error('the installed PDF renderer did not return a persistent page image');
+    }
+    console.log('read_document: PDF/DOCX/XLSX/PPTX parsed and PDF rendered through isolated installed workers');
+  } finally { unregisterDocument(); await documentSession.close(); }
+} finally {
+  if (previousMediaHome === undefined) delete process.env.LIGULE_HOME;
+  else process.env.LIGULE_HOME = previousMediaHome;
+}
 const { detectPermissionCapabilities } = await import(pathToFileURL(join(coreRoot, 'dist', 'capability', 'permission-capabilities.js')).href);
 const { createPermissionContext } = await import(pathToFileURL(join(coreRoot, 'dist', 'kernel', 'permission.js')).href);
+
+const searchPlugin = createWebSearchPlugin({ provider: 'deepseek', serviceId: 'install-probe', apiKeyEnv: 'LIGULE_INSTALL_SEARCH_DISABLED_KEY' });
+const searchCatalog = createKernel();
+const unregisterSearchCatalog = searchPlugin.setup(searchCatalog);
+try {
+  const declared = searchCatalog.manifest().find(tool => tool.name === 'web_search');
+  if (JSON.stringify(Object.keys(declared?.parameters.properties ?? {}).sort()) !== JSON.stringify(['count', 'query'])) {
+    throw new Error('the installed search declaration exposes an unexpected argument');
+  }
+} finally { unregisterSearchCatalog(); }
+const searchDenied = createKernel({ permission: createPermissionContext('read-only', 'disabled', {
+  filesystemRead: 'full', filesystemWrite: 'unavailable', network: 'unavailable', process: 'unavailable',
+}) });
+const unregisterSearchDenied = searchPlugin.setup(searchDenied);
+try {
+  let blocked = false;
+  try { await searchDenied.call('web_search', { query: 'installed permission check' }); }
+  catch (error) { if (!error.code?.startsWith('permission_')) throw error; blocked = true; }
+  if (!blocked) throw new Error('the installed search tool bypassed disabled network permission');
+  console.log('web_search: exported schema and network denial checked without credentials or a service request');
+} finally { unregisterSearchDenied(); }
 
 if (typeof KernelError !== 'function') throw new Error('KernelError is missing from the installed package');
 if (VERSION !== '${pkg.version}') throw new Error('the TUI compatibility entry did not preserve VERSION');
@@ -216,7 +315,7 @@ const coreRequire = createRequire(corePackage);
 const { Client } = coreRequire('@modelcontextprotocol/sdk/client');
 const { StdioClientTransport, getDefaultEnvironment } = coreRequire('@modelcontextprotocol/sdk/client/stdio.js');
 const expected = [
-  'ligule_interaction_reply', 'ligule_run', 'ligule_run_await', 'ligule_run_cancel', 'ligule_run_start', 'ligule_run_status', 'ligule_session_configure',
+  'ligule_interaction_reply', 'ligule_run', 'ligule_run_await', 'ligule_run_cancel', 'ligule_run_start', 'ligule_run_status', 'ligule_session_close', 'ligule_session_configure',
   'ligule_session_create', 'ligule_session_list', 'ligule_session_open', 'ligule_session_read', 'ligule_session_send',
 ].sort();
 const projectRoot = ${JSON.stringify(mcpProject)};

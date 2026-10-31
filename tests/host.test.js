@@ -879,7 +879,7 @@ test('manual compaction returns a boundary the status line then reports', async 
     await started;
     hold(Promise.resolve());
     // 只有一轮历史时，摘要可能不比原文短；此时应拒绝压缩。
-    await connection.request('run.start', { sessionId, input: 'go again' });
+    await connection.request('run.start', { sessionId, input: 'go again with a detailed request worth summarising '.repeat(20) });
 
     const done = await connection.request('session.compact', { sessionId });
     assert.ok(Number.isInteger(done.fromSeq) && Number.isInteger(done.toSeq) && done.toSeq >= done.fromSeq);

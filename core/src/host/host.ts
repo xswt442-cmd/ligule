@@ -3,10 +3,10 @@
 import { randomUUID } from 'node:crypto';
 import type { Readable, Writable } from 'node:stream';
 import { access, readFile, realpath, stat } from 'node:fs/promises';
-import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import {
-  createOutputSchemaContract, DELEGATION_RESULT_TOOL, MAX_DELEGATION_SCHEMA_BYTES, outputSchemaInstructions,
+  assertDelegationCompletion, createOutputSchemaContract, DELEGATION_RESULT_TOOL, MAX_DELEGATION_SCHEMA_BYTES, outputSchemaInstructions,
   registerDelegationResultTool, type DelegationSpec, type RunValidation,
 } from '../delegation.js';
 import {
@@ -40,7 +40,7 @@ import { adoptForSessionDirectory } from '../session/adopt.js';
 import { searchSessionDirectories } from '../session/search.js';
 import { branchSession } from '../session/branch.js';
 import { listProjectFiles } from './paths.js';
-import { branchSessionId, exportMarkdown, writeExport, type ExportRecord } from './export.js';
+import { branchSessionId, exportImageUrl, exportMarkdown, MAX_EXPORT_ASSETS, writeExport, type ExportAsset, type ExportRecord } from './export.js';
 import { createCompaction } from '../session/compaction.js';
 import { sessionWriterActive } from '../session/lock.js';
 import { requestAgentControl, type AgentControlRequest } from './agent-control-runtime.js';
@@ -57,6 +57,15 @@ import { discoverTemplates, expandTemplate, findTemplate, parseInvocation, templ
 import { createLoop, DEFAULT_LOOP_LIMITS, type LoopCompaction, type LoopProgressEvent, type LoopProgressPhase, type LoopResult } from '../kernel/loop.js';
 import { minimalPlugin } from '../tools/minimal.js';
 import { networkPlugin } from '../tools/network.js';
+import { createTodoWritePlugin } from '../tools/todo-write.js';
+import { createReadImagePlugin } from '../tools/read-image.js';
+import { createReadDocumentPlugin } from '../tools/read-document.js';
+import { createSearchSupport, type SearchStatus } from './search.js';
+import { createBrowserSupport, type BrowserSupport } from '../capability/browser.js';
+import { assertBrowserArguments, browserToolPolicy, BROWSER_SERVER } from '../capability/browser-policy.js';
+import { createScreenshotPlugin } from '../tools/screenshot.js';
+import { createMediaStore, imagePreview } from '../capability/media.js';
+import { checkedImageReferences, IMAGE_LIMITS, type ImageReference } from '../session/media.js';
 import { createSkillPlugin } from '../tools/skill.js';
 import { createMcpPlugin, type McpAuthorization } from '../tools/mcp.js';
 import { createSubagentPlugin } from '../tools/subagent.js';
@@ -137,6 +146,7 @@ interface ProjectEnvironment extends Omit<EnvironmentSeed, 'layers' | 'store' | 
   policy?: PolicyConfig;
   generation?: SessionGeneration;
   pendingModel?: Record<string, unknown>;
+  browserSupport?: Promise<BrowserSupport>;
 }
 
 interface HostOptions {
@@ -158,6 +168,7 @@ interface HostOptions {
   readonly interactive?: boolean;
   readonly permission?: PermissionContext;
   readonly permissionControl?: boolean;
+  readonly screenCaptureConsent?: boolean;
   readonly agentControl?: {
     readonly grantId: string;
     readonly storePath: string;
@@ -211,6 +222,10 @@ function policyRuleKey(rule: Pick<PolicyRule, 'tool' | 'match' | 'target' | 'pat
 
 interface HostSessionBase {
   readonly id: string;
+  readonly search: SearchStatus;
+  readonly browser: BrowserSupport;
+  browserPaused: boolean;
+  readonly childMcp: Map<McpRegistry, string>;
   readonly session: SessionLog;
   readonly listeners: ((event: SessionEvent) => void)[];
   readonly asks: Set<() => void>;
@@ -220,10 +235,12 @@ interface HostSessionBase {
   readonly managedProcesses: ManagedProcessRegistry;
   readonly managedGrantId?: string;
   permission: PermissionContext;
+  readonly screenCapture: { enabled: boolean; source: 'none' | 'startup' | 'trusted-ui' | 'grant'; controller: AbortController };
   policyOverride: PolicyMode | null;
   readonly mode: ModeState;
   loopIterations: number;
   readonly loopModelCalls: number;
+  readonly loopMaxParallelTools: number;
   pendingLoopIterations?: number;
   generation: SessionGeneration;
   modelCredentialBindings?: Record<string, unknown>;
@@ -262,6 +279,14 @@ interface HostSessionState extends HostSessionBase {
   readonly runDelegated: (input: string, options: DelegatedRunOptions) => Promise<DelegatedRunResult>;
   compaction: ReturnType<typeof createCompaction> | null;
   readonly rebuildCompaction: (model: Record<string, unknown>) => ReturnType<typeof createCompaction> | null;
+}
+
+interface HostSessionRetirement {
+  managedProcessesClosed: boolean;
+  mcpClosed: boolean;
+  extensionsDisposed: boolean;
+  assemblyDisposed: boolean;
+  sessionClosed: boolean;
 }
 
 interface DelegatedRunOptions {
@@ -453,7 +478,7 @@ function exportRecordOf(event: SessionEvent): ExportRecord | undefined {
     text?: string;
     tool?: string;
     toolCalls?: { id: string; name: string; args?: Record<string, unknown> }[];
-    result?: { content?: unknown; failed?: boolean; code?: string; spilled?: string };
+    result?: { content?: unknown; failed?: boolean; code?: string; spilled?: string; images?: readonly ImageReference[] };
     name?: string;
     layer?: string;
   } = { kind: event.kind };
@@ -474,6 +499,7 @@ function exportRecordOf(event: SessionEvent): ExportRecord | undefined {
       ...(typeof event.result.failed === 'boolean' ? { failed: event.result.failed } : {}),
       ...(typeof event.result.code === 'string' ? { code: event.result.code } : {}),
       ...(typeof event.result.spilled === 'string' ? { spilled: event.result.spilled } : {}),
+      ...(event.result.images === undefined ? {} : { images: checkedImageReferences(event.result.images) }),
     };
   }
   return record;
@@ -481,10 +507,10 @@ function exportRecordOf(event: SessionEvent): ExportRecord | undefined {
 
 // 通过 Session 模块解析记录目录，确保 Host 与会话列表使用同一位置。
 // 缺少循环上限时补入默认值，避免未定义的上限让循环无法执行。
-function loopLimitsOf(config: HostConfigSnapshot): LoopLimits {
+function loopLimitsOf(config: HostConfigSnapshot): LoopLimits & { readonly maxParallelTools: number } {
   const limits = { ...DEFAULT_LOOP_LIMITS, ...(isRecord(config.loop) ? config.loop : {}) };
-  const positiveInteger = (value: unknown, key: 'iterations' | 'modelCalls'): number => {
-    if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+  const positiveInteger = (value: unknown, key: 'iterations' | 'modelCalls' | 'maxParallelTools'): number => {
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
       throw new KernelError('host_loop_limits_invalid', { detail: `${key} must be an integer of at least 1` });
     }
     return value;
@@ -492,6 +518,7 @@ function loopLimitsOf(config: HostConfigSnapshot): LoopLimits {
   return {
     iterations: positiveInteger(limits.iterations, 'iterations'),
     modelCalls: positiveInteger(limits.modelCalls, 'modelCalls'),
+    maxParallelTools: positiveInteger(limits.maxParallelTools, 'maxParallelTools'),
   };
 }
 
@@ -499,6 +526,7 @@ function sessionLoopLimits(state: HostSessionBase): LoopLimits {
   return {
     get iterations() { return state.loopIterations; },
     get modelCalls() { return state.loopModelCalls; },
+    get maxParallelTools() { return state.loopMaxParallelTools; },
   };
 }
 
@@ -545,6 +573,7 @@ function observedProvider(provider: HostProvider, onDelta: (event: ProviderEvent
     get pending() { return provider.pending; },
     get capabilities() { return provider.capabilities; },
     get requiresCompletion() { return provider.requiresCompletion; },
+    get imageInput() { return provider.imageInput; },
     get outputTokens() { return provider.outputTokens; },
     get contextTokens() { return provider.contextTokens; },
     get thinkingCapability() { return provider.thinkingCapability; },
@@ -569,6 +598,7 @@ function currentProvider(read: () => HostProvider, authorize: () => void): HostP
     get pending() { return read().pending; },
     get capabilities() { return read().capabilities; },
     get requiresCompletion() { return read().requiresCompletion; },
+    get imageInput() { return read().imageInput; },
     get outputTokens() { return read().outputTokens; },
     get contextTokens() { return read().contextTokens; },
     get thinkingCapability() { return read().thinkingCapability; },
@@ -669,8 +699,9 @@ export function createHost({
   config, provider, plugins = [minimalPlugin, networkPlugin], policy, logger, modeName, modePaths, skillRegistry,
   templateRegistry, extensions = { paths: [], ignored: [] }, loadEnvironment, configStore, configLayers, configStoreFor,
   deriveProvider = providerFromConfig, interactive = false, permission = DEFAULT_PERMISSION_CONTEXT, permissionControl = false,
-  agentControl,
+  agentControl, screenCaptureConsent = false,
 }: HostOptions): Host {
+  if (typeof screenCaptureConsent !== 'boolean') throw new KernelError('screen_capture_consent_invalid');
   // 每个项目环境持有自己的配置快照、提供方、策略、模式、记录目录和可写配置层。
   // 在加载环境时校验配置，避免等到第一次模型请求才发现错误。
   // 文件系统边界同时限制工具访问范围和指令文件向上查找的范围。
@@ -687,6 +718,8 @@ export function createHost({
     const root = resolve(own.config.workspaceRoot ?? own.config.boundary);
     const runtimeConfig: RuntimeConfig = Object.freeze({ ...own.config, workspaceRoot: root, boundary: resolve(root, own.config.boundary) });
     const mcpConfig = isRecord(own.config.mcp) ? { mcp: { servers: own.config.mcp.servers } } : {};
+    const configuredMcp = mcpServerConfigs(mcpConfig, process.env, root);
+    if (configuredMcp.some(server => server.name === BROWSER_SERVER)) throw new KernelError('browser_server_name_reserved');
     return {
       projectRoot: root,
       layers: own.layers ?? {},
@@ -699,7 +732,7 @@ export function createHost({
       skillRegistry: own.skillRegistry,
       templateRegistry: own.templateRegistry,
       extensions: own.extensions ?? { paths: [], ignored: [] },
-      mcpConfigs: mcpServerConfigs(mcpConfig, process.env, root),
+      mcpConfigs: configuredMcp,
       directory: sessionDirectory(runtimeConfig),
     };
   }
@@ -781,7 +814,15 @@ export function createHost({
     return loaded;
   }
 
+  async function browserForEnvironment(env: ProjectEnvironment): Promise<BrowserSupport> {
+    env.browserSupport ??= createBrowserSupport(env.config, env.layers);
+    const browser = await env.browserSupport;
+    if (browser.server !== undefined && !env.mcpConfigs.some(server => server.name === BROWSER_SERVER)) env.mcpConfigs.push(browser.server);
+    return browser;
+  }
+
   async function currentMcpConfigs(env: ProjectEnvironment): Promise<ReturnType<typeof mcpServerConfigs>> {
+    await browserForEnvironment(env);
     if (loadEnvironment === undefined) return env.mcpConfigs;
     const latest = await loadConfigLayers({ projectRoot: env.projectRoot });
     const config = createConfig({
@@ -789,22 +830,33 @@ export function createHost({
       ...(env.layers.flag === undefined ? {} : { flag: env.layers.flag }),
     });
     const mcpConfig = isRecord(config.mcp) ? { mcp: { servers: config.mcp.servers } } : {};
-    return mcpServerConfigs(mcpConfig, process.env, env.projectRoot);
+    const servers = mcpServerConfigs(mcpConfig, process.env, env.projectRoot);
+    if (servers.some(server => server.name === BROWSER_SERVER)) throw new KernelError('browser_server_name_reserved');
+    const browser = await createBrowserSupport({ ...config, boundary: env.config.boundary, workspaceRoot: env.projectRoot },
+      { ...latest, ...(env.layers.flag === undefined ? {} : { flag: env.layers.flag }) });
+    return [...servers, ...(browser.server === undefined ? [] : [browser.server])];
   }
 
   // Settings can inspect the Host-configured runtime registry before opening a conversation.
-  // This assembles metadata only; no tool run, extension import, or MCP connection is started.
+  // Assemble metadata and check configured credential availability without running tools or connecting MCP.
   async function settingsToolCatalog(env: ProjectEnvironment, skills: SkillRegistry): Promise<ReturnType<Kernel['catalog']>> {
+    const search = await createSearchSupport(env.config, env.layers);
+    await browserForEnvironment(env);
     const kernel = createKernel({ config: env.config });
-    const mcp = createMcpRegistry(env.mcpConfigs);
+    const mcp = createMcpRegistry(env.mcpConfigs, { toolPolicy: browserToolPolicy });
     const managedProcesses = createManagedProcessRegistry();
     const basePlugins: Plugin<Kernel>[] = [
       ...plugins,
+      ...(search.plugin === undefined ? [] : [search.plugin]),
       ...(skills.skills.length === 0 ? [] : [createSkillPlugin(skills, () => env.mcpConfigs.map((server) => server.name))]),
       createMcpPlugin(mcp),
     ];
     const catalogPlugins: Plugin<Kernel>[] = [
       ...basePlugins,
+      createTodoWritePlugin(),
+      createReadImagePlugin(),
+      createReadDocumentPlugin(),
+      createScreenshotPlugin(),
       managedProcessPlugin(managedProcesses),
       ...(interactive ? [createAskUserPlugin({ ask: async () => { throw new KernelError('settings_catalog_not_executable'); } })] : []),
       createSubagentPlugin({
@@ -832,9 +884,22 @@ export function createHost({
       if (state.environment !== env) continue;
       for (const previous of env.mcpConfigs) {
         const next = current.find((server) => server.name === previous.name);
-        if (next === undefined || next.identityDigest !== previous.identityDigest) await state.mcp.revoke(previous.name);
+        if (next === undefined || next.identityDigest !== previous.identityDigest) await revokeSessionMcp(state, previous.name);
       }
     }
+  }
+
+  async function revokeSessionMcp(state: HostSessionState, name: string): Promise<void> {
+    await Promise.all([state.mcp, ...state.childMcp.keys()].map(registry => registry.revoke(name)));
+    if (name === BROWSER_SERVER) await Promise.all([state.id, ...state.childMcp.values()].map(id => state.browser.clearSession(id)));
+  }
+
+  function browserView(state: HostSessionState) {
+    const denied = permissionDenial(state.permission, 'external');
+    return { ...state.browser.status, permitted: state.browser.status.available && denied === undefined,
+      ...(state.browser.status.code === undefined && denied !== undefined ? { code: denied.code } : {}),
+      paused: state.browserPaused, connected: [state.mcp, ...state.childMcp.keys()].some(registry => registry.activeServers().includes(BROWSER_SERVER)),
+      changeAllowed: permissionControl };
   }
 
   async function readOnlySessionConfig(projectRoot: string): Promise<RuntimeConfig> {
@@ -969,6 +1034,10 @@ export function createHost({
   }
 
   const sessions = new Map<string, HostSessionState>();
+  let imagePreviews = 0;
+  const retiringSessions = new Set<string>();
+  const retirementProgress = new Map<string, HostSessionRetirement>();
+  const retirementTasks = new Map<string, Promise<void>>();
   const pendingApprovalDetails = new Map<string, { sessionId: string; args: Record<string, unknown>; argumentSha256: string }>();
   const building = new Set<Promise<unknown>>();
   let closing: Promise<void> | undefined;
@@ -976,6 +1045,7 @@ export function createHost({
   function open(id: string): HostSessionState {
     const state = sessions.get(id);
     if (state === undefined) throw new KernelError('session_not_open', { detail: id });
+    if (retiringSessions.has(id)) throw new KernelError('session_closing', { detail: id });
     return state;
   }
 
@@ -1019,7 +1089,7 @@ export function createHost({
         catch (error) { sessionFailure = { code: errorCode(error) ?? 'provider_rebuild_failed' }; continue; }
         const previous = resolveModel(ownGeneration.model);
         const next = resolveModel(ownModel);
-        if (['api', 'baseURL', 'apiKeyEnv', 'model', 'outputTokens', 'serviceOutputLimit', 'serviceContextTokens'].every((field) => previous[field] === next[field])) continue;
+        if (['api', 'baseURL', 'apiKeyEnv', 'model', 'outputTokens', 'serviceOutputLimit', 'serviceContextTokens', 'serviceImageInput'].every((field) => previous[field] === next[field])) continue;
         const generation: SessionGeneration = { provider: ownProvider, model: ownModel, explicit: true, options: ownGeneration.options };
         if (state.running === undefined) {
           state.generation = generation;
@@ -1176,24 +1246,65 @@ export function createHost({
 
   // 释放会话的 MCP 子进程、扩展监听器、模板登记表和记录锁。
   // 会话记录继续保存在磁盘上；这里只清理运行时状态。
-  async function retire(state: HostSessionState): Promise<void> {
-    // 失败或取消结果已经写入记录；收尾只等待轮次结束，不覆盖其结果。
-    await state.operation?.catch(() => undefined);
-    const failures: unknown[] = [];
-    for (const release of [
-      () => state.managedProcesses.close(),
-      () => state.mcp.close(),
-      () => state.extensions.dispose(),
-      () => state.assembly.dispose(),
-    ]) {
-      try { await release(); }
-      catch (error) { failures.push(error); }
+  async function retire(state: HostSessionState, shutdown = false): Promise<void> {
+    state.screenCapture.controller.abort(new KernelError('screen_capture_session_closed'));
+    const inFlight = retirementTasks.get(state.id);
+    if (inFlight !== undefined) {
+      if (!shutdown) return await inFlight;
+      try { await inFlight; } catch { /* Shutdown still releases the record lock after a failed close. */ }
+      if (!sessions.has(state.id)) return;
     }
-    // 即使其中一个资源未能释放，也要移除会话并释放记录锁，避免客户端无法关闭会话。
-    sessions.delete(state.id);
-    try { await state.session.close(); }
-    catch (error) { failures.push(error); }
-    if (failures.length > 0) throw new AggregateError(failures, 'host_session_retire_failed');
+    let progress = retirementProgress.get(state.id);
+    if (progress === undefined) {
+      progress = {
+        managedProcessesClosed: false,
+        mcpClosed: false,
+        extensionsDisposed: false,
+        assemblyDisposed: false,
+        sessionClosed: false,
+      };
+      retirementProgress.set(state.id, progress);
+    }
+    retiringSessions.add(state.id);
+    const work = (async () => {
+      // 失败或取消结果已经写入记录；收尾只等待轮次结束，不覆盖其结果。
+      await state.operation?.catch(() => undefined);
+      const failures: unknown[] = [];
+      const resources = [
+        ['managedProcessesClosed', () => state.managedProcesses.close()],
+        ['mcpClosed', async () => { await state.mcp.close(); await state.browser.closeSession(state.id); }],
+        ['extensionsDisposed', () => state.extensions.dispose()],
+        ['assemblyDisposed', () => state.assembly.dispose()],
+      ] as const;
+      for (const [field, release] of resources) {
+        if (progress![field]) continue;
+        try {
+          await release();
+          progress![field] = true;
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      if (failures.length > 0 && !shutdown) throw new AggregateError(failures, 'host_session_retire_failed');
+      if (!progress!.sessionClosed) {
+        try {
+          await state.session.close();
+          progress!.sessionClosed = true;
+        } catch (error) {
+          failures.push(error);
+          if (!shutdown) throw new AggregateError(failures, 'host_session_retire_failed');
+        }
+      }
+      sessions.delete(state.id);
+      retirementProgress.delete(state.id);
+      retiringSessions.delete(state.id);
+      if (failures.length > 0) throw new AggregateError(failures, 'host_session_retire_failed');
+    })();
+    retirementTasks.set(state.id, work);
+    try { await work; }
+    finally {
+      if (retirementTasks.get(state.id) === work) retirementTasks.delete(state.id);
+    }
   }
 
   // 项目最后一个会话关闭后移除其环境，让下次打开时重新加载配置。
@@ -1294,6 +1405,9 @@ export function createHost({
     state.modelCredentialBindings = Object.keys(layers).length === 0 ? undefined
       : modelConfigOf(createConfig({ user: layers.user ?? {}, flag: layers.flag ?? {} }));
     const controller = new AbortController();
+    let browserCleanup: Promise<unknown> | undefined;
+    const stopBrowser = () => { browserCleanup = revokeSessionMcp(state, BROWSER_SERVER).then(() => undefined, error => error); };
+    controller.signal.addEventListener('abort', stopBrowser, { once: true });
     const progress = beginProgress(state, connection, initialPhase);
     const settleAsks = (): void => { for (const settle of state.asks) settle(); };
     controller.signal.addEventListener('abort', settleAsks, { once: true });
@@ -1303,6 +1417,8 @@ export function createHost({
         return await action(controller.signal, progress.report);
       } finally {
         controller.signal.removeEventListener('abort', settleAsks);
+        controller.signal.removeEventListener('abort', stopBrowser);
+        const browserCleanupError = await browserCleanup;
         state.running = undefined;
         changeProgressPhase(state, connection, 'settling');
         try {
@@ -1332,6 +1448,7 @@ export function createHost({
             publishProgress(state, connection);
           }
         }
+        if (browserCleanupError !== undefined) throw browserCleanupError;
       }
     })();
     state.operation = operation;
@@ -1401,6 +1518,13 @@ export function createHost({
   ) {
     const events = await session.read();
     const header = await session.header();
+    let provisionalOutput = null;
+    let provisionalOutputError: string | null = null;
+    try { provisionalOutput = await session.readProvisionalOutput(events); }
+    catch (error) {
+      if (!(error instanceof KernelError) || error.code !== 'session_stream_invalid') throw error;
+      provisionalOutputError = error.code;
+    }
     if (at !== undefined && before !== undefined) {
       throw new KernelError('protocol_args_invalid', { detail: 'session.read at and before are mutually exclusive' });
     }
@@ -1416,6 +1540,8 @@ export function createHost({
       sessionId,
       events: fullResults ? await fillSpills(page, env) : page,
       header: header ?? null,
+      provisionalOutput,
+      provisionalOutputError,
       label: foldLabel(events),
       endSeq: page.at(-1)?.seq ?? null,
       hasMore: page.length > 0 && page[0].seq > 1,
@@ -1470,6 +1596,8 @@ export function createHost({
     const asks = new Set<() => void>();
     const modeState: ModeState = { file: undefined, tools: [], undo: () => {} };
     const configuredLoopLimits = loopLimitsOf(config);
+    const search = await createSearchSupport(config, env.layers);
+    const browser = await browserForEnvironment(env);
     // 新会话可能尚未选择模式，因此在创建记录时再解析模式身份。
     const session = observedSession(createSessionLog({
       directory,
@@ -1486,6 +1614,10 @@ export function createHost({
       connection.notify({ notify: 'event', sessionId: id, event });
       for (const listener of listeners) listener(event);
     });
+    const inheritedImages = recover ? (await session.read()).flatMap(event =>
+      event.kind === 'tool' && isRecord(event.result) && event.result.images !== undefined
+        ? checkedImageReferences(event.result.images) : []) : [];
+    const media = createMediaStore({ ...config, workspaceRoot: env.projectRoot }, id, inheritedImages);
     // 新会话继承项目当前有效的生成设置。配置写入后，初始快照可能已过期，优先读取环境的最新设置。
     const workspaceTrusted = await isTrusted(env.projectRoot);
     const basePermission = recover ? permission : initial?.permission?.context ?? permission;
@@ -1510,6 +1642,10 @@ export function createHost({
     });
     const state: HostSessionBase = {
       id,
+      search: search.status,
+      browser,
+      browserPaused: false,
+      childMcp: new Map(),
       session,
       listeners,
       asks,
@@ -1522,9 +1658,11 @@ export function createHost({
       managedProcesses,
       ...(agentControl === undefined ? {} : { managedGrantId: agentControl.grantId }),
       permission: sessionPermission,
+      screenCapture: { enabled: false, source: 'none', controller: new AbortController() },
       policyOverride: initial?.policy ?? null,
       loopIterations: initial?.loopIterations ?? configuredLoopLimits.iterations,
       loopModelCalls: configuredLoopLimits.modelCalls,
+      loopMaxParallelTools: configuredLoopLimits.maxParallelTools,
       generation: initial?.generation ?? env.generation ?? { provider, model: modelConfigOf(config), options: {} },
       adopt: async () => {},
     };
@@ -1544,6 +1682,21 @@ export function createHost({
     await session.acquire();
     const cleanup = [];
     try {
+    const captureGrant = await activeDelegation();
+    const initialCapture = agentControl === undefined ? screenCaptureConsent : captureGrant?.allowScreenCapture === true;
+    if (initialCapture) {
+      if (recover && ((await session.header())?.formatVersion ?? 0) < 1) throw new KernelError('session_screen_capture_format_unsupported');
+      await session.append({ kind: 'screenCapture', ignorable: true, enabled: true,
+        source: agentControl === undefined ? 'startup' : 'grant', at: new Date().toISOString() });
+      state.screenCapture.enabled = true;
+      state.screenCapture.source = agentControl === undefined ? 'startup' : 'grant';
+    }
+    const authorizeScreenCapture = async (): Promise<AbortSignal> => {
+      if (!state.screenCapture.enabled) throw new KernelError('screen_capture_not_authorized');
+      if (agentControl !== undefined && (await activeDelegation())?.allowScreenCapture !== true) throw new KernelError('screen_capture_not_authorized');
+      state.screenCapture.controller.signal.throwIfAborted();
+      return state.screenCapture.controller.signal;
+    };
     if (recover) {
       const events = await session.read();
       state.sessionPolicyRules = events.filter((item) => item.kind === 'sessionPolicyRule').map((item) => item.rule as PolicyRule);
@@ -1748,9 +1901,23 @@ export function createHost({
       logger?.log?.('skill is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
     }
     // 只有配置了 MCP Server 时才注册 MCP 工具。
-    const mcp = createMcpRegistry(mcpConfigs);
+    const assertMcpAccess = (server: string): void => {
+      if (server !== BROWSER_SERVER) return;
+      if (state.permissionChanging) throw new KernelError('permission_change_in_progress');
+      const denied = permissionDenial(state.permission, 'external');
+      if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
+      if (state.browserPaused) throw new KernelError('browser_stopped');
+    };
+    const sessionMcpConfigs = await Promise.all(mcpConfigs.map(server => server.name === BROWSER_SERVER ? browser.session(id) : server));
+    const mcp = createMcpRegistry(sessionMcpConfigs, { toolPolicy: browserToolPolicy, assertServerAccess: assertMcpAccess,
+      afterCall: name => name === BROWSER_SERVER ? browser.clearSession(id) : Promise.resolve() });
+    cleanup.push(() => browser.closeSession(id));
     cleanup.push(() => mcp.close());
     const authorizeMcpServer = async (server: string): Promise<void> => {
+      if (server === BROWSER_SERVER) {
+        assertMcpAccess(server);
+        await browser.verify();
+      }
       const configured = mcpConfigs.find((entry) => entry.name === server);
       if (configured === undefined) throw new KernelError('mcp_server_unknown', { detail: server });
       const currentServers = await currentMcpConfigs(env);
@@ -1770,6 +1937,10 @@ export function createHost({
     };
     const authorizeMcpTool = async (server: string, tool: string): Promise<void> => {
       await authorizeMcpServer(server);
+      if (server === BROWSER_SERVER) {
+        if (browserToolPolicy(server, tool, { type: 'object', properties: {} }) === undefined) throw new KernelError('browser_tool_denied');
+        if (tool === 'browser_take_screenshot' && live.imageInput !== true) throw new KernelError('model_image_input_unsupported');
+      }
       const grant = await activeDelegation();
       if (grant !== undefined) {
         await assertDelegationProject(grant, env.projectRoot);
@@ -1777,6 +1948,7 @@ export function createHost({
       }
     };
     const mcpAuthorization: McpAuthorization = {
+      authorizeArguments: (server, tool, args) => { if (server === BROWSER_SERVER) assertBrowserArguments(tool, args); },
       authorizeServer: authorizeMcpServer,
       authorizeTool: authorizeMcpTool,
       identityDigest: (server) => mcpConfigs.find((entry) => entry.name === server)?.identityDigest,
@@ -1803,7 +1975,7 @@ export function createHost({
     const fragments: ExtensionPromptFragment[] = [];
     // 派生执行继承父会话的策略和静态提示词前缀，但不能再注册子 Agent。
     // 直接使用底层提供方；派生事件记录在其独立会话中。
-    const basePlugins = [...loaded, createMcpPlugin(mcp, mcpAuthorization)];
+    const basePlugins = [...loaded, ...(search.plugin === undefined ? [] : [search.plugin])];
     // 提问属于父会话，因为派生执行没有客户端可以回答。
     // 提问和审批走不同流程；只有支持交互回答的客户端才注册提问工具。
     const asked = interactive === false ? [] : [createAskUserPlugin({
@@ -1835,7 +2007,12 @@ export function createHost({
         }
       },
     })];
-    const assembly = loadAssembly(kernel, [...basePlugins, managedProcessPlugin(managedProcesses), ...asked, createCompactPlugin({
+    const assembly = loadAssembly(kernel, [...basePlugins, createMcpPlugin(mcp, mcpAuthorization, { media,
+      sourceFor: server => server === BROWSER_SERVER ? 'browser' : undefined }), createTodoWritePlugin({ session }),
+      createReadImagePlugin({ media, supportsImages: () => live.imageInput === true }),
+      createReadDocumentPlugin({ media, supportsImages: () => live.imageInput === true }),
+      createScreenshotPlugin({ media, supportsImages: () => live.imageInput === true, authorize: authorizeScreenCapture }),
+      managedProcessPlugin(managedProcesses), ...asked, createCompactPlugin({
       // 压缩实例随所选模型重建；工具经取值函数读取当前实例。派生子会话不注册此工具，
       // 子会话仍由自身构建的自动压缩管理预算。
       compaction: () => state.compaction ?? null,
@@ -1851,6 +2028,16 @@ export function createHost({
       sessionId: id,
       logger,
       plugins: basePlugins,
+      authorizeScreenCapture,
+      createMcp: async (childId, childMedia) => {
+        const servers = await Promise.all(mcpConfigs.map(server => server.name === BROWSER_SERVER ? browser.session(childId) : server));
+        const childRegistry = createMcpRegistry(servers, { toolPolicy: browserToolPolicy, assertServerAccess: assertMcpAccess,
+          afterCall: name => name === BROWSER_SERVER ? browser.clearSession(childId) : Promise.resolve() });
+        state.childMcp.set(childRegistry, childId);
+        return { plugin: createMcpPlugin(childRegistry, mcpAuthorization, { media: childMedia,
+          sourceFor: server => server === BROWSER_SERVER ? 'browser' : undefined }),
+          close: async () => { try { await childRegistry.close(); await browser.closeSession(childId); } finally { state.childMcp.delete(childRegistry); } } };
+      },
       modePaths,
       modeFile: () => state.mode.file,
       promptFragments: () => fragments,
@@ -1990,6 +2177,7 @@ export function createHost({
       prompt,
       session,
       limits: sessionLoopLimits(state),
+      resolveImage: media.read,
       compaction: loopCompaction,
       onProgress: (event) => {
         if (state.progressId !== undefined) observeLoopProgress(state as HostSessionState, connection, state.progressId, event);
@@ -2062,6 +2250,7 @@ export function createHost({
           user: options.user,
           onProgress: options.onProgress,
           completesRun: contract === undefined ? [] : [DELEGATION_RESULT_TOOL],
+          validateCompletion: () => assertDelegationCompletion(contract, structuredSubmitted),
           ...(contract === undefined && delegatedMode === undefined ? {} : {
             turnContext: {
               ...(delegatedMode === undefined ? {} : { delegationMode: delegatedMode }),
@@ -2071,9 +2260,7 @@ export function createHost({
         });
         const validation = contract === undefined
           ? undefined
-          : structuredSubmitted
-            ? { status: 'valid' as const, schemaDigest: contract.digest }
-            : { status: 'invalid' as const, schemaDigest: contract.digest, errors: ['The run ended without submitting a structured result.'] };
+          : { status: 'valid' as const, schemaDigest: contract.digest };
         return {
           ...result,
           ...(structuredSubmitted ? { structured } : {}),
@@ -2187,6 +2374,9 @@ export function createHost({
         loopIterations: state.loopIterations,
         policy: { mode: state.chain.mode, source: state.chain.modeSource, default: state.chain.configuredMode() },
         permission: sessionPermissionView(state, canControlPermission),
+        screenCapture: { enabled: state.screenCapture.enabled, source: state.screenCapture.source, changeAllowed: permissionControl },
+        search: state.search,
+        browser: browserView(state),
         generation: generationView(state.generation),
       },
       pending,
@@ -2205,6 +2395,7 @@ export function createHost({
         allowedPolicies: knownGrant.allowedPolicies,
         allowedMcpServers: knownGrant.allowedMcpServers,
         allowedMcpTools: knownGrant.allowedMcpTools,
+        allowScreenCapture: knownGrant.allowScreenCapture,
       },
     };
   }
@@ -2430,6 +2621,7 @@ export function createHost({
       });
       state.permission = next;
       await state.managedProcesses.stopAll();
+      if (permissionDenial(next, 'external') !== undefined) await revokeSessionMcp(state, BROWSER_SERVER);
       return { sessionId: state.id, permission: sessionPermissionView(state, canControlPermission), applies: 'now' };
     } finally {
       if (sessions.get(state.id) === state) state.permissionChanging = false;
@@ -2551,13 +2743,45 @@ export function createHost({
           return opened;
         }
         case 'session.close': {
-          const state = open(sessionId);
+          const state = sessions.get(sessionId);
+          if (state === undefined) throw new KernelError('session_not_open', { detail: sessionId });
           // 关闭前必须由客户端明确取消运行中的轮次，确保结果已记录。
           if (state.permissionChanging) throw new KernelError('permission_change_in_progress', { detail: sessionId });
           if (state.running !== undefined) throw new KernelError('run_already_running', { detail: sessionId });
           await retire(state);
           evictEnvironment(state.environment);
           return { sessionId };
+        }
+        case 'screen-capture.set': {
+          if (!permissionControl) throw new KernelError('screen_capture_control_unavailable');
+          const state = open(sessionId);
+          const enabled = message.params.enabled === true;
+          if (enabled && message.params.confirmScreenCapture !== true) throw new KernelError('screen_capture_confirmation_required');
+          if (enabled && state.running !== undefined) throw new KernelError('run_already_running');
+          if (enabled && state.permissionChanging) throw new KernelError('permission_change_in_progress');
+          const decisionAt = new Date().toISOString();
+          state.screenCapture.enabled = false;
+          state.screenCapture.source = 'none';
+          state.screenCapture.controller.abort(new KernelError(enabled ? 'screen_capture_replaced' : 'screen_capture_revoked'));
+          const intent = enabled ? new AbortController() : state.screenCapture.controller;
+          if (enabled) {
+            state.screenCapture.controller = intent;
+            state.permissionChanging = true;
+          }
+          try {
+            if (enabled && agentControl !== undefined && (await activeDelegation())?.allowScreenCapture !== true) throw new KernelError('screen_capture_not_authorized');
+            if (((await state.session.header())?.formatVersion ?? 0) < 1) throw new KernelError('session_screen_capture_format_unsupported');
+            if (closing !== undefined) throw new KernelError('host_closed');
+            if (sessions.get(sessionId) !== state || retiringSessions.has(sessionId)) throw new KernelError('session_closing');
+            if (enabled) intent.signal.throwIfAborted();
+            await state.session.append({ kind: 'screenCapture', ignorable: true, enabled, source: 'trusted-ui', at: decisionAt });
+            if (enabled) {
+              intent.signal.throwIfAborted();
+              state.screenCapture.enabled = true;
+              state.screenCapture.source = 'trusted-ui';
+            }
+            return { sessionId, enabled: state.screenCapture.enabled, source: state.screenCapture.source };
+          } finally { if (enabled) state.permissionChanging = false; }
         }
         case 'session.label': {
           const state = open(sessionId);
@@ -2641,6 +2865,48 @@ export function createHost({
           }, env);
           return { ...snapshot, writerActive: opened?.running !== undefined || await sessionWriterActive(path) };
         }
+        case 'session.image.preview': {
+          if (imagePreviews >= 4) throw new KernelError('image_preview_busy');
+          imagePreviews++;
+          try {
+            const env = await environmentFor(requiredString(message.params.projectRoot, 'projectRoot'));
+            const opened = sessions.get(sessionId);
+            if (opened !== undefined && workspaceIdentity(opened.environment.projectRoot) !== workspaceIdentity(env.projectRoot)) {
+              throw new KernelError('image_owner_mismatch');
+            }
+            const path = recordPathOf(sessionId, env);
+            try { await access(path); }
+            catch (error) {
+              if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new KernelError('session_not_found');
+              throw error;
+            }
+            const session = opened?.session ?? createSessionLog({ directory: env.directory, id: sessionId });
+            const references = (await session.read()).flatMap(event =>
+              event.kind === 'tool' && isRecord(event.result) && event.result.failed !== true && event.result.images !== undefined
+                ? checkedImageReferences(event.result.images) : []);
+            const reference = references.find(item => item.id === message.params.imageId);
+            if (reference === undefined) throw new KernelError('image_not_in_session');
+            const media = createMediaStore({ ...env.config, workspaceRoot: env.projectRoot }, sessionId, references);
+            return await imagePreview(media, reference);
+          } finally { imagePreviews--; }
+        }
+        case 'browser.stop':
+        case 'browser.resume': {
+          if (!permissionControl) throw new KernelError('browser_control_trusted_ui_required');
+          return await serializeSessionConfiguration(sessionId, async () => {
+            const state = open(sessionId);
+            if (message.method === 'browser.resume') {
+              const denied = permissionDenial(state.permission, 'external');
+              if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
+              await state.browser.verify();
+              state.browserPaused = false;
+            } else {
+              state.browserPaused = true;
+              await revokeSessionMcp(state, BROWSER_SERVER);
+            }
+            return { sessionId, browser: browserView(state) };
+          });
+        }
         case 'session.control': {
           const env = await environmentFor(requiredString(message.params.projectRoot, 'projectRoot'));
           return await requestAgentControl(env.projectRoot, sessionId, message.params.request as AgentControlRequest);
@@ -2662,18 +2928,48 @@ export function createHost({
           // Host 负责读取和排版完整记录并写出文件，客户端只选择目标路径。
           // 用户通过保存对话框选择的导出路径不属于模型工具写入，不受项目边界限制。
           const record = await readRecord(sessionId, { fullResults: true });
+          const path = requiredString(message.params.path, 'path');
+          const exportEnvironment = sessions.get(sessionId)?.environment
+            ?? sessions.get(branchOwner(sessionId) ?? '')?.environment ?? defaultEnvironment;
+          const assets: ExportAsset[] = [];
+          const assetFailures: { path: string; code: string }[] = [];
+          const imageUrls = new Map<string, string>();
+          const seenImages = new Map<string, ImageReference>();
+          let assetBytes = 0;
+          const collectImages = async (id: string, records: readonly ExportRecord[]) => {
+            const references = records.flatMap(item => item.result?.images ?? []);
+            if (references.length === 0) return;
+            const media = createMediaStore({ ...exportEnvironment.config, workspaceRoot: exportEnvironment.projectRoot }, id, references);
+            for (const reference of references) {
+              const previous = seenImages.get(reference.id);
+              if (previous !== undefined && (Object.keys(previous) as (keyof ImageReference)[]).every(key => previous[key] === reference[key])) continue;
+              const failedPath = join(dirname(path), decodeURIComponent(exportImageUrl(path, reference.id)));
+              if (previous !== undefined) {
+                imageUrls.delete(reference.id);
+                assetFailures.push({ path: failedPath, code: 'export_asset_conflict' });
+                continue;
+              }
+              seenImages.set(reference.id, reference);
+              if (assets.length >= MAX_EXPORT_ASSETS || assetBytes + reference.bytes > IMAGE_LIMITS.storageBytes) {
+                assetFailures.push({ path: failedPath, code: 'export_asset_limit_exceeded' });
+                continue;
+              }
+              try {
+                const data = await media.read(reference);
+                assets.push({ reference, data });
+                assetBytes += data.length;
+                imageUrls.set(reference.id, exportImageUrl(path, reference.id));
+              } catch (error) {
+                assetFailures.push({ path: failedPath, code: errorCode(error) ?? 'image_unavailable' });
+              }
+            }
+          };
           const header: SessionHeader | undefined = record.header ?? undefined;
           const exportRecords = record.events.flatMap((event) => {
             const item = exportRecordOf(event);
             return item === undefined ? [] : [item];
           });
-          const main = exportMarkdown(exportRecords, {
-            id: sessionId,
-            projectRoot: header?.projectRoot,
-            createdAt: header?.createdAt ?? null,
-            // 先确定导出快照的末尾序号，避免读取期间追加的新事件混入本次导出。
-            unfinished: sessions.get(sessionId)?.running !== undefined,
-          });
+          await collectImages(sessionId, exportRecords);
           // 同时导出父会话记录引用的派生会话内容。
           const branches = [];
           const skipped = [];
@@ -2693,12 +2989,19 @@ export function createHost({
               const exported = exportRecordOf(event);
               return exported === undefined ? [] : [exported];
             });
-            branches.push({ id: branchId, text: exportMarkdown(branchEvents, { id: branchId, projectRoot: header?.projectRoot }) });
+            await collectImages(branchId, branchEvents);
+            branches.push({ id: branchId, events: branchEvents });
           }
           try {
             // 对每个导出文件分别返回结果，包括路径冲突和写入失败，并附上主文件路径。
-            const done = await writeExport(requiredString(message.params.path, 'path'), main, branches);
-            return { written: done.written, skipped: [...skipped, ...done.skipped], failed: done.failed };
+            const main = exportMarkdown(exportRecords, {
+              id: sessionId, projectRoot: header?.projectRoot, createdAt: header?.createdAt ?? null,
+              unfinished: sessions.get(sessionId)?.running !== undefined,
+            }, imageUrls);
+            const branchTexts = branches.map(branch => ({ id: branch.id,
+              text: exportMarkdown(branch.events, { id: branch.id, projectRoot: header?.projectRoot }, imageUrls) }));
+            const done = await writeExport(path, main, branchTexts, assets);
+            return { written: done.written, skipped: [...skipped, ...done.skipped], failed: [...assetFailures, ...done.failed] };
           } catch (cause) {
             if (cause instanceof KernelError) throw cause;
             // 无法创建目标目录时，报告整批导出尚未开始。
@@ -2797,6 +3100,9 @@ export function createHost({
             policySource: state.chain.modeSource,
             policyDefault: state.chain.configuredMode(),
             permission: sessionPermissionView(state, canControlPermission),
+            screenCapture: { enabled: state.screenCapture.enabled, source: state.screenCapture.source, changeAllowed: permissionControl },
+            search: state.search,
+            browser: browserView(state),
             denials: state.chain.denials(),
             delegation: currentGrant === undefined ? null : {
               grantId: currentGrant.id,
@@ -2809,6 +3115,7 @@ export function createHost({
               defaultPolicy: currentGrant.defaultPolicy,
               allowedPolicies: currentGrant.allowedPolicies,
               allowOperator: currentGrant.allowOperator,
+              allowScreenCapture: currentGrant.allowScreenCapture,
               allowedMcpServers: currentGrant.allowedMcpServers,
               allowedMcpTools: currentGrant.allowedMcpTools,
             },
@@ -2928,6 +3235,8 @@ export function createHost({
               ...(message.params.allowedPolicyNever === true ? ['never' as const] : []),
             ],
             allowOperator: message.params.allowOperator as boolean,
+            allowScreenCapture: message.params.allowScreenCapture === true,
+            confirmScreenCapture: message.params.confirmScreenCapture === true,
             allowedMcpServers: message.params.allowedMcpServers as string[] | undefined,
             allowedMcpTools: message.params.allowedMcpTools as string[] | undefined,
             confirmFullAccess: message.params.confirmFullAccess as boolean,
@@ -3096,7 +3405,7 @@ export function createHost({
               source: 'trusted-ui', trusted: message.params.trusted, updatedAt,
             });
             state.mcpTrust.set(mcpTrustKey(serverName, server.identityDigest), { source: 'trusted-ui', trusted: message.params.trusted, updatedAt });
-            if (!message.params.trusted) await state.mcp.revoke(serverName);
+            if (!message.params.trusted) await revokeSessionMcp(state, serverName);
             return { scope, server: serverName, trusted: message.params.trusted, updatedAt };
           }
 
@@ -3115,7 +3424,7 @@ export function createHost({
               if (scope === 'user' && current.identityDigest !== server.identityDigest) continue;
               const sessionTrust = state.mcpTrust.get(mcpTrustKey(serverName, current.identityDigest));
               const effective = sessionTrust ?? await mcpServerTrust(mcpTrustPathOf(), state.environment.projectRoot, serverName, current.identityDigest);
-              if (effective?.trusted !== true) await state.mcp.revoke(serverName);
+              if (effective?.trusted !== true) await revokeSessionMcp(state, serverName);
             }
           }
           return { version: store.version, scope, server: serverName, trusted: message.params.trusted };
@@ -3165,6 +3474,15 @@ export function createHost({
           const sessionTrust = session?.mcpTrust.get(mcpTrustKey(serverName, server.identityDigest));
           const trust = sessionTrust ?? await mcpServerTrust(mcpTrustPathOf(), env.projectRoot, serverName, server.identityDigest);
           if (trust?.trusted !== true) throw new KernelError('mcp_server_untrusted', { detail: serverName });
+          if (serverName === BROWSER_SERVER) {
+            if (session === undefined) throw new KernelError('browser_session_required');
+            const denied = permissionDenial(session.permission, 'external');
+            if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
+            if (session.browserPaused) throw new KernelError('browser_stopped');
+            await session.browser.verify();
+            const tools = await session.mcp.toolsOf(serverName, AbortSignal.timeout(25_000));
+            return { server: serverName, identityDigest: server.identityDigest, tools: tools.map(({ name, description, digest }) => ({ name, description, digest })) };
+          }
           const registry = createMcpRegistry([server]);
           try {
             const tools = await registry.toolsOf(serverName, AbortSignal.timeout(25_000));
@@ -3300,7 +3618,7 @@ export function createHost({
         await Promise.allSettled([...building]);
         const opened = [...sessions.values()];
         for (const state of opened) state.running?.abort();
-        const retired = await Promise.allSettled(opened.map((state) => retire(state)));
+        const retired = await Promise.allSettled(opened.map((state) => retire(state, true)));
         for (const result of retired) {
           if (result.status !== 'rejected') continue;
           const failure = result.reason;

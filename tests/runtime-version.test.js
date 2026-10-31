@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { parse, parseAllDocuments } from '../core/node_modules/yaml/dist/index.js';
 import { releaseManifest } from '../scripts/pack-release.js';
 
@@ -80,12 +81,18 @@ test('the ripgrep runtime uses the upstream platform-selecting dependency', () =
   assert.equal(Object.keys(release.optionalDependencies).some((name) => name.startsWith('ligule-rg-')), false);
 });
 
-test('the public CLI declares all external runtime dependencies of its private Core', () => {
+test('the public CLI separates its bundled JavaScript parser from consumer-platform dependencies', () => {
   const core = JSON.parse(read('../core/package.json'));
   const release = releaseManifest();
   for (const field of ['dependencies', 'optionalDependencies']) {
     for (const [name, version] of Object.entries(core[field] ?? {})) {
-      assert.equal(release[field]?.[name], version, `${name} must be installed by the consumer for its own platform`);
+      if (release.bundledDependencies.includes(name)) {
+        assert.equal(name, 'xlsx', 'native runtime dependencies must remain consumer-installed');
+        const fromCore = createRequire(new URL('../core/package.json', import.meta.url));
+        assert.equal(release[field]?.[name], fromCore(name).version);
+      } else {
+        assert.equal(release[field]?.[name], version, `${name} must be installed by the consumer for its own platform`);
+      }
     }
   }
 });

@@ -1,12 +1,25 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { assertCoreRuntimeMatches } from './core-runtime.js';
 import { assertSymlinksInside } from './runtime-tree.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
+export const BUNDLED_SPREADSHEET = 'xlsx';
+
+function spreadsheetPayload() {
+  const fromCore = createRequire(join(root, 'core', 'package.json'));
+  const path = join(dirname(fromCore.resolve(BUNDLED_SPREADSHEET)), 'package.json');
+  const manifest = JSON.parse(readFileSync(path, 'utf8'));
+  if (manifest.name !== BUNDLED_SPREADSHEET || typeof manifest.version !== 'string'
+    || Object.keys({ ...manifest.dependencies, ...manifest.optionalDependencies }).length !== 0) {
+    throw new Error('the bundled spreadsheet parser must be a dependency-free JavaScript package');
+  }
+  return { directory: dirname(path), version: manifest.version };
+}
 
 export function releaseManifest() {
   const manifest = JSON.parse(readFileSync(join(root, 'tui', 'package.json'), 'utf8'));
@@ -28,6 +41,8 @@ export function releaseManifest() {
     manifest[field] = { ...core[field], ...manifest[field] };
   }
   manifest.dependencies['@ligule/core'] = '*';
+  manifest.dependencies[BUNDLED_SPREADSHEET] = spreadsheetPayload().version;
+  manifest.bundledDependencies = [...new Set([...manifest.bundledDependencies, BUNDLED_SPREADSHEET])];
   return manifest;
 }
 
@@ -68,7 +83,16 @@ export async function packRelease(destination) {
     await assertSymlinksInside(stagedPackage);
     await assertCoreRuntimeMatches(join(root, 'core'), join(stagedPackage, 'node_modules', '@ligule', 'core'));
     // The public manifest installs external dependencies for the consumer's platform.
-    // Bundle only the private Core payload, without the build machine's native dependency tree.
+    // Bundle Core and the dependency-free spreadsheet parser; native modules remain consumer-installed.
+    const spreadsheet = spreadsheetPayload();
+    const spreadsheetDirectory = join(stagedPackage, 'node_modules', BUNDLED_SPREADSHEET);
+    if (!existsSync(spreadsheetDirectory)) {
+      await cp(spreadsheet.directory, spreadsheetDirectory, { recursive: true, dereference: true,
+        errorOnExist: true, force: false, filter: path => basename(path) !== 'node_modules' });
+    }
+    const installedSpreadsheet = JSON.parse(readFileSync(join(spreadsheetDirectory, 'package.json'), 'utf8'));
+    if (installedSpreadsheet.version !== spreadsheet.version) throw new Error('the bundled spreadsheet version differs from the source runtime');
+    await assertSymlinksInside(spreadsheetDirectory);
     const coreManifestPath = join(stagedPackage, 'node_modules', '@ligule', 'core', 'package.json');
     const coreManifest = JSON.parse(readFileSync(coreManifestPath, 'utf8'));
     delete coreManifest.dependencies;
@@ -79,6 +103,8 @@ export async function packRelease(destination) {
     const sourceInfo = packInfo(dryRun, 'deployed dry run');
     const included = new Set(sourceInfo.files.map(({ path }) => path));
     if (!included.has('package.json')) throw new Error('deployed package is missing package.json');
+    if (sourceInfo.files.some(({ path }) => path.startsWith(`node_modules/${BUNDLED_SPREADSHEET}/`)
+      && /\.(?:node|dll|exe|so|dylib)$/iu.test(path))) throw new Error('the bundled spreadsheet parser must not contain platform-native binaries');
     await mkdir(destinationDirectory, { recursive: true });
     const finalOutput = execPnpm(['--dir', stagedPackage, 'pack', '--json', '--pack-destination', destinationDirectory, '--ignore-workspace'], { cwd: root, encoding: 'utf8' });
     const finalInfo = packInfo(finalOutput, 'staged package');

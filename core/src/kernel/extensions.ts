@@ -111,7 +111,7 @@ export async function extensionSources(layers: SourceLayers = {}, { projectRoot,
       ignored.push({
         code: 'extension_source_ignored',
         path: layer,
-        detail: `${entries.length} extension path(s) in the ${layer} layer are not loaded: a repository does not decide what code this process runs (D68)`,
+        detail: `${entries.length} extension path(s) in the ${layer} layer are not loaded: a repository does not decide what code this process runs`,
       });
     } else if (!Array.isArray(entries)) {
       ignored.push({ code: 'extension_entries_invalid', path: layer, detail: `extensions must be an array of paths, got ${entries.invalid}` });
@@ -162,7 +162,19 @@ interface LoadOptions {
 export async function loadExtensions(paths: string[], options: LoadOptions) {
   const loaded: { name: string; path: string; tools: string[] }[] = [];
   const diagnostics: ExtensionDiagnostic[] = [];
-  const undo: (() => void)[] = [];
+  const undo: (() => void)[][] = [];
+
+  function clean(owns: (() => void)[]) {
+    const errors: unknown[] = [];
+    while (owns.length > 0) {
+      try {
+        owns.pop()?.();
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    return errors;
+  }
 
   for (const path of paths) {
     const owns: (() => void)[] = [];
@@ -209,14 +221,18 @@ export async function loadExtensions(paths: string[], options: LoadOptions) {
       owns.push(() => {
         if (typeof disposer === 'function') disposer();
       });
-      undo.push(() => {
-        for (const remove of owns.reverse()) remove();
-      });
+      undo.push(owns);
       loaded.push({ name, path, tools });
     } catch (error) {
-      for (const remove of owns.reverse()) remove();
+      const cleanupErrors = clean(owns);
       const failure = error instanceof KernelError ? error : new KernelError('extension_load_failed', { cause: error });
-      diagnostics.push({ code: failure.code, path, detail: failure.detail ?? (error as Error).message });
+      const detail = failure.detail ?? (error instanceof Error ? error.message : String(error));
+      const cleanupDetail = cleanupErrors.map((item) => item instanceof Error ? item.message : String(item));
+      diagnostics.push({
+        code: failure.code,
+        path,
+        detail: cleanupDetail.length === 0 ? detail : `${detail}; cleanup failed: ${cleanupDetail.join('; ')}`,
+      });
     }
   }
 
@@ -224,7 +240,10 @@ export async function loadExtensions(paths: string[], options: LoadOptions) {
     loaded,
     diagnostics,
     dispose() {
-      while (undo.length > 0) undo.pop()!();
+      const errors: unknown[] = [];
+      while (undo.length > 0) errors.push(...clean(undo.pop()!));
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 0) throw new AggregateError(errors, 'extension cleanup failed');
     },
   };
 }

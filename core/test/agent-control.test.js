@@ -5,6 +5,11 @@ import { join, resolve } from 'node:path';
 import { createDelegationGrant, listDelegationGrants, requireDelegationGrant, revokeDelegationGrant, assertDelegationMcpServer, assertDelegationMcpTool, assertDelegationPermission, assertDelegationPolicy } from '../dist/host/agent-control.js';
 import { createPermissionContext } from '../dist/kernel/permission.js';
 import { withTuiHost } from './helpers/tui-host.js';
+import { createConfig } from '../dist/kernel/config.js';
+import { serveHost } from '../dist/host/host.js';
+import { hostProviderFromConfig } from '../dist/host/provider.js';
+import { createMemoryConnectionPair } from '../dist/host/memory.js';
+import { createConnection } from '../dist/host/connection.js';
 
 const root = resolve('testplace');
 
@@ -36,6 +41,43 @@ function input(projectRoot, overrides = {}) {
   };
 }
 
+test('screen capture requires an independent explicit confirmation and never follows Operator', async () => {
+  await fixture(async ({ projectRoot, storePath }) => {
+    const empty = await listDelegationGrants(storePath);
+    await assert.rejects(createDelegationGrant(storePath, input(projectRoot, { allowScreenCapture: true }), empty.version), { code: 'screen_capture_confirmation_required' });
+    const ordinary = await createDelegationGrant(storePath, input(projectRoot, { allowOperator: true }), empty.version);
+    assert.equal(ordinary.grants[0].allowScreenCapture, false);
+    const explicit = await createDelegationGrant(storePath, input(projectRoot, { allowScreenCapture: true, confirmScreenCapture: true }), ordinary.version);
+    const grant = explicit.grants.find(item => item.allowScreenCapture);
+    assert.equal(grant.confirmedScreenCapture, true);
+    assert.equal((await requireDelegationGrant(storePath, grant.id, projectRoot)).allowScreenCapture, true);
+    const stored = JSON.parse(await readFile(storePath, 'utf8'));
+    stored.grants.find(item => item.id === grant.id).source = 'legacy';
+    await writeFile(storePath, JSON.stringify(stored));
+    await assert.rejects(listDelegationGrants(storePath), { code: 'agent_control_store_invalid' });
+  });
+});
+
+test('an Operator Host startup option cannot exceed a grant without screen permission', async () => {
+  await fixture(async ({ projectRoot, directory, storePath }) => {
+    const created = await createDelegationGrant(storePath, input(projectRoot, { allowOperator: true }), (await listDelegationGrants(storePath)).version);
+    const grantId = created.grants[0].id;
+    const config = createConfig({ user: { boundary: projectRoot, workspaceRoot: projectRoot, host: { sessionDirectory: join(directory, 'sessions') } } });
+    const pair = createMemoryConnectionPair();
+    const host = serveHost({ ...pair.host, config, provider: hostProviderFromConfig(config), screenCaptureConsent: true,
+      agentControl: { grantId, storePath, operator: true, validate: () => requireDelegationGrant(storePath, grantId, projectRoot) },
+    });
+    const client = createConnection(pair.client);
+    try {
+      const { sessionId } = await client.request('session.create', { projectRoot });
+      const status = await client.request('status.get', { sessionId });
+      assert.deepEqual(status.screenCapture, { enabled: false, source: 'none', changeAllowed: false });
+      assert.equal(status.delegation.allowScreenCapture, false);
+      await assert.rejects(client.request('screen-capture.set', { sessionId, enabled: true, confirmScreenCapture: true }), { code: 'screen_capture_control_unavailable' });
+    } finally { pair.client.output.end(); await host.release(); }
+  });
+});
+
 test('delegation grants bind to a canonical project and reject a different project', async () => {
   await fixture(async ({ projectRoot, directory, storePath }) => {
     const empty = await listDelegationGrants(storePath);
@@ -56,11 +98,15 @@ test('existing grants without a recorded origin remain usable without inventing 
     const created = await createDelegationGrant(storePath, input(projectRoot), (await listDelegationGrants(storePath)).version);
     const legacy = JSON.parse(await readFile(storePath, 'utf8'));
     delete legacy.grants[0].source;
+    delete legacy.grants[0].allowScreenCapture;
+    delete legacy.grants[0].confirmedScreenCapture;
     delete legacy.audit[0].source;
     await writeFile(storePath, `${JSON.stringify(legacy)}\n`);
 
     const loaded = await listDelegationGrants(storePath);
     assert.equal(loaded.grants[0].source, 'legacy');
+    assert.equal(loaded.grants[0].allowScreenCapture, false);
+    assert.equal(loaded.grants[0].confirmedScreenCapture, false);
     assert.deepEqual(loaded.grants[0].allowedMcpServers, []);
     assert.deepEqual(loaded.grants[0].allowedMcpTools, []);
     assert.equal((await requireDelegationGrant(storePath, created.grants[0].id, projectRoot)).source, 'legacy');

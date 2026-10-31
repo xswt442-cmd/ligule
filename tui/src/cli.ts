@@ -132,8 +132,13 @@ let grantFlag: string | undefined;
 let langFlag: string | undefined;
 let jsonFlag = false;
 let operatorFlag = false;
+let screenCaptureFlag = false;
 for (let index = 0; index < argv.length; index += 1) {
   const arg = argv[index];
+  if (arg === '--allow-screen-capture') {
+    screenCaptureFlag = true;
+    continue;
+  }
   if (arg === '--operator') {
     operatorFlag = true;
     continue;
@@ -384,10 +389,11 @@ async function runOneRound(
   config: CliConfig,
   selection: ReturnType<typeof resolveMode>,
   extensions: Awaited<ReturnType<typeof extensionSources>>,
+  layers: Awaited<ReturnType<typeof configSnapshot>>['layers'],
   text: string,
   sessionId?: string,
 ): Promise<void> {
-  const host = createHost({ config, provider: providerFromConfig(config), policy: config.policy, extensions, ...selection });
+  const host = createHost({ config, provider: providerFromConfig(config), policy: config.policy, extensions, configLayers: layers, screenCaptureConsent: screenCaptureFlag, ...selection });
   const approvals = terminalApprovals();
   const connection: Pick<Connection, 'notify' | 'request'> = {
     notify: printNotification,
@@ -454,6 +460,8 @@ if (invalidLanguage) {
   printFailure('agent_control_grant_required', t('--grant 需要已创建的 Agent Control 授权 ID', '--grant needs an existing Agent Control grant ID'));
 } else if (grantFlag !== undefined && command !== 'mcp-server') {
   printFailure('cli_grant_requires_mcp_server', t('--grant 只能与 mcp-server 一起使用', '--grant is only valid with mcp-server'));
+} else if (screenCaptureFlag && command !== undefined && !['run', 'resume', 'tui'].includes(command)) {
+  printFailure('cli_screen_capture_flag_not_allowed', t('--allow-screen-capture 仅用于 run、resume 或 tui；MCP 截图须由可信界面明确创建授权。', '--allow-screen-capture is only valid for run, resume or tui; MCP screen capture requires a grant explicitly created in a trusted interface.'));
 } else if (operatorFlag && command !== 'mcp-server') {
   printFailure('cli_operator_requires_mcp_server', t('--operator 只能与 mcp-server 一起使用', '--operator is only valid with mcp-server'));
 } else if (command === '--version' || command === '-v') {
@@ -527,8 +535,8 @@ if (invalidLanguage) {
     printFailure('cli_run_needs_the_user_text', t('run 需要用户消息，例如 ligule run "read the note"', 'run needs a user message, for example ligule run "read the note"'));
   } else {
     try {
-      const { config, extensions } = await configSnapshot();
-      await runOneRound(config, resolveMode(config), extensions, text);
+      const { config, extensions, layers } = await configSnapshot();
+      await runOneRound(config, resolveMode(config), extensions, layers, text);
     } catch (error) {
       const fields = errorFields(error);
       printFailure(fields.code ?? 'cli_run_failed', fields.detail, fields.diagnostics);
@@ -544,8 +552,8 @@ if (invalidLanguage) {
     printFailure('cli_run_needs_the_user_text', t('resume 还需要用户消息，例如 ligule resume 5f3c "keep going"', 'resume also needs a user message, for example ligule resume 5f3c "keep going"'));
   } else {
     try {
-      const { config, extensions } = await configSnapshot();
-      await runOneRound(config, resolveMode(config), extensions, text, sessionId);
+      const { config, extensions, layers } = await configSnapshot();
+      await runOneRound(config, resolveMode(config), extensions, layers, text, sessionId);
     } catch (error) {
       const fields = errorFields(error);
       printFailure(fields.code ?? 'cli_resume_failed', fields.detail, fields.diagnostics);
@@ -672,6 +680,7 @@ if (invalidLanguage) {
         const { runTui } = await import('./tui/start.js');
         await runTui({
           config,
+          screenCaptureConsent: screenCaptureFlag,
           provider: hostProviderFromConfig(config),
           policy: config.policy,
           extensions,
@@ -698,6 +707,7 @@ if (invalidLanguage) {
   console.log(t('直接运行 ligule 打开终端界面；tui 子命令仍可使用。', 'Run ligule without a command to open the terminal UI; the tui subcommand remains available.'));
   console.log(t('mcp-server --project <绝对目录>：启动本地 stdio MCP 控制器；默认只读。使用 --grant <ID> 引用可信界面预先创建的外控授权。', 'mcp-server --project <absolute-directory>: start a local stdio MCP controller; read-only by default. Use --grant <ID> to reference a grant created in a trusted interface.'));
   console.log(t('mcp-server --operator：明确授权该本地 MCP 客户端读取并回应真实待决的审批/提问，以及修改会话级设置；Policy 的拒绝规则仍生效。', 'mcp-server --operator: authorize this local MCP client to review and answer real pending approvals/questions and change session settings; Policy denials remain in force.'));
+  console.log(t('run/resume/tui --allow-screen-capture：明确允许本进程的会话及内部子代理截图；不改变工具模式、Shell 权限或其他授权。', 'run/resume/tui --allow-screen-capture: explicitly permit screen capture by this process’s Sessions and internal children; tool modes, shell permissions and other grants remain independent.'));
   console.log(t('选项：--config <key.path=value>（可重复）、--mode <name>、--project <绝对目录>、--grant <ID>、--operator、--lang <zh|en|auto>', 'Options: --config <key.path=value> (repeatable), --mode <name>, --project <absolute-directory>, --grant <ID>, --operator, --lang <zh|en|auto>'));
   console.log(t('run、tui 和 host 从配置读取 model.api、model.baseURL 与 model.model；密钥由 model.apiKeyEnv 指定，未设置时读取 LIGULE_API_KEY。', 'run, tui and host read model.api, model.baseURL and model.model from config; the key uses model.apiKeyEnv, or LIGULE_API_KEY when unset.'));
   console.log(t('run、tui 和 host 默认使用 minimal 模式；--mode 可覆盖 mode 配置。tools 和 call 不读取模式。', 'run, tui and host use the minimal mode by default; --mode overrides the mode config. tools and call do not read a mode.'));

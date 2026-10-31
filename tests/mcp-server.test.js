@@ -328,7 +328,7 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     const listed = await first.client.listTools();
     const toolNames = listed.tools.map((tool) => tool.name).sort();
     assert.deepEqual(toolNames, [
-      'ligule_interaction_reply', 'ligule_run', 'ligule_run_await', 'ligule_run_cancel', 'ligule_run_start', 'ligule_run_status', 'ligule_session_configure', 'ligule_session_create',
+      'ligule_interaction_reply', 'ligule_run', 'ligule_run_await', 'ligule_run_cancel', 'ligule_run_start', 'ligule_run_status', 'ligule_session_close', 'ligule_session_configure', 'ligule_session_create',
       'ligule_session_list', 'ligule_session_open', 'ligule_session_read', 'ligule_session_send',
     ]);
     const readSchema = listed.tools.find((tool) => tool.name === 'ligule_session_read').inputSchema;
@@ -594,6 +594,7 @@ test('operator tools configure real sessions, answer Host interactions, and run 
   const requests = [];
   const queueGate = gate();
   const cancelGate = gate();
+  const draftGate = gate();
   let callId = 0;
   const endpoint = createServer(async (request, response) => {
     const chunks = [];
@@ -602,6 +603,27 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     requests.push(body);
     const last = body.messages.at(-1);
     const userText = body.messages.filter((message) => message.role === 'user').at(-1)?.content ?? '';
+    if (userText.includes('MCP_OPERATOR_DRAFT_GATE')) {
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: 'A separately inspectable provisional fragment.' } }] })}\n\n`);
+      await draftGate.waiting;
+      if (!response.destroyed) response.end(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`);
+      return;
+    }
+    if (userText.includes('MCP_OPERATOR_RESULT_REPAIR')) {
+      callId += 1;
+      sse(response, { tool_calls: [{ index: 0, id: `operator-call-${callId}`, type: 'function', function: {
+        name: 'ligule_delegation_result', arguments: JSON.stringify({ result: { answer: last?.role === 'tool' ? 'corrected result' : 42 } }),
+      } }] });
+      return;
+    }
+    if (userText.includes('MCP_OPERATOR_RESULT_INVALID') && last?.role !== 'tool') {
+      callId += 1;
+      sse(response, { tool_calls: [{ index: 0, id: `operator-call-${callId}`, type: 'function', function: {
+        name: 'ligule_delegation_result', arguments: JSON.stringify({ result: { answer: 42 } }),
+      } }] });
+      return;
+    }
     if (userText.includes('MCP_OPERATOR_STRUCTURED')) {
       assert.ok((body.tools ?? []).some((tool) => tool.function?.name === 'ligule_delegation_result'));
       assert.ok((body.tools ?? []).some((tool) => tool.function?.name === 'read'));
@@ -673,7 +695,7 @@ test('operator tools configure real sessions, answer Host interactions, and run 
   context.client.setNotificationHandler(LoggingMessageNotificationSchema, (notification) => { notifications.push(notification); });
   try {
     const names = (await context.client.listTools()).tools.map((tool) => tool.name).sort();
-    assert.equal(names.length, 12);
+    assert.equal(names.length, 13);
     const project = await realpath(projectRoot);
     const invalidInitialModel = await context.client.callTool({ name: 'ligule_session_create', arguments: {
       projectRoot: project, initial: { model: { provider: 'legacy', model: 'not-in-this-config' } },
@@ -750,6 +772,49 @@ test('operator tools configure real sessions, answer Host interactions, and run 
       sessionId: structuredSession.sessionId,
     } }), 'operator_structured_mode_restored');
     assert.equal(restoredMode.effective.mode, 'full');
+    const drafting = toolData(await context.client.callTool({ name: 'ligule_run_start', arguments: {
+      sessionId: structuredSession.sessionId, input: 'MCP_OPERATOR_DRAFT_GATE',
+    } }), 'operator_draft_start');
+    const pendingOutput = await waitFor(async () => {
+      const page = toolData(await context.client.callTool({ name: 'ligule_session_read', arguments: { sessionId: structuredSession.sessionId } }), 'operator_provisional_read');
+      return page.provisionalOutput ?? undefined;
+    }, 'provisional output persisted through stdio MCP');
+    assert.equal(pendingOutput.provisional, true);
+    assert.equal(pendingOutput.text, 'A separately inspectable provisional fragment.');
+    draftGate.release();
+    assert.equal((await waitForOutcome(context.client, drafting.operationId)).state, 'done');
+    const committedPage = toolData(await context.client.callTool({ name: 'ligule_session_read', arguments: { sessionId: structuredSession.sessionId } }), 'operator_committed_read');
+    assert.equal(committedPage.provisionalOutput, null);
+    for (const input of ['MCP_OPERATOR_RESULT_ABSENT', 'MCP_OPERATOR_RESULT_INVALID']) {
+      const failedStructure = toolData(await context.client.callTool({ name: 'ligule_run', arguments: {
+        sessionId: structuredSession.sessionId,
+        input,
+        delegation: { outputSchema: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] } },
+        timeoutMs: 5_000,
+      } }), 'operator_invalid_structure');
+      assert.equal(failedStructure.state, 'failed');
+      assert.equal(failedStructure.code, 'delegation_result_missing');
+      assert.equal(failedStructure.result.state, 'failed');
+      assert.equal(failedStructure.result.stopReason, 'validation_failed');
+      assert.equal(failedStructure.result.validation.status, 'invalid');
+      assert.deepEqual(failedStructure.result.artifacts, [{ kind: 'session', sessionId: structuredSession.sessionId }]);
+      const failedTurn = await findHistoryRecord(context.client, structuredSession.sessionId,
+        record => record.kind === 'turn' && record.json.includes('delegation_result_missing'));
+      assert.equal(JSON.parse(failedTurn.record.json).status, 'failed');
+      if (input.endsWith('INVALID')) {
+        assert.ok(await findHistoryRecord(context.client, structuredSession.sessionId,
+          record => record.kind === 'tool' && record.json.includes('delegation_result_invalid')));
+      }
+    }
+    const correctedStructure = toolData(await context.client.callTool({ name: 'ligule_run', arguments: {
+      sessionId: structuredSession.sessionId,
+      input: 'MCP_OPERATOR_RESULT_REPAIR',
+      delegation: { outputSchema: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] } },
+      timeoutMs: 5_000,
+    } }), 'operator_corrected_structure');
+    assert.equal(correctedStructure.state, 'done');
+    assert.equal(correctedStructure.result.validation.status, 'valid');
+    assert.deepEqual(correctedStructure.result.output.structured, { answer: 'corrected result' });
     const invalidConfiguredModel = await context.client.callTool({ name: 'ligule_session_configure', arguments: {
       sessionId, changes: { model: { provider: 'legacy', model: 'not-in-this-config' } },
     } });
@@ -940,6 +1005,7 @@ test('operator tools configure real sessions, answer Host interactions, and run 
   } finally {
     queueGate.release();
     cancelGate.release();
+    draftGate.release();
     await context.close();
     endpoint.closeAllConnections();
     await new Promise((done) => endpoint.close(done));

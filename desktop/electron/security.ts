@@ -5,8 +5,8 @@ import type { DesktopNotification } from './api.js';
 export const APP_PAGE = 'app://ligule/index.html';
 export const DEV_PAGE = 'http://localhost:5188/';
 export const MAX_FRAME_BYTES = 16 * 1024 * 1024;
-export const PRODUCTION_CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self'; connect-src 'none'; frame-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
-export const DEVELOPMENT_CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self' ws://localhost:5188; frame-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
+export const PRODUCTION_CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; font-src 'self'; connect-src 'none'; frame-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
+export const DEVELOPMENT_CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; connect-src 'self' ws://localhost:5188; frame-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
 
 export function developmentCsp(nonce: unknown): string {
   if (typeof nonce !== 'string' || !/^[A-Za-z0-9+/]{43}=$/u.test(nonce)) throw new Error('desktop_development_nonce_invalid');

@@ -20,7 +20,15 @@ export function loadAssembly<TKernel>(kernel: TKernel, manifest: readonly Plugin
 
   // 按加载顺序逆序卸载插件。
   function unwind() {
-    while (installed.length > 0) installed.pop()?.dispose();
+    const errors: unknown[] = [];
+    while (installed.length > 0) {
+      try {
+        installed.pop()?.dispose();
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    return errors;
   }
 
   try {
@@ -41,7 +49,8 @@ export function loadAssembly<TKernel>(kernel: TKernel, manifest: readonly Plugin
     }
   } catch (error) {
     // 加载失败时卸载已成功加载的插件，再抛出原始错误。
-    unwind();
+    const cleanupErrors = unwind();
+    if (cleanupErrors.length > 0) throw new AggregateError([error, ...cleanupErrors], 'assembly setup and cleanup failed');
     throw error;
   }
 
@@ -51,7 +60,9 @@ export function loadAssembly<TKernel>(kernel: TKernel, manifest: readonly Plugin
       return installed.map((entry) => entry.name);
     },
     dispose() {
-      unwind();
+      const errors = unwind();
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 0) throw new AggregateError(errors, 'assembly cleanup failed');
     },
   };
 }

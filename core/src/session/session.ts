@@ -6,13 +6,15 @@
 import { mkdir, open, truncate, type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 import { KernelError, KernelRuntimeError } from '../kernel/error.js';
-import { loadCheckpointFile } from './checkpoint.js';
+import { loadCheckpointFile, type CompactionBlock } from './checkpoint.js';
+import { checkedImageReferences } from './media.js';
 import { createSessionHeader } from './format.js';
 import { readSessionRecord } from './record.js';
 import { acquireSessionLock } from './lock.js';
 import type { SessionEvent, PendingSessionEvent, SessionHeader } from './format.js';
 import type { ReadSessionRecord } from './record.js';
 import type { SessionLock } from './lock.js';
+import { createStreamDraft, readStreamDraft, type StreamDraftWriter, type ProvisionalOutput } from './stream-draft.js';
 
 export interface SessionMetadata {
   readonly projectRoot?: string;
@@ -36,10 +38,44 @@ export interface SessionLog {
   read(): Promise<SessionEvent[]>;
   header(): Promise<SessionHeader | undefined>;
   modelView(): Promise<unknown[]>;
+  beginOutput(userSeq: number | undefined, onFailure: (error: KernelRuntimeError) => void): StreamDraftWriter;
+  readProvisionalOutput(events: readonly SessionEvent[]): Promise<ProvisionalOutput | null>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export function projectModelView(events: readonly SessionEvent[], blocks: readonly Pick<CompactionBlock, 'fromSeq' | 'toSeq' | 'text'>[] = []): unknown[] {
+  const view = [];
+  let blockIndex = 0;
+  let reasoning = '';
+  for (const event of events) {
+    while (blockIndex < blocks.length && event.seq > blocks[blockIndex].toSeq) blockIndex += 1;
+    const block = blocks[blockIndex];
+    if (block !== undefined && event.seq >= block.fromSeq) {
+      if (event.seq === block.fromSeq) view.push({ role: 'user', text: block.text });
+      continue;
+    }
+    if (event.kind === 'user') {
+      reasoning = '';
+      view.push({ role: 'user', text: event.text });
+    } else if (event.kind === 'reasoning') {
+      reasoning += typeof event.text === 'string' ? event.text : '';
+    } else if (event.kind === 'assistant') {
+      const assistantReasoning = typeof event.reasoning === 'string' ? event.reasoning : reasoning;
+      view.push({ role: 'assistant', text: event.text, toolCalls: event.toolCalls,
+        ...(assistantReasoning === '' ? {} : { reasoning: assistantReasoning }) });
+      reasoning = '';
+    } else if (event.kind === 'tool') {
+      if (!isRecord(event.result)) throw new TypeError('a tool event has no result object');
+      const result = event.result;
+      const content = result.content === '' && result.failed ? `${result.code}: ${result.reason ?? 'no output'}` : result.content;
+      view.push({ role: 'tool', id: event.callId, tool: event.tool, content, failed: result.failed, code: result.code,
+        ...(result.images === undefined ? {} : { images: checkedImageReferences(result.images) }) });
+    }
+  }
+  return view;
 }
 
 /**
@@ -178,6 +214,8 @@ export function createSessionLog({ directory, id, meta }: CreateSessionLogOption
     directory,
     path,
     append,
+    beginOutput: (userSeq, onFailure) => createStreamDraft(directory, id, userSeq, onFailure),
+    readProvisionalOutput: events => readStreamDraft(directory, id, events),
     acquire: () => serialize(async () => {
       await takeOwnership();
       retained = true;
@@ -199,43 +237,7 @@ export function createSessionLog({ directory, id, meta }: CreateSessionLogOption
     async modelView(): Promise<unknown[]> {
       const events = await this.read();
       const { blocks } = await loadCheckpointFile({ directory, id, events });
-      const view = [];
-      let blockIndex = 0;
-      let reasoning = '';
-      for (const event of events) {
-        while (blockIndex < blocks.length && event.seq > blocks[blockIndex].toSeq) blockIndex += 1;
-        const block = blocks[blockIndex];
-        if (block !== undefined && event.seq >= block.fromSeq) {
-          if (event.seq === block.fromSeq) view.push({ role: 'user', text: block.text });
-          continue;
-        }
-        if (event.kind === 'user') {
-          reasoning = '';
-          view.push({ role: 'user', text: event.text });
-        } else if (event.kind === 'reasoning') {
-          reasoning += typeof event.text === 'string' ? event.text : '';
-        } else if (event.kind === 'assistant') {
-          const assistantReasoning = typeof event.reasoning === 'string' ? event.reasoning : reasoning;
-          view.push({ role: 'assistant', text: event.text, toolCalls: event.toolCalls,
-            ...(assistantReasoning === '' ? {} : { reasoning: assistantReasoning }) });
-          reasoning = '';
-        } else if (event.kind === 'tool') {
-          // `reason` 面向用户，`content` 面向模型。拒绝结果需将错误码和原因写入 `content`，
-          // 否则模型无法区分策略拒绝和空工具响应。
-          if (!isRecord(event.result)) throw new TypeError('a tool event has no result object');
-          const result = event.result;
-          const content = result.content === '' && result.failed ? `${result.code}: ${result.reason ?? 'no output'}` : result.content;
-          view.push({
-            role: 'tool',
-            id: event.callId,
-            tool: event.tool,
-            content,
-            failed: result.failed,
-            code: result.code,
-          });
-        }
-      }
-      return view;
+      return projectModelView(events, blocks);
     },
   };
   return session;

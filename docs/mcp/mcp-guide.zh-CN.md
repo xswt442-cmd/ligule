@@ -38,10 +38,11 @@ Windows 路径示例：
 }
 ```
 
-每个 MCP Server 进程只授权启动时指定的一个项目。客户端通过 MCP `tools/list` 发现十二个工具及其参数 schema：
+每个 MCP Server 进程只授权启动时指定的一个项目。客户端通过 MCP `tools/list` 发现十三个工具及其参数 schema：
 
 - `ligule_session_create`：在授权项目中创建会话。
 - `ligule_session_open`：接回已有会话。列表中的会话需要先接回，之后才能提交任务或读取记录。
+- `ligule_session_close`：释放空闲、队列为空且没有待决交互的会话。忙碌时返回 `control_session_busy`；先取消运行、等待停止，并显式清空队列后重试。关闭释放控制者的会话名额和记录锁，保留历史与已结束操作的查询（限当前进程最近 256 个操作）。关闭失败后会话暂停接受新工作，需重试清理。人工接管同样释放名额，原控制者不能重新抢回该会话。
 - `ligule_session_list`：有界列出授权项目中的会话。
 - `ligule_session_configure`：读取会话当前/待生效的设置和实际可用选项；操控者模式可修改会话设置。
 - `ligule_interaction_reply`：对真实待决的审批或提问作一次性答复；只接受原会话和请求编号。
@@ -69,7 +70,7 @@ Windows 路径示例：
 
 ## 委派运行与结构化结果
 
-`ligule_run` 与 `ligule_run_start` 接受可选 `delegation`。其中 `mode` 可选择具名或内联模式，但只能缩小当前会话的工具和提示片段范围，不能扩大会话、Permission、Policy 或 Grant 上限。`outputSchema` 可要求该轮提交符合受支持 JSON Schema 的结构化结果；模型必须调用 `ligule_delegation_result` 提交，通过校验后运行才会以有效结构化结果完成。模式和结果契约只作用于本次运行，不会创建新会话或修改项目配置。内部 `subagent` 是模型可调用的工具，和 MCP 外控的一轮委派不是同一个会话。
+`ligule_run` 与 `ligule_run_start` 接受可选 `delegation`。其中 `mode` 可选择具名或内联模式，但只能缩小当前会话的工具和提示片段范围，不能扩大会话、Permission、Policy 或 Grant 上限。`outputSchema` 可要求该轮提交符合受支持 JSON Schema 的结构化结果；模型必须调用 `ligule_delegation_result` 提交，通过校验后运行才会以有效结构化结果完成。无效提交可以在本轮现有迭代预算内纠正。如果运行最终只返回普通文本、没有有效提交，会以 `delegation_result_missing` 失败；结果为 `state: failed`、`stopReason: validation_failed`、`validation.status: invalid`。Loop 会在写入成功终态前把 Session 轮次记为失败。此前的工具副作用和 Session 记录都会保留，不会回滚或重放。取消和模型提供方失败仍保留各自的结果原因。未设置 `outputSchema` 时，普通运行完成行为不变。模式和结果契约只作用于本次运行，不会创建新会话或修改项目配置。内部 `subagent` 是模型可调用的工具，和 MCP 外控的一轮委派不是同一个会话。
 
 ## Agent Control 项目授权
 
@@ -85,7 +86,7 @@ MCP 会校验项目路径与 Grant 绑定一致，并将其默认 Permission、�
 
 可信 TUI/Desktop 接管外控会话时，会先取消正在运行的操作、清空尚未发送的队列并释放 Host 会话锁，再把会话交回本地用户。已完成的工具副作用不会被重放或撤销；旧进程的 `operationId` 在 Server 重启后不可恢复。
 
-新会话可在 `ligule_session_create` 的 `initial` 中一次性设置 `mode`、`policy`、`model`、`thinking`、`outputTokens` 和 `loopIterations`。已打开会话使用 `ligule_session_configure` 的 `changes`。单次更新只能改一个类别：Mode、Policy、生成设置或循环上限；生成设置类别内部可同时改模型、思考档位和输出上限。`loopIterations` 是每轮用户任务允许的模型/工具循环次数，必须是正安全整数；默认值来自项目 `[loop].iterations`，未设置时为 64。会话覆盖不改项目配置，保存在 Session JSONL 中，并在重新接回时恢复。`loop.modelCalls` 仍使用项目配置，不会随 `loopIterations` 一起变化。混合类别的请求会被 schema 拒绝，避免部分生效。当前格式的记录会保存并恢复 Mode、Policy 覆盖、Policy 拒绝计数与强制逐次审批状态，以及模型/生成设置。运行期间的生成设置和循环上限在下一轮开始时生效，Policy 在之后的工具判定生效，不能改变已经等待中的审批。旧格式会话仍可读取，但不能修改 Permission 或 Policy。响应中的 `applies` 明确给出时机。
+新会话可在 `ligule_session_create` 的 `initial` 中一次性设置 `mode`、`policy`、`model`、`thinking`、`outputTokens` 和 `loopIterations`。已打开会话使用 `ligule_session_configure` 的 `changes`。单次更新只能改一个类别：Mode、Policy、生成设置或循环上限；生成设置类别内部可同时改模型、思考档位和输出上限。`loopIterations` 是每轮用户任务允许的模型/工具循环次数，必须是正安全整数；默认值来自项目 `[loop].iterations`，未设置时为 64。项目 `[loop].maxParallelTools` 限制同时执行的独立工具调用数，必须是正安全整数，默认值为 4；内部子代理继承父级上限。这些值属于项目配置，不是会话覆盖。会话覆盖不改项目配置，保存在 Session JSONL 中，并在重新接回时恢复。`loop.modelCalls` 仍使用项目配置，不会随 `loopIterations` 一起变化。混合类别的请求会被 schema 拒绝，避免部分生效。当前格式的记录会保存并恢复 Mode、Policy 覆盖、Policy 拒绝计数与强制逐次审批状态，以及模型/生成设置。运行期间的生成设置和循环上限在下一轮开始时生效，Policy 在之后的工具判定生效，不能改变已经等待中的审批。旧格式会话仍可读取，但不能修改 Permission 或 Policy。响应中的 `applies` 明确给出时机。
 
 Node/Python 脚本调用需要逐次审批；`approval.request` 会包含规范脚本路径、SHA-256、解释器、工作区和 Permission，Operator 应向操作者展示这些信息。审批等待期间源文件或执行身份变化时，Host 拒绝执行并返回 `exec_script_binding_changed`。无法安全绑定的脚本、包装器、复合解释器调用和动态命令会 fail closed；它们不会因为 Operator 可以答复普通审批而获得绕过权限。
 
@@ -95,11 +96,11 @@ Node/Python 脚本调用需要逐次审批；`approval.request` 会包含规范�
 
 `ligule_run_status` 保留 `running/done/failed/cancelled` 四种终态兼容状态，并返回阶段、等待类型、进度、待决交互及有界事件。每个操作保留最近 128 个事件；使用 `after` 游标增量读取，单次最多 50 条。若事件缓存已覆盖旧游标，`eventGap` 会提示需要从现有状态重新同步。运行和等待交互时状态仍是 `running`。
 
-`ligule_session_send` 最多缓存 16 条下一轮消息，每条不超过 65,536 个字符。空闲会话立即开始一轮并返回 `operationId`；运行中的消息按接收顺序排队。运行正常完成后自动执行下一条，并在来源操作的事件流发布 `queue.started` 与新 `operationId`，即使新一轮很快结束也能查询。运行取消或失败会暂停队列，调用 `continue` 才继续；可用 `cancel_queued` 删除指定条目，或用 `clear_queue` 清空剩余条目。该队列只在 Server 进程内存在，重启后不恢复，也不会重放不确定的副作用。正在等待审批或提问时，排队消息不会替代交互答复。
+`ligule_session_send` 最多缓存 16 条下一轮消息，每条不超过 65,536 个字符。空闲会话立即开始一轮并返回 `operationId`；运行中的消息按接收顺序排队。运行正常完成后自动执行下一条，并在来源操作的事件流发布 `queue.started` 与新 `operationId`，即使新一轮很快结束也能查询。运行取消或失败（包括缺少有效委派结果）会暂停队列，调用 `continue` 才继续；可用 `cancel_queued` 删除指定条目，或用 `clear_queue` 清空剩余条目。该队列只在 Server 进程内存在，重启后不恢复，也不会重放不确定的副作用。正在等待审批或提问时，排队消息不会替代交互答复。
 
 成功结果同时提供 `structuredContent` 和 JSON 文本 `content`。工具执行失败时返回 `isError: true`，从文本 `content` 中解析 JSON 的 `code` 字段，例如 `session_locked` 或 `operation_not_found`；失败结果没有成功形状的 `structuredContent`。未知工具或不符合 schema 的参数返回 MCP 协议错误。运行状态只包含固定摘要和错误码，模型正文与工具结果通过会话记录读取。
 
-`ligule_session_read` 默认返回最近一页，页内记录按时间从早到晚排列。用响应里的 `nextBefore` 作为下一次读取的 `before`，即可逐页向更早记录读取。单次最多返回 50 条记录；每条 `json` 是 Host 记录的 JSON 文本片段，每段最多 8192 个 UTF-16 字符。
+`ligule_session_read` 默认返回最近一页，页内记录按时间从早到晚排列。用响应里的 `nextBefore` 作为下一次读取的 `before`，即可逐页向更早记录读取。单次最多返回 50 条记录；每条 `json` 是 Host 记录的 JSON 文本片段，每段最多 8192 个 UTF-16 字符。响应尚未写入 Session 记录时，结果还可能包含独立的 `provisionalOutput` 快照，并标记 `provisional: true`。字段包括 `responseId`、可空的 `userSeq`、`updatedAt`、`text`、`reasoning`、`textCharacters`、`reasoningCharacters` 和 `truncated`。它不是助手正式记录，也不会作为模型输入。若正式助手记录已有相同 `responseId`，读取时会忽略残留快照。快照损坏或超限时返回 `provisionalOutputError: session_stream_invalid`，但仍可读取正式记录。快照可能落后于 Provider 流；进程突然终止时，尚未写入的最后一批内容可能丢失。
 
 读取一个较大的完整记录时，先用 `at` 指定该记录的事件序号，再按响应里的 `nextOffset` 继续读取同一记录：
 

@@ -137,6 +137,17 @@ async function rows() {
   })`);
 }
 
+async function chooseImageInput(rowIndex, value) {
+  await evaluate(`(() => {
+    const select = document.querySelectorAll('.model-config-table tbody tr')[${rowIndex}]?.querySelector('select[aria-label]');
+    if (!select) throw new Error('image_input_select_missing');
+    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(select, ${JSON.stringify(value)});
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  })()`);
+  await waitFor(`document.querySelectorAll('.model-config-table tbody tr')[${rowIndex}]?.querySelector('select[aria-label]')?.value === ${JSON.stringify(value)}`, 'image_input_value_not_adopted');
+}
+
 async function saveService() {
   await clickButtonText('Save service|保存服务');
   await waitFor(`!document.querySelector('.service-form') && Boolean(document.querySelector('.service-row'))`, 'model_catalog_save_did_not_return_to_list', 20_000);
@@ -356,6 +367,7 @@ async function runScenarios() {
   sendResult('native_clean_data_root_has_no_machine_model_service', '通过', '真实 Host 的新隔离 LIGULE_HOME 没有内嵌模型服务、旧模型默认项或凭据；Renderer 显示空目录提示');
   await openNewService();
   await addRow('model-a', 'Alpha display', '128000', '16384', 0);
+  await chooseImageInput(0, 'true');
   await screenshot('model-catalog-normal-window.png');
   await window.setSize(760, 940);
   await waitFor(`Boolean(document.querySelector('.model-table-scroll'))`, 'model_catalog_table_scroll_missing');
@@ -375,6 +387,14 @@ async function runScenarios() {
 
   await saveService();
   await openEditor('Catalog one');
+  assert.equal(await evaluate(`document.querySelector('.model-config-table tbody tr select')?.value`), 'true');
+  await chooseImageInput(0, 'false');
+  await saveService();
+  await openEditor('Catalog one');
+  assert.equal(await evaluate(`document.querySelector('.model-config-table tbody tr select')?.value`), 'false');
+  assert.equal((await configSnapshot()).services.find(service => service.name === 'Catalog one').modelSettings.find(model => model.id === 'model-a').imageInput, false);
+  await screenshot('model-image-input-disabled.png');
+  sendResult('native_image_input_settings_round_trip', '通过', '真实 Electron 选择图像支持并保存，再仅修改图像输入为不支持；重新打开编辑器及 config.get 均保留 false');
   const beforeBoundDiscovery = (await fixtureControl('state')).discoveryRequests.length;
   await clickButtonText('Fetch and add models|获取可用模型并填入');
   await waitFixtureDiscovery(beforeBoundDiscovery, 200);
@@ -466,7 +486,7 @@ async function runScenarios() {
   catalog = await configSnapshot();
   first = catalog.services.find(service => service.name === 'Catalog one');
   assert.deepEqual(first.models, ['model-a', 'model-c']);
-  assert.deepEqual(first.modelSettings.find(item => item.id === 'model-a'), { id: 'model-a', name: 'Alpha display', contextTokens: 128000, outputTokens: 16384 });
+  assert.deepEqual(first.modelSettings.find(item => item.id === 'model-a'), { id: 'model-a', name: 'Alpha display', contextTokens: 128000, outputTokens: 16384, imageInput: false });
   sendResult('native_model_add_delete_and_keyboard_accessibility', '通过', `B 行的可访问删除按钮以真实窗口 Space 键激活（${JSON.stringify(deleteKeyEvents)}）；界面手动添加 C，真实 config.set 保存并经 Host 读回 A/C`);
 
   phase = 'invalid_inputs_never_modify_disk';
@@ -651,6 +671,7 @@ async function verifyPersistedStateAfterProcessReopen() {
   await waitFor(`Boolean(document.querySelector('textarea.composer-input')) && !document.querySelector('textarea.composer-input').readOnly`, 'reopened_composer_not_ready', 30_000);
   await waitFor(`document.querySelector('textarea.composer-input')?.value.includes('draft survives local Host restart') && document.querySelector('textarea.composer-input')?.value.includes('queued item survives local Host restart')`, 'draft_or_recovered_queue_not_restored_after_process_reopen', 30_000);
   const preferencesDocument = await hostCall('prefs.read');
+  assert.equal((await configSnapshot()).services.find(service => service.name === 'Catalog one').modelSettings.find(model => model.id === 'model-a').imageInput, false);
   const persistedDrafts = Object.values(preferencesDocument.settings.drafts ?? {}).flatMap(items => Object.values(items));
   assert.ok(persistedDrafts.some(value => value.includes('draft survives local Host restart') && value.includes('queued item survives local Host restart')));
   await screenshot('model-catalog-host-prefs-after-process-reopen.png');

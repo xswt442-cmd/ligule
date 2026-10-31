@@ -4,7 +4,7 @@ import { KernelError } from './error.js';
 
 const MAX_SCHEMA_DEPTH = 8;
 const SCHEMA_KEYS = [
-  'type', 'properties', 'required', 'description', 'minimum', 'maximum', 'minLength', 'maxLength', 'enum', 'items', 'anyOf', 'additionalProperties',
+  'type', 'properties', 'required', 'description', 'minimum', 'maximum', 'minLength', 'maxLength', 'minItems', 'maxItems', 'enum', 'items', 'anyOf', 'additionalProperties',
 ];
 const VALUE_TYPES = ['string', 'integer', 'number', 'boolean'];
 const NUMBER_TYPES = ['integer', 'number'];
@@ -74,6 +74,15 @@ function validateSchemaNode(
     && schema.minLength > schema.maxLength) {
     violations.push(`${path} has minLength above maxLength`);
   }
+  for (const bound of ['minItems', 'maxItems']) {
+    if (schema[bound] === undefined) continue;
+    if (!Number.isSafeInteger(schema[bound]) || (schema[bound] as number) < 0) {
+      violations.push(`${path}.${bound} must be a non-negative safe integer`);
+    } else if (type !== 'array') violations.push(`${path}.${bound} needs type array`);
+  }
+  if (typeof schema.minItems === 'number' && typeof schema.maxItems === 'number' && schema.minItems > schema.maxItems) {
+    violations.push(`${path} has minItems above maxItems`);
+  }
   if (type !== undefined && NUMBER_TYPES.includes(type)
     && typeof schema.minimum === 'number' && typeof schema.maximum === 'number'
     && Number.isFinite(schema.minimum) && Number.isFinite(schema.maximum) && schema.minimum > schema.maximum) {
@@ -129,10 +138,9 @@ function validateSchemaNode(
 
   if (type === 'array') {
     if (!isPlainObject(schema.items)) {
-      violations.push(`${path}.items must be a string schema`);
+      violations.push(`${path}.items must be a schema object`);
     } else {
       validateSchemaNode(schema.items, `${path}.items`, depth + 1, violations);
-      if (schemaType(schema.items) !== 'string') violations.push(`${path}.items.type must be string`);
     }
   } else if (schema.items !== undefined) {
     violations.push(`${path}.items requires type array`);
@@ -214,6 +222,11 @@ function validateValue(schema: Record<string, unknown>, value: unknown, path: st
       }
     }
   } else if (type === 'array' && Array.isArray(value) && isPlainObject(schema.items)) {
+    if (typeof schema.minItems === 'number' && value.length < schema.minItems) violations.push(`"${path}" must contain at least ${schema.minItems} items`);
+    if (typeof schema.maxItems === 'number' && value.length > schema.maxItems) {
+      violations.push(`"${path}" must contain at most ${schema.maxItems} items`);
+      return;
+    }
     value.forEach((item, index) => validateValue(schema.items as Record<string, unknown>, item, `${path}[${index}]`, violations));
   }
 }

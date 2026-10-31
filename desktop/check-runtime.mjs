@@ -62,8 +62,28 @@ const insideAppModules = async (name, resolver = requireFromApp) => {
     throw new Error(`${name} resolved outside the vendored runtime tree: ${modulePath}`);
   }
 };
-for (const name of ['tree-sitter', 'tree-sitter-bash', 'tree-sitter-pwsh', '@napi-rs/keyring', '@vscode/ripgrep']) {
+for (const name of ['tree-sitter', 'tree-sitter-bash', 'tree-sitter-pwsh', '@napi-rs/keyring', '@vscode/ripgrep',
+  'sharp', '@napi-rs/canvas', 'pdfjs-dist/legacy/build/pdf.mjs', 'officeparser', 'xlsx', 'yauzl']) {
   await insideAppModules(name);
+}
+const sharp = requireFromApp('sharp');
+const { createCanvas } = requireFromApp('@napi-rs/canvas');
+const canvas = createCanvas(3, 2);
+const context = canvas.getContext('2d');
+context.fillStyle = '#1c6ab4';
+context.fillRect(0, 0, 3, 2);
+const pixels = await sharp(canvas.toBuffer('image/png')).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+if (pixels.info.width !== 3 || pixels.info.height !== 2 || !pixels.data.subarray(0, 4).equals(Buffer.from([28, 106, 180, 255]))) {
+  throw new Error('the vendored PDF/image native rendering pipeline failed');
+}
+const pdf = await import(pathToFileURL(requireFromApp.resolve('pdfjs-dist/legacy/build/pdf.mjs')).href);
+if (typeof pdf.getDocument !== 'function' || typeof requireFromApp('officeparser').parseOffice !== 'function'
+  || typeof requireFromApp('xlsx').read !== 'function' || typeof requireFromApp('yauzl').open !== 'function') {
+  throw new Error('the vendored document parser dependencies did not load');
+}
+if (process.platform === 'win32') {
+  await insideAppModules('node-screenshots');
+  if (typeof requireFromApp('node-screenshots').Monitor.all !== 'function') throw new Error('the vendored screen capture binding did not load');
 }
 const bash = await library.parseCommand('git status', 'bash');
 const powershell = await library.parseCommand('Get-ChildItem', 'powershell');
@@ -118,7 +138,7 @@ try {
   await rm(temporary, { recursive: true, force: true });
 }
 
-console.log(`runtime check passed: Node ${process.version}; @ligule/core Host; modes; bash and PowerShell grammars; keyring; ${providerPackage} search; ${options.resources === undefined ? 'vendor' : 'resources'}=${runtimeRoot}`);
+console.log(`runtime check passed: Node ${process.version}; @ligule/core Host; modes; bash and PowerShell grammars; keyring; document/image dependencies; ${providerPackage} search; ${options.resources === undefined ? 'vendor' : 'resources'}=${runtimeRoot}`);
 
 function parseOptions(args) {
   const parsed = { resources: undefined, vendor: undefined };

@@ -23,6 +23,8 @@ export interface DelegationGrant {
   readonly defaultPolicy: DelegationPolicy;
   readonly allowedPolicies: readonly DelegationPolicy[];
   readonly allowOperator: boolean;
+  readonly allowScreenCapture: boolean;
+  readonly confirmedScreenCapture: boolean;
   readonly allowedMcpServers: readonly string[];
   readonly allowedMcpTools: readonly string[];
   readonly confirmedFullAccess: boolean;
@@ -61,6 +63,8 @@ export interface CreateDelegationGrantInput {
   readonly defaultPolicy: DelegationPolicy;
   readonly allowedPolicies: readonly DelegationPolicy[];
   readonly allowOperator: boolean;
+  readonly allowScreenCapture?: boolean;
+  readonly confirmScreenCapture?: boolean;
   readonly confirmFullAccess: boolean;
   readonly confirmUnrestrictedNetwork: boolean;
   readonly confirmPartialWorkspaceWrite?: boolean;
@@ -135,8 +139,8 @@ function isPolicy(value: unknown): value is DelegationPolicy {
 function validateGrant(value: unknown): DelegationGrant {
   const keys = ['id', 'name', 'projectRoot', 'defaultPermissionProfile', 'maxPermissionProfile', 'defaultNetwork', 'maxNetwork',
     'source', 'defaultPolicy', 'allowedPolicies', 'allowOperator', 'confirmedFullAccess', 'confirmedUnrestrictedNetwork',
-    'confirmedPartialWorkspaceWrite', 'allowedMcpServers', 'allowedMcpTools', 'createdAt', 'expiresAt', 'revokedAt'];
-  const requiredKeys = keys.filter((key) => !['source', 'confirmedPartialWorkspaceWrite', 'allowedMcpServers', 'allowedMcpTools'].includes(key));
+    'confirmedPartialWorkspaceWrite', 'allowedMcpServers', 'allowedMcpTools', 'allowScreenCapture', 'confirmedScreenCapture', 'createdAt', 'expiresAt', 'revokedAt'];
+  const requiredKeys = keys.filter((key) => !['source', 'confirmedPartialWorkspaceWrite', 'allowedMcpServers', 'allowedMcpTools', 'allowScreenCapture', 'confirmedScreenCapture'].includes(key));
   const mcpServers = isRecord(value) && Array.isArray(value.allowedMcpServers) ? value.allowedMcpServers : [];
   const mcpTools = isRecord(value) && Array.isArray(value.allowedMcpTools) ? value.allowedMcpTools : [];
   if (!isRecord(value) || Object.keys(value).some((key) => !keys.includes(key))
@@ -155,6 +159,9 @@ function validateGrant(value: unknown): DelegationGrant {
     || new Set(value.allowedPolicies).size !== value.allowedPolicies.length
     || !value.allowedPolicies.includes(value.defaultPolicy)
     || typeof value.allowOperator !== 'boolean'
+    || (value.allowScreenCapture !== undefined && typeof value.allowScreenCapture !== 'boolean')
+    || (value.confirmedScreenCapture !== undefined && typeof value.confirmedScreenCapture !== 'boolean')
+    || (value.allowScreenCapture === true && (value.confirmedScreenCapture !== true || value.source !== 'trusted-ui'))
     || typeof value.confirmedFullAccess !== 'boolean'
     || typeof value.confirmedUnrestrictedNetwork !== 'boolean'
     || (value.confirmedPartialWorkspaceWrite !== undefined && typeof value.confirmedPartialWorkspaceWrite !== 'boolean')
@@ -182,6 +189,8 @@ function validateGrant(value: unknown): DelegationGrant {
     defaultPolicy: value.defaultPolicy,
     allowedPolicies: Object.freeze([...value.allowedPolicies]) as DelegationPolicy[],
     allowOperator: value.allowOperator,
+    allowScreenCapture: value.allowScreenCapture === true,
+    confirmedScreenCapture: value.confirmedScreenCapture === true,
     allowedMcpServers: Object.freeze([...mcpServers]) as string[],
     allowedMcpTools: Object.freeze([...mcpTools]) as string[],
     confirmedFullAccess: value.confirmedFullAccess,
@@ -320,7 +329,9 @@ function checkedInput(input: CreateDelegationGrantInput): Omit<DelegationGrant, 
     || !input.allowedPolicies.includes(input.defaultPolicy)) throw new KernelError('agent_control_policy_limit_invalid');
   if (typeof input.allowOperator !== 'boolean' || typeof input.confirmFullAccess !== 'boolean'
     || typeof input.confirmUnrestrictedNetwork !== 'boolean'
-    || (input.confirmPartialWorkspaceWrite !== undefined && typeof input.confirmPartialWorkspaceWrite !== 'boolean')) {
+    || (input.confirmPartialWorkspaceWrite !== undefined && typeof input.confirmPartialWorkspaceWrite !== 'boolean')
+    || (input.allowScreenCapture !== undefined && typeof input.allowScreenCapture !== 'boolean')
+    || (input.confirmScreenCapture !== undefined && typeof input.confirmScreenCapture !== 'boolean')) {
     throw new KernelError('agent_control_grant_invalid');
   }
   const allowedMcpServers = input.allowedMcpServers ?? [];
@@ -334,6 +345,7 @@ function checkedInput(input: CreateDelegationGrantInput): Omit<DelegationGrant, 
   }
   if (input.maxPermissionProfile === 'full-access' && !input.confirmFullAccess) throw new KernelError('agent_control_full_access_confirmation_required');
   if (input.maxNetwork === 'unrestricted' && !input.confirmUnrestrictedNetwork) throw new KernelError('agent_control_unrestricted_network_confirmation_required');
+  if (input.allowScreenCapture === true && input.confirmScreenCapture !== true) throw new KernelError('screen_capture_confirmation_required');
   if (input.expiresAt !== null && (typeof input.expiresAt !== 'string' || !Number.isFinite(Date.parse(input.expiresAt))
     || Date.parse(input.expiresAt) <= Date.now())) throw new KernelError('agent_control_expiry_invalid');
   if (typeof input.projectRoot !== 'string' || !isAbsolute(input.projectRoot)) throw new KernelError('agent_control_project_invalid');
@@ -347,6 +359,8 @@ function checkedInput(input: CreateDelegationGrantInput): Omit<DelegationGrant, 
     defaultPolicy: input.defaultPolicy,
     allowedPolicies: [...input.allowedPolicies],
     allowOperator: input.allowOperator,
+    allowScreenCapture: input.allowScreenCapture === true,
+    confirmedScreenCapture: input.allowScreenCapture === true && input.confirmScreenCapture === true,
     allowedMcpServers: [...allowedMcpServers],
     allowedMcpTools: [...allowedMcpTools],
     confirmedFullAccess: input.confirmFullAccess,

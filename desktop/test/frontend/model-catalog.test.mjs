@@ -17,6 +17,26 @@ test('names and independent token limits round trip through editable rows', () =
   assert.equal(encodeModelRows(rows).modelSettings[0].id, 'model-renamed');
 });
 
+test('image input overrides preserve true, false, and automatic values', () => {
+  const configured = {
+    ...service,
+    models: ['image-on', 'image-off', 'automatic'],
+    modelSettings: [{ id: 'image-on', imageInput: true }, { id: 'image-off', imageInput: false }],
+  };
+  const rows = modelRows(configured);
+  assert.equal(rows[0].imageInput, true);
+  assert.equal(rows[1].imageInput, false);
+  assert.equal(rows[2].imageInput, undefined);
+  assert.deepEqual(encodeModelRows(rows), { models: configured.models, modelSettings: configured.modelSettings });
+});
+
+test('an image input false override is retained without other model settings', () => {
+  assert.deepEqual(
+    encodeModelRows([{ ...newModelRow('model-a'), imageInput: false }]),
+    { models: ['model-a'], modelSettings: [{ id: 'model-a', imageInput: false }] },
+  );
+});
+
 test('fetching adds models and preserves existing manually edited rows', () => {
   const row = { ...newModelRow('model-a'), name: 'Chosen name', contextTokens: '128000', outputTokens: '16384' };
   const merged = mergeModelRows([row], ['model-a', 'model-b', 'model-b']);

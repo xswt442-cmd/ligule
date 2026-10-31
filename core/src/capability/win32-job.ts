@@ -5,14 +5,21 @@ type NativeHandle = number | bigint;
 
 const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9;
 const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
+const JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x100;
+const PROCESS_SET_QUOTA = 0x0100;
+const PROCESS_TERMINATE = 0x0001;
 
 export interface OwnedProcessJob {
   assign(processHandle: NativeHandle): void;
+  assignPid(pid: number): void;
   close(): void;
 }
 
-export async function createOwnedProcessJob(options: { assignCurrentProcess?: boolean } = {}): Promise<OwnedProcessJob> {
+export async function createOwnedProcessJob(options: { assignCurrentProcess?: boolean; processMemoryBytes?: number } = {}): Promise<OwnedProcessJob> {
   if (process.platform !== 'win32') throw new KernelError('exec_job_platform');
+  if (options.processMemoryBytes !== undefined && (!Number.isSafeInteger(options.processMemoryBytes) || options.processMemoryBytes < 1)) {
+    throw new KernelError('exec_job_memory_limit_invalid');
+  }
   const koffi = (await import('koffi')).default;
   const kernel = koffi.load('kernel32.dll');
   const basic = koffi.struct({
@@ -45,6 +52,7 @@ export async function createOwnedProcessJob(options: { assignCurrentProcess?: bo
   const createJob = kernel.func('__stdcall', 'CreateJobObjectW', 'intptr', ['void*', 'str16']) as (security: null, name: null) => NativeHandle;
   const setInformation = kernel.func('__stdcall', 'SetInformationJobObject', 'int', ['intptr', 'int', koffi.pointer(extended), 'uint32_t']) as (job: NativeHandle, kind: number, info: unknown, length: number) => number;
   const currentProcess = kernel.func('__stdcall', 'GetCurrentProcess', 'intptr', []) as () => NativeHandle;
+  const openProcess = kernel.func('__stdcall', 'OpenProcess', 'intptr', ['uint32_t', 'int', 'uint32_t']) as (access: number, inherit: number, pid: number) => NativeHandle;
   const assignProcess = kernel.func('__stdcall', 'AssignProcessToJobObject', 'int', ['intptr', 'intptr']) as (job: NativeHandle, processHandle: NativeHandle) => number;
   const closeHandle = kernel.func('__stdcall', 'CloseHandle', 'int', ['intptr']) as (handle: NativeHandle) => number;
   const lastError = kernel.func('__stdcall', 'GetLastError', 'uint32_t', []) as () => number;
@@ -58,7 +66,7 @@ export async function createOwnedProcessJob(options: { assignCurrentProcess?: bo
       BasicLimitInformation: {
         PerProcessUserTimeLimit: 0,
         PerJobUserTimeLimit: 0,
-        LimitFlags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        LimitFlags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | (options.processMemoryBytes === undefined ? 0 : JOB_OBJECT_LIMIT_PROCESS_MEMORY),
         MinimumWorkingSetSize: 0,
         MaximumWorkingSetSize: 0,
         ActiveProcessLimit: 0,
@@ -74,7 +82,7 @@ export async function createOwnedProcessJob(options: { assignCurrentProcess?: bo
         WriteTransferCount: 0,
         OtherTransferCount: 0,
       },
-      ProcessMemoryLimit: 0,
+      ProcessMemoryLimit: options.processMemoryBytes ?? 0,
       JobMemoryLimit: 0,
       PeakProcessMemoryUsed: 0,
       PeakJobMemoryUsed: 0,
@@ -88,6 +96,16 @@ export async function createOwnedProcessJob(options: { assignCurrentProcess?: bo
     if (!ready && closeHandle(handle) === 0) throw failed('CloseHandle', lastError());
   }
   return {
+    assignPid(pid) {
+      if (!Number.isSafeInteger(pid) || pid < 1 || pid > 0xffffffff) throw failed('OpenProcess', 87);
+      const processHandle = openProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
+      if (processHandle === 0 || processHandle === 0n) throw failed('OpenProcess', lastError());
+      try {
+        if (closed || assignProcess(handle, processHandle) === 0) throw failed('AssignProcessToJobObject', closed ? 6 : lastError());
+      } finally {
+        if (closeHandle(processHandle) === 0) throw failed('CloseHandle', lastError());
+      }
+    },
     assign(processHandle) {
       if (closed) throw failed('AssignProcessToJobObject', 6);
       if (assignProcess(handle, processHandle) === 0) throw failed('AssignProcessToJobObject', lastError());

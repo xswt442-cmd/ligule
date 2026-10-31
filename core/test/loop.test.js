@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { appendFile, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createConfig, createKernel, createLoop, createSessionLog, KernelError, KernelRuntimeError } from '../dist/index.js';
 
@@ -261,6 +261,60 @@ test('a tool the host marked as completing the run stops it without another mode
   assert.equal(provider.requests.length, 1);
 });
 
+test('a parallel completion tool is a barrier and every call receives exactly one result', async () => {
+  const root = await mkdtemp(join(process.cwd(), 'testplace', 'loop-barrier-'));
+  try {
+    const session = createSessionLog({ directory: root, id: 'barrier' });
+    const kernel = createKernel({ session });
+    kernel.register(tool('finish', async () => ({ text: 'done' }), 'parallel'));
+    kernel.register(tool('write_marker', async () => { await appendFile(join(root, 'effects.txt'), 'executed\n'); return { text: 'written' }; }, 'parallel'));
+    const calls = ['finish', 'write_marker', 'write_marker'].map((name, index) => ({ type: 'tool-call', id: `barrier-${index}`, name, args: {} }));
+    await createLoop({ kernel, provider: scriptedProvider([calls]), session, completesRun: ['finish'] }).run('complete');
+    await assert.rejects(readFile(join(root, 'effects.txt')), { code: 'ENOENT' });
+    const results = (await session.read()).filter(event => event.kind === 'tool');
+    for (const call of calls) assert.equal(results.filter(event => event.callId === call.id).length, 1);
+    assert.deepEqual(results.map(event => event.result.code), [undefined, 'tool_skipped', 'tool_skipped']);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('parallel tools use a bounded rolling pool and cancellation does not start queued calls', async () => {
+  const root = await mkdtemp(join(process.cwd(), 'testplace', 'loop-pool-'));
+  try {
+    for (const cancel of [false, true]) {
+      const session = createSessionLog({ directory: root, id: cancel ? 'cancel' : 'all' });
+      const kernel = createKernel({ session });
+      const controller = new AbortController();
+      let active = 0;
+      let peak = 0;
+      let started = 0;
+      let finished = 0;
+      kernel.register(tool('work', async () => {
+        started += 1;
+        active += 1;
+        peak = Math.max(peak, active);
+        try {
+          if (cancel) controller.abort();
+          await sleep(10);
+          await appendFile(join(root, cancel ? 'cancelled.txt' : 'all.txt'), 'completed\n');
+          return { text: 'done' };
+        } finally { active -= 1; finished += 1; }
+      }, 'parallel'));
+      const calls = Array.from({ length: 7 }, (_, index) => ({ type: 'tool-call', id: `pool-${index}`, name: 'work', args: {} }));
+      const operation = createLoop({ kernel, session, provider: scriptedProvider([calls]), limits: { iterations: 2, modelCalls: 2, maxParallelTools: 2 } }).run('work', { signal: controller.signal });
+      if (cancel) await assert.rejects(operation, { code: 'loop_cancelled' });
+      else await operation;
+      assert.ok(peak <= 2);
+      assert.equal(active, 0);
+      assert.equal(finished, started);
+      if (cancel) assert.ok(started > 0 && started <= 2);
+      else assert.equal(started, 7);
+      const results = (await session.read()).filter(event => event.kind === 'tool');
+      for (const call of calls) assert.equal(results.filter(event => event.callId === call.id).length, 1);
+      assert.equal(results.filter(event => event.result.code === 'tool_skipped').length, cancel ? 7 - started : 0);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('a cancelled run persists its terminal and answers every dispatched call', async () => {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'loop-'));
   try {
@@ -271,6 +325,7 @@ test('a cancelled run persists its terminal and answers every dispatched call', 
     });
     const controller = new AbortController();
     kernel.register(tool('long', async (args, context) => {
+      setTimeout(() => controller.abort(), 5);
       await sleep(20);
       if (context.signal.aborted) throw new KernelError('exec_cancelled');
       return { text: 'never' };
@@ -279,7 +334,6 @@ test('a cancelled run persists its terminal and answers every dispatched call', 
       [{ type: 'tool-call', name: 'long' }],
       [{ type: 'text', text: 'not reached' }],
     ]);
-    setTimeout(() => controller.abort(), 5);
     await assert.rejects(
       () => createLoop({ kernel, provider, session }).run('go', { signal: controller.signal }),
       (error) => error.code === 'loop_cancelled',

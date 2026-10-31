@@ -8,7 +8,7 @@ import { Modal } from './ui';
 import { HoldSheet } from './HoldSheet';
 
 type Editor = { service: ModelService; rows: ModelRow[]; key: string; original: string };
-const editorSignature = (service: ModelService, rows: ModelRow[]) => JSON.stringify({ service, rows: rows.map(({ id, name, contextTokens, outputTokens }) => ({ id, name, contextTokens, outputTokens })) });
+const editorSignature = (service: ModelService, rows: ModelRow[]) => JSON.stringify({ service, rows: rows.map(({ id, name, contextTokens, outputTokens, imageInput }) => ({ id, name, contextTokens, outputTokens, imageInput })) });
 type Credential = { source: 'environment' | 'keyring' | 'missing'; configured: boolean };
 const PRESETS = {
   deepseek: { name: 'DeepSeek', api: 'chat-completions' as const, baseURL: 'https://api.deepseek.com/v1' },
@@ -226,16 +226,17 @@ export function ModelPanel({ client, projectRoot, onEdit }: {
       <label>{t('服务地址', 'Base URL')}<input type="url" value={editor.service.baseURL} onChange={event => patch({ baseURL: event.target.value })} placeholder="https://api.example.com/v1" required /></label>
       <section className="service-model-catalog" aria-label={t('模型目录', 'Model catalog')}>
         <div className="model-catalog-heading"><h3>{t('模型目录', 'Model catalog')} <span>{editor.rows.length}/128</span></h3><button type="button" disabled={busy || editor.service.api !== 'chat-completions' || editor.service.baseURL.trim() === '' || !validReference} onClick={() => void fetchModels()}>{t('获取可用模型并填入', 'Fetch and add models')}</button></div>
-        <p className="model-catalog-help">{t('Token 数留空使用默认值。请按模型实际能力填写；获取列表会保留已有参数，不会推测模型上限。', 'Blank token limits use defaults. Enter limits supported by the model; fetching preserves existing settings and does not infer token limits.')}</p>
-        <div className="model-table-scroll" tabIndex={0} aria-label={t('模型配置表，可横向滚动', 'Model configuration table, scroll horizontally')}><table className="model-config-table"><thead><tr><th scope="col">{t('模型标识', 'Model ID')}</th><th scope="col">{t('显示名称', 'Display name')}</th><th scope="col">{t('上下文窗口', 'Context window')}</th><th scope="col">{t('最大输出 token', 'Max output tokens')}</th><th scope="col"><span className="sr-only">{t('操作', 'Actions')}</span></th></tr></thead><tbody>
+        <p className="model-catalog-help">{t('Token 数留空使用默认值。图像输入选择“自动”时仅启用已验证模型，未知模型默认拒绝图片；请按服务实际能力选择“支持”。获取列表会保留已有参数。', 'Blank token limits use defaults. Automatic image input enables only verified models; unknown models reject images. Select Supported only when the service supports images. Fetching preserves existing settings.')}</p>
+        <div className="model-table-scroll" tabIndex={0} aria-label={t('模型配置表，可横向滚动', 'Model configuration table, scroll horizontally')}><table className="model-config-table"><thead><tr><th scope="col">{t('模型标识', 'Model ID')}</th><th scope="col">{t('显示名称', 'Display name')}</th><th scope="col">{t('上下文窗口', 'Context window')}</th><th scope="col">{t('最大输出 token', 'Max output tokens')}</th><th scope="col">{t('图像输入', 'Image input')}</th><th scope="col"><span className="sr-only">{t('操作', 'Actions')}</span></th></tr></thead><tbody>
           {editor.rows.map((row, index) => <tr key={row.key}>
             <td><input aria-label={t(`第 ${index + 1} 行模型标识`, `Model ID, row ${index + 1}`)} value={row.id} maxLength={256} onChange={event => patchRow(row.key, { id: event.target.value })} placeholder="model-id" required /></td>
             <td><input aria-label={t(`第 ${index + 1} 行显示名称`, `Display name, row ${index + 1}`)} value={row.name} maxLength={100} onChange={event => patchRow(row.key, { name: event.target.value })} placeholder={row.id || t('可选', 'Optional')} /></td>
             <td><input type="number" min={1} step={1} inputMode="numeric" aria-label={t(`第 ${index + 1} 行上下文窗口`, `Context window, row ${index + 1}`)} value={row.contextTokens} onChange={event => patchRow(row.key, { contextTokens: event.target.value })} placeholder={t('默认', 'Default')} /></td>
             <td><input type="number" min={1} step={1} inputMode="numeric" aria-label={t(`第 ${index + 1} 行最大输出 token`, `Max output tokens, row ${index + 1}`)} value={row.outputTokens} onChange={event => patchRow(row.key, { outputTokens: event.target.value })} placeholder={t('默认', 'Default')} /></td>
+            <td><select aria-label={t(`第 ${index + 1} 行图像输入`, `Image input, row ${index + 1}`)} value={row.imageInput === undefined ? 'auto' : String(row.imageInput)} onChange={event => patchRow(row.key, { imageInput: event.target.value === 'auto' ? undefined : event.target.value === 'true' })}><option value="auto">{t('自动', 'Automatic')}</option><option value="true">{t('支持', 'Supported')}</option><option value="false">{t('不支持', 'Unsupported')}</option></select></td>
             <td><button type="button" className="icon-button model-remove-row" aria-label={t(`删除模型 ${row.id || index + 1}`, `Delete model ${row.id || index + 1}`)} onClick={() => setEditor(current => current === null ? null : { ...current, rows: current.rows.filter(item => item.key !== row.key) })}><Icon name="trash" size={14} /></button></td>
           </tr>)}
-          {editor.rows.length === 0 && <tr><td colSpan={5} className="model-catalog-empty">{t('获取服务模型列表，或手动添加第一个模型。', 'Fetch models from the service or add your first model manually.')}</td></tr>}
+          {editor.rows.length === 0 && <tr><td colSpan={6} className="model-catalog-empty">{t('获取服务模型列表，或手动添加第一个模型。', 'Fetch models from the service or add your first model manually.')}</td></tr>}
         </tbody></table></div>
         <button type="button" className="model-add-row" disabled={editor.rows.length >= 128} onClick={() => setEditor(current => current === null ? null : { ...current, rows: [...current.rows, newModelRow()] })}><Icon name="plus" size={14} />{t('添加模型', 'Add model')}</button>
       </section>

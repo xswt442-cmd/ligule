@@ -5,6 +5,21 @@ import type { ProviderDiagnostic } from './status';
 
 export type ToolCall = { id: string; name: string; args?: Record<string, unknown> };
 
+export type ImageReference = {
+  kind: 'image';
+  version: 1;
+  id: string;
+  workspace: string;
+  sessionId: string;
+  source: 'file' | 'desktop' | 'browser' | 'document';
+  mimeType: 'image/png';
+  bytes: number;
+  width: number;
+  height: number;
+  sha256: string;
+  createdAt: string;
+};
+
 export type Verdict = {
   decision?: string;
   via?: string;
@@ -38,6 +53,7 @@ export type Record_ = {
     reason?: string;
     content?: unknown;
     spilled?: string;
+    images?: ImageReference[];
   };
   // 权限判定结果写入记录并显示在界面中，但不进入模型上下文。
   verdict?: Verdict;
@@ -74,6 +90,7 @@ export type Row = {
   code?: string;
   diagnostics?: ProviderDiagnostic;
   callId?: string;
+  images?: ImageReference[];
   // 卡片标题下方显示目标对象和操作摘要。
   summary?: string;
   // 卡片右侧显示退出码、溢出文件、判定、派生会话和耗时等状态。
@@ -320,6 +337,7 @@ function projected(record: Record_, options: { startedAt?: number; now?: number 
         : capabilityOf(record.tool, record.args),
       code: result.code,
       callId: record.callId,
+      ...(result.failed !== true && Array.isArray(result.images) ? { images: result.images } : {}),
       summary: change.summary,
       diff: change.diff,
       notes,

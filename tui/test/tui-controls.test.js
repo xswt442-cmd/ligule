@@ -50,6 +50,33 @@ async function until(terminal, condition) {
   });
 }
 
+test('TUI screen consent requires the explicit confirmation command and can be revoked without a model run', async () => {
+  await withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+    const { App } = await import('../dist/tui/app.js');
+    const terminal = fakeTerminal();
+    const instance = render(createElement(App, { client, sessionId, info: { boundary: projectDirectory }, stdout: terminal.stdout, interactive: true }),
+      { stdin: terminal.stdin, stdout: terminal.stdout, exitOnCtrlC: false, patchConsole: false, interactive: true });
+    const submit = async text => {
+      terminal.stdin.write(text);
+      await new Promise(resolve => setTimeout(resolve, 60));
+      terminal.stdin.write('\r');
+    };
+    try {
+      await until(terminal, frame => frame.includes('read-only'));
+      await submit('/screen on');
+      await until(terminal, frame => frame.includes('截图会读取现有画面'));
+      assert.equal(requests.some(request => request.method === 'screen-capture.set'), false);
+      await submit('/screen on confirm');
+      await until(terminal, frame => frame.includes('本会话截图已授权'));
+      assert.equal((await client.request('status.get', { sessionId })).screenCapture.enabled, true);
+      await submit('/screen off');
+      await until(terminal, frame => frame.includes('本会话截图授权已撤销'));
+      assert.equal((await client.request('status.get', { sessionId })).screenCapture.enabled, false);
+      assert.equal(requests.some(request => request.method === 'run.start'), false);
+    } finally { instance.unmount(); }
+  }, { interactive: true, permissionControl: true });
+});
+
 test('TUI control panels select a model, mode, and policy without running a request or changing the draft', async () => {
   let homeDirectory = '';
   await withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {

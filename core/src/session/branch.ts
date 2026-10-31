@@ -51,14 +51,15 @@ export async function branchSession(
   parentSessionId: string,
   { at, projectRoot }: { at?: number; projectRoot?: string },
 ): Promise<BranchResult> {
-  let text: string;
+  let bytes: Buffer;
   try {
-    text = await readFile(join(directory, `${parentSessionId}.jsonl`), 'utf8');
+    bytes = await readFile(join(directory, `${parentSessionId}.jsonl`));
   } catch (cause) {
     if ((cause as { code?: string }).code === 'ENOENT') throw new KernelError('session_not_found', { detail: parentSessionId });
     throw cause;
   }
-  const record = parseSessionBytes(Buffer.from(text, 'utf8'));
+  const record = parseSessionBytes(bytes);
+  const text = bytes.subarray(0, record.completeBytes).toString('utf8');
   const last = record.events.at(-1);
   const boundary = at ?? (last?.seq ?? -1);
   if (at !== undefined) {

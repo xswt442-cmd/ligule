@@ -30,7 +30,7 @@ const runResultOutput = object({
   state: { type: 'string', enum: ['completed', 'failed', 'cancelled'] },
   stopReason: { type: 'string', enum: [
     'assistant_completed', 'tool_completed', 'cancelled', 'budget_exhausted', 'refused',
-    'provider_error', 'tool_error', 'host_error',
+    'provider_error', 'tool_error', 'validation_failed', 'host_error',
   ] },
   output: object({ text: { type: ['string', 'null'] }, structured: {} }, ['text']),
   validation: object({
@@ -155,6 +155,7 @@ const delegationOutput = { type: ['object', 'null'], additionalProperties: false
   allowedPolicies: { type: 'array', items: { type: 'string', enum: ['ask', 'auto', 'none', 'never'] } },
   allowedMcpServers: { type: 'array', items: { type: 'string' } },
   allowedMcpTools: { type: 'array', items: { type: 'string' } },
+  allowScreenCapture: { type: 'boolean' },
 }, required: ['grantId', 'maxPermissionProfile', 'maxNetwork', 'allowedPolicies', 'allowedMcpServers', 'allowedMcpTools'] };
 const requestedChanges = { type: ['object', 'null'], additionalProperties: false, properties: {
   mode: { type: 'string' }, policy: { type: 'string' }, model: { type: ['object', 'null'] },
@@ -172,6 +173,12 @@ const configurationOutput = object({
     mode: { type: ['string', 'null'] },
     loopIterations: { type: 'integer', minimum: 1 },
     permission: permissionOutput,
+    screenCapture: object({ enabled: { type: 'boolean' }, source: { type: 'string', enum: ['none', 'startup', 'trusted-ui', 'grant'] }, changeAllowed: { type: 'boolean' } }, ['enabled', 'source']),
+    search: object({ configured: { type: 'boolean' }, available: { type: 'boolean' },
+      serviceId: { type: 'string', maxLength: 128 }, code: { type: 'string', maxLength: 128 } }, ['configured', 'available']),
+    browser: object({ configured: { type: 'boolean' }, available: { type: 'boolean' }, permitted: { type: 'boolean' },
+      paused: { type: 'boolean' }, connected: { type: 'boolean' }, changeAllowed: { type: 'boolean' },
+      code: { type: 'string', maxLength: 128 } }, ['configured', 'available', 'permitted', 'paused', 'connected', 'changeAllowed']),
     policy: { type: 'object', additionalProperties: false, properties: {
       mode: { type: 'string', enum: ['ask', 'auto', 'none', 'never'] }, source: { type: 'string' }, default: { type: 'string' },
     }, required: ['mode', 'source', 'default'] },
@@ -230,6 +237,13 @@ const approvalAnswers = { type: 'array', minItems: 1, maxItems: 4, items: object
   selected: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 80 } },
   custom: { type: 'string', maxLength: 4000 },
 }, ['id', 'selected']) };
+const provisionalOutput = { type: ['object', 'null'], additionalProperties: false, properties: {
+  provisional: { type: 'boolean', enum: [true] }, responseId: id,
+  userSeq: { type: ['integer', 'null'], minimum: 0 }, updatedAt: { type: 'string', maxLength: 64 },
+  text: { type: 'string', maxLength: 8192 }, reasoning: { type: 'string', maxLength: 8192 },
+  textCharacters: { type: 'integer', minimum: 0 }, reasoningCharacters: { type: 'integer', minimum: 0 },
+  truncated: { type: 'boolean' },
+}, required: ['provisional', 'responseId', 'userSeq', 'updatedAt', 'text', 'reasoning', 'textCharacters', 'reasoningCharacters', 'truncated'] };
 const replyOutput = object({ requestId: id, sessionId: id, operationId: id, type: { type: 'string', enum: ['approval', 'question'] },
   decision: { type: 'string', enum: ['allow', 'deny'] }, answered: { type: 'integer' }, resolved: { type: 'boolean' },
   source: { type: 'string', enum: ['human', 'controller'] } },
@@ -239,6 +253,8 @@ const tools: Tool[] = [
     inputSchema: object({ projectRoot: root, initial: initialSettings }, ['projectRoot']), outputSchema: sessionOutput },
   { name: 'ligule_session_open', description: 'Resume a persistent session in the authorized project. Missing, locked or foreign sessions fail. No operation IDs survive server restart.',
     inputSchema: object({ projectRoot: root, sessionId: id }, ['projectRoot', 'sessionId']), outputSchema: sessionOutput },
+  { name: 'ligule_session_close', description: 'Close an idle session owned by this controller. The queue must be empty and no approval or question may be pending. Busy sessions remain open; cancel or finish work and clear queued messages before retrying. Session history and completed operation status are retained.',
+    inputSchema: object({ sessionId: id }, ['sessionId']), outputSchema: sessionOutput },
   { name: 'ligule_session_list', description: 'List up to 50 persistent sessions belonging to the authorized project. Open one before reading its records.',
     inputSchema: object({ projectRoot: root, limit: { type: 'integer', minimum: 1, maximum: 50, default: 20 } }, ['projectRoot']),
     outputSchema: object({ sessions: { type: 'array', maxItems: 50, items: object({ sessionId: id, name: { type: 'string', maxLength: 120 }, archived: { type: 'boolean' }, createdAt: { type: ['string', 'null'], maxLength: 128 } }, ['sessionId', 'name', 'archived', 'createdAt']) } }, ['sessions']) },
@@ -266,7 +282,7 @@ const tools: Tool[] = [
     inputSchema: object({ operationId: id }, ['operationId']), outputSchema: object({ ...operationProperties, terminated: { type: 'boolean' } }, ['operationId', 'sessionId', 'state', 'terminated']) },
   { name: 'ligule_session_read', description: 'Read real persistent records, newest page first (records inside a page are chronological). Use nextBefore as before for older pages. Each json field is a record JSON fragment, at most 8192 UTF-16 characters. If nextOffset is non-null, call with at=that seq and offset=nextOffset until null, concatenating fragments before JSON.parse. at and before are exclusive. This preserves complete large records without unbounded responses.',
     inputSchema: object({ sessionId: id, limit: { type: 'integer', minimum: 1, maximum: 50, default: 20 }, before: { type: 'integer', minimum: 1 }, at: { type: 'integer', minimum: 1 }, offset: { type: 'integer', minimum: 0, default: 0 } }, ['sessionId']),
-    outputSchema: object({ sessionId: id, nextBefore: { type: ['integer', 'null'] }, hasMore: { type: 'boolean' }, records: { type: 'array', maxItems: 50, items: object({ seq: { type: 'integer' }, kind: { type: 'string' }, json: { type: 'string', maxLength: 8192 }, offset: { type: 'integer' }, nextOffset: { type: ['integer', 'null'] }, totalCharacters: { type: 'integer' } }, ['seq', 'kind', 'json', 'offset', 'nextOffset', 'totalCharacters']) } }, ['sessionId', 'records', 'nextBefore', 'hasMore']) },
+    outputSchema: object({ sessionId: id, nextBefore: { type: ['integer', 'null'] }, hasMore: { type: 'boolean' }, provisionalOutput, provisionalOutputError: { type: ['string', 'null'] }, records: { type: 'array', maxItems: 50, items: object({ seq: { type: 'integer' }, kind: { type: 'string' }, json: { type: 'string', maxLength: 8192 }, offset: { type: 'integer' }, nextOffset: { type: ['integer', 'null'] }, totalCharacters: { type: 'integer' } }, ['seq', 'kind', 'json', 'offset', 'nextOffset', 'totalCharacters']) } }, ['sessionId', 'records', 'nextBefore', 'hasMore']) },
 ];
 
 interface Arguments {
@@ -338,9 +354,9 @@ export async function serveMcp({ projectRoot, version, flags = [], modeName, ope
     capabilities: { tools: {}, logging: {} },
     instructions: grant === undefined
       ? operatorEnabled
-        ? 'One local stdio operator for the explicitly authorized project. This server was launched with --operator, so session-only settings and replies to real pending approvals/questions are available. Policy decisions still run in Host; hard denials cannot be overridden. Use ligule_run to delegate and wait in one call, or run_start/await/status/cancel for separate control. Notifications are best-effort. Disconnect cancels active runs and releases locks. Operation IDs and queued messages are process-local; Session JSONL persists.'
-        : 'One local stdio controller for the explicitly authorized project. Session creation/open/list, run, run_start/await/status/cancel, session configuration reads, message sending and record paging are available. Ordinary approvals and questions wait for the local Desktop/TUI user; MCP replies and settings changes require the explicit --operator flag. Disconnect cancels active runs and releases locks. Operation IDs and queued messages are process-local; Session JSONL persists.'
-      : `One local stdio controller for project ${grant.projectRoot}, bounded by grant ${grant.id} (${grant.maxPermissionProfile}, network up to ${grant.maxNetwork}, policies: ${grant.allowedPolicies.join(', ')}). The grant is not remote identity authentication and does not override OS sandbox limits or hard Policy denials.${operatorEnabled ? ' --operator also allows ordinary approved interactions.' : ' Ordinary approvals and questions wait for the local Desktop/TUI user; MCP replies and settings changes are disabled.'} Use ligule_run to delegate and wait in one call. Disconnect cancels active runs and releases locks.`,
+        ? 'One local stdio operator for the explicitly authorized project. This server was launched with --operator, so session-only settings and replies to real pending approvals/questions are available. Policy decisions still run in Host; hard denials cannot be overridden. Use ligule_run to delegate and wait in one call, or run_start/await/status/cancel for separate control. Idle sessions can be explicitly closed after queued messages are cleared. Notifications are best-effort. Disconnect cancels active runs and releases locks. Operation IDs and queued messages are process-local; Session JSONL persists.'
+        : 'One local stdio controller for the explicitly authorized project. Session creation/open/close/list, run, run_start/await/status/cancel, session configuration reads, message sending and record paging are available. Ordinary approvals and questions wait for the local Desktop/TUI user; MCP replies and settings changes require the explicit --operator flag. Idle sessions can be explicitly closed after queued messages are cleared. Disconnect cancels active runs and releases locks. Operation IDs and queued messages are process-local; Session JSONL persists.'
+      : `One local stdio controller for project ${grant.projectRoot}, bounded by grant ${grant.id} (${grant.maxPermissionProfile}, network up to ${grant.maxNetwork}, policies: ${grant.allowedPolicies.join(', ')}). The grant is not remote identity authentication and does not override OS sandbox limits or hard Policy denials.${operatorEnabled ? ' --operator also allows ordinary approved interactions.' : ' Ordinary approvals and questions wait for the local Desktop/TUI user; MCP replies and settings changes are disabled.'} Idle sessions can be explicitly closed after queued messages are cleared. Use ligule_run to delegate and wait in one call. Disconnect cancels active runs and releases locks.`,
   });
   const control = createControl(host, authorizedRoot, {
     operator: operatorEnabled,
@@ -385,6 +401,7 @@ export async function serveMcp({ projectRoot, version, flags = [], modeName, ope
       switch (request.params.name) {
         case 'ligule_session_create': result = await control.create(input.projectRoot!, input.initial); break;
         case 'ligule_session_open': result = await control.open(input.projectRoot!, input.sessionId!); break;
+        case 'ligule_session_close': result = await control.close(input.sessionId!); break;
         case 'ligule_session_list': result = await control.list(input.projectRoot!, input.limit ?? 20); break;
         case 'ligule_session_configure': result = await control.configure(input.sessionId!, input.changes); break;
         case 'ligule_interaction_reply': result = control.replyInteraction({

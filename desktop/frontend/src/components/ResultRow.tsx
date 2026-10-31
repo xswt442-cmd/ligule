@@ -1,9 +1,10 @@
 import { Fold } from './Fold';
 import { useText } from '../locale';
 import type { RowProps } from './types';
+import { ImagePreview } from './ImagePreview';
 
 // 结果卡片显示退出码、溢出文件、权限判定、派生会话和运行时长。
-export function ResultRow({ row, verbosity }: RowProps) {
+export function ResultRow({ row, verbosity, client, sessionId, projectRoot }: RowProps) {
   const t = useText();
   return <article className="row result" data-kind="result">
     <div className="row-head">
@@ -17,5 +18,8 @@ export function ResultRow({ row, verbosity }: RowProps) {
       {row.notes?.map((note) => <span className="row-note" key={note}>{note}</span>)}
     </div>
     <Fold text={row.text} verbosity={verbosity} />
+    {row.images?.map((image) => client !== undefined && projectRoot !== undefined
+      ? <ImagePreview key={`${sessionId ?? ''}:${image.id}`} client={client} sessionId={sessionId ?? null} projectRoot={projectRoot} image={image} />
+      : null)}
   </article>;
 }

@@ -76,7 +76,7 @@ selection = { provider = "deepseek", model = "deepseek-flash" }
 
 #### 模型输出预算
 
-桌面「设置 → 模型服务」的每个服务都有模型配置表，可手动添加、删除模型，并填写显示名称、上下文窗口与最大输出 token 数。留空的数值继承现有配置；填写数字时使用完整的正整数，例如 `128000`。显示名称不改变发送到服务的模型标识。支持模型发现的服务可以获取可用列表，再勾选要加入的模型；已有模型的名称和参数保留，获取列表不会探测 token 上限。目录修改在「保存服务」后生效。
+桌面「设置 → 模型服务」的每个服务都有模型配置表，可手动添加、删除模型，并填写显示名称、上下文窗口与最大输出 token 数。留空的数值继承现有配置；填写数字时使用完整的正整数，例如 `128000`。显示名称不改变发送到服务的模型标识。支持模型发现的服务可以获取可用列表，再勾选要加入的模型；已有模型的名称和参数保留。在响应体大小上限内，发现结果保留全部有效且不重复的候选；每个保存的服务最多包含 128 个模型。获取列表不会探测 token 上限。目录修改在「保存服务」后生效。
 
 逐模型设置保存在同一服务的可选 `modelSettings` 列表中，`id` 对应 `models` 中的模型标识，例如 `modelSettings = [{ id = "custom-model", name = "我的模型", contextTokens = 128000, outputTokens = 16384 }]`。选中该模型时，其上下文窗口用于压缩判断，输出额度用于实际请求并参与压缩压力阈值（预留上限为窗口的四分之一）。不同服务中同名模型的设置互相独立；旧的纯模型标识列表仍可使用。
 
@@ -131,13 +131,41 @@ HTTP 错误只显示状态码及必要的固定错误分类，不显示网关原
 
 ### 工具模式与内部子代理
 
+Windows 的 `full` 模式提供 `screenshot`，每次捕获一帧主显示器 `screen` 或 `active-window`，可用相对目标的 `{x, y, width, height}` 指定区域。它仅读取现有画面，不创建窗口或切换焦点。活动窗口模式保存该窗口屏幕区域内的可见像素；跨屏窗口、捕获时窗口或显示参数变化、锁屏和无交互桌面均明确失败。每次捕获使用受控独立进程，限时 12 秒、进程内存 512 MiB、像素 4,000 万。成功后立即返回真实图像及 `shotId`，可用 `read_image({shotId})` 重读。
+
+截图需要独立同意。桌面版已有会话选择 `full` 后，点击“截图关闭”并确认即可授权；同一入口可撤销，并中止进行中的捕获。TUI `/screen on` 显示范围说明，`/screen on confirm` 授权当前会话及内部子任务，`/screen off` 撤销。CLI 的 `run`、`resume`、`tui` 支持 `--allow-screen-capture`，明确授权该进程。普通单会话授权不会在重新打开时恢复；显式启动参数或仍有效的截图 Grant 按各自范围生效。MCP 必须在可信界面另行创建并确认“屏幕观察”授权；`--operator`、Permission 档位不能自行开启，MCP 也不接受该启动参数。截图同意不扩大工具模式、Shell 权限或 Policy 规则。已保存的图片仍受会话归属和保留期控制。
+
+`full` 模式还包含 `read_image`：使用 `{path: "diagram.png"}` 读取文件边界内图片，或用 `{shotId: "…"}` 重读本会话持有的已保存图片。PNG、JPEG、WebP、GIF 会经解码并统一为 PNG，动画只读首帧；输入最多 20 MiB、4,000 万像素，输出最长边 2048 像素、最多 8 MiB。Session JSONL 只保存引用，模型请求发送前才读取并校验图片字节。图片位于数据根下本工作区的 `screenshots/`，配额 256 MiB、保留 30 天。分支只继承复制历史中已有的图片；内部子代理持有独立图片。缺失、过期或被修改的图片明确报错。Markdown 导出将可用图片复制到同级 `.assets` 目录并使用相对链接，单独报告不可用文件；导出副本由使用者管理。
+
+`full` 模式提供 `read_document`，在文件边界内读取 PDF 页、DOCX 段落和表格块、XLSX 工作表单元格、PPTX 幻灯片文字及表格。普通文本仍使用 `read`。`{path, start, count}` 默认读取前 20 个单元；`start` 从 1 开始，`count` 最多 20，XLSX 默认读取行和前十列。指定表格区域可用 `{path, sheet, range: {startRow, endRow, startColumn, endColumn}}`，最多 200 行、10,000 个单元格。返回来源位置、工作表名、警告和 `truncated`；截断时照 `continuation` 继续读取，包括块内文本 `offset`。公式返回原式和已有缓存，不重新计算。
+
+PDF 的 `{path, renderPage: 2}` 单独渲染一页，要求当前模型支持图片，输出持久 `document` 图片引用；没有文字层的页会提示渲染，不当成空白。页面最长边 2048 像素，源栅格图片最多 4,000 万像素。该工具不做 OCR，不渲染 Office 图片或图表，不执行宏、脚本、外链或嵌入对象。输入最多 20 MiB，提取文本最多 24,000 UTF-8 字节；PDF/PPTX 最多 200 页/张。Office ZIP 最多 2,000 条、实际解压量 64 MiB。独立解析进程默认限时 15 秒、V8 堆上限 192 MiB，Windows 另有 512 MiB 进程内存上限；取消会等待解析进程退出。可用 `limits.documentBytes`、`limits.documentOutputBytes`、`limits.documentTimeoutMs` 调低上限，文本预算至少 256 字节。密码 PDF 报 `document_password_required`；加密或旧版 Office 容器报 `document_encrypted_or_legacy`，不接受密码参数。损坏文件和资源超限明确失败。
+
+桌面版成功工具结果中的“预览图片”按钮读取会话已有图片，生成最长边 512 像素、最多 256 KiB 的临时 WebP 缩略图。外控会话和已关闭会话也可只读预览，无须接管或重新授权截图；预览不会捕获当前屏幕。图片缺失、过期或完整性校验失败会显示错误。缩略图不写入会话记录，切换会话或卸载组件时释放显示资源。
+
+自动图像输入仅启用已验证的 DeepSeek 官方 `deepseek-flash` 路由及其文档声明的旧视觉别名，未知路由默认拒绝。可通过 `modelSettings = [{id = "custom-model", imageInput = true}]` 明确声明模型支持图像；`false` 禁用，省略则自动识别。桌面版可为每个模型选择“自动／支持／不支持”。切换至不支持图像的模型时，会拒绝发送仍包含图片的上下文；可改用支持图像的模型或新建 Session。每个请求最多八张图片、16 MiB 规范化图片字节。含图片的记录需要能识别不可忽略图像事件的程序读取；旧程序会拒绝重新打开。
+
+`full` 模式包含 `todo_write`，以 `items: [{content, status}]` 替换当前轮次的完整任务清单，状态为 `pending`、`in_progress` 或 `completed`；空数组清空清单。最多 40 个不重复的非空项目，每项最多 400 个字符，内容合计最多 8,000 个 UTF-8 字节。快照作为 Session 元数据保留历史；轮次结束后活动清单清空，下一轮从空清单开始。内部子代理使用独立清单。这个工具不授予工作区写权限，随包 `minimal` 模式不包含它。
+
+`full` 模式仅在搜索配置与凭据可用时提供 `web_search`；它不在随包 `minimal` 中，`minimal` 的九个工具保持不变。在用户配置中，将 `serviceId` 设为 `[model].services` 中已有服务的 ID：
+
+```toml
+[search]
+provider = "deepseek"
+serviceId = "deepseek"
+```
+
+该服务必须使用官方 `https://api.deepseek.com` 地址；`/v1` 和 Anthropic 兼容的 `/anthropic/v1` 根路径也受支持。Search 复用该服务的 `apiKeyEnv` 引用，优先读取非空环境变量，再读取操作系统凭据库；不要在聊天或配置文件中写入明文密钥。`[search]` 只能由用户配置、明确的命令行配置或受管配置启用和选择；项目共享和本地配置不能启用 Search，也不能替换服务或凭据绑定。没有配置、服务无效、凭据缺失/格式错误或系统凭据库不可用时，`web_search` 不会注册。`status.get` 的 `search` 字段显示 `configured`、`available`、可选的 `serviceId` 和错误 `code`；外控调用 `ligule_session_configure` 时也可从返回的 `effective.search` 读取该状态。`available` 只表示配置有效且凭据存在并符合格式，不代表远程账户认证成功。搜索设置和服务绑定在 Session 创建时读取；更新后重启 Host 可确保新 Session 使用新配置。每次搜索请求都会重新读取同一凭据引用。
+
+调用 `web_search` 时，`query` 必须是 1–128 个 Unicode 字符的非空文本；`count` 可选，范围为 1–10，默认 5。请求只发送到固定的官方 Search API，模型不能提供 URL 或密钥。默认不请求网页正文，也不会自动抓取结果页面。响应含标题、URL、摘要片段、总结和可用日期，并报告 `received`、`returned`、`truncated`。标题、片段、总结和 URL 分别最多 256、512、1,024 和 2,048 个 UTF-8 字节；总结果受 `limits.resultBytes` 限制（默认 16,000 字节，硬上限 24,000 字节），预算低于 1,024 字节时拒绝搜索。结果不提供游标；出现截断时缩小或改写查询。请求沿用 `fetchBytes` 与 `fetchTimeoutMs` 配置，并分别受 2 MiB 响应和 30 秒硬上限约束；不会自动跟随重定向。网络 Permission、Policy 和 Agent Control Grant 仍适用。HTTP 错误以固定错误码报告，不回显响应正文或密钥：`search_credential_rejected`、`search_payment_required`、`search_rate_limited`、`search_forbidden`、`search_timeout`、`search_service_unavailable`。
+
 工具模式选择交给模型的工具清单和提示片段，不会更改 Permission、Policy 或 Agent Control Grant。随包提供的 `minimal` 是默认模式；`full` 会包含当前 Host 注册的全部工具。模式文件按项目、用户、随包的顺序查找；高优先级文件完整替代低优先级同名文件。
 
 在用户数据根的 `tools/` 目录放置一个 TOML 文件即可声明自己的命令工具：`description` 说明用途，`command` 是不带参数的可执行文件，`args` 数组用 `{参数名}` 占位符（独占一项）在调用时替换为模型提供的参数，`parameters` 描述参数模式（受支持子集与内置工具相同）。占位符只替换整个参数位，模型输入不进入 shell 语法；执行按 Shell 命令走同一权限与审批链路，声明一个工具不授予任何额外权限。声明的工具默认不进入模式清单：需要在模式文件中列出其名称（或使用 `tools = "*"`）才会提供给模型。无效文件以诊断报告并跳过，不阻塞其他工具。
 
 代码型扩展安装在用户数据根的 `extensions/` 目录：单个 `.js` 文件，或一个包含 `index.js` 的目录（一目录一包）。扩展以 Host 进程内代码运行，只有 full-access 且不受限网络的会话才会加载；`ligule extensions` 列出当前会加载的路径与诊断。已安装扩展可以停用：终端 `/extensions [on|off <名称>]`、桌面设置工具页的开关写入数据根的 `extensions-state.json`，下次启动生效；配置层显式声明的扩展路径不受登记影响。
 
-在包含 `subagent` 工具的模式中，模型可以把互相独立的工作委派给内部子代理。每个子代理在同一 Host 进程中运行，但拥有独立的子会话记录；同一父轮最多并行三个，子代理不能继续创建子代理。子任务沿用父会话的 Provider、Permission 和 Policy 判定，模式只能进一步缩小工具范围，模型调用次数、输出、思考和循环预算不能高于父会话。通过输出 schema 要求结构化结果时，子代理必须提交并通过验证。TUI 可用 `/sub <序号>` 查看子记录；桌面会话菜单提供子任务列表，Markdown 导出会包含子会话记录。失败或取消的子任务仍会保留可查看的会话引用。
+在包含 `subagent` 工具的模式中，模型可以把互相独立的工作委派给内部子代理。每个子代理在同一 Host 进程中运行，但拥有独立的子会话记录；同一父轮最多并行三个，子代理不能继续创建子代理。子任务沿用父会话的 Provider、Permission 和 Policy 判定，模式只能进一步缩小工具范围，模型调用次数、输出、思考和循环预算不能高于父会话。独立工具调用按项目 `[loop].maxParallelTools` 上限并发执行，默认值为 4，必须是正安全整数；子代理沿用此上限。通过输出 schema 要求结构化结果时，子代理必须提交并通过验证；无效提交可在本轮现有迭代预算内纠正。子代理若未提交有效结果便结束，会以失败状态保留 Session 记录和已完成的工具副作用。TUI 可用 `/sub <序号>` 查看子记录；桌面会话菜单提供子任务列表，Markdown 导出会包含子会话记录。失败或取消的子任务仍会保留可查看的会话引用。
 
 ### 审批和设置
 
@@ -207,6 +235,25 @@ MCP 调用以 `mcp:<服务器>/<工具>` 进入 Host 的 Policy 判定。配置�
 
 取消当前轮次会取消正在等待的 MCP 请求；已在外部服务器产生的副作用需要核对。服务器意外断连时调用失败，不自动重新连接或重放；确认外部状态后，在桌面版重连 Host，或退出并重新启动终端界面，再重新披露工具。Skill 声明的 MCP 依赖只检查服务器是否已配置，不能证明它可连接，也不会授予调用权限。
 
+### 托管浏览器
+
+托管浏览器由 Ligule 以 MCP Server `ligule-browser` 启动 Playwright MCP。配置只接受使用者配置、命令行 flag 或 managed 配置层中的 `[browser]`；项目和目录配置不能指定浏览器程序。支持的配置形状如下，两个路径都必须是绝对路径：
+
+```toml
+[browser]
+provider = "playwright-mcp"
+entryPoint = "/absolute/path/to/node_modules/@playwright/mcp/cli.js"
+executablePath = "/absolute/path/to/chromium"
+```
+
+`entryPoint` 必须指向受支持版本 `@playwright/mcp` **0.0.83** 的 `cli.js`，`executablePath` 指向 Chromium 浏览器可执行文件。Ligule 以 headless 和 isolated 模式启动；每个 Session 及派生子任务使用独立的浏览器上下文和存储目录。浏览器进程不受 Ligule 的 OS 网络沙箱约束，因此配置浏览器会启动能访问该操作系统网络的外部进程。
+
+使用前需要当前会话的 Permission 为 `full-access`、网络为 `unrestricted`，并且平台报告完整的进程管理能力；`network = "policy"` 或 `network = "disabled"` 时会拒绝浏览器操作。MCP Server `ligule-browser` 仍需按其精确配置摘要在可信界面信任。外控 Agent 的 Grant 还必须允许该 Server 以及被调用的精确 MCP 工具；这些信任和 Grant 不会绕过 Policy。
+
+浏览器只开放 `browser_navigate`、`browser_snapshot`、`browser_click`、`browser_type`、`browser_press_key`、`browser_wait_for`、`browser_take_screenshot`、`browser_close` 和 `browser_handle_dialog`。导航只接受不含用户名或密码的 HTTP(S) URL；截图只返回当前 viewport。接口拒绝 `filename`、整页或元素截图参数，以及执行脚本、文件上传、安装扩展和调整 viewport 等能力。
+
+TUI 输入 `/browser` 可查看配置、可用性、Permission、暂停状态和 MCP 连接状态；`/browser stop` 会暂停并终止当前 Session 及派生任务的浏览器进程，`/browser resume` 只解除暂停，不会启动浏览器实例。运行中的轮次也可执行 stop。外控只读会话不能本地执行这两项操作，需先接管或关闭外控会话。桌面版的 Browser Stop 使用相同的 Session 范围。人工停止、取消轮次、关闭 Session 或撤销生效的 MCP 信任会终止对应浏览器进程；恢复后，下次需要浏览器工具时才会重新连接。
+
 ### 常见问题
 
 - `tui_terminal_required`：请在交互式终端运行 `ligule`；脚本中使用 `ligule run`。
@@ -214,4 +261,5 @@ MCP 调用以 `mcp:<服务器>/<工具>` 进入 Host 的 Policy 判定。配置�
 - `data_root_invalid`：`LIGULE_HOME` 必须是绝对路径；未设置时使用 `~/.ligule`。
 - `provider_model_required` 或 `provider_base_url_required`：检查服务地址、接口类型和模型名称。
 - `resume_mode_changed`：恢复会话时指定其原有模式，或在终端界面使用 `/resume <编号> <模式名>`。
+- `delete_target_is_link`：删除工具拒绝目标路径最后一项为符号链接或 junction，并保留链接目标；如果确实要将真实目标送入回收站，请明确指定目标本身。
 - 命令不熟悉时运行 `ligule --help`；在终端界面输入 `/help` 查看界面命令和按键。

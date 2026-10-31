@@ -11,7 +11,7 @@ import { createLoop, DEFAULT_LOOP_LIMITS, type LoopLimits } from '../kernel/loop
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { createSessionLog } from '../session/session.js';
 import {
-  completedRunResult, createOutputSchemaContract, DELEGATION_RESULT_TOOL, failedRunResult, MAX_DELEGATION_SCHEMA_BYTES,
+  assertDelegationCompletion, completedRunResult, createOutputSchemaContract, DELEGATION_RESULT_TOOL, failedRunResult, MAX_DELEGATION_SCHEMA_BYTES,
   MODE_SELECTION_SCHEMA, outputSchemaInstructions, registerDelegationResultTool,
 } from '../delegation.js';
 import {
@@ -23,6 +23,12 @@ import { createDecisionChain } from '../kernel/policy.js';
 import { createLogger } from '../kernel/log.js';
 import { loadAssembly } from '../kernel/assembly.js';
 import { KernelError, KernelRuntimeError } from '../kernel/error.js';
+import { createTodoWritePlugin } from './todo-write.js';
+import { createReadImagePlugin } from './read-image.js';
+import { createReadDocumentPlugin } from './read-document.js';
+import { createScreenshotPlugin } from './screenshot.js';
+import { createMediaStore, type MediaStore } from '../capability/media.js';
+import { boundaryOf } from '../capability/limits.js';
 import type { PermissionContext } from '../kernel/permission.js';
 
 type LoopOptions = Parameters<typeof createLoop>[0];
@@ -42,6 +48,8 @@ function stableErrorCode(error: unknown): string {
 }
 
 export interface SubagentDeps {
+  readonly createMcp?: (id: string, media: MediaStore) => Promise<{ plugin: Parameters<typeof loadAssembly>[1][number]; close(): Promise<void> }>;
+  readonly authorizeScreenCapture?: () => Promise<AbortSignal>;
   config: ReturnType<typeof createConfig>;
   provider: SubagentProvider;
   chain: ReturnType<typeof createDecisionChain>;
@@ -61,6 +69,7 @@ function childLimits(args: { loopIterations?: number; modelCalls?: number }, par
   const limits = {
     iterations: args.loopIterations ?? parent.iterations,
     modelCalls: args.modelCalls ?? parent.modelCalls,
+    ...(parent.maxParallelTools === undefined ? {} : { maxParallelTools: parent.maxParallelTools }),
   };
   if (limits.iterations > parent.iterations || limits.modelCalls > parent.modelCalls) {
     throw new KernelError('subagent_budget_escalation', { detail: 'a child run may only use budgets within its parent session limits' });
@@ -189,6 +198,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
               }),
             });
             let disposeAssembly: (() => void) | undefined;
+            let closeMcp: (() => Promise<void>) | undefined;
             let disposeResultTool: (() => void) | undefined;
             let undoMode = () => {};
             let undoParentRestrictions = () => {};
@@ -203,7 +213,32 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                 permission,
               });
               // 派生执行继承父会话的插件工具，但不注册 `subagent`，从而禁止递归派生。
-              const assembly = loadAssembly(child, deps.plugins);
+              const media = createMediaStore({ boundary: boundaryOf(deps.config),
+                ...(typeof deps.config.workspaceRoot === 'string' ? { workspaceRoot: deps.config.workspaceRoot } : {}),
+                ...(typeof deps.config.userHome === 'string' ? { userHome: deps.config.userHome } : {}),
+              }, id);
+              let recordedScreenConsent = false;
+              const authorizeScreenCapture = deps.authorizeScreenCapture === undefined ? undefined : async () => {
+                const signal = await deps.authorizeScreenCapture!();
+                if (!recordedScreenConsent) {
+                  await session.append({ kind: 'screenCapture', ignorable: true, enabled: true, source: 'parent', at: new Date().toISOString() });
+                  recordedScreenConsent = true;
+                }
+                return signal;
+              };
+              const mcp = deps.createMcp === undefined ? undefined : await deps.createMcp(id, media);
+              closeMcp = mcp === undefined ? undefined : () => mcp.close();
+              const assembly = loadAssembly(child, [
+                ...deps.plugins,
+                ...(mcp === undefined ? [] : [mcp.plugin]),
+                ...(parentTools.has('todo_write') ? [createTodoWritePlugin({ session })] : []),
+                ...(parentTools.has('read_image') ? [createReadImagePlugin({ media, supportsImages: () => provider.imageInput === true })] : []),
+                ...(parentTools.has('read_document') ? [createReadDocumentPlugin({ media, supportsImages: () => provider.imageInput === true })] : []),
+                ...(parentTools.has('screenshot') ? [createScreenshotPlugin({ media,
+                  supportsImages: () => provider.imageInput === true,
+                  authorize: authorizeScreenCapture,
+                })] : []),
+              ]);
               disposeAssembly = () => assembly.dispose();
               let structuredSubmitted = false;
               let structuredResult: unknown;
@@ -252,6 +287,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                 prompt,
                 session,
                 limits,
+                resolveImage: media.read,
                 completesRun: outputContract === undefined ? [] : [DELEGATION_RESULT_TOOL],
                 turnContext: () => ({
                   childGeneration: {
@@ -264,7 +300,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
               });
               let result: Awaited<ReturnType<typeof loop.run>>;
               try {
-                result = await loop.run(args.task, { signal });
+                result = await loop.run(args.task, { signal, validateCompletion: () => assertDelegationCompletion(outputContract, structuredSubmitted) });
               } catch (error) {
                 // Record-lock and Session I/O failures mean the child record may be unreliable; do not turn them into a normal child result.
                 if (error instanceof KernelRuntimeError) throw error;
@@ -299,9 +335,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
               }
               const validation = outputContract === undefined
                 ? { status: 'not_requested' as const }
-                : structuredSubmitted
-                  ? { status: 'valid' as const, schemaDigest: outputContract.digest }
-                  : { status: 'invalid' as const, schemaDigest: outputContract.digest, errors: ['The child ended without submitting a structured result.'] };
+                : { status: 'valid' as const, schemaDigest: outputContract.digest };
               return {
                 text: result.text,
                 sessionId: id,
@@ -330,7 +364,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                     try { disposeResultTool?.(); }
                     finally {
                       try { disposeAssembly?.(); }
-                      finally { await session.close(); }
+                      finally { try { await closeMcp?.(); } finally { await session.close(); } }
                     }
                   }
                 }

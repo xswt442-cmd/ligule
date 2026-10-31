@@ -10,6 +10,8 @@ import {
   type ProviderCapabilities, type RetryPolicy,
 } from './http.js';
 import type { ModelMessage, ModelRequest, ProviderEvent } from '../kernel/loop.js';
+import { imageInputOf, resolveRequestImages } from './images.js';
+import type { ImageReference } from '../session/media.js';
 
 interface ChatCompletionsCapabilities extends ProviderCapabilities {
   readonly streaming: boolean;
@@ -19,6 +21,7 @@ interface ChatCompletionsCapabilities extends ProviderCapabilities {
 }
 
 interface ChatCompletionsProviderOptions {
+  readonly imageInput?: boolean;
   readonly baseUrl?: unknown;
   readonly model?: unknown;
   readonly apiKeyEnv?: string;
@@ -31,6 +34,7 @@ interface ChatCompletionsProviderOptions {
 }
 
 interface ModelProvider {
+  readonly imageInput: boolean;
   readonly requiresCompletion: true;
   readonly name: string;
   readonly model: string;
@@ -49,9 +53,10 @@ interface ChatToolCall {
 }
 
 type ChatToolMessage = { readonly role: 'tool'; readonly tool_call_id: string | undefined; readonly content: string | undefined };
+type ChatImageBlock = { readonly type: 'text'; readonly text: string } | { readonly type: 'image_url'; readonly image_url: { readonly url: string } };
 type ChatWireMessage =
   | { readonly role: 'system'; readonly content: string }
-  | { readonly role: 'user'; readonly content: string }
+  | { readonly role: 'user'; readonly content: string | readonly ChatImageBlock[] }
   | { readonly role: 'assistant'; readonly content: string | null; readonly reasoning_content?: string; readonly tool_calls?: readonly ChatToolCall[] }
   | ChatToolMessage;
 
@@ -153,11 +158,18 @@ function toolNameMapping(request: ModelRequest): ToolNameMapping {
   };
 }
 
-function toWireMessages(view: readonly ModelMessage[], system: string, toolNames: ToolNameMapping, preserveReasoning: boolean): ChatWireMessage[] {
+function toWireMessages(view: readonly ModelMessage[], system: string, toolNames: ToolNameMapping, preserveReasoning: boolean, images: ReadonlyMap<ImageReference, string>): ChatWireMessage[] {
   // Chat Completions 将系统提示作为消息列表首项发送。
   const messages: ChatWireMessage[] = system === '' ? [] : [{ role: 'system', content: system }];
   assertAllAnswered(view);
+  let pending: ChatImageBlock[] = [];
+  const flushImages = () => {
+    if (pending.length === 0) return;
+    messages.push({ role: 'user', content: pending });
+    pending = [];
+  };
   for (const entry of view) {
+    if (entry.role !== 'tool') flushImages();
     if (entry.role === 'user') {
       messages.push({ role: 'user', content: entry.text });
     } else if (entry.role === 'assistant') {
@@ -178,8 +190,15 @@ function toWireMessages(view: readonly ModelMessage[], system: string, toolNames
     } else {
       // 每个工具调用单独发送一条结果消息，并使用调用 ID 关联。
       messages.push({ role: 'tool', tool_call_id: entry.id, content: resultText(entry.content) });
+      for (const reference of entry.images ?? []) {
+        const image = images.get(reference);
+        if (image === undefined) throw new KernelError('image_reference_invalid');
+        pending.push({ type: 'text', text: `Image from tool call ${entry.id ?? ''}: ${reference.id}` },
+          { type: 'image_url', image_url: { url: `data:${reference.mimeType};base64,${image}` } });
+      }
     }
   }
+  flushImages();
   return messages;
 }
 
@@ -192,12 +211,14 @@ export function createChatCompletionsProvider({
   declaredOutputLimit,
   contextTokens,
   thinkingEffort: requestedThinkingEffort,
+  imageInput: declaredImageInput,
   retry = DEFAULT_RETRY,
 }: ChatCompletionsProviderOptions = {}): ModelProvider {
   // 直接使用配置中的 baseURL；不同兼容服务对 `/v1` 前缀的要求不同，不在此处补写路径。
   const root = apiRoot(baseUrl);
   if (typeof model !== 'string' || model === '') throw new KernelError('provider_model_required');
   const effective = chatCompletionsCapabilities(capabilities);
+  const imageInput = imageInputOf(root, model, declaredImageInput);
   const thinkingCapability = thinkingCapabilityOf('chat-completions', root, model);
   const thinkingEffort = requestedThinkingEffort === undefined
     ? undefined
@@ -212,10 +233,12 @@ export function createChatCompletionsProvider({
 
   async function* stream(request: ModelRequest, { signal }: { readonly signal?: AbortSignal | null } = {}): AsyncGenerator<ProviderEvent> {
     const toolNames = toolNameMapping(request);
+    assertAllAnswered(request.messages ?? []);
+    const images = await resolveRequestImages(request, imageInput, signal);
     const body = {
       model,
       messages: toWireMessages(request.messages ?? [], request.system ?? '', toolNames,
-        thinkingCapability !== undefined && thinkingEffort !== 'none'),
+        thinkingCapability !== undefined && thinkingEffort !== 'none', images),
       stream: effective.streaming,
       // 根据提供方能力决定是否请求最终用量；不支持时由压缩逻辑继续使用本地估算。
       ...(effective.streaming && effective.streamUsage ? { stream_options: { include_usage: true } } : {}),
@@ -371,6 +394,7 @@ export function createChatCompletionsProvider({
   }
 
   const provider = {
+    imageInput,
     name: 'chat-completions',
     requiresCompletion: true as const,
     model,
@@ -382,7 +406,7 @@ export function createChatCompletionsProvider({
     // 模型切换必须由调用方明确请求；失败时不自动切换到其他模型。
     withModel(next: string) {
       return createChatCompletionsProvider({ baseUrl, model: next, apiKeyEnv, capabilities, outputTokens,
-        ...(next === model ? { declaredOutputLimit, contextTokens } : {}),
+        ...(next === model ? { declaredOutputLimit, contextTokens, imageInput: declaredImageInput } : {}),
         ...(requestedThinkingEffort === undefined ? {} : { thinkingEffort: requestedThinkingEffort }), retry });
     },
   };

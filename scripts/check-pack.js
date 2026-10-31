@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { releaseManifest } from './pack-release.js';
+import { BUNDLED_SPREADSHEET, releaseManifest } from './pack-release.js';
 
 const repo = fileURLToPath(new URL('..', import.meta.url));
 const packDir = join(repo, 'testplace', 'pack');
@@ -52,9 +52,16 @@ try {
     throw new Error(`${tarball} must declare external Core dependencies in the public package manifest`);
   }
   for (const name of Object.keys({ ...pkg.dependencies, ...pkg.optionalDependencies })) {
-    if (name !== '@ligule/core' && existsSync(join(shipped, 'node_modules', name))) {
+    if (name !== '@ligule/core' && name !== BUNDLED_SPREADSHEET && existsSync(join(shipped, 'node_modules', name))) {
       throw new Error(`${tarball} must install ${name} on the consumer instead of bundling its build-platform tree`);
     }
+  }
+  const spreadsheet = join(shipped, 'node_modules', BUNDLED_SPREADSHEET);
+  const spreadsheetManifest = JSON.parse(readFileSync(join(spreadsheet, 'package.json'), 'utf8'));
+  if (spreadsheetManifest.version !== pkg.dependencies[BUNDLED_SPREADSHEET]
+    || !existsSync(join(spreadsheet, 'xlsx.js')) || !existsSync(join(spreadsheet, 'LICENSE'))
+    || Object.keys({ ...spreadsheetManifest.dependencies, ...spreadsheetManifest.optionalDependencies }).length !== 0) {
+    throw new Error(`${tarball} must contain the dependency-free spreadsheet parser and its license`);
   }
   for (const testPath of ['test', 'tests', 'core/test', 'tui/test']) {
     if (existsSync(join(shipped, testPath))) throw new Error(`${tarball} must not contain test files: ${testPath}`);

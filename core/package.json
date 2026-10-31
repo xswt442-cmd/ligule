@@ -47,27 +47,41 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.0",
+    "@napi-rs/canvas": "1.0.13",
     "@napi-rs/keyring": "2.1.1",
     "@vscode/ripgrep": "1.18.0",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
     "cross-spawn": "7.0.6",
+    "officeparser": "8.2.0",
+    "pdfjs-dist": "6.4.299",
     "proper-lockfile": "4.1.2",
+    "sharp": "0.35.5",
     "smol-toml": "^1.9.0",
     "toml-eslint-parser": "1.0.3",
     "tree-sitter": "^0.25.1",
     "tree-sitter-bash": "^0.25.1",
     "tree-sitter-pwsh": "0.38.1",
-    "yaml": "^2.9.1"
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
+    "yaml": "^2.9.1",
+    "yauzl": "3.4.0"
   },
   "optionalDependencies": {
-    "koffi": "3.1.1"
+    "koffi": "3.1.1",
+    "node-screenshots": "0.2.8"
   },
   "devDependencies": {
     "@modelcontextprotocol/server-filesystem": "^2026.8.31",
     "@types/cross-spawn": "^6.0.6",
     "@types/node": "^24.19.1",
     "@types/proper-lockfile": "^4.1.4",
+    "@types/yauzl": "3.4.0",
+    "docx": "9.5.1",
+    "exceljs": "4.4.0",
+    "jszip": "3.10.1",
+    "pdf-lib": "1.17.1",
+    "pdfkit": "0.17.2",
+    "pptxgenjs": "4.0.1",
     "typescript": "^5.9.3"
   }
 }

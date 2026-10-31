@@ -22,7 +22,10 @@ test('service validation rejects unknown fields, duplicate ids, unsafe URLs, and
 });
 
 test('per-model settings validate ids, fields, uniqueness, and safe token budgets', () => {
-  const valid = { ...service, modelSettings: [{ id: service.models[0], name: 'Reasoner', contextTokens: 64000, outputTokens: 32000 }] };
+  const valid = { ...service, modelSettings: [
+    { id: service.models[0], name: 'Reasoner', contextTokens: 64000, outputTokens: 32000, imageInput: true },
+    { id: service.models[1], imageInput: false },
+  ] };
   assert.deepEqual(modelServices([valid])[0].modelSettings, valid.modelSettings);
   const invalid = [
     [{ ...service, modelSettings: [{ id: 'missing', outputTokens: 100 }] }],
@@ -30,6 +33,9 @@ test('per-model settings validate ids, fields, uniqueness, and safe token budget
     [{ ...service, modelSettings: [{ id: service.models[0], outputTokens: 101, contextTokens: 100 }] }],
     [{ ...service, modelSettings: [{ id: service.models[0], outputTokens: -1 }] }],
     [{ ...service, modelSettings: [{ id: service.models[0], outputTokens: 1.5 }] }],
+    [{ ...service, modelSettings: [{ id: service.models[0], imageInput: 'true' }] }],
+    [{ ...service, modelSettings: [{ id: service.models[0], imageInput: null }] }],
+    [{ ...service, modelSettings: [{ id: service.models[0], imageInput: 1 }] }],
     [{ ...service, modelSettings: [JSON.parse('{"id":"deepseek-reasoner","outputTokens":100,"__proto__":{"polluted":true}}')] }],
     [{ ...service, modelSettings: [{ id: service.models[0], unsupported: true }] }],
   ];
@@ -38,13 +44,24 @@ test('per-model settings validate ids, fields, uniqueness, and safe token budget
   assert.equal(resolved.outputTokens, 32000);
   assert.equal(resolved.serviceOutputLimit, true);
   assert.equal(resolved.serviceContextTokens, 64000);
+  assert.equal(resolved.serviceImageInput, true);
+  assert.equal(resolveModel({ services: [valid] }, { provider: service.id, model: service.models[1] }).serviceImageInput, false);
   assert.equal(resolveModel({ services: [service] }, { provider: service.id, model: service.models[0] }).serviceOutputLimit, undefined);
   const forged = resolveModel({ api: service.api, baseURL: service.baseURL, model: service.models[0], serviceOutputLimit: true, serviceContextTokens: 1 });
   assert.equal(forged.serviceOutputLimit, undefined);
   assert.equal(forged.serviceContextTokens, undefined);
+  const legacy = resolveModel({
+    api: service.api, baseURL: service.baseURL, model: service.models[0], imageInput: true, serviceImageInput: true,
+  }, { provider: 'legacy', model: service.models[0] });
+  assert.equal(legacy.imageInput, true, 'the existing legacy setting remains unchanged');
+  assert.equal(legacy.serviceImageInput, undefined, 'a user-supplied derived field is always removed');
   const switched = resolveModel({ services: [valid], serviceOutputLimit: true, serviceContextTokens: 1 }, { provider: service.id, model: service.models[1] });
   assert.equal(switched.serviceOutputLimit, undefined);
   assert.equal(switched.serviceContextTokens, undefined);
+  const serviceSwitched = resolveModel({ ...resolved, services: [valid, { ...service, id: 'other', models: ['other-model'], modelSettings: undefined }] }, {
+    provider: 'other', model: 'other-model',
+  });
+  assert.equal(serviceSwitched.serviceImageInput, undefined, 'a different service does not inherit the prior derived value');
 });
 
 test('service and default selection use versioned TOML writes and preserve unrelated bytes', async () => {
@@ -64,10 +81,16 @@ test('service and default selection use versioned TOML writes and preserve unrel
     assert.equal(resolveModel(parse(await readFile(file, 'utf8')).model).model, service.models[1]);
     await writeConfigField(file, { field: 'model.services', value: [{ ...service, name: 'Updated' }], version: selected.version });
     assert.equal((await readFile(file, 'utf8')).startsWith(untouched), true);
-    const withSettings = [{ ...service, modelSettings: [{ id: service.models[1], name: 'Custom', contextTokens: 96_000, outputTokens: 32_000 }] }];
+    const withSettings = [{ ...service, modelSettings: [
+      { id: service.models[0], imageInput: true },
+      { id: service.models[1], name: 'Custom', contextTokens: 96_000, outputTokens: 32_000, imageInput: false },
+    ] }];
     const settingsWrite = await writeConfigField(file, { field: 'model.services', value: withSettings, version: configVersion(await readFile(file, 'utf8')) });
     assert.deepEqual(structuredClone(parse(await readFile(file, 'utf8')).model.services), withSettings);
-    assert.equal(resolveModel(parse(await readFile(file, 'utf8')).model, { provider: service.id, model: service.models[1] }).outputTokens, 32_000);
+    const roundTrippedModel = parse(await readFile(file, 'utf8')).model;
+    assert.equal(resolveModel(roundTrippedModel, { provider: service.id, model: service.models[1] }).outputTokens, 32_000);
+    assert.equal(resolveModel(roundTrippedModel, { provider: service.id, model: service.models[0] }).serviceImageInput, true);
+    assert.equal(resolveModel(roundTrippedModel, { provider: service.id, model: service.models[1] }).serviceImageInput, false);
     assert.ok(settingsWrite.version);
     const commented = '[model]\nservices = [\n# keep this service comment\n{ id = "x", name = "X", api = "messages", baseURL = "https://example.test", apiKeyEnv = "KEY", models = ["m"] }\n]\n';
     await writeFile(file, commented, 'utf8');

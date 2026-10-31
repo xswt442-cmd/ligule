@@ -805,16 +805,17 @@ button.pill:hover {
 .model-catalog-heading button { flex: none; font-size: var(--text-xs); }
 .model-catalog-help { margin: 0; padding: 0 14px 12px; color: var(--fg-muted); font-size: var(--text-xs); line-height: 1.6; }
 .model-table-scroll { overflow-x: auto; max-height: 420px; scrollbar-gutter: stable; }
-.model-config-table { width: 100%; min-width: 650px; border-collapse: collapse; table-layout: fixed; }
+.model-config-table { width: 100%; min-width: 780px; border-collapse: collapse; table-layout: fixed; }
 .model-config-table th { position: sticky; top: 0; z-index: 1; background: var(--bg-sunk); text-align: start; color: var(--fg-muted); font-size: var(--text-xs); font-weight: 500; padding: 8px 10px; border-block: 1px solid var(--line); }
-.model-config-table th:nth-child(1) { width: 27%; }
-.model-config-table th:nth-child(2) { width: 25%; }
-.model-config-table th:nth-child(3), .model-config-table th:nth-child(4) { width: 21%; }
+.model-config-table th:nth-child(1) { width: 23%; }
+.model-config-table th:nth-child(2) { width: 21%; }
+.model-config-table th:nth-child(3), .model-config-table th:nth-child(4) { width: 17%; }
+.model-config-table th:nth-child(5) { width: 16%; }
 .model-config-table th:last-child { width: 42px; }
 .model-config-table td { padding: 8px 6px; border-bottom: 1px solid var(--line); }
 .model-config-table td:first-child { padding-inline-start: 12px; }
 .model-config-table td:last-child { padding-inline-end: 12px; }
-.service-fields .model-config-table input { font-size: var(--text-xs); padding: 8px; border-radius: 7px; }
+.service-fields .model-config-table input, .service-fields .model-config-table select { font-size: var(--text-xs); padding: 8px; border-radius: 7px; }
 .model-config-table input[type="number"] { font-variant-numeric: tabular-nums; }
 .model-remove-row:hover { color: var(--bad); }
 .model-config-table .model-catalog-empty { padding: 24px 14px; color: var(--fg-muted); font-size: var(--text-sm); text-align: center; }

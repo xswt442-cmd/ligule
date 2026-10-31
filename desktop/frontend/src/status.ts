@@ -16,6 +16,8 @@ export type Status = {
   sessionId: string;
   running: boolean;
   permission?: SessionPermission;
+  screenCapture?: { enabled: boolean; source: 'none' | 'startup' | 'trusted-ui' | 'grant'; changeAllowed?: boolean };
+  browser?: BrowserStatus;
   tools: string[];
   // 当前模式名称与权限策略是不同字段，分别维护。
   mode: string | null;
@@ -52,6 +54,16 @@ export type Status = {
   // 上下文窗口未知时 Host 返回 null；此时不启用压缩或显示压力条。
   usage: Usage | null;
   progress: RunProgress | null;
+};
+
+export type BrowserStatus = {
+  configured: boolean;
+  available: boolean;
+  permitted: boolean;
+  code?: string;
+  paused: boolean;
+  connected: boolean;
+  changeAllowed: boolean;
 };
 
 export type PermissionProfile = 'read-only' | 'workspace-write' | 'full-access';

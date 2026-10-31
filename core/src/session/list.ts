@@ -71,11 +71,15 @@ export interface SessionSummary {
 export function sessionDirectory(config: SessionDirectoryConfig): string {
   const configured = config.host?.sessionDirectory;
   if (typeof configured === 'string' && configured !== '') return configured;
+  return join(workspaceDataDirectory(config), 'sessions');
+}
+
+export function workspaceDataDirectory(config: SessionDirectoryConfig): string {
   const workspace = config.workspaceRoot ?? config.boundary;
   const identity = workspaceIdentity(workspace);
   const prettyPath = workspaceFolderLabel(identity);
   const suffix = createHash('sha256').update(identity).digest('hex').slice(0, 16);
-  return join(dataRoot(config.userHome), 'workspaces', `${prettyPath}--${suffix}`, 'sessions');
+  return join(dataRoot(config.userHome), 'workspaces', `${prettyPath}--${suffix}`);
 }
 
 function workspaceFolderLabel(identity: string): string {

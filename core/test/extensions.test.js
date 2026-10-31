@@ -153,6 +153,55 @@ test('a broken extension takes back its own registrations and leaves the others 
   assert.deepEqual(kernel.list(), ['keep']);
 });
 
+test('extension disposal attempts all owned cleanups in reverse order and only once', async () => {
+  const root = await directoryWith({
+    'cleanup.js': `export default function cleanup(host) {
+  host.registerTool({ name: 'cleanup-tool', description: 'tool', access: 'read', parameters: { type: 'object', properties: {} }, run: async () => ({ text: 'ok' }) });
+  host.registerPrompt({ name: 'cleanup-prompt', text: 'prompt' });
+  host.onEvent(() => {});
+  return () => { throw new Error('extension disposer failed'); };
+}`,
+  });
+  const kernel = createKernel({ config: createConfig({ user: { boundary: root } }) });
+  const fragments = new Map();
+  const listeners = new Set();
+  const loaded = await loadExtensions([join(root, 'cleanup.js')], {
+    registerTool: (tool) => kernel.register(tool),
+    registerFragment: (fragment) => { fragments.set(fragment.name, fragment); return () => fragments.delete(fragment.name); },
+    addEventListener: (handler) => { listeners.add(handler); return () => listeners.delete(handler); },
+    request: (name, args) => kernel.call(name, args),
+  });
+  assert.throws(() => loaded.dispose(), (error) => error instanceof Error && error.message === 'extension disposer failed');
+  assert.deepEqual(kernel.list(), []);
+  assert.equal(fragments.size, 0);
+  assert.equal(listeners.size, 0);
+  loaded.dispose();
+  assert.deepEqual(kernel.list(), []);
+});
+
+test('extension setup failure keeps its error visible when owned cleanup also fails', async () => {
+  const root = await directoryWith({
+    'broken-cleanup.js': `export default function brokenCleanup(host) {
+  host.registerTool({ name: 'partial-tool', description: 'tool', access: 'read', parameters: { type: 'object', properties: {} }, run: async () => ({ text: 'ok' }) });
+  host.registerPrompt({ name: 'partial-prompt', text: 'prompt' });
+  throw new Error('original setup failure');
+}`,
+  });
+  const kernel = createKernel({ config: createConfig({ user: { boundary: root } }) });
+  const fragments = new Map();
+  const loaded = await loadExtensions([join(root, 'broken-cleanup.js')], {
+    registerTool: (tool) => kernel.register(tool),
+    registerFragment: (fragment) => { fragments.set(fragment.name, fragment); return () => { fragments.delete(fragment.name); throw new Error('fragment cleanup failed'); }; },
+    addEventListener: () => () => {},
+    request: (name, args) => kernel.call(name, args),
+  });
+  assert.equal(loaded.diagnostics.length, 1);
+  assert.match(loaded.diagnostics[0].detail, /original setup failure/);
+  assert.match(loaded.diagnostics[0].detail, /fragment cleanup failed/);
+  assert.deepEqual(kernel.list(), []);
+  assert.equal(fragments.size, 0);
+});
+
 test('what an extension asks for still passes the decision chain and the record', async () => {
   const root = await directoryWith({
     'calls.js': `export default function calls(host) {

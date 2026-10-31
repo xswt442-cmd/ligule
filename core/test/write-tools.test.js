@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   createConfig, createKernel, createObservationLog, createPermissionContext, createTool, deleteTool, editTool, freedesktopTrash, readTool,
@@ -108,6 +108,18 @@ test('edit replaces the one occurrence the anchor locates', async () => {
   });
 });
 
+test('edit preserves replacement tokens as literal file content through the kernel', async () => {
+  await withWorkspace(async (workspace) => {
+    const kernel = createKernel({ config: createConfig({ user: { boundary: workspace } }), permission: workspaceWrite });
+    kernel.register(createTool);
+    kernel.register(editTool);
+    await kernel.call('create', { path: 'literal.txt', content: 'before ANCHOR after' });
+    const replacement = "$& $$ $` $'\nconst value = '$&';";
+    await kernel.call('edit', { path: 'literal.txt', anchor: 'ANCHOR', replacement });
+    assert.equal(await readFile(join(workspace, 'literal.txt'), 'utf8'), `before ${replacement} after`);
+  });
+});
+
 test('edit rejects an empty or blank anchor before looking at the file', async () => {
   await withWorkspace(async (workspace) => {
     for (const anchor of ['', '   ']) {
@@ -150,6 +162,38 @@ test('delete moves the file into the trash directory instead of removing it', as
     assert.equal(trashed.length, 1);
     assert.match(trashed[0], /^\d{13}-[0-9a-f]{8}--note\.txt$/);
     assert.equal(await readFile(join(workspace, '.ligule-trash', trashed[0]), 'utf8'), 'keep me');
+  });
+});
+
+test('delete refuses a final directory link for every backend and preserves its target', async () => {
+  await withWorkspace(async (workspace) => {
+    await mkdir(join(workspace, 'source'));
+    await writeFile(join(workspace, 'source', 'keep.txt'), 'keep the source');
+    await symlink(join(workspace, 'source'), join(workspace, 'alias'), process.platform === 'win32' ? 'junction' : 'dir');
+    for (const trashBackend of ['auto', 'system', 'managed']) {
+      const kernel = createKernel({ config: createConfig({ user: { boundary: workspace, trashBackend } }), permission: workspaceWrite });
+      kernel.register(deleteTool);
+      for (const path of ['alias', 'alias/']) {
+        await assert.rejects(kernel.call('delete', { path }), { code: 'delete_target_is_link' });
+        assert.equal((await lstat(join(workspace, 'alias'))).isSymbolicLink(), true);
+        assert.equal(await readFile(join(workspace, 'source', 'keep.txt'), 'utf8'), 'keep the source');
+      }
+    }
+    assert.deepEqual((await readdir(workspace)).sort(), ['alias', 'source']);
+  });
+});
+
+test('delete refuses a dangling directory link without replacing it', async () => {
+  await withWorkspace(async (workspace) => {
+    const source = join(workspace, 'source');
+    await mkdir(source);
+    await symlink(source, join(workspace, 'alias'), process.platform === 'win32' ? 'junction' : 'dir');
+    await rm(source, { recursive: true });
+    const kernel = createKernel({ config: createConfig({ user: { boundary: workspace, trashBackend: 'managed' } }), permission: workspaceWrite });
+    kernel.register(deleteTool);
+    await assert.rejects(kernel.call('delete', { path: 'alias' }), { code: 'delete_target_is_link' });
+    assert.equal((await lstat(join(workspace, 'alias'))).isSymbolicLink(), true);
+    assert.deepEqual(await readdir(workspace), ['alias']);
   });
 });
 

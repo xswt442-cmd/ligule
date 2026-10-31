@@ -8,7 +8,35 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ### 简体中文
 
+- 支持可信配置的无头 Playwright MCP 浏览器，按会话隔离，截图沿用持久图像通路；`/browser` 可查看状态、停止及恢复。
+
+- `full` 模式新增 `web_search`，复用已配置的官方 DeepSeek 服务；仅在配置和凭据可用时注册，仍受网络 Permission 与 Policy 控制。
+
+- `full` 新增 `read_document`，受限读取 PDF、DOCX、XLSX、PPTX，支持定位续读、公式缓存与 PDF 页面图像；独立进程限制资源并响应取消。
+
+- Windows `full` 新增单帧 `screenshot`，沿用持久图像通路；新增独立截图同意、撤销及明确的外控 Grant 上限，捕获不切换焦点。
+
+- `full` 模式新增 `read_image`，支持持久图像引用、两种模型协议、会话恢复与分支；Markdown 可携带图片副本导出。
+- 模型服务可按模型声明 `imageInput`，未知图像能力默认拒绝，子代理图片按会话隔离。
+
+- 外控新增 `ligule_session_close` 关闭空闲会话并释放名额，人工接管同样释放名额；会话历史继续保留。
+- `full` 模式新增 `todo_write`，支持每轮独立、持久保存历史的完整任务清单，内部子代理各自隔离。
+
 ### English
+
+- Trusted configuration can enable a headless Playwright MCP browser with Session isolation and durable screenshots; `/browser` shows status, stops, and resumes it.
+
+- The `full` mode adds `web_search`, reusing a configured official DeepSeek service. It is registered only when configuration and credentials are available and remains subject to network Permission and Policy.
+
+- `full` includes `read_document` for bounded PDF, DOCX, XLSX and PPTX extraction, located continuation, cached formulas and PDF page images, with isolated resource limits and cancellation.
+
+- Windows `full` includes single-frame `screenshot` with persistent images, separate consent and revocation, explicit Agent Control grant limits, and no focus changes.
+
+- The `full` mode includes `read_image` with persistent images, both provider protocols, Session recovery and branching, and portable Markdown image exports.
+- Per-model `imageInput` declarations keep unknown image capabilities disabled and isolate internal subagent images by Session.
+
+- External controllers can close idle sessions with `ligule_session_close`; closing and human takeover release session slots while preserving history.
+- The `full` mode includes `todo_write` for per-turn task lists with durable history and isolated internal subagent state.
 
 ## [0.1.0] - 2026-10-24
 
