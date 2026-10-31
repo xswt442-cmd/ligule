@@ -11,9 +11,14 @@ export function GrantOverview({ grant, state, copied, disabled, onCopy, onRevoke
   onRevoke: () => void;
 }) {
   const t = useText();
+  const revoked = grant.revokedAt !== null;
+  const expired = !revoked && grant.expiresAt !== null && Date.parse(grant.expiresAt) <= Date.now();
   return <details className="catalog-fold grant-inspector" open>
     <summary>{grant.name} · {state}</summary>
     <p className="catalog-current">{grant.projectRoot}</p>
+    {(revoked || expired) && <p className="sheet-note" data-grant-invalid={revoked ? 'revoked' : 'expired'}>{revoked
+      ? t('此授权已撤销：不能再建立新的外控连接；已建立的会话按原有记录继续。需要继续协作时请重新创建授权。', 'This grant is revoked: no new external control connection can use it; sessions already open continue from their existing record. Create a new grant to collaborate again.')
+      : t('此授权已到期：不能再建立新的外控连接；已建立的会话按原有记录继续。需要继续协作时请重新创建授权。', 'This grant has expired: no new external control connection can use it; sessions already open continue from their existing record. Create a new grant to collaborate again.')}</p>}
     <div className="grant-summary-grid">
       <Row label={t('文件与命令', 'Files and commands')}><span>{grant.defaultPermissionProfile} / {grant.maxPermissionProfile}</span></Row>
       <Row label={t('网络', 'Network')}><span>{grant.defaultNetwork} / {grant.maxNetwork}</span></Row>
