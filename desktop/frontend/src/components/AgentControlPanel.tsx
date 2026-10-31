@@ -4,6 +4,7 @@ import { useText } from '../locale';
 import { Icon } from './Icon';
 import { Group, Modal, Row } from './ui';
 import { GrantOverview } from './GrantOverview';
+import { applyGrantPreset, grantPreset, grantPresets, type GrantPresetId } from '../agent-control-presets';
 import type { Grant, NetworkLimit, PermissionProfile, PolicySelection } from './agent-control-types';
 type Snapshot = { version: string; grants: Grant[] };
 type WorkspaceRoster = { default: string | null; workspaces: { identity: string; directory: string; name: string }[] };
@@ -287,6 +288,16 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
     }
     return options;
   }, [projectRoot, project, workspaceRoster]);
+  const applyPreset = (id: GrantPresetId) => {
+    const preset = grantPreset(id);
+    setDraft((current) => ({
+      ...applyGrantPreset(current, id),
+      name: current.name.trim() === '' ? t(preset.label.zh, preset.label.en) : current.name,
+    }));
+    setDirty(true);
+    setGrantStep(1);
+    setNote(null);
+  };
   const clearDraft = () => {
     setDraft(emptyDraft());
     setDirty(false);
@@ -356,6 +367,15 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
           t('风险确认与创建', 'Risk review and create'),
         ].map((label, index) => <li key={label} aria-current={grantStep === index ? 'step' : undefined}>{label}</li>)}
       </ol>
+      {grantStep === 0 && <section className="grant-presets" aria-label={t('安全预设', 'Safe presets')}>
+        <p className="session-note">{t('常见外控场景从预设开始：只读观察，或允许确认后写入工作区。预设不会开启完整访问、无限制网络、Operator 或 Screen Capture；需要更大能力时在下面的上限里逐项确认。', 'Start from a preset for the common external-control cases: observe read-only, or allow workspace writes after confirmation. Presets never enable full access, unrestricted network, Operator or Screen Capture; widen the limits below with explicit confirmations.')}</p>
+        <div className="grant-actions">
+          {grantPresets.map((preset) => <button type="button" key={preset.id} disabled={busy} onClick={() => applyPreset(preset.id)}>
+            <strong>{t(preset.label.zh, preset.label.en)}</strong>
+            <small>{t(preset.description.zh, preset.description.en)}</small>
+          </button>)}
+        </div>
+      </section>}
       {grantStep === 0 && <>
       <div className="grant-basic-grid">
         <label className="grant-field">
