@@ -195,7 +195,12 @@ function gate() {
   };
 }
 
-test('a real stdio MCP client controls, reads, cancels, and reopens Host sessions', { timeout: 60_000 }, async (t) => {
+// This case starts four real stdio MCP servers in sequence (initial, reopen, operator, foreign
+// rejection). Each server boots a fresh Host, which probes OS sandboxing/permissions first —
+// measured here at about 6.4s for a small workspace and about 25s for this repository. The
+// suite-level guard therefore covers four startups; the individual protocol steps are still
+// bounded by their own waits, and the product has no timeout of its own here.
+test('a real stdio MCP client controls, reads, cancels, and reopens Host sessions', { timeout: 180_000 }, async (t) => {
   const trace = [];
   const clients = new Set();
   const tempParent = resolve(process.env.LIGULE_MCP_E2E_TEMP_ROOT ?? join(testplaceRoot, 'tmp'));
