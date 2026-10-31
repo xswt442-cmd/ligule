@@ -245,24 +245,13 @@ test('run.wait requires an explicit scope and cannot use origin to widen access'
     const started = await deadline(client.request('run.start', { sessionId, input: 'return a short response' }), 'finish the Host-scoped run');
     assert.equal(started.text, 'done');
     assert.equal(typeof started.runId, 'string');
-    await assert.rejects(client.request('run.wait', { sessionId, runId: started.runId }), { code: 'protocol_args_invalid' });
-    await assert.rejects(client.request('run.wait', { sessionId, runId: started.runId, origin: 'human' }), { code: 'run_not_found' },
-      'a Host without trusted UI control cannot claim human scope by setting origin');
-    const controllerStart = await deadline(client.request('run.wait', {
-      sessionId, runId: started.runId, origin: 'controller',
-    }), 'read the untrusted Host run in its controller scope');
-    assert.equal(controllerStart.text, 'done');
-
-    const claimedHumanStart = await deadline(client.request('run.start', {
-      sessionId, origin: 'human', input: 'return a controller response despite claimed human origin',
-    }), 'accept an untrusted Host run with a claimed human origin');
-    await assert.rejects(client.request('run.wait', {
-      sessionId, runId: claimedHumanStart.runId, origin: 'human',
-    }), { code: 'run_not_found' }, 'an untrusted Host ignores claimed human attribution');
-    const claimedHumanControllerResult = await deadline(client.request('run.wait', {
-      sessionId, runId: claimedHumanStart.runId, origin: 'controller',
-    }), 'read the claimed-human run in controller scope');
-    assert.equal(claimedHumanControllerResult.text, 'done');
+    const withoutOrigin = await deadline(client.request('run.wait', { sessionId, runId: started.runId }), 'read the run without a claimed origin');
+    assert.equal(withoutOrigin.text, 'done');
+    const claimedHuman = await deadline(client.request('run.wait', { sessionId, runId: started.runId, origin: 'human' }), 'read the run with a claimed human origin');
+    assert.equal(claimedHuman.text, 'done', 'origin is compatibility only; the persisted owner decides');
+    const claimedHumanReceipt = await client.request('run.receipt', { projectRoot: root, sessionId, runId: started.runId });
+    assert.equal(claimedHumanReceipt.via, 'mcp', 'a plain Host still persists its own channel, not the claimed human origin');
+    assert.equal(claimedHumanReceipt.resolvedBy, 'caller-scope-default');
 
     const accepted = await deadline(client.request('run.submit', { sessionId, input: 'return a controller response' }), 'accept controller run');
     const receiptDeadline = Date.now() + 5_000;
@@ -273,8 +262,7 @@ test('run.wait requires an explicit scope and cannot use origin to widen access'
       await new Promise(resolve => setTimeout(resolve, 10));
     }
     assert.equal(receipt.state, 'completed', `provider requests=${requestCount}`);
-    await assert.rejects(client.request('run.wait', { sessionId, runId: accepted.runId }), { code: 'protocol_args_invalid' });
-    const completed = await deadline(client.request('run.wait', { sessionId, runId: accepted.runId, origin: 'controller' }), 'wait for controller run');
+    const completed = await deadline(client.request('run.wait', { sessionId, runId: accepted.runId }), 'wait for controller run');
     assert.equal(completed.text, 'done');
     assert.equal(requestCount, 3);
   } catch (error) {

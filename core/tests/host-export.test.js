@@ -71,7 +71,7 @@ test('session.export writes the record to the path the caller names', async () =
   assert.doesNotMatch(text, /还在跑/, '那一轮已经跑完，这份文件就不是半截的读数');
   assert.ok(requests.some((request) => request.method === 'session.export' && request.params.path === path),
     '界面只交出一个目的地，排版与落盘都在宿主那一侧');
-}));
+}, { permissionControl: true }));
 
 test('exporting while the round is still running says the tail is unfinished', async () => withTuiHost(async ({ client, sessionId, directory, notifications }) => {
   // 模型服务故意等两秒（`delayMs`）：那一段时间里这一轮还在往下写，导出读到的是中途的末端。
@@ -85,7 +85,7 @@ test('exporting while the round is still running says the tail is unfinished', a
   assert.match(await readFile(path, 'utf8'), /^> 导出这一刻这一份会话还在跑/m,
     '那一份文件在开头就说出后面还会写，不让人把中途的末端当成整轮');
   await round;
-}, { delayMs: 2_000 }));
+}, { delayMs: 2_000, permissionControl: true }));
 
 test('session.export reports a stable code when the destination cannot be written', async () => withTuiHost(async ({ client, sessionId, directory }) => {
   await client.request('run.start', { sessionId, input: '说一句就好' });
@@ -96,7 +96,7 @@ test('session.export reports a stable code when the destination cannot be writte
     (error) => error.code === 'host_export_write_failed',
     '对话框返回路径不等于文件已经写成',
   );
-}));
+}, { permissionControl: true }));
 
 test('session.export needs both a session and a destination', async () => withTuiHost(async ({ client, sessionId }) => {
   await assert.rejects(

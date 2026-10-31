@@ -248,8 +248,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     return response;
   }
 
-  const connection = {
-    [TRUSTED_AGENT_CONTROL_ORIGIN]: true as const,
+  const notifications = {
     notify(message: Record<string, unknown>) {
       const sessionId = typeof message.sessionId === 'string' ? message.sessionId : undefined;
       if (sessionId === undefined) return;
@@ -277,6 +276,11 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     },
     request(method: string, params?: unknown) { return interactionRequest(method, params); },
   };
+  // 本地控制面（MCP stdio、进程内调用方）不带 human capability；只有经 authenticated
+  // Agent Control socket 送达的请求用 bridgeConnection，才允许写/读 human origin。
+  const connection = notifications;
+  const bridgeConnection = { ...notifications, [TRUSTED_AGENT_CONTROL_ORIGIN]: true as const };
+  const humanDeliveries = new Set<string>();
 
   async function tracked<T>(work: Promise<T>): Promise<T> {
     pending.add(work);
@@ -524,7 +528,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     });
   }
 
-  function startOne(sessionId: string, input: string, queueItemId?: string, delegation?: DelegationSpec, source: 'human' | 'controller' = 'controller', requestKey?: string, durable = false) {
+  function startOne(sessionId: string, input: string, queueItemId?: string, delegation?: DelegationSpec, source: 'human' | 'controller' = 'controller', requestKey?: string, durable = false, channel = connection) {
     writable(sessionId);
     if (active.has(sessionId)) throw new KernelError('run_already_running');
     if (operations.size >= 256) {
@@ -544,7 +548,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
       return record(await host.handle({ method: 'run.submit', params: {
         sessionId, input, origin: source,
         ...(delegation === undefined ? {} : { delegation }), ...(requestKey === undefined ? {} : { requestKey }),
-      } }, connection));
+      } }, channel));
     });
     if (durable) found.accepted = submit.then(value => {
       if (value === undefined) throw new KernelError('host_response_invalid');
@@ -554,11 +558,11 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     const work = durable
       ? found.accepted!.then(receipt => host.handle({ method: 'run.wait', params: {
         sessionId, runId: receipt.runId, origin: source,
-      } }, connection))
+      } }, channel))
       : Promise.resolve().then(() => host.handle({ method: 'run.start', params: {
         sessionId, input, origin: source,
         ...(delegation === undefined ? {} : { delegation }), ...(requestKey === undefined ? {} : { requestKey }),
-      } }, connection));
+      } }, channel));
     found.settled = work.then(
       (result) => {
         const completed = record(result);
@@ -594,6 +598,9 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
         });
         found.state = 'done';
         found.summary = 'Run completed.';
+        // 经 Human Control bridge 在本控制实例内投递的 human run，本实例可以读它的 receipt；
+        // 别的 Host 建立的 human run 仍然留在 human scope 里，不可见。
+        if (source === 'human' && typeof completed.runId === 'string') humanDeliveries.add(completed.runId);
       },
     ).catch((error: unknown) => {
       const code = controlErrorCode(error);
@@ -622,7 +629,8 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     if (queue === undefined || queue.paused || queue.items.length === 0 || active.has(sessionId) || closing !== undefined) return;
     const item = queue.items.shift()!;
     try {
-      const next = startOne(sessionId, item.input, item.queueItemId, undefined, item.source);
+      const next = startOne(sessionId, item.input, item.queueItemId, undefined, item.source, undefined, false,
+        item.source === 'human' ? bridgeConnection : connection);
       const source = operations.get(item.sourceOperationId);
       if (source !== undefined) publish(source, 'queue.started', { queueItemId: item.queueItemId, newOperationId: next.operationId, source: item.source });
     }
@@ -700,7 +708,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     return { ...effective, requested: changes };
   }
 
-  function send(sessionId: string, action: 'send' | 'continue' | 'cancel_queued' | 'clear_queue', input?: string, queueItemId?: string, source: 'human' | 'controller' = 'controller') {
+  function send(sessionId: string, action: 'send' | 'continue' | 'cancel_queued' | 'clear_queue', input?: string, queueItemId?: string, source: 'human' | 'controller' = 'controller', channel = connection) {
     writable(sessionId);
     const queue = currentQueue(sessionId);
     if (action === 'continue') {
@@ -733,7 +741,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     if (queueItemId !== undefined) throw new KernelError('session_send_arguments_invalid');
     if (typeof input !== 'string' || input.trim() === '' || input.length > 65_536) throw new KernelError('session_input_invalid');
     if (!active.has(sessionId) && queue.items.length === 0 && !queue.paused) {
-      const found = startOne(sessionId, input, undefined, undefined, source);
+      const found = startOne(sessionId, input, undefined, undefined, source, undefined, false, channel);
       return {
         sessionId, accepted: true, queued: false, operationId: found.operationId, state: found.state,
         ...queueSummary(sessionId),
@@ -749,12 +757,12 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     return { sessionId, accepted: true, queued: true, queueItemId: item.queueItemId, ...queueSummary(sessionId) };
   }
 
-  async function cancelOperation(operationId: string, source: 'human' | 'controller' = 'controller') {
+  async function cancelOperation(operationId: string, source: 'human' | 'controller' = 'controller', channel = connection) {
     const found = operation(operationId);
     if (source === 'controller') writable(found.sessionId);
     else owned(found.sessionId);
     if (found.state === 'running') {
-      try { await host.handle({ method: 'run.cancel', params: { sessionId: found.sessionId } }, connection); }
+      try { await host.handle({ method: 'run.cancel', params: { sessionId: found.sessionId } }, channel); }
       catch (error) { if (controlErrorCode(error) !== 'run_not_running') throw error; }
       await found.settled;
     }
@@ -777,7 +785,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     takingOver.add(sessionId);
     try {
       const found = active.get(sessionId);
-      if (found !== undefined) await cancelOperation(found.operationId, 'human');
+      if (found !== undefined) await cancelOperation(found.operationId, 'human', bridgeConnection);
       const queue = queues.get(sessionId);
       if (queue !== undefined) {
         queue.items.length = 0;
@@ -799,9 +807,9 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     owned(sessionId);
     switch (request.action) {
       case 'status': return await observeSession(sessionId, request.after, request.limit, request.waitMs);
-      case 'configuration': return await host.handle({ method: 'status.get', params: { sessionId } }, connection);
-      case 'details': return await host.handle({ method: 'approval.details', params: { sessionId, requestId: request.requestId } }, connection);
-      case 'send': return send(sessionId, 'send', request.input, undefined, 'human');
+      case 'configuration': return await host.handle({ method: 'status.get', params: { sessionId } }, bridgeConnection);
+      case 'details': return await host.handle({ method: 'approval.details', params: { sessionId, requestId: request.requestId } }, bridgeConnection);
+      case 'send': return send(sessionId, 'send', request.input, undefined, 'human', bridgeConnection);
       case 'reply': return replyInteraction({
         sessionId,
         requestId: request.requestId,
@@ -814,11 +822,20 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
             }
           : { answers: request.answers }),
       }, 'human');
+      case 'permission': return await host.handle({ method: 'permission.set', params: {
+        sessionId,
+        permissionProfile: request.permissionProfile,
+        ...(request.permissionNetwork === undefined ? {} : { permissionNetwork: request.permissionNetwork }),
+        ...(request.confirmFullAccess === undefined ? {} : { confirmFullAccess: request.confirmFullAccess }),
+        ...(request.confirmNetwork === undefined ? {} : { confirmNetwork: request.confirmNetwork }),
+        ...(request.confirmPartialWorkspaceWrite === undefined ? {} : { confirmPartialWorkspaceWrite: request.confirmPartialWorkspaceWrite }),
+        ...(request.confirmWorkspaceTrust === undefined ? {} : { confirmWorkspaceTrust: request.confirmWorkspaceTrust }),
+      } }, bridgeConnection);
       case 'cancel': {
         const found = active.get(sessionId);
         return found === undefined
           ? { sessionId, state: 'idle', terminated: true }
-          : await cancelOperation(found.operationId, 'human');
+          : await cancelOperation(found.operationId, 'human', bridgeConnection);
       }
       case 'takeover': return await takeOverSession(sessionId);
     }
@@ -912,13 +929,15 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
       owned(sessionId);
       await authorized(projectRoot);
       ready();
+      const channel = typeof reference.runId === 'string' && humanDeliveries.has(reference.runId)
+        ? bridgeConnection : connection;
       const receipt = record(await tracked(host.handle({ method: 'run.receipt', params: {
         projectRoot, sessionId, ...reference,
-      } }, connection)));
+      } }, channel)));
       if (offset === undefined) return { receipt };
       const page = record(await tracked(host.handle({ method: 'run.result', params: {
         projectRoot, sessionId, runId: receipt.runId, offset,
-      } }, connection)));
+      } }, channel)));
       return { receipt, result: page };
     },
     cancel: (operationId: string) => cancelOperation(operationId),

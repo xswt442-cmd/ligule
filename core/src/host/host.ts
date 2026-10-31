@@ -13,7 +13,8 @@ import {
   registerDelegationResultTool, completedRunResult, failedRunResult, type DelegationSpec, type RunValidation,
 } from '../delegation.js';
 import {
-  assertDelegationMcpServer, assertDelegationMcpTool, assertDelegationPermission, assertDelegationPolicy, createDelegationGrant, delegationPathOf,
+  assertDelegationMcpServer, assertDelegationMcpTool, assertDelegationMode, assertDelegationModelSelection, assertDelegationPermission,
+  assertDelegationPolicy, boundedOutputTokens, createDelegationGrant, delegationPathOf,
   listDelegationGrants, recordDelegationEvent, revokeDelegationGrant,
   type CreateDelegationGrantInput, type DelegationGrant,
 } from './agent-control.js';
@@ -37,7 +38,7 @@ import { createDecisionChain, isPolicyRule, policyArgsHash, type DecisionChain, 
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
 import { createSessionLog, type SessionLog } from '../session/session.js';
-import { createRunAcceptance, findRunReceipt, isRunAcceptance, publishRunResult, readRunResult, runPayloadDigest, runReceipts, runResultPage, type RunAcceptance } from '../session/run.js';
+import { createRunAcceptance, findRunReceipt, isRunAcceptance, publishRunResult, readRunResult, runPayloadDigest, runReceipts, runResultPage, type DurableRunReceipt, type RunAcceptance } from '../session/run.js';
 import type { SessionEvent, SessionHeader } from '../session/format.js';
 import { chooseResumeMode, listWorkspaceSessions, sessionDirectories, sessionDirectory, workspaceDataDirectory } from '../session/list.js';
 import { adoptForSessionDirectory } from '../session/adopt.js';
@@ -49,8 +50,8 @@ import { compactionLimitsOf, loopLimitsOf, sessionLoopLimits, taskLimitsOf } fro
 export { compactionLimitsOf } from './runtime-limits.js';
 import { createCompaction } from '../session/compaction.js';
 import { sessionWriterActive } from '../session/lock.js';
-import { canChangePermission, requirePermissionControl, requireTrustedUi, type ControlTrust } from './capabilities.js';
 import { requestAgentControl, TRUSTED_AGENT_CONTROL_ORIGIN, type AgentControlRequest } from './agent-control-runtime.js';
+import { canChangePermission, controllerScopeOf, mayRecordHumanRun, maySetPermission, requirePermissionControl, requireTrustedUi, runChannelOf, runOriginBasis, runScopesOf, type ControlTrust } from './capabilities.js';
 import { usageEvent } from '../session/usage.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
 import { foldLabel } from '../session/format.js';
@@ -484,20 +485,51 @@ function runOriginOf(value: unknown, defaultOrigin: 'human' | 'controller', canR
   return value ?? defaultOrigin;
 }
 
-function readableRunScopes(permissionControl: boolean, connection: HostClientConnection, controllerScope: string): string[] | undefined {
-  if (permissionControl) return undefined;
-  return connection[TRUSTED_AGENT_CONTROL_ORIGIN] === true ? ['human', controllerScope] : [controllerScope];
+/** 由可信通道与作用域派生的 Run 来源证据；请求参数不能指定。 */
+function runProvenanceOf(trust: ControlTrust, bridge: boolean, origin: 'human' | 'controller',
+  scope: string): import('../session/run.js').RunProvenance {
+  const via = runChannelOf(trust, bridge);
+  if (origin === 'human') return { via, resolvedBy: runOriginBasis(trust, bridge) };
+  return { via, resolvedBy: scope === 'controller:local' ? 'controller-local' : 'controller-grant' };
 }
 
-function runScopeForOrigin(events: readonly SessionEvent[], sessionId: string, runId: string,
-  origin: 'human' | 'controller', readableScopes: readonly string[] | undefined): string | undefined {
+/**
+ * 唯一的「持久证据 + 活跃性 → 对外状态」映射。
+ * 记录里的 state 是最后一次落盘的终态（或 accepted），活跃性只能由当前 Host 提供；
+ * 任何对外返回 receipt 的入口都必须经过这里，避免各调用点自行拼装出不同的状态。
+ */
+function runReceiptView(receipt: DurableRunReceipt, live: boolean): DurableRunReceipt & { liveness: 'alive' | 'unknown' } {
+  return { ...receipt, state: live ? 'running' : receipt.state, liveness: live ? 'alive' : 'unknown' };
+}
+
+/** 一次 Run 覆盖的事件区间：从接受该 Run 的 user 事件到下一个 user 事件之前。 */
+function withinRunWindows(events: readonly SessionEvent[], receipts: readonly import('../session/run.js').DurableRunReceipt[]): SessionEvent[] {
+  if (receipts.length === 0) return [];
+  const windows = receipts.map((receipt) => {
+    const nextUser = events.find(event => event.kind === 'user' && event.seq > receipt.userSeq);
+    return { start: receipt.userSeq, end: nextUser?.seq ?? Number.POSITIVE_INFINITY };
+  });
+  return events.filter(event => windows.some(window => event.seq > window.start && event.seq < window.end));
+}
+
+/** 一次 Run 的持久归属：授权只认这里记录的 callerScope，请求参数不能改写它。 */
+function runAcceptanceScope(events: readonly SessionEvent[], sessionId: string, runId: string): string | undefined {
   const accepted = events.find(event => event.kind === 'user' && isRunAcceptance(event.run)
     && event.run.sessionId === sessionId && event.run.runId === runId);
-  if (accepted?.kind !== 'user' || !isRunAcceptance(accepted.run)) return undefined;
-  const scope = accepted.run.callerScope;
-  if (readableScopes !== undefined && !readableScopes.includes(scope)) return undefined;
-  if (origin === 'human' ? scope !== 'human' : !scope.startsWith('controller:')) return undefined;
-  return scope;
+  return accepted?.kind === 'user' && isRunAcceptance(accepted.run) ? accepted.run.callerScope : undefined;
+}
+
+/** Grant 可以同时约束 Session 的 Mode、模型与输出预算；Run 开始时复核，避免配置变更绕过上限。 */
+function withOutputCeiling(options: HostGenerationOptions, ceiling: number | undefined): HostGenerationOptions {
+  return ceiling === undefined ? options : { ...options, outputTokensCeiling: ceiling };
+}
+
+function assertGrantSessionScope(grant: DelegationGrant, state: HostSessionState): void {
+  const mode = state.mode.file?.name;
+  if (mode !== undefined) assertDelegationMode(grant, mode);
+  const selection = modelSelectionOf(state.generation.model);
+  if (selection !== undefined) assertDelegationModelSelection(grant, `${selection.provider}/${selection.model}`);
+  else if (typeof state.generation.provider.model === 'string') assertDelegationModelSelection(grant, state.generation.provider.model);
 }
 
 function errorDetail(error: unknown): string | undefined {
@@ -952,6 +984,7 @@ export function createHost({
       const latest = env.store === undefined ? env.config : (await env.store.read()).values;
       model = { ...modelConfigOf(env.config), ...(isRecord(latest.model) ? latest.model : {}), selection };
       checkedSessionModel(model, selection);
+      if (grant !== undefined) assertDelegationModelSelection(grant, `${selection.provider}/${selection.model}`);
     }
     let policy: Exclude<PolicyMode, 'default'> | undefined;
     const requestedPolicy = params.initialPolicy ?? grant?.defaultPolicy;
@@ -1007,7 +1040,7 @@ export function createHost({
       if (!Number.isSafeInteger(params.initialOutputTokens) || params.initialOutputTokens < 1) {
         throw new KernelError('provider_output_budget_invalid');
       }
-      options.outputTokens = params.initialOutputTokens;
+      options.outputTokens = boundedOutputTokens(grant, params.initialOutputTokens);
     }
     if (params.initialThinkingEffort !== undefined && params.initialThinkingEffort !== 'default') {
       if (!['none', 'low', 'high', 'max'].includes(params.initialThinkingEffort)) {
@@ -1022,14 +1055,22 @@ export function createHost({
       }
       loopIterations = params.initialLoopIterations;
     }
+    const ceiling = grant?.maxOutputTokens;
+    const generationOptions = withOutputCeiling(options, ceiling);
     const persistGeneration = selection !== undefined || Object.keys(options).length > 0;
-    const provider = persistGeneration ? deriveProvider({ ...env.config, model }, options) : env.generation?.provider ?? env.provider;
+    // 未显式选择模型时沿用 Host 默认生成设置；Grant 有预算上限时仍需重新派生 Provider。
+    const provider = persistGeneration
+      ? deriveProvider({ ...env.config, model }, generationOptions)
+      : ceiling === undefined
+        ? env.generation?.provider ?? env.provider
+        : deriveProvider({ ...env.config, model }, withOutputCeiling(env.generation?.options ?? {}, ceiling));
     const mode = params.initialMode === undefined
       ? undefined
       : params.initialMode === 'default' ? env.modeName ?? DEFAULT_MODE : requiredString(params.initialMode, 'initialMode');
     if (mode !== undefined) {
       if (env.modePaths === undefined) throw new KernelError('host_mode_paths_required');
       await loadMode(mode, env.modePaths);
+      if (grant !== undefined) assertDelegationMode(grant, mode);
     }
     if (params.confirmInitialWorkspaceTrust === true) await setTrusted(env.projectRoot, true);
     return {
@@ -1038,7 +1079,7 @@ export function createHost({
       ...(initialPermission === undefined ? {} : { permission: initialPermission }),
       ...(loopIterations === undefined ? {} : { loopIterations }),
       persistLoopIterations: loopIterations !== undefined,
-      generation: { provider, model, ...(selection === undefined ? {} : { explicit: true }), options },
+      generation: { provider, model, ...(selection === undefined ? {} : { explicit: true }), options: generationOptions },
       persistGeneration,
     };
   }
@@ -1771,14 +1812,21 @@ export function createHost({
         const baseModel = { ...(env.generation?.model ?? modelConfigOf(config)) };
         const selection = generationSelectionOf(saved);
         const model = selection === undefined ? baseModel : { ...baseModel, selection };
-        const options = generationOptionsOf(saved);
+        // 续开记录只持久化显式输出预算；上限由当前 Grant 重新派生，避免旧记录绕过新上限。
+        const options = withOutputCeiling(generationOptionsOf(saved), grant?.maxOutputTokens);
         state.generation = { provider: deriveProvider({ ...config, model }, options), model, explicit: selection !== undefined, options };
       } else {
         const previous = events.filter((event) => event.kind === 'modelSelection').at(-1);
         if (previous !== undefined) {
           const selection = modelSelection({ provider: previous.provider, model: previous.model });
           const model = { ...(env.generation?.model ?? modelConfigOf(config)), selection };
-          state.generation = { provider: deriveProvider({ ...config, model }, {}), model, explicit: true, options: {} };
+          const options = withOutputCeiling({}, grant?.maxOutputTokens);
+          state.generation = { provider: deriveProvider({ ...config, model }, options), model, explicit: true, options };
+        } else if (grant?.maxOutputTokens !== undefined && env.generation !== undefined) {
+          // 续开记录没有显式选择时沿用 Host 的默认生成设置，但仍需套上当前 Grant 的预算上限。
+          const model = env.generation.model;
+          const options = withOutputCeiling(env.generation.options, grant.maxOutputTokens);
+          state.generation = { provider: deriveProvider({ ...config, model }, options), model, options };
         }
       }
     } else {
@@ -2512,7 +2560,7 @@ export function createHost({
     };
   }
 
-  async function configureSession(state: HostSessionState, params: HostMethodParams): Promise<Record<string, unknown>> {
+  async function configureSession(state: HostSessionState, params: HostMethodParams, bridge = false): Promise<Record<string, unknown>> {
     const modeChanged = params.mode !== undefined;
     const policyChanged = params.policy !== undefined;
     const permissionChanged = params.permissionProfile !== undefined || params.permissionNetwork !== undefined;
@@ -2527,13 +2575,15 @@ export function createHost({
 
     if (permissionChanged) {
       return await setPermission(state, params.permissionProfile ?? state.permission.profile,
-        params.permissionNetwork, undefined, undefined, undefined, undefined);
+        params.permissionNetwork, undefined, undefined, undefined, undefined, bridge);
     }
 
     if (modeChanged) {
       const requestedName = params.mode === 'default' ? state.environment.modeName ?? DEFAULT_MODE : requiredString(params.mode, 'mode');
       if (state.environment.modePaths === undefined) throw new KernelError('host_mode_paths_required');
       const requested = await loadMode(requestedName, state.environment.modePaths);
+      const modeGrant = await activeDelegation();
+      if (modeGrant !== undefined) assertDelegationMode(modeGrant, requested.name);
       const current = state.mode.file;
       let applies: 'now' | 'next_round' | 'unchanged' = 'unchanged';
       if (current?.name === requested.name && current.layer === requested.layer) {
@@ -2610,6 +2660,8 @@ export function createHost({
       const latest = state.environment.store === undefined ? state.environment.config : (await state.environment.store.read()).values;
       model = { ...modelConfigOf(state.environment.config), ...(isRecord(latest.model) ? latest.model : {}), selection };
       checkedSessionModel(model, selection);
+      const scopeGrant = await activeDelegation();
+      if (scopeGrant !== undefined) assertDelegationModelSelection(scopeGrant, `${selection.provider}/${selection.model}`);
       explicit = true;
     }
 
@@ -2617,17 +2669,20 @@ export function createHost({
     if (params.resetOutputTokens === true) delete options.outputTokens;
     else if (params.outputTokens !== undefined) {
       if (!Number.isSafeInteger(params.outputTokens) || params.outputTokens < 1) throw new KernelError('provider_output_budget_invalid');
-      options.outputTokens = params.outputTokens;
+      const budgetGrant = await activeDelegation();
+      options.outputTokens = boundedOutputTokens(budgetGrant, params.outputTokens);
     }
     if (params.resetThinking === true || params.thinkingEffort === 'default') delete options.thinkingEffort;
     else if (params.thinkingEffort !== undefined) {
       if (!['none', 'low', 'high', 'max'].includes(params.thinkingEffort)) throw new KernelError('provider_thinking_effort_invalid');
       options.thinkingEffort = params.thinkingEffort as HostGenerationOptions['thinkingEffort'];
     }
-    const provider = deriveProvider({ ...state.environment.config, model }, options);
-    const generation: SessionGeneration = { provider, model, ...(explicit ? { explicit: true } : {}), options };
+    const ceiling = (await activeDelegation())?.maxOutputTokens;
+    const generationOptions = withOutputCeiling(options, ceiling);
+    const provider = deriveProvider({ ...state.environment.config, model }, generationOptions);
+    const generation: SessionGeneration = { provider, model, ...(explicit ? { explicit: true } : {}), options: generationOptions };
     const before = JSON.stringify({ model: previous.model, explicit: previous.explicit === true, options: previous.options });
-    const after = JSON.stringify({ model, explicit, options });
+    const after = JSON.stringify({ model, explicit, options: generationOptions });
     if (before === after) return { ...(await sessionConfiguration(state)), applies: 'unchanged' };
     const compaction = state.running === undefined ? state.rebuildCompaction(model) : undefined;
     await state.session.append(sessionGenerationEvent(generation));
@@ -2647,10 +2702,14 @@ export function createHost({
     confirmNetwork: unknown,
     confirmPartialWorkspaceWrite: unknown,
     confirmWorkspaceTrust: unknown,
+    bridge: boolean,
   ): Promise<Record<string, unknown>> {
     const grant = await activeDelegation();
-    if (!permissionControl && agentControl === undefined) throw new KernelError('permission_control_unavailable');
-    if (agentControl !== undefined && !agentControl.operator) throw new KernelError('agent_control_operator_required');
+    // 权限变更是可信 UI、经过认证的桥连接或 Grant operator 的能力；普通 MCP 客户端不接受。
+    if (!maySetPermission(controlTrust, bridge)) {
+      if (controlTrust.agentControl === undefined) throw new KernelError('permission_control_unavailable');
+      throw new KernelError('agent_control_operator_required');
+    }
     if (state.permissionChanging) throw new KernelError('permission_change_in_progress', { detail: state.id });
     if (state.running !== undefined) throw new KernelError('permission_session_running', { detail: state.id });
     if (profileValue !== 'read-only' && profileValue !== 'workspace-write' && profileValue !== 'full-access') {
@@ -2790,10 +2849,15 @@ export function createHost({
         const ownedState = sessions.get(sessionId);
         if (ownedState !== undefined) await assertDelegationProject(grant, ownedState.environment.projectRoot);
       }
+      // 身份与作用域只由 Host 所在的可信通道决定；连接上的桥标记由认证后端设置。
+      // 进程内直接调用 Host（插件清理测试、Host 自身）没有通道对象，视作“非桥”。
+      const bridge = connection !== undefined && connection[TRUSTED_AGENT_CONTROL_ORIGIN] === true;
+      const controllerScope = controllerScopeOf(grant?.id);
+      const runScopes = runScopesOf(controlTrust, bridge, controllerScope);
 
       switch (message.method) {
         case 'workspace.trust': {
-          if (!permissionControl) throw new KernelError('workspace_trust_control_unavailable');
+          requireTrustedUi('workspace-trust', controlTrust);
           if (typeof message.params.trusted !== 'boolean') throw new KernelError('protocol_args_invalid', { detail: 'trusted must be a boolean' });
           if (message.params.trusted && message.params.confirmWorkspaceTrust !== true) {
             throw new KernelError('workspace_trust_confirmation_required');
@@ -3074,6 +3138,8 @@ export function createHost({
           };
         }
         case 'session.export': {
+          // 导出会把完整 RunResult 与图片写到用户选择的路径，只允许可信本地 UI 发起。
+          requireTrustedUi('session-export', controlTrust);
           // Host 负责读取和排版完整记录并写出文件，客户端只选择目标路径。
           // 用户通过保存对话框选择的导出路径不属于模型工具写入，不受项目边界限制。
           const record = await readRecord(sessionId, { fullResults: true });
@@ -3159,9 +3225,9 @@ export function createHost({
         }
         case 'run.start': {
           const state = open(sessionId);
-          const origin = runOriginOf(message.params.origin, 'human',
-            permissionControl || connection[TRUSTED_AGENT_CONTROL_ORIGIN] === true);
-          const scope = origin === 'controller' ? 'controller:' + (grant?.id ?? 'local') : 'human';
+          const origin = runOriginOf(message.params.origin, 'human', mayRecordHumanRun(controlTrust, bridge));
+          const scope = origin === 'controller' ? controllerScope : 'human';
+          if (grant !== undefined) assertGrantSessionScope(grant, state);
           const requestKey = message.params.requestKey;
           const digest = runPayloadDigest(input, message.params.delegation);
           const waitForOriginal = async (receipt: import('../session/run.js').DurableRunReceipt) => {
@@ -3197,7 +3263,8 @@ export function createHost({
               }
             }
             runContextOf(state, message.params.delegation);
-            const run = createRunAcceptance(sessionId, input, message.params.delegation, scope, requestKey);
+            const run = createRunAcceptance(sessionId, input, message.params.delegation, scope, requestKey,
+              runProvenanceOf(controlTrust, bridge, origin ?? 'human', scope));
             const work = executeRun(state, input, origin ?? 'human', message.params.delegation, run, connection, userSeq => {
               accepted.resolve({ runId: run.runId, sessionId, userSeq, state: 'accepted', acceptedAt: run.acceptedAt,
                 ...(requestKey === undefined ? {} : { requestKey }) });
@@ -3375,14 +3442,17 @@ export function createHost({
           const owner = header?.workspace ?? (header?.projectRoot ? workspaceIdentity(header.projectRoot) : undefined);
           if (owner !== workspace) throw new KernelError('artifact_owner_mismatch');
           const events = await log.read();
+          const visibleRuns = runScopes === undefined
+            ? runReceipts(events, sessionId)
+            : runScopes.flatMap(scope => runReceipts(events, sessionId, scope));
           let artifactEvents = events;
           if (message.method === 'artifact.list' && message.params.runId !== undefined) {
-            const scope = permissionControl ? undefined : 'controller:' + (grant?.id ?? 'local');
-            const receipt = runReceipts(events, sessionId, scope).find(item => item.runId === message.params.runId);
+            const receipt = visibleRuns.find(item => item.runId === message.params.runId);
             if (receipt === undefined) throw new KernelError('run_not_found');
-            const nextUser = events.find(event => event.kind === 'user' && event.seq > receipt.userSeq);
-            artifactEvents = events.filter(event => event.seq > receipt.userSeq
-              && (nextUser === undefined || event.seq < nextUser.seq));
+            artifactEvents = withinRunWindows(events, [receipt]);
+          } else if (runScopes !== undefined) {
+            // 无 Grant 或受限连接只列出自己可见 Run 产生的证据，不枚举其他调用者的产物。
+            artifactEvents = withinRunWindows(events, visibleRuns);
           }
           const evidence = artifactEvents.filter(event => event.kind === 'tool' && (event.tool === 'present' || event.tool === 'subagent'));
           const artifacts = confirmedFileArtifacts(await fillSpills(evidence, env), workspace);
@@ -3423,9 +3493,9 @@ export function createHost({
         }
         case 'run.submit': {
           const state = open(sessionId);
-          const origin = runOriginOf(message.params.origin, 'controller',
-            permissionControl || connection[TRUSTED_AGENT_CONTROL_ORIGIN] === true);
-          const scope = origin === 'controller' ? 'controller:' + (grant?.id ?? 'local') : 'human';
+          const origin = runOriginOf(message.params.origin, 'controller', mayRecordHumanRun(controlTrust, bridge));
+          const scope = origin === 'controller' ? controllerScope : 'human';
+          if (grant !== undefined) assertGrantSessionScope(grant, state);
           const key = message.params.requestKey;
           const digest = runPayloadDigest(input, message.params.delegation);
           const pending = pendingSubmissions.get(sessionId);
@@ -3434,7 +3504,7 @@ export function createHost({
             if (pending.digest !== digest) throw new KernelError('run_request_conflict');
             const receipt = await pending.receipt;
             const live = state.activeRunId === receipt.runId;
-            return { ...receipt, reused: true, state: live ? 'running' : receipt.state, liveness: live ? 'alive' : 'unknown' };
+            return { ...runReceiptView(receipt, live), reused: true };
           }
           const accepted = deferred<import('../session/run.js').DurableRunReceipt>();
           void accepted.promise.catch(() => undefined);
@@ -3449,11 +3519,12 @@ export function createHost({
                 if (!user || !isRunAcceptance(user.run) || user.run.payloadDigest !== digest) throw new KernelError('run_request_conflict');
                 accepted.resolve(previous);
                 const live = state.activeRunId === previous.runId;
-                return { ...previous, reused: true, state: live ? 'running' : previous.state, liveness: live ? 'alive' : 'unknown' };
+                return { ...runReceiptView(previous, live), reused: true };
               }
             }
             runContextOf(state, message.params.delegation);
-            const run = createRunAcceptance(sessionId, input, message.params.delegation, scope, key);
+            const run = createRunAcceptance(sessionId, input, message.params.delegation, scope, key,
+              runProvenanceOf(controlTrust, bridge, origin, scope));
             const work = executeRun(state, input, origin, message.params.delegation, run, connection, userSeq => {
               accepted.resolve({ runId: run.runId, sessionId, userSeq, state: 'accepted', acceptedAt: run.acceptedAt,
                 ...(run.requestKey === undefined ? {} : { requestKey: run.requestKey }) });
@@ -3461,7 +3532,7 @@ export function createHost({
             void work.catch(error => accepted.reject(error));
             const receipt = await accepted.promise;
             const live = state.activeRunId === receipt.runId;
-            return { ...receipt, reused: false, state: live ? 'running' : receipt.state, liveness: live ? 'alive' : 'unknown' };
+            return { ...runReceiptView(receipt, live), reused: false };
           } catch (error) {
             accepted.reject(error);
             throw error;
@@ -3472,12 +3543,14 @@ export function createHost({
         case 'run.wait': {
           const state = open(sessionId);
           const runId = requiredString(message.params.runId, 'runId');
-          const origin = message.params.origin;
-          if (origin !== 'human' && origin !== 'controller') throw new KernelError('protocol_args_invalid');
+          // origin 仅作为旧客户端的兼容字段保留，不参与授权；真实来源取自持久 Acceptance。
+          if (message.params.origin !== undefined && message.params.origin !== 'human' && message.params.origin !== 'controller') {
+            throw new KernelError('protocol_args_invalid');
+          }
           const events = await state.session.read();
-          const scopes = readableRunScopes(permissionControl, connection, 'controller:' + (grant?.id ?? 'local'));
-          const scope = runScopeForOrigin(events, sessionId, runId, origin, scopes);
+          const scope = runAcceptanceScope(events, sessionId, runId);
           if (scope === undefined) throw new KernelError('run_not_found');
+          if (runScopes !== undefined && !runScopes.includes(scope)) throw new KernelError('run_not_found');
           const receipt = findRunReceipt(events, sessionId, scope, { runId });
           if (receipt === undefined) throw new KernelError('run_not_found');
           if (state.activeRunId === runId && state.operation !== undefined) return await state.operation;
@@ -3526,17 +3599,16 @@ export function createHost({
           const owner = header?.workspace ?? (header?.projectRoot ? workspaceIdentity(header.projectRoot) : undefined);
           if (owner !== workspace) throw new KernelError('run_owner_mismatch');
           const events = await log.read();
-          const scopes = readableRunScopes(permissionControl, connection, 'controller:' + (grant?.id ?? 'local'));
-          const visibleReceipts = scopes === undefined
+          const visibleReceipts = runScopes === undefined
             ? runReceipts(events, sessionId)
-            : scopes.flatMap(scope => runReceipts(events, sessionId, scope)).sort((left, right) => left.userSeq - right.userSeq);
+            : runScopes.flatMap(scope => runReceipts(events, sessionId, scope)).sort((left, right) => left.userSeq - right.userSeq);
           if (message.method === 'run.receipts') {
             const limit = message.params.limit ?? 20;
             const before = message.params.before;
             const matching = visibleReceipts.filter(item => before === undefined || item.userSeq < before).reverse();
             const page = matching.slice(0, limit);
-            return { sessionId, receipts: page.map(receipt => sessions.get(sessionId)?.activeRunId === receipt.runId
-              ? { ...receipt, state: 'running', liveness: 'alive' } : { ...receipt, liveness: 'unknown' }),
+            return { sessionId, receipts: page.map(receipt =>
+              runReceiptView(receipt, sessions.get(sessionId)?.activeRunId === receipt.runId)),
               hasMore: matching.length > page.length,
               nextBefore: matching.length > page.length ? page.at(-1)?.userSeq ?? null : null };
           }
@@ -3554,7 +3626,7 @@ export function createHost({
           if (receipt === undefined) throw new KernelError('run_not_found');
           if (message.method === 'run.receipt') {
             const live = sessions.get(sessionId)?.activeRunId === receipt.runId;
-            return { ...receipt, state: live ? 'running' : receipt.state, liveness: live ? 'alive' : 'unknown' };
+            return runReceiptView(receipt, live);
           }
           const result = await readRunResult(env.directory, workspace, sessionId, receipt);
           return { runId: receipt.runId, ...runResultPage(result, message.params.offset ?? 0) };
@@ -3585,6 +3657,7 @@ export function createHost({
             message.params.confirmNetwork,
             message.params.confirmPartialWorkspaceWrite,
             message.params.confirmWorkspaceTrust,
+            bridge,
           ));
         }
         case 'mode.set': {
@@ -3662,7 +3735,7 @@ export function createHost({
           };
         }
         case 'session.configure': {
-          return await serializeSessionConfiguration(sessionId, () => configureSession(open(sessionId), message.params));
+          return await serializeSessionConfiguration(sessionId, () => configureSession(open(sessionId), message.params, bridge));
         }
         case 'workspaces.list':
           // 返回持久工作区登记表及默认工作区身份，供客户端显示。
@@ -3772,6 +3845,9 @@ export function createHost({
             confirmScreenCapture: message.params.confirmScreenCapture === true,
             allowedMcpServers: message.params.allowedMcpServers as string[] | undefined,
             allowedMcpTools: message.params.allowedMcpTools as string[] | undefined,
+            ...(message.params.allowedModes === undefined ? {} : { allowedModes: message.params.allowedModes as string[] }),
+            ...(message.params.allowedModels === undefined ? {} : { allowedModels: message.params.allowedModels as string[] }),
+            ...(message.params.maxOutputTokens === undefined ? {} : { maxOutputTokens: message.params.maxOutputTokens as number }),
             confirmFullAccess: message.params.confirmFullAccess as boolean,
             confirmUnrestrictedNetwork: message.params.confirmUnrestrictedNetwork as boolean,
             confirmPartialWorkspaceWrite: message.params.confirmPartialWorkspaceWrite === true,

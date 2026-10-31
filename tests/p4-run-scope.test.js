@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFile, mkdir, readFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -8,6 +8,7 @@ import { createDelegationGrant, listDelegationGrants, requireDelegationGrant, re
 import { createConnection } from '../core/dist/host/connection.js';
 import { createMemoryConnectionPair } from '../core/dist/host/memory.js';
 import { serveHost } from '../core/dist/host/host.js';
+import { createControl } from '../core/dist/host/control.js';
 import { hostProviderFromConfig } from '../core/dist/host/provider.js';
 import { modeDirectories } from '../core/dist/kernel/modes.js';
 import { withTuiHost } from '../core/tests/helpers/tui-host.js';
@@ -54,7 +55,7 @@ test('run receipt and result reads stay within the active Grant scope and valida
   let firstGrantId;
   let secondGrantId;
   let expiredGrantId;
-  await withTuiHost(async ({ client, config, sessionId, projectDirectory, directory }) => {
+  await withTuiHost(async ({ client, config, sessionId, sessionDirectory, projectDirectory, directory }) => {
     const first = await client.request('run.submit', {
       sessionId, origin: 'controller', input: 'scope-bound result', requestKey: 'scope-key',
     });
@@ -76,16 +77,22 @@ test('run receipt and result reads stay within the active Grant scope and valida
       });
       assert.notEqual(second.runId, first.runId, 'a second Grant must not reuse another Grant’s idempotency key');
       await peer.client.request('run.wait', { sessionId, origin: 'controller', runId: second.runId });
-      await assert.rejects(peer.client.request('run.wait', {
+      // origin 不再参与授权：不能靠声明 human 换 scope，归属只来自持久 Acceptance。
+      assert.equal((await peer.client.request('run.wait', {
         sessionId, origin: 'human', runId: second.runId,
-      }), { code: 'run_not_found' }, 'a Grant cannot select human scope by claiming human origin');
+      })).text, 'Local response: scope-bound result');
       const claimedHuman = await peer.client.request('run.submit', {
         sessionId, origin: 'human', input: 'a Grant cannot claim a human receipt',
       });
       await peer.client.request('run.wait', { sessionId, origin: 'controller', runId: claimedHuman.runId });
-      await assert.rejects(peer.client.request('run.wait', {
+      assert.equal((await peer.client.request('run.wait', {
         sessionId, origin: 'human', runId: claimedHuman.runId,
-      }), { code: 'run_not_found' }, 'a Grant cannot widen receipt access by claiming human origin');
+      })).text, 'Local response: a Grant cannot claim a human receipt');
+      const acceptances = (await readFile(join(sessionDirectory, `${sessionId}.jsonl`), 'utf8')).split(String.fromCharCode(10))
+        .filter(line => line.trim() !== '').map(line => JSON.parse(line))
+        .filter(event => event.kind === 'user' && event.run !== undefined);
+      assert.equal(acceptances.at(-1).run.callerScope, `controller:${secondGrantId}`,
+        'a Grant’s run must stay bound to its own controller scope whatever origin it declares');
 
       const otherProject = join(directory, 'other-project');
       await mkdir(otherProject);
@@ -131,7 +138,8 @@ test('trusted local UI can read both run scopes even when a Grant is active', as
   let otherGrantId;
   await withTuiHost(async ({ client, config, sessionId, projectDirectory, sessionDirectory, directory }) => {
     const human = await client.request('run.submit', { sessionId, origin: 'human', input: 'human scope result', requestKey: 'shared-key' });
-    await assert.rejects(client.request('run.wait', { sessionId, runId: human.runId }), { code: 'protocol_args_invalid' });
+    // run.wait 不再要求 origin：Host 从持久 Acceptance 推导 Run 归属，再按调用方可读 scope 授权。
+    await client.request('run.wait', { sessionId, runId: human.runId });
     await client.request('run.wait', { sessionId, origin: 'human', runId: human.runId });
     const controller = await client.request('run.submit', { sessionId, origin: 'controller', input: 'controller scope result', requestKey: 'shared-key' });
     await client.request('run.wait', { sessionId, origin: 'controller', runId: controller.runId });
@@ -139,8 +147,7 @@ test('trusted local UI can read both run scopes even when a Grant is active', as
       projectRoot: projectDirectory, sessionId, requestKey: 'shared-key',
     }), { code: 'run_request_key_ambiguous' });
     const direct = await client.request('run.start', { sessionId, input: 'direct trusted UI run' });
-    await assert.rejects(client.request('run.wait', { sessionId, runId: direct.runId }), { code: 'protocol_args_invalid' });
-    assert.equal((await client.request('run.wait', { sessionId, origin: 'human', runId: direct.runId })).text, direct.text);
+    assert.equal((await client.request('run.wait', { sessionId, runId: direct.runId })).text, direct.text);
     const recordPath = join(sessionDirectory, `${sessionId}.jsonl`);
     const beforeReads = await readFile(recordPath);
 
@@ -163,9 +170,10 @@ test('trusted local UI can read both run scopes even when a Grant is active', as
     } finally { await peer.stop(); }
 
     await client.request('session.open', { sessionId });
-    await assert.rejects(client.request('run.wait', {
+    // origin 不再选择 scope：可信 UI 读到的是这条 Run 的唯一持久归属，两种写法结果相同。
+    assert.equal((await client.request('run.wait', {
       sessionId, origin: 'human', runId: grantBRun.runId,
-    }), { code: 'run_not_found' });
+    })).text, 'Local response: controller scope B result');
     assert.equal((await client.request('run.wait', {
       sessionId, origin: 'controller', runId: grantBRun.runId,
     })).text, 'Local response: controller scope B result');
@@ -187,6 +195,126 @@ test('trusted local UI can read both run scopes even when a Grant is active', as
         grantId, storePath, operator: false,
         validate: () => requireDelegationGrant(storePath, grantId, projectDirectory),
       };
+    },
+  });
+});
+
+test('a Grant-bound control facade cannot read another Host’s human receipt', async () => {
+  // MCP stdio 走 createControl 的本地控制面。该控制面不是 authenticated Agent Control bridge，
+  // 因此不能借 human scope 读取可信 UI 建立的 human run（P6-A 身份统一前它曾能读到）。
+  await withTuiHost(async ({ client, config, sessionId, projectDirectory, directory }) => {
+    const human = await client.request('run.submit', {
+      sessionId, origin: 'human', input: 'human-only receipt', requestKey: 'facade-key',
+    });
+    await client.request('run.wait', { sessionId, origin: 'human', runId: human.runId });
+    await client.request('session.close', { sessionId });
+
+    const storePath = join(directory, 'agent-control.json');
+    const empty = await listDelegationGrants(storePath);
+    const created = await createDelegationGrant(storePath, grantInput(projectDirectory, 'facade scope'), empty.version);
+    const grantId = created.grants[0].id;
+    const pair = createMemoryConnectionPair();
+    const peer = serveHost({
+      ...pair.host, config,
+      provider: hostProviderFromConfig(config),
+      policy: config.policy,
+      modeName: 'minimal',
+      modePaths: modeDirectories(projectDirectory, fileURLToPath(new URL('../core/modes/', import.meta.url)), join(directory, 'home')),
+      agentControl: { grantId, storePath, operator: false, validate: () => requireDelegationGrant(storePath, grantId, projectDirectory) },
+    });
+    const control = createControl(peer, projectDirectory, { operator: false });
+    try {
+      await control.open(projectDirectory, sessionId);
+      await assert.rejects(control.getRun(sessionId, { runId: human.runId }), { code: 'run_not_found' });
+      await assert.rejects(control.getRun(sessionId, { requestKey: 'facade-key' }), { code: 'run_not_found' });
+      const own = await control.submit(sessionId, 'facade-owned run', undefined, 'facade-own-key');
+      const got = await control.getRun(sessionId, { runId: own.receipt.runId });
+      assert.equal(got.receipt.runId, own.receipt.runId);
+      await logEvidence(directory, 'PASS grant-bound control facade is denied human-scope receipts and keeps its own controller receipt');
+    } finally {
+      await control.release();
+      pair.client.output.end();
+      await peer.release();
+    }
+  }, { testDirectory, permissionControl: true });
+});
+
+test('artifacts and export stay inside the caller’s visible Run scope', async () => {
+  await withTuiHost(async ({ client, config, sessionId, projectDirectory, directory }) => {
+    const storePath = join(directory, 'agent-control.json');
+    const created = await createDelegationGrant(storePath, grantInput(projectDirectory, 'artifact scope'), (await listDelegationGrants(storePath)).version);
+    const grantId = created.grants[0].id;
+    await writeFile(join(projectDirectory, 'human-report.txt'), 'human evidence');
+    await client.request('session.configure', { sessionId, mode: 'full' });
+    await client.request('run.start', {
+      sessionId,
+      input: JSON.stringify({ tool: 'present', args: { files: [{ path: 'human-report.txt' }] } }),
+    });
+    const listing = await client.request('artifact.list', { projectRoot: projectDirectory, sessionId });
+    assert.equal(listing.items.length, 1, 'the trusted local UI sees the human run artifact');
+    const humanReceipt = (await client.request('run.receipts', { projectRoot: projectDirectory, sessionId })).receipts[0];
+    const humanRunId = humanReceipt.runId;
+    assert.equal(humanReceipt.via, 'trusted-ui', 'the receipt records which channel submitted the run');
+    assert.equal(humanReceipt.resolvedBy, 'permission-control', 'the receipt records why the run counts as human');
+    await client.request('session.export', { sessionId, path: join(directory, 'human-export.md') });
+    await client.request('session.close', { sessionId });
+
+    const peer = startGrantHost({ config, projectDirectory, directory, storePath, grantId });
+    try {
+      await peer.client.request('session.open', { sessionId });
+      await assert.rejects(peer.client.request('artifact.list', {
+        projectRoot: projectDirectory, sessionId, runId: humanRunId,
+      }), { code: 'run_not_found' }, 'a Grant cannot ask for artifacts of a run it cannot read');
+      const scoped = await peer.client.request('artifact.list', { projectRoot: projectDirectory, sessionId });
+      assert.equal(scoped.items.length, 0, 'a Grant cannot enumerate artifacts produced outside its scope');
+      await assert.rejects(peer.client.request('session.export', { sessionId, path: join(directory, 'peer-export.md') }),
+        { code: 'session_export_trusted_ui_required' });
+      await logEvidence(directory, 'PASS Grant-bound scope hides human artifacts and refuses session export');
+    } finally { await peer.stop(); }
+  }, { testDirectory, permissionControl: true, config: { policy: { mode: 'auto' } } });
+});
+
+test('a session transcript stays readable while one Run’s full result stays scoped', async () => {
+  let storePath;
+  let grantId;
+  await withTuiHost(async ({ client, config, sessionId, projectDirectory, directory }) => {
+    const human = await client.request('run.submit', { sessionId, origin: 'human', input: 'human transcript task' });
+    await client.request('run.wait', { sessionId, runId: human.runId });
+    await client.request('session.close', { sessionId });
+
+    const peer = startGrantHost({ config, projectDirectory, directory, storePath, grantId });
+    try {
+      await peer.client.request('session.open', { sessionId });
+      // 转录属于会话：拿到会话读取权就能看到已持久化的消息。
+      const transcript = await peer.client.request('session.read', { sessionId, limit: 100 });
+      assert.match(JSON.stringify(transcript.events), /Local response: human transcript task/u);
+      // 完整结果属于 Run：另一个 scope 的控制器既读不到回执，也读不到结果。
+      await assert.rejects(peer.client.request('run.receipt', {
+        projectRoot: projectDirectory, sessionId, runId: human.runId,
+      }), { code: 'run_not_found' });
+      await assert.rejects(peer.client.request('run.result', {
+        projectRoot: projectDirectory, sessionId, runId: human.runId,
+      }), { code: 'run_not_found' });
+      // 同一个调用方自己的 Run：两类内容都可见。
+      const own = await peer.client.request('run.submit', { sessionId, origin: 'controller', input: 'own scoped task' });
+      await peer.client.request('run.wait', { sessionId, origin: 'controller', runId: own.runId });
+      assert.match((await peer.client.request('run.result', {
+        projectRoot: projectDirectory, sessionId, runId: own.runId,
+      })).json, /own scoped task/u);
+    } finally {
+      await peer.client.request('session.close', { sessionId }).catch(() => undefined);
+      await peer.stop();
+    }
+    await logEvidence(directory, 'PASS transcript readable, Run result scoped to the caller');
+  }, {
+    testDirectory,
+    permissionControl: true,
+    agentControl: async ({ directory, projectDirectory }) => {
+      storePath = join(directory, 'agent-control.json');
+      const empty = await listDelegationGrants(storePath);
+      const created = await createDelegationGrant(storePath, grantInput(projectDirectory, 'transcript reader'), empty.version);
+      grantId = created.grants[0].id;
+      return { grantId, storePath, operator: false, validate: () => requireDelegationGrant(storePath, grantId, projectDirectory) };
     },
   });
 });

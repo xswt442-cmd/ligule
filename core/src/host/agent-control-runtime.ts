@@ -24,6 +24,7 @@ export type AgentControlRequest =
   | { readonly action: 'details'; readonly requestId: string }
   | { readonly action: 'reply'; readonly requestId: string; readonly type: 'approval'; readonly decision: 'allow' | 'deny'; readonly rememberScope?: 'session' | 'project' | 'user'; readonly rememberTarget?: 'file' | 'workspace' | 'tool' | 'command' }
   | { readonly action: 'reply'; readonly requestId: string; readonly type: 'question'; readonly answers: unknown }
+  | { readonly action: 'permission'; readonly permissionProfile: string; readonly permissionNetwork?: string; readonly confirmFullAccess?: boolean; readonly confirmNetwork?: boolean; readonly confirmPartialWorkspaceWrite?: boolean; readonly confirmWorkspaceTrust?: boolean }
   | { readonly action: 'cancel' }
   | { readonly action: 'takeover' };
 
@@ -83,6 +84,26 @@ function validRequest(input: unknown): AgentControlRequest {
         throw new KernelError('agent_control_request_invalid');
       }
       return { action: 'status', after: after as number, limit: limit as number, waitMs: waitMs as number };
+    }
+    case 'permission': {
+      if (typeof value.permissionProfile !== 'string'
+        || !['read-only', 'workspace-write', 'full-access'].includes(value.permissionProfile)) {
+        throw new KernelError('agent_control_request_invalid');
+      }
+      if (value.permissionNetwork !== undefined && !['policy', 'unrestricted', 'disabled'].includes(String(value.permissionNetwork))) {
+        throw new KernelError('agent_control_request_invalid');
+      }
+      for (const flag of ['confirmFullAccess', 'confirmNetwork', 'confirmPartialWorkspaceWrite', 'confirmWorkspaceTrust']) {
+        if (value[flag] !== undefined && typeof value[flag] !== 'boolean') throw new KernelError('agent_control_request_invalid');
+      }
+      return {
+        action: 'permission', permissionProfile: value.permissionProfile,
+        ...(value.permissionNetwork === undefined ? {} : { permissionNetwork: value.permissionNetwork as string }),
+        ...(value.confirmFullAccess === undefined ? {} : { confirmFullAccess: value.confirmFullAccess as boolean }),
+        ...(value.confirmNetwork === undefined ? {} : { confirmNetwork: value.confirmNetwork as boolean }),
+        ...(value.confirmPartialWorkspaceWrite === undefined ? {} : { confirmPartialWorkspaceWrite: value.confirmPartialWorkspaceWrite as boolean }),
+        ...(value.confirmWorkspaceTrust === undefined ? {} : { confirmWorkspaceTrust: value.confirmWorkspaceTrust as boolean }),
+      };
     }
     case 'send':
       if (typeof value.input !== 'string' || value.input.trim() === '' || value.input.length > 65_536) {

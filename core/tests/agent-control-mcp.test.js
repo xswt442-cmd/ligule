@@ -240,6 +240,26 @@ test('a second local Host can observe and take over the active MCP-owned Session
       assert.deepEqual(configuration.delegation.allowedPolicies, ['ask', 'auto']);
       assert.equal(configuration.delegation.allowOperator, true);
 
+      // 本地人类可以通过桥在 Session 空闲时调整权限；普通 MCP 客户端没有这个入口。
+      const relaxed = await host.handle({ method: 'session.control', params: {
+        projectRoot, sessionId, request: { action: 'permission', permissionProfile: 'workspace-write', confirmPartialWorkspaceWrite: true },
+      } }, localConnection);
+      assert.equal(relaxed.permission.profile, 'workspace-write');
+      assert.equal(relaxed.applies, 'now');
+      const reread = await host.handle({ method: 'session.control', params: {
+        projectRoot, sessionId, request: { action: 'configuration' },
+      } }, localConnection);
+      assert.equal(reread.permission.profile, 'workspace-write', 'the change is visible on the next configuration read');
+
+      await assert.rejects(host.handle({ method: 'session.control', params: {
+        projectRoot, sessionId, request: { action: 'permission', permissionProfile: 'full-access' },
+      } }, localConnection), { code: 'agent_control_permission_exceeds_grant' },
+      'a human change is still bounded by the Grant ceiling');
+      const restored = await host.handle({ method: 'session.control', params: {
+        projectRoot, sessionId, request: { action: 'permission', permissionProfile: 'read-only' },
+      } }, localConnection);
+      assert.equal(restored.permission.profile, 'read-only');
+
       const takeover = await host.handle({ method: 'session.control', params: {
         projectRoot, sessionId, request: { action: 'takeover' },
       } }, localConnection);
