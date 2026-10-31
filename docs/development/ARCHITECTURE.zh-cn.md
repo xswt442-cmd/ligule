@@ -6,7 +6,7 @@
 
 本文面向阅读或修改仓库的贡献者，说明组件职责、依赖方向、一次请求的执行路径和会话恢复。协议字段与模块细节以链接到的源码为准。
 
-用户配置层的 `[telemetry].enabled = true` 可开启有界本地 JSONL 事件日志；可选的 `otlpEndpoint` 只接受本机回环 OTLP/HTTP protobuf 地址，并导出有界 OpenTelemetry Trace。默认关闭；项目配置不能启用此功能，存储或导出失败均不影响 Agent 执行。本地存储失败会停用当前遥测写入器，并通过 Host 日志记录脱敏后的错误码；直接调用 `flush()` 时会收到该错误。日志和 Trace 不包含提示词、推理、工具参数/结果、文件路径或凭据。Session JSONL 仍是恢复事实来源；本地 JSONL 是结构化事件日志，不是 OpenTelemetry Logs，Ligule 也没有 Trace 查看器。
+用户配置层的 `[telemetry].enabled = true` 可开启有界本地 JSONL 事件日志；可选的 `otlpEndpoint` 只接受本机回环 OTLP/HTTP protobuf 地址，并导出有界 OpenTelemetry Trace。默认关闭；项目配置不能启用此功能，存储或导出失败均不影响 Agent 执行。本地 JSONL 存储固定最多保留四个 64 KiB 分段和有界 Manifest；分段保留数不是用户配置项，因为调整它需要安全迁移 Manifest。本地存储失败会停用当前遥测写入器，并通过 Host 日志记录脱敏后的错误码；直接调用 `flush()` 时会收到该错误。日志和 Trace 不包含提示词、推理、工具参数/结果、文件路径或凭据。Session JSONL 仍是恢复事实来源；本地 JSONL 是结构化事件日志，不是 OpenTelemetry Logs，Ligule 也没有 Trace 查看器。
 
 CLI 的 npm 包内置私有 Core 的编译代码、模式与元数据；Core 的外部运行依赖合并到公开包清单，由 npm 在消费者系统安装对应的原生依赖。打包时不内置构建机器的外部依赖树，同一 tarball 用于 Windows 与 Linux 的安装验证。
 
@@ -190,7 +190,7 @@ sequenceDiagram
 
 `model.outputTokens` 表示本次请求的输出预算，与旧版能力上限调整相互独立。模型服务保留字符串形式的 `models` 列表，并可按模型 ID 配置 `modelSettings`，包括显示名称、上下文窗口和请求输出预算。模型级输出声明可以提高未知端点的保守默认值，但不能超过已核实的端点或模型上限，也不能覆盖显式能力限制。未设置该声明的旧配置仍使用保守上限。[预算解析器](../../core/src/model/output-budget.ts)会校验生效限制；同一模型的上下文窗口也控制 Host 的压缩。Provider 重建和会话生成设置变更在轮次边界生效。
 
-Host 的运行进度仅在当前活跃会话与任务期间存在，由 Loop、压缩、审批和提问事件生成。`status.get` 与 `progress` 通知提供阶段、时间和计数；TUI 与 Desktop 展示同一状态。Host 会合并短时间内重复的活动通知，但保留实际进度时间；任务结束时清除进度。进度心跳不会写入 Session JSONL，默认也不会因无活动超时而取消任务。
+Host 的运行进度仅在当前活跃会话与任务期间存在，由 Loop、压缩、审批和提问事件生成。`status.get` 与 `progress` 通知提供阶段、时间和计数；活动进度快照也携带 TaskBudget 状态，使 TUI 与 Desktop 可直接显示剩余执行时间、累计交互等待和 Host 判定的暂停状态，无需轮询完整状态视图。Host 会合并短时间内重复的活动通知，但保留实际进度时间；任务结束时清除进度。进度心跳不会写入 Session JSONL，默认也不会因无活动超时而取消任务。
 
 ### 会话记录与恢复
 
