@@ -26,6 +26,7 @@ import { selectedText, transcriptLines, viewportPosition, wrapLine } from './vie
 import { CURRENT, ENGLISH_LABELS, ENGLISH_VIEWS, KEYMAP, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec } from './keymap.js';
 import { displayWidth } from './commands.js';
 import { textOf as chooseText, type Locale } from '@ligule/core/kernel/locale.js';
+import { controlPresets } from '@ligule/core/host/control-presets.js';
 import type { TerminalAction } from './keymap.js';
 import type { SessionEvent, SessionHeader } from '@ligule/core/session/format.js';
 import type { SessionSummary } from '@ligule/core/session/list.js';
@@ -1255,6 +1256,58 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     ].join('\n') });
   }, [client, push, sessionId, t]);
 
+  const createPresetGrant = useCallback((presetId: string) => {
+    const permission = status?.permission;
+    if (permission === undefined) {
+      push({ kind: 'error', text: t('无法读取当前权限，请重试。', 'Could not read current permissions; retry.') });
+      return;
+    }
+    const preset = controlPresets({
+      partialWorkspaceWriteConfirmationRequired: permission.partialWorkspaceWriteConfirmationRequired,
+      partialWorkspaceWriteConfirmed: permission.partialWorkspaceWriteConfirmed,
+    }).find(candidate => candidate.id === presetId);
+    if (preset === undefined) {
+      push({ kind: 'error', text: t('未知的安全预设。', 'Unknown safe preset.') });
+      return;
+    }
+    const projectRoot = info.boundary;
+    if (projectRoot === undefined || projectRoot === '') {
+      push({ kind: 'error', text: t('请先选择工作区再创建授权。', 'Select a workspace before creating a grant.') });
+      return;
+    }
+    void (async () => {
+      const current = await client.request('agent-control.list', {}) as AgentControlSnapshot;
+      const created = await client.request('agent-control.create', {
+        version: current.version,
+        grantName: `${preset.id}-${new Date().toISOString().slice(0, 10)}`,
+        projectRoot,
+        defaultPermissionProfile: preset.defaultPermissionProfile,
+        maxPermissionProfile: preset.maxPermissionProfile,
+        defaultNetwork: preset.defaultNetwork,
+        maxNetwork: preset.maxNetwork,
+        defaultPolicy: preset.defaultPolicy,
+        allowedPolicyAsk: preset.allowedPolicies.includes('ask'),
+        allowedPolicyAuto: false,
+        allowedPolicyNone: preset.allowedPolicies.includes('none'),
+        allowOperator: preset.allowOperator,
+        allowedMcpServers: [],
+        allowedMcpTools: [],
+        confirmFullAccess: false,
+        confirmUnrestrictedNetwork: false,
+        confirmPartialWorkspaceWrite: preset.confirmPartialWorkspaceWrite,
+        confirmWorkspaceTrust: preset.confirmWorkspaceTrust,
+        expiresAt: '',
+      }) as AgentControlSnapshot;
+      setControlSnapshot(created);
+      const grant = created.grants.at(-1);
+      push({ kind: 'meta', text: grant === undefined
+        ? t('外控授权已创建。', 'Agent Control grant created.')
+        : t(`已用安全预设创建 ${grant.name}：${grant.id} · /control copy ${grant.id.slice(0, 8)} 可复制 MCP 配置`, `Created ${grant.name} from a safe preset: ${grant.id} · use /control copy ${grant.id.slice(0, 8)} to copy the MCP config`) });
+    })().catch((error: unknown) => {
+      push({ kind: 'error', text: t(`创建授权失败：${errorCode(error) ?? 'agent_control_create_failed'}`, `Could not create the grant: ${errorCode(error) ?? 'agent_control_create_failed'}`) });
+    });
+  }, [client, info.boundary, push, setControlSnapshot, status, t]);
+
   const exitTui = useCallback((savedDraft = inputNow.current.draft) => {
     if (inputs === undefined) { app.exit(); return; }
     void inputs.write(info.boundary ?? '', sessionId, query === null ? savedDraft : inputNow.current.draft, inputNow.current.queue).then(
@@ -1279,6 +1332,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         const snapshot = await client.request('agent-control.list', {}) as AgentControlSnapshot;
         setControlSnapshot(snapshot);
         available = [
+          { id: 'preset:reader', label: t('安全预设 · 信任此项目并以只读观察', 'Safe preset · trust this project and observe read-only'), description: t(`信任 ${info.boundary ?? ''} 并创建上限为只读的外控授权：控制器只能读取会话与运行结果，不能写文件、执行 Shell、联网或操作其他能力。`, `Trust ${info.boundary ?? ''} and create an Agent Control grant capped at read-only: the controller can read the session and run results, but cannot write files, run Shell, use the network, or operate other capabilities.`) },
+          { id: 'preset:workspace', label: t('安全预设 · 信任此项目并以工作区写入协作', 'Safe preset · trust this project with workspace-write'), description: t(`信任 ${info.boundary ?? ''} 并创建上限为工作区写入的外控授权；默认仍以只读启动。不含 full-access、不受限网络、Screen Capture 或 Operator。`, `Trust ${info.boundary ?? ''} with a workspace-write ceiling; runs still start read-only. Excludes full-access, unrestricted network, Screen Capture, and Operator.`) },
           { id: 'create', label: t('新建外控授权', 'Create a grant'), description: t('开始逐项填写授权上限和到期时间。', 'Enter the grant limits and expiry one step at a time.') },
           ...snapshot.grants.map((grant) => {
             const state = grant.revokedAt !== null ? t('已撤销', 'revoked')
@@ -2534,6 +2589,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     const currentPanel = panel;
     closePanel();
     if (currentPanel === 'control') {
+      if (id.startsWith('preset:')) {
+        createPresetGrant(id.slice('preset:'.length));
+        return;
+      }
       if (id === 'create') {
         runCommand('control', 'create');
         return;
@@ -2608,7 +2667,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       await refreshStatus();
       push({ kind: 'meta', text: changed.when === 'round' ? t(`下轮使用 ${changed.model}`, `${changed.model} will apply next turn`) : t(`已切换至 ${changed.model}`, `Switched to ${changed.model}`) });
     }, (error: unknown) => push({ kind: 'error', text: t(`无法选择模型：${errorCode(error) ?? 'model_select_failed'}`, `Could not select model: ${errorCode(error) ?? 'model_select_failed'}`) }));
-  }, [choices, panel, closePanel, openPicker, changePermission, runCommand, client, sessionId, refreshStatus, push, t, info.boundary, controlSnapshot, controlTarget]);
+  }, [choices, panel, closePanel, openPicker, changePermission, createPresetGrant, runCommand, client, sessionId, refreshStatus, push, t, info.boundary, controlSnapshot, controlTarget]);
 
   const loadApprovalDetails = useCallback(async () => {
     const current = ask;
