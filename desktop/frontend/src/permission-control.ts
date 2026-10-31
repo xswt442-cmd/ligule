@@ -75,7 +75,10 @@ function permissionRequest(
   return {
     sessionId: status?.sessionId,
     permissionProfile: target.profile,
-    permissionNetwork: target.network,
+    // Send the network only when the user actually changed it. Otherwise it is
+    // derived from the current effective permission, and re-sending it would
+    // ask the Host to record a value the user never chose.
+    ...(target.network === current.network ? {} : { permissionNetwork: target.network }),
     confirmFullAccess: confirmed.fullAccess,
     confirmNetwork: confirmed.network,
     ...(confirmed.partialWorkspaceWrite ? { confirmPartialWorkspaceWrite: true } : {}),

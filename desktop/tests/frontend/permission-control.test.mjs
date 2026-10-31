@@ -108,6 +108,40 @@ test('permission.set is never called before each required confirmation', async (
   assert.deepEqual(calls, []);
 });
 
+test('a profile-only change does not resend the unchanged network', async () => {
+  const calls = [];
+  const updated = status({ profile: 'read-only', network: 'policy' });
+  const client = {
+    call: async (method, params) => {
+      calls.push({ method, params });
+      return method === 'status.get' ? updated : { applies: 'now' };
+    },
+  };
+  await changePermissionAndRefresh(client, status(), { profile: 'read-only', network: 'policy' }, { fullAccess: false, network: false }, false);
+  assert.equal(calls[0].method, 'permission.set');
+  assert.equal('permissionNetwork' in calls[0].params, false);
+  assert.equal(calls[0].params.permissionProfile, 'read-only');
+});
+
+test('a network-only change keeps the profile and sends the new network', async () => {
+  const calls = [];
+  const updated = status({ network: 'disabled' });
+  const client = {
+    call: async (method, params) => {
+      calls.push({ method, params });
+      return method === 'status.get' ? updated : { applies: 'now' };
+    },
+  };
+  await changePermissionAndRefresh(client, status(), { profile: 'workspace-write', network: 'disabled' }, { fullAccess: false, network: false }, false);
+  assert.deepEqual(calls[0].params, {
+    sessionId: 'session-1',
+    permissionProfile: 'workspace-write',
+    permissionNetwork: 'disabled',
+    confirmFullAccess: false,
+    confirmNetwork: false,
+  });
+});
+
 test('permission changes are unavailable while the Host disallows them or the session runs', async () => {
   const calls = [];
   const client = { call: async (...args) => { calls.push(args); return {}; } };
