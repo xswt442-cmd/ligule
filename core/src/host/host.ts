@@ -49,6 +49,7 @@ import { compactionLimitsOf, loopLimitsOf, sessionLoopLimits, taskLimitsOf } fro
 export { compactionLimitsOf } from './runtime-limits.js';
 import { createCompaction } from '../session/compaction.js';
 import { sessionWriterActive } from '../session/lock.js';
+import { canChangePermission, requirePermissionControl, requireTrustedUi, type ControlTrust } from './capabilities.js';
 import { requestAgentControl, TRUSTED_AGENT_CONTROL_ORIGIN, type AgentControlRequest } from './agent-control-runtime.js';
 import { usageEvent } from '../session/usage.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
@@ -477,7 +478,7 @@ function errorMessage(error: unknown): string | undefined {
 
 function runOriginOf(value: unknown, defaultOrigin: 'human' | 'controller', canRecordHuman: boolean): 'human' | 'controller' {
   if (value !== undefined && value !== 'human' && value !== 'controller') throw new KernelError('protocol_args_invalid');
-  // Only trusted local UI or the authenticated Agent Control bridge can persist a human source.
+  // Only a trusted local UI or the authenticated Agent Control bridge can persist a human source.
   // External MCP callers cannot self-assert it through request parameters.
   if (!canRecordHuman) return 'controller';
   return value ?? defaultOrigin;
@@ -772,7 +773,8 @@ export function createHost({
   // 每个归一化项目根目录只缓存一个环境，供该项目的会话与列表操作复用。
   const environments = new Map<string, ProjectEnvironment>([[defaultEnvironment.projectRoot, defaultEnvironment]]);
   const sessionConfigurationTails = new Map<string, Promise<void>>();
-  const canControlPermission = permissionControl || agentControl?.operator === true;
+  const controlTrust: ControlTrust = { permissionControl, agentControl };
+  const canControlPermission = canChangePermission(controlTrust);
   let knownGrant: DelegationGrant | undefined;
 
   async function activeDelegation(): Promise<DelegationGrant | undefined> {
@@ -939,9 +941,7 @@ export function createHost({
   }
 
   async function initialSessionSettings(env: ProjectEnvironment, params: HostMethodParams, grant?: DelegationGrant): Promise<InitialSessionSettings> {
-    if (params.confirmInitialWorkspaceTrust === true && !permissionControl) {
-      throw new KernelError('workspace_trust_control_unavailable');
-    }
+    if (params.confirmInitialWorkspaceTrust === true) requireTrustedUi('workspace-trust', controlTrust);
     const hasProvider = params.initialProvider !== undefined;
     const hasModel = params.initialModel !== undefined;
     if (hasProvider !== hasModel) throw new KernelError('session_model_selection_invalid', { detail: 'initialProvider and initialModel must be supplied together' });
@@ -965,9 +965,7 @@ export function createHost({
     const hasInitialPermission = params.initialPermissionProfile !== undefined || params.initialPermissionNetwork !== undefined;
     let initialPermission: InitialSessionSettings['permission'];
     if (hasInitialPermission) {
-      if (!permissionControl && agentControl?.operator !== true) {
-        throw new KernelError(agentControl === undefined ? 'permission_control_unavailable' : 'agent_control_operator_required');
-      }
+      requirePermissionControl(controlTrust);
       const profile = params.initialPermissionProfile ?? permission.profile;
       const network = params.initialPermissionNetwork ?? permission.network;
       if (profile !== 'read-only' && profile !== 'workspace-write' && profile !== 'full-access') {
@@ -2688,9 +2686,7 @@ export function createHost({
       && !confirmedPartialWorkspaceWrite) {
       throw new KernelError('permission_partial_sandbox_confirmation_required');
     }
-    if (confirmWorkspaceTrust === true && !permissionControl) {
-      throw new KernelError('workspace_trust_control_unavailable');
-    }
+    if (confirmWorkspaceTrust === true) requireTrustedUi('workspace-trust', controlTrust);
     if (confirmWorkspaceTrust === true && !state.permission.workspaceTrusted) {
       await setTrusted(state.environment.projectRoot, true);
     }
@@ -2906,7 +2902,7 @@ export function createHost({
           return { sessionId };
         }
         case 'screen-capture.set': {
-          if (!permissionControl) throw new KernelError('screen_capture_control_unavailable');
+          requireTrustedUi('screen-capture', controlTrust);
           const state = open(sessionId);
           const enabled = message.params.enabled === true;
           if (enabled && message.params.confirmScreenCapture !== true) throw new KernelError('screen_capture_confirmation_required');
@@ -3045,7 +3041,7 @@ export function createHost({
         }
         case 'browser.stop':
         case 'browser.resume': {
-          if (!permissionControl) throw new KernelError('browser_control_trusted_ui_required');
+          requireTrustedUi('browser', controlTrust);
           return await serializeSessionConfiguration(sessionId, async () => {
             const state = open(sessionId);
             if (message.method === 'browser.resume') {
@@ -3218,7 +3214,7 @@ export function createHost({
         case 'storage.inspect':
         case 'storage.cleanup.preview':
         case 'storage.cleanup.apply': {
-          if (!permissionControl) throw new KernelError('storage_control_trusted_ui_required');
+          requireTrustedUi('storage', controlTrust);
           const env = await environmentFor(requiredString(message.params.projectRoot, 'projectRoot'));
           try {
             const info = await stat(await realpath(env.projectRoot));
@@ -3396,7 +3392,7 @@ export function createHost({
             return { sessionId, items: artifacts.slice(offset, offset + limit), total: artifacts.length,
               nextOffset: offset + limit < artifacts.length ? offset + limit : null };
           }
-          if (message.method === 'artifact.resolve' && !permissionControl) throw new KernelError('artifact_native_control_required');
+          if (message.method === 'artifact.resolve') requireTrustedUi('artifact-native', controlTrust);
           const chosen = artifacts.find(entry => entry.artifactKey === message.params.artifactKey);
           if (chosen === undefined) throw new KernelError('artifact_not_in_session');
           const boundary = boundaryOf(env.config);
@@ -3737,11 +3733,11 @@ export function createHost({
           return await savePrefs(prefsPathOf(), value, { version: requiredString(message.params.version, 'version') });
         }
         case 'agent-control.list': {
-          if (!permissionControl) throw new KernelError('agent_control_trusted_ui_required');
+          requireTrustedUi('agent-control', controlTrust);
           return await listDelegationGrants(delegationPathOf());
         }
         case 'agent-control.create': {
-          if (!permissionControl) throw new KernelError('agent_control_trusted_ui_required');
+          requireTrustedUi('agent-control', controlTrust);
           if (message.params.confirmWorkspaceTrust !== true) throw new KernelError('workspace_trust_confirmation_required');
           if (permission.partialWorkspaceWriteConfirmationRequired
             && (message.params.maxPermissionProfile === 'workspace-write' || message.params.maxPermissionProfile === 'full-access')
@@ -3784,7 +3780,7 @@ export function createHost({
           return await createDelegationGrant(delegationPathOf(), input, requiredString(message.params.version, 'version'));
         }
         case 'agent-control.revoke': {
-          if (!permissionControl) throw new KernelError('agent_control_trusted_ui_required');
+          requireTrustedUi('agent-control', controlTrust);
           const grantId = requiredString(message.params.grantId, 'grantId');
           const result = await revokeDelegationGrant(
             delegationPathOf(), grantId, requiredString(message.params.version, 'version'),
@@ -3795,7 +3791,7 @@ export function createHost({
           return result;
         }
         case 'mcp.trust.list': {
-          if (!permissionControl) throw new KernelError('mcp_trust_trusted_ui_required');
+          requireTrustedUi('mcp-trust', controlTrust);
           const env = await environmentFor(message.params.projectRoot);
           const session = message.params.sessionId === undefined ? undefined : open(requiredString(message.params.sessionId, 'sessionId'));
           if (session !== undefined && session.environment !== env) throw new KernelError('session_project_forbidden');
@@ -3832,7 +3828,7 @@ export function createHost({
           return { version: store.version, servers };
         }
         case 'settings.catalog': {
-          if (!permissionControl) throw new KernelError('settings_catalog_trusted_ui_required');
+          requireTrustedUi('settings', controlTrust);
           const env = await environmentFor(message.params.projectRoot);
           const session = message.params.sessionId === undefined ? undefined : open(requiredString(message.params.sessionId, 'sessionId'));
           if (session !== undefined && session.environment !== env) throw new KernelError('session_project_forbidden');
@@ -3915,7 +3911,7 @@ export function createHost({
           };
         }
         case 'mcp.trust.set': {
-          if (!permissionControl) throw new KernelError('mcp_trust_trusted_ui_required');
+          requireTrustedUi('mcp-trust', controlTrust);
           const env = await environmentFor(message.params.projectRoot);
           const serverName = requiredString(message.params.server, 'server');
           const expectedIdentity = requiredString(message.params.identityDigest, 'identityDigest');
@@ -3968,7 +3964,7 @@ export function createHost({
         }
         case 'extensions.set': {
           // 启停登记是用户范围的持久状态；只有可信界面可以修改。
-          if (!permissionControl) throw new KernelError('extensions_set_trusted_ui_required');
+          requireTrustedUi('extensions', controlTrust);
           const env = await environmentFor(message.params.projectRoot);
           const name = requiredString(message.params.name, 'name');
           if (typeof message.params.enabled !== 'boolean') {
@@ -3995,7 +3991,7 @@ export function createHost({
           return { name, enabled: message.params.enabled, applies: 'next-start' };
         }
         case 'mcp.trust.tools': {
-          if (!permissionControl) throw new KernelError('mcp_trust_trusted_ui_required');
+          requireTrustedUi('mcp-trust', controlTrust);
           const env = await environmentFor(message.params.projectRoot);
           const serverName = requiredString(message.params.server, 'server');
           const configuredServers = await currentMcpConfigs(env);
