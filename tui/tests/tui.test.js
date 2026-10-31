@@ -1491,6 +1491,15 @@ test('/control creates a project-bound grant through the interactive wizard', op
         && (output.includes('来源 可信界面创建') || output.includes('source Trusted UI'))
         && output.includes(projectDirectory);
     }, { within: 10_000, read: () => strip(painted).slice(-1_200) });
+
+    const listed = await client.request('agent-control.list', {});
+    await client.request('agent-control.revoke', { grantId: saved.grants[0].id, version: listed.version });
+    await answer('/control list');
+    await waitFor(() => {
+      const output = strip(painted);
+      return (output.includes('1 张已失效') || output.includes('1 grant(s) are no longer valid'))
+        && (output.includes('重新创建授权') || output.includes('Create a new grant'));
+    }, { within: 10_000, read: () => strip(painted).slice(-1_200) });
   } finally {
     instance.unmount();
   }

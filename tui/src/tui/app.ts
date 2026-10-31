@@ -1711,7 +1711,13 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
                   : t('历史记录未保存来源', 'Legacy record; source not recorded');
                 return `${grant.id} · ${grant.name} · ${state} · ${t('权限', 'permission')} ${grant.defaultPermissionProfile} / ${grant.maxPermissionProfile} · ${t('网络', 'network')} ${grant.defaultNetwork} / ${grant.maxNetwork} · Policy ${grant.defaultPolicy} (${grant.allowedPolicies.join(', ')}) · MCP ${grant.allowedMcpServers.join(', ') || t('无', 'none')} · ${t('工具', 'tools')} ${grant.allowedMcpTools.join(', ') || t('无', 'none')} · ${expiry} · ${t('来源', 'source')} ${source} · ${grant.projectRoot} · ${t('在线状态未知', 'online status unknown')}`;
               });
-            push({ kind: 'meta', text: lines.join('\n') });
+            const invalid = snapshot.grants.filter((grant) => grant.revokedAt !== null
+              || (grant.expiresAt !== null && Date.parse(grant.expiresAt) <= Date.now())).length;
+            push({ kind: 'meta', text: invalid === 0 ? lines.join('\n') : [
+              lines.join('\n'),
+              t(`其中 ${invalid} 张已失效（撤销/到期）：不能建立新的外控连接；已建立的会话按原记录继续，需要时请重新创建授权。`,
+                `${invalid} grant(s) are no longer valid (revoked/expired): they cannot open new external control connections; open sessions continue from their record. Create a new grant when needed.`),
+            ].join('\n') });
             return;
           }
           const matches = snapshot.grants.filter((grant) => grant.id === wanted || grant.id.startsWith(wanted));
