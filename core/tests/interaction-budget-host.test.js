@@ -99,15 +99,35 @@ test('Host pauses the execution deadline while parallel approvals are both waiti
       return { decision: 'allow' };
     });
 
-    const result = await client.request('run.start', { sessionId, input: JSON.stringify({ toolCalls: [
-      { tool: 'read_document', args: { path: 'first.pdf' } },
-      { tool: 'read_document', args: { path: 'second.pdf' } },
-    ] }) });
-    assert.ok(result.runId);
+    // The two approvals wait 2s each, which already exceeds the 1.5s task budget: if approval
+    // waiting counted as execution time the task would run out before the approvals returned and
+    // interactionWaitMs would stay near zero. Starting and parsing the document worker itself
+    // takes 1.1-1.5s here, so "did it still finish inside the budget after resuming" is not the
+    // property under test; assert the approval wait and the post-resume execution budget
+    // separately, then tell a completed turn from one ended by the deadline.
+    let failure;
+    try {
+      const result = await client.request('run.start', { sessionId, input: JSON.stringify({ toolCalls: [
+        { tool: 'read_document', args: { path: 'first.pdf' } },
+        { tool: 'read_document', args: { path: 'second.pdf' } },
+      ] }) });
+      assert.ok(result.runId);
+    } catch (error) { failure = error; }
     assert.equal(approvals, 2);
     assert.equal(peakApprovals, 2);
+    const task = (await client.request('status.get', { sessionId })).task;
+    assert.ok(task !== null && typeof task === 'object', 'the finished turn keeps its task budget snapshot');
+    assert.ok(task.interactionWaitMs >= 1_900, `approval wait was counted as execution: ${task.interactionWaitMs}ms`);
+    assert.ok(task.executionElapsedMs <= 1_700, `execution budget was overshot: ${task.executionElapsedMs}ms`);
     const { events } = await client.request('session.read', { sessionId });
-    assert.equal(events.findLast((event) => event.kind === 'turn')?.status, 'completed');
+    const turn = events.findLast((event) => event.kind === 'turn');
+    if (turn?.status === 'completed') {
+      assert.equal(failure, undefined);
+    } else {
+      assert.equal(turn?.status, 'failed');
+      assert.equal(turn?.code, 'task_deadline_exceeded');
+      assert.ok(failure === undefined || failure.code === 'task_deadline_exceeded', String(failure?.message));
+    }
   }, {
     modeName: 'full',
     config: { loop: { iterations: 2, modelCalls: 2, maxParallelTools: 2,
