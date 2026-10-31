@@ -292,7 +292,7 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
     const preset = grantPreset(id);
     setDraft((current) => ({
       ...applyGrantPreset(current, id),
-      name: current.name.trim() === '' ? t(preset.label.zh, preset.label.en) : current.name,
+      name: current.name.trim() === '' ? t(preset.name.zh, preset.name.en) : current.name,
     }));
     setDirty(true);
     setGrantStep(1);

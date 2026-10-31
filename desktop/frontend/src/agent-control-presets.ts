@@ -24,6 +24,7 @@ export type GrantPresetLimits = {
 export type GrantPreset = {
   readonly id: GrantPresetId;
   readonly label: { readonly zh: string; readonly en: string };
+  readonly name: { readonly zh: string; readonly en: string };
   readonly description: { readonly zh: string; readonly en: string };
   readonly limits: GrantPresetLimits;
 };
@@ -31,10 +32,11 @@ export type GrantPreset = {
 const PRESETS: readonly GrantPreset[] = [
   {
     id: 'reader',
-    label: { zh: '只读观察', en: 'Observe read-only' },
+    label: { zh: '信任此项目并以只读观察', en: 'Trust this project and observe read-only' },
+    name: { zh: '只读观察', en: 'Read-only observer' },
     description: {
-      zh: '只读查看会话与项目文件；不可写文件、不可运行命令。',
-      en: 'Read the session and project files only; no writes, no commands.',
+      zh: '创建上限为只读的外控授权：控制器只能读取会话与运行结果，不能写文件、执行 Shell、联网或操作其他能力。',
+      en: 'Create an Agent Control grant capped at read-only: the controller can read the session and run results, but cannot write files, run Shell, use the network, or operate other capabilities.',
     },
     limits: {
       defaultPermissionProfile: 'read-only',
@@ -47,10 +49,11 @@ const PRESETS: readonly GrantPreset[] = [
   },
   {
     id: 'workspace',
-    label: { zh: '工作区写入协作', en: 'Collaborate with writes' },
+    label: { zh: '信任此项目并以工作区写入协作', en: 'Trust this project with workspace-write' },
+    name: { zh: '工作区协作', en: 'Workspace collaborator' },
     description: {
-      zh: '默认仍只读，允许在确认后升高到工作区写入；不改网络、Policy 与工具上限。',
-      en: 'Stays read-only by default; may be raised to workspace write after confirmation. Network, Policy and tool ceilings stay untouched.',
+      zh: '创建上限为工作区写入的外控授权；默认仍以只读启动。不含 full-access、不受限网络、Screen Capture 或 Operator。',
+      en: 'Create an Agent Control grant with a workspace-write ceiling; runs still start read-only. Excludes full-access, unrestricted network, Screen Capture, and Operator.',
     },
     limits: {
       defaultPermissionProfile: 'read-only',
