@@ -9,6 +9,8 @@ import { checkedThinkingEffort, thinkingCapabilityOf, type DeepSeekThinkingEffor
 
 export interface HostGenerationOptions {
   readonly outputTokens?: number;
+  /** Grant ceiling: the effective per-request budget is capped at this value. */
+  readonly outputTokensCeiling?: number;
   readonly thinkingEffort?: DeepSeekThinkingEffort;
 }
 
@@ -70,15 +72,21 @@ export function providerFromConfig(config: ConfigSnapshot, generation: HostGener
   if (capabilities !== undefined && !isRecord(capabilities)) {
     throw new KernelError('provider_capability_invalid', { detail: 'model.capabilities must be a table' });
   }
+  const ceiling = generation.outputTokensCeiling;
+  // 非法值原样下传，由 Provider 统一报 provider_output_budget_invalid，避免在这里被静默丢弃。
+  const requestedOutput: unknown = generation.outputTokens ?? model.outputTokens;
+  const outputTokens = ceiling === undefined
+    ? requestedOutput
+    : requestedOutput === undefined
+      ? ceiling
+      : typeof requestedOutput !== 'number' ? requestedOutput : Math.min(requestedOutput, ceiling);
   const options = {
     baseUrl: model.baseURL,
     model: model.model,
     ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }),
     ...(capabilities === undefined ? {} : { capabilities }),
     ...(typeof model.serviceImageInput === 'boolean' ? { imageInput: model.serviceImageInput } : {}),
-    ...(generation.outputTokens === undefined
-      ? (model.outputTokens === undefined ? {} : { outputTokens: model.outputTokens })
-      : { outputTokens: generation.outputTokens }),
+    ...(outputTokens === undefined ? {} : { outputTokens }),
     ...(generation.thinkingEffort === undefined ? {} : { thinkingEffort: generation.thinkingEffort }),
     ...(model.serviceOutputLimit === true ? { declaredOutputLimit: model.outputTokens } : {}),
     ...(model.serviceContextTokens !== undefined
@@ -106,7 +114,12 @@ export function providerFromConfig(config: ConfigSnapshot, generation: HostGener
     withModel(next: string) {
       return providerFromConfig({ ...config, model: { ...selectedConfig, selection: { provider: serviceId, model: next } } }, generation);
     },
-    withGeneration(next: HostGenerationOptions) { return providerFromConfig({ ...config, model: selectedConfig }, next); },
+    withGeneration(next: HostGenerationOptions) {
+      return providerFromConfig({ ...config, model: selectedConfig }, {
+        ...next,
+        ...(generation.outputTokensCeiling === undefined ? {} : { outputTokensCeiling: generation.outputTokensCeiling }),
+      });
+    },
   });
 }
 

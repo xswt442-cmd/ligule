@@ -69,6 +69,8 @@ const durableReceiptOutput = object({
   runId: id, sessionId: id, userSeq: { type: 'integer', minimum: 0 },
   acceptedAt: { type: 'string' }, state: { type: 'string', enum: ['accepted', 'running', 'completed', 'failed', 'cancelled', 'interrupted'] },
   liveness: { type: 'string', enum: ['alive', 'unknown'] }, reused: { type: 'boolean' }, requestKey: { type: 'string', maxLength: 128 },
+  via: { type: 'string', enum: ['trusted-ui', 'agent-control-bridge', 'mcp'] },
+  resolvedBy: { type: 'string', enum: ['permission-control', 'agent-control-bridge', 'caller-scope-default', 'controller-local', 'controller-grant'] },
   resultRef: object({ version: { type: 'integer', const: 1 }, name: { type: 'string', maxLength: 64 },
     bytes: { type: 'integer', minimum: 1, maximum: 16 * 1024 * 1024 }, sha256: { type: 'string', pattern: '^[a-f0-9]{64}$' },
   }, ['version', 'name', 'bytes', 'sha256']),

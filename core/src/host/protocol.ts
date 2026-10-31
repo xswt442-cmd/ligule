@@ -268,12 +268,12 @@ export const METHODS = Object.freeze({
     parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
   },
   'session.control': {
-    description: 'Send a human action to the local Host that currently owns this externally controlled Session. The same Host remains its only writer; the local action can read its configuration, observe, message, answer, cancel, or take over.',
+    description: 'Send a human action to the local Host that currently owns this externally controlled Session. The same Host remains its only writer; the local action can read its configuration, observe, message, answer, change permission while idle, cancel, or take over.',
     parameters: { type: 'object', properties: {
       projectRoot: { type: 'string', description: 'the exact workspace root that owns the session' },
       sessionId: SESSION_ID,
       request: { type: 'object', additionalProperties: false, properties: {
-        action: { type: 'string', enum: ['status', 'configuration', 'details', 'send', 'reply', 'cancel', 'takeover'] },
+        action: { type: 'string', enum: ['status', 'configuration', 'details', 'send', 'reply', 'permission', 'cancel', 'takeover'] },
         after: { type: 'integer', minimum: 0 },
         limit: { type: 'integer', minimum: 1, maximum: 50 },
         waitMs: { type: 'integer', minimum: 0, maximum: 30000 },
@@ -284,6 +284,12 @@ export const METHODS = Object.freeze({
         rememberScope: { type: 'string', enum: ['session', 'project', 'user'] },
         rememberTarget: { type: 'string', enum: ['file', 'workspace', 'tool', 'command'] },
         answers: {},
+        permissionProfile: { type: 'string', enum: ['read-only', 'workspace-write', 'full-access'] },
+        permissionNetwork: { type: 'string', enum: ['policy', 'unrestricted', 'disabled'] },
+        confirmFullAccess: { type: 'boolean', description: 'the human confirmed raising to full-access' },
+        confirmNetwork: { type: 'boolean', description: 'the human confirmed unrestricted network' },
+        confirmPartialWorkspaceWrite: { type: 'boolean', description: 'the human confirmed the partial sandbox for workspace-write' },
+        confirmWorkspaceTrust: { type: 'boolean', description: 'the human trusts this workspace' },
       }, required: ['action'] },
     }, required: ['projectRoot', 'sessionId', 'request'] },
   },
@@ -370,10 +376,11 @@ export const METHODS = Object.freeze({
     }, required: ['sessionId', 'input'] },
   },
   'run.wait': {
-    description: 'Wait for a run in the explicitly selected caller scope. The Host verifies access from its trusted UI, authenticated Agent Control bridge, or active Grant context; origin is not an authorization grant.',
+    description: 'Wait for a run. The Host derives the run owner from the persisted acceptance and authorizes the caller against its own readable scopes; origin is accepted for compatibility but never grants or selects access.',
     parameters: { type: 'object', additionalProperties: false, properties: {
-      sessionId: SESSION_ID, runId: SESSION_ID, origin: { type: 'string', enum: ['human', 'controller'] },
-    }, required: ['sessionId', 'runId', 'origin'] },
+      sessionId: SESSION_ID, runId: SESSION_ID,
+      origin: { type: 'string', enum: ['human', 'controller'], description: 'compatibility only; the persisted run owner decides' },
+    }, required: ['sessionId', 'runId'] },
   },
   'run.receipt': {
     description: 'Read a durable task receipt from this project Session without reopening its writer or replaying work. A requestKey that matches multiple visible scopes returns run_request_key_ambiguous; use runId to select one receipt.',
@@ -536,6 +543,9 @@ export const METHODS = Object.freeze({
       confirmScreenCapture: { type: 'boolean' },
       allowedMcpServers: { type: 'array', items: { type: 'string' } },
       allowedMcpTools: { type: 'array', items: { type: 'string' } },
+      allowedModes: { type: 'array', items: { type: 'string' }, description: 'mode names this grant may select; omit to allow every mode' },
+      allowedModels: { type: 'array', items: { type: 'string' }, description: 'model references (service/model or bare model id) this grant may select; omit to allow every model' },
+      maxOutputTokens: { type: 'number', description: 'ceiling for a single request output budget; omit to leave the budget unbounded' },
       confirmFullAccess: { type: 'boolean' },
       confirmUnrestrictedNetwork: { type: 'boolean' },
       confirmPartialWorkspaceWrite: { type: 'boolean', description: 'confirm trust in the project and accept partial workspace-write sandbox limits when this platform requires it' },
