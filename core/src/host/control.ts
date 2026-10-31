@@ -909,7 +909,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
       return { ...status(found), timedOut: found.state === 'running' };
     },
     async getRun(sessionId: string, reference: { runId?: string; requestKey?: string }, offset?: number) {
-      ready();
+      owned(sessionId);
       await authorized(projectRoot);
       ready();
       const receipt = record(await tracked(host.handle({ method: 'run.receipt', params: {

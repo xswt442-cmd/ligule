@@ -113,6 +113,12 @@ test('a real stdio MCP process uses its grant ceiling and detects revocation', a
       const sessionId = made.structuredContent.sessionId;
       assert.equal(typeof sessionId, 'string');
 
+      const unownedRun = await client.callTool({ name: 'ligule_run_get', arguments: {
+        sessionId: 'session-not-opened-by-this-control', runId: 'run-not-owned',
+      } });
+      assert.equal(unownedRun.isError, true);
+      assert.equal(codeOf(unownedRun), 'session_not_open');
+
       const config = await client.callTool({ name: 'ligule_session_configure', arguments: { sessionId } });
       assert.equal(config.isError, undefined, `${JSON.stringify(config)}\n${stderr()}`);
       assert.equal(config.structuredContent.effective.permission.profile, 'workspace-write');
