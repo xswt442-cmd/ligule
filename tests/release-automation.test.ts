@@ -377,7 +377,7 @@ test('release workflows split CI, tagging, and product publication and keep proc
   assert.deepEqual(tag.on.workflow_dispatch.inputs.product.options, ['cli', 'desktop']);
   const setupJobs: [Workflow, string][] = [[npmPublish, 'npm'], [npmPublish, 'github-notes'], [desktopPublish, 'preflight'], [desktopPublish, 'draft'], [desktopPublish, 'publish']];
   for (const [workflowConfig, jobName] of setupJobs) {
-    const setup = workflowConfig.jobs[jobName].steps.find((step) => step.uses === 'actions/setup-node@v5');
+    const setup = workflowConfig.jobs[jobName].steps.find((step) => step.uses === 'actions/setup-node@v7');
     assert.equal(setup?.with?.['package-manager-cache'], false,
       `${jobName} must disable pnpm auto-caching when pnpm is not installed`);
   }
@@ -482,8 +482,8 @@ test('release workflows split CI, tagging, and product publication and keep proc
   assert.match(registryCommand, /"\$GITHUB_WORKSPACE\/dist-tarball\/ligule-\$\{version\}\.tgz"/);
   assert.doesNotMatch(registryCommand, /registry-version --/);
   assert.ok(registrySteps.some((step) => step.run === 'pnpm install --frozen-lockfile'));
-  const pnpmSetup = registrySteps.findIndex((step) => step.uses === 'pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86');
-  assert.ok(pnpmSetup >= 0 && pnpmSetup < registrySteps.findIndex((step) => step.uses === 'actions/setup-node@v5'),
+  const pnpmSetup = registrySteps.findIndex((step) => step.uses === 'pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413');
+  assert.ok(pnpmSetup >= 0 && pnpmSetup < registrySteps.findIndex((step) => step.uses === 'actions/setup-node@v7'),
   'pnpm must exist before setup-node configures pnpm caching');
 
   assert.ok(desktopPublish.on.workflow_dispatch);
