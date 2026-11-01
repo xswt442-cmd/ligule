@@ -52,6 +52,12 @@ ligule run "Review the project structure and suggest improvements"
 
 Run `ligule` to start the terminal UI. The desktop app prepares a default workspace on first launch; you can change it in Settings.
 
+## Interface preview
+
+![Desktop new session](docs/assets/desktop-first-session.png)
+
+![TUI commands and keyboard help](docs/assets/tui-help.png)
+
 ## Configuration
 
 Configure services and models in Desktop Settings. The CLI/TUI use the same configuration. See the [user guide](docs/guide.en.md) for configuration fields, credential sources, and model selection. Set `LIGULE_HOME` to an absolute path to change the user data root.

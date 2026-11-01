@@ -52,6 +52,12 @@ ligule run "检查项目结构并提出建议"
 
 运行 `ligule` 可启动终端界面。桌面版首次启动会准备默认工作区；之后可在设置中调整。
 
+## 界面预览
+
+![Desktop 新建会话](docs/assets/desktop-first-session.png)
+
+![TUI 命令与按键帮助](docs/assets/tui-help.png)
+
 ## 配置
 
 桌面版在「设置 → 模型服务」中配置服务与模型；CLI/TUI 使用同一配置。完整字段、凭据来源和模型选择方式见[使用手册](docs/guide.zh-CN.md)。`LIGULE_HOME` 可设置为绝对路径，用于更换用户数据根目录。
