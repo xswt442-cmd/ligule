@@ -160,6 +160,11 @@ test('a real stdio MCP process uses its grant ceiling and detects revocation', a
       const afterRevoke = await client.callTool({ name: 'ligule_session_configure', arguments: { sessionId } });
       assert.equal(afterRevoke.isError, true);
       assert.equal(codeOf(afterRevoke), 'agent_control_grant_revoked');
+      const afterRevokeRun = await client.callTool({
+        name: 'ligule_run_start', arguments: { sessionId, input: 'must not run after grant revocation' },
+      });
+      assert.equal(afterRevokeRun.isError, true);
+      assert.equal(codeOf(afterRevokeRun), 'agent_control_grant_revoked');
     } finally {
       await client.close();
     }
