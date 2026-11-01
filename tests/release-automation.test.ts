@@ -482,8 +482,8 @@ test('release workflows split CI, tagging, and product publication and keep proc
   assert.match(registryCommand, /"\$GITHUB_WORKSPACE\/dist-tarball\/ligule-\$\{version\}\.tgz"/);
   assert.doesNotMatch(registryCommand, /registry-version --/);
   assert.ok(registrySteps.some((step) => step.run === 'pnpm install --frozen-lockfile'));
-  assert.ok(registrySteps.findIndex((step) => step.uses === 'pnpm/action-setup@v6')
-    < registrySteps.findIndex((step) => step.uses === 'actions/setup-node@v5'),
+  const pnpmSetup = registrySteps.findIndex((step) => step.uses === 'pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86');
+  assert.ok(pnpmSetup >= 0 && pnpmSetup < registrySteps.findIndex((step) => step.uses === 'actions/setup-node@v5'),
   'pnpm must exist before setup-node configures pnpm caching');
 
   assert.ok(desktopPublish.on.workflow_dispatch);
