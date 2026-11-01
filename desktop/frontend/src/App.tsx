@@ -10,6 +10,7 @@ import { BranchPanel } from './components/BranchPanel';
 import { HoldSheet } from './components/HoldSheet';
 import { QuitSheet } from './components/QuitSheet';
 import { holdReasons, report as reportEdit, type EditGate } from './edit-gate';
+import { approvalSession, toApprovalAsk, type ApprovalRequestParams } from './approval-request';
 import { blockedSessions, type QuitInput, type QuitRow } from './quit';
 import { SessionRail } from './components/SessionRail';
 import type { SearchHit } from './components/rail/types';
@@ -28,7 +29,7 @@ import { insertMention, mentionToken } from './mentions';
 import type { ModelSelection } from './model-catalog';
 import { thinkingRequest } from './thinking-request';
 import { createSlotRegistry, SLOTS, type Panel } from './slots';
-import { appendProjectedRecords, capabilityOf, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn, type Record_, type Row } from './rows';
+import { appendProjectedRecords, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn, type Record_, type Row } from './rows';
 import { taskSummaryLabelOf, taskSummaryOf, type Status } from './status';
 import { loadSettings, mergeQueueIntoDraft, readSettings, saveSettings, type Settings } from './settings';
 import { LocaleProvider, localeOf } from './locale';
@@ -652,56 +653,13 @@ export function App({ transport }: { transport: Transport }) {
       }
       // Host 发出的交互请求分为审批和用户提问。
       if (message.method !== 'approval.request') return;
-      const params = message.params as { sessionId?: string; projectRoot?: string; tool?: string; command?: string; args?: Record<string, unknown>; reason?: string; shell?: string; executable?: string; policy?: string; policySource?: string; policyForced?: boolean; detailsRef?: string; argumentBytes?: number; argumentSha256?: string; identityDigest?: string; contentBytes?: number; contentSha256?: string; rememberable?: boolean; rememberScopes?: ('session' | 'project' | 'user')[]; rememberHintKey?: 'file' | 'tool' | 'command' | 'mcp'; rememberTargetOptions?: ('file' | 'workspace' | 'tool' | 'command')[]; scriptBinding?: { path?: string; sha256?: string; interpreter?: string; workspaceRoot?: string; permission?: { profile?: string; network?: string; capabilities?: Record<string, string> } } };
+      const params = message.params as ApprovalRequestParams | undefined;
       // 请求属于发起它的会话；即使会话在后台等待，也必须显示并允许答复。
-      const asked = params?.sessionId;
-      if (typeof asked !== 'string' || asked === '') return;
-      const tool = params.tool ?? '';
+      const asked = approvalSession(params);
+      if (asked === null || params === undefined) return;
       notify('approval', asked, params.projectRoot ?? '');
-      const args = params.args ?? {};
-      // 审批摘要说明实际操作对象，例如命令、路径、目标地址或 MCP 工具。
-      const detail = String(params.command ?? args.path ?? args.url ?? capabilityOf(tool, args));
-      // 展开审批详情时显示具体操作和变更内容；无可展示内容的调用不显示展开入口。
-      const change = changeOf(tool, args);
-      const content = changeBody(change, args);
-      const englishChange = changeOf(tool, args, 'en');
-      const detailsSuffix = params.scriptBinding === undefined ? { chinese: '', english: '' } : {
-        chinese: `\n\n${t('脚本审批绑定', 'Script approval binding')}:\n${t('路径', 'Path')}: ${params.scriptBinding.path ?? ''}\nSHA-256: ${params.scriptBinding.sha256 ?? ''}\n${t('解释器', 'Interpreter')}: ${params.scriptBinding.interpreter ?? ''}\n${t('工作区', 'Workspace')}: ${params.scriptBinding.workspaceRoot ?? ''}\n${t('权限', 'Permission')}: ${params.scriptBinding.permission?.profile ?? ''} / ${params.scriptBinding.permission?.network ?? ''}\n${JSON.stringify(params.scriptBinding.permission?.capabilities ?? {})}`,
-        english: `\n\nScript approval binding:\nPath: ${params.scriptBinding.path ?? ''}\nSHA-256: ${params.scriptBinding.sha256 ?? ''}\nInterpreter: ${params.scriptBinding.interpreter ?? ''}\nWorkspace: ${params.scriptBinding.workspaceRoot ?? ''}\nPermission: ${params.scriptBinding.permission?.profile ?? ''} / ${params.scriptBinding.permission?.network ?? ''}\n${JSON.stringify(params.scriptBinding.permission?.capabilities ?? {})}`,
-      };
-      const summary = typeof params.contentBytes === 'number' && typeof params.contentSha256 === 'string'
-        ? `${t(`内容 ${params.contentBytes} 字节 · SHA-256 ${params.contentSha256}`, `Content ${params.contentBytes} bytes · SHA-256 ${params.contentSha256}`)}\n\n`
-        : typeof params.argumentSha256 === 'string'
-          ? `${t(`参数 ${params.argumentBytes ?? 0} 字节 · SHA-256 ${params.argumentSha256}`, `Arguments ${params.argumentBytes ?? 0} bytes · SHA-256 ${params.argumentSha256}`)}\n\n`
-          : '';
-      setAsks((current) => [...current, {
-        id: message.id ?? '',
-        sessionId: asked,
-        project: params.projectRoot ?? '',
-        tool,
-        detail,
-        change: change.summary,
-        reason: params.reason ?? '',
-        // 显示权限判定使用的命令语法和实际执行文件。
-        backend: params.shell === undefined ? '' : `${params.shell} · ${params.executable ?? ''}`,
-        // 同时显示本次审批使用的策略、策略来源和是否因连续拒绝而收紧。
-        policy: params.policy ?? '',
-        policySource: params.policySource ?? '',
-        policyForced: params.policyForced === true,
-        rememberable: params.rememberable === true,
-        rememberScopes: params.rememberScopes ?? [],
-        ...(params.rememberHintKey === undefined ? {} : { rememberHintKey: params.rememberHintKey }),
-        ...(Array.isArray(params.rememberTargetOptions) ? { rememberTargetOptions: params.rememberTargetOptions } : {}),
-        ...(typeof params.detailsRef === 'string' ? { detailsRef: params.detailsRef } : {}),
-        ...(typeof params.argumentBytes === 'number' ? { argumentBytes: params.argumentBytes } : {}),
-        ...(typeof params.argumentSha256 === 'string' ? { argumentSha256: params.argumentSha256 } : {}),
-        ...(typeof params.identityDigest === 'string' ? { identityDigest: params.identityDigest } : {}),
-        detailsLoaded: false,
-        detailsLoading: false,
-        detailsSuffix,
-        content: `${summary}${content}${detailsSuffix.chinese}`,
-        english: { change: englishChange.summary, content: `${summary}${changeBody(englishChange, args, 'en')}${detailsSuffix.english}` },
-      }]);
+      const ask = toApprovalAsk(message.id ?? '', params, t);
+      setAsks((current) => [...current, ask]);
     });
 
     // 显示 Host 进程的标准错误输出；它不属于协议帧。
