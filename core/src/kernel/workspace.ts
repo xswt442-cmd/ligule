@@ -41,14 +41,31 @@ function canonicalOf(directory: string): { identity: string; directory: string }
   } catch {
     real = asked;
   }
+  const unrooted = real.startsWith('\\\\?\\') ? real.slice(4) : real;
   if (process.platform === 'win32') {
-    const stripped = real.replace(/^\\\\\?\\/, '').replace(/[\\/]+$/, '');
+    const stripped = trimTrailingSeparators(unrooted, 'windows');
     const rooted = /^[A-Za-z]:$/.test(stripped) ? `${stripped}\\` : stripped;
     // Windows 路径比较不区分盘符或目录名称大小写。
     return { identity: rooted.toLowerCase(), directory: rooted };
   }
-  const rooted = real.replace(/\/+$/, '');
+  const rooted = trimTrailingSeparators(unrooted);
   return { identity: rooted === '' ? '/' : rooted, directory: rooted };
+}
+
+/**
+ * 去掉结尾的路径分隔符。
+ *
+ * 逐字符扫描而不是用正则：`/\/+$/` 这类模式在每个起点重扫同一串分隔符，
+ * 由输入控制的路径会退化成多项式时间（CodeQL js/polynomial-redos）。
+ */
+export function trimTrailingSeparators(value: string, kinds: 'slash' | 'windows' = 'slash'): string {
+  let end = value.length;
+  while (end > 0) {
+    const last = value[end - 1];
+    if (last !== '/' && (kinds === 'slash' || last !== '\\')) break;
+    end -= 1;
+  }
+  return value.slice(0, end);
 }
 
 /** 生成供登记表、缓存和记录筛选共用的目录身份键。 */
