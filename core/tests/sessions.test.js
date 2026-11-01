@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { appendFile, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { withTuiHost } from './helpers/tui-host.js';
 import {
@@ -11,6 +11,7 @@ import {
   searchSessions, serveHost, sessionDirectory, writeCheckpointFile,
 } from '../dist/index.js';
 import { workspaceIdentity } from '../dist/kernel/workspace.js';
+import { workspaceDataDirectory, splitUncIdentity } from '../dist/session/list.js';
 
 const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
 
@@ -431,6 +432,42 @@ test('the listing index caches parsed summaries and rebuilds on change', async (
     const afterDelete = await listSessions(directory, { index: true });
     assert.equal(afterDelete.length, plain.length - 1, '删除的记录不再出现');
   });
+});
+
+// UNC 工作区目录名决定旧记录能否被发现：沿用替换前正则的切分口径，防止标签悄悄变化。
+test('UNC workspace directories keep the established label shape', { skip: process.platform !== 'win32' }, () => {
+  const backslash = String.fromCharCode(92);
+  const labels = [
+    [`${backslash}${backslash}server${backslash}share`, 'unc--server-share'],
+    [`${backslash}${backslash}server/share`, 'unc--server-share'],
+    [`${backslash}${backslash}server${backslash}share${backslash}dir`, 'unc--server-share-dir'],
+    [`${backslash}${backslash}server${backslash}share${backslash}dir${backslash}`, 'unc--server-share-dir'],
+    [`${backslash}${backslash}a/b `, 'unc--a-b-'],
+    // 其余部分不允许出现换行（旧 `$` 只匹配输入末尾），退回普通标签。
+    [`${backslash}${backslash}a/b\n`, 'root-a-b-'],
+  ];
+  for (const [identity, label] of labels) {
+    const leaf = basename(workspaceDataDirectory({ userHome: join('C:', 'home'), workspaceRoot: identity }));
+    // 叶子目录是 `<label>--<16 位摘要>`。
+    assert.equal(leaf.slice(0, leaf.length - 18), label, identity);
+  }
+});
+
+// 单独的切分函数保留旧正则的回溯结果：host 是最长的无反斜杠前缀。
+test('UNC identities split exactly like the replaced pattern', () => {
+  const backslash = String.fromCharCode(92);
+  const splits = [
+    [`${backslash}${backslash}a//b`, { host: 'a/', rest: 'b' }],
+    [`${backslash}${backslash}a${backslash}b`, { host: 'a', rest: 'b' }],
+    [`${backslash}${backslash}a/b `, { host: 'a', rest: 'b ' }],
+    [`${backslash}${backslash}a${backslash}${backslash}b`, { host: 'a', rest: `${backslash}b` }],
+    [`${backslash}${backslash}/a/B///${backslash}`, { host: '/a/B//', rest: backslash }],
+  ];
+  for (const [identity, expected] of splits) assert.deepEqual(splitUncIdentity(identity), expected, identity);
+  // 没有分隔符、没有 host、其余部分带换行都不是可切分的 UNC 身份。
+  for (const identity of [`${backslash}${backslash}a`, `${backslash}${backslash}a${backslash}`, `${backslash}${backslash}a/b\n`, `a${backslash}b`, `/${backslash}${backslash}a`]) {
+    assert.equal(splitUncIdentity(identity), undefined, identity);
+  }
 });
 
 // 跨目录列表只在当前工作区目录写索引；旧目录保持只读发现。

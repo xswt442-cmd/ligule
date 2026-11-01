@@ -102,26 +102,29 @@ function workspaceFolderLabel(identity: string): string {
  *
  * 逐字符扫描而不是用 `/^\\\\([^\\]+)[\\/]+(.+)$/u`：后者两个量词共享分隔符，
  * 每个字符位置的失败路径都要重扫分隔符串，输入由路径决定会退化成多项式时间
- * （CodeQL js/polynomial-redos）。这里从右往左找最靠右且可行的切分，等价于
- * 正则的贪婪回溯顺序，复杂度与路径长度线性相关。
+ * （CodeQL js/polynomial-redos）。这里按正则的贪婪顺序取最靠右的可行切分：
+ * `(.+)` 贪婪使剩余部分尽量短，因此 host 取最长的可行前缀；复杂度与路径长度线性相关。
  */
-function splitUncIdentity(identity: string): { host: string; rest: string } | undefined {
+export function splitUncIdentity(identity: string): { host: string; rest: string } | undefined {
   if (!identity.startsWith('\\\\')) return undefined;
   const body = identity.slice(2);
+  const length = body.length;
   const isSeparator = (char: string): boolean => char === '/' || char === '\\';
-  for (let index = body.length - 1; index >= 0; index -= 1) {
-    if (!isSeparator(body[index])) continue;
-    let runStart = index;
-    while (runStart > 0 && isSeparator(body[runStart - 1])) runStart -= 1;
-    let runEnd = index;
-    while (runEnd + 1 < body.length && isSeparator(body[runEnd + 1])) runEnd += 1;
-    const host = body.slice(0, runStart);
-    if (host !== '' && !host.includes('\\')) {
-      for (let cut = runEnd; cut >= runStart; cut -= 1) {
-        if (cut + 1 < body.length) return { host, rest: body.slice(cut + 1) };
-      }
-    }
-    index = runStart;
+  // 组 1 不含反斜杠：第一次出现的位置固定后，每个候选只用比较下标，不必重扫前缀。
+  const firstBackslash = body.indexOf('\\');
+  // 组 3 用 `.` 且 `$`：JS 里不带 m 的 `$` 只匹配输入末尾，所以其余部分不能含换行。
+  const newlinesAfter = new Int32Array(length + 1);
+  for (let index = length - 1; index >= 0; index -= 1) {
+    newlinesAfter[index] = newlinesAfter[index + 1] + (body[index] === '\n' ? 1 : 0);
+  }
+  for (let restStart = length - 1; restStart >= 1; restStart -= 1) {
+    const hostEnd = restStart - 1;
+    if (!isSeparator(body[hostEnd]) || hostEnd === 0) continue;
+    if (firstBackslash !== -1 && hostEnd > firstBackslash) continue;
+    if (newlinesAfter[restStart] > 0) continue;
+    const rest = body.slice(restStart);
+    if (rest === '') continue;
+    return { host: body.slice(0, hostEnd), rest };
   }
   return undefined;
 }
