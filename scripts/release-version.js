@@ -57,12 +57,12 @@ function updateJsonFile(path, expectedVersion, nextVersion) {
   if (document.version !== expectedVersion) {
     throw new Error(`${path} version is ${document.version}, expected ${expectedVersion}`);
   }
-  const versionEntry = /^  ("version"\s*:\s*)"([^"]+)"(,?)$/m;
+  const versionEntry = /^([ \t]*)("version"\s*:\s*)"([^"]+)"(,?)$/m;
   const match = versionEntry.exec(source);
-  if (match === null || match[2] !== expectedVersion) {
+  if (match === null || match[3] !== expectedVersion) {
     throw new Error(`${path} top-level version entry is missing or does not match ${expectedVersion}`);
   }
-  return source.replace(versionEntry, (_line, key, _version, comma) => `${key}${JSON.stringify(nextVersion)}${comma}`);
+  return source.replace(versionEntry, (_line, indentation, key, _version, comma) => `${indentation}${key}${JSON.stringify(nextVersion)}${comma}`);
 }
 
 function updateSourceVersion(path, expectedVersion, nextVersion) {
