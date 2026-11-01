@@ -2,7 +2,6 @@
 // 这里只做参数归一与文案，不决定是否放行，也不持有界面状态。
 import type { Ask } from './components/ApprovalCard';
 import { capabilityOf, changeBody, changeOf } from './rows.ts';
-export type Text = (chinese: string, english: string) => string;
 
 export type ApprovalRequestParams = {
   sessionId?: string;
@@ -42,7 +41,7 @@ export function approvalSession(params: ApprovalRequestParams | undefined): stri
 }
 
 /** 组装摘要、变更说明与脚本绑定说明；返回值与 `Ask` 的界面字段一一对应。 */
-export function toApprovalAsk(id: string, params: ApprovalRequestParams, t: Text): Ask {
+export function toApprovalAsk(id: string, params: ApprovalRequestParams): Ask {
   const tool = params.tool ?? '';
   const args = params.args ?? {};
   const detail = String(params.command ?? args.path ?? args.url ?? capabilityOf(tool, args));
@@ -51,14 +50,20 @@ export function toApprovalAsk(id: string, params: ApprovalRequestParams, t: Text
   const englishChange = changeOf(tool, args, 'en');
   // 脚本审批必须显示实际执行的文件、摘要与权限绑定，避免只看到路径。
   const detailsSuffix = params.scriptBinding === undefined ? { chinese: '', english: '' } : {
-    chinese: `\n\n${t('脚本审批绑定', 'Script approval binding')}:\n${t('路径', 'Path')}: ${params.scriptBinding.path ?? ''}\nSHA-256: ${params.scriptBinding.sha256 ?? ''}\n${t('解释器', 'Interpreter')}: ${params.scriptBinding.interpreter ?? ''}\n${t('工作区', 'Workspace')}: ${params.scriptBinding.workspaceRoot ?? ''}\n${t('权限', 'Permission')}: ${params.scriptBinding.permission?.profile ?? ''} / ${params.scriptBinding.permission?.network ?? ''}\n${JSON.stringify(params.scriptBinding.permission?.capabilities ?? {})}`,
+    chinese: `\n\n脚本审批绑定:\n路径: ${params.scriptBinding.path ?? ''}\nSHA-256: ${params.scriptBinding.sha256 ?? ''}\n解释器: ${params.scriptBinding.interpreter ?? ''}\n工作区: ${params.scriptBinding.workspaceRoot ?? ''}\n权限: ${params.scriptBinding.permission?.profile ?? ''} / ${params.scriptBinding.permission?.network ?? ''}\n${JSON.stringify(params.scriptBinding.permission?.capabilities ?? {})}`,
     english: `\n\nScript approval binding:\nPath: ${params.scriptBinding.path ?? ''}\nSHA-256: ${params.scriptBinding.sha256 ?? ''}\nInterpreter: ${params.scriptBinding.interpreter ?? ''}\nWorkspace: ${params.scriptBinding.workspaceRoot ?? ''}\nPermission: ${params.scriptBinding.permission?.profile ?? ''} / ${params.scriptBinding.permission?.network ?? ''}\n${JSON.stringify(params.scriptBinding.permission?.capabilities ?? {})}`,
   };
   const summary = typeof params.contentBytes === 'number' && typeof params.contentSha256 === 'string'
-    ? `${t(`内容 ${params.contentBytes} 字节 · SHA-256 ${params.contentSha256}`, `Content ${params.contentBytes} bytes · SHA-256 ${params.contentSha256}`)}\n\n`
+    ? {
+      chinese: `内容 ${params.contentBytes} 字节 · SHA-256 ${params.contentSha256}\n\n`,
+      english: `Content ${params.contentBytes} bytes · SHA-256 ${params.contentSha256}\n\n`,
+    }
     : typeof params.argumentSha256 === 'string'
-      ? `${t(`参数 ${params.argumentBytes ?? 0} 字节 · SHA-256 ${params.argumentSha256}`, `Arguments ${params.argumentBytes ?? 0} bytes · SHA-256 ${params.argumentSha256}`)}\n\n`
-      : '';
+      ? {
+        chinese: `参数 ${params.argumentBytes ?? 0} 字节 · SHA-256 ${params.argumentSha256}\n\n`,
+        english: `Arguments ${params.argumentBytes ?? 0} bytes · SHA-256 ${params.argumentSha256}\n\n`,
+      }
+      : { chinese: '', english: '' };
   return {
     id,
     sessionId: params.sessionId ?? '',
@@ -84,7 +89,7 @@ export function toApprovalAsk(id: string, params: ApprovalRequestParams, t: Text
     detailsLoaded: false,
     detailsLoading: false,
     detailsSuffix,
-    content: `${summary}${content}${detailsSuffix.chinese}`,
-    english: { change: englishChange.summary, content: `${summary}${changeBody(englishChange, args, 'en')}${detailsSuffix.english}` },
+    content: `${summary.chinese}${content}${detailsSuffix.chinese}`,
+    english: { change: englishChange.summary, content: `${summary.english}${changeBody(englishChange, args, 'en')}${detailsSuffix.english}` },
   };
 }

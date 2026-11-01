@@ -67,7 +67,8 @@ export type GrantDraftFlags = {
 };
 
 /** 只报错，不改草稿；界面据此显示逐项提示。 */
-export function grantDraftFlags(draft: GrantDraft): GrantDraftFlags {
+export function grantDraftFlags(draft: GrantDraft, now = Date.now()): GrantDraftFlags {
+  const expiration = draft.expiresAt === '' ? undefined : Date.parse(draft.expiresAt);
   return {
     profileExceeds: PROFILE_RANK[draft.defaultPermissionProfile] > PROFILE_RANK[draft.maxPermissionProfile],
     networkExceeds: NETWORK_RANK[draft.defaultNetwork] > NETWORK_RANK[draft.maxNetwork],
@@ -76,7 +77,7 @@ export function grantDraftFlags(draft: GrantDraft): GrantDraftFlags {
       const server = capability.startsWith('mcp:') ? capability.slice(4).split('/')[0] : '';
       return !draft.allowedMcpServers.includes(server);
     }),
-    invalidExpiry: draft.expiresAt !== '' && !Number.isFinite(Date.parse(draft.expiresAt)),
+    invalidExpiry: expiration !== undefined && (!Number.isFinite(expiration) || expiration <= now),
   };
 }
 
@@ -91,8 +92,8 @@ export function limitsReady(draft: GrantDraft): boolean {
 }
 
 /** 最终能否创建：在 limitsReady 之上再加项目、名称、到期时间与工作区信任确认。 */
-export function grantReady(draft: GrantDraft, project: string): boolean {
-  return project !== '' && draft.name.trim() !== '' && !grantDraftFlags(draft).invalidExpiry
+export function grantReady(draft: GrantDraft, project: string, now = Date.now()): boolean {
+  return project !== '' && draft.name.trim() !== '' && !grantDraftFlags(draft, now).invalidExpiry
     && draft.confirmWorkspaceTrust && limitsReady(draft);
 }
 

@@ -20,11 +20,15 @@ assert.deepEqual(draft.allowedPolicies, ['ask']);
 assert.ok(!Number.isNaN(Date.parse(draft.expiresAt)));
 
 const base: GrantDraft = { ...draft, name: 'grant', confirmWorkspaceTrust: true };
-assert.equal(grantReady(base, '/project'), true, '只读且已确认信任时可创建');
-assert.equal(grantReady(base, ''), false, '没有项目不能创建');
-assert.equal(grantReady({ ...base, name: '  ' }, '/project'), false, '没有名称不能创建');
-assert.equal(grantReady({ ...base, expiresAt: 'not-a-date' }, '/project'), false, '到期时间无效不能创建');
-assert.equal(grantReady({ ...base, confirmWorkspaceTrust: false }, '/project'), false, '未确认工作区信任不能创建');
+const now = Date.UTC(2026, 0, 1, 0, 0, 0);
+assert.equal(grantReady(base, '/project', now), true, '只读且已确认信任时可创建');
+assert.equal(grantReady(base, '', now), false, '没有项目不能创建');
+assert.equal(grantReady({ ...base, name: '  ' }, '/project', now), false, '没有名称不能创建');
+assert.equal(grantReady({ ...base, expiresAt: 'not-a-date' }, '/project', now), false, '到期时间无效不能创建');
+assert.equal(grantReady({ ...base, confirmWorkspaceTrust: false }, '/project', now), false, '未确认工作区信任不能创建');
+assert.equal(grantReady({ ...base, expiresAt: '2025-12-31T23:59:59.999Z' }, '/project', now), false, '已过期的授权不能创建');
+assert.equal(grantReady({ ...base, expiresAt: '2026-01-01T00:00:00.000Z' }, '/project', now), false, '当前时间到期的授权不能创建');
+assert.equal(grantReady({ ...base, expiresAt: '2026-01-01T00:00:00.001Z' }, '/project', now), true, '未来到期的授权可以创建');
 
 // 上限低于默认值属于本步错误，且即使其它确认齐全也不能继续。
 const exceeds: GrantDraft = { ...base, defaultPermissionProfile: 'full-access', defaultNetwork: 'unrestricted' };

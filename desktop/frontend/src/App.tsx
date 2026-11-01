@@ -227,6 +227,7 @@ export function App({ transport }: { transport: Transport }) {
   // 当前草稿所属的会话。打开会话时，需等恢复请求完成后再保存草稿，避免把旧草稿写入新会话。
   const [inputOwner, setInputOwner] = useState<string | null>(null);
   const [readOnlySessionId, setReadOnlySessionId] = useState<string | null>(null);
+  const [writerLockNoticeSessionId, setWriterLockNoticeSessionId] = useState<string | null>(null);
   const [externalWriterActive, setExternalWriterActive] = useState(false);
   const saveWarned = useRef(false);
   // Host 重连期间暂停发送队列，也不触发轮次结束后的自动发送。
@@ -659,7 +660,7 @@ export function App({ transport }: { transport: Transport }) {
       const asked = approvalSession(params);
       if (asked === null || params === undefined) return;
       notify('approval', asked, params.projectRoot ?? '');
-      const ask = toApprovalAsk(message.id ?? '', params, t);
+      const ask = toApprovalAsk(message.id ?? '', params);
       setAsks((current) => [...current, ask]);
     });
 
@@ -738,6 +739,7 @@ export function App({ transport }: { transport: Transport }) {
     dispatchAt.current.clear();
     setReading(true);
     let observing = false;
+    let writerLockHeld = false;
     let newest: {
       events: Record_[];
       hasMore: boolean;
@@ -755,6 +757,7 @@ export function App({ transport }: { transport: Transport }) {
         newest = await client.call('session.read', { sessionId: id, limit: RENDER_WINDOW, fullResults: true }, 60_000) as typeof newest;
       } catch (error) {
         if (code(error) !== 'session_locked') throw error;
+        writerLockHeld = true;
         newest = await client.call('session.observe', {
           projectRoot: requestedRoot, sessionId: id, limit: RENDER_WINDOW, fullResults: true,
         }, 60_000) as typeof newest;
@@ -800,10 +803,15 @@ export function App({ transport }: { transport: Transport }) {
         events = [...older.events, ...events];
         hasMore = older.hasMore;
       }
+      if (openRequest.current !== request) return;
+      setWriterLockNoticeSessionId(writerLockHeld ? id : null);
       // 将后台会话中已关闭问题卡片的题目和答案写入该会话记录。
       const kept = pendingEchoes.current.get(id) ?? [];
       pendingEchoes.current.delete(id);
-      setRows([...events.flatMap((record) => projectRecord(record)), ...kept.map((line) => metaRow('meta', line.zh, line.en))]);
+      setRows([
+        ...events.flatMap((record) => projectRecord(record)),
+        ...kept.map((line) => metaRow('meta', line.zh, line.en)),
+      ]);
       setPage({ before: Number(events[0]?.seq ?? 1), hasMore });
       // 如果保存的阅读位置仍在已加载页面中就恢复该位置；否则停在末尾，不改变展示档或自动加载更多页面。
       const back = savedAnchor !== undefined && savedAnchor > Number(events[0]?.seq) && savedAnchor < Number(events.at(-1)?.seq)
@@ -998,7 +1006,7 @@ export function App({ transport }: { transport: Transport }) {
       await refreshedPreferences;
       if (sessionId !== null) {
         // Host 被强制结束后，记录锁可能要等租约过期；重试预算比租约略长，仍拿不到就明确提示。
-        const reopened = await reopenSessionWriter({
+        await reopenSessionWriter({
           open: () => client.call('session.open', projectRoot === '' ? { sessionId } : { sessionId, projectRoot }, 60_000).then(() => undefined),
           code,
           isLocked: (failure) => failure === 'session_locked',
@@ -1006,11 +1014,6 @@ export function App({ transport }: { transport: Transport }) {
           sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
           budgetMs: 15_000,
         });
-        if (reopened.kind === 'locked') {
-          setRows((current) => [...current, metaRow('error', '会话仍被先前的宿主占用，已以只读方式打开；等锁释放后点「重新连接」可取回写入权。', 'The previous host still holds the session lock, so it opened read-only. Reconnect once the lock clears to regain the writer.')]);
-        } else if (reopened.kind === 'failed') {
-          setRows((current) => [...current, metaRow('error', `无法重新打开会话：${reopened.code}`, `Could not reopen the conversation: ${reopened.code}`)]);
-        }
         await openSession(sessionId, undefined, true);
       } else {
         try {
@@ -1680,7 +1683,11 @@ export function App({ transport }: { transport: Transport }) {
         <Icon name="warn" size={15} />
         <span>{externalWriterActive
           ? t('外控 Agent 正在运行。下方可以查看进度、补充消息、处理待决问题或接管会话。', 'An external agent is controlling this session. Use the panel below to follow progress, send guidance, answer requests, or take over.')
-          : t('此会话当前没有活动写入者。刷新会话可重新打开并取得控制权。', 'This session has no active writer. Refresh to reopen it and take control.')}</span>
+          : t('此会话当前没有活动写入者。刷新会话可重新打开并取得控制权。', 'This session has no active writer. Refresh to reopen it and take control.')}
+          {writerLockNoticeSessionId === sessionId && <> {t(
+            '先前的宿主仍持有会话写入锁；锁释放后重新打开会话即可恢复写入。',
+            'The previous Host still holds the session writer lock. Reopen the conversation after it clears to regain write access.',
+          )}</>}</span>
         <button type="button" onClick={() => { if (sessionId !== null) void openSession(sessionId, undefined, false, projectRoot); }}>
           {externalWriterActive ? t('刷新观察', 'Refresh view') : t('重新打开', 'Reopen session')}
         </button>
