@@ -73,32 +73,14 @@ export function SecuritySettings({ client, projectRoot, sessionId, status, onSta
 
   return <div className="security-settings">
     {failure !== '' && <p className="session-note" data-tone="bad">{t('读取或更新安全状态失败。', 'Could not read or update security settings.')} <code>{failure}</code></p>}
-    <Group title={t('审批方式', 'Approval behavior')}>
-      <Row label={t('默认审批档', 'Default approval tier')}>
-        <span>{catalog?.policyDefault ?? t('未知', 'Unknown')}</span>
-        {status !== null && <span className="catalog-tag">{t(`当前会话：${status.policy}`, `Session: ${status.policy}`)}</span>}
-      </Row>
-      <Row label={t('自定义规则', 'Custom rules')}>
-        <details className="catalog-fold">
-          <summary>{t('查看与编辑审批规则', 'View and edit approval rules')}</summary>
-        <PolicyRules client={client} projectRoot={projectRoot} onEdit={onEdit} />
-        </details>
-      </Row>
-    </Group>
-    <Group title={t('工作区信任', 'Workspace trust')}>
-      <Row label={t('当前项目', 'Current project')}><code className="catalog-path">{projectRoot || t('未选择项目', 'No project selected')}</code></Row>
-      <Row label={t('信任状态', 'Trust status')}>
-        <span>{catalog === null ? t('正在读取…', 'Loading…') : catalog.projectTrusted ? t('已信任', 'Trusted') : t('未信任', 'Not trusted')}</span>
-        {catalog?.projectTrusted
-          ? <button type="button" disabled={busy} onClick={() => void updateTrust(false)}>{t('撤销信任', 'Revoke trust')}</button>
-          : <button type="button" disabled={busy || projectRoot === ''} onClick={() => setConfirmTrust(true)}>{t('信任此工作区', 'Trust this workspace')}</button>}
-      </Row>
-      <p className="sheet-note">{t('项目脚本和钩子会以当前 OS 账户运行；Policy 与平台 Sandbox 仍生效。', 'Project scripts and hooks run as this OS user; Policy and platform sandbox limits still apply.')}</p>
-    </Group>
-    <Group title={t('会话权限与网络', 'Session permission and network')}>
+    <Group title={t('当前会话', 'This session')}>
       {sessionId === null
         ? <p className="stub">{t('打开会话后可以在这里修改它的权限档与网络访问。', 'Open a conversation to change its permission profile and network access here.')}</p>
         : <>
+          <Row label={t('正在编辑', 'Editing')}>
+            <span>{t('只影响此会话', 'This session only')}</span>
+            <code className="catalog-path">{sessionId.slice(0, 8)}…</code>
+          </Row>
           <Row label={t('状态', 'Status')}>
             <span>{t('权限更改', 'Changes')}：{editor.changeState}</span>
             <span className="catalog-tag">{t(`当前：${profileLabel(permission?.profile ?? 'read-only', t)} · ${networkLabel(permission?.network ?? 'policy', t)}`, `Current: ${profileLabel(permission?.profile ?? 'read-only', t)} · ${networkLabel(permission?.network ?? 'policy', t)}`)}</span>
@@ -119,11 +101,8 @@ export function SecuritySettings({ client, projectRoot, sessionId, status, onSta
               <option value="unrestricted">{networkLabel('unrestricted', t)}</option>
             </select>
           </Row>
-          {permission !== undefined && <Row label={t('平台执行', 'Platform enforcement')}>
-            <span>{t(`只读 ${permission.profiles.readOnly} · 工作区写入 ${permission.profiles.workspaceWrite} · 命令 ${permission.execution.available ? '可用' : '不可用'}`, `Read-only ${permission.profiles.readOnly} · workspace-write ${permission.profiles.workspaceWrite} · commands ${permission.execution.available ? 'available' : 'unavailable'}`)}</span>
-          </Row>}
           {permission !== undefined && <details className="catalog-fold security-capability-details">
-            <summary>{t(`查看平台能力详情${permission.limitations.length === 0 ? '' : `（限制 ${permission.limitations.length} 项）`}`, `View platform details${permission.limitations.length === 0 ? '' : ` (${permission.limitations.length} limitations)`}`)}</summary>
+            <summary>{t(`平台隔离与限制${permission.limitations.length === 0 ? '' : `（${permission.limitations.length} 项）`}`, `Platform isolation${permission.limitations.length === 0 ? '' : ` (${permission.limitations.length} limitations)`}`)}</summary>
             <Row label={t('文件读取 / 写入', 'File read / write')}><span>{permission.capabilities.filesystemRead} / {permission.capabilities.filesystemWrite}</span></Row>
             <Row label={t('网络 / 进程', 'Network / process')}><span>{permission.capabilities.network} / {permission.capabilities.process}</span></Row>
             <Row label={t('命令执行', 'Command execution')}>
@@ -140,6 +119,29 @@ export function SecuritySettings({ client, projectRoot, sessionId, status, onSta
             </button>
           </div>
         </>}
+    </Group>
+    <Group title={t('默认值与审批规则', 'Defaults and approval rules')}>
+      <Row label={t('默认审批档', 'Default approval tier')}>
+        <span>{catalog?.policyDefault ?? t('未知', 'Unknown')}</span>
+        {status !== null && <span className="catalog-tag">{t(`本会话覆盖：${status.policy}`, `Session override: ${status.policy}`)}</span>}
+      </Row>
+      <p className="sheet-note">{t('会话可以单独覆盖上面的默认档；规则逐条覆盖，未被更高层覆盖时继续生效。', 'A session may override the default above; rules apply item by item until a higher layer overrides them.')}</p>
+      <Row label={t('自定义规则', 'Custom rules')}>
+        <details className="catalog-fold">
+          <summary>{t('查看与编辑审批规则', 'View and edit approval rules')}</summary>
+        <PolicyRules client={client} projectRoot={projectRoot} onEdit={onEdit} />
+        </details>
+      </Row>
+    </Group>
+    <Group title={t('工作区信任', 'Workspace trust')}>
+      <Row label={t('当前项目', 'Current project')}><code className="catalog-path">{projectRoot || t('未选择项目', 'No project selected')}</code></Row>
+      <Row label={t('信任状态', 'Trust status')}>
+        <span>{catalog === null ? t('正在读取…', 'Loading…') : catalog.projectTrusted ? t('已信任', 'Trusted') : t('未信任', 'Not trusted')}</span>
+        {catalog?.projectTrusted
+          ? <button type="button" disabled={busy} onClick={() => void updateTrust(false)}>{t('撤销信任', 'Revoke trust')}</button>
+          : <button type="button" disabled={busy || projectRoot === ''} onClick={() => setConfirmTrust(true)}>{t('信任此工作区', 'Trust this workspace')}</button>}
+      </Row>
+      <p className="sheet-note">{t('项目脚本和钩子会以当前 OS 账户运行；Policy 与平台 Sandbox 仍生效。', 'Project scripts and hooks run as this OS user; Policy and platform sandbox limits still apply.')}</p>
     </Group>
     {confirmTrust && <Modal title={t('确认信任工作区', 'Confirm workspace trust')} className="confirm" onClose={() => setConfirmTrust(false)}>
       <h2 className="confirm-lead">{t('允许项目代码在当前账户下运行？', 'Allow project code to run as this account?')}</h2>
