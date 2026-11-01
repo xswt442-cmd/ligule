@@ -1461,6 +1461,7 @@ async function runChecks() {
       : ['host_fault_list_invalid'];
     if (unexpectedFaults.length > 0) throw new Error(`locked_session_unexpected_pre_reconnect_faults:${JSON.stringify(unexpectedFaults)}`);
     const lockHolder = await startLockHoldingHost(sessionId);
+    let lockHolderClosed = false;
     try {
       const holderSnapshot = await lockHolder.observe();
       if (holderSnapshot.writerActive !== true) throw new Error('external_lock_holder_not_active');
@@ -1522,9 +1523,23 @@ async function runChecks() {
       const disconnectBannerRemains = await devTools.evaluate(`${reconnectSelector} !== null`);
       if (disconnectBannerRemains !== true) problems.push('readonly_heartbeat_cleared_host_disconnect');
       if (problems.length > 0) throw new Error(`packaged_locked_session_ui:${JSON.stringify({ problems, observed, disconnectBannerRemains })}`);
-      return `Host PID ${oldPid} 已结束；外部 Host PID ${lockHolder.pid} 仍持锁；Main Host 再次退出后断连横幅跨过心跳周期保留`;
-    } finally {
       await lockHolder.close();
+      lockHolderClosed = true;
+      const disconnectedHostFaults = await devTools.evaluate('window.__packagedSmokeFaults.splice(0)');
+      const unexpectedHostFaults = Array.isArray(disconnectedHostFaults)
+        ? disconnectedHostFaults.filter(fault => !['host_closed:process-exit', 'host_closed:write-failed'].includes(fault))
+        : ['host_fault_list_invalid'];
+      if (unexpectedHostFaults.length > 0) throw new Error(`locked_session_unexpected_recovery_faults:${JSON.stringify(unexpectedHostFaults)}`);
+      await devTools.evaluate(`(${reconnectSelector}).click(); true`);
+      await waitUntil(async () => await devTools.evaluate(`${reconnectSelector} === null`), 60_000, 'locked_session_host_reconnect');
+      await waitUntil(async () => await devTools.evaluate(`(() => {
+        const input = document.querySelector('footer.composer:not(.external-session-composer) textarea.composer-input');
+        return document.querySelector('#session-title')?.textContent?.trim() === 'Packaged smoke record'
+          && input instanceof HTMLTextAreaElement && !input.readOnly;
+      })()`), 60_000, 'locked_session_reopened_with_write_access');
+      return `Host PID ${oldPid} 与锁恢复 Host PID ${lockedAppHostPid} 均终止；外部 Host PID ${lockHolder.pid} 持锁时以只读观察，释放后重连并恢复写入；断连横幅跨过心跳周期保留`;
+    } finally {
+      if (!lockHolderClosed) await lockHolder.close();
     }
   });
 
@@ -1617,7 +1632,9 @@ async function run() {
   }
 
   const { stdout, stderr } = await startApplication();
-  const deadline = setTimeout(() => { timedOut = true; applicationProcess.kill(); }, 150_000);
+  // The Host-lock case has sequential bounded startup, lease, observe, and post-release reopen stages.
+  // Keep this run-wide watchdog above those stage limits; each wait still reports its own failure label.
+  const deadline = setTimeout(() => { timedOut = true; applicationProcess.kill(); }, 300_000);
   try {
     await runChecks();
   } catch (error) {
